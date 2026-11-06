@@ -1,0 +1,15 @@
+[package]
+name = "mc-bamboo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A Minecraft server written from scratch in Rust."
+readme = "../../README.md"
+keywords = ["minecraft", "server"]
+categories = ["games"]
+
+[[bin]]
+name = "bamboo"
+path = "src/main.rs"
