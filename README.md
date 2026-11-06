@@ -27,8 +27,10 @@ cargo run --bin bamboo
 ```bash
 cd apps/desktop
 pnpm install
-pnpm tauri dev
+pnpm start
 ```
+
+打包用 `pnpm tauri build`。
 
 ## 项目结构
 

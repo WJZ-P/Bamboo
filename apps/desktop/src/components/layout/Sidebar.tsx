@@ -25,6 +25,9 @@ const Nav = styled.nav`
 
 const NavButton = styled(PixelButton)`
   width: 100%;
+  padding: 7px 14px;
+  font-size: ${({ theme }) => theme.font.nav};
+  line-height: 24px;
   text-align: left;
 `;
 

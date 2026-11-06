@@ -6,3 +6,4 @@ export { PixelSlot } from "./PixelSlot";
 export { PixelSwitch } from "./PixelSwitch";
 export { StatTile } from "./StatTile";
 export { StatusLamp } from "./StatusLamp";
+export { CloseIcon, MaximizeIcon, MinimizeIcon } from "./WindowIcons";

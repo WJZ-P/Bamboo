@@ -4,7 +4,7 @@ import styled from "styled-components";
 import icon from "../../assets/icon.png";
 import { useServer } from "../../state/ServerContext";
 import { raisedBevel } from "../../theme/bevel";
-import { StatusLamp } from "../pixel";
+import { CloseIcon, MaximizeIcon, MinimizeIcon, StatusLamp } from "../pixel";
 
 const Bar = styled.header`
   display: flex;
@@ -29,17 +29,32 @@ const Name = styled.span`
   text-shadow: 2px 2px 0 ${({ theme }) => theme.color.black};
 `;
 
+/** 单独放一层，窗口按钮之间才不会带上标题栏的间距。 */
+const WindowControls = styled.div`
+  display: flex;
+  align-self: stretch;
+`;
+
 const WindowButton = styled.button<{ $danger?: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 44px;
-  height: 100%;
+  padding: 0;
   border: 0;
   border-left: 2px solid ${({ theme }) => theme.color.black};
   background: none;
+  color: ${({ theme }) => theme.color.text};
   cursor: pointer;
 
   &:hover {
     background: ${({ theme, $danger }) =>
       $danger ? theme.color.redstone.base : theme.color.stone.base};
+  }
+
+  &:focus-visible {
+    outline: 2px solid ${({ theme }) => theme.color.gold};
+    outline-offset: -4px;
   }
 `;
 
@@ -54,15 +69,17 @@ export function TitleBar() {
       <Logo src={icon} alt="" />
       <Name data-tauri-drag-region>Bamboo</Name>
       <StatusLamp $on={snapshot?.running ?? false} />
-      <WindowButton type="button" aria-label="最小化" onClick={() => appWindow.minimize()}>
-        _
-      </WindowButton>
-      <WindowButton type="button" aria-label="最大化" onClick={() => appWindow.toggleMaximize()}>
-        □
-      </WindowButton>
-      <WindowButton $danger type="button" aria-label="关闭" onClick={() => appWindow.close()}>
-        ×
-      </WindowButton>
+      <WindowControls>
+        <WindowButton type="button" aria-label="最小化" onClick={() => appWindow.minimize()}>
+          <MinimizeIcon />
+        </WindowButton>
+        <WindowButton type="button" aria-label="最大化" onClick={() => appWindow.toggleMaximize()}>
+          <MaximizeIcon />
+        </WindowButton>
+        <WindowButton $danger type="button" aria-label="关闭" onClick={() => appWindow.close()}>
+          <CloseIcon />
+        </WindowButton>
+      </WindowControls>
     </Bar>
   );
 }

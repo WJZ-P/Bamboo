@@ -41,6 +41,8 @@ export const theme = {
     /** 字体的原生点阵是 12px，取它的整数倍显示最清晰。 */
     small: "12px",
     body: "12px",
+    /** 侧边栏导航。不是 12 的整数倍，边缘会略虚，但大小最合适。 */
+    nav: "18px",
     title: "24px",
     display: "36px",
   },
