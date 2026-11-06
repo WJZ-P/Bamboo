@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/mc-bamboo", "crates/mc-bamboo-protocol"]
+members = ["crates/*", "apps/desktop/src-tauri", "tools/*"]
+# 默认只编译服务端，桌面端的 WebView 依赖要显式用 -p 选中。
+default-members = ["crates/*"]
 
 [workspace.package]
 version = "0.0.0"
@@ -8,3 +10,20 @@ edition = "2024"
 rust-version = "1.96"
 license = "AGPL-3.0-only"
 repository = "https://github.com/WJZ-P/Bamboo"
+
+[workspace.dependencies]
+mc-bamboo-data = { path = "crates/mc-bamboo-data", version = "0.0.0" }
+mc-bamboo-nbt = { path = "crates/mc-bamboo-nbt", version = "0.0.0" }
+mc-bamboo-protocol = { path = "crates/mc-bamboo-protocol", version = "0.0.0" }
+mc-bamboo-server = { path = "crates/mc-bamboo-server", version = "0.0.0" }
+mc-bamboo-world = { path = "crates/mc-bamboo-world", version = "0.0.0" }
+
+bytes = "1.12.1"
+md-5 = "0.10"
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }

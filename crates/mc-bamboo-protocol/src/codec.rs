@@ -1,9 +1,11 @@
-//! Primitive types of the network protocol.
+//! 网络协议的基础数据类型。
 
-/// The longest encoding of a 32-bit VarInt.
+use uuid::Uuid;
+
+/// 32 位 VarInt 编码后的最大长度。
 pub const MAX_VARINT_LEN: usize = 5;
 
-/// Why a packet could not be decoded.
+/// 数据包解码失败的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     #[error("packet ended early")]
@@ -18,13 +20,15 @@ pub enum DecodeError {
     InvalidUtf8,
     #[error("packet has {0} trailing bytes")]
     TrailingBytes(usize),
+    #[error("invalid element count {0}")]
+    InvalidCount(i32),
     #[error("unknown packet id {0:#04x}")]
     UnknownPacket(i32),
     #[error("unknown handshake intent {0}")]
     UnknownIntent(i32),
 }
 
-/// Decodes a VarInt from the start of `input`, returning its value and encoded length.
+/// 从 `input` 开头解码一个 VarInt，返回它的值和占用的字节数。
 pub fn decode_varint(input: &[u8]) -> Result<(i32, usize), DecodeError> {
     let mut value = 0u32;
     for (index, &byte) in input.iter().take(MAX_VARINT_LEN).enumerate() {
@@ -40,7 +44,7 @@ pub fn decode_varint(input: &[u8]) -> Result<(i32, usize), DecodeError> {
     }
 }
 
-/// Encodes `value`, returning a buffer and how many of its leading bytes are used.
+/// 编码 `value`，返回缓冲区和其中实际使用的字节数。
 pub fn encode_varint(value: i32) -> ([u8; MAX_VARINT_LEN], usize) {
     let mut bytes = [0; MAX_VARINT_LEN];
     let mut remaining = value as u32;
@@ -54,19 +58,39 @@ pub fn encode_varint(value: i32) -> ([u8; MAX_VARINT_LEN], usize) {
     (bytes, len + 1)
 }
 
-/// Appends `value` to `out` as a VarInt.
+/// 把 `value` 以 VarInt 形式追加到 `out`。
 pub fn write_varint(out: &mut Vec<u8>, value: i32) {
     let (bytes, len) = encode_varint(value);
     out.extend_from_slice(&bytes[..len]);
 }
 
-/// Appends `value` to `out` as a length-prefixed UTF-8 string.
+/// 把 `value` 以带长度前缀的 UTF-8 字符串形式追加到 `out`。
 pub fn write_string(out: &mut Vec<u8>, value: &str) {
     write_varint(out, value.len() as i32);
     out.extend_from_slice(value.as_bytes());
 }
 
-/// A cursor over the body of one packet.
+/// 把 `value` 以 VarLong 形式追加到 `out`。
+pub fn write_varlong(out: &mut Vec<u8>, value: i64) {
+    let mut remaining = value as u64;
+    while remaining >= 0x80 {
+        out.push(remaining as u8 | 0x80);
+        remaining >>= 7;
+    }
+    out.push(remaining as u8);
+}
+
+/// 把布尔值写成一个字节。
+pub fn write_bool(out: &mut Vec<u8>, value: bool) {
+    out.push(u8::from(value));
+}
+
+/// 把 UUID 写成 16 个字节。
+pub fn write_uuid(out: &mut Vec<u8>, value: Uuid) {
+    out.extend_from_slice(value.as_bytes());
+}
+
+/// 单个数据包内容的读取游标。
 #[derive(Debug)]
 pub struct Reader<'a> {
     input: &'a [u8],
@@ -83,6 +107,11 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    pub fn u8(&mut self) -> Result<u8, DecodeError> {
+        let [value] = self.array()?;
+        Ok(value)
+    }
+
     pub fn u16(&mut self) -> Result<u16, DecodeError> {
         Ok(u16::from_be_bytes(self.array()?))
     }
@@ -91,12 +120,25 @@ impl<'a> Reader<'a> {
         Ok(i64::from_be_bytes(self.array()?))
     }
 
-    /// Reads a string of at most `max_chars` UTF-16 code units, the unit the game counts in.
+    pub fn uuid(&mut self) -> Result<Uuid, DecodeError> {
+        Ok(Uuid::from_bytes(self.array()?))
+    }
+
+    /// 读取列表的元素个数，并限制在 `max` 以内。
+    pub fn count(&mut self, max: usize) -> Result<usize, DecodeError> {
+        let count = self.varint()?;
+        usize::try_from(count)
+            .ok()
+            .filter(|&count| count <= max)
+            .ok_or(DecodeError::InvalidCount(count))
+    }
+
+    /// 读取长度不超过 `max_chars` 的字符串。游戏按 UTF-16 码元计数，这里保持一致。
     pub fn string(&mut self, max_chars: usize) -> Result<&'a str, DecodeError> {
         let encoded_len = self.varint()?;
         let len = usize::try_from(encoded_len)
             .map_err(|_| DecodeError::InvalidStringLength(encoded_len))?;
-        // One UTF-16 code unit takes at most three UTF-8 bytes.
+        // 一个 UTF-16 码元最多占三个 UTF-8 字节。
         if len > max_chars * 3 {
             return Err(DecodeError::StringTooLong { max_chars });
         }
@@ -106,7 +148,7 @@ impl<'a> Reader<'a> {
             .split_at_checked(len)
             .ok_or(DecodeError::UnexpectedEnd)?;
         let string = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)?;
-        // UTF-8 is never shorter than UTF-16, so only long strings need counting.
+        // UTF-8 的字节数不会少于 UTF-16 码元数，所以只有较长的字符串才需要实际计数。
         if len > max_chars && string.encode_utf16().count() > max_chars {
             return Err(DecodeError::StringTooLong { max_chars });
         }
@@ -115,7 +157,12 @@ impl<'a> Reader<'a> {
         Ok(string)
     }
 
-    /// Ends decoding. A packet with bytes left over is malformed.
+    /// 取走还没读的全部字节。
+    pub fn rest(self) -> &'a [u8] {
+        self.input
+    }
+
+    /// 结束解码。还有剩余字节的数据包是畸形的。
     pub fn finish(self) -> Result<(), DecodeError> {
         match self.input.len() {
             0 => Ok(()),
@@ -171,6 +218,51 @@ mod tests {
     }
 
     #[test]
+    fn varlong_matches_known_encodings() {
+        let cases: [(i64, &[u8]); 4] = [
+            (0, &[0x00]),
+            (300, &[0xac, 0x02]),
+            (
+                i64::MAX,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            ),
+            (
+                -1,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+            ),
+        ];
+        for (value, encoded) in cases {
+            let mut out = Vec::new();
+            write_varlong(&mut out, value);
+            assert_eq!(out, encoded, "encoding {value}");
+        }
+    }
+
+    #[test]
+    fn uuid_round_trips() {
+        let value = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let mut out = Vec::new();
+        write_uuid(&mut out, value);
+        assert_eq!(Reader::new(&out).uuid(), Ok(value));
+    }
+
+    #[test]
+    fn count_rejects_negative_and_oversized_values() {
+        assert_eq!(Reader::new(&[3]).count(3), Ok(3));
+        assert_eq!(
+            Reader::new(&[4]).count(3),
+            Err(DecodeError::InvalidCount(4))
+        );
+
+        let mut negative = Vec::new();
+        write_varint(&mut negative, -1);
+        assert_eq!(
+            Reader::new(&negative).count(3),
+            Err(DecodeError::InvalidCount(-1))
+        );
+    }
+
+    #[test]
     fn varint_ignores_bytes_after_its_end() {
         assert_eq!(decode_varint(&[0x01, 0xff, 0xff]), Ok((1, 1)));
     }
@@ -205,11 +297,11 @@ mod tests {
 
     #[test]
     fn string_limit_counts_utf16_code_units() {
-        // Three bytes in UTF-8 but one UTF-16 code unit.
+        // UTF-8 占三个字节，但只有一个 UTF-16 码元。
         let encoded = encoded_string("竹");
         assert_eq!(Reader::new(&encoded).string(1), Ok("竹"));
 
-        // Four bytes in UTF-8 and two UTF-16 code units.
+        // UTF-8 占四个字节，对应两个 UTF-16 码元。
         let encoded = encoded_string("🎋");
         assert_eq!(
             Reader::new(&encoded).string(1),

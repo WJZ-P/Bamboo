@@ -10,4 +10,7 @@ keywords = ["minecraft", "protocol"]
 categories = ["network-programming"]
 
 [dependencies]
-thiserror = "2.0.21"
+mc-bamboo-data.workspace = true
+mc-bamboo-nbt.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "mc-bamboo-nbt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NBT encoding for the Bamboo Minecraft server."
+keywords = ["minecraft", "nbt"]
+categories = ["encoding"]

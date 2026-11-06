@@ -1,0 +1,13 @@
+[package]
+name = "mc-bamboo-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chunks, lighting and world generation of the Bamboo Minecraft server."
+keywords = ["minecraft", "world"]
+categories = ["games"]
+
+[dependencies]
+mc-bamboo-data.workspace = true

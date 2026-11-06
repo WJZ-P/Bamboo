@@ -1,16 +1,16 @@
-//! Length-prefixed frames that carry packets over TCP.
+//! 在 TCP 上承载数据包的长度前缀帧。
 
 use crate::{
     codec::{decode_varint, encode_varint, write_varint},
     packet::ClientboundPacket,
 };
 
-/// Frame lengths are limited to 21 bits, which fit in three VarInt bytes.
+/// 帧长度限制在 21 位以内，正好能放进三个字节的 VarInt。
 pub const MAX_FRAME_LEN: usize = (1 << 21) - 1;
 
 const MAX_HEADER_LEN: usize = 3;
 
-/// Why a byte stream is not a valid sequence of frames.
+/// 字节流不是合法帧序列的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
     #[error("frame length is wider than 21 bits")]
@@ -21,17 +21,17 @@ pub enum FrameError {
     TooLong { len: usize, max: usize },
 }
 
-/// The extent of one complete frame at the start of a buffer.
+/// 缓冲区开头一个完整帧的范围。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameBounds {
     pub header_len: usize,
     pub payload_len: usize,
 }
 
-/// Looks for a complete frame at the start of `buffer`.
+/// 在 `buffer` 开头查找一个完整的帧。
 ///
-/// Returns `Ok(None)` while more bytes are needed. A frame over `max_len` is rejected as soon
-/// as its header arrives, so its payload never has to be buffered.
+/// 数据还不够时返回 `Ok(None)`。超过 `max_len` 的帧在帧头到达时就会被拒绝，
+/// 所以不需要先把它的内容缓存下来。
 pub fn find_frame(buffer: &[u8], max_len: usize) -> Result<Option<FrameBounds>, FrameError> {
     let header = &buffer[..buffer.len().min(MAX_HEADER_LEN)];
     let (payload_len, header_len) = match decode_varint(header) {
@@ -58,10 +58,10 @@ pub fn find_frame(buffer: &[u8], max_len: usize) -> Result<Option<FrameBounds>, 
     }))
 }
 
-/// Appends `packet` to `out` as one frame.
+/// 把 `packet` 作为一帧追加到 `out`。
 ///
-/// Appending lets several packets share a buffer and reach the socket in a single write.
-/// On error `out` is left as it was.
+/// 用追加的方式，多个数据包可以共用一个缓冲区，一次写入 socket。
+/// 出错时 `out` 保持原样。
 pub fn append_frame<P: ClientboundPacket>(out: &mut Vec<u8>, packet: &P) -> Result<(), FrameError> {
     let frame_start = out.len();
     out.extend_from_slice(&[0; MAX_HEADER_LEN]);
@@ -78,7 +78,7 @@ pub fn append_frame<P: ClientboundPacket>(out: &mut Vec<u8>, packet: &P) -> Resu
         });
     }
 
-    // The length is only known now, so close the gap left by a header under three bytes.
+    // 到这里才知道实际长度。帧头不足三字节时，要把预留的空隙合上。
     let (header, header_len) = encode_varint(payload_len as i32);
     out[frame_start..frame_start + header_len].copy_from_slice(&header[..header_len]);
     out.copy_within(payload_start.., frame_start + header_len);
@@ -90,7 +90,7 @@ pub fn append_frame<P: ClientboundPacket>(out: &mut Vec<u8>, packet: &P) -> Resu
 mod tests {
     use super::*;
 
-    /// A packet whose encoded body is `len` zero bytes.
+    /// 内容是 `len` 个零字节的测试数据包。
     struct Filler {
         len: usize,
     }
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn appended_frames_can_be_found_at_every_header_width() {
-        // Payload lengths are one larger than the body because of the packet id.
+        // 负载比内容多一个字节，也就是数据包 ID。
         for body_len in [0, 126, 127, 16_382, 16_383, MAX_FRAME_LEN - 1] {
             let mut out = vec![0xee];
             append_frame(&mut out, &Filler { len: body_len }).unwrap();

@@ -1,21 +1,13 @@
-//! Packets of the Handshake, Status and Login states.
-//!
-//! Packet ids match `reports/packets.json` from the official 26.3 data generator.
+//! Handshake 状态：每条连接发来的第一个数据包。
 
-use crate::codec::{DecodeError, Reader, write_string};
+use mc_bamboo_data::packets::handshake::serverbound;
 
-/// The longest server address the official server accepts in a handshake.
+use crate::codec::{DecodeError, Reader};
+
+/// 官方服务端允许握手包携带的最长服务器地址。
 const MAX_SERVER_ADDRESS_CHARS: usize = 255;
 
-/// A packet the server sends to clients.
-pub trait ClientboundPacket {
-    const ID: i32;
-
-    /// Appends everything that follows the packet id.
-    fn write_body(&self, out: &mut Vec<u8>);
-}
-
-/// What a client wants to do after the handshake.
+/// 客户端握手之后想做的事。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
     Status,
@@ -34,7 +26,7 @@ impl Intent {
     }
 }
 
-/// The first packet of every connection.
+/// 每条连接的第一个数据包。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Handshake<'a> {
     pub protocol_version: i32,
@@ -44,13 +36,11 @@ pub struct Handshake<'a> {
 }
 
 impl<'a> Handshake<'a> {
-    const ID: i32 = 0x00;
-
-    /// Decodes a frame payload, which starts with the packet id.
+    /// 解码一帧的负载，负载以数据包 ID 开头。
     pub fn decode(payload: &'a [u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
         let id = reader.varint()?;
-        if id != Self::ID {
+        if id != serverbound::INTENTION {
             return Err(DecodeError::UnknownPacket(id));
         }
 
@@ -65,81 +55,12 @@ impl<'a> Handshake<'a> {
     }
 }
 
-/// A packet a client sends in the Status state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusRequest {
-    /// Asks for the server list entry.
-    Status,
-    /// Measures latency. The server echoes the number back unchanged.
-    Ping(i64),
-}
-
-impl StatusRequest {
-    const STATUS_ID: i32 = 0x00;
-    const PING_ID: i32 = 0x01;
-
-    /// Decodes a frame payload, which starts with the packet id.
-    pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(payload);
-        let request = match reader.varint()? {
-            Self::STATUS_ID => Self::Status,
-            Self::PING_ID => Self::Ping(reader.i64()?),
-            unknown => return Err(DecodeError::UnknownPacket(unknown)),
-        };
-        reader.finish()?;
-        Ok(request)
-    }
-}
-
-/// The server list entry, as JSON.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StatusResponse<'a> {
-    pub json: &'a str,
-}
-
-impl ClientboundPacket for StatusResponse<'_> {
-    const ID: i32 = 0x00;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        write_string(out, self.json);
-    }
-}
-
-/// The answer to [`StatusRequest::Ping`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PongResponse {
-    pub payload: i64,
-}
-
-impl ClientboundPacket for PongResponse {
-    const ID: i32 = 0x01;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.payload.to_be_bytes());
-    }
-}
-
-/// Refuses a login. The reason is a text component in JSON form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LoginDisconnect<'a> {
-    pub reason_json: &'a str,
-}
-
-impl ClientboundPacket for LoginDisconnect<'_> {
-    const ID: i32 = 0x00;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        write_string(out, self.reason_json);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         PROTOCOL_VERSION,
-        codec::write_varint,
-        frame::{MAX_FRAME_LEN, append_frame, find_frame},
+        codec::{write_string, write_varint},
     };
 
     fn handshake_payload(address: &str, intent: i32) -> Vec<u8> {
@@ -222,49 +143,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn decodes_status_requests() {
-        assert_eq!(StatusRequest::decode(&[0x00]), Ok(StatusRequest::Status));
-        assert_eq!(
-            StatusRequest::decode(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0x2a]),
-            Ok(StatusRequest::Ping(42))
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_status_requests() {
-        assert_eq!(
-            StatusRequest::decode(&[0x00, 0x00]),
-            Err(DecodeError::TrailingBytes(1))
-        );
-        assert_eq!(
-            StatusRequest::decode(&[0x01, 0, 0]),
-            Err(DecodeError::UnexpectedEnd)
-        );
-        assert_eq!(
-            StatusRequest::decode(&[0x02]),
-            Err(DecodeError::UnknownPacket(2))
-        );
-    }
-
-    #[test]
-    fn encodes_clientbound_packets() {
-        let mut out = Vec::new();
-        append_frame(&mut out, &StatusResponse { json: "{}" }).unwrap();
-        assert_eq!(out, [0x04, 0x00, 0x02, b'{', b'}']);
-
-        out.clear();
-        append_frame(&mut out, &PongResponse { payload: 42 }).unwrap();
-        assert_eq!(out, [0x09, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x2a]);
-
-        out.clear();
-        append_frame(&mut out, &LoginDisconnect { reason_json: "{}" }).unwrap();
-        assert_eq!(out, [0x04, 0x00, 0x02, b'{', b'}']);
-    }
-
-    /// Network input is attacker-controlled, so no byte sequence may cause a panic.
+    /// 网络输入不可信，任何字节序列都不能让解码器 panic。
     #[test]
     fn decoders_survive_arbitrary_bytes() {
+        use crate::{
+            frame::{MAX_FRAME_LEN, find_frame},
+            packet::status::StatusRequest,
+        };
+
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         let mut next_byte = || {
             state ^= state << 13;

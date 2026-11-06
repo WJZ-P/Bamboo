@@ -1,0 +1,189 @@
+//! 在桌面应用进程里启动和停止服务端，并把状态变化推送给界面。
+
+use std::{
+    net::SocketAddr,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use mc_bamboo_server::{
+    GAME_VERSION, PROTOCOL_VERSION, PlayerInfo, Server, ServerEvent, ServerHandle,
+};
+use serde::Serialize;
+use tauri::{
+    AppHandle, Emitter,
+    async_runtime::{self, JoinHandle},
+};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, broadcast::error::RecvError, oneshot},
+};
+use tracing::{info, warn};
+
+use crate::settings::ServerSettings;
+
+/// 服务端状态变化时发给界面的事件名。
+const STATE_EVENT: &str = "bamboo://state";
+/// 在线玩家变化时发给界面的事件名。
+const PLAYERS_EVENT: &str = "bamboo://players";
+
+struct RunningServer {
+    address: SocketAddr,
+    started_at_ms: u64,
+    max_players: u32,
+    handle: ServerHandle,
+    stop: oneshot::Sender<()>,
+    server_task: JoinHandle<()>,
+    watcher_task: JoinHandle<()>,
+}
+
+/// 界面显示用的玩家信息。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerView {
+    name: String,
+    uuid: String,
+}
+
+impl From<PlayerInfo> for PlayerView {
+    fn from(player: PlayerInfo) -> Self {
+        Self {
+            name: player.name,
+            uuid: player.uuid,
+        }
+    }
+}
+
+/// 某一时刻的服务端状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSnapshot {
+    running: bool,
+    address: Option<String>,
+    started_at_ms: Option<u64>,
+    max_players: Option<u32>,
+    players: Vec<PlayerView>,
+    game_version: &'static str,
+    protocol_version: i32,
+}
+
+/// 持有运行中的服务端。同一时间最多只有一个。
+#[derive(Default)]
+pub struct ServerController {
+    running: Mutex<Option<RunningServer>>,
+}
+
+impl ServerController {
+    pub async fn snapshot(&self) -> ServerSnapshot {
+        snapshot_of(self.running.lock().await.as_ref())
+    }
+
+    pub async fn start(
+        &self,
+        app: &AppHandle,
+        settings: &ServerSettings,
+    ) -> Result<ServerSnapshot, String> {
+        let mut running = self.running.lock().await;
+        if running.is_some() {
+            return Err("服务器已经在运行了".to_owned());
+        }
+
+        let target = format!("{}:{}", settings.host, settings.port);
+        let listener = TcpListener::bind(&target)
+            .await
+            .map_err(|error| format!("无法监听 {target}：{error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("读取监听地址失败：{error}"))?;
+        let server = Server::new(listener, settings.to_server_config())
+            .map_err(|error| format!("服务器配置无效：{error}"))?;
+        let handle = server.handle();
+
+        let (stop, stopped) = oneshot::channel::<()>();
+        let server_task = async_runtime::spawn(server.run(async {
+            let _ = stopped.await;
+        }));
+        let watcher_task = async_runtime::spawn(watch_events(app.clone(), handle.clone()));
+
+        info!("Bamboo is listening on {address} for Minecraft {GAME_VERSION}");
+        *running = Some(RunningServer {
+            address,
+            started_at_ms: now_ms(),
+            max_players: settings.max_players,
+            handle,
+            stop,
+            server_task,
+            watcher_task,
+        });
+
+        let snapshot = snapshot_of(running.as_ref());
+        emit_state(app, &snapshot);
+        Ok(snapshot)
+    }
+
+    pub async fn stop(&self, app: &AppHandle) -> ServerSnapshot {
+        let mut running = self.running.lock().await;
+        if let Some(server) = running.take() {
+            server.watcher_task.abort();
+            // 接收端已经结束时发送会失败，那也正是我们要的结果。
+            let _ = server.stop.send(());
+            if let Err(error) = server.server_task.await {
+                warn!(%error, "server task ended abnormally");
+            }
+            info!("Bamboo stopped");
+        }
+
+        let snapshot = snapshot_of(None);
+        emit_state(app, &snapshot);
+        snapshot
+    }
+}
+
+fn snapshot_of(running: Option<&RunningServer>) -> ServerSnapshot {
+    ServerSnapshot {
+        running: running.is_some(),
+        address: running.map(|server| server.address.to_string()),
+        started_at_ms: running.map(|server| server.started_at_ms),
+        max_players: running.map(|server| server.max_players),
+        players: running
+            .map(|server| {
+                let mut players = server.handle.online_players();
+                players.sort_by(|left, right| left.name.cmp(&right.name));
+                players.into_iter().map(PlayerView::from).collect()
+            })
+            .unwrap_or_default(),
+        game_version: GAME_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+    }
+}
+
+/// 玩家进出时通知界面。界面自己持有快照，这里只推送变化后的玩家列表。
+async fn watch_events(app: AppHandle, handle: ServerHandle) {
+    let mut events = handle.subscribe();
+    loop {
+        match events.recv().await {
+            Ok(ServerEvent::PlayerJoined(_) | ServerEvent::PlayerLeft(_)) => {}
+            // 落后时直接重新读取完整列表，不需要补齐漏掉的事件。
+            Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => return,
+        }
+
+        let mut players = handle.online_players();
+        players.sort_by(|left, right| left.name.cmp(&right.name));
+        let players: Vec<PlayerView> = players.into_iter().map(PlayerView::from).collect();
+        if let Err(error) = app.emit(PLAYERS_EVENT, players) {
+            warn!(%error, "failed to send the player list to the window");
+        }
+    }
+}
+
+fn emit_state(app: &AppHandle, snapshot: &ServerSnapshot) {
+    if let Err(error) = app.emit(STATE_EVENT, snapshot) {
+        warn!(%error, "failed to send the server state to the window");
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}

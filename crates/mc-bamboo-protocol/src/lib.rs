@@ -1,14 +1,10 @@
-//! Minecraft: Java Edition network protocol.
+//! Minecraft Java 版网络协议。
 //!
-//! Everything here works on byte slices and never touches a socket, so the code can be
-//! tested with plain bytes and reused by any transport.
+//! 这个 crate 只和字节打交道，不碰 socket，所以可以直接拿字节切片做测试，
+//! 也能被任何传输层复用。
 
 pub mod codec;
 pub mod frame;
 pub mod packet;
 
-/// Protocol number of the only game version Bamboo supports.
-pub const PROTOCOL_VERSION: i32 = 777;
-
-/// Name of the only game version Bamboo supports.
-pub const GAME_VERSION: &str = "26.3";
+pub use mc_bamboo_data::version::{GAME_VERSION, PROTOCOL_VERSION};

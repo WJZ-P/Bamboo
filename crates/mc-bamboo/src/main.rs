@@ -1,7 +1,8 @@
+//! 无界面的命令行入口：`bamboo [监听地址]`。
+
 use std::{error::Error, future};
 
-use mc_bamboo::{ServerConfig, serve};
-use mc_bamboo_protocol::GAME_VERSION;
+use mc_bamboo_server::{GAME_VERSION, Server, ServerConfig};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -25,7 +26,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         listener.local_addr()?
     );
 
-    serve(listener, ServerConfig::default(), shutdown_signal()).await?;
+    Server::new(listener, ServerConfig::default())?
+        .run(shutdown_signal())
+        .await;
     info!("Bamboo stopped");
     Ok(())
 }
