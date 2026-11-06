@@ -1,0 +1,13 @@
+[package]
+name = "mc-bamboo-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minecraft: Java Edition network protocol for the Bamboo server."
+keywords = ["minecraft", "protocol"]
+categories = ["network-programming"]
+
+[dependencies]
+thiserror = "2.0.21"

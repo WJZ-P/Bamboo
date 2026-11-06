@@ -1,15 +1,21 @@
+<div align="center">
+
+<img src="assets/icon.png" width="128" alt="Bamboo" />
+
 # Bamboo
 
-用 Rust 从零编写的 Minecraft 服务端。
+用 Rust 从零编写的 Minecraft 服务端
 
-A Minecraft server written from scratch in Rust.
+A Minecraft server written from scratch in Rust
 
-> 项目处于早期阶段，`0.0.0` 版本只用于占用 crate 名称，还没有任何服务端功能。
->
-> Early stage: version `0.0.0` only reserves the crate name and has no server functionality yet.
+</div>
+
+> 项目处于早期阶段，目前能在服务器列表中显示，还不能进入游戏。对标版本为 Minecraft 26.3。
 
 ## License
 
-[AGPL-3.0-only](LICENSE)
+代码使用 [AGPL-3.0-only](LICENSE) 许可。
+
+`assets/icon.png` 是 Minecraft 的竹子贴图，版权归 Mojang 所有，不在 AGPL 许可范围内。
 
 Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
