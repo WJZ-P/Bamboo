@@ -1,12 +1,13 @@
 //! 世界层：区块、方块、光照和世界生成。
 //!
 //! 这一层只描述游戏世界本身，不知道网络的存在。
-//! 把区块编码成数据包的工作在 `mc-bamboo-server` 里完成。
+//! 把区块编码成数据包的工作在 `mc-bamboo-game` 里完成。
 
 pub mod chunk;
 pub mod flat;
 pub mod light;
 pub mod palette;
+pub mod store;
 
 /// 主世界的最低方块高度。
 pub const MIN_Y: i32 = -64;

@@ -1,0 +1,181 @@
+//! 方块变化和物品栏同步。
+
+use mc_bamboo_core::BlockPos;
+use mc_bamboo_data::packets::play::clientbound;
+
+use crate::{
+    codec::{write_block_pos, write_bool, write_i16, write_i32, write_varint},
+    item::ItemStack,
+    packet::ClientboundPacket,
+};
+
+/// 一个方块变了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockUpdate {
+    pub pos: BlockPos,
+    /// 方块状态 ID。非法的 ID 会让客户端抛异常。
+    pub state: i32,
+}
+
+impl ClientboundPacket for BlockUpdate {
+    const ID: i32 = clientbound::BLOCK_UPDATE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_block_pos(out, self.pos);
+        write_varint(out, self.state);
+    }
+}
+
+/// 确认到 `sequence` 为止的所有预测。必须排在这些改动的 [`BlockUpdate`] 后面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockChangedAck {
+    pub sequence: i32,
+}
+
+impl ClientboundPacket for BlockChangedAck {
+    const ID: i32 = clientbound::BLOCK_CHANGED_ACK;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.sequence);
+    }
+}
+
+/// 让客户端播放一个世界事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelEvent {
+    pub event: i32,
+    pub pos: BlockPos,
+    pub data: i32,
+    pub global: bool,
+}
+
+impl LevelEvent {
+    /// 破坏方块的粒子和声音，`data` 是被破坏方块的状态 ID。
+    pub const DESTROY_BLOCK: i32 = 2001;
+
+    /// 破坏方块的粒子和声音。发起者已经在本地预测过，不要发给他。
+    pub const fn destroy_block(pos: BlockPos, state: i32) -> Self {
+        Self {
+            event: Self::DESTROY_BLOCK,
+            pos,
+            data: state,
+            global: false,
+        }
+    }
+}
+
+impl ClientboundPacket for LevelEvent {
+    const ID: i32 = clientbound::LEVEL_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_i32(out, self.event);
+        write_block_pos(out, self.pos);
+        write_i32(out, self.data);
+        write_bool(out, self.global);
+    }
+}
+
+/// 改变一个容器槽。物品带组件，所以只能发给物品的主人，见 [`ItemStack`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerSetSlot<'a> {
+    /// 玩家物品栏是 0。
+    pub container_id: i32,
+    pub state_id: i32,
+    /// `InventoryMenu` 的编号。
+    pub slot: i16,
+    pub stack: &'a ItemStack,
+}
+
+impl ClientboundPacket for ContainerSetSlot<'_> {
+    const ID: i32 = clientbound::CONTAINER_SET_SLOT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.container_id);
+        write_varint(out, self.state_id);
+        write_i16(out, self.slot);
+        self.stack.write(out);
+    }
+}
+
+/// 改变选中的快捷栏格，`slot` 是 0 到 8。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetHeldSlot {
+    pub slot: i32,
+}
+
+impl ClientboundPacket for SetHeldSlot {
+    const ID: i32 = clientbound::SET_HELD_SLOT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.slot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::test_util::{body, hex};
+
+    #[test]
+    fn block_update_matches_official_bytes() {
+        let stone = BlockUpdate {
+            pos: BlockPos::new(8, -60, 8),
+            state: 1,
+        };
+        assert_eq!(body(&stone), hex("00 00 02 00 00 00 8f c4 01"));
+
+        let oak_log = BlockUpdate {
+            state: 140,
+            ..stone
+        };
+        assert_eq!(body(&oak_log), hex("00 00 02 00 00 00 8f c4 8c 01"));
+    }
+
+    #[test]
+    fn block_changed_ack_matches_official_bytes() {
+        assert_eq!(body(&BlockChangedAck { sequence: 300 }), hex("ac 02"));
+    }
+
+    #[test]
+    fn level_event_matches_official_bytes() {
+        let packet = LevelEvent::destroy_block(BlockPos::new(8, -61, 8), 9);
+        assert_eq!(
+            body(&packet),
+            hex("00 00 07 d1 00 00 02 00 00 00 8f c3 00 00 00 09 00")
+        );
+    }
+
+    #[test]
+    fn container_set_slot_matches_official_bytes() {
+        let stack = ItemStack::new(1, 1);
+        let packet = ContainerSetSlot {
+            container_id: 0,
+            state_id: 2,
+            slot: 36,
+            stack: &stack,
+        };
+        assert_eq!(body(&packet), hex("00 02 00 24 01 01 00 00"));
+    }
+
+    #[test]
+    fn container_set_slot_keeps_components_for_their_owner() {
+        let stack = ItemStack {
+            item: 1,
+            count: 2,
+            added: vec![(1, vec![0x10])],
+            removed: vec![12],
+        };
+        let packet = ContainerSetSlot {
+            container_id: 0,
+            state_id: 2,
+            slot: 36,
+            stack: &stack,
+        };
+        assert_eq!(body(&packet), hex("00 02 00 24 02 01 01 01 01 10 0c"));
+    }
+
+    #[test]
+    fn set_held_slot_is_a_var_int() {
+        assert_eq!(body(&SetHeldSlot { slot: 3 }), hex("03"));
+    }
+}

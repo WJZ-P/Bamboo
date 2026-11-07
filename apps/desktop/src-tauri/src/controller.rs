@@ -36,6 +36,14 @@ struct RunningServer {
     watcher_task: JoinHandle<()>,
 }
 
+/// 真正还在运行的服务端。世界线程崩溃时服务端会自己结束，这时还没有人调用 `stop`，
+/// 那一项还留在 `running` 里，但已经不算运行了。
+fn alive(running: &Option<RunningServer>) -> Option<&RunningServer> {
+    running
+        .as_ref()
+        .filter(|server| !server.server_task.inner().is_finished())
+}
+
 /// 界面显示用的玩家信息。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,7 +82,7 @@ pub struct ServerController {
 
 impl ServerController {
     pub async fn snapshot(&self) -> ServerSnapshot {
-        snapshot_of(self.running.lock().await.as_ref())
+        snapshot_of(alive(&*self.running.lock().await))
     }
 
     pub async fn start(
@@ -83,8 +91,11 @@ impl ServerController {
         settings: &ServerSettings,
     ) -> Result<ServerSnapshot, String> {
         let mut running = self.running.lock().await;
-        if running.is_some() {
+        if alive(&running).is_some() {
             return Err("服务器已经在运行了".to_owned());
+        }
+        if let Some(ended) = running.take() {
+            ended.watcher_task.abort();
         }
 
         let target = format!("{}:{}", settings.host, settings.port);
@@ -99,9 +110,16 @@ impl ServerController {
         let handle = server.handle();
 
         let (stop, stopped) = oneshot::channel::<()>();
-        let server_task = async_runtime::spawn(server.run(async {
-            let _ = stopped.await;
-        }));
+        let exit_app = app.clone();
+        let server_task = async_runtime::spawn(async move {
+            server
+                .run(async {
+                    let _ = stopped.await;
+                })
+                .await;
+            // 服务端自己结束时没有人调用 `stop`，界面只能从这里知道。
+            emit_state(&exit_app, &snapshot_of(None));
+        });
         let watcher_task = async_runtime::spawn(watch_events(app.clone(), handle.clone()));
 
         info!("Bamboo is listening on {address} for Minecraft {GAME_VERSION}");
@@ -115,7 +133,7 @@ impl ServerController {
             watcher_task,
         });
 
-        let snapshot = snapshot_of(running.as_ref());
+        let snapshot = snapshot_of(alive(&running));
         emit_state(app, &snapshot);
         Ok(snapshot)
     }
@@ -186,4 +204,49 @@ fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_server::ServerConfig;
+    use tokio::task::yield_now;
+
+    use super::*;
+
+    /// 一个已经停了的服务端留下的那一项，或者一个还在运行的。
+    async fn entry(server_task: JoinHandle<()>) -> RunningServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Server::new(listener, ServerConfig::default()).unwrap();
+        RunningServer {
+            address,
+            started_at_ms: 0,
+            max_players: 20,
+            handle: server.handle(),
+            stop: oneshot::channel().0,
+            server_task,
+            watcher_task: async_runtime::spawn(async {}),
+        }
+    }
+
+    #[test]
+    fn server_that_ended_on_its_own_does_not_count_as_running() {
+        async_runtime::block_on(async {
+            let (_keep_running, wait) = oneshot::channel::<()>();
+            let running = Some(
+                entry(async_runtime::spawn(async {
+                    let _ = wait.await;
+                }))
+                .await,
+            );
+            assert!(snapshot_of(alive(&running)).running);
+
+            let ended = async_runtime::spawn(async {});
+            while !ended.inner().is_finished() {
+                yield_now().await;
+            }
+            let running = Some(entry(ended).await);
+            assert!(!snapshot_of(alive(&running)).running);
+        });
+    }
 }

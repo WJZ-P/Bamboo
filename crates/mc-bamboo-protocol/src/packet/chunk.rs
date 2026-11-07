@@ -1,9 +1,11 @@
 //! 区块数据的网络格式。
 //!
 //! 这里只描述字节怎么排列。区块本身是什么样由 `mc-bamboo-world` 决定，
-//! 两者在 `mc-bamboo-server` 里对接。
+//! 两者在 `mc-bamboo-game` 里对接。
 
-use crate::codec::write_varint;
+use mc_bamboo_core::BlockPos;
+
+use crate::codec::{write_i16, write_varint};
 
 /// 调色板容器里的调色板。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,17 @@ pub struct Heightmap<'a> {
     pub data: &'a [u64],
 }
 
+/// 区块包里的一个方块实体。
+///
+/// 收到区块时客户端只创建列表里的方块实体，漏掉的方块（比如箱子）就看不见了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEntityInfo {
+    /// 世界坐标。水平方向只取区块内的低 4 位。
+    pub pos: BlockPos,
+    /// `minecraft:block_entity_type` 注册表 ID。
+    pub kind: i32,
+}
+
 /// 区块的光照数据。掩码的第 n 位对应从世界底部下一层算起的第 n 个区块段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LightData<'a> {
@@ -72,6 +85,18 @@ fn write_bit_set(out: &mut Vec<u8>, mask: u64) {
     out.extend_from_slice(&mask.to_le_bytes()[..used_bytes]);
 }
 
+fn write_block_entities(out: &mut Vec<u8>, block_entities: &[BlockEntityInfo]) {
+    write_varint(out, block_entities.len() as i32);
+    for block_entity in block_entities {
+        let BlockPos { x, y, z } = block_entity.pos;
+        out.push(((x & 15) << 4 | (z & 15)) as u8);
+        write_i16(out, y as i16);
+        write_varint(out, block_entity.kind);
+        // 没有 NBT。客户端按方块状态创建默认的方块实体。
+        out.push(0);
+    }
+}
+
 fn write_light_layers(out: &mut Vec<u8>, layers: &[&[u8]]) {
     write_varint(out, layers.len() as i32);
     for layer in layers {
@@ -86,6 +111,7 @@ fn write_light_layers(out: &mut Vec<u8>, layers: &[&[u8]]) {
 pub fn encode_chunk_body(
     heightmaps: &[Heightmap<'_>],
     sections: &[u8],
+    block_entities: &[BlockEntityInfo],
     light: &LightData<'_>,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(sections.len() + 4096);
@@ -102,8 +128,7 @@ pub fn encode_chunk_body(
     write_varint(&mut out, sections.len() as i32);
     out.extend_from_slice(sections);
 
-    // 方块实体的数量。
-    write_varint(&mut out, 0);
+    write_block_entities(&mut out, block_entities);
 
     write_bit_set(&mut out, light.sky_mask);
     write_bit_set(&mut out, light.block_mask);
@@ -155,6 +180,28 @@ mod tests {
     }
 
     #[test]
+    fn block_entity_matches_official_bytes() {
+        let block_entity = BlockEntityInfo {
+            pos: BlockPos::new(3, -60, 5),
+            kind: 1,
+        };
+        let mut out = Vec::new();
+        write_block_entities(&mut out, &[block_entity]);
+        assert_eq!(out, [1, 0x35, 0xff, 0xc4, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn block_entity_keeps_only_the_position_inside_the_chunk() {
+        let block_entity = BlockEntityInfo {
+            pos: BlockPos::new(-13, 70, 37),
+            kind: 300,
+        };
+        let mut out = Vec::new();
+        write_block_entities(&mut out, &[block_entity]);
+        assert_eq!(out, [1, 0x35, 0x00, 70, 0xac, 0x02, 0x00]);
+    }
+
+    #[test]
     fn body_keeps_the_official_field_order() {
         let heightmaps = [Heightmap {
             kind: 1,
@@ -168,14 +215,18 @@ mod tests {
             sky_updates: &[&[0xaa, 0xbb]],
             block_updates: &[],
         };
-        let body = encode_chunk_body(&heightmaps, &[7, 8], &light);
+        let block_entities = [BlockEntityInfo {
+            pos: BlockPos::new(3, -60, 5),
+            kind: 1,
+        }];
+        let body = encode_chunk_body(&heightmaps, &[7, 8], &block_entities, &light);
 
         assert_eq!(
             body,
             [
                 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 2, // 高度图
                 2, 7, 8, // 区块段
-                0, // 方块实体
+                1, 0x35, 0xff, 0xc4, 1, 0, // 方块实体
                 1, 1, 0, 1, 2, 0, // 四个掩码
                 1, 2, 0xaa, 0xbb, // 天空光
                 0,    // 方块光

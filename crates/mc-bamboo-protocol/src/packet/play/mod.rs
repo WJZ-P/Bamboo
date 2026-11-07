@@ -1,40 +1,28 @@
 //! Play 状态：玩家已经在世界里。
+//!
+//! 按主题分成几个子模块，所有公开项都从这里导出。
 
-use mc_bamboo_data::packets::play::{clientbound, serverbound};
-use uuid::Uuid;
+mod block;
+mod chat;
+mod entity;
+mod movement;
+mod player_info;
+mod request;
 
-use super::{ClientboundPacket, write_text_component};
-use crate::codec::{
-    DecodeError, Reader, write_bool, write_string, write_uuid, write_varint, write_varlong,
+pub use block::*;
+pub use chat::*;
+pub use entity::*;
+pub use movement::*;
+pub use player_info::*;
+pub use request::*;
+
+use mc_bamboo_data::packets::play::clientbound;
+
+use super::ClientboundPacket;
+use crate::{
+    codec::{write_bool, write_i32, write_i64, write_string, write_varint, write_varlong},
+    text::Component,
 };
-
-/// 客户端在 Play 状态发送的数据包。
-///
-/// 这里只解码服务端关心的包。其他合法的包归入 `Other`，由调用方忽略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayRequest {
-    /// 对 [`KeepAlive`] 的回应。
-    KeepAlive(i64),
-    /// 客户端确认了 [`PlayerPosition`] 这次传送。
-    AcceptTeleportation(i32),
-    Other(i32),
-}
-
-impl PlayRequest {
-    /// 解码一帧的负载，负载以数据包 ID 开头。
-    pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(payload);
-        match reader.varint()? {
-            serverbound::KEEP_ALIVE => {
-                let id = reader.i64()?;
-                reader.finish()?;
-                Ok(Self::KeepAlive(id))
-            }
-            serverbound::ACCEPT_TELEPORTATION => Ok(Self::AcceptTeleportation(reader.varint()?)),
-            other => Ok(Self::Other(other)),
-        }
-    }
-}
 
 /// 游戏模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,31 +143,6 @@ impl ClientboundPacket for PlayerPosition {
     }
 }
 
-/// 把一名玩家加入 Tab 列表。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AddPlayerInfo<'a> {
-    pub uuid: Uuid,
-    pub name: &'a str,
-    pub game_mode: GameMode,
-}
-
-impl ClientboundPacket for AddPlayerInfo<'_> {
-    const ID: i32 = clientbound::PLAYER_INFO_UPDATE;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        // 动作位掩码，依次是 ADD_PLAYER、UPDATE_GAME_MODE、UPDATE_LISTED。
-        const ACTIONS: u8 = 1 << 0 | 1 << 2 | 1 << 3;
-        out.push(ACTIONS);
-        write_varint(out, 1);
-        write_uuid(out, self.uuid);
-        write_string(out, self.name);
-        // 皮肤等属性的数量。
-        write_varint(out, 0);
-        write_varint(out, self.game_mode as i32);
-        write_bool(out, true);
-    }
-}
-
 /// 同步时间。26.x 起每个世界时钟单独同步。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SetTime {
@@ -231,6 +194,23 @@ impl ClientboundPacket for SetChunkCacheCenter {
     fn write_body(&self, out: &mut Vec<u8>) {
         write_varint(out, self.x);
         write_varint(out, self.z);
+    }
+}
+
+/// 让客户端卸载一个区块。这个包不走批次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForgetLevelChunk {
+    pub x: i32,
+    pub z: i32,
+}
+
+impl ClientboundPacket for ForgetLevelChunk {
+    const ID: i32 = clientbound::FORGET_LEVEL_CHUNK;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        // 线上是一个 Long，低 32 位是 x，所以大端写出来 z 在前。
+        write_i32(out, self.z);
+        write_i32(out, self.x);
     }
 }
 
@@ -290,46 +270,94 @@ impl ClientboundPacket for KeepAlive {
     }
 }
 
-/// 在 Play 状态断开连接。
+/// 对 [`PlayRequest::PingRequest`] 的回应，`time` 原样返回。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PongResponse {
+    pub time: i64,
+}
+
+impl ClientboundPacket for PongResponse {
+    const ID: i32 = clientbound::PONG_RESPONSE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_i64(out, self.time);
+    }
+}
+
+/// 在 Play 状态断开连接。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Disconnect<'a> {
-    pub reason: &'a str,
+    pub reason: &'a Component,
 }
 
 impl ClientboundPacket for Disconnect<'_> {
     const ID: i32 = clientbound::DISCONNECT;
 
     fn write_body(&self, out: &mut Vec<u8>) {
-        write_text_component(out, self.reason);
+        self.reason.write(out);
+    }
+}
+
+/// 一组数据包的分隔符。两个分隔符之间的包在客户端主线程的同一个任务里处理。
+///
+/// 漏掉第二个分隔符时，后面的包全部被吞掉，所以要把两个分隔符和内容一次放进发送队列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundleDelimiter;
+
+impl ClientboundPacket for BundleDelimiter {
+    const ID: i32 = clientbound::BUNDLE_DELIMITER;
+
+    fn write_body(&self, _out: &mut Vec<u8>) {}
+}
+
+/// 统计数据。客户端只是在等回应好结束统计界面的加载状态，所以总是发空列表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AwardStats;
+
+impl ClientboundPacket for AwardStats {
+    const ID: i32 = clientbound::AWARD_STATS;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, 0);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::test_util::{body, frame, hex};
 
     #[test]
-    fn decodes_keep_alive_and_teleport_confirmation() {
-        let mut keep_alive = vec![serverbound::KEEP_ALIVE as u8];
-        keep_alive.extend_from_slice(&42i64.to_be_bytes());
-        assert_eq!(
-            PlayRequest::decode(&keep_alive),
-            Ok(PlayRequest::KeepAlive(42))
-        );
-
-        let accept = [serverbound::ACCEPT_TELEPORTATION as u8, 7];
-        assert_eq!(
-            PlayRequest::decode(&accept),
-            Ok(PlayRequest::AcceptTeleportation(7))
-        );
-    }
-
-    #[test]
-    fn leaves_unhandled_packets_to_the_caller() {
-        assert_eq!(
-            PlayRequest::decode(&[serverbound::CLIENT_TICK_END as u8]),
-            Ok(PlayRequest::Other(serverbound::CLIENT_TICK_END))
-        );
+    fn packet_ids_match_the_specs() {
+        let ids = [
+            (BundleDelimiter::ID, 0),
+            (AddEntity::ID, 1),
+            (AwardStats::ID, 3),
+            (BlockChangedAck::ID, 4),
+            (BlockUpdate::ID, 8),
+            (ContainerSetSlot::ID, 20),
+            (DisguisedChat::ID, 33),
+            (EntityPositionSync::ID, 35),
+            (ForgetLevelChunk::ID, 38),
+            (LevelEvent::ID, 47),
+            (MoveEntityPos::ID, 54),
+            (MoveEntityPosRot::ID, 55),
+            (MoveEntityRot::ID, 57),
+            (PongResponse::ID, 63),
+            (PlayerInfoRemove::ID, 70),
+            (PlayerInfoUpdate::ID, 71),
+            (RemoveEntities::ID, 78),
+            (RotateHead::ID, 85),
+            (SetEntityData::ID, 101),
+            (SetEquipment::ID, 104),
+            (SetHeldSlot::ID, 107),
+            (SwingAnimation::ID, 123),
+            (SystemChat::ID, 124),
+            (UpdateAttributes::ID, 134),
+        ];
+        for (actual, expected) in ids {
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
@@ -365,9 +393,88 @@ mod tests {
     }
 
     #[test]
+    fn position_frame_matches_official_bytes() {
+        let position = PlayerPosition {
+            teleport_id: 1,
+            x: 8.5,
+            y: -60.0,
+            z: 8.5,
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        assert_eq!(
+            frame(&position),
+            hex("3e 49 01
+                 40 21 00 00 00 00 00 00  c0 4e 00 00 00 00 00 00  40 21 00 00 00 00 00 00
+                 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
+                 00 00 00 00  00 00 00 00
+                 00 00 00 00")
+        );
+    }
+
+    #[test]
+    fn level_chunks_load_start_matches_official_bytes() {
+        assert_eq!(frame(&LevelChunksLoadStart), hex("06 27 0d 00 00 00 00"));
+    }
+
+    #[test]
     fn disconnect_reason_is_an_nbt_string() {
-        let mut body = Vec::new();
-        Disconnect { reason: "hi" }.write_body(&mut body);
-        assert_eq!(body, [8, 0, 2, b'h', b'i']);
+        let reason = Component::text("hi");
+        assert_eq!(body(&Disconnect { reason: &reason }), [8, 0, 2, b'h', b'i']);
+    }
+
+    #[test]
+    fn set_chunk_cache_center_matches_official_bytes() {
+        assert_eq!(
+            frame(&SetChunkCacheCenter { x: 1, z: 0 }),
+            hex("03 60 01 00")
+        );
+        assert_eq!(
+            frame(&SetChunkCacheCenter { x: -1, z: 300 }),
+            hex("08 60 ff ff ff ff 0f ac 02")
+        );
+    }
+
+    #[test]
+    fn forget_level_chunk_writes_z_first() {
+        assert_eq!(
+            frame(&ForgetLevelChunk { x: -3, z: 5 }),
+            hex("09 26 00 00 00 05 ff ff ff fd")
+        );
+        assert_eq!(
+            frame(&ForgetLevelChunk { x: -3, z: -3 }),
+            hex("09 26 ff ff ff fd ff ff ff fd")
+        );
+    }
+
+    #[test]
+    fn chunk_batch_frames_match_official_bytes() {
+        assert_eq!(frame(&ChunkBatchStart), hex("01 0c"));
+        assert_eq!(
+            frame(&ChunkBatchFinished { batch_size: 9 }),
+            hex("02 0b 09")
+        );
+        assert_eq!(
+            frame(&ChunkBatchFinished { batch_size: 300 }),
+            hex("03 0b ac 02")
+        );
+    }
+
+    #[test]
+    fn pong_response_echoes_the_time() {
+        let packet = PongResponse {
+            time: 0x0000_018b_cfe5_6800,
+        };
+        assert_eq!(body(&packet), hex("00 00 01 8b cf e5 68 00"));
+    }
+
+    #[test]
+    fn bundle_delimiter_is_an_empty_packet() {
+        assert_eq!(frame(&BundleDelimiter), hex("01 00"));
+    }
+
+    #[test]
+    fn award_stats_is_an_empty_list() {
+        assert_eq!(body(&AwardStats), hex("00"));
     }
 }

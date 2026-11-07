@@ -12,8 +12,8 @@ use uuid::{Builder, Uuid};
 use super::{Connection, ConnectionError};
 use crate::{players::PlayerSession, server::Shared};
 
-/// 完成登录。玩家被拒绝或中途离开时返回 `None`。
-pub(super) async fn serve(
+/// 读取玩家名并把玩家加入玩家表。同名玩家在线时要等它离开。玩家被拒绝或中途离开时返回 `None`。
+pub(super) async fn admit(
     connection: &mut Connection,
     shared: &Arc<Shared>,
 ) -> Result<Option<PlayerSession>, ConnectionError> {
@@ -27,21 +27,27 @@ pub(super) async fn serve(
         return Err(ConnectionError::InvalidPlayerName);
     }
 
-    let uuid = offline_uuid(name);
-    let session = match PlayerSession::join(shared, name, uuid) {
-        Ok(session) => session,
+    match PlayerSession::join(shared, name, offline_uuid(name)).await {
+        Ok(session) => Ok(Some(session)),
         Err(refusal) => {
             connection.refuse_login(refusal.message()).await?;
-            return Ok(None);
+            Ok(None)
         }
-    };
+    }
+}
 
+/// 告诉客户端登录成功，等它确认。
+pub(super) async fn finish(
+    connection: &mut Connection,
+    session: &PlayerSession,
+    shared: &Shared,
+) -> Result<(), ConnectionError> {
     let mut frame = Vec::new();
     append_frame(
         &mut frame,
         &LoginFinished {
-            uuid,
-            name,
+            uuid: session.uuid,
+            name: &session.name,
             session_id: shared.session_id,
         },
     )?;
@@ -53,7 +59,7 @@ pub(super) async fn serve(
     match LoginRequest::decode(&payload)? {
         LoginRequest::Acknowledged => {
             connection.allow_full_size_frames();
-            Ok(Some(session))
+            Ok(())
         }
         LoginRequest::Hello { .. } => Err(ConnectionError::UnexpectedPacket),
     }

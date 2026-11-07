@@ -4,20 +4,26 @@ use mc_bamboo_data::registries::KNOWN_PACKS;
 use mc_bamboo_protocol::{
     GAME_VERSION,
     frame::append_frame,
-    packet::configuration::{ConfigurationDisconnect, ConfigurationRequest},
+    packet::{
+        configuration::{ConfigurationDisconnect, ConfigurationRequest},
+        play::ClientInformation,
+    },
+    text::Component,
 };
 
 use super::{Connection, ConnectionError};
 use crate::server::Shared;
 
+/// 走完 Configuration，返回客户端的设置。客户端没发时是默认值，和官方相同。
 pub(super) async fn serve(
     connection: &mut Connection,
     shared: &Shared,
-) -> Result<(), ConnectionError> {
+) -> Result<ClientInformation, ConnectionError> {
     connection
         .write(&shared.responses.configuration_start)
         .await?;
 
+    let mut client = ClientInformation::default();
     let mut data_sent = false;
     loop {
         let Some(payload) = connection.next_frame().await? else {
@@ -38,11 +44,12 @@ pub(super) async fn serve(
                     .await?;
                 data_sent = true;
             }
-            ConfigurationRequest::FinishConfiguration if data_sent => return Ok(()),
+            ConfigurationRequest::ClientInformation(information) => client = information,
+            ConfigurationRequest::FinishConfiguration if data_sent => return Ok(client),
             ConfigurationRequest::FinishConfiguration => {
                 return Err(ConnectionError::UnexpectedPacket);
             }
-            // 客户端设置、自定义通道之类的包，现在都用不上。
+            // 自定义通道之类的包，现在都用不上。
             ConfigurationRequest::Other(_) => {}
         }
     }
@@ -56,7 +63,7 @@ fn knows_official_packs(packs: &[(&str, &str, &str)]) -> bool {
 }
 
 async fn refuse(connection: &mut Connection) -> Result<(), ConnectionError> {
-    let reason = format!("客户端缺少 Minecraft {GAME_VERSION} 的官方数据");
+    let reason = Component::text(format!("客户端缺少 Minecraft {GAME_VERSION} 的官方数据"));
     let mut frame = Vec::new();
     append_frame(&mut frame, &ConfigurationDisconnect { reason: &reason })?;
     connection.write(&frame).await?;

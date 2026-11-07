@@ -5,17 +5,17 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    LOGIN_INTENT, STATUS_INTENT, TEST_DEADLINE, TestServer, frame, handshake,
-    handshake_with_protocol, hello, json_packet, packet_id, status_request,
+    LOGIN_INTENT, STATUS_INTENT, TEST_DEADLINE, TestServer, disconnect_body, frame, handshake,
+    handshake_with_protocol, hello, json_packet, packet_id, status_request, translated,
 };
 use mc_bamboo_data::packets::{configuration, login, play};
 use mc_bamboo_protocol::codec::{Reader, write_varint};
 use mc_bamboo_server::{PlayerInfo, ServerConfig, ServerEvent};
 use tokio::time::{sleep, timeout};
 
-/// 视距 1 只有 9 个区块，测试跑得快。
+/// 配置写 1 会被修正成官方的下限 2，所以实际是 `T(2)` 的 49 个区块，测试跑得快。
 const VIEW_DISTANCE: u8 = 1;
-const CHUNKS: usize = 9;
+const CHUNKS: usize = 49;
 
 fn small_world() -> ServerConfig {
     ServerConfig {
@@ -35,7 +35,7 @@ async fn wait_until_empty(server: &TestServer) {
     .expect("player stayed in the player list");
 }
 
-/// 读取 Configuration 或 Play 状态的断开原因。原因是 NBT 字符串：类型、两字节长度、内容。
+/// 读取 Configuration 状态的断开原因。原因是 NBT 字符串：类型、两字节长度、内容。
 fn disconnect_reason(payload: &[u8]) -> String {
     let mut reader = Reader::new(payload);
     reader.varint().unwrap();
@@ -81,6 +81,8 @@ async fn join_order_matches_the_official_server() {
             play::clientbound::PLAYER_ABILITIES,
             play::clientbound::PLAYER_POSITION,
             play::clientbound::PLAYER_INFO_UPDATE,
+            play::clientbound::SET_ENTITY_DATA,
+            play::clientbound::UPDATE_ATTRIBUTES,
             play::clientbound::SET_TIME,
             play::clientbound::GAME_EVENT,
             play::clientbound::SET_CHUNK_CACHE_CENTER,
@@ -143,9 +145,7 @@ async fn keep_alive_keeps_the_player_connected() {
 
     for _ in 0..3 {
         let keep_alive = client.read_until(play::clientbound::KEEP_ALIVE).await;
-        let mut answer = vec![play::serverbound::KEEP_ALIVE as u8];
-        answer.extend_from_slice(&keep_alive[1..]);
-        client.send(&frame(&answer)).await;
+        client.answer_keep_alive(&keep_alive).await;
     }
 
     assert_eq!(server.handle.online_players().len(), 1);
@@ -163,13 +163,16 @@ async fn silent_player_is_disconnected_with_a_reason() {
 
     let disconnect = client.read_until(play::clientbound::DISCONNECT).await;
 
-    assert_eq!(disconnect_reason(&disconnect), "连接超时");
+    assert_eq!(
+        disconnect_body(&disconnect),
+        translated("disconnect.timeout")
+    );
     client.assert_closed().await;
     wait_until_empty(&server).await;
 }
 
 #[tokio::test]
-async fn wrong_keep_alive_answer_closes_the_connection() {
+async fn wrong_keep_alive_answer_disconnects_with_the_timeout_reason() {
     let config = ServerConfig {
         keep_alive_interval: Duration::from_millis(100),
         ..small_world()
@@ -183,6 +186,11 @@ async fn wrong_keep_alive_answer_closes_the_connection() {
     answer.extend_from_slice(&(-1i64).to_be_bytes());
     client.send(&frame(&answer)).await;
 
+    let disconnect = client.read_until(play::clientbound::DISCONNECT).await;
+    assert_eq!(
+        disconnect_body(&disconnect),
+        translated("disconnect.timeout")
+    );
     client.assert_closed().await;
 }
 
@@ -223,25 +231,6 @@ async fn full_server_refuses_with_a_message() {
     let (id, reason) = json_packet(&second.read_frame().await);
     assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
     assert_eq!(reason["text"], "服务器已满");
-}
-
-#[tokio::test]
-async fn duplicate_name_is_refused_and_keeps_the_first_player() {
-    let server = TestServer::start(small_world()).await;
-    let mut first = server.join("Kitten").await;
-    first.read_chunks(CHUNKS).await;
-
-    let mut second = server.connect().await;
-    second.send(&handshake(LOGIN_INTENT)).await;
-    second.send(&hello("Kitten")).await;
-
-    let (id, reason) = json_packet(&second.read_frame().await);
-    assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
-    assert_eq!(reason["text"], "这个名字已经在服务器里了");
-    drop(second);
-
-    sleep(Duration::from_millis(50)).await;
-    assert_eq!(server.handle.online_players().len(), 1);
 }
 
 #[tokio::test]
@@ -340,7 +329,10 @@ async fn shutdown_tells_players_why_they_are_leaving() {
     };
     let read = async {
         let disconnect = client.read_until(play::clientbound::DISCONNECT).await;
-        assert_eq!(disconnect_reason(&disconnect), "服务器已关闭");
+        assert_eq!(
+            disconnect_body(&disconnect),
+            translated("multiplayer.disconnect.server_shutdown")
+        );
         drop(client);
     };
     tokio::join!(shutdown, read);

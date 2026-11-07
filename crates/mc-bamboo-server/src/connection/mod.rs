@@ -5,6 +5,7 @@
 
 mod configuration;
 mod login;
+mod outbound;
 mod play;
 mod status;
 
@@ -18,11 +19,12 @@ use mc_bamboo_protocol::{
     packet::{
         handshake::{Handshake, Intent},
         login::LoginDisconnect,
+        play::ClientInformation,
     },
 };
 use serde_json::json;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::OwnedSemaphorePermit,
     time::timeout,
@@ -31,6 +33,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::{players::PlayerSession, server::Shared};
+
+#[cfg(test)]
+pub(crate) use outbound::MAX_QUEUED_BYTES;
 
 /// 登录之前的帧都很小：最大的合法握手包只有 780 字节。
 /// 把上限压到远低于协议允许的 2 MiB，未认证的连接就占不了多少内存。
@@ -58,8 +63,37 @@ enum ConnectionError {
     UnknownDataPacks,
     #[error("client did not answer the keep-alive")]
     KeepAliveTimeout,
-    #[error("sending chunks took too long")]
-    ChunkSendTimeout,
+    #[error("writing to the client took too long")]
+    WriteTimeout,
+    #[error("client sent requests faster than the world can handle them")]
+    TooManyRequests,
+    #[error("client does not read fast enough, its outbound queue is full")]
+    OutboundOverflow,
+    #[error("the same player logged in again")]
+    DuplicateLogin,
+    #[error("the server is stopping")]
+    ServerStopped,
+}
+
+impl ConnectionError {
+    /// 在 Play 状态告诉客户端的断开原因，是客户端语言文件里的翻译键。
+    /// 返回 `None` 时直接断开：要么写不出去了，要么是客户端自己的问题。
+    fn disconnect_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::KeepAliveTimeout => Some("disconnect.timeout"),
+            Self::TooManyRequests => Some("disconnect.exceeded_packet_rate"),
+            Self::DuplicateLogin => Some("multiplayer.disconnect.duplicate_login"),
+            Self::ServerStopped => Some("multiplayer.disconnect.server_shutdown"),
+            _ => None,
+        }
+    }
+}
+
+/// 走完进入游戏之前的流程的玩家。
+struct Joined {
+    session: PlayerSession,
+    /// Configuration 阶段收到的客户端设置，没收到时是默认值。
+    client: ClientInformation,
 }
 
 /// 运行一条连接直到结束。
@@ -80,13 +114,13 @@ pub(crate) async fn handle(
     let mut connection = Connection::new(stream);
     let time_limit = shared.config.pre_play_timeout;
     let pre_play = timeout(time_limit, pre_play(&mut connection, &shared));
-    let session = tokio::select! {
+    let joined = tokio::select! {
         () = cancel.cancelled() => {
             debug!(%peer, "connection closed by shutdown");
             return;
         }
         outcome = pre_play => match outcome {
-            Ok(Ok(session)) => session,
+            Ok(Ok(joined)) => joined,
             Ok(Err(error)) => {
                 debug!(%peer, %error, "dropping connection");
                 return;
@@ -100,12 +134,12 @@ pub(crate) async fn handle(
 
     // 名额只限制进入游戏之前的连接，玩家数量由玩家表限制。
     drop(slot);
-    let Some(session) = session else {
+    let Some(Joined { session, client }) = joined else {
         debug!(%peer, "connection finished");
         return;
     };
 
-    if let Err(error) = play::serve(connection, &session, &shared, cancel).await {
+    if let Err(error) = play::serve(connection, &session, client, &shared, cancel).await {
         debug!(%peer, %error, "player connection ended");
     }
 }
@@ -114,7 +148,7 @@ pub(crate) async fn handle(
 async fn pre_play(
     connection: &mut Connection,
     shared: &Arc<Shared>,
-) -> Result<Option<PlayerSession>, ConnectionError> {
+) -> Result<Option<Joined>, ConnectionError> {
     let Some(payload) = connection.next_frame().await? else {
         return Ok(None);
     };
@@ -137,13 +171,61 @@ async fn pre_play(
             Ok(None)
         }
         Intent::Login => {
-            let Some(session) = login::serve(connection, shared).await? else {
+            let Some(session) = login::admit(connection, shared).await? else {
                 return Ok(None);
             };
-            configuration::serve(connection, shared).await?;
-            Ok(Some(session))
+            // 还没进入 Play 时被同名玩家顶掉，连接直接结束就好，客户端看到的是连接断开。
+            let client = tokio::select! {
+                () = session.kicked() => return Err(ConnectionError::DuplicateLogin),
+                client = configure(connection, &session, shared) => client?,
+            };
+            Ok(Some(Joined { session, client }))
         }
     }
+}
+
+async fn configure(
+    connection: &mut Connection,
+    session: &PlayerSession,
+    shared: &Shared,
+) -> Result<ClientInformation, ConnectionError> {
+    login::finish(connection, session, shared).await?;
+    configuration::serve(connection, shared).await
+}
+
+/// 返回下一帧的负载。客户端关闭连接后返回 `None`。
+///
+/// 这个函数是取消安全的：放进 `select!` 被打断时，已读到的数据都留在缓冲区里。
+async fn read_frame<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    buffer: &mut BytesMut,
+    max_frame_len: usize,
+) -> Result<Option<Bytes>, ConnectionError> {
+    loop {
+        if let Some(frame) = find_frame(buffer, max_frame_len)? {
+            buffer.advance(frame.header_len);
+            return Ok(Some(buffer.split_to(frame.payload_len).freeze()));
+        }
+        if stream.read_buf(buffer).await? == 0 {
+            return if buffer.is_empty() {
+                Ok(None)
+            } else {
+                Err(ConnectionError::TruncatedFrame)
+            };
+        }
+    }
+}
+
+/// 写完最后一个包之后关闭连接。
+///
+/// 如果 socket 里还有没读的数据，直接关闭会让系统发送 reset，
+/// 客户端可能还没读到最后一个包就被丢弃了。握手后马上被拒绝的客户端通常还在发数据，
+/// 所以这里要等客户端先关闭。
+async fn finish(stream: &mut TcpStream) -> io::Result<()> {
+    stream.shutdown().await?;
+    let mut discarded = [0; 256];
+    while stream.read(&mut discarded).await? != 0 {}
+    Ok(())
 }
 
 /// 切分成协议帧的 TCP 流。
@@ -167,23 +249,8 @@ impl Connection {
         self.max_frame_len = MAX_FRAME_LEN;
     }
 
-    /// 返回下一帧的负载。客户端关闭连接后返回 `None`。
-    ///
-    /// 这个函数是取消安全的：放进 `select!` 被打断时，已读到的数据都留在缓冲区里。
     async fn next_frame(&mut self) -> Result<Option<Bytes>, ConnectionError> {
-        loop {
-            if let Some(frame) = find_frame(&self.read_buffer, self.max_frame_len)? {
-                self.read_buffer.advance(frame.header_len);
-                return Ok(Some(self.read_buffer.split_to(frame.payload_len).freeze()));
-            }
-            if self.stream.read_buf(&mut self.read_buffer).await? == 0 {
-                return if self.read_buffer.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(ConnectionError::TruncatedFrame)
-                };
-            }
-        }
+        read_frame(&mut self.stream, &mut self.read_buffer, self.max_frame_len).await
     }
 
     async fn write(&mut self, frames: &[u8]) -> io::Result<()> {
@@ -205,15 +272,7 @@ impl Connection {
         Ok(())
     }
 
-    /// 写完最后一个包之后关闭连接。
-    ///
-    /// 如果 socket 里还有没读的数据，直接关闭会让系统发送 reset，
-    /// 客户端可能还没读到最后一个包就被丢弃了。握手后马上被拒绝的客户端通常还在发数据，
-    /// 所以这里要等客户端先关闭。
     async fn finish(&mut self) -> io::Result<()> {
-        self.stream.shutdown().await?;
-        let mut discarded = [0; 256];
-        while self.stream.read(&mut discarded).await? != 0 {}
-        Ok(())
+        finish(&mut self.stream).await
     }
 }

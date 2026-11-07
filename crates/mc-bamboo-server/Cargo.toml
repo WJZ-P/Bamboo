@@ -12,8 +12,8 @@ categories = ["games", "network-programming"]
 [dependencies]
 bytes.workspace = true
 mc-bamboo-data.workspace = true
+mc-bamboo-game.workspace = true
 mc-bamboo-protocol.workspace = true
-mc-bamboo-world.workspace = true
 md-5.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

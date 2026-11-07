@@ -5,6 +5,8 @@
 
 pub mod codec;
 pub mod frame;
+pub mod item;
 pub mod packet;
+pub mod text;
 
 pub use mc_bamboo_data::version::{GAME_VERSION, PROTOCOL_VERSION};

@@ -1,6 +1,8 @@
 //! 区块：16×384×16 的方块柱，由 24 个区块段组成。
 
-use mc_bamboo_data::blocks;
+use std::collections::BTreeMap;
+
+use mc_bamboo_data::{block_of_state, blocks};
 
 use crate::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
@@ -61,10 +63,25 @@ impl Section {
     }
 }
 
+/// 区块里的一个方块实体。现在只有位置和类型，内容都是默认值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEntity {
+    /// 区块内坐标。
+    pub x: usize,
+    /// 世界高度。
+    pub y: i32,
+    /// 区块内坐标。
+    pub z: usize,
+    /// `minecraft:block_entity_type` 注册表 ID。
+    pub kind: i32,
+}
+
 /// 一个区块。
 #[derive(Debug, Clone)]
 pub struct Chunk {
     sections: Vec<Section>,
+    /// 有方块实体的位置和类型。键是 `(y, z, x)`，所以遍历顺序和放置的先后无关。
+    block_entities: BTreeMap<(i32, usize, usize), i32>,
 }
 
 impl Chunk {
@@ -72,11 +89,19 @@ impl Chunk {
     pub fn empty(biome: u32) -> Self {
         Self {
             sections: vec![Section::empty(biome); SECTION_COUNT],
+            block_entities: BTreeMap::new(),
         }
     }
 
     pub fn sections(&self) -> &[Section] {
         &self.sections
+    }
+
+    /// 区块里的方块实体，按高度、z、x 升序。
+    pub fn block_entities(&self) -> impl Iterator<Item = BlockEntity> + '_ {
+        self.block_entities
+            .iter()
+            .map(|(&(y, z, x), &kind)| BlockEntity { x, y, z, kind })
     }
 
     /// 把世界高度拆成区块段下标和段内高度。
@@ -102,6 +127,12 @@ impl Chunk {
     pub fn set_block(&mut self, x: usize, y: i32, z: usize, state: u32) {
         let (section, local_y) = Self::locate(y);
         self.sections[section].set_block(x, local_y, z, state);
+
+        let key = (y, z, x);
+        match block_of_state(state).and_then(|block| block.block_entity_type) {
+            Some(kind) => self.block_entities.insert(key, kind),
+            None => self.block_entities.remove(&key),
+        };
     }
 
     /// 这一列最高方块上方第一格的高度。整列都是空气时返回 [`MIN_Y`]。
@@ -124,6 +155,8 @@ impl Chunk {
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_data::registries::block_entity_type;
+
     use super::*;
 
     #[test]
@@ -173,5 +206,63 @@ mod tests {
     #[should_panic(expected = "超出了世界范围")]
     fn rejects_heights_outside_the_world() {
         Chunk::empty(0).block(0, MIN_Y - 1, 0);
+    }
+
+    #[test]
+    fn records_block_entities_of_every_state_of_a_block() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(3, -60, 5, blocks::CHEST);
+        // 同一个方块的其他状态也是方块实体，比如朝向不同的箱子。
+        chunk.set_block(4, -60, 5, blocks::CHEST + 1);
+        chunk.set_block(5, -60, 5, blocks::STONE);
+
+        let entity = |x| BlockEntity {
+            x,
+            y: -60,
+            z: 5,
+            kind: block_entity_type::CHEST,
+        };
+        assert_eq!(
+            chunk.block_entities().collect::<Vec<_>>(),
+            [entity(3), entity(4)]
+        );
+    }
+
+    #[test]
+    fn replacing_a_block_entity_updates_the_list() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::CHEST);
+
+        chunk.set_block(0, 0, 0, blocks::OAK_WALL_SIGN);
+        let kinds: Vec<_> = chunk.block_entities().map(|entity| entity.kind).collect();
+        assert_eq!(kinds, [block_entity_type::SIGN]);
+
+        chunk.set_block(0, 0, 0, blocks::AIR);
+        assert_eq!(chunk.block_entities().count(), 0);
+    }
+
+    #[test]
+    fn block_entity_order_does_not_depend_on_placement_order() {
+        let positions = [(1, 7, 2), (2, -60, 9), (0, 7, 2), (0, 7, 1)];
+        let mut forward = Chunk::empty(0);
+        let mut backward = Chunk::empty(0);
+        for (x, y, z) in positions {
+            forward.set_block(x, y, z, blocks::CHEST);
+        }
+        for (x, y, z) in positions.into_iter().rev() {
+            backward.set_block(x, y, z, blocks::CHEST);
+        }
+
+        let order = |chunk: &Chunk| {
+            chunk
+                .block_entities()
+                .map(|entity| (entity.y, entity.z, entity.x))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&forward), order(&backward));
+        assert_eq!(
+            order(&forward),
+            [(-60, 9, 2), (7, 1, 0), (7, 2, 0), (7, 2, 1)]
+        );
     }
 }

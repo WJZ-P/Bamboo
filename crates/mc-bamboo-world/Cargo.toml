@@ -10,4 +10,5 @@ keywords = ["minecraft", "world"]
 categories = ["games"]
 
 [dependencies]
+mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true

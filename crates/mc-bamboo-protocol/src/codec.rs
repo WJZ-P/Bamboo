@@ -1,5 +1,6 @@
 //! 网络协议的基础数据类型。
 
+use mc_bamboo_core::{BlockPos, Vec3};
 use uuid::Uuid;
 
 /// 32 位 VarInt 编码后的最大长度。
@@ -26,6 +27,12 @@ pub enum DecodeError {
     UnknownPacket(i32),
     #[error("unknown handshake intent {0}")]
     UnknownIntent(i32),
+    #[error("enum value {0} is out of range")]
+    InvalidEnum(i32),
+    #[error("invalid item id {0}")]
+    InvalidItem(i32),
+    #[error("invalid item count {0}")]
+    InvalidItemCount(i32),
 }
 
 /// 从 `input` 开头解码一个 VarInt，返回它的值和占用的字节数。
@@ -90,6 +97,43 @@ pub fn write_uuid(out: &mut Vec<u8>, value: Uuid) {
     out.extend_from_slice(value.as_bytes());
 }
 
+/// 把 `value` 按大端写成 2 个字节。
+pub fn write_i16(out: &mut Vec<u8>, value: i16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// 把 `value` 按大端写成 4 个字节。
+pub fn write_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// 把 `value` 按大端写成 8 个字节。
+pub fn write_i64(out: &mut Vec<u8>, value: i64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// 把 `value` 按大端写成 4 个字节。
+pub fn write_f32(out: &mut Vec<u8>, value: f32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// 把 `value` 按大端写成 8 个字节。
+pub fn write_f64(out: &mut Vec<u8>, value: f64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+/// 把方块坐标写成一个 64 位整数。
+pub fn write_block_pos(out: &mut Vec<u8>, pos: BlockPos) {
+    write_i64(out, pos.pack());
+}
+
+/// 依次写入 x、y、z 三个 Double。
+pub fn write_vec3(out: &mut Vec<u8>, value: Vec3) {
+    for coordinate in [value.x, value.y, value.z] {
+        write_f64(out, coordinate);
+    }
+}
+
 /// 单个数据包内容的读取游标。
 #[derive(Debug)]
 pub struct Reader<'a> {
@@ -112,16 +156,55 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    pub fn i8(&mut self) -> Result<i8, DecodeError> {
+        Ok(i8::from_be_bytes(self.array()?))
+    }
+
     pub fn u16(&mut self) -> Result<u16, DecodeError> {
         Ok(u16::from_be_bytes(self.array()?))
+    }
+
+    pub fn i16(&mut self) -> Result<i16, DecodeError> {
+        Ok(i16::from_be_bytes(self.array()?))
+    }
+
+    pub fn i32(&mut self) -> Result<i32, DecodeError> {
+        Ok(i32::from_be_bytes(self.array()?))
     }
 
     pub fn i64(&mut self) -> Result<i64, DecodeError> {
         Ok(i64::from_be_bytes(self.array()?))
     }
 
+    pub fn f32(&mut self) -> Result<f32, DecodeError> {
+        Ok(f32::from_be_bytes(self.array()?))
+    }
+
+    pub fn f64(&mut self) -> Result<f64, DecodeError> {
+        Ok(f64::from_be_bytes(self.array()?))
+    }
+
+    /// 和官方一样，非零字节都算 `true`。
+    pub fn bool(&mut self) -> Result<bool, DecodeError> {
+        Ok(self.u8()? != 0)
+    }
+
     pub fn uuid(&mut self) -> Result<Uuid, DecodeError> {
         Ok(Uuid::from_bytes(self.array()?))
+    }
+
+    pub fn block_pos(&mut self) -> Result<BlockPos, DecodeError> {
+        Ok(BlockPos::unpack(self.i64()?))
+    }
+
+    /// 取走接下来的 `len` 个字节。
+    pub fn bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+        let (bytes, rest) = self
+            .input
+            .split_at_checked(len)
+            .ok_or(DecodeError::UnexpectedEnd)?;
+        self.input = rest;
+        Ok(bytes)
     }
 
     /// 读取列表的元素个数，并限制在 `max` 以内。
@@ -352,6 +435,54 @@ mod tests {
         assert_eq!(reader.u16(), Ok(25565));
         assert_eq!(reader.i64(), Ok(42));
         assert_eq!(reader.finish(), Ok(()));
+    }
+
+    #[test]
+    fn fixed_width_numbers_round_trip() {
+        let mut out = Vec::new();
+        write_i16(&mut out, -2);
+        write_i32(&mut out, -3);
+        write_i64(&mut out, -4);
+        write_f32(&mut out, 1.5);
+        write_f64(&mut out, -2.5);
+
+        let mut reader = Reader::new(&out);
+        assert_eq!(reader.i16(), Ok(-2));
+        assert_eq!(reader.i32(), Ok(-3));
+        assert_eq!(reader.i64(), Ok(-4));
+        assert_eq!(reader.f32(), Ok(1.5));
+        assert_eq!(reader.f64(), Ok(-2.5));
+        assert_eq!(reader.finish(), Ok(()));
+    }
+
+    #[test]
+    fn signed_bytes_keep_their_sign() {
+        assert_eq!(Reader::new(&[0xff]).i8(), Ok(-1));
+    }
+
+    #[test]
+    fn any_non_zero_byte_is_true() {
+        assert_eq!(Reader::new(&[0]).bool(), Ok(false));
+        assert_eq!(Reader::new(&[1]).bool(), Ok(true));
+        assert_eq!(Reader::new(&[0x80]).bool(), Ok(true));
+    }
+
+    #[test]
+    fn block_pos_round_trips() {
+        let pos = BlockPos::new(18, -61, -7);
+        let mut out = Vec::new();
+        write_block_pos(&mut out, pos);
+
+        assert_eq!(out, [0x00, 0x00, 0x04, 0xbf, 0xff, 0xff, 0x9f, 0xc3]);
+        assert_eq!(Reader::new(&out).block_pos(), Ok(pos));
+    }
+
+    #[test]
+    fn bytes_takes_exactly_what_was_asked() {
+        let mut reader = Reader::new(&[1, 2, 3]);
+        assert_eq!(reader.bytes(2), Ok(&[1, 2][..]));
+        assert_eq!(reader.bytes(2), Err(DecodeError::UnexpectedEnd));
+        assert_eq!(reader.u8(), Ok(3));
     }
 
     #[test]

@@ -2,8 +2,10 @@
 //!
 //! 这个 crate 不关心界面：命令行版和桌面版都通过 [`Server`] 启动服务端，
 //! 再通过 [`ServerHandle`] 观察它的运行情况。
+//!
+//! 这里只有网络：accept、握手、登录、配置、连接任务和出站队列。
+//! 游戏逻辑在世界线程上，见 `mc-bamboo-game`。
 
-mod chunk_encoding;
 mod config;
 mod connection;
 mod event;

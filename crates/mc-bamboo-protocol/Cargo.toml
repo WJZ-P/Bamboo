@@ -10,6 +10,7 @@ keywords = ["minecraft", "protocol"]
 categories = ["network-programming"]
 
 [dependencies]
+mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 mc-bamboo-nbt.workspace = true
 thiserror.workspace = true

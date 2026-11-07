@@ -5,8 +5,11 @@ use mc_bamboo_data::{
     packets::configuration::{clientbound, serverbound},
 };
 
-use super::{ClientboundPacket, write_text_component};
-use crate::codec::{DecodeError, Reader, write_bool, write_string, write_varint};
+use super::{ClientboundPacket, play::ClientInformation};
+use crate::{
+    codec::{DecodeError, Reader, write_bool, write_string, write_varint},
+    text::Component,
+};
 
 /// 官方允许客户端声明的内容包数量上限。
 const MAX_KNOWN_PACKS: usize = 64;
@@ -19,6 +22,8 @@ const MAX_STRING_CHARS: usize = 32767;
 pub enum ConfigurationRequest<'a> {
     /// 客户端确认了哪些内容包，内容是 (命名空间, ID, 版本)。
     SelectKnownPacks(Vec<(&'a str, &'a str, &'a str)>),
+    /// 客户端的设置，进入 Play 状态后要用。
+    ClientInformation(ClientInformation),
     /// 客户端已经收到全部配置，准备进入 Play 状态。
     FinishConfiguration,
     Other(i32),
@@ -41,6 +46,11 @@ impl<'a> ConfigurationRequest<'a> {
                 }
                 reader.finish()?;
                 Ok(Self::SelectKnownPacks(packs))
+            }
+            serverbound::CLIENT_INFORMATION => {
+                let information = ClientInformation::read(&mut reader)?;
+                reader.finish()?;
+                Ok(Self::ClientInformation(information))
             }
             serverbound::FINISH_CONFIGURATION => {
                 reader.finish()?;
@@ -160,16 +170,16 @@ impl ClientboundPacket for FinishConfiguration {
 }
 
 /// 在 Configuration 状态断开连接。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConfigurationDisconnect<'a> {
-    pub reason: &'a str,
+    pub reason: &'a Component,
 }
 
 impl ClientboundPacket for ConfigurationDisconnect<'_> {
     const ID: i32 = clientbound::DISCONNECT;
 
     fn write_body(&self, out: &mut Vec<u8>) {
-        write_text_component(out, self.reason);
+        self.reason.write(out);
     }
 }
 
@@ -178,6 +188,13 @@ mod tests {
     use mc_bamboo_data::Tag;
 
     use super::*;
+    use crate::{
+        frame::{MAX_FRAME_LEN, find_frame},
+        packet::{
+            play::{ChatVisibility, HumanoidArm, ParticleStatus},
+            test_util::{body, hex},
+        },
+    };
 
     #[test]
     fn decodes_known_packs() {
@@ -209,11 +226,51 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unhandled_packets_to_the_caller() {
-        let payload = [serverbound::CLIENT_INFORMATION as u8, 1, 2, 3];
+    fn decodes_client_information() {
+        let frame = hex("0f 00 05 7a 68 5f 63 6e 0c 00 01 7f 01 00 01 00");
+        let bounds = find_frame(&frame, MAX_FRAME_LEN).unwrap().unwrap();
+        assert_eq!(frame.len(), bounds.header_len + bounds.payload_len);
+
+        assert_eq!(
+            ConfigurationRequest::decode(&frame[bounds.header_len..]),
+            Ok(ConfigurationRequest::ClientInformation(ClientInformation {
+                language: "zh_cn".to_owned(),
+                view_distance: 12,
+                chat_visibility: ChatVisibility::Full,
+                chat_colors: true,
+                model_customisation: 0x7f,
+                main_hand: HumanoidArm::Right,
+                text_filtering_enabled: false,
+                allows_listing: true,
+                particle_status: ParticleStatus::All,
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_client_information() {
+        let payload = hex("00 05 7a 68 5f 63 6e 0c 00 01 7f 01 00 01 00 ff");
         assert_eq!(
             ConfigurationRequest::decode(&payload),
-            Ok(ConfigurationRequest::Other(serverbound::CLIENT_INFORMATION))
+            Err(DecodeError::TrailingBytes(1))
+        );
+    }
+
+    #[test]
+    fn leaves_unhandled_packets_to_the_caller() {
+        let payload = [serverbound::PONG as u8, 1, 2, 3];
+        assert_eq!(
+            ConfigurationRequest::decode(&payload),
+            Ok(ConfigurationRequest::Other(serverbound::PONG))
+        );
+    }
+
+    #[test]
+    fn disconnect_reason_is_a_component() {
+        let reason = Component::text("hi");
+        assert_eq!(
+            body(&ConfigurationDisconnect { reason: &reason }),
+            [8, 0, 2, b'h', b'i']
         );
     }
 
