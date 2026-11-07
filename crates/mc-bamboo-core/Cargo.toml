@@ -1,0 +1,10 @@
+[package]
+name = "mc-bamboo-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Basic types shared across the Bamboo Minecraft server."
+keywords = ["minecraft"]
+categories = ["games"]

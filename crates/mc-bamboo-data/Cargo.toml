@@ -8,3 +8,6 @@ repository.workspace = true
 description = "Version data of the Bamboo Minecraft server, generated from the official server."
 keywords = ["minecraft"]
 categories = ["games"]
+
+[dependencies]
+mc-bamboo-core.workspace = true

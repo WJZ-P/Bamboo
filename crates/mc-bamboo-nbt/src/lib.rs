@@ -12,6 +12,7 @@ pub enum Tag {
     Float(f32),
     Double(f64),
     ByteArray(Vec<i8>),
+    /// 编码后超过 65535 字节的部分不写。
     String(String),
     /// 列表里的元素类型必须相同。
     List(Vec<Tag>),
@@ -21,6 +22,9 @@ pub enum Tag {
 }
 
 const END_ID: u8 = 0;
+
+/// 字符串编码后的字节数上限，长度前缀只有两个字节。
+const MAX_STRING_BYTES: usize = u16::MAX as usize;
 
 impl Tag {
     fn id(&self) -> u8 {
@@ -94,27 +98,40 @@ fn write_len(out: &mut Vec<u8>, len: usize) {
 ///
 /// 和标准 UTF-8 的差别有两处：NUL 写成两个字节，
 /// 超出基本平面的字符按 UTF-16 的两个代理项分别编码，各占三个字节。
+///
+/// 长度前缀放不下的字符不写。官方这时抛异常，这个包发不出去。这里没有错误路径，
+/// 而长度写错后后面的字节全部错位，客户端解码失败就断线了，所以宁可少写。
 fn write_modified_utf8(out: &mut Vec<u8>, value: &str) {
     let length_at = out.len();
     out.extend_from_slice(&[0, 0]);
+    let content_at = out.len();
 
-    for unit in value.encode_utf16() {
-        match unit {
-            0x0001..=0x007f => out.push(unit as u8),
-            0x0000 | 0x0080..=0x07ff => {
-                out.push(0xc0 | (unit >> 6) as u8);
-                out.push(0x80 | (unit & 0x3f) as u8);
+    let mut units = [0; 2];
+    for character in value.chars() {
+        let character_at = out.len();
+        for unit in character.encode_utf16(&mut units).iter().copied() {
+            match unit {
+                0x0001..=0x007f => out.push(unit as u8),
+                0x0000 | 0x0080..=0x07ff => {
+                    out.push(0xc0 | (unit >> 6) as u8);
+                    out.push(0x80 | (unit & 0x3f) as u8);
+                }
+                _ => {
+                    out.push(0xe0 | (unit >> 12) as u8);
+                    out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
+                    out.push(0x80 | (unit & 0x3f) as u8);
+                }
             }
-            _ => {
-                out.push(0xe0 | (unit >> 12) as u8);
-                out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
-                out.push(0x80 | (unit & 0x3f) as u8);
-            }
+        }
+        // 按字符回退，不会留下半个代理对。
+        if out.len() - content_at > MAX_STRING_BYTES {
+            out.truncate(character_at);
+            break;
         }
     }
 
-    let encoded_len = (out.len() - length_at - 2) as u16;
-    out[length_at..length_at + 2].copy_from_slice(&encoded_len.to_be_bytes());
+    let encoded_len = (out.len() - content_at) as u16;
+    out[length_at..content_at].copy_from_slice(&encoded_len.to_be_bytes());
 }
 
 #[cfg(test)]
@@ -165,6 +182,54 @@ mod tests {
             network_bytes(&Tag::String("🎋".to_owned())),
             [8, 0, 6, 0xed, 0xa0, 0xbc, 0xed, 0xbe, 0x8b]
         );
+    }
+
+    /// 字符串标签内容的编码结果，确认长度前缀和实际字节数一致。
+    fn string_content(value: String) -> Vec<u8> {
+        let bytes = network_bytes(&Tag::String(value));
+        let len = u16::from_be_bytes([bytes[1], bytes[2]]);
+        assert_eq!(usize::from(len), bytes.len() - 3);
+        bytes[3..].to_vec()
+    }
+
+    #[test]
+    fn keeps_a_string_that_exactly_fills_the_length_prefix() {
+        assert_eq!(string_content("a".repeat(65535)).len(), 65535);
+        assert_eq!(string_content("竹".repeat(21845)).len(), 65535);
+    }
+
+    #[test]
+    fn drops_the_characters_the_length_prefix_cannot_hold() {
+        assert_eq!(string_content("a".repeat(65536)).len(), 65535);
+        assert_eq!(string_content("a".repeat(100_000)).len(), 65535);
+        assert_eq!(string_content("竹".repeat(21846)).len(), 65535);
+    }
+
+    #[test]
+    fn long_strings_are_not_cut_inside_a_character() {
+        // 最后一个“竹”只剩 1 个字节的空间，整个字符都不写。
+        let content = string_content(format!("ab{}", "竹".repeat(21845)));
+        assert_eq!(content.len(), 2 + 21844 * 3);
+
+        // 代理对占 6 个字节，放不下时两半都不写。
+        let content = string_content(format!("a{}", "🎋".repeat(10923)));
+        assert_eq!(content.len(), 1 + 10922 * 6);
+        assert_eq!(
+            content[content.len() - 6..],
+            [0xed, 0xa0, 0xbc, 0xed, 0xbe, 0x8b]
+        );
+    }
+
+    #[test]
+    fn a_long_string_leaves_the_following_tags_intact() {
+        let tag = Tag::Compound(vec![
+            ("a".to_owned(), Tag::String("x".repeat(70_000))),
+            ("b".to_owned(), Tag::Byte(7)),
+        ]);
+        let bytes = network_bytes(&tag);
+        assert_eq!(bytes[..4], [10, 8, 0, 1]);
+        assert_eq!(bytes[5..7], [0xff, 0xff]);
+        assert_eq!(bytes[7 + 65535..], [1, 0, 1, b'b', 7, 0]);
     }
 
     #[test]

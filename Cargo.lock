@@ -1766,8 +1766,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-blocks"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "tracing",
+]
+
+[[package]]
+name = "mc-bamboo-core"
+version = "0.0.0"
+
+[[package]]
 name = "mc-bamboo-data"
 version = "0.0.0"
+dependencies = [
+ "mc-bamboo-core",
+]
 
 [[package]]
 name = "mc-bamboo-desktop"
@@ -1784,6 +1800,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-game"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "mc-bamboo-nbt",
+ "mc-bamboo-protocol",
+ "mc-bamboo-world",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "mc-bamboo-nbt"
 version = "0.0.0"
 
@@ -1791,6 +1821,7 @@ version = "0.0.0"
 name = "mc-bamboo-protocol"
 version = "0.0.0"
 dependencies = [
+ "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",
  "thiserror 2.0.21",
@@ -1803,8 +1834,8 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "mc-bamboo-data",
+ "mc-bamboo-game",
  "mc-bamboo-protocol",
- "mc-bamboo-world",
  "md-5",
  "serde_json",
  "thiserror 2.0.21",
@@ -1818,6 +1849,9 @@ dependencies = [
 name = "mc-bamboo-vanilla"
 version = "0.0.0"
 dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-core",
+ "mc-bamboo-data",
  "serde",
  "serde_json",
 ]
@@ -1826,6 +1860,7 @@ dependencies = [
 name = "mc-bamboo-world"
 version = "0.0.0"
 dependencies = [
+ "mc-bamboo-core",
  "mc-bamboo-data",
 ]
 
