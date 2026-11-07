@@ -4,7 +4,7 @@
 //! 小方法在 [`state_for_placement`]、[`can_attach_to`]、[`keep_berries`]、[`pick_berries`] 里。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockClass, FieldValue, tags::block_tags};
+use mc_bamboo_data::{Block, BlockClass, FieldValue, registries::fluid, tags::block_tags};
 
 use super::{break_if_unsupported, schedule_break_if_unsupported};
 use crate::{
@@ -14,8 +14,8 @@ use crate::{
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{BERRIES, BlockState, SupportType},
-    world::{Fluid, UPDATE_CLIENTS, World},
+    state::{BERRIES, BlockState, FluidState, SupportType},
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// 字段 `growthDirection`。
@@ -92,7 +92,7 @@ fn can_survive(state: BlockState, world: &World, pos: BlockPos) -> bool {
 /// 字段 `scheduleFluidTicks` 为真的植物泡在水里。
 fn tick_water_if_submerged(block: &Block, world: &mut World, pos: BlockPos) {
     if field_bool(block, "scheduleFluidTicks") {
-        world.schedule_fluid_tick(pos, Fluid::Water);
+        world.schedule_fluid_tick(pos, fluid::WATER);
     }
 }
 
@@ -159,6 +159,28 @@ impl Behaviour for GrowingPlantHead {
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         break_if_unsupported(state, world, pos);
     }
+
+    /// 四种植物里只有 `KelpBlock` 是 `LiquidBlockContainer`，它本来就泡在水里。
+    fn can_place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _fluid: i32,
+        _by_player: bool,
+    ) -> bool {
+        false
+    }
+
+    fn place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        _fluid: FluidState,
+    ) -> bool {
+        false
+    }
 }
 
 /// `GrowingPlantBodyBlock`：头后面的每一格。
@@ -216,6 +238,28 @@ impl Behaviour for GrowingPlantBody {
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         break_if_unsupported(state, world, pos);
+    }
+
+    /// 四种植物里只有 `KelpPlantBlock` 是 `LiquidBlockContainer`，它本来就泡在水里。
+    fn can_place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _fluid: i32,
+        _by_player: bool,
+    ) -> bool {
+        false
+    }
+
+    fn place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        _fluid: FluidState,
+    ) -> bool {
+        false
     }
 }
 

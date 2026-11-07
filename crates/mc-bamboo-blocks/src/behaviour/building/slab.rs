@@ -10,7 +10,7 @@ use crate::{
         common::{default_state, is_water_source, tick_water_if_waterlogged},
     },
     context::PlaceContext,
-    state::{BlockState, SLAB_TYPE, SlabType, WATERLOGGED},
+    state::{BlockState, FluidState, SLAB_TYPE, SlabType, WATERLOGGED},
     world::World,
 };
 
@@ -75,6 +75,29 @@ impl Behaviour for Slab {
     ) -> BlockState {
         tick_water_if_waterlogged(state, world, pos);
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    /// 双层台阶是整格，装不了水。
+    fn can_place_liquid(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        fluid: i32,
+        by_player: bool,
+    ) -> bool {
+        state.get(SLAB_TYPE) != SlabType::Double
+            && Plain.can_place_liquid(state, world, pos, fluid, by_player)
+    }
+
+    fn place_liquid(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        fluid: FluidState,
+    ) -> bool {
+        state.get(SLAB_TYPE) != SlabType::Double && Plain.place_liquid(state, world, pos, fluid)
     }
 }
 

@@ -7,6 +7,10 @@ use mc_bamboo_data::{BlockAncestor, items};
 
 use crate::{
     context::{Actor, BlockHit, UseContext},
+    fluid::{
+        self,
+        bucket::{self, Bucket},
+    },
     level::{Effect, Level},
     placement,
     state::BlockState,
@@ -102,7 +106,10 @@ pub fn use_item(
     hand: Hand,
 ) -> Outcome {
     let mut world = World::new(level, ticks);
-    let result = placement::use_in_air(&mut world, actor, hand);
+    let result = match Bucket::of(actor.item_in(hand)) {
+        Some(bucket) => bucket::use_bucket(&mut world, actor, bucket),
+        None => placement::use_in_air(&mut world, actor, hand),
+    };
     finish(world, result)
 }
 
@@ -126,7 +133,7 @@ pub fn destroy_block(
     finish(world, InteractionResult::Success)
 }
 
-/// 到期的计划刻，`now` 是这一刻的 `gameTime`。
+/// 到期的计划刻，`now` 是这一刻的 `gameTime`。和官方 `ServerLevel.tick` 一样先跑方块的，再跑流体的。
 pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
     ticks.collect_due(now);
     let mut world = World::new(level, ticks);
@@ -135,6 +142,10 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
         if state.block_id() == block {
             state.tick(&mut world, pos);
         }
+    }
+    world.ticks_mut().collect_due_fluids();
+    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        fluid::tick(&mut world, pos, fluid);
     }
     finish(world, InteractionResult::Pass)
 }

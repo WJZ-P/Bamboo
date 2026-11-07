@@ -3,7 +3,7 @@
 //! 烤架上的食物在方块实体里，这里只看手上的东西能不能放上去，放满四个的情况走不到。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, block_maps, blocks, tags::item_tags};
+use mc_bamboo_data::{Block, block_maps, blocks, registries, tags::item_tags};
 
 use crate::{
     behaviour::{
@@ -12,7 +12,9 @@ use crate::{
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{BlockState, HORIZONTAL_FACING, LIT, SIGNAL_FIRE, WATERLOGGED, item_is_tagged},
+    state::{
+        BlockState, FluidState, HORIZONTAL_FACING, LIT, SIGNAL_FIRE, WATERLOGGED, item_is_tagged,
+    },
     world::World,
 };
 
@@ -73,5 +75,22 @@ impl Behaviour for Campfire {
             return InteractionResult::Success;
         }
         InteractionResult::TryEmptyHandInteraction
+    }
+
+    /// 进水的同时熄火。
+    fn place_liquid(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        fluid: FluidState,
+    ) -> bool {
+        if state.get(WATERLOGGED) || !fluid.is(registries::fluid::WATER) {
+            return false;
+        }
+        let doused = state.with(WATERLOGGED, true).with(LIT, false);
+        world.set_block_and_update(pos, doused);
+        world.schedule_fluid_tick(pos, fluid.fluid());
+        true
     }
 }

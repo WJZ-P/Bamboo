@@ -8,6 +8,7 @@ use tracing::error;
 
 use crate::{
     context::BlockHit,
+    fluid::Fluid,
     level::{Effect, Level},
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, SupportType},
@@ -78,11 +79,11 @@ const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
 /// 这个世界没有光照引擎，一律按开阔的白天算。
 const FIXED_BRIGHTNESS: i32 = 15;
 
-/// 流体种类，只用来排流体的计划刻。
+/// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fluid {
-    Water,
-    Lava,
+pub enum ClipFluid {
+    None,
+    SourceOnly,
 }
 
 /// `CollectingNeighborUpdater` 的一项更新。
@@ -385,9 +386,18 @@ impl<'a> World<'a> {
         self.ticks.will_tick_this_tick(pos, id)
     }
 
-    /// `scheduleTick(pos, fluid, delay)`。流体不流动，这里什么也不做。
-    /// 写成函数是为了以后有流体时只改一处。
-    pub const fn schedule_fluid_tick(&mut self, _pos: BlockPos, _fluid: Fluid) {}
+    /// `scheduleTick(pos, fluid, fluid.getTickDelay(level))`，`fluid` 是流体的注册表 ID。
+    pub fn schedule_fluid_tick(&mut self, pos: BlockPos, fluid: i32) {
+        // 空的流体的 `getTickDelay` 是 0，官方也照样排，到期时什么也不做。
+        let delay = Fluid::of_type(fluid).map_or(0, Fluid::tick_delay);
+        self.schedule_fluid_tick_with_delay(pos, fluid, delay);
+    }
+
+    /// `scheduleTick(pos, fluid, delay)`。
+    pub fn schedule_fluid_tick_with_delay(&mut self, pos: BlockPos, fluid: i32, delay: i32) {
+        self.ticks
+            .schedule_fluid(pos, fluid, delay, TickPriority::Normal);
+    }
 
     /// `setBlockAndUpdate`：`setBlock(pos, state, UPDATE_ALL)`。
     pub fn set_block_and_update(&mut self, pos: BlockPos, state: BlockState) -> bool {
@@ -719,20 +729,36 @@ impl<'a> World<'a> {
         self.update_or_destroy(current, updated, pos, flags, limit);
     }
 
-    /// `BlockGetter.clip`：从 `from` 到 `to` 的视线碰到的第一个方块或者水源。
+    /// `BlockGetter.clip`：从 `from` 到 `to` 的视线碰到的第一个方块或者流体，什么也没碰到时是 `None`。
     ///
-    /// 上下文是 `ClipContext.Block.OUTLINE` 和 `ClipContext.Fluid.SOURCE_ONLY`，
-    /// `PlaceOnWaterBlockItem` 只用这一种。没有用 `getInteractionShape`，
-    /// 它只影响点中炼药锅和漏斗内壁时报告的面，结果都是放不下。
-    pub(crate) fn clip_source_fluids(&self, from: Vec3, to: Vec3) -> BlockHit {
-        traverse_blocks(from, to, |pos| self.clip_one_block(pos, from, to))
-            .unwrap_or_else(|| miss(from, to))
+    /// 方块的上下文是 `ClipContext.Block.OUTLINE`，选中框要看玩家主手拿着什么，所以要传 `main_hand`。
+    pub(crate) fn clip(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        fluid: ClipFluid,
+        main_hand: i32,
+    ) -> Option<BlockHit> {
+        traverse_blocks(from, to, |pos| {
+            self.clip_one_block(pos, from, to, fluid, main_hand)
+        })
     }
 
-    fn clip_one_block(&self, pos: BlockPos, from: Vec3, to: Vec3) -> Option<BlockHit> {
+    fn clip_one_block(
+        &self,
+        pos: BlockPos,
+        from: Vec3,
+        to: Vec3,
+        fluid: ClipFluid,
+        main_hand: i32,
+    ) -> Option<BlockHit> {
         let state = self.block_state(pos);
-        let block_hit = shape::clip(&shape::outline_boxes(state, pos), from, to, pos);
-        let fluid_hit = self.clip_fluid(state.fluid(), pos, from, to);
+        let outline = outline_seen_holding(state, pos, main_hand);
+        let block_hit = clip_with_interaction_override(&outline, state, from, to, pos);
+        let fluid_hit = match fluid {
+            ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
+            ClipFluid::None => None,
+        };
         let distance =
             |hit: &Option<BlockHit>| hit.map_or(f64::MAX, |hit| from.distance_to_sqr(hit.location));
         if distance(&block_hit) <= distance(&fluid_hit) {
@@ -741,27 +767,56 @@ impl<'a> World<'a> {
             fluid_hit
         }
     }
+}
 
-    fn clip_fluid(
-        &self,
-        fluid: FluidState,
-        pos: BlockPos,
-        from: Vec3,
-        to: Vec3,
-    ) -> Option<BlockHit> {
-        if !fluid.is_source() {
-            return None;
+/// `EntityCollisionContext` 下的选中框：主手拿着光源方块或者脚手架时，它们的选中框是整格。
+fn outline_seen_holding(state: BlockState, pos: BlockPos, main_hand: i32) -> shape::Boxes {
+    let held_is_own_item =
+        main_hand != mc_bamboo_data::items::AIR && main_hand == state.block().item;
+    if held_is_own_item && (state.is(blocks::LIGHT) || state.is(blocks::SCAFFOLDING)) {
+        let full = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+        return std::borrow::Cow::Owned(vec![full]);
+    }
+    shape::outline_boxes(state, pos)
+}
+
+/// `BlockGetter.clipWithInteractionOverride`：交互形状碰得更早时，用它的面。
+fn clip_with_interaction_override(
+    outline: &[shape::Aabb],
+    state: BlockState,
+    from: Vec3,
+    to: Vec3,
+    pos: BlockPos,
+) -> Option<BlockHit> {
+    let hit = shape::clip(outline, from, to, pos)?;
+    let interaction = shape::clip(&shape::interaction_boxes(state), from, to, pos);
+    match interaction {
+        Some(closer)
+            if from.distance_to_sqr(closer.location) < from.distance_to_sqr(hit.location) =>
+        {
+            Some(BlockHit {
+                face: closer.face,
+                ..hit
+            })
         }
-        let above = self.fluid_state(pos.above());
-        let same_above = fluid.is_water() == above.is_water() && fluid.is_lava() == above.is_lava();
-        let height = if same_above { 1.0 } else { fluid.own_height() };
-        let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(height), 1.0);
-        shape::clip(&[bounds], from, to, pos)
+        _ => Some(hit),
     }
 }
 
-/// `BlockGetter.traverseBlocks` 的未命中结果。
-fn miss(from: Vec3, to: Vec3) -> BlockHit {
+/// `ClipContext.Fluid.SOURCE_ONLY` 的流体形状。
+///
+/// 官方 `FlowingFluid.getShape` 按流体状态缓存，高度是进程里第一次调用时那个位置算出来的，
+/// 和后来的位置无关。这里固定用流体自己的高度，也就是上面没有同种流体时的高度，oracle 用同样的位置预热了缓存。
+fn clip_source(fluid: FluidState, pos: BlockPos, from: Vec3, to: Vec3) -> Option<BlockHit> {
+    if !fluid.is_source() {
+        return None;
+    }
+    let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
+    shape::clip(&[bounds], from, to, pos)
+}
+
+/// `BlockGetter.traverseBlocks` 的未命中结果，类型是 `MISS` 的 `BlockHitResult`。
+pub(crate) fn miss(from: Vec3, to: Vec3) -> BlockHit {
     let delta = from.subtract(to);
     BlockHit {
         pos: BlockPos::containing(to),
@@ -873,7 +928,10 @@ mod tests {
     fn destroyed_positions(effects: &[Effect]) -> Vec<BlockPos> {
         effects
             .iter()
-            .map(|&Effect::Destroyed { pos, .. }| pos)
+            .filter_map(|effect| match *effect {
+                Effect::Destroyed { pos, .. } => Some(pos),
+                Effect::FilledBucket { .. } => None,
+            })
             .collect()
     }
 
@@ -1090,6 +1148,15 @@ mod tests {
         assert_eq!(queued[0].trigger_tick, 3);
     }
 
+    fn clip_empty_handed(
+        world: &World,
+        from: Vec3,
+        to: Vec3,
+        fluid: ClipFluid,
+    ) -> Option<BlockHit> {
+        world.clip(from, to, fluid, items::AIR)
+    }
+
     #[test]
     fn clip_stops_at_the_first_block() {
         let mut level = TestLevel::new();
@@ -1097,8 +1164,9 @@ mod tests {
         level.set(wall, BlockState(blocks::STONE));
         level.set(wall.east(), BlockState(blocks::STONE));
         with_world(&mut level, |world| {
-            let hit =
-                world.clip_source_fluids(Vec3::new(0.5, 64.5, 0.5), Vec3::new(9.5, 64.5, 0.5));
+            let from = Vec3::new(0.5, 64.5, 0.5);
+            let hit = clip_empty_handed(world, from, Vec3::new(9.5, 64.5, 0.5), ClipFluid::None)
+                .expect("视线碰到墙");
             assert_eq!(hit.pos, wall);
             assert_eq!(hit.face, Direction::West);
         });
@@ -1111,23 +1179,64 @@ mod tests {
         let source = BlockPos::new(0, 60, 0);
         level.set(flowing, BlockState::WATER.with(crate::state::LEVEL, 2));
         level.set(source, BlockState::WATER);
+        let (from, to) = (Vec3::new(0.5, 64.5, 0.5), Vec3::new(0.5, 55.5, 0.5));
         with_world(&mut level, |world| {
-            let hit =
-                world.clip_source_fluids(Vec3::new(0.5, 64.5, 0.5), Vec3::new(0.5, 55.5, 0.5));
+            let hit = clip_empty_handed(world, from, to, ClipFluid::SourceOnly).expect("看到水源");
             assert_eq!(hit.pos, source);
             assert_eq!(hit.face, Direction::Up);
+            // 水面的高度是流体自己的高度，不看上面。
+            assert_eq!(hit.location.y, 60.0 + f64::from(8.0_f32 / 9.0));
+            assert_eq!(clip_empty_handed(world, from, to, ClipFluid::None), None);
         });
     }
 
     #[test]
-    fn clip_miss_points_back_at_the_viewer() {
+    fn clip_misses_when_nothing_is_in_the_way() {
         let mut level = TestLevel::new();
         with_world(&mut level, |world| {
+            let from = Vec3::new(0.5, 64.5, 0.5);
             let to = Vec3::new(0.5, 60.5, 0.5);
-            let hit = world.clip_source_fluids(Vec3::new(0.5, 64.5, 0.5), to);
+            assert_eq!(
+                clip_empty_handed(world, from, to, ClipFluid::SourceOnly),
+                None
+            );
+            let hit = miss(from, to);
             assert_eq!(hit.pos, BlockPos::new(0, 60, 0));
             assert_eq!(hit.face, Direction::Up);
             assert_eq!(hit.location, to);
+        });
+    }
+
+    #[test]
+    fn the_inside_of_a_cauldron_reports_its_top_face() {
+        let mut level = TestLevel::new();
+        let cauldron = BlockPos::new(0, 64, 0);
+        level.set(cauldron, BlockState(blocks::CAULDRON));
+        // 斜着看进锅里，射线落在里面的北墙上，交互形状的顶面更近，报告的面换成顶面。
+        let from = Vec3::new(0.5, 66.0, 1.5);
+        let to = Vec3::new(0.5, 64.3, 0.05);
+        with_world(&mut level, |world| {
+            let hit = clip_empty_handed(world, from, to, ClipFluid::None).expect("看到锅");
+            assert_eq!(hit.pos, cauldron);
+            assert_eq!(hit.face, Direction::Up);
+            assert!(hit.location.y < 65.0);
+        });
+    }
+
+    #[test]
+    fn holding_scaffolding_makes_its_outline_a_full_block() {
+        let mut level = TestLevel::new();
+        let scaffolding = BlockPos::new(0, 64, 0);
+        level.set(scaffolding, BlockState(blocks::SCAFFOLDING));
+        // 从四条腿中间横穿过去。
+        let (from, to) = (Vec3::new(-1.0, 64.5, 0.5), Vec3::new(3.0, 64.5, 0.5));
+        with_world(&mut level, |world| {
+            assert_eq!(clip_empty_handed(world, from, to, ClipFluid::None), None);
+            let held = world
+                .clip(from, to, ClipFluid::None, items::SCAFFOLDING)
+                .expect("拿着脚手架时它是整格");
+            assert_eq!(held.face, Direction::West);
+            assert_eq!(held.location.x, 0.0);
         });
     }
 

@@ -12,7 +12,7 @@
 //! | `ScaffoldingBlockItem` | `updatePlacementContext`、`mustSurvive` |
 //! | `SolidBucketItem` | `useOn` 之后换成空桶，创造模式不换 |
 
-use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Hand};
 use mc_bamboo_data::{Item, ItemKind, blocks};
 
 use crate::{
@@ -25,7 +25,7 @@ use crate::{
     interact::InteractionResult,
     shape::CollisionContext,
     state::BlockState,
-    world::{UPDATE_ALL_IMMEDIATE, UPDATE_KNOWN_SHAPE, World},
+    world::{ClipFluid, UPDATE_ALL_IMMEDIATE, UPDATE_KNOWN_SHAPE, World, miss},
 };
 
 /// 脚手架横着最多长这么远。
@@ -49,10 +49,11 @@ pub(crate) fn use_in_air(world: &mut World, actor: &Actor, hand: Hand) -> Intera
     if item.kind != ItemKind::PlaceOnWater {
         return InteractionResult::Pass;
     }
-    let from = actor.eye_position();
-    let view = Vec3::view_vector(actor.yaw, actor.pitch);
-    let to = from.add(view.scale(actor.block_interaction_range));
-    let hit = world.clip_source_fluids(from, to);
+    let (from, to) = actor.view_segment();
+    // 官方不看结果是不是 `MISS`，没碰到东西时也拿视线的终点去放。
+    let hit = world
+        .clip(from, to, ClipFluid::SourceOnly, actor.main_hand)
+        .unwrap_or_else(|| miss(from, to));
     let above = BlockHit {
         pos: hit.pos.above(),
         ..hit
@@ -251,6 +252,7 @@ fn clear_above(world: &mut World, pos: BlockPos) {
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_core::Vec3;
     use mc_bamboo_data::{blocks, items};
 
     use super::*;

@@ -10,9 +10,10 @@ use super::speleothem::{cauldron_fill_fluid, stalactite_tip_above};
 use crate::{
     behaviour::Behaviour,
     context::UseContext,
+    fluid::Fluid,
     interact::InteractionResult,
     state::{BlockState, LEVEL_CAULDRON, block_of_item},
-    world::{Fluid, World},
+    world::World,
 };
 
 /// 三个类的 `useItemOn` 和 `tick` 都在父类 `AbstractCauldronBlock` 里，只有查表的内容不同。

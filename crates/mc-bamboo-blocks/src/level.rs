@@ -31,4 +31,7 @@ pub enum Effect {
         state: BlockState,
         except_initiator: bool,
     },
+    /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
+    /// 物品栏里没有 `item` 时放一个进去。
+    FilledBucket { item: i32 },
 }

@@ -14,7 +14,8 @@ use crate::{
     },
     context::{Actor, PlaceContext},
     state::{
-        AGE_4, BlockState, DOUBLE_BLOCK_HALF, DoubleBlockHalf, HORIZONTAL_FACING, WATERLOGGED,
+        AGE_4, BlockState, DOUBLE_BLOCK_HALF, DoubleBlockHalf, FluidState, HORIZONTAL_FACING,
+        WATERLOGGED,
     },
     world::World,
 };
@@ -144,6 +145,28 @@ impl Behaviour for TallSeagrass {
         player: &Actor,
     ) -> BlockState {
         DoublePlant.player_will_destroy(state, world, pos, player)
+    }
+
+    /// 高海草本来就泡在水里，装不了别的。
+    fn can_place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _fluid: i32,
+        _by_player: bool,
+    ) -> bool {
+        false
+    }
+
+    fn place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        _fluid: FluidState,
+    ) -> bool {
+        false
     }
 }
 

@@ -3,12 +3,12 @@
 use std::collections::{HashSet, VecDeque};
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockAncestor, blocks};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, items};
 
 use crate::{
     behaviour::Behaviour,
-    state::{BlockState, LEVEL, WATERLOGGED},
-    world::{UPDATE_ALL_IMMEDIATE, UPDATE_CLIENTS, UPDATE_LIMIT, World},
+    state::BlockState,
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// `SpongeBlock`。
@@ -19,41 +19,16 @@ const MAX_DEPTH: i32 = 6;
 /// `MAX_COUNT` 加上海绵自己。
 const MAX_VISITED: i32 = 65;
 
-/// `SimpleWaterloggedBlock.pickupBlock`。
-fn drain_waterlogged(state: BlockState, world: &mut World, pos: BlockPos) -> bool {
-    if !state.get(WATERLOGGED) {
-        return false;
-    }
-    world.set_block_and_update(pos, state.with(WATERLOGGED, false));
-    if !state.can_survive(world, pos) {
-        world.destroy_block(pos, UPDATE_LIMIT);
-    }
-    true
-}
-
-/// `BucketPickup.pickupBlock`，`user` 是空的。屏障只让创造模式的玩家舀，海绵不算。
-fn pick_up_water(state: BlockState, world: &mut World, pos: BlockPos) -> bool {
-    if state.is(blocks::BARRIER) {
-        return false;
-    }
-    if state.is_a(BlockAncestor::SimpleWaterloggedBlock) {
-        return drain_waterlogged(state, world, pos);
-    }
-    let picked_up = state.is(blocks::BUBBLE_COLUMN)
-        || state.is_a(BlockAncestor::LiquidBlock) && state.get(LEVEL) == 0;
-    if picked_up {
-        world.set_block(pos, BlockState::AIR, UPDATE_ALL_IMMEDIATE);
-    }
-    picked_up
-}
-
 /// `removeWaterBreadthFirstSearch` 里处理一格的部分：这一格的水没了就继续往外找。
 fn absorb(world: &mut World, pos: BlockPos) -> bool {
     let state = world.block_state(pos);
     if !state.fluid().is_water() {
         return false;
     }
-    if state.is_a(BlockAncestor::BucketPickup) && pick_up_water(state, world, pos) {
+    // 官方用空的 `user` 舀水，所以屏障里的水吸不走。
+    if state.is_a(BlockAncestor::BucketPickup)
+        && state.pickup_block(world, pos, false) != items::AIR
+    {
         return true;
     }
     let removable = state.is_a(BlockAncestor::LiquidBlock)
