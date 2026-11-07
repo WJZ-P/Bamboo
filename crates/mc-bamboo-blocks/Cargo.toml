@@ -1,0 +1,15 @@
+[package]
+name = "mc-bamboo-blocks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Block behaviour of the Bamboo Minecraft server: placement, shape updates, destruction and interaction."
+keywords = ["minecraft"]
+categories = ["games"]
+
+[dependencies]
+mc-bamboo-core.workspace = true
+mc-bamboo-data.workspace = true
+tracing.workspace = true
