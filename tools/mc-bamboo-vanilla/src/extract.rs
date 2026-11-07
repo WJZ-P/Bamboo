@@ -11,6 +11,11 @@ use std::{
 
 use serde::Deserialize;
 
+const BLOCK_REGISTRY: &str = "minecraft:block";
+const ITEM_REGISTRY: &str = "minecraft:item";
+/// 官方数据生成器的输出目录，相对于工作目录。
+const GENERATED_DIR: &str = "generated";
+
 /// 官方报告里一个连接状态的数据包：方向 → 包名 → ID。
 pub type PacketReport = BTreeMap<String, BTreeMap<String, PacketEntry>>;
 
@@ -28,6 +33,10 @@ pub struct Extracted {
     pub synced_registries: Vec<SyncedRegistry>,
     pub tags: Vec<TagGroup>,
     pub block_states: BlockStates,
+    pub blocks: Vec<Block>,
+    pub items: Vec<ExtractedItem>,
+    pub state_tables: StateTables,
+    pub block_maps: BlockMaps,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +78,177 @@ pub struct BlockStates {
     pub defaults: BTreeMap<String, u32>,
 }
 
+/// 一个方块。列表里的位置就是它的注册表 ID。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Block {
+    pub name: String,
+    /// 全部状态的 ID，顺序和官方一致。
+    pub states: Vec<u32>,
+    pub default_state: u32,
+    pub item: i32,
+    pub has_collision: bool,
+    pub has_fluid: bool,
+    pub two_blocks: bool,
+    pub block_entity_type: Option<i32>,
+    /// 官方的类名，比如 `SlabBlock`。
+    pub class: String,
+    /// 这个类、它的父类和方块包里的接口。
+    pub ancestors: Vec<String>,
+    pub properties: Vec<Property>,
+    pub fields: Vec<BlockField>,
+    pub instrument: String,
+    pub dynamic_shape: bool,
+    pub offset: Option<BlockOffset>,
+}
+
+/// 一个方块属性，顺序和取值都是官方 `StateDefinition` 里的。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+pub struct Property {
+    pub name: String,
+    pub values: Vec<String>,
+}
+
+/// 类的一个构造参数或者只读方法的结果。方法名后面带括号。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BlockField {
+    pub name: String,
+    pub value: FieldValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FieldValue {
+    Bool(bool),
+    Int(i32),
+    Float(f32),
+    Double(f64),
+    Block(i32),
+    State(u32),
+    Item(i32),
+    Direction(i32),
+    Tag(String),
+    Name(String),
+}
+
+/// 方块的渲染偏移，形状跟着它走的方块碰撞也和位置有关。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockOffset {
+    pub vertical: bool,
+    pub max_horizontal: f32,
+    pub max_vertical: f32,
+    pub moves_shape: bool,
+}
+
+/// 每个状态一项的表和去重后的形状表。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateTables {
+    pub facts: Vec<u32>,
+    pub fluid: Vec<u8>,
+    pub light_dampening: Vec<u8>,
+    pub collision: Vec<u16>,
+    pub outline: Vec<u16>,
+    pub support: Vec<u16>,
+    /// `placementContext` 下和普通碰撞不同的状态：状态 ID 和形状下标。
+    pub placement_collision: Vec<(u32, u16)>,
+    /// 形状跟着偏移走的状态在几个位置上的 `isFaceSturdy`：状态 ID、坐标和位。
+    pub offset_sturdy_samples: Vec<(u32, i32, i32, i32, u32)>,
+    pub fluid_states: Vec<FluidState>,
+    /// 每个形状的盒子，一个盒子是 `min_x, min_y, min_z, max_x, max_y, max_z`。
+    pub shapes: Vec<Vec<[f64; 6]>>,
+    pub shape_faces: Vec<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FluidState {
+    pub fluid: i32,
+    pub source: bool,
+    pub amount: u8,
+    pub falling: bool,
+    pub legacy_block: u32,
+}
+
+/// 官方写在静态表里的方块对应关系，都是方块注册表 ID。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockMaps {
+    pub flower_pots: Vec<(i32, i32)>,
+    pub candle_cakes: Vec<(i32, i32)>,
+    pub weathering: Vec<(i32, i32)>,
+    pub waxables: Vec<(i32, i32)>,
+    /// 方块、`igniteOdds`、`burnOdds`。
+    pub fire_odds: Vec<(i32, i32, i32)>,
+    /// 物品注册表 ID。
+    pub campfire_inputs: Vec<i32>,
+}
+
+/// `Extractor.java` 导出的物品。物品组件在官方报告里，见 [`Item`]。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedItem {
+    pub name: String,
+    /// 官方的类名，比如 `BlockItem`。
+    pub class: String,
+    pub block: Option<i32>,
+    pub wall_block: Option<i32>,
+    pub attachment: Option<i32>,
+    pub overrides_can_destroy_block: bool,
+}
+
+/// 一个物品。列表里的位置就是它的注册表 ID。
+pub struct Item {
+    pub name: String,
+    pub class: String,
+    pub block: Option<i32>,
+    pub wall_block: Option<i32>,
+    pub attachment: Option<i32>,
+    pub max_stack_size: i32,
+    pub can_destroy_blocks_in_creative: bool,
+    pub consumable: bool,
+    pub compostable: bool,
+    pub jukebox_playable: bool,
+}
+
+/// `reports/minecraft/components/item` 里一个物品的报告，只取用到的组件。
+#[derive(Debug, Deserialize)]
+struct ItemReport {
+    components: ItemComponents,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemComponents {
+    #[serde(rename = "minecraft:max_stack_size")]
+    max_stack_size: i32,
+    #[serde(rename = "minecraft:tool")]
+    tool: Option<ToolComponent>,
+    #[serde(rename = "minecraft:consumable")]
+    consumable: Option<serde_json::Value>,
+    #[serde(rename = "minecraft:compostable")]
+    compostable: Option<serde_json::Value>,
+    #[serde(rename = "minecraft:jukebox_playable")]
+    jukebox_playable: Option<serde_json::Value>,
+}
+
+/// 字段等于默认值 `true` 时报告不写它。
+#[derive(Debug, Deserialize)]
+struct ToolComponent {
+    can_destroy_blocks_in_creative: Option<bool>,
+}
+
+/// `registries.json` 里的一个注册表：条目名 → ID。
+#[derive(Debug, Deserialize)]
+struct RegistryReport {
+    entries: BTreeMap<String, RegistryEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryEntry {
+    protocol_id: usize,
+}
+
 /// 生成代码需要的全部输入。
 pub struct VersionData {
     pub version: Version,
@@ -77,6 +257,12 @@ pub struct VersionData {
     pub synced_registries: Vec<SyncedRegistry>,
     pub tags: Vec<TagGroup>,
     pub block_states: BlockStates,
+    pub blocks: Vec<Block>,
+    pub items: Vec<Item>,
+    pub state_tables: StateTables,
+    pub block_maps: BlockMaps,
+    /// 内置注册表名 → 按 ID 排列的条目。
+    pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
 }
@@ -92,7 +278,20 @@ pub fn run(
     run_extractor(java, work_dir, workspace_root, &extracted_path)?;
 
     let extracted: Extracted = read_json(&extracted_path)?;
-    let packets = read_packet_report(&work_dir.join("generated/reports/packets.json"))?;
+    let reports = work_dir.join(GENERATED_DIR).join("reports");
+    let packets = read_packet_report(&reports.join("packets.json"))?;
+    let builtin_registries = read_registry_report(&reports.join("registries.json"))?;
+    check_registry_order(
+        &builtin_registries,
+        BLOCK_REGISTRY,
+        extracted.blocks.iter().map(|block| &block.name),
+    )?;
+    check_registry_order(
+        &builtin_registries,
+        ITEM_REGISTRY,
+        extracted.items.iter().map(|item| &item.name),
+    )?;
+    let items = read_items(extracted.items, &reports.join("minecraft/components/item"))?;
     Ok(VersionData {
         version: extracted.version,
         known_packs: extracted.known_packs,
@@ -100,24 +299,43 @@ pub fn run(
         synced_registries: extracted.synced_registries,
         tags: extracted.tags,
         block_states: extracted.block_states,
+        blocks: extracted.blocks,
+        items,
+        state_tables: extracted.state_tables,
+        block_maps: extracted.block_maps,
+        builtin_registries,
         packets,
     })
 }
 
 /// 运行官方的数据生成器。它同时会把依赖库解压到工作目录里。
 fn run_reports(java: &str, server_jar: &Path, work_dir: &Path) -> Result<(), String> {
+    // 传入解压出来的内层 jar 时，这条命令进的是服务端入口，什么也不生成，退出码却是 0。
+    // 先删掉旧输出，否则后面的步骤会拿旧报告生成数据，还报告成功。
+    let output = work_dir.join(GENERATED_DIR);
+    if output.exists() {
+        fs::remove_dir_all(&output)
+            .map_err(|error| format!("无法清理 {}：{error}", output.display()))?;
+    }
+
     let status = Command::new(java)
         .current_dir(work_dir)
         .arg("-DbundlerMainClass=net.minecraft.data.Main")
         .arg("-jar")
         .arg(server_jar)
-        .args(["--reports", "--output", "generated"])
+        .args(["--reports", "--output", GENERATED_DIR])
         .status()
         .map_err(|error| format!("无法运行 {java}：{error}"))?;
-    if status.success() {
+    if !status.success() {
+        return Err(format!("官方数据生成器退出失败：{status}"));
+    }
+    if output.is_dir() {
         Ok(())
     } else {
-        Err(format!("官方数据生成器退出失败：{status}"))
+        Err(format!(
+            "{} 没有生成报告，这里要用官方下载的 server.jar，不是解压出来的内层 jar",
+            server_jar.display()
+        ))
     }
 }
 
@@ -169,8 +387,116 @@ fn read_packet_report(path: &Path) -> Result<BTreeMap<String, PacketReport>, Str
     read_json(path)
 }
 
+fn read_registry_report(path: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let report: BTreeMap<String, RegistryReport> = read_json(path)?;
+    report
+        .into_iter()
+        .map(|(name, registry)| {
+            let entries = entries_by_id(&name, registry)?;
+            Ok((name, entries))
+        })
+        .collect()
+}
+
+/// 按 ID 排列条目。生成的代码把条目的位置当作 ID，所以 ID 必须从 0 开始连续。
+fn entries_by_id(name: &str, registry: RegistryReport) -> Result<Vec<String>, String> {
+    let mut entries: Vec<_> = registry.entries.into_iter().collect();
+    entries.sort_by_key(|(_, entry)| entry.protocol_id);
+    if entries
+        .iter()
+        .enumerate()
+        .any(|(id, (_, entry))| entry.protocol_id != id)
+    {
+        return Err(format!("{name} 的 ID 不是从 0 开始连续的"));
+    }
+    Ok(entries.into_iter().map(|(entry, _)| entry).collect())
+}
+
+/// `Extractor.java` 是按遍历顺序导出的，这里确认这个顺序就是注册表 ID。
+fn check_registry_order<'a>(
+    registries: &BTreeMap<String, Vec<String>>,
+    registry: &str,
+    names: impl Iterator<Item = &'a String>,
+) -> Result<(), String> {
+    let entries = registries
+        .get(registry)
+        .ok_or_else(|| format!("注册表报告里没有 {registry}"))?;
+    if names.eq(entries) {
+        Ok(())
+    } else {
+        Err(format!("{registry} 的导出顺序和注册表报告不一致"))
+    }
+}
+
+/// 给物品补上组件报告里的数据。
+fn read_items(extracted: Vec<ExtractedItem>, reports: &Path) -> Result<Vec<Item>, String> {
+    extracted
+        .into_iter()
+        .map(|item| {
+            let file = item.name.strip_prefix("minecraft:").unwrap_or(&item.name);
+            let report: ItemReport = read_json(&reports.join(format!("{file}.json")))?;
+            let components = report.components;
+            let tool_allows = components
+                .tool
+                .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
+            Ok(Item {
+                max_stack_size: components.max_stack_size,
+                can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
+                consumable: components.consumable.is_some(),
+                compostable: components.compostable.is_some(),
+                jukebox_playable: components.jukebox_playable.is_some(),
+                name: item.name,
+                class: item.class,
+                block: item.block,
+                wall_block: item.wall_block,
+                attachment: item.attachment,
+            })
+        })
+        .collect()
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
     serde_json::from_str(&text).map_err(|error| format!("{} 格式不对：{error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry(entries: &[(&str, usize)]) -> RegistryReport {
+        let entries = entries
+            .iter()
+            .map(|&(name, protocol_id)| (name.to_owned(), RegistryEntry { protocol_id }))
+            .collect();
+        RegistryReport { entries }
+    }
+
+    #[test]
+    fn sorts_registry_entries_by_id() {
+        let entries = entries_by_id("test", registry(&[("a", 1), ("b", 0)]));
+        assert_eq!(entries, Ok(vec!["b".to_owned(), "a".to_owned()]));
+    }
+
+    #[test]
+    fn rejects_registry_ids_that_are_not_positions() {
+        assert!(entries_by_id("test", registry(&[("a", 0), ("b", 2)])).is_err());
+        assert!(entries_by_id("test", registry(&[("a", 1)])).is_err());
+    }
+
+    #[test]
+    fn export_order_has_to_match_the_report() {
+        let first = "a".to_owned();
+        let second = "b".to_owned();
+        let report = BTreeMap::from([("test".to_owned(), vec![first.clone(), second.clone()])]);
+
+        let check = |registry, names: &[&String]| {
+            check_registry_order(&report, registry, names.iter().copied())
+        };
+        assert_eq!(check("test", &[&first, &second]), Ok(()));
+        assert!(check("test", &[&second, &first]).is_err());
+        assert!(check("test", &[&first]).is_err());
+        assert!(check("missing", &[&first, &second]).is_err());
+    }
 }

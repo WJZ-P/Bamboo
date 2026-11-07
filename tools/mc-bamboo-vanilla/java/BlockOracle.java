@@ -1,0 +1,3191 @@
+import com.google.common.collect.ImmutableList;
+import com.mojang.authlib.GameProfile;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import java.io.BufferedWriter;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintStream;
+import java.io.Writer;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Random;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.concurrent.ForkJoinPool;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import net.minecraft.SharedConstants;
+import net.minecraft.advancements.CriterionTriggerInstance;
+import net.minecraft.advancements.triggers.CriterionTrigger;
+import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.Holder;
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.LayeredRegistryAccess;
+import net.minecraft.core.NonNullList;
+import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.particles.ExplosionParticleInfo;
+import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.resources.RegistryDataLoader;
+import net.minecraft.resources.Identifier;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.server.PlayerAdvancements;
+import net.minecraft.server.RegistryLayer;
+import net.minecraft.server.ReloadableServerRegistries;
+import net.minecraft.server.ReloadableServerResources;
+import net.minecraft.server.dedicated.DedicatedPlayerList;
+import net.minecraft.server.dedicated.DedicatedServer;
+import net.minecraft.server.ServerScoreboard;
+import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerPlayerGameMode;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.repository.PackRepository;
+import net.minecraft.server.packs.repository.ServerPacksSource;
+import net.minecraft.server.packs.resources.CloseableResourceManager;
+import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.server.permissions.PermissionSet;
+import net.minecraft.server.players.NameAndId;
+
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.stats.Stat;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.TagLoader;
+import net.minecraft.util.AbortableIterationConsumer;
+import net.minecraft.util.RandomSource;
+import net.minecraft.util.random.WeightedList;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.DifficultyInstance;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.MenuProvider;
+import net.minecraft.world.attribute.EnvironmentAttributeSystem;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageSources;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.PositionMoveRotation;
+import net.minecraft.world.entity.Relative;
+import net.minecraft.world.entity.ai.attributes.AttributeMap;
+import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
+import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
+import net.minecraft.world.entity.player.Abilities;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.player.PlayerEquipment;
+import net.minecraft.world.food.FoodData;
+import net.minecraft.world.inventory.PlayerEnderChestContainer;
+import net.minecraft.world.flag.FeatureFlagSet;
+import net.minecraft.world.flag.FeatureFlags;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.GameMasterBlockItem;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemCooldowns;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.PlaceOnWaterBlockItem;
+import net.minecraft.world.item.StandingAndWallBlockItem;
+import net.minecraft.world.item.context.UseOnContext;
+import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.ExplosionDamageCalculator;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.StructureManager;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.block.BaseEntityBlock;
+import net.minecraft.world.level.block.BaseRailBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CakeBlock;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.ChiseledBookShelfBlock;
+import net.minecraft.world.level.block.ComposterBlock;
+import net.minecraft.world.level.block.DirectionalBlock;
+import net.minecraft.world.level.block.EntityBlock;
+import net.minecraft.world.level.block.FlowerPotBlock;
+import net.minecraft.world.level.block.HorizontalDirectionalBlock;
+import net.minecraft.world.level.block.JukeboxBlock;
+import net.minecraft.world.level.block.LecternBlock;
+import net.minecraft.world.level.block.VegetationBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ChiseledBookShelfBlockEntity;
+import net.minecraft.world.level.block.entity.JukeboxBlockEntity;
+import net.minecraft.world.level.block.entity.LecternBlockEntity;
+import net.minecraft.world.level.block.piston.PistonBaseBlock;
+import net.minecraft.world.level.block.piston.PistonHeadBlock;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.ChestType;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
+import net.minecraft.world.level.block.state.properties.PistonType;
+import net.minecraft.world.level.border.WorldBorder;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
+import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.entity.EntityInLevelCallback;
+import net.minecraft.world.level.entity.EntityTypeTest;
+import net.minecraft.world.level.entity.LevelEntityGetter;
+import net.minecraft.world.level.gameevent.GameEvent;
+import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.levelgen.PositionalRandomFactory;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
+import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
+import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.ticks.LevelChunkTicks;
+import net.minecraft.world.ticks.LevelTicks;
+import net.minecraft.world.ticks.ScheduledTick;
+import sun.misc.Unsafe;
+
+/**
+ * 方块行为的 oracle：官方代码出题、给答案，tools/mc-bamboo-vanilla/src/oracle.rs 用 mc-bamboo-blocks 跑同样的题来比较。
+ *
+ * 和 Extractor 一样只在 JVM 里加载官方类，不启动服务端，不涉及 EULA。假世界 FakeLevel 继承 ServerLevel，假玩家 FakePlayer 继承
+ * ServerPlayer，都用 Unsafe.allocateInstance 跳过构造函数。方块和物品的代码、ServerPlayerGameMode、CollectingNeighborUpdater、
+ * 标签、配方、战利品表全是官方的，假的只有方块的存储和世界外的一切。
+ *
+ * 运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
+ *
+ *     java -cp <target/vanilla 下全部 jar> BlockOracle.java [--seed S] [--cases N] [--only X] [--avoid A,B] [--case I] [--explain]
+ *
+ *     --seed S    默认 1。参数相同时两次运行的输出逐字节相同。
+ *     --cases N   题目总数，默认 10000。题目在 place、use、destroy、tick 之间按 3:3:1:1 轮转，方块和物品也是轮转的，
+ *                 20 万题时每个方块物品至少放几十次，每个方块类至少几百题。
+ *     --only X    只出和 X 有关的题。X 是方块 ID、物品 ID（minecraft: 可省略）或者方块类、物品类的简单名，继承链上的类都算，
+ *                 比如 StairBlock、DoubleHighBlockItem。X 是不能放置的物品（flint_and_steel、ShearsItem）时只出 use 题，
+ *                 拿着它点各种方块。
+ *     --avoid A,B 这些类（方块类的简单名）的方块不进场景，手里也不拿会放下它们的物品，题目的主角不受影响。水永远可以出现：
+ *                 第 4 章要求的场景里有水，它不改变世界。新版本多了没移植的类时，用它单独检查一个类。
+ *                 花盆和堆肥桶例外：站着用主手点中它们时可以拿着这些物品，这时点击一定被方块接住，轮不到物品放置。
+ *     --case I    只跑第 I 题，用来重现一个失败的场景。--seed、--only 和 --avoid 要和原来相同。
+ *     --explain   每个 case 行多一个 text 字段，把场景和变化写成人能读的文字。它不属于格式，读取时忽略。
+ *
+ * JDK 26 启动时会警告修改了 final 字段，这是给假世界补字段造成的，没有影响。加 --enable-final-field-mutation=ALL-UNNAMED 能消除，
+ * 这个选项 Java 25 不认识，所以启动命令里没有加。
+ *
+ * stdout 只有 JSON 行，大缓冲写出。日志和结尾的汇总都在 stderr：每个类每种题的数量、改变世界的题数、skip 的原因、异常、
+ * 随机数调用点、没有放下过的类和原因。
+ *
+ *
+ * 一、行的格式
+ *
+ * 一行一个 JSON 对象，type 区分四种行。第一行是 header，最后一行是 end，读不到 end 说明进程中途死了。
+ *
+ *     {"type":"header","version":"26.3","protocol":777,"seed":1,"cases":200000,"maxChainedUpdates":1000000,"gameTime":100000,"minY":-64,"maxY":319}
+ *     {"type":"skip","id":7,"kind":"place","block":"minecraft:kelp","class":"KelpBlock","reason":"random:..."}
+ *     {"type":"case","id":3,"block":"minecraft:oak_door","class":"DoorBlock","scene":[...],"action":{...},"outcome":{...}}
+ *     {"type":"end","cases":199153,"skipped":847}
+ *
+ * case 行：
+ *
+ *     id        题号，从 0 开始，--case 用它。
+ *     block     这道题针对的方块。放置题是物品放的主方块，比如 torch 的题 block 是 minecraft:torch，放下的可能是 wall_torch。
+ *     class     block 的 getClass().getSimpleName()，按类汇总用它。
+ *     scene     [[x,y,z,state],...] 题目开始时的世界。state 是全局方块状态 ID，和 mc_bamboo_data::blocks 的常量是同一套数字。
+ *               列表以外的格子全是空气，y 超出 minY..=maxY 的格子是 void_air，超出世界的格子写不进去。顺序没有含义。
+ *     action    题目，见下面。
+ *     outcome   官方的答案，见下面。
+ *
+ * action：
+ *
+ *     kind      "place"、"use"、"destroy"、"tick"。
+ *     main      主手物品的注册表 ID，空手是 "minecraft:air"。物品是默认组件的 ItemStack，数量 1。
+ *     off       副手物品，同上。
+ *     hand      "main" 或 "off"，这次动作用哪只手。destroy 和 tick 永远是 "main"。
+ *     itemClass 这只手里物品的 Java 类名，比如 BlockItem、ShearsItem、AirItem。
+ *     itemUseOn 这只手里的物品不是方块物品，但是有自己的 useOn：类覆盖了 Item.useOn，或者有 block_transformer 组件（斧子去皮、
+ *               锄头耕地这些，它们的类就是 Item）。方块自己不处理点击时结果来自物品，这部分不在 mc-bamboo-blocks 的范围里。
+ *     pos       [x,y,z]。place、use 是点击的方块（BlockHitResult.getBlockPos），destroy、tick 是目标方块。
+ *     face      只有 place、use 有。点击的面："down"、"up"、"north"、"south"、"west"、"east"。
+ *     loc       只有 place、use 有。[x,y,z] 精确的点击位置（BlockHitResult.getLocation），double 的位，见第二节。
+ *               它就是 pos + float 光标，和官方解码 use_item_on 包的算法相同，float 的光标用 (loc - pos) as f32 能还原。
+ *     inside    只有 place、use 有。BlockHitResult.isInside。
+ *     actor     [x,y,z] 玩家的脚，double 的位。
+ *     yaw       玩家的 yRot，float 的位，已经在 [-180, 180) 里，这是服务端收到后 wrapDegrees 的结果。头的朝向和身体相同。
+ *     pitch     玩家的 xRot，float 的位，在 [-90, 90] 里。
+ *     sneak     蹲着，也就是 isSecondaryUseActive。
+ *     box       [minX,minY,minZ,maxX,maxY,maxZ] 玩家的碰撞盒，double 的位。蹲下时是蹲姿的高度。
+ *     others    [box,...] 场景里其他玩家的碰撞盒。玩家自己和他们都挡路：isUnobstructed 要和 box 和 others 里的每个盒子比。
+ *
+ * 官方比较盒子时走 Shapes.joinIsNotEmpty，重叠小于 1e-7 不算重叠。
+ *
+ * outcome：
+ *
+ *     result    place、use：useItemOn 返回的 InteractionResult，"success"（PREDICTED）、"success_server"（SERVER_ONLY）、
+ *               "consume"（NONE），这三种都是 InteractionResult.Success，括号里是它的 swingSource。还有 "fail"、"pass"。
+ *               "try_empty_hand" 只在 useItemOn 内部出现，理论上不会写出来，读到时照样比较。
+ *               destroy：destroyBlock 返回 true 是 "destroyed"，false 是 "refused"（比如拿着剑、GameMaster 方块）。
+ *               tick：固定是 "ticked"。
+ *     changes   [[x,y,z,state],...] 结束时和 scene 不同的每一格的最终状态，变成空气时 state 是 0。顺序没有含义。
+ *     destroyed [[x,y,z,state,excluded],...] levelEvent(2001) 按发生顺序的列表。state 是事件的数据，也就是被破坏的方块状态。
+ *               excluded 为 true 表示 source 是发起的玩家，官方广播时跳过他，对应 Effect::Destroyed 的 except_initiator。
+ *     ticks     [[x,y,z,"block"|"fluid",id,delay,priority],...] 按发生顺序排的新计划刻，同一格同一类型重复的已经去掉，和
+ *               LevelChunkTicks 的规则相同。id 是方块或流体的注册表 ID。delay 相对当前游戏时间，-1 表示延迟是随机的，
+ *               见第四节。priority 是 TickPriority.getValue()，0 是 NORMAL。流体的计划刻只是记录，流体流动不在范围内。
+ *     itemReached  place、use：方块没有吃掉这次点击，轮到了手里的物品（ServerPlayerGameMode 走到了 itemStack.useOn）。
+ *               和 itemUseOn 同时为真时结果来自物品自己的 useOn，不在 mc-bamboo-blocks 的范围里。别的题永远是假。
+ *     spawned   [entity type id,...] 这次动作生成的实体，比如掉落物。只是记录，不用比较。
+ *     rng       碰过随机数但是结果不依赖它，比如开门的音调。只是记录，不用比较。
+ *
+ * skip 行没有答案，表示这题只能排除。reason 的前缀：
+ *
+ *     random:<调用点>        换随机数结果就变，见第四节。
+ *     random-loop:<调用点>   极端的随机数让官方代码取了十万次以上。
+ *     random-positional:<调用点>  官方要一个按位置派生的随机源，目前没有出现过。
+ *     explosion:<调用点>     走到了 level.explode，比如主世界用重生锚。
+ *     worldgen:<调用点>      走到了世界生成，比如骨粉催熟树苗。
+ *     impossible:<调用点>    残缺的多格结构让官方代码读了别的方块没有的属性，真实世界到不了这种状态。
+ *     exception:<类名>       官方代码抛了别的异常。这是假世界的 bug，正常的运行里不该有，异常的栈写在 stderr。
+ *
+ *
+ * 二、数字
+ *
+ * 整数是 JSON 数字。double 和 float 必须原样保留，写成 IEEE 754 位的十六进制字符串，高位在前：
+ * double 固定 16 位，float 固定 8 位。不用十进制，serde_json 默认的浮点解析不保证往返。
+ *
+ *     f64::from_bits(u64::from_str_radix(text, 16)?)
+ *     f32::from_bits(u32::from_str_radix(text, 16)?)
+ *
+ *
+ * 三、假世界的设定
+ *
+ * 在 Rust 里重放时 Level 和 Actor 要和这些一致。
+ *
+ *     玩家      创造模式，没有任何权限，canUseGameMasterBlocks 是假，所以 GameMaster 方块放不了也破坏不了。没有在飞。
+ *     世界      主世界，平原，白天，晴天，普通难度，默认游戏规则，游戏时间固定，世界边界是默认值。
+ *     亮度      getRawBrightness、getBrightness 恒为 15。
+ *     信号      getSignal、getDirectSignal、hasNeighborSignal、getBestNeighborSignal、getControlInputSignal 恒为 0 或假。
+ *               方块自己状态里的 powered、power 不会产生信号。
+ *     方块实体  场景加载时新建，内容为空。有三种方块的状态是内容的镜像，内容按状态补齐：chiseled_bookshelf 的书、
+ *               jukebox 的唱片、lectern 的书。
+ *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
+ *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
+ *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
+ *     计划刻    场景开始时没有排队的计划刻。这次动作排的不运行。tick 题只运行目标方块自己的 BlockState.tick 一次，
+ *               和 ServerLevel.tickBlock 一样，不运行别的方块，也不运行流体。
+ *     方块事件  level.blockEvent 丢弃，活塞不会真的动。
+ *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
+ *               updateNeighborsAt、updateNeighbourShapes，邻居队列是真正的 CollectingNeighborUpdater，
+ *               链长限制是 header 里的 maxChainedUpdates。
+ *
+ *
+ * 四、随机数
+ *
+ * level.getRandom() 和 player.getRandom() 是同一个计数的随机源。一题没有碰过它时答案就是唯一的。碰过时换全取最小值、全取最大值、
+ * 另一个种子再跑三遍：result、changes、destroyed、ticks（不看 delay）有一项不同就写 skip，全部相同才写 case，rng 是真。
+ * 只有 delay 不同时那一条写成 -1，比较时不看它。stderr 的汇总列出每个调用点改变和没有改变结果的次数。
+ *
+ *
+ * 五、怎么重放一题
+ *
+ *     1. 按 scene 建世界，方块只写入，不触发任何连锁。
+ *     2. place、use：use_item_on(actor, hand, BlockHit { pos, face, loc, inside })。两种题走同一个入口，区别只在出题时想考什么。
+ *        destroy：destroy_block(actor, pos)。tick：直接运行 pos 这一格的方块的 tick。
+ *     3. 比较 result、changes、destroyed 和 ticks 里范围内的条目。
+ *
+ * 官方的 useItemOn 和 destroyBlock 是直接调用的。够距检查、方块高度检查、序列号在 ServerGamePacketListenerImpl 里，不在这里，
+ * 所以 pos 可以在任何地方，loc 也不一定在玩家看得到的面上。世界最顶层的方块点上面（目标格已经出界）的情况是真的会发生的，题目里有。
+ */
+public final class BlockOracle {
+    /** 假世界的游戏时间。计划刻输出的是相对它的延迟，这个值写在 header 里。 */
+    private static final long GAME_TIME = 100_000L;
+    /** 官方 server.properties 的默认值。 */
+    private static final int MAX_CHAINED_UPDATES = 1_000_000;
+    private static final int FULL_BRIGHTNESS = 15;
+    private static final int LEVEL_EVENT_BLOCK_DESTROYED = 2001;
+    private static final int SEA_LEVEL = 63;
+    private static final int OUTPUT_BUFFER = 4 << 20;
+    private static final int MAX_RANDOM_DRAWS = 100_000;
+    private static final Direction[] DIRECTIONS = Direction.values();
+    private static final Direction[] HORIZONTAL = {Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST};
+
+    private static final Unsafe UNSAFE = loadUnsafe();
+    private static final Map<String, Field> FIELDS = new HashMap<>();
+
+    public static void main(String[] args) {
+        PrintStream log = System.err;
+        try {
+            run(args, log);
+        } catch (Exception error) {
+            error.printStackTrace(log);
+            // 官方的后台线程不是守护线程，不主动退出进程就不会结束。
+            System.exit(1);
+        }
+        System.exit(0);
+    }
+
+    private static void run(String[] args, PrintStream log) throws Exception {
+        FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
+        // 官方日志默认写 stdout。日志框架初始化时记下 System.out，要抢在这之前换掉，否则日志会混进 JSON。
+        System.setOut(log);
+        Options options = Options.parse(args);
+
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
+        repository.reload();
+        repository.setSelected(List.of("vanilla"));
+        try (CloseableResourceManager resources =
+                        new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
+                Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8), OUTPUT_BUFFER)) {
+            Official official = Official.load(resources);
+            new Oracle(official, options, out, log).run();
+        }
+    }
+
+    private static Unsafe loadUnsafe() {
+        try {
+            Field field = Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (Unsafe) field.get(null);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    /** 不运行构造函数：真正的 ServerLevel 和 ServerPlayer 要一个完整的服务端才能构造。 */
+    @SuppressWarnings("unchecked")
+    private static <T> T allocate(Class<T> type) {
+        try {
+            return (T) UNSAFE.allocateInstance(type);
+        } catch (InstantiationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static Field field(Class<?> owner, String name) {
+        return FIELDS.computeIfAbsent(owner.getName() + '#' + name, key -> {
+            try {
+                Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException error) {
+                throw new IllegalStateException(error);
+            }
+        });
+    }
+
+    private static void set(Class<?> owner, Object target, String name, Object value) {
+        try {
+            field(owner, name).set(target, value);
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T read(Class<?> owner, Object target, String name) {
+        try {
+            return (T) field(owner, name).get(target);
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static <T> T pick(Random random, List<T> list) {
+        return list.get(random.nextInt(list.size()));
+    }
+
+    private static boolean chance(Random random, int percent) {
+        return random.nextInt(100) < percent;
+    }
+
+    private static String id(Block block) {
+        return BuiltInRegistries.BLOCK.getKey(block).toString();
+    }
+
+    private static String id(Item item) {
+        return BuiltInRegistries.ITEM.getKey(item).toString();
+    }
+
+    private static String className(Block block) {
+        return block.getClass().getSimpleName();
+    }
+
+    private enum Kind {
+        PLACE("place"),
+        USE("use"),
+        DESTROY("destroy"),
+        TICK("tick");
+
+        private final String label;
+
+        Kind(String label) {
+            this.label = label;
+        }
+    }
+
+    private record Options(long seed, int cases, String only, Set<String> avoid, int single, boolean explain) {
+        private static final String USAGE =
+                "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>] [--case I] [--explain]";
+
+        static Options parse(String[] args) {
+            long seed = 1;
+            int cases = 10_000;
+            String only = null;
+            Set<String> avoid = Set.of();
+            int single = -1;
+            boolean explain = false;
+            for (int i = 0; i < args.length; i++) {
+                switch (args[i]) {
+                    case "--seed" -> seed = Long.parseLong(value(args, ++i));
+                    case "--cases" -> cases = Integer.parseInt(value(args, ++i));
+                    case "--only" -> only = value(args, ++i);
+                    case "--avoid" -> avoid = Set.of(value(args, ++i).split(","));
+                    case "--case" -> single = Integer.parseInt(value(args, ++i));
+                    case "--explain" -> explain = true;
+                    default -> throw new IllegalArgumentException(USAGE);
+                }
+            }
+            return new Options(seed, cases, only, avoid, single, explain);
+        }
+
+        private static String value(String[] args, int index) {
+            if (index >= args.length) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            return args[index];
+        }
+    }
+
+    /** 这个场景只能排除，不能当作答案。抛出后这一行写成 skip。 */
+    private static final class SkipCase extends RuntimeException {
+        private final String reason;
+
+        SkipCase(String reason) {
+            super(reason, null, false, false);
+            this.reason = reason;
+        }
+    }
+
+    /** 官方资源和假服务端，所有场景共用。 */
+    private static final class Official {
+        final RegistryAccess registries;
+        final Holder<DimensionType> overworld;
+        final Holder<Biome> plains;
+        final BiomeManager biomes;
+        final DamageSources damageSources;
+        final FakeServer server;
+        final GameRules gameRules = new GameRules(FeatureFlags.DEFAULT_FLAGS);
+        final WorldBorder border = new WorldBorder();
+        final RandomSource soundSeeds = RandomSource.create(0);
+        final GameProfile profile = new GameProfile(new UUID(0, 1), "Oracle");
+        final PlayerAdvancements advancements = allocate(NoAdvancements.class);
+        final ServerGamePacketListenerImpl connection = allocate(SilentConnection.class);
+        final FakeChunkSource chunkSource = allocate(FakeChunkSource.class);
+        final StructureManager structures = allocate(NoStructures.class);
+        final ServerScoreboard scoreboard;
+        EnvironmentAttributeSystem attributes;
+
+        private Official(ReloadableServerResources managers) {
+            this.registries = (RegistryAccess) managers.fullRegistries().lookup();
+            this.overworld = registries.lookupOrThrow(Registries.DIMENSION_TYPE).getOrThrow(BuiltinDimensionTypes.OVERWORLD);
+            this.plains = registries.lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.PLAINS);
+            this.biomes = new BiomeManager((x, y, z) -> plains, 0L);
+            this.damageSources = new DamageSources(registries);
+            this.server = FakeServer.create(managers, gameRules);
+            this.scoreboard = new ServerScoreboard(server);
+        }
+
+        /** 和 WorldLoader.load 相同的流程，只是不加载维度：标签、物品组件、配方、战利品表都是真的。 */
+        static Official load(CloseableResourceManager resources) throws Exception {
+            LayeredRegistryAccess<RegistryLayer> initial = RegistryLayer.createRegistryAccess();
+            List<Registry.PendingTags<?>> staticTags =
+                    TagLoader.loadTagsForExistingRegistries(resources, initial.getLayer(RegistryLayer.STATIC));
+            RegistryAccess.Frozen context = initial.getAccessForLoading(RegistryLayer.WORLD);
+            List<HolderLookup.RegistryLookup<?>> lookups = TagLoader.buildUpdatedLookups(context, staticTags);
+            RegistryAccess.Frozen world = RegistryDataLoader
+                    .load(resources, lookups, RegistryDataLoader.WORLD_REGISTRIES, ForkJoinPool.commonPool())
+                    .join();
+            LayeredRegistryAccess<RegistryLayer> layers = initial.replaceFrom(RegistryLayer.WORLD, world);
+            ReloadableServerResources managers = ReloadableServerResources
+                    .loadResources(resources, layers, staticTags, FeatureFlags.DEFAULT_FLAGS,
+                            Commands.CommandSelection.DEDICATED, LevelBasedPermissionSet.GAMEMASTER,
+                            ForkJoinPool.commonPool(), Runnable::run)
+                    .get();
+            managers.updateComponentsAndStaticRegistryTags();
+            // MinecraftServer 的构造函数做这一步。不做的话营火的 RecipePropertySet.CAMPFIRE_INPUT 是空的。
+            managers.getRecipeManager().finalizeRecipeLoading(FeatureFlags.DEFAULT_FLAGS);
+
+            Official official = new Official(managers);
+            FakeLevel sample = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.LOW, 0));
+            // 只有维度和生物群系这两层。时间线和天气依赖时钟，假世界永远是白天的晴天。
+            official.attributes = EnvironmentAttributeSystem.builder().addStaticLayers(sample).build();
+            return official;
+        }
+    }
+
+    private static final class FakeServer extends DedicatedServer {
+        private ReloadableServerResources managers;
+        private GameRules rules;
+        private DedicatedPlayerList players;
+
+        private FakeServer() {
+            super(null, null, null, null, null, null, null, null, null, null);
+        }
+
+        static FakeServer create(ReloadableServerResources managers, GameRules rules) {
+            FakeServer server = allocate(FakeServer.class);
+            server.managers = managers;
+            server.rules = rules;
+            server.players = allocate(FakePlayerList.class);
+            return server;
+        }
+
+        @Override
+        public RecipeManager getRecipeManager() {
+            return managers.getRecipeManager();
+        }
+
+        @Override
+        public ReloadableServerRegistries.Holder reloadableRegistries() {
+            return managers.fullRegistries();
+        }
+
+        @Override
+        public GameRules getGameRules() {
+            return rules;
+        }
+
+        @Override
+        public boolean isUnderSpawnProtection(ServerLevel level, BlockPos pos, Player player) {
+            return false;
+        }
+
+        /** 只有掉落物的战利品表用它，掉落物不进答案。 */
+        @Override
+        public RandomSource getRandomSequence(Identifier key) {
+            return RandomSource.create(0L);
+        }
+
+        @Override
+        public DedicatedPlayerList getPlayerList() {
+            return players;
+        }
+    }
+
+    private static final class FakePlayerList extends DedicatedPlayerList {
+        private FakePlayerList() {
+            super(null, null, null);
+        }
+
+        @Override
+        public boolean isOp(NameAndId nameAndId) {
+            return false;
+        }
+    }
+
+    /** 走到世界生成或者要真正的区块时排除，这些都在 Bamboo 的范围外。 */
+    private static final class FakeChunkSource extends ServerChunkCache {
+        private FakeChunkSource() {
+            super(null, null, null, null, null, null, 0, 0, false, null);
+        }
+
+        @Override
+        public ChunkGenerator getGenerator() {
+            throw new SkipCase("worldgen:" + OracleRandom.callSite());
+        }
+
+        @Override
+        public void sendToTrackingPlayers(Entity entity, Packet<? super ClientGamePacketListener> packet) {
+        }
+
+        @Override
+        public void sendToTrackingPlayersAndSelf(Entity entity, Packet<? super ClientGamePacketListener> packet) {
+        }
+    }
+
+    /** level.findBlocksIn 按区块段扫描。这个区块只把段转给假世界，扫描顺序还是官方的。 */
+    private static final class FakeChunk extends LevelChunk {
+        private FakeLevel level;
+        private int chunkX;
+        private int chunkZ;
+
+        private FakeChunk() {
+            super(null, null);
+        }
+
+        static FakeChunk of(FakeLevel level, int chunkX, int chunkZ) {
+            FakeChunk chunk = allocate(FakeChunk.class);
+            chunk.level = level;
+            chunk.chunkX = chunkX;
+            chunk.chunkZ = chunkZ;
+            return chunk;
+        }
+
+        @Override
+        public int getSectionIndexFromSectionY(int sectionY) {
+            return sectionY;
+        }
+
+        @Override
+        public LevelChunkSection getSection(int sectionY) {
+            return FakeSection.of(level, new BlockPos(chunkX << 4, sectionY << 4, chunkZ << 4));
+        }
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            return level.getBlockState(pos);
+        }
+
+        @Override
+        public FluidState getFluidState(BlockPos pos) {
+            return level.getFluidState(pos);
+        }
+
+        @Override
+        public void markPosForPostProcessing(BlockPos pos) {
+        }
+    }
+
+    private static final class FakeSection extends LevelChunkSection {
+        private FakeLevel level;
+        private BlockPos origin;
+
+        private FakeSection() {
+            super(null, null);
+        }
+
+        static FakeSection of(FakeLevel level, BlockPos origin) {
+            FakeSection section = allocate(FakeSection.class);
+            section.level = level;
+            section.origin = origin;
+            return section;
+        }
+
+        @Override
+        public boolean maybeHas(Predicate<BlockState> predicate) {
+            return true;
+        }
+
+        @Override
+        public BlockState getBlockState(int sectionX, int sectionY, int sectionZ) {
+            return level.getBlockState(origin.offset(sectionX, sectionY, sectionZ));
+        }
+    }
+
+    /** 假世界里没有结构。 */
+    private static final class NoStructures extends StructureManager {
+        private NoStructures() {
+            super(null, null, null);
+        }
+
+        @Override
+        public StructureStart getStructureWithPieceAt(BlockPos pos, HolderSet<Structure> structures) {
+            return StructureStart.INVALID_START;
+        }
+
+        @Override
+        public StructureStart getStructureWithPieceAt(BlockPos pos, Predicate<Holder<Structure>> predicate) {
+            return StructureStart.INVALID_START;
+        }
+    }
+
+    /** 发给客户端的包都丢掉：告示牌编辑界面、传送、方块更新。 */
+    private static final class SilentConnection extends ServerGamePacketListenerImpl {
+        private SilentConnection() {
+            super(null, null, null, null);
+        }
+
+        @Override
+        public void send(Packet<?> packet) {
+        }
+
+        @Override
+        public void teleport(PositionMoveRotation destination, Set<Relative> relatives) {
+        }
+    }
+
+    /** 没有任何进度在监听，官方的触发器看到空表就直接返回。 */
+    private static final class NoAdvancements extends PlayerAdvancements {
+        private NoAdvancements() {
+            super(null, null, null, null, null);
+        }
+
+        @Override
+        public <T extends CriterionTriggerInstance> Map<PlayerAdvancements.TriggerInstanceKey, T> getTriggerMapForType(CriterionTrigger<T> type) {
+            return null;
+        }
+    }
+
+    private static final class FixedLevelData implements LevelData {
+        @Override
+        public LevelData.RespawnData getRespawnData() {
+            return LevelData.RespawnData.DEFAULT;
+        }
+
+        @Override
+        public long getGameTime() {
+            return GAME_TIME;
+        }
+
+        @Override
+        public boolean isHardcore() {
+            return false;
+        }
+
+        @Override
+        public Difficulty getDifficulty() {
+            return Difficulty.NORMAL;
+        }
+
+        @Override
+        public boolean isDifficultyLocked() {
+            return false;
+        }
+    }
+
+    /**
+     * 记录每一次取随机数。假世界的 level.getRandom() 和 player.getRandom() 都是它。
+     *
+     * <p>大多数用到随机数的地方只是音调和粒子，所以不能一碰到就排除。碰过随机数的场景会换几种随机数重跑，
+     * 世界的结果变了才算依赖随机。LOW 和 HIGH 是两个极端，能抓住 nextInt(5) == 0 这种小概率分支。
+     */
+    private static final class OracleRandom implements RandomSource {
+        private static final StackWalker WALKER = StackWalker.getInstance();
+        private static final int MAX_SITES = 8;
+        private static final Set<String> PLUMBING = Set.of("net.minecraft.server.level.ServerLevel", "net.minecraft.world.level.Level",
+                "net.minecraft.world.level.LevelReader", "net.minecraft.world.level.LevelAccessor");
+
+        enum Mode {
+            SEEDED,
+            LOW,
+            HIGH
+        }
+
+        private final Mode mode;
+        private final Random seeded;
+        private final Set<String> sites = new LinkedHashSet<>();
+        private int draws;
+
+        OracleRandom(Mode mode, long seed) {
+            this.mode = mode;
+            this.seeded = new Random(seed);
+        }
+
+        private void touch() {
+            if (++draws > MAX_RANDOM_DRAWS) {
+                throw new SkipCase("random-loop:" + callSite());
+            }
+            if (sites.size() < MAX_SITES) {
+                sites.add(callSite());
+            }
+        }
+
+        private static boolean isCaller(String name) {
+            return name.startsWith("net.minecraft.") && !name.startsWith("net.minecraft.util.") && !PLUMBING.contains(name);
+        }
+
+        private static String callSite() {
+            return WALKER.walk(frames -> frames
+                    .filter(frame -> isCaller(frame.getClassName()))
+                    .findFirst()
+                    .map(frame -> {
+                        String name = frame.getClassName();
+                        return name.substring(name.lastIndexOf('.') + 1) + "." + frame.getMethodName();
+                    })
+                    .orElse("unknown"));
+        }
+
+        @Override
+        public RandomSource fork() {
+            touch();
+            return this;
+        }
+
+        @Override
+        public PositionalRandomFactory forkPositional() {
+            throw new SkipCase("random-positional:" + callSite());
+        }
+
+        @Override
+        public void setSeed(long seed) {
+            touch();
+        }
+
+        @Override
+        public int nextInt() {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextInt();
+                case LOW -> 0;
+                case HIGH -> Integer.MAX_VALUE;
+            };
+        }
+
+        @Override
+        public int nextInt(int bound) {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextInt(bound);
+                case LOW -> 0;
+                case HIGH -> bound - 1;
+            };
+        }
+
+        @Override
+        public long nextLong() {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextLong();
+                case LOW -> 0L;
+                case HIGH -> Long.MAX_VALUE;
+            };
+        }
+
+        @Override
+        public boolean nextBoolean() {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextBoolean();
+                case LOW -> false;
+                case HIGH -> true;
+            };
+        }
+
+        @Override
+        public float nextFloat() {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextFloat();
+                case LOW -> 0.0F;
+                case HIGH -> Math.nextDown(1.0F);
+            };
+        }
+
+        @Override
+        public double nextDouble() {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextDouble();
+                case LOW -> 0.0;
+                case HIGH -> Math.nextDown(1.0);
+            };
+        }
+
+        @Override
+        public double nextGaussian() {
+            touch();
+            return switch (mode) {
+                case SEEDED -> seeded.nextGaussian();
+                case LOW -> -3.0;
+                case HIGH -> 3.0;
+            };
+        }
+    }
+
+    /** 真正的 LevelTicks 按区块存队列，这里全放进一个官方的 LevelChunkTicks，同一格同一类型去重的规则不变。 */
+    private static final class RecordingTicks<T> extends LevelTicks<T> {
+        private final LevelChunkTicks<T> container = new LevelChunkTicks<>();
+        private final List<ScheduledTick<T>> accepted = new ArrayList<>();
+
+        RecordingTicks() {
+            super(chunk -> true);
+        }
+
+        @Override
+        public void schedule(ScheduledTick<T> tick) {
+            int before = container.count();
+            container.schedule(tick);
+            if (container.count() > before) {
+                accepted.add(tick);
+            }
+        }
+
+        @Override
+        public boolean hasScheduledTick(BlockPos pos, T type) {
+            return container.hasScheduledTick(pos, type);
+        }
+
+        @Override
+        public boolean willTickThisTick(BlockPos pos, T type) {
+            return false;
+        }
+    }
+
+    private record Destroyed(BlockPos pos, int state, boolean initiatorExcluded) {
+    }
+
+    /**
+     * 假世界。继承 ServerLevel 是为了让 level instanceof ServerLevel 的分支和真实服务端一样走。
+     * 构造函数没有运行，这里覆盖掉所有会碰到空字段的方法。
+     */
+    private static final class FakeLevel extends ServerLevel {
+        private Official official;
+        private Long2ObjectOpenHashMap<BlockState> blocks;
+        private Long2ObjectOpenHashMap<BlockEntity> blockEntities;
+        private RecordingTicks<Block> recordedBlockTicks;
+        private RecordingTicks<Fluid> recordedFluidTicks;
+        private List<ServerPlayer> playersInWorld;
+        private List<Destroyed> destroyed;
+        private List<String> spawned;
+        private LevelData data;
+        private LevelEntityGetter<Entity> entityGetter;
+        private int lastEntityId = 100;
+
+        private FakeLevel() {
+            super(null, null, null, null, null, null, false, 0L, null, false);
+        }
+
+        static FakeLevel create(Official official, OracleRandom random) {
+            FakeLevel level = allocate(FakeLevel.class);
+            level.official = official;
+            level.blocks = new Long2ObjectOpenHashMap<>();
+            level.blockEntities = new Long2ObjectOpenHashMap<>();
+            level.recordedBlockTicks = new RecordingTicks<>();
+            level.recordedFluidTicks = new RecordingTicks<>();
+            level.playersInWorld = new ArrayList<>();
+            level.destroyed = new ArrayList<>();
+            level.spawned = new ArrayList<>();
+            level.data = new FixedLevelData();
+            level.entityGetter = new PlayerEntities(level.playersInWorld);
+            set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, MAX_CHAINED_UPDATES));
+            set(Level.class, level, "random", random);
+            set(Level.class, level, "soundSeedGenerator", official.soundSeeds);
+            set(Level.class, level, "dimensionTypeRegistration", official.overworld);
+            set(Level.class, level, "dimension", Level.OVERWORLD);
+            set(Level.class, level, "registryAccess", official.registries);
+            set(Level.class, level, "damageSources", official.damageSources);
+            set(ServerLevel.class, level, "players", new ArrayList<ServerPlayer>());
+            return level;
+        }
+
+        /** 直接写入场景，不触发任何连锁。方块实体和区块加载后一样已经存在。 */
+        void load(Long2ObjectMap<BlockState> scene) {
+            blocks.putAll(scene);
+            for (Long2ObjectMap.Entry<BlockState> entry : scene.long2ObjectEntrySet()) {
+                if (entry.getValue().hasBlockEntity()) {
+                    BlockEntity entity = getBlockEntity(BlockPos.of(entry.getLongKey()));
+                    if (entity != null) {
+                        syncContents(entity, entry.getValue());
+                    }
+                }
+            }
+        }
+
+        /** 这几种方块的状态是内容的镜像。场景里只有状态，内容要补成一致，否则右键的结果是真实世界到不了的。 */
+        private static void syncContents(BlockEntity entity, BlockState state) {
+            switch (entity) {
+                case ChiseledBookShelfBlockEntity shelf -> {
+                    NonNullList<ItemStack> items = read(ChiseledBookShelfBlockEntity.class, shelf, "items");
+                    for (int slot = 0; slot < items.size(); slot++) {
+                        if (state.getValue(ChiseledBookShelfBlock.SLOT_OCCUPIED_PROPERTIES.get(slot))) {
+                            items.set(slot, new ItemStack(Items.BOOK));
+                        }
+                    }
+                }
+                case JukeboxBlockEntity jukebox -> {
+                    if (state.getValue(JukeboxBlock.HAS_RECORD)) {
+                        set(JukeboxBlockEntity.class, jukebox, "item", new ItemStack(Items.MUSIC_DISC_13));
+                    }
+                }
+                case LecternBlockEntity lectern -> {
+                    if (state.getValue(LecternBlock.HAS_BOOK)) {
+                        set(LecternBlockEntity.class, lectern, "book", new ItemStack(Items.WRITABLE_BOOK));
+                    }
+                }
+                default -> {
+                }
+            }
+        }
+
+        void addPlayer(FakePlayer player) {
+            playersInWorld.add(player);
+        }
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            if (!isInValidBounds(pos)) {
+                return Blocks.VOID_AIR.defaultBlockState();
+            }
+            BlockState state = blocks.get(pos.asLong());
+            return state != null ? state : Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public FluidState getFluidState(BlockPos pos) {
+            return isInValidBounds(pos) ? getBlockState(pos).getFluidState() : Fluids.EMPTY.defaultFluidState();
+        }
+
+        /** Level.setBlock。 */
+        @Override
+        public boolean setBlock(BlockPos pos, BlockState blockState, int updateFlags, int updateLimit) {
+            if (!isInValidBounds(pos)) {
+                return false;
+            }
+            Block block = blockState.getBlock();
+            BlockState oldState = setBlockInChunk(pos, blockState, updateFlags);
+            if (oldState == null) {
+                return false;
+            }
+            if (getBlockState(pos) == blockState) {
+                if ((updateFlags & 1) != 0) {
+                    updateNeighborsAt(pos, oldState.getBlock());
+                    if (blockState.hasAnalogOutputSignal()) {
+                        updateNeighbourForOutputSignal(pos, block);
+                    }
+                }
+                if ((updateFlags & 16) == 0 && updateLimit > 0) {
+                    int neighbourUpdateFlags = updateFlags & -34;
+                    oldState.updateIndirectNeighbourShapes(this, pos, neighbourUpdateFlags, updateLimit - 1);
+                    blockState.updateNeighbourShapes(this, pos, neighbourUpdateFlags, updateLimit - 1);
+                    blockState.updateIndirectNeighbourShapes(this, pos, neighbourUpdateFlags, updateLimit - 1);
+                }
+            }
+            return true;
+        }
+
+        /** LevelChunk.setBlockState，去掉光照、高度图和区块段。 */
+        private BlockState setBlockInChunk(BlockPos pos, BlockState state, int flags) {
+            BlockState oldState = getBlockState(pos);
+            if (oldState == state) {
+                return null;
+            }
+            blocks.put(pos.asLong(), state);
+
+            Block newBlock = state.getBlock();
+            boolean blockChanged = !oldState.is(newBlock);
+            boolean movedByPiston = (flags & 64) != 0;
+            boolean sideEffects = (flags & 256) == 0;
+            if (blockChanged && oldState.hasBlockEntity() && !state.shouldChangedStateKeepBlockEntity(oldState)) {
+                if (sideEffects) {
+                    BlockEntity blockEntity = getBlockEntity(pos);
+                    if (blockEntity != null) {
+                        blockEntity.preRemoveSideEffects(pos, oldState);
+                    }
+                }
+                removeBlockEntity(pos);
+            }
+            if ((blockChanged || newBlock instanceof BaseRailBlock)
+                    && ((flags & 1) != 0 || movedByPiston)) {
+                oldState.affectNeighborsAfterRemoval(this, pos, movedByPiston);
+            }
+            if (!getBlockState(pos).is(newBlock)) {
+                return null;
+            }
+            if ((flags & 512) == 0) {
+                state.onPlace(this, pos, oldState, movedByPiston);
+            }
+            if (state.hasBlockEntity() && getBlockState(pos).is(newBlock)) {
+                updateBlockEntity(pos, state, newBlock);
+            }
+            return oldState;
+        }
+
+        @SuppressWarnings("deprecation")
+        private void updateBlockEntity(BlockPos pos, BlockState state, Block newBlock) {
+            BlockEntity blockEntity = existingBlockEntity(pos);
+            if (blockEntity != null && !blockEntity.isValidBlockState(state)) {
+                removeBlockEntity(pos);
+                blockEntity = null;
+            }
+            if (blockEntity == null) {
+                blockEntity = ((EntityBlock) newBlock).newBlockEntity(pos.immutable(), state);
+                if (blockEntity != null) {
+                    setBlockEntity(blockEntity);
+                }
+            } else {
+                blockEntity.setBlockState(state);
+            }
+        }
+
+        private BlockEntity existingBlockEntity(BlockPos pos) {
+            BlockEntity blockEntity = blockEntities.get(pos.asLong());
+            if (blockEntity != null && blockEntity.isRemoved()) {
+                blockEntities.remove(pos.asLong());
+                return null;
+            }
+            return blockEntity;
+        }
+
+        /** 不算掉落。 */
+        @Override
+        public boolean destroyBlock(BlockPos pos, boolean dropResources, Entity breaker, int updateLimit) {
+            return super.destroyBlock(pos, false, breaker, updateLimit);
+        }
+
+        /** Level.getBlockEntity，也就是 EntityCreationType.IMMEDIATE：没有时按当前状态建一个。 */
+        @Override
+        public BlockEntity getBlockEntity(BlockPos pos) {
+            if (!isInValidBounds(pos)) {
+                return null;
+            }
+            BlockEntity blockEntity = blockEntities.get(pos.asLong());
+            if (blockEntity == null) {
+                BlockState state = getBlockState(pos);
+                if (state.hasBlockEntity()) {
+                    blockEntity = ((EntityBlock) state.getBlock()).newBlockEntity(pos.immutable(), state);
+                    if (blockEntity != null) {
+                        setBlockEntity(blockEntity);
+                    }
+                }
+                return blockEntity;
+            }
+            if (blockEntity.isRemoved()) {
+                blockEntities.remove(pos.asLong());
+                return null;
+            }
+            return blockEntity;
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public void setBlockEntity(BlockEntity blockEntity) {
+            BlockPos pos = blockEntity.getBlockPos();
+            if (!isInValidBounds(pos)) {
+                return;
+            }
+            BlockState state = getBlockState(pos);
+            if (!state.hasBlockEntity()) {
+                return;
+            }
+            if (state != blockEntity.getBlockState()) {
+                if (!blockEntity.getType().isValid(state)) {
+                    return;
+                }
+                blockEntity.setBlockState(state);
+            }
+            blockEntity.setLevel(this);
+            blockEntity.clearRemoved();
+            BlockEntity previous = blockEntities.put(pos.asLong(), blockEntity);
+            if (previous != null && previous != blockEntity) {
+                previous.setRemoved();
+            }
+        }
+
+        @Override
+        public void removeBlockEntity(BlockPos pos) {
+            BlockEntity removed = blockEntities.remove(pos.asLong());
+            if (removed != null) {
+                removed.setRemoved();
+            }
+        }
+
+        @Override
+        public void blockEntityChanged(BlockPos pos) {
+        }
+
+        @Override
+        public LevelTicks<Block> getBlockTicks() {
+            return recordedBlockTicks;
+        }
+
+        @Override
+        public LevelTicks<Fluid> getFluidTicks() {
+            return recordedFluidTicks;
+        }
+
+        @Override
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (type == LEVEL_EVENT_BLOCK_DESTROYED) {
+                destroyed.add(new Destroyed(pos.immutable(), data, source instanceof Player));
+            }
+        }
+
+        @Override
+        public void globalLevelEvent(int type, BlockPos pos, int data) {
+        }
+
+        @Override
+        public void gameEvent(Holder<GameEvent> gameEvent, Vec3 position, GameEvent.Context context) {
+        }
+
+        @Override
+        public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int updateFlags) {
+        }
+
+        @Override
+        public void updatePOIOnBlockStateChange(BlockPos pos, BlockState oldState, BlockState newState) {
+        }
+
+        @Override
+        public void playSeededSound(Entity except, double x, double y, double z, Holder<SoundEvent> sound, SoundSource source,
+                float volume, float pitch, long seed) {
+        }
+
+        @Override
+        public void playSeededSound(Entity except, Entity sourceEntity, Holder<SoundEvent> sound, SoundSource source, float volume,
+                float pitch, long seed) {
+        }
+
+        @Override
+        public void blockEvent(BlockPos pos, Block block, int b0, int b1) {
+        }
+
+        @Override
+        public void destroyBlockProgress(int id, BlockPos blockPos, int progress) {
+        }
+
+        @Override
+        public void broadcastEntityEvent(Entity entity, byte event) {
+        }
+
+        @Override
+        public void broadcastDamageEvent(Entity entity, DamageSource source) {
+        }
+
+        @Override
+        public void explode(Entity source, DamageSource damageSource, ExplosionDamageCalculator damageCalculator, double x, double y,
+                double z, float r, boolean fire, Level.ExplosionInteraction interactionType, ParticleOptions smallExplosionParticles,
+                ParticleOptions largeExplosionParticles, WeightedList<ExplosionParticleInfo> blockParticles,
+                Holder<SoundEvent> explosionSound) {
+            throw new SkipCase("explosion:" + OracleRandom.callSite());
+        }
+
+        @Override
+        public boolean addFreshEntity(Entity entity) {
+            spawned.add(EntityType.getKey(entity.getType()).toString());
+            return true;
+        }
+
+        @Override
+        public int getNextEntityId() {
+            return ++lastEntityId;
+        }
+
+        @Override
+        protected LevelEntityGetter<Entity> getEntities() {
+            return entityGetter;
+        }
+
+        @Override
+        public Collection<EnderDragonPart> dragonParts() {
+            return List.of();
+        }
+
+        @Override
+        public List<ServerPlayer> players() {
+            return playersInWorld;
+        }
+
+        @Override
+        public ServerChunkCache getChunkSource() {
+            return official.chunkSource;
+        }
+
+        @Override
+        public ChunkAccess getChunk(int chunkX, int chunkZ, ChunkStatus status, boolean loadOrGenerate) {
+            return FakeChunk.of(this, chunkX, chunkZ);
+        }
+
+        @Override
+        public StructureManager structureManager() {
+            return official.structures;
+        }
+
+        @Override
+        public DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            return new DifficultyInstance(getDifficulty(), GAME_TIME, 0L, 0.0F);
+        }
+
+        /** 场景里的玩家总在目标附近。 */
+        @Override
+        public boolean canSpreadFireAround(BlockPos pos) {
+            return true;
+        }
+
+        @Override
+        public ServerScoreboard getScoreboard() {
+            return official.scoreboard;
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public boolean hasChunk(int chunkX, int chunkZ) {
+            return true;
+        }
+
+        @Override
+        public boolean isLoaded(BlockPos pos) {
+            return isInValidBounds(pos);
+        }
+
+        @Override
+        public BlockGetter getChunkForCollisions(int chunkX, int chunkZ) {
+            return this;
+        }
+
+        @Override
+        public int getBrightness(LightLayer layer, BlockPos pos) {
+            return FULL_BRIGHTNESS;
+        }
+
+        @Override
+        public int getRawBrightness(BlockPos pos, int darkening) {
+            return FULL_BRIGHTNESS;
+        }
+
+        @Override
+        public int getDirectSignal(BlockPos pos, Direction direction) {
+            return 0;
+        }
+
+        @Override
+        public int getDirectSignalTo(BlockPos pos) {
+            return 0;
+        }
+
+        @Override
+        public int getControlInputSignal(BlockPos pos, Direction direction, boolean onlyDiodes) {
+            return 0;
+        }
+
+        @Override
+        public boolean hasSignal(BlockPos pos, Direction direction) {
+            return false;
+        }
+
+        @Override
+        public int getSignal(BlockPos pos, Direction direction) {
+            return 0;
+        }
+
+        @Override
+        public int getBestOwnOrNeighbourSignal(BlockPos pos) {
+            return 0;
+        }
+
+        @Override
+        public boolean hasNeighborSignal(BlockPos blockPos) {
+            return false;
+        }
+
+        @Override
+        public int getBestNeighborSignal(BlockPos pos) {
+            return 0;
+        }
+
+        @Override
+        public LevelData getLevelData() {
+            return data;
+        }
+
+        @Override
+        public FeatureFlagSet enabledFeatures() {
+            return FeatureFlags.DEFAULT_FLAGS;
+        }
+
+        @Override
+        public GameRules getGameRules() {
+            return official.gameRules;
+        }
+
+        @Override
+        public WorldBorder getWorldBorder() {
+            return official.border;
+        }
+
+        @Override
+        public DedicatedServer getServer() {
+            return official.server;
+        }
+
+        @Override
+        public EnvironmentAttributeSystem environmentAttributes() {
+            return official.attributes;
+        }
+
+        @Override
+        public BiomeManager getBiomeManager() {
+            return official.biomes;
+        }
+
+        @Override
+        public Holder<Biome> getNoiseBiome(int quartX, int quartY, int quartZ) {
+            return official.plains;
+        }
+
+        @Override
+        public Holder<Biome> getUncachedNoiseBiome(int quartX, int quartY, int quartZ) {
+            return official.plains;
+        }
+
+        @Override
+        public int getSeaLevel() {
+            return SEA_LEVEL;
+        }
+
+        @Override
+        public long getSeed() {
+            return 0L;
+        }
+
+        @Override
+        public RecipeManager recipeAccess() {
+            return official.server.getRecipeManager();
+        }
+    }
+
+    /** 世界里只有玩家这一种实体，查询直接遍历。 */
+    private record PlayerEntities(List<ServerPlayer> players) implements LevelEntityGetter<Entity> {
+        @Override
+        public Entity get(int id) {
+            return players.stream().filter(player -> player.getId() == id).findFirst().orElse(null);
+        }
+
+        @Override
+        public Entity get(UUID id) {
+            return players.stream().filter(player -> player.getUUID().equals(id)).findFirst().orElse(null);
+        }
+
+        @Override
+        public Iterable<Entity> getAll() {
+            return new ArrayList<>(players);
+        }
+
+        @Override
+        public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AbortableIterationConsumer<U> consumer) {
+            for (ServerPlayer player : players) {
+                U cast = type.tryCast(player);
+                if (cast != null && consumer.accept(cast).shouldAbort()) {
+                    return;
+                }
+            }
+        }
+
+        @Override
+        public void get(AABB bb, Consumer<Entity> output) {
+            for (ServerPlayer player : players) {
+                if (player.getBoundingBox().intersects(bb)) {
+                    output.accept(player);
+                }
+            }
+        }
+
+        @Override
+        public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AABB bb, AbortableIterationConsumer<U> consumer) {
+            for (ServerPlayer player : players) {
+                if (player.getBoundingBox().intersects(bb)) {
+                    U cast = type.tryCast(player);
+                    if (cast != null && consumer.accept(cast).shouldAbort()) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /** 创造模式的官方 ServerPlayerGameMode，流程一行不改。 */
+    private static final class CreativeGameMode extends ServerPlayerGameMode {
+        CreativeGameMode(ServerPlayer player) {
+            super(player);
+            setGameModeForPlayer(GameType.CREATIVE, null);
+        }
+    }
+
+    /** 假玩家。继承 ServerPlayer 的理由和 FakeLevel 一样。 */
+    private static final class FakePlayer extends ServerPlayer {
+        private static final StackWalker CALLER = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+
+        private PlayerAdvancements advancements;
+        private boolean reachedItem;
+
+        private FakePlayer() {
+            super(null, null, null, null);
+        }
+
+        static FakePlayer create(FakeLevel level, Official official, RandomSource random, int id, Vec3 position, float yaw, float pitch,
+                boolean sneak) {
+            FakePlayer player = allocate(FakePlayer.class);
+            player.assembleEntity(level, official, random, id);
+            player.assemblePlayer(official);
+            player.moveTo(position, yaw, pitch, sneak);
+            level.addPlayer(player);
+            return player;
+        }
+
+        private void assembleEntity(FakeLevel level, Official official, RandomSource random, int id) {
+            set(Entity.class, this, "type", EntityTypes.PLAYER);
+            set(Entity.class, this, "level", level);
+            set(Entity.class, this, "id", id);
+            set(Entity.class, this, "random", random);
+            set(Entity.class, this, "position", Vec3.ZERO);
+            set(Entity.class, this, "blockPosition", BlockPos.ZERO);
+            set(Entity.class, this, "chunkPosition", ChunkPos.ZERO);
+            set(Entity.class, this, "deltaMovement", Vec3.ZERO);
+            set(Entity.class, this, "levelCallback", EntityInLevelCallback.NULL);
+            set(Entity.class, this, "passengers", ImmutableList.of());
+            set(Entity.class, this, "dimensions", EntityTypes.PLAYER.getDimensions());
+            set(Entity.class, this, "uuid", new UUID(0, id));
+            set(Entity.class, this, "stringUUID", new UUID(0, id).toString());
+            firstTick = true;
+            blocksBuilding = true;
+            set(LivingEntity.class, this, "attributes", new AttributeMap(DefaultAttributes.getSupplier(EntityTypes.PLAYER)));
+            set(LivingEntity.class, this, "activeEffects", new HashMap<>());
+            set(Entity.class, this, "entityData", defaultEntityData());
+            setHealth(getMaxHealth());
+        }
+
+        private SynchedEntityData defaultEntityData() {
+            SynchedEntityData.Builder builder = new SynchedEntityData.Builder(this);
+            builder.define(DATA_SHARED_FLAGS_ID, (byte) 0);
+            builder.define(accessor("DATA_AIR_SUPPLY_ID"), getMaxAirSupply());
+            builder.define(accessor("DATA_CUSTOM_NAME_VISIBLE"), false);
+            builder.define(accessor("DATA_CUSTOM_NAME"), Optional.<Component>empty());
+            builder.define(accessor("DATA_SILENT"), false);
+            builder.define(accessor("DATA_NO_GRAVITY"), false);
+            builder.define(DATA_POSE, Pose.STANDING);
+            builder.define(accessor("DATA_TICKS_FROZEN"), 0);
+            defineSynchedData(builder);
+            return builder.build();
+        }
+
+        private static <T> EntityDataAccessor<T> accessor(String name) {
+            return read(Entity.class, null, name);
+        }
+
+        private void assemblePlayer(Official official) {
+            PlayerEquipment playerEquipment = new PlayerEquipment(this);
+            set(LivingEntity.class, this, "equipment", playerEquipment);
+            set(Player.class, this, "inventory", new Inventory(this, playerEquipment));
+            set(Player.class, this, "abilities", new Abilities());
+            set(Player.class, this, "cooldowns", new ItemCooldowns());
+            set(Player.class, this, "gameProfile", official.profile);
+            enderChestInventory = new PlayerEnderChestContainer();
+            foodData = new FoodData();
+            set(ServerPlayer.class, this, "server", official.server);
+            set(ServerPlayer.class, this, "gameMode", new CreativeGameMode(this));
+            advancements = official.advancements;
+            connection = official.connection;
+        }
+
+        private void moveTo(Vec3 position, float yaw, float pitch, boolean sneak) {
+            if (sneak) {
+                setShiftKeyDown(true);
+                setPose(Pose.CROUCHING);
+            }
+            setPos(position.x, position.y, position.z);
+            setYRot(yaw);
+            setXRot(pitch);
+            yRotO = yaw;
+            xRotO = pitch;
+            yHeadRot = yaw;
+            yHeadRotO = yaw;
+            yBodyRot = yaw;
+            yBodyRotO = yaw;
+        }
+
+        void hold(Item main, Item off) {
+            equipment.set(EquipmentSlot.MAINHAND, main == Items.AIR ? ItemStack.EMPTY : new ItemStack(main));
+            equipment.set(EquipmentSlot.OFFHAND, off == Items.AIR ? ItemStack.EMPTY : new ItemStack(off));
+        }
+
+        /** ServerPlayerGameMode 只在 useItemOn 轮到物品的时候问这个，这时方块已经没有吃掉这次点击。 */
+        @Override
+        public boolean hasInfiniteMaterials() {
+            if (CALLER.getCallerClass() == ServerPlayerGameMode.class) {
+                reachedItem = true;
+            }
+            return super.hasInfiniteMaterials();
+        }
+
+        /** 没有权限系统的服务端：GameMaster 方块放不了也破坏不了。 */
+        @Override
+        public PermissionSet permissions() {
+            return PermissionSet.NO_PERMISSIONS;
+        }
+
+        @Override
+        public PlayerAdvancements getAdvancements() {
+            return advancements;
+        }
+
+        @Override
+        public void awardStat(Stat<?> stat, int count) {
+        }
+
+        @Override
+        public void resetStat(Stat<?> stat) {
+        }
+
+        @Override
+        public OptionalInt openMenu(MenuProvider provider) {
+            return OptionalInt.empty();
+        }
+
+        @Override
+        public void closeContainer() {
+        }
+
+        @Override
+        public void sendSystemMessage(Component message) {
+        }
+
+        @Override
+        public void sendSystemMessage(Component message, boolean overlay) {
+        }
+
+        @Override
+        public void sendOverlayMessage(Component message) {
+        }
+
+        @Override
+        public void sendBuildLimitMessage(boolean isTooHigh, int limit) {
+        }
+
+        @Override
+        public void onUpdateAbilities() {
+        }
+    }
+
+    private record ScheduledBlockTick(BlockPos pos, boolean fluid, String type, int delay, int priority) {
+        boolean sameExceptDelay(ScheduledBlockTick other) {
+            return pos.equals(other.pos) && fluid == other.fluid && type.equals(other.type) && priority == other.priority;
+        }
+    }
+
+    /** 官方给出的答案。 */
+    private static final class Outcome {
+        final String result;
+        final Long2ObjectOpenHashMap<BlockState> changes = new Long2ObjectOpenHashMap<>();
+        final List<Destroyed> destroyed;
+        final List<ScheduledBlockTick> ticks = new ArrayList<>();
+        final List<String> spawned;
+        final boolean itemReached;
+        boolean touchedRandom;
+
+        Outcome(String result, FakeLevel level, Long2ObjectMap<BlockState> scene, boolean itemReached) {
+            this.result = result;
+            this.itemReached = itemReached;
+            this.destroyed = level.destroyed;
+            this.spawned = level.spawned;
+            collectChanges(level, scene);
+            collectTicks(level);
+        }
+
+        private void collectChanges(FakeLevel level, Long2ObjectMap<BlockState> scene) {
+            BlockState air = Blocks.AIR.defaultBlockState();
+            for (Long2ObjectMap.Entry<BlockState> entry : level.blocks.long2ObjectEntrySet()) {
+                if (entry.getValue() != scene.getOrDefault(entry.getLongKey(), air)) {
+                    changes.put(entry.getLongKey(), entry.getValue());
+                }
+            }
+        }
+
+        private void collectTicks(FakeLevel level) {
+            for (ScheduledTick<Block> tick : level.recordedBlockTicks.accepted) {
+                ticks.add(new ScheduledBlockTick(tick.pos(), false, id(tick.type()), delay(tick), tick.priority().getValue()));
+            }
+            for (ScheduledTick<Fluid> tick : level.recordedFluidTicks.accepted) {
+                String fluid = BuiltInRegistries.FLUID.getKey(tick.type()).toString();
+                ticks.add(new ScheduledBlockTick(tick.pos(), true, fluid, delay(tick), tick.priority().getValue()));
+            }
+        }
+
+        private static int delay(ScheduledTick<?> tick) {
+            return (int) (tick.triggerTick() - GAME_TIME);
+        }
+
+        boolean sameWorld(Outcome other) {
+            if (!result.equals(other.result) || !changes.equals(other.changes) || !destroyed.equals(other.destroyed)
+                    || ticks.size() != other.ticks.size()) {
+                return false;
+            }
+            for (int i = 0; i < ticks.size(); i++) {
+                if (!ticks.get(i).sameExceptDelay(other.ticks.get(i))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** 世界一样、只有延迟不同时，把延迟记成 -1。 */
+        void maskRandomDelays(Outcome other) {
+            for (int i = 0; i < ticks.size(); i++) {
+                ScheduledBlockTick tick = ticks.get(i);
+                if (tick.delay != other.ticks.get(i).delay) {
+                    ticks.set(i, new ScheduledBlockTick(tick.pos, tick.fluid, tick.type, -1, tick.priority));
+                }
+            }
+        }
+    }
+
+    /** 一道题。 */
+    private static final class Case {
+        final int id;
+        final Kind kind;
+        final Block subject;
+        final Item item;
+        final Height height;
+        final Long2ObjectOpenHashMap<BlockState> scene = new Long2ObjectOpenHashMap<>();
+        Item main = Items.AIR;
+        Item off = Items.AIR;
+        InteractionHand hand = InteractionHand.MAIN_HAND;
+        BlockHitResult hit;
+        BlockPos target;
+        Vec3 actor;
+        float yaw;
+        float pitch;
+        boolean sneak;
+        Vec3 bystander;
+        AABB actorBox;
+        AABB bystanderBox;
+
+        Case(int id, Kind kind, Subject subject, Height height) {
+            this.id = id;
+            this.kind = kind;
+            this.subject = subject.block;
+            this.item = subject.item;
+            this.height = height;
+        }
+
+        void put(BlockPos pos, BlockState state) {
+            if (height.contains(pos)) {
+                scene.put(pos.asLong(), state);
+            }
+        }
+
+        boolean occupied(BlockPos pos) {
+            return scene.containsKey(pos.asLong());
+        }
+    }
+
+    /** 建筑高度的范围，两端都包含。 */
+    private record Height(int min, int max) {
+        boolean contains(BlockPos pos) {
+            return pos.getY() >= min && pos.getY() <= max;
+        }
+    }
+
+    private record Subject(Block block, Item item) {
+    }
+
+    /** 从注册表算出来的各种方块和物品的集合。 */
+    private static final class Catalog {
+        private static final Set<Class<?>> GENERIC_ROOTS = Set.of(Object.class, BlockBehaviour.class, Block.class, BaseEntityBlock.class,
+                HorizontalDirectionalBlock.class, DirectionalBlock.class, VegetationBlock.class);
+        private static final List<Block> TERRAIN = List.of(Blocks.STONE, Blocks.DIRT, Blocks.GRASS_BLOCK, Blocks.SAND, Blocks.RED_SAND,
+                Blocks.GRAVEL, Blocks.OAK_PLANKS, Blocks.OAK_LOG, Blocks.NETHERRACK, Blocks.SOUL_SAND, Blocks.SOUL_SOIL, Blocks.END_STONE,
+                Blocks.FARMLAND, Blocks.CLAY, Blocks.MOSS_BLOCK, Blocks.MUD, Blocks.MYCELIUM, Blocks.PODZOL, Blocks.GLASS, Blocks.OBSIDIAN,
+                Blocks.ICE, Blocks.CRIMSON_NYLIUM, Blocks.WARPED_NYLIUM, Blocks.COBBLESTONE, Blocks.ROOTED_DIRT, Blocks.SNOW_BLOCK,
+                Blocks.MAGMA_BLOCK, Blocks.SLIME_BLOCK, Blocks.JUNGLE_LOG, Blocks.OAK_LEAVES);
+
+        private final Set<String> avoid;
+        final List<Block> blocks = new ArrayList<>();
+        /** blocks 里能进场景的方块，--avoid 没有排除的那些。 */
+        final List<Block> scenery = new ArrayList<>();
+        final List<BlockItem> blockItems = new ArrayList<>();
+        /** blockItems 里能拿在手里的物品。 */
+        final List<BlockItem> heldBlockItems = new ArrayList<>();
+        final List<Item> items = new ArrayList<>();
+        final List<Item> heldItems = new ArrayList<>();
+        final Map<Class<?>, List<Item>> interactiveByClass = new LinkedHashMap<>();
+        final List<List<Item>> interactive = new ArrayList<>();
+        final List<Item> tools = new ArrayList<>();
+        final List<Item> pottable = new ArrayList<>();
+        final List<Item> candles = new ArrayList<>();
+        final List<Item> compostable = new ArrayList<>();
+        final List<BlockState> sturdy = new ArrayList<>();
+        final List<Block> weak = new ArrayList<>();
+        final List<Block> replaceable = new ArrayList<>();
+        final Set<Block> placeable = new HashSet<>();
+        final Map<Class<?>, List<Block>> families = new HashMap<>();
+        private final List<Block> terrain;
+
+        Catalog(Set<String> avoid) throws ReflectiveOperationException {
+            this.avoid = avoid;
+            this.terrain = TERRAIN.stream().filter(this::allowed).toList();
+            for (Block block : BuiltInRegistries.BLOCK) {
+                if (block.isEnabled(FeatureFlags.DEFAULT_FLAGS)) {
+                    addBlock(block);
+                }
+            }
+            for (Item item : BuiltInRegistries.ITEM) {
+                if (item.isEnabled(FeatureFlags.DEFAULT_FLAGS) && item != Items.AIR) {
+                    addItem(item);
+                }
+            }
+            interactive.addAll(interactiveByClass.values());
+            Map<Block, Block> potted = read(FlowerPotBlock.class, null, "POTTED_BY_CONTENT");
+            potted.keySet().stream().map(Block::asItem).filter(item -> item != Items.AIR).sorted(Comparator.comparing(BlockOracle::id))
+                    .forEach(pottable::add);
+            items.stream().filter(item -> new ItemStack(item).has(DataComponents.COMPOSTABLE)).forEach(compostable::add);
+            addTools(List.of(Items.WOODEN_AXE, Items.DIAMOND_AXE, Items.STONE_SHOVEL, Items.IRON_HOE, Items.GOLDEN_PICKAXE,
+                    Items.IRON_SWORD, Items.TRIDENT, Items.MACE, Items.SHEARS, Items.FLINT_AND_STEEL, Items.FIRE_CHARGE, Items.BRUSH,
+                    Items.BONE_MEAL, Items.WATER_BUCKET, Items.LAVA_BUCKET, Items.BUCKET, Items.POWDER_SNOW_BUCKET, Items.GLASS_BOTTLE,
+                    Items.POTION, Items.HONEY_BOTTLE, Items.HONEYCOMB, Items.GLOW_INK_SAC, Items.INK_SAC, Items.DYE.white(), Items.DYE.red(),
+                    Items.GLOWSTONE, Items.BOOK, Items.WRITABLE_BOOK, Items.WRITTEN_BOOK, Items.ENCHANTED_BOOK, Items.MUSIC_DISC_13,
+                    Items.ENDER_EYE, Items.COMPASS, Items.STICK, Items.BEEF, Items.COOKED_BEEF, Items.CAKE, Items.SWEET_BERRIES,
+                    Items.GLOW_BERRIES, Items.WHEAT_SEEDS, Items.COCOA_BEANS, Items.BAMBOO, Items.MINECART, Items.OAK_BOAT, Items.ARMOR_STAND,
+                    Items.ITEM_FRAME, Items.PAINTING, Items.LEAD, Items.NAME_TAG, Items.DEBUG_STICK));
+        }
+
+        private void addTools(List<Item> candidates) {
+            candidates.stream().filter(this::allowedInHand).forEach(tools::add);
+        }
+
+        private boolean allowed(Block block) {
+            return !avoid.contains(className(block));
+        }
+
+        private boolean allowedInHand(Item item) {
+            return !(item instanceof BlockItem blockItem) || allowed(blockItem.getBlock());
+        }
+
+        private void addBlock(Block block) {
+            blocks.add(block);
+            if (block.defaultBlockState().is(BlockTags.CANDLES) && block.asItem() != Items.AIR) {
+                candles.add(block.asItem());
+            }
+            if (allowed(block)) {
+                addScenery(block);
+            }
+        }
+
+        private void addScenery(Block block) {
+            scenery.add(block);
+            families.computeIfAbsent(familyRoot(block.getClass()), root -> new ArrayList<>()).add(block);
+            BlockState state = block.defaultBlockState();
+            if (isSturdy(state)) {
+                sturdy.add(state);
+            } else if (!state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty()) {
+                weak.add(block);
+            }
+            if (state.canBeReplaced()) {
+                replaceable.add(block);
+            }
+        }
+
+        private static boolean isSturdy(BlockState state) {
+            return Arrays.stream(DIRECTIONS).allMatch(face -> state.isFaceSturdy(EmptyBlockGetter.INSTANCE, BlockPos.ZERO, face));
+        }
+
+        private void addItem(Item item) {
+            items.add(item);
+            if (allowedInHand(item)) {
+                heldItems.add(item);
+            }
+            if (item instanceof BlockItem blockItem) {
+                blockItems.add(blockItem);
+                if (allowedInHand(item)) {
+                    heldBlockItems.add(blockItem);
+                }
+                placeable.add(blockItem.getBlock());
+                if (item instanceof StandingAndWallBlockItem standing) {
+                    placeable.add(read(StandingAndWallBlockItem.class, standing, "wallBlock"));
+                }
+            } else if (hasOwnUseOn(item)) {
+                interactiveByClass.computeIfAbsent(item.getClass(), type -> new ArrayList<>()).add(item);
+            }
+        }
+
+        /** 方块物品的 useOn 就是放置，不算。 */
+        static boolean hasOwnUseOn(Item item) {
+            return !(item instanceof BlockItem) && (overridesUseOn(item) || new ItemStack(item).has(DataComponents.BLOCK_TRANSFORMER));
+        }
+
+        private static boolean overridesUseOn(Item item) {
+            try {
+                return item.getClass().getMethod("useOn", UseOnContext.class).getDeclaringClass() != Item.class;
+            } catch (NoSuchMethodException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        private static Class<?> familyRoot(Class<?> type) {
+            Class<?> root = type;
+            while (!GENERIC_ROOTS.contains(root.getSuperclass())) {
+                root = root.getSuperclass();
+            }
+            return root;
+        }
+
+        /** 这个方块的同族方块，--avoid 把整个家族都排除时只有它自己。 */
+        List<Block> familyOf(Block block) {
+            return families.getOrDefault(familyRoot(block.getClass()), List.of(block));
+        }
+
+        BlockState terrain(Random random) {
+            return pick(random, terrain).defaultBlockState();
+        }
+    }
+
+    /** 一种能让方块存活的邻居。side 是邻居相对方块的方向，waterBeside 表示邻居旁边还要有水。 */
+    private record Support(Direction side, BlockState state, boolean waterBeside) {
+    }
+
+    private record SupportInfo(boolean free, List<Support> supports) {
+    }
+
+    /** 用官方的 canSurvive 试出每个方块要什么支撑，这样不用手写每个方块的放置规则。 */
+    private static final class Supports {
+        private static final int MAX_SAMPLES = 6;
+        private static final int MAX_SUPPORTS = 96;
+        private static final BlockPos CENTER = new BlockPos(0, 64, 0);
+
+        private final Official official;
+        private final Catalog catalog;
+        private final Map<Block, SupportInfo> known = new HashMap<>();
+        private final List<Block> needy = new ArrayList<>();
+
+        Supports(Official official, Catalog catalog) {
+            this.official = official;
+            this.catalog = catalog;
+        }
+
+        SupportInfo of(Block block) {
+            return known.computeIfAbsent(block, this::discover);
+        }
+
+        private SupportInfo discover(Block block) {
+            FakeLevel level = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.LOW, 0));
+            List<BlockState> states = samples(block);
+            boolean free = states.stream().anyMatch(state -> survives(state, level));
+            List<Support> supports = new ArrayList<>();
+            if (!free) {
+                collectSingleSupports(states, level, supports);
+                if (supports.stream().allMatch(support -> support.state.is(block))) {
+                    collectWateredSupports(states, level, supports);
+                }
+                Collections.shuffle(supports, new Random(BuiltInRegistries.BLOCK.getId(block)));
+                supports = new ArrayList<>(supports.subList(0, Math.min(MAX_SUPPORTS, supports.size())));
+            }
+            return new SupportInfo(free, supports);
+        }
+
+        private static List<BlockState> samples(Block block) {
+            List<BlockState> states = block.getStateDefinition().getPossibleStates();
+            if (states.size() <= MAX_SAMPLES) {
+                return states;
+            }
+            List<BlockState> samples = new ArrayList<>();
+            samples.add(block.defaultBlockState());
+            for (int i = 1; i < MAX_SAMPLES; i++) {
+                samples.add(states.get(i * (states.size() / MAX_SAMPLES)));
+            }
+            return samples;
+        }
+
+        private static boolean survives(BlockState state, FakeLevel level) {
+            try {
+                return state.canSurvive(level, CENTER);
+            } catch (RuntimeException ignored) {
+                // 这里只是在猜支撑，假邻居让官方代码取不到属性时当作不行。
+                return false;
+            }
+        }
+
+        private void collectSingleSupports(List<BlockState> states, FakeLevel level, List<Support> supports) {
+            for (Direction side : DIRECTIONS) {
+                BlockPos neighbour = CENTER.relative(side);
+                for (Block candidate : catalog.scenery) {
+                    BlockState support = candidate.defaultBlockState();
+                    level.blocks.clear();
+                    level.blocks.put(neighbour.asLong(), support);
+                    if (states.stream().anyMatch(state -> survives(state, level))) {
+                        supports.add(new Support(side, support, false));
+                    }
+                }
+            }
+        }
+
+        /** 甘蔗这样的方块，脚下的方块旁边还要有水。 */
+        private void collectWateredSupports(List<BlockState> states, FakeLevel level, List<Support> supports) {
+            BlockPos below = CENTER.below();
+            for (Block candidate : catalog.scenery) {
+                BlockState support = candidate.defaultBlockState();
+                level.blocks.clear();
+                level.blocks.put(below.asLong(), support);
+                level.blocks.put(below.east().asLong(), Blocks.WATER.defaultBlockState());
+                if (states.stream().anyMatch(state -> survives(state, level))) {
+                    supports.add(new Support(Direction.DOWN, support, true));
+                }
+            }
+        }
+
+        List<Block> needy() {
+            if (needy.isEmpty()) {
+                for (Block block : catalog.scenery) {
+                    if (!of(block).free && !of(block).supports.isEmpty()) {
+                        needy.add(block);
+                    }
+                }
+            }
+            return needy;
+        }
+    }
+
+    /** 出题。每一题只用自己的种子，所以 --case 能单独重现。 */
+    private static final class Generator {
+        private static final float[] CURSORS = {0.0F, 0.0625F, 0.25F, 0.4999F, 0.5F, 0.5001F, 0.75F, 0.9375F, 1.0F};
+        private static final float[] INSET_SURFACES = {0.125F, 0.1875F, 0.5F, 0.75F, 0.875F, 0.9375F};
+        private static final int DEPENDANT_LAYERS = 3;
+        private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
+
+        private final Catalog catalog;
+        private final Supports supports;
+        private final FakeLevel probe;
+        private final Height height;
+
+        Generator(Official official, Catalog catalog, Supports supports) {
+            this.catalog = catalog;
+            this.supports = supports;
+            this.probe = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.LOW, 0));
+            this.height = new Height(probe.getMinY(), probe.getMaxY());
+        }
+
+        Case build(int id, Kind kind, Subject subject, long seed) {
+            Random random = new Random(seed * 0x9E3779B97F4A7C15L + id);
+            Case c = new Case(id, kind, subject, height);
+            switch (kind) {
+                case PLACE -> buildPlace(c, random);
+                case USE -> buildUse(c, random);
+                case DESTROY -> buildDestroy(c, random);
+                case TICK -> buildTick(c, random);
+            }
+            return c;
+        }
+
+        private void buildPlace(Case c, Random random) {
+            BlockPos target = origin(random);
+            pickActor(c, random, target);
+            Direction facing = Direction.fromYRot(c.yaw);
+            Set<Long> reserved = reserve(random, target, facing);
+            int roll = random.nextInt(100);
+            if (roll < 46) {
+                placeAgainstNeighbour(c, random, target);
+            } else if (roll < 62) {
+                placeIntoReplaceable(c, random, target);
+            } else if (roll < 74) {
+                placeOntoOwnKind(c, random, target);
+            } else if (roll < 86) {
+                placeInWater(c, random, target);
+            } else {
+                placeAnywhere(c, random, target);
+            }
+            decorate(c, random, target, reserved);
+            holdForPlacing(c, random);
+        }
+
+        /** 目标格、上面一格、面前一格多半留空，门和床才放得下。 */
+        private static Set<Long> reserve(Random random, BlockPos target, Direction facing) {
+            Set<Long> reserved = new HashSet<>();
+            reserved.add(target.asLong());
+            if (chance(random, 80)) {
+                reserved.add(target.above().asLong());
+                reserved.add(target.relative(facing).asLong());
+            }
+            return reserved;
+        }
+
+        private void holdForPlacing(Case c, Random random) {
+            if (chance(random, 85)) {
+                c.main = c.item;
+                c.off = chance(random, 20) ? pickHeld(random, c.subject) : Items.AIR;
+            } else {
+                c.hand = InteractionHand.OFF_HAND;
+                c.off = c.item;
+                c.main = chance(random, 50) ? Items.AIR : pickHeld(random, c.subject);
+            }
+        }
+
+        private void placeAgainstNeighbour(Case c, Random random, BlockPos target) {
+            SupportInfo info = supports.of(c.subject);
+            Support support = !info.supports.isEmpty() && chance(random, 75) ? pick(random, info.supports) : null;
+            Direction side = support != null ? support.side : pickSide(random);
+            if (!clickable(target.relative(side))) {
+                side = towardsWorld(target);
+                support = null;
+            }
+            BlockPos clicked = target.relative(side);
+            c.put(clicked, support != null ? support.state : pickSolid(random));
+            if (support != null && support.waterBeside) {
+                c.put(clicked.relative(pick(random, List.of(HORIZONTAL))), Blocks.WATER.defaultBlockState());
+            }
+            click(c, random, clicked, side.getOpposite());
+        }
+
+        private void placeIntoReplaceable(Case c, Random random, BlockPos target) {
+            if (!clickable(target)) {
+                placeAgainstNeighbour(c, random, target);
+                return;
+            }
+            c.put(target, pickReplaceable(random));
+            addFloor(c, random, target);
+            click(c, random, target, pick(random, List.of(DIRECTIONS)));
+        }
+
+        /** 台阶、蜡烛、海泡菜这些能叠加的方块：目标格已经有一个同类方块，点它或者点它旁边。 */
+        private void placeOntoOwnKind(Case c, Random random, BlockPos target) {
+            if (!clickable(target)) {
+                placeAgainstNeighbour(c, random, target);
+                return;
+            }
+            c.put(target, randomState(random, chance(random, 70) ? c.subject : pick(random, catalog.familyOf(c.subject))));
+            addFloor(c, random, target);
+            if (chance(random, 70)) {
+                click(c, random, target, pick(random, List.of(DIRECTIONS)));
+            } else {
+                Direction side = clickableSide(random, target);
+                c.put(target.relative(side), pickSolid(random));
+                click(c, random, target.relative(side), side.getOpposite());
+            }
+        }
+
+        private void placeInWater(Case c, Random random, BlockPos target) {
+            if (!clickable(target)) {
+                placeAgainstNeighbour(c, random, target);
+                return;
+            }
+            c.put(target, chance(random, 80) ? Blocks.WATER.defaultBlockState() : randomState(random, Blocks.WATER));
+            SupportInfo info = supports.of(c.subject);
+            if (!info.supports.isEmpty()) {
+                Support support = pick(random, info.supports);
+                c.put(target.relative(support.side), support.state);
+                if (chance(random, 50) && clickable(target.relative(support.side))) {
+                    click(c, random, target.relative(support.side), support.side.getOpposite());
+                    return;
+                }
+            } else {
+                addFloor(c, random, target);
+            }
+            click(c, random, target, pick(random, List.of(DIRECTIONS)));
+        }
+
+        private void placeAnywhere(Case c, Random random, BlockPos target) {
+            Direction side = clickableSide(random, target);
+            c.put(target.relative(side), neighbour(random, c));
+            click(c, random, target.relative(side), side.getOpposite());
+        }
+
+        private void addFloor(Case c, Random random, BlockPos target) {
+            if (chance(random, 70)) {
+                c.put(target.below(), pickSolid(random));
+            }
+        }
+
+        /** 题目的方块：随机状态，补全多格结构，再选玩家。 */
+        private BlockPos placeSubject(Case c, Random random) {
+            BlockPos target = originInWorld(random);
+            BlockState state = randomState(random, c.subject);
+            c.put(target, state);
+            complete(c, random, target, state);
+            pickActor(c, random, target);
+            return target;
+        }
+
+        private void buildUse(Case c, Random random) {
+            BlockPos target = placeSubject(c, random);
+            addSupports(c, random, target, 60);
+            decorate(c, random, target, Set.of(target.asLong()));
+            click(c, random, target, pick(random, List.of(DIRECTIONS)));
+            holdForUse(c, random);
+        }
+
+        private void holdForUse(Case c, Random random) {
+            c.main = c.item != null ? c.item : pickHeld(random, c.subject);
+            c.off = chance(random, 30) ? pickHeld(random, c.subject) : Items.AIR;
+            if (chance(random, 30)) {
+                c.hand = InteractionHand.OFF_HAND;
+                if (c.item != null) {
+                    c.off = c.item;
+                }
+            }
+            dropAvoidedItems(c);
+        }
+
+        /**
+         * 花盆和堆肥桶的题要拿着 --avoid 的植物才比得了方块自己的逻辑，这些物品不能走到放置。
+         * 蹲着、用副手或者点中的不是题目的方块时，点击可能轮到物品，放下一个 --avoid 的类，比不出方块的问题。
+         */
+        private void dropAvoidedItems(Case c) {
+            BlockState clicked = c.scene.get(c.hit.getBlockPos().asLong());
+            if (!c.sneak && c.hand == InteractionHand.MAIN_HAND && clicked != null && clicked.is(c.subject)) {
+                return;
+            }
+            if (!catalog.allowedInHand(c.main)) {
+                c.main = Items.AIR;
+            }
+            if (!catalog.allowedInHand(c.off)) {
+                c.off = Items.AIR;
+            }
+        }
+
+        private void buildDestroy(Case c, Random random) {
+            BlockPos target = placeSubject(c, random);
+            addSupports(c, random, target, 50);
+            addDependants(c, random, target);
+            decorate(c, random, target, Set.of(target.asLong()));
+            c.target = target;
+            c.main = chance(random, 60) ? Items.AIR : chance(random, 50) ? pick(random, catalog.heldBlockItems) : pick(random, catalog.tools);
+        }
+
+        private void buildTick(Case c, Random random) {
+            BlockPos target = placeSubject(c, random);
+            addSupports(c, random, target, 50);
+            decorate(c, random, target, Set.of(target.asLong()));
+            c.target = target;
+        }
+
+        private void addSupports(Case c, Random random, BlockPos target, int percent) {
+            SupportInfo info = supports.of(c.subject);
+            if (!info.supports.isEmpty() && chance(random, percent)) {
+                Support support = pick(random, info.supports);
+                BlockPos at = target.relative(support.side);
+                if (!c.occupied(at)) {
+                    c.put(at, support.state);
+                    if (support.waterBeside) {
+                        c.put(at.relative(pick(random, List.of(HORIZONTAL))), Blocks.WATER.defaultBlockState());
+                    }
+                }
+            } else if (chance(random, 40)) {
+                c.put(target.below(), pickSolid(random));
+            }
+        }
+
+        /** 目标周围放上靠它才活得下来的方块，破坏后要看到连锁。 */
+        private void addDependants(Case c, Random random, BlockPos target) {
+            probe.blocks.clear();
+            probe.blocks.putAll(c.scene);
+            addDependants(c, random, target, DEPENDANT_LAYERS);
+        }
+
+        /** 靠别的方块活着的方块上面还可以有这样的方块，这样才看得到邻居队列分层的顺序。 */
+        private void addDependants(Case c, Random random, BlockPos target, int layers) {
+            for (Direction side : DIRECTIONS) {
+                BlockPos at = target.relative(side);
+                if (!c.occupied(at) && chance(random, 45)) {
+                    BlockState dependant = findDependant(random, at);
+                    if (dependant != null) {
+                        c.put(at, dependant);
+                        complete(c, random, at, dependant);
+                        probe.blocks.putAll(c.scene);
+                        if (layers > 1 && chance(random, 60)) {
+                            addDependants(c, random, at, layers - 1);
+                        }
+                    }
+                }
+            }
+        }
+
+        private BlockState findDependant(Random random, BlockPos at) {
+            List<Block> needy = supports.needy();
+            for (int attempt = 0; attempt < 10 && !needy.isEmpty(); attempt++) {
+                BlockState state = randomState(random, pick(random, needy));
+                if (survives(state, at)) {
+                    return state;
+                }
+            }
+            return null;
+        }
+
+        private boolean survives(BlockState state, BlockPos at) {
+            try {
+                return state.canSurvive(probe, at);
+            } catch (RuntimeException ignored) {
+                return false;
+            }
+        }
+
+        /** 把多格结构的另一部分补上。留一部分残缺的，官方代码在残缺时的行为也要比较。 */
+        private void complete(Case c, Random random, BlockPos pos, BlockState state) {
+            if (chance(random, 15)) {
+                return;
+            }
+            if (state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)) {
+                boolean lower = state.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.LOWER;
+                c.put(lower ? pos.above() : pos.below(), state.setValue(BlockStateProperties.DOUBLE_BLOCK_HALF,
+                        lower ? DoubleBlockHalf.UPPER : DoubleBlockHalf.LOWER));
+            }
+            if (state.hasProperty(BlockStateProperties.BED_PART)) {
+                Direction facing = state.getValue(BlockStateProperties.HORIZONTAL_FACING);
+                boolean foot = state.getValue(BlockStateProperties.BED_PART) == BedPart.FOOT;
+                c.put(pos.relative(foot ? facing : facing.getOpposite()),
+                        state.setValue(BlockStateProperties.BED_PART, foot ? BedPart.HEAD : BedPart.FOOT));
+            }
+            if (state.getBlock() instanceof ChestBlock && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
+                c.put(pos.relative(ChestBlock.getConnectedDirection(state)),
+                        state.setValue(ChestBlock.TYPE, state.getValue(ChestBlock.TYPE).getOpposite()));
+            }
+            completePiston(c, pos, state);
+        }
+
+        private void completePiston(Case c, BlockPos pos, BlockState state) {
+            if (state.getBlock() instanceof PistonBaseBlock && state.getValue(PistonBaseBlock.EXTENDED)) {
+                Direction facing = state.getValue(PistonBaseBlock.FACING);
+                PistonType type = state.is(Blocks.STICKY_PISTON) ? PistonType.STICKY : PistonType.DEFAULT;
+                c.put(pos.relative(facing), Blocks.PISTON_HEAD.defaultBlockState()
+                        .setValue(PistonHeadBlock.FACING, facing).setValue(PistonHeadBlock.TYPE, type));
+            }
+            if (state.getBlock() instanceof PistonHeadBlock) {
+                Direction facing = state.getValue(PistonHeadBlock.FACING);
+                Block base = state.getValue(PistonHeadBlock.TYPE) == PistonType.STICKY ? Blocks.STICKY_PISTON : Blocks.PISTON;
+                c.put(pos.relative(facing.getOpposite()), base.defaultBlockState()
+                        .setValue(PistonBaseBlock.FACING, facing).setValue(PistonBaseBlock.EXTENDED, true));
+            }
+        }
+
+        /** 目标周围六格和稍远的几格，疏密每题不同。reserved 里的格子不放东西。 */
+        private void decorate(Case c, Random random, BlockPos target, Set<Long> reserved) {
+            int percent = 15 + 20 * random.nextInt(4);
+            for (Direction side : DIRECTIONS) {
+                BlockPos at = target.relative(side);
+                if (!c.occupied(at) && !reserved.contains(at.asLong()) && chance(random, percent)) {
+                    putNeighbour(c, random, at);
+                }
+            }
+            int extras = random.nextInt(9);
+            for (int i = 0; i < extras; i++) {
+                BlockPos at = target.offset(random.nextInt(5) - 2, random.nextInt(5) - 2, random.nextInt(5) - 2);
+                if (!c.occupied(at) && !reserved.contains(at.asLong())) {
+                    putNeighbour(c, random, at);
+                }
+            }
+        }
+
+        private void putNeighbour(Case c, Random random, BlockPos at) {
+            BlockState state = neighbour(random, c);
+            c.put(at, state);
+            if (chance(random, 50)) {
+                complete(c, random, at, state);
+            }
+        }
+
+        /** 第 4 章的邻居：同家族、实心、半格、能替换、水，还有一小部分什么都行。 */
+        private BlockState neighbour(Random random, Case c) {
+            int roll = random.nextInt(100);
+            if (roll < 36) {
+                return aligned(random, familyState(random, c.subject), c);
+            }
+            if (roll < 56) {
+                return pickSolid(random);
+            }
+            if (roll < 70) {
+                return randomState(random, pick(random, catalog.weak));
+            }
+            if (roll < 79) {
+                return pickReplaceable(random);
+            }
+            if (roll < 87) {
+                return chance(random, 70) ? Blocks.WATER.defaultBlockState() : randomState(random, Blocks.WATER);
+            }
+            return randomState(random, pick(random, catalog.scenery));
+        }
+
+        private BlockState familyState(Random random, Block subject) {
+            return randomState(random, chance(random, 55) ? subject : pick(random, catalog.familyOf(subject)));
+        }
+
+        /** 让邻居的朝向常常和玩家一致，否则箱子合并这种要求朝向相同的分支很难碰到。 */
+        private BlockState aligned(Random random, BlockState state, Case c) {
+            if (state.hasProperty(BlockStateProperties.HORIZONTAL_FACING) && chance(random, 50)) {
+                state = state.setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.fromYRot(c.yaw).getOpposite());
+            }
+            if (state.getBlock() instanceof ChestBlock && chance(random, 70)) {
+                state = state.setValue(ChestBlock.TYPE, ChestType.SINGLE);
+            }
+            return state;
+        }
+
+        private BlockState pickSolid(Random random) {
+            int roll = random.nextInt(100);
+            if (roll < 60) {
+                return catalog.terrain(random);
+            }
+            return roll < 85 ? pick(random, catalog.sturdy) : randomState(random, pick(random, catalog.weak));
+        }
+
+        private BlockState pickReplaceable(Random random) {
+            return randomState(random, pick(random, catalog.replaceable));
+        }
+
+        private static BlockState randomState(Random random, Block block) {
+            if (chance(random, 15)) {
+                return block.defaultBlockState();
+            }
+            return pick(random, block.getStateDefinition().getPossibleStates());
+        }
+
+        private Item pickHeld(Random random, Block subject) {
+            if (subject instanceof FlowerPotBlock && chance(random, 50)) {
+                return pick(random, catalog.pottable);
+            }
+            if (subject instanceof CakeBlock && chance(random, 50)) {
+                return pick(random, catalog.candles);
+            }
+            if (subject instanceof ComposterBlock && chance(random, 50)) {
+                return pick(random, catalog.compostable);
+            }
+            int roll = random.nextInt(100);
+            if (roll < 30) {
+                return Items.AIR;
+            }
+            if (roll < 42 && subject.asItem() != Items.AIR) {
+                return subject.asItem();
+            }
+            if (roll < 62) {
+                return pick(random, catalog.tools);
+            }
+            if (roll < 74) {
+                return pick(random, pick(random, catalog.interactive));
+            }
+            return roll < 92 ? pick(random, catalog.heldBlockItems) : pick(random, catalog.heldItems);
+        }
+
+        private boolean clickable(BlockPos pos) {
+            return height.contains(pos);
+        }
+
+        private static Direction pickSide(Random random) {
+            int roll = random.nextInt(100);
+            if (roll < 40) {
+                return Direction.DOWN;
+            }
+            return roll < 80 ? pick(random, List.of(HORIZONTAL)) : Direction.UP;
+        }
+
+        private Direction clickableSide(Random random, BlockPos target) {
+            Direction side = pick(random, List.of(DIRECTIONS));
+            return clickable(target.relative(side)) ? side : towardsWorld(target);
+        }
+
+        private Direction towardsWorld(BlockPos target) {
+            return target.getY() >= height.max ? Direction.DOWN : Direction.UP;
+        }
+
+        /** 世界顶部和底部各占一部分，还有点在世界最外一层的面上、目标格已经出界的情况。 */
+        private BlockPos origin(Random random) {
+            int roll = random.nextInt(100);
+            int y;
+            if (roll < 6) {
+                y = height.max;
+            } else if (roll < 9) {
+                y = height.max - 1;
+            } else if (roll < 12) {
+                y = height.max + 1;
+            } else if (roll < 18) {
+                y = height.min;
+            } else if (roll < 21) {
+                y = height.min + 1;
+            } else if (roll < 24) {
+                y = height.min - 1;
+            } else {
+                y = 60 + random.nextInt(9);
+            }
+            return new BlockPos(random.nextInt(64) - 32, y, random.nextInt(64) - 32);
+        }
+
+        /** 方块本身要在世界里的题目用这个。 */
+        private BlockPos originInWorld(Random random) {
+            BlockPos origin = origin(random);
+            return origin.atY(Math.clamp(origin.getY(), height.min, height.max));
+        }
+
+        private void pickActor(Case c, Random random, BlockPos target) {
+            c.yaw = pickYaw(random);
+            c.pitch = pickPitch(random);
+            c.sneak = chance(random, 30);
+            c.actor = chance(random, 62) ? farPosition(random, target) : blockingPosition(random, target);
+            if (chance(random, 10)) {
+                c.bystander = blockingPosition(random, target);
+            }
+        }
+
+        /** 服务端收到的 yaw 已经 wrapDegrees 到 [-180, 180)。 */
+        private static float pickYaw(Random random) {
+            int roll = random.nextInt(100);
+            float yaw;
+            if (roll < 30) {
+                yaw = random.nextInt(8) * 45.0F - 180.0F;
+            } else if (roll < 50) {
+                float boundary = random.nextInt(8) * 45.0F - 180.0F;
+                yaw = random.nextBoolean() ? Math.nextUp(boundary) : Math.nextDown(boundary);
+            } else {
+                yaw = random.nextFloat() * 360.0F - 180.0F;
+            }
+            return yaw < -180.0F ? -180.0F : yaw;
+        }
+
+        private static float pickPitch(Random random) {
+            if (chance(random, 30)) {
+                return LOOK_PITCHES[random.nextInt(LOOK_PITCHES.length)];
+            }
+            return random.nextFloat() * 180.0F - 90.0F;
+        }
+
+        private static Vec3 farPosition(Random random, BlockPos target) {
+            double angle = random.nextDouble() * Math.PI * 2.0;
+            double distance = 2.0 + random.nextDouble() * 3.0;
+            return new Vec3(target.getX() + 0.5 + Math.cos(angle) * distance, target.getY() - 2 + random.nextInt(5),
+                    target.getZ() + 0.5 + Math.sin(angle) * distance);
+        }
+
+        /** 站在目标格、半格、刚好贴着、一格外，脚或者头碰到目标格。 */
+        private static Vec3 blockingPosition(Random random, BlockPos target) {
+            double x = target.getX() + 0.5;
+            double y = target.getY();
+            double z = target.getZ() + 0.5;
+            double sign = random.nextBoolean() ? 1.0 : -1.0;
+            return switch (random.nextInt(6)) {
+                case 0 -> new Vec3(x, y, z);
+                case 1 -> new Vec3(x + 0.5 * sign, y, z + (random.nextDouble() - 0.5) * 0.5);
+                case 2 -> new Vec3(x + 0.8 * sign, y, z);
+                case 3 -> new Vec3(x, y, z + 1.0 * sign);
+                case 4 -> new Vec3(x + (random.nextDouble() - 0.5), y - 1.0, z + (random.nextDouble() - 0.5));
+                default -> new Vec3(x + (random.nextDouble() - 0.5), y + 1.0, z + (random.nextDouble() - 0.5));
+            };
+        }
+
+        private static void click(Case c, Random random, BlockPos pos, Direction face) {
+            c.hit = new BlockHitResult(location(random, pos, face), face, pos, chance(random, 5));
+        }
+
+        /** 和官方解码一样：客户端发 float 的光标，服务端用 double 加上方块坐标。 */
+        private static Vec3 location(Random random, BlockPos pos, Direction face) {
+            float x = cursor(random);
+            float y = cursor(random);
+            float z = cursor(random);
+            float surface = face.getAxisDirection() == Direction.AxisDirection.POSITIVE ? 1.0F : 0.0F;
+            if (chance(random, 12)) {
+                surface = INSET_SURFACES[random.nextInt(INSET_SURFACES.length)];
+            }
+            switch (face.getAxis()) {
+                case X -> x = surface;
+                case Y -> y = surface;
+                case Z -> z = surface;
+            }
+            return new Vec3((double) pos.getX() + x, (double) pos.getY() + y, (double) pos.getZ() + z);
+        }
+
+        private static float cursor(Random random) {
+            return chance(random, 30) ? CURSORS[random.nextInt(CURSORS.length)] : random.nextFloat();
+        }
+    }
+
+    /** 从 --only 算出每种题目的题干，再按顺序轮转，保证每个方块和物品都轮得到。 */
+    private static final class Subjects {
+        private static final int RARE_CLASS_COPIES = 6;
+        private static final Kind[] PATTERN = {Kind.PLACE, Kind.USE, Kind.PLACE, Kind.DESTROY, Kind.USE, Kind.PLACE, Kind.TICK, Kind.USE};
+
+        private final Map<Kind, List<Subject>> byKind = new LinkedHashMap<>();
+        private final List<Kind> pattern = new ArrayList<>();
+        private final Map<Kind, Integer> turns = new HashMap<>();
+
+        Subjects(Catalog catalog, String only, long seed) {
+            Random random = new Random(seed);
+            List<Subject> placing = new ArrayList<>();
+            List<Subject> others = new ArrayList<>();
+            List<Subject> held = new ArrayList<>();
+            for (BlockItem item : catalog.blockItems) {
+                if (only == null || matches(only, item.getBlock()) || matches(only, item)) {
+                    placing.add(new Subject(item.getBlock(), item));
+                }
+            }
+            for (Block block : catalog.blocks) {
+                if (only == null || matches(only, block) || matches(only, block.asItem())) {
+                    others.add(new Subject(block, null));
+                }
+            }
+            for (Item item : catalog.items) {
+                if (only != null && !(item instanceof BlockItem) && matches(only, item)) {
+                    held.add(new Subject(null, item));
+                }
+            }
+            placing = weighted(placing, random);
+            others = weighted(others, random);
+            if (!held.isEmpty()) {
+                others.addAll(heldOnBlocks(held, catalog, random));
+            }
+            byKind.put(Kind.PLACE, placing);
+            byKind.put(Kind.USE, others);
+            if (held.isEmpty()) {
+                byKind.put(Kind.DESTROY, others);
+                byKind.put(Kind.TICK, others);
+            }
+            for (Kind kind : PATTERN) {
+                if (!byKind.getOrDefault(kind, List.of()).isEmpty()) {
+                    pattern.add(kind);
+                }
+            }
+            if (pattern.isEmpty()) {
+                throw new IllegalArgumentException("--only " + only + " matches no block, item or class");
+            }
+        }
+
+        private static List<Subject> heldOnBlocks(List<Subject> held, Catalog catalog, Random random) {
+            List<Subject> subjects = new ArrayList<>();
+            for (Subject subject : held) {
+                for (Block block : catalog.blocks) {
+                    subjects.add(new Subject(block, subject.item));
+                }
+            }
+            Collections.shuffle(subjects, random);
+            return subjects;
+        }
+
+        /** 一个类的方块很少时多给几次机会，否则只有一个方块的类几乎轮不到。 */
+        private static List<Subject> weighted(List<Subject> subjects, Random random) {
+            Map<Class<?>, List<Subject>> byClass = new LinkedHashMap<>();
+            for (Subject subject : subjects) {
+                byClass.computeIfAbsent(subject.block.getClass(), type -> new ArrayList<>()).add(subject);
+            }
+            List<Subject> result = new ArrayList<>(subjects);
+            for (List<Subject> group : byClass.values()) {
+                int states = group.getFirst().block.getStateDefinition().getPossibleStates().size();
+                int copies = RARE_CLASS_COPIES + Integer.SIZE - Integer.numberOfLeadingZeros(states);
+                for (int i = group.size(); i < copies; i++) {
+                    result.add(pick(random, group));
+                }
+            }
+            result.sort(Comparator.comparing(subject -> id(subject.block)));
+            Collections.shuffle(result, random);
+            return result;
+        }
+
+        private static boolean matches(String only, Block block) {
+            return only.equals(id(block)) || ("minecraft:" + only).equals(id(block)) || classMatches(only, block.getClass());
+        }
+
+        private static boolean matches(String only, Item item) {
+            return item != Items.AIR
+                    && (only.equals(id(item)) || ("minecraft:" + only).equals(id(item)) || classMatches(only, item.getClass()));
+        }
+
+        private static boolean classMatches(String only, Class<?> type) {
+            for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+                if (current.getSimpleName().equals(only)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        Kind kind(int id) {
+            return pattern.get(id % pattern.size());
+        }
+
+        Subject next(Kind kind) {
+            List<Subject> subjects = byKind.get(kind);
+            int turn = turns.merge(kind, 1, Integer::sum) - 1;
+            return subjects.get(turn % subjects.size());
+        }
+    }
+
+    /** 一个方块类的统计。 */
+    private static final class ClassStats {
+        final int[] cases = new int[Kind.values().length];
+        final int[] changed = new int[Kind.values().length];
+        final Map<String, Integer> skips = new TreeMap<>();
+        final Map<String, Integer> placeResults = new TreeMap<>();
+        int placed;
+    }
+
+    /** 跑题、写答案、做汇总。 */
+    private static final class Oracle {
+        private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+        private final Official official;
+        private final Options options;
+        private final Writer out;
+        private final PrintStream log;
+        private final Catalog catalog;
+        private final Supports supports;
+        private final Generator generator;
+        private final Subjects subjects;
+        private final StringBuilder line = new StringBuilder(4096);
+        private final Map<String, ClassStats> stats = new TreeMap<>();
+        private final Map<String, Integer> exceptions = new TreeMap<>();
+        private final Map<String, Integer> skipReasons = new TreeMap<>();
+        private final Map<String, Integer> cosmeticRandom = new TreeMap<>();
+        private final Map<String, Integer> decisiveRandom = new TreeMap<>();
+        private final int[] kinds = new int[Kind.values().length];
+        private int written;
+        private int skipped;
+        private int changedWorld;
+
+        Oracle(Official official, Options options, Writer out, PrintStream log) throws ReflectiveOperationException {
+            this.official = official;
+            this.options = options;
+            this.out = out;
+            this.log = log;
+            this.catalog = new Catalog(options.avoid);
+            this.supports = new Supports(official, catalog);
+            this.generator = new Generator(official, catalog, supports);
+            this.subjects = new Subjects(catalog, options.only, options.seed);
+        }
+
+        void run() throws IOException {
+            long start = System.nanoTime();
+            writeHeader();
+            int first = Math.max(options.single, 0);
+            int end = options.single >= 0 ? options.single + 1 : options.cases;
+            for (int id = 0; id < end; id++) {
+                Kind kind = subjects.kind(id);
+                Subject subject = subjects.next(kind);
+                if (id >= first) {
+                    runCase(id, kind, subject);
+                }
+            }
+            writeEnd();
+            out.flush();
+            printSummary(System.nanoTime() - start);
+        }
+
+        private void runCase(int id, Kind kind, Subject subject) throws IOException {
+            Case c = generator.build(id, kind, subject, options.seed);
+            ClassStats classStats = statsOf(subject.block);
+            classStats.cases[kind.ordinal()]++;
+            kinds[kind.ordinal()]++;
+            try {
+                Outcome outcome = answer(c);
+                record(c, outcome, classStats);
+                writeCase(c, outcome);
+            } catch (SkipCase skip) {
+                skip(c, classStats, skip.reason);
+            } catch (Throwable error) {
+                Throwable cause = rootCause(error);
+                if (cause instanceof SkipCase skip) {
+                    skip(c, classStats, skip.reason);
+                } else if (readsMissingProperty(cause)) {
+                    skip(c, classStats, "impossible:" + siteOf(cause));
+                } else {
+                    recordException(c, cause);
+                    skip(c, classStats, "exception:" + cause.getClass().getSimpleName());
+                }
+            }
+        }
+
+        /** 比如小型垂滴叶的下半上面不是上半，骨粉直接读那一格的 half。题目故意留了一些残缺的结构，见 complete。 */
+        private static boolean readsMissingProperty(Throwable error) {
+            return error instanceof IllegalArgumentException && String.valueOf(error.getMessage()).startsWith("Cannot get property");
+        }
+
+        private static String siteOf(Throwable error) {
+            return Arrays.stream(error.getStackTrace())
+                    .filter(frame -> frame.getClassName().startsWith("net.minecraft.") && !frame.getClassName().endsWith(".StateHolder"))
+                    .findFirst()
+                    .map(frame -> frame.getClassName().substring(frame.getClassName().lastIndexOf('.') + 1) + "." + frame.getMethodName())
+                    .orElse("unknown");
+        }
+
+        private static Throwable rootCause(Throwable error) {
+            Throwable cause = error;
+            while (cause.getCause() != null && cause.getCause() != cause) {
+                cause = cause.getCause();
+            }
+            return cause;
+        }
+
+        private void recordException(Case c, Throwable error) {
+            StackTraceElement site = Arrays.stream(error.getStackTrace())
+                    .filter(frame -> frame.getClassName().startsWith("net.minecraft.") || frame.getClassName().startsWith("BlockOracle"))
+                    .findFirst().orElse(null);
+            String where = site == null ? "unknown" : site.getClassName().substring(site.getClassName().lastIndexOf('.') + 1) + "."
+                    + site.getMethodName();
+            String key = error.getClass().getSimpleName() + " at " + where + ": " + error.getMessage();
+            if (exceptions.merge(key.length() > 200 ? key.substring(0, 200) : key, 1, Integer::sum) == 1) {
+                log.println("first exception of its kind, case " + c.id + " " + c.kind.label + " " + id(c.subject));
+                error.printStackTrace(log);
+            }
+        }
+
+        private void skip(Case c, ClassStats classStats, String reason) throws IOException {
+            skipped++;
+            skipReasons.merge(reason, 1, Integer::sum);
+            classStats.skips.merge(c.kind.label + ":" + reason, 1, Integer::sum);
+            line.setLength(0);
+            line.append("{\"type\":\"skip\",\"id\":").append(c.id);
+            line.append(",\"kind\":\"").append(c.kind.label).append('"');
+            line.append(",\"block\":\"").append(id(c.subject)).append('"');
+            line.append(",\"class\":\"").append(className(c.subject)).append('"');
+            line.append(",\"reason\":\"").append(reason).append("\"}\n");
+            out.append(line);
+        }
+
+        /** 跑一次。碰过随机数就换几种随机数重跑，世界的结果变了就排除。 */
+        private Outcome answer(Case c) {
+            long seed = options.seed * 31 + c.id;
+            OracleRandom random = new OracleRandom(OracleRandom.Mode.SEEDED, seed);
+            Outcome outcome = execute(c, random);
+            if (random.draws == 0) {
+                return outcome;
+            }
+            outcome.touchedRandom = true;
+            List<OracleRandom> variants = List.of(new OracleRandom(OracleRandom.Mode.LOW, 0), new OracleRandom(OracleRandom.Mode.HIGH, 0),
+                    new OracleRandom(OracleRandom.Mode.SEEDED, ~seed));
+            for (OracleRandom variant : variants) {
+                Outcome other = execute(c, variant);
+                if (!outcome.sameWorld(other)) {
+                    random.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
+                    variant.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
+                    throw new SkipCase("random:" + String.join("+", random.sites));
+                }
+                outcome.maskRandomDelays(other);
+            }
+            random.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
+            return outcome;
+        }
+
+        private Outcome execute(Case c, OracleRandom random) {
+            FakeLevel level = FakeLevel.create(official, random);
+            level.load(c.scene);
+            FakePlayer actor = FakePlayer.create(level, official, random, 1, c.actor, c.yaw, c.pitch, c.sneak);
+            actor.hold(c.main, c.off);
+            c.actorBox = actor.getBoundingBox();
+            if (c.bystander != null) {
+                c.bystanderBox = FakePlayer.create(level, official, random, 2, c.bystander, 0.0F, 0.0F, false).getBoundingBox();
+            }
+            String result = switch (c.kind) {
+                case PLACE, USE -> resultName(actor.gameMode.useItemOn(actor, level, actor.getItemInHand(c.hand), c.hand, c.hit));
+                case DESTROY -> actor.gameMode.destroyBlock(c.target) ? "destroyed" : "refused";
+                case TICK -> {
+                    level.getBlockState(c.target).tick(level, c.target, random);
+                    yield "ticked";
+                }
+            };
+            return new Outcome(result, level, c.scene, actor.reachedItem);
+        }
+
+        private static String resultName(InteractionResult result) {
+            return switch (result) {
+                case InteractionResult.Success success -> switch (success.swingSource()) {
+                    case PREDICTED -> "success";
+                    case SERVER_ONLY -> "success_server";
+                    case NONE -> "consume";
+                };
+                case InteractionResult.Fail fail -> "fail";
+                case InteractionResult.Pass pass -> "pass";
+                case InteractionResult.TryEmptyHandInteraction tryEmpty -> "try_empty_hand";
+            };
+        }
+
+        private ClassStats statsOf(Block block) {
+            return stats.computeIfAbsent(className(block), name -> new ClassStats());
+        }
+
+        private void record(Case c, Outcome outcome, ClassStats classStats) {
+            if (!outcome.changes.isEmpty()) {
+                classStats.changed[c.kind.ordinal()]++;
+                changedWorld++;
+            }
+            if (c.kind == Kind.PLACE) {
+                classStats.placeResults.merge(outcome.result, 1, Integer::sum);
+                recordPlaced(c, outcome);
+            }
+        }
+
+        /** 点击的格子或者它旁边的格子变成了新方块才算放下。墙上的火把算在 WallTorchBlock 头上。 */
+        private void recordPlaced(Case c, Outcome outcome) {
+            BlockPos clicked = c.hit.getBlockPos();
+            for (BlockPos pos : List.of(clicked, clicked.relative(c.hit.getDirection()))) {
+                BlockState placed = outcome.changes.get(pos.asLong());
+                BlockState before = c.scene.get(pos.asLong());
+                if (placed != null && !placed.isAir() && (before == null || !before.is(placed.getBlock()))) {
+                    statsOf(placed.getBlock()).placed++;
+                }
+            }
+        }
+
+        private void writeHeader() throws IOException {
+            line.setLength(0);
+            line.append("{\"type\":\"header\",\"version\":\"").append(SharedConstants.getCurrentVersion().id()).append('"');
+            line.append(",\"protocol\":").append(SharedConstants.getCurrentVersion().protocolVersion());
+            line.append(",\"seed\":").append(options.seed);
+            line.append(",\"cases\":").append(options.single >= 0 ? 1 : options.cases);
+            line.append(",\"maxChainedUpdates\":").append(MAX_CHAINED_UPDATES);
+            line.append(",\"gameTime\":").append(GAME_TIME);
+            line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max).append("}\n");
+            out.append(line);
+        }
+
+        private void writeEnd() throws IOException {
+            line.setLength(0);
+            line.append("{\"type\":\"end\",\"cases\":").append(written).append(",\"skipped\":").append(skipped).append("}\n");
+            out.append(line);
+        }
+
+        private void writeCase(Case c, Outcome outcome) throws IOException {
+            written++;
+            line.setLength(0);
+            line.append("{\"type\":\"case\",\"id\":").append(c.id);
+            line.append(",\"block\":\"").append(id(c.subject)).append('"');
+            line.append(",\"class\":\"").append(className(c.subject)).append('"');
+            line.append(",\"scene\":");
+            positions(c.scene);
+            writeAction(c);
+            writeOutcome(outcome);
+            if (options.explain) {
+                explain(c, outcome);
+            }
+            line.append("}\n");
+            out.append(line);
+        }
+
+        private void writeAction(Case c) {
+            line.append(",\"action\":{\"kind\":\"").append(c.kind.label).append('"');
+            line.append(",\"main\":\"").append(id(c.main)).append("\",\"off\":\"").append(id(c.off)).append('"');
+            line.append(",\"hand\":\"").append(c.hand == InteractionHand.MAIN_HAND ? "main" : "off").append('"');
+            Item used = c.hand == InteractionHand.MAIN_HAND ? c.main : c.off;
+            line.append(",\"itemClass\":\"").append(used.getClass().getSimpleName()).append('"');
+            line.append(",\"itemUseOn\":").append(Catalog.hasOwnUseOn(used));
+            if (c.hit != null) {
+                BlockPos pos = c.hit.getBlockPos();
+                line.append(",\"pos\":");
+                pos(pos);
+                line.append(",\"face\":\"").append(c.hit.getDirection().getName()).append('"');
+                Vec3 location = c.hit.getLocation();
+                line.append(",\"loc\":[");
+                hex(location.x);
+                line.append(',');
+                hex(location.y);
+                line.append(',');
+                hex(location.z);
+                line.append("],\"inside\":").append(c.hit.isInside());
+            } else {
+                line.append(",\"pos\":");
+                pos(c.target);
+            }
+            writeActor(c);
+            line.append('}');
+        }
+
+        private void writeActor(Case c) {
+            line.append(",\"actor\":[");
+            hex(c.actor.x);
+            line.append(',');
+            hex(c.actor.y);
+            line.append(',');
+            hex(c.actor.z);
+            line.append("],\"yaw\":");
+            hex(c.yaw);
+            line.append(",\"pitch\":");
+            hex(c.pitch);
+            line.append(",\"sneak\":").append(c.sneak);
+            line.append(",\"box\":");
+            box(c.actorBox);
+            line.append(",\"others\":[");
+            if (c.bystander != null) {
+                box(c.bystanderBox);
+            }
+            line.append(']');
+        }
+
+        private void writeOutcome(Outcome outcome) {
+            line.append(",\"outcome\":{\"result\":\"").append(outcome.result).append('"');
+            line.append(",\"changes\":");
+            positions(outcome.changes);
+            line.append(",\"destroyed\":[");
+            for (int i = 0; i < outcome.destroyed.size(); i++) {
+                Destroyed event = outcome.destroyed.get(i);
+                if (i > 0) {
+                    line.append(',');
+                }
+                line.append('[').append(event.pos.getX()).append(',').append(event.pos.getY()).append(',').append(event.pos.getZ());
+                line.append(',').append(event.state).append(',').append(event.initiatorExcluded).append(']');
+            }
+            line.append("],\"ticks\":[");
+            for (int i = 0; i < outcome.ticks.size(); i++) {
+                ScheduledBlockTick tick = outcome.ticks.get(i);
+                if (i > 0) {
+                    line.append(',');
+                }
+                line.append('[').append(tick.pos.getX()).append(',').append(tick.pos.getY()).append(',').append(tick.pos.getZ());
+                line.append(",\"").append(tick.fluid ? "fluid" : "block").append("\",\"").append(tick.type).append("\",");
+                line.append(tick.delay).append(',').append(tick.priority).append(']');
+            }
+            line.append("],\"itemReached\":").append(outcome.itemReached);
+            line.append(",\"spawned\":[");
+            for (int i = 0; i < outcome.spawned.size(); i++) {
+                line.append(i > 0 ? ",\"" : "\"").append(outcome.spawned.get(i)).append('"');
+            }
+            line.append("],\"rng\":").append(outcome.touchedRandom).append('}');
+        }
+
+        private void positions(Long2ObjectMap<BlockState> states) {
+            long[] keys = states.keySet().toLongArray();
+            Arrays.sort(keys);
+            line.append('[');
+            for (int i = 0; i < keys.length; i++) {
+                if (i > 0) {
+                    line.append(',');
+                }
+                line.append('[').append(BlockPos.getX(keys[i])).append(',').append(BlockPos.getY(keys[i])).append(',');
+                line.append(BlockPos.getZ(keys[i])).append(',').append(Block.getId(states.get(keys[i]))).append(']');
+            }
+            line.append(']');
+        }
+
+        private void pos(BlockPos pos) {
+            line.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ()).append(']');
+        }
+
+        private void box(AABB box) {
+            line.append('[');
+            hex(box.minX);
+            line.append(',');
+            hex(box.minY);
+            line.append(',');
+            hex(box.minZ);
+            line.append(',');
+            hex(box.maxX);
+            line.append(',');
+            hex(box.maxY);
+            line.append(',');
+            hex(box.maxZ);
+            line.append(']');
+        }
+
+        private void hex(double value) {
+            long bits = Double.doubleToRawLongBits(value);
+            line.append('"');
+            for (int shift = 60; shift >= 0; shift -= 4) {
+                line.append(HEX[(int) (bits >>> shift) & 15]);
+            }
+            line.append('"');
+        }
+
+        private void hex(float value) {
+            int bits = Float.floatToRawIntBits(value);
+            line.append('"');
+            for (int shift = 28; shift >= 0; shift -= 4) {
+                line.append(HEX[(bits >>> shift) & 15]);
+            }
+            line.append('"');
+        }
+
+        /** --explain 给人看的版本，不属于格式的一部分。 */
+        private void explain(Case c, Outcome outcome) {
+            StringBuilder text = new StringBuilder();
+            text.append(c.kind.label).append(' ').append(id(c.subject)).append(" yaw=").append(c.yaw).append(" pitch=").append(c.pitch);
+            text.append(" sneak=").append(c.sneak).append(" hand=").append(c.hand).append(" actor=").append(c.actor);
+            if (c.hit != null) {
+                text.append(" click=").append(c.hit.getBlockPos().toShortString()).append(' ').append(c.hit.getDirection());
+                text.append(' ').append(c.hit.getLocation());
+            }
+            text.append(" scene:");
+            describe(text, c.scene);
+            text.append(" changes:");
+            describe(text, outcome.changes);
+            line.append(",\"text\":\"").append(text.toString().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+
+        private static void describe(StringBuilder text, Long2ObjectMap<BlockState> states) {
+            long[] keys = states.keySet().toLongArray();
+            Arrays.sort(keys);
+            for (long key : keys) {
+                text.append(" (").append(BlockPos.of(key).toShortString()).append(") ");
+                text.append(states.get(key).toString().replace("Block{minecraft:", "").replace("}", ""));
+            }
+        }
+
+        private void printSummary(long nanos) {
+            double seconds = nanos / 1e9;
+            int total = written + skipped;
+            log.printf("oracle summary: seed=%d cases=%d written=%d skipped=%d changedWorld=%d time=%.1fs rate=%.0f cases/s%n", options.seed,
+                    total, written, skipped, changedWorld, seconds, total / seconds);
+            for (Kind kind : Kind.values()) {
+                log.printf("  kind %-8s %d%n", kind.label, kinds[kind.ordinal()]);
+            }
+            printMap("skip reasons", skipReasons);
+            printMap("exceptions", exceptions);
+            printRandomSites();
+            log.println("per class: place/use/destroy/tick cases | changed | placed | skips");
+            stats.forEach(this::printClass);
+            printZeroPlacements();
+        }
+
+        /** 一次运行里的调用点全部算上，所以音调这种无害的调用点也可能出现在“改变结果”一列，要和“没有影响”一列对照着看。 */
+        private void printRandomSites() {
+            Set<String> sites = new TreeSet<>(decisiveRandom.keySet());
+            sites.addAll(cosmeticRandom.keySet());
+            log.println("random sites: cases where the outcome changed | cases where it did not");
+            for (String site : sites) {
+                log.printf("  %7d %7d %s%n", decisiveRandom.getOrDefault(site, 0), cosmeticRandom.getOrDefault(site, 0), site);
+            }
+        }
+
+        private void printMap(String title, Map<String, Integer> map) {
+            log.println(title + ": " + map.size());
+            map.forEach((key, count) -> log.printf("  %7d %s%n", count, key));
+        }
+
+        private void printClass(String name, ClassStats s) {
+            log.printf("  %-36s %5d %5d %5d %5d | %5d %5d %5d %5d | %5d | %s%n", name, s.cases[0], s.cases[1], s.cases[2], s.cases[3],
+                    s.changed[0], s.changed[1], s.changed[2], s.changed[3], s.placed, s.skips);
+        }
+
+        private void printZeroPlacements() {
+            log.println("block classes with zero placements:");
+            Map<String, List<Block>> byClass = new TreeMap<>();
+            catalog.blocks.forEach(block -> byClass.computeIfAbsent(className(block), name -> new ArrayList<>()).add(block));
+            byClass.forEach((name, blocks) -> {
+                ClassStats s = stats.get(name);
+                boolean inScope = options.only == null || (s != null && s.cases[Kind.PLACE.ordinal()] > 0);
+                if (inScope && (s == null || s.placed == 0)) {
+                    log.printf("  %-36s %s%n", name, explainZero(blocks, s));
+                }
+            });
+        }
+
+        private String explainZero(List<Block> blocks, ClassStats s) {
+            if (blocks.stream().noneMatch(catalog.placeable::contains)) {
+                return "no block item places this block";
+            }
+            if (blocks.stream().allMatch(block -> block.asItem() instanceof GameMasterBlockItem)) {
+                return "needs the gamemaster permission";
+            }
+            if (blocks.stream().allMatch(block -> block.asItem() instanceof PlaceOnWaterBlockItem)) {
+                return "placed by Item.use (the use_item packet with a ray trace), useItemOn always passes";
+            }
+            if (s != null && s.skips.keySet().stream().anyMatch(key -> key.startsWith("place:random:"))) {
+                return "getStateForPlacement draws from the random source, every placement is a skip line: " + s.skips;
+            }
+            return s == null ? "UNEXPLAINED: no cases" : "UNEXPLAINED: results " + s.placeResults + " skips " + s.skips;
+        }
+    }
+}
