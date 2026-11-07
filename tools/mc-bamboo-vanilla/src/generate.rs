@@ -7,7 +7,10 @@ use std::{
     path::Path,
 };
 
-use crate::extract::{Block, BlockField, FieldValue, Item, Property, TagGroup, VersionData};
+use crate::extract::{
+    Block, BlockField, BlockPredicate, FieldValue, Item, Property, StateProvider, TagGroup,
+    VersionData,
+};
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
 const ATTRIBUTE_REGISTRY: &str = "minecraft:attribute";
@@ -29,6 +32,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let states = states_file(data)?;
     let shapes = shapes_file(data)?;
     let tags = tags_file(data)?;
+    let transformers = block_transformers_file(data)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
@@ -36,6 +40,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "blocks.rs", &blocks)?;
     write_file(output_dir, "block_classes.rs", &block_classes_file(data))?;
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
+    write_file(output_dir, "block_transformers.rs", &transformers)?;
     write_file(output_dir, "items.rs", &items)?;
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
@@ -50,7 +55,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod blocks;\npub mod items;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod items;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -388,6 +393,110 @@ fn block_maps_file(data: &VersionData) -> String {
     out
 }
 
+fn block_transformers_file(data: &VersionData) -> Result<String, String> {
+    let block_tags = tag_indexes(&data.tags, BLOCK_REGISTRY)?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "use crate::{{BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule}};"
+    );
+    let _ = writeln!(out, "use crate::tags::block_tags;");
+    for transformer in &data.block_transformers {
+        let _ = writeln!(out, "\n/// `{}`。", transformer.name);
+        let _ = writeln!(
+            out,
+            "pub static {}: BlockTransformer = BlockTransformer {{",
+            constant_name(&transformer.name)
+        );
+        let _ = writeln!(out, "    name: {:?},", transformer.name);
+        let _ = writeln!(out, "    transforms: &[");
+        for transform in &transformer.transforms {
+            let _ = writeln!(
+                out,
+                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {} }},",
+                state_provider(&transform.provider, data, &block_tags)?,
+                transform.disallowed_faces,
+                transform.update_from_neighbors
+            );
+        }
+        let _ = writeln!(out, "    ],");
+        let _ = writeln!(out, "}};");
+    }
+    Ok(out)
+}
+
+/// 规则多的提供器一条规则一行，斧子有一百多条。
+fn state_provider(
+    provider: &StateProvider,
+    data: &VersionData,
+    block_tags: &TagIndexes,
+) -> Result<String, String> {
+    Ok(match provider {
+        StateProvider::Simple(state) => {
+            if *state >= data.block_states.total {
+                return Err(format!("状态提供器引用了不存在的状态 {state}"));
+            }
+            format!("StateProvider::Simple({state})")
+        }
+        StateProvider::CopyProperties(source) => format!(
+            "StateProvider::CopyProperties(&{})",
+            state_provider(source, data, block_tags)?
+        ),
+        StateProvider::RuleBased { rules, fallback } => {
+            let rules = rules
+                .iter()
+                .map(|rule| {
+                    Ok(format!(
+                        "StateRule {{ if_true: {}, then: {} }}",
+                        block_predicate(&rule.if_true, data, block_tags)?,
+                        state_provider(&rule.then, data, block_tags)?
+                    ))
+                })
+                .collect::<Result<Vec<String>, String>>()?;
+            let fallback = match fallback {
+                Some(fallback) => format!("Some(&{})", state_provider(fallback, data, block_tags)?),
+                None => "None".to_owned(),
+            };
+            format!(
+                "StateProvider::RuleBased {{ rules: &[\n            {},\n        ], fallback: {fallback} }}",
+                rules.join(",\n            ")
+            )
+        }
+    })
+}
+
+fn block_predicate(
+    predicate: &BlockPredicate,
+    data: &VersionData,
+    block_tags: &TagIndexes,
+) -> Result<String, String> {
+    Ok(match predicate {
+        BlockPredicate::MatchingBlocks { offset, blocks } => {
+            let known = |id: &i32| usize::try_from(*id).is_ok_and(|id| id < data.blocks.len());
+            if let Some(unknown) = blocks.iter().find(|id| !known(id)) {
+                return Err(format!("方块判定引用了不存在的方块 {unknown}"));
+            }
+            format!("BlockPredicate::MatchingBlocks {{ offset: {offset:?}, blocks: &{blocks:?} }}")
+        }
+        BlockPredicate::MatchingBlockTag { offset, tag } => {
+            if !block_tags.contains_key(tag.as_str()) {
+                return Err(format!("方块判定引用了不存在的方块标签 {tag}"));
+            }
+            format!(
+                "BlockPredicate::MatchingBlockTag {{ offset: {offset:?}, tag: block_tags::{} }}",
+                constant_name(tag)
+            )
+        }
+        BlockPredicate::AllOf(parts) => {
+            let parts = parts
+                .iter()
+                .map(|part| block_predicate(part, data, block_tags))
+                .collect::<Result<Vec<String>, String>>()?;
+            format!("BlockPredicate::AllOf(&[{}])", parts.join(", "))
+        }
+    })
+}
+
 /// 写一张每个状态一项的表，一行 32 项。
 fn write_state_table<T: Debug>(out: &mut String, doc: &str, name: &str, kind: &str, values: &[T]) {
     let _ = writeln!(out, "/// {doc}");
@@ -563,7 +672,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
             item.name,
             item_kind(item)?,
             item.block,
@@ -573,16 +682,47 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             item.can_destroy_blocks_in_creative,
             item.consumable,
             item.compostable,
-            item.jukebox_playable
+            item.jukebox_playable,
+            block_transformer_of(item, data)?,
+            item.blocks_attacks
         );
     }
     let _ = writeln!(out, "];");
     Ok(out)
 }
 
-/// 官方的物品类决定放置走哪条路。新出现的方块物品类要先看过它怎么放，再加进这张表。
+/// 物品的 `block_transformer` 组件，指向 `block_transformers.rs` 里的条目。
+fn block_transformer_of(item: &Item, data: &VersionData) -> Result<String, String> {
+    let Some(name) = &item.block_transformer else {
+        return Ok("None".to_owned());
+    };
+    if !data
+        .block_transformers
+        .iter()
+        .any(|transformer| &transformer.name == name)
+    {
+        return Err(format!(
+            "{} 的 block_transformer 是不存在的 {name}",
+            item.name
+        ));
+    }
+    Ok(format!(
+        "Some(&crate::block_transformers::{})",
+        constant_name(name)
+    ))
+}
+
+/// 官方的物品类决定放置走哪条路，或者非方块物品的 `useOn` 走哪条路。
+/// 新出现的方块物品类要先看过它怎么放，再加进这张表。
 fn item_kind(item: &Item) -> Result<&'static str, String> {
     match item.class.as_str() {
+        "FlintAndSteelItem" => Ok("FlintAndSteel"),
+        "FireChargeItem" => Ok("FireCharge"),
+        "HoneycombItem" => Ok("Honeycomb"),
+        "ShearsItem" => Ok("Shears"),
+        "EnderEyeItem" => Ok("EnderEye"),
+        "DebugStickItem" => Ok("DebugStick"),
+        "BrushItem" => Ok("Brush"),
         "BlockItem" => Ok("Block"),
         "StandingAndWallBlockItem" => Ok("StandingAndWall"),
         "BannerItem" => Ok("Banner"),
@@ -799,6 +939,8 @@ mod tests {
             consumable: false,
             compostable: false,
             jukebox_playable: false,
+            block_transformer: None,
+            blocks_attacks: false,
         }
     }
 
@@ -874,5 +1016,14 @@ mod tests {
     fn refuses_a_block_item_class_it_has_not_seen() {
         let error = item_kind(&item("NewBlockItem", Some(1))).unwrap_err();
         assert!(error.contains("NewBlockItem"));
+    }
+
+    #[test]
+    fn non_block_items_with_their_own_use_on_get_a_kind() {
+        assert_eq!(
+            item_kind(&item("FlintAndSteelItem", None)),
+            Ok("FlintAndSteel")
+        );
+        assert_eq!(item_kind(&item("Item", None)), Ok("Other"));
     }
 }

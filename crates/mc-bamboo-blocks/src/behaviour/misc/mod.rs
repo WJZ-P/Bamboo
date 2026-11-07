@@ -15,7 +15,7 @@ mod creaking_heart;
 mod decorated_pot;
 mod facing;
 mod falling;
-mod fire;
+pub(crate) mod fire;
 mod flower_pot;
 mod frogspawn;
 mod frosted_ice;

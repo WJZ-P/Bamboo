@@ -2,6 +2,7 @@
 
 pub mod block_classes;
 pub mod block_maps;
+pub mod block_transformers;
 pub mod blocks;
 pub mod items;
 pub mod packets;

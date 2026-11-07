@@ -1,12 +1,12 @@
 //! `FireBlock`、`SoulFireBlock` 和父类 `BaseFireBlock`。
 //!
 //! 火的蔓延和熄灭都在 `FireBlock.tick` 里，不在范围里，这里不排它的计划刻。
-//! 打火石和火焰弹是有自己 `useOn` 的物品，火没有方块物品，世界里的火从形状更新里来。
+//! 火没有方块物品，打火石和火焰弹用 [`can_be_placed_at`] 和 [`state_at`] 生火，见 `crate::item_use`。
 
 use mc_bamboo_core::{Axis, BlockPos, Direction};
 use mc_bamboo_data::{block_maps::FIRE_ODDS, blocks, tags::block_tags};
 
-use super::portal::PortalShape;
+use super::portal::{PortalShape, is_frame};
 use crate::{
     behaviour::Behaviour,
     state::{AGE_15, BlockState, EAST, NORTH, Property, SOUTH, SupportType, UP, WATERLOGGED, WEST},
@@ -77,12 +77,28 @@ fn is_soul_fire_base(state: BlockState) -> bool {
 }
 
 /// `BaseFireBlock.getState`。
-fn state_at(world: &World, pos: BlockPos) -> BlockState {
+pub(crate) fn state_at(world: &World, pos: BlockPos) -> BlockState {
     if is_soul_fire_base(world.block_state(pos.below())) {
         BlockState(blocks::SOUL_FIRE)
     } else {
         fire_state(world, pos)
     }
+}
+
+/// `BaseFireBlock.canBePlacedAt`：空气里放得住火，或者这里能点亮一个空的传送门框架。
+pub(crate) fn can_be_placed_at(world: &World, pos: BlockPos, forward: Direction) -> bool {
+    world.block_state(pos).is_air()
+        && (state_at(world, pos).can_survive(world, pos) || is_portal(world, pos, forward))
+}
+
+/// `BaseFireBlock.isPortal`：旁边有框架方块时，按玩家朝向的左手轴优先找空框架。
+/// 官方只在朝向是竖直的时候取随机的轴，玩家的水平朝向永远是水平的。
+fn is_portal(world: &World, pos: BlockPos, forward: Direction) -> bool {
+    let beside_frame = Direction::ALL
+        .into_iter()
+        .any(|side| is_frame(world.block_state(pos.relative(side))));
+    beside_frame
+        && PortalShape::find_empty(world, pos, forward.counter_clockwise().axis()).is_some()
 }
 
 /// `getStateWithAge`。

@@ -37,6 +37,7 @@ pub struct Extracted {
     pub items: Vec<ExtractedItem>,
     pub state_tables: StateTables,
     pub block_maps: BlockMaps,
+    pub block_transformers: Vec<BlockTransformer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +186,58 @@ pub struct BlockMaps {
     pub campfire_inputs: Vec<i32>,
 }
 
+/// 世界层注册表里的一个 `BlockTransformer`，只有改方块的部分。
+#[derive(Debug, Deserialize)]
+pub struct BlockTransformer {
+    pub name: String,
+    pub transforms: Vec<BlockTransform>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockTransform {
+    pub provider: StateProvider,
+    /// `Direction` 的 ID。
+    pub disallowed_faces: Vec<i32>,
+    pub update_from_neighbors: bool,
+}
+
+/// `Extractor.java` 只导出这几种状态提供器，别的在那边就报错。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StateProvider {
+    /// 状态 ID。
+    Simple(u32),
+    CopyProperties(Box<StateProvider>),
+    RuleBased {
+        rules: Vec<StateRule>,
+        fallback: Option<Box<StateProvider>>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateRule {
+    pub if_true: BlockPredicate,
+    pub then: StateProvider,
+}
+
+/// `Extractor.java` 只导出这几种方块判定，别的在那边就报错。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockPredicate {
+    /// 方块注册表 ID。
+    MatchingBlocks {
+        offset: [i32; 3],
+        blocks: Vec<i32>,
+    },
+    MatchingBlockTag {
+        offset: [i32; 3],
+        tag: String,
+    },
+    AllOf(Vec<BlockPredicate>),
+}
+
 /// `Extractor.java` 导出的物品。物品组件在官方报告里，见 [`Item`]。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,6 +263,9 @@ pub struct Item {
     pub consumable: bool,
     pub compostable: bool,
     pub jukebox_playable: bool,
+    /// `block_transformer` 组件指向的注册表条目。
+    pub block_transformer: Option<String>,
+    pub blocks_attacks: bool,
 }
 
 /// `reports/minecraft/components/item` 里一个物品的报告，只取用到的组件。
@@ -230,6 +286,11 @@ struct ItemComponents {
     compostable: Option<serde_json::Value>,
     #[serde(rename = "minecraft:jukebox_playable")]
     jukebox_playable: Option<serde_json::Value>,
+    /// 报告里写注册表条目的名字。直接内联的写法读不了，生成会失败。
+    #[serde(rename = "minecraft:block_transformer")]
+    block_transformer: Option<String>,
+    #[serde(rename = "minecraft:blocks_attacks")]
+    blocks_attacks: Option<serde_json::Value>,
 }
 
 /// 字段等于默认值 `true` 时报告不写它。
@@ -261,6 +322,8 @@ pub struct VersionData {
     pub items: Vec<Item>,
     pub state_tables: StateTables,
     pub block_maps: BlockMaps,
+    /// 按名字排序。
+    pub block_transformers: Vec<BlockTransformer>,
     /// 内置注册表名 → 按 ID 排列的条目。
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
@@ -303,6 +366,7 @@ pub fn run(
         items,
         state_tables: extracted.state_tables,
         block_maps: extracted.block_maps,
+        block_transformers: extracted.block_transformers,
         builtin_registries,
         packets,
     })
@@ -445,6 +509,8 @@ fn read_items(extracted: Vec<ExtractedItem>, reports: &Path) -> Result<Vec<Item>
                 consumable: components.consumable.is_some(),
                 compostable: components.compostable.is_some(),
                 jukebox_playable: components.jukebox_playable.is_some(),
+                block_transformer: components.block_transformer,
+                blocks_attacks: components.blocks_attacks.is_some(),
                 name: item.name,
                 class: item.class,
                 block: item.block,

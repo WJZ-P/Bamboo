@@ -22,7 +22,7 @@ const MIN_HEIGHT: i32 = 3;
 const MAX_HEIGHT: i32 = 21;
 
 /// `FRAME`。
-fn is_frame(state: BlockState) -> bool {
+pub(super) fn is_frame(state: BlockState) -> bool {
     state.is_tagged(block_tags::NETHER_PORTAL_FRAME)
 }
 

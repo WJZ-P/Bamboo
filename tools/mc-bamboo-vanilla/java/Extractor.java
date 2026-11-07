@@ -26,9 +26,12 @@ import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
+import net.minecraft.core.HolderSet;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.Vec3i;
+import net.minecraft.core.component.BlockTransformer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
@@ -74,6 +77,16 @@ import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
+import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
+import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
+import net.minecraft.world.level.levelgen.blockpredicates.CombiningPredicate;
+import net.minecraft.world.level.levelgen.blockpredicates.MatchingBlockTagPredicate;
+import net.minecraft.world.level.levelgen.blockpredicates.MatchingBlocksPredicate;
+import net.minecraft.world.level.levelgen.blockpredicates.StateTestingPredicate;
+import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider;
+import net.minecraft.world.level.levelgen.feature.stateproviders.CopyPropertiesProvider;
+import net.minecraft.world.level.levelgen.feature.stateproviders.RuleBasedStateProvider;
+import net.minecraft.world.level.levelgen.feature.stateproviders.SimpleStateProvider;
 import net.minecraft.world.level.material.FlowingFluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -136,6 +149,7 @@ public final class Extractor {
             root.add("items", items());
             root.add("stateTables", new StateTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
+            root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -599,6 +613,107 @@ public final class Extractor {
                     odds.add(entry);
                 });
         return odds;
+    }
+
+    /**
+     * 世界层的 BlockTransformer 注册表：物品的 block_transformer 组件指向这里的条目，斧子去皮、锄头耕地、锹压土径都是它。
+     *
+     * <p>只导出改方块的部分。状态提供器和方块判定只认识官方数据用到的几种，遇到别的直接报错：
+     * 升级版本时要先在 mc-bamboo-blocks 里实现它，再加进这里。
+     */
+    private static JsonArray blockTransformers(RegistryAccess registries) throws ReflectiveOperationException {
+        Registry<BlockTransformer> registry = registries.lookupOrThrow(Registries.BLOCK_TRANSFORMER);
+        JsonArray transformers = new JsonArray();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            JsonArray transforms = new JsonArray();
+            for (BlockTransformer.BlockTransformData data : registry.getValue(name).transforms()) {
+                transforms.add(blockTransform(data));
+            }
+            JsonObject transformer = new JsonObject();
+            transformer.addProperty("name", name.toString());
+            transformer.add("transforms", transforms);
+            transformers.add(transformer);
+        }
+        return transformers;
+    }
+
+    private static JsonObject blockTransform(BlockTransformer.BlockTransformData data) throws ReflectiveOperationException {
+        JsonArray faces = new JsonArray();
+        data.disallowedFaces().forEach(face -> faces.add(face.get3DDataValue()));
+        JsonObject transform = new JsonObject();
+        transform.add("provider", stateProvider(data.blockStateProvider().value()));
+        transform.add("disallowedFaces", faces);
+        transform.addProperty("updateFromNeighbors", data.updateFromNeighbors());
+        return transform;
+    }
+
+    private static JsonObject stateProvider(BlockStateProvider provider) throws ReflectiveOperationException {
+        JsonObject typed = new JsonObject();
+        switch (provider) {
+            case SimpleStateProvider simple -> typed.addProperty("simple", Block.BLOCK_STATE_REGISTRY.getId(simple.state()));
+            case CopyPropertiesProvider copy -> typed.add("copyProperties", stateProvider(copy.source().value()));
+            case RuleBasedStateProvider rules -> typed.add("ruleBased", ruleBased(rules));
+            default -> throw new IllegalStateException("unsupported block state provider " + provider.getClass().getName());
+        }
+        return typed;
+    }
+
+    private static JsonObject ruleBased(RuleBasedStateProvider provider) throws ReflectiveOperationException {
+        JsonArray rules = new JsonArray();
+        for (RuleBasedStateProvider.Rule rule : provider.rules()) {
+            JsonObject object = new JsonObject();
+            object.add("ifTrue", blockPredicate(rule.ifTrue()));
+            object.add("then", stateProvider(rule.then().value()));
+            rules.add(object);
+        }
+        JsonObject object = new JsonObject();
+        object.add("rules", rules);
+        if (provider.fallback() != null) {
+            object.add("fallback", stateProvider(provider.fallback().value()));
+        }
+        return object;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static JsonObject blockPredicate(BlockPredicate predicate) throws ReflectiveOperationException {
+        JsonObject typed = new JsonObject();
+        switch (predicate) {
+            case MatchingBlocksPredicate matching -> {
+                JsonObject object = predicateOffset(matching);
+                JsonArray ids = new JsonArray();
+                ((HolderSet<Block>) readField(MatchingBlocksPredicate.class, "blocks", matching))
+                        .forEach(block -> ids.add(BuiltInRegistries.BLOCK.getId(block.value())));
+                object.add("blocks", ids);
+                typed.add("matchingBlocks", object);
+            }
+            case MatchingBlockTagPredicate matching -> {
+                JsonObject object = predicateOffset(matching);
+                TagKey<Block> tag = (TagKey<Block>) readField(MatchingBlockTagPredicate.class, "tag", matching);
+                object.addProperty("tag", tag.location().toString());
+                typed.add("matchingBlockTag", object);
+            }
+            case AllOfPredicate all -> {
+                JsonArray predicates = new JsonArray();
+                for (BlockPredicate part : (List<BlockPredicate>) readField(CombiningPredicate.class, "predicates", all)) {
+                    predicates.add(blockPredicate(part));
+                }
+                typed.add("allOf", predicates);
+            }
+            default -> throw new IllegalStateException("unsupported block predicate " + predicate.getClass().getName());
+        }
+        return typed;
+    }
+
+    /** 判定的那一格相对被点的方块的位置。 */
+    private static JsonObject predicateOffset(StateTestingPredicate predicate) throws ReflectiveOperationException {
+        Vec3i offset = (Vec3i) readField(StateTestingPredicate.class, "offset", predicate);
+        JsonArray xyz = new JsonArray();
+        xyz.add(offset.getX());
+        xyz.add(offset.getY());
+        xyz.add(offset.getZ());
+        JsonObject object = new JsonObject();
+        object.add("offset", xyz);
+        return object;
     }
 
     /** 覆盖之后的结果不再由 tool 组件决定，组件报告里看不出来。 */

@@ -11,7 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, blocks, items, packets, registries, shapes, states, tags, version,
+    block_maps, block_transformers, blocks, items, packets, registries, shapes, states, tags,
+    version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -213,7 +214,7 @@ impl Block {
     }
 }
 
-/// 物品走哪条放置路径，对应官方 `Item` 的类。
+/// 官方 `Item` 的类：方块物品走哪条放置路径，非方块物品的 `useOn` 走哪条路。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     /// `BlockItem`：放置对应的方块。
@@ -236,7 +237,21 @@ pub enum ItemKind {
     Scaffolding,
     /// `SolidBucketItem`：`powder_snow_bucket`。
     SolidBucket,
-    /// 不是方块物品。
+    /// `FlintAndSteelItem`：点燃营火、蜡烛，或者在点中的面前生火。
+    FlintAndSteel,
+    /// `FireChargeItem`：和打火石相同，写方块的标记不同。
+    FireCharge,
+    /// `HoneycombItem`：给铜涂蜡。
+    Honeycomb,
+    /// `ShearsItem`：让 `GrowingPlantHeadBlock` 停止生长。
+    Shears,
+    /// `EnderEyeItem`：装进末地传送门框架。
+    EnderEye,
+    /// `DebugStickItem`：要 gamemaster 权限。
+    DebugStick,
+    /// `BrushItem`：开始刷，结果在后面的使用刻里。
+    Brush,
+    /// 别的非方块物品，`useOn` 只看 [`Item::block_transformer`]。
     Other,
 }
 
@@ -260,6 +275,63 @@ pub struct Item {
     pub compostable: bool,
     /// 有 `jukebox_playable` 组件。
     pub jukebox_playable: bool,
+    /// `block_transformer` 组件：斧子、锄头、锹右键时改方块的规则。
+    pub block_transformer: Option<&'static BlockTransformer>,
+    /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
+    pub blocks_attacks: bool,
+}
+
+/// 数据驱动的 `BlockTransformer`，条目在 [`block_transformers`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockTransformer {
+    pub name: &'static str,
+    /// 按顺序试，第一项给出新状态时就用它。
+    pub transforms: &'static [BlockTransform],
+}
+
+/// `BlockTransformer.BlockTransformData` 里改方块的部分。音效、粒子、耐久和掉落物不在这里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockTransform {
+    pub provider: StateProvider,
+    /// `disallowedFaces`：点中这些面时跳过这一项，是 `Direction` 的 ID。
+    pub disallowed_faces: &'static [i32],
+    /// `updateFromNeighbors`：写入前先按六个邻居更新一遍状态。
+    pub update_from_neighbors: bool,
+}
+
+/// 官方的 `BlockStateProvider`，只有官方数据用到的几种，生成器遇到别的会报错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateProvider {
+    /// `SimpleStateProvider`：固定的状态 ID。
+    Simple(u32),
+    /// `CopyPropertiesProvider`：`source` 给的状态，复制上这一格现有状态的属性。
+    CopyProperties(&'static StateProvider),
+    /// `RuleBasedStateProvider`：第一条成立并且给出状态的规则，都不成立时问 `fallback`。
+    RuleBased {
+        rules: &'static [StateRule],
+        fallback: Option<&'static StateProvider>,
+    },
+}
+
+/// `RuleBasedStateProvider.Rule`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateRule {
+    pub if_true: BlockPredicate,
+    pub then: StateProvider,
+}
+
+/// 官方的 `BlockPredicate`，只有官方数据用到的几种。`offset` 是相对被判定位置的偏移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockPredicate {
+    /// `matching_blocks`：那一格是这些方块之一，都是方块注册表 ID。
+    MatchingBlocks {
+        offset: [i32; 3],
+        blocks: &'static [i32],
+    },
+    /// `matching_block_tag`。
+    MatchingBlockTag { offset: [i32; 3], tag: BlockTag },
+    /// `all_of`。
+    AllOf(&'static [BlockPredicate]),
 }
 
 /// 查找一个状态所属的方块，状态 ID 不存在时返回 `None`。
@@ -431,24 +503,93 @@ mod tests {
         assert_eq!(count(ItemKind::GameMaster), 7);
         assert_eq!(count(ItemKind::Scaffolding), 1);
         assert_eq!(count(ItemKind::SolidBucket), 1);
-        assert_eq!(count(ItemKind::Other), 517);
+        assert_eq!(count(ItemKind::Other), 510);
 
         assert_eq!(item(items::LILY_PAD).kind, ItemKind::PlaceOnWater);
         assert_eq!(item(items::COMMAND_BLOCK).kind, ItemKind::GameMaster);
         assert_eq!(item(items::POWDER_SNOW_BUCKET).kind, ItemKind::SolidBucket);
+        assert_eq!(item(items::FLINT_AND_STEEL).kind, ItemKind::FlintAndSteel);
+        assert_eq!(item(items::FIRE_CHARGE).kind, ItemKind::FireCharge);
+        assert_eq!(item(items::HONEYCOMB).kind, ItemKind::Honeycomb);
+        assert_eq!(item(items::SHEARS).kind, ItemKind::Shears);
+        assert_eq!(item(items::ENDER_EYE).kind, ItemKind::EnderEye);
+        assert_eq!(item(items::DEBUG_STICK).kind, ItemKind::DebugStick);
+        assert_eq!(item(items::BRUSH).kind, ItemKind::Brush);
     }
 
     #[test]
     fn only_block_items_have_a_block() {
+        const NOT_BLOCK_ITEMS: [ItemKind; 8] = [
+            ItemKind::FlintAndSteel,
+            ItemKind::FireCharge,
+            ItemKind::Honeycomb,
+            ItemKind::Shears,
+            ItemKind::EnderEye,
+            ItemKind::DebugStick,
+            ItemKind::Brush,
+            ItemKind::Other,
+        ];
         assert_eq!(block_items().count(), 1141);
         for item in items::ITEMS {
             assert_eq!(
                 item.block.is_none(),
-                item.kind == ItemKind::Other,
+                NOT_BLOCK_ITEMS.contains(&item.kind),
                 "{}",
                 item.name
             );
         }
+    }
+
+    #[test]
+    fn tools_point_at_their_block_transformer() {
+        let transformer = |id| item(id).block_transformer.map(|found| found.name);
+        assert_eq!(transformer(items::WOODEN_AXE), Some("minecraft:axe"));
+        assert_eq!(transformer(items::NETHERITE_HOE), Some("minecraft:hoe"));
+        assert_eq!(transformer(items::STONE_SHOVEL), Some("minecraft:shovel"));
+        assert_eq!(transformer(items::SHEARS), None);
+        let with_transformer = items::ITEMS
+            .iter()
+            .filter(|item| item.block_transformer.is_some())
+            .count();
+        assert_eq!(with_transformer, 21);
+    }
+
+    #[test]
+    fn only_the_shield_blocks_attacks() {
+        let blocking: Vec<_> = items::ITEMS
+            .iter()
+            .filter(|item| item.blocks_attacks)
+            .map(|item| item.name)
+            .collect();
+        assert_eq!(blocking, ["minecraft:shield"]);
+    }
+
+    #[test]
+    fn the_shovel_makes_paths_only_under_air() {
+        let [path] = block_transformers::SHOVEL.transforms else {
+            panic!("the shovel has one transform");
+        };
+        assert_eq!(path.disallowed_faces, [0]);
+        assert!(path.update_from_neighbors);
+        let StateProvider::RuleBased { rules, fallback } = path.provider else {
+            panic!("the shovel uses rules");
+        };
+        assert_eq!(fallback, None);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].then, StateProvider::Simple(blocks::DIRT_PATH));
+        assert_eq!(
+            rules[0].if_true,
+            BlockPredicate::AllOf(&[
+                BlockPredicate::MatchingBlockTag {
+                    offset: [0, 0, 0],
+                    tag: tags::block_tags::TURNS_INTO_DIRT_PATH,
+                },
+                BlockPredicate::MatchingBlockTag {
+                    offset: [0, 1, 0],
+                    tag: tags::block_tags::AIR,
+                },
+            ])
+        );
     }
 
     #[test]

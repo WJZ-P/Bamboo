@@ -31,13 +31,13 @@ use crate::{
 /// 脚手架横着最多长这么远。
 const SCAFFOLDING_MAX_HORIZONTAL: i32 = 7;
 
-/// `Item.useOn`：这个 crate 只认识方块物品，别的物品什么也不做。
+/// `Item.useOn`：方块物品在这里放置，别的物品走 [`item_use`](crate::item_use)。
 pub(crate) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     match item_of(ctx.item) {
-        Some(item) if !matches!(item.kind, ItemKind::Other | ItemKind::PlaceOnWater) => {
-            block_item_use_on(world, item, *ctx)
-        }
-        _ => InteractionResult::Pass,
+        Some(item) if item.kind == ItemKind::PlaceOnWater => InteractionResult::Pass,
+        Some(item) if item.block.is_some() => block_item_use_on(world, item, *ctx),
+        Some(item) => crate::item_use::use_on(world, item, ctx),
+        None => InteractionResult::Pass,
     }
 }
 
