@@ -213,10 +213,12 @@ pub fn face_shape(shape: &[Aabb], face: Direction) -> Vec<Aabb> {
 }
 
 /// `Shapes.mergedFaceOccludes`：`shape` 朝 `direction` 的面和 `occluder` 朝回来的面合起来盖满了整个面。
+///
+/// 官方比的是“整格减去两个面还剩不剩”，不是“和整格一样”：墙和栅栏的碰撞盒比一格高，伸出去的部分不算。
 pub fn merged_face_occludes(shape: &[Aabb], occluder: &[Aabb], direction: Direction) -> bool {
     let mut faces = face_shape(shape, direction);
     faces.extend(face_shape(occluder, direction.opposite()));
-    is_full_block(&faces)
+    !join_is_not_empty(FULL_BLOCK, &faces, BooleanOp::OnlyFirst)
 }
 
 /// 这个盒子在 `axis` 上撑满 0 到 1。
@@ -544,6 +546,9 @@ mod tests {
         ));
         assert!(merged_face_occludes(FULL_BLOCK, &[], Direction::East));
         assert!(!merged_face_occludes(&[], &[], Direction::East));
+        // 墙伸向东边的那段比一格高，挨着一个西面是整面的方块，照样堵死。
+        let wall_arm = [Aabb::new(0.5, 0.0, 5.0 / 16.0, 1.0, 1.5, 11.0 / 16.0)];
+        assert!(merged_face_occludes(&wall_arm, FULL_BLOCK, Direction::East));
     }
 
     #[test]

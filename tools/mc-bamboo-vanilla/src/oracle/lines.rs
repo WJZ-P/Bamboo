@@ -292,7 +292,10 @@ mod tests {
 
         let item = CASE
             .replace(r#""kind":"place""#, r#""kind":"item""#)
-            .replace(r#""itemReached":true"#, r#""itemReached":false,"gained":["minecraft:water_bucket"]"#);
+            .replace(
+                r#""itemReached":true"#,
+                r#""itemReached":false,"gained":["minecraft:water_bucket"]"#,
+            );
         let Line::Case(case) = serde_json::from_str(&item).expect("这一行符合格式") else {
             panic!("这是 case 行");
         };
