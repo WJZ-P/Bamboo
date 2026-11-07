@@ -1,7 +1,7 @@
-//! `SnowLayerBlock`。
+//! `SnowLayerBlock`、`PowderSnowBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, tags::block_tags};
+use mc_bamboo_data::{Block, items, tags::block_tags};
 
 use crate::{
     behaviour::{
@@ -9,8 +9,9 @@ use crate::{
         common::{default_state, is_collision_face_full},
     },
     context::PlaceContext,
+    level::Effect,
     state::{BlockState, LAYERS},
-    world::World,
+    world::{UPDATE_ALL_IMMEDIATE, World},
 };
 
 /// `SnowLayerBlock`。
@@ -71,5 +72,27 @@ impl Behaviour for SnowLayer {
         } else {
             BlockState::AIR
         }
+    }
+}
+
+/// `PowderSnowBlock`：范围里只有空桶舀起它这一件事。
+pub(super) struct PowderSnow;
+
+impl Behaviour for PowderSnow {
+    /// 舀走以后官方发一个破坏事件，`source` 是空的，所以发起者也收得到。
+    fn pickup_block(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        _by_player: bool,
+    ) -> i32 {
+        world.set_block(pos, BlockState::AIR, UPDATE_ALL_IMMEDIATE);
+        world.push_effect(Effect::Destroyed {
+            pos,
+            state,
+            except_initiator: false,
+        });
+        items::POWDER_SNOW_BUCKET
     }
 }

@@ -8,11 +8,11 @@ use std::borrow::Cow;
 
 pub use mc_bamboo_core::Aabb;
 use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3, mth};
-use mc_bamboo_data::{Block, BlockOffset};
+use mc_bamboo_data::{Block, BlockAncestor, BlockOffset};
 
 use crate::{
     context::BlockHit,
-    state::{BlockState, SupportType},
+    state::{BlockState, FACING_HOPPER, SupportType},
 };
 
 /// 比这更近的两个坐标算同一个。官方合并形状时用的是同一个阈值。
@@ -129,6 +129,54 @@ pub fn support_boxes(state: BlockState, pos: BlockPos) -> Boxes {
     at_position(mc_bamboo_data::support_shape(state.0), state.block(), pos)
 }
 
+/// `Block.box`：以十六分之一格为单位的盒子。
+const fn sixteenths(
+    min_x: f64,
+    min_y: f64,
+    min_z: f64,
+    max_x: f64,
+    max_y: f64,
+    max_z: f64,
+) -> Aabb {
+    Aabb::new(
+        min_x / 16.0,
+        min_y / 16.0,
+        min_z / 16.0,
+        max_x / 16.0,
+        max_y / 16.0,
+        max_z / 16.0,
+    )
+}
+
+/// `AbstractCauldronBlock.SHAPE_INSIDE`：`Block.column(12.0, 4.0, 16.0)`。
+const CAULDRON_INSIDE: Aabb = sixteenths(2.0, 4.0, 2.0, 14.0, 16.0, 14.0);
+/// 漏斗构造函数里的 `inside`：`Block.column(12.0, 11.0, 16.0)`。
+const HOPPER_INSIDE: Aabb = sixteenths(2.0, 11.0, 2.0, 14.0, 16.0, 14.0);
+
+/// `getInteractionShape`：射线碰到选中框后，再碰到这个形状更近时报告它的面。
+///
+/// 只有炼药锅、堆肥桶、漏斗和脚手架覆盖了它，形状是这几个类的常量。
+pub fn interaction_boxes(state: BlockState) -> Vec<Aabb> {
+    if state.is_a(BlockAncestor::AbstractCauldronBlock) {
+        return vec![CAULDRON_INSIDE];
+    }
+    if state.is_a(BlockAncestor::ComposterBlock) || state.is_a(BlockAncestor::ScaffoldingBlock) {
+        return FULL_BLOCK.to_vec();
+    }
+    if state.is_a(BlockAncestor::HopperBlock) {
+        // 朝北的出口上面那段是 `Block.boxZ(4.0, 8.0, 10.0, 0.0, 4.0)`，别的朝向绕方块中心转过去。
+        let spout = match state.get(FACING_HOPPER) {
+            Direction::North => sixteenths(6.0, 8.0, 0.0, 10.0, 10.0, 4.0),
+            Direction::East => sixteenths(12.0, 8.0, 6.0, 16.0, 10.0, 10.0),
+            Direction::South => sixteenths(6.0, 8.0, 12.0, 10.0, 10.0, 16.0),
+            Direction::West => sixteenths(0.0, 8.0, 6.0, 4.0, 10.0, 10.0),
+            Direction::Down | Direction::Up => return vec![HOPPER_INSIDE],
+        };
+        return vec![HOPPER_INSIDE, spout];
+    }
+    Vec::new()
+}
+
 /// `SupportType.isSupporting`：`shape` 是方块的支撑形状。
 pub fn is_supporting(shape: &[Aabb], face: Direction, support: SupportType) -> bool {
     let required = match support {
@@ -162,6 +210,13 @@ pub fn face_shape(shape: &[Aabb], face: Direction) -> Vec<Aabb> {
         .filter(|bounds| bounds.min(axis) <= plane && plane < bounds.max(axis))
         .map(|&bounds| stretched(bounds, axis))
         .collect()
+}
+
+/// `Shapes.mergedFaceOccludes`：`shape` 朝 `direction` 的面和 `occluder` 朝回来的面合起来盖满了整个面。
+pub fn merged_face_occludes(shape: &[Aabb], occluder: &[Aabb], direction: Direction) -> bool {
+    let mut faces = face_shape(shape, direction);
+    faces.extend(face_shape(occluder, direction.opposite()));
+    is_full_block(&faces)
 }
 
 /// 这个盒子在 `axis` 上撑满 0 到 1。
@@ -468,6 +523,43 @@ mod tests {
         let hit = clip(FULL_BLOCK, from, Vec3::new(0.5, 3.5, 0.5), pos).expect("起点在方块里");
         assert!(hit.inside);
         assert_eq!(hit.face, Direction::Down);
+    }
+
+    #[test]
+    fn merged_faces_occlude_when_together_they_cover_the_face() {
+        let bottom_slab = [Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0)];
+        let top_slab = [Aabb::new(0.0, 0.5, 0.0, 1.0, 1.0, 1.0)];
+        let west_half = [Aabb::new(0.0, 0.0, 0.0, 0.5, 1.0, 1.0)];
+        // 下半台阶的顶面不贴着上面一格。
+        assert!(!merged_face_occludes(&bottom_slab, &[], Direction::Up));
+        assert!(merged_face_occludes(&bottom_slab, &[], Direction::Down));
+        assert!(merged_face_occludes(&[], &top_slab, Direction::Down));
+        // 一边盖住西半，另一边盖住东半，合起来就堵死了。
+        let east_half = [Aabb::new(0.5, 0.0, 0.0, 1.0, 1.0, 1.0)];
+        assert!(!merged_face_occludes(&west_half, &[], Direction::North));
+        assert!(merged_face_occludes(
+            &west_half,
+            &east_half,
+            Direction::North
+        ));
+        assert!(merged_face_occludes(FULL_BLOCK, &[], Direction::East));
+        assert!(!merged_face_occludes(&[], &[], Direction::East));
+    }
+
+    #[test]
+    fn interaction_shapes_belong_to_four_classes() {
+        assert_eq!(
+            interaction_boxes(BlockState(blocks::CAULDRON)),
+            [CAULDRON_INSIDE]
+        );
+        assert_eq!(interaction_boxes(BlockState(blocks::COMPOSTER)), FULL_BLOCK);
+        assert_eq!(
+            interaction_boxes(BlockState(blocks::HOPPER)),
+            [HOPPER_INSIDE]
+        );
+        let east = BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::East);
+        assert_eq!(interaction_boxes(east).len(), 2);
+        assert!(interaction_boxes(BlockState(blocks::STONE)).is_empty());
     }
 
     #[test]

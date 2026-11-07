@@ -1,7 +1,8 @@
 //! 用官方代码检查 `mc-bamboo-blocks`。
 //!
-//! `BlockOracle.java` 在 JVM 里运行官方的 `useItemOn`、`destroyBlock`，一题一行写到 stdout。
-//! 这里边读边在同样的场景里重放，比较 `InteractionResult`、世界的变化、破坏事件和范围内的计划刻。
+//! `BlockOracle.java` 在 JVM 里运行官方的 `useItemOn`、`useItem`、`destroyBlock`、计划刻和流体的流动，
+//! 一题一行写到 stdout。这里边读边在同样的场景里重放，比较 `InteractionResult`、世界的变化、破坏事件、
+//! 物品栏里多出的物品和范围内的计划刻，方块和流体的计划刻是两条队列，各自按执行顺序比较。
 //! 题目不落盘，20 万题的输出有一百多 MB。
 //!
 //! 一题的结论是下面四种之一：
@@ -39,7 +40,7 @@ use mc_bamboo_data::{
 };
 
 use lines::{Case, Header, Kind, Line, Tick};
-use replay::{Replayed, Scheduled, replay};
+use replay::{FLUID_NAMES, Replayed, Scheduled, replay};
 use report::{Mismatch, Report};
 
 /// 同时留着的官方日志行数，只在 JVM 失败时打印。
@@ -61,7 +62,6 @@ pub enum Rule {
     ImpossibleScene,
     ItemUseOn,
     CanDestroyBlock,
-    FluidTick,
     RandomDelay,
     FallingTick,
     FireTick,
@@ -71,7 +71,7 @@ pub enum Rule {
 }
 
 impl Rule {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 15] = [
         Self::AnalogInput,
         Self::RandomOutcome,
         Self::RandomLoop,
@@ -81,7 +81,6 @@ impl Rule {
         Self::ImpossibleScene,
         Self::ItemUseOn,
         Self::CanDestroyBlock,
-        Self::FluidTick,
         Self::RandomDelay,
         Self::FallingTick,
         Self::FireTick,
@@ -101,7 +100,6 @@ impl Rule {
             Self::ImpossibleScene => "impossible scene",
             Self::ItemUseOn => "item useOn",
             Self::CanDestroyBlock => "canDestroyBlock",
-            Self::FluidTick => "fluid tick",
             Self::RandomDelay => "random delay",
             Self::FallingTick => "falling tick",
             Self::FireTick => "fire tick",
@@ -134,7 +132,6 @@ impl Rule {
             Self::CanDestroyBlock => {
                 "case: Item.canDestroyBlock refused, the caller checks it before destroy_block"
             }
-            Self::FluidTick => "tick entry: fluids do not flow, only recorded (chapter 1)",
             Self::RandomDelay => {
                 "tick delay: the official delay is random, position and type are still compared"
             }
@@ -147,8 +144,10 @@ impl Rule {
     }
 
     /// `skip` 行的原因前缀对应的规则。`exception:` 不在这里：那是假世界的 bug，要算失败。
+    ///
+    /// `untick:<类名>` 是 flow 题往后跑时碰到了范围外的计划刻，按那个类的规则计数。
     fn of_skip(reason: &str) -> Option<Self> {
-        let (prefix, _) = reason.split_once(':')?;
+        let (prefix, detail) = reason.split_once(':')?;
         match prefix {
             "random" => Some(Self::RandomOutcome),
             "random-loop" => Some(Self::RandomLoop),
@@ -156,19 +155,21 @@ impl Rule {
             "explosion" => Some(Self::Explosion),
             "worldgen" => Some(Self::Worldgen),
             "impossible" => Some(Self::ImpossibleScene),
+            "untick" => OUT_OF_SCOPE_TICKS
+                .iter()
+                .find(|(ancestor, _)| format!("{ancestor:?}") == detail)
+                .map(|&(_, rule)| rule),
             _ => None,
         }
     }
 }
 
-/// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较。
-/// 以后做了其中某一种时，把它从表里删掉，比较就打开了。
+/// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
+/// flow 题往后跑时要执行它们的话整题排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::FallingBlock, Rule::FallingTick),
     (BlockAncestor::BrushableBlock, Rule::FallingTick),
     (BlockAncestor::FireBlock, Rule::FireTick),
-    (BlockAncestor::LiquidBlock, Rule::FluidTick),
-    (BlockAncestor::BubbleColumnBlock, Rule::FluidTick),
     (BlockAncestor::DiodeBlock, Rule::RedstoneTick),
     (BlockAncestor::ObserverBlock, Rule::RedstoneTick),
     (BlockAncestor::RedstoneTorchBlock, Rule::RedstoneTick),
@@ -254,6 +255,7 @@ impl Options {
         if self.pure {
             args.extend(["--avoid".to_owned(), unported_classes().join(",")]);
         }
+        args.extend(["--untick".to_owned(), untick_classes().join(",")]);
         args
     }
 
@@ -270,6 +272,14 @@ impl Options {
         }
         args.join(" ")
     }
+}
+
+/// 计划刻不在范围里的类，官方类名就是 `BlockAncestor` 的变体名。
+fn untick_classes() -> Vec<String> {
+    OUT_OF_SCOPE_TICKS
+        .iter()
+        .map(|(ancestor, _)| format!("{ancestor:?}"))
+        .collect()
 }
 
 /// 还没移植的类的名字，官方类名就是 `BlockClass` 的变体名。
@@ -586,10 +596,25 @@ fn compare(
         result: answer.result != replayed.result,
         cells: differing_cells(case, replayed),
         destroyed: answer.destroyed != replayed.destroyed,
-        ticks: !same_ticks(&official, &ours),
+        ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
+        gained: answer.gained != replayed.gained,
         panic: None,
     })
+}
+
+/// 方块和流体是两条队列，各自比较。
+fn same_queues(official: &[Scheduled], ours: &[Scheduled]) -> bool {
+    let queue = |ticks: &[Scheduled], fluid: bool| -> Vec<Scheduled> {
+        ticks
+            .iter()
+            .filter(|tick| tick.fluid == fluid)
+            .cloned()
+            .collect()
+    };
+    [false, true]
+        .into_iter()
+        .all(|fluid| same_ticks(&queue(official, fluid), &queue(ours, fluid)))
 }
 
 /// 两边结束时状态不同的格子。
@@ -609,7 +634,7 @@ fn differing_cells(case: &Case, replayed: &Replayed) -> BTreeSet<BlockPos> {
         .collect()
 }
 
-/// 官方的计划刻里要比较的部分，按执行顺序排好。不比较的条目计入排除表。
+/// 官方的计划刻里要比较的部分，每条队列按执行顺序排好。不比较的条目计入排除表。
 fn comparable_ticks(
     ticks: &[Tick],
     names: &Names,
@@ -617,33 +642,44 @@ fn comparable_ticks(
 ) -> Result<Vec<Scheduled>, String> {
     let mut comparable = Vec::with_capacity(ticks.len());
     for tick in ticks {
-        if tick.is_fluid() {
-            report.excluded_entry(Rule::FluidTick);
-            continue;
-        }
-        let block = names.block(tick.id())?;
-        if let Some(rule) = tick_exclusion(block) {
-            report.excluded_entry(rule);
-            continue;
-        }
+        let id = if tick.is_fluid() {
+            fluid_name(tick.id())?
+        } else {
+            let block = names.block(tick.id())?;
+            if let Some(rule) = tick_exclusion(block) {
+                report.excluded_entry(rule);
+                continue;
+            }
+            block.name
+        };
         if tick.delay() == Tick::RANDOM_DELAY {
             report.excluded_entry(Rule::RandomDelay);
         }
         comparable.push(Scheduled {
             pos: tick.pos(),
-            block: block.name,
+            fluid: tick.is_fluid(),
+            id,
             delay: tick.delay(),
             priority: tick.priority(),
         });
     }
-    comparable.sort_by_key(|tick| (tick.delay, tick.priority));
+    comparable.sort_by_key(|tick| (tick.fluid, tick.delay, tick.priority));
     Ok(comparable)
+}
+
+/// 官方的流体名，也就是 [`FLUID_NAMES`] 里的那一个。
+fn fluid_name(name: &str) -> Result<&'static str, String> {
+    FLUID_NAMES
+        .iter()
+        .find(|&&known| known == name)
+        .copied()
+        .ok_or_else(|| format!("unknown fluid {name}, are the generated files stale?"))
 }
 
 fn in_scope_scheduled(ticks: &[Scheduled], names: &Names) -> Result<Vec<Scheduled>, String> {
     let mut comparable = Vec::with_capacity(ticks.len());
     for tick in ticks {
-        if tick_exclusion(names.block(tick.block)?).is_none() {
+        if tick.fluid || tick_exclusion(names.block(tick.id)?).is_none() {
             comparable.push(tick.clone());
         }
     }
@@ -663,7 +699,7 @@ fn same_ticks(official: &[Scheduled], ours: &[Scheduled]) -> bool {
     official.iter().all(|tick| {
         let found = remaining.iter().position(|candidate| {
             candidate.pos == tick.pos
-                && candidate.block == tick.block
+                && candidate.id == tick.id
                 && candidate.priority == tick.priority
                 && (tick.delay == Tick::RANDOM_DELAY || candidate.delay == tick.delay)
         });
@@ -672,16 +708,12 @@ fn same_ticks(official: &[Scheduled], ours: &[Scheduled]) -> bool {
 }
 
 /// 这道题碰过的、还没移植的类。手上方块物品放的方块不一定进了世界，也算碰过。
-///
-/// 水不算：`LiquidBlock` 只有岩浆才写世界，水的逻辑全是流体的计划刻，而这些不比较。
 fn blockers(case: &Case, replayed: &Replayed, names: &Names) -> Result<Vec<BlockClass>, String> {
-    let water = block_id_of_state(blocks::WATER);
     let (_, held) = names.item(case.action.used_item())?;
     let held_blocks = [held.block, held.wall_block].into_iter().flatten();
     let mut classes: Vec<BlockClass> = replayed
         .touched
         .iter()
-        .filter(|&&id| Some(id) != water)
         .map(|&id| blocks::BLOCKS[id].class)
         .chain(held_blocks.map(|id| blocks::BLOCKS[id as usize].class))
         .filter(|&class| !is_ported(class))
@@ -698,9 +730,18 @@ mod tests {
     fn scheduled(x: i32, delay: i32) -> Scheduled {
         Scheduled {
             pos: BlockPos::new(x, 64, 0),
-            block: "minecraft:sugar_cane",
+            fluid: false,
+            id: "minecraft:sugar_cane",
             delay,
             priority: 0,
+        }
+    }
+
+    fn fluid_tick(x: i32, delay: i32) -> Scheduled {
+        Scheduled {
+            fluid: true,
+            id: "minecraft:water",
+            ..scheduled(x, delay)
         }
     }
 
@@ -806,7 +847,10 @@ mod tests {
         assert_eq!(options.forwarded, ["--seed", "2", "--only", "SlabBlock"]);
         assert_eq!(options.show, 5);
         assert!(!options.show_blocked);
-        assert_eq!(options.java_args(), options.forwarded);
+        let java_args = options.java_args();
+        assert_eq!(java_args[..4], options.forwarded);
+        assert_eq!(java_args[4], "--untick");
+        assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
         assert_eq!(options.rerun_args(), "--only SlabBlock");
         assert!(Options::parse(&["--seed"]).is_err());
         assert!(Options::parse(&["--show", "many"]).is_err());
@@ -841,7 +885,34 @@ mod tests {
             Some(Rule::RandomOutcome)
         );
         assert_eq!(Rule::of_skip("explosion:x"), Some(Rule::Explosion));
+        assert_eq!(
+            Rule::of_skip("untick:FallingBlock"),
+            Some(Rule::FallingTick)
+        );
+        assert_eq!(Rule::of_skip("untick:StairBlock"), None);
         assert_eq!(Rule::of_skip("exception:NullPointerException"), None);
+    }
+
+    #[test]
+    fn block_and_fluid_queues_are_compared_separately() {
+        let official = [scheduled(1, 5), fluid_tick(2, 5)];
+        assert!(same_queues(&official, &[fluid_tick(2, 5), scheduled(1, 5)]));
+        assert!(!same_queues(&official, &[scheduled(1, 5)]));
+        assert!(!same_queues(
+            &official,
+            &[scheduled(1, 5), fluid_tick(2, 30)]
+        ));
+    }
+
+    #[test]
+    fn liquids_tick_inside_the_comparison() {
+        let water = mc_bamboo_data::block_of_state(blocks::WATER).expect("水存在");
+        assert_eq!(tick_exclusion(water), None);
+        assert_eq!(
+            fluid_name("minecraft:flowing_lava"),
+            Ok("minecraft:flowing_lava")
+        );
+        assert!(fluid_name("minecraft:honey").is_err());
     }
 
     #[test]

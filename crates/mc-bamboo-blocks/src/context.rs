@@ -50,6 +50,13 @@ impl Actor {
             self.position.z,
         )
     }
+
+    /// `Item.getPlayerPOVHitResult` 的视线：从眼睛出发，沿着朝向伸出交互距离那么长。
+    pub fn view_segment(&self) -> (Vec3, Vec3) {
+        let from = self.eye_position();
+        let view = Vec3::view_vector(self.yaw, self.pitch);
+        (from, from.add(view.scale(self.block_interaction_range)))
+    }
 }
 
 /// `BlockHitResult`：玩家点中了什么。

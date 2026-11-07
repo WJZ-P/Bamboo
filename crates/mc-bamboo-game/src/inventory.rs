@@ -21,6 +21,8 @@ use crate::{
 
 /// `InventoryMenu` 的槽位数。
 const MENU_SLOTS: usize = 46;
+/// 头盔的菜单槽位，盔甲、背包、快捷栏和副手从这里一直排到最后，官方 `Inventory` 迭代的就是这些槽。
+const ARMOR_START: usize = 5;
 /// 快捷栏第一格的菜单槽位。
 const HOTBAR_START: usize = 36;
 const OFF_HAND: usize = 45;
@@ -139,6 +141,28 @@ impl Inventory {
             .find(|&slot| self.slots[slot].is_empty())
     }
 
+    /// `Inventory.contains`：盔甲、背包、快捷栏或者副手里有不带组件的这种物品。
+    fn contains_plain(&self, item: i32) -> bool {
+        self.slots[ARMOR_START..].iter().any(|stack| {
+            !stack.is_empty()
+                && stack.item == item
+                && stack.added.is_empty()
+                && stack.removed.is_empty()
+        })
+    }
+
+    /// 创造模式的 `ItemUtils.createFilledResult`：物品栏里没有时放进第一个空槽，返回那个菜单槽位。
+    ///
+    /// 舀起来的东西都不能叠放，所以不用找能叠上去的槽。没有空槽时官方直接丢掉它。
+    fn add_filled(&mut self, item: i32) -> Option<usize> {
+        if self.contains_plain(item) {
+            return None;
+        }
+        let slot = self.first_free_slot()?;
+        self.slots[slot] = ItemStack::new(item, 1);
+        Some(slot)
+    }
+
     /// 选中官方 `getSuitableHotbarSlot` 选的格子，返回它的菜单槽位：
     /// 从当前格往后第一个空格，没有空格时第一个没附魔的格子。
     fn select_suitable_hotbar_slot(&mut self) -> usize {
@@ -239,6 +263,16 @@ pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     player.inventory.slots.swap(main_hand, OFF_HAND);
     send_slot(player, &mut region.links, main_hand);
     send_slot(player, &mut region.links, OFF_HAND);
+}
+
+/// 用空桶舀起了 `item`。客户端在本地放进了同一格，官方在这一刻末尾把这一格同步过去，这里直接发。
+pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    if let Some(slot) = player.inventory.add_filled(item) {
+        send_slot(player, &mut region.links, slot);
+    }
 }
 
 /// 把一个槽发给物品的主人，组件只能发回给它。

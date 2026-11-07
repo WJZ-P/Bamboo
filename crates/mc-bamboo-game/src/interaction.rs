@@ -240,13 +240,21 @@ fn destroy_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
 /// 把方块逻辑留下的结果发出去。`initiator` 是发起动作的玩家，计划刻没有发起者。
 fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
-        let Effect::Destroyed {
-            pos,
-            state,
-            except_initiator,
-        } = *effect;
-        let except = initiator.filter(|_| except_initiator);
-        send_destroy_event(region, except, pos, state.0);
+        match *effect {
+            Effect::Destroyed {
+                pos,
+                state,
+                except_initiator,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                send_destroy_event(region, except, pos, state.0);
+            }
+            Effect::FilledBucket { item } => {
+                if let Some(id) = initiator {
+                    inventory::add_filled_bucket(region, id, item);
+                }
+            }
+        }
     }
 }
 

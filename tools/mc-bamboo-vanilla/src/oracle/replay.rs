@@ -10,10 +10,10 @@ use mc_bamboo_blocks::{
     Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, Outcome,
     TickPriority, destroy_block, run_scheduled_ticks,
     shape::{self, BooleanOp},
-    use_item_on,
+    use_item, use_item_on,
 };
 use mc_bamboo_core::{BlockPos, Vec3};
-use mc_bamboo_data::blocks;
+use mc_bamboo_data::{blocks, items};
 
 use super::{
     Names,
@@ -26,6 +26,14 @@ const STANDING_EYE_HEIGHT: f32 = 1.62;
 const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 /// 创造模式的 `blockInteractionRange`。
 const CREATIVE_INTERACTION_RANGE: f64 = 5.0;
+/// 流体的注册表名，下标是 [`mc_bamboo_data::registries::fluid`] 里的 ID。
+pub const FLUID_NAMES: [&str; 5] = [
+    "minecraft:empty",
+    "minecraft:flowing_water",
+    "minecraft:water",
+    "minecraft:flowing_lava",
+    "minecraft:lava",
+];
 
 /// 这个世界在 Rust 这边的答案。
 #[derive(Debug)]
@@ -34,8 +42,10 @@ pub struct Replayed {
     /// 和场景不同的格子。
     pub changes: BTreeMap<BlockPos, u32>,
     pub destroyed: Vec<Destroyed>,
-    /// 这次动作留在队列里的计划刻，按执行顺序。
+    /// 这次动作留在队列里的计划刻，方块的在前，流体的在后，各自按执行顺序。
     pub ticks: Vec<Scheduled>,
+    /// 物品栏里新出现的物品。
+    pub gained: Vec<String>,
     /// 读写过的方块的注册表 ID。结果不对时看它们里面有没有还没移植的类。
     pub touched: BTreeSet<usize>,
 }
@@ -44,7 +54,10 @@ pub struct Replayed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scheduled {
     pub pos: BlockPos,
-    pub block: &'static str,
+    /// 流体的计划刻，否则是方块的。
+    pub fluid: bool,
+    /// 方块或者流体的注册表名。
+    pub id: &'static str,
     pub delay: i32,
     pub priority: i32,
 }
@@ -215,20 +228,25 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     run_scheduled_ticks(&mut level, &mut ticks, header.game_time);
 
     let actor = actor_of(action, names)?;
+    let target = action.target();
+    let now = header.game_time;
     let outcome = match action.kind {
         Kind::Place | Kind::Use => {
             let hit = hit_of(action)?;
             use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit)
         }
-        Kind::Destroy => destroy_block(&mut level, &mut ticks, &actor, action.target()),
-        Kind::Tick => run_one_tick(&mut level, &mut ticks, action.target(), header.game_time),
+        Kind::Destroy => destroy_block(&mut level, &mut ticks, &actor, target),
+        Kind::Tick => run_one_tick(&mut level, &mut ticks, target, now),
+        Kind::Flow => run_flow(&mut level, &mut ticks, target, now, action.steps),
+        Kind::Item => use_item(&mut level, &mut ticks, &actor, action.hand),
     };
 
     Ok(Replayed {
         result: result_name(action.kind, outcome.result),
         changes: level.changes(&case.scene),
         destroyed: destroyed_of(&outcome),
-        ticks: scheduled_of(&ticks, header.game_time),
+        ticks: scheduled_of(&ticks, now),
+        gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
     })
 }
@@ -245,12 +263,30 @@ fn run_one_tick(
     run_scheduled_ticks(level, ticks, now)
 }
 
+/// 官方的题直接调用这一格的 `FluidState.tick`，再一刻一刻往后跑。这里同样排一个立刻到期的流体刻。
+fn run_flow(
+    level: &mut OracleLevel,
+    ticks: &mut BlockTicks,
+    pos: BlockPos,
+    now: i64,
+    steps: u32,
+) -> Outcome {
+    let fluid = level.block_state(pos).fluid().fluid();
+    ticks.schedule_fluid(pos, fluid, 0, TickPriority::Normal);
+    let mut outcome = run_scheduled_ticks(level, ticks, now);
+    for step in 1..=i64::from(steps) {
+        let later = run_scheduled_ticks(level, ticks, now + step);
+        outcome.effects.extend(later.effects);
+    }
+    outcome
+}
+
 fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
     match kind {
-        Kind::Tick => "ticked",
+        Kind::Tick | Kind::Flow => "ticked",
         Kind::Destroy if result == InteractionResult::Fail => "refused",
         Kind::Destroy => "destroyed",
-        Kind::Place | Kind::Use => match result {
+        Kind::Place | Kind::Use | Kind::Item => match result {
             InteractionResult::Success => "success",
             InteractionResult::SuccessServer => "success_server",
             InteractionResult::Consume => "consume",
@@ -265,26 +301,50 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
     outcome
         .effects
         .iter()
-        .map(|effect| match *effect {
+        .filter_map(|effect| match *effect {
             Effect::Destroyed {
                 pos,
                 state,
                 except_initiator,
-            } => Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator),
+            } => Some(Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator)),
+            Effect::FilledBucket { .. } => None,
         })
         .collect()
 }
 
+/// 舀起来的东西。假玩家的物品栏里只有两只手上的物品，已经有同样的物品时官方不再放。
+fn gained_of(outcome: &Outcome, actor: &Actor) -> Vec<String> {
+    let mut held = vec![actor.main_hand, actor.off_hand];
+    let mut gained = Vec::new();
+    for effect in &outcome.effects {
+        if let Effect::FilledBucket { item } = *effect
+            && !held.contains(&item)
+        {
+            held.push(item);
+            gained.push(items::ITEMS[item as usize].name.to_owned());
+        }
+    }
+    gained
+}
+
 fn scheduled_of(ticks: &BlockTicks, now: i64) -> Vec<Scheduled> {
-    ticks
-        .pending()
-        .map(|tick| Scheduled {
-            pos: tick.pos,
-            block: blocks::BLOCKS[tick.block].name,
-            delay: i32::try_from(tick.trigger_tick - now).expect("计划刻的延迟放得进 i32"),
-            priority: tick.priority as i32,
-        })
-        .collect()
+    let delay =
+        |trigger_tick: i64| i32::try_from(trigger_tick - now).expect("计划刻的延迟放得进 i32");
+    let blocks = ticks.pending().map(|tick| Scheduled {
+        pos: tick.pos,
+        fluid: false,
+        id: blocks::BLOCKS[tick.block].name,
+        delay: delay(tick.trigger_tick),
+        priority: tick.priority as i32,
+    });
+    let fluids = ticks.pending_fluids().map(|tick| Scheduled {
+        pos: tick.pos,
+        fluid: true,
+        id: FLUID_NAMES[tick.fluid as usize],
+        delay: delay(tick.trigger_tick),
+        priority: tick.priority as i32,
+    });
+    blocks.chain(fluids).collect()
 }
 
 #[cfg(test)]
@@ -301,6 +361,24 @@ mod tests {
             max_y: 319,
             touched: RefCell::new(BTreeSet::new()),
         }
+    }
+
+    #[test]
+    fn fluid_names_follow_the_registry() {
+        use mc_bamboo_data::registries::fluid;
+
+        assert_eq!(FLUID_NAMES.len(), fluid::TOTAL as usize);
+        assert_eq!(FLUID_NAMES[fluid::EMPTY as usize], "minecraft:empty");
+        assert_eq!(FLUID_NAMES[fluid::WATER as usize], "minecraft:water");
+        assert_eq!(
+            FLUID_NAMES[fluid::FLOWING_WATER as usize],
+            "minecraft:flowing_water"
+        );
+        assert_eq!(FLUID_NAMES[fluid::LAVA as usize], "minecraft:lava");
+        assert_eq!(
+            FLUID_NAMES[fluid::FLOWING_LAVA as usize],
+            "minecraft:flowing_lava"
+        );
     }
 
     #[test]

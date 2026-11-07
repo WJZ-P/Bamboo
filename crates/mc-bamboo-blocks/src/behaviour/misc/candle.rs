@@ -1,7 +1,7 @@
 //! `CandleBlock` 和父类 `AbstractCandleBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, registries};
 
 use crate::{
     behaviour::{
@@ -10,7 +10,7 @@ use crate::{
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{BlockState, CANDLES, LIT, WATERLOGGED},
+    state::{BlockState, CANDLES, FluidState, LIT, WATERLOGGED},
     world::{UPDATE_ALL_IMMEDIATE, World},
 };
 
@@ -75,5 +75,26 @@ impl Behaviour for Candle {
             return InteractionResult::Success;
         }
         Plain.use_item_on(state, world, ctx)
+    }
+
+    /// 点着的蜡烛进水时熄灭。
+    fn place_liquid(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        fluid: FluidState,
+    ) -> bool {
+        if state.get(WATERLOGGED) || !fluid.is(registries::fluid::WATER) {
+            return false;
+        }
+        let wet = state.with(WATERLOGGED, true);
+        if state.get(LIT) {
+            extinguish(wet, world, pos);
+        } else {
+            world.set_block_and_update(pos, wet);
+        }
+        world.schedule_fluid_tick(pos, fluid.fluid());
+        true
     }
 }

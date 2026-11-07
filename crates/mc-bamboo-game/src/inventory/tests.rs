@@ -827,6 +827,29 @@ fn nothing_happens_when_there_is_nothing_to_pick() {
 }
 
 #[test]
+fn a_filled_bucket_goes_into_the_first_free_slot_only_once() {
+    let mut inventory = Inventory::default();
+    inventory.slots[36] = ItemStack::new(items::BUCKET, 1);
+    assert_eq!(inventory.add_filled(items::WATER_BUCKET), Some(37));
+    assert_eq!(inventory.slots[37], ItemStack::new(items::WATER_BUCKET, 1));
+    assert_eq!(inventory.add_filled(items::WATER_BUCKET), None);
+
+    // 副手和盔甲槽也算物品栏。
+    let mut other = Inventory::default();
+    other.slots[45] = ItemStack::new(items::LAVA_BUCKET, 1);
+    assert_eq!(other.add_filled(items::LAVA_BUCKET), None);
+}
+
+#[test]
+fn a_full_inventory_drops_the_filled_bucket_like_the_game() {
+    let mut inventory = Inventory::default();
+    for slot in 9..=44 {
+        inventory.slots[slot] = ItemStack::new(items::STONE, 1);
+    }
+    assert_eq!(inventory.add_filled(items::WATER_BUCKET), None);
+}
+
+#[test]
 fn heights_outside_the_world_are_not_loaded() {
     let (mut server, client) = settled();
     server.request(
