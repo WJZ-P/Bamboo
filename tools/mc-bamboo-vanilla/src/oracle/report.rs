@@ -10,7 +10,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{Block, BlockClass, block_of_state, blocks};
 
 use super::{
-    Rule,
+    Rule, UNPORTED_ITEM_USE_ON,
     lines::{Case, Cell, Destroyed, Header, Kind},
     replay::{Replayed, Scheduled},
     tick_classes,
@@ -272,6 +272,11 @@ impl Report {
             let classes = tick_classes(rule);
             if !classes.is_empty() {
                 println!("          {:<18} {classes:?}", "");
+            }
+            if rule == Rule::ItemUseOn {
+                for (class, reason) in UNPORTED_ITEM_USE_ON {
+                    println!("          {:<18} {class}: {reason}", "");
+                }
             }
         }
         println!(

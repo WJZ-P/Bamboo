@@ -144,6 +144,7 @@ import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.ChiseledBookShelfBlock;
 import net.minecraft.world.level.block.ComposterBlock;
 import net.minecraft.world.level.block.DirectionalBlock;
+import net.minecraft.world.level.block.EndPortalFrameBlock;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.FlowerPotBlock;
 import net.minecraft.world.level.block.HorizontalDirectionalBlock;
@@ -208,7 +209,9 @@ import sun.misc.Unsafe;
  *                 20 万题时每个方块物品至少放几十次，每个方块类至少几百题。
  *     --only X    只出和 X 有关的题。X 是方块 ID、物品 ID（minecraft: 可省略）或者方块类、物品类的简单名，继承链上的类都算，
  *                 比如 StairBlock、DoubleHighBlockItem。X 是不能放置的物品（flint_and_steel、ShearsItem）时只出 use 题，
- *                 拿着它点各种方块。
+ *                 拿着它点各种方块，其中大约一半是先试出来的、它会改的方块（斧子的原木、锄头的泥土）。
+ *                 带 block_transformer 组件的物品有时副手拿盾，这时主手的右键是举盾。末影之眼点框架的题有一半
+ *                 在一圈朝里的框架里，装上就可能打开末地传送门。
  *     --avoid A,B 这些类（方块类的简单名）的方块不进场景，手里也不拿会放下它们的物品，题目的主角不受影响。水永远可以出现：
  *                 第 4 章要求的场景里有水，它不改变世界。新版本多了没移植的类时，用它单独检查一个类。
  *                 花盆和堆肥桶例外：站着用主手点中它们时可以拿着这些物品，这时点击一定被方块接住，轮不到物品放置。
@@ -2221,15 +2224,41 @@ public final class BlockOracle {
 
         private void buildUse(Case c, Random random) {
             BlockPos target = placeSubject(c, random);
+            if (c.item == Items.ENDER_EYE && c.subject == Blocks.END_PORTAL_FRAME && chance(random, 50)) {
+                surroundWithPortalRing(c, random, target);
+            }
             addSupports(c, random, target, 60);
             decorate(c, random, target, Set.of(target.asLong()));
             click(c, random, target, pick(random, List.of(DIRECTIONS)));
             holdForUse(c, random);
         }
 
+        /**
+         * 末影之眼的题：目标是一圈朝里的框架里还没装眼的一个，别的框架大多装好了，装上这一个就可能打开传送门。
+         * 圈里的 3×3 由后面的 decorate 随机放东西，打开时要破坏掉。
+         */
+        private void surroundWithPortalRing(Case c, Random random, BlockPos target) {
+            List<BlockPos> slots = new ArrayList<>();
+            List<Direction> facings = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                slots.addAll(List.of(new BlockPos(i, 0, -1), new BlockPos(i, 0, 3), new BlockPos(-1, 0, i), new BlockPos(3, 0, i)));
+                facings.addAll(List.of(Direction.SOUTH, Direction.NORTH, Direction.EAST, Direction.WEST));
+            }
+            int mine = random.nextInt(slots.size());
+            BlockPos interior = target.subtract(slots.get(mine));
+            for (int i = 0; i < slots.size(); i++) {
+                boolean eye = i != mine && chance(random, 92);
+                c.put(interior.offset(slots.get(i)), Blocks.END_PORTAL_FRAME.defaultBlockState()
+                        .setValue(EndPortalFrameBlock.FACING, facings.get(i)).setValue(EndPortalFrameBlock.HAS_EYE, eye));
+            }
+        }
+
         private void holdForUse(Case c, Random random) {
             c.main = c.item != null ? c.item : pickHeld(random, c.subject);
             c.off = chance(random, 30) ? pickHeld(random, c.subject) : Items.AIR;
+            if (c.item != null && new ItemStack(c.item).has(DataComponents.BLOCK_TRANSFORMER) && chance(random, 15)) {
+                c.off = Items.SHIELD;
+            }
             if (chance(random, 30)) {
                 c.hand = InteractionHand.OFF_HAND;
                 if (c.item != null) {
@@ -2610,13 +2639,15 @@ public final class BlockOracle {
     /** 从 --only 算出每种题目的题干，再按顺序轮转，保证每个方块和物品都轮得到。 */
     private static final class Subjects {
         private static final int RARE_CLASS_COPIES = 6;
+        private static final int PROBE_ALL_STATES = 64;
+        private static final int PROBE_SAMPLES = 16;
         private static final Kind[] PATTERN = {Kind.PLACE, Kind.USE, Kind.PLACE, Kind.DESTROY, Kind.USE, Kind.PLACE, Kind.TICK, Kind.USE};
 
         private final Map<Kind, List<Subject>> byKind = new LinkedHashMap<>();
         private final List<Kind> pattern = new ArrayList<>();
         private final Map<Kind, Integer> turns = new HashMap<>();
 
-        Subjects(Catalog catalog, String only, long seed) {
+        Subjects(Official official, Catalog catalog, String only, long seed) {
             Random random = new Random(seed);
             List<Subject> placing = new ArrayList<>();
             List<Subject> others = new ArrayList<>();
@@ -2639,7 +2670,7 @@ public final class BlockOracle {
             placing = weighted(placing, random);
             others = weighted(others, random);
             if (!held.isEmpty()) {
-                others.addAll(heldOnBlocks(held, catalog, random));
+                others.addAll(heldOnBlocks(held, catalog, official, random));
             }
             byKind.put(Kind.PLACE, placing);
             byKind.put(Kind.USE, others);
@@ -2657,15 +2688,60 @@ public final class BlockOracle {
             }
         }
 
-        private static List<Subject> heldOnBlocks(List<Subject> held, Catalog catalog, Random random) {
+        /**
+         * 不能放置的物品：每个方块都轮到一次，它会改的方块再补到和全部方块一样多。
+         * 不然锄头这种只改几个方块的物品，几万题里只有几十题真的耕了地。
+         */
+        private static List<Subject> heldOnBlocks(List<Subject> held, Catalog catalog, Official official, Random random) {
             List<Subject> subjects = new ArrayList<>();
             for (Subject subject : held) {
                 for (Block block : catalog.blocks) {
                     subjects.add(new Subject(block, subject.item));
                 }
+                List<Block> targets = catalog.blocks.stream().filter(block -> changesClickedBlock(official, subject.item, block)).toList();
+                for (int i = 0; !targets.isEmpty() && i < catalog.blocks.size(); i++) {
+                    subjects.add(new Subject(targets.get(i % targets.size()), subject.item));
+                }
             }
             Collections.shuffle(subjects, random);
             return subjects;
+        }
+
+        /** 蹲着拿这个物品点方块的顶面，上面是空气。试的状态里有一个被改了就算。 */
+        private static boolean changesClickedBlock(Official official, Item item, Block block) {
+            BlockPos pos = new BlockPos(0, 64, 0);
+            BlockHitResult hit = new BlockHitResult(new Vec3(0.5, 65.0, 0.5), Direction.UP, pos, false);
+            for (BlockState state : probeStates(block)) {
+                FakeLevel level = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.LOW, 0));
+                Long2ObjectOpenHashMap<BlockState> scene = new Long2ObjectOpenHashMap<>();
+                scene.put(pos.asLong(), state);
+                level.load(scene);
+                FakePlayer player = FakePlayer.create(level, official, level.getRandom(), 1, new Vec3(3.5, 64.0, 0.5), 90.0F, 30.0F, true);
+                player.hold(item, Items.AIR);
+                try {
+                    player.gameMode.useItemOn(player, level, player.getMainHandItem(), InteractionHand.MAIN_HAND, hit);
+                } catch (RuntimeException ignored) {
+                    // 这里只是在挑方块，官方代码在孤零零的方块上抛异常时不挑它。
+                    continue;
+                }
+                if (level.getBlockState(pos) != state) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** 状态不多的方块全试，营火要“没点着、没泡水”的状态才挑得出来。状态多的均匀挑一些。 */
+        private static List<BlockState> probeStates(Block block) {
+            List<BlockState> states = block.getStateDefinition().getPossibleStates();
+            if (states.size() <= PROBE_ALL_STATES) {
+                return states;
+            }
+            List<BlockState> picked = new ArrayList<>();
+            for (int i = 0; i < PROBE_SAMPLES; i++) {
+                picked.add(states.get(i * states.size() / PROBE_SAMPLES));
+            }
+            return picked;
         }
 
         /** 一个类的方块很少时多给几次机会，否则只有一个方块的类几乎轮不到。 */
@@ -2756,7 +2832,7 @@ public final class BlockOracle {
             this.catalog = new Catalog(options.avoid);
             this.supports = new Supports(official, catalog);
             this.generator = new Generator(official, catalog, supports);
-            this.subjects = new Subjects(catalog, options.only, options.seed);
+            this.subjects = new Subjects(official, catalog, options.only, options.seed);
         }
 
         void run() throws IOException {

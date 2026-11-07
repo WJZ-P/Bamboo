@@ -133,6 +133,8 @@ pub struct Action {
     pub off: String,
     #[serde(deserialize_with = "hand")]
     pub hand: Hand,
+    /// 这只手上物品的官方类名。
+    pub item_class: String,
     pub item_use_on: bool,
     pub pos: [i32; 3],
     #[serde(default, deserialize_with = "face")]

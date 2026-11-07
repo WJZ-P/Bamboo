@@ -130,7 +130,9 @@ impl Rule {
             Self::ImpossibleScene => {
                 "case: a half of a broken structure made the official code throw"
             }
-            Self::ItemUseOn => "case: both sides left the click to a non block item's own useOn",
+            Self::ItemUseOn => {
+                "case: the click reached a non block item whose own useOn is not ported"
+            }
             Self::CanDestroyBlock => {
                 "case: Item.canDestroyBlock refused, the caller checks it before destroy_block"
             }
@@ -199,6 +201,45 @@ fn tick_classes(rule: Rule) -> Vec<BlockAncestor> {
         .filter(|(_, entry)| *entry == rule)
         .map(|&(ancestor, _)| ancestor)
         .collect()
+}
+
+/// 没有移植 `useOn` 的非方块物品类，官方类名和原因。点击轮到这些物品时不比较。
+///
+/// 斧子、锄头、锹（类就是 `Item`，靠 `block_transformer` 组件）、打火石、火焰弹、蜜脾、剪刀、末影之眼、
+/// 调试棒和刷子移植了，照常比较。桶、玻璃瓶和睡莲走 `Item.use`，不经过 `useOn`，所以不在这张表里。
+const UNPORTED_ITEM_USE_ON: &[(&str, &str)] = &[
+    (
+        "BoneMealItem",
+        "growth is random, saplings and fungi run world generation",
+    ),
+    ("SpawnEggItem", "spawns an entity"),
+    ("ArmorStandItem", "spawns an entity"),
+    ("CushionItem", "spawns an entity"),
+    ("EndCrystalItem", "spawns an entity"),
+    ("FireworkRocketItem", "spawns an entity"),
+    ("HangingEntityItem", "spawns an entity"),
+    ("ItemFrameItem", "spawns an entity"),
+    ("LeadItem", "spawns an entity"),
+    ("MinecartItem", "spawns an entity"),
+    (
+        "PotionItem",
+        "turning dirt into mud needs the potion_contents component, actors only carry item ids",
+    ),
+    ("SplashPotionItem", "inherits the useOn of PotionItem"),
+    ("LingeringPotionItem", "inherits the useOn of PotionItem"),
+    (
+        "CompassItem",
+        "a lodestone only changes the held item, no block",
+    ),
+    ("MapItem", "banner markers live in the map data, no block"),
+];
+
+/// 物品类不在 [`UNPORTED_ITEM_USE_ON`] 里时是 `None`。
+fn unported_item_use_on(class: &str) -> Option<&'static str> {
+    UNPORTED_ITEM_USE_ON
+        .iter()
+        .find(|(name, _)| *name == class)
+        .map(|&(_, reason)| reason)
 }
 
 /// 这个方块的计划刻不在比较的范围里时，返回原因。
@@ -506,11 +547,12 @@ impl Session {
     }
 }
 
-/// 官方的方块没有吃掉这次点击，结果来自非方块物品自己的 `useOn`，那不在这个 crate 里。
+/// 官方的方块没有吃掉这次点击，结果来自还没移植的非方块物品的 `useOn`。
 /// 我们这边也要什么都没做才算：方块多吃了点击，或者动了世界，要照常比较，这是真的不一致。
 fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
     case.action.item_use_on
         && case.outcome.item_reached
+        && unported_item_use_on(&case.action.item_class).is_some()
         && replayed.result == "pass"
         && replayed.changes.is_empty()
         && replayed.destroyed.is_empty()
@@ -710,15 +752,22 @@ mod tests {
 
     /// 在 (0, 64, 0) 的石头顶面放一块石头，`scene` 和 `outcome` 由测试给。
     fn place_stone(scene: &str, outcome: &str) -> String {
-        let action =
-            r#"{"kind":"place","main":"minecraft:stone","off":"minecraft:air","hand":"main",
-            "itemClass":"BlockItem","itemUseOn":false,"pos":[0,64,0],"face":"up",
+        click_top("minecraft:stone", "BlockItem", scene, outcome)
+    }
+
+    /// 主手拿着 `item` 点 (0, 64, 0) 的顶面。
+    fn click_top(item: &str, class: &str, scene: &str, outcome: &str) -> String {
+        let use_on = class != "BlockItem";
+        let action = format!(
+            r#"{{"kind":"use","main":"{item}","off":"minecraft:air","hand":"main",
+            "itemClass":"{class}","itemUseOn":{use_on},"pos":[0,64,0],"face":"up",
             "loc":["3fe0000000000000","4050400000000000","3fe0000000000000"],"inside":false,
             "actor":["4014000000000000","4050400000000000","4014000000000000"],
             "yaw":"00000000","pitch":"00000000","sneak":false,
             "box":["4012666666666666","4050400000000000","4012666666666666",
-                   "4015999999999999","4050c00000000000","4015999999999999"],"others":[]}"#
-                .replace('\n', " ");
+                   "4015999999999999","4050c00000000000","4015999999999999"],"others":[]}}"#
+        )
+        .replace('\n', " ");
         format!(
             r#"{{"type":"case","id":0,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
         )
@@ -758,6 +807,36 @@ mod tests {
         assert!(verdict_of(&wrong_result).is_err());
         let wrong_world = place_stone(&scene, &answer("success", "[]"));
         assert!(verdict_of(&wrong_world).is_err());
+    }
+
+    #[test]
+    fn a_ported_item_use_on_is_compared() {
+        let scene = format!("[[0,64,0,{}]]", blocks::STONE);
+        let fire = format!("[[0,65,0,{}]]", blocks::FIRE);
+        let flint = "minecraft:flint_and_steel";
+        let lit = click_top(
+            flint,
+            "FlintAndSteelItem",
+            &scene,
+            &answer("success", &fire),
+        );
+        assert_eq!(verdict_of(&lit), Ok(()));
+        let left_alone = click_top(flint, "FlintAndSteelItem", &scene, &answer("pass", "[]"));
+        assert!(verdict_of(&left_alone).is_err());
+    }
+
+    #[test]
+    fn an_unported_item_use_on_is_not_compared() {
+        let scene = format!("[[0,64,0,{}]]", blocks::GRASS_BLOCK);
+        let grown = format!("[[0,65,0,{}]]", blocks::SHORT_GRASS);
+        let case = click_top(
+            "minecraft:bone_meal",
+            "BoneMealItem",
+            &scene,
+            &answer("success", &grown),
+        );
+        assert_eq!(verdict_of(&case), Ok(()));
+        assert!(unported_item_use_on("FlintAndSteelItem").is_none());
     }
 
     #[test]
