@@ -7,7 +7,7 @@ use mc_bamboo_data::{block_of_state, blocks, facts, state_facts};
 use crate::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
     light::{SkyLightSources, sources::updated_lowest_source},
-    palette::{PalettedContainer, pack_values},
+    palette::{PaletteView, PalettedContainer, pack_values},
 };
 
 /// `isAir`：空气、洞穴空气和虚空空气。
@@ -71,6 +71,15 @@ impl Section {
     /// `hasOnlyAir`。
     pub fn is_empty(&self) -> bool {
         self.non_air_blocks == 0
+    }
+
+    /// `maybeHas`：调色板里有满足条件的状态。没有调色板时不知道，按有算。
+    pub fn maybe_has(&self, predicate: impl Fn(u32) -> bool) -> bool {
+        match self.blocks.palette() {
+            PaletteView::Single(state) => predicate(state),
+            PaletteView::Indirect(states) => states.iter().any(|&state| predicate(state)),
+            PaletteView::Global => true,
+        }
     }
 }
 

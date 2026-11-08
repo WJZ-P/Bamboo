@@ -268,10 +268,17 @@ impl LightEngine {
     }
 
     /// 一段里的光源。返回这一段下面还有没有光源。
+    ///
+    /// 写数据时借着这一段，所以要往外照的格子先记下来，写完再按原来的顺序入队。
     fn light_section_sources(&mut self, sources: &Neighborhood<'_>, section: SectionPos) -> bool {
         let section_min = section_bottom(section.y);
         let section_max = section_min + 15;
         let mut sources_below = false;
+        let mut increases = Vec::new();
+        let layer = self
+            .storage
+            .layer_to_write(section)
+            .expect("调用方确认过这一段存着光照");
         for z in 0..16 {
             for x in 0..16 {
                 let lowest = sources.center.lowest_source_y(x, z);
@@ -282,10 +289,6 @@ impl LightEngine {
                 let neighbor_lowest = around.into_iter().max().unwrap_or(i32::MIN);
                 let [north, south, west, east] = around;
                 for y in (section_min.max(lowest)..=section_max).rev() {
-                    let layer = self
-                        .storage
-                        .layer_to_write(section)
-                        .expect("调用方确认过这一段存着光照");
                     layer.set(x, (y & 15) as usize, z, MAX_LEVEL);
                     if y == lowest || y < neighbor_lowest {
                         let node =
@@ -297,11 +300,14 @@ impl LightEngine {
                             y < west,
                             y < east,
                         );
-                        self.enqueue_increase(node, data);
+                        increases.push((node, data));
                     }
                 }
                 sources_below |= lowest < section_min;
             }
+        }
+        for (node, data) in increases {
+            self.enqueue_increase(node, data);
         }
         sources_below
     }

@@ -8,7 +8,7 @@ use super::{
     engine::{LightEngine, PULL_LIGHT_IN_ENTRY, entry},
     properties::{emission, is_empty_shape, opacity, shape_occludes},
 };
-use crate::{MIN_Y, WORLD_HEIGHT};
+use crate::{MIN_Y, SECTION_SIZE, chunk::Chunk};
 
 impl LightEngine {
     /// `getEmission`：光照没打开的区块柱里方块不发光。
@@ -139,20 +139,27 @@ impl LightEngine {
     pub(super) fn propagate_block_light_sources(&mut self, chunks: Chunks<'_>, pos: ChunkPos) {
         self.storage.set_light_enabled(pos, true);
         let chunk = chunks.chunk(pos);
-        for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
-            if chunk.is_section_empty(y) {
+        for (index, section) in chunk.sections().iter().enumerate() {
+            if !section.maybe_has(|state| emission(state) != 0) {
                 continue;
             }
-            for z in 0..16 {
-                for x in 0..16 {
-                    let state = chunk.block(x, y, z);
-                    let emission = emission(state);
-                    if emission != 0 {
-                        let node = BlockPos::new(pos.x * 16 + x as i32, y, pos.z * 16 + z as i32);
-                        let data =
-                            entry::increase_light_from_emission(emission, is_empty_shape(state));
-                        self.enqueue_increase(node, data);
-                    }
+            let bottom = MIN_Y + index as i32 * SECTION_SIZE;
+            for y in bottom..bottom + SECTION_SIZE {
+                self.enqueue_emitters_in_layer(chunk, pos, y);
+            }
+        }
+    }
+
+    /// 一层 16×16 里发光的方块，z、x 升序。
+    fn enqueue_emitters_in_layer(&mut self, chunk: &Chunk, pos: ChunkPos, y: i32) {
+        for z in 0..16 {
+            for x in 0..16 {
+                let state = chunk.block(x, y, z);
+                let emission = emission(state);
+                if emission != 0 {
+                    let node = BlockPos::new(pos.x * 16 + x as i32, y, pos.z * 16 + z as i32);
+                    let data = entry::increase_light_from_emission(emission, is_empty_shape(state));
+                    self.enqueue_increase(node, data);
                 }
             }
         }
