@@ -160,7 +160,7 @@ impl Default for EnderChest {
 pub(crate) struct BlockEventData {
     pub(crate) pos: BlockPos,
     /// 方块的注册表 ID，官方 `triggerEvent` 前要核对方块没变。
-    pub(crate) block: u32,
+    pub(crate) block: usize,
     pub(crate) action: u8,
     pub(crate) data: u8,
 }
@@ -412,12 +412,12 @@ fn stop_open_shulker(region: &mut Region, pos: BlockPos) {
 
 /// 排一个方块事件。方块在这一刻已经没了就不排，队列里已有的相同事件不重复排。
 fn push_block_event(region: &mut Region, pos: BlockPos, action: u8, data: u8) {
-    let Some(block) = region.chunks.block(pos) else {
+    let Some(state) = region.chunks.block(pos) else {
         return;
     };
     let event = BlockEventData {
         pos,
-        block,
+        block: BlockState(state).block_id(),
         action,
         data,
     };
@@ -454,7 +454,7 @@ pub(crate) fn run_block_events(region: &mut Region) {
         let Some(state) = region.chunks.block(event.pos) else {
             continue;
         };
-        if state != event.block {
+        if BlockState(state).block_id() != event.block {
             continue;
         }
         let Some(entry) = region.containers.get_mut(&event.pos) else {
@@ -468,7 +468,7 @@ pub(crate) fn run_block_events(region: &mut Region) {
             action: event.action,
             data: event.data,
             // 官方 `ClientboundBlockEventPacket` 带的是方块注册表 ID，不是状态 ID。
-            block: BlockState(state).block_id() as i32,
+            block: event.block as i32,
         });
         for player in region.players.values() {
             if hears_level_event(player, event.pos) {
