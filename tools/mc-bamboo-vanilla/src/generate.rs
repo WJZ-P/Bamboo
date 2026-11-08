@@ -20,6 +20,9 @@ const CHAT_TYPE_REGISTRY: &str = "minecraft:chat_type";
 const DATA_COMPONENT_TYPE_REGISTRY: &str = "minecraft:data_component_type";
 const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
 const ENTITY_TYPE_REGISTRY: &str = "minecraft:entity_type";
+const POTION_REGISTRY: &str = "minecraft:potion";
+const MOB_EFFECT_REGISTRY: &str = "minecraft:mob_effect";
+const BANNER_PATTERN_REGISTRY: &str = "minecraft:banner_pattern";
 const BLOCK_REGISTRY: &str = "minecraft:block";
 const FLUID_REGISTRY: &str = "minecraft:fluid";
 const ITEM_REGISTRY: &str = "minecraft:item";
@@ -35,6 +38,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
     let heightmaps = heightmaps_file(data)?;
+    let loot = loot_file(data)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
@@ -49,6 +53,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
+    write_file(output_dir, "loot.rs", &loot)?;
     write_file(output_dir, "tags.rs", &tags)
 }
 
@@ -59,7 +64,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod loot;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -821,13 +826,15 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, max_damage: {}, enchantable: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
             item.name,
             item_kind(item)?,
             item.block,
             item.wall_block,
             item.attachment,
             item.max_stack_size,
+            item.max_damage.map_or("None".to_owned(), |value| format!("Some({value})")),
+            item.enchantable.map_or("None".to_owned(), |value| format!("Some({value})")),
             item.can_destroy_blocks_in_creative,
             item.consumable,
             compost_layers_of(item),
@@ -954,6 +961,10 @@ fn registries_file(data: &VersionData) -> String {
         DATA_COMPONENT_TYPE_REGISTRY,
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
+    // 战利品表要按名字查这些注册表，比如药水、状态效果和旗帜图案。
+    write_registry_ids(&mut out, data, "potion", POTION_REGISTRY);
+    write_registry_ids(&mut out, data, "mob_effect", MOB_EFFECT_REGISTRY);
+    write_registry_ids(&mut out, data, "banner_pattern", BANNER_PATTERN_REGISTRY);
     out
 }
 
@@ -969,6 +980,15 @@ fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, regist
 
     let _ = writeln!(out, "pub mod {module} {{");
     let _ = writeln!(out, "    pub const TOTAL: u32 = {};", entries.len());
+    let _ = writeln!(
+        out,
+        "    /// 条目名，下标就是注册表 ID。\n    pub static NAMES: &[&str] = &[{}];",
+        entries
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     for (id, name) in entries.iter().enumerate() {
         let _ = writeln!(out, "    pub const {}: i32 = {id};", constant_name(name));
     }
@@ -1060,6 +1080,141 @@ fn tags_file(data: &VersionData) -> Result<String, String> {
     Ok(out)
 }
 
+/// 战利品表、它的条件注册表和方块到掉落表的对应，都是官方数据包里的原文。
+fn loot_file(data: &VersionData) -> Result<String, String> {
+    for (name, text) in &data.loot_tables {
+        serde_json::from_str::<serde_json::Value>(text)
+            .map_err(|error| format!("战利品表 {name} 不是合法的 JSON：{error}"))?;
+    }
+
+    let mut block_tables = Vec::new();
+    for block in &data.blocks {
+        let Some(table) = &block.loot_table else {
+            continue;
+        };
+        if !data.loot_tables.contains_key(table) {
+            return Err(format!("{} 的掉落表 {table} 不存在", block.name));
+        }
+        block_tables.push((block.name.as_str(), table.as_str()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "//! 官方数据包里的战利品表原文。解析和求值在 `mc-bamboo-loot`。\n"
+    );
+    write_string_map(&mut out, "战利品表：名字 → 官方 JSON 原文。", "LOOT_TABLES", &data.loot_tables);
+    write_string_map(
+        &mut out,
+        "`predicate` 注册表：战利品条件，战利品表用名字引用它们。",
+        "LOOT_PREDICATES",
+        &data.loot_predicates,
+    );
+    write_string_map(
+        &mut out,
+        "`context_int_provider` 注册表：战利品表按名字引用的整数提供器。",
+        "CONTEXT_INT_PROVIDERS",
+        &data.context_int_providers,
+    );
+    write_string_map(
+        &mut out,
+        "`context_float_provider` 注册表：战利品表按名字引用的浮点提供器。",
+        "CONTEXT_FLOAT_PROVIDERS",
+        &data.context_float_providers,
+    );
+    write_string_map(
+        &mut out,
+        "官方数据包里的附魔定义原文：名字 → JSON。",
+        "ENCHANTMENTS",
+        &data.enchantments,
+    );
+    write_string_map(
+        &mut out,
+        "官方数据包里的烧炼配方原文：名字 → JSON，只有 `minecraft:smelting`。",
+        "SMELTING_RECIPES",
+        &data.smelting_recipes,
+    );
+
+    let mut instant_effects = data.instant_mob_effects.clone();
+    instant_effects.sort();
+    let _ = writeln!(out, "/// `MobEffect.isInstantaneous()` 为真的效果。");
+    let _ = writeln!(
+        out,
+        "pub static INSTANT_MOB_EFFECTS: &[&str] = &{instant_effects:?};\n"
+    );
+    let _ = writeln!(out, "/// 这个效果是不是瞬时的。");
+    let _ = writeln!(
+        out,
+        "pub fn mob_effect_is_instantaneous(name: &str) -> bool {{ INSTANT_MOB_EFFECTS.binary_search(&name).is_ok() }}\n"
+    );
+
+    let _ = writeln!(out, "/// 方块 → 它的掉落表。没有掉落表的方块不在这里。");
+    let _ = writeln!(out, "pub static BLOCK_LOOT_TABLES: &[(&str, &str)] = &[");
+    for (block, table) in &block_tables {
+        let _ = writeln!(out, "    ({block:?}, {table:?}),");
+    }
+    let _ = writeln!(out, "];\n");
+
+    let _ = writeln!(out, "/// 按名字查战利品表，名字要带命名空间。");
+    let _ = writeln!(
+        out,
+        "pub fn loot_table(name: &str) -> Option<&'static str> {{ lookup(LOOT_TABLES, name) }}\n"
+    );
+    let _ = writeln!(out, "/// 按名字查战利品条件。");
+    let _ = writeln!(
+        out,
+        "pub fn loot_predicate(name: &str) -> Option<&'static str> {{ lookup(LOOT_PREDICATES, name) }}\n"
+    );
+    let _ = writeln!(out, "/// 按名字查整数提供器。");
+    let _ = writeln!(
+        out,
+        "pub fn context_int_provider(name: &str) -> Option<&'static str> {{ lookup(CONTEXT_INT_PROVIDERS, name) }}\n"
+    );
+    let _ = writeln!(out, "/// 按名字查浮点提供器。");
+    let _ = writeln!(
+        out,
+        "pub fn context_float_provider(name: &str) -> Option<&'static str> {{ lookup(CONTEXT_FLOAT_PROVIDERS, name) }}\n"
+    );
+    let _ = writeln!(out, "/// 按名字查附魔定义。");
+    let _ = writeln!(
+        out,
+        "pub fn enchantment(name: &str) -> Option<&'static str> {{ lookup(ENCHANTMENTS, name) }}\n"
+    );
+    let _ = writeln!(out, "/// 按名字查烧炼配方。");
+    let _ = writeln!(
+        out,
+        "pub fn smelting_recipe(name: &str) -> Option<&'static str> {{ lookup(SMELTING_RECIPES, name) }}\n"
+    );
+    let _ = writeln!(out, "/// 按方块查掉落表。");
+    let _ = writeln!(
+        out,
+        "pub fn block_loot_table(block: &str) -> Option<&'static str> {{ lookup(BLOCK_LOOT_TABLES, block) }}"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "fn lookup(list: &'static [(&'static str, &'static str)], name: &str) -> Option<&'static str> {{");
+    let _ = writeln!(
+        out,
+        "    list.binary_search_by(|(key, _)| key.cmp(&name)).ok().map(|index| list[index].1)"
+    );
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+/// 写一张按键排序的名字表。`BTreeMap` 的顺序就是二分查找需要的顺序。
+fn write_string_map(
+    out: &mut String,
+    doc: &str,
+    name: &str,
+    map: &BTreeMap<String, String>,
+) {
+    let _ = writeln!(out, "/// {doc}");
+    let _ = writeln!(out, "pub static {name}: &[(&str, &str)] = &[");
+    for (key, value) in map {
+        let _ = writeln!(out, "    ({key:?}, {value:?}),");
+    }
+    let _ = writeln!(out, "];\n");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,6 +1235,7 @@ mod tests {
             fields: Vec::new(),
             instrument: "harp".to_owned(),
             dynamic_shape: false,
+            loot_table: None,
             offset: None,
         }
     }
@@ -1099,6 +1255,8 @@ mod tests {
             wall_block: None,
             attachment: None,
             max_stack_size: 64,
+            max_damage: None,
+            enchantable: None,
             can_destroy_blocks_in_creative: true,
             consumable: false,
             compostable: None,

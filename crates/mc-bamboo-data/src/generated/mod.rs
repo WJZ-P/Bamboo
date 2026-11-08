@@ -7,6 +7,7 @@ pub mod blocks;
 pub mod heightmaps;
 pub mod items;
 pub mod light;
+pub mod loot;
 pub mod packets;
 pub mod registries;
 pub mod shapes;

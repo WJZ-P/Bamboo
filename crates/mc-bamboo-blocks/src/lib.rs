@@ -36,7 +36,7 @@ pub use interact::{
     InteractionResult, Outcome, destroy_block, run_scheduled_ticks, use_item, use_item_on,
 };
 pub use level::{Effect, Level, RedstoneMemory};
-pub use random::{LegacyRandom, LevelRandom};
+pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};

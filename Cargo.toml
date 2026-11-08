@@ -17,6 +17,7 @@ mc-bamboo-blocks = { path = "crates/mc-bamboo-blocks", version = "0.0.0" }
 mc-bamboo-core = { path = "crates/mc-bamboo-core", version = "0.0.0" }
 mc-bamboo-data = { path = "crates/mc-bamboo-data", version = "0.0.0" }
 mc-bamboo-game = { path = "crates/mc-bamboo-game", version = "0.0.0" }
+mc-bamboo-loot = { path = "crates/mc-bamboo-loot", version = "0.0.0" }
 mc-bamboo-nbt = { path = "crates/mc-bamboo-nbt", version = "0.0.0" }
 mc-bamboo-protocol = { path = "crates/mc-bamboo-protocol", version = "0.0.0" }
 mc-bamboo-server = { path = "crates/mc-bamboo-server", version = "0.0.0" }

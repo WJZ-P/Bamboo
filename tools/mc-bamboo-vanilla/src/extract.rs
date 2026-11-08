@@ -40,6 +40,20 @@ pub struct Extracted {
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
     pub heightmaps: Vec<HeightmapType>,
+    /// 数据包里的战利品表原文：带命名空间的名字 → JSON。
+    pub loot_tables: BTreeMap<String, String>,
+    /// `predicate` 注册表条目的原文。
+    pub loot_predicates: BTreeMap<String, String>,
+    /// `context_int_provider` 注册表条目的原文。
+    pub context_int_providers: BTreeMap<String, String>,
+    /// `context_float_provider` 注册表条目的原文。
+    pub context_float_providers: BTreeMap<String, String>,
+    /// 数据包里的附魔定义原文：带命名空间的名字 → JSON。
+    pub enchantments: BTreeMap<String, String>,
+    /// 数据包里的烧炼配方原文，只有 `minecraft:smelting`。
+    pub smelting_recipes: BTreeMap<String, String>,
+    /// `MobEffect.isInstantaneous()` 为真的效果。
+    pub instant_mob_effects: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +116,8 @@ pub struct Block {
     pub fields: Vec<BlockField>,
     pub instrument: String,
     pub dynamic_shape: bool,
+    /// `BlockBehaviour.getLootTable`，没有掉落表时是 `None`。
+    pub loot_table: Option<String>,
     pub offset: Option<BlockOffset>,
 }
 
@@ -294,6 +310,10 @@ pub struct Item {
     pub wall_block: Option<i32>,
     pub attachment: Option<i32>,
     pub max_stack_size: i32,
+    /// `max_damage` 组件，没有这个组件时物品不能受损。
+    pub max_damage: Option<i32>,
+    /// `enchantable` 组件的 `value`，附魔台的等级计算要用。
+    pub enchantable: Option<i32>,
     pub can_destroy_blocks_in_creative: bool,
     pub consumable: bool,
     /// `compostable` 组件的 `layers`。
@@ -314,6 +334,10 @@ struct ItemReport {
 struct ItemComponents {
     #[serde(rename = "minecraft:max_stack_size")]
     max_stack_size: i32,
+    #[serde(rename = "minecraft:max_damage")]
+    max_damage: Option<i32>,
+    #[serde(rename = "minecraft:enchantable")]
+    enchantable: Option<EnchantableComponent>,
     #[serde(rename = "minecraft:tool")]
     tool: Option<ToolComponent>,
     #[serde(rename = "minecraft:consumable")]
@@ -333,6 +357,11 @@ struct ItemComponents {
 #[derive(Debug, Deserialize)]
 struct ToolComponent {
     can_destroy_blocks_in_creative: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnchantableComponent {
+    value: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -489,6 +518,17 @@ pub struct VersionData {
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
+    /// 战利品表原文：带命名空间的名字 → JSON。
+    pub loot_tables: BTreeMap<String, String>,
+    pub loot_predicates: BTreeMap<String, String>,
+    pub context_int_providers: BTreeMap<String, String>,
+    pub context_float_providers: BTreeMap<String, String>,
+    /// 附魔定义原文：带命名空间的名字 → JSON。
+    pub enchantments: BTreeMap<String, String>,
+    /// 烧炼配方原文，只有 `minecraft:smelting`。
+    pub smelting_recipes: BTreeMap<String, String>,
+    /// `MobEffect.isInstantaneous()` 为真的效果。
+    pub instant_mob_effects: Vec<String>,
 }
 
 pub fn run(
@@ -498,6 +538,32 @@ pub fn run(
     workspace_root: &Path,
 ) -> Result<VersionData, String> {
     run_reports(java, server_jar, work_dir)?;
+    read_version_data(java, work_dir, workspace_root)
+}
+
+/// 不重新跑官方数据生成器，直接用上一次留下的报告重新运行 `Extractor.java`。
+///
+/// 报告只由服务端 jar 决定，换 jar 时必须先跑一遍 `generate`。
+pub fn extract_existing(
+    java: &str,
+    work_dir: &Path,
+    workspace_root: &Path,
+) -> Result<VersionData, String> {
+    let reports = work_dir.join(GENERATED_DIR).join("reports");
+    if !reports.is_dir() {
+        return Err(format!(
+            "{} 不存在，先运行一次 generate",
+            reports.display()
+        ));
+    }
+    read_version_data(java, work_dir, workspace_root)
+}
+
+fn read_version_data(
+    java: &str,
+    work_dir: &Path,
+    workspace_root: &Path,
+) -> Result<VersionData, String> {
     let extracted_path = work_dir.join("extracted.json");
     run_extractor(java, work_dir, workspace_root, &extracted_path)?;
 
@@ -536,6 +602,13 @@ pub fn run(
         heightmaps: extracted.heightmaps,
         builtin_registries,
         packets,
+        loot_tables: extracted.loot_tables,
+        loot_predicates: extracted.loot_predicates,
+        context_int_providers: extracted.context_int_providers,
+        context_float_providers: extracted.context_float_providers,
+        enchantments: extracted.enchantments,
+        smelting_recipes: extracted.smelting_recipes,
+        instant_mob_effects: extracted.instant_mob_effects,
     })
 }
 
@@ -676,6 +749,8 @@ fn read_items(
                 .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
             Ok(Item {
                 max_stack_size: components.max_stack_size,
+                max_damage: components.max_damage,
+                enchantable: components.enchantable.map(|component| component.value),
                 can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
                 consumable: components.consumable.is_some(),
                 compostable: components

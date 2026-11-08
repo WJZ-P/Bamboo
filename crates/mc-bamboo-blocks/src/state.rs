@@ -79,6 +79,17 @@ impl BlockState {
         self.try_get(property).is_some()
     }
 
+    /// 按属性名取官方序列化名。谓词按名字比较属性，和官方 `getValue(property)` 一致。
+    pub fn property_state(self, name: &str) -> Option<&'static str> {
+        let slot = PropertySlot::find(self, name)?;
+        Some(slot.def.values[slot.current_index(self)])
+    }
+
+    /// 按属性名取所有值的官方顺序，范围比较时用来确定 `compareTo` 的顺序。
+    pub fn property_values(self, name: &str) -> Option<&'static [&'static str]> {
+        PropertySlot::find(self, name).map(|slot| slot.def.values)
+    }
+
     /// 改属性的值。方块没有这个属性或者没有这个值时 panic，和官方的 `setValue` 一样。
     #[must_use]
     pub fn with<T: PropertyValue>(self, property: Property<T>, value: T) -> Self {

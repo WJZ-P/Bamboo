@@ -3,6 +3,8 @@
 //! ```text
 //! mc-bamboo-vanilla generate <server.jar> [java 路径]
 //!     从官方服务端生成 mc-bamboo-data 的版本数据
+//! mc-bamboo-vanilla extract [java 路径]
+//!     不重跑官方数据生成器，用 target/vanilla 里上次的报告重新导出数据
 //! mc-bamboo-vanilla probe <地址> <端口> [java 路径]
 //!     用官方网络代码连接正在运行的 Bamboo，检查它发的每个包
 //! mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure]
@@ -47,7 +49,7 @@ const PROBE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/Probe.java";
 const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
-const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
+const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]";
 
@@ -67,6 +69,8 @@ fn run() -> Result<(), String> {
     match args[..] {
         ["generate", server_jar] => generate(server_jar, "java"),
         ["generate", server_jar, java] => generate(server_jar, java),
+        ["extract"] => extract("java"),
+        ["extract", java] => extract(java),
         ["probe", host, port] => probe(host, port, "java"),
         ["probe", host, port, java] => probe(host, port, java),
         ["oracle", java, ref options @ ..] => oracle(java, options),
@@ -90,6 +94,23 @@ fn generate(server_jar: &str, java: &str) -> Result<(), String> {
 
     println!(
         "已生成 Minecraft {} 的数据（协议 {}）",
+        data.version.name, data.version.protocol
+    );
+    Ok(())
+}
+
+/// 用上次 `generate` 留下的报告重跑 `Extractor.java`，再写一遍生成文件。
+fn extract(java: &str) -> Result<(), String> {
+    let root = workspace_root();
+    let work_dir = root.join(WORK_DIR);
+    let data = extract::extract_existing(java, &work_dir, &root)?;
+
+    let output_dir = root.join(OUTPUT_DIR);
+    fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
+    generate::write_all(&data, &output_dir)?;
+
+    println!(
+        "已用现有的报告重新生成 Minecraft {} 的数据（协议 {}）",
         data.version.name, data.version.protocol
     );
     Ok(())
