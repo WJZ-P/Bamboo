@@ -107,7 +107,7 @@ pub(crate) fn tick_editors(region: &mut Region) {
         let in_range = region.players.values().any(|player| {
             *player.uuid.as_bytes() == editor
                 && interaction::within_block_interaction_range(
-                    player.position,
+                    player.position(),
                     player.eye_height(),
                     interaction::interaction_range(player.game_mode),
                     pos,

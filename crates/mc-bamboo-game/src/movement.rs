@@ -10,6 +10,7 @@ use crate::{
     inbound::PlayerId,
     links::Links,
     player::Player,
+    player_grid::PlayerGrid,
     region::{Region, RegionTick},
 };
 
@@ -51,11 +52,17 @@ impl Teleport {
 }
 
 /// 把玩家传送到 `target`，朝向不变。
-pub(crate) fn teleport(player: &mut Player, links: &mut Links, now: RegionTick, target: Vec3) {
+pub(crate) fn teleport(
+    player: &mut Player,
+    links: &mut Links,
+    grid: &mut PlayerGrid,
+    now: RegionTick,
+    target: Vec3,
+) {
     let teleport_id = player.teleport.next_id();
     player.teleport.sent_at = now;
     player.teleport.awaiting_position = Some(target);
-    player.position = target;
+    player.set_position(grid, target);
     let Vec3 { x, y, z } = target;
     let packet = PlayerPosition {
         teleport_id,
@@ -87,7 +94,13 @@ pub(crate) fn on_move_player(
     if let Some(awaiting) = player.teleport.awaiting_position {
         // 这个包可能是传送之前发的，位置不能信。朝向不影响别的东西，可以照常更新。
         if region.tick.since(player.teleport.sent_at) > TELEPORT_RESEND_TICKS {
-            teleport(player, &mut region.links, region.tick, awaiting);
+            teleport(
+                player,
+                &mut region.links,
+                &mut region.player_grid,
+                region.tick,
+                awaiting,
+            );
         }
         if let Some((yaw, pitch)) = rotation {
             set_rotation(player, yaw, pitch);
@@ -95,9 +108,16 @@ pub(crate) fn on_move_player(
         return;
     }
 
-    let position = position.unwrap_or(player.position);
+    let position = position.unwrap_or(player.position());
     let (yaw, pitch) = rotation.unwrap_or((player.yaw, player.pitch));
-    accept_movement(player, position, yaw, pitch, on_ground);
+    accept_movement(
+        player,
+        &mut region.player_grid,
+        position,
+        yaw,
+        pitch,
+        on_ground,
+    );
 }
 
 /// 处理 `accept_teleportation`。
@@ -126,8 +146,8 @@ pub(crate) fn on_accept_teleportation(
         return;
     }
 
-    player.position = awaiting;
-    accept_movement(player, position, yaw, pitch, false);
+    player.set_position(&mut region.player_grid, awaiting);
+    accept_movement(player, &mut region.player_grid, position, yaw, pitch, false);
 }
 
 fn invalid_movement() -> Component {
@@ -143,12 +163,20 @@ fn has_invalid_values(position: Vec3, (yaw, pitch): (f32, f32)) -> bool {
         || !pitch.is_finite()
 }
 
-fn accept_movement(player: &mut Player, position: Vec3, yaw: f32, pitch: f32, on_ground: bool) {
-    player.position = Vec3::new(
+fn accept_movement(
+    player: &mut Player,
+    grid: &mut PlayerGrid,
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+) {
+    let position = Vec3::new(
         position.x.clamp(-MAX_HORIZONTAL, MAX_HORIZONTAL),
         position.y.clamp(-MAX_VERTICAL, MAX_VERTICAL),
         position.z.clamp(-MAX_HORIZONTAL, MAX_HORIZONTAL),
     );
+    player.set_position(grid, position);
     set_rotation(player, yaw, pitch);
     player.on_ground = on_ground;
 }
@@ -267,8 +295,14 @@ mod tests {
             ClientInformation::default(),
             Vec3::default(),
         );
-        teleport(&mut player, &mut region.links, region.tick, SPAWN);
-        region.players.insert(PLAYER, player);
+        teleport(
+            &mut player,
+            &mut region.links,
+            &mut region.player_grid,
+            region.tick,
+            SPAWN,
+        );
+        region.insert_player(player);
         (region, recorder)
     }
 
@@ -345,7 +379,7 @@ mod tests {
         on_accept_teleportation(&mut region, PLAYER, id, Vec3::new(x, y, z), (yaw, pitch));
 
         assert!(!player(&region).teleport.is_awaiting());
-        assert_eq!(player(&region).position, SPAWN);
+        assert_eq!(player(&region).position(), SPAWN);
     }
 
     #[test]
@@ -353,13 +387,13 @@ mod tests {
         let (mut region, recorder) = settled_region();
 
         move_to(&mut region, Vec3::new(5.0e7, 9.0e9, -5.0e7));
-        assert_eq!(player(&region).position, Vec3::new(3.0e7, 2.0e7, -3.0e7));
+        assert_eq!(player(&region).position(), Vec3::new(3.0e7, 2.0e7, -3.0e7));
 
         move_to(
             &mut region,
             Vec3::new(f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
         );
-        assert_eq!(player(&region).position, Vec3::new(3.0e7, -2.0e7, -3.0e7));
+        assert_eq!(player(&region).position(), Vec3::new(3.0e7, -2.0e7, -3.0e7));
         assert!(!recorder.closed());
     }
 
@@ -381,7 +415,7 @@ mod tests {
                     .ends_with(&encode_frames(&Disconnect { reason: &reason }))
             );
             assert!(recorder.closed());
-            assert_eq!(player(&region).position, SPAWN);
+            assert_eq!(player(&region).position(), SPAWN);
         }
     }
 
@@ -407,21 +441,21 @@ mod tests {
         let target = Vec3::new(1.0, 2.0, 3.0);
 
         on_move_player(&mut region, PLAYER, Some(target), Some((90.0, -45.0)), true);
-        assert_eq!(player(&region).position, target);
+        assert_eq!(player(&region).position(), target);
         assert_eq!((player(&region).yaw, player(&region).pitch), (90.0, -45.0));
         assert!(player(&region).on_ground);
 
         on_move_player(&mut region, PLAYER, None, Some((10.0, 20.0)), false);
-        assert_eq!(player(&region).position, target);
+        assert_eq!(player(&region).position(), target);
         assert_eq!((player(&region).yaw, player(&region).pitch), (10.0, 20.0));
         assert!(!player(&region).on_ground);
 
         on_move_player(&mut region, PLAYER, Some(SPAWN), None, true);
-        assert_eq!(player(&region).position, SPAWN);
+        assert_eq!(player(&region).position(), SPAWN);
         assert_eq!((player(&region).yaw, player(&region).pitch), (10.0, 20.0));
 
         on_move_player(&mut region, PLAYER, None, None, false);
-        assert_eq!(player(&region).position, SPAWN);
+        assert_eq!(player(&region).position(), SPAWN);
         assert_eq!((player(&region).yaw, player(&region).pitch), (10.0, 20.0));
         assert!(!player(&region).on_ground);
     }
@@ -432,7 +466,7 @@ mod tests {
 
         move_to(&mut region, Vec3::new(8.5, 300.0, 8.5));
 
-        assert_eq!(player(&region).position.y, 300.0);
+        assert_eq!(player(&region).position().y, 300.0);
         assert_eq!(player(&region).chunk_pos(), ChunkPos::new(0, 0));
 
         move_to(&mut region, Vec3::new(-0.5, 300.0, 16.5));
@@ -452,7 +486,7 @@ mod tests {
         );
 
         let waiting = player(&region);
-        assert_eq!(waiting.position, SPAWN);
+        assert_eq!(waiting.position(), SPAWN);
         assert_eq!((waiting.yaw, waiting.pitch), (-170.0, 90.0));
         assert!(!waiting.on_ground);
         assert!(waiting.teleport.is_awaiting());
@@ -476,7 +510,7 @@ mod tests {
 
         let settled = player(&region);
         assert!(!settled.teleport.is_awaiting());
-        assert_eq!(settled.position, reported);
+        assert_eq!(settled.position(), reported);
         assert_eq!((settled.yaw, settled.pitch), (-170.0, -90.0));
         assert!(!settled.on_ground);
     }
@@ -493,7 +527,7 @@ mod tests {
             (0.0, 0.0),
         );
 
-        assert_eq!(player(&region).position, Vec3::new(3.0e7, 0.0, 0.0));
+        assert_eq!(player(&region).position(), Vec3::new(3.0e7, 0.0, 0.0));
     }
 
     #[test]
@@ -550,7 +584,7 @@ mod tests {
         advance(&mut region, 1);
         move_to(&mut region, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(recorder_ids(&mut region, &recorder), [1, 2]);
-        assert_eq!(player(&region).position, SPAWN);
+        assert_eq!(player(&region).position(), SPAWN);
 
         // 重发之后旧 id 不算数，新 id 才能结束等待。
         on_accept_teleportation(&mut region, PLAYER, 1, SPAWN, (0.0, 0.0));

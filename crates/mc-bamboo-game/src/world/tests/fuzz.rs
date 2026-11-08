@@ -879,7 +879,7 @@ fn check_tick(server: &Harness, actor: &mut Actor) {
     let acknowledged = actor.model.acknowledged.take();
     let expected = actor.expected_ack.take();
     if actor.client.is_closed() {
-        let position = server.player(&actor.client).position;
+        let position = server.player(&actor.client).position();
         let kicked_at = *actor.kicked_at.get_or_insert(position);
         assert_eq!(
             position, kicked_at,
@@ -1007,8 +1007,8 @@ fn check_convergence(server: &Harness, actors: &[Actor], view_distance: i32) {
 /// `viewer` 的客户端应该有 `target` 这个实体。`entities.md` 第 4 节。
 fn should_see(viewer: &Player, target: &Player, view_distance: i32) -> bool {
     let range = f64::from((viewer.view_distance(view_distance) * 16).min(512));
-    let dx = viewer.position.x - target.position.x;
-    let dz = viewer.position.z - target.position.z;
+    let dx = viewer.position().x - target.position().x;
+    let dz = viewer.position().z - target.position().z;
     viewer.id != target.id
         && dx * dx + dz * dz <= range * range
         && viewer.chunks.is_chunk_tracked(target.chunk_pos())

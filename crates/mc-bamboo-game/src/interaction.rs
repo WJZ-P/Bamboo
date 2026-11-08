@@ -170,7 +170,7 @@ fn actor_of(player: &Player) -> Actor {
     };
     Actor {
         uuid: *player.uuid.as_bytes(),
-        position: player.position,
+        position: player.position(),
         yaw: player.yaw,
         head_yaw: player.head_yaw,
         pitch: player.pitch,
@@ -201,7 +201,7 @@ pub(crate) fn interaction_range(game_mode: GameMode) -> f64 {
 /// 玩家能不能够到这个方块。`blocks-inventory.md` 6.1。
 pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
     within_block_interaction_range(
-        player.position,
+        player.position(),
         player.eye_height(),
         interaction_range(player.game_mode),
         pos,
@@ -335,15 +335,41 @@ fn send_level_event(
     event: &impl mc_bamboo_protocol::packet::ClientboundPacket,
 ) {
     let frames = encode_frames(event);
-    for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, pos) {
-            region.links.send_frames(player.id, &frames);
+    // 先从网格挑出附近的候选，再做和官方一样的距离判断。
+    // Pick nearby candidates from the grid, then apply the same distance check as vanilla.
+    let Region {
+        players,
+        player_grid,
+        links,
+        ..
+    } = region;
+    let x = f64::from(pos.x);
+    let z = f64::from(pos.z);
+    let mut sent = 0;
+    for id in player_grid.near(x, z, LEVEL_EVENT_RADIUS) {
+        if Some(id) != except
+            && players
+                .get(&id)
+                .is_some_and(|player| hears_level_event(player, pos))
+        {
+            links.send_frames(id, &frames);
+            sent += 1;
         }
     }
+    // 网格漏记了谁，这名玩家就会悄悄收不到包。测试构建里每次都和全量扫描对一遍。
+    // A player missing from the grid would silently miss packets, so debug builds compare against a full scan.
+    debug_assert_eq!(
+        sent,
+        players
+            .values()
+            .filter(|player| Some(player.id) != except && hears_level_event(player, pos))
+            .count(),
+        "player grid is out of sync with player positions"
+    );
 }
 
 pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
-    let Vec3 { x, y, z } = player.position;
+    let Vec3 { x, y, z } = player.position();
     let dx = f64::from(pos.x) - x;
     let dy = f64::from(pos.y) - y;
     let dz = f64::from(pos.z) - z;

@@ -1095,9 +1095,9 @@ fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
         return false;
     };
     let eye = Vec3::new(
-        player.position.x,
-        player.position.y + player.eye_height(),
-        player.position.z,
+        player.position().x,
+        player.position().y + player.eye_height(),
+        player.position().z,
     );
     match menu.target {
         Target::Single(pos) => in_reach(region, pos, menu.kind, eye),

@@ -40,6 +40,7 @@ mod links;
 mod menu;
 mod movement;
 mod player;
+mod player_grid;
 mod region;
 mod sign;
 mod world;

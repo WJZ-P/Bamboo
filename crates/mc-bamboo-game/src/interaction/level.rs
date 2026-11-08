@@ -85,9 +85,9 @@ impl Level for RegionLevel<'_> {
     /// 这个世界只有创造模式，没有旁观者。
     fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool {
         let corner = pos.corner();
-        self.players
-            .values()
-            .any(|player| player.position.distance_to_sqr(corner).sqrt() < f64::from(max_distance))
+        self.players.values().any(|player| {
+            player.position().distance_to_sqr(corner).sqrt() < f64::from(max_distance)
+        })
     }
 
     /// 读的是上一轮光照算完时的结果，和官方一样：这次操作改的方块要等到下一轮才影响光照。

@@ -197,6 +197,7 @@ impl World {
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
+        self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {
             self.region.links.broadcast(&frames);
         }
