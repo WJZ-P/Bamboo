@@ -27,6 +27,7 @@ mod menu;
 mod portal;
 mod potent_sulfur;
 mod pumpkin;
+mod redstone;
 mod redstone_ore;
 mod respawn_anchor;
 mod scaffolding;
@@ -68,6 +69,7 @@ use self::{
     portal::NetherPortal,
     potent_sulfur::PotentSulfur,
     pumpkin::Pumpkin,
+    redstone::{Powered, RedstoneLamp, Target},
     redstone_ore::RedstoneOre,
     respawn_anchor::RespawnAnchor,
     scaffolding::Scaffolding,
@@ -136,8 +138,10 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         C::PathBlock => Some(&DirtPath),
         C::PointedDripstoneBlock | C::SulfurSpikeBlock => Some(&Speleothem),
         C::PotentSulfurBlock => Some(&PotentSulfur),
+        C::PoweredBlock => Some(&Powered),
         C::PumpkinBlock => Some(&Pumpkin),
         C::RedStoneOreBlock => Some(&RedstoneOre),
+        C::RedstoneLampBlock => Some(&RedstoneLamp),
         C::RespawnAnchorBlock => Some(&RespawnAnchor),
         C::ScaffoldingBlock => Some(&Scaffolding),
         C::SculkCatalystBlock => Some(&SculkCatalyst),
@@ -149,6 +153,7 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         C::SoulFireBlock => Some(&SoulFire),
         C::SpongeBlock => Some(&Sponge),
         C::SporeBlossomBlock => Some(&SporeBlossom),
+        C::TargetBlock => Some(&Target),
         C::TestBlock => Some(&TestBlock),
         C::TntBlock => Some(&Tnt),
         C::TurtleEggBlock => Some(&TurtleEgg),
@@ -173,7 +178,6 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::NetherrackBlock
         | C::NyliumBlock
         | C::PowderSnowBlock
-        | C::PoweredBlock
         | C::RootedDirtBlock
         | C::SculkBlock
         | C::SlimeBlock
@@ -186,16 +190,14 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::TrialSpawnerBlock
         | C::WeatheringCopperFullBlock
         | C::WebBlock => Some(&Plain),
-        // 官方的覆盖在这个世界里都走不到：下落和孵化的计划刻不在范围里，灯和靶子的状态只跟着信号变，
-        // 主世界的水不会蒸发，`GameMasterBlock` 要权限，别的只碰方块实体的内容。
+        // 官方的覆盖在这个世界里都走不到：下落和孵化的计划刻不在范围里，主世界的水不会蒸发，
+        // `GameMasterBlock` 要权限，别的只碰方块实体的内容。
         C::BrushableBlock
         | C::ColoredFallingBlock
         | C::JigsawBlock
-        | C::RedstoneLampBlock
         | C::SandBlock
         | C::SnifferEggBlock
         | C::StructureBlock
-        | C::TargetBlock
         | C::TestInstanceBlock
         | C::WetSpongeBlock => Some(&Plain),
         _ => None,

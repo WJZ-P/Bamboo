@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockState, Level,
+    Aabb, BlockState, Level, RedstoneMemory,
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::BlockPos;
@@ -18,6 +18,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
+    pub(crate) redstone: &'a mut RedstoneMemory,
 }
 
 impl Level for RegionLevel<'_> {
@@ -47,5 +48,13 @@ impl Level for RegionLevel<'_> {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        self.redstone
     }
 }

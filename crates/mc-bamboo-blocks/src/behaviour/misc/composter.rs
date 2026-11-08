@@ -3,7 +3,7 @@
 //! 一个物品能不能加一层是随机的，第 1 章说随机分支取一个确定的值，这里总是加一层。
 //! 官方必定成功的物品（蛋糕、南瓜派）和这里一样，别的物品 oracle 排除。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction};
 
 use crate::{
     behaviour::{Behaviour, common::item_of},
@@ -72,6 +72,16 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) == MAX_LEVEL {
             world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, READY));
         }
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        state.get(LEVEL_COMPOSTER)
     }
 }
 

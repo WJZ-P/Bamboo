@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{blocks, items};
 
-use crate::{Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, shape::Aabb};
+use crate::{
+    Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, level::RedstoneMemory,
+    shape::Aabb,
+};
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -18,6 +21,7 @@ pub(crate) struct TestLevel {
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
     pub(crate) obstructed: bool,
+    redstone: RedstoneMemory,
 }
 
 impl TestLevel {
@@ -62,6 +66,14 @@ impl Level for TestLevel {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
     }
 }
 

@@ -240,21 +240,28 @@ fn destroy_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
 /// 把方块逻辑留下的结果发出去。`initiator` 是发起动作的玩家，计划刻没有发起者。
 fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
-        let Effect::Destroyed {
-            pos,
-            state,
-            except_initiator,
-        } = *effect;
-        let except = initiator.filter(|_| except_initiator);
-        send_destroy_event(region, except, pos, state.0);
+        match *effect {
+            Effect::Destroyed {
+                pos,
+                state,
+                except_initiator,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let event = LevelEvent::destroy_block(pos, state.0 as i32);
+                send_level_event(region, except, &event);
+            }
+            Effect::TorchBurnout { pos } => {
+                send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
+            }
+        }
     }
 }
 
-/// 破坏的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
-fn send_destroy_event(region: &mut Region, except: Option<PlayerId>, pos: BlockPos, state: u32) {
-    let frames = encode_frames(&LevelEvent::destroy_block(pos, state as i32));
+/// 世界事件的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
+fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
+    let frames = encode_frames(event);
     for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, pos) {
+        if Some(player.id) != except && hears_level_event(player, event.pos) {
             region.links.send_frames(player.id, &frames);
         }
     }

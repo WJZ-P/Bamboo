@@ -1,7 +1,8 @@
 //! 用官方代码检查 `mc-bamboo-blocks`。
 //!
-//! `BlockOracle.java` 在 JVM 里运行官方的 `useItemOn`、`destroyBlock`，一题一行写到 stdout。
-//! 这里边读边在同样的场景里重放，比较 `InteractionResult`、世界的变化、破坏事件和范围内的计划刻。
+//! `BlockOracle.java` 在 JVM 里运行官方的 `useItemOn`、`destroyBlock`，有的题之后再走几个游戏刻，
+//! 一题一行写到 stdout。这里边读边在同样的场景里重放，比较 `InteractionResult`、世界的变化、
+//! 破坏事件和范围内还排着的计划刻。
 //! 题目不落盘，20 万题的输出有一百多 MB。
 //!
 //! 一题的结论是下面四种之一：
@@ -30,9 +31,7 @@ use std::{
     thread,
 };
 
-use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
-};
+use mc_bamboo_blocks::{behaviour::is_ported, world::MAX_CHAINED_NEIGHBOR_UPDATES};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
     Block, BlockAncestor, BlockClass, Item, block_id_of_state, blocks, items, version,
@@ -65,13 +64,17 @@ pub enum Rule {
     RandomDelay,
     FallingTick,
     FireTick,
-    RedstoneTick,
+    CommandTick,
     TimerTick,
     EntityTick,
+    Piston,
+    EntityTrigger,
+    Dispensing,
+    DaylightTimer,
 }
 
 impl Rule {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 20] = [
         Self::AnalogInput,
         Self::RandomOutcome,
         Self::RandomLoop,
@@ -85,9 +88,13 @@ impl Rule {
         Self::RandomDelay,
         Self::FallingTick,
         Self::FireTick,
-        Self::RedstoneTick,
+        Self::CommandTick,
         Self::TimerTick,
         Self::EntityTick,
+        Self::Piston,
+        Self::EntityTrigger,
+        Self::Dispensing,
+        Self::DaylightTimer,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -105,16 +112,20 @@ impl Rule {
             Self::RandomDelay => "random delay",
             Self::FallingTick => "falling tick",
             Self::FireTick => "fire tick",
-            Self::RedstoneTick => "redstone tick",
+            Self::CommandTick => "command tick",
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
+            Self::Piston => "piston",
+            Self::EntityTrigger => "entity trigger",
+            Self::Dispensing => "dispensing",
+            Self::DaylightTimer => "daylight timer",
         }
     }
 
     pub const fn reason(self) -> &'static str {
         match self {
             Self::AnalogInput => {
-                "case: a clicked comparator read an analog output, signals do not exist (chapter 1)"
+                "case: a comparator read a jukebox, the record is block entity content Bamboo does not keep"
             }
             Self::RandomOutcome => {
                 "case: the official outcome changes with the random source (chapter 1)"
@@ -140,9 +151,22 @@ impl Rule {
             }
             Self::FallingTick => "tick: blocks do not fall (chapter 1)",
             Self::FireTick => "tick: fire does not spread (chapter 1)",
-            Self::RedstoneTick => "tick: signals do not exist, powered only changes by hand",
+            Self::CommandTick => "tick: command blocks run commands, out of scope",
             Self::TimerTick => "tick: growth and hatching timers are out of scope (chapter 1)",
             Self::EntityTick => "tick: only entities trigger or read this tick, none are simulated",
+            Self::Piston => {
+                "scope: block events are dropped, pistons never move, pushing is the next step"
+            }
+            Self::EntityTrigger => {
+                "scope: plates, detector rails, tripwires, targets, sculk sensors, lightning rods \
+                 and primed TNT need entities, projectiles, vibrations or lightning"
+            }
+            Self::Dispensing => {
+                "scope: dispensers, droppers and crafters are empty, they never dispense or craft"
+            }
+            Self::DaylightTimer => {
+                "scope: daylight detectors follow the sun in a block entity ticker that does not run"
+            }
         }
     }
 
@@ -161,25 +185,15 @@ impl Rule {
     }
 }
 
-/// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较。
-/// 以后做了其中某一种时，把它从表里删掉，比较就打开了。
+/// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
+/// `settle` 里跑过它们的题整道排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::FallingBlock, Rule::FallingTick),
     (BlockAncestor::BrushableBlock, Rule::FallingTick),
     (BlockAncestor::FireBlock, Rule::FireTick),
     (BlockAncestor::LiquidBlock, Rule::FluidTick),
     (BlockAncestor::BubbleColumnBlock, Rule::FluidTick),
-    (BlockAncestor::DiodeBlock, Rule::RedstoneTick),
-    (BlockAncestor::ObserverBlock, Rule::RedstoneTick),
-    (BlockAncestor::RedstoneTorchBlock, Rule::RedstoneTick),
-    (BlockAncestor::RedstoneLampBlock, Rule::RedstoneTick),
-    (BlockAncestor::DispenserBlock, Rule::RedstoneTick),
-    (BlockAncestor::CrafterBlock, Rule::RedstoneTick),
-    (BlockAncestor::CommandBlock, Rule::RedstoneTick),
-    (BlockAncestor::TargetBlock, Rule::RedstoneTick),
-    (BlockAncestor::LightningRodBlock, Rule::RedstoneTick),
-    (BlockAncestor::LecternBlock, Rule::RedstoneTick),
-    (BlockAncestor::SculkSensorBlock, Rule::RedstoneTick),
+    (BlockAncestor::CommandBlock, Rule::CommandTick),
     (BlockAncestor::FrogspawnBlock, Rule::TimerTick),
     (BlockAncestor::SnifferEggBlock, Rule::TimerTick),
     (BlockAncestor::DriedGhastBlock, Rule::TimerTick),
@@ -189,7 +203,6 @@ const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::BasePressurePlateBlock, Rule::EntityTick),
     (BlockAncestor::DetectorRailBlock, Rule::EntityTick),
     (BlockAncestor::TripWireBlock, Rule::EntityTick),
-    (BlockAncestor::BigDripleafBlock, Rule::EntityTick),
 ];
 
 /// 这条规则排除了哪些类的计划刻，打印排除表时用。
@@ -475,7 +488,7 @@ impl Session {
         let header = self.header.as_ref().ok_or("case before the header")?;
         let kind = case.action.kind;
 
-        if let Some(rule) = case_exclusion(case, block) {
+        if let Some(rule) = case_exclusion(case, block, &self.names)? {
             self.report.excluded(block, kind, rule);
             return Ok(());
         }
@@ -518,8 +531,8 @@ fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
 }
 
 /// 不用重放就知道不比较的题。
-fn case_exclusion(case: &Case, block: &Block) -> Option<Rule> {
-    match case.action.kind {
+fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Rule>, String> {
+    let rule = match case.action.kind {
         Kind::Destroy
             if case.outcome.result == "refused"
                 && !block
@@ -529,32 +542,23 @@ fn case_exclusion(case: &Case, block: &Block) -> Option<Rule> {
         {
             Some(Rule::CanDestroyBlock)
         }
-        Kind::Place | Kind::Use if clicks_comparator_with_analog_input(case) => {
-            Some(Rule::AnalogInput)
-        }
         Kind::Tick => tick_exclusion(block),
         _ => None,
+    };
+    match rule {
+        Some(rule) => Ok(Some(rule)),
+        None => settled_out_of_scope(case, names),
     }
 }
 
-/// 点中的比较器会重新读输入。假世界把 `Level` 上的信号都屏蔽了，方块自己的模拟输出还在，
-/// 官方的比较器这时可能亮起来。世界里没有信号，比较器的 `powered` 不跟着变。
-fn clicks_comparator_with_analog_input(case: &Case) -> bool {
-    let state_at = |pos: BlockPos| {
-        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
-        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
-    };
-    let pos = case.action.target();
-    let clicked = state_at(pos);
-    if block_id_of_state(clicked.0) != block_id_of_state(blocks::COMPARATOR) {
-        return false;
+/// `settle` 里跑过不在范围里的计划刻：官方的世界已经被它改过，这道题比不了。
+fn settled_out_of_scope(case: &Case, names: &Names) -> Result<Option<Rule>, String> {
+    for name in &case.outcome.ran {
+        if let Some(rule) = tick_exclusion(names.block(name)?) {
+            return Ok(Some(rule));
+        }
     }
-    let facing = clicked.get(HORIZONTAL_FACING);
-    let input_pos = pos.relative(facing);
-    let input = state_at(input_pos);
-    input.has_analog_output_signal()
-        || input.is_redstone_conductor()
-            && state_at(input_pos.relative(facing)).has_analog_output_signal()
+    Ok(None)
 }
 
 /// 外层的错误是题目本身有问题，内层的错误是 `mc-bamboo-blocks` 的 panic。
@@ -650,7 +654,7 @@ fn in_scope_scheduled(ticks: &[Scheduled], names: &Names) -> Result<Vec<Schedule
     Ok(comparable)
 }
 
-/// 官方的列表按发生顺序写，排序后就是执行顺序，所以没有随机延迟时逐项比较。
+/// 官方的列表按执行顺序写，所以没有随机延迟时逐项比较。
 /// 有随机延迟时执行顺序定不下来，只比较集合。
 fn same_ticks(official: &[Scheduled], ours: &[Scheduled]) -> bool {
     if official.len() != ours.len() {
@@ -717,7 +721,7 @@ mod tests {
             "actor":["4014000000000000","4050400000000000","4014000000000000"],
             "yaw":"00000000","pitch":"00000000","sneak":false,
             "box":["4012666666666666","4050400000000000","4012666666666666",
-                   "4015999999999999","4050c00000000000","4015999999999999"],"others":[]}"#
+                   "4015999999999999","4050c00000000000","4015999999999999"],"others":[],"settle":0}"#
                 .replace('\n', " ");
         format!(
             r#"{{"type":"case","id":0,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
@@ -725,8 +729,13 @@ mod tests {
     }
 
     fn answer(result: &str, changes: &str) -> String {
+        answer_after_ticks(result, changes, "")
+    }
+
+    /// `ran` 是 `settle` 里跑过计划刻的方块，用逗号隔开的带引号的 ID。
+    fn answer_after_ticks(result: &str, changes: &str, ran: &str) -> String {
         format!(
-            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":[],"itemReached":true,"spawned":[],"rng":false}}"#
+            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":[],"ran":[{ran}],"itemReached":true,"spawned":[],"rng":false}}"#
         )
     }
 
@@ -761,14 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn a_comparator_reading_an_analog_output_is_not_compared() {
-        let scene = format!(
-            "[[0,64,0,{}],[0,64,-1,{}]]",
-            blocks::COMPARATOR,
-            blocks::LECTERN
-        );
-        let case = place_stone(&scene, &answer("fail", "[]"));
-        assert_eq!(verdict_of(&case), Ok(()));
+    fn a_case_that_settled_an_out_of_scope_tick_is_not_compared() {
+        let stone = blocks::STONE;
+        let scene = format!("[[0,64,0,{stone}]]");
+        // 官方的沙子落下去了，我们这边不会落，这一题只能排除。
+        let fell = answer_after_ticks("success", "[]", r#""minecraft:sand""#);
+        assert_eq!(verdict_of(&place_stone(&scene, &fell)), Ok(()));
+        let lamp = answer_after_ticks("success", "[]", r#""minecraft:redstone_lamp""#);
+        assert!(verdict_of(&place_stone(&scene, &lamp)).is_err());
     }
 
     #[test]
@@ -848,8 +857,10 @@ mod tests {
     fn out_of_scope_ticks_cover_subclasses() {
         let sand = mc_bamboo_data::block_of_state(blocks::SAND).expect("沙子存在");
         assert_eq!(tick_exclusion(sand), Some(Rule::FallingTick));
+        let chain = mc_bamboo_data::block_of_state(blocks::CHAIN_COMMAND_BLOCK).expect("存在");
+        assert_eq!(tick_exclusion(chain), Some(Rule::CommandTick));
         let repeater = mc_bamboo_data::block_of_state(blocks::REPEATER).expect("中继器存在");
-        assert_eq!(tick_exclusion(repeater), Some(Rule::RedstoneTick));
+        assert_eq!(tick_exclusion(repeater), None);
         let cane = mc_bamboo_data::block_of_state(blocks::SUGAR_CANE).expect("甘蔗存在");
         assert_eq!(tick_exclusion(cane), None);
     }

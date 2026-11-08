@@ -3,7 +3,7 @@
 //! 官方这张表还有水瓶、旗帜和染色物品的条目，它们都要看物品组件。这里的物品没有组件，
 //! 官方默认组件的物品走到这些条目时都是 `TRY_WITH_EMPTY_HAND`，和没有条目一样。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use super::speleothem::{cauldron_fill_fluid, stalactite_tip_above};
@@ -130,12 +130,27 @@ impl Behaviour for Cauldron {
             receive_drip(state, world, pos, fluid);
         }
     }
+
+    /// 岩浆锅总是满的，官方直接写 3。空锅没有覆盖，读出来是 0。
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.is_a(BlockAncestor::LayeredCauldronBlock) {
+            state.get(LEVEL_CAULDRON)
+        } else if state.is_a(BlockAncestor::LavaCauldronBlock) {
+            MAX_FILL_LEVEL
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_core::Direction;
-
     use super::*;
     use crate::{
         behaviour::misc::test_support::tick,

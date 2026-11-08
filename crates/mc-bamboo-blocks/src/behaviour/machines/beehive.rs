@@ -3,6 +3,7 @@
 //! 蜜蜂在方块实体里，这里的蜂巢总是空的：`updateShape` 和 `playerWillDestroy` 里放蜜蜂、
 //! 掉落的部分没有东西要做。采蜜后不管有没有烟，蜜都清零，有烟只是不放蜜蜂。
 
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, items};
 
 use crate::{
@@ -41,5 +42,15 @@ impl Behaviour for Beehive {
             return InteractionResult::Success;
         }
         Plain.use_item_on(state, world, ctx)
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        state.get(LEVEL_HONEY)
     }
 }

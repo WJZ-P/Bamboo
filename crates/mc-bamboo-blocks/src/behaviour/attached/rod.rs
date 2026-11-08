@@ -37,9 +37,15 @@ impl Behaviour for EndRod {
     }
 }
 
-/// `LightningRodBlock`。`onPlace` 和 `tick` 只管闪电打中以后的 8 刻信号，这个世界没有闪电，
-/// 不移植，oracle 的计划刻排除表里有这一项。
+/// `LightningRodBlock`。这个世界没有闪电，打中以后亮起来的那一步不移植，oracle 的排除表里有这一项。
+/// `onPlace` 只管带着信号放下的避雷针，玩家放的不会带。8 刻以后把信号收回来的 `tick` 移植了。
 pub(super) struct LightningRod;
+
+/// `updateNeighbours`：信号只穿过它插着的那一格。
+fn update_neighbours(state: BlockState, world: &mut World, pos: BlockPos) {
+    let front = state.get(FACING).opposite();
+    world.update_neighbors_at(pos.relative(front), state.block());
+}
 
 impl Behaviour for LightningRod {
     fn state_for_placement(
@@ -69,8 +75,31 @@ impl Behaviour for LightningRod {
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(POWERED) {
-            let front = state.get(FACING).opposite();
-            world.update_neighbors_at(pos.relative(front), state.block());
+            update_neighbours(state, world, pos);
+        }
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        world.set_block_and_update(pos, state.with(POWERED, false));
+        update_neighbours(state, world, pos);
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        if state.get(POWERED) { 15 } else { 0 }
+    }
+
+    /// 只强充能它插着的那一格。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if state.get(POWERED) && state.get(FACING) == direction {
+            15
+        } else {
+            0
         }
     }
 }

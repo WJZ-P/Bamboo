@@ -8,9 +8,9 @@ use tracing::error;
 
 use crate::{
     context::BlockHit,
-    level::{Effect, Level},
+    level::{Effect, Level, RedstoneMemory},
     shape::{self, CollisionContext},
-    state::{BlockState, FluidState, SupportType},
+    state::{BlockState, FluidState, POWER, SupportType},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -219,6 +219,8 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
+    wire_should_signal: bool,
 }
 
 impl<'a> World<'a> {
@@ -228,6 +230,7 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            wire_should_signal: true,
         }
     }
 
@@ -321,19 +324,120 @@ impl<'a> World<'a> {
         FIXED_BRIGHTNESS
     }
 
-    /// `hasNeighborSignal`。世界里没有红石信号。写成函数是为了以后有红石时只改一处。
-    pub const fn has_neighbor_signal(&self, _pos: BlockPos) -> bool {
-        false
+    /// `getSignal`：`pos` 这一格朝 `direction` 输出多强的信号。
+    ///
+    /// 导体还要算上强充能它的邻居，这就是红石线能被旁边的方块“穿过”充能的原因。
+    pub fn signal(&self, pos: BlockPos, direction: Direction) -> i32 {
+        let state = self.block_state(pos);
+        let signal = state.signal(self, pos, direction);
+        if state.is_redstone_conductor() {
+            signal.max(self.direct_signal_to(pos))
+        } else {
+            signal
+        }
     }
 
-    /// `getSignal`。世界里没有红石信号。
-    pub const fn signal(&self, _pos: BlockPos, _direction: Direction) -> i32 {
-        0
+    /// `hasSignal`。
+    pub fn has_signal(&self, pos: BlockPos, direction: Direction) -> bool {
+        self.signal(pos, direction) > 0
     }
 
-    /// `getBestNeighborSignal`。世界里没有红石信号。
-    pub const fn best_neighbor_signal(&self, _pos: BlockPos) -> i32 {
-        0
+    /// `getDirectSignal`。
+    pub fn direct_signal(&self, pos: BlockPos, direction: Direction) -> i32 {
+        self.block_state(pos).direct_signal(self, pos, direction)
+    }
+
+    /// `getDirectSignalTo`：周围六格强充能 `pos` 的最大值。
+    pub fn direct_signal_to(&self, pos: BlockPos) -> i32 {
+        let mut best = 0;
+        for direction in Direction::ALL {
+            best = best.max(self.direct_signal(pos.relative(direction), direction));
+            if best >= 15 {
+                break;
+            }
+        }
+        best
+    }
+
+    /// `getControlInputSignal`：中继器和比较器读侧面的输入。
+    /// `only_diodes` 为真时只认中继器和比较器，锁定用的是这种。
+    pub fn control_input_signal(
+        &self,
+        pos: BlockPos,
+        direction: Direction,
+        only_diodes: bool,
+    ) -> i32 {
+        let state = self.block_state(pos);
+        if only_diodes {
+            if state.is_a(BlockAncestor::DiodeBlock) {
+                self.direct_signal(pos, direction)
+            } else {
+                0
+            }
+        } else if state.is(blocks::REDSTONE_BLOCK) {
+            15
+        } else if state.is(blocks::REDSTONE_WIRE) {
+            state.get(POWER)
+        } else if state.is_signal_source() {
+            self.direct_signal(pos, direction)
+        } else {
+            0
+        }
+    }
+
+    /// `hasNeighborSignal`。
+    pub fn has_neighbor_signal(&self, pos: BlockPos) -> bool {
+        Direction::ALL
+            .into_iter()
+            .any(|direction| self.has_signal(pos.relative(direction), direction))
+    }
+
+    /// `getBestNeighborSignal`：周围六格给 `pos` 的最强信号。
+    pub fn best_neighbor_signal(&self, pos: BlockPos) -> i32 {
+        let mut best = 0;
+        for direction in Direction::ALL {
+            let signal = self.signal(pos.relative(direction), direction);
+            if signal >= 15 {
+                return 15;
+            }
+            best = best.max(signal);
+        }
+        best
+    }
+
+    /// `getBestOwnOrNeighbourSignal`。
+    pub fn best_own_or_neighbour_signal(&self, pos: BlockPos) -> i32 {
+        let state = self.block_state(pos);
+        let own = if state.is_signal_source() {
+            state.own_signal(self, pos)
+        } else {
+            0
+        };
+        self.best_neighbor_signal(pos).max(own)
+    }
+
+    /// `RedstoneWireBlock.getBlockSignal`：算导线的输入时先把导线的信号关掉，
+    /// 不然导线自己的功率会绕回自己身上。官方的 `shouldSignal` 是方块实例上的字段。
+    pub fn wire_block_signal(&mut self, pos: BlockPos) -> i32 {
+        self.wire_should_signal = false;
+        let signal = self.best_neighbor_signal(pos);
+        self.wire_should_signal = true;
+        signal
+    }
+
+    /// 红石线此刻算不算信号源，见 [`World::wire_block_signal`]。
+    pub const fn wire_should_signal(&self) -> bool {
+        self.wire_should_signal
+    }
+
+    /// 比较器的输出和火把最近的开关，见 [`RedstoneMemory`]。
+    pub fn redstone_memory(&self) -> &RedstoneMemory {
+        self.level.redstone()
+    }
+
+    /// 见 [`World::redstone_memory`]。
+    pub fn redstone_memory_mut(&mut self) -> &mut RedstoneMemory {
+        self.level.redstone_mut()
     }
 
     /// `getGameTime`。
@@ -459,6 +563,10 @@ impl<'a> World<'a> {
         }
 
         let block_changed = !old.is_same_block(state);
+        // 换了方块，官方把方块实体一起删掉，比较器存的输出也就跟着没了。
+        if block_changed {
+            self.level.redstone_mut().forget_block_entity(pos);
+        }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
@@ -873,7 +981,10 @@ mod tests {
     fn destroyed_positions(effects: &[Effect]) -> Vec<BlockPos> {
         effects
             .iter()
-            .map(|&Effect::Destroyed { pos, .. }| pos)
+            .filter_map(|effect| match *effect {
+                Effect::Destroyed { pos, .. } => Some(pos),
+                Effect::TorchBurnout { .. } => None,
+            })
             .collect()
     }
 

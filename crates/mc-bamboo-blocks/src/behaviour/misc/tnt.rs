@@ -14,7 +14,7 @@ use crate::{
 /// `TntBlock`。
 pub(super) struct Tnt;
 
-/// `onPlace` 和 `neighborChanged`：有信号时点燃。世界里没有信号，写成这样是为了以后只改一处。
+/// `onPlace` 和 `neighborChanged`：有信号时点燃，方块消失，点燃的实体不生成。
 fn prime_if_powered(world: &mut World, pos: BlockPos) {
     if world.has_neighbor_signal(pos) {
         world.remove_block(pos);

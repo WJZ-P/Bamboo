@@ -1,8 +1,11 @@
 //! `LecternBlock`。
 //!
-//! 翻页的红石脉冲要界面才走得到，`tick` 不做。
+//! 翻页的红石脉冲要界面才排得出来，这里只有到期时把信号收回来的 `tick`。
+//!
+//! 比较器读出来的强度看书翻到第几页。这里的物品都是默认组件，书一页也没有，
+//! 官方这时按读完了算：`floor(1.0 * 14) + 1`，所以有书就是 15。
 
-use mc_bamboo_core::{BlockPos, Hand};
+use mc_bamboo_core::{BlockPos, Direction, Hand};
 use mc_bamboo_data::{Block, tags::item_tags};
 
 use crate::{
@@ -15,6 +18,9 @@ use crate::{
 
 /// `LecternBlock`。
 pub(super) struct Lectern;
+
+/// 没有页的书放在讲台上时比较器读到的强度。
+const BLANK_BOOK_SIGNAL: i32 = 15;
 
 /// `updateBelow`：讲台的信号穿过下面一格。
 fn update_below(state: BlockState, world: &mut World, pos: BlockPos) {
@@ -76,6 +82,46 @@ impl Behaviour for Lectern {
             InteractionResult::Success
         } else {
             InteractionResult::Consume
+        }
+    }
+
+    /// 翻页的脉冲到期：`changePowered(false)`。
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        world.set_block_and_update(pos, state.with(POWERED, false));
+        update_below(state, world, pos);
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        if state.get(POWERED) { 15 } else { 0 }
+    }
+
+    /// 只强充能脚下那一格。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if direction == Direction::Up {
+            state.own_signal(world, pos)
+        } else {
+            0
+        }
+    }
+
+    /// 见模块的说明，没有书时是 0。
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.get(HAS_BOOK) {
+            BLANK_BOOK_SIGNAL
+        } else {
+            0
         }
     }
 }

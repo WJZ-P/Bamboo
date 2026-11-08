@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_blocks::BlockTicks;
+use mc_bamboo_blocks::{BlockTicks, RedstoneMemory};
 use mc_bamboo_core::Vec3;
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{
@@ -87,6 +87,8 @@ pub(crate) struct Region {
     pub(crate) block_changes: BlockChanges,
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
+    /// 比较器的输出和红石火把最近的开关。
+    redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
     /// 服务端视距，已经 clamp 到合法范围。
     pub(crate) view_distance: i32,
@@ -110,6 +112,7 @@ impl Region {
             template_body,
             block_changes: BlockChanges::default(),
             block_ticks: BlockTicks::new(),
+            redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
             max_players,
@@ -126,6 +129,7 @@ impl Region {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
             players: &self.players,
+            redstone: &mut self.redstone,
         };
         (level, &mut self.block_ticks)
     }

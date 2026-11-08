@@ -1,8 +1,9 @@
 //! `ChiseledBookShelfBlock`。
 //!
 //! 书在方块实体里，但是状态上的 `slot_N_occupied` 是它的镜像，这里只改状态。
+//! 比较器读的是最近放进或者拿出书的那一格，记在 [`RedstoneMemory`](crate::RedstoneMemory) 里。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, tags::item_tags};
 
 use super::slot_container::hit_slot;
@@ -37,10 +38,18 @@ const COLUMNS: usize = 3;
 /// `ChiseledBookShelfBlock`。
 pub(super) struct ChiseledBookShelf;
 
-/// 点中的这一格的属性，没点在书架朝外的那一面时是 `None`。
-fn clicked_slot(state: BlockState, ctx: &UseContext) -> Option<Property<bool>> {
+/// 点中的是第几格，没点在书架朝外的那一面时是 `None`。
+fn clicked_slot(state: BlockState, ctx: &UseContext) -> Option<usize> {
     let facing = state.get(HORIZONTAL_FACING);
-    hit_slot(&ctx.hit, facing, ROWS, COLUMNS).map(|slot| SLOT_OCCUPIED[slot])
+    hit_slot(&ctx.hit, facing, ROWS, COLUMNS)
+}
+
+/// `ChiseledBookShelfBlockEntity.updateState`：先记下动的是哪一格，再把状态换成书的镜像。
+fn update_state(state: BlockState, world: &mut World, pos: BlockPos, slot: usize, occupied: bool) {
+    world
+        .redstone_memory_mut()
+        .set_last_bookshelf_slot(pos, slot);
+    world.set_block_and_update(pos, state.with(SLOT_OCCUPIED[slot], occupied));
 }
 
 impl Behaviour for ChiseledBookShelf {
@@ -69,10 +78,10 @@ impl Behaviour for ChiseledBookShelf {
         let Some(slot) = clicked_slot(state, ctx) else {
             return InteractionResult::Pass;
         };
-        if state.get(slot) {
+        if state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        world.set_block_and_update(ctx.clicked_pos(), state.with(slot, true));
+        update_state(state, world, ctx.clicked_pos(), slot, true);
         InteractionResult::Success
     }
 
@@ -85,10 +94,24 @@ impl Behaviour for ChiseledBookShelf {
         let Some(slot) = clicked_slot(state, ctx) else {
             return InteractionResult::Pass;
         };
-        if !state.get(slot) {
+        if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        world.set_block_and_update(ctx.clicked_pos(), state.with(slot, false));
+        update_state(state, world, ctx.clicked_pos(), slot, false);
         InteractionResult::Success
+    }
+
+    /// 最近动过的那一格的序号加一，没动过是 0。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world
+            .redstone_memory()
+            .last_bookshelf_slot(pos)
+            .map_or(0, |slot| slot as i32 + 1)
     }
 }

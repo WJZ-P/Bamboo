@@ -5,8 +5,8 @@
 //! 够距检查、序列号和发包都在调用方。入口在 [`use_item_on`]、[`use_item`]、[`destroy_block`]
 //! 和 [`run_scheduled_ticks`]。
 //!
-//! 世界里没有红石信号、流体流动和光照引擎，见 [`World::has_neighbor_signal`]、
-//! [`World::schedule_fluid_tick`] 和 [`World::raw_brightness`]。
+//! 红石信号是真的，见 [`World::signal`] 和 [`World::has_neighbor_signal`]。
+//! 世界里没有流体流动和光照引擎，见 [`World::schedule_fluid_tick`] 和 [`World::raw_brightness`]。
 
 pub mod behaviour;
 pub mod context;
@@ -26,7 +26,7 @@ pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
     InteractionResult, Outcome, destroy_block, run_scheduled_ticks, use_item, use_item_on,
 };
-pub use level::{Effect, Level};
+pub use level::{Effect, Level, RedstoneMemory};
 pub use shape::{Aabb, Boxes, CollisionContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
 pub use ticks::{BlockTicks, ScheduledTick, TickPriority};
