@@ -438,6 +438,16 @@ pub fn set_changed(world: &mut World, pos: BlockPos) {
         if state.is_air() {
             continue;
         }
+        // 堆肥桶的容器不是方块实体：官方 `InputContainer` / `OutputContainer` 的 `setChanged`
+        // 只加层或清空（在 [`crate::composter`] 里已经做过），再调一次时槽已空或状态没变，
+        // 不会通知比较器。等级变化引起的通知走的是 `setBlock`。
+        // A composter's container is not a block entity: vanilla `InputContainer` /
+        // `OutputContainer.setChanged` only adds a layer or empties it (already done in
+        // [`crate::composter`]); a second call finds the slot empty or the state unchanged and
+        // notifies no comparator. Level changes reach comparators through `setBlock`.
+        if state.is_a(BlockAncestor::ComposterBlock) {
+            continue;
+        }
         world.update_neighbour_for_output_signal(changed, state.block());
     }
 }
