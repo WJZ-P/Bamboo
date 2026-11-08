@@ -24,6 +24,7 @@ use crate::{
     inventory, light_updates, movement,
     player::shows_hat,
     region::Region,
+    sign,
 };
 
 const TICK: Duration = Duration::from_millis(50);
@@ -83,6 +84,8 @@ impl World {
         self.global.advance_time();
         self.region.advance_tick();
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        // 方块实体的 tick：告示牌在这里清掉走远的编辑者。
+        sign::tick_editors(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
@@ -276,6 +279,9 @@ impl World {
                 yaw,
                 pitch,
             } => interaction::on_use_item(region, player, hand, sequence, (yaw, pitch)),
+            PlayRequest::SignUpdate { pos, lines, slot } => {
+                sign::on_sign_update(region, player, pos, lines, slot);
+            }
             // 这三种连接任务就地处理了，不会发到这里。
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }

@@ -38,6 +38,7 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
@@ -67,6 +68,7 @@ import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
@@ -81,6 +83,7 @@ import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
@@ -110,6 +113,7 @@ import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.network.protocol.game.ServerboundPunchPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCreativeModeSlotPacket;
+import net.minecraft.network.protocol.game.ServerboundSignUpdatePacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.network.protocol.game.VecDeltaCodec;
@@ -164,6 +168,7 @@ import net.minecraft.world.level.block.RotatedPillarBlock;
 import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
+import net.minecraft.world.level.block.entity.SignTextSlot;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
@@ -236,6 +241,7 @@ public final class Probe {
     private static final int OFF_HAND_SLOT = 45;
     private static final int STACK = 64;
     private static final String CHAT_TEXT = "你好，竹子🐾";
+    private static final String SIGN_TEXT = "竹子会写字";
     private static final String UNKNOWN_COMMAND = "Unknown or incomplete command. See below for error";
 
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
@@ -243,6 +249,7 @@ public final class Probe {
             "handleAddEntity",
             "handleAwardStats",
             "handleBlockChangedAck",
+            "handleBlockEntityData",
             "handleBlockUpdate",
             "handleBundlePacket",
             "handleChunkBatchFinished",
@@ -260,6 +267,7 @@ public final class Probe {
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
+            "handleOpenSignEditor",
             "handlePlayerAbilities",
             "handlePlayerInfoRemove",
             "handlePlayerInfoUpdate",
@@ -403,6 +411,18 @@ public final class Probe {
                 && Math.abs(first.z - second.z) <= POSITION_TOLERANCE;
     }
 
+    /** 告示牌一面第 `line` 行，`front_text`/`back_text` 里 `messages` 的字符串。 */
+    private static String signLine(CompoundTag tag, String side, int line) {
+        if (tag == null) {
+            return null;
+        }
+        return tag.getCompound(side)
+                .flatMap(text -> text.getList("messages"))
+                .filter(messages -> messages.size() > line)
+                .flatMap(messages -> messages.getString(line))
+                .orElse(null);
+    }
+
     /** 官方的包不公开这个字段，客户端要靠 Level 才取得到实体。 */
     private static int privateInt(Object packet, Class<?> owner, String name) {
         try {
@@ -464,6 +484,7 @@ public final class Probe {
                 section("equipment" + names, () -> equipment(actor, observer));
                 section("blocks" + names, () -> blocks(actor, observer));
                 section("placement" + names, () -> placement(actor, observer));
+                section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
             }
@@ -842,6 +863,30 @@ public final class Probe {
             actor.send(new ServerboundSetCarriedItemPacket(0));
         }
 
+        /** 放下的告示牌只给放置者打开编辑界面，写进去的字另一个客户端从方块实体数据里读得到。 */
+        private void signs(Join actor, Join observer) throws IOException {
+            BlockPos ground = BlockPos.containing(actor.position).offset(2, -1, 2);
+            BlockPos sign = ground.above();
+            BlockState standing = Blocks.OAK_SIGN.defaultBlockState();
+            int observerEditors = observer.signEditors.size();
+
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            useOn(actor, Items.OAK_SIGN, ground, Direction.UP, Vec3.upFromBottomCenterOf(ground, 1.0));
+            await("signs: " + actor.player + " gets the editor", () -> actor.signEditors.containsKey(sign));
+            check("signs: the editor opens on the front", actor.signEditors.get(sign) == SignTextSlot.FRONT);
+            await("signs: " + observer.player + " sees the sign", () -> standing.equals(observer.blocks.get(sign)));
+            pumpFor(SETTLE_MILLIS);
+            check("signs: only the placer gets the editor", observer.signEditors.size() == observerEditors);
+
+            actor.send(new ServerboundSignUpdatePacket(
+                    sign, List.of(SIGN_TEXT, "", "", ""), SignTextSlot.FRONT));
+            await("signs: " + actor.player + " reads the text back",
+                    () -> SIGN_TEXT.equals(signLine(actor.blockEntityTags.get(sign), "front_text", 0)));
+            await("signs: " + observer.player + " reads the text",
+                    () -> SIGN_TEXT.equals(signLine(observer.blockEntityTags.get(sign), "front_text", 0)));
+            actor.edits.add(new Edit(sign, standing));
+        }
+
         /** 手持 `item` 右键方块，等服务端确认。物品放在第 1 格，这一段开始时已经选中它。 */
         private void useOn(Join actor, Item item, BlockPos clicked, Direction face, Vec3 location) throws IOException {
             actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(item)));
@@ -931,6 +976,12 @@ public final class Probe {
                     if (edit.state.is(Blocks.CHEST)) {
                         check("late: the chest is in the block entity list",
                                 late.blockEntities.get(edit.pos) == BlockEntityTypes.CHEST);
+                    }
+                    if (edit.state.is(Blocks.OAK_SIGN)) {
+                        check("late: the sign is in the block entity list",
+                                late.blockEntities.get(edit.pos) == BlockEntityTypes.SIGN);
+                        check("late: the chunk carries the sign text",
+                                SIGN_TEXT.equals(signLine(late.blockEntityTags.get(edit.pos), "front_text", 0)));
                     }
                 }
                 for (BlockPos pos : editor.cleared) {
@@ -1033,6 +1084,10 @@ public final class Probe {
         final Map<Integer, Map<Integer, Object>> metadata = new HashMap<>();
         final Map<BlockPos, BlockState> blocks = new HashMap<>();
         final Map<BlockPos, BlockEntityType<?>> blockEntities = new HashMap<>();
+        /** 方块实体数据里的 NBT，告示牌的文字在这里。 */
+        final Map<BlockPos, CompoundTag> blockEntityTags = new HashMap<>();
+        /** 收到过编辑界面的告示牌，值是玩家要编辑的那一面。 */
+        final Map<BlockPos, SignTextSlot> signEditors = new HashMap<>();
         final Map<Integer, ItemStack> slots = new HashMap<>();
         final List<Edit> edits = new ArrayList<>();
         /** 放下又消失的方块。地面上的空气 `recordChunk` 不记，所以不能写成 `Edit`。 */
@@ -1346,6 +1401,10 @@ public final class Probe {
             handlers.put("handleSwingAnimation", value -> onSwing((ClientboundSwingAnimationPacket) value));
             handlers.put("handleSetEquipment", value -> onEquipment((ClientboundSetEquipmentPacket) value));
             handlers.put("handleBlockUpdate", value -> onBlockUpdate((ClientboundBlockUpdatePacket) value));
+            handlers.put("handleBlockEntityData",
+                    value -> onBlockEntityData((ClientboundBlockEntityDataPacket) value));
+            handlers.put("handleOpenSignEditor",
+                    value -> onOpenSignEditor((ClientboundOpenSignEditorPacket) value));
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
             handlers.put("handleContainerSetSlot", value -> onSetSlot((ClientboundContainerSetSlotPacket) value));
@@ -1636,6 +1695,19 @@ public final class Probe {
             events.add("block " + pos.toShortString() + " " + Block.getId(packet.getBlockState()));
         }
 
+        private void onBlockEntityData(ClientboundBlockEntityDataPacket packet) {
+            check("signs: block entity data names a sign",
+                    packet.getType() == BlockEntityTypes.SIGN
+                            || packet.getType() == BlockEntityTypes.HANGING_SIGN);
+            blockEntityTags.put(packet.getPos().immutable(), packet.getTag());
+            events.add("data " + packet.getPos().toShortString());
+        }
+
+        private void onOpenSignEditor(ClientboundOpenSignEditorPacket packet) {
+            signEditors.put(packet.pos().immutable(), packet.slot());
+            events.add("editor " + packet.pos().toShortString());
+        }
+
         private void onAck(ClientboundBlockChangedAckPacket packet) {
             check("blocks: acks go up", packet.sequence() > lastAck);
             lastAck = packet.sequence();
@@ -1696,9 +1768,21 @@ public final class Probe {
                 }
             }
             packet.chunkData().forEachBlockEntityTag(packet.x(), packet.z(), (pos, type, tag) -> {
-                check("chunk: block entities have no NBT", tag == null);
+                // 告示牌的文字在 `getUpdateTag` 里，别的方块实体没有自定义内容。
+                if (isSign(type)) {
+                    check("chunk: signs carry their text", tag != null);
+                } else {
+                    check("chunk: block entities have no NBT", tag == null);
+                }
+                if (tag != null) {
+                    blockEntityTags.put(pos.immutable(), tag);
+                }
                 blockEntities.put(pos.immutable(), type);
             });
+        }
+
+        private static boolean isSign(BlockEntityType<?> type) {
+            return type == BlockEntityTypes.SIGN || type == BlockEntityTypes.HANGING_SIGN;
         }
 
         /** 用官方代码解码区块，再检查地层、高度图和光照。 */

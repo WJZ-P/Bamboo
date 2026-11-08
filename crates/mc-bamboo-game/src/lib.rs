@@ -17,6 +17,7 @@
 //! | `chunk_tracking` | 跟踪范围和发送速度 |
 //! | `chunk_encoding` | 区块的网络格式 |
 //! | `light_updates` | 算光照，发 `light_update` |
+//! | `sign` | 告示牌的方块实体数据 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
 mod chat;
@@ -32,6 +33,7 @@ mod links;
 mod movement;
 mod player;
 mod region;
+mod sign;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
