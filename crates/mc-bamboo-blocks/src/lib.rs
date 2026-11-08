@@ -18,6 +18,7 @@ pub mod fluid;
 pub mod interact;
 mod item_use;
 pub mod level;
+pub mod mining;
 pub mod placement;
 pub mod random;
 pub mod random_tick;
@@ -34,7 +35,7 @@ pub use behaviour::machines::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
-    InteractionResult, Outcome, destroy_block, run_action_block_ticks, run_scheduled_ticks,
+    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
     use_item, use_item_on,
 };
 pub use level::{Effect, Level, RedstoneMemory};

@@ -209,7 +209,7 @@ pub enum PushReaction {
 }
 
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
     pub name: &'static str,
     /// 第一个状态的 ID。这个方块的状态一直连续到下一个方块的 `first_state` 之前。
@@ -243,7 +243,14 @@ pub struct Block {
     pub offset: Option<BlockOffset>,
     /// `hasDynamicShape`：官方不缓存这种方块的形状，读取时要带上世界和位置。
     pub dynamic_shape: bool,
+    /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
+    pub destroy_time: f32,
+    /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
+    pub requires_correct_tool_for_drops: bool,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for Block {}
 
 impl Block {
     /// 官方类的字段或者方法结果。名字写错时返回 `None`，见 [`BlockField`]。

@@ -4,16 +4,18 @@
 //! M2 只有创造模式：破坏一步完成，放置不扣物品。
 //! 客户端在本地预测这些操作，结果靠 `block_update` 和 `block_changed_ack` 收敛到服务端。
 
+pub(crate) mod adventure;
 pub(crate) mod level;
+pub(crate) mod mining;
 pub(crate) mod rules;
+
+pub(crate) use mining::tick_mining;
 
 use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_blocks::{
-    Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult, Level,
-};
+use mc_bamboo_blocks::{Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult};
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_data::{items, registries::attribute_defaults};
 use mc_bamboo_protocol::{
     packet::play::{
         BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
@@ -175,7 +177,7 @@ fn actor_of(player: &Player) -> Actor {
         main_hand: held(Hand::Main),
         off_hand: held(Hand::Off),
         eye_height: player.eye_height(),
-        block_interaction_range: BLOCK_INTERACTION_RANGE,
+        block_interaction_range: interaction_range(player.game_mode),
         // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
         // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
@@ -183,22 +185,45 @@ fn actor_of(player: &Player) -> Actor {
     }
 }
 
+/// `Player.blockInteractionRange()`：属性的基础值 4.5，
+/// 创造模式的 `ServerPlayer.updatePlayerAttributes` 再加 0.5 的修饰符。
+pub(crate) fn interaction_range(game_mode: GameMode) -> f64 {
+    let base = attribute_defaults::BLOCK_INTERACTION_RANGE;
+    if game_mode == GameMode::Creative {
+        base + 0.5
+    } else {
+        base
+    }
+}
+
 /// 玩家能不能够到这个方块。`blocks-inventory.md` 6.1。
 pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
-    within_block_interaction_range(player, pos, REACH_BUFFER)
+    within_block_interaction_range(
+        player.position,
+        player.eye_height(),
+        interaction_range(player.game_mode),
+        pos,
+        REACH_BUFFER,
+    )
 }
 
 /// `Player.isWithinBlockInteractionRange(pos, buffer)`：眼睛到方块单位立方体的距离。
-pub(crate) fn within_block_interaction_range(player: &Player, pos: BlockPos, buffer: f64) -> bool {
-    let Vec3 { x, y, z } = player.position;
+pub(crate) fn within_block_interaction_range(
+    position: Vec3,
+    eye_height: f64,
+    range: f64,
+    pos: BlockPos,
+    buffer: f64,
+) -> bool {
+    let Vec3 { x, y, z } = position;
     let axis = |low: i32, eye: f64| {
         let low = f64::from(low);
         (low - eye).max(eye - (low + 1.0)).max(0.0)
     };
     let dx = axis(pos.x, x);
-    let dy = axis(pos.y, y + player.eye_height());
+    let dy = axis(pos.y, y + eye_height);
     let dz = axis(pos.z, z);
-    let range = BLOCK_INTERACTION_RANGE + buffer;
+    let range = range + buffer;
     dx * dx + dy * dy + dz * dz < range * range
 }
 
@@ -210,57 +235,22 @@ pub(crate) fn on_player_action(
     id: PlayerId,
     action: PlayerActionKind,
     pos: BlockPos,
+    face: Direction,
     sequence: i32,
 ) {
     match action {
-        PlayerActionKind::StartDestroyBlock => {
-            if record_sequence(region, id, sequence) {
-                destroy_block(region, id, pos);
-            }
-        }
-        // 创造模式不发这三个，收到了也只结束预测。
-        PlayerActionKind::ChangeDestroyDirection
+        PlayerActionKind::StartDestroyBlock
+        | PlayerActionKind::ChangeDestroyDirection
         | PlayerActionKind::AbortDestroyBlock
         | PlayerActionKind::StopDestroyBlock => {
-            record_sequence(region, id, sequence);
+            if record_sequence(region, id, sequence) {
+                mining::handle_block_break_action(region, id, action, pos, face);
+            }
         }
         PlayerActionKind::DropAllItems => inventory::drop_held_item(region, id, true),
         PlayerActionKind::DropItem => inventory::drop_held_item(region, id, false),
         PlayerActionKind::SwapItemWithOffhand => inventory::swap_hands(region, id),
         PlayerActionKind::ReleaseUseItem | PlayerActionKind::Stab => {}
-    }
-}
-
-/// 创造模式破坏方块，官方 `handleBlockBreakAction` 和 `destroyBlock` 的顺序。
-/// `blocks-inventory.md` 5.2。
-///
-/// 够不到时什么也不发，靠 ack 回滚客户端的预测。
-fn destroy_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
-    let Some(player) = region.players.get(&id) else {
-        return;
-    };
-    if !within_reach(player, pos) {
-        return;
-    }
-    if pos.y > MAX_Y {
-        region.links.send(id, &block_update(pos, blocks::VOID_AIR));
-        return;
-    }
-    if !rules::can_destroy(player.inventory.held(Hand::Main)) {
-        send_current_block(region, id, pos);
-        return;
-    }
-
-    let actor = actor_of(player);
-    let (mut level, ticks) = region.block_level();
-    // 世界下面读到的是 `void_air`。破坏空气世界不变，官方还会发一个客户端不看的 2001，这里省掉。
-    if level.block_state(pos).is_air() {
-        return;
-    }
-    let outcome = mc_bamboo_blocks::destroy_block(&mut level, ticks, &actor, pos);
-    send_effects(region, Some(id), &outcome.effects);
-    if outcome.result == InteractionResult::Fail {
-        send_current_block(region, id, pos);
     }
 }
 
@@ -329,6 +319,8 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     region.links.send(id, &OpenSignEditor { pos, slot });
                 }
             }
+            // 音符盒的声音和粒子归“方块声音”那边，这里只消费掉事件。
+            Effect::NoteBlockPlayed { .. } => {}
         }
     }
 }

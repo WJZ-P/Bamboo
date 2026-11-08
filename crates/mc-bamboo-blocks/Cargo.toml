@@ -12,4 +12,6 @@ categories = ["games"]
 [dependencies]
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+# 物品的 `tool` 组件：挖掘速度和掉落规则都从默认组件里读。
+mc-bamboo-protocol.workspace = true
 tracing.workspace = true

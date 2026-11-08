@@ -43,7 +43,7 @@ impl InteractionResult {
 }
 
 /// 一次操作的结果。世界的变化已经通过 [`Level::write_block`] 写进去了。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
     pub result: InteractionResult,
     /// 这次点击走了方块的 `useWithoutItem`。容器就是在这里打开的，调用方要接着接线。
@@ -123,6 +123,22 @@ pub fn use_item(
         None => placement::use_in_air(&mut world, actor, hand),
     };
     finish(world, result)
+}
+
+/// `state.attack(level, pos, player)`：生存模式开始挖时打的那一下。
+///
+/// 红石矿会亮起来、龙蛋会传送、音符盒会响，别的方块什么也不做。
+/// 官方的 `Player.attack` 还管实体，这里只有方块的这一半。
+pub fn attack(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    actor: &Actor,
+    pos: BlockPos,
+) -> Outcome {
+    let mut world = World::new(level, ticks);
+    let state = world.block_state(pos);
+    state.attack(&mut world, pos, actor);
+    finish(world, InteractionResult::Pass)
 }
 
 /// `ServerPlayerGameMode.destroyBlock` 里 `canDestroyBlock` 之后的部分。

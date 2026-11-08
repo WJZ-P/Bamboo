@@ -501,7 +501,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -518,6 +518,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.instrument,
             offset_literal(block),
             block.dynamic_shape,
+            block.destroy_time,
+            block.requires_correct_tool_for_drops,
         );
     }
 
@@ -1986,6 +1988,17 @@ fn registries_file(data: &VersionData) -> String {
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+
+    let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
+    let _ = writeln!(out, "pub mod attribute_defaults {{");
+    for (name, value) in &data.attribute_defaults {
+        let _ = writeln!(
+            out,
+            "    pub const {}: f64 = {value:?};",
+            constant_name(name)
+        );
+    }
+    let _ = writeln!(out, "}}\n");
     out
 }
 
@@ -2118,6 +2131,8 @@ mod tests {
             instrument: "harp".to_owned(),
             dynamic_shape: false,
             offset: None,
+            destroy_time: 0.0,
+            requires_correct_tool_for_drops: false,
         }
     }
 

@@ -73,6 +73,7 @@ import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.animal.axolotl.Axolotl;
 import net.minecraft.world.entity.animal.cow.MushroomCow;
@@ -212,6 +213,7 @@ public final class Extractor {
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("attributeDefaults", attributeDefaults());
             root.add("componentEnums", componentEnums());
             root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
@@ -472,11 +474,24 @@ public final class Extractor {
             object.add("properties", properties(block));
             object.add("fields", fields(block));
             object.addProperty("instrument", state.instrument().getSerializedName());
+            object.addProperty("destroyTime", block.defaultDestroyTime());
+            object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
             addOffset(object, block);
             blocks.add(object);
         }
         return blocks;
+    }
+
+    /** 属性的默认值。玩家没有状态效果、没有附魔时的起点。 */
+    private static JsonObject attributeDefaults() {
+        JsonObject defaults = new JsonObject();
+        for (Attribute attribute : BuiltInRegistries.ATTRIBUTE) {
+            defaults.addProperty(
+                    BuiltInRegistries.ATTRIBUTE.getKey(attribute).toString(),
+                    attribute.getDefaultValue());
+        }
+        return defaults;
     }
 
     /** 分派表按类名走。匿名类没有名字，官方以后用了要先决定它算哪一类。 */

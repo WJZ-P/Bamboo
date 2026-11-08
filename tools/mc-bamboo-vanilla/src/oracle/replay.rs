@@ -413,6 +413,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
+            | Effect::NoteBlockPlayed { .. }
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. } => None,
         })
