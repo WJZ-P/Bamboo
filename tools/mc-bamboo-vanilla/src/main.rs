@@ -20,8 +20,12 @@
 //!
 //! `server.jar` 是官方下载的那个文件，不是 `target/vanilla/versions` 里解压出来的内层 jar。
 //!
-//! `oracle` 依赖生成的数据。生成文件坏了、这个工具编译不过时，用 `--no-default-features`
-//! 编译，`generate` 不需要它们。
+//! `probe` 连的是你自己启动的那个 Bamboo，它跑的是离线模式。正版验证的那一项检查连不了
+//! 这个服务端（`online_mode` 要在启动时定下来），所以 `probe` 会在自己的进程里再起一个开了
+//! 正版验证的服务端，外加一个假的 session server 顶替 Mojang，全程只走 127.0.0.1。
+//!
+//! `oracle` 和 `probe-online` 依赖生成的数据。生成文件坏了、这个工具编译不过时，
+//! 用 `--no-default-features` 编译，`generate` 不需要它们。
 
 mod extract;
 mod generate;
@@ -29,6 +33,8 @@ mod generate;
 mod light;
 #[cfg(feature = "oracle")]
 mod menu;
+#[cfg(feature = "probe-online")]
+mod online;
 #[cfg(feature = "oracle")]
 mod oracle;
 
@@ -102,12 +108,17 @@ fn probe(host: &str, port: &str, java: &str) -> Result<(), String> {
     let work_dir = root.join(WORK_DIR);
     let classpath = extract::classpath(&work_dir)?;
 
-    let status = Command::new(java)
+    let mut command = Command::new(java);
+    command
         .current_dir(&work_dir)
         .arg("-cp")
         .arg(classpath)
         .arg(root.join(PROBE_SOURCE))
-        .args([host, port])
+        .args([host, port]);
+    // 正版验证的检查要连另一个服务端，这两个服务活到探针跑完。
+    let _online = online_probe(&mut command)?;
+
+    let status = command
         .status()
         .map_err(|error| format!("无法运行 {java}：{error}"))?;
     if status.success() {
@@ -115,6 +126,20 @@ fn probe(host: &str, port: &str, java: &str) -> Result<(), String> {
     } else {
         Err(format!("探针发现了问题：{status}"))
     }
+}
+
+/// 在这个进程里起一个开了正版验证的服务端和一个假 session server，地址交给探针。
+#[cfg(feature = "probe-online")]
+fn online_probe(command: &mut Command) -> Result<online::OnlineProbe, String> {
+    let probe = online::start()?;
+    command.args([probe.server_address().as_str(), probe.session_url()]);
+    Ok(probe)
+}
+
+#[cfg(not(feature = "probe-online"))]
+fn online_probe(_command: &mut Command) -> Result<(), String> {
+    println!("这个版本编译时关掉了 probe-online 功能，跳过正版验证的检查");
+    Ok(())
 }
 
 #[cfg(feature = "oracle")]

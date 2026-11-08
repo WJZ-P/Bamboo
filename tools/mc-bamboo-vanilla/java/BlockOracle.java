@@ -13,11 +13,13 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -32,7 +34,9 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import net.minecraft.SharedConstants;
 import net.minecraft.advancements.CriterionTriggerInstance;
@@ -59,6 +63,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.server.RegistryLayer;
@@ -128,6 +133,7 @@ import net.minecraft.world.item.SolidBucketItem;
 import net.minecraft.world.item.StandingAndWallBlockItem;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.level.BlockEventData;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.EmptyBlockGetter;
@@ -163,11 +169,13 @@ import net.minecraft.world.level.block.entity.JukeboxBlockEntity;
 import net.minecraft.world.level.block.entity.LecternBlockEntity;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.piston.PistonHeadBlock;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.ChestType;
+import net.minecraft.world.level.block.state.properties.ComparatorMode;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.PistonType;
 import net.minecraft.world.level.border.WorldBorder;
@@ -183,6 +191,8 @@ import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.entity.LevelEntityGetter;
 import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
@@ -191,6 +201,7 @@ import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
 import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.level.storage.loot.LootTable;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -220,12 +231,14 @@ import sun.misc.Unsafe;
  *                 带 block_transformer 组件的物品有时副手拿盾，这时主手的右键是举盾。末影之眼点框架的题有一半
  *                 在一圈朝里的框架里，装上就可能打开末地传送门。
  *                 X 是用 use_item 的物品（桶、细雪桶、荷叶、青蛙卵）时还出看着各种方块用它的 item 题。
+ *                 点的是活塞、活塞头或者移动活塞时，除了随机题还出几道固定的多刻活塞题，见第三节。
  *     --avoid A,B 这些类（方块类的简单名）的方块不进场景，手里也不拿会放下它们的物品，题目的主角不受影响。水永远可以出现：
  *                 第 4 章要求的场景里有水。新版本多了没移植的类时，用它单独检查一个类。
  *                 花盆和堆肥桶例外：站着用主手点中它们时可以拿着这些物品，这时点击一定被方块接住，轮不到物品放置。
  *     --untick A,B 这些类（简单名，继承链上的类都算）的计划刻不在 mc-bamboo-blocks 的范围里。flow 题往后跑的时候要执行
  *                 其中一个，这一题写成 skip，原因是 untick:<类名>。
  *     --case I    只跑第 I 题，用来重现一个失败的场景。--seed、--only、--avoid 和 --untick 要和原来相同。
+ *                 显式活塞题的 id 从 1000000 开始，也能这样单独跑。
  *     --explain   每个 case 行多一个 text 字段，把场景和变化写成人能读的文字。它不属于格式，读取时忽略。
  *
  * JDK 26 启动时会警告修改了 final 字段，这是给假世界补字段造成的，没有影响。加 --enable-final-field-mutation=ALL-UNNAMED 能消除，
@@ -277,6 +290,9 @@ import sun.misc.Unsafe;
  *     sneak     蹲着，也就是 isSecondaryUseActive。
  *     box       [minX,minY,minZ,maxX,maxY,maxZ] 玩家的碰撞盒，double 的位。蹲下时是蹲姿的高度。
  *     others    [box,...] 场景里其他玩家的碰撞盒。玩家自己和他们都挡路：isUnobstructed 要和 box 和 others 里的每个盒子比。
+ *     settle    动作做完之后再走多少个游戏刻，0 表示不走。每一刻先 gameTime += 1，再把到期的方块计划刻、流体计划刻、
+ *               方块事件和移动活塞的方块实体按官方的顺序跑完，和 ServerLevel.tick 里 tickTime 之后那几步相同。
+ *               中继器的延迟、火把烧坏、按钮弹回、活塞推方块要靠它才看得到。
  *
  * 官方比较盒子时走 Shapes.joinIsNotEmpty，重叠小于 1e-7 不算重叠。
  *
@@ -290,10 +306,15 @@ import sun.misc.Unsafe;
  *     changes   [[x,y,z,state],...] 结束时和 scene 不同的每一格的最终状态，变成空气时 state 是 0。顺序没有含义。
  *     destroyed [[x,y,z,state,excluded],...] levelEvent(2001) 按发生顺序的列表。state 是事件的数据，也就是被破坏的方块状态。
  *               excluded 为 true 表示 source 是发起的玩家，官方广播时跳过他，对应 Effect::Destroyed 的 except_initiator。
- *     ticks     [[x,y,z,"block"|"fluid",id,delay,priority],...] 按发生顺序排的新计划刻，同一格同一类型重复的已经去掉，和
- *               LevelChunkTicks 的规则相同。id 是方块或流体的注册表 ID。delay 相对 header 的 gameTime，-1 表示延迟是随机的，
- *               见第四节。priority 是 TickPriority.getValue()，0 是 NORMAL。flow 题写的是跑完以后还在排队的计划刻，
- *               先是方块的，再是流体的，各自按官方执行的顺序。
+ *     ticks     [[x,y,z,"block"|"fluid",id,delay,priority],...] 动作和 settle 走完之后还排着的计划刻，按执行顺序
+ *               （ScheduledTick.DRAIN_ORDER：触发时刻、优先级、排进来的次序），同一格同一类型重复的已经去掉，和
+ *               LevelChunkTicks 的规则相同。id 是方块或流体的注册表 ID。先写方块的，再写流体的，各自按执行顺序。
+ *               delay 相对结束时的游戏时间，flow 题的结束时间算上 steps，-1 表示延迟是随机的，见第四节。
+ *               priority 是 TickPriority.getValue()，0 是 NORMAL。
+ *     ran       [block id,...] settle 里真的运行过 tick 的方块的注册表 ID，去重，顺序没有含义。名单里有不在比较范围里的
+ *               计划刻（比如方块下落）时，世界已经被它改过，重放的一方只能排除这道题。
+ *     analogContent 动作或者 settle 改了方块实体的内容，旁边又有比较器读得到，而且那个方块实体不是书架。Bamboo 不保留容器内容，
+ *               比较器读到的模拟信号两边会不一样，重放的一方只能排除这道题。
  *     itemReached  place、use：方块没有吃掉这次点击，轮到了手里的物品（ServerPlayerGameMode 走到了 itemStack.useOn）。
  *               和 itemUseOn 同时为真时结果来自物品自己的 useOn，不在 mc-bamboo-blocks 的范围里。别的题永远是假。
  *     gained    [item id,...] 只有 item 题有内容：物品栏里新出现的物品。创造模式用空桶舀起东西时，装满的桶放进物品栏。
@@ -327,22 +348,28 @@ import sun.misc.Unsafe;
  *
  *     玩家      创造模式，没有任何权限，canUseGameMasterBlocks 是假，所以 GameMaster 方块放不了也破坏不了。没有在飞。
  *               交互距离是创造模式的 5 格。物品栏里只有两只手上的物品。
- *     世界      主世界，平原，白天，晴天，普通难度，默认游戏规则，游戏时间固定（flow 题往后跑时一刻加一），世界边界是默认值。
+ *     世界      主世界，平原，白天，晴天，普通难度，默认游戏规则，世界边界是默认值。游戏时间从 header 的 gameTime 开始，
+ *               settle 每走一刻加一，flow 题每往后跑一步也加一。
  *     流体形状  FlowingFluid.getShape 按流体状态缓存，第一次调用时的位置决定高度。启动时在上面没有同种流体的位置调用过，
  *               所以水源和岩浆源的形状是它们自己的高度 8/9。
  *     亮度      getRawBrightness、getBrightness 恒为 15。
- *     信号      getSignal、getDirectSignal、hasNeighborSignal、getBestNeighborSignal、getControlInputSignal 恒为 0 或假。
- *               方块自己状态里的 powered、power 不会产生信号。
+ *     信号      官方真实的实现，方块状态里的 powered、power 真的会产生信号。
  *     方块实体  场景加载时新建，内容为空。有三种方块的状态是内容的镜像，内容按状态补齐：chiseled_bookshelf 的书、
- *               jukebox 的唱片、lectern 的书。
+ *               jukebox 的唱片、lectern 的书。只有移动活塞（moving_piston 上的 PistonMovingBlockEntity）的 ticker 会跑，
+ *               别的方块实体都不 tick，所以阳光探测器不会随时间重算。
  *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
  *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
  *     计划刻    场景开始时没有排队的计划刻。队列是官方的 LevelTicks。除了 flow 题，这次动作排的不运行。tick 题只运行
- *               目标方块自己的 BlockState.tick 一次，不运行别的方块，也不运行流体。flow 题第一下直接运行目标格的
- *               FluidState.tick，然后每刻用官方的 LevelTicks.tick 先跑到期的方块计划刻（ServerLevel.tickBlock），
- *               再跑流体的（ServerLevel.tickFluid），每条队列每刻最多 65536 个。
- *     方块事件  level.blockEvent 丢弃，活塞不会真的动。
+ *               目标方块自己的 BlockState.tick 一次。flow 题第一下直接运行目标格的 FluidState.tick，之后每往后走一步都
+ *               按 ServerLevel.tick 的顺序跑：先跑到期的方块计划刻（ServerLevel.tickBlock），再跑流体的
+ *               （ServerLevel.tickFluid），再跑方块事件，最后跑方块实体，每条队列每刻最多 65536 个。第一下那刻也一样跑
+ *               方块事件和方块实体。settle 每刻也按同样的顺序完整跑一刻。
+ *     方块事件  level.blockEvent 排进官方的顺序，settle 和 flow 每刻在计划刻之后、方块实体之前执行，同一项只排一次。
+ *               动作期间排的也在第一刻执行，所以放下红石块活塞会在下一刻动。活塞的整个动画要走三刻：第一刻推方块并
+ *               推进半格，第二刻再推进半格，第三刻把真正的方块放回去。
+ *     活塞题    随机题之外另有几道固定的活塞题（推出、收回、粘性收回、粘液块分支、推不动、打掉火把），同样的场景和动作
+ *               按 settle = 1..4 各出一遍，逐刻比较世界。它们排在随机题的号段后面，id 从 1000000 开始。
  *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
  *               updateNeighborsAt、updateNeighbourShapes，邻居队列是真正的 CollectingNeighborUpdater，
  *               链长限制是 header 里的 maxChainedUpdates。
@@ -351,8 +378,8 @@ import sun.misc.Unsafe;
  * 四、随机数
  *
  * level.getRandom() 和 player.getRandom() 是同一个计数的随机源。一题没有碰过它时答案就是唯一的。碰过时换全取最小值、全取最大值、
- * 另一个种子再跑三遍：result、changes、destroyed、ticks（不看 delay）有一项不同就写 skip，全部相同才写 case，rng 是真。
- * 只有 delay 不同时那一条写成 -1，比较时不看它。stderr 的汇总列出每个调用点改变和没有改变结果的次数。
+ * 另一个种子再跑三遍：result、changes、destroyed、ran（不看顺序）、ticks（不看 delay，按格子和类型配对，随机的延迟会打乱执行顺序）
+ * 有一项不同就写 skip，全部相同才写 case，rng 是真。只有 delay 不同时那一条写成 -1，比较时不看它。stderr 的汇总列出每个调用点改变和没有改变结果的次数。
  *
  *
  * 五、怎么重放一题
@@ -361,13 +388,14 @@ import sun.misc.Unsafe;
  *     2. place、use：use_item_on(actor, hand, BlockHit { pos, face, loc, inside })。两种题走同一个入口，区别只在出题时想考什么。
  *        destroy：destroy_block(actor, pos)。tick：直接运行 pos 这一格的方块的 tick。
  *        flow：运行 pos 这一格的流体刻，再把时钟一刻一刻往后拨 steps 次，每次跑到期的计划刻。item：use_item(actor, hand)。
- *     3. 比较 result、changes、destroyed、gained 和 ticks 里范围内的条目。
+ *     3. 再走 settle 刻：每刻先把时间加一，再按顺序跑完到期的方块和流体计划刻、方块事件、移动活塞的方块实体。
+ *     4. 比较 result、changes、destroyed、ran、analogContent、gained 和 ticks 里范围内的条目。
  *
  * 官方的 useItemOn 和 destroyBlock 是直接调用的。够距检查、方块高度检查、序列号在 ServerGamePacketListenerImpl 里，不在这里，
  * 所以 pos 可以在任何地方，loc 也不一定在玩家看得到的面上。世界最顶层的方块点上面（目标格已经出界）的情况是真的会发生的，题目里有。
  */
 public final class BlockOracle {
-    /** 假世界的游戏时间。计划刻输出的是相对它的延迟，这个值写在 header 里。 */
+    /** 假世界开始时的游戏时间，写在 header 里。settle 每走一刻加一。 */
     private static final long GAME_TIME = 100_000L;
     /** 官方 server.properties 的默认值。 */
     private static final int MAX_CHAINED_UPDATES = 1_000_000;
@@ -519,7 +547,9 @@ public final class BlockOracle {
         DESTROY("destroy"),
         TICK("tick"),
         FLOW("flow"),
-        ITEM("item");
+        ITEM("item"),
+        RANDOM("random"),
+        CHUNK("chunk");
 
         private final String label;
 
@@ -528,9 +558,10 @@ public final class BlockOracle {
         }
     }
 
-    private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, int single, boolean explain) {
+    private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, Set<String> unrandom, int single,
+            boolean explain) {
         private static final String USAGE = "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>]"
-                + " [--untick <classes>] [--case I] [--explain]";
+                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain]";
 
         static Options parse(String[] args) {
             long seed = 1;
@@ -538,6 +569,7 @@ public final class BlockOracle {
             String only = null;
             Set<String> avoid = Set.of();
             Set<String> untick = Set.of();
+            Set<String> unrandom = Set.of();
             int single = -1;
             boolean explain = false;
             for (int i = 0; i < args.length; i++) {
@@ -547,12 +579,13 @@ public final class BlockOracle {
                     case "--only" -> only = value(args, ++i);
                     case "--avoid" -> avoid = Set.of(value(args, ++i).split(","));
                     case "--untick" -> untick = Set.of(value(args, ++i).split(","));
+                    case "--unrandom" -> unrandom = Set.of(value(args, ++i).split(","));
                     case "--case" -> single = Integer.parseInt(value(args, ++i));
                     case "--explain" -> explain = true;
                     default -> throw new IllegalArgumentException(USAGE);
                 }
             }
-            return new Options(seed, cases, only, avoid, untick, single, explain);
+            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain);
         }
 
         private static String value(String[] args, int index) {
@@ -654,7 +687,7 @@ public final class BlockOracle {
 
         @Override
         public ReloadableServerRegistries.Holder reloadableRegistries() {
-            return managers.fullRegistries();
+            return new NoLoot(managers.fullRegistries().lookup());
         }
 
         @Override
@@ -676,6 +709,21 @@ public final class BlockOracle {
         @Override
         public DedicatedPlayerList getPlayerList() {
             return players;
+        }
+    }
+
+    /**
+     * 战利品表都是空的，世界里没有掉落物，和 Bamboo 一样。掉落时官方每一组物品都从世界的随机源取 5 个数
+     * （位置的偏移和速度），组数又取决于战利品表的随机序列，留着它们，后面的随机数就和 Bamboo 对不上了。
+     */
+    private static final class NoLoot extends ReloadableServerRegistries.Holder {
+        NoLoot(HolderLookup.Provider registries) {
+            super(registries);
+        }
+
+        @Override
+        public LootTable getLootTable(ResourceKey<LootTable> id) {
+            return LootTable.EMPTY;
         }
     }
 
@@ -710,7 +758,10 @@ public final class BlockOracle {
         }
     }
 
-    /** level.findBlocksIn 按区块段扫描。这个区块只把段转给假世界，扫描顺序还是官方的。 */
+    /**
+     * level.findBlocksIn 按区块段扫描，ServerLevel.tickChunk 按区块段挑随机刻的格子。这个区块只把段转给假世界，
+     * 扫描和挑格子的顺序还是官方的。
+     */
     private static final class FakeChunk extends LevelChunk {
         private FakeLevel level;
         private int chunkX;
@@ -736,6 +787,42 @@ public final class BlockOracle {
         @Override
         public LevelChunkSection getSection(int sectionY) {
             return FakeSection.of(level, new BlockPos(chunkX << 4, sectionY << 4, chunkZ << 4));
+        }
+
+        /** tickChunk 按下标遍历，下标 0 是世界最低的区块段。 */
+        @Override
+        public LevelChunkSection[] getSections() {
+            LevelChunkSection[] sections = new LevelChunkSection[getSectionsCount()];
+            for (int index = 0; index < sections.length; index++) {
+                sections[index] = getSection(getSectionYFromSectionIndex(index));
+            }
+            return sections;
+        }
+
+        @Override
+        public ChunkPos getPos() {
+            return new ChunkPos(chunkX, chunkZ);
+        }
+
+        @Override
+        public int getMinY() {
+            return level.getMinY();
+        }
+
+        @Override
+        public int getHeight() {
+            return level.getHeight();
+        }
+
+        /** ChunkAccess.getHeight：这一列最高的、符合高度图条件的方块，没有时是世界底部下面一格。 */
+        @Override
+        public int getHeight(Heightmap.Types type, int x, int z) {
+            for (int y = level.getMaxY(); y >= level.getMinY(); y--) {
+                if (type.isOpaque().test(level.getBlockState(new BlockPos((chunkX << 4) + x, y, (chunkZ << 4) + z)))) {
+                    return y;
+                }
+            }
+            return level.getMinY() - 1;
         }
 
         @Override
@@ -775,7 +862,24 @@ public final class BlockOracle {
 
         @Override
         public BlockState getBlockState(int sectionX, int sectionY, int sectionZ) {
-            return level.getBlockState(origin.offset(sectionX, sectionY, sectionZ));
+            BlockState state = level.getBlockState(origin.offset(sectionX, sectionY, sectionZ));
+            level.checkRandomTick(state);
+            return state;
+        }
+
+        /** LevelChunkSection.isRandomlyTicking：tickingBlockCount 或者 tickingFluidCount 不是 0。 */
+        @Override
+        public boolean isRandomlyTicking() {
+            for (Long2ObjectMap.Entry<BlockState> entry : level.blocks.long2ObjectEntrySet()) {
+                BlockPos pos = BlockPos.of(entry.getLongKey());
+                BlockState state = entry.getValue();
+                boolean inside = pos.getX() >> 4 == origin.getX() >> 4 && pos.getY() >> 4 == origin.getY() >> 4
+                        && pos.getZ() >> 4 == origin.getZ() >> 4;
+                if (inside && (state.isRandomlyTicking() || state.getFluidState().isRandomlyTicking())) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -823,9 +927,14 @@ public final class BlockOracle {
         }
     }
 
+    /** 除了游戏时间都是固定的。时间从 {@link #GAME_TIME} 开始，settle 每走一刻调用一次 {@link #advance}。 */
     private static final class FixedLevelData implements LevelData {
-        /** 只有 flow 题让时间往前走。 */
-        long time = GAME_TIME;
+        private long gameTime = GAME_TIME;
+
+        /** ServerLevel.tickTime 里的 levelData.setGameTime(gameTime + 1)。 */
+        void advance() {
+            gameTime++;
+        }
 
         @Override
         public LevelData.RespawnData getRespawnData() {
@@ -834,7 +943,7 @@ public final class BlockOracle {
 
         @Override
         public long getGameTime() {
-            return time;
+            return gameTime;
         }
 
         @Override
@@ -854,10 +963,11 @@ public final class BlockOracle {
     }
 
     /**
-     * 记录每一次取随机数。假世界的 level.getRandom() 和 player.getRandom() 都是它。
+     * 记录每一次取随机数。假世界的 level.getRandom() 是一个，玩家的 getRandom() 是另一个。
      *
-     * <p>大多数用到随机数的地方只是音调和粒子，所以不能一碰到就排除。碰过随机数的场景会换几种随机数重跑，
-     * 世界的结果变了才算依赖随机。LOW 和 HIGH 是两个极端，能抓住 nextInt(5) == 0 这种小概率分支。
+     * <p>SEEDED 就是官方 ServerLevel 用的 LegacyRandomSource，mc-bamboo-blocks 用同样的种子逐位重现它，所以世界的随机源
+     * 不用排除，直接比较。玩家自己的随机源 Bamboo 没有，它碰过的场景会换几种随机数重跑，世界的结果变了才排除。
+     * LOW 和 HIGH 是两个极端，能抓住 nextInt(5) == 0 这种小概率分支。
      */
     private static final class OracleRandom implements RandomSource {
         private static final StackWalker WALKER = StackWalker.getInstance();
@@ -872,13 +982,17 @@ public final class BlockOracle {
         }
 
         private final Mode mode;
-        private final Random seeded;
+        private final RandomSource seeded;
         private final Set<String> sites = new LinkedHashSet<>();
         private int draws;
 
         OracleRandom(Mode mode, long seed) {
+            this(mode, new LegacyRandomSource(seed));
+        }
+
+        private OracleRandom(Mode mode, RandomSource seeded) {
             this.mode = mode;
-            this.seeded = new Random(seed);
+            this.seeded = seeded;
         }
 
         private void touch() {
@@ -905,10 +1019,11 @@ public final class BlockOracle {
                     .orElse("unknown"));
         }
 
+        /** SEEDED 和官方一样取一个 long 做新源的种子，新源的取数照样记在这里。 */
         @Override
         public RandomSource fork() {
             touch();
-            return this;
+            return mode == Mode.SEEDED ? new OracleRandom(mode, seeded.fork()) : this;
         }
 
         @Override
@@ -919,6 +1034,7 @@ public final class BlockOracle {
         @Override
         public void setSeed(long seed) {
             touch();
+            seeded.setSeed(seed);
         }
 
         @Override
@@ -994,7 +1110,7 @@ public final class BlockOracle {
 
     /**
      * 官方的 LevelTicks，区块的容器在第一次排刻时才建，这样哪里都排得进去。记下被接受的计划刻（同一格同一类型重复的会被
-     * LevelChunkTicks 丢掉）。flow 题用官方的 tick 方法真正跑它们。
+     * LevelChunkTicks 丢掉）。flow 题和 settle 用官方的 tick 方法真正跑它们。
      */
     private static final class RecordingTicks<T> extends LevelTicks<T> {
         private final Long2ObjectOpenHashMap<LevelChunkTicks<T>> containers = new Long2ObjectOpenHashMap<>();
@@ -1045,14 +1161,27 @@ public final class BlockOracle {
         private Official official;
         private Long2ObjectOpenHashMap<BlockState> blocks;
         private Long2ObjectOpenHashMap<BlockEntity> blockEntities;
+        private LinkedHashSet<BlockEventData> blockEvents;
+        /**
+         * 移动方块实体的 ticker，按登记顺序。官方的完整机制是
+         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里只登记活塞：
+         * Bamboo 别的方块实体都不 tick。
+         */
+        private LinkedHashMap<BlockPos, PistonMovingBlockEntity> tickers;
+        /** tick 阶段里新登记的 ticker，下一刻开头并进 {@link #tickers}。 */
+        private LinkedHashMap<BlockPos, PistonMovingBlockEntity> pendingTickers;
+        private boolean tickingBlockEntities;
         private RecordingTicks<Block> recordedBlockTicks;
         private RecordingTicks<Fluid> recordedFluidTicks;
         private List<ServerPlayer> playersInWorld;
         private List<Destroyed> destroyed;
         private List<String> spawned;
+        private Set<String> ranBlocks;
+        private boolean analogContent;
         private FixedLevelData data;
         private LevelEntityGetter<Entity> entityGetter;
         private int lastEntityId = 100;
+        private Set<String> unrandom;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -1063,13 +1192,20 @@ public final class BlockOracle {
             level.official = official;
             level.blocks = new Long2ObjectOpenHashMap<>();
             level.blockEntities = new Long2ObjectOpenHashMap<>();
+            level.blockEvents = new LinkedHashSet<>();
+            level.tickers = new LinkedHashMap<>();
+            level.pendingTickers = new LinkedHashMap<>();
+            level.tickingBlockEntities = false;
             level.recordedBlockTicks = new RecordingTicks<>();
             level.recordedFluidTicks = new RecordingTicks<>();
             level.playersInWorld = new ArrayList<>();
             level.destroyed = new ArrayList<>();
             level.spawned = new ArrayList<>();
+            level.ranBlocks = new LinkedHashSet<>();
+            level.analogContent = false;
             level.data = new FixedLevelData();
             level.entityGetter = new PlayerEntities(level.playersInWorld);
+            level.unrandom = Set.of();
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, MAX_CHAINED_UPDATES));
             set(Level.class, level, "random", random);
             set(Level.class, level, "soundSeedGenerator", official.soundSeeds);
@@ -1127,15 +1263,166 @@ public final class BlockOracle {
         }
 
         /**
-         * flow 题：先跑这一格的流体刻，再按官方 ServerLevel.tick 的顺序往后跑 steps 刻，每刻方块的计划刻在前，流体的在后。
+         * 再走 ticks 个游戏刻，照 ServerLevel.tick 的顺序：先 tickTime 把时间加一，再跑到期的方块计划刻，
+         * 然后跑到期的流体计划刻，再跑方块事件，最后跑方块实体。
+         *
+         * <p>实体的刻不跑。handlingTick 只在计划刻和方块事件期间为真，跑方块实体之前已经放回假，和官方相同。
+         */
+        void settle(int ticks) {
+            for (int i = 0; i < ticks; i++) {
+                data.advance();
+                long now = getGameTime();
+                set(ServerLevel.class, this, "handlingTick", true);
+                recordedBlockTicks.tick(now, MAX_TICKS_PER_TICK, this::tickBlock);
+                recordedFluidTicks.tick(now, MAX_TICKS_PER_TICK, (at, fluid) -> invoke(TICK_FLUID, at, fluid));
+                runBlockEvents();
+                set(ServerLevel.class, this, "handlingTick", false);
+                tickRegisteredTickers();
+            }
+        }
+
+        /**
+         * ServerLevel.runBlockEvents：按排进来的顺序执行，这一格已经换成别的方块时丢掉。
+         *
+         * <p>官方在这里还会给客户端发 ClientboundBlockEventPacket，假世界里没客户端。区块没加载时往后挪的
+         * 那份重排也不做，假世界的区块都算加载过。
+         */
+        private void runBlockEvents() {
+            withPlayersHidden(() -> {
+                while (!blockEvents.isEmpty()) {
+                    BlockEventData eventData = blockEvents.iterator().next();
+                    blockEvents.remove(eventData);
+                    BlockState state = getBlockState(eventData.pos());
+                    if (state.is(eventData.block())) {
+                        state.triggerEvent(this, eventData.pos(), eventData.paramA(), eventData.paramB());
+                    }
+                }
+            });
+        }
+
+        /**
+         * 方块事件和方块实体的 tick 里，实体查询看不到玩家。
+         *
+         * <p>Bamboo 不模拟实体：活塞推实体、敲钟惊动附近的实体都不在范围里。假玩家跳过了构造函数，被推或者被钟
+         * 读到没初始化的字段会抛空指针。世界里的方块变化不受影响。
+         */
+        private void withPlayersHidden(Runnable body) {
+            List<ServerPlayer> hidden = new ArrayList<>(playersInWorld);
+            playersInWorld.clear();
+            try {
+                body.run();
+            } finally {
+                playersInWorld.addAll(hidden);
+            }
+        }
+
+        /**
+         * Level.tickBlockEntities：先并进上一刻登记的新 ticker，再按顺序跑。官方的 wrapper 每下都重读这一格的
+         * 状态，类型对不上就不跑。
+         *
+         * <p>官方遍历的是列表，删掉的 wrapper 要等下一次 tick 才回收；这里也等到循环结束再删，顺序一致。
+         */
+        private void tickRegisteredTickers() {
+            tickingBlockEntities = true;
+            tickers.putAll(pendingTickers);
+            pendingTickers.clear();
+            try {
+                withPlayersHidden(() -> {
+                    for (Map.Entry<BlockPos, PistonMovingBlockEntity> entry : new ArrayList<>(tickers.entrySet())) {
+                        BlockPos pos = entry.getKey();
+                        PistonMovingBlockEntity entity = entry.getValue();
+                        if (!entity.isRemoved()) {
+                            BlockState state = getBlockState(pos);
+                            if (entity.getType().isValid(state)) {
+                                PistonMovingBlockEntity.tick(this, pos, state, entity);
+                            }
+                        }
+                    }
+                });
+                tickers.values().removeIf(BlockEntity::isRemoved);
+            } finally {
+                tickingBlockEntities = false;
+            }
+        }
+
+        /** LevelChunk.updateBlockEntityTicker：只登记移动活塞，见 {@link #tickers}。 */
+        private void registerTicker(BlockEntity blockEntity) {
+            if (blockEntity instanceof PistonMovingBlockEntity piston
+                    && getBlockState(piston.getBlockPos()).is(Blocks.MOVING_PISTON)) {
+                if (tickingBlockEntities) {
+                    pendingTickers.put(piston.getBlockPos(), piston);
+                } else {
+                    tickers.put(piston.getBlockPos(), piston);
+                }
+            }
+        }
+
+        /** ServerLevel.tickBlock。到期时这一格换成了别的方块，这个刻就不执行。 */
+        private void tickBlock(BlockPos pos, Block block) {
+            BlockState state = getBlockState(pos);
+            if (state.is(block)) {
+                ranBlocks.add(id(block));
+                state.tick(this, pos, getRandom());
+            }
+        }
+
+        /**
+         * flow 题：先跑这一格的流体刻，再按官方 ServerLevel.tick 的顺序往后跑 steps 刻，每刻方块的计划刻在前，
+         * 流体的在后，然后是方块事件和方块实体。动作自己那一格也一样，流体刻之后跑方块事件和方块实体。
          * 方块的计划刻要是落在 untick 里的类上（下落、红石这些范围外的刻），这一题只能排除。
          */
         void flow(BlockPos pos, int steps, Set<String> untick) {
+            set(ServerLevel.class, this, "handlingTick", true);
             getFluidState(pos).tick(this, pos, getBlockState(pos));
+            runBlockEvents();
+            set(ServerLevel.class, this, "handlingTick", false);
+            tickRegisteredTickers();
             for (int step = 1; step <= steps; step++) {
-                data.time = GAME_TIME + step;
-                recordedBlockTicks.tick(data.time, MAX_TICKS_PER_TICK, (at, block) -> runBlockTick(at, block, untick));
-                recordedFluidTicks.tick(data.time, MAX_TICKS_PER_TICK, (at, fluid) -> invoke(TICK_FLUID, at, fluid));
+                data.gameTime = GAME_TIME + step;
+                long now = getGameTime();
+                set(ServerLevel.class, this, "handlingTick", true);
+                recordedBlockTicks.tick(now, MAX_TICKS_PER_TICK, (at, block) -> runBlockTick(at, block, untick));
+                recordedFluidTicks.tick(now, MAX_TICKS_PER_TICK, (at, fluid) -> invoke(TICK_FLUID, at, fluid));
+                runBlockEvents();
+                set(ServerLevel.class, this, "handlingTick", false);
+                tickRegisteredTickers();
+            }
+        }
+
+        /** Level.randValue：getBlockRandomPos 的线性同余，和 random 无关，种子见 Oracle.answer。 */
+        void seedPositions(int value) {
+            set(Level.class, this, "randValue", value);
+        }
+
+        /** random 题：ServerLevel.tickChunk 选中这一格时做的事。 */
+        void randomTick(BlockPos pos) {
+            BlockState state = getBlockState(pos);
+            if (state.isRandomlyTicking()) {
+                state.randomTick(this, pos, random);
+            }
+            FluidState fluid = state.getFluidState();
+            if (fluid.isRandomlyTicking()) {
+                fluid.randomTick(this, pos, random);
+            }
+        }
+
+        /** chunk 题：官方的 tickChunk，碰到 unrandom 里的类的随机刻时这一题只能排除。 */
+        void tickChunk(BlockPos pos, int speed, Set<String> unrandom) {
+            this.unrandom = unrandom;
+            try {
+                tickChunk(FakeChunk.of(this, pos.getX() >> 4, pos.getZ() >> 4), speed);
+            } finally {
+                this.unrandom = Set.of();
+            }
+        }
+
+        /** tickChunk 从区块段读到的状态。要做随机刻的状态落在 unrandom 里时排除这一题。 */
+        void checkRandomTick(BlockState state) {
+            if (!unrandom.isEmpty() && state.isRandomlyTicking()) {
+                String outOfScope = ancestorIn(state.getBlock().getClass(), unrandom);
+                if (outOfScope != null) {
+                    throw new SkipCase("unrandom:" + outOfScope);
+                }
             }
         }
 
@@ -1321,6 +1608,7 @@ public final class BlockOracle {
             if (previous != null && previous != blockEntity) {
                 previous.setRemoved();
             }
+            registerTicker(blockEntity);
         }
 
         @Override
@@ -1329,10 +1617,38 @@ public final class BlockOracle {
             if (removed != null) {
                 removed.setRemoved();
             }
+            tickers.remove(pos);
+            pendingTickers.remove(pos);
         }
 
+        /**
+         * BlockEntity.setChanged 先调这里，再让旁边的比较器重读模拟信号。
+         *
+         * <p>容器内容 Bamboo 不保留，只有书架的格子做成了状态，读到的数和官方一样。别的方块实体改了内容
+         * 又有比较器能读到，这道题的世界两边就不一样了。
+         */
         @Override
         public void blockEntityChanged(BlockPos pos) {
+            BlockEntity entity = existingBlockEntity(pos);
+            if (entity != null && !(entity instanceof ChiseledBookShelfBlockEntity) && readsAnalogOutput(pos)) {
+                analogContent = true;
+            }
+        }
+
+        /** Level.updateNeighbourForOutputSignal 找的是哪些比较器：隔着导电方块也读得到。 */
+        private boolean readsAnalogOutput(BlockPos pos) {
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                BlockPos relativePos = pos.relative(direction);
+                BlockState state = getBlockState(relativePos);
+                if (state.is(Blocks.COMPARATOR)) {
+                    return true;
+                }
+                if (state.isRedstoneConductor(this, relativePos)
+                        && getBlockState(relativePos.relative(direction)).is(Blocks.COMPARATOR)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         @Override
@@ -1378,8 +1694,10 @@ public final class BlockOracle {
                 float pitch, long seed) {
         }
 
+        /** ServerLevel.blockEvent：排进下一刻执行的队列，同一项只排一次。 */
         @Override
         public void blockEvent(BlockPos pos, Block block, int b0, int b1) {
+            blockEvents.add(new BlockEventData(pos.immutable(), block, b0, b1));
         }
 
         @Override
@@ -1445,7 +1763,7 @@ public final class BlockOracle {
 
         @Override
         public DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
-            return new DifficultyInstance(getDifficulty(), GAME_TIME, 0L, 0.0F);
+            return new DifficultyInstance(getDifficulty(), getGameTime(), 0L, 0.0F);
         }
 
         /** 场景里的玩家总在目标附近。 */
@@ -1483,46 +1801,6 @@ public final class BlockOracle {
         @Override
         public int getRawBrightness(BlockPos pos, int darkening) {
             return FULL_BRIGHTNESS;
-        }
-
-        @Override
-        public int getDirectSignal(BlockPos pos, Direction direction) {
-            return 0;
-        }
-
-        @Override
-        public int getDirectSignalTo(BlockPos pos) {
-            return 0;
-        }
-
-        @Override
-        public int getControlInputSignal(BlockPos pos, Direction direction, boolean onlyDiodes) {
-            return 0;
-        }
-
-        @Override
-        public boolean hasSignal(BlockPos pos, Direction direction) {
-            return false;
-        }
-
-        @Override
-        public int getSignal(BlockPos pos, Direction direction) {
-            return 0;
-        }
-
-        @Override
-        public int getBestOwnOrNeighbourSignal(BlockPos pos) {
-            return 0;
-        }
-
-        @Override
-        public boolean hasNeighborSignal(BlockPos blockPos) {
-            return false;
-        }
-
-        @Override
-        public int getBestNeighborSignal(BlockPos pos) {
-            return 0;
         }
 
         @Override
@@ -1803,9 +2081,13 @@ public final class BlockOracle {
     }
 
     private record ScheduledBlockTick(BlockPos pos, boolean fluid, String type, int delay, int priority) {
-        boolean sameExceptDelay(ScheduledBlockTick other) {
-            return pos.equals(other.pos) && fluid == other.fluid && type.equals(other.type) && priority == other.priority;
+        /** 同一格同一类型只会排着一个，所以这三样能认出是哪一个计划刻。 */
+        TickKey key() {
+            return new TickKey(pos, fluid, type);
         }
+    }
+
+    private record TickKey(BlockPos pos, boolean fluid, String type) {
     }
 
     /** 官方给出的答案。 */
@@ -1815,7 +2097,9 @@ public final class BlockOracle {
         final List<Destroyed> destroyed;
         final List<ScheduledBlockTick> ticks = new ArrayList<>();
         final List<String> spawned;
+        final List<String> ran;
         final boolean itemReached;
+        final boolean analogContent;
         final List<String> gained;
         boolean touchedRandom;
 
@@ -1825,12 +2109,10 @@ public final class BlockOracle {
             this.gained = gained;
             this.destroyed = level.destroyed;
             this.spawned = level.spawned;
+            this.ran = List.copyOf(level.ranBlocks);
+            this.analogContent = level.analogContent;
             collectChanges(level, c.scene);
-            if (c.kind == Kind.FLOW) {
-                collectTicks(level.recordedBlockTicks.pending(), level.recordedFluidTicks.pending());
-            } else {
-                collectTicks(level.recordedBlockTicks.accepted, level.recordedFluidTicks.accepted);
-            }
+            collectTicks(level);
         }
 
         private void collectChanges(FakeLevel level, Long2ObjectMap<BlockState> scene) {
@@ -1842,38 +2124,49 @@ public final class BlockOracle {
             }
         }
 
-        private void collectTicks(List<ScheduledTick<Block>> blockTicks, List<ScheduledTick<Fluid>> fluidTicks) {
-            for (ScheduledTick<Block> tick : blockTicks) {
-                ticks.add(new ScheduledBlockTick(tick.pos(), false, id(tick.type()), delay(tick), tick.priority().getValue()));
+        /** 动作和 settle 走完之后还排着的计划刻，按执行顺序，方块的在流体的前面。 */
+        private void collectTicks(FakeLevel level) {
+            long now = level.getGameTime();
+            for (ScheduledTick<Block> tick : level.recordedBlockTicks.pending()) {
+                ticks.add(new ScheduledBlockTick(tick.pos(), false, id(tick.type()), delay(tick, now), tick.priority().getValue()));
             }
-            for (ScheduledTick<Fluid> tick : fluidTicks) {
+            for (ScheduledTick<Fluid> tick : level.recordedFluidTicks.pending()) {
                 String fluid = BuiltInRegistries.FLUID.getKey(tick.type()).toString();
-                ticks.add(new ScheduledBlockTick(tick.pos(), true, fluid, delay(tick), tick.priority().getValue()));
+                ticks.add(new ScheduledBlockTick(tick.pos(), true, fluid, delay(tick, now), tick.priority().getValue()));
             }
         }
 
-        private static int delay(ScheduledTick<?> tick) {
-            return (int) (tick.triggerTick() - GAME_TIME);
+        private static int delay(ScheduledTick<?> tick, long now) {
+            return (int) (tick.triggerTick() - now);
         }
 
         boolean sameWorld(Outcome other) {
-            if (!result.equals(other.result) || !changes.equals(other.changes) || !destroyed.equals(other.destroyed)
-                    || !gained.equals(other.gained) || ticks.size() != other.ticks.size()) {
-                return false;
-            }
-            for (int i = 0; i < ticks.size(); i++) {
-                if (!ticks.get(i).sameExceptDelay(other.ticks.get(i))) {
-                    return false;
-                }
-            }
-            return true;
+            return result.equals(other.result) && changes.equals(other.changes) && destroyed.equals(other.destroyed)
+                    && gained.equals(other.gained)
+                    && Set.copyOf(ran).equals(Set.copyOf(other.ran)) && sameTicksExceptDelay(other);
         }
 
-        /** 世界一样、只有延迟不同时，把延迟记成 -1。 */
+        /** 随机的延迟会改变执行顺序，所以按格子和类型配对，不按下标。 */
+        private boolean sameTicksExceptDelay(Outcome other) {
+            Map<TickKey, ScheduledBlockTick> others = other.ticksByKey();
+            return ticks.size() == others.size() && ticks.stream().allMatch(tick -> {
+                ScheduledBlockTick match = others.get(tick.key());
+                return match != null && match.priority == tick.priority;
+            });
+        }
+
+        private Map<TickKey, ScheduledBlockTick> ticksByKey() {
+            Map<TickKey, ScheduledBlockTick> byKey = new HashMap<>();
+            ticks.forEach(tick -> byKey.put(tick.key(), tick));
+            return byKey;
+        }
+
+        /** 世界一样、只有延迟不同时，把延迟记成 -1。调用前 sameWorld 已经为真，每一个都配得上。 */
         void maskRandomDelays(Outcome other) {
+            Map<TickKey, ScheduledBlockTick> others = other.ticksByKey();
             for (int i = 0; i < ticks.size(); i++) {
                 ScheduledBlockTick tick = ticks.get(i);
-                if (tick.delay != other.ticks.get(i).delay) {
+                if (tick.delay != others.get(tick.key()).delay) {
                     ticks.set(i, new ScheduledBlockTick(tick.pos, tick.fluid, tick.type, -1, tick.priority));
                 }
             }
@@ -1900,8 +2193,12 @@ public final class BlockOracle {
         Vec3 bystander;
         AABB actorBox;
         AABB bystanderBox;
+        /** 动作做完之后再走几个游戏刻。 */
+        int settle;
         /** flow 题在第一个流体刻之后再跑多少刻。 */
         int steps;
+        /** chunk 题的 tickSpeed：每个区块段挑几格。 */
+        int speed;
 
         Case(int id, Kind kind, Subject subject, Height height) {
             this.id = id;
@@ -1941,6 +2238,17 @@ public final class BlockOracle {
                 Blocks.FARMLAND, Blocks.CLAY, Blocks.MOSS_BLOCK, Blocks.MUD, Blocks.MYCELIUM, Blocks.PODZOL, Blocks.GLASS, Blocks.OBSIDIAN,
                 Blocks.ICE, Blocks.CRIMSON_NYLIUM, Blocks.WARPED_NYLIUM, Blocks.COBBLESTONE, Blocks.ROOTED_DIRT, Blocks.SNOW_BLOCK,
                 Blocks.MAGMA_BLOCK, Blocks.SLIME_BLOCK, Blocks.JUNGLE_LOG, Blocks.OAK_LEAVES);
+        /** 信号源和被信号驱动的元件，用来在题目旁边堆出电路。导线单独铺，不在这里。 */
+        private static final List<Block> CIRCUITRY = List.of(Blocks.REDSTONE_BLOCK, Blocks.REDSTONE_TORCH, Blocks.REDSTONE_WALL_TORCH,
+                Blocks.LEVER, Blocks.STONE_BUTTON, Blocks.OAK_BUTTON, Blocks.REPEATER, Blocks.COMPARATOR, Blocks.OBSERVER,
+                Blocks.DAYLIGHT_DETECTOR, Blocks.TARGET, Blocks.TRIPWIRE_HOOK, Blocks.DETECTOR_RAIL,
+                Blocks.LIGHTNING_ROD.weathering().unaffected(), Blocks.SCULK_SENSOR, Blocks.CALIBRATED_SCULK_SENSOR,
+                Blocks.STONE_PRESSURE_PLATE, Blocks.REDSTONE_LAMP, Blocks.COPPER_BULB.weathering().unaffected(), Blocks.NOTE_BLOCK,
+                Blocks.OAK_DOOR, Blocks.IRON_DOOR, Blocks.OAK_TRAPDOOR, Blocks.OAK_FENCE_GATE, Blocks.POWERED_RAIL,
+                Blocks.ACTIVATOR_RAIL, Blocks.DISPENSER, Blocks.DROPPER, Blocks.CRAFTER, Blocks.PISTON, Blocks.STICKY_PISTON,
+                Blocks.TNT, Blocks.BELL, Blocks.HOPPER, Blocks.BIG_DRIPLEAF, Blocks.LECTERN, Blocks.CAKE, Blocks.COMPOSTER,
+                Blocks.CAULDRON, Blocks.WATER_CAULDRON, Blocks.BEEHIVE, Blocks.RESPAWN_ANCHOR, Blocks.END_PORTAL_FRAME,
+                Blocks.CHISELED_BOOKSHELF);
 
         private final Set<String> avoid;
         final List<Block> blocks = new ArrayList<>();
@@ -1964,11 +2272,14 @@ public final class BlockOracle {
         final List<Block> replaceable = new ArrayList<>();
         final Set<Block> placeable = new HashSet<>();
         final Map<Class<?>, List<Block>> families = new HashMap<>();
+        /** CIRCUITRY 里 --avoid 没有排除的那些。 */
+        final List<Block> circuitry;
         private final List<Block> terrain;
 
         Catalog(Set<String> avoid) throws ReflectiveOperationException {
             this.avoid = avoid;
             this.terrain = TERRAIN.stream().filter(this::allowed).toList();
+            this.circuitry = CIRCUITRY.stream().filter(this::allowed).toList();
             for (Block block : BuiltInRegistries.BLOCK) {
                 if (block.isEnabled(FeatureFlags.DEFAULT_FLAGS)) {
                     addBlock(block);
@@ -2059,6 +2370,12 @@ public final class BlockOracle {
         /** 有带流体的状态：液体、气泡柱、海草这些，还有能含水的方块。 */
         static boolean holdsFluid(Block block) {
             return block.getStateDefinition().getPossibleStates().stream().anyMatch(state -> !state.getFluidState().isEmpty());
+        }
+
+        /** 有会随机刻的状态，方块自己的或者流体的。 */
+        static boolean ticksRandomly(Block block) {
+            return block.getStateDefinition().getPossibleStates().stream()
+                    .anyMatch(state -> state.isRandomlyTicking() || state.getFluidState().isRandomlyTicking());
         }
 
         /** 方块物品的 useOn 就是放置，不算。 */
@@ -2203,6 +2520,8 @@ public final class BlockOracle {
         private static final float[] INSET_SURFACES = {0.125F, 0.1875F, 0.5F, 0.75F, 0.875F, 0.9375F};
         private static final int DEPENDANT_LAYERS = 3;
         private static final int[] FLOW_STEPS = {0, 1, 5, 10, 20, 40, 80, 120};
+        /** 3 是默认的 random_tick_speed，大的值让场景里的方块在一题里多半都被挑中。 */
+        private static final int[] CHUNK_SPEEDS = {1, 3, 64, 1024};
         private static final double STANDING_EYE_HEIGHT = 1.62;
         private static final double CROUCHING_EYE_HEIGHT = 1.27;
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
@@ -2222,19 +2541,299 @@ public final class BlockOracle {
         Case build(int id, Kind kind, Subject subject, long seed) {
             Random random = new Random(seed * 0x9E3779B97F4A7C15L + id);
             Case c = new Case(id, kind, subject, height);
-            switch (kind) {
+            BlockPos focus = switch (kind) {
                 case PLACE -> buildPlace(c, random);
                 case USE -> buildUse(c, random);
                 case DESTROY -> buildDestroy(c, random);
                 case TICK -> buildTick(c, random);
                 case FLOW -> buildFlow(c, random);
                 case ITEM -> buildItem(c, random);
+                case RANDOM -> buildRandom(c, random);
+                case CHUNK -> buildChunk(c, random);
+            };
+            // flow 和 item 题考的是流体和物品本身，不加红石电路，也不额外 settle。
+            if (kind != Kind.FLOW && kind != Kind.ITEM) {
+                addCircuit(c, random, focus);
+                if (c.settle == 0) {
+                    c.settle = pickSettle(c, random);
+                }
             }
             return c;
         }
 
+        private static final BlockPos PISTON_CELL = new BlockPos(0, 64, 0);
+        /** 多刻活塞题各出 settle = 1..4：推方块、再推半格、放回方块、放回方块引起的连锁。 */
+        private static final int PISTON_SETTLE_STEPS = 4;
+
+        /**
+         * 多刻活塞题：场景和动作都是固定的，同一道题按 settle 各出一遍，逐刻比较世界。
+         *
+         * <p>随机题里活塞旁边不一定有信号，走得完整个动画的很少，所以单独出这几道。id 从 base 开始，
+         * {@code --case} 也能单独重现。
+         */
+        List<Case> pistonCases(int base) {
+            List<Scenario> scenarios = List.of(
+                    new Scenario(Kind.PLACE, Blocks.PISTON, Items.REDSTONE_BLOCK, c -> {
+                        c.put(PISTON_CELL, piston(Blocks.PISTON, Direction.EAST, false));
+                        c.put(PISTON_CELL.relative(Direction.EAST, 2), Blocks.STONE.defaultBlockState());
+                        placeOnTop(c, PISTON_CELL, Items.REDSTONE_BLOCK);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.STICKY_PISTON, Items.REDSTONE_BLOCK, c -> {
+                        c.put(PISTON_CELL, piston(Blocks.STICKY_PISTON, Direction.EAST, false));
+                        c.put(PISTON_CELL.relative(Direction.EAST, 2), Blocks.STONE.defaultBlockState());
+                        placeOnTop(c, PISTON_CELL, Items.REDSTONE_BLOCK);
+                    }),
+                    new Scenario(Kind.DESTROY, Blocks.PISTON, Items.AIR, c -> {
+                        c.put(PISTON_CELL, piston(Blocks.PISTON, Direction.EAST, true));
+                        c.put(PISTON_CELL.relative(Direction.EAST), head(Direction.EAST, PistonType.DEFAULT));
+                        c.put(PISTON_CELL.relative(Direction.EAST, 2), Blocks.STONE.defaultBlockState());
+                        c.put(PISTON_CELL.above(), Blocks.REDSTONE_BLOCK.defaultBlockState());
+                        destroyAt(c, PISTON_CELL.above());
+                    }),
+                    new Scenario(Kind.DESTROY, Blocks.STICKY_PISTON, Items.AIR, c -> {
+                        c.put(PISTON_CELL, piston(Blocks.STICKY_PISTON, Direction.EAST, true));
+                        c.put(PISTON_CELL.relative(Direction.EAST), head(Direction.EAST, PistonType.STICKY));
+                        c.put(PISTON_CELL.relative(Direction.EAST, 2), Blocks.STONE.defaultBlockState());
+                        c.put(PISTON_CELL.above(), Blocks.REDSTONE_BLOCK.defaultBlockState());
+                        destroyAt(c, PISTON_CELL.above());
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.PISTON, Items.REDSTONE_BLOCK, c -> {
+                        BlockPos slime = PISTON_CELL.relative(Direction.EAST);
+                        c.put(PISTON_CELL, piston(Blocks.PISTON, Direction.EAST, false));
+                        c.put(slime, Blocks.SLIME_BLOCK.defaultBlockState());
+                        c.put(slime.above(), Blocks.STONE.defaultBlockState());
+                        c.put(slime.relative(Direction.EAST), Blocks.STONE.defaultBlockState());
+                        placeOnTop(c, PISTON_CELL, Items.REDSTONE_BLOCK);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.PISTON, Items.REDSTONE_BLOCK, c -> {
+                        c.put(PISTON_CELL, piston(Blocks.PISTON, Direction.EAST, false));
+                        c.put(PISTON_CELL.relative(Direction.EAST), Blocks.OBSIDIAN.defaultBlockState());
+                        placeOnTop(c, PISTON_CELL, Items.REDSTONE_BLOCK);
+                    }),
+                    new Scenario(Kind.PLACE, Blocks.PISTON, Items.REDSTONE_BLOCK, c -> {
+                        BlockPos torch = PISTON_CELL.relative(Direction.EAST);
+                        c.put(PISTON_CELL, piston(Blocks.PISTON, Direction.EAST, false));
+                        c.put(torch.below(), Blocks.STONE.defaultBlockState());
+                        c.put(torch, Blocks.TORCH.defaultBlockState());
+                        placeOnTop(c, PISTON_CELL, Items.REDSTONE_BLOCK);
+                    }));
+            List<Case> cases = new ArrayList<>();
+            for (Scenario scenario : scenarios) {
+                for (int settle = 1; settle <= PISTON_SETTLE_STEPS; settle++) {
+                    Case c = new Case(base + cases.size(), scenario.kind(),
+                            new Subject(scenario.subject(), scenario.item()), height);
+                    scenario.setup().accept(c);
+                    c.settle = settle;
+                    cases.add(c);
+                }
+            }
+            return cases;
+        }
+
+        /** 固定场景的最小描述。{@code item} 只给汇总用，{@code setup} 填场景和动作。 */
+        private record Scenario(Kind kind, Block subject, Item item, Consumer<Case> setup) {
+        }
+
+        private static BlockState piston(Block block, Direction facing, boolean extended) {
+            return block.defaultBlockState()
+                    .setValue(PistonBaseBlock.FACING, facing)
+                    .setValue(PistonBaseBlock.EXTENDED, extended);
+        }
+
+        private static BlockState head(Direction facing, PistonType type) {
+            return Blocks.PISTON_HEAD.defaultBlockState()
+                    .setValue(PistonHeadBlock.FACING, facing)
+                    .setValue(PistonHeadBlock.TYPE, type);
+        }
+
+        /** 站得够远，往 pos 的顶面放 item，方块落在 pos 上面那一格。 */
+        private static void placeOnTop(Case c, BlockPos pos, Item item) {
+            c.main = item;
+            c.hand = InteractionHand.MAIN_HAND;
+            c.hit = new BlockHitResult(new Vec3(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5), Direction.UP, pos, false);
+            c.actor = new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 2.5);
+            c.yaw = 0.0F;
+            c.pitch = 0.0F;
+        }
+
+        /** 站在 pos 旁边打掉它。 */
+        private static void destroyAt(Case c, BlockPos pos) {
+            c.target = pos;
+            c.actor = new Vec3(pos.getX() + 0.5, pos.getY() - 1.0, pos.getZ() + 2.5);
+            c.yaw = 0.0F;
+            c.pitch = 0.0F;
+        }
+
+        /**
+         * 一半的题在题目旁边堆一点红石，三种样子里挑一种：
+         *
+         * <ul>
+         *   <li>散放的信号源和元件，加一条导线。状态是随机的，不一定自洽，官方的 updateShape 和 neighborChanged
+         *       会把它纠正过来，要比的就是这一步。</li>
+         *   <li>从题目旁边往外接的一串元件。题目一变，信号顺着它传出去，中继器的延迟要走几刻才看得到。</li>
+         *   <li>火把和导线绕成的环。题目一碰它就开始闪，闪到第八次烧坏。</li>
+         * </ul>
+         */
+        private void addCircuit(Case c, Random random, BlockPos focus) {
+            if (catalog.circuitry.isEmpty() || !chance(random, 50)) {
+                return;
+            }
+            Set<Long> reserved = reserveForCircuit(c, focus);
+            int roll = random.nextInt(100);
+            if (roll < 40) {
+                addLooseParts(c, random, focus, reserved);
+                addWire(c, random, focus, reserved);
+            } else if (roll < 85) {
+                addChain(c, random, focus, reserved);
+            } else {
+                addTorchClock(c, random, focus, reserved);
+            }
+        }
+
+        private void addLooseParts(Case c, Random random, BlockPos focus, Set<Long> reserved) {
+            int parts = 1 + random.nextInt(4);
+            for (int i = 0; i < parts; i++) {
+                BlockPos at = focus.offset(random.nextInt(5) - 2, random.nextInt(3) - 1, random.nextInt(5) - 2);
+                if (free(c, at, reserved)) {
+                    c.put(at, randomState(random, pick(random, catalog.circuitry)));
+                }
+            }
+        }
+
+        private static boolean free(Case c, BlockPos pos, Set<Long> reserved) {
+            return !c.occupied(pos) && !reserved.contains(pos.asLong());
+        }
+
+        /** 四个水平方向打乱以后，第一个让 cells 给出的格子全都空着的方向。 */
+        private static Optional<Direction> freeDirection(Case c, Random random, Set<Long> reserved,
+                Function<Direction, List<BlockPos>> cells) {
+            List<Direction> directions = new ArrayList<>(List.of(HORIZONTAL));
+            Collections.shuffle(directions, random);
+            return directions.stream()
+                    .filter(along -> cells.apply(along).stream().allMatch(pos -> free(c, pos, reserved)))
+                    .findFirst();
+        }
+
+        /**
+         * 从题目旁边沿一个水平方向往外接一串，每一节脚下垫导体：导线、中继器、比较器、导体，最后一节是随便一个元件。
+         * 中继器和比较器的输入朝着题目。开头旁边有时放一个信号源。状态多半是默认的，少数是随机的。
+         */
+        private void addChain(Case c, Random random, BlockPos focus, Set<Long> reserved) {
+            int length = 2 + random.nextInt(5);
+            Optional<Direction> found = freeDirection(c, random, reserved, along -> {
+                List<BlockPos> cells = new ArrayList<>();
+                for (int i = 1; i <= length; i++) {
+                    cells.add(focus.relative(along, i));
+                    cells.add(focus.relative(along, i).below());
+                }
+                return cells;
+            });
+            if (found.isEmpty()) {
+                return;
+            }
+            Direction along = found.get();
+            for (int i = 1; i <= length; i++) {
+                BlockPos at = focus.relative(along, i);
+                c.put(at.below(), conductor(random));
+                c.put(at, i == length ? randomState(random, pick(random, catalog.circuitry)) : chainLink(random, along));
+            }
+            BlockPos beside = focus.relative(along).relative(along.getClockWise());
+            if (chance(random, 40) && free(c, beside, reserved)) {
+                c.put(beside, randomState(random, pick(random, catalog.circuitry)));
+            }
+        }
+
+        /** 串里的一节，信号从 along 的反方向进来。 */
+        private BlockState chainLink(Random random, Direction along) {
+            int roll = random.nextInt(100);
+            BlockState link;
+            if (roll < 45) {
+                link = Blocks.REDSTONE_WIRE.defaultBlockState();
+            } else if (roll < 70) {
+                link = Blocks.REPEATER.defaultBlockState().setValue(BlockStateProperties.DELAY, 1 + random.nextInt(4));
+            } else if (roll < 82) {
+                link = Blocks.COMPARATOR.defaultBlockState()
+                        .setValue(BlockStateProperties.MODE_COMPARATOR, pick(random, List.of(ComparatorMode.values())));
+            } else {
+                return conductor(random);
+            }
+            if (!catalog.allowed(link.getBlock())) {
+                return conductor(random);
+            }
+            if (chance(random, 20)) {
+                link = randomState(random, link.getBlock());
+            }
+            if (link.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
+                link = link.setValue(BlockStateProperties.HORIZONTAL_FACING, along.getOpposite());
+            }
+            return link;
+        }
+
+        /** 导体，多半是石头，偶尔是别的地形方块。地形里有玻璃这种不导电的，正好也考一下。 */
+        private BlockState conductor(Random random) {
+            return chance(random, 80) && catalog.allowed(Blocks.STONE) ? Blocks.STONE.defaultBlockState() : catalog.terrain(random);
+        }
+
+        /**
+         * 火把时钟：墙上的火把插在 base 的侧面，把头顶的 cover 强充能；导线在 base 顶上，挨着 cover，
+         * 读到信号就给 base 充能，火把于是熄灭，信号断了再亮回来，每两刻翻一次，60 刻里翻到第八次烧坏。
+         * 导线挨着题目，题目一动它就重新算，环就转起来了，所以要多走几十刻。
+         */
+        private void addTorchClock(Case c, Random random, BlockPos focus, Set<Long> reserved) {
+            if (!catalog.allowed(Blocks.REDSTONE_WIRE) || !catalog.allowed(Blocks.REDSTONE_WALL_TORCH)) {
+                return;
+            }
+            Optional<Direction> found = freeDirection(c, random, reserved, along -> {
+                BlockPos wire = focus.relative(along);
+                return List.of(wire, wire.below(), wire.below().relative(along), wire.relative(along));
+            });
+            if (found.isEmpty()) {
+                return;
+            }
+            Direction along = found.get();
+            BlockPos wire = focus.relative(along);
+            BlockPos torch = wire.below().relative(along);
+            c.put(wire.below(), conductor(random));
+            c.put(torch.above(), conductor(random));
+            c.put(wire, Blocks.REDSTONE_WIRE.defaultBlockState());
+            c.put(torch, Blocks.REDSTONE_WALL_TORCH.defaultBlockState().setValue(BlockStateProperties.HORIZONTAL_FACING, along));
+            c.settle = 20 + random.nextInt(41);
+        }
+
+        /** 放置的目标格和点中的格子不能被电路占掉，否则这一题考的就不是原来那件事了。 */
+        private static Set<Long> reserveForCircuit(Case c, BlockPos focus) {
+            Set<Long> reserved = new HashSet<>();
+            reserved.add(focus.asLong());
+            reserved.add(focus.above().asLong());
+            if (c.hit != null) {
+                BlockPos clicked = c.hit.getBlockPos();
+                reserved.add(clicked.asLong());
+                reserved.add(clicked.relative(c.hit.getDirection()).asLong());
+            }
+            return reserved;
+        }
+
+        /** 一条直线的导线，底下多半垫实心方块。导线网络的功率计算要靠它才比得到。 */
+        private void addWire(Case c, Random random, BlockPos focus, Set<Long> reserved) {
+            if (!catalog.allowed(Blocks.REDSTONE_WIRE) || !chance(random, 60)) {
+                return;
+            }
+            Direction along = pick(random, List.of(HORIZONTAL));
+            BlockPos at = focus.relative(pick(random, List.of(HORIZONTAL)));
+            int length = 1 + random.nextInt(4);
+            for (int i = 0; i < length; i++, at = at.relative(along)) {
+                if (c.occupied(at) || reserved.contains(at.asLong())) {
+                    continue;
+                }
+                c.put(at, randomState(random, Blocks.REDSTONE_WIRE));
+                if (!c.occupied(at.below()) && !reserved.contains(at.below().asLong()) && chance(random, 80)) {
+                    c.put(at.below(), pickSolid(random));
+                }
+            }
+        }
+
         /** 题目的方块带着流体，周围是有洞的地板和零散的方块，跑完第一个流体刻以后再跑几刻。 */
-        private void buildFlow(Case c, Random random) {
+        private BlockPos buildFlow(Case c, Random random) {
             BlockPos target = originInWorld(random);
             BlockState state = withFluid(random, c.subject);
             c.put(target, state);
@@ -2244,6 +2843,7 @@ public final class BlockOracle {
             pickActor(c, random, target);
             c.target = target;
             c.steps = FLOW_STEPS[random.nextInt(FLOW_STEPS.length)];
+            return target;
         }
 
         /** 题目方块带流体的状态：液体多半是源头，别的方块从带流体的状态里挑。 */
@@ -2308,8 +2908,41 @@ public final class BlockOracle {
             }
         }
 
+        /**
+         * 动作做完之后再走几刻。场景里没有红石时不走：别的类的计划刻要么没移植，要么和这一章无关，
+         * 白走一场还会让题目作废。
+         */
+        private int pickSettle(Case c, Random random) {
+            if (!hasCircuitry(c)) {
+                return 0;
+            }
+            int roll = random.nextInt(100);
+            if (roll < 30) {
+                return 0;
+            }
+            if (roll < 70) {
+                // 中继器最长 8 刻，侦测器、火把、比较器 2 刻，灯 4 刻。
+                return 1 + random.nextInt(8);
+            }
+            // 按钮弹回是 20 刻（石头）或者 30 刻（木头），一串中继器要的更久。
+            return roll < 85 ? 9 + random.nextInt(12) : 21 + random.nextInt(20);
+        }
+
+        /** 场景里有信号源或者元件。 */
+        private boolean hasCircuitry(Case c) {
+            if (catalog.circuitry.contains(c.subject) || c.subject == Blocks.REDSTONE_WIRE) {
+                return true;
+            }
+            for (BlockState state : c.scene.values()) {
+                if (state.is(Blocks.REDSTONE_WIRE) || catalog.circuitry.contains(state.getBlock())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /** 用 use_item 的题：玩家从几格外看着题目的方块，手里拿着桶、荷叶或者青蛙卵。 */
-        private void buildItem(Case c, Random random) {
+        private BlockPos buildItem(Case c, Random random) {
             BlockPos target = originInWorld(random);
             BlockState state = randomState(random, c.subject);
             c.put(target, state);
@@ -2322,6 +2955,7 @@ public final class BlockOracle {
             aimAt(c, random, target);
             c.target = target;
             holdForItem(c, random);
+            return target;
         }
 
         /** 眼睛在目标附近一点的反方向上，离开 1 到 6 格，交互距离是 5 格，所以有一些题够不着。 */
@@ -2353,7 +2987,7 @@ public final class BlockOracle {
             c.main = roll < 40 ? Items.AIR : roll < 60 ? pick(random, List.of(Items.LIGHT, Items.SCAFFOLDING)) : pickHeld(random, c.subject);
         }
 
-        private void buildPlace(Case c, Random random) {
+        private BlockPos buildPlace(Case c, Random random) {
             BlockPos target = origin(random);
             pickActor(c, random, target);
             Direction facing = Direction.fromYRot(c.yaw);
@@ -2372,6 +3006,7 @@ public final class BlockOracle {
             }
             decorate(c, random, target, reserved);
             holdForPlacing(c, random);
+            return target;
         }
 
         /** 目标格、上面一格、面前一格多半留空，门和床才放得下。 */
@@ -2481,7 +3116,7 @@ public final class BlockOracle {
             return target;
         }
 
-        private void buildUse(Case c, Random random) {
+        private BlockPos buildUse(Case c, Random random) {
             BlockPos target = placeSubject(c, random);
             if (c.item == Items.ENDER_EYE && c.subject == Blocks.END_PORTAL_FRAME && chance(random, 50)) {
                 surroundWithPortalRing(c, random, target);
@@ -2490,6 +3125,7 @@ public final class BlockOracle {
             decorate(c, random, target, Set.of(target.asLong()));
             click(c, random, target, pick(random, List.of(DIRECTIONS)));
             holdForUse(c, random);
+            return target;
         }
 
         /**
@@ -2544,20 +3180,66 @@ public final class BlockOracle {
             }
         }
 
-        private void buildDestroy(Case c, Random random) {
+        private BlockPos buildDestroy(Case c, Random random) {
             BlockPos target = placeSubject(c, random);
             addSupports(c, random, target, 50);
             addDependants(c, random, target);
             decorate(c, random, target, Set.of(target.asLong()));
             c.target = target;
             c.main = chance(random, 60) ? Items.AIR : chance(random, 50) ? pick(random, catalog.heldBlockItems) : pick(random, catalog.tools);
+            return target;
         }
 
-        private void buildTick(Case c, Random random) {
+        private BlockPos buildTick(Case c, Random random) {
             BlockPos target = placeSubject(c, random);
             addSupports(c, random, target, 50);
             decorate(c, random, target, Set.of(target.asLong()));
             c.target = target;
+            return target;
+        }
+
+        /** 题目的方块多半是会随机刻的状态，有支撑和零散的邻居，脚下常常有一片地面，长和蔓延都有地方。 */
+        private BlockPos buildRandom(Case c, Random random) {
+            BlockPos target = originInWorld(random);
+            BlockState state = tickingState(random, c.subject);
+            c.put(target, state);
+            complete(c, random, target, state);
+            pickActor(c, random, target);
+            addSupports(c, random, target, 60);
+            if (chance(random, 50)) {
+                growthGround(c, random, target);
+            }
+            decorate(c, random, target, Set.of(target.asLong()));
+            c.target = target;
+            return target;
+        }
+
+        /** 和 random 题一样的场景，跑官方的 tickChunk，看挑格子的顺序和区块段的判断。 */
+        private BlockPos buildChunk(Case c, Random random) {
+            BlockPos target = buildRandom(c, random);
+            c.speed = CHUNK_SPEEDS[random.nextInt(CHUNK_SPEEDS.length)];
+            return target;
+        }
+
+        /** 状态里有会随机刻的时候多半挑它们，否则题目大多什么也不做。 */
+        private static BlockState tickingState(Random random, Block block) {
+            List<BlockState> ticking = block.getStateDefinition().getPossibleStates().stream()
+                    .filter(state -> state.isRandomlyTicking() || state.getFluidState().isRandomlyTicking())
+                    .toList();
+            return ticking.isEmpty() || chance(random, 15) ? randomState(random, block) : pick(random, ticking);
+        }
+
+        /** 目标下面一层铺一片 3×3 的地面：草和菌丝的蔓延、茎结瓜、作物看耕地都要它。 */
+        private void growthGround(Case c, Random random, BlockPos target) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos at = target.offset(dx, -1, dz);
+                    if (!c.occupied(at)) {
+                        c.put(at, chance(random, 40) && catalog.allowed(Blocks.DIRT) ? Blocks.DIRT.defaultBlockState()
+                                : catalog.terrain(random));
+                    }
+                }
+            }
         }
 
         private void addSupports(Case c, Random random, BlockPos target, int percent) {
@@ -2901,7 +3583,7 @@ public final class BlockOracle {
         private static final int PROBE_ALL_STATES = 64;
         private static final int PROBE_SAMPLES = 16;
         private static final Kind[] PATTERN = {Kind.PLACE, Kind.USE, Kind.PLACE, Kind.DESTROY, Kind.USE, Kind.PLACE, Kind.TICK, Kind.USE,
-                Kind.FLOW, Kind.ITEM};
+                Kind.FLOW, Kind.ITEM, Kind.RANDOM, Kind.CHUNK, Kind.RANDOM};
 
         private final Map<Kind, List<Subject>> byKind = new LinkedHashMap<>();
         private final List<Kind> pattern = new ArrayList<>();
@@ -2936,6 +3618,7 @@ public final class BlockOracle {
             placing = weighted(placing, random);
             others = weighted(others, random);
             List<Subject> wet = others.stream().filter(subject -> Catalog.holdsFluid(subject.block)).toList();
+            List<Subject> ticking = others.stream().filter(subject -> Catalog.ticksRandomly(subject.block)).toList();
             List<Subject> using = usable.isEmpty() && held.isEmpty() ? withUsableItems(others, catalog, random)
                     : heldOnBlocks(usable, catalog, official, random);
             if (!held.isEmpty()) {
@@ -2947,6 +3630,8 @@ public final class BlockOracle {
                 byKind.put(Kind.DESTROY, others);
                 byKind.put(Kind.TICK, others);
                 byKind.put(Kind.FLOW, wet);
+                byKind.put(Kind.RANDOM, ticking);
+                byKind.put(Kind.CHUNK, ticking);
             }
             byKind.put(Kind.ITEM, using);
             for (Kind kind : PATTERN) {
@@ -3130,11 +3815,17 @@ public final class BlockOracle {
             }
         }
 
+        /** 显式活塞题的 id 从这里开始，和随机题的号段分开。 */
+        private static final int PISTON_CASE_BASE = 1_000_000;
+
         void run() throws IOException {
             long start = System.nanoTime();
-            writeHeader();
+            List<Case> pistonCases = generator.pistonCases(PISTON_CASE_BASE);
+            boolean single = options.single >= 0;
+            boolean pistons = single ? options.single >= PISTON_CASE_BASE : includesPistonCases();
+            writeHeader(single ? 1 : options.cases + (pistons ? pistonCases.size() : 0));
             int first = Math.max(options.single, 0);
-            int end = options.single >= 0 ? options.single + 1 : options.cases;
+            int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
                 Kind kind = subjects.kind(id);
                 Subject subject = subjects.next(kind);
@@ -3142,16 +3833,38 @@ public final class BlockOracle {
                     runCase(id, kind, subject);
                 }
             }
+            if (pistons) {
+                for (Case c : pistonCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
             writeEnd();
             out.flush();
             printSummary(System.nanoTime() - start);
         }
 
+        /** --only 点名的是活塞、活塞头、移动活塞或者它们的类时，显式活塞题也要跑。 */
+        private boolean includesPistonCases() {
+            if (options.only == null) {
+                return true;
+            }
+            for (Block block : List.of(Blocks.PISTON, Blocks.STICKY_PISTON, Blocks.MOVING_PISTON, Blocks.PISTON_HEAD)) {
+                if (Subjects.matches(options.only, block)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private void runCase(int id, Kind kind, Subject subject) throws IOException {
-            Case c = generator.build(id, kind, subject, options.seed);
-            ClassStats classStats = statsOf(subject.block);
-            classStats.cases[kind.ordinal()]++;
-            kinds[kind.ordinal()]++;
+            runBuilt(generator.build(id, kind, subject, options.seed), statsOf(subject.block));
+        }
+
+        private void runBuilt(Case c, ClassStats classStats) throws IOException {
+            classStats.cases[c.kind.ordinal()]++;
+            kinds[c.kind.ordinal()]++;
             try {
                 Outcome outcome = answer(c);
                 record(c, outcome, classStats);
@@ -3218,53 +3931,71 @@ public final class BlockOracle {
             out.append(line);
         }
 
-        /** 跑一次。碰过随机数就换几种随机数重跑，世界的结果变了就排除。 */
+        /** 世界随机源的种子，写在 case 行里，mc-bamboo-blocks 用它重现同样的随机数。 */
+        private long caseSeed(Case c) {
+            return options.seed * 31 + c.id;
+        }
+
+        /**
+         * 跑一次。世界的随机源和 mc-bamboo-blocks 用同一个种子，结果直接比较。玩家自己的随机源 Bamboo 没有，
+         * 它碰过的题换几种随机数重跑，世界的结果变了就排除。
+         */
         private Outcome answer(Case c) {
-            long seed = options.seed * 31 + c.id;
-            OracleRandom random = new OracleRandom(OracleRandom.Mode.SEEDED, seed);
-            Outcome outcome = execute(c, random);
-            if (random.draws == 0) {
-                return outcome;
-            }
-            outcome.touchedRandom = true;
-            List<OracleRandom> variants = List.of(new OracleRandom(OracleRandom.Mode.LOW, 0), new OracleRandom(OracleRandom.Mode.HIGH, 0),
-                    new OracleRandom(OracleRandom.Mode.SEEDED, ~seed));
-            for (OracleRandom variant : variants) {
-                Outcome other = execute(c, variant);
-                if (!outcome.sameWorld(other)) {
-                    random.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
-                    variant.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
-                    throw new SkipCase("random:" + String.join("+", random.sites));
+            long seed = caseSeed(c);
+            OracleRandom levelRandom = new OracleRandom(OracleRandom.Mode.SEEDED, seed);
+            OracleRandom entityRandom = new OracleRandom(OracleRandom.Mode.SEEDED, -seed);
+            Outcome outcome = execute(c, levelRandom, entityRandom);
+            outcome.touchedRandom = levelRandom.draws > 0 || entityRandom.draws > 0;
+            if (entityRandom.draws > 0) {
+                List<OracleRandom> variants = List.of(new OracleRandom(OracleRandom.Mode.LOW, 0),
+                        new OracleRandom(OracleRandom.Mode.HIGH, 0), new OracleRandom(OracleRandom.Mode.SEEDED, ~seed));
+                for (OracleRandom variant : variants) {
+                    Outcome other = execute(c, new OracleRandom(OracleRandom.Mode.SEEDED, seed), variant);
+                    if (!outcome.sameWorld(other)) {
+                        entityRandom.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
+                        throw new SkipCase("random-entity:" + String.join("+", entityRandom.sites));
+                    }
+                    outcome.maskRandomDelays(other);
                 }
-                outcome.maskRandomDelays(other);
             }
-            random.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
+            levelRandom.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
+            entityRandom.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
             return outcome;
         }
 
-        private Outcome execute(Case c, OracleRandom random) {
-            FakeLevel level = FakeLevel.create(official, random);
+        private Outcome execute(Case c, OracleRandom levelRandom, OracleRandom entityRandom) {
+            FakeLevel level = FakeLevel.create(official, levelRandom);
+            level.seedPositions(new LegacyRandomSource(~caseSeed(c)).nextInt());
             level.load(c.scene);
-            FakePlayer actor = FakePlayer.create(level, official, random, 1, c.actor, c.yaw, c.pitch, c.sneak);
+            FakePlayer actor = FakePlayer.create(level, official, entityRandom, 1, c.actor, c.yaw, c.pitch, c.sneak);
             actor.hold(c.main, c.off);
             c.actorBox = actor.getBoundingBox();
             if (c.bystander != null) {
-                c.bystanderBox = FakePlayer.create(level, official, random, 2, c.bystander, 0.0F, 0.0F, false).getBoundingBox();
+                c.bystanderBox = FakePlayer.create(level, official, entityRandom, 2, c.bystander, 0.0F, 0.0F, false).getBoundingBox();
             }
             List<ItemStack> before = inventoryOf(actor);
             String result = switch (c.kind) {
                 case PLACE, USE -> resultName(actor.gameMode.useItemOn(actor, level, actor.getItemInHand(c.hand), c.hand, c.hit));
                 case DESTROY -> actor.gameMode.destroyBlock(c.target) ? "destroyed" : "refused";
                 case TICK -> {
-                    level.getBlockState(c.target).tick(level, c.target, random);
+                    level.getBlockState(c.target).tick(level, c.target, levelRandom);
                     yield "ticked";
                 }
                 case FLOW -> {
                     level.flow(c.target, c.steps, options.untick);
                     yield "ticked";
                 }
+                case RANDOM -> {
+                    level.randomTick(c.target);
+                    yield "ticked";
+                }
+                case CHUNK -> {
+                    level.tickChunk(c.target, c.speed, options.unrandom);
+                    yield "ticked";
+                }
                 case ITEM -> resultName(actor.gameMode.useItem(actor, level, actor.getItemInHand(c.hand), c.hand));
             };
+            level.settle(c.settle);
             List<String> gained = c.kind == Kind.ITEM ? gainedItems(before, inventoryOf(actor)) : List.of();
             return new Outcome(result, level, c, actor.reachedItem, gained);
         }
@@ -3330,12 +4061,12 @@ public final class BlockOracle {
             }
         }
 
-        private void writeHeader() throws IOException {
+        private void writeHeader(int cases) throws IOException {
             line.setLength(0);
             line.append("{\"type\":\"header\",\"version\":\"").append(SharedConstants.getCurrentVersion().id()).append('"');
             line.append(",\"protocol\":").append(SharedConstants.getCurrentVersion().protocolVersion());
             line.append(",\"seed\":").append(options.seed);
-            line.append(",\"cases\":").append(options.single >= 0 ? 1 : options.cases);
+            line.append(",\"cases\":").append(cases);
             line.append(",\"maxChainedUpdates\":").append(MAX_CHAINED_UPDATES);
             line.append(",\"gameTime\":").append(GAME_TIME);
             line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max).append("}\n");
@@ -3352,6 +4083,7 @@ public final class BlockOracle {
             written++;
             line.setLength(0);
             line.append("{\"type\":\"case\",\"id\":").append(c.id);
+            line.append(",\"seed\":").append(caseSeed(c));
             line.append(",\"block\":\"").append(id(c.subject)).append('"');
             line.append(",\"class\":\"").append(className(c.subject)).append('"');
             line.append(",\"scene\":");
@@ -3392,7 +4124,11 @@ public final class BlockOracle {
             if (c.kind == Kind.FLOW) {
                 line.append(",\"steps\":").append(c.steps);
             }
+            if (c.kind == Kind.CHUNK) {
+                line.append(",\"speed\":").append(c.speed);
+            }
             writeActor(c);
+            line.append(",\"settle\":").append(c.settle);
             line.append('}');
         }
 
@@ -3440,7 +4176,13 @@ public final class BlockOracle {
                 line.append(",\"").append(tick.fluid ? "fluid" : "block").append("\",\"").append(tick.type).append("\",");
                 line.append(tick.delay).append(',').append(tick.priority).append(']');
             }
-            line.append("],\"itemReached\":").append(outcome.itemReached);
+            line.append("],\"ran\":[");
+            for (int i = 0; i < outcome.ran.size(); i++) {
+                line.append(i > 0 ? ",\"" : "\"").append(outcome.ran.get(i)).append('"');
+            }
+            line.append(']');
+            line.append(",\"analogContent\":").append(outcome.analogContent);
+            line.append(",\"itemReached\":").append(outcome.itemReached);
             strings("gained", outcome.gained);
             strings("spawned", outcome.spawned);
             line.append(",\"rng\":").append(outcome.touchedRandom).append('}');
@@ -3542,16 +4284,16 @@ public final class BlockOracle {
             printMap("skip reasons", skipReasons);
             printMap("exceptions", exceptions);
             printRandomSites();
-            log.println("per class: place/use/destroy/tick/flow/item cases | changed | placed | skips");
+            log.println("per class: place/use/destroy/tick/flow/item/random/chunk cases | changed | placed | skips");
             stats.forEach(this::printClass);
             printZeroPlacements();
         }
 
-        /** 一次运行里的调用点全部算上，所以音调这种无害的调用点也可能出现在“改变结果”一列，要和“没有影响”一列对照着看。 */
+        /** 第一列是玩家的随机源改变了结果、只能排除的题，第二列是写出来比较的题（世界的随机源直接比较）。 */
         private void printRandomSites() {
             Set<String> sites = new TreeSet<>(decisiveRandom.keySet());
             sites.addAll(cosmeticRandom.keySet());
-            log.println("random sites: cases where the outcome changed | cases where it did not");
+            log.println("random sites: skipped because the entity random changed the outcome | written cases");
             for (String site : sites) {
                 log.printf("  %7d %7d %s%n", decisiveRandom.getOrDefault(site, 0), cosmeticRandom.getOrDefault(site, 0), site);
             }

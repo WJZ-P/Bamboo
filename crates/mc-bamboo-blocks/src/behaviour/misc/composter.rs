@@ -1,14 +1,15 @@
 //! `ComposterBlock`。
 //!
-//! 一个物品能不能加一层是随机的，第 1 章说随机分支取一个确定的值，这里总是加一层。
-//! 官方必定成功的物品（蛋糕、南瓜派）和这里一样，别的物品 oracle 排除。
+//! 放一个物品加几层由物品的 `compostable` 组件决定，抽签用世界的随机数，和官方逐位相同。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_data::CompostLayers;
 
 use crate::{
     behaviour::{Behaviour, common::item_of},
     context::UseContext,
     interact::InteractionResult,
+    random::LegacyRandom,
     state::{BlockState, LEVEL_COMPOSTER},
     world::World,
 };
@@ -23,9 +24,36 @@ const MAX_LEVEL: i32 = 7;
 /// 满了之后等多久变成 [`READY`]。
 const READY_DELAY: i32 = 20;
 
-/// `addLayer`。
-fn add_layer(state: BlockState, world: &mut World, pos: BlockPos) {
-    let level = state.get(LEVEL_COMPOSTER) + 1;
+/// `WeightedList.getRandomOrThrow`：`nextInt(总权重)` 落在哪一项。
+fn pick_weighted(distribution: &[(i32, i32)], random: &LegacyRandom) -> i32 {
+    let total = distribution.iter().map(|&(_, weight)| weight).sum();
+    let mut selection = random.next_int(total);
+    for &(layers, weight) in distribution {
+        selection -= weight;
+        if selection < 0 {
+            return layers;
+        }
+    }
+    // 抽到的数小于总权重，一定落在上面某一项里。
+    0
+}
+
+/// `compostable.layers().get(...)`。战利品上下文没有给种子，用的是世界的随机数。
+fn layers_to_add(layers: CompostLayers, state: BlockState, world: &World) -> i32 {
+    match layers {
+        CompostLayers::Constant(layers) => layers,
+        CompostLayers::Weighted { when_empty, .. } if state.get(LEVEL_COMPOSTER) == 0 => when_empty,
+        CompostLayers::Weighted { distribution, .. } => pick_weighted(distribution, world.random()),
+    }
+}
+
+/// `addLayer`：没抽中时什么也不改。
+fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) {
+    let added = layers_to_add(layers, state, world);
+    if added <= 0 {
+        return;
+    }
+    let level = (state.get(LEVEL_COMPOSTER) + added).clamp(0, MAX_LEVEL);
     world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, level));
     if level == MAX_LEVEL {
         world.schedule_tick(pos, state.block(), READY_DELAY);
@@ -46,11 +74,12 @@ impl Behaviour for Composter {
         ctx: &UseContext,
     ) -> InteractionResult {
         let level = state.get(LEVEL_COMPOSTER);
-        if level >= READY || !item_of(ctx.item).is_some_and(|item| item.compostable) {
+        let compostable = item_of(ctx.item).and_then(|item| item.compostable);
+        let Some(layers) = compostable.filter(|_| level < READY) else {
             return InteractionResult::TryEmptyHandInteraction;
-        }
+        };
         if level < MAX_LEVEL {
-            add_layer(state, world, ctx.clicked_pos());
+            add_layer(state, world, ctx.clicked_pos(), layers);
         }
         InteractionResult::Success
     }
@@ -64,6 +93,10 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) != READY {
             return InteractionResult::Pass;
         }
+        // `extractProduce` 先给掉出来的骨粉算落点，`Vec3.offsetRandomXZ` 取两个 `nextFloat`。
+        // 世界里没有物品实体，这两个数照样要取。
+        world.random().next_float();
+        world.random().next_float();
         world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_COMPOSTER, 0));
         InteractionResult::Success
     }
@@ -72,6 +105,16 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) == MAX_LEVEL {
             world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, READY));
         }
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        state.get(LEVEL_COMPOSTER)
     }
 }
 
@@ -87,15 +130,62 @@ mod tests {
 
     const COMPOSTER: BlockPos = BlockPos::new(0, 64, 0);
 
-    /// 官方这里是随机的，oracle 比不了，这里固定下来：种子总是加一层。
+    fn compost(level: &mut TestLevel, item: i32) -> InteractionResult {
+        use_item(level, &actor_holding(item), top_hit(COMPOSTER)).result
+    }
+
     #[test]
-    fn seeds_always_add_a_layer() {
+    fn an_empty_composter_always_takes_a_layer() {
         let mut level = TestLevel::new();
         level.set(COMPOSTER, BlockState(blocks::COMPOSTER));
-        let actor = actor_holding(items::WHEAT_SEEDS);
-        let outcome = use_item(&mut level, &actor, top_hit(COMPOSTER));
-        assert_eq!(outcome.result, InteractionResult::Success);
+        assert_eq!(
+            compost(&mut level, items::WHEAT_SEEDS),
+            InteractionResult::Success
+        );
         assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), 1);
+    }
+
+    /// 种子是 `compostable/low`：不空的时候 `nextInt(100) < 30` 才加一层。
+    #[test]
+    fn seeds_add_a_layer_on_a_thirty_percent_draw() {
+        let mut level = TestLevel::new();
+        let expected = LegacyRandom::new(0).next_int(100) < 30;
+        level.set(
+            COMPOSTER,
+            BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 3),
+        );
+        assert_eq!(
+            compost(&mut level, items::WHEAT_SEEDS),
+            InteractionResult::Success
+        );
+        assert_eq!(
+            level.get(COMPOSTER).get(LEVEL_COMPOSTER),
+            3 + i32::from(expected)
+        );
+    }
+
+    #[test]
+    fn a_cake_always_adds_a_layer() {
+        let mut level = TestLevel::new();
+        level.set(
+            COMPOSTER,
+            BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 6),
+        );
+        compost(&mut level, items::CAKE);
+        assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), MAX_LEVEL);
+    }
+
+    #[test]
+    fn stone_is_not_compostable() {
+        // 堆肥桶不认石头，官方接着让物品自己试，石头是方块物品，会在上面放下来。
+        // 要点是堆肥桶没有加层。
+        let mut level = TestLevel::new();
+        level.set(COMPOSTER, BlockState(blocks::COMPOSTER));
+        assert_eq!(
+            compost(&mut level, items::STONE),
+            InteractionResult::Success
+        );
+        assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), 0);
     }
 
     #[test]

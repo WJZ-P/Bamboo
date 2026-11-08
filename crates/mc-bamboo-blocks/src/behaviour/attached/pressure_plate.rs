@@ -17,11 +17,17 @@ use crate::{
 /// `BasePressurePlateBlock`。
 pub(super) struct PressurePlate;
 
-/// `getSignalForState` 大于 0。普通压力板的属性是 `powered`，测重压力板的是 `power`。
+/// `getSignalForState`。普通压力板的属性是 `powered`，测重压力板的是 `power`。
+fn signal_for_state(state: BlockState) -> i32 {
+    match state.try_get(POWERED) {
+        Some(true) => 15,
+        Some(false) => 0,
+        None => state.get(POWER),
+    }
+}
+
 fn is_pressed(state: BlockState) -> bool {
-    state
-        .try_get(POWERED)
-        .unwrap_or_else(|| state.get(POWER) > 0)
+    signal_for_state(state) > 0
 }
 
 impl Behaviour for PressurePlate {
@@ -49,6 +55,25 @@ impl Behaviour for PressurePlate {
         if is_pressed(state) {
             world.update_neighbors_at(pos, state.block());
             world.update_neighbors_at(pos.below(), state.block());
+        }
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        signal_for_state(state)
+    }
+
+    /// 只强充能脚下那一格。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if direction == Direction::Up {
+            signal_for_state(state)
+        } else {
+            0
         }
     }
 }

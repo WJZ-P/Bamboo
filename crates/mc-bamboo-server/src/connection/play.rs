@@ -9,8 +9,10 @@ use std::{
 };
 
 use bytes::BytesMut;
+use mc_bamboo_auth::{DecryptHalf, EncryptHalf, Encryption};
 use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId};
 use mc_bamboo_protocol::{
+    compression,
     frame::append_frame,
     packet::{
         ClientboundPacket,
@@ -55,6 +57,10 @@ pub(super) async fn serve(
         mut stream,
         mut read_buffer,
         max_frame_len,
+        compression,
+        encryption,
+        // 进了 Play 就没有进服时限了，阶段这时用不到。
+        phase: _,
     } = connection;
     let player = PlayerId(session.entity_id);
     let leave = LeaveGuard {
@@ -66,6 +72,7 @@ pub(super) async fn serve(
         player,
         shared,
         max_frame_len,
+        compression,
     };
     let (outcome, flushed) = exchange(
         &mut stream,
@@ -73,6 +80,7 @@ pub(super) async fn serve(
         reader,
         session,
         client,
+        encryption,
         cancel,
     )
     .await;
@@ -116,15 +124,27 @@ async fn exchange(
     reader: RequestReader<'_>,
     session: &PlayerSession,
     client: ClientInformation,
+    encryption: Option<Encryption>,
     cancel: CancellationToken,
 ) -> (Result<(), ConnectionError>, bool) {
     let (outbound, queue) = outbound::channel(MAX_QUEUED_BYTES);
     let (mut read_half, mut write_half) = stream.split();
+    let compression = reader.compression;
+    // 读和写在下面两个并发的任务里，各自拿走自己那个方向的 AES 流。
+    let (encrypt, decrypt) = match encryption {
+        Some(encryption) => {
+            let (encrypt, decrypt) = encryption.split();
+            (Some(encrypt), Some(decrypt))
+        }
+        None => (None, None),
+    };
 
-    let writer = write_queue(&mut write_half, queue, WRITE_TIMEOUT);
+    let writer = write_queue(&mut write_half, queue, WRITE_TIMEOUT, compression, encrypt);
     let requests = async {
         reader.join(session, client, &outbound)?;
-        reader.run(&mut read_half, read_buffer, &outbound).await
+        reader
+            .run(&mut read_half, read_buffer, &outbound, decrypt)
+            .await
     };
     tokio::pin!(writer, requests);
 
@@ -159,16 +179,36 @@ async fn exchange(
     (outcome, flushed)
 }
 
-/// 按顺序写出队列里的帧，直到队列结束。
+/// 按顺序写出队列里的帧，直到队列结束。压缩启用时每个包在写之前压缩，加密启用时再加密。
+///
+/// 顺序和官方管线一致：压缩在长度前缀里面，加密在最外面，连长度前缀一起加密。
 async fn write_queue<W: AsyncWrite + Unpin>(
     stream: &mut W,
     mut queue: OutboundQueue,
     time_limit: Duration,
+    compression: Option<i32>,
+    mut encrypt: Option<EncryptHalf>,
 ) -> Result<(), ConnectionError> {
     while let Some(frames) = queue.next().await {
-        timeout(time_limit, stream.write_all(&frames))
-            .await
-            .map_err(|_| ConnectionError::WriteTimeout)??;
+        let compressed = match compression {
+            Some(threshold) => Some(compression::encode_frames(&frames, threshold)?),
+            None => None,
+        };
+        let payload = compressed.as_deref().unwrap_or(&frames);
+        let encrypted = match &mut encrypt {
+            Some(encrypt) => {
+                let mut buffer = payload.to_vec();
+                encrypt.encrypt(&mut buffer);
+                Some(buffer)
+            }
+            None => None,
+        };
+        timeout(
+            time_limit,
+            stream.write_all(encrypted.as_deref().unwrap_or(payload)),
+        )
+        .await
+        .map_err(|_| ConnectionError::WriteTimeout)??;
         queue.mark_written(frames.len());
     }
     Ok(())
@@ -179,6 +219,7 @@ struct RequestReader<'a> {
     player: PlayerId,
     shared: &'a Shared,
     max_frame_len: usize,
+    compression: Option<i32>,
 }
 
 impl RequestReader<'_> {
@@ -193,6 +234,7 @@ impl RequestReader<'_> {
             id: self.player,
             uuid: session.uuid,
             name: session.name.clone(),
+            properties: session.properties.clone(),
             client,
             sink: Box::new(outbound.clone()),
         };
@@ -212,6 +254,7 @@ impl RequestReader<'_> {
         stream: &mut R,
         buffer: &mut BytesMut,
         outbound: &Outbound,
+        mut decrypt: Option<DecryptHalf>,
     ) -> Result<(), ConnectionError> {
         let period = self.shared.config.keep_alive_interval;
         let mut ticks = interval_at(Instant::now() + period, period);
@@ -228,7 +271,13 @@ impl RequestReader<'_> {
                         .ok_or(ConnectionError::KeepAliveTimeout)?;
                     enqueue(outbound, &KeepAlive { id })?;
                 }
-                frame = read_frame(stream, buffer, self.max_frame_len) => {
+                frame = read_frame(
+                    stream,
+                    buffer,
+                    self.max_frame_len,
+                    self.compression,
+                    decrypt.as_mut(),
+                ) => {
                     let Some(payload) = frame? else {
                         return Ok(());
                     };
@@ -308,6 +357,8 @@ impl KeepAliveState {
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_auth::SHARED_SECRET_LEN;
+    use mc_bamboo_protocol::frame::{MAX_FRAME_LEN, find_frame};
     use tokio::io::{AsyncReadExt, duplex};
 
     use super::*;
@@ -357,7 +408,7 @@ mod tests {
         let (mut near, _far) = duplex(4);
 
         outbound.push(vec![0; 16]);
-        let result = write_queue(&mut near, queue, Duration::from_millis(20)).await;
+        let result = write_queue(&mut near, queue, Duration::from_millis(20), None, None).await;
 
         assert!(matches!(result, Err(ConnectionError::WriteTimeout)));
     }
@@ -371,7 +422,7 @@ mod tests {
         outbound.push(vec![3]);
         outbound.finish();
         outbound.push(vec![4]);
-        write_queue(&mut near, queue, Duration::from_secs(1))
+        write_queue(&mut near, queue, Duration::from_secs(1), None, None)
             .await
             .unwrap();
         drop(near);
@@ -379,5 +430,64 @@ mod tests {
         let mut written = Vec::new();
         far.read_to_end(&mut written).await.unwrap();
         assert_eq!(written, [1, 2, 3]);
+    }
+
+    /// 加密是最外的一层：长度前缀也在里面，而且一条连接上的字节是一条流，
+    /// 所以要连着两批帧一起解密才能还原。
+    #[tokio::test]
+    async fn writer_encrypts_the_whole_stream_including_the_length() {
+        let secret = [7; SHARED_SECRET_LEN];
+        let (outbound, queue) = outbound::channel(1024);
+        let (mut near, mut far) = duplex(1024);
+        let mut batch = Vec::new();
+        append_frame(&mut batch, &KeepAlive { id: 7 }).unwrap();
+        outbound.push(batch.clone());
+        outbound.push(batch.clone());
+        outbound.finish();
+
+        let (encrypt, mut decrypt) = Encryption::new(&secret).split();
+        write_queue(
+            &mut near,
+            queue,
+            Duration::from_secs(1),
+            None,
+            Some(encrypt),
+        )
+        .await
+        .unwrap();
+        drop(near);
+
+        let mut written = Vec::new();
+        far.read_to_end(&mut written).await.unwrap();
+        assert_ne!(written[..batch.len()], batch[..]);
+        decrypt.decrypt(&mut written);
+        assert_eq!(written, [batch.clone(), batch].concat());
+    }
+
+    #[tokio::test]
+    async fn writer_compresses_every_packet_when_compression_is_on() {
+        let (outbound, queue) = outbound::channel(1024);
+        let (mut near, mut far) = duplex(1024);
+        let mut batch = Vec::new();
+        append_frame(&mut batch, &KeepAlive { id: 7 }).unwrap();
+        outbound.push(batch.clone());
+        outbound.finish();
+
+        write_queue(&mut near, queue, Duration::from_secs(1), Some(0), None)
+            .await
+            .unwrap();
+        drop(near);
+
+        let mut written = Vec::new();
+        far.read_to_end(&mut written).await.unwrap();
+        let frame = find_frame(&written, MAX_FRAME_LEN).unwrap().unwrap();
+        let decoded = compression::decode(
+            &written[frame.header_len..frame.header_len + frame.payload_len],
+            0,
+        )
+        .unwrap();
+        let original = find_frame(&batch, MAX_FRAME_LEN).unwrap().unwrap();
+        let payload = &batch[original.header_len..original.header_len + original.payload_len];
+        assert_eq!(decoded, payload);
     }
 }

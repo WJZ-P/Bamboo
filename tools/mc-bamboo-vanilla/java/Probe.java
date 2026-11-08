@@ -1,19 +1,31 @@
+import com.mojang.authlib.properties.Property;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import it.unimi.dsi.fastutil.shorts.ShortIterator;
+import it.unimi.dsi.fastutil.shorts.ShortOpenHashSet;
 import io.netty.channel.Channel;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.math.BigInteger;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.PublicKey;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
+import java.util.Collection;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -29,21 +41,27 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.HashedStack;
 import net.minecraft.network.PacketDecoder;
+import net.minecraft.network.PacketSendListener;
+import net.minecraft.network.VarInt;
 import net.minecraft.network.ProtocolInfo;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -69,6 +87,7 @@ import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
@@ -87,12 +106,14 @@ import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
+import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
@@ -118,13 +139,17 @@ import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.network.protocol.game.ServerboundPunchPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCreativeModeSlotPacket;
+import net.minecraft.network.protocol.game.ServerboundSignUpdatePacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.network.protocol.game.VecDeltaCodec;
 import net.minecraft.network.protocol.login.ClientLoginPacketListener;
+import net.minecraft.network.protocol.login.ClientboundHelloPacket;
+import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket;
 import net.minecraft.network.protocol.login.ServerboundHelloPacket;
+import net.minecraft.network.protocol.login.ServerboundKeyPacket;
 import net.minecraft.network.protocol.login.ServerboundLoginAcknowledgedPacket;
 import net.minecraft.network.protocol.ping.ClientboundPongResponsePacket;
 import net.minecraft.network.protocol.ping.ServerboundPingRequestPacket;
@@ -148,6 +173,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.util.Crypt;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityTypes;
@@ -167,6 +193,7 @@ import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -174,15 +201,21 @@ import net.minecraft.world.level.block.RotatedPillarBlock;
 import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
+import net.minecraft.world.level.block.entity.SignTextSlot;
+import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.ticks.ProtoChunkTicks;
 
 /**
  * 用官方 26.3 的网络代码扮演客户端，检查 Bamboo 发的每个包。
@@ -197,6 +230,9 @@ import net.minecraft.world.phys.Vec3;
  * <p>官方管线跑在 EmbeddedChannel 上，字节通过阻塞 socket 转发，这样不依赖 NIO。
  * 所以这里验证的是协议内容，不包括 NIO 传输层和客户端的渲染。
  *
+ * <p>多给两个参数时，最后一名玩家连的是另一个开了正版验证的服务端，加密和 session server
+ * 那一段也跟着检查；参数由 `mc-bamboo-vanilla probe` 传进来，少给就跳过那一段。
+ *
  * <p>脚本的每一步都有时限。一步超时后这一段剩下的步骤跳过，下一段继续，结束时列出所有失败。
  */
 public final class Probe {
@@ -204,10 +240,14 @@ public final class Probe {
     private static final String PLAYER = "Kitten";
     private static final String SECOND_PLAYER = "Mochi";
     private static final String LATE_PLAYER = "Latecomer";
+    /** 走正版验证进服的那名玩家，它连的是另一个服务端，所以用一个别处没有的名字。 */
+    private static final String ONLINE_PLAYER = "Sakura";
     /** 客户端请求的视距，和 Bamboo 的默认值相同，所以 chunkRadius 和跟踪范围都用它。 */
     private static final int VIEW_DISTANCE = 8;
     private static final int ALL_SKIN_PARTS = 0x7f;
     private static final int NO_HAT_SKIN_PARTS = 0x3f;
+    /** 官方服务器默认的 `network-compression-threshold`。 */
+    private static final int COMPRESSION_THRESHOLD = 256;
     /** 出生点所在的区块。 */
     private static final ChunkPos SPAWN_CHUNK = new ChunkPos(0, 0);
     /** 全部区块到齐之后走到这个区块，让服务端发 center、forget 和新区块。 */
@@ -246,6 +286,7 @@ public final class Probe {
     private static final int OFF_HAND_SLOT = 45;
     private static final int STACK = 64;
     private static final String CHAT_TEXT = "你好，竹子🐾";
+    private static final String SIGN_TEXT = "竹子会写字";
     private static final String UNKNOWN_COMMAND = "Unknown or incomplete command. See below for error";
 
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
@@ -253,11 +294,13 @@ public final class Probe {
             "handleAddEntity",
             "handleAwardStats",
             "handleBlockChangedAck",
+            "handleBlockEntityData",
             "handleBlockEvent",
             "handleBlockUpdate",
             "handleBundlePacket",
             "handleChunkBatchFinished",
             "handleChunkBatchStart",
+            "handleChunkBlocksUpdate",
             "handleContainerClose",
             "handleContainerContent",
             "handleContainerSetSlot",
@@ -274,6 +317,7 @@ public final class Probe {
             "handleMoveEntity",
             "handleMovePlayer",
             "handleOpenScreen",
+            "handleOpenSignEditor",
             "handlePlayerAbilities",
             "handlePlayerInfoRemove",
             "handlePlayerInfoUpdate",
@@ -299,6 +343,9 @@ public final class Probe {
     public static void main(String[] args) throws Exception {
         String host = args[0];
         int port = Integer.parseInt(args[1]);
+        // 多出来的两个参数是开了正版验证的服务端和假 session server，没给就不查那一段。
+        String onlineAddress = args.length > 2 ? args[2] : null;
+        String sessionUrl = args.length > 3 ? args[3] : null;
         startWatchdog();
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -318,6 +365,9 @@ public final class Probe {
                 probeStatus(host, port);
                 new Scenario(host, port, layers).run();
                 check("chunk: an untouched chunk had its light compared", flatLightChecked);
+                if (onlineAddress != null && sessionUrl != null) {
+                    probeOnline(onlineAddress, sessionUrl, layers);
+                }
             } catch (Exception error) {
                 // 官方解码器发现格式错误时会断开连接，这里记成一项失败，照常输出汇总。
                 check("connection: no error while talking to the server (" + error + ")", false);
@@ -411,10 +461,55 @@ public final class Probe {
         }
     }
 
+    /**
+     * 开了正版验证的那一段：这名玩家连另一个服务端，走完官方客户端的加密登录流程。
+     *
+     * <p>假 session server 由 {@code mc-bamboo-vanilla probe} 启动。客户端先把自己算出的
+     * serverId 哈希报给它，服务端随后拿同一个哈希来问才拿得到档案，所以两边的算法必须一致。
+     */
+    private static void probeOnline(
+            String address, String sessionUrl, LayeredRegistryAccess<RegistryLayer> layers) throws IOException {
+        int colon = address.lastIndexOf(':');
+        String host = address.substring(0, colon);
+        int port = Integer.parseInt(address.substring(colon + 1));
+        Join sakura = new Join(host, port, layers, ONLINE_PLAYER, HumanoidArm.RIGHT, false, sessionUrl);
+        try {
+            sakura.start();
+            long deadline = System.currentTimeMillis() + JOIN_TIMEOUT_MILLIS;
+            while (!sakura.onlineJoinDone() && !sakura.closed && System.currentTimeMillis() < deadline) {
+                sakura.pump();
+            }
+            check("online: " + ONLINE_PLAYER + " joined through the encrypted login", sakura.onlineJoinDone());
+            sakura.checkDigestTheServerAsked();
+            sakura.finishChecks();
+        } finally {
+            sakura.close();
+        }
+    }
+
+    /** 问一次假 session server，回复体当成 UTF-8 文本。 */
+    private static String httpGet(String url) throws IOException {
+        try (InputStream body = URI.create(url).toURL().openStream()) {
+            return new String(body.readAllBytes(), StandardCharsets.UTF_8).trim();
+        }
+    }
+
     private static boolean near(Vec3 first, Vec3 second) {
         return Math.abs(first.x - second.x) <= POSITION_TOLERANCE
                 && Math.abs(first.y - second.y) <= POSITION_TOLERANCE
                 && Math.abs(first.z - second.z) <= POSITION_TOLERANCE;
+    }
+
+    /** 告示牌一面第 `line` 行，`front_text`/`back_text` 里 `messages` 的字符串。 */
+    private static String signLine(CompoundTag tag, String side, int line) {
+        if (tag == null) {
+            return null;
+        }
+        return tag.getCompound(side)
+                .flatMap(text -> text.getList("messages"))
+                .filter(messages -> messages.size() > line)
+                .flatMap(messages -> messages.getString(line))
+                .orElse(null);
     }
 
     /** 官方的包不公开这个字段，客户端要靠 Level 才取得到实体。 */
@@ -478,6 +573,8 @@ public final class Probe {
                 section("equipment" + names, () -> equipment(actor, observer));
                 section("blocks" + names, () -> blocks(actor, observer));
                 section("placement" + names, () -> placement(actor, observer));
+                section("pistons" + names, () -> pistons(actor, observer));
+                section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
             }
@@ -842,8 +939,11 @@ public final class Probe {
 
             int ownEvents = actor.levelEvents.size();
             int otherEvents = observer.levelEvents.size();
+            int ownSections = actor.sectionUpdates.size();
+            int otherSections = observer.sectionUpdates.size();
+            int breaking = actor.nextSequence();
             actor.send(new ServerboundPlayerActionPacket(
-                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, log, Direction.UP, actor.nextSequence()));
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, log, Direction.UP, breaking));
             await("placement: the torch goes with the log", () -> air.equals(observer.blocks.get(torch)));
             pumpFor(SETTLE_MILLIS);
             check("placement: the observer gets both break events", observer.levelEvents.size() == otherEvents + 2);
@@ -851,11 +951,121 @@ public final class Probe {
                     actor.levelEvents.size() == ownEvents + 1
                             && actor.levelEvents.getLast().getData() == Block.getId(standing));
 
+            // 原木和火把在同一段里、同一 tick 没了，官方把两格放进一个 section_blocks_update。
+            List<BlockPos> together = officialOrder(log, torch);
+            check("placement: the log and the torch arrive in one section update in the official order",
+                    observer.sectionUpdates.size() == otherSections + 1
+                            && observer.sectionUpdates.getLast().equals(together));
+            check("placement: the breaker gets the same section update",
+                    actor.sectionUpdates.size() == ownSections + 1
+                            && actor.sectionUpdates.getLast().equals(together));
+            check("placement: the section update decodes to air",
+                    air.equals(observer.blocks.get(log)) && air.equals(observer.blocks.get(torch)));
+            check("placement: the section update comes before the ack",
+                    actor.eventIndex("block " + torch.toShortString() + " " + Block.getId(air))
+                            < actor.eventIndex("ack " + breaking));
+
             actor.cleared.add(log);
             actor.cleared.add(torch);
             actor.edits.add(new Edit(slab, upperSlab));
             actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(Items.CHEST)));
             actor.send(new ServerboundSetCarriedItemPacket(0));
+        }
+
+        private static boolean extended(BlockState state) {
+            return state != null && state.is(Blocks.STICKY_PISTON) && state.getValue(PistonBaseBlock.EXTENDED);
+        }
+
+        private static boolean retracted(BlockState state) {
+            return state != null && state.is(Blocks.STICKY_PISTON) && !state.getValue(PistonBaseBlock.EXTENDED);
+        }
+
+        /** 粘性活塞推出方块再拉回来：客户端要收到方块事件，被推的方块要出现在新位置。 */
+        private void pistons(Join actor, Join observer) throws IOException {
+            BlockPos ground = BlockPos.containing(actor.position).offset(0, -1, 3);
+            BlockPos piston = ground.above();
+            BlockPos stone = piston.north();
+            BlockPos pushed = stone.north();
+            BlockPos power = ground.west().above();
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState stoneState = Blocks.STONE.defaultBlockState();
+
+            // 朝北放：yaw 0 时官方取玩家的朝向，活塞朝玩家的反方向。
+            actor.send(new ServerboundMovePlayerPacket.Rot(0.0f, 0.0f, true, false));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            useOn(actor, Items.STICKY_PISTON, ground, Direction.UP, Vec3.upFromBottomCenterOf(ground, 1.0));
+            await("pistons: " + observer.player + " sees the sticky piston",
+                    () -> retracted(observer.blocks.get(piston)));
+            useOn(actor, Items.STONE, ground.north(), Direction.UP, Vec3.upFromBottomCenterOf(ground.north(), 1.0));
+            await("pistons: " + observer.player + " sees the block to push",
+                    () -> stoneState.equals(observer.blocks.get(stone)));
+
+            int extending = observer.blockEvents.size();
+            useOn(actor, Items.REDSTONE_BLOCK, ground.west(), Direction.UP, Vec3.upFromBottomCenterOf(ground.west(), 1.0));
+            await("pistons: the piston extends", () -> extended(observer.blocks.get(piston)));
+            await("pistons: the head arrives",
+                    () -> observer.blocks.get(stone) != null && observer.blocks.get(stone).is(Blocks.PISTON_HEAD));
+            await("pistons: the block lands one step further", () -> stoneState.equals(observer.blocks.get(pushed)));
+            pumpFor(SETTLE_MILLIS);
+            check("pistons: extending sends one block event", observer.blockEvents.size() == extending + 1);
+            ClientboundBlockEventPacket extend = observer.blockEvents.getLast();
+            check("pistons: the extension event names the piston",
+                    extend.getPos().equals(piston) && extend.getBlock() == Blocks.STICKY_PISTON && extend.getB0() == 0);
+
+            int retracting = observer.blockEvents.size();
+            int breaking = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, power, Direction.UP, breaking));
+            await("pistons: the power block breaks", () -> actor.lastAck >= breaking);
+            await("pistons: the piston retracts", () -> retracted(observer.blocks.get(piston)));
+            await("pistons: the block comes back", () -> stoneState.equals(observer.blocks.get(stone)));
+            await("pistons: the space behind is open again", () -> air.equals(observer.blocks.get(pushed)));
+            pumpFor(SETTLE_MILLIS);
+            check("pistons: retracting sends one block event", observer.blockEvents.size() == retracting + 1);
+            ClientboundBlockEventPacket retract = observer.blockEvents.getLast();
+            check("pistons: the retraction event names the piston",
+                    retract.getPos().equals(piston) && retract.getBlock() == Blocks.STICKY_PISTON && retract.getB0() == 1);
+        }
+
+        /** 放下的告示牌只给放置者打开编辑界面，写进去的字另一个客户端从方块实体数据里读得到。 */
+        private void signs(Join actor, Join observer) throws IOException {
+            BlockPos ground = BlockPos.containing(actor.position).offset(2, -1, 2);
+            BlockPos sign = ground.above();
+            BlockState standing = Blocks.OAK_SIGN.defaultBlockState();
+            int observerEditors = observer.signEditors.size();
+
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            useOn(actor, Items.OAK_SIGN, ground, Direction.UP, Vec3.upFromBottomCenterOf(ground, 1.0));
+            await("signs: " + actor.player + " gets the editor", () -> actor.signEditors.containsKey(sign));
+            check("signs: the editor opens on the front", actor.signEditors.get(sign) == SignTextSlot.FRONT);
+            await("signs: " + observer.player + " sees the sign", () -> standing.equals(observer.blocks.get(sign)));
+            pumpFor(SETTLE_MILLIS);
+            check("signs: only the placer gets the editor", observer.signEditors.size() == observerEditors);
+
+            actor.send(new ServerboundSignUpdatePacket(
+                    sign, List.of(SIGN_TEXT, "", "", ""), SignTextSlot.FRONT));
+            await("signs: " + actor.player + " reads the text back",
+                    () -> SIGN_TEXT.equals(signLine(actor.blockEntityTags.get(sign), "front_text", 0)));
+            await("signs: " + observer.player + " reads the text",
+                    () -> SIGN_TEXT.equals(signLine(observer.blockEntityTags.get(sign), "front_text", 0)));
+            actor.edits.add(new Edit(sign, standing));
+        }
+
+        /**
+         * 官方 `ChunkHolder.blockChanged` 按 `changed` 的先后把段内坐标记进 `ShortOpenHashSet`，
+         * `section_blocks_update` 里的格子就是这个集合读出来的顺序。
+         */
+        private static List<BlockPos> officialOrder(BlockPos... changed) {
+            ShortOpenHashSet set = new ShortOpenHashSet();
+            for (BlockPos pos : changed) {
+                set.add(SectionPos.sectionRelativePos(pos));
+            }
+            SectionPos section = SectionPos.of(changed[0]);
+            List<BlockPos> order = new ArrayList<>();
+            for (ShortIterator iterator = set.iterator(); iterator.hasNext(); ) {
+                order.add(section.relativeToBlockPos(iterator.nextShort()));
+            }
+            return order;
         }
 
         /** 手持 `item` 右键方块，等服务端确认。物品放在第 1 格，这一段开始时已经选中它。 */
@@ -1062,6 +1272,12 @@ public final class Probe {
                         check("late: the chest is in the block entity list",
                                 late.blockEntities.get(edit.pos) == BlockEntityTypes.CHEST);
                     }
+                    if (edit.state.is(Blocks.OAK_SIGN)) {
+                        check("late: the sign is in the block entity list",
+                                late.blockEntities.get(edit.pos) == BlockEntityTypes.SIGN);
+                        check("late: the chunk carries the sign text",
+                                SIGN_TEXT.equals(signLine(late.blockEntityTags.get(edit.pos), "front_text", 0)));
+                    }
                 }
                 for (BlockPos pos : editor.cleared) {
                     check("late: blocks that went away are not in the chunk", !late.blocks.containsKey(pos));
@@ -1117,11 +1333,16 @@ public final class Probe {
     /** 一个官方客户端：进服流程，以及它收到的所有东西。 */
     private static final class Join {
         final String player;
-        final UUID uuid;
+        /** 服务端最后认下来的 UUID。离线模式里它就是客户端自己算出的那个。 */
+        UUID uuid;
         final HumanoidArm arm;
         private final String host;
         private final int port;
         private final boolean walks;
+        /** 客户端按玩家名算出的 UUID，hello 包里报的就是它。 */
+        private final UUID offlineUuid;
+        /** 假 session server 的根地址。非空就表示这条连接要走正版验证。 */
+        private final String sessionUrl;
         private final LayeredRegistryAccess<RegistryLayer> layers;
         private final RegistryAccess.Frozen registries;
         private final PalettedContainerFactory containers;
@@ -1148,12 +1369,19 @@ public final class Probe {
         private boolean forgetBeforeCenter;
         private int keepAlives;
         private boolean latencyUpdated;
+        private boolean compressionSeen;
         private boolean disconnected;
         private boolean ownDataChecked;
         private boolean inBundle;
         private boolean closed;
         private String disconnectReason = "";
         private int sequence;
+        /** 客户端自己算出来的 serverId 哈希，服务端问 session server 时要用同一个。 */
+        private String reportedDigest = "";
+        /** 假 session server 说好要发的档案，服务端转过来的必须和它一致。 */
+        private UUID expectedUuid;
+        private String expectedSkin = "";
+        private String expectedSignature = "";
 
         int entityId;
         Vec3 position = new Vec3(SPAWN_X, SPAWN_Y, SPAWN_Z);
@@ -1163,6 +1391,10 @@ public final class Probe {
         final Map<Integer, Map<Integer, Object>> metadata = new HashMap<>();
         final Map<BlockPos, BlockState> blocks = new HashMap<>();
         final Map<BlockPos, BlockEntityType<?>> blockEntities = new HashMap<>();
+        /** 方块实体数据里的 NBT，告示牌的文字在这里。 */
+        final Map<BlockPos, CompoundTag> blockEntityTags = new HashMap<>();
+        /** 收到过编辑界面的告示牌，值是玩家要编辑的那一面。 */
+        final Map<BlockPos, SignTextSlot> signEditors = new HashMap<>();
         final Map<Integer, ItemStack> slots = new HashMap<>();
         /** 打开的菜单里的槽，和容器 0 的 `slots` 分开记。 */
         final Map<Integer, ItemStack> menuSlots = new HashMap<>();
@@ -1171,7 +1403,11 @@ public final class Probe {
         /** 放下又消失的方块。地面上的空气 `recordChunk` 不记，所以不能写成 `Edit`。 */
         final List<BlockPos> cleared = new ArrayList<>();
         final List<String> events = new ArrayList<>();
+        /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
+        final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
+        /** 活塞伸出、收回的动画事件。 */
+        final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
@@ -1193,13 +1429,26 @@ public final class Probe {
                 String player,
                 HumanoidArm arm,
                 boolean walks) throws IOException {
+            this(host, port, layers, player, arm, walks, null);
+        }
+
+        Join(
+                String host,
+                int port,
+                LayeredRegistryAccess<RegistryLayer> layers,
+                String player,
+                HumanoidArm arm,
+                boolean walks,
+                String sessionUrl) throws IOException {
             this.host = host;
             this.port = port;
             this.layers = layers;
             this.player = player;
-            this.uuid = UUIDUtil.createOfflinePlayerUUID(player);
+            this.offlineUuid = UUIDUtil.createOfflinePlayerUUID(player);
+            this.uuid = offlineUuid;
             this.arm = arm;
             this.walks = walks;
+            this.sessionUrl = sessionUrl;
             this.registries = layers.compositeAccess();
             this.containers = PalettedContainerFactory.create(registries);
             this.bridge = new Bridge(host, port);
@@ -1221,8 +1470,15 @@ public final class Probe {
         void start() {
             connection.initiateServerboundPlayConnection(host, port, listener(ClientLoginPacketListener.class, Map.of(
                     "handleLoginFinished", packet -> onLoginFinished((ClientboundLoginFinishedPacket) packet),
+                    "handleCompression", packet -> onCompression((ClientboundLoginCompressionPacket) packet),
+                    "handleHello", packet -> onHello((ClientboundHelloPacket) packet),
                     "handleDisconnect", packet -> onLoginRefused((ClientboundLoginDisconnectPacket) packet))));
-            connection.send(new ServerboundHelloPacket(player, uuid));
+            connection.send(new ServerboundHelloPacket(player, offlineUuid));
+        }
+
+        /** 这条连接要不要走正版验证。 */
+        private boolean online() {
+            return sessionUrl != null;
         }
 
         /** 转发一轮字节。服务端主动断开或者官方解码器报错时，连接会在这里结束。 */
@@ -1303,6 +1559,11 @@ public final class Probe {
             return spawnChunksDone() && walkEntered.size() == expectedEntered.size();
         }
 
+        /** 正版验证那一段只要走到进服：区块到齐，而且 tab 里是 session server 给的身份。 */
+        boolean onlineJoinDone() {
+            return spawnChunksDone() && tab.containsKey(uuid);
+        }
+
         /** 区块全部到齐、走过一个区块、收到两个心跳和一次延迟广播之后就可以结束了。 */
         boolean longRunningDone() {
             return walkDone() && latencyUpdated && keepAlives >= KEEP_ALIVES_TO_ANSWER;
@@ -1315,6 +1576,10 @@ public final class Probe {
             check("play: first batch is the three by three around the spawn", firstBatchIsAroundTheSpawn());
             check("play: tab list has the player", tab.containsKey(uuid));
             check("play: was not disconnected", !disconnected);
+            check("compression: " + player + " received compressed frames", bridge.compressedFrames > 0);
+            check("compression: " + player + " received raw frames below the threshold", bridge.rawFrames > 0);
+            check("compression: " + player + " never compressed below the threshold",
+                    bridge.belowThresholdFrames == 0);
             playPackets.keySet().forEach(name -> check("play: M2 sends " + name, M2_PACKETS.contains(name)));
             if (walks) {
                 check("walk: center moved first", walkCenterArrived && !forgetBeforeCenter);
@@ -1346,15 +1611,88 @@ public final class Probe {
             return firstBatch.stream().allMatch(pos -> Math.abs(pos.x()) <= 1 && Math.abs(pos.z()) <= 1);
         }
 
+        /**
+         * 官方 {@code ClientHandshakePacketListenerImpl.handleHello}：算哈希、发密钥包、切换加密。
+         *
+         * <p>真客户端这一步去问 Mojang 的 {@code joinServer}，这里把哈希报给假 session server，
+         * 它拿这个哈希等服务端来问。密钥包写出去之后才切换加密，和官方的发送监听器一样。
+         */
+        private void onHello(ClientboundHelloPacket packet) {
+            if (!online()) {
+                check("login: an offline server does not ask for a key", false);
+                return;
+            }
+            check("online: the server asks the client to authenticate", packet.shouldAuthenticate());
+            check("online: the server id is empty like the official one", packet.getServerId().isEmpty());
+            check("online: the challenge is four bytes", packet.getChallenge().length == 4);
+            try {
+                SecretKey secret = Crypt.generateSecretKey();
+                PublicKey publicKey = packet.getPublicKey();
+                reportedDigest =
+                        new BigInteger(Crypt.digestData(packet.getServerId(), publicKey, secret)).toString(16);
+                Cipher decrypt = Crypt.getCipher(Cipher.DECRYPT_MODE, secret);
+                Cipher encrypt = Crypt.getCipher(Cipher.ENCRYPT_MODE, secret);
+                ServerboundKeyPacket key = new ServerboundKeyPacket(secret, publicKey, packet.getChallenge());
+                expectProfile(reportedDigest);
+                connection.send(key, PacketSendListener.thenRun(
+                        () -> connection.setEncryptionKey(decrypt, encrypt)));
+            } catch (Exception error) {
+                check("online: the client could answer the key request (" + error + ")", false);
+            }
+        }
+
+        /** 把自己算出的哈希报给假 session server，拿回这次它要发的档案。 */
+        private void expectProfile(String digest) throws IOException {
+            String[] fields = httpGet(sessionUrl + "/probe/expect?username=" + player + "&hash=" + digest).split(" ");
+            expectedUuid = UUID.fromString(fields[0]);
+            expectedSkin = fields[1];
+            expectedSignature = fields[2];
+        }
+
+        /** 服务端问 session server 的哈希，要和客户端自己算出来的一字不差。 */
+        void checkDigestTheServerAsked() throws IOException {
+            String asked = httpGet(sessionUrl + "/probe/asked");
+            check("online: the server asked the session server about the client's digest",
+                    !reportedDigest.isEmpty() && asked.equals(reportedDigest));
+        }
+
+        /** 皮肤要原样转发，签名也要带着，不然客户端不显示披风。 */
+        private void checkSkin(String what, Collection<Property> textures) {
+            check(what, textures.size() == 1
+                    && textures.stream().allMatch(property -> property.value().equals(expectedSkin)
+                            && expectedSignature.equals(property.signature())));
+        }
+
+        /** 和官方客户端一样：收到登录压缩包之后才把管线换成压缩帧。 */
+        private void onCompression(ClientboundLoginCompressionPacket packet) {
+            int threshold = packet.getCompressionThreshold();
+            compressionSeen = true;
+            check("login: " + player + " was told the official compression threshold",
+                    threshold == COMPRESSION_THRESHOLD);
+            bridge.enableCompression(threshold);
+        }
+
         private void onLoginRefused(ClientboundLoginDisconnectPacket packet) {
             System.out.println("PROBE login refused: " + packet.reason().getString());
             check("login: accepted", false);
         }
 
         private void onLoginFinished(ClientboundLoginFinishedPacket packet) {
-            check("login: name is kept", packet.gameProfile().name().equals(player));
-            check("login: uuid uses the offline algorithm", packet.gameProfile().id().equals(uuid));
+            var profile = packet.gameProfile();
+            check("login: name is kept", profile.name().equals(player));
+            if (online()) {
+                check("online: the login profile uses the uuid from the session server",
+                        profile.id().equals(expectedUuid));
+                check("online: the login uuid is not the offline one", !profile.id().equals(offlineUuid));
+                checkSkin("online: the login profile carries the signed skin",
+                        profile.properties().get("textures"));
+            } else {
+                check("login: uuid uses the offline algorithm", profile.id().equals(offlineUuid));
+                check("login: an offline profile has no skin", profile.properties().isEmpty());
+            }
+            uuid = profile.id();
             check("login: session id is present", packet.sessionId() != null);
+            check("login: compression comes before the login success of " + player, compressionSeen);
 
             connection.setupInboundProtocol(ConfigurationProtocols.CLIENTBOUND, listener(
                     ClientConfigurationPacketListener.class, Map.of(
@@ -1484,6 +1822,12 @@ public final class Probe {
             handlers.put("handleSwingAnimation", value -> onSwing((ClientboundSwingAnimationPacket) value));
             handlers.put("handleSetEquipment", value -> onEquipment((ClientboundSetEquipmentPacket) value));
             handlers.put("handleBlockUpdate", value -> onBlockUpdate((ClientboundBlockUpdatePacket) value));
+            handlers.put("handleChunkBlocksUpdate",
+                    value -> onSectionBlocksUpdate((ClientboundSectionBlocksUpdatePacket) value));
+            handlers.put("handleBlockEntityData",
+                    value -> onBlockEntityData((ClientboundBlockEntityDataPacket) value));
+            handlers.put("handleOpenSignEditor",
+                    value -> onOpenSignEditor((ClientboundOpenSignEditorPacket) value));
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
@@ -1510,7 +1854,11 @@ public final class Probe {
             check("play: world is flat", spawn.isFlat());
             check("play: sea level matches the flat preset", spawn.seaLevel() == -63);
             check("play: view distance", packet.chunkRadius() == VIEW_DISTANCE);
-            check("play: offline mode", !packet.onlineMode());
+            if (online()) {
+                check("online: the login packet says the server is in online mode", packet.onlineMode());
+            } else {
+                check("play: offline mode", !packet.onlineMode());
+            }
         }
 
         private void onAbilities(ClientboundPlayerAbilitiesPacket packet) {
@@ -1540,8 +1888,16 @@ public final class Probe {
                     actions.equals(EnumSet.allOf(ClientboundPlayerInfoUpdatePacket.Action.class)));
             for (var entry : packet.entries()) {
                 String name = entry.profile().name();
-                check("play: tab uuid uses the offline algorithm",
-                        entry.profileId().equals(UUIDUtil.createOfflinePlayerUUID(name)));
+                if (online()) {
+                    check("online: the tab uuid comes from the session server",
+                            entry.profileId().equals(expectedUuid));
+                    checkSkin("online: the skin from the session server reached the tab list",
+                            entry.profile().properties().get("textures"));
+                } else {
+                    check("play: tab uuid uses the offline algorithm",
+                            entry.profileId().equals(UUIDUtil.createOfflinePlayerUUID(name)));
+                    check("play: an offline tab entry has no skin", entry.profile().properties().isEmpty());
+                }
                 check("play: tab entry is listed", entry.listed());
                 check("play: tab entry has the game mode", entry.gameMode() == GameType.CREATIVE);
                 check("play: tab entry has no chat session", entry.chatSession() == null);
@@ -1774,9 +2130,37 @@ public final class Probe {
         }
 
         private void onBlockUpdate(ClientboundBlockUpdatePacket packet) {
-            BlockPos pos = packet.getPos().immutable();
-            blocks.put(pos, packet.getBlockState());
-            events.add("block " + pos.toShortString() + " " + Block.getId(packet.getBlockState()));
+            recordBlock(packet.getPos(), packet.getBlockState());
+        }
+
+        /** 和官方客户端一样，用包自己的 `runUpdates` 把每一格交出来。 */
+        private void onSectionBlocksUpdate(ClientboundSectionBlocksUpdatePacket packet) {
+            List<BlockPos> positions = new ArrayList<>();
+            packet.runUpdates((pos, state) -> {
+                positions.add(pos.immutable());
+                recordBlock(pos, state);
+            });
+            check("blocks: a section update carries more than one block", positions.size() > 1);
+            sectionUpdates.add(positions);
+        }
+
+        private void recordBlock(BlockPos pos, BlockState state) {
+            BlockPos immutable = pos.immutable();
+            blocks.put(immutable, state);
+            events.add("block " + immutable.toShortString() + " " + Block.getId(state));
+        }
+
+        private void onBlockEntityData(ClientboundBlockEntityDataPacket packet) {
+            check("signs: block entity data names a sign",
+                    packet.getType() == BlockEntityTypes.SIGN
+                            || packet.getType() == BlockEntityTypes.HANGING_SIGN);
+            blockEntityTags.put(packet.getPos().immutable(), packet.getTag());
+            events.add("data " + packet.getPos().toShortString());
+        }
+
+        private void onOpenSignEditor(ClientboundOpenSignEditorPacket packet) {
+            signEditors.put(packet.pos().immutable(), packet.slot());
+            events.add("editor " + packet.pos().toShortString());
         }
 
         private void onAck(ClientboundBlockChangedAckPacket packet) {
@@ -1789,6 +2173,11 @@ public final class Probe {
         private void onLevelEvent(ClientboundLevelEventPacket packet) {
             levelEvents.add(packet);
             events.add("event " + packet.getPos().toShortString());
+        }
+
+        private void onBlockEvent(ClientboundBlockEventPacket packet) {
+            blockEvents.add(packet);
+            events.add("blockevent " + packet.getPos().toShortString());
         }
 
         private void onSetSlot(ClientboundContainerSetSlotPacket packet) {
@@ -1868,7 +2257,43 @@ public final class Probe {
                 sections[index].read(buffer);
             }
             check("chunk: all sections were consumed", buffer.readableBytes() == 0);
+            checkChunkData(packet, sections);
             return sections;
+        }
+
+        /** 区块段头的计数和每种高度图都由官方代码从解出来的方块重算，再和收到的值比较。 */
+        private void checkChunkData(ClientboundLevelChunkWithLightPacket packet, LevelChunkSection[] sections) {
+            for (int index = 0; index < sections.length; index += 1) {
+                int receivedBlocks = privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount");
+                int receivedFluids = privateInt(sections[index], LevelChunkSection.class, "fluidCount");
+                sections[index].recalcBlockCounts();
+                check("chunk: section " + index + " block count",
+                        receivedBlocks == privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount"));
+                check("chunk: section " + index + " fluid count",
+                        receivedFluids == privateInt(sections[index], LevelChunkSection.class, "fluidCount"));
+            }
+
+            ProtoChunk chunk = new ProtoChunk(
+                    new ChunkPos(packet.x(), packet.z()),
+                    UpgradeData.EMPTY,
+                    sections,
+                    new ProtoChunkTicks<>(),
+                    new ProtoChunkTicks<>(),
+                    LevelHeightAccessor.create(-64, SECTIONS * 16),
+                    containers,
+                    null);
+            Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS);
+
+            Map<Heightmap.Types, long[]> received = packet.chunkData().getHeightmaps();
+            for (Heightmap.Types type : Heightmap.Types.values()) {
+                check("chunk: " + type + " is sent exactly when the client needs it",
+                        type.sendToClient() == received.containsKey(type));
+            }
+            for (Map.Entry<Heightmap.Types, long[]> entry : received.entrySet()) {
+                long[] expected = chunk.getOrCreateHeightmapUnprimed(entry.getKey()).getRawData();
+                check("chunk: " + entry.getKey() + " heightmap",
+                        Arrays.equals(entry.getValue(), expected));
+            }
         }
 
         /** 记下这个区块里改过的位置和方块实体，后来的玩家要靠它们检查改动。 */
@@ -1887,9 +2312,21 @@ public final class Probe {
                 }
             }
             packet.chunkData().forEachBlockEntityTag(packet.x(), packet.z(), (pos, type, tag) -> {
-                check("chunk: block entities have no NBT", tag == null);
+                // 告示牌的文字在 `getUpdateTag` 里，别的方块实体没有自定义内容。
+                if (isSign(type)) {
+                    check("chunk: signs carry their text", tag != null);
+                } else {
+                    check("chunk: block entities have no NBT", tag == null);
+                }
+                if (tag != null) {
+                    blockEntityTags.put(pos.immutable(), tag);
+                }
                 blockEntities.put(pos.immutable(), type);
             });
+        }
+
+        private static boolean isSign(BlockEntityType<?> type) {
+            return type == BlockEntityTypes.SIGN || type == BlockEntityTypes.HANGING_SIGN;
         }
 
         /** 用官方代码解码区块，再检查地层、高度图和光照。 */
@@ -2063,10 +2500,20 @@ public final class Probe {
 
     /** 在内存里运行官方管线，并把它的字节通过真实的 TCP socket 收发。 */
     private static final class Bridge implements AutoCloseable {
+        /** 官方管线上分帧之后、解压之前的位置，用来检查每个包的长度前缀。 */
+        private static final String FRAME_PROBE = "frame_probe";
+
         final Connection connection = new Connection(PacketFlow.CLIENTBOUND);
         private final EmbeddedChannel channel;
         private final Socket socket;
         private final byte[] chunk = new byte[1 << 16];
+        private int threshold;
+        /** 解压前的帧里长度前缀不为零的个数，也就是真的压缩过的包。 */
+        int compressedFrames;
+        /** 解压前的帧里长度前缀为零的个数，小包就是原样发的。 */
+        int rawFrames;
+        /** 长度前缀不为零但小于阈值的帧。官方不会这样发，客户端也会拒绝。 */
+        int belowThresholdFrames;
 
         Bridge(String host, int port) throws IOException {
             socket = new Socket(host, port);
@@ -2085,6 +2532,37 @@ public final class Probe {
         /** 官方管线关了这条连接。解码出错时走这条路。 */
         boolean channelClosed() {
             return !channel.isOpen();
+        }
+
+        /**
+         * 和官方客户端收到登录压缩包之后做的一样，把管线切换到压缩帧。
+         *
+         * <p>切换完再把探针挂在解压前面：分帧之后、解压之前的帧体带着长度前缀，
+         * 非零就说明服务端真的压了这一个包。
+         */
+        void enableCompression(int threshold) {
+            this.threshold = threshold;
+            connection.setupCompression(threshold, false);
+            channel.pipeline().addBefore("decompress", FRAME_PROBE, new FrameProbe());
+        }
+
+        /** 看一眼还没解压的帧体，只读长度前缀，不动它的读指针。 */
+        private final class FrameProbe extends ChannelInboundHandlerAdapter {
+            @Override
+            public void channelRead(ChannelHandlerContext context, Object message) {
+                if (message instanceof ByteBuf frame && frame.isReadable()) {
+                    int declared = VarInt.read(frame.duplicate());
+                    if (declared == 0) {
+                        rawFrames += 1;
+                    } else {
+                        compressedFrames += 1;
+                        if (declared < threshold) {
+                            belowThresholdFrames += 1;
+                        }
+                    }
+                }
+                context.fireChannelRead(message);
+            }
         }
 
         /** 转发一轮：先发管线里排队的字节，再读一次 socket，读不到时最多等 READ_TIMEOUT_MILLIS。 */

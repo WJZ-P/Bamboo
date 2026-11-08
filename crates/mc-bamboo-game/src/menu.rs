@@ -826,7 +826,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
 
 /// 这个容器打开后是什么形状。返回 `None` 时官方也不会打开菜单。
 fn menu_shape(
-    region: &Region,
+    region: &mut Region,
     pos: BlockPos,
     kind: ContainerKind,
 ) -> Option<(Target, usize, i32, &'static str)> {
@@ -1012,9 +1012,12 @@ fn add_resource_to(inventory: &mut Inventory, slot: usize, stack: &ItemStack) ->
 }
 
 /// 菜单槽位换算成官方 `Inventory` 的下标，`SetPlayerInventory` 要用它。
+///
+/// 护甲在 `Inventory` 里是 36 到 39，顺序和菜单相反：菜单 5 是头盔，对应物品栏 39，
+/// 菜单 8 是靴子，对应 36，所以是 `44 - slot`。
 fn official_index(slot: usize) -> Option<i32> {
     match slot {
-        5..=8 => Some(39 - slot as i32),
+        5..=8 => Some(44 - slot as i32),
         9..=35 => Some(slot as i32),
         36..=44 => Some(slot as i32 - HOTBAR_START as i32),
         45 => Some(40),

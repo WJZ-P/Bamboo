@@ -29,6 +29,15 @@ export const theme = {
     online: "#6be04a",
     offline: "#8a8a8a",
   },
+  /** 性能曲线。CPU 用竹子绿，整机用金色细线，内存用钻石青。 */
+  chart: {
+    grid: "#2b2b2b",
+    cpu: "#5eac44",
+    cpuFill: "rgba(94, 172, 68, 0.35)",
+    system: "#ffcc33",
+    memory: "#7ec8e3",
+    memoryFill: "rgba(126, 200, 227, 0.3)",
+  },
   log: {
     ERROR: "#ff6b6b",
     WARN: "#ffcc33",

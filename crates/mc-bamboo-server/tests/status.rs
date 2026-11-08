@@ -209,10 +209,7 @@ async fn shutdown_closes_connections_and_frees_the_port() {
     }));
 
     // 这条连接什么都不发，只有关闭流程才能让它结束。
-    let mut client = Client {
-        stream: TcpStream::connect(address).await.unwrap(),
-        buffer: Vec::new(),
-    };
+    let mut client = Client::new(TcpStream::connect(address).await.unwrap());
     sleep(Duration::from_millis(50)).await;
 
     stop.send(()).unwrap();

@@ -13,10 +13,8 @@ categories = ["games"]
 mc-bamboo-blocks.workspace = true
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
 mc-bamboo-world.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-mc-bamboo-nbt.workspace = true

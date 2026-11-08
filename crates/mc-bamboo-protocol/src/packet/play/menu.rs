@@ -1,14 +1,8 @@
 //! 菜单和容器。
 
-use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::packets::play::clientbound;
 
-use crate::{
-    codec::{write_block_pos, write_varint},
-    item::ItemStack,
-    packet::ClientboundPacket,
-    text::Component,
-};
+use crate::{codec::write_varint, item::ItemStack, packet::ClientboundPacket, text::Component};
 
 /// 打开一个菜单。`menu_type` 是 `minecraft:menu` 注册表 ID，`title` 是窗口标题。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,28 +57,6 @@ impl ClientboundPacket for ContainerClose {
 
     fn write_body(&self, out: &mut Vec<u8>) {
         write_varint(out, self.container_id);
-    }
-}
-
-/// 方块事件，目前只用来告诉客户端箱子和潜影盒开合了。
-///
-/// `block` 是方块注册表 ID。事件 id 和数据由方块的 `triggerEvent` 解释。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockEvent {
-    pub pos: BlockPos,
-    pub action: u8,
-    pub data: u8,
-    pub block: i32,
-}
-
-impl ClientboundPacket for BlockEvent {
-    const ID: i32 = clientbound::BLOCK_EVENT;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        write_block_pos(out, self.pos);
-        out.push(self.action);
-        out.push(self.data);
-        write_varint(out, self.block);
     }
 }
 
@@ -161,17 +133,6 @@ mod tests {
     #[test]
     fn container_close_is_a_var_int() {
         assert_eq!(body(&ContainerClose { container_id: 300 }), hex("ac 02"));
-    }
-
-    #[test]
-    fn block_event_writes_the_block_id_last() {
-        let packet = BlockEvent {
-            pos: BlockPos::new(8, -60, 8),
-            action: 1,
-            data: 2,
-            block: 300,
-        };
-        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 01 02 ac 02"));
     }
 
     #[test]

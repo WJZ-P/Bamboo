@@ -74,6 +74,7 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
     let config = WorldConfig {
         view_distance: 2,
         max_players: 20,
+        online_mode: false,
     };
     let world = World::new(config, receiver);
     let player = PlayerId(1);
@@ -81,6 +82,7 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
         id: player,
         uuid: Uuid::from_u128(1),
         name: "Kitten".to_owned(),
+        properties: Vec::new(),
         client: ClientInformation::default(),
         sink: Box::new(DiscardingSink),
     };

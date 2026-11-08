@@ -13,8 +13,8 @@ use crate::{
     },
     context::PlaceContext,
     state::{
-        BLOOM, BlockState, HORIZONTAL_FACING, SCULK_SENSOR_PHASE, SHRIEKING, SculkSensorPhase,
-        WATERLOGGED,
+        BLOOM, BlockState, HORIZONTAL_FACING, POWER, SCULK_SENSOR_PHASE, SHRIEKING,
+        SculkSensorPhase, WATERLOGGED,
     },
     world::World,
 };
@@ -26,6 +26,19 @@ pub(super) struct SculkSensor;
 fn update_neighbours(state: BlockState, world: &mut World, pos: BlockPos) {
     world.update_neighbors_at(pos, state.block());
     world.update_neighbors_at(pos.below(), state.block());
+}
+
+/// 冷却的刻数，官方写在 `deactivate` 的 `scheduleTick` 里。
+const COOLDOWN_TICKS: i32 = 10;
+
+/// `deactivate`：信号归零，进入冷却。
+fn deactivate(state: BlockState, world: &mut World, pos: BlockPos) {
+    let cooling = state
+        .with(SCULK_SENSOR_PHASE, SculkSensorPhase::Cooldown)
+        .with(POWER, 0);
+    world.set_block_and_update(pos, cooling);
+    world.schedule_tick(pos, state.block(), COOLDOWN_TICKS);
+    update_neighbours(state, world, pos);
 }
 
 impl Behaviour for SculkSensor {
@@ -55,6 +68,37 @@ impl Behaviour for SculkSensor {
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(SCULK_SENSOR_PHASE) == SculkSensorPhase::Active {
             update_neighbours(state, world, pos);
+        }
+    }
+
+    /// 激活的感测器到期后冷却，冷却完再回到待命。激活本身要振动，这里没有。
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        match state.get(SCULK_SENSOR_PHASE) {
+            SculkSensorPhase::Active => deactivate(state, world, pos),
+            SculkSensorPhase::Cooldown => {
+                let inactive = state.with(SCULK_SENSOR_PHASE, SculkSensorPhase::Inactive);
+                world.set_block_and_update(pos, inactive);
+            }
+            SculkSensorPhase::Inactive => {}
+        }
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        state.get(POWER)
+    }
+
+    /// 只强充能脚下那一格，强度还是走 `getSignal`，校准型会挡掉一面。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if direction == Direction::Up {
+            state.signal(world, pos, direction)
+        } else {
+            0
         }
     }
 }
@@ -87,6 +131,33 @@ impl Behaviour for CalibratedSculkSensor {
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         SculkSensor.affect_neighbors_after_removal(state, world, pos);
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        SculkSensor.tick(state, world, pos);
+    }
+
+    fn own_signal(&self, state: BlockState, world: &World, pos: BlockPos) -> i32 {
+        SculkSensor.own_signal(state, world, pos)
+    }
+
+    /// 校准型的那一面是输入，不往那边输出。
+    fn signal(&self, state: BlockState, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        if direction == state.get(HORIZONTAL_FACING) {
+            0
+        } else {
+            SculkSensor.own_signal(state, world, pos)
+        }
+    }
+
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        SculkSensor.direct_signal(state, world, pos, direction)
     }
 }
 

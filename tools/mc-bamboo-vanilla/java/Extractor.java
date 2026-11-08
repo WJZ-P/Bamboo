@@ -50,6 +50,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
@@ -79,7 +80,9 @@ import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
+import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.CombiningPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.MatchingBlockTagPredicate;
@@ -115,18 +118,24 @@ public final class Extractor {
             new BlockPos(-77, 12, 29),
             new BlockPos(1000, -30, -2000));
     /** 这些位的含义写在 mc-bamboo-data 的 lib.rs 里，两边要一起改。 */
-    private static final int FACT_AIR = 1 << 18;
-    private static final int FACT_CAN_OCCLUDE = 1 << 19;
-    private static final int FACT_SOLID = 1 << 20;
-    private static final int FACT_LIQUID = 1 << 21;
-    private static final int FACT_REPLACEABLE = 1 << 22;
-    private static final int FACT_REDSTONE_CONDUCTOR = 1 << 23;
-    private static final int FACT_COLLISION_FULL_BLOCK = 1 << 24;
-    private static final int FACT_SOLID_RENDER = 1 << 25;
-    private static final int FACT_SIGNAL_SOURCE = 1 << 26;
-    private static final int FACT_ANALOG_OUTPUT = 1 << 27;
-    private static final int FACT_PROPAGATES_SKYLIGHT = 1 << 28;
-    private static final int FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION = 1 << 29;
+    private static final long FACT_AIR = 1L << 18;
+    private static final long FACT_CAN_OCCLUDE = 1L << 19;
+    private static final long FACT_SOLID = 1L << 20;
+    private static final long FACT_LIQUID = 1L << 21;
+    private static final long FACT_REPLACEABLE = 1L << 22;
+    private static final long FACT_REDSTONE_CONDUCTOR = 1L << 23;
+    private static final long FACT_COLLISION_FULL_BLOCK = 1L << 24;
+    private static final long FACT_SOLID_RENDER = 1L << 25;
+    private static final long FACT_SIGNAL_SOURCE = 1L << 26;
+    private static final long FACT_ANALOG_OUTPUT = 1L << 27;
+    private static final long FACT_PROPAGATES_SKYLIGHT = 1L << 28;
+    private static final long FACT_RANDOMLY_TICKING = 1L << 29;
+    private static final long FACT_FLUID_RANDOMLY_TICKING = 1L << 30;
+    private static final long FACT_BLOCKS_LIGHT_FROM_BELOW = 1L << 31;
+    private static final long FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION = 1L << 32;
+    private static final long FACT_MOTION_BLOCKING = 1L << 33;
+    private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
+    private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
 
     public static void main(String[] args) throws Exception {
@@ -155,6 +164,7 @@ public final class Extractor {
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
+            root.add("heightmaps", heightmaps());
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -175,6 +185,20 @@ public final class Extractor {
                 .join();
         staticTags.forEach(Registry.PendingTags::apply);
         return initial.replaceFrom(RegistryLayer.WORLD, world);
+    }
+
+    /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */
+    private static JsonArray heightmaps() throws ReflectiveOperationException {
+        JsonArray types = new JsonArray();
+        for (Heightmap.Types type : Heightmap.Types.values()) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", type.getSerializedName());
+            entry.addProperty("id", (int) readField(Heightmap.Types.class, "id", type));
+            entry.addProperty("sendToClient", type.sendToClient());
+            entry.addProperty("keepAfterWorldgen", type.keepAfterWorldgen());
+            types.add(entry);
+        }
+        return types;
     }
 
     private static JsonObject version() {
@@ -288,6 +312,9 @@ public final class Extractor {
             object.addProperty("hasCollision", hasPlacementCollision(state));
             object.addProperty("hasFluid", !state.getFluidState().isEmpty());
             object.addProperty("twoBlocks", takesTwoBlocks(block, state));
+            object.addProperty("pushReaction", state.getPistonPushReaction().name().toLowerCase(Locale.ROOT));
+            // 活塞推不动也不打碎的方块，`BlockBehaviour.Properties.strength(-1.0F)`。
+            object.addProperty("unbreakable", state.getDestroySpeed(EmptyBlockGetter.INSTANCE, BlockPos.ZERO) == -1.0F);
             addBlockEntityType(object, state);
             object.addProperty("class", className(block.getClass()));
             object.add("ancestors", ancestors(block.getClass()));
@@ -561,8 +588,38 @@ public final class Extractor {
         maps.add("weathering", blockPairs(WeatheringCopper.NEXT_BY_BLOCK.get()));
         maps.add("waxables", blockPairs(HoneycombItem.WAXABLES.get()));
         maps.add("fireOdds", fireOdds());
+        maps.add("ignitedByLava", ignitedByLava());
         maps.add("campfireInputs", campfireInputs(resources, registries));
+        maps.add("compostLayers", compostLayers(resources));
         return maps;
+    }
+
+    /** 数据包 context_int_provider/compostable 下的整数提供器原文，键是物品组件引用它用的名字。 */
+    private static JsonObject compostLayers(ResourceManager resources) throws IOException {
+        String directory = "context_int_provider/";
+        Map<String, JsonElement> providers = new TreeMap<>();
+        for (var entry : resources.listResources(directory + "compostable", id -> id.getPath().endsWith(".json")).entrySet()) {
+            Identifier file = entry.getKey();
+            String path = file.getPath();
+            String name = file.getNamespace() + ":" + path.substring(directory.length(), path.length() - ".json".length());
+            try (Reader reader = entry.getValue().openAsReader()) {
+                providers.put(name, JsonParser.parseReader(reader));
+            }
+        }
+        JsonObject layers = new JsonObject();
+        providers.forEach(layers::add);
+        return layers;
+    }
+
+    /** BlockBehaviour.Properties.ignitedByLava 是整个方块的属性，按方块 ID 列出来。 */
+    private static JsonArray ignitedByLava() {
+        JsonArray ids = new JsonArray();
+        for (Block block : BuiltInRegistries.BLOCK) {
+            if (block.defaultBlockState().ignitedByLava()) {
+                ids.add(BuiltInRegistries.BLOCK.getId(block));
+            }
+        }
+        return ids;
     }
 
     /** RecipePropertySet.CAMPFIRE_INPUT：官方加载配方时从营火配方的原料收集出这个集合。 */
@@ -833,11 +890,11 @@ public final class Extractor {
 
         /** 形状可以随位置变，但只能是跟着偏移平移。其余事实不能变，变了说明生成的表不够用。 */
         private void checkPositionFacts(int id, BlockState state, boolean movesShape) {
-            int expected = stateFacts(state, BlockPos.ZERO);
+            long expected = stateFacts(state, BlockPos.ZERO);
             Vec3 zeroOffset = state.getOffset(BlockPos.ZERO);
+            long mask = movesShape ? ~STURDY_MASK : ~0L;
             for (BlockPos pos : SAMPLE_POSITIONS) {
-                int found = stateFacts(state, pos);
-                int mask = movesShape ? ~STURDY_MASK : ~0;
+                long found = stateFacts(state, pos);
                 if ((found & mask) != (expected & mask)) {
                     throw new IllegalStateException(state + " 的事实和位置有关：" + pos);
                 }
@@ -847,7 +904,7 @@ public final class Extractor {
                     if (!shapeKey(moved).equals(shapeKey(state.getShape(EMPTY, pos)))) {
                         throw new IllegalStateException(state + " 的形状不只是跟着偏移平移：" + pos);
                     }
-                    addOffsetSturdySample(id, pos, found);
+                    addOffsetSturdySample(id, pos, (int) (found & STURDY_MASK));
                 }
             }
         }
@@ -864,8 +921,8 @@ public final class Extractor {
 
         /** isSolid 和 liquid 官方标了过时，但方块类还在用，这里要原样读出来。 */
         @SuppressWarnings("deprecation")
-        private static int stateFacts(BlockState state, BlockPos pos) {
-            int facts = 0;
+        private static long stateFacts(BlockState state, BlockPos pos) {
+            long facts = 0;
             for (SupportType support : SupportType.values()) {
                 for (Direction direction : Direction.values()) {
                     if (state.isFaceSturdy(EMPTY, pos, direction, support)) {
@@ -884,7 +941,15 @@ public final class Extractor {
             facts |= state.isSignalSource() ? FACT_SIGNAL_SOURCE : 0;
             facts |= state.hasAnalogOutputSignal() ? FACT_ANALOG_OUTPUT : 0;
             facts |= state.propagatesSkylightDown() ? FACT_PROPAGATES_SKYLIGHT : 0;
+            facts |= state.isRandomlyTicking() ? FACT_RANDOMLY_TICKING : 0;
+            facts |= state.getFluidState().isRandomlyTicking() ? FACT_FLUID_RANDOMLY_TICKING : 0;
+            // 下面是石头：不用形状挡光的完整方块，草方块、菌岩这些也是。
+            BlockState below = Blocks.STONE.defaultBlockState();
+            boolean blocksLight = LightEngine.getLightDampeningInto(below, state, Direction.UP, 0) == LIGHT_BLOCKED;
+            facts |= blocksLight ? FACT_BLOCKS_LIGHT_FROM_BELOW : 0;
             facts |= state.useShapeForLightOcclusion() ? FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION : 0;
+            facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) ? FACT_MOTION_BLOCKING : 0;
+            facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES) ? FACT_MOTION_BLOCKING_NO_LEAVES : 0;
             return facts;
         }
 

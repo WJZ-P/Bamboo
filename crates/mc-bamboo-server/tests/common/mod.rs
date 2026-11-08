@@ -7,10 +7,12 @@ pub mod wire;
 
 use std::{net::SocketAddr, time::Duration};
 
+use mc_bamboo_auth::{DecryptHalf, EncryptHalf, Encryption, SharedSecret};
 use mc_bamboo_data::packets::{configuration, login, play};
 use mc_bamboo_protocol::{
     PROTOCOL_VERSION,
     codec::{Reader, write_string, write_uuid, write_varint},
+    compression,
     frame::{MAX_FRAME_LEN, find_frame},
     text::Component,
 };
@@ -66,10 +68,7 @@ impl TestServer {
     }
 
     pub async fn connect(&self) -> Client {
-        Client {
-            stream: TcpStream::connect(self.address).await.unwrap(),
-            buffer: Vec::new(),
-        }
+        Client::new(TcpStream::connect(self.address).await.unwrap())
     }
 
     /// 走完整个登录和配置流程，返回已经进入 Play 状态的客户端。
@@ -122,10 +121,7 @@ impl TestServer {
     pub async fn join_without_reading(&self, name: &str) -> Client {
         let socket = TcpSocket::new_v4().unwrap();
         socket.set_recv_buffer_size(SMALL_RECEIVE_BUFFER).unwrap();
-        let mut client = Client {
-            stream: socket.connect(self.address).await.unwrap(),
-            buffer: Vec::new(),
-        };
+        let mut client = Client::new(socket.connect(self.address).await.unwrap());
         client
             .configure_with(&client_information(STUCK_VIEW_DISTANCE), name)
             .await;
@@ -178,9 +174,35 @@ impl Drop for TestServer {
 pub struct Client {
     pub stream: TcpStream,
     pub buffer: Vec<u8>,
+    /// 服务端发过登录压缩包之后是它的阈值，两个方向都换成压缩帧。
+    compression: Option<i32>,
+    /// 见过 `login_finished` 之后，Play 状态里同样的包 ID 不再当作压缩包。
+    login_done: bool,
+    /// 交换过密钥之后两个方向的 AES 流。
+    encrypt: Option<EncryptHalf>,
+    decrypt: Option<DecryptHalf>,
 }
 
 impl Client {
+    /// 刚连上的假客户端：没有读缓冲，还没收到登录压缩包。
+    pub fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+            compression: None,
+            login_done: false,
+            encrypt: None,
+            decrypt: None,
+        }
+    }
+
+    /// 从下一个字节开始两个方向都加密，和服务端收到 key 包之后的切换对应。
+    pub fn enable_encryption(&mut self, secret: &SharedSecret) {
+        let (encrypt, decrypt) = Encryption::new(secret).split();
+        self.encrypt = Some(encrypt);
+        self.decrypt = Some(decrypt);
+    }
+
     /// 走到服务端说 Configuration 结束为止，这时玩家还没有进入世界。
     pub async fn configure(&mut self, name: &str) {
         self.configure_with(&[], name).await;
@@ -191,7 +213,13 @@ impl Client {
     pub async fn configure_with(&mut self, first_packets: &[u8], name: &str) {
         self.send(&handshake(LOGIN_INTENT)).await;
         self.send(&hello(name)).await;
+        self.configure_after_hello(first_packets).await;
+    }
 
+    /// 从等 `login_finished` 开始走完 Login 和 Configuration，返回那个包的负载。
+    ///
+    /// 正版验证的客户端在 `hello` 之后还要交换密钥，所以那条路在交换完之后接着走这一段。
+    pub async fn configure_after_hello(&mut self, first_packets: &[u8]) -> Vec<u8> {
         let finished = self.read_frame().await;
         assert_eq!(packet_id(&finished), login::clientbound::LOGIN_FINISHED);
         self.send(&frame(&[login::serverbound::LOGIN_ACKNOWLEDGED as u8]))
@@ -203,6 +231,7 @@ impl Client {
         self.send(&official_known_packs()).await;
         self.read_until(configuration::clientbound::FINISH_CONFIGURATION)
             .await;
+        finished
     }
 
     /// 告诉服务端 Configuration 结束，之后就是 Play 状态了。
@@ -213,21 +242,52 @@ impl Client {
         .await;
     }
 
+    /// 发一批帧。压缩启用后像客户端一样逐帧重新包装，加密启用后整段再加密。
     pub async fn send(&mut self, bytes: &[u8]) {
-        self.stream.write_all(bytes).await.unwrap();
+        let mut bytes = encode_outgoing(bytes, self.compression);
+        if let Some(encrypt) = &mut self.encrypt {
+            encrypt.encrypt(&mut bytes);
+        }
+        self.stream.write_all(&bytes).await.unwrap();
     }
 
+    /// 收到的登录压缩包里的阈值。关着压缩时是 `None`。
+    pub fn compression_threshold(&self) -> Option<i32> {
+        self.compression
+    }
+
+    /// 读一个包。登录压缩包由客户端自己消化，就像真实客户端那样。
     pub async fn read_frame(&mut self) -> Vec<u8> {
         timeout(TEST_DEADLINE, async {
             loop {
                 if let Some(frame) = find_frame(&self.buffer, MAX_FRAME_LEN).unwrap() {
                     let end = frame.header_len + frame.payload_len;
-                    let payload = self.buffer[frame.header_len..end].to_vec();
+                    let mut payload = self.buffer[frame.header_len..end].to_vec();
                     self.buffer.drain(..end);
+
+                    if self.compression.is_none()
+                        && !self.login_done
+                        && packet_id(&payload) == login::clientbound::LOGIN_COMPRESSION
+                    {
+                        self.compression = Some(login_compression_threshold(&payload));
+                        continue;
+                    }
+
+                    if let Some(threshold) = self.compression {
+                        payload = compression::decode(&payload, threshold)
+                            .expect("the server should send valid compressed packets");
+                    }
+                    if packet_id(&payload) == login::clientbound::LOGIN_FINISHED {
+                        self.login_done = true;
+                    }
                     return payload;
                 }
+                let read_from = self.buffer.len();
                 let read = self.stream.read_buf(&mut self.buffer).await.unwrap();
                 assert_ne!(read, 0, "server closed the connection before a full frame");
+                if let Some(decrypt) = &mut self.decrypt {
+                    decrypt.decrypt(&mut self.buffer[read_from..]);
+                }
             }
         })
         .await
@@ -315,6 +375,15 @@ impl Client {
         })
         .await;
         assert!(closed.is_ok(), "connection stayed open");
+    }
+}
+
+/// 按当前压缩状态把测试要发出去的帧逐帧重新包装，和真实客户端一样。
+pub fn encode_outgoing(bytes: &[u8], threshold: Option<i32>) -> Vec<u8> {
+    match threshold {
+        Some(threshold) => compression::encode_frames(bytes, threshold)
+            .expect("the test frames should be complete packets"),
+        None => bytes.to_vec(),
     }
 }
 
@@ -418,6 +487,15 @@ pub fn official_known_packs() -> Vec<u8> {
 
 pub fn packet_id(payload: &[u8]) -> i32 {
     Reader::new(payload).varint().unwrap()
+}
+
+/// `login_compression` 包里的阈值。
+fn login_compression_threshold(payload: &[u8]) -> i32 {
+    let mut reader = Reader::new(payload);
+    assert_eq!(reader.varint(), Ok(login::clientbound::LOGIN_COMPRESSION));
+    let threshold = reader.varint().unwrap();
+    reader.finish().unwrap();
+    threshold
 }
 
 /// 拆开由数据包 ID 和一个字符串组成的负载，并把字符串解析成 JSON。

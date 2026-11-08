@@ -15,7 +15,7 @@ use mc_bamboo_protocol::{
 use tracing::warn;
 
 use crate::{
-    chat,
+    chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     container, entity_sync,
     global::{Global, RosterEntry},
@@ -24,6 +24,7 @@ use crate::{
     inventory, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
+    sign,
 };
 
 const TICK: Duration = Duration::from_millis(50);
@@ -40,6 +41,8 @@ pub struct WorldConfig {
     pub view_distance: i32,
     /// 写进 `login` 包的玩家上限。满员由连接层判断，世界线程不看它。
     pub max_players: i32,
+    /// 服务端有没有开正版验证。只写进 `login` 包，验证本身在连接层做。
+    pub online_mode: bool,
 }
 
 /// 所有游戏状态的唯一所有者。
@@ -57,7 +60,7 @@ impl World {
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
         Self {
             global: Global::default(),
-            region: Region::new(view_distance, config.max_players),
+            region: Region::new(view_distance, config.max_players, config.online_mode),
             inbox,
         }
     }
@@ -73,8 +76,9 @@ impl World {
         }
     }
 
-    /// 推进一 tick。顺序有约束：光照和官方一样在处理完请求之后、下一 tick 之前算，计划刻紧跟在时间增长之后，
-    /// 新区块排在区块中心和 forget 后面，光照变化紧挨在方块变化前面，方块变化排在 ack 前面，
+    /// 推进一 tick。顺序有约束：光照和官方一样在处理完请求之后、下一 tick 之前算，计划刻、随机刻和
+    /// 方块实体的 tick 紧跟在时间增长之后（官方 `ServerLevel.tick` 的顺序），新区块排在区块中心和
+    /// forget 后面，每个区块的光照变化紧挨在它的方块变化前面，方块变化排在 ack 前面，
     /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
         self.process_inbox()?;
@@ -83,15 +87,18 @@ impl World {
         self.global.advance_time();
         self.region.advance_tick();
         interaction::run_block_ticks(&mut self.region, self.global.time());
-        // 方块事件和方块实体在玩家之前，官方 `ServerLevel.tick` 也是这个顺序。
+        // 官方 `ServerLevel.tick` 里随机刻在 `chunkSource.tick`，方块实体的 tick 在它之后。
+        interaction::run_random_ticks(&mut self.region);
+        // 方块实体的 tick：告示牌在这里清掉走远的编辑者。
+        sign::tick_editors(&mut self.region);
+        // 容器开合人数的重查和菜单同步。
         container::tick(&mut self.region);
         menu::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
-        light_updates::broadcast_light_changes(&mut self.region);
-        interaction::broadcast_block_changes(&mut self.region);
+        chunk_broadcast::broadcast_changes(&mut self.region);
         entity_sync::sync_entities(&mut self.region);
         entity_sync::send_equipment_changes(&mut self.region);
         interaction::send_block_changed_acks(&mut self.region);
@@ -138,7 +145,7 @@ impl World {
     }
 
     /// 把进服的 10 步串起来，全部写进这名玩家的同一条出站缓冲。`coverage.md` 4.1。
-    fn on_join(&mut self, request: JoinRequest) {
+    fn on_join(&mut self, mut request: JoinRequest) {
         let id = request.id;
         if self.region.players.contains_key(&id) {
             warn!(player = id.0, "ignoring a second join with the same id");
@@ -147,6 +154,8 @@ impl World {
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
+            // 皮肤只有名单要用，直接搬过来。
+            properties: std::mem::take(&mut request.properties),
             game_mode: GAME_MODE,
             latency: 0,
             show_hat: shows_hat(&request.client),
@@ -303,6 +312,9 @@ impl World {
                 },
             ),
             PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
+            PlayRequest::SignUpdate { pos, lines, slot } => {
+                sign::on_sign_update(region, player, pos, lines, slot);
+            }
             // 这三种连接任务就地处理了，不会发到这里。
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }

@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use mc_bamboo_blocks::LevelRandom;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand};
 use mc_bamboo_data::{blocks, packets::play::clientbound};
 use mc_bamboo_protocol::{
@@ -109,6 +110,45 @@ pub(crate) fn frames_with_id(frames: &[Frame], id: i32) -> Vec<&Frame> {
     frames.iter().filter(|frame| frame.id == id).collect()
 }
 
+/// `section_blocks_update` 里的格子：世界坐标和方块状态，按包里的顺序。
+pub(crate) fn section_blocks(frame: &Frame) -> Vec<(BlockPos, u32)> {
+    let mut reader = Reader::new(&frame.body);
+    let section = reader.i64().unwrap();
+    // 官方的 `SectionPos.of(long)`：x 在高 22 位，z 在中间 22 位，y 在低 20 位。
+    let origin = BlockPos::new(
+        (section >> 42) as i32 * 16,
+        (section << 44 >> 44) as i32 * 16,
+        (section << 22 >> 42) as i32 * 16,
+    );
+    let count = reader.varint().unwrap();
+    let blocks = (0..count)
+        .map(|_| {
+            let entry = reader.varlong().unwrap();
+            let local = (entry & 0xfff) as i32;
+            let pos = origin.offset(local >> 8, local & 15, (local >> 4) & 15);
+            (pos, (entry >> 12) as u32)
+        })
+        .collect();
+    reader.finish().unwrap();
+    blocks
+}
+
+/// 客户端按收到的顺序写进世界的方块，`block_update` 和 `section_blocks_update` 都算。
+pub(crate) fn block_changes(frames: &[Frame]) -> Vec<(BlockPos, u32)> {
+    frames
+        .iter()
+        .flat_map(|frame| match frame.id {
+            clientbound::BLOCK_UPDATE => {
+                let mut reader = Reader::new(&frame.body);
+                let pos = reader.block_pos().unwrap();
+                vec![(pos, reader.varint().unwrap() as u32)]
+            }
+            clientbound::SECTION_BLOCKS_UPDATE => section_blocks(frame),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 /// 区块包开头的坐标：两个 Int。
 pub(crate) fn chunk_position(frame: &Frame) -> ChunkPos {
     let mut reader = Reader::new(&frame.body);
@@ -157,9 +197,13 @@ impl Harness {
         let config = WorldConfig {
             view_distance,
             max_players: 20,
+            online_mode: false,
         };
+        let mut world = World::new(config, receiver);
+        // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。
+        world.region.random = LevelRandom::new(0);
         Self {
-            world: World::new(config, receiver),
+            world,
             inbox,
             in_flight: Arc::default(),
             next_id: 1,
@@ -176,6 +220,7 @@ impl Harness {
             id,
             uuid,
             name: name.to_owned(),
+            properties: Vec::new(),
             client,
             sink: Box::new(sink.clone()),
         };
@@ -684,6 +729,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         id: new_id,
         uuid: old.uuid,
         name: "Kitten".to_owned(),
+        properties: Vec::new(),
         client: client_requesting(2),
         sink: Box::new(sink),
     };

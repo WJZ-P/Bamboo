@@ -19,6 +19,8 @@ tauri-build = { version = "2", features = [] }
 mc-bamboo-server.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+# 只要 CPU 和内存，关掉磁盘、网络、显卡等默认功能。
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 tauri = { version = "2", features = [] }
 tokio.workspace = true
 tracing.workspace = true

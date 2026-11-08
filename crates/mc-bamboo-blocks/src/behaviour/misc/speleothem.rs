@@ -1,14 +1,14 @@
 //! `SpeleothemBlock` 和子类 `PointedDripstoneBlock`、`SulfurSpikeBlock`，还有炼药锅接水要用的
-//! 查找函数。生长在随机刻里，不在范围里。
+//! 查找函数。往下长和往炼药锅里滴水都在随机刻里。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, blocks, registries::fluid, tags::block_tags};
+use mc_bamboo_data::{Block, FieldValue, blocks, registries::fluid, tags::block_tags};
 
-use super::fall;
+use super::{cauldron::can_receive_drip, fall};
 use crate::{
     behaviour::{
         Behaviour,
-        common::{default_state, is_water_source, tick_water_if_waterlogged},
+        common::{default_state, field_int, is_water_source, tick_water_if_waterlogged},
     },
     context::PlaceContext,
     fluid::Fluid,
@@ -27,6 +27,16 @@ pub(super) struct Speleothem;
 const DELAY_BEFORE_FALLING: i32 = 2;
 /// `MAX_SEARCH_LENGTH_BETWEEN_STALACTITE_TIP_AND_CAULDRON`，也是 `findRootBlock` 的上限。
 const MAX_SEARCH_LENGTH: i32 = 11;
+/// `GROWTH_PROBABILITY_PER_RANDOM_TICK`。
+const GROWTH_CHANCE: f32 = 0.011_377_778;
+/// `MAX_STALAGMITE_SEARCH_RANGE_WHEN_GROWING`。
+const STALAGMITE_SEARCH_RANGE: i32 = 10;
+/// `WATER_TRANSFER_PROBABILITY_PER_RANDOM_TICK`。
+const WATER_TRANSFER_CHANCE: f32 = 0.175_781_25;
+/// `LAVA_TRANSFER_PROBABILITY_PER_RANDOM_TICK`。
+const LAVA_TRANSFER_CHANCE: f32 = 0.058_593_75;
+/// 水滴落进炼药锅的计划刻延迟，再加上下落的格数。
+const DRIP_DELAY: i32 = 50;
 /// `REQUIRED_SPACE_TO_DRIP_THROUGH_NON_SOLID_BLOCK`：`Block.column(4.0, 0.0, 16.0)`。
 const DRIP_SPACE: &[Aabb] = &[Aabb::new(
     6.0 / 16.0,
@@ -266,6 +276,222 @@ impl Behaviour for Speleothem {
             world.destroy_block(pos, UPDATE_LIMIT);
         } else {
             drop_stalactite(state, world, pos);
+        }
+    }
+
+    /// 滴水石锥先看要不要往下滴水，两种钟乳石都偶尔往下长或者在下面长出石笋。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.is(blocks::POINTED_DRIPSTONE) {
+            let value = world.random().next_float();
+            transfer_fluid(state, world, pos, value);
+        }
+        if world.random().next_float() < GROWTH_CHANCE && is_stalactite_start(state, world, pos) {
+            grow_if_possible(state, world, pos);
+        }
+    }
+}
+
+/// `isStalactiteStartPos`：钟乳石最上面的一节。
+fn is_stalactite_start(state: BlockState, world: &World, pos: BlockPos) -> bool {
+    is_stalactite(state) && !world.block_state(pos.above()).is_same_block(state)
+}
+
+/// `isTip(state, false)`：不算合并的尖端。
+fn is_unmerged_tip(state: BlockState) -> bool {
+    state.is_tagged(block_tags::SPELEOTHEMS)
+        && state.get(SPELEOTHEM_THICKNESS) == SpeleothemThickness::Tip
+}
+
+/// `findTip(state, level, pos, maxSearchLength, false)`：顺着尖端的方向找到尖端。
+fn find_tip(state: BlockState, world: &World, pos: BlockPos, max_length: i32) -> Option<BlockPos> {
+    if is_unmerged_tip(state) {
+        return Some(pos);
+    }
+    let tip = state.get(VERTICAL_DIRECTION);
+    let mut current = pos;
+    for _ in 1..max_length {
+        current = current.relative(tip);
+        let found = world.block_state(current);
+        if is_unmerged_tip(found) {
+            return Some(current);
+        }
+        let same = found.is_same_block(state) && found.get(VERTICAL_DIRECTION) == tip;
+        if !world.is_inside_build_height(current.y) || !same {
+            return None;
+        }
+    }
+    None
+}
+
+/// `PointedDripstoneBlock.maybeTransferFluid`：根上面是水或者岩浆时，按概率滴进下面的炼药锅，
+/// 根上面是泥巴时把它变成黏土。`value` 是官方先取好的那个 `nextFloat`。
+fn transfer_fluid(state: BlockState, world: &mut World, pos: BlockPos, value: f32) {
+    if value > WATER_TRANSFER_CHANCE || !is_stalactite_start(state, world, pos) {
+        return;
+    }
+    let Some(root) = root_above(world, pos, state) else {
+        return;
+    };
+    let source_pos = root.above();
+    let source = world.block_state(source_pos);
+    let fluid_above = world.fluid_state(source_pos);
+    let (fluid, chance) = if source.is(blocks::MUD) || fluid_above.is(fluid::WATER) {
+        (Fluid::Water, WATER_TRANSFER_CHANCE)
+    } else if fluid_above.is(fluid::LAVA) {
+        (Fluid::Lava, LAVA_TRANSFER_CHANCE)
+    } else {
+        return;
+    };
+    if value >= chance {
+        return;
+    }
+    let Some(tip) = find_tip(state, world, pos, MAX_SEARCH_LENGTH) else {
+        return;
+    };
+    if source.is(blocks::MUD) {
+        world.set_block_and_update(source_pos, BlockState(blocks::CLAY));
+    } else if let Some(cauldron) = fillable_cauldron_below(world, tip, fluid) {
+        let delay = DRIP_DELAY + tip.y - cauldron.y;
+        let cauldron_block = world.block_state(cauldron).block();
+        world.schedule_tick(cauldron, cauldron_block, delay);
+    }
+}
+
+/// `findFillableCauldronBelowStalactiteTip`。
+fn fillable_cauldron_below(world: &World, tip: BlockPos, fluid: Fluid) -> Option<BlockPos> {
+    find_block_vertical(
+        world,
+        tip,
+        Direction::Down,
+        |pos, state| can_drip_through(world, pos, state),
+        |state| can_receive_drip(state, fluid),
+    )
+}
+
+/// `growStalactiteOrStalagmiteIfPossible`：钟乳石的尖端能长时，一半机会往下长，一半机会在下面长石笋。
+fn grow_if_possible(state: BlockState, world: &mut World, pos: BlockPos) {
+    if !can_grow(state, world, pos) {
+        return;
+    }
+    let max_length = field_int(state.block(), "getMaxGrowthLength()");
+    let Some(tip) = find_tip(state, world, pos, max_length) else {
+        return;
+    };
+    let tip_state = world.block_state(tip);
+    if is_free_hanging_stalactite(tip_state) && can_tip_grow(state, tip_state, world, tip) {
+        if world.random().next_boolean() {
+            grow(state, world, tip, Direction::Down);
+        } else {
+            grow_stalagmite_below(state, world, tip);
+        }
+    }
+}
+
+/// `canGrow`：长在 `blockToGrowOn` 下面。滴水石锥还要再上面一格是水源。
+fn can_grow(own: BlockState, world: &World, pos: BlockPos) -> bool {
+    let block = own.block();
+    let Some(FieldValue::State(grow_on)) = block.field("blockToGrowOn") else {
+        panic!("field blockToGrowOn of {} is not a state", block.name);
+    };
+    let on_base = world
+        .block_state(pos.above())
+        .is_same_block(BlockState(grow_on));
+    if !own.is(blocks::POINTED_DRIPSTONE) {
+        return on_base;
+    }
+    on_base
+        && world
+            .block_state(pos.relative_by(Direction::Up, 2))
+            .fluid()
+            .is(fluid::WATER)
+}
+
+/// `isUnmergedTipWithDirection`：同种方块、朝 `tip` 的、没合并的尖端。
+fn is_unmerged_tip_toward(own: BlockState, state: BlockState, tip: Direction) -> bool {
+    is_unmerged_tip(state) && state.get(VERTICAL_DIRECTION) == tip && state.is_same_block(own)
+}
+
+/// `canTipGrow`：尖端前面是空气，或者是对着它的另一根的尖端。
+fn can_tip_grow(own: BlockState, tip_state: BlockState, world: &World, tip: BlockPos) -> bool {
+    let direction = tip_state.get(VERTICAL_DIRECTION);
+    let ahead = world.block_state(tip.relative(direction));
+    if !ahead.fluid().is_empty() {
+        return false;
+    }
+    ahead.is_air() || is_unmerged_tip_toward(own, ahead, direction.opposite())
+}
+
+/// `grow`：往 `direction` 长一节，碰到对面的尖端就合并。
+fn grow(own: BlockState, world: &mut World, from: BlockPos, direction: Direction) {
+    let target = from.relative(direction);
+    let existing = world.block_state(target);
+    if is_unmerged_tip_toward(own, existing, direction.opposite()) {
+        create_merged_tips(own, world, existing, target);
+    } else if existing.is_air() || existing.is(blocks::WATER) {
+        create_speleothem(own, world, target, direction, SpeleothemThickness::Tip);
+    }
+}
+
+/// `createSpeleothem`。
+fn create_speleothem(
+    own: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    direction: Direction,
+    thickness: SpeleothemThickness,
+) {
+    let state = own
+        .default_state()
+        .with(VERTICAL_DIRECTION, direction)
+        .with(SPELEOTHEM_THICKNESS, thickness)
+        .with(WATERLOGGED, world.fluid_state(pos).is(fluid::WATER));
+    world.set_block_and_update(pos, state);
+}
+
+/// `createMergedTips`：上下两个尖端都变成合并的尖端。
+fn create_merged_tips(own: BlockState, world: &mut World, tip_state: BlockState, tip: BlockPos) {
+    let (stalactite, stalagmite) = if tip_state.get(VERTICAL_DIRECTION) == Direction::Up {
+        (tip.above(), tip)
+    } else {
+        (tip, tip.below())
+    };
+    create_speleothem(
+        own,
+        world,
+        stalactite,
+        Direction::Down,
+        SpeleothemThickness::TipMerge,
+    );
+    create_speleothem(
+        own,
+        world,
+        stalagmite,
+        Direction::Up,
+        SpeleothemThickness::TipMerge,
+    );
+}
+
+/// `growStalagmiteBelow`：往下找最多 10 格，长高已有的石笋，或者在地上长一根新的。
+fn grow_stalagmite_below(own: BlockState, world: &mut World, above: BlockPos) {
+    let mut pos = above;
+    for _ in 0..STALAGMITE_SEARCH_RANGE {
+        pos = pos.below();
+        let state = world.block_state(pos);
+        if !state.fluid().is_empty() {
+            return;
+        }
+        if is_unmerged_tip_toward(own, state, Direction::Up) && can_tip_grow(own, state, world, pos)
+        {
+            grow(own, world, pos, Direction::Up);
+            return;
+        }
+        if is_valid_placement(own, world, pos, Direction::Up) && !world.is_water_at(pos.below()) {
+            grow(own, world, pos.below(), Direction::Up);
+            return;
+        }
+        // `blocksStalagmiteScan`：只有滴水石锥会被挡住。
+        if own.is(blocks::POINTED_DRIPSTONE) && !can_drip_through(world, pos, state) {
+            return;
         }
     }
 }

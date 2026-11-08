@@ -24,6 +24,14 @@ pub(super) struct CandleCake;
 /// `MAX_BITES`。
 const MAX_BITES: i32 = 6;
 
+/// `CakeBlock.getOutputSignal`。
+const fn output_signal(bites: i32) -> i32 {
+    (7 - bites) * 2
+}
+
+/// `CakeBlock.FULL_CAKE_SIGNAL`。
+const FULL_CAKE_SIGNAL: i32 = output_signal(0);
+
 /// `CandleCakeBlock.byCandle`。
 fn candle_cake_of(candle: BlockState) -> Option<BlockState> {
     let candle = candle.block_id() as i32;
@@ -112,6 +120,16 @@ impl Behaviour for Cake {
     ) -> InteractionResult {
         eat(state, world, ctx.clicked_pos())
     }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        output_signal(state.get(BITES))
+    }
 }
 
 impl Behaviour for CandleCake {
@@ -154,5 +172,16 @@ impl Behaviour for CandleCake {
         ctx: &UseContext,
     ) -> InteractionResult {
         eat(BlockState(blocks::CAKE), world, ctx.clicked_pos())
+    }
+
+    /// 带蜡烛的蛋糕一定是完整的。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        FULL_CAKE_SIGNAL
     }
 }

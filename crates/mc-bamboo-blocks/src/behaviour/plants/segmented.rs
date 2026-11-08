@@ -11,7 +11,7 @@ use crate::{
     },
     context::PlaceContext,
     state::{BlockState, FLOWER_AMOUNT, HORIZONTAL_FACING, Property, SEGMENT_AMOUNT, SupportType},
-    world::World,
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// `SegmentableBlock.MAX_SEGMENT`。
@@ -71,6 +71,18 @@ impl Behaviour for FlowerBed {
         _neighbor: BlockState,
     ) -> BlockState {
         vegetation_update_shape(state, world, pos)
+    }
+
+    fn is_valid_bonemeal_target(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> bool {
+        true
+    }
+
+    /// 不满四朵时加一朵。满了官方掉一份同样的花，这个世界没有掉落物，世界不变。
+    fn perform_bonemeal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        let amount = state.get(FLOWER_AMOUNT);
+        if amount < MAX_SEGMENT {
+            world.set_block(pos, state.with(FLOWER_AMOUNT, amount + 1), UPDATE_CLIENTS);
+        }
     }
 }
 

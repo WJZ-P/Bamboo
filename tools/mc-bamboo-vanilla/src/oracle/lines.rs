@@ -43,6 +43,8 @@ pub struct Skip {
 #[derive(Debug, Deserialize)]
 pub struct Case {
     pub id: u64,
+    /// 官方假世界的随机源的种子，重放时用同一个种子。
+    pub seed: i64,
     pub block: String,
     pub scene: Vec<Cell>,
     pub action: Action,
@@ -61,6 +63,10 @@ pub enum Kind {
     Flow,
     /// `use_item` 包：物品自己从眼睛看出去找目标。
     Item,
+    /// 一格的随机刻。
+    Random,
+    /// 一个区块的随机刻，官方的 `tickChunk`。
+    Chunk,
 }
 
 impl Kind {
@@ -72,6 +78,8 @@ impl Kind {
             Self::Tick => "tick",
             Self::Flow => "flow",
             Self::Item => "item",
+            Self::Random => "random",
+            Self::Chunk => "chunk",
         }
     }
 }
@@ -150,6 +158,9 @@ pub struct Action {
     /// 只有 flow 题有：第一个流体刻之后再跑多少刻。
     #[serde(default)]
     pub steps: u32,
+    /// 只有 chunk 题有：`tickChunk` 的 `tickSpeed`。
+    #[serde(default)]
+    pub speed: i32,
     pub actor: [Double; 3],
     pub yaw: Float,
     pub pitch: Float,
@@ -157,6 +168,8 @@ pub struct Action {
     #[serde(rename = "box")]
     pub actor_box: [Double; 6],
     pub others: Vec<[Double; 6]>,
+    /// 动作做完之后再走几个游戏刻。
+    pub settle: u32,
 }
 
 impl Action {
@@ -181,6 +194,10 @@ pub struct Answer {
     pub changes: Vec<Cell>,
     pub destroyed: Vec<Destroyed>,
     pub ticks: Vec<Tick>,
+    /// `settle` 里真的运行过 `tick` 的方块的注册表 ID。
+    pub ran: Vec<String>,
+    /// 改了容器内容，旁边又有比较器读得到。Bamboo 不保留容器内容，这题比不了。
+    pub analog_content: bool,
     pub item_reached: bool,
     /// 物品栏里新出现的物品，只有 item 题有内容。
     #[serde(default)]
@@ -232,7 +249,7 @@ fn face<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Direction>,
 mod tests {
     use super::*;
 
-    const CASE: &str = r#"{"type":"case","id":3,"block":"minecraft:stone","class":"Block",
+    const CASE: &str = r#"{"type":"case","id":3,"seed":34,"block":"minecraft:stone","class":"Block",
         "scene":[[1,64,2,1]],
         "action":{"kind":"place","main":"minecraft:stone","off":"minecraft:air","hand":"off",
             "itemClass":"BlockItem","itemUseOn":false,"pos":[1,64,2],"face":"up",
@@ -240,9 +257,10 @@ mod tests {
             "actor":["0000000000000000","4050000000000000","0000000000000000"],
             "yaw":"c2340001","pitch":"00000000","sneak":true,
             "box":["bfd3333333333333","4050000000000000","bfd3333333333333",
-                   "3fd3333333333333","4051000000000000","3fd3333333333333"],"others":[]},
+                   "3fd3333333333333","4051000000000000","3fd3333333333333"],"others":[],"settle":3},
         "outcome":{"result":"success","changes":[[1,65,2,1]],"destroyed":[[0,1,2,3,true]],
-            "ticks":[[1,2,3,"fluid","minecraft:water",5,0]],"itemReached":true,"spawned":[],"rng":false}}"#;
+            "ticks":[[1,2,3,"fluid","minecraft:water",5,0]],"ran":["minecraft:repeater"],
+            "analogContent":true,"itemReached":true,"spawned":[],"rng":false}}"#;
 
     #[test]
     fn a_case_line_parses_with_exact_floats() {
@@ -258,8 +276,11 @@ mod tests {
         assert_eq!(case.action.loc.expect("place 有点击点")[0].0, 1.5);
         // -45.000004 是 -45 往外一位的 float，走十进制很容易丢掉。
         assert_eq!(case.action.yaw.0.to_bits(), 0xc234_0001);
+        assert_eq!(case.action.settle, 3);
+        assert!(case.outcome.analog_content);
         assert!(case.outcome.item_reached);
         assert!(case.outcome.ticks[0].is_fluid());
+        assert_eq!(case.outcome.ran, ["minecraft:repeater"]);
         assert_eq!(case.outcome.destroyed, [Destroyed(0, 1, 2, 3, true)]);
     }
 

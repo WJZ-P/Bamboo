@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/WJZ-P/Bamboo"
 
 [workspace.dependencies]
+mc-bamboo-auth = { path = "crates/mc-bamboo-auth", version = "0.0.0" }
 mc-bamboo-blocks = { path = "crates/mc-bamboo-blocks", version = "0.0.0" }
 mc-bamboo-core = { path = "crates/mc-bamboo-core", version = "0.0.0" }
 mc-bamboo-data = { path = "crates/mc-bamboo-data", version = "0.0.0" }
@@ -21,11 +22,23 @@ mc-bamboo-protocol = { path = "crates/mc-bamboo-protocol", version = "0.0.0" }
 mc-bamboo-server = { path = "crates/mc-bamboo-server", version = "0.0.0" }
 mc-bamboo-world = { path = "crates/mc-bamboo-world", version = "0.0.0" }
 
+aes = "0.8"
 bytes = "1.12.1"
+cfb8 = "0.8"
+flate2 = "1.1.11"
+hmac = "0.12.1"
 md-5 = "0.10"
+# 用系统自带的 TLS（Windows 是 schannel），这台机器上没有 rustls 后端需要的汇编工具链。
+native-tls = "0.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rsa = "0.9"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = "0.10"
+sha2 = "0.10.9"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+tokio-native-tls = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

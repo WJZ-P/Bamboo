@@ -3,7 +3,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
 
-use super::update_attached_neighbours;
+use super::{attached_direct_signal, attached_own_signal, update_attached_neighbours};
 use crate::{
     behaviour::{Behaviour, common::FaceAttached},
     context::{PlaceContext, UseContext},
@@ -58,5 +58,19 @@ impl Behaviour for Lever {
         world.set_block_and_update(pos, pulled);
         update_attached_neighbours(pulled, world, pos);
         InteractionResult::Success
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        attached_own_signal(state)
+    }
+
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        attached_direct_signal(state, direction)
     }
 }

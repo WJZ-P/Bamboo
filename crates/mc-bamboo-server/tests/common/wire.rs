@@ -493,11 +493,21 @@ impl Packet for PlayerPosition {
     }
 }
 
+/// Tab 列表里的一档案属性，比如签名过的皮肤。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabProperty {
+    pub name: String,
+    pub value: String,
+    pub signature: Option<String>,
+}
+
 /// Tab 列表的一条记录。只有动作掩码里有的字段才是 `Some`。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TabEntry {
     pub uuid: Uuid,
     pub name: Option<String>,
+    /// 跟着名字一起来的档案属性，离线模式是空列表。
+    pub properties: Vec<TabProperty>,
     pub game_mode: Option<i32>,
     pub listed: Option<bool>,
     pub latency: Option<i32>,
@@ -544,7 +554,8 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
     };
     if actions & 0x01 != 0 {
         entry.name = Some(reader.string(16).expect("name").to_owned());
-        assert_eq!(varint(reader), 0, "offline players have no properties");
+        let count = list_len(reader);
+        entry.properties = (0..count).map(|_| read_tab_property(reader)).collect();
     }
     if actions & 0x02 != 0 {
         assert!(!boolean(reader), "offline players have no chat session");
@@ -568,6 +579,19 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
         entry.show_hat = Some(boolean(reader));
     }
     entry
+}
+
+/// 档案上的一项属性，签名是可选的。
+fn read_tab_property(reader: &mut Reader<'_>) -> TabProperty {
+    let name = reader.string(64).expect("property name").to_owned();
+    let value = reader.string(32767).expect("property value").to_owned();
+    let signature =
+        boolean(reader).then(|| reader.string(1024).expect("property signature").to_owned());
+    TabProperty {
+        name,
+        value,
+        signature,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -959,6 +983,36 @@ impl Packet for BlockUpdate {
             pos: position(reader),
             state: varint(reader) as u32,
         }
+    }
+}
+
+/// 一段里同一 tick 改了几格。坐标已经换成世界坐标，按包里的顺序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionBlocksUpdate {
+    pub blocks: Vec<(Pos, u32)>,
+}
+
+impl Packet for SectionBlocksUpdate {
+    const ID: i32 = clientbound::SECTION_BLOCKS_UPDATE;
+
+    fn read(reader: &mut Reader<'_>) -> Self {
+        // 段坐标是 `x(22) | z(22) | y(20)`。
+        let section = reader.i64().expect("section position");
+        let origin = Pos::new(
+            (section >> 42) as i32 * 16,
+            (section << 44 >> 44) as i32 * 16,
+            (section << 22 >> 42) as i32 * 16,
+        );
+        let blocks = (0..list_len(reader))
+            .map(|_| {
+                // 状态 ID 在高位，低 12 位是段内的 `x << 8 | z << 4 | y`。
+                let entry = reader.varlong().expect("VarLong");
+                let local = (entry & 0xfff) as i32;
+                let pos = origin.offset(local >> 8, local & 15, (local >> 4) & 15);
+                (pos, (entry >> 12) as u32)
+            })
+            .collect();
+        Self { blocks }
     }
 }
 
@@ -1655,6 +1709,7 @@ pub fn packet_name(id: i32) -> String {
         clientbound::PONG_RESPONSE => "pong_response",
         clientbound::REMOVE_ENTITIES => "remove_entities",
         clientbound::ROTATE_HEAD => "rotate_head",
+        clientbound::SECTION_BLOCKS_UPDATE => "section_blocks_update",
         clientbound::SET_CHUNK_CACHE_CENTER => "set_chunk_cache_center",
         clientbound::SET_ENTITY_DATA => "set_entity_data",
         clientbound::SET_EQUIPMENT => "set_equipment",

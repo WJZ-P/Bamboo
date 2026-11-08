@@ -17,7 +17,7 @@
 
 做到：两个真实 26.3 客户端能走动（区块跟随）、互相看见、一起破坏和放置方块、聊天，长时间不断线。
 
-不做：正版验证和加密、压缩、存档、世界生成、生存模式、服务端物理、方块更新和红石、性能优化（光照裁剪、区块缓存、`section_blocks_update`、`light_update`）。
+不做：存档、世界生成、生存模式、服务端物理、方块更新和红石、性能优化（光照裁剪、区块缓存、`light_update`）。`section_blocks_update` 后来照官方做了，见 D4。
 
 ## 2. 决定
 
@@ -26,7 +26,7 @@
 | D1 | 方块实体列表 | **实现**。`Chunk` 记录有方块实体的位置，区块包写条目，NBT 写 `00` | 这是世界数据本来就该有的东西，几十行。拒绝放置箱子等于创造模式玩不了 |
 | D2 | 同名重连 | **按官方踢旧连接**：旧连接收到 `multiplayer.disconnect.duplicate_login`，新连接等它离开后进入 | 断网时旧连接最多留 30 秒，这段时间重连被拒绝很烦人 |
 | D3 | 放不好的方块 | 拒绝放置（只回 ack）：两格方块 47 种、默认含水 24 种、`PlaceOnWaterBlockItem` 2 种、`GameMasterBlockItem` 7 种。其余一律放默认状态 | 规格第 10 章的建议。README 写明 |
-| D4 | 放置音效 `sound`、`section_blocks_update` | 不做 | P2 |
+| D4 | 放置音效 `sound`、`section_blocks_update` | `sound` 不做。`section_blocks_update` **照官方做**（M2 之后补上）：`ChunkHolder.broadcastChanges` 逐个区块先发 `light_update`，再从下往上逐段发方块。一段这一 tick 只改了一格发 `block_update`，改了几格发一个 `section_blocks_update`，格子按官方 `ShortOpenHashSet` 的遍历顺序，后面跟着方块实体的 `block_entity_data`。实现在 `mc-bamboo-game` 的 `chunk_broadcast` | `sound` 是 P2。水流、红石和以后的 `/fill` 一 tick 改很多格：改满一段从 4096 个包、45056 字节变成 1 个包、8205 字节，客户端看到的结果不变 |
 | D5 | `update_attributes` | 进服时发给自己一次，配对时不发 | `coverage.md` 第 3 节第 3 条 |
 | D6 | 入站积压 | 不停止读 socket。每连接 `InFlight` 配额 4096，超了就断开这名玩家 | `coverage.md` G14。这条代替 `folia.md` 6.4 的“停止读 socket” |
 | D7 | 断开原因 | 用翻译键：`disconnect.timeout`、`multiplayer.disconnect.server_shutdown`、`multiplayer.disconnect.duplicate_login`、`multiplayer.disconnect.invalid_player_movement`、`multiplayer.disconnect.illegal_characters` | 客户端按自己的语言显示 |
@@ -121,11 +121,13 @@ impl Links {
 
 ```text
 1. 取出 inbox 里已有的全部消息，FIFO 处理
-   然后算完排着的光照，记下变了的段（官方在两个 tick 之间做这一步）
+   然后算排着的光照，记下变了的段（官方的光照线程在两个 tick 之间做这一步）。
+   每 tick 最多做 8 万步（release 构建约 10 ms），一轮可以停在半路，剩下的下一 tick 接着算；
+   一轮算完才换上新的光照
 2. game_time + 1
 3. 派生状态：head_yaw、姿势、元数据脏标记
 4. 区块跟踪：比较 (center, vd)，center → forget → pending
-5. light_update 发给区块在跟踪范围边上的玩家，然后广播方块变化给 isChunkTracked 的玩家
+5. 逐个区块：light_update 发给区块在跟踪范围边上的玩家，再按段广播方块变化给 isChunkTracked 的玩家（D4）
 6. visible 配对和解除，然后每名玩家 send_changes
 7. 比较装备，发 set_equipment
 8. 每名玩家 block_changed_ack

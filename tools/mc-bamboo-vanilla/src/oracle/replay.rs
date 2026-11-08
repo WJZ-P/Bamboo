@@ -7,13 +7,14 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, Outcome,
-    TickPriority, destroy_block, run_scheduled_ticks,
+    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Effect,
+    InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory, TickPriority, destroy_block,
+    random_tick, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
-    use_item, use_item_on,
+    tick_chunk, use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, LightLayer, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use super::{
     Names,
@@ -44,7 +45,8 @@ pub struct Replayed {
     /// 和场景不同的格子。
     pub changes: BTreeMap<BlockPos, u32>,
     pub destroyed: Vec<Destroyed>,
-    /// 这次动作留在队列里的计划刻，方块的在前，流体的在后，各自按执行顺序。
+    /// 走完 `settle` 之后还排着的计划刻，方块的在前，流体的在后，各自按执行顺序，
+    /// 延迟相对结束的时刻。
     pub ticks: Vec<Scheduled>,
     /// 物品栏里新出现的物品。
     pub gained: Vec<String>,
@@ -64,13 +66,19 @@ pub struct Scheduled {
     pub priority: i32,
 }
 
-/// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。
+/// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。随机源和官方用同一个种子。
 struct OracleLevel {
     blocks: HashMap<BlockPos, BlockState>,
     entities: Vec<Aabb>,
     min_y: i32,
     max_y: i32,
+    random: LevelRandom,
     touched: RefCell<BTreeSet<usize>>,
+    /// 每道题一份，和假世界里每道题新建的方块实体一样。
+    redstone: RedstoneMemory,
+    /// 活塞这类会动的方块实体，见 `BlockOracle.java` 的方块事件和 ticker。
+    block_entities: BlockEntities,
+    block_events: BlockEvents,
 }
 
 impl OracleLevel {
@@ -83,7 +91,11 @@ impl OracleLevel {
             entities: entity_boxes(&case.action),
             min_y: header.min_y,
             max_y: header.max_y,
+            random: LevelRandom::new(case.seed),
             touched: RefCell::new(BTreeSet::new()),
+            redstone: RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
         }
     }
 
@@ -122,7 +134,7 @@ impl Level for OracleLevel {
         state
     }
 
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool {
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, _flags: u32) -> bool {
         if !self.contains(pos) {
             return false;
         }
@@ -151,6 +163,58 @@ impl Level for OracleLevel {
     /// 假世界里 `getBrightness` 恒为 15，`getSkyDarken` 是 0。
     fn brightness(&self, _layer: LightLayer, _pos: BlockPos) -> i32 {
         FULL_BRIGHTNESS
+    }
+
+    /// 官方的假世界每次 `getBlockEntity` 都按状态新建一个空的告示牌实体，
+    /// 所以这里看到的永远是空白告示牌。
+    fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        let state = self.block_state(pos);
+        state
+            .is_a(BlockAncestor::SignBlock)
+            .then(SignContent::default)
+    }
+
+    /// 写进来的内容不留下，下一次读还是那个新建的空实体。
+    fn set_sign(&mut self, pos: BlockPos, _content: SignContent) -> bool {
+        self.block_state(pos).is_a(BlockAncestor::SignBlock)
+    }
+
+    fn block_entities(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
+    }
+
+    fn random(&self) -> &LevelRandom {
+        &self.random
+    }
+
+    /// 官方假世界的区块段每次都扫一遍场景。
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.blocks.iter().any(|(pos, state)| {
+            pos.chunk() == chunk
+                && pos.y >> 4 == section_y
+                && (state.is_randomly_ticking() || state.is_fluid_randomly_ticking())
+        })
+    }
+
+    /// 官方假世界的 `canSpreadFireAround` 永远是真：场景里的玩家总在目标附近。
+    fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
+        true
     }
 }
 
@@ -203,6 +267,8 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         STANDING_EYE_HEIGHT
     };
     Ok(Actor {
+        // 假世界每次 `getBlockEntity` 都新建空告示牌，编辑器登记不上，UUID 看不出来。
+        uuid: [0; 16],
         position: Vec3::new(x, y, z),
         yaw: action.yaw.0,
         // 官方的题里头和身体的朝向相同。
@@ -213,6 +279,9 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         off_hand: names.item(&action.off)?.0,
         eye_height: f64::from(eye_height),
         block_interaction_range: CREATIVE_INTERACTION_RANGE,
+        // 题目的玩家一直是创造模式。
+        may_build: true,
+        prevents_block_drops: true,
     })
 }
 
@@ -237,7 +306,7 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     let actor = actor_of(action, names)?;
     let target = action.target();
     let now = header.game_time;
-    let outcome = match action.kind {
+    let mut outcome = match action.kind {
         Kind::Place | Kind::Use => {
             let hit = hit_of(action)?;
             use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit)
@@ -246,19 +315,42 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         Kind::Tick => run_one_tick(&mut level, &mut ticks, target, now),
         Kind::Flow => run_flow(&mut level, &mut ticks, target, now, action.steps),
         Kind::Item => use_item(&mut level, &mut ticks, &actor, action.hand),
+        Kind::Random => random_tick(&mut level, &mut ticks, target),
+        Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
     };
+    // flow 题在动作里已经走到 `game_time + steps`，后面的刻从那里接着数。
+    let after_action = match action.kind {
+        Kind::Flow => now + i64::from(action.steps),
+        _ => now,
+    };
+    let end = after_action + i64::from(action.settle);
+    settle(&mut level, &mut ticks, after_action, end, &mut outcome);
 
     Ok(Replayed {
         result: result_name(action.kind, outcome.result),
         changes: level.changes(&case.scene),
         destroyed: destroyed_of(&outcome),
-        ticks: scheduled_of(&ticks, now),
+        ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
     })
 }
 
-/// 官方的题直接调用 `state.tick`，这里排一个立刻到期的刻，走真正的入口。
+/// 动作之后一直走到 `end`：每一刻和世界线程一样，时间加一再跑到期的计划刻。破坏事件接在动作的后面。
+fn settle(
+    level: &mut OracleLevel,
+    ticks: &mut BlockTicks,
+    start: i64,
+    end: i64,
+    outcome: &mut Outcome,
+) {
+    for now in start + 1..=end {
+        let settled = run_scheduled_ticks(level, ticks, now);
+        outcome.effects.extend(settled.effects);
+    }
+}
+
+/// 官方的题直接调用 `state.tick`，这里排一个立刻到期的刻，只跑到期的方块刻。
 fn run_one_tick(
     level: &mut OracleLevel,
     ticks: &mut BlockTicks,
@@ -267,7 +359,7 @@ fn run_one_tick(
 ) -> Outcome {
     let block = level.block_state(pos).block_id();
     ticks.schedule(pos, block, 0, TickPriority::Normal);
-    run_scheduled_ticks(level, ticks, now)
+    run_action_block_ticks(level, ticks, now)
 }
 
 /// 官方的题直接调用这一格的 `FluidState.tick`，再一刻一刻往后跑。这里同样排一个立刻到期的流体刻。
@@ -290,7 +382,7 @@ fn run_flow(
 
 fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
     match kind {
-        Kind::Tick | Kind::Flow => "ticked",
+        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk => "ticked",
         Kind::Destroy if result == InteractionResult::Fail => "refused",
         Kind::Destroy => "destroyed",
         Kind::Place | Kind::Use | Kind::Item => match result {
@@ -314,7 +406,15 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
                 state,
                 except_initiator,
             } => Some(Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator)),
-            Effect::FilledBucket { .. } => None,
+            // 火把烧坏只放烟，题里不比较。
+            Effect::TorchBurnout { .. } => None,
+            Effect::BoneMealUsed { .. }
+            | Effect::FilledBucket { .. }
+            | Effect::SignChanged { .. }
+            | Effect::SignWaxed { .. }
+            | Effect::OpenSignEditor { .. }
+            // 方块事件只发给客户端播放动画，假世界没有客户端。
+            | Effect::BlockEvent { .. } => None,
         })
         .collect()
 }
@@ -366,7 +466,11 @@ mod tests {
             entities: vec![player],
             min_y: -64,
             max_y: 319,
+            random: LevelRandom::new(0),
             touched: RefCell::new(BTreeSet::new()),
+            redstone: RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
         }
     }
 
@@ -393,7 +497,7 @@ mod tests {
         let mut level = level_with_player(Aabb::new(0.0, 0.0, 0.0, 0.1, 0.1, 0.1));
         let above = BlockPos::new(0, 320, 0);
         assert_eq!(level.block_state(above), BlockState(blocks::VOID_AIR));
-        assert!(!level.write_block(above, BlockState(blocks::STONE)));
+        assert!(!level.write_block(above, BlockState(blocks::STONE), 0));
         assert!(level.touched.borrow().is_empty());
     }
 
@@ -403,10 +507,10 @@ mod tests {
         let kept = BlockPos::new(0, 64, 0);
         let removed = BlockPos::new(0, 65, 0);
         let scene = [Cell(0, 64, 0, blocks::STONE), Cell(0, 65, 0, blocks::STONE)];
-        level.write_block(kept, BlockState(blocks::STONE));
-        level.write_block(removed, BlockState::AIR);
+        level.write_block(kept, BlockState(blocks::STONE), 0);
+        level.write_block(removed, BlockState::AIR, 0);
         let air_written = BlockPos::new(0, 66, 0);
-        level.write_block(air_written, BlockState::AIR);
+        level.write_block(air_written, BlockState::AIR, 0);
         assert_eq!(
             level.changes(&scene),
             BTreeMap::from([(removed, blocks::AIR)])

@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
+use mc_bamboo_core::{
+    BlockPos, Direction, Hand, Vec3,
+    sign::{LINES, MAX_LINE_CHARS, SignTextSlot},
+};
 use mc_bamboo_data::{items::ITEMS, packets::play::serverbound, registries::data_component_type};
 
 use crate::{
@@ -139,6 +142,12 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
+    /// 告示牌编辑器提交的文字，每一行最多 [`MAX_LINE_CHARS`] 个字符。
+    SignUpdate {
+        pos: BlockPos,
+        lines: [String; LINES],
+        slot: SignTextSlot,
+    },
     /// 服务端不解码的包，内容是包 ID。
     Other(i32),
 }
@@ -226,6 +235,7 @@ impl PlayRequest {
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
             },
+            serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             other => return Ok(Self::Other(other)),
         };
         reader.finish()?;
@@ -263,6 +273,17 @@ fn read_chat(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?;
     reader.i8()?;
     Ok(PlayRequest::Chat { message })
+}
+
+/// 解码 `sign_update`：方块坐标、四行文字、哪一面。官方按这个顺序写。
+fn read_sign_update(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let pos = reader.block_pos()?;
+    let mut lines: [String; LINES] = std::array::from_fn(|_| String::new());
+    for line in &mut lines {
+        *line = reader.string(MAX_LINE_CHARS)?.to_owned();
+    }
+    let slot = SignTextSlot::from_id(reader.varint()?);
+    Ok(PlayRequest::SignUpdate { pos, lines, slot })
 }
 
 fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
@@ -1302,6 +1323,84 @@ mod tests {
                 pos: BlockPos::new(8, -61, 8),
                 include_data: false,
             })
+        );
+    }
+
+    #[test]
+    fn decodes_sign_update_with_four_lines_then_the_slot() {
+        assert_eq!(
+            decode_body(
+                serverbound::SIGN_UPDATE,
+                "00 00 02 00 00 00 8f c3
+                 02 68 69
+                 00
+                 01 61
+                 00
+                 01"
+            ),
+            Ok(PlayRequest::SignUpdate {
+                pos: BlockPos::new(8, -61, 8),
+                lines: [
+                    "hi".to_owned(),
+                    String::new(),
+                    "a".to_owned(),
+                    String::new()
+                ],
+                slot: SignTextSlot::Front,
+            })
+        );
+    }
+
+    #[test]
+    fn sign_update_defaults_an_unknown_slot_to_the_back() {
+        let decoded = decode_body(
+            serverbound::SIGN_UPDATE,
+            "00 00 02 00 00 00 8f c3
+             00
+             00
+             00
+             00
+             07",
+        );
+        assert_eq!(
+            decoded,
+            Ok(PlayRequest::SignUpdate {
+                pos: BlockPos::new(8, -61, 8),
+                lines: [String::new(), String::new(), String::new(), String::new()],
+                slot: SignTextSlot::Back,
+            })
+        );
+    }
+
+    #[test]
+    fn sign_update_rejects_a_line_longer_than_the_limit_and_short_bodies() {
+        let mut payload = vec![serverbound::SIGN_UPDATE as u8];
+        payload.extend(hex("00 00 02 00 00 00 8f c3"));
+        write_string(&mut payload, &"竹".repeat(MAX_LINE_CHARS));
+        payload.extend(hex("00 00 00 00"));
+        assert!(matches!(
+            PlayRequest::decode(&payload),
+            Ok(PlayRequest::SignUpdate { .. })
+        ));
+
+        let mut payload = vec![serverbound::SIGN_UPDATE as u8];
+        payload.extend(hex("00 00 02 00 00 00 8f c3"));
+        write_string(&mut payload, &"竹".repeat(MAX_LINE_CHARS + 1));
+        payload.extend(hex("00 00 00 00"));
+        assert_eq!(
+            PlayRequest::decode(&payload),
+            Err(DecodeError::StringTooLong {
+                max_chars: MAX_LINE_CHARS
+            })
+        );
+
+        // 少了第四行和那一面。
+        assert_eq!(
+            decode_body(
+                serverbound::SIGN_UPDATE,
+                "00 00 02 00 00 00 8f c3  00  00  00"
+            ),
+            Err(DecodeError::UnexpectedEnd)
         );
     }
 

@@ -62,7 +62,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let mut region = Region::new(2, 20);
+        let mut region = Region::new(2, 20, false);
         let id = PlayerId(1);
         let sink = TestSink::default();
         region.links.add(id, Box::new(sink.clone()));
@@ -163,6 +163,17 @@ fn spawn(region: &mut Region, id: PlayerId, x: f64, z: f64) {
     region.players.insert(id, player);
 }
 
+/// 护甲槽在菜单里是 5 到 8，官方 `Inventory` 里是 39 到 36，顺序相反。
+#[test]
+fn armour_menu_slots_map_to_the_official_inventory_indices() {
+    assert_eq!(official_index(5), Some(39), "头盔");
+    assert_eq!(official_index(6), Some(38), "胸甲");
+    assert_eq!(official_index(7), Some(37), "护腿");
+    assert_eq!(official_index(8), Some(36), "靴子");
+    assert_eq!(official_index(45), Some(40), "副手");
+    assert_eq!(official_index(0), None, "合成结果和光标不在物品栏里");
+}
+
 /// 单箱打开后发 `open_screen` 和完整的 `container_set_content`。
 #[test]
 fn opening_a_chest_sends_the_screen_then_the_content() {
@@ -192,7 +203,7 @@ fn opening_a_chest_sends_the_screen_then_the_content() {
     assert_eq!(fixture.entry(pos).open_count, 1);
 }
 
-/// 打开箱子会排一个方块事件，下一 tick 把人数发给附近的人。
+/// 打开箱子会排一个方块事件，同一 tick 的计划刻阶段把人数发给附近的人。
 #[test]
 fn opening_a_chest_sends_a_block_event() {
     let mut fixture = Fixture::new();
@@ -201,7 +212,7 @@ fn opening_a_chest_sends_a_block_event() {
     fixture.open(pos);
     fixture.take_ids();
 
-    container::tick(&mut fixture.region);
+    crate::interaction::run_block_ticks(&mut fixture.region, crate::global::GameTime(0));
     let frames = fixture.take_frames();
     let events: Vec<&Frame> = frames
         .iter()

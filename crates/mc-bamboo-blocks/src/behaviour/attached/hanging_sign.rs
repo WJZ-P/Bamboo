@@ -11,7 +11,7 @@ use crate::{
             default_state, is_collision_face_full, is_water_source, item_of, rotation_segment,
         },
     },
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{ATTACHED, BlockState, HORIZONTAL_FACING, ROTATION_16, SupportType, WATERLOGGED},
     world::World,
@@ -112,6 +112,10 @@ impl Behaviour for CeilingHangingSign {
     ) -> InteractionResult {
         Sign.use_without_item(state, world, ctx)
     }
+
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, placer: &Actor) {
+        Sign.set_placed_by(state, world, pos, placer);
+    }
 }
 
 /// `WallHangingSignBlock`。官方没有覆盖 `canSurvive`，放下以后不会掉。
@@ -200,6 +204,10 @@ impl Behaviour for WallHangingSign {
         ctx: &UseContext,
     ) -> InteractionResult {
         Sign.use_without_item(state, world, ctx)
+    }
+
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, placer: &Actor) {
+        Sign.set_placed_by(state, world, pos, placer);
     }
 
     fn can_place_from_hanging_sign_item(

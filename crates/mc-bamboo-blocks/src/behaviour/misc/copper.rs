@@ -4,6 +4,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, items, tags::item_tags};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour,
@@ -15,7 +16,8 @@ use crate::{
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     state::{
-        BlockState, COPPER_GOLEM_POSE, HORIZONTAL_FACING, LIT, POWERED, WATERLOGGED, item_is_tagged,
+        BlockState, COPPER_GOLEM_POSE, CopperGolemPose, HORIZONTAL_FACING, LIT, POWERED,
+        WATERLOGGED, item_is_tagged,
     },
     world::World,
 };
@@ -37,7 +39,21 @@ fn check_and_flip(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block_and_update(pos, flipped.with(POWERED, signal));
 }
 
+/// `WeatheringCopperFullBlock`：只有氧化。
+pub(super) struct WeatheringCopperFull;
+
+impl Behaviour for WeatheringCopperFull {
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+}
+
 impl Behaviour for CopperBulb {
+    /// `WeatheringCopperBulbBlock` 在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         if !old.is_same_block(state) {
             check_and_flip(state, world, pos);
@@ -53,6 +69,16 @@ impl Behaviour for CopperBulb {
     ) {
         check_and_flip(state, world, pos);
     }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.get(LIT) { 15 } else { 0 }
+    }
 }
 
 /// `CopperGolemStatueBlock`。
@@ -61,6 +87,16 @@ pub(super) struct CopperGolemStatue;
 /// `updatePose`。
 fn update_pose(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block_and_update(pos, state.cycle(COPPER_GOLEM_POSE));
+}
+
+/// `getAnalogOutputSignal`：姿势的序号加一，顺序和官方的 `Pose` 一样。
+fn pose_signal(state: BlockState) -> i32 {
+    match state.get(COPPER_GOLEM_POSE) {
+        CopperGolemPose::Standing => 1,
+        CopperGolemPose::Sitting => 2,
+        CopperGolemPose::Running => 3,
+        CopperGolemPose::Star => 4,
+    }
 }
 
 impl Behaviour for CopperGolemStatue {
@@ -107,6 +143,16 @@ impl Behaviour for CopperGolemStatue {
         update_pose(state, world, ctx.clicked_pos());
         InteractionResult::Success
     }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        pose_signal(state)
+    }
 }
 
 /// `WeatheringCopperGolemStatueBlock`：会氧化的雕像。
@@ -122,6 +168,10 @@ fn revive_statue(state: BlockState, world: &mut World, pos: BlockPos) -> Interac
 }
 
 impl Behaviour for WeatheringCopperGolemStatue {
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -162,5 +212,15 @@ impl Behaviour for WeatheringCopperGolemStatue {
         }
         update_pose(state, world, pos);
         InteractionResult::Success
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        pose_signal(state)
     }
 }

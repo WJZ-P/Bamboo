@@ -60,6 +60,39 @@ async fn player_joins_and_receives_the_world() {
     assert_eq!(players[0].name, "Kitten");
 }
 
+/// 默认配置和官方一样：登录时收到阈值 256，之后两个方向都是压缩帧。
+#[tokio::test]
+async fn the_server_turns_compression_on_by_default() {
+    let server = TestServer::start(small_world()).await;
+    let mut client = server.join("Kitten").await;
+
+    assert_eq!(client.compression_threshold(), Some(256));
+    // 登录之后的大包都走压缩，假客户端解不开就会在这里失败。
+    assert_eq!(
+        packet_id(&client.read_frame().await),
+        play::clientbound::LOGIN
+    );
+    assert_eq!(client.read_chunks(CHUNKS).await, CHUNKS);
+}
+
+/// 负的阈值关掉压缩，客户端照常能进服。
+#[tokio::test]
+async fn players_can_still_join_with_compression_off() {
+    let config = ServerConfig {
+        compression_threshold: -1,
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.join("Kitten").await;
+
+    assert_eq!(client.compression_threshold(), None);
+    assert_eq!(
+        packet_id(&client.read_frame().await),
+        play::clientbound::LOGIN
+    );
+    assert_eq!(client.read_chunks(CHUNKS).await, CHUNKS);
+}
+
 #[tokio::test]
 async fn join_order_matches_the_official_server() {
     let server = TestServer::start(small_world()).await;
@@ -231,6 +264,39 @@ async fn full_server_refuses_with_a_message() {
     let (id, reason) = json_packet(&second.read_frame().await);
     assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
     assert_eq!(reason["text"], "服务器已满");
+}
+
+/// 官方 `ServerLoginPacketListenerImpl.tick` 在 600 刻（30 秒）时说 `slow_login`，
+/// Bamboo 的进服时限到点时也说这句话。
+#[tokio::test]
+async fn a_slow_login_is_told_why_it_was_dropped() {
+    let config = ServerConfig {
+        pre_play_timeout: Duration::from_millis(200),
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.connect().await;
+
+    // 握手说了要登录，然后什么都不发：官方的 600 刻就是从这里开始算的。
+    client.send(&handshake(LOGIN_INTENT)).await;
+
+    let (id, reason) = json_packet(&client.read_frame().await);
+    assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
+    assert_eq!(reason["translate"], "multiplayer.disconnect.slow_login");
+    client.assert_closed().await;
+}
+
+/// 还没说要登录的连接直接断开，官方的登录时限也管不到它。
+#[tokio::test]
+async fn a_connection_that_never_handshakes_is_dropped_silently() {
+    let config = ServerConfig {
+        pre_play_timeout: Duration::from_millis(200),
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.connect().await;
+
+    client.assert_closed().await;
 }
 
 #[tokio::test]

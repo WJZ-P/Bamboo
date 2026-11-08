@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, FieldValue, Item, Property, StateProvider, TagGroup,
-    VersionData,
+    Block, BlockField, BlockPredicate, CompostLayers, FieldValue, HeightmapType, Item, Property,
+    StateProvider, TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -35,6 +35,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let light = light_file(data)?;
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
+    let heightmaps = heightmaps_file(data)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
@@ -48,6 +49,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
+    write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "tags.rs", &tags)
 }
 
@@ -58,7 +60,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -80,6 +82,83 @@ fn version_file(data: &VersionData) -> String {
         version.data_version
     );
     out
+}
+
+/// 官方的 `Heightmap.Types`。区块包按 `id` 排列，`id` 也是网络上的键。
+fn heightmaps_file(data: &VersionData) -> Result<String, String> {
+    check_heightmap_types(&data.heightmaps)?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 一个高度图类型。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct HeightmapType {{");
+    let _ = writeln!(
+        out,
+        "    /// 官方的序列化名，比如 `MOTION_BLOCKING_NO_LEAVES`。"
+    );
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// 网络上的键，也是官方 `Types` 的声明顺序。");
+    let _ = writeln!(out, "    pub id: i32,");
+    let _ = writeln!(out, "    /// `sendToClient`：区块包带上这一种。");
+    let _ = writeln!(out, "    pub send_to_client: bool,");
+    let _ = writeln!(out, "    /// `keepAfterWorldgen`：区块里一直留着这一种。");
+    let _ = writeln!(out, "    pub keep_after_worldgen: bool,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+
+    for type_ in &data.heightmaps {
+        let _ = writeln!(out, "/// `{}`。", type_.name);
+        let _ = writeln!(
+            out,
+            "pub const {}: HeightmapType = HeightmapType {{",
+            constant_name(&type_.name)
+        );
+        let _ = writeln!(out, "    name: {:?},", type_.name);
+        let _ = writeln!(out, "    id: {},", type_.id);
+        let _ = writeln!(out, "    send_to_client: {},", type_.send_to_client);
+        let _ = writeln!(
+            out,
+            "    keep_after_worldgen: {},",
+            type_.keep_after_worldgen
+        );
+        let _ = writeln!(out, "}};");
+        let _ = writeln!(out);
+    }
+
+    let constants: Vec<String> = data
+        .heightmaps
+        .iter()
+        .map(|type_| constant_name(&type_.name))
+        .collect();
+    let _ = writeln!(out, "/// 全部类型，顺序和官方 `Types.values()` 相同。");
+    let _ = writeln!(
+        out,
+        "pub static TYPES: &[HeightmapType] = &[{}];",
+        constants.join(", ")
+    );
+    Ok(out)
+}
+
+/// 生成的文件按下标取类型，所以 `id` 必须是从 0 开始连续的，名字也要唯一。
+fn check_heightmap_types(types: &[HeightmapType]) -> Result<(), String> {
+    if types.is_empty() {
+        return Err("没有导出高度图类型".to_owned());
+    }
+    for (index, type_) in types.iter().enumerate() {
+        if type_.id != index as i32 {
+            return Err(format!(
+                "高度图 {} 的 id 是 {}，应该是 {index}",
+                type_.name, type_.id
+            ));
+        }
+    }
+    let mut names: Vec<&str> = types.iter().map(|type_| type_.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.len() != types.len() {
+        return Err("高度图类型的名字不唯一".to_owned());
+    }
+    Ok(())
 }
 
 /// `minecraft:level_chunk_with_light` → `LEVEL_CHUNK_WITH_LIGHT`。
@@ -118,7 +197,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef}};"
+        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PushReaction}};"
     );
     let _ = writeln!(out, "use crate::tags::block_tags;\n");
     let _ = writeln!(out, "/// 方块状态的总数，决定了全局调色板的位数。");
@@ -134,7 +213,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -142,6 +221,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.has_collision,
             block.has_fluid,
             block.two_blocks,
+            push_reaction(&block.push_reaction)?,
+            block.unbreakable,
             block.block_entity_type,
             block.class,
             properties.name_of(property_list(&block.properties)),
@@ -248,6 +329,18 @@ fn field_value(value: &FieldValue, block_tags: &TagIndexes) -> Result<String, St
             format!("FieldValue::Tag(block_tags::{})", constant_name(name))
         }
     })
+}
+
+/// 官方 `PushReaction` 的名字，小写换成 Rust 的常量名。官方加了新的值时这里要跟着加。
+fn push_reaction(name: &str) -> Result<&'static str, String> {
+    match name {
+        "push_pull" => Ok("PushPull"),
+        "push" => Ok("Push"),
+        "popped" => Ok("Popped"),
+        "immoveable" => Ok("Immoveable"),
+        "ignore_entity" => Ok("IgnoreEntity"),
+        other => Err(format!("未知的 PushReaction {other}")),
+    }
 }
 
 fn offset_literal(block: &Block) -> String {
@@ -383,6 +476,15 @@ fn block_maps_file(data: &VersionData) -> String {
         out,
         "pub const FIRE_ODDS: &[(i32, i32, i32)] = &{:?};\n",
         maps.fire_odds
+    );
+    let _ = writeln!(
+        out,
+        "/// `ignitedByLava` 的方块 ID，升序。岩浆的随机刻只点燃旁边的这些方块。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const IGNITED_BY_LAVA: &[i32] = &{:?};\n",
+        maps.ignited_by_lava
     );
     let _ = writeln!(
         out,
@@ -532,7 +634,7 @@ fn states_file(data: &VersionData) -> Result<String, String> {
         &mut out,
         "每个状态的事实，位的含义见 [`crate::facts`]。",
         "STATE_FACTS",
-        "u32",
+        "u64",
         &tables.facts,
     );
     write_state_table(
@@ -723,7 +825,7 @@ fn check_state_ids(blocks: &[Block], total: u32) -> Result<(), String> {
 
 fn items_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
-    let _ = writeln!(out, "use crate::{{Item, ItemKind}};\n");
+    let _ = writeln!(out, "use crate::{{CompostLayers, Item, ItemKind}};\n");
     let _ = writeln!(out, "/// 各物品的注册表 ID。");
     for (id, item) in data.items.iter().enumerate() {
         let _ = writeln!(out, "pub const {}: i32 = {id};", constant_name(&item.name));
@@ -743,7 +845,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             item.max_stack_size,
             item.can_destroy_blocks_in_creative,
             item.consumable,
-            item.compostable,
+            compost_layers_of(item),
             item.jukebox_playable,
             block_transformer_of(item, data)?,
             item.blocks_attacks
@@ -751,6 +853,20 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     }
     let _ = writeln!(out, "];");
     Ok(out)
+}
+
+/// 物品的 `compostable` 组件。
+fn compost_layers_of(item: &Item) -> String {
+    match &item.compostable {
+        None => "None".to_owned(),
+        Some(CompostLayers::Constant(layers)) => format!("Some(CompostLayers::Constant({layers}))"),
+        Some(CompostLayers::Weighted {
+            when_empty,
+            distribution,
+        }) => format!(
+            "Some(CompostLayers::Weighted {{ when_empty: {when_empty}, distribution: &{distribution:?} }})"
+        ),
+    }
 }
 
 /// 物品的 `block_transformer` 组件，指向 `block_transformers.rs` 里的条目。
@@ -785,6 +901,7 @@ fn item_kind(item: &Item) -> Result<&'static str, String> {
         "EnderEyeItem" => Ok("EnderEye"),
         "DebugStickItem" => Ok("DebugStick"),
         "BrushItem" => Ok("Brush"),
+        "BoneMealItem" => Ok("BoneMeal"),
         "BlockItem" => Ok("Block"),
         "StandingAndWallBlockItem" => Ok("StandingAndWall"),
         "BannerItem" => Ok("Banner"),
@@ -972,6 +1089,8 @@ mod tests {
             has_collision: false,
             has_fluid: false,
             two_blocks: false,
+            push_reaction: "push_pull".to_owned(),
+            unbreakable: false,
             block_entity_type: None,
             class: "Block".to_owned(),
             ancestors: Vec::new(),
@@ -1000,7 +1119,7 @@ mod tests {
             max_stack_size: 64,
             can_destroy_blocks_in_creative: true,
             consumable: false,
-            compostable: false,
+            compostable: None,
             jukebox_playable: false,
             block_transformer: None,
             blocks_attacks: false,
@@ -1088,5 +1207,25 @@ mod tests {
             Ok("FlintAndSteel")
         );
         assert_eq!(item_kind(&item("Item", None)), Ok("Other"));
+    }
+
+    fn heightmap(name: &str, id: i32) -> HeightmapType {
+        HeightmapType {
+            name: name.to_owned(),
+            id,
+            send_to_client: false,
+            keep_after_worldgen: true,
+        }
+    }
+
+    #[test]
+    fn heightmap_ids_are_the_declaration_order() {
+        assert_eq!(
+            check_heightmap_types(&[heightmap("A", 0), heightmap("B", 1)]),
+            Ok(())
+        );
+        assert!(check_heightmap_types(&[]).is_err());
+        assert!(check_heightmap_types(&[heightmap("A", 1)]).is_err());
+        assert!(check_heightmap_types(&[heightmap("A", 0), heightmap("A", 1)]).is_err());
     }
 }

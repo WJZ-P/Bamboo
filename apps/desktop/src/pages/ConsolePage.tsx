@@ -3,6 +3,7 @@ import styled from "styled-components";
 
 import type { LogLevel } from "../api/bamboo";
 import { LogRow } from "../components/LogRow";
+import { PerformanceStrip } from "../components/PerformanceStrip";
 import { PixelButton, PixelPanel, PixelSwitch, SunkenBox } from "../components/pixel";
 import { logStore } from "../state/logStore";
 
@@ -70,33 +71,36 @@ export function ConsolePage() {
   }, []);
 
   return (
-    <Panel>
-      <Toolbar>
-        {FILTERS.map(({ id, label }) => (
-          <PixelButton
-            key={id}
-            type="button"
-            $size="small"
-            $variant={id === filter ? "bamboo" : "stone"}
-            aria-pressed={id === filter}
-            onClick={() => setFilter(id)}
-          >
-            {label}
+    <>
+      <PerformanceStrip />
+      <Panel>
+        <Toolbar>
+          {FILTERS.map(({ id, label }) => (
+            <PixelButton
+              key={id}
+              type="button"
+              $size="small"
+              $variant={id === filter ? "bamboo" : "stone"}
+              aria-pressed={id === filter}
+              onClick={() => setFilter(id)}
+            >
+              {label}
+            </PixelButton>
+          ))}
+          <Spacer />
+          <PixelSwitch checked={followTail} label="跟随最新" onChange={setFollowTail} />
+          <PixelButton type="button" $size="small" onClick={logStore.clear}>
+            清空
           </PixelButton>
-        ))}
-        <Spacer />
-        <PixelSwitch checked={followTail} label="跟随最新" onChange={setFollowTail} />
-        <PixelButton type="button" $size="small" onClick={logStore.clear}>
-          清空
-        </PixelButton>
-      </Toolbar>
-      <Log ref={logRef} role="log">
-        {visibleLines.length === 0 ? (
-          <Empty>还没有日志。启动服务器后，这里会显示运行记录。</Empty>
-        ) : (
-          visibleLines.map((line) => <LogRow key={line.id} line={line} />)
-        )}
-      </Log>
-    </Panel>
+        </Toolbar>
+        <Log ref={logRef} role="log">
+          {visibleLines.length === 0 ? (
+            <Empty>还没有日志。启动服务器后，这里会显示运行记录。</Empty>
+          ) : (
+            visibleLines.map((line) => <LogRow key={line.id} line={line} />)
+          )}
+        </Log>
+      </Panel>
+    </>
   );
 }

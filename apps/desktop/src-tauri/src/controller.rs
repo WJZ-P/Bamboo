@@ -97,8 +97,10 @@ impl ServerController {
         if let Some(ended) = running.take() {
             ended.watcher_task.abort();
         }
+        // 界面也会校验，但设置文件是用户可以手改的，这里再拦一次。
+        settings.validate()?;
 
-        let target = format!("{}:{}", settings.host, settings.port);
+        let target = format!("{}:{}", settings.host.trim(), settings.port);
         let listener = TcpListener::bind(&target)
             .await
             .map_err(|error| format!("无法监听 {target}：{error}"))?;

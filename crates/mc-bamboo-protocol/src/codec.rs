@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 /// 32 位 VarInt 编码后的最大长度。
 pub const MAX_VARINT_LEN: usize = 5;
+/// 64 位 VarLong 编码后的最大长度。
+pub const MAX_VARLONG_LEN: usize = 10;
 
 /// 数据包解码失败的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -13,6 +15,8 @@ pub enum DecodeError {
     UnexpectedEnd,
     #[error("VarInt is longer than 5 bytes")]
     VarIntTooLong,
+    #[error("VarLong is longer than 10 bytes")]
+    VarLongTooLong,
     #[error("string has invalid length {0}")]
     InvalidStringLength(i32),
     #[error("string is longer than {max_chars} characters")]
@@ -77,6 +81,12 @@ pub fn write_varint(out: &mut Vec<u8>, value: i32) {
 pub fn write_string(out: &mut Vec<u8>, value: &str) {
     write_varint(out, value.len() as i32);
     out.extend_from_slice(value.as_bytes());
+}
+
+/// 把 `value` 以带长度前缀的字节数组形式追加到 `out`。
+pub fn write_byte_array(out: &mut Vec<u8>, value: &[u8]) {
+    write_varint(out, value.len() as i32);
+    out.extend_from_slice(value);
 }
 
 /// 把 `value` 以 VarLong 形式追加到 `out`。
@@ -153,6 +163,18 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    pub fn varlong(&mut self) -> Result<i64, DecodeError> {
+        let mut value = 0u64;
+        for index in 0..MAX_VARLONG_LEN {
+            let byte = self.u8()?;
+            value |= u64::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                return Ok(value as i64);
+            }
+        }
+        Err(DecodeError::VarLongTooLong)
+    }
+
     pub fn u8(&mut self) -> Result<u8, DecodeError> {
         let [value] = self.array()?;
         Ok(value)
@@ -207,6 +229,12 @@ impl<'a> Reader<'a> {
             .ok_or(DecodeError::UnexpectedEnd)?;
         self.input = rest;
         Ok(bytes)
+    }
+
+    /// 读取带长度前缀的字节数组，长度限制在 `max` 以内。
+    pub fn byte_array(&mut self, max: usize) -> Result<&'a [u8], DecodeError> {
+        let len = self.count(max)?;
+        self.bytes(len)
     }
 
     /// 读取列表的元素个数，并限制在 `max` 以内。
@@ -320,7 +348,22 @@ mod tests {
             let mut out = Vec::new();
             write_varlong(&mut out, value);
             assert_eq!(out, encoded, "encoding {value}");
+            let mut reader = Reader::new(encoded);
+            assert_eq!(reader.varlong(), Ok(value), "decoding {value}");
+            assert_eq!(reader.finish(), Ok(()));
         }
+    }
+
+    #[test]
+    fn varlong_rejects_truncated_and_overlong_input() {
+        assert_eq!(
+            Reader::new(&[0x80, 0x80]).varlong(),
+            Err(DecodeError::UnexpectedEnd)
+        );
+        assert_eq!(
+            Reader::new(&[0x80; MAX_VARLONG_LEN + 1]).varlong(),
+            Err(DecodeError::VarLongTooLong)
+        );
     }
 
     #[test]
@@ -485,6 +528,36 @@ mod tests {
         assert_eq!(reader.bytes(2), Ok(&[1, 2][..]));
         assert_eq!(reader.bytes(2), Err(DecodeError::UnexpectedEnd));
         assert_eq!(reader.u8(), Ok(3));
+    }
+
+    #[test]
+    fn byte_arrays_round_trip() {
+        let mut out = Vec::new();
+        write_byte_array(&mut out, &[]);
+        write_byte_array(&mut out, &[7, 8, 9]);
+        assert_eq!(out, [0x00, 0x03, 7, 8, 9]);
+
+        let mut reader = Reader::new(&out);
+        assert_eq!(reader.byte_array(16), Ok(&[][..]));
+        assert_eq!(reader.byte_array(16), Ok(&[7, 8, 9][..]));
+        reader.finish().expect("读完了");
+    }
+
+    #[test]
+    fn byte_array_rejects_a_length_it_cannot_trust() {
+        // 超过上限的长度，连后面的字节都不看。
+        assert_eq!(
+            Reader::new(&[0x04, 1, 2, 3, 4]).byte_array(3),
+            Err(DecodeError::InvalidCount(4))
+        );
+        assert_eq!(
+            Reader::new(&[0xff, 0xff, 0xff, 0xff, 0x0f]).byte_array(3),
+            Err(DecodeError::InvalidCount(-1))
+        );
+        assert_eq!(
+            Reader::new(&[0x04, 1, 2]).byte_array(16),
+            Err(DecodeError::UnexpectedEnd)
+        );
     }
 
     #[test]

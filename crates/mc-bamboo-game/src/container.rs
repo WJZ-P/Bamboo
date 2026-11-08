@@ -1,26 +1,22 @@
 //! 有物品栏的方块实体：箱子、木桶、末影箱、潜影盒、漏斗、发射器、投掷器。
 //!
 //! 内容按方块位置存在 [`Region`] 里，只有世界线程碰它。这里还管官方的开合计数
-//! （`ContainerOpenersCounter`）、方块事件队列和潜影盒的开合动画。菜单和点击在
-//! [`crate::menu`]。
+//! （`ContainerOpenersCounter`）和方块事件的排队；事件本身、潜影盒的盖子和动画都在
+//! `mc-bamboo-blocks` 的方块事件队列和方块实体里。菜单和点击在 [`crate::menu`]。
 
 use std::collections::BTreeSet;
 
 use mc_bamboo_blocks::{
-    BlockState,
+    BlockState, ShulkerBoxEntity, World, open_lid_box,
     state::{CHEST_TYPE, ChestType, FACING, OPEN},
 };
-use mc_bamboo_core::{Aabb, BlockPos, Direction, Vec3};
+use mc_bamboo_core::{Aabb, BlockPos, Direction};
 use mc_bamboo_data::{BlockAncestor, registries::menu};
-use mc_bamboo_protocol::{
-    item::ItemStack,
-    packet::play::{BlockEvent, GameMode},
-};
+use mc_bamboo_protocol::{item::ItemStack, packet::play::GameMode};
 
 use crate::{
     inbound::PlayerId,
-    interaction::{BLOCK_INTERACTION_RANGE, hears_level_event},
-    links::encode_frames,
+    interaction::{self, BLOCK_INTERACTION_RANGE},
     player::Player,
     region::{Region, RegionTick},
 };
@@ -29,8 +25,6 @@ use crate::{
 const RECHECK_DELAY: u64 = 5;
 /// 官方 `stillValidBlockEntity` 和开合计数重查多给的格数。
 pub(crate) const CONTAINER_BUFFER: f64 = 4.0;
-/// 潜影盒动画每个 tick 走的进度。
-const SHULKER_STEP: f32 = 0.1;
 
 /// 有物品栏的方块。种类决定槽位数、菜单类型和标题。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,33 +73,6 @@ impl ContainerKind {
     }
 }
 
-/// `ShulkerBoxBlockEntity.AnimationStatus`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShulkerStatus {
-    Closed,
-    Opening,
-    Opened,
-    Closing,
-}
-
-/// 潜影盒盖子的动画进度。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ShulkerAnimation {
-    pub(crate) status: ShulkerStatus,
-    pub(crate) progress: f32,
-    pub(crate) progress_old: f32,
-}
-
-impl Default for ShulkerAnimation {
-    fn default() -> Self {
-        Self {
-            status: ShulkerStatus::Closed,
-            progress: 0.0,
-            progress_old: 0.0,
-        }
-    }
-}
-
 /// 一个容器方块的内容和开合状态。没有内容的容器不留条目。
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
@@ -117,7 +84,6 @@ pub(crate) struct ContainerEntry {
     pub(crate) max_range: f64,
     /// 下一次重查开合人数的 tick，官方 `scheduleRecheck` 的计划刻。
     pub(crate) recheck_at: Option<RegionTick>,
-    pub(crate) shulker: ShulkerAnimation,
     /// 方块已经没了，等打开的菜单关掉后丢弃。
     pub(crate) dead: bool,
 }
@@ -132,7 +98,6 @@ impl ContainerEntry {
             open_count: 0,
             max_range: 0.0,
             recheck_at: None,
-            shulker: ShulkerAnimation::default(),
             dead: false,
         }
     }
@@ -153,16 +118,6 @@ impl Default for EnderChest {
             active: None,
         }
     }
-}
-
-/// 排队等这一 tick 处理的方块事件，官方 `ServerLevel.blockEvents`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BlockEventData {
-    pub(crate) pos: BlockPos,
-    /// 方块的注册表 ID，官方 `triggerEvent` 前要核对方块没变。
-    pub(crate) block: usize,
-    pub(crate) action: u8,
-    pub(crate) data: u8,
 }
 
 /// 方块属于哪种容器，不是容器时返回 `None`。
@@ -364,22 +319,27 @@ fn on_close(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
     }
 }
 
-/// 木桶的 `OPEN` 状态。官方 `setBlockAndUpdate` 换了状态才通知邻居，这里只记改动。
+/// 木桶的 `OPEN` 状态，官方 `BarrelBlockEntity.updateBlockState` 的 `setBlockAndUpdate`。
+///
+/// 走完整的写方块路径：邻居和形状都更新，侦测器、比较器能看到；改动也由 `RegionLevel` 记下，
+/// 广播阶段发出去。
 fn set_open(region: &mut Region, pos: BlockPos, open: bool) {
-    let Some(state) = region.chunks.block(pos).map(BlockState) else {
-        return;
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        let state = world.block_state(pos);
+        if !state.has(OPEN) || state.get(OPEN) == open {
+            return;
+        }
+        world.set_block_and_update(pos, state.with(OPEN, open));
+        world.into_effects()
     };
-    if !state.has(OPEN) || state.get(OPEN) == open {
-        return;
-    }
-    if region.chunks.set_block(pos, state.with(OPEN, open).0) {
-        region.block_changes.changed.push(pos);
-    }
+    interaction::send_effects(region, None, &effects);
 }
 
-/// `openerCountChanged`：箱子和末影箱把人数发给附近的人，客户端靠它开盖子。
+/// `openerCountChanged`：箱子和末影箱把人数排进方块事件队列，客户端靠它开盖子。
 ///
-/// 官方不管人数有没有变都发，队列里重复的事件由集合去掉。
+/// 官方不管人数有没有变都排，队列里重复的事件由集合去掉。
 fn opener_count_changed(region: &mut Region, pos: BlockPos, kind: ContainerKind, _previous: i32) {
     if !matches!(kind, ContainerKind::Chest | ContainerKind::EnderChest) {
         return;
@@ -388,17 +348,17 @@ fn opener_count_changed(region: &mut Region, pos: BlockPos, kind: ContainerKind,
         .containers
         .get(&pos)
         .map_or(0, |entry| entry.open_count);
-    push_block_event(region, pos, 1, current as u8);
+    queue_block_event(region, pos, 1, current);
 }
 
-/// 潜影盒的 `startOpen`：不重查人数，直接加一并立刻发事件。
+/// 潜影盒的 `startOpen`：不重查人数，直接加一并立刻排事件。
 fn start_open_shulker(region: &mut Region, pos: BlockPos) {
     let count = {
         let entry = entry_at(region, pos, ContainerKind::ShulkerBox);
         entry.open_count = entry.open_count.max(0) + 1;
         entry.open_count
     };
-    push_block_event(region, pos, 1, count as u8);
+    queue_block_event(region, pos, 1, count);
 }
 
 fn stop_open_shulker(region: &mut Region, pos: BlockPos) {
@@ -407,82 +367,27 @@ fn stop_open_shulker(region: &mut Region, pos: BlockPos) {
         entry.open_count -= 1;
         entry.open_count
     };
-    push_block_event(region, pos, 1, count as u8);
+    queue_block_event(region, pos, 1, count);
 }
 
-/// 排一个方块事件。方块在这一刻已经没了就不排，队列里已有的相同事件不重复排。
-fn push_block_event(region: &mut Region, pos: BlockPos, action: u8, data: u8) {
-    let Some(state) = region.chunks.block(pos) else {
+/// `level.blockEvent(pos, block, 1, count)`：排进这一 tick 的方块事件队列。
+///
+/// 方块已经没了就不排，官方 `ServerLevel.blockEvent` 也不看。队列由 `run_scheduled_ticks`
+/// 在随机刻之后统一处理，和官方 `ServerLevel.tick` 的顺序一样。
+fn queue_block_event(region: &mut Region, pos: BlockPos, param_a: i32, param_b: i32) {
+    let Some(state) = region.chunks.block(pos).map(BlockState) else {
         return;
     };
-    let event = BlockEventData {
-        pos,
-        block: BlockState(state).block_id(),
-        action,
-        data,
-    };
-    if !region.block_events.contains(&event) {
-        region.block_events.push(event);
-    }
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    world.block_event(pos, state.block(), param_a, param_b);
 }
 
-/// 方块的 `triggerEvent`。返回 `true` 的事件要广播给客户端。
-fn trigger_event(entry: &mut ContainerEntry, action: u8, data: u8) -> bool {
-    if action != 1 {
-        return false;
-    }
-    match entry.kind {
-        // 客户端自己会开盖子，服务端不用记。
-        ContainerKind::Chest | ContainerKind::EnderChest => true,
-        ContainerKind::ShulkerBox => {
-            entry.open_count = i32::from(data as i8);
-            match entry.open_count {
-                0 => entry.shulker.status = ShulkerStatus::Closing,
-                1 => entry.shulker.status = ShulkerStatus::Opening,
-                _ => {}
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-/// tick 里处理方块事件：方块的 `triggerEvent` 成功后广播给 64 格内的玩家，失败的事件丢掉。
-pub(crate) fn run_block_events(region: &mut Region) {
-    let events = std::mem::take(&mut region.block_events);
-    for event in events {
-        let Some(state) = region.chunks.block(event.pos) else {
-            continue;
-        };
-        if BlockState(state).block_id() != event.block {
-            continue;
-        }
-        let Some(entry) = region.containers.get_mut(&event.pos) else {
-            continue;
-        };
-        if !trigger_event(entry, event.action, event.data) {
-            continue;
-        }
-        let frames = encode_frames(&BlockEvent {
-            pos: event.pos,
-            action: event.action,
-            data: event.data,
-            // 官方 `ClientboundBlockEventPacket` 带的是方块注册表 ID，不是状态 ID。
-            block: event.block as i32,
-        });
-        for player in region.players.values() {
-            if hears_level_event(player, event.pos) {
-                region.links.send_frames(player.id, &frames);
-            }
-        }
-    }
-}
-
-/// tick 里容器相关的部分，顺序照官方 `ServerLevel.tick`：先计划刻，再方块事件，最后方块实体。
+/// tick 里容器相关的部分：到期的开合人数重查，再丢掉没人用的条目。
+///
+/// 方块事件和潜影盒动画已经交给 `mc-bamboo-blocks` 的方块事件队列和方块实体 ticker。
 pub(crate) fn tick(region: &mut Region) {
     run_rechecks(region);
-    run_block_events(region);
-    tick_animations(region);
     forget_unused(region);
 }
 
@@ -585,36 +490,7 @@ fn has_container_open(
         .is_some_and(|menu| menu.target.contains(pos))
 }
 
-/// 潜影盒盖子的动画，官方 `ShulkerBoxBlockEntity.updateAnimation`，每 tick 一步。
-fn tick_animations(region: &mut Region) {
-    for entry in region.containers.values_mut() {
-        if entry.kind != ContainerKind::ShulkerBox {
-            continue;
-        }
-        let animation = &mut entry.shulker;
-        animation.progress_old = animation.progress;
-        match animation.status {
-            ShulkerStatus::Closed => animation.progress = 0.0,
-            ShulkerStatus::Opening => {
-                animation.progress += SHULKER_STEP;
-                if animation.progress >= 1.0 {
-                    animation.status = ShulkerStatus::Opened;
-                    animation.progress = 1.0;
-                }
-            }
-            ShulkerStatus::Opened => animation.progress = 1.0,
-            ShulkerStatus::Closing => {
-                animation.progress -= SHULKER_STEP;
-                if animation.progress <= 0.0 {
-                    animation.status = ShulkerStatus::Closed;
-                    animation.progress = 0.0;
-                }
-            }
-        }
-    }
-}
-
-/// 丢掉没人用的空条目。被菜单引用着的、还有东西的、动画没停的都留着。
+/// 丢掉没人用的空条目。被菜单引用着的、还有东西的都留着。盖子动画在方块实体里，不归这里。
 fn forget_unused(region: &mut Region) {
     let targeted: BTreeSet<BlockPos> = region
         .menus
@@ -622,9 +498,7 @@ fn forget_unused(region: &mut Region) {
         .flat_map(|menu| menu.target.positions())
         .collect();
     region.containers.retain(|pos, entry| {
-        let idle = entry.open_count <= 0
-            && entry.shulker.status == ShulkerStatus::Closed
-            && entry.slots.iter().all(ItemStack::is_empty);
+        let idle = entry.open_count <= 0 && entry.slots.iter().all(ItemStack::is_empty);
         targeted.contains(pos) || !(entry.dead || idle)
     });
 }
@@ -642,56 +516,23 @@ pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
 }
 
 /// 潜影盒能不能开：盖子要抬进的那半格空间没有碰撞。官方 `ShulkerBoxBlock.canOpen`。
-pub(crate) fn can_open_shulker(region: &Region, pos: BlockPos) -> bool {
-    // 没有条目时盖子就是关着的，仍要检查上方空间。
-    if region
-        .containers
-        .get(&pos)
-        .is_some_and(|entry| entry.shulker.status != ShulkerStatus::Closed)
+pub(crate) fn can_open_shulker(region: &mut Region, pos: BlockPos) -> bool {
+    let (mut level, ticks) = region.block_level();
+    let world = World::new(&mut level, ticks);
+    // 方块实体不存在时盖子就是关着的，仍要检查上方空间。
+    if world
+        .block_entity::<ShulkerBoxEntity>(pos)
+        .is_some_and(|entity| !entity.is_closed())
     {
         return true;
     }
-    let Some(state) = region.chunks.block(pos).map(BlockState) else {
-        return true;
-    };
-    let facing = state.get(FACING);
-    let lid = progress_delta_aabb(1.0, facing, 0.0, 0.5, pos).deflated(1.0e-6);
-    no_collision(region, lid)
-}
-
-/// `Shulker.getProgressDeltaAabb`。
-fn progress_delta_aabb(size: f32, direction: Direction, from: f32, to: f32, pos: BlockPos) -> Aabb {
-    let size = f64::from(size);
-    let half = size * 0.5;
-    let base = Aabb::new(-half, 0.0, -half, half, size, half);
-    let max_movement = f64::from(from.max(to)) * size;
-    let min_movement = f64::from(from.min(to)) * size;
-    let (x, y, z) = direction.normal();
-    let expanded = base.expanded_towards(
-        f64::from(x) * max_movement,
-        f64::from(y) * max_movement,
-        f64::from(z) * max_movement,
-    );
-    let moved = expanded.contracted(
-        -f64::from(x) * (size + min_movement),
-        -f64::from(y) * (size + min_movement),
-        -f64::from(z) * (size + min_movement),
-    );
-    let Vec3 { x, y, z } = bottom_center_of(pos);
-    moved.moved(x, y, z)
-}
-
-/// `Vec3.atBottomCenterOf`：方块底面的中心。
-fn bottom_center_of(pos: BlockPos) -> Vec3 {
-    Vec3::new(
-        f64::from(pos.x) + 0.5,
-        f64::from(pos.y),
-        f64::from(pos.z) + 0.5,
-    )
+    let state = world.block_state(pos);
+    let lid = open_lid_box(pos, state.get(FACING));
+    no_collision(&world, lid)
 }
 
 /// `CollisionGetter.noCollision` 里和方块有关的那部分。
-fn no_collision(region: &Region, box_: Aabb) -> bool {
+fn no_collision(world: &World, box_: Aabb) -> bool {
     let x0 = box_.min_x.floor() as i32;
     let x1 = box_.max_x.floor() as i32;
     let y0 = box_.min_y.floor() as i32;
@@ -703,14 +544,9 @@ fn no_collision(region: &Region, box_: Aabb) -> bool {
         for y in y0..=y1 {
             for z in z0..=z1 {
                 let pos = BlockPos::new(x, y, z);
-                let Some(state) = region.chunks.block(pos) else {
-                    continue;
-                };
-                let shapes = mc_bamboo_blocks::shape::collision_boxes(
-                    BlockState(state),
-                    pos,
-                    mc_bamboo_blocks::shape::CollisionContext::Empty,
-                );
+                let state = world.block_state(pos);
+                let shapes =
+                    state.collision_boxes(world, pos, mc_bamboo_blocks::CollisionContext::Empty);
                 if shapes.is_empty() {
                     continue;
                 }

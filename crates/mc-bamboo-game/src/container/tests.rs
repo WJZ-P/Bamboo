@@ -1,5 +1,5 @@
 use mc_bamboo_blocks::{
-    BlockState,
+    BlockState, ShulkerStatus,
     state::{CHEST_TYPE, ChestType, FACING, HORIZONTAL_FACING},
 };
 use mc_bamboo_core::{BlockPos, Direction};
@@ -63,9 +63,9 @@ fn chest_halves_point_at_each_other_the_official_way() {
 }
 
 #[test]
-fn the_closed_lid_of_an_upright_shulker_is_the_half_block_above_it() {
+fn the_lid_box_of_an_upright_shulker_is_the_half_block_above_it() {
     let pos = BlockPos::new(3, 64, -2);
-    let lid = progress_delta_aabb(1.0, Direction::Up, 0.0, 0.5, pos);
+    let lid = open_lid_box(pos, Direction::Up);
     assert_eq!(
         lid,
         Aabb::new(
@@ -76,44 +76,47 @@ fn the_closed_lid_of_an_upright_shulker_is_the_half_block_above_it() {
             f64::from(pos.y) + 1.5,
             f64::from(pos.z) + 1.0
         )
+        .deflated(1.0e-6)
     );
 }
 
 #[test]
 fn a_shulker_cannot_open_into_a_solid_block() {
-    let mut region = Region::new(2, 20);
+    let mut region = Region::new(2, 20, false);
     let pos = BlockPos::new(0, 100, 0);
     // 官方只在这格真的是潜影盒方块实体时才问 `canOpen`，所以先把方块放上。
     region.chunks.set_block(pos, blocks::SHULKER_BOX);
-    assert!(can_open_shulker(&region, pos));
+    assert!(can_open_shulker(&mut region, pos));
 
     region.chunks.set_block(pos.above(), blocks::STONE);
-    assert!(!can_open_shulker(&region, pos));
+    assert!(!can_open_shulker(&mut region, pos));
 }
 
 #[test]
 fn the_shulker_animation_follows_the_block_event() {
-    let mut entry = ContainerEntry::new(ContainerKind::ShulkerBox);
-    assert_eq!(entry.shulker.status, ShulkerStatus::Closed);
+    let mut entity = ShulkerBoxEntity::new(BlockPos::new(0, 100, 0));
+    assert!(entity.is_closed());
 
-    assert!(trigger_event(&mut entry, 1, 1));
-    assert_eq!(entry.open_count, 1);
-    assert_eq!(entry.shulker.status, ShulkerStatus::Opening);
+    assert!(entity.trigger_event(1, 1));
+    assert_eq!(entity.open_count(), 1);
+    assert_eq!(entity.status(), ShulkerStatus::Opening);
 
-    assert!(trigger_event(&mut entry, 1, 0));
-    assert_eq!(entry.open_count, 0);
-    assert_eq!(entry.shulker.status, ShulkerStatus::Closing);
+    assert!(entity.trigger_event(1, 0));
+    assert_eq!(entity.open_count(), 0);
+    assert_eq!(entity.status(), ShulkerStatus::Closing);
 
-    assert!(!trigger_event(&mut entry, 2, 0));
+    assert!(!entity.trigger_event(2, 0));
 }
 
 #[test]
 fn chests_accept_the_open_event_but_hoppers_do_not() {
-    let mut chest = ContainerEntry::new(ContainerKind::Chest);
-    assert!(trigger_event(&mut chest, 1, 1));
-
-    let mut hopper = ContainerEntry::new(ContainerKind::Hopper);
-    assert!(!trigger_event(&mut hopper, 1, 1));
+    let mut region = Region::new(2, 20, false);
+    let pos = BlockPos::new(0, 100, 0);
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    assert!(BlockState(blocks::CHEST).trigger_event(&mut world, pos, 1, 1));
+    assert!(BlockState(blocks::ENDER_CHEST).trigger_event(&mut world, pos, 1, 1));
+    assert!(!BlockState(blocks::HOPPER).trigger_event(&mut world, pos, 1, 1));
 }
 
 #[test]

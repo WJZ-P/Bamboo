@@ -19,6 +19,8 @@ pub(super) struct SnowLayer;
 
 /// `MAX_HEIGHT`。
 const MAX_HEIGHT: i32 = 8;
+/// 方块光比这个亮时雪层化掉。
+const MELT_BRIGHTNESS: i32 = 11;
 
 impl Behaviour for SnowLayer {
     fn state_for_placement(
@@ -71,6 +73,13 @@ impl Behaviour for SnowLayer {
             Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
         } else {
             BlockState::AIR
+        }
+    }
+
+    /// 方块光比 11 亮就化掉。官方先掉落雪球，这个世界没有掉落物。
+    fn random_tick(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
+        if world.block_light(pos) > MELT_BRIGHTNESS {
+            world.remove_block(pos);
         }
     }
 }

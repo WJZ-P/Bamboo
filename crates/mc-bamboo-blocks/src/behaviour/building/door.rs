@@ -3,6 +3,7 @@
 use mc_bamboo_core::{Axis, BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -73,6 +74,13 @@ fn hinge_from_click(ctx: &PlaceContext) -> DoorHingeSide {
 }
 
 impl Behaviour for Door {
+    /// `WeatheringCopperDoorBlock` 的下半在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.get(DOUBLE_BLOCK_HALF) == DoubleBlockHalf::Lower {
+            change_over_time(state, world, pos);
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -142,6 +150,10 @@ impl Behaviour for Door {
         let other_half = if lower { pos.above() } else { pos.below() };
         let signal = has_signal(world, pos, other_half);
         if !state.is(source.default_state) && signal != state.get(POWERED) {
+            if signal != state.get(OPEN) {
+                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
+                world.random().next_float();
+            }
             let updated = state.with(POWERED, signal).with(OPEN, signal);
             world.set_block(pos, updated, UPDATE_CLIENTS);
         }
@@ -178,6 +190,8 @@ impl Behaviour for Door {
             toggled,
             UPDATE_CLIENTS | UPDATE_IMMEDIATE,
         );
+        // `playSound` 在放下新状态之后取音高，后面的随机刻要接在这里。
+        world.random().next_float();
         InteractionResult::Success
     }
 }

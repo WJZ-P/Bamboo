@@ -71,12 +71,12 @@ const fn wall_property(side: Direction) -> Property<WallSide> {
 /// `WallBlock`。
 pub(super) struct Wall;
 
-/// `connectsTo`。`face` 是 `other` 朝着墙的面。
-fn connects_to(other: BlockState, face: Direction) -> bool {
+/// `connectsTo`。`face` 是 `other` 朝着墙的面，`other_pos` 是它的位置。
+fn connects_to(world: &World, other_pos: BlockPos, other: BlockState, face: Direction) -> bool {
     let gate =
         other.is_a(BlockAncestor::FenceGateBlock) && fence_gate::connects_to_direction(other, face);
     other.is_tagged(block_tags::WALLS)
-        || !is_exception_for_connection(other) && has_full_face(other, face)
+        || !is_exception_for_connection(other) && has_full_face(world, other_pos, other, face)
         || other.is_a(BlockAncestor::IronBarsBlock)
         || gate
 }
@@ -159,7 +159,12 @@ fn side_update(
     let mut connections = connections_of(state);
     for (connection, side) in connections.iter_mut().zip(Direction::HORIZONTAL) {
         if side == direction {
-            *connection = connects_to(neighbor, direction.opposite());
+            *connection = connects_to(
+                world,
+                pos.relative(direction),
+                neighbor,
+                direction.opposite(),
+            );
         }
     }
     let above = pos.above();
@@ -175,8 +180,15 @@ impl Behaviour for Wall {
     ) -> Option<BlockState> {
         let pos = ctx.clicked_pos();
         let above = pos.above();
-        let connections = Direction::HORIZONTAL
-            .map(|side| connects_to(world.block_state(pos.relative(side)), side.opposite()));
+        let connections = Direction::HORIZONTAL.map(|side| {
+            let neighbor_pos = pos.relative(side);
+            connects_to(
+                world,
+                neighbor_pos,
+                world.block_state(neighbor_pos),
+                side.opposite(),
+            )
+        });
         let state = default_state(block).with(WATERLOGGED, is_water_source(world, pos));
         Some(with_connections(
             world,

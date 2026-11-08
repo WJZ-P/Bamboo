@@ -3,10 +3,10 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockState, Level,
+    Aabb, BlockEntities, BlockEvents, BlockState, Level, LevelRandom, RedstoneMemory,
     shape::{self, BooleanOp},
 };
-use mc_bamboo_core::{BlockPos, LightLayer};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::blocks;
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
@@ -18,6 +18,10 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
+    pub(crate) random: &'a LevelRandom,
+    pub(crate) redstone: &'a mut RedstoneMemory,
+    pub(crate) block_entities: &'a mut BlockEntities,
+    pub(crate) block_events: &'a mut BlockEvents,
 }
 
 impl Level for RegionLevel<'_> {
@@ -25,9 +29,11 @@ impl Level for RegionLevel<'_> {
         BlockState(self.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
     }
 
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool {
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
         let written = self.chunks.set_block(pos, state.0);
-        if written {
+        // 官方 `Level.setBlock` 只在 `UPDATE_CLIENTS` 时才 `sendBlockUpdated`，
+        // 活塞的移动方块用 `UPDATE_INVISIBLE` 写，客户端会自己播放动画。
+        if written && flags & mc_bamboo_blocks::world::UPDATE_CLIENTS != 0 {
             self.changes.changed.push(pos);
         }
         written
@@ -49,8 +55,52 @@ impl Level for RegionLevel<'_> {
         MAX_Y
     }
 
+    fn random(&self) -> &LevelRandom {
+        self.random
+    }
+
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.chunks.is_randomly_ticking_section(chunk, section_y)
+    }
+
+    /// 这个世界只有创造模式，没有旁观者。
+    fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool {
+        let corner = pos.corner();
+        self.players
+            .values()
+            .any(|player| player.position.distance_to_sqr(corner).sqrt() < f64::from(max_distance))
+    }
+
     /// 读的是上一轮光照算完时的结果，和官方一样：这次操作改的方块要等到下一轮才影响光照。
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
         i32::from(self.chunks.light_value(layer, pos))
+    }
+
+    fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        self.chunks.sign(pos)
+    }
+
+    fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        self.chunks.set_sign(pos, content)
+    }
+
+    fn block_entities(&self) -> &BlockEntities {
+        self.block_entities
+    }
+
+    fn block_entities_mut(&mut self) -> &mut BlockEntities {
+        self.block_entities
+    }
+
+    fn block_events(&mut self) -> &mut BlockEvents {
+        self.block_events
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        self.redstone
     }
 }

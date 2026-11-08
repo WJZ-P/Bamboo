@@ -95,30 +95,28 @@ fn wall_state(default: BlockState, ctx: &PlaceContext, world: &World) -> Option<
 
 /// `updateShape` 里挂在两面墙之间的钟和单面墙上的钟互相转换的部分。
 ///
-/// 这里看的是传进来的邻居，不是世界里的。形状跟着渲染偏移走的方块都不是整面，查表就够了。
+/// 这里看的是传进来的邻居，不是世界里的；邻居是 `moving_piston` 时形状来自它的方块实体。
 fn wall_shape_change(
     state: BlockState,
+    world: &World,
     direction: Direction,
+    neighbor_pos: BlockPos,
     neighbor: BlockState,
 ) -> Option<BlockState> {
+    let sturdy = |face| world.is_state_face_sturdy(neighbor, neighbor_pos, face, SupportType::Full);
     let attachment = state.get(BELL_ATTACHMENT);
     let facing = state.get(HORIZONTAL_FACING);
     if direction.axis() != facing.axis() {
         return None;
     }
-    if attachment == BellAttachType::DoubleWall
-        && !neighbor.is_face_sturdy(direction, SupportType::Full)
-    {
+    if attachment == BellAttachType::DoubleWall && !sturdy(direction) {
         let single = state
             .with(BELL_ATTACHMENT, BellAttachType::SingleWall)
             .with(HORIZONTAL_FACING, direction.opposite());
         return Some(single);
     }
     let behind = connected_direction(state);
-    if attachment == BellAttachType::SingleWall
-        && behind == direction
-        && neighbor.is_face_sturdy(facing, SupportType::Full)
-    {
+    if attachment == BellAttachType::SingleWall && behind == direction && sturdy(facing) {
         return Some(state.with(BELL_ATTACHMENT, BellAttachType::DoubleWall));
     }
     None
@@ -163,7 +161,7 @@ impl Behaviour for Bell {
         {
             return BlockState::AIR;
         }
-        wall_shape_change(state, direction, neighbor).unwrap_or_else(|| {
+        wall_shape_change(state, world, direction, neighbor_pos, neighbor).unwrap_or_else(|| {
             Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
         })
     }

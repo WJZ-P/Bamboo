@@ -2,16 +2,19 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
+    behaviour::machines::{ShulkerBoxEntity, open_support_shape},
+    block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
     fluid::Fluid,
-    level::{Effect, Level},
+    level::{Effect, Level, RedstoneMemory},
+    random::LegacyRandom,
     shape::{self, CollisionContext},
-    state::{BlockState, FluidState, SupportType},
+    state::{BlockState, FACING, FluidState, POWER, SupportType},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -76,6 +79,10 @@ const WORLD_BOUND: i32 = 30_000_000;
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
 /// 默认世界边界的半径。这个世界不能改边界。
 const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
+/// `Difficulty.NORMAL.getId()`。
+const NORMAL_DIFFICULTY: i32 = 2;
+/// 游戏规则 `fire_spread_radius_around_player` 的默认值。
+const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
@@ -220,6 +227,10 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
+    wire_should_signal: bool,
+    /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
+    handling_tick: bool,
 }
 
 impl<'a> World<'a> {
@@ -229,11 +240,31 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            wire_should_signal: true,
+            handling_tick: false,
         }
     }
 
-    /// 这次操作收集到的结果。
-    pub(crate) fn into_effects(self) -> Vec<Effect> {
+    /// 世界刻里的一次操作，`ServerLevel.tick` 把自己的 `handlingTick` 设成真的时候。
+    pub fn in_world_tick(level: &'a mut dyn Level, ticks: &'a mut BlockTicks) -> Self {
+        Self {
+            handling_tick: true,
+            ..Self::new(level, ticks)
+        }
+    }
+
+    /// `ServerLevel.isHandlingTick`。活塞收回时用它判断前方的移动方块要不要直接落下。
+    pub const fn is_handling_tick(&self) -> bool {
+        self.handling_tick
+    }
+
+    /// `ServerLevel.tick` 在方块事件之后、实体和方块实体之前把 `handlingTick` 放回假。
+    pub(crate) fn end_handling_tick(&mut self) {
+        self.handling_tick = false;
+    }
+
+    /// 这次操作收集到的结果。调用方发出去，见 `mc-bamboo-game` 的 `send_effects`。
+    pub fn into_effects(self) -> Vec<Effect> {
         self.effects
     }
 
@@ -304,9 +335,38 @@ impl<'a> World<'a> {
 
     /// `isFaceSturdy`：世界里这一格的这个面能不能支撑东西。
     ///
-    /// 大部分方块的结果在 `STATE_FACTS` 里。竹子这类方块的形状跟着渲染偏移走，要按位置算。
+    /// 大部分方块的结果在 `STATE_FACTS` 里。竹子这类方块的形状跟着渲染偏移走，要按位置算；
+    /// `moving_piston` 官方标了 `dynamicShape`，支撑形状来自方块实体的碰撞形状，也跟着动画走。
     pub fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
-        let state = self.block_state(pos);
+        self.is_state_face_sturdy(self.block_state(pos), pos, face, support)
+    }
+
+    /// `state.isFaceSturdy(level, pos, face, support)`：按传进来的状态算，不重新读这一格。
+    ///
+    /// 形状更新拿到的邻居状态可能比世界里的新或者旧，官方用的是传进来的那个；但 `moving_piston`
+    /// 的形状照样从这一格的方块实体读，所以要带上世界和位置，不能只查状态的表。
+    pub fn is_state_face_sturdy(
+        &self,
+        state: BlockState,
+        pos: BlockPos,
+        face: Direction,
+        support: SupportType,
+    ) -> bool {
+        if state.is(blocks::MOVING_PISTON) {
+            let boxes = state.collision_boxes(self, pos, CollisionContext::Empty);
+            return shape::is_supporting(&boxes, face, support);
+        }
+        // `ShulkerBoxBlock.getBlockSupportShape`：盖子打开时只剩背面那一层薄板。
+        if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+            let open = self
+                .block_entity::<ShulkerBoxEntity>(pos)
+                .is_some_and(|entity| !entity.is_closed());
+            if open {
+                let boxes = [open_support_shape(state.get(FACING))];
+                return shape::is_supporting(&boxes, face, support);
+            }
+            return shape::is_supporting(&shape::support_boxes(state, pos), face, support);
+        }
         if state
             .block()
             .offset
@@ -322,6 +382,168 @@ impl<'a> World<'a> {
         self.level.brightness(layer, pos)
     }
 
+    /// `getBlockEntity(pos) instanceof SignBlockEntity` 之后读到的内容，不是告示牌时是 `None`。
+    pub fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        self.level.sign(pos)
+    }
+
+    /// 改写告示牌的内容。不是告示牌方块时什么也不做，返回 `false`。
+    pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        self.level.set_sign(pos, content)
+    }
+
+    /// `getBlockEntity(pos)` 之后按类型取。
+    pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
+        self.level.block_entities().get(pos)
+    }
+
+    /// 这一格有没有方块实体。
+    pub fn has_block_entity(&self, pos: BlockPos) -> bool {
+        self.level.block_entities().contains(pos)
+    }
+
+    /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做，
+    /// 只打一条警告，说明有地方放错了。
+    pub fn set_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
+        let pos = entity.pos();
+        let state = self.block_state(pos);
+        if !state.has_block_entity() {
+            warn!(
+                "Trying to set block entity at {} {} {}, but state {} does not allow it",
+                pos.x,
+                pos.y,
+                pos.z,
+                state.block().name
+            );
+            return;
+        }
+        self.level.block_entities_mut().insert(entity);
+    }
+
+    /// `Level.removeBlockEntity`。
+    pub fn remove_block_entity(&mut self, pos: BlockPos) {
+        self.level.block_entities_mut().remove(pos);
+    }
+
+    /// 带着这一格的方块实体运行一段代码。实体在运行期间不在表里，所以这段代码用
+    /// `getBlockEntity(pos)` 找不到它自己，别的地方和官方相同。
+    pub fn with_block_entity<T: BlockEntity, R>(
+        &mut self,
+        pos: BlockPos,
+        f: impl FnOnce(&mut T, &mut World) -> R,
+    ) -> Option<R> {
+        let (id, mut entity) = self.level.block_entities_mut().take_at(pos)?;
+        let result = entity
+            .as_any_mut()
+            .downcast_mut::<T>()
+            .map(|typed| f(typed, self));
+        self.level.block_entities_mut().put(pos, id, entity);
+        result
+    }
+
+    /// `level.blockEvent(pos, block, paramA, paramB)`。`block` 是排进队列的方块。
+    pub fn block_event(
+        &mut self,
+        pos: BlockPos,
+        block: &'static Block,
+        param_a: i32,
+        param_b: i32,
+    ) {
+        let block = BlockState(block.default_state).block_id();
+        self.level.block_events().push(BlockEvent {
+            pos,
+            block,
+            param_a,
+            param_b,
+        });
+    }
+
+    /// `ServerLevel.runBlockEvents`：按排队的顺序一直处理到队列空，处理中新排进来的同一轮执行。
+    ///
+    /// 处理成功的事件记成 [`Effect::BlockEvent`]，由调用方发给附近的玩家。
+    pub fn run_block_events(&mut self) {
+        while let Some(event) = self.level.block_events().pop() {
+            let state = self.block_state(event.pos);
+            if state.block_id() != event.block {
+                continue;
+            }
+            if state.trigger_event(self, event.pos, event.param_a, event.param_b) {
+                self.push_effect(Effect::BlockEvent {
+                    pos: event.pos,
+                    block: event.block,
+                    param_a: event.param_a,
+                    param_b: event.param_b,
+                });
+            }
+        }
+    }
+
+    /// `Level.tickBlockEntities`：按 ticker 列表的顺序运行每刻的方块实体。
+    pub fn tick_block_entities(&mut self) {
+        self.level.block_entities_mut().begin_tick();
+        while let Some((pos, id)) = self.level.block_entities_mut().next_ticker() {
+            let Some(mut entity) = self.level.block_entities_mut().take(pos, id) else {
+                continue;
+            };
+            entity.tick(self);
+            self.level.block_entities_mut().put(pos, id, entity);
+        }
+        self.level.block_entities_mut().end_tick();
+    }
+
+    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
+    pub fn max_local_raw_brightness(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - SKY_DARKEN)
+    }
+
+    /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
+    pub fn block_light(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+    }
+
+    /// `isRaining`。这个世界永远是晴天。
+    pub const fn is_raining(&self) -> bool {
+        false
+    }
+
+    /// `isRainingAt`。这个世界永远是晴天。
+    pub const fn is_raining_at(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `getDifficulty().getId()`。这个世界没有难度设置，客户端收不到难度时显示普通，这里也按普通算。
+    pub const fn difficulty_id(&self) -> i32 {
+        NORMAL_DIFFICULTY
+    }
+
+    /// `getRandom()`，也就是 `Level.random`。
+    pub fn random(&self) -> &LegacyRandom {
+        self.level.random().source()
+    }
+
+    /// `getBlockRandomPos`。
+    pub(crate) fn block_random_pos(&self, origin: BlockPos, y_mask: i32) -> BlockPos {
+        self.level.random().block_random_pos(origin, y_mask)
+    }
+
+    /// `LevelChunkSection.isRandomlyTicking`。
+    pub(crate) fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.level.is_randomly_ticking_section(chunk, section_y)
+    }
+
+    /// `isLoaded`：所有区块都在内存里，只看高度和坐标的范围。
+    pub fn is_loaded(&self, pos: BlockPos) -> bool {
+        self.is_in_valid_bounds(pos)
+    }
+
+    /// `ServerLevel.canSpreadFireAround`：游戏规则 `fire_spread_radius_around_player` 是默认的 128，
+    /// 离所有玩家都不到这么远时火才蔓延。
+    pub fn can_spread_fire_around(&self, pos: BlockPos) -> bool {
+        self.level
+            .any_player_close_enough_to(pos, FIRE_SPREAD_RADIUS_AROUND_PLAYER)
+    }
+
     /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
     pub fn raw_brightness(&self, pos: BlockPos) -> i32 {
         self.brightness(LightLayer::Block, pos)
@@ -333,19 +555,120 @@ impl<'a> World<'a> {
         (self.brightness(LightLayer::Sky, pos) - SKY_DARKEN).max(0)
     }
 
-    /// `hasNeighborSignal`。世界里没有红石信号。写成函数是为了以后有红石时只改一处。
-    pub const fn has_neighbor_signal(&self, _pos: BlockPos) -> bool {
-        false
+    /// `getSignal`：`pos` 这一格朝 `direction` 输出多强的信号。
+    ///
+    /// 导体还要算上强充能它的邻居，这就是红石线能被旁边的方块“穿过”充能的原因。
+    pub fn signal(&self, pos: BlockPos, direction: Direction) -> i32 {
+        let state = self.block_state(pos);
+        let signal = state.signal(self, pos, direction);
+        if state.is_redstone_conductor() {
+            signal.max(self.direct_signal_to(pos))
+        } else {
+            signal
+        }
     }
 
-    /// `getSignal`。世界里没有红石信号。
-    pub const fn signal(&self, _pos: BlockPos, _direction: Direction) -> i32 {
-        0
+    /// `hasSignal`。
+    pub fn has_signal(&self, pos: BlockPos, direction: Direction) -> bool {
+        self.signal(pos, direction) > 0
     }
 
-    /// `getBestNeighborSignal`。世界里没有红石信号。
-    pub const fn best_neighbor_signal(&self, _pos: BlockPos) -> i32 {
-        0
+    /// `getDirectSignal`。
+    pub fn direct_signal(&self, pos: BlockPos, direction: Direction) -> i32 {
+        self.block_state(pos).direct_signal(self, pos, direction)
+    }
+
+    /// `getDirectSignalTo`：周围六格强充能 `pos` 的最大值。
+    pub fn direct_signal_to(&self, pos: BlockPos) -> i32 {
+        let mut best = 0;
+        for direction in Direction::ALL {
+            best = best.max(self.direct_signal(pos.relative(direction), direction));
+            if best >= 15 {
+                break;
+            }
+        }
+        best
+    }
+
+    /// `getControlInputSignal`：中继器和比较器读侧面的输入。
+    /// `only_diodes` 为真时只认中继器和比较器，锁定用的是这种。
+    pub fn control_input_signal(
+        &self,
+        pos: BlockPos,
+        direction: Direction,
+        only_diodes: bool,
+    ) -> i32 {
+        let state = self.block_state(pos);
+        if only_diodes {
+            if state.is_a(BlockAncestor::DiodeBlock) {
+                self.direct_signal(pos, direction)
+            } else {
+                0
+            }
+        } else if state.is(blocks::REDSTONE_BLOCK) {
+            15
+        } else if state.is(blocks::REDSTONE_WIRE) {
+            state.get(POWER)
+        } else if state.is_signal_source() {
+            self.direct_signal(pos, direction)
+        } else {
+            0
+        }
+    }
+
+    /// `hasNeighborSignal`。
+    pub fn has_neighbor_signal(&self, pos: BlockPos) -> bool {
+        Direction::ALL
+            .into_iter()
+            .any(|direction| self.has_signal(pos.relative(direction), direction))
+    }
+
+    /// `getBestNeighborSignal`：周围六格给 `pos` 的最强信号。
+    pub fn best_neighbor_signal(&self, pos: BlockPos) -> i32 {
+        let mut best = 0;
+        for direction in Direction::ALL {
+            let signal = self.signal(pos.relative(direction), direction);
+            if signal >= 15 {
+                return 15;
+            }
+            best = best.max(signal);
+        }
+        best
+    }
+
+    /// `getBestOwnOrNeighbourSignal`。
+    pub fn best_own_or_neighbour_signal(&self, pos: BlockPos) -> i32 {
+        let state = self.block_state(pos);
+        let own = if state.is_signal_source() {
+            state.own_signal(self, pos)
+        } else {
+            0
+        };
+        self.best_neighbor_signal(pos).max(own)
+    }
+
+    /// `RedstoneWireBlock.getBlockSignal`：算导线的输入时先把导线的信号关掉，
+    /// 不然导线自己的功率会绕回自己身上。官方的 `shouldSignal` 是方块实例上的字段。
+    pub fn wire_block_signal(&mut self, pos: BlockPos) -> i32 {
+        self.wire_should_signal = false;
+        let signal = self.best_neighbor_signal(pos);
+        self.wire_should_signal = true;
+        signal
+    }
+
+    /// 红石线此刻算不算信号源，见 [`World::wire_block_signal`]。
+    pub const fn wire_should_signal(&self) -> bool {
+        self.wire_should_signal
+    }
+
+    /// 比较器的输出和火把最近的开关，见 [`RedstoneMemory`]。
+    pub fn redstone_memory(&self) -> &RedstoneMemory {
+        self.level.redstone()
+    }
+
+    /// 见 [`World::redstone_memory`]。
+    pub fn redstone_memory_mut(&mut self) -> &mut RedstoneMemory {
+        self.level.redstone_mut()
     }
 
     /// `getGameTime`。
@@ -475,12 +798,31 @@ impl<'a> World<'a> {
         flags: u32,
     ) -> Option<BlockState> {
         let old = self.block_state(pos);
-        if old == state || !self.level.write_block(pos, state) {
+        if old == state || !self.level.write_block(pos, state, flags) {
             return None;
         }
 
         let block_changed = !old.is_same_block(state);
+        // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
+        if block_changed && old.has_block_entity() {
+            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
+                self.pre_remove_block_entity(pos, old);
+            }
+            self.remove_block_entity(pos);
+        }
+        // 比较器存的输出这些也跟着没了。
+        if block_changed {
+            self.level.redstone_mut().forget_block_entity(pos);
+        }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
+        // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
+        if block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0
+        {
+            block_entity::pre_remove_side_effects(old, self);
+        }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
             old.affect_neighbors_after_removal(self, pos);
@@ -493,6 +835,15 @@ impl<'a> World<'a> {
             state.on_place(self, pos, old);
         }
         Some(old)
+    }
+
+    /// `BlockEntity.preRemoveSideEffects`。实体在回调期间不在表里，和 [`World::with_block_entity`] 一样。
+    fn pre_remove_block_entity(&mut self, pos: BlockPos, state: BlockState) {
+        let Some((id, mut entity)) = self.level.block_entities_mut().take_at(pos) else {
+            return;
+        };
+        entity.pre_remove_side_effects(self, pos, state);
+        self.level.block_entities_mut().put(pos, id, entity);
     }
 
     /// `removeBlock(pos, false)`：换成这一格的流体，没有流体时是空气。
@@ -941,7 +1292,13 @@ mod tests {
             .iter()
             .filter_map(|effect| match *effect {
                 Effect::Destroyed { pos, .. } => Some(pos),
-                Effect::FilledBucket { .. } => None,
+                Effect::BoneMealUsed { .. }
+                | Effect::TorchBurnout { .. }
+                | Effect::FilledBucket { .. }
+                | Effect::SignChanged { .. }
+                | Effect::SignWaxed { .. }
+                | Effect::OpenSignEditor { .. }
+                | Effect::BlockEvent { .. } => None,
             })
             .collect()
     }

@@ -11,8 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, items, light, packets, registries, shapes, states,
-    tags, version,
+    block_maps, block_transformers, blocks, heightmaps, items, light, packets, registries, shapes,
+    states, tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -28,31 +28,42 @@ pub mod facts {
     /// `isFaceSturdy(RIGID)` 的起始位。
     pub const STURDY_RIGID: u32 = 12;
     /// 全部 `isFaceSturdy` 的位。
-    pub const STURDY_MASK: u32 = (1 << 18) - 1;
+    pub const STURDY_MASK: u64 = (1 << 18) - 1;
     /// `isAir`。
-    pub const AIR: u32 = 1 << 18;
+    pub const AIR: u64 = 1 << 18;
     /// `canOcclude`。
-    pub const CAN_OCCLUDE: u32 = 1 << 19;
+    pub const CAN_OCCLUDE: u64 = 1 << 19;
     /// `isSolid`，官方标了 `@Deprecated` 的那个粗略判定，告示牌、蛋糕之类的存活要用它。
-    pub const SOLID: u32 = 1 << 20;
+    pub const SOLID: u64 = 1 << 20;
     /// `liquid`，方块属性里的标记，不是“含有流体”。
-    pub const LIQUID: u32 = 1 << 21;
+    pub const LIQUID: u64 = 1 << 21;
     /// `canBeReplaced()`，不带放置上下文的那个重载。
-    pub const REPLACEABLE: u32 = 1 << 22;
+    pub const REPLACEABLE: u64 = 1 << 22;
     /// `isRedstoneConductor`。
-    pub const REDSTONE_CONDUCTOR: u32 = 1 << 23;
+    pub const REDSTONE_CONDUCTOR: u64 = 1 << 23;
     /// `isCollisionShapeFullBlock`。
-    pub const COLLISION_FULL_BLOCK: u32 = 1 << 24;
+    pub const COLLISION_FULL_BLOCK: u64 = 1 << 24;
     /// `isSolidRender`。
-    pub const SOLID_RENDER: u32 = 1 << 25;
+    pub const SOLID_RENDER: u64 = 1 << 25;
     /// `isSignalSource`。
-    pub const SIGNAL_SOURCE: u32 = 1 << 26;
+    pub const SIGNAL_SOURCE: u64 = 1 << 26;
     /// `hasAnalogOutputSignal`。
-    pub const ANALOG_OUTPUT: u32 = 1 << 27;
+    pub const ANALOG_OUTPUT: u64 = 1 << 27;
     /// `propagatesSkylightDown`。
-    pub const PROPAGATES_SKYLIGHT: u32 = 1 << 28;
+    pub const PROPAGATES_SKYLIGHT: u64 = 1 << 28;
+    /// `isRandomlyTicking`：随机刻会调用这个状态的 `randomTick`。
+    pub const RANDOMLY_TICKING: u64 = 1 << 29;
+    /// `getFluidState().isRandomlyTicking`：随机刻会调用这一格的流体的 `randomTick`。
+    pub const FLUID_RANDOMLY_TICKING: u64 = 1 << 30;
+    /// 下面是一个不用形状挡光的完整方块时，`LightEngine.getLightDampeningInto(下面, 这个状态, UP, _)` 是 16：
+    /// 这个状态用自己的形状挡光，而且挡光形状的底面是满的，比如下半台阶。
+    pub const BLOCKS_LIGHT_FROM_BELOW: u64 = 1 << 31;
     /// `useShapeForLightOcclusion`，没有和 `canOcclude` 合并的原值。
-    pub const USE_SHAPE_FOR_LIGHT_OCCLUSION: u32 = 1 << 29;
+    pub const USE_SHAPE_FOR_LIGHT_OCCLUSION: u64 = 1 << 32;
+    /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP)`，`MOTION_BLOCKING` 和 `OCEAN_FLOOR` 用。
+    pub const MOTION_BLOCKING: u64 = 1 << 33;
+    /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES)`，`MOTION_BLOCKING_NO_LEAVES` 用。
+    pub const MOTION_BLOCKING_NO_LEAVES: u64 = 1 << 34;
 }
 
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
@@ -173,6 +184,21 @@ pub struct FluidFacts {
     pub legacy_block: u32,
 }
 
+/// 活塞推动时的反应，官方 `PushReaction`，顺序和官方一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushReaction {
+    /// 跟着活塞走，也能被拉回来。
+    PushPull,
+    /// 能推，不能拉。
+    Push,
+    /// 推的时候直接掉下来。
+    Popped,
+    /// 推不动。
+    Immoveable,
+    /// 只对实体有意义，方块不会碰到。
+    IgnoreEntity,
+}
+
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
@@ -190,6 +216,10 @@ pub struct Block {
     ///
     /// `pitcher_crop` 不算，它有 `half` 属性，但放下时只占一格，长大后才有上半。
     pub two_blocks: bool,
+    /// 活塞推动时的反应，`state.getPistonPushReaction()`。
+    pub push_reaction: PushReaction,
+    /// 破坏速度是 -1：活塞不会推动，也不会打碎它。
+    pub unbreakable: bool,
     /// 方块实体类型的 ID，见 [`registries::block_entity_type`]。
     pub block_entity_type: Option<i32>,
     /// `block.getClass().getSimpleName()`。
@@ -253,6 +283,8 @@ pub enum ItemKind {
     DebugStick,
     /// `BrushItem`：开始刷，结果在后面的使用刻里。
     Brush,
+    /// `BoneMealItem`：催熟能长的方块，或者在水里长海草。
+    BoneMeal,
     /// 别的非方块物品，`useOn` 只看 [`Item::block_transformer`]。
     Other,
 }
@@ -273,14 +305,26 @@ pub struct Item {
     pub can_destroy_blocks_in_creative: bool,
     /// 有 `consumable` 组件：放置失败时官方会开始吃。
     pub consumable: bool,
-    /// 有 `compostable` 组件。
-    pub compostable: bool,
+    /// `compostable` 组件：能放进堆肥桶，放一个加几层。
+    pub compostable: Option<CompostLayers>,
     /// 有 `jukebox_playable` 组件。
     pub jukebox_playable: bool,
     /// `block_transformer` 组件：斧子、锄头、锹右键时改方块的规则。
     pub block_transformer: Option<&'static BlockTransformer>,
     /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
     pub blocks_attacks: bool,
+}
+
+/// `compostable` 组件的 `layers`，数据包 `context_int_provider/compostable` 里的整数提供器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompostLayers {
+    /// 固定加这么多层，不取随机数。
+    Constant(i32),
+    /// 堆肥桶空着时加 `when_empty` 层；否则 `nextInt(总权重)` 按权重抽一项，元素是（层数，权重）。
+    Weighted {
+        when_empty: i32,
+        distribution: &'static [(i32, i32)],
+    },
 }
 
 /// 数据驱动的 `BlockTransformer`，条目在 [`block_transformers`]。
@@ -360,7 +404,7 @@ pub fn state_count(block_id: usize) -> u32 {
 }
 
 /// 状态的事实，位的含义见 [`facts`]。状态 ID 不存在时 panic。
-pub fn state_facts(state: u32) -> u32 {
+pub fn state_facts(state: u32) -> u64 {
     states::STATE_FACTS[state as usize]
 }
 
@@ -523,7 +567,9 @@ mod tests {
         assert_eq!(count(ItemKind::GameMaster), 7);
         assert_eq!(count(ItemKind::Scaffolding), 1);
         assert_eq!(count(ItemKind::SolidBucket), 1);
-        assert_eq!(count(ItemKind::Other), 510);
+        assert_eq!(count(ItemKind::Brush), 1);
+        assert_eq!(count(ItemKind::BoneMeal), 1);
+        assert_eq!(count(ItemKind::Other), 509);
 
         assert_eq!(item(items::LILY_PAD).kind, ItemKind::PlaceOnWater);
         assert_eq!(item(items::COMMAND_BLOCK).kind, ItemKind::GameMaster);
@@ -535,11 +581,12 @@ mod tests {
         assert_eq!(item(items::ENDER_EYE).kind, ItemKind::EnderEye);
         assert_eq!(item(items::DEBUG_STICK).kind, ItemKind::DebugStick);
         assert_eq!(item(items::BRUSH).kind, ItemKind::Brush);
+        assert_eq!(item(items::BONE_MEAL).kind, ItemKind::BoneMeal);
     }
 
     #[test]
     fn only_block_items_have_a_block() {
-        const NOT_BLOCK_ITEMS: [ItemKind; 8] = [
+        const NOT_BLOCK_ITEMS: [ItemKind; 9] = [
             ItemKind::FlintAndSteel,
             ItemKind::FireCharge,
             ItemKind::Honeycomb,
@@ -547,6 +594,7 @@ mod tests {
             ItemKind::EnderEye,
             ItemKind::DebugStick,
             ItemKind::Brush,
+            ItemKind::BoneMeal,
             ItemKind::Other,
         ];
         assert_eq!(block_items().count(), 1141);
@@ -674,12 +722,24 @@ mod tests {
 
     #[test]
     fn compostable_comes_from_the_components() {
-        let compostable = items::ITEMS.iter().filter(|item| item.compostable);
+        let compostable = items::ITEMS
+            .iter()
+            .filter(|item| item.compostable.is_some());
         assert_eq!(compostable.count(), 122);
-        assert!(item(items::OAK_LEAVES).compostable);
-        assert!(item(items::WHEAT_SEEDS).compostable);
-        assert!(!item(items::STONE).compostable);
-        assert!(!item(items::AIR).compostable);
+        assert!(item(items::OAK_LEAVES).compostable.is_some());
+        assert!(item(items::STONE).compostable.is_none());
+        assert!(item(items::AIR).compostable.is_none());
+        assert_eq!(
+            item(items::WHEAT_SEEDS).compostable,
+            Some(CompostLayers::Weighted {
+                when_empty: 1,
+                distribution: &[(1, 30), (0, 70)],
+            })
+        );
+        assert_eq!(
+            item(items::CAKE).compostable,
+            Some(CompostLayers::Constant(1))
+        );
     }
 
     #[test]
@@ -802,6 +862,34 @@ mod tests {
         assert_eq!(block_entity_type(blocks::STONE), None);
         // 26.3 的床已经不是方块实体了。
         assert_eq!(block_entity_type(blocks::RED_BED), None);
+    }
+
+    #[test]
+    fn push_reactions_and_unbreakable_blocks_come_from_the_block_properties() {
+        let block = |state| block_of_state(state).expect("状态属于某个方块");
+        assert_eq!(
+            block(blocks::PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::STICKY_PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::SLIME_BLOCK).push_reaction,
+            PushReaction::PushPull
+        );
+        assert_eq!(
+            block(blocks::OAK_LEAVES).push_reaction,
+            PushReaction::Popped
+        );
+        assert_eq!(block(blocks::WATER).push_reaction, PushReaction::Popped);
+        assert_eq!(block(blocks::STONE).push_reaction, PushReaction::PushPull);
+
+        assert!(block(blocks::BEDROCK).unbreakable);
+        assert!(block(blocks::MOVING_PISTON).unbreakable);
+        assert!(!block(blocks::PISTON).unbreakable);
+        assert!(!block(blocks::OBSIDIAN).unbreakable);
     }
 
     #[test]
@@ -1021,7 +1109,7 @@ mod tests {
     #[test]
     fn item_components_are_summarised() {
         assert!(item(items::SWEET_BERRIES).consumable);
-        assert!(item(items::SWEET_BERRIES).compostable);
+        assert!(item(items::SWEET_BERRIES).compostable.is_some());
         assert!(!item(items::STONE).consumable);
         assert!(item(items::MUSIC_DISC_CAT).jukebox_playable);
     }

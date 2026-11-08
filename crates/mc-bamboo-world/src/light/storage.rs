@@ -1,8 +1,9 @@
 //! 一层光照按区块段存放，官方的 `LayerLightSectionStorage`、`SkyLightSectionStorage` 和 `BlockLightSectionStorage`。
 //!
 //! 一个区块段自己有方块，或者 26 个邻居里有一个有方块，才存光照；两种都不是的段读出来是默认值。
-//! 官方分“正在算”和“给别人看”两份数据，算完一轮才交换。这里的光照只在世界线程上算，算的时候没有人读，
-//! 所以只留一份。
+//! 官方分“正在算”和“给别人看”两份数据，算完一轮才把变过的段换过去。这里也一样：引擎改的是自己那一份，
+//! 记下变过的段，一轮算完由 [`publish`](LightStorage::publish) 抄进给别人读的那一份。
+//! 一轮可以分几个 tick 算完，算到一半时别人读到的还是上一轮的结果。
 //!
 //! 超平坦世界无穷大，所以每个区块柱默认是模板柱的样子，第一次写的时候才复制一份自己的。
 
@@ -31,6 +32,10 @@ pub(crate) struct LightColumn {
     states: [u8; LIGHT_SECTION_COUNT],
     /// `columnsWithSources`：这一列打开了光照。
     light_on: bool,
+    /// 最后一次写这一柱时拿到的版本号，见 [`LightStorage::revision`]。
+    revision: u64,
+    /// 哪几段已经记进 [`LightStorage::changed`]，第 n 位是第 n 段。
+    changed: u32,
 }
 
 impl LightColumn {
@@ -40,6 +45,8 @@ impl LightColumn {
             layers: [const { None }; LIGHT_SECTION_COUNT],
             states: [0; LIGHT_SECTION_COUNT],
             light_on: false,
+            revision: 0,
+            changed: 0,
         }
     }
 
@@ -63,7 +70,11 @@ pub(crate) struct LightStorage {
     to_remove: BTreeSet<SectionPos>,
     /// `sectionsAffectedByLightUpdates`：这一轮写过的段和它们的邻居。
     affected: BTreeSet<SectionPos>,
+    /// `changedSections`：上次 [`publish`](Self::publish) 以后数据变过的段，写过、新建、丢掉的都算。
+    changed: Vec<SectionPos>,
     has_inconsistencies: bool,
+    /// 发出去的最后一个版本号。
+    last_revision: u64,
 }
 
 /// 光照段在区块柱里的下标。超出 26 段时没有。
@@ -87,12 +98,18 @@ impl LightStorage {
     pub(crate) fn new(layer: LightLayer, template: LightColumn, lowest_section: i32) -> Self {
         Self {
             layer,
-            template,
+            // 模板柱的版本号是 0，写过的柱从 1 往上数，两者不会撞上。
+            template: LightColumn {
+                revision: 0,
+                ..template
+            },
             columns: HashMap::new(),
             lowest_section,
             to_remove: BTreeSet::new(),
             affected: BTreeSet::new(),
+            changed: Vec::new(),
             has_inconsistencies: false,
+            last_revision: 0,
         }
     }
 
@@ -104,10 +121,14 @@ impl LightStorage {
         self.columns.get(&pos).unwrap_or(&self.template)
     }
 
-    /// 要写这个区块柱了，没有自己一份的话先从模板复制。
+    /// 要写这个区块柱了，没有自己一份的话先从模板复制。所有写都经过这里，每次换一个新的版本号。
     fn column_mut(&mut self, pos: ChunkPos) -> &mut LightColumn {
+        self.last_revision += 1;
+        let revision = self.last_revision;
         let template = &self.template;
-        self.columns.entry(pos).or_insert_with(|| template.clone())
+        let column = self.columns.entry(pos).or_insert_with(|| template.clone());
+        column.revision = revision;
+        column
     }
 
     /// 这个区块柱写过，内容可能和模板不同。
@@ -115,9 +136,21 @@ impl LightStorage {
         self.columns.contains_key(&pos)
     }
 
-    /// 复制一个区块柱，算模板的时候用。
+    /// 这个区块柱的版本号。每写一次都换成没用过的新值，没写过的柱是 0，
+    /// 所以两次读到的值相同就说明中间没写过。
+    ///
+    /// 不看受影响的段：一轮结束时丢掉的段不算受影响，区块包里却少了它们。
+    /// 别人读的那一份只在 [`publish`](Self::publish) 时被写，所以它的版本号跟着发布走。
+    pub(crate) fn revision(&self, pos: ChunkPos) -> u64 {
+        self.column(pos).revision
+    }
+
+    /// 复制一个区块柱的光照，算模板的时候用。复制出来的不带“变过”的记号。
     pub(crate) fn column_at(&self, pos: ChunkPos) -> LightColumn {
-        self.column(pos).clone()
+        LightColumn {
+            changed: 0,
+            ..self.column(pos).clone()
+        }
     }
 
     /// `getBottomSectionY`。
@@ -157,8 +190,39 @@ impl LightStorage {
         if !self.storing_light_for_section(section) {
             return None;
         }
+        self.slot_to_write(section)?.as_mut()
+    }
+
+    /// 要改这一段的数据了：没有自己一份的区块柱先从模板复制，这一段记进 [`changed`](Self::changed)。
+    /// 和 [`column_mut`](Self::column_mut) 一样换一个新的版本号；这里要同时改 `changed`，所以没法直接调它。
+    fn slot_to_write(&mut self, section: SectionPos) -> Option<&mut Option<DataLayer>> {
         let slot = slot(section.y)?;
-        self.column_mut(section.chunk()).layers[slot].as_mut()
+        self.last_revision += 1;
+        let template = &self.template;
+        let column = self
+            .columns
+            .entry(section.chunk())
+            .or_insert_with(|| template.clone());
+        column.revision = self.last_revision;
+        if column.changed & (1 << slot) == 0 {
+            column.changed |= 1 << slot;
+            self.changed.push(section);
+        }
+        Some(&mut column.layers[slot])
+    }
+
+    /// `swapSectionMap` 的前半：把上次以后变过的段抄进 `visible`，别人从那里读光照。
+    pub(crate) fn publish(&mut self, visible: &mut LightStorage) {
+        for section in mem::take(&mut self.changed) {
+            let slot = slot(section.y).expect("记下的段都在光照的高度范围里");
+            let column = self
+                .columns
+                .get_mut(&section.chunk())
+                .expect("记下的段所在的区块柱已经有了自己的一份");
+            column.changed &= !(1 << slot);
+            visible.column_mut(section.chunk()).layers[slot] = column.layers[slot].clone();
+        }
+        visible.lowest_section = self.lowest_section;
     }
 
     /// `lightOnInSection`。
@@ -233,8 +297,9 @@ impl LightStorage {
             return;
         }
         let layer = self.create_data_layer(section);
-        let slot = slot(section.y).expect("只有世界上下各多一段的范围里才有光照");
-        self.column_mut(section.chunk()).layers[slot] = Some(layer);
+        *self
+            .slot_to_write(section)
+            .expect("只有世界上下各多一段的范围里才有光照") = Some(layer);
         self.lowest_section = self.lowest_section.min(section.y);
         self.mark_section_and_neighbors_as_affected(section);
         self.has_inconsistencies = true;
@@ -273,8 +338,8 @@ impl LightStorage {
             return;
         }
         for section in mem::take(&mut self.to_remove) {
-            if let Some(slot) = slot(section.y) {
-                self.column_mut(section.chunk()).layers[slot] = None;
+            if let Some(slot) = self.slot_to_write(section) {
+                *slot = None;
             }
         }
     }
@@ -437,6 +502,28 @@ mod tests {
         let layer = storage.layer(SectionPos::new(0, 0, 0)).expect("刚存了光照");
         assert_eq!(layer.get(5, 9, 5), 6);
         assert_eq!(layer.get(4, 9, 5), 15);
+    }
+
+    #[test]
+    fn every_write_gives_the_column_a_new_revision() {
+        let mut storage = sky();
+        let column = ChunkPos::new(0, 0);
+        assert_eq!(storage.revision(column), 0);
+
+        storage.update_section_status(ORIGIN, false);
+        let created = storage.revision(column);
+        assert_ne!(created, 0);
+
+        storage.set_stored_level(BlockPos::new(1, -60, 1), 7);
+        let written = storage.revision(column);
+        assert_ne!(written, created);
+
+        // 丢掉段也是写，哪怕没有一格光照变了。
+        storage.update_section_status(ORIGIN, true);
+        let emptied = storage.revision(column);
+        storage.mark_new_inconsistencies();
+        assert_ne!(storage.revision(column), emptied);
+        assert!(!storage.storing_light_for_section(ORIGIN));
     }
 
     #[test]
