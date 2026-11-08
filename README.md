@@ -107,6 +107,10 @@ WebView2 的渲染进程不算在内。
 - 命令方块这类管理员方块不能放置，调试棒也不能用，Bamboo 没有权限系统。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
 - 没有命令，没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
+- 配方已经有了完整的查找和匹配逻辑（`mc-bamboo-recipes`），但还没接进游戏：工作台、熔炉、
+  高炉、烟熏炉、营火、切石机、锻造台和酿造台都不能用，也没有配方书和配方相关的包。
+  物品组件仍是不透明字节，特殊配方只按默认组件判断，所以旗帜复制、书复制、地图放大永远匹配不上，
+  纹饰和修复物品的产物只比较物品和数量。
 - 正版验证的限制：`online_mode` 默认关闭，命令行版用的是默认配置，桌面端的设置页里可以打开。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
   没有玩家公钥和聊天签名，开了正版验证的聊天也是不签名的。
@@ -123,12 +127,13 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包，只处理字节 |
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、世界生成，不知道网络 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻，纯逻辑，不知道网络和存储 |
+| `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编码 |
-| `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、注册表和标签 |
+| `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为和光照 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照和配方 |
 
 依赖方向是单向的：
 
@@ -142,7 +147,8 @@ mc-bamboo   apps/desktop
 protocol blocks world
 ```
 
-`protocol`、`blocks` 和 `world` 互不依赖，它们都依赖 `core` 和 `data`，`protocol` 还依赖 `nbt`。
+`protocol`、`blocks`、`world` 和 `recipes` 互不依赖，它们都依赖 `core` 和 `data`，`protocol` 还依赖 `nbt`。
+`recipes` 只依赖 `data`：它不认识数据包，也不认识世界线程。
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 
 ## 线程模型
@@ -186,6 +192,14 @@ cargo run --release -p mc-bamboo-vanilla -- oracle <java 路径> [--cases N] [--
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- light <java 路径> [--scenes N] [--seed S]
+```
+
+配方用官方的 `RecipeManager` 出题：每条有序和无序配方按自己的原料摆出来，加上平移、镜像、
+换物品、缺一格、多一格和数量不同，再把每种烧炼、切石机、锻造和酿造的输入过一遍，加上随机网格；
+`mc-bamboo-recipes` 重放后比较全部匹配的配方、第一条和产物的物品数量：
+
+```bash
+cargo run --release -p mc-bamboo-vanilla -- recipe-oracle <java 路径> [--cases N] [--seed S]
 ```
 
 这些命令需要 Java 25 或更新版本。

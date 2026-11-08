@@ -10,6 +10,8 @@
 //!     让官方代码给方块行为出题和给答案，用 mc-bamboo-blocks 重放，比较两边的结果
 //! mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
 //!     让官方光照引擎在随机场景里算光照，用 mc-bamboo-world 重放，逐段比较
+//! mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
+//!     让官方 RecipeManager 对大量网格和输入查配方，用 mc-bamboo-recipes 重放并比较
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -33,6 +35,8 @@ mod light;
 mod online;
 #[cfg(feature = "oracle")]
 mod oracle;
+#[cfg(feature = "oracle")]
+mod recipe_oracle;
 
 use std::{
     env, fs,
@@ -47,9 +51,12 @@ const PROBE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/Probe.java";
 const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
+#[cfg(feature = "oracle")]
+const RECIPE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/RecipeOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked]
-      mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]";
+      mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
+      mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -71,6 +78,7 @@ fn run() -> Result<(), String> {
         ["probe", host, port, java] => probe(host, port, java),
         ["oracle", java, ref options @ ..] => oracle(java, options),
         ["light", java, ref options @ ..] => light(java, options),
+        ["recipe-oracle", java, ref options @ ..] => recipe_oracle(java, options),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -144,6 +152,11 @@ fn light(java: &str, options: &[&str]) -> Result<(), String> {
     light::run(official_program(java, LIGHT_SOURCE)?, options)
 }
 
+#[cfg(feature = "oracle")]
+fn recipe_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    recipe_oracle::run(official_program(java, RECIPE_ORACLE_SOURCE)?, options)
+}
+
 /// 用官方解压出来的 jar 当 classpath，运行一个单文件 Java 程序。
 #[cfg(feature = "oracle")]
 fn official_program(java: &str, source: &str) -> Result<Command, String> {
@@ -167,6 +180,11 @@ fn oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn light(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn recipe_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

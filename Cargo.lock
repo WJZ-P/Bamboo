@@ -1963,6 +1963,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-recipes"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-data",
+]
+
+[[package]]
 name = "mc-bamboo-server"
 version = "0.0.0"
 dependencies = [
@@ -1991,6 +1998,7 @@ dependencies = [
  "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-recipes",
  "mc-bamboo-server",
  "mc-bamboo-world",
  "serde",

@@ -8,6 +8,7 @@ pub mod heightmaps;
 pub mod items;
 pub mod light;
 pub mod packets;
+pub mod recipes;
 pub mod registries;
 pub mod shapes;
 pub mod states;
