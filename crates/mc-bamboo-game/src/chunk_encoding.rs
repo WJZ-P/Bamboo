@@ -5,19 +5,18 @@
 use std::borrow::Cow;
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
+use mc_bamboo_data::heightmaps;
 use mc_bamboo_protocol::packet::chunk::{
     BlockEntityInfo, Heightmap, LightData, Palette, encode_chunk_body, write_paletted_container,
     write_section_header,
 };
 use mc_bamboo_world::{
-    chunk::Section,
+    chunk::{Chunk, HeightmapKind, Section},
     light::{LIGHT_SECTION_COUNT, LevelLight, MIN_LIGHT_SECTION, SectionPos},
     palette::{PaletteView, PalettedContainer},
     store::ChunkStore,
 };
 
-/// 发给客户端的高度图类型：WORLD_SURFACE、MOTION_BLOCKING、MOTION_BLOCKING_NO_LEAVES。
-const CLIENT_HEIGHTMAP_KINDS: [i32; 3] = [1, 4, 5];
 /// 方块和光照都没改过的区块共用模板的编码，随便取一个还没改过的位置编出来就行。
 const TEMPLATE_POS: ChunkPos = ChunkPos::new(0, 0);
 /// 光照段全选：区块包带上全部 26 段。
@@ -49,12 +48,11 @@ pub(crate) fn encode_chunk(store: &ChunkStore, pos: ChunkPos) -> Vec<u8> {
         write_section(&mut sections, section);
     }
 
-    let heightmap = chunk.heightmap();
-    // 高度图把所有非空气方块都算上，不区分方块种类，所以三种的内容相同。
-    let heightmaps = CLIENT_HEIGHTMAP_KINDS.map(|kind| Heightmap {
-        kind,
-        data: &heightmap,
-    });
+    let heightmap_data = client_heightmaps(chunk);
+    let heightmaps: Vec<Heightmap> = heightmap_data
+        .iter()
+        .map(|(kind, data)| Heightmap { kind: *kind, data })
+        .collect();
 
     let block_entities: Vec<BlockEntityInfo> = chunk
         .block_entities()
@@ -69,6 +67,18 @@ pub(crate) fn encode_chunk(store: &ChunkStore, pos: ChunkPos) -> Vec<u8> {
     with_light_data(&sky, &block, |light| {
         encode_chunk_body(&heightmaps, &sections, &block_entities, light)
     })
+}
+
+/// 区块包里要带的高度图：官方 `Types.sendToClient` 的那几种，键用官方的 `id`。
+fn client_heightmaps(chunk: &Chunk) -> Vec<(i32, Vec<u64>)> {
+    heightmaps::TYPES
+        .iter()
+        .filter(|heightmap| heightmap.send_to_client)
+        .map(|heightmap| {
+            let kind = HeightmapKind::of_type(heightmap).expect("发给客户端的高度图在区块里都留着");
+            (heightmap.id, chunk.heightmap(kind))
+        })
+        .collect()
 }
 
 /// 一层光照里选中的段，官方 `ClientboundLightUpdatePacketData.prepareSectionData` 的结果。
@@ -132,8 +142,7 @@ pub(crate) fn with_light_data<R>(
 }
 
 fn write_section(out: &mut Vec<u8>, section: &Section) {
-    // 目前的世界里没有流体。
-    write_section_header(out, section.block_count(), 0);
+    write_section_header(out, section.block_count(), section.fluid_count());
     write_container(out, section.blocks());
     write_container(out, section.biomes());
 }

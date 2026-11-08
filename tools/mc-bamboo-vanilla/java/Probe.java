@@ -12,6 +12,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -157,6 +158,7 @@ import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -169,10 +171,14 @@ import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.ticks.ProtoChunkTicks;
 
 /**
  * 用官方 26.3 的网络代码扮演客户端，检查 Bamboo 发的每个包。
@@ -1677,7 +1683,43 @@ public final class Probe {
                 sections[index].read(buffer);
             }
             check("chunk: all sections were consumed", buffer.readableBytes() == 0);
+            checkChunkData(packet, sections);
             return sections;
+        }
+
+        /** 区块段头的计数和每种高度图都由官方代码从解出来的方块重算，再和收到的值比较。 */
+        private void checkChunkData(ClientboundLevelChunkWithLightPacket packet, LevelChunkSection[] sections) {
+            for (int index = 0; index < sections.length; index += 1) {
+                int receivedBlocks = privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount");
+                int receivedFluids = privateInt(sections[index], LevelChunkSection.class, "fluidCount");
+                sections[index].recalcBlockCounts();
+                check("chunk: section " + index + " block count",
+                        receivedBlocks == privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount"));
+                check("chunk: section " + index + " fluid count",
+                        receivedFluids == privateInt(sections[index], LevelChunkSection.class, "fluidCount"));
+            }
+
+            ProtoChunk chunk = new ProtoChunk(
+                    new ChunkPos(packet.x(), packet.z()),
+                    UpgradeData.EMPTY,
+                    sections,
+                    new ProtoChunkTicks<>(),
+                    new ProtoChunkTicks<>(),
+                    LevelHeightAccessor.create(-64, SECTIONS * 16),
+                    containers,
+                    null);
+            Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS);
+
+            Map<Heightmap.Types, long[]> received = packet.chunkData().getHeightmaps();
+            for (Heightmap.Types type : Heightmap.Types.values()) {
+                check("chunk: " + type + " is sent exactly when the client needs it",
+                        type.sendToClient() == received.containsKey(type));
+            }
+            for (Map.Entry<Heightmap.Types, long[]> entry : received.entrySet()) {
+                long[] expected = chunk.getOrCreateHeightmapUnprimed(entry.getKey()).getRawData();
+                check("chunk: " + entry.getKey() + " heightmap",
+                        Arrays.equals(entry.getValue(), expected));
+            }
         }
 
         /** 记下这个区块里改过的位置和方块实体，后来的玩家要靠它们检查改动。 */
