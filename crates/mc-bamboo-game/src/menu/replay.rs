@@ -210,6 +210,16 @@ impl Replay {
         }
     }
 
+    /// 打开之前换掉工作台自己的一格。织布机和砂轮的材料补丁走这里。
+    ///
+    /// Replace one of the workstation's own slots before the menu opens. Loom and grindstone
+    /// ingredient patches use this.
+    pub fn reseed(&mut self, index: usize, stack: ItemStack) {
+        if let Some(station) = self.station.as_mut() {
+            station.replay_replace(index, stack);
+        }
+    }
+
     /// 打开之前换掉容器里的一格。组件点击题用它放上带补丁的物品。
     ///
     /// Replace one container slot before the menu opens.

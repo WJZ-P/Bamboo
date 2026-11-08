@@ -1879,6 +1879,17 @@ impl Station {
         self.creative = creative;
     }
 
+    /// 打开前换掉一格材料。同步压住，`slotsChanged` 会重算结果，state id 不动。
+    ///
+    /// Replace one ingredient before the menu opens. Updates stay suppressed, `slotsChanged`
+    /// recomputes the result, and the state id does not move.
+    pub(crate) fn replay_replace(&mut self, index: usize, stack: ItemStack) {
+        let was = self.suppress;
+        self.suppress = true;
+        self.set_by_player(index, stack);
+        self.suppress = was;
+    }
+
     pub(crate) fn replay_view(&self) -> StationSnapshot {
         StationSnapshot {
             slots: self.slots.clone(),

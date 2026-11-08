@@ -251,13 +251,32 @@ impl Report {
             .ok_or_else(|| format!("case {}: unknown menu shape {:?}", case.id, case.shape))?;
         self.cases += 1;
         let mut replay = if shape.is_workstation() {
-            Replay::workstation(
+            let mut replay = Replay::workstation(
                 shape,
                 &pairs(&case.container),
                 &pairs(&case.inventory),
                 &case.data,
                 case.creative,
-            )
+            );
+            // 材料先按物品和数量放进去，再盖上组件。下标是格子序号，合成格要加一。
+            // Ingredients land as item and count first, then the component patch. The index is the
+            // grid slot; crafting and the inventory grid sit one slot later.
+            for patch in &case.patches {
+                let Some(&[item, count]) = case.container.get(patch.index) else {
+                    return Err(format!(
+                        "case {}: patch slot {} is outside the grid",
+                        case.id, patch.index
+                    ));
+                };
+                let slot = work_slot(shape, patch.index).ok_or_else(|| {
+                    format!(
+                        "case {}: shape {} has no grid slot {}",
+                        case.id, case.shape, patch.index
+                    )
+                })?;
+                replay.reseed(slot, stack_with_patch(item, count, &patch.bytes)?);
+            }
+            replay
         } else {
             let mut replay = Replay::new(shape, &pairs(&case.container), &pairs(&case.inventory));
             replay.set_creative(case.creative);
@@ -478,6 +497,24 @@ fn unhex(text: &str) -> Result<Vec<u8>, String> {
                 .map_err(|error| format!("bad hex: {error}"))
         })
         .collect()
+}
+
+/// 合成格和工作台材料放进菜单时的槽位。和 `ReplayShape::seed_slot` 一样。
+///
+/// Where a grid index lands in the menu. Matches `ReplayShape::seed_slot`.
+fn work_slot(shape: ReplayShape, index: usize) -> Option<usize> {
+    match shape {
+        ReplayShape::Inventory | ReplayShape::Crafting => Some(index + 1),
+        ReplayShape::Stonecutter
+        | ReplayShape::Smithing
+        | ReplayShape::Furnace
+        | ReplayShape::BlastFurnace
+        | ReplayShape::Smoker
+        | ReplayShape::Brewing
+        | ReplayShape::Loom
+        | ReplayShape::Grindstone => Some(index),
+        _ => None,
+    }
 }
 
 fn pairs(entries: &[[i32; 2]]) -> Vec<(i32, i32)> {
