@@ -7,8 +7,9 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, Outcome,
-    RedstoneMemory, TickPriority, destroy_block, run_scheduled_ticks,
+    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Effect,
+    InteractionResult, Level, Outcome, RedstoneMemory, TickPriority, destroy_block,
+    run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
     use_item, use_item_on,
 };
@@ -74,6 +75,9 @@ struct OracleLevel {
     touched: RefCell<BTreeSet<usize>>,
     /// 每道题一份，和假世界里每道题新建的方块实体一样。
     redstone: RedstoneMemory,
+    /// 活塞这类会动的方块实体，见 `BlockOracle.java` 的方块事件和 ticker。
+    block_entities: BlockEntities,
+    block_events: BlockEvents,
 }
 
 impl OracleLevel {
@@ -88,6 +92,8 @@ impl OracleLevel {
             max_y: header.max_y,
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
         }
     }
 
@@ -126,7 +132,7 @@ impl Level for OracleLevel {
         state
     }
 
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool {
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, _flags: u32) -> bool {
         if !self.contains(pos) {
             return false;
         }
@@ -169,6 +175,18 @@ impl Level for OracleLevel {
     /// 写进来的内容不留下，下一次读还是那个新建的空实体。
     fn set_sign(&mut self, pos: BlockPos, _content: SignContent) -> bool {
         self.block_state(pos).is_a(BlockAncestor::SignBlock)
+    }
+
+    fn block_entities(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
     }
 
     fn redstone(&self) -> &RedstoneMemory {
@@ -309,7 +327,7 @@ fn settle(
     }
 }
 
-/// 官方的题直接调用 `state.tick`，这里排一个立刻到期的刻，走真正的入口。
+/// 官方的题直接调用 `state.tick`，这里排一个立刻到期的刻，只跑到期的方块刻。
 fn run_one_tick(
     level: &mut OracleLevel,
     ticks: &mut BlockTicks,
@@ -318,7 +336,7 @@ fn run_one_tick(
 ) -> Outcome {
     let block = level.block_state(pos).block_id();
     ticks.schedule(pos, block, 0, TickPriority::Normal);
-    run_scheduled_ticks(level, ticks, now)
+    run_action_block_ticks(level, ticks, now)
 }
 
 /// 官方的题直接调用这一格的 `FluidState.tick`，再一刻一刻往后跑。这里同样排一个立刻到期的流体刻。
@@ -370,7 +388,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             Effect::FilledBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
-            | Effect::OpenSignEditor { .. } => None,
+            | Effect::OpenSignEditor { .. }
+            // 方块事件只发给客户端播放动画，假世界没有客户端。
+            | Effect::BlockEvent { .. } => None,
         })
         .collect()
 }
@@ -424,6 +444,8 @@ mod tests {
             max_y: 319,
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
         }
     }
 
@@ -450,7 +472,7 @@ mod tests {
         let mut level = level_with_player(Aabb::new(0.0, 0.0, 0.0, 0.1, 0.1, 0.1));
         let above = BlockPos::new(0, 320, 0);
         assert_eq!(level.block_state(above), BlockState(blocks::VOID_AIR));
-        assert!(!level.write_block(above, BlockState(blocks::STONE)));
+        assert!(!level.write_block(above, BlockState(blocks::STONE), 0));
         assert!(level.touched.borrow().is_empty());
     }
 
@@ -460,10 +482,10 @@ mod tests {
         let kept = BlockPos::new(0, 64, 0);
         let removed = BlockPos::new(0, 65, 0);
         let scene = [Cell(0, 64, 0, blocks::STONE), Cell(0, 65, 0, blocks::STONE)];
-        level.write_block(kept, BlockState(blocks::STONE));
-        level.write_block(removed, BlockState::AIR);
+        level.write_block(kept, BlockState(blocks::STONE), 0);
+        level.write_block(removed, BlockState::AIR, 0);
         let air_written = BlockPos::new(0, 66, 0);
-        level.write_block(air_written, BlockState::AIR);
+        level.write_block(air_written, BlockState::AIR, 0);
         assert_eq!(
             level.changes(&scene),
             BTreeMap::from([(removed, blocks::AIR)])

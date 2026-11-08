@@ -70,14 +70,13 @@ pub enum Rule {
     CommandTick,
     TimerTick,
     EntityTick,
-    Piston,
     EntityTrigger,
     Dispensing,
     DaylightTimer,
 }
 
 impl Rule {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::AnalogInput,
         Self::RandomOutcome,
         Self::RandomLoop,
@@ -93,7 +92,6 @@ impl Rule {
         Self::CommandTick,
         Self::TimerTick,
         Self::EntityTick,
-        Self::Piston,
         Self::EntityTrigger,
         Self::Dispensing,
         Self::DaylightTimer,
@@ -116,7 +114,6 @@ impl Rule {
             Self::CommandTick => "command tick",
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
-            Self::Piston => "piston",
             Self::EntityTrigger => "entity trigger",
             Self::Dispensing => "dispensing",
             Self::DaylightTimer => "daylight timer",
@@ -159,9 +156,6 @@ impl Rule {
             Self::CommandTick => "tick: command blocks run commands, out of scope",
             Self::TimerTick => "tick: growth and hatching timers are out of scope (chapter 1)",
             Self::EntityTick => "tick: only entities trigger or read this tick, none are simulated",
-            Self::Piston => {
-                "scope: block events are dropped, pistons never move, pushing is the next step"
-            }
             Self::EntityTrigger => {
                 "scope: plates, detector rails, tripwires, targets, sculk sensors, lightning rods \
                  and primed TNT need entities, projectiles, vibrations or lightning"
