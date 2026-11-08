@@ -46,7 +46,9 @@ impl LegacyRandom {
     }
 
     /// `next(bits)`：线性同余走一步，取高 `bits` 位。
-    fn next(&self, bits: u32) -> i32 {
+    ///
+    /// 官方 `WorldgenRandom` 包着这个源时直接调用它，所以这里是公开的。
+    pub fn next(&self, bits: u32) -> i32 {
         let seed = self
             .seed
             .get()

@@ -1997,6 +1997,7 @@ dependencies = [
  "mc-bamboo-protocol",
  "mc-bamboo-server",
  "mc-bamboo-world",
+ "mc-bamboo-worldgen",
  "serde",
  "serde_json",
  "tokio",
@@ -2008,6 +2009,16 @@ version = "0.0.0"
 dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
+]
+
+[[package]]
+name = "mc-bamboo-worldgen"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-data",
+ "md-5",
+ "serde_json",
 ]
 
 [[package]]
