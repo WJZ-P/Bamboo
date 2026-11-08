@@ -181,8 +181,13 @@ impl Dyn {
             }
             Self::List(values) => {
                 out.push(TAG_LIST_START);
+                // 官方 `HashOps.createList` 写入的是每个元素 `HashCode.asBytes()`，
+                // 也就是那个元素哈希的 4 个小端字节，不是元素自己的载荷。
+                //
+                // `HashOps.createList` writes each element's `HashCode.asBytes()`
+                // (the 4 little-endian bytes of that element's hash), not its payload.
                 for value in values {
-                    value.write_hash_payload(out);
+                    out.extend_from_slice(&value.hash().to_le_bytes());
                 }
                 out.push(TAG_LIST_END);
             }
@@ -270,41 +275,42 @@ mod tests {
         format!("{value:08x}")
     }
 
-    /// 官方的 `HashCode.asBytes()` 是 `asInt()` 的小端字节。
+    /// 空值的 `HashCode.asInt()`。`asBytes()` 是这四个字节的小端序。
+    ///
+    /// `HashCode.asInt()` of the empty value. `asBytes()` is those four bytes
+    /// in little-endian order.
     #[test]
     fn the_empty_value_matches_the_official_probe() {
-        assert_eq!(hex(empty_hash()), "c574b4c8");
+        assert_eq!(hex(empty_hash()), "a016d052");
     }
 
-    /// 这些向量来自官方的 `HashOps.CRC32C_INSTANCE`（见调研脚本的输出）。
+    /// 这些向量是 Guava `Hashing.crc32c()` 的 `HashCode.asInt()`，写入方式和
+    /// `HashOps` 的 `putByte` / `putInt` / `putBytes(asBytes())` 相同。
+    ///
+    /// These vectors are Guava `Hashing.crc32c()` `HashCode.asInt()` values,
+    /// written the same way `HashOps` uses `putByte`, `putInt`, and
+    /// `putBytes(asBytes())`.
     #[test]
     fn primitives_match_the_official_probe() {
         let cases = [
-            (Dyn::Int(1), "1cd7505d"),
-            (Dyn::Byte(1), "e3a5c56a"),
-            (Dyn::Short(258), "fe74bac1"),
-            (Dyn::Long(1), "5b3194be"),
-            (Dyn::Float(1.0), "902d0465"),
-            (Dyn::Double(1.0), "f6cd5330"),
-            (Dyn::string("ab"), "75563e49"),
-            (Dyn::string("竹"), "7230956f"),
-            (Dyn::string("🎫"), "6a4ecc58"),
-            (Dyn::Bool(true), "c2ce36c3"),
-            (Dyn::list(vec![Dyn::Int(1), Dyn::Int(2)]), "24061bae"),
-            (
-                Dyn::Map(vec![("a".to_owned(), Dyn::Int(1))]),
-                "febb82f9",
-            ),
-            (Dyn::ByteArray(vec![1, 2]), "e7a471a6"),
-            (Dyn::IntArray(vec![1, 2]), "0b6b4108"),
-            (Dyn::LongArray(vec![1, 2]), "67d91c90"),
+            (Dyn::Int(1), "5d50d71c"),
+            (Dyn::Byte(1), "6ac5a5e3"),
+            (Dyn::Short(258), "c1ba74fe"),
+            (Dyn::Long(1), "be94315b"),
+            (Dyn::Float(1.0), "65042d90"),
+            (Dyn::Double(1.0), "3053cdf6"),
+            (Dyn::string("ab"), "493e5675"),
+            (Dyn::string("竹"), "6f953072"),
+            (Dyn::string("🎫"), "58cc4e6a"),
+            (Dyn::Bool(true), "c336cec2"),
+            (Dyn::list(vec![Dyn::Int(1), Dyn::Int(2)]), "ae1b0624"),
+            (Dyn::Map(vec![("a".to_owned(), Dyn::Int(1))]), "f982bbfe"),
+            (Dyn::ByteArray(vec![1, 2]), "a671a4e7"),
+            (Dyn::IntArray(vec![1, 2]), "08416b0b"),
+            (Dyn::LongArray(vec![1, 2]), "901cd967"),
         ];
         for (value, expected) in cases {
-            assert_eq!(
-                hex(value.hash()),
-                expected,
-                "{value:?} 的格式和官方对不上"
-            );
+            assert_eq!(hex(value.hash()), expected, "{value:?} 的格式和官方对不上");
         }
     }
 

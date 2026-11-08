@@ -235,9 +235,7 @@ fn names(registry: Registry) -> Option<&'static [&'static str]> {
         "minecraft:cow_sound_variant" => registry_names::COW_SOUND_VARIANT,
         "minecraft:cow_variant" => registry_names::COW_VARIANT,
         "minecraft:damage_type" => registry_names::DAMAGE_TYPE,
-        "minecraft:data_component_predicate_type" => {
-            registry_names::DATA_COMPONENT_PREDICATE_TYPE
-        }
+        "minecraft:data_component_predicate_type" => registry_names::DATA_COMPONENT_PREDICATE_TYPE,
         "minecraft:data_component_type" => {
             mc_bamboo_data::component_registries::names::DATA_COMPONENT_TYPE
         }

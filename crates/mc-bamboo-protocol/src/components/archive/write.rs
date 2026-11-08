@@ -34,7 +34,14 @@ impl Fields {
         }
     }
 
-    /// 官方 `optionalFieldOf(name, default)`：等于默认值时不写这个键。
+    /// 官方 `optionalFieldOf(name, default)`：编码前用 `Objects.equals` 和默认值比，
+    /// 相等就不写这个键。这里比的是编好的 `Dyn`。编码会丢掉信息时（补丁里的瞬态组件）
+    /// 不能用这个方法，调用方要按对象是否等于默认值自己决定。
+    ///
+    /// `optionalFieldOf(name, default)` omits the key when `Objects.equals` says the
+    /// value is the default, before encoding. This helper compares the encoded
+    /// `Dyn`. Do not use it when encoding drops information, such as a transient
+    /// component inside a patch.
     pub fn default(self, name: &str, value: Dyn, default: &Dyn) -> Self {
         if value.same(default) {
             self
@@ -50,6 +57,12 @@ impl Fields {
 
     pub fn build(self) -> Dyn {
         Dyn::Map(self.0)
+    }
+}
+
+impl Default for Fields {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
