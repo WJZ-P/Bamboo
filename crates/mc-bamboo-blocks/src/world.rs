@@ -2,7 +2,7 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::error;
 
@@ -320,6 +320,16 @@ impl<'a> World<'a> {
     /// `getBrightness(layer, pos)`：只看天空光或者只看方块光。
     pub fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
         self.level.brightness(layer, pos)
+    }
+
+    /// `getBlockEntity(pos) instanceof SignBlockEntity` 之后读到的内容，不是告示牌时是 `None`。
+    pub fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        self.level.sign(pos)
+    }
+
+    /// 改写告示牌的内容。不是告示牌方块时什么也不做，返回 `false`。
+    pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        self.level.set_sign(pos, content)
     }
 
     /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
@@ -941,7 +951,10 @@ mod tests {
             .iter()
             .filter_map(|effect| match *effect {
                 Effect::Destroyed { pos, .. } => Some(pos),
-                Effect::FilledBucket { .. } => None,
+                Effect::FilledBucket { .. }
+                | Effect::SignChanged { .. }
+                | Effect::SignWaxed { .. }
+                | Effect::OpenSignEditor { .. } => None,
             })
             .collect()
     }

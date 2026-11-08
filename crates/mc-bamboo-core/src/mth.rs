@@ -60,6 +60,23 @@ pub fn lerp(factor: f64, from: f64, to: f64) -> f64 {
     from + factor * (to - from)
 }
 
+/// `Mth.wrapDegrees`：把角度折回 -180 到 180 之间，结果仍然可能是 180。
+pub fn wrap_degrees(value: f32) -> f32 {
+    let wrapped = value % 360.0;
+    if wrapped >= 180.0 {
+        wrapped - 360.0
+    } else if wrapped < -180.0 {
+        wrapped + 360.0
+    } else {
+        wrapped
+    }
+}
+
+/// `Mth.degreesDifferenceAbs`：两个角度之间差多少度，最多 180。
+pub fn degrees_difference_abs(first: f32, second: f32) -> f32 {
+    wrap_degrees(second - first).abs()
+}
+
 /// `Mth.clamp`。比较的顺序和官方相同，所以 `NaN` 的结果也相同。
 pub fn clamp(value: f64, min: f64, max: f64) -> f64 {
     if value < min { min } else { value.min(max) }
@@ -125,6 +142,19 @@ mod tests {
         assert_eq!(seed(1000000, 64, -3000000), 80424206700872);
         assert_eq!(seed(5, 0, -7), -113315081188586);
         assert_eq!(seed(30000000, 0, 29999999), 20650537332405);
+    }
+
+    #[test]
+    fn wrap_degrees_folds_angles_into_one_turn() {
+        assert_eq!(wrap_degrees(0.0), 0.0);
+        assert_eq!(wrap_degrees(90.0), 90.0);
+        // 官方的判断是 `>= 180`，所以 180 折成 -180。
+        assert_eq!(wrap_degrees(180.0), -180.0);
+        assert_eq!(wrap_degrees(270.0), -90.0);
+        assert_eq!(wrap_degrees(-270.0), 90.0);
+        assert_eq!(wrap_degrees(720.0), 0.0);
+        assert_eq!(degrees_difference_abs(170.0, -170.0), 20.0);
+        assert_eq!(degrees_difference_abs(180.0, -180.0), 0.0);
     }
 
     #[test]

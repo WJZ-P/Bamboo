@@ -10,6 +10,8 @@ use crate::{state::BlockState, world::World};
 /// 发起动作的玩家。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Actor {
+    /// `player.getUUID()`。告示牌用它认出登记的编辑者。
+    pub uuid: [u8; 16],
     pub position: Vec3,
     /// `getYRot`：身体的朝向。`getDirection`、`getRotation` 看它。
     pub yaw: f32,
@@ -26,6 +28,8 @@ pub struct Actor {
     pub eye_height: f64,
     /// `blockInteractionRange`。
     pub block_interaction_range: f64,
+    /// `player.mayBuild()`：创造模式和冒险模式是真。这个世界只有创造模式。
+    pub may_build: bool,
 }
 
 impl Actor {

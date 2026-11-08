@@ -1,6 +1,6 @@
 //! 方块变化和物品栏同步。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, sign::SignTextSlot};
 use mc_bamboo_data::packets::play::clientbound;
 
 use crate::{
@@ -61,6 +61,42 @@ impl ClientboundPacket for BlockChangedAck {
     }
 }
 
+/// 打开告示牌编辑器。只有被允许编辑的那名玩家会收到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSignEditor {
+    pub pos: BlockPos,
+    pub slot: SignTextSlot,
+}
+
+impl ClientboundPacket for OpenSignEditor {
+    const ID: i32 = clientbound::OPEN_SIGN_EDITOR;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_block_pos(out, self.pos);
+        write_varint(out, self.slot.id());
+    }
+}
+
+/// 一个方块实体现在的内容，官方的 `ClientboundBlockEntityDataPacket`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEntityData<'a> {
+    pub pos: BlockPos,
+    /// `minecraft:block_entity_type` 注册表 ID。
+    pub kind: i32,
+    /// 方块实体保存的数据，官方的 `getUpdateTag`，网络格式的 NBT。
+    pub data: &'a [u8],
+}
+
+impl ClientboundPacket for BlockEntityData<'_> {
+    const ID: i32 = clientbound::BLOCK_ENTITY_DATA;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_block_pos(out, self.pos);
+        write_varint(out, self.kind);
+        out.extend_from_slice(self.data);
+    }
+}
+
 /// 让客户端播放一个世界事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelEvent {
@@ -73,6 +109,8 @@ pub struct LevelEvent {
 impl LevelEvent {
     /// 破坏方块的粒子和声音，`data` 是被破坏方块的状态 ID。
     pub const DESTROY_BLOCK: i32 = 2001;
+    /// 告示牌上蜡成功，官方 `HoneycombItem.tryApplyToSign` 里的 `levelEvent(null, 3003, pos, 0)`。
+    pub const WAX_ON_SIGN: i32 = 3003;
 
     /// 破坏方块的粒子和声音。发起者已经在本地预测过，不要发给他。
     pub const fn destroy_block(pos: BlockPos, state: i32) -> Self {
@@ -80,6 +118,16 @@ impl LevelEvent {
             event: Self::DESTROY_BLOCK,
             pos,
             data: state,
+            global: false,
+        }
+    }
+
+    /// 告示牌上蜡的光照效果，附近的玩家都看得到。
+    pub const fn wax_on_sign(pos: BlockPos) -> Self {
+        Self {
+            event: Self::WAX_ON_SIGN,
+            pos,
+            data: 0,
             global: false,
         }
     }
@@ -172,6 +220,25 @@ mod tests {
         expected.extend_from_slice(&layer);
         expected.push(0);
         assert_eq!(body(&packet), expected);
+    }
+
+    #[test]
+    fn open_sign_editor_matches_official_bytes() {
+        let packet = OpenSignEditor {
+            pos: BlockPos::new(8, -60, 8),
+            slot: SignTextSlot::Front,
+        };
+        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 01"));
+    }
+
+    #[test]
+    fn block_entity_data_copies_the_tag_after_the_type() {
+        let packet = BlockEntityData {
+            pos: BlockPos::new(8, -60, 8),
+            kind: 42,
+            data: &[0x08, 0x00],
+        };
+        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 2a 08 00"));
     }
 
     #[test]

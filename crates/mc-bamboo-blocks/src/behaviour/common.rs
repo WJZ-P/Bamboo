@@ -234,6 +234,16 @@ pub fn rotation_segment(degrees: f32) -> i32 {
     (f64::from(turns) + 0.5).floor() as i32 & 15
 }
 
+/// `RotationSegment.convertToDegrees(segment)`：段换回角度，180 度以上的折成负角。
+pub fn rotation_degrees(segment: i32) -> f32 {
+    let degrees = (segment & 15) as f32 * 22.5;
+    if degrees >= 180.0 {
+        degrees - 360.0
+    } else {
+        degrees
+    }
+}
+
 /// `FallingBlock.isFree`。
 pub fn is_free(state: BlockState) -> bool {
     state.is_air()
