@@ -19,8 +19,10 @@
 //! | `chunk_broadcast` | 每 tick 逐个区块发光照和方块的变化 |
 //! | `light_updates` | 算光照，发 `light_update` |
 //! | `sign` | 告示牌的方块实体数据 |
+//! | `block_items` | 方块实体从物品上带来的组件和它的 `getUpdateTag` |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
+mod block_items;
 mod chat;
 mod chunk_broadcast;
 mod chunk_encoding;

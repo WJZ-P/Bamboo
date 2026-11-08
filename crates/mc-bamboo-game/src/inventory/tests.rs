@@ -755,7 +755,7 @@ fn a_stack_with_components_is_not_the_same_item() {
     let (mut server, client) = settled();
     set_block(&mut server, ABOVE, blocks::STONE);
     let named = ItemStack {
-        added: vec![(5, vec![0x00])],
+        added: vec![(data_component_type::MAX_STACK_SIZE, vec![9])],
         ..ItemStack::new(items::STONE, 1)
     };
     fill(&mut server, &client, &[(40, named.clone())]);

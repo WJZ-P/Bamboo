@@ -1047,7 +1047,7 @@ fn equipment_is_only_sent_for_the_slots_that_changed() {
 }
 
 #[test]
-fn components_neither_count_as_a_change_nor_reach_the_viewers() {
+fn components_reach_the_viewers_and_count_as_a_change() {
     let mut stage = Stage::at(POSITION);
     stage.player().inventory.slots[HOTBAR_SLOT] = ItemStack {
         item: STONE,
@@ -1058,25 +1058,49 @@ fn components_neither_count_as_a_change_nor_reach_the_viewers() {
     send_equipment_changes(&mut stage.region);
     assert_eq!(
         stage.flush_watcher(),
-        [frame(clientbound::SET_EQUIPMENT, "07 00 02 01 00 00")]
+        [frame(
+            clientbound::SET_EQUIPMENT,
+            "07 00 02 01 01 01 01 10 0c"
+        )]
     );
 
+    // 官方 `equipmentHasChanged` 用 `ItemStack.matches` 比，组件变了也要重发。
     stage.player().inventory.slots[HOTBAR_SLOT].added.clear();
     send_equipment_changes(&mut stage.region);
-    assert!(stage.flush_watcher().is_empty());
+    assert_eq!(
+        stage.flush_watcher(),
+        [frame(clientbound::SET_EQUIPMENT, "07 00 02 01 00 01 0c")]
+    );
 
     let frames = parse_frames(&pairing_frames(stage.player()));
-    assert_eq!(frames[3].body, hex("07 00 02 01 00 00"));
+    assert_eq!(frames[3].body, hex("07 00 02 01 00 01 0c"));
 }
 
 #[test]
-fn stacks_that_count_as_empty_are_all_the_same_empty_slot() {
+fn a_stack_with_a_zero_count_is_the_same_as_an_empty_slot() {
     let mut stage = Stage::at(POSITION);
 
     stage.player().inventory.slots[HOTBAR_SLOT] = ItemStack::new(STONE, 0);
-    stage.player().inventory.slots[OFF_HAND_SLOT] = ItemStack::new(0, 5);
     send_equipment_changes(&mut stage.region);
 
+    assert!(stage.flush_watcher().is_empty());
+}
+
+/// 数量不是零的空气照官方 `ItemStack.matches` 算变了一次，发出去的还是一个空槽位。
+///
+/// 客户端发不出这种物品：`set_creative_mode_slot` 里空气一律变成空物品堆。
+#[test]
+fn air_with_a_count_counts_as_a_change_once() {
+    let mut stage = Stage::at(POSITION);
+
+    stage.player().inventory.slots[OFF_HAND_SLOT] = ItemStack::new(0, 5);
+    send_equipment_changes(&mut stage.region);
+    assert_eq!(
+        stage.flush_watcher(),
+        [frame(clientbound::SET_EQUIPMENT, "07 01 00")]
+    );
+
+    send_equipment_changes(&mut stage.region);
     assert!(stage.flush_watcher().is_empty());
 }
 

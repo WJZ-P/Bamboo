@@ -512,9 +512,8 @@ fn a_second_player_sees_what_the_first_player_put_in() {
         .menus
         .get(&other)
         .expect("第二个菜单应该开着");
-    let (slots, sources) = display(&fixture.region, other, menu);
+    let slots = display(&fixture.region, other, menu);
     assert_eq!(slots[0], ItemStack::new(items::STONE, 10));
-    assert_eq!(sources[0], Some(fixture.id));
     assert_eq!(fixture.entry(pos).open_count, 2);
 }
 
@@ -544,7 +543,7 @@ fn the_ender_chest_contents_belong_to_the_player() {
     fixture.open(second);
     assert_eq!(fixture.player().ender_chest.active, Some(second));
     let menu = fixture.menu();
-    let (slots, _) = display(&fixture.region, fixture.id, menu);
+    let slots = display(&fixture.region, fixture.id, menu);
     assert_eq!(slots[0], ItemStack::new(items::DIAMOND, 2));
 }
 

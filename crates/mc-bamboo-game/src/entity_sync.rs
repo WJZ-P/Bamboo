@@ -6,7 +6,7 @@
 use std::{collections::BTreeSet, mem};
 
 use mc_bamboo_core::{Hand, Vec3};
-use mc_bamboo_data::{items::AIR, registries::entity_type};
+use mc_bamboo_data::registries::entity_type;
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
@@ -50,18 +50,9 @@ const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
     EquipmentSlot::Head,
 ];
 
-/// 判断一个装备槽变没变时比较的内容：物品和数量。组件不发给观察者，所以不比较。
-type EquipmentKey = (i32, i32);
-
-const NO_EQUIPMENT: EquipmentKey = (AIR, 0);
-
-fn equipment_key(stack: &ItemStack) -> EquipmentKey {
-    if stack.is_empty() {
-        NO_EQUIPMENT
-    } else {
-        (stack.item, stack.count)
-    }
-}
+/// 上次发出去的装备。官方 `LivingEntity.equipmentHasChanged` 用 `ItemStack.matches` 比，
+/// 所以物品、数量和组件任何一样变了都要重发。
+const NO_EQUIPMENT: ItemStack = ItemStack::empty();
 
 /// 玩家元数据里服务端维护的部分。其余 index 一直是默认值，不用发。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,7 +130,7 @@ pub(crate) struct EntitySync {
     /// 上次发出去的元数据。
     sent_metadata: Metadata,
     /// 上次比较时的装备，和 [`EQUIPMENT_SLOTS`] 一一对应。
-    sent_equipment: [EquipmentKey; EQUIPMENT_SLOTS.len()],
+    sent_equipment: [ItemStack; EQUIPMENT_SLOTS.len()],
     /// 看得见这名玩家的人。它们的客户端里有这个实体。
     seen_by: BTreeSet<PlayerId>,
 }
@@ -168,7 +159,7 @@ impl EntitySync {
                 model_customisation: client.model_customisation,
                 ..Metadata::DEFAULT
             },
-            sent_equipment: [NO_EQUIPMENT; EQUIPMENT_SLOTS.len()],
+            sent_equipment: [const { NO_EQUIPMENT }; EQUIPMENT_SLOTS.len()],
             seen_by: BTreeSet::new(),
         }
     }
@@ -522,9 +513,8 @@ fn send_equipment_change(player: &mut Player, links: &mut Links) {
         let Some(stack) = player.inventory.equipment(slot) else {
             continue;
         };
-        let current = equipment_key(stack);
-        if *sent != current {
-            *sent = current;
+        if !sent.matches(stack) {
+            *sent = stack.clone();
             changed.push((slot, stack));
         }
     }

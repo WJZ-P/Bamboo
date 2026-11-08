@@ -12,7 +12,6 @@ use mc_bamboo_protocol::{item::ItemStack, packet::play::ContainerInput};
 use super::{Ctx, HashedStack, Menu, Target};
 use crate::{
     container::ContainerKind,
-    inbound::PlayerId,
     inventory::{HOTBAR_START, Inventory, OFF_HAND},
 };
 
@@ -56,7 +55,6 @@ pub struct Snapshot {
 pub struct Replay {
     menu: Menu,
     container: Vec<ItemStack>,
-    sources: Vec<Option<PlayerId>>,
     inventory: Inventory,
     creative: bool,
 }
@@ -82,10 +80,8 @@ impl Replay {
                 shape.kind(),
                 Target::Single(BlockPos::new(0, 0, 0)),
                 size,
-                PlayerId(0),
             ),
             container: slots,
-            sources: vec![None; size],
             inventory: player,
             creative: true,
         }
@@ -111,9 +107,7 @@ impl Replay {
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
-            viewer: self.menu.viewer,
             container: &mut self.container,
-            sources: &mut self.sources,
             inventory: &mut self.inventory,
             carried: &mut self.menu.carried,
             quickcraft_status: &mut self.menu.quickcraft_status,

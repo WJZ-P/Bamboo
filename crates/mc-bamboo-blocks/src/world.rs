@@ -227,6 +227,8 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `BlockItem.place` 刚放下的那一格，官方在这里读物品上的组件，见 [`World::placed_at`]。
+    placed_at: Option<BlockPos>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -240,6 +242,7 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            placed_at: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -266,6 +269,17 @@ impl<'a> World<'a> {
     /// 这次操作收集到的结果。调用方发出去，见 `mc-bamboo-game` 的 `send_effects`。
     pub fn into_effects(self) -> Vec<Effect> {
         self.effects
+    }
+
+    /// 这次操作放下的那一格方块，官方 `BlockItem.place` 里 `updateBlockEntityComponents`
+    /// 看的位置。组件在 `mc-bamboo-protocol`，这一层看不见，所以只报位置，由调用方接着做。
+    pub const fn placed_at(&self) -> Option<BlockPos> {
+        self.placed_at
+    }
+
+    /// `BlockItem.place` 放成功时记下这一格。
+    pub(crate) fn set_placed_at(&mut self, pos: BlockPos) {
+        self.placed_at = Some(pos);
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {

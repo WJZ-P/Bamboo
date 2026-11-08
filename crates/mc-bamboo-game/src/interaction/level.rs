@@ -8,6 +8,7 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::blocks;
+use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
@@ -17,6 +18,8 @@ use crate::{inbound::PlayerId, player::Player};
 pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
+    /// 方块实体从物品带来的组件，换了方块就丢，见 [`crate::block_items`]。
+    pub(crate) block_items: &'a mut BTreeMap<BlockPos, ComponentPatch>,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
     pub(crate) random: &'a LevelRandom,
     pub(crate) redstone: &'a mut RedstoneMemory,
@@ -30,7 +33,13 @@ impl Level for RegionLevel<'_> {
     }
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
+        let previous = self.chunks.block(pos).map(BlockState);
         let written = self.chunks.set_block(pos, state.0);
+        // 官方 `LevelChunk.setBlockState`：换成别的方块时旧的方块实体就没了。
+        // 区块里那份 `getUpdateTag` 由 `Chunk::set_block` 自己丢。
+        if written && previous.is_some_and(|previous| !previous.is_same_block(state)) {
+            self.block_items.remove(&pos);
+        }
         // 官方 `Level.setBlock` 只在 `UPDATE_CLIENTS` 时才 `sendBlockUpdated`，
         // 活塞的移动方块用 `UPDATE_INVISIBLE` 写，客户端会自己播放动画。
         if written && flags & mc_bamboo_blocks::world::UPDATE_CLIENTS != 0 {

@@ -2127,10 +2127,13 @@ fn a_player_arriving_later_gets_chests_and_banners_in_the_chunk() {
         .find(|frame| chunk_position(frame) == ChunkPos::new(0, 0))
         .expect("第一批里有出生点的区块");
     let banner = block_entity_type::BANNER as u8;
+    // 箱子的 `getUpdateTag` 是空的，官方写一个 `TAG_End`。
     assert!(contains(chunk_body(chunk), &[0x35, 0xff, 0xc4, 0x01, 0x00]));
+    // 旗帜的 `getUpdateTag` 走 `saveWithoutMetadata`，至少带一张空的组件表，
+    // 所以后面跟的是一个 `TAG_Compound`。
     assert!(contains(
         chunk_body(chunk),
-        &[0x45, 0xff, 0xc4, banner, 0x00]
+        &[0x45, 0xff, 0xc4, banner, 0x0a, 0x0a, 0x00, 0x0a]
     ));
 }
 

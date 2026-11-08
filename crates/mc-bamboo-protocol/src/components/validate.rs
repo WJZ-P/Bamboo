@@ -10,7 +10,7 @@ use mc_bamboo_data::registries::data_component_type as kinds;
 
 use crate::{
     codec::DecodeError,
-    components::{ComponentPatch, ComponentValue, PatchEntry, defaults, stack::ItemStackTemplate},
+    components::{ComponentPatch, ComponentValue, defaults, stack::ItemStackTemplate},
     item::ItemStack,
 };
 
@@ -31,6 +31,8 @@ pub fn validate_stack(stack: &ItemStack) -> Result<(), DecodeError> {
 }
 
 /// 官方 `ItemStack.validateComponents`。
+///
+/// 官方看的是解析好的组件表，所以每一项都要走 [`defaults::resolve`]，不能只看补丁。
 pub fn validate_components(item: i32, patch: &ComponentPatch) -> Result<(), DecodeError> {
     // 官方：既能损坏又能堆叠是非法的。
     if defaults::resolve(item, patch, kinds::MAX_DAMAGE).is_some()
@@ -41,33 +43,34 @@ pub fn validate_components(item: i32, patch: &ComponentPatch) -> Result<(), Deco
         ));
     }
 
-    for (_, entry) in patch.entries() {
-        let PatchEntry::Set(value) = entry else {
-            continue;
-        };
-        match value {
-            ComponentValue::Container(slots) => {
-                for stack in slots.iter().flatten() {
-                    validate_contained(stack)?;
-                }
-            }
-            ComponentValue::BundleContents(stacks) | ComponentValue::ChargedProjectiles(stacks) => {
-                for stack in stacks {
-                    validate_contained(stack)?;
-                }
-            }
-            _ => {}
-        }
+    if let Some(ComponentValue::Container(slots)) = defaults::resolve(item, patch, kinds::CONTAINER)
+    {
+        validate_contained_sizes(slots.iter().flatten())?;
+    }
+    // 官方还会查收纳袋的总重量，我们没算，见 README 的已知限制。
+    if let Some(ComponentValue::BundleContents(stacks)) =
+        defaults::resolve(item, patch, kinds::BUNDLE_CONTENTS)
+    {
+        validate_contained_sizes(stacks.iter())?;
+    }
+    if let Some(ComponentValue::ChargedProjectiles(stacks)) =
+        defaults::resolve(item, patch, kinds::CHARGED_PROJECTILES)
+    {
+        validate_contained_sizes(stacks.iter())?;
     }
     Ok(())
 }
 
-/// 官方 `ItemStack.validateContainedItemSizes`，再往下递归。
-fn validate_contained(stack: &ItemStackTemplate) -> Result<(), DecodeError> {
-    if stack.count > stack.max_stack_size() {
-        return Err(DecodeError::InvalidItemCount(stack.count));
+/// 官方 `ItemStack.validateContainedItemSizes`：只查数量，不往下递归。
+fn validate_contained_sizes<'a>(
+    stacks: impl Iterator<Item = &'a ItemStackTemplate>,
+) -> Result<(), DecodeError> {
+    for stack in stacks {
+        if stack.count > stack.max_stack_size() {
+            return Err(DecodeError::InvalidItemCount(stack.count));
+        }
     }
-    validate_components(stack.item, &stack.components)
+    Ok(())
 }
 
 /// 官方 `ItemStack.getMaxStackSize`：补丁和默认组件合起来之后的 `max_stack_size`。

@@ -25,7 +25,7 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    container, entity_sync,
+    block_items, container, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory,
@@ -441,6 +441,16 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let hit = block_hit(packet);
     let outcome = mc_bamboo_blocks::use_item_on(&mut level, ticks, &actor, packet.hand, &hit);
 
+    // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
+    if let Some(placed) = outcome.placed_at {
+        let stack = region
+            .players
+            .get(&id)
+            .map(|player| player.inventory.held(packet.hand).clone());
+        if let Some(stack) = stack {
+            block_items::apply(region, placed, &stack);
+        }
+    }
     send_effects(region, Some(id), &outcome.effects);
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item {
@@ -519,6 +529,16 @@ pub(crate) fn on_use_item(
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::use_item(&mut level, ticks, &actor, hand);
 
+    // 睡莲这类 `PlaceOnWaterBlockItem` 的放置走这条路，一样要把组件留给方块实体。
+    if let Some(placed) = outcome.placed_at {
+        let stack = region
+            .players
+            .get(&id)
+            .map(|player| player.inventory.held(hand).clone());
+        if let Some(stack) = stack {
+            block_items::apply(region, placed, &stack);
+        }
+    }
     send_effects(region, Some(id), &outcome.effects);
     swing(region, id, hand, outcome.result);
 }
