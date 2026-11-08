@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::{
     book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    container, entity_sync,
+    container, entity_sync, game_mode,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
@@ -208,8 +208,18 @@ impl World {
         if !self.region.links.is_open(player) {
             return;
         }
+        if let PlayRequest::ChatCommand { command } = request {
+            if !game_mode::try_command(&mut self.global, &mut self.region, player, &command) {
+                chat::on_chat_command(&mut self.region, player, command);
+            }
+            return;
+        }
         let region = &mut self.region;
         match request {
+            // 聊天命令在上面处理过了，这里只是让匹配穷尽。
+            //
+            // Chat commands are handled above. This arm only makes the match exhaustive.
+            PlayRequest::ChatCommand { .. } => {}
             PlayRequest::AcceptTeleportation {
                 id,
                 x,
@@ -237,9 +247,6 @@ impl World {
                     region.links.broadcast(&frames);
                     chat::detect_chat_rate_spam(region, player);
                 }
-            }
-            PlayRequest::ChatCommand { command } => {
-                chat::on_chat_command(region, player, command);
             }
             PlayRequest::ClientCommand { action } => {
                 chat::on_client_command(region, player, action);

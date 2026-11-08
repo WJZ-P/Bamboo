@@ -113,6 +113,15 @@ impl Global {
         }))
     }
 
+    /// 名单上的游戏模式。后进服的人靠这份名单看到别人现在的模式。
+    ///
+    /// The roster's game mode. Players who join later see the current mode from this list.
+    pub(crate) fn set_game_mode(&mut self, id: PlayerId, mode: GameMode) {
+        if let Some(entry) = self.roster.get_mut(&id) {
+            entry.game_mode = mode;
+        }
+    }
+
     /// 记下心跳算出的新延迟。下一次周期广播时才发出去。
     pub(crate) fn set_latency(&mut self, id: PlayerId, millis: i32) {
         if let Some(entry) = self.roster.get_mut(&id) {

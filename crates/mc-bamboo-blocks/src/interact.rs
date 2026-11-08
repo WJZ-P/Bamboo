@@ -185,6 +185,12 @@ pub fn destroy_block(
     if world.remove_block(pos) {
         state.destroy(&mut world, pos);
     }
+    // `preventsBlockDrops`（创造模式）在 `mineBlock` 之前返回。剪刀和普通工具都在这里扣耐久。
+    //
+    // `preventsBlockDrops` (creative) returns before `mineBlock`. Shears and other tools spend durability here.
+    if !actor.prevents_block_drops {
+        crate::durability::mine_block(&world, state);
+    }
     finish(world, InteractionResult::Success)
 }
 

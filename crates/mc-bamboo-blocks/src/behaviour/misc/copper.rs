@@ -158,12 +158,18 @@ impl Behaviour for CopperGolemStatue {
 /// `WeatheringCopperGolemStatueBlock`：会氧化的雕像。
 pub(super) struct WeatheringCopperGolemStatue;
 
-/// 没有氧化的雕像被斧头点中时变回铜傀儡。实体不在范围里，方块和官方一样消失。
-fn revive_statue(state: BlockState, world: &mut World, pos: BlockPos) -> InteractionResult {
+/// 没有氧化的雕像被斧头点中时变回铜傀儡。实体不在范围里，方块和官方成功路径一样消失。
+///
+/// An unaffected statue hit with an axe turns back into a copper golem. The entity is out of scope; the block disappears, matching vanilla's success path.
+fn revive_statue(state: BlockState, world: &mut World, ctx: &UseContext) -> InteractionResult {
     if field_name(state.block(), "getAge()") != "unaffected" {
         return InteractionResult::Pass;
     }
-    world.remove_block(pos);
+    // 官方先 `hurtAndBreak(1)`，傀儡生成成功才 `removeBlock`。这里没有方块实体，方块总会消失。
+    //
+    // Vanilla calls `hurtAndBreak(1)` first and `removeBlock` only when the golem exists. There is no block entity here, so the block always disappears.
+    crate::durability::hurt_hand(world, ctx.hand, 1);
+    world.remove_block(ctx.clicked_pos());
     InteractionResult::Success
 }
 
@@ -205,7 +211,7 @@ impl Behaviour for WeatheringCopperGolemStatue {
     ) -> InteractionResult {
         let pos = ctx.clicked_pos();
         if item_is_tagged(ctx.item, item_tags::AXES) {
-            return revive_statue(state, world, pos);
+            return revive_statue(state, world, ctx);
         }
         if ctx.item == items::HONEYCOMB {
             return InteractionResult::Pass;

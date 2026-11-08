@@ -38,6 +38,14 @@ impl Behaviour for Beehive {
     ) -> InteractionResult {
         let harvests = ctx.item == items::SHEARS || ctx.item == items::GLASS_BOTTLE;
         if state.get(LEVEL_HONEY) >= MAX_HONEY_LEVELS && harvests {
+            // 剪刀在掉蜜脾之后、清零之前 `hurtAndBreak(1)`。掉落表的随机数还没做。
+            // 玻璃瓶官方会 `shrink(1)` 并给出蜂蜜瓶，这里还不消耗瓶子。
+            //
+            // Shears call `hurtAndBreak(1)` after the honeycomb drop and before the reset. The loot random draws are not implemented.
+            // A glass bottle `shrink(1)`s and yields a honey bottle in vanilla; the bottle is not consumed here yet.
+            if ctx.item == items::SHEARS {
+                crate::durability::hurt_hand(world, ctx.hand, 1);
+            }
             world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;
         }

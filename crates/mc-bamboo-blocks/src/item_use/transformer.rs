@@ -34,6 +34,15 @@ pub(super) fn transform_block(
         return InteractionResult::Pass;
     };
     let state = fitted_to_neighbours(transform, world, state, pos);
+    // 掉落物表在官方这里取随机数，还没做。耐久在写方块之前扣，和 `transformBlock` 一样。
+    //
+    // The loot table draws here in vanilla and is not implemented. Durability is spent before the block write, as in `transformBlock`.
+    crate::durability::pay_for_transform(
+        world,
+        ctx,
+        transform.consume_on_use,
+        transform.item_damage_per_use,
+    );
     world.set_block(pos, state, UPDATE_ALL_IMMEDIATE);
     InteractionResult::Success
 }

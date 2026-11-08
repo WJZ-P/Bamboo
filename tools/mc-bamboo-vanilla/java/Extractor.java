@@ -97,6 +97,10 @@ import net.minecraft.world.item.component.FireworkExplosion;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.component.MapPostProcessing;
 import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.enchantment.ConditionalEffect;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.effects.EnchantmentValueEffect;
 import net.minecraft.world.item.alchemy.Potion;
 import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.crafting.*;
@@ -214,6 +218,7 @@ public final class Extractor {
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
+            root.add("itemDamageEnchantments", itemDamageEnchantments(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
             root.add("attributeDefaults", attributeDefaults());
@@ -1194,7 +1199,37 @@ public final class Extractor {
         transform.add("provider", stateProvider(data.blockStateProvider().value()));
         transform.add("disallowedFaces", faces);
         transform.addProperty("updateFromNeighbors", data.updateFromNeighbors());
+        transform.addProperty("consumeOnUse", data.consumeOnUse());
+        transform.addProperty("itemDamagePerUse", data.itemDamagePerUse());
         return transform;
+    }
+
+    /**
+     * 带 {@code minecraft:item_damage} 效果的附魔。耐久附魔是数据驱动的，这里用官方 codec 把效果原样编出来。
+     *
+     * <p>没有这个效果的附魔不出现。效果列表的顺序就是 {@code Enchantment.getEffects} 的顺序。
+     *
+     * <p>Enchantments whose {@code minecraft:item_damage} list is non-empty. The codec output is kept as-is, in
+     * {@code Enchantment.getEffects} order.
+     */
+    private static JsonArray itemDamageEnchantments(RegistryAccess registries) {
+        Registry<Enchantment> registry = registries.lookupOrThrow(Registries.ENCHANTMENT);
+        Codec<List<ConditionalEffect<EnchantmentValueEffect>>> codec =
+                ConditionalEffect.codec(EnchantmentValueEffect.CODEC).listOf();
+        RegistryOps<JsonElement> ops = registries.createSerializationContext(JsonOps.INSTANCE);
+        JsonArray enchantments = new JsonArray();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            List<ConditionalEffect<EnchantmentValueEffect>> effects =
+                    registry.getValue(name).getEffects(EnchantmentEffectComponents.ITEM_DAMAGE);
+            if (effects.isEmpty()) {
+                continue;
+            }
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", name.toString());
+            entry.add("effects", codec.encodeStart(ops, effects).getOrThrow());
+            enchantments.add(entry);
+        }
+        return enchantments;
     }
 
     private static JsonObject stateProvider(BlockStateProvider provider) throws ReflectiveOperationException {

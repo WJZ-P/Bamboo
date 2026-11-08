@@ -76,7 +76,7 @@ impl Inventory {
     }
 
     /// 这只手的菜单槽位。
-    fn hand_slot(&self, hand: Hand) -> usize {
+    pub(crate) fn hand_slot(&self, hand: Hand) -> usize {
         match hand {
             Hand::Main => HOTBAR_START + usize::from(self.selected),
             Hand::Off => OFF_HAND,

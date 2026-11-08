@@ -56,6 +56,14 @@ impl Behaviour for Tnt {
         }
         prime(world);
         world.set_block(ctx.clicked_pos(), BlockState::AIR, UPDATE_ALL_IMMEDIATE);
+        // 打火石 `hurtAndBreak(1)`，火焰弹 `consume(1)`。都在方块消失之后。
+        //
+        // Flint and steel uses `hurtAndBreak(1)`; a fire charge uses `consume(1)`. Both happen after the block is gone.
+        if ctx.item == items::FLINT_AND_STEEL {
+            crate::durability::hurt_hand(world, ctx.hand, 1);
+        } else {
+            crate::durability::consume_hand(ctx.hand, 1);
+        }
         InteractionResult::Success
     }
 }

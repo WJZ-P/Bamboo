@@ -213,6 +213,24 @@ impl ClientboundPacket for UpdateAttributes<'_> {
     }
 }
 
+/// `ClientboundEntityEventPacket`：物品损坏时是 47 到 52，按装备槽。
+///
+/// `ClientboundEntityEventPacket`: item breaks use 47 through 52, one per equipment slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntityEvent {
+    pub entity_id: i32,
+    pub event: u8,
+}
+
+impl ClientboundPacket for EntityEvent {
+    const ID: i32 = clientbound::ENTITY_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.entity_id.to_be_bytes());
+        out.push(self.event);
+    }
+}
+
 /// 实体的装备槽。枚举值是官方的 ordinal，不是 `EquipmentSlot.id`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EquipmentSlot {

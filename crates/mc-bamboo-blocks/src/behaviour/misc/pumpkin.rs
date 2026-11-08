@@ -32,6 +32,10 @@ impl Behaviour for Pumpkin {
         };
         let carved = BlockState(blocks::CARVED_PUMPKIN).with(HORIZONTAL_FACING, facing);
         world.set_block(ctx.clicked_pos(), carved, UPDATE_ALL_IMMEDIATE);
+        // 种子掉落在写方块之前取随机数，还没做。耐久在写方块之后扣。
+        //
+        // Seed drops draw before the block write and are not implemented. Durability is spent after the write.
+        crate::durability::hurt_hand(world, ctx.hand, 1);
         InteractionResult::Success
     }
 }

@@ -1,7 +1,7 @@
 //! 方块交互的网络一侧：够距、点击点、序列号和确认、高度提示、把当前的方块发回去。
 //!
 //! 方块的逻辑都在 `mc_bamboo_blocks` 里，这里只把玩家的动作交给它，再把结果发给客户端。
-//! M2 只有创造模式：破坏一步完成，放置不扣物品。
+//! 创造模式破坏一步完成，也不扣物品数量。生存模式按挖掘进度破坏，工具会掉耐久。
 //! 客户端在本地预测这些操作，结果靠 `block_update` 和 `block_changed_ack` 收敛到服务端。
 
 pub(crate) mod adventure;
@@ -29,7 +29,7 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    block_items, container, entity_sync,
+    block_items, container, durability, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory,
@@ -478,16 +478,18 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let held = player.inventory.held(packet.hand).clone();
     let is_placement_attempt = rules::is_placement_attempt(&held);
 
-    let (mut level, ticks) = region.block_level();
-    let hit = block_hit(packet);
-    let outcome = mc_bamboo_blocks::use_item_on_checked(
-        &mut level,
-        ticks,
-        &actor,
-        packet.hand,
-        &hit,
-        |state| actor.may_build || adventure::can_place_on(&held, state),
-    );
+    let outcome = durability::run(region, id, packet.hand, |region| {
+        let (mut level, ticks) = region.block_level();
+        let hit = block_hit(packet);
+        mc_bamboo_blocks::use_item_on_checked(
+            &mut level,
+            ticks,
+            &actor,
+            packet.hand,
+            &hit,
+            |state| actor.may_build || adventure::can_place_on(&held, state),
+        )
+    });
 
     // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {

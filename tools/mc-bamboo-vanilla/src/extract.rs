@@ -39,6 +39,8 @@ pub struct Extracted {
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
+    /// 带 `minecraft:item_damage` 效果的附魔，按名字排序。
+    pub item_damage_enchantments: Vec<ItemDamageEnchantment>,
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
     /// 属性名字 → 默认值，没有状态效果和附魔时的起点。
@@ -473,6 +475,114 @@ pub struct BlockTransform {
     /// `Direction` 的 ID。
     pub disallowed_faces: Vec<i32>,
     pub update_from_neighbors: bool,
+    /// `consumeOnUse`。可堆叠物品用完时是否减 1。
+    pub consume_on_use: bool,
+    /// `itemDamagePerUse`。不可堆叠时 `hurtAndBreak` 的点数。codec 缺省是 0，生成器导出加载后的值。
+    pub item_damage_per_use: i32,
+}
+
+/// 一个附魔上的 `minecraft:item_damage` 效果。
+#[derive(Debug, Deserialize)]
+pub struct ItemDamageEnchantment {
+    pub name: String,
+    pub effects: Vec<ConditionalValueEffect>,
+}
+
+/// `ConditionalEffect`：效果，以及可选的战利品条件。
+#[derive(Debug, Deserialize)]
+pub struct ConditionalValueEffect {
+    pub effect: ValueEffectJson,
+    #[serde(default)]
+    pub requirements: Option<LootConditionJson>,
+}
+
+/// `EnchantmentValueEffect` 的 codec。不认识的 `type` 让反序列化失败，生成器因此停下来。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ValueEffectJson {
+    #[serde(rename = "minecraft:add")]
+    Add { value: LevelValueJson },
+    #[serde(rename = "minecraft:all_of")]
+    AllOf { effects: Vec<ValueEffectJson> },
+    #[serde(rename = "minecraft:multiply")]
+    Multiply { factor: LevelValueJson },
+    #[serde(rename = "minecraft:remove_binomial")]
+    RemoveBinomial { chance: LevelValueJson },
+    #[serde(rename = "minecraft:exponential")]
+    Exponential {
+        base: LevelValueJson,
+        exponent: LevelValueJson,
+    },
+    #[serde(rename = "minecraft:set")]
+    Set { value: LevelValueJson },
+}
+
+/// `LevelBasedValue`。裸数字是 `Constant`，其余按 `type` 分派。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum LevelValueJson {
+    Constant(f32),
+    Typed(TypedLevelJson),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum TypedLevelJson {
+    #[serde(rename = "minecraft:clamped")]
+    Clamped {
+        value: Box<LevelValueJson>,
+        min: f32,
+        max: f32,
+    },
+    #[serde(rename = "minecraft:constant")]
+    Constant { value: f32 },
+    #[serde(rename = "minecraft:exponent")]
+    Exponent {
+        base: Box<LevelValueJson>,
+        power: Box<LevelValueJson>,
+    },
+    #[serde(rename = "minecraft:fraction")]
+    Fraction {
+        numerator: Box<LevelValueJson>,
+        denominator: Box<LevelValueJson>,
+    },
+    #[serde(rename = "minecraft:levels_squared")]
+    LevelsSquared { added: f32 },
+    #[serde(rename = "minecraft:linear")]
+    Linear {
+        base: f32,
+        per_level_above_first: f32,
+    },
+    #[serde(rename = "minecraft:lookup")]
+    Lookup {
+        values: Vec<f32>,
+        fallback: Box<LevelValueJson>,
+    },
+}
+
+/// `item_damage` 用到的战利品条件。别的条件类型会让反序列化失败。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum LootConditionJson {
+    #[serde(rename = "minecraft:all_of")]
+    AllOf { terms: Vec<LootConditionJson> },
+    #[serde(rename = "minecraft:any_of")]
+    AnyOf { terms: Vec<LootConditionJson> },
+    #[serde(rename = "minecraft:inverted")]
+    Inverted { term: Box<LootConditionJson> },
+    #[serde(rename = "minecraft:match_tool")]
+    MatchTool {
+        #[serde(default)]
+        predicate: Option<ItemPredicateJson>,
+    },
+}
+
+/// `MatchTool` 的物品谓词。出现 `count` 或 `components` 时拒绝，避免把没实现的比较当成通过。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemPredicateJson {
+    #[serde(default)]
+    pub items: Option<serde_json::Value>,
 }
 
 /// `Extractor.java` 只导出这几种状态提供器，别的在那边就报错。
@@ -728,6 +838,8 @@ pub struct VersionData {
     pub block_maps: BlockMaps,
     /// 按名字排序。
     pub block_transformers: Vec<BlockTransformer>,
+    /// 带 `minecraft:item_damage` 效果的附魔，按名字排序。
+    pub item_damage_enchantments: Vec<ItemDamageEnchantment>,
     pub recipes: RecipesFile,
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
@@ -787,6 +899,7 @@ pub fn run(
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
         block_transformers: extracted.block_transformers,
+        item_damage_enchantments: extracted.item_damage_enchantments,
         recipes: RecipesFile {
             damageable,
             dyed,

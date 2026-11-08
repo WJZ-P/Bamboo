@@ -8,6 +8,7 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod heightmaps;
 pub mod item_components;
+pub mod item_damage;
 pub mod items;
 pub mod light;
 pub mod packets;

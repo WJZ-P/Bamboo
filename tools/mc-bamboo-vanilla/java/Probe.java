@@ -101,6 +101,7 @@ import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundDisguisedChatPacket;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
 import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
 import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
@@ -310,12 +311,16 @@ public final class Probe {
     /** 改过名的箱子，打开时的菜单标题就是它。 */
     private static final String CHEST_NAME = "小猫的箱子";
     private static final String UNKNOWN_COMMAND = "Unknown or incomplete command. See below for error";
+    /** `LivingEntity.entityEventForEquipmentBreak` 的主手。 */
+    // Main hand in `LivingEntity.entityEventForEquipmentBreak`.
+    private static final byte EQUIPMENT_BREAK_MAIN_HAND = 47;
 
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
     private static final Set<String> M2_PACKETS = Set.of(
             "handleAddEntity",
             "handleAwardStats",
             "handleBlockChangedAck",
+            "handleBlockDestruction",
             "handleBlockEntityData",
             "handleBlockEvent",
             "handleBlockUpdate",
@@ -328,6 +333,7 @@ public final class Probe {
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
+            "handleEntityEvent",
             "handleEntityPositionSync",
             "handleForgetLevelChunk",
             "handleGameEvent",
@@ -602,6 +608,7 @@ public final class Probe {
                 section("chat" + names, () -> chat(actor, observer));
             }
 
+            section("tool durability", () -> toolDurability(kitten, mochi));
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
 
@@ -1502,6 +1509,57 @@ public final class Probe {
             check("chat: statistics only go to the requester", observer.stats == otherStats);
         }
 
+        /**
+         * 耐久只剩 1 的镐挖掉一块草方块，客户端收到损坏事件，快捷栏那格变空，然后回到创造模式。
+         *
+         * A pickaxe with one durability mines one grass block. The client gets the break event,
+         * that hotbar slot becomes empty, and the mode returns to creative.
+         */
+        private void toolDurability(Join actor, Join observer) throws IOException {
+            ItemStack pick = new ItemStack(Items.DIAMOND_PICKAXE);
+            pick.setDamageValue(pick.getMaxDamage() - 1);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, pick));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            // 创造模式写槽不回包。清掉旧记录，后面必须看到这一格被写成空。
+            //
+            // Creative slot writes are not echoed. Drop the old record so the empty slot has to arrive.
+            actor.slots.remove(HOTBAR_START);
+            BlockPos feet = BlockPos.containing(actor.position);
+            BlockPos grass = feet.offset(3, -1, 1);
+            actor.edits.add(new Edit(grass, Blocks.AIR.defaultBlockState()));
+            int ownEvents = actor.entityEvents.size();
+            int otherEvents = observer.entityEvents.size();
+            boolean survival = false;
+            try {
+                actor.gameModeParam = Float.NaN;
+                actor.send(new ServerboundChatCommandPacket("gamemode survival"));
+                await("durability: the game mode becomes survival", () -> actor.gameModeParam == 0.0f);
+                survival = true;
+                // 生存模式不会在进度到 1 时自己挖穿，停手后不够 0.7 会转成延迟破坏，几刻后挖掉。
+                //
+                // Survival does not finish a block when progress reaches 1. Stopping under 0.7 becomes a delayed break.
+                int sequence = actor.nextSequence();
+                actor.send(new ServerboundPlayerActionPacket(
+                        ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, grass, Direction.UP, sequence));
+                actor.send(new ServerboundPlayerActionPacket(
+                        ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, grass, Direction.UP, actor.nextSequence()));
+                await("durability: the pickaxe breaks", () -> actor.entityEvents.size() > ownEvents
+                        && actor.slots.containsKey(HOTBAR_START)
+                        && actor.slots.get(HOTBAR_START).isEmpty());
+                check("durability: the break event is 47",
+                        actor.entityEvents.get(ownEvents) == EQUIPMENT_BREAK_MAIN_HAND);
+                await("durability: the observer sees the break", () -> observer.entityEvents.size() > otherEvents);
+                check("durability: the observer's break event is 47",
+                        observer.entityEvents.get(otherEvents) == EQUIPMENT_BREAK_MAIN_HAND);
+            } finally {
+                if (survival) {
+                    actor.gameModeParam = Float.NaN;
+                    actor.send(new ServerboundChatCommandPacket("gamemode creative"));
+                    await("durability: the game mode returns to creative", () -> actor.gameModeParam == 1.0f);
+                }
+            }
+        }
+
         /** 后来的玩家看到的区块要有之前所有的改动，方块实体也要在列表里。 */
         private void checkEditedChunks(Join first, Join second, Join late) throws IOException {
             await("late: the tab list holds three players", () -> late.tab.size() == 3);
@@ -1662,6 +1720,15 @@ public final class Probe {
         int entityDataPackets;
         int heldSlot = -1;
         int lastAck = -1;
+        /** 最近一次 `CHANGE_GAME_MODE` 的参数。还没收到时是 NaN。 */
+        // The latest `CHANGE_GAME_MODE` parameter. NaN until one arrives.
+        float gameModeParam = Float.NaN;
+        /** 收到的实体事件字节。物品损坏是 47 或 48。 */
+        // Entity-event bytes. An item break is 47 or 48.
+        final List<Byte> entityEvents = new ArrayList<>();
+        private boolean chunkLoadChecked;
+        private boolean abilitiesChecked;
+        private boolean attributesChecked;
         int acks;
         int stats;
         int openContainerId = -1;
@@ -2047,6 +2114,7 @@ public final class Probe {
             handlers.put("handlePlayerInfoRemove", value -> onPlayerInfoRemove((ClientboundPlayerInfoRemovePacket) value));
             handlers.put("handleSetTime", value -> onSetTime((ClientboundSetTimePacket) value));
             handlers.put("handleGameEvent", value -> onGameEvent((ClientboundGameEventPacket) value));
+            handlers.put("handleEntityEvent", value -> onEntityEvent((ClientboundEntityEventPacket) value));
             handlers.put("handleSetChunkCacheCenter",
                     value -> onChunkCenter((ClientboundSetChunkCacheCenterPacket) value));
             handlers.put("handleForgetLevelChunk",
@@ -2112,6 +2180,13 @@ public final class Probe {
         }
 
         private void onAbilities(ClientboundPlayerAbilitiesPacket packet) {
+            // 进服之后切模式还会再发能力包。创造模式的检查只看第一份。
+            //
+            // A mode change sends more abilities packets. The creative check looks at the first one.
+            if (abilitiesChecked) {
+                return;
+            }
+            abilitiesChecked = true;
             check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
         }
 
@@ -2128,6 +2203,9 @@ public final class Probe {
             var actions = packet.actions();
             if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_HAT))) {
                 packet.entries().forEach(entry -> hats.put(entry.profileId(), entry.showHat()));
+                return;
+            }
+            if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_GAME_MODE))) {
                 return;
             }
             if (!actions.contains(ClientboundPlayerInfoUpdatePacket.Action.ADD_PLAYER)) {
@@ -2188,7 +2266,19 @@ public final class Probe {
         }
 
         private void onGameEvent(ClientboundGameEventPacket packet) {
-            check("play: chunk loading event", packet.getEvent() == ClientboundGameEventPacket.LEVEL_CHUNKS_LOAD_START);
+            if (!chunkLoadChecked) {
+                chunkLoadChecked = true;
+                check("play: chunk loading event",
+                        packet.getEvent() == ClientboundGameEventPacket.LEVEL_CHUNKS_LOAD_START);
+                return;
+            }
+            if (packet.getEvent() == ClientboundGameEventPacket.CHANGE_GAME_MODE) {
+                gameModeParam = packet.getParam();
+            }
+        }
+
+        private void onEntityEvent(ClientboundEntityEventPacket packet) {
+            entityEvents.add(packet.getEventId());
         }
 
         private void onChunkCenter(ClientboundSetChunkCacheCenterPacket packet) {
@@ -2257,6 +2347,13 @@ public final class Probe {
 
         private void onAttributes(ClientboundUpdateAttributesPacket packet) {
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
+            // 切出创造模式会再发一份没有加成的属性。创造加成只检查进服的第一份。
+            //
+            // Leaving creative sends the attributes again without the bonus. Only the first packet is checked.
+            if (attributesChecked) {
+                return;
+            }
+            attributesChecked = true;
             var names = packet.getValues().stream()
                     .map(snapshot -> snapshot.attribute().unwrapKey().orElseThrow().identifier().getPath())
                     .toList();

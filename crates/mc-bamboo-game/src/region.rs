@@ -50,7 +50,7 @@ const ABILITIES: PlayerAbilities = PlayerAbilities {
 };
 
 /// 创造模式的触及距离加成完全由服务端下发，客户端代码里没有这两个数。
-const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
+pub(crate) const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
     AttributeSnapshot {
         attribute: attribute::BLOCK_INTERACTION_RANGE,
         base: 4.5,

@@ -169,6 +169,25 @@ impl ClientboundPacket for SetTime {
     }
 }
 
+/// `ClientboundGameEventPacket.CHANGE_GAME_MODE`。参数是模式 ID 的浮点值。
+///
+/// `ClientboundGameEventPacket.CHANGE_GAME_MODE`. The parameter is the mode id as a float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeGameMode {
+    pub mode: GameMode,
+}
+
+impl ClientboundPacket for ChangeGameMode {
+    const ID: i32 = clientbound::GAME_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        /// `ClientboundGameEventPacket.CHANGE_GAME_MODE`。
+        const CHANGE_GAME_MODE: u8 = 3;
+        out.push(CHANGE_GAME_MODE);
+        out.extend_from_slice(&(self.mode as i32 as f32).to_be_bytes());
+    }
+}
+
 /// 通知客户端开始等待区块，客户端收到后才会结束加载画面的流程。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelChunksLoadStart;
@@ -425,6 +444,23 @@ mod tests {
     #[test]
     fn level_chunks_load_start_matches_official_bytes() {
         assert_eq!(frame(&LevelChunksLoadStart), hex("06 27 0d 00 00 00 00"));
+    }
+
+    #[test]
+    fn change_game_mode_and_entity_event_match_official_layout() {
+        assert_eq!(
+            frame(&ChangeGameMode {
+                mode: GameMode::Survival
+            }),
+            hex("06 27 03 00 00 00 00")
+        );
+        assert_eq!(
+            frame(&EntityEvent {
+                entity_id: 7,
+                event: 47
+            }),
+            hex("06 22 00 00 00 07 2f")
+        );
     }
 
     #[test]

@@ -72,6 +72,10 @@ impl Behaviour for Campfire {
         }
         if item_is_tagged(ctx.item, item_tags::DOUSES_CAMPFIRES) && state.get(LIT) {
             world.set_block_and_update(ctx.clicked_pos(), state.with(LIT, false));
+            // `hurtAndBreak(1)` 在熄灭之后。1009 音效没有随机数。
+            //
+            // `hurtAndBreak(1)` happens after the douse. Level event 1009 draws nothing.
+            crate::durability::hurt_hand(world, ctx.hand, 1);
             return InteractionResult::Success;
         }
         InteractionResult::TryEmptyHandInteraction
