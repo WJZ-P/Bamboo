@@ -1050,9 +1050,15 @@ impl<'a> World<'a> {
         }
 
         // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
-        if block_changed && old.has_block_entity() {
-            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
+        // 新状态自己声明要留下实体时（铜箱子这些）两步都跳过。
+        let mut entity_dropped_contents = false;
+        if block_changed && old.has_block_entity() && !block_entity::keeps_block_entity(state, old)
+        {
+            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 && self.has_block_entity(pos) {
+                // 活塞的 `finalTick`、熔炉和酿造台的掉落都在实体自己的回调里。
+                // Piston `finalTick`, and furnace or brewing drops, run on the entity.
                 self.pre_remove_block_entity(pos, old);
+                entity_dropped_contents = block_entity::drops_own_contents(old);
             }
             self.remove_block_entity(pos);
         }
@@ -1072,9 +1078,16 @@ impl<'a> World<'a> {
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        // Vanilla drops the block entity before `affectNeighborsAfterRemoval`. The order decides
-        // which random values come next.
-        if let Some(counts) = dropped_counts {
+        // 熔炉和酿造台有实体时已经在上面掉过，这里再掉一次随机数会翻倍。唱片机不在那一组里，
+        // 弹出唱片的两个 `nextFloat` 仍走下面的 `pre_remove_side_effects`。
+        //
+        // Vanilla drops before `affectNeighborsAfterRemoval`. A furnace or brewing stand
+        // that still had an entity already dropped above; dropping again would double the draws.
+        // A jukebox is not in that group, so the two `nextFloat`s of popping the disc still run
+        // in `pre_remove_side_effects` below.
+        if let Some(counts) = dropped_counts
+            && !entity_dropped_contents
+        {
             block_entity::pre_remove_side_effects(old, self, &counts);
         }
         if jukebox_count > 0 {

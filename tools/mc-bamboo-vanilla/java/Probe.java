@@ -353,10 +353,14 @@ public final class Probe {
             "handleRemoveEntities",
             "handleRotateMob",
             "handleSetChunkCacheCenter",
+            // 光标变化时官方发 `set_cursor_item`。关菜单把材料退回物品栏时发 `set_player_inventory`。
+            // Vanilla sends `set_cursor_item` when the cursor changes, and `set_player_inventory` when closing a menu returns items.
+            "handleSetCursorItem",
             "handleSetEntityData",
             "handleSetEntityMotion",
             "handleSetEquipment",
             "handleSetHeldSlot",
+            "handleSetPlayerInventory",
             "handleSetTime",
             "handleSoundEvent",
             "handleSwingAnimation",
@@ -615,6 +619,7 @@ public final class Probe {
             section("world entities", () -> worldEntities(kitten, mochi));
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
+            section("crafting", () -> crafting(kitten));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
@@ -1645,6 +1650,50 @@ public final class Probe {
             opener.send(new ServerboundContainerClosePacket(opener.openContainerId));
             await("container: closing the chest is seen by the watcher",
                     () -> isClosedChest(watcher, chest));
+        }
+
+        /**
+         * 放下工作台，把一根橡木原木放进合成格，结果格应是四块橡木木板。
+         * Place a crafting table, put an oak log in the grid, and expect four oak planks.
+         */
+        private void crafting(Join actor) throws IOException {
+            // (2, -1, 2) 上已经有告示牌。换一格空地，避免放不下去。
+            // A sign already stands at (2, -1, 2). Use an empty cell so the table can be placed.
+            BlockPos ground = BlockPos.containing(actor.position).offset(1, -1, 2);
+            BlockPos table = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 6, new ItemStack(Items.CRAFTING_TABLE)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 7, new ItemStack(Items.OAK_LOG)));
+            actor.send(new ServerboundSetCarriedItemPacket(6));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    placing));
+            await("crafting: the table is placed",
+                    () -> actor.blocks.containsKey(table) && actor.blocks.get(table).is(Blocks.CRAFTING_TABLE));
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 8, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCarriedItemPacket(8));
+            actor.openMenuType = null;
+            actor.lastContentState = -1;
+            actor.menuSlots.clear();
+            int opening = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(table, 1.0), Direction.UP, table, false),
+                    opening));
+            await("crafting: the screen opens", () -> MenuType.CRAFTING.equals(actor.openMenuType));
+            await("crafting: the grid arrives", () -> actor.lastContentState >= 0);
+            check("crafting: the menu has forty-six slots", actor.lastContent.size() == 46);
+
+            int logSlot = 37 + 7;
+            actor.send(actor.click(logSlot, 0, ContainerInput.PICKUP));
+            actor.send(actor.click(1, 0, ContainerInput.PICKUP));
+            await("crafting: one log becomes four oak planks",
+                    () -> is(actor.menuSlots.get(0), Items.OAK_PLANKS, 4)
+                            && is(actor.menuSlots.get(1), Items.OAK_LOG, 1));
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
         }
 
         /** 这名玩家在 `blocks` 里放下的箱子。 */

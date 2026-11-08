@@ -19,9 +19,9 @@ pub use recipe::{
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, component_enums, component_registries, entity_types,
-    heightmaps, item_components, items, jukebox_songs, light, loot, packets, recipes, registries,
-    shapes, sounds, states, tags, version, worldgen,
+    block_maps, block_transformers, blocks, component_enums, component_registries,
+    crafting_remainders, entity_types, heightmaps, item_components, items, jukebox_songs, light,
+    loot, packets, recipes, registries, shapes, sounds, states, tags, version, worldgen,
 };
 
 pub use generated::sounds::{

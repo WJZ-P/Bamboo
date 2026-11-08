@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -100,6 +101,7 @@ import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.MobBucketItem;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.JukeboxSong;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.SolidBucketItem;
@@ -247,7 +249,11 @@ public final class Extractor {
             root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
-            root.add("itemComponents", itemComponents(resources, layers));
+            JsonArray itemComponents = new JsonArray();
+            JsonArray craftingRemainders = new JsonArray();
+            itemComponents(resources, layers, itemComponents, craftingRemainders);
+            root.add("itemComponents", itemComponents);
+            root.add("craftingRemainders", craftingRemainders);
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -281,6 +287,7 @@ public final class Extractor {
 
     /**
      * 每个物品的默认组件，按官方 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+     * 同时导出 `Item.getCraftingRemainder()`，那是物品上的字段，不是 `use_remainder` 组件。
      *
      * 默认组件是数据驱动的，`Item.components()` 要等 `ReloadableServerResources` 把它们绑上去
      * 才读得到，所以这里照 WorldLoader.load 的后半段再加载一次服务端资源。
@@ -302,8 +309,9 @@ public final class Extractor {
         return array;
     }
 
-    private static JsonArray itemComponents(
-            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers) throws Exception {
+    private static void itemComponents(
+            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers,
+            JsonArray items, JsonArray remainders) throws Exception {
         ReloadableServerResources managers = ReloadableServerResources
                 .loadResources(resources, layers, STATIC_TAGS, FeatureFlags.DEFAULT_FLAGS,
                         Commands.CommandSelection.DEDICATED, LevelBasedPermissionSet.GAMEMASTER,
@@ -312,7 +320,6 @@ public final class Extractor {
         managers.updateComponentsAndStaticRegistryTags();
         RegistryAccess registries = (RegistryAccess) managers.fullRegistries().lookup();
 
-        JsonArray items = new JsonArray();
         for (Item item : BuiltInRegistries.ITEM) {
             // 官方的 DataComponentMap 超过 8 项就换成按身份哈希排序的映射，遍历顺序每次运行都可能不同。
             // 组件补丁里的顺序没有含义，所以这里按组件类型的注册表 ID 排一遍，生成的字节才稳定。
@@ -327,19 +334,32 @@ public final class Extractor {
             for (TypedDataComponent<?> component : components) {
                 patch.set(component);
             }
-            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
-            DataComponentPatch.STREAM_CODEC.encode(buffer, patch.build());
-            byte[] bytes = new byte[buffer.readableBytes()];
-            buffer.readBytes(bytes);
+            items.add(encodePatch(patch.build(), registries));
 
-            StringBuilder hex = new StringBuilder(bytes.length * 2);
-            for (byte value : bytes) {
-                hex.append(Character.forDigit((value >> 4) & 0xf, 16));
-                hex.append(Character.forDigit(value & 0xf, 16));
+            ItemStackTemplate remainder = item.getCraftingRemainder();
+            if (remainder == null) {
+                remainders.add(JsonNull.INSTANCE);
+            } else {
+                JsonArray triple = new JsonArray();
+                triple.add(BuiltInRegistries.ITEM.getId(remainder.item().value()));
+                triple.add(remainder.count());
+                triple.add(encodePatch(remainder.components(), registries));
+                remainders.add(triple);
             }
-            items.add(hex.toString());
         }
-        return items;
+    }
+
+    private static String encodePatch(DataComponentPatch patch, RegistryAccess registries) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            hex.append(Character.forDigit((value >> 4) & 0xf, 16));
+            hex.append(Character.forDigit(value & 0xf, 16));
+        }
+        return hex.toString();
     }
 
     /**
@@ -1038,7 +1058,7 @@ public final class Extractor {
     private static JsonObject recipes(RegistryAccess registries) throws ReflectiveOperationException {
         JsonArray entries = new JsonArray();
         for (RecipeHolder<?> holder : new RecipeManager(registries).getRecipes()) {
-            entries.add(recipe(holder));
+            entries.add(recipe(holder, registries));
         }
         JsonObject object = new JsonObject();
         object.add("potions", potions());
@@ -1055,7 +1075,8 @@ public final class Extractor {
         return potions;
     }
 
-    private static JsonObject recipe(RecipeHolder<?> holder) throws ReflectiveOperationException {
+    private static JsonObject recipe(RecipeHolder<?> holder, RegistryAccess registries)
+            throws ReflectiveOperationException {
         Recipe<?> recipe = holder.value();
         JsonObject object = new JsonObject();
         object.addProperty("id", holder.id().identifier().toString());
@@ -1065,11 +1086,11 @@ public final class Extractor {
             object.addProperty("width", shaped.getWidth());
             object.addProperty("height", shaped.getHeight());
             object.add("pattern", pattern(shaped.getIngredients()));
-            object.add("result", stack((ItemStackTemplate) readField(ShapedRecipe.class, "result", shaped)));
+            object.add("result", stack((ItemStackTemplate) readField(ShapedRecipe.class, "result", shaped), registries));
         } else if (recipe instanceof ShapelessRecipe shapeless) {
             object.addProperty("kind", "shapeless");
             object.add("ingredients", ingredients((List<Ingredient>) readField(ShapelessRecipe.class, "ingredients", shapeless)));
-            object.add("result", stack((ItemStackTemplate) readField(ShapelessRecipe.class, "result", shapeless)));
+            object.add("result", stack((ItemStackTemplate) readField(ShapelessRecipe.class, "result", shapeless), registries));
         } else if (recipe instanceof TransmuteRecipe transmute) {
             object.addProperty("kind", "transmute");
             object.add("input", ingredient((Ingredient) readField(TransmuteRecipe.class, "input", transmute)));
@@ -1077,37 +1098,37 @@ public final class Extractor {
             MinMaxBounds.Ints bounds = (MinMaxBounds.Ints) readField(TransmuteRecipe.class, "materialCount", transmute);
             object.addProperty("minMaterial", bounds.min().orElse(1));
             object.addProperty("maxMaterial", bounds.max().orElse(8));
-            transmuteResult(object, (TransmuteResult) readField(TransmuteRecipe.class, "result", transmute));
+            transmuteResult(object, (TransmuteResult) readField(TransmuteRecipe.class, "result", transmute), registries);
             object.addProperty("addMaterialCount", (boolean) readField(TransmuteRecipe.class, "addMaterialCountToResult", transmute));
         } else if (recipe instanceof DyeRecipe dye) {
             object.addProperty("kind", "dye");
             object.add("target", ingredient((Ingredient) readField(DyeRecipe.class, "target", dye)));
             object.add("dye", ingredient((Ingredient) readField(DyeRecipe.class, "dye", dye)));
-            object.add("result", stack((ItemStackTemplate) readField(DyeRecipe.class, "result", dye)));
+            object.add("result", stack((ItemStackTemplate) readField(DyeRecipe.class, "result", dye), registries));
         } else if (recipe instanceof ImbueRecipe imbue) {
             object.addProperty("kind", "imbue");
             object.add("source", ingredient((Ingredient) readField(ImbueRecipe.class, "source", imbue)));
             object.add("material", ingredient((Ingredient) readField(ImbueRecipe.class, "material", imbue)));
-            object.add("result", stack((ItemStackTemplate) readField(ImbueRecipe.class, "result", imbue)));
+            object.add("result", stack((ItemStackTemplate) readField(ImbueRecipe.class, "result", imbue), registries));
         } else if (recipe instanceof AbstractCookingRecipe cooking) {
             String kind = recipe instanceof SmeltingRecipe ? "smelting"
                     : recipe instanceof BlastingRecipe ? "blasting"
                     : recipe instanceof SmokingRecipe ? "smoking" : "campfire_cooking";
             object.addProperty("kind", kind);
             object.add("ingredient", ingredient((Ingredient) readField(SingleItemRecipe.class, "input", cooking)));
-            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", cooking)));
+            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", cooking), registries));
             object.addProperty("experience", cooking.experience());
             object.addProperty("time", cooking.cookingTime());
         } else if (recipe instanceof StonecutterRecipe stonecutting) {
             object.addProperty("kind", "stonecutting");
             object.add("ingredient", ingredient((Ingredient) readField(SingleItemRecipe.class, "input", stonecutting)));
-            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", stonecutting)));
+            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", stonecutting), registries));
         } else if (recipe instanceof SmithingTransformRecipe transform) {
             object.addProperty("kind", "smithing_transform");
             object.add("template", optionalIngredient(transform.templateIngredient()));
             object.add("base", ingredient(transform.baseIngredient()));
             object.add("addition", optionalIngredient(transform.additionIngredient()));
-            object.add("result", stack((ItemStackTemplate) readField(SmithingTransformRecipe.class, "result", transform)));
+            object.add("result", stack((ItemStackTemplate) readField(SmithingTransformRecipe.class, "result", transform), registries));
         } else if (recipe instanceof SmithingTrimRecipe trim) {
             object.addProperty("kind", "smithing_trim");
             object.add("template", ingredient(trim.templateIngredient().orElseThrow()));
@@ -1119,13 +1140,13 @@ public final class Extractor {
             object.addProperty("kind", "brewing");
             object.add("input", potionIngredient(brewing.getInput()));
             object.add("reagent", potionIngredient(brewing.getReagent()));
-            object.add("result", stack(brewing.getOutput()));
+            object.add("result", stack(brewing.getOutput(), registries));
         } else if (recipe instanceof FireworkRocketRecipe rocket) {
             object.addProperty("kind", "firework_rocket");
             object.add("shell", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "shell", rocket)));
             object.add("fuel", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "fuel", rocket)));
             object.add("star", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "star", rocket)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkRocketRecipe.class, "result", rocket)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkRocketRecipe.class, "result", rocket), registries));
         } else if (recipe instanceof FireworkStarRecipe star) {
             object.addProperty("kind", "firework_star");
             JsonArray shapes = new JsonArray();
@@ -1141,21 +1162,21 @@ public final class Extractor {
             object.add("twinkle", ingredient((Ingredient) readField(FireworkStarRecipe.class, "twinkle", star)));
             object.add("fuel", ingredient((Ingredient) readField(FireworkStarRecipe.class, "fuel", star)));
             object.add("dye", ingredient((Ingredient) readField(FireworkStarRecipe.class, "dye", star)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkStarRecipe.class, "result", star)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkStarRecipe.class, "result", star), registries));
         } else if (recipe instanceof FireworkStarFadeRecipe fade) {
             object.addProperty("kind", "firework_star_fade");
             object.add("target", ingredient((Ingredient) readField(FireworkStarFadeRecipe.class, "target", fade)));
             object.add("dye", ingredient((Ingredient) readField(FireworkStarFadeRecipe.class, "dye", fade)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkStarFadeRecipe.class, "result", fade)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkStarFadeRecipe.class, "result", fade), registries));
         } else if (recipe instanceof MapExtendingRecipe map) {
             object.addProperty("kind", "mapextending");
             object.add("map", ingredient((Ingredient) readField(MapExtendingRecipe.class, "map", map)));
             object.add("material", ingredient((Ingredient) readField(MapExtendingRecipe.class, "material", map)));
-            transmuteResult(object, (TransmuteResult) readField(MapExtendingRecipe.class, "result", map));
+            transmuteResult(object, (TransmuteResult) readField(MapExtendingRecipe.class, "result", map), registries);
         } else if (recipe instanceof BannerDuplicateRecipe banner) {
             object.addProperty("kind", "banner_duplicate");
             object.add("banner", ingredient((Ingredient) readField(BannerDuplicateRecipe.class, "banner", banner)));
-            object.add("result", stack((ItemStackTemplate) readField(BannerDuplicateRecipe.class, "result", banner)));
+            object.add("result", stack((ItemStackTemplate) readField(BannerDuplicateRecipe.class, "result", banner), registries));
         } else if (recipe instanceof BookCloningRecipe book) {
             object.addProperty("kind", "book_cloning");
             object.add("source", ingredient((Ingredient) readField(BookCloningRecipe.class, "source", book)));
@@ -1163,12 +1184,12 @@ public final class Extractor {
             MinMaxBounds.Ints bounds = (MinMaxBounds.Ints) readField(BookCloningRecipe.class, "allowedGenerations", book);
             object.addProperty("minGeneration", bounds.min().orElse(0));
             object.addProperty("maxGeneration", bounds.max().orElse(Integer.MAX_VALUE));
-            object.add("result", stack((ItemStackTemplate) readField(BookCloningRecipe.class, "result", book)));
+            object.add("result", stack((ItemStackTemplate) readField(BookCloningRecipe.class, "result", book), registries));
         } else if (recipe instanceof ShieldDecorationRecipe shield) {
             object.addProperty("kind", "shield_decoration");
             object.add("banner", ingredient((Ingredient) readField(ShieldDecorationRecipe.class, "banner", shield)));
             object.add("target", ingredient((Ingredient) readField(ShieldDecorationRecipe.class, "target", shield)));
-            object.add("result", stack((ItemStackTemplate) readField(ShieldDecorationRecipe.class, "result", shield)));
+            object.add("result", stack((ItemStackTemplate) readField(ShieldDecorationRecipe.class, "result", shield), registries));
         } else if (recipe instanceof RepairItemRecipe) {
             object.addProperty("kind", "repair_item");
         } else if (recipe instanceof DecoratedPotRecipe pot) {
@@ -1177,7 +1198,7 @@ public final class Extractor {
             object.add("left", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "leftPattern", pot)));
             object.add("right", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "rightPattern", pot)));
             object.add("front", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "frontPattern", pot)));
-            object.add("result", stack((ItemStackTemplate) readField(DecoratedPotRecipe.class, "result", pot)));
+            object.add("result", stack((ItemStackTemplate) readField(DecoratedPotRecipe.class, "result", pot), registries));
         } else {
             throw new IllegalStateException("unsupported recipe " + holder.id());
         }
@@ -1237,18 +1258,27 @@ public final class Extractor {
         return object;
     }
 
-    private static JsonObject stack(ItemStackTemplate template) {
+    private static JsonObject stack(ItemStackTemplate template, RegistryAccess registries) {
         JsonObject object = new JsonObject();
         object.addProperty("item", BuiltInRegistries.ITEM.getId(template.item().value()));
         object.addProperty("count", template.count());
-        object.addProperty("hasComponents", !template.components().isEmpty());
+        object.addProperty("components", hex(template.components(), registries));
         return object;
     }
 
-    private static void transmuteResult(JsonObject object, TransmuteResult result) {
+    private static void transmuteResult(JsonObject object, TransmuteResult result, RegistryAccess registries) {
         result.item().ifPresent(item -> object.addProperty("resultItem", BuiltInRegistries.ITEM.getId(item.value())));
         object.addProperty("resultCount", result.count());
-        object.addProperty("resultHasComponents", !result.components().isEmpty());
+        object.addProperty("resultComponents", hex(result.components(), registries));
+    }
+
+    /** 组件补丁按官方的网络编码写成十六进制，Bamboo 那边用同一套编解码还原。 */
+    private static String hex(DataComponentPatch patch, RegistryAccess registries) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
     }
 
     private static Object readField(Class<?> owner, String name, Object target) throws ReflectiveOperationException {

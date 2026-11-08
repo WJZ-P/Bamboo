@@ -2,6 +2,7 @@ import com.google.common.hash.HashCode;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFutureListener;
 import java.io.BufferedWriter;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
@@ -12,13 +13,19 @@ import java.io.Writer;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ForkJoinPool;
 import net.minecraft.SharedConstants;
+import net.minecraft.advancements.triggers.CriterionTrigger;
+import net.minecraft.advancements.CriterionTriggerInstance;
+import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
@@ -31,12 +38,15 @@ import net.minecraft.network.HashedPatchMap;
 import net.minecraft.network.HashedStack;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.Packet;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
 import net.minecraft.server.ReloadableServerResources;
+import net.minecraft.server.dedicated.DedicatedServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
@@ -50,6 +60,7 @@ import net.minecraft.util.Prediction;
 import net.minecraft.world.Container;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.Inventory;
@@ -58,44 +69,55 @@ import net.minecraft.world.entity.player.PlayerEquipment;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.AbstractFurnaceMenu;
+import net.minecraft.world.inventory.BlastFurnaceMenu;
+import net.minecraft.world.inventory.BrewingStandMenu;
 import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.ContainerData;
 import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.ContainerLevelAccess;
 import net.minecraft.world.inventory.ContainerSynchronizer;
+import net.minecraft.world.inventory.CraftingMenu;
+import net.minecraft.world.inventory.DataSlot;
 import net.minecraft.world.inventory.DispenserMenu;
-import net.minecraft.core.component.DataComponents;
-import net.minecraft.network.chat.Component;
+import net.minecraft.world.inventory.FurnaceMenu;
+import net.minecraft.world.inventory.HopperMenu;
+import net.minecraft.world.inventory.InventoryMenu;
 import net.minecraft.server.network.Filterable;
 import net.minecraft.util.Mth;
-import net.minecraft.world.inventory.ContainerData;
-import net.minecraft.world.inventory.HopperMenu;
 import net.minecraft.world.inventory.LecternMenu;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.RemoteSlot;
 import net.minecraft.world.inventory.ShulkerBoxMenu;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.inventory.SmithingMenu;
+import net.minecraft.world.inventory.SmokerMenu;
+import net.minecraft.world.inventory.StonecutterMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.WritableBookContent;
 import net.minecraft.world.item.component.WrittenBookContent;
+import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+import net.minecraft.world.item.crafting.BrewingRecipe;
+import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.item.crafting.RecipeType;
+import net.minecraft.world.item.crafting.ShapedRecipe;
+import net.minecraft.world.item.crafting.ShapelessRecipe;
+import net.minecraft.world.item.crafting.SingleItemRecipe;
+import net.minecraft.world.item.crafting.SmithingRecipe;
+import net.minecraft.world.level.gamerules.GameRules;
 import sun.misc.Unsafe;
 
 /**
  * 容器菜单的 oracle：官方代码出题、给答案，tools/mc-bamboo-vanilla/src/menu.rs 用 mc-bamboo-game 的 Replay 跑同样的题来比较。
  *
- * <p>不启动服务端，也不打开真正的方块。每道题是官方的一个菜单（ChestMenu 三行和六行、HopperMenu、DispenserMenu、
- * ShulkerBoxMenu、LecternMenu）配一个 SimpleContainer 和一名假玩家的 Inventory。箱子那几类按
- * handleContainerClick 的顺序点一串随机点击。讲台按 handleContainerButtonClick 的顺序按一串随机按钮，
- * 页码夹取和取书清页由一个只实现了 LecternBlockEntity 容器行为的 Container 完成，不创建真的方块实体。
- * 假玩家是 Unsafe.allocateInstance 出来的 ServerPlayer，只补了 level、inventory 和 abilities.instabuild；
- * 掉落的物品被 override 成空操作，因为 Bamboo 也没有物品实体。
- *
- * <p>随机题按“从不预测”的模型模拟：每次点击的 changedSlots 是空的，carriedItem 恒为 {@link HashedStack#EMPTY}。
- * 最后另有一道带组件的题，客户端按 {@code MultiPlayerGameMode.handleContainerInput} 把变过的槽
- * 和光标哈希回传，服务端补发的槽位必须和 Bamboo 一致。
- * 每步之后写出菜单的全部槽位、光标和 stateId。菜单的 stateId 只有 ContainerSynchronizer 会推进，
- * 官方的那个是 ServerPlayer 里的匿名类，这里按它原样写了一个：sendInitialData 和 sendSlotChange 各调一次
- * {@code container.incrementStateId()}，sendCarriedChange 不调。sendAllDataToRemote 和 broadcastChanges 本身仍然是官方的。
+ * <p>不启动服务端，也不打开真正的方块。箱子、漏斗、发射器和潜影盒配一个 SimpleContainer。
+ * 工作台、玩家 2×2、切石机、锻造台、三种熔炉和酿造台用菜单自己的格子。讲台用一个只实现了书槽的 Container。
+ * 随机题按“从不预测”的模型点。最后另有一道带组件的题，客户端按官方预测回传哈希。
+ * 每步写出槽位、光标、stateId、data 槽和组件补丁。讲台还写页码。
  *
  * <p>运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
  *
@@ -106,7 +128,7 @@ import sun.misc.Unsafe;
  *     --case I   只跑第 I 题，用来重现不一致的题。
  *
  * stdout 一行一个 JSON：header（版本、协议、种子）、case（题目和每一步的答案）、end。
- * 日志和异常在 stderr。物品用注册表 ID，空槽是 [0, 0]。
+ * 日志和异常在 stderr。物品是 [注册表 ID, 数量, 组件补丁十六进制]，空槽是 [0, 0, ""]。
  */
 public final class MenuOracle {
     /** 菜单的容器 ID。所有题都用 1，和 ServerPlayer.nextContainerCounter 的第一次相同。 */
@@ -115,6 +137,11 @@ public final class MenuOracle {
     private static final ContainerInput[] INPUTS = ContainerInput.values();
     private static final Unsafe UNSAFE = loadUnsafe();
     private static final Map<String, Field> FIELDS = new HashMap<>();
+    private static RecipeManager RECIPES;
+    private static RegistryAccess.Frozen REGISTRIES;
+    private static GameRules RULES;
+    private static FakeServer SERVER;
+    private static final Map<RecipeType<?>, List<RecipeHolder<?>>> BY_TYPE = new HashMap<>();
 
     private MenuOracle() {
     }
@@ -169,6 +196,14 @@ public final class MenuOracle {
                             ForkJoinPool.commonPool(), Runnable::run)
                     .get();
             managers.updateComponentsAndStaticRegistryTags();
+            managers.getRecipeManager().finalizeRecipeLoading(FeatureFlags.DEFAULT_FLAGS);
+            RECIPES = managers.getRecipeManager();
+            REGISTRIES = layers.compositeAccess();
+        }
+        RULES = new GameRules(FeatureFlags.DEFAULT_FLAGS);
+        SERVER = FakeServer.create(RECIPES, RULES);
+        for (RecipeHolder<?> recipe : RECIPES.getRecipes()) {
+            BY_TYPE.computeIfAbsent(recipe.value().getType(), key -> new ArrayList<>()).add(recipe);
         }
     }
 
@@ -285,12 +320,41 @@ public final class MenuOracle {
                 inventory.setItem(inventorySlot(random), randomStack(random));
             }
 
-            Container container = new SimpleContainer(shape.size);
-            for (int i = 0, count = random.nextInt(shape.size + 1); i < count; i++) {
-                container.setItem(random.nextInt(shape.size), randomStack(random));
+            Container container = null;
+            ItemStack[] grid = new ItemStack[shape.size];
+            for (int i = 0; i < grid.length; i++) {
+                grid[i] = ItemStack.EMPTY;
+            }
+            JsonArray data = new JsonArray();
+            int[] machineData = new int[0];
+            if (shape.workstation) {
+                for (int i = 0, count = random.nextInt(grid.length + 1); i < count; i++) {
+                    grid[random.nextInt(grid.length)] = randomStack(random);
+                }
+                if (random.nextInt(5) != 0) {
+                    placeRecipe(shape, grid, random);
+                }
+                if (shape.machineData) {
+                    machineData = new int[4];
+                    for (int i = 0; i < machineData.length; i++) {
+                        machineData[i] = random.nextInt(400);
+                        data.add(machineData[i]);
+                    }
+                }
+            } else {
+                container = new SimpleContainer(shape.size);
+                for (int i = 0, count = random.nextInt(shape.size + 1); i < count; i++) {
+                    container.setItem(random.nextInt(shape.size), randomStack(random));
+                }
             }
 
-            AbstractContainerMenu menu = shape.create(inventory, container);
+            AbstractContainerMenu menu = shape.create(inventory, container, player);
+            if (machineData.length > 0) {
+                seedData(menu, machineData);
+            }
+            if (shape.workstation) {
+                placeGrid(menu, shape, grid);
+            }
             // 官方 ServerPlayer.initMenu：装同步器，sendAllDataToRemote 发出第一个 stateId。
             menu.setSynchronizer(new Sync());
 
@@ -299,23 +363,33 @@ public final class MenuOracle {
             line.addProperty("id", id);
             line.addProperty("shape", shape.id);
             line.addProperty("creative", creative);
-            line.add("container", items(container, shape.size));
+            line.add("container", shape.workstation ? stacks(grid) : items(container, shape.size));
             line.add("inventory", inventoryItems(inventory));
+            line.add("data", data);
             line.add("open", outcome(menu));
 
             JsonArray steps = new JsonArray();
             for (int[] click : clickSequence(random, menu.slots.size())) {
-                // handleContainerClick 去掉 containerId、stillValid 和槽位校验之后的顺序。
-                menu.suppressRemoteUpdates();
-                menu.clicked(click[0], click[1], INPUTS[click[2]], player);
-                menu.setRemoteCarried(HashedStack.EMPTY);
-                menu.resumeRemoteUpdates();
-                menu.broadcastChanges();
+                boolean menuButton = click.length > 3 && click[3] == 1;
+                if (menuButton) {
+                    // handleContainerButtonClick：不压住同步，接受了才再广播一次。
+                    if (menu.clickMenuButton(player, click[1])) {
+                        menu.broadcastChanges();
+                    }
+                } else {
+                    // handleContainerClick 去掉 containerId、stillValid 和槽位校验之后的顺序。
+                    menu.suppressRemoteUpdates();
+                    menu.clicked(click[0], click[1], INPUTS[click[2]], player);
+                    menu.setRemoteCarried(HashedStack.EMPTY);
+                    menu.resumeRemoteUpdates();
+                    menu.broadcastChanges();
+                }
 
                 JsonObject step = new JsonObject();
                 step.addProperty("slot", click[0]);
                 step.addProperty("button", click[1]);
                 step.addProperty("input", click[2]);
+                step.addProperty("menuButton", menuButton);
                 step.add("outcome", outcome(menu));
                 steps.add(step);
             }
@@ -348,7 +422,7 @@ public final class MenuOracle {
             container.setItem(1, new ItemStack(Items.STONE, 16));
 
             RecordingSync sync = new RecordingSync(hasher);
-            AbstractContainerMenu menu = shape.create(player.getInventory(), container);
+            AbstractContainerMenu menu = shape.create(player.getInventory(), container, player);
             menu.setSynchronizer(sync);
 
             JsonObject line = new JsonObject();
@@ -483,22 +557,42 @@ public final class MenuOracle {
 
     /** 菜单的形状。名字和 Rust 的 ReplayShape 对应。 */
     private enum Shape {
-        CHEST_3(27, "chest3"),
-        CHEST_6(54, "chest6"),
-        HOPPER(5, "hopper"),
-        DISPENSER(9, "dispenser"),
-        SHULKER(27, "shulker"),
-        LECTERN(1, "lectern");
+        CHEST_3(27, "chest3", false, false),
+        CHEST_6(54, "chest6", false, false),
+        HOPPER(5, "hopper", false, false),
+        DISPENSER(9, "dispenser", false, false),
+        SHULKER(27, "shulker", false, false),
+        LECTERN(1, "lectern", false, false),
+        INVENTORY(4, "inventory", true, false),
+        CRAFTING(9, "crafting", true, false),
+        STONECUTTER(1, "stonecutter", true, false),
+        SMITHING(3, "smithing", true, false),
+        FURNACE(3, "furnace", true, true),
+        BLAST_FURNACE(3, "blast_furnace", true, true),
+        SMOKER(3, "smoker", true, true),
+        BREWING(5, "brewing", true, true);
 
         final int size;
         final String id;
+        final boolean workstation;
+        final boolean machineData;
 
-        Shape(int size, String id) {
+        Shape(int size, String id, boolean workstation, boolean machineData) {
             this.size = size;
             this.id = id;
+            this.workstation = workstation;
+            this.machineData = machineData;
         }
 
-        AbstractContainerMenu create(Inventory inventory, Container container) {
+        int seedOffset() {
+            return this == INVENTORY || this == CRAFTING ? 1 : 0;
+        }
+
+        int gridWidth() {
+            return this == INVENTORY ? 2 : this == CRAFTING ? 3 : 0;
+        }
+
+        AbstractContainerMenu create(Inventory inventory, Container container, FakePlayer player) {
             return switch (this) {
                 case CHEST_3 -> new ChestMenu(MenuType.GENERIC_9x3, CONTAINER_ID, inventory, container, 3);
                 case CHEST_6 -> new ChestMenu(MenuType.GENERIC_9x6, CONTAINER_ID, inventory, container, 6);
@@ -506,6 +600,14 @@ public final class MenuOracle {
                 case DISPENSER -> new DispenserMenu(CONTAINER_ID, inventory, container);
                 case SHULKER -> new ShulkerBoxMenu(CONTAINER_ID, inventory, container);
                 case LECTERN -> throw new IllegalStateException("lectern cases build their own menu");
+                case INVENTORY -> new InventoryMenu(inventory, true, player);
+                case CRAFTING -> new CraftingMenu(CONTAINER_ID, inventory, ContainerLevelAccess.create(player.level(), BlockPos.ZERO));
+                case STONECUTTER -> new StonecutterMenu(CONTAINER_ID, inventory);
+                case SMITHING -> new SmithingMenu(CONTAINER_ID, inventory);
+                case FURNACE -> new FurnaceMenu(CONTAINER_ID, inventory);
+                case BLAST_FURNACE -> new BlastFurnaceMenu(CONTAINER_ID, inventory);
+                case SMOKER -> new SmokerMenu(CONTAINER_ID, inventory);
+                case BREWING -> new BrewingStandMenu(CONTAINER_ID, inventory);
             };
         }
     }
@@ -552,7 +654,10 @@ public final class MenuOracle {
         List<int[]> clicks = new ArrayList<>();
         int count = 2 + random.nextInt(18);
         while (clicks.size() < count) {
-            if (random.nextInt(100) < 12) {
+            int roll = random.nextInt(100);
+            if (roll < 8) {
+                clicks.add(new int[]{0, random.nextInt(12) - 1, 0, 1});
+            } else if (roll < 20) {
                 drag(random, slots, clicks);
             } else {
                 clicks.add(single(random, slots));
@@ -611,7 +716,7 @@ public final class MenuOracle {
     private static JsonArray items(Container container, int size) {
         JsonArray items = new JsonArray();
         for (int slot = 0; slot < size; slot++) {
-            items.add(pair(container.getItem(slot)));
+            items.add(idCount(container.getItem(slot)));
         }
         return items;
     }
@@ -620,7 +725,7 @@ public final class MenuOracle {
     private static JsonArray inventoryItems(Inventory inventory) {
         JsonArray items = new JsonArray();
         for (int slot = 0; slot <= 40; slot++) {
-            items.add(pair(inventory.getItem(slot)));
+            items.add(idCount(inventory.getItem(slot)));
         }
         return items;
     }
@@ -638,6 +743,7 @@ public final class MenuOracle {
             slots.add(pair(slot.getItem()));
         }
         outcome.add("slots", slots);
+        outcome.add("data", dataSlots(menu));
         if (lectern != null) {
             outcome.addProperty("page", lectern.page);
         }
@@ -799,12 +905,191 @@ public final class MenuOracle {
         return writable == null ? 0 : writable.pages().size();
     }
 
-    /** 物品写成 [注册表 ID, 数量]，空槽是 [0, 0]。 */
+    /** 物品写成 [注册表 ID, 数量, 组件补丁十六进制]，空槽是 [0, 0, ""]。 */
     private static JsonArray pair(ItemStack stack) {
         JsonArray pair = new JsonArray();
         pair.add(stack.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(stack.getItem()));
         pair.add(stack.getCount());
+        pair.add(stack.isEmpty() ? "" : patchHex(stack));
         return pair;
+    }
+
+    private static String patchHex(ItemStack stack) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), REGISTRIES);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, stack.getComponentsPatch());
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            builder.append(Character.forDigit((value >> 4) & 0xF, 16));
+            builder.append(Character.forDigit(value & 0xF, 16));
+        }
+        return builder.toString();
+    }
+
+    private static JsonArray stacks(ItemStack[] grid) {
+        JsonArray items = new JsonArray();
+        for (ItemStack stack : grid) {
+            items.add(idCount(stack));
+        }
+        return items;
+    }
+
+    /** 开局材料只要物品和数量，组件是放进去之后才算出来的。 */
+    private static JsonArray idCount(ItemStack stack) {
+        JsonArray pair = new JsonArray();
+        pair.add(stack.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(stack.getItem()));
+        pair.add(stack.getCount());
+        return pair;
+    }
+
+    private static void placeGrid(AbstractContainerMenu menu, Shape shape, ItemStack[] grid) {
+        int offset = shape.seedOffset();
+        for (int i = 0; i < grid.length; i++) {
+            if (!grid[i].isEmpty()) {
+                menu.getSlot(i + offset).set(grid[i].copy());
+            }
+        }
+    }
+
+    private static void seedData(AbstractContainerMenu menu, int[] values) {
+        try {
+            ContainerData data = menu instanceof BrewingStandMenu
+                    ? (ContainerData) field(BrewingStandMenu.class, "brewingStandData").get(menu)
+                    : (ContainerData) field(AbstractFurnaceMenu.class, "data").get(menu);
+            for (int i = 0; i < values.length; i++) {
+                data.set(i, values[i]);
+            }
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static JsonArray dataSlots(AbstractContainerMenu menu) {
+        try {
+            List<DataSlot> slots = (List<DataSlot>) field(AbstractContainerMenu.class, "dataSlots").get(menu);
+            JsonArray data = new JsonArray();
+            for (DataSlot slot : slots) {
+                data.add(slot.get());
+            }
+            return data;
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static void placeRecipe(Shape shape, ItemStack[] grid, Random random) {
+        List<RecipeHolder<?>> recipes = recipesFor(shape);
+        if (recipes.isEmpty()) {
+            return;
+        }
+        for (int attempt = 0; attempt < 8; attempt++) {
+            RecipeHolder<?> recipe = recipes.get(random.nextInt(recipes.size()));
+            if (tryPlace(shape, grid, recipe.value())) {
+                return;
+            }
+        }
+    }
+
+    private static List<RecipeHolder<?>> recipesFor(Shape shape) {
+        RecipeType<?> type = switch (shape) {
+            case INVENTORY, CRAFTING -> RecipeType.CRAFTING;
+            case STONECUTTER -> RecipeType.STONECUTTING;
+            case SMITHING -> RecipeType.SMITHING;
+            case FURNACE -> RecipeType.SMELTING;
+            case BLAST_FURNACE -> RecipeType.BLASTING;
+            case SMOKER -> RecipeType.SMOKING;
+            case BREWING -> RecipeType.BREWING;
+            default -> null;
+        };
+        if (type == null) {
+            return List.of();
+        }
+        return BY_TYPE.getOrDefault(type, List.of());
+    }
+
+    private static boolean tryPlace(Shape shape, ItemStack[] grid, net.minecraft.world.item.crafting.Recipe<?> recipe) {
+        ItemStack[] next = grid.clone();
+        boolean placed = false;
+        if (recipe instanceof ShapedRecipe shaped) {
+            int width = shape.gridWidth();
+            if (width == 0 || shaped.getWidth() > width || shaped.getHeight() > width) {
+                return false;
+            }
+            List<Optional<Ingredient>> ingredients = shaped.getIngredients();
+            int cursor = 0;
+            for (int y = 0; y < shaped.getHeight(); y++) {
+                for (int x = 0; x < shaped.getWidth(); x++) {
+                    Optional<Ingredient> ingredient = ingredients.get(cursor++);
+                    if (ingredient.isEmpty()) {
+                        continue;
+                    }
+                    ItemStack stack = one(ingredient.get());
+                    if (stack.isEmpty()) {
+                        return false;
+                    }
+                    next[x + y * width] = stack;
+                    placed = true;
+                }
+            }
+        } else if (recipe instanceof ShapelessRecipe shapeless) {
+            List<Ingredient> ingredients = shapelessIngredients(shapeless);
+            if (ingredients.size() > grid.length) {
+                return false;
+            }
+            for (int i = 0; i < ingredients.size(); i++) {
+                ItemStack stack = one(ingredients.get(i));
+                if (stack.isEmpty()) {
+                    return false;
+                }
+                next[i] = stack;
+                placed = true;
+            }
+        } else if (recipe instanceof SmithingRecipe smithing) {
+            ItemStack base = one(smithing.baseIngredient());
+            if (base.isEmpty()) {
+                return false;
+            }
+            next[0] = smithing.templateIngredient().map(MenuOracle::one).orElse(ItemStack.EMPTY);
+            next[1] = base;
+            next[2] = smithing.additionIngredient().map(MenuOracle::one).orElse(ItemStack.EMPTY);
+            placed = true;
+        } else if (recipe instanceof BrewingRecipe brewing) {
+            ItemStack input = one(brewing.getInput().ingredient());
+            ItemStack reagent = one(brewing.getReagent().ingredient());
+            if (input.isEmpty() || reagent.isEmpty()) {
+                return false;
+            }
+            next[0] = input;
+            next[3] = reagent;
+            placed = true;
+        } else if (recipe instanceof SingleItemRecipe single) {
+            ItemStack stack = one(single.input());
+            if (stack.isEmpty()) {
+                return false;
+            }
+            next[0] = stack;
+            placed = true;
+        }
+        if (!placed) {
+            return false;
+        }
+        System.arraycopy(next, 0, grid, 0, grid.length);
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Ingredient> shapelessIngredients(ShapelessRecipe recipe) {
+        try {
+            return (List<Ingredient>) field(ShapelessRecipe.class, "ingredients").get(recipe);
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static ItemStack one(Ingredient ingredient) {
+        return ingredient.items().findFirst().map(holder -> new ItemStack(holder.value())).orElse(ItemStack.EMPTY);
     }
 
     /**
@@ -854,7 +1139,7 @@ public final class MenuOracle {
 
     /**
      * 官方 ServerPlayer 的匿名 ContainerSynchronizer。我们只关心 stateId：
-     * 发整包和发一个槽各推进一次，光标不变。
+     * 发整包和发一个槽各推进一次，光标和 data 槽不变。
      */
     private static final class Sync implements ContainerSynchronizer {
         @Override
@@ -897,6 +1182,65 @@ public final class MenuOracle {
         public FeatureFlagSet enabledFeatures() {
             return FeatureFlags.DEFAULT_FLAGS;
         }
+
+        @Override
+        public RecipeManager recipeAccess() {
+            return RECIPES;
+        }
+
+        @Override
+        public DedicatedServer getServer() {
+            return SERVER;
+        }
+
+        @Override
+        public GameRules getGameRules() {
+            return RULES;
+        }
+    }
+
+    /** 只有 getRecipeManager 和 getGameRules 会被菜单用到。 */
+    private static final class FakeServer extends DedicatedServer {
+        private RecipeManager recipes;
+        private GameRules rules;
+
+        private FakeServer() {
+            super(null, null, null, null, null, null, null, null, null, null);
+        }
+
+        static FakeServer create(RecipeManager recipes, GameRules rules) {
+            FakeServer server = allocate(FakeServer.class);
+            server.recipes = recipes;
+            server.rules = rules;
+            return server;
+        }
+
+        @Override
+        public RecipeManager getRecipeManager() {
+            return recipes;
+        }
+
+        @Override
+        public GameRules getGameRules() {
+            return rules;
+        }
+    }
+
+    /** 合成结果直接往 connection 发一个槽包。这里把包丢掉，state id 已经加过了。 */
+    private static final class SilentListener extends ServerGamePacketListenerImpl {
+        private SilentListener() {
+            super(null, null, null, null);
+        }
+
+        static SilentListener create() {
+            return allocate(SilentListener.class);
+        }
+
+        @Override
+        public void send(Packet<?> packet) {}
+
+        @Override
+        public void send(Packet<?> packet, ChannelFutureListener listener) {}
     }
 
     /** 假玩家。继承 ServerPlayer 的理由和 BlockOracle 一样，只补菜单用得到的字段。 */
@@ -917,6 +1261,7 @@ public final class MenuOracle {
             abilities.instabuild = creative;
             abilities.mayBuild = mayBuild;
             set(Player.class, player, "abilities", abilities);
+            player.connection = SilentListener.create();
             return player;
         }
 
@@ -927,7 +1272,37 @@ public final class MenuOracle {
         }
 
         @Override
-        public void awardStat(net.minecraft.stats.Stat<?> stat, int count) {
+        public void awardStat(net.minecraft.stats.Stat<?> stat, int count) {}
+
+        @Override
+        public int awardRecipes(Collection<RecipeHolder<?>> recipes) {
+            return 0;
+        }
+
+        @Override
+        public void triggerRecipeCrafted(RecipeHolder<?> recipe, List<ItemStack> itemStacks) {}
+
+        @Override
+        public void onEquipItem(EquipmentSlot slot, ItemStack oldStack, ItemStack stack) {}
+
+        @Override
+        public PlayerAdvancements getAdvancements() {
+            return EmptyAdvancements.INSTANCE;
+        }
+    }
+
+    /** 成就触发器只问有没有监听者。没有的话官方就跳过，不会改菜单。 */
+    private static final class EmptyAdvancements extends PlayerAdvancements {
+        static final EmptyAdvancements INSTANCE = allocate(EmptyAdvancements.class);
+
+        private EmptyAdvancements() {
+            super(null, null, null, null, null);
+        }
+
+        @Override
+        public <T extends CriterionTriggerInstance> Map<PlayerAdvancements.TriggerInstanceKey, T> getTriggerMapForType(
+                CriterionTrigger<T> type) {
+            return null;
         }
     }
 }

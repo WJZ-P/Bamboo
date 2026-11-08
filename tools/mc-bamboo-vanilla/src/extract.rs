@@ -82,6 +82,8 @@ pub struct Extracted {
     pub jukebox_songs: Vec<ExtractedJukeboxSong>,
     /// 世界生成的数据：噪声参数、密度函数、维度设置和多噪声群系预设，原样是 JSON。
     pub worldgen: serde_json::Value,
+    /// `Item.getCraftingRemainder()`，和物品注册表对齐。没有余料的是 `null`。
+    pub crafting_remainders: Vec<Option<(i32, i32, String)>>,
 }
 
 /// `JukeboxSong`：长度（秒）和比较器输出。
@@ -152,8 +154,8 @@ pub enum ExtractedRecipeKind {
         result_item: Option<i32>,
         #[serde(rename = "resultCount")]
         result_count: i32,
-        #[serde(rename = "resultHasComponents")]
-        result_has_components: bool,
+        #[serde(rename = "resultComponents")]
+        result_components: String,
         #[serde(rename = "addMaterialCount")]
         add_material_count: bool,
     },
@@ -240,8 +242,8 @@ pub enum ExtractedRecipeKind {
         result_item: Option<i32>,
         #[serde(rename = "resultCount")]
         result_count: i32,
-        #[serde(rename = "resultHasComponents")]
-        result_has_components: bool,
+        #[serde(rename = "resultComponents")]
+        result_components: String,
     },
     BannerDuplicate {
         banner: ExtractedIngredient,
@@ -284,7 +286,8 @@ pub struct ExtractedIngredient {
 pub struct ExtractedStack {
     pub item: i32,
     pub count: i32,
-    pub has_components: bool,
+    /// 官方 `DataComponentPatch.STREAM_CODEC` 的字节，十六进制。
+    pub components: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -920,6 +923,8 @@ pub struct VersionData {
     pub jukebox_songs: Vec<ExtractedJukeboxSong>,
     /// 世界生成的数据，原样写进 `mc-bamboo-data` 的 `worldgen.json`。
     pub worldgen: serde_json::Value,
+    /// `Item.getCraftingRemainder()`，和物品注册表对齐。
+    pub crafting_remainders: Vec<Option<(i32, i32, String)>>,
 }
 
 pub fn run(
@@ -1012,6 +1017,7 @@ fn read_version_data(
         instant_mob_effects: extracted.instant_mob_effects,
         component_enums: extracted.component_enums,
         item_components: extracted.item_components,
+        crafting_remainders: extracted.crafting_remainders,
         jukebox_songs: extracted.jukebox_songs,
         worldgen: extracted.worldgen,
     })

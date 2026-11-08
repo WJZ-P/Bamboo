@@ -143,10 +143,10 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
-    /// 讲台翻页、跳页或取书。`button_id` 是 varint，100 起是跳到的页码加 100。
+    /// 菜单按钮。切石机用它选结果，讲台用它翻页。`button_id` 是 varint，讲台从 100 起是跳到的页码加 100。
     ///
-    /// Lectern page controls. `button_id` is a varint; values from 100 jump to
-    /// `button_id - 100`.
+    /// A menu button. The stonecutter selects a result; the lectern turns pages.
+    /// `button_id` is a varint, and lectern values from 100 jump to `button_id - 100`.
     ContainerButtonClick {
         container_id: i32,
         button_id: i32,
@@ -1207,6 +1207,17 @@ mod tests {
             Ok(PlayRequest::ContainerButtonClick {
                 container_id: 1,
                 button_id: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_container_button_click() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_BUTTON_CLICK, "05 02"),
+            Ok(PlayRequest::ContainerButtonClick {
+                container_id: 5,
+                button_id: 2,
             })
         );
     }
