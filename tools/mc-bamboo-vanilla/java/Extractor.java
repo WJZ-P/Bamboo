@@ -12,6 +12,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -87,6 +89,7 @@ import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvi
 import net.minecraft.world.level.levelgen.feature.stateproviders.CopyPropertiesProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.RuleBasedStateProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.SimpleStateProvider;
+import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.material.FlowingFluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -123,6 +126,7 @@ public final class Extractor {
     private static final int FACT_SIGNAL_SOURCE = 1 << 26;
     private static final int FACT_ANALOG_OUTPUT = 1 << 27;
     private static final int FACT_PROPAGATES_SKYLIGHT = 1 << 28;
+    private static final int FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION = 1 << 29;
     private static final int STURDY_MASK = (1 << 18) - 1;
 
     public static void main(String[] args) throws Exception {
@@ -148,6 +152,7 @@ public final class Extractor {
             root.add("blocks", blocks());
             root.add("items", items());
             root.add("stateTables", new StateTables().build());
+            root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
 
@@ -879,6 +884,7 @@ public final class Extractor {
             facts |= state.isSignalSource() ? FACT_SIGNAL_SOURCE : 0;
             facts |= state.hasAnalogOutputSignal() ? FACT_ANALOG_OUTPUT : 0;
             facts |= state.propagatesSkylightDown() ? FACT_PROPAGATES_SKYLIGHT : 0;
+            facts |= state.useShapeForLightOcclusion() ? FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION : 0;
             return facts;
         }
 
@@ -934,6 +940,86 @@ public final class Extractor {
                 }
             }
             return facts;
+        }
+    }
+
+    /**
+     * 光照引擎要的表：每个状态的发光等级，和光照引擎看到的 6 个面的遮挡形状。
+     *
+     * <p>面的形状用 LightEngine.getOcclusionShape 取，它已经把 canOcclude 和 useShapeForLightOcclusion 算进去了。
+     * 去重后两两之间的 Shapes.faceShapeOccludes 也在这里算好，Rust 只查表，不做形状运算。
+     */
+    private static final class LightTables {
+        private final JsonArray emission = new JsonArray();
+        private final JsonArray occlusion = new JsonArray();
+        private final JsonArray occlusionFaces = new JsonArray();
+        private final Map<String, Integer> occlusionIndexes = new HashMap<>();
+        private final List<VoxelShape> faces = new ArrayList<>();
+        private final Map<String, Integer> faceIndexes = new HashMap<>();
+
+        JsonObject build() {
+            // 空形状是 0，完整方块是 1，和 StateTables 的形状表一样固定下来。
+            faceIndex(Shapes.empty());
+            faceIndex(Shapes.block());
+            occlusionIndex(new int[6]);
+            for (int id = 0; id < Block.BLOCK_STATE_REGISTRY.size(); id++) {
+                BlockState state = Block.BLOCK_STATE_REGISTRY.byId(id);
+                emission.add(state.getLightEmission());
+                occlusion.add(occlusionIndex(stateFaces(state)));
+            }
+
+            JsonObject tables = new JsonObject();
+            tables.add("emission", emission);
+            tables.add("occlusion", occlusion);
+            tables.add("occlusionFaces", occlusionFaces);
+            tables.addProperty("faceCount", faces.size());
+            tables.add("faceOccludes", faceOccludes());
+            return tables;
+        }
+
+        private int[] stateFaces(BlockState state) {
+            int[] ids = new int[6];
+            for (Direction direction : Direction.values()) {
+                ids[direction.get3DDataValue()] = faceIndex(LightEngine.getOcclusionShape(state, direction));
+            }
+            return ids;
+        }
+
+        private int occlusionIndex(int[] ids) {
+            return occlusionIndexes.computeIfAbsent(Arrays.toString(ids), key -> {
+                JsonArray array = new JsonArray();
+                for (int id : ids) {
+                    array.add(id);
+                }
+                occlusionFaces.add(array);
+                return occlusionFaces.size() - 1;
+            });
+        }
+
+        private int faceIndex(VoxelShape face) {
+            return faceIndexes.computeIfAbsent(face.toAabbs().toString(), key -> {
+                faces.add(face);
+                return faces.size() - 1;
+            });
+        }
+
+        /** 第 a * faceCount + b 位是 faceShapeOccludes(a, b)，每 64 位一个 long，低位在前。 */
+        private JsonArray faceOccludes() {
+            int count = faces.size();
+            long[] words = new long[(count * count + 63) / 64];
+            for (int a = 0; a < count; a++) {
+                for (int b = 0; b < count; b++) {
+                    if (Shapes.faceShapeOccludes(faces.get(a), faces.get(b))) {
+                        int bit = a * count + b;
+                        words[bit / 64] |= 1L << (bit % 64);
+                    }
+                }
+            }
+            JsonArray array = new JsonArray();
+            for (long word : words) {
+                array.add(word);
+            }
+            return array;
         }
     }
 }

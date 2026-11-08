@@ -11,8 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, items, packets, registries, shapes, states, tags,
-    version,
+    block_maps, block_transformers, blocks, items, light, packets, registries, shapes, states,
+    tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -51,6 +51,8 @@ pub mod facts {
     pub const ANALOG_OUTPUT: u32 = 1 << 27;
     /// `propagatesSkylightDown`。
     pub const PROPAGATES_SKYLIGHT: u32 = 1 << 28;
+    /// `useShapeForLightOcclusion`，没有和 `canOcclude` 合并的原值。
+    pub const USE_SHAPE_FOR_LIGHT_OCCLUSION: u32 = 1 << 29;
 }
 
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
@@ -370,6 +372,24 @@ pub fn state_fluid(state: u32) -> &'static FluidFacts {
 /// 状态的 `getLightDampening`。状态 ID 不存在时 panic。
 pub fn light_dampening(state: u32) -> u8 {
     states::LIGHT_DAMPENING[state as usize]
+}
+
+/// 状态的 `getLightEmission`。状态 ID 不存在时 panic。
+pub fn light_emission(state: u32) -> u8 {
+    light::LIGHT_EMISSION[state as usize]
+}
+
+/// 光照引擎看到的 6 个面的遮挡形状编号，官方的 `LightEngine.getOcclusionShape`，按 `Direction` 的 ID 排列。
+///
+/// 编号 0 是空形状，1 是完整方块，两个编号之间能不能挡住光看 [`face_shape_occludes`]。状态 ID 不存在时 panic。
+pub fn light_occlusion_faces(state: u32) -> &'static [u16; 6] {
+    &light::OCCLUSION_FACES[usize::from(light::LIGHT_OCCLUSION[state as usize])]
+}
+
+/// 官方的 `Shapes.faceShapeOccludes`：两个面形状合起来盖满整个面。参数是 [`light_occlusion_faces`] 的编号。
+pub fn face_shape_occludes(shape: u16, occluder: u16) -> bool {
+    let bit = usize::from(shape) * light::FACE_SHAPE_COUNT + usize::from(occluder);
+    light::FACE_OCCLUDES[bit / 64] >> (bit % 64) & 1 == 1
 }
 
 /// `CollisionContext.empty()` 下的碰撞形状。[`BlockOffset::moves_shape`] 的方块要自己加上偏移。

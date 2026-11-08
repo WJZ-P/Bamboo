@@ -5,6 +5,7 @@ pub mod block_maps;
 pub mod block_transformers;
 pub mod blocks;
 pub mod items;
+pub mod light;
 pub mod packets;
 pub mod registries;
 pub mod shapes;

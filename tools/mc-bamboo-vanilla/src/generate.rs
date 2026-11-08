@@ -31,6 +31,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let items = items_file(data)?;
     let states = states_file(data)?;
     let shapes = shapes_file(data)?;
+    let light = light_file(data)?;
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
 
@@ -42,6 +43,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
     write_file(output_dir, "items.rs", &items)?;
+    write_file(output_dir, "light.rs", &light)?;
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
@@ -55,7 +57,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod items;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -631,6 +633,65 @@ fn shapes_file(data: &VersionData) -> Result<String, String> {
         out,
         "pub static OFFSET_STURDY_SAMPLES: &[(u32, i32, i32, i32, u32)] = &{:?};",
         tables.offset_sturdy_samples
+    );
+    Ok(out)
+}
+
+fn light_file(data: &VersionData) -> Result<String, String> {
+    let tables = &data.light_tables;
+    let total = data.block_states.total;
+    check_table_length("LIGHT_EMISSION", &tables.emission, total)?;
+    check_table_length("LIGHT_OCCLUSION", &tables.occlusion, total)?;
+    let words = (tables.face_count * tables.face_count).div_ceil(64);
+    if tables.face_occludes.len() != words {
+        return Err(format!(
+            "FACE_OCCLUDES 有 {} 项，{} 个面形状要 {words} 项",
+            tables.face_occludes.len(),
+            tables.face_count
+        ));
+    }
+
+    let mut out = String::new();
+    write_state_table(
+        &mut out,
+        "每个状态的 `getLightEmission`。",
+        "LIGHT_EMISSION",
+        "u8",
+        &tables.emission,
+    );
+    write_state_table(
+        &mut out,
+        "每个状态在 [`OCCLUSION_FACES`] 里的下标。",
+        "LIGHT_OCCLUSION",
+        "u16",
+        &tables.occlusion,
+    );
+    let _ = writeln!(
+        out,
+        "/// 去重后的 `LightEngine.getOcclusionShape`，按 `Direction` 的 ID 排列 6 个面形状的编号。\n/// 第一项全是空形状。编号 0 是空形状，1 是完整方块。"
+    );
+    let _ = writeln!(out, "pub static OCCLUSION_FACES: &[[u16; 6]] = &[");
+    for faces in &tables.occlusion_faces {
+        let _ = writeln!(out, "    {faces:?},");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(out, "/// 去重后的面形状个数。");
+    let _ = writeln!(
+        out,
+        "pub const FACE_SHAPE_COUNT: usize = {};\n",
+        tables.face_count
+    );
+    let occludes: Vec<u64> = tables
+        .face_occludes
+        .iter()
+        .map(|&word| word as u64)
+        .collect();
+    write_state_table(
+        &mut out,
+        "第 `a * FACE_SHAPE_COUNT + b` 位是官方的 `Shapes.faceShapeOccludes(a, b)`，低位在前。",
+        "FACE_OCCLUDES",
+        "u64",
+        &occludes,
     );
     Ok(out)
 }

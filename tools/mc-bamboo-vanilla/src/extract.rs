@@ -36,6 +36,7 @@ pub struct Extracted {
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
     pub state_tables: StateTables,
+    pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
 }
@@ -170,6 +171,22 @@ pub struct FluidState {
     pub amount: u8,
     pub falling: bool,
     pub legacy_block: u32,
+}
+
+/// 光照引擎要的表，`Extractor.java` 的 `LightTables`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightTables {
+    /// 每个状态的 `getLightEmission`。
+    pub emission: Vec<u8>,
+    /// 每个状态在 `occlusion_faces` 里的下标。
+    pub occlusion: Vec<u16>,
+    /// 去重后的 6 个面的遮挡形状，按 `Direction` 的 ID 排列，第一项全是空形状。
+    pub occlusion_faces: Vec<[u16; 6]>,
+    /// 去重后的面形状个数。
+    pub face_count: usize,
+    /// 两两之间的 `faceShapeOccludes`，Java 的 `long` 是有符号的。
+    pub face_occludes: Vec<i64>,
 }
 
 /// 官方写在静态表里的方块对应关系，都是方块注册表 ID。
@@ -321,6 +338,7 @@ pub struct VersionData {
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
     pub state_tables: StateTables,
+    pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     /// 按名字排序。
     pub block_transformers: Vec<BlockTransformer>,
@@ -365,6 +383,7 @@ pub fn run(
         blocks: extracted.blocks,
         items,
         state_tables: extracted.state_tables,
+        light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
         block_transformers: extracted.block_transformers,
         builtin_registries,
