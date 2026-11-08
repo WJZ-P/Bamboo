@@ -13,9 +13,9 @@ use mc_bamboo_blocks::{
     run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
     state::{CHEST_TYPE, ChestType, FACING},
-    tick_chunk, use_item, use_item_on,
+    tick_chunk, use_item, use_item_on, use_item_on_with_stack,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -589,7 +589,27 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     let mut outcome = match action.kind {
         Kind::Place | Kind::Use => {
             let hit = hit_of(action)?;
-            use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit)
+            let held = match action.hand {
+                Hand::Main => &action.main,
+                Hand::Off => &action.off,
+            };
+            // 点到炼药锅时给手里的物品挂上和 Java 同一套组件，两边才能比到水瓶、染料和旗帜。
+            // A cauldron click gets the same components Java attaches, so water, dye and banners compare.
+            match super::cauldron_hand::stack(
+                level.block_state(hit.pos),
+                names.item(held)?.0,
+                action.sneak,
+            ) {
+                Some(stack) => use_item_on_with_stack(
+                    &mut level,
+                    &mut ticks,
+                    &actor,
+                    action.hand,
+                    &hit,
+                    &stack,
+                ),
+                None => use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit),
+            }
         }
         Kind::Destroy => destroy_block(&mut level, &mut ticks, &actor, target),
         Kind::Tick => run_one_tick(&mut level, &mut ticks, target, now),

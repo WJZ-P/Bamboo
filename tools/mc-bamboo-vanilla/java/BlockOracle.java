@@ -90,6 +90,7 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.stats.Stat;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
@@ -122,8 +123,10 @@ import net.minecraft.world.food.FoodData;
 import net.minecraft.world.inventory.PlayerEnderChestContainer;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
+import net.minecraft.world.item.BannerItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.BucketItem;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.GameMasterBlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemCooldowns;
@@ -132,6 +135,9 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PlaceOnWaterBlockItem;
 import net.minecraft.world.item.SolidBucketItem;
 import net.minecraft.world.item.StandingAndWallBlockItem;
+import net.minecraft.world.item.alchemy.PotionContents;
+import net.minecraft.world.item.alchemy.Potions;
+import net.minecraft.world.item.component.DyedItemColor;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraft.world.level.BlockEventData;
@@ -146,6 +152,7 @@ import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.block.AbstractCauldronBlock;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.BaseRailBlock;
 import net.minecraft.world.level.block.Block;
@@ -166,6 +173,9 @@ import net.minecraft.world.level.block.JukeboxBlock;
 import net.minecraft.world.level.block.LecternBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.VegetationBlock;
+import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.block.entity.BannerPatternLayers;
+import net.minecraft.world.level.block.entity.BannerPatterns;
 import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -4303,12 +4313,44 @@ public final class BlockOracle {
             return outcome;
         }
 
+        /**
+         * 点到炼药锅时给手里的物品挂上 {@code CauldronInteractions} 要看的组件。
+         * 只挂在炼药锅上：水瓶会把泥土变成泥，带图案的旗帜会写进方块实体。
+         * 旗帜的图案只在不蹲着的水炼药锅上挂，蹲着会走到放置。
+         *
+         * Attach the components {@code CauldronInteractions} inspects, and only when the click hits a cauldron.
+         * A water potion turns dirt into mud, and a banner pattern is stored on the block entity.
+         * The pattern is attached only on a water cauldron the player is not sneaking against.
+         */
+        private void attachCauldronComponents(Case c, FakePlayer actor, FakeLevel level) {
+            if ((c.kind != Kind.PLACE && c.kind != Kind.USE) || c.hit == null) {
+                return;
+            }
+            BlockState clicked = level.getBlockState(c.hit.getBlockPos());
+            if (!(clicked.getBlock() instanceof AbstractCauldronBlock)) {
+                return;
+            }
+            ItemStack stack = actor.getItemInHand(c.hand);
+            if (stack.isEmpty()) {
+                return;
+            }
+            if (stack.is(Items.POTION)) {
+                stack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.WATER));
+            } else if (stack.is(ItemTags.CAULDRON_CAN_REMOVE_DYE)) {
+                stack.set(DataComponents.DYED_COLOR, new DyedItemColor(0xFF3366));
+            } else if (!c.sneak && clicked.is(Blocks.WATER_CAULDRON) && stack.getItem() instanceof BannerItem) {
+                Holder<BannerPattern> pattern = actor.registryAccess().lookupOrThrow(Registries.BANNER_PATTERN).getOrThrow(BannerPatterns.BASE);
+                stack.set(DataComponents.BANNER_PATTERNS, new BannerPatternLayers.Builder().add(pattern, DyeColor.WHITE).build());
+            }
+        }
+
         private Outcome execute(Case c, OracleRandom levelRandom, OracleRandom entityRandom) {
             FakeLevel level = FakeLevel.create(official, levelRandom);
             level.seedPositions(new LegacyRandomSource(~caseSeed(c)).nextInt());
             level.load(c.scene, c.contents);
             FakePlayer actor = FakePlayer.create(level, official, entityRandom, 1, c.actor, c.yaw, c.pitch, c.sneak);
             actor.hold(c.main, c.off);
+            attachCauldronComponents(c, actor, level);
             c.actorBox = actor.getBoundingBox();
             if (c.bystander != null) {
                 c.bystanderBox = FakePlayer.create(level, official, entityRandom, 2, c.bystander, 0.0F, 0.0F, false).getBoundingBox();

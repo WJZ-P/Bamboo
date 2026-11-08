@@ -178,6 +178,15 @@ WebView2 的渲染进程不算在内。
 - 流体只有主世界的规则，游戏规则是默认值，改不了。岩浆会点燃旁边的方块，岩浆变高时官方随机地慢四倍，
   Bamboo 用同一个随机源。鱼桶倒出来的只有水，没有鱼。没有音效和粒子：岩浆凝固的嘶嘶声、桶的声音都没有。
 - 用桶和炼药锅互动时，官方会给创造模式的物品栏补一个空桶或者满桶（原来没有的话），Bamboo 不补。
+  炼药锅其余要看物品组件的条目已经接上：没有自定义效果的水瓶给空锅或没满的水锅加一层水，玩家拿回玻璃瓶；
+  玻璃瓶从水锅里舀走一层，拿到 `potion_contents` 是水的药水；`cauldron_can_remove_dye` 里带 `dyed_color`
+  的物品整堆洗掉颜色；带 `banner_patterns` 的旗帜去掉最后一层，一摞只洗一个；染色潜影盒换成不染色的，
+  其余组件按 `ItemStack.transmuteCopy` 留在新物品上。创造模式按 `ItemUtils.createFilledResult`：
+  不消耗手里那一个，水瓶和玻璃瓶在物品栏里已经有同样的结果时不再加一份，旗帜和潜影盒总是再给一份。
+  洗染料不走这条，创造和生存都是整堆去掉颜色。没有音效（`bottle_empty`、`bottle_fill` 和桶的声音），
+  没有统计（`use_cauldron`、`item_used`、`clean_armor`、`clean_banner`、`clean_shulker_box`、
+  `fill_cauldron`），也没有 `gameEvent`（`fluid_place`、`fluid_pickup`、`block_change`）。
+  生存模式放不下时官方会把剩下的掉在地上，这里没有物品实体，那一份直接消失；创造模式官方本来就会删掉放不进去的那一份。
 - 容器只在方块之间存取：漏斗不捡地上的掉落物（世界里没有物品实体），投掷器朝空气时物品消失，
   发射器不会发射，方块实体没有持久化，关服后内容清空。破坏容器时里面的东西直接消失，没有掉落物。
   漏斗和投掷器认箱子、木桶、潜影盒、漏斗、发射器、投掷器和堆肥桶。熔炉、高炉、烟熏炉、
@@ -191,6 +200,8 @@ WebView2 的渲染进程不算在内。
   整数按 `Integer.parseInt` 解析，包括全角和阿拉伯-印度数字这些 `Character.digit` 认的十进制数字。
   带方块实体 NBT 的谓词读不出来，一律按不匹配算。
   书与笔保存和署名会解析并写回 `writable_book_content` 和 `written_book_content`。
+  炼药锅读 `potion_contents`（没有自定义效果的水）、`dyed_color`（物品在 `cauldron_can_remove_dye` 里）
+  和 `banner_patterns`（去掉最后一层）。染色潜影盒换成不染色的，补丁按 `transmuteCopy` 套到新物品上。
 - 组件的已知限制：有五种组件（`lock`、`container_loot`、`map_decorations`、`debug_stick_state`、
   `recipes`）线上是 NBT，官方客户端还要把它过一遍 DFU 的 `Codec`；文本组件的校验是「宁可放过」，
   实体选择器、NBT 路径、对话框和 `show_item` 里的组件表只看字段类型。这两类我们没法保证客户端解得开，

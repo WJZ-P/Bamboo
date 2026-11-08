@@ -238,6 +238,11 @@ pub struct World<'a> {
     effects: Vec<Effect>,
     /// `BlockItem.place` 刚放下的那一格，官方在这里读物品上的组件，见 [`World::placed_at`]。
     placed_at: Option<BlockPos>,
+    /// 这次右键要换给玩家的物品。方块逻辑只记账，游戏层再改物品栏。
+    ///
+    /// The item this click hands back. Block behaviour only records it; the game layer edits
+    /// the inventory.
+    item_exchange: Option<crate::item_exchange::ItemExchange>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -252,6 +257,7 @@ impl<'a> World<'a> {
             updates: NeighborQueue::default(),
             effects: Vec::new(),
             placed_at: None,
+            item_exchange: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -289,6 +295,20 @@ impl<'a> World<'a> {
     /// `BlockItem.place` 放成功时记下这一格。
     pub(crate) fn set_placed_at(&mut self, pos: BlockPos) {
         self.placed_at = Some(pos);
+    }
+
+    /// 记下这次右键要换给玩家的物品。
+    ///
+    /// Record the item this click hands back to the player.
+    pub(crate) fn set_item_exchange(&mut self, exchange: crate::item_exchange::ItemExchange) {
+        self.item_exchange = Some(exchange);
+    }
+
+    /// 这次右键记下的物品交换。
+    ///
+    /// The item exchange recorded for this click.
+    pub(crate) fn item_exchange(&self) -> Option<&crate::item_exchange::ItemExchange> {
+        self.item_exchange.as_ref()
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {

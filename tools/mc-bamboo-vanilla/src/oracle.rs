@@ -18,6 +18,7 @@
 //!
 //! 那时想单独检查一个类可以加 `--pure`：场景里只放已经移植的方块，结果里就没有 `blocked` 了。
 
+mod cauldron_hand;
 mod lines;
 mod replay;
 mod report;
