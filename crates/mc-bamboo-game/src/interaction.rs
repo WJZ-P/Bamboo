@@ -13,11 +13,11 @@ use mc_bamboo_blocks::{
     Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult, Level,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{block_of_state, blocks, items};
+use mc_bamboo_data::{blocks, items};
 use mc_bamboo_protocol::{
     packet::play::{
-        BlockChangedAck, BlockEntityData, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
-        PlayerActionKind, SystemChat,
+        BlockChangedAck, BlockUpdate, GameMode, LevelEvent, OpenSignEditor, PlayerActionKind,
+        SystemChat,
     },
     text::{Color, Component},
 };
@@ -33,7 +33,6 @@ use crate::{
     movement,
     player::Player,
     region::Region,
-    sign,
 };
 
 const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
@@ -125,46 +124,6 @@ fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
         }
     }
     chunks
-}
-
-/// tick 第 5 阶段：把改过的方块发给 `is_chunk_tracked` 的玩家。`blocks-inventory.md` 第 11 章。
-///
-/// 区块还在 `pending` 里的玩家不用发，它们收到的区块就是最新内容。
-pub(crate) fn broadcast_block_changes(region: &mut Region) {
-    let mut changed = mem::take(&mut region.block_changes.changed);
-    // 同一格这一 tick 改了几次时，只有最后的状态要发。
-    changed.sort_unstable();
-    changed.dedup();
-    for pos in changed {
-        let Some(state) = region.chunks.block(pos) else {
-            continue;
-        };
-        let frames = encode_frames(&block_update(pos, state));
-        // `broadcastBlockEntityIfNeeded` 跟在方块更新后面，用 `getUpdateTag` 的内容。
-        let entity_frames = sign_data_frames(region, pos, state);
-        let chunk = pos.chunk();
-        for player in region.players.values() {
-            if player.chunks.is_chunk_tracked(chunk) {
-                region.links.send_frames(player.id, &frames);
-                if let Some(frames) = &entity_frames {
-                    region.links.send_frames(player.id, frames);
-                }
-            }
-        }
-    }
-}
-
-/// 这一格是告示牌时，广播还要带上方块实体的内容。
-///
-/// 别的方块实体还没有内容模型，编不出官方的 `getUpdateTag`，只能发方块更新。
-fn sign_data_frames(region: &Region, pos: BlockPos, state: u32) -> Option<Vec<u8>> {
-    let content = region.chunks.sign(pos)?;
-    let kind = block_of_state(state)?.block_entity_type?;
-    Some(encode_frames(&BlockEntityData {
-        pos,
-        kind,
-        data: &sign::update_tag(&content),
-    }))
 }
 
 /// tick 第 8 阶段：每名玩家发 `block_changed_ack`。必须晚于第 5 阶段，`blocks-inventory.md` 4.3。

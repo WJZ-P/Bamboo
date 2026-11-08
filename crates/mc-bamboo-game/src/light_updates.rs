@@ -4,7 +4,7 @@
 //! `light_update` 只发给这个区块在跟踪范围边上的玩家：范围里面的区块，客户端收到方块变化后自己重算光照；
 //! 边上的区块缺邻居，客户端算不准，才要服务端的结果。
 
-use std::{collections::BTreeMap, mem};
+use std::collections::BTreeMap;
 
 use mc_bamboo_core::{ChunkPos, LightLayer};
 use mc_bamboo_protocol::packet::play::LightUpdate;
@@ -40,25 +40,21 @@ fn merge_changes(
     }
 }
 
-/// tick 第 5 阶段，紧挨在方块变化前面：每个光照变了的区块发一个 `light_update`。
-///
-/// 官方按区块逐个发，先光照后方块；这里先发完所有区块的光照再发方块。官方遍历区块的顺序是哈希顺序，
-/// 不同区块之间本来就没有约定的先后，同一个区块里光照仍然在方块前面，而且在同一 tick。
-pub(crate) fn broadcast_light_changes(region: &mut Region) {
-    for (pos, changes) in mem::take(&mut region.light_changes) {
-        let receivers: Vec<PlayerId> = region
-            .players
-            .values()
-            .filter(|player| player.chunks.is_chunk_on_tracked_border(pos))
-            .map(|player| player.id)
-            .collect();
-        if receivers.is_empty() {
-            continue;
-        }
-        let frames = encode_light_update(&region.chunks, pos, changes);
-        for id in receivers {
-            region.links.send_frames(id, &frames);
-        }
+/// tick 第 5 阶段，紧挨在这个区块的方块变化前面：光照变了的区块发一个 `light_update`。
+/// 由 [`chunk_broadcast`](crate::chunk_broadcast) 逐个区块调用。
+pub(crate) fn broadcast_chunk_light(region: &mut Region, pos: ChunkPos, changes: LightChanges) {
+    let receivers: Vec<PlayerId> = region
+        .players
+        .values()
+        .filter(|player| player.chunks.is_chunk_on_tracked_border(pos))
+        .map(|player| player.id)
+        .collect();
+    if receivers.is_empty() {
+        return;
+    }
+    let frames = encode_light_update(&region.chunks, pos, changes);
+    for id in receivers {
+        region.links.send_frames(id, &frames);
     }
 }
 

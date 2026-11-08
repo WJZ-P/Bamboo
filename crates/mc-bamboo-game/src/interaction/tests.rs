@@ -17,7 +17,7 @@ use mc_bamboo_protocol::{
         ClientboundPacket,
         play::{
             BlockChangedAck, BlockUpdate, Disconnect, LevelEvent, PlayRequest, PlayerActionKind,
-            SwingAnimation, SystemChat,
+            SectionBlock, SectionBlocksUpdate, SwingAnimation, SystemChat,
         },
     },
     text::{Color, Component},
@@ -28,8 +28,8 @@ use crate::{
     links::encode_frames,
     player::Player,
     world::tests::{
-        Client, Frame, Harness, SPAWN_X, SPAWN_Y, SPAWN_Z, body_of, chunk_body, chunk_position,
-        client_requesting, frames_with_id,
+        Client, Frame, Harness, SPAWN_X, SPAWN_Y, SPAWN_Z, block_changes, body_of, chunk_body,
+        chunk_position, client_requesting, frames_with_id,
     },
 };
 
@@ -71,6 +71,24 @@ fn update(pos: BlockPos, state: u32) -> Frame {
     })
 }
 
+/// 同一段里改了几格时的那个包，`blocks` 要按官方发送的顺序写。
+fn section_update(blocks: &[(BlockPos, u32)]) -> Frame {
+    let (first, _) = blocks[0];
+    let blocks: Vec<SectionBlock> = blocks
+        .iter()
+        .map(|&(pos, state)| SectionBlock {
+            local: (((pos.x & 15) << 8) | ((pos.z & 15) << 4) | (pos.y & 15)) as u16,
+            state: state as i32,
+        })
+        .collect();
+    frame_of(&SectionBlocksUpdate {
+        x: first.x >> 4,
+        y: first.y >> 4,
+        z: first.z >> 4,
+        blocks: &blocks,
+    })
+}
+
 fn ack(sequence: i32) -> Frame {
     frame_of(&BlockChangedAck { sequence })
 }
@@ -106,6 +124,7 @@ fn block_frames(client: &Client) -> Vec<Frame> {
             matches!(
                 frame.id,
                 clientbound::BLOCK_UPDATE
+                    | clientbound::SECTION_BLOCKS_UPDATE
                     | clientbound::BLOCK_CHANGED_ACK
                     | clientbound::LEVEL_EVENT
             )
@@ -1624,7 +1643,13 @@ fn a_water_bucket_pours_a_source_that_flows_on_later_ticks() {
     }
     let flowing = BlockState::WATER.with(LEVEL, 1).0;
     assert_eq!(block_at(&mut server, ABOVE.east()), Some(flowing));
-    assert!(block_frames(&client).contains(&update(ABOVE.east(), flowing)));
+    // 四格在同一段，同一 tick 流过去，一起发。
+    let frames = client.take_frames();
+    assert_eq!(
+        frames_with_id(&frames, clientbound::SECTION_BLOCKS_UPDATE).len(),
+        1
+    );
+    assert!(block_changes(&frames).contains(&(ABOVE.east(), flowing)));
 }
 
 #[test]
@@ -2017,18 +2042,16 @@ fn a_torch_goes_with_its_support_and_everyone_sees_it() {
     server.tick();
 
     assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
-    let gone = [update(GROUND, blocks::AIR), update(ABOVE, blocks::AIR)];
+    // 两格在同一段，合成一个包，顺序是官方 `ShortOpenHashSet` 的遍历顺序。
+    let gone = section_update(&[(GROUND, blocks::AIR), (ABOVE, blocks::AIR)]);
     // 官方的连锁里破坏的是世界，不是发起者，所以火把的事件发起者也要收到。
     let torch = destroyed(ABOVE, blocks::TORCH);
     let grass = destroyed(GROUND, blocks::GRASS_BLOCK);
     assert_eq!(
         block_frames(&breaker),
-        [torch.clone(), gone[0].clone(), gone[1].clone(), ack(2)]
+        [torch.clone(), gone.clone(), ack(2)]
     );
-    assert_eq!(
-        block_frames(&watcher),
-        [grass, torch, gone[0].clone(), gone[1].clone()]
-    );
+    assert_eq!(block_frames(&watcher), [grass, torch, gone]);
 }
 
 #[test]
@@ -2191,16 +2214,19 @@ fn arbitrary_requests_never_panic_and_never_end_in_a_ghost() {
 
         // 每一 tick 的 ack 都排在所有方块更新后面。
         let frames = client.take_frames();
-        let last_update = frames
-            .iter()
-            .rposition(|frame| frame.id == clientbound::BLOCK_UPDATE);
+        let last_update = frames.iter().rposition(|frame| {
+            matches!(
+                frame.id,
+                clientbound::BLOCK_UPDATE | clientbound::SECTION_BLOCKS_UPDATE
+            )
+        });
         let ack = frames
             .iter()
             .position(|frame| frame.id == clientbound::BLOCK_CHANGED_ACK);
         if let (Some(last_update), Some(ack)) = (last_update, ack) {
             assert!(last_update < ack);
         }
-        updates += frames_with_id(&frames, clientbound::BLOCK_UPDATE).len();
+        updates += block_changes(&frames).len();
     }
 
     assert!(!client.is_closed());

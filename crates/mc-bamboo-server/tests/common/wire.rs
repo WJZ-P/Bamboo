@@ -985,6 +985,36 @@ impl Packet for BlockUpdate {
     }
 }
 
+/// 一段里同一 tick 改了几格。坐标已经换成世界坐标，按包里的顺序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionBlocksUpdate {
+    pub blocks: Vec<(Pos, u32)>,
+}
+
+impl Packet for SectionBlocksUpdate {
+    const ID: i32 = clientbound::SECTION_BLOCKS_UPDATE;
+
+    fn read(reader: &mut Reader<'_>) -> Self {
+        // 段坐标是 `x(22) | z(22) | y(20)`。
+        let section = reader.i64().expect("section position");
+        let origin = Pos::new(
+            (section >> 42) as i32 * 16,
+            (section << 44 >> 44) as i32 * 16,
+            (section << 22 >> 42) as i32 * 16,
+        );
+        let blocks = (0..list_len(reader))
+            .map(|_| {
+                // 状态 ID 在高位，低 12 位是段内的 `x << 8 | z << 4 | y`。
+                let entry = reader.varlong().expect("VarLong");
+                let local = (entry & 0xfff) as i32;
+                let pos = origin.offset(local >> 8, local & 15, (local >> 4) & 15);
+                (pos, (entry >> 12) as u32)
+            })
+            .collect();
+        Self { blocks }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockChangedAck {
     pub sequence: i32,
@@ -1678,6 +1708,7 @@ pub fn packet_name(id: i32) -> String {
         clientbound::PONG_RESPONSE => "pong_response",
         clientbound::REMOVE_ENTITIES => "remove_entities",
         clientbound::ROTATE_HEAD => "rotate_head",
+        clientbound::SECTION_BLOCKS_UPDATE => "section_blocks_update",
         clientbound::SET_CHUNK_CACHE_CENTER => "set_chunk_cache_center",
         clientbound::SET_ENTITY_DATA => "set_entity_data",
         clientbound::SET_EQUIPMENT => "set_equipment",
