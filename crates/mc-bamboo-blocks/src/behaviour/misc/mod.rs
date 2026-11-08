@@ -34,6 +34,7 @@ mod respawn_anchor;
 mod scaffolding;
 mod sculk;
 mod sea_pickle;
+mod sniffer_egg;
 mod snow;
 mod soil;
 mod speleothem;
@@ -193,13 +194,13 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::TransparentBlock
         | C::TrialSpawnerBlock
         | C::WebBlock => Some(&Plain),
+        C::SnifferEggBlock => Some(&sniffer_egg::SnifferEgg),
         // 官方的覆盖在这个世界里都走不到：下落和孵化的计划刻不在范围里，主世界的水不会蒸发，
         // `GameMasterBlock` 要权限，别的只碰方块实体的内容。
         C::BrushableBlock
         | C::ColoredFallingBlock
         | C::JigsawBlock
         | C::SandBlock
-        | C::SnifferEggBlock
         | C::StructureBlock
         | C::TestInstanceBlock
         | C::WetSpongeBlock => Some(&Plain),
