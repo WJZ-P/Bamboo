@@ -17,6 +17,7 @@ const ATTRIBUTE_REGISTRY: &str = "minecraft:attribute";
 const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const BLOCK_ENTITY_TYPE_REGISTRY: &str = "minecraft:block_entity_type";
 const CHAT_TYPE_REGISTRY: &str = "minecraft:chat_type";
+const CONSUME_EFFECT_TYPE_REGISTRY: &str = "minecraft:consume_effect_type";
 const DATA_COMPONENT_TYPE_REGISTRY: &str = "minecraft:data_component_type";
 const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
 const ENTITY_TYPE_REGISTRY: &str = "minecraft:entity_type";
@@ -48,8 +49,84 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
+    write_file(
+        output_dir,
+        "component_registries.rs",
+        &component_registries_file(data)?,
+    )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "tags.rs", &tags)
+}
+
+/// 物品组件解码要用到的注册表大小，外加几个要按 ID 分派的小注册表的常量。
+///
+/// 组件的 `StreamCodec` 把 `Holder` 和注册表条目写成数字 ID，解码时只需要知道条目个数
+/// 就能判断 ID 合不合法，所以这里只导出大小，不导出上千个用不到的名字。
+fn component_registries_file(data: &VersionData) -> Result<String, String> {
+    /// 要导出大小的注册表，`(模块里的常量名, 注册表名)`。
+    const SIZES: &[(&str, &str)] = &[
+        ("BANNER_PATTERN", "minecraft:banner_pattern"),
+        ("BLOCK", BLOCK_REGISTRY),
+        ("BLOCK_ENTITY_TYPE", BLOCK_ENTITY_TYPE_REGISTRY),
+        ("BLOCK_TRANSFORMER", "minecraft:block_transformer"),
+        ("CAT_SOUND_VARIANT", "minecraft:cat_sound_variant"),
+        ("CAT_VARIANT", "minecraft:cat_variant"),
+        ("CHICKEN_SOUND_VARIANT", "minecraft:chicken_sound_variant"),
+        ("CHICKEN_VARIANT", "minecraft:chicken_variant"),
+        ("CONSUME_EFFECT_TYPE", CONSUME_EFFECT_TYPE_REGISTRY),
+        ("COW_SOUND_VARIANT", "minecraft:cow_sound_variant"),
+        ("COW_VARIANT", "minecraft:cow_variant"),
+        ("DAMAGE_TYPE", "minecraft:damage_type"),
+        (
+            "DATA_COMPONENT_PREDICATE_TYPE",
+            "minecraft:data_component_predicate_type",
+        ),
+        ("DATA_COMPONENT_TYPE", DATA_COMPONENT_TYPE_REGISTRY),
+        ("DECORATED_POT_PATTERN", "minecraft:decorated_pot_pattern"),
+        ("ENCHANTMENT", "minecraft:enchantment"),
+        ("ENTITY_TYPE", ENTITY_TYPE_REGISTRY),
+        ("FROG_VARIANT", "minecraft:frog_variant"),
+        ("INSTRUMENT", "minecraft:instrument"),
+        ("ITEM", ITEM_REGISTRY),
+        ("JUKEBOX_SONG", "minecraft:jukebox_song"),
+        ("MOB_EFFECT", "minecraft:mob_effect"),
+        ("PAINTING_VARIANT", "minecraft:painting_variant"),
+        ("PIG_SOUND_VARIANT", "minecraft:pig_sound_variant"),
+        ("PIG_VARIANT", "minecraft:pig_variant"),
+        ("POTION", "minecraft:potion"),
+        ("SOUND_EVENT", "minecraft:sound_event"),
+        ("TRIM_MATERIAL", "minecraft:trim_material"),
+        ("TRIM_PATTERN", "minecraft:trim_pattern"),
+        ("VILLAGER_TYPE", "minecraft:villager_type"),
+        ("WOLF_SOUND_VARIANT", "minecraft:wolf_sound_variant"),
+        ("WOLF_VARIANT", "minecraft:wolf_variant"),
+        (
+            "ZOMBIE_NAUTILUS_VARIANT",
+            "minecraft:zombie_nautilus_variant",
+        ),
+    ];
+
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 组件解码要校验的注册表条目个数。");
+    let _ = writeln!(out, "pub mod sizes {{");
+    for &(name, registry) in SIZES {
+        let entries = registry_entries(data, registry)
+            .ok_or_else(|| format!("注册表报告里没有 {registry}"))?;
+        if entries.is_empty() {
+            return Err(format!("{registry} 是空的"));
+        }
+        let _ = writeln!(out, "    /// `{registry}`。");
+        let _ = writeln!(out, "    pub const {name}: u32 = {};", entries.len());
+    }
+    let _ = writeln!(out, "}}\n");
+
+    write_registry_ids(
+        &mut out,
+        data,
+        "consume_effect_type",
+        CONSUME_EFFECT_TYPE_REGISTRY,
+    );
+    Ok(out)
 }
 
 fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String> {
@@ -59,7 +136,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod component_registries;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -957,15 +1034,18 @@ fn registries_file(data: &VersionData) -> String {
     out
 }
 
-/// 把一个注册表的条目写成常量，数字 ID 就是条目在列表里的位置。
-fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, registry: &str) {
-    let entries = data
-        .synced_registries
+/// 一个注册表按 ID 排列的条目，先找同步注册表，再找内置注册表。
+fn registry_entries<'a>(data: &'a VersionData, registry: &str) -> Option<&'a [String]> {
+    data.synced_registries
         .iter()
         .find(|candidate| candidate.name == registry)
-        .map(|found| &found.entries)
-        .or_else(|| data.builtin_registries.get(registry))
-        .map_or(&[][..], Vec::as_slice);
+        .map(|found| found.entries.as_slice())
+        .or_else(|| data.builtin_registries.get(registry).map(Vec::as_slice))
+}
+
+/// 把一个注册表的条目写成常量，数字 ID 就是条目在列表里的位置。
+fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, registry: &str) {
+    let entries = registry_entries(data, registry).unwrap_or(&[]);
 
     let _ = writeln!(out, "pub mod {module} {{");
     let _ = writeln!(out, "    pub const TOTAL: u32 = {};", entries.len());
