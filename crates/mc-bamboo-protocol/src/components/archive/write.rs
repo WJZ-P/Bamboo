@@ -168,8 +168,10 @@ pub fn range_i32(value: i32, min: i32, max: i32) -> Result<i32> {
 }
 
 /// 官方 `ExtraCodecs.floatRange` 的编码校验。
+///
+/// Encode-side check of vanilla `ExtraCodecs.floatRange`.
 pub fn float_range(value: f32, min: f32, max: f32) -> Result<Dyn> {
-    if (min..=max).contains(&value) {
+    if within_java_float_range(value, min, max) {
         Ok(Dyn::Float(value))
     } else {
         Err(Error::new(format!("{value} is not in [{min};{max}]")))
@@ -177,10 +179,36 @@ pub fn float_range(value: f32, min: f32, max: f32) -> Result<Dyn> {
 }
 
 /// 官方 `ExtraCodecs.floatRange` 的解码校验。
+///
+/// Decode-side check of vanilla `ExtraCodecs.floatRange`.
 pub fn range_f32(value: f32, min: f32, max: f32) -> Result<f32> {
-    if (min..=max).contains(&value) {
+    if within_java_float_range(value, min, max) {
         Ok(value)
     } else {
         Err(Error::new(format!("{value} is not in [{min};{max}]")))
+    }
+}
+
+/// 官方用 `Float.compareTo` 判断区间：`-0.0` 比 `0.0` 小，所以从 0 开始的区间不收 `-0.0`；
+/// NaN 比任何数都大，总在区间外。`total_cmp` 的顺序和它一致（负号的 NaN 排在最前，同样在区间外）。
+///
+/// Vanilla checks the range with `Float.compareTo`: `-0.0` is less than `0.0`, so a range starting
+/// at 0 rejects `-0.0`, and NaN is greater than everything, so it is always outside. `total_cmp`
+/// orders floats the same way (a negative NaN sorts first and is outside as well).
+fn within_java_float_range(value: f32, min: f32, max: f32) -> bool {
+    value.total_cmp(&min).is_ge() && value.total_cmp(&max).is_le()
+}
+
+#[cfg(test)]
+mod float_range_tests {
+    use super::*;
+
+    #[test]
+    fn negative_zero_is_below_a_range_starting_at_zero() {
+        assert!(range_f32(-0.0, 0.0, f32::MAX).is_err());
+        assert!(range_f32(0.0, 0.0, f32::MAX).is_ok());
+        assert!(range_f32(f32::NAN, 0.0, f32::MAX).is_err());
+        assert!(range_f32(-0.0, -1.0, 1.0).is_ok());
+        assert!(float_range(-0.0, 0.0, 1.0).is_err());
     }
 }
