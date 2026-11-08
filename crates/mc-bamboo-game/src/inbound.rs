@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use mc_bamboo_core::profile::Property;
 use mc_bamboo_protocol::packet::play::{ClientInformation, PlayRequest};
 use uuid::Uuid;
 
@@ -29,6 +30,8 @@ pub struct JoinRequest {
     pub id: PlayerId,
     pub uuid: Uuid,
     pub name: String,
+    /// 皮肤等属性，离线模式下是空的。
+    pub properties: Vec<Property>,
     /// Configuration 阶段收到的客户端设置，没收到时是默认值。
     pub client: ClientInformation,
     pub sink: Box<dyn PlayerSink>,

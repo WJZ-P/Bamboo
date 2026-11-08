@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use mc_bamboo_core::profile::Property;
 use mc_bamboo_protocol::{
     packet::play::{GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, SystemChat},
     text::{Color, Component},
@@ -24,6 +25,9 @@ pub(crate) struct GameTime(pub(crate) i64);
 pub(crate) struct RosterEntry {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
+    /// 皮肤等属性，正版验证时由 session server 给出。别人要看到这名玩家的皮肤，
+    /// 就得靠这些属性跟着 Tab 列表一起发过去。
+    pub(crate) properties: Vec<Property>,
     pub(crate) game_mode: GameMode,
     /// 毫秒。
     pub(crate) latency: i32,
@@ -35,6 +39,7 @@ impl RosterEntry {
         PlayerInfoEntry {
             uuid: self.uuid,
             name: &self.name,
+            properties: &self.properties,
             game_mode: self.game_mode,
             listed: true,
             latency: self.latency,
@@ -153,6 +158,7 @@ mod tests {
         RosterEntry {
             uuid: STEVE_UUID,
             name: "Steve".to_owned(),
+            properties: Vec::new(),
             game_mode: GameMode::Creative,
             latency: 42,
             show_hat: true,
@@ -182,6 +188,29 @@ mod tests {
         expected.extend_from_slice(&[5, b'S', b't', b'e', b'v', b'e']);
         // 没有属性、没有聊天会话、创造、显示、延迟 42、没有显示名、顺序 0、显示帽子。
         expected.extend_from_slice(&[0x00, 0x00, 0x01, 0x01, 0x2a, 0x00, 0x00, 0x01]);
+        assert_eq!(body(&frames), expected);
+    }
+
+    /// 皮肤跟着新玩家的 Tab 列表条目一起广播出去，别人才看得到。
+    #[test]
+    fn a_new_player_brings_their_skin() {
+        let mut entry = steve();
+        entry.properties = vec![Property {
+            name: "textures".to_owned(),
+            value: "ewo=".to_owned(),
+            signature: None,
+        }];
+        let frames = Global::default().add_player(STEVE, entry);
+
+        let mut expected = vec![0xff, 0x01];
+        expected.extend_from_slice(STEVE_UUID.as_bytes());
+        expected.extend_from_slice(&[5, b'S', b't', b'e', b'v', b'e']);
+        // 一项属性：名字 textures，值 ewo=，没有签名。
+        expected.push(0x01);
+        expected.extend_from_slice(&[8, b't', b'e', b'x', b't', b'u', b'r', b'e', b's']);
+        expected.extend_from_slice(&[4, b'e', b'w', b'o', b'=']);
+        expected.push(0x00);
+        expected.extend_from_slice(&[0x00, 0x01, 0x01, 0x2a, 0x00, 0x00, 0x01]);
         assert_eq!(body(&frames), expected);
     }
 

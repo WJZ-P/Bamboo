@@ -5,6 +5,7 @@
 
 use std::mem;
 
+use mc_bamboo_core::profile::Property;
 use mc_bamboo_data::packets::play::{clientbound, serverbound};
 use mc_bamboo_protocol::codec::{Reader, write_string, write_varint};
 use uuid::Uuid;
@@ -498,6 +499,8 @@ impl Packet for PlayerPosition {
 pub struct TabEntry {
     pub uuid: Uuid,
     pub name: Option<String>,
+    /// 皮肤等属性。离线模式下是空的。
+    pub properties: Vec<Property>,
     pub game_mode: Option<i32>,
     pub listed: Option<bool>,
     pub latency: Option<i32>,
@@ -544,7 +547,7 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
     };
     if actions & 0x01 != 0 {
         entry.name = Some(reader.string(16).expect("name").to_owned());
-        assert_eq!(varint(reader), 0, "offline players have no properties");
+        entry.properties = read_properties(reader);
     }
     if actions & 0x02 != 0 {
         assert!(!boolean(reader), "offline players have no chat session");
@@ -568,6 +571,19 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
         entry.show_hat = Some(boolean(reader));
     }
     entry
+}
+
+/// 档案上的属性列表，每一项的签名是可选的。
+fn read_properties(reader: &mut Reader<'_>) -> Vec<Property> {
+    let count = list_len(reader);
+    (0..count)
+        .map(|_| Property {
+            name: reader.string(64).expect("property name").to_owned(),
+            value: reader.string(32767).expect("property value").to_owned(),
+            signature: boolean(reader)
+                .then(|| reader.string(32767).expect("property signature").to_owned()),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

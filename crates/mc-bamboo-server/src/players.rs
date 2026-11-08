@@ -5,6 +5,8 @@ use std::sync::{
     atomic::{AtomicI32, Ordering},
 };
 
+use mc_bamboo_auth::Profile;
+use mc_bamboo_core::profile::Property;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 use tracing::info;
 use uuid::Uuid;
@@ -66,22 +68,25 @@ pub(crate) struct PlayerSession {
     signals: SessionSignals,
     pub(crate) name: String,
     pub(crate) uuid: Uuid,
+    /// 皮肤等属性，离线模式下是空的。
+    pub(crate) properties: Vec<Property>,
     pub(crate) entity_id: i32,
 }
 
 impl PlayerSession {
-    /// 把玩家加入玩家表。
+    /// 把玩家加入玩家表。`profile` 是正版验证的结果，离线模式下由玩家名现编。
     ///
     /// 同名玩家在线时和官方一样踢掉旧连接，等它离开之后再进入。断网时旧连接要等心跳超时才会结束，
     /// 这段时间拒绝重连的话玩家就进不来了。这里没有自己的时限，调用方的 `pre_play_timeout` 兜底。
-    pub(crate) async fn join(
-        shared: &Arc<Shared>,
-        name: &str,
-        uuid: Uuid,
-    ) -> Result<Self, JoinRefusal> {
+    pub(crate) async fn join(shared: &Arc<Shared>, profile: Profile) -> Result<Self, JoinRefusal> {
+        let Profile {
+            uuid,
+            name,
+            properties,
+        } = profile;
         let player = OnlinePlayer {
             info: PlayerInfo {
-                name: name.to_owned(),
+                name: name.clone(),
                 uuid: uuid.to_string(),
             },
             signals: SessionSignals::default(),
@@ -102,8 +107,9 @@ impl PlayerSession {
         Ok(Self {
             shared: Arc::clone(shared),
             signals: player.signals(),
-            name: name.to_owned(),
+            name,
             uuid,
+            properties,
             entity_id: NEXT_ENTITY_ID.fetch_add(1, Ordering::Relaxed),
         })
     }

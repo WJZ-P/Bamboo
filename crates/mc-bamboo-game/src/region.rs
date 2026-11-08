@@ -95,6 +95,8 @@ pub(crate) struct Region {
     /// 服务端视距，已经 clamp 到合法范围。
     pub(crate) view_distance: i32,
     max_players: i32,
+    /// 写进 `login` 包的那一位，官方取的是 `MinecraftServer.usesAuthentication()`。
+    online_mode: bool,
 }
 
 // 世界线程以后要能把 `Region` 交给线程池，所以它必须能在线程之间移动。
@@ -104,7 +106,7 @@ const _: () = {
 };
 
 impl Region {
-    pub(crate) fn new(view_distance: i32, max_players: i32) -> Self {
+    pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {
         let chunks = ChunkStore::flat();
         let template_body = encode_template(&chunks);
         Self {
@@ -119,6 +121,7 @@ impl Region {
             tick: RegionTick::default(),
             view_distance,
             max_players,
+            online_mode,
         }
     }
 
@@ -143,6 +146,8 @@ impl Region {
             id,
             uuid,
             name,
+            // 皮肤归名单管，进服的这三步不看它。
+            properties: _,
             client,
             sink,
         } = request;
@@ -160,7 +165,7 @@ impl Region {
             game_mode,
             is_flat: true,
             sea_level: flat::SEA_LEVEL,
-            online_mode: false,
+            online_mode: self.online_mode,
         };
         self.links.send(id, &login);
         self.links.send(id, &ABILITIES);
@@ -220,7 +225,7 @@ mod tests {
 
     #[test]
     fn tick_clock_measures_elapsed_ticks() {
-        let mut region = Region::new(2, 20);
+        let mut region = Region::new(2, 20, false);
         let start = region.tick;
 
         for _ in 0..21 {

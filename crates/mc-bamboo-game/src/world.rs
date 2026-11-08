@@ -41,6 +41,8 @@ pub struct WorldConfig {
     pub view_distance: i32,
     /// 写进 `login` 包的玩家上限。满员由连接层判断，世界线程不看它。
     pub max_players: i32,
+    /// 服务端有没有开正版验证。只写进 `login` 包，验证本身在连接层做。
+    pub online_mode: bool,
 }
 
 /// 所有游戏状态的唯一所有者。
@@ -58,7 +60,7 @@ impl World {
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
         Self {
             global: Global::default(),
-            region: Region::new(view_distance, config.max_players),
+            region: Region::new(view_distance, config.max_players, config.online_mode),
             inbox,
         }
     }
@@ -138,7 +140,7 @@ impl World {
     }
 
     /// 把进服的 10 步串起来，全部写进这名玩家的同一条出站缓冲。`coverage.md` 4.1。
-    fn on_join(&mut self, request: JoinRequest) {
+    fn on_join(&mut self, mut request: JoinRequest) {
         let id = request.id;
         if self.region.players.contains_key(&id) {
             warn!(player = id.0, "ignoring a second join with the same id");
@@ -147,6 +149,8 @@ impl World {
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
+            // 皮肤只有名单要用，直接搬过来。
+            properties: std::mem::take(&mut request.properties),
             game_mode: GAME_MODE,
             latency: 0,
             show_hat: shows_hat(&request.client),

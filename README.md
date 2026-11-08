@@ -34,7 +34,7 @@ pnpm start
 
 ## 现在能玩什么
 
-- 离线模式登录，多名玩家进入同一个超平坦世界。
+- 多名玩家进入同一个超平坦世界，默认走离线模式登录。
 - 区块跟着玩家走，Tab 列表、玩家互相可见、潜行、冲刺、挥手、手持物同步。
 - 创造模式的破坏和放置。全部官方方块类都移植了：朝向、连接、支撑和右键走官方逻辑，用官方代码做 oracle 对比验证。
 - 告示牌能写字：放下后给放置者打开编辑界面，右键重新编辑，按玩家面向哪一面决定编辑正面还是背面。
@@ -56,6 +56,11 @@ pnpm start
 - 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。
 - 网络压缩：登录末尾告诉客户端阈值（默认 256，负值关闭），之后两个方向都按官方格式收发压缩帧，
   小于阈值的包原样发。压缩只在连接任务里做，世界线程交出的帧本身不变。
+- 正版验证和加密（`online_mode`，默认关闭）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
+  客户端回来的共享密钥和挑战码按官方解密校验，密钥包之后两个方向都走 AES/CFB8，加密在最外层，连长度前缀一起加密。
+  serverId 哈希用官方那套带符号的十六进制 SHA-1，再按官方格式问 session server 的 `hasJoined`，
+  打开 `prevent-proxy-connections` 时带上客户端 IP。验证失败、服务不可用、超时都用官方的翻译键断开。
+  问 session server 在连接任务里做，有时限，世界线程不等这段 IO。session server 给的 UUID、皮肤和签名原样进 Tab 列表。
 - 红石信号、邻居更新和计划刻按官方逻辑计算（计划刻带优先级）：导线、火把（含烧坏）、中继器、比较器、侦测器、按钮、拉杆、红石灯、铜灯、门、活板门、栅栏门、音符盒、唱片机、动力铁轨、发射器、投掷器和合成器的计划刻都能用。
 
 已知限制：
@@ -74,7 +79,10 @@ pnpm start
 - 命令方块这类管理员方块不能放置，调试棒也不能用，Bamboo 没有权限系统。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
 - 没有命令，没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
-- 没有正版验证和加密。
+- 正版验证的限制：`online_mode` 默认关闭，Bamboo 还没有配置文件，命令行版用的是默认配置，要打开得改 `ServerConfig`。
+  代理转发（Velocity / BungeeCord）没有实现，和正版验证互斥的判断已经写好，但现在恒为「没开转发」。
+  没有玩家公钥和聊天签名，开了正版验证的聊天也是不签名的。问 session server 用一个 10 秒的总时限，
+  官方是连接和读取各 5 秒。官方那种登录排队（`slow_login`）没有做，只有进服之前的总超时管着。
 
 ## 项目结构
 
@@ -86,7 +94,8 @@ pnpm start
 | `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包，只处理字节 |
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、世界生成，不知道网络 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻，纯逻辑，不知道网络和存储 |
-| `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向 |
+| `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
+| `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编码 |
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
@@ -97,7 +106,7 @@ pnpm start
 ```text
 mc-bamboo   apps/desktop
        \     /
-  mc-bamboo-server
+  mc-bamboo-server ─── mc-bamboo-auth
          |
    mc-bamboo-game
     /    |     \
@@ -105,6 +114,7 @@ protocol blocks world
 ```
 
 `protocol`、`blocks` 和 `world` 互不依赖，它们都依赖 `core` 和 `data`，`protocol` 还依赖 `nbt`。
+`auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 
 ## 线程模型
 
@@ -132,6 +142,10 @@ cargo run -p mc-bamboo-vanilla -- generate <server.jar>
 ```bash
 cargo run -p mc-bamboo-vanilla -- probe 127.0.0.1 25565
 ```
+
+`probe` 连的是你启动的那个 Bamboo，它跑的是离线模式。正版验证那一段要换一个服务端（`online_mode`
+在启动时就定下来了），所以 `probe` 会在自己的进程里再起一个开了正版验证的 Bamboo，外加一个假的
+session server 顶替 Mojang，让官方客户端代码走完加密登录，全程只走 `127.0.0.1`，不访问外网。
 
 最后让官方代码给方块行为出题和给答案，用 `mc-bamboo-blocks` 重放，比较两边的结果：
 

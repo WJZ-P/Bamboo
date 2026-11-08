@@ -1,18 +1,36 @@
-//! Login 状态：确认玩家身份。目前只支持离线模式，不做正版验证和加密。
+//! Login 状态：确认玩家身份。
+//!
+//! 关掉正版验证时这里只读一个玩家名，UUID 由玩家名算出来；打开时要走官方
+//! `ServerLoginPacketListenerImpl.handleHello` / `handleKey` 的全套：公布公钥、
+//! 校验 challenge、启用加密，再去问 session server。
 
 use std::sync::Arc;
 
+use mc_bamboo_auth::{
+    AuthError, Profile, ServerKeyPair, has_joined, random_challenge, server_id_hash,
+};
 use mc_bamboo_protocol::{
     frame::append_frame,
-    packet::login::{LoginCompression, LoginFinished, LoginRequest, MAX_PLAYER_NAME_CHARS},
+    packet::login::{
+        LoginCompression, LoginFinished, LoginHello, LoginRequest, MAX_PLAYER_NAME_CHARS,
+    },
 };
 use md5::{Digest, Md5};
+use tracing::{error, info, warn};
 use uuid::{Builder, Uuid};
 
 use super::{Connection, ConnectionError};
 use crate::{players::PlayerSession, server::Shared};
 
-/// 读取玩家名并把玩家加入玩家表。同名玩家在线时要等它离开。玩家被拒绝或中途离开时返回 `None`。
+/// 官方 `ServerLoginPacketListenerImpl.serverId` 一直是空串，哈希里也用它。
+const SERVER_ID: &str = "";
+/// session server 不认这次登录时客户端看到的话。
+const UNVERIFIED_USERNAME: &str = "multiplayer.disconnect.unverified_username";
+/// 问不到 session server 时客户端看到的话。
+const AUTHSERVERS_DOWN: &str = "multiplayer.disconnect.authservers_down";
+
+/// 确认玩家身份并把玩家加入玩家表。同名玩家在线时要等它离开。
+/// 玩家被拒绝或中途离开时返回 `None`。
 pub(super) async fn admit(
     connection: &mut Connection,
     shared: &Arc<Shared>,
@@ -26,11 +44,91 @@ pub(super) async fn admit(
     if !is_valid_player_name(name) {
         return Err(ConnectionError::InvalidPlayerName);
     }
+    // 后面还要再读包，名字不能继续借着这一帧。
+    let name = name.to_owned();
 
-    match PlayerSession::join(shared, name, offline_uuid(name)).await {
+    let profile = match &shared.keypair {
+        Some(keypair) => match authenticate(connection, shared, keypair, name).await? {
+            Some(profile) => profile,
+            None => return Ok(None),
+        },
+        None => offline_profile(name),
+    };
+
+    match PlayerSession::join(shared, profile).await {
         Ok(session) => Ok(Some(session)),
         Err(refusal) => {
             connection.refuse_login(refusal.message()).await?;
+            Ok(None)
+        }
+    }
+}
+
+/// 官方 `handleKey` 加上它起的那条验证线程：加密连接，然后问 session server。
+///
+/// 这个请求跑在连接任务里，世界线程碰不到它，所以一个玩家等 Mojang 回话不会卡住别人。
+async fn authenticate(
+    connection: &mut Connection,
+    shared: &Shared,
+    keypair: &ServerKeyPair,
+    name: String,
+) -> Result<Option<Profile>, ConnectionError> {
+    let challenge = random_challenge();
+    let mut frame = Vec::new();
+    append_frame(
+        &mut frame,
+        &LoginHello {
+            server_id: SERVER_ID,
+            public_key: keypair.public_key_der(),
+            challenge: &challenge,
+            // 走到这里就说明服务端要去问 Mojang，官方这一位也是写死的 true。
+            should_authenticate: true,
+        },
+    )?;
+    connection.write(&frame).await?;
+
+    let Some(payload) = connection.next_frame().await? else {
+        return Err(ConnectionError::ClosedBeforeJoining);
+    };
+    let LoginRequest::Key {
+        shared_secret,
+        challenge: answer,
+    } = LoginRequest::decode(&payload)?
+    else {
+        return Err(ConnectionError::UnexpectedPacket);
+    };
+
+    // 官方的顺序：先验 challenge，再解出密钥。
+    if keypair.decrypt(answer).ok().as_deref() != Some(&challenge[..]) {
+        return Err(ConnectionError::ChallengeMismatch);
+    }
+    let secret = keypair.decrypt_shared_secret(shared_secret)?;
+    let digest = server_id_hash(SERVER_ID, &secret, keypair.public_key_der());
+    // 官方在收到 key 包时就切换加密，所以后面的包，包括下面的断开原因，都是加密的。
+    connection.enable_encryption(&secret);
+
+    // 开了 prevent-proxy-connections 才把客户端的地址交给 Mojang 比对。
+    let ip = shared
+        .config
+        .prevent_proxy_connections
+        .then(|| connection.peer_ip())
+        .flatten();
+    let url = &shared.config.session_server_url;
+    match has_joined(url, &name, &digest, ip, shared.config.auth_timeout).await {
+        Ok(profile) => {
+            info!("UUID of player {} is {}", profile.name, profile.uuid);
+            Ok(Some(profile))
+        }
+        Err(AuthError::Unverified(_)) => {
+            error!("Username '{name}' tried to join with an invalid session");
+            connection
+                .refuse_login_translated(UNVERIFIED_USERNAME)
+                .await?;
+            Ok(None)
+        }
+        Err(AuthError::Unavailable(error)) => {
+            warn!(%error, "couldn't verify username because servers are unavailable");
+            connection.refuse_login_translated(AUTHSERVERS_DOWN).await?;
             Ok(None)
         }
     }
@@ -59,6 +157,7 @@ pub(super) async fn finish(
         &LoginFinished {
             uuid: session.uuid,
             name: &session.name,
+            properties: &session.properties,
             session_id: shared.session_id,
         },
     )?;
@@ -72,7 +171,9 @@ pub(super) async fn finish(
             connection.allow_full_size_frames();
             Ok(())
         }
-        LoginRequest::Hello { .. } => Err(ConnectionError::UnexpectedPacket),
+        LoginRequest::Hello { .. } | LoginRequest::Key { .. } => {
+            Err(ConnectionError::UnexpectedPacket)
+        }
     }
 }
 
@@ -81,6 +182,15 @@ fn is_valid_player_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_PLAYER_NAME_CHARS
         && name.bytes().all(|byte| (33..127).contains(&byte))
+}
+
+/// 离线模式的身份，对应官方 `UUIDUtil.createOfflineProfile`：UUID 由玩家名算出，没有皮肤。
+fn offline_profile(name: String) -> Profile {
+    Profile {
+        uuid: offline_uuid(&name),
+        name,
+        properties: Vec::new(),
+    }
 }
 
 /// 离线模式的 UUID，由玩家名算出，和官方的算法相同。

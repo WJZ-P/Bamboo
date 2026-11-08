@@ -1,3 +1,4 @@
+import com.mojang.authlib.properties.Property;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -7,15 +8,21 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.math.BigInteger;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.PublicKey;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
+import java.util.Collection;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -31,6 +38,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -46,6 +55,7 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.PacketDecoder;
+import net.minecraft.network.PacketSendListener;
 import net.minecraft.network.VarInt;
 import net.minecraft.network.ProtocolInfo;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -122,10 +132,12 @@ import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.network.protocol.game.VecDeltaCodec;
 import net.minecraft.network.protocol.login.ClientLoginPacketListener;
+import net.minecraft.network.protocol.login.ClientboundHelloPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket;
 import net.minecraft.network.protocol.login.ServerboundHelloPacket;
+import net.minecraft.network.protocol.login.ServerboundKeyPacket;
 import net.minecraft.network.protocol.login.ServerboundLoginAcknowledgedPacket;
 import net.minecraft.network.protocol.ping.ClientboundPongResponsePacket;
 import net.minecraft.network.protocol.ping.ServerboundPingRequestPacket;
@@ -149,6 +161,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.util.Crypt;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityTypes;
@@ -202,6 +215,9 @@ import net.minecraft.world.ticks.ProtoChunkTicks;
  * <p>官方管线跑在 EmbeddedChannel 上，字节通过阻塞 socket 转发，这样不依赖 NIO。
  * 所以这里验证的是协议内容，不包括 NIO 传输层和客户端的渲染。
  *
+ * <p>多给两个参数时，最后一名玩家连的是另一个开了正版验证的服务端，加密和 session server
+ * 那一段也跟着检查；参数由 `mc-bamboo-vanilla probe` 传进来，少给就跳过那一段。
+ *
  * <p>脚本的每一步都有时限。一步超时后这一段剩下的步骤跳过，下一段继续，结束时列出所有失败。
  */
 public final class Probe {
@@ -209,6 +225,8 @@ public final class Probe {
     private static final String PLAYER = "Kitten";
     private static final String SECOND_PLAYER = "Mochi";
     private static final String LATE_PLAYER = "Latecomer";
+    /** 走正版验证进服的那名玩家，它连的是另一个服务端，所以用一个别处没有的名字。 */
+    private static final String ONLINE_PLAYER = "Sakura";
     /** 客户端请求的视距，和 Bamboo 的默认值相同，所以 chunkRadius 和跟踪范围都用它。 */
     private static final int VIEW_DISTANCE = 8;
     private static final int ALL_SKIN_PARTS = 0x7f;
@@ -305,6 +323,9 @@ public final class Probe {
     public static void main(String[] args) throws Exception {
         String host = args[0];
         int port = Integer.parseInt(args[1]);
+        // 多出来的两个参数是开了正版验证的服务端和假 session server，没给就不查那一段。
+        String onlineAddress = args.length > 2 ? args[2] : null;
+        String sessionUrl = args.length > 3 ? args[3] : null;
         startWatchdog();
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -324,6 +345,9 @@ public final class Probe {
                 probeStatus(host, port);
                 new Scenario(host, port, layers).run();
                 check("chunk: an untouched chunk had its light compared", flatLightChecked);
+                if (onlineAddress != null && sessionUrl != null) {
+                    probeOnline(onlineAddress, sessionUrl, layers);
+                }
             } catch (Exception error) {
                 // 官方解码器发现格式错误时会断开连接，这里记成一项失败，照常输出汇总。
                 check("connection: no error while talking to the server (" + error + ")", false);
@@ -414,6 +438,39 @@ public final class Probe {
             });
             connection.send(ServerboundStatusRequestPacket.INSTANCE);
             bridge.pumpUntil(finished, 10_000);
+        }
+    }
+
+    /**
+     * 开了正版验证的那一段：这名玩家连另一个服务端，走完官方客户端的加密登录流程。
+     *
+     * <p>假 session server 由 {@code mc-bamboo-vanilla probe} 启动。客户端先把自己算出的
+     * serverId 哈希报给它，服务端随后拿同一个哈希来问才拿得到档案，所以两边的算法必须一致。
+     */
+    private static void probeOnline(
+            String address, String sessionUrl, LayeredRegistryAccess<RegistryLayer> layers) throws IOException {
+        int colon = address.lastIndexOf(':');
+        String host = address.substring(0, colon);
+        int port = Integer.parseInt(address.substring(colon + 1));
+        Join sakura = new Join(host, port, layers, ONLINE_PLAYER, HumanoidArm.RIGHT, false, sessionUrl);
+        try {
+            sakura.start();
+            long deadline = System.currentTimeMillis() + JOIN_TIMEOUT_MILLIS;
+            while (!sakura.onlineJoinDone() && !sakura.closed && System.currentTimeMillis() < deadline) {
+                sakura.pump();
+            }
+            check("online: " + ONLINE_PLAYER + " joined through the encrypted login", sakura.onlineJoinDone());
+            sakura.checkDigestTheServerAsked();
+            sakura.finishChecks();
+        } finally {
+            sakura.close();
+        }
+    }
+
+    /** 问一次假 session server，回复体当成 UTF-8 文本。 */
+    private static String httpGet(String url) throws IOException {
+        try (InputStream body = URI.create(url).toURL().openStream()) {
+            return new String(body.readAllBytes(), StandardCharsets.UTF_8).trim();
         }
     }
 
@@ -1050,11 +1107,16 @@ public final class Probe {
     /** 一个官方客户端：进服流程，以及它收到的所有东西。 */
     private static final class Join {
         final String player;
-        final UUID uuid;
+        /** 服务端最后认下来的 UUID。离线模式里它就是客户端自己算出的那个。 */
+        UUID uuid;
         final HumanoidArm arm;
         private final String host;
         private final int port;
         private final boolean walks;
+        /** 客户端按玩家名算出的 UUID，hello 包里报的就是它。 */
+        private final UUID offlineUuid;
+        /** 假 session server 的根地址。非空就表示这条连接要走正版验证。 */
+        private final String sessionUrl;
         private final LayeredRegistryAccess<RegistryLayer> layers;
         private final RegistryAccess.Frozen registries;
         private final PalettedContainerFactory containers;
@@ -1088,6 +1150,12 @@ public final class Probe {
         private boolean closed;
         private String disconnectReason = "";
         private int sequence;
+        /** 客户端自己算出来的 serverId 哈希，服务端问 session server 时要用同一个。 */
+        private String reportedDigest = "";
+        /** 假 session server 说好要发的档案，服务端转过来的必须和它一致。 */
+        private UUID expectedUuid;
+        private String expectedSkin = "";
+        private String expectedSignature = "";
 
         int entityId;
         Vec3 position = new Vec3(SPAWN_X, SPAWN_Y, SPAWN_Z);
@@ -1123,13 +1191,26 @@ public final class Probe {
                 String player,
                 HumanoidArm arm,
                 boolean walks) throws IOException {
+            this(host, port, layers, player, arm, walks, null);
+        }
+
+        Join(
+                String host,
+                int port,
+                LayeredRegistryAccess<RegistryLayer> layers,
+                String player,
+                HumanoidArm arm,
+                boolean walks,
+                String sessionUrl) throws IOException {
             this.host = host;
             this.port = port;
             this.layers = layers;
             this.player = player;
-            this.uuid = UUIDUtil.createOfflinePlayerUUID(player);
+            this.offlineUuid = UUIDUtil.createOfflinePlayerUUID(player);
+            this.uuid = offlineUuid;
             this.arm = arm;
             this.walks = walks;
+            this.sessionUrl = sessionUrl;
             this.registries = layers.compositeAccess();
             this.containers = PalettedContainerFactory.create(registries);
             this.bridge = new Bridge(host, port);
@@ -1152,8 +1233,14 @@ public final class Probe {
             connection.initiateServerboundPlayConnection(host, port, listener(ClientLoginPacketListener.class, Map.of(
                     "handleLoginFinished", packet -> onLoginFinished((ClientboundLoginFinishedPacket) packet),
                     "handleCompression", packet -> onCompression((ClientboundLoginCompressionPacket) packet),
+                    "handleHello", packet -> onHello((ClientboundHelloPacket) packet),
                     "handleDisconnect", packet -> onLoginRefused((ClientboundLoginDisconnectPacket) packet))));
-            connection.send(new ServerboundHelloPacket(player, uuid));
+            connection.send(new ServerboundHelloPacket(player, offlineUuid));
+        }
+
+        /** 这条连接要不要走正版验证。 */
+        private boolean online() {
+            return sessionUrl != null;
         }
 
         /** 转发一轮字节。服务端主动断开或者官方解码器报错时，连接会在这里结束。 */
@@ -1234,6 +1321,11 @@ public final class Probe {
             return spawnChunksDone() && walkEntered.size() == expectedEntered.size();
         }
 
+        /** 正版验证那一段只要走到进服：区块到齐，而且 tab 里是 session server 给的身份。 */
+        boolean onlineJoinDone() {
+            return spawnChunksDone() && tab.containsKey(uuid);
+        }
+
         /** 区块全部到齐、走过一个区块、收到两个心跳和一次延迟广播之后就可以结束了。 */
         boolean longRunningDone() {
             return walkDone() && latencyUpdated && keepAlives >= KEEP_ALIVES_TO_ANSWER;
@@ -1281,6 +1373,58 @@ public final class Probe {
             return firstBatch.stream().allMatch(pos -> Math.abs(pos.x()) <= 1 && Math.abs(pos.z()) <= 1);
         }
 
+        /**
+         * 官方 {@code ClientHandshakePacketListenerImpl.handleHello}：算哈希、发密钥包、切换加密。
+         *
+         * <p>真客户端这一步去问 Mojang 的 {@code joinServer}，这里把哈希报给假 session server，
+         * 它拿这个哈希等服务端来问。密钥包写出去之后才切换加密，和官方的发送监听器一样。
+         */
+        private void onHello(ClientboundHelloPacket packet) {
+            if (!online()) {
+                check("login: an offline server does not ask for a key", false);
+                return;
+            }
+            check("online: the server asks the client to authenticate", packet.shouldAuthenticate());
+            check("online: the server id is empty like the official one", packet.getServerId().isEmpty());
+            check("online: the challenge is four bytes", packet.getChallenge().length == 4);
+            try {
+                SecretKey secret = Crypt.generateSecretKey();
+                PublicKey publicKey = packet.getPublicKey();
+                reportedDigest =
+                        new BigInteger(Crypt.digestData(packet.getServerId(), publicKey, secret)).toString(16);
+                Cipher decrypt = Crypt.getCipher(Cipher.DECRYPT_MODE, secret);
+                Cipher encrypt = Crypt.getCipher(Cipher.ENCRYPT_MODE, secret);
+                ServerboundKeyPacket key = new ServerboundKeyPacket(secret, publicKey, packet.getChallenge());
+                expectProfile(reportedDigest);
+                connection.send(key, PacketSendListener.thenRun(
+                        () -> connection.setEncryptionKey(decrypt, encrypt)));
+            } catch (Exception error) {
+                check("online: the client could answer the key request (" + error + ")", false);
+            }
+        }
+
+        /** 把自己算出的哈希报给假 session server，拿回这次它要发的档案。 */
+        private void expectProfile(String digest) throws IOException {
+            String[] fields = httpGet(sessionUrl + "/probe/expect?username=" + player + "&hash=" + digest).split(" ");
+            expectedUuid = UUID.fromString(fields[0]);
+            expectedSkin = fields[1];
+            expectedSignature = fields[2];
+        }
+
+        /** 服务端问 session server 的哈希，要和客户端自己算出来的一字不差。 */
+        void checkDigestTheServerAsked() throws IOException {
+            String asked = httpGet(sessionUrl + "/probe/asked");
+            check("online: the server asked the session server about the client's digest",
+                    !reportedDigest.isEmpty() && asked.equals(reportedDigest));
+        }
+
+        /** 皮肤要原样转发，签名也要带着，不然客户端不显示披风。 */
+        private void checkSkin(String what, Collection<Property> textures) {
+            check(what, textures.size() == 1
+                    && textures.stream().allMatch(property -> property.value().equals(expectedSkin)
+                            && expectedSignature.equals(property.signature())));
+        }
+
         /** 和官方客户端一样：收到登录压缩包之后才把管线换成压缩帧。 */
         private void onCompression(ClientboundLoginCompressionPacket packet) {
             int threshold = packet.getCompressionThreshold();
@@ -1296,8 +1440,19 @@ public final class Probe {
         }
 
         private void onLoginFinished(ClientboundLoginFinishedPacket packet) {
-            check("login: name is kept", packet.gameProfile().name().equals(player));
-            check("login: uuid uses the offline algorithm", packet.gameProfile().id().equals(uuid));
+            var profile = packet.gameProfile();
+            check("login: name is kept", profile.name().equals(player));
+            if (online()) {
+                check("online: the login profile uses the uuid from the session server",
+                        profile.id().equals(expectedUuid));
+                check("online: the login uuid is not the offline one", !profile.id().equals(offlineUuid));
+                checkSkin("online: the login profile carries the signed skin",
+                        profile.properties().get("textures"));
+            } else {
+                check("login: uuid uses the offline algorithm", profile.id().equals(offlineUuid));
+                check("login: an offline profile has no skin", profile.properties().isEmpty());
+            }
+            uuid = profile.id();
             check("login: session id is present", packet.sessionId() != null);
             check("login: compression comes before the login success of " + player, compressionSeen);
 
@@ -1454,7 +1609,11 @@ public final class Probe {
             check("play: world is flat", spawn.isFlat());
             check("play: sea level matches the flat preset", spawn.seaLevel() == -63);
             check("play: view distance", packet.chunkRadius() == VIEW_DISTANCE);
-            check("play: offline mode", !packet.onlineMode());
+            if (online()) {
+                check("online: the login packet says the server is in online mode", packet.onlineMode());
+            } else {
+                check("play: offline mode", !packet.onlineMode());
+            }
         }
 
         private void onAbilities(ClientboundPlayerAbilitiesPacket packet) {
@@ -1484,8 +1643,16 @@ public final class Probe {
                     actions.equals(EnumSet.allOf(ClientboundPlayerInfoUpdatePacket.Action.class)));
             for (var entry : packet.entries()) {
                 String name = entry.profile().name();
-                check("play: tab uuid uses the offline algorithm",
-                        entry.profileId().equals(UUIDUtil.createOfflinePlayerUUID(name)));
+                if (online()) {
+                    check("online: the tab uuid comes from the session server",
+                            entry.profileId().equals(expectedUuid));
+                    checkSkin("online: the skin from the session server reached the tab list",
+                            entry.profile().properties().get("textures"));
+                } else {
+                    check("play: tab uuid uses the offline algorithm",
+                            entry.profileId().equals(UUIDUtil.createOfflinePlayerUUID(name)));
+                    check("play: an offline tab entry has no skin", entry.profile().properties().isEmpty());
+                }
                 check("play: tab entry is listed", entry.listed());
                 check("play: tab entry has the game mode", entry.gameMode() == GameType.CREATIVE);
                 check("play: tab entry has no chat session", entry.chatSession() == null);

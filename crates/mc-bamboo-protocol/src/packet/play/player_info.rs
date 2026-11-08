@@ -1,11 +1,12 @@
 //! Tab 列表。所有在线玩家都在每个客户端的列表里，和距离无关。
 
+use mc_bamboo_core::profile::Property;
 use mc_bamboo_data::packets::play::clientbound;
 use uuid::Uuid;
 
 use super::GameMode;
 use crate::{
-    codec::{write_bool, write_string, write_uuid, write_varint},
+    codec::{write_bool, write_properties, write_string, write_uuid, write_varint},
     packet::ClientboundPacket,
     text::Component,
 };
@@ -15,6 +16,8 @@ use crate::{
 pub struct PlayerInfoEntry<'a> {
     pub uuid: Uuid,
     pub name: &'a str,
+    /// 皮肤等属性。别人的客户端靠这些字段显示皮肤，离线模式下是空的。
+    pub properties: &'a [Property],
     pub game_mode: GameMode,
     pub listed: bool,
     /// 毫秒。
@@ -29,8 +32,7 @@ impl PlayerInfoEntry<'_> {
         write_uuid(out, self.uuid);
         if actions & PlayerInfoUpdate::ADD_PLAYER != 0 {
             write_string(out, self.name);
-            // 皮肤等属性的数量。离线模式没有属性。
-            write_varint(out, 0);
+            write_properties(out, self.properties);
         }
         if actions & PlayerInfoUpdate::INITIALIZE_CHAT != 0 {
             // 聊天会话。离线模式没有。
@@ -127,6 +129,7 @@ mod tests {
         PlayerInfoEntry {
             uuid: STEVE,
             name: "Steve",
+            properties: &[],
             game_mode: GameMode::Creative,
             listed: true,
             latency: 42,
@@ -222,6 +225,34 @@ mod tests {
         assert_eq!(
             update(actions, &[entry]),
             hex(&format!("60 01 {STEVE_HEX} 01 08 00 02 68 69 ac 02"))
+        );
+    }
+
+    /// 皮肤跟着 ADD_PLAYER 一起发出去，别人的客户端才看得到。
+    #[test]
+    fn add_player_carries_the_skin() {
+        let properties = [Property {
+            name: "textures".to_owned(),
+            value: "ewo=".to_owned(),
+            signature: Some("c2ln".to_owned()),
+        }];
+        let entry = PlayerInfoEntry {
+            properties: &properties,
+            ..steve()
+        };
+        assert_eq!(
+            update(PlayerInfoUpdate::ADD_PLAYER, &[entry]),
+            hex(&format!(
+                "01
+                 01
+                 {STEVE_HEX}
+                 05 53 74 65 76 65
+                 01
+                 08 74 65 78 74 75 72 65 73
+                 04 65 77 6f 3d
+                 01
+                 04 63 32 6c 6e"
+            ))
         );
     }
 

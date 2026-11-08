@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use mc_bamboo_auth::ServerKeyPair;
 use mc_bamboo_data::{registries, tags};
 use mc_bamboo_game::{Inbound, World, WorldConfig};
 use mc_bamboo_protocol::{
@@ -121,6 +122,9 @@ pub(crate) struct Shared {
     pub(crate) responses: PreEncodedResponses,
     /// 每次服务端启动时生成的会话 ID。
     pub(crate) session_id: Uuid,
+    /// 这次启动的 RSA 密钥对，只有开了正版验证才有。官方不管开不开都生成，
+    /// 但是关掉的时候它一次也用不上，生成 1024 位的钥匙又要花掉启动时间。
+    pub(crate) keypair: Option<ServerKeyPair>,
     /// 发给世界线程的消息。世界线程结束后发送会失败。
     pub(crate) inbox: Sender<Inbound>,
     status: RwLock<Arc<[u8]>>,
@@ -208,12 +212,14 @@ impl Server {
         let status = encode_status(&config, 0)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER_LEN);
         let (inbox_sender, inbox) = mpsc::channel();
+        let keypair = config.online_mode.then(ServerKeyPair::generate);
         Ok(Self {
             listener,
             shared: Arc::new(Shared {
                 config,
                 responses,
                 session_id: Uuid::new_v4(),
+                keypair,
                 inbox: inbox_sender,
                 status: RwLock::new(status),
                 players: Mutex::new(HashMap::new()),
@@ -312,6 +318,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
     WorldConfig {
         view_distance: i32::from(config.view_distance),
         max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
+        online_mode: config.online_mode,
     }
 }
 
@@ -349,6 +356,7 @@ fn panic_message(panic: &(dyn Any + Send)) -> &str {
 mod tests {
     use std::{future::pending, sync::Barrier, time::Duration};
 
+    use mc_bamboo_auth::Profile;
     use mc_bamboo_data::packets::{configuration, login, play};
     use mc_bamboo_protocol::{
         PROTOCOL_VERSION,
@@ -725,7 +733,14 @@ mod tests {
                 let mut stale_rounds = 0;
                 for _ in 0..ROUNDS {
                     let session = runtime
-                        .block_on(PlayerSession::join(&shared, name, uuid))
+                        .block_on(PlayerSession::join(
+                            &shared,
+                            Profile {
+                                uuid,
+                                name: name.to_owned(),
+                                properties: Vec::new(),
+                            },
+                        ))
                         .unwrap();
                     barrier.wait();
                     drop(session);

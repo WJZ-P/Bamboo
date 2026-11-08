@@ -122,7 +122,7 @@ impl Stage {
     }
 
     fn with_client(position: Vec3, client: ClientInformation) -> Self {
-        let mut region = Region::new(8, 20);
+        let mut region = Region::new(8, 20, false);
         let own = Recorder::default();
         let watcher = Recorder::default();
         region.links.add(STEVE, Box::new(own.clone()));

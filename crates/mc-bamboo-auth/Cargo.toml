@@ -1,0 +1,24 @@
+[package]
+name = "mc-bamboo-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mojang authentication and protocol encryption for the Bamboo Minecraft server."
+keywords = ["minecraft", "authentication"]
+categories = ["games", "cryptography"]
+
+[dependencies]
+aes.workspace = true
+cfb8.workspace = true
+mc-bamboo-core.workspace = true
+native-tls.workspace = true
+rand_core.workspace = true
+rsa.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-native-tls.workspace = true
+uuid.workspace = true
