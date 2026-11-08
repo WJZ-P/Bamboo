@@ -15,6 +15,12 @@ use crate::{
 };
 
 /// 游戏规则 `random_tick_speed` 的默认值：每个区块段每刻挑几格。
+///
+/// 运行时的速度从 [`crate::Level::block_game_rules`] 读。这个常数只是默认值，
+/// 必须和生成表里的 `GameRules.RANDOM_TICK_SPEED` 一样。
+///
+/// Runtime speed comes from [`crate::Level::block_game_rules`]. This constant is only the
+/// default and must match the generated `GameRules.RANDOM_TICK_SPEED`.
 pub const DEFAULT_RANDOM_TICK_SPEED: i32 = 3;
 /// 每次掷骰子有这么多分之一的机会碰一下天气。
 const PRECIPITATION_CHANCE: i32 = 48;
@@ -48,6 +54,12 @@ pub fn tick_chunk(
 ///
 /// 世界只有平原，平原在任何高度都暖得下雨，水不会结冰；天永远是晴的，不会积雪，也没有雨落进炼药锅。
 /// 所以掷中时只剩挑格子这一步，它会推进 `randValue`，后面挑的格子要和官方一样就不能省。
+///
+/// `max_snow_accumulation_height` 只在 `ServerLevel.tickPrecipitation` 确认正在下雨之后才读。
+/// 这条晴天路径不读它。
+///
+/// `max_snow_accumulation_height` is read only after `ServerLevel.tickPrecipitation` sees rain.
+/// This clear-weather path does not read it.
 fn roll_precipitation(world: &World, origin: BlockPos, speed: i32) {
     for _ in 0..speed {
         if world.random().next_int(PRECIPITATION_CHANCE) == 0 {

@@ -260,6 +260,7 @@ pub(crate) fn actor_holding(item: i32) -> Actor {
         block_interaction_range: 5.0,
         may_build: true,
         prevents_block_drops: true,
+        can_use_game_master_blocks: false,
     }
 }
 

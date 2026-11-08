@@ -211,8 +211,13 @@ pub fn attack(
 
 /// `ServerPlayerGameMode.destroyBlock` 里 `canDestroyBlock` 之后的部分。
 ///
-/// 这个世界没有权限系统，官方的 `GameMasterBlock` 破坏不了，返回 [`InteractionResult::Fail`]，
-/// 调用方要把这一格发回给客户端。
+/// 调试棒的 `canDestroyBlock` 恒返回假，方块不会被挖掉。`GameMasterBlock` 只有
+/// `canUseGameMasterBlocks` 为真才挖得动。
+///
+/// The part of `ServerPlayerGameMode.destroyBlock` after `canDestroyBlock`.
+///
+/// A debug stick's `canDestroyBlock` always returns false, so the block stays.
+/// A `GameMasterBlock` breaks only when `canUseGameMasterBlocks` is true.
 pub fn destroy_block(
     level: &mut dyn Level,
     ticks: &mut BlockTicks,
@@ -221,13 +226,31 @@ pub fn destroy_block(
 ) -> Outcome {
     let mut world = World::new(level, ticks);
     let state = world.block_state(pos);
-    if state.is_a(BlockAncestor::GameMasterBlock) {
+    // `DebugStickItem.canDestroyBlock` 对任何玩家都返回 false。左键改属性在游戏层做。
+    //
+    // `DebugStickItem.canDestroyBlock` returns false for every player. The left-click
+    // property change happens in the game layer.
+    if actor.main_hand == items::DEBUG_STICK {
+        return outcome_from(world, InteractionResult::Fail, false);
+    }
+    // `ServerPlayerGameMode.destroyBlock`：`GameMasterBlock` 且没有权限时发一次方块更新并返回 false。
+    //
+    // `ServerPlayerGameMode.destroyBlock` sends a block update and returns false for a
+    // `GameMasterBlock` when the player lacks permission.
+    if state.is_a(BlockAncestor::GameMasterBlock) && !actor.can_use_game_master_blocks {
         return outcome_from(world, InteractionResult::Fail, false);
     }
     let state = state.player_will_destroy(&mut world, pos, actor);
     if world.remove_block(pos) {
         state.destroy(&mut world, pos);
     }
+    // `Block.dropResources` 先看 `GameRules.BLOCK_DROPS`，再看创造模式的 `preventsBlockDrops`。
+    // 物品实体还没接上。默认开着，这一步不取随机数。
+    //
+    // `Block.dropResources` checks `GameRules.BLOCK_DROPS`, then creative `preventsBlockDrops`.
+    // Item entities are not wired yet. The default is on, and this step draws no random numbers.
+    let _allow_drops =
+        crate::block_drops_allowed(world.block_game_rules(), actor.prevents_block_drops);
     // `preventsBlockDrops`（创造模式）在 `mineBlock` 之前返回。剪刀和普通工具都在这里扣耐久。
     //
     // `preventsBlockDrops` (creative) returns before `mineBlock`. Shears and other tools spend durability here.
