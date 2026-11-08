@@ -9,8 +9,7 @@ use super::syntax::{Reader, take_compound};
 ///
 /// Whether the whole text is an NBT path. The empty string is accepted.
 pub(crate) fn parse(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    let mut reader = Reader::new(&chars);
+    let mut reader = Reader::new(text);
     let mut first = true;
     while reader.can_read() && reader.peek() != Some(' ') {
         if !node(&mut reader, first) {
@@ -32,7 +31,7 @@ pub(crate) fn parse(text: &str) -> bool {
     !reader.can_read()
 }
 
-fn node(reader: &mut Reader<'_>, first: bool) -> bool {
+fn node(reader: &mut Reader, first: bool) -> bool {
     match reader.peek() {
         Some('"' | '\'') => {
             let Ok(name) = reader.read_string() else {
@@ -50,7 +49,7 @@ fn node(reader: &mut Reader<'_>, first: bool) -> bool {
     }
 }
 
-fn object(reader: &mut Reader<'_>, name: &str) -> bool {
+fn object(reader: &mut Reader, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -61,7 +60,7 @@ fn object(reader: &mut Reader<'_>, name: &str) -> bool {
     }
 }
 
-fn index(reader: &mut Reader<'_>) -> bool {
+fn index(reader: &mut Reader) -> bool {
     if reader.expect('[').is_err() {
         return false;
     }
@@ -75,7 +74,7 @@ fn index(reader: &mut Reader<'_>) -> bool {
     reader.read_int().is_ok() && reader.expect(']').is_ok()
 }
 
-fn unquoted_name(reader: &mut Reader<'_>) -> String {
+fn unquoted_name(reader: &mut Reader) -> String {
     let start = reader.pos();
     while reader
         .peek()
@@ -84,7 +83,7 @@ fn unquoted_name(reader: &mut Reader<'_>) -> String {
         reader.skip();
     }
     let end = reader.pos();
-    reader.slice_from(start)[..end - start].iter().collect()
+    reader.copy(start, end)
 }
 
 #[cfg(test)]

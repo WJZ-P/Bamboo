@@ -49,10 +49,12 @@ const COLORS: [&str; 16] = [
 ///
 /// Decode one component and write the tag the official codec would emit.
 pub(crate) fn canonical(tag: &Tag, depth: u32) -> Result<Tag, DecodeError> {
-    if depth >= MAX_DEPTH {
-        return Err(bad("nested too deep"));
-    }
-    Ok(encode(decode(tag, depth)?))
+    crate::stack_hop::guard(|| {
+        if depth >= MAX_DEPTH {
+            return Err(bad("nested too deep"));
+        }
+        Ok(encode(decode(tag, depth)?))
+    })
 }
 
 /// `show_item` 和对话框里的物品，按 `ItemStackTemplate.MAP_CODEC` 重写。
@@ -71,6 +73,10 @@ struct Piece {
 }
 
 fn decode(tag: &Tag, depth: u32) -> Result<Piece, DecodeError> {
+    crate::stack_hop::guard(|| decode_frame(tag, depth))
+}
+
+fn decode_frame(tag: &Tag, depth: u32) -> Result<Piece, DecodeError> {
     match tag {
         Tag::String(text) => Ok(Piece {
             content: vec![("text".to_owned(), Tag::String(text.clone()))],
@@ -632,19 +638,7 @@ fn uuid_from_ints(values: &[i32]) -> Uuid {
 }
 
 fn dialog_url(url: String) -> Result<String, DecodeError> {
-    let Some((scheme, _)) = url.split_once(':') else {
-        return Err(bad("url needs a protocol"));
-    };
-    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-        return Err(bad("url protocol is not allowed"));
-    }
-    if url.chars().any(|c| {
-        c.is_whitespace()
-            || c.is_control()
-            || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
-    }) {
-        return Err(bad("url is not valid"));
-    }
+    super::uri::check(&url).map_err(bad)?;
     Ok(url)
 }
 
@@ -698,12 +692,17 @@ fn is_number(tag: &Tag) -> bool {
 }
 
 fn finish(fields: Vec<(String, Tag)>) -> Tag {
+    // 把条目搬进新顺序。克隆后再丢掉会按层递归 `Drop`，512 层把栈打穿。
+    //
+    // Move entries into the new order. Cloning and then dropping recurses per
+    // level, and 512 levels overflow the stack.
     let keys: Vec<String> = fields.iter().map(|(key, _)| key.clone()).collect();
     let order = iteration_order(&keys);
+    let mut fields: Vec<Option<(String, Tag)>> = fields.into_iter().map(Some).collect();
     Tag::Compound(
         order
             .into_iter()
-            .map(|index| fields[index].clone())
+            .map(|index| fields[index].take().expect("key is ordered once"))
             .collect(),
     )
 }

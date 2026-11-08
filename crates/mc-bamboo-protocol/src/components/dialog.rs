@@ -626,19 +626,7 @@ fn identifier_field(entries: &[(String, Tag)], name: &str) -> Result<String, Dec
 }
 
 fn http_url(url: String) -> Result<String, DecodeError> {
-    let Some((scheme, _)) = url.split_once(':') else {
-        return Err(bad("url needs a protocol"));
-    };
-    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-        return Err(bad("url protocol is not allowed"));
-    }
-    if url.chars().any(|c| {
-        c.is_whitespace()
-            || c.is_control()
-            || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
-    }) {
-        return Err(bad("url is not valid"));
-    }
+    super::uri::check(&url).map_err(bad)?;
     Ok(url)
 }
 
@@ -686,12 +674,17 @@ fn field<'a>(entries: &'a [(String, Tag)], name: &str) -> Option<&'a Tag> {
 }
 
 fn finish(fields: Vec<(String, Tag)>) -> Tag {
+    // 把条目搬进新顺序。克隆后再丢掉会按层递归 `Drop`，深标签会把栈打穿。
+    //
+    // Move entries into the new order. Cloning and then dropping recurses per
+    // level and overflows the stack on a deep tag.
     let keys: Vec<String> = fields.iter().map(|(key, _)| key.clone()).collect();
     let order = iteration_order(&keys);
+    let mut fields: Vec<Option<(String, Tag)>> = fields.into_iter().map(Some).collect();
     Tag::Compound(
         order
             .into_iter()
-            .map(|index| fields[index].clone())
+            .map(|index| fields[index].take().expect("key is ordered once"))
             .collect(),
     )
 }

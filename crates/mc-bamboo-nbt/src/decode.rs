@@ -3,6 +3,15 @@
 //! 官方 `FriendlyByteBuf.readNbt` 读的是「类型字节加内容」，根节点没有名字，
 //! 类型 0（`TAG_End`）表示没有标签。读出来的条目保持出现顺序：官方的 `CompoundTag`
 //! 用 `HashMap`，写出去的键序由哈希决定，我们复述读到的顺序才能原样写回。
+//!
+//! 列表和复合标签用堆上的显式栈读，不用调用栈。官方允许嵌套 512 层，而这段解码跑在
+//! 连接任务里（tokio worker，默认栈大约 2 MB）。Rust 的栈溢出会让整个进程退出，
+//! 一个客户端就能把服务器打崩。
+//!
+//! Lists and compounds are read with an explicit heap stack, not the call stack.
+//! Official NBT allows 512 levels, and this decoder runs on the connection task
+//! (a tokio worker, about 2 MB of stack). A Rust stack overflow aborts the
+//! process, so one client could take the whole server down.
 
 use crate::Tag;
 
@@ -120,6 +129,24 @@ pub struct Reader<'a> {
     accounter: Accounter,
 }
 
+/// 正在读的列表或复合标签。元素本身不在调用栈上。
+enum Frame {
+    List {
+        elem_kind: u8,
+        remaining: usize,
+        values: Vec<Tag>,
+    },
+    Compound {
+        entries: Vec<(String, Tag)>,
+        pending_key: Option<String>,
+    },
+}
+
+enum Step {
+    Value(Tag),
+    Child(u8),
+}
+
 impl<'a> Reader<'a> {
     pub const fn new(input: &'a [u8], accounter: Accounter) -> Self {
         Self {
@@ -148,10 +175,18 @@ impl<'a> Reader<'a> {
         let kind = self.u8()?;
         match kind {
             0 => Err(DecodeError::EndTag),
-            10 => self.compound_payload(),
+            10 => match self.payload(10)? {
+                Tag::Compound(entries) => Ok(entries),
+                _ => unreachable!("类型 10 是复合标签"),
+            },
             other => {
                 // 官方先完整读出标签再发现类型不对，所以畸形深度也要在这里挡住。
-                self.payload(other)?;
+                // 读出来的树可能有 512 层，不能靠自动 `Drop` 拆。
+                //
+                // Official code reads the whole tag before rejecting the type, so a
+                // bad depth still fails here. The tree can be 512 deep, so it is
+                // not left to automatic `Drop`.
+                Tag::release(self.payload(other)?);
                 Err(DecodeError::NotACompound(other))
             }
         }
@@ -162,50 +197,99 @@ impl<'a> Reader<'a> {
         self.any_tag()?.ok_or(DecodeError::EndTag)
     }
 
+    /// 读一个标签的内容。列表和复合标签的嵌套记在 `stack` 上，调用栈不跟着变深。
+    ///
+    /// Read one payload. Nested lists and compounds live on `stack`, so the call
+    /// stack does not grow with them.
     fn payload(&mut self, kind: u8) -> Result<Tag, DecodeError> {
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut step = self.begin_payload(kind, &mut stack)?;
+        loop {
+            match step {
+                Step::Child(kind) => step = self.begin_payload(kind, &mut stack)?,
+                Step::Value(tag) => {
+                    step = self.store_payload(tag, &mut stack)?;
+                    if stack.is_empty()
+                        && let Step::Value(tag) = step
+                    {
+                        return Ok(tag);
+                    }
+                }
+            }
+        }
+    }
+
+    fn begin_payload(
+        &mut self,
+        kind: u8,
+        stack: &mut Vec<Frame>,
+    ) -> Result<Step, DecodeError> {
         match kind {
             1 => {
                 self.accounter.account(9)?;
-                Ok(Tag::Byte(self.i8()?))
+                Ok(Step::Value(Tag::Byte(self.i8()?)))
             }
             2 => {
                 self.accounter.account(10)?;
-                Ok(Tag::Short(i16::from_be_bytes(self.array()?)))
+                Ok(Step::Value(Tag::Short(i16::from_be_bytes(self.array()?))))
             }
             3 => {
                 self.accounter.account(12)?;
-                Ok(Tag::Int(i32::from_be_bytes(self.array()?)))
+                Ok(Step::Value(Tag::Int(i32::from_be_bytes(self.array()?))))
             }
             4 => {
                 self.accounter.account(16)?;
-                Ok(Tag::Long(i64::from_be_bytes(self.array()?)))
+                Ok(Step::Value(Tag::Long(i64::from_be_bytes(self.array()?))))
             }
             5 => {
                 self.accounter.account(12)?;
-                Ok(Tag::Float(f32::from_be_bytes(self.array()?)))
+                Ok(Step::Value(Tag::Float(f32::from_be_bytes(self.array()?))))
             }
             6 => {
                 self.accounter.account(16)?;
-                Ok(Tag::Double(f64::from_be_bytes(self.array()?)))
+                Ok(Step::Value(Tag::Double(f64::from_be_bytes(self.array()?))))
             }
             7 => {
                 self.accounter.account(24)?;
                 let len = self.array_len(1)?;
                 let bytes = self.bytes(len)?;
-                Ok(Tag::ByteArray(bytes.iter().map(|&b| b as i8).collect()))
+                Ok(Step::Value(Tag::ByteArray(
+                    bytes.iter().map(|&byte| byte as i8).collect(),
+                )))
             }
-            8 => Ok(Tag::String(self.string()?)),
+            8 => Ok(Step::Value(Tag::String(self.string()?))),
             9 => {
                 self.accounter.push_depth()?;
-                let list = self.list_payload();
-                self.accounter.pop_depth();
-                list.map(Tag::List)
+                match self.list_header() {
+                    Ok((_, 0)) => {
+                        self.accounter.pop_depth();
+                        Ok(Step::Value(Tag::List(Vec::new())))
+                    }
+                    Ok((elem_kind, count)) => {
+                        stack.push(Frame::List {
+                            elem_kind,
+                            remaining: count,
+                            values: Vec::new(),
+                        });
+                        Ok(Step::Child(elem_kind))
+                    }
+                    Err(error) => {
+                        self.accounter.pop_depth();
+                        Err(error)
+                    }
+                }
             }
             10 => {
                 self.accounter.push_depth()?;
-                let entries = self.compound_payload();
-                self.accounter.pop_depth();
-                entries.map(Tag::Compound)
+                if let Err(error) = self.accounter.account(48) {
+                    self.accounter.pop_depth();
+                    return Err(error);
+                }
+                stack.push(Frame::Compound {
+                    entries: Vec::new(),
+                    pending_key: None,
+                });
+                self.next_compound_field(stack)
             }
             11 => {
                 self.accounter.account(24)?;
@@ -214,7 +298,7 @@ impl<'a> Reader<'a> {
                 for _ in 0..len {
                     values.push(i32::from_be_bytes(self.array()?));
                 }
-                Ok(Tag::IntArray(values))
+                Ok(Step::Value(Tag::IntArray(values)))
             }
             12 => {
                 self.accounter.account(24)?;
@@ -223,10 +307,85 @@ impl<'a> Reader<'a> {
                 for _ in 0..len {
                     values.push(i64::from_be_bytes(self.array()?));
                 }
-                Ok(Tag::LongArray(values))
+                Ok(Step::Value(Tag::LongArray(values)))
             }
             other => Err(DecodeError::UnknownTagType(other)),
         }
+    }
+
+    /// 把刚读完的值交给外层列表或复合标签。栈空了就把它作为整棵树交回去。
+    ///
+    /// Hand the value to the enclosing list or compound. An empty stack means
+    /// this value is the whole tree.
+    fn store_payload(&mut self, mut tag: Tag, stack: &mut Vec<Frame>) -> Result<Step, DecodeError> {
+        loop {
+            let kind = match stack.last() {
+                None => return Ok(Step::Value(tag)),
+                Some(Frame::List { .. }) => 0u8,
+                Some(Frame::Compound { .. }) => 1,
+            };
+            if kind == 0 {
+                let (finished, elem_kind) = {
+                    let Frame::List {
+                        elem_kind,
+                        remaining,
+                        values,
+                    } = stack.last_mut().expect("列表帧")
+                    else {
+                        unreachable!("列表帧");
+                    };
+                    values.push(unwrap_list_element(tag));
+                    *remaining -= 1;
+                    (*remaining == 0, *elem_kind)
+                };
+                if finished {
+                    let Frame::List { values, .. } = stack.pop().expect("列表帧") else {
+                        unreachable!("列表帧");
+                    };
+                    self.accounter.pop_depth();
+                    tag = Tag::List(values);
+                    continue;
+                }
+                return Ok(Step::Child(elem_kind));
+            }
+
+            let key = {
+                let Frame::Compound { pending_key, .. } = stack.last_mut().expect("复合标签帧")
+                else {
+                    unreachable!("复合标签帧");
+                };
+                pending_key.take().expect("复合标签的键")
+            };
+            {
+                let Frame::Compound { entries, .. } = stack.last_mut().expect("复合标签帧") else {
+                    unreachable!("复合标签帧");
+                };
+                if let Some(entry) = entries.iter_mut().find(|(name, _)| *name == key) {
+                    entry.1 = tag;
+                } else {
+                    self.accounter.account(36)?;
+                    entries.push((key, tag));
+                }
+            }
+            return self.next_compound_field(stack);
+        }
+    }
+
+    fn next_compound_field(&mut self, stack: &mut Vec<Frame>) -> Result<Step, DecodeError> {
+        let kind = self.u8()?;
+        if kind == 0 {
+            let Some(Frame::Compound { entries, .. }) = stack.pop() else {
+                unreachable!("复合标签帧");
+            };
+            self.accounter.pop_depth();
+            return Ok(Step::Value(Tag::Compound(entries)));
+        }
+        let key = self.key()?;
+        let Some(Frame::Compound { pending_key, .. }) = stack.last_mut() else {
+            unreachable!("复合标签帧");
+        };
+        *pending_key = Some(key);
+        Ok(Step::Child(kind))
     }
 
     /// 数组的长度前缀。官方的 `accountBytes(每项字节数, 长度)` 遇到负数会抛异常。
@@ -241,7 +400,10 @@ impl<'a> Reader<'a> {
         Ok(len)
     }
 
-    fn list_payload(&mut self) -> Result<Vec<Tag>, DecodeError> {
+    /// 列表头：元素类型和个数。深度已经由调用方记过。
+    ///
+    /// List header: element type and count. The caller already counted the depth.
+    fn list_header(&mut self) -> Result<(u8, usize), DecodeError> {
         self.accounter.account(36)?;
         let kind = self.u8()?;
         let count = i32::from_be_bytes(self.array()?);
@@ -252,33 +414,7 @@ impl<'a> Reader<'a> {
             return Err(DecodeError::MissingListType(count));
         }
         self.accounter.account_each(4, count as u64)?;
-
-        let mut values = Vec::new();
-        for _ in 0..count {
-            values.push(unwrap_list_element(self.payload(kind)?));
-        }
-        Ok(values)
-    }
-
-    fn compound_payload(&mut self) -> Result<Vec<(String, Tag)>, DecodeError> {
-        self.accounter.account(48)?;
-        let mut entries: Vec<(String, Tag)> = Vec::new();
-        loop {
-            let kind = self.u8()?;
-            if kind == 0 {
-                return Ok(entries);
-            }
-            let key = self.key()?;
-            let value = self.payload(kind)?;
-            // 官方用 `Map.put`：重复的键只替换值，不再记一份条目开销。
-            match entries.iter_mut().find(|(name, _)| *name == key) {
-                Some(entry) => entry.1 = value,
-                None => {
-                    self.accounter.account(36)?;
-                    entries.push((key, value));
-                }
-            }
-        }
+        Ok((kind, count as usize))
     }
 
     /// 官方 `CompoundTag.readString`：先读字符串，再按它的长度记账。

@@ -12,6 +12,13 @@ use mc_bamboo_nbt::Tag;
 pub struct Component(Tag);
 
 impl Component {
+    /// 取出内部标签。深标签接着要 [`Tag::release`]，不能靠自动 `Drop`。
+    ///
+    /// Take the inner tag. A deep tag must then be [`Tag::release`]d.
+    pub(crate) fn into_tag(self) -> Tag {
+        self.0
+    }
+
     /// 一段字面文本。没有样式和子组件时写成 `TAG_String`。
     pub fn text(text: impl Into<String>) -> Self {
         Self(Tag::String(text.into()))

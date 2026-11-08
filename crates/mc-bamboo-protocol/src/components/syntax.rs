@@ -1,31 +1,31 @@
 //! Brigadier 的 `StringReader` 里文本组件用得到的那一部分。
 //!
-//! 游标按 Unicode 标量值走。Java 的 `String` 下标是 UTF-16 码元，BMP 之外的字符会差一位；
-//! 选择器和路径几乎都在 BMP 里。
+//! 游标按 UTF-16 码元走，和 Java 的 `String.charAt` 一样。BMP 里一个码元就是一个标量。
+//! 代理项对不成标量，读出来是空，调用方停下。选择器里出现增补平面字符就整段拒绝。
 //!
 //! The slice of Brigadier's `StringReader` that chat components need.
-//! The cursor counts Unicode scalars. Java indexes UTF-16 code units, so a
-//! non-BMP character is one step here and two there. Selectors and paths stay in the BMP.
+//! The cursor counts UTF-16 code units, like Java's `String.charAt`. In the BMP one
+//! unit is one scalar. A surrogate is not a scalar, so the read comes back empty and
+//! the caller stops. A selector that contains a supplementary character is rejected.
 
 use crate::components::cursor::parse_identifier;
 
-/// 读一段选择器、NBT 路径或方块坐标。
-pub(crate) struct Reader<'a> {
-    chars: &'a [char],
+/// 读一段选择器、NBT 路径或方块坐标。游标的单位是 UTF-16 码元。
+pub(crate) struct Reader {
+    units: Vec<u16>,
     pos: usize,
 }
 
-impl<'a> Reader<'a> {
-    pub(crate) fn new(chars: &'a [char]) -> Self {
-        Self { chars, pos: 0 }
+impl Reader {
+    pub(crate) fn new(text: &str) -> Self {
+        Self {
+            units: text.encode_utf16().collect(),
+            pos: 0,
+        }
     }
 
     pub(crate) fn pos(&self) -> usize {
         self.pos
-    }
-
-    pub(crate) fn slice_from(&self, start: usize) -> &'a [char] {
-        &self.chars[start..]
     }
 
     pub(crate) fn set_pos(&mut self, pos: usize) {
@@ -33,19 +33,33 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn can_read(&self) -> bool {
-        self.pos < self.chars.len()
+        self.pos < self.units.len()
     }
 
+    /// 当前码元。代理项对不成一个标量时返回 `None`，调用方要停，不能空转。
+    ///
+    /// The current code unit. `None` when a surrogate does not form a scalar.
+    /// Callers stop instead of spinning.
     pub(crate) fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+        self.unit_at(self.pos)
     }
 
     pub(crate) fn peek_at(&self, offset: usize) -> Option<char> {
-        self.chars.get(self.pos + offset).copied()
+        self.unit_at(self.pos + offset)
+    }
+
+    fn unit_at(&self, index: usize) -> Option<char> {
+        char::from_u32(u32::from(*self.units.get(index)?))
     }
 
     pub(crate) fn skip(&mut self) {
-        self.pos += 1;
+        if self.pos < self.units.len() {
+            self.pos += 1;
+        }
+    }
+
+    pub(crate) fn copy(&self, start: usize, end: usize) -> String {
+        String::from_utf16(&self.units[start..end]).unwrap_or_default()
     }
 
     /// 官方 `StringReader.skipWhitespace`，按 `Character.isWhitespace`。
@@ -77,7 +91,7 @@ impl<'a> Reader<'a> {
         while self.peek().is_some_and(unquoted) {
             self.skip();
         }
-        self.chars[start..self.pos].iter().collect()
+        self.copy(start, self.pos)
     }
 
     /// 官方 `readInt`。溢出或没有数字都是错。
@@ -94,13 +108,9 @@ impl<'a> Reader<'a> {
             self.pos = start;
             return Err(());
         }
-        self.chars[start..self.pos]
-            .iter()
-            .collect::<String>()
-            .parse()
-            .map_err(|_| {
-                self.pos = start;
-            })
+        self.copy(start, self.pos).parse().map_err(|_| {
+            self.pos = start;
+        })
     }
 
     /// 官方 `readDouble`：减号、数字和小数点，再交给 `Double.parseDouble`。
@@ -117,7 +127,7 @@ impl<'a> Reader<'a> {
         if self.pos == start {
             return Err(());
         }
-        let text: String = self.chars[start..self.pos].iter().collect();
+        let text = self.copy(start, self.pos);
         text.parse().map_err(|_| {
             self.pos = start;
         })
@@ -145,7 +155,7 @@ impl<'a> Reader<'a> {
         if self.pos == start {
             return Err(());
         }
-        let raw: String = self.chars[start..self.pos].iter().collect();
+        let raw = self.copy(start, self.pos);
         parse_identifier(&raw).map_err(|_| ())
     }
 
@@ -172,8 +182,8 @@ impl<'a> Reader<'a> {
     }
 
     fn starts_with(&self, text: &str) -> bool {
-        let chars: Vec<char> = text.chars().collect();
-        self.chars[self.pos..].starts_with(&chars)
+        let prefix: Vec<u16> = text.encode_utf16().collect();
+        self.units[self.pos..].starts_with(&prefix)
     }
 }
 
@@ -181,7 +191,7 @@ impl<'a> Reader<'a> {
 ///
 /// `MinMaxBounds.Bounds.fromReader`. Either end may be absent, and `5..1` is legal here.
 pub(crate) fn read_bounds(
-    reader: &mut Reader<'_>,
+    reader: &mut Reader,
     integer: bool,
 ) -> Result<(Option<f64>, Option<f64>), ()> {
     if !reader.can_read() {
@@ -210,7 +220,7 @@ pub(crate) fn read_bounds(
     Ok((min.map(parse).transpose()?, max.map(parse).transpose()?))
 }
 
-fn read_bound_number(reader: &mut Reader<'_>) -> Result<Option<String>, ()> {
+fn read_bound_number(reader: &mut Reader) -> Result<Option<String>, ()> {
     let start = reader.pos();
     while let Some(c) = reader.peek() {
         let number = c.is_ascii_digit() || c == '-';
@@ -224,21 +234,23 @@ fn read_bound_number(reader: &mut Reader<'_>) -> Result<Option<String>, ()> {
     if reader.pos() == start {
         return Ok(None);
     }
-    Ok(Some(reader.chars[start..reader.pos].iter().collect()))
+    Ok(Some(reader.copy(start, reader.pos())))
 }
 
 /// 从当前位置读一个 SNBT 复合标签，成功就把游标移过它。
 ///
 /// Read one SNBT compound and leave the cursor just past it.
-pub(crate) fn take_compound(reader: &mut Reader<'_>) -> bool {
+pub(crate) fn take_compound(reader: &mut Reader) -> bool {
     if reader.peek() != Some('{') {
         return false;
     }
     let start = reader.pos();
-    let Some(end) = compound_end(reader.slice_from(start)) else {
+    let Some(end) = compound_end(&reader.units[start..]) else {
         return false;
     };
-    let text: String = reader.slice_from(start)[..end].iter().collect();
+    let Ok(text) = String::from_utf16(&reader.units[start..start + end]) else {
+        return false;
+    };
     if mc_bamboo_nbt::parse_snbt(&text).is_err() {
         return false;
     }
@@ -246,25 +258,25 @@ pub(crate) fn take_compound(reader: &mut Reader<'_>) -> bool {
     true
 }
 
-fn compound_end(chars: &[char]) -> Option<usize> {
+fn compound_end(units: &[u16]) -> Option<usize> {
     let mut depth = 0i32;
     let mut quote = None;
     let mut escaped = false;
-    for (index, character) in chars.iter().copied().enumerate() {
+    for (index, unit) in units.iter().copied().enumerate() {
         if let Some(open) = quote {
             if escaped {
                 escaped = false;
-            } else if character == '\\' {
+            } else if unit == u16::from(b'\\') {
                 escaped = true;
-            } else if character == open {
+            } else if unit == open {
                 quote = None;
             }
             continue;
         }
-        match character {
-            '"' | '\'' => quote = Some(character),
-            '{' => depth += 1,
-            '}' => {
+        match unit {
+            unit if unit == u16::from(b'"') || unit == u16::from(b'\'') => quote = Some(unit),
+            unit if unit == u16::from(b'{') => depth += 1,
+            unit if unit == u16::from(b'}') => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(index + 1);
@@ -280,8 +292,7 @@ fn compound_end(chars: &[char]) -> Option<usize> {
 ///
 /// `BlockPosArgument.blockPos`. The whole string has to be consumed.
 pub(crate) fn block_pos(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    let mut reader = Reader::new(&chars);
+    let mut reader = Reader::new(text);
     let ok = if reader.peek() == Some('^') {
         local_pos(&mut reader)
     } else {
@@ -290,7 +301,7 @@ pub(crate) fn block_pos(text: &str) -> bool {
     ok && !reader.can_read()
 }
 
-fn world_pos(reader: &mut Reader<'_>) -> bool {
+fn world_pos(reader: &mut Reader) -> bool {
     world_coord(reader)
         && reader.expect(' ').is_ok()
         && world_coord(reader)
@@ -298,7 +309,7 @@ fn world_pos(reader: &mut Reader<'_>) -> bool {
         && world_coord(reader)
 }
 
-fn world_coord(reader: &mut Reader<'_>) -> bool {
+fn world_coord(reader: &mut Reader) -> bool {
     if reader.peek() == Some('^') || !reader.can_read() {
         return false;
     }
@@ -317,7 +328,7 @@ fn world_coord(reader: &mut Reader<'_>) -> bool {
     }
 }
 
-fn local_pos(reader: &mut Reader<'_>) -> bool {
+fn local_pos(reader: &mut Reader) -> bool {
     local_coord(reader)
         && reader.expect(' ').is_ok()
         && local_coord(reader)
@@ -325,7 +336,7 @@ fn local_pos(reader: &mut Reader<'_>) -> bool {
         && local_coord(reader)
 }
 
-fn local_coord(reader: &mut Reader<'_>) -> bool {
+fn local_coord(reader: &mut Reader) -> bool {
     if reader.peek() != Some('^') {
         return false;
     }

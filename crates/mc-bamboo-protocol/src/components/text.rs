@@ -22,7 +22,18 @@ pub(crate) fn accept_tag(tag: &Tag) -> Result<(), DecodeError> {
 /// 官方 `ComponentSerialization.STREAM_CODEC`：读一个 NBT 标签，按 `Component` 解码再写回。
 pub fn read(cursor: &mut Cursor<'_>) -> Result<Component, DecodeError> {
     let tag = cursor.nbt_tag()?;
-    Ok(Component::from_tag(super::text_wire::canonical(&tag, 0)?))
+    let encoded = match super::text_wire::canonical(&tag, 0) {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            // 读进来的树和解出来的树都可能有 512 层，不能靠自动 `Drop`。
+            //
+            // Either tree can be 512 levels deep, so neither uses automatic `Drop`.
+            Tag::release(tag);
+            return Err(error);
+        }
+    };
+    Tag::release(tag);
+    Ok(Component::from_tag(encoded))
 }
 
 /// 官方 `ComponentSerialization.OPTIONAL_STREAM_CODEC`。

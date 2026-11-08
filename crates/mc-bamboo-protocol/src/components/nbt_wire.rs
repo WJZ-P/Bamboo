@@ -26,7 +26,7 @@ use super::{
     java_hash::{hash_order, iteration_order},
 };
 
-const MAX_PREDICATE_DEPTH: u32 = 32;
+pub(crate) const MAX_PREDICATE_DEPTH: u32 = 32;
 
 /// 读到的标签换成官方 `Codec.encode` 会写出的那一份。
 ///
@@ -48,12 +48,21 @@ pub(crate) fn canonicalize(kind: i32, tag: &Tag) -> Result<Tag, Error> {
 /// Put this layer's keys into a fresh `HashMap` in declaration order, then emit
 /// bucket order. Nested tags are already ordered and are left alone.
 fn finish(fields: Vec<(String, Tag)>) -> Tag {
+    // 把条目搬进新顺序。克隆后再丢掉会按层递归 `Drop`，512 层把栈打穿。
+    //
+    // Move entries into the new order. Cloning and then dropping recurses per
+    // level, and 512 levels overflow the stack.
+    reorder(fields)
+}
+
+fn reorder(fields: Vec<(String, Tag)>) -> Tag {
     let keys: Vec<String> = fields.iter().map(|(key, _)| key.clone()).collect();
     let order = iteration_order(&keys);
+    let mut fields: Vec<Option<(String, Tag)>> = fields.into_iter().map(Some).collect();
     Tag::Compound(
         order
             .into_iter()
-            .map(|index| fields[index].clone())
+            .map(|index| fields[index].take().expect("每个键只排一次"))
             .collect(),
     )
 }
@@ -62,6 +71,10 @@ fn finish(fields: Vec<(String, Tag)>) -> Tag {
 ///
 /// `ItemPredicate.CODEC`, which is also `LockCode.CODEC`.
 fn item_predicate(tag: &Tag, depth: u32) -> Result<Tag, Error> {
+    crate::stack_hop::guard(|| item_predicate_frame(tag, depth))
+}
+
+fn item_predicate_frame(tag: &Tag, depth: u32) -> Result<Tag, Error> {
     if depth > MAX_PREDICATE_DEPTH {
         return Err(Error::new("item predicate nested too deeply"));
     }

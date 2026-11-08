@@ -1467,6 +1467,10 @@ fn encode_partial_tag(tag: &Tag, depth: u32) -> Result<Dyn> {
 /// Known predicate booleans become `HashOps` booleans, and nested exact components
 /// are encoded with the component codec.
 fn predicate_dyn(tag: &Tag, depth: u32) -> Result<Dyn> {
+    crate::stack_hop::guard(|| predicate_dyn_frame(tag, depth))
+}
+
+fn predicate_dyn_frame(tag: &Tag, depth: u32) -> Result<Dyn> {
     match tag {
         Tag::Compound(entries) => {
             let mut out = Vec::new();

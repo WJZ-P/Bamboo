@@ -110,10 +110,17 @@ impl ItemStack {
         // `validatedStreamCodec`: decode every component, store what its codec writes
         // back, then require the whole stack to encode through `ItemStack.CODEC`.
         let patch = ComponentPatch::from_opaque(&stack)?;
-        crate::components::archive::stack::encode_stack(item, count, &patch).map_err(|_| {
-            DecodeError::InvalidComponentValue("item stack codec rejected the value")
-        })?;
+        match crate::components::archive::stack::encode_stack(item, count, &patch) {
+            Ok(encoded) => encoded.release(),
+            Err(_) => {
+                patch.release();
+                return Err(DecodeError::InvalidComponentValue(
+                    "item stack codec rejected the value",
+                ));
+            }
+        }
         let (added, removed) = patch.to_opaque();
+        patch.release();
         Ok(Self {
             item,
             count,

@@ -39,6 +39,10 @@ pub fn same_decoded(kind: i32, expected: &Tag, actual: &ComponentValue) -> bool 
 }
 
 pub(super) fn encode_value(value: &ComponentValue, depth: u32) -> Result<Dyn> {
+    crate::stack_hop::guard(|| encode_value_frame(value, depth))
+}
+
+fn encode_value_frame(value: &ComponentValue, depth: u32) -> Result<Dyn> {
     encode_early(value, depth)
         .or_else(|| encode_items(value, depth))
         .or_else(|| encode_late(value, depth))
@@ -68,7 +72,13 @@ fn encode_early(value: &ComponentValue, depth: u32) -> Option<Result<Dyn>> {
     };
     Some(match value {
         CustomData(entries) | BucketEntityData(entries) => {
-            Ok(Dyn::from_tag(&Tag::Compound(entries.clone())))
+            let tag = Tag::Compound(entries.clone());
+            let encoded = Dyn::from_tag(&tag);
+            // 临时标签不能靠自动 `Drop` 拆。
+            //
+            // The temporary tag must not use automatic `Drop`.
+            Tag::release(tag);
+            Ok(encoded)
         }
         MaxStackSize(value) => int_dyn(write::range_i32(*value, 1, 99)),
         MaxDamage(value) => int_dyn(positive_i32(*value)),

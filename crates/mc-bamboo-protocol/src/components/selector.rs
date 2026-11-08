@@ -13,8 +13,14 @@ use super::syntax::{Reader, read_bounds, take_compound};
 
 /// 整段文本是不是一个合法的实体选择器或玩家名。
 pub(crate) fn parse(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    let mut reader = Reader::new(&chars);
+    // 增补平面占两个 UTF-16 码元。引号、名字长度和游标对不齐的地方整段拒绝。
+    //
+    // A supplementary character is two UTF-16 units. Reject the whole selector
+    // where quotes, the name length or the cursor would not match.
+    if text.chars().any(|character| u32::from(character) > 0xFFFF) {
+        return false;
+    }
+    let mut reader = Reader::new(text);
     let mut parser = Parser::default();
     parser.parse(&mut reader) && !reader.can_read()
 }
@@ -52,7 +58,7 @@ struct Parser {
 }
 
 impl Parser {
-    fn parse(&mut self, reader: &mut Reader<'_>) -> bool {
+    fn parse(&mut self, reader: &mut Reader) -> bool {
         if reader.peek() == Some('@') {
             reader.skip();
             self.selector(reader)
@@ -61,7 +67,7 @@ impl Parser {
         }
     }
 
-    fn selector(&mut self, reader: &mut Reader<'_>) -> bool {
+    fn selector(&mut self, reader: &mut Reader) -> bool {
         let kind = match reader.peek() {
             Some(kind @ ('a' | 'e' | 'n' | 'p' | 'r' | 's')) => {
                 reader.skip();
@@ -77,7 +83,7 @@ impl Parser {
         self.options(reader)
     }
 
-    fn name_or_uuid(&mut self, reader: &mut Reader<'_>) -> bool {
+    fn name_or_uuid(&mut self, reader: &mut Reader) -> bool {
         let Ok(name) = reader.read_string() else {
             return false;
         };
@@ -88,7 +94,7 @@ impl Parser {
         (1..=16).contains(&length)
     }
 
-    fn options(&mut self, reader: &mut Reader<'_>) -> bool {
+    fn options(&mut self, reader: &mut Reader) -> bool {
         while reader.can_read() && reader.peek() != Some(']') {
             reader.skip_whitespace();
             let start = reader.pos();
@@ -125,7 +131,7 @@ impl Parser {
         }
     }
 
-    fn option(&mut self, reader: &mut Reader<'_>, key: &str) -> bool {
+    fn option(&mut self, reader: &mut Reader, key: &str) -> bool {
         match key {
             "name" => invertible(reader, &mut self.name, |reader| {
                 reader.read_string().is_ok()
@@ -194,7 +200,7 @@ impl Parser {
         }
     }
 
-    fn entity_type(&mut self, reader: &mut Reader<'_>) -> bool {
+    fn entity_type(&mut self, reader: &mut Reader) -> bool {
         let inverted = inverted(reader);
         let tag = reader.peek() == Some('#');
         if tag {
@@ -246,9 +252,9 @@ fn once(flag: &mut bool, parse: impl FnOnce() -> bool) -> bool {
 }
 
 fn invertible(
-    reader: &mut Reader<'_>,
+    reader: &mut Reader,
     state: &mut Limit,
-    parse: impl FnOnce(&mut Reader<'_>) -> bool,
+    parse: impl FnOnce(&mut Reader) -> bool,
 ) -> bool {
     let inverted = inverted(reader);
     let allowed = !matches!(
@@ -266,7 +272,7 @@ fn invertible(
     true
 }
 
-fn inverted(reader: &mut Reader<'_>) -> bool {
+fn inverted(reader: &mut Reader) -> bool {
     reader.skip_whitespace();
     if reader.peek() == Some('!') {
         reader.skip();
@@ -277,14 +283,14 @@ fn inverted(reader: &mut Reader<'_>) -> bool {
     }
 }
 
-fn non_negative(reader: &mut Reader<'_>, integer: bool) -> bool {
+fn non_negative(reader: &mut Reader, integer: bool) -> bool {
     let Ok((min, max)) = read_bounds(reader, integer) else {
         return false;
     };
     min.is_none_or(|value| value >= 0.0) && max.is_none_or(|value| value >= 0.0)
 }
 
-fn score_map(reader: &mut Reader<'_>) -> bool {
+fn score_map(reader: &mut Reader) -> bool {
     if reader.expect('{').is_err() {
         return false;
     }
@@ -304,7 +310,7 @@ fn score_map(reader: &mut Reader<'_>) -> bool {
     reader.expect('}').is_ok()
 }
 
-fn advancement_map(reader: &mut Reader<'_>) -> bool {
+fn advancement_map(reader: &mut Reader) -> bool {
     if reader.expect('{').is_err() {
         return false;
     }
@@ -334,7 +340,7 @@ fn advancement_map(reader: &mut Reader<'_>) -> bool {
     reader.expect('}').is_ok()
 }
 
-fn criterion_map(reader: &mut Reader<'_>) -> bool {
+fn criterion_map(reader: &mut Reader) -> bool {
     if reader.expect('{').is_err() {
         return false;
     }
@@ -377,5 +383,14 @@ mod tests {
         assert!(!parse("@a["));
         assert!(!parse("@a extra"));
         assert!(!parse(""));
+        // BMP 里的引号名字按一个码元读，官方收下。
+        //
+        // A quoted BMP name is one code unit, and official code accepts it.
+        assert!(parse("@e[name=\"猫\"]"));
+        // 增补平面一律拒绝，避免 UTF-16 下标和标量下标对不齐。
+        //
+        // Supplementary characters are rejected so the UTF-16 cursor cannot drift.
+        assert!(!parse("@e[name=\"😀\"]"));
+        assert!(!parse("😀"));
     }
 }

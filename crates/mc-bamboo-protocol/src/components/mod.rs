@@ -32,6 +32,7 @@ pub mod stack;
 mod syntax;
 pub mod text;
 mod text_wire;
+pub mod uri;
 pub mod validate;
 pub mod value;
 
@@ -423,6 +424,10 @@ pub enum ComponentValue {
 impl ComponentValue {
     /// 按组件类型 ID 解码一个值，格式和官方的 `streamCodec` 一致。
     pub fn read(cursor: &mut Cursor<'_>, kind: i32) -> Result<Self, DecodeError> {
+        crate::stack_hop::guard(|| Self::read_frame(cursor, kind))
+    }
+
+    fn read_frame(cursor: &mut Cursor<'_>, kind: i32) -> Result<Self, DecodeError> {
         Ok(match kind {
             kinds::CUSTOM_DATA => Self::CustomData(cursor.nbt_compound()?),
             kinds::MAX_STACK_SIZE => Self::MaxStackSize(cursor.varint()?),
@@ -734,8 +739,14 @@ impl ComponentValue {
     #[expect(clippy::too_many_lines, reason = "一百多种组件，一种一条分支")]
     pub fn write(&self, out: &mut Vec<u8>) {
         match self {
-            Self::CustomData(tag) | Self::BucketEntityData(tag) => {
-                Tag::Compound(tag.clone()).write_network(out);
+            Self::CustomData(entries) | Self::BucketEntityData(entries) => {
+                let tag = Tag::Compound(entries.clone());
+                tag.write_network(out);
+                // 克隆出来的树不能靠自动 `Drop` 拆。512 层会把连接任务的栈打穿。
+                //
+                // The clone must not use automatic `Drop`. 512 levels overflow the
+                // connection task.
+                Tag::release(tag);
             }
             Self::MaxStackSize(value)
             | Self::MaxDamage(value)
@@ -1120,13 +1131,60 @@ fn write_enchantments(out: &mut Vec<u8>, levels: &[(i32, i32)]) {
     }
 }
 
+/// 拆掉一个组件值里的深标签。其余变体层数有上限，自动 `Drop` 装得下。
+fn release_value(value: ComponentValue) {
+    match value {
+        ComponentValue::CustomData(entries) | ComponentValue::BucketEntityData(entries) => {
+            Tag::release(Tag::Compound(entries));
+        }
+        ComponentValue::CustomName(component) | ComponentValue::ItemName(component) => {
+            Tag::release(component.into_tag());
+        }
+        ComponentValue::Lore(lines) => {
+            for line in lines {
+                Tag::release(line.into_tag());
+            }
+        }
+        ComponentValue::MapDecorations(tag)
+        | ComponentValue::DebugStickState(tag)
+        | ComponentValue::Recipes(tag)
+        | ComponentValue::Lock(tag)
+        | ComponentValue::ContainerLoot(tag) => Tag::release(tag),
+        ComponentValue::BundleContents(items) | ComponentValue::ChargedProjectiles(items) => {
+            for item in items {
+                item.components.release();
+            }
+        }
+        ComponentValue::Container(slots) => {
+            for slot in slots.into_iter().flatten() {
+                slot.components.release();
+            }
+        }
+        ComponentValue::UseRemainder(item) | ComponentValue::SulfurCubeContent(item) => {
+            item.components.release();
+        }
+        other => drop(other),
+    }
+}
+
 /// 官方 `fromCodecWithRegistries`：NBT 过一遍 `Codec`，存 `Codec` 写回来的标签。
 ///
 /// `fromCodecWithRegistries`: run the tag through the `Codec` and store what it writes back.
 fn canonical_nbt(cursor: &mut Cursor<'_>, kind: i32) -> Result<Tag, DecodeError> {
     let tag = cursor.nbt_tag()?;
-    nbt_wire::canonicalize(kind, &tag)
-        .map_err(|_| DecodeError::InvalidComponentValue("nbt component codec rejected the value"))
+    match nbt_wire::canonicalize(kind, &tag) {
+        Ok(tag) => Ok(tag),
+        // 嵌套超过我们的上限时要让连接断开。别的 codec 错误仍按这个包原来的处理。
+        //
+        // Crossing the nesting cap must disconnect the connection. Other codec
+        // errors keep this packet's existing handling.
+        Err(error) if error.message.contains("nested too deeply") => {
+            Err(DecodeError::StacksTooDeep { max_depth: 32 })
+        }
+        Err(_) => Err(DecodeError::InvalidComponentValue(
+            "nbt component codec rejected the value",
+        )),
+    }
 }
 
 /// 补丁里的一项：设成某个值，或者移除。
@@ -1200,6 +1258,18 @@ impl ComponentPatch {
             patch.put(kind, PatchEntry::Removed);
         }
         Ok(patch)
+    }
+
+    /// 拆掉补丁里可能很深的标签和嵌套物品，不把调用栈按层耗尽。
+    ///
+    /// Dismantle tags and nested items that may be very deep, without using one
+    /// call frame per level.
+    pub(crate) fn release(self) {
+        for (_, entry) in self.entries {
+            if let PatchEntry::Set(value) = entry {
+                release_value(value);
+            }
+        }
     }
 
     /// 把 [`ItemStack`] 里不透明的字节解析成类型化的组件。

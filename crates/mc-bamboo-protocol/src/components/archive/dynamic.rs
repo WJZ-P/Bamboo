@@ -30,7 +30,12 @@ const TAG_LONG_ARRAY_START: u8 = 18;
 const TAG_LONG_ARRAY_END: u8 = 19;
 
 /// 编解码器的中间值。变体的名字对应官方的 `DynamicOps` 操作。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// [`Clone`] 和 [`Dyn::release`] 走堆上的显式栈。自动 `Drop` 仍会递归，深树要调用 `release`。
+///
+/// [`Clone`] and [`Dyn::release`] use an explicit heap stack. Automatic `Drop`
+/// still recurses; call `release` for a deep tree.
+#[derive(Debug, PartialEq)]
 pub enum Dyn {
     Byte(i8),
     Short(i16),
@@ -48,6 +53,94 @@ pub enum Dyn {
     LongArray(Vec<i64>),
 }
 
+impl Clone for Dyn {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Start(&'a Dyn),
+            List {
+                values: &'a [Dyn],
+                index: usize,
+                built: Vec<Dyn>,
+            },
+            Map {
+                entries: &'a [(String, Dyn)],
+                index: usize,
+                built: Vec<(String, Dyn)>,
+            },
+        }
+
+        let mut stack = vec![Task::Start(self)];
+        let mut done = Vec::new();
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Start(value) => match value {
+                    Dyn::Byte(value) => done.push(Dyn::Byte(*value)),
+                    Dyn::Short(value) => done.push(Dyn::Short(*value)),
+                    Dyn::Int(value) => done.push(Dyn::Int(*value)),
+                    Dyn::Long(value) => done.push(Dyn::Long(*value)),
+                    Dyn::Float(value) => done.push(Dyn::Float(*value)),
+                    Dyn::Double(value) => done.push(Dyn::Double(*value)),
+                    Dyn::Bool(value) => done.push(Dyn::Bool(*value)),
+                    Dyn::String(value) => done.push(Dyn::String(value.clone())),
+                    Dyn::ByteArray(values) => done.push(Dyn::ByteArray(values.clone())),
+                    Dyn::IntArray(values) => done.push(Dyn::IntArray(values.clone())),
+                    Dyn::LongArray(values) => done.push(Dyn::LongArray(values.clone())),
+                    Dyn::List(values) => stack.push(Task::List {
+                        values,
+                        index: 0,
+                        built: Vec::with_capacity(values.len()),
+                    }),
+                    Dyn::Map(entries) => stack.push(Task::Map {
+                        entries,
+                        index: 0,
+                        built: Vec::with_capacity(entries.len()),
+                    }),
+                },
+                Task::List {
+                    values,
+                    index,
+                    mut built,
+                } => {
+                    if index > 0 {
+                        built.push(done.pop().expect("list element"));
+                    }
+                    if index == values.len() {
+                        done.push(Dyn::List(built));
+                    } else {
+                        stack.push(Task::List {
+                            values,
+                            index: index + 1,
+                            built,
+                        });
+                        stack.push(Task::Start(&values[index]));
+                    }
+                }
+                Task::Map {
+                    entries,
+                    index,
+                    mut built,
+                } => {
+                    if index > 0 {
+                        let (key, _) = &entries[index - 1];
+                        built.push((key.clone(), done.pop().expect("map value")));
+                    }
+                    if index == entries.len() {
+                        done.push(Dyn::Map(built));
+                    } else {
+                        stack.push(Task::Map {
+                            entries,
+                            index: index + 1,
+                            built,
+                        });
+                        stack.push(Task::Start(&entries[index].1));
+                    }
+                }
+            }
+        }
+        done.pop().expect("cloned value")
+    }
+}
+
 impl Dyn {
     pub fn string(value: impl Into<String>) -> Self {
         Self::String(value.into())
@@ -60,6 +153,20 @@ impl Dyn {
     /// 一个空映射。官方 `MapCodec.unitCodec` 编出来的就是这个。
     pub fn empty_map() -> Self {
         Self::Map(Vec::new())
+    }
+
+    /// 拆掉一棵可能很深的中间值，不使用调用栈。
+    ///
+    /// Dismantle a value that may be very deep, without using the call stack.
+    pub fn release(self) {
+        let mut stack = vec![self];
+        while let Some(value) = stack.pop() {
+            match value {
+                Self::List(values) => stack.extend(values),
+                Self::Map(entries) => stack.extend(entries.into_iter().map(|(_, value)| value)),
+                _ => {}
+            }
+        }
     }
 
     /// 官方 `Objects.equals` 的比较规则。
@@ -83,6 +190,10 @@ impl Dyn {
     /// 用于原样保存合法输入的组件（`lock` 这类只在存档里有 `Codec` 的组件），
     /// 转换之后布尔和数值的标签类型都保留，写回去不会有变化。
     pub fn from_tag(tag: &Tag) -> Self {
+        crate::stack_hop::guard(|| Self::from_tag_frame(tag))
+    }
+
+    fn from_tag_frame(tag: &Tag) -> Self {
         match tag {
             Tag::Byte(value) => Self::Byte(*value),
             Tag::Short(value) => Self::Short(*value),
@@ -106,6 +217,10 @@ impl Dyn {
 
     /// 变成 NBT 标签。布尔写回字节，映射的键必须都是字符串。
     pub fn to_tag(&self) -> Tag {
+        crate::stack_hop::guard(|| self.to_tag_frame())
+    }
+
+    fn to_tag_frame(&self) -> Tag {
         match self {
             Self::Byte(value) => Tag::Byte(*value),
             Self::Short(value) => Tag::Short(*value),
