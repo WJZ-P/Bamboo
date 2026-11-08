@@ -9,15 +9,17 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{
-    blocks, items, items::ITEMS, packets::play::clientbound, registries::block_entity_type,
+    block_id_of_state, blocks, items, items::ITEMS, packets::play::clientbound,
+    registries::block_entity_type, registries::data_component_type as kinds,
 };
 use mc_bamboo_protocol::{
+    components::{ComponentValue, cursor::HolderSet, predicate::BlockPredicate},
     item::ItemStack,
     packet::{
         ClientboundPacket,
         play::{
-            BlockChangedAck, BlockUpdate, Disconnect, LevelEvent, PlayRequest, PlayerActionKind,
-            SectionBlock, SectionBlocksUpdate, SwingAnimation, SystemChat,
+            BlockChangedAck, BlockUpdate, Disconnect, GameMode, LevelEvent, PlayRequest,
+            PlayerActionKind, SectionBlock, SectionBlocksUpdate, SwingAnimation, SystemChat,
         },
     },
     text::{Color, Component},
@@ -2246,4 +2248,152 @@ fn arbitrary_requests_never_panic_and_never_end_in_a_ghost() {
     let inventory = &server.player(&client).inventory;
     assert!(inventory.selected < 9);
     assert_eq!(inventory.slots.len(), 46);
+}
+
+/// 直接放进主手，不走 `SetCreativeModeSlot`：冒险模式收不了那个包。
+fn hold_stack(server: &mut Harness, client: &Client, stack: ItemStack) {
+    player_mut(server, client).inventory.slots[36] = stack;
+}
+
+fn set_adventure(server: &mut Harness, client: &Client) {
+    player_mut(server, client).game_mode = GameMode::Adventure;
+}
+
+/// 只包含 `state` 这一种方块的谓词。
+fn block_predicate(state: u32) -> BlockPredicate {
+    BlockPredicate {
+        blocks: Some(HolderSet::Ids(vec![
+            block_id_of_state(state).unwrap() as i32
+        ])),
+        properties: None,
+        nbt: None,
+        components: Default::default(),
+    }
+}
+
+/// 一个物品，挂上 `kind` 组件里的一条谓词。
+fn with_component(item: i32, kind: i32, state: u32) -> ItemStack {
+    let mut value = Vec::new();
+    let predicates = vec![block_predicate(state)];
+    match kind {
+        kinds::CAN_BREAK => ComponentValue::CanBreak(predicates).write(&mut value),
+        kinds::CAN_PLACE_ON => ComponentValue::CanPlaceOn(predicates).write(&mut value),
+        _ => unreachable!("测试只用这两个组件"),
+    }
+    ItemStack {
+        item,
+        count: 1,
+        added: vec![(kind, value)],
+        removed: Vec::new(),
+    }
+}
+
+#[test]
+fn adventure_mode_places_stone_where_can_place_on_matches() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    // 点的是脚下的草方块，`can_place_on` 写的也是草方块。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::GRASS_BLOCK),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    // 草方块换成别的方块后谓词就不再匹配，这里看的是点击那一刻的草方块。
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::STONE));
+}
+
+#[test]
+fn adventure_mode_refuses_placement_where_can_place_on_does_not_match() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::DIRT),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    // 被拒绝的预测照样要 ack。
+    assert_eq!(client.take_frames().last(), Some(&ack(1)));
+}
+
+#[test]
+fn creative_mode_ignores_can_place_on() {
+    let (mut server, client) = settled();
+    // 创造模式能建造，谓词匹配不上也照放。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::DIRT),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::STONE));
+}
+
+#[test]
+fn adventure_mode_breaks_a_block_that_can_break_lists() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    // 矮草没有硬度，进度一到就挖穿。
+    set_block(&mut server, ABOVE, blocks::SHORT_GRASS);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STICK, kinds::CAN_BREAK, blocks::SHORT_GRASS),
+    );
+
+    destroy(&server, &client, ABOVE, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    assert_eq!(client.take_frames(), [update(ABOVE, blocks::AIR), ack(1)]);
+}
+
+#[test]
+fn adventure_mode_cannot_break_a_block_outside_can_break() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    set_block(&mut server, ABOVE, blocks::SHORT_GRASS);
+    // 组件里写的是泥土，矮草不在列表里。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STICK, kinds::CAN_BREAK, blocks::DIRT),
+    );
+
+    destroy(&server, &client, ABOVE, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::SHORT_GRASS));
+    assert_eq!(
+        client.take_frames(),
+        [update(ABOVE, blocks::SHORT_GRASS), ack(1)]
+    );
+}
+
+#[test]
+fn adventure_mode_can_break_does_not_allow_placing() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    // `can_break` 只管挖，放置要看 `can_place_on`。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_BREAK, blocks::GRASS_BLOCK),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
 }
