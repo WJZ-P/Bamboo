@@ -1,0 +1,14 @@
+[package]
+name = "mc-bamboo-loot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mc-bamboo-blocks.workspace = true
+mc-bamboo-data.workspace = true
+md-5.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

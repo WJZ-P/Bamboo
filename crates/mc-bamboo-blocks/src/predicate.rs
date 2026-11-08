@@ -88,6 +88,42 @@ fn property_matches(matcher: &PropertyMatcher, state: BlockState) -> bool {
     }
 }
 
+/// 官方 `PropertyMatcher.match`，给战利品表的 `StatePropertiesPredicate` 用。
+///
+/// `exact` 有值时按 `ExactMatcher` 比；否则按 `RangedMatcher`，缺的端点不设限。
+/// 属性不存在，或者任一边解析不成这个属性的值，都是不匹配。
+///
+/// `PropertyMatcher.match` for loot `StatePropertiesPredicate`.
+/// A present `exact` uses `ExactMatcher`; otherwise this is `RangedMatcher` and a missing
+/// bound is unbounded. A missing property, or a value that does not parse, does not match.
+pub fn property_text_matches(
+    state: BlockState,
+    name: &str,
+    exact: Option<&str>,
+    min: Option<&str>,
+    max: Option<&str>,
+) -> bool {
+    let Some(def) = state
+        .block()
+        .properties
+        .iter()
+        .find(|property| property.name == name)
+    else {
+        return false;
+    };
+    let Some(actual) = state
+        .property_text(name)
+        .and_then(|text| parse_value(def, text))
+    else {
+        return false;
+    };
+    if let Some(expected) = exact {
+        return parse_value(def, expected).is_some_and(|value| value == actual);
+    }
+    min.is_none_or(|min| parse_value(def, min).is_some_and(|value| actual >= value))
+        && max.is_none_or(|max| parse_value(def, max).is_some_and(|value| actual <= value))
+}
+
 /// 官方 `Property.getValue`：把一个字符串解析成属性值，解析不出来时返回 `None`。
 ///
 /// 整数属性按 `Integer.parseInt` 解析，再检查在 `min..=max` 里；布尔属性只认

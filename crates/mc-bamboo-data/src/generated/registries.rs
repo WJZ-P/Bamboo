@@ -48,6 +48,8 @@ pub const SYNCED_REGISTRIES: &[SyncedRegistry] = &[
 
 pub mod biome {
     pub const TOTAL: u32 = 67;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:badlands", "minecraft:bamboo_jungle", "minecraft:basalt_deltas", "minecraft:beach", "minecraft:birch_forest", "minecraft:cherry_grove", "minecraft:cold_ocean", "minecraft:crimson_forest", "minecraft:dappled_forest", "minecraft:dark_forest", "minecraft:deep_cold_ocean", "minecraft:deep_dark", "minecraft:deep_frozen_ocean", "minecraft:deep_lukewarm_ocean", "minecraft:deep_ocean", "minecraft:desert", "minecraft:dripstone_caves", "minecraft:end_barrens", "minecraft:end_highlands", "minecraft:end_midlands", "minecraft:eroded_badlands", "minecraft:flower_forest", "minecraft:forest", "minecraft:frozen_ocean", "minecraft:frozen_peaks", "minecraft:frozen_river", "minecraft:grove", "minecraft:ice_spikes", "minecraft:jagged_peaks", "minecraft:jungle", "minecraft:lukewarm_ocean", "minecraft:lush_caves", "minecraft:mangrove_swamp", "minecraft:meadow", "minecraft:mushroom_fields", "minecraft:nether_wastes", "minecraft:ocean", "minecraft:old_growth_birch_forest", "minecraft:old_growth_pine_taiga", "minecraft:old_growth_spruce_taiga", "minecraft:pale_garden", "minecraft:plains", "minecraft:river", "minecraft:savanna", "minecraft:savanna_plateau", "minecraft:small_end_islands", "minecraft:snowy_beach", "minecraft:snowy_plains", "minecraft:snowy_slopes", "minecraft:snowy_taiga", "minecraft:soul_sand_valley", "minecraft:sparse_jungle", "minecraft:stony_peaks", "minecraft:stony_shore", "minecraft:sulfur_caves", "minecraft:sunflower_plains", "minecraft:swamp", "minecraft:taiga", "minecraft:the_end", "minecraft:the_void", "minecraft:warm_ocean", "minecraft:warped_forest", "minecraft:windswept_forest", "minecraft:windswept_gravelly_hills", "minecraft:windswept_hills", "minecraft:windswept_savanna", "minecraft:wooded_badlands"];
     pub const BADLANDS: i32 = 0;
     pub const BAMBOO_JUNGLE: i32 = 1;
     pub const BASALT_DELTAS: i32 = 2;
@@ -119,6 +121,8 @@ pub mod biome {
 
 pub mod chat_type {
     pub const TOTAL: u32 = 7;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:chat", "minecraft:emote_command", "minecraft:msg_command_incoming", "minecraft:msg_command_outgoing", "minecraft:say_command", "minecraft:team_msg_command_incoming", "minecraft:team_msg_command_outgoing"];
     pub const CHAT: i32 = 0;
     pub const EMOTE_COMMAND: i32 = 1;
     pub const MSG_COMMAND_INCOMING: i32 = 2;
@@ -130,6 +134,8 @@ pub mod chat_type {
 
 pub mod dimension_type {
     pub const TOTAL: u32 = 4;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:overworld", "minecraft:overworld_caves", "minecraft:the_end", "minecraft:the_nether"];
     pub const OVERWORLD: i32 = 0;
     pub const OVERWORLD_CAVES: i32 = 1;
     pub const THE_END: i32 = 2;
@@ -138,12 +144,16 @@ pub mod dimension_type {
 
 pub mod world_clock {
     pub const TOTAL: u32 = 2;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:overworld", "minecraft:the_end"];
     pub const OVERWORLD: i32 = 0;
     pub const THE_END: i32 = 1;
 }
 
 pub mod attribute {
     pub const TOTAL: u32 = 40;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:air_drag_modifier", "minecraft:armor", "minecraft:armor_toughness", "minecraft:attack_damage", "minecraft:attack_knockback", "minecraft:attack_speed", "minecraft:below_name_distance", "minecraft:block_break_speed", "minecraft:block_interaction_range", "minecraft:bounciness", "minecraft:burning_time", "minecraft:camera_distance", "minecraft:explosion_knockback_resistance", "minecraft:entity_interaction_range", "minecraft:fall_damage_multiplier", "minecraft:flying_speed", "minecraft:follow_range", "minecraft:friction_modifier", "minecraft:gravity", "minecraft:jump_strength", "minecraft:knockback_resistance", "minecraft:luck", "minecraft:max_absorption", "minecraft:max_health", "minecraft:mining_efficiency", "minecraft:movement_efficiency", "minecraft:movement_speed", "minecraft:name_tag_distance", "minecraft:oxygen_bonus", "minecraft:safe_fall_distance", "minecraft:scale", "minecraft:sneaking_speed", "minecraft:spawn_reinforcements", "minecraft:step_height", "minecraft:submerged_mining_speed", "minecraft:sweeping_damage_ratio", "minecraft:tempt_range", "minecraft:water_movement_efficiency", "minecraft:waypoint_transmit_range", "minecraft:waypoint_receive_range"];
     pub const AIR_DRAG_MODIFIER: i32 = 0;
     pub const ARMOR: i32 = 1;
     pub const ARMOR_TOUGHNESS: i32 = 2;
@@ -188,6 +198,8 @@ pub mod attribute {
 
 pub mod block_entity_type {
     pub const TOTAL: u32 = 49;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:furnace", "minecraft:chest", "minecraft:trapped_chest", "minecraft:ender_chest", "minecraft:jukebox", "minecraft:dispenser", "minecraft:dropper", "minecraft:sign", "minecraft:hanging_sign", "minecraft:mob_spawner", "minecraft:creaking_heart", "minecraft:piston", "minecraft:brewing_stand", "minecraft:enchanting_table", "minecraft:end_portal", "minecraft:beacon", "minecraft:skull", "minecraft:daylight_detector", "minecraft:hopper", "minecraft:comparator", "minecraft:banner", "minecraft:structure_block", "minecraft:end_gateway", "minecraft:command_block", "minecraft:shulker_box", "minecraft:conduit", "minecraft:barrel", "minecraft:smoker", "minecraft:blast_furnace", "minecraft:lectern", "minecraft:bell", "minecraft:jigsaw", "minecraft:campfire", "minecraft:beehive", "minecraft:sculk_sensor", "minecraft:calibrated_sculk_sensor", "minecraft:sculk_catalyst", "minecraft:sculk_shrieker", "minecraft:chiseled_bookshelf", "minecraft:shelf", "minecraft:brushable_block", "minecraft:decorated_pot", "minecraft:crafter", "minecraft:trial_spawner", "minecraft:vault", "minecraft:test_block", "minecraft:test_instance_block", "minecraft:copper_golem_statue", "minecraft:potent_sulfur"];
     pub const FURNACE: i32 = 0;
     pub const CHEST: i32 = 1;
     pub const TRAPPED_CHEST: i32 = 2;
@@ -241,6 +253,8 @@ pub mod block_entity_type {
 
 pub mod entity_type {
     pub const TOTAL: u32 = 161;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:acacia_boat", "minecraft:acacia_chest_boat", "minecraft:allay", "minecraft:area_effect_cloud", "minecraft:armadillo", "minecraft:armor_stand", "minecraft:arrow", "minecraft:axolotl", "minecraft:bamboo_chest_raft", "minecraft:bamboo_raft", "minecraft:bat", "minecraft:bee", "minecraft:birch_boat", "minecraft:birch_chest_boat", "minecraft:blaze", "minecraft:block_display", "minecraft:bogged", "minecraft:breeze", "minecraft:breeze_wind_charge", "minecraft:camel", "minecraft:camel_husk", "minecraft:cat", "minecraft:cave_spider", "minecraft:cherry_boat", "minecraft:cherry_chest_boat", "minecraft:chest_minecart", "minecraft:chicken", "minecraft:cod", "minecraft:copper_golem", "minecraft:command_block_minecart", "minecraft:cow", "minecraft:creaking", "minecraft:creeper", "minecraft:cushion", "minecraft:dark_oak_boat", "minecraft:dark_oak_chest_boat", "minecraft:dolphin", "minecraft:donkey", "minecraft:dragon_fireball", "minecraft:drowned", "minecraft:egg", "minecraft:elder_guardian", "minecraft:enderman", "minecraft:endermite", "minecraft:ender_dragon", "minecraft:ender_pearl", "minecraft:end_crystal", "minecraft:evoker", "minecraft:evoker_fangs", "minecraft:experience_bottle", "minecraft:experience_orb", "minecraft:eye_of_ender", "minecraft:falling_block", "minecraft:fireball", "minecraft:firework_rocket", "minecraft:fox", "minecraft:frog", "minecraft:furnace_minecart", "minecraft:ghast", "minecraft:happy_ghast", "minecraft:giant", "minecraft:glow_item_frame", "minecraft:glow_squid", "minecraft:goat", "minecraft:guardian", "minecraft:hoglin", "minecraft:hopper_minecart", "minecraft:horse", "minecraft:husk", "minecraft:illusioner", "minecraft:interaction", "minecraft:iron_golem", "minecraft:item", "minecraft:item_display", "minecraft:item_frame", "minecraft:jungle_boat", "minecraft:jungle_chest_boat", "minecraft:leash_knot", "minecraft:lightning_bolt", "minecraft:llama", "minecraft:llama_spit", "minecraft:magma_cube", "minecraft:mangrove_boat", "minecraft:mangrove_chest_boat", "minecraft:mannequin", "minecraft:marker", "minecraft:minecart", "minecraft:mooshroom", "minecraft:mule", "minecraft:nautilus", "minecraft:oak_boat", "minecraft:oak_chest_boat", "minecraft:ocelot", "minecraft:ominous_item_spawner", "minecraft:painting", "minecraft:pale_oak_boat", "minecraft:pale_oak_chest_boat", "minecraft:panda", "minecraft:parched", "minecraft:parrot", "minecraft:phantom", "minecraft:pig", "minecraft:piglin", "minecraft:piglin_brute", "minecraft:pillager", "minecraft:polar_bear", "minecraft:poplar_boat", "minecraft:poplar_chest_boat", "minecraft:splash_potion", "minecraft:lingering_potion", "minecraft:pufferfish", "minecraft:rabbit", "minecraft:ravager", "minecraft:salmon", "minecraft:sheep", "minecraft:shulker", "minecraft:shulker_bullet", "minecraft:silverfish", "minecraft:skeleton", "minecraft:skeleton_horse", "minecraft:slime", "minecraft:small_fireball", "minecraft:sniffer", "minecraft:snowball", "minecraft:snow_golem", "minecraft:spawner_minecart", "minecraft:spectral_arrow", "minecraft:spider", "minecraft:spruce_boat", "minecraft:spruce_chest_boat", "minecraft:squid", "minecraft:stray", "minecraft:strider", "minecraft:sulfur_cube", "minecraft:tadpole", "minecraft:text_display", "minecraft:tnt", "minecraft:tnt_minecart", "minecraft:trader_llama", "minecraft:trident", "minecraft:tropical_fish", "minecraft:turtle", "minecraft:vex", "minecraft:villager", "minecraft:vindicator", "minecraft:wandering_trader", "minecraft:warden", "minecraft:wind_charge", "minecraft:witch", "minecraft:wither", "minecraft:wither_skeleton", "minecraft:wither_skull", "minecraft:wolf", "minecraft:zoglin", "minecraft:zombie", "minecraft:zombie_horse", "minecraft:zombie_nautilus", "minecraft:zombie_villager", "minecraft:zombified_piglin", "minecraft:player", "minecraft:fishing_bobber"];
     pub const ACACIA_BOAT: i32 = 0;
     pub const ACACIA_CHEST_BOAT: i32 = 1;
     pub const ALLAY: i32 = 2;
@@ -406,6 +420,8 @@ pub mod entity_type {
 
 pub mod data_component_type {
     pub const TOTAL: u32 = 122;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:custom_data", "minecraft:max_stack_size", "minecraft:max_damage", "minecraft:damage", "minecraft:unbreakable", "minecraft:use_effects", "minecraft:custom_name", "minecraft:minimum_attack_charge", "minecraft:damage_type", "minecraft:item_name", "minecraft:item_model", "minecraft:lore", "minecraft:rarity", "minecraft:enchantments", "minecraft:can_place_on", "minecraft:can_break", "minecraft:attribute_modifiers", "minecraft:custom_model_data", "minecraft:tooltip_display", "minecraft:repair_cost", "minecraft:creative_slot_lock", "minecraft:enchantment_glint_override", "minecraft:intangible_projectile", "minecraft:food", "minecraft:consumable", "minecraft:use_remainder", "minecraft:use_cooldown", "minecraft:damage_resistant", "minecraft:tool", "minecraft:weapon", "minecraft:attack_range", "minecraft:enchantable", "minecraft:equippable", "minecraft:repairable", "minecraft:glider", "minecraft:tooltip_style", "minecraft:death_protection", "minecraft:blocks_attacks", "minecraft:piercing_weapon", "minecraft:kinetic_weapon", "minecraft:attack_animation", "minecraft:interact_animation", "minecraft:additional_trade_cost", "minecraft:block_transformer", "minecraft:villager_food", "minecraft:stored_enchantments", "minecraft:dye", "minecraft:dyed_color", "minecraft:map_id", "minecraft:map_decorations", "minecraft:map_post_processing", "minecraft:charged_projectiles", "minecraft:bundle_contents", "minecraft:potion_contents", "minecraft:potion_duration_scale", "minecraft:suspicious_stew_effects", "minecraft:writable_book_content", "minecraft:written_book_content", "minecraft:trim", "minecraft:debug_stick_state", "minecraft:entity_data", "minecraft:bucket_entity_data", "minecraft:block_entity_data", "minecraft:instrument", "minecraft:provides_trim_material", "minecraft:ominous_bottle_amplifier", "minecraft:jukebox_playable", "minecraft:provides_banner_patterns", "minecraft:recipes", "minecraft:lodestone_tracker", "minecraft:firework_explosion", "minecraft:fireworks", "minecraft:profile", "minecraft:note_block_sound", "minecraft:banner_patterns", "minecraft:base_color", "minecraft:pot_decorations", "minecraft:container", "minecraft:block_state", "minecraft:bees", "minecraft:sulfur_cube_content", "minecraft:lock", "minecraft:container_loot", "minecraft:break_sound", "minecraft:compostable", "minecraft:cooking_fuel", "minecraft:brewing_fuel", "minecraft:mob_visibility", "minecraft:villager/variant", "minecraft:wolf/variant", "minecraft:wolf/sound_variant", "minecraft:wolf/collar", "minecraft:fox/variant", "minecraft:salmon/size", "minecraft:parrot/variant", "minecraft:tropical_fish/pattern", "minecraft:tropical_fish/base_color", "minecraft:tropical_fish/pattern_color", "minecraft:mooshroom/variant", "minecraft:rabbit/variant", "minecraft:pig/variant", "minecraft:pig/sound_variant", "minecraft:cow/variant", "minecraft:cow/sound_variant", "minecraft:chicken/variant", "minecraft:chicken/sound_variant", "minecraft:zombie_nautilus/variant", "minecraft:frog/variant", "minecraft:horse/variant", "minecraft:painting/variant", "minecraft:llama/variant", "minecraft:axolotl/variant", "minecraft:cat/variant", "minecraft:cat/sound_variant", "minecraft:cat/collar", "minecraft:sheep/color", "minecraft:shulker/color", "minecraft:provides_pottery_pattern", "minecraft:sign_text_front", "minecraft:sign_text_back", "minecraft:waxed", "minecraft:cushion/color"];
     pub const CUSTOM_DATA: i32 = 0;
     pub const MAX_STACK_SIZE: i32 = 1;
     pub const MAX_DAMAGE: i32 = 2;
@@ -532,12 +548,163 @@ pub mod data_component_type {
 
 pub mod fluid {
     pub const TOTAL: u32 = 5;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:empty", "minecraft:flowing_water", "minecraft:water", "minecraft:flowing_lava", "minecraft:lava"];
     pub const EMPTY: i32 = 0;
     pub const FLOWING_WATER: i32 = 1;
     pub const WATER: i32 = 2;
     pub const FLOWING_LAVA: i32 = 3;
     pub const LAVA: i32 = 4;
 }
+
+
+pub mod potion {
+    pub const TOTAL: u32 = 46;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:water", "minecraft:mundane", "minecraft:thick", "minecraft:awkward", "minecraft:night_vision", "minecraft:long_night_vision", "minecraft:invisibility", "minecraft:long_invisibility", "minecraft:leaping", "minecraft:long_leaping", "minecraft:strong_leaping", "minecraft:fire_resistance", "minecraft:long_fire_resistance", "minecraft:swiftness", "minecraft:long_swiftness", "minecraft:strong_swiftness", "minecraft:slowness", "minecraft:long_slowness", "minecraft:strong_slowness", "minecraft:turtle_master", "minecraft:long_turtle_master", "minecraft:strong_turtle_master", "minecraft:water_breathing", "minecraft:long_water_breathing", "minecraft:healing", "minecraft:strong_healing", "minecraft:harming", "minecraft:strong_harming", "minecraft:poison", "minecraft:long_poison", "minecraft:strong_poison", "minecraft:regeneration", "minecraft:long_regeneration", "minecraft:strong_regeneration", "minecraft:strength", "minecraft:long_strength", "minecraft:strong_strength", "minecraft:weakness", "minecraft:long_weakness", "minecraft:luck", "minecraft:slow_falling", "minecraft:long_slow_falling", "minecraft:wind_charged", "minecraft:weaving", "minecraft:oozing", "minecraft:infested"];
+    pub const WATER: i32 = 0;
+    pub const MUNDANE: i32 = 1;
+    pub const THICK: i32 = 2;
+    pub const AWKWARD: i32 = 3;
+    pub const NIGHT_VISION: i32 = 4;
+    pub const LONG_NIGHT_VISION: i32 = 5;
+    pub const INVISIBILITY: i32 = 6;
+    pub const LONG_INVISIBILITY: i32 = 7;
+    pub const LEAPING: i32 = 8;
+    pub const LONG_LEAPING: i32 = 9;
+    pub const STRONG_LEAPING: i32 = 10;
+    pub const FIRE_RESISTANCE: i32 = 11;
+    pub const LONG_FIRE_RESISTANCE: i32 = 12;
+    pub const SWIFTNESS: i32 = 13;
+    pub const LONG_SWIFTNESS: i32 = 14;
+    pub const STRONG_SWIFTNESS: i32 = 15;
+    pub const SLOWNESS: i32 = 16;
+    pub const LONG_SLOWNESS: i32 = 17;
+    pub const STRONG_SLOWNESS: i32 = 18;
+    pub const TURTLE_MASTER: i32 = 19;
+    pub const LONG_TURTLE_MASTER: i32 = 20;
+    pub const STRONG_TURTLE_MASTER: i32 = 21;
+    pub const WATER_BREATHING: i32 = 22;
+    pub const LONG_WATER_BREATHING: i32 = 23;
+    pub const HEALING: i32 = 24;
+    pub const STRONG_HEALING: i32 = 25;
+    pub const HARMING: i32 = 26;
+    pub const STRONG_HARMING: i32 = 27;
+    pub const POISON: i32 = 28;
+    pub const LONG_POISON: i32 = 29;
+    pub const STRONG_POISON: i32 = 30;
+    pub const REGENERATION: i32 = 31;
+    pub const LONG_REGENERATION: i32 = 32;
+    pub const STRONG_REGENERATION: i32 = 33;
+    pub const STRENGTH: i32 = 34;
+    pub const LONG_STRENGTH: i32 = 35;
+    pub const STRONG_STRENGTH: i32 = 36;
+    pub const WEAKNESS: i32 = 37;
+    pub const LONG_WEAKNESS: i32 = 38;
+    pub const LUCK: i32 = 39;
+    pub const SLOW_FALLING: i32 = 40;
+    pub const LONG_SLOW_FALLING: i32 = 41;
+    pub const WIND_CHARGED: i32 = 42;
+    pub const WEAVING: i32 = 43;
+    pub const OOZING: i32 = 44;
+    pub const INFESTED: i32 = 45;
+}
+
+pub mod mob_effect {
+    pub const TOTAL: u32 = 40;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:speed", "minecraft:slowness", "minecraft:haste", "minecraft:mining_fatigue", "minecraft:strength", "minecraft:instant_health", "minecraft:instant_damage", "minecraft:jump_boost", "minecraft:nausea", "minecraft:regeneration", "minecraft:resistance", "minecraft:fire_resistance", "minecraft:water_breathing", "minecraft:invisibility", "minecraft:blindness", "minecraft:night_vision", "minecraft:hunger", "minecraft:weakness", "minecraft:poison", "minecraft:wither", "minecraft:health_boost", "minecraft:absorption", "minecraft:saturation", "minecraft:glowing", "minecraft:levitation", "minecraft:luck", "minecraft:unluck", "minecraft:slow_falling", "minecraft:conduit_power", "minecraft:dolphins_grace", "minecraft:bad_omen", "minecraft:hero_of_the_village", "minecraft:darkness", "minecraft:trial_omen", "minecraft:raid_omen", "minecraft:wind_charged", "minecraft:weaving", "minecraft:oozing", "minecraft:infested", "minecraft:breath_of_the_nautilus"];
+    pub const SPEED: i32 = 0;
+    pub const SLOWNESS: i32 = 1;
+    pub const HASTE: i32 = 2;
+    pub const MINING_FATIGUE: i32 = 3;
+    pub const STRENGTH: i32 = 4;
+    pub const INSTANT_HEALTH: i32 = 5;
+    pub const INSTANT_DAMAGE: i32 = 6;
+    pub const JUMP_BOOST: i32 = 7;
+    pub const NAUSEA: i32 = 8;
+    pub const REGENERATION: i32 = 9;
+    pub const RESISTANCE: i32 = 10;
+    pub const FIRE_RESISTANCE: i32 = 11;
+    pub const WATER_BREATHING: i32 = 12;
+    pub const INVISIBILITY: i32 = 13;
+    pub const BLINDNESS: i32 = 14;
+    pub const NIGHT_VISION: i32 = 15;
+    pub const HUNGER: i32 = 16;
+    pub const WEAKNESS: i32 = 17;
+    pub const POISON: i32 = 18;
+    pub const WITHER: i32 = 19;
+    pub const HEALTH_BOOST: i32 = 20;
+    pub const ABSORPTION: i32 = 21;
+    pub const SATURATION: i32 = 22;
+    pub const GLOWING: i32 = 23;
+    pub const LEVITATION: i32 = 24;
+    pub const LUCK: i32 = 25;
+    pub const UNLUCK: i32 = 26;
+    pub const SLOW_FALLING: i32 = 27;
+    pub const CONDUIT_POWER: i32 = 28;
+    pub const DOLPHINS_GRACE: i32 = 29;
+    pub const BAD_OMEN: i32 = 30;
+    pub const HERO_OF_THE_VILLAGE: i32 = 31;
+    pub const DARKNESS: i32 = 32;
+    pub const TRIAL_OMEN: i32 = 33;
+    pub const RAID_OMEN: i32 = 34;
+    pub const WIND_CHARGED: i32 = 35;
+    pub const WEAVING: i32 = 36;
+    pub const OOZING: i32 = 37;
+    pub const INFESTED: i32 = 38;
+    pub const BREATH_OF_THE_NAUTILUS: i32 = 39;
+}
+
+pub mod banner_pattern {
+    pub const TOTAL: u32 = 43;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:base", "minecraft:border", "minecraft:bricks", "minecraft:circle", "minecraft:creeper", "minecraft:cross", "minecraft:curly_border", "minecraft:diagonal_left", "minecraft:diagonal_right", "minecraft:diagonal_up_left", "minecraft:diagonal_up_right", "minecraft:flow", "minecraft:flower", "minecraft:globe", "minecraft:gradient", "minecraft:gradient_up", "minecraft:guster", "minecraft:half_horizontal", "minecraft:half_horizontal_bottom", "minecraft:half_vertical", "minecraft:half_vertical_right", "minecraft:mojang", "minecraft:piglin", "minecraft:rhombus", "minecraft:skull", "minecraft:small_stripes", "minecraft:square_bottom_left", "minecraft:square_bottom_right", "minecraft:square_top_left", "minecraft:square_top_right", "minecraft:straight_cross", "minecraft:stripe_bottom", "minecraft:stripe_center", "minecraft:stripe_downleft", "minecraft:stripe_downright", "minecraft:stripe_left", "minecraft:stripe_middle", "minecraft:stripe_right", "minecraft:stripe_top", "minecraft:triangle_bottom", "minecraft:triangle_top", "minecraft:triangles_bottom", "minecraft:triangles_top"];
+    pub const BASE: i32 = 0;
+    pub const BORDER: i32 = 1;
+    pub const BRICKS: i32 = 2;
+    pub const CIRCLE: i32 = 3;
+    pub const CREEPER: i32 = 4;
+    pub const CROSS: i32 = 5;
+    pub const CURLY_BORDER: i32 = 6;
+    pub const DIAGONAL_LEFT: i32 = 7;
+    pub const DIAGONAL_RIGHT: i32 = 8;
+    pub const DIAGONAL_UP_LEFT: i32 = 9;
+    pub const DIAGONAL_UP_RIGHT: i32 = 10;
+    pub const FLOW: i32 = 11;
+    pub const FLOWER: i32 = 12;
+    pub const GLOBE: i32 = 13;
+    pub const GRADIENT: i32 = 14;
+    pub const GRADIENT_UP: i32 = 15;
+    pub const GUSTER: i32 = 16;
+    pub const HALF_HORIZONTAL: i32 = 17;
+    pub const HALF_HORIZONTAL_BOTTOM: i32 = 18;
+    pub const HALF_VERTICAL: i32 = 19;
+    pub const HALF_VERTICAL_RIGHT: i32 = 20;
+    pub const MOJANG: i32 = 21;
+    pub const PIGLIN: i32 = 22;
+    pub const RHOMBUS: i32 = 23;
+    pub const SKULL: i32 = 24;
+    pub const SMALL_STRIPES: i32 = 25;
+    pub const SQUARE_BOTTOM_LEFT: i32 = 26;
+    pub const SQUARE_BOTTOM_RIGHT: i32 = 27;
+    pub const SQUARE_TOP_LEFT: i32 = 28;
+    pub const SQUARE_TOP_RIGHT: i32 = 29;
+    pub const STRAIGHT_CROSS: i32 = 30;
+    pub const STRIPE_BOTTOM: i32 = 31;
+    pub const STRIPE_CENTER: i32 = 32;
+    pub const STRIPE_DOWNLEFT: i32 = 33;
+    pub const STRIPE_DOWNRIGHT: i32 = 34;
+    pub const STRIPE_LEFT: i32 = 35;
+    pub const STRIPE_MIDDLE: i32 = 36;
+    pub const STRIPE_RIGHT: i32 = 37;
+    pub const STRIPE_TOP: i32 = 38;
+    pub const TRIANGLE_BOTTOM: i32 = 39;
+    pub const TRIANGLE_TOP: i32 = 40;
+    pub const TRIANGLES_BOTTOM: i32 = 41;
+    pub const TRIANGLES_TOP: i32 = 42;
+}
+
 
 pub mod menu {
     pub const TOTAL: u32 = 25;
@@ -610,5 +777,6 @@ pub mod attribute_defaults {
     pub const WATER_MOVEMENT_EFFICIENCY: f64 = 0.0;
     pub const WAYPOINT_RECEIVE_RANGE: f64 = 0.0;
     pub const WAYPOINT_TRANSMIT_RANGE: f64 = 0.0;
+
 }
 

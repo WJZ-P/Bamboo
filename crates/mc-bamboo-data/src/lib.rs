@@ -20,11 +20,12 @@ pub use recipe::{
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
-    item_components, items, light, packets, recipes, registries, shapes, states, tags, version,
-    worldgen,
+    item_components, items, light, loot, packets, recipes, registries, shapes, states, tags,
+    version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
+const ITEM_TAG_REGISTRY: &str = "minecraft:item";
 
 /// `states::STATE_FACTS` 里每一位的含义。全部用 `EmptyBlockGetter` 在 `BlockPos.ZERO` 读取。
 ///
@@ -334,6 +335,15 @@ pub struct Item {
     /// `StandingAndWallBlockItem.attachmentDirection` 的 ID：主方块朝这个方向贴着支撑。
     pub attachment: Option<i32>,
     pub max_stack_size: i32,
+    /// `max_damage` 组件，没有这个组件时物品不能受损。
+    ///
+    /// The `max_damage` component. The item cannot take damage when this is absent.
+    pub max_damage: Option<i32>,
+    /// `enchantable` 组件的 `value`，附魔台算等级时用；没有这个组件就不能附魔。
+    ///
+    /// The `value` of the `enchantable` component. Enchanting cost uses it; items without
+    /// the component cannot be enchanted.
+    pub enchantable: Option<i32>,
     /// 手持这个物品时，创造模式玩家能不能破坏方块。
     pub can_destroy_blocks_in_creative: bool,
     /// 有 `consumable` 组件：放置失败时官方会开始吃。
@@ -503,6 +513,17 @@ pub fn block_tag(name: &str) -> Option<&'static [i32]> {
     let group = tags::TAG_GROUPS
         .iter()
         .find(|group| group.registry == BLOCK_TAG_REGISTRY)?;
+    let tag = group.tags.iter().find(|tag| tag.name == name)?;
+    Some(tag.ids)
+}
+
+/// 一个物品标签包含的物品注册表 ID，标签不存在时返回 `None`。
+///
+/// `name` 要带命名空间，比如 `minecraft:swords`。
+pub fn item_tag(name: &str) -> Option<&'static [i32]> {
+    let group = tags::TAG_GROUPS
+        .iter()
+        .find(|group| group.registry == ITEM_TAG_REGISTRY)?;
     let tag = group.tags.iter().find(|tag| tag.name == name)?;
     Some(tag.ids)
 }
@@ -1166,6 +1187,22 @@ mod tests {
             fluids.tags[tags::fluid_tags::WATER.index].name,
             "minecraft:water"
         );
+    }
+
+    #[test]
+    fn item_tags_resolve_by_name() {
+        let swords = item_tag("minecraft:swords").expect("swords 是物品标签");
+        assert!(!swords.is_empty());
+        assert_eq!(
+            swords,
+            tags::TAG_GROUPS[tags::item_tags::GROUP]
+                .tags
+                .iter()
+                .find(|tag| tag.name == "minecraft:swords")
+                .expect("swords 在物品标签组里")
+                .ids
+        );
+        assert!(item_tag("minecraft:no_such_tag").is_none());
     }
 
     #[test]

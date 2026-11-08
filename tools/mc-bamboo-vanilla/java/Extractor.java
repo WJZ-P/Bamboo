@@ -70,6 +70,7 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
@@ -216,6 +217,13 @@ public final class Extractor {
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("lootTables", dataFiles(resources, "loot_table"));
+            root.add("lootPredicates", dataFiles(resources, "predicate"));
+            root.add("contextIntProviders", dataFiles(resources, "context_int_provider"));
+            root.add("contextFloatProviders", dataFiles(resources, "context_float_provider"));
+            root.add("enchantments", dataFiles(resources, "enchantment"));
+            root.add("smeltingRecipes", smeltingRecipes(resources));
+            root.add("instantMobEffects", instantMobEffects());
             root.add("attributeDefaults", attributeDefaults());
             root.add("componentEnums", componentEnums());
             root.add("worldgen", worldgen(layers.compositeAccess()));
@@ -341,6 +349,73 @@ public final class Extractor {
         enums.add("counts", counts);
         enums.add("sparse", sparse);
         return enums;
+    }
+
+    /**
+     * 一个数据包目录下的全部 JSON，键是带命名空间的条目名，值保留官方文件的原文。
+     *
+     * <p>战利品表不是注册表，走官方加载流程读不到，只能像数据包加载器那样按目录读文件。
+     */
+    private static JsonObject dataFiles(ResourceManager resources, String directory) throws IOException {
+        JsonObject files = new JsonObject();
+        for (Map.Entry<Identifier, Resource> entry : resources.listResources(directory, id -> true).entrySet()) {
+            // 列目录时官方返回的标识带着目录和 .json，去掉后才是表名。
+            String path = entry.getKey().getPath();
+            String name = path.substring(directory.length() + 1, path.length() - ".json".length());
+            Identifier id = Identifier.fromNamespaceAndPath(entry.getKey().getNamespace(), name);
+            try (Reader reader = entry.getValue().openAsReader()) {
+                files.addProperty(id.toString(), readAll(reader));
+            }
+        }
+        return files;
+    }
+
+    /**
+     * 原版数据包里的烧炼配方原文。
+     *
+     * <p>战利品表的 `furnace_smelt` 要按输入物品查烧炼配方，配方表只在服务端加载，这里按目录读出
+     * `minecraft:smelting` 的那部分。
+     */
+    private static JsonObject smeltingRecipes(ResourceManager resources) throws IOException {
+        JsonObject files = new JsonObject();
+        String directory = "recipe";
+        for (Map.Entry<Identifier, Resource> entry : resources.listResources(directory, id -> true).entrySet()) {
+            String path = entry.getKey().getPath();
+            String name = path.substring(directory.length() + 1, path.length() - ".json".length());
+            Identifier id = Identifier.fromNamespaceAndPath(entry.getKey().getNamespace(), name);
+            String text;
+            try (Reader reader = entry.getValue().openAsReader()) {
+                text = readAll(reader);
+            }
+            JsonElement type = JsonParser.parseString(text).getAsJsonObject().get("type");
+            if (type != null && "minecraft:smelting".equals(type.getAsString())) {
+                files.addProperty(id.toString(), text);
+            }
+        }
+        return files;
+    }
+
+    /**
+     * `MobEffect.isInstantaneous()` 的效果。可疑的 stew 设置持续时间时，瞬时的效果不乘 20。
+     */
+    private static JsonArray instantMobEffects() {
+        JsonArray effects = new JsonArray();
+        for (MobEffect effect : BuiltInRegistries.MOB_EFFECT) {
+            if (effect.isInstantaneous()) {
+                effects.add(BuiltInRegistries.MOB_EFFECT.getKey(effect).toString());
+            }
+        }
+        return effects;
+    }
+
+    private static String readAll(Reader reader) throws IOException {
+        StringBuilder text = new StringBuilder();
+        char[] buffer = new char[8192];
+        int count;
+        while ((count = reader.read(buffer)) >= 0) {
+            text.append(buffer, 0, count);
+        }
+        return text.toString();
     }
 
     /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */
@@ -480,6 +555,7 @@ public final class Extractor {
             object.addProperty("destroyTime", block.defaultDestroyTime());
             object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
+            object.addProperty("lootTable", block.getLootTable().map(key -> key.identifier().toString()).orElse(null));
             addOffset(object, block);
             blocks.add(object);
         }

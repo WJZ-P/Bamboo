@@ -238,6 +238,7 @@ WebView2 的渲染进程不算在内。
   骨粉不能让树苗长成树、不能催大型蘑菇和草方块上的植物，刷怪蛋、矿车、盔甲架、拴绳放不出来，水瓶不能把泥土变成泥巴，
   刷子只吃掉点击。世界生成决定的方块（紫颂花生长）和要生成实体（海龟蛋、嗅探兽蛋、青蛙卵）的随机刻也不做。
 - 生存模式的挖掘只有进度和裂纹：不掉落物品、不给经验，工具不掉耐久，不扣饥饿值、不记统计，附魔和状态效果（急迫、挖掘疲劳）都没有。
+  掉什么已经能按官方战利品表算出来（`mc-bamboo-loot`），挖掘、实体死亡和开箱都还没调用它。
   冒险模式按官方 `Player.blockActionRestricted` 判定：主手的 `can_break` 能匹配这一格才挖得动；放置按官方
   `ItemStack.useOn` 的检查，`can_place_on` 能匹配点到的方块才放得下。旁观模式挖不动。传送门没有别的维度，
   折跃门也不存出口，所以旁观者右键只会看到 `spectator.cannot_teleport`，不会真的传送。工作台、熔炉这些菜单
@@ -250,6 +251,13 @@ WebView2 的渲染进程不算在内。
   （官方要发 `open_book`），也没有讲台。没有聊天过滤，成书不带 `filtered` 文本。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
 - 没有命令，没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
+- 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐，但还没接进破坏、死亡和开箱。
+  会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
+  做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
+  没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。
+  数值里的 `score`、`storage`、`environment_attribute`，条件里的 `entity_scores` 和 `environment_attribute_check`，条目里的 `slots` 和战利品表标签（`#`）同样报不支持。
+  位置谓词不查流体和结构。实体谓词里还没做的子谓词（效果、NBT、玩家、装备槽、闪电等）会让整次求值失败，而不是当成不匹配。
+  随机序列不存档，也没有 `salt`、`includeWorldSeed`、`includeSequenceId` 开关（默认 salt 0，后两项都开）。掉落不查物品的功能开关（`isItemEnabled`）。乘客谓词只看第一个乘客。
 - 配方已经有了完整的查找和匹配逻辑（`mc-bamboo-recipes`），但还没接进游戏：工作台、熔炉、
   高炉、烟熏炉、营火、切石机、锻造台和酿造台都不能用，也没有配方书和配方相关的包。
   配方的输入还是只看物品 ID，特殊配方不读组件，所以旗帜复制、书复制、地图放大永远匹配不上；
@@ -272,12 +280,13 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-worldgen` | 世界生成的数学：随机源、噪声、密度函数、气候和群系源，纯函数，还没接进游戏 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
+| `crates/mc-bamboo-loot` | 战利品表：方块掉落、实体死亡和箱子填充，纯逻辑，还没接进破坏流程 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
-| `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、注册表和标签 |
+| `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、物品组件、方块谓词、配方和世界生成 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、物品组件、方块谓词、配方、战利品表和世界生成 |
 
 依赖方向是单向的：
 
@@ -297,6 +306,8 @@ protocol blocks world
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 `worldgen` 还没接进游戏，只有开发工具依赖它；它依赖 `data`（官方导出的世界生成数据）和
 `blocks`（里面有官方的 `LegacyRandomSource`）。
+`loot` 也还没接进游戏，只有开发工具依赖它；它依赖 `data`（嵌入的战利品表 JSON）和
+`blocks`（随机源、方块状态）。
 
 ## 线程模型
 
@@ -370,6 +381,15 @@ cargo run -p mc-bamboo-vanilla -- predicate-oracle <java 路径> [--cases N] [--
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- recipe-oracle <java 路径> [--cases N] [--seed S]
+```
+
+战利品表也一样：官方对随机方块状态、工具、爆炸半径和世界种子跑 `LootTable.getRandomItems`，
+箱子题再按 `fill` 放进容器，实体题按 `LivingEntity.dropFromLootTable` 的参数（不放 `LAST_DAMAGE_PLAYER`）跑死亡表。
+`mc-bamboo-loot` 重放，比较物品、数量、两边都能表示的组件，以及跑完后随机源的下一个 `nextLong`。
+造不出的实体、袭击查询和探险地图的结构搜索会记成排除：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
 ```
 
 世界生成的数学也一样：官方代码按一批种子和一批坐标算出每条噪声的两条求值路径、

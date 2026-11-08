@@ -50,7 +50,7 @@ pub use interact::{
 };
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use level::{Effect, Level, RedstoneMemory};
-pub use random::{LegacyRandom, LevelRandom};
+pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
