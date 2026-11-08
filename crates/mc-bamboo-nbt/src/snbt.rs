@@ -1237,7 +1237,9 @@ impl Tag {
                 }
                 out.push(']');
             }
-            Self::List(_) | Self::Compound(_) => unreachable!("containers are written by the heap stack"),
+            Self::List(_) | Self::Compound(_) => {
+                unreachable!("containers are written by the heap stack")
+            }
         }
     }
 

@@ -219,11 +219,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn begin_payload(
-        &mut self,
-        kind: u8,
-        stack: &mut Vec<Frame>,
-    ) -> Result<Step, DecodeError> {
+    fn begin_payload(&mut self, kind: u8, stack: &mut Vec<Frame>) -> Result<Step, DecodeError> {
         match kind {
             1 => {
                 self.accounter.account(9)?;
@@ -357,7 +353,8 @@ impl<'a> Reader<'a> {
                 pending_key.take().expect("复合标签的键")
             };
             {
-                let Frame::Compound { entries, .. } = stack.last_mut().expect("复合标签帧") else {
+                let Frame::Compound { entries, .. } = stack.last_mut().expect("复合标签帧")
+                else {
                     unreachable!("复合标签帧");
                 };
                 if let Some(entry) = entries.iter_mut().find(|(name, _)| *name == key) {
