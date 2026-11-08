@@ -474,6 +474,33 @@ pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     send_slot(player, &mut region.links, OFF_HAND);
 }
 
+/// 官方 `Inventory.add`：放进背包，并同步变过的槽。
+///
+/// 创造模式放不下也算成功，剩下的一份没有物品实体，直接消失。生存模式放不下的部分同样消失。
+///
+/// `Inventory.add`. Creative mode reports success even when nothing fits. A remainder has
+/// no item entity, so it vanishes in either game mode.
+pub(crate) fn give(region: &mut Region, id: PlayerId, stack: ItemStack) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let creative = player.game_mode == GameMode::Creative;
+    let before = player.inventory.slots.clone();
+    player.inventory.add(stack, creative);
+    let changed: Vec<usize> = player
+        .inventory
+        .slots
+        .iter()
+        .zip(&before)
+        .enumerate()
+        .filter(|(_, (now, was))| *now != *was)
+        .map(|(slot, _)| slot)
+        .collect();
+    for slot in changed {
+        send_slot(player, &mut region.links, slot);
+    }
+}
+
 /// 炼药锅记下的物品交换。创造模式就是官方的 `hasInfiniteMaterials`。
 ///
 /// Apply a cauldron's item exchange. Creative mode is vanilla `hasInfiniteMaterials`.

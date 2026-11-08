@@ -1139,6 +1139,49 @@ impl Tag {
     }
 
     fn write_snbt(&self, out: &mut String) {
+        // 列表和复合标签用堆上的栈。512 层是合法 NBT，调用栈装不下。
+        //
+        // Lists and compounds use a heap stack. 512 levels are legal NBT and do not
+        // fit on the call stack.
+        enum Job<'a> {
+            Tag(&'a Tag),
+            Text(&'static str),
+            Key(&'a str),
+        }
+        let mut jobs = vec![Job::Tag(self)];
+        while let Some(job) = jobs.pop() {
+            match job {
+                Job::Text(text) => out.push_str(text),
+                Job::Key(key) => write_key_escape(key, out),
+                Job::Tag(Tag::List(values)) => {
+                    jobs.push(Job::Text("]"));
+                    for (index, value) in values.iter().enumerate().rev() {
+                        jobs.push(Job::Tag(value));
+                        if index != 0 {
+                            jobs.push(Job::Text(","));
+                        }
+                    }
+                    jobs.push(Job::Text("["));
+                }
+                Job::Tag(Tag::Compound(entries)) => {
+                    let sorted: Vec<(&String, &Tag)> = sorted_entries(entries).collect();
+                    jobs.push(Job::Text("}"));
+                    for (index, (key, value)) in sorted.into_iter().enumerate().rev() {
+                        jobs.push(Job::Tag(value));
+                        jobs.push(Job::Text(":"));
+                        jobs.push(Job::Key(key));
+                        if index != 0 {
+                            jobs.push(Job::Text(","));
+                        }
+                    }
+                    jobs.push(Job::Text("{"));
+                }
+                Job::Tag(other) => other.write_snbt_leaf(out),
+            }
+        }
+    }
+
+    fn write_snbt_leaf(&self, out: &mut String) {
         match self {
             Self::Byte(value) => {
                 out.push_str(&value.to_string());
@@ -1173,28 +1216,6 @@ impl Tag {
                 out.push(']');
             }
             Self::String(value) => out.push_str(&quote_and_escape(value)),
-            Self::List(values) => {
-                out.push('[');
-                for (index, value) in values.iter().enumerate() {
-                    if index != 0 {
-                        out.push(',');
-                    }
-                    value.write_snbt(out);
-                }
-                out.push(']');
-            }
-            Self::Compound(entries) => {
-                out.push('{');
-                for (index, (key, value)) in sorted_entries(entries).enumerate() {
-                    if index != 0 {
-                        out.push(',');
-                    }
-                    write_key_escape(key, out);
-                    out.push(':');
-                    value.write_snbt(out);
-                }
-                out.push('}');
-            }
             Self::IntArray(values) => {
                 out.push_str("[I;");
                 for (index, value) in values.iter().enumerate() {
@@ -1215,6 +1236,9 @@ impl Tag {
                     out.push('L');
                 }
                 out.push(']');
+            }
+            Self::List(_) | Self::Compound(_) => {
+                unreachable!("containers are written by the heap stack")
             }
         }
     }

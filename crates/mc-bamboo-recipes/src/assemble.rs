@@ -793,7 +793,12 @@ fn assemble_repair(input: &[ItemStack]) -> Option<ItemStack> {
     // 只复制诅咒附魔，官方 `RepairItemRecipe.assemble`。
     //
     // 官方的 `EnchantmentHelper.updateEnchantments` 在新物品上读不到附魔组件时直接返回，
-    // 所以只有在结果本来就有这个组件（物品自带默认值）时才写回去。
+    // 所以只有在结果本来就有这个组件（物品自带默认值）时才写回去。没有诅咒时写的是空表，
+    // `ItemStack.set` 发现它等于默认值，补丁里不留「移除」。
+    //
+    // `updateEnchantments` returns immediately when the new item has no enchantment
+    // component, so this only runs when the item carries that component as a default.
+    // No curses writes an empty map. `ItemStack.set` sees the default and leaves no removal.
     let enchant_kind = enchantment_component(stack.item);
     if defaults::resolve(stack.item, &patch, enchant_kind).is_some() {
         let first_enchantments = enchantments(first, enchant_kind);
@@ -811,12 +816,12 @@ fn assemble_repair(input: &[ItemStack]) -> Option<ItemStack> {
                 None => curses.push((*enchantment, *level)),
             }
         }
-        set(
-            stack.item,
-            &mut patch,
-            enchant_kind,
-            (!curses.is_empty()).then_some(ComponentValue::Enchantments(curses)),
-        );
+        let value = if enchant_kind == kinds::STORED_ENCHANTMENTS {
+            ComponentValue::StoredEnchantments(curses)
+        } else {
+            ComponentValue::Enchantments(curses)
+        };
+        set(stack.item, &mut patch, enchant_kind, Some(value));
     }
 
     stack = stack_with(stack.item, stack.count, patch);

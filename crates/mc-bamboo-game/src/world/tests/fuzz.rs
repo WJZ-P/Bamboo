@@ -11,9 +11,11 @@ use mc_bamboo_data::{
     blocks,
     items::{self, ITEMS},
     packets::play::clientbound,
+    registries::data_component_type,
 };
 use mc_bamboo_protocol::{
-    codec::Reader,
+    codec::{Reader, write_varint},
+    components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
     packet::play::{
         ChatVisibility, ClientCommandKind, ClientInformation, EquipmentSlot, HumanoidArm,
@@ -159,7 +161,15 @@ impl Remote {
             let count = reader.varint().unwrap();
             self.equipment[usize::from(slot & 0x7f)] = if count > 0 {
                 let item = reader.varint().unwrap();
-                assert_eq!((reader.varint(), reader.varint()), (Ok(0), Ok(0)));
+                // 组件现在按官方原样发出去，客户端模型要把补丁读完才能接着读下一个槽。
+                // Components are forwarded as vanilla writes them, so the model has to consume the patch.
+                let consumed = {
+                    let rest = reader.remaining();
+                    let mut cursor = Cursor::new(rest);
+                    ComponentPatch::read(&mut cursor).expect("equipment component patch");
+                    rest.len() - cursor.remaining().len()
+                };
+                reader.bytes(consumed).unwrap();
                 (item, count)
             } else {
                 (items::AIR, 0)
@@ -579,8 +589,16 @@ fn random_stack(rng: &mut Rng) -> ItemStack {
     };
     let mut stack = ItemStack::new(item, rng.below(99) as i32 + 1);
     if rng.chance(10) {
-        let value = vec![rng.below(256) as u8; rng.below(5) as usize];
-        stack.added.push((rng.pick(&[1, 13, 40, -1]), value));
+        // 创造模式槽位的解码器会拒掉解不开的组件。这里只放一个合法的 `max_stack_size`，
+        // 装备包才能按官方补丁格式读完。
+        //
+        // The creative-slot decoder rejects a component it cannot decode. Only a valid
+        // `max_stack_size` is attached here, so the equipment packet stays readable.
+        let mut value = Vec::new();
+        write_varint(&mut value, rng.below(99) as i32 + 1);
+        stack
+            .added
+            .push((data_component_type::MAX_STACK_SIZE, value));
     }
     if rng.chance(5) {
         stack.removed.push(rng.below(122) as i32);

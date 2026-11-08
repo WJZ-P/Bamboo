@@ -394,10 +394,28 @@ fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeErr
 /// 帧有长度前缀，物品后面多余的字节不会让字节流错位。
 fn read_creative_mode_slot(mut reader: Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let slot = reader.i16()?;
-    Ok(match ItemStack::read_delimited(&mut reader) {
-        Ok(stack) => PlayRequest::SetCreativeModeSlot { slot, stack },
-        Err(_) => PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT),
-    })
+    match ItemStack::read_delimited(&mut reader) {
+        Ok(stack) => Ok(PlayRequest::SetCreativeModeSlot { slot, stack }),
+        // 嵌套超过上限时官方抛 `DecoderException`，这条连接要断。别的畸形物品仍然
+        // 忽略，槽位保持不动：规格允许这样，已有测试也按这个结果写。
+        //
+        // Nesting past the cap is a `DecoderException` officially, so this
+        // connection drops. Other malformed items are still ignored and the slot
+        // stays put: the spec allows that, and the existing tests expect it.
+        Err(error) if nesting_limit(&error) => Err(error),
+        Err(_) => Ok(PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT)),
+    }
+}
+
+/// 这种错误表示嵌套深过上限。收下它会在转发时把别人的连接打掉，或者在解码时把进程打崩。
+fn nesting_limit(error: &DecodeError) -> bool {
+    match error {
+        DecodeError::Nbt(mc_bamboo_nbt::DecodeError::TooDeep { .. })
+        | DecodeError::StacksTooDeep { .. } => true,
+        DecodeError::InvalidTextComponent(message) => *message == "nested too deep",
+        DecodeError::InvalidComponentValue(message) => message.contains("nested too deep"),
+        _ => false,
+    }
 }
 
 /// 解码 `container_click`。槽位和按钮的范围由调用方判断，官方也是这样。

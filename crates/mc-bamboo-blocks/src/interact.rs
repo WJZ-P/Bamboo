@@ -57,6 +57,10 @@ pub struct Outcome {
     ///
     /// The item this click hands back to the player, or `None` when the hand stays as it is.
     pub item_exchange: Option<ItemExchange>,
+    /// 要从方块拿进物品栏的一堆。没有物品实体，放不下的部分会消失。
+    ///
+    /// A stack to add to the inventory. There is no item entity, so a remainder vanishes.
+    pub gained: Option<mc_bamboo_protocol::item::ItemStack>,
     pub effects: Vec<Effect>,
 }
 
@@ -341,11 +345,13 @@ pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
 fn outcome_from(world: World, result: InteractionResult, used_without_item: bool) -> Outcome {
     let placed_at = world.placed_at();
     let item_exchange = world.item_exchange().cloned();
+    let gained = world.gained().cloned();
     Outcome {
         result,
         used_without_item,
         placed_at,
         item_exchange,
+        gained,
         effects: world.into_effects(),
     }
 }

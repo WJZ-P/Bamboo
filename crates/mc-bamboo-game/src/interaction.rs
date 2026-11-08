@@ -650,6 +650,13 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     if let Some(exchange) = &outcome.item_exchange {
         inventory::apply_item_exchange(region, id, packet.hand, exchange);
     }
+    // 雕纹书架取出的书。官方放不下就 `player.drop`，这里没有物品实体，剩下的消失。
+    //
+    // A book taken from a chiseled bookshelf. Vanilla drops what does not fit.
+    // There is no item entity here, so a remainder vanishes.
+    if let Some(gained) = outcome.gained.clone() {
+        inventory::give(region, id, gained);
+    }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item && !menu::open_block(region, id, packet.pos) {
         lectern::open(region, id, packet.pos);
