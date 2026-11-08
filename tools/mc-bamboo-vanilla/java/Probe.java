@@ -48,13 +48,18 @@ import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
+import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
@@ -130,6 +135,7 @@ import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ServerboundEditBookPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPickItemFromBlockPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket;
@@ -186,10 +192,18 @@ import net.minecraft.world.entity.player.ChatVisiblity;
 import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.SwingAnimationType;
+import net.minecraft.world.item.component.WritableBookContent;
+import net.minecraft.world.item.component.WrittenBookContent;
+import net.minecraft.world.item.component.DebugStickState;
+import net.minecraft.world.item.component.ResolvableProfile;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
@@ -199,11 +213,15 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RotatedPillarBlock;
 import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.block.entity.BannerPatternLayers;
+import net.minecraft.world.level.block.entity.BannerPatterns;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
 import net.minecraft.world.level.block.entity.SignTextSlot;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -287,6 +305,10 @@ public final class Probe {
     private static final int STACK = 64;
     private static final String CHAT_TEXT = "你好，竹子🐾";
     private static final String SIGN_TEXT = "竹子会写字";
+    /** 改过名的剑，组件 `custom_name` 要发给别的玩家。 */
+    private static final String SWORD_NAME = "小猫的剑";
+    /** 改过名的箱子，打开时的菜单标题就是它。 */
+    private static final String CHEST_NAME = "小猫的箱子";
     private static final String UNKNOWN_COMMAND = "Unknown or incomplete command. See below for error";
 
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
@@ -324,9 +346,13 @@ public final class Probe {
             "handleRemoveEntities",
             "handleRotateMob",
             "handleSetChunkCacheCenter",
+            // 光标变化时官方发 `set_cursor_item`。关菜单把材料退回物品栏时发 `set_player_inventory`。
+            // Vanilla sends `set_cursor_item` when the cursor changes, and `set_player_inventory` when closing a menu returns items.
+            "handleSetCursorItem",
             "handleSetEntityData",
             "handleSetEquipment",
             "handleSetHeldSlot",
+            "handleSetPlayerInventory",
             "handleSetTime",
             "handleSwingAnimation",
             "handleSystemChat",
@@ -576,10 +602,13 @@ public final class Probe {
                 section("pistons" + names, () -> pistons(actor, observer));
                 section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
+                section("components" + names, () -> components(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
             }
 
+            section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
+            section("crafting", () -> crafting(kitten));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
@@ -590,6 +619,8 @@ public final class Probe {
 
             section("long running", () -> {
                 await("play: keep-alives and the latency broadcast arrived", JOIN_TIMEOUT_MILLIS, kitten::longRunningDone);
+                await("play: another client received the latency update", JOIN_TIMEOUT_MILLIS,
+                        () -> late.latencyUpdated);
             });
 
             for (Join client : clients) {
@@ -1120,6 +1151,222 @@ public final class Probe {
         }
 
         /**
+         * 物品组件：校验过的组件要发给别的玩家，放下的方块实体也要带上物品里的数据。
+         *
+         * 组件和 NBT 都由官方的编解码器解，所以这些检查过了就说明官方客户端解得开。
+         */
+        private void components(Join actor, Join observer) throws IOException {
+            Remote remote = observer.remote(actor);
+            Holder<Enchantment> sharpness = actor.registries
+                    .lookupOrThrow(Registries.ENCHANTMENT)
+                    .getOrThrow(Enchantments.SHARPNESS);
+            ItemEnchantments.Mutable stored = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+            stored.set(sharpness, 3);
+            ItemStack book = new ItemStack(Items.ENCHANTED_BOOK);
+            book.set(DataComponents.STORED_ENCHANTMENTS, stored.toImmutable());
+            ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+            sword.set(DataComponents.CUSTOM_NAME, Component.literal(SWORD_NAME));
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, book));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(OFF_HAND_SLOT, sword));
+            actor.send(new ServerboundSetCarriedItemPacket(2));
+            await("components: the observer sees the enchanted book", () -> {
+                ItemStack held = remote.equipment.get(EquipmentSlot.MAINHAND);
+                return held != null
+                        && held.is(Items.ENCHANTED_BOOK)
+                        && held.getOrDefault(DataComponents.STORED_ENCHANTMENTS, ItemEnchantments.EMPTY)
+                                .getLevel(sharpness) == 3;
+            });
+            await("components: the observer sees the renamed sword", () -> {
+                ItemStack held = remote.equipment.get(EquipmentSlot.OFFHAND);
+                Component name = held == null ? null : held.get(DataComponents.CUSTOM_NAME);
+                return name != null && SWORD_NAME.equals(name.getString());
+            });
+
+            // `debug_stick_state` 在线上是 NBT，我们只能校验最外层。它属于发来它的玩家：
+            // 换手时服务端把主手和副手两格都发回给这个玩家，副手那一份要原样带着组件。
+            ItemStack debugStick = new ItemStack(Items.DEBUG_STICK);
+            debugStick.set(DataComponents.DEBUG_STICK_STATE, new DebugStickState(Map.of(
+                    BuiltInRegistries.BLOCK.wrapAsHolder(Blocks.OAK_LOG), BlockStateProperties.AXIS)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, debugStick));
+            actor.send(new ServerboundSetCarriedItemPacket(2));
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
+            await("components: the owner gets the components we only shape check after moving them", () -> {
+                ItemStack moved = actor.slots.get(OFF_HAND_SLOT);
+                if (moved == null || !moved.is(Items.DEBUG_STICK)) {
+                    return false;
+                }
+                DebugStickState state = moved.getOrDefault(DataComponents.DEBUG_STICK_STATE, DebugStickState.EMPTY);
+                return state.properties().containsValue(BlockStateProperties.AXIS);
+            });
+
+            // 带图案的旗帜：图案要进方块实体，再编成 NBT 发给所有人。
+            BlockPos bannerGround = BlockPos.containing(actor.position).offset(2, -1, -2);
+            BlockPos banner = bannerGround.above();
+            BannerPatternLayers layers = bannerLayers(actor.registries);
+            ItemStack bannerItem = new ItemStack(Items.BANNER.white());
+            bannerItem.set(DataComponents.BANNER_PATTERNS, layers);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, bannerItem));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(bannerGround, 1.0), Direction.UP, bannerGround, false),
+                    placing));
+            await("components: " + actor.player + " gets the ack for the banner", () -> actor.lastAck >= placing);
+            await("components: " + observer.player + " sees the banner",
+                    () -> observer.blocks.get(banner) != null
+                            && observer.blocks.get(banner).is(Blocks.BANNER.white()));
+            await("components: the banner patterns reach the observer",
+                    () -> layers.equals(bannerPatterns(observer.blockEntityTags.get(banner), observer.registries)));
+            await("components: the banner patterns come back to the placer",
+                    () -> layers.equals(bannerPatterns(actor.blockEntityTags.get(banner), actor.registries)));
+            actor.edits.add(new Edit(banner, observer.blocks.get(banner)));
+
+            // 头颅的档案：我们写的 NBT 要能被官方的 `ResolvableProfile.CODEC` 解回来。
+            BlockPos headGround = BlockPos.containing(actor.position).offset(0, -1, -2);
+            BlockPos head = headGround.above();
+            ResolvableProfile profile = ResolvableProfile.createUnresolved(actor.player);
+            ItemStack headItem = new ItemStack(Items.PLAYER_HEAD);
+            headItem.set(DataComponents.PROFILE, profile);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, headItem));
+            int placingHead = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(headGround, 1.0), Direction.UP, headGround, false),
+                    placingHead));
+            await("components: " + actor.player + " gets the ack for the head", () -> actor.lastAck >= placingHead);
+            await("components: the head profile reaches the observer",
+                    () -> profile.equals(headProfile(observer.blockEntityTags.get(head), observer.registries)));
+
+            // 改了名的箱子：打开时的标题就是那个名字。
+            BlockPos chestGround = BlockPos.containing(actor.position).offset(-2, -1, -2);
+            BlockPos namedChest = chestGround.above();
+            ItemStack chestItem = new ItemStack(Items.CHEST);
+            chestItem.set(DataComponents.CUSTOM_NAME, Component.literal(CHEST_NAME));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, chestItem));
+            int placingChest = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(chestGround, 1.0), Direction.UP, chestGround, false),
+                    placingChest));
+            await("components: " + actor.player + " gets the ack for the named chest",
+                    () -> actor.lastAck >= placingChest);
+            await("components: " + actor.player + " sees the named chest",
+                    () -> actor.blocks.get(namedChest) != null && actor.blocks.get(namedChest).is(Blocks.CHEST));
+            openChest(actor, namedChest);
+            check("components: the menu title is the custom name",
+                    actor.openMenuTitle != null && CHEST_NAME.equals(actor.openMenuTitle.getString()));
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
+
+            // 清掉这一段用的槽位，后面几段按空物品栏算。
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(OFF_HAND_SLOT, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            await("components: the hands are empty again",
+                    () -> isEmpty(remote, EquipmentSlot.OFFHAND) && isEmpty(remote, EquipmentSlot.MAINHAND));
+        }
+
+        /** 一面红色花朵图案的旗帜，和探针放下去的那一面一样。 */
+        private static BannerPatternLayers bannerLayers(RegistryAccess.Frozen registries) {
+            Holder<BannerPattern> flower = registries
+                    .lookupOrThrow(Registries.BANNER_PATTERN)
+                    .getOrThrow(BannerPatterns.FLOWER);
+            return new BannerPatternLayers(List.of(new BannerPatternLayers.Layer(flower, DyeColor.RED)));
+        }
+
+        /** 方块实体数据里的旗帜图案，按官方 `BannerPatternLayers.CODEC` 解。 */
+        private static BannerPatternLayers bannerPatterns(CompoundTag tag, RegistryAccess.Frozen registries) {
+            Tag patterns = tag == null ? null : tag.get("patterns");
+            if (patterns == null) {
+                return null;
+            }
+            return BannerPatternLayers.CODEC
+                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), patterns)
+                    .result()
+                    .orElse(null);
+        }
+
+        /** 方块实体数据里的头颅档案，按官方 `ResolvableProfile.CODEC` 解。 */
+        private static ResolvableProfile headProfile(CompoundTag tag, RegistryAccess.Frozen registries) {
+            Tag profile = tag == null ? null : tag.get("profile");
+            if (profile == null) {
+                return null;
+            }
+            return ResolvableProfile.CODEC
+                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), profile)
+                    .result()
+                    .orElse(null);
+        }
+
+        /**
+         * 官方客户端保存书与笔再署名。署名不改本地物品，服务端必须把成书同步回来，
+         * 标题、作者和页面用官方组件 codec 解出来。
+         */
+        private void books(Join actor) throws IOException {
+            int inventorySlot = 4;
+            int menuSlot = HOTBAR_START + inventorySlot;
+            List<String> pages = List.of("Hello", "第二页");
+            actor.send(new ServerboundSetCreativeModeSlotPacket(menuSlot, new ItemStack(Items.WRITABLE_BOOK)));
+            actor.send(new ServerboundEditBookPacket(inventorySlot, pages, Optional.empty()));
+            await("book: the edited pages come back", () -> writablePages(actor.slots.get(menuSlot), pages));
+            check("book: editing keeps it a book and quill", actor.slots.get(menuSlot).is(Items.WRITABLE_BOOK));
+
+            String title = "My Title";
+            actor.send(new ServerboundEditBookPacket(inventorySlot, pages, Optional.of(title)));
+            await("book: signing turns it into a written book",
+                    () -> actor.slots.getOrDefault(menuSlot, ItemStack.EMPTY).is(Items.WRITTEN_BOOK));
+            ItemStack stack = actor.slots.get(menuSlot);
+            WrittenBookContent book = stack.get(DataComponents.WRITTEN_BOOK_CONTENT);
+            check("book: the written content is present", book != null);
+            if (book == null) {
+                return;
+            }
+            check("book: the count is unchanged", stack.getCount() == 1);
+            check("book: the title matches", title.equals(book.title().raw()));
+            check("book: the title was not filtered", book.title().filtered().isEmpty());
+            check("book: the author is the player name", actor.player.equals(book.author()));
+            check("book: generation is the original", book.generation() == 0);
+            check("book: the book is already resolved", book.resolved());
+            check("book: the pages match and were not filtered", writtenPages(book, pages));
+        }
+
+        /** 书与笔的页面：原文对得上，没有过滤文本。 */
+        private static boolean writablePages(ItemStack stack, List<String> pages) {
+            if (stack == null || !stack.is(Items.WRITABLE_BOOK)) {
+                return false;
+            }
+            WritableBookContent content = stack.get(DataComponents.WRITABLE_BOOK_CONTENT);
+            if (content == null || content.pages().size() != pages.size()) {
+                return false;
+            }
+            for (int i = 0; i < pages.size(); i++) {
+                var page = content.pages().get(i);
+                if (!pages.get(i).equals(page.raw()) || page.filtered().isPresent()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** 成书的页面是字面文本组件。 */
+        private static boolean writtenPages(WrittenBookContent book, List<String> pages) {
+            if (book.pages().size() != pages.size()) {
+                return false;
+            }
+            for (int i = 0; i < pages.size(); i++) {
+                var page = book.pages().get(i);
+                if (!pages.get(i).equals(page.raw().getString()) || page.filtered().isPresent()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
          * 箱子：打开、放进物品、关上、再打开还在，另一名玩家打开能看到同一份内容。
          * 打开和关闭的人数也通过方块事件同步给附近的人。
          */
@@ -1174,6 +1421,50 @@ public final class Probe {
             opener.send(new ServerboundContainerClosePacket(opener.openContainerId));
             await("container: closing the chest is seen by the watcher",
                     () -> isClosedChest(watcher, chest));
+        }
+
+        /**
+         * 放下工作台，把一根橡木原木放进合成格，结果格应是四块橡木木板。
+         * Place a crafting table, put an oak log in the grid, and expect four oak planks.
+         */
+        private void crafting(Join actor) throws IOException {
+            // (2, -1, 2) 上已经有告示牌。换一格空地，避免放不下去。
+            // A sign already stands at (2, -1, 2). Use an empty cell so the table can be placed.
+            BlockPos ground = BlockPos.containing(actor.position).offset(1, -1, 2);
+            BlockPos table = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 6, new ItemStack(Items.CRAFTING_TABLE)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 7, new ItemStack(Items.OAK_LOG)));
+            actor.send(new ServerboundSetCarriedItemPacket(6));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    placing));
+            await("crafting: the table is placed",
+                    () -> actor.blocks.containsKey(table) && actor.blocks.get(table).is(Blocks.CRAFTING_TABLE));
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 8, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCarriedItemPacket(8));
+            actor.openMenuType = null;
+            actor.lastContentState = -1;
+            actor.menuSlots.clear();
+            int opening = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(table, 1.0), Direction.UP, table, false),
+                    opening));
+            await("crafting: the screen opens", () -> MenuType.CRAFTING.equals(actor.openMenuType));
+            await("crafting: the grid arrives", () -> actor.lastContentState >= 0);
+            check("crafting: the menu has forty-six slots", actor.lastContent.size() == 46);
+
+            int logSlot = 37 + 7;
+            actor.send(actor.click(logSlot, 0, ContainerInput.PICKUP));
+            actor.send(actor.click(1, 0, ContainerInput.PICKUP));
+            await("crafting: one log becomes four oak planks",
+                    () -> is(actor.menuSlots.get(0), Items.OAK_PLANKS, 4)
+                            && is(actor.menuSlots.get(1), Items.OAK_LOG, 1));
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
         }
 
         /** 这名玩家在 `blocks` 里放下的箱子。 */
@@ -1277,6 +1568,13 @@ public final class Probe {
                                 late.blockEntities.get(edit.pos) == BlockEntityTypes.SIGN);
                         check("late: the chunk carries the sign text",
                                 SIGN_TEXT.equals(signLine(late.blockEntityTags.get(edit.pos), "front_text", 0)));
+                    }
+                    if (edit.state.is(Blocks.BANNER.white())) {
+                        check("late: the banner is in the block entity list",
+                                late.blockEntities.get(edit.pos) == BlockEntityTypes.BANNER);
+                        check("late: the chunk carries the banner patterns",
+                                bannerLayers(late.registries)
+                                        .equals(bannerPatterns(late.blockEntityTags.get(edit.pos), late.registries)));
                     }
                 }
                 for (BlockPos pos : editor.cleared) {
@@ -1417,6 +1715,8 @@ public final class Probe {
         int stats;
         int openContainerId = -1;
         MenuType<?> openMenuType;
+        /** 最后一次 `open_screen` 的标题。 */
+        Component openMenuTitle;
         int menuStateId = -1;
         int lastContentState = -1;
         List<ItemStack> lastContent = List.of();
@@ -1922,6 +2222,8 @@ public final class Probe {
             check("play: periodic tab update names the player",
                     packet.entries().stream().anyMatch(entry -> entry.profileId().equals(uuid)));
             check("play: periodic tab update lists everyone online", packet.entries().size() == tab.size());
+            check("play: latency is a non-negative millisecond count",
+                    packet.entries().stream().allMatch(entry -> entry.latency() >= 0));
             latencyUpdated = true;
         }
 
@@ -2150,9 +2452,13 @@ public final class Probe {
         }
 
         private void onBlockEntityData(ClientboundBlockEntityDataPacket packet) {
-            check("signs: block entity data names a sign",
+            // 有内容要发给客户端的方块实体：告示牌的文字，旗帜、头颅和陶罐从物品带来的组件。
+            check("blocks: block entity data only comes from block entities we fill in",
                     packet.getType() == BlockEntityTypes.SIGN
-                            || packet.getType() == BlockEntityTypes.HANGING_SIGN);
+                            || packet.getType() == BlockEntityTypes.HANGING_SIGN
+                            || packet.getType() == BlockEntityTypes.BANNER
+                            || packet.getType() == BlockEntityTypes.SKULL
+                            || packet.getType() == BlockEntityTypes.DECORATED_POT);
             blockEntityTags.put(packet.getPos().immutable(), packet.getTag());
             events.add("data " + packet.getPos().toShortString());
         }
@@ -2194,6 +2500,7 @@ public final class Probe {
         private void onOpenScreen(ClientboundOpenScreenPacket packet) {
             openContainerId = packet.getContainerId();
             openMenuType = packet.getType();
+            openMenuTitle = packet.getTitle();
             menuSlots.clear();
             menuStateId = -1;
             events.add("open " + openContainerId);
@@ -2306,10 +2613,13 @@ public final class Probe {
                 }
             }
             packet.chunkData().forEachBlockEntityTag(packet.x(), packet.z(), (pos, type, tag) -> {
-                // 告示牌的文字在 `getUpdateTag` 里，别的方块实体没有自定义内容。
+                // 告示牌的文字和旗帜的图案都在 `getUpdateTag` 里。旗帜走 `saveWithoutMetadata`，
+                // 哪怕没有图案也带一张空的组件表，所以它的标签一定不是空的。
                 if (isSign(type)) {
                     check("chunk: signs carry their text", tag != null);
-                } else {
+                } else if (type == BlockEntityTypes.BANNER) {
+                    check("chunk: banners carry their update tag", tag != null);
+                } else if (type != BlockEntityTypes.SKULL && type != BlockEntityTypes.DECORATED_POT) {
                     check("chunk: block entities have no NBT", tag == null);
                 }
                 if (tag != null) {

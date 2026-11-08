@@ -1,8 +1,8 @@
 //! 各类配方的 `matches`，一一对应官方的配方类。
 
 use mc_bamboo_data::{
-    FireworkShape, Ingredient, ItemKind, PotionIngredient, Recipe, RecipeKind, is_damageable, items,
-    registries::data_component_type as kinds,
+    FireworkShape, Ingredient, ItemKind, PotionIngredient, Recipe, RecipeKind, is_damageable,
+    items, registries::data_component_type as kinds,
 };
 use mc_bamboo_protocol::components::{ComponentValue, defaults};
 
@@ -796,7 +796,12 @@ mod tests {
         assert!(ItemStack::empty().is_empty());
         assert!(!ItemStack::new(ITEM_A, 1).is_empty());
         assert_eq!(
-            CraftingInput::of(3, 3, &std::array::from_fn::<_, 9, _>(|_| ItemStack::empty())).size(),
+            CraftingInput::of(
+                3,
+                3,
+                &std::array::from_fn::<_, 9, _>(|_| ItemStack::empty())
+            )
+            .size(),
             0
         );
     }

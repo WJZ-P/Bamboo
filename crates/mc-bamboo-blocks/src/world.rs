@@ -86,6 +86,15 @@ const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
+/// `level.getWorldBorder().isWithinBounds(pos)`：这个世界不能改边界，半径是默认的 29999984。
+///
+/// 方块坐标转成 `double` 再比，左边含、右边不含。
+pub fn is_within_world_border(pos: BlockPos) -> bool {
+    let inside =
+        |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
+    inside(pos.x) && inside(pos.z)
+}
+
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipFluid {
@@ -227,6 +236,8 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `BlockItem.place` 刚放下的那一格，官方在这里读物品上的组件，见 [`World::placed_at`]。
+    placed_at: Option<BlockPos>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -240,6 +251,7 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            placed_at: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -266,6 +278,17 @@ impl<'a> World<'a> {
     /// 这次操作收集到的结果。调用方发出去，见 `mc-bamboo-game` 的 `send_effects`。
     pub fn into_effects(self) -> Vec<Effect> {
         self.effects
+    }
+
+    /// 这次操作放下的那一格方块，官方 `BlockItem.place` 里 `updateBlockEntityComponents`
+    /// 看的位置。组件在 `mc-bamboo-protocol`，这一层看不见，所以只报位置，由调用方接着做。
+    pub const fn placed_at(&self) -> Option<BlockPos> {
+        self.placed_at
+    }
+
+    /// `BlockItem.place` 放成功时记下这一格。
+    pub(crate) fn set_placed_at(&mut self, pos: BlockPos) {
+        self.placed_at = Some(pos);
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {
@@ -328,9 +351,7 @@ impl<'a> World<'a> {
 
     /// `getWorldBorder().isWithinBounds(pos)`。
     pub fn is_within_world_border(&self, pos: BlockPos) -> bool {
-        let inside =
-            |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
-        inside(pos.x) && inside(pos.z)
+        is_within_world_border(pos)
     }
 
     /// `isFaceSturdy`：世界里这一格的这个面能不能支撑东西。
@@ -392,6 +413,13 @@ impl<'a> World<'a> {
         self.level.set_sign(pos, content)
     }
 
+    /// `getBlockEntity(pos) instanceof SkullBlockEntity` 时的 `getNoteBlockSound`。
+    ///
+    /// 音符盒的 `getCustomSoundId` 读上面那一格，见 [`crate::behaviour::machines`] 里的音符盒。
+    pub fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        self.level.note_block_sound(pos)
+    }
+
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.level.block_entities().get(pos)
@@ -400,6 +428,42 @@ impl<'a> World<'a> {
     /// 这一格有没有方块实体。
     pub fn has_block_entity(&self, pos: BlockPos) -> bool {
         self.level.block_entities().contains(pos)
+    }
+
+    /// 这一格的物品栏，见 [`Level::with_container`]。
+    ///
+    /// 堆肥桶没有方块实体，官方 `ComposterBlock.getContainer` 按等级现做一个容器，这里同样处理。
+    pub(crate) fn with_container(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut dyn crate::container::Container),
+    ) -> bool {
+        if self
+            .block_state(pos)
+            .is_a(mc_bamboo_data::BlockAncestor::ComposterBlock)
+        {
+            return crate::composter::with_container(self, pos, f);
+        }
+        self.level.with_container(pos, f)
+    }
+
+    /// 比较器从这一格的容器读到的模拟信号，见 [`Level::container_signal`]。
+    pub(crate) fn container_signal(&self, pos: BlockPos) -> i32 {
+        self.level.container_signal(pos)
+    }
+
+    /// 这一格容器背后的方块位置，见 [`Level::container_positions`]。
+    pub(crate) fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
+        self.level.container_positions(pos)
+    }
+
+    /// 带着这一格的漏斗方块实体运行一段代码，见 [`Level::with_hopper`]。
+    pub(crate) fn with_hopper(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut crate::hopper::HopperEntity),
+    ) -> bool {
+        self.level.with_hopper(pos, f)
     }
 
     /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做，
@@ -798,25 +862,31 @@ impl<'a> World<'a> {
         flags: u32,
     ) -> Option<BlockState> {
         let old = self.block_state(pos);
-        if old == state || !self.level.write_block(pos, state, flags) {
+        if old == state {
+            return None;
+        }
+        let block_changed = !old.is_same_block(state);
+        let drops_own_contents = block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0;
+        // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
+        // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
+        let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
+        if !self.level.write_block(pos, state, flags) {
             return None;
         }
 
-        let block_changed = !old.is_same_block(state);
         // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
         // 新状态自己声明要留下实体时（铜箱子这些）两步都跳过。
-        if block_changed
-            && old.has_block_entity()
-            && !block_entity::keeps_block_entity(state, old)
+        let mut entity_dropped_contents = false;
+        if block_changed && old.has_block_entity() && !block_entity::keeps_block_entity(state, old)
         {
-            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
-                // 登记过的实体用的是它自己的 `preRemoveSideEffects`，熔炉和酿造台在这里掉内容、
-                // 发经验。没有实体的（世界生成直接摆下的箱子之类）按方块类型补官方的取数。
-                if self.has_block_entity(pos) {
-                    self.pre_remove_block_entity(pos, old);
-                } else {
-                    block_entity::pre_remove_side_effects(old, self);
-                }
+            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 && self.has_block_entity(pos) {
+                // 活塞的 `finalTick`、熔炉和酿造台的掉落都在实体自己的回调里。
+                // Piston `finalTick`, and furnace or brewing drops, run on the entity.
+                self.pre_remove_block_entity(pos, old);
+                entity_dropped_contents = block_entity::drops_own_contents(old);
             }
             self.remove_block_entity(pos);
         }
@@ -825,6 +895,15 @@ impl<'a> World<'a> {
             self.level.redstone_mut().forget_block_entity(pos);
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
+        // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
+        // 熔炉和酿造台有实体时已经在上面掉过，这里再掉一次随机数会翻倍。
+        // Vanilla drops before `affectNeighborsAfterRemoval`. A furnace or brewing stand
+        // that still had an entity already dropped above; dropping again would double the draws.
+        if let Some(counts) = dropped_counts
+            && !entity_dropped_contents
+        {
+            block_entity::pre_remove_side_effects(old, self, &counts);
+        }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
             old.affect_neighbors_after_removal(self, pos);
@@ -1270,6 +1349,7 @@ fn traverse_blocks<T>(
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
 
     use super::*;
     use crate::{
@@ -1300,7 +1380,9 @@ mod tests {
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }
                 | Effect::OpenSignEditor { .. }
-                | Effect::BlockEvent { .. } => None,
+                | Effect::NoteBlockPlayed { .. }
+                | Effect::BlockEvent { .. }
+                | Effect::ComposterFill { .. } => None,
             })
             .collect()
     }
@@ -1618,5 +1700,42 @@ mod tests {
             .filter(|item| item.kind == mc_bamboo_data::ItemKind::PlaceOnWater)
             .count();
         assert_eq!(kinds, 2);
+    }
+
+    /// 容器被换掉时，官方 `preRemoveSideEffects` 按每格的数量取随机数：每一格三个
+    /// double 的掉落点，非空的堆再按 `split(nextInt(21) + 10)` 一块一块取六个 double。
+    /// 这个世界没有物品实体，但随机数一个都不能少，否则后面的随机刻会错开。
+    #[test]
+    fn destroying_a_container_consumes_the_drop_random_numbers() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::CHEST));
+        let mut slots = vec![ItemStack::empty(); 27];
+        // 第一格一件，第二格三件，其余 25 格是空的。
+        slots[0] = ItemStack::new(items::STONE, 1);
+        slots[1] = ItemStack::new(items::DIRT, 3);
+        level.set_container(CENTER, slots);
+        with_world(&mut level, |world| {
+            world.set_block(CENTER, BlockState::AIR, UPDATE_ALL);
+        });
+
+        let expected = LegacyRandom::new(0);
+        for _ in [1, 3] {
+            for _ in 0..3 {
+                expected.next_double();
+            }
+            expected.next_int(21);
+            for _ in 0..6 {
+                expected.next_double();
+            }
+        }
+        for _ in 2..27 {
+            for _ in 0..3 {
+                expected.next_double();
+            }
+        }
+        assert_eq!(
+            expected.next_double().to_bits(),
+            level.random.source().next_double().to_bits()
+        );
     }
 }

@@ -257,7 +257,11 @@ fn every_recipe_matches_its_own_ingredients() {
             RecipeKind::Cooking { ingredient, .. }
             | RecipeKind::Stonecutting { ingredient, .. } => {
                 let stack = ItemStack::new(ingredient.items[0], 1);
-                assert!(stack.matches(recipe), "{} 不认自己的输入", recipe.id);
+                assert!(
+                    RecipeInput::matches(&stack, recipe),
+                    "{} 不认自己的输入",
+                    recipe.id
+                );
             }
             RecipeKind::SmithingTransform {
                 template,
@@ -359,7 +363,8 @@ fn empty_input_matches_nothing() {
     ] {
         assert!(manager.get_recipe_for(kind, &empty_stack, None).is_none());
     }
-    let empty_smithing = SmithingInput::new(ItemStack::empty(), ItemStack::empty(), ItemStack::empty());
+    let empty_smithing =
+        SmithingInput::new(ItemStack::empty(), ItemStack::empty(), ItemStack::empty());
     assert!(
         manager
             .get_recipe_for(RecipeType::Smithing, &empty_smithing, None)

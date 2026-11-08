@@ -134,7 +134,7 @@ impl RecipeInput for CaseInput {
     fn matches(&self, recipe: &Recipe) -> bool {
         match self {
             Self::Crafting(input) => input.matches(recipe),
-            Self::Stack(stack) => stack.matches(recipe),
+            Self::Stack(stack) => RecipeInput::matches(stack, recipe),
             Self::Smithing(input) => input.matches(recipe),
             Self::Brewing(input) => input.matches(recipe),
         }

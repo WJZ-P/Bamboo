@@ -792,7 +792,7 @@ fn nan_position_kicks_and_later_requests_are_ignored() {
     assert_eq!(client.take_frames(), [expected]);
     assert!(client.is_closed());
     // 被踢的玩家留到 `Leave`，请求和写入都不再有效果。
-    assert_eq!(server.player(&client).position.x, SPAWN_X);
+    assert_eq!(server.player(&client).position().x, SPAWN_X);
 
     server.leave(&client);
     server.tick();
@@ -1144,6 +1144,11 @@ fn every_decoded_request_reaches_a_module_without_disconnecting() {
             sequence: 3,
             yaw: 0.0,
             pitch: 0.0,
+        },
+        PlayRequest::EditBook {
+            slot: -1,
+            pages: vec!["hi".to_owned()],
+            title: None,
         },
         // 这三种本来不会发到世界线程。
         PlayRequest::KeepAlive(1),

@@ -121,6 +121,19 @@ impl FurnaceEntity {
         std::array::from_fn(|id| self.data(id))
     }
 
+    /// 官方 `ContainerData.set`。存档回读和菜单写数据槽都走这里，不经过 `setItem`。
+    ///
+    /// Vanilla `ContainerData.set`. Loading and menu data writes use this and do not go through `setItem`.
+    pub fn set_data(&mut self, id: usize, value: i32) {
+        match id {
+            0 => self.lit_time_remaining = value,
+            1 => self.lit_total_time = value,
+            2 => self.cooking_timer = value,
+            3 => self.cooking_total_time = value,
+            _ => {}
+        }
+    }
+
     /// 官方 `setItem`：写一格，数量按 `getMaxStackSize(stack)` 截断，
     /// 也就是 `min(99, 物品自身的上限)`。
     ///
@@ -138,6 +151,17 @@ impl FurnaceEntity {
             self.cooking_total_time = self.total_cook_time();
             self.cooking_timer = 0;
         }
+    }
+
+    /// 不经过 `setItem` 的写回。`removeItem` 和原地改数量不重算烹饪时间。
+    ///
+    /// Writes a slot without `setItem`. `removeItem` and in-place count edits do not recompute cook time.
+    pub fn write_item(&mut self, slot: usize, stack: ItemStack) {
+        self.items[slot] = if stack.is_empty() {
+            ItemStack::empty()
+        } else {
+            stack
+        };
     }
 
     /// 官方 `Container.removeItem`：拿走一格里的几个。它不经过 `setItem`。
@@ -276,7 +300,11 @@ impl FurnaceEntity {
 
     /// 官方 `setRecipeUsed`：记一次配方统计。
     fn set_recipe_used(&mut self, recipe: &'static Recipe) {
-        if let Some((_, count)) = self.recipes_used.iter_mut().find(|(id, _)| *id == recipe.id) {
+        if let Some((_, count)) = self
+            .recipes_used
+            .iter_mut()
+            .find(|(id, _)| *id == recipe.id)
+        {
             *count += 1;
         } else {
             self.recipes_used.push((recipe.id, 1));
@@ -361,9 +389,9 @@ impl FurnaceEntity {
                     } else {
                         self.cooking_timer = 0;
                     }
-                } else {
-                    self.cooking_timer = 0;
                 }
+                // 官方 `recipe == null` 时不改 `cookingTimer`。找不到配方就留着原来的进度。
+                // Vanilla leaves `cookingTimer` unchanged when `recipe == null`.
             } else {
                 self.cooking_timer = 0;
             }

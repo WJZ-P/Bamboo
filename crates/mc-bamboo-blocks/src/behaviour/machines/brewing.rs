@@ -8,7 +8,7 @@
 use std::any::Any;
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{Block, Recipe, RecipeType};
+use mc_bamboo_data::{Recipe, RecipeType};
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{
     BrewingInput, RecipeManager, assemble, brewing_fuel, crafting_remainder, is_brewing_fuel,
@@ -16,13 +16,7 @@ use mc_bamboo_recipes::{
 };
 
 use crate::{
-    behaviour::{
-        Behaviour,
-        common::{default_state, update_neighbours_after_destroy},
-    },
     block_entity::{BlockEntity, drop_item_stack},
-    context::{PlaceContext, UseContext},
-    interact::InteractionResult,
     state::{BlockState, HAS_BOTTLE_0, HAS_BOTTLE_1, HAS_BOTTLE_2},
     world::{UPDATE_CLIENTS, World},
 };
@@ -114,6 +108,19 @@ impl BrewingStandEntity {
         std::array::from_fn(|id| self.data(id))
     }
 
+    /// 官方 `ContainerData.set`。存档回读和菜单写数据槽都走这里。
+    ///
+    /// Vanilla `ContainerData.set`. Loading and menu data writes use this.
+    pub fn set_data(&mut self, id: usize, value: i32) {
+        match id {
+            0 => self.brew_time = value,
+            1 => self.fuel = value,
+            2 => self.total_brew_time = value,
+            3 => self.total_fuel = value,
+            _ => {}
+        }
+    }
+
     /// 官方 `setItem`，也就是 `BaseContainerBlockEntity.setItem`：
     /// 写一格，数量按 `getMaxStackSize(stack)` 截断，然后通知。
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
@@ -156,11 +163,8 @@ impl BrewingStandEntity {
 
     /// 官方 `RecipeManager.CachedCheck.getRecipeFor`。
     fn recipe_for(&mut self, input: BrewingInput) -> Option<&'static Recipe> {
-        let recipe = RecipeManager::global().get_recipe_for(
-            RecipeType::Brewing,
-            &input,
-            self.last_recipe,
-        );
+        let recipe =
+            RecipeManager::global().get_recipe_for(RecipeType::Brewing, &input, self.last_recipe);
         if let Some(recipe) = recipe {
             self.last_recipe = Some(recipe);
         }
@@ -208,9 +212,8 @@ impl BrewingStandEntity {
             let input = self.input_for(slot);
             if let Some(recipe) = self.recipe_for(input.clone()) {
                 // 官方 `items.set(dest, recipe.assemble(input))`，`EMPTY` 也照样写回去。
-                self.items[slot] =
-                    assemble(recipe, &[input.input.clone(), input.reagent.clone()])
-                        .unwrap_or_else(ItemStack::empty);
+                self.items[slot] = assemble(recipe, &[input.input.clone(), input.reagent.clone()])
+                    .unwrap_or_else(ItemStack::empty);
             }
         }
 
@@ -300,12 +303,7 @@ impl BlockEntity for BrewingStandEntity {
     }
 
     /// 官方没有覆盖 `preRemoveSideEffects`，基类只把五格内容掉出来。
-    fn pre_remove_side_effects(
-        &mut self,
-        world: &mut World,
-        _pos: BlockPos,
-        _state: BlockState,
-    ) {
+    fn pre_remove_side_effects(&mut self, world: &mut World, _pos: BlockPos, _state: BlockState) {
         for stack in &self.items {
             drop_item_stack(world, self.pos, stack);
         }
@@ -317,39 +315,5 @@ impl BlockEntity for BrewingStandEntity {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
-    }
-}
-
-/// `BrewingStandBlock`。没有朝向，放下时建一个空方块实体。
-pub(super) struct BrewingStand;
-
-impl Behaviour for BrewingStand {
-    fn state_for_placement(
-        &self,
-        block: &'static Block,
-        _ctx: &PlaceContext,
-        _world: &World,
-    ) -> Option<BlockState> {
-        Some(default_state(block))
-    }
-
-    /// `newBlockEntity`：放下酿造台时建一个空实体。
-    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
-        if !old.is_same_block(state) && !world.has_block_entity(pos) {
-            world.set_block_entity(Box::new(BrewingStandEntity::new(pos)));
-        }
-    }
-
-    fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        update_neighbours_after_destroy(state, world, pos);
-    }
-
-    fn use_without_item(
-        &self,
-        _state: BlockState,
-        _world: &mut World,
-        _ctx: &UseContext,
-    ) -> InteractionResult {
-        InteractionResult::Success
     }
 }

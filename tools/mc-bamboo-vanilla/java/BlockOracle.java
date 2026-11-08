@@ -94,6 +94,7 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.util.random.WeightedList;
+import net.minecraft.world.Container;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.InteractionHand;
@@ -154,18 +155,26 @@ import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.ChiseledBookShelfBlock;
 import net.minecraft.world.level.block.ComposterBlock;
 import net.minecraft.world.level.block.DirectionalBlock;
+import net.minecraft.world.level.block.DispenserBlock;
 import net.minecraft.world.level.block.EndPortalFrameBlock;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.Fallable;
 import net.minecraft.world.level.block.FlowerPotBlock;
+import net.minecraft.world.level.block.HopperBlock;
 import net.minecraft.world.level.block.HorizontalDirectionalBlock;
 import net.minecraft.world.level.block.JukeboxBlock;
 import net.minecraft.world.level.block.LecternBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.VegetationBlock;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.entity.ChiseledBookShelfBlockEntity;
+import net.minecraft.world.level.block.entity.DispenserBlockEntity;
+import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.level.block.entity.JukeboxBlockEntity;
+import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
 import net.minecraft.world.level.block.entity.LecternBlockEntity;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.piston.PistonHeadBlock;
@@ -264,6 +273,8 @@ import sun.misc.Unsafe;
  *     class     block 的 getClass().getSimpleName()，按类汇总用它。
  *     scene     [[x,y,z,state],...] 题目开始时的世界。state 是全局方块状态 ID，和 mc_bamboo_data::blocks 的常量是同一套数字。
  *               列表以外的格子全是空气，y 超出 minY..=maxY 的格子是 void_air，超出世界的格子写不进去。顺序没有含义。
+ *     contents  [[x,y,z,slot,item,count],...] 场景里容器方块的内容，只写非空的格子，按坐标和槽位排序。item 是物品的注册表 ID，
+ *               物品是默认组件的。没写的槽是空的。只有箱子（含双箱的两半）、木桶、潜影盒、漏斗、发射器和投掷器会写。
  *     action    题目，见下面。
  *     outcome   官方的答案，见下面。
  *
@@ -313,8 +324,11 @@ import sun.misc.Unsafe;
  *               priority 是 TickPriority.getValue()，0 是 NORMAL。
  *     ran       [block id,...] settle 里真的运行过 tick 的方块的注册表 ID，去重，顺序没有含义。名单里有不在比较范围里的
  *               计划刻（比如方块下落）时，世界已经被它改过，重放的一方只能排除这道题。
- *     analogContent 动作或者 settle 改了方块实体的内容，旁边又有比较器读得到，而且那个方块实体不是书架。Bamboo 不保留容器内容，
- *               比较器读到的模拟信号两边会不一样，重放的一方只能排除这道题。
+ *     contents  [[x,y,z,slot,item,count],...] 结束时所有已建模容器的非空格子，写法同场景的 contents。箱子按两半分别列出，
+ *               顺序是坐标再槽位。Bamboo 的容器内容、漏斗搬运和比较器读数就靠它比较。
+ *     analogContent 动作或者 settle 改了方块实体的内容，旁边又有比较器读得到，而且那个方块实体不是已建模的容器（书架、
+ *               箱子、木桶、潜影盒、漏斗、发射器、投掷器）。Bamboo 不保留那些方块实体的内容，比较器读到的模拟信号两边会
+ *               不一样，重放的一方只能排除这道题。
  *     itemReached  place、use：方块没有吃掉这次点击，轮到了手里的物品（ServerPlayerGameMode 走到了 itemStack.useOn）。
  *               和 itemUseOn 同时为真时结果来自物品自己的 useOn，不在 mc-bamboo-blocks 的范围里。别的题永远是假。
  *     gained    [item id,...] 只有 item 题有内容：物品栏里新出现的物品。创造模式用空桶舀起东西时，装满的桶放进物品栏。
@@ -354,9 +368,11 @@ import sun.misc.Unsafe;
  *               所以水源和岩浆源的形状是它们自己的高度 8/9。
  *     亮度      getRawBrightness、getBrightness 恒为 15。
  *     信号      官方真实的实现，方块状态里的 powered、power 真的会产生信号。
- *     方块实体  场景加载时新建，内容为空。有三种方块的状态是内容的镜像，内容按状态补齐：chiseled_bookshelf 的书、
- *               jukebox 的唱片、lectern 的书。只有移动活塞（moving_piston 上的 PistonMovingBlockEntity）的 ticker 会跑，
- *               别的方块实体都不 tick，所以阳光探测器不会随时间重算。
+ *     方块实体  场景加载时新建，容器内容按 contents 填，别的为空。有三种方块的状态是内容的镜像，内容按状态补齐：
+ *               chiseled_bookshelf 的书、jukebox 的唱片、lectern 的书。只有漏斗和移动活塞（moving_piston 上的
+ *               PistonMovingBlockEntity）的 ticker 会跑：漏斗每刻按官方 HopperBlockEntity.pushItemsTick 搬物品，
+ *               同一次 tick 里漏斗按登记顺序（坐标顺序）在前，活塞在后。别的方块实体都不 tick，所以阳光探测器不会
+ *               随时间重算。
  *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
  *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
@@ -389,7 +405,7 @@ import sun.misc.Unsafe;
  *        destroy：destroy_block(actor, pos)。tick：直接运行 pos 这一格的方块的 tick。
  *        flow：运行 pos 这一格的流体刻，再把时钟一刻一刻往后拨 steps 次，每次跑到期的计划刻。item：use_item(actor, hand)。
  *     3. 再走 settle 刻：每刻先把时间加一，再按顺序跑完到期的方块和流体计划刻、方块事件、移动活塞的方块实体。
- *     4. 比较 result、changes、destroyed、ran、analogContent、gained 和 ticks 里范围内的条目。
+ *     4. 比较 result、changes、destroyed、ran、contents、analogContent、gained 和 ticks 里范围内的条目。
  *
  * 官方的 useItemOn 和 destroyBlock 是直接调用的。够距检查、方块高度检查、序列号在 ServerGamePacketListenerImpl 里，不在这里，
  * 所以 pos 可以在任何地方，loc 也不一定在玩家看得到的面上。世界最顶层的方块点上面（目标格已经出界）的情况是真的会发生的，题目里有。
@@ -1164,12 +1180,14 @@ public final class BlockOracle {
         private LinkedHashSet<BlockEventData> blockEvents;
         /**
          * 移动方块实体的 ticker，按登记顺序。官方的完整机制是
-         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里只登记活塞：
-         * Bamboo 别的方块实体都不 tick。
+         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里登记活塞和漏斗：
+         * Bamboo 别的方块实体都不 tick。漏斗单独一张表，每刻先跑，和 Bamboo 方块实体表里漏斗总在活塞前面一致；
+         * 表里按坐标顺序登记，见 {@link #load}。
          */
-        private LinkedHashMap<BlockPos, PistonMovingBlockEntity> tickers;
-        /** tick 阶段里新登记的 ticker，下一刻开头并进 {@link #tickers}。 */
-        private LinkedHashMap<BlockPos, PistonMovingBlockEntity> pendingTickers;
+        private LinkedHashMap<BlockPos, BlockEntity> tickers;
+        private LinkedHashMap<BlockPos, HopperBlockEntity> hopperTickers;
+        /** tick 阶段里新登记的 ticker，下一刻开头并进上面两张表。 */
+        private LinkedHashMap<BlockPos, BlockEntity> pendingTickers;
         private boolean tickingBlockEntities;
         private RecordingTicks<Block> recordedBlockTicks;
         private RecordingTicks<Fluid> recordedFluidTicks;
@@ -1194,6 +1212,7 @@ public final class BlockOracle {
             level.blockEntities = new Long2ObjectOpenHashMap<>();
             level.blockEvents = new LinkedHashSet<>();
             level.tickers = new LinkedHashMap<>();
+            level.hopperTickers = new LinkedHashMap<>();
             level.pendingTickers = new LinkedHashMap<>();
             level.tickingBlockEntities = false;
             level.recordedBlockTicks = new RecordingTicks<>();
@@ -1221,15 +1240,61 @@ public final class BlockOracle {
 
         /** 直接写入场景，不触发任何连锁。方块实体和区块加载后一样已经存在。 */
         void load(Long2ObjectMap<BlockState> scene) {
+            load(scene, new Long2ObjectOpenHashMap<>());
+        }
+
+        /**
+         * 见 {@link #load(Long2ObjectMap)}，容器内容按坐标顺序填，箱子两半分开填。
+         *
+         * <p>内容直接写进方块实体的槽位表，不走 {@code setItem}：官方从 NBT 读区块时也不会因为填内容去通知比较器，
+         * 场景加载和重放两边都看不到这一下。
+         */
+        void load(Long2ObjectMap<BlockState> scene, Long2ObjectMap<NonNullList<ItemStack>> contents) {
             blocks.putAll(scene);
-            for (Long2ObjectMap.Entry<BlockState> entry : scene.long2ObjectEntrySet()) {
-                if (entry.getValue().hasBlockEntity()) {
-                    BlockEntity entity = getBlockEntity(BlockPos.of(entry.getLongKey()));
+            long[] keys = scene.keySet().toLongArray();
+            Arrays.sort(keys);
+            for (long key : keys) {
+                BlockState state = scene.get(key);
+                if (state.hasBlockEntity()) {
+                    BlockEntity entity = getBlockEntity(BlockPos.of(key));
                     if (entity != null) {
-                        syncContents(entity, entry.getValue());
+                        syncContents(entity, state);
                     }
                 }
             }
+            long[] filled = contents.keySet().toLongArray();
+            Arrays.sort(filled);
+            for (long key : filled) {
+                BlockEntity entity = getBlockEntity(BlockPos.of(key));
+                if (!(entity instanceof Container container)) {
+                    continue;
+                }
+                NonNullList<ItemStack> stored = storedItems((BaseContainerBlockEntity) entity);
+                NonNullList<ItemStack> stacks = contents.get(key);
+                for (int slot = 0; slot < Math.min(container.getContainerSize(), stacks.size()); slot++) {
+                    stored.set(slot, stacks.get(slot).copy());
+                }
+            }
+        }
+
+        /** 容器方块的槽位表。子类各自声明 `items` 字段，调父类的 `getItems` 统一拿。 */
+        @SuppressWarnings("unchecked")
+        private static NonNullList<ItemStack> storedItems(BaseContainerBlockEntity entity) {
+            try {
+                return (NonNullList<ItemStack>) method(BaseContainerBlockEntity.class, "getItems").invoke(entity);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        /** 已建模的容器：内容两边都有，比较器读数和漏斗搬运都能比。 */
+        private static boolean modelsContents(BlockEntity entity) {
+            return entity instanceof ChiseledBookShelfBlockEntity
+                    || entity instanceof ChestBlockEntity
+                    || entity instanceof BarrelBlockEntity
+                    || entity instanceof ShulkerBoxBlockEntity
+                    || entity instanceof HopperBlockEntity
+                    || entity instanceof DispenserBlockEntity;
         }
 
         /** 这几种方块的状态是内容的镜像。场景里只有状态，内容要补成一致，否则右键的结果是真实世界到不了的。 */
@@ -1324,36 +1389,58 @@ public final class BlockOracle {
          */
         private void tickRegisteredTickers() {
             tickingBlockEntities = true;
-            tickers.putAll(pendingTickers);
+            pendingTickers.forEach((pos, entity) -> {
+                if (entity instanceof HopperBlockEntity hopper) {
+                    hopperTickers.put(pos, hopper);
+                } else {
+                    tickers.put(pos, entity);
+                }
+            });
             pendingTickers.clear();
             try {
                 withPlayersHidden(() -> {
-                    for (Map.Entry<BlockPos, PistonMovingBlockEntity> entry : new ArrayList<>(tickers.entrySet())) {
+                    for (Map.Entry<BlockPos, HopperBlockEntity> entry : new ArrayList<>(hopperTickers.entrySet())) {
                         BlockPos pos = entry.getKey();
-                        PistonMovingBlockEntity entity = entry.getValue();
+                        HopperBlockEntity entity = entry.getValue();
                         if (!entity.isRemoved()) {
                             BlockState state = getBlockState(pos);
                             if (entity.getType().isValid(state)) {
-                                PistonMovingBlockEntity.tick(this, pos, state, entity);
+                                HopperBlockEntity.pushItemsTick(this, pos, state, entity);
+                            }
+                        }
+                    }
+                    for (Map.Entry<BlockPos, BlockEntity> entry : new ArrayList<>(tickers.entrySet())) {
+                        BlockPos pos = entry.getKey();
+                        if (entry.getValue() instanceof PistonMovingBlockEntity piston && !piston.isRemoved()) {
+                            BlockState state = getBlockState(pos);
+                            if (piston.getType().isValid(state)) {
+                                PistonMovingBlockEntity.tick(this, pos, state, piston);
                             }
                         }
                     }
                 });
+                hopperTickers.values().removeIf(BlockEntity::isRemoved);
                 tickers.values().removeIf(BlockEntity::isRemoved);
             } finally {
                 tickingBlockEntities = false;
             }
         }
 
-        /** LevelChunk.updateBlockEntityTicker：只登记移动活塞，见 {@link #tickers}。 */
+        /** LevelChunk.updateBlockEntityTicker：登记移动活塞和漏斗，见 {@link #tickers}。 */
         private void registerTicker(BlockEntity blockEntity) {
-            if (blockEntity instanceof PistonMovingBlockEntity piston
-                    && getBlockState(piston.getBlockPos()).is(Blocks.MOVING_PISTON)) {
-                if (tickingBlockEntities) {
-                    pendingTickers.put(piston.getBlockPos(), piston);
-                } else {
-                    tickers.put(piston.getBlockPos(), piston);
-                }
+            boolean registered = blockEntity instanceof PistonMovingBlockEntity piston
+                            && getBlockState(piston.getBlockPos()).is(Blocks.MOVING_PISTON)
+                    || blockEntity instanceof HopperBlockEntity hopper
+                            && getBlockState(hopper.getBlockPos()).is(Blocks.HOPPER);
+            if (!registered) {
+                return;
+            }
+            if (tickingBlockEntities) {
+                pendingTickers.put(blockEntity.getBlockPos(), blockEntity);
+            } else if (blockEntity instanceof HopperBlockEntity hopper) {
+                hopperTickers.put(hopper.getBlockPos(), hopper);
+            } else {
+                tickers.put(blockEntity.getBlockPos(), blockEntity);
             }
         }
 
@@ -1618,19 +1705,20 @@ public final class BlockOracle {
                 removed.setRemoved();
             }
             tickers.remove(pos);
+            hopperTickers.remove(pos);
             pendingTickers.remove(pos);
         }
 
         /**
          * BlockEntity.setChanged 先调这里，再让旁边的比较器重读模拟信号。
          *
-         * <p>容器内容 Bamboo 不保留，只有书架的格子做成了状态，读到的数和官方一样。别的方块实体改了内容
+         * <p>已建模容器的内容两边都有，比较器读到的数一样。只有书架以外的、Bamboo 没保留内容的方块实体改了内容
          * 又有比较器能读到，这道题的世界两边就不一样了。
          */
         @Override
         public void blockEntityChanged(BlockPos pos) {
             BlockEntity entity = existingBlockEntity(pos);
-            if (entity != null && !(entity instanceof ChiseledBookShelfBlockEntity) && readsAnalogOutput(pos)) {
+            if (entity != null && !modelsContents(entity) && readsAnalogOutput(pos)) {
                 analogContent = true;
             }
         }
@@ -2090,12 +2178,17 @@ public final class BlockOracle {
     private record TickKey(BlockPos pos, boolean fluid, String type) {
     }
 
+    /** 容器里一个非空的格子：坐标、槽位、物品 ID、数量。 */
+    private record ContainerStack(long pos, int slot, String item, int count) {
+    }
+
     /** 官方给出的答案。 */
     private static final class Outcome {
         final String result;
         final Long2ObjectOpenHashMap<BlockState> changes = new Long2ObjectOpenHashMap<>();
         final List<Destroyed> destroyed;
         final List<ScheduledBlockTick> ticks = new ArrayList<>();
+        final List<ContainerStack> contents = new ArrayList<>();
         final List<String> spawned;
         final List<String> ran;
         final boolean itemReached;
@@ -2113,6 +2206,30 @@ public final class BlockOracle {
             this.analogContent = level.analogContent;
             collectChanges(level, c.scene);
             collectTicks(level);
+            collectContents(level);
+        }
+
+        /**
+         * 结束时所有已建模容器的非空格子，按坐标和槽位排序。箱子两半分别列，和存档里的方块实体一样。
+         *
+         * <p>雕纹书架的内容是方块状态的镜像，Bamboo 那边由状态表示，不在这张表里。
+         */
+        private void collectContents(FakeLevel level) {
+            long[] keys = level.blockEntities.keySet().toLongArray();
+            Arrays.sort(keys);
+            for (long key : keys) {
+                BlockEntity entity = level.blockEntities.get(key);
+                if (!(entity instanceof Container container) || !FakeLevel.modelsContents(entity)
+                        || entity instanceof ChiseledBookShelfBlockEntity) {
+                    continue;
+                }
+                for (int slot = 0; slot < container.getContainerSize(); slot++) {
+                    ItemStack stack = container.getItem(slot);
+                    if (!stack.isEmpty()) {
+                        contents.add(new ContainerStack(key, slot, id(stack.getItem()), stack.getCount()));
+                    }
+                }
+            }
         }
 
         private void collectChanges(FakeLevel level, Long2ObjectMap<BlockState> scene) {
@@ -2142,7 +2259,7 @@ public final class BlockOracle {
 
         boolean sameWorld(Outcome other) {
             return result.equals(other.result) && changes.equals(other.changes) && destroyed.equals(other.destroyed)
-                    && gained.equals(other.gained)
+                    && contents.equals(other.contents) && gained.equals(other.gained)
                     && Set.copyOf(ran).equals(Set.copyOf(other.ran)) && sameTicksExceptDelay(other);
         }
 
@@ -2181,6 +2298,8 @@ public final class BlockOracle {
         final Item item;
         final Height height;
         final Long2ObjectOpenHashMap<BlockState> scene = new Long2ObjectOpenHashMap<>();
+        /** 场景里容器方块的内容，键是坐标。没有条目的容器是空的。 */
+        final Long2ObjectOpenHashMap<NonNullList<ItemStack>> contents = new Long2ObjectOpenHashMap<>();
         Item main = Items.AIR;
         Item off = Items.AIR;
         InteractionHand hand = InteractionHand.MAIN_HAND;
@@ -2217,6 +2336,35 @@ public final class BlockOracle {
         boolean occupied(BlockPos pos) {
             return scene.containsKey(pos.asLong());
         }
+
+        /** 往场景里的容器放一组物品，从第 0 格起。这一格不是已建模的容器时直接报错。 */
+        void putContents(BlockPos pos, ItemStack... stacks) {
+            int size = containerSize(scene.get(pos.asLong()));
+            if (size < 0) {
+                throw new IllegalArgumentException("not a modelled container: " + pos);
+            }
+            NonNullList<ItemStack> list = NonNullList.withSize(size, ItemStack.EMPTY);
+            for (int slot = 0; slot < stacks.length; slot++) {
+                list.set(slot, stacks[slot]);
+            }
+            contents.put(pos.asLong(), list);
+        }
+    }
+
+    /**
+     * 这个状态对应的已建模容器有几格，不是的话是 -1。书架的格子是状态的镜像，不在这里填。
+     *
+     * <p>和 {@link FakeLevel#modelsContents} 用同一张名单；这里在建题时就查，所以临时建一个方块实体看类型。
+     */
+    private static int containerSize(BlockState state) {
+        if (state == null || !state.hasBlockEntity()) {
+            return -1;
+        }
+        BlockEntity entity = ((EntityBlock) state.getBlock()).newBlockEntity(BlockPos.ZERO, state);
+        if (entity == null || !FakeLevel.modelsContents(entity) || entity instanceof ChiseledBookShelfBlockEntity) {
+            return -1;
+        }
+        return entity instanceof Container container ? container.getContainerSize() : -1;
     }
 
     /** 建筑高度的范围，两端都包含。 */
@@ -2525,6 +2673,9 @@ public final class BlockOracle {
         private static final double STANDING_EYE_HEIGHT = 1.62;
         private static final double CROUCHING_EYE_HEIGHT = 1.27;
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
+        /** 随机填进场景容器的物品。剑用来试堆叠上限 1。 */
+        private static final List<Item> CONTAINER_ITEMS = List.of(Items.STONE, Items.DIRT, Items.OAK_LOG, Items.BREAD,
+                Items.COBBLESTONE, Items.IRON_INGOT, Items.IRON_SWORD);
 
         private final Catalog catalog;
         private final Supports supports;
@@ -2558,7 +2709,38 @@ public final class BlockOracle {
                     c.settle = pickSettle(c, random);
                 }
             }
+            fillContainers(c, random);
             return c;
+        }
+
+        /** 场景里的容器随机放些物品，比较器读数、漏斗搬运和投掷器才有内容可比。 */
+        private void fillContainers(Case c, Random random) {
+            long[] keys = c.scene.keySet().toLongArray();
+            Arrays.sort(keys);
+            for (long key : keys) {
+                if (c.contents.containsKey(key)) {
+                    continue;
+                }
+                int size = containerSize(c.scene.get(key));
+                if (size < 0 || chance(random, 40)) {
+                    continue;
+                }
+                NonNullList<ItemStack> list = NonNullList.withSize(size, ItemStack.EMPTY);
+                boolean full = chance(random, 10);
+                int stacks = full ? size : 1 + random.nextInt(Math.min(3, size));
+                List<Integer> slots = new ArrayList<>(size);
+                for (int slot = 0; slot < size; slot++) {
+                    slots.add(slot);
+                }
+                Collections.shuffle(slots, random);
+                for (int i = 0; i < stacks; i++) {
+                    Item item = pick(random, CONTAINER_ITEMS);
+                    int max = new ItemStack(item).getMaxStackSize();
+                    int count = full ? max : 1 + random.nextInt(max);
+                    list.set(slots.get(i), new ItemStack(item, count));
+                }
+                c.contents.put(key, list);
+            }
         }
 
         private static final BlockPos PISTON_CELL = new BlockPos(0, 64, 0);
@@ -2662,6 +2844,136 @@ public final class BlockOracle {
             c.actor = new Vec3(pos.getX() + 0.5, pos.getY() - 1.0, pos.getZ() + 2.5);
             c.yaw = 0.0F;
             c.pitch = 0.0F;
+        }
+
+        /** 漏斗题的格子和 settle 步数。物品每 8 刻挪一格，40 和 100 刻能看到连搬几次。 */
+        private static final BlockPos HOPPER_CELL = new BlockPos(0, 64, 0);
+        private static final int[] HOPPER_SETTLE_STEPS = {1, 9, 40, 100};
+
+        /**
+         * 漏斗和投掷器的固定题：场景摆好，同一道按 settle 各出一遍，逐刻比较整个世界的容器内容。
+         *
+         * <p>随机题里漏斗旁边不一定有容器，物品也不一定搬得起来，所以单独出这些。
+         * id 从 base 开始，{@code --case} 也能单独重现。
+         */
+        List<Case> hopperCases(int base) {
+            List<Scenario> scenarios = List.of(
+                    // 上面的箱子有东西，漏斗从上面吸，往下面的箱子送。
+                    new Scenario(Kind.TICK, Blocks.HOPPER, Items.STONE, c -> {
+                        c.put(HOPPER_CELL.above(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.above(), new ItemStack(Items.STONE, 5), new ItemStack(Items.BREAD, 2));
+                        c.put(HOPPER_CELL, hopper(Direction.DOWN, true));
+                        c.put(HOPPER_CELL.below(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.below(), new ItemStack(Items.DIRT, 1));
+                        c.target = HOPPER_CELL;
+                    }),
+                    // 漏斗串：上面的漏斗把东西送进下面的漏斗，下面那个再往箱子里送。
+                    new Scenario(Kind.TICK, Blocks.HOPPER, Items.STONE, c -> {
+                        c.put(HOPPER_CELL, hopper(Direction.DOWN, true));
+                        c.put(HOPPER_CELL.above(), hopper(Direction.DOWN, true));
+                        c.putContents(HOPPER_CELL.above(), new ItemStack(Items.STONE, 5));
+                        c.put(HOPPER_CELL.below(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.below(), new ItemStack(Items.DIRT, 1));
+                        c.target = HOPPER_CELL;
+                    }),
+                    // 被红石锁住的漏斗什么都不搬。
+                    new Scenario(Kind.TICK, Blocks.HOPPER, Items.STONE, c -> {
+                        c.put(HOPPER_CELL.above(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.above(), new ItemStack(Items.STONE, 5));
+                        c.put(HOPPER_CELL, hopper(Direction.DOWN, false));
+                        c.put(HOPPER_CELL.below(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.below(), new ItemStack(Items.DIRT, 1));
+                        c.target = HOPPER_CELL;
+                    }),
+                    // 投掷器朝箱子，把东西塞进去。
+                    new Scenario(Kind.TICK, Blocks.DROPPER, Items.STONE, c -> {
+                        c.put(HOPPER_CELL, dropper(Direction.DOWN));
+                        c.putContents(HOPPER_CELL, new ItemStack(Items.STONE, 3), new ItemStack(Items.BREAD, 2));
+                        c.put(HOPPER_CELL.below(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.below(), new ItemStack(Items.DIRT, 1));
+                        c.target = HOPPER_CELL;
+                    }),
+                    // 投掷器朝空气，东西消失；随机数两边要取一样多。
+                    new Scenario(Kind.TICK, Blocks.DROPPER, Items.STONE, c -> {
+                        c.put(HOPPER_CELL, dropper(Direction.UP));
+                        c.putContents(HOPPER_CELL, new ItemStack(Items.STONE, 3), new ItemStack(Items.BREAD, 2));
+                        c.target = HOPPER_CELL;
+                    }),
+                    // 漏斗从上面的箱子吸到第一件物品，旁边的比较器读数从 0 变成 1，灯亮。
+                    new Scenario(Kind.TICK, Blocks.HOPPER, Items.STONE, c -> {
+                        c.put(HOPPER_CELL.above(), Blocks.CHEST.defaultBlockState());
+                        c.putContents(HOPPER_CELL.above(), new ItemStack(Items.STONE, 1));
+                        c.put(HOPPER_CELL, hopper(Direction.DOWN, true));
+                        c.put(HOPPER_CELL.east(), comparator(Direction.WEST));
+                        c.put(HOPPER_CELL.east(2), Blocks.REDSTONE_LAMP.defaultBlockState());
+                        c.target = HOPPER_CELL;
+                    }),
+                    // 上面的漏斗往各种容器里塞东西，旁边的比较器读数跟着变。
+                    pushingInto(Blocks.CHEST),
+                    pushingInto(Blocks.BARREL),
+                    pushingInto(Blocks.SHULKER_BOX),
+                    pushingInto(Blocks.DISPENSER),
+                    pushingInto(Blocks.DROPPER),
+                    // 双箱：比较器读的是两半合起来的 54 格。
+                    new Scenario(Kind.TICK, Blocks.CHEST, Items.STONE, c -> {
+                        BlockPos first = HOPPER_CELL;
+                        c.put(first, Blocks.CHEST.defaultBlockState()
+                                .setValue(ChestBlock.FACING, Direction.NORTH)
+                                .setValue(ChestBlock.TYPE, ChestType.LEFT));
+                        c.putContents(first, new ItemStack(Items.STONE, 10));
+                        c.put(first.east(), Blocks.CHEST.defaultBlockState()
+                                .setValue(ChestBlock.FACING, Direction.NORTH)
+                                .setValue(ChestBlock.TYPE, ChestType.RIGHT));
+                        c.putContents(first.east(), new ItemStack(Items.DIRT, 5));
+                        c.put(first.above(), hopper(Direction.DOWN, true));
+                        c.putContents(first.above(), new ItemStack(Items.STONE, 3));
+                        c.put(first.east().east(), comparator(Direction.WEST));
+                        c.put(first.east(2).east(), Blocks.REDSTONE_LAMP.defaultBlockState());
+                        c.target = first.above();
+                    }));
+            List<Case> cases = new ArrayList<>();
+            for (Scenario scenario : scenarios) {
+                for (int settle : HOPPER_SETTLE_STEPS) {
+                    Case c = new Case(base + cases.size(), scenario.kind(),
+                            new Subject(scenario.subject(), scenario.item()), height);
+                    scenario.setup().accept(c);
+                    // 假玩家要有个位置；漏斗题里它不碰方块，站远一点。
+                    if (c.actor == null) {
+                        c.actor = new Vec3(4.5, 70.0, 4.5);
+                    }
+                    c.settle = settle;
+                    cases.add(c);
+                }
+            }
+            return cases;
+        }
+
+        /** 上面一个装了石头 3 个的漏斗，往下面这一类容器里塞；容器旁边是比较器和灯。 */
+        private static Scenario pushingInto(Block container) {
+            return new Scenario(Kind.TICK, container, Items.STONE, c -> {
+                c.put(HOPPER_CELL, container.defaultBlockState());
+                c.putContents(HOPPER_CELL, new ItemStack(Items.STONE, 1), new ItemStack(Items.BREAD, 1));
+                c.put(HOPPER_CELL.above(), hopper(Direction.DOWN, true));
+                c.putContents(HOPPER_CELL.above(), new ItemStack(Items.STONE, 3));
+                c.put(HOPPER_CELL.east(), comparator(Direction.WEST));
+                c.put(HOPPER_CELL.east(2), Blocks.REDSTONE_LAMP.defaultBlockState());
+                c.target = HOPPER_CELL.above();
+            });
+        }
+
+        private static BlockState hopper(Direction facing, boolean enabled) {
+            return Blocks.HOPPER.defaultBlockState()
+                    .setValue(HopperBlock.FACING, facing)
+                    .setValue(HopperBlock.ENABLED, enabled);
+        }
+
+        private static BlockState dropper(Direction facing) {
+            return Blocks.DROPPER.defaultBlockState().setValue(DispenserBlock.FACING, facing);
+        }
+
+        /** 比较器的 FACING 指着它读的那一格，输出在反面。 */
+        private static BlockState comparator(Direction input) {
+            return Blocks.COMPARATOR.defaultBlockState().setValue(HorizontalDirectionalBlock.FACING, input);
         }
 
         /**
@@ -3817,13 +4129,20 @@ public final class BlockOracle {
 
         /** 显式活塞题的 id 从这里开始，和随机题的号段分开。 */
         private static final int PISTON_CASE_BASE = 1_000_000;
+        /** 显式漏斗题的 id 从这里开始。 */
+        private static final int HOPPER_CASE_BASE = 2_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
             List<Case> pistonCases = generator.pistonCases(PISTON_CASE_BASE);
+            List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
             boolean single = options.single >= 0;
-            boolean pistons = single ? options.single >= PISTON_CASE_BASE : includesPistonCases();
-            writeHeader(single ? 1 : options.cases + (pistons ? pistonCases.size() : 0));
+            boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
+                    : includesPistonCases();
+            boolean hoppers = single ? options.single >= HOPPER_CASE_BASE : includesHopperCases();
+            writeHeader(single ? 1 : options.cases
+                    + (pistons ? pistonCases.size() : 0)
+                    + (hoppers ? hopperCases.size() : 0));
             int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -3840,6 +4159,13 @@ public final class BlockOracle {
                     }
                 }
             }
+            if (hoppers) {
+                for (Case c : hopperCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
             writeEnd();
             out.flush();
             printSummary(System.nanoTime() - start);
@@ -3851,6 +4177,20 @@ public final class BlockOracle {
                 return true;
             }
             for (Block block : List.of(Blocks.PISTON, Blocks.STICKY_PISTON, Blocks.MOVING_PISTON, Blocks.PISTON_HEAD)) {
+                if (Subjects.matches(options.only, block)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** --only 点名的是漏斗、投掷器、发射器或那几种容器时，显式漏斗题也要跑。 */
+        private boolean includesHopperCases() {
+            if (options.only == null) {
+                return true;
+            }
+            for (Block block : List.of(Blocks.HOPPER, Blocks.DROPPER, Blocks.DISPENSER, Blocks.CHEST, Blocks.TRAPPED_CHEST,
+                    Blocks.BARREL, Blocks.SHULKER_BOX, Blocks.COMPARATOR)) {
                 if (Subjects.matches(options.only, block)) {
                     return true;
                 }
@@ -3966,7 +4306,7 @@ public final class BlockOracle {
         private Outcome execute(Case c, OracleRandom levelRandom, OracleRandom entityRandom) {
             FakeLevel level = FakeLevel.create(official, levelRandom);
             level.seedPositions(new LegacyRandomSource(~caseSeed(c)).nextInt());
-            level.load(c.scene);
+            level.load(c.scene, c.contents);
             FakePlayer actor = FakePlayer.create(level, official, entityRandom, 1, c.actor, c.yaw, c.pitch, c.sneak);
             actor.hold(c.main, c.off);
             c.actorBox = actor.getBoundingBox();
@@ -4088,6 +4428,8 @@ public final class BlockOracle {
             line.append(",\"class\":\"").append(className(c.subject)).append('"');
             line.append(",\"scene\":");
             positions(c.scene);
+            line.append(",\"contents\":");
+            sceneContents(c.contents);
             writeAction(c);
             writeOutcome(outcome);
             if (options.explain) {
@@ -4166,7 +4508,9 @@ public final class BlockOracle {
                 line.append('[').append(event.pos.getX()).append(',').append(event.pos.getY()).append(',').append(event.pos.getZ());
                 line.append(',').append(event.state).append(',').append(event.initiatorExcluded).append(']');
             }
-            line.append("],\"ticks\":[");
+            line.append("],\"contents\":");
+            outcomeContents(outcome.contents);
+            line.append(",\"ticks\":[");
             for (int i = 0; i < outcome.ticks.size(); i++) {
                 ScheduledBlockTick tick = outcome.ticks.get(i);
                 if (i > 0) {
@@ -4212,6 +4556,51 @@ public final class BlockOracle {
 
         private void pos(BlockPos pos) {
             line.append('[').append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ()).append(']');
+        }
+
+        /** 场景里容器内容的 JSON，按坐标和槽位排序。 */
+        private void sceneContents(Long2ObjectMap<NonNullList<ItemStack>> contents) {
+            long[] keys = contents.keySet().toLongArray();
+            Arrays.sort(keys);
+            line.append('[');
+            boolean first = true;
+            for (long key : keys) {
+                NonNullList<ItemStack> stacks = contents.get(key);
+                for (int slot = 0; slot < stacks.size(); slot++) {
+                    ItemStack stack = stacks.get(slot);
+                    if (!stack.isEmpty()) {
+                        first = containerStack(first, key, slot, stack);
+                    }
+                }
+            }
+            line.append(']');
+        }
+
+        /** 答案里容器内容的 JSON。列表在收集时已经按坐标和槽位排好。 */
+        private void outcomeContents(List<ContainerStack> contents) {
+            line.append('[');
+            for (int i = 0; i < contents.size(); i++) {
+                ContainerStack stack = contents.get(i);
+                if (i > 0) {
+                    line.append(',');
+                }
+                containerStack(true, stack.pos, stack.slot, stack.item, stack.count);
+            }
+            line.append(']');
+        }
+
+        private boolean containerStack(boolean first, long pos, int slot, ItemStack stack) {
+            return containerStack(first, pos, slot, id(stack.getItem()), stack.getCount());
+        }
+
+        private boolean containerStack(boolean first, long pos, int slot, String item, int count) {
+            if (!first) {
+                line.append(',');
+            }
+            line.append('[').append(BlockPos.getX(pos)).append(',').append(BlockPos.getY(pos)).append(',');
+            line.append(BlockPos.getZ(pos)).append(',').append(slot).append(",\"").append(item).append("\",");
+            line.append(count).append(']');
+            return false;
         }
 
         private void box(AABB box) {

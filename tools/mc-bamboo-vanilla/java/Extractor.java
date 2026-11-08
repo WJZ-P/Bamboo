@@ -4,6 +4,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.datafixers.util.Pair;
+import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
 import io.netty.buffer.Unpooled;
 import java.io.IOException;
@@ -72,6 +74,7 @@ import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.animal.axolotl.Axolotl;
 import net.minecraft.world.entity.animal.cow.MushroomCow;
@@ -86,6 +89,7 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.Rarity;
@@ -114,9 +118,19 @@ import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
+import net.minecraft.world.level.block.state.properties.EnumProperty;
+import net.minecraft.world.level.block.state.properties.IntegerProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
+import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
@@ -204,9 +218,15 @@ public final class Extractor {
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("attributeDefaults", attributeDefaults());
             root.add("componentEnums", componentEnums());
+            root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
-            root.add("itemComponents", itemComponents(resources, layers));
+            JsonArray itemComponents = new JsonArray();
+            JsonArray craftingRemainders = new JsonArray();
+            itemComponents(resources, layers, itemComponents, craftingRemainders);
+            root.add("itemComponents", itemComponents);
+            root.add("craftingRemainders", craftingRemainders);
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -240,13 +260,15 @@ public final class Extractor {
 
     /**
      * 每个物品的默认组件，按官方 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+     * 同时导出 `Item.getCraftingRemainder()`，那是物品上的字段，不是 `use_remainder` 组件。
      *
      * 默认组件是数据驱动的，`Item.components()` 要等 `ReloadableServerResources` 把它们绑上去
      * 才读得到，所以这里照 WorldLoader.load 的后半段再加载一次服务端资源。
      * `PendingTags.apply` 只是重新绑定同样的内容，重复调用没有副作用。
      */
-    private static JsonArray itemComponents(
-            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers) throws Exception {
+    private static void itemComponents(
+            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers,
+            JsonArray items, JsonArray remainders) throws Exception {
         ReloadableServerResources managers = ReloadableServerResources
                 .loadResources(resources, layers, STATIC_TAGS, FeatureFlags.DEFAULT_FLAGS,
                         Commands.CommandSelection.DEDICATED, LevelBasedPermissionSet.GAMEMASTER,
@@ -255,7 +277,6 @@ public final class Extractor {
         managers.updateComponentsAndStaticRegistryTags();
         RegistryAccess registries = (RegistryAccess) managers.fullRegistries().lookup();
 
-        JsonArray items = new JsonArray();
         for (Item item : BuiltInRegistries.ITEM) {
             // 官方的 DataComponentMap 超过 8 项就换成按身份哈希排序的映射，遍历顺序每次运行都可能不同。
             // 组件补丁里的顺序没有含义，所以这里按组件类型的注册表 ID 排一遍，生成的字节才稳定。
@@ -270,19 +291,32 @@ public final class Extractor {
             for (TypedDataComponent<?> component : components) {
                 patch.set(component);
             }
-            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
-            DataComponentPatch.STREAM_CODEC.encode(buffer, patch.build());
-            byte[] bytes = new byte[buffer.readableBytes()];
-            buffer.readBytes(bytes);
+            items.add(encodePatch(patch.build(), registries));
 
-            StringBuilder hex = new StringBuilder(bytes.length * 2);
-            for (byte value : bytes) {
-                hex.append(Character.forDigit((value >> 4) & 0xf, 16));
-                hex.append(Character.forDigit(value & 0xf, 16));
+            ItemStackTemplate remainder = item.getCraftingRemainder();
+            if (remainder == null) {
+                remainders.add(JsonNull.INSTANCE);
+            } else {
+                JsonArray triple = new JsonArray();
+                triple.add(BuiltInRegistries.ITEM.getId(remainder.item().value()));
+                triple.add(remainder.count());
+                triple.add(encodePatch(remainder.components(), registries));
+                remainders.add(triple);
             }
-            items.add(hex.toString());
         }
-        return items;
+    }
+
+    private static String encodePatch(DataComponentPatch patch, RegistryAccess registries) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            hex.append(Character.forDigit((value >> 4) & 0xf, 16));
+            hex.append(Character.forDigit(value & 0xf, 16));
+        }
+        return hex.toString();
     }
 
     /**
@@ -463,11 +497,24 @@ public final class Extractor {
             object.add("properties", properties(block));
             object.add("fields", fields(block));
             object.addProperty("instrument", state.instrument().getSerializedName());
+            object.addProperty("destroyTime", block.defaultDestroyTime());
+            object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
             addOffset(object, block);
             blocks.add(object);
         }
         return blocks;
+    }
+
+    /** 属性的默认值。玩家没有状态效果、没有附魔时的起点。 */
+    private static JsonObject attributeDefaults() {
+        JsonObject defaults = new JsonObject();
+        for (Attribute attribute : BuiltInRegistries.ATTRIBUTE) {
+            defaults.addProperty(
+                    BuiltInRegistries.ATTRIBUTE.getKey(attribute).toString(),
+                    attribute.getDefaultValue());
+        }
+        return defaults;
     }
 
     /** 分派表按类名走。匿名类没有名字，官方以后用了要先决定它算哪一类。 */
@@ -510,6 +557,7 @@ public final class Extractor {
             JsonObject object = new JsonObject();
             object.addProperty("name", property.getName());
             object.add("values", valueNames(property));
+            describeType(property, object);
             result.add(object);
         }
         return result;
@@ -519,6 +567,35 @@ public final class Extractor {
         JsonArray names = new JsonArray();
         property.getPossibleValues().forEach(value -> names.add(property.getName(value)));
         return names;
+    }
+
+    /**
+     * 属性的官方类型，以及 {@code Comparable.compareTo} 用的顺序。
+     *
+     * <p>{@code StatePropertiesPredicate} 的区间比较按属性值的 {@code compareTo} 来，
+     * 三种属性类各有各的顺序：
+     * <ul>
+     *   <li>{@code IntegerProperty} 按数值比，取值是 {@code min..=max} 的连续整数；</li>
+     *   <li>{@code BooleanProperty} 的取值列表是 {@code [true, false]}，但 {@code false < true}；</li>
+     *   <li>{@code EnumProperty} 按枚举常量的声明序号比，取值列表可能是常量的乱序子集。</li>
+     * </ul>
+     */
+    private static void describeType(Property<?> property, JsonObject object) {
+        if (property instanceof IntegerProperty) {
+            List<?> values = property.getPossibleValues();
+            object.addProperty("type", "integer");
+            object.addProperty("min", (Integer) values.get(0));
+            object.addProperty("max", (Integer) values.get(values.size() - 1));
+        } else if (property instanceof BooleanProperty) {
+            object.addProperty("type", "boolean");
+        } else if (property instanceof EnumProperty<?> enumProperty) {
+            object.addProperty("type", "enum");
+            JsonArray ordinals = new JsonArray();
+            enumProperty.getPossibleValues().forEach(value -> ordinals.add(((Enum<?>) value).ordinal()));
+            object.add("ordinals", ordinals);
+        } else {
+            throw new IllegalStateException("未知的属性类型：" + property.getClass().getName());
+        }
     }
 
     /** 方块的第 n 个状态就是属性值的笛卡尔积的第 n 项，最后一个属性变化最快。 */
@@ -978,6 +1055,78 @@ public final class Extractor {
         JsonObject layers = new JsonObject();
         providers.forEach(layers::add);
         return layers;
+    }
+
+    /**
+     * 世界生成的纯计算部分要用的几个注册表。
+     *
+     * <p>噪声参数、密度函数和维度设置按官方 codec 原样编回 JSON，Bamboo 用同一套 codec 的语义解析，
+     * 所以升级版本时数据和解析一起动，不会对不上。密度函数里对注册表的引用还是引用（字符串），
+     * Bamboo 解析时才展开，和官方编译前跑 `DfRewriteRule.INLINE_REFERENCE` 的效果一样。
+     *
+     * <p>多噪声群系预设不走 codec：官方的 `Climate.Parameter` 在 codec 里是浮点，
+     * 而内存里是「原值乘一万再截断」的定点数，来回换算会差一两个最低位，
+     * 所以这里直接导出定点数。顺序就是官方 `ParameterList` 里的顺序，R 树靠它建。
+     */
+    private static JsonObject worldgen(RegistryAccess registries) {
+        RegistryOps<JsonElement> ops = registries.createSerializationContext(JsonOps.INSTANCE);
+        JsonObject worldgen = new JsonObject();
+        worldgen.add("noise", encodeRegistry(registries, ops, Registries.NOISE, NormalNoise.DIRECT_CODEC));
+        worldgen.add("density_function",
+                encodeRegistry(registries, ops, Registries.DENSITY_FUNCTION, DensityFunction.CODEC));
+        worldgen.add("noise_settings",
+                encodeRegistry(registries, ops, Registries.NOISE_SETTINGS, NoiseGeneratorSettings.DIRECT_CODEC));
+        worldgen.add("multi_noise_presets", multiNoisePresets(registries));
+        worldgen.add("end_biomes", endBiomes());
+        return worldgen;
+    }
+
+    /** 一个注册表的全部条目，按名字排序，每一条用给定的 codec 编成 JSON。 */
+    private static <T> JsonObject encodeRegistry(RegistryAccess registries, RegistryOps<JsonElement> ops,
+            ResourceKey<Registry<T>> key, Codec<T> codec) {
+        Registry<T> registry = registries.lookupOrThrow(key);
+        JsonObject entries = new JsonObject();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            entries.add(name.toString(), codec.encodeStart(ops, registry.getValue(name)).getOrThrow());
+        }
+        return entries;
+    }
+
+    /** 两个多噪声群系预设，每条是群系 ID 加十三个定点数（六个区间的上下界和 offset）。 */
+    private static JsonObject multiNoisePresets(RegistryAccess registries) {
+        Registry<MultiNoiseBiomeSourceParameterList> registry =
+                registries.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST);
+        JsonObject presets = new JsonObject();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            JsonArray entries = new JsonArray();
+            for (Pair<Climate.ParameterPoint, Holder<Biome>> entry : registry.getValue(name).parameters().values()) {
+                Climate.ParameterPoint point = entry.getFirst();
+                JsonArray parameters = new JsonArray();
+                for (Climate.Parameter parameter : List.of(point.temperature(), point.humidity(),
+                        point.continentalness(), point.erosion(), point.depth(), point.weirdness())) {
+                    parameters.add(parameter.min());
+                    parameters.add(parameter.max());
+                }
+                parameters.add(point.offset());
+                JsonObject item = new JsonObject();
+                item.addProperty("biome", entry.getSecond().unwrapKey().orElseThrow().identifier().toString());
+                item.add("parameters", parameters);
+                entries.add(item);
+            }
+            presets.add(name.toString(), entries);
+        }
+        return presets;
+    }
+
+    /** TheEndBiomeSource 的五个群系，顺序和官方构造参数一致。 */
+    private static JsonObject endBiomes() {
+        JsonObject biomes = new JsonObject();
+        biomes.addProperty("end", Biomes.THE_END.identifier().toString());
+        biomes.addProperty("highlands", Biomes.END_HIGHLANDS.identifier().toString());
+        biomes.addProperty("midlands", Biomes.END_MIDLANDS.identifier().toString());
+        biomes.addProperty("islands", Biomes.SMALL_END_ISLANDS.identifier().toString());
+        biomes.addProperty("barrens", Biomes.END_BARRENS.identifier().toString());
+        return biomes;
     }
 
     /** BlockBehaviour.Properties.ignitedByLava 是整个方块的属性，按方块 ID 列出来。 */

@@ -11,7 +11,7 @@ use mc_bamboo_data::{Block, BlockClass, block_of_state, blocks};
 
 use super::{
     Rule, UNPORTED_ITEM_USE_ON,
-    lines::{Case, Cell, Destroyed, Header, Kind},
+    lines::{Case, Cell, ContainerStack, Destroyed, Header, Kind},
     replay::{Replayed, Scheduled},
     tick_classes,
 };
@@ -26,6 +26,8 @@ pub struct Mismatch {
     /// 结果不同的格子。
     pub cells: BTreeSet<BlockPos>,
     pub destroyed: bool,
+    /// 容器内容不同。
+    pub contents: bool,
     pub ticks: bool,
     /// 官方和我们范围内的计划刻。
     pub compared_ticks: (Vec<Scheduled>, Vec<Scheduled>),
@@ -39,6 +41,7 @@ impl Mismatch {
         !self.result
             && self.cells.is_empty()
             && !self.destroyed
+            && !self.contents
             && !self.ticks
             && !self.gained
             && self.panic.is_none()
@@ -456,6 +459,20 @@ fn gained_lines(text: &mut String, gained: &[String], differ: bool) {
     }
 }
 
+fn contents_lines(text: &mut String, contents: &[ContainerStack], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for stack in contents {
+        let _ = writeln!(
+            text,
+            "  {mark}    contents {} slot {} {} x{}",
+            pos_text(stack.pos()),
+            stack.slot(),
+            short(stack.item()),
+            stack.count()
+        );
+    }
+}
+
 fn click_line(case: &Case) -> String {
     let action = &case.action;
     match (action.face, action.loc, action.inside) {
@@ -539,6 +556,7 @@ fn render_official(text: &mut String, case: &Case, mismatch: &Mismatch) {
     let cells: Vec<_> = answer.changes.iter().map(|&c| to_pair(c)).collect();
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &answer.destroyed, mismatch.destroyed);
+    contents_lines(text, &answer.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.0, mismatch.ticks);
     gained_lines(text, &answer.gained, mismatch.gained);
 }
@@ -558,6 +576,7 @@ fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mism
         .collect();
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &replayed.destroyed, mismatch.destroyed);
+    contents_lines(text, &replayed.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.1, mismatch.ticks);
     gained_lines(text, &replayed.gained, mismatch.gained);
 }

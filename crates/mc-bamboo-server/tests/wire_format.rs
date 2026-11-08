@@ -488,8 +488,9 @@ fn chunks_decode_every_kind_of_palette() {
     assert_eq!(chunk.state_at(Pos::new(21, -48, -16)), 12345);
     assert_eq!(chunk.sections[0].block_count, 1);
 
-    let entry = chunk.block_entities[0];
+    let entry = &chunk.block_entities[0];
     assert_eq!((entry.packed_xz, entry.y, entry.kind), (0x35, -60, 1));
+    assert_eq!(entry.data, None);
     assert_eq!(chunk.block_entity_at(Pos::new(19, -60, -11)), Some(entry));
 }
 

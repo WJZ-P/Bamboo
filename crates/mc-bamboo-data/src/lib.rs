@@ -19,8 +19,9 @@ pub use recipe::{
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
-    item_components, items, light, packets, recipes, registries, shapes, states, tags, version,
+    block_maps, block_transformers, blocks, component_enums, component_registries,
+    crafting_remainders, heightmaps, item_components, items, light, packets, recipes, registries,
+    shapes, states, tags, version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -131,6 +132,23 @@ pub struct FluidTag {
 pub struct PropertyDef {
     pub name: &'static str,
     pub values: &'static [&'static str],
+    pub kind: PropertyKind,
+}
+
+/// 方块属性的官方类型，以及 `StatePropertiesPredicate` 做区间比较时用的顺序。
+///
+/// 官方的 `Property` 只有三个子类，属性值的 `compareTo` 各按各的顺序比：
+/// 整数按数值，布尔 `false < true`，枚举按枚举常量的声明序号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyKind {
+    /// `IntegerProperty`：取值是 `min..=max` 的连续整数，按数值比较。
+    Integer { min: i32, max: i32 },
+    /// `BooleanProperty`：取值列表是 `[true, false]`，比较时 `false < true`。
+    Boolean,
+    /// `EnumProperty`：取值列表可能是常量的乱序子集，比较时用常量的声明序号。
+    ///
+    /// 下标和 [`PropertyDef::values`] 一一对应。
+    Enum { ordinals: &'static [u16] },
 }
 
 /// 一个构造参数或者只读方法的结果，名字和官方的字段名相同，方法名后面带括号。
@@ -208,7 +226,7 @@ pub enum PushReaction {
 }
 
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
     pub name: &'static str,
     /// 第一个状态的 ID。这个方块的状态一直连续到下一个方块的 `first_state` 之前。
@@ -242,7 +260,14 @@ pub struct Block {
     pub offset: Option<BlockOffset>,
     /// `hasDynamicShape`：官方不缓存这种方块的形状，读取时要带上世界和位置。
     pub dynamic_shape: bool,
+    /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
+    pub destroy_time: f32,
+    /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
+    pub requires_correct_tool_for_drops: bool,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for Block {}
 
 impl Block {
     /// 官方类的字段或者方法结果。名字写错时返回 `None`，见 [`BlockField`]。

@@ -70,7 +70,13 @@ fn int_reference(key: &str, fast_cooking: bool) -> Option<i32> {
             _ => return None,
         };
         // 官方是 `Quotient(exactly(time), ConditionalValue(FAST_FURNACE, 2, 1))`，整数除法。
-        return Some(time / if fast_cooking { FAST_BURN_TIME_REDUCTION_FACTOR } else { 1 });
+        return Some(
+            time / if fast_cooking {
+                FAST_BURN_TIME_REDUCTION_FACTOR
+            } else {
+                1
+            },
+        );
     }
     Some(match key {
         "cooking/normal_burn_time_reduction_factor" => 1,
@@ -142,7 +148,9 @@ pub fn is_brewing_fuel(stack: &ItemStack) -> bool {
     crate::matching::resolved(stack, kinds::BREWING_FUEL).is_some()
 }
 
-/// 官方 `Item.getCraftingRemainder()`：物品默认组件里的 `use_remainder`。
+/// 官方 `Item.getCraftingRemainder()`：物品上的 `craftingRemainingItem`。
+///
+/// Vanilla `Item.getCraftingRemainder()`: the item's `craftingRemainingItem` field.
 pub fn crafting_remainder(stack: &ItemStack) -> Option<ItemStack> {
     crate::assemble::remainder(stack)
 }

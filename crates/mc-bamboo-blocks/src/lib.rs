@@ -13,12 +13,18 @@
 
 pub mod behaviour;
 pub mod block_entity;
+mod composter;
+pub mod container;
 pub mod context;
+pub mod dispenser;
 pub mod fluid;
+pub mod hopper;
 pub mod interact;
 mod item_use;
 pub mod level;
+pub mod mining;
 pub mod placement;
+pub mod predicate;
 pub mod random;
 pub mod random_tick;
 pub mod shape;
@@ -32,10 +38,13 @@ mod testing;
 pub use behaviour::Behaviour;
 pub use behaviour::machines::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
+pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
+pub use dispenser::dispense_from;
+pub use hopper::HopperEntity;
 pub use interact::{
-    InteractionResult, Outcome, destroy_block, run_action_block_ticks, run_scheduled_ticks,
-    use_item, use_item_on,
+    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
+    use_item, use_item_on, use_item_on_checked,
 };
 pub use level::{Effect, Level, RedstoneMemory};
 pub use random::{LegacyRandom, LevelRandom};

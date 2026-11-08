@@ -65,18 +65,21 @@ pub(crate) fn encode_chunk(store: &ChunkStore, pos: ChunkPos) -> Vec<u8> {
         .map(|(kind, data)| Heightmap { kind: *kind, data })
         .collect();
 
-    // 告示牌的文字不放在区块里，要编成官方的 `getUpdateTag` 一起发。
+    // 告示牌的文字、旗帜的图案这些不放在区块的方块里，要编成官方的 `getUpdateTag` 一起发。
     let block_entities: Vec<(BlockEntityInfo, Option<Vec<u8>>)> = chunk
         .block_entities()
         .map(|entity| {
-            // 表里存的是区块内坐标，查告示牌内容要用世界坐标。
+            // 表里存的是区块内坐标，查方块实体的内容要用世界坐标。
             let local = BlockPos::new(entity.x as i32, entity.y, entity.z as i32);
             let world = BlockPos::new(
                 pos.x * 16 + entity.x as i32,
                 entity.y,
                 pos.z * 16 + entity.z as i32,
             );
-            let data = store.sign(world).map(|content| sign::update_tag(&content));
+            let data = store
+                .sign(world)
+                .map(|content| sign::update_tag(&content))
+                .or_else(|| store.update_tag(world).map(<[u8]>::to_vec));
             (
                 BlockEntityInfo {
                     pos: local,

@@ -110,6 +110,28 @@ const fn pack_section(x: i32, y: i32, z: i32) -> i64 {
     ((x as i64 & 0x3f_ffff) << 42) | ((z as i64 & 0x3f_ffff) << 20) | (y as i64 & 0xf_ffff)
 }
 
+/// 某个玩家正在挖方块，其余玩家看到裂纹。官方的 `ClientboundBlockDestructionPacket`。
+///
+/// `progress` 是 `0` 到 `10` 的裂纹阶段，`-1` 表示不挖了。它按无符号字节写，
+/// 客户端读出来再当成 `int`，所以 `-1` 是 `255`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockDestruction {
+    /// 正在挖的玩家实体 ID。发包的 `id` 就是它，收包的人据此排除自己。
+    pub id: i32,
+    pub pos: BlockPos,
+    pub progress: i8,
+}
+
+impl ClientboundPacket for BlockDestruction {
+    const ID: i32 = clientbound::BLOCK_DESTRUCTION;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.id);
+        write_block_pos(out, self.pos);
+        out.push(self.progress as u8);
+    }
+}
+
 /// 确认到 `sequence` 为止的所有预测。必须排在这些改动的 [`BlockUpdate`] 和
 /// [`SectionBlocksUpdate`] 后面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +391,22 @@ mod tests {
             data: &[0x08, 0x00],
         };
         assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 2a 08 00"));
+    }
+
+    #[test]
+    fn block_destruction_matches_official_bytes() {
+        let packet = BlockDestruction {
+            id: 1,
+            pos: BlockPos::new(8, -61, 8),
+            progress: 5,
+        };
+        assert_eq!(body(&packet), hex("01 00 00 02 00 00 00 8f c3 05"));
+        // 停止挖掘时发 -1，按无符号字节写是 255。
+        let cancelled = BlockDestruction {
+            progress: -1,
+            ..packet
+        };
+        assert_eq!(body(&cancelled), hex("01 00 00 02 00 00 00 8f c3 ff"));
     }
 
     #[test]

@@ -120,10 +120,9 @@ fn chests_accept_the_open_event_but_hoppers_do_not() {
 }
 
 #[test]
-fn a_new_chest_has_an_empty_slot_for_every_source() {
+fn a_new_chest_starts_with_empty_slots() {
     let chest = ContainerEntry::new(ContainerKind::Chest);
     assert_eq!(chest.slots.len(), 27);
-    assert_eq!(chest.sources.len(), 27);
     assert!(chest.slots.iter().all(ItemStack::is_empty));
     assert_eq!(chest.open_count, 0);
     assert!(chest.recheck_at.is_none());

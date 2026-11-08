@@ -12,6 +12,11 @@ categories = ["games"]
 [dependencies]
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+# 物品的 `tool` 组件：挖掘速度和掉落规则都从默认组件里读。
 mc-bamboo-protocol.workspace = true
 mc-bamboo-recipes.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# 谓词的 NBT 字段在测试里要能构造。
+mc-bamboo-nbt.workspace = true

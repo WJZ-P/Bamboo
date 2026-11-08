@@ -10,8 +10,8 @@ use std::{
 use crate::extract::{
     Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
-    ExtractedStack, FieldValue, HeightmapType, Item, Property, StateProvider, TagGroup,
-    VersionData,
+    ExtractedStack, FieldValue, HeightmapType, Item, Property, PropertyKind, StateProvider,
+    TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -69,8 +69,47 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         "item_components.rs",
         &item_components_file(data)?,
     )?;
+    write_file(
+        output_dir,
+        "crafting_remainders.rs",
+        &crafting_remainders_file(data)?,
+    )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
-    write_file(output_dir, "tags.rs", &tags)
+    write_file(output_dir, "tags.rs", &tags)?;
+    write_worldgen(data, output_dir)
+}
+
+/// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。
+///
+/// 这几个注册表是递归的树（密度函数里套密度函数、样条里套样条），生成等价的 Rust 结构
+/// 会是一大堆嵌套字面量，升级版本时也看不出差异；JSON 是官方 codec 的原始形态，
+/// `mc-bamboo-worldgen` 用同一套 codec 的语义解析，所以这里原样存。
+fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&data.worldgen)
+        .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
+    let path = output_dir.join("worldgen.json");
+    fs::write(&path, format!("{json}\n"))
+        .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 官方数据包里世界生成的几个注册表：`worldgen/noise`、`worldgen/density_function`、"
+    );
+    let _ = writeln!(
+        out,
+        "/// `worldgen/noise_settings`、两个多噪声群系预设和末地的五个群系。"
+    );
+    let _ = writeln!(out, "///");
+    let _ = writeln!(
+        out,
+        "/// 前三个是官方 codec 编出来的 JSON，预设是量化好的定点数。解析在 `mc-bamboo-worldgen`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLDGEN: &str = include_str!(\"worldgen.json\");"
+    );
+    write_file(output_dir, "worldgen.rs", &out)
 }
 
 /// 组件里按 ID 查表的枚举：连续的常量个数，稀疏的整张 ID 表。
@@ -193,6 +232,70 @@ fn item_components_file(data: &VersionData) -> Result<String, String> {
     Ok(out)
 }
 
+/// `Item.getCraftingRemainder()`。只有声明了余料的物品在表里，按物品 ID 二分查找。
+///
+/// 补丁字节是官方 `DataComponentPatch.STREAM_CODEC`。空补丁不占字节。
+fn crafting_remainders_file(data: &VersionData) -> Result<String, String> {
+    if data.crafting_remainders.len() != data.items.len() {
+        return Err(format!(
+            "导出了 {} 个合成余料，物品有 {} 个",
+            data.crafting_remainders.len(),
+            data.items.len()
+        ));
+    }
+    let mut blob = Vec::new();
+    let mut entries = Vec::new();
+    for (source, remainder) in data.crafting_remainders.iter().enumerate() {
+        let Some((item, count, hex)) = remainder else {
+            continue;
+        };
+        let bytes = if hex.is_empty() || hex == "0000" {
+            Vec::new()
+        } else {
+            decode_hex(hex)
+                .ok_or_else(|| format!("{} 的合成余料组件不是十六进制", data.items[source].name))?
+        };
+        let start = blob.len();
+        blob.extend_from_slice(&bytes);
+        entries.push((source as i32, *item, *count, start, blob.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 合成余料的组件补丁拼在一起，位置见 [`ENTRIES`] 的最后两列。"
+    );
+    let _ = writeln!(out, "pub static PATCHES: &[u8] = b\"{}\";\n", escape(&blob));
+    let _ = writeln!(
+        out,
+        "/// `(物品 ID, 余料物品, 数量, 补丁起点, 补丁终点)`，按物品 ID 排好。"
+    );
+    let _ = writeln!(out, "pub static ENTRIES: &[(i32, i32, i32, u32, u32)] = &[");
+    for (source, item, count, start, end) in entries {
+        let _ = writeln!(out, "    ({source}, {item}, {count}, {start}, {end}),");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 这个物品的 `getCraftingRemainder`。没有余料时是 `None`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub fn of(item: i32) -> Option<(i32, i32, &'static [u8])> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    let index = ENTRIES.binary_search_by_key(&item, |entry| entry.0).ok()?;"
+    );
+    let _ = writeln!(out, "    let entry = ENTRIES[index];");
+    let _ = writeln!(
+        out,
+        "    Some((entry.1, entry.2, &PATCHES[entry.3 as usize..entry.4 as usize]))"
+    );
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
@@ -302,6 +405,7 @@ pub mod block_transformers;
 pub mod blocks;
 pub mod component_enums;
 pub mod component_registries;
+pub mod crafting_remainders;
 pub mod heightmaps;
 pub mod item_components;
 pub mod items;
@@ -313,6 +417,7 @@ pub mod shapes;
 pub mod states;
 pub mod tags;
 pub mod version;
+pub mod worldgen;
 "
     .to_owned()
 }
@@ -450,7 +555,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PushReaction}};"
+        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PropertyKind, PushReaction}};"
     );
     let _ = writeln!(out, "use crate::tags::block_tags;\n");
     let _ = writeln!(out, "/// 方块状态的总数，决定了全局调色板的位数。");
@@ -466,7 +571,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -483,6 +588,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.instrument,
             offset_literal(block),
             block.dynamic_shape,
+            block.destroy_time,
+            block.requires_correct_tool_for_drops,
         );
     }
 
@@ -541,8 +648,17 @@ fn property_list(properties: &[Property]) -> String {
     let items: Vec<String> = properties
         .iter()
         .map(|property| {
+            let kind = match &property.kind {
+                PropertyKind::Integer { min, max } => {
+                    format!("PropertyKind::Integer {{ min: {min}, max: {max} }}")
+                }
+                PropertyKind::Boolean => "PropertyKind::Boolean".to_owned(),
+                PropertyKind::Enum { ordinals } => {
+                    format!("PropertyKind::Enum {{ ordinals: &{ordinals:?} }}")
+                }
+            };
             format!(
-                "PropertyDef {{ name: {:?}, values: &{:?} }}",
+                "PropertyDef {{ name: {:?}, values: &{:?}, kind: {kind} }}",
                 property.name, property.values
             )
         })
@@ -623,6 +739,56 @@ fn check_properties(blocks: &[Block]) -> Result<(), String> {
                 block.name,
                 block.states.len()
             ));
+        }
+        for property in &block.properties {
+            check_property_kind(&block.name, property)?;
+        }
+    }
+    Ok(())
+}
+
+/// 属性的取值列表要和官方类型对得上：整数是连续的 `min..=max`，布尔是 `[true, false]`，
+/// 枚举的序号和取值一一对应。区间匹配靠的就是这些类型和顺序。
+fn check_property_kind(block: &str, property: &Property) -> Result<(), String> {
+    match &property.kind {
+        PropertyKind::Integer { min, max } => {
+            let parsed = property
+                .values
+                .iter()
+                .map(|value| {
+                    value.parse::<i32>().map_err(|_| {
+                        format!(
+                            "{block} 的属性 {} 是 IntegerProperty，却有不是整数的取值 {value}",
+                            property.name
+                        )
+                    })
+                })
+                .collect::<Result<Vec<i32>, String>>()?;
+            if parsed != (*min..=*max).collect::<Vec<i32>>() {
+                return Err(format!(
+                    "{block} 的属性 {} 是 IntegerProperty {min}..={max}，取值列表却是 {:?}",
+                    property.name, property.values
+                ));
+            }
+        }
+        PropertyKind::Boolean => {
+            if property.values != ["true", "false"] {
+                return Err(format!(
+                    "{block} 的属性 {} 是 BooleanProperty，取值列表却是 {:?}",
+                    property.name, property.values
+                ));
+            }
+        }
+        PropertyKind::Enum { ordinals } => {
+            let mut distinct = ordinals.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            if ordinals.len() != property.values.len() || distinct.len() != ordinals.len() {
+                return Err(format!(
+                    "{block} 的属性 {} 的枚举序号 {ordinals:?} 和取值列表 {:?} 对不上",
+                    property.name, property.values
+                ));
+            }
         }
     }
     Ok(())
@@ -1526,14 +1692,16 @@ impl<'a> RecipeWriter<'a> {
 
     /// 组件补丁的十六进制字节写成 Rust 字节切片。
     fn components(&self, hex: &str) -> Result<String, String> {
-        if hex.len() % 2 != 0 {
+        let (pairs, rest) = hex.as_bytes().as_chunks::<2>();
+        if !rest.is_empty() {
             return Err(format!("组件字节的十六进制长度是奇数：{hex}"));
         }
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        for pair in hex.as_bytes().chunks_exact(2) {
-            let pair = std::str::from_utf8(pair).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
-            let byte = u8::from_str_radix(pair, 16)
-                .map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+        let mut bytes = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let pair =
+                std::str::from_utf8(pair).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            let byte =
+                u8::from_str_radix(pair, 16).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
             bytes.push(byte);
         }
         Ok(format!("&{bytes:?}"))
@@ -1969,6 +2137,17 @@ fn registries_file(data: &VersionData) -> String {
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+
+    let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
+    let _ = writeln!(out, "pub mod attribute_defaults {{");
+    for (name, value) in &data.attribute_defaults {
+        let _ = writeln!(
+            out,
+            "    pub const {}: f64 = {value:?};",
+            constant_name(name)
+        );
+    }
+    let _ = writeln!(out, "}}\n");
     out
 }
 
@@ -2101,6 +2280,8 @@ mod tests {
             instrument: "harp".to_owned(),
             dynamic_shape: false,
             offset: None,
+            destroy_time: 0.0,
+            requires_correct_tool_for_drops: false,
         }
     }
 
@@ -2108,6 +2289,10 @@ mod tests {
         Property {
             name: "test".to_owned(),
             values: values.iter().map(|&value| value.to_owned()).collect(),
+            // 这里只关心状态数，给一个和取值列表一样长的枚举类型。
+            kind: PropertyKind::Enum {
+                ordinals: vec![0, 1],
+            },
         }
     }
 

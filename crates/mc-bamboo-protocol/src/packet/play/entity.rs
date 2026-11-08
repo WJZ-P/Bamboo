@@ -228,7 +228,8 @@ pub enum EquipmentSlot {
 
 /// 更新实体的装备，发给看得到这个实体的其他玩家。
 ///
-/// 物品一律不带组件，见 [`ItemStack`]。
+/// 物品带着组件：客户端要靠它们画附魔光效和改过的名字。收包的一定不是物品的主人，
+/// 所以走 [`ItemStack::write_for_others`]，没法完全校验的那几种组件不发。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetEquipment<'a> {
     entity_id: i32,
@@ -250,7 +251,7 @@ impl ClientboundPacket for SetEquipment<'_> {
         for (index, (slot, stack)) in self.slots.iter().enumerate() {
             let is_last = index + 1 == self.slots.len();
             out.push(*slot as u8 | if is_last { 0 } else { EQUIPMENT_CONTINUE });
-            stack.write_without_components(out);
+            stack.write_for_others(out);
         }
     }
 }
@@ -491,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn set_equipment_never_forwards_components() {
+    fn set_equipment_forwards_the_components() {
         let stack = ItemStack {
             item: 1,
             count: 2,
@@ -500,7 +501,7 @@ mod tests {
         };
         let slots = [(EquipmentSlot::MainHand, &stack)];
         let packet = SetEquipment::new(ENTITY, &slots).unwrap();
-        assert_eq!(body(&packet), hex("07 00 02 01 00 00"));
+        assert_eq!(body(&packet), hex("07 00 02 01 01 01 01 10 0c"));
     }
 
     #[test]

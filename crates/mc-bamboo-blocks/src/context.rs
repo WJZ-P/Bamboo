@@ -28,7 +28,7 @@ pub struct Actor {
     pub eye_height: f64,
     /// `blockInteractionRange`。
     pub block_interaction_range: f64,
-    /// `player.mayBuild()`：创造模式和冒险模式是真。这个世界只有创造模式。
+    /// `player.mayBuild()`：生存模式和创造模式是真，冒险模式和旁观模式是假。
     pub may_build: bool,
     /// `player.preventsBlockDrops()`：创造模式的 `instabuild` 能力。活塞头在玩家破坏时
     /// 只有它为真才拆底座，生存模式改由形状更新拆。

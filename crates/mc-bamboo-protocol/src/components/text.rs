@@ -39,6 +39,86 @@ fn bad(reason: &'static str) -> DecodeError {
     DecodeError::InvalidTextComponent(reason)
 }
 
+/// 这段文本里有没有被 [`validate`] 放过的构造。
+///
+/// 转发给第三方之前要问一遍：客户端解这段 NBT 时用的是官方的 `Codec`，
+/// 我们没完全校验的地方它可能解不开，解不开就断线。见 [`crate::components::forward`]。
+pub fn is_fully_checked(component: &Component) -> bool {
+    fully_checked(component.tag())
+}
+
+fn fully_checked(tag: &Tag) -> bool {
+    match tag {
+        Tag::String(_) => true,
+        Tag::List(items) => items.iter().all(fully_checked),
+        Tag::Compound(entries) => {
+            checked_contents(entries) && checked_style(entries) && checked_children(entries)
+        }
+        _ => false,
+    }
+}
+
+/// 内容部分：官方要再解析实体选择器、NBT 路径和档案，我们只看了字段类型。
+fn checked_contents(entries: &[(String, Tag)]) -> bool {
+    const UNCHECKED: [&str; 3] = ["selector", "nbt", "object"];
+
+    if let Some(Tag::String(kind)) = field(entries, "type")
+        && UNCHECKED.contains(&kind.as_str())
+    {
+        return false;
+    }
+    UNCHECKED
+        .into_iter()
+        .all(|name| field(entries, name).is_none())
+}
+
+/// `extra`、`with` 和 `separator` 里的子组件。
+fn checked_children(entries: &[(String, Tag)]) -> bool {
+    for name in ["extra", "with"] {
+        if let Some(Tag::List(items)) = field(entries, name)
+            && !items.iter().all(|item| match item {
+                // 基本类型的翻译参数不是组件。
+                Tag::Compound(_) | Tag::List(_) | Tag::String(_) => fully_checked(item),
+                _ => true,
+            })
+        {
+            return false;
+        }
+    }
+    match field(entries, "separator") {
+        Some(separator) => fully_checked(separator),
+        None => true,
+    }
+}
+
+/// 样式部分：对话框的内联定义和 `show_item` 里的组件表都没往下看。
+fn checked_style(entries: &[(String, Tag)]) -> bool {
+    if let Some(Tag::Compound(click)) = field(entries, "click_event")
+        && string_field(click, "action") == Ok("show_dialog")
+        && !matches!(field(click, "dialog"), Some(Tag::String(_)))
+    {
+        return false;
+    }
+    let Some(Tag::Compound(hover)) = field(entries, "hover_event") else {
+        return true;
+    };
+    match string_field(hover, "action") {
+        Ok("show_item") => {
+            // `count` 是 1 到 99 的整数，`components` 是一整张 NBT 形式的组件表。
+            field(hover, "count").is_none() && field(hover, "components").is_none()
+        }
+        Ok("show_text") => match field(hover, "value") {
+            Some(value) => fully_checked(value),
+            None => true,
+        },
+        Ok("show_entity") => match field(hover, "name") {
+            Some(name) => fully_checked(name),
+            None => true,
+        },
+        _ => true,
+    }
+}
+
 /// 官方 `ComponentSerialization.createCodec`：字符串、非空列表，或者一个完整的复合标签。
 fn validate(tag: &Tag, depth: u32) -> Result<(), DecodeError> {
     if depth >= MAX_DEPTH {

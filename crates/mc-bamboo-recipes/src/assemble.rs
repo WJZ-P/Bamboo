@@ -15,13 +15,12 @@
 
 use mc_bamboo_data::{
     FireworkShape, Recipe, RecipeKind, Stack, items,
-    registries::{data_component_type as kinds, SYNCED_REGISTRIES},
+    registries::{SYNCED_REGISTRIES, data_component_type as kinds},
 };
 use mc_bamboo_protocol::{
     components::{
         ComponentPatch, ComponentValue, PatchEntry, cursor::Cursor, cursor::Holder, defaults,
-        stack::ItemStackTemplate,
-        value::FireworkExplosion,
+        stack::ItemStackTemplate, value::FireworkExplosion,
     },
     item::ItemStack,
 };
@@ -104,7 +103,11 @@ pub(crate) fn patch_of(stack: &ItemStack) -> ComponentPatch {
 /// 官方 `PatchedDataComponentMap.applyPatch`：把 `overlay` 叠到 `base` 上。
 ///
 /// 值等于默认组件时条目消失；移除一个本来就没有默认值的组件时也不留条目。
-pub(crate) fn applied(item: i32, base: &ComponentPatch, overlay: &ComponentPatch) -> ComponentPatch {
+pub(crate) fn applied(
+    item: i32,
+    base: &ComponentPatch,
+    overlay: &ComponentPatch,
+) -> ComponentPatch {
     let mut patch = base.clone();
     for (kind, entry) in overlay.entries() {
         match entry {
@@ -188,9 +191,11 @@ pub fn assemble(recipe: &Recipe, input: &[ItemStack]) -> Option<ItemStack> {
             result_components,
             *add_material_count,
         ),
-        RecipeKind::Dye { target, dye, result } => {
-            assemble_dye(input, *target, *dye, *result)
-        }
+        RecipeKind::Dye {
+            target,
+            dye,
+            result,
+        } => assemble_dye(input, *target, *dye, *result),
         RecipeKind::Imbue { result, .. } => {
             let source = input.get(4)?;
             let mut stack = create(*result);
@@ -217,9 +222,9 @@ pub fn assemble(recipe: &Recipe, input: &[ItemStack]) -> Option<ItemStack> {
         RecipeKind::SmithingTrim { pattern, .. } => {
             assemble_trim(input.get(1)?, input.get(2)?, pattern)
         }
-        RecipeKind::FireworkRocket { fuel, star, result, .. } => {
-            assemble_firework_rocket(input, *fuel, *star, *result)
-        }
+        RecipeKind::FireworkRocket {
+            fuel, star, result, ..
+        } => assemble_firework_rocket(input, *fuel, *star, *result),
         RecipeKind::FireworkStar {
             shapes,
             trail,
@@ -228,9 +233,11 @@ pub fn assemble(recipe: &Recipe, input: &[ItemStack]) -> Option<ItemStack> {
             result,
             ..
         } => assemble_firework_star(input, shapes, *trail, *twinkle, *dye, *result),
-        RecipeKind::FireworkStarFade { target, dye, result } => {
-            assemble_firework_star_fade(input, *target, *dye, *result)
-        }
+        RecipeKind::FireworkStarFade {
+            target,
+            dye,
+            result,
+        } => assemble_firework_star_fade(input, *target, *dye, *result),
         RecipeKind::MapExtending {
             map,
             result_item,
@@ -294,7 +301,11 @@ fn assemble_transmute(
         }
     }
     let input_stack = found_input?;
-    let extra = if add_material_count { material_count } else { 0 };
+    let extra = if add_material_count {
+        material_count
+    } else {
+        0
+    };
     let item = result_item.unwrap_or(input_stack.item);
     Some(create_with_original(
         item,
@@ -338,7 +349,13 @@ fn assemble_dye(
         _ => None,
     };
     let new_dyed_color = apply_dyes(current, &dyes);
-    let mut stack = create_with_original(result.item, result.count, result.components, target_stack, 0);
+    let mut stack = create_with_original(
+        result.item,
+        result.count,
+        result.components,
+        target_stack,
+        0,
+    );
     let mut patch = patch_of(&stack);
     set(
         stack.item,
@@ -566,7 +583,13 @@ fn assemble_firework_star_fade(
         return None;
     }
 
-    let mut stack = create_with_original(result.item, result.count, result.components, target_stack, 0);
+    let mut stack = create_with_original(
+        result.item,
+        result.count,
+        result.components,
+        target_stack,
+        0,
+    );
     let mut patch = patch_of(&stack);
     let mut explosion = match resolved(&stack, kinds::FIREWORK_EXPLOSION) {
         Some(ComponentValue::FireworkExplosion(explosion)) => explosion,
@@ -694,7 +717,13 @@ fn assemble_shield(
     }
     let target_stack = target_stack?;
 
-    let mut stack = create_with_original(result.item, result.count, result.components, target_stack, 0);
+    let mut stack = create_with_original(
+        result.item,
+        result.count,
+        result.components,
+        target_stack,
+        0,
+    );
     let mut patch = patch_of(&stack);
     set(stack.item, &mut patch, kinds::BANNER_PATTERNS, patterns);
     set(
@@ -969,15 +998,33 @@ pub fn remaining_items(recipe: &Recipe, input: &[ItemStack]) -> Vec<ItemStack> {
     }
 }
 
-/// 官方 `Item.getCraftingRemainder()`：物品默认组件里的 `USE_REMAINDER`。
+/// 官方 `Item.getCraftingRemainder()`，物品上的 `craftingRemainingItem` 字段。
+///
+/// 这和 `use_remainder` 组件不是一回事：喝牛奶才看组件，合成和烧燃料看这个字段。
+///
+/// Vanilla `Item.getCraftingRemainder()`, the item's `craftingRemainingItem` field.
+///
+/// This is not the `use_remainder` component. Drinking milk reads the component;
+/// crafting and fuel consumption read this field.
 pub(crate) fn remainder(stack: &ItemStack) -> Option<ItemStack> {
-    match defaults::of_item(stack.item).get(kinds::USE_REMAINDER) {
-        Some(ComponentValue::UseRemainder(template)) => Some(ItemStack {
-            item: template.item,
-            count: template.count,
-            added: template.components.to_opaque().0,
-            removed: template.components.to_opaque().1,
-        }),
-        _ => None,
+    if stack.is_empty() {
+        return None;
     }
+    let (item, count, patch) = mc_bamboo_data::crafting_remainders::of(stack.item)?;
+    let (added, removed) = if patch.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let mut cursor = Cursor::new(patch);
+        let parsed = ComponentPatch::read(&mut cursor).ok()?;
+        if cursor.finish().is_err() {
+            return None;
+        }
+        parsed.to_opaque()
+    };
+    Some(ItemStack {
+        item,
+        count,
+        added,
+        removed,
+    })
 }

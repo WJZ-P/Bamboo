@@ -198,6 +198,40 @@ impl ChunkStore {
         true
     }
 
+    /// 这一格的方块实体要发给客户端的 NBT，官方 `BlockEntity.getUpdateTag` 的结果。
+    ///
+    /// 内容由 `mc-bamboo-game` 算好写进来：这一层不认识物品组件，只负责跟着方块存和丢。
+    /// 告示牌不走这里，它的内容在 [`sign`](Self::sign)。
+    pub fn update_tag(&self, pos: BlockPos) -> Option<&[u8]> {
+        if !is_inside_world(pos.y) {
+            return None;
+        }
+        self.chunk(pos.chunk())
+            .update_tag(local(pos.x), pos.y, local(pos.z))
+    }
+
+    /// 改写这一格方块实体要发给客户端的 NBT。`None` 表示这一格没有要发的内容。
+    ///
+    /// 这一格没有方块实体时什么也不做，返回 `false`。
+    pub fn set_update_tag(&mut self, pos: BlockPos, tag: Option<Vec<u8>>) -> bool {
+        if !is_inside_world(pos.y) {
+            return false;
+        }
+        let (x, z) = (local(pos.x), local(pos.z));
+        if block_of_state(self.chunk(pos.chunk()).block(x, pos.y, z))
+            .is_none_or(|block| block.block_entity_type.is_none())
+        {
+            return false;
+        }
+        // 内容没变就不动区块：版本号不变，区块包的缓存也不用重新编码。
+        if self.update_tag(pos) == tag.as_deref() {
+            return true;
+        }
+        let chunk = self.edited.chunk_mut(pos.chunk(), &self.template);
+        chunk.set_update_tag(x, pos.y, z, tag);
+        true
+    }
+
     /// 正在被某名玩家编辑的告示牌和它们的编辑器。
     pub fn sign_editors(&self) -> impl Iterator<Item = (BlockPos, [u8; 16])> + '_ {
         self.edited.iter().flat_map(|(chunk_pos, chunk)| {

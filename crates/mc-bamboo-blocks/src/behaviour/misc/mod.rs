@@ -9,6 +9,10 @@ mod cake;
 mod candle;
 mod cauldron;
 mod composter;
+
+pub(crate) use composter::{
+    MAX_LEVEL as COMPOST_MAX_LEVEL, READY as COMPOST_READY, compost_empty, compost_fill,
+};
 mod copper;
 mod crafter;
 mod creaking_heart;

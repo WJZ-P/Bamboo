@@ -7,7 +7,7 @@
 use std::any::Any;
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, BlockAncestor};
 
 use super::{cooking::FurnaceEntity, facing_the_view};
 use crate::{
@@ -17,6 +17,8 @@ use crate::{
     },
     block_entity::BlockEntity,
     context::{PlaceContext, UseContext},
+    dispenser::dispense_from,
+    hopper::HopperEntity,
     interact::InteractionResult,
     shape::{Aabb, Boxes, CollisionContext},
     state::{BlockState, ENABLED, FACING, FACING_HOPPER, TRIGGERED},
@@ -47,6 +49,17 @@ impl Behaviour for Barrel {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `BarrelBlock.getAnalogOutputSignal`：比较器读木桶的内容。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
     }
 }
 
@@ -307,6 +320,17 @@ impl Behaviour for ShulkerBox {
     ) -> InteractionResult {
         InteractionResult::Success
     }
+
+    /// `ShulkerBoxBlock.getAnalogOutputSignal`：比较器读潜影盒的内容。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
+    }
 }
 
 /// `AbstractFurnaceBlock`：`FurnaceBlock`、`BlastFurnaceBlock`、`SmokerBlock` 只有界面不同。
@@ -334,6 +358,25 @@ impl Behaviour for Furnace {
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         update_neighbours_after_destroy(state, world, pos);
+    }
+
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal`：比较器读三格内容。
+    ///
+    /// 实体正在 tick、不在表里时读到 0。空熔炉本来就是 0。
+    ///
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots. While the entity
+    /// is ticking it is out of the map, so this returns 0. An empty furnace is 0 anyway.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world
+            .block_entity::<FurnaceEntity>(pos)
+            .map(|entity| crate::container::redstone_signal(entity.items().iter(), 3))
+            .unwrap_or(0)
     }
 
     fn use_without_item(
@@ -379,6 +422,9 @@ impl Behaviour for Hopper {
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         if !old.is_same_block(state) {
             check_powered_state(state, world, pos);
+            if !world.has_block_entity(pos) {
+                world.set_block_entity(Box::new(HopperEntity::new(pos)));
+            }
         }
     }
 
@@ -403,6 +449,17 @@ impl Behaviour for Hopper {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `HopperBlock.getAnalogOutputSignal`：比较器读漏斗里的 5 格。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
     }
 }
 
@@ -451,6 +508,26 @@ impl Behaviour for Dispenser {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `DispenserBlock.tick`：计划刻到期，投掷器把物品发出去。
+    ///
+    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里，发射器这一支什么也不做。
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.is_a(BlockAncestor::DropperBlock) {
+            dispense_from(world, pos, state);
+        }
+    }
+
+    /// `DispenserBlock.getAnalogOutputSignal`：比较器读 9 格。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
     }
 }
 
