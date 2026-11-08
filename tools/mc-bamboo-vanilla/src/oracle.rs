@@ -33,15 +33,15 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::FACING, state::FACING_HOPPER, state::HAS_RECORD,
-    state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
+    BlockState, behaviour::is_ported, state::CRAFTING, state::FACING, state::FACING_HOPPER,
+    state::HAS_RECORD, state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
     Block, BlockAncestor, BlockClass, Item, block_id_of_state, blocks, items, version,
 };
 
-use lines::{Case, Header, Kind, Line, Tick};
+use lines::{Case, ContainerStack, Header, Kind, Line, SoundPlay, Tick};
 use replay::{FLUID_NAMES, Replayed, Scheduled, replay};
 use report::{Mismatch, Report};
 
@@ -178,17 +178,21 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: an item dispenser fired (arrows, water, armor) or a crafter tried to craft \
-                 (level event 1050); those behaviours are out of scope"
+                "scope: an item dispenser fired, or a crafter crafted (level event 1049/2010, \
+                 the crafting flag, or its slots changed). A crafter that only plays fail event \
+                 1050 is still compared"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
             }
             Self::EntitySound => {
-                "scope: entities and their sounds are not simulated (mob buckets spawn a mob)"
+                "compare: a mob bucket is still compared; only a sound played by the mob that \
+                 bucket spawns (registry name minecraft:entity.<that entity>., and the player is \
+                 not skipped) is removed from the official list"
             }
             Self::BlockEntityEvent => {
-                "scope: vault block entities play their own sounds and state events"
+                "scope: the official outcome contains a vault block-entity sound or state event \
+                 3015-3017; a vault that did not fire one is still compared"
             }
             Self::UnmodeledContainer => {
                 "case: a hopper or dropper ticked next to a container Bamboo keeps no slot table for \
@@ -599,6 +603,10 @@ impl Session {
         let kind = case.action.kind;
 
         if let Some(rule) = case_exclusion(case, block, &self.names)? {
+            if rule == Rule::Dispensing {
+                self.report
+                    .note_dispensing(crafter_crafts(case), dispenser_dispenses(case));
+            }
             self.report.excluded(block, kind, rule);
             return Ok(());
         }
@@ -648,7 +656,7 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if case.outcome.analog_content {
         return Ok(Some(Rule::AnalogInput));
     }
-    if dispenser_dispenses(case) || crafter_ejects(case) {
+    if dispenser_dispenses(case) || crafter_crafts(case) {
         return Ok(Some(Rule::Dispensing));
     }
     if transfers_with_unmodeled_container(case) {
@@ -657,17 +665,10 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if fires_a_vault_event(case) {
         return Ok(Some(Rule::BlockEntityEvent));
     }
-    if uses_a_mob_bucket(case) {
-        return Ok(Some(Rule::EntitySound));
-    }
     let rule = match case.action.kind {
-        Kind::Destroy
-            if case.outcome.result == "refused"
-                && !block
-                    .class
-                    .ancestors()
-                    .contains(&BlockAncestor::GameMasterBlock) =>
-        {
+        // 看目标格上的方块，不看题目类。旁边的床会把头写进题目那一格。
+        // The cell at the target, not the case's class. A neighbouring bed writes its head there.
+        Kind::Destroy if case.outcome.result == "refused" && !target_is_game_master(case) => {
             Some(Rule::CanDestroyBlock)
         }
         Kind::Place | Kind::Use if clicks_comparator_with_analog_input(case) => {
@@ -689,6 +690,9 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
 }
 
 /// 宝库的方块实体在状态切换、插钥匙和吐战利品时自己报事件、放音效。Bamboo 没有方块实体。
+/// 只在官方结果里真的出现这些声音或 3015–3017 时整题排除。宝库在场但这次没触发，照常比较。
+/// Exclude the case only when the official outcome actually contains those sounds or events
+/// 3015-3017. A vault that did not fire is still compared.
 fn fires_a_vault_event(case: &Case) -> bool {
     const SOUNDS: [&str; 6] = [
         "minecraft:block.vault.insert_item",
@@ -710,9 +714,83 @@ fn fires_a_vault_event(case: &Case) -> bool {
         .any(|event| EVENTS.contains(&event.0))
 }
 
-/// 生物桶的 `Item.use` 会生成一只生物，并让它叫一声。生物和它的随机源都不在范围里。
-fn uses_a_mob_bucket(case: &Case) -> bool {
+/// 这题是 `MobBucketItem.use`。倒出之后 `checkExtraContent` 会 `spawn`，再 `playAmbientSound`。
+/// This case is `MobBucketItem.use`. After emptying, `checkExtraContent` spawns the mob and
+/// calls `playAmbientSound`.
+fn pours_a_mob_bucket(case: &Case) -> bool {
     case.action.kind == Kind::Item && case.action.item_class == "MobBucketItem"
+}
+
+/// 这一声是这只桶生成的生物自己发的，比较前从官方列表去掉。
+///
+/// This sound was played by the mob this bucket spawns. It is removed from the official list
+/// before comparing.
+///
+/// `MobBucketItem.spawn` 在放进世界之后只调用一次 `playAmbientSound`。那一声来自
+/// `LivingEntity.makeSound(getAmbientSound())`，再进 `Entity.playSound`：
+/// `level.playSound(null, getX(), getY(), getZ(), ...)`。所以同时满足才算：
+/// `MobBucketItem.spawn` calls `playAmbientSound` once after the mob is added. That goes through
+/// `LivingEntity.makeSound(getAmbientSound())` and then `Entity.playSound`:
+/// `level.playSound(null, getX(), getY(), getZ(), ...)`. All of these must hold:
+/// - `excluded == false`。`except` 是 null，不跳过玩家。桶自己的 `playEmptySound` 传入玩家，留下来照比。
+///   `excluded == false`. The except is null, so the player is not skipped. The bucket's own
+///   `playEmptySound` passes the player and stays in the comparison.
+/// - 注册表名以 `minecraft:entity.<生物路径>.` 开头。生物是生成器导出的 `MobBucketItem.type`，
+///   比如鲑鱼是 `minecraft:entity.salmon.ambient`，美西螈是 `idle_water` / `idle_air`。
+///   方块发出的 `entity.generic.extinguish_fire`、`entity.tnt.primed`、`entity.copper_golem.spawn`
+///   路径对不上，留下来照比。蝌蚪和硫磺立方的 `getAmbientSound` 是 null，没有可删的一声。
+///   The registry name starts with `minecraft:entity.<mob path>.`. The mob is the exported
+///   `MobBucketItem.type`. A salmon plays `minecraft:entity.salmon.ambient`; an axolotl plays
+///   `idle_water` or `idle_air`. Block sounds such as `entity.generic.extinguish_fire`,
+///   `entity.tnt.primed` and `entity.copper_golem.spawn` use a different path and stay comparable.
+///   A tadpole's and a sulfur cube's `getAmbientSound` is null, so there is nothing to drop.
+fn spawned_mob_sound(sound: &SoundPlay, entity: &str) -> bool {
+    if sound.7 {
+        return false;
+    }
+    let Some(path) = entity.strip_prefix("minecraft:") else {
+        return false;
+    };
+    let Ok(index) = usize::try_from(sound.0) else {
+        return false;
+    };
+    let Some(name) = mc_bamboo_data::sounds::SOUND_EVENTS
+        .get(index)
+        .map(|event| event.name)
+    else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix("minecraft:entity.") else {
+        return false;
+    };
+    rest.strip_prefix(path)
+        .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// 这只桶生成的生物。不是生物桶时是 `None`，声音列表整份照比。
+/// The mob this bucket spawns. `None` when the case is not a mob bucket, and the sound lists
+/// are compared in full.
+fn mob_bucket_entity<'a>(case: &Case, names: &'a Names) -> Option<&'a str> {
+    if !pours_a_mob_bucket(case) {
+        return None;
+    }
+    names
+        .item(case.action.used_item())
+        .ok()
+        .and_then(|(_, item)| item.bucket_entity)
+}
+
+/// 生物桶照常比较。官方多出来的、这只生物自己的声音去掉，顺序保留。Bamboo 不发这些声音。
+/// A mob bucket is compared as usual. That mob's own sounds are dropped from the official
+/// list, in order. Bamboo does not play them.
+fn sounds_match(case: &Case, names: &Names, official: &[SoundPlay], ours: &[SoundPlay]) -> bool {
+    let Some(entity) = mob_bucket_entity(case, names) else {
+        return official == ours;
+    };
+    official
+        .iter()
+        .filter(|sound| !spawned_mob_sound(sound, entity))
+        .eq(ours.iter())
 }
 
 /// 骨粉在这些方块上能不能用、成不成功都要读树和巨型蘑菇的地物配置。只比类本身，
@@ -727,6 +805,21 @@ const BONE_MEAL_NEEDS_FEATURES: [BlockClass; 3] = [
 fn bone_meals_a_feature_plant(case: &Case) -> bool {
     case.action.item_class == "BoneMealItem"
         && BONE_MEAL_NEEDS_FEATURES.contains(&scene_state(case, case.action.target()).class())
+}
+
+/// 目标格上的方块是 `GameMasterBlock`。
+///
+/// The block on the target cell is a `GameMasterBlock`.
+///
+/// 创造模式里剑的 `canDestroyBlock` 对任何方块都是假，调用方进 `destroy_block` 之前就停了。
+/// 那种拒绝只在目标格真是这个类时才比较：Bamboo 自己会拒绝。旁边的床会把头写进拼图方块那一格，
+/// 目标就不再是 `GameMasterBlock`，拒绝来自物品，整题排除。
+/// In creative a sword's `canDestroyBlock` is false for every block, so the caller stops before
+/// `destroy_block`. That refusal is compared only when the cell really is this class: Bamboo
+/// refuses it itself. A bed beside a jigsaw writes its head onto that cell, so the target is no
+/// longer a `GameMasterBlock`. The refusal comes from the item, and the case is excluded.
+fn target_is_game_master(case: &Case) -> bool {
+    scene_state(case, case.action.target()).is_a(BlockAncestor::GameMasterBlock)
 }
 
 /// 题目开始时这一格的状态。
@@ -843,12 +936,81 @@ fn transfers_with_unmodeled_container(case: &Case) -> bool {
         && final_state(case, target.relative(state.get(FACING))).is_some_and(is_unmodeled_container)
 }
 
-/// 合成器到期时官方发 1050。合成要配方和方块实体里的物品，不在范围里。
-fn crafter_ejects(case: &Case) -> bool {
-    case.outcome
+/// 合成成功才整题排除。没有配方或产物是空的时官方只发 `SOUND_CRAFTER_FAIL`（1050），
+/// 方块和格子都不变，那一声照常比较。
+///
+/// Only a successful craft excludes the case. With no recipe, or an empty result, official
+/// sends only `SOUND_CRAFTER_FAIL` (1050). The block and the slots stay put, and that event
+/// is compared.
+///
+/// 成功的标志 / A craft succeeded when any of these is true:
+/// - 等级事件 1049（`SOUND_CRAFTER_CRAFT`）或 2010（吐出时的烟）。
+///   Level event 1049 (`SOUND_CRAFTER_CRAFT`) or 2010 (the ejection smoke).
+/// - `crafting` 从关变成开。`CrafterBlock.dispenseFrom` 在合成成功时 `setBlock`。
+///   `crafting` turns on. `CrafterBlock.dispenseFrom` calls `setBlock` on success.
+/// - 合成器的格子变了，而且这题确实跑过合成器的计划刻。
+///   The crafter's slots changed, and this case did run the crafter's scheduled tick.
+fn crafter_crafts(case: &Case) -> bool {
+    const CRAFT_EVENTS: [i32; 2] = [1049, 2010];
+    if case
+        .outcome
         .level_events
         .iter()
-        .any(|event| event.0 == 1050)
+        .any(|event| CRAFT_EVENTS.contains(&event.0))
+    {
+        return true;
+    }
+    if !crafter_ran(case) {
+        return false;
+    }
+    crafting_turned_on(case) || crafter_slots_changed(case)
+}
+
+/// 动作本身是合成器的计划刻，或者 `settle` 里跑过它。
+/// The action is the crafter's scheduled tick, or `settle` ran one.
+fn crafter_ran(case: &Case) -> bool {
+    case.outcome.ran.iter().any(|id| id == "minecraft:crafter")
+        || case.action.kind == Kind::Tick && case.block == "minecraft:crafter"
+}
+
+/// `crafting` 在这题里被设上。
+/// `crafting` was turned on by this case.
+fn crafting_turned_on(case: &Case) -> bool {
+    case.outcome.changes.iter().any(|cell| {
+        let Some(state) = state_of(cell.state()) else {
+            return false;
+        };
+        if !crafting_is_on(state) {
+            return false;
+        }
+        !crafting_is_on(scene_state(case, cell.pos()))
+    })
+}
+
+fn crafting_is_on(state: BlockState) -> bool {
+    state.is_a(BlockAncestor::CrafterBlock) && state.get(CRAFTING)
+}
+
+/// 合成器里的物品和开始时不一样。
+/// The crafter's items differ from the start of the case.
+fn crafter_slots_changed(case: &Case) -> bool {
+    let at_crafter = |stack: &ContainerStack| {
+        let pos = stack.pos();
+        scene_state(case, pos).is_a(BlockAncestor::CrafterBlock)
+            || final_state(case, pos).is_some_and(|state| state.is_a(BlockAncestor::CrafterBlock))
+    };
+    let before: Vec<_> = case
+        .contents
+        .iter()
+        .filter(|stack| at_crafter(stack))
+        .collect();
+    let after: Vec<_> = case
+        .outcome
+        .contents
+        .iter()
+        .filter(|stack| at_crafter(stack))
+        .collect();
+    before != after
 }
 
 /// 发射器的物品行为（箭、水、盔甲等）不在范围里，Bamboo 的发射器 tick 什么也不做。
@@ -966,12 +1128,20 @@ fn compare(
     let answer = &case.outcome;
     let official = comparable_ticks(&answer.ticks, names, report)?;
     let ours = in_scope_scheduled(&replayed.ticks, names)?;
+    if let Some(entity) = mob_bucket_entity(case, names) {
+        let dropped = answer
+            .sounds
+            .iter()
+            .filter(|sound| spawned_mob_sound(sound, entity))
+            .count();
+        report.note_mob_sounds(dropped as u64);
+    }
     Ok(Mismatch {
         result: answer.result != replayed.result,
         cells: differing_cells(case, replayed),
         destroyed: answer.destroyed != replayed.destroyed,
         level_events: answer.level_events != replayed.level_events,
-        sounds: answer.sounds != replayed.sounds,
+        sounds: !sounds_match(case, names, &answer.sounds, &replayed.sounds),
         contents: answer.contents != replayed.contents,
         ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
@@ -1418,6 +1588,43 @@ mod tests {
             Some(Rule::EntityRandomTick)
         );
         assert_eq!(Rule::of_skip("exception:NullPointerException"), None);
+    }
+
+    #[test]
+    fn a_spawned_mobs_sound_is_dropped_and_the_bucket_sound_stays() {
+        let play = |name: &str, excluded: bool| {
+            lines::SoundPlay(
+                i32::from(sounds::sound_event(name)),
+                lines::Double(0.0),
+                lines::Double(0.0),
+                lines::Double(0.0),
+                sounds::NEUTRAL.id(),
+                lines::Float(1.0),
+                lines::Float(1.0),
+                excluded,
+            )
+        };
+        let bucket = play("minecraft:item.bucket.empty_fish", true);
+        let ambient = play("minecraft:entity.salmon.ambient", false);
+        let idle = play("minecraft:entity.axolotl.idle_water", false);
+        let primed = play("minecraft:entity.tnt.primed", false);
+        let extinguish = play("minecraft:entity.generic.extinguish_fire", false);
+        let skipped_entity = play("minecraft:entity.salmon.ambient", true);
+        let salmon = "minecraft:salmon";
+        assert!(spawned_mob_sound(&ambient, salmon));
+        assert!(!spawned_mob_sound(&ambient, "minecraft:cod"));
+        assert!(spawned_mob_sound(&idle, "minecraft:axolotl"));
+        assert!(!spawned_mob_sound(&bucket, salmon));
+        assert!(!spawned_mob_sound(&primed, salmon));
+        assert!(!spawned_mob_sound(&extinguish, salmon));
+        assert!(!spawned_mob_sound(&skipped_entity, salmon));
+        let official = [bucket, extinguish, ambient, primed];
+        let kept: Vec<_> = official
+            .iter()
+            .filter(|sound| !spawned_mob_sound(sound, salmon))
+            .cloned()
+            .collect();
+        assert_eq!(kept, vec![bucket, extinguish, primed]);
     }
 
     #[test]

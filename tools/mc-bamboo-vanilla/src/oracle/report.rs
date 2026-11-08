@@ -100,6 +100,15 @@ pub struct Report {
     broken: Vec<String>,
     /// `case` 和 `skip` 行的数量，和 `end` 行对账。
     lines: (u64, u64),
+    /// `dispensing` 里合成成功的题。1050 的失败声不在这里。
+    /// Successful crafter crafts inside `dispensing`. The fail event 1050 is not one of these.
+    crafter_crafted: u64,
+    /// `dispensing` 里发射器真的射出东西的题。
+    /// Dispenser cases inside `dispensing` where an item was actually fired.
+    dispenser_fired: u64,
+    /// 比较生物桶时从官方列表去掉的、生物自己的声音条数。题本身仍然比较。
+    /// Spawned-mob sounds dropped from the official list. The case is still compared.
+    mob_sounds_dropped: u64,
 }
 
 impl Report {
@@ -115,7 +124,23 @@ impl Report {
             details: Vec::new(),
             broken: Vec::new(),
             lines: (0, 0),
+            crafter_crafted: 0,
+            dispenser_fired: 0,
+            mob_sounds_dropped: 0,
         }
+    }
+
+    /// 记下一道 `dispensing` 排除是合成成功、发射器射出，还是两样都有。
+    /// Record whether a `dispensing` exclusion was a craft, a fired dispenser, or both.
+    pub fn note_dispensing(&mut self, crafted: bool, fired: bool) {
+        self.crafter_crafted += u64::from(crafted);
+        self.dispenser_fired += u64::from(fired);
+    }
+
+    /// 这道生物桶题从官方列表去掉了几声生物自己的声音。
+    /// How many spawned-mob sounds this mob-bucket case dropped from the official list.
+    pub fn note_mob_sounds(&mut self, dropped: u64) {
+        self.mob_sounds_dropped += dropped;
     }
 
     pub fn start(&mut self, header: &Header) {
@@ -280,6 +305,22 @@ impl Report {
         for rule in Rule::ALL {
             let hits = self.rules.get(&rule).copied().unwrap_or(0);
             println!("  {hits:>7} {:<18} {}", rule.name(), rule.reason());
+            if rule == Rule::Dispensing {
+                println!(
+                    "          {:<18} crafter crafted {} (1049/2010, crafting flag, or its slots; 1050 is compared)",
+                    "", self.crafter_crafted
+                );
+                println!(
+                    "          {:<18} dispenser fired {}",
+                    "", self.dispenser_fired
+                );
+            }
+            if rule == Rule::EntitySound {
+                println!(
+                    "          {:<18} mob sounds dropped from the official list: {} (the case is still compared)",
+                    "", self.mob_sounds_dropped
+                );
+            }
             let classes = tick_classes(rule);
             if !classes.is_empty() {
                 println!("          {:<18} {classes:?}", "");

@@ -621,6 +621,14 @@ fn sounds_file(data: &VersionData) -> Result<String, String> {
     let _ = writeln!(out, "    pub const fn id(self) -> u8 {{");
     let _ = writeln!(out, "        self.0");
     let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    /// 序号就是官方 `SoundSource.ordinal()`。");
+    let _ = writeln!(
+        out,
+        "    /// The number is official `SoundSource.ordinal()`."
+    );
+    let _ = writeln!(out, "    pub const fn from_id(id: u8) -> Self {{");
+    let _ = writeln!(out, "        Self(id)");
+    let _ = writeln!(out, "    }}");
     let _ = writeln!(out, "}}\n");
     for (id, name) in tables.sources.iter().enumerate() {
         let constant = match name.as_str() {
@@ -1430,7 +1438,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {}, place_sound: {:?} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {}, place_sound: {:?}, empty_sound: {:?}, empty_source: {:?}, bucket_entity: {:?} }},",
             item.name,
             item_kind(item)?,
             item.block,
@@ -1443,7 +1451,10 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             item.jukebox_playable,
             block_transformer_of(item, data)?,
             item.blocks_attacks,
-            item.place_sound
+            item.place_sound,
+            item.empty_sound,
+            item.empty_source,
+            item.bucket_entity
         );
     }
     let _ = writeln!(out, "];");
@@ -2468,6 +2479,9 @@ mod tests {
             block_transformer: None,
             blocks_attacks: false,
             place_sound: None,
+            empty_sound: None,
+            empty_source: None,
+            bucket_entity: None,
         }
     }
 

@@ -3854,6 +3854,11 @@ impl SoundSource {
     pub const fn id(self) -> u8 {
         self.0
     }
+    /// 序号就是官方 `SoundSource.ordinal()`。
+    /// The number is official `SoundSource.ordinal()`.
+    pub const fn from_id(id: u8) -> Self {
+        Self(id)
+    }
 }
 
 /// `master`。

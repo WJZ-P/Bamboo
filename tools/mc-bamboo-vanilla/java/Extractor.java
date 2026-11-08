@@ -70,9 +70,11 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
@@ -88,7 +90,9 @@ import net.minecraft.world.entity.animal.parrot.Parrot;
 import net.minecraft.world.entity.animal.rabbit.Rabbit;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.BucketItem;
 import net.minecraft.world.item.DyeColor;
+import net.minecraft.world.item.MobBucketItem;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -793,8 +797,29 @@ public final class Extractor {
             }
             if (item instanceof SolidBucketItem solidBucket) {
                 // 细雪桶放下了自己的声音，不用方块声音表里的放置声音。
+                // Powder snow places with its own sound, not the block sound type.
                 SoundEvent placeSound = (SoundEvent) readField(SolidBucketItem.class, "placeSound", solidBucket);
                 object.addProperty("placeSound", BuiltInRegistries.SOUND_EVENT.getId(placeSound));
+            }
+            // `BucketItem.playEmptySound`：岩浆标签用 `BUCKET_EMPTY_LAVA`，否则 `BUCKET_EMPTY`，来源 `BLOCKS`。
+            // `MobBucketItem` 覆盖成自己的 `emptySound`，来源 `NEUTRAL`。
+            // `BucketItem.playEmptySound`: the lava tag uses `BUCKET_EMPTY_LAVA`, otherwise `BUCKET_EMPTY`, source `BLOCKS`.
+            // `MobBucketItem` overrides that with its own `emptySound` and source `NEUTRAL`.
+            if (item instanceof MobBucketItem mobBucket) {
+                SoundEvent emptySound = (SoundEvent) readField(MobBucketItem.class, "emptySound", mobBucket);
+                object.addProperty("emptySound", BuiltInRegistries.SOUND_EVENT.getId(emptySound));
+                object.addProperty("emptySource", SoundSource.NEUTRAL.ordinal());
+                // `MobBucketItem.type`：倒出来的生物。它的 `playAmbientSound` 用 `entity.<注册表路径>.` 下的音效。
+                // `MobBucketItem.type`: the mob that is poured out. Its `playAmbientSound` uses events under
+                // `entity.<registry path>.`.
+                EntityType<?> mob = (EntityType<?>) readField(MobBucketItem.class, "type", mobBucket);
+                object.addProperty("bucketEntity", BuiltInRegistries.ENTITY_TYPE.getKey(mob).toString());
+            } else if (item instanceof BucketItem bucket) {
+                SoundEvent emptySound = bucket.getContent().is(FluidTags.LAVA)
+                        ? SoundEvents.BUCKET_EMPTY_LAVA
+                        : SoundEvents.BUCKET_EMPTY;
+                object.addProperty("emptySound", BuiltInRegistries.SOUND_EVENT.getId(emptySound));
+                object.addProperty("emptySource", SoundSource.BLOCKS.ordinal());
             }
             object.addProperty("overridesCanDestroyBlock", overridesCanDestroyBlock(item));
             items.add(object);

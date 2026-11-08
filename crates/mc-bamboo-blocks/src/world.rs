@@ -323,14 +323,21 @@ impl<'a> World<'a> {
 
     /// 同上，但跳过发起这次操作的玩家，官方传的是 `player` 作 `except`。
     pub fn play_block_sound_except(&mut self, pos: BlockPos, sound: u16, volume: f32, pitch: f32) {
-        self.play_sound(
-            block_center(pos),
-            sound,
-            sounds::BLOCKS,
-            volume,
-            pitch,
-            true,
-        );
+        self.play_sound_except(pos, sound, sounds::BLOCKS, volume, pitch);
+    }
+
+    /// `Level.playSound(player, pos, sound, source, volume, pitch)`。
+    /// 坐标是方块中心，跳过发起的玩家。
+    /// Block centre; the player who started it is skipped.
+    pub fn play_sound_except(
+        &mut self,
+        pos: BlockPos,
+        sound: u16,
+        source: sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+    ) {
+        self.play_sound(block_center(pos), sound, source, volume, pitch, true);
     }
 
     /// `playSound(except, x, y, z, sound, source, volume, pitch)`，允许任意坐标和声音来源。

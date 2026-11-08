@@ -568,8 +568,21 @@ pub struct ExtractedItem {
     pub wall_block: Option<i32>,
     pub attachment: Option<i32>,
     /// `SolidBucketItem.placeSound`，只有细雪桶有。
+    /// `SolidBucketItem.placeSound`. Only the powder-snow bucket has one.
     #[serde(default)]
     pub place_sound: Option<i32>,
+    /// `BucketItem.playEmptySound` 或 `MobBucketItem.emptySound`。
+    /// `BucketItem.playEmptySound`, or `MobBucketItem.emptySound`.
+    #[serde(default)]
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。生物桶是 `NEUTRAL`，其余桶是 `BLOCKS`。
+    /// `SoundSource` ordinal when emptying. `NEUTRAL` for a mob bucket, `BLOCKS` otherwise.
+    #[serde(default)]
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名，比如 `minecraft:salmon`。
+    /// Registry name of `MobBucketItem.type`, for example `minecraft:salmon`.
+    #[serde(default)]
+    pub bucket_entity: Option<String>,
     pub overrides_can_destroy_block: bool,
 }
 
@@ -592,7 +605,17 @@ pub struct Item {
     pub block_transformer: Option<String>,
     pub blocks_attacks: bool,
     /// `SolidBucketItem.placeSound`，放下时播放的声音。
+    /// `SolidBucketItem.placeSound`, played when the bucket places its block.
     pub place_sound: Option<i32>,
+    /// 倒空时的音效。只有 `BucketItem`（含生物桶）有。
+    /// Sound played when the bucket empties. Only `BucketItem`, including mob buckets.
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。
+    /// `SoundSource` ordinal when the bucket empties.
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名。别的物品是 `None`。
+    /// Registry name of `MobBucketItem.type`. `None` for every other item.
+    pub bucket_entity: Option<String>,
 }
 
 /// `reports/minecraft/components/item` 里一个物品的报告，只取用到的组件。
@@ -1019,6 +1042,9 @@ fn read_items(
             jukebox_song: components.jukebox_playable.clone(),
             block_transformer: components.block_transformer,
             place_sound: item.place_sound,
+            empty_sound: item.empty_sound,
+            empty_source: item.empty_source,
+            bucket_entity: item.bucket_entity,
             blocks_attacks: components.blocks_attacks.is_some(),
             name: item.name,
             class: item.class,

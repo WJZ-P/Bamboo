@@ -354,7 +354,18 @@ pub struct Item {
     /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
     pub blocks_attacks: bool,
     /// `SolidBucketItem.placeSound`：放下时播放的声音，只有细雪桶有。
+    /// `SolidBucketItem.placeSound`. Only the powder-snow bucket has one.
     pub place_sound: Option<i32>,
+    /// `BucketItem.playEmptySound` 或 `MobBucketItem.emptySound`。只有这两种桶有。
+    /// `BucketItem.playEmptySound`, or `MobBucketItem.emptySound`. Only those buckets have one.
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。生物桶是 `NEUTRAL`，其余是 `BLOCKS`。
+    /// `SoundSource` ordinal when emptying. `NEUTRAL` for a mob bucket, `BLOCKS` otherwise.
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名。倒出后 `playAmbientSound` 的音效挂在 `entity.<这段路径>.` 下。
+    /// Registry name of `MobBucketItem.type`. `playAmbientSound` after pouring uses events under
+    /// `entity.<this path>.`.
+    pub bucket_entity: Option<&'static str>,
 }
 
 /// `compostable` 组件的 `layers`，数据包 `context_int_provider/compostable` 里的整数提供器。
