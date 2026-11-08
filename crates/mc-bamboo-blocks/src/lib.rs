@@ -41,7 +41,8 @@ mod testing;
 
 pub use behaviour::Behaviour;
 pub use behaviour::machines::{
-    ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern, signal_lectern_page,
+    CampfireEntity, ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern,
+    signal_lectern_page,
 };
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};

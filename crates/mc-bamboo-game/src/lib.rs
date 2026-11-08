@@ -25,6 +25,7 @@
 
 mod block_items;
 mod book;
+mod campfire;
 mod chat;
 mod chunk_broadcast;
 mod chunk_encoding;

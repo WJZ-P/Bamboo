@@ -854,7 +854,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 堆肥的粒子和声音，题里不比较。
             | Effect::ComposterFill { .. }
             // 讲台翻页的声音，题里不比较。
-            | Effect::PageTurned { .. } => None,
+            | Effect::PageTurned { .. }
+            // 营火食物的方块实体包，题里不比较。
+            | Effect::CampfireChanged { .. } => None,
         })
         .collect()
 }
@@ -959,7 +961,10 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             // 讲台翻页是菜单里的 `levelEvent(1043)`，方块题不比较。游戏层会把它发出去。
             // A lectern page turn is menu `levelEvent(1043)`. Block cases do not compare it.
             // The game layer still sends it.
-            | Effect::PageTurned { .. } => {}
+            | Effect::PageTurned { .. }
+            // 营火食物的方块实体包，方块题不比较。游戏层会把它发出去。
+            // The campfire food block-entity packet is not compared. The game layer still sends it.
+            | Effect::CampfireChanged { .. } => {}
         }
     }
     (events, sounds)

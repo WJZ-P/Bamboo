@@ -430,6 +430,10 @@ pub enum Effect {
     /// The client plays the page-turn sound. Nearby players, including the one
     /// who turned the page, all receive it.
     PageTurned { pos: BlockPos },
+    /// 营火上的食物变了，`CampfireBlockEntity.getUpdateTag` 要重新发给客户端。
+    ///
+    /// Food on a campfire changed. `CampfireBlockEntity.getUpdateTag` has to be sent again.
+    CampfireChanged { pos: BlockPos },
 }
 
 /// 自定义音效的名字。`Effect` 要能按值拷贝，名字放在这里，效果里只留下标。

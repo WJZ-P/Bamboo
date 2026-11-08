@@ -442,6 +442,7 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_level_event(region, None, pos, &event);
             }
+            Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
         }
     }
 }

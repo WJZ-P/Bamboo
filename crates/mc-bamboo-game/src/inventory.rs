@@ -218,6 +218,18 @@ impl Inventory {
                 replacement,
                 limit_creative,
             } => self.fill_hand(hand, replacement.clone(), creative, *limit_creative),
+            ItemExchange::Shrink => {
+                if !creative {
+                    let slot = self.hand_slot(hand);
+                    let stack = &mut self.slots[slot];
+                    if stack.count > 0 {
+                        stack.count -= 1;
+                    }
+                    if stack.is_empty() {
+                        *stack = ItemStack::empty();
+                    }
+                }
+            }
         }
         self.slots
             .iter()
