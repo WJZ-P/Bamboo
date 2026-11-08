@@ -9,10 +9,18 @@ mod generated;
 
 use mc_bamboo_core::Aabb;
 
+/// 配方表的数据结构和官方数据包导出的全部配方。
+pub mod recipe;
+
+pub use recipe::{
+    CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, RecipeKind, RecipeType,
+    Stack, has_dye_component, is_damageable,
+};
+
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
-    item_components, items, light, packets, registries, shapes, states, tags, version,
+    item_components, items, light, packets, recipes, registries, shapes, states, tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
