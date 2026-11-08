@@ -318,8 +318,10 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World) {
                 }
             }
         }
-        // `JukeboxBlockEntity.popOutTheItem` 用 `offsetRandomXZ` 取两个 `nextFloat`。
-        // 潜影盒把这个方法覆盖成空的。
+        // `JukeboxBlockEntity.preRemoveSideEffects` → `popOutTheItem`：唱片非空时
+        // `offsetRandomXZ` 取两个 `nextFloat`。`LevelChunk.setBlockState` 在
+        // `affectNeighborsAfterRemoval` 之前调用，那边不要再取。
+        // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
         E::JUKEBOX if state.get(HAS_RECORD) => {
             world.random().next_float();
             world.random().next_float();
