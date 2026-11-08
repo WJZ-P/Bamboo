@@ -12,6 +12,7 @@
 //!   `debug_stick_state`、`recipes`、`intangible_projectile`）线上是 NBT，官方会把 NBT 过一遍
 //!   DFU 的 `Codec` 再写回去。这里只保留 NBT 并校验最外层的形状，不复刻 DFU。
 
+pub mod archive;
 pub mod cursor;
 pub mod defaults;
 pub mod predicate;

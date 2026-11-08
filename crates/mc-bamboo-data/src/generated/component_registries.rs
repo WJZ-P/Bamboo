@@ -2,6 +2,8 @@
 
 /// 组件解码要校验的注册表条目个数。
 pub mod sizes {
+    /// `minecraft:attribute`。
+    pub const ATTRIBUTE: u32 = 40;
     /// `minecraft:banner_pattern`。
     pub const BANNER_PATTERN: u32 = 43;
     /// `minecraft:block`。
@@ -44,6 +46,8 @@ pub mod sizes {
     pub const ITEM: u32 = 1658;
     /// `minecraft:jukebox_song`。
     pub const JUKEBOX_SONG: u32 = 22;
+    /// `minecraft:map_decoration_type`。
+    pub const MAP_DECORATION_TYPE: u32 = 40;
     /// `minecraft:mob_effect`。
     pub const MOB_EFFECT: u32 = 40;
     /// `minecraft:painting_variant`。
@@ -72,6 +76,49 @@ pub mod sizes {
 
 /// 注册表条目名，下标就是网络 ID。存档的 `Holder` 按名字读写。
 pub mod registry_names {
+    /// `minecraft:attribute`。
+    pub const ATTRIBUTE: &[&str] = &[
+        "minecraft:air_drag_modifier",
+        "minecraft:armor",
+        "minecraft:armor_toughness",
+        "minecraft:attack_damage",
+        "minecraft:attack_knockback",
+        "minecraft:attack_speed",
+        "minecraft:below_name_distance",
+        "minecraft:block_break_speed",
+        "minecraft:block_interaction_range",
+        "minecraft:bounciness",
+        "minecraft:burning_time",
+        "minecraft:camera_distance",
+        "minecraft:explosion_knockback_resistance",
+        "minecraft:entity_interaction_range",
+        "minecraft:fall_damage_multiplier",
+        "minecraft:flying_speed",
+        "minecraft:follow_range",
+        "minecraft:friction_modifier",
+        "minecraft:gravity",
+        "minecraft:jump_strength",
+        "minecraft:knockback_resistance",
+        "minecraft:luck",
+        "minecraft:max_absorption",
+        "minecraft:max_health",
+        "minecraft:mining_efficiency",
+        "minecraft:movement_efficiency",
+        "minecraft:movement_speed",
+        "minecraft:name_tag_distance",
+        "minecraft:oxygen_bonus",
+        "minecraft:safe_fall_distance",
+        "minecraft:scale",
+        "minecraft:sneaking_speed",
+        "minecraft:spawn_reinforcements",
+        "minecraft:step_height",
+        "minecraft:submerged_mining_speed",
+        "minecraft:sweeping_damage_ratio",
+        "minecraft:tempt_range",
+        "minecraft:water_movement_efficiency",
+        "minecraft:waypoint_transmit_range",
+        "minecraft:waypoint_receive_range",
+    ];
     /// `minecraft:banner_pattern`。
     pub const BANNER_PATTERN: &[&str] = &[
         "minecraft:base",
@@ -1494,6 +1541,14 @@ pub mod registry_names {
         "minecraft:cold",
         "minecraft:temperate",
         "minecraft:warm",
+    ];
+    /// `minecraft:consume_effect_type`。
+    pub const CONSUME_EFFECT_TYPE: &[&str] = &[
+        "minecraft:apply_effects",
+        "minecraft:remove_effects",
+        "minecraft:clear_all_effects",
+        "minecraft:teleport_randomly",
+        "minecraft:play_sound",
     ];
     /// `minecraft:cow_sound_variant`。
     pub const COW_SOUND_VARIANT: &[&str] = &[
@@ -3516,6 +3571,49 @@ pub mod registry_names {
         "minecraft:tears",
         "minecraft:wait",
         "minecraft:ward",
+    ];
+    /// `minecraft:map_decoration_type`。
+    pub const MAP_DECORATION_TYPE: &[&str] = &[
+        "minecraft:player",
+        "minecraft:frame",
+        "minecraft:red_marker",
+        "minecraft:blue_marker",
+        "minecraft:target_x",
+        "minecraft:target_point",
+        "minecraft:player_off_map",
+        "minecraft:player_off_limits",
+        "minecraft:mansion",
+        "minecraft:monument",
+        "minecraft:banner_white",
+        "minecraft:banner_orange",
+        "minecraft:banner_magenta",
+        "minecraft:banner_light_blue",
+        "minecraft:banner_yellow",
+        "minecraft:banner_lime",
+        "minecraft:banner_pink",
+        "minecraft:banner_gray",
+        "minecraft:banner_light_gray",
+        "minecraft:banner_cyan",
+        "minecraft:banner_purple",
+        "minecraft:banner_blue",
+        "minecraft:banner_brown",
+        "minecraft:banner_green",
+        "minecraft:banner_red",
+        "minecraft:banner_black",
+        "minecraft:red_x",
+        "minecraft:village_desert",
+        "minecraft:village_plains",
+        "minecraft:village_savanna",
+        "minecraft:village_snowy",
+        "minecraft:village_taiga",
+        "minecraft:jungle_temple",
+        "minecraft:swamp_hut",
+        "minecraft:trial_chambers",
+        "minecraft:abandoned_camp",
+        "minecraft:ancient_city",
+        "minecraft:desert_pyramid",
+        "minecraft:mineshaft",
+        "minecraft:ocean_ruin_warm",
     ];
     /// `minecraft:mob_effect`。
     pub const MOB_EFFECT: &[&str] = &[

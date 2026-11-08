@@ -289,6 +289,7 @@ fn escape(bytes: &[u8]) -> String {
 fn component_registries_file(data: &VersionData) -> Result<String, String> {
     /// 要导出大小的注册表，`(模块里的常量名, 注册表名)`。
     const SIZES: &[(&str, &str)] = &[
+        ("ATTRIBUTE", "minecraft:attribute"),
         ("BANNER_PATTERN", "minecraft:banner_pattern"),
         ("BLOCK", BLOCK_REGISTRY),
         ("BLOCK_ENTITY_TYPE", BLOCK_ENTITY_TYPE_REGISTRY),
@@ -313,6 +314,7 @@ fn component_registries_file(data: &VersionData) -> Result<String, String> {
         ("INSTRUMENT", "minecraft:instrument"),
         ("ITEM", ITEM_REGISTRY),
         ("JUKEBOX_SONG", "minecraft:jukebox_song"),
+        ("MAP_DECORATION_TYPE", "minecraft:map_decoration_type"),
         ("MOB_EFFECT", "minecraft:mob_effect"),
         ("PAINTING_VARIANT", "minecraft:painting_variant"),
         ("PIG_SOUND_VARIANT", "minecraft:pig_sound_variant"),
@@ -348,7 +350,7 @@ fn component_registries_file(data: &VersionData) -> Result<String, String> {
     let _ = writeln!(out, "/// 注册表条目名，下标就是网络 ID。存档的 `Holder` 按名字读写。");
     let _ = writeln!(out, "pub mod registry_names {{");
     for &(name, registry) in SIZES {
-        if registry == DATA_COMPONENT_TYPE_REGISTRY || registry == CONSUME_EFFECT_TYPE_REGISTRY {
+        if registry == DATA_COMPONENT_TYPE_REGISTRY {
             continue;
         }
         let entries = registry_entries(data, registry)
