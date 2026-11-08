@@ -18,7 +18,7 @@ use crate::{
 pub struct PlayerInfoEntry<'a> {
     pub uuid: Uuid,
     pub name: &'a str,
-    /// 皮肤等属性。离线模式没有属性。
+    /// 皮肤等属性。别人的客户端靠这些字段显示皮肤，离线模式没有属性。
     pub properties: &'a [ProfileProperty],
     pub game_mode: GameMode,
     pub listed: bool,
@@ -248,6 +248,34 @@ mod tests {
         assert_eq!(
             update(actions, &[entry]),
             hex(&format!("60 01 {STEVE_HEX} 01 08 00 02 68 69 ac 02"))
+        );
+    }
+
+    /// 皮肤跟着 ADD_PLAYER 一起发出去，别人的客户端才看得到。
+    #[test]
+    fn add_player_carries_the_skin() {
+        let properties = [ProfileProperty {
+            name: "textures".to_owned(),
+            value: "ewo=".to_owned(),
+            signature: Some("c2ln".to_owned()),
+        }];
+        let entry = PlayerInfoEntry {
+            properties: &properties,
+            ..steve()
+        };
+        assert_eq!(
+            update(PlayerInfoUpdate::ADD_PLAYER, &[entry]),
+            hex(&format!(
+                "01
+                 01
+                 {STEVE_HEX}
+                 05 53 74 65 76 65
+                 01
+                 08 74 65 78 74 75 72 65 73
+                 04 65 77 6f 3d
+                 01
+                 04 63 32 6c 6e"
+            ))
         );
     }
 

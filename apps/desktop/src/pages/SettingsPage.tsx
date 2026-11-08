@@ -198,6 +198,24 @@ export function SettingsPage() {
             ))}
           </Row>
         );
+      case "toggle":
+        return (
+          <Row>
+            <PixelButton
+              type="button"
+              $size="small"
+              $variant={draft[field.key] ? "bamboo" : "stone"}
+              role="switch"
+              aria-label={field.label}
+              aria-checked={draft[field.key]}
+              aria-invalid={invalid}
+              disabled={disabled}
+              onClick={() => setValue(field.key, !draft[field.key])}
+            >
+              {draft[field.key] ? "已打开" : "已关闭"}
+            </PixelButton>
+          </Row>
+        );
     }
   };
 

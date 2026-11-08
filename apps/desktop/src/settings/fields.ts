@@ -15,6 +15,11 @@ export const GROUPS = [
   { id: "basic", title: "基本", hint: "玩家怎么找到这台服务器。" },
   { id: "network", title: "网络", hint: "连接本身怎么传数据。" },
   {
+    id: "auth",
+    title: "正版验证",
+    hint: "要不要让 Mojang 确认每名玩家的账号。关掉时谁都能随便填一个名字进服。和代理转发互斥：代理已经替服务端验过了，两个只能开一个。",
+  },
+  {
     id: "forwarding",
     title: "代理转发",
     hint: "服务端藏在 BungeeCord 或 Velocity 后面时才需要改。开启后一定要用防火墙挡住外部直连，否则任何人都能冒充任意玩家进服。",
@@ -59,8 +64,15 @@ export type ChoiceField = Common<KeysOf<ServerSettings["forwarding"]>> & {
   control: "choice";
   options: readonly { value: ServerSettings["forwarding"]; label: string }[];
 };
+export type ToggleField = Common<KeysOf<boolean>> & { control: "toggle" };
 
-export type SettingField = TextField | PasswordField | NumberField | SliderField | ChoiceField;
+export type SettingField =
+  | TextField
+  | PasswordField
+  | NumberField
+  | SliderField
+  | ChoiceField
+  | ToggleField;
 
 /** 心跳必须留出余量：客户端 30 秒收不到任何字节就自己断开。 */
 const MAX_KEEP_ALIVE_SECONDS = 29;
@@ -136,6 +148,27 @@ export const FIELDS: readonly SettingField[] = [
     hint: "服务端每隔这么久发一次心跳，上一次还没有回应就断开。客户端 30 秒收不到任何数据就会自己断开，所以这里必须小于 30 秒。",
   },
   {
+    key: "onlineMode",
+    group: "auth",
+    label: "正版验证",
+    control: "toggle",
+    wide: true,
+    hint: "对应官方的 online-mode。打开后登录过程会加密，每名玩家都要经过 Mojang 的 session server 确认，皮肤也由 Mojang 提供；服务端因此需要能访问外网。关掉时既不加密也不验证，UUID 由玩家名算出来。打开了代理转发就不能再打开这一项。",
+    validate: (draft) =>
+      draft.onlineMode && draft.forwarding !== "off"
+        ? "正版验证和代理转发不能同时打开：代理已经替服务端验过身份了"
+        : null,
+  },
+  {
+    key: "preventProxyConnections",
+    group: "auth",
+    label: "禁止代理连接",
+    control: "toggle",
+    wide: true,
+    disabled: (draft) => !draft.onlineMode,
+    hint: "对应官方的 prevent-proxy-connections。打开后向 Mojang 提问时带上客户端的 IP，Mojang 会比对玩家登录时报备的那个，对不上就不认这次登录。玩家经过 VPN 或者代理进来时两边的 IP 不一样，会被挡住。",
+  },
+  {
     key: "forwarding",
     group: "forwarding",
     label: "转发模式",
@@ -146,7 +179,11 @@ export const FIELDS: readonly SettingField[] = [
       { value: "legacy", label: "BungeeCord 旧式" },
       { value: "modern", label: "Velocity 现代" },
     ],
-    hint: "玩家的 IP 和 UUID 由谁提供。不转发时由本服务端自己生成离线 UUID；旧式转发信任握手包里带的信息；现代转发会在登录时向代理索要并验证签名。",
+    hint: "玩家的 IP 和 UUID 由谁提供。不转发时由本服务端自己生成离线 UUID；旧式转发信任握手包里带的信息；现代转发会在登录时向代理索要并验证签名。开启转发就要把正版验证关掉。",
+    validate: (draft) =>
+      draft.onlineMode && draft.forwarding !== "off"
+        ? "打开代理转发就要把正版验证关掉，服务端不能自己再验一次"
+        : null,
   },
   {
     key: "forwardingSecret",
@@ -205,6 +242,9 @@ export function describeDefault(field: SettingField, defaults: ServerSettings): 
   if (field.control === "choice") {
     const value = defaults[field.key];
     return field.options.find((option) => option.value === value)?.label ?? value;
+  }
+  if (field.control === "toggle") {
+    return defaults[field.key] ? "开" : "关";
   }
   return defaults[field.key].length > 0 ? defaults[field.key] : "留空";
 }

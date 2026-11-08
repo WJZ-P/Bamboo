@@ -32,7 +32,7 @@ pub struct JoinRequest {
     pub id: PlayerId,
     pub uuid: Uuid,
     pub name: String,
-    /// 代理转发来的皮肤等属性。离线模式没有属性。
+    /// session server 或者代理给出的皮肤等属性。离线模式没有属性。
     pub properties: Vec<ProfileProperty>,
     /// Configuration 阶段收到的客户端设置，没收到时是默认值。
     pub client: ClientInformation,

@@ -10,9 +10,15 @@ mod outbound;
 mod play;
 mod status;
 
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{
+    io,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::{Buf, Bytes, BytesMut};
+use mc_bamboo_auth::{CryptError, DecryptHalf, Encryption, SharedSecret};
 use mc_bamboo_protocol::{
     GAME_VERSION, PROTOCOL_VERSION,
     codec::DecodeError,
@@ -49,6 +55,20 @@ const MAX_PRE_LOGIN_FRAME_LEN: usize = 1024;
 /// 128 KiB 足够装下最长的合法握手包，同时仍然远低于协议的 2 MiB。
 const MAX_FORWARDING_FRAME_LEN: usize = 128 * 1024;
 
+/// 进入游戏之前的时限到点之后，再给客户端这么久把断开消息收下。
+const GOODBYE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 连接走到哪个阶段了。时限到点时用它决定要不要告别，以及说什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// 握手、Status，或者刚进 Login 还没读到 hello。
+    Handshake,
+    /// Login 状态，对应官方的 `ServerLoginPacketListenerImpl`。
+    Login,
+    /// Configuration 状态。官方在这个阶段没有登录时限。
+    Configuration,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ConnectionError {
     #[error(transparent)]
@@ -59,6 +79,10 @@ enum ConnectionError {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Compression(#[from] CompressionError),
+    #[error(transparent)]
+    Crypt(#[from] CryptError),
+    #[error("client answered the encryption challenge with the wrong bytes")]
+    ChallengeMismatch,
     #[error("connection closed in the middle of a frame")]
     TruncatedFrame,
     #[error("connection closed before joining the game")]
@@ -111,7 +135,9 @@ struct Joined {
 /// 运行一条连接直到结束。
 ///
 /// 进入游戏之前的时限覆盖整个过程，而不是每次读取，
-/// 这样客户端没法靠一个字节一个字节地慢慢发来占住名额。
+/// 这样客户端没法靠一个字节一个字节地慢慢发来占住名额。默认的 30 秒和官方
+/// `ServerLoginPacketListenerImpl` 的 `MAX_TICKS_BEFORE_LOGIN`（600 刻）一样长，
+/// 在 Login 阶段到点时也和官方一样说 `multiplayer.disconnect.slow_login`。
 pub(crate) async fn handle(
     stream: TcpStream,
     peer: SocketAddr,
@@ -125,23 +151,27 @@ pub(crate) async fn handle(
 
     let mut connection = Connection::new(stream, pre_login_frame_len(shared.config.forwarding));
     let time_limit = shared.config.pre_play_timeout;
-    let pre_play = timeout(time_limit, pre_play(&mut connection, &shared));
-    let joined = tokio::select! {
-        () = cancel.cancelled() => {
-            debug!(%peer, "connection closed by shutdown");
+    let outcome = {
+        let pre_play = timeout(time_limit, pre_play(&mut connection, &shared));
+        tokio::select! {
+            () = cancel.cancelled() => {
+                debug!(%peer, "connection closed by shutdown");
+                return;
+            }
+            outcome = pre_play => outcome,
+        }
+    };
+    let joined = match outcome {
+        Ok(Ok(joined)) => joined,
+        Ok(Err(error)) => {
+            debug!(%peer, %error, "dropping connection");
             return;
         }
-        outcome = pre_play => match outcome {
-            Ok(Ok(joined)) => joined,
-            Ok(Err(error)) => {
-                debug!(%peer, %error, "dropping connection");
-                return;
-            }
-            Err(_) => {
-                debug!(%peer, "connection timed out");
-                return;
-            }
-        },
+        Err(_) => {
+            debug!(%peer, "connection timed out");
+            say_goodbye_to_a_slow_login(&mut connection).await;
+            return;
+        }
     };
 
     // 名额只限制进入游戏之前的连接，玩家数量由玩家表限制。
@@ -154,6 +184,17 @@ pub(crate) async fn handle(
     if let Err(error) = play::serve(connection, &session, client, &shared, cancel).await {
         debug!(%peer, %error, "player connection ended");
     }
+}
+
+/// 时限到点时告别。只有 Login 阶段有话要说，和官方 `ServerLoginPacketListenerImpl.tick` 一样。
+///
+/// 这一步已经在时限之外了，所以自己带一个短时限，不让收不下这个包的客户端拖着名额。
+async fn say_goodbye_to_a_slow_login(connection: &mut Connection) {
+    if connection.phase != Phase::Login {
+        return;
+    }
+    let goodbye = connection.refuse_login_translated(login::SLOW_LOGIN);
+    let _ = timeout(GOODBYE_TIMEOUT, goodbye).await;
 }
 
 /// 处理进入游戏之前的全部流程。玩家成功进入游戏时返回它的在线状态。
@@ -188,6 +229,8 @@ async fn pre_play(
             Ok(None)
         }
         Intent::Login => {
+            // 官方的 600 刻从建立 Login 监听器开始算，就是这里。
+            connection.phase = Phase::Login;
             let identity =
                 match forwarding::identity(shared.config.forwarding, handshake.server_address) {
                     Ok(identity) => identity,
@@ -216,17 +259,20 @@ async fn configure(
     shared: &Shared,
 ) -> Result<ClientInformation, ConnectionError> {
     login::finish(connection, session, shared).await?;
+    connection.phase = Phase::Configuration;
     configuration::serve(connection, shared).await
 }
 
 /// 返回下一帧的负载。客户端关闭连接后返回 `None`。
 ///
 /// 这个函数是取消安全的：放进 `select!` 被打断时，已读到的数据都留在缓冲区里。
+/// 加密是最外面的一层，所以字节一读进来就解密，长度前缀也在里面。
 async fn read_frame<R: AsyncRead + Unpin>(
     stream: &mut R,
     buffer: &mut BytesMut,
     max_frame_len: usize,
     compression: Option<i32>,
+    mut decrypt: Option<&mut DecryptHalf>,
 ) -> Result<Option<Bytes>, ConnectionError> {
     loop {
         if let Some(frame) = find_frame(buffer, max_frame_len)? {
@@ -240,12 +286,16 @@ async fn read_frame<R: AsyncRead + Unpin>(
                 None => payload,
             }));
         }
+        let read_from = buffer.len();
         if stream.read_buf(buffer).await? == 0 {
             return if buffer.is_empty() {
                 Ok(None)
             } else {
                 Err(ConnectionError::TruncatedFrame)
             };
+        }
+        if let Some(decrypt) = decrypt.as_deref_mut() {
+            decrypt.decrypt(&mut buffer[read_from..]);
         }
     }
 }
@@ -287,6 +337,10 @@ struct Connection {
     max_frame_len: usize,
     /// 压缩启用后是服务端声明的阈值，两个方向都换成压缩帧。
     compression: Option<i32>,
+    /// 正版验证交换出密钥之后两个方向的 AES 流。
+    encryption: Option<Encryption>,
+    /// 连接走到哪个阶段了。时限到点时要看它。
+    phase: Phase,
 }
 
 impl Connection {
@@ -296,7 +350,14 @@ impl Connection {
             read_buffer: BytesMut::with_capacity(max_frame_len),
             max_frame_len,
             compression: None,
+            encryption: None,
+            phase: Phase::Handshake,
         }
+    }
+
+    /// 客户端的地址，拿不到时返回 `None`。开了 `prevent-proxy-connections` 要把它告诉 Mojang。
+    fn peer_ip(&self) -> Option<IpAddr> {
+        self.stream.peer_addr().ok().map(|peer| peer.ip())
     }
 
     /// 登录完成后放开帧大小限制，客户端可能发送较大的配置数据。
@@ -309,37 +370,56 @@ impl Connection {
         self.compression = Some(threshold);
     }
 
+    /// 从下一个字节开始两个方向都加密。官方在收到 key 包时就切换，之后没有未加密的字节。
+    fn enable_encryption(&mut self, secret: &SharedSecret) {
+        self.encryption = Some(Encryption::new(secret));
+    }
+
     async fn next_frame(&mut self) -> Result<Option<Bytes>, ConnectionError> {
         read_frame(
             &mut self.stream,
             &mut self.read_buffer,
             self.max_frame_len,
             self.compression,
+            self.encryption.as_mut().map(Encryption::decrypt_half),
         )
         .await
     }
 
-    /// 写一批帧。压缩启用后逐个包压缩，世界线程交来的帧本身不压缩。
+    /// 写一批帧。压缩启用后逐个包压缩，世界线程交来的帧本身不压缩；
+    /// 加密在最外层，连长度前缀一起加密。
     async fn write(&mut self, frames: &[u8]) -> Result<(), ConnectionError> {
-        match self.compression {
-            Some(threshold) => {
-                let compressed = compression::encode_frames(frames, threshold)?;
-                Ok(self.stream.write_all(&compressed).await?)
+        let compressed = match self.compression {
+            Some(threshold) => Some(compression::encode_frames(frames, threshold)?),
+            None => None,
+        };
+        let payload = compressed.as_deref().unwrap_or(frames);
+        match &mut self.encryption {
+            Some(encryption) => {
+                let mut encrypted = payload.to_vec();
+                encryption.encrypt(&mut encrypted);
+                self.stream.write_all(&encrypted).await?;
             }
-            None => Ok(self.stream.write_all(frames).await?),
+            None => self.stream.write_all(payload).await?,
         }
+        Ok(())
     }
 
     /// 发送登录阶段的断开消息并关闭连接。
     async fn refuse_login(&mut self, reason: &str) -> Result<(), ConnectionError> {
-        let reason_json = json!({ "text": reason }).to_string();
+        self.send_login_disconnect(&json!({ "text": reason }).to_string())
+            .await
+    }
+
+    /// 用客户端语言文件里的翻译键拒绝登录。Login 阶段的断开原因还是 JSON，不是 NBT。
+    async fn refuse_login_translated(&mut self, key: &str) -> Result<(), ConnectionError> {
+        self.send_login_disconnect(&json!({ "translate": key }).to_string())
+            .await
+    }
+
+    async fn send_login_disconnect(&mut self, reason_json: &str) -> Result<(), ConnectionError> {
         let mut frame = Vec::new();
-        append_frame(
-            &mut frame,
-            &LoginDisconnect {
-                reason_json: &reason_json,
-            },
-        )?;
+        append_frame(&mut frame, &LoginDisconnect { reason_json })?;
         self.write(&frame).await?;
         self.finish().await?;
         Ok(())

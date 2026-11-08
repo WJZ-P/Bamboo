@@ -10,12 +10,9 @@ pub const MAX_PROPERTY_VALUE_CHARS: usize = 32767;
 pub const MAX_PROPERTY_SIGNATURE_CHARS: usize = 1024;
 
 /// 一条档案属性，比如签名过的皮肤。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProfileProperty {
-    pub name: String,
-    pub value: String,
-    pub signature: Option<String>,
-}
+///
+/// 类型定义在 `mc-bamboo-core` 里：正版验证层算出它，协议层写进包里，两边都够不着对方。
+pub use mc_bamboo_core::profile::Property as ProfileProperty;
 
 /// 按官方 `GAME_PROFILE_PROPERTIES` 的格式写属性列表：条数、名字、值、有无签名、签名。
 pub(crate) fn write_profile_properties(out: &mut Vec<u8>, properties: &[ProfileProperty]) {
@@ -69,5 +66,34 @@ mod tests {
         let mut out = Vec::new();
         write_profile_properties(&mut out, &[]);
         assert_eq!(out, [0]);
+    }
+
+    /// 逐字节对照一遍，省得解码端和编码端一起写错。
+    #[test]
+    fn properties_are_written_like_a_property_map() {
+        let mut out = Vec::new();
+        write_profile_properties(
+            &mut out,
+            &[
+                ProfileProperty {
+                    name: "a".to_owned(),
+                    value: "b".to_owned(),
+                    signature: Some("c".to_owned()),
+                },
+                ProfileProperty {
+                    name: "d".to_owned(),
+                    value: "e".to_owned(),
+                    signature: None,
+                },
+            ],
+        );
+        assert_eq!(
+            out,
+            [
+                0x02, // 两项
+                0x01, b'a', 0x01, b'b', 0x01, 0x01, b'c', // 带签名
+                0x01, b'd', 0x01, b'e', 0x00, // 不带签名
+            ]
+        );
     }
 }

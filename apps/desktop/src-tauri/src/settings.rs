@@ -60,6 +60,10 @@ pub struct ServerSettings {
     pub keep_alive_seconds: u64,
     /// 启用压缩的包负载字节数，-1 表示关闭压缩。
     pub compression_threshold: i32,
+    /// 要不要做正版验证，和官方的 `online-mode` 相同。和代理转发互斥。
+    pub online_mode: bool,
+    /// 问 session server 时带上客户端的 IP，和官方的 `prevent-proxy-connections` 相同。
+    pub prevent_proxy_connections: bool,
     pub forwarding: Forwarding,
     /// Velocity 现代转发用的签名密钥。
     pub forwarding_secret: String,
@@ -80,6 +84,8 @@ impl Default for ServerSettings {
                 .unwrap_or(u32::MAX),
             keep_alive_seconds: defaults.keep_alive_interval.as_secs(),
             compression_threshold: defaults.compression_threshold,
+            online_mode: defaults.online_mode,
+            prevent_proxy_connections: defaults.prevent_proxy_connections,
             forwarding: Forwarding::Off,
             forwarding_secret: defaults.forwarding_secret,
         }
@@ -88,6 +94,7 @@ impl Default for ServerSettings {
 
 impl ServerSettings {
     pub fn to_server_config(&self) -> ServerConfig {
+        let defaults = ServerConfig::default();
         ServerConfig {
             motd: self.motd.clone(),
             max_players: self.max_players,
@@ -96,6 +103,13 @@ impl ServerSettings {
             max_pre_play_connections: self.max_pre_play_connections as usize,
             keep_alive_interval: Duration::from_secs(self.keep_alive_seconds),
             compression_threshold: self.compression_threshold,
+            online_mode: self.online_mode,
+            prevent_proxy_connections: self.prevent_proxy_connections,
+            // 下面三项不是 server.properties 里的选项，界面上不给：session server 的地址只有
+            // 测试会改，两个时限照 authlib 的常量来。
+            session_server_url: defaults.session_server_url,
+            auth_connect_timeout: defaults.auth_connect_timeout,
+            auth_read_timeout: defaults.auth_read_timeout,
             forwarding: self.forwarding.into(),
             forwarding_secret: self.forwarding_secret.clone(),
         }
@@ -138,6 +152,10 @@ impl ServerSettings {
         }
         if self.forwarding == Forwarding::Modern && self.forwarding_secret.is_empty() {
             return Err("现代转发必须填写转发密钥".to_owned());
+        }
+        // 服务端那边会把正版验证悄悄关掉，与其让用户以为两个都开着，不如在这里说清楚。
+        if self.online_mode && self.forwarding != Forwarding::Off {
+            return Err("正版验证和代理转发不能同时打开：代理已经替服务端验过身份了".to_owned());
         }
         Ok(())
     }
@@ -190,6 +208,14 @@ mod tests {
         );
         assert_eq!(config.keep_alive_interval, defaults.keep_alive_interval);
         assert_eq!(config.compression_threshold, defaults.compression_threshold);
+        assert_eq!(config.online_mode, defaults.online_mode);
+        assert_eq!(
+            config.prevent_proxy_connections,
+            defaults.prevent_proxy_connections
+        );
+        assert_eq!(config.session_server_url, defaults.session_server_url);
+        assert_eq!(config.auth_connect_timeout, defaults.auth_connect_timeout);
+        assert_eq!(config.auth_read_timeout, defaults.auth_read_timeout);
         assert_eq!(config.forwarding, defaults.forwarding);
         assert_eq!(config.forwarding_secret, defaults.forwarding_secret);
     }
@@ -206,6 +232,9 @@ mod tests {
             max_pre_play_connections: 64,
             keep_alive_seconds: 20,
             compression_threshold: -1,
+            // 转发开着时正版验证不能开，所以这一项在下一个测试里单独试。
+            online_mode: false,
+            prevent_proxy_connections: true,
             forwarding: Forwarding::Modern,
             forwarding_secret: "secret".to_owned(),
         };
@@ -218,8 +247,21 @@ mod tests {
         assert_eq!(config.max_pre_play_connections, 64);
         assert_eq!(config.keep_alive_interval, Duration::from_secs(20));
         assert_eq!(config.compression_threshold, -1);
+        assert!(!config.online_mode);
+        assert!(config.prevent_proxy_connections);
         assert_eq!(config.forwarding, ForwardingMode::Modern);
         assert_eq!(config.forwarding_secret, "secret");
+    }
+
+    /// 正版验证也要真的传下去，不然界面上的开关是摆设。
+    #[test]
+    fn online_mode_reaches_the_server_config() {
+        let settings = ServerSettings {
+            online_mode: true,
+            ..ServerSettings::default()
+        };
+        assert!(settings.validate().is_ok());
+        assert!(settings.to_server_config().online_mode);
     }
 
     #[test]
@@ -369,5 +411,33 @@ mod tests {
         );
         // 旧式转发由代理自己保证可信，不需要密钥。
         assert!(validate(|settings| settings.forwarding = Forwarding::Legacy).is_ok());
+    }
+
+    #[test]
+    fn online_mode_and_forwarding_are_mutually_exclusive() {
+        assert!(validate(|settings| settings.online_mode = true).is_ok());
+        assert!(
+            validate(|settings| {
+                settings.online_mode = true;
+                settings.forwarding = Forwarding::Legacy;
+            })
+            .is_err()
+        );
+        assert!(
+            validate(|settings| {
+                settings.online_mode = true;
+                settings.forwarding = Forwarding::Modern;
+                settings.forwarding_secret = "secret".to_owned();
+            })
+            .is_err()
+        );
+    }
+
+    /// 新字段在旧设置文件里不存在，要取默认值（关闭），不能让旧配置突然开始验证正版。
+    #[test]
+    fn online_mode_defaults_to_off_in_an_old_settings_file() {
+        let parsed: ServerSettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.online_mode);
+        assert!(!parsed.prevent_proxy_connections);
     }
 }

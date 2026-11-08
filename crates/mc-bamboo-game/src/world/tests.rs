@@ -197,6 +197,7 @@ impl Harness {
         let config = WorldConfig {
             view_distance,
             max_players: 20,
+            online_mode: false,
         };
         let mut world = World::new(config, receiver);
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。

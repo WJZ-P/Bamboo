@@ -581,6 +581,7 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
     entry
 }
 
+/// 档案上的一项属性，签名是可选的。
 fn read_tab_property(reader: &mut Reader<'_>) -> TabProperty {
     let name = reader.string(64).expect("property name").to_owned();
     let value = reader.string(32767).expect("property value").to_owned();

@@ -12,6 +12,8 @@ categories = ["games", "network-programming"]
 [dependencies]
 bytes.workspace = true
 hmac.workspace = true
+mc-bamboo-auth.workspace = true
+mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 mc-bamboo-game.workspace = true
 mc-bamboo-protocol.workspace = true

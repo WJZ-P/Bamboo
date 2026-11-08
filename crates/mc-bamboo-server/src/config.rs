@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use mc_bamboo_auth::{CONNECT_TIMEOUT, READ_TIMEOUT, SESSION_SERVER_URL};
 use tracing::warn;
 
 /// 视距的下限，再小客户端就没有可渲染的区块了。
@@ -47,6 +48,26 @@ pub struct ServerConfig {
     ///
     /// 小于 0 表示关闭压缩，0 表示每个包都压缩。默认 256。
     pub compression_threshold: i32,
+    /// 要不要做正版验证，和官方的 `online-mode` 相同。
+    ///
+    /// 打开之后登录过程会加密，并且每名玩家都要经过 Mojang 的 session server 确认；
+    /// 关掉时既不加密也不验证，玩家名由客户端随便填，UUID 由玩家名算出来。
+    ///
+    /// 和代理转发互斥：代理已经替我们验过了，打开转发时这一项会被关掉。
+    ///
+    /// 默认关闭：Bamboo 还在开发阶段，本地连进来调试不该依赖外网。
+    pub online_mode: bool,
+    /// 问 session server 时带上客户端的 IP，和官方的 `prevent-proxy-connections` 相同。
+    ///
+    /// Mojang 会比对这个 IP 和客户端自己报备的那个，对不上就不认这次登录。
+    /// 玩家经过代理进来时两边的 IP 不一样，所以默认关闭。
+    pub prevent_proxy_connections: bool,
+    /// session server 的 `hasJoined` 地址。默认是 Mojang 的官方地址，测试把它指到本地。
+    pub session_server_url: String,
+    /// 连接 session server 的时限，对应 authlib `MinecraftClient.CONNECT_TIMEOUT_MS`。
+    pub auth_connect_timeout: Duration,
+    /// 等 session server 吐下一段字节的时限，对应 authlib `MinecraftClient.READ_TIMEOUT_MS`。
+    pub auth_read_timeout: Duration,
     /// 玩家信息由谁提供。
     pub forwarding: ForwardingMode,
     /// Velocity 现代转发用的签名密钥，和代理的 `forwarding.secret` 文件内容相同。
@@ -66,6 +87,11 @@ impl Default for ServerConfig {
             max_pre_play_connections: 1024,
             keep_alive_interval: Duration::from_secs(15),
             compression_threshold: 256,
+            online_mode: false,
+            prevent_proxy_connections: false,
+            session_server_url: SESSION_SERVER_URL.to_owned(),
+            auth_connect_timeout: CONNECT_TIMEOUT,
+            auth_read_timeout: READ_TIMEOUT,
             forwarding: ForwardingMode::Off,
             forwarding_secret: String::new(),
         }
@@ -98,7 +124,21 @@ impl ServerConfig {
             warn!("modern forwarding needs a secret, forwarding is disabled");
             self.forwarding = ForwardingMode::Off;
         }
+
+        // 上面那一步可能把转发关掉，所以互斥判断放在它后面。
+        if self.online_mode && self.uses_proxy_forwarding() {
+            warn!("online mode cannot be used together with proxy forwarding, turning it off");
+            self.online_mode = false;
+        }
         self
+    }
+
+    /// 代理转发（Velocity / BungeeCord）开着没有。
+    ///
+    /// 代理会代替我们完成正版验证，再把玩家的身份放进握手包或者插件回应里转发过来，
+    /// 这时服务端自己再去问一次 Mojang 一定会失败，所以两者互斥。
+    fn uses_proxy_forwarding(&self) -> bool {
+        self.forwarding != ForwardingMode::Off
     }
 }
 
@@ -172,6 +212,44 @@ mod tests {
             with_keep_alive(Duration::ZERO),
             ServerConfig::default().keep_alive_interval
         );
+    }
+
+    fn with_online_mode(forwarding: ForwardingMode, secret: &str) -> bool {
+        let config = ServerConfig {
+            online_mode: true,
+            forwarding,
+            forwarding_secret: secret.to_owned(),
+            ..ServerConfig::default()
+        };
+        config.normalized().online_mode
+    }
+
+    #[test]
+    fn online_mode_is_off_by_default() {
+        let config = ServerConfig::default();
+        assert!(!config.online_mode);
+        assert!(!config.prevent_proxy_connections);
+        assert_eq!(config.session_server_url, SESSION_SERVER_URL);
+        assert_eq!(config.auth_connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.auth_read_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn online_mode_stays_on_while_nothing_forwards() {
+        assert!(with_online_mode(ForwardingMode::Off, ""));
+    }
+
+    /// 代理已经替服务端验过身份了，再自己问一次 Mojang 必然失败，所以转发赢。
+    #[test]
+    fn forwarding_turns_online_mode_off() {
+        assert!(!with_online_mode(ForwardingMode::Legacy, ""));
+        assert!(!with_online_mode(ForwardingMode::Modern, "secret"));
+    }
+
+    /// 没有密钥的现代转发会先退回关闭，这时正版验证留着。
+    #[test]
+    fn modern_forwarding_without_a_secret_leaves_online_mode_alone() {
+        assert!(with_online_mode(ForwardingMode::Modern, ""));
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod wire;
 
 use std::{net::SocketAddr, time::Duration};
 
+use mc_bamboo_auth::{DecryptHalf, EncryptHalf, Encryption, SharedSecret};
 use mc_bamboo_data::packets::{configuration, login, play};
 use mc_bamboo_protocol::{
     PROTOCOL_VERSION,
@@ -177,6 +178,9 @@ pub struct Client {
     compression: Option<i32>,
     /// 见过 `login_finished` 之后，Play 状态里同样的包 ID 不再当作压缩包。
     login_done: bool,
+    /// 交换过密钥之后两个方向的 AES 流。
+    encrypt: Option<EncryptHalf>,
+    decrypt: Option<DecryptHalf>,
 }
 
 impl Client {
@@ -187,7 +191,16 @@ impl Client {
             buffer: Vec::new(),
             compression: None,
             login_done: false,
+            encrypt: None,
+            decrypt: None,
         }
+    }
+
+    /// 从下一个字节开始两个方向都加密，和服务端收到 key 包之后的切换对应。
+    pub fn enable_encryption(&mut self, secret: &SharedSecret) {
+        let (encrypt, decrypt) = Encryption::new(secret).split();
+        self.encrypt = Some(encrypt);
+        self.decrypt = Some(decrypt);
     }
 
     /// 走到服务端说 Configuration 结束为止，这时玩家还没有进入世界。
@@ -200,7 +213,13 @@ impl Client {
     pub async fn configure_with(&mut self, first_packets: &[u8], name: &str) {
         self.send(&handshake(LOGIN_INTENT)).await;
         self.send(&hello(name)).await;
+        self.configure_after_hello(first_packets).await;
+    }
 
+    /// 从等 `login_finished` 开始走完 Login 和 Configuration，返回那个包的负载。
+    ///
+    /// 正版验证的客户端在 `hello` 之后还要交换密钥，所以那条路在交换完之后接着走这一段。
+    pub async fn configure_after_hello(&mut self, first_packets: &[u8]) -> Vec<u8> {
         let finished = self.read_frame().await;
         assert_eq!(packet_id(&finished), login::clientbound::LOGIN_FINISHED);
         self.send(&frame(&[login::serverbound::LOGIN_ACKNOWLEDGED as u8]))
@@ -212,6 +231,7 @@ impl Client {
         self.send(&official_known_packs()).await;
         self.read_until(configuration::clientbound::FINISH_CONFIGURATION)
             .await;
+        finished
     }
 
     /// 告诉服务端 Configuration 结束，之后就是 Play 状态了。
@@ -222,9 +242,12 @@ impl Client {
         .await;
     }
 
-    /// 发一批帧。压缩启用后像客户端一样逐帧重新包装。
+    /// 发一批帧。压缩启用后像客户端一样逐帧重新包装，加密启用后整段再加密。
     pub async fn send(&mut self, bytes: &[u8]) {
-        let bytes = encode_outgoing(bytes, self.compression);
+        let mut bytes = encode_outgoing(bytes, self.compression);
+        if let Some(encrypt) = &mut self.encrypt {
+            encrypt.encrypt(&mut bytes);
+        }
         self.stream.write_all(&bytes).await.unwrap();
     }
 
@@ -259,8 +282,12 @@ impl Client {
                     }
                     return payload;
                 }
+                let read_from = self.buffer.len();
                 let read = self.stream.read_buf(&mut self.buffer).await.unwrap();
                 assert_ne!(read, 0, "server closed the connection before a full frame");
+                if let Some(decrypt) = &mut self.decrypt {
+                    decrypt.decrypt(&mut self.buffer[read_from..]);
+                }
             }
         })
         .await

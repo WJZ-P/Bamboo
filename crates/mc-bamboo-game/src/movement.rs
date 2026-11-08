@@ -256,7 +256,7 @@ mod tests {
 
     /// 一个刚进入世界、还没确认传送的玩家。
     fn awaiting_region() -> (Region, Recorder) {
-        let mut region = Region::new(8, 20);
+        let mut region = Region::new(8, 20, false);
         let recorder = Recorder::default();
         region.links.add(PLAYER, Box::new(recorder.clone()));
         let mut player = Player::new(

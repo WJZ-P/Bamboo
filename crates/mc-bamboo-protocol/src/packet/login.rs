@@ -7,16 +7,28 @@ use super::{
     ClientboundPacket,
     profile::{ProfileProperty, write_profile_properties},
 };
-use crate::codec::{DecodeError, Reader, write_string, write_uuid, write_varint};
+use crate::codec::{
+    DecodeError, Reader, write_bool, write_byte_array, write_string, write_uuid, write_varint,
+};
 
 /// 玩家名的最大长度。
 pub const MAX_PLAYER_NAME_CHARS: usize = 16;
+
+/// 用服务端公钥加密出来的那两段数据的长度上限。
+///
+/// 1024 位 RSA 的输出正好是 128 字节，留一点余量，太长的直接当畸形包。
+const MAX_ENCRYPTED_LEN: usize = 256;
 
 /// 客户端在 Login 状态发送的数据包。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginRequest<'a> {
     /// 登录请求，带着玩家名。
     Hello { name: &'a str, uuid: Uuid },
+    /// 客户端用服务端公钥加密的 AES 密钥和 challenge。
+    Key {
+        shared_secret: &'a [u8],
+        challenge: &'a [u8],
+    },
     /// 对登录插件询问的回应。`data` 为 `None` 表示客户端不认识这个频道。
     PluginResponse {
         message_id: i32,
@@ -38,6 +50,14 @@ impl<'a> LoginRequest<'a> {
                 };
                 reader.finish()?;
                 Ok(hello)
+            }
+            serverbound::KEY => {
+                let key = Self::Key {
+                    shared_secret: reader.byte_array(MAX_ENCRYPTED_LEN)?,
+                    challenge: reader.byte_array(MAX_ENCRYPTED_LEN)?,
+                };
+                reader.finish()?;
+                Ok(key)
             }
             serverbound::CUSTOM_QUERY_ANSWER => {
                 let message_id = reader.varint()?;
@@ -73,6 +93,29 @@ impl ClientboundPacket for LoginPluginRequest<'_> {
         write_varint(out, self.message_id);
         write_string(out, self.channel);
         out.extend_from_slice(self.data);
+    }
+}
+
+/// 要求客户端加密这条连接：公布服务端公钥，并要求把 challenge 原样加密送回来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginHello<'a> {
+    /// 官方这里一直是空串。
+    pub server_id: &'a str,
+    /// 公钥的 X.509 编码。
+    pub public_key: &'a [u8],
+    pub challenge: &'a [u8],
+    /// 服务端要不要去问 Mojang。关掉正版验证但仍然加密时它是 false。
+    pub should_authenticate: bool,
+}
+
+impl ClientboundPacket for LoginHello<'_> {
+    const ID: i32 = clientbound::HELLO;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_string(out, self.server_id);
+        write_byte_array(out, self.public_key);
+        write_byte_array(out, self.challenge);
+        write_bool(out, self.should_authenticate);
     }
 }
 
@@ -222,10 +265,69 @@ mod tests {
         write_varint(&mut expected, 1);
         write_string(&mut expected, "textures");
         write_string(&mut expected, "value");
-        crate::codec::write_bool(&mut expected, true);
+        write_bool(&mut expected, true);
         write_string(&mut expected, "signature");
         write_uuid(&mut expected, Uuid::from_u128(2));
         assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn decodes_key() {
+        let mut payload = vec![serverbound::KEY as u8];
+        write_byte_array(&mut payload, &[1, 2, 3]);
+        write_byte_array(&mut payload, &[4, 5]);
+
+        assert_eq!(
+            LoginRequest::decode(&payload),
+            Ok(LoginRequest::Key {
+                shared_secret: &[1, 2, 3],
+                challenge: &[4, 5],
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_key_packet_with_absurd_lengths() {
+        let mut payload = vec![serverbound::KEY as u8];
+        write_byte_array(&mut payload, &vec![0; MAX_ENCRYPTED_LEN + 1]);
+        write_byte_array(&mut payload, &[4, 5]);
+
+        assert_eq!(
+            LoginRequest::decode(&payload),
+            Err(DecodeError::InvalidCount(MAX_ENCRYPTED_LEN as i32 + 1))
+        );
+
+        // 第二段缺字节也要被认出来。
+        let mut payload = vec![serverbound::KEY as u8];
+        write_byte_array(&mut payload, &[1, 2, 3]);
+        write_varint(&mut payload, 4);
+        payload.push(9);
+        assert_eq!(
+            LoginRequest::decode(&payload),
+            Err(DecodeError::UnexpectedEnd)
+        );
+    }
+
+    #[test]
+    fn encodes_login_hello() {
+        let mut out = Vec::new();
+        append_frame(
+            &mut out,
+            &LoginHello {
+                server_id: "",
+                public_key: &[0xaa, 0xbb],
+                challenge: &[1, 2, 3, 4],
+                should_authenticate: true,
+            },
+        )
+        .unwrap();
+        // 帧长 11：包 ID 0x01，空的 serverId，两段字节数组，一个布尔值。
+        assert_eq!(
+            out,
+            [
+                0x0b, 0x01, 0x00, 0x02, 0xaa, 0xbb, 0x04, 0x01, 0x02, 0x03, 0x04, 0x01
+            ]
+        );
     }
 
     #[test]

@@ -266,6 +266,39 @@ async fn full_server_refuses_with_a_message() {
     assert_eq!(reason["text"], "服务器已满");
 }
 
+/// 官方 `ServerLoginPacketListenerImpl.tick` 在 600 刻（30 秒）时说 `slow_login`，
+/// Bamboo 的进服时限到点时也说这句话。
+#[tokio::test]
+async fn a_slow_login_is_told_why_it_was_dropped() {
+    let config = ServerConfig {
+        pre_play_timeout: Duration::from_millis(200),
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.connect().await;
+
+    // 握手说了要登录，然后什么都不发：官方的 600 刻就是从这里开始算的。
+    client.send(&handshake(LOGIN_INTENT)).await;
+
+    let (id, reason) = json_packet(&client.read_frame().await);
+    assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
+    assert_eq!(reason["translate"], "multiplayer.disconnect.slow_login");
+    client.assert_closed().await;
+}
+
+/// 还没说要登录的连接直接断开，官方的登录时限也管不到它。
+#[tokio::test]
+async fn a_connection_that_never_handshakes_is_dropped_silently() {
+    let config = ServerConfig {
+        pre_play_timeout: Duration::from_millis(200),
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.connect().await;
+
+    client.assert_closed().await;
+}
+
 #[tokio::test]
 async fn invalid_name_closes_the_connection() {
     let server = TestServer::start(small_world()).await;

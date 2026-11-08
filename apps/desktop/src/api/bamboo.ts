@@ -31,6 +31,8 @@ export interface ServerSettings {
   maxPrePlayConnections: number;
   keepAliveSeconds: number;
   compressionThreshold: number;
+  onlineMode: boolean;
+  preventProxyConnections: boolean;
   forwarding: Forwarding;
   forwardingSecret: string;
 }
