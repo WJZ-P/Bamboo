@@ -15,6 +15,8 @@ oracle = [
     "dep:mc-bamboo-blocks",
     "dep:mc-bamboo-core",
     "dep:mc-bamboo-data",
+    "dep:mc-bamboo-game",
+    "dep:mc-bamboo-protocol",
     "dep:mc-bamboo-world",
 ]
 
@@ -22,6 +24,8 @@ oracle = [
 mc-bamboo-blocks = { workspace = true, optional = true }
 mc-bamboo-core = { workspace = true, optional = true }
 mc-bamboo-data = { workspace = true, optional = true }
+mc-bamboo-game = { workspace = true, optional = true }
+mc-bamboo-protocol = { workspace = true, optional = true }
 mc-bamboo-world = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
