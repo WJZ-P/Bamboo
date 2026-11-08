@@ -529,6 +529,32 @@ mod tests {
         crate::destroy_block(level, &mut BlockTicks::new(), &actor, HEAD);
     }
 
+    /// 朝下的粘性活塞开始缩回时，压在底座上的中继器留着：底座这时是 `moving_piston`，
+    /// 形状来自方块实体，刚开始缩回时还是伸出的底座，顶面是整的。以前按状态查表，形状是空的，
+    /// 中继器被形状更新打掉了（oracle 种子 77001 第 116246 题）。
+    #[test]
+    fn a_repeater_on_a_retracting_piston_stays() {
+        let mut level = TestLevel::new();
+        let base = BlockState(blocks::STICKY_PISTON)
+            .with(FACING, Direction::Down)
+            .with(EXTENDED, true);
+        let head = BlockState(blocks::PISTON_HEAD)
+            .with(FACING, Direction::Down)
+            .with(PISTON_TYPE, PistonType::Sticky);
+        let top = BASE.above();
+        level.set(BASE, base);
+        level.set(BASE.below(), head);
+        level.set(top, BlockState(blocks::REPEATER));
+
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.block_event(BASE, base.block(), 1, Direction::Down.id());
+        world.run_block_events();
+
+        assert!(level.get(BASE).is(blocks::MOVING_PISTON));
+        assert!(level.get(top).is(blocks::REPEATER));
+    }
+
     /// 创造模式在 `player_will_destroy` 里先拆底座，生存模式留到头被移除时的形状更新。
     /// 写方块的先后能看出走的是哪条路，最后底座都没了。
     #[test]

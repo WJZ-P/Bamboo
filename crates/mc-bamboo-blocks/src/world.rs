@@ -337,7 +337,20 @@ impl<'a> World<'a> {
     /// 大部分方块的结果在 `STATE_FACTS` 里。竹子这类方块的形状跟着渲染偏移走，要按位置算；
     /// `moving_piston` 官方标了 `dynamicShape`，支撑形状来自方块实体的碰撞形状，也跟着动画走。
     pub fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
-        let state = self.block_state(pos);
+        self.is_state_face_sturdy(self.block_state(pos), pos, face, support)
+    }
+
+    /// `state.isFaceSturdy(level, pos, face, support)`：按传进来的状态算，不重新读这一格。
+    ///
+    /// 形状更新拿到的邻居状态可能比世界里的新或者旧，官方用的是传进来的那个；但 `moving_piston`
+    /// 的形状照样从这一格的方块实体读，所以要带上世界和位置，不能只查状态的表。
+    pub fn is_state_face_sturdy(
+        &self,
+        state: BlockState,
+        pos: BlockPos,
+        face: Direction,
+        support: SupportType,
+    ) -> bool {
         if state.is(blocks::MOVING_PISTON) {
             let boxes = state.collision_boxes(self, pos, CollisionContext::Empty);
             return shape::is_supporting(&boxes, face, support);

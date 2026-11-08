@@ -22,9 +22,9 @@ use crate::{
 /// `IronBarsBlock`。
 pub(super) struct IronBars;
 
-/// `attachsTo`。`face` 是 `other` 朝着栏杆的面。
-fn attaches_to(other: BlockState, face: Direction) -> bool {
-    !is_exception_for_connection(other) && has_full_face(other, face)
+/// `attachsTo`。`face` 是 `other` 朝着栏杆的面，`other_pos` 是它的位置。
+fn attaches_to(world: &World, other_pos: BlockPos, other: BlockState, face: Direction) -> bool {
+    !is_exception_for_connection(other) && has_full_face(world, other_pos, other, face)
         || other.is_a(BlockAncestor::IronBarsBlock)
         || other.is_tagged(block_tags::WALLS)
 }
@@ -45,8 +45,10 @@ impl Behaviour for IronBars {
         let state = Direction::HORIZONTAL
             .into_iter()
             .fold(default_state(block), |state, side| {
-                let neighbor = world.block_state(pos.relative(side));
-                state.with(pipe_property(side), attaches_to(neighbor, side.opposite()))
+                let neighbor_pos = pos.relative(side);
+                let neighbor = world.block_state(neighbor_pos);
+                let attached = attaches_to(world, neighbor_pos, neighbor, side.opposite());
+                state.with(pipe_property(side), attached)
             });
         Some(state.with(WATERLOGGED, is_water_source(world, pos)))
     }
@@ -64,7 +66,7 @@ impl Behaviour for IronBars {
         if direction.axis().is_horizontal() {
             state.with(
                 pipe_property(direction),
-                attaches_to(neighbor, direction.opposite()),
+                attaches_to(world, neighbor_pos, neighbor, direction.opposite()),
             )
         } else {
             Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
