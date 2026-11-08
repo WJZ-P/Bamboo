@@ -350,6 +350,7 @@ mod tests {
             (PlayerInfoUpdate::ID, 71),
             (RemoveEntities::ID, 78),
             (RotateHead::ID, 85),
+            (SectionBlocksUpdate::ID, 86),
             (SetEntityData::ID, 101),
             (SetEquipment::ID, 104),
             (SetHeldSlot::ID, 107),

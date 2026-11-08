@@ -1,6 +1,8 @@
 import com.mojang.authlib.properties.Property;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import it.unimi.dsi.fastutil.shorts.ShortIterator;
+import it.unimi.dsi.fastutil.shorts.ShortOpenHashSet;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -44,6 +46,7 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
@@ -104,6 +107,7 @@ import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
+import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
@@ -284,6 +288,7 @@ public final class Probe {
             "handleBundlePacket",
             "handleChunkBatchFinished",
             "handleChunkBatchStart",
+            "handleChunkBlocksUpdate",
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
@@ -916,14 +921,31 @@ public final class Probe {
 
             int ownEvents = actor.levelEvents.size();
             int otherEvents = observer.levelEvents.size();
+            int ownSections = actor.sectionUpdates.size();
+            int otherSections = observer.sectionUpdates.size();
+            int breaking = actor.nextSequence();
             actor.send(new ServerboundPlayerActionPacket(
-                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, log, Direction.UP, actor.nextSequence()));
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, log, Direction.UP, breaking));
             await("placement: the torch goes with the log", () -> air.equals(observer.blocks.get(torch)));
             pumpFor(SETTLE_MILLIS);
             check("placement: the observer gets both break events", observer.levelEvents.size() == otherEvents + 2);
             check("placement: the breaker only gets the event of the torch",
                     actor.levelEvents.size() == ownEvents + 1
                             && actor.levelEvents.getLast().getData() == Block.getId(standing));
+
+            // 原木和火把在同一段里、同一 tick 没了，官方把两格放进一个 section_blocks_update。
+            List<BlockPos> together = officialOrder(log, torch);
+            check("placement: the log and the torch arrive in one section update in the official order",
+                    observer.sectionUpdates.size() == otherSections + 1
+                            && observer.sectionUpdates.getLast().equals(together));
+            check("placement: the breaker gets the same section update",
+                    actor.sectionUpdates.size() == ownSections + 1
+                            && actor.sectionUpdates.getLast().equals(together));
+            check("placement: the section update decodes to air",
+                    air.equals(observer.blocks.get(log)) && air.equals(observer.blocks.get(torch)));
+            check("placement: the section update comes before the ack",
+                    actor.eventIndex("block " + torch.toShortString() + " " + Block.getId(air))
+                            < actor.eventIndex("ack " + breaking));
 
             actor.cleared.add(log);
             actor.cleared.add(torch);
@@ -954,6 +976,23 @@ public final class Probe {
             await("signs: " + observer.player + " reads the text",
                     () -> SIGN_TEXT.equals(signLine(observer.blockEntityTags.get(sign), "front_text", 0)));
             actor.edits.add(new Edit(sign, standing));
+        }
+
+        /**
+         * 官方 `ChunkHolder.blockChanged` 按 `changed` 的先后把段内坐标记进 `ShortOpenHashSet`，
+         * `section_blocks_update` 里的格子就是这个集合读出来的顺序。
+         */
+        private static List<BlockPos> officialOrder(BlockPos... changed) {
+            ShortOpenHashSet set = new ShortOpenHashSet();
+            for (BlockPos pos : changed) {
+                set.add(SectionPos.sectionRelativePos(pos));
+            }
+            SectionPos section = SectionPos.of(changed[0]);
+            List<BlockPos> order = new ArrayList<>();
+            for (ShortIterator iterator = set.iterator(); iterator.hasNext(); ) {
+                order.add(section.relativeToBlockPos(iterator.nextShort()));
+            }
+            return order;
         }
 
         /** 手持 `item` 右键方块，等服务端确认。物品放在第 1 格，这一段开始时已经选中它。 */
@@ -1174,6 +1213,8 @@ public final class Probe {
         /** 放下又消失的方块。地面上的空气 `recordChunk` 不记，所以不能写成 `Edit`。 */
         final List<BlockPos> cleared = new ArrayList<>();
         final List<String> events = new ArrayList<>();
+        /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
+        final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
@@ -1584,6 +1625,8 @@ public final class Probe {
             handlers.put("handleSwingAnimation", value -> onSwing((ClientboundSwingAnimationPacket) value));
             handlers.put("handleSetEquipment", value -> onEquipment((ClientboundSetEquipmentPacket) value));
             handlers.put("handleBlockUpdate", value -> onBlockUpdate((ClientboundBlockUpdatePacket) value));
+            handlers.put("handleChunkBlocksUpdate",
+                    value -> onSectionBlocksUpdate((ClientboundSectionBlocksUpdatePacket) value));
             handlers.put("handleBlockEntityData",
                     value -> onBlockEntityData((ClientboundBlockEntityDataPacket) value));
             handlers.put("handleOpenSignEditor",
@@ -1885,9 +1928,24 @@ public final class Probe {
         }
 
         private void onBlockUpdate(ClientboundBlockUpdatePacket packet) {
-            BlockPos pos = packet.getPos().immutable();
-            blocks.put(pos, packet.getBlockState());
-            events.add("block " + pos.toShortString() + " " + Block.getId(packet.getBlockState()));
+            recordBlock(packet.getPos(), packet.getBlockState());
+        }
+
+        /** 和官方客户端一样，用包自己的 `runUpdates` 把每一格交出来。 */
+        private void onSectionBlocksUpdate(ClientboundSectionBlocksUpdatePacket packet) {
+            List<BlockPos> positions = new ArrayList<>();
+            packet.runUpdates((pos, state) -> {
+                positions.add(pos.immutable());
+                recordBlock(pos, state);
+            });
+            check("blocks: a section update carries more than one block", positions.size() > 1);
+            sectionUpdates.add(positions);
+        }
+
+        private void recordBlock(BlockPos pos, BlockState state) {
+            BlockPos immutable = pos.immutable();
+            blocks.put(immutable, state);
+            events.add("block " + immutable.toShortString() + " " + Block.getId(state));
         }
 
         private void onBlockEntityData(ClientboundBlockEntityDataPacket packet) {

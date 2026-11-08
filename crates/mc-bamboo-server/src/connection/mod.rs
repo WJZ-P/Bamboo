@@ -4,6 +4,7 @@
 //! 每个状态放在一个子模块里，这里只负责分发和帧的收发。
 
 mod configuration;
+mod forwarding;
 mod login;
 mod outbound;
 mod play;
@@ -13,6 +14,7 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -23,7 +25,7 @@ use mc_bamboo_protocol::{
     compression::{self, CompressionError},
     frame::{FrameError, MAX_FRAME_LEN, append_frame, find_frame},
     packet::{
-        handshake::{Handshake, Intent},
+        handshake::{Handshake, Intent, MAX_LEGACY_SERVER_ADDRESS_CHARS, MAX_SERVER_ADDRESS_CHARS},
         login::LoginDisconnect,
         play::ClientInformation,
     },
@@ -38,7 +40,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::{players::PlayerSession, server::Shared};
+use crate::{config::ForwardingMode, players::PlayerSession, server::Shared};
 
 #[cfg(test)]
 pub(crate) use outbound::MAX_QUEUED_BYTES;
@@ -46,6 +48,26 @@ pub(crate) use outbound::MAX_QUEUED_BYTES;
 /// 登录之前的帧都很小：最大的合法握手包只有 780 字节。
 /// 把上限压到远低于协议允许的 2 MiB，未认证的连接就占不了多少内存。
 const MAX_PRE_LOGIN_FRAME_LEN: usize = 1024;
+
+/// 打开转发后，登录前就要收下带皮肤属性的握手包和插件回应。
+///
+/// legacy 的地址上限是 32767 个 UTF-16 码元，按每个三字节算约 96 KiB；
+/// 128 KiB 足够装下最长的合法握手包，同时仍然远低于协议的 2 MiB。
+const MAX_FORWARDING_FRAME_LEN: usize = 128 * 1024;
+
+/// 进入游戏之前的时限到点之后，再给客户端这么久把断开消息收下。
+const GOODBYE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 连接走到哪个阶段了。时限到点时用它决定要不要告别，以及说什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// 握手、Status，或者刚进 Login 还没读到 hello。
+    Handshake,
+    /// Login 状态，对应官方的 `ServerLoginPacketListenerImpl`。
+    Login,
+    /// Configuration 状态。官方在这个阶段没有登录时限。
+    Configuration,
+}
 
 #[derive(Debug, thiserror::Error)]
 enum ConnectionError {
@@ -71,6 +93,8 @@ enum ConnectionError {
     InvalidPlayerName,
     #[error("packet is not allowed at this point")]
     UnexpectedPacket,
+    #[error("invalid forwarded player data: {0}")]
+    InvalidForwarding(String),
     #[error("client does not know the official data packs")]
     UnknownDataPacks,
     #[error("client did not answer the keep-alive")]
@@ -111,7 +135,9 @@ struct Joined {
 /// 运行一条连接直到结束。
 ///
 /// 进入游戏之前的时限覆盖整个过程，而不是每次读取，
-/// 这样客户端没法靠一个字节一个字节地慢慢发来占住名额。
+/// 这样客户端没法靠一个字节一个字节地慢慢发来占住名额。默认的 30 秒和官方
+/// `ServerLoginPacketListenerImpl` 的 `MAX_TICKS_BEFORE_LOGIN`（600 刻）一样长，
+/// 在 Login 阶段到点时也和官方一样说 `multiplayer.disconnect.slow_login`。
 pub(crate) async fn handle(
     stream: TcpStream,
     peer: SocketAddr,
@@ -123,25 +149,29 @@ pub(crate) async fn handle(
         debug!(%peer, %error, "failed to disable Nagle's algorithm");
     }
 
-    let mut connection = Connection::new(stream);
+    let mut connection = Connection::new(stream, pre_login_frame_len(shared.config.forwarding));
     let time_limit = shared.config.pre_play_timeout;
-    let pre_play = timeout(time_limit, pre_play(&mut connection, &shared));
-    let joined = tokio::select! {
-        () = cancel.cancelled() => {
-            debug!(%peer, "connection closed by shutdown");
+    let outcome = {
+        let pre_play = timeout(time_limit, pre_play(&mut connection, &shared));
+        tokio::select! {
+            () = cancel.cancelled() => {
+                debug!(%peer, "connection closed by shutdown");
+                return;
+            }
+            outcome = pre_play => outcome,
+        }
+    };
+    let joined = match outcome {
+        Ok(Ok(joined)) => joined,
+        Ok(Err(error)) => {
+            debug!(%peer, %error, "dropping connection");
             return;
         }
-        outcome = pre_play => match outcome {
-            Ok(Ok(joined)) => joined,
-            Ok(Err(error)) => {
-                debug!(%peer, %error, "dropping connection");
-                return;
-            }
-            Err(_) => {
-                debug!(%peer, "connection timed out");
-                return;
-            }
-        },
+        Err(_) => {
+            debug!(%peer, "connection timed out");
+            say_goodbye_to_a_slow_login(&mut connection).await;
+            return;
+        }
     };
 
     // 名额只限制进入游戏之前的连接，玩家数量由玩家表限制。
@@ -156,6 +186,17 @@ pub(crate) async fn handle(
     }
 }
 
+/// 时限到点时告别。只有 Login 阶段有话要说，和官方 `ServerLoginPacketListenerImpl.tick` 一样。
+///
+/// 这一步已经在时限之外了，所以自己带一个短时限，不让收不下这个包的客户端拖着名额。
+async fn say_goodbye_to_a_slow_login(connection: &mut Connection) {
+    if connection.phase != Phase::Login {
+        return;
+    }
+    let goodbye = connection.refuse_login_translated(login::SLOW_LOGIN);
+    let _ = timeout(GOODBYE_TIMEOUT, goodbye).await;
+}
+
 /// 处理进入游戏之前的全部流程。玩家成功进入游戏时返回它的在线状态。
 async fn pre_play(
     connection: &mut Connection,
@@ -164,7 +205,12 @@ async fn pre_play(
     let Some(payload) = connection.next_frame().await? else {
         return Ok(None);
     };
-    let handshake = Handshake::decode(&payload)?;
+    // Spigot 为了让 legacy 转发把皮肤塞进地址，把握手的地址上限提高到了 32767。
+    let max_address_chars = match shared.config.forwarding {
+        ForwardingMode::Legacy => MAX_LEGACY_SERVER_ADDRESS_CHARS,
+        _ => MAX_SERVER_ADDRESS_CHARS,
+    };
+    let handshake = Handshake::decode_with_address_limit(&payload, max_address_chars)?;
     debug!(?handshake, "received handshake");
 
     match handshake.intent {
@@ -183,7 +229,18 @@ async fn pre_play(
             Ok(None)
         }
         Intent::Login => {
-            let Some(session) = login::admit(connection, shared).await? else {
+            // 官方的 600 刻从建立 Login 监听器开始算，就是这里。
+            connection.phase = Phase::Login;
+            let identity =
+                match forwarding::identity(shared.config.forwarding, handshake.server_address) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        debug!(%error, "invalid forwarding data");
+                        connection.refuse_login(forwarding::BAD_LEGACY_DATA).await?;
+                        return Ok(None);
+                    }
+                };
+            let Some(session) = login::admit(connection, shared, identity).await? else {
                 return Ok(None);
             };
             // 还没进入 Play 时被同名玩家顶掉，连接直接结束就好，客户端看到的是连接断开。
@@ -202,6 +259,7 @@ async fn configure(
     shared: &Shared,
 ) -> Result<ClientInformation, ConnectionError> {
     login::finish(connection, session, shared).await?;
+    connection.phase = Phase::Configuration;
     configuration::serve(connection, shared).await
 }
 
@@ -242,6 +300,14 @@ async fn read_frame<R: AsyncRead + Unpin>(
     }
 }
 
+/// 登录之前允许的帧大小。转发打开时要把带皮肤属性的握手包和插件回应也收下。
+fn pre_login_frame_len(mode: ForwardingMode) -> usize {
+    match mode {
+        ForwardingMode::Off => MAX_PRE_LOGIN_FRAME_LEN,
+        ForwardingMode::Legacy | ForwardingMode::Modern => MAX_FORWARDING_FRAME_LEN,
+    }
+}
+
 /// 解压后的包最多多长。进入 Play 之前帧被限制得比官方小，解压后也照这个限制；
 /// 之后和官方一样，只受协议的解压上限约束。
 fn max_packet_len(max_frame_len: usize) -> usize {
@@ -273,16 +339,19 @@ struct Connection {
     compression: Option<i32>,
     /// 正版验证交换出密钥之后两个方向的 AES 流。
     encryption: Option<Encryption>,
+    /// 连接走到哪个阶段了。时限到点时要看它。
+    phase: Phase,
 }
 
 impl Connection {
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, max_frame_len: usize) -> Self {
         Self {
             stream,
-            read_buffer: BytesMut::with_capacity(MAX_PRE_LOGIN_FRAME_LEN),
-            max_frame_len: MAX_PRE_LOGIN_FRAME_LEN,
+            read_buffer: BytesMut::with_capacity(max_frame_len),
+            max_frame_len,
             compression: None,
             encryption: None,
+            phase: Phase::Handshake,
         }
     }
 

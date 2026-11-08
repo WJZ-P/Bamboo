@@ -1,10 +1,12 @@
 //! 网络协议的基础数据类型。
 
-use mc_bamboo_core::{BlockPos, Vec3, profile::Property};
+use mc_bamboo_core::{BlockPos, Vec3};
 use uuid::Uuid;
 
 /// 32 位 VarInt 编码后的最大长度。
 pub const MAX_VARINT_LEN: usize = 5;
+/// 64 位 VarLong 编码后的最大长度。
+pub const MAX_VARLONG_LEN: usize = 10;
 
 /// 数据包解码失败的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -13,6 +15,8 @@ pub enum DecodeError {
     UnexpectedEnd,
     #[error("VarInt is longer than 5 bytes")]
     VarIntTooLong,
+    #[error("VarLong is longer than 10 bytes")]
+    VarLongTooLong,
     #[error("string has invalid length {0}")]
     InvalidStringLength(i32),
     #[error("string is longer than {max_chars} characters")]
@@ -75,22 +79,6 @@ pub fn write_varint(out: &mut Vec<u8>, value: i32) {
 pub fn write_string(out: &mut Vec<u8>, value: &str) {
     write_varint(out, value.len() as i32);
     out.extend_from_slice(value.as_bytes());
-}
-
-/// 写入档案属性列表，皮肤和披风就在里面。
-///
-/// 官方是 `ByteBufCodecs.GAME_PROFILE_PROPERTIES`：个数上限 16，名字 64 个字符，
-/// 值 32767 个，签名 1024 个。这些内容都是 Mojang 给的，这里原样转发。
-pub fn write_properties(out: &mut Vec<u8>, properties: &[Property]) {
-    write_varint(out, properties.len() as i32);
-    for property in properties {
-        write_string(out, &property.name);
-        write_string(out, &property.value);
-        write_bool(out, property.signature.is_some());
-        if let Some(signature) = &property.signature {
-            write_string(out, signature);
-        }
-    }
 }
 
 /// 把 `value` 以带长度前缀的字节数组形式追加到 `out`。
@@ -171,6 +159,18 @@ impl<'a> Reader<'a> {
         let (value, len) = decode_varint(self.input)?;
         self.input = &self.input[len..];
         Ok(value)
+    }
+
+    pub fn varlong(&mut self) -> Result<i64, DecodeError> {
+        let mut value = 0u64;
+        for index in 0..MAX_VARLONG_LEN {
+            let byte = self.u8()?;
+            value |= u64::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                return Ok(value as i64);
+            }
+        }
+        Err(DecodeError::VarLongTooLong)
     }
 
     pub fn u8(&mut self) -> Result<u8, DecodeError> {
@@ -346,7 +346,22 @@ mod tests {
             let mut out = Vec::new();
             write_varlong(&mut out, value);
             assert_eq!(out, encoded, "encoding {value}");
+            let mut reader = Reader::new(encoded);
+            assert_eq!(reader.varlong(), Ok(value), "decoding {value}");
+            assert_eq!(reader.finish(), Ok(()));
         }
+    }
+
+    #[test]
+    fn varlong_rejects_truncated_and_overlong_input() {
+        assert_eq!(
+            Reader::new(&[0x80, 0x80]).varlong(),
+            Err(DecodeError::UnexpectedEnd)
+        );
+        assert_eq!(
+            Reader::new(&[0x80; MAX_VARLONG_LEN + 1]).varlong(),
+            Err(DecodeError::VarLongTooLong)
+        );
     }
 
     #[test]
@@ -511,38 +526,6 @@ mod tests {
         assert_eq!(reader.bytes(2), Ok(&[1, 2][..]));
         assert_eq!(reader.bytes(2), Err(DecodeError::UnexpectedEnd));
         assert_eq!(reader.u8(), Ok(3));
-    }
-
-    #[test]
-    fn properties_are_written_like_a_property_map() {
-        let mut out = Vec::new();
-        write_properties(
-            &mut out,
-            &[
-                Property {
-                    name: "a".to_owned(),
-                    value: "b".to_owned(),
-                    signature: Some("c".to_owned()),
-                },
-                Property {
-                    name: "d".to_owned(),
-                    value: "e".to_owned(),
-                    signature: None,
-                },
-            ],
-        );
-        assert_eq!(
-            out,
-            [
-                0x02, // 两项
-                0x01, b'a', 0x01, b'b', 0x01, 0x01, b'c', // 带签名
-                0x01, b'd', 0x01, b'e', 0x00, // 不带签名
-            ]
-        );
-
-        let mut out = Vec::new();
-        write_properties(&mut out, &[]);
-        assert_eq!(out, [0x00]);
     }
 
     #[test]

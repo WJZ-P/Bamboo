@@ -7,6 +7,7 @@ pub mod configuration;
 pub mod handshake;
 pub mod login;
 pub mod play;
+pub mod profile;
 pub mod status;
 
 /// 服务端发给客户端的数据包。

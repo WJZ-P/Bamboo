@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_core::profile::Property;
 use mc_bamboo_protocol::{
-    packet::play::{GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, SystemChat},
+    packet::{
+        play::{GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, SystemChat},
+        profile::ProfileProperty,
+    },
     text::{Color, Component},
 };
 use uuid::Uuid;
@@ -25,9 +27,9 @@ pub(crate) struct GameTime(pub(crate) i64);
 pub(crate) struct RosterEntry {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
-    /// 皮肤等属性，正版验证时由 session server 给出。别人要看到这名玩家的皮肤，
-    /// 就得靠这些属性跟着 Tab 列表一起发过去。
-    pub(crate) properties: Vec<Property>,
+    /// 皮肤等属性，由 session server 或者代理给出。名单上的人都要带着，
+    /// 别人才能看到真实皮肤。
+    pub(crate) properties: Vec<ProfileProperty>,
     pub(crate) game_mode: GameMode,
     /// 毫秒。
     pub(crate) latency: i32,
@@ -195,7 +197,7 @@ mod tests {
     #[test]
     fn a_new_player_brings_their_skin() {
         let mut entry = steve();
-        entry.properties = vec![Property {
+        entry.properties = vec![ProfileProperty {
             name: "textures".to_owned(),
             value: "ewo=".to_owned(),
             signature: None,

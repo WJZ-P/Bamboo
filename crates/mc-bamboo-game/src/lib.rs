@@ -16,11 +16,13 @@
 //! | `movement` | 移动包和传送确认 |
 //! | `chunk_tracking` | 跟踪范围和发送速度 |
 //! | `chunk_encoding` | 区块的网络格式 |
+//! | `chunk_broadcast` | 每 tick 逐个区块发光照和方块的变化 |
 //! | `light_updates` | 算光照，发 `light_update` |
 //! | `sign` | 告示牌的方块实体数据 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
 mod chat;
+mod chunk_broadcast;
 mod chunk_encoding;
 mod chunk_tracking;
 mod entity_sync;

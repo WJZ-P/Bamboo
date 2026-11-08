@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use mc_bamboo_auth::Profile;
-use mc_bamboo_core::profile::Property;
+use mc_bamboo_protocol::packet::profile::ProfileProperty;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 use tracing::info;
 use uuid::Uuid;
@@ -68,13 +68,13 @@ pub(crate) struct PlayerSession {
     signals: SessionSignals,
     pub(crate) name: String,
     pub(crate) uuid: Uuid,
-    /// 皮肤等属性，离线模式下是空的。
-    pub(crate) properties: Vec<Property>,
+    /// session server 或者代理给出的皮肤等属性。离线模式没有属性。
+    pub(crate) properties: Vec<ProfileProperty>,
     pub(crate) entity_id: i32,
 }
 
 impl PlayerSession {
-    /// 把玩家加入玩家表。`profile` 是正版验证的结果，离线模式下由玩家名现编。
+    /// 把玩家加入玩家表。`profile` 是正版验证或者代理转发的结果，离线模式下由玩家名现编。
     ///
     /// 同名玩家在线时和官方一样踢掉旧连接，等它离开之后再进入。断网时旧连接要等心跳超时才会结束，
     /// 这段时间拒绝重连的话玩家就进不来了。这里没有自己的时限，调用方的 `pre_play_timeout` 兜底。

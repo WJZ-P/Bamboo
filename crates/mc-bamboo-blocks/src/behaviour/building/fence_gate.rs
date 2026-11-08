@@ -75,6 +75,10 @@ impl Behaviour for FenceGate {
         if state.get(POWERED) != power {
             let updated = state.with(POWERED, power).with(OPEN, power);
             world.set_block(pos, updated, UPDATE_CLIENTS);
+            if state.get(OPEN) != power {
+                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
+                world.random().next_float();
+            }
         }
     }
 
@@ -101,6 +105,8 @@ impl Behaviour for FenceGate {
             toggled,
             UPDATE_CLIENTS | UPDATE_IMMEDIATE,
         );
+        // `playSound` 在放下新状态之后取音高。
+        world.random().next_float();
         InteractionResult::Success
     }
 }

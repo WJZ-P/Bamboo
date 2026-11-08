@@ -17,12 +17,24 @@ export interface ServerSnapshot {
   protocolVersion: number;
 }
 
+/** 从代理接收玩家信息的方式。 */
+export type Forwarding = "off" | "legacy" | "modern";
+
+/** 服务端的全部可调选项。字段和 `src-tauri` 的 `ServerSettings` 一一对应。 */
 export interface ServerSettings {
   host: string;
   port: number;
   motd: string;
   maxPlayers: number;
   viewDistance: number;
+  prePlayTimeoutSeconds: number;
+  maxPrePlayConnections: number;
+  keepAliveSeconds: number;
+  compressionThreshold: number;
+  onlineMode: boolean;
+  preventProxyConnections: boolean;
+  forwarding: Forwarding;
+  forwardingSecret: string;
 }
 
 export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";
@@ -42,6 +54,7 @@ export const stopServer = () => invoke<ServerSnapshot>("stop_server");
 export const loadSettings = () => invoke<ServerSettings>("load_settings");
 export const saveSettings = (settings: ServerSettings) =>
   invoke<void>("save_settings", { settings });
+export const defaultSettings = () => invoke<ServerSettings>("default_settings");
 export const recentLogs = () => invoke<LogLine[]>("recent_logs");
 
 export const onStateChanged = (handler: (snapshot: ServerSnapshot) => void): Promise<UnlistenFn> =>

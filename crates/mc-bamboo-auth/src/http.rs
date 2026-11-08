@@ -38,46 +38,86 @@ pub(crate) struct Response {
     pub body: Vec<u8>,
 }
 
-/// 发一个 GET 请求，整个来回不许超过 `deadline`。
-pub(crate) async fn get(url: &str, deadline: Duration) -> Result<Response, HttpError> {
-    timeout(deadline, request(url))
-        .await
-        .map_err(|_| HttpError::Timeout)?
+/// 问 session server 的两个时限，照 authlib `MinecraftClient` 的两个常量分开算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// 把连接建起来（TCP 加 TLS 握手）的时限，对应 `CONNECT_TIMEOUT_MS`。
+    pub connect: Duration,
+    /// 等对面吐出下一段字节的时限，对应 `READ_TIMEOUT_MS`。
+    ///
+    /// 和 Java 的 `SO_TIMEOUT` 一样每次读都重新计时，所以慢慢回话的服务器不会被判超时，
+    /// 但是不说话的服务器一定会。
+    pub read: Duration,
 }
 
-async fn request(url: &str) -> Result<Response, HttpError> {
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: crate::CONNECT_TIMEOUT,
+            read: crate::READ_TIMEOUT,
+        }
+    }
+}
+
+/// 发一个 GET 请求。
+pub(crate) async fn get(url: &str, timeouts: Timeouts) -> Result<Response, HttpError> {
     let target = Target::parse(url)?;
+    // TCP 和 TLS 握手一起算连接阶段，Java 那边也是 `setConnectTimeout` 管这一段。
+    match timeout(timeouts.connect, connect(&target))
+        .await
+        .map_err(|_| HttpError::Timeout)??
+    {
+        Transport::Tls(stream) => exchange(stream, &target.request_head(), timeouts.read).await,
+        Transport::Plain(stream) => exchange(stream, &target.request_head(), timeouts.read).await,
+    }
+}
+
+/// 建好的连接。TLS 和明文走同一段收发代码，所以在这里把类型收拢起来。
+///
+/// TLS 那一半比裸 socket 大得多，装进 `Box` 免得明文连接也占着这么大的栈空间。
+enum Transport {
+    Tls(Box<tokio_native_tls::TlsStream<TcpStream>>),
+    Plain(TcpStream),
+}
+
+async fn connect(target: &Target<'_>) -> Result<Transport, HttpError> {
     let stream = TcpStream::connect((target.host, target.port))
         .await
         .map_err(|error| HttpError::Connect(target.authority.to_owned(), error))?;
-    let head = target.request_head();
-
-    if target.tls {
-        let connector = native_tls::TlsConnector::new()
-            .map_err(|error| HttpError::Tls(target.host.to_owned(), error.to_string()))?;
-        let stream = tokio_native_tls::TlsConnector::from(connector)
-            .connect(target.host, stream)
-            .await
-            .map_err(|error| HttpError::Tls(target.host.to_owned(), error.to_string()))?;
-        exchange(stream, &head).await
-    } else {
-        exchange(stream, &head).await
+    if !target.tls {
+        return Ok(Transport::Plain(stream));
     }
+
+    let connector = native_tls::TlsConnector::new()
+        .map_err(|error| HttpError::Tls(target.host.to_owned(), error.to_string()))?;
+    let connector = tokio_native_tls::TlsConnector::from(connector);
+    let stream = connector
+        .connect(target.host, stream)
+        .await
+        .map_err(|error| HttpError::Tls(target.host.to_owned(), error.to_string()))?;
+    Ok(Transport::Tls(Box::new(stream)))
 }
 
 /// 把请求写出去，再读回一个完整的回复。
 ///
 /// 回复一读满就返回，不等对面关连接：session server 回的是 `Connection: keep-alive`，
 /// 一直读到 EOF 会白等到超时。
-async fn exchange<S>(mut stream: S, head: &str) -> Result<Response, HttpError>
+async fn exchange<S>(
+    mut stream: S,
+    head: &str,
+    read_timeout: Duration,
+) -> Result<Response, HttpError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    stream
-        .write_all(head.as_bytes())
-        .await
-        .map_err(HttpError::Io)?;
-    stream.flush().await.map_err(HttpError::Io)?;
+    // Java 的 SO_TIMEOUT 只管读，但是写不出去的连接同样不能挂着，所以用同一个时限。
+    timeout(read_timeout, async {
+        stream.write_all(head.as_bytes()).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| HttpError::Timeout)?
+    .map_err(HttpError::Io)?;
 
     let mut buffer = Vec::new();
     let mut chunk = [0; 4096];
@@ -85,7 +125,10 @@ where
         if let Some(response) = parse(&buffer, false)? {
             return Ok(response);
         }
-        let read = stream.read(&mut chunk).await.map_err(HttpError::Io)?;
+        let read = timeout(read_timeout, stream.read(&mut chunk))
+            .await
+            .map_err(|_| HttpError::Timeout)?
+            .map_err(HttpError::Io)?;
         if read == 0 {
             // 对面关了连接。没有长度头的回复到这里才算完整。
             return parse(&buffer, true)?
@@ -207,9 +250,30 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// 把 `主机[:端口]` 拆开。IPv6 字面量按 RFC 3986 写在方括号里，里面的冒号不是端口分隔符。
+///
+/// 返回的主机名不带方括号，端口没写时是 `None`。方括号不成对就返回 `None`，当成坏 URL。
+fn split_authority(authority: &str) -> Option<(&str, Option<&str>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        return match after {
+            "" => Some((host, None)),
+            port => Some((host, Some(port.strip_prefix(':')?))),
+        };
+    }
+    if authority.contains(']') {
+        return None;
+    }
+    Some(match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    })
+}
+
 /// 请求要发往哪里。
 struct Target<'a> {
     tls: bool,
+    /// 连接用的主机名。IPv6 字面量在这里已经去掉了方括号。
     host: &'a str,
     port: u16,
     /// URL 里写的 `主机[:端口]`，原样放进 `Host` 头。
@@ -233,9 +297,11 @@ impl<'a> Target<'a> {
             Some(index) => (&rest[..index], &rest[index..]),
             None => (rest, "/"),
         };
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port)) => (host, port.parse().map_err(|_| malformed())?),
-            None => (authority, if tls { 443 } else { 80 }),
+        let default_port = if tls { 443 } else { 80 };
+        let (host, port) = split_authority(authority).ok_or_else(malformed)?;
+        let port = match port {
+            Some(port) => port.parse().map_err(|_| malformed())?,
+            None => default_port,
         };
         if host.is_empty() || port == 0 {
             return Err(malformed());
@@ -287,6 +353,23 @@ mod tests {
         assert_eq!((target.port, target.path), (80, "/"));
     }
 
+    /// IPv6 字面量写在方括号里，里面的冒号不是端口分隔符。连接时要去掉方括号，
+    /// `Host` 头里要留着。
+    #[test]
+    fn parses_ipv6_literals() {
+        let target = Target::parse("http://[::1]:8080/hasJoined").expect("url");
+        assert_eq!((target.host, target.port), ("::1", 8080));
+        assert_eq!(target.authority, "[::1]:8080");
+        assert!(target.request_head().contains("Host: [::1]:8080\r\n"));
+
+        let target = Target::parse("https://[2001:db8::1]/a?b=c").expect("url");
+        assert_eq!((target.host, target.port), ("2001:db8::1", 443));
+        assert_eq!(target.path, "/a?b=c");
+
+        let target = Target::parse("http://[::1]").expect("url");
+        assert_eq!((target.host, target.port, target.path), ("::1", 80, "/"));
+    }
+
     #[test]
     fn rejects_urls_it_cannot_use() {
         for url in [
@@ -296,6 +379,12 @@ mod tests {
             "http://example.com:/",
             "http://example.com:0/",
             "http://example.com:70000/",
+            // 方括号不成对，或者方括号后面不是端口。
+            "http://[::1/",
+            "http://::1]/",
+            "http://[::1]8080/",
+            "http://[]/",
+            "http://[::1]:/",
         ] {
             assert!(
                 matches!(Target::parse(url), Err(HttpError::Url(_))),

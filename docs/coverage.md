@@ -269,7 +269,7 @@ tick 循环：20 tick 每秒，按绝对时间排下一次，不要在工作完�
 | 客户端 | 加载画面 | 30 秒 | 放行玩家 | `LevelLoadTracker` | 2.1 第 5 项 |
 | 官方服务端 | `ReadTimeoutHandler` | 30 秒没收到字节 | 断开 | `ServerConnectionListener` | 不需要单独实现，心跳已覆盖 |
 | 官方服务端 | 心跳 | 每 15 秒，上一次没回就断开 | `disconnect.timeout` | `ServerCommonPacketListenerImpl.keepConnectionAlive` | M1 相同，`keep_alive_interval` 15 秒 |
-| 官方服务端 | 登录 | 600 tick | 断开 | `ServerLoginPacketListenerImpl` | M1 的 `pre_play_timeout` 30 秒覆盖 Login 和 Configuration |
+| 官方服务端 | 登录 | 600 tick | `multiplayer.disconnect.slow_login` | `ServerLoginPacketListenerImpl.tick` 的 `MAX_TICKS_BEFORE_LOGIN` | `pre_play_timeout` 30 秒覆盖 Login 和 Configuration，时长相同。在 Login 阶段到点时也发同一个翻译键，别的阶段官方没有时限，直接断开 |
 | Bamboo M1 | `CHUNK_SEND_TIMEOUT` | 60 秒 | 断开 | `connection/play.rs` | 删除。批次确认取代它 |
 
 客户端正常时每秒至少发 20 个 `client_tick_end`，所以读超时只在客户端真的挂了时才有意义。

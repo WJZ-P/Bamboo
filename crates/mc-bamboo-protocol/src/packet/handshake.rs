@@ -4,8 +4,10 @@ use mc_bamboo_data::packets::handshake::serverbound;
 
 use crate::codec::{DecodeError, Reader};
 
-/// 官方服务端允许握手包携带的最长服务器地址。
-const MAX_SERVER_ADDRESS_CHARS: usize = 255;
+/// 原版服务端允许握手包携带的最长服务器地址。
+pub const MAX_SERVER_ADDRESS_CHARS: usize = 255;
+/// Spigot 把上限提高到 `Short.MAX_VALUE`，好让 legacy 转发的皮肤属性塞进服务器地址。
+pub const MAX_LEGACY_SERVER_ADDRESS_CHARS: usize = 32767;
 
 /// 客户端握手之后想做的事。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,15 @@ pub struct Handshake<'a> {
 impl<'a> Handshake<'a> {
     /// 解码一帧的负载，负载以数据包 ID 开头。
     pub fn decode(payload: &'a [u8]) -> Result<Self, DecodeError> {
+        Self::decode_with_address_limit(payload, MAX_SERVER_ADDRESS_CHARS)
+    }
+
+    /// 和 [`decode`](Self::decode) 相同，但允许更长的服务器地址。
+    /// 代理把玩家 IP、UUID 和皮肤塞在地址里，官方后端会放开这个上限。
+    pub fn decode_with_address_limit(
+        payload: &'a [u8],
+        max_address_chars: usize,
+    ) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
         let id = reader.varint()?;
         if id != serverbound::INTENTION {
@@ -46,7 +57,7 @@ impl<'a> Handshake<'a> {
 
         let handshake = Self {
             protocol_version: reader.varint()?,
-            server_address: reader.string(MAX_SERVER_ADDRESS_CHARS)?,
+            server_address: reader.string(max_address_chars)?,
             server_port: reader.u16()?,
             intent: Intent::from_id(reader.varint()?)?,
         };
@@ -140,6 +151,28 @@ mod tests {
             Err(DecodeError::StringTooLong {
                 max_chars: MAX_SERVER_ADDRESS_CHARS
             })
+        );
+    }
+
+    #[test]
+    fn forwarded_addresses_may_be_longer_than_a_normal_handshake() {
+        let address = format!(
+            "localhost\0 127.0.0.1\0 00000000000000000000000000000000\0 [{}]",
+            "x".repeat(300)
+        );
+        let payload = handshake_payload(&address, 2);
+
+        assert_eq!(
+            Handshake::decode(&payload),
+            Err(DecodeError::StringTooLong {
+                max_chars: MAX_SERVER_ADDRESS_CHARS
+            })
+        );
+        assert_eq!(
+            Handshake::decode_with_address_limit(&payload, MAX_LEGACY_SERVER_ADDRESS_CHARS)
+                .unwrap()
+                .server_address,
+            address
         );
     }
 

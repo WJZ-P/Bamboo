@@ -1,13 +1,15 @@
 //! Tab 列表。所有在线玩家都在每个客户端的列表里，和距离无关。
 
-use mc_bamboo_core::profile::Property;
 use mc_bamboo_data::packets::play::clientbound;
 use uuid::Uuid;
 
 use super::GameMode;
 use crate::{
-    codec::{write_bool, write_properties, write_string, write_uuid, write_varint},
-    packet::ClientboundPacket,
+    codec::{write_bool, write_string, write_uuid, write_varint},
+    packet::{
+        ClientboundPacket,
+        profile::{ProfileProperty, write_profile_properties},
+    },
     text::Component,
 };
 
@@ -16,8 +18,8 @@ use crate::{
 pub struct PlayerInfoEntry<'a> {
     pub uuid: Uuid,
     pub name: &'a str,
-    /// 皮肤等属性。别人的客户端靠这些字段显示皮肤，离线模式下是空的。
-    pub properties: &'a [Property],
+    /// 皮肤等属性。别人的客户端靠这些字段显示皮肤，离线模式没有属性。
+    pub properties: &'a [ProfileProperty],
     pub game_mode: GameMode,
     pub listed: bool,
     /// 毫秒。
@@ -32,7 +34,7 @@ impl PlayerInfoEntry<'_> {
         write_uuid(out, self.uuid);
         if actions & PlayerInfoUpdate::ADD_PLAYER != 0 {
             write_string(out, self.name);
-            write_properties(out, self.properties);
+            write_profile_properties(out, self.properties);
         }
         if actions & PlayerInfoUpdate::INITIALIZE_CHAT != 0 {
             // 聊天会话。离线模式没有。
@@ -165,6 +167,27 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_player_writes_the_skin_properties() {
+        let properties = [ProfileProperty {
+            name: "textures".to_owned(),
+            value: "value".to_owned(),
+            signature: Some("signature".to_owned()),
+        }];
+        let entry = PlayerInfoEntry {
+            properties: &properties,
+            ..steve()
+        };
+
+        let mut expected = format!("01 01 {STEVE_HEX} 05 53 74 65 76 65 01");
+        expected.push_str(" 08 74 65 78 74 75 72 65 73 05 76 61 6c 75 65 01");
+        expected.push_str(" 09 73 69 67 6e 61 74 75 72 65");
+        assert_eq!(
+            update(PlayerInfoUpdate::ADD_PLAYER, &[entry]),
+            hex(&expected)
+        );
+    }
+
+    #[test]
     fn single_action_updates_match_official_bytes() {
         assert_eq!(
             update(PlayerInfoUpdate::UPDATE_HAT, &[steve()]),
@@ -231,7 +254,7 @@ mod tests {
     /// 皮肤跟着 ADD_PLAYER 一起发出去，别人的客户端才看得到。
     #[test]
     fn add_player_carries_the_skin() {
-        let properties = [Property {
+        let properties = [ProfileProperty {
             name: "textures".to_owned(),
             value: "ewo=".to_owned(),
             signature: Some("c2ln".to_owned()),

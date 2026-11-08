@@ -26,13 +26,16 @@ aes = "0.8"
 bytes = "1.12.1"
 cfb8 = "0.8"
 flate2 = "1.1.11"
+hmac = "0.12.1"
 md-5 = "0.10"
 # 用系统自带的 TLS（Windows 是 schannel），这台机器上没有 rustls 后端需要的汇编工具链。
 native-tls = "0.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 rsa = "0.9"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.10"
+sha2 = "0.10.9"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
 tokio-native-tls = "0.3"

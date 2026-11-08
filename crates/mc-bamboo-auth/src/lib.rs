@@ -13,8 +13,16 @@ mod http;
 mod keypair;
 mod session;
 
+use std::time::Duration;
+
+/// 建立到 session server 的连接的时限，照 authlib `MinecraftClient.CONNECT_TIMEOUT_MS`。
+pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(5000);
+/// 等 session server 吐下一段字节的时限，照 authlib `MinecraftClient.READ_TIMEOUT_MS`。
+pub const READ_TIMEOUT: Duration = Duration::from_millis(5000);
+
 pub use cipher::{DecryptHalf, EncryptHalf, Encryption, SHARED_SECRET_LEN, SharedSecret};
 pub use digest::{minecraft_hex_digest, server_id_hash};
+pub use http::Timeouts;
 pub use keypair::{
     CHALLENGE_LEN, Challenge, CryptError, ServerKeyPair, encrypt_to_server, random_challenge,
 };

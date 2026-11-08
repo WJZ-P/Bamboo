@@ -4,6 +4,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, items, tags::item_tags};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour,
@@ -38,7 +39,21 @@ fn check_and_flip(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block_and_update(pos, flipped.with(POWERED, signal));
 }
 
+/// `WeatheringCopperFullBlock`：只有氧化。
+pub(super) struct WeatheringCopperFull;
+
+impl Behaviour for WeatheringCopperFull {
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+}
+
 impl Behaviour for CopperBulb {
+    /// `WeatheringCopperBulbBlock` 在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         if !old.is_same_block(state) {
             check_and_flip(state, world, pos);
@@ -153,6 +168,10 @@ fn revive_statue(state: BlockState, world: &mut World, pos: BlockPos) -> Interac
 }
 
 impl Behaviour for WeatheringCopperGolemStatue {
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

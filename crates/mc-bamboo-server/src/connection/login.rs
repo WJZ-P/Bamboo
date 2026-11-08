@@ -1,13 +1,15 @@
 //! Login 状态：确认玩家身份。
 //!
-//! 关掉正版验证时这里只读一个玩家名，UUID 由玩家名算出来；打开时要走官方
-//! `ServerLoginPacketListenerImpl.handleHello` / `handleKey` 的全套：公布公钥、
-//! 校验 challenge、启用加密，再去问 session server。
+//! 三条路：离线模式只读一个玩家名，UUID 由玩家名算出来；代理转发信任代理给的 UUID、
+//! 名字和皮肤；打开正版验证时走官方 `ServerLoginPacketListenerImpl.handleHello` /
+//! `handleKey` 的全套：公布公钥、校验 challenge、启用加密，再去问 session server。
+//!
+//! 正版验证和代理转发互斥，[`ServerConfig::normalized`](crate::ServerConfig) 保证了这一点。
 
 use std::sync::Arc;
 
 use mc_bamboo_auth::{
-    AuthError, Profile, ServerKeyPair, has_joined, random_challenge, server_id_hash,
+    AuthError, Profile, ServerKeyPair, Timeouts, has_joined, random_challenge, server_id_hash,
 };
 use mc_bamboo_protocol::{
     frame::append_frame,
@@ -19,7 +21,7 @@ use md5::{Digest, Md5};
 use tracing::{error, info, warn};
 use uuid::{Builder, Uuid};
 
-use super::{Connection, ConnectionError};
+use super::{Connection, ConnectionError, forwarding};
 use crate::{players::PlayerSession, server::Shared};
 
 /// 官方 `ServerLoginPacketListenerImpl.serverId` 一直是空串，哈希里也用它。
@@ -28,12 +30,15 @@ const SERVER_ID: &str = "";
 const UNVERIFIED_USERNAME: &str = "multiplayer.disconnect.unverified_username";
 /// 问不到 session server 时客户端看到的话。
 const AUTHSERVERS_DOWN: &str = "multiplayer.disconnect.authservers_down";
+/// 官方 `ServerLoginPacketListenerImpl.tick` 在 600 刻（30 秒）时说的那句话。
+pub(super) const SLOW_LOGIN: &str = "multiplayer.disconnect.slow_login";
 
 /// 确认玩家身份并把玩家加入玩家表。同名玩家在线时要等它离开。
 /// 玩家被拒绝或中途离开时返回 `None`。
 pub(super) async fn admit(
     connection: &mut Connection,
     shared: &Arc<Shared>,
+    identity: forwarding::Identity,
 ) -> Result<Option<PlayerSession>, ConnectionError> {
     let Some(payload) = connection.next_frame().await? else {
         return Ok(None);
@@ -47,12 +52,32 @@ pub(super) async fn admit(
     // 后面还要再读包，名字不能继续借着这一帧。
     let name = name.to_owned();
 
-    let profile = match &shared.keypair {
-        Some(keypair) => match authenticate(connection, shared, keypair, name).await? {
-            Some(profile) => profile,
-            None => return Ok(None),
+    let profile = match identity {
+        // 没有转发时才可能开着正版验证，这时服务端手里有密钥对。
+        forwarding::Identity::Offline => match &shared.keypair {
+            Some(keypair) => match authenticate(connection, shared, keypair, name).await? {
+                Some(profile) => profile,
+                None => return Ok(None),
+            },
+            None => offline_profile(name),
         },
-        None => offline_profile(name),
+        // legacy 只转发 UUID 和属性，名字还是握手之后客户端自己报的。
+        forwarding::Identity::Legacy(legacy) => Profile {
+            uuid: legacy.uuid,
+            name,
+            properties: legacy.properties,
+        },
+        forwarding::Identity::Modern => {
+            let Some(profile) = forwarding::authenticate(connection, shared).await? else {
+                return Ok(None);
+            };
+            // 和官方一样，代理给的名字直接采用，不再按本地玩家名规则检查。
+            Profile {
+                uuid: profile.uuid,
+                name: profile.name,
+                properties: profile.properties,
+            }
+        }
     };
 
     match PlayerSession::join(shared, profile).await {
@@ -114,7 +139,11 @@ async fn authenticate(
         .then(|| connection.peer_ip())
         .flatten();
     let url = &shared.config.session_server_url;
-    match has_joined(url, &name, &digest, ip, shared.config.auth_timeout).await {
+    let timeouts = Timeouts {
+        connect: shared.config.auth_connect_timeout,
+        read: shared.config.auth_read_timeout,
+    };
+    match has_joined(url, &name, &digest, ip, timeouts).await {
         Ok(profile) => {
             info!("UUID of player {} is {}", profile.name, profile.uuid);
             Ok(Some(profile))
@@ -171,9 +200,9 @@ pub(super) async fn finish(
             connection.allow_full_size_frames();
             Ok(())
         }
-        LoginRequest::Hello { .. } | LoginRequest::Key { .. } => {
-            Err(ConnectionError::UnexpectedPacket)
-        }
+        LoginRequest::Hello { .. }
+        | LoginRequest::Key { .. }
+        | LoginRequest::PluginResponse { .. } => Err(ConnectionError::UnexpectedPacket),
     }
 }
 

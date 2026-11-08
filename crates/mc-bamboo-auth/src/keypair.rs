@@ -1,5 +1,17 @@
 //! 服务端的 RSA 密钥对，对应官方 `MinecraftServer.initializeKeyPair` 和
 //! `Crypt.generateKeyPair` / `Crypt.decryptByteToSecretKey`。
+//!
+//! # 已知安全问题：RUSTSEC-2023-0071
+//!
+//! 这里用的 `rsa` crate（0.9）有一个计时侧信道（Marvin 攻击）：解密的耗时和私钥有关，
+//! 能反复计时的攻击者理论上可以把私钥还原出来。上游至今没有修好的版本，所以换版本解决不了。
+//!
+//! 缓解方式是 [`ServerKeyPair::decrypt`] 里的 `decrypt_blinded`：每次解密先用随机数把密文
+//! 盲化，解密耗时就和真实的密文无关了。这是上游推荐的做法，但 advisory 本身仍然挂着。
+//!
+//! 残余风险在这里有限：这把钥匙每次启动重新生成（官方也是），只用来接一次 AES 密钥交换，
+//! 泄露它最多让攻击者解开同一次启动期间的登录握手，拿不到 Mojang 的任何凭据。真要彻底躲开，
+//! 得换一个解密实现或者自己做 PKCS#1 解包，那是另一件事。
 
 use rand_core::{OsRng, RngCore};
 use rsa::{
@@ -64,7 +76,7 @@ impl ServerKeyPair {
     /// 用私钥解开客户端送来的数据。Java 的 `Cipher.getInstance("RSA")` 默认是
     /// PKCS#1 v1.5 填充，客户端的 `Crypt.encryptUsingKey` 走的就是这条路。
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptError> {
-        // 用带盲化的解密，免得解密耗时泄露私钥（RUSTSEC-2023-0071）。
+        // 必须用带盲化的解密，免得解密耗时泄露私钥。模块注释里写了 RUSTSEC-2023-0071 的来龙去脉。
         self.private_key
             .decrypt_blinded(&mut OsRng, Pkcs1v15Encrypt, ciphertext)
             .map_err(|_| CryptError::Decrypt)

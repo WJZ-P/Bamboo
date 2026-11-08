@@ -2,19 +2,18 @@
 
 use std::collections::HashMap;
 
-use mc_bamboo_core::{BlockPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use crate::{
-    Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, level::RedstoneMemory,
-    shape::Aabb,
+    Actor, BlockHit, BlockState, BlockTicks, Level, LevelRandom, Outcome, destroy_block,
+    level::RedstoneMemory, shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
 
-/// 方块存在表里，没写过的格子是空气，世界外是 `void_air`。
-#[derive(Default)]
+/// 方块存在表里，没写过的格子是空气，世界外是 `void_air`。随机数的种子固定是 0，玩家总在附近。
 pub(crate) struct TestLevel {
     blocks: HashMap<BlockPos, BlockState>,
     /// 告示牌的内容。和区块存储一样，换成别的方块时丢掉。
@@ -23,6 +22,7 @@ pub(crate) struct TestLevel {
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
     pub(crate) obstructed: bool,
+    pub(crate) random: LevelRandom,
     redstone: RedstoneMemory,
     /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
     pub(crate) light: Option<(i32, i32)>,
@@ -30,7 +30,15 @@ pub(crate) struct TestLevel {
 
 impl TestLevel {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            blocks: HashMap::new(),
+            signs: HashMap::new(),
+            writes: Vec::new(),
+            obstructed: false,
+            random: LevelRandom::new(0),
+            redstone: RedstoneMemory::default(),
+            light: None,
+        }
     }
 
     /// 直接写一格，不做任何连锁。
@@ -73,6 +81,22 @@ impl Level for TestLevel {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn random(&self) -> &LevelRandom {
+        &self.random
+    }
+
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.blocks.iter().any(|(pos, state)| {
+            pos.chunk() == chunk
+                && pos.y >> 4 == section_y
+                && (state.is_randomly_ticking() || state.is_fluid_randomly_ticking())
+        })
+    }
+
+    fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
+        true
     }
 
     fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {

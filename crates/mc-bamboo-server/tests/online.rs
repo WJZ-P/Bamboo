@@ -15,7 +15,6 @@ use common::{
     json_packet, packet_id, wire,
 };
 use mc_bamboo_auth::{SHARED_SECRET_LEN, SharedSecret, encrypt_to_server, server_id_hash};
-use mc_bamboo_core::profile::Property;
 use mc_bamboo_data::packets::{login, play};
 use mc_bamboo_protocol::codec::{Reader, write_byte_array};
 use mc_bamboo_server::ServerConfig;
@@ -153,7 +152,8 @@ fn online_server(session: &FakeSession) -> ServerConfig {
     ServerConfig {
         online_mode: true,
         session_server_url: session.url.clone(),
-        auth_timeout: SHORT_AUTH_TIMEOUT,
+        auth_connect_timeout: SHORT_AUTH_TIMEOUT,
+        auth_read_timeout: SHORT_AUTH_TIMEOUT,
         // 配置写 1 会被修正成官方的下限 2，区块少，测试跑得快。
         view_distance: 1,
         ..ServerConfig::default()
@@ -268,7 +268,7 @@ async fn the_skin_reaches_the_tab_list() {
     let entry = update.entry(uuid).expect("the player is on the tab list");
     assert_eq!(
         entry.properties,
-        vec![Property {
+        vec![wire::TabProperty {
             name: "textures".to_owned(),
             value: SKIN_VALUE.to_owned(),
             signature: Some(SKIN_SIGNATURE.to_owned()),

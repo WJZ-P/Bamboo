@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use mc_bamboo_core::{BlockPos, Direction, mth};
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
 use super::{Fluid, can_be_replaced_with, empty, height};
@@ -60,24 +60,16 @@ fn spread_delay(
         && !old.is_falling()
         && !new.is_falling()
         && height(new, world, pos) > height(old, world, pos);
-    if rising && slow_lava(world, pos) {
+    if rising && slow_lava(world) {
         delay * 4
     } else {
         delay
     }
 }
 
-/// `level.getRandom().nextInt(4) != 0`。
-///
-/// 这个世界没有随机源，用位置和时间的散列代替，概率和官方一样。结果跟着随机数变的题 oracle 排除了。
-fn slow_lava(world: &World, pos: BlockPos) -> bool {
-    let time = world.game_time() as u64;
-    let mut mixed =
-        mth::seed(pos.x, pos.y, pos.z) as u64 ^ time.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    mixed ^= mixed >> 33;
-    mixed = mixed.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    mixed ^= mixed >> 33;
-    !mixed.is_multiple_of(4)
+/// `level.getRandom().nextInt(4) != 0`：涨起来的岩浆四分之三的机会慢四倍。
+fn slow_lava(world: &World) -> bool {
+    world.random().next_int(4) != 0
 }
 
 /// `spread`：能往下就往下，不能时往旁边。

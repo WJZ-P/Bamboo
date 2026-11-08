@@ -2,14 +2,16 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::error;
 
 use crate::{
+    block_entity,
     context::BlockHit,
     fluid::Fluid,
     level::{Effect, Level, RedstoneMemory},
+    random::LegacyRandom,
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, POWER, SupportType},
     ticks::{BlockTicks, TickPriority},
@@ -76,6 +78,10 @@ const WORLD_BOUND: i32 = 30_000_000;
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
 /// 默认世界边界的半径。这个世界不能改边界。
 const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
+/// `Difficulty.NORMAL.getId()`。
+const NORMAL_DIFFICULTY: i32 = 2;
+/// 游戏规则 `fire_spread_radius_around_player` 的默认值。
+const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
@@ -333,6 +339,59 @@ impl<'a> World<'a> {
     /// 改写告示牌的内容。不是告示牌方块时什么也不做，返回 `false`。
     pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         self.level.set_sign(pos, content)
+    }
+
+    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
+    pub fn max_local_raw_brightness(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - SKY_DARKEN)
+    }
+
+    /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
+    pub fn block_light(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+    }
+
+    /// `isRaining`。这个世界永远是晴天。
+    pub const fn is_raining(&self) -> bool {
+        false
+    }
+
+    /// `isRainingAt`。这个世界永远是晴天。
+    pub const fn is_raining_at(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `getDifficulty().getId()`。这个世界没有难度设置，客户端收不到难度时显示普通，这里也按普通算。
+    pub const fn difficulty_id(&self) -> i32 {
+        NORMAL_DIFFICULTY
+    }
+
+    /// `getRandom()`，也就是 `Level.random`。
+    pub fn random(&self) -> &LegacyRandom {
+        self.level.random().source()
+    }
+
+    /// `getBlockRandomPos`。
+    pub(crate) fn block_random_pos(&self, origin: BlockPos, y_mask: i32) -> BlockPos {
+        self.level.random().block_random_pos(origin, y_mask)
+    }
+
+    /// `LevelChunkSection.isRandomlyTicking`。
+    pub(crate) fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.level.is_randomly_ticking_section(chunk, section_y)
+    }
+
+    /// `isLoaded`：所有区块都在内存里，只看高度和坐标的范围。
+    pub fn is_loaded(&self, pos: BlockPos) -> bool {
+        self.is_in_valid_bounds(pos)
+    }
+
+    /// `ServerLevel.canSpreadFireAround`：游戏规则 `fire_spread_radius_around_player` 是默认的 128，
+    /// 离所有玩家都不到这么远时火才蔓延。
+    pub fn can_spread_fire_around(&self, pos: BlockPos) -> bool {
+        self.level
+            .any_player_close_enough_to(pos, FIRE_SPREAD_RADIUS_AROUND_PLAYER)
     }
 
     /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
@@ -599,6 +658,14 @@ impl<'a> World<'a> {
             self.level.redstone_mut().forget_block_entity(pos);
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
+        // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
+        if block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0
+        {
+            block_entity::pre_remove_side_effects(old, self);
+        }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
             old.affect_neighbors_after_removal(self, pos);
@@ -1059,7 +1126,8 @@ mod tests {
             .iter()
             .filter_map(|effect| match *effect {
                 Effect::Destroyed { pos, .. } => Some(pos),
-                Effect::TorchBurnout { .. }
+                Effect::BoneMealUsed { .. }
+                | Effect::TorchBurnout { .. }
                 | Effect::FilledBucket { .. }
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }

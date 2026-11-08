@@ -4,9 +4,12 @@
 //! [`World`](crate::World) 串起来。现在只有一个 `Region`，将来有多个时，
 //! 玩家和它的链路一起搬家。
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use mc_bamboo_blocks::{BlockTicks, RedstoneMemory};
+use mc_bamboo_blocks::{BlockTicks, LevelRandom, RedstoneMemory};
 use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{
@@ -16,7 +19,7 @@ use mc_bamboo_protocol::packet::play::{
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
 use crate::{
-    chunk_encoding::encode_template,
+    chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
     global::GameTime,
     inbound::{JoinRequest, PlayerId},
@@ -83,12 +86,16 @@ pub(crate) struct Region {
     pub(crate) chunks: ChunkStore,
     /// 没改过的区块共用的编码结果。
     pub(crate) template_body: Vec<u8>,
+    /// 改过的区块的编码结果，区块变了就重新编码。
+    pub(crate) chunk_cache: ChunkCache,
     /// 这一 tick 改过的方块，等广播阶段发出去。
     pub(crate) block_changes: BlockChanges,
     /// 这一 tick 开头算完光照以后变了的段，等广播阶段发出去。
     pub(crate) light_changes: BTreeMap<ChunkPos, LightChanges>,
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
+    /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
+    pub(crate) random: LevelRandom,
     /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
     redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
@@ -97,6 +104,13 @@ pub(crate) struct Region {
     max_players: i32,
     /// 写进 `login` 包的那一位，官方取的是 `MinecraftServer.usesAuthentication()`。
     online_mode: bool,
+}
+
+/// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
+fn unique_seed() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as i64)
 }
 
 // 世界线程以后要能把 `Region` 交给线程池，所以它必须能在线程之间移动。
@@ -114,9 +128,11 @@ impl Region {
             links: Links::default(),
             chunks,
             template_body,
+            chunk_cache: ChunkCache::default(),
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
+            random: LevelRandom::new(unique_seed()),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
@@ -135,6 +151,7 @@ impl Region {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
             players: &self.players,
+            random: &self.random,
             redstone: &mut self.redstone,
         };
         (level, &mut self.block_ticks)
@@ -142,11 +159,11 @@ impl Region {
 
     /// 进服第 1 到 3 步：`login`、`player_abilities`、`player_position`。
     pub(crate) fn add_player(&mut self, request: JoinRequest, game_mode: GameMode) {
+        // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
             id,
             uuid,
             name,
-            // 皮肤归名单管，进服的这三步不看它。
             properties: _,
             client,
             sink,

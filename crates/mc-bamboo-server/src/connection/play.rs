@@ -59,6 +59,8 @@ pub(super) async fn serve(
         max_frame_len,
         compression,
         encryption,
+        // 进了 Play 就没有进服时限了，阶段这时用不到。
+        phase: _,
     } = connection;
     let player = PlayerId(session.entity_id);
     let leave = LeaveGuard {
