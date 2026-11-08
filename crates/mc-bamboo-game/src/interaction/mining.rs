@@ -697,6 +697,40 @@ mod tests {
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::STONE));
     }
 
+    /// 旁边的人看到裂纹，方块挖掉时收到 -1 和方块变化。
+    #[test]
+    fn another_player_sees_the_crack_and_the_block_disappears() {
+        let (mut server, miner, watcher) = two_players();
+        survive(&mut server, &miner, items::DIAMOND_PICKAXE);
+        set_block(&mut server, GROUND, blocks::STONE);
+        let breaker = miner.id.0;
+
+        start(&server, &miner, GROUND, Direction::Up, 1);
+        server.tick();
+        assert_eq!(
+            cracks(&watcher),
+            [crack(breaker, GROUND, 1), crack(breaker, GROUND, 3)]
+        );
+
+        // 攒到 0.7 以上再松手，方块当场挖掉。
+        server.tick();
+        server.tick();
+        watcher.take_frames();
+        miner.take_frames();
+        stop(&server, &miner, GROUND, Direction::Up, 2);
+        server.tick();
+
+        assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
+        assert_eq!(
+            watcher.take_frames(),
+            [
+                crack(breaker, GROUND, -1),
+                level_event(2001, GROUND, blocks::STONE as i32),
+                update(GROUND, blocks::AIR),
+            ]
+        );
+    }
+
     #[test]
     fn cracks_do_not_reach_players_further_than_32_blocks() {
         let (mut server, miner, far) = two_players();
