@@ -179,6 +179,12 @@ impl Level for OracleLevel {
         self.block_state(pos).is_a(BlockAncestor::SignBlock)
     }
 
+    /// 官方的假世界不会给方块实体放组件，`getNoteBlockSound` 永远是 `null`，
+    /// 音符盒的 `getCustomSoundId` 拿不到音效，`triggerEvent` 直接返回 `false`。
+    fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
+        None
+    }
+
     fn block_entities(&self) -> &BlockEntities {
         &self.block_entities
     }

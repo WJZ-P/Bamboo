@@ -14,6 +14,7 @@
 
 pub mod cursor;
 pub mod defaults;
+pub mod forward;
 pub mod predicate;
 pub mod stack;
 pub mod text;
@@ -1303,6 +1304,32 @@ impl ComponentPatch {
             .map(|(_, entry)| entry)
     }
 
+    /// 能发给别人的那几项，见 [`forward`]。移除项只有组件类型，一律留着。
+    pub fn filtered(&self) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(kind, entry)| match entry {
+                    PatchEntry::Set(value) => forward::forwardable_value(*kind, value),
+                    PatchEntry::Removed => true,
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// 官方 `DataComponentPatch.equals`：两份补丁是同一张表。
+    ///
+    /// 官方存在映射里，条目的先后无所谓；我们按线上的顺序存，所以要逐项查。
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .all(|(kind, entry)| other.entry(*kind) == Some(entry))
+    }
+
     /// 补丁里的 `max_stack_size`。
     pub fn max_stack_size(&self) -> Option<i32> {
         match self.get(kinds::MAX_STACK_SIZE) {
@@ -1312,7 +1339,7 @@ impl ComponentPatch {
     }
 
     /// 官方用 `Map.put`：同一个组件类型出现两次时后面的赢，位置不变。
-    pub(crate) fn put(&mut self, kind: i32, entry: PatchEntry) {
+    pub fn put(&mut self, kind: i32, entry: PatchEntry) {
         match self.entries.iter_mut().find(|(id, _)| *id == kind) {
             Some(existing) => existing.1 = entry,
             None => self.entries.push((kind, entry)),

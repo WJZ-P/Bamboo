@@ -56,6 +56,13 @@ pub trait Level {
     /// 改写告示牌的内容，对应 `SignBlockEntity` 里那几个字段。不是告示牌方块时返回 `false`。
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool;
 
+    /// `getBlockEntity(pos) instanceof SkullBlockEntity` 时它的 `getNoteBlockSound`。
+    ///
+    /// 官方把物品上的 `note_block_sound` 组件搬进头颅方块实体，音符盒响的时候按它找自定义
+    /// 音效，见 [`Effect::NoteBlockPlayed`]。不是头颅方块实体、或者头颅没带音效时返回
+    /// `None`，官方对应 `null`。
+    fn note_block_sound(&self, pos: BlockPos) -> Option<String>;
+
     /// 这一格的方块实体和它们的 ticker。
     fn block_entities(&self) -> &BlockEntities;
 
@@ -181,7 +188,9 @@ pub enum Effect {
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///
-    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里。
+    /// 上面是带 `note_block_sound` 的头颅时，官方播放的是那个音效，不按乐器查表。
+    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里；自定义音效的名字等音效实现
+    /// 时再加进这一项，`Effect` 要能按值拷贝，装不下 `String`。
     NoteBlockPlayed {
         pos: BlockPos,
         instrument: NoteBlockInstrument,

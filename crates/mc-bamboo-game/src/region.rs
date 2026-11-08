@@ -12,6 +12,7 @@ use std::{
 use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory};
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
+use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameMode,
     LevelChunksLoadStart, Login, PlayerAbilities, SetEntityData, SetTime, UpdateAttributes,
@@ -108,6 +109,9 @@ pub(crate) struct Region {
     pub(crate) block_ticks: BlockTicks,
     /// 有内容的方块实体，按位置索引。只在这个区域里存在，没有持久化。
     pub(crate) containers: BTreeMap<BlockPos, ContainerEntry>,
+    /// 方块实体从物品上带来的组件，官方 `BlockEntity.collectComponents` 的结果，
+    /// 见 [`crate::block_items`]。
+    pub(crate) block_items: BTreeMap<BlockPos, ComponentPatch>,
     /// 每名玩家打开的菜单。物品栏菜单不在里面，它没有状态要同步。
     pub(crate) menus: BTreeMap<PlayerId, Menu>,
     /// 活塞这类会动的方块实体。
@@ -153,6 +157,7 @@ impl Region {
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
             containers: BTreeMap::new(),
+            block_items: BTreeMap::new(),
             menus: BTreeMap::new(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -174,6 +179,7 @@ impl Region {
         let level = RegionLevel {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
+            block_items: &mut self.block_items,
             players: &self.players,
             random: &self.random,
             redstone: &mut self.redstone,

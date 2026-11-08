@@ -7,6 +7,7 @@ use crate::{
     codec::{write_f32, write_i32},
     components::{
         cursor::{HolderSet, write_nbt_tag},
+        stack::ItemStackTemplate,
         value::SignText,
     },
     text::{Color, Component},
@@ -514,6 +515,325 @@ fn damageable_and_stackable_at_once_is_rejected() {
         removed: vec![kinds::MAX_DAMAGE],
     };
     assert_eq!(validate_stack(&stack), Ok(()));
+}
+
+/// 官方 `validateContainedItemSizes` 只查数量，不往容器里的物品再查一层组件。
+#[test]
+fn validation_does_not_recurse_into_contained_components() {
+    use crate::components::validate::validate_stack;
+
+    // 一把既能损坏又能堆叠的剑：官方放在容器里时不查这一条。
+    let mut max_stack = Vec::new();
+    write_varint(&mut max_stack, 16);
+    let mut inner_patch = ComponentPatch::new();
+    inner_patch.put(
+        kinds::MAX_STACK_SIZE,
+        PatchEntry::Set(ComponentValue::MaxStackSize(16)),
+    );
+    let inner = ItemStackTemplate {
+        item: items::DIAMOND_SWORD,
+        count: 1,
+        components: inner_patch,
+    };
+    let mut value = Vec::new();
+    ComponentValue::Container(vec![Some(inner)]).write(&mut value);
+    let stack = ItemStack {
+        item: items::SHULKER_BOX,
+        count: 1,
+        added: vec![(kinds::CONTAINER, value)],
+        removed: Vec::new(),
+    };
+    assert_eq!(validate_stack(&stack), Ok(()));
+}
+
+/// 容器、收纳袋和弩上的箭都要查数量，三项都走 `getOrDefault`。
+#[test]
+fn every_container_like_component_checks_the_counts() {
+    use crate::components::validate::validate_stack;
+
+    let sword = || ItemStackTemplate {
+        item: items::DIAMOND_SWORD,
+        count: 2,
+        components: ComponentPatch::new(),
+    };
+    for (item, kind, value) in [
+        (
+            items::SHULKER_BOX,
+            kinds::CONTAINER,
+            ComponentValue::Container(vec![Some(sword())]),
+        ),
+        (
+            items::BUNDLE,
+            kinds::BUNDLE_CONTENTS,
+            ComponentValue::BundleContents(vec![sword()]),
+        ),
+        (
+            items::CROSSBOW,
+            kinds::CHARGED_PROJECTILES,
+            ComponentValue::ChargedProjectiles(vec![sword()]),
+        ),
+    ] {
+        let mut bytes = Vec::new();
+        value.write(&mut bytes);
+        let stack = ItemStack {
+            item,
+            count: 1,
+            added: vec![(kind, bytes)],
+            removed: Vec::new(),
+        };
+        assert_eq!(
+            validate_stack(&stack),
+            Err(DecodeError::InvalidItemCount(2)),
+            "kind {kind}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_stack_is_always_valid() {
+    use crate::components::validate::validate_stack;
+
+    assert_eq!(validate_stack(&ItemStack::empty()), Ok(()));
+    // 数量是零的时候官方连组件都不看。
+    assert_eq!(
+        validate_stack(&ItemStack::new(items::DIAMOND_SWORD, 0)),
+        Ok(())
+    );
+}
+
+#[test]
+fn patches_compare_as_maps() {
+    let mut first = ComponentPatch::new();
+    first.put(
+        kinds::REPAIR_COST,
+        PatchEntry::Set(ComponentValue::RepairCost(1)),
+    );
+    first.put(kinds::LORE, PatchEntry::Removed);
+    let mut second = ComponentPatch::new();
+    second.put(kinds::LORE, PatchEntry::Removed);
+    second.put(
+        kinds::REPAIR_COST,
+        PatchEntry::Set(ComponentValue::RepairCost(1)),
+    );
+
+    assert!(first.same_as(&second));
+    assert!(second.same_as(&first));
+    assert!(!first.same_as(&ComponentPatch::new()));
+
+    // 同一个键，一边是设值一边是移除。
+    let mut third = ComponentPatch::new();
+    third.put(
+        kinds::REPAIR_COST,
+        PatchEntry::Set(ComponentValue::RepairCost(1)),
+    );
+    third.put(
+        kinds::LORE,
+        PatchEntry::Set(ComponentValue::Lore(Vec::new())),
+    );
+    assert!(!first.same_as(&third));
+}
+
+/// 组件转发给第三方的规则，见 [`crate::components::forward`]。
+#[test]
+fn components_we_check_fully_are_forwarded() {
+    let forwards = |value: &ComponentValue, kind: i32| forward::forwardable(kind, &encode(value));
+
+    // 结构清楚的组件都能转发。
+    assert!(forwards(
+        &ComponentValue::MaxStackSize(16),
+        kinds::MAX_STACK_SIZE
+    ));
+    assert!(forwards(
+        &ComponentValue::Enchantments(vec![(0, 3)]),
+        kinds::ENCHANTMENTS
+    ));
+    assert!(forwards(
+        &ComponentValue::CustomName(Component::text("Kitten")),
+        kinds::CUSTOM_NAME
+    ));
+    assert!(forwards(
+        &ComponentValue::CustomData(vec![("a".to_owned(), Tag::Byte(1))]),
+        kinds::CUSTOM_DATA
+    ));
+    assert!(forwards(
+        &ComponentValue::IntangibleProjectile,
+        kinds::INTANGIBLE_PROJECTILE
+    ));
+}
+
+#[test]
+fn components_we_only_shape_check_stay_on_the_server() {
+    let forwards = |value: &ComponentValue, kind: i32| forward::forwardable(kind, &encode(value));
+
+    // 这五种线上是 NBT，官方客户端还要过一遍 DFU 的 `Codec`。
+    assert!(!forwards(
+        &ComponentValue::Lock(Tag::Compound(Vec::new())),
+        kinds::LOCK
+    ));
+    assert!(!forwards(
+        &ComponentValue::ContainerLoot(Tag::Compound(Vec::new())),
+        kinds::CONTAINER_LOOT
+    ));
+    assert!(!forwards(
+        &ComponentValue::MapDecorations(Tag::Compound(Vec::new())),
+        kinds::MAP_DECORATIONS
+    ));
+    assert!(!forwards(
+        &ComponentValue::DebugStickState(Tag::Compound(Vec::new())),
+        kinds::DEBUG_STICK_STATE
+    ));
+    assert!(!forwards(
+        &ComponentValue::Recipes(Tag::List(Vec::new())),
+        kinds::RECIPES
+    ));
+}
+
+/// 整份补丁的过滤：留下能发给别人的，移除项一律留着。
+#[test]
+fn a_patch_can_be_filtered_for_other_players() {
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::MAX_STACK_SIZE,
+        PatchEntry::Set(ComponentValue::MaxStackSize(16)),
+    );
+    patch.put(
+        kinds::LOCK,
+        PatchEntry::Set(ComponentValue::Lock(Tag::Compound(Vec::new()))),
+    );
+    patch.put(kinds::LORE, PatchEntry::Removed);
+
+    let filtered = patch.filtered();
+    assert_eq!(
+        filtered.get(kinds::MAX_STACK_SIZE),
+        Some(&ComponentValue::MaxStackSize(16))
+    );
+    assert_eq!(filtered.get(kinds::LOCK), None);
+    assert_eq!(filtered.entry(kinds::LORE), Some(&PatchEntry::Removed));
+    // 原来的补丁不动。
+    assert!(patch.get(kinds::LOCK).is_some());
+}
+
+#[test]
+fn text_we_do_not_fully_check_is_not_forwarded() {
+    let loose = Component::from_tag(Tag::Compound(vec![(
+        "selector".to_owned(),
+        Tag::String("@a".to_owned()),
+    )]));
+    assert!(!text::is_fully_checked(&loose));
+    assert!(!forward::forwardable(
+        kinds::CUSTOM_NAME,
+        &encode(&ComponentValue::CustomName(loose.clone()))
+    ));
+    // 名字藏在别的组件里也一样。
+    assert!(!forward::forwardable(
+        kinds::LORE,
+        &encode(&ComponentValue::Lore(vec![loose]))
+    ));
+}
+
+#[test]
+fn nested_stacks_are_checked_too() {
+    let loose = Component::from_tag(Tag::Compound(vec![(
+        "nbt".to_owned(),
+        Tag::String("Items".to_owned()),
+    )]));
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::CUSTOM_NAME,
+        PatchEntry::Set(ComponentValue::CustomName(loose)),
+    );
+    let inner = ItemStackTemplate {
+        item: items::DIAMOND_SWORD,
+        count: 1,
+        components: patch,
+    };
+    let contents = ComponentValue::Container(vec![Some(inner.clone())]);
+    assert!(!forward::forwardable(kinds::CONTAINER, &encode(&contents)));
+
+    // 组件干净的嵌套物品堆可以转发。
+    let clean = ItemStackTemplate {
+        components: ComponentPatch::new(),
+        ..inner
+    };
+    assert!(forward::forwardable(
+        kinds::CONTAINER,
+        &encode(&ComponentValue::Container(vec![Some(clean)]))
+    ));
+}
+
+#[test]
+fn the_text_constructs_we_fully_check_are_forwarded() {
+    for component in [
+        Component::text("hi"),
+        Component::text("hi").color(Color::Red).italic(),
+        Component::translate("block.minecraft.chest", ["x".into()]),
+        Component::text("a").extra(Component::text("b")),
+        Component::text("").suggest_command("/foo"),
+    ] {
+        assert!(text::is_fully_checked(&component), "{component:?}");
+    }
+}
+
+#[test]
+fn the_loose_spots_in_text_are_listed_one_by_one() {
+    let compound = |entries: &[(&str, Tag)]| {
+        Component::from_tag(Tag::Compound(
+            entries
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                .collect(),
+        ))
+    };
+    let text = |value: &str| Tag::String(value.to_owned());
+
+    // 实体选择器、NBT 路径和档案都要官方再解析一次。
+    for entries in [
+        vec![("selector", text("@a"))],
+        vec![("nbt", text("Items")), ("block", text("0 0 0"))],
+        vec![("object", text("player")), ("player", text("Kitten"))],
+        vec![("type", text("selector")), ("selector", text("@a"))],
+    ] {
+        assert!(!text::is_fully_checked(&compound(&entries)), "{entries:?}");
+    }
+
+    // 对话框的内联定义和 `show_item` 里的组件表也没往下看。
+    let dialog = |value: Tag| {
+        compound(&[
+            ("text", text("a")),
+            (
+                "click_event",
+                Tag::Compound(vec![
+                    ("action".to_owned(), text("show_dialog")),
+                    ("dialog".to_owned(), value),
+                ]),
+            ),
+        ])
+    };
+    assert!(!text::is_fully_checked(&dialog(Tag::Compound(Vec::new()))));
+    assert!(text::is_fully_checked(&dialog(text(
+        "minecraft:quick_actions"
+    ))));
+
+    let hover = |entries: Vec<(String, Tag)>| {
+        compound(&[("text", text("a")), ("hover_event", Tag::Compound(entries))])
+    };
+    assert!(!text::is_fully_checked(&hover(vec![
+        ("action".to_owned(), text("show_item")),
+        ("id".to_owned(), text("minecraft:stone")),
+        ("components".to_owned(), Tag::Compound(Vec::new())),
+    ])));
+    assert!(text::is_fully_checked(&hover(vec![
+        ("action".to_owned(), text("show_item")),
+        ("id".to_owned(), text("minecraft:stone")),
+    ])));
+    // 嵌套的组件也要查。
+    assert!(!text::is_fully_checked(&hover(vec![
+        ("action".to_owned(), text("show_text")),
+        (
+            "value".to_owned(),
+            Tag::Compound(vec![("selector".to_owned(), text("@a"))]),
+        ),
+    ])));
 }
 
 #[test]

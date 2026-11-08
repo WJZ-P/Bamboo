@@ -259,8 +259,8 @@ impl World {
             PlayRequest::SetCreativeModeSlot { slot, stack } => {
                 inventory::on_set_creative_mode_slot(region, player, slot, stack);
             }
-            PlayRequest::PickItemFromBlock { pos, .. } => {
-                inventory::on_pick_item_from_block(region, player, pos);
+            PlayRequest::PickItemFromBlock { pos, include_data } => {
+                inventory::on_pick_item_from_block(region, player, pos, include_data);
             }
             PlayRequest::PlayerAction {
                 action,

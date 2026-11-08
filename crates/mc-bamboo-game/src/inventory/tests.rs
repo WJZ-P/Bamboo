@@ -71,6 +71,17 @@ fn pick(server: &Harness, client: &Client, pos: BlockPos) {
     );
 }
 
+/// Ctrl+中键：官方的 `includeData`，物品还带上方块实体的数据。
+fn pick_with_data(server: &Harness, client: &Client, pos: BlockPos) {
+    server.request(
+        client,
+        PlayRequest::PickItemFromBlock {
+            pos,
+            include_data: true,
+        },
+    );
+}
+
 fn place_on_ground(server: &Harness, client: &Client, hand: Hand) {
     server.request(
         client,
@@ -493,6 +504,40 @@ fn swapping_uses_the_selected_slot_and_keeps_components_for_the_owner() {
     );
 }
 
+/// 我们只校验最外层的那几种组件也要原样还给物品主人：它的客户端刚把这些字节发过来。
+#[test]
+fn components_we_only_shape_check_come_back_to_the_owner() {
+    let (mut server, client) = settled();
+    let mut lock = Vec::new();
+    mc_bamboo_nbt::Tag::Compound(Vec::new()).write_network(&mut lock);
+    let locked = ItemStack {
+        item: items::CHEST,
+        count: 1,
+        added: vec![(data_component_type::LOCK, lock)],
+        removed: Vec::new(),
+    };
+
+    set_slot(&server, &client, 45, locked.clone());
+    select(&server, &client, 2);
+    action(&server, &client, PlayerActionKind::SwapItemWithOffhand);
+    server.tick();
+
+    // 换手之后组件还在，服务端发回去的那一份也带着它。
+    assert_eq!(inventory(&server, &client).slots[38], locked);
+    let frames = client.take_frames();
+    let sent = frames
+        .iter()
+        .find(|frame| frame.id == clientbound::CONTAINER_SET_SLOT && frame.body.len() > 5)
+        .expect("换手要把主手那一格发回来");
+    // 槽位 38 之后是 trusted 格式的物品：数量、物品、一项增加的组件、零项移除。
+    assert_eq!(
+        sent.body,
+        [
+            0x00, 0x01, 0x00, 0x26, 0x01, 0x94, 0x03, 0x01, 0x00, 0x51, 0x0a, 0x00
+        ]
+    );
+}
+
 #[test]
 fn the_block_placed_is_the_one_in_the_selected_slot() {
     let (mut server, client) = settled();
@@ -755,7 +800,7 @@ fn a_stack_with_components_is_not_the_same_item() {
     let (mut server, client) = settled();
     set_block(&mut server, ABOVE, blocks::STONE);
     let named = ItemStack {
-        added: vec![(5, vec![0x00])],
+        added: vec![(data_component_type::MAX_STACK_SIZE, vec![9])],
         ..ItemStack::new(items::STONE, 1)
     };
     fill(&mut server, &client, &[(40, named.clone())]);
@@ -767,6 +812,103 @@ fn a_stack_with_components_is_not_the_same_item() {
     assert_eq!(inventory.selected, 0);
     assert_eq!(inventory.slots[36], ItemStack::new(items::STONE, 1));
     assert_eq!(inventory.slots[40], named);
+}
+
+/// 旗帜的 `getCloneItemStack` 走方块实体，中键不按 Ctrl 也带上图案。
+#[test]
+fn picking_a_banner_brings_its_patterns_along() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::WHITE_BANNER);
+    let layers =
+        ComponentValue::BannerPatterns(vec![mc_bamboo_protocol::components::value::BannerLayer {
+            pattern: mc_bamboo_protocol::components::cursor::Holder::Id(12),
+            color: 14,
+        }]);
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        data_component_type::BANNER_PATTERNS,
+        PatchEntry::Set(layers.clone()),
+    );
+    server.region().block_items.insert(ABOVE, patch);
+
+    pick(&server, &client, ABOVE);
+    server.tick();
+
+    let picked = inventory(&server, &client).slots[36].clone();
+    assert_eq!(picked.item, items::WHITE_BANNER);
+    assert_eq!(
+        picked.patch().get(data_component_type::BANNER_PATTERNS),
+        Some(&layers)
+    );
+}
+
+/// Ctrl+中键：箱子带上里面的东西和自定义名，官方 `addBlockDataToItem`。
+#[test]
+fn picking_a_chest_with_data_brings_its_contents_along() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::CHEST);
+    let stone = ItemStack::new(items::STONE, 5);
+    crate::container::entry_at(
+        server.region(),
+        ABOVE,
+        crate::container::ContainerKind::Chest,
+    )
+    .slots[1] = stone.clone();
+
+    pick_with_data(&server, &client, ABOVE);
+    server.tick();
+
+    let picked = inventory(&server, &client).slots[36].clone();
+    assert_eq!(picked.item, items::CHEST);
+    let contents = picked.patch().get(data_component_type::CONTAINER).cloned();
+    assert_eq!(
+        contents,
+        Some(ComponentValue::Container(vec![
+            None,
+            Some(mc_bamboo_protocol::components::stack::ItemStackTemplate {
+                item: items::STONE,
+                count: 5,
+                components: ComponentPatch::new(),
+            }),
+        ]))
+    );
+
+    // 不按 Ctrl 的中键还是一个干净的箱子。组件不一样，所以放进下一个空格。
+    pick(&server, &client, ABOVE);
+    server.tick();
+    let selected = usize::from(inventory(&server, &client).selected);
+    assert_eq!(selected, 1);
+    let plain = inventory(&server, &client).slots[36 + selected].clone();
+    assert_eq!(plain, ItemStack::new(items::CHEST, 1));
+}
+
+/// Ctrl+中键选取告示牌：文字进 `block_entity_data` 组件，官方不把它算进隐式组件。
+#[test]
+fn picking_a_sign_with_data_keeps_the_text() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::OAK_SIGN);
+    let mut content = mc_bamboo_core::sign::SignContent::BLANK;
+    content.front.messages[0] = "hello".to_owned();
+    assert!(server.region().chunks.set_sign(ABOVE, content));
+
+    pick_with_data(&server, &client, ABOVE);
+    server.tick();
+
+    let picked = inventory(&server, &client).slots[36].clone();
+    assert_eq!(picked.item, items::OAK_SIGN);
+    let data = picked
+        .patch()
+        .get(data_component_type::BLOCK_ENTITY_DATA)
+        .cloned();
+    let Some(ComponentValue::BlockEntityData(data)) = data else {
+        panic!("中键带数据的告示牌要有 block_entity_data：{picked:?}");
+    };
+    assert_eq!(data.kind, block_entity_type::SIGN);
+    assert!(
+        format!("{:?}", data.tag).contains("hello"),
+        "{:?}",
+        data.tag
+    );
 }
 
 #[test]

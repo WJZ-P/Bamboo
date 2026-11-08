@@ -514,8 +514,108 @@ fn a_second_player_sees_what_the_first_player_put_in() {
         .expect("第二个菜单应该开着");
     let (slots, sources) = display(&fixture.region, other, menu);
     assert_eq!(slots[0], ItemStack::new(items::STONE, 10));
-    assert_eq!(sources[0], Some(fixture.id));
+    assert_eq!(sources[0], Some(fixture.id), "组件的来源是放东西的那个人");
     assert_eq!(fixture.entry(pos).open_count, 2);
+}
+
+/// 一件带 `lock` 的物品：放进共享箱子以后，放的人还看得到这一项，别人看到的那一份没有。
+#[test]
+fn only_the_player_who_put_it_in_gets_the_components_we_cannot_check() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+
+    *fixture.inventory_slot(36) = locked_chest();
+    fixture.click(Fixture::hotbar(0), 0, ContainerInput::Pickup);
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(
+        fixture.entry(pos).slots[0],
+        locked_chest(),
+        "世界里留着完整的"
+    );
+    assert_eq!(fixture.entry(pos).sources[0], Some(fixture.id));
+
+    // 放的人自己看到的那一份是完整的。
+    let menu = fixture.menu();
+    assert_eq!(
+        network_slots(&fixture.region, fixture.id, menu)[0],
+        locked_chest()
+    );
+
+    // 另一名玩家看到的那一份滤过了。
+    let other = PlayerId(2);
+    spawn(&mut fixture.region, other, 2.5, 2.5);
+    open_block(&mut fixture.region, other, pos);
+    let other_menu = fixture
+        .region
+        .menus
+        .get(&other)
+        .expect("第二个菜单应该开着");
+    assert_eq!(
+        network_slots(&fixture.region, other, other_menu)[0],
+        ItemStack::new(items::CHEST, 1)
+    );
+}
+
+/// 别人把这件物品拿出箱子时，没校验过的组件不跟着走：它到不了别人的客户端。
+#[test]
+fn taking_another_players_item_out_of_a_chest_drops_those_components() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] = locked_chest();
+    // 第一格是别人放的。
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).sources[0] =
+        Some(PlayerId(9));
+    fixture.open(pos);
+
+    fixture.click(0, 0, ContainerInput::Pickup);
+
+    assert_eq!(
+        fixture.menu().carried,
+        ItemStack::new(items::CHEST, 1),
+        "拿到手上的那一份没有锁"
+    );
+    assert!(fixture.entry(pos).slots[0].is_empty());
+}
+
+/// 叠上去只改数量，组件还是原来那名玩家的，所以来源不变。
+#[test]
+fn merging_into_another_players_stack_keeps_the_source() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    let other = PlayerId(9);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] =
+        ItemStack::new(items::STONE, 1);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).sources[0] = Some(other);
+    fixture.open(pos);
+
+    fixture.menu_mut().carried = ItemStack::new(items::STONE, 1);
+    fixture.click(0, 0, ContainerInput::Pickup);
+
+    assert_eq!(fixture.entry(pos).slots[0], ItemStack::new(items::STONE, 2));
+    assert_eq!(fixture.entry(pos).sources[0], Some(other));
+
+    // 换成另一种物品就是新的一份字节：两边换位置，这一格的来源跟着换人。
+    fixture.menu_mut().carried = locked_chest();
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.entry(pos).slots[0], locked_chest());
+    assert_eq!(fixture.entry(pos).sources[0], Some(fixture.id));
+    assert_eq!(fixture.menu().carried, ItemStack::new(items::STONE, 2));
+}
+
+/// 一个带 `lock` 的箱子物品。`lock` 线上是 NBT，我们只校验最外层，所以发不给别人。
+fn locked_chest() -> ItemStack {
+    let mut lock = Vec::new();
+    mc_bamboo_nbt::Tag::Compound(Vec::new()).write_network(&mut lock);
+    ItemStack {
+        item: items::CHEST,
+        count: 1,
+        added: vec![(mc_bamboo_data::registries::data_component_type::LOCK, lock)],
+        removed: Vec::new(),
+    }
 }
 
 /// 末影箱的内容跟着玩家走，换个方块位置再打开还是那些东西。
@@ -544,8 +644,137 @@ fn the_ender_chest_contents_belong_to_the_player() {
     fixture.open(second);
     assert_eq!(fixture.player().ender_chest.active, Some(second));
     let menu = fixture.menu();
-    let (slots, _) = display(&fixture.region, fixture.id, menu);
+    let (slots, sources) = display(&fixture.region, fixture.id, menu);
     assert_eq!(slots[0], ItemStack::new(items::DIAMOND, 2));
+    assert_eq!(sources[0], Some(fixture.id), "末影箱永远是自己的");
+}
+
+/// 改了名的箱子打开时标题就是那个名字，官方 `Nameable.getDisplayName`。
+#[test]
+fn a_named_chest_opens_with_its_name_as_the_title() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    let name = Component::text("小猫的箱子");
+    name_block(&mut fixture, pos, &name);
+    fixture.open(pos);
+
+    let frames = fixture.take_frames();
+    let mut open = frames[0].reader();
+    assert_eq!(open.varint(), Ok(1));
+    assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X3));
+    // 标题是一段 NBT 文本组件，内容就是那个名字。
+    let mut title = Vec::new();
+    name.write(&mut title);
+    assert_eq!(open.rest(), title);
+}
+
+/// 双箱的标题先看主箱，再看另一半，官方 `ChestBlock.MENU_PROVIDER_COMBINER`。
+#[test]
+fn a_double_chest_takes_the_name_of_either_half() {
+    let mut fixture = Fixture::new();
+    let (left, right) = double_chest(&mut fixture);
+    let name = Component::text("大箱子");
+    name_block(&mut fixture, left, &name);
+
+    fixture.open(right);
+    let frames = fixture.take_frames();
+    let mut open = frames[0].reader();
+    assert_eq!(open.varint(), Ok(1));
+    assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X6));
+    let mut title = Vec::new();
+    name.write(&mut title);
+    assert_eq!(open.rest(), title);
+}
+
+/// 放一个双箱，返回左右两半的位置。主箱（官方的 FIRST）是 `RIGHT` 那一半。
+fn double_chest(fixture: &mut Fixture) -> (BlockPos, BlockPos) {
+    let y = flat::surface_y();
+    let right = BlockPos::new(0, y, 0);
+    let left = BlockPos::new(-1, y, 0);
+    fixture.place(
+        right,
+        BlockState(blocks::CHEST)
+            .with(HORIZONTAL_FACING, Direction::North)
+            .with(CHEST_TYPE, ChestType::Right)
+            .0,
+    );
+    fixture.place(
+        left,
+        BlockState(blocks::CHEST)
+            .with(HORIZONTAL_FACING, Direction::North)
+            .with(CHEST_TYPE, ChestType::Left)
+            .0,
+    );
+    (left, right)
+}
+
+/// 给这一格的方块实体一个自定义名，和放下一个改过名的方块一样。
+fn name_block(fixture: &mut Fixture, pos: BlockPos, name: &Component) {
+    let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+        mc_bamboo_protocol::components::PatchEntry::Set(
+            mc_bamboo_protocol::components::ComponentValue::CustomName(name.clone()),
+        ),
+    );
+    fixture.region.block_items.insert(pos, patch);
+}
+
+/// 堆叠上限来自组件：改小上限的物品叠不到一起。
+#[test]
+fn the_stack_limit_comes_from_the_components() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+
+    // 把上限改成 2，官方 `Slot.getMaxStackSize` 取的就是这个值。
+    let mut limited = ItemStack::new(items::STONE, 2);
+    limited.added.push((
+        mc_bamboo_data::registries::data_component_type::MAX_STACK_SIZE,
+        vec![2],
+    ));
+    *fixture.inventory_slot(36) = limited.clone();
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] = limited.clone();
+
+    // 拿起两个再点进已经满了的那一格：放不进去，光标里的东西不变。
+    fixture.click(Fixture::hotbar(0), 0, ContainerInput::Pickup);
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.menu().carried, limited);
+    assert_eq!(fixture.entry(pos).slots[0], limited);
+
+    // 同一个物品不改上限的时候就能叠到 4 个。
+    let plain = ItemStack::new(items::STONE, 2);
+    fixture.menu_mut().carried = plain.clone();
+    fixture.entry_mut(pos).slots[0] = plain;
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.entry(pos).slots[0], ItemStack::new(items::STONE, 4));
+    assert!(fixture.menu().carried.is_empty());
+}
+
+/// 组件不同的物品不是同一种东西，官方 `isSameItemSameComponents`。
+#[test]
+fn stacks_with_different_components_do_not_merge() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+
+    let mut named = ItemStack::new(items::STONE, 1);
+    let mut name = Vec::new();
+    Component::text("Kitten").write(&mut name);
+    named.added.push((
+        mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+        name,
+    ));
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] = named.clone();
+    fixture.menu_mut().carried = ItemStack::new(items::STONE, 1);
+
+    // 点在改过名的那一格上：两边换位置，不合并。
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.entry(pos).slots[0], ItemStack::new(items::STONE, 1));
+    assert_eq!(fixture.menu().carried, named);
 }
 
 /// 潜影盒里放不进潜影盒。

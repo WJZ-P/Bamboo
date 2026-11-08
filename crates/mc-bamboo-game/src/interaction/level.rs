@@ -7,7 +7,11 @@ use mc_bamboo_blocks::{
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
-use mc_bamboo_data::blocks;
+use mc_bamboo_data::{
+    block_of_state, blocks,
+    registries::{block_entity_type as entities, data_component_type as kinds},
+};
+use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue};
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
@@ -17,6 +21,8 @@ use crate::{inbound::PlayerId, player::Player};
 pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
+    /// 方块实体从物品带来的组件，换了方块就丢，见 [`crate::block_items`]。
+    pub(crate) block_items: &'a mut BTreeMap<BlockPos, ComponentPatch>,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
     pub(crate) random: &'a LevelRandom,
     pub(crate) redstone: &'a mut RedstoneMemory,
@@ -30,7 +36,13 @@ impl Level for RegionLevel<'_> {
     }
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
+        let previous = self.chunks.block(pos).map(BlockState);
         let written = self.chunks.set_block(pos, state.0);
+        // 官方 `LevelChunk.setBlockState`：换成别的方块时旧的方块实体就没了。
+        // 区块里那份 `getUpdateTag` 由 `Chunk::set_block` 自己丢。
+        if written && previous.is_some_and(|previous| !previous.is_same_block(state)) {
+            self.block_items.remove(&pos);
+        }
         // 官方 `Level.setBlock` 只在 `UPDATE_CLIENTS` 时才 `sendBlockUpdated`，
         // 活塞的移动方块用 `UPDATE_INVISIBLE` 写，客户端会自己播放动画。
         if written && flags & mc_bamboo_blocks::world::UPDATE_CLIENTS != 0 {
@@ -82,6 +94,20 @@ impl Level for RegionLevel<'_> {
 
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         self.chunks.set_sign(pos, content)
+    }
+
+    /// 头颅方块实体认的 `note_block_sound` 存在 [`Self::block_items`] 里，见
+    /// [`crate::block_items`] 的 `apply`。
+    fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        let skull =
+            block_of_state(self.chunks.block(pos)?)?.block_entity_type == Some(entities::SKULL);
+        if !skull {
+            return None;
+        }
+        match self.block_items.get(&pos)?.get(kinds::NOTE_BLOCK_SOUND)? {
+            ComponentValue::NoteBlockSound(sound) => Some(sound.clone()),
+            _ => None,
+        }
     }
 
     fn block_entities(&self) -> &BlockEntities {

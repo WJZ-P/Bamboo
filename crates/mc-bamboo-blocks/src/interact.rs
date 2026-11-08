@@ -48,6 +48,9 @@ pub struct Outcome {
     pub result: InteractionResult,
     /// 这次点击走了方块的 `useWithoutItem`。容器就是在这里打开的，调用方要接着接线。
     pub used_without_item: bool,
+    /// `BlockItem.place` 放下的那一格。调用方要把物品上的组件搬进这一格的方块实体，
+    /// 见 [`World::placed_at`]。
+    pub placed_at: Option<BlockPos>,
     pub effects: Vec<Effect>,
 }
 
@@ -64,6 +67,7 @@ pub fn use_item_on(
     Outcome {
         result,
         used_without_item,
+        placed_at: world.placed_at(),
         effects: world.into_effects(),
     }
 }
@@ -203,6 +207,7 @@ pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
     Outcome {
         result,
         used_without_item: false,
+        placed_at: world.placed_at(),
         effects: world.into_effects(),
     }
 }

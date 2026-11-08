@@ -20,6 +20,7 @@ use mc_bamboo_protocol::{
 use tracing::{debug, warn};
 
 use crate::{
+    block_items,
     container::{self, CONTAINER_BUFFER, ContainerKind},
     inbound::PlayerId,
     interaction::{BLOCK_INTERACTION_RANGE, rules},
@@ -122,18 +123,10 @@ pub(crate) struct Menu {
     quickcraft_status: i32,
     quickcraft_type: i32,
     quickcraft_slots: Vec<usize>,
-    /// 菜单给谁看，共享容器里不是自己写过的槽要去掉组件。
-    viewer: PlayerId,
 }
 
 impl Menu {
-    fn new(
-        container_id: i32,
-        kind: ContainerKind,
-        target: Target,
-        container_size: usize,
-        viewer: PlayerId,
-    ) -> Self {
+    fn new(container_id: i32, kind: ContainerKind, target: Target, container_size: usize) -> Self {
         let slots_len = container_size + PLAYER_SLOTS;
         Self {
             container_id,
@@ -147,7 +140,6 @@ impl Menu {
             quickcraft_status: 0,
             quickcraft_type: 0,
             quickcraft_slots: Vec::new(),
-            viewer,
         }
     }
 
@@ -214,8 +206,10 @@ pub(crate) struct ClickPacket {
 struct Ctx<'a> {
     kind: ContainerKind,
     container_size: usize,
+    /// 点这个菜单的人。容器格里别人放的组件只能滤过以后交给他，见 [`Ctx::taken_by_viewer`]。
     viewer: PlayerId,
     container: &'a mut [ItemStack],
+    /// 每个容器格的组件来自哪名玩家，和 `container` 一一对应。
     sources: &'a mut [Option<PlayerId>],
     inventory: &'a mut Inventory,
     carried: &'a mut ItemStack,
@@ -235,7 +229,7 @@ impl Ctx<'_> {
         index - self.container_size + INVENTORY_MENU_START
     }
 
-    /// 这个槽现在的物品。别的玩家写进来的物品不带组件，和发出去的一致。
+    /// 这个槽现在的物品。
     fn get(&self, index: usize) -> ItemStack {
         self.container_or_inventory(index).clone()
     }
@@ -248,13 +242,26 @@ impl Ctx<'_> {
         }
     }
 
+    /// 这一格的物品离开容器交到点菜单的人手上时的样子。
+    ///
+    /// 别人放进来的物品里那几种没法完全校验的组件不跟着走：它们只能发回给来源玩家，
+    /// 一路跟到这名玩家的物品栏里就没法再分辨了。官方不滤，这是我们多出来的一道。
+    fn taken_by_viewer(&self, index: usize, stack: ItemStack) -> ItemStack {
+        if index < self.container_size && self.sources[index] != Some(self.viewer) {
+            return stack.filtered();
+        }
+        stack
+    }
+
     fn set(&mut self, index: usize, stack: ItemStack) {
         if index < self.container_size {
-            self.sources[index] = if stack.is_empty() {
-                None
-            } else {
-                Some(self.viewer)
-            };
+            let previous = &self.container[index];
+            if stack.is_empty() {
+                self.sources[index] = None;
+            } else if previous.is_empty() || !same_component_bytes(previous, &stack) {
+                self.sources[index] = Some(self.viewer);
+            }
+            // 原来那一格非空、组件字节又没变，就是合并（只有数量变了），来源跟着不变。
             self.container[index] = stack;
         } else {
             let slot = self.inv_slot(index);
@@ -284,7 +291,7 @@ impl Ctx<'_> {
         } else {
             self.set(index, copy_with_count(&current, leftover));
         }
-        Some(taken)
+        Some(self.taken_by_viewer(index, taken))
     }
 
     /// 官方 `Slot.safeTake`。`onTake` 对我们什么也不做。
@@ -299,7 +306,8 @@ impl Ctx<'_> {
         if current.is_empty() {
             return ItemStack::empty();
         }
-        copy_with_count(&current, item_max(&current))
+        let cloned = copy_with_count(&current, item_max(&current));
+        self.taken_by_viewer(index, cloned)
     }
 
     /// 官方 `Slot.safeInsert`。返回没放进槽里的剩余物品。
@@ -400,7 +408,8 @@ impl Ctx<'_> {
         if clicked.is_empty() {
             return ItemStack::empty();
         }
-        let mut stack = clicked.clone();
+        // 从容器格移到物品栏时物品换了主人，组件照 `taken_by_viewer` 过一遍。
+        let mut stack = self.taken_by_viewer(index, clicked.clone());
         let moved = if index < self.container_size {
             self.move_item_stack_to(&mut stack, self.container_size, self.slots_len(), true)
         } else {
@@ -531,7 +540,8 @@ fn pickup(ctx: &mut Ctx, index: usize, primary: bool) {
             let amount = if primary { carried.count } else { 1 };
             *ctx.carried = ctx.safe_insert(index, carried, amount);
         } else if carried.count <= stack_limit(&carried) {
-            *ctx.carried = clicked;
+            // 两边换位置：拿到手上的那一份换了主人。
+            *ctx.carried = ctx.taken_by_viewer(index, clicked);
             ctx.set(index, carried);
         }
     } else if is_same_item_same_components(&clicked, &carried) {
@@ -550,7 +560,8 @@ fn swap_with_inventory(ctx: &mut Ctx, slot_index: i32, button: i32) {
         return;
     };
     let source = ctx.inventory.slots[source_slot].clone();
-    let target = ctx.get(index);
+    // 交换和「放不下时收进物品栏」都会把容器格里的物品搬进这名玩家的物品栏。
+    let target = ctx.taken_by_viewer(index, ctx.get(index));
     if source.is_empty() && target.is_empty() {
         return;
     }
@@ -797,7 +808,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
         player.container_counter = player.container_counter % 100 + 1;
         player.container_counter
     };
-    let menu = Menu::new(container_id, kind, target, container_size, id);
+    let menu = Menu::new(container_id, kind, target, container_size);
     if kind == ContainerKind::EnderChest
         && let Some(player) = region.players.get_mut(&id)
     {
@@ -808,7 +819,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
     for target_pos in positions {
         container::start_open(region, target_pos, kind);
     }
-    let title = Component::translate(title, []);
+    let title = menu_title(region, &region.menus[&id].target, title);
     region.links.send(
         id,
         &OpenScreen {
@@ -822,6 +833,18 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
     };
     broadcast_full_state(region, id, &mut menu);
     region.menus.insert(id, menu);
+}
+
+/// 菜单的标题，官方 `Nameable.getDisplayName`：方块实体有自定义名就用它。
+///
+/// 双箱看官方 `ChestBlock.MENU_PROVIDER_COMBINER`：先看主箱，再看另一半，都没有才用默认标题。
+fn menu_title(region: &Region, target: &Target, default: &str) -> Component {
+    for pos in target.positions() {
+        if let Some(name) = block_items::custom_name(region, pos) {
+            return name.clone();
+        }
+    }
+    Component::translate(default, [])
 }
 
 /// 这个容器打开后是什么形状。返回 `None` 时官方也不会打开菜单。
@@ -1174,10 +1197,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
 
 /// 官方 `broadcastChanges`：只发和远程槽不一致的格，光标单独发。
 fn broadcast_changes(region: &mut Region, id: PlayerId, menu: &mut Menu) {
-    let (slots, sources) = display(region, id, menu);
-    let current: Vec<ItemStack> = (0..menu.slots_len())
-        .map(|index| network_stack(menu, &slots, &sources, index))
-        .collect();
+    let current = network_slots(region, id, menu);
     for (state_id, index, stack) in menu.take_slot_changes(&current) {
         region.links.send(
             id,
@@ -1196,10 +1216,7 @@ fn broadcast_changes(region: &mut Region, id: PlayerId, menu: &mut Menu) {
 
 /// 官方 `broadcastFullState`：每个槽都当成变了，打包成一个 `container_set_content`。
 fn broadcast_full_state(region: &mut Region, id: PlayerId, menu: &mut Menu) {
-    let (slots, sources) = display(region, id, menu);
-    let items: Vec<ItemStack> = (0..menu.slots_len())
-        .map(|index| network_stack(menu, &slots, &sources, index))
-        .collect();
+    let items = network_slots(region, id, menu);
     let state_id = menu.take_full_state(&items);
     region.links.send(
         id,
@@ -1212,6 +1229,26 @@ fn broadcast_full_state(region: &mut Region, id: PlayerId, menu: &mut Menu) {
     );
 }
 
+/// 这名玩家会收到的那一份槽位内容。
+///
+/// 自己的物品栏、光标和自己的末影箱写完整的补丁：那些字节就是这名玩家的客户端发来的。
+/// 共享容器里别人放的格子要滤一遍，见 [`ItemStack::write_for_others`]。
+/// 记远程槽的账用的也是这一份，不然记的和发出去的不一样。
+fn network_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemStack> {
+    let (slots, sources) = display(region, id, menu);
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, stack)| {
+            if index < menu.container_size && sources[index] != Some(id) {
+                stack.filtered()
+            } else {
+                stack
+            }
+        })
+        .collect()
+}
+
 /// 菜单里的全部槽位：容器格加上玩家的 36 格。`sources` 只对容器格有意义。
 fn display(region: &Region, id: PlayerId, menu: &Menu) -> (Vec<ItemStack>, Vec<Option<PlayerId>>) {
     let (mut slots, mut sources) = raw_container_slots(region, id, menu);
@@ -1222,7 +1259,7 @@ fn display(region: &Region, id: PlayerId, menu: &Menu) -> (Vec<ItemStack>, Vec<O
     };
     for index in 0..PLAYER_SLOTS {
         slots.push(player.inventory.slots[INVENTORY_MENU_START + index].clone());
-        sources.push(None);
+        sources.push(Some(id));
     }
     (slots, sources)
 }
@@ -1281,55 +1318,33 @@ fn write_back_containers(
     }
 }
 
-/// 发出去的物品。别的玩家写进来的槽要去掉组件，组件字节只能发回给写它的玩家。
-fn network_stack(
-    menu: &Menu,
-    slots: &[ItemStack],
-    sources: &[Option<PlayerId>],
-    index: usize,
-) -> ItemStack {
-    let stack = &slots[index];
-    if index < menu.container_size
-        && !stack.is_empty()
-        && sources[index].is_some_and(|source| source != menu.viewer)
-    {
-        return ItemStack::new(stack.item, stack.count);
-    }
-    stack.clone()
-}
-
 /// 官方 `ItemStack.isSameItemSameComponents`。空物品和空物品也算相同。
 fn is_same_item_same_components(a: &ItemStack, b: &ItemStack) -> bool {
-    a.item == b.item && same_components(a, b)
-}
-
-/// 官方 `DataComponentPatch` 的相等。我们的补丁按类型排序后比较，值按字节比较。
-fn same_components(a: &ItemStack, b: &ItemStack) -> bool {
-    let mut added_a: Vec<(i32, &[u8])> = a.added.iter().map(|(k, v)| (*k, v.as_slice())).collect();
-    let mut added_b: Vec<(i32, &[u8])> = b.added.iter().map(|(k, v)| (*k, v.as_slice())).collect();
-    added_a.sort_unstable();
-    added_b.sort_unstable();
-    if added_a != added_b {
-        return false;
-    }
-    let mut removed_a = a.removed.clone();
-    let mut removed_b = b.removed.clone();
-    removed_a.sort_unstable();
-    removed_b.sort_unstable();
-    removed_a == removed_b
+    a.is_same_item_same_components(b)
 }
 
 /// 官方 `ItemStack.matches`：同种物品、同样组件、数量也相同。
 fn stack_matches(a: &ItemStack, b: &ItemStack) -> bool {
-    a.count == b.count && is_same_item_same_components(a, b)
+    a.matches(b)
 }
 
-/// 官方 `ItemStack.isSameItem`，只看物品 ID。
+/// 官方 `ItemStack.isSameItem`，只看物品。
 fn is_same_item(a: &ItemStack, b: &ItemStack) -> bool {
-    a.item == b.item
+    a.is_same_item(b)
 }
 
-/// 官方 `HashedStack.matches`。只有哈希，算不出组件值，只比较物品、数量和组件的类型。
+/// 同一格里的物品只是数量变了：物品和组件字节都没动，来源还是原来那名玩家。
+///
+/// 换了物品就不算，哪怕两种物品的组件字节碰巧一样；不然别人放的新物品会被当成原来那个人的。
+fn same_component_bytes(a: &ItemStack, b: &ItemStack) -> bool {
+    a.item == b.item && a.added == b.added && a.removed == b.removed
+}
+
+/// 官方 `HashedStack.matches`。
+///
+/// 官方把每一项组件按 `HashOps`（CRC32C）算成一个整数再比。那套哈希要整个组件的 DFU
+/// `Codec`，我们没有，见 README 的已知限制。这里保守处理：带组件的物品一律算不一致，
+/// 结果只是多发一个 `container_set_slot`，不会误以为客户端手上的东西和服务端一样。
 fn hashed_matches(hash: &HashedStack, local: &ItemStack) -> bool {
     match hash {
         HashedStack::Empty => local.is_empty(),
@@ -1337,23 +1352,17 @@ fn hashed_matches(hash: &HashedStack, local: &ItemStack) -> bool {
             !local.is_empty()
                 && hashed.item == local.item
                 && hashed.count == local.count
-                && sorted_kinds(hashed.added.iter().map(|(kind, _)| *kind))
-                    == sorted_kinds(local.added.iter().map(|(kind, _)| *kind))
-                && sorted_kinds(hashed.removed.iter().copied())
-                    == sorted_kinds(local.removed.iter().copied())
+                && hashed.added.is_empty()
+                && hashed.removed.is_empty()
+                && local.added.is_empty()
+                && local.removed.is_empty()
         }
     }
 }
 
-fn sorted_kinds(kinds: impl Iterator<Item = i32>) -> Vec<i32> {
-    let mut kinds: Vec<i32> = kinds.collect();
-    kinds.sort_unstable();
-    kinds
-}
-
-/// 官方 `ItemStack.getMaxStackSize`：物品数据里的上限。
+/// 官方 `ItemStack.getMaxStackSize`：默认组件被补丁覆盖之后的上限。
 fn item_max(stack: &ItemStack) -> i32 {
-    rules::item(stack.item).map_or(CONTAINER_STACK_LIMIT, |item| item.max_stack_size)
+    stack.max_stack_size()
 }
 
 /// 官方 `Slot.getMaxStackSize(stack)`：容器上限和物品上限取小的。
@@ -1361,9 +1370,9 @@ fn stack_limit(stack: &ItemStack) -> i32 {
     CONTAINER_STACK_LIMIT.min(item_max(stack))
 }
 
-/// 官方 `ItemStack.isStackable`。这里忽略了耐久：拆开的工具在我们的数据里也算能叠。
+/// 官方 `ItemStack.isStackable`。
 fn is_stackable(stack: &ItemStack) -> bool {
-    item_max(stack) > 1
+    stack.is_stackable()
 }
 
 /// 官方 `ItemStack.copyWithCount`。

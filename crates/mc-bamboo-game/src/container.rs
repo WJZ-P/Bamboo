@@ -74,10 +74,15 @@ impl ContainerKind {
 }
 
 /// 一个容器方块的内容和开合状态。没有内容的容器不留条目。
+///
+/// 自定义名和锁不在这里，它们是方块实体从物品上带来的组件，见 [`crate::block_items`]。
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,
-    /// 每个槽的组件来自哪名玩家。共享容器只能把组件发回给写它的玩家。
+    /// 每一格的组件字节是哪名玩家的客户端发来的。
+    ///
+    /// 共享容器里的物品可能是别人放进来的：那几种我们没法完全校验的组件只能发回给来源玩家，
+    /// 别人看到的那一份要滤过，见 [`crate::menu`]。
     pub(crate) sources: Vec<Option<PlayerId>>,
     /// 官方 `ContainerOpenersCounter.openCount`。潜影盒也用它算盖子开合。
     pub(crate) open_count: i32,
@@ -505,6 +510,7 @@ fn forget_unused(region: &mut Region) {
 
 /// 方块被破坏。内容没有掉落物，等打开着的菜单关掉后一起丢弃。
 pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
+    crate::block_items::forget(region, pos);
     let targeted = region.menus.values().any(|menu| menu.target.contains(pos));
     if !targeted {
         region.containers.remove(&pos);

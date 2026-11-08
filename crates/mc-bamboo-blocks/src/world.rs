@@ -236,6 +236,8 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `BlockItem.place` 刚放下的那一格，官方在这里读物品上的组件，见 [`World::placed_at`]。
+    placed_at: Option<BlockPos>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -249,6 +251,7 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            placed_at: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -275,6 +278,17 @@ impl<'a> World<'a> {
     /// 这次操作收集到的结果。调用方发出去，见 `mc-bamboo-game` 的 `send_effects`。
     pub fn into_effects(self) -> Vec<Effect> {
         self.effects
+    }
+
+    /// 这次操作放下的那一格方块，官方 `BlockItem.place` 里 `updateBlockEntityComponents`
+    /// 看的位置。组件在 `mc-bamboo-protocol`，这一层看不见，所以只报位置，由调用方接着做。
+    pub const fn placed_at(&self) -> Option<BlockPos> {
+        self.placed_at
+    }
+
+    /// `BlockItem.place` 放成功时记下这一格。
+    pub(crate) fn set_placed_at(&mut self, pos: BlockPos) {
+        self.placed_at = Some(pos);
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {
@@ -397,6 +411,13 @@ impl<'a> World<'a> {
     /// 改写告示牌的内容。不是告示牌方块时什么也不做，返回 `false`。
     pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         self.level.set_sign(pos, content)
+    }
+
+    /// `getBlockEntity(pos) instanceof SkullBlockEntity` 时的 `getNoteBlockSound`。
+    ///
+    /// 音符盒的 `getCustomSoundId` 读上面那一格，见 [`crate::behaviour::machines`] 里的音符盒。
+    pub fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        self.level.note_block_sound(pos)
     }
 
     /// `getBlockEntity(pos)` 之后按类型取。
