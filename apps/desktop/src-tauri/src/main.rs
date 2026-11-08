@@ -9,6 +9,7 @@
 mod commands;
 mod controller;
 mod log_bridge;
+mod metrics;
 mod settings;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use crate::{
     controller::ServerController,
     log_bridge::{LogHub, LogLayer},
+    metrics::MetricsHub,
 };
 
 fn main() {
@@ -32,8 +34,10 @@ fn main() {
     tauri::Builder::default()
         .manage(ServerController::default())
         .manage(Arc::clone(&logs))
+        .manage(Arc::new(MetricsHub::default()))
         .setup(|app| {
             log_bridge::spawn_forwarder(app.handle().clone(), app.state::<Arc<LogHub>>().inner());
+            metrics::spawn_sampler(app.handle().clone(), app.state::<Arc<MetricsHub>>().inner());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -44,6 +48,7 @@ fn main() {
             commands::save_settings,
             commands::default_settings,
             commands::recent_logs,
+            commands::recent_metrics,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

@@ -45,6 +45,19 @@ export interface LogLine {
   message: string;
 }
 
+/** 一次性能采样，每秒一次。CPU 都按整机算，0 到 100；内存是字节。 */
+export interface MetricsSample {
+  timestampMs: number;
+  processCpu: number;
+  systemCpu: number;
+  /** Bamboo 进程的工作集。 */
+  processMemory: number;
+  systemMemoryUsed: number;
+  systemMemoryTotal: number;
+  /** 逻辑处理器个数。 */
+  cpuCount: number;
+}
+
 export const getSnapshot = () => invoke<ServerSnapshot>("get_snapshot");
 export const startServer = (settings: ServerSettings) =>
   invoke<ServerSnapshot>("start_server", { settings });
@@ -54,6 +67,7 @@ export const saveSettings = (settings: ServerSettings) =>
   invoke<void>("save_settings", { settings });
 export const defaultSettings = () => invoke<ServerSettings>("default_settings");
 export const recentLogs = () => invoke<LogLine[]>("recent_logs");
+export const recentMetrics = () => invoke<MetricsSample[]>("recent_metrics");
 
 export const onStateChanged = (handler: (snapshot: ServerSnapshot) => void): Promise<UnlistenFn> =>
   listen<ServerSnapshot>("bamboo://state", (event) => handler(event.payload));
@@ -63,3 +77,6 @@ export const onPlayersChanged = (handler: (players: PlayerView[]) => void): Prom
 
 export const onLogBatch = (handler: (lines: LogLine[]) => void): Promise<UnlistenFn> =>
   listen<LogLine[]>("bamboo://log", (event) => handler(event.payload));
+
+export const onMetrics = (handler: (sample: MetricsSample) => void): Promise<UnlistenFn> =>
+  listen<MetricsSample>("bamboo://metrics", (event) => handler(event.payload));
