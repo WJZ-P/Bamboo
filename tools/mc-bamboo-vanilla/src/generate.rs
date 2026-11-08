@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, BlockSet, CompostLayers, ExtractedIngredient,
+    Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
     ExtractedStack, FieldValue, HeightmapType, Item, Property, StateProvider, TagGroup,
     VersionData,
@@ -1079,11 +1079,10 @@ fn check_state_ids(blocks: &[Block], total: u32) -> Result<(), String> {
 }
 
 fn items_file(data: &VersionData) -> Result<String, String> {
-    let block_tags = tag_indexes(&data.tags, BLOCK_REGISTRY)?;
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "use crate::{{BlockSet, CompostLayers, Item, ItemKind, Tool, ToolRule}};\n"
+        "use crate::{{CompostLayers, Item, ItemKind}};\n"
     );
     let _ = writeln!(out, "/// 各物品的注册表 ID。");
     for (id, item) in data.items.iter().enumerate() {
@@ -1095,7 +1094,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {}, tool: {} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
             item.name,
             item_kind(item)?,
             item.block,
@@ -1107,8 +1106,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             compost_layers_of(item),
             item.jukebox_playable,
             block_transformer_of(item, data)?,
-            item.blocks_attacks,
-            tool_of(item, &block_tags)?
+            item.blocks_attacks
         );
     }
     let _ = writeln!(out, "];");
@@ -1147,48 +1145,6 @@ fn block_transformer_of(item: &Item, data: &VersionData) -> Result<String, Strin
     Ok(format!(
         "Some(&crate::block_transformers::{})",
         constant_name(name)
-    ))
-}
-
-/// 物品的 `minecraft:tool` 组件。规则按数据包里的顺序写，先匹配到的算数。
-fn tool_of(item: &Item, block_tags: &TagIndexes) -> Result<String, String> {
-    let Some(tool) = &item.tool else {
-        return Ok("None".to_owned());
-    };
-    let rules = tool
-        .rules
-        .iter()
-        .map(|rule| {
-            let blocks = rule
-                .blocks
-                .iter()
-                .map(|set| match set {
-                    BlockSet::Tag(name) => {
-                        if !block_tags.contains_key(name.as_str()) {
-                            return Err(format!(
-                                "{} 的工具规则引用了不存在的方块标签 {name}",
-                                item.name
-                            ));
-                        }
-                        Ok(format!(
-                            "BlockSet::Tag(crate::tags::block_tags::{})",
-                            constant_name(name)
-                        ))
-                    }
-                    BlockSet::Block(id) => Ok(format!("BlockSet::Block({id})")),
-                })
-                .collect::<Result<Vec<String>, String>>()?
-                .join(", ");
-            Ok(format!(
-                "ToolRule {{ blocks: &[{blocks}], speed: {:?}, correct_for_drops: {:?} }}",
-                rule.speed, rule.correct_for_drops
-            ))
-        })
-        .collect::<Result<Vec<String>, String>>()?;
-    Ok(format!(
-        "Some(Tool {{ rules: &[{}], default_mining_speed: {:?} }})",
-        rules.join(", "),
-        tool.default_mining_speed
     ))
 }
 
@@ -2169,7 +2125,6 @@ mod tests {
             jukebox_playable: false,
             block_transformer: None,
             blocks_attacks: false,
-            tool: None,
         }
     }
 

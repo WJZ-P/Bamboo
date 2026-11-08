@@ -5,7 +5,11 @@
 //! 没有状态效果，所以急迫和挖掘疲劳都按没有算。
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
-use mc_bamboo_data::{block_id_of_state, block_of_state, items, registries::attribute_defaults};
+use mc_bamboo_data::{
+    block_id_of_state, block_of_state, block_tag,
+    registries::{attribute_defaults, data_component_type as kinds},
+};
+use mc_bamboo_protocol::components::{ComponentValue, cursor::HolderSet, defaults, value::ToolRule};
 
 use crate::{
     fluid::Fluid,
@@ -30,8 +34,8 @@ pub struct Miner {
 /// `MobEffectUtil.hasDigSpeed` 和 `MINING_FATIGUE` 在这里是恒假。
 pub fn destroy_speed(state: u32, miner: Miner) -> f32 {
     let block = block_id_of_state(state).unwrap_or_default() as i32;
-    let item = item_of(miner.main_hand);
-    let mut speed = item.tool.map_or(1.0, |tool| tool.mining_speed(block));
+    let mut speed = tool_of(miner.main_hand)
+        .map_or(1.0, |tool| tool.mining_speed(block));
     if speed > 1.0 {
         speed += attribute_defaults::MINING_EFFICIENCY as f32;
     }
@@ -72,20 +76,60 @@ pub fn is_correct_for_drops(state: u32, main_hand: i32) -> bool {
         return true;
     }
     let block_id = block_id_of_state(state).unwrap_or_default() as i32;
-    let tool = item_of(main_hand);
-    tool.tool
-        .is_some_and(|tool| tool.is_correct_for_drops(block_id))
+    tool_of(main_hand).is_some_and(|tool| tool.is_correct_for_drops(block_id))
 }
 
-/// 物品 ID 对应的物品。注册表里没有的 ID 按空手算。
+/// 一个物品的 `tool` 组件，官方 `ItemStack.get(DataComponents.TOOL)`。
 ///
-/// 官方客户端和服务器都只会给出注册表里的物品；创造模式发包时 ID 是客户端写的，
-/// 越界的数在这里不能把世界线程弄崩。
-fn item_of(id: i32) -> &'static mc_bamboo_data::Item {
-    usize::try_from(id)
-        .ok()
-        .and_then(|id| items::ITEMS.get(id))
-        .unwrap_or(&items::ITEMS[items::AIR as usize])
+/// 读的是 [`defaults::of_item`] 解出来的默认组件，和线上组件是同一套编解码。
+/// 物品 ID 不认识时没有组件；官方客户端和服务器都只会给出注册表里的物品，
+/// 创造模式发包时 ID 是客户端写的，越界的数在这里不能把世界线程弄崩。
+fn tool_of(item: i32) -> Option<Tool<'static>> {
+    match defaults::of_item(item).get(kinds::TOOL) {
+        Some(ComponentValue::Tool {
+            rules,
+            default_mining_speed,
+            ..
+        }) => Some(Tool {
+            rules,
+            default_mining_speed: *default_mining_speed,
+        }),
+        _ => None,
+    }
+}
+
+/// 官方 `net.minecraft.world.item.component.Tool` 里和挖掘有关的那一半。
+struct Tool<'a> {
+    rules: &'a [ToolRule],
+    default_mining_speed: f32,
+}
+
+impl Tool<'_> {
+    /// 官方 `Tool.getMiningSpeed`：第一条规定了速度、并且管这块方块的规则。
+    fn mining_speed(&self, block: i32) -> f32 {
+        self.rules
+            .iter()
+            .find(|rule| rule.speed.is_some() && rule_blocks(rule, block))
+            .and_then(|rule| rule.speed)
+            .unwrap_or(self.default_mining_speed)
+    }
+
+    /// 官方 `Tool.isCorrectForDrops`：第一条规定了掉落、并且管这块方块的规则。
+    fn is_correct_for_drops(&self, block: i32) -> bool {
+        self.rules
+            .iter()
+            .find(|rule| rule.correct_for_drops.is_some() && rule_blocks(rule, block))
+            .and_then(|rule| rule.correct_for_drops)
+            .unwrap_or(false)
+    }
+}
+
+/// 一条规则管不管这块方块，官方 `state.is(rule.blocks)`。
+fn rule_blocks(rule: &ToolRule, block: i32) -> bool {
+    match &rule.blocks {
+        HolderSet::Tag(name) => block_tag(name).is_some_and(|ids| ids.contains(&block)),
+        HolderSet::Ids(ids) => ids.contains(&block),
+    }
 }
 
 /// 眼睛是不是泡在水里，官方的 `Entity.isEyeInFluid(FluidTags.WATER)`。

@@ -523,29 +523,6 @@ pub struct Item {
     /// `block_transformer` 组件指向的注册表条目。
     pub block_transformer: Option<String>,
     pub blocks_attacks: bool,
-    /// `minecraft:tool` 组件。
-    pub tool: Option<Tool>,
-}
-
-/// `minecraft:tool` 组件。
-pub struct Tool {
-    pub rules: Vec<ToolRule>,
-    pub default_mining_speed: f32,
-}
-
-/// 一条工具规则。`blocks` 里的标签名还没解析，生成的时候查 `block_tags` 的常量。
-pub struct ToolRule {
-    pub blocks: Vec<BlockSet>,
-    pub speed: Option<f32>,
-    pub correct_for_drops: Option<bool>,
-}
-
-/// 工具规则匹配的方块：标签或者单个方块。
-pub enum BlockSet {
-    /// 标签名，带 `minecraft:` 前缀。
-    Tag(String),
-    /// 方块的注册表 ID。
-    Block(i32),
 }
 
 /// `reports/minecraft/components/item` 里一个物品的报告，只取用到的组件。
@@ -579,38 +556,11 @@ struct ItemComponents {
     dye: Option<serde_json::Value>,
 }
 
-/// 字段等于默认值时不写：`can_destroy_blocks_in_creative` 默认 `true`，
-/// `default_mining_speed` 默认 `1.0`，`speed`、`correct_for_drops` 默认是空的。
+/// 只取 `can_destroy_blocks_in_creative`：规则本身由协议 crate 从官方导出的组件字节里解。
+/// 字段等于默认值时不写，所以缺省是 `true`。
 #[derive(Debug, Deserialize)]
 struct ToolComponent {
     can_destroy_blocks_in_creative: Option<bool>,
-    default_mining_speed: Option<f32>,
-    #[serde(default)]
-    rules: Vec<ToolRuleReport>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolRuleReport {
-    blocks: ToolBlocks,
-    speed: Option<f32>,
-    correct_for_drops: Option<bool>,
-}
-
-/// 官方的 `HolderSet<Block>`：一个标签、一个方块，或者它们的列表。
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ToolBlocks {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl ToolBlocks {
-    fn names(&self) -> &[String] {
-        match self {
-            Self::One(name) => std::slice::from_ref(name),
-            Self::Many(names) => names,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,17 +750,10 @@ pub fn run(
         ITEM_REGISTRY,
         extracted.items.iter().map(|item| &item.name),
     )?;
-    let block_ids: BTreeMap<String, i32> = extracted
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(id, block)| (block.name.clone(), id as i32))
-        .collect();
     let (items, damageable, dyed) = read_items(
         extracted.items,
         &reports.join("minecraft/components/item"),
         &extracted.block_maps.compost_layers,
-        &block_ids,
     )?;
     Ok(VersionData {
         version: extracted.version,
@@ -970,7 +913,6 @@ fn read_items(
     extracted: Vec<ExtractedItem>,
     reports: &Path,
     compost_providers: &BTreeMap<String, serde_json::Value>,
-    block_ids: &BTreeMap<String, i32>,
 ) -> Result<ItemTables, String> {
     let mut items = Vec::with_capacity(extracted.len());
     let mut damageable = Vec::new();
@@ -989,10 +931,6 @@ fn read_items(
             .tool
             .as_ref()
             .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
-        let tool = components
-            .tool
-            .map(|tool| read_tool(tool, &item.name, block_ids))
-            .transpose()?;
         items.push(Item {
             max_stack_size: components.max_stack_size,
             can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
@@ -1009,46 +947,9 @@ fn read_items(
             block: item.block,
             wall_block: item.wall_block,
             attachment: item.attachment,
-            tool,
         });
     }
     Ok((items, damageable, dyed))
-}
-
-/// 把组件报告里的工具规则解析成名字和方块 ID。工具规则里写的是方块标签名或者方块名。
-fn read_tool(
-    tool: ToolComponent,
-    item: &str,
-    block_ids: &BTreeMap<String, i32>,
-) -> Result<Tool, String> {
-    let rules = tool
-        .rules
-        .into_iter()
-        .map(|rule| {
-            let blocks = rule
-                .blocks
-                .names()
-                .iter()
-                .map(|name| match name.strip_prefix('#') {
-                    Some(tag) => Ok(BlockSet::Tag(tag.to_owned())),
-                    None => block_ids
-                        .get(name)
-                        .copied()
-                        .map(BlockSet::Block)
-                        .ok_or_else(|| format!("{item} 的工具规则引用了不存在的方块 {name}")),
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(ToolRule {
-                blocks,
-                speed: rule.speed,
-                correct_for_drops: rule.correct_for_drops,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(Tool {
-        rules,
-        default_mining_speed: tool.default_mining_speed.unwrap_or(1.0),
-    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
