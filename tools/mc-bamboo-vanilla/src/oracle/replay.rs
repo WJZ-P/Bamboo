@@ -7,18 +7,21 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Effect,
-    InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory, TickPriority, destroy_block,
-    random_tick, run_action_block_ticks, run_scheduled_ticks,
+    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Combined, Container,
+    Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
+    ShulkerSlots, Slots, TickPriority, destroy_block, random_tick, redstone_signal,
+    run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
+    state::{CHEST_TYPE, ChestType, FACING},
     tick_chunk, use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
-use mc_bamboo_data::{BlockAncestor, blocks, items};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::{BlockAncestor, blocks, items, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
     Names,
-    lines::{Action, Case, Cell, Destroyed, Double, Header, Kind},
+    lines::{Action, Case, Cell, ContainerStack, Destroyed, Double, Header, Kind},
 };
 
 /// `Player.DEFAULT_EYE_HEIGHT`。
@@ -45,6 +48,8 @@ pub struct Replayed {
     /// 和场景不同的格子。
     pub changes: BTreeMap<BlockPos, u32>,
     pub destroyed: Vec<Destroyed>,
+    /// 结束时所有已建模容器的非空格子，按坐标和槽位排序。
+    pub contents: Vec<ContainerStack>,
     /// 走完 `settle` 之后还排着的计划刻，方块的在前，流体的在后，各自按执行顺序，
     /// 延迟相对结束的时刻。
     pub ticks: Vec<Scheduled>,
@@ -69,6 +74,9 @@ pub struct Scheduled {
 /// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。随机源和官方用同一个种子。
 struct OracleLevel {
     blocks: HashMap<BlockPos, BlockState>,
+    /// 容器方块的槽位表，官方的 `Container` 方块实体。双箱两半各一张，引用时按
+    /// `CompoundContainer` 拼起来。末影箱的槽位在玩家身上，不是容器，不在这里。
+    containers: BTreeMap<BlockPos, Vec<ItemStack>>,
     entities: Vec<Aabb>,
     min_y: i32,
     max_y: i32,
@@ -81,26 +89,189 @@ struct OracleLevel {
     block_events: BlockEvents,
 }
 
+/// 已建模的容器，槽位数和官方一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerKind {
+    Chest,
+    Barrel,
+    ShulkerBox,
+    Hopper,
+    Dispenser,
+    Dropper,
+}
+
+impl ContainerKind {
+    /// 方块属于哪种容器。顺序有讲究：投掷器也是发射器的子类，末影箱不是箱子。
+    fn of(state: BlockState) -> Option<Self> {
+        [
+            (BlockAncestor::ShulkerBoxBlock, Self::ShulkerBox),
+            (BlockAncestor::BarrelBlock, Self::Barrel),
+            (BlockAncestor::HopperBlock, Self::Hopper),
+            (BlockAncestor::DropperBlock, Self::Dropper),
+            (BlockAncestor::DispenserBlock, Self::Dispenser),
+            (BlockAncestor::ChestBlock, Self::Chest),
+        ]
+        .into_iter()
+        .find(|(ancestor, _)| state.is_a(*ancestor))
+        .map(|(_, kind)| kind)
+    }
+
+    const fn slots(self) -> usize {
+        match self {
+            Self::Hopper => 5,
+            Self::Dispenser | Self::Dropper => 9,
+            Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
+        }
+    }
+}
+
+/// 一个双箱的两半，`first` 是主箱（`ChestType::Right` 那一半）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DoubleChest {
+    first: BlockPos,
+    second: BlockPos,
+}
+
 impl OracleLevel {
-    fn new(case: &Case, header: &Header) -> Self {
-        let scene = case.scene.iter();
-        Self {
-            blocks: scene
-                .map(|cell| (cell.pos(), BlockState(cell.state())))
-                .collect(),
+    /// 按场景建世界，再填容器内容。容器和漏斗方块实体的建立顺序和官方一样：
+    /// 场景按 `BlockPos.asLong` 排（x、z、y），先建全部方块实体，再填内容。
+    fn new(case: &Case, header: &Header, names: &Names) -> Result<Self, String> {
+        let mut cells: Vec<(BlockPos, BlockState)> = case
+            .scene
+            .iter()
+            .map(|cell| (cell.pos(), BlockState(cell.state())))
+            .collect();
+        cells.sort_by_key(|(pos, _)| pos.pack());
+
+        let mut containers: BTreeMap<BlockPos, Vec<ItemStack>> = BTreeMap::new();
+        let mut block_entities = BlockEntities::default();
+        for &(pos, state) in &cells {
+            if let Some(kind) = ContainerKind::of(state) {
+                containers.insert(pos, vec![ItemStack::empty(); kind.slots()]);
+            }
+            // 官方的 `LevelChunk` 在场景加载时给每个有方块实体的格子建实体，漏斗的
+            // ticker 这时登记，tick 顺序就是这里插入的顺序。
+            if state.is_a(BlockAncestor::HopperBlock) {
+                block_entities.insert(Box::new(HopperEntity::new(pos)));
+            }
+        }
+        for filled in &case.contents {
+            let Some(slots) = containers.get_mut(&filled.pos()) else {
+                // 场景里这一格不是已建模的容器，官方那边也读不到 `Container`。
+                continue;
+            };
+            let Ok(slot) = usize::try_from(filled.slot()) else {
+                continue;
+            };
+            if let Some(slots) = slots.get_mut(slot) {
+                let (item, _) = names.item(filled.item())?;
+                *slots = ItemStack::new(item, filled.count());
+            }
+        }
+
+        Ok(Self {
+            blocks: cells.into_iter().collect(),
+            containers,
             entities: entity_boxes(&case.action),
             min_y: header.min_y,
             max_y: header.max_y,
             random: LevelRandom::new(case.seed),
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
-            block_entities: BlockEntities::default(),
+            block_entities,
             block_events: BlockEvents::default(),
-        }
+        })
     }
 
     fn contains(&self, pos: BlockPos) -> bool {
         (self.min_y..=self.max_y).contains(&pos.y)
+    }
+
+    /// 这一格现在的容器种类，只看已经写过的方块。
+    fn kind(&self, pos: BlockPos) -> Option<ContainerKind> {
+        self.blocks.get(&pos).copied().and_then(ContainerKind::of)
+    }
+
+    /// 取槽位表，没有时按种类建一张空的。方块刚放下时官方也在这里建方块实体。
+    fn slots_mut(&mut self, pos: BlockPos, kind: ContainerKind) -> &mut Vec<ItemStack> {
+        self.containers
+            .entry(pos)
+            .or_insert_with(|| vec![ItemStack::empty(); kind.slots()])
+    }
+
+    /// `ChestBlock.isChestBlockedAt` 里和方块有关的那一半：上面是红石导体。
+    fn blocked(&self, pos: BlockPos) -> bool {
+        self.block_state(pos.above()).is_redstone_conductor()
+    }
+
+    /// `ChestBlock.getConnectedDirection`。
+    fn connected_direction(state: BlockState) -> Direction {
+        let facing = state.get(FACING);
+        if state.get(CHEST_TYPE) == ChestType::Left {
+            facing.clockwise()
+        } else {
+            facing.counter_clockwise()
+        }
+    }
+
+    /// `chestCanConnectTo`：普通箱子只和同一种箱子合并，铜箱子不管氧化程度和涂蜡。
+    fn can_connect_to(state: BlockState, other: BlockState) -> bool {
+        if state.is_a(BlockAncestor::CopperChestBlock) {
+            other.is_tagged(block_tags::COPPER_CHESTS) && other.has(CHEST_TYPE)
+        } else {
+            other.is_same_block(state)
+        }
+    }
+
+    /// `DoubleBlockCombiner` 对邻居的全部要求：能合并、不是单箱、类型不同、朝向相同。
+    fn neighbour_combines(&self, pos: BlockPos, state: BlockState) -> bool {
+        let Some(other) = self.blocks.get(&pos).copied() else {
+            return false;
+        };
+        if !Self::can_connect_to(state, other) {
+            return false;
+        }
+        let (Some(other_type), Some(other_facing)) =
+            (other.try_get(CHEST_TYPE), other.try_get(FACING))
+        else {
+            return false;
+        };
+        other_type != ChestType::Single
+            && other_type != state.get(CHEST_TYPE)
+            && other_facing == state.get(FACING)
+    }
+
+    /// `ChestBlock.combine`。`Ok(None)` 是单箱，`Err(())` 是被压住读不到。
+    fn chest_shape(&self, pos: BlockPos, ignore_blocked: bool) -> Result<Option<DoubleChest>, ()> {
+        if !ignore_blocked && self.blocked(pos) {
+            return Err(());
+        }
+        let Some(state) = self.blocks.get(&pos).copied() else {
+            return Ok(None);
+        };
+        let chest_type = state.get(CHEST_TYPE);
+        if chest_type == ChestType::Single {
+            return Ok(None);
+        }
+        let first_is_here = chest_type == ChestType::Right;
+        let neighbour = pos.relative(Self::connected_direction(state));
+        if !self.neighbour_combines(neighbour, state) {
+            return Ok(None);
+        }
+        if !ignore_blocked && self.blocked(neighbour) {
+            return Err(());
+        }
+        Ok(Some(if first_is_here {
+            DoubleChest {
+                first: pos,
+                second: neighbour,
+            }
+        } else {
+            DoubleChest {
+                first: neighbour,
+                second: pos,
+            }
+        }))
     }
 
     fn touch(&self, state: BlockState) {
@@ -139,6 +310,16 @@ impl Level for OracleLevel {
             return false;
         }
         self.touch(state);
+        // 换成别的方块时方块实体一起换掉，内容没有掉落物。同一格还是同一种容器时保留内容。
+        let old = self.kind(pos);
+        let new = ContainerKind::of(state);
+        if old != new {
+            self.containers.remove(&pos);
+            if let Some(kind) = new {
+                self.containers
+                    .insert(pos, vec![ItemStack::empty(); kind.slots()]);
+            }
+        }
         self.blocks.insert(pos, state);
         true
     }
@@ -220,6 +401,98 @@ impl Level for OracleLevel {
 
     /// 官方假世界的 `canSpreadFireAround` 永远是真：场景里的玩家总在目标附近。
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
+        true
+    }
+
+    /// `getBlockContainer`：漏斗取物品时会忽略压住箱子的方块，双箱按 `CompoundContainer` 合并。
+    fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        let Some(kind) = self.kind(pos) else {
+            return false;
+        };
+        if kind == ContainerKind::Chest
+            && let Ok(Some(chest)) = self.chest_shape(pos, true)
+        {
+            self.slots_mut(chest.first, ContainerKind::Chest);
+            self.slots_mut(chest.second, ContainerKind::Chest);
+            let Some(mut first) = self.containers.remove(&chest.first) else {
+                return false;
+            };
+            let Some(mut second) = self.containers.remove(&chest.second) else {
+                self.containers.insert(chest.first, first);
+                return false;
+            };
+            {
+                let mut combined = Combined::new(&mut first, &mut second);
+                f(&mut combined);
+            }
+            self.containers.insert(chest.first, first);
+            self.containers.insert(chest.second, second);
+            return true;
+        }
+
+        let slots = self.slots_mut(pos, kind);
+        if kind == ContainerKind::ShulkerBox {
+            let mut shulker = ShulkerSlots::new(slots);
+            f(&mut shulker);
+        } else {
+            let mut normal = Slots::new(slots);
+            f(&mut normal);
+        }
+        true
+    }
+
+    /// `BlockEntity.preRemoveSideEffects` 掉落的是这一格自己的槽位表，双箱的另一半不算。
+    fn own_container_counts(&self, pos: BlockPos) -> Vec<i32> {
+        self.containers
+            .get(&pos)
+            .map(|slots| slots.iter().map(|stack| stack.count).collect())
+            .unwrap_or_default()
+    }
+
+    /// `ChestBlock.getAnalogOutputSignal` 读信号时不忽略压住箱子的方块，双箱按 54 格算。
+    fn container_signal(&self, pos: BlockPos) -> i32 {
+        if self.kind(pos) == Some(ContainerKind::Chest) {
+            match self.chest_shape(pos, false) {
+                Err(()) => return 0,
+                Ok(None) => {}
+                Ok(Some(chest)) => {
+                    let first = self
+                        .containers
+                        .get(&chest.first)
+                        .map_or(&[][..], |slots| slots.as_slice());
+                    let second = self
+                        .containers
+                        .get(&chest.second)
+                        .map_or(&[][..], |slots| slots.as_slice());
+                    return redstone_signal(
+                        first.iter().chain(second.iter()),
+                        first.len() + second.len(),
+                    );
+                }
+            }
+        }
+        let Some(slots) = self.containers.get(&pos) else {
+            return 0;
+        };
+        redstone_signal(slots.iter(), slots.len())
+    }
+
+    /// `CompoundContainer.setChanged`：双箱两半都通知。
+    fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
+        if self.kind(pos) == Some(ContainerKind::Chest)
+            && let Ok(Some(chest)) = self.chest_shape(pos, true)
+        {
+            return vec![chest.first, chest.second];
+        }
+        vec![pos]
+    }
+
+    /// 漏斗的 ticker 在 [`Level::block_entities`] 里，这里直接取出来。
+    fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
+        let Some(hopper) = self.block_entities.get_mut(pos) else {
+            return false;
+        };
+        f(hopper);
         true
     }
 }
@@ -304,10 +577,11 @@ fn hit_of(action: &Action) -> Result<BlockHit, String> {
 /// 跑一道题。题目本身有问题时返回错误，`mc-bamboo-blocks` 的 panic 由调用方接住。
 pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, String> {
     let action = &case.action;
-    let mut level = OracleLevel::new(case, header);
+    let mut level = OracleLevel::new(case, header, names)?;
     let mut ticks = BlockTicks::new();
-    // 队列是空的，这一下只是把时钟拨到官方假世界的时间。
-    run_scheduled_ticks(&mut level, &mut ticks, header.game_time);
+    // 官方的假世界直接从 `gameTime` 开始，没有先跑一刻，这里也只拨时钟：
+    // 跑一刻会把场景里的漏斗方块实体先 tick 一次，动作之后的刻数就对不上了。
+    ticks.set_time(header.game_time);
 
     let actor = actor_of(action, names)?;
     let target = action.target();
@@ -336,6 +610,7 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         result: result_name(action.kind, outcome.result),
         changes: level.changes(&case.scene),
         destroyed: destroyed_of(&outcome),
+        contents: contents_of(&level),
         ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
@@ -400,6 +675,31 @@ fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
             InteractionResult::TryEmptyHandInteraction => "try_empty_hand",
         },
     }
+}
+
+/// 结束时所有已建模容器的非空格子。顺序和官方一样：先按 `BlockPos.asLong`（x、z、y），再按槽位。
+fn contents_of(level: &OracleLevel) -> Vec<ContainerStack> {
+    let mut positions: Vec<BlockPos> = level.containers.keys().copied().collect();
+    positions.sort_by_key(|pos| pos.pack());
+    let mut contents = Vec::new();
+    for pos in positions {
+        for (slot, stack) in level.containers[&pos].iter().enumerate() {
+            if stack.is_empty() {
+                continue;
+            }
+            let item = usize::try_from(stack.item).expect("物品 ID 不会是负数");
+            let slot = u32::try_from(slot).expect("槽位放得进 u32");
+            contents.push(ContainerStack(
+                pos.x,
+                pos.y,
+                pos.z,
+                slot,
+                items::ITEMS[item].name.to_owned(),
+                stack.count,
+            ));
+        }
+    }
+    contents
 }
 
 fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
@@ -470,6 +770,7 @@ mod tests {
     fn level_with_player(player: Aabb) -> OracleLevel {
         OracleLevel {
             blocks: HashMap::new(),
+            containers: BTreeMap::new(),
             entities: vec![player],
             min_y: -64,
             max_y: 319,

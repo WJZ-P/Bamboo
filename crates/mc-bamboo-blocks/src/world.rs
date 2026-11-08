@@ -430,6 +430,34 @@ impl<'a> World<'a> {
         self.level.block_entities().contains(pos)
     }
 
+    /// 这一格的物品栏，见 [`Level::with_container`]。
+    pub(crate) fn with_container(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut dyn crate::container::Container),
+    ) -> bool {
+        self.level.with_container(pos, f)
+    }
+
+    /// 比较器从这一格的容器读到的模拟信号，见 [`Level::container_signal`]。
+    pub(crate) fn container_signal(&self, pos: BlockPos) -> i32 {
+        self.level.container_signal(pos)
+    }
+
+    /// 这一格容器背后的方块位置，见 [`Level::container_positions`]。
+    pub(crate) fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
+        self.level.container_positions(pos)
+    }
+
+    /// 带着这一格的漏斗方块实体运行一段代码，见 [`Level::with_hopper`]。
+    pub(crate) fn with_hopper(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut crate::hopper::HopperEntity),
+    ) -> bool {
+        self.level.with_hopper(pos, f)
+    }
+
     /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做，
     /// 只打一条警告，说明有地方放错了。
     pub fn set_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
@@ -826,11 +854,21 @@ impl<'a> World<'a> {
         flags: u32,
     ) -> Option<BlockState> {
         let old = self.block_state(pos);
-        if old == state || !self.level.write_block(pos, state, flags) {
+        if old == state {
+            return None;
+        }
+        let block_changed = !old.is_same_block(state);
+        let drops_own_contents = block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0;
+        // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
+        // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
+        let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
+        if !self.level.write_block(pos, state, flags) {
             return None;
         }
 
-        let block_changed = !old.is_same_block(state);
         // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
         if block_changed && old.has_block_entity() {
             if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
@@ -844,12 +882,8 @@ impl<'a> World<'a> {
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        if block_changed
-            && old.has_block_entity()
-            && !block_entity::keeps_block_entity(state, old)
-            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0
-        {
-            block_entity::pre_remove_side_effects(old, self);
+        if let Some(counts) = dropped_counts {
+            block_entity::pre_remove_side_effects(old, self, &counts);
         }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
@@ -1296,6 +1330,7 @@ fn traverse_blocks<T>(
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
 
     use super::*;
     use crate::{
@@ -1645,5 +1680,42 @@ mod tests {
             .filter(|item| item.kind == mc_bamboo_data::ItemKind::PlaceOnWater)
             .count();
         assert_eq!(kinds, 2);
+    }
+
+    /// 容器被换掉时，官方 `preRemoveSideEffects` 按每格的数量取随机数：每一格三个
+    /// double 的掉落点，非空的堆再按 `split(nextInt(21) + 10)` 一块一块取六个 double。
+    /// 这个世界没有物品实体，但随机数一个都不能少，否则后面的随机刻会错开。
+    #[test]
+    fn destroying_a_container_consumes_the_drop_random_numbers() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::CHEST));
+        let mut slots = vec![ItemStack::empty(); 27];
+        // 第一格一件，第二格三件，其余 25 格是空的。
+        slots[0] = ItemStack::new(items::STONE, 1);
+        slots[1] = ItemStack::new(items::DIRT, 3);
+        level.set_container(CENTER, slots);
+        with_world(&mut level, |world| {
+            world.set_block(CENTER, BlockState::AIR, UPDATE_ALL);
+        });
+
+        let expected = LegacyRandom::new(0);
+        for _ in [1, 3] {
+            for _ in 0..3 {
+                expected.next_double();
+            }
+            expected.next_int(21);
+            for _ in 0..6 {
+                expected.next_double();
+            }
+        }
+        for _ in 2..27 {
+            for _ in 0..3 {
+                expected.next_double();
+            }
+        }
+        assert_eq!(
+            expected.next_double().to_bits(),
+            level.random.source().next_double().to_bits()
+        );
     }
 }

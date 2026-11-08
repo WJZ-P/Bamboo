@@ -4,12 +4,14 @@ use std::collections::HashMap;
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::block_entity::{BlockEntities, BlockEvents};
 
 use crate::{
-    Actor, BlockHit, BlockState, BlockTicks, Level, LevelRandom, Outcome, destroy_block,
-    level::RedstoneMemory, shape::Aabb,
+    Actor, BlockHit, BlockState, BlockTicks, Container, Level, LevelRandom, Outcome, Slots,
+    container::redstone_signal, destroy_block, hopper::HopperEntity, level::RedstoneMemory,
+    shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
@@ -30,6 +32,8 @@ pub(crate) struct TestLevel {
     redstone: RedstoneMemory,
     /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
     pub(crate) light: Option<(i32, i32)>,
+    /// 容器方块的槽位表。没有条目的容器方块什么也取不到，测试要显式放。
+    pub(crate) containers: HashMap<BlockPos, Vec<ItemStack>>,
     block_entities: BlockEntities,
     block_events: BlockEvents,
 }
@@ -45,6 +49,7 @@ impl TestLevel {
             random: LevelRandom::new(0),
             redstone: RedstoneMemory::default(),
             light: None,
+            containers: HashMap::new(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
         }
@@ -57,6 +62,11 @@ impl TestLevel {
 
     pub(crate) fn get(&self, pos: BlockPos) -> BlockState {
         self.block_state(pos)
+    }
+
+    /// 给这一格放一张槽位表，模拟官方的容器方块实体。
+    pub(crate) fn set_container(&mut self, pos: BlockPos, slots: Vec<ItemStack>) {
+        self.containers.insert(pos, slots);
     }
 }
 
@@ -162,6 +172,37 @@ impl Level for TestLevel {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        let Some(slots) = self.containers.get_mut(&pos) else {
+            return false;
+        };
+        let mut container = Slots::new(slots);
+        f(&mut container);
+        true
+    }
+
+    fn own_container_counts(&self, pos: BlockPos) -> Vec<i32> {
+        self.containers
+            .get(&pos)
+            .map(|slots| slots.iter().map(|stack| stack.count).collect())
+            .unwrap_or_default()
+    }
+
+    fn container_signal(&self, pos: BlockPos) -> i32 {
+        let Some(slots) = self.containers.get(&pos) else {
+            return 0;
+        };
+        redstone_signal(slots.iter(), slots.len())
+    }
+
+    fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
+        let Some(hopper) = self.block_entities.get_mut(pos) else {
+            return false;
+        };
+        f(hopper);
+        true
     }
 }
 

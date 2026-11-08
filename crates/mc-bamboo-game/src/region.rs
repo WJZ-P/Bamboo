@@ -185,6 +185,7 @@ impl Region {
             redstone: &mut self.redstone,
             block_entities: &mut self.block_entities,
             block_events: &mut self.block_events,
+            containers: &mut self.containers,
         };
         (level, &mut self.block_ticks)
     }
