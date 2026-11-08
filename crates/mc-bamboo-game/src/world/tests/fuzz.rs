@@ -14,6 +14,7 @@ use mc_bamboo_data::{
 };
 use mc_bamboo_protocol::{
     codec::Reader,
+    components::{ComponentValue, cursor::Cursor},
     item::ItemStack,
     packet::play::{
         ChatVisibility, ClientCommandKind, ClientInformation, EquipmentSlot, HumanoidArm,
@@ -134,6 +135,26 @@ impl Default for Remote {
     }
 }
 
+/// 跳过可信格式的组件补丁：先个数，再按组件类型把值读完，最后是被删掉的类型。
+///
+/// Skips a trusted component patch: the counts, each value read by its type, then the
+/// removed type ids.
+fn skip_component_patch(reader: &mut Reader<'_>) {
+    let added = reader.varint().expect("added component count");
+    let removed = reader.varint().expect("removed component count");
+    for _ in 0..added {
+        let kind = reader.varint().expect("component type");
+        let before = reader.remaining().len();
+        let mut cursor = Cursor::new(reader.remaining());
+        ComponentValue::read(&mut cursor, kind).expect("component value");
+        let consumed = before - cursor.remaining().len();
+        reader.bytes(consumed).expect("component bytes");
+    }
+    for _ in 0..removed {
+        reader.varint().expect("removed component type");
+    }
+}
+
 impl Remote {
     fn read_metadata(&mut self, reader: &mut Reader<'_>) {
         loop {
@@ -159,7 +180,11 @@ impl Remote {
             let count = reader.varint().unwrap();
             self.equipment[usize::from(slot & 0x7f)] = if count > 0 {
                 let item = reader.varint().unwrap();
-                assert_eq!((reader.varint(), reader.varint()), (Ok(0), Ok(0)));
+                // 发给别人的物品带着组件补丁，值前面没有长度。模型只记物品和数量。
+                //
+                // Items sent to other players carry a component patch, and values have no
+                // length prefix. The model only records the item and the count.
+                skip_component_patch(reader);
                 (item, count)
             } else {
                 (items::AIR, 0)
@@ -667,6 +692,7 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 position: rng.chance(90).then_some(position),
                 rotation: rng.chance(50).then(|| random_rotation(rng, hostile)),
                 on_ground: rng.chance(50),
+                horizontal_collision: false,
             }
         }
         8 => {
@@ -805,8 +831,22 @@ fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
             if actor.is_alive() {
                 for _ in 0..rng.below(6) {
                     let request = random_request(&mut rng, actor);
+                    let positioned = matches!(
+                        request,
+                        PlayRequest::MovePlayer {
+                            position: Some(_),
+                            ..
+                        }
+                    );
                     actor.expected_ack = actor.expected_ack.max(sequence_of(&request));
                     server.request(&actor.client, request);
+                    // 同一个客户端 tick 的第二个位置包会被踢。非恶意序列在每个位置后面结束这一 tick。
+                    //
+                    // A second position in the same client tick is a kick. End the tick after each
+                    // position so an ordinary sequence stays connected.
+                    if positioned && !actor.hostile {
+                        server.client_tick_end(&actor.client);
+                    }
                 }
                 if rng.chance(5) {
                     let millis = rng.pick(&[0, 40, i32::MAX, i32::MIN]);

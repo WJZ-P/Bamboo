@@ -24,6 +24,10 @@ use mc_bamboo_data::entity_types;
 
 use crate::{shape::Aabb, state::BlockState, world::World};
 
+pub use physics::{
+    TravelSegment, enclosed_in_air, no_block_collision, overlaps_new_blocks, stuck_speed,
+    sweep_movement,
+};
 pub use random::JavaRandom;
 
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。

@@ -130,6 +130,8 @@ import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
+import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
@@ -709,6 +711,40 @@ public final class Probe {
             return TextColor.fromLegacyFormat(color).equals(component.getStyle().getColor());
         }
 
+        /**
+         * 走一段服务端按「这一 tick 的起点」计量也会接受的路。一步 4 格，两步落在同一个 tick 里仍低于 100。
+         *
+         * Walk a path the server accepts when it measures from the start of the tick. A 4-block step stays
+         * under the 100 limit even if two steps land in the same tick.
+         */
+        private void moveClose(Join actor, Vec3 target, boolean onGround) throws IOException {
+            // 地面上有这一轮放下的方块。先升到它们上面，水平过去，再落下来。
+            //
+            // This section's blocks sit on the ground. Climb above them, cross, then drop.
+            double cruise = Math.max(Math.max(actor.position.y, target.y), -10.0);
+            stepTowards(actor, new Vec3(actor.position.x, cruise, actor.position.z));
+            stepTowards(actor, new Vec3(target.x, cruise, target.z));
+            stepTowards(actor, target);
+            if (actor.position.distanceToSqr(target) <= 16.0) {
+                actor.moveTo(target, onGround);
+                pumpFor(TICK_MILLIS * 2);
+            }
+        }
+
+        private void stepTowards(Join actor, Vec3 target) throws IOException {
+            final double maxStep = 4.0;
+            for (int guard = 0; guard < 32 && actor.position.distanceToSqr(target) > maxStep * maxStep; guard += 1) {
+                Vec3 before = actor.position;
+                Vec3 delta = target.subtract(before);
+                double length = Math.sqrt(before.distanceToSqr(target));
+                actor.moveTo(before.add(delta.scale(maxStep / length)), false);
+                pumpFor(TICK_MILLIS * 2);
+                if (actor.position.distanceToSqr(target) > before.distanceToSqr(target) - 1.0) {
+                    return;
+                }
+            }
+        }
+
         private void walkAndWait(Join actor, Join observer, double deltaZ) throws IOException {
             Vec3 start = actor.position;
             for (int step = 1; step <= WALK_STEPS; step += 1) {
@@ -761,6 +797,89 @@ public final class Probe {
             check("movement: the big move ends at the real position", near(remote.position, far));
             actor.moveTo(ground, true);
             await("movement: and back", () -> near(remote.position, ground));
+
+            Vec3 home = ground;
+            BlockPos wall = BlockPos.containing(home).offset(1, 0, 0);
+            placeStone(actor, wall);
+            int beforeWall = actor.pullbacks;
+            actor.moveTo(actor.position.add(0.0, 0.0, 0.4), true);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: walking beside a block is not pulled back", actor.pullbacks == beforeWall);
+
+            Vec3 onGround = actor.position;
+            int beforeSolid = actor.pullbacks;
+            actor.expectPullback = true;
+            actor.moveTo(onGround.add(0.0, -0.2, 0.0), true);
+            await("movement: moving into a solid block is pulled back", () -> actor.pullbacks > beforeSolid);
+            check("movement: the solid block does not disconnect", !actor.disconnected);
+            check("movement: the solid-block pull-back stays put", near(actor.position, onGround));
+
+            BlockPos stepGround = BlockPos.containing(actor.position).offset(0, -1, 1);
+            placeSlab(actor, stepGround);
+            Vec3 ontoStep = new Vec3(stepGround.getX() + 0.5, stepGround.getY() + 1.5, stepGround.getZ() + 0.5);
+            int beforeStep = actor.pullbacks;
+            actor.moveTo(ontoStep, true);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: stepping onto a slab is not pulled back", actor.pullbacks == beforeStep);
+
+            Vec3 high = actor.position.add(0.0, 4.0, 0.0);
+            int beforeFall = actor.pullbacks;
+            actor.moveTo(high, false);
+            actor.moveTo(actor.position.add(0.0, -3.0, 0.0), false);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: a short fall is not pulled back", actor.pullbacks == beforeFall);
+
+            Vec3 beforeLeap = actor.position;
+            int beforeLeapBack = actor.pullbacks;
+            actor.expectPullback = true;
+            actor.moveTo(beforeLeap.add(100.0, 0.0, 0.0), true);
+            await("movement: a 100 block move is pulled back", () -> actor.pullbacks > beforeLeapBack);
+            check("movement: the pull-back stays at the old position", near(actor.position, beforeLeap));
+            check("movement: a pull-back does not disconnect", !actor.disconnected);
+
+            // 拆掉探测放的方块，再走回原来的落点。后面的方块测试仍然对着草方块。
+            //
+            // Remove the blocks this section placed, then walk back. Later block tests still expect grass.
+            clearPlaced(actor, wall);
+            clearPlaced(actor, stepGround.above());
+            int beforeHome = actor.pullbacks;
+            actor.moveTo(home, true);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: returning home is not pulled back", actor.pullbacks == beforeHome);
+        }
+
+        private void clearPlaced(Join actor, BlockPos at) throws IOException {
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, at, Direction.UP, sequence));
+            await("movement: the placed block is gone", () -> {
+                BlockState state = actor.blocks.get(at);
+                return state != null && state.isAir();
+            });
+        }
+
+        private void placeStone(Join actor, BlockPos at) throws IOException {
+            BlockPos ground = at.below();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE)));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    sequence));
+            await("movement: the wall block is placed", () -> actor.blocks.get(at) != null && actor.blocks.get(at).is(Blocks.STONE));
+        }
+
+        private void placeSlab(Join actor, BlockPos ground) throws IOException {
+            BlockPos at = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE_SLAB)));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    sequence));
+            await("movement: the step is placed", () -> actor.blocks.get(at) != null && actor.blocks.get(at).is(Blocks.STONE_SLAB));
         }
 
         private static Object dataValue(Join viewer, Join target, int index) {
@@ -1350,7 +1469,7 @@ public final class Probe {
             BlockPos tntGround = feet.offset(0, -1, 20);
             // 站在旁边，不要站进即将放下去的 TNT 里。
             // Stand beside the spot so the player is not inside the TNT about to be placed.
-            actor.moveTo(new Vec3(tntGround.getX() - 1.5, origin.y, tntGround.getZ() + 0.5), true);
+            moveClose(actor, new Vec3(tntGround.getX() - 1.5, origin.y, tntGround.getZ() + 0.5), true);
             useOn(actor, Items.TNT, tntGround, Direction.UP, Vec3.upFromBottomCenterOf(tntGround, 1.0));
             BlockPos tnt = tntGround.above();
             useOn(actor, Items.STONE, tnt, Direction.NORTH, Vec3.atCenterOf(tnt).add(0.0, 0.0, -0.5));
@@ -1377,14 +1496,14 @@ public final class Probe {
             // from chunk section 0, so this air is indistinguishable from the original cell.
 
             BlockPos redGround = feet.offset(-20, -1, 0);
-            actor.moveTo(new Vec3(redGround.getX() - 1.5, origin.y, redGround.getZ() + 0.5), true);
+            moveClose(actor, new Vec3(redGround.getX() - 1.5, origin.y, redGround.getZ() + 0.5), true);
             useOn(actor, Items.TNT, redGround, Direction.UP, Vec3.upFromBottomCenterOf(redGround, 1.0));
             BlockPos redTnt = redGround.above();
             useOn(actor, Items.REDSTONE_BLOCK, redTnt, Direction.NORTH, Vec3.atCenterOf(redTnt).add(0.0, 0.0, -0.5));
             await("tnt: redstone lights another primed tnt", 10_000, () -> findEntity(observer, EntityTypes.TNT) != null);
             await("tnt: the redstone-lit block is gone", 10_000,
                     () -> Blocks.AIR.defaultBlockState().equals(observer.blocks.get(redTnt)));
-            actor.moveTo(origin, true);
+            moveClose(actor, origin, true);
             actor.send(new ServerboundSetCarriedItemPacket(0));
         }
 
@@ -1526,7 +1645,7 @@ public final class Probe {
             check("container: the reopened menu starts at state one", opener.lastContentState == 1);
 
             // 第二名玩家走到箱子旁边再打开，看到同一份内容，开盖人数变成二。
-            watcher.moveTo(new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 2.5), true);
+            moveClose(watcher, new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 2.5), true);
             pumpFor(TICK_MILLIS);
             openChest(watcher, chest);
             await("container: the second player sees the apple", () -> is(watcher.menuSlots.get(0), Items.APPLE, 7));
@@ -1739,6 +1858,9 @@ public final class Probe {
         private boolean spawnCenterChecked;
         private boolean walked;
         private boolean walkCenterArrived;
+        private boolean spawnAccepted;
+        private boolean expectPullback;
+        private int pullbacks;
         private boolean forgetBeforeCenter;
         private int keepAlives;
         private boolean latencyUpdated;
@@ -1884,6 +2006,7 @@ public final class Probe {
         void moveTo(Vec3 target, boolean onGround) throws IOException {
             position = target;
             send(new ServerboundMovePlayerPacket.Pos(target, onGround, false));
+            send(ServerboundClientTickEndPacket.INSTANCE);
         }
 
         int nextSequence() {
@@ -2248,8 +2371,19 @@ public final class Probe {
 
         private void onPosition(ClientboundPlayerPositionPacket packet) {
             var target = packet.change().position();
-            check("play: spawn is above the grass", target.y() == SPAWN_Y);
             check("play: position is absolute", packet.relatives().isEmpty());
+            if (!spawnAccepted) {
+                spawnAccepted = true;
+                check("play: spawn is above the grass", target.y() == SPAWN_Y);
+                connection.send(new ServerboundAcceptTeleportationPacket(
+                        packet.id(), target.x(), target.y(), target.z(), 0f, 0f));
+                connection.send(new ServerboundPlayerLoadedPacket());
+                return;
+            }
+            pullbacks += 1;
+            check("play: a later position packet is a correction the probe expected", expectPullback);
+            expectPullback = false;
+            position = new Vec3(target.x(), target.y(), target.z());
             connection.send(new ServerboundAcceptTeleportationPacket(
                     packet.id(), target.x(), target.y(), target.z(), 0f, 0f));
         }
@@ -2872,9 +3006,14 @@ public final class Probe {
             connection.send(new ServerboundChunkBatchReceivedPacket(20f));
             if (walks && !walked && spawnChunks.size() == expectedSpawnChunks.size()) {
                 walked = true;
-                double blockX = WALK_TARGET.x() * 16 + SPAWN_X;
+                // 一格 16 格超过“移动太快”的一包上限。先走 8 格，人已经进了目标区块。
+                //
+                // Sixteen blocks in one packet exceeds the moved-too-quickly limit.
+                // Eight blocks already enters the target chunk.
+                double blockX = SPAWN_X + 8.0;
                 position = new Vec3(blockX, SPAWN_Y, SPAWN_Z);
                 connection.send(new ServerboundMovePlayerPacket.Pos(blockX, SPAWN_Y, SPAWN_Z, true, false));
+                connection.send(ServerboundClientTickEndPacket.INSTANCE);
             }
         }
 

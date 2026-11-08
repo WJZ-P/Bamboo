@@ -580,8 +580,11 @@ mod tests {
         let mut buffer = Vec::new();
         join(&mut stream, &mut buffer).await;
 
-        let tick_end = frame(&[play::serverbound::CLIENT_TICK_END as u8]);
-        stream.write_all(&tick_end.repeat(5000)).await.unwrap();
+        // 没解码、也不会进世界线程的包。`client_tick_end` 现在要转发给世界。
+        //
+        // An undecoded packet that never reaches the world. `client_tick_end` is forwarded now.
+        let ignored = frame(&[0x7f]);
+        stream.write_all(&ignored.repeat(5000)).await.unwrap();
 
         // 连接任务还在正常工作：不进配额的包不影响 ping 的回应。
         let mut ping = vec![play::serverbound::PING_REQUEST as u8];
