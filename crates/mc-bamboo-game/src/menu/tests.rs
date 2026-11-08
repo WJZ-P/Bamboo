@@ -547,6 +547,134 @@ fn the_ender_chest_contents_belong_to_the_player() {
     assert_eq!(slots[0], ItemStack::new(items::DIAMOND, 2));
 }
 
+/// 改了名的箱子打开时标题就是那个名字，官方 `Nameable.getDisplayName`。
+#[test]
+fn a_named_chest_opens_with_its_name_as_the_title() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    let name = Component::text("小猫的箱子");
+    name_block(&mut fixture, pos, &name);
+    fixture.open(pos);
+
+    let frames = fixture.take_frames();
+    let mut open = frames[0].reader();
+    assert_eq!(open.varint(), Ok(1));
+    assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X3));
+    // 标题是一段 NBT 文本组件，内容就是那个名字。
+    let mut title = Vec::new();
+    name.write(&mut title);
+    assert_eq!(open.rest(), title);
+}
+
+/// 双箱的标题先看主箱，再看另一半，官方 `ChestBlock.MENU_PROVIDER_COMBINER`。
+#[test]
+fn a_double_chest_takes_the_name_of_either_half() {
+    let mut fixture = Fixture::new();
+    let (left, right) = double_chest(&mut fixture);
+    let name = Component::text("大箱子");
+    name_block(&mut fixture, left, &name);
+
+    fixture.open(right);
+    let frames = fixture.take_frames();
+    let mut open = frames[0].reader();
+    assert_eq!(open.varint(), Ok(1));
+    assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X6));
+    let mut title = Vec::new();
+    name.write(&mut title);
+    assert_eq!(open.rest(), title);
+}
+
+/// 放一个双箱，返回左右两半的位置。主箱（官方的 FIRST）是 `RIGHT` 那一半。
+fn double_chest(fixture: &mut Fixture) -> (BlockPos, BlockPos) {
+    let y = flat::surface_y();
+    let right = BlockPos::new(0, y, 0);
+    let left = BlockPos::new(-1, y, 0);
+    fixture.place(
+        right,
+        BlockState(blocks::CHEST)
+            .with(HORIZONTAL_FACING, Direction::North)
+            .with(CHEST_TYPE, ChestType::Right)
+            .0,
+    );
+    fixture.place(
+        left,
+        BlockState(blocks::CHEST)
+            .with(HORIZONTAL_FACING, Direction::North)
+            .with(CHEST_TYPE, ChestType::Left)
+            .0,
+    );
+    (left, right)
+}
+
+/// 给这一格的方块实体一个自定义名，和放下一个改过名的方块一样。
+fn name_block(fixture: &mut Fixture, pos: BlockPos, name: &Component) {
+    let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+    patch.put(
+        mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+        mc_bamboo_protocol::components::PatchEntry::Set(
+            mc_bamboo_protocol::components::ComponentValue::CustomName(name.clone()),
+        ),
+    );
+    fixture.region.block_items.insert(pos, patch);
+}
+
+/// 堆叠上限来自组件：改小上限的物品叠不到一起。
+#[test]
+fn the_stack_limit_comes_from_the_components() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+
+    // 把上限改成 2，官方 `Slot.getMaxStackSize` 取的就是这个值。
+    let mut limited = ItemStack::new(items::STONE, 2);
+    limited.added.push((
+        mc_bamboo_data::registries::data_component_type::MAX_STACK_SIZE,
+        vec![2],
+    ));
+    *fixture.inventory_slot(36) = limited.clone();
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] = limited.clone();
+
+    // 拿起两个再点进已经满了的那一格：放不进去，光标里的东西不变。
+    fixture.click(Fixture::hotbar(0), 0, ContainerInput::Pickup);
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.menu().carried, limited);
+    assert_eq!(fixture.entry(pos).slots[0], limited);
+
+    // 同一个物品不改上限的时候就能叠到 4 个。
+    let plain = ItemStack::new(items::STONE, 2);
+    fixture.menu_mut().carried = plain.clone();
+    fixture.entry_mut(pos).slots[0] = plain;
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.entry(pos).slots[0], ItemStack::new(items::STONE, 4));
+    assert!(fixture.menu().carried.is_empty());
+}
+
+/// 组件不同的物品不是同一种东西，官方 `isSameItemSameComponents`。
+#[test]
+fn stacks_with_different_components_do_not_merge() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+
+    let mut named = ItemStack::new(items::STONE, 1);
+    let mut name = Vec::new();
+    Component::text("Kitten").write(&mut name);
+    named.added.push((
+        mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+        name,
+    ));
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] = named.clone();
+    fixture.menu_mut().carried = ItemStack::new(items::STONE, 1);
+
+    // 点在改过名的那一格上：两边换位置，不合并。
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.entry(pos).slots[0], ItemStack::new(items::STONE, 1));
+    assert_eq!(fixture.menu().carried, named);
+}
+
 /// 潜影盒里放不进潜影盒。
 #[test]
 fn a_shulker_box_refuses_another_shulker_box() {
