@@ -44,6 +44,7 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.IntegerProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 
 /**
@@ -155,6 +156,8 @@ public final class PredicateOracle {
         private final Options options;
         private final PrintStream log;
         private final Random random;
+        /** 整数改写成哪一套十进制数字。按顺序轮换，每种文字都会出到。 */
+        private int unicodeScripts;
 
         Oracle(RegistryAccess registries, Writer out, Options options, PrintStream log) {
             this.registries = registries;
@@ -296,6 +299,9 @@ public final class PredicateOracle {
         /** 精确值：四成是这一格现在的值，三成换一个合法值，其余写垃圾。 */
         private String exactValue(BlockState state, Property<?> property) {
             Property<?> own = ownProperty(state, property);
+            if (own instanceof IntegerProperty && random.nextInt(5) == 0) {
+                return unicodeDigits(serialized(state, own));
+            }
             if (own != null) {
                 int mode = random.nextInt(10);
                 if (mode < 4) {
@@ -327,6 +333,9 @@ public final class PredicateOracle {
 
         private String boundValue(BlockState state, Property<?> property) {
             Property<?> own = ownProperty(state, property);
+            if (own instanceof IntegerProperty && random.nextInt(5) == 0) {
+                return unicodeDigits(serialized(state, own));
+            }
             if (own != null) {
                 int mode = random.nextInt(10);
                 if (mode < 5) {
@@ -372,15 +381,46 @@ public final class PredicateOracle {
             return GARBAGE[random.nextInt(GARBAGE.length)];
         }
 
+        /** 把 ASCII 数字换成一套 {@code Character.digit} 认的十进制数字，数值不变。 */
+        private String unicodeDigits(String ascii) {
+            int zero = UNICODE_ZERO[this.unicodeScripts % UNICODE_ZERO.length];
+            this.unicodeScripts++;
+            StringBuilder out = new StringBuilder(ascii.length());
+            for (int index = 0; index < ascii.length(); index++) {
+                char c = ascii.charAt(index);
+                if (c >= '0' && c <= '9') {
+                    out.append((char) (zero + (c - '0')));
+                } else {
+                    out.append(c);
+                }
+            }
+            return out.toString();
+        }
+
         private void line(String text) throws Exception {
             out.write(text);
             out.write('\n');
         }
     }
 
+    /**
+     * {@code Integer.parseInt} 会认的基本多文种平面十进制数字起点，每个区间连续 10 个码元。
+     * 和 {@code crates/mc-bamboo-blocks/src/predicate.rs} 的 {@code DECIMAL_DIGIT_ZERO} 是同一张表。
+     */
+    private static final int[] UNICODE_ZERO = {
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66,
+        0x0CE6, 0x0D66, 0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946,
+        0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0,
+        0xA9F0, 0xAA50, 0xABF0, 0xFF10,
+    };
+
     private static final String[] GARBAGE = {
         "", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "16", "64",
         "-1", "+3", "03", "999", "2147483648", "-2147483649",
+        // 全角、阿拉伯-印度数字能解析；全角加号、上标、下标和补充平面的数字不能。
+        "\uFF13", "\u0663", "\uFF11\uFF12", "\uFF10\uFF13", "-\uFF13", "+\uFF13",
+        "\uFF0B\uFF13", "\u00B3", "\u2083", "\uD801\uDCA0",
+        "\uFF19\uFF19\uFF19\uFF19\uFF19\uFF19\uFF19\uFF19\uFF19\uFF19",
         "true", "false", "TRUE", "False",
         "x", "y", "z", "up", "down", "north", "south", "east", "west",
         "diagonal", "not a value", "minecraft:stone", "",

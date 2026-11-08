@@ -167,7 +167,8 @@ WebView2 的渲染进程不算在内。
   开合本身的状态变化、邻居更新和潜影盒动画都是完整的。
 - 物品组件接进玩法的地方是挖掘和放置：`tool` 组件决定挖掘速度和有没有掉落物；冒险模式靠主手的
   `can_break` 谓词决定能不能挖，靠 `can_place_on` 谓词决定点到的方块能不能放。谓词里的方块列表、
-  方块标签和方块状态属性都按官方匹配，属性类型（整数、布尔、枚举）和枚举的声明顺序来自生成的数据，
+  方块标签和方块状态属性都按官方匹配，属性类型（整数、布尔、枚举）和枚举的声明顺序来自生成的数据。
+  整数按 `Integer.parseInt` 解析，包括全角和阿拉伯-印度数字这些 `Character.digit` 认的十进制数字。
   带方块实体 NBT 的谓词读不出来，一律按不匹配算。
 - 组件的已知限制：有五种组件（`lock`、`container_loot`、`map_decorations`、`debug_stick_state`、
   `recipes`）线上是 NBT，官方客户端还要把它过一遍 DFU 的 `Codec`；文本组件的校验是「宁可放过」，
@@ -321,7 +322,7 @@ cargo run -p mc-bamboo-vanilla -- components <java 路径> [--show N]
 ```
 
 冒险模式的方块谓词用官方的 `StatePropertiesPredicate` 和 `BlockPredicate` 出题：随机挑方块状态和谓词，
-覆盖方块列表、方块标签、精确值、区间、缺一端、错值、不存在的属性名和 NBT，按官方 `StreamCodec`
+覆盖方块列表、方块标签、精确值、区间、缺一端、错值、不存在的属性名、Unicode 十进制数字和 NBT，按官方 `StreamCodec`
 编码后交给 `mc-bamboo-blocks` 解码重放，逐条比较匹配结果：
 
 ```bash
