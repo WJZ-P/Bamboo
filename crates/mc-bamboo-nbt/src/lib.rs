@@ -3,8 +3,13 @@
 //! 目前只实现网络上用到的编码和解码。读存档还要认文件格式的根节点名字，等做到存档再加。
 
 mod decode;
+pub mod snbt;
 
 pub use decode::{Accounter, DEFAULT_QUOTA, DecodeError, MAX_DEPTH, Reader};
+pub use snbt::{
+    SnbtError, java_double_to_string, java_float_to_string, parse_snbt, parse_snbt_compound,
+    quote_and_escape,
+};
 
 /// 一个 NBT 值。
 #[derive(Debug, Clone, PartialEq)]

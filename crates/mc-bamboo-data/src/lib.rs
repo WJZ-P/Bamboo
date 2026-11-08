@@ -20,11 +20,12 @@ pub use recipe::{
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, component_enums, component_registries,
-    crafting_remainders, heightmaps, item_components, items, light, packets, recipes, registries,
-    shapes, states, tags, version, worldgen,
+    crafting_remainders, entity_types, heightmaps, item_components, items, jukebox_songs, light,
+    loot, packets, recipes, registries, shapes, states, tags, version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
+const ITEM_TAG_REGISTRY: &str = "minecraft:item";
 
 /// `states::STATE_FACTS` 里每一位的含义。全部用 `EmptyBlockGetter` 在 `BlockPos.ZERO` 读取。
 ///
@@ -197,7 +198,7 @@ pub struct BlockOffset {
 impl Eq for BlockOffset {}
 
 /// 一个流体状态，`FluidState` 的事实。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FluidFacts {
     /// 流体注册表 ID，见 [`registries::fluid`]。
     pub fluid: i32,
@@ -208,7 +209,12 @@ pub struct FluidFacts {
     pub falling: bool,
     /// `createLegacyBlock` 的状态 ID。
     pub legacy_block: u32,
+    /// `FluidState.getExplosionResistance`：爆炸射线穿过这个流体时消耗的强度。
+    pub explosion_resistance: f32,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for FluidFacts {}
 
 /// 活塞推动时的反应，官方 `PushReaction`，顺序和官方一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -264,6 +270,18 @@ pub struct Block {
     pub destroy_time: f32,
     /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
     pub requires_correct_tool_for_drops: bool,
+    /// `Block.getSpeedFactor`：实体在上面移动时水平速度乘这个系数。
+    ///
+    /// `Block.getSpeedFactor`: horizontal speed is multiplied by this while the entity is on the block.
+    pub speed_factor: f32,
+    /// `Block.getBounceRestitution`：实体撞在上面时竖直方向保留多少速度。
+    ///
+    /// `Block.getBounceRestitution`: how much vertical speed remains after a bounce.
+    pub bounce_restitution: f32,
+    /// `Block.getExplosionResistance`：爆炸射线穿过这个方块时消耗的强度。
+    ///
+    /// `Block.getExplosionResistance`: how much blast power a ray loses in this block.
+    pub explosion_resistance: f32,
 }
 
 // 表里的浮点数都来自官方的常量，没有 NaN。
@@ -334,6 +352,15 @@ pub struct Item {
     /// `StandingAndWallBlockItem.attachmentDirection` 的 ID：主方块朝这个方向贴着支撑。
     pub attachment: Option<i32>,
     pub max_stack_size: i32,
+    /// `max_damage` 组件，没有这个组件时物品不能受损。
+    ///
+    /// The `max_damage` component. The item cannot take damage when this is absent.
+    pub max_damage: Option<i32>,
+    /// `enchantable` 组件的 `value`，附魔台算等级时用；没有这个组件就不能附魔。
+    ///
+    /// The `value` of the `enchantable` component. Enchanting cost uses it; items without
+    /// the component cannot be enchanted.
+    pub enchantable: Option<i32>,
     /// 手持这个物品时，创造模式玩家能不能破坏方块。
     pub can_destroy_blocks_in_creative: bool,
     /// 有 `consumable` 组件：放置失败时官方会开始吃。
@@ -507,6 +534,17 @@ pub fn block_tag(name: &str) -> Option<&'static [i32]> {
     Some(tag.ids)
 }
 
+/// 一个物品标签包含的物品注册表 ID，标签不存在时返回 `None`。
+///
+/// `name` 要带命名空间，比如 `minecraft:swords`。
+pub fn item_tag(name: &str) -> Option<&'static [i32]> {
+    let group = tags::TAG_GROUPS
+        .iter()
+        .find(|group| group.registry == ITEM_TAG_REGISTRY)?;
+    let tag = group.tags.iter().find(|tag| tag.name == name)?;
+    Some(tag.ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +605,20 @@ mod tests {
                 version: "26.3",
             }]
         );
+    }
+
+    #[test]
+    fn entity_types_are_indexed_by_registry_id() {
+        assert_eq!(
+            entity_types::FACTS.len(),
+            registries::entity_type::TOTAL as usize
+        );
+        let falling_block = &entity_types::FACTS[registries::entity_type::FALLING_BLOCK as usize];
+        assert_eq!(falling_block.name, "minecraft:falling_block");
+        assert_eq!(falling_block.update_interval, 20);
+        let tnt = &entity_types::FACTS[registries::entity_type::TNT as usize];
+        assert_eq!(tnt.name, "minecraft:tnt");
+        assert_eq!(tnt.update_interval, 10);
     }
 
     #[test]
@@ -1166,6 +1218,22 @@ mod tests {
             fluids.tags[tags::fluid_tags::WATER.index].name,
             "minecraft:water"
         );
+    }
+
+    #[test]
+    fn item_tags_resolve_by_name() {
+        let swords = item_tag("minecraft:swords").expect("swords 是物品标签");
+        assert!(!swords.is_empty());
+        assert_eq!(
+            swords,
+            tags::TAG_GROUPS[tags::item_tags::GROUP]
+                .tags
+                .iter()
+                .find(|tag| tag.name == "minecraft:swords")
+                .expect("swords 在物品标签组里")
+                .ids
+        );
+        assert!(item_tag("minecraft:no_such_tag").is_none());
     }
 
     #[test]

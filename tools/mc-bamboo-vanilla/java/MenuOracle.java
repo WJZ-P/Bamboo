@@ -1,3 +1,4 @@
+import com.google.common.hash.HashCode;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import io.netty.buffer.Unpooled;
@@ -30,9 +31,13 @@ import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponentPatch;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.HashedPatchMap;
 import net.minecraft.network.HashedStack;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
@@ -49,6 +54,8 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.resources.RegistryOps;
+import net.minecraft.util.HashOps;
 import net.minecraft.util.Prediction;
 import net.minecraft.world.Container;
 import net.minecraft.world.SimpleContainer;
@@ -76,6 +83,9 @@ import net.minecraft.world.inventory.DispenserMenu;
 import net.minecraft.world.inventory.FurnaceMenu;
 import net.minecraft.world.inventory.HopperMenu;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.server.network.Filterable;
+import net.minecraft.util.Mth;
+import net.minecraft.world.inventory.LecternMenu;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.RemoteSlot;
 import net.minecraft.world.inventory.ShulkerBoxMenu;
@@ -86,6 +96,8 @@ import net.minecraft.world.inventory.StonecutterMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.WritableBookContent;
+import net.minecraft.world.item.component.WrittenBookContent;
 import net.minecraft.world.item.crafting.AbstractCookingRecipe;
 import net.minecraft.world.item.crafting.BrewingRecipe;
 import net.minecraft.world.item.crafting.Ingredient;
@@ -102,18 +114,10 @@ import sun.misc.Unsafe;
 /**
  * 容器菜单的 oracle：官方代码出题、给答案，tools/mc-bamboo-vanilla/src/menu.rs 用 mc-bamboo-game 的 Replay 跑同样的题来比较。
  *
- * <p>不启动服务端，也不打开真正的方块。每道题是官方的一个菜单。箱子、漏斗、发射器和潜影盒配一个
- * SimpleContainer。工作台、玩家 2×2、切石机、锻造台、三种熔炉和酿造台用菜单自己的格子，开局从配方表里抽一组材料放进去。
- * 再按 handleContainerClick 的顺序点一串随机点击。切石机还会夹几次 container_button_click。
- * 假玩家是 Unsafe.allocateInstance 出来的 ServerPlayer，只补了 level、inventory、connection 和 abilities.instabuild。
- * 掉落的物品、统计、配方书和装备音效被 override 成空操作，因为 Bamboo 也不做这些。
- *
- * <p>客户端按“从不预测”的模型模拟，两边相同：每次点击的 changedSlots 是空的，carriedItem 恒为 {@link HashedStack#EMPTY}。
- * 每步之后写出菜单的全部槽位、光标、stateId、data 槽和组件补丁。菜单的 stateId 只有 ContainerSynchronizer 会推进，
- * 另外合成结果会在 {@code CraftingMenu.slotChangedCraftingGrid} 里直接加一次。
- * 官方的同步器是 ServerPlayer 里的匿名类，这里按它原样写了一个：sendInitialData 和 sendSlotChange 各调一次
- * {@code container.incrementStateId()}，sendCarriedChange 和 sendDataChange 不调。
- * sendAllDataToRemote 和 broadcastChanges 本身仍然是官方的。
+ * <p>不启动服务端，也不打开真正的方块。箱子、漏斗、发射器和潜影盒配一个 SimpleContainer。
+ * 工作台、玩家 2×2、切石机、锻造台、三种熔炉和酿造台用菜单自己的格子。讲台用一个只实现了书槽的 Container。
+ * 随机题按“从不预测”的模型点。最后另有一道带组件的题，客户端按官方预测回传哈希。
+ * 每步写出槽位、光标、stateId、data 槽和组件补丁。讲台还写页码。
  *
  * <p>运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
  *
@@ -286,6 +290,10 @@ public final class MenuOracle {
                 write(caseOf(index));
                 written++;
             }
+            if (options.only() < 0) {
+                write(componentCase(written));
+                written++;
+            }
 
             JsonObject end = new JsonObject();
             end.addProperty("type", "end");
@@ -301,6 +309,9 @@ public final class MenuOracle {
         private JsonObject caseOf(int id) {
             Random random = new Random(options.seed() * 1_000_003L + id);
             Shape shape = Shape.values()[random.nextInt(Shape.values().length)];
+            if (shape == Shape.LECTERN) {
+                return lecternCase(id, random);
+            }
             boolean creative = random.nextInt(4) != 0;
             FakePlayer player = FakePlayer.create(creative);
             Inventory inventory = player.getInventory();
@@ -385,6 +396,163 @@ public final class MenuOracle {
             line.add("steps", steps);
             return line;
         }
+
+        /**
+         * 带组件的钻石剑：客户端预测后回传哈希。补发列表空，说明两边的哈希一致。
+         *
+         * A diamond sword with components. The client sends hashes after predicting.
+         * An empty resend list means both hashes agree.
+         */
+        private JsonObject componentCase(int id) {
+            RegistryAccess.Frozen access = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+            RegistryOps<HashCode> hashOps = access.createSerializationContext(HashOps.CRC32C_INSTANCE);
+            HashedPatchMap.HashGenerator hasher =
+                    component -> hashComponent(hashOps, component);
+            Shape shape = Shape.CHEST_3;
+            FakePlayer player = FakePlayer.create(false);
+            Container container = new SimpleContainer(shape.size);
+            ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+            sword.set(DataComponents.CUSTOM_NAME, Component.literal("oracle"));
+            sword.set(DataComponents.DAMAGE, 3);
+            sword.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
+            if (sword.has(DataComponents.ATTRIBUTE_MODIFIERS)) {
+                sword.remove(DataComponents.ATTRIBUTE_MODIFIERS);
+            }
+            container.setItem(0, sword);
+            container.setItem(1, new ItemStack(Items.STONE, 16));
+
+            RecordingSync sync = new RecordingSync(hasher);
+            AbstractContainerMenu menu = shape.create(player.getInventory(), container, player);
+            menu.setSynchronizer(sync);
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", shape.id);
+            line.addProperty("creative", false);
+            line.addProperty("predict", true);
+            line.add("container", items(container, shape.size));
+            line.add("inventory", inventoryItems(player.getInventory()));
+            line.add("open", outcome(menu));
+            JsonArray patches = new JsonArray();
+            JsonObject patch = new JsonObject();
+            patch.addProperty("index", 0);
+            patch.addProperty("bytes", hex(patchBytes(access, sword.getComponentsPatch())));
+            patches.add(patch);
+            line.add("patches", patches);
+
+            JsonArray steps = new JsonArray();
+            steps.add(predictingClick(menu, 0, 0, 0, player, sync, hasher));
+            steps.add(predictingClick(menu, 2, 0, 0, player, sync, hasher));
+            steps.add(predictingClick(menu, 1, 0, 0, player, sync, hasher));
+            line.add("steps", steps);
+            return line;
+        }
+
+        private static int hashComponent(RegistryOps<HashCode> hashOps, TypedDataComponent<?> component) {
+            return component.encodeValue(hashOps).getOrThrow(IllegalStateException::new).asInt();
+        }
+
+        private static JsonObject predictingClick(
+                AbstractContainerMenu menu,
+                int slot,
+                int button,
+                int input,
+                FakePlayer player,
+                RecordingSync sync,
+                HashedPatchMap.HashGenerator hasher) {
+            List<ItemStack> before = new ArrayList<>();
+            for (Slot menuSlot : menu.slots) {
+                before.add(menuSlot.getItem().copy());
+            }
+            menu.suppressRemoteUpdates();
+            menu.clicked(slot, button, INPUTS[input], player);
+            for (int index = 0; index < menu.slots.size(); index++) {
+                ItemStack after = menu.slots.get(index).getItem();
+                if (!ItemStack.matches(before.get(index), after)) {
+                    menu.setRemoteSlotUnsafe(index, HashedStack.create(after, hasher));
+                }
+            }
+            menu.setRemoteCarried(HashedStack.create(menu.getCarried(), hasher));
+            menu.resumeRemoteUpdates();
+            sync.reset();
+            menu.broadcastChanges();
+
+            JsonObject step = new JsonObject();
+            step.addProperty("slot", slot);
+            step.addProperty("button", button);
+            step.addProperty("input", input);
+            step.add("outcome", outcome(menu));
+            JsonArray resent = new JsonArray();
+            for (int resentSlot : sync.slots) {
+                resent.add(resentSlot);
+            }
+            step.add("resent", resent);
+            step.addProperty("carried_resent", sync.carried);
+            return step;
+        }
+
+        private static byte[] patchBytes(RegistryAccess registries, DataComponentPatch patch) {
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+            byte[] bytes = new byte[buffer.readableBytes()];
+            buffer.readBytes(bytes);
+            return bytes;
+        }
+
+        private static String hex(byte[] bytes) {
+            StringBuilder text = new StringBuilder(bytes.length * 2);
+            for (byte value : bytes) {
+                text.append(Character.forDigit((value >> 4) & 0xf, 16));
+                text.append(Character.forDigit(value & 0xf, 16));
+            }
+            return text.toString();
+        }
+
+        /**
+         * 官方 {@link LecternMenu} 的按钮。不创建 {@code LecternBlockEntity}：它的 {@code setPage} 会改方块，
+         * {@code stillValid} 没有世界时永远是假。页码夹取和 {@code removeItemNoUpdate} 清页写在旁边的容器里。
+         */
+        private JsonObject lecternCase(int id, Random random) {
+            boolean creative = random.nextInt(4) != 0;
+            boolean mayBuild = random.nextInt(5) != 0;
+            int pageCount = random.nextInt(6);
+            boolean written = random.nextBoolean();
+            FakePlayer player = FakePlayer.create(creative, mayBuild);
+            LecternSlots lectern = new LecternSlots();
+            lectern.setBook(bookStack(written, pageCount));
+            AbstractContainerMenu menu = new LecternMenu(CONTAINER_ID, lectern, lectern.data);
+            menu.setSynchronizer(new Sync());
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", "lectern");
+            line.addProperty("creative", creative);
+            line.addProperty("mayBuild", mayBuild);
+            line.addProperty("pageCount", pageCount);
+            line.add("container", items(lectern, 1));
+            line.add("inventory", inventoryItems(player.getInventory()));
+            line.add("open", outcome(menu, lectern));
+
+            JsonArray steps = new JsonArray();
+            int count = 2 + random.nextInt(18);
+            for (int i = 0; i < count; i++) {
+                int buttonId = lecternButton(random, pageCount);
+                if (menu.stillValid(player) && menu.clickMenuButton(player, buttonId)) {
+                    menu.broadcastChanges();
+                }
+                JsonObject step = new JsonObject();
+                step.addProperty("slot", 0);
+                step.addProperty("button", 0);
+                step.addProperty("input", 0);
+                step.addProperty("buttonId", buttonId);
+                step.add("outcome", outcome(menu, lectern));
+                steps.add(step);
+            }
+            line.add("steps", steps);
+            return line;
+        }
     }
 
     /** 菜单的形状。名字和 Rust 的 ReplayShape 对应。 */
@@ -394,6 +562,7 @@ public final class MenuOracle {
         HOPPER(5, "hopper", false, false),
         DISPENSER(9, "dispenser", false, false),
         SHULKER(27, "shulker", false, false),
+        LECTERN(1, "lectern", false, false),
         INVENTORY(4, "inventory", true, false),
         CRAFTING(9, "crafting", true, false),
         STONECUTTER(1, "stonecutter", true, false),
@@ -430,6 +599,7 @@ public final class MenuOracle {
                 case HOPPER -> new HopperMenu(CONTAINER_ID, inventory, container);
                 case DISPENSER -> new DispenserMenu(CONTAINER_ID, inventory, container);
                 case SHULKER -> new ShulkerBoxMenu(CONTAINER_ID, inventory, container);
+                case LECTERN -> throw new IllegalStateException("lectern cases build their own menu");
                 case INVENTORY -> new InventoryMenu(inventory, true, player);
                 case CRAFTING -> new CraftingMenu(CONTAINER_ID, inventory, ContainerLevelAccess.create(player.level(), BlockPos.ZERO));
                 case STONECUTTER -> new StonecutterMenu(CONTAINER_ID, inventory);
@@ -561,6 +731,10 @@ public final class MenuOracle {
     }
 
     private static JsonObject outcome(AbstractContainerMenu menu) {
+        return outcome(menu, null);
+    }
+
+    private static JsonObject outcome(AbstractContainerMenu menu, LecternSlots lectern) {
         JsonObject outcome = new JsonObject();
         outcome.addProperty("state", menu.getStateId());
         outcome.add("carried", pair(menu.getCarried()));
@@ -570,7 +744,165 @@ public final class MenuOracle {
         }
         outcome.add("slots", slots);
         outcome.add("data", dataSlots(menu));
+        if (lectern != null) {
+            outcome.addProperty("page", lectern.page);
+        }
         return outcome;
+    }
+
+    /** {@code LecternMenu} 的按钮。100 以上是跳页，3 是取书。 */
+    private static int lecternButton(Random random, int pageCount) {
+        int[] pool = {
+            1, 2, 3, 0, 4, 99, 100, 101, 102, 104, 100 + pageCount, Integer.MAX_VALUE, Integer.MIN_VALUE, -50,
+        };
+        return pool[random.nextInt(pool.length)];
+    }
+
+    /** 讲台上的那一本。页数为 0 的成书仍带着组件，{@code hasBook} 才是真。 */
+    private static ItemStack bookStack(boolean written, int pageCount) {
+        ItemStack stack = new ItemStack(written ? Items.WRITTEN_BOOK : Items.WRITABLE_BOOK);
+        if (written) {
+            List<Filterable<Component>> pages = new ArrayList<>();
+            for (int i = 0; i < pageCount; i++) {
+                pages.add(Filterable.passThrough(Component.literal("p" + i)));
+            }
+            stack.set(
+                    DataComponents.WRITTEN_BOOK_CONTENT,
+                    new WrittenBookContent(Filterable.passThrough("Title"), "Author", 0, pages, true));
+        } else if (pageCount > 0) {
+            List<Filterable<String>> pages = new ArrayList<>();
+            for (int i = 0; i < pageCount; i++) {
+                pages.add(Filterable.passThrough("p" + i));
+            }
+            stack.set(DataComponents.WRITABLE_BOOK_CONTENT, new WritableBookContent(pages));
+        }
+        return stack;
+    }
+
+    /**
+     * {@code LecternBlockEntity} 的书槽和页码。{@code set} 走 {@code Mth.clamp}，
+     * {@code removeItemNoUpdate} 把页码和页数写成 0。{@code stillValid} 只看有没有书组件。
+     */
+    private static final class LecternSlots implements Container {
+        private ItemStack book = ItemStack.EMPTY;
+        private int page;
+        private int pageCount;
+        final PageData data = new PageData();
+
+        void setBook(ItemStack book) {
+            this.book = book;
+            this.page = 0;
+            this.pageCount = pageCountOf(book);
+        }
+
+        void setPage(int requested) {
+            int next = Mth.clamp(requested, 0, this.pageCount - 1);
+            if (next != this.page) {
+                this.page = next;
+            }
+        }
+
+        @Override
+        public int getContainerSize() {
+            return 1;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return this.book.isEmpty();
+        }
+
+        @Override
+        public ItemStack getItem(int slot) {
+            return slot == 0 ? this.book : ItemStack.EMPTY;
+        }
+
+        @Override
+        public ItemStack removeItem(int slot, int count) {
+            if (slot != 0) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack result = this.book.split(count);
+            if (this.book.isEmpty()) {
+                onRemove();
+            }
+            return result;
+        }
+
+        @Override
+        public ItemStack removeItemNoUpdate(int slot) {
+            if (slot != 0) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack previous = this.book;
+            this.book = ItemStack.EMPTY;
+            onRemove();
+            return previous;
+        }
+
+        private void onRemove() {
+            this.page = 0;
+            this.pageCount = 0;
+        }
+
+        @Override
+        public void setItem(int slot, ItemStack itemStack) {
+        }
+
+        @Override
+        public int getMaxStackSize() {
+            return 1;
+        }
+
+        @Override
+        public void setChanged() {
+        }
+
+        @Override
+        public boolean stillValid(Player player) {
+            return hasBook();
+        }
+
+        @Override
+        public boolean canPlaceItem(int slot, ItemStack itemStack) {
+            return false;
+        }
+
+        @Override
+        public void clearContent() {
+        }
+
+        private boolean hasBook() {
+            return this.book.has(DataComponents.WRITABLE_BOOK_CONTENT) || this.book.has(DataComponents.WRITTEN_BOOK_CONTENT);
+        }
+
+        private final class PageData implements ContainerData {
+            @Override
+            public int get(int dataId) {
+                return dataId == 0 ? LecternSlots.this.page : 0;
+            }
+
+            @Override
+            public void set(int dataId, int value) {
+                if (dataId == 0) {
+                    LecternSlots.this.setPage(value);
+                }
+            }
+
+            @Override
+            public int getCount() {
+                return 1;
+            }
+        }
+    }
+
+    private static int pageCountOf(ItemStack book) {
+        WrittenBookContent written = book.get(DataComponents.WRITTEN_BOOK_CONTENT);
+        if (written != null) {
+            return written.pages().size();
+        }
+        WritableBookContent writable = book.get(DataComponents.WRITABLE_BOOK_CONTENT);
+        return writable == null ? 0 : writable.pages().size();
     }
 
     /** 物品写成 [注册表 ID, 数量, 组件补丁十六进制]，空槽是 [0, 0, ""]。 */
@@ -761,6 +1093,51 @@ public final class MenuOracle {
     }
 
     /**
+     * 带哈希的同步器。补发的槽位记下来，和 Bamboo 的预测点击比。
+     *
+     * Records which slots were resent so the predicting click can be compared.
+     */
+    private static final class RecordingSync implements ContainerSynchronizer {
+        final HashedPatchMap.HashGenerator hasher;
+        final List<Integer> slots = new ArrayList<>();
+        boolean carried;
+
+        RecordingSync(HashedPatchMap.HashGenerator hasher) {
+            this.hasher = hasher;
+        }
+
+        void reset() {
+            slots.clear();
+            carried = false;
+        }
+
+        @Override
+        public void sendInitialData(AbstractContainerMenu container, List<ItemStack> slotItems, ItemStack carriedItem, int[] dataSlots) {
+            container.incrementStateId();
+        }
+
+        @Override
+        public void sendSlotChange(AbstractContainerMenu container, int slotIndex, ItemStack itemStack) {
+            slots.add(slotIndex);
+            container.incrementStateId();
+        }
+
+        @Override
+        public void sendCarriedChange(AbstractContainerMenu container, ItemStack itemStack) {
+            carried = true;
+        }
+
+        @Override
+        public void sendDataChange(AbstractContainerMenu container, int id, int value) {
+        }
+
+        @Override
+        public RemoteSlot createSlot() {
+            return new RemoteSlot.Synchronized(hasher);
+        }
+    }
+
+    /**
      * 官方 ServerPlayer 的匿名 ContainerSynchronizer。我们只关心 stateId：
      * 发整包和发一个槽各推进一次，光标和 data 槽不变。
      */
@@ -873,11 +1250,16 @@ public final class MenuOracle {
         }
 
         static FakePlayer create(boolean creative) {
+            return create(creative, true);
+        }
+
+        static FakePlayer create(boolean creative, boolean mayBuild) {
             FakePlayer player = allocate(FakePlayer.class);
             set(Entity.class, player, "level", FakeLevel.create());
             set(Player.class, player, "inventory", new Inventory(player, new PlayerEquipment(player)));
             Abilities abilities = new Abilities();
             abilities.instabuild = creative;
+            abilities.mayBuild = mayBuild;
             set(Player.class, player, "abilities", abilities);
             player.connection = SilentListener.create();
             return player;

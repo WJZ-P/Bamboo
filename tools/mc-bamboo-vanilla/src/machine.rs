@@ -19,6 +19,7 @@ use std::{
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, Level, LevelRandom, RedstoneMemory, World,
     behaviour::machines::{BrewingStandEntity, FurnaceEntity},
+    entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::{CookingKind, blocks};
@@ -70,6 +71,10 @@ struct MachineLevel {
     block_entities: BlockEntities,
     block_events: BlockEvents,
     redstone: RedstoneMemory,
+    /// 熔炉不生成实体。比较器在 tick 里可能问到这张表，空着就行。
+    ///
+    /// Furnaces spawn no entities. A tick may still ask for the table; it stays empty.
+    entities: Entities,
 }
 
 impl MachineLevel {
@@ -82,6 +87,7 @@ impl MachineLevel {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             redstone: RedstoneMemory::default(),
+            entities: Entities::default(),
         }
     }
 }
@@ -157,6 +163,14 @@ impl Level for MachineLevel {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        &self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.entities
     }
 }
 

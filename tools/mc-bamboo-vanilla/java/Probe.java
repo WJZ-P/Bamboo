@@ -109,6 +109,7 @@ import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
+import net.minecraft.network.protocol.game.ClientboundOpenBookPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
@@ -182,6 +183,7 @@ import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.util.Crypt;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
@@ -338,6 +340,7 @@ public final class Probe {
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
+            "handleOpenBook",
             "handleOpenScreen",
             "handleOpenSignEditor",
             "handlePlayerAbilities",
@@ -350,6 +353,7 @@ public final class Probe {
             // Vanilla sends `set_cursor_item` when the cursor changes, and `set_player_inventory` when closing a menu returns items.
             "handleSetCursorItem",
             "handleSetEntityData",
+            "handleSetEntityMotion",
             "handleSetEquipment",
             "handleSetHeldSlot",
             "handleSetPlayerInventory",
@@ -606,6 +610,7 @@ public final class Probe {
                 section("chat" + names, () -> chat(actor, observer));
             }
 
+            section("world entities", () -> worldEntities(kitten, mochi));
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
             section("crafting", () -> crafting(kitten));
@@ -1303,6 +1308,106 @@ public final class Probe {
         }
 
         /**
+         * 下落的沙子被客户端看到：生成、往下移动、落地后变回方块。
+         * 打火石点燃的 TNT 出现，大约 80 tick 后炸掉旁边的石头；红石块也会点燃另一块 TNT。
+         *
+         * The client sees a falling sand block spawn, move down, and become a block again.
+         * Flint-and-steel TNT appears and breaks a neighbouring stone after about 80 ticks.
+         * A redstone block lights a second TNT.
+         */
+        private void worldEntities(Join actor, Join observer) throws IOException {
+            Vec3 origin = actor.position;
+            BlockPos feet = BlockPos.containing(origin);
+            // 柱子要够高，下落才会超过跟踪间隔，客户端才看得到移动。人得跟着往上走，创造模式够不着 40 格。
+            // The pillar has to be tall enough that the fall outlasts the tracking interval, so the client
+            // sees a move. The player has to climb with it: creative reach cannot touch a 40-block column.
+            BlockPos columnBase = feet.offset(4, -1, -4);
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            for (int i = 0; i < 40; i++) {
+                BlockPos clicked = columnBase.above(i);
+                if (i % 3 == 0) {
+                    actor.moveTo(new Vec3(clicked.getX() - 1.5, clicked.getY() + 1.0, clicked.getZ() + 0.5), false);
+                }
+                useOn(actor, Items.STONE, clicked, Direction.UP, Vec3.upFromBottomCenterOf(clicked, 1.0));
+            }
+            BlockPos support = columnBase.above(40);
+            actor.moveTo(new Vec3(support.getX() - 1.5, support.getY(), support.getZ() + 0.5), false);
+            useOn(actor, Items.SAND, support, Direction.EAST, Vec3.atCenterOf(support).add(0.5, 0.0, 0.0));
+            await("falling: the observer sees the falling block", 10_000,
+                    () -> findEntity(observer, EntityTypes.FALLING_BLOCK) != null);
+            int fallingId = findEntity(observer, EntityTypes.FALLING_BLOCK);
+            Remote falling = observer.remotes.get(fallingId);
+            check("falling: the block state is sand", falling.data == Block.getId(Blocks.SAND.defaultBlockState()));
+            double spawnedY = falling.position.y;
+            int seen = falling.moves + falling.syncs;
+            await("falling: the falling block moves", 10_000, () -> {
+                Remote remote = observer.remotes.get(fallingId);
+                return remote != null && remote.moves + remote.syncs > seen;
+            });
+            Remote moved = observer.remotes.get(fallingId);
+            check("falling: the block is lower than where it spawned", moved != null && moved.position.y < spawnedY);
+            BlockPos landing = columnBase.east().above();
+            BlockState sand = Blocks.SAND.defaultBlockState();
+            await("falling: the sand lands", 15_000, () -> sand.equals(observer.blocks.get(landing)));
+            await("falling: the entity is removed", 10_000, () -> !observer.remotes.containsKey(fallingId));
+            actor.edits.add(new Edit(landing, sand));
+
+            BlockPos tntGround = feet.offset(0, -1, 20);
+            // 站在旁边，不要站进即将放下去的 TNT 里。
+            // Stand beside the spot so the player is not inside the TNT about to be placed.
+            actor.moveTo(new Vec3(tntGround.getX() - 1.5, origin.y, tntGround.getZ() + 0.5), true);
+            useOn(actor, Items.TNT, tntGround, Direction.UP, Vec3.upFromBottomCenterOf(tntGround, 1.0));
+            BlockPos tnt = tntGround.above();
+            useOn(actor, Items.STONE, tnt, Direction.NORTH, Vec3.atCenterOf(tnt).add(0.0, 0.0, -0.5));
+            BlockPos broken = tnt.north();
+            await("tnt: the stone next to it is there", () -> observer.blocks.get(broken) != null && observer.blocks.get(broken).is(Blocks.STONE));
+            long started = System.currentTimeMillis();
+            useOn(actor, Items.FLINT_AND_STEEL, tnt, Direction.UP, Vec3.upFromBottomCenterOf(tnt, 1.0));
+            await("tnt: the observer sees the primed tnt", 10_000, () -> findEntity(observer, EntityTypes.TNT) != null);
+            int tntId = findEntity(observer, EntityTypes.TNT);
+            Remote primed = observer.remotes.get(tntId);
+            int primedSeen = primed == null ? 0 : primed.moves + primed.syncs;
+            await("tnt: the primed tnt moves", 10_000, () -> {
+                Remote remote = observer.remotes.get(tntId);
+                return remote != null && remote.moves + remote.syncs > primedSeen;
+            });
+            await("tnt: the explosion breaks the stone", 20_000,
+                    () -> Blocks.AIR.defaultBlockState().equals(observer.blocks.get(broken)));
+            long elapsed = System.currentTimeMillis() - started;
+            check("tnt: the explosion waits about 80 ticks", elapsed >= 2_000 && elapsed <= 20_000);
+            await("tnt: the primed tnt is removed", 10_000, () -> !observer.remotes.containsKey(tntId));
+            // 爆炸把这两格变回空气。后来的玩家只从区块第 0 段记录 y < -60 的空气，
+            // 这里的空气和原来的空气分不出来，所以不记成改动。
+            // The blast turns these cells back into air. A later player only records air below y=-60
+            // from chunk section 0, so this air is indistinguishable from the original cell.
+
+            BlockPos redGround = feet.offset(-20, -1, 0);
+            actor.moveTo(new Vec3(redGround.getX() - 1.5, origin.y, redGround.getZ() + 0.5), true);
+            useOn(actor, Items.TNT, redGround, Direction.UP, Vec3.upFromBottomCenterOf(redGround, 1.0));
+            BlockPos redTnt = redGround.above();
+            useOn(actor, Items.REDSTONE_BLOCK, redTnt, Direction.NORTH, Vec3.atCenterOf(redTnt).add(0.0, 0.0, -0.5));
+            await("tnt: redstone lights another primed tnt", 10_000, () -> findEntity(observer, EntityTypes.TNT) != null);
+            await("tnt: the redstone-lit block is gone", 10_000,
+                    () -> Blocks.AIR.defaultBlockState().equals(observer.blocks.get(redTnt)));
+            actor.moveTo(origin, true);
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+        }
+
+        /**
+         * 观察者目前看得到的这种实体，没有时是 null。
+         *
+         * The entity of this type the observer can currently see, or null.
+         */
+        private Integer findEntity(Join join, EntityType<?> type) {
+            for (var entry : join.remotes.entrySet()) {
+                if (entry.getValue().type == type) {
+                    return entry.getKey();
+                }
+            }
+            return null;
+        }
+
+        /**
          * 官方客户端保存书与笔再署名。署名不改本地物品，服务端必须把成书同步回来，
          * 标题、作者和页面用官方组件 codec 解出来。
          */
@@ -1332,6 +1437,21 @@ public final class Probe {
             check("book: generation is the original", book.generation() == 0);
             check("book: the book is already resolved", book.resolved());
             check("book: the pages match and were not filtered", writtenPages(book, pages));
+
+            int before = actor.openBooks;
+            actor.send(new ServerboundSetCarriedItemPacket(inventorySlot));
+            int using = actor.nextSequence();
+            actor.send(new ServerboundUseItemPacket(InteractionHand.MAIN_HAND, using, 0.0f, 0.0f));
+            await("book: using a written book opens it",
+                    () -> actor.openBooks == before + 1 && actor.openBook == InteractionHand.MAIN_HAND);
+            check("book: the open book is in the main hand", actor.openBook == InteractionHand.MAIN_HAND);
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 5, new ItemStack(Items.WRITABLE_BOOK)));
+            actor.send(new ServerboundSetCarriedItemPacket(5));
+            int quill = actor.nextSequence();
+            actor.send(new ServerboundUseItemPacket(InteractionHand.MAIN_HAND, quill, 0.0f, 0.0f));
+            await("book: using a book and quill is acked", () -> actor.lastAck >= quill);
+            check("book: a book and quill does not open", actor.openBooks == before + 1);
         }
 
         /** 书与笔的页面：原文对得上，没有过滤文本。 */
@@ -1607,6 +1727,8 @@ public final class Probe {
     /** 客户端眼里的另一名玩家。位置用官方的 VecDeltaCodec 累加。 */
     private static final class Remote {
         final UUID uuid;
+        final EntityType<?> type;
+        final int data;
         final VecDeltaCodec codec = new VecDeltaCodec();
         final Map<EquipmentSlot, ItemStack> equipment = new EnumMap<>(EquipmentSlot.class);
         final List<ClientboundSwingAnimationPacket> swings = new ArrayList<>();
@@ -1620,6 +1742,8 @@ public final class Probe {
 
         Remote(ClientboundAddEntityPacket packet) {
             uuid = packet.getUUID();
+            type = packet.getType();
+            data = packet.getData();
             position = new Vec3(packet.getX(), packet.getY(), packet.getZ());
             codec.setBase(position);
             yRot = packet.getYRot();
@@ -1714,6 +1838,12 @@ public final class Probe {
         int acks;
         int stats;
         int openContainerId = -1;
+        /** 右键成书收到的 `open_book`。
+         *
+         * <p>The `open_book` packet from using a written book.
+         */
+        InteractionHand openBook;
+        int openBooks;
         MenuType<?> openMenuType;
         /** 最后一次 `open_screen` 的标题。 */
         Component openMenuTitle;
@@ -2130,6 +2260,7 @@ public final class Probe {
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
+            handlers.put("handleOpenBook", value -> onOpenBook((ClientboundOpenBookPacket) value));
             handlers.put("handleOpenScreen", value -> onOpenScreen((ClientboundOpenScreenPacket) value));
             handlers.put("handleContainerContent",
                     value -> onContainerContent((ClientboundContainerSetContentPacket) value));
@@ -2320,8 +2451,12 @@ public final class Probe {
             List<Packet<? super ClientGamePacketListener>> inner = new ArrayList<>();
             packet.subPackets().forEach(inner::add);
             check("bundle: bundles are not empty", !inner.isEmpty());
-            if (inner.getFirst() instanceof ClientboundAddEntityPacket) {
-                checkPairingBundle(inner);
+            if (inner.getFirst() instanceof ClientboundAddEntityPacket added) {
+                if (added.getType() == EntityTypes.PLAYER) {
+                    checkPairingBundle(inner);
+                } else {
+                    checkWorldEntityBundle(inner, added);
+                }
             }
             inBundle = true;
             inner.forEach(subPacket -> subPacket.handle(gameListener));
@@ -2352,13 +2487,41 @@ public final class Probe {
             }
         }
 
+        /**
+         * 下落方块和点燃的 TNT 不是玩家：没有血量和皮肤，下落方块的 data 是方块状态。
+         *
+         * Falling blocks and primed TNT are not players: no health or skin. A falling block's
+         * data is its block state.
+         */
+        private void checkWorldEntityBundle(List<Packet<? super ClientGamePacketListener>> inner, ClientboundAddEntityPacket added) {
+            if (added.getType() == EntityTypes.FALLING_BLOCK) {
+                check("bundle: a falling block carries its block state", added.getData() != 0);
+                boolean hasData = inner.size() > 1 && inner.get(1) instanceof ClientboundSetEntityDataPacket;
+                check("bundle: falling block metadata follows add_entity", hasData);
+                if (hasData) {
+                    var data = (ClientboundSetEntityDataPacket) inner.get(1);
+                    check("bundle: falling block metadata names the entity", data.id() == added.getId());
+                    check("bundle: falling block metadata has a start position",
+                            data.packedItems().stream().anyMatch(item -> item.id() == 8));
+                }
+            }
+            if (added.getType() == EntityTypes.TNT) {
+                check("bundle: primed tnt data is zero", added.getData() == 0);
+            }
+        }
+
         private void onAddEntity(ClientboundAddEntityPacket packet) {
             check("entity: add_entity is in a bundle", inBundle);
             check("entity: the client's own entity is never added", packet.getId() != entityId);
-            check("entity: players use the player entity type", packet.getType() == EntityTypes.PLAYER);
-            check("entity: add_entity comes after the tab entry", tab.containsKey(packet.getUUID()));
-            check("entity: no initial movement", packet.getMovement().equals(Vec3.ZERO));
-            check("entity: data is zero", packet.getData() == 0);
+            boolean player = packet.getType() == EntityTypes.PLAYER;
+            boolean falling = packet.getType() == EntityTypes.FALLING_BLOCK;
+            boolean tnt = packet.getType() == EntityTypes.TNT;
+            check("entity: only players, falling blocks and primed tnt are added", player || falling || tnt);
+            if (player) {
+                check("entity: add_entity comes after the tab entry", tab.containsKey(packet.getUUID()));
+                check("entity: no initial movement", packet.getMovement().equals(Vec3.ZERO));
+                check("entity: data is zero", packet.getData() == 0);
+            }
             remotes.put(packet.getId(), new Remote(packet));
             events.add("add " + packet.getId());
         }
@@ -2495,6 +2658,11 @@ public final class Probe {
             check("container: the state id goes up", packet.getStateId() > menuStateId);
             menuStateId = packet.getStateId();
             menuSlots.put((int) packet.getSlot(), packet.getItem());
+        }
+
+        private void onOpenBook(ClientboundOpenBookPacket packet) {
+            openBook = packet.hand();
+            openBooks++;
         }
 
         private void onOpenScreen(ClientboundOpenScreenPacket packet) {

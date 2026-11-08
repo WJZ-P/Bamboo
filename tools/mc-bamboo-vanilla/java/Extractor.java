@@ -7,6 +7,7 @@ import com.google.gson.JsonParser;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.io.IOException;
 import java.io.Reader;
@@ -50,6 +51,9 @@ import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.VarInt;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.util.StringRepresentable;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
@@ -71,6 +75,8 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
@@ -90,6 +96,7 @@ import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStackTemplate;
+import net.minecraft.world.item.JukeboxSong;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.Rarity;
@@ -212,14 +219,23 @@ public final class Extractor {
             root.add("blockStates", blockStates());
             root.add("blocks", blocks());
             root.add("items", items());
+            root.add("entityTypes", entityTypes());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("lootTables", dataFiles(resources, "loot_table"));
+            root.add("lootPredicates", dataFiles(resources, "predicate"));
+            root.add("contextIntProviders", dataFiles(resources, "context_int_provider"));
+            root.add("contextFloatProviders", dataFiles(resources, "context_float_provider"));
+            root.add("enchantments", dataFiles(resources, "enchantment"));
+            root.add("smeltingRecipes", smeltingRecipes(resources));
+            root.add("instantMobEffects", instantMobEffects());
             root.add("attributeDefaults", attributeDefaults());
             root.add("componentEnums", componentEnums());
+            root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
             JsonArray itemComponents = new JsonArray();
@@ -266,6 +282,22 @@ public final class Extractor {
      * 才读得到，所以这里照 WorldLoader.load 的后半段再加载一次服务端资源。
      * `PendingTags.apply` 只是重新绑定同样的内容，重复调用没有副作用。
      */
+    /** `JukeboxSongs` 注册表，按注册表 ID 排序。比较器读 `comparatorOutput`。 */
+    private static JsonArray jukeboxSongs(RegistryAccess registries) {
+        Registry<JukeboxSong> registry = registries.lookupOrThrow(Registries.JUKEBOX_SONG);
+        List<Holder.Reference<JukeboxSong>> songs = new ArrayList<>();
+        registry.listElements().forEach(songs::add);
+        songs.sort(Comparator.comparingInt(song -> registry.getId(song.value())));
+        JsonArray array = new JsonArray();
+        for (Holder.Reference<JukeboxSong> song : songs) {
+            JsonObject object = new JsonObject();
+            object.addProperty("length", song.value().lengthInSeconds());
+            object.addProperty("output", song.value().comparatorOutput());
+            array.add(object);
+        }
+        return array;
+    }
+
     private static void itemComponents(
             CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers,
             JsonArray items, JsonArray remainders) throws Exception {
@@ -360,7 +392,141 @@ public final class Extractor {
         JsonObject enums = new JsonObject();
         enums.add("counts", counts);
         enums.add("sparse", sparse);
+        enums.add("names", componentEnumNames());
         return enums;
+    }
+
+    /**
+     * 一个数据包目录下的全部 JSON，键是带命名空间的条目名，值保留官方文件的原文。
+     *
+     * <p>战利品表不是注册表，走官方加载流程读不到，只能像数据包加载器那样按目录读文件。
+     */
+    private static JsonObject dataFiles(ResourceManager resources, String directory) throws IOException {
+        JsonObject files = new JsonObject();
+        for (Map.Entry<Identifier, Resource> entry : resources.listResources(directory, id -> true).entrySet()) {
+            // 列目录时官方返回的标识带着目录和 .json，去掉后才是表名。
+            String path = entry.getKey().getPath();
+            String name = path.substring(directory.length() + 1, path.length() - ".json".length());
+            Identifier id = Identifier.fromNamespaceAndPath(entry.getKey().getNamespace(), name);
+            try (Reader reader = entry.getValue().openAsReader()) {
+                files.addProperty(id.toString(), readAll(reader));
+            }
+        }
+        return files;
+    }
+
+    /**
+     * 原版数据包里的烧炼配方原文。
+     *
+     * <p>战利品表的 `furnace_smelt` 要按输入物品查烧炼配方，配方表只在服务端加载，这里按目录读出
+     * `minecraft:smelting` 的那部分。
+     */
+    private static JsonObject smeltingRecipes(ResourceManager resources) throws IOException {
+        JsonObject files = new JsonObject();
+        String directory = "recipe";
+        for (Map.Entry<Identifier, Resource> entry : resources.listResources(directory, id -> true).entrySet()) {
+            String path = entry.getKey().getPath();
+            String name = path.substring(directory.length() + 1, path.length() - ".json".length());
+            Identifier id = Identifier.fromNamespaceAndPath(entry.getKey().getNamespace(), name);
+            String text;
+            try (Reader reader = entry.getValue().openAsReader()) {
+                text = readAll(reader);
+            }
+            JsonElement type = JsonParser.parseString(text).getAsJsonObject().get("type");
+            if (type != null && "minecraft:smelting".equals(type.getAsString())) {
+                files.addProperty(id.toString(), text);
+            }
+        }
+        return files;
+    }
+
+    /**
+     * `MobEffect.isInstantaneous()` 的效果。可疑的 stew 设置持续时间时，瞬时的效果不乘 20。
+     */
+    private static JsonArray instantMobEffects() {
+        JsonArray effects = new JsonArray();
+        for (MobEffect effect : BuiltInRegistries.MOB_EFFECT) {
+            if (effect.isInstantaneous()) {
+                effects.add(BuiltInRegistries.MOB_EFFECT.getKey(effect).toString());
+            }
+        }
+        return effects;
+    }
+
+    private static String readAll(Reader reader) throws IOException {
+        StringBuilder text = new StringBuilder();
+        char[] buffer = new char[8192];
+        int count;
+        while ((count = reader.read(buffer)) >= 0) {
+            text.append(buffer, 0, count);
+        }
+        return text.toString();
+    }
+
+    /**
+     * 同一批枚举的序列化名字，存档用的 `Codec` 走的是名字而不是 ID。
+     *
+     * 连续的枚举按 ID 排，下标就是网络上的那个 ID；ID 从官方自己的 `StreamCodec` 读出来，
+     * 因为声明顺序不一定等于 ID 顺序（`EquipmentSlot` 就不是）。
+     * 稀疏的枚举按声明顺序排，和 `sparse` 里的 ID 表一一对应。
+     */
+    private static JsonObject componentEnumNames() {
+        JsonObject names = new JsonObject();
+        names.add("rarity", byStreamId(Rarity.values(), Rarity.STREAM_CODEC));
+        names.add("dye_color", byStreamId(DyeColor.values(), DyeColor.STREAM_CODEC));
+        names.add("item_use_animation", byStreamId(ItemUseAnimation.values(), ItemUseAnimation.STREAM_CODEC));
+        names.add("swing_animation_type", byStreamId(SwingAnimationType.values(), SwingAnimationType.STREAM_CODEC));
+        names.add("equipment_slot", byStreamId(EquipmentSlot.values(), EquipmentSlot.STREAM_CODEC));
+        names.add("equipment_slot_group", byStreamId(EquipmentSlotGroup.values(), EquipmentSlotGroup.STREAM_CODEC));
+        names.add("attribute_operation", byStreamId(AttributeModifier.Operation.values(), AttributeModifier.Operation.STREAM_CODEC));
+        names.add("firework_shape", byStreamId(FireworkExplosion.Shape.values(), FireworkExplosion.Shape.STREAM_CODEC));
+        // `map_post_processing` 是瞬态组件，没有存档 Codec，也不是 StringRepresentable，不导出名字。
+        names.add("fox_variant", byStreamId(Fox.Variant.values(), Fox.Variant.STREAM_CODEC));
+        names.add("axolotl_variant", byStreamId(Axolotl.Variant.values(), Axolotl.Variant.STREAM_CODEC));
+        names.add("salmon_size", byStreamId(Salmon.Variant.values(), Salmon.Variant.STREAM_CODEC));
+        names.add("parrot_variant", byStreamId(Parrot.Variant.values(), Parrot.Variant.STREAM_CODEC));
+        names.add("mooshroom_variant", byStreamId(MushroomCow.Variant.values(), MushroomCow.Variant.STREAM_CODEC));
+        names.add("llama_variant", byStreamId(Llama.Variant.values(), Llama.Variant.STREAM_CODEC));
+        names.add(
+                "horse_variant",
+                byStreamId(
+                        net.minecraft.world.entity.animal.equine.Variant.values(),
+                        net.minecraft.world.entity.animal.equine.Variant.STREAM_CODEC));
+        // `ItemAttributeModifiers.Display.Type` 没有公开的 StreamCodec，它的 ID 就是声明顺序，
+        // `components` 对照里的 attribute_display_type 折回题会确认这一点。
+        names.add("attribute_display_type", inDeclarationOrder(ItemAttributeModifiers.Display.Type.values()));
+        // 稀疏枚举按声明顺序，和上面的 ID 表对齐。
+        names.add("tropical_fish_pattern", inDeclarationOrder(TropicalFish.Pattern.values()));
+        names.add("rabbit_variant", inDeclarationOrder(Rabbit.Variant.values()));
+        return names;
+    }
+
+    /** 按官方 `StreamCodec` 写出来的 VarInt 当下标排序列化名字。 */
+    private static <T extends StringRepresentable> JsonArray byStreamId(T[] values, StreamCodec<? super ByteBuf, T> codec) {
+        String[] names = new String[values.length];
+        for (T value : values) {
+            ByteBuf buffer = Unpooled.buffer();
+            codec.encode(buffer, value);
+            int id = VarInt.read(buffer);
+            if (id < 0 || id >= names.length || names[id] != null) {
+                throw new IllegalStateException("枚举 ID " + id + " 不在 0.." + names.length + " 里或者重复了");
+            }
+            names[id] = value.getSerializedName();
+        }
+        JsonArray array = new JsonArray();
+        for (String name : names) {
+            array.add(name);
+        }
+        return array;
+    }
+
+    /** 按声明顺序列出序列化名字。 */
+    private static JsonArray inDeclarationOrder(StringRepresentable[] values) {
+        JsonArray array = new JsonArray();
+        for (StringRepresentable value : values) {
+            array.add(value.getSerializedName());
+        }
+        return array;
     }
 
     /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */
@@ -500,6 +666,12 @@ public final class Extractor {
             object.addProperty("destroyTime", block.defaultDestroyTime());
             object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
+            object.addProperty("lootTable", block.getLootTable().map(key -> key.identifier().toString()).orElse(null));
+            // 实体移动用的两个系数，见 `Block.getSpeedFactor`、`Block.getBounceRestitution`。
+            object.addProperty("speedFactor", block.getSpeedFactor());
+            object.addProperty("bounceRestitution", block.getBounceRestitution());
+            // 爆炸射线消耗用的抗性，见 `Block.getExplosionResistance`。
+            object.addProperty("explosionResistance", block.getExplosionResistance());
             addOffset(object, block);
             blocks.add(object);
         }
@@ -640,9 +812,28 @@ public final class Extractor {
                 }
             }
         }
+        // 下面三个方法在 `Block`/`BlockBehaviour` 上，上面按类往上找时停在了 `Block.class` 之前。
+        // 实体运动、爆炸和落地要用它们，子类覆盖过的同名结果已经在上面导出了。
+        addNonDefaultFloat(fields, block, "getExplosionResistance", 0.0F);
+        addNonDefaultFloat(fields, block, "getSpeedFactor", 1.0F);
+        addNonDefaultFloat(fields, block, "getBounceRestitution", 0.0F);
         JsonArray result = new JsonArray();
         new TreeMap<>(fields).values().forEach(result::add);
         return result;
+    }
+
+    /** 只导出和默认值不同的结果。绝大多数方块都是默认值，全写进去只会让生成文件变大。 */
+    private static void addNonDefaultFloat(Map<String, JsonObject> fields, Block block, String name, float expected)
+            throws ReflectiveOperationException {
+        if (fields.containsKey(name + "()")) {
+            return;
+        }
+        Method method = Block.class.getDeclaredMethod(name);
+        method.setAccessible(true);
+        float value = (float) method.invoke(block);
+        if (value != expected) {
+            addField(fields, name + "()", value);
+        }
     }
 
     private static boolean isFactMethod(Method method) {
@@ -790,6 +981,23 @@ public final class Extractor {
             items.add(object);
         }
         return items;
+    }
+
+    /** 按注册表 ID 排列的实体类型。跟踪范围和更新间隔是 `ChunkMap.addEntity` 用的值。 */
+    private static JsonArray entityTypes() {
+        JsonArray types = new JsonArray();
+        for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
+            JsonObject object = new JsonObject();
+            object.addProperty("name", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+            object.addProperty("clientTrackingRange", type.clientTrackingRange());
+            // 官方的 `Integer.MAX_VALUE` 表示 `UpdateInterval.NEVER`，这里写成 -1。
+            object.addProperty("updateInterval", type.hasUpdateInterval() ? type.updateInterval() : -1);
+            object.addProperty("trackDeltas", type.trackDeltas());
+            object.addProperty("width", type.getDimensions().width());
+            object.addProperty("height", type.getDimensions().height());
+            types.add(object);
+        }
+        return types;
     }
 
     /** 官方数据包的全部配方，按注册表的顺序。`getRecipeFor` 取第一条匹配的，先后由这个顺序决定。 */
@@ -1479,6 +1687,8 @@ public final class Extractor {
                 object.addProperty("amount", added.getAmount());
                 object.addProperty("falling", added.hasProperty(FlowingFluid.FALLING) && added.getValue(FlowingFluid.FALLING));
                 object.addProperty("legacyBlock", Block.BLOCK_STATE_REGISTRY.getId(added.createLegacyBlock()));
+                // 爆炸射线里取方块和流体抗性的较大者，见 `FluidState.getExplosionResistance`。
+                object.addProperty("explosionResistance", added.getExplosionResistance());
                 fluidStates.add(object);
                 return fluidStates.size() - 1;
             });

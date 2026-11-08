@@ -7,10 +7,22 @@
 //! 题目来自每个物品的默认组件、创造模式物品栏的全部物品，以及一批手写的组件。
 //! 跑完会列出一个组件类型都没覆盖到的那些类型。
 //!
-//! 还有两组额外的检查：
+//! 还有几组额外的检查：
 //!
 //! - 每个物品的默认组件：生成的 `item_components.rs` 要和官方现在编出来的字节一样；
-//! - 按 ID 查表的枚举：喂一个越界的原始 ID 进去，官方折回成什么，Bamboo 也要折回成什么。
+//! - 按 ID 查表的枚举：喂一个越界的原始 ID 进去，官方折回成什么，Bamboo 也要折回成什么；
+//! - 同一批物品堆的存档 NBT（`ItemStack.CODEC` 和 `DataComponentPatch.CODEC`）以及
+//!   `HashedStack.create` 的组件哈希；
+//! - SNBT 的打印和解析，对照官方 `StringTagVisitor`、`SnbtPrinterTagVisitor` 和 `TagParser`。
+//!
+//! Extra checks besides the network patch bytes:
+//!
+//! - generated default components must match the bytes the official codec writes now;
+//! - by-id enums must fold the same way;
+//! - the same stacks' archive NBT (`ItemStack.CODEC` and `DataComponentPatch.CODEC`)
+//!   and the `HashedStack.create` component hashes;
+//! - SNBT printing and parsing against `StringTagVisitor`, `SnbtPrinterTagVisitor`,
+//!   and `TagParser`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,9 +31,14 @@ use std::{
 };
 
 use mc_bamboo_data::{item_components, items, version};
+use mc_bamboo_nbt::{Accounter, DEFAULT_QUOTA, Reader, Tag, parse_snbt};
 use mc_bamboo_protocol::{
     codec::DecodeError,
-    components::{ComponentPatch, cursor::Cursor},
+    components::{
+        ComponentPatch,
+        archive::stack::{nbt_equal, transcode_patch, transcode_stack},
+        cursor::Cursor,
+    },
 };
 use serde::Deserialize;
 
@@ -60,6 +77,38 @@ enum Line {
     End {
         cases: usize,
     },
+    /// 同一份补丁的存档 NBT，以及官方 `HashedStack.create` 的哈希。
+    ///
+    /// Archive NBT for one patch, plus the `HashedStack.create` hashes.
+    Archive {
+        index: usize,
+        name: String,
+        stack: String,
+        patch: String,
+        added: Vec<(i32, i32)>,
+        removed: Vec<i32>,
+        #[serde(default)]
+        skip_hash: bool,
+    },
+    /// 官方把一个标签打印成紧凑和缩进两种 SNBT，再解析回去。
+    ///
+    /// Official compact and pretty SNBT for one tag, parsed back to NBT.
+    Snbt {
+        name: String,
+        source: String,
+        compact: String,
+        pretty: String,
+        parsed: String,
+        pretty_parsed: String,
+    },
+    /// 一段手写的 SNBT。官方解析失败时 `error` 有内容，`parsed` 为空。
+    ///
+    /// A handwritten SNBT string. `error` is set when official parsing fails.
+    SnbtInput {
+        text: String,
+        error: Option<String>,
+        parsed: Option<String>,
+    },
     Verified {
         checked: usize,
         mismatches: Vec<String>,
@@ -72,8 +121,16 @@ struct Report {
     component_types: Vec<String>,
     cases: usize,
     covered: BTreeSet<i32>,
-    /// 回传给官方的每一行。
+    /// 回传给官方的网络补丁，一行一道题。
+    ///
+    /// Network-patch replies, one line per case.
     replies: Vec<String>,
+    /// 回传给官方的存档 NBT，一行一道存档题。
+    ///
+    /// Archive NBT replies, one line per archive case.
+    archive_replies: Vec<String>,
+    archive: usize,
+    snbt: usize,
     mismatches: Vec<String>,
     skipped: Vec<String>,
     /// 检查过默认组件的物品数。
@@ -164,6 +221,33 @@ impl Report {
                     error,
                 } => self.check_fold(&name, &input, &output, error.as_deref())?,
                 Line::Skipped { case, error } => self.skipped.push(format!("{case}: {error}")),
+                Line::Archive {
+                    index,
+                    name,
+                    stack,
+                    patch,
+                    added,
+                    removed,
+                    skip_hash,
+                } => self.check_archive(
+                    index,
+                    &name,
+                    (&stack, &patch),
+                    (&added, &removed, skip_hash),
+                )?,
+                Line::Snbt {
+                    name,
+                    source,
+                    compact,
+                    pretty,
+                    parsed,
+                    pretty_parsed,
+                } => self.check_snbt(&name, &source, &compact, &pretty, &parsed, &pretty_parsed)?,
+                Line::SnbtInput {
+                    text,
+                    error,
+                    parsed,
+                } => self.check_snbt_input(&text, error.as_deref(), parsed.as_deref())?,
                 Line::End { cases } => {
                     self.ended = true;
                     if cases != self.cases {
@@ -303,7 +387,7 @@ impl Report {
     }
 
     fn send_replies(&mut self, stdin: &mut impl Write) -> Result<(), String> {
-        for reply in &self.replies {
+        for reply in self.replies.iter().chain(&self.archive_replies) {
             writeln!(stdin, "{reply}").map_err(|error| format!("cannot write to java: {error}"))?;
         }
         stdin
@@ -329,6 +413,166 @@ impl Report {
             }
             _ => Err(format!("expected a verdict, got {}", line.trim())),
         }
+    }
+
+    /// 存档 NBT 往返，以及 `HashedStack.create` 的哈希。
+    ///
+    /// Archive NBT round trip, and the `HashedStack.create` hashes.
+    fn check_archive(
+        &mut self,
+        index: usize,
+        name: &str,
+        nbt: (&str, &str),
+        hashes: (&[(i32, i32)], &[i32], bool),
+    ) -> Result<(), String> {
+        let (stack_hex, patch_hex) = nbt;
+        let (added, removed, skip_hash) = hashes;
+        if index != self.archive {
+            return Err(format!(
+                "archive case {index} arrived as number {}",
+                self.archive
+            ));
+        }
+        self.archive += 1;
+        let stack_bytes = unhex(stack_hex)?;
+        let patch_bytes = unhex(patch_hex)?;
+        let stack_out = match transcode_stack(&stack_bytes) {
+            Ok(stack) => {
+                if !nbt_equal(&stack.bytes, &stack_bytes) {
+                    self.mismatch(format!(
+                        "{name}: stack nbt differs, official {stack_hex}, bamboo {}",
+                        to_hex(&stack.bytes)
+                    ));
+                }
+                if !skip_hash && !same_ids(&stack.added, added) {
+                    self.mismatch(format!(
+                        "{name}: added hashes differ, official {added:?}, bamboo {:?}",
+                        stack.added
+                    ));
+                }
+                if !skip_hash && !same_ids(removed, &stack.removed) {
+                    self.mismatch(format!(
+                        "{name}: removed components differ, official {removed:?}, bamboo {:?}",
+                        stack.removed
+                    ));
+                }
+                to_hex(&stack.bytes)
+            }
+            Err(error) => {
+                self.mismatch(format!("{name}: bamboo cannot decode stack nbt: {error}"));
+                stack_hex.to_owned()
+            }
+        };
+        let patch_out = match transcode_patch(&patch_bytes) {
+            Ok(bytes) => {
+                if !nbt_equal(&bytes, &patch_bytes) {
+                    self.mismatch(format!(
+                        "{name}: patch nbt differs, official {patch_hex}, bamboo {}",
+                        to_hex(&bytes)
+                    ));
+                }
+                to_hex(&bytes)
+            }
+            Err(error) => {
+                self.mismatch(format!("{name}: bamboo cannot decode patch nbt: {error}"));
+                patch_hex.to_owned()
+            }
+        };
+        self.archive_replies
+            .push(format!("A {index} {stack_out} {patch_out}"));
+        Ok(())
+    }
+
+    /// 同一份标签，官方和 Bamboo 打印出来的 SNBT 要一样；再把这段 SNBT 解析回去，
+    /// 两边的标签也要一样。打印和解析分开比：`NaNf` 这种字面量官方解析成字符串，
+    /// 再打印就和原来的浮点不一样。
+    ///
+    /// The same tag must print as the same SNBT, and parsing that SNBT must produce
+    /// the same tag. Printing and parsing are separate: official parsing turns a
+    /// literal such as `NaNf` into a string, so printing the parsed tag does not
+    /// reproduce the original float.
+    fn check_snbt(
+        &mut self,
+        name: &str,
+        source: &str,
+        compact: &str,
+        pretty: &str,
+        parsed: &str,
+        pretty_parsed: &str,
+    ) -> Result<(), String> {
+        self.snbt += 1;
+        let source = read_tag(&unhex(source)?)?;
+        let printed = source.to_snbt();
+        if printed != compact {
+            self.mismatch(format!(
+                "{name}: compact SNBT differs, official {compact}, bamboo {printed}"
+            ));
+        }
+        let pretty_printed = source.to_pretty_snbt();
+        if pretty_printed != pretty {
+            self.mismatch(format!(
+                "{name}: pretty SNBT differs, official {pretty}, bamboo {pretty_printed}"
+            ));
+        }
+        let official = unhex(parsed)?;
+        let pretty_official = unhex(pretty_parsed)?;
+        match parse_snbt(compact) {
+            Ok(tag) => {
+                if !nbt_equal(&write_tag(&tag), &official) {
+                    self.mismatch(format!("{name}: compact SNBT parsed to a different tag"));
+                }
+            }
+            Err(error) => {
+                self.mismatch(format!(
+                    "{name}: bamboo cannot parse compact SNBT {compact}: {error}"
+                ));
+            }
+        }
+        match parse_snbt(pretty) {
+            Ok(tag) => {
+                if !nbt_equal(&write_tag(&tag), &pretty_official) {
+                    self.mismatch(format!("{name}: pretty SNBT parsed to a different tag"));
+                }
+            }
+            Err(error) => {
+                self.mismatch(format!("{name}: bamboo cannot parse pretty SNBT: {error}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// 手写的 SNBT。合法输入两边解析结果一样，非法输入两边都拒绝。
+    ///
+    /// Handwritten SNBT. Legal input parses the same; illegal input fails on both sides.
+    fn check_snbt_input(
+        &mut self,
+        text: &str,
+        official_error: Option<&str>,
+        parsed: Option<&str>,
+    ) -> Result<(), String> {
+        self.snbt += 1;
+        match (parse_snbt(text), official_error, parsed) {
+            (Ok(tag), None, Some(parsed)) => {
+                let official = unhex(parsed)?;
+                if !nbt_equal(&write_tag(&tag), &official) {
+                    self.mismatch(format!(
+                        "snbt {text}: parsed tag differs, official {parsed}, bamboo {}",
+                        to_hex(&write_tag(&tag))
+                    ));
+                }
+            }
+            (Ok(_), Some(error), _) => self.mismatch(format!(
+                "snbt {text}: official rejects it ({error}), bamboo accepts it"
+            )),
+            (Err(error), None, _) => self.mismatch(format!(
+                "snbt {text}: official accepts it, bamboo rejects it: {error}"
+            )),
+            (Err(_), Some(_), _) => {}
+            (Ok(_), None, None) => {
+                self.mismatch(format!("snbt {text}: official accepted it without a tag"));
+            }
+        }
+        Ok(())
     }
 
     fn mismatch(&mut self, text: String) {
@@ -383,6 +627,10 @@ impl Report {
             self.folds.len(),
             folds.join(" ")
         );
+        println!(
+            "COMPONENTS ARCHIVE: {} stacks, COMPONENTS SNBT: {} samples",
+            self.archive, self.snbt
+        );
         if !uncovered.is_empty() {
             println!("COMPONENTS UNCOVERED: {}", uncovered.join(" "));
         }
@@ -427,6 +675,29 @@ fn unhex(text: &str) -> Result<Vec<u8>, String> {
                 .map_err(|error| format!("bad hex: {error}"))
         })
         .collect()
+}
+
+fn read_tag(bytes: &[u8]) -> Result<Tag, String> {
+    let mut reader = Reader::new(bytes, Accounter::new(DEFAULT_QUOTA));
+    let tag = reader.tag().map_err(|error| error.to_string())?;
+    if reader.read() != bytes.len() {
+        return Err("trailing nbt".to_owned());
+    }
+    Ok(tag)
+}
+
+fn write_tag(tag: &Tag) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    tag.write_network(&mut bytes);
+    bytes
+}
+
+fn same_ids<T: Ord + Clone>(left: &[T], right: &[T]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort();
+    right.sort();
+    left == right
 }
 
 fn to_hex(bytes: &[u8]) -> String {

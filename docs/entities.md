@@ -1,5 +1,9 @@
 # M2 规格：玩家互相可见（实体同步）
 
+非玩家实体（下落方块、点燃的 TNT）不在这份规格里。它们归世界线程所有，用 ID 引用，同步走 `add_entity`、位置增量和 `remove_entities`。玩家配对、元数据和移动包仍以本文为准。
+
+Non-player entities (falling blocks and primed TNT) are outside this spec. The world thread owns them and refers to them by id. Sync uses `add_entity`, position deltas and `remove_entities`. Player pairing, metadata and movement packets still follow this document.
+
 目标：Minecraft Java 26.3，协议 777。本文覆盖 Tab 列表、实体追踪、移动同步、元数据、挥手、潜行冲刺和手持装备。移动包解析、区块发送、方块交互和聊天在别的规格里，这里只写它们和本领域相接的部分。
 
 证据标记：

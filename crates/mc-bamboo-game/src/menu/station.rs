@@ -1867,7 +1867,7 @@ fn send_outgoing(region: &mut Region, id: PlayerId, container_id: i32, packets: 
                 id,
                 &ContainerSetData {
                     container_id,
-                    data_id,
+                    id: data_id,
                     value,
                 },
             ),

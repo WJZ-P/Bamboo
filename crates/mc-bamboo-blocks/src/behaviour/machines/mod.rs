@@ -34,6 +34,7 @@ pub use self::brewing::BrewingStandEntity;
 pub(crate) use self::containers::open_support_shape;
 pub use self::containers::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
 pub use self::cooking::FurnaceEntity;
+pub use self::lectern::{reset_lectern, signal_lectern_page};
 
 use mc_bamboo_data::{Block, BlockClass};
 

@@ -807,6 +807,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     let Some((target, container_size, menu_type, title)) = menu_shape(region, pos, kind) else {
         return false;
     };
+    crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }
@@ -911,6 +912,14 @@ fn menu_shape(
                 kind.title(),
             )
         }
+        // 雕纹书架、唱片机和陶罐官方没有菜单。合成器的 `CrafterMenu` 这次不打开。
+        //
+        // Chiseled bookshelves, jukeboxes and pots have no vanilla menu. The crafter's
+        // `CrafterMenu` is not opened in this change.
+        ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => return None,
         _ => (
             Target::Single(pos),
             kind.slots(),
@@ -1083,35 +1092,49 @@ fn official_index(slot: usize) -> Option<i32> {
     }
 }
 
-/// 每个 tick：先关掉已经失效的菜单，再把变化发给客户端。官方 `ServerPlayer.tick`。
+/// 每个 tick：先把变化发给客户端，再关掉已经失效的菜单。官方 `ServerPlayer.tick`。
+///
+/// Each tick broadcasts changes, then closes a menu that is no longer valid. Vanilla
+/// `ServerPlayer.tick` calls `broadcastChanges` before `stillValid`.
 pub(crate) fn tick(region: &mut Region) {
     let ids: Vec<PlayerId> = region.menus.keys().copied().collect();
     for id in ids {
-        let station_menu = region
+        // 工作台这一类菜单自己同步熔炉和酿造台的进度，不走箱子那套槽位广播。
+        // Workstation menus sync furnace and brewing progress themselves.
+        if region
             .menus
             .get(&id)
-            .is_some_and(|menu| menu.station.is_some());
-        let valid = region
-            .menus
-            .get(&id)
-            .is_some_and(|menu| still_valid(region, id, menu));
+            .is_some_and(|menu| menu.station.is_some())
+        {
+            station::tick_menu(region, id);
+            let valid = region
+                .menus
+                .get(&id)
+                .is_some_and(|menu| still_valid(region, id, menu));
+            if !valid {
+                warn!(
+                    player = id.0,
+                    "closing a menu whose block is gone or out of reach"
+                );
+                close_menu(region, id);
+            }
+            continue;
+        }
+        // 官方先 `broadcastChanges`，再看 `stillValid`：失效这一刻的槽位变化也会先发出去。
+        // Vanilla broadcasts before `stillValid`, so the last slot changes still go out.
+        let Some(mut menu) = region.menus.remove(&id) else {
+            continue;
+        };
+        broadcast_changes(region, id, &mut menu);
+        let valid = still_valid(region, id, &menu);
+        region.menus.insert(id, menu);
         if !valid {
             warn!(
                 player = id.0,
                 "closing a menu whose block is gone or out of reach"
             );
             close_menu(region, id);
-            continue;
         }
-        if station_menu {
-            station::tick_menu(region, id);
-            continue;
-        }
-        let Some(mut menu) = region.menus.remove(&id) else {
-            continue;
-        };
-        broadcast_changes(region, id, &mut menu);
-        region.menus.insert(id, menu);
     }
 }
 
@@ -1419,22 +1442,34 @@ fn same_component_bytes(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.added == b.added && a.removed == b.removed
 }
 
-/// 官方 `HashedStack.matches`。
+/// 官方 `HashedStack.matches` / `HashedPatchMap.matches`。
 ///
-/// 官方把每一项组件按 `HashOps`（CRC32C）算成一个整数再比。那套哈希要整个组件的 DFU
-/// `Codec`，我们没有，见 README 的已知限制。这里保守处理：带组件的物品一律算不一致，
-/// 结果只是多发一个 `container_set_slot`，不会误以为客户端手上的东西和服务端一样。
+/// 每一项增加的组件按存档 `Codec` 走 `HashOps`（CRC32C）得到 `HashCode.asInt()`，
+/// 再和客户端发来的整数比较。移除项只比组件类型。解不开本地组件、或者某项没有
+/// 存档 `Codec`（瞬态组件）时不算匹配，结果只是多发一次槽位同步。
+///
+/// `HashedStack.matches` / `HashedPatchMap.matches`.
+///
+/// Each added component is hashed with its persistent codec through `HashOps`
+/// (CRC32C) and compared as `HashCode.asInt()`. Removals compare component types
+/// only. A component that cannot be decoded, or that has no persistent codec,
+/// does not match, so the slot is synchronized again.
 fn hashed_matches(hash: &HashedStack, local: &ItemStack) -> bool {
     match hash {
         HashedStack::Empty => local.is_empty(),
         HashedStack::Item(hashed) => {
-            !local.is_empty()
-                && hashed.item == local.item
-                && hashed.count == local.count
-                && hashed.added.is_empty()
-                && hashed.removed.is_empty()
-                && local.added.is_empty()
-                && local.removed.is_empty()
+            if local.is_empty() || hashed.item != local.item || hashed.count != local.count {
+                return false;
+            }
+            let Ok(patch) = mc_bamboo_protocol::components::ComponentPatch::from_opaque(local)
+            else {
+                return false;
+            };
+            mc_bamboo_protocol::components::archive::stack::matches_hashed(
+                &patch,
+                &hashed.added,
+                &hashed.removed,
+            )
         }
     }
 }

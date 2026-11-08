@@ -143,6 +143,32 @@ impl Vec3 {
         Self::new(self.x * factor, self.y * factor, self.z * factor)
     }
 
+    /// 分量各自乘一个系数，`Vec3.multiply(double, double, double)`。
+    pub const fn multiply(self, x: f64, y: f64, z: f64) -> Self {
+        Self::new(self.x * x, self.y * y, self.z * z)
+    }
+
+    /// `Vec3.lengthSqr`。
+    pub const fn length_sqr(self) -> f64 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    /// `Vec3.length`。
+    pub fn length(self) -> f64 {
+        self.length_sqr().sqrt()
+    }
+
+    /// `Vec3.normalize`：长度化成 1，太短的向量变成零。
+    pub fn normalize(self) -> Self {
+        let length = self.length();
+        // 官方写的是 `1.0E-5F`，那个 float 常量变成 double 不是精确的 1e-5。
+        if length < f64::from(1.0e-5_f32) {
+            Self::default()
+        } else {
+            Self::new(self.x / length, self.y / length, self.z / length)
+        }
+    }
+
     /// 到 `other` 距离的平方。
     pub const fn distance_to_sqr(self, other: Self) -> f64 {
         let delta = self.subtract(other);
@@ -436,6 +462,16 @@ impl Direction {
             }
         }
         result
+    }
+
+    /// `Direction.axisStepOrder`：碰撞按哪根轴的顺序解算。Y 总是最先，
+    /// 水平面上先解短的那根。
+    pub fn axis_step_order(movement: Vec3) -> [Axis; 3] {
+        if movement.x.abs() < movement.z.abs() {
+            [Axis::Y, Axis::Z, Axis::X]
+        } else {
+            [Axis::Y, Axis::X, Axis::Z]
+        }
     }
 
     /// 官方的序列化名，比如 `north`。

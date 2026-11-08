@@ -1,9 +1,11 @@
 //! 一次右键的上下文，对应官方的 `UseOnContext`、`BlockPlaceContext`、`BlockHitResult`。
 
 use std::ops::Deref;
+use std::sync::LazyLock;
 
 use mc_bamboo_core::{Axis, BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::items;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{state::BlockState, world::World};
 
@@ -85,6 +87,10 @@ pub struct UseContext<'a> {
     pub hit: BlockHit,
     /// 这只手上的物品，方块的 `useItemOn` 里的 `itemStack`。
     pub item: i32,
+    /// 这只手上的物品堆。没有传进来时，组件按这个物品的默认值判断。
+    ///
+    /// The stack in this hand. When it is absent, component checks use the item's defaults.
+    pub stack: Option<&'a ItemStack>,
 }
 
 impl<'a> UseContext<'a> {
@@ -94,6 +100,7 @@ impl<'a> UseContext<'a> {
             hand,
             hit,
             item: actor.item_in(hand),
+            stack: None,
         }
     }
 
@@ -145,6 +152,26 @@ pub struct PlaceContext<'a> {
     relative_pos: BlockPos,
     replace_clicked: bool,
 }
+
+/// `DirectionalPlaceContext` 里没有玩家。放置判定读不到它，这里给一份空的。
+/// 没有玩家时 `preventsBlockDrops` 是假。
+///
+/// `DirectionalPlaceContext` has no player. Placement checks never read this stand-in.
+/// `preventsBlockDrops` is false when there is no player.
+static NOBODY: LazyLock<Actor> = LazyLock::new(|| Actor {
+    uuid: [0; 16],
+    position: Vec3::new(0.0, 0.0, 0.0),
+    yaw: 0.0,
+    head_yaw: 0.0,
+    pitch: 0.0,
+    secondary_use: false,
+    main_hand: items::AIR,
+    off_hand: items::AIR,
+    eye_height: 0.0,
+    block_interaction_range: 0.0,
+    may_build: false,
+    prevents_block_drops: false,
+});
 
 impl<'a> PlaceContext<'a> {
     pub fn new(context: UseContext<'a>, world: &World) -> Self {
@@ -236,6 +263,38 @@ impl<'a> PlaceContext<'a> {
     /// 这个位置现在的方块。
     pub fn replaced_state(&self, world: &World) -> BlockState {
         world.block_state(self.clicked_pos())
+    }
+}
+
+impl PlaceContext<'static> {
+    /// `DirectionalPlaceContext`：没有玩家，空手，点的是 `pos` 这一格的 `face` 面。
+    ///
+    /// 下落方块落地时用它判断这一格能不能被替换掉。
+    pub fn directional(world: &World, pos: BlockPos, face: Direction) -> Self {
+        let location = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y),
+            f64::from(pos.z) + 0.5,
+        );
+        let context = UseContext {
+            actor: &NOBODY,
+            hand: Hand::Main,
+            hit: BlockHit {
+                pos,
+                face,
+                location,
+                inside: false,
+            },
+            item: items::AIR,
+            stack: None,
+        };
+        let mut place = Self {
+            context,
+            relative_pos: pos,
+            replace_clicked: true,
+        };
+        place.replace_clicked = world.block_state(pos).can_be_replaced(&place, world);
+        place
     }
 }
 

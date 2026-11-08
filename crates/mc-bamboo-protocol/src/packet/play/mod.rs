@@ -350,6 +350,7 @@ mod tests {
             (MoveEntityPos::ID, 54),
             (MoveEntityPosRot::ID, 55),
             (MoveEntityRot::ID, 57),
+            (OpenBook::ID, 59),
             (OpenScreen::ID, 60),
             (OpenSignEditor::ID, 61),
             (PongResponse::ID, 63),

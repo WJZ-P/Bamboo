@@ -26,3 +26,25 @@ pub mod sparse {
     pub const RABBIT_VARIANT: &[i32] = &[0, 1, 2, 3, 4, 5, 99];
     pub const TROPICAL_FISH_PATTERN: &[i32] = &[0, 256, 512, 768, 1024, 1280, 1, 257, 513, 769, 1025, 1281];
 }
+
+/// 枚举的序列化名字，下标就是网络上的 ID。存档编解码器按名字读写。
+pub mod names {
+    pub const ATTRIBUTE_DISPLAY_TYPE: &[&str] = &["default", "hidden", "override"];
+    pub const ATTRIBUTE_OPERATION: &[&str] = &["add_value", "add_multiplied_base", "add_multiplied_total"];
+    pub const AXOLOTL_VARIANT: &[&str] = &["lucy", "wild", "gold", "cyan", "blue"];
+    pub const DYE_COLOR: &[&str] = &["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"];
+    pub const EQUIPMENT_SLOT: &[&str] = &["mainhand", "feet", "legs", "chest", "head", "offhand", "body", "saddle"];
+    pub const EQUIPMENT_SLOT_GROUP: &[&str] = &["any", "mainhand", "offhand", "hand", "feet", "legs", "chest", "head", "armor", "body", "saddle"];
+    pub const FIREWORK_SHAPE: &[&str] = &["small_ball", "large_ball", "star", "creeper", "burst"];
+    pub const FOX_VARIANT: &[&str] = &["red", "snow"];
+    pub const HORSE_VARIANT: &[&str] = &["white", "creamy", "chestnut", "brown", "black", "gray", "dark_brown"];
+    pub const ITEM_USE_ANIMATION: &[&str] = &["none", "eat", "drink", "block", "bow", "trident", "crossbow", "spyglass", "toot_horn", "brush", "bundle", "spear"];
+    pub const LLAMA_VARIANT: &[&str] = &["creamy", "white", "brown", "gray"];
+    pub const MOOSHROOM_VARIANT: &[&str] = &["red", "brown"];
+    pub const PARROT_VARIANT: &[&str] = &["red_blue", "blue", "green", "yellow_blue", "gray"];
+    pub const RABBIT_VARIANT: &[&str] = &["brown", "white", "black", "white_splotched", "gold", "salt", "evil"];
+    pub const RARITY: &[&str] = &["common", "uncommon", "rare", "epic"];
+    pub const SALMON_SIZE: &[&str] = &["small", "medium", "large"];
+    pub const SWING_ANIMATION_TYPE: &[&str] = &["none", "whack", "stab"];
+    pub const TROPICAL_FISH_PATTERN: &[&str] = &["kob", "sunstreak", "snooper", "dasher", "brinely", "spotty", "flopper", "stripey", "glitter", "blockfish", "betty", "clayfish"];
+}

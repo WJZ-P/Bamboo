@@ -20,6 +20,10 @@ fn every_container_block_has_a_kind() {
         (blocks::HOPPER, ContainerKind::Hopper),
         (blocks::DISPENSER, ContainerKind::Dispenser),
         (blocks::DROPPER, ContainerKind::Dropper),
+        (blocks::CHISELED_BOOKSHELF, ContainerKind::ChiseledBookshelf),
+        (blocks::JUKEBOX, ContainerKind::Jukebox),
+        (blocks::DECORATED_POT, ContainerKind::DecoratedPot),
+        (blocks::CRAFTER, ContainerKind::Crafter),
     ];
     for (block, kind) in kinds {
         assert_eq!(kind_of(BlockState(block)), Some(kind));
@@ -47,6 +51,12 @@ fn kinds_carry_the_official_sizes_and_menu_types() {
     assert_eq!(ContainerKind::Dispenser.menu_type(), menu::GENERIC_3X3);
     assert_eq!(ContainerKind::Dispenser.title(), "container.dispenser");
     assert_eq!(ContainerKind::Dropper.title(), "container.dropper");
+    assert_eq!(ContainerKind::ChiseledBookshelf.slots(), 6);
+    assert_eq!(ContainerKind::Jukebox.slots(), 1);
+    assert_eq!(ContainerKind::DecoratedPot.slots(), 1);
+    assert_eq!(ContainerKind::Crafter.slots(), 9);
+    assert_eq!(ContainerKind::Crafter.menu_type(), menu::CRAFTER_3X3);
+    assert_eq!(ContainerKind::Crafter.title(), "container.crafter");
 }
 
 #[test]

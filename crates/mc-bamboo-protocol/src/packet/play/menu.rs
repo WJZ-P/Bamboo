@@ -1,5 +1,6 @@
 //! 菜单和容器。
 
+use mc_bamboo_core::Hand;
 use mc_bamboo_data::packets::play::clientbound;
 
 use crate::{
@@ -51,13 +52,14 @@ impl ClientboundPacket for ContainerSetContent<'_> {
     }
 }
 
-/// 菜单的一个数据槽变了，官方 `ClientboundContainerSetDataPacket`。
+/// 菜单的一个数据槽变了，官方 `ClientboundContainerSetDataPacket`。`id` 和 `value` 都是 short，不推进 `state_id`。
 ///
-/// 熔炉的燃烧进度、切石机选中的结果编号都存在数据槽里，不推进 `state_id`。
+/// One menu data slot changed. `id` and `value` are shorts and do not advance `state_id`.
+/// Furnace progress, the stonecutter selection, and the lectern page all use this packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContainerSetData {
     pub container_id: i32,
-    pub data_id: i16,
+    pub id: i16,
     pub value: i16,
 }
 
@@ -66,8 +68,24 @@ impl ClientboundPacket for ContainerSetData {
 
     fn write_body(&self, out: &mut Vec<u8>) {
         write_varint(out, self.container_id);
-        write_i16(out, self.data_id);
+        write_i16(out, self.id);
         write_i16(out, self.value);
+    }
+}
+
+/// 打开手里的成书，官方 `ClientboundOpenBookPacket`。手是 varint。
+///
+/// Opens the written book in `hand`. The hand is a varint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenBook {
+    pub hand: Hand,
+}
+
+impl ClientboundPacket for OpenBook {
+    const ID: i32 = clientbound::OPEN_BOOK;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.hand as i32);
     }
 }
 
@@ -160,11 +178,25 @@ mod tests {
         assert_eq!(
             body(&ContainerSetData {
                 container_id: 3,
-                data_id: 1,
+                id: 1,
                 value: 200
             }),
             hex("03 00 01 00 c8")
         );
+        assert_eq!(
+            body(&ContainerSetData {
+                container_id: 1,
+                id: 0,
+                value: -1,
+            }),
+            hex("01 00 00 ff ff")
+        );
+    }
+
+    #[test]
+    fn open_book_writes_the_hand() {
+        assert_eq!(body(&OpenBook { hand: Hand::Main }), hex("00"));
+        assert_eq!(body(&OpenBook { hand: Hand::Off }), hex("01"));
     }
 
     #[test]

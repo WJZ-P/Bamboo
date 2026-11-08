@@ -6,10 +6,12 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
     container::Container,
+    entity::Entities,
     hopper::HopperEntity,
     random::LevelRandom,
     shape::Aabb,
@@ -80,6 +82,16 @@ pub trait Level {
     /// 见 [`Level::redstone`]。
     fn redstone_mut(&mut self) -> &mut RedstoneMemory;
 
+    /// 这个世界里的实体。实体由世界线程拥有，见 `docs/folia.md`。
+    ///
+    /// Entities in this world. The world thread owns them; see `docs/folia.md`.
+    fn entities(&self) -> &Entities;
+
+    /// 见 [`Level::entities`]。
+    ///
+    /// See [`Level::entities`].
+    fn entities_mut(&mut self) -> &mut Entities;
+
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
     /// 双箱已经按官方 `CompoundContainer` 的顺序合并成一张表。这一格不是容器方块时
@@ -124,6 +136,36 @@ pub trait Level {
         let _ = (pos, f);
         false
     }
+
+    /// 雕纹书架、唱片机、饰纹陶罐和合成器的槽位表。没有这张表时不调用 `f`。
+    ///
+    /// Slot list for a chiseled bookshelf, jukebox, decorated pot or crafter. `f` is not called
+    /// when the list is absent.
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let _ = (pos, len, f);
+        false
+    }
+
+    /// 这一格容器现在的槽位。没有容器时是空的。
+    ///
+    /// The container slots at this position, or an empty list when there is no container.
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        let _ = pos;
+        Vec::new()
+    }
+
+    /// 删掉这一格的容器槽位。破坏唱片机时 `setTheItem(EMPTY)` 在通知邻居之前清空。
+    ///
+    /// Drop the container slots at this position. Breaking a jukebox runs `setTheItem(EMPTY)`
+    /// before neighbors are told.
+    fn clear_container(&mut self, pos: BlockPos) {
+        let _ = pos;
+    }
 }
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。
@@ -136,11 +178,58 @@ pub struct RedstoneMemory {
     comparator_outputs: HashMap<BlockPos, i32>,
     /// `ChiseledBookShelfBlockEntity.lastInteractedSlot`。没有记录的格子是 -1，也就是没动过。
     bookshelf_slots: HashMap<BlockPos, usize>,
-    /// `JukeboxBlockEntity` 的 `songPlayer.isPlaying()`。唱片的内容不在范围里，只记哪几格在放。
-    /// 世界生成时直接摆下的 `has_record=true` 唱机没有方块实体，也就没在放。
+    /// `JukeboxBlockEntity` 的 `songPlayer.isPlaying()`。唱片在容器槽位里。
+    /// 场景里直接摆下的 `has_record=true` 唱机没有经过 `setTheItem`，所以没在放。
+    ///
+    /// `JukeboxSongPlayer.isPlaying`. The disc lives in the container slot.
+    /// A scene jukebox placed with `has_record=true` never went through `setTheItem`, so it is
+    /// not playing.
     jukebox_playing: HashSet<BlockPos>,
+    /// `CrafterBlockEntity` 的禁用槽。位 `n` 为 1 表示第 `n` 格禁用。没有记录时全是 0。
+    ///
+    /// Disabled slots of a `CrafterBlockEntity`. Bit `n` set means slot `n` is disabled.
+    /// Missing positions are all enabled.
+    crafter_disabled: HashMap<BlockPos, u16>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
+    /// `LecternBlockEntity` 的页码。比较器只读得了这三项，书本身在游戏层。
+    ///
+    /// Page, page count, and whether the book has writable or written content.
+    /// The item stack itself lives in the game layer.
+    lecterns: HashMap<BlockPos, LecternFacts>,
+    /// 这次右键即将放上的书。方块逻辑看不见物品组件，由调用方先放进来。
+    ///
+    /// The book about to be placed. Block logic cannot see item components,
+    /// so the caller deposits the facts before the use.
+    pending_lectern: Option<LecternFacts>,
+}
+
+/// 讲台比较器要的三项，对应 `LecternBlockEntity` 的 `page`、`pageCount` 和 `hasBook()`。
+///
+/// The three facts a lectern comparator reads: `page`, `pageCount`, and `hasBook()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LecternFacts {
+    pub page: i32,
+    pub page_count: i32,
+    pub has_content: bool,
+}
+
+impl LecternFacts {
+    /// `LecternBlockEntity.getRedstoneSignal`。
+    ///
+    /// `pageCount > 1` 时进度是 `page / (pageCount - 1)`，否则是 1。
+    /// `Mth.floor` 先把 float 提升成 double。
+    ///
+    /// Progress is `page / (pageCount - 1)` when `pageCount > 1`, otherwise 1.
+    /// `Mth.floor` widens the float to double before truncating.
+    pub fn signal(self) -> i32 {
+        let progress = if self.page_count > 1 {
+            self.page as f32 / (self.page_count as f32 - 1.0_f32)
+        } else {
+            1.0_f32
+        };
+        mc_bamboo_core::mth::floor(f64::from(progress * 14.0_f32)) + i32::from(self.has_content)
+    }
 }
 
 impl RedstoneMemory {
@@ -178,11 +267,66 @@ impl RedstoneMemory {
         }
     }
 
+    /// `CrafterBlockEntity.isSlotDisabled` 的九个位。
+    ///
+    /// The nine bits behind `CrafterBlockEntity.isSlotDisabled`.
+    pub fn crafter_disabled(&self, pos: BlockPos) -> u16 {
+        self.crafter_disabled.get(&pos).copied().unwrap_or(0)
+    }
+
+    /// 写下合成器的禁用槽。全是 0 时不留记录。
+    ///
+    /// Store a crafter's disabled slots. An all-zero mask is not recorded.
+    pub fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
+        if mask == 0 {
+            self.crafter_disabled.remove(&pos);
+        } else {
+            self.crafter_disabled.insert(pos, mask);
+        }
+    }
+
     /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
     pub fn forget_block_entity(&mut self, pos: BlockPos) {
         self.comparator_outputs.remove(&pos);
         self.bookshelf_slots.remove(&pos);
         self.jukebox_playing.remove(&pos);
+        self.crafter_disabled.remove(&pos);
+        self.lecterns.remove(&pos);
+    }
+
+    /// 这次交互要放上的书。方块行为在 `placeBook` 里取走。
+    ///
+    /// Facts for the book the current interaction is placing. `placeBook` takes them.
+    pub fn set_pending_lectern(&mut self, facts: LecternFacts) {
+        self.pending_lectern = Some(facts);
+    }
+
+    /// 取走上一段放进来的书。没有就返回 `None`。
+    ///
+    /// Takes the facts deposited for this interaction, if any.
+    pub fn take_pending_lectern(&mut self) -> Option<LecternFacts> {
+        self.pending_lectern.take()
+    }
+
+    /// 记下这一格讲台的页码。
+    ///
+    /// Stores the lectern facts at `pos`.
+    pub fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.lecterns.insert(pos, facts);
+    }
+
+    /// 这一格讲台的页码。没有记录时是 `None`。
+    ///
+    /// Lectern facts at `pos`, if a book was recorded there.
+    pub fn lectern(&self, pos: BlockPos) -> Option<LecternFacts> {
+        self.lecterns.get(&pos).copied()
+    }
+
+    /// 取书或拆掉讲台时丢掉页码。
+    ///
+    /// Drops the lectern facts when the book is removed or the block goes away.
+    pub fn clear_lectern(&mut self, pos: BlockPos) {
+        self.lecterns.remove(&pos);
     }
 
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
@@ -256,4 +400,10 @@ pub enum Effect {
     /// `levelEvent(1500, pos, data)`：堆肥桶收进一个能堆肥的物品。
     /// `success` 为真时数据是 1（等级升了），否则是 0。客户端自己播粒子和声音。
     ComposterFill { pos: BlockPos, success: bool },
+    /// 讲台翻页，`levelEvent(1043, pos, 0)`。客户端自己播翻页的声音。
+    ///
+    /// `LecternBlock.signalPageChange` emits `levelEvent(1043, pos, 0)`.
+    /// The client plays the page-turn sound. Nearby players, including the one
+    /// who turned the page, all receive it.
+    PageTurned { pos: BlockPos },
 }
