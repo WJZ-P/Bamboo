@@ -8,8 +8,8 @@
 //! 扩容把每个桶按 `hash & 旧容量` 拆成两半，两半都保持桶里原来的先后；删除不缩容。
 //! 遍历是桶号从小到大，同一个桶里按放进去的先后。
 //!
-//! 一个桶里的结点到 8 个时官方会尝试树化：容量不到 64 就先扩容一次。推动上限是 12 个方块，
-//! 这里照做这次扩容；真正的树化还要容量至少 64、同一个桶里再到第 10 个，推动结构凑不出来，
+//! 一个桶里已经有 8 个结点、再放第 9 个时官方会尝试树化：容量不到 64 就先扩容一次。
+//! 推动上限是 12 个方块，这里照做这次扩容；真正的树化还要容量至少 64，推动结构凑不出来，
 //! 所以树化之后的红黑树遍历顺序没有实现。
 
 use mc_bamboo_core::BlockPos;
@@ -21,8 +21,9 @@ const INITIAL_CAPACITY: usize = 16;
 /// `DEFAULT_LOAD_FACTOR` 的 3/4。
 const LOAD_NUMERATOR: usize = 3;
 const LOAD_DENOMINATOR: usize = 4;
-/// `TREEIFY_THRESHOLD - 1`：桶里已有 7 个时，再放第 8 个就尝试树化。
-const TREEIFY_AFTER: usize = 7;
+/// `TREEIFY_THRESHOLD`。官方 `putVal` 追加结点时 `binCount` 是桶里原有结点数减一，
+/// `binCount >= TREEIFY_THRESHOLD - 1` 就是原有结点数不少于 8：放第 9 个时尝试树化。
+const TREEIFY_THRESHOLD: usize = 8;
 /// `MIN_TREEIFY_CAPACITY`：容量不到它就只扩容，树化不起来。
 const MIN_TREEIFY_CAPACITY: usize = 64;
 
@@ -60,8 +61,8 @@ impl DeleteAfterMove {
             existing
         };
 
-        // 放进去的是第 8 个或更晚的结点：官方 `treeifyBin`，容量不到 64 只扩容。
-        if existing >= TREEIFY_AFTER && self.buckets.len() < MIN_TREEIFY_CAPACITY {
+        // 放进去的是第 9 个或更晚的结点：官方 `treeifyBin`，容量不到 64 只扩容。
+        if existing >= TREEIFY_THRESHOLD && self.buckets.len() < MIN_TREEIFY_CAPACITY {
             self.resize();
         }
         self.len += 1;
@@ -240,7 +241,20 @@ mod tests {
         );
     }
 
-    /// 同一个桶里到 9 个，官方会扩容两次（树化前的 `treeifyBin`），顺序跟着拆桶走。
+    /// 同一个桶里有 8 个时官方不扩容，按放进去的先后；放第 9 个时 `treeifyBin` 扩容一次，
+    /// 桶按第 5 位拆开。两组答案都来自真的 `java.util.HashMap`。
+    #[test]
+    fn a_crowded_bucket_resizes_on_its_ninth_entry() {
+        let eight: Vec<(i32, i32, i32)> = (0..8).map(|i| (1 + 16 * i, 0, 0)).collect();
+        assert_eq!(put_all(&eight), positions(&eight));
+
+        let nine: Vec<(i32, i32, i32)> = (0..9).map(|i| (1 + 16 * i, 0, 0)).collect();
+        let xs = [1, 33, 65, 97, 129, 17, 49, 81, 113];
+        let split: Vec<(i32, i32, i32)> = xs.iter().map(|&x| (x, 0, 0)).collect();
+        assert_eq!(put_all(&nine), positions(&split));
+    }
+
+    /// 同一个桶里到 9 个，官方会扩容（树化前的 `treeifyBin`），顺序跟着拆桶走。
     #[test]
     fn treeify_resize_keeps_order() {
         let colliding: Vec<(i32, i32, i32)> = (0..9).map(|i| (7, -9, 13 + i * 64)).collect();
