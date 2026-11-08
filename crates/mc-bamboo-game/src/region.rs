@@ -19,7 +19,7 @@ use mc_bamboo_protocol::packet::play::{
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
 use crate::{
-    chunk_encoding::encode_template,
+    chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
     global::GameTime,
     inbound::{JoinRequest, PlayerId},
@@ -86,6 +86,8 @@ pub(crate) struct Region {
     pub(crate) chunks: ChunkStore,
     /// 没改过的区块共用的编码结果。
     pub(crate) template_body: Vec<u8>,
+    /// 改过的区块的编码结果，区块变了就重新编码。
+    pub(crate) chunk_cache: ChunkCache,
     /// 这一 tick 改过的方块，等广播阶段发出去。
     pub(crate) block_changes: BlockChanges,
     /// 这一 tick 开头算完光照以后变了的段，等广播阶段发出去。
@@ -124,6 +126,7 @@ impl Region {
             links: Links::default(),
             chunks,
             template_body,
+            chunk_cache: ChunkCache::default(),
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
