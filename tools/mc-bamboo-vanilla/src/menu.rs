@@ -3,8 +3,13 @@
 //! `MenuOracle.java` 在 JVM 里给每种容器菜单出题：随机的初始内容、随机的创造模式开关和随机的一串点击。
 //! 每一步之后它报告菜单的全部槽位、光标和 `state_id`。这里用 [`Replay`] 跑同一串点击，逐槽、逐个 `state_id` 比较。
 //!
-//! 两边都是“客户端从不预测”的模型：点击自带的 `changed_slots` 是空的，光标永远是空物品。
-//! 这样服务端记账和真实客户端的预测就是同一个值，比较才有意义。
+//! 随机题是“客户端从不预测”：点击自带的 `changed_slots` 是空的，光标永远是空物品。
+//! 最后一道带组件的题改成官方 `MultiPlayerGameMode.handleContainerInput` 的预测，
+//! 回传变过的槽和光标的哈希，再比服务端补发了哪些槽。
+//!
+//! Random cases never predict: `changed_slots` is empty and the carried hash is
+//! empty. The last case predicts like `MultiPlayerGameMode.handleContainerInput`
+//! and compares which slots the server resends.
 //!
 //! 题目不落盘，`--case` 可以单独重跑一道。
 
@@ -15,7 +20,11 @@ use std::{
 
 use mc_bamboo_data::version;
 use mc_bamboo_game::{Replay, ReplayShape, Snapshot};
-use mc_bamboo_protocol::{item::ItemStack, packet::play::ContainerInput};
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, cursor::Cursor},
+    item::ItemStack,
+    packet::play::ContainerInput,
+};
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
@@ -48,6 +57,22 @@ struct Case {
     inventory: Vec<[i32; 2]>,
     open: Outcome,
     steps: Vec<Step>,
+    /// 这道题的客户端会按官方预测回传哈希。
+    ///
+    /// This case's client sends hashes the way the official client predicts.
+    #[serde(default)]
+    predict: bool,
+    /// 打开前盖到容器格上的组件补丁，网络格式。
+    ///
+    /// Component patches, in the network format, applied before the menu opens.
+    #[serde(default)]
+    patches: Vec<StoredPatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoredPatch {
+    index: usize,
+    bytes: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +81,16 @@ struct Step {
     button: i8,
     input: u8,
     outcome: Outcome,
+    /// 这次点击之后服务端补发的槽位。只有预测题才有。
+    ///
+    /// Slots the server resent after this click. Only predicting cases set it.
+    #[serde(default)]
+    resent: Vec<i16>,
+    /// 光标有没有被补发。
+    ///
+    /// Whether the carried item was resent.
+    #[serde(default)]
+    carried_resent: bool,
 }
 
 /// 菜单在某一刻的样子。槽位和光标都是 `[物品 ID, 数量]`，空槽是 `[0, 0]`。
@@ -186,12 +221,35 @@ impl Report {
         self.cases += 1;
         let mut replay = Replay::new(shape, &pairs(&case.container), &pairs(&case.inventory));
         replay.set_creative(case.creative);
+        if case.predict {
+            for patch in &case.patches {
+                let Some(&[item, count]) = case.container.get(patch.index) else {
+                    return Err(format!(
+                        "case {}: patch slot {} is outside the container",
+                        case.id, patch.index
+                    ));
+                };
+                replay.set_container(patch.index, stack_with_patch(item, count, &patch.bytes)?);
+            }
+        }
         let snapshot = replay.open();
         self.compare(&format!("case {} open", case.id), &snapshot, &case.open);
 
         for (index, step) in case.steps.iter().enumerate() {
             let input = ContainerInput::from_id(i32::from(step.input));
-            let snapshot = replay.click(step.slot, step.button, input);
+            let snapshot = if case.predict {
+                let (snapshot, resent, carried_resent) =
+                    replay.click_predicting(step.slot, step.button, input);
+                if resent != step.resent || carried_resent != step.carried_resent {
+                    self.mismatch(format!(
+                        "case {} step {index}: resent slots official {:?} carried {}, bamboo {resent:?} carried {carried_resent}",
+                        case.id, step.resent, step.carried_resent
+                    ));
+                }
+                snapshot
+            } else {
+                replay.click(step.slot, step.button, input)
+            };
             self.steps += 1;
             self.compare(
                 &format!("case {} step {index}", case.id),
@@ -270,6 +328,32 @@ fn shape_of(name: &str) -> Option<ReplayShape> {
         "shulker" => Some(ReplayShape::ShulkerBox),
         _ => None,
     }
+}
+
+fn stack_with_patch(item: i32, count: i32, hex: &str) -> Result<ItemStack, String> {
+    let bytes = unhex(hex)?;
+    let mut cursor = Cursor::new(&bytes);
+    let patch = ComponentPatch::read(&mut cursor).map_err(|error| error.to_string())?;
+    cursor.finish().map_err(|error| error.to_string())?;
+    let (added, removed) = patch.to_opaque();
+    Ok(ItemStack {
+        item,
+        count,
+        added,
+        removed,
+    })
+}
+
+fn unhex(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err(format!("odd hex length {}", text.len()));
+    }
+    (0..text.len() / 2)
+        .map(|index| {
+            u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+                .map_err(|error| format!("bad hex: {error}"))
+        })
+        .collect()
 }
 
 fn pairs(entries: &[[i32; 2]]) -> Vec<(i32, i32)> {

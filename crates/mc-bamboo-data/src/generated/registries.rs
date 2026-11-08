@@ -557,7 +557,6 @@ pub mod fluid {
     pub const LAVA: i32 = 4;
 }
 
-
 pub mod potion {
     pub const TOTAL: u32 = 46;
     /// 条目名，下标就是注册表 ID。
@@ -705,9 +704,10 @@ pub mod banner_pattern {
     pub const TRIANGLES_TOP: i32 = 42;
 }
 
-
 pub mod menu {
     pub const TOTAL: u32 = 25;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["minecraft:generic_9x1", "minecraft:generic_9x2", "minecraft:generic_9x3", "minecraft:generic_9x4", "minecraft:generic_9x5", "minecraft:generic_9x6", "minecraft:generic_3x3", "minecraft:crafter_3x3", "minecraft:anvil", "minecraft:beacon", "minecraft:blast_furnace", "minecraft:brewing_stand", "minecraft:crafting", "minecraft:enchantment", "minecraft:furnace", "minecraft:grindstone", "minecraft:hopper", "minecraft:lectern", "minecraft:loom", "minecraft:merchant", "minecraft:shulker_box", "minecraft:smithing", "minecraft:smoker", "minecraft:cartography_table", "minecraft:stonecutter"];
     pub const GENERIC_9X1: i32 = 0;
     pub const GENERIC_9X2: i32 = 1;
     pub const GENERIC_9X3: i32 = 2;
@@ -777,6 +777,5 @@ pub mod attribute_defaults {
     pub const WATER_MOVEMENT_EFFICIENCY: f64 = 0.0;
     pub const WAYPOINT_RECEIVE_RANGE: f64 = 0.0;
     pub const WAYPOINT_TRANSMIT_RANGE: f64 = 0.0;
-
 }
 

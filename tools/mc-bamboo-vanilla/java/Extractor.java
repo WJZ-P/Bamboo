@@ -7,6 +7,7 @@ import com.google.gson.JsonParser;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.io.IOException;
 import java.io.Reader;
@@ -49,6 +50,9 @@ import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.VarInt;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.util.StringRepresentable;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
@@ -348,6 +352,7 @@ public final class Extractor {
         JsonObject enums = new JsonObject();
         enums.add("counts", counts);
         enums.add("sparse", sparse);
+        enums.add("names", componentEnumNames());
         return enums;
     }
 
@@ -416,6 +421,72 @@ public final class Extractor {
             text.append(buffer, 0, count);
         }
         return text.toString();
+    }
+
+    /**
+     * 同一批枚举的序列化名字，存档用的 `Codec` 走的是名字而不是 ID。
+     *
+     * 连续的枚举按 ID 排，下标就是网络上的那个 ID；ID 从官方自己的 `StreamCodec` 读出来，
+     * 因为声明顺序不一定等于 ID 顺序（`EquipmentSlot` 就不是）。
+     * 稀疏的枚举按声明顺序排，和 `sparse` 里的 ID 表一一对应。
+     */
+    private static JsonObject componentEnumNames() {
+        JsonObject names = new JsonObject();
+        names.add("rarity", byStreamId(Rarity.values(), Rarity.STREAM_CODEC));
+        names.add("dye_color", byStreamId(DyeColor.values(), DyeColor.STREAM_CODEC));
+        names.add("item_use_animation", byStreamId(ItemUseAnimation.values(), ItemUseAnimation.STREAM_CODEC));
+        names.add("swing_animation_type", byStreamId(SwingAnimationType.values(), SwingAnimationType.STREAM_CODEC));
+        names.add("equipment_slot", byStreamId(EquipmentSlot.values(), EquipmentSlot.STREAM_CODEC));
+        names.add("equipment_slot_group", byStreamId(EquipmentSlotGroup.values(), EquipmentSlotGroup.STREAM_CODEC));
+        names.add("attribute_operation", byStreamId(AttributeModifier.Operation.values(), AttributeModifier.Operation.STREAM_CODEC));
+        names.add("firework_shape", byStreamId(FireworkExplosion.Shape.values(), FireworkExplosion.Shape.STREAM_CODEC));
+        // `map_post_processing` 是瞬态组件，没有存档 Codec，也不是 StringRepresentable，不导出名字。
+        names.add("fox_variant", byStreamId(Fox.Variant.values(), Fox.Variant.STREAM_CODEC));
+        names.add("axolotl_variant", byStreamId(Axolotl.Variant.values(), Axolotl.Variant.STREAM_CODEC));
+        names.add("salmon_size", byStreamId(Salmon.Variant.values(), Salmon.Variant.STREAM_CODEC));
+        names.add("parrot_variant", byStreamId(Parrot.Variant.values(), Parrot.Variant.STREAM_CODEC));
+        names.add("mooshroom_variant", byStreamId(MushroomCow.Variant.values(), MushroomCow.Variant.STREAM_CODEC));
+        names.add("llama_variant", byStreamId(Llama.Variant.values(), Llama.Variant.STREAM_CODEC));
+        names.add(
+                "horse_variant",
+                byStreamId(
+                        net.minecraft.world.entity.animal.equine.Variant.values(),
+                        net.minecraft.world.entity.animal.equine.Variant.STREAM_CODEC));
+        // `ItemAttributeModifiers.Display.Type` 没有公开的 StreamCodec，它的 ID 就是声明顺序，
+        // `components` 对照里的 attribute_display_type 折回题会确认这一点。
+        names.add("attribute_display_type", inDeclarationOrder(ItemAttributeModifiers.Display.Type.values()));
+        // 稀疏枚举按声明顺序，和上面的 ID 表对齐。
+        names.add("tropical_fish_pattern", inDeclarationOrder(TropicalFish.Pattern.values()));
+        names.add("rabbit_variant", inDeclarationOrder(Rabbit.Variant.values()));
+        return names;
+    }
+
+    /** 按官方 `StreamCodec` 写出来的 VarInt 当下标排序列化名字。 */
+    private static <T extends StringRepresentable> JsonArray byStreamId(T[] values, StreamCodec<? super ByteBuf, T> codec) {
+        String[] names = new String[values.length];
+        for (T value : values) {
+            ByteBuf buffer = Unpooled.buffer();
+            codec.encode(buffer, value);
+            int id = VarInt.read(buffer);
+            if (id < 0 || id >= names.length || names[id] != null) {
+                throw new IllegalStateException("枚举 ID " + id + " 不在 0.." + names.length + " 里或者重复了");
+            }
+            names[id] = value.getSerializedName();
+        }
+        JsonArray array = new JsonArray();
+        for (String name : names) {
+            array.add(name);
+        }
+        return array;
+    }
+
+    /** 按声明顺序列出序列化名字。 */
+    private static JsonArray inDeclarationOrder(StringRepresentable[] values) {
+        JsonArray array = new JsonArray();
+        for (StringRepresentable value : values) {
+            array.add(value.getSerializedName());
+        }
+        return array;
     }
 
     /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */

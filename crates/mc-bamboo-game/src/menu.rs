@@ -1373,22 +1373,34 @@ fn same_component_bytes(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.added == b.added && a.removed == b.removed
 }
 
-/// 官方 `HashedStack.matches`。
+/// 官方 `HashedStack.matches` / `HashedPatchMap.matches`。
 ///
-/// 官方把每一项组件按 `HashOps`（CRC32C）算成一个整数再比。那套哈希要整个组件的 DFU
-/// `Codec`，我们没有，见 README 的已知限制。这里保守处理：带组件的物品一律算不一致，
-/// 结果只是多发一个 `container_set_slot`，不会误以为客户端手上的东西和服务端一样。
+/// 每一项增加的组件按存档 `Codec` 走 `HashOps`（CRC32C）得到 `HashCode.asInt()`，
+/// 再和客户端发来的整数比较。移除项只比组件类型。解不开本地组件、或者某项没有
+/// 存档 `Codec`（瞬态组件）时不算匹配，结果只是多发一次槽位同步。
+///
+/// `HashedStack.matches` / `HashedPatchMap.matches`.
+///
+/// Each added component is hashed with its persistent codec through `HashOps`
+/// (CRC32C) and compared as `HashCode.asInt()`. Removals compare component types
+/// only. A component that cannot be decoded, or that has no persistent codec,
+/// does not match, so the slot is synchronized again.
 fn hashed_matches(hash: &HashedStack, local: &ItemStack) -> bool {
     match hash {
         HashedStack::Empty => local.is_empty(),
         HashedStack::Item(hashed) => {
-            !local.is_empty()
-                && hashed.item == local.item
-                && hashed.count == local.count
-                && hashed.added.is_empty()
-                && hashed.removed.is_empty()
-                && local.added.is_empty()
-                && local.removed.is_empty()
+            if local.is_empty() || hashed.item != local.item || hashed.count != local.count {
+                return false;
+            }
+            let Ok(patch) = mc_bamboo_protocol::components::ComponentPatch::from_opaque(local)
+            else {
+                return false;
+            };
+            mc_bamboo_protocol::components::archive::stack::matches_hashed(
+                &patch,
+                &hashed.added,
+                &hashed.removed,
+            )
         }
     }
 }

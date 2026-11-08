@@ -7,7 +7,11 @@
 //! 官方客户端会预测，但那是另一条路径；两边用同一个模型才比得了。
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_protocol::{item::ItemStack, packet::play::ContainerInput};
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, archive::stack::component_hashes},
+    item::ItemStack,
+    packet::play::{ContainerInput, HashedItem},
+};
 
 use super::{Ctx, HashedStack, Menu, Target};
 use crate::{
@@ -99,6 +103,15 @@ impl Replay {
         self.creative = creative;
     }
 
+    /// 打开之前换掉容器里的一格。组件点击题用它放上带补丁的物品。
+    ///
+    /// Replace one container slot before the menu opens.
+    pub fn set_container(&mut self, index: usize, stack: ItemStack) {
+        if index < self.container.len() {
+            self.container[index] = stack;
+        }
+    }
+
     /// 模拟 `sendAllDataToRemote`，打开菜单后的第一个 state_id 是 1。
     pub fn open(&mut self) -> Snapshot {
         let slots = self.menu_slots();
@@ -133,6 +146,54 @@ impl Replay {
         self.snapshot()
     }
 
+    /// 官方 `MultiPlayerGameMode.handleContainerInput` 的预测：变过的槽和光标都回传
+    /// `HashedStack.create`。返回这次服务端补发的槽位，以及光标有没有被补发。
+    ///
+    /// The predicting client from `MultiPlayerGameMode.handleContainerInput`.
+    /// Returns the slots the server resent, and whether the carried item was resent.
+    pub fn click_predicting(
+        &mut self,
+        slot: i16,
+        button: i8,
+        input: ContainerInput,
+    ) -> (Snapshot, Vec<i16>, bool) {
+        if !self.menu.valid_slot_index(slot) {
+            return (self.snapshot(), Vec::new(), false);
+        }
+        let before = self.menu_slots();
+        let mut ctx = Ctx {
+            kind: self.menu.kind,
+            container_size: self.menu.container_size,
+            viewer: VIEWER,
+            container: &mut self.container,
+            sources: &mut self.sources,
+            inventory: &mut self.inventory,
+            carried: &mut self.menu.carried,
+            quickcraft_status: &mut self.menu.quickcraft_status,
+            quickcraft_type: &mut self.menu.quickcraft_type,
+            quickcraft_slots: &mut self.menu.quickcraft_slots,
+            creative: self.creative,
+        };
+        super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
+        let after = self.menu_slots();
+        for (index, (previous, current)) in before.iter().zip(&after).enumerate() {
+            if !previous.matches(current) {
+                self.menu.remote_slots[index].receive(hashed_stack(current));
+            }
+        }
+        self.menu
+            .remote_carried
+            .receive(hashed_stack(&self.menu.carried));
+        let resent = self
+            .menu
+            .take_slot_changes(&after)
+            .iter()
+            .map(|(_, index, _)| *index as i16)
+            .collect();
+        let carried_resent = self.menu.take_carried_change().is_some();
+        (self.snapshot(), resent, carried_resent)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             slots: self.menu_slots(),
@@ -159,6 +220,37 @@ fn official_slot(index: usize) -> Option<usize> {
         40 => Some(OFF_HAND),
         _ => None,
     }
+}
+
+/// 官方 `HashedStack.create`。算不出哈希时放一个对不上的值，服务端会把这格再发一次。
+///
+/// `HashedStack.create`. A value that cannot be hashed does not match, so the
+/// server sends the slot again.
+fn hashed_stack(stack: &ItemStack) -> HashedStack {
+    if stack.is_empty() {
+        return HashedStack::Empty;
+    }
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return hashed_mismatch(stack);
+    };
+    match component_hashes(&patch) {
+        Some(hashed) => HashedStack::Item(HashedItem {
+            item: stack.item,
+            count: stack.count,
+            added: hashed.added,
+            removed: hashed.removed,
+        }),
+        None => hashed_mismatch(stack),
+    }
+}
+
+fn hashed_mismatch(stack: &ItemStack) -> HashedStack {
+    HashedStack::Item(HashedItem {
+        item: stack.item,
+        count: stack.count,
+        added: vec![(i32::MIN, 0)],
+        removed: Vec::new(),
+    })
 }
 
 fn stack(item: i32, count: i32) -> ItemStack {

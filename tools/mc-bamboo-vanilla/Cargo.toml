@@ -17,6 +17,7 @@ oracle = [
     "dep:mc-bamboo-data",
     "dep:mc-bamboo-game",
     "dep:mc-bamboo-loot",
+    "dep:mc-bamboo-nbt",
     "dep:mc-bamboo-protocol",
     "dep:mc-bamboo-recipes",
     "dep:mc-bamboo-world",
@@ -31,6 +32,7 @@ mc-bamboo-core = { workspace = true, optional = true }
 mc-bamboo-data = { workspace = true, optional = true }
 mc-bamboo-game = { workspace = true, optional = true }
 mc-bamboo-loot = { workspace = true, optional = true }
+mc-bamboo-nbt = { workspace = true, optional = true }
 mc-bamboo-protocol = { workspace = true, optional = true }
 mc-bamboo-recipes = { workspace = true, optional = true }
 mc-bamboo-server = { workspace = true, optional = true }

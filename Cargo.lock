@@ -2016,6 +2016,7 @@ dependencies = [
  "mc-bamboo-data",
  "mc-bamboo-game",
  "mc-bamboo-loot",
+ "mc-bamboo-nbt",
  "mc-bamboo-protocol",
  "mc-bamboo-recipes",
  "mc-bamboo-server",

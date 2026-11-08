@@ -1,5 +1,7 @@
+import com.google.common.hash.HashCode;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import io.netty.buffer.Unpooled;
 import java.io.BufferedWriter;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
@@ -21,8 +23,14 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.component.DataComponentPatch;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.HashedPatchMap;
 import net.minecraft.network.HashedStack;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
@@ -36,6 +44,8 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.resources.RegistryOps;
+import net.minecraft.util.HashOps;
 import net.minecraft.util.Prediction;
 import net.minecraft.world.Container;
 import net.minecraft.world.SimpleContainer;
@@ -70,7 +80,9 @@ import sun.misc.Unsafe;
  * 假玩家是 Unsafe.allocateInstance 出来的 ServerPlayer，只补了 level、inventory 和 abilities.instabuild；
  * 掉落的物品被 override 成空操作，因为 Bamboo 也没有物品实体。
  *
- * <p>客户端按“从不预测”的模型模拟，两边相同：每次点击的 changedSlots 是空的，carriedItem 恒为 {@link HashedStack#EMPTY}。
+ * <p>随机题按“从不预测”的模型模拟：每次点击的 changedSlots 是空的，carriedItem 恒为 {@link HashedStack#EMPTY}。
+ * 最后另有一道带组件的题，客户端按 {@code MultiPlayerGameMode.handleContainerInput} 把变过的槽
+ * 和光标哈希回传，服务端补发的槽位必须和 Bamboo 一致。
  * 每步之后写出菜单的全部槽位、光标和 stateId。菜单的 stateId 只有 ContainerSynchronizer 会推进，
  * 官方的那个是 ServerPlayer 里的匿名类，这里按它原样写了一个：sendInitialData 和 sendSlotChange 各调一次
  * {@code container.incrementStateId()}，sendCarriedChange 不调。sendAllDataToRemote 和 broadcastChanges 本身仍然是官方的。
@@ -233,6 +245,10 @@ public final class MenuOracle {
                 write(caseOf(index));
                 written++;
             }
+            if (options.only() < 0) {
+                write(componentCase(written));
+                written++;
+            }
 
             JsonObject end = new JsonObject();
             end.addProperty("type", "end");
@@ -292,6 +308,118 @@ public final class MenuOracle {
             }
             line.add("steps", steps);
             return line;
+        }
+
+        /**
+         * 带组件的钻石剑：客户端预测后回传哈希。补发列表空，说明两边的哈希一致。
+         *
+         * A diamond sword with components. The client sends hashes after predicting.
+         * An empty resend list means both hashes agree.
+         */
+        private JsonObject componentCase(int id) {
+            RegistryAccess.Frozen access = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+            RegistryOps<HashCode> hashOps = access.createSerializationContext(HashOps.CRC32C_INSTANCE);
+            HashedPatchMap.HashGenerator hasher =
+                    component -> hashComponent(hashOps, component);
+            Shape shape = Shape.CHEST_3;
+            FakePlayer player = FakePlayer.create(false);
+            Container container = new SimpleContainer(shape.size);
+            ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+            sword.set(DataComponents.CUSTOM_NAME, Component.literal("oracle"));
+            sword.set(DataComponents.DAMAGE, 3);
+            sword.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
+            if (sword.has(DataComponents.ATTRIBUTE_MODIFIERS)) {
+                sword.remove(DataComponents.ATTRIBUTE_MODIFIERS);
+            }
+            container.setItem(0, sword);
+            container.setItem(1, new ItemStack(Items.STONE, 16));
+
+            RecordingSync sync = new RecordingSync(hasher);
+            AbstractContainerMenu menu = shape.create(player.getInventory(), container);
+            menu.setSynchronizer(sync);
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", shape.id);
+            line.addProperty("creative", false);
+            line.addProperty("predict", true);
+            line.add("container", items(container, shape.size));
+            line.add("inventory", inventoryItems(player.getInventory()));
+            line.add("open", outcome(menu));
+            JsonArray patches = new JsonArray();
+            JsonObject patch = new JsonObject();
+            patch.addProperty("index", 0);
+            patch.addProperty("bytes", hex(patchBytes(access, sword.getComponentsPatch())));
+            patches.add(patch);
+            line.add("patches", patches);
+
+            JsonArray steps = new JsonArray();
+            steps.add(predictingClick(menu, 0, 0, 0, player, sync, hasher));
+            steps.add(predictingClick(menu, 2, 0, 0, player, sync, hasher));
+            steps.add(predictingClick(menu, 1, 0, 0, player, sync, hasher));
+            line.add("steps", steps);
+            return line;
+        }
+
+        private static int hashComponent(RegistryOps<HashCode> hashOps, TypedDataComponent<?> component) {
+            return component.encodeValue(hashOps).getOrThrow(IllegalStateException::new).asInt();
+        }
+
+        private static JsonObject predictingClick(
+                AbstractContainerMenu menu,
+                int slot,
+                int button,
+                int input,
+                FakePlayer player,
+                RecordingSync sync,
+                HashedPatchMap.HashGenerator hasher) {
+            List<ItemStack> before = new ArrayList<>();
+            for (Slot menuSlot : menu.slots) {
+                before.add(menuSlot.getItem().copy());
+            }
+            menu.suppressRemoteUpdates();
+            menu.clicked(slot, button, INPUTS[input], player);
+            for (int index = 0; index < menu.slots.size(); index++) {
+                ItemStack after = menu.slots.get(index).getItem();
+                if (!ItemStack.matches(before.get(index), after)) {
+                    menu.setRemoteSlotUnsafe(index, HashedStack.create(after, hasher));
+                }
+            }
+            menu.setRemoteCarried(HashedStack.create(menu.getCarried(), hasher));
+            menu.resumeRemoteUpdates();
+            sync.reset();
+            menu.broadcastChanges();
+
+            JsonObject step = new JsonObject();
+            step.addProperty("slot", slot);
+            step.addProperty("button", button);
+            step.addProperty("input", input);
+            step.add("outcome", outcome(menu));
+            JsonArray resent = new JsonArray();
+            for (int resentSlot : sync.slots) {
+                resent.add(resentSlot);
+            }
+            step.add("resent", resent);
+            step.addProperty("carried_resent", sync.carried);
+            return step;
+        }
+
+        private static byte[] patchBytes(RegistryAccess registries, DataComponentPatch patch) {
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+            byte[] bytes = new byte[buffer.readableBytes()];
+            buffer.readBytes(bytes);
+            return bytes;
+        }
+
+        private static String hex(byte[] bytes) {
+            StringBuilder text = new StringBuilder(bytes.length * 2);
+            for (byte value : bytes) {
+                text.append(Character.forDigit((value >> 4) & 0xf, 16));
+                text.append(Character.forDigit(value & 0xf, 16));
+            }
+            return text.toString();
         }
     }
 
@@ -455,6 +583,51 @@ public final class MenuOracle {
         pair.add(stack.isEmpty() ? 0 : BuiltInRegistries.ITEM.getId(stack.getItem()));
         pair.add(stack.getCount());
         return pair;
+    }
+
+    /**
+     * 带哈希的同步器。补发的槽位记下来，和 Bamboo 的预测点击比。
+     *
+     * Records which slots were resent so the predicting click can be compared.
+     */
+    private static final class RecordingSync implements ContainerSynchronizer {
+        final HashedPatchMap.HashGenerator hasher;
+        final List<Integer> slots = new ArrayList<>();
+        boolean carried;
+
+        RecordingSync(HashedPatchMap.HashGenerator hasher) {
+            this.hasher = hasher;
+        }
+
+        void reset() {
+            slots.clear();
+            carried = false;
+        }
+
+        @Override
+        public void sendInitialData(AbstractContainerMenu container, List<ItemStack> slotItems, ItemStack carriedItem, int[] dataSlots) {
+            container.incrementStateId();
+        }
+
+        @Override
+        public void sendSlotChange(AbstractContainerMenu container, int slotIndex, ItemStack itemStack) {
+            slots.add(slotIndex);
+            container.incrementStateId();
+        }
+
+        @Override
+        public void sendCarriedChange(AbstractContainerMenu container, ItemStack itemStack) {
+            carried = true;
+        }
+
+        @Override
+        public void sendDataChange(AbstractContainerMenu container, int id, int value) {
+        }
+
+        @Override
+        public RemoteSlot createSlot() {
+            return new RemoteSlot.Synchronized(hasher);
+        }
     }
 
     /**
