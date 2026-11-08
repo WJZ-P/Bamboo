@@ -121,10 +121,13 @@ fn scooped_bucket(state: BlockState) -> Option<i32> {
     if state.is(blocks::LAVA_CAULDRON) {
         return Some(items::LAVA_BUCKET);
     }
-    let full = state.get(LEVEL_CAULDRON) == MAX_FILL_LEVEL;
-    if state.is(blocks::WATER_CAULDRON) && full {
+    // 空锅没有 `level`。先看是不是分层锅，再读水位。
+    //
+    // An empty cauldron has no `level`. Check for a layered cauldron before reading it.
+    if state.is(blocks::WATER_CAULDRON) && state.get(LEVEL_CAULDRON) == MAX_FILL_LEVEL {
         Some(items::WATER_BUCKET)
-    } else if state.is(blocks::POWDER_SNOW_CAULDRON) && full {
+    } else if state.is(blocks::POWDER_SNOW_CAULDRON) && state.get(LEVEL_CAULDRON) == MAX_FILL_LEVEL
+    {
         Some(items::POWDER_SNOW_BUCKET)
     } else {
         None
@@ -1003,6 +1006,10 @@ mod tests {
         assert!(limit);
 
         let bucket = ItemStack::new(items::BUCKET, 1);
+        assert_unchanged(
+            &click_stack(BlockState(blocks::CAULDRON), &bucket),
+            BlockState(blocks::CAULDRON),
+        );
         assert_unchanged(&click_stack(water(2), &bucket), water(2));
         let emptied = click_stack(water(3), &bucket);
         assert_eq!(emptied.result, InteractionResult::Success);
