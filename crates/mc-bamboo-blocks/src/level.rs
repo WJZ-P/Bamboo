@@ -7,7 +7,11 @@ use mc_bamboo_core::{
     sign::{SignContent, SignTextSlot},
 };
 
-use crate::{random::LevelRandom, shape::Aabb, state::BlockState};
+use crate::{
+    random::LevelRandom,
+    shape::Aabb,
+    state::{BlockState, NoteBlockInstrument},
+};
 
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
 pub trait Level {
@@ -161,4 +165,16 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// 音符盒被敲响，`NoteBlock.triggerEvent`。`seed` 是官方传给 `playSeededSound` 的那个随机数。
+    ///
+    /// 官方把方块事件排进队列，下一 tick 的 `ServerLevel.runBlockEvents` 才取这个随机数
+    /// （在随机刻之后、实体刻之前）；Bamboo 没有方块事件队列，在开始挖的时候就取了，
+    /// 取数次数一样，在随机序列里的位置不一样。声音和粒子还没做，
+    /// 音效那边要的音色、音高和随机数都在这里。
+    NoteBlockPlayed {
+        pos: BlockPos,
+        instrument: NoteBlockInstrument,
+        note: i32,
+        seed: i64,
+    },
 }

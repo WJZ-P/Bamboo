@@ -7,8 +7,9 @@ use mc_bamboo_data::{Block, tags::item_tags};
 
 use crate::{
     behaviour::{Behaviour, Plain, common::default_state},
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
+    level::Effect,
     state::{BlockState, NOTE, NOTEBLOCK_INSTRUMENT, NoteBlockInstrument, POWERED, item_is_tagged},
     world::World,
 };
@@ -45,7 +46,34 @@ fn with_instrument(state: BlockState, world: &World, pos: BlockPos) -> BlockStat
     state.with(NOTEBLOCK_INSTRUMENT, instrument)
 }
 
+/// `NoteBlock.playNote`：上面是头颅，或者上面是空气，敲下去才响。
+fn play_note(state: BlockState, world: &mut World, pos: BlockPos) {
+    let instrument = state.get(NOTEBLOCK_INSTRUMENT);
+    if !works_above_note_block(instrument) && !world.block_state(pos.above()).is_air() {
+        return;
+    }
+    // `triggerEvent`：头上有自定义声音的头颅时要找方块实体，没有就什么都不放。
+    // 头颅的方块实体还没有，`getCustomSoundId` 按找不到算，官方此时直接返回、不取随机数。
+    if instrument == NoteBlockInstrument::CustomHead {
+        return;
+    }
+    // 官方在方块事件阶段取一次 `nextLong` 当声音的随机种子，见 `Effect::NoteBlockPlayed`。
+    let seed = world.random().next_long();
+    let note = state.get(NOTE);
+    world.push_effect(Effect::NoteBlockPlayed {
+        pos,
+        instrument,
+        note,
+        seed,
+    });
+}
+
 impl Behaviour for Note {
+    /// `NoteBlock.attack`：拿手打一下和右键一样，响一声。
+    fn attack(&self, state: BlockState, world: &mut World, pos: BlockPos, _player: &Actor) {
+        play_note(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

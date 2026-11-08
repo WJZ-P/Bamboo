@@ -113,6 +113,22 @@ pub fn use_item(
     finish(world, result)
 }
 
+/// `state.attack(level, pos, player)`：生存模式开始挖时打的那一下。
+///
+/// 红石矿会亮起来、龙蛋会传送、音符盒会响，别的方块什么也不做。
+/// 官方的 `Player.attack` 还管实体，这里只有方块的这一半。
+pub fn attack(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    actor: &Actor,
+    pos: BlockPos,
+) -> Outcome {
+    let mut world = World::new(level, ticks);
+    let state = world.block_state(pos);
+    state.attack(&mut world, pos, actor);
+    finish(world, InteractionResult::Pass)
+}
+
 /// `ServerPlayerGameMode.destroyBlock` 里 `canDestroyBlock` 之后的部分。
 ///
 /// 这个世界没有权限系统，官方的 `GameMasterBlock` 破坏不了，返回 [`InteractionResult::Fail`]，

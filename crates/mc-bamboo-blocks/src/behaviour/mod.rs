@@ -129,6 +129,9 @@ pub trait Behaviour: Sync {
         state
     }
 
+    /// `attack`：生存模式的玩家开始挖这一格，官方的 `ServerPlayerGameMode.handleBlockBreakAction`。
+    fn attack(&self, _state: BlockState, _world: &mut World, _pos: BlockPos, _player: &Actor) {}
+
     /// `useItemOn`。
     fn use_item_on(
         &self,
@@ -702,6 +705,11 @@ impl BlockState {
     ) -> BlockState {
         self.behaviour()
             .player_will_destroy(self, world, pos, player)
+    }
+
+    /// `attack`。
+    pub fn attack(self, world: &mut World, pos: BlockPos, player: &Actor) {
+        self.behaviour().attack(self, world, pos, player);
     }
 
     /// `useItemOn`。
