@@ -54,7 +54,9 @@ pub struct Outcome {
     pub effects: Vec<Effect>,
 }
 
-/// `ServerPlayerGameMode.useItemOn`，去掉观察者分支。
+/// `ServerPlayerGameMode.useItemOn` 里非旁观者的那一支。
+///
+/// 旁观者在游戏层单独处理：有菜单就打开，传送门发提示，其余直接放过，不会进到这里。
 pub fn use_item_on(
     level: &mut dyn Level,
     ticks: &mut BlockTicks,

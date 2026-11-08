@@ -788,22 +788,24 @@ fn place_count(size: usize, kind: i32, stack: &ItemStack) -> i32 {
 }
 
 /// 打开一个容器方块，对应官方 `useWithoutItem` 里的 `player.openMenu`。
-pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
+///
+/// 打不开（不是容器、被挡住、潜影盒被挡住）时返回 `false`，调用方据此判断有没有菜单。
+pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
     let Some(kind) = container::kind_at(region, pos) else {
-        return;
+        return false;
     };
     if !region.players.contains_key(&id) {
-        return;
+        return false;
     }
     let Some((target, container_size, menu_type, title)) = menu_shape(region, pos, kind) else {
-        return;
+        return false;
     };
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }
     let container_id = {
         let Some(player) = region.players.get_mut(&id) else {
-            return;
+            return false;
         };
         player.container_counter = player.container_counter % 100 + 1;
         player.container_counter
@@ -815,9 +817,12 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
         player.ender_chest.active = Some(pos);
     }
     region.menus.insert(id, menu);
-    let positions = region.menus[&id].target.positions();
-    for target_pos in positions {
-        container::start_open(region, target_pos, kind);
+    // 官方每个容器的 `startOpen` 都先看 `isSpectator`：旁观者打开不计数，盖子不动也不响。
+    if !is_spectator(region, id) {
+        let positions = region.menus[&id].target.positions();
+        for target_pos in positions {
+            container::start_open(region, target_pos, kind);
+        }
     }
     let title = menu_title(region, &region.menus[&id].target, title);
     region.links.send(
@@ -829,10 +834,19 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
         },
     );
     let Some(mut menu) = region.menus.remove(&id) else {
-        return;
+        return false;
     };
     broadcast_full_state(region, id, &mut menu);
     region.menus.insert(id, menu);
+    true
+}
+
+/// 官方 `ContainerUser.getLivingEntity().isSpectator()`。
+fn is_spectator(region: &Region, id: PlayerId) -> bool {
+    region
+        .players
+        .get(&id)
+        .is_some_and(|player| player.game_mode == GameMode::Spectator)
 }
 
 /// 菜单的标题，官方 `Nameable.getDisplayName`：方块实体有自定义名就用它。
@@ -935,8 +949,11 @@ fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items:
     if return_items {
         place_item_back_in_inventory(region, id, carried);
     }
-    for pos in menu.target.positions() {
-        container::stop_open(region, pos, menu.kind);
+    // `stopOpen` 看的是关菜单这一刻的游戏模式，和官方一样不管打开时是什么模式。
+    if !is_spectator(region, id) {
+        for pos in menu.target.positions() {
+            container::stop_open(region, pos, menu.kind);
+        }
     }
     if matches!(menu.target, Target::EnderChest(_))
         && let Some(player) = region.players.get_mut(&id)

@@ -3,13 +3,11 @@
 //! 物品栏由客户端决定，服务端只是一份镜像：客户端改的槽不回包，
 //! 服务端自己改了（换手、中键）才发 `container_set_slot`。
 
+use mc_bamboo_blocks::BlockState;
 use mc_bamboo_core::{BlockPos, Hand};
-use mc_bamboo_data::{
-    block_of_state, items,
-    registries::{block_entity_type, data_component_type},
-};
+use mc_bamboo_data::{block_of_state, registries::data_component_type};
 use mc_bamboo_protocol::{
-    components::{ComponentPatch, ComponentValue, PatchEntry, defaults},
+    components::{ComponentValue, defaults},
     item::ItemStack,
     packet::play::{ContainerSetSlot, EquipmentSlot, GameMode, SetHeldSlot},
 };
@@ -300,16 +298,19 @@ pub(crate) fn on_pick_item_from_block(
     }
     // 官方的 `hasInfiniteMaterials`，也就是创造模式。
     let include_data = include_data && player.game_mode == GameMode::Creative;
-    // 高度超出世界时官方也当作没加载。
-    let Some(block) = region.chunks.block(pos).and_then(block_of_state) else {
+    // 高度超出世界时官方也当作没加载。状态 ID 不在表里同样当没加载。
+    let Some(state_id) = region
+        .chunks
+        .block(pos)
+        .filter(|state| block_of_state(*state).is_some())
+    else {
         return;
     };
-    // 水、火、传送门这些方块没有物品。
-    if block.item == items::AIR {
+    // 官方先 `getCloneItemStack`，空物品堆（水、火、传送门、移动中的活塞）就到此为止。
+    let mut stack = clone::clone_item_stack(region, pos, BlockState(state_id), include_data);
+    if stack.is_empty() {
         return;
     }
-
-    let mut stack = clone_item_stack(region, pos, block.item);
     if include_data {
         block_items::add_block_data(region, pos, &mut stack);
     }
@@ -325,46 +326,7 @@ pub(crate) fn on_pick_item_from_block(
     }
 }
 
-/// 官方 `BlockBehaviour.getCloneItemStack`。
-///
-/// 旗帜和饰纹陶罐的覆盖不看 `includeData`：它们总是带上方块实体的那几项组件。
-/// 官方还有二十来个别的覆盖（作物给种子、洞穴藤蔓给发光浆果、花盆给花、`light` 给带亮度的物品
-/// 这些），这里都还是默认实现，只有方块自己的物品。
-fn clone_item_stack(region: &Region, pos: BlockPos, item: i32) -> ItemStack {
-    let mut stack = ItemStack::new(item, 1);
-    let kind = region
-        .chunks
-        .block(pos)
-        .and_then(block_of_state)
-        .and_then(|block| block.block_entity_type);
-    match kind {
-        // `AbstractBannerBlock.getCloneItemStack` 走 `BannerBlockEntity.getItem`，
-        // 也就是整份 `collectComponents`。
-        Some(block_entity_type::BANNER) => {
-            let (added, removed) = block_items::collect(region, pos).to_opaque();
-            stack.added = added;
-            stack.removed = removed;
-        }
-        // `DecoratedPotBlock.getCloneItemStack` 只带纹样，不带罐子里的东西。
-        Some(block_entity_type::DECORATED_POT) => {
-            let mut patch = ComponentPatch::new();
-            if let Some(decorations) = block_items::collect(region, pos)
-                .get(data_component_type::POT_DECORATIONS)
-                .cloned()
-            {
-                patch.put(
-                    data_component_type::POT_DECORATIONS,
-                    PatchEntry::Set(decorations),
-                );
-            }
-            let (added, removed) = patch.to_opaque();
-            stack.added = added;
-            stack.removed = removed;
-        }
-        _ => {}
-    }
-    stack
-}
+mod clone;
 
 #[cfg(test)]
 mod tests;
