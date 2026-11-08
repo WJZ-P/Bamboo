@@ -8,8 +8,10 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, CompostLayers, FieldValue, HeightmapType, Item, Property,
-    StateProvider, TagGroup, VersionData,
+    Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
+    ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
+    ExtractedStack, FieldValue, HeightmapType, Item, Property, PropertyKind, StateProvider,
+    TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -17,6 +19,7 @@ const ATTRIBUTE_REGISTRY: &str = "minecraft:attribute";
 const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const BLOCK_ENTITY_TYPE_REGISTRY: &str = "minecraft:block_entity_type";
 const CHAT_TYPE_REGISTRY: &str = "minecraft:chat_type";
+const CONSUME_EFFECT_TYPE_REGISTRY: &str = "minecraft:consume_effect_type";
 const DATA_COMPONENT_TYPE_REGISTRY: &str = "minecraft:data_component_type";
 const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
 const ENTITY_TYPE_REGISTRY: &str = "minecraft:entity_type";
@@ -24,6 +27,7 @@ const BLOCK_REGISTRY: &str = "minecraft:block";
 const FLUID_REGISTRY: &str = "minecraft:fluid";
 const ITEM_REGISTRY: &str = "minecraft:item";
 const JUKEBOX_SONG_REGISTRY: &str = "minecraft:jukebox_song";
+const MENU_REGISTRY: &str = "minecraft:menu";
 const WORLD_CLOCK_REGISTRY: &str = "minecraft:world_clock";
 
 pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
@@ -35,6 +39,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let light = light_file(data)?;
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
+    let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
     let sounds = sounds_file(data)?;
 
@@ -46,13 +51,279 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
     write_file(output_dir, "items.rs", &items)?;
+    write_file(output_dir, "recipes.rs", &recipes)?;
     write_file(output_dir, "light.rs", &light)?;
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
+    write_file(
+        output_dir,
+        "component_registries.rs",
+        &component_registries_file(data)?,
+    )?;
+    write_file(
+        output_dir,
+        "component_enums.rs",
+        &component_enums_file(data)?,
+    )?;
+    write_file(
+        output_dir,
+        "item_components.rs",
+        &item_components_file(data)?,
+    )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "sounds.rs", &sounds)?;
-    write_file(output_dir, "tags.rs", &tags)
+    write_file(output_dir, "tags.rs", &tags)?;
+    write_worldgen(data, output_dir)
+}
+
+/// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。
+///
+/// 这几个注册表是递归的树（密度函数里套密度函数、样条里套样条），生成等价的 Rust 结构
+/// 会是一大堆嵌套字面量，升级版本时也看不出差异；JSON 是官方 codec 的原始形态，
+/// `mc-bamboo-worldgen` 用同一套 codec 的语义解析，所以这里原样存。
+fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&data.worldgen)
+        .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
+    let path = output_dir.join("worldgen.json");
+    fs::write(&path, format!("{json}\n"))
+        .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 官方数据包里世界生成的几个注册表：`worldgen/noise`、`worldgen/density_function`、"
+    );
+    let _ = writeln!(
+        out,
+        "/// `worldgen/noise_settings`、两个多噪声群系预设和末地的五个群系。"
+    );
+    let _ = writeln!(out, "///");
+    let _ = writeln!(
+        out,
+        "/// 前三个是官方 codec 编出来的 JSON，预设是量化好的定点数。解析在 `mc-bamboo-worldgen`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLDGEN: &str = include_str!(\"worldgen.json\");"
+    );
+    write_file(output_dir, "worldgen.rs", &out)
+}
+
+/// 组件里按 ID 查表的枚举：连续的常量个数，稀疏的整张 ID 表。
+///
+/// 官方 `ByIdMap.continuous` 要求 ID 刚好是 0 到个数减一的排列，所以连续的枚举只要个数。
+/// 越界时怎么折回（`ZERO`、`CLAMP`、`WRAP`）是代码，留在 `mc-bamboo-protocol` 里。
+fn component_enums_file(data: &VersionData) -> Result<String, String> {
+    /// 官方加了新枚举或者改了名字时要在这里跟着改，顺序就是生成文件里的顺序。
+    const COUNTS: &[&str] = &[
+        "attribute_display_type",
+        "attribute_operation",
+        "axolotl_variant",
+        "dye_color",
+        "equipment_slot",
+        "equipment_slot_group",
+        "firework_shape",
+        "fox_variant",
+        "horse_variant",
+        "item_use_animation",
+        "llama_variant",
+        "map_post_processing",
+        "mooshroom_variant",
+        "parrot_variant",
+        "rarity",
+        "salmon_size",
+        "swing_animation_type",
+    ];
+    const SPARSE: &[&str] = &["rabbit_variant", "tropical_fish_pattern"];
+
+    let enums = &data.component_enums;
+    check_enum_names("counts", COUNTS, enums.counts.keys())?;
+    check_enum_names("sparse", SPARSE, enums.sparse.keys())?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 连续枚举的常量个数，ID 就是 0 到这个数减一。");
+    let _ = writeln!(out, "pub mod counts {{");
+    for name in COUNTS {
+        let count = enums.counts[*name];
+        if count == 0 {
+            return Err(format!("枚举 {name} 一个常量都没有"));
+        }
+        let _ = writeln!(out, "    pub const {}: i32 = {count};", upper(name));
+    }
+    let _ = writeln!(out, "}}\n");
+
+    let _ = writeln!(
+        out,
+        "/// 稀疏枚举的 ID，按官方的声明顺序。官方的默认值都是第一个声明的常量。"
+    );
+    let _ = writeln!(out, "pub mod sparse {{");
+    for name in SPARSE {
+        let ids = &enums.sparse[*name];
+        if ids.is_empty() {
+            return Err(format!("枚举 {name} 一个常量都没有"));
+        }
+        let _ = writeln!(out, "    pub const {}: &[i32] = &{ids:?};", upper(name));
+    }
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+/// 生成文件里的名字和官方导出的名字必须一一对应，官方加了新枚举时要报错。
+fn check_enum_names<'a>(
+    kind: &str,
+    expected: &[&str],
+    found: impl Iterator<Item = &'a String>,
+) -> Result<(), String> {
+    let found: BTreeSet<&str> = found.map(String::as_str).collect();
+    let expected: BTreeSet<&str> = expected.iter().copied().collect();
+    if found != expected {
+        return Err(format!(
+            "{kind} 里的枚举和生成器对不上：官方 {found:?}，生成器 {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn upper(name: &str) -> String {
+    name.to_uppercase()
+}
+
+/// 每个物品的默认组件，按官方 `DataComponentPatch.STREAM_CODEC` 编出来的字节。
+///
+/// 全部字节拼成一个 `&[u8]`，`RANGES` 给出每个物品在里面的位置，下标是物品的注册表 ID。
+/// 分成一千多个字节串字面量会让生成文件大一倍，编译也慢。
+fn item_components_file(data: &VersionData) -> Result<String, String> {
+    if data.item_components.len() != data.items.len() {
+        return Err(format!(
+            "导出了 {} 个物品的默认组件，物品有 {} 个",
+            data.item_components.len(),
+            data.items.len()
+        ));
+    }
+
+    let mut blob: Vec<u8> = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(data.item_components.len());
+    for (index, hex) in data.item_components.iter().enumerate() {
+        let bytes = decode_hex(hex)
+            .ok_or_else(|| format!("{} 的默认组件不是十六进制", data.items[index].name))?;
+        let start = blob.len();
+        blob.extend_from_slice(&bytes);
+        ranges.push((start, blob.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 全部物品的默认组件拼在一起，每个物品的位置见 [`RANGES`]。"
+    );
+    let _ = writeln!(out, "pub const DEFAULTS: &[u8] = b\"{}\";\n", escape(&blob));
+    let _ = writeln!(
+        out,
+        "/// 每个物品的默认组件在 [`DEFAULTS`] 里的起止位置，下标是物品的注册表 ID。"
+    );
+    let _ = writeln!(out, "pub const RANGES: &[(u32, u32)] = &[");
+    for (start, end) in ranges {
+        let _ = writeln!(out, "    ({start}, {end}),");
+    }
+    let _ = writeln!(out, "];");
+    Ok(out)
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len() / 2)
+        .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok())
+        .collect()
+}
+
+/// 把字节写成 Rust 的字节串字面量，能直接认出来的 ASCII 保持原样。
+fn escape(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => {
+                let _ = write!(out, "\\x{byte:02x}");
+            }
+        }
+    }
+    out
+}
+
+/// 物品组件解码要用到的注册表大小，外加几个要按 ID 分派的小注册表的常量。
+///
+/// 组件的 `StreamCodec` 把 `Holder` 和注册表条目写成数字 ID，解码时只需要知道条目个数
+/// 就能判断 ID 合不合法，所以这里只导出大小，不导出上千个用不到的名字。
+fn component_registries_file(data: &VersionData) -> Result<String, String> {
+    /// 要导出大小的注册表，`(模块里的常量名, 注册表名)`。
+    const SIZES: &[(&str, &str)] = &[
+        ("BANNER_PATTERN", "minecraft:banner_pattern"),
+        ("BLOCK", BLOCK_REGISTRY),
+        ("BLOCK_ENTITY_TYPE", BLOCK_ENTITY_TYPE_REGISTRY),
+        ("BLOCK_TRANSFORMER", "minecraft:block_transformer"),
+        ("CAT_SOUND_VARIANT", "minecraft:cat_sound_variant"),
+        ("CAT_VARIANT", "minecraft:cat_variant"),
+        ("CHICKEN_SOUND_VARIANT", "minecraft:chicken_sound_variant"),
+        ("CHICKEN_VARIANT", "minecraft:chicken_variant"),
+        ("CONSUME_EFFECT_TYPE", CONSUME_EFFECT_TYPE_REGISTRY),
+        ("COW_SOUND_VARIANT", "minecraft:cow_sound_variant"),
+        ("COW_VARIANT", "minecraft:cow_variant"),
+        ("DAMAGE_TYPE", "minecraft:damage_type"),
+        (
+            "DATA_COMPONENT_PREDICATE_TYPE",
+            "minecraft:data_component_predicate_type",
+        ),
+        ("DATA_COMPONENT_TYPE", DATA_COMPONENT_TYPE_REGISTRY),
+        ("DECORATED_POT_PATTERN", "minecraft:decorated_pot_pattern"),
+        ("ENCHANTMENT", "minecraft:enchantment"),
+        ("ENTITY_TYPE", ENTITY_TYPE_REGISTRY),
+        ("FROG_VARIANT", "minecraft:frog_variant"),
+        ("INSTRUMENT", "minecraft:instrument"),
+        ("ITEM", ITEM_REGISTRY),
+        ("JUKEBOX_SONG", "minecraft:jukebox_song"),
+        ("MOB_EFFECT", "minecraft:mob_effect"),
+        ("PAINTING_VARIANT", "minecraft:painting_variant"),
+        ("PIG_SOUND_VARIANT", "minecraft:pig_sound_variant"),
+        ("PIG_VARIANT", "minecraft:pig_variant"),
+        ("POTION", "minecraft:potion"),
+        ("SOUND_EVENT", "minecraft:sound_event"),
+        ("TRIM_MATERIAL", "minecraft:trim_material"),
+        ("TRIM_PATTERN", "minecraft:trim_pattern"),
+        ("VILLAGER_TYPE", "minecraft:villager_type"),
+        ("WOLF_SOUND_VARIANT", "minecraft:wolf_sound_variant"),
+        ("WOLF_VARIANT", "minecraft:wolf_variant"),
+        (
+            "ZOMBIE_NAUTILUS_VARIANT",
+            "minecraft:zombie_nautilus_variant",
+        ),
+    ];
+
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 组件解码要校验的注册表条目个数。");
+    let _ = writeln!(out, "pub mod sizes {{");
+    for &(name, registry) in SIZES {
+        let entries = registry_entries(data, registry)
+            .ok_or_else(|| format!("注册表报告里没有 {registry}"))?;
+        if entries.is_empty() {
+            return Err(format!("{registry} 是空的"));
+        }
+        let _ = writeln!(out, "    /// `{registry}`。");
+        let _ = writeln!(out, "    pub const {name}: u32 = {};", entries.len());
+    }
+    let _ = writeln!(out, "}}\n");
+
+    write_registry_ids(
+        &mut out,
+        data,
+        "consume_effect_type",
+        CONSUME_EFFECT_TYPE_REGISTRY,
+    );
+    Ok(out)
 }
 
 fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String> {
@@ -62,8 +333,27 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod sounds;\npub mod states;\npub mod tags;\npub mod version;\n"
-        .to_owned()
+    "pub mod block_classes;
+pub mod block_maps;
+pub mod block_transformers;
+pub mod blocks;
+pub mod component_enums;
+pub mod component_registries;
+pub mod heightmaps;
+pub mod item_components;
+pub mod items;
+pub mod light;
+pub mod packets;
+pub mod recipes;
+pub mod registries;
+pub mod shapes;
+pub mod sounds;
+pub mod states;
+pub mod tags;
+pub mod version;
+pub mod worldgen;
+"
+    .to_owned()
 }
 
 fn version_file(data: &VersionData) -> String {
@@ -350,9 +640,10 @@ fn sounds_file(data: &VersionData) -> Result<String, String> {
 ///
 /// 唱片放进唱片机时 `JukeboxSongPlayer.play` 用这个 ID 发 1010 的等级事件。
 fn write_jukebox_songs(out: &mut String, data: &VersionData) -> Result<(), String> {
-    let songs = registry_entries(data, JUKEBOX_SONG_REGISTRY);
+    let songs = registry_entries(data, JUKEBOX_SONG_REGISTRY)
+        .ok_or_else(|| format!("没有 {JUKEBOX_SONG_REGISTRY} 注册表"))?;
     if songs.is_empty() {
-        return Err(format!("没有 {JUKEBOX_SONG_REGISTRY} 注册表"));
+        return Err(format!("{JUKEBOX_SONG_REGISTRY} 是空的"));
     }
     let mut rows: Vec<(i32, i32)> = Vec::new();
     for (item_id, item) in data.items.iter().enumerate() {
@@ -395,16 +686,6 @@ fn write_jukebox_songs(out: &mut String, data: &VersionData) -> Result<(), Strin
     Ok(())
 }
 
-/// 一个注册表按 ID 排列的条目，同步注册表优先，其次是内置注册表。
-fn registry_entries<'a>(data: &'a VersionData, registry: &str) -> &'a [String] {
-    data.synced_registries
-        .iter()
-        .find(|candidate| candidate.name == registry)
-        .map(|found| found.entries.as_slice())
-        .or_else(|| data.builtin_registries.get(registry).map(Vec::as_slice))
-        .unwrap_or(&[])
-}
-
 /// `minecraft:level_chunk_with_light` → `LEVEL_CHUNK_WITH_LIGHT`。
 fn constant_name(identifier: &str) -> String {
     let path = identifier.strip_prefix("minecraft:").unwrap_or(identifier);
@@ -441,7 +722,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef}};"
+        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PropertyKind, PushReaction}};"
     );
     let _ = writeln!(out, "use crate::tags::block_tags;\n");
     let _ = writeln!(out, "/// 方块状态的总数，决定了全局调色板的位数。");
@@ -457,7 +738,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, pickup_sound: {:?} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {}, pickup_sound: {:?} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -465,6 +746,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.has_collision,
             block.has_fluid,
             block.two_blocks,
+            push_reaction(&block.push_reaction)?,
+            block.unbreakable,
             block.block_entity_type,
             block.class,
             properties.name_of(property_list(&block.properties)),
@@ -472,6 +755,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.instrument,
             offset_literal(block),
             block.dynamic_shape,
+            block.destroy_time,
+            block.requires_correct_tool_for_drops,
             block.pickup_sound,
         );
     }
@@ -531,8 +816,17 @@ fn property_list(properties: &[Property]) -> String {
     let items: Vec<String> = properties
         .iter()
         .map(|property| {
+            let kind = match &property.kind {
+                PropertyKind::Integer { min, max } => {
+                    format!("PropertyKind::Integer {{ min: {min}, max: {max} }}")
+                }
+                PropertyKind::Boolean => "PropertyKind::Boolean".to_owned(),
+                PropertyKind::Enum { ordinals } => {
+                    format!("PropertyKind::Enum {{ ordinals: &{ordinals:?} }}")
+                }
+            };
             format!(
-                "PropertyDef {{ name: {:?}, values: &{:?} }}",
+                "PropertyDef {{ name: {:?}, values: &{:?}, kind: {kind} }}",
                 property.name, property.values
             )
         })
@@ -574,6 +868,18 @@ fn field_value(value: &FieldValue, block_tags: &TagIndexes) -> Result<String, St
     })
 }
 
+/// 官方 `PushReaction` 的名字，小写换成 Rust 的常量名。官方加了新的值时这里要跟着加。
+fn push_reaction(name: &str) -> Result<&'static str, String> {
+    match name {
+        "push_pull" => Ok("PushPull"),
+        "push" => Ok("Push"),
+        "popped" => Ok("Popped"),
+        "immoveable" => Ok("Immoveable"),
+        "ignore_entity" => Ok("IgnoreEntity"),
+        other => Err(format!("未知的 PushReaction {other}")),
+    }
+}
+
 fn offset_literal(block: &Block) -> String {
     block.offset.map_or_else(
         || "None".to_owned(),
@@ -601,6 +907,56 @@ fn check_properties(blocks: &[Block]) -> Result<(), String> {
                 block.name,
                 block.states.len()
             ));
+        }
+        for property in &block.properties {
+            check_property_kind(&block.name, property)?;
+        }
+    }
+    Ok(())
+}
+
+/// 属性的取值列表要和官方类型对得上：整数是连续的 `min..=max`，布尔是 `[true, false]`，
+/// 枚举的序号和取值一一对应。区间匹配靠的就是这些类型和顺序。
+fn check_property_kind(block: &str, property: &Property) -> Result<(), String> {
+    match &property.kind {
+        PropertyKind::Integer { min, max } => {
+            let parsed = property
+                .values
+                .iter()
+                .map(|value| {
+                    value.parse::<i32>().map_err(|_| {
+                        format!(
+                            "{block} 的属性 {} 是 IntegerProperty，却有不是整数的取值 {value}",
+                            property.name
+                        )
+                    })
+                })
+                .collect::<Result<Vec<i32>, String>>()?;
+            if parsed != (*min..=*max).collect::<Vec<i32>>() {
+                return Err(format!(
+                    "{block} 的属性 {} 是 IntegerProperty {min}..={max}，取值列表却是 {:?}",
+                    property.name, property.values
+                ));
+            }
+        }
+        PropertyKind::Boolean => {
+            if property.values != ["true", "false"] {
+                return Err(format!(
+                    "{block} 的属性 {} 是 BooleanProperty，取值列表却是 {:?}",
+                    property.name, property.values
+                ));
+            }
+        }
+        PropertyKind::Enum { ordinals } => {
+            let mut distinct = ordinals.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            if ordinals.len() != property.values.len() || distinct.len() != ordinals.len() {
+                return Err(format!(
+                    "{block} 的属性 {} 的枚举序号 {ordinals:?} 和取值列表 {:?} 对不上",
+                    property.name, property.values
+                ));
+            }
         }
     }
     Ok(())
@@ -1156,6 +1512,734 @@ fn item_kind(item: &Item) -> Result<&'static str, String> {
     }
 }
 
+/// 原料本身不是列表，去重池单独写一份。
+struct SharedIngredients {
+    /// 源码 → 编号。
+    known: BTreeMap<String, usize>,
+    ordered: Vec<String>,
+}
+
+impl SharedIngredients {
+    fn new() -> Self {
+        Self {
+            known: BTreeMap::new(),
+            ordered: Vec::new(),
+        }
+    }
+
+    fn name_of(&mut self, ingredient: String) -> String {
+        let next = self.ordered.len();
+        let index = *self.known.entry(ingredient.clone()).or_insert(next);
+        if index == next {
+            self.ordered.push(ingredient);
+        }
+        format!("INGREDIENT_{index}")
+    }
+
+    fn definitions(&self) -> String {
+        let mut out = String::new();
+        for (index, ingredient) in self.ordered.iter().enumerate() {
+            let _ = writeln!(out, "const INGREDIENT_{index}: Ingredient = {ingredient};");
+        }
+        out
+    }
+}
+
+/// 物品标签名 → 成员物品 ID。配方里的标签原料靠它核对展开结果。
+fn item_tag_members(data: &VersionData) -> Result<BTreeMap<&str, &[i32]>, String> {
+    let group_index = tag_group_index(&data.tags, ITEM_REGISTRY)?;
+    Ok(tag_indexes(&data.tags, ITEM_REGISTRY)?
+        .into_iter()
+        .map(|(name, index)| (name, data.tags[group_index].tags[index].ids.as_slice()))
+        .collect())
+}
+
+fn check_item(item: i32, data: &VersionData) -> Result<(), String> {
+    if item < 0 || item as usize >= data.items.len() {
+        return Err(format!("引用了不存在的物品 ID {item}"));
+    }
+    Ok(())
+}
+
+/// 核对一份物品 ID 列表，保证可以直接用二分查找。
+fn checked_item_list<'a>(
+    items: &'a [i32],
+    data: &VersionData,
+    what: &str,
+) -> Result<&'a [i32], String> {
+    for &item in items {
+        check_item(item, data)?;
+    }
+    if items.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(format!("{what}列表不是升序且不重复"));
+    }
+    Ok(items)
+}
+
+/// 核对一个原料：物品 ID 都在注册表里，标签确实存在且展开结果和官方标签一致。
+fn check_ingredient(
+    ingredient: &ExtractedIngredient,
+    data: &VersionData,
+    item_tags: &BTreeMap<&str, &[i32]>,
+) -> Result<(), String> {
+    for &item in &ingredient.items {
+        check_item(item, data)?;
+    }
+    if ingredient.items.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("原料的物品列表不是升序且不重复".to_owned());
+    }
+    if let Some(tag) = &ingredient.tag {
+        let Some(members) = item_tags.get(tag.as_str()) else {
+            return Err(format!("原料引用了不存在的物品标签 {tag}"));
+        };
+        let mut expected = members.to_vec();
+        expected.sort_unstable();
+        expected.dedup();
+        if expected != ingredient.items {
+            return Err(format!("标签 {tag} 展开的物品和官方标签不一致"));
+        }
+    }
+    Ok(())
+}
+
+/// 导出端给的序列化名必须和种类对得上，防止两边对同一个配方有两种说法。
+fn check_serializer(recipe: &ExtractedRecipe) -> Result<(), String> {
+    let expected = match &recipe.kind {
+        ExtractedRecipeKind::Shaped { .. } => "minecraft:crafting_shaped",
+        ExtractedRecipeKind::Shapeless { .. } => "minecraft:crafting_shapeless",
+        ExtractedRecipeKind::Transmute { .. } => "minecraft:crafting_transmute",
+        ExtractedRecipeKind::Dye { .. } => "minecraft:crafting_dye",
+        ExtractedRecipeKind::Imbue { .. } => "minecraft:crafting_imbue",
+        ExtractedRecipeKind::DecoratedPot { .. } => "minecraft:crafting_decorated_pot",
+        ExtractedRecipeKind::Smelting { .. } => "minecraft:smelting",
+        ExtractedRecipeKind::Blasting { .. } => "minecraft:blasting",
+        ExtractedRecipeKind::Smoking { .. } => "minecraft:smoking",
+        ExtractedRecipeKind::CampfireCooking { .. } => "minecraft:campfire_cooking",
+        ExtractedRecipeKind::Stonecutting { .. } => "minecraft:stonecutting",
+        ExtractedRecipeKind::SmithingTransform { .. } => "minecraft:smithing_transform",
+        ExtractedRecipeKind::SmithingTrim { .. } => "minecraft:smithing_trim",
+        ExtractedRecipeKind::Brewing { .. } => "minecraft:brewing",
+        ExtractedRecipeKind::FireworkRocket { .. } => "minecraft:crafting_special_firework_rocket",
+        ExtractedRecipeKind::FireworkStar { .. } => "minecraft:crafting_special_firework_star",
+        ExtractedRecipeKind::FireworkStarFade { .. } => {
+            "minecraft:crafting_special_firework_star_fade"
+        }
+        ExtractedRecipeKind::Mapextending { .. } => "minecraft:crafting_special_mapextending",
+        ExtractedRecipeKind::BannerDuplicate { .. } => "minecraft:crafting_special_bannerduplicate",
+        ExtractedRecipeKind::BookCloning { .. } => "minecraft:crafting_special_bookcloning",
+        ExtractedRecipeKind::ShieldDecoration { .. } => {
+            "minecraft:crafting_special_shielddecoration"
+        }
+        ExtractedRecipeKind::RepairItem => "minecraft:crafting_special_repairitem",
+    };
+    if recipe.serializer != expected {
+        return Err(format!(
+            "序列化名是 {}，按种类应该是 {expected}",
+            recipe.serializer
+        ));
+    }
+    Ok(())
+}
+
+/// 生成配方表时共用的去重池和标签表。
+struct RecipeWriter<'a> {
+    data: &'a VersionData,
+    item_tags: BTreeMap<&'a str, &'a [i32]>,
+    item_lists: SharedLists,
+    ingredients: SharedIngredients,
+    patterns: SharedLists,
+    ingredient_slices: SharedLists,
+    shapes: SharedLists,
+}
+
+impl<'a> RecipeWriter<'a> {
+    fn new(data: &'a VersionData) -> Result<Self, String> {
+        Ok(Self {
+            data,
+            item_tags: item_tag_members(data)?,
+            item_lists: SharedLists::new("ITEM_LIST", "&[i32]"),
+            ingredients: SharedIngredients::new(),
+            patterns: SharedLists::new("PATTERN", "&[Option<Ingredient>]"),
+            ingredient_slices: SharedLists::new("INGREDIENTS", "&[Ingredient]"),
+            shapes: SharedLists::new("SHAPES", "&[(FireworkShape, Ingredient)]"),
+        })
+    }
+
+    fn kind(&mut self, recipe: &ExtractedRecipe) -> Result<String, String> {
+        check_serializer(recipe)?;
+        Ok(match &recipe.kind {
+            ExtractedRecipeKind::Shaped {
+                width,
+                height,
+                pattern,
+                result,
+            } => self.shaped(*width, *height, pattern, result)?,
+            ExtractedRecipeKind::Shapeless {
+                ingredients,
+                result,
+            } => self.shapeless(ingredients, result)?,
+            ExtractedRecipeKind::Transmute {
+                input,
+                material,
+                min_material,
+                max_material,
+                result_item,
+                result_count,
+                result_has_components,
+                add_material_count,
+            } => {
+                let input = self.ingredient(input)?;
+                let material = self.ingredient(material)?;
+                let result_item = match result_item {
+                    None => "None".to_owned(),
+                    Some(item) => {
+                        check_item(*item, self.data)?;
+                        format!("Some({item})")
+                    }
+                };
+                if *result_count <= 0 {
+                    return Err(format!("产物数量是 {result_count}"));
+                }
+                format!(
+                    "RecipeKind::Transmute {{ input: {input}, material: {material}, \
+                     min_material: {min_material}, max_material: {max_material}, \
+                     result_item: {result_item}, result_count: {result_count}, \
+                     result_has_components: {result_has_components}, \
+                     add_material_count: {add_material_count} }}"
+                )
+            }
+            ExtractedRecipeKind::Dye {
+                target,
+                dye,
+                result,
+            } => {
+                let target = self.ingredient(target)?;
+                let dye = self.ingredient(dye)?;
+                let result = self.stack(result)?;
+                format!("RecipeKind::Dye {{ target: {target}, dye: {dye}, result: {result} }}")
+            }
+            ExtractedRecipeKind::Imbue {
+                source,
+                material,
+                result,
+            } => {
+                let source = self.ingredient(source)?;
+                let material = self.ingredient(material)?;
+                let result = self.stack(result)?;
+                format!(
+                    "RecipeKind::Imbue {{ source: {source}, material: {material}, \
+                     result: {result} }}"
+                )
+            }
+            ExtractedRecipeKind::Smelting {
+                ingredient,
+                result,
+                experience,
+                time,
+            } => self.cooking("Smelting", ingredient, result, *experience, *time)?,
+            ExtractedRecipeKind::Blasting {
+                ingredient,
+                result,
+                experience,
+                time,
+            } => self.cooking("Blasting", ingredient, result, *experience, *time)?,
+            ExtractedRecipeKind::Smoking {
+                ingredient,
+                result,
+                experience,
+                time,
+            } => self.cooking("Smoking", ingredient, result, *experience, *time)?,
+            ExtractedRecipeKind::CampfireCooking {
+                ingredient,
+                result,
+                experience,
+                time,
+            } => self.cooking("Campfire", ingredient, result, *experience, *time)?,
+            ExtractedRecipeKind::Stonecutting { ingredient, result } => {
+                self.stonecutting(ingredient, result)?
+            }
+            ExtractedRecipeKind::SmithingTransform {
+                template,
+                base,
+                addition,
+                result,
+            } => self.smithing_transform(template, base, addition, result)?,
+            ExtractedRecipeKind::SmithingTrim {
+                template,
+                base,
+                addition,
+                pattern,
+            } => self.smithing_trim(template, base, addition, pattern)?,
+            ExtractedRecipeKind::Brewing {
+                input,
+                reagent,
+                result,
+            } => self.brewing(input, reagent, result)?,
+            ExtractedRecipeKind::FireworkRocket {
+                shell,
+                fuel,
+                star,
+                result,
+            } => self.firework_rocket(shell, fuel, star, result)?,
+            ExtractedRecipeKind::FireworkStar {
+                shapes,
+                trail,
+                twinkle,
+                fuel,
+                dye,
+                result,
+            } => self.firework_star(shapes, trail, twinkle, fuel, dye, result)?,
+            ExtractedRecipeKind::FireworkStarFade {
+                target,
+                dye,
+                result,
+            } => self.firework_star_fade(target, dye, result)?,
+            ExtractedRecipeKind::Mapextending {
+                map,
+                material,
+                result_item,
+                result_count,
+                result_has_components,
+            } => self.map_extending(
+                map,
+                material,
+                *result_item,
+                *result_count,
+                *result_has_components,
+            )?,
+            ExtractedRecipeKind::BannerDuplicate { banner, result } => {
+                self.banner_duplicate(banner, result)?
+            }
+            ExtractedRecipeKind::BookCloning {
+                source,
+                material,
+                min_generation,
+                max_generation,
+                result,
+            } => self.book_cloning(source, material, *min_generation, *max_generation, result)?,
+            ExtractedRecipeKind::ShieldDecoration {
+                banner,
+                target,
+                result,
+            } => self.shield_decoration(banner, target, result)?,
+            ExtractedRecipeKind::RepairItem => "RecipeKind::RepairItem".to_owned(),
+            ExtractedRecipeKind::DecoratedPot {
+                back,
+                left,
+                right,
+                front,
+                result,
+            } => self.decorated_pot(back, left, right, front, result)?,
+        })
+    }
+
+    fn ingredient(&mut self, ingredient: &ExtractedIngredient) -> Result<String, String> {
+        check_ingredient(ingredient, self.data, &self.item_tags)?;
+        let items = self.item_lists.name_of(format!("&{:?}", ingredient.items));
+        let tag = match &ingredient.tag {
+            None => "None".to_owned(),
+            Some(tag) => format!("Some({tag:?})"),
+        };
+        Ok(self
+            .ingredients
+            .name_of(format!("Ingredient {{ tag: {tag}, items: {items} }}")))
+    }
+
+    fn optional_ingredient(
+        &mut self,
+        ingredient: &Option<ExtractedIngredient>,
+    ) -> Result<String, String> {
+        Ok(match ingredient {
+            None => "None".to_owned(),
+            Some(ingredient) => format!("Some({})", self.ingredient(ingredient)?),
+        })
+    }
+
+    fn ingredient_list(&mut self, list: &[ExtractedIngredient]) -> Result<String, String> {
+        let names = list
+            .iter()
+            .map(|ingredient| self.ingredient(ingredient))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(self
+            .ingredient_slices
+            .name_of(format!("&[{}]", names.join(", "))))
+    }
+
+    fn stack(&self, stack: &ExtractedStack) -> Result<String, String> {
+        check_item(stack.item, self.data)?;
+        if stack.count <= 0 {
+            return Err(format!("产物数量是 {}", stack.count));
+        }
+        Ok(format!(
+            "Stack {{ item: {}, count: {}, has_components: {} }}",
+            stack.item, stack.count, stack.has_components
+        ))
+    }
+
+    fn potion_ingredient(
+        &mut self,
+        ingredient: &ExtractedPotionIngredient,
+    ) -> Result<String, String> {
+        let item = self.ingredient(&ingredient.item)?;
+        let potions = match &ingredient.potions {
+            None => "None".to_owned(),
+            Some(potions) => {
+                // 官方只当集合用，排序去重后可以直接二分。
+                let mut sorted = potions.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                for &potion in &sorted {
+                    if potion < 0 || potion as usize >= self.data.recipes.potions.len() {
+                        return Err(format!("酿造原料引用了不存在的药水 ID {potion}"));
+                    }
+                }
+                format!("Some(&{sorted:?})")
+            }
+        };
+        Ok(format!(
+            "PotionIngredient {{ item: {item}, potions: {potions} }}"
+        ))
+    }
+
+    fn pattern(&mut self, pattern: &[Option<ExtractedIngredient>]) -> Result<String, String> {
+        let cells = pattern
+            .iter()
+            .map(|cell| match cell {
+                None => Ok("None".to_owned()),
+                Some(ingredient) => Ok(format!("Some({})", self.ingredient(ingredient)?)),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(self.patterns.name_of(format!("&[{}]", cells.join(", "))))
+    }
+
+    fn shaped(
+        &mut self,
+        width: u8,
+        height: u8,
+        pattern: &[Option<ExtractedIngredient>],
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        if width == 0 || height == 0 || width > 3 || height > 3 {
+            return Err(format!("有序配方是 {width}x{height} 格"));
+        }
+        if pattern.len() != usize::from(width) * usize::from(height) {
+            return Err(format!(
+                "有序配方有 {} 格，但尺寸是 {width}x{height}",
+                pattern.len()
+            ));
+        }
+        let pattern = self.pattern(pattern)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::Shaped {{ width: {width}, height: {height}, \
+             pattern: {pattern}, result: {result} }}"
+        ))
+    }
+
+    fn shapeless(
+        &mut self,
+        ingredients: &[ExtractedIngredient],
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        if ingredients.is_empty() {
+            return Err("无序配方没有原料".to_owned());
+        }
+        let ingredients = self.ingredient_list(ingredients)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::Shapeless {{ ingredients: {ingredients}, result: {result} }}"
+        ))
+    }
+
+    fn cooking(
+        &mut self,
+        kind: &str,
+        ingredient: &ExtractedIngredient,
+        result: &ExtractedStack,
+        experience: f32,
+        time: i32,
+    ) -> Result<String, String> {
+        if time <= 0 {
+            return Err(format!("烹饪时间是 {time}"));
+        }
+        let ingredient = self.ingredient(ingredient)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::Cooking {{ kind: CookingKind::{kind}, ingredient: {ingredient}, \
+             result: {result}, experience: {experience:?}, time: {time} }}"
+        ))
+    }
+
+    fn stonecutting(
+        &mut self,
+        ingredient: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let ingredient = self.ingredient(ingredient)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::Stonecutting {{ ingredient: {ingredient}, result: {result} }}"
+        ))
+    }
+
+    fn smithing_transform(
+        &mut self,
+        template: &Option<ExtractedIngredient>,
+        base: &ExtractedIngredient,
+        addition: &Option<ExtractedIngredient>,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let template = self.optional_ingredient(template)?;
+        let base = self.ingredient(base)?;
+        let addition = self.optional_ingredient(addition)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::SmithingTransform {{ template: {template}, base: {base}, \
+             addition: {addition}, result: {result} }}"
+        ))
+    }
+
+    fn smithing_trim(
+        &mut self,
+        template: &ExtractedIngredient,
+        base: &ExtractedIngredient,
+        addition: &ExtractedIngredient,
+        pattern: &str,
+    ) -> Result<String, String> {
+        let template = self.ingredient(template)?;
+        let base = self.ingredient(base)?;
+        let addition = self.ingredient(addition)?;
+        Ok(format!(
+            "RecipeKind::SmithingTrim {{ template: {template}, base: {base}, \
+             addition: {addition}, pattern: {pattern:?} }}"
+        ))
+    }
+
+    fn brewing(
+        &mut self,
+        input: &ExtractedPotionIngredient,
+        reagent: &ExtractedPotionIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let input = self.potion_ingredient(input)?;
+        let reagent = self.potion_ingredient(reagent)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::Brewing {{ input: {input}, reagent: {reagent}, result: {result} }}"
+        ))
+    }
+
+    fn firework_rocket(
+        &mut self,
+        shell: &ExtractedIngredient,
+        fuel: &ExtractedIngredient,
+        star: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let shell = self.ingredient(shell)?;
+        let fuel = self.ingredient(fuel)?;
+        let star = self.ingredient(star)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::FireworkRocket {{ shell: {shell}, fuel: {fuel}, star: {star}, \
+             result: {result} }}"
+        ))
+    }
+
+    fn firework_star(
+        &mut self,
+        shapes: &[ExtractedShape],
+        trail: &ExtractedIngredient,
+        twinkle: &ExtractedIngredient,
+        fuel: &ExtractedIngredient,
+        dye: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let mut sorted: Vec<&ExtractedShape> = shapes.iter().collect();
+        sorted.sort_by_key(|shape| shape.shape.as_str());
+        let mut entries = Vec::with_capacity(sorted.len());
+        for shape in sorted {
+            let kind = match shape.shape.as_str() {
+                "small_ball" => "SmallBall",
+                "large_ball" => "LargeBall",
+                "star" => "Star",
+                "creeper" => "Creeper",
+                "burst" => "Burst",
+                other => return Err(format!("未知的烟花形状 {other}")),
+            };
+            let ingredient = self.ingredient(&shape.ingredient)?;
+            entries.push(format!("(FireworkShape::{kind}, {ingredient})"));
+        }
+        let shapes = self.shapes.name_of(format!("&[{}]", entries.join(", ")));
+        let trail = self.ingredient(trail)?;
+        let twinkle = self.ingredient(twinkle)?;
+        let fuel = self.ingredient(fuel)?;
+        let dye = self.ingredient(dye)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::FireworkStar {{ shapes: {shapes}, trail: {trail}, \
+             twinkle: {twinkle}, fuel: {fuel}, dye: {dye}, result: {result} }}"
+        ))
+    }
+
+    fn firework_star_fade(
+        &mut self,
+        target: &ExtractedIngredient,
+        dye: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let target = self.ingredient(target)?;
+        let dye = self.ingredient(dye)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::FireworkStarFade {{ target: {target}, dye: {dye}, result: {result} }}"
+        ))
+    }
+
+    fn map_extending(
+        &mut self,
+        map: &ExtractedIngredient,
+        material: &ExtractedIngredient,
+        result_item: Option<i32>,
+        result_count: i32,
+        result_has_components: bool,
+    ) -> Result<String, String> {
+        let map = self.ingredient(map)?;
+        let material = self.ingredient(material)?;
+        let result_item = match result_item {
+            None => "None".to_owned(),
+            Some(item) => {
+                check_item(item, self.data)?;
+                format!("Some({item})")
+            }
+        };
+        if result_count <= 0 {
+            return Err(format!("产物数量是 {result_count}"));
+        }
+        Ok(format!(
+            "RecipeKind::MapExtending {{ map: {map}, material: {material}, \
+             result_item: {result_item}, result_count: {result_count}, \
+             result_has_components: {result_has_components} }}"
+        ))
+    }
+
+    fn banner_duplicate(
+        &mut self,
+        banner: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let banner = self.ingredient(banner)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::BannerDuplicate {{ banner: {banner}, result: {result} }}"
+        ))
+    }
+
+    fn book_cloning(
+        &mut self,
+        source: &ExtractedIngredient,
+        material: &ExtractedIngredient,
+        min_generation: i32,
+        max_generation: i32,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let source = self.ingredient(source)?;
+        let material = self.ingredient(material)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::BookCloning {{ source: {source}, material: {material}, \
+             min_generation: {min_generation}, max_generation: {max_generation}, \
+             result: {result} }}"
+        ))
+    }
+
+    fn shield_decoration(
+        &mut self,
+        banner: &ExtractedIngredient,
+        target: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let banner = self.ingredient(banner)?;
+        let target = self.ingredient(target)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::ShieldDecoration {{ banner: {banner}, target: {target}, \
+             result: {result} }}"
+        ))
+    }
+
+    fn decorated_pot(
+        &mut self,
+        back: &ExtractedIngredient,
+        left: &ExtractedIngredient,
+        right: &ExtractedIngredient,
+        front: &ExtractedIngredient,
+        result: &ExtractedStack,
+    ) -> Result<String, String> {
+        let back = self.ingredient(back)?;
+        let left = self.ingredient(left)?;
+        let right = self.ingredient(right)?;
+        let front = self.ingredient(front)?;
+        let result = self.stack(result)?;
+        Ok(format!(
+            "RecipeKind::DecoratedPot {{ back: {back}, left: {left}, right: {right}, \
+             front: {front}, result: {result} }}"
+        ))
+    }
+}
+
+fn recipes_file(data: &VersionData) -> Result<String, String> {
+    let mut writer = RecipeWriter::new(data)?;
+    let mut entries = Vec::with_capacity(data.recipes.entries.len());
+    let mut seen = BTreeSet::new();
+    for recipe in &data.recipes.entries {
+        if !seen.insert(recipe.id.as_str()) {
+            return Err(format!("配方 {} 出现了两次", recipe.id));
+        }
+        let kind = writer
+            .kind(recipe)
+            .map_err(|error| format!("{}：{error}", recipe.id))?;
+        entries.push(format!(
+            "    Recipe {{ id: {:?}, kind: {kind} }},",
+            recipe.id
+        ));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "use crate::{{CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, \
+         RecipeKind, Stack}};\n"
+    );
+    let _ = writeln!(out, "/// 药水注册表的条目名，下标就是 ID。");
+    let _ = writeln!(
+        out,
+        "pub static POTIONS: &[&str] = &{:?};\n",
+        data.recipes.potions
+    );
+    let damageable = checked_item_list(&data.recipes.damageable, data, "可损坏物品")?;
+    let _ = writeln!(
+        out,
+        "/// 默认物品栈带 `max_damage` 和 `damage` 的物品，升序。"
+    );
+    let _ = writeln!(out, "pub static DAMAGEABLE: &[i32] = &{:?};\n", damageable);
+    let dyed = checked_item_list(&data.recipes.dyed, data, "带染料组件的物品")?;
+    let _ = writeln!(out, "/// 默认物品栈带 `dye` 组件的物品，升序。");
+    let _ = writeln!(out, "pub static DYED: &[i32] = &{:?};\n", dyed);
+    out.push_str(&writer.item_lists.definitions());
+    out.push_str(&writer.ingredients.definitions());
+    out.push_str(&writer.patterns.definitions());
+    out.push_str(&writer.ingredient_slices.definitions());
+    out.push_str(&writer.shapes.definitions());
+    let _ = writeln!(out, "/// 官方数据包的全部配方，顺序就是注册表顺序。");
+    let _ = writeln!(out, "pub static RECIPES: &[Recipe] = &[");
+    for entry in &entries {
+        let _ = writeln!(out, "{entry}");
+    }
+    let _ = writeln!(out, "];");
+    Ok(out)
+}
+
 fn registries_file(data: &VersionData) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "use crate::{{KnownPack, SyncedRegistry}};\n");
@@ -1208,13 +2292,33 @@ fn registries_file(data: &VersionData) -> String {
         DATA_COMPONENT_TYPE_REGISTRY,
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
+    write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+
+    let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
+    let _ = writeln!(out, "pub mod attribute_defaults {{");
+    for (name, value) in &data.attribute_defaults {
+        let _ = writeln!(
+            out,
+            "    pub const {}: f64 = {value:?};",
+            constant_name(name)
+        );
+    }
+    let _ = writeln!(out, "}}\n");
     out
+}
+
+/// 一个注册表按 ID 排列的条目，先找同步注册表，再找内置注册表。
+fn registry_entries<'a>(data: &'a VersionData, registry: &str) -> Option<&'a [String]> {
+    data.synced_registries
+        .iter()
+        .find(|candidate| candidate.name == registry)
+        .map(|found| found.entries.as_slice())
+        .or_else(|| data.builtin_registries.get(registry).map(Vec::as_slice))
 }
 
 /// 把一个注册表的条目写成常量，数字 ID 就是条目在列表里的位置。
 fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, registry: &str) {
-    let entries = registry_entries(data, registry);
-
+    let entries = registry_entries(data, registry).unwrap_or(&[]);
     let _ = writeln!(out, "pub mod {module} {{");
     let _ = writeln!(out, "    pub const TOTAL: u32 = {};", entries.len());
     for (id, name) in entries.iter().enumerate() {
@@ -1321,6 +2425,8 @@ mod tests {
             has_collision: false,
             has_fluid: false,
             two_blocks: false,
+            push_reaction: "push_pull".to_owned(),
+            unbreakable: false,
             block_entity_type: None,
             class: "Block".to_owned(),
             ancestors: Vec::new(),
@@ -1329,6 +2435,8 @@ mod tests {
             instrument: "harp".to_owned(),
             dynamic_shape: false,
             offset: None,
+            destroy_time: 0.0,
+            requires_correct_tool_for_drops: false,
             pickup_sound: None,
         }
     }
@@ -1337,6 +2445,10 @@ mod tests {
         Property {
             name: "test".to_owned(),
             values: values.iter().map(|&value| value.to_owned()).collect(),
+            // 这里只关心状态数，给一个和取值列表一样长的枚举类型。
+            kind: PropertyKind::Enum {
+                ordinals: vec![0, 1],
+            },
         }
     }
 

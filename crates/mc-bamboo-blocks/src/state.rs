@@ -84,6 +84,14 @@ impl BlockState {
         self.try_get(property).is_some()
     }
 
+    /// 属性当前值的官方序列化名，方块没有这个属性时返回 `None`。
+    ///
+    /// 按名字查属性，给 `can_break` 这类从数据里读到属性名的谓词用；类型化的取值走 [`Self::try_get`]。
+    pub fn property_text(self, name: &str) -> Option<&'static str> {
+        let slot = PropertySlot::find(self, name)?;
+        Some(slot.def.values[slot.current_index(self)])
+    }
+
     /// 改属性的值。方块没有这个属性或者没有这个值时 panic，和官方的 `setValue` 一样。
     #[must_use]
     pub fn with<T: PropertyValue>(self, property: Property<T>, value: T) -> Self {
@@ -237,6 +245,16 @@ impl BlockState {
     /// `hasBlockEntity`。
     pub fn has_block_entity(self) -> bool {
         self.block().block_entity_type.is_some()
+    }
+
+    /// `getPistonPushReaction`，方块属性里的值，和状态无关。
+    pub fn push_reaction(self) -> mc_bamboo_data::PushReaction {
+        self.block().push_reaction
+    }
+
+    /// `getDestroySpeed == -1`，活塞推不动，也打不碎。
+    pub fn is_unbreakable(self) -> bool {
+        self.block().unbreakable
     }
 
     /// `instrument()`，这个方块放在音符盒下面时的乐器。

@@ -11,7 +11,7 @@ use mc_bamboo_data::{Block, BlockClass, SOUND_EVENTS, block_of_state, blocks};
 
 use super::{
     Rule, UNPORTED_ITEM_USE_ON,
-    lines::{Case, Cell, Destroyed, Header, Kind, LevelPlay, SoundPlay},
+    lines::{Case, Cell, ContainerStack, Destroyed, Header, Kind, LevelPlay, SoundPlay},
     replay::{Replayed, Scheduled},
     tick_classes,
 };
@@ -29,6 +29,8 @@ pub struct Mismatch {
     /// 世界事件和音效的列表不同。
     pub level_events: bool,
     pub sounds: bool,
+    /// 容器内容不同。
+    pub contents: bool,
     pub ticks: bool,
     /// 官方和我们范围内的计划刻。
     pub compared_ticks: (Vec<Scheduled>, Vec<Scheduled>),
@@ -44,6 +46,7 @@ impl Mismatch {
             && !self.destroyed
             && !self.level_events
             && !self.sounds
+            && !self.contents
             && !self.ticks
             && !self.gained
             && self.panic.is_none()
@@ -461,6 +464,20 @@ fn gained_lines(text: &mut String, gained: &[String], differ: bool) {
     }
 }
 
+fn contents_lines(text: &mut String, contents: &[ContainerStack], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for stack in contents {
+        let _ = writeln!(
+            text,
+            "  {mark}    contents {} slot {} {} x{}",
+            pos_text(stack.pos()),
+            stack.slot(),
+            short(stack.item()),
+            stack.count()
+        );
+    }
+}
+
 fn click_line(case: &Case) -> String {
     let action = &case.action;
     match (action.face, action.loc, action.inside) {
@@ -546,6 +563,7 @@ fn render_official(text: &mut String, case: &Case, mismatch: &Mismatch) {
     destroyed_lines(text, &answer.destroyed, mismatch.destroyed);
     level_event_lines(text, &answer.level_events, mismatch.level_events);
     sound_lines(text, &answer.sounds, mismatch.sounds);
+    contents_lines(text, &answer.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.0, mismatch.ticks);
     gained_lines(text, &answer.gained, mismatch.gained);
 }
@@ -567,6 +585,7 @@ fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mism
     destroyed_lines(text, &replayed.destroyed, mismatch.destroyed);
     level_event_lines(text, &replayed.level_events, mismatch.level_events);
     sound_lines(text, &replayed.sounds, mismatch.sounds);
+    contents_lines(text, &replayed.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.1, mismatch.ticks);
     gained_lines(text, &replayed.gained, mismatch.gained);
 }

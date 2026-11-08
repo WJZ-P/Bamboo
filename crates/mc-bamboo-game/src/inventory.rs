@@ -4,18 +4,19 @@
 //! 服务端自己改了（换手、中键）才发 `container_set_slot`。
 
 use mc_bamboo_core::{BlockPos, Hand};
-use mc_bamboo_data::{block_of_state, items, registries::data_component_type};
+use mc_bamboo_data::{
+    block_of_state, items,
+    registries::{block_entity_type, data_component_type},
+};
 use mc_bamboo_protocol::{
+    components::{ComponentPatch, ComponentValue, PatchEntry, defaults},
     item::ItemStack,
     packet::play::{ContainerSetSlot, EquipmentSlot, GameMode, SetHeldSlot},
 };
 use tracing::debug;
 
 use crate::{
-    inbound::PlayerId,
-    interaction::{rules, within_reach},
-    links::Links,
-    player::Player,
+    block_items, inbound::PlayerId, interaction::within_reach, links::Links, player::Player,
     region::Region,
 };
 
@@ -24,8 +25,8 @@ const MENU_SLOTS: usize = 46;
 /// 头盔的菜单槽位，盔甲、背包、快捷栏和副手从这里一直排到最后，官方 `Inventory` 迭代的就是这些槽。
 const ARMOR_START: usize = 5;
 /// 快捷栏第一格的菜单槽位。
-const HOTBAR_START: usize = 36;
-const OFF_HAND: usize = 45;
+pub(crate) const HOTBAR_START: usize = 36;
+pub(crate) const OFF_HAND: usize = 45;
 /// 快捷栏的格数。
 const HOTBAR_SIZE: usize = 9;
 /// 官方 `Inventory.items` 的长度：快捷栏和背包。
@@ -90,8 +91,8 @@ impl Inventory {
     }
 
     /// 中键选取，返回物品变了的菜单槽位，升序。`blocks-inventory.md` 8.4。
-    fn pick(&mut self, item: i32) -> Vec<usize> {
-        match self.find_plain_stack(item) {
+    fn pick(&mut self, stack: &ItemStack) -> Vec<usize> {
+        match self.find_slot_matching_item(stack) {
             Some(index) if index < HOTBAR_SIZE => {
                 self.select(index);
                 Vec::new()
@@ -101,12 +102,12 @@ impl Inventory {
                 self.slots.swap(hotbar, menu_slot(index));
                 vec![menu_slot(index), hotbar]
             }
-            None => self.add_and_pick(item),
+            None => self.add_and_pick(stack),
         }
     }
 
     /// 选中的格子有东西时挪到第一个空槽，没有空槽就覆盖掉，和官方一样。
-    fn add_and_pick(&mut self, item: i32) -> Vec<usize> {
+    fn add_and_pick(&mut self, stack: &ItemStack) -> Vec<usize> {
         let hotbar = self.select_suitable_hotbar_slot();
         let mut changed = Vec::with_capacity(2);
         if !self.slots[hotbar].is_empty()
@@ -115,7 +116,7 @@ impl Inventory {
             self.slots.swap(hotbar, free);
             changed.push(free);
         }
-        self.slots[hotbar] = ItemStack::new(item, 1);
+        self.slots[hotbar] = stack.clone();
         changed.push(hotbar);
         changed
     }
@@ -124,14 +125,13 @@ impl Inventory {
         self.selected = hotbar_index as u8;
     }
 
-    /// 第一个不带组件的同种物品，下标是官方 `Inventory.items` 的下标。
-    fn find_plain_stack(&self, item: i32) -> Option<usize> {
+    /// 官方 `Inventory.findSlotMatchingItem`：第一个同物品、同组件的格子。
+    ///
+    /// 下标是官方 `Inventory.items` 的下标。
+    fn find_slot_matching_item(&self, stack: &ItemStack) -> Option<usize> {
         (0..INVENTORY_ITEMS).find(|&index| {
-            let stack = &self.slots[menu_slot(index)];
-            !stack.is_empty()
-                && stack.item == item
-                && stack.added.is_empty()
-                && stack.removed.is_empty()
+            let candidate = &self.slots[menu_slot(index)];
+            !candidate.is_empty() && candidate.is_same_item_same_components(stack)
         })
     }
 
@@ -141,25 +141,23 @@ impl Inventory {
             .find(|&slot| self.slots[slot].is_empty())
     }
 
-    /// `Inventory.contains`：盔甲、背包、快捷栏或者副手里有不带组件的这种物品。
-    fn contains_plain(&self, item: i32) -> bool {
-        self.slots[ARMOR_START..].iter().any(|stack| {
-            !stack.is_empty()
-                && stack.item == item
-                && stack.added.is_empty()
-                && stack.removed.is_empty()
-        })
+    /// `Inventory.contains`：盔甲、背包、快捷栏或者副手里有同物品、同组件的东西。
+    fn contains(&self, stack: &ItemStack) -> bool {
+        self.slots[ARMOR_START..]
+            .iter()
+            .any(|candidate| !candidate.is_empty() && candidate.is_same_item_same_components(stack))
     }
 
     /// 创造模式的 `ItemUtils.createFilledResult`：物品栏里没有时放进第一个空槽，返回那个菜单槽位。
     ///
     /// 舀起来的东西都不能叠放，所以不用找能叠上去的槽。没有空槽时官方直接丢掉它。
     fn add_filled(&mut self, item: i32) -> Option<usize> {
-        if self.contains_plain(item) {
+        let stack = ItemStack::new(item, 1);
+        if self.contains(&stack) {
             return None;
         }
         let slot = self.first_free_slot()?;
-        self.slots[slot] = ItemStack::new(item, 1);
+        self.slots[slot] = stack;
         Some(slot)
     }
 
@@ -179,7 +177,7 @@ impl Inventory {
 }
 
 /// 官方 `Inventory.items` 的下标换算成菜单槽位。
-const fn menu_slot(index: usize) -> usize {
+pub(crate) const fn menu_slot(index: usize) -> usize {
     if index < HOTBAR_SIZE {
         HOTBAR_START + index
     } else {
@@ -187,23 +185,19 @@ const fn menu_slot(index: usize) -> usize {
     }
 }
 
-/// 官方的 `isEnchanted`。组件的值以附魔的个数开头，默认值是空的。
+/// 官方 `ItemStack.isEnchanted`：解析好的 `enchantments` 组件不是空的。
 fn is_enchanted(stack: &ItemStack) -> bool {
-    stack.added.iter().any(|(kind, value)| {
-        *kind == data_component_type::ENCHANTMENTS && value.first() != Some(&0)
-    })
+    matches!(
+        defaults::resolve(stack.item, &stack.patch(), data_component_type::ENCHANTMENTS),
+        Some(ComponentValue::Enchantments(levels)) if !levels.is_empty()
+    )
 }
 
-/// 官方的 `count <= getMaxStackSize()`。空物品总是合法的。
+/// 官方 `handleSetCreativeModeSlot` 里的 `validData`：`count <= getMaxStackSize()`。
 ///
-/// 上限可以被组件改掉，这里不解析组件的值：改过上限的物品只受解码时 1 到 99 的限制。
+/// 上限看解析好的组件，所以改过 `max_stack_size` 的物品按新上限算。
 fn count_is_valid(stack: &ItemStack) -> bool {
-    stack.is_empty()
-        || stack
-            .added
-            .iter()
-            .any(|(kind, _)| *kind == data_component_type::MAX_STACK_SIZE)
-        || rules::item(stack.item).is_some_and(|item| stack.count <= item.max_stack_size)
+    stack.is_empty() || stack.count <= stack.max_stack_size()
 }
 
 /// `set_carried_item`：选中了快捷栏的另一格。`blocks-inventory.md` 3.1。
@@ -275,8 +269,9 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
     }
 }
 
-/// 把一个槽发给物品的主人，组件只能发回给它。
-fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
+/// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端
+/// 自己的数据，见 [`ItemStack::write`]。
+pub(crate) fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
     let state_id = player.inventory.next_state_id();
     let packet = ContainerSetSlot {
         container_id: PLAYER_CONTAINER,
@@ -289,14 +284,22 @@ fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
 
 /// `pick_item_from_block`：中键选取方块。`blocks-inventory.md` 8.4。
 ///
-/// 客户端不预测，这里不处理的话中键就没有效果。Ctrl+中键的 `include_data` 不用看，M2 当普通中键处理。
-pub(crate) fn on_pick_item_from_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
-    let Some(player) = region.players.get_mut(&id) else {
+/// 客户端不预测，这里不处理的话中键就没有效果。`include_data` 是 Ctrl+中键，官方只在创造模式
+/// 下看它，为真时物品还带上方块实体的数据，见 [`block_items::add_block_data`]。
+pub(crate) fn on_pick_item_from_block(
+    region: &mut Region,
+    id: PlayerId,
+    pos: BlockPos,
+    include_data: bool,
+) {
+    let Some(player) = region.players.get(&id) else {
         return;
     };
     if !within_reach(player, pos) {
         return;
     }
+    // 官方的 `hasInfiniteMaterials`，也就是创造模式。
+    let include_data = include_data && player.game_mode == GameMode::Creative;
     // 高度超出世界时官方也当作没加载。
     let Some(block) = region.chunks.block(pos).and_then(block_of_state) else {
         return;
@@ -306,12 +309,61 @@ pub(crate) fn on_pick_item_from_block(region: &mut Region, id: PlayerId, pos: Bl
         return;
     }
 
-    let changed = player.inventory.pick(block.item);
+    let mut stack = clone_item_stack(region, pos, block.item);
+    if include_data {
+        block_items::add_block_data(region, pos, &mut stack);
+    }
+
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let changed = player.inventory.pick(&stack);
     let slot = i32::from(player.inventory.selected);
     region.links.send(id, &SetHeldSlot { slot });
     for slot in changed {
         send_slot(player, &mut region.links, slot);
     }
+}
+
+/// 官方 `BlockBehaviour.getCloneItemStack`。
+///
+/// 旗帜和饰纹陶罐的覆盖不看 `includeData`：它们总是带上方块实体的那几项组件。
+/// 官方还有二十来个别的覆盖（作物给种子、洞穴藤蔓给发光浆果、花盆给花、`light` 给带亮度的物品
+/// 这些），这里都还是默认实现，只有方块自己的物品。
+fn clone_item_stack(region: &Region, pos: BlockPos, item: i32) -> ItemStack {
+    let mut stack = ItemStack::new(item, 1);
+    let kind = region
+        .chunks
+        .block(pos)
+        .and_then(block_of_state)
+        .and_then(|block| block.block_entity_type);
+    match kind {
+        // `AbstractBannerBlock.getCloneItemStack` 走 `BannerBlockEntity.getItem`，
+        // 也就是整份 `collectComponents`。
+        Some(block_entity_type::BANNER) => {
+            let (added, removed) = block_items::collect(region, pos).to_opaque();
+            stack.added = added;
+            stack.removed = removed;
+        }
+        // `DecoratedPotBlock.getCloneItemStack` 只带纹样，不带罐子里的东西。
+        Some(block_entity_type::DECORATED_POT) => {
+            let mut patch = ComponentPatch::new();
+            if let Some(decorations) = block_items::collect(region, pos)
+                .get(data_component_type::POT_DECORATIONS)
+                .cloned()
+            {
+                patch.put(
+                    data_component_type::POT_DECORATIONS,
+                    PatchEntry::Set(decorations),
+                );
+            }
+            let (added, removed) = patch.to_opaque();
+            stack.added = added;
+            stack.removed = removed;
+        }
+        _ => {}
+    }
+    stack
 }
 
 #[cfg(test)]

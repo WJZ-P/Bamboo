@@ -1,6 +1,10 @@
 //! NBT：Minecraft 用来存储结构化数据的二进制格式。
 //!
-//! 目前只实现网络上用到的编码。读取存档时才需要解码，等做到存档再加。
+//! 目前只实现网络上用到的编码和解码。读存档还要认文件格式的根节点名字，等做到存档再加。
+
+mod decode;
+
+pub use decode::{Accounter, DEFAULT_QUOTA, DecodeError, MAX_DEPTH, Reader};
 
 /// 一个 NBT 值。
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +26,7 @@ pub enum Tag {
 }
 
 const END_ID: u8 = 0;
+const COMPOUND_ID: u8 = 10;
 
 /// 字符串编码后的字节数上限，长度前缀只有两个字节。
 const MAX_STRING_BYTES: usize = u16::MAX as usize;
@@ -64,10 +69,19 @@ impl Tag {
             }
             Self::String(value) => write_modified_utf8(out, value),
             Self::List(values) => {
-                out.push(values.first().map_or(END_ID, Self::id));
+                let element_type = raw_element_type(values);
+                out.push(element_type);
                 write_len(out, values.len());
                 for value in values {
-                    value.write_payload(out);
+                    if element_type == COMPOUND_ID && needs_wrapper(value) {
+                        // 官方 `ListTag.wrapIfNeeded`：类型不一致的元素各自包进 `{"": 值}`。
+                        out.push(value.id());
+                        write_modified_utf8(out, "");
+                        value.write_payload(out);
+                        out.push(END_ID);
+                    } else {
+                        value.write_payload(out);
+                    }
                 }
             }
             Self::Compound(entries) => {
@@ -87,6 +101,30 @@ impl Tag {
                 out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
             }
         }
+    }
+}
+
+/// 官方 `ListTag.identifyRawElementType`：元素类型一致时就用它，混在一起时写成复合标签。
+fn raw_element_type(values: &[Tag]) -> u8 {
+    let mut uniform = END_ID;
+    for value in values {
+        let id = value.id();
+        if uniform == END_ID {
+            uniform = id;
+        } else if uniform != id {
+            return COMPOUND_ID;
+        }
+    }
+    uniform
+}
+
+/// 官方 `ListTag.wrapIfNeeded`：只有本身不是包装的复合标签能原样写出去。
+///
+/// 官方 `ListTag.isWrapper` 说的包装就是「只有一个空名字键的复合标签」。
+fn needs_wrapper(value: &Tag) -> bool {
+    match value {
+        Tag::Compound(entries) => matches!(&entries[..], [(name, _)] if name.is_empty()),
+        _ => true,
     }
 }
 

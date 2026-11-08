@@ -4,6 +4,7 @@ import io.netty.buffer.Unpooled;
 import it.unimi.dsi.fastutil.shorts.ShortIterator;
 import it.unimi.dsi.fastutil.shorts.ShortOpenHashSet;
 import io.netty.channel.Channel;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
@@ -47,16 +48,22 @@ import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
+import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.HashedStack;
 import net.minecraft.network.PacketDecoder;
 import net.minecraft.network.PacketSendListener;
 import net.minecraft.network.VarInt;
@@ -86,9 +93,12 @@ import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
+import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundDisguisedChatPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
@@ -99,6 +109,7 @@ import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
+import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
@@ -123,6 +134,9 @@ import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ServerboundEditBookPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPickItemFromBlockPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket;
@@ -179,10 +193,20 @@ import net.minecraft.world.entity.PositionPath;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.ChatVisiblity;
 import net.minecraft.world.entity.player.Input;
+import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.SwingAnimationType;
+import net.minecraft.world.item.component.WritableBookContent;
+import net.minecraft.world.item.component.WrittenBookContent;
+import net.minecraft.world.item.component.DebugStickState;
+import net.minecraft.world.item.component.ResolvableProfile;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
@@ -193,10 +217,15 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.RotatedPillarBlock;
 import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.block.entity.BannerPatternLayers;
+import net.minecraft.world.level.block.entity.BannerPatterns;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
 import net.minecraft.world.level.block.entity.SignTextSlot;
+import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -280,6 +309,10 @@ public final class Probe {
     private static final int STACK = 64;
     private static final String CHAT_TEXT = "你好，竹子🐾";
     private static final String SIGN_TEXT = "竹子会写字";
+    /** 改过名的剑，组件 `custom_name` 要发给别的玩家。 */
+    private static final String SWORD_NAME = "小猫的剑";
+    /** 改过名的箱子，打开时的菜单标题就是它。 */
+    private static final String CHEST_NAME = "小猫的箱子";
     private static final String UNKNOWN_COMMAND = "Unknown or incomplete command. See below for error";
 
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
@@ -288,11 +321,14 @@ public final class Probe {
             "handleAwardStats",
             "handleBlockChangedAck",
             "handleBlockEntityData",
+            "handleBlockEvent",
             "handleBlockUpdate",
             "handleBundlePacket",
             "handleChunkBatchFinished",
             "handleChunkBatchStart",
             "handleChunkBlocksUpdate",
+            "handleContainerClose",
+            "handleContainerContent",
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
@@ -306,6 +342,7 @@ public final class Probe {
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
+            "handleOpenScreen",
             "handleOpenSignEditor",
             "handlePlayerAbilities",
             "handlePlayerInfoRemove",
@@ -564,10 +601,15 @@ public final class Probe {
                 section("blocks" + names, () -> blocks(actor, observer));
                 section("placement" + names, () -> placement(actor, observer));
                 section("sounds" + names, () -> sounds(actor, observer));
+                section("pistons" + names, () -> pistons(actor, observer));
                 section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
+                section("components" + names, () -> components(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
             }
+
+            section("books", () -> books(kitten));
+            section("containers", () -> containers(kitten, mochi));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
@@ -578,6 +620,8 @@ public final class Probe {
 
             section("long running", () -> {
                 await("play: keep-alives and the latency broadcast arrived", JOIN_TIMEOUT_MILLIS, kitten::longRunningDone);
+                await("play: another client received the latency update", JOIN_TIMEOUT_MILLIS,
+                        () -> late.latencyUpdated);
             });
 
             for (Join client : clients) {
@@ -1036,6 +1080,88 @@ public final class Probe {
             }
         }
 
+        private static boolean extended(BlockState state) {
+            return state != null && state.is(Blocks.STICKY_PISTON) && state.getValue(PistonBaseBlock.EXTENDED);
+        }
+
+        private static boolean retracted(BlockState state) {
+            return state != null && state.is(Blocks.STICKY_PISTON) && !state.getValue(PistonBaseBlock.EXTENDED);
+        }
+
+        /** 粘性活塞推出方块再拉回来：客户端要收到方块事件，被推的方块要出现在新位置。 */
+        private void pistons(Join actor, Join observer) throws IOException {
+            // 动手的人先往北走了约 4 格，再往南放活塞就出了观察者的 16 格。
+            // 朝观察者走近不到一格，活塞放在北面 3 格，测完走回去。
+            double step = observer.position.x < actor.position.x ? -WALK_STEP : WALK_STEP;
+            Vec3 start = actor.position;
+            for (int walked = 1; walked <= 3; walked += 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+            BlockPos ground = BlockPos.containing(actor.position).offset(0, -1, -3);
+            BlockPos piston = ground.above();
+            BlockPos stone = piston.north();
+            BlockPos pushed = stone.north();
+            BlockPos power = ground.west().above();
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState stoneState = Blocks.STONE.defaultBlockState();
+
+            // 朝北放：yaw 0 时官方取玩家的朝向，活塞朝玩家的反方向。
+            actor.send(new ServerboundMovePlayerPacket.Rot(0.0f, 0.0f, true, false));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            useOn(actor, Items.STICKY_PISTON, ground, Direction.UP, Vec3.upFromBottomCenterOf(ground, 1.0));
+            await("pistons: " + observer.player + " sees the sticky piston",
+                    () -> retracted(observer.blocks.get(piston)));
+            useOn(actor, Items.STONE, ground.north(), Direction.UP, Vec3.upFromBottomCenterOf(ground.north(), 1.0));
+            await("pistons: " + observer.player + " sees the block to push",
+                    () -> stoneState.equals(observer.blocks.get(stone)));
+
+            int extending = observer.blockEvents.size();
+            int heard = observer.sounds.size();
+            useOn(actor, Items.REDSTONE_BLOCK, ground.west(), Direction.UP, Vec3.upFromBottomCenterOf(ground.west(), 1.0));
+            await("pistons: the piston extends", () -> extended(observer.blocks.get(piston)));
+            await("pistons: the head arrives",
+                    () -> observer.blocks.get(stone) != null && observer.blocks.get(stone).is(Blocks.PISTON_HEAD));
+            await("pistons: the block lands one step further", () -> stoneState.equals(observer.blocks.get(pushed)));
+            pumpFor(SETTLE_MILLIS);
+            check("pistons: extending sends one block event", observer.blockEvents.size() == extending + 1);
+            ClientboundBlockEventPacket extend = observer.blockEvents.getLast();
+            check("pistons: the extension event names the piston",
+                    extend.getPos().equals(piston) && extend.getBlock() == Blocks.STICKY_PISTON && extend.getB0() == 0);
+            boolean heardExtend = false;
+            for (ClientboundSoundPacket sound : observer.sounds.subList(heard, observer.sounds.size())) {
+                if (sound.getSound().value() != SoundEvents.PISTON_EXTEND) {
+                    continue;
+                }
+                heardExtend = true;
+                check("pistons: the extend sound comes from the block", sound.getSource() == SoundSource.BLOCKS);
+                check("pistons: the extend sound is at the piston",
+                        near(Vec3.atCenterOf(piston), new Vec3(sound.getX(), sound.getY(), sound.getZ())));
+                check("pistons: the extend sound has volume 0.5", sound.getVolume() == 0.5f);
+                check("pistons: the extend sound has the piston pitch",
+                        sound.getPitch() >= 0.6f && sound.getPitch() < 0.85f);
+            }
+            check("pistons: the other client hears the piston extend", heardExtend);
+
+            int retracting = observer.blockEvents.size();
+            int breaking = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, power, Direction.UP, breaking));
+            await("pistons: the power block breaks", () -> actor.lastAck >= breaking);
+            await("pistons: the piston retracts", () -> retracted(observer.blocks.get(piston)));
+            await("pistons: the block comes back", () -> stoneState.equals(observer.blocks.get(stone)));
+            await("pistons: the space behind is open again", () -> air.equals(observer.blocks.get(pushed)));
+            pumpFor(SETTLE_MILLIS);
+            check("pistons: retracting sends one block event", observer.blockEvents.size() == retracting + 1);
+            ClientboundBlockEventPacket retract = observer.blockEvents.getLast();
+            check("pistons: the retraction event names the piston",
+                    retract.getPos().equals(piston) && retract.getBlock() == Blocks.STICKY_PISTON && retract.getB0() == 1);
+            for (int walked = 2; walked >= 0; walked -= 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+        }
+
         /** 放下的告示牌只给放置者打开编辑界面，写进去的字另一个客户端从方块实体数据里读得到。 */
         private void signs(Join actor, Join observer) throws IOException {
             BlockPos ground = BlockPos.containing(actor.position).offset(2, -1, 2);
@@ -1128,6 +1254,336 @@ public final class Probe {
             await("inventory: ctrl+Q takes the stack", () -> isEmpty(remote, EquipmentSlot.MAINHAND));
         }
 
+        /**
+         * 物品组件：校验过的组件要发给别的玩家，放下的方块实体也要带上物品里的数据。
+         *
+         * 组件和 NBT 都由官方的编解码器解，所以这些检查过了就说明官方客户端解得开。
+         */
+        private void components(Join actor, Join observer) throws IOException {
+            Remote remote = observer.remote(actor);
+            Holder<Enchantment> sharpness = actor.registries
+                    .lookupOrThrow(Registries.ENCHANTMENT)
+                    .getOrThrow(Enchantments.SHARPNESS);
+            ItemEnchantments.Mutable stored = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+            stored.set(sharpness, 3);
+            ItemStack book = new ItemStack(Items.ENCHANTED_BOOK);
+            book.set(DataComponents.STORED_ENCHANTMENTS, stored.toImmutable());
+            ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+            sword.set(DataComponents.CUSTOM_NAME, Component.literal(SWORD_NAME));
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, book));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(OFF_HAND_SLOT, sword));
+            actor.send(new ServerboundSetCarriedItemPacket(2));
+            await("components: the observer sees the enchanted book", () -> {
+                ItemStack held = remote.equipment.get(EquipmentSlot.MAINHAND);
+                return held != null
+                        && held.is(Items.ENCHANTED_BOOK)
+                        && held.getOrDefault(DataComponents.STORED_ENCHANTMENTS, ItemEnchantments.EMPTY)
+                                .getLevel(sharpness) == 3;
+            });
+            await("components: the observer sees the renamed sword", () -> {
+                ItemStack held = remote.equipment.get(EquipmentSlot.OFFHAND);
+                Component name = held == null ? null : held.get(DataComponents.CUSTOM_NAME);
+                return name != null && SWORD_NAME.equals(name.getString());
+            });
+
+            // `debug_stick_state` 在线上是 NBT，我们只能校验最外层。它属于发来它的玩家：
+            // 换手时服务端把主手和副手两格都发回给这个玩家，副手那一份要原样带着组件。
+            ItemStack debugStick = new ItemStack(Items.DEBUG_STICK);
+            debugStick.set(DataComponents.DEBUG_STICK_STATE, new DebugStickState(Map.of(
+                    BuiltInRegistries.BLOCK.wrapAsHolder(Blocks.OAK_LOG), BlockStateProperties.AXIS)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, debugStick));
+            actor.send(new ServerboundSetCarriedItemPacket(2));
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
+            await("components: the owner gets the components we only shape check after moving them", () -> {
+                ItemStack moved = actor.slots.get(OFF_HAND_SLOT);
+                if (moved == null || !moved.is(Items.DEBUG_STICK)) {
+                    return false;
+                }
+                DebugStickState state = moved.getOrDefault(DataComponents.DEBUG_STICK_STATE, DebugStickState.EMPTY);
+                return state.properties().containsValue(BlockStateProperties.AXIS);
+            });
+
+            // 带图案的旗帜：图案要进方块实体，再编成 NBT 发给所有人。
+            BlockPos bannerGround = BlockPos.containing(actor.position).offset(2, -1, -2);
+            BlockPos banner = bannerGround.above();
+            BannerPatternLayers layers = bannerLayers(actor.registries);
+            ItemStack bannerItem = new ItemStack(Items.BANNER.white());
+            bannerItem.set(DataComponents.BANNER_PATTERNS, layers);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, bannerItem));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(bannerGround, 1.0), Direction.UP, bannerGround, false),
+                    placing));
+            await("components: " + actor.player + " gets the ack for the banner", () -> actor.lastAck >= placing);
+            await("components: " + observer.player + " sees the banner",
+                    () -> observer.blocks.get(banner) != null
+                            && observer.blocks.get(banner).is(Blocks.BANNER.white()));
+            await("components: the banner patterns reach the observer",
+                    () -> layers.equals(bannerPatterns(observer.blockEntityTags.get(banner), observer.registries)));
+            await("components: the banner patterns come back to the placer",
+                    () -> layers.equals(bannerPatterns(actor.blockEntityTags.get(banner), actor.registries)));
+            actor.edits.add(new Edit(banner, observer.blocks.get(banner)));
+
+            // 头颅的档案：我们写的 NBT 要能被官方的 `ResolvableProfile.CODEC` 解回来。
+            BlockPos headGround = BlockPos.containing(actor.position).offset(0, -1, -2);
+            BlockPos head = headGround.above();
+            ResolvableProfile profile = ResolvableProfile.createUnresolved(actor.player);
+            ItemStack headItem = new ItemStack(Items.PLAYER_HEAD);
+            headItem.set(DataComponents.PROFILE, profile);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, headItem));
+            int placingHead = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(headGround, 1.0), Direction.UP, headGround, false),
+                    placingHead));
+            await("components: " + actor.player + " gets the ack for the head", () -> actor.lastAck >= placingHead);
+            await("components: the head profile reaches the observer",
+                    () -> profile.equals(headProfile(observer.blockEntityTags.get(head), observer.registries)));
+
+            // 改了名的箱子：打开时的标题就是那个名字。
+            BlockPos chestGround = BlockPos.containing(actor.position).offset(-2, -1, -2);
+            BlockPos namedChest = chestGround.above();
+            ItemStack chestItem = new ItemStack(Items.CHEST);
+            chestItem.set(DataComponents.CUSTOM_NAME, Component.literal(CHEST_NAME));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, chestItem));
+            int placingChest = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(chestGround, 1.0), Direction.UP, chestGround, false),
+                    placingChest));
+            await("components: " + actor.player + " gets the ack for the named chest",
+                    () -> actor.lastAck >= placingChest);
+            await("components: " + actor.player + " sees the named chest",
+                    () -> actor.blocks.get(namedChest) != null && actor.blocks.get(namedChest).is(Blocks.CHEST));
+            openChest(actor, namedChest);
+            check("components: the menu title is the custom name",
+                    actor.openMenuTitle != null && CHEST_NAME.equals(actor.openMenuTitle.getString()));
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
+
+            // 清掉这一段用的槽位，后面几段按空物品栏算。
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(OFF_HAND_SLOT, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            await("components: the hands are empty again",
+                    () -> isEmpty(remote, EquipmentSlot.OFFHAND) && isEmpty(remote, EquipmentSlot.MAINHAND));
+        }
+
+        /** 一面红色花朵图案的旗帜，和探针放下去的那一面一样。 */
+        private static BannerPatternLayers bannerLayers(RegistryAccess.Frozen registries) {
+            Holder<BannerPattern> flower = registries
+                    .lookupOrThrow(Registries.BANNER_PATTERN)
+                    .getOrThrow(BannerPatterns.FLOWER);
+            return new BannerPatternLayers(List.of(new BannerPatternLayers.Layer(flower, DyeColor.RED)));
+        }
+
+        /** 方块实体数据里的旗帜图案，按官方 `BannerPatternLayers.CODEC` 解。 */
+        private static BannerPatternLayers bannerPatterns(CompoundTag tag, RegistryAccess.Frozen registries) {
+            Tag patterns = tag == null ? null : tag.get("patterns");
+            if (patterns == null) {
+                return null;
+            }
+            return BannerPatternLayers.CODEC
+                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), patterns)
+                    .result()
+                    .orElse(null);
+        }
+
+        /** 方块实体数据里的头颅档案，按官方 `ResolvableProfile.CODEC` 解。 */
+        private static ResolvableProfile headProfile(CompoundTag tag, RegistryAccess.Frozen registries) {
+            Tag profile = tag == null ? null : tag.get("profile");
+            if (profile == null) {
+                return null;
+            }
+            return ResolvableProfile.CODEC
+                    .parse(registries.createSerializationContext(NbtOps.INSTANCE), profile)
+                    .result()
+                    .orElse(null);
+        }
+
+        /**
+         * 官方客户端保存书与笔再署名。署名不改本地物品，服务端必须把成书同步回来，
+         * 标题、作者和页面用官方组件 codec 解出来。
+         */
+        private void books(Join actor) throws IOException {
+            int inventorySlot = 4;
+            int menuSlot = HOTBAR_START + inventorySlot;
+            List<String> pages = List.of("Hello", "第二页");
+            actor.send(new ServerboundSetCreativeModeSlotPacket(menuSlot, new ItemStack(Items.WRITABLE_BOOK)));
+            actor.send(new ServerboundEditBookPacket(inventorySlot, pages, Optional.empty()));
+            await("book: the edited pages come back", () -> writablePages(actor.slots.get(menuSlot), pages));
+            check("book: editing keeps it a book and quill", actor.slots.get(menuSlot).is(Items.WRITABLE_BOOK));
+
+            String title = "My Title";
+            actor.send(new ServerboundEditBookPacket(inventorySlot, pages, Optional.of(title)));
+            await("book: signing turns it into a written book",
+                    () -> actor.slots.getOrDefault(menuSlot, ItemStack.EMPTY).is(Items.WRITTEN_BOOK));
+            ItemStack stack = actor.slots.get(menuSlot);
+            WrittenBookContent book = stack.get(DataComponents.WRITTEN_BOOK_CONTENT);
+            check("book: the written content is present", book != null);
+            if (book == null) {
+                return;
+            }
+            check("book: the count is unchanged", stack.getCount() == 1);
+            check("book: the title matches", title.equals(book.title().raw()));
+            check("book: the title was not filtered", book.title().filtered().isEmpty());
+            check("book: the author is the player name", actor.player.equals(book.author()));
+            check("book: generation is the original", book.generation() == 0);
+            check("book: the book is already resolved", book.resolved());
+            check("book: the pages match and were not filtered", writtenPages(book, pages));
+        }
+
+        /** 书与笔的页面：原文对得上，没有过滤文本。 */
+        private static boolean writablePages(ItemStack stack, List<String> pages) {
+            if (stack == null || !stack.is(Items.WRITABLE_BOOK)) {
+                return false;
+            }
+            WritableBookContent content = stack.get(DataComponents.WRITABLE_BOOK_CONTENT);
+            if (content == null || content.pages().size() != pages.size()) {
+                return false;
+            }
+            for (int i = 0; i < pages.size(); i++) {
+                var page = content.pages().get(i);
+                if (!pages.get(i).equals(page.raw()) || page.filtered().isPresent()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** 成书的页面是字面文本组件。 */
+        private static boolean writtenPages(WrittenBookContent book, List<String> pages) {
+            if (book.pages().size() != pages.size()) {
+                return false;
+            }
+            for (int i = 0; i < pages.size(); i++) {
+                var page = book.pages().get(i);
+                if (!pages.get(i).equals(page.raw().getString()) || page.filtered().isPresent()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * 箱子：打开、放进物品、关上、再打开还在，另一名玩家打开能看到同一份内容。
+         * 打开和关闭的人数也通过方块事件同步给附近的人。
+         */
+        private void containers(Join opener, Join watcher) throws IOException {
+            BlockPos chest = chestOf(opener);
+            // 快捷栏第 3 格放苹果，后面 Shift 点击把它推进箱子。官方不回应这个包，
+            // 所以内容要等打开菜单时的完整内容来确认。
+            opener.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 3, new ItemStack(Items.APPLE, 7)));
+            pumpFor(TICK_MILLIS);
+
+            int openerEvents = opener.blockEvents.size();
+            int watcherEvents = watcher.blockEvents.size();
+            int firstId = openChest(opener, chest);
+            check("container: the chest menu is three rows", MenuType.GENERIC_9x3.equals(opener.openMenuType));
+            check("container: the chest menu has sixty-three slots", opener.lastContent.size() == 63);
+            check("container: a new menu starts at state one", opener.lastContentState == 1);
+            check("container: the apple is in the opened inventory",
+                    is(opener.menuSlots.get(54 + 3), Items.APPLE, 7));
+            await("container: the open event reaches both players",
+                    () -> chestEventCount(opener, chest, openerEvents) == 1
+                            && chestEventCount(watcher, chest, watcherEvents) == 1);
+            check("container: opening sets the open count to one", lastChestEvent(opener, chest).getB1() == 1);
+
+            // 箱子有 27 格，后面是玩家背包 27 格，再往后才是快捷栏，所以快捷栏第 3 格是 54 + 3。
+            int clickState = opener.menuStateId;
+            int hotbarSlot = 54 + 3;
+            opener.send(opener.click(hotbarSlot, 0, ContainerInput.QUICK_MOVE));
+            await("container: shift-click moves the apple into the chest",
+                    () -> is(opener.menuSlots.get(0), Items.APPLE, 7)
+                            && opener.menuSlots.getOrDefault(hotbarSlot, ItemStack.EMPTY).isEmpty());
+            check("container: two slots changed, one state id each", opener.menuStateId == clickState + 2);
+            check("container: the shifted stack keeps its count", opener.menuSlots.get(0).getCount() == 7);
+
+            opener.send(new ServerboundContainerClosePacket(opener.openContainerId));
+            await("container: closing brings the open count to zero",
+                    () -> isClosedChest(opener, chest));
+
+            // 再打开，苹果还在。菜单 ID 换了，内容从头发。
+            int secondId = openChest(opener, chest);
+            check("container: reopening uses a new container id", secondId != firstId);
+            check("container: the apple was kept", is(opener.menuSlots.get(0), Items.APPLE, 7));
+            check("container: the reopened menu starts at state one", opener.lastContentState == 1);
+
+            // 第二名玩家走到箱子旁边再打开，看到同一份内容，开盖人数变成二。
+            watcher.moveTo(new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 2.5), true);
+            pumpFor(TICK_MILLIS);
+            openChest(watcher, chest);
+            await("container: the second player sees the apple", () -> is(watcher.menuSlots.get(0), Items.APPLE, 7));
+            await("container: the open count reaches two", () -> lastChestEvent(opener, chest).getB1() == 2);
+            watcher.send(new ServerboundContainerClosePacket(watcher.openContainerId));
+            await("container: the open count goes back to one", () -> lastChestEvent(opener, chest).getB1() == 1);
+            opener.send(new ServerboundContainerClosePacket(opener.openContainerId));
+            await("container: closing the chest is seen by the watcher",
+                    () -> isClosedChest(watcher, chest));
+        }
+
+        /** 这名玩家在 `blocks` 里放下的箱子。 */
+        private static BlockPos chestOf(Join client) {
+            for (Edit edit : client.edits) {
+                if (edit.state.is(Blocks.CHEST)) {
+                    return edit.pos;
+                }
+            }
+            throw new StepFailed(client.player + " placed no chest");
+        }
+
+        /** 右键箱子并等到 open_screen 和完整的 container_set_content 都到了，返回菜单 ID。 */
+        private int openChest(Join client, BlockPos chest) throws IOException {
+            client.openMenuType = null;
+            client.lastContentState = -1;
+            client.menuSlots.clear();
+            int sequence = client.nextSequence();
+            client.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(chest, 1.0), Direction.UP, chest, false),
+                    sequence));
+            await("container: " + client.player + " gets the ack for opening", () -> client.lastAck >= sequence);
+            await("container: " + client.player + " gets the chest screen", () -> client.openMenuType != null);
+            await("container: " + client.player + " gets the chest content", () -> client.lastContentState >= 0);
+            return client.openContainerId;
+        }
+
+        private static int chestEventCount(Join client, BlockPos pos, int start) {
+            int count = 0;
+            for (int index = start; index < client.blockEvents.size(); index += 1) {
+                ClientboundBlockEventPacket event = client.blockEvents.get(index);
+                if (event.getPos().equals(pos) && event.getB0() == 1 && event.getBlock() == Blocks.CHEST) {
+                    count += 1;
+                }
+            }
+            return count;
+        }
+
+        private static ClientboundBlockEventPacket lastChestEvent(Join client, BlockPos pos) {
+            for (int index = client.blockEvents.size() - 1; index >= 0; index -= 1) {
+                ClientboundBlockEventPacket event = client.blockEvents.get(index);
+                if (event.getPos().equals(pos) && event.getB0() == 1 && event.getBlock() == Blocks.CHEST) {
+                    return event;
+                }
+            }
+            return null;
+        }
+
+        /** 最后一条开盖事件是 0，说明服务器认为盖子已经合上。 */
+        private static boolean isClosedChest(Join client, BlockPos pos) {
+            ClientboundBlockEventPacket event = lastChestEvent(client, pos);
+            return event != null && event.getB1() == 0;
+        }
+
+        private static boolean is(ItemStack stack, Item item, int count) {
+            return stack != null && stack.is(item) && stack.getCount() == count;
+        }
+
         private void chat(Join actor, Join observer) throws IOException {
             String expected = "<" + actor.player + "> " + CHAT_TEXT;
             actor.send(new ServerboundChatPacket(
@@ -1172,6 +1628,13 @@ public final class Probe {
                                 late.blockEntities.get(edit.pos) == BlockEntityTypes.SIGN);
                         check("late: the chunk carries the sign text",
                                 SIGN_TEXT.equals(signLine(late.blockEntityTags.get(edit.pos), "front_text", 0)));
+                    }
+                    if (edit.state.is(Blocks.BANNER.white())) {
+                        check("late: the banner is in the block entity list",
+                                late.blockEntities.get(edit.pos) == BlockEntityTypes.BANNER);
+                        check("late: the chunk carries the banner patterns",
+                                bannerLayers(late.registries)
+                                        .equals(bannerPatterns(late.blockEntityTags.get(edit.pos), late.registries)));
                     }
                 }
                 for (BlockPos pos : editor.cleared) {
@@ -1291,6 +1754,10 @@ public final class Probe {
         /** 收到过编辑界面的告示牌，值是玩家要编辑的那一面。 */
         final Map<BlockPos, SignTextSlot> signEditors = new HashMap<>();
         final Map<Integer, ItemStack> slots = new HashMap<>();
+        /** 打开的菜单里的槽，和容器 0 的 `slots` 分开记。 */
+        final Map<Integer, ItemStack> menuSlots = new HashMap<>();
+        /** 活塞伸出、收回的动画事件，箱子开合的人数也走这个包。 */
+        final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<Edit> edits = new ArrayList<>();
         /** 放下又消失的方块。地面上的空气 `recordChunk` 不记，所以不能写成 `Edit`。 */
         final List<BlockPos> cleared = new ArrayList<>();
@@ -1307,6 +1774,13 @@ public final class Probe {
         int lastAck = -1;
         int acks;
         int stats;
+        int openContainerId = -1;
+        MenuType<?> openMenuType;
+        /** 最后一次 `open_screen` 的标题。 */
+        Component openMenuTitle;
+        int menuStateId = -1;
+        int lastContentState = -1;
+        List<ItemStack> lastContent = List.of();
 
         Join(
                 String host,
@@ -1715,8 +2189,13 @@ public final class Probe {
             handlers.put("handleOpenSignEditor",
                     value -> onOpenSignEditor((ClientboundOpenSignEditorPacket) value));
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
+            handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
             handlers.put("handleSoundEvent", value -> onSound((ClientboundSoundPacket) value));
+            handlers.put("handleOpenScreen", value -> onOpenScreen((ClientboundOpenScreenPacket) value));
+            handlers.put("handleContainerContent",
+                    value -> onContainerContent((ClientboundContainerSetContentPacket) value));
+            handlers.put("handleContainerClose", value -> onContainerClose((ClientboundContainerClosePacket) value));
             handlers.put("handleContainerSetSlot", value -> onSetSlot((ClientboundContainerSetSlotPacket) value));
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
@@ -1805,6 +2284,8 @@ public final class Probe {
             check("play: periodic tab update names the player",
                     packet.entries().stream().anyMatch(entry -> entry.profileId().equals(uuid)));
             check("play: periodic tab update lists everyone online", packet.entries().size() == tab.size());
+            check("play: latency is a non-negative millisecond count",
+                    packet.entries().stream().allMatch(entry -> entry.latency() >= 0));
             latencyUpdated = true;
         }
 
@@ -2033,9 +2514,13 @@ public final class Probe {
         }
 
         private void onBlockEntityData(ClientboundBlockEntityDataPacket packet) {
-            check("signs: block entity data names a sign",
+            // 有内容要发给客户端的方块实体：告示牌的文字，旗帜、头颅和陶罐从物品带来的组件。
+            check("blocks: block entity data only comes from block entities we fill in",
                     packet.getType() == BlockEntityTypes.SIGN
-                            || packet.getType() == BlockEntityTypes.HANGING_SIGN);
+                            || packet.getType() == BlockEntityTypes.HANGING_SIGN
+                            || packet.getType() == BlockEntityTypes.BANNER
+                            || packet.getType() == BlockEntityTypes.SKULL
+                            || packet.getType() == BlockEntityTypes.DECORATED_POT);
             blockEntityTags.put(packet.getPos().immutable(), packet.getTag());
             events.add("data " + packet.getPos().toShortString());
         }
@@ -2061,9 +2546,57 @@ public final class Probe {
             sounds.add(packet);
         }
 
+        private void onBlockEvent(ClientboundBlockEventPacket packet) {
+            blockEvents.add(packet);
+            events.add("blockevent " + packet.getPos().toShortString());        }
+
         private void onSetSlot(ClientboundContainerSetSlotPacket packet) {
-            check("inventory: the player inventory is container zero", packet.getContainerId() == 0);
-            slots.put(packet.getSlot(), packet.getItem());
+            if (packet.getContainerId() == 0) {
+                slots.put(packet.getSlot(), packet.getItem());
+                return;
+            }
+            check("container: slot changes belong to the open menu",
+                    packet.getContainerId() == openContainerId);
+            check("container: the state id goes up", packet.getStateId() > menuStateId);
+            menuStateId = packet.getStateId();
+            menuSlots.put((int) packet.getSlot(), packet.getItem());
+        }
+
+        private void onOpenScreen(ClientboundOpenScreenPacket packet) {
+            openContainerId = packet.getContainerId();
+            openMenuType = packet.getType();
+            openMenuTitle = packet.getTitle();
+            menuSlots.clear();
+            menuStateId = -1;
+            events.add("open " + openContainerId);
+        }
+
+        private void onContainerContent(ClientboundContainerSetContentPacket packet) {
+            check("container: content names the open menu", packet.containerId() == openContainerId);
+            menuStateId = packet.stateId();
+            lastContentState = packet.stateId();
+            lastContent = packet.items();
+            menuSlots.clear();
+            for (int index = 0; index < packet.items().size(); index += 1) {
+                menuSlots.put(index, packet.items().get(index));
+            }
+        }
+
+        private void onContainerClose(ClientboundContainerClosePacket packet) {
+            check("container: close names the open menu", packet.getContainerId() == openContainerId);
+            events.add("close " + packet.getContainerId());
+        }
+
+        /** 一次菜单点击。客户端不预测：没有改过的槽，光标是空的。 */
+        Packet<?> click(int slot, int button, ContainerInput input) {
+            return new ServerboundContainerClickPacket(
+                    openContainerId,
+                    menuStateId,
+                    (short) slot,
+                    (byte) button,
+                    input,
+                    new Int2ObjectOpenHashMap<>(),
+                    HashedStack.EMPTY);
         }
 
         private void onSystemChat(ClientboundSystemChatPacket packet) {
@@ -2145,10 +2678,13 @@ public final class Probe {
                 }
             }
             packet.chunkData().forEachBlockEntityTag(packet.x(), packet.z(), (pos, type, tag) -> {
-                // 告示牌的文字在 `getUpdateTag` 里，别的方块实体没有自定义内容。
+                // 告示牌的文字和旗帜的图案都在 `getUpdateTag` 里。旗帜走 `saveWithoutMetadata`，
+                // 哪怕没有图案也带一张空的组件表，所以它的标签一定不是空的。
                 if (isSign(type)) {
                     check("chunk: signs carry their text", tag != null);
-                } else {
+                } else if (type == BlockEntityTypes.BANNER) {
+                    check("chunk: banners carry their update tag", tag != null);
+                } else if (type != BlockEntityTypes.SKULL && type != BlockEntityTypes.DECORATED_POT) {
                     check("chunk: block entities have no NBT", tag == null);
                 }
                 if (tag != null) {

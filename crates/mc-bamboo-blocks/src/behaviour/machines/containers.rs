@@ -1,10 +1,13 @@
 //! 只有界面和比较器输出的容器：`BarrelBlock`、`ShulkerBoxBlock`、`AbstractFurnaceBlock` 的三个子类、
 //! `HopperBlock`、`DispenserBlock`、`DropperBlock`。
 //!
-//! 内容在方块实体里，这里不做，所以打开木桶不会改 `open`，`tick` 里的 `recheckOpen` 也没有东西要查。
+//! 内容在方块实体里，这里不做。木桶的 `open` 状态和潜影盒的盖子动画都由 `mc-bamboo-game` 的
+//! `ContainerOpenersCounter` 和方块事件驱动，这里只放潜影盒的方块实体和形状。
 
-use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::Block;
+use std::any::Any;
+
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{Block, BlockAncestor};
 
 use super::facing_the_view;
 use crate::{
@@ -12,10 +15,14 @@ use crate::{
         Behaviour,
         common::{default_state, facing_the_player, update_neighbours_after_destroy},
     },
+    block_entity::BlockEntity,
     context::{PlaceContext, UseContext},
+    dispenser::{click_if_empty, dispense_from},
+    hopper::HopperEntity,
     interact::InteractionResult,
+    shape::{Aabb, Boxes, CollisionContext},
     state::{BlockState, ENABLED, FACING, FACING_HOPPER, TRIGGERED},
-    world::{UPDATE_CLIENTS, World},
+    world::{UPDATE_ALL, UPDATE_CLIENTS, UPDATE_LIMIT, World},
 };
 
 /// `BarrelBlock`。
@@ -43,9 +50,215 @@ impl Behaviour for Barrel {
     ) -> InteractionResult {
         InteractionResult::Success
     }
+
+    /// `BarrelBlock.getAnalogOutputSignal`：比较器读木桶的内容。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
+    }
 }
 
-/// `ShulkerBoxBlock`。盖子打开时的形状跟着方块实体走，这里的盒子永远是关着的。
+/// 潜影盒动画每个 tick 走的进度，官方 `progress += 0.1F`。
+const SHULKER_STEP: f32 = 0.1;
+/// 整格的形状，没有方块实体时潜影盒的碰撞和支撑形状。
+const FULL_BLOCK: Aabb = Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+
+/// `ShulkerBoxBlockEntity.AnimationStatus`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShulkerStatus {
+    Closed,
+    Opening,
+    Opened,
+    Closing,
+}
+
+/// `ShulkerBoxBlockEntity`：潜影盒的盖子和开合人数。
+///
+/// 进度每刻由方块实体的 ticker 推进，形状和支撑面跟着进度走，见 [`ShulkerBoxEntity::bounding_box`]
+/// 和 [`open_support_shape`]。
+pub struct ShulkerBoxEntity {
+    pos: BlockPos,
+    open_count: i32,
+    status: ShulkerStatus,
+    progress: f32,
+    progress_old: f32,
+}
+
+impl ShulkerBoxEntity {
+    /// 刚放下的潜影盒：盖子关着，没有人在开。
+    pub fn new(pos: BlockPos) -> Self {
+        Self {
+            pos,
+            open_count: 0,
+            status: ShulkerStatus::Closed,
+            progress: 0.0,
+            progress_old: 0.0,
+        }
+    }
+
+    /// `isClosed`。官方只看状态，不看进度。
+    pub const fn is_closed(&self) -> bool {
+        matches!(self.status, ShulkerStatus::Closed)
+    }
+
+    /// `getAnimationStatus`。
+    pub const fn status(&self) -> ShulkerStatus {
+        self.status
+    }
+
+    /// 现在的开盖人数，官方 `openCount`。
+    pub const fn open_count(&self) -> i32 {
+        self.open_count
+    }
+
+    /// `getProgress(a)`：上一次和这一次的进度之间插值。
+    pub fn progress(&self, a: f32) -> f32 {
+        let factor = a.min(1.0);
+        self.progress_old + factor * (self.progress - self.progress_old)
+    }
+
+    /// `getBoundingBox(state)`：盖子抬起来之后，碰撞形状跟着进度变。
+    ///
+    /// 官方这里用的是方块内的中心 `(0.5, 0.0, 0.5)`，碰撞形状是相对这一格的，调用方再加位置。
+    pub fn bounding_box(&self, state: BlockState) -> Aabb {
+        let progress = self.progress(1.0);
+        progress_delta_aabb(
+            1.0,
+            state.get(FACING),
+            -1.0,
+            0.5 * progress,
+            Vec3::new(0.5, 0.0, 0.5),
+        )
+    }
+
+    /// `triggerEvent`：事件 1 换开盖人数，0 开始关、1 开始开，其余交给基类。
+    pub fn trigger_event(&mut self, param_a: i32, param_b: i32) -> bool {
+        if param_a != 1 {
+            return false;
+        }
+        self.open_count = param_b;
+        match param_b {
+            0 => self.status = ShulkerStatus::Closing,
+            1 => self.status = ShulkerStatus::Opening,
+            _ => {}
+        }
+        true
+    }
+
+    /// `updateAnimation`：每刻推进一步。开始时和停住时更新邻居，形状跟着变。
+    fn update_animation(&mut self, state: BlockState, world: &mut World) {
+        self.progress_old = self.progress;
+        match self.status {
+            ShulkerStatus::Closed => self.progress = 0.0,
+            ShulkerStatus::Opening => {
+                self.progress += SHULKER_STEP;
+                if self.progress_old == 0.0 {
+                    do_neighbor_updates(state, world, self.pos);
+                }
+                if self.progress >= 1.0 {
+                    self.status = ShulkerStatus::Opened;
+                    self.progress = 1.0;
+                    do_neighbor_updates(state, world, self.pos);
+                }
+            }
+            ShulkerStatus::Opened => self.progress = 1.0,
+            ShulkerStatus::Closing => {
+                self.progress -= SHULKER_STEP;
+                if self.progress_old == 1.0 {
+                    do_neighbor_updates(state, world, self.pos);
+                }
+                if self.progress <= 0.0 {
+                    self.status = ShulkerStatus::Closed;
+                    self.progress = 0.0;
+                    do_neighbor_updates(state, world, self.pos);
+                }
+            }
+        }
+    }
+}
+
+/// `ShulkerBoxBlockEntity.doNeighborUpdates`：形状变了，告诉邻居重新算。
+fn do_neighbor_updates(state: BlockState, world: &mut World, pos: BlockPos) {
+    world.update_neighbour_shapes(state, pos, UPDATE_ALL, UPDATE_LIMIT);
+    world.update_neighbors_at(pos, state.block());
+}
+
+impl BlockEntity for ShulkerBoxEntity {
+    fn pos(&self) -> BlockPos {
+        self.pos
+    }
+
+    fn tick(&mut self, world: &mut World) {
+        let state = world.block_state(self.pos);
+        self.update_animation(state, world);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// `ShulkerBoxBlock.getBlockSupportShape` 里打开时的薄板：`SHAPES_OPEN_SUPPORT` 的一项。
+///
+/// 基准形状是底面那一层 `Block.boxZ(16.0, 0.0, 1.0)`，`rotateAll` 按方向转过去，
+/// 箱子朝哪边抬盖子，剩下的薄板就在对面上。
+pub(crate) const fn open_support_shape(facing: Direction) -> Aabb {
+    match facing {
+        Direction::Up => Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0 / 16.0, 1.0),
+        Direction::Down => Aabb::new(0.0, 15.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
+        Direction::North => Aabb::new(0.0, 0.0, 15.0 / 16.0, 1.0, 1.0, 1.0),
+        Direction::South => Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0 / 16.0),
+        Direction::West => Aabb::new(15.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+        Direction::East => Aabb::new(0.0, 0.0, 0.0, 1.0 / 16.0, 1.0, 1.0),
+    }
+}
+
+/// `ShulkerBoxBlock.canOpen` 检查的那半格空间，已经缩进 1e-6。世界坐标。
+pub fn open_lid_box(pos: BlockPos, facing: Direction) -> Aabb {
+    progress_delta_aabb(1.0, facing, 0.0, 0.5, bottom_center_of(pos)).deflated(1.0e-6)
+}
+
+/// `Shulker.getProgressDeltaAabb`。`center` 是盒子底面的中心，方块形状用格内的 `(0.5, 0, 0.5)`，
+/// `canOpen` 用 `Vec3.atBottomCenterOf(pos)`。
+fn progress_delta_aabb(size: f32, direction: Direction, from: f32, to: f32, center: Vec3) -> Aabb {
+    let size = f64::from(size);
+    let half = size * 0.5;
+    let base = Aabb::new(-half, 0.0, -half, half, size, half);
+    let max_movement = f64::from(from.max(to)) * size;
+    let min_movement = f64::from(from.min(to)) * size;
+    let (x, y, z) = direction.normal();
+    let expanded = base.expanded_towards(
+        f64::from(x) * max_movement,
+        f64::from(y) * max_movement,
+        f64::from(z) * max_movement,
+    );
+    let moved = expanded.contracted(
+        -f64::from(x) * (size + min_movement),
+        -f64::from(y) * (size + min_movement),
+        -f64::from(z) * (size + min_movement),
+    );
+    moved.moved(center.x, center.y, center.z)
+}
+
+/// `Vec3.atBottomCenterOf`：方块底面的中心。
+fn bottom_center_of(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y),
+        f64::from(pos.z) + 0.5,
+    )
+}
+
+/// `ShulkerBoxBlock`。形状跟着方块实体里的盖子进度走。
 pub(super) struct ShulkerBox;
 
 impl Behaviour for ShulkerBox {
@@ -56,6 +269,43 @@ impl Behaviour for ShulkerBox {
         _world: &World,
     ) -> Option<BlockState> {
         Some(default_state(block).with(FACING, ctx.clicked_face()))
+    }
+
+    /// `newBlockEntity`：换上潜影盒时建一个盖着的实体。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state) && !world.has_block_entity(pos) {
+            world.set_block_entity(Box::new(ShulkerBoxEntity::new(pos)));
+        }
+    }
+
+    /// `BaseEntityBlock.triggerEvent`：交给方块实体，没有实体时是假。
+    fn trigger_event(
+        &self,
+        _state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        param_a: i32,
+        param_b: i32,
+    ) -> bool {
+        world
+            .with_block_entity::<ShulkerBoxEntity, _>(pos, |entity, _| {
+                entity.trigger_event(param_a, param_b)
+            })
+            .unwrap_or(false)
+    }
+
+    /// `getShape`：有实体时按盖子的进度，没有实体时是整格。
+    fn collision_boxes(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _context: CollisionContext,
+    ) -> Boxes {
+        match world.block_entity::<ShulkerBoxEntity>(pos) {
+            Some(entity) => Boxes::Owned(vec![entity.bounding_box(state)]),
+            None => Boxes::Owned(vec![FULL_BLOCK]),
+        }
     }
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
@@ -69,6 +319,17 @@ impl Behaviour for ShulkerBox {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `ShulkerBoxBlock.getAnalogOutputSignal`：比较器读潜影盒的内容。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
     }
 }
 
@@ -132,6 +393,9 @@ impl Behaviour for Hopper {
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         if !old.is_same_block(state) {
             check_powered_state(state, world, pos);
+            if !world.has_block_entity(pos) {
+                world.set_block_entity(Box::new(HopperEntity::new(pos)));
+            }
         }
     }
 
@@ -156,6 +420,17 @@ impl Behaviour for Hopper {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `HopperBlock.getAnalogOutputSignal`：比较器读漏斗里的 5 格。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
     }
 }
 
@@ -204,5 +479,196 @@ impl Behaviour for Dispenser {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `DispenserBlock.tick`：计划刻到期。投掷器把物品发出去。
+    ///
+    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里。空的发射器仍报 1001，
+    /// 和 `dispenseFrom` 在 `getRandomSlot` 得到 `-1` 时一样。
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.is_a(BlockAncestor::DropperBlock) {
+            dispense_from(world, pos, state);
+        } else {
+            click_if_empty(world, pos);
+        }
+    }
+
+    /// `DispenserBlock.getAnalogOutputSignal`：比较器读 9 格。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::blocks;
+
+    use super::*;
+    use crate::{BlockTicks, Effect, SupportType, testing::TestLevel};
+
+    const POS: BlockPos = BlockPos::new(0, 64, 0);
+
+    /// 放着一个盖着的潜影盒、实体已经登记好。
+    fn placed_shulker(facing: Direction) -> (TestLevel, BlockTicks) {
+        let mut level = TestLevel::new();
+        level.set(POS, BlockState(blocks::SHULKER_BOX).with(FACING, facing));
+        let mut ticks = BlockTicks::new();
+        World::new(&mut level, &mut ticks).set_block_entity(Box::new(ShulkerBoxEntity::new(POS)));
+        (level, ticks)
+    }
+
+    fn state_at(world: &World) -> BlockState {
+        world.block_state(POS)
+    }
+
+    fn open_event(world: &mut World, param_b: i32) {
+        let block = state_at(world).block();
+        world.block_event(POS, block, 1, param_b);
+        world.run_block_events();
+    }
+
+    #[test]
+    fn the_open_event_starts_the_lid_and_reports_it() {
+        let (mut level, mut ticks) = placed_shulker(Direction::Up);
+        let mut world = World::new(&mut level, &mut ticks);
+
+        open_event(&mut world, 1);
+        let entity = world
+            .block_entity::<ShulkerBoxEntity>(POS)
+            .expect("实体应该还在");
+        assert_eq!(entity.status(), ShulkerStatus::Opening);
+        assert_eq!(entity.open_count(), 1);
+        assert!(matches!(
+            world.into_effects().as_slice(),
+            [Effect::BlockEvent {
+                param_a: 1,
+                param_b: 1,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn ten_ticks_open_the_lid_and_neighbour_updates_follow_it() {
+        let (mut level, mut ticks) = placed_shulker(Direction::Up);
+        let mut world = World::new(&mut level, &mut ticks);
+        open_event(&mut world, 1);
+
+        for _ in 0..10 {
+            world.tick_block_entities();
+        }
+
+        let entity = world
+            .block_entity::<ShulkerBoxEntity>(POS)
+            .expect("实体应该还在");
+        assert_eq!(entity.status(), ShulkerStatus::Opened);
+        assert_eq!(entity.progress(1.0), 1.0);
+        let state = state_at(&world);
+        assert_eq!(
+            entity.bounding_box(state),
+            Aabb::new(0.0, 0.0, 0.0, 1.0, 1.5, 1.0)
+        );
+        // 盖子打开了，只剩底面那一层支撑。
+        assert!(world.is_face_sturdy(POS, Direction::Down, SupportType::Full));
+        assert!(!world.is_face_sturdy(POS, Direction::Up, SupportType::Full));
+    }
+
+    #[test]
+    fn the_close_event_brings_the_lid_back_down() {
+        let (mut level, mut ticks) = placed_shulker(Direction::Up);
+        let mut world = World::new(&mut level, &mut ticks);
+        open_event(&mut world, 1);
+        for _ in 0..10 {
+            world.tick_block_entities();
+        }
+
+        open_event(&mut world, 0);
+        let entity = world
+            .block_entity::<ShulkerBoxEntity>(POS)
+            .expect("实体应该还在");
+        assert_eq!(entity.status(), ShulkerStatus::Closing);
+
+        for _ in 0..10 {
+            world.tick_block_entities();
+        }
+        let entity = world
+            .block_entity::<ShulkerBoxEntity>(POS)
+            .expect("实体应该还在");
+        assert_eq!(entity.status(), ShulkerStatus::Closed);
+        assert_eq!(entity.progress(1.0), 0.0);
+        assert_eq!(
+            entity.bounding_box(state_at(&world)),
+            Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn other_events_fall_through_to_the_base_class() {
+        let mut entity = ShulkerBoxEntity::new(POS);
+        assert!(entity.trigger_event(1, 1));
+        assert!(!entity.trigger_event(2, 0));
+        assert!(!entity.trigger_event(0, 1));
+    }
+
+    #[test]
+    fn only_chests_and_shulkers_answer_the_open_event() {
+        let (mut level, mut ticks) = placed_shulker(Direction::Up);
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut a = |block| BlockState(block).trigger_event(&mut world, POS, 1, 1);
+
+        assert!(a(blocks::CHEST));
+        assert!(a(blocks::TRAPPED_CHEST));
+        assert!(a(blocks::COPPER_CHEST));
+        assert!(a(blocks::ENDER_CHEST));
+        assert!(a(blocks::SHULKER_BOX), "有实体时潜影盒自己处理");
+        assert!(!a(blocks::BARREL), "木桶没有 triggerEvent");
+        assert!(!a(blocks::HOPPER));
+        assert!(!BlockState(blocks::CHEST).trigger_event(&mut world, POS, 2, 1));
+    }
+
+    #[test]
+    fn a_shulker_without_its_entity_ignores_the_event() {
+        let mut level = TestLevel::new();
+        level.set(POS, BlockState(blocks::SHULKER_BOX));
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        assert!(!BlockState(blocks::SHULKER_BOX).trigger_event(&mut world, POS, 1, 1));
+    }
+
+    #[test]
+    fn the_open_support_slab_sits_opposite_the_lid() {
+        let up = open_support_shape(Direction::Up);
+        assert_eq!(up, Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0 / 16.0, 1.0));
+        let down = open_support_shape(Direction::Down);
+        assert_eq!(down, Aabb::new(0.0, 15.0 / 16.0, 0.0, 1.0, 1.0, 1.0));
+        let north = open_support_shape(Direction::North);
+        assert_eq!(north, Aabb::new(0.0, 0.0, 15.0 / 16.0, 1.0, 1.0, 1.0));
+        let south = open_support_shape(Direction::South);
+        assert_eq!(south, Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0 / 16.0));
+        let west = open_support_shape(Direction::West);
+        assert_eq!(west, Aabb::new(15.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+        let east = open_support_shape(Direction::East);
+        assert_eq!(east, Aabb::new(0.0, 0.0, 0.0, 1.0 / 16.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn the_lid_box_is_the_half_block_in_front_of_the_face() {
+        let pos = BlockPos::new(3, 64, -2);
+        let up = open_lid_box(pos, Direction::Up);
+        assert_eq!(
+            up,
+            Aabb::new(3.0, 65.0, -2.0, 4.0, 65.5, -1.0).deflated(1.0e-6)
+        );
+        let down = open_lid_box(pos, Direction::Down);
+        assert_eq!(
+            down,
+            Aabb::new(3.0, 63.5, -2.0, 4.0, 64.0, -1.0).deflated(1.0e-6)
+        );
     }
 }

@@ -13,7 +13,7 @@ use common::{
     wire::{
         ABILITY_FLYING, AddEntity, BlockChangedAck, BlockUpdate, ContainerSetSlot, DOWN,
         DROP_ALL_ITEMS, DROP_ITEM, Disconnect, EAST, ForgetLevelChunk, INPUT_SHIFT,
-        LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND, MAX_Y, MIN_Y, NORTH, OFF_HAND, Pos,
+        LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND, MAX_Y, MIN_Y, NORTH, Nbt, OFF_HAND, Pos,
         RELEASE_USE_ITEM, SLOT_MAINHAND, SLOT_OFFHAND, SOUTH, START_DESTROY_BLOCK,
         SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK, SectionBlocksUpdate, SetEquipment,
         SetHeldSlot, Stack, SwingAnimation, SystemChat, UP, face_center, pick_item_from_block,
@@ -24,8 +24,9 @@ use common::{
 use mc_bamboo_data::{
     block_of_state, blocks, items,
     packets::play::{clientbound, serverbound},
-    registries::block_entity_type,
+    registries::{block_entity_type, data_component_type},
 };
+use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
 use mc_bamboo_server::ServerConfig;
 use tokio::time::sleep;
 
@@ -1136,7 +1137,7 @@ async fn off_hand_placing_swings_the_off_hand() {
 }
 
 #[tokio::test]
-async fn components_come_back_to_the_owner_and_never_reach_other_players() {
+async fn components_come_back_to_the_owner_and_reach_other_players() {
     let server = TestServer::start(small_world()).await;
     let mut alice = server.enter("Alice").await;
     let mut bob = server.enter("Bob").await;
@@ -1173,11 +1174,19 @@ async fn components_come_back_to_the_owner_and_never_reach_other_players() {
             .iter()
             .filter(|frame| frame.is::<SetEquipment>())
             .any(|frame| {
-                frame.decode::<SetEquipment>().slot(SLOT_OFFHAND)
+                let packet = frame.decode::<SetEquipment>();
+                // 别人也看得到组件：上限改成了 16，`rarity` 被移除。
+                packet.slot(SLOT_OFFHAND)
                     == Some(Some(Stack {
                         item: items::STONE,
                         count: 2,
                     }))
+                    && packet.patch(SLOT_OFFHAND).is_some_and(|patch| {
+                        patch.get(data_component_type::MAX_STACK_SIZE)
+                            == Some(&ComponentValue::MaxStackSize(16))
+                            && patch.entry(data_component_type::RARITY)
+                                == Some(&PatchEntry::Removed)
+                    })
             })
     })
     .await;
@@ -1315,10 +1324,20 @@ async fn a_late_joiner_gets_the_edited_chunk_and_the_block_entities() {
     assert_eq!(entry.packed_xz, 0x35);
     assert_eq!(entry.y, -60);
     assert_eq!(entry.kind, block_entity_type::CHEST);
+    // 箱子的 `getUpdateTag` 是空的，官方不写 NBT。
+    assert_eq!(entry.data, None);
     let entry = chunk
         .block_entity_at(banner)
         .expect("the banner must be listed");
     assert_eq!(entry.kind, block_entity_type::BANNER);
+    // 旗帜走 `saveWithoutMetadata`，至少带一张空的组件表。
+    assert_eq!(
+        entry.data,
+        Some(Nbt::Compound(vec![(
+            "components".to_owned(),
+            Nbt::Compound(Vec::new())
+        )]))
+    );
     assert_eq!(chunk.block_entities.len(), 2);
 }
 

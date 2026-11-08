@@ -4,16 +4,17 @@
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
-    block_entity,
+    behaviour::machines::{ShulkerBoxEntity, open_support_shape},
+    block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
     fluid::Fluid,
     level::{Effect, Level, RedstoneMemory},
     random::LegacyRandom,
     shape::{self, CollisionContext},
-    state::{BlockState, FluidState, POWER, SupportType},
+    state::{BlockState, FACING, FluidState, HAS_RECORD, POWER, SupportType},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -92,6 +93,15 @@ fn block_center(pos: BlockPos) -> Vec3 {
         f64::from(pos.y) + 0.5,
         f64::from(pos.z) + 0.5,
     )
+}
+
+/// `level.getWorldBorder().isWithinBounds(pos)`：这个世界不能改边界，半径是默认的 29999984。
+///
+/// 方块坐标转成 `double` 再比，左边含、右边不含。
+pub fn is_within_world_border(pos: BlockPos) -> bool {
+    let inside =
+        |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
+    inside(pos.x) && inside(pos.z)
 }
 
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
@@ -235,8 +245,12 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `BlockItem.place` 刚放下的那一格，官方在这里读物品上的组件，见 [`World::placed_at`]。
+    placed_at: Option<BlockPos>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
+    /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
+    handling_tick: bool,
 }
 
 impl<'a> World<'a> {
@@ -246,13 +260,44 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            placed_at: None,
             wire_should_signal: true,
+            handling_tick: false,
         }
     }
 
-    /// 这次操作收集到的结果。
-    pub(crate) fn into_effects(self) -> Vec<Effect> {
+    /// 世界刻里的一次操作，`ServerLevel.tick` 把自己的 `handlingTick` 设成真的时候。
+    pub fn in_world_tick(level: &'a mut dyn Level, ticks: &'a mut BlockTicks) -> Self {
+        Self {
+            handling_tick: true,
+            ..Self::new(level, ticks)
+        }
+    }
+
+    /// `ServerLevel.isHandlingTick`。活塞收回时用它判断前方的移动方块要不要直接落下。
+    pub const fn is_handling_tick(&self) -> bool {
+        self.handling_tick
+    }
+
+    /// `ServerLevel.tick` 在方块事件之后、实体和方块实体之前把 `handlingTick` 放回假。
+    pub(crate) fn end_handling_tick(&mut self) {
+        self.handling_tick = false;
+    }
+
+    /// 这次操作收集到的结果。调用方发出去，见 `mc-bamboo-game` 的 `send_effects`。
+    pub fn into_effects(self) -> Vec<Effect> {
         self.effects
+    }
+
+    /// 这次操作放下的那一格方块，官方 `BlockItem.place` 里 `updateBlockEntityComponents`
+    /// 看的位置。组件在 `mc-bamboo-protocol`，这一层看不见，所以只报位置，由调用方接着做。
+    pub const fn placed_at(&self) -> Option<BlockPos> {
+        self.placed_at
+    }
+
+    /// `BlockItem.place` 放成功时记下这一格。
+    pub(crate) fn set_placed_at(&mut self, pos: BlockPos) {
+        self.placed_at = Some(pos);
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {
@@ -354,17 +399,6 @@ impl<'a> World<'a> {
         });
     }
 
-    /// `blockEvent(pos, block, b0, b1)`。方块 ID 从这一格现在的状态取，和官方传的 `this` 一样。
-    pub fn block_event(&mut self, pos: BlockPos, b0: u8, b1: u8) {
-        let state = self.block_state(pos);
-        self.push_effect(Effect::BlockEvent {
-            pos,
-            block: state.block_id() as i32,
-            b0,
-            b1,
-        });
-    }
-
     /// `getBlockState`。世界外是 `void_air`。
     pub fn block_state(&self, pos: BlockPos) -> BlockState {
         self.level.block_state(pos)
@@ -416,16 +450,43 @@ impl<'a> World<'a> {
 
     /// `getWorldBorder().isWithinBounds(pos)`。
     pub fn is_within_world_border(&self, pos: BlockPos) -> bool {
-        let inside =
-            |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
-        inside(pos.x) && inside(pos.z)
+        is_within_world_border(pos)
     }
 
     /// `isFaceSturdy`：世界里这一格的这个面能不能支撑东西。
     ///
-    /// 大部分方块的结果在 `STATE_FACTS` 里。竹子这类方块的形状跟着渲染偏移走，要按位置算。
+    /// 大部分方块的结果在 `STATE_FACTS` 里。竹子这类方块的形状跟着渲染偏移走，要按位置算；
+    /// `moving_piston` 官方标了 `dynamicShape`，支撑形状来自方块实体的碰撞形状，也跟着动画走。
     pub fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
-        let state = self.block_state(pos);
+        self.is_state_face_sturdy(self.block_state(pos), pos, face, support)
+    }
+
+    /// `state.isFaceSturdy(level, pos, face, support)`：按传进来的状态算，不重新读这一格。
+    ///
+    /// 形状更新拿到的邻居状态可能比世界里的新或者旧，官方用的是传进来的那个；但 `moving_piston`
+    /// 的形状照样从这一格的方块实体读，所以要带上世界和位置，不能只查状态的表。
+    pub fn is_state_face_sturdy(
+        &self,
+        state: BlockState,
+        pos: BlockPos,
+        face: Direction,
+        support: SupportType,
+    ) -> bool {
+        if state.is(blocks::MOVING_PISTON) {
+            let boxes = state.collision_boxes(self, pos, CollisionContext::Empty);
+            return shape::is_supporting(&boxes, face, support);
+        }
+        // `ShulkerBoxBlock.getBlockSupportShape`：盖子打开时只剩背面那一层薄板。
+        if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+            let open = self
+                .block_entity::<ShulkerBoxEntity>(pos)
+                .is_some_and(|entity| !entity.is_closed());
+            if open {
+                let boxes = [open_support_shape(state.get(FACING))];
+                return shape::is_supporting(&boxes, face, support);
+            }
+            return shape::is_supporting(&shape::support_boxes(state, pos), face, support);
+        }
         if state
             .block()
             .offset
@@ -449,6 +510,140 @@ impl<'a> World<'a> {
     /// 改写告示牌的内容。不是告示牌方块时什么也不做，返回 `false`。
     pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         self.level.set_sign(pos, content)
+    }
+
+    /// `getBlockEntity(pos) instanceof SkullBlockEntity` 时的 `getNoteBlockSound`。
+    ///
+    /// 音符盒的 `getCustomSoundId` 读上面那一格，见 [`crate::behaviour::machines`] 里的音符盒。
+    pub fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        self.level.note_block_sound(pos)
+    }
+
+    /// `getBlockEntity(pos)` 之后按类型取。
+    pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
+        self.level.block_entities().get(pos)
+    }
+
+    /// 这一格有没有方块实体。
+    pub fn has_block_entity(&self, pos: BlockPos) -> bool {
+        self.level.block_entities().contains(pos)
+    }
+
+    /// 这一格的物品栏，见 [`Level::with_container`]。
+    pub(crate) fn with_container(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut dyn crate::container::Container),
+    ) -> bool {
+        self.level.with_container(pos, f)
+    }
+
+    /// 比较器从这一格的容器读到的模拟信号，见 [`Level::container_signal`]。
+    pub(crate) fn container_signal(&self, pos: BlockPos) -> i32 {
+        self.level.container_signal(pos)
+    }
+
+    /// 这一格容器背后的方块位置，见 [`Level::container_positions`]。
+    pub(crate) fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
+        self.level.container_positions(pos)
+    }
+
+    /// 带着这一格的漏斗方块实体运行一段代码，见 [`Level::with_hopper`]。
+    pub(crate) fn with_hopper(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut crate::hopper::HopperEntity),
+    ) -> bool {
+        self.level.with_hopper(pos, f)
+    }
+
+    /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做，
+    /// 只打一条警告，说明有地方放错了。
+    pub fn set_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
+        let pos = entity.pos();
+        let state = self.block_state(pos);
+        if !state.has_block_entity() {
+            warn!(
+                "Trying to set block entity at {} {} {}, but state {} does not allow it",
+                pos.x,
+                pos.y,
+                pos.z,
+                state.block().name
+            );
+            return;
+        }
+        self.level.block_entities_mut().insert(entity);
+    }
+
+    /// `Level.removeBlockEntity`。
+    pub fn remove_block_entity(&mut self, pos: BlockPos) {
+        self.level.block_entities_mut().remove(pos);
+    }
+
+    /// 带着这一格的方块实体运行一段代码。实体在运行期间不在表里，所以这段代码用
+    /// `getBlockEntity(pos)` 找不到它自己，别的地方和官方相同。
+    pub fn with_block_entity<T: BlockEntity, R>(
+        &mut self,
+        pos: BlockPos,
+        f: impl FnOnce(&mut T, &mut World) -> R,
+    ) -> Option<R> {
+        let (id, mut entity) = self.level.block_entities_mut().take_at(pos)?;
+        let result = entity
+            .as_any_mut()
+            .downcast_mut::<T>()
+            .map(|typed| f(typed, self));
+        self.level.block_entities_mut().put(pos, id, entity);
+        result
+    }
+
+    /// `level.blockEvent(pos, block, paramA, paramB)`。`block` 是排进队列的方块。
+    pub fn block_event(
+        &mut self,
+        pos: BlockPos,
+        block: &'static Block,
+        param_a: i32,
+        param_b: i32,
+    ) {
+        let block = BlockState(block.default_state).block_id();
+        self.level.block_events().push(BlockEvent {
+            pos,
+            block,
+            param_a,
+            param_b,
+        });
+    }
+
+    /// `ServerLevel.runBlockEvents`：按排队的顺序一直处理到队列空，处理中新排进来的同一轮执行。
+    ///
+    /// 处理成功的事件记成 [`Effect::BlockEvent`]，由调用方发给附近的玩家。
+    pub fn run_block_events(&mut self) {
+        while let Some(event) = self.level.block_events().pop() {
+            let state = self.block_state(event.pos);
+            if state.block_id() != event.block {
+                continue;
+            }
+            if state.trigger_event(self, event.pos, event.param_a, event.param_b) {
+                self.push_effect(Effect::BlockEvent {
+                    pos: event.pos,
+                    block: event.block,
+                    param_a: event.param_a,
+                    param_b: event.param_b,
+                });
+            }
+        }
+    }
+
+    /// `Level.tickBlockEntities`：按 ticker 列表的顺序运行每刻的方块实体。
+    pub fn tick_block_entities(&mut self) {
+        self.level.block_entities_mut().begin_tick();
+        while let Some((pos, id)) = self.level.block_entities_mut().next_ticker() {
+            let Some(mut entity) = self.level.block_entities_mut().take(pos, id) else {
+                continue;
+            };
+            entity.tick(self);
+            self.level.block_entities_mut().put(pos, id, entity);
+        }
+        self.level.block_entities_mut().end_tick();
     }
 
     /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
@@ -758,23 +953,59 @@ impl<'a> World<'a> {
         flags: u32,
     ) -> Option<BlockState> {
         let old = self.block_state(pos);
-        if old == state || !self.level.write_block(pos, state) {
+        if old == state {
+            return None;
+        }
+        let block_changed = !old.is_same_block(state);
+        let drops_own_contents = block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0;
+        // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
+        // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
+        let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
+        // `forget_block_entity` 会清掉正在放的歌，停歌的 1011 要先记下来。
+        let stop_jukebox = drops_own_contents
+            && old.block().block_entity_type
+                == Some(mc_bamboo_data::registries::block_entity_type::JUKEBOX)
+            && self.redstone_memory().is_jukebox_playing(pos);
+        if !self.level.write_block(pos, state, flags) {
             return None;
         }
 
-        let block_changed = !old.is_same_block(state);
-        // 换了方块，官方把方块实体一起删掉，比较器存的输出也就跟着没了。
+        // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
+        if block_changed && old.has_block_entity() {
+            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
+                self.pre_remove_block_entity(pos, old);
+            }
+            self.remove_block_entity(pos);
+        }
+        // 比较器存的输出这些也跟着没了。
         if block_changed {
             self.level.redstone_mut().forget_block_entity(pos);
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
+        // `removeBlockEntity` 不看跳过副作用的标志，`setRemoved` 一定会走，所以它在掉落之后。
+        if let Some(counts) = dropped_counts {
+            // `removeTheItem` → `setTheItem(EMPTY)` → `JukeboxSongPlayer.stop`：
+            // 正在放歌才报 1011，然后 `onSongChanged`。两个 `nextFloat` 在这之后。
+            if stop_jukebox {
+                self.level_event(1011, pos, 0);
+                self.update_neighbors_at(pos, old.block());
+            }
+            block_entity::pre_remove_side_effects(old, self, &counts);
+            // `popOutTheItem` 末尾的 `onSongChanged`，在 `setRemoved` 的 1011 之前。
+            if old.block().block_entity_type
+                == Some(mc_bamboo_data::registries::block_entity_type::JUKEBOX)
+                && old.get(HAS_RECORD)
+            {
+                self.update_neighbors_at(pos, old.block());
+            }
+        }
+        // `removeBlockEntity` 不看跳过副作用的标志，`setRemoved` 一定会走。
         if block_changed && old.has_block_entity() && !block_entity::keeps_block_entity(state, old)
         {
-            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
-                block_entity::pre_remove_side_effects(old, self);
-            }
-            // `removeBlockEntity` 不看跳过副作用的标志，`setRemoved` 一定会走。
             block_entity::removed_side_effects(old, self, pos);
         }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
@@ -789,6 +1020,15 @@ impl<'a> World<'a> {
             state.on_place(self, pos, old);
         }
         Some(old)
+    }
+
+    /// `BlockEntity.preRemoveSideEffects`。实体在回调期间不在表里，和 [`World::with_block_entity`] 一样。
+    fn pre_remove_block_entity(&mut self, pos: BlockPos, state: BlockState) {
+        let Some((id, mut entity)) = self.level.block_entities_mut().take_at(pos) else {
+            return;
+        };
+        entity.pre_remove_side_effects(self, pos, state);
+        self.level.block_entities_mut().put(pos, id, entity);
     }
 
     /// `removeBlock(pos, false)`：换成这一格的流体，没有流体时是空气。
@@ -1213,6 +1453,7 @@ fn traverse_blocks<T>(
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
 
     use super::*;
     use crate::{
@@ -1245,6 +1486,7 @@ mod tests {
                 | Effect::OpenSignEditor { .. }
                 | Effect::Sound { .. }
                 | Effect::LevelEvent { .. }
+                | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. } => None,
             })
             .collect()
@@ -1563,5 +1805,42 @@ mod tests {
             .filter(|item| item.kind == mc_bamboo_data::ItemKind::PlaceOnWater)
             .count();
         assert_eq!(kinds, 2);
+    }
+
+    /// 容器被换掉时，官方 `preRemoveSideEffects` 按每格的数量取随机数：每一格三个
+    /// double 的掉落点，非空的堆再按 `split(nextInt(21) + 10)` 一块一块取六个 double。
+    /// 这个世界没有物品实体，但随机数一个都不能少，否则后面的随机刻会错开。
+    #[test]
+    fn destroying_a_container_consumes_the_drop_random_numbers() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::CHEST));
+        let mut slots = vec![ItemStack::empty(); 27];
+        // 第一格一件，第二格三件，其余 25 格是空的。
+        slots[0] = ItemStack::new(items::STONE, 1);
+        slots[1] = ItemStack::new(items::DIRT, 3);
+        level.set_container(CENTER, slots);
+        with_world(&mut level, |world| {
+            world.set_block(CENTER, BlockState::AIR, UPDATE_ALL);
+        });
+
+        let expected = LegacyRandom::new(0);
+        for _ in [1, 3] {
+            for _ in 0..3 {
+                expected.next_double();
+            }
+            expected.next_int(21);
+            for _ in 0..6 {
+                expected.next_double();
+            }
+        }
+        for _ in 2..27 {
+            for _ in 0..3 {
+                expected.next_double();
+            }
+        }
+        assert_eq!(
+            expected.next_double().to_bits(),
+            level.random.source().next_double().to_bits()
+        );
     }
 }

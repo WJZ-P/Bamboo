@@ -1,0 +1,13 @@
+[package]
+name = "mc-bamboo-recipes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recipe matching for the Bamboo Minecraft server, translated from the official recipe classes."
+keywords = ["minecraft"]
+categories = ["games"]
+
+[dependencies]
+mc-bamboo-data.workspace = true

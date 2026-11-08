@@ -23,6 +23,23 @@ fn on_song_changed(state: BlockState, world: &mut World, pos: BlockPos) {
     world.update_neighbour_for_output_signal(pos, state.block());
 }
 
+/// `popOutTheItem` 拿走唱片以后的部分：`setTheItem(EMPTY)` 里的 `stop`，再弹出掉落物。
+///
+/// 掉落物实体还没有，但官方算它的位置时从世界随机源取了两个数
+/// （`offsetRandomXZ(level.getRandom(), 0.7F)`），后面的随机数要接在这里。
+fn pop_out_the_item(state: BlockState, world: &mut World, pos: BlockPos) {
+    // `JukeboxSongPlayer.stop`：只有正在放歌时才通知。
+    // `JukeboxSongPlayer.stop`：正在放歌才报 1011，然后通知邻居。
+    if world.redstone_memory().is_jukebox_playing(pos) {
+        world.redstone_memory_mut().set_jukebox_playing(pos, false);
+        world.level_event(1011, pos, 0);
+        on_song_changed(state, world, pos);
+    }
+    world.random().next_float();
+    world.random().next_float();
+    on_song_changed(state, world, pos);
+}
+
 impl Behaviour for Jukebox {
     /// `JukeboxBlock.ownSignal`：歌在放时发 15。唱片在方块实体里，这里记在 `RedstoneMemory` 上。
     fn own_signal(&self, _state: BlockState, world: &World, pos: BlockPos) -> i32 {
@@ -34,10 +51,9 @@ impl Behaviour for Jukebox {
     }
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        // 方块实体的 `preRemoveSideEffects`：破坏时弹出唱片。
-        if state.get(HAS_RECORD) {
-            on_song_changed(state, world, pos);
-        }
+        // `JukeboxBlock.affectNeighborsAfterRemoval` 只有 `Containers.updateNeighboursAfterDestroy`。
+        // 有唱片时 `popOutTheItem` 末尾的 `onSongChanged` 在 `setRemoved` 之前，
+        // 见 `World::set_block_state`。两个 `nextFloat` 也在那边取过。
         update_neighbours_after_destroy(state, world, pos);
     }
 
@@ -72,14 +88,9 @@ impl Behaviour for Jukebox {
             return InteractionResult::Pass;
         }
         let pos = ctx.clicked_pos();
+        // `popOutTheItem` → `setTheItem(EMPTY)`：先 `notifyItemChangedInJukebox` 写方块，再停歌、弹出。
         world.set_block(pos, state.with(HAS_RECORD, false), UPDATE_CLIENTS);
-        // `popOutTheItem` 生成掉落物时用 `offsetRandomXZ` 抽两个 `nextFloat`。这里没有实体，
-        // 只照抽，让后面的音高和官方用同一段随机数。
-        world.random().next_float();
-        world.random().next_float();
-        // `popOutTheItem` 之后歌停了。
-        world.redstone_memory_mut().set_jukebox_playing(pos, false);
-        on_song_changed(state, world, pos);
+        pop_out_the_item(state, world, pos);
         InteractionResult::Success
     }
 }

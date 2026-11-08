@@ -9,9 +9,10 @@ use uuid::Uuid;
 use crate::{
     chat::SpamThrottlers,
     chunk_tracking::{ChunkTracker, MIN_VIEW_DISTANCE},
+    container::EnderChest,
     entity_sync::EntitySync,
     inbound::PlayerId,
-    interaction::BlockPrediction,
+    interaction::{BlockPrediction, mining::Mining},
     inventory::Inventory,
     movement::Teleport,
 };
@@ -42,7 +43,13 @@ pub(crate) struct Player {
     pub(crate) chunks: ChunkTracker,
     pub(crate) sync: EntitySync,
     pub(crate) prediction: BlockPrediction,
+    /// 正在挖哪个方块、挖了多久，官方 `ServerPlayerGameMode` 的那几个字段。
+    pub(crate) mining: Mining,
     pub(crate) inventory: Inventory,
+    /// 官方 `containerCounter`，每打开一次菜单加一，100 回绕到 1。
+    pub(crate) container_counter: i32,
+    /// 这名玩家自己的末影箱，每个玩家一份。
+    pub(crate) ender_chest: EnderChest,
     pub(crate) spam: SpamThrottlers,
 }
 
@@ -70,7 +77,10 @@ impl Player {
             teleport: Teleport::default(),
             chunks: ChunkTracker::default(),
             prediction: BlockPrediction::default(),
+            mining: Mining::default(),
             inventory: Inventory::default(),
+            container_counter: 0,
+            ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),
         }
     }

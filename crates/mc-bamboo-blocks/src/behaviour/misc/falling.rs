@@ -11,7 +11,7 @@ use crate::{
         Behaviour, Plain,
         common::{default_state, field_block},
     },
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, SupportType},
     world::{UPDATE_CLIENTS, World},
@@ -109,6 +109,11 @@ impl DragonEgg {
 }
 
 impl Behaviour for DragonEgg {
+    /// `DragonEggBlock.attack`：拿手打一下和右键一样，传送到附近。
+    fn attack(&self, state: BlockState, world: &mut World, pos: BlockPos, _player: &Actor) {
+        Self::teleport(state, world, pos);
+    }
+
     fn use_without_item(
         &self,
         state: BlockState,

@@ -98,6 +98,10 @@ fn place(world: &mut World, item: &Item, ctx: PlaceContext) -> InteractionResult
     let pos = ctx.clicked_pos();
     let placed = world.block_state(pos);
     if placed.is_same_block(state) {
+        // 官方接着是 `updateBlockStateFromTag`、`updateCustomBlockEntityTag` 和
+        // `updateBlockEntityComponents`：物品上的组件要搬进方块实体。组件在
+        // `mc-bamboo-protocol`，这一层看不见，所以只记下位置，见 [`World::placed_at`]。
+        world.set_placed_at(pos);
         // `updateBlockEntityComponents` 的 `setChanged`：没有模拟输出的方块也会告诉比较器。
         if placed.has_block_entity() {
             world.update_neighbour_for_output_signal(pos, placed.block());

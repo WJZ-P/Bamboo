@@ -1,20 +1,22 @@
-//! 世界里的音效和方块事件。
+//! 世界里的音效。
 
-use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{SoundSource, packets::play::clientbound};
 
 use crate::{
-    codec::{write_block_pos, write_f32, write_i32, write_i64, write_varint},
+    codec::{write_bool, write_f32, write_i32, write_i64, write_string, write_varint},
     packet::ClientboundPacket,
 };
 
 /// 让客户端在某个位置播一个音效，官方的 `ClientboundSoundPacket`。
 ///
-/// 声音是注册表里的 Holder，网络上是 ID + 1；0 表示后面跟着完整的声音定义，Bamboo 只发注册表里的。
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 声音是注册表里的 Holder：网络上是注册表 ID 加一。`inline` 有值时写 0，再写
+/// `SoundEvent.createVariableRangeEvent` 的标识符和空的固定范围。
+#[derive(Debug, Clone, PartialEq)]
 pub struct Sound {
-    /// `sound_event` 注册表 ID。
+    /// `sound_event` 注册表 ID。`inline` 有值时忽略。
     pub sound: i32,
+    /// 不在注册表里的音效标识符，官方 `createVariableRangeEvent`。
+    pub inline: Option<String>,
     pub source: SoundSource,
     pub x: f64,
     pub y: f64,
@@ -34,8 +36,15 @@ impl ClientboundPacket for Sound {
     const ID: i32 = clientbound::SOUND;
 
     fn write_body(&self, out: &mut Vec<u8>) {
-        // Holder：注册表 ID 加一，见官方的 `ByteBufCodecs.holder`。
-        write_varint(out, self.sound + 1);
+        // Holder：注册表 ID 加一；0 后面是内联的 `SoundEvent`，见 `ByteBufCodecs.holder`。
+        if let Some(name) = &self.inline {
+            write_varint(out, 0);
+            write_string(out, name);
+            // 可变范围：`Optional` 空，没有固定距离。
+            write_bool(out, false);
+        } else {
+            write_varint(out, self.sound + 1);
+        }
         write_varint(out, i32::from(self.source.id()));
         for coordinate in [self.x, self.y, self.z] {
             write_i32(out, (coordinate * Self::LOCATION_ACCURACY) as i32);
@@ -43,27 +52,6 @@ impl ClientboundPacket for Sound {
         write_f32(out, self.volume);
         write_f32(out, self.pitch);
         write_i64(out, self.seed);
-    }
-}
-
-/// 一个方块事件，官方的 `ClientboundBlockEventPacket`。音符盒的声音和音符粒子都靠它。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockEvent {
-    pub pos: BlockPos,
-    /// `minecraft:block` 注册表 ID。
-    pub block: i32,
-    pub b0: u8,
-    pub b1: u8,
-}
-
-impl ClientboundPacket for BlockEvent {
-    const ID: i32 = clientbound::BLOCK_EVENT;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        write_block_pos(out, self.pos);
-        out.push(self.b0);
-        out.push(self.b1);
-        write_varint(out, self.block);
     }
 }
 
@@ -76,6 +64,7 @@ mod tests {
     fn sound_matches_official_bytes() {
         let packet = Sound {
             sound: 1,
+            inline: None,
             source: mc_bamboo_data::sounds::BLOCKS,
             x: 0.0,
             y: 0.0,
@@ -96,6 +85,7 @@ mod tests {
     fn sound_scales_coordinates_and_truncates_toward_zero() {
         let packet = Sound {
             sound: 40,
+            inline: None,
             source: mc_bamboo_data::sounds::RECORDS,
             x: 1.5,
             y: -0.5,
@@ -113,13 +103,25 @@ mod tests {
     }
 
     #[test]
-    fn block_event_matches_official_bytes() {
-        let packet = BlockEvent {
-            pos: BlockPos::new(8, -60, 8),
-            block: 1,
-            b0: 0,
-            b1: 0,
+    fn inline_sound_writes_a_direct_holder() {
+        let packet = Sound {
+            sound: 0,
+            inline: Some("minecraft:custom.note".to_owned()),
+            source: mc_bamboo_data::sounds::RECORDS,
+            x: 0.5,
+            y: 0.5,
+            z: 0.5,
+            volume: 3.0,
+            pitch: 1.0,
+            seed: 7,
         };
-        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 00 00 01"));
+        // 0、标识符、没有固定范围、来源 records。
+        let bytes = body(&packet);
+        assert_eq!(bytes[0], 0);
+        assert!(
+            bytes
+                .windows(b"minecraft:custom.note".len())
+                .any(|window| window == b"minecraft:custom.note")
+        );
     }
 }

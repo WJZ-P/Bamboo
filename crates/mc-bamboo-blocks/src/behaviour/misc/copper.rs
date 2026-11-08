@@ -1,8 +1,12 @@
 //! `CopperBulbBlock`、`WeatheringCopperBulbBlock`、`CopperGolemStatueBlock`、
 //! `WeatheringCopperGolemStatueBlock`。
 
-use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, items, sounds::sound_event, tags::item_tags};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{
+    Block, items,
+    sounds::{self, sound_event},
+    tags::item_tags,
+};
 
 use crate::behaviour::weathering::change_over_time;
 use crate::{
@@ -176,6 +180,20 @@ fn revive_statue(state: BlockState, world: &mut World, pos: BlockPos) -> Interac
     if field_name(state.block(), "getAge()") != "unaffected" {
         return InteractionResult::Pass;
     }
+    // `initCopperGolem` 的 `playSpawnSound`，在 `removeBlock` 之前。
+    // 实体站在方块中心的 x/z 上，y 是方块的 y，来源是 `NEUTRAL`。
+    world.play_sound(
+        Vec3 {
+            x: f64::from(pos.x) + 0.5,
+            y: f64::from(pos.y),
+            z: f64::from(pos.z) + 0.5,
+        },
+        sound_event("minecraft:entity.copper_golem.spawn"),
+        sounds::NEUTRAL,
+        1.0,
+        1.0,
+        false,
+    );
     world.remove_block(pos);
     InteractionResult::Success
 }

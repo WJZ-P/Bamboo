@@ -9,10 +9,19 @@ mod generated;
 
 use mc_bamboo_core::Aabb;
 
+/// 配方表的数据结构和官方数据包导出的全部配方。
+pub mod recipe;
+
+pub use recipe::{
+    CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, RecipeKind, RecipeType,
+    Stack, has_dye_component, is_damageable,
+};
+
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, heightmaps, items, light, packets, registries, shapes,
-    sounds, states, tags, version,
+    block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
+    item_components, items, light, packets, recipes, registries, shapes, sounds, states, tags,
+    version, worldgen,
 };
 
 pub use generated::sounds::{
@@ -128,6 +137,23 @@ pub struct FluidTag {
 pub struct PropertyDef {
     pub name: &'static str,
     pub values: &'static [&'static str],
+    pub kind: PropertyKind,
+}
+
+/// 方块属性的官方类型，以及 `StatePropertiesPredicate` 做区间比较时用的顺序。
+///
+/// 官方的 `Property` 只有三个子类，属性值的 `compareTo` 各按各的顺序比：
+/// 整数按数值，布尔 `false < true`，枚举按枚举常量的声明序号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyKind {
+    /// `IntegerProperty`：取值是 `min..=max` 的连续整数，按数值比较。
+    Integer { min: i32, max: i32 },
+    /// `BooleanProperty`：取值列表是 `[true, false]`，比较时 `false < true`。
+    Boolean,
+    /// `EnumProperty`：取值列表可能是常量的乱序子集，比较时用常量的声明序号。
+    ///
+    /// 下标和 [`PropertyDef::values`] 一一对应。
+    Enum { ordinals: &'static [u16] },
 }
 
 /// 一个构造参数或者只读方法的结果，名字和官方的字段名相同，方法名后面带括号。
@@ -189,8 +215,23 @@ pub struct FluidFacts {
     pub legacy_block: u32,
 }
 
+/// 活塞推动时的反应，官方 `PushReaction`，顺序和官方一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushReaction {
+    /// 跟着活塞走，也能被拉回来。
+    PushPull,
+    /// 能推，不能拉。
+    Push,
+    /// 推的时候直接掉下来。
+    Popped,
+    /// 推不动。
+    Immoveable,
+    /// 只对实体有意义，方块不会碰到。
+    IgnoreEntity,
+}
+
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
     pub name: &'static str,
     /// 第一个状态的 ID。这个方块的状态一直连续到下一个方块的 `first_state` 之前。
@@ -206,6 +247,10 @@ pub struct Block {
     ///
     /// `pitcher_crop` 不算，它有 `half` 属性，但放下时只占一格，长大后才有上半。
     pub two_blocks: bool,
+    /// 活塞推动时的反应，`state.getPistonPushReaction()`。
+    pub push_reaction: PushReaction,
+    /// 破坏速度是 -1：活塞不会推动，也不会打碎它。
+    pub unbreakable: bool,
     /// 方块实体类型的 ID，见 [`registries::block_entity_type`]。
     pub block_entity_type: Option<i32>,
     /// `block.getClass().getSimpleName()`。
@@ -222,7 +267,14 @@ pub struct Block {
     pub dynamic_shape: bool,
     /// 用桶取起这个方块时播的声音，`sound_event` 注册表 ID。只有实现 `BucketPickup` 的方块有。
     pub pickup_sound: Option<i32>,
+    /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
+    pub destroy_time: f32,
+    /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
+    pub requires_correct_tool_for_drops: bool,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for Block {}
 
 impl Block {
     /// 官方类的字段或者方法结果。名字写错时返回 `None`，见 [`BlockField`]。
@@ -858,6 +910,34 @@ mod tests {
         assert_eq!(block_entity_type(blocks::STONE), None);
         // 26.3 的床已经不是方块实体了。
         assert_eq!(block_entity_type(blocks::RED_BED), None);
+    }
+
+    #[test]
+    fn push_reactions_and_unbreakable_blocks_come_from_the_block_properties() {
+        let block = |state| block_of_state(state).expect("状态属于某个方块");
+        assert_eq!(
+            block(blocks::PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::STICKY_PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::SLIME_BLOCK).push_reaction,
+            PushReaction::PushPull
+        );
+        assert_eq!(
+            block(blocks::OAK_LEAVES).push_reaction,
+            PushReaction::Popped
+        );
+        assert_eq!(block(blocks::WATER).push_reaction, PushReaction::Popped);
+        assert_eq!(block(blocks::STONE).push_reaction, PushReaction::PushPull);
+
+        assert!(block(blocks::BEDROCK).unbreakable);
+        assert!(block(blocks::MOVING_PISTON).unbreakable);
+        assert!(!block(blocks::PISTON).unbreakable);
+        assert!(!block(blocks::OBSIDIAN).unbreakable);
     }
 
     #[test]

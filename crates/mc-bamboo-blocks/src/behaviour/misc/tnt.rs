@@ -17,7 +17,7 @@ pub(super) struct Tnt;
 
 /// `prime`：生成点燃的 TNT。实体还没有，只取它构造时那个随机朝向（`level.getRandom().nextDouble()`），
 /// 然后照官方在实体位置放点燃的声音。
-fn prime(world: &mut World, pos: BlockPos) {
+pub(super) fn prime(world: &mut World, pos: BlockPos) {
     world.random().next_double();
     let position = Vec3::new(
         f64::from(pos.x) + 0.5,
