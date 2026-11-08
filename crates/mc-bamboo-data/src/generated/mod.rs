@@ -4,6 +4,7 @@ pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;
 pub mod blocks;
+pub mod heightmaps;
 pub mod items;
 pub mod light;
 pub mod packets;

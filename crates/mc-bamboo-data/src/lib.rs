@@ -11,8 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, items, light, packets, registries, shapes, states,
-    tags, version,
+    block_maps, block_transformers, blocks, heightmaps, items, light, packets, registries, shapes,
+    states, tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -53,6 +53,10 @@ pub mod facts {
     pub const PROPAGATES_SKYLIGHT: u32 = 1 << 28;
     /// `useShapeForLightOcclusion`，没有和 `canOcclude` 合并的原值。
     pub const USE_SHAPE_FOR_LIGHT_OCCLUSION: u32 = 1 << 29;
+    /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP)`，`MOTION_BLOCKING` 和 `OCEAN_FLOOR` 用。
+    pub const MOTION_BLOCKING: u32 = 1 << 30;
+    /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES)`，`MOTION_BLOCKING_NO_LEAVES` 用。
+    pub const MOTION_BLOCKING_NO_LEAVES: u32 = 1 << 31;
 }
 
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
