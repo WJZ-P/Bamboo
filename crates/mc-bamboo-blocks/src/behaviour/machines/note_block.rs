@@ -170,3 +170,112 @@ impl Behaviour for Note {
         InteractionResult::Success
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::{blocks, items};
+
+    use super::*;
+    use crate::{
+        BlockTicks, Outcome,
+        testing::{TestLevel, actor_holding, top_hit, use_item},
+    };
+
+    const POS: BlockPos = BlockPos::new(0, 64, 0);
+
+    fn level() -> TestLevel {
+        let mut level = TestLevel::new();
+        level.set(POS, BlockState(blocks::NOTE_BLOCK));
+        level
+    }
+
+    /// 从现在的随机状态再取一个 `nextLong`：返回取到的数和之后的内部种子。
+    fn next_long(level: &TestLevel) -> (i64, i64) {
+        let random = level.random.clone();
+        let value = random.source().next_long();
+        (value, random.source().seed())
+    }
+
+    /// 方块事件里播放的音符，元组是（乐器、音调、音高、音效种子）。
+    fn played(outcome: &Outcome) -> Vec<(NoteBlockInstrument, i32, f32, i64)> {
+        outcome
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::NoteBlockPlayed {
+                    instrument,
+                    note,
+                    pitch,
+                    seed,
+                    ..
+                } => Some((*instrument, *note, *pitch, *seed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_played_by_block_event(
+        level: &mut TestLevel,
+        ticks: &mut BlockTicks,
+        expected_note: i32,
+    ) {
+        let (seed, seed_after) = next_long(level);
+        let outcome = crate::run_scheduled_ticks(level, ticks, 1);
+
+        assert_eq!(
+            played(&outcome),
+            [(NoteBlockInstrument::Harp, expected_note, pitch_from_note(expected_note), seed)]
+        );
+        // 方块事件本身也要广播（官方 `triggerEvent` 返回 `true` 时发包）。
+        assert!(
+            outcome
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::BlockEvent { .. })),
+            "音符盒的方块事件应该广播"
+        );
+        // 下一刻的方块事件里刚好取了一个 `nextLong`。
+        assert_eq!(level.random.source().seed(), seed_after);
+    }
+
+    #[test]
+    fn right_clicking_plays_the_note_in_the_next_ticks_block_event() {
+        let mut level = level();
+        let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(POS));
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(played(&outcome).is_empty(), "声音要等下一 tick 的方块事件");
+        assert_eq!(level.get(POS).get(NOTE), 1);
+
+        let mut ticks = BlockTicks::new();
+        assert_played_by_block_event(&mut level, &mut ticks, 1);
+    }
+
+    #[test]
+    fn redstone_plays_the_note_in_the_next_ticks_block_event() {
+        let mut level = level();
+        level.set(POS.below(), BlockState(blocks::REDSTONE_BLOCK));
+        let state = level.get(POS);
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            state.neighbor_changed(
+                &mut world,
+                POS,
+                BlockState(blocks::REDSTONE_BLOCK).block(),
+            );
+        }
+        assert!(level.get(POS).get(POWERED));
+
+        assert_played_by_block_event(&mut level, &mut ticks, 0);
+    }
+
+    #[test]
+    fn hitting_plays_the_note_in_the_next_ticks_block_event() {
+        let mut level = level();
+        let actor = actor_holding(items::AIR);
+        let mut ticks = BlockTicks::new();
+        crate::attack(&mut level, &mut ticks, &actor, POS);
+
+        assert_played_by_block_event(&mut level, &mut ticks, 0);
+    }
+}
