@@ -137,6 +137,15 @@ fn component_enums_file(data: &VersionData) -> Result<String, String> {
     let enums = &data.component_enums;
     check_enum_names("counts", COUNTS, enums.counts.keys())?;
     check_enum_names("sparse", SPARSE, enums.sparse.keys())?;
+    // `map_post_processing` 是瞬态组件，官方没有存到存档里的 `Codec`，也就没有序列化名字。
+    let mut named: Vec<&str> = COUNTS
+        .iter()
+        .copied()
+        .filter(|name| *name != "map_post_processing")
+        .chain(SPARSE.iter().copied())
+        .collect();
+    named.sort_unstable();
+    check_enum_names("names", &named, enums.names.keys())?;
 
     let mut out = String::new();
     let _ = writeln!(out, "/// 连续枚举的常量个数，ID 就是 0 到这个数减一。");
@@ -161,6 +170,27 @@ fn component_enums_file(data: &VersionData) -> Result<String, String> {
             return Err(format!("枚举 {name} 一个常量都没有"));
         }
         let _ = writeln!(out, "    pub const {}: &[i32] = &{ids:?};", upper(name));
+    }
+    let _ = writeln!(out, "}}\n");
+
+    let _ = writeln!(
+        out,
+        "/// 枚举的序列化名字，下标就是网络上的 ID。存档编解码器按名字读写。"
+    );
+    let _ = writeln!(out, "pub mod names {{");
+    for name in &named {
+        let names = &enums.names[*name];
+        let expected = match COUNTS.iter().find(|count| *count == name) {
+            Some(_) => enums.counts[*name] as usize,
+            None => enums.sparse[*name].len(),
+        };
+        if names.len() != expected || names.iter().any(String::is_empty) {
+            return Err(format!(
+                "枚举 {name} 有 {} 个名字，应该有 {expected} 个",
+                names.len()
+            ));
+        }
+        let _ = writeln!(out, "    pub const {}: &[&str] = &{names:?};", upper(name));
     }
     let _ = writeln!(out, "}}");
     Ok(out)
@@ -312,6 +342,20 @@ fn component_registries_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(out, "    /// `{registry}`。");
         let _ = writeln!(out, "    pub const {name}: u32 = {};", entries.len());
     }
+    let _ = writeln!(out, "}}\n");
+
+    let component_types = registry_entries(data, DATA_COMPONENT_TYPE_REGISTRY)
+        .ok_or_else(|| format!("注册表报告里没有 {DATA_COMPONENT_TYPE_REGISTRY}"))?;
+    let _ = writeln!(
+        out,
+        "/// `{DATA_COMPONENT_TYPE_REGISTRY}` 的条目名，下标就是 ID。存档的组件补丁按名字读写。"
+    );
+    let _ = writeln!(out, "pub mod names {{");
+    let _ = writeln!(out, "    pub const DATA_COMPONENT_TYPE: &[&str] = &[");
+    for name in component_types {
+        let _ = writeln!(out, "        {name:?},");
+    }
+    let _ = writeln!(out, "    ];");
     let _ = writeln!(out, "}}\n");
 
     write_registry_ids(

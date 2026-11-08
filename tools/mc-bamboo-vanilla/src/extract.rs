@@ -57,6 +57,8 @@ pub struct ComponentEnums {
     pub counts: BTreeMap<String, u32>,
     /// 枚举名 → 按声明顺序的 ID。
     pub sparse: BTreeMap<String, Vec<i32>>,
+    /// 枚举名 → 序列化名字，下标和网络上的 ID 一致。没有存档 `Codec` 的瞬态枚举不在里面。
+    pub names: BTreeMap<String, Vec<String>>,
 }
 
 /// 官方数据包的全部配方，`entries` 的顺序就是注册表的顺序。
