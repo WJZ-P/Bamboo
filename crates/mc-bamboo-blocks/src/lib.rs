@@ -19,8 +19,10 @@ pub mod container;
 pub mod context;
 pub mod dispense;
 pub mod dispenser;
+pub mod durability;
 pub mod entity;
 pub mod fluid;
+pub mod gamerules;
 pub mod hopper;
 pub mod interact;
 mod item_exchange;
@@ -41,12 +43,14 @@ mod testing;
 
 pub use behaviour::Behaviour;
 pub use behaviour::machines::{
-    ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern, signal_lectern_page,
+    CampfireEntity, ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern,
+    signal_lectern_page,
 };
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
-pub use dispenser::dispense_from;
+pub use dispenser::{click_if_empty, dispense_from};
+pub use gamerules::{BlockGameRules, apply_text, block_drops_allowed};
 pub use hopper::HopperEntity;
 pub use interact::{
     InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks,
@@ -55,12 +59,13 @@ pub use interact::{
     use_item_on_checked_with_stack, use_item_on_with_stack,
 };
 pub use item_exchange::{ItemExchange, wash_dyed_color};
+pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
     Effect, LecternFacts, Level, RedstoneMemory, custom_sound_name, intern_custom_sound,
 };
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
-pub use shape::{Aabb, Boxes, CollisionContext};
+pub use shape::{Aabb, Boxes, CollisionContext, EntityContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
 pub use ticks::{BlockTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
 pub use world::World;

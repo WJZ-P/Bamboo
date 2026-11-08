@@ -13,6 +13,7 @@ use crate::{
     block_entity::{BlockEntities, BlockEvents},
     container::Container,
     entity::Entities,
+    gamerules::BlockGameRules,
     hopper::HopperEntity,
     random::LevelRandom,
     shape::Aabb,
@@ -113,6 +114,13 @@ pub trait Level {
     ///
     /// See [`Level::entities`].
     fn entities_mut(&mut self) -> &mut Entities;
+
+    /// 方块逻辑读到的游戏规则快照。默认是官方默认值。
+    ///
+    /// The game-rule snapshot block logic reads. The default is the vanilla defaults.
+    fn block_game_rules(&self) -> BlockGameRules {
+        BlockGameRules::vanilla()
+    }
 
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
@@ -481,6 +489,23 @@ pub enum Effect {
     /// A dispenser wrote equipment into this player's inventory. The menu slot is already
     /// updated. The caller sends `container_set_slot`.
     DispenserEquipped { entity_id: i32, menu_slot: u16 },
+    /// 营火上的食物变了，`CampfireBlockEntity.getUpdateTag` 要重新发给客户端。
+    ///
+    /// Food on a campfire changed. `CampfireBlockEntity.getUpdateTag` has to be sent again.
+    CampfireChanged { pos: BlockPos },
+    /// 快捷栏上方的提示。`key` 是翻译键，参数是已经序列化好的文本。
+    ///
+    /// An action-bar message. `key` is the translation key and the arguments are already text.
+    Overlay {
+        key: &'static str,
+        first: Option<&'static str>,
+        second: Option<&'static str>,
+    },
+    /// 有权限的玩家右键了命令方块。客户端自己打开编辑界面，服务端补一份方块实体数据。
+    ///
+    /// A permitted player used a command block. The client opens the editor; the server sends
+    /// the block-entity data.
+    OpenCommandBlock { pos: BlockPos },
 }
 
 /// 自定义音效的名字。`Effect` 要能按值拷贝，名字放在这里，效果里只留下标。

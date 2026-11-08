@@ -1,7 +1,8 @@
 //! 流体：水和岩浆的流动、桶。对应官方的 `FlowingFluid`、`WaterFluid`、`LavaFluid` 和 `BucketItem`。
 //!
 //! 流体的计划刻有自己的队列，每一刻在方块的计划刻之后跑，见 [`run_scheduled_ticks`](crate::run_scheduled_ticks)。
-//! 世界是主世界，游戏规则都是默认值：水能生成新的源头，岩浆不能；岩浆不是下界那种快速的岩浆。
+//! 世界是主世界。源头转换读 `water_source_conversion` 和 `lava_source_conversion`，
+//! 默认是水能、岩浆不能。岩浆不是下界那种快速的岩浆。
 //! 岩浆的随机刻会点燃附近能烧的方块，见 [`random_tick`]。
 
 pub mod bucket;
@@ -86,9 +87,15 @@ impl Fluid {
         }
     }
 
-    /// `canConvertToSource`：游戏规则 `water_source_conversion` 和 `lava_source_conversion` 的默认值。
-    const fn can_convert_to_source(self) -> bool {
-        matches!(self, Self::Water)
+    /// `canConvertToSource`：水读 `water_source_conversion`，岩浆读 `lava_source_conversion`。
+    ///
+    /// `canConvertToSource`: water reads `water_source_conversion`, lava reads `lava_source_conversion`.
+    fn can_convert_to_source(self, world: &World) -> bool {
+        let rules = world.block_game_rules();
+        match self {
+            Self::Water => rules.water_source_conversion,
+            Self::Lava => rules.lava_source_conversion,
+        }
     }
 
     /// `getBucket`。

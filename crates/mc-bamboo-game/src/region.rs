@@ -10,7 +10,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory, entity::Entities,
+    BlockEntities, BlockEvents, BlockGameRules, BlockTicks, LevelRandom, RedstoneMemory,
+    entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
@@ -38,6 +39,13 @@ use crate::{
 
 const DIMENSION: &str = "minecraft:overworld";
 /// 出生点在 (0, 0) 区块的中心。
+///
+/// `respawn_radius`（旧名 `spawnRadius`）是 `PlayerSpawnFinder` 在死亡重生时用的。
+/// 这里没有死亡重生，超平坦出生点仍然是这一格，不读那条规则。
+///
+/// `respawn_radius` (formerly `spawnRadius`) is what `PlayerSpawnFinder` uses on death.
+/// There is no death respawn here, so the superflat spawn stays on this cell and does
+/// not read that rule.
 const SPAWN_X: f64 = 8.5;
 const SPAWN_Z: f64 = 8.5;
 
@@ -156,6 +164,21 @@ pub(crate) struct Region {
     max_players: i32,
     /// 写进 `login` 包的那一位，官方取的是 `MinecraftServer.usesAuthentication()`。
     online_mode: bool,
+    /// 方块逻辑读的游戏规则快照。权威副本在 `Global`，改规则时当场写过来。
+    ///
+    /// The game-rule snapshot block logic reads. The authoritative copy is on `Global`
+    /// and is copied here as soon as a rule changes.
+    pub(crate) block_rules: BlockGameRules,
+    /// `GameRules.SEND_COMMAND_FEEDBACK`。
+    pub(crate) send_command_feedback: bool,
+    /// `GameRules.LOG_ADMIN_COMMANDS`。
+    pub(crate) log_admin_commands: bool,
+    /// `GameRules.COMMAND_BLOCKS_WORK`。
+    pub(crate) command_blocks_work: bool,
+    /// 命令方块里保存的命令。不执行，也不存档。
+    ///
+    /// Commands stored in command blocks. They are not executed and not saved.
+    pub(crate) command_blocks: BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -198,6 +221,7 @@ impl Region {
     pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {
         let chunks = ChunkStore::flat();
         let template_body = encode_template(&chunks);
+        let rules = crate::gamerules::GameRuleSet::vanilla();
         Self {
             players: BTreeMap::new(),
             player_grid: PlayerGrid::default(),
@@ -223,6 +247,11 @@ impl Region {
             view_distance,
             max_players,
             online_mode,
+            block_rules: rules.block_snapshot(),
+            send_command_feedback: rules.bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
+            log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
+            command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
+            command_blocks: BTreeMap::new(),
         }
     }
 
@@ -243,6 +272,8 @@ impl Region {
             block_events: &mut self.block_events,
             containers: &mut self.containers,
             entities: &mut self.entities,
+            block_rules: self.block_rules,
+            command_blocks: &mut self.command_blocks,
         };
         (level, &mut self.block_ticks)
     }

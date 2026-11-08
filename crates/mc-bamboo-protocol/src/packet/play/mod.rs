@@ -6,6 +6,7 @@ mod block;
 mod chat;
 mod command;
 mod entity;
+mod gamerule;
 mod menu;
 mod movement;
 mod player_info;
@@ -16,6 +17,7 @@ pub use block::*;
 pub use chat::*;
 pub use command::*;
 pub use entity::*;
+pub use gamerule::*;
 pub use menu::*;
 pub use movement::*;
 pub use player_info::*;
@@ -489,6 +491,24 @@ mod tests {
     #[test]
     fn level_chunks_load_start_matches_official_bytes() {
         assert_eq!(frame(&LevelChunksLoadStart), hex("06 27 0d 00 00 00 00"));
+    }
+
+    #[test]
+    fn change_game_mode_and_entity_event_match_official_layout() {
+        assert_eq!(
+            frame(&GameEvent {
+                event: GameEvent::CHANGE_GAME_MODE,
+                param: 0.0,
+            }),
+            hex("06 27 03 00 00 00 00")
+        );
+        assert_eq!(
+            frame(&EntityEvent {
+                entity_id: 7,
+                event: 47
+            }),
+            hex("06 22 00 00 00 07 2f")
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! `BlockOracle.java` 写到 stdout 的行，字段的含义以它顶部的注释为准。
 
+use std::collections::BTreeMap;
+
 use mc_bamboo_core::{BlockPos, Direction, Hand};
 use serde::{Deserialize, Deserializer, de::Error};
 
@@ -23,6 +25,11 @@ pub struct Header {
     pub game_time: i64,
     pub min_y: i32,
     pub max_y: i32,
+    /// 这批题覆盖的游戏规则。空表示官方默认值。
+    ///
+    /// Game rules overridden for this batch. Empty means the official defaults.
+    #[serde(default)]
+    pub rules: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

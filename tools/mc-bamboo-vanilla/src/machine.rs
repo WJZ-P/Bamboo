@@ -1,10 +1,10 @@
-//! 熔炉和酿造台的逐刻对照。
+//! 熔炉、酿造台和营火的逐刻对照。
 //!
 //! `MachineOracle.java` 在假世界里 tick 官方方块实体，每一刻记下进度、燃料、物品、方块状态和
 //! `Level.random` 的内部种子。取出产物时调用 `getRecipesToAwardAndPopExperience`。
 //! 这里用同样的初始物品和数据槽重放，逐刻比较。
 //!
-//! Tick-by-tick check for furnaces and brewing stands.
+//! Tick-by-tick check for furnaces, brewing stands, and campfires.
 //!
 //! `MachineOracle.java` ticks the vanilla block entities in a fake world and records progress,
 //! fuel, items, the block state, and the internal seed of `Level.random` after every tick.
@@ -18,7 +18,7 @@ use std::{
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, Level, LevelRandom, RedstoneMemory, World,
-    behaviour::machines::{BrewingStandEntity, FurnaceEntity},
+    behaviour::machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
     entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
@@ -177,12 +177,16 @@ impl Level for MachineLevel {
 enum Machine {
     Furnace(FurnaceEntity),
     Brewing(BrewingStandEntity),
+    Campfire(CampfireEntity),
 }
 
 impl Machine {
     fn open(kind: &str, state: BlockState) -> Self {
         if kind == "brewing" {
             return Self::Brewing(BrewingStandEntity::new(POS));
+        }
+        if kind == "campfire" {
+            return Self::Campfire(CampfireEntity::new(POS));
         }
         let cooking = match kind {
             "blast_furnace" => CookingKind::Blasting,
@@ -196,6 +200,7 @@ impl Machine {
         match self {
             Self::Furnace(entity) => entity.set_item(slot, stack),
             Self::Brewing(entity) => entity.set_item(slot, stack),
+            Self::Campfire(entity) => entity.set_item(slot, stack),
         }
     }
 
@@ -203,6 +208,7 @@ impl Machine {
         match self {
             Self::Furnace(entity) => entity.set_data(id, value),
             Self::Brewing(entity) => entity.set_data(id, value),
+            Self::Campfire(entity) => entity.set_data(id, value),
         }
     }
 
@@ -210,6 +216,7 @@ impl Machine {
         match self {
             Self::Furnace(entity) => entity.server_tick(world),
             Self::Brewing(entity) => entity.server_tick(world),
+            Self::Campfire(entity) => entity.server_tick(world),
         }
     }
 
@@ -217,6 +224,7 @@ impl Machine {
         match self {
             Self::Furnace(entity) => entity.items().to_vec(),
             Self::Brewing(entity) => entity.items().to_vec(),
+            Self::Campfire(entity) => entity.items().to_vec(),
         }
     }
 
@@ -224,6 +232,7 @@ impl Machine {
         match self {
             Self::Furnace(entity) => entity.data_values().to_vec(),
             Self::Brewing(entity) => entity.data_values().to_vec(),
+            Self::Campfire(entity) => entity.data_values().to_vec(),
         }
     }
 

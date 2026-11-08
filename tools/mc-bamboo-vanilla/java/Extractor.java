@@ -4,6 +4,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
@@ -113,6 +114,10 @@ import net.minecraft.world.item.component.FireworkExplosion;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.component.MapPostProcessing;
 import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.enchantment.ConditionalEffect;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.effects.EnchantmentValueEffect;
 import net.minecraft.world.item.alchemy.Potion;
 import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.crafting.*;
@@ -208,6 +213,13 @@ public final class Extractor {
     private static List<Registry.PendingTags<?>> STATIC_TAGS = List.of();
 
     public static void main(String[] args) throws Exception {
+        // 只导出游戏规则，不跑整份数据生成。`generate` 走下面的完整路径。
+        if (args.length == 1 && args[0].equals("--game-rules")) {
+            SharedConstants.tryDetectVersion();
+            Bootstrap.bootStrap();
+            System.out.print(new GsonBuilder().create().toJson(gameRules()));
+            System.exit(0);
+        }
         Path output = Path.of(args[0]);
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -234,6 +246,7 @@ public final class Extractor {
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
+            root.add("itemDamageEnchantments", itemDamageEnchantments(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
             root.add("soundTables", new SoundTables().build());
@@ -248,6 +261,7 @@ public final class Extractor {
             root.add("componentEnums", componentEnums());
             root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
+            root.add("gameRules", gameRules());
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
             JsonArray itemComponents = new JsonArray();
             JsonArray craftingRemainders = new JsonArray();
@@ -260,6 +274,42 @@ public final class Extractor {
 
         // 官方的后台线程不是守护线程，不主动退出进程就不会结束。
         System.exit(0);
+    }
+
+    /**
+     * `BuiltInRegistries.GAME_RULE` 里的每一条。顺序是注册表 ID。
+     * `enabled` 看 `FeatureFlags.DEFAULT_FLAGS`：默认世界的 `GameRules` 会滤掉没开的实验规则。
+     */
+    static JsonArray gameRules() {
+        JsonArray rules = new JsonArray();
+        BuiltInRegistries.GAME_RULE.listElements().forEach(holder -> {
+            var rule = holder.value();
+            JsonObject object = new JsonObject();
+            object.addProperty("name", rule.id());
+            object.addProperty("identifier", rule.getIdentifier().toString());
+            object.addProperty("category", rule.category().id().toString());
+            object.addProperty("kind", rule.gameRuleType().getSerializedName());
+            Object value = rule.defaultValue();
+            if (value instanceof Boolean bool) {
+                object.addProperty("defaultBool", bool);
+            } else if (value instanceof Integer integer) {
+                object.addProperty("defaultInt", integer);
+            } else {
+                throw new IllegalStateException("unsupported game rule value " + rule.id());
+            }
+            if (rule.argument() instanceof IntegerArgumentType integer) {
+                object.addProperty("min", integer.getMinimum());
+                object.addProperty("max", integer.getMaximum());
+            }
+            object.addProperty("enabled", rule.isEnabled(net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS));
+            JsonArray features = new JsonArray();
+            for (var name : net.minecraft.world.flag.FeatureFlags.REGISTRY.toNames(rule.requiredFeatures())) {
+                features.add(name.toString());
+            }
+            object.add("features", features);
+            rules.add(object);
+        });
+        return rules;
     }
 
     /** 和 WorldLoader.load 的前半段相同：加载静态注册表的标签，再加载世界层注册表。 */
@@ -1486,6 +1536,8 @@ public final class Extractor {
         transform.add("provider", stateProvider(data.blockStateProvider().value()));
         transform.add("disallowedFaces", faces);
         transform.addProperty("updateFromNeighbors", data.updateFromNeighbors());
+        transform.addProperty("consumeOnUse", data.consumeOnUse());
+        transform.addProperty("itemDamagePerUse", data.itemDamagePerUse());
         // 没配声音时字段是 `SoundEvents.EMPTY`，不导出，生成器按 `None` 处理。
         SoundEvent sound = data.sound().value();
         if (sound != SoundEvents.EMPTY) {
@@ -1498,6 +1550,34 @@ public final class Extractor {
                 "copperChest",
                 data.transformType() == BlockTransformer.TransformType.COPPER_CHEST);
         return transform;
+    }
+
+    /**
+     * 带 {@code minecraft:item_damage} 效果的附魔。耐久附魔是数据驱动的，这里用官方 codec 把效果原样编出来。
+     *
+     * <p>没有这个效果的附魔不出现。效果列表的顺序就是 {@code Enchantment.getEffects} 的顺序。
+     *
+     * <p>Enchantments whose {@code minecraft:item_damage} list is non-empty. The codec output is kept as-is, in
+     * {@code Enchantment.getEffects} order.
+     */
+    private static JsonArray itemDamageEnchantments(RegistryAccess registries) {
+        Registry<Enchantment> registry = registries.lookupOrThrow(Registries.ENCHANTMENT);
+        Codec<List<ConditionalEffect<EnchantmentValueEffect>>> codec =
+                ConditionalEffect.codec(EnchantmentValueEffect.CODEC).listOf();
+        RegistryOps<JsonElement> ops = registries.createSerializationContext(JsonOps.INSTANCE);
+        JsonArray enchantments = new JsonArray();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            List<ConditionalEffect<EnchantmentValueEffect>> effects =
+                    registry.getValue(name).getEffects(EnchantmentEffectComponents.ITEM_DAMAGE);
+            if (effects.isEmpty()) {
+                continue;
+            }
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", name.toString());
+            entry.add("effects", codec.encodeStart(ops, effects).getOrThrow());
+            enchantments.add(entry);
+        }
+        return enchantments;
     }
 
     private static JsonObject stateProvider(BlockStateProvider provider) throws ReflectiveOperationException {

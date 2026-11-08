@@ -26,7 +26,7 @@ use super::{
 ///
 /// Encode one component into the archive value.
 pub fn encode(component: &crate::text::Component, depth: u32) -> Result<Dyn> {
-    encode_tag(component.tag(), depth)
+    crate::stack_hop::guard(|| encode_tag(component.tag(), depth))
 }
 
 /// 从存档标签还原一段文本。只接受字符串、非空列表或复合标签，内容和官方的
@@ -44,6 +44,10 @@ pub fn decode(tag: &Tag) -> Result<crate::text::Component> {
 }
 
 fn encode_tag(tag: &Tag, depth: u32) -> Result<Dyn> {
+    crate::stack_hop::guard(|| encode_tag_frame(tag, depth))
+}
+
+fn encode_tag_frame(tag: &Tag, depth: u32) -> Result<Dyn> {
     match tag {
         Tag::String(text) => Ok(Dyn::String(text.clone())),
         Tag::List(items) => {

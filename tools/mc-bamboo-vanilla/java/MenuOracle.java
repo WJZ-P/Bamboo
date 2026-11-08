@@ -26,7 +26,9 @@ import net.minecraft.advancements.CriterionTriggerInstance;
 import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderGetter;
 import net.minecraft.core.HolderLookup;
+import net.minecraft.core.HolderSet;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -34,6 +36,7 @@ import net.minecraft.core.component.DataComponentPatch;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.HashedPatchMap;
 import net.minecraft.network.HashedStack;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -53,6 +56,7 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.tags.BannerPatternTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.resources.RegistryOps;
 import net.minecraft.util.HashOps;
@@ -81,8 +85,10 @@ import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.DataSlot;
 import net.minecraft.world.inventory.DispenserMenu;
 import net.minecraft.world.inventory.FurnaceMenu;
+import net.minecraft.world.inventory.GrindstoneMenu;
 import net.minecraft.world.inventory.HopperMenu;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.inventory.LoomMenu;
 import net.minecraft.server.network.Filterable;
 import net.minecraft.util.Mth;
 import net.minecraft.world.inventory.LecternMenu;
@@ -93,9 +99,13 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.inventory.SmithingMenu;
 import net.minecraft.world.inventory.SmokerMenu;
 import net.minecraft.world.inventory.StonecutterMenu;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.item.component.WritableBookContent;
 import net.minecraft.world.item.component.WrittenBookContent;
 import net.minecraft.world.item.crafting.AbstractCookingRecipe;
@@ -108,6 +118,8 @@ import net.minecraft.world.item.crafting.ShapedRecipe;
 import net.minecraft.world.item.crafting.ShapelessRecipe;
 import net.minecraft.world.item.crafting.SingleItemRecipe;
 import net.minecraft.world.item.crafting.SmithingRecipe;
+import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.gamerules.GameRules;
 import sun.misc.Unsafe;
 
@@ -334,6 +346,10 @@ public final class MenuOracle {
                 if (random.nextInt(5) != 0) {
                     placeRecipe(shape, grid, random);
                 }
+                // 织布机和砂轮的随机物品栏放不进旗帜、染料和附魔，结果槽比不出图案和耐久。
+                // Random inventory items never include banners, dyes, or enchantments, so the
+                // result slot would not compare pattern layers or durability.
+                decorateStation(shape, grid, inventory, random);
                 if (shape.machineData) {
                     machineData = new int[4];
                     for (int i = 0; i < machineData.length; i++) {
@@ -366,6 +382,12 @@ public final class MenuOracle {
             line.add("container", shape.workstation ? stacks(grid) : items(container, shape.size));
             line.add("inventory", inventoryItems(inventory));
             line.add("data", data);
+            if (shape.workstation) {
+                JsonArray patches = gridPatches(grid);
+                if (!patches.isEmpty()) {
+                    line.add("patches", patches);
+                }
+            }
             line.add("open", outcome(menu));
 
             JsonArray steps = new JsonArray();
@@ -570,7 +592,9 @@ public final class MenuOracle {
         FURNACE(3, "furnace", true, true),
         BLAST_FURNACE(3, "blast_furnace", true, true),
         SMOKER(3, "smoker", true, true),
-        BREWING(5, "brewing", true, true);
+        BREWING(5, "brewing", true, true),
+        LOOM(3, "loom", true, false),
+        GRINDSTONE(2, "grindstone", true, false);
 
         final int size;
         final String id;
@@ -608,6 +632,8 @@ public final class MenuOracle {
                 case BLAST_FURNACE -> new BlastFurnaceMenu(CONTAINER_ID, inventory);
                 case SMOKER -> new SmokerMenu(CONTAINER_ID, inventory);
                 case BREWING -> new BrewingStandMenu(CONTAINER_ID, inventory);
+                case LOOM -> new LoomMenu(CONTAINER_ID, inventory);
+                case GRINDSTONE -> new GrindstoneMenu(CONTAINER_ID, inventory);
             };
         }
     }
@@ -979,6 +1005,126 @@ public final class MenuOracle {
         }
     }
 
+    /**
+     * 织布机放上旗帜和染料，有时再放图案物品或已经有层数的旗帜。
+     * 砂轮放上带耐久、附魔或诅咒的物品。补丁由 {@link #gridPatches} 带给 Rust。
+     *
+     * <p>Loom cases get a banner and a dye, sometimes a pattern item or a banner that already has
+     * layers. Grindstone cases get damaged, enchanted, or cursed items. {@link #gridPatches} carries
+     * the component patches to Rust.
+     */
+    private static void decorateStation(Shape shape, ItemStack[] grid, Inventory inventory, Random random) {
+        if (shape == Shape.LOOM && random.nextInt(5) != 0) {
+            grid[0] = loomBanner(random);
+            Item dye = random.nextBoolean() ? Items.DYE.white() : Items.DYE.blue();
+            grid[1] = new ItemStack(dye, 1 + random.nextInt(64));
+            int pattern = random.nextInt(4);
+            if (pattern == 1) {
+                grid[2] = new ItemStack(Items.GLOBE_BANNER_PATTERN);
+            } else if (pattern == 2) {
+                grid[2] = new ItemStack(Items.CREEPER_BANNER_PATTERN);
+            } else if (pattern == 3) {
+                grid[2] = new ItemStack(Items.FLOWER_BANNER_PATTERN);
+            }
+            inventory.setItem(random.nextInt(36), new ItemStack(Items.BANNER.white(), 1 + random.nextInt(16)));
+            inventory.setItem(random.nextInt(36), new ItemStack(Items.DYE.black(), 1 + random.nextInt(64)));
+        } else if (shape == Shape.GRINDSTONE && random.nextInt(5) != 0) {
+            grid[0] = grindInput(random);
+            if (random.nextBoolean()) {
+                grid[1] = grindInput(random);
+            }
+        }
+    }
+
+    private static ItemStack loomBanner(Random random) {
+        Item item = random.nextBoolean() ? Items.BANNER.white() : Items.BANNER.orange();
+        ItemStack banner = new ItemStack(item, 1 + random.nextInt(16));
+        int layers = random.nextInt(8);
+        if (layers > 0) {
+            banner.set(DataComponents.BANNER_PATTERNS, bannerLayers(layers, random));
+        }
+        return banner;
+    }
+
+    private static BannerPatternLayers bannerLayers(int count, Random random) {
+        HolderGetter<BannerPattern> getter = REGISTRIES.lookupOrThrow(Registries.BANNER_PATTERN);
+        HolderSet<BannerPattern> patterns = getter.get(BannerPatternTags.NO_ITEM_REQUIRED).orElseThrow();
+        BannerPatternLayers.Builder builder = new BannerPatternLayers.Builder();
+        DyeColor[] colors = {
+            DyeColor.WHITE, DyeColor.ORANGE, DyeColor.MAGENTA, DyeColor.LIGHT_BLUE,
+            DyeColor.YELLOW, DyeColor.LIME, DyeColor.PINK, DyeColor.GRAY,
+            DyeColor.LIGHT_GRAY, DyeColor.CYAN, DyeColor.PURPLE, DyeColor.BLUE,
+            DyeColor.BROWN, DyeColor.GREEN, DyeColor.RED, DyeColor.BLACK
+        };
+        for (int i = 0; i < count; i++) {
+            builder.add(patterns.get(i % patterns.size()), colors[random.nextInt(colors.length)]);
+        }
+        return builder.build();
+    }
+
+    private static ItemStack grindInput(Random random) {
+        int kind = random.nextInt(5);
+        if (kind == 0) {
+            return new ItemStack(Items.STICK, 1);
+        }
+        if (kind == 1) {
+            ItemStack book = new ItemStack(Items.ENCHANTED_BOOK);
+            book.set(DataComponents.STORED_ENCHANTMENTS, grindEnchantments(random));
+            return book;
+        }
+        ItemStack sword = new ItemStack(random.nextBoolean() ? Items.DIAMOND_SWORD : Items.IRON_SWORD);
+        if (random.nextBoolean()) {
+            sword.setDamageValue(random.nextInt(Math.max(1, sword.getMaxDamage())));
+        }
+        if (random.nextInt(3) != 0) {
+            sword.set(DataComponents.ENCHANTMENTS, grindEnchantments(random));
+        }
+        if (random.nextInt(4) == 0) {
+            sword.set(DataComponents.REPAIR_COST, random.nextInt(10));
+        }
+        return sword;
+    }
+
+    /**
+     * 锋利、耐久，外加最多一条绑定诅咒。
+     *
+     * <p>Sharpness, Unbreaking, and at most one Binding Curse.
+     */
+    private static ItemEnchantments grindEnchantments(Random random) {
+        Registry<Enchantment> registry = REGISTRIES.lookupOrThrow(Registries.ENCHANTMENT);
+        ItemEnchantments.Mutable mutable = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+        mutable.set(registry.getOrThrow(Enchantments.SHARPNESS), 1 + random.nextInt(5));
+        if (random.nextBoolean()) {
+            mutable.set(registry.getOrThrow(Enchantments.UNBREAKING), 1 + random.nextInt(3));
+        }
+        if (random.nextBoolean()) {
+            // 只放绑定诅咒。两件都带它时结果里也只有这一条，不和哈希顺序打架。
+            // Binding curse only. Two cursed inputs still leave one entry, so hash order cannot diverge.
+            mutable.set(registry.getOrThrow(Enchantments.BINDING_CURSE), 1);
+        }
+        return mutable.toImmutable();
+    }
+
+    /**
+     * 工作台材料格上的组件补丁。下标是格子序号，合成格在菜单里还要再加 {@code seedOffset}。
+     *
+     * <p>Component patches on workstation ingredients. The index is the grid slot; crafting adds
+     * {@code seedOffset} when the stack is placed in the menu.
+     */
+    private static JsonArray gridPatches(ItemStack[] grid) {
+        JsonArray patches = new JsonArray();
+        for (int i = 0; i < grid.length; i++) {
+            if (grid[i].isEmpty() || grid[i].getComponentsPatch().isEmpty()) {
+                continue;
+            }
+            JsonObject patch = new JsonObject();
+            patch.addProperty("index", i);
+            patch.addProperty("bytes", patchHex(grid[i]));
+            patches.add(patch);
+        }
+        return patches;
+    }
+
     private static void placeRecipe(Shape shape, ItemStack[] grid, Random random) {
         List<RecipeHolder<?>> recipes = recipesFor(shape);
         if (recipes.isEmpty()) {
@@ -1269,6 +1415,17 @@ public final class MenuOracle {
         @Override
         public ItemEntity drop(ItemStack itemStack, boolean thrownFromHand, Prediction prediction) {
             return null;
+        }
+
+        /**
+         * `LoomMenu` 构造时用 `player.registryAccess()` 取旗帜图案。假世界没有注册表。
+         *
+         * <p>`LoomMenu` reads banner patterns from `player.registryAccess()` in its constructor.
+         * The fake level has no registry.
+         */
+        @Override
+        public RegistryAccess registryAccess() {
+            return REGISTRIES;
         }
 
         @Override

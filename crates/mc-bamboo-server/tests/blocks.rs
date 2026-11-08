@@ -11,14 +11,14 @@ use common::{
     TestServer, frame,
     player::{Answers, Player},
     wire::{
-        ABILITY_FLYING, AddEntity, BlockChangedAck, BlockUpdate, ContainerSetSlot, DOWN,
-        DROP_ALL_ITEMS, DROP_ITEM, Disconnect, EAST, ForgetLevelChunk, INPUT_SHIFT,
-        LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND, MAX_Y, MIN_Y, NORTH, Nbt, OFF_HAND, Pos,
-        RELEASE_USE_ITEM, SLOT_MAINHAND, SLOT_OFFHAND, SOUTH, START_DESTROY_BLOCK,
-        SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK, SectionBlocksUpdate, SetEquipment,
-        SetHeldSlot, Stack, SwingAnimation, SystemChat, UP, face_center, pick_item_from_block,
-        plain_stack_bytes, player_abilities, player_action, player_input, set_carried_item,
-        set_creative_mode_slot, set_creative_mode_slot_raw, use_item, use_item_on,
+        AddEntity, BlockChangedAck, BlockUpdate, ContainerSetSlot, DOWN, DROP_ALL_ITEMS, DROP_ITEM,
+        Disconnect, EAST, ForgetLevelChunk, INPUT_SHIFT, LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND,
+        MAX_Y, MIN_Y, NORTH, Nbt, OFF_HAND, Pos, RELEASE_USE_ITEM, SLOT_MAINHAND, SLOT_OFFHAND,
+        SOUTH, START_DESTROY_BLOCK, SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK,
+        SectionBlocksUpdate, SetEquipment, SetHeldSlot, Stack, SwingAnimation, SystemChat, UP,
+        face_center, pick_item_from_block, plain_stack_bytes, player_action, player_input,
+        set_carried_item, set_creative_mode_slot, set_creative_mode_slot_raw, use_item,
+        use_item_on,
     },
 };
 use mc_bamboo_data::{
@@ -579,22 +579,20 @@ async fn a_block_without_collision_can_go_into_a_player() {
 async fn the_collision_box_shrinks_when_crouching_but_not_when_flying() {
     let server = TestServer::start(small_world()).await;
     let mut alice = holding(&server, "Alice", items::STONE).await;
-    // 脚在 -60.6：站着头顶到 -58.8，碰到 Y=-59 这一格；蹲下头顶到 -59.1，碰不到。
-    // 离出生点远一点，查世界用的玩家进服时不能站在这里。
+    // 脚在 -60.6 会插进草方块。官方 `handleMovePlayer` 把人拉回去，这个位置从移动包到不了。
+    // 蹲下变矮、飞行时不变矮，由游戏测试 `only_a_real_crouch_shortens_the_player` 直接放人来查。
+    //
+    // Feet at -60.6 intersect the grass. Official handleMovePlayer pulls that back, so a move
+    // packet cannot reach it. The shorter crouch box, and flying not crouching, is checked by
+    // the game test only_a_real_crouch_shortens_the_player, which places the player directly.
     let head = Pos::new(12, -59, 8);
     alice.fly_to(12.5, -60.6, 8.5).await;
 
     place(&mut alice, head, UP).await;
-    assert_eq!(world_state(&server, "Standing", head).await, blocks::AIR);
-
-    alice.send(&player_abilities(ABILITY_FLYING)).await;
-    alice.send(&player_input(INPUT_SHIFT)).await;
-    place(&mut alice, head, UP).await;
-    assert_eq!(world_state(&server, "Flying", head).await, blocks::AIR);
-
-    alice.send(&player_abilities(0)).await;
-    place(&mut alice, head, UP).await;
-    assert_eq!(world_state(&server, "Crouching", head).await, blocks::STONE);
+    assert_eq!(
+        world_state(&server, "PulledBack", head).await,
+        blocks::STONE
+    );
 }
 
 #[tokio::test]

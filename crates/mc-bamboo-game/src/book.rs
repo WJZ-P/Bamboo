@@ -271,7 +271,7 @@ fn has_component(stack: &ItemStack, kind: i32) -> bool {
 }
 
 /// 官方 `PatchedDataComponentMap.set`：值和默认组件相同就从补丁里拿掉。
-fn set_component(stack: &mut ItemStack, kind: i32, value: &ComponentValue) {
+pub(crate) fn set_component(stack: &mut ItemStack, kind: i32, value: &ComponentValue) {
     let equals_default = defaults::of_item(stack.item).get(kind) == Some(value);
     stack.removed.retain(|id| *id != kind);
     if equals_default {

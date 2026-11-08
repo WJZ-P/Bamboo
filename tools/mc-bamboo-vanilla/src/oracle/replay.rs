@@ -7,9 +7,9 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Combined, Container,
-    Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
-    ShulkerSlots, Slots, TickPriority, destroy_block,
+    Aabb, Actor, BlockEntities, BlockEvents, BlockGameRules, BlockHit, BlockState, BlockTicks,
+    Combined, Container, Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome,
+    RedstoneMemory, ShulkerSlots, Slots, TickPriority, apply_text, destroy_block,
     entity::Entities,
     level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
@@ -112,6 +112,10 @@ struct OracleLevel {
     ///
     /// The fake players. The actor comes first, then the bystanders in `others`.
     living: Vec<EquipTarget>,
+    /// 这道题的游戏规则。默认值和官方 `new GameRules(DEFAULT_FLAGS)` 一样。
+    ///
+    /// Game rules for this case. Defaults match `new GameRules(DEFAULT_FLAGS)`.
+    block_rules: BlockGameRules,
 }
 
 /// 已建模的容器，槽位数和官方一致。
@@ -196,6 +200,14 @@ fn seed_mirrored_contents(slots: &mut [ItemStack], state: BlockState) {
     }
 }
 
+fn block_rules_of(header: &Header) -> Result<BlockGameRules, String> {
+    let mut rules = BlockGameRules::vanilla();
+    for (name, value) in &header.rules {
+        apply_text(&mut rules, name, value)?;
+    }
+    Ok(rules)
+}
+
 impl OracleLevel {
     /// 按场景建世界，再填容器内容。容器和漏斗方块实体的建立顺序和官方一样：
     /// 场景按 `BlockPos.asLong` 排（x、z、y），先建全部方块实体，再填内容。
@@ -254,6 +266,7 @@ impl OracleLevel {
             block_entities,
             block_events: BlockEvents::default(),
             living: equip_targets(&case.action, names)?,
+            block_rules: block_rules_of(header)?,
         })
     }
 
@@ -462,6 +475,10 @@ impl Level for OracleLevel {
 
     fn entities(&self) -> &Entities {
         &self.world_entities
+    }
+
+    fn block_game_rules(&self) -> BlockGameRules {
+        self.block_rules
     }
 
     fn entities_mut(&mut self) -> &mut Entities {
@@ -750,6 +767,10 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         // 题目的玩家一直是创造模式。
         may_build: true,
         prevents_block_drops: true,
+        // 假玩家是创造模式，但没有任何权限。`canUseGameMasterBlocks` 是假。
+        //
+        // The fake player is creative and has no permissions, so `canUseGameMasterBlocks` is false.
+        can_use_game_master_blocks: false,
     })
 }
 
@@ -949,7 +970,14 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::ComposterFill { .. }
             // 讲台翻页的声音，题里不比较。
             | Effect::PageTurned { .. }
-            | Effect::DispenserEquipped { .. } => None,
+            | Effect::DispenserEquipped { .. }
+            // 营火食物的方块实体包，题里不比较。
+            | Effect::CampfireChanged { .. }
+            // 快捷栏提示和命令方块编辑器不进方块题的比较。
+            //
+            // Action-bar text and the command-block editor are not part of a block case.
+            | Effect::Overlay { .. }
+            | Effect::OpenCommandBlock { .. } => None,
         })
         .collect()
 }
@@ -1055,7 +1083,12 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             // A lectern page turn is menu `levelEvent(1043)`. Block cases do not compare it.
             // The game layer still sends it.
             | Effect::PageTurned { .. }
-            | Effect::DispenserEquipped { .. } => {}
+            | Effect::DispenserEquipped { .. }
+            // 营火食物的方块实体包，方块题不比较。游戏层会把它发出去。
+            // The campfire food block-entity packet is not compared. The game layer still sends it.
+            | Effect::CampfireChanged { .. }
+            | Effect::Overlay { .. }
+            | Effect::OpenCommandBlock { .. } => {}
         }
     }
     (events, sounds)
@@ -1116,6 +1149,7 @@ mod tests {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             living: Vec::new(),
+            block_rules: BlockGameRules::vanilla(),
         }
     }
 

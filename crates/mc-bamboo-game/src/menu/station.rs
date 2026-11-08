@@ -1,11 +1,11 @@
-//! 工作台菜单：玩家 2×2、工作台、切石机、锻造台、熔炉系列、酿造台。
+//! 工作台菜单：玩家 2×2、工作台、切石机、锻造台、熔炉系列、酿造台、织布机、砂轮。
 //!
 //! 点击顺序照官方 `AbstractContainerMenu.doClick`。每种菜单的 `quickMoveStack`
 //! 各自翻译，不共用。`slotsChanged` 查配方时不带提示：官方 `CraftingMenu.slotsChanged`
 //! 传的就是 `null`，提示只给 `place_recipe` 用，而那条不在这次的范围里。
 //!
 //! Workstation menus: the player 2×2, crafting table, stonecutter, smithing table,
-//! furnaces, and brewing stand.
+//! furnaces, brewing stand, loom, and grindstone.
 //!
 //! Clicks follow `AbstractContainerMenu.doClick`. Each menu has its own `quickMoveStack`.
 //! Recipe lookup from `slotsChanged` passes no hint: vanilla `CraftingMenu.slotsChanged`
@@ -33,7 +33,7 @@ use mc_bamboo_recipes::{
 };
 use tracing::debug;
 
-use super::{ClickPacket, ContainerKind, Menu, RemoteSlot, Target};
+use super::{ClickPacket, ContainerKind, Menu, RemoteSlot, Target, grindstone, loom};
 use crate::{
     container::CONTAINER_BUFFER, inbound::PlayerId, interaction::BLOCK_INTERACTION_RANGE,
     inventory::Inventory, player::Player, region::Region,
@@ -99,6 +99,8 @@ enum Kind {
     BlastFurnace,
     Smoker,
     Brewing,
+    Loom,
+    Grindstone,
 }
 
 impl Kind {
@@ -119,6 +121,10 @@ impl Kind {
             Some(Self::Smoker)
         } else if is(blocks::BREWING_STAND) {
             Some(Self::Brewing)
+        } else if is(blocks::LOOM) {
+            Some(Self::Loom)
+        } else if is(blocks::GRINDSTONE) {
+            Some(Self::Grindstone)
         } else {
             None
         }
@@ -131,12 +137,14 @@ impl Kind {
             Self::Smithing => 40,
             Self::Furnace | Self::BlastFurnace | Self::Smoker => 39,
             Self::Brewing => 41,
+            Self::Loom => 40,
+            Self::Grindstone => 39,
         }
     }
 
     fn data_len(self) -> usize {
         match self {
-            Self::Stonecutter | Self::Smithing => 1,
+            Self::Stonecutter | Self::Smithing | Self::Loom => 1,
             Self::Furnace | Self::BlastFurnace | Self::Smoker | Self::Brewing => 4,
             _ => 0,
         }
@@ -151,6 +159,8 @@ impl Kind {
             Self::Smithing => 4,
             Self::Furnace | Self::BlastFurnace | Self::Smoker => 3,
             Self::Brewing => 5,
+            Self::Loom => 4,
+            Self::Grindstone => 3,
         }
     }
 
@@ -184,6 +194,8 @@ impl Kind {
             Self::Stonecutter => menu::STONECUTTER,
             Self::Smithing => menu::SMITHING,
             Self::Brewing => menu::BREWING_STAND,
+            Self::Loom => menu::LOOM,
+            Self::Grindstone => menu::GRINDSTONE,
         }
     }
 
@@ -196,6 +208,8 @@ impl Kind {
             Self::Stonecutter => "container.stonecutter",
             Self::Smithing => "container.upgrade",
             Self::Brewing => "container.brewing",
+            Self::Loom => "container.loom",
+            Self::Grindstone => "container.grindstone",
         }
     }
 }
@@ -225,6 +239,12 @@ enum Role {
     StoneResult,
     SmithInput,
     SmithResult,
+    LoomBanner,
+    LoomDye,
+    LoomPattern,
+    LoomResult,
+    GrindInput,
+    GrindResult,
     Machine,
     Armor(i32),
     Player,
@@ -281,6 +301,18 @@ pub(crate) struct Station {
     ///
     /// How many times this click calls `award_experience`. Shift-clicking the result is twice.
     furnace_awards: i32,
+    /// 织布机当前可选的旗帜图案，注册表 ID。
+    ///
+    /// Banner patterns the loom can select right now, as registry ids.
+    patterns: Vec<i32>,
+    /// 这次点击要结算的砂轮经验，还没从世界随机源取数。
+    ///
+    /// Grindstone experience totals for this click, before the world random draws.
+    awards: Vec<i32>,
+    /// 菜单是在真实世界上打开的。重放不取砂轮的经验随机数。
+    ///
+    /// The menu was opened on a real world. Replays do not draw grindstone experience.
+    in_world: bool,
     packets: Vec<Outgoing>,
 }
 
@@ -310,6 +342,9 @@ impl Station {
             machine_set: [false; 5],
             machine_content: [false; 5],
             furnace_awards: 0,
+            patterns: Vec::new(),
+            awards: Vec::new(),
+            in_world: false,
             packets: Vec::new(),
         }
     }
@@ -432,6 +467,18 @@ impl Station {
                 3 => Role::SmithResult,
                 _ => Role::Player,
             },
+            Kind::Loom => match index {
+                0 => Role::LoomBanner,
+                1 => Role::LoomDye,
+                2 => Role::LoomPattern,
+                3 => Role::LoomResult,
+                _ => Role::Player,
+            },
+            Kind::Grindstone => match index {
+                0 | 1 => Role::GrindInput,
+                2 => Role::GrindResult,
+                _ => Role::Player,
+            },
             Kind::Furnace | Kind::BlastFurnace | Kind::Smoker | Kind::Brewing => {
                 if index < self.kind.machine_len() {
                     Role::Machine
@@ -457,7 +504,15 @@ impl Station {
 
     fn may_place(&self, index: usize, stack: &ItemStack) -> bool {
         match self.role(index) {
-            Role::CraftResult | Role::StoneResult | Role::SmithResult => false,
+            Role::CraftResult
+            | Role::StoneResult
+            | Role::SmithResult
+            | Role::LoomResult
+            | Role::GrindResult => false,
+            Role::LoomBanner => loom::is_banner(stack),
+            Role::LoomDye => loom::is_dye(stack),
+            Role::LoomPattern => loom::is_pattern_item(stack),
+            Role::GrindInput => grindstone::may_place(stack),
             Role::Armor(slot) => is_equippable_in_slot(stack, slot),
             Role::SmithInput => match index {
                 0 => is_smithing_template(stack.item),
@@ -541,6 +596,8 @@ impl Station {
             Role::Craft => self.refresh_craft(),
             Role::StoneInput => self.stone_changed(),
             Role::SmithInput => self.refresh_smithing(),
+            Role::LoomBanner | Role::LoomDye | Role::LoomPattern => self.refresh_loom(),
+            Role::GrindInput => self.refresh_grindstone(),
             Role::Machine => self.mark_set(index),
             _ => {}
         }
@@ -550,6 +607,8 @@ impl Station {
         match self.role(index) {
             Role::StoneInput => self.stone_changed(),
             Role::SmithInput => self.refresh_smithing(),
+            Role::LoomBanner | Role::LoomDye | Role::LoomPattern => self.refresh_loom(),
+            Role::GrindInput => self.refresh_grindstone(),
             Role::Machine => self.mark_content(index),
             _ => {}
         }
@@ -1011,6 +1070,8 @@ impl Station {
             Kind::Smithing => self.route_smithing(index, stack),
             Kind::Furnace | Kind::BlastFurnace | Kind::Smoker => self.route_furnace(index, stack),
             Kind::Brewing => self.route_brewing(index, stack, clicked),
+            Kind::Loom => self.route_loom(index, stack),
+            Kind::Grindstone => self.route_grindstone(index, stack),
         }
     }
 
@@ -1250,6 +1311,8 @@ impl Station {
             Role::CraftResult => self.take_craft_result(),
             Role::StoneResult => self.take_stone_result(),
             Role::SmithResult => self.take_smith_result(),
+            Role::LoomResult => self.take_loom_result(),
+            Role::GrindResult => self.take_grindstone_result(),
             Role::Machine if self.kind.is_furnace() && index == 2 => self.furnace_awards += 1,
             _ => {}
         }
@@ -1361,10 +1424,16 @@ impl Station {
         }
     }
 
-    /// 按钮选结果。和当前编号相同就拒绝，编号越界也返回真。
+    /// 按钮选结果。切石机和当前编号相同就拒绝，编号越界也返回真。
+    /// 织布机越界返回假，同一个编号再点一次仍然成立。
     ///
-    /// Selects a result. The same index is rejected. An out-of-range index still returns true.
+    /// Selects a result. The stonecutter rejects the current index and still returns true when the
+    /// index is out of range. The loom returns false out of range, and clicking the same index
+    /// again still succeeds.
     fn click_button(&mut self, button: i32) -> bool {
+        if self.kind == Kind::Loom {
+            return self.click_loom(button);
+        }
         if self.kind != Kind::Stonecutter {
             return false;
         }
@@ -1413,6 +1482,154 @@ impl Station {
         }
         stack.count -= 1;
         self.set_by_player(index, normalize(stack));
+    }
+
+    /// 官方 `LoomMenu.quickMoveStack`。
+    ///
+    /// Vanilla `LoomMenu.quickMoveStack`.
+    fn route_loom(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index == 3 {
+            return Self::moved_or_stop(self.move_items(stack, 4, 40, true), true);
+        }
+        if index != 0 && index != 1 && index != 2 {
+            if loom::is_banner(stack) {
+                return Self::moved_or_stop(self.move_items(stack, 0, 1, false), false);
+            }
+            if loom::is_dye(stack) {
+                return Self::moved_or_stop(self.move_items(stack, 1, 2, false), false);
+            }
+            if loom::is_pattern_item(stack) {
+                return Self::moved_or_stop(self.move_items(stack, 2, 3, false), false);
+            }
+            if (4..31).contains(&index) {
+                return Self::moved_or_stop(self.move_items(stack, 31, 40, false), false);
+            }
+            if (31..40).contains(&index) && !self.move_items(stack, 4, 31, false) {
+                return MoveResult::Stop { write_back: false };
+            }
+            return MoveResult::Moved { crafted: false };
+        }
+        Self::moved_or_stop(self.move_items(stack, 4, 40, false), false)
+    }
+
+    /// 官方 `GrindstoneMenu.quickMoveStack`。
+    ///
+    /// Vanilla `GrindstoneMenu.quickMoveStack`.
+    fn route_grindstone(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index == 2 {
+            return Self::moved_or_stop(self.move_items(stack, 3, 39, true), true);
+        }
+        if index != 0 && index != 1 {
+            if !self.slots[0].is_empty() && !self.slots[1].is_empty() {
+                if (3..30).contains(&index) {
+                    return Self::moved_or_stop(self.move_items(stack, 30, 39, false), false);
+                }
+                if (30..39).contains(&index) && !self.move_items(stack, 3, 30, false) {
+                    return MoveResult::Stop { write_back: false };
+                }
+                return MoveResult::Moved { crafted: false };
+            }
+            return Self::moved_or_stop(self.move_items(stack, 0, 2, false), false);
+        }
+        Self::moved_or_stop(self.move_items(stack, 3, 39, false), false)
+    }
+
+    /// 官方 `LoomMenu.slotsChanged`。两边输入都空着时不 `broadcastChanges`。
+    ///
+    /// Vanilla `LoomMenu.slotsChanged`. It does not call `broadcastChanges` when either input is empty.
+    fn refresh_loom(&mut self) {
+        let banner = self.slots[0].clone();
+        let dye = self.slots[1].clone();
+        let pattern_item = self.slots[2].clone();
+        if banner.is_empty() || dye.is_empty() {
+            self.slots[3] = ItemStack::empty();
+            self.patterns.clear();
+            self.set_loom_index(-1);
+            return;
+        }
+        let selected = self.data.first().copied().unwrap_or(0);
+        let valid = selected >= 0 && (selected as usize) < self.patterns.len();
+        let previous = self.patterns.clone();
+        self.patterns = loom::selectable(&pattern_item);
+        let display = if self.patterns.len() == 1 {
+            self.set_loom_index(0);
+            self.patterns.first().copied()
+        } else if !valid {
+            self.set_loom_index(-1);
+            None
+        } else {
+            let selected_id = previous[selected as usize];
+            match self.patterns.iter().position(|id| *id == selected_id) {
+                Some(index) => {
+                    self.set_loom_index(index as i32);
+                    Some(selected_id)
+                }
+                None => {
+                    self.set_loom_index(-1);
+                    None
+                }
+            }
+        };
+        match display {
+            Some(_) if loom::layer_count(&banner) >= loom::MAX_LAYERS => {
+                self.set_loom_index(-1);
+                self.slots[3] = ItemStack::empty();
+            }
+            Some(pattern) => self.setup_loom_result(pattern),
+            None => self.slots[3] = ItemStack::empty(),
+        }
+        self.broadcast();
+    }
+
+    fn setup_loom_result(&mut self, pattern: i32) {
+        let result = loom::with_layer(&self.slots[0], &self.slots[1], pattern);
+        if !result.matches(&self.slots[3]) {
+            self.slots[3] = result;
+        }
+    }
+
+    fn set_loom_index(&mut self, index: i32) {
+        if let Some(slot) = self.data.first_mut() {
+            *slot = index;
+        }
+    }
+
+    /// 官方 `LoomMenu.clickMenuButton`。层数上限在 `slotsChanged`，不在这里。
+    ///
+    /// Vanilla `LoomMenu.clickMenuButton`. The layer cap lives in `slotsChanged`, not here.
+    fn click_loom(&mut self, button: i32) -> bool {
+        if button < 0 || button as usize >= self.patterns.len() {
+            return false;
+        }
+        let pattern = self.patterns[button as usize];
+        self.set_loom_index(button);
+        self.setup_loom_result(pattern);
+        true
+    }
+
+    fn take_loom_result(&mut self) {
+        self.shrink_input(0);
+        self.shrink_input(1);
+        if self.slots[0].is_empty() || self.slots[1].is_empty() {
+            self.set_loom_index(-1);
+        }
+    }
+
+    /// 官方 `GrindstoneMenu.createResult`。
+    ///
+    /// Vanilla `GrindstoneMenu.createResult`.
+    fn refresh_grindstone(&mut self) {
+        self.slots[2] = grindstone::compute(&self.slots[0], &self.slots[1]);
+        self.broadcast();
+    }
+
+    fn take_grindstone_result(&mut self) {
+        let amount = grindstone::experience_sum(&self.slots[0], &self.slots[1]);
+        if self.in_world {
+            self.awards.push(amount);
+        }
+        self.set_by_player(0, ItemStack::empty());
+        self.set_by_player(1, ItemStack::empty());
     }
 
     fn official_get(&self, official: usize) -> ItemStack {
@@ -1614,6 +1831,8 @@ impl Station {
             Kind::Crafting => 1..10,
             Kind::Stonecutter => 0..1,
             Kind::Smithing => 0..3,
+            Kind::Loom => 0..3,
+            Kind::Grindstone => 0..2,
             _ => 0..0,
         };
         range
@@ -1660,6 +1879,17 @@ impl Station {
         self.creative = creative;
     }
 
+    /// 打开前换掉一格材料。同步压住，`slotsChanged` 会重算结果，state id 不动。
+    ///
+    /// Replace one ingredient before the menu opens. Updates stay suppressed, `slotsChanged`
+    /// recomputes the result, and the state id does not move.
+    pub(crate) fn replay_replace(&mut self, index: usize, stack: ItemStack) {
+        let was = self.suppress;
+        self.suppress = true;
+        self.set_by_player(index, stack);
+        self.suppress = was;
+    }
+
     pub(crate) fn replay_view(&self) -> StationSnapshot {
         StationSnapshot {
             slots: self.slots.clone(),
@@ -1683,6 +1913,8 @@ pub(crate) enum WorkKind {
     BlastFurnace,
     Smoker,
     Brewing,
+    Loom,
+    Grindstone,
 }
 
 impl From<WorkKind> for Kind {
@@ -1696,6 +1928,8 @@ impl From<WorkKind> for Kind {
             WorkKind::BlastFurnace => Self::BlastFurnace,
             WorkKind::Smoker => Self::Smoker,
             WorkKind::Brewing => Self::Brewing,
+            WorkKind::Loom => Self::Loom,
+            WorkKind::Grindstone => Self::Grindstone,
         }
     }
 }
@@ -1950,6 +2184,29 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
     }
 }
 
+/// 砂轮取出结果时的经验和 `levelEvent(1042)`。重放没有 `in_world`，这里的表是空的。
+///
+/// Experience and `levelEvent(1042)` for a grindstone take. A replay has no `in_world`, so the
+/// list is empty.
+fn roll_grindstone(region: &mut Region, station: &mut Station) {
+    if station.awards.is_empty() {
+        return;
+    }
+    let pos = station.pos;
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        for amount in std::mem::take(&mut station.awards) {
+            grindstone::award(world.random(), amount);
+            // 官方在经验取完之后发 `levelEvent(1042)`。这一下不取随机数。
+            // Vanilla sends `levelEvent(1042)` after the experience draws. This one draws nothing.
+            world.level_event(1042, pos, 0);
+        }
+        world.drain_effects()
+    };
+    crate::interaction::send_effects(region, None, &effects);
+}
+
 fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet: &ClickPacket) {
     let (creative, selected, inv) = {
         let Some(player) = region.players.get(&id) else {
@@ -1974,6 +2231,7 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
         station.receive(*slot, hash.clone());
     }
     station.remote_carried.receive(packet.carried.clone());
+    roll_grindstone(region, station);
     if let Some(player) = region.players.get_mut(&id) {
         station.write_player(&mut player.inventory);
     }
@@ -1986,10 +2244,10 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
     }
 }
 
-/// 右键工作台、切石机、锻造台、熔炉或酿造台。不是这些方块就返回 `false`。
+/// 右键工作台、切石机、锻造台、熔炉、酿造台、织布机或砂轮。不是这些方块就返回 `false`。
 ///
-/// Right-click a crafting table, stonecutter, smithing table, furnace, or brewing stand.
-/// Returns `false` for every other block.
+/// Right-click a crafting table, stonecutter, smithing table, furnace, brewing stand, loom, or
+/// grindstone. Returns `false` for every other block.
 pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
     let Some(state) = region.chunks.block(pos) else {
         return false;
@@ -2016,6 +2274,7 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     };
     let mut station = Station::create(kind, container_id, pos);
     station.creative = creative;
+    station.in_world = true;
     station.load_player(&inv, selected);
     pull_machine(region, &mut station);
     station.send_all();
@@ -2252,5 +2511,56 @@ mod tests {
         assert_eq!(station.carried.count, 4);
         assert!(station.slots[1].is_empty());
         assert!(station.slots[0].is_empty());
+    }
+
+    #[test]
+    fn a_loom_adds_one_layer_and_consumes_the_banner_and_dye() {
+        let mut station = Station::create(Kind::Loom, 1, BlockPos::new(0, 0, 0));
+        station.set_by_player(0, stack(items::WHITE_BANNER, 2));
+        station.set_by_player(1, stack(items::WHITE_DYE, 2));
+        assert_eq!(station.data[0], -1);
+        assert!(station.slots[3].is_empty());
+        assert!(station.click_button(0));
+        assert_eq!(station.data[0], 0);
+        assert_eq!(loom::layer_count(&station.slots[3]), 1);
+        station.click(3, 0, ContainerInput::Pickup);
+        assert_eq!(station.slots[0].count, 1);
+        assert_eq!(station.slots[1].count, 1);
+        assert_eq!(loom::layer_count(&station.carried), 1);
+        // 旗帜和染料都还剩，`slotsChanged` 会再做一份结果。
+        // Banner and dye both remain, so `slotsChanged` builds another result.
+        assert_eq!(loom::layer_count(&station.slots[3]), 1);
+    }
+
+    #[test]
+    fn six_banner_layers_clear_the_loom_selection() {
+        let mut station = Station::create(Kind::Loom, 1, BlockPos::new(0, 0, 0));
+        station.set_by_player(0, stack(items::WHITE_BANNER, 1));
+        station.set_by_player(1, stack(items::WHITE_DYE, 1));
+        assert!(station.click_button(0));
+        let dye = station.slots[1].clone();
+        let pattern = station.patterns[0];
+        let mut banner = stack(items::WHITE_BANNER, 1);
+        for _ in 0..loom::MAX_LAYERS {
+            banner = loom::with_layer(&banner, &dye, pattern);
+        }
+        station.set_by_player(0, banner);
+        assert_eq!(station.data[0], -1);
+        assert!(station.slots[3].is_empty());
+    }
+
+    #[test]
+    fn a_grindstone_stacks_two_sticks_and_clears_both_inputs() {
+        let mut station = Station::create(Kind::Grindstone, 1, BlockPos::new(0, 0, 0));
+        station.set_by_player(0, stack(items::STICK, 1));
+        station.set_by_player(1, stack(items::STICK, 1));
+        assert_eq!(station.slots[2].item, items::STICK);
+        assert_eq!(station.slots[2].count, 2);
+        station.click(2, 1, ContainerInput::Pickup);
+        assert_eq!(station.carried.count, 1);
+        assert!(station.slots[0].is_empty());
+        assert!(station.slots[1].is_empty());
+        assert!(station.slots[2].is_empty());
+        assert!(station.awards.is_empty());
     }
 }

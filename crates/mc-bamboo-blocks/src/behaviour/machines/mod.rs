@@ -14,6 +14,7 @@
 mod beehive;
 mod brewing;
 mod campfire;
+mod campfire_entity;
 pub(crate) mod chest;
 mod command_block;
 mod containers;
@@ -34,6 +35,7 @@ mod tripwire;
 mod workstations;
 
 pub use self::brewing::BrewingStandEntity;
+pub use self::campfire_entity::CampfireEntity;
 pub(crate) use self::containers::open_support_shape;
 pub use self::containers::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
 pub use self::cooking::FurnaceEntity;

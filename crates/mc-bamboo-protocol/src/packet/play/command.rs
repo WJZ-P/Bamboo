@@ -290,7 +290,10 @@ impl ClientboundPacket for CommandSuggestions<'_> {
     }
 }
 
-/// 实体事件。命令系统只用来同步权限等级。
+/// `ClientboundEntityEventPacket`。命令系统用它同步权限等级，物品损坏是 47 到 52。
+///
+/// `ClientboundEntityEventPacket`. Commands use it for the permission level.
+/// Item breaks are 47 through 52, one per equipment slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntityEvent {
     pub entity_id: i32,

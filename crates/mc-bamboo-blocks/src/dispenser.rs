@@ -66,6 +66,25 @@ pub(crate) fn limited(stack: ItemStack) -> ItemStack {
     stack
 }
 
+/// `DispenserBlock.dispenseFrom` 在槽位是 `-1` 时的那一下。
+///
+/// 计划刻走 [`crate::dispense::dispense_from`]，空槽的 1001 已经包含在里面。
+/// 这个函数留着 main 上的那一截：有物品时不发射，空槽发 1001。
+///
+/// The `-1` slot half of `DispenserBlock.dispenseFrom`.
+///
+/// The scheduled tick uses [`crate::dispense::dispense_from`], which already plays 1001
+/// for an empty slot. This is the function main added: items present do nothing, an empty
+/// slot plays 1001.
+pub fn click_if_empty(world: &mut World, pos: BlockPos) {
+    let Some(occupied) = occupied_slots(world, pos) else {
+        return;
+    };
+    if random_slot(world, &occupied) < 0 {
+        world.level_event(1001, pos, 0);
+    }
+}
+
 /// 九个槽是不是非空。没有方块实体时是 `None`。
 pub(crate) fn occupied_slots(world: &mut World, pos: BlockPos) -> Option<Vec<bool>> {
     let mut occupied = None;

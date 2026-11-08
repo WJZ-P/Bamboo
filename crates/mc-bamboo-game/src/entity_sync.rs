@@ -188,7 +188,7 @@ impl EntitySync {
     }
 
     /// 把同一份字节发给每个观察者。
-    fn send_to_viewers(&self, links: &mut Links, frames: &[u8]) {
+    pub(crate) fn send_to_viewers(&self, links: &mut Links, frames: &[u8]) {
         for &viewer in &self.seen_by {
             links.send_frames(viewer, frames);
         }

@@ -1,5 +1,6 @@
 import com.google.common.collect.ImmutableList;
 import com.mojang.authlib.GameProfile;
+import com.mojang.serialization.DataResult;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.io.BufferedWriter;
@@ -140,7 +141,10 @@ import net.minecraft.world.item.alchemy.PotionContents;
 import net.minecraft.world.item.alchemy.Potions;
 import net.minecraft.world.item.component.DyedItemColor;
 import net.minecraft.world.item.context.UseOnContext;
+import net.minecraft.world.item.crafting.CampfireCookingRecipe;
 import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.item.crafting.RecipeType;
+import net.minecraft.world.item.crafting.SingleRecipeInput;
 import net.minecraft.world.level.BlockEventData;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
@@ -159,6 +163,7 @@ import net.minecraft.world.level.block.BaseRailBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CakeBlock;
+import net.minecraft.world.level.block.CampfireBlock;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.ChiseledBookShelfBlock;
 import net.minecraft.world.level.block.ComposterBlock;
@@ -182,6 +187,7 @@ import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.entity.ChiseledBookShelfBlockEntity;
+import net.minecraft.world.level.block.entity.CampfireBlockEntity;
 import net.minecraft.world.level.block.entity.CrafterBlockEntity;
 import net.minecraft.world.level.block.entity.DecoratedPotBlockEntity;
 import net.minecraft.world.level.block.entity.DispenserBlockEntity;
@@ -212,6 +218,7 @@ import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.entity.LevelEntityGetter;
 import net.minecraft.world.level.gameevent.GameEvent;
+import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
@@ -386,10 +393,9 @@ import sun.misc.Unsafe;
  *     亮度      getRawBrightness、getBrightness 恒为 15。
  *     信号      官方真实的实现，方块状态里的 powered、power 真的会产生信号。
  *     方块实体  场景加载时新建，容器内容按 contents 填，别的为空。有三种方块的状态是内容的镜像，内容按状态补齐：
- *               chiseled_bookshelf 的书、jukebox 的唱片、lectern 的书。只有漏斗和移动活塞（moving_piston 上的
- *               PistonMovingBlockEntity）的 ticker 会跑：漏斗每刻按官方 HopperBlockEntity.pushItemsTick 搬物品，
- *               同一次 tick 里漏斗按登记顺序（坐标顺序）在前，活塞在后。别的方块实体都不 tick，所以阳光探测器不会
- *               随时间重算。
+ *               chiseled_bookshelf 的书、jukebox 的唱片、lectern 的书。漏斗、移动活塞和营火的 ticker 会跑：
+ *               漏斗每刻按官方 HopperBlockEntity.pushItemsTick 搬物品，同一次 tick 里漏斗在前，然后是活塞和营火。
+ *               点着的营火走 cookTick，灭了走 cooldownTick。别的方块实体都不 tick，所以阳光探测器不会随时间重算。
  *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
  *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
@@ -471,6 +477,7 @@ public final class BlockOracle {
                         new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
                 Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8), OUTPUT_BUFFER)) {
             Official official = Official.load(resources);
+            official.applyRules(options.rules);
             new Oracle(official, options, out, log).run();
         }
     }
@@ -591,9 +598,9 @@ public final class BlockOracle {
     }
 
     private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, Set<String> unrandom, int single,
-            boolean explain) {
+            boolean explain, Map<String, String> rules) {
         private static final String USAGE = "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>]"
-                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain]";
+                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain] [--rule name=value]";
 
         static Options parse(String[] args) {
             long seed = 1;
@@ -604,6 +611,7 @@ public final class BlockOracle {
             Set<String> unrandom = Set.of();
             int single = -1;
             boolean explain = false;
+            Map<String, String> rules = new LinkedHashMap<>();
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seed" -> seed = Long.parseLong(value(args, ++i));
@@ -614,10 +622,18 @@ public final class BlockOracle {
                     case "--unrandom" -> unrandom = Set.of(value(args, ++i).split(","));
                     case "--case" -> single = Integer.parseInt(value(args, ++i));
                     case "--explain" -> explain = true;
+                    case "--rule" -> {
+                        String pair = value(args, ++i);
+                        int split = pair.indexOf('=');
+                        if (split <= 0 || split == pair.length() - 1) {
+                            throw new IllegalArgumentException(USAGE);
+                        }
+                        rules.put(pair.substring(0, split), pair.substring(split + 1));
+                    }
                     default -> throw new IllegalArgumentException(USAGE);
                 }
             }
-            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain);
+            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain, rules);
         }
 
         private static String value(String[] args, int index) {
@@ -647,6 +663,8 @@ public final class BlockOracle {
         final DamageSources damageSources;
         final FakeServer server;
         final GameRules gameRules = new GameRules(FeatureFlags.DEFAULT_FLAGS);
+        /** 题面写了 `random_tick_speed` 时，chunk 题用这个速度，不再从 `CHUNK_SPEEDS` 里抽。 */
+        Integer fixedChunkSpeed;
         final WorldBorder border = new WorldBorder();
         final RandomSource soundSeeds = RandomSource.create(0);
         final GameProfile profile = new GameProfile(new UUID(0, 1), "Oracle");
@@ -665,6 +683,33 @@ public final class BlockOracle {
             this.damageSources = new DamageSources(registries);
             this.server = FakeServer.create(managers, gameRules);
             this.scoreboard = new ServerScoreboard(server);
+        }
+
+        /** 把 `--rule name=value` 写进假世界。未知规则、未启用的规则、反序列化失败都直接报错。 */
+        void applyRules(Map<String, String> rules) {
+            for (Map.Entry<String, String> entry : rules.entrySet()) {
+                Identifier id = entry.getKey().indexOf(':') >= 0
+                        ? Identifier.parse(entry.getKey())
+                        : Identifier.withDefaultNamespace(entry.getKey());
+                GameRule<?> rule = BuiltInRegistries.GAME_RULE.get(id).map(holder -> holder.value()).orElse(null);
+                if (rule == null) {
+                    throw new IllegalArgumentException("unknown game rule " + entry.getKey());
+                }
+                setRule(rule, entry.getValue());
+            }
+        }
+
+        private <T> void setRule(GameRule<T> rule, String text) {
+            DataResult<T> parsed = rule.deserialize(text);
+            T value = parsed.getOrThrow(message -> new IllegalArgumentException(rule.id() + ": " + message));
+            boolean enabled = gameRules.availableRules().anyMatch(candidate -> candidate == rule);
+            if (!enabled) {
+                throw new IllegalArgumentException("game rule " + rule.id() + " is not enabled");
+            }
+            gameRules.set(rule, value, null);
+            if (rule == GameRules.RANDOM_TICK_SPEED && value instanceof Integer speed) {
+                fixedChunkSpeed = speed;
+            }
         }
 
         /** 和 WorldLoader.load 相同的流程，只是不加载维度：标签、物品组件、配方、战利品表都是真的。 */
@@ -1228,14 +1273,16 @@ public final class BlockOracle {
         private LinkedHashSet<BlockEventData> blockEvents;
         /**
          * 移动方块实体的 ticker，按登记顺序。官方的完整机制是
-         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里登记活塞和漏斗：
-         * Bamboo 别的方块实体都不 tick。漏斗单独一张表，每刻先跑，和 Bamboo 方块实体表里漏斗总在活塞前面一致；
+         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里登记活塞、漏斗和营火。
+         * 漏斗单独一张表，每刻先跑，和 Bamboo 方块实体表里漏斗总在别的实体前面一致；
          * 表里按坐标顺序登记，见 {@link #load}。
          */
         private LinkedHashMap<BlockPos, BlockEntity> tickers;
         private LinkedHashMap<BlockPos, HopperBlockEntity> hopperTickers;
         /** tick 阶段里新登记的 ticker，下一刻开头并进上面两张表。 */
         private LinkedHashMap<BlockPos, BlockEntity> pendingTickers;
+        /** 营火点着时的配方缓存。熄灭或换实体时丢掉，和官方重做 `getTicker` 一样。 */
+        private Map<BlockPos, RecipeManager.CachedCheck<SingleRecipeInput, CampfireCookingRecipe>> campfireChecks;
         private boolean tickingBlockEntities;
         private RecordingTicks<Block> recordedBlockTicks;
         private RecordingTicks<Fluid> recordedFluidTicks;
@@ -1264,6 +1311,7 @@ public final class BlockOracle {
             level.tickers = new LinkedHashMap<>();
             level.hopperTickers = new LinkedHashMap<>();
             level.pendingTickers = new LinkedHashMap<>();
+            level.campfireChecks = new HashMap<>();
             level.tickingBlockEntities = false;
             level.recordedBlockTicks = new RecordingTicks<>();
             level.recordedFluidTicks = new RecordingTicks<>();
@@ -1485,6 +1533,8 @@ public final class BlockOracle {
                             if (piston.getType().isValid(state)) {
                                 PistonMovingBlockEntity.tick(this, pos, state, piston);
                             }
+                        } else if (entry.getValue() instanceof CampfireBlockEntity campfire && !campfire.isRemoved()) {
+                            tickCampfire(pos, campfire);
                         }
                     }
                 });
@@ -1495,14 +1545,36 @@ public final class BlockOracle {
             }
         }
 
-        /** LevelChunk.updateBlockEntityTicker：登记移动活塞和漏斗，见 {@link #tickers}。 */
+        /** 点着走 `cookTick`，灭了走 `cooldownTick`。状态变化时丢掉配方缓存。 */
+        private void tickCampfire(BlockPos pos, CampfireBlockEntity campfire) {
+            BlockState state = getBlockState(pos);
+            if (!campfire.getType().isValid(state)) {
+                campfireChecks.remove(pos);
+                return;
+            }
+            if (state.getValue(CampfireBlock.LIT)) {
+                RecipeManager.CachedCheck<SingleRecipeInput, CampfireCookingRecipe> check = campfireChecks
+                        .computeIfAbsent(pos, ignored -> RecipeManager.createCheck(RecipeType.CAMPFIRE_COOKING));
+                CampfireBlockEntity.cookTick(this, pos, state, campfire, check);
+            } else {
+                campfireChecks.remove(pos);
+                CampfireBlockEntity.cooldownTick(this, pos, state, campfire);
+            }
+        }
+
+        /** LevelChunk.updateBlockEntityTicker：登记移动活塞、漏斗和营火，见 {@link #tickers}。 */
         private void registerTicker(BlockEntity blockEntity) {
             boolean registered = blockEntity instanceof PistonMovingBlockEntity piston
                             && getBlockState(piston.getBlockPos()).is(Blocks.MOVING_PISTON)
                     || blockEntity instanceof HopperBlockEntity hopper
-                            && getBlockState(hopper.getBlockPos()).is(Blocks.HOPPER);
+                            && getBlockState(hopper.getBlockPos()).is(Blocks.HOPPER)
+                    || blockEntity instanceof CampfireBlockEntity campfire
+                            && campfire.getType().isValid(getBlockState(campfire.getBlockPos()));
             if (!registered) {
                 return;
+            }
+            if (blockEntity instanceof CampfireBlockEntity campfire) {
+                campfireChecks.remove(campfire.getBlockPos());
             }
             if (tickingBlockEntities) {
                 pendingTickers.put(blockEntity.getBlockPos(), blockEntity);
@@ -1776,6 +1848,7 @@ public final class BlockOracle {
             tickers.remove(pos);
             hopperTickers.remove(pos);
             pendingTickers.remove(pos);
+            campfireChecks.remove(pos);
         }
 
         /**
@@ -2782,12 +2855,15 @@ public final class BlockOracle {
         private final Supports supports;
         private final FakeLevel probe;
         private final Height height;
+        /** 题面覆盖了 `random_tick_speed` 时用这个速度，否则 chunk 题仍从 `CHUNK_SPEEDS` 抽。 */
+        private final Integer fixedChunkSpeed;
 
         Generator(Official official, Catalog catalog, Supports supports) {
             this.catalog = catalog;
             this.supports = supports;
             this.probe = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.LOW, 0));
             this.height = new Height(probe.getMinY(), probe.getMaxY());
+            this.fixedChunkSpeed = official.fixedChunkSpeed;
         }
 
         Case build(int id, Kind kind, Subject subject, long seed) {
@@ -3630,7 +3706,12 @@ public final class BlockOracle {
         /** 和 random 题一样的场景，跑官方的 tickChunk，看挑格子的顺序和区块段的判断。 */
         private BlockPos buildChunk(Case c, Random random) {
             BlockPos target = buildRandom(c, random);
-            c.speed = CHUNK_SPEEDS[random.nextInt(CHUNK_SPEEDS.length)];
+            // 没覆盖 `random_tick_speed` 时仍从这四档里抽，抽数次数和以前一样。
+            if (fixedChunkSpeed != null) {
+                c.speed = fixedChunkSpeed;
+            } else {
+                c.speed = CHUNK_SPEEDS[random.nextInt(CHUNK_SPEEDS.length)];
+            }
             return target;
         }
 
@@ -4543,7 +4624,21 @@ public final class BlockOracle {
             line.append(",\"cases\":").append(cases);
             line.append(",\"maxChainedUpdates\":").append(MAX_CHAINED_UPDATES);
             line.append(",\"gameTime\":").append(GAME_TIME);
-            line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max).append("}\n");
+            line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max);
+            if (!options.rules.isEmpty()) {
+                line.append(",\"rules\":{");
+                boolean firstRule = true;
+                for (Map.Entry<String, String> entry : options.rules.entrySet()) {
+                    if (!firstRule) {
+                        line.append(',');
+                    }
+                    firstRule = false;
+                    line.append('"').append(entry.getKey().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+                    line.append(":\"").append(entry.getValue().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+                }
+                line.append('}');
+            }
+            line.append("}\n");
             out.append(line);
         }
 

@@ -12,7 +12,15 @@ pub use snbt::{
 };
 
 /// 一个 NBT 值。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// [`Clone`] 走堆上的显式栈。派生的克隆会按嵌套深度递归。深度超过 512 的树不要靠
+/// 自动 `Drop` 拆掉，调用 [`Tag::release`]：自动 `Drop` 也是递归的，在连接任务的栈上会把进程打崩。
+///
+/// [`Clone`] uses an explicit heap stack. A derived clone would recurse with the
+/// nesting. Do not rely on automatic `Drop` for a tree deeper than a few dozen
+/// levels; call [`Tag::release`]. Automatic `Drop` recurses too, and that overflows
+/// the connection task.
+#[derive(Debug, PartialEq)]
 pub enum Tag {
     Byte(i8),
     Short(i16),
@@ -57,54 +65,203 @@ impl Tag {
     /// 按网络格式写入：先写类型，再写内容。和文件格式不同，根节点没有名字。
     pub fn write_network(&self, out: &mut Vec<u8>) {
         out.push(self.id());
-        self.write_payload(out);
+        write_payload(self, out);
     }
+}
 
-    fn write_payload(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Byte(value) => out.extend_from_slice(&value.to_be_bytes()),
-            Self::Short(value) => out.extend_from_slice(&value.to_be_bytes()),
-            Self::Int(value) => out.extend_from_slice(&value.to_be_bytes()),
-            Self::Long(value) => out.extend_from_slice(&value.to_be_bytes()),
-            Self::Float(value) => out.extend_from_slice(&value.to_be_bytes()),
-            Self::Double(value) => out.extend_from_slice(&value.to_be_bytes()),
-            Self::ByteArray(values) => {
-                write_len(out, values.len());
-                out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
-            }
-            Self::String(value) => write_modified_utf8(out, value),
-            Self::List(values) => {
-                let element_type = raw_element_type(values);
-                out.push(element_type);
-                write_len(out, values.len());
-                for value in values {
-                    if element_type == COMPOUND_ID && needs_wrapper(value) {
-                        // 官方 `ListTag.wrapIfNeeded`：类型不一致的元素各自包进 `{"": 值}`。
-                        out.push(value.id());
-                        write_modified_utf8(out, "");
-                        value.write_payload(out);
-                        out.push(END_ID);
+impl Clone for Tag {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Start(&'a Tag),
+            List {
+                values: &'a [Tag],
+                index: usize,
+                built: Vec<Tag>,
+            },
+            Compound {
+                entries: &'a [(String, Tag)],
+                index: usize,
+                built: Vec<(String, Tag)>,
+            },
+        }
+
+        let mut stack = vec![Task::Start(self)];
+        let mut done = Vec::new();
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Start(tag) => match tag {
+                    Tag::Byte(value) => done.push(Tag::Byte(*value)),
+                    Tag::Short(value) => done.push(Tag::Short(*value)),
+                    Tag::Int(value) => done.push(Tag::Int(*value)),
+                    Tag::Long(value) => done.push(Tag::Long(*value)),
+                    Tag::Float(value) => done.push(Tag::Float(*value)),
+                    Tag::Double(value) => done.push(Tag::Double(*value)),
+                    Tag::ByteArray(values) => done.push(Tag::ByteArray(values.clone())),
+                    Tag::String(value) => done.push(Tag::String(value.clone())),
+                    Tag::IntArray(values) => done.push(Tag::IntArray(values.clone())),
+                    Tag::LongArray(values) => done.push(Tag::LongArray(values.clone())),
+                    Tag::List(values) => stack.push(Task::List {
+                        values,
+                        index: 0,
+                        built: Vec::with_capacity(values.len()),
+                    }),
+                    Tag::Compound(entries) => stack.push(Task::Compound {
+                        entries,
+                        index: 0,
+                        built: Vec::with_capacity(entries.len()),
+                    }),
+                },
+                Task::List {
+                    values,
+                    index,
+                    mut built,
+                } => {
+                    if index > 0 {
+                        built.push(done.pop().expect("列表元素"));
+                    }
+                    if index == values.len() {
+                        done.push(Tag::List(built));
                     } else {
-                        value.write_payload(out);
+                        stack.push(Task::List {
+                            values,
+                            index: index + 1,
+                            built,
+                        });
+                        stack.push(Task::Start(&values[index]));
+                    }
+                }
+                Task::Compound {
+                    entries,
+                    index,
+                    mut built,
+                } => {
+                    if index > 0 {
+                        let (key, _) = &entries[index - 1];
+                        built.push((key.clone(), done.pop().expect("复合标签的值")));
+                    }
+                    if index == entries.len() {
+                        done.push(Tag::Compound(built));
+                    } else {
+                        stack.push(Task::Compound {
+                            entries,
+                            index: index + 1,
+                            built,
+                        });
+                        stack.push(Task::Start(&entries[index].1));
                     }
                 }
             }
-            Self::Compound(entries) => {
-                for (name, value) in entries {
-                    out.push(value.id());
-                    write_modified_utf8(out, name);
-                    value.write_payload(out);
+        }
+        done.pop().expect("克隆出来的标签")
+    }
+}
+
+impl Tag {
+    /// 拆掉一棵可能很深的标签，不使用调用栈。
+    ///
+    /// 自动 `Drop` 会按层递归。连接任务的栈装不下 512 层。
+    ///
+    /// Dismantle a tag that may be very deep, without using the call stack.
+    /// Automatic `Drop` recurses per level, and the connection task cannot hold 512 frames.
+    pub fn release(self) {
+        let mut stack = vec![self];
+        while let Some(tag) = stack.pop() {
+            match tag {
+                Tag::List(values) => stack.extend(values),
+                Tag::Compound(entries) => stack.extend(entries.into_iter().map(|(_, value)| value)),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// 写标签内容。嵌套用显式栈，和 [`Tag::write_network`] 的类型字节分开。
+fn write_payload(tag: &Tag, out: &mut Vec<u8>) {
+    enum Job<'a> {
+        Payload(&'a Tag),
+        List {
+            values: &'a [Tag],
+            index: usize,
+            element_type: u8,
+        },
+        Compound {
+            entries: &'a [(String, Tag)],
+            index: usize,
+        },
+        /// 异类列表元素外面那层包装复合标签的结束字节。
+        WrapperEnd,
+    }
+
+    let mut stack = vec![Job::Payload(tag)];
+    while let Some(job) = stack.pop() {
+        match job {
+            Job::Payload(Tag::Byte(value)) => out.extend_from_slice(&value.to_be_bytes()),
+            Job::Payload(Tag::Short(value)) => out.extend_from_slice(&value.to_be_bytes()),
+            Job::Payload(Tag::Int(value)) => out.extend_from_slice(&value.to_be_bytes()),
+            Job::Payload(Tag::Long(value)) => out.extend_from_slice(&value.to_be_bytes()),
+            Job::Payload(Tag::Float(value)) => out.extend_from_slice(&value.to_be_bytes()),
+            Job::Payload(Tag::Double(value)) => out.extend_from_slice(&value.to_be_bytes()),
+            Job::Payload(Tag::ByteArray(values)) => {
+                write_len(out, values.len());
+                out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
+            }
+            Job::Payload(Tag::String(value)) => write_modified_utf8(out, value),
+            Job::Payload(Tag::IntArray(values)) => {
+                write_len(out, values.len());
+                out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
+            }
+            Job::Payload(Tag::LongArray(values)) => {
+                write_len(out, values.len());
+                out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
+            }
+            Job::Payload(Tag::List(values)) => {
+                let element_type = raw_element_type(values);
+                out.push(element_type);
+                write_len(out, values.len());
+                stack.push(Job::List {
+                    values,
+                    index: 0,
+                    element_type,
+                });
+            }
+            Job::Payload(Tag::Compound(entries)) => stack.push(Job::Compound { entries, index: 0 }),
+            Job::List {
+                values,
+                index,
+                element_type,
+            } => {
+                if index == values.len() {
+                    continue;
                 }
-                out.push(END_ID);
+                stack.push(Job::List {
+                    values,
+                    index: index + 1,
+                    element_type,
+                });
+                let value = &values[index];
+                if element_type == COMPOUND_ID && needs_wrapper(value) {
+                    // 官方 `ListTag.wrapIfNeeded`：类型不一致的元素各自包进 `{"": 值}`。
+                    out.push(value.id());
+                    write_modified_utf8(out, "");
+                    stack.push(Job::WrapperEnd);
+                }
+                stack.push(Job::Payload(value));
             }
-            Self::IntArray(values) => {
-                write_len(out, values.len());
-                out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
+            Job::Compound { entries, index } => {
+                if index == entries.len() {
+                    out.push(END_ID);
+                    continue;
+                }
+                stack.push(Job::Compound {
+                    entries,
+                    index: index + 1,
+                });
+                let (name, value) = &entries[index];
+                out.push(value.id());
+                write_modified_utf8(out, name);
+                stack.push(Job::Payload(value));
             }
-            Self::LongArray(values) => {
-                write_len(out, values.len());
-                out.extend(values.iter().flat_map(|value| value.to_be_bytes()));
-            }
+            Job::WrapperEnd => out.push(END_ID),
         }
     }
 }

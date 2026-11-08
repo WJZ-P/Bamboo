@@ -47,14 +47,42 @@ impl IgniteSound {
     }
 }
 
-/// `FlintAndSteelItem.useOn`。
-pub(super) fn flint_and_steel(world: &mut World, ctx: &UseContext) -> InteractionResult {
-    ignite(world, ctx, UPDATE_ALL_IMMEDIATE, IgniteSound::FlintAndSteel)
+/// 成功之后怎么消耗手上的物品。
+///
+/// How a successful use spends the held item.
+enum Spend {
+    /// `hurtAndBreak(1)`。
+    Hurt,
+    /// `ItemStack.shrink(1)`。创造模式的数量由外面改回去。
+    ///
+    /// `ItemStack.shrink(1)`. Creative mode restores the count outside.
+    Shrink,
 }
 
-/// `FireChargeItem.useOn`：`setBlockAndUpdate`。
+/// `FlintAndSteelItem.useOn`。音效的音调取一个随机数。成功后 `hurtAndBreak(1)`。
+///
+/// `FlintAndSteelItem.useOn`. The pitch draws one random number. Success calls `hurtAndBreak(1)`.
+pub(super) fn flint_and_steel(world: &mut World, ctx: &UseContext) -> InteractionResult {
+    ignite(
+        world,
+        ctx,
+        UPDATE_ALL_IMMEDIATE,
+        IgniteSound::FlintAndSteel,
+        Spend::Hurt,
+    )
+}
+
+/// `FireChargeItem.useOn`：`setBlockAndUpdate`。音效的音调取两个随机数。成功后 `shrink(1)`。
+///
+/// `FireChargeItem.useOn`: `setBlockAndUpdate`. The pitch draws two random numbers. Success calls `shrink(1)`.
 pub(super) fn fire_charge(world: &mut World, ctx: &UseContext) -> InteractionResult {
-    ignite(world, ctx, UPDATE_ALL, IgniteSound::FireCharge)
+    ignite(
+        world,
+        ctx,
+        UPDATE_ALL,
+        IgniteSound::FireCharge,
+        Spend::Shrink,
+    )
 }
 
 /// 点着点中的方块，或者在点中的面前生火。火也放不下时是 `FAIL`。
@@ -63,12 +91,14 @@ fn ignite(
     ctx: &UseContext,
     flags: u32,
     sound: IgniteSound,
+    spend: Spend,
 ) -> InteractionResult {
     let pos = ctx.clicked_pos();
     let state = world.block_state(pos);
     if can_light(state) {
         sound.play(world, pos);
         world.set_block(pos, state.with(LIT, true), flags);
+        spend_held(world, ctx, spend);
         return InteractionResult::Success;
     }
     let fire_pos = pos.relative(ctx.clicked_face());
@@ -78,7 +108,18 @@ fn ignite(
     sound.play(world, fire_pos);
     let fire_state = fire::state_at(world, fire_pos);
     world.set_block(fire_pos, fire_state, flags);
+    spend_held(world, ctx, spend);
     InteractionResult::Success
+}
+
+/// 写完方块再消耗。没有玩家时两个函数都不做事。
+///
+/// Spend after the block is written. Both functions do nothing when there is no player.
+fn spend_held(world: &mut World, ctx: &UseContext, spend: Spend) {
+    match spend {
+        Spend::Hurt => crate::durability::hurt_hand(world, ctx.hand, 1),
+        Spend::Shrink => crate::durability::shrink_hand(ctx.hand, 1),
+    }
 }
 
 /// `CampfireBlock.canLight`、`CandleBlock.canLight`、`CandleCakeBlock.canLight`：

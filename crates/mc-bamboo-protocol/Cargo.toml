@@ -16,3 +16,7 @@ mc-bamboo-data.workspace = true
 mc-bamboo-nbt.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+# 查线程的栈范围，见 `stack_hop`。
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

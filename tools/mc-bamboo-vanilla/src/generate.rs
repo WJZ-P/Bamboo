@@ -10,8 +10,9 @@ use std::{
 use crate::extract::{
     Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
-    ExtractedStack, FieldValue, HeightmapType, Item, Property, PropertyKind, StateProvider,
-    TagGroup, VersionData,
+    ExtractedStack, FieldValue, GameRuleFact, HeightmapType, Item, LevelValueJson,
+    LootConditionJson, Property, PropertyKind, StateProvider, TagGroup, TypedLevelJson,
+    ValueEffectJson, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -43,10 +44,12 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let light = light_file(data)?;
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
+    let item_damage = item_damage_file(data)?;
     let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
     let sounds = sounds_file(data)?;
     let loot = loot_file(data)?;
+    let gamerules = gamerules_file(&data.game_rules)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
@@ -60,6 +63,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "block_classes.rs", &block_classes_file(data))?;
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
+    write_file(output_dir, "item_damage.rs", &item_damage)?;
     write_file(output_dir, "items.rs", &items)?;
     write_file(output_dir, "jukebox_songs.rs", &jukebox_songs_file(data))?;
     write_file(output_dir, "recipes.rs", &recipes)?;
@@ -91,6 +95,9 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "sounds.rs", &sounds)?;
     write_file(output_dir, "loot.rs", &loot)?;
+    if !data.game_rules.is_empty() {
+        write_file(output_dir, "gamerules.rs", &gamerules)?;
+    }
     write_file(output_dir, "tags.rs", &tags)?;
     write_worldgen(data, output_dir)
 }
@@ -534,6 +541,112 @@ fn float_literal(value: f32) -> String {
     }
 }
 
+/// 把 `Extractor.gameRules` 写成 `gamerules.rs`。
+pub fn write_gamerules(rules: &[GameRuleFact], output_dir: &Path) -> Result<(), String> {
+    write_file(output_dir, "gamerules.rs", &gamerules_file(rules)?)
+}
+
+fn gamerules_file(rules: &[GameRuleFact]) -> Result<String, String> {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一条游戏规则。下标是 `minecraft:game_rule` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct GameRuleDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub identifier: &'static str,");
+    let _ = writeln!(out, "    pub category: &'static str,");
+    let _ = writeln!(out, "    pub kind: GameRuleKind,");
+    let _ = writeln!(out, "    pub default_bool: bool,");
+    let _ = writeln!(out, "    pub default_int: i32,");
+    let _ = writeln!(out, "    pub min: i32,");
+    let _ = writeln!(out, "    pub max: i32,");
+    let _ = writeln!(
+        out,
+        "    /// `GameRule.isEnabled(FeatureFlags.DEFAULT_FLAGS)`。"
+    );
+    let _ = writeln!(out, "    pub enabled: bool,");
+    let _ = writeln!(out, "    pub features: &'static [&'static str],");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub enum GameRuleKind {{");
+    let _ = writeln!(out, "    Bool,");
+    let _ = writeln!(out, "    Int,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    for (index, rule) in rules.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "pub const {}: usize = {index};",
+            const_name(&rule.name)?
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "pub static RULES: &[GameRuleDef] = &[");
+    for rule in rules {
+        let (kind, default_bool, default_int, min, max) = match rule.kind.as_str() {
+            "boolean" => (
+                "GameRuleKind::Bool",
+                rule.default_bool
+                    .ok_or_else(|| format!("{} 没有布尔默认值", rule.name))?,
+                0,
+                0,
+                0,
+            ),
+            "integer" => (
+                "GameRuleKind::Int",
+                false,
+                rule.default_int
+                    .ok_or_else(|| format!("{} 没有整数默认值", rule.name))?,
+                rule.min.ok_or_else(|| format!("{} 没有下限", rule.name))?,
+                rule.max.ok_or_else(|| format!("{} 没有上限", rule.name))?,
+            ),
+            other => return Err(format!("{} 的类型 {other} 不认识", rule.name)),
+        };
+        if rule.identifier != format!("minecraft:{}", rule.name) {
+            return Err(format!(
+                "{} 的标识符是 {}，不是 minecraft:{}",
+                rule.name, rule.identifier, rule.name
+            ));
+        }
+        let features = rule
+            .features
+            .iter()
+            .map(|feature| format!("{feature:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "    GameRuleDef {{ name: {:?}, identifier: {:?}, category: {:?}, kind: {kind}, default_bool: {default_bool}, default_int: {default_int}, min: {min}, max: {max}, enabled: {}, features: &[{features}] }},",
+            rule.name, rule.identifier, rule.category, rule.enabled,
+        );
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 短名或 `minecraft:` 全名。没注册的返回 `None`。");
+    let _ = writeln!(out, "pub fn find(name: &str) -> Option<usize> {{");
+    let _ = writeln!(
+        out,
+        "    let name = name.strip_prefix(\"minecraft:\").unwrap_or(name);"
+    );
+    let _ = writeln!(out, "    RULES.iter().position(|rule| rule.name == name)");
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+fn const_name(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return Err(format!("游戏规则名 {name} 不能当成常量"));
+    }
+    Ok(name.to_ascii_uppercase())
+}
+
 fn module_file() -> String {
     "pub mod block_classes;
 pub mod block_maps;
@@ -544,8 +657,10 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
 pub mod entity_types;
+pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;
+pub mod item_damage;
 pub mod items;
 pub mod jukebox_songs;
 pub mod light;
@@ -1331,19 +1446,270 @@ fn block_transformers_file(data: &VersionData) -> Result<String, String> {
             };
             let _ = writeln!(
                 out,
-                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {}, sound: {}, particle: {}, copper_chest: {} }},",
+                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {}, sound: {}, particle: {}, copper_chest: {}, consume_on_use: {}, item_damage_per_use: {} }},",
                 state_provider(&transform.provider, data, &block_tags)?,
                 transform.disallowed_faces,
                 transform.update_from_neighbors,
                 sound,
                 transform.particle,
-                transform.copper_chest
+                transform.copper_chest,
+                transform.consume_on_use,
+                transform.item_damage_per_use
             );
         }
         let _ = writeln!(out, "    ],");
         let _ = writeln!(out, "}};");
     }
     Ok(out)
+}
+
+const ENCHANTMENT_REGISTRY: &str = "minecraft:enchantment";
+
+/// `Enchantment.modifyDurabilityChange` 用的 `minecraft:item_damage` 效果。
+fn item_damage_file(data: &VersionData) -> Result<String, String> {
+    let item_tags = tag_indexes(&data.tags, ITEM_REGISTRY)?;
+    let enchantments = registry_entries(data, ENCHANTMENT_REGISTRY)
+        .ok_or_else(|| format!("没有注册表 {ENCHANTMENT_REGISTRY}"))?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 带 `minecraft:item_damage` 效果的附魔。顺序是附魔名字的字典序，查找按注册表 ID。"
+    );
+    let _ = writeln!(out, "pub static ITEM_DAMAGE: &[ItemDamageEnchantment] = &[");
+    for enchantment in &data.item_damage_enchantments {
+        let id = registry_id(enchantments, &enchantment.name)?;
+        let _ = writeln!(out, "    ItemDamageEnchantment {{");
+        let _ = writeln!(out, "        enchantment: {id},");
+        let _ = writeln!(out, "        effects: &[");
+        for effect in &enchantment.effects {
+            let _ = writeln!(out, "            ItemDamageEffect {{");
+            let _ = writeln!(
+                out,
+                "                effect: {},",
+                value_effect(&effect.effect)?
+            );
+            let requirement = match &effect.requirements {
+                None => "None".to_owned(),
+                Some(condition) => {
+                    format!("Some({})", tool_match(condition, data, &item_tags)?)
+                }
+            };
+            let _ = writeln!(out, "                requirement: {requirement},");
+            let _ = writeln!(out, "            }},");
+        }
+        let _ = writeln!(out, "        ],");
+        let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    let mut header = "use crate::{\n    ItemDamageEffect, ItemDamageEnchantment, LevelBasedValue, ToolMatch, ValueEffect,\n};\nuse crate::tags::item_tags;\n".to_owned();
+    if out.contains("items::") {
+        header.push_str("use crate::items;\n");
+    }
+    header.push('\n');
+    header.push_str(&out);
+    Ok(header)
+}
+
+fn registry_id(entries: &[String], name: &str) -> Result<i32, String> {
+    entries
+        .iter()
+        .position(|entry| entry == name)
+        .map(|id| i32::try_from(id).unwrap_or(i32::MAX))
+        .ok_or_else(|| format!("{name} 不在注册表里"))
+}
+
+fn value_effect(effect: &ValueEffectJson) -> Result<String, String> {
+    Ok(match effect {
+        ValueEffectJson::Add { value } => {
+            format!("ValueEffect::Add({})", level_value(value)?)
+        }
+        ValueEffectJson::Multiply { factor } => {
+            format!("ValueEffect::Multiply({})", level_value(factor)?)
+        }
+        ValueEffectJson::Set { value } => {
+            format!("ValueEffect::Set({})", level_value(value)?)
+        }
+        ValueEffectJson::RemoveBinomial { chance } => format!(
+            "ValueEffect::RemoveBinomial {{ chance: {} }}",
+            level_value(chance)?
+        ),
+        ValueEffectJson::Exponential { base, exponent } => format!(
+            "ValueEffect::Exponential {{ base: {}, exponent: {} }}",
+            level_value(base)?,
+            level_value(exponent)?
+        ),
+        ValueEffectJson::AllOf { effects } => {
+            let effects = effects
+                .iter()
+                .map(value_effect)
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("ValueEffect::AllOf(&[{}])", effects.join(", "))
+        }
+    })
+}
+
+fn level_value(value: &LevelValueJson) -> Result<String, String> {
+    Ok(match value {
+        LevelValueJson::Constant(number) => {
+            format!("LevelBasedValue::Constant({})", rust_f32(*number))
+        }
+        LevelValueJson::Typed(typed) => match typed {
+            TypedLevelJson::Constant { value } => {
+                format!("LevelBasedValue::Constant({})", rust_f32(*value))
+            }
+            TypedLevelJson::Linear {
+                base,
+                per_level_above_first,
+            } => format!(
+                "LevelBasedValue::Linear {{ base: {}, per_level_above_first: {} }}",
+                rust_f32(*base),
+                rust_f32(*per_level_above_first)
+            ),
+            TypedLevelJson::Fraction {
+                numerator,
+                denominator,
+            } => format!(
+                "LevelBasedValue::Fraction {{ numerator: &{}, denominator: &{} }}",
+                level_value(numerator)?,
+                level_value(denominator)?
+            ),
+            TypedLevelJson::Clamped { value, min, max } => format!(
+                "LevelBasedValue::Clamped {{ value: &{}, min: {}, max: {} }}",
+                level_value(value)?,
+                rust_f32(*min),
+                rust_f32(*max)
+            ),
+            TypedLevelJson::LevelsSquared { added } => {
+                format!(
+                    "LevelBasedValue::LevelsSquared {{ added: {} }}",
+                    rust_f32(*added)
+                )
+            }
+            TypedLevelJson::Exponent { base, power } => format!(
+                "LevelBasedValue::Exponent {{ base: &{}, power: &{} }}",
+                level_value(base)?,
+                level_value(power)?
+            ),
+            TypedLevelJson::Lookup { values, fallback } => format!(
+                "LevelBasedValue::Lookup {{ values: &[{}], fallback: &{} }}",
+                values
+                    .iter()
+                    .map(|value| rust_f32(*value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                level_value(fallback)?
+            ),
+        },
+    })
+}
+
+fn rust_f32(value: f32) -> String {
+    if value.is_nan() {
+        return "f32::NAN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "f32::NEG_INFINITY".to_owned()
+        } else {
+            "f32::INFINITY".to_owned()
+        };
+    }
+    let text = format!("{value:?}");
+    if text.contains(['.', 'e', 'E']) {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
+fn tool_match(
+    condition: &LootConditionJson,
+    data: &VersionData,
+    item_tags: &TagIndexes,
+) -> Result<String, String> {
+    Ok(match condition {
+        LootConditionJson::MatchTool { predicate: None } => "ToolMatch::Any".to_owned(),
+        LootConditionJson::MatchTool {
+            predicate: Some(predicate),
+        } => match &predicate.items {
+            None => "ToolMatch::Any".to_owned(),
+            Some(items) => tool_items(items, data, item_tags)?,
+        },
+        LootConditionJson::Inverted { term } => {
+            format!(
+                "ToolMatch::Inverted(&{})",
+                tool_match(term, data, item_tags)?
+            )
+        }
+        LootConditionJson::AllOf { terms } => {
+            format!(
+                "ToolMatch::AllOf(&[{}])",
+                tool_matches(terms, data, item_tags)?
+            )
+        }
+        LootConditionJson::AnyOf { terms } => {
+            format!(
+                "ToolMatch::AnyOf(&[{}])",
+                tool_matches(terms, data, item_tags)?
+            )
+        }
+    })
+}
+
+fn tool_matches(
+    terms: &[LootConditionJson],
+    data: &VersionData,
+    item_tags: &TagIndexes,
+) -> Result<String, String> {
+    terms
+        .iter()
+        .map(|term| tool_match(term, data, item_tags))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|terms| terms.join(", "))
+}
+
+fn tool_items(
+    items: &serde_json::Value,
+    data: &VersionData,
+    item_tags: &TagIndexes,
+) -> Result<String, String> {
+    match items {
+        serde_json::Value::String(name) => Ok(one_tool_item(name, data, item_tags)?),
+        serde_json::Value::Array(entries) => {
+            let mut ids = Vec::new();
+            for entry in entries {
+                let serde_json::Value::String(name) = entry else {
+                    return Err(format!("物品谓词里有不是字符串的条目：{entry}"));
+                };
+                if name.starts_with('#') {
+                    return Err(format!("物品列表里不能再嵌标签：{name}"));
+                }
+                ids.push(item_constant(data, name)?);
+            }
+            Ok(format!("ToolMatch::Items(&[{}])", ids.join(", ")))
+        }
+        other => Err(format!("不认识的物品谓词：{other}")),
+    }
+}
+
+fn one_tool_item(name: &str, data: &VersionData, item_tags: &TagIndexes) -> Result<String, String> {
+    if let Some(tag) = name.strip_prefix('#') {
+        if !item_tags.contains_key(tag) {
+            return Err(format!("没有物品标签 {tag}"));
+        }
+        return Ok(format!("ToolMatch::Tag(item_tags::{})", constant_name(tag)));
+    }
+    Ok(format!(
+        "ToolMatch::Items(&[{}])",
+        item_constant(data, name)?
+    ))
+}
+
+fn item_constant(data: &VersionData, name: &str) -> Result<String, String> {
+    if !data.items.iter().any(|item| item.name == name) {
+        return Err(format!("没有物品 {name}"));
+    }
+    Ok(format!("items::{}", constant_name(name)))
 }
 
 /// 规则多的提供器一条规则一行，斧子有一百多条。

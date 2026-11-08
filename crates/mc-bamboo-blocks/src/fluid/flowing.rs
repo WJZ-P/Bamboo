@@ -145,7 +145,7 @@ fn new_liquid(world: &World, kind: Fluid, pos: BlockPos, state: BlockState) -> F
         }
     }
 
-    if sources >= 2 && kind.can_convert_to_source() {
+    if sources >= 2 && kind.can_convert_to_source(world) {
         let below = world.block_state(pos.below());
         if below.is_solid() || is_source_of(kind, below.fluid()) {
             return kind.source_state();

@@ -1171,13 +1171,14 @@ fn block_state_component(stack: &ItemStack) -> Option<Vec<(String, String)>> {
 #[test]
 fn heights_outside_the_world_are_not_loaded() {
     let (mut server, client) = settled();
-    server.request(
-        &client,
-        PlayRequest::MovePlayer {
-            position: Some(mc_bamboo_core::Vec3::new(8.5, 318.0, 8.5)),
-            rotation: None,
-            on_ground: false,
-        },
+    // 一次飞到世界顶过不了速度检查。测试要的是人已经在那儿，好让挑选落在世界外。
+    //
+    // One packet to the top of the world fails the speed check. The test wants the player
+    // already there, so the pick lands outside the world.
+    crate::player_move::place_player(
+        server.region(),
+        client.id,
+        mc_bamboo_core::Vec3::new(8.5, 318.0, 8.5),
     );
 
     pick(&server, &client, BlockPos::new(8, 320, 8));

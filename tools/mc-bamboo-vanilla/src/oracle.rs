@@ -51,7 +51,7 @@ const LOG_TAIL: usize = 60;
 /// `--show` 的默认值。
 const DEFAULT_SHOW: usize = 3;
 
-const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked]";
+const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value]";
 
 /// 不比较的内容。每一条都有原因，第 4 章要求排除的内容进最后的报告。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -332,6 +332,16 @@ impl Options {
             match arg {
                 "--cases" | "--seed" | "--only" | "--case" => {
                     let value = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend([arg.to_owned(), (*value).to_owned()]);
+                }
+                "--rule" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    let (name, setting) = value.split_once('=').ok_or(USAGE)?;
+                    if name.is_empty() || setting.is_empty() {
+                        return Err(USAGE.to_owned());
+                    }
                     options
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);

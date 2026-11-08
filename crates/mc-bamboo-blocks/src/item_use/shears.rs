@@ -24,6 +24,10 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> Option<InteractionR
         1.0,
     );
     world.set_block_and_update(pos, state.with(AGE_25, MAX_AGE));
+    // `player != null` 时 `hurtAndBreak(1)`，在写方块之后。
+    //
+    // `hurtAndBreak(1)` when `player != null`, after the block write.
+    crate::durability::hurt_hand(world, ctx.hand, 1);
     Some(InteractionResult::Success)
 }
 

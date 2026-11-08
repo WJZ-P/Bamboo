@@ -8,6 +8,7 @@ use std::{
 };
 
 use mc_bamboo_core::Vec3;
+use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
@@ -119,6 +120,7 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         chunk_tracking::send_chunks(&mut self.region);
+        movement::finish_tick(&mut self.region);
         self.region.links.flush();
         ControlFlow::Continue(())
     }
@@ -251,7 +253,15 @@ impl World {
                 position,
                 rotation,
                 on_ground,
-            } => movement::on_move_player(region, player, position, rotation, on_ground),
+                horizontal_collision,
+            } => movement::on_move_player(
+                region,
+                player,
+                position,
+                rotation,
+                on_ground,
+                horizontal_collision,
+            ),
             PlayRequest::ChunkBatchReceived {
                 desired_chunks_per_tick,
             } => chunk_tracking::on_chunk_batch_received(region, player, desired_chunks_per_tick),
@@ -264,10 +274,47 @@ impl World {
                     chat::detect_chat_rate_spam(region, player);
                 }
             }
+            // 聊天命令和建议在上面处理过了，这里只是让匹配穷尽。
+            //
+            // Chat commands and suggestions are handled above. This arm only makes the match exhaustive.
             PlayRequest::ChatCommand { .. } | PlayRequest::CommandSuggestion { .. } => {}
             PlayRequest::ClientCommand { action } => {
-                chat::on_client_command(region, player, action);
+                if action
+                    == mc_bamboo_protocol::packet::play::ClientCommandKind::RequestGameRuleValues
+                {
+                    crate::gamerules::on_request_values(&self.global, &mut self.region, player);
+                } else {
+                    chat::on_client_command(&mut self.region, player, action);
+                }
             }
+            PlayRequest::ChangeGameMode { mode } => self.on_change_game_mode(player, mode),
+            PlayRequest::SetGameRule { entries } => {
+                crate::gamerules::on_set_packet(
+                    &mut self.global,
+                    &mut self.region,
+                    player,
+                    entries,
+                );
+            }
+            PlayRequest::SetCommandBlock {
+                pos,
+                command,
+                mode,
+                track_output,
+                conditional,
+                automatic,
+            } => crate::command_block::on_set(
+                region,
+                player,
+                crate::command_block::CommandBlockEdit {
+                    pos,
+                    command,
+                    mode,
+                    track_output,
+                    conditional,
+                    automatic,
+                },
+            ),
             PlayRequest::PlayerInput { flags } => {
                 entity_sync::on_player_input(region, player, flags);
             }
@@ -356,9 +403,40 @@ impl World {
             PlayRequest::EditBook { slot, pages, title } => {
                 book::on_edit_book(region, player, slot, pages, title);
             }
-            // 这三种连接任务就地处理了，不会发到这里。
+            // 连接任务把这两种转过来。其余 `Other` 它自己丢掉。
+            //
+            // The connection forwards these two. It drops every other `Other` packet.
+            PlayRequest::Other(id) if id == serverbound::CLIENT_TICK_END => {
+                movement::on_client_tick_end(region, player);
+            }
+            PlayRequest::Other(id) if id == serverbound::PLAYER_LOADED => {
+                movement::on_player_loaded(region, player);
+            }
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }
+    }
+
+    /// `handleChangeGameMode`。权限不够时只记日志。
+    ///
+    /// `handleChangeGameMode`. Without permission this only logs.
+    fn on_change_game_mode(&mut self, id: PlayerId, mode: GameMode) {
+        let Some((allowed, name)) = self.region.players.get(&id).map(|player| {
+            (
+                player.permission_level >= mc_bamboo_command::permission::GAMEMASTERS,
+                player.name.clone(),
+            )
+        }) else {
+            return;
+        };
+        if !allowed {
+            warn!(
+                player = %name,
+                ?mode,
+                "tried to change game mode without required permissions"
+            );
+            return;
+        }
+        command::change_own_mode(&mut self.global, &mut self.region, id, mode);
     }
 
     /// 客户端的设置变了。视距由下一次跟踪阶段生效，皮肤外层和主手由实体同步发出去。
