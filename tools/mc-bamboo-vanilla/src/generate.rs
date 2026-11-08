@@ -344,6 +344,24 @@ fn component_registries_file(data: &VersionData) -> Result<String, String> {
     }
     let _ = writeln!(out, "}}\n");
 
+    // 存档编解码器按名字读写注册表条目，这里把上面这些注册表的名字表一起导出。
+    let _ = writeln!(out, "/// 注册表条目名，下标就是网络 ID。存档的 `Holder` 按名字读写。");
+    let _ = writeln!(out, "pub mod registry_names {{");
+    for &(name, registry) in SIZES {
+        if registry == DATA_COMPONENT_TYPE_REGISTRY || registry == CONSUME_EFFECT_TYPE_REGISTRY {
+            continue;
+        }
+        let entries = registry_entries(data, registry)
+            .ok_or_else(|| format!("注册表报告里没有 {registry}"))?;
+        let _ = writeln!(out, "    /// `{registry}`。");
+        let _ = writeln!(out, "    pub const {name}: &[&str] = &[");
+        for entry in entries {
+            let _ = writeln!(out, "        {entry:?},");
+        }
+        let _ = writeln!(out, "    ];");
+    }
+    let _ = writeln!(out, "}}\n");
+
     let component_types = registry_entries(data, DATA_COMPONENT_TYPE_REGISTRY)
         .ok_or_else(|| format!("注册表报告里没有 {DATA_COMPONENT_TYPE_REGISTRY}"))?;
     let _ = writeln!(
