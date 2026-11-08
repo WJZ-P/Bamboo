@@ -2,7 +2,11 @@
 //!
 //! `LightOracle.java` 在 JVM 里铺一片真正的官方区块，按官方流程算好超平坦的光照，再分几个 tick 随机改方块，
 //! 每个 tick 之后报告全部光照段、光照变了的段和随机位置上的光照值。这里边读边在 [`ChunkStore`] 里做同样的改动，
-//! 逐项比较。题目不落盘。
+//! 等排着的光照全部算完再逐项比较。题目不落盘。
+//!
+//! 官方那边任务攒够 1000 个就当场算一轮；这边改方块时只排轮次，改完才一轮轮地算，
+//! 每一轮读它排好那一刻的方块，而且每次只给一点工作量，一轮要停好几次才算完。
+//! 两边一致，说明晚算、分几次算的轮次和当场一口气算完的结果相同。
 //!
 //! 比较的是官方区块包里的那种数据：一段不存光照、存着但没分配数组（带默认值）、还是一整个数组，
 //! 数组按 64 位 FNV-1a 哈希比较。`--detail` 让官方逐段描述，不一致时能看出是哪一段。
@@ -28,6 +32,8 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 const LAYERS: [LightLayer; 2] = [LightLayer::Sky, LightLayer::Block];
 /// `--show` 的默认值。
 const DEFAULT_SHOW: usize = 5;
+/// 每次只给光照这么多工作量，一轮会停在各种地方再接着算。取一个和 1000 对不齐的数。
+const WORK_PER_RUN: usize = 997;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -197,7 +203,7 @@ impl Report {
         Ok(())
     }
 
-    /// 在一个新的超平坦世界里重放一道题的每个 tick。
+    /// 在一个新的超平坦世界里重放一道题的每个 tick，每个 tick 等光照全部算完再比较。
     fn replay(&mut self, index: u32, ticks: &[Tick]) {
         self.scenes += 1;
         let mut store = ChunkStore::flat();
@@ -205,7 +211,9 @@ impl Report {
             for &[x, y, z, state] in &tick.edits {
                 store.set_block(BlockPos::new(x, y, z), state as u32);
             }
-            store.run_light_updates();
+            while store.has_pending_light_updates() {
+                store.run_light_updates(WORK_PER_RUN);
+            }
             let place = format!("scene {index} tick {number}");
             self.compare_columns(&store, tick, &place);
             self.compare_changes(&mut store, tick, &place);

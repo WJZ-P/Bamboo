@@ -116,7 +116,7 @@ pub(crate) const PULL_LIGHT_IN_ENTRY: u64 = entry::decrease_all_directions(1);
 pub(crate) struct LightEngine {
     pub(crate) storage: LightStorage,
     /// `blockNodesToCheck`。官方是哈希集合，这里按加入的顺序检查，结果和顺序无关。
-    nodes_to_check: Vec<BlockPos>,
+    nodes_to_check: VecDeque<BlockPos>,
     checking: HashSet<BlockPos>,
     decrease: VecDeque<(BlockPos, u64)>,
     increase: VecDeque<(BlockPos, u64)>,
@@ -126,7 +126,7 @@ impl LightEngine {
     pub(crate) fn new(storage: LightStorage) -> Self {
         Self {
             storage,
-            nodes_to_check: Vec::new(),
+            nodes_to_check: VecDeque::new(),
             checking: HashSet::new(),
             decrease: VecDeque::new(),
             increase: VecDeque::new(),
@@ -140,7 +140,7 @@ impl LightEngine {
     /// `checkBlock`：这一格的光照性质变了，下一轮更新时检查它。
     pub(crate) fn check_block(&mut self, pos: BlockPos) {
         if self.checking.insert(pos) {
-            self.nodes_to_check.push(pos);
+            self.nodes_to_check.push_back(pos);
         }
     }
 
@@ -152,15 +152,41 @@ impl LightEngine {
             || !self.increase.is_empty()
     }
 
-    /// `runLightUpdates`：检查记下的格子，传播到稳定，再丢掉不再存光照的段。
-    pub(crate) fn run_light_updates(&mut self, chunks: Chunks<'_>) {
-        self.checking.clear();
-        for node in std::mem::take(&mut self.nodes_to_check) {
+    /// `runLightUpdates`，可以分几次做完：先检查记下的格子，再传播变暗，最后传播变亮。
+    ///
+    /// 每处理一项 `work` 加一，到了 `budget` 就停，下次从停下的地方接着做。前一步的队列空了才做下一步，
+    /// 中间也没有别人改这一层的数据，所以和一口气做完的结果相同。全部做完以后丢掉不再存光照的段，返回 `true`。
+    pub(crate) fn run_light_updates(
+        &mut self,
+        chunks: Chunks<'_>,
+        work: &mut usize,
+        budget: usize,
+    ) -> bool {
+        while *work < budget
+            && let Some(node) = self.nodes_to_check.pop_front()
+        {
+            *work += 1;
             self.check_node(chunks, node);
         }
-        self.propagate_decreases(chunks);
-        self.propagate_increases(chunks);
+        while *work < budget
+            && let Some((node, data)) = self.decrease.pop_front()
+        {
+            *work += 1;
+            self.propagate_decrease(chunks, node, data);
+        }
+        while *work < budget
+            && let Some((node, data)) = self.increase.pop_front()
+        {
+            *work += 1;
+            self.propagate_increase(chunks, node, data);
+        }
+        if !self.nodes_to_check.is_empty() || !self.decrease.is_empty() || !self.increase.is_empty()
+        {
+            return false;
+        }
+        self.checking.clear();
         self.storage.mark_new_inconsistencies();
+        true
     }
 
     /// `propagateLightSources`：一个刚生成的区块第一次算光照。
@@ -186,30 +212,26 @@ impl LightEngine {
         self.increase.push_back((node, data));
     }
 
-    fn propagate_decreases(&mut self, chunks: Chunks<'_>) {
-        while let Some((node, data)) = self.decrease.pop_front() {
-            match self.layer() {
-                LightLayer::Sky => self.propagate_sky_decrease(node, data),
-                LightLayer::Block => self.propagate_block_decrease(chunks, node, data),
-            }
+    fn propagate_decrease(&mut self, chunks: Chunks<'_>, node: BlockPos, data: u64) {
+        match self.layer() {
+            LightLayer::Sky => self.propagate_sky_decrease(node, data),
+            LightLayer::Block => self.propagate_block_decrease(chunks, node, data),
         }
     }
 
     /// 一项增加只在这一格还是入队时的等级时才传播，后来变得更亮的话会有另一项。
     /// 光源的那一项例外：它先把这一格点亮到自己的等级。
-    fn propagate_increases(&mut self, chunks: Chunks<'_>) {
-        while let Some((node, data)) = self.increase.pop_front() {
-            let mut level = self.storage.stored_level(node);
-            let target = entry::from_level(data);
-            if entry::is_increase_from_emission(data) && level < target {
-                self.storage.set_stored_level(node, target);
-                level = target;
-            }
-            if level == target {
-                match self.layer() {
-                    LightLayer::Sky => self.propagate_sky_increase(chunks, node, data, level),
-                    LightLayer::Block => self.propagate_block_increase(chunks, node, data, level),
-                }
+    fn propagate_increase(&mut self, chunks: Chunks<'_>, node: BlockPos, data: u64) {
+        let mut level = self.storage.stored_level(node);
+        let target = entry::from_level(data);
+        if entry::is_increase_from_emission(data) && level < target {
+            self.storage.set_stored_level(node, target);
+            level = target;
+        }
+        if level == target {
+            match self.layer() {
+                LightLayer::Sky => self.propagate_sky_increase(chunks, node, data, level),
+                LightLayer::Block => self.propagate_block_increase(chunks, node, data, level),
             }
         }
     }

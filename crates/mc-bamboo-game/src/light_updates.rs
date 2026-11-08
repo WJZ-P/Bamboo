@@ -1,4 +1,4 @@
-//! 光照的网络一侧：在两个 tick 之间把光照算完，把变了的段发给需要的玩家。
+//! 光照的网络一侧：在两个 tick 之间算光照，把变了的段发给需要的玩家。
 //!
 //! 官方的 `ChunkHolder.broadcastChanges` 先发这个区块的 `light_update`，再发它的方块变化。
 //! `light_update` 只发给这个区块在跟踪范围边上的玩家：范围里面的区块，客户端收到方块变化后自己重算光照；
@@ -17,12 +17,21 @@ use crate::{
     region::Region,
 };
 
-/// tick 第 1 阶段之后：算完排着的光照更新，记下变了的段等广播阶段发出去。
+/// 每 tick 给光照的工作量：任务数加上传播的步数。官方在光照线程上算，主线程从不等它；
+/// 这里在世界线程上算，做不完的留到下一 tick：一次改很多方块时光照晚几 tick 出来，tick 不会被拖住。
+/// release 构建每毫秒大约做 8000 步，8 万步约 10 ms。按步数而不是按时间算，同样的输入每次结果都一样。
+const LIGHT_BUDGET: usize = 80_000;
+
+/// tick 第 1 阶段之后：算排着的光照，记下变了的段等广播阶段发出去。
 ///
-/// 官方在两个 tick 之间处理完玩家的包以后才排光照，所以这一 tick 处理过的请求在这里算进去；
-/// 计划刻改的方块要等到下一 tick 开头才算，和官方一样晚一 tick 发光照。
+/// 官方在两个 tick 之间处理完玩家的包以后才排光照，所以这一 tick 处理过的请求在这里排成一轮；
+/// 计划刻改的方块要等到下一 tick 开头才排，和官方一样晚一 tick 发光照。
+///
+/// 做到 [`LIGHT_BUDGET`] 就停，一轮可以停在半路。一轮算完才换上新的光照，
+/// 方块规则读到的总是上一轮算完的结果。一轮读的是它排好那一刻的方块，那些方块最晚在那一 tick 广播出去，
+/// 所以发给客户端的光照不会比它手上的方块新。
 pub(crate) fn run_light_updates(region: &mut Region) {
-    region.chunks.run_light_updates();
+    region.chunks.run_light_updates(LIGHT_BUDGET);
     merge_changes(
         &mut region.light_changes,
         region.chunks.take_light_changes(),
@@ -137,6 +146,65 @@ mod tests {
         let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
         assert!(ids.contains(&clientbound::BLOCK_UPDATE));
         assert!(!ids.contains(&clientbound::LIGHT_UPDATE));
+    }
+
+    /// 边上那个区块里一块 16×5×16 的石头，1280 个任务，至少要算两轮。
+    fn stone_box() -> Vec<BlockPos> {
+        let mut positions = Vec::new();
+        for x in 48..64 {
+            for y in -55..=-51 {
+                for z in 0..16 {
+                    positions.push(BlockPos::new(x, y, z));
+                }
+            }
+        }
+        positions
+    }
+
+    #[test]
+    fn light_that_takes_several_rounds_still_arrives() {
+        let (mut server, client) = settled();
+        let stones = stone_box();
+        for &pos in &stones {
+            change_block(&mut server, pos, blocks::STONE);
+        }
+
+        // 一 tick 能算几轮看机器快慢，所以只看最后的结果。
+        let mut lit = Vec::new();
+        for _ in 0..100 {
+            server.tick();
+            let frames = client.take_frames();
+            let updates = frames
+                .iter()
+                .filter(|frame| frame.id == clientbound::LIGHT_UPDATE);
+            lit.extend(updates.map(light_update_chunk));
+            if !server.region().chunks.has_pending_light_updates() {
+                break;
+            }
+        }
+        assert!(!server.region().chunks.has_pending_light_updates());
+        assert!(lit.contains(&BORDER));
+
+        // 分几 tick 算完的光照和一口气算完的一样。
+        let mut reference = ChunkStore::flat();
+        for &pos in &stones {
+            reference.set_block(pos, blocks::STONE);
+        }
+        reference.finish_light_updates();
+        let chunks = &server.region().chunks;
+        for x in 32..80 {
+            for y in -61..-45 {
+                for z in -16..32 {
+                    let pos = BlockPos::new(x, y, z);
+                    for layer in [LightLayer::Sky, LightLayer::Block] {
+                        assert_eq!(
+                            chunks.light_value(layer, pos),
+                            reference.light_value(layer, pos)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

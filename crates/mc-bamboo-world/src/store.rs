@@ -1,7 +1,7 @@
 //! 区块表：所有区块读写的唯一入口。
 //!
 //! 超平坦世界的区块内容都相同，所以只存一个模板，第一次改动一个区块时才给它一份自己的拷贝。
-//! 光照也跟着区块走：改方块时记下光照要检查的地方，[`run_light_updates`](ChunkStore::run_light_updates) 时一起算。
+//! 光照也跟着区块走：改方块时记下光照要检查的地方，[`run_light_updates`](ChunkStore::run_light_updates) 时一轮轮地算。
 //! 以后加 ticket 和卸载时，也只需要改这一个地方。
 
 use std::collections::{BTreeMap, HashMap};
@@ -13,7 +13,7 @@ use crate::{
     MIN_Y, WORLD_HEIGHT,
     chunk::{Chunk, Section},
     flat,
-    light::{Chunks, LevelLight, LightChanges, SectionPos, has_different_light_properties},
+    light::{Chunks, LevelLight, LightChanges, SectionPos, write_block},
 };
 
 /// 世界里的全部区块。
@@ -87,7 +87,7 @@ impl ChunkStore {
     /// 设置方块状态，返回方块是否真的变了。高度超出世界时什么也不做。
     ///
     /// 和官方的 `LevelChunk.setBlockState` 一样：区块段变空或者变满时登记一下，
-    /// 光照性质变了时更新这一列的天空光源，再记下这一格要检查。
+    /// 光照性质变了时更新这一列的天空光源，再记下这一格要检查。光照要等 [`run_light_updates`](Self::run_light_updates) 才算。
     pub fn set_block(&mut self, pos: BlockPos, state: u32) -> bool {
         let Some(previous) = self.block(pos) else {
             return false;
@@ -96,26 +96,22 @@ impl ChunkStore {
         if previous == state || (was_empty && is_air(state)) {
             return false;
         }
-        let (x, z) = (local(pos.x), local(pos.z));
+        let current = self.edited.get(&pos.chunk()).unwrap_or(&self.template);
+        self.light.block_changing(current, pos, state);
         let template = &self.template;
         let chunk = self
             .edited
             .entry(pos.chunk())
             .or_insert_with(|| template.clone());
-        chunk.set_block(x, pos.y, z, state);
+        let light_changed = write_block(chunk, pos, state);
         let is_empty = chunk.is_section_empty(pos.y);
-        let light_changed = has_different_light_properties(previous, state);
-        if light_changed {
-            chunk.update_sky_light_sources(x, pos.y, z);
-        }
 
-        let chunks = Chunks::new(&self.template, &self.edited);
         if was_empty != is_empty {
             self.light
-                .update_section_status(chunks, SectionPos::of(pos), is_empty);
+                .update_section_status(SectionPos::of(pos), is_empty);
         }
         if light_changed {
-            self.light.check_block(chunks, pos);
+            self.light.check_block(pos);
         }
         true
     }
@@ -167,10 +163,23 @@ impl ChunkStore {
         })
     }
 
-    /// 把攒着的光照更新算完。官方在两个 tick 之间做这件事。
-    pub fn run_light_updates(&mut self) {
+    /// 算攒着的光照，官方的光照线程在两个 tick 之间做这件事：攒着的任务排成一轮，再一轮轮地算。
+    ///
+    /// 工作量（任务数加上传播的步数）到了 `budget` 就停，哪怕一轮算到一半，下次接着算。
+    /// 一轮算完才换上新的光照，[`light_value`](Self::light_value) 读到的总是上一轮算完的结果。返回这次的工作量。
+    pub fn run_light_updates(&mut self, budget: usize) -> usize {
         self.light
-            .run_updates(Chunks::new(&self.template, &self.edited));
+            .run_updates(Chunks::new(&self.template, &self.edited), budget)
+    }
+
+    /// 把攒着的光照全部算完。
+    pub fn finish_light_updates(&mut self) {
+        self.run_light_updates(usize::MAX);
+    }
+
+    /// 还有没算完的光照。
+    pub fn has_pending_light_updates(&self) -> bool {
+        self.light.has_pending_updates()
     }
 
     /// 上次取走以后光照变了的区块和段，发 `light_update` 用。
