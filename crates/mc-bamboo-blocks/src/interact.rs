@@ -234,6 +234,11 @@ pub fn destroy_block(
 /// 一刻里的世界，`now` 是这一刻的 `gameTime`。
 ///
 /// 和官方 `ServerLevel.tick` 一样按顺序跑：到期的方块刻、到期的流体刻、方块事件、方块实体。
+/// 实体刻不在这里。官方的方块 oracle 不 tick 实体，游戏循环另外调 [`run_entity_tick`]。
+///
+/// Scheduled block ticks, fluid ticks, block events, then block entities, matching
+/// that part of `ServerLevel.tick`. Entity ticks are separate: the block oracle does
+/// not tick entities, and the game loop calls [`run_entity_tick`] on its own.
 pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
     ticks.collect_due(now);
     let mut world = World::in_world_tick(level, ticks);
@@ -255,6 +260,17 @@ pub fn run_action_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now
     let mut world = World::new(level, ticks);
     run_block_ticks(&mut world);
     outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `EntityTickList.forEach`：世界里的每个实体各走一个 tick。tick 期间生成的实体
+/// 下一 tick 才开始动。
+///
+/// `EntityTickList.forEach`: each live entity ticks once. Entities spawned during
+/// the tick wait until the next one.
+pub fn run_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::new(level, ticks);
+    world.tick_entities();
+    finish(world, InteractionResult::Pass)
 }
 
 /// 到期的方块计划刻，`ServerLevel.tick` 和 tick 题的动作都用这一段。

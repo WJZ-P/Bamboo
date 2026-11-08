@@ -6,6 +6,7 @@ use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockState, Combined, Container, HopperEntity, Level,
     LevelRandom, RedstoneMemory, ShulkerSlots, Slots,
     container::redstone_signal,
+    entity::Entities,
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
@@ -38,6 +39,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_entities: &'a mut BlockEntities,
     pub(crate) block_events: &'a mut BlockEvents,
     pub(crate) containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
+    pub(crate) entities: &'a mut Entities,
 }
 
 impl Level for RegionLevel<'_> {
@@ -138,6 +140,14 @@ impl Level for RegionLevel<'_> {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        self.entities
     }
 
     /// `getBlockContainer`：方块是容器时给它建一张槽位表。双箱按 `CompoundContainer`

@@ -9,8 +9,9 @@ use std::{
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Combined, Container,
     Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
-    ShulkerSlots, Slots, TickPriority, destroy_block, random_tick, redstone_signal,
-    run_action_block_ticks, run_scheduled_ticks,
+    ShulkerSlots, Slots, TickPriority, destroy_block,
+    entity::Entities,
+    random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
     state::{
         CHEST_TYPE, ChestType, FACING, HAS_RECORD, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED,
@@ -81,6 +82,11 @@ struct OracleLevel {
     /// `CompoundContainer` 拼起来。末影箱的槽位在玩家身上，不是容器，不在这里。
     containers: BTreeMap<BlockPos, Vec<ItemStack>>,
     entities: Vec<Aabb>,
+    /// 下落方块和 TNT。方块 oracle 不 tick 它们，只是让 `addFreshEntity` 有地方放。
+    ///
+    /// Falling blocks and primed TNT. The block oracle does not tick them; the store
+    /// only gives `addFreshEntity` somewhere to land.
+    world_entities: Entities,
     min_y: i32,
     max_y: i32,
     random: LevelRandom,
@@ -223,6 +229,7 @@ impl OracleLevel {
             blocks: cells.into_iter().collect(),
             containers,
             entities: entity_boxes(&case.action),
+            world_entities: Entities::default(),
             min_y: header.min_y,
             max_y: header.max_y,
             random: LevelRandom::new(case.seed),
@@ -434,6 +441,14 @@ impl Level for OracleLevel {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        &self.world_entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.world_entities
     }
 
     fn random(&self) -> &LevelRandom {
@@ -876,6 +891,7 @@ mod tests {
             blocks: HashMap::new(),
             containers: BTreeMap::new(),
             entities: vec![player],
+            world_entities: Entities::default(),
             min_y: -64,
             max_y: 319,
             random: LevelRandom::new(0),

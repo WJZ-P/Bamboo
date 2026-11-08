@@ -19,9 +19,9 @@ pub use recipe::{
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
-    item_components, items, jukebox_songs, light, loot, packets, recipes, registries, shapes,
-    states, tags, version, worldgen,
+    block_maps, block_transformers, blocks, component_enums, component_registries, entity_types,
+    heightmaps, item_components, items, jukebox_songs, light, loot, packets, recipes, registries,
+    shapes, states, tags, version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -198,7 +198,7 @@ pub struct BlockOffset {
 impl Eq for BlockOffset {}
 
 /// 一个流体状态，`FluidState` 的事实。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FluidFacts {
     /// 流体注册表 ID，见 [`registries::fluid`]。
     pub fluid: i32,
@@ -209,7 +209,12 @@ pub struct FluidFacts {
     pub falling: bool,
     /// `createLegacyBlock` 的状态 ID。
     pub legacy_block: u32,
+    /// `FluidState.getExplosionResistance`：爆炸射线穿过这个流体时消耗的强度。
+    pub explosion_resistance: f32,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for FluidFacts {}
 
 /// 活塞推动时的反应，官方 `PushReaction`，顺序和官方一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -265,6 +270,18 @@ pub struct Block {
     pub destroy_time: f32,
     /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
     pub requires_correct_tool_for_drops: bool,
+    /// `Block.getSpeedFactor`：实体在上面移动时水平速度乘这个系数。
+    ///
+    /// `Block.getSpeedFactor`: horizontal speed is multiplied by this while the entity is on the block.
+    pub speed_factor: f32,
+    /// `Block.getBounceRestitution`：实体撞在上面时竖直方向保留多少速度。
+    ///
+    /// `Block.getBounceRestitution`: how much vertical speed remains after a bounce.
+    pub bounce_restitution: f32,
+    /// `Block.getExplosionResistance`：爆炸射线穿过这个方块时消耗的强度。
+    ///
+    /// `Block.getExplosionResistance`: how much blast power a ray loses in this block.
+    pub explosion_resistance: f32,
 }
 
 // 表里的浮点数都来自官方的常量，没有 NaN。
@@ -588,6 +605,20 @@ mod tests {
                 version: "26.3",
             }]
         );
+    }
+
+    #[test]
+    fn entity_types_are_indexed_by_registry_id() {
+        assert_eq!(
+            entity_types::FACTS.len(),
+            registries::entity_type::TOTAL as usize
+        );
+        let falling_block = &entity_types::FACTS[registries::entity_type::FALLING_BLOCK as usize];
+        assert_eq!(falling_block.name, "minecraft:falling_block");
+        assert_eq!(falling_block.update_interval, 20);
+        let tnt = &entity_types::FACTS[registries::entity_type::TNT as usize];
+        assert_eq!(tnt.name, "minecraft:tnt");
+        assert_eq!(tnt.update_interval, 10);
     }
 
     #[test]

@@ -9,7 +9,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory};
+use mc_bamboo_blocks::{
+    BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory, entity::Entities,
+};
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::components::ComponentPatch;
@@ -23,6 +25,7 @@ use crate::{
     chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
     container::ContainerEntry,
+    entity_tracking::EntityTracking,
     global::GameTime,
     inbound::{JoinRequest, PlayerId},
     interaction::{BlockChanges, level::RegionLevel},
@@ -126,6 +129,14 @@ pub(crate) struct Region {
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 下落的方块和点燃的 TNT。世界线程独占，见 `docs/folia.md`。
+    ///
+    /// Falling blocks and primed TNT. The world thread owns them; see `docs/folia.md`.
+    pub(crate) entities: Entities,
+    /// 这些实体和玩家之间的配对。
+    ///
+    /// Pairing between those entities and players.
+    pub(crate) entity_tracking: EntityTracking,
     /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
     redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
@@ -192,6 +203,8 @@ impl Region {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
+            entities: Entities::default(),
+            entity_tracking: EntityTracking::default(),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
@@ -216,6 +229,7 @@ impl Region {
             block_entities: &mut self.block_entities,
             block_events: &mut self.block_events,
             containers: &mut self.containers,
+            entities: &mut self.entities,
         };
         (level, &mut self.block_ticks)
     }

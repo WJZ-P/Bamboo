@@ -66,7 +66,6 @@ pub enum Rule {
     ItemUseOn,
     CanDestroyBlock,
     RandomDelay,
-    FallingTick,
     CommandTick,
     TimerTick,
     EntityTick,
@@ -78,7 +77,7 @@ pub enum Rule {
 }
 
 impl Rule {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::AnalogInput,
         Self::EntityRandom,
         Self::RandomLoop,
@@ -89,7 +88,6 @@ impl Rule {
         Self::ItemUseOn,
         Self::CanDestroyBlock,
         Self::RandomDelay,
-        Self::FallingTick,
         Self::CommandTick,
         Self::TimerTick,
         Self::EntityTick,
@@ -112,7 +110,6 @@ impl Rule {
             Self::ItemUseOn => "item useOn",
             Self::CanDestroyBlock => "canDestroyBlock",
             Self::RandomDelay => "random delay",
-            Self::FallingTick => "falling tick",
             Self::CommandTick => "command tick",
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
@@ -157,7 +154,6 @@ impl Rule {
             Self::RandomDelay => {
                 "tick delay: the player's random source picked it, position and type are compared"
             }
-            Self::FallingTick => "tick: blocks do not fall (chapter 1)",
             Self::CommandTick => "tick: command blocks run commands, out of scope",
             Self::TimerTick => {
                 "tick: growth, hatching and time of day timers are out of scope (eggs, eyeblossoms)"
@@ -220,8 +216,6 @@ const OUT_OF_SCOPE_RANDOM_TICKS: &[(BlockAncestor, Rule)] = &[
 /// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
 /// `settle` 或 flow 题往后跑时执行它们的话整题排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
-    (BlockAncestor::FallingBlock, Rule::FallingTick),
-    (BlockAncestor::BrushableBlock, Rule::FallingTick),
     (BlockAncestor::CommandBlock, Rule::CommandTick),
     (BlockAncestor::FrogspawnBlock, Rule::TimerTick),
     (BlockAncestor::SnifferEggBlock, Rule::TimerTick),
@@ -598,11 +592,11 @@ impl Session {
                 return Ok(());
             }
         };
-        if left_to_the_item(case, &replayed) {
+        let mismatch = compare(case, &replayed, &self.names, &mut self.report)?;
+        if left_to_the_item(case, &replayed, &mismatch) {
             self.report.excluded(block, kind, Rule::ItemUseOn);
             return Ok(());
         }
-        let mismatch = compare(case, &replayed, &self.names, &mut self.report)?;
         if mismatch.is_empty() {
             self.report.passed(block, case);
         } else {
@@ -615,15 +609,31 @@ impl Session {
 }
 
 /// 官方的方块没有吃掉这次点击，结果来自还没移植的非方块物品的 `useOn`。
-/// 我们这边也要什么都没做才算：方块多吃了点击，或者动了世界，要照常比较，这是真的不一致。
-fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
+/// 这时官方可以多做事（物品自己的效果），我们做不到；但我们做的每一件事官方都得做了、而且做得一样：
+/// 方块多吃了点击、改了官方没改的格子、或者改得不一样，照常算失败。两边都有、而且一样的变化
+/// （比如场景里的漏斗在之后几刻搬了东西）不妨碍排除。
+///
+/// The official block passed the click and the result came from a non-block item whose `useOn` is
+/// not ported. Vanilla may do more (the item's own effect), which Bamboo cannot; but everything
+/// Bamboo did must also have happened in vanilla, the same way. A block that consumed the click, or a
+/// cell Bamboo changed that vanilla left alone or changed differently, still counts as a failure.
+/// Changes both sides made identically (say, a hopper in the scene moving items afterwards) do not
+/// prevent the exclusion.
+fn left_to_the_item(case: &Case, replayed: &Replayed, mismatch: &Mismatch) -> bool {
+    let changes_also_official = replayed.changes.iter().all(|(&pos, &state)| {
+        case.outcome
+            .changes
+            .iter()
+            .any(|cell| cell.pos() == pos && cell.state() == state)
+    });
     case.action.item_use_on
         && case.outcome.item_reached
         && unported_item_use_on(&case.action.item_class).is_some()
         && replayed.result == "pass"
-        && replayed.changes.is_empty()
-        && replayed.destroyed.is_empty()
-        && replayed.ticks.is_empty()
+        && changes_also_official
+        && (replayed.destroyed.is_empty() || !mismatch.destroyed)
+        && (replayed.ticks.is_empty() || !mismatch.ticks)
+        && mismatch.panic.is_none()
 }
 
 /// 不用重放就知道不比较的题。
@@ -803,10 +813,11 @@ fn transfers_with_unmodeled_container(case: &Case) -> bool {
 /// combined container items change. A hopper only moves the same items, so the totals stay
 /// equal and that is not a craft. `CrafterBlock.dispenseFrom` and `serverTick` are out of scope.
 fn crafter_crafts(case: &Case) -> bool {
-    if !crafter_ran(case) {
-        return false;
-    }
-    crafting_turned_on(case) || (crafter_slots_changed(case) && container_items_changed(case))
+    // `crafting` 只在合成成功时才会被设上，不管这一刻是题目本身还是之后几刻里跑的。
+    // `crafting` only turns on after a successful craft, whether the crafter ticked as the
+    // action itself or during the ticks that follow it.
+    crafting_turned_on(case)
+        || (crafter_ran(case) && crafter_slots_changed(case) && container_items_changed(case))
 }
 
 /// 动作本身是合成器的计划刻，或者 `settle` 里跑过它。
@@ -1177,9 +1188,13 @@ mod tests {
     fn a_case_that_settled_an_out_of_scope_tick_is_not_compared() {
         let stone = blocks::STONE;
         let scene = format!("[[0,64,0,{stone}]]");
-        // 官方的沙子落下去了，我们这边不会落，这一题只能排除。
-        let fell = answer_after_ticks("success", "[]", r#""minecraft:sand""#);
-        assert_eq!(verdict_of(&place_stone(&scene, &fell)), Ok(()));
+        // 官方的命令方块在 settle 里跑了计划刻，我们不跑，这一题只能排除。
+        // 沙子以前也走这条排除，下落已经做了，不再用它当例子。
+        //
+        // A command block that ticked during settle is still out of scope, so the case is excluded.
+        // Sand used to take this path; falling is implemented, so it is no longer the example.
+        let command = answer_after_ticks("success", "[]", r#""minecraft:command_block""#);
+        assert_eq!(verdict_of(&place_stone(&scene, &command)), Ok(()));
         let lamp = answer_after_ticks("success", "[]", r#""minecraft:redstone_lamp""#);
         assert!(verdict_of(&place_stone(&scene, &lamp)).is_err());
     }
@@ -1289,7 +1304,8 @@ mod tests {
         let java_args = options.java_args();
         assert_eq!(java_args[..4], options.forwarded);
         assert_eq!(java_args[4], "--untick");
-        assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
+        assert!(java_args[5].split(',').any(|class| class == "CommandBlock"));
+        assert!(!java_args[5].split(',').any(|class| class == "FallingBlock"));
         assert_eq!(java_args[6], "--unrandom");
         assert!(
             java_args[7]
@@ -1332,9 +1348,10 @@ mod tests {
         // 世界的随机源和官方逐位相同，不再有这种排除。
         assert_eq!(Rule::of_skip("random:KelpBlock.getStateForPlacement"), None);
         assert_eq!(Rule::of_skip("explosion:x"), Some(Rule::Explosion));
+        assert_eq!(Rule::of_skip("untick:FallingBlock"), None);
         assert_eq!(
-            Rule::of_skip("untick:FallingBlock"),
-            Some(Rule::FallingTick)
+            Rule::of_skip("untick:CommandBlock"),
+            Some(Rule::CommandTick)
         );
         assert_eq!(Rule::of_skip("untick:StairBlock"), None);
         assert_eq!(
@@ -1369,7 +1386,7 @@ mod tests {
     #[test]
     fn out_of_scope_ticks_cover_subclasses() {
         let sand = mc_bamboo_data::block_of_state(blocks::SAND).expect("沙子存在");
-        assert_eq!(tick_exclusion(sand), Some(Rule::FallingTick));
+        assert_eq!(tick_exclusion(sand), None);
         let chain = mc_bamboo_data::block_of_state(blocks::CHAIN_COMMAND_BLOCK).expect("存在");
         assert_eq!(tick_exclusion(chain), Some(Rule::CommandTick));
         let repeater = mc_bamboo_data::block_of_state(blocks::REPEATER).expect("中继器存在");

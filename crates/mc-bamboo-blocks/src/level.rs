@@ -11,6 +11,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
     container::Container,
+    entity::Entities,
     hopper::HopperEntity,
     random::LevelRandom,
     shape::Aabb,
@@ -80,6 +81,16 @@ pub trait Level {
 
     /// 见 [`Level::redstone`]。
     fn redstone_mut(&mut self) -> &mut RedstoneMemory;
+
+    /// 这个世界里的实体。实体由世界线程拥有，见 `docs/folia.md`。
+    ///
+    /// Entities in this world. The world thread owns them; see `docs/folia.md`.
+    fn entities(&self) -> &Entities;
+
+    /// 见 [`Level::entities`]。
+    ///
+    /// See [`Level::entities`].
+    fn entities_mut(&mut self) -> &mut Entities;
 
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///

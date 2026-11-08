@@ -75,6 +75,7 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
@@ -216,6 +217,7 @@ public final class Extractor {
             root.add("blockStates", blockStates());
             root.add("blocks", blocks());
             root.add("items", items());
+            root.add("entityTypes", entityTypes());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
@@ -645,6 +647,11 @@ public final class Extractor {
             object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
             object.addProperty("lootTable", block.getLootTable().map(key -> key.identifier().toString()).orElse(null));
+            // 实体移动用的两个系数，见 `Block.getSpeedFactor`、`Block.getBounceRestitution`。
+            object.addProperty("speedFactor", block.getSpeedFactor());
+            object.addProperty("bounceRestitution", block.getBounceRestitution());
+            // 爆炸射线消耗用的抗性，见 `Block.getExplosionResistance`。
+            object.addProperty("explosionResistance", block.getExplosionResistance());
             addOffset(object, block);
             blocks.add(object);
         }
@@ -785,9 +792,28 @@ public final class Extractor {
                 }
             }
         }
+        // 下面三个方法在 `Block`/`BlockBehaviour` 上，上面按类往上找时停在了 `Block.class` 之前。
+        // 实体运动、爆炸和落地要用它们，子类覆盖过的同名结果已经在上面导出了。
+        addNonDefaultFloat(fields, block, "getExplosionResistance", 0.0F);
+        addNonDefaultFloat(fields, block, "getSpeedFactor", 1.0F);
+        addNonDefaultFloat(fields, block, "getBounceRestitution", 0.0F);
         JsonArray result = new JsonArray();
         new TreeMap<>(fields).values().forEach(result::add);
         return result;
+    }
+
+    /** 只导出和默认值不同的结果。绝大多数方块都是默认值，全写进去只会让生成文件变大。 */
+    private static void addNonDefaultFloat(Map<String, JsonObject> fields, Block block, String name, float expected)
+            throws ReflectiveOperationException {
+        if (fields.containsKey(name + "()")) {
+            return;
+        }
+        Method method = Block.class.getDeclaredMethod(name);
+        method.setAccessible(true);
+        float value = (float) method.invoke(block);
+        if (value != expected) {
+            addField(fields, name + "()", value);
+        }
     }
 
     private static boolean isFactMethod(Method method) {
@@ -935,6 +961,23 @@ public final class Extractor {
             items.add(object);
         }
         return items;
+    }
+
+    /** 按注册表 ID 排列的实体类型。跟踪范围和更新间隔是 `ChunkMap.addEntity` 用的值。 */
+    private static JsonArray entityTypes() {
+        JsonArray types = new JsonArray();
+        for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
+            JsonObject object = new JsonObject();
+            object.addProperty("name", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+            object.addProperty("clientTrackingRange", type.clientTrackingRange());
+            // 官方的 `Integer.MAX_VALUE` 表示 `UpdateInterval.NEVER`，这里写成 -1。
+            object.addProperty("updateInterval", type.hasUpdateInterval() ? type.updateInterval() : -1);
+            object.addProperty("trackDeltas", type.trackDeltas());
+            object.addProperty("width", type.getDimensions().width());
+            object.addProperty("height", type.getDimensions().height());
+            types.add(object);
+        }
+        return types;
     }
 
     /** 官方数据包的全部配方，按注册表的顺序。`getRecipeFor` 取第一条匹配的，先后由这个顺序决定。 */
@@ -1614,6 +1657,8 @@ public final class Extractor {
                 object.addProperty("amount", added.getAmount());
                 object.addProperty("falling", added.hasProperty(FlowingFluid.FALLING) && added.getValue(FlowingFluid.FALLING));
                 object.addProperty("legacyBlock", Block.BLOCK_STATE_REGISTRY.getId(added.createLegacyBlock()));
+                // 爆炸射线里取方块和流体抗性的较大者，见 `FluidState.getExplosionResistance`。
+                object.addProperty("explosionResistance", added.getExplosionResistance());
                 fluidStates.add(object);
                 return fluidStates.size() - 1;
             });

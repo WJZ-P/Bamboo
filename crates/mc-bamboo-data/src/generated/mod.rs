@@ -6,6 +6,7 @@ pub mod block_transformers;
 pub mod blocks;
 pub mod component_enums;
 pub mod component_registries;
+pub mod entity_types;
 pub mod heightmaps;
 pub mod item_components;
 pub mod items;

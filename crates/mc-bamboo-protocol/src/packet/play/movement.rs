@@ -164,6 +164,22 @@ impl ClientboundPacket for MoveEntityRot {
     }
 }
 
+/// 服务端告诉客户端实体现在的速度。客户端用它预测位置，`LpVec3` 是低精度的。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetEntityMotion {
+    pub entity_id: i32,
+    pub movement: Vec3,
+}
+
+impl ClientboundPacket for SetEntityMotion {
+    const ID: i32 = clientbound::SET_ENTITY_MOTION;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        write_lp_vec3(out, self.movement);
+    }
+}
+
 /// [`EntityPositionSync`] 的位置。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PositionPath {
@@ -531,6 +547,21 @@ mod tests {
                 "07 01 01 {POSITION_HEX} 02 42 b4 00 00 00 00 00 00 01"
             ))
         );
+    }
+
+    #[test]
+    fn set_entity_motion_writes_a_low_precision_vector() {
+        let motion = SetEntityMotion {
+            entity_id: ENTITY,
+            movement: Vec3::new(0.5, 0.0, -0.25),
+        };
+        assert_eq!(body(&motion), hex("07 f9 ff 5f fe ff fe"));
+
+        let still = SetEntityMotion {
+            entity_id: 300,
+            movement: Vec3::default(),
+        };
+        assert_eq!(body(&still), hex("ac 02 00"));
     }
 
     #[test]

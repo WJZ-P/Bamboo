@@ -18,6 +18,7 @@ mod composter;
 pub mod container;
 pub mod context;
 pub mod dispenser;
+pub mod entity;
 pub mod fluid;
 pub mod hopper;
 pub mod interact;
@@ -45,9 +46,9 @@ pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::dispense_from;
 pub use hopper::HopperEntity;
 pub use interact::{
-    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
-    use_item, use_item_on, use_item_on_checked, use_item_on_checked_with_stack,
-    use_item_on_with_stack,
+    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_entity_tick,
+    run_scheduled_ticks, use_item, use_item_on, use_item_on_checked,
+    use_item_on_checked_with_stack, use_item_on_with_stack,
 };
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use level::{Effect, Level, RedstoneMemory};

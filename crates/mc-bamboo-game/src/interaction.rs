@@ -103,6 +103,15 @@ pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
     send_effects(region, None, &outcome.effects);
 }
 
+/// `EntityTickList.forEach`。计划刻里生成的实体这一步才第一次 tick。
+///
+/// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
+pub(crate) fn run_entity_ticks(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
+    send_effects(region, None, &outcome.effects);
+}
+
 /// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
 pub(crate) fn run_random_ticks(region: &mut Region) {
     for chunk in random_ticking_chunks(region) {
