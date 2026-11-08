@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_blocks::BlockState;
+use mc_bamboo_blocks::{BlockState, World, hopper::set_changed};
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
 use mc_bamboo_protocol::{
@@ -409,9 +409,9 @@ impl Ctx<'_> {
         if !moved {
             return ItemStack::empty();
         }
-        if stack.is_empty() {
-            self.set(index, ItemStack::empty());
-        }
+        // 官方的 `moveItemStackTo` 直接改槽里那堆物品，来源格自动只剩没搬走的部分。
+        // 这里搬的是副本，剩下多少都要写回去，否则没搬完的那部分会凭空复制一份。
+        self.set(index, stack.clone());
         // `DispenserMenu` 比别的菜单多这一句。
         if matches!(self.kind, ContainerKind::Dispenser | ContainerKind::Dropper)
             && stack.count == clicked.count
@@ -831,7 +831,7 @@ fn menu_shape(
     kind: ContainerKind,
 ) -> Option<(Target, usize, i32, &'static str)> {
     Some(match kind {
-        ContainerKind::Chest => match container::chest_shape(region, pos) {
+        ContainerKind::Chest => match container::chest_shape(&region.chunks, pos) {
             Err(()) => return None,
             Ok(None) => (
                 Target::Single(pos),
@@ -850,7 +850,7 @@ fn menu_shape(
             ),
         },
         ContainerKind::EnderChest => {
-            if container::blocked(region, pos) {
+            if container::blocked(&region.chunks, pos) {
                 return None;
             }
             // 末影箱的 27 格在玩家身上，方块实体自己一格也没有。
@@ -1260,6 +1260,9 @@ fn raw_container_slots(
 }
 
 /// 把点击之后的容器格写回方块实体。双箱按位置分成前后两段。
+///
+/// 漏斗和发射器原来没有条目，这里按需新建，否则点开的菜单编辑会悄悄丢掉。
+/// 内容变了的格子要 `setChanged`，比较器才会立刻重算。
 fn write_back_containers(
     region: &mut Region,
     menu: &Menu,
@@ -1267,17 +1270,30 @@ fn write_back_containers(
     sources: &[Option<PlayerId>],
 ) {
     let mut offset = 0;
+    let mut changed = Vec::new();
     for pos in menu.target.positions() {
         let len = menu.kind.slots();
-        if let Some(entry) = region.containers.get_mut(&pos)
-            && offset + len <= slots.len()
-        {
-            entry.slots.clone_from_slice(&slots[offset..offset + len]);
-            entry
-                .sources
-                .clone_from_slice(&sources[offset..offset + len]);
+        if offset + len <= slots.len() {
+            let entry = container::entry_in(&mut region.containers, pos, menu.kind);
+            if entry.slots.len() == len {
+                if entry.slots.as_slice() != &slots[offset..offset + len] {
+                    changed.push(pos);
+                }
+                entry.slots.clone_from_slice(&slots[offset..offset + len]);
+                entry
+                    .sources
+                    .clone_from_slice(&sources[offset..offset + len]);
+            }
         }
         offset += len;
+    }
+    if changed.is_empty() {
+        return;
+    }
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    for pos in changed {
+        set_changed(&mut world, pos);
     }
 }
 

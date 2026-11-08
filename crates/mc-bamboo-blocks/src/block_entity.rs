@@ -119,6 +119,15 @@ impl BlockEntities {
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
     }
 
+    /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。
+    pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
+        self.entities
+            .get_mut(&pos)?
+            .entity
+            .as_any_mut()
+            .downcast_mut()
+    }
+
     /// 这一格有没有方块实体。
     pub fn contains(&self, pos: BlockPos) -> bool {
         self.entities.contains_key(&pos)
@@ -263,8 +272,8 @@ const SLOT_OCCUPIED: [Property<bool>; 6] = [
     SLOT_5_OCCUPIED,
 ];
 
-/// `Containers.dropItemStack` 在堆是空的时候取的三对 double：掉落点的 `x/y/z`。
-fn drop_empty_stack(world: &mut World) {
+/// `Containers.dropItemStack` 开头的掉落点：`floor(x/y/z)` 之后各取一个 double。
+fn drop_point(world: &mut World) {
     for _ in 0..3 {
         world.random().next_double();
     }
@@ -272,28 +281,38 @@ fn drop_empty_stack(world: &mut World) {
 
 /// 一格空的槽位：`dropContents` 对每一格都调用 `dropItemStack`，空堆只取掉落点。
 fn drop_empty_slot(world: &mut World) {
-    drop_empty_stack(world);
+    drop_point(world);
 }
 
-/// 一本 `chiseled_bookshelf` 里的书：掉落点之后，`split(nextInt(21) + 10)` 一次就分完，
-/// 再是 `setDeltaMovement` 里的三个 `triangle`，每个取两个 double。
-fn drop_book(world: &mut World) {
-    drop_empty_stack(world);
-    world.random().next_int(21);
-    for _ in 0..6 {
-        world.random().next_double();
+/// 一格装 `count` 件物品的槽位。掉落点之后，每一堆取一次 `nextInt(21) + 10`
+/// （最后一堆不足时只拿走剩下的），再取 `setDeltaMovement` 里三个 `triangle` 的六个 double。
+fn drop_stack(world: &mut World, count: i32) {
+    drop_point(world);
+    let mut left = count;
+    while left > 0 {
+        let split = (world.random().next_int(21) + 10).min(left);
+        left -= split;
+        for _ in 0..6 {
+            world.random().next_double();
+        }
     }
 }
 
-/// 官方容器实体的 `getContainerSize`，内容为空时槽位一个不少。
-fn drop_empty_slots(world: &mut World, slots: i32) {
-    for _ in 0..slots {
-        drop_empty_slot(world);
+/// 一张 `Container` 的槽位表。`counts` 是每格的数量，没有的格子按空槽算。
+///
+/// 官方 `dropContents` 从第 0 格数到 `getContainerSize() - 1`，空格也照样调用
+/// `dropItemStack`，所以槽位数不能省。
+fn drop_slots(world: &mut World, slots: i32, counts: &[i32]) {
+    for slot in 0..slots {
+        match counts.get(slot as usize).copied().unwrap_or(0) {
+            0 => drop_empty_slot(world),
+            count => drop_stack(world, count),
+        }
     }
 }
 
-/// `BlockEntity.preRemoveSideEffects`。
-pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World) {
+/// `BlockEntity.preRemoveSideEffects`。`counts` 是这一格自己那张物品表每格的数量。
+pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, counts: &[i32]) {
     let Some(entity) = state.block().block_entity_type else {
         return;
     };
@@ -301,18 +320,19 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World) {
 
     match entity {
         // `ChestBlockEntity`、`TrappedChestBlockEntity`（铜箱子也是这个实体）、`BarrelBlockEntity`。
-        E::CHEST | E::TRAPPED_CHEST | E::BARREL => drop_empty_slots(world, 27),
+        E::CHEST | E::TRAPPED_CHEST | E::BARREL => drop_slots(world, 27, counts),
         // `AbstractFurnaceBlockEntity`：三格燃料，经验来自空的 `recipesUsed`，不取数。
-        E::FURNACE | E::SMOKER | E::BLAST_FURNACE => drop_empty_slots(world, 3),
-        E::HOPPER | E::BREWING_STAND => drop_empty_slots(world, 5),
-        E::DISPENSER | E::DROPPER | E::CRAFTER => drop_empty_slots(world, 9),
-        E::SHELF => drop_empty_slots(world, 3),
-        E::DECORATED_POT => drop_empty_slots(world, 1),
-        E::CAMPFIRE => drop_empty_slots(world, 4),
+        E::FURNACE | E::SMOKER | E::BLAST_FURNACE => drop_slots(world, 3, counts),
+        E::HOPPER | E::BREWING_STAND => drop_slots(world, 5, counts),
+        E::DISPENSER | E::DROPPER | E::CRAFTER => drop_slots(world, 9, counts),
+        E::SHELF => drop_slots(world, 3, counts),
+        E::DECORATED_POT => drop_slots(world, 1, counts),
+        E::CAMPFIRE => drop_slots(world, 4, counts),
+        // 书架的 `SLOT_OCCUPIED` 就是它那六格的内容：每格一本书，数量是一。
         E::CHISELED_BOOKSHELF => {
             for slot in SLOT_OCCUPIED {
                 if state.get(slot) {
-                    drop_book(world);
+                    drop_stack(world, 1);
                 } else {
                     drop_empty_slot(world);
                 }

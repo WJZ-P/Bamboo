@@ -33,8 +33,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::HAS_RECORD, state::HORIZONTAL_FACING,
-    world::MAX_CHAINED_NEIGHBOR_UPDATES,
+    BlockState, behaviour::is_ported, state::FACING, state::FACING_HOPPER, state::HAS_RECORD,
+    state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
@@ -73,10 +73,11 @@ pub enum Rule {
     EntityTrigger,
     Dispensing,
     DaylightTimer,
+    UnmodeledContainer,
 }
 
 impl Rule {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::AnalogInput,
         Self::EntityRandom,
         Self::RandomLoop,
@@ -95,6 +96,7 @@ impl Rule {
         Self::EntityTrigger,
         Self::Dispensing,
         Self::DaylightTimer,
+        Self::UnmodeledContainer,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -117,16 +119,17 @@ impl Rule {
             Self::EntityTrigger => "entity trigger",
             Self::Dispensing => "dispensing",
             Self::DaylightTimer => "daylight timer",
+            Self::UnmodeledContainer => "unmodeled container",
         }
     }
 
     pub const fn reason(self) -> &'static str {
         match self {
             Self::AnalogInput => {
-                "case: a comparator read analog input the fake world cannot reproduce, \
-                 either container contents Bamboo does not keep (chiseled bookshelf excepted), \
+                "case: a comparator read a block entity Bamboo keeps no contents for \
+                 (lectern, jukebox, furnace, crafter, decorated pot and the like), \
                  a scene jukebox the fake world fills with a fixed disc, \
-                 or a clicked comparator re-reading its input"
+                 or a clicked comparator re-reading such an input"
             }
             Self::EntityRandom => {
                 "case: the outcome changed with the player's own random source, Bamboo has none"
@@ -169,10 +172,15 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: dispensers, droppers and crafters are empty, they never dispense or craft"
+                "scope: an item dispenser fired, its item behaviours (arrows, water, armor) are out of scope"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
+            }
+            Self::UnmodeledContainer => {
+                "case: a hopper or dropper ticked next to a container Bamboo keeps no slot table for \
+                 (shelf, crafter, chiseled bookshelf, furnace, brewing stand, decorated pot), \
+                 so the transfer cannot be replayed"
             }
         }
     }
@@ -625,6 +633,12 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if case.outcome.analog_content {
         return Ok(Some(Rule::AnalogInput));
     }
+    if dispenser_dispenses(case) {
+        return Ok(Some(Rule::Dispensing));
+    }
+    if transfers_with_unmodeled_container(case) {
+        return Ok(Some(Rule::UnmodeledContainer));
+    }
     let rule = match case.action.kind {
         Kind::Destroy
             if case.outcome.result == "refused"
@@ -673,8 +687,8 @@ fn scene_state(case: &Case, pos: BlockPos) -> BlockState {
     BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
 }
 
-/// 点中的比较器会重新读输入。假世界把 `Level` 上的信号都屏蔽了，方块自己的模拟输出还在，
-/// 官方的比较器这时可能亮起来。Bamboo 有信号，但容器内容不算，两种情况下这题都比不了。
+/// 点中的比较器会重新读输入。内容已经建模的容器两边读到的一样，可以比较；
+/// 别的方块实体（讲台、唱机、熔炉这类）Bamboo 没有保留内容，这题只能排除。
 fn clicks_comparator_with_analog_input(case: &Case) -> bool {
     let state_at = |pos: BlockPos| scene_state(case, pos);
     let pos = case.action.target();
@@ -685,9 +699,137 @@ fn clicks_comparator_with_analog_input(case: &Case) -> bool {
     let facing = clicked.get(HORIZONTAL_FACING);
     let input_pos = pos.relative(facing);
     let input = state_at(input_pos);
+    let behind = state_at(input_pos.relative(facing));
+    let modeled = |state: BlockState| is_modeled_container(state);
+    if modeled(input) || input.is_redstone_conductor() && modeled(behind) {
+        return false;
+    }
     input.has_analog_output_signal()
-        || input.is_redstone_conductor()
-            && state_at(input_pos.relative(facing)).has_analog_output_signal()
+        || input.is_redstone_conductor() && behind.has_analog_output_signal()
+}
+
+/// 内容已经在重放里建模的容器方块。末影箱的槽位在玩家身上，不算。
+fn is_modeled_container(state: BlockState) -> bool {
+    state.class().ancestors().iter().any(|ancestor| {
+        matches!(
+            ancestor,
+            BlockAncestor::ChestBlock
+                | BlockAncestor::BarrelBlock
+                | BlockAncestor::ShulkerBoxBlock
+                | BlockAncestor::HopperBlock
+                | BlockAncestor::DispenserBlock
+        )
+    })
+}
+
+/// Bamboo 没保留内容的容器方块实体。漏斗吸不出来也放不进去，比较器和投掷器碰不到它们。
+fn is_unmodeled_container(state: BlockState) -> bool {
+    state.class().ancestors().iter().any(|ancestor| {
+        matches!(
+            ancestor,
+            BlockAncestor::ShelfBlock
+                | BlockAncestor::CrafterBlock
+                | BlockAncestor::ChiseledBookShelfBlock
+                | BlockAncestor::AbstractFurnaceBlock
+                | BlockAncestor::BrewingStandBlock
+                | BlockAncestor::DecoratedPotBlock
+        )
+    })
+}
+
+/// 状态 ID 不在注册表里时返回 `None`：这题照常交给重放，panic 在那边算一道失败。
+/// 排除判断比重放先跑，不能自己碰不合法的 ID。
+fn state_of(id: u32) -> Option<BlockState> {
+    block_id_of_state(id).map(|_| BlockState(id))
+}
+
+/// 动作和 settle 走完之后这一格的状态：`changes` 里记录的是和场景不同的格子。
+fn final_state(case: &Case, pos: BlockPos) -> Option<BlockState> {
+    let cell = case
+        .outcome
+        .changes
+        .iter()
+        .find(|cell| cell.pos() == pos)
+        .or_else(|| case.scene.iter().find(|cell| cell.pos() == pos));
+    match cell {
+        Some(cell) => state_of(cell.state()),
+        None => Some(BlockState::AIR),
+    }
+}
+
+/// 漏斗每刻都从上方吸、往出口放，投掷器 tick 时只往出口放，两边都要读容器的槽位表。
+/// 碰到 Bamboo 没建模的容器时，搬物品的结果没法重放，这题只能排除。
+fn transfers_with_unmodeled_container(case: &Case) -> bool {
+    let scene = case
+        .scene
+        .iter()
+        .filter_map(|cell| Some((cell.pos(), state_of(cell.state())?)));
+    let changed = case
+        .outcome
+        .changes
+        .iter()
+        .filter_map(|cell| Some((cell.pos(), state_of(cell.state())?)));
+    // 漏斗从上方吸，出口在 `facing` 那一格。
+    let hopper_hits = scene
+        .clone()
+        .chain(changed.clone())
+        .filter(|(_, state)| state.is_a(BlockAncestor::HopperBlock))
+        .any(|(pos, state)| {
+            final_state(case, pos.above()).is_some_and(is_unmodeled_container)
+                || final_state(case, pos.relative(state.get(FACING_HOPPER)))
+                    .is_some_and(is_unmodeled_container)
+        });
+    if hopper_hits {
+        return true;
+    }
+    // 投掷器没有 ticker，只有动作那一下（或者场景里被红石排上刻）才会动手。
+    let target = case.action.target();
+    let dropper_ran = case.outcome.ran.iter().any(|id| id == "minecraft:dropper");
+    if !(dropper_ran || case.action.kind == Kind::Tick) {
+        return false;
+    }
+    let Some(state) = final_state(case, target) else {
+        return false;
+    };
+    state.is_a(BlockAncestor::DropperBlock)
+        && final_state(case, target.relative(state.get(FACING))).is_some_and(is_unmodeled_container)
+}
+
+/// 发射器的物品行为（箭、水、盔甲等）不在范围里，Bamboo 的发射器 tick 什么也不做。
+/// 场景里的发射器有东西又真的 tick 了，官方那边已经发出去，这题只能排除。投掷器自己实现了，照常比较。
+fn dispenser_dispenses(case: &Case) -> bool {
+    let is_dispenser = |pos: BlockPos| {
+        let state = scene_state(case, pos);
+        state.is_a(BlockAncestor::DispenserBlock) && !state.is_a(BlockAncestor::DropperBlock)
+    };
+    let ticked = case
+        .outcome
+        .ran
+        .iter()
+        .any(|id| id == "minecraft:dispenser")
+        || case.action.kind == Kind::Tick && case.block == "minecraft:dispenser";
+    if ticked {
+        return case.contents.iter().any(|stack| is_dispenser(stack.pos()));
+    }
+    // 流动题里被红石排上的发射器刻由官方假世界反射调用 `ServerLevel.tickBlock`，
+    // 不经过 FakeLevel 记 `ran` 的那一层，所以上面看不出来。官方发出去之后槽位里的东西变少，
+    // 用前后的数量判断。上面有漏斗的格子排除：那是漏斗正常吸走一件，Bamboo 能重放。
+    if case.action.kind != Kind::Flow {
+        return false;
+    }
+    let mut before: BTreeMap<BlockPos, i32> = BTreeMap::new();
+    for stack in &case.contents {
+        *before.entry(stack.pos()).or_default() += stack.count();
+    }
+    let mut after: BTreeMap<BlockPos, i32> = BTreeMap::new();
+    for stack in &case.outcome.contents {
+        *after.entry(stack.pos()).or_default() += stack.count();
+    }
+    before.iter().any(|(&pos, &count)| {
+        let hopper_above = final_state(case, pos.above())
+            .is_some_and(|state| state.is_a(BlockAncestor::HopperBlock));
+        after.get(&pos).copied().unwrap_or(0) < count && is_dispenser(pos) && !hopper_above
+    })
 }
 
 /// 假世界给场景里带唱片的唱机补了一张固定的 `music_disc_13`（`FakeLevel.syncContents`），
@@ -772,6 +914,7 @@ fn compare(
         result: answer.result != replayed.result,
         cells: differing_cells(case, replayed),
         destroyed: answer.destroyed != replayed.destroyed,
+        contents: answer.contents != replayed.contents,
         ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
         gained: answer.gained != replayed.gained,
