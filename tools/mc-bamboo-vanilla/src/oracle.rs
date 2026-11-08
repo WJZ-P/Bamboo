@@ -537,7 +537,14 @@ impl Session {
             Line::Case(case) => self.accept_case(&case),
             Line::Skip(skip) => {
                 let block = self.names.block(&skip.block)?;
-                match Rule::of_skip(&skip.reason) {
+                // 本来就不比较的刻里官方代码抛了异常（比如传送门随机刻在假世界里生成僵尸猪灵），
+                // 照不比较算，不算假世界坏了。
+                let out_of_scope = match skip.kind {
+                    Kind::Tick => tick_exclusion(block),
+                    Kind::Random => random_tick_exclusion(block),
+                    _ => None,
+                };
+                match Rule::of_skip(&skip.reason).or(out_of_scope) {
                     Some(rule) => self.report.skipped(block, skip.kind, rule),
                     None => self.report.broken_oracle(block, skip.kind, &skip.reason),
                 }
