@@ -1398,6 +1398,7 @@ public final class Probe {
         final Map<Integer, ItemStack> slots = new HashMap<>();
         /** 打开的菜单里的槽，和容器 0 的 `slots` 分开记。 */
         final Map<Integer, ItemStack> menuSlots = new HashMap<>();
+        /** 活塞伸出、收回的动画事件，箱子开合的人数也走这个包。 */
         final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<Edit> edits = new ArrayList<>();
         /** 放下又消失的方块。地面上的空气 `recordChunk` 不记，所以不能写成 `Edit`。 */
@@ -1406,8 +1407,6 @@ public final class Probe {
         /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
         final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
-        /** 活塞伸出、收回的动画事件。 */
-        final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
@@ -2214,11 +2213,6 @@ public final class Probe {
         private void onContainerClose(ClientboundContainerClosePacket packet) {
             check("container: close names the open menu", packet.getContainerId() == openContainerId);
             events.add("close " + packet.getContainerId());
-        }
-
-        private void onBlockEvent(ClientboundBlockEventPacket packet) {
-            blockEvents.add(packet);
-            events.add("blockevent " + packet.getPos().toShortString());
         }
 
         /** 一次菜单点击。客户端不预测：没有改过的槽，光标是空的。 */
