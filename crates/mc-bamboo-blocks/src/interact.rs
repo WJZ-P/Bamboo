@@ -48,10 +48,15 @@ pub struct Outcome {
     pub result: InteractionResult,
     /// 这次点击走了方块的 `useWithoutItem`。容器就是在这里打开的，调用方要接着接线。
     pub used_without_item: bool,
+    /// `BlockItem.place` 放下的那一格。调用方要把物品上的组件搬进这一格的方块实体，
+    /// 见 [`World::placed_at`]。
+    pub placed_at: Option<BlockPos>,
     pub effects: Vec<Effect>,
 }
 
-/// `ServerPlayerGameMode.useItemOn`，去掉观察者分支。
+/// `ServerPlayerGameMode.useItemOn` 里非旁观者的那一支。
+///
+/// 旁观者在游戏层单独处理：有菜单就打开，传送门发提示，其余直接放过，不会进到这里。
 pub fn use_item_on(
     level: &mut dyn Level,
     ticks: &mut BlockTicks,
@@ -59,11 +64,28 @@ pub fn use_item_on(
     hand: Hand,
     hit: &BlockHit,
 ) -> Outcome {
+    use_item_on_checked(level, ticks, actor, hand, hit, |_| true)
+}
+
+/// 和 [`use_item_on`] 一样，`may_use_on` 是官方 `ItemStack.useOn` 开头那道检查：
+/// 冒险模式且不能建造时，手里的 `can_place_on` 必须匹配点到的方块。
+///
+/// 检查在方块自己的右键之后、物品的 `useOn` 之前，看的是点到的这一格**现在**的状态。
+/// 返回 `false` 时不调用物品的 `useOn`，结果和官方一样是 [`InteractionResult::Pass`]。
+pub fn use_item_on_checked(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    actor: &Actor,
+    hand: Hand,
+    hit: &BlockHit,
+    may_use_on: impl FnOnce(BlockState) -> bool,
+) -> Outcome {
     let mut world = World::new(level, ticks);
-    let (result, used_without_item) = run_use_item_on(&mut world, actor, hand, *hit);
+    let (result, used_without_item) = run_use_item_on(&mut world, actor, hand, *hit, may_use_on);
     Outcome {
         result,
         used_without_item,
+        placed_at: world.placed_at(),
         effects: world.into_effects(),
     }
 }
@@ -73,6 +95,7 @@ fn run_use_item_on(
     actor: &Actor,
     hand: Hand,
     hit: BlockHit,
+    may_use_on: impl FnOnce(BlockState) -> bool,
 ) -> (InteractionResult, bool) {
     let state = world.block_state(hit.pos);
     let ctx = UseContext::new(actor, hand, hit);
@@ -84,8 +107,10 @@ fn run_use_item_on(
     }
     if ctx.hand_is_empty() {
         (InteractionResult::Pass, false)
-    } else {
+    } else if may_use_on(world.block_state(hit.pos)) {
         (placement::use_on(world, &ctx), false)
+    } else {
+        (InteractionResult::Pass, false)
     }
 }
 
@@ -203,6 +228,7 @@ pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
     Outcome {
         result,
         used_without_item: false,
+        placed_at: world.placed_at(),
         effects: world.into_effects(),
     }
 }
@@ -320,6 +346,41 @@ mod tests {
         let outcome = run_scheduled_ticks(&mut level, &mut ticks, 1);
         assert_eq!(outcome.result, InteractionResult::Pass);
         assert_eq!(ticks.pending().count(), 0);
+    }
+
+    #[test]
+    fn the_use_on_gate_sees_the_clicked_block_and_skips_the_item() {
+        let mut level = level();
+        let actor = actor_holding(items::DIRT);
+        let seen = std::cell::Cell::new(None);
+        let mut ticks = BlockTicks::new();
+        let outcome = use_item_on_checked(
+            &mut level,
+            &mut ticks,
+            &actor,
+            Hand::Main,
+            &top_hit(FLOOR),
+            |state| {
+                seen.set(Some(state));
+                false
+            },
+        );
+        // 官方 `ItemStack.useOn` 看的是点到的这一格。
+        assert_eq!(seen.get(), Some(BlockState(blocks::STONE)));
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert!(level.get(FLOOR.above()).is_air());
+
+        let mut ticks = BlockTicks::new();
+        let outcome = use_item_on_checked(
+            &mut level,
+            &mut ticks,
+            &actor,
+            Hand::Main,
+            &top_hit(FLOOR),
+            |_| true,
+        );
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert_eq!(level.get(FLOOR.above()), BlockState(blocks::DIRT));
     }
 
     #[test]

@@ -38,14 +38,18 @@ fn text_tag(text: &SignText) -> Tag {
 /// 告示牌的 `getUpdateTag`：两面文字和上蜡标志，没有 id、坐标这些元数据。
 ///
 /// `allow_op_features` 只在为真时写，官方的默认值是假。
-pub fn update_tag(content: &SignContent) -> Vec<u8> {
-    let tag = Tag::Compound(vec![
+pub fn update_tag_value(content: &SignContent) -> Tag {
+    Tag::Compound(vec![
         ("front_text".to_owned(), text_tag(&content.front)),
         ("back_text".to_owned(), text_tag(&content.back)),
         ("is_waxed".to_owned(), Tag::Byte(content.waxed as i8)),
-    ]);
+    ])
+}
+
+/// [`update_tag_value`] 的网络字节。
+pub fn update_tag(content: &SignContent) -> Vec<u8> {
     let mut out = Vec::new();
-    tag.write_network(&mut out);
+    update_tag_value(content).write_network(&mut out);
     out
 }
 
@@ -103,7 +107,7 @@ pub(crate) fn tick_editors(region: &mut Region) {
         let in_range = region.players.values().any(|player| {
             *player.uuid.as_bytes() == editor
                 && interaction::within_block_interaction_range(
-                    player.position,
+                    player.position(),
                     player.eye_height(),
                     interaction::interaction_range(player.game_mode),
                     pos,

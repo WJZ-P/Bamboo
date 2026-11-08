@@ -16,6 +16,9 @@ use crate::{
     inventory::{HOTBAR_START, Inventory, OFF_HAND},
 };
 
+/// 重放里只有一名玩家，容器里的东西都算它放的。
+const VIEWER: PlayerId = PlayerId(0);
+
 /// 菜单对应的方块种类。箱子要带行数，双箱是 6 行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayShape {
@@ -56,6 +59,7 @@ pub struct Snapshot {
 pub struct Replay {
     menu: Menu,
     container: Vec<ItemStack>,
+    /// 每个容器格的组件来自哪名玩家。重放里只有一名玩家，所以都是它。
     sources: Vec<Option<PlayerId>>,
     inventory: Inventory,
     creative: bool,
@@ -82,10 +86,9 @@ impl Replay {
                 shape.kind(),
                 Target::Single(BlockPos::new(0, 0, 0)),
                 size,
-                PlayerId(0),
             ),
             container: slots,
-            sources: vec![None; size],
+            sources: vec![Some(VIEWER); size],
             inventory: player,
             creative: true,
         }
@@ -111,7 +114,7 @@ impl Replay {
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
-            viewer: self.menu.viewer,
+            viewer: VIEWER,
             container: &mut self.container,
             sources: &mut self.sources,
             inventory: &mut self.inventory,

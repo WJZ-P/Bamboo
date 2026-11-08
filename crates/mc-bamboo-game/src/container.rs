@@ -4,15 +4,16 @@
 //! （`ContainerOpenersCounter`）和方块事件的排队；事件本身、潜影盒的盖子和动画都在
 //! `mc-bamboo-blocks` 的方块事件队列和方块实体里。菜单和点击在 [`crate::menu`]。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
     BlockState, ShulkerBoxEntity, World, open_lid_box,
     state::{CHEST_TYPE, ChestType, FACING, OPEN},
 };
 use mc_bamboo_core::{Aabb, BlockPos, Direction};
-use mc_bamboo_data::{BlockAncestor, registries::menu};
+use mc_bamboo_data::{BlockAncestor, registries::menu, tags::block_tags};
 use mc_bamboo_protocol::{item::ItemStack, packet::play::GameMode};
+use mc_bamboo_world::store::ChunkStore;
 
 use crate::{
     inbound::PlayerId,
@@ -74,10 +75,15 @@ impl ContainerKind {
 }
 
 /// 一个容器方块的内容和开合状态。没有内容的容器不留条目。
+///
+/// 自定义名和锁不在这里，它们是方块实体从物品上带来的组件，见 [`crate::block_items`]。
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,
-    /// 每个槽的组件来自哪名玩家。共享容器只能把组件发回给写它的玩家。
+    /// 每一格的组件字节是哪名玩家的客户端发来的。
+    ///
+    /// 共享容器里的物品可能是别人放进来的：那几种我们没法完全校验的组件只能发回给来源玩家，
+    /// 别人看到的那一份要滤过，见 [`crate::menu`]。
     pub(crate) sources: Vec<Option<PlayerId>>,
     /// 官方 `ContainerOpenersCounter.openCount`。潜影盒也用它算盖子开合。
     pub(crate) open_count: i32,
@@ -139,21 +145,24 @@ pub(crate) fn kind_of(state: BlockState) -> Option<ContainerKind> {
 }
 
 /// 这个位置现在是什么容器。
-pub(crate) fn kind_at(region: &Region, pos: BlockPos) -> Option<ContainerKind> {
-    region
-        .chunks
+pub(crate) fn kind_in(chunks: &ChunkStore, pos: BlockPos) -> Option<ContainerKind> {
+    chunks
         .block(pos)
         .and_then(|state| kind_of(BlockState(state)))
 }
 
-/// 取这个位置的条目，没有就建一个空的。方块换成另一种容器时重建。
-pub(crate) fn entry_at(
-    region: &mut Region,
+/// 见 [`kind_in`]，从区域里取区块。
+pub(crate) fn kind_at(region: &Region, pos: BlockPos) -> Option<ContainerKind> {
+    kind_in(&region.chunks, pos)
+}
+
+/// 取条目，没有就建一个空的。方块换成另一种容器时重建。
+pub(crate) fn entry_in(
+    containers: &mut BTreeMap<BlockPos, ContainerEntry>,
     pos: BlockPos,
     kind: ContainerKind,
 ) -> &mut ContainerEntry {
-    region
-        .containers
+    containers
         .entry(pos)
         .and_modify(|entry| {
             if entry.kind != kind {
@@ -163,11 +172,19 @@ pub(crate) fn entry_at(
         .or_insert_with(|| ContainerEntry::new(kind))
 }
 
+/// 见 [`entry_in`]，从区域里取容器表。
+pub(crate) fn entry_at(
+    region: &mut Region,
+    pos: BlockPos,
+    kind: ContainerKind,
+) -> &mut ContainerEntry {
+    entry_in(&mut region.containers, pos, kind)
+}
+
 /// 潜影盒上面有红石导体或者坐着猫时开不了盖子。这里只看红石导体。
-pub(crate) fn blocked(region: &Region, pos: BlockPos) -> bool {
+pub(crate) fn blocked(chunks: &ChunkStore, pos: BlockPos) -> bool {
     let above = pos.above();
-    region
-        .chunks
+    chunks
         .block(above)
         .is_some_and(|state| BlockState(state).is_redstone_conductor())
 }
@@ -193,12 +210,22 @@ pub(crate) struct DoubleChest {
 ///
 /// 返回 `Ok(None)` 表示是单箱，`Ok(Some(..))` 是双箱，`Err(())` 表示开不了。
 /// 方块在这一刻已经确认是箱子。
-pub(crate) fn chest_shape(region: &Region, pos: BlockPos) -> Result<Option<DoubleChest>, ()> {
+pub(crate) fn chest_shape(chunks: &ChunkStore, pos: BlockPos) -> Result<Option<DoubleChest>, ()> {
+    chest_shape_with(chunks, pos, false)
+}
+
+/// 见 [`chest_shape`]。`ignore_blocked` 是官方的 `ignoreBeingBlocked`：漏斗取物品时是 `true`，
+/// 比较器读信号时是 `false`。
+pub(crate) fn chest_shape_with(
+    chunks: &ChunkStore,
+    pos: BlockPos,
+    ignore_blocked: bool,
+) -> Result<Option<DoubleChest>, ()> {
     // 方块实体不存在或者上方被压住时官方返回 NONE。
-    if blocked(region, pos) {
+    if !ignore_blocked && blocked(chunks, pos) {
         return Err(());
     }
-    let Some(state) = region.chunks.block(pos).map(BlockState) else {
+    let Some(state) = chunks.block(pos).map(BlockState) else {
         return Ok(None);
     };
     let chest_type = state.get(CHEST_TYPE);
@@ -208,10 +235,10 @@ pub(crate) fn chest_shape(region: &Region, pos: BlockPos) -> Result<Option<Doubl
 
     let first_is_here = chest_type == ChestType::Right;
     let neighbour = pos.relative(connected_direction(state));
-    if !neighbour_combines(region, neighbour, state) {
+    if !neighbour_combines(chunks, neighbour, state) {
         return Ok(None);
     }
-    if blocked(region, neighbour) {
+    if !ignore_blocked && blocked(chunks, neighbour) {
         return Err(());
     }
     let (first, second) = if first_is_here {
@@ -222,12 +249,21 @@ pub(crate) fn chest_shape(region: &Region, pos: BlockPos) -> Result<Option<Doubl
     Ok(Some(DoubleChest { first, second }))
 }
 
-/// `DoubleBlockCombiner` 对邻居的全部要求：同一种方块、不是单箱、类型不同、朝向相同。
-fn neighbour_combines(region: &Region, pos: BlockPos, state: BlockState) -> bool {
-    let Some(other) = region.chunks.block(pos).map(BlockState) else {
+/// `chestCanConnectTo`：普通箱子只和同一种箱子合并，铜箱子不管氧化程度和涂蜡。
+fn can_connect_to(state: BlockState, other: BlockState) -> bool {
+    if state.is_a(BlockAncestor::CopperChestBlock) {
+        other.is_tagged(block_tags::COPPER_CHESTS) && other.has(CHEST_TYPE)
+    } else {
+        other.is_same_block(state)
+    }
+}
+
+/// `DoubleBlockCombiner` 对邻居的全部要求：能合并、不是单箱、类型不同、朝向相同。
+fn neighbour_combines(chunks: &ChunkStore, pos: BlockPos, state: BlockState) -> bool {
+    let Some(other) = chunks.block(pos).map(BlockState) else {
         return false;
     };
-    if !other.is_same_block(state) {
+    if !can_connect_to(state, other) {
         return false;
     }
     let (Some(other_type), Some(other_facing)) = (other.try_get(CHEST_TYPE), other.try_get(FACING))
@@ -505,6 +541,7 @@ fn forget_unused(region: &mut Region) {
 
 /// 方块被破坏。内容没有掉落物，等打开着的菜单关掉后一起丢弃。
 pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
+    crate::block_items::forget(region, pos);
     let targeted = region.menus.values().any(|menu| menu.target.contains(pos));
     if !targeted {
         region.containers.remove(&pos);

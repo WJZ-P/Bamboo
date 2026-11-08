@@ -201,6 +201,18 @@ impl Behaviour for Chest {
     ) -> InteractionResult {
         InteractionResult::Success
     }
+
+    /// `ChestBlock.getAnalogOutputSignal`：`getContainer(..., false)`，压住时读不到，
+    /// 双箱按合并后的 54 格算。位置上的规则在 `Level::container_signal` 里。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
+    }
 }
 
 /// `CopperChestBlock`、`WeatheringCopperChestBlock`：合并时两半要变成同一种铜箱子。
@@ -334,6 +346,16 @@ impl Behaviour for CopperChest {
         ctx: &UseContext,
     ) -> InteractionResult {
         Chest.use_without_item(state, world, ctx)
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        Chest.analog_output_signal(state, world, pos, direction)
     }
 }
 

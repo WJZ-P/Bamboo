@@ -98,7 +98,7 @@ fn encode_section(
     };
     // `broadcastBlockEntityIfNeeded`，和包里的格子一个顺序。
     for &(pos, state) in &changes {
-        if let Some(data) = sign_data_frames(region, pos, state) {
+        if let Some(data) = block_entity_data_frames(region, pos, state) {
             frames.extend_from_slice(&data);
         }
     }
@@ -121,17 +121,21 @@ fn encode_section_update(chunk: ChunkPos, section_y: i32, changes: &[(BlockPos, 
     })
 }
 
-/// 这一格是告示牌时，广播还要带上方块实体的内容，官方 `getUpdateTag` 的结果。
+/// 这一格的方块实体有内容时，广播还要带上官方 `getUpdateTag` 的结果。
 ///
-/// 别的方块实体还没有内容模型，编不出官方的 `getUpdateTag`，只能发方块更新。
+/// 告示牌的内容在区块的告示牌表里，旗帜、头颅和陶罐的在 [`crate::block_items`] 编好的那份
+/// NBT 里。剩下的方块实体官方发的是空标签，客户端按方块状态自己建，所以只发方块更新。
 /// 和官方一样先看方块有没有方块实体，一段改满时大多数格子在这一步就结束了。
-fn sign_data_frames(region: &Region, pos: BlockPos, state: u32) -> Option<Vec<u8>> {
+fn block_entity_data_frames(region: &Region, pos: BlockPos, state: u32) -> Option<Vec<u8>> {
     let kind = block_of_state(state)?.block_entity_type?;
-    let content = region.chunks.sign(pos)?;
+    let data = match region.chunks.sign(pos) {
+        Some(content) => sign::update_tag(&content),
+        None => region.chunks.update_tag(pos)?.to_vec(),
+    };
     Some(encode_frames(&BlockEntityData {
         pos,
         kind,
-        data: &sign::update_tag(&content),
+        data: &data,
     }))
 }
 

@@ -12,6 +12,7 @@ use std::{
 use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory};
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
+use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameMode,
     LevelChunksLoadStart, Login, PlayerAbilities, SetEntityData, SetTime, UpdateAttributes,
@@ -29,6 +30,7 @@ use crate::{
     menu::Menu,
     movement,
     player::Player,
+    player_grid::PlayerGrid,
 };
 
 const DIMENSION: &str = "minecraft:overworld";
@@ -94,6 +96,11 @@ impl RegionTick {
 pub(crate) struct Region {
     /// 已经进入世界的玩家。被踢的玩家留在这里，直到连接层的 `Leave` 到达。
     pub(crate) players: BTreeMap<PlayerId, Player>,
+    /// 玩家在哪一格，广播找附近的人用。和 `players` 一起增删，见 [`Region::insert_player`]。
+    ///
+    /// Which cell each player is in, for broadcasts. Kept in step with `players`; see
+    /// [`Region::insert_player`].
+    pub(crate) player_grid: PlayerGrid,
     pub(crate) links: Links,
     pub(crate) chunks: ChunkStore,
     /// 没改过的区块共用的编码结果。
@@ -108,6 +115,9 @@ pub(crate) struct Region {
     pub(crate) block_ticks: BlockTicks,
     /// 有内容的方块实体，按位置索引。只在这个区域里存在，没有持久化。
     pub(crate) containers: BTreeMap<BlockPos, ContainerEntry>,
+    /// 方块实体从物品上带来的组件，官方 `BlockEntity.collectComponents` 的结果，
+    /// 见 [`crate::block_items`]。
+    pub(crate) block_items: BTreeMap<BlockPos, ComponentPatch>,
     /// 每名玩家打开的菜单。物品栏菜单不在里面，它没有状态要同步。
     pub(crate) menus: BTreeMap<PlayerId, Menu>,
     /// 活塞这类会动的方块实体。
@@ -140,11 +150,35 @@ const _: () = {
 };
 
 impl Region {
+    /// 测试里直接把玩家挪到某处，网格跟着更新。
+    ///
+    /// Test helper: moves a player directly and updates the grid.
+    #[cfg(test)]
+    pub(crate) fn move_player(&mut self, id: PlayerId, position: Vec3) {
+        let Self {
+            players,
+            player_grid,
+            ..
+        } = self;
+        if let Some(player) = players.get_mut(&id) {
+            player.set_position(player_grid, position);
+        }
+    }
+
+    /// 让玩家进入世界：放进玩家表，也记进网格。
+    ///
+    /// Puts a player into the world: the player table and the grid.
+    pub(crate) fn insert_player(&mut self, player: Player) {
+        self.player_grid.place(player.id, player.position());
+        self.players.insert(player.id, player);
+    }
+
     pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {
         let chunks = ChunkStore::flat();
         let template_body = encode_template(&chunks);
         Self {
             players: BTreeMap::new(),
+            player_grid: PlayerGrid::default(),
             links: Links::default(),
             chunks,
             template_body,
@@ -153,6 +187,7 @@ impl Region {
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
             containers: BTreeMap::new(),
+            block_items: BTreeMap::new(),
             menus: BTreeMap::new(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -174,11 +209,13 @@ impl Region {
         let level = RegionLevel {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
+            block_items: &mut self.block_items,
             players: &self.players,
             random: &self.random,
             redstone: &mut self.redstone,
             block_entities: &mut self.block_entities,
             block_events: &mut self.block_events,
+            containers: &mut self.containers,
         };
         (level, &mut self.block_ticks)
     }
@@ -215,8 +252,14 @@ impl Region {
 
         let spawn = Vec3::new(SPAWN_X, f64::from(flat::surface_y()), SPAWN_Z);
         let mut player = Player::new(id, uuid, name, game_mode, client, spawn);
-        movement::teleport(&mut player, &mut self.links, self.tick, spawn);
-        self.players.insert(id, player);
+        movement::teleport(
+            &mut player,
+            &mut self.links,
+            &mut self.player_grid,
+            self.tick,
+            spawn,
+        );
+        self.insert_player(player);
     }
 
     /// 进服第 6 步：只有服务端会告诉客户端自己的皮肤外层、主手和触及距离。

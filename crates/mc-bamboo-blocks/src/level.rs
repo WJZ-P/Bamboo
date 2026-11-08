@@ -9,6 +9,8 @@ use mc_bamboo_core::{
 
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
+    container::Container,
+    hopper::HopperEntity,
     random::LevelRandom,
     shape::Aabb,
     state::{BlockState, NoteBlockInstrument},
@@ -56,6 +58,13 @@ pub trait Level {
     /// 改写告示牌的内容，对应 `SignBlockEntity` 里那几个字段。不是告示牌方块时返回 `false`。
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool;
 
+    /// `getBlockEntity(pos) instanceof SkullBlockEntity` 时它的 `getNoteBlockSound`。
+    ///
+    /// 官方把物品上的 `note_block_sound` 组件搬进头颅方块实体，音符盒响的时候按它找自定义
+    /// 音效，见 [`Effect::NoteBlockPlayed`]。不是头颅方块实体、或者头颅没带音效时返回
+    /// `None`，官方对应 `null`。
+    fn note_block_sound(&self, pos: BlockPos) -> Option<String>;
+
     /// 这一格的方块实体和它们的 ticker。
     fn block_entities(&self) -> &BlockEntities;
 
@@ -70,6 +79,51 @@ pub trait Level {
 
     /// 见 [`Level::redstone`]。
     fn redstone_mut(&mut self) -> &mut RedstoneMemory;
+
+    /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
+    ///
+    /// 双箱已经按官方 `CompoundContainer` 的顺序合并成一张表。这一格不是容器方块时
+    /// 不调用 `f`，返回 `false`。
+    /// 漏斗取放物品时官方会忽略压住箱子的方块（`getContainerAt` 传 `ignoreBeingBlocked=true`），
+    /// 所以这里的容器是能取到的那个，和比较器看到的可能不同。
+    fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        let _ = (pos, f);
+        false
+    }
+
+    /// 这一格自己那张物品栏里每格有多少个物品，双箱只算这一半。
+    ///
+    /// 官方的 `BlockEntity.preRemoveSideEffects` 掉落的是方块实体自己的 `getItems`，
+    /// 所以它和 [`Level::with_container`] 不同：不合并双箱，也不管压住箱子的方块。
+    /// 没有物品表时返回空表，调用方按空槽处理。
+    fn own_container_counts(&self, pos: BlockPos) -> Vec<i32> {
+        let _ = pos;
+        Vec::new()
+    }
+
+    /// 比较器从这一格的容器读到的模拟信号，官方 `getRedstoneSignalFromBlockEntity`。
+    ///
+    /// 双箱按合并后的 54 格算，和被压住读不到时是 0，见 `ChestBlock.getAnalogOutputSignal`。
+    fn container_signal(&self, pos: BlockPos) -> i32 {
+        let _ = pos;
+        0
+    }
+
+    /// 这一格容器背后的方块位置：单箱是这一格，双箱是两半，见 `CompoundContainer.setChanged`。
+    ///
+    /// 和 [`Level::with_container`] 一样按能取到的那条规则算，被压住的箱子也算能取到。
+    fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
+        vec![pos]
+    }
+
+    /// 带着这一格的漏斗方块实体运行一段代码。这一格没有漏斗实体时不调用 `f`，返回 `false`。
+    ///
+    /// 实体正在 tick 时它已经从方块实体表里拿出来了，这时也取不到，和官方
+    /// `getBlockEntity(pos)` 在 tick 期间找不到自己一样。
+    fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
+        let _ = (pos, f);
+        false
+    }
 }
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。
@@ -181,7 +235,9 @@ pub enum Effect {
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///
-    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里。
+    /// 上面是带 `note_block_sound` 的头颅时，官方播放的是那个音效，不按乐器查表。
+    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里；自定义音效的名字等音效实现
+    /// 时再加进这一项，`Effect` 要能按值拷贝，装不下 `String`。
     NoteBlockPlayed {
         pos: BlockPos,
         instrument: NoteBlockInstrument,
@@ -197,4 +253,7 @@ pub enum Effect {
         param_a: i32,
         param_b: i32,
     },
+    /// `levelEvent(1500, pos, data)`：堆肥桶收进一个能堆肥的物品。
+    /// `success` 为真时数据是 1（等级升了），否则是 0。客户端自己播粒子和声音。
+    ComposterFill { pos: BlockPos, success: bool },
 }

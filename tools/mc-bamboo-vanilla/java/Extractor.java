@@ -120,6 +120,9 @@ import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
+import net.minecraft.world.level.block.state.properties.EnumProperty;
+import net.minecraft.world.level.block.state.properties.IntegerProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
 import net.minecraft.world.level.biome.Biome;
@@ -605,6 +608,7 @@ public final class Extractor {
             JsonObject object = new JsonObject();
             object.addProperty("name", property.getName());
             object.add("values", valueNames(property));
+            describeType(property, object);
             result.add(object);
         }
         return result;
@@ -614,6 +618,35 @@ public final class Extractor {
         JsonArray names = new JsonArray();
         property.getPossibleValues().forEach(value -> names.add(property.getName(value)));
         return names;
+    }
+
+    /**
+     * 属性的官方类型，以及 {@code Comparable.compareTo} 用的顺序。
+     *
+     * <p>{@code StatePropertiesPredicate} 的区间比较按属性值的 {@code compareTo} 来，
+     * 三种属性类各有各的顺序：
+     * <ul>
+     *   <li>{@code IntegerProperty} 按数值比，取值是 {@code min..=max} 的连续整数；</li>
+     *   <li>{@code BooleanProperty} 的取值列表是 {@code [true, false]}，但 {@code false < true}；</li>
+     *   <li>{@code EnumProperty} 按枚举常量的声明序号比，取值列表可能是常量的乱序子集。</li>
+     * </ul>
+     */
+    private static void describeType(Property<?> property, JsonObject object) {
+        if (property instanceof IntegerProperty) {
+            List<?> values = property.getPossibleValues();
+            object.addProperty("type", "integer");
+            object.addProperty("min", (Integer) values.get(0));
+            object.addProperty("max", (Integer) values.get(values.size() - 1));
+        } else if (property instanceof BooleanProperty) {
+            object.addProperty("type", "boolean");
+        } else if (property instanceof EnumProperty<?> enumProperty) {
+            object.addProperty("type", "enum");
+            JsonArray ordinals = new JsonArray();
+            enumProperty.getPossibleValues().forEach(value -> ordinals.add(((Enum<?>) value).ordinal()));
+            object.add("ordinals", ordinals);
+        } else {
+            throw new IllegalStateException("未知的属性类型：" + property.getClass().getName());
+        }
     }
 
     /** 方块的第 n 个状态就是属性值的笛卡尔积的第 n 项，最后一个属性变化最快。 */

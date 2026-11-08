@@ -15,7 +15,7 @@ use mc_bamboo_protocol::{
 use tracing::warn;
 
 use crate::{
-    chat, chunk_broadcast,
+    book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     container, entity_sync,
     global::{Global, RosterEntry},
@@ -197,6 +197,7 @@ impl World {
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
+        self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {
             self.region.links.broadcast(&frames);
         }
@@ -259,8 +260,8 @@ impl World {
             PlayRequest::SetCreativeModeSlot { slot, stack } => {
                 inventory::on_set_creative_mode_slot(region, player, slot, stack);
             }
-            PlayRequest::PickItemFromBlock { pos, .. } => {
-                inventory::on_pick_item_from_block(region, player, pos);
+            PlayRequest::PickItemFromBlock { pos, include_data } => {
+                inventory::on_pick_item_from_block(region, player, pos, include_data);
             }
             PlayRequest::PlayerAction {
                 action,
@@ -317,6 +318,9 @@ impl World {
             PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
+            }
+            PlayRequest::EditBook { slot, pages, title } => {
+                book::on_edit_book(region, player, slot, pages, title);
             }
             // 这三种连接任务就地处理了，不会发到这里。
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}

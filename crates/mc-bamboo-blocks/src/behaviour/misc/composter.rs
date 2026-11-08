@@ -9,6 +9,7 @@ use crate::{
     behaviour::{Behaviour, common::item_of},
     context::UseContext,
     interact::InteractionResult,
+    level::Effect,
     random::LegacyRandom,
     state::{BlockState, LEVEL_COMPOSTER},
     world::World,
@@ -18,9 +19,9 @@ use crate::{
 pub(super) struct Composter;
 
 /// `READY`：可以取骨粉了。
-const READY: i32 = 8;
+pub(crate) const READY: i32 = 8;
 /// `MAX_LEVEL`：满了，等计划刻变成 [`READY`]。
-const MAX_LEVEL: i32 = 7;
+pub(crate) const MAX_LEVEL: i32 = 7;
 /// 满了之后等多久变成 [`READY`]。
 const READY_DELAY: i32 = 20;
 
@@ -47,17 +48,34 @@ fn layers_to_add(layers: CompostLayers, state: BlockState, world: &World) -> i32
     }
 }
 
-/// `addLayer`：没抽中时什么也不改。
-fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) {
+/// `addLayer`：没抽中时什么也不改，返回等级有没有变。
+fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) -> bool {
     let added = layers_to_add(layers, state, world);
     if added <= 0 {
-        return;
+        return false;
     }
     let level = (state.get(LEVEL_COMPOSTER) + added).clamp(0, MAX_LEVEL);
     world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, level));
     if level == MAX_LEVEL {
         world.schedule_tick(pos, state.block(), READY_DELAY);
     }
+    true
+}
+
+/// `addLayer` 再加 `levelEvent(1500)`。玩家右键和漏斗塞东西都走这里。
+pub(crate) fn compost_fill(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    layers: CompostLayers,
+) {
+    let success = add_layer(state, world, pos, layers);
+    world.push_effect(Effect::ComposterFill { pos, success });
+}
+
+/// `empty`：等级归零。漏斗取走骨粉走这一支，不生成物品，也不取随机数。
+pub(crate) fn compost_empty(state: BlockState, world: &mut World, pos: BlockPos) {
+    world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
 }
 
 impl Behaviour for Composter {
@@ -79,7 +97,7 @@ impl Behaviour for Composter {
             return InteractionResult::TryEmptyHandInteraction;
         };
         if level < MAX_LEVEL {
-            add_layer(state, world, ctx.clicked_pos(), layers);
+            compost_fill(state, world, ctx.clicked_pos(), layers);
         }
         InteractionResult::Success
     }
@@ -125,6 +143,7 @@ mod tests {
     use super::*;
     use crate::{
         behaviour::misc::test_support::tick,
+        level::Effect,
         testing::{TestLevel, actor_holding, top_hit, use_item},
     };
 
@@ -138,11 +157,21 @@ mod tests {
     fn an_empty_composter_always_takes_a_layer() {
         let mut level = TestLevel::new();
         level.set(COMPOSTER, BlockState(blocks::COMPOSTER));
-        assert_eq!(
-            compost(&mut level, items::WHEAT_SEEDS),
-            InteractionResult::Success
+        let outcome = use_item(
+            &mut level,
+            &actor_holding(items::WHEAT_SEEDS),
+            top_hit(COMPOSTER),
         );
+        assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), 1);
+        // 空桶走 `when_empty`，一定加一层，`levelEvent` 的数据是 1。
+        assert_eq!(
+            outcome.effects,
+            [Effect::ComposterFill {
+                pos: COMPOSTER,
+                success: true,
+            }]
+        );
     }
 
     /// 种子是 `compostable/low`：不空的时候 `nextInt(100) < 30` 才加一层。
@@ -154,13 +183,23 @@ mod tests {
             COMPOSTER,
             BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 3),
         );
-        assert_eq!(
-            compost(&mut level, items::WHEAT_SEEDS),
-            InteractionResult::Success
+        let outcome = use_item(
+            &mut level,
+            &actor_holding(items::WHEAT_SEEDS),
+            top_hit(COMPOSTER),
         );
+        assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(
             level.get(COMPOSTER).get(LEVEL_COMPOSTER),
             3 + i32::from(expected)
+        );
+        // 没抽中也发 `levelEvent(1500)`，数据是 0。
+        assert_eq!(
+            outcome.effects,
+            [Effect::ComposterFill {
+                pos: COMPOSTER,
+                success: expected,
+            }]
         );
     }
 

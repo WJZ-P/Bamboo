@@ -132,6 +132,23 @@ pub struct FluidTag {
 pub struct PropertyDef {
     pub name: &'static str,
     pub values: &'static [&'static str],
+    pub kind: PropertyKind,
+}
+
+/// 方块属性的官方类型，以及 `StatePropertiesPredicate` 做区间比较时用的顺序。
+///
+/// 官方的 `Property` 只有三个子类，属性值的 `compareTo` 各按各的顺序比：
+/// 整数按数值，布尔 `false < true`，枚举按枚举常量的声明序号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyKind {
+    /// `IntegerProperty`：取值是 `min..=max` 的连续整数，按数值比较。
+    Integer { min: i32, max: i32 },
+    /// `BooleanProperty`：取值列表是 `[true, false]`，比较时 `false < true`。
+    Boolean,
+    /// `EnumProperty`：取值列表可能是常量的乱序子集，比较时用常量的声明序号。
+    ///
+    /// 下标和 [`PropertyDef::values`] 一一对应。
+    Enum { ordinals: &'static [u16] },
 }
 
 /// 一个构造参数或者只读方法的结果，名字和官方的字段名相同，方法名后面带括号。

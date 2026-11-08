@@ -10,8 +10,8 @@ use std::{
 use crate::extract::{
     Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
-    ExtractedStack, FieldValue, HeightmapType, Item, Property, StateProvider, TagGroup,
-    VersionData,
+    ExtractedStack, FieldValue, HeightmapType, Item, Property, PropertyKind, StateProvider,
+    TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -549,7 +549,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PushReaction}};"
+        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PropertyKind, PushReaction}};"
     );
     let _ = writeln!(out, "use crate::tags::block_tags;\n");
     let _ = writeln!(out, "/// 方块状态的总数，决定了全局调色板的位数。");
@@ -642,8 +642,17 @@ fn property_list(properties: &[Property]) -> String {
     let items: Vec<String> = properties
         .iter()
         .map(|property| {
+            let kind = match &property.kind {
+                PropertyKind::Integer { min, max } => {
+                    format!("PropertyKind::Integer {{ min: {min}, max: {max} }}")
+                }
+                PropertyKind::Boolean => "PropertyKind::Boolean".to_owned(),
+                PropertyKind::Enum { ordinals } => {
+                    format!("PropertyKind::Enum {{ ordinals: &{ordinals:?} }}")
+                }
+            };
             format!(
-                "PropertyDef {{ name: {:?}, values: &{:?} }}",
+                "PropertyDef {{ name: {:?}, values: &{:?}, kind: {kind} }}",
                 property.name, property.values
             )
         })
@@ -724,6 +733,56 @@ fn check_properties(blocks: &[Block]) -> Result<(), String> {
                 block.name,
                 block.states.len()
             ));
+        }
+        for property in &block.properties {
+            check_property_kind(&block.name, property)?;
+        }
+    }
+    Ok(())
+}
+
+/// 属性的取值列表要和官方类型对得上：整数是连续的 `min..=max`，布尔是 `[true, false]`，
+/// 枚举的序号和取值一一对应。区间匹配靠的就是这些类型和顺序。
+fn check_property_kind(block: &str, property: &Property) -> Result<(), String> {
+    match &property.kind {
+        PropertyKind::Integer { min, max } => {
+            let parsed = property
+                .values
+                .iter()
+                .map(|value| {
+                    value.parse::<i32>().map_err(|_| {
+                        format!(
+                            "{block} 的属性 {} 是 IntegerProperty，却有不是整数的取值 {value}",
+                            property.name
+                        )
+                    })
+                })
+                .collect::<Result<Vec<i32>, String>>()?;
+            if parsed != (*min..=*max).collect::<Vec<i32>>() {
+                return Err(format!(
+                    "{block} 的属性 {} 是 IntegerProperty {min}..={max}，取值列表却是 {:?}",
+                    property.name, property.values
+                ));
+            }
+        }
+        PropertyKind::Boolean => {
+            if property.values != ["true", "false"] {
+                return Err(format!(
+                    "{block} 的属性 {} 是 BooleanProperty，取值列表却是 {:?}",
+                    property.name, property.values
+                ));
+            }
+        }
+        PropertyKind::Enum { ordinals } => {
+            let mut distinct = ordinals.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            if ordinals.len() != property.values.len() || distinct.len() != ordinals.len() {
+                return Err(format!(
+                    "{block} 的属性 {} 的枚举序号 {ordinals:?} 和取值列表 {:?} 对不上",
+                    property.name, property.values
+                ));
+            }
         }
     }
     Ok(())
@@ -2204,6 +2263,10 @@ mod tests {
         Property {
             name: "test".to_owned(),
             values: values.iter().map(|&value| value.to_owned()).collect(),
+            // 这里只关心状态数，给一个和取值列表一样长的枚举类型。
+            kind: PropertyKind::Enum {
+                ordinals: vec![0, 1],
+            },
         }
     }
 

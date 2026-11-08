@@ -48,10 +48,12 @@ impl Behaviour for Jukebox {
     }
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        // 方块实体的 `preRemoveSideEffects`：破坏时弹出唱片。方块已经换掉了，
-        // `notifyItemChangedInJukebox` 不再写方块。
-        // 这里不取 `popOutTheItem` 的两个随机数：oracle 里官方破坏唱片机后的随机数和不取时一致，
-        // 取了反而对不上（种子 31 只比唱片机，破坏题 86 题不同）。原因还没查清，查清前照 oracle 来。
+        // `JukeboxBlock.affectNeighborsAfterRemoval` 只有 `Containers.updateNeighboursAfterDestroy`，
+        // 不取随机数。两个 `nextFloat` 在更早的 `JukeboxBlockEntity.preRemoveSideEffects`：
+        // `LevelChunk.setBlockState` 先调它（`popOutTheItem`，物品非空才 `offsetRandomXZ`），
+        // 再调这个方法。数在 `block_entity::pre_remove_side_effects` 里已经取过，这里再取会错开后面的随机数。
+        // 方块此时已经换成空气，`notifyItemChangedInJukebox` 对不上旧状态，不会再写方块；
+        // 有唱片时 `popOutTheItem` 末尾的 `onSongChanged` 仍会通知邻居。
         if state.get(HAS_RECORD) {
             on_song_changed(state, world, pos);
         }

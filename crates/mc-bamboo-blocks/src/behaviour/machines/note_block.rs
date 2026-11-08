@@ -114,8 +114,8 @@ impl Behaviour for Note {
 
     /// `NoteBlock.triggerEvent`：算音高，取一个 `nextLong` 当音效种子。
     ///
-    /// 自定义头颅的声音要从上面那格的方块实体读，Bamboo 还没有头颅方块实体，
-    /// 按 `getCustomSoundId` 找不到处理：返回 `false`，官方也不会取随机数。
+    /// 上面是带 `note_block_sound` 的头颅时，官方用那个音效代替乐器表里的音效
+    /// （`getCustomSoundId`）。头颅上没有音效时官方直接返回 `false`，不取随机数。
     fn trigger_event(
         &self,
         state: BlockState,
@@ -131,7 +131,10 @@ impl Behaviour for Note {
         } else {
             pitch_from_note(note)
         };
-        if instrument == NoteBlockInstrument::CustomHead {
+        // 官方只读上面那一格的方块实体，没有音效就是 `null`，这时直接返回 `false`。
+        if instrument == NoteBlockInstrument::CustomHead
+            && world.note_block_sound(pos.above()).is_none()
+        {
             return false;
         }
         let seed = world.random().next_long();
@@ -278,5 +281,70 @@ mod tests {
         crate::attack(&mut level, &mut ticks, &actor, POS);
 
         assert_played_by_block_event(&mut level, &mut ticks, 0);
+    }
+
+    /// 上面一格放着头颅、乐器是 `CustomHead` 的音符盒，可选带一个头颅音效。
+    fn custom_head_level(sound: Option<&str>) -> TestLevel {
+        let mut level = level();
+        let state = level
+            .get(POS)
+            .with(NOTEBLOCK_INSTRUMENT, NoteBlockInstrument::CustomHead);
+        level.set(POS, state);
+        level.set(POS.above(), BlockState(blocks::PLAYER_HEAD));
+        if let Some(sound) = sound {
+            level
+                .note_block_sounds
+                .insert(POS.above(), sound.to_owned());
+        }
+        level
+    }
+
+    #[test]
+    fn a_custom_head_with_a_sound_is_played_and_takes_a_seed() {
+        let mut level = custom_head_level(Some("minecraft:ui.button.click"));
+        let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(POS));
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(played(&outcome).is_empty(), "声音要等下一 tick 的方块事件");
+
+        let (seed, seed_after) = next_long(&level);
+        let mut ticks = BlockTicks::new();
+        let outcome = crate::run_scheduled_ticks(&mut level, &mut ticks, 1);
+        // 头颅乐器的音高固定是 1，音调还是要带上。
+        assert_eq!(
+            played(&outcome),
+            [(NoteBlockInstrument::CustomHead, 1, 1.0, seed)]
+        );
+        assert!(
+            outcome
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::BlockEvent { .. })),
+            "拿到音效时 triggerEvent 返回 true，方块事件要广播"
+        );
+        assert_eq!(level.random.source().seed(), seed_after);
+    }
+
+    #[test]
+    fn a_custom_head_without_a_sound_returns_false_and_draws_no_random() {
+        let mut level = custom_head_level(None);
+        let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(POS));
+        assert_eq!(outcome.result, InteractionResult::Success);
+
+        let seed = level.random.source().seed();
+        let mut ticks = BlockTicks::new();
+        let outcome = crate::run_scheduled_ticks(&mut level, &mut ticks, 1);
+        assert!(played(&outcome).is_empty());
+        assert!(
+            !outcome
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::BlockEvent { .. })),
+            "triggerEvent 返回 false 时官方不广播方块事件"
+        );
+        assert_eq!(
+            level.random.source().seed(),
+            seed,
+            "没有音效时不取 nextLong"
+        );
     }
 }
