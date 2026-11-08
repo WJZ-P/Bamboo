@@ -611,6 +611,122 @@ fn hidden_mob_effects_stop_at_the_limit() {
 }
 
 #[test]
+fn the_checks_in_the_official_constructors_are_kept() {
+    // Enchantable 的值必须是正数。
+    let mut bytes = Vec::new();
+    write_varint(&mut bytes, 0);
+    assert_eq!(
+        decode(kinds::ENCHANTABLE, &bytes),
+        Err(DecodeError::InvalidComponentValue(
+            "enchantment value must be positive"
+        ))
+    );
+    let mut bytes = Vec::new();
+    write_varint(&mut bytes, 1);
+    assert_eq!(
+        decode(kinds::ENCHANTABLE, &bytes),
+        Ok(ComponentValue::Enchantable(1))
+    );
+
+    // 附魔等级在 0 到 255 之间。
+    let mut bytes = Vec::new();
+    write_varint(&mut bytes, 1);
+    write_varint(&mut bytes, 0);
+    write_varint(&mut bytes, 256);
+    assert_eq!(
+        decode(kinds::ENCHANTMENTS, &bytes),
+        Err(DecodeError::InvalidComponentValue(
+            "enchantment level is out of range"
+        ))
+    );
+
+    // 成书的代数在 0 到 3 之间。
+    let mut bytes = Vec::new();
+    write_string(&mut bytes, "t");
+    write_bool(&mut bytes, false);
+    write_string(&mut bytes, "a");
+    write_varint(&mut bytes, 4);
+    assert_eq!(
+        decode(kinds::WRITTEN_BOOK_CONTENT, &bytes),
+        Err(DecodeError::InvalidComponentValue(
+            "book generation is out of range"
+        ))
+    );
+}
+
+#[test]
+fn hash_backed_tables_lose_their_duplicates() {
+    // 同一个附魔出现两次时后面的等级赢。
+    let mut bytes = Vec::new();
+    write_varint(&mut bytes, 2);
+    write_varint(&mut bytes, 3);
+    write_varint(&mut bytes, 1);
+    write_varint(&mut bytes, 3);
+    write_varint(&mut bytes, 2);
+    assert_eq!(
+        decode(kinds::ENCHANTMENTS, &bytes),
+        Ok(ComponentValue::Enchantments(vec![(3, 2)]))
+    );
+
+    // tooltip_display 的隐藏列表是个集合。
+    let mut bytes = Vec::new();
+    write_bool(&mut bytes, false);
+    write_varint(&mut bytes, 3);
+    write_varint(&mut bytes, kinds::DAMAGE);
+    write_varint(&mut bytes, kinds::LORE);
+    write_varint(&mut bytes, kinds::DAMAGE);
+    assert_eq!(
+        decode(kinds::TOOLTIP_DISPLAY, &bytes),
+        Ok(ComponentValue::TooltipDisplay {
+            hide_tooltip: false,
+            hidden_components: vec![kinds::DAMAGE, kinds::LORE],
+        })
+    );
+}
+
+#[test]
+fn an_id_inside_the_entity_nbt_is_stripped() {
+    // 类型已经单独写了一遍，官方会把 NBT 里的 id 去掉。
+    let mut bytes = Vec::new();
+    write_varint(&mut bytes, 0);
+    write_nbt_tag(
+        &mut bytes,
+        &Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("x".to_owned())),
+            ("Health".to_owned(), Tag::Float(1.0)),
+        ]),
+    );
+    assert_eq!(
+        decode(kinds::ENTITY_DATA, &bytes),
+        Ok(ComponentValue::EntityData(value::TypedEntityData {
+            kind: 0,
+            tag: vec![("Health".to_owned(), Tag::Float(1.0))],
+        }))
+    );
+}
+
+#[test]
+fn a_mob_effect_amplifier_is_clamped_like_the_game() {
+    let mut bytes = Vec::new();
+    write_bool(&mut bytes, false);
+    write_bool(&mut bytes, false);
+    write_varint(&mut bytes, 1);
+    write_varint(&mut bytes, 0);
+    write_varint(&mut bytes, 300);
+    write_varint(&mut bytes, 0);
+    // ambient、show_particles、show_icon、没有 hidden_effect，最后是没有 custom_name。
+    for _ in 0..5 {
+        write_bool(&mut bytes, false);
+    }
+    let ComponentValue::PotionContents { custom_effects, .. } =
+        decode(kinds::POTION_CONTENTS, &bytes).expect("合法的药水")
+    else {
+        panic!("decoded the wrong component");
+    };
+    assert_eq!(custom_effects[0].details.amplifier, 255);
+}
+
+#[test]
 fn colors_are_big_endian_ints() {
     let mut bytes = Vec::new();
     write_i32(&mut bytes, 0x0012_3456);

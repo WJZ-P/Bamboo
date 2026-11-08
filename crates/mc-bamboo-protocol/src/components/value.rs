@@ -236,7 +236,9 @@ impl EffectDetails {
             ));
         }
         Ok(Self {
-            amplifier: cursor.varint()?,
+            // 官方 `MobEffectInstance` 的构造方法把放大等级夹在 0 到 255 之间，
+            // 写回去的也是夹过的值。
+            amplifier: cursor.varint()?.clamp(0, 255),
             duration: cursor.varint()?,
             ambient: cursor.bool()?,
             show_particles: cursor.bool()?,
@@ -817,10 +819,11 @@ pub struct TypedEntityData {
 
 impl TypedEntityData {
     pub fn read(cursor: &mut Cursor<'_>, registry: Registry) -> Result<Self, DecodeError> {
-        Ok(Self {
-            kind: cursor.registry_id(registry)?,
-            tag: cursor.nbt_compound()?,
-        })
+        let kind = cursor.registry_id(registry)?;
+        let mut tag = cursor.nbt_compound()?;
+        // 官方的构造方法走 `stripId`：类型已经单独写了，NBT 里的 `id` 一律去掉。
+        tag.retain(|(name, _)| name != "id");
+        Ok(Self { kind, tag })
     }
 
     pub fn write(&self, out: &mut Vec<u8>) {

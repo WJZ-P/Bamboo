@@ -63,6 +63,8 @@ const MAX_BOOK_PAGES: usize = 100;
 const MAX_WRITABLE_PAGE: usize = 1024;
 /// 官方 `WrittenBookContent.TITLE_MAX_LENGTH`。
 const MAX_BOOK_TITLE: usize = 32;
+/// 官方 `WrittenBookContent.MAX_GENERATION`。
+const MAX_BOOK_GENERATION: i32 = 3;
 
 /// 一种组件的值。变体的顺序和 `minecraft:data_component_type` 注册表一致。
 #[derive(Debug, Clone, PartialEq)]
@@ -438,9 +440,10 @@ impl ComponentValue {
             kinds::CUSTOM_MODEL_DATA => Self::CustomModelData(CustomModelData::read(cursor)?),
             kinds::TOOLTIP_DISPLAY => Self::TooltipDisplay {
                 hide_tooltip: cursor.bool()?,
-                hidden_components: cursor.list(usize::MAX, |cursor| {
+                // 官方存在 `ReferenceLinkedOpenHashSet` 里：保持顺序，重复的只留一份。
+                hidden_components: dedupe(cursor.list(usize::MAX, |cursor| {
                     cursor.registry_id(Registry::DATA_COMPONENT_TYPE)
-                })?,
+                })?),
             },
             kinds::REPAIR_COST => Self::RepairCost(cursor.varint()?),
             kinds::CREATIVE_SLOT_LOCK => Self::CreativeSlotLock,
@@ -488,7 +491,16 @@ impl ComponentValue {
                 hitbox_margin: cursor.f32()?,
                 mob_factor: cursor.f32()?,
             },
-            kinds::ENCHANTABLE => Self::Enchantable(cursor.varint()?),
+            kinds::ENCHANTABLE => {
+                // 官方 `Enchantable` 的构造方法要求这个值是正数。
+                let value = cursor.varint()?;
+                if value <= 0 {
+                    return Err(DecodeError::InvalidComponentValue(
+                        "enchantment value must be positive",
+                    ));
+                }
+                Self::Enchantable(value)
+            }
             kinds::EQUIPPABLE => Self::Equippable(Equippable::read(cursor)?),
             kinds::REPAIRABLE => Self::Repairable(cursor.holder_set(Registry::ITEM)?),
             kinds::GLIDER => Self::Glider,
@@ -560,13 +572,25 @@ impl ComponentValue {
                     Filterable::read(cursor, |cursor| cursor.string(MAX_WRITABLE_PAGE))
                 })?)
             }
-            kinds::WRITTEN_BOOK_CONTENT => Self::WrittenBookContent {
-                title: Filterable::read(cursor, |cursor| cursor.string(MAX_BOOK_TITLE))?,
-                author: cursor.string(MAX_STRING)?,
-                generation: cursor.varint()?,
-                pages: cursor.list(usize::MAX, |cursor| Filterable::read(cursor, text::read))?,
-                resolved: cursor.bool()?,
-            },
+            kinds::WRITTEN_BOOK_CONTENT => {
+                let title = Filterable::read(cursor, |cursor| cursor.string(MAX_BOOK_TITLE))?;
+                let author = cursor.string(MAX_STRING)?;
+                let generation = cursor.varint()?;
+                // 官方 `WrittenBookContent` 的构造方法要求代数在 0 到 3 之间。
+                if !(0..=MAX_BOOK_GENERATION).contains(&generation) {
+                    return Err(DecodeError::InvalidComponentValue(
+                        "book generation is out of range",
+                    ));
+                }
+                Self::WrittenBookContent {
+                    title,
+                    author,
+                    generation,
+                    pages: cursor
+                        .list(usize::MAX, |cursor| Filterable::read(cursor, text::read))?,
+                    resolved: cursor.bool()?,
+                }
+            }
             kinds::TRIM => Self::Trim {
                 material: TrimMaterial::read(cursor)?,
                 pattern: TrimPattern::read(cursor)?,
@@ -615,11 +639,12 @@ impl ComponentValue {
             kinds::CONTAINER => Self::Container(cursor.list(MAX_CONTAINER_SLOTS, |cursor| {
                 cursor.optional(ItemStackTemplate::read)
             })?),
-            kinds::BLOCK_STATE => Self::BlockState(cursor.map(
+            // 官方存在哈希映射里，同名的属性只留一份。
+            kinds::BLOCK_STATE => Self::BlockState(dedupe_by_key(cursor.map(
                 usize::MAX,
                 |cursor| cursor.string(MAX_STRING),
                 |cursor| cursor.string(MAX_STRING),
-            )?),
+            )?)),
             kinds::BEES => Self::Bees(cursor.list(usize::MAX, BeeOccupant::read)?),
             kinds::SULFUR_CUBE_CONTENT => Self::SulfurCubeContent(ItemStackTemplate::read(cursor)?),
             kinds::LOCK => Self::Lock(read_nbt_shaped(cursor, Shape::Compound)?),
@@ -1039,12 +1064,45 @@ impl ComponentValue {
 }
 
 /// 官方 `ItemEnchantments.STREAM_CODEC` 的映射表。
+///
+/// 官方的构造方法要求等级在 0 到 255 之间，映射表本身又会按附魔去重。
 fn read_enchantments(cursor: &mut Cursor<'_>) -> Result<Vec<(i32, i32)>, DecodeError> {
-    cursor.map(
+    let levels = cursor.map(
         usize::MAX,
         |cursor| cursor.registry_id(Registry::ENCHANTMENT),
         Cursor::varint,
-    )
+    )?;
+    for &(_, level) in &levels {
+        if !(0..=255).contains(&level) {
+            return Err(DecodeError::InvalidComponentValue(
+                "enchantment level is out of range",
+            ));
+        }
+    }
+    Ok(dedupe_by_key(levels))
+}
+
+/// 官方把这一项存在集合里，重复的元素只留第一次出现的那一份。
+fn dedupe(values: Vec<i32>) -> Vec<i32> {
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        if !result.contains(&value) {
+            result.push(value);
+        }
+    }
+    result
+}
+
+/// 官方把这些表存在哈希映射里，同一个键出现两次时后面的值赢，位置不变。
+fn dedupe_by_key<K: PartialEq, V>(entries: Vec<(K, V)>) -> Vec<(K, V)> {
+    let mut result: Vec<(K, V)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        match result.iter_mut().find(|(existing, _)| *existing == key) {
+            Some(entry) => entry.1 = value,
+            None => result.push((key, value)),
+        }
+    }
+    result
 }
 
 fn write_enchantments(out: &mut Vec<u8>, levels: &[(i32, i32)]) {
