@@ -49,6 +49,27 @@ impl ClientboundPacket for BlockUpdate {
     }
 }
 
+/// 让客户端播放方块动画，官方的 `ClientboundBlockEventPacket`。活塞伸出、收回靠它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEvent {
+    pub pos: BlockPos,
+    /// `minecraft:block` 注册表 ID，不是状态 ID。官方线上写的是 `writeByte` 的低 8 位。
+    pub block: i32,
+    pub param_a: i32,
+    pub param_b: i32,
+}
+
+impl ClientboundPacket for BlockEvent {
+    const ID: i32 = clientbound::BLOCK_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_block_pos(out, self.pos);
+        out.push(self.param_a as u8);
+        out.push(self.param_b as u8);
+        write_varint(out, self.block);
+    }
+}
+
 /// 一个区块段里这一 tick 改了不止一格，官方的 `ClientboundSectionBlocksUpdatePacket`。
 ///
 /// 只改了一格时官方发 [`BlockUpdate`]。客户端对两种包做的事一样，逐格写进世界。
@@ -386,6 +407,17 @@ mod tests {
             ..packet
         };
         assert_eq!(body(&cancelled), hex("01 00 00 02 00 00 00 8f c3 ff"));
+    }
+
+    #[test]
+    fn block_event_writes_the_block_and_two_bytes() {
+        let packet = BlockEvent {
+            pos: BlockPos::new(8, -60, 8),
+            block: 42,
+            param_a: 0,
+            param_b: 1,
+        };
+        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 00 01 2a"));
     }
 
     #[test]

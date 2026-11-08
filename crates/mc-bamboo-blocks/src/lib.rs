@@ -11,9 +11,8 @@
 //! 流体流动和光照引擎在别处算好，这里只读，见 [`World::schedule_fluid_tick`] 和
 //! [`World::raw_brightness`]。
 
-mod block_entity;
-
 pub mod behaviour;
+pub mod block_entity;
 pub mod context;
 pub mod fluid;
 pub mod interact;
@@ -32,9 +31,12 @@ pub mod world;
 mod testing;
 
 pub use behaviour::Behaviour;
+pub use behaviour::machines::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
+pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
-    InteractionResult, Outcome, attack, destroy_block, run_scheduled_ticks, use_item, use_item_on,
+    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
+    use_item, use_item_on,
 };
 pub use level::{Effect, Level, RedstoneMemory};
 pub use random::{LegacyRandom, LevelRandom};

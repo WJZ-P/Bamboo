@@ -15,6 +15,9 @@ oracle = [
     "dep:mc-bamboo-blocks",
     "dep:mc-bamboo-core",
     "dep:mc-bamboo-data",
+    "dep:mc-bamboo-game",
+    "dep:mc-bamboo-protocol",
+    "dep:mc-bamboo-recipes",
     "dep:mc-bamboo-world",
 ]
 # probe 里开了 online_mode 的那一项检查，要在工具进程里再起一个服务端。
@@ -24,6 +27,9 @@ probe-online = ["dep:mc-bamboo-server", "dep:tokio"]
 mc-bamboo-blocks = { workspace = true, optional = true }
 mc-bamboo-core = { workspace = true, optional = true }
 mc-bamboo-data = { workspace = true, optional = true }
+mc-bamboo-game = { workspace = true, optional = true }
+mc-bamboo-protocol = { workspace = true, optional = true }
+mc-bamboo-recipes = { workspace = true, optional = true }
 mc-bamboo-server = { workspace = true, optional = true }
 mc-bamboo-world = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }

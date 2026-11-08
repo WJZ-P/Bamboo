@@ -46,6 +46,8 @@ impl InteractionResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub result: InteractionResult,
+    /// 这次点击走了方块的 `useWithoutItem`。容器就是在这里打开的，调用方要接着接线。
+    pub used_without_item: bool,
     pub effects: Vec<Effect>,
 }
 
@@ -58,8 +60,12 @@ pub fn use_item_on(
     hit: &BlockHit,
 ) -> Outcome {
     let mut world = World::new(level, ticks);
-    let result = run_use_item_on(&mut world, actor, hand, *hit);
-    finish(world, result)
+    let (result, used_without_item) = run_use_item_on(&mut world, actor, hand, *hit);
+    Outcome {
+        result,
+        used_without_item,
+        effects: world.into_effects(),
+    }
 }
 
 fn run_use_item_on(
@@ -67,32 +73,38 @@ fn run_use_item_on(
     actor: &Actor,
     hand: Hand,
     hit: BlockHit,
-) -> InteractionResult {
+) -> (InteractionResult, bool) {
     let state = world.block_state(hit.pos);
     let ctx = UseContext::new(actor, hand, hit);
     let holds_something = actor.main_hand != items::AIR || actor.off_hand != items::AIR;
     if !(actor.secondary_use && holds_something)
-        && let Some(result) = use_block(state, world, &ctx)
+        && let Some((result, used_without_item)) = use_block(state, world, &ctx)
     {
-        return result;
+        return (result, used_without_item);
     }
     if ctx.hand_is_empty() {
-        InteractionResult::Pass
+        (InteractionResult::Pass, false)
     } else {
-        placement::use_on(world, &ctx)
+        (placement::use_on(world, &ctx), false)
     }
 }
 
 /// 方块自己的右键。不消耗这次点击时返回 `None`，官方接着让物品试。
-fn use_block(state: BlockState, world: &mut World, ctx: &UseContext) -> Option<InteractionResult> {
+///
+/// 第二个返回值表示结果来自 `useWithoutItem`。
+fn use_block(
+    state: BlockState,
+    world: &mut World,
+    ctx: &UseContext,
+) -> Option<(InteractionResult, bool)> {
     let item_use = state.use_item_on(world, ctx);
     if item_use.consumes_action() {
-        return Some(item_use);
+        return Some((item_use, false));
     }
     if item_use == InteractionResult::TryEmptyHandInteraction && ctx.hand == Hand::Main {
         let hand_use = state.use_without_item(world, ctx);
         if hand_use.consumes_action() {
-            return Some(hand_use);
+            return Some((hand_use, true));
         }
     }
     None
@@ -144,31 +156,53 @@ pub fn destroy_block(
     if state.is_a(BlockAncestor::GameMasterBlock) {
         return finish(world, InteractionResult::Fail);
     }
-    state.player_will_destroy(&mut world, pos, actor);
-    world.remove_block(pos);
+    let state = state.player_will_destroy(&mut world, pos, actor);
+    if world.remove_block(pos) {
+        state.destroy(&mut world, pos);
+    }
     finish(world, InteractionResult::Success)
 }
 
-/// 到期的计划刻，`now` 是这一刻的 `gameTime`。和官方 `ServerLevel.tick` 一样先跑方块的，再跑流体的。
+/// 一刻里的世界，`now` 是这一刻的 `gameTime`。
+///
+/// 和官方 `ServerLevel.tick` 一样按顺序跑：到期的方块刻、到期的流体刻、方块事件、方块实体。
 pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
     ticks.collect_due(now);
-    let mut world = World::new(level, ticks);
-    while let Some((pos, block)) = world.ticks_mut().next_due() {
-        let state = world.block_state(pos);
-        if state.block_id() == block {
-            state.tick(&mut world, pos);
-        }
-    }
+    let mut world = World::in_world_tick(level, ticks);
+    run_block_ticks(&mut world);
     world.ticks_mut().collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
         fluid::tick(&mut world, pos, fluid);
     }
+    world.run_block_events();
+    world.end_handling_tick();
+    world.tick_block_entities();
     finish(world, InteractionResult::Pass)
+}
+
+/// oracle 的 tick 题：官方的题在动作里直接调用这一格的 `state.tick`，还没进 `ServerLevel.tick`，
+/// 所以只跑到期的方块刻，流体刻、方块事件和方块实体都留到后面的刻。
+pub fn run_action_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
+    ticks.collect_due(now);
+    let mut world = World::new(level, ticks);
+    run_block_ticks(&mut world);
+    finish(world, InteractionResult::Pass)
+}
+
+/// 到期的方块计划刻，`ServerLevel.tick` 和 tick 题的动作都用这一段。
+fn run_block_ticks(world: &mut World) {
+    while let Some((pos, block)) = world.ticks_mut().next_due() {
+        let state = world.block_state(pos);
+        if state.block_id() == block {
+            state.tick(world, pos);
+        }
+    }
 }
 
 pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
     Outcome {
         result,
+        used_without_item: false,
         effects: world.into_effects(),
     }
 }
@@ -217,6 +251,27 @@ mod tests {
         let outcome = click(&mut level, &actor, top_hit(FLOOR));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert!(level.get(FLOOR.above()).is(blocks::DIRT));
+    }
+
+    #[test]
+    fn using_a_chest_reports_the_empty_hand_path() {
+        let mut level = level();
+        level.set(FLOOR.above(), BlockState(blocks::CHEST).default_state());
+        let outcome = click(
+            &mut level,
+            &actor_holding(items::AIR),
+            top_hit(FLOOR.above()),
+        );
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(outcome.used_without_item);
+    }
+
+    #[test]
+    fn a_plain_block_with_an_empty_hand_does_not_use_the_empty_hand_path() {
+        let mut level = level();
+        let outcome = click(&mut level, &actor_holding(items::AIR), top_hit(FLOOR));
+        assert_eq!(outcome.result, InteractionResult::Pass);
+        assert!(!outcome.used_without_item);
     }
 
     #[test]

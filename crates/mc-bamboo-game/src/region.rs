@@ -9,8 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mc_bamboo_blocks::{BlockTicks, LevelRandom, RedstoneMemory};
-use mc_bamboo_core::{ChunkPos, Vec3};
+use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameMode,
@@ -21,10 +21,12 @@ use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 use crate::{
     chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
+    container::ContainerEntry,
     global::GameTime,
     inbound::{JoinRequest, PlayerId},
     interaction::{BlockChanges, level::RegionLevel},
     links::Links,
+    menu::Menu,
     movement,
     player::Player,
 };
@@ -76,6 +78,16 @@ impl RegionTick {
     pub(crate) fn since(self, earlier: Self) -> u64 {
         self.0.saturating_sub(earlier.0)
     }
+
+    /// `later` 个 tick 之后。
+    pub(crate) fn plus(self, later: u64) -> Self {
+        Self(self.0.saturating_add(later))
+    }
+
+    /// 是否已经到了 `at` 这一刻。这一 tick 开始时增长，所以到期的刻在自己这一 tick 跑。
+    pub(crate) fn reached(self, at: Self) -> bool {
+        self.0 >= at.0
+    }
 }
 
 /// 世界的一块区域。`players` 和 `links` 是两个字段，遍历玩家时可以写链路。
@@ -94,6 +106,14 @@ pub(crate) struct Region {
     pub(crate) light_changes: BTreeMap<ChunkPos, LightChanges>,
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
+    /// 有内容的方块实体，按位置索引。只在这个区域里存在，没有持久化。
+    pub(crate) containers: BTreeMap<BlockPos, ContainerEntry>,
+    /// 每名玩家打开的菜单。物品栏菜单不在里面，它没有状态要同步。
+    pub(crate) menus: BTreeMap<PlayerId, Menu>,
+    /// 活塞这类会动的方块实体。
+    block_entities: BlockEntities,
+    /// 等这一刻末尾处理的方块事件，官方的 `Level.blockEvents`。
+    block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
     /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
@@ -132,6 +152,10 @@ impl Region {
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
+            containers: BTreeMap::new(),
+            menus: BTreeMap::new(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
@@ -153,6 +177,8 @@ impl Region {
             players: &self.players,
             random: &self.random,
             redstone: &mut self.redstone,
+            block_entities: &mut self.block_entities,
+            block_events: &mut self.block_events,
         };
         (level, &mut self.block_ticks)
     }
@@ -251,6 +277,20 @@ mod tests {
 
         assert_eq!(region.tick.since(start), 21);
         assert_eq!(start.since(region.tick), 0);
+    }
+
+    #[test]
+    fn a_scheduled_tick_runs_on_its_own_tick() {
+        let mut region = Region::new(2, 20, false);
+        let start = region.tick;
+        let at = start.plus(5);
+
+        for _ in 0..4 {
+            region.advance_tick();
+            assert!(!region.tick.reached(at));
+        }
+        region.advance_tick();
+        assert!(region.tick.reached(at));
     }
 
     #[test]

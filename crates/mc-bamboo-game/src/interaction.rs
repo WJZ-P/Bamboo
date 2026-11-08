@@ -17,8 +17,8 @@ use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{items, registries::attribute_defaults};
 use mc_bamboo_protocol::{
     packet::play::{
-        BlockChangedAck, BlockUpdate, GameMode, LevelEvent, OpenSignEditor, PlayerActionKind,
-        SystemChat,
+        BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
+        PlayerActionKind, SystemChat,
     },
     text::{Color, Component},
 };
@@ -26,12 +26,12 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    entity_sync,
+    container, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory,
     links::{Links, encode_frames},
-    movement,
+    menu, movement,
     player::Player,
     region::Region,
 };
@@ -43,6 +43,8 @@ const SIMULATION_DISTANCE: i32 = 10;
 const BONE_MEAL_EVENT: i32 = 1505;
 /// 骨粉事件的数据：粒子的数量。
 const BONE_MEAL_PARTICLES: i32 = 15;
+/// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
+pub(crate) const BLOCK_INTERACTION_RANGE: f64 = 5.0;
 /// 官方判定时多给的一格，服务端记录的位置可能比客户端晚一点。
 const REACH_BUFFER: f64 = 1.0;
 /// 点击点离方块中心的最大偏差，官方的比较是严格小于。
@@ -177,6 +179,8 @@ fn actor_of(player: &Player) -> Actor {
         block_interaction_range: interaction_range(player.game_mode),
         // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
+        // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
+        prevents_block_drops: matches!(player.game_mode, GameMode::Creative),
     }
 }
 
@@ -249,8 +253,8 @@ pub(crate) fn on_player_action(
     }
 }
 
-/// 把方块逻辑留下的结果发出去。`initiator` 是发起动作的玩家，计划刻没有发起者。
-fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
+/// 把方块逻辑留下的结果发出去。`initiator` 是发起动作的玩家，计划刻和容器开合没有发起者。
+pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
             Effect::Destroyed {
@@ -258,12 +262,15 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                 state,
                 except_initiator,
             } => {
+                // 容器里的东西没有掉落物，等打开着的菜单关掉后一起丢掉。
+                container::on_block_destroyed(region, pos);
                 let except = initiator.filter(|_| except_initiator);
                 let event = LevelEvent::destroy_block(pos, state.0 as i32);
-                send_level_event(region, except, &event);
+                send_level_event(region, except, pos, &event);
             }
             Effect::TorchBurnout { pos } => {
-                send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
+                let event = LevelEvent::redstone_torch_burnout(pos);
+                send_level_event(region, None, pos, &event);
             }
             Effect::FilledBucket { item } => {
                 if let Some(id) = initiator {
@@ -277,12 +284,33 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                     data: BONE_MEAL_PARTICLES,
                     global: false,
                 };
-                send_level_event(region, None, &event);
+                send_level_event(region, None, pos, &event);
             }
             // `markUpdated` 的 `sendBlockUpdated`：方块没变，广播阶段照样重发这一格。
             Effect::SignChanged { pos } => region.block_changes.changed.push(pos),
             Effect::SignWaxed { pos } => {
-                send_level_event(region, None, &LevelEvent::wax_on_sign(pos));
+                let event = LevelEvent::wax_on_sign(pos);
+                send_level_event(region, None, pos, &event);
+            }
+            // 活塞伸出、收回的动画。官方广播给 64 格内的所有玩家，发起者也要。
+            Effect::BlockEvent {
+                pos,
+                block,
+                param_a,
+                param_b,
+            } => {
+                let block = i32::try_from(block).expect("方块注册表 ID 放得进 i32");
+                send_level_event(
+                    region,
+                    None,
+                    pos,
+                    &BlockEvent {
+                        pos,
+                        block,
+                        param_a,
+                        param_b,
+                    },
+                );
             }
             // `openTextEdit` 只给登记的编辑者发，它一定就是发起者。
             Effect::OpenSignEditor { pos, slot } => {
@@ -296,17 +324,22 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
     }
 }
 
-/// 世界事件的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
-fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
+/// 世界事件和方块事件的粒子和动画发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
+fn send_level_event(
+    region: &mut Region,
+    except: Option<PlayerId>,
+    pos: BlockPos,
+    event: &impl mc_bamboo_protocol::packet::ClientboundPacket,
+) {
     let frames = encode_frames(event);
     for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, event.pos) {
+        if Some(player.id) != except && hears_level_event(player, pos) {
             region.links.send_frames(player.id, &frames);
         }
     }
 }
 
-fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
+pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
     let Vec3 { x, y, z } = player.position;
     let dx = f64::from(pos.x) - x;
     let dy = f64::from(pos.y) - y;
@@ -400,6 +433,10 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let outcome = mc_bamboo_blocks::use_item_on(&mut level, ticks, &actor, packet.hand, &hit);
 
     send_effects(region, Some(id), &outcome.effects);
+    // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
+    if outcome.used_without_item {
+        menu::open_block(region, id, packet.pos);
+    }
     if is_placement_attempt && !outcome.result.consumes_action() {
         send_limit_hint(&mut region.links, id, packet);
     }

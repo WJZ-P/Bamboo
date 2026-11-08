@@ -37,6 +37,26 @@ pub enum DecodeError {
     InvalidItem(i32),
     #[error("invalid item count {0}")]
     InvalidItemCount(i32),
+    #[error("invalid data component type {0}")]
+    InvalidComponentType(i32),
+    #[error("malformed NBT: {0}")]
+    Nbt(#[from] mc_bamboo_nbt::DecodeError),
+    #[error("not a valid resource location")]
+    InvalidIdentifier,
+    #[error("unknown data component type {0}")]
+    UnknownComponent(i32),
+    #[error("data component type {0} appears twice in one patch")]
+    DuplicateComponent(i32),
+    #[error("id {id} is not registered in {registry}")]
+    UnknownRegistryId { registry: &'static str, id: i32 },
+    #[error("{registry} has no tag with this name")]
+    UnknownTag { registry: &'static str },
+    #[error("item stacks are nested deeper than {max_depth}")]
+    StacksTooDeep { max_depth: u32 },
+    #[error("component value is out of range: {0}")]
+    InvalidComponentValue(&'static str),
+    #[error("malformed text component: {0}")]
+    InvalidTextComponent(&'static str),
 }
 
 /// 从 `input` 开头解码一个 VarInt，返回它的值和占用的字节数。
@@ -270,6 +290,11 @@ impl<'a> Reader<'a> {
 
     /// 取走还没读的全部字节。
     pub fn rest(self) -> &'a [u8] {
+        self.input
+    }
+
+    /// 还没读的字节，不移动游标。
+    pub const fn remaining(&self) -> &'a [u8] {
         self.input
     }
 

@@ -18,7 +18,7 @@ mod stairs;
 mod trapdoor;
 mod wall;
 
-use mc_bamboo_core::Direction;
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::BlockClass;
 
 use self::{
@@ -41,6 +41,7 @@ use super::Behaviour;
 use crate::{
     context::PlaceContext,
     state::{BlockState, SupportType},
+    world::World,
 };
 
 /// 这个家族里类到行为的分派。新版本多出来、还没移植的类是 `None`。
@@ -76,13 +77,13 @@ fn clicked_upper_half(ctx: &PlaceContext) -> bool {
     ctx.click_location().y - f64::from(ctx.clicked_pos().y) > 0.5
 }
 
-/// `isFaceSturdy(level, pos, face)`：这个状态的这个面是完整的。
+/// `state.isFaceSturdy(level, pos, face)`：这个状态的这个面是完整的。
 ///
-/// 形状更新拿到的邻居可能比世界里的新，也可能比世界里的旧，所以不用
-/// [`World::is_face_sturdy`](crate::World::is_face_sturdy) 重新读世界。
-/// 形状跟着渲染偏移走的方块都不是整面，查表的结果在任何位置上都对。
-fn has_full_face(state: BlockState, face: Direction) -> bool {
-    state.is_face_sturdy(face, SupportType::Full)
+/// 形状更新拿到的邻居可能比世界里的新，也可能比世界里的旧，所以按传进来的状态算，不重新读世界；
+/// 邻居是 `moving_piston` 时形状来自 `pos` 上的方块实体，见
+/// [`World::is_state_face_sturdy`](crate::World::is_state_face_sturdy)。
+fn has_full_face(world: &World, pos: BlockPos, state: BlockState, face: Direction) -> bool {
+    world.is_state_face_sturdy(state, pos, face, SupportType::Full)
 }
 
 #[cfg(test)]
@@ -138,7 +139,7 @@ mod tests {
     use super::*;
     use crate::shape;
 
-    /// [`has_full_face`] 不看位置的依据。
+    /// 查表的 `is_face_sturdy` 对这些方块不看位置也对的依据。
     #[test]
     fn shapes_that_follow_the_render_offset_never_have_a_full_face() {
         let samples = [BlockPos::new(0, 0, 0), BlockPos::new(5, 0, -7)];
@@ -149,7 +150,11 @@ mod tests {
             for id in block.first_state..block.first_state + state_count(block) {
                 let state = BlockState(id);
                 for face in Direction::ALL {
-                    assert!(!has_full_face(state, face), "{}", block.name);
+                    assert!(
+                        !state.is_face_sturdy(face, SupportType::Full),
+                        "{}",
+                        block.name
+                    );
                     for pos in samples {
                         let boxes = shape::support_boxes(state, pos);
                         assert!(!shape::is_face_full(&boxes, face), "{}", block.name);

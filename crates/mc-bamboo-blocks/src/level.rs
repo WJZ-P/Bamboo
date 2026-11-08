@@ -8,6 +8,7 @@ use mc_bamboo_core::{
 };
 
 use crate::{
+    block_entity::{BlockEntities, BlockEvents},
     random::LevelRandom,
     shape::Aabb,
     state::{BlockState, NoteBlockInstrument},
@@ -19,7 +20,10 @@ pub trait Level {
     fn block_state(&self, pos: BlockPos) -> BlockState;
 
     /// 写入一格，不做任何连锁。高度超出世界时什么也不做，返回 `false`。
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool;
+    ///
+    /// `flags` 是 [`set_block`](crate::World::set_block) 的那一组，存储只需要看
+    /// [`UPDATE_CLIENTS`](crate::world::UPDATE_CLIENTS)：官方只在带这个标记时才把改动发给客户端。
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool;
 
     /// 这些盒子（世界坐标）和所有挡路的实体都没有正体积重叠。
     fn is_unobstructed(&self, boxes: &[Aabb]) -> bool;
@@ -51,6 +55,15 @@ pub trait Level {
 
     /// 改写告示牌的内容，对应 `SignBlockEntity` 里那几个字段。不是告示牌方块时返回 `false`。
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool;
+
+    /// 这一格的方块实体和它们的 ticker。
+    fn block_entities(&self) -> &BlockEntities;
+
+    /// 见 [`Level::block_entities`]。
+    fn block_entities_mut(&mut self) -> &mut BlockEntities;
+
+    /// `Level.blockEvents`：`level.blockEvent` 排进来的事件。
+    fn block_events(&mut self) -> &mut BlockEvents;
 
     /// 红石用到的、方块状态装不下的世界数据。
     fn redstone(&self) -> &RedstoneMemory;
@@ -143,7 +156,7 @@ impl RedstoneMemory {
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
@@ -165,16 +178,23 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
-    /// 音符盒被敲响，`NoteBlock.triggerEvent`。`seed` 是官方传给 `playSeededSound` 的那个随机数。
+    /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
+    /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///
-    /// 官方把方块事件排进队列，下一 tick 的 `ServerLevel.runBlockEvents` 才取这个随机数
-    /// （在随机刻之后、实体刻之前）；Bamboo 没有方块事件队列，在开始挖的时候就取了，
-    /// 取数次数一样，在随机序列里的位置不一样。声音和粒子还没做，
-    /// 音效那边要的音色、音高和随机数都在这里。
+    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里。
     NoteBlockPlayed {
         pos: BlockPos,
         instrument: NoteBlockInstrument,
         note: i32,
+        pitch: f32,
         seed: i64,
+    },
+    /// `ServerLevel.runBlockEvents` 里的 `ClientboundBlockEventPacket`：方块事件处理成功了，
+    /// 把这一项发给附近 64 格内的玩家。`block` 是方块的注册表 ID，官方包里的第三个字段。
+    BlockEvent {
+        pos: BlockPos,
+        block: usize,
+        param_a: i32,
+        param_b: i32,
     },
 }

@@ -39,9 +39,221 @@ pub struct Extracted {
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
+    pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
     /// 属性名字 → 默认值，没有状态效果和附魔时的起点。
     pub attribute_defaults: BTreeMap<String, f64>,
+    pub component_enums: ComponentEnums,
+    /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+    pub item_components: Vec<String>,
+}
+
+/// 按 ID 查表的枚举：连续的只有常量个数，稀疏的是整张 ID 表。
+#[derive(Debug, Deserialize)]
+pub struct ComponentEnums {
+    /// 枚举名 → 常量个数。
+    pub counts: BTreeMap<String, u32>,
+    /// 枚举名 → 按声明顺序的 ID。
+    pub sparse: BTreeMap<String, Vec<i32>>,
+}
+
+/// 官方数据包的全部配方，`entries` 的顺序就是注册表的顺序。
+#[derive(Debug, Deserialize)]
+pub struct RecipesFile {
+    /// 药水注册表的条目名，下标就是 ID。
+    pub potions: Vec<String>,
+    /// 默认物品栈带 `max_damage` 和 `damage` 的物品注册表 ID。修复物品配方要求这两样都在。
+    /// 由 Rust 从物品组件报告里补上，官方 `Extractor` 不导出。
+    #[serde(default)]
+    pub damageable: Vec<i32>,
+    /// 默认物品栈带 `dye` 组件的物品注册表 ID。染色类配方要求染料物品有这个组件。
+    #[serde(default)]
+    pub dyed: Vec<i32>,
+    pub entries: Vec<ExtractedRecipe>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtractedRecipe {
+    pub id: String,
+    /// `RecipeSerializer` 的注册表键，比如 `minecraft:crafting_shaped`。
+    #[serde(rename = "type")]
+    pub serializer: String,
+    #[serde(flatten)]
+    pub kind: ExtractedRecipeKind,
+}
+
+/// `Extractor.java` 按官方的类分出来的配方。字段和那边的 JSON 一一对应。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtractedRecipeKind {
+    Shaped {
+        width: u8,
+        height: u8,
+        pattern: Vec<Option<ExtractedIngredient>>,
+        result: ExtractedStack,
+    },
+    Shapeless {
+        ingredients: Vec<ExtractedIngredient>,
+        result: ExtractedStack,
+    },
+    Transmute {
+        input: ExtractedIngredient,
+        material: ExtractedIngredient,
+        #[serde(rename = "minMaterial")]
+        min_material: i32,
+        #[serde(rename = "maxMaterial")]
+        max_material: i32,
+        #[serde(rename = "resultItem")]
+        result_item: Option<i32>,
+        #[serde(rename = "resultCount")]
+        result_count: i32,
+        #[serde(rename = "resultHasComponents")]
+        result_has_components: bool,
+        #[serde(rename = "addMaterialCount")]
+        add_material_count: bool,
+    },
+    Dye {
+        target: ExtractedIngredient,
+        dye: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    Imbue {
+        source: ExtractedIngredient,
+        material: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    /// 四种烹饪配方共用。`kind` 由 `Extractor.java` 写成 `smelting`、`blasting` 等。
+    Smelting {
+        ingredient: ExtractedIngredient,
+        result: ExtractedStack,
+        experience: f32,
+        time: i32,
+    },
+    Blasting {
+        ingredient: ExtractedIngredient,
+        result: ExtractedStack,
+        experience: f32,
+        time: i32,
+    },
+    Smoking {
+        ingredient: ExtractedIngredient,
+        result: ExtractedStack,
+        experience: f32,
+        time: i32,
+    },
+    CampfireCooking {
+        ingredient: ExtractedIngredient,
+        result: ExtractedStack,
+        experience: f32,
+        time: i32,
+    },
+    Stonecutting {
+        ingredient: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    SmithingTransform {
+        template: Option<ExtractedIngredient>,
+        base: ExtractedIngredient,
+        addition: Option<ExtractedIngredient>,
+        result: ExtractedStack,
+    },
+    SmithingTrim {
+        template: ExtractedIngredient,
+        base: ExtractedIngredient,
+        addition: ExtractedIngredient,
+        /// `TrimPattern` 的注册表键。
+        pattern: String,
+    },
+    Brewing {
+        input: ExtractedPotionIngredient,
+        reagent: ExtractedPotionIngredient,
+        result: ExtractedStack,
+    },
+    FireworkRocket {
+        shell: ExtractedIngredient,
+        fuel: ExtractedIngredient,
+        star: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    FireworkStar {
+        shapes: Vec<ExtractedShape>,
+        trail: ExtractedIngredient,
+        twinkle: ExtractedIngredient,
+        fuel: ExtractedIngredient,
+        dye: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    FireworkStarFade {
+        target: ExtractedIngredient,
+        dye: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    Mapextending {
+        map: ExtractedIngredient,
+        material: ExtractedIngredient,
+        #[serde(rename = "resultItem")]
+        result_item: Option<i32>,
+        #[serde(rename = "resultCount")]
+        result_count: i32,
+        #[serde(rename = "resultHasComponents")]
+        result_has_components: bool,
+    },
+    BannerDuplicate {
+        banner: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    BookCloning {
+        source: ExtractedIngredient,
+        material: ExtractedIngredient,
+        #[serde(rename = "minGeneration")]
+        min_generation: i32,
+        #[serde(rename = "maxGeneration")]
+        max_generation: i32,
+        result: ExtractedStack,
+    },
+    ShieldDecoration {
+        banner: ExtractedIngredient,
+        target: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+    RepairItem,
+    DecoratedPot {
+        back: ExtractedIngredient,
+        left: ExtractedIngredient,
+        right: ExtractedIngredient,
+        front: ExtractedIngredient,
+        result: ExtractedStack,
+    },
+}
+
+/// 展开成物品 ID 的原料。`items` 升序、不重复。
+#[derive(Debug, Deserialize)]
+pub struct ExtractedIngredient {
+    /// 原料本来是一个标签时才有。
+    pub tag: Option<String>,
+    pub items: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedStack {
+    pub item: i32,
+    pub count: i32,
+    pub has_components: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtractedPotionIngredient {
+    pub item: ExtractedIngredient,
+    /// 药水注册表 ID。官方数据包只用了直接列出药水的写法。
+    pub potions: Option<Vec<i32>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtractedShape {
+    /// `FireworkExplosion.Shape` 的序列化名，比如 `burst`。
+    pub shape: String,
+    pub ingredient: ExtractedIngredient,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +307,10 @@ pub struct Block {
     pub has_collision: bool,
     pub has_fluid: bool,
     pub two_blocks: bool,
+    /// 活塞推动时的反应，官方 `PushReaction` 名字的小写形式。
+    pub push_reaction: String,
+    /// 破坏速度是 -1：活塞推不动，也打不碎。
+    pub unbreakable: bool,
     pub block_entity_type: Option<i32>,
     /// 官方的类名，比如 `SlabBlock`。
     pub class: String,
@@ -355,6 +571,12 @@ struct ItemComponents {
     block_transformer: Option<String>,
     #[serde(rename = "minecraft:blocks_attacks")]
     blocks_attacks: Option<serde_json::Value>,
+    /// 修复物品配方要求输入带 `max_damage` 和 `damage`。
+    #[serde(rename = "minecraft:max_damage")]
+    max_damage: Option<serde_json::Value>,
+    /// 染色类配方要求染料物品带 `dye` 组件。
+    #[serde(rename = "minecraft:dye")]
+    dye: Option<serde_json::Value>,
 }
 
 /// 字段等于默认值时不写：`can_destroy_blocks_in_creative` 默认 `true`，
@@ -539,6 +761,7 @@ pub struct VersionData {
     pub block_maps: BlockMaps,
     /// 按名字排序。
     pub block_transformers: Vec<BlockTransformer>,
+    pub recipes: RecipesFile,
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
     /// 属性名字 → 默认值。
@@ -547,6 +770,10 @@ pub struct VersionData {
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
+    /// 组件里按 ID 查表的枚举。
+    pub component_enums: ComponentEnums,
+    /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+    pub item_components: Vec<String>,
 }
 
 pub fn run(
@@ -579,7 +806,7 @@ pub fn run(
         .enumerate()
         .map(|(id, block)| (block.name.clone(), id as i32))
         .collect();
-    let items = read_items(
+    let (items, damageable, dyed) = read_items(
         extracted.items,
         &reports.join("minecraft/components/item"),
         &extracted.block_maps.compost_layers,
@@ -598,10 +825,17 @@ pub fn run(
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
         block_transformers: extracted.block_transformers,
+        recipes: RecipesFile {
+            damageable,
+            dyed,
+            ..extracted.recipes
+        },
         heightmaps: extracted.heightmaps,
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
+        component_enums: extracted.component_enums,
+        item_components: extracted.item_components,
     })
 }
 
@@ -725,47 +959,60 @@ fn check_registry_order<'a>(
     }
 }
 
+/// `read_items` 的三份结果：物品表、带默认 `max_damage` 的 ID、带默认 `dye` 的 ID。
+type ItemTables = (Vec<Item>, Vec<i32>, Vec<i32>);
+
 /// 给物品补上组件报告里的数据。
+///
+/// 顺便收两份配方要用的物品 ID：带默认 `max_damage` 的，和带默认 `dye` 的。
+/// 列表下标就是注册表 ID，天然升序。
 fn read_items(
     extracted: Vec<ExtractedItem>,
     reports: &Path,
     compost_providers: &BTreeMap<String, serde_json::Value>,
     block_ids: &BTreeMap<String, i32>,
-) -> Result<Vec<Item>, String> {
-    extracted
-        .into_iter()
-        .map(|item| {
-            let file = item.name.strip_prefix("minecraft:").unwrap_or(&item.name);
-            let report: ItemReport = read_json(&reports.join(format!("{file}.json")))?;
-            let components = report.components;
-            let tool_allows = components
-                .tool
-                .as_ref()
-                .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
-            let tool = components
-                .tool
-                .map(|tool| read_tool(tool, &item.name, block_ids))
-                .transpose()?;
-            Ok(Item {
-                max_stack_size: components.max_stack_size,
-                can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
-                consumable: components.consumable.is_some(),
-                compostable: components
-                    .compostable
-                    .map(|component| compost_layers(&component.layers, compost_providers))
-                    .transpose()?,
-                jukebox_playable: components.jukebox_playable.is_some(),
-                block_transformer: components.block_transformer,
-                blocks_attacks: components.blocks_attacks.is_some(),
-                name: item.name,
-                class: item.class,
-                block: item.block,
-                wall_block: item.wall_block,
-                attachment: item.attachment,
-                tool,
-            })
-        })
-        .collect()
+) -> Result<ItemTables, String> {
+    let mut items = Vec::with_capacity(extracted.len());
+    let mut damageable = Vec::new();
+    let mut dyed = Vec::new();
+    for (id, item) in extracted.into_iter().enumerate() {
+        let file = item.name.strip_prefix("minecraft:").unwrap_or(&item.name);
+        let report: ItemReport = read_json(&reports.join(format!("{file}.json")))?;
+        let components = report.components;
+        if components.max_damage.is_some() {
+            damageable.push(id as i32);
+        }
+        if components.dye.is_some() {
+            dyed.push(id as i32);
+        }
+        let tool_allows = components
+            .tool
+            .as_ref()
+            .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
+        let tool = components
+            .tool
+            .map(|tool| read_tool(tool, &item.name, block_ids))
+            .transpose()?;
+        items.push(Item {
+            max_stack_size: components.max_stack_size,
+            can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
+            consumable: components.consumable.is_some(),
+            compostable: components
+                .compostable
+                .map(|component| compost_layers(&component.layers, compost_providers))
+                .transpose()?,
+            jukebox_playable: components.jukebox_playable.is_some(),
+            block_transformer: components.block_transformer,
+            blocks_attacks: components.blocks_attacks.is_some(),
+            name: item.name,
+            class: item.class,
+            block: item.block,
+            wall_block: item.wall_block,
+            attachment: item.attachment,
+            tool,
+        });
+    }
+    Ok((items, damageable, dyed))
 }
 
 /// 把组件报告里的工具规则解析成名字和方块 ID。工具规则里写的是方块标签名或者方块名。

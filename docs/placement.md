@@ -92,7 +92,7 @@ pub trait Level {
     /// 世界外返回 `void_air`。
     fn block_state(&self, pos: BlockPos) -> BlockState;
     /// 写入一格，不做任何连锁。高度超出世界时什么也不做，返回 `false`。
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool;
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool;
     /// 这些盒子（世界坐标）和所有挡路的实体都没有正体积重叠。
     fn is_unobstructed(&self, boxes: &[Aabb]) -> bool;
 }

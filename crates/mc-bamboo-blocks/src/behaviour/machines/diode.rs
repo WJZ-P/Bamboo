@@ -28,9 +28,9 @@ use crate::{
 /// `DiodeBlock`。
 struct Diode;
 
-/// `canSurviveOn`：形状跟着渲染偏移走的方块都撑不住，查表的结果在任何位置上都对。
-fn can_survive_on(state: BlockState) -> bool {
-    state.is_face_sturdy(Direction::Up, SupportType::Rigid)
+/// `canSurviveOn`：下面那一格是 `moving_piston` 时，形状来自它的方块实体。
+fn can_survive_on(world: &World, below: BlockPos, state: BlockState) -> bool {
+    world.is_state_face_sturdy(state, below, Direction::Up, SupportType::Rigid)
 }
 
 /// `updateNeighborsInFront`：输出的方向是 `facing` 的反方向。
@@ -351,7 +351,7 @@ impl Behaviour for Repeater {
         neighbor_pos: BlockPos,
         neighbor: BlockState,
     ) -> BlockState {
-        if direction == Direction::Down && !can_survive_on(neighbor) {
+        if direction == Direction::Down && !can_survive_on(world, neighbor_pos, neighbor) {
             return BlockState::AIR;
         }
         if direction.axis() != state.get(HORIZONTAL_FACING).axis() {
@@ -441,7 +441,7 @@ impl Behaviour for Comparator {
         neighbor_pos: BlockPos,
         neighbor: BlockState,
     ) -> BlockState {
-        if direction == Direction::Down && !can_survive_on(neighbor) {
+        if direction == Direction::Down && !can_survive_on(world, neighbor_pos, neighbor) {
             return BlockState::AIR;
         }
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)

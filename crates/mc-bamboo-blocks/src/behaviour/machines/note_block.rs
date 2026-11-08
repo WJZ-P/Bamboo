@@ -47,25 +47,19 @@ fn with_instrument(state: BlockState, world: &World, pos: BlockPos) -> BlockStat
 }
 
 /// `NoteBlock.playNote`：上面是头颅，或者上面是空气，敲下去才响。
+///
+/// 声音本身是下一 tick 的方块事件，见 [`Note::trigger_event`]。
 fn play_note(state: BlockState, world: &mut World, pos: BlockPos) {
     let instrument = state.get(NOTEBLOCK_INSTRUMENT);
     if !works_above_note_block(instrument) && !world.block_state(pos.above()).is_air() {
         return;
     }
-    // `triggerEvent`：头上有自定义声音的头颅时要找方块实体，没有就什么都不放。
-    // 头颅的方块实体还没有，`getCustomSoundId` 按找不到算，官方此时直接返回、不取随机数。
-    if instrument == NoteBlockInstrument::CustomHead {
-        return;
-    }
-    // 官方在方块事件阶段取一次 `nextLong` 当声音的随机种子，见 `Effect::NoteBlockPlayed`。
-    let seed = world.random().next_long();
-    let note = state.get(NOTE);
-    world.push_effect(Effect::NoteBlockPlayed {
-        pos,
-        instrument,
-        note,
-        seed,
-    });
+    world.block_event(pos, state.block(), 0, 0);
+}
+
+/// `NoteBlock.getPitchFromNote`。
+fn pitch_from_note(note: i32) -> f32 {
+    2.0f64.powf(f64::from(note - 12) / 12.0) as f32
 }
 
 impl Behaviour for Note {
@@ -111,8 +105,44 @@ impl Behaviour for Note {
     ) {
         let signal = world.has_neighbor_signal(pos);
         if signal != state.get(POWERED) {
+            if signal {
+                play_note(state, world, pos);
+            }
             world.set_block_and_update(pos, state.with(POWERED, signal));
         }
+    }
+
+    /// `NoteBlock.triggerEvent`：算音高，取一个 `nextLong` 当音效种子。
+    ///
+    /// 自定义头颅的声音要从上面那格的方块实体读，Bamboo 还没有头颅方块实体，
+    /// 按 `getCustomSoundId` 找不到处理：返回 `false`，官方也不会取随机数。
+    fn trigger_event(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        _param_a: i32,
+        _param_b: i32,
+    ) -> bool {
+        let instrument = state.get(NOTEBLOCK_INSTRUMENT);
+        let note = state.get(NOTE);
+        let pitch = if works_above_note_block(instrument) {
+            1.0
+        } else {
+            pitch_from_note(note)
+        };
+        if instrument == NoteBlockInstrument::CustomHead {
+            return false;
+        }
+        let seed = world.random().next_long();
+        world.push_effect(Effect::NoteBlockPlayed {
+            pos,
+            instrument,
+            note,
+            pitch,
+            seed,
+        });
+        true
     }
 
     fn use_item_on(
@@ -134,7 +164,9 @@ impl Behaviour for Note {
         world: &mut World,
         ctx: &UseContext,
     ) -> InteractionResult {
-        world.set_block_and_update(ctx.clicked_pos(), state.cycle(NOTE));
+        let state = state.cycle(NOTE);
+        world.set_block_and_update(ctx.clicked_pos(), state);
+        play_note(state, world, ctx.clicked_pos());
         InteractionResult::Success
     }
 }

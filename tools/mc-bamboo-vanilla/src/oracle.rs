@@ -70,14 +70,13 @@ pub enum Rule {
     TimerTick,
     EntityTick,
     EntityRandomTick,
-    Piston,
     EntityTrigger,
     Dispensing,
     DaylightTimer,
 }
 
 impl Rule {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::AnalogInput,
         Self::EntityRandom,
         Self::RandomLoop,
@@ -93,7 +92,6 @@ impl Rule {
         Self::TimerTick,
         Self::EntityTick,
         Self::EntityRandomTick,
-        Self::Piston,
         Self::EntityTrigger,
         Self::Dispensing,
         Self::DaylightTimer,
@@ -116,7 +114,6 @@ impl Rule {
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
             Self::EntityRandomTick => "entity random tick",
-            Self::Piston => "piston",
             Self::EntityTrigger => "entity trigger",
             Self::Dispensing => "dispensing",
             Self::DaylightTimer => "daylight timer",
@@ -166,9 +163,6 @@ impl Rule {
             Self::EntityTick => "tick: only entities trigger or read this tick, none are simulated",
             Self::EntityRandomTick => {
                 "random tick: it spawns entities (turtles hatching, piglins from portals)"
-            }
-            Self::Piston => {
-                "scope: block events are dropped, pistons never move, pushing is the next step"
             }
             Self::EntityTrigger => {
                 "scope: plates, detector rails, tripwires, targets, sculk sensors, lightning rods \
