@@ -8,6 +8,7 @@ use std::{
 };
 
 use mc_bamboo_core::Vec3;
+use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
@@ -119,6 +120,7 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         chunk_tracking::send_chunks(&mut self.region);
+        movement::finish_tick(&mut self.region);
         self.region.links.flush();
         ControlFlow::Continue(())
     }
@@ -251,7 +253,15 @@ impl World {
                 position,
                 rotation,
                 on_ground,
-            } => movement::on_move_player(region, player, position, rotation, on_ground),
+                horizontal_collision,
+            } => movement::on_move_player(
+                region,
+                player,
+                position,
+                rotation,
+                on_ground,
+                horizontal_collision,
+            ),
             PlayRequest::ChunkBatchReceived {
                 desired_chunks_per_tick,
             } => chunk_tracking::on_chunk_batch_received(region, player, desired_chunks_per_tick),
@@ -359,7 +369,15 @@ impl World {
             PlayRequest::EditBook { slot, pages, title } => {
                 book::on_edit_book(region, player, slot, pages, title);
             }
-            // 这三种连接任务就地处理了，不会发到这里。
+            // 连接任务把这两种转过来。其余 `Other` 它自己丢掉。
+            //
+            // The connection forwards these two. It drops every other `Other` packet.
+            PlayRequest::Other(id) if id == serverbound::CLIENT_TICK_END => {
+                movement::on_client_tick_end(region, player);
+            }
+            PlayRequest::Other(id) if id == serverbound::PLAYER_LOADED => {
+                movement::on_player_loaded(region, player);
+            }
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }
     }

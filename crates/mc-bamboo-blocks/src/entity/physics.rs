@@ -1,7 +1,11 @@
 //! 实体运动和碰撞，官方 `Entity` 里和移动、落地、方块效果有关的那部分。
 //!
-//! 只有下落的方块和点燃的 TNT，所以 `noPhysics`、活塞推动、上台阶、载具、实体间碰撞
-//! 这些分支都没有：官方那两个类不走这些路，`maxUpStep` 也是 0。
+//! 下落的方块和点燃的 TNT 走 `maxUpStep == 0` 的那条路。上台阶在 `sweep_movement` 里，
+//! 只有玩家把台阶高度传进来时才发生。实体之间和世界边界仍然不挡路。
+//!
+//! Falling blocks and primed TNT take the `maxUpStep == 0` path. Step-up lives in
+//! `sweep_movement` and runs only when a caller passes a step height. Entities and the
+//! world border still do not collide.
 //!
 //! 方块碰撞按官方的 `VoxelShape.collide` 扫掠。官方的形状是体素网格，每个格子是一个
 //! 体素；形状表里一个盒子就是一个格子，所以那条沿体素走的循环退化成逐盒子的判定，
@@ -14,9 +18,9 @@ use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
 use crate::{
     entity::{Entity, Movement, axis_component, with_axis},
-    shape::{self, Aabb, CollisionContext, EntityContext},
+    shape::{self, Aabb, BooleanOp, CollisionContext, EntityContext},
     state::BlockState,
-    world::World,
+    world::{self, World},
 };
 
 /// `getDefaultGravity()`：下落方块和 TNT 都用默认重力。
@@ -98,6 +102,8 @@ impl Entity {
             fall_distance: self.fall_distance,
             bottom: self.position.y,
             falling_block: self.kind.is_falling_block(),
+            descending: false,
+            placement: false,
         })
     }
 
@@ -176,27 +182,20 @@ impl Entity {
     }
 
     /// `Entity.collide`：把位移按轴拆开，撞到方块就停在方块前面。
+    ///
+    /// 这两个实体的 `maxUpStep` 是 0，所以不上台阶。玩家走 [`sweep_movement`]。
+    ///
+    /// `Entity.collide`. These entities have `maxUpStep` 0, so they do not step up.
+    /// Players use [`sweep_movement`].
     fn collide(&self, world: &World, movement: Vec3) -> Vec3 {
-        let bounds = self.bounding_box();
-        let target = bounds.expanded_towards(movement.x, movement.y, movement.z);
-        let collisions = world.block_collisions(target, self.collision_context());
-        if collisions.is_empty() {
-            return movement;
-        }
-        let mut resolved = Vec3::default();
-        for axis in Direction::axis_step_order(movement) {
-            let axis_movement = axis_component(movement, axis);
-            if axis_movement == 0.0 {
-                continue;
-            }
-            let moved = bounds.moved(resolved.x, resolved.y, resolved.z);
-            let mut distance = axis_movement;
-            for (_, boxes) in &collisions {
-                distance = collide_axis(axis, moved, boxes, distance);
-            }
-            resolved = with_axis(resolved, axis, distance);
-        }
-        resolved
+        sweep_movement(
+            movement,
+            self.bounding_box(),
+            0.0,
+            self.on_ground,
+            self.collision_context(),
+            |pos| world.block_state(pos),
+        )
     }
 
     /// `setOnGroundWithMovement`。
@@ -486,6 +485,8 @@ impl Entity {
             fall_distance: self.fall_distance,
             bottom: self.position.y,
             falling_block: self.kind.is_falling_block(),
+            descending: false,
+            placement: false,
         }
     }
 
@@ -494,6 +495,324 @@ impl Entity {
         let bounds = self.make_bounding_box_at(from);
         bounds.collided_along_vector(to.subtract(from), aabbs)
     }
+}
+
+/// 一段移动，给 `checkInsideBlocks` 用。
+///
+/// One movement segment for `checkInsideBlocks`.
+#[derive(Debug, Clone, Copy)]
+pub struct TravelSegment {
+    pub from: Vec3,
+    pub to: Vec3,
+    /// `Entity.Movement.original`。没有时整段走直线。
+    ///
+    /// `Entity.Movement.original`. Absent means the segment is one straight line.
+    pub original: Option<Vec3>,
+}
+
+/// `Entity.collide`，带 `maxUpStep`。`max_up_step` 为 0 时和下落方块用的那条路相同。
+///
+/// 没有实体碰撞，也没有世界边界的形状。玩家之间互不阻挡。
+///
+/// `Entity.collide` with `maxUpStep`. A zero step height matches the falling-block path.
+///
+/// There are no entity collisions and no world-border shape. Players do not block each other.
+pub fn sweep_movement(
+    movement: Vec3,
+    bounds: Aabb,
+    max_up_step: f32,
+    on_ground: bool,
+    context: CollisionContext,
+    mut block_at: impl FnMut(BlockPos) -> BlockState,
+) -> Vec3 {
+    let movement_step = collide_bounding_box(movement, bounds, context, &mut block_at);
+    let x_collision = movement.x != movement_step.x;
+    let y_collision = movement.y != movement_step.y;
+    let z_collision = movement.z != movement_step.z;
+    let landed = y_collision && movement.y < 0.0;
+    if max_up_step > 0.0 && (landed || on_ground) && (x_collision || z_collision) {
+        let grounded = if landed {
+            bounds.moved(0.0, movement_step.y, 0.0)
+        } else {
+            bounds
+        };
+        let mut step_box =
+            grounded.expanded_towards(movement.x, f64::from(max_up_step), movement.z);
+        if !landed {
+            step_box = step_box.expanded_towards(0.0, -f64::from(1.0e-5_f32), 0.0);
+        }
+        let colliders = flatten(&world::collect_block_collisions(
+            step_box,
+            context,
+            &mut block_at,
+        ));
+        let skip = movement_step.y as f32;
+        for height in step_heights(grounded.min_y, &colliders, max_up_step, skip) {
+            let stepped = collide_with_shapes(
+                Vec3::new(movement.x, f64::from(height), movement.z),
+                grounded,
+                &colliders,
+            );
+            if horizontal_distance_sqr(stepped) > horizontal_distance_sqr(movement_step) {
+                let down = bounds.min_y - grounded.min_y;
+                return Vec3::new(stepped.x, stepped.y - down, stepped.z);
+            }
+        }
+    }
+    movement_step
+}
+
+/// `CollisionGetter.noBlockCollision`。不算实体和世界边界。
+///
+/// `CollisionGetter.noBlockCollision`. Entities and the world border are not included.
+pub fn no_block_collision(
+    bounds: Aabb,
+    context: CollisionContext,
+    block_at: impl FnMut(BlockPos) -> BlockState,
+) -> bool {
+    world::collect_block_collisions(bounds, context, block_at).is_empty()
+}
+
+/// `ServerGamePacketListenerImpl.isEntityCollidingWithAnythingNew` 的方块部分。
+///
+/// 预移动上下文的 `placement` 必须是 true。实体碰撞没有接上。
+///
+/// The block half of `isEntityCollidingWithAnythingNew`.
+///
+/// The pre-move context must have `placement` set. Entity collisions are not included.
+pub fn overlaps_new_blocks(
+    old_box: Aabb,
+    current_box: Aabb,
+    current: Vec3,
+    target: Vec3,
+    pre_move: CollisionContext,
+    block_at: impl FnMut(BlockPos) -> BlockState,
+) -> bool {
+    let new_box = current_box.moved(
+        target.x - current.x,
+        target.y - current.y,
+        target.z - current.z,
+    );
+    let shrink = f64::from(1.0e-5_f32);
+    let new_deflated = new_box.deflate(shrink, shrink, shrink);
+    let old_deflated = old_box.deflate(shrink, shrink, shrink);
+    for (_, boxes) in world::collect_block_collisions(new_deflated, pre_move, block_at) {
+        if !shape::join_is_not_empty(&boxes, &[old_deflated], BooleanOp::And) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `ServerGamePacketListenerImpl.noBlocksAround`。
+///
+/// `ServerGamePacketListenerImpl.noBlocksAround`.
+pub fn enclosed_in_air(bounds: Aabb, mut block_at: impl FnMut(BlockPos) -> BlockState) -> bool {
+    let area = bounds
+        .inflate(0.0625, 0.0625, 0.0625)
+        .expanded_towards(0.0, -0.55, 0.0);
+    let from = BlockPos::containing(Vec3::new(area.min_x, area.min_y, area.min_z));
+    let to = BlockPos::containing(Vec3::new(area.max_x, area.max_y, area.max_z));
+    let mut y = from.y;
+    while y <= to.y {
+        let mut z = from.z;
+        while z <= to.z {
+            let mut x = from.x;
+            while x <= to.x {
+                if !block_at(BlockPos::new(x, y, z)).is_air() {
+                    return false;
+                }
+                x += 1;
+            }
+            z += 1;
+        }
+        y += 1;
+    }
+    true
+}
+
+/// `checkInsideBlocks` 里蜘蛛网和细雪的 `makeStuckInBlock`。最后一个碰到的乘数留下来。
+///
+/// 压力板、绊线和甜浆果丛的 `entityInside` 没有接。碰到蜘蛛网或细雪时摔落距离要清掉。
+///
+/// `makeStuckInBlock` for cobwebs and powder snow inside `checkInsideBlocks`. The last multiplier wins.
+///
+/// `entityInside` for pressure plates, tripwires, and sweet berry bushes is not wired.
+/// Touching a cobweb or powder snow clears the fall distance.
+pub fn stuck_speed(
+    segments: &[TravelSegment],
+    mut box_at: impl FnMut(Vec3) -> Aabb,
+    context: EntityContext,
+    mut block_at: impl FnMut(BlockPos) -> BlockState,
+) -> Option<Vec3> {
+    let mut inside = InsideBlocks::default();
+    for segment in segments {
+        let mut pos = segment.from;
+        let delta = segment.to.subtract(segment.from);
+        let mut max_iterations = 16;
+        match segment.original {
+            Some(original) if delta.length_sqr() > 0.0 => {
+                for axis in Direction::axis_step_order(original) {
+                    let axis_move = axis_component(delta, axis);
+                    if axis_move != 0.0 {
+                        let to = offset_along(pos, axis, axis_move);
+                        max_iterations -= stuck_between(
+                            pos,
+                            to,
+                            &mut box_at,
+                            context,
+                            &mut block_at,
+                            &mut inside,
+                            max_iterations,
+                        );
+                        pos = to;
+                    }
+                }
+            }
+            _ => {
+                max_iterations -= stuck_between(
+                    segment.from,
+                    segment.to,
+                    &mut box_at,
+                    context,
+                    &mut block_at,
+                    &mut inside,
+                    16,
+                );
+            }
+        }
+        if max_iterations <= 0 {
+            stuck_between(
+                segment.to,
+                segment.to,
+                &mut box_at,
+                context,
+                &mut block_at,
+                &mut inside,
+                1,
+            );
+        }
+    }
+    inside.multiplier
+}
+
+/// 这一段位移里已经数过的方块，以及最后一个卡住乘数。
+///
+/// Blocks already counted on this move, and the last stuck multiplier.
+#[derive(Default)]
+struct InsideBlocks {
+    visited: Vec<BlockPos>,
+    multiplier: Option<Vec3>,
+}
+
+fn stuck_between(
+    from: Vec3,
+    to: Vec3,
+    box_at: &mut impl FnMut(Vec3) -> Aabb,
+    context: EntityContext,
+    block_at: &mut impl FnMut(BlockPos) -> BlockState,
+    inside: &mut InsideBlocks,
+    max_iterations: i32,
+) -> i32 {
+    let deflated = box_at(to).deflate(1.0e-5, 1.0e-5, 1.0e-5);
+    let mut iterations = 0;
+    let mut visit = |pos: BlockPos, iteration: i32| -> bool {
+        if iteration >= max_iterations {
+            return false;
+        }
+        iterations = iteration;
+        let state = block_at(pos);
+        if state.is_air() {
+            return true;
+        }
+        let inside_boxes = shape::entity_inside_boxes(state, pos, context);
+        let bounds = box_at(from);
+        let inside_block = shape::is_unit_cube(&inside_boxes)
+            || bounds.collided_along_vector(to.subtract(from), &world_boxes(&inside_boxes, pos));
+        if inside_block && !inside.visited.contains(&pos) {
+            inside.visited.push(pos);
+            if let Some(multiplier) = stuck_multiplier(state) {
+                inside.multiplier = Some(multiplier);
+            }
+        }
+        true
+    };
+    for_each_block_intersected_between(from, to, deflated, &mut visit);
+    iterations
+}
+
+fn stuck_multiplier(state: BlockState) -> Option<Vec3> {
+    if state.is_a(BlockAncestor::WebBlock) {
+        Some(Vec3::new(0.25, f64::from(0.05_f32), 0.25))
+    } else if state.is_a(BlockAncestor::PowderSnowBlock) {
+        Some(Vec3::new(f64::from(0.9_f32), 1.5, f64::from(0.9_f32)))
+    } else {
+        None
+    }
+}
+
+fn collide_bounding_box(
+    movement: Vec3,
+    bounds: Aabb,
+    context: CollisionContext,
+    block_at: &mut impl FnMut(BlockPos) -> BlockState,
+) -> Vec3 {
+    if movement.length_sqr() == 0.0 {
+        return movement;
+    }
+    let target = bounds.expanded_towards(movement.x, movement.y, movement.z);
+    let collisions = world::collect_block_collisions(target, context, block_at);
+    collide_with_shapes(movement, bounds, &flatten(&collisions))
+}
+
+fn collide_with_shapes(movement: Vec3, bounds: Aabb, boxes: &[Aabb]) -> Vec3 {
+    if boxes.is_empty() {
+        return movement;
+    }
+    let mut resolved = Vec3::default();
+    for axis in Direction::axis_step_order(movement) {
+        let axis_movement = axis_component(movement, axis);
+        if axis_movement == 0.0 {
+            continue;
+        }
+        let moved = bounds.moved(resolved.x, resolved.y, resolved.z);
+        let distance = collide_axis(axis, moved, boxes, axis_movement);
+        resolved = with_axis(resolved, axis, distance);
+    }
+    resolved
+}
+
+fn flatten(collisions: &[(BlockPos, Vec<Aabb>)]) -> Vec<Aabb> {
+    let mut boxes = Vec::new();
+    for (_, shapes) in collisions {
+        boxes.extend(shapes.iter().copied());
+    }
+    boxes
+}
+
+fn horizontal_distance_sqr(movement: Vec3) -> f64 {
+    movement.x * movement.x + movement.z * movement.z
+}
+
+/// `Entity.collectCandidateStepUpHeights`。
+fn step_heights(ground_min_y: f64, boxes: &[Aabb], max_step: f32, skip: f32) -> Vec<f32> {
+    let mut heights = Vec::new();
+    for shape in boxes {
+        for coord in [shape.min_y, shape.max_y] {
+            let relative = (coord - ground_min_y) as f32;
+            if relative < 0.0 || relative == skip {
+                continue;
+            }
+            if relative > max_step {
+                break;
+            }
+            if !heights.contains(&relative) {
+                heights.push(relative);
+            }
+        }
+    }
+    heights.sort_by(f32::total_cmp);
+    heights
 }
 
 /// `Vec3.pos.relative(axis.getPositive(), distance)`。
@@ -882,4 +1201,56 @@ fn between_corners_in_direction(
         }
     }
     positions
+}
+
+#[cfg(test)]
+mod step_tests {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    use super::*;
+    use crate::state::BlockState;
+
+    fn player_box(x: f64) -> Aabb {
+        Aabb::new(x - 0.3, 0.0, -0.3, x + 0.3, 1.8, 0.3)
+    }
+
+    fn context() -> CollisionContext {
+        CollisionContext::Entity(EntityContext {
+            fall_distance: 0.0,
+            bottom: 0.0,
+            falling_block: false,
+            descending: false,
+            placement: false,
+        })
+    }
+
+    /// 半砖能迈上去，整块和零台阶高度都不能。
+    ///
+    /// A slab can be stepped onto. A full block, and a zero step height, cannot.
+    #[test]
+    fn a_step_climbs_a_slab_and_stops_at_a_full_block() {
+        let slab = BlockState(blocks::STONE_SLAB);
+        let stone = BlockState(blocks::STONE);
+        let air = BlockState(blocks::AIR);
+        let movement = Vec3::new(0.5, 0.0, 0.0);
+        let bounds = player_box(0.6);
+        let at = |state: BlockState| {
+            move |pos: BlockPos| {
+                if pos == BlockPos::new(1, 0, 0) {
+                    state
+                } else {
+                    air
+                }
+            }
+        };
+        let climbed = sweep_movement(movement, bounds, 0.6, true, context(), at(slab));
+        let blocked = sweep_movement(movement, bounds, 0.6, true, context(), at(stone));
+        let no_step = sweep_movement(movement, bounds, 0.0, true, context(), at(slab));
+        assert!(climbed.y > 0.4, "{climbed:?}");
+        assert!(climbed.x > blocked.x, "slab {climbed:?} block {blocked:?}");
+        assert_eq!(blocked.y, 0.0);
+        assert_eq!(no_step.y, 0.0);
+        assert!(no_step.x < climbed.x);
+    }
 }

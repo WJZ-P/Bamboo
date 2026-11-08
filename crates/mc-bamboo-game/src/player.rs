@@ -17,6 +17,7 @@ use crate::{
     menu::station::InventoryCursor,
     movement::Teleport,
     player_grid::PlayerGrid,
+    player_move::Motion,
 };
 
 const STANDING_EYE_HEIGHT: f64 = 1.62;
@@ -49,6 +50,10 @@ pub(crate) struct Player {
     /// 每 tick 由派生状态的阶段写成 `yaw`。
     pub(crate) head_yaw: f32,
     pub(crate) on_ground: bool,
+    /// 移动校验用的服务端状态，对应 `ServerGamePacketListenerImpl` 里跟位置有关的字段。
+    ///
+    /// Server-side movement state, the position fields of `ServerGamePacketListenerImpl`.
+    pub(crate) motion: Motion,
     /// 最近一次收到的客户端设置。
     pub(crate) client: ClientInformation,
     pub(crate) teleport: Teleport,
@@ -90,6 +95,7 @@ impl Player {
             pitch: 0.0,
             head_yaw: 0.0,
             on_ground: false,
+            motion: Motion::new(position),
             sync: EntitySync::new(position, &client),
             client,
             teleport: Teleport::default(),

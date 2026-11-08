@@ -36,6 +36,10 @@ const MAX_SIGNED_ARGUMENTS: usize = 8;
 
 /// 移动包 `flags` 里表示站在地上的位。
 const MOVE_FLAG_ON_GROUND: u8 = 0x01;
+/// 移动包 `flags` 里表示这一下在水平方向撞到了东西。
+///
+/// The move-packet bit that says this move collided horizontally.
+const MOVE_FLAG_HORIZONTAL_COLLISION: u8 = 0x02;
 
 /// [`PlayRequest::PlayerInput`] 的 `flags` 里表示按住潜行键的位。
 pub const INPUT_FLAG_SHIFT: u8 = 0x20;
@@ -70,6 +74,10 @@ pub enum PlayRequest {
         /// `(yaw, pitch)`。
         rotation: Option<(f32, f32)>,
         on_ground: bool,
+        /// `ServerboundMovePlayerPacket.horizontalCollision`，`flags` 的第 1 位。
+        ///
+        /// `ServerboundMovePlayerPacket.horizontalCollision`, bit 1 of `flags`.
+        horizontal_collision: bool,
     },
     /// 收到了一批区块，并告诉服务端之后每 tick 发几个。
     ChunkBatchReceived {
@@ -294,6 +302,7 @@ impl PlayRequest {
             position,
             rotation,
             on_ground: flags & MOVE_FLAG_ON_GROUND != 0,
+            horizontal_collision: flags & MOVE_FLAG_HORIZONTAL_COLLISION != 0,
         }
     }
 }
@@ -784,6 +793,7 @@ mod tests {
                 position: Some(position),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             }
         );
         assert_eq!(
@@ -795,6 +805,7 @@ mod tests {
                 position: Some(position),
                 rotation: Some((90.0, -45.0)),
                 on_ground: true,
+                horizontal_collision: true,
             }
         );
         assert_eq!(
@@ -803,6 +814,7 @@ mod tests {
                 position: None,
                 rotation: Some((90.0, -45.0)),
                 on_ground: false,
+                horizontal_collision: false,
             }
         );
         assert_eq!(
@@ -811,6 +823,7 @@ mod tests {
                 position: None,
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             }
         );
     }
@@ -823,6 +836,7 @@ mod tests {
                 position: None,
                 rotation: None,
                 on_ground: false,
+                horizontal_collision: true,
             })
         );
     }

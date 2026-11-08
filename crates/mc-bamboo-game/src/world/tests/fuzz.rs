@@ -685,6 +685,7 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 position: rng.chance(90).then_some(position),
                 rotation: rng.chance(50).then(|| random_rotation(rng, hostile)),
                 on_ground: rng.chance(50),
+                horizontal_collision: false,
             }
         }
         8 => {
@@ -823,8 +824,22 @@ fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
             if actor.is_alive() {
                 for _ in 0..rng.below(6) {
                     let request = random_request(&mut rng, actor);
+                    let positioned = matches!(
+                        request,
+                        PlayRequest::MovePlayer {
+                            position: Some(_),
+                            ..
+                        }
+                    );
                     actor.expected_ack = actor.expected_ack.max(sequence_of(&request));
                     server.request(&actor.client, request);
+                    // 同一个客户端 tick 的第二个位置包会被踢。非恶意序列在每个位置后面结束这一 tick。
+                    //
+                    // A second position in the same client tick is a kick. End the tick after each
+                    // position so an ordinary sequence stays connected.
+                    if positioned && !actor.hostile {
+                        server.client_tick_end(&actor.client);
+                    }
                 }
                 if rng.chance(5) {
                     let millis = rng.pick(&[0, 40, i32::MAX, i32::MIN]);

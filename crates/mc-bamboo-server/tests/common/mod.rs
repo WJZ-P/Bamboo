@@ -446,6 +446,14 @@ pub fn accept_teleportation(x: f64, y: f64, z: f64) -> Vec<u8> {
     frame(&payload)
 }
 
+pub fn player_loaded() -> Vec<u8> {
+    frame(&[play::serverbound::PLAYER_LOADED as u8])
+}
+
+pub fn client_tick_end() -> Vec<u8> {
+    frame(&[play::serverbound::CLIENT_TICK_END as u8])
+}
+
 pub fn move_player_pos(x: f64, y: f64, z: f64) -> Vec<u8> {
     let mut payload = vec![play::serverbound::MOVE_PLAYER_POS as u8];
     for coordinate in [x, y, z] {

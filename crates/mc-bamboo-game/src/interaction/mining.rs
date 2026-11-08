@@ -871,6 +871,7 @@ mod tests {
                 position: Some(Vec3::new(8.25, -60.0, 8.5)),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             },
         );
         let pos = BlockPos::new(14, -59, 8);

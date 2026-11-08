@@ -264,6 +264,70 @@ pub struct World<'a> {
     handling_tick: bool,
 }
 
+/// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读。
+///
+/// 玩家移动不能借 `World`：`RegionLevel` 借着玩家表。形状顺序和 [`World::block_collisions`] 相同。
+///
+/// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at`.
+///
+/// Player movement cannot borrow `World`: `RegionLevel` already borrows the player map.
+/// Shape order matches [`World::block_collisions`].
+pub(crate) fn collect_block_collisions(
+    box_: shape::Aabb,
+    context: CollisionContext,
+    mut block_at: impl FnMut(BlockPos) -> BlockState,
+) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
+    let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
+    let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
+    let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
+    let y_max = mth::floor(box_.max_y + shape::EPSILON) + 1;
+    let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
+    let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
+    let mut collisions = Vec::new();
+    for z in z_min..=z_max {
+        for y in y_min..=y_max {
+            for x in x_min..=x_max {
+                let corner = u8::from(x == x_min || x == x_max)
+                    + u8::from(y == y_min || y == y_max)
+                    + u8::from(z == z_min || z == z_max);
+                if corner == 3 {
+                    continue;
+                }
+                let pos = BlockPos::new(x, y, z);
+                let state = block_at(pos);
+                if corner == 1 && !shape::has_large_collision_shape(state) {
+                    continue;
+                }
+                if corner == 2 && !state.is(blocks::MOVING_PISTON) {
+                    continue;
+                }
+                let boxes = shape::collision_boxes(state, pos, context);
+                if boxes.is_empty() {
+                    continue;
+                }
+                let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
+                let matched = if shape::is_unit_cube(&boxes) {
+                    box_.intersects_coords(
+                        x_origin,
+                        y_origin,
+                        z_origin,
+                        x_origin + 1.0,
+                        y_origin + 1.0,
+                        z_origin + 1.0,
+                    )
+                } else {
+                    let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
+                    shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
+                };
+                if matched {
+                    collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
+                }
+            }
+        }
+    }
+    collisions
+}
+
 impl<'a> World<'a> {
     pub fn new(level: &'a mut dyn Level, ticks: &'a mut BlockTicks) -> Self {
         Self {
@@ -1516,60 +1580,16 @@ impl<'a> World<'a> {
     /// `CollisionGetter.getBlockCollisions`：和 `box_` 碰上的方块的碰撞形状，按 `Cursor3D` 的顺序。
     ///
     /// 返回的形状已经是世界坐标。顺序有影响：官方在运动被完全挡住后就不再往后看。
+    ///
+    /// `CollisionGetter.getBlockCollisions`: collision shapes that meet `box_`, in `Cursor3D` order.
+    ///
+    /// The shapes are in world coordinates. Order matters: vanilla stops looking once movement is fully blocked.
     pub(crate) fn block_collisions(
         &self,
         box_: shape::Aabb,
         context: CollisionContext,
     ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
-        let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
-        let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
-        let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
-        let y_max = mth::floor(box_.max_y + shape::EPSILON) + 1;
-        let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
-        let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
-        let mut collisions = Vec::new();
-        for z in z_min..=z_max {
-            for y in y_min..=y_max {
-                for x in x_min..=x_max {
-                    let corner = u8::from(x == x_min || x == x_max)
-                        + u8::from(y == y_min || y == y_max)
-                        + u8::from(z == z_min || z == z_max);
-                    if corner == 3 {
-                        continue;
-                    }
-                    let pos = BlockPos::new(x, y, z);
-                    let state = self.block_state(pos);
-                    if corner == 1 && !shape::has_large_collision_shape(state) {
-                        continue;
-                    }
-                    if corner == 2 && !state.is(blocks::MOVING_PISTON) {
-                        continue;
-                    }
-                    let boxes = shape::collision_boxes(state, pos, context);
-                    if boxes.is_empty() {
-                        continue;
-                    }
-                    let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
-                    let matched = if shape::is_unit_cube(&boxes) {
-                        box_.intersects_coords(
-                            x_origin,
-                            y_origin,
-                            z_origin,
-                            x_origin + 1.0,
-                            y_origin + 1.0,
-                            z_origin + 1.0,
-                        )
-                    } else {
-                        let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
-                        shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
-                    };
-                    if matched {
-                        collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
-                    }
-                }
-            }
-        }
-        collisions
+        collect_block_collisions(box_, context, |pos| self.block_state(pos))
     }
 
     /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
