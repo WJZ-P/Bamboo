@@ -7,7 +7,7 @@
 //! | `HoneycombItem` | 给铜涂蜡 |
 //! | `ShearsItem` | 让还在长的藤蔓头、海带头停止生长 |
 //! | `EnderEyeItem` | 装进末地传送门框架，一圈装满时生成传送门 |
-//! | `DebugStickItem` | 要 gamemaster 权限，这个世界里总是失败 |
+//! | `DebugStickItem` | 管理员右键改属性，见 [`debug_stick`] |
 //! | `BrushItem` | 开始刷，刷出东西在后面的使用刻里，不在范围里 |
 //! | `BoneMealItem` | 催熟方块，或者在水里长海草，见 [`bone_meal`] |
 //!
@@ -21,11 +21,14 @@
 //! Sounds, drops and game events are still omitted. Bone meal particles are sent to the player.
 
 mod bone_meal;
+mod debug_stick;
 mod ender_eye;
 mod honeycomb;
 mod ignite;
 mod shears;
 mod transformer;
+
+pub use debug_stick::{StickSelect, select as debug_stick_select};
 
 use mc_bamboo_data::{Item, ItemKind};
 
@@ -41,8 +44,7 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
             shears::use_on(world, ctx).unwrap_or_else(|| default_use_on(world, item, ctx))
         }
         ItemKind::EnderEye => ender_eye::use_on(world, ctx),
-        // `DebugStickItem.handleInteraction` 先看 `canUseGameMasterBlocks`，Bamboo 没有权限系统。
-        ItemKind::DebugStick => InteractionResult::Fail,
+        ItemKind::DebugStick => debug_stick::use_on(world, ctx),
         // `BrushItem.useOn` 只开始使用物品，结果总是 `CONSUME`。
         ItemKind::Brush => InteractionResult::Consume,
         ItemKind::BoneMeal => bone_meal::use_on(world, ctx),

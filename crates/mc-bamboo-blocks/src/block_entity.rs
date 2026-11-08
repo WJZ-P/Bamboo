@@ -339,7 +339,7 @@ pub(crate) fn drops_own_contents(state: BlockState) -> bool {
     use registries::block_entity_type as E;
     matches!(
         state.block().block_entity_type,
-        Some(E::FURNACE | E::SMOKER | E::BLAST_FURNACE | E::BREWING_STAND)
+        Some(E::FURNACE | E::SMOKER | E::BLAST_FURNACE | E::BREWING_STAND | E::CAMPFIRE)
     )
 }
 

@@ -40,9 +40,9 @@ use super::{
         PlayerChat, PlayerInfoRemove, PlayerInfoUpdate, PlayerPosition, Pos, RemoveEntities,
         RotateHead, START_DESTROY_BLOCK, SectionBlocksUpdate, SetChunkCacheCenter, SetEntityData,
         SetEquipment, SetHeldSlot, SwingAnimation, SystemChat, Tracked, UP,
-        accept_teleportation_with_id, assert_bundles_paired, face_center, move_position,
-        move_rotation, packet_name, player_action, replay_block, replay_entity,
-        set_creative_mode_slot, tracked_chunks, use_item_on,
+        accept_teleportation_with_id, assert_bundles_paired, client_tick_end, face_center,
+        move_position, move_rotation, packet_name, player_action, player_loaded, replay_block,
+        replay_entity, set_creative_mode_slot, tracked_chunks, use_item_on,
     },
 };
 
@@ -212,6 +212,8 @@ pub struct Player {
     cursor: usize,
     /// 上一次用的 sequence。真实客户端先加一再用，所以第一个值是 1。
     sequence: i32,
+    /// 已经发过 `player_loaded`。没发的话服务端会丢掉移动。
+    reported_load: bool,
     /// 登录时服务端声明的压缩阈值，关着压缩时是 `None`。
     compression: Option<i32>,
 }
@@ -254,9 +256,16 @@ impl Player {
             cursor: 0,
             sequence: 0,
             compression,
+            reported_load: false,
         };
         player.entity_id = player.expect::<Login>(|_| true).await.entity_id;
         player.cursor = 0;
+        // 真实客户端画出世界之后发 `player_loaded`。没发的话服务端丢掉移动。
+        //
+        // A real client sends player_loaded once the world is on screen. Until then the
+        // server drops movement.
+        player.reported_load = true;
+        player.send(&player_loaded()).await;
         player
     }
 
@@ -458,16 +467,47 @@ impl Player {
         self.send(&chunk_batch_received(FAST_CHUNKS_PER_TICK)).await;
     }
 
-    /// 走到这里，脚踩地面。
+    /// 走到这里，脚踩地面。太远就拆成服务端一个 tick 能接受的几步。
     pub async fn move_to(&mut self, x: f64, y: f64, z: f64) {
-        self.position = (x, y, z);
-        self.send(&move_position(x, y, z, true)).await;
+        self.travel(x, y, z, true).await;
     }
 
-    /// 飞到这里，脚不着地。
+    /// 飞到这里，脚不着地。太远就拆成服务端一个 tick 能接受的几步。
     pub async fn fly_to(&mut self, x: f64, y: f64, z: f64) {
+        self.travel(x, y, z, false).await;
+    }
+
+    /// 一步最多 10 格，正好是速度检查放行的距离。
+    async fn travel(&mut self, x: f64, y: f64, z: f64, on_ground: bool) {
+        if !self.reported_load {
+            self.reported_load = true;
+            self.send(&player_loaded()).await;
+        }
+        let (mut cx, mut cy, mut cz) = self.position;
+        loop {
+            let dx = x - cx;
+            let dy = y - cy;
+            let dz = z - cz;
+            let distance_sqr = dx * dx + dy * dy + dz * dz;
+            // 正好 10 格（平方 100）官方放行。再远才拆开，避免一个合法的包被拆成中间位置。
+            //
+            // Exactly 10 blocks (squared distance 100) is allowed. Split only past that, so a
+            // legal packet is not turned into intermediate positions.
+            if distance_sqr <= 100.0 {
+                break;
+            }
+            let scale = 10.0 / distance_sqr.sqrt();
+            cx += dx * scale;
+            cy += dy * scale;
+            cz += dz * scale;
+            self.send(&move_position(cx, cy, cz, false)).await;
+            self.send(&client_tick_end()).await;
+            sleep(CLIENT_TICK).await;
+        }
         self.position = (x, y, z);
-        self.send(&move_position(x, y, z, false)).await;
+        self.send(&move_position(x, y, z, on_ground)).await;
+        self.send(&client_tick_end()).await;
+        sleep(CLIENT_TICK).await;
     }
 
     /// 走到 (x, z)，一 tick 走 `step` 格，和真实客户端一样每 tick 一个包。

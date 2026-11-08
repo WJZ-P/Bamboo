@@ -82,8 +82,6 @@ const VALID_CHUNK_BOUND: i32 = 2_097_061;
 const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
 /// `Difficulty.NORMAL.getId()`。
 const NORMAL_DIFFICULTY: i32 = 2;
-/// 游戏规则 `fire_spread_radius_around_player` 的默认值。
-const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
@@ -253,10 +251,79 @@ pub struct World<'a> {
     /// The item this click hands back. Block behaviour only records it; the game layer edits
     /// the inventory.
     item_exchange: Option<crate::item_exchange::ItemExchange>,
+    /// 这次右键要从方块里拿进物品栏的一堆，比如雕纹书架取出的书。
+    ///
+    /// A stack this click moves from a block into the inventory, such as a book
+    /// taken from a chiseled bookshelf.
+    gained: Option<mc_bamboo_protocol::item::ItemStack>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
     handling_tick: bool,
+}
+
+/// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读。
+///
+/// 玩家移动不能借 `World`：`RegionLevel` 借着玩家表。形状顺序和 [`World::block_collisions`] 相同。
+///
+/// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at`.
+///
+/// Player movement cannot borrow `World`: `RegionLevel` already borrows the player map.
+/// Shape order matches [`World::block_collisions`].
+pub(crate) fn collect_block_collisions(
+    box_: shape::Aabb,
+    context: CollisionContext,
+    mut block_at: impl FnMut(BlockPos) -> BlockState,
+) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
+    let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
+    let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
+    let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
+    let y_max = mth::floor(box_.max_y + shape::EPSILON) + 1;
+    let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
+    let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
+    let mut collisions = Vec::new();
+    for z in z_min..=z_max {
+        for y in y_min..=y_max {
+            for x in x_min..=x_max {
+                let corner = u8::from(x == x_min || x == x_max)
+                    + u8::from(y == y_min || y == y_max)
+                    + u8::from(z == z_min || z == z_max);
+                if corner == 3 {
+                    continue;
+                }
+                let pos = BlockPos::new(x, y, z);
+                let state = block_at(pos);
+                if corner == 1 && !shape::has_large_collision_shape(state) {
+                    continue;
+                }
+                if corner == 2 && !state.is(blocks::MOVING_PISTON) {
+                    continue;
+                }
+                let boxes = shape::collision_boxes(state, pos, context);
+                if boxes.is_empty() {
+                    continue;
+                }
+                let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
+                let matched = if shape::is_unit_cube(&boxes) {
+                    box_.intersects_coords(
+                        x_origin,
+                        y_origin,
+                        z_origin,
+                        x_origin + 1.0,
+                        y_origin + 1.0,
+                        z_origin + 1.0,
+                    )
+                } else {
+                    let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
+                    shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
+                };
+                if matched {
+                    collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
+                }
+            }
+        }
+    }
+    collisions
 }
 
 impl<'a> World<'a> {
@@ -268,6 +335,7 @@ impl<'a> World<'a> {
             effects: Vec::new(),
             placed_at: None,
             item_exchange: None,
+            gained: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -326,6 +394,20 @@ impl<'a> World<'a> {
     /// The item exchange recorded for this click.
     pub(crate) fn item_exchange(&self) -> Option<&crate::item_exchange::ItemExchange> {
         self.item_exchange.as_ref()
+    }
+
+    /// 记下这次要从方块拿进物品栏的物品。
+    ///
+    /// Record a stack this click should move from the block into the inventory.
+    pub(crate) fn set_gained(&mut self, stack: mc_bamboo_protocol::item::ItemStack) {
+        self.gained = Some(stack);
+    }
+
+    /// 这次右键记下的、要放进物品栏的物品。
+    ///
+    /// The stack recorded for this click, to be added to the inventory.
+    pub(crate) fn gained(&self) -> Option<&mc_bamboo_protocol::item::ItemStack> {
+        self.gained.as_ref()
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {
@@ -765,11 +847,24 @@ impl<'a> World<'a> {
         self.is_in_valid_bounds(pos)
     }
 
-    /// `ServerLevel.canSpreadFireAround`：游戏规则 `fire_spread_radius_around_player` 是默认的 128，
-    /// 离所有玩家都不到这么远时火才蔓延。
+    /// 方块逻辑读到的游戏规则。
+    ///
+    /// The game rules block logic reads.
+    pub fn block_game_rules(&self) -> crate::gamerules::BlockGameRules {
+        self.level.block_game_rules()
+    }
+
+    /// `ServerLevel.canSpreadFireAround`：`fire_spread_radius_around_player` 为 `-1` 时不看玩家，
+    /// 否则离所有玩家都不到这个距离火才蔓延。
+    ///
+    /// `ServerLevel.canSpreadFireAround`: `-1` skips the player check. Otherwise fire spreads
+    /// only when some player is within that distance.
     pub fn can_spread_fire_around(&self, pos: BlockPos) -> bool {
-        self.level
-            .any_player_close_enough_to(pos, FIRE_SPREAD_RADIUS_AROUND_PLAYER)
+        let radius = self.block_game_rules().fire_spread_radius_around_player;
+        // 官方在半径是 -1 时短路，不会调用 `anyPlayerCloseEnoughTo`。
+        //
+        // Vanilla short-circuits on -1 and does not call `anyPlayerCloseEnoughTo`.
+        radius == -1 || self.level.any_player_close_enough_to(pos, radius)
     }
 
     /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
@@ -1403,6 +1498,12 @@ impl<'a> World<'a> {
     /// `TntBlock.prime`: spawns a primed TNT with the default fuse. The caller removes the block.
     /// The yaw comes from `level.getRandom()`, the same source block logic uses.
     pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+        // `TntBlock.prime` 在规则为假时直接返回，不取朝向的随机数。
+        //
+        // `TntBlock.prime` returns before drawing the yaw when the rule is false.
+        if !self.block_game_rules().tnt_explodes {
+            return -1;
+        }
         let position = block_center_bottom(pos);
         let angle = self.random().next_double();
         let entity = Entity::primed_tnt(position, angle);
@@ -1425,6 +1526,12 @@ impl<'a> World<'a> {
     ///
     /// `TntBlock.wasExploded`: TNT lit by an explosion gets a shorter fuse.
     pub fn spawn_short_fuse_tnt(&mut self, pos: BlockPos) -> i32 {
+        // `TntBlock.wasExploded` 先看 `TNT_EXPLODES`，关着时不取短引信的随机数。
+        //
+        // `TntBlock.wasExploded` checks `TNT_EXPLODES` first and draws no short-fuse random when it is off.
+        if !self.block_game_rules().tnt_explodes {
+            return -1;
+        }
         let angle = self.random().next_double();
         let mut entity = Entity::primed_tnt(block_center_bottom(pos), angle);
         let fuse = short_fuse(PrimedTnt::DEFAULT_FUSE, self.random());
@@ -1496,60 +1603,16 @@ impl<'a> World<'a> {
     /// `CollisionGetter.getBlockCollisions`：和 `box_` 碰上的方块的碰撞形状，按 `Cursor3D` 的顺序。
     ///
     /// 返回的形状已经是世界坐标。顺序有影响：官方在运动被完全挡住后就不再往后看。
+    ///
+    /// `CollisionGetter.getBlockCollisions`: collision shapes that meet `box_`, in `Cursor3D` order.
+    ///
+    /// The shapes are in world coordinates. Order matters: vanilla stops looking once movement is fully blocked.
     pub(crate) fn block_collisions(
         &self,
         box_: shape::Aabb,
         context: CollisionContext,
     ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
-        let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
-        let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
-        let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
-        let y_max = mth::floor(box_.max_y + shape::EPSILON) + 1;
-        let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
-        let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
-        let mut collisions = Vec::new();
-        for z in z_min..=z_max {
-            for y in y_min..=y_max {
-                for x in x_min..=x_max {
-                    let corner = u8::from(x == x_min || x == x_max)
-                        + u8::from(y == y_min || y == y_max)
-                        + u8::from(z == z_min || z == z_max);
-                    if corner == 3 {
-                        continue;
-                    }
-                    let pos = BlockPos::new(x, y, z);
-                    let state = self.block_state(pos);
-                    if corner == 1 && !shape::has_large_collision_shape(state) {
-                        continue;
-                    }
-                    if corner == 2 && !state.is(blocks::MOVING_PISTON) {
-                        continue;
-                    }
-                    let boxes = shape::collision_boxes(state, pos, context);
-                    if boxes.is_empty() {
-                        continue;
-                    }
-                    let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
-                    let matched = if shape::is_unit_cube(&boxes) {
-                        box_.intersects_coords(
-                            x_origin,
-                            y_origin,
-                            z_origin,
-                            x_origin + 1.0,
-                            y_origin + 1.0,
-                            z_origin + 1.0,
-                        )
-                    } else {
-                        let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
-                        shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
-                    };
-                    if matched {
-                        collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
-                    }
-                }
-            }
-        }
-        collisions
+        collect_block_collisions(box_, context, |pos| self.block_state(pos))
     }
 
     /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
@@ -1861,7 +1924,10 @@ mod tests {
                 | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. }
                 | Effect::ComposterFill { .. }
-                | Effect::PageTurned { .. } => None,
+                | Effect::PageTurned { .. }
+                | Effect::CampfireChanged { .. }
+                | Effect::Overlay { .. }
+                | Effect::OpenCommandBlock { .. } => None,
             })
             .collect()
     }

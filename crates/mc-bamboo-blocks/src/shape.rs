@@ -55,8 +55,7 @@ pub enum CollisionContext {
 
 /// 实体的碰撞上下文，对应官方的 `EntityCollisionContext` 里和运动有关的那几项。
 ///
-/// 官方的 `isDescending()` 是 `isShiftKeyDown()`，下落的方块和点燃的 TNT 都不会潜行，
-/// 所以这里没有这一项。
+/// The entity collision context: the parts of `EntityCollisionContext` that movement uses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EntityContext {
     /// `fallDistance`。细雪靠它判断要不要托住实体。
@@ -65,6 +64,14 @@ pub struct EntityContext {
     pub bottom: f64,
     /// 是不是 `FallingBlockEntity`。细雪的碰撞形状和这个有关。
     pub falling_block: bool,
+    /// `isDescending()`，也就是按着潜行键。下落的方块和点燃的 TNT 不潜行。
+    ///
+    /// `isDescending()`, the sneak key. Falling blocks and primed TNT do not sneak.
+    pub descending: bool,
+    /// `isPlacement()`。`CollisionContext.withPosition` 会把它设上，细雪和脚手架因此没有碰撞。
+    ///
+    /// `isPlacement()`. `CollisionContext.withPosition` sets it, so powder snow and scaffolding have no collision.
+    pub placement: bool,
 }
 
 impl EntityContext {
@@ -170,6 +177,12 @@ const SCAFFOLDING_UNSTABLE_BOTTOM: Aabb = Aabb::new(0.0, 0.0, 0.0, 1.0, 2.0 / 16
 /// 实体上下文下的碰撞形状。只有细雪和脚手架按实体改形状，别的方块和空上下文一样。
 fn entity_collision_boxes(state: BlockState, pos: BlockPos, entity: EntityContext) -> Boxes {
     if state.is_a(BlockAncestor::PowderSnowBlock) {
+        // `isPlacement()` 时官方直接返回空形状，连 `fallDistance > 2.5` 也不托。
+        //
+        // With `isPlacement()`, vanilla returns an empty shape, even when `fallDistance > 2.5`.
+        if entity.placement {
+            return Cow::Borrowed(&[]);
+        }
         // `fallDistance > 2.5` 时整块都托住；下落的方块永远拿 `super.getCollisionShape`，
         // 也就是整格。生物穿皮革靴子的那个分支走不到这里。
         if entity.fall_distance > 2.5 {
@@ -181,7 +194,10 @@ fn entity_collision_boxes(state: BlockState, pos: BlockPos, entity: EntityContex
         return Cow::Borrowed(&[]);
     }
     if state.is_a(BlockAncestor::ScaffoldingBlock) {
-        if entity.is_above(FULL_BLOCK, pos) {
+        if entity.placement {
+            return Cow::Borrowed(&[]);
+        }
+        if entity.is_above(FULL_BLOCK, pos) && !entity.descending {
             return at_position(SCAFFOLDING_STABLE, state.block(), pos);
         }
         let bottom = state.get(BOTTOM);

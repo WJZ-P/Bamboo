@@ -213,6 +213,7 @@ public final class ComponentOracle {
                 writeCase(index, cases.get(index));
             }
             writeEnumFolds();
+            writeBoundaries();
             writeArchive();
             writeSnbt();
             line("{\"type\":\"end\",\"cases\":" + cases.size() + "}");
@@ -418,6 +419,131 @@ public final class ComponentOracle {
                             + "}");
                 }
             }
+        }
+
+        /**
+         * 组件编解码的边界：畸形的锁、过深的文本、不存在的注册表名字。
+         *
+         * 和枚举折回用同一条 `fold`：官方 `STREAM_CODEC` 解得开就附上重新编码的字节，
+         * 解不开就带上原因。Bamboo 必须在收和拒上一致，收下的再写出来逐字节相同。
+         */
+        private void writeBoundaries() throws Exception {
+            boundary("lock empty", DataComponents.LOCK, buf -> buf.writeNbt(new CompoundTag()));
+            boundary("lock list", DataComponents.LOCK, buf -> buf.writeNbt(new ListTag()));
+            boundary(
+                    "lock unknown item",
+                    DataComponents.LOCK,
+                    buf -> buf.writeNbt(compound("{items:\"minecraft:no_such_item\"}")));
+            boundary(
+                    "lock tripwire",
+                    DataComponents.LOCK,
+                    buf -> buf.writeNbt(compound("{items:\"minecraft:tripwire_hook\"}")));
+            boundary(
+                    "lock swapped count",
+                    DataComponents.LOCK,
+                    buf -> buf.writeNbt(compound("{count:{min:3,max:1}}")));
+            boundary(
+                    "recipes unknown key",
+                    DataComponents.RECIPES,
+                    buf -> {
+                        ListTag recipes = new ListTag();
+                        recipes.add(StringTag.valueOf("minecraft:no_such_recipe"));
+                        buf.writeNbt(recipes);
+                    });
+            boundary(
+                    "recipes string",
+                    DataComponents.RECIPES,
+                    buf -> buf.writeNbt(StringTag.valueOf("nope")));
+            boundary(
+                    "map unknown type",
+                    DataComponents.MAP_DECORATIONS,
+                    buf -> buf.writeNbt(compound(
+                            "{id:{type:\"minecraft:no_such\",x:0.0d,z:0.0d,rotation:0.0f}}")));
+            boundary(
+                    "text reorder",
+                    DataComponents.CUSTOM_NAME,
+                    buf -> buf.writeNbt(compound("{text:\"hi\",color:\"red\"}")));
+            boundary(
+                    "text selector",
+                    DataComponents.CUSTOM_NAME,
+                    buf -> buf.writeNbt(compound("{selector:\"@a\"}")));
+            boundary(
+                    "text bad selector",
+                    DataComponents.CUSTOM_NAME,
+                    buf -> buf.writeNbt(compound("{selector:\"@a[\"}")));
+            boundary(
+                    "dialog known",
+                    DataComponents.CUSTOM_NAME,
+                    buf -> buf.writeNbt(compound(
+                            "{text:\"a\",click_event:{action:\"show_dialog\",dialog:\"minecraft:quick_actions\"}}")));
+            boundary(
+                    "dialog missing",
+                    DataComponents.CUSTOM_NAME,
+                    buf -> buf.writeNbt(compound(
+                            "{text:\"a\",click_event:{action:\"show_dialog\",dialog:\"minecraft:no_such_dialog\"}}")));
+            boundary("text nested", DataComponents.CUSTOM_NAME, buf -> buf.writeNbt(nestedText(6)));
+        }
+
+        /** 几层 `extra`，两边都该收下，重新编码后逐字节相同。 */
+        private static CompoundTag nestedText(int depth) {
+            CompoundTag current = new CompoundTag();
+            current.putString("text", "a");
+            for (int layer = 0; layer < depth; layer++) {
+                CompoundTag parent = new CompoundTag();
+                parent.putString("text", "b");
+                ListTag extra = new ListTag();
+                extra.add(current);
+                parent.put("extra", extra);
+                current = parent;
+            }
+            return current;
+        }
+
+        /** SNBT 解析失败时包成运行时异常，lambda 里才能写。 */
+        private static Tag compound(String snbt) {
+            try {
+                return TagParser.parseCompoundFully(snbt);
+            } catch (Exception error) {
+                throw new IllegalArgumentException(error);
+            }
+        }
+
+        /** 一个组件的网络字节，走和枚举折回相同的收/拒比较。 */
+        private void boundary(String name, DataComponentType<?> type, java.util.function.Consumer<RegistryFriendlyByteBuf> write)
+                throws Exception {
+            RegistryFriendlyByteBuf input = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            input.writeVarInt(1);
+            input.writeVarInt(0);
+            input.writeVarInt(BuiltInRegistries.DATA_COMPONENT_TYPE.getId(type));
+            String error = null;
+            byte[] inputBytes = new byte[0];
+            byte[] outputBytes = new byte[0];
+            try {
+                write.accept(input);
+                inputBytes = new byte[input.readableBytes()];
+                input.getBytes(input.readerIndex(), inputBytes);
+                outputBytes = inputBytes;
+                DataComponentPatch decoded = DataComponentPatch.STREAM_CODEC.decode(input);
+                if (input.readableBytes() != 0) {
+                    error = input.readableBytes() + " trailing bytes";
+                } else {
+                    RegistryFriendlyByteBuf again = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+                    DataComponentPatch.STREAM_CODEC.encode(again, decoded);
+                    outputBytes = new byte[again.readableBytes()];
+                    again.readBytes(outputBytes);
+                }
+            } catch (Exception failure) {
+                error = String.valueOf(failure);
+            }
+            line("{\"type\":\"fold\",\"name\":"
+                    + quote("boundary " + name)
+                    + ",\"input\":\""
+                    + hex(inputBytes)
+                    + "\",\"output\":\""
+                    + hex(outputBytes)
+                    + "\",\"error\":"
+                    + (error == null ? "null" : quote(error))
+                    + "}");
         }
 
         /** 读 Bamboo 写回来的字节，用官方代码解出补丁，和原来的比。 */

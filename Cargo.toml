@@ -31,6 +31,8 @@ bytes = "1.12.1"
 cfb8 = "0.8"
 flate2 = "1.1.11"
 hmac = "0.12.1"
+# 只在类 Unix 平台上用来查线程的栈范围（见 mc-bamboo-protocol 的 stack_hop）。
+libc = "0.2"
 md-5 = "0.10"
 # 用系统自带的 TLS（Windows 是 schannel），这台机器上没有 rustls 后端需要的汇编工具链。
 native-tls = "0.2"

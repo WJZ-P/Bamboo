@@ -108,14 +108,19 @@ impl Behaviour for ChiseledBookShelf {
             return InteractionResult::Consume;
         }
         let pos = ctx.clicked_pos();
-        // `removeBook` 先取出再出声，声音看取出来的那本是不是附魔书。
-        // `removeBook` removes the book first, then plays. The sound follows that book.
+        // `removeBook` 先取出再出声。整本进背包；放不下就消失，没有物品实体。
+        //
+        // `removeBook` removes the book first, then plays. The whole book goes into the
+        // inventory. If it does not fit it disappears; there is no item entity.
         let taken = world
             .slots_at(pos)
             .get(slot)
             .cloned()
             .unwrap_or_else(ItemStack::empty);
         set_bookshelf_slot(world, pos, slot, ItemStack::empty());
+        if !taken.is_empty() {
+            world.set_gained(taken.clone());
+        }
         let sound = if !taken.is_empty() && taken.item == items::ENCHANTED_BOOK {
             "minecraft:block.chiseled_bookshelf.pickup.enchanted"
         } else {

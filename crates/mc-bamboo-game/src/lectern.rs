@@ -62,8 +62,6 @@ struct Book {
     page: i32,
     page_count: i32,
     has_content: bool,
-    /// 放书的人。别人看到的是 [`ItemStack::filtered`]。
-    owner: Option<PlayerId>,
 }
 
 /// 一名玩家打开的讲台菜单。
@@ -257,7 +255,6 @@ pub(crate) fn complete_use(
             page: 0,
             page_count,
             has_content,
-            owner: Some(id),
         },
     );
     if creative {
@@ -533,19 +530,17 @@ fn ensure_book(region: &mut Region, pos: BlockPos) {
             page,
             page_count,
             has_content,
-            owner: None,
         },
     );
 }
 
 fn send_open(region: &mut Region, id: PlayerId, pos: BlockPos, container_id: i32) {
     let Some((shown, page)) = region.lecterns.books.get(&pos).map(|book| {
-        let shown = if book.owner == Some(id) {
-            book.stack.clone()
-        } else {
-            book.stack.filtered()
-        };
-        (shown, book.page)
+        // 校验过的组件原样发给所有人，包括后来打开这本讲台的玩家。
+        //
+        // A validated component patch is sent unchanged, including to a player who opens
+        // this lectern afterwards.
+        (book.stack.clone(), book.page)
     }) else {
         return;
     };

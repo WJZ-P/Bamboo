@@ -24,6 +24,12 @@ const CHAT_DISABLED: &str = "chat.disabled.options";
 /// 每条消息或者命令给 [`TickThrottler`] 加多少。
 const SPAM_INCREMENT_STEP: i32 = 20;
 /// `chat-spam-threshold-seconds` 和 `command-spam-threshold-seconds` 默认都是 10，阈值是它们的 20 倍。
+///
+/// 这是 `server.properties` 的阈值，不是游戏规则。官方 `ServerGamePacketListenerImpl.detectRateSpam`
+/// 用的也是这个配置。
+///
+/// This is the `server.properties` threshold, not a game rule. Official
+/// `ServerGamePacketListenerImpl.detectRateSpam` uses that setting too.
 const SPAM_THRESHOLD: i32 = 200;
 
 /// `TickThrottler(20, 200)`：动作一次加 20，每 tick 减 1，到阈值就算刷屏。

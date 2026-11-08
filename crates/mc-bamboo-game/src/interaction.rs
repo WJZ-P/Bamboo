@@ -13,9 +13,8 @@ pub(crate) use mining::tick_mining;
 
 use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_blocks::{
-    Actor, BlockHit, BlockState, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult,
-};
+use mc_bamboo_blocks::{Actor, BlockHit, BlockState, Effect, InteractionResult};
+use mc_bamboo_command::permission;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
 use mc_bamboo_protocol::{
@@ -137,9 +136,12 @@ pub(crate) fn run_entity_ticks(region: &mut Region) {
 /// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
 pub(crate) fn run_random_ticks(region: &mut Region) {
     for chunk in random_ticking_chunks(region) {
+        let speed = region.block_rules.random_tick_speed;
         let (mut level, ticks) = region.block_level();
-        let outcome =
-            mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, DEFAULT_RANDOM_TICK_SPEED);
+        // `ServerChunkCache.tickChunks` 把 `GameRules.RANDOM_TICK_SPEED` 传给 `tickChunk`。
+        //
+        // `ServerChunkCache.tickChunks` passes `GameRules.RANDOM_TICK_SPEED` to `tickChunk`.
+        let outcome = mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, speed);
         send_effects(region, None, &outcome.effects);
     }
 }
@@ -217,6 +219,14 @@ fn actor_of(player: &Player) -> Actor {
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
         // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
         prevents_block_drops: matches!(player.game_mode, GameMode::Creative),
+        // `ServerPlayer.canUseGameMasterBlocks`：`instabuild` 并且至少是游戏管理员。
+        // 旁观模式的 `instant_build` 是假，所以旁观的 OP 也不能用调试棒和命令方块。
+        //
+        // `ServerPlayer.canUseGameMasterBlocks`: `instabuild` and at least gamemaster.
+        // Spectator `instant_build` is false, so a spectator op cannot use the debug stick
+        // or command blocks either.
+        can_use_game_master_blocks: matches!(player.game_mode, GameMode::Creative)
+            && player.permission_level >= permission::GAMEMASTERS,
     }
 }
 
@@ -442,6 +452,35 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_level_event(region, None, pos, &event);
             }
+            Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
+            // `ServerPlayer.sendOverlayMessage`。只发给发起动作的那名玩家。
+            //
+            // `ServerPlayer.sendOverlayMessage`. Only the player who started the action.
+            Effect::Overlay { key, first, second } => {
+                let Some(id) = initiator else {
+                    continue;
+                };
+                let mut args = Vec::new();
+                if let Some(first) = first {
+                    args.push(first.into());
+                }
+                if let Some(second) = second {
+                    args.push(second.into());
+                }
+                let content = Component::translate(key, args);
+                region.links.send(
+                    id,
+                    &SystemChat {
+                        content: &content,
+                        overlay: true,
+                    },
+                );
+            }
+            Effect::OpenCommandBlock { pos } => {
+                if let Some(id) = initiator {
+                    crate::command_block::open(region, id, pos);
+                }
+            }
         }
     }
 }
@@ -643,12 +682,23 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         if let Some(stack) = stack {
             block_items::apply(region, placed, id, &stack);
         }
+        // `CommandBlock.setPlacedBy`。`/setblock` 不走这里。
+        //
+        // `CommandBlock.setPlacedBy`. `/setblock` does not come through here.
+        crate::command_block::on_placed(region, placed);
     }
     send_effects(region, Some(id), &outcome.effects);
     // 炼药锅的 `createFilledResult` 和洗染料。方块逻辑只记账，物品栏在这里改。
     // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.
     if let Some(exchange) = &outcome.item_exchange {
         inventory::apply_item_exchange(region, id, packet.hand, exchange);
+    }
+    // 雕纹书架取出的书。官方放不下就 `player.drop`，这里没有物品实体，剩下的消失。
+    //
+    // A book taken from a chiseled bookshelf. Vanilla drops what does not fit.
+    // There is no item entity here, so a remainder vanishes.
+    if let Some(gained) = outcome.gained.clone() {
+        inventory::give(region, id, gained);
     }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item && !menu::open_block(region, id, packet.pos) {
@@ -767,6 +817,7 @@ pub(crate) fn on_use_item(
         if let Some(stack) = stack {
             block_items::apply(region, placed, id, &stack);
         }
+        crate::command_block::on_placed(region, placed);
     }
     send_effects(region, Some(id), &outcome.effects);
     let mut result = outcome.result;

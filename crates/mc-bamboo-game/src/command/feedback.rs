@@ -115,7 +115,13 @@ pub(crate) fn send_system(region: &mut Region, id: PlayerId, content: &Component
 /// Official `sendSuccess`. When `broadcast` is set, other ops receive a grey italic
 /// `chat.type.admin` line.
 pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component, broadcast: bool) {
-    send_system(region, source, &message);
+    // `CommandSourceStack.sendSuccess`：自己的系统消息受 `send_command_feedback` 限制。
+    //
+    // `CommandSourceStack.sendSuccess`: the caller's system message is gated by
+    // `send_command_feedback`.
+    if region.send_command_feedback {
+        send_system(region, source, &message);
+    }
     if !broadcast {
         return;
     }
@@ -126,9 +132,21 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     else {
         return;
     };
+    // `broadcastToAdmins`：其他 OP 的 `chat.type.admin` 也看 `send_command_feedback`。
+    // 日志看 `log_admin_commands`，而且来源不是服务器本身。玩家执行的命令会记。
+    //
+    // `broadcastToAdmins`: other ops' `chat.type.admin` also checks `send_command_feedback`.
+    // The log checks `log_admin_commands`, and the source is not the server. A player's
+    // command is logged.
+    if region.log_admin_commands {
+        info!(player = %name, "broadcasting command feedback");
+    }
+    if !region.send_command_feedback {
+        return;
+    }
     let admin = Component::translate(
         "chat.type.admin",
-        [Component::text(name.clone()).into(), message.into()],
+        [Component::text(name).into(), message.into()],
     )
     .color(Color::Gray)
     .italic();
@@ -145,5 +163,4 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     for id in ops {
         region.links.send_frames(id, &frames);
     }
-    info!(player = %name, "broadcasting command feedback");
 }

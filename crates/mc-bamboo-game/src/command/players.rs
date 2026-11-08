@@ -257,6 +257,24 @@ pub(crate) fn help(
     Ok(())
 }
 
+/// `GameModeCommand.setGameMode`：F3+N / F3+F4 发来的模式。模式没变时没有消息。
+///
+/// `GameModeCommand.setGameMode` for the mode from F3+N / F3+F4. An unchanged mode sends nothing.
+pub(crate) fn change_own_mode(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    protocol: GameMode,
+) {
+    let mode = match protocol {
+        GameMode::Survival => CommandMode::Survival,
+        GameMode::Creative => CommandMode::Creative,
+        GameMode::Adventure => CommandMode::Adventure,
+        GameMode::Spectator => CommandMode::Spectator,
+    };
+    apply_mode(global, region, id, id, mode, protocol);
+}
+
 fn apply_mode(
     global: &mut Global,
     region: &mut Region,
@@ -331,14 +349,21 @@ fn apply_mode(
             true,
         );
     } else {
-        let changed = Component::translate("gameMode.changed", [mode_name.clone().into()]);
-        region.links.send(
-            target,
-            &mc_bamboo_protocol::packet::play::SystemChat {
-                content: &changed,
-                overlay: false,
-            },
-        );
+        // `GameModeCommand.logGamemodeChange`：给目标的 `gameMode.changed` 受
+        // `GameRules.SEND_COMMAND_FEEDBACK` 限制。
+        //
+        // `GameModeCommand.logGamemodeChange`: the target's `gameMode.changed` is gated by
+        // `GameRules.SEND_COMMAND_FEEDBACK`.
+        if region.send_command_feedback {
+            let changed = Component::translate("gameMode.changed", [mode_name.clone().into()]);
+            region.links.send(
+                target,
+                &mc_bamboo_protocol::packet::play::SystemChat {
+                    content: &changed,
+                    overlay: false,
+                },
+            );
+        }
         feedback::success(
             region,
             source,

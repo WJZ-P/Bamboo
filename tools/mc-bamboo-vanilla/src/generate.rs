@@ -10,8 +10,9 @@ use std::{
 use crate::extract::{
     Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
-    ExtractedStack, FieldValue, HeightmapType, Item, LevelValueJson, LootConditionJson, Property,
-    PropertyKind, StateProvider, TagGroup, TypedLevelJson, ValueEffectJson, VersionData,
+    ExtractedStack, FieldValue, GameRuleFact, HeightmapType, Item, LevelValueJson,
+    LootConditionJson, Property, PropertyKind, StateProvider, TagGroup, TypedLevelJson,
+    ValueEffectJson, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -48,6 +49,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let heightmaps = heightmaps_file(data)?;
     let sounds = sounds_file(data)?;
     let loot = loot_file(data)?;
+    let gamerules = gamerules_file(&data.game_rules)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
@@ -93,6 +95,9 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "sounds.rs", &sounds)?;
     write_file(output_dir, "loot.rs", &loot)?;
+    if !data.game_rules.is_empty() {
+        write_file(output_dir, "gamerules.rs", &gamerules)?;
+    }
     write_file(output_dir, "tags.rs", &tags)?;
     write_worldgen(data, output_dir)
 }
@@ -536,6 +541,112 @@ fn float_literal(value: f32) -> String {
     }
 }
 
+/// 把 `Extractor.gameRules` 写成 `gamerules.rs`。
+pub fn write_gamerules(rules: &[GameRuleFact], output_dir: &Path) -> Result<(), String> {
+    write_file(output_dir, "gamerules.rs", &gamerules_file(rules)?)
+}
+
+fn gamerules_file(rules: &[GameRuleFact]) -> Result<String, String> {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一条游戏规则。下标是 `minecraft:game_rule` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct GameRuleDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub identifier: &'static str,");
+    let _ = writeln!(out, "    pub category: &'static str,");
+    let _ = writeln!(out, "    pub kind: GameRuleKind,");
+    let _ = writeln!(out, "    pub default_bool: bool,");
+    let _ = writeln!(out, "    pub default_int: i32,");
+    let _ = writeln!(out, "    pub min: i32,");
+    let _ = writeln!(out, "    pub max: i32,");
+    let _ = writeln!(
+        out,
+        "    /// `GameRule.isEnabled(FeatureFlags.DEFAULT_FLAGS)`。"
+    );
+    let _ = writeln!(out, "    pub enabled: bool,");
+    let _ = writeln!(out, "    pub features: &'static [&'static str],");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub enum GameRuleKind {{");
+    let _ = writeln!(out, "    Bool,");
+    let _ = writeln!(out, "    Int,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    for (index, rule) in rules.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "pub const {}: usize = {index};",
+            const_name(&rule.name)?
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "pub static RULES: &[GameRuleDef] = &[");
+    for rule in rules {
+        let (kind, default_bool, default_int, min, max) = match rule.kind.as_str() {
+            "boolean" => (
+                "GameRuleKind::Bool",
+                rule.default_bool
+                    .ok_or_else(|| format!("{} 没有布尔默认值", rule.name))?,
+                0,
+                0,
+                0,
+            ),
+            "integer" => (
+                "GameRuleKind::Int",
+                false,
+                rule.default_int
+                    .ok_or_else(|| format!("{} 没有整数默认值", rule.name))?,
+                rule.min.ok_or_else(|| format!("{} 没有下限", rule.name))?,
+                rule.max.ok_or_else(|| format!("{} 没有上限", rule.name))?,
+            ),
+            other => return Err(format!("{} 的类型 {other} 不认识", rule.name)),
+        };
+        if rule.identifier != format!("minecraft:{}", rule.name) {
+            return Err(format!(
+                "{} 的标识符是 {}，不是 minecraft:{}",
+                rule.name, rule.identifier, rule.name
+            ));
+        }
+        let features = rule
+            .features
+            .iter()
+            .map(|feature| format!("{feature:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "    GameRuleDef {{ name: {:?}, identifier: {:?}, category: {:?}, kind: {kind}, default_bool: {default_bool}, default_int: {default_int}, min: {min}, max: {max}, enabled: {}, features: &[{features}] }},",
+            rule.name, rule.identifier, rule.category, rule.enabled,
+        );
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 短名或 `minecraft:` 全名。没注册的返回 `None`。");
+    let _ = writeln!(out, "pub fn find(name: &str) -> Option<usize> {{");
+    let _ = writeln!(
+        out,
+        "    let name = name.strip_prefix(\"minecraft:\").unwrap_or(name);"
+    );
+    let _ = writeln!(out, "    RULES.iter().position(|rule| rule.name == name)");
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+fn const_name(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return Err(format!("游戏规则名 {name} 不能当成常量"));
+    }
+    Ok(name.to_ascii_uppercase())
+}
+
 fn module_file() -> String {
     "pub mod block_classes;
 pub mod block_maps;
@@ -546,6 +657,7 @@ pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
 pub mod entity_types;
+pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;
 pub mod item_damage;

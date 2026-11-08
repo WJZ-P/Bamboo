@@ -184,6 +184,14 @@ pub fn accept_teleportation_with_id(id: i32, x: f64, y: f64, z: f64) -> Vec<u8> 
     frame(&payload)
 }
 
+pub fn client_tick_end() -> Vec<u8> {
+    frame(&packet(serverbound::CLIENT_TICK_END))
+}
+
+pub fn player_loaded() -> Vec<u8> {
+    frame(&packet(serverbound::PLAYER_LOADED))
+}
+
 pub fn move_position(x: f64, y: f64, z: f64, on_ground: bool) -> Vec<u8> {
     let mut payload = packet(serverbound::MOVE_PLAYER_POS);
     push_position(&mut payload, x, y, z);

@@ -35,6 +35,10 @@ pub struct Actor {
     /// `player.preventsBlockDrops()`：创造模式的 `instabuild` 能力。活塞头在玩家破坏时
     /// 只有它为真才拆底座，生存模式改由形状更新拆。
     pub prevents_block_drops: bool,
+    /// `ServerPlayer.canUseGameMasterBlocks`：`instabuild` 并且权限至少是游戏管理员。
+    ///
+    /// `ServerPlayer.canUseGameMasterBlocks`: `instabuild` and at least gamemaster permission.
+    pub can_use_game_master_blocks: bool,
 }
 
 impl Actor {
@@ -171,6 +175,7 @@ static NOBODY: LazyLock<Actor> = LazyLock::new(|| Actor {
     block_interaction_range: 0.0,
     may_build: false,
     prevents_block_drops: false,
+    can_use_game_master_blocks: false,
 });
 
 impl<'a> PlaceContext<'a> {

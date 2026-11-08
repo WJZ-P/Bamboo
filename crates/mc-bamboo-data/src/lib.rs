@@ -20,9 +20,9 @@ pub use recipe::{
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
-    component_registries, crafting_remainders, entity_types, heightmaps, item_components,
-    item_damage, items, jukebox_songs, light, loot, packets, recipes, registries, shapes, sounds,
-    states, tags, version, worldgen,
+    component_registries, crafting_remainders, entity_types, gamerules, heightmaps,
+    item_components, item_damage, items, jukebox_songs, light, loot, packets, recipes, registries,
+    shapes, sounds, states, tags, version, worldgen,
 };
 
 pub use generated::sounds::{

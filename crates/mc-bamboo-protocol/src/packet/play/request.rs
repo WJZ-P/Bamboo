@@ -33,9 +33,24 @@ const LAST_SEEN_ACKNOWLEDGED_BYTES: usize = 3;
 ///
 /// Maximum argument signatures on a signed command. Official `ArgumentSignatures` uses 8.
 const MAX_SIGNED_ARGUMENTS: usize = 8;
+/// `FriendlyByteBuf.readUtf` 的默认上限。
+///
+/// The default limit of `FriendlyByteBuf.readUtf`.
+const MAX_UTF: usize = 32_767;
+/// `set_game_rule` 一次最多带几条。官方没有上限。
+///
+/// How many entries one `set_game_rule` may carry. Vanilla has no limit.
+const MAX_GAME_RULE_ENTRIES: usize = 1024;
+const COMMAND_BLOCK_TRACK_OUTPUT: u8 = 1;
+const COMMAND_BLOCK_CONDITIONAL: u8 = 2;
+const COMMAND_BLOCK_AUTOMATIC: u8 = 4;
 
 /// 移动包 `flags` 里表示站在地上的位。
 const MOVE_FLAG_ON_GROUND: u8 = 0x01;
+/// 移动包 `flags` 里表示这一下在水平方向撞到了东西。
+///
+/// The move-packet bit that says this move collided horizontally.
+const MOVE_FLAG_HORIZONTAL_COLLISION: u8 = 0x02;
 
 /// [`PlayRequest::PlayerInput`] 的 `flags` 里表示按住潜行键的位。
 pub const INPUT_FLAG_SHIFT: u8 = 0x20;
@@ -70,6 +85,10 @@ pub enum PlayRequest {
         /// `(yaw, pitch)`。
         rotation: Option<(f32, f32)>,
         on_ground: bool,
+        /// `ServerboundMovePlayerPacket.horizontalCollision`，`flags` 的第 1 位。
+        ///
+        /// `ServerboundMovePlayerPacket.horizontalCollision`, bit 1 of `flags`.
+        horizontal_collision: bool,
     },
     /// 收到了一批区块，并告诉服务端之后每 tick 发几个。
     ChunkBatchReceived {
@@ -202,6 +221,30 @@ pub enum PlayRequest {
         /// 有标题就是署名，没有就是只保存页面。
         title: Option<String>,
     },
+    /// F3+N / F3+F4。模式是 `GameType` 的序号。
+    ///
+    /// F3+N / F3+F4. The mode is the `GameType` ordinal.
+    ChangeGameMode {
+        mode: super::GameMode,
+    },
+    /// 游戏规则界面提交的值。键是 `minecraft:` 标识符，值是序列化文本。
+    ///
+    /// Values submitted by the game-rules screen. The key is a `minecraft:` identifier
+    /// and the value is serialized text.
+    SetGameRule {
+        entries: Vec<(String, String)>,
+    },
+    /// 命令方块界面的保存。
+    ///
+    /// A save from the command-block screen.
+    SetCommandBlock {
+        pos: BlockPos,
+        command: String,
+        mode: CommandBlockMode,
+        track_output: bool,
+        conditional: bool,
+        automatic: bool,
+    },
     /// 服务端不解码的包，内容是包 ID。
     Other(i32),
 }
@@ -328,6 +371,13 @@ impl PlayRequest {
             },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             serverbound::EDIT_BOOK => read_edit_book(&mut reader)?,
+            serverbound::CHANGE_GAME_MODE => Self::ChangeGameMode {
+                mode: game_mode(reader.varint()?)?,
+            },
+            serverbound::SET_GAME_RULE => Self::SetGameRule {
+                entries: read_game_rules(&mut reader)?,
+            },
+            serverbound::SET_COMMAND_BLOCK => read_command_block(&mut reader)?,
             other => return Ok(Self::Other(other)),
         };
         reader.finish()?;
@@ -339,6 +389,7 @@ impl PlayRequest {
             position,
             rotation,
             on_ground: flags & MOVE_FLAG_ON_GROUND != 0,
+            horizontal_collision: flags & MOVE_FLAG_HORIZONTAL_COLLISION != 0,
         }
     }
 }
@@ -481,10 +532,28 @@ fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeErr
 /// 帧有长度前缀，物品后面多余的字节不会让字节流错位。
 fn read_creative_mode_slot(mut reader: Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let slot = reader.i16()?;
-    Ok(match ItemStack::read_delimited(&mut reader) {
-        Ok(stack) => PlayRequest::SetCreativeModeSlot { slot, stack },
-        Err(_) => PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT),
-    })
+    match ItemStack::read_delimited(&mut reader) {
+        Ok(stack) => Ok(PlayRequest::SetCreativeModeSlot { slot, stack }),
+        // 嵌套超过上限时官方抛 `DecoderException`，这条连接要断。别的畸形物品仍然
+        // 忽略，槽位保持不动：规格允许这样，已有测试也按这个结果写。
+        //
+        // Nesting past the cap is a `DecoderException` officially, so this
+        // connection drops. Other malformed items are still ignored and the slot
+        // stays put: the spec allows that, and the existing tests expect it.
+        Err(error) if nesting_limit(&error) => Err(error),
+        Err(_) => Ok(PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT)),
+    }
+}
+
+/// 这种错误表示嵌套深过上限。收下它会在转发时把别人的连接打掉，或者在解码时把进程打崩。
+fn nesting_limit(error: &DecodeError) -> bool {
+    match error {
+        DecodeError::Nbt(mc_bamboo_nbt::DecodeError::TooDeep { .. })
+        | DecodeError::StacksTooDeep { .. } => true,
+        DecodeError::InvalidTextComponent(message) => *message == "nested too deep",
+        DecodeError::InvalidComponentValue(message) => message.contains("nested too deep"),
+        _ => false,
+    }
 }
 
 /// 解码 `container_click`。槽位和按钮的范围由调用方判断，官方也是这样。
@@ -554,6 +623,64 @@ fn read_component_type(reader: &mut Reader<'_>) -> Result<i32, DecodeError> {
 }
 
 /// 解码官方用 `readEnum` 读的字段。这种字段越界时官方解码失败，不是回绕。
+/// `CommandBlockEntity.Mode`。序号就是网上的枚举。
+///
+/// `CommandBlockEntity.Mode`. The ordinal is the enum on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBlockMode {
+    /// 连锁。
+    Sequence = 0,
+    /// 重复。
+    Auto = 1,
+    /// 脉冲。
+    Redstone = 2,
+}
+
+fn game_mode(id: i32) -> Result<super::GameMode, DecodeError> {
+    match id {
+        0 => Ok(super::GameMode::Survival),
+        1 => Ok(super::GameMode::Creative),
+        2 => Ok(super::GameMode::Adventure),
+        3 => Ok(super::GameMode::Spectator),
+        other => Err(DecodeError::InvalidEnum(other)),
+    }
+}
+
+fn command_block_mode(id: i32) -> Result<CommandBlockMode, DecodeError> {
+    match id {
+        0 => Ok(CommandBlockMode::Sequence),
+        1 => Ok(CommandBlockMode::Auto),
+        2 => Ok(CommandBlockMode::Redstone),
+        other => Err(DecodeError::InvalidEnum(other)),
+    }
+}
+
+fn read_game_rules(reader: &mut Reader<'_>) -> Result<Vec<(String, String)>, DecodeError> {
+    let count = reader.count(MAX_GAME_RULE_ENTRIES)?;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let identifier = reader.string(MAX_UTF)?.to_owned();
+        let value = reader.string(MAX_UTF)?.to_owned();
+        entries.push((identifier, value));
+    }
+    Ok(entries)
+}
+
+fn read_command_block(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let pos = reader.block_pos()?;
+    let command = reader.string(MAX_UTF)?.to_owned();
+    let mode = command_block_mode(reader.varint()?)?;
+    let flags = reader.u8()?;
+    Ok(PlayRequest::SetCommandBlock {
+        pos,
+        command,
+        mode,
+        track_output: flags & COMMAND_BLOCK_TRACK_OUTPUT != 0,
+        conditional: flags & COMMAND_BLOCK_CONDITIONAL != 0,
+        automatic: flags & COMMAND_BLOCK_AUTOMATIC != 0,
+    })
+}
+
 fn by_ordinal<T: Copy>(values: &[T], id: i32) -> Result<T, DecodeError> {
     usize::try_from(id)
         .ok()
@@ -854,6 +981,7 @@ mod tests {
                 position: Some(position),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             }
         );
         assert_eq!(
@@ -865,6 +993,7 @@ mod tests {
                 position: Some(position),
                 rotation: Some((90.0, -45.0)),
                 on_ground: true,
+                horizontal_collision: true,
             }
         );
         assert_eq!(
@@ -873,6 +1002,7 @@ mod tests {
                 position: None,
                 rotation: Some((90.0, -45.0)),
                 on_ground: false,
+                horizontal_collision: false,
             }
         );
         assert_eq!(
@@ -881,6 +1011,7 @@ mod tests {
                 position: None,
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             }
         );
     }
@@ -893,6 +1024,7 @@ mod tests {
                 position: None,
                 rotation: None,
                 on_ground: false,
+                horizontal_collision: true,
             })
         );
     }

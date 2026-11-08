@@ -6,16 +6,19 @@
 
 use std::collections::BTreeMap;
 
+mod grindstone;
+mod item_patch;
+mod loom;
 pub(crate) mod station;
 
 use mc_bamboo_blocks::{BlockState, World, hopper::set_changed};
-use mc_bamboo_core::{Aabb, BlockPos, Vec3};
+use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
         ContainerClose, ContainerInput, ContainerSetContent, ContainerSetSlot, GameMode,
-        HashedStack, OpenScreen, SetCursorItem, SetPlayerInventory,
+        HashedStack, OpenScreen, SetCursorItem, SetPlayerInventory, SystemChat,
     },
     text::Component,
 };
@@ -27,6 +30,7 @@ use crate::{
     inbound::PlayerId,
     interaction::{BLOCK_INTERACTION_RANGE, rules},
     inventory::{HOTBAR_START, Inventory, OFF_HAND, menu_slot},
+    lock,
     region::Region,
 };
 
@@ -213,11 +217,7 @@ pub(crate) struct ClickPacket {
 struct Ctx<'a> {
     kind: ContainerKind,
     container_size: usize,
-    /// 点这个菜单的人。容器格里别人放的组件只能滤过以后交给他，见 [`Ctx::taken_by_viewer`]。
-    viewer: PlayerId,
     container: &'a mut [ItemStack],
-    /// 每个容器格的组件来自哪名玩家，和 `container` 一一对应。
-    sources: &'a mut [Option<PlayerId>],
     inventory: &'a mut Inventory,
     carried: &'a mut ItemStack,
     quickcraft_status: &'a mut i32,
@@ -249,26 +249,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// 这一格的物品离开容器交到点菜单的人手上时的样子。
-    ///
-    /// 别人放进来的物品里那几种没法完全校验的组件不跟着走：它们只能发回给来源玩家，
-    /// 一路跟到这名玩家的物品栏里就没法再分辨了。官方不滤，这是我们多出来的一道。
-    fn taken_by_viewer(&self, index: usize, stack: ItemStack) -> ItemStack {
-        if index < self.container_size && self.sources[index] != Some(self.viewer) {
-            return stack.filtered();
-        }
-        stack
-    }
-
     fn set(&mut self, index: usize, stack: ItemStack) {
         if index < self.container_size {
-            let previous = &self.container[index];
-            if stack.is_empty() {
-                self.sources[index] = None;
-            } else if previous.is_empty() || !same_component_bytes(previous, &stack) {
-                self.sources[index] = Some(self.viewer);
-            }
-            // 原来那一格非空、组件字节又没变，就是合并（只有数量变了），来源跟着不变。
             self.container[index] = stack;
         } else {
             let slot = self.inv_slot(index);
@@ -298,7 +280,7 @@ impl Ctx<'_> {
         } else {
             self.set(index, copy_with_count(&current, leftover));
         }
-        Some(self.taken_by_viewer(index, taken))
+        Some(taken)
     }
 
     /// 官方 `Slot.safeTake`。`onTake` 对我们什么也不做。
@@ -313,8 +295,7 @@ impl Ctx<'_> {
         if current.is_empty() {
             return ItemStack::empty();
         }
-        let cloned = copy_with_count(&current, item_max(&current));
-        self.taken_by_viewer(index, cloned)
+        copy_with_count(&current, item_max(&current))
     }
 
     /// 官方 `Slot.safeInsert`。返回没放进槽里的剩余物品。
@@ -415,8 +396,7 @@ impl Ctx<'_> {
         if clicked.is_empty() {
             return ItemStack::empty();
         }
-        // 从容器格移到物品栏时物品换了主人，组件照 `taken_by_viewer` 过一遍。
-        let mut stack = self.taken_by_viewer(index, clicked.clone());
+        let mut stack = clicked.clone();
         let moved = if index < self.container_size {
             self.move_item_stack_to(&mut stack, self.container_size, self.slots_len(), true)
         } else {
@@ -547,8 +527,7 @@ fn pickup(ctx: &mut Ctx, index: usize, primary: bool) {
             let amount = if primary { carried.count } else { 1 };
             *ctx.carried = ctx.safe_insert(index, carried, amount);
         } else if carried.count <= stack_limit(&carried) {
-            // 两边换位置：拿到手上的那一份换了主人。
-            *ctx.carried = ctx.taken_by_viewer(index, clicked);
+            *ctx.carried = clicked;
             ctx.set(index, carried);
         }
     } else if is_same_item_same_components(&clicked, &carried) {
@@ -568,7 +547,7 @@ fn swap_with_inventory(ctx: &mut Ctx, slot_index: i32, button: i32) {
     };
     let source = ctx.inventory.slots[source_slot].clone();
     // 交换和「放不下时收进物品栏」都会把容器格里的物品搬进这名玩家的物品栏。
-    let target = ctx.taken_by_viewer(index, ctx.get(index));
+    let target = ctx.get(index);
     if source.is_empty() && target.is_empty() {
         return;
     }
@@ -807,6 +786,15 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     let Some((target, container_size, menu_type, title)) = menu_shape(region, pos, kind) else {
         return false;
     };
+    // 潜影盒先看头顶有没有空，锁在菜单创建时才查。末影箱不是 `BaseContainerBlockEntity`。
+    // 打得开才收起讲台。
+    //
+    // A shulker checks the space above first. The lock is checked when the menu is created.
+    // An ender chest is not a `BaseContainerBlockEntity`. The lectern closes only when this
+    // menu will actually open.
+    if locked_message(region, id, &target, title) {
+        return false;
+    }
     crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         close_menu(region, id);
@@ -846,6 +834,41 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     };
     broadcast_full_state(region, id, &mut menu);
     region.menus.insert(id, menu);
+    true
+}
+
+/// 锁住了就发 `container.isLocked`，菜单不开。旁观者和末影箱不查锁。
+///
+/// 官方同时播 `CHEST_LOCKED`。这里没有音效包，只发快捷栏上方的提示。
+///
+/// A lock sends `container.isLocked` and does not open the menu. Spectators and
+/// ender chests skip the check. Vanilla also plays `CHEST_LOCKED`; there is no
+/// sound packet, so only the overlay is sent.
+fn locked_message(region: &mut Region, id: PlayerId, target: &Target, title: &str) -> bool {
+    if is_spectator(region, id) || matches!(target, Target::EnderChest(_)) {
+        return false;
+    }
+    let held = region
+        .players
+        .get(&id)
+        .map(|player| player.inventory.held(Hand::Main).clone())
+        .unwrap_or_else(ItemStack::empty);
+    let blocked = target
+        .positions()
+        .iter()
+        .any(|pos| !lock::unlocks(region, *pos, &held));
+    if !blocked {
+        return false;
+    }
+    let name = menu_title(region, target, title);
+    let content = Component::translate("container.isLocked", [name.into()]);
+    region.links.send(
+        id,
+        &SystemChat {
+            content: &content,
+            overlay: true,
+        },
+    );
     true
 }
 
@@ -1227,7 +1250,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
         None => return,
     };
     let ender = matches!(menu.target, Target::EnderChest(_));
-    let (mut slots, mut sources) = raw_container_slots(region, id, &menu);
+    let mut slots = raw_container_slots(region, id, &menu);
     let creative = region
         .players
         .get(&id)
@@ -1236,9 +1259,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
         let mut ctx = Ctx {
             kind: menu.kind,
             container_size: menu.container_size,
-            viewer: id,
             container: &mut slots,
-            sources: &mut sources,
             inventory: &mut player.inventory,
             carried: &mut menu.carried,
             quickcraft_status: &mut menu.quickcraft_status,
@@ -1261,7 +1282,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
                 .clone_from_slice(&slots[..menu.container_size]);
         }
     } else {
-        write_back_containers(region, &menu, &slots, &sources);
+        write_back_containers(region, &menu, &slots);
     }
     for (slot, hash) in packet.changed_slots {
         match usize::try_from(slot) {
@@ -1315,83 +1336,56 @@ fn broadcast_full_state(region: &mut Region, id: PlayerId, menu: &mut Menu) {
     );
 }
 
-/// 这名玩家会收到的那一份槽位内容。
+/// 这名玩家会收到的槽位内容，组件原样写，和官方一样。
 ///
-/// 自己的物品栏、光标和自己的末影箱写完整的补丁：那些字节就是这名玩家的客户端发来的。
-/// 共享容器里别人放的格子要滤一遍，见 [`ItemStack::write_for_others`]。
-/// 记远程槽的账用的也是这一份，不然记的和发出去的不一样。
+/// The slots this player receives. Components are written as they are, matching vanilla.
 fn network_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemStack> {
-    let (slots, sources) = display(region, id, menu);
-    slots
-        .into_iter()
-        .enumerate()
-        .map(|(index, stack)| {
-            if index < menu.container_size && sources[index] != Some(id) {
-                stack.filtered()
-            } else {
-                stack
-            }
-        })
-        .collect()
+    display(region, id, menu)
 }
 
-/// 菜单里的全部槽位：容器格加上玩家的 36 格。`sources` 只对容器格有意义。
-fn display(region: &Region, id: PlayerId, menu: &Menu) -> (Vec<ItemStack>, Vec<Option<PlayerId>>) {
-    let (mut slots, mut sources) = raw_container_slots(region, id, menu);
+/// 菜单里的全部槽位：容器格加上玩家的 36 格。
+///
+/// Every menu slot: the container slots, then the player's 36 inventory slots.
+fn display(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemStack> {
+    let mut slots = raw_container_slots(region, id, menu);
     let Some(player) = region.players.get(&id) else {
         slots.resize(menu.slots_len(), ItemStack::empty());
-        sources.resize(menu.slots_len(), None);
-        return (slots, sources);
+        return slots;
     };
     for index in 0..PLAYER_SLOTS {
         slots.push(player.inventory.slots[INVENTORY_MENU_START + index].clone());
-        sources.push(Some(id));
     }
-    (slots, sources)
+    slots
 }
 
-/// 容器自己的格。末影箱的内容在玩家身上，组件的来源永远是这名玩家。
-fn raw_container_slots(
-    region: &Region,
-    id: PlayerId,
-    menu: &Menu,
-) -> (Vec<ItemStack>, Vec<Option<PlayerId>>) {
+/// 容器自己的格。末影箱的内容在玩家身上。
+///
+/// The container's own slots. An ender chest's contents live on the player.
+fn raw_container_slots(region: &Region, id: PlayerId, menu: &Menu) -> Vec<ItemStack> {
     if matches!(menu.target, Target::EnderChest(_)) {
-        let slots = region.players.get(&id).map_or_else(
+        return region.players.get(&id).map_or_else(
             || vec![ItemStack::empty(); menu.container_size],
             |player| player.ender_chest.slots.clone(),
         );
-        let sources = vec![Some(id); slots.len()];
-        return (slots, sources);
     }
     let mut slots = Vec::with_capacity(menu.container_size);
-    let mut sources = Vec::with_capacity(menu.container_size);
     for pos in menu.target.positions() {
         match region.containers.get(&pos) {
-            Some(entry) => {
-                slots.extend(entry.slots.iter().cloned());
-                sources.extend(entry.sources.iter().copied());
-            }
+            Some(entry) => slots.extend(entry.slots.iter().cloned()),
             None => {
                 let len = menu.kind.slots();
                 slots.resize(slots.len() + len, ItemStack::empty());
-                sources.resize(sources.len() + len, None);
             }
         }
     }
-    (slots, sources)
+    slots
 }
 
 /// 把点击之后的容器格写回方块实体。双箱按位置分成前后两段。
 ///
 /// 漏斗和发射器原来没有条目，这里按需新建，否则点开的菜单编辑会悄悄丢掉。
 /// 内容变了的格子要 `setChanged`，比较器才会立刻重算。
-fn write_back_containers(
-    region: &mut Region,
-    menu: &Menu,
-    slots: &[ItemStack],
-    sources: &[Option<PlayerId>],
-) {
+fn write_back_containers(region: &mut Region, menu: &Menu, slots: &[ItemStack]) {
     let mut offset = 0;
     let mut changed = Vec::new();
     for pos in menu.target.positions() {
@@ -1403,9 +1397,6 @@ fn write_back_containers(
                     changed.push(pos);
                 }
                 entry.slots.clone_from_slice(&slots[offset..offset + len]);
-                entry
-                    .sources
-                    .clone_from_slice(&sources[offset..offset + len]);
             }
         }
         offset += len;
@@ -1433,13 +1424,6 @@ fn stack_matches(a: &ItemStack, b: &ItemStack) -> bool {
 /// 官方 `ItemStack.isSameItem`，只看物品。
 fn is_same_item(a: &ItemStack, b: &ItemStack) -> bool {
     a.is_same_item(b)
-}
-
-/// 同一格里的物品只是数量变了：物品和组件字节都没动，来源还是原来那名玩家。
-///
-/// 换了物品就不算，哪怕两种物品的组件字节碰巧一样；不然别人放的新物品会被当成原来那个人的。
-fn same_component_bytes(a: &ItemStack, b: &ItemStack) -> bool {
-    a.item == b.item && a.added == b.added && a.removed == b.removed
 }
 
 /// 官方 `HashedStack.matches` / `HashedPatchMap.matches`。

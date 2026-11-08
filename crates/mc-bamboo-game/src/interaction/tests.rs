@@ -200,21 +200,19 @@ fn look(server: &mut Harness, client: &Client, yaw: f32, pitch: f32) {
             position: None,
             rotation: Some((yaw, pitch)),
             on_ground: false,
+            horizontal_collision: false,
         },
     );
     server.tick();
     client.take_frames();
 }
 
-fn move_player(server: &Harness, client: &Client, x: f64, y: f64, z: f64) {
-    server.request(
-        client,
-        PlayRequest::MovePlayer {
-            position: Some(Vec3::new(x, y, z)),
-            rotation: None,
-            on_ground: false,
-        },
-    );
+fn move_player(server: &mut Harness, client: &Client, x: f64, y: f64, z: f64) {
+    // 交互测试要的是人已经在这个位置，包括站进方块里。移动包会被速度或碰撞拉回去。
+    //
+    // Interaction tests need the player already at this position, including inside a block.
+    // A move packet would be pulled back by the speed or collision check.
+    crate::player_move::place_player(server.region(), client.id, Vec3::new(x, y, z));
 }
 
 fn set_block(server: &mut Harness, pos: BlockPos, state: u32) {
@@ -356,7 +354,7 @@ fn game_master_blocks_cannot_be_broken() {
 fn bedrock_at_the_bottom_of_the_world_can_be_broken() {
     let (mut server, client) = settled();
     let pos = BlockPos::new(8, -64, 8);
-    move_player(&server, &client, 8.5, -63.0, 8.5);
+    move_player(&mut server, &client, 8.5, -63.0, 8.5);
 
     destroy(&server, &client, pos, 1);
     server.tick();
@@ -369,7 +367,7 @@ fn bedrock_at_the_bottom_of_the_world_can_be_broken() {
 fn breaking_exactly_at_the_reach_limit_only_acks() {
     let (mut server, client) = settled();
     // 眼睛在 (9, -58.38, 8.5)，高度和 z 都在这两个方块的范围里，只有 x 有距离。
-    move_player(&server, &client, 9.0, -60.0, 8.5);
+    move_player(&mut server, &client, 9.0, -60.0, 8.5);
     let inside = BlockPos::new(14, -59, 8);
     let outside = BlockPos::new(15, -59, 8);
     set_block(&mut server, inside, blocks::STONE);
@@ -391,7 +389,7 @@ fn crouching_lowers_the_eyes_but_flying_does_not() {
     let pos = BlockPos::new(8, -50, 8);
     set_block(&mut server, pos, blocks::STONE);
     // 站着时眼睛离方块 5.9 格，蹲着时 6.25 格。
-    move_player(&server, &client, 8.5, -57.52, 8.5);
+    move_player(&mut server, &client, 8.5, -57.52, 8.5);
     press_shift(&mut server, &client);
 
     destroy(&server, &client, pos, 1);
@@ -417,7 +415,7 @@ fn breaking_air_only_acks() {
 #[test]
 fn breaking_above_the_world_sends_void_air_back() {
     let (mut server, client) = settled();
-    move_player(&server, &client, 8.5, 318.0, 8.5);
+    move_player(&mut server, &client, 8.5, 318.0, 8.5);
     let pos = BlockPos::new(8, 320, 8);
 
     destroy(&server, &client, pos, 1);
@@ -432,7 +430,7 @@ fn breaking_above_the_world_sends_void_air_back() {
 #[test]
 fn breaking_below_the_world_only_acks() {
     let (mut server, client) = settled();
-    move_player(&server, &client, 8.5, -67.0, 8.5);
+    move_player(&mut server, &client, 8.5, -67.0, 8.5);
 
     destroy(&server, &client, BlockPos::new(8, -65, 8), 1);
     server.tick();
@@ -447,8 +445,8 @@ fn level_event_stops_at_64_blocks_from_the_block_corner() {
     let near = server.join_and_settle("Bob");
     let far = server.join_and_settle("Carol");
     let pos = BlockPos::new(8, -61, 8);
-    move_player(&server, &near, 71.9, -61.0, 8.0);
-    move_player(&server, &far, 72.0, -61.0, 8.0);
+    move_player(&mut server, &near, 71.9, -61.0, 8.0);
+    move_player(&mut server, &far, 72.0, -61.0, 8.0);
     server.tick();
     near.take_frames();
     far.take_frames();
@@ -586,7 +584,7 @@ fn destroy_actions_a_creative_client_never_sends_only_ack() {
 #[test]
 fn official_packets_place_and_break_end_to_end() {
     let (mut server, client) = settled();
-    move_player(&server, &client, 10.5, -60.0, 8.5);
+    move_player(&mut server, &client, 10.5, -60.0, 8.5);
     hold(&server, &client, items::STONE);
 
     // `blocks-inventory.md` 3.1 的实测字节：主手，点 (8,-61,8) 顶面中心，seq 2。
@@ -802,7 +800,7 @@ fn a_solid_block_cannot_go_into_the_player_placing_it() {
 #[test]
 fn a_solid_block_cannot_go_into_another_player() {
     let (mut server, placer, standing) = two_players();
-    move_player(&server, &standing, 11.5, SPAWN_Y, 8.5);
+    move_player(&mut server, &standing, 11.5, SPAWN_Y, 8.5);
     hold(&server, &placer, items::STONE);
 
     click_top(&server, &placer, GROUND, 1);
@@ -827,7 +825,7 @@ fn a_flower_can_go_into_a_player() {
 fn touching_the_side_of_a_player_is_not_an_overlap() {
     let (mut server, client) = settled();
     // 碰撞盒从 x = 11.0 开始，正好贴着 x = 10 这一格的东面。
-    move_player(&server, &client, 11.3, SPAWN_Y, 8.5);
+    move_player(&mut server, &client, 11.3, SPAWN_Y, 8.5);
     hold(&server, &client, items::STONE);
 
     click_top(&server, &client, BlockPos::new(10, -61, 8), 1);
@@ -846,7 +844,7 @@ fn only_a_real_crouch_shortens_the_player() {
     let ceiling = target.relative(Direction::Up);
     set_block(&mut server, ceiling, blocks::STONE);
     // 站着时头顶到 -57.9，伸进目标格 0.1。蹲着时到 -58.2，碰不到。
-    move_player(&server, &client, 8.5, -59.7, 8.5);
+    move_player(&mut server, &client, 8.5, -59.7, 8.5);
     hold(&server, &client, items::DIRT);
     let place = use_item_on(Hand::Main, ceiling, Direction::Down, 1);
 
@@ -872,7 +870,7 @@ fn the_top_of_the_world_refuses_with_a_message() {
     let (mut server, client) = settled();
     let top = BlockPos::new(8, 319, 8);
     set_block(&mut server, top, blocks::STONE);
-    move_player(&server, &client, 10.5, 317.0, 8.5);
+    move_player(&mut server, &client, 10.5, 317.0, 8.5);
     hold(&server, &client, items::DIRT);
 
     click_top(&server, &client, top, 1);
@@ -916,7 +914,7 @@ fn replacing_at_the_top_of_the_world_works_without_a_message() {
     let (mut server, client) = settled();
     let top = BlockPos::new(8, 319, 8);
     set_block(&mut server, top, blocks::SHORT_GRASS);
-    move_player(&server, &client, 10.5, 317.0, 8.5);
+    move_player(&mut server, &client, 10.5, 317.0, 8.5);
     hold(&server, &client, items::STONE);
 
     click_top(&server, &client, top, 1);
@@ -939,7 +937,7 @@ fn the_side_of_the_highest_block_works_as_usual() {
     let top = BlockPos::new(8, 319, 8);
     let east = top.relative(Direction::East);
     set_block(&mut server, top, blocks::STONE);
-    move_player(&server, &client, 11.5, 317.0, 8.5);
+    move_player(&mut server, &client, 11.5, 317.0, 8.5);
     hold(&server, &client, items::DIRT);
 
     let request = use_item_on(Hand::Main, top, Direction::East, 1);
@@ -954,7 +952,7 @@ fn the_side_of_the_highest_block_works_as_usual() {
 fn the_bottom_face_of_the_lowest_block_refuses_with_a_message() {
     let (mut server, client) = settled();
     let bottom = BlockPos::new(8, -64, 8);
-    move_player(&server, &client, 8.5, -67.0, 8.5);
+    move_player(&mut server, &client, 8.5, -67.0, 8.5);
     hold(&server, &client, items::DIRT);
 
     let request = use_item_on(Hand::Main, bottom, Direction::Down, 1);
@@ -988,7 +986,7 @@ fn clicks_above_or_below_the_world_only_get_the_message() {
 
     for (pos, player_y, message) in cases {
         let (mut server, client) = settled();
-        move_player(&server, &client, 8.5, player_y, 8.5);
+        move_player(&mut server, &client, 8.5, player_y, 8.5);
         hold(&server, &client, items::STONE);
 
         click_top(&server, &client, pos, 1);
@@ -1015,7 +1013,7 @@ fn top_of_the_world_message_needs_a_placement_attempt() {
     for (item, attempt) in cases {
         let (mut server, client) = settled();
         set_block(&mut server, top, blocks::STONE);
-        move_player(&server, &client, 10.5, 317.0, 8.5);
+        move_player(&mut server, &client, 10.5, 317.0, 8.5);
         hold(&server, &client, item);
 
         click_top(&server, &client, top, 1);
@@ -1032,7 +1030,7 @@ fn an_empty_hand_gets_no_top_of_the_world_message() {
     let (mut server, client) = settled();
     let top = BlockPos::new(8, 319, 8);
     set_block(&mut server, top, blocks::STONE);
-    move_player(&server, &client, 10.5, 317.0, 8.5);
+    move_player(&mut server, &client, 10.5, 317.0, 8.5);
 
     click_top(&server, &client, top, 1);
     server.tick();
@@ -1640,7 +1638,7 @@ fn a_lily_pad_lands_on_the_water_in_view() {
     let water = BlockPos::new(11, -61, 8);
     set_block(&mut server, water, blocks::WATER);
     // 荷叶有碰撞形状，脚要在它上面。
-    move_player(&server, &placer, 11.5, -59.0, 8.5);
+    move_player(&mut server, &placer, 11.5, -59.0, 8.5);
     hold(&server, &placer, items::LILY_PAD);
     server.tick();
     placer.take_frames();
@@ -1801,7 +1799,7 @@ fn every_refused_prediction_is_acked_after_the_blocks_it_touched() {
 #[test]
 fn players_far_away_do_not_get_the_change() {
     let (mut server, near, far) = two_players();
-    move_player(&server, &far, 2000.0, SPAWN_Y, 2000.0);
+    move_player(&mut server, &far, 2000.0, SPAWN_Y, 2000.0);
     server.tick();
     far.take_frames();
 
@@ -1815,7 +1813,7 @@ fn players_far_away_do_not_get_the_change() {
 fn a_pending_chunk_arrives_with_the_change_instead_of_an_update() {
     let mut server = Harness::new(8);
     let breaker = server.join_and_settle("Alice");
-    move_player(&server, &breaker, 40.5, SPAWN_Y, 40.5);
+    move_player(&mut server, &breaker, 40.5, SPAWN_Y, 40.5);
     server.receive_all_chunks(&breaker);
     breaker.take_frames();
 
@@ -2023,7 +2021,7 @@ fn a_slab_goes_under_a_player_floating_above_its_real_shape() {
     let ground = BlockPos::new(8, -61, 8);
     let target = BlockPos::new(8, -60, 8);
     // 脚在这一格的上半，下半格的台阶碰不到，整格的方块碰得到。
-    move_player(&server, &client, 8.5, -59.4, 8.5);
+    move_player(&mut server, &client, 8.5, -59.4, 8.5);
 
     hold(&server, &client, items::STONE);
     click_top(&server, &client, ground, 1);
@@ -2269,7 +2267,7 @@ fn arbitrary_requests_never_panic_and_never_end_in_a_ghost() {
             server.request(&client, request);
         }
         let y = [-66.0, -60.0, -60.0, 316.0][random.below(4)];
-        move_player(&server, &client, 8.5, y, 8.5);
+        move_player(&mut server, &client, 8.5, y, 8.5);
         let sync = &mut player_mut(&mut server, &client).sync;
         sync.shift_key_down = random.below(2) == 0;
         sync.flying = random.below(2) == 0;
@@ -2563,7 +2561,7 @@ fn spectator_portals_say_they_cannot_teleport() {
 fn spectator_use_item_does_not_place_a_lily_pad() {
     let (mut server, client) = settled();
     set_block(&mut server, GROUND, blocks::WATER);
-    move_player(&server, &client, 11.5, -59.0, 8.5);
+    move_player(&mut server, &client, 11.5, -59.0, 8.5);
     set_spectator(&mut server, &client);
     hold_stack(&mut server, &client, ItemStack::new(items::LILY_PAD, 1));
     server.tick();

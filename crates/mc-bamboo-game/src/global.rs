@@ -174,6 +174,10 @@ pub(crate) struct Global {
     end_clock: Clock,
     roster: BTreeMap<PlayerId, RosterEntry>,
     ticks_since_latency_broadcast: u32,
+    /// 游戏规则。不写存档，重启回到官方默认值。
+    ///
+    /// Game rules. They are not saved, so a restart restores the official defaults.
+    rules: crate::gamerules::GameRuleSet,
 }
 
 impl Default for Global {
@@ -184,6 +188,7 @@ impl Default for Global {
             end_clock: Clock::official(),
             roster: BTreeMap::new(),
             ticks_since_latency_broadcast: 0,
+            rules: crate::gamerules::GameRuleSet::vanilla(),
         }
     }
 }
@@ -191,6 +196,20 @@ impl Default for Global {
 impl Global {
     pub(crate) fn time(&self) -> GameTime {
         self.time
+    }
+
+    /// 权威的游戏规则。
+    ///
+    /// The authoritative game rules.
+    pub(crate) fn rules(&self) -> &crate::gamerules::GameRuleSet {
+        &self.rules
+    }
+
+    /// 权威的游戏规则，可写。
+    ///
+    /// The authoritative game rules, writable.
+    pub(crate) fn rules_mut(&mut self) -> &mut crate::gamerules::GameRuleSet {
+        &mut self.rules
     }
 
     pub(crate) fn clock(&self) -> Clock {

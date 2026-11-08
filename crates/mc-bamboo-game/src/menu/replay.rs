@@ -16,12 +16,8 @@ use mc_bamboo_protocol::{
 use super::{Ctx, HashedStack, Menu, Target};
 use crate::{
     container::ContainerKind,
-    inbound::PlayerId,
     inventory::{HOTBAR_START, Inventory, OFF_HAND},
 };
-
-/// 重放里只有一名玩家，容器里的东西都算它放的。
-const VIEWER: PlayerId = PlayerId(0);
 
 /// 菜单对应的方块种类。箱子要带行数，双箱是 6 行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +37,8 @@ pub enum ReplayShape {
     BlastFurnace,
     Smoker,
     Brewing,
+    Loom,
+    Grindstone,
 }
 
 impl ReplayShape {
@@ -57,7 +55,9 @@ impl ReplayShape {
             | Self::Furnace
             | Self::BlastFurnace
             | Self::Smoker
-            | Self::Brewing => ContainerKind::Chest,
+            | Self::Brewing
+            | Self::Loom
+            | Self::Grindstone => ContainerKind::Chest,
         }
     }
 
@@ -72,6 +72,8 @@ impl ReplayShape {
             Self::BlastFurnace => Some(WorkKind::BlastFurnace),
             Self::Smoker => Some(WorkKind::Smoker),
             Self::Brewing => Some(WorkKind::Brewing),
+            Self::Loom => Some(WorkKind::Loom),
+            Self::Grindstone => Some(WorkKind::Grindstone),
             _ => None,
         }
     }
@@ -94,7 +96,9 @@ impl ReplayShape {
             | Self::Furnace
             | Self::BlastFurnace
             | Self::Smoker
-            | Self::Brewing => Some(index),
+            | Self::Brewing
+            | Self::Loom
+            | Self::Grindstone => Some(index),
             _ => None,
         }
     }
@@ -124,8 +128,6 @@ pub struct Snapshot {
 pub struct Replay {
     menu: Menu,
     container: Vec<ItemStack>,
-    /// 每个容器格的组件来自哪名玩家。重放里只有一名玩家，所以都是它。
-    sources: Vec<Option<PlayerId>>,
     inventory: Inventory,
     creative: bool,
     station: Option<super::station::Station>,
@@ -154,7 +156,6 @@ impl Replay {
                 size,
             ),
             container: slots,
-            sources: vec![Some(VIEWER); size],
             inventory: player,
             creative: true,
             station: None,
@@ -202,6 +203,16 @@ impl Replay {
         }
     }
 
+    /// 打开之前换掉工作台自己的一格。织布机和砂轮的材料补丁走这里。
+    ///
+    /// Replace one of the workstation's own slots before the menu opens. Loom and grindstone
+    /// ingredient patches use this.
+    pub fn reseed(&mut self, index: usize, stack: ItemStack) {
+        if let Some(station) = self.station.as_mut() {
+            station.replay_replace(index, stack);
+        }
+    }
+
     /// 打开之前换掉容器里的一格。组件点击题用它放上带补丁的物品。
     ///
     /// Replace one container slot before the menu opens.
@@ -238,9 +249,7 @@ impl Replay {
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
-            viewer: VIEWER,
             container: &mut self.container,
-            sources: &mut self.sources,
             inventory: &mut self.inventory,
             carried: &mut self.menu.carried,
             quickcraft_status: &mut self.menu.quickcraft_status,
@@ -286,9 +295,7 @@ impl Replay {
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
-            viewer: VIEWER,
             container: &mut self.container,
-            sources: &mut self.sources,
             inventory: &mut self.inventory,
             carried: &mut self.menu.carried,
             quickcraft_status: &mut self.menu.quickcraft_status,

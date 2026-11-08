@@ -86,6 +86,28 @@ pub struct Extracted {
     pub worldgen: serde_json::Value,
     /// `Item.getCraftingRemainder()`，和物品注册表对齐。没有余料的是 `null`。
     pub crafting_remainders: Vec<Option<(i32, i32, String)>>,
+    /// `BuiltInRegistries.GAME_RULE`，按注册表 ID。旧的提取结果没有这一项。
+    #[serde(default)]
+    pub game_rules: Vec<GameRuleFact>,
+}
+
+/// 一条游戏规则。字段和 `Extractor.gameRules` 的 JSON 对应。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameRuleFact {
+    pub name: String,
+    pub identifier: String,
+    pub category: String,
+    /// `boolean` 或 `integer`，官方 `GameRuleType.getSerializedName`。
+    pub kind: String,
+    pub default_bool: Option<bool>,
+    pub default_int: Option<i32>,
+    pub min: Option<i32>,
+    pub max: Option<i32>,
+    /// `GameRule.isEnabled(FeatureFlags.DEFAULT_FLAGS)`。
+    pub enabled: bool,
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// `JukeboxSong`：长度（秒）和比较器输出。
@@ -1038,6 +1060,8 @@ pub struct VersionData {
     pub worldgen: serde_json::Value,
     /// `Item.getCraftingRemainder()`，和物品注册表对齐。
     pub crafting_remainders: Vec<Option<(i32, i32, String)>>,
+    /// `BuiltInRegistries.GAME_RULE`，按注册表 ID。
+    pub game_rules: Vec<GameRuleFact>,
 }
 
 pub fn run(
@@ -1134,6 +1158,7 @@ fn read_version_data(
         crafting_remainders: extracted.crafting_remainders,
         jukebox_songs: extracted.jukebox_songs,
         worldgen: extracted.worldgen,
+        game_rules: extracted.game_rules,
     })
 }
 
