@@ -11,7 +11,7 @@ use crate::{
     chunk_tracking::{ChunkTracker, MIN_VIEW_DISTANCE},
     entity_sync::EntitySync,
     inbound::PlayerId,
-    interaction::BlockPrediction,
+    interaction::{BlockPrediction, mining::Mining},
     inventory::Inventory,
     movement::Teleport,
 };
@@ -42,6 +42,8 @@ pub(crate) struct Player {
     pub(crate) chunks: ChunkTracker,
     pub(crate) sync: EntitySync,
     pub(crate) prediction: BlockPrediction,
+    /// 正在挖哪个方块、挖了多久，官方 `ServerPlayerGameMode` 的那几个字段。
+    pub(crate) mining: Mining,
     pub(crate) inventory: Inventory,
     pub(crate) spam: SpamThrottlers,
 }
@@ -70,6 +72,7 @@ impl Player {
             teleport: Teleport::default(),
             chunks: ChunkTracker::default(),
             prediction: BlockPrediction::default(),
+            mining: Mining::default(),
             inventory: Inventory::default(),
             spam: SpamThrottlers::default(),
         }

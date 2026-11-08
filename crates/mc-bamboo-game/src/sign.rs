@@ -102,7 +102,13 @@ pub(crate) fn tick_editors(region: &mut Region) {
     for (pos, editor) in region.chunks.sign_editors() {
         let in_range = region.players.values().any(|player| {
             *player.uuid.as_bytes() == editor
-                && interaction::within_block_interaction_range(player, pos, EDIT_BUFFER)
+                && interaction::within_block_interaction_range(
+                    player.position,
+                    player.eye_height(),
+                    interaction::interaction_range(player.game_mode),
+                    pos,
+                    EDIT_BUFFER,
+                )
         });
         if !in_range {
             stale.push(pos);
