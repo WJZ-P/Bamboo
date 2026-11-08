@@ -329,6 +329,14 @@ fn destroy_and_ack(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) {
 ///
 /// 挖成功时方块逻辑会留下破坏粒子；挖不动时什么也没发生，调用方负责回包。
 fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> bool {
+    // `ServerPlayerGameMode.destroyBlock` 最先调用 `ItemStack.canDestroyBlock`。
+    // 调试棒在这里改属性，并且恒返回 false，空气也一样。
+    //
+    // `ServerPlayerGameMode.destroyBlock` calls `ItemStack.canDestroyBlock` first.
+    // A debug stick changes a property here and always returns false, including on air.
+    if crate::debug_stick::on_left_click(region, snapshot.id, &snapshot.actor, pos) {
+        return false;
+    }
     // `ItemStack.canDestroyBlock`：只有带 `tool` 组件又明确不许在创造模式挖的物品才拦，
     // 而且只拦创造模式。
     if snapshot.game_mode == GameMode::Creative
@@ -346,8 +354,7 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     if block_state(region, pos).is_air() {
         return true;
     }
-    // 方块的 `GameMasterBlock` 检查在这里面：没有权限系统，命令方块这类一律挖不动，
-    // 返回 `Fail`，调用方把这一格发回去。
+    // `GameMasterBlock` 的权限检查在这里面。没有 `canUseGameMasterBlocks` 时挖不动。
     let outcome = durability::run(region, snapshot.id, Hand::Main, |region| {
         let (mut level, ticks) = region.block_level();
         mc_bamboo_blocks::destroy_block(&mut level, ticks, &snapshot.actor, pos)

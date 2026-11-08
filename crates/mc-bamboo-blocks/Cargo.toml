@@ -12,6 +12,8 @@ categories = ["games"]
 [dependencies]
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+# 调试棒的 `debug_stick_state` 组件是一个 NBT compound。
+mc-bamboo-nbt.workspace = true
 # 物品的 `tool` 组件：挖掘速度和掉落规则都从默认组件里读。
 mc-bamboo-protocol.workspace = true
 mc-bamboo-recipes.workspace = true

@@ -8,7 +8,7 @@
 //! mc-bamboo-vanilla probe <地址> <端口> [java 路径]
 //!     用官方网络代码连接正在运行的 Bamboo，检查它发的每个包
 //! mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure]
-//!                          [--case I] [--show N] [--show-blocked]
+//!                          [--case I] [--show N] [--show-blocked] [--rule 名字=值]
 //!     让官方代码给方块行为出题和给答案，用 mc-bamboo-blocks 重放，比较两边的结果
 //! mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
 //!     让官方光照引擎在随机场景里算光照，用 mc-bamboo-world 重放，逐段比较
@@ -106,8 +106,8 @@ const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
 #[cfg(feature = "oracle")]
 const MOVE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MovementOracle.java";
-const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
-      mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked]
+const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
+      mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
       mc-bamboo-vanilla menu <java 路径> [--cases N] [--seed S] [--case I] [--show N]
       mc-bamboo-vanilla components <java 路径> [--show N]
@@ -137,6 +137,7 @@ fn run() -> Result<(), String> {
         ["generate", server_jar, java] => generate(server_jar, java),
         ["extract"] => extract("java"),
         ["extract", java] => extract(java),
+        ["gamerules", java] => dump_gamerules(java),
         ["probe", host, port] => probe(host, port, "java"),
         ["probe", host, port, java] => probe(host, port, java),
         ["oracle", java, ref options @ ..] => oracle(java, options),
@@ -152,6 +153,39 @@ fn run() -> Result<(), String> {
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         _ => Err(USAGE.to_owned()),
     }
+}
+
+/// 只从官方注册表导出游戏规则，写 `gamerules.rs`，不动别的生成文件。
+fn dump_gamerules(java: &str) -> Result<(), String> {
+    let root = workspace_root();
+    let work_dir = root.join(WORK_DIR);
+    let classpath = extract::classpath(&work_dir)?;
+    let source = root.join("tools/mc-bamboo-vanilla/java/Extractor.java");
+    let output = Command::new(java)
+        .current_dir(&work_dir)
+        .arg("-cp")
+        .arg(classpath)
+        .arg(&source)
+        .arg("--game-rules")
+        .output()
+        .map_err(|error| format!("无法运行 {java}：{error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "导出游戏规则失败：{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let rules: Vec<extract::GameRuleFact> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("游戏规则 JSON 解析失败：{error}"))?;
+    if rules.is_empty() {
+        return Err("官方没有导出任何游戏规则".to_owned());
+    }
+    let output_dir = root.join(OUTPUT_DIR);
+    fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
+    generate::write_gamerules(&rules, &output_dir)?;
+    println!("已生成 {} 条游戏规则", rules.len());
+    Ok(())
 }
 
 fn generate(server_jar: &str, java: &str) -> Result<(), String> {

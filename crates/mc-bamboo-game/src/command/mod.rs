@@ -8,9 +8,12 @@
 //! Parsing lives in `mc-bamboo-command`. This module turns a parsed command into world
 //! changes and sends each player the command tree they can use when they join.
 
+pub(crate) use players::change_own_mode;
+
 mod blocks;
 mod catalog;
 mod feedback;
+mod gamerule;
 mod items;
 mod players;
 mod select;
@@ -39,8 +42,12 @@ pub(crate) type CommandFn =
     fn(&mut Global, &mut Region, PlayerId, &ParsedCommand) -> Result<(), CommandFail>;
 
 pub(crate) struct Commands {
-    graph: CommandGraph,
+    pub(crate) graph: CommandGraph,
     actions: Vec<Option<CommandFn>>,
+    /// 和 `actions` 对齐。`/gamerule` 的节点记下规则下标，别的命令是 `None`。
+    ///
+    /// Parallel to `actions`. `/gamerule` nodes store the rule index; other commands are `None`.
+    pub(crate) rules: Vec<Option<u16>>,
 }
 
 pub(crate) fn commands() -> &'static Commands {

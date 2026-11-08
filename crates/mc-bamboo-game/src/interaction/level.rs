@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockEntities, BlockEvents, BlockState, Combined, Container, HopperEntity, Level,
-    LevelRandom, RedstoneMemory, ShulkerSlots, Slots,
+    Aabb, BlockEntities, BlockEvents, BlockGameRules, BlockState, Combined, Container,
+    HopperEntity, Level, LevelRandom, RedstoneMemory, ShulkerSlots, Slots,
     container::redstone_signal,
     entity::Entities,
     shape::{self, BooleanOp},
@@ -40,6 +40,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_events: &'a mut BlockEvents,
     pub(crate) containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
     pub(crate) entities: &'a mut Entities,
+    pub(crate) block_rules: BlockGameRules,
+    pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
 }
 
 impl Level for RegionLevel<'_> {
@@ -54,6 +56,9 @@ impl Level for RegionLevel<'_> {
         // 区块里那份 `getUpdateTag` 由 `Chunk::set_block` 自己丢。
         if written && previous.is_some_and(|previous| !previous.is_same_block(state)) {
             self.block_items.remove(&pos);
+        }
+        if written {
+            crate::command_block::forget_if_replaced(self.command_blocks, pos, state);
         }
         // 官方 `Level.setBlock` 只在 `UPDATE_CLIENTS` 时才 `sendBlockUpdated`，
         // 活塞的移动方块用 `UPDATE_INVISIBLE` 写，客户端会自己播放动画。
@@ -148,6 +153,10 @@ impl Level for RegionLevel<'_> {
 
     fn entities_mut(&mut self) -> &mut Entities {
         self.entities
+    }
+
+    fn block_game_rules(&self) -> BlockGameRules {
+        self.block_rules
     }
 
     /// `getBlockContainer`：方块是容器时给它建一张槽位表。双箱按 `CompoundContainer`

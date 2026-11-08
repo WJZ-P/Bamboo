@@ -117,6 +117,7 @@ import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
 import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
 import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
+import net.minecraft.network.protocol.game.ClientboundGameRuleValuesPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
@@ -146,6 +147,7 @@ import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
 import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
+import net.minecraft.network.protocol.game.ServerboundChangeGameModePacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
@@ -285,6 +287,8 @@ public final class Probe {
     private static final String PLAYER = "Kitten";
     private static final String SECOND_PLAYER = "Mochi";
     private static final String LATE_PLAYER = "Latecomer";
+    /** 不在 `ops.json` 里，用来确认没有权限的客户端改不了规则、也切不了模式。 */
+    private static final String VISITOR = "Visitor";
     /** 走正版验证进服的那名玩家，它连的是另一个服务端，所以用一个别处没有的名字。 */
     private static final String ONLINE_PLAYER = "Sakura";
     /** 客户端请求的视距，和 Bamboo 的默认值相同，所以 chunkRadius 和跟踪范围都用它。 */
@@ -368,6 +372,7 @@ public final class Probe {
             "handleEntityPositionSync",
             "handleForgetLevelChunk",
             "handleGameEvent",
+            "handleGameRuleValues",
             "handleKeepAlive",
             "handleLevelChunkWithLight",
             "handleLevelEvent",
@@ -688,6 +693,7 @@ public final class Probe {
                 checkEditedChunks(kitten, mochi, late);
             });
             section("commands", () -> commands(kitten, mochi, late));
+            section("gamerules", () -> gamerules(kitten));
             section("leaving", () -> leaving(kitten, mochi, late));
 
             section("long running", () -> {
@@ -2241,7 +2247,10 @@ public final class Probe {
                             && actor.commandParses("msg " + observer.player + " ping")
                             && actor.commandParses("tell " + observer.player + " ping")
                             && actor.commandParses("w " + late.player + " ping")
-                            && actor.commandParses("kick " + late.player));
+                            && actor.commandParses("kick " + late.player)
+                            && actor.commandParses("gamerule random_tick_speed")
+                            && actor.commandParses("gamerule random_tick_speed 1")
+                            && actor.commandParses("gamerule minecraft:tnt_explodes false"));
             check("commands: incomplete or unknown input fails in the client tree",
                     !actor.commandParses("nope")
                             && !actor.commandParses("gamemode")
@@ -2249,7 +2258,10 @@ public final class Probe {
                             && !actor.commandParses("give " + actor.player)
                             && !actor.commandParses("setblock 1 2 3")
                             && !actor.commandParses("setblock 4 -58 4 oak_stairs[facing=foo]")
-                            && !actor.commandParses("kick"));
+                            && !actor.commandParses("kick")
+                            && !actor.commandParses("gamerule")
+                            && !actor.commandParses("gamerule nope")
+                            && !actor.commandParses("gamerule max_minecart_speed"));
 
             actor.send(new ServerboundChatCommandPacket("time set noon"));
             await("commands: noon is already the clock",
@@ -2332,7 +2344,8 @@ public final class Probe {
             actor.send(new ServerboundCommandSuggestionPacket(7, "/g"));
             await("commands: literal suggestions arrive",
                     () -> actor.suggestions != null && actor.suggestions.id() == 7);
-            check("commands: g completes gamemode and give", suggestionTexts(actor).contains("gamemode")
+            check("commands: g completes gamemode, gamerule and give", suggestionTexts(actor).contains("gamemode")
+                    && suggestionTexts(actor).contains("gamerule")
                     && suggestionTexts(actor).contains("give"));
             actor.suggestions = null;
             actor.send(new ServerboundCommandSuggestionPacket(8, "/teleport "));
@@ -2347,6 +2360,63 @@ public final class Probe {
             await("commands: creative is restored", () -> actor.ownGameMode == GameType.CREATIVE);
             actor.send(new ServerboundChatCommandPacket("time set 6000"));
             await("commands: the clock returns to noon", () -> containsText(actor, "Set minecraft:overworld to 6000 tick(s)"));
+
+            requestGameRules(actor);
+            await("gamerules: the screen receives the values", () -> actor.gameRuleValuesArrived);
+            check("gamerules: random tick speed starts at 3", "3".equals(actor.gameRuleValues.get("random_tick_speed")));
+            check("gamerules: tnt explodes by default", "true".equals(actor.gameRuleValues.get("tnt_explodes")));
+            check("gamerules: the disabled minecart rule is absent", !actor.gameRuleValues.containsKey("max_minecart_speed"));
+
+            actor.send(new ServerboundChatCommandPacket("gamerule random_tick_speed"));
+            await("gamerules: a query reports the current value",
+                    () -> containsText(actor, "Game rule random_tick_speed is currently set to 3"));
+            actor.send(new ServerboundChatCommandPacket("gamerule random_tick_speed 1"));
+            await("gamerules: setting a rule is announced",
+                    () -> containsText(actor, "Game rule random_tick_speed is now set to 1"));
+            check("gamerules: other ops see the admin broadcast",
+                    containsText(observer, "[Kitten: Game rule random_tick_speed is now set to 1]"));
+            requestGameRules(actor);
+            await("gamerules: the screen sees the new value",
+                    () -> actor.gameRuleValuesArrived && "1".equals(actor.gameRuleValues.get("random_tick_speed")));
+            actor.send(new ServerboundChatCommandPacket("gamerule random_tick_speed 1"));
+            await("gamerules: an unchanged value is refused",
+                    () -> containsText(actor, "Game rule random_tick_speed is already set to 1"));
+
+            actor.gameModeParam = Float.NaN;
+            actor.send(new ServerboundChangeGameModePacket(GameType.SPECTATOR));
+            await("gamerules: F3+F4 reaches spectator", () -> actor.gameModeParam == 3.0f);
+            await("gamerules: the tab list shows spectator", () -> actor.ownGameMode == GameType.SPECTATOR);
+            actor.gameModeParam = Float.NaN;
+            actor.send(new ServerboundChangeGameModePacket(GameType.CREATIVE));
+            await("gamerules: F3+F4 returns to creative", () -> actor.gameModeParam == 1.0f && actor.ownGameMode == GameType.CREATIVE);
+
+            actor.send(new ServerboundChatCommandPacket("gamerule random_tick_speed 3"));
+            await("gamerules: random tick speed is restored",
+                    () -> containsText(actor, "Game rule random_tick_speed is now set to 3"));
+        }
+
+        /** 没有权限的客户端：界面要不到规则，F3+F4 和 `/gamerule` 都被拒绝，值不变。 */
+        private void gamerules(Join op) throws IOException {
+            Join visitor = connect(VISITOR, HumanoidArm.RIGHT, false);
+            await("gamerules: the visitor got the spawn chunks", JOIN_TIMEOUT_MILLIS, visitor::spawnChunksDone);
+            visitor.gameRuleValuesArrived = false;
+            visitor.gameModeParam = Float.NaN;
+            visitor.send(new ServerboundClientCommandPacket(ServerboundClientCommandPacket.Action.REQUEST_GAMERULE_VALUES));
+            visitor.send(new ServerboundChangeGameModePacket(GameType.SPECTATOR));
+            visitor.send(new ServerboundChatCommandPacket("gamerule random_tick_speed 9"));
+            await("gamerules: a visitor is told the command is unknown", () -> containsText(visitor, UNKNOWN_COMMAND));
+            check("gamerules: a visitor is not sent the values", !visitor.gameRuleValuesArrived);
+            check("gamerules: a visitor stays creative",
+                    Float.isNaN(visitor.gameModeParam) && visitor.ownGameMode == GameType.CREATIVE);
+            requestGameRules(op);
+            await("gamerules: the operator still sees the restored value",
+                    () -> op.gameRuleValuesArrived && "3".equals(op.gameRuleValues.get("random_tick_speed")));
+        }
+
+        private static void requestGameRules(Join client) throws IOException {
+            client.gameRuleValuesArrived = false;
+            client.gameRuleValues.clear();
+            client.send(new ServerboundClientCommandPacket(ServerboundClientCommandPacket.Action.REQUEST_GAMERULE_VALUES));
         }
 
         private static int stoneCount(Join client) {
@@ -2532,6 +2602,9 @@ public final class Probe {
         /** 最近一次 `CHANGE_GAME_MODE` 的参数。还没收到时是 NaN。 */
         // The latest `CHANGE_GAME_MODE` parameter. NaN until one arrives.
         float gameModeParam = Float.NaN;
+        /** `game_rule_values` 里的短名和序列化后的值。 */
+        final Map<String, String> gameRuleValues = new HashMap<>();
+        boolean gameRuleValuesArrived;
         /** 收到的实体事件字节。物品损坏是 47 或 48。 */
         // Entity-event bytes. An item break is 47 or 48.
         final List<Byte> entityEvents = new ArrayList<>();
@@ -2930,6 +3003,7 @@ public final class Probe {
             handlers.put("handlePlayerInfoRemove", value -> onPlayerInfoRemove((ClientboundPlayerInfoRemovePacket) value));
             handlers.put("handleSetTime", value -> onSetTime((ClientboundSetTimePacket) value));
             handlers.put("handleGameEvent", value -> onGameEvent((ClientboundGameEventPacket) value));
+            handlers.put("handleGameRuleValues", value -> onGameRuleValues((ClientboundGameRuleValuesPacket) value));
             handlers.put("handleSetChunkCacheCenter",
                     value -> onChunkCenter((ClientboundSetChunkCacheCenterPacket) value));
             handlers.put("handleForgetLevelChunk",
@@ -3021,7 +3095,7 @@ public final class Probe {
             //
             // The offline probe's ops.json lists these players at level 4. The online-mode
             // server has no op list.
-            if (online()) {
+            if (online() || player.equals(VISITOR)) {
                 check("commands: a player absent from ops.json is level 0", packet.getEventId() == 24);
             } else {
                 check("commands: the permission event is owners", packet.getEventId() == 28);
@@ -3170,6 +3244,12 @@ public final class Probe {
                         clock.unwrapKey().map(key -> key.identifier().getPath().equals("overworld")).orElse(false));
                 check("play: clock is at noon", state.totalTicks() == 6000);
             });
+        }
+
+        private void onGameRuleValues(ClientboundGameRuleValuesPacket packet) {
+            gameRuleValues.clear();
+            packet.values().forEach((key, value) -> gameRuleValues.put(key.identifier().getPath(), value));
+            gameRuleValuesArrived = true;
         }
 
         private void onGameEvent(ClientboundGameEventPacket packet) {

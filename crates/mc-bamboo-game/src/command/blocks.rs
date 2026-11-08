@@ -22,11 +22,6 @@ use crate::{
     region::Region,
 };
 
-/// 官方 `GameRules.MAX_BLOCK_MODIFICATIONS` 的默认值。Bamboo 没有游戏规则。
-///
-/// The default of official `GameRules.MAX_BLOCK_MODIFICATIONS`. Bamboo has no game rules.
-const MAX_FILL: i64 = 32_768;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FillMode {
     Replace,
@@ -272,10 +267,14 @@ fn fill_in(
     let area = (i64::from(max_x - min_x) + 1)
         .saturating_mul(i64::from(max_y - min_y) + 1)
         .saturating_mul(i64::from(max_z - min_z) + 1);
-    if area > MAX_FILL {
+    // `FillCommand` 用 `GameRules.MAX_BLOCK_MODIFICATIONS` 限制体积。
+    //
+    // `FillCommand` limits the volume with `GameRules.MAX_BLOCK_MODIFICATIONS`.
+    let limit = i64::from(world.block_game_rules().max_block_modifications);
+    if area > limit {
         return Err(fail_with(
             "commands.fill.toobig",
-            [TranslateArg::from(MAX_FILL), area.into()],
+            [TranslateArg::from(limit), area.into()],
         ));
     }
 

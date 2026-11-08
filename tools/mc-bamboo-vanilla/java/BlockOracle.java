@@ -1,5 +1,6 @@
 import com.google.common.collect.ImmutableList;
 import com.mojang.authlib.GameProfile;
+import com.mojang.serialization.DataResult;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.io.BufferedWriter;
@@ -216,6 +217,7 @@ import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.entity.LevelEntityGetter;
 import net.minecraft.world.level.gameevent.GameEvent;
+import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
@@ -474,6 +476,7 @@ public final class BlockOracle {
                         new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
                 Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8), OUTPUT_BUFFER)) {
             Official official = Official.load(resources);
+            official.applyRules(options.rules);
             new Oracle(official, options, out, log).run();
         }
     }
@@ -594,9 +597,9 @@ public final class BlockOracle {
     }
 
     private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, Set<String> unrandom, int single,
-            boolean explain) {
+            boolean explain, Map<String, String> rules) {
         private static final String USAGE = "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>]"
-                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain]";
+                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain] [--rule name=value]";
 
         static Options parse(String[] args) {
             long seed = 1;
@@ -607,6 +610,7 @@ public final class BlockOracle {
             Set<String> unrandom = Set.of();
             int single = -1;
             boolean explain = false;
+            Map<String, String> rules = new LinkedHashMap<>();
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seed" -> seed = Long.parseLong(value(args, ++i));
@@ -617,10 +621,18 @@ public final class BlockOracle {
                     case "--unrandom" -> unrandom = Set.of(value(args, ++i).split(","));
                     case "--case" -> single = Integer.parseInt(value(args, ++i));
                     case "--explain" -> explain = true;
+                    case "--rule" -> {
+                        String pair = value(args, ++i);
+                        int split = pair.indexOf('=');
+                        if (split <= 0 || split == pair.length() - 1) {
+                            throw new IllegalArgumentException(USAGE);
+                        }
+                        rules.put(pair.substring(0, split), pair.substring(split + 1));
+                    }
                     default -> throw new IllegalArgumentException(USAGE);
                 }
             }
-            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain);
+            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain, rules);
         }
 
         private static String value(String[] args, int index) {
@@ -650,6 +662,8 @@ public final class BlockOracle {
         final DamageSources damageSources;
         final FakeServer server;
         final GameRules gameRules = new GameRules(FeatureFlags.DEFAULT_FLAGS);
+        /** 题面写了 `random_tick_speed` 时，chunk 题用这个速度，不再从 `CHUNK_SPEEDS` 里抽。 */
+        Integer fixedChunkSpeed;
         final WorldBorder border = new WorldBorder();
         final RandomSource soundSeeds = RandomSource.create(0);
         final GameProfile profile = new GameProfile(new UUID(0, 1), "Oracle");
@@ -668,6 +682,33 @@ public final class BlockOracle {
             this.damageSources = new DamageSources(registries);
             this.server = FakeServer.create(managers, gameRules);
             this.scoreboard = new ServerScoreboard(server);
+        }
+
+        /** 把 `--rule name=value` 写进假世界。未知规则、未启用的规则、反序列化失败都直接报错。 */
+        void applyRules(Map<String, String> rules) {
+            for (Map.Entry<String, String> entry : rules.entrySet()) {
+                Identifier id = entry.getKey().indexOf(':') >= 0
+                        ? Identifier.parse(entry.getKey())
+                        : Identifier.withDefaultNamespace(entry.getKey());
+                GameRule<?> rule = BuiltInRegistries.GAME_RULE.get(id).map(holder -> holder.value()).orElse(null);
+                if (rule == null) {
+                    throw new IllegalArgumentException("unknown game rule " + entry.getKey());
+                }
+                setRule(rule, entry.getValue());
+            }
+        }
+
+        private <T> void setRule(GameRule<T> rule, String text) {
+            DataResult<T> parsed = rule.deserialize(text);
+            T value = parsed.getOrThrow(message -> new IllegalArgumentException(rule.id() + ": " + message));
+            boolean enabled = gameRules.availableRules().anyMatch(candidate -> candidate == rule);
+            if (!enabled) {
+                throw new IllegalArgumentException("game rule " + rule.id() + " is not enabled");
+            }
+            gameRules.set(rule, value, null);
+            if (rule == GameRules.RANDOM_TICK_SPEED && value instanceof Integer speed) {
+                fixedChunkSpeed = speed;
+            }
         }
 
         /** 和 WorldLoader.load 相同的流程，只是不加载维度：标签、物品组件、配方、战利品表都是真的。 */
@@ -2767,12 +2808,15 @@ public final class BlockOracle {
         private final Supports supports;
         private final FakeLevel probe;
         private final Height height;
+        /** 题面覆盖了 `random_tick_speed` 时用这个速度，否则 chunk 题仍从 `CHUNK_SPEEDS` 抽。 */
+        private final Integer fixedChunkSpeed;
 
         Generator(Official official, Catalog catalog, Supports supports) {
             this.catalog = catalog;
             this.supports = supports;
             this.probe = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.LOW, 0));
             this.height = new Height(probe.getMinY(), probe.getMaxY());
+            this.fixedChunkSpeed = official.fixedChunkSpeed;
         }
 
         Case build(int id, Kind kind, Subject subject, long seed) {
@@ -3615,7 +3659,12 @@ public final class BlockOracle {
         /** 和 random 题一样的场景，跑官方的 tickChunk，看挑格子的顺序和区块段的判断。 */
         private BlockPos buildChunk(Case c, Random random) {
             BlockPos target = buildRandom(c, random);
-            c.speed = CHUNK_SPEEDS[random.nextInt(CHUNK_SPEEDS.length)];
+            // 没覆盖 `random_tick_speed` 时仍从这四档里抽，抽数次数和以前一样。
+            if (fixedChunkSpeed != null) {
+                c.speed = fixedChunkSpeed;
+            } else {
+                c.speed = CHUNK_SPEEDS[random.nextInt(CHUNK_SPEEDS.length)];
+            }
             return target;
         }
 
@@ -4527,7 +4576,21 @@ public final class BlockOracle {
             line.append(",\"cases\":").append(cases);
             line.append(",\"maxChainedUpdates\":").append(MAX_CHAINED_UPDATES);
             line.append(",\"gameTime\":").append(GAME_TIME);
-            line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max).append("}\n");
+            line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max);
+            if (!options.rules.isEmpty()) {
+                line.append(",\"rules\":{");
+                boolean firstRule = true;
+                for (Map.Entry<String, String> entry : options.rules.entrySet()) {
+                    if (!firstRule) {
+                        line.append(',');
+                    }
+                    firstRule = false;
+                    line.append('"').append(entry.getKey().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+                    line.append(":\"").append(entry.getValue().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+                }
+                line.append('}');
+            }
+            line.append("}\n");
             out.append(line);
         }
 

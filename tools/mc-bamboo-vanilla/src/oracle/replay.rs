@@ -7,9 +7,9 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Combined, Container,
-    Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
-    ShulkerSlots, Slots, TickPriority, destroy_block,
+    Aabb, Actor, BlockEntities, BlockEvents, BlockGameRules, BlockHit, BlockState, BlockTicks,
+    Combined, Container, Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome,
+    RedstoneMemory, ShulkerSlots, Slots, TickPriority, apply_text, destroy_block,
     entity::Entities,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
@@ -103,6 +103,10 @@ struct OracleLevel {
     /// 活塞这类会动的方块实体，见 `BlockOracle.java` 的方块事件和 ticker。
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 这道题的游戏规则。默认值和官方 `new GameRules(DEFAULT_FLAGS)` 一样。
+    ///
+    /// Game rules for this case. Defaults match `new GameRules(DEFAULT_FLAGS)`.
+    block_rules: BlockGameRules,
 }
 
 /// 已建模的容器，槽位数和官方一致。
@@ -187,6 +191,14 @@ fn seed_mirrored_contents(slots: &mut [ItemStack], state: BlockState) {
     }
 }
 
+fn block_rules_of(header: &Header) -> Result<BlockGameRules, String> {
+    let mut rules = BlockGameRules::vanilla();
+    for (name, value) in &header.rules {
+        apply_text(&mut rules, name, value)?;
+    }
+    Ok(rules)
+}
+
 impl OracleLevel {
     /// 按场景建世界，再填容器内容。容器和漏斗方块实体的建立顺序和官方一样：
     /// 场景按 `BlockPos.asLong` 排（x、z、y），先建全部方块实体，再填内容。
@@ -244,6 +256,7 @@ impl OracleLevel {
             redstone: RedstoneMemory::default(),
             block_entities,
             block_events: BlockEvents::default(),
+            block_rules: block_rules_of(header)?,
         })
     }
 
@@ -454,6 +467,10 @@ impl Level for OracleLevel {
         &self.world_entities
     }
 
+    fn block_game_rules(&self) -> BlockGameRules {
+        self.block_rules
+    }
+
     fn entities_mut(&mut self) -> &mut Entities {
         &mut self.world_entities
     }
@@ -657,6 +674,10 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         // 题目的玩家一直是创造模式。
         may_build: true,
         prevents_block_drops: true,
+        // 假玩家是创造模式，但没有任何权限。`canUseGameMasterBlocks` 是假。
+        //
+        // The fake player is creative and has no permissions, so `canUseGameMasterBlocks` is false.
+        can_use_game_master_blocks: false,
     })
 }
 
@@ -856,7 +877,12 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 讲台翻页的声音，题里不比较。
             | Effect::PageTurned { .. }
             // 营火食物的方块实体包，题里不比较。
-            | Effect::CampfireChanged { .. } => None,
+            | Effect::CampfireChanged { .. }
+            // 快捷栏提示和命令方块编辑器不进方块题的比较。
+            //
+            // Action-bar text and the command-block editor are not part of a block case.
+            | Effect::Overlay { .. }
+            | Effect::OpenCommandBlock { .. } => None,
         })
         .collect()
 }
@@ -964,7 +990,9 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             | Effect::PageTurned { .. }
             // 营火食物的方块实体包，方块题不比较。游戏层会把它发出去。
             // The campfire food block-entity packet is not compared. The game layer still sends it.
-            | Effect::CampfireChanged { .. } => {}
+            | Effect::CampfireChanged { .. }
+            | Effect::Overlay { .. }
+            | Effect::OpenCommandBlock { .. } => {}
         }
     }
     (events, sounds)
@@ -1024,6 +1052,7 @@ mod tests {
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            block_rules: BlockGameRules::vanilla(),
         }
     }
 

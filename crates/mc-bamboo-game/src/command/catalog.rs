@@ -4,11 +4,14 @@
 
 use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 
-use crate::command::{CommandFn, Commands, blocks, items, players, teleport, time};
+use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
+
+use crate::command::{CommandFn, Commands, blocks, gamerule, items, players, teleport, time};
 
 struct Builder {
     graph: CommandGraph,
     actions: Vec<Option<CommandFn>>,
+    rules: Vec<Option<u16>>,
 }
 
 impl Builder {
@@ -16,6 +19,7 @@ impl Builder {
         Self {
             graph: CommandGraph::new(),
             actions: Vec::new(),
+            rules: Vec::new(),
         }
     }
 
@@ -43,9 +47,15 @@ impl Builder {
         self.run(node, action);
     }
 
+    fn run_rule(&mut self, node: usize, rule: usize, action: CommandFn) {
+        self.run(node, action);
+        self.rules[node] = u16::try_from(rule).ok();
+    }
+
     fn ensure(&mut self, id: usize) {
         if self.actions.len() <= id {
             self.actions.resize(id + 1, None);
+            self.rules.resize(id + 1, None);
         }
     }
 }
@@ -57,6 +67,7 @@ pub(crate) fn build() -> Commands {
     register_me(&mut builder, root);
     register_fill(&mut builder, root);
     register_gamemode(&mut builder, root);
+    register_gamerule(&mut builder, root);
     register_give(&mut builder, root);
     register_help(&mut builder, root);
     register_kick(&mut builder, root);
@@ -69,6 +80,49 @@ pub(crate) fn build() -> Commands {
     Commands {
         graph: builder.graph,
         actions: builder.actions,
+        rules: builder.rules,
+    }
+}
+
+/// `GameRuleCommand.register`：每个启用的规则有短名和 `minecraft:` 全名，都能查询和设置。
+///
+/// 子节点按注册表顺序。官方 `GameRuleMap` 是 identity hash，顺序不稳定。
+///
+/// `GameRuleCommand.register`: each enabled rule has a short name and a `minecraft:` name,
+/// and both can query and set.
+///
+/// Children follow registry order. The official `GameRuleMap` is an identity hash map,
+/// so its order is not stable.
+fn register_gamerule(builder: &mut Builder, root: usize) {
+    let gamerule = builder.literal(root, "gamerule", permission::GAMEMASTERS);
+    for (index, rule) in RULES.iter().enumerate() {
+        if rule.enabled {
+            register_one_rule(builder, gamerule, rule.name, index, rule);
+            register_one_rule(builder, gamerule, rule.identifier, index, rule);
+        }
+    }
+}
+
+fn register_one_rule(
+    builder: &mut Builder,
+    parent: usize,
+    name: &str,
+    index: usize,
+    rule: &GameRuleDef,
+) {
+    let node = builder.literal(parent, name, 0);
+    builder.run_rule(node, index, gamerule::query);
+    let value = builder.argument(node, "value", argument_of(rule), 0);
+    builder.run_rule(value, index, gamerule::set);
+}
+
+fn argument_of(rule: &GameRuleDef) -> ArgumentType {
+    match rule.kind {
+        GameRuleKind::Bool => ArgumentType::Bool,
+        GameRuleKind::Int => ArgumentType::Integer {
+            min: rule.min,
+            max: rule.max,
+        },
     }
 }
 

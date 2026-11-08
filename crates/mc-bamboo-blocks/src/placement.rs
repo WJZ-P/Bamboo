@@ -189,8 +189,10 @@ fn placement_state(world: &mut World, item: &Item, ctx: &PlaceContext) -> Option
         | ItemKind::Banner
         | ItemKind::HangingSign
         | ItemKind::PlayerHead => standing_or_wall_state(world, item, ctx),
-        // Bamboo 没有权限系统，官方的 `canUseGameMasterBlocks` 一律是假。
-        ItemKind::GameMaster => None,
+        // `GameMasterBlockItem.getPlacementState`：没有 `canUseGameMasterBlocks` 时返回 null。
+        //
+        // `GameMasterBlockItem.getPlacementState` returns null without `canUseGameMasterBlocks`.
+        ItemKind::GameMaster if !ctx.actor.can_use_game_master_blocks => None,
         _ => {
             let block = block_of(item);
             behaviour_of(block.class).before_placement(block, ctx, world);

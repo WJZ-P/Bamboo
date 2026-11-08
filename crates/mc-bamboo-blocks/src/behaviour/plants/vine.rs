@@ -136,8 +136,14 @@ impl Behaviour for Vine {
     }
 
     /// 四分之一的机会挑一个方向：水平的面还空着时往那边爬，否则往上或者往下长。
-    /// 游戏规则 `spread_vines` 是默认的开着。
+    ///
+    /// `VineBlock.randomTick` 先看 `GameRules.SPREAD_VINES`。关着时不调用 `nextInt`。
+    ///
+    /// `VineBlock.randomTick` checks `GameRules.SPREAD_VINES` first and does not call `nextInt` when it is off.
     fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if !world.block_game_rules().spread_vines {
+            return;
+        }
         if world.random().next_int(SPREAD_CHANCE) != 0 {
             return;
         }

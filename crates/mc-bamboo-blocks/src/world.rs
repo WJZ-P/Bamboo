@@ -82,8 +82,6 @@ const VALID_CHUNK_BOUND: i32 = 2_097_061;
 const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
 /// `Difficulty.NORMAL.getId()`。
 const NORMAL_DIFFICULTY: i32 = 2;
-/// 游戏规则 `fire_spread_radius_around_player` 的默认值。
-const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
@@ -849,11 +847,24 @@ impl<'a> World<'a> {
         self.is_in_valid_bounds(pos)
     }
 
-    /// `ServerLevel.canSpreadFireAround`：游戏规则 `fire_spread_radius_around_player` 是默认的 128，
-    /// 离所有玩家都不到这么远时火才蔓延。
+    /// 方块逻辑读到的游戏规则。
+    ///
+    /// The game rules block logic reads.
+    pub fn block_game_rules(&self) -> crate::gamerules::BlockGameRules {
+        self.level.block_game_rules()
+    }
+
+    /// `ServerLevel.canSpreadFireAround`：`fire_spread_radius_around_player` 为 `-1` 时不看玩家，
+    /// 否则离所有玩家都不到这个距离火才蔓延。
+    ///
+    /// `ServerLevel.canSpreadFireAround`: `-1` skips the player check. Otherwise fire spreads
+    /// only when some player is within that distance.
     pub fn can_spread_fire_around(&self, pos: BlockPos) -> bool {
-        self.level
-            .any_player_close_enough_to(pos, FIRE_SPREAD_RADIUS_AROUND_PLAYER)
+        let radius = self.block_game_rules().fire_spread_radius_around_player;
+        // 官方在半径是 -1 时短路，不会调用 `anyPlayerCloseEnoughTo`。
+        //
+        // Vanilla short-circuits on -1 and does not call `anyPlayerCloseEnoughTo`.
+        radius == -1 || self.level.any_player_close_enough_to(pos, radius)
     }
 
     /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
@@ -1487,6 +1498,12 @@ impl<'a> World<'a> {
     /// `TntBlock.prime`: spawns a primed TNT with the default fuse. The caller removes the block.
     /// The yaw comes from `level.getRandom()`, the same source block logic uses.
     pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+        // `TntBlock.prime` 在规则为假时直接返回，不取朝向的随机数。
+        //
+        // `TntBlock.prime` returns before drawing the yaw when the rule is false.
+        if !self.block_game_rules().tnt_explodes {
+            return -1;
+        }
         let position = block_center_bottom(pos);
         let angle = self.random().next_double();
         let entity = Entity::primed_tnt(position, angle);
@@ -1509,6 +1526,12 @@ impl<'a> World<'a> {
     ///
     /// `TntBlock.wasExploded`: TNT lit by an explosion gets a shorter fuse.
     pub fn spawn_short_fuse_tnt(&mut self, pos: BlockPos) -> i32 {
+        // `TntBlock.wasExploded` 先看 `TNT_EXPLODES`，关着时不取短引信的随机数。
+        //
+        // `TntBlock.wasExploded` checks `TNT_EXPLODES` first and draws no short-fuse random when it is off.
+        if !self.block_game_rules().tnt_explodes {
+            return -1;
+        }
         let angle = self.random().next_double();
         let mut entity = Entity::primed_tnt(block_center_bottom(pos), angle);
         let fuse = short_fuse(PrimedTnt::DEFAULT_FUSE, self.random());
@@ -1902,7 +1925,9 @@ mod tests {
                 | Effect::BlockEvent { .. }
                 | Effect::ComposterFill { .. }
                 | Effect::PageTurned { .. }
-                | Effect::CampfireChanged { .. } => None,
+                | Effect::CampfireChanged { .. }
+                | Effect::Overlay { .. }
+                | Effect::OpenCommandBlock { .. } => None,
             })
             .collect()
     }
