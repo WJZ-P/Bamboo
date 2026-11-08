@@ -5,18 +5,26 @@
 //! 槽位在关卡的容器表里，规则同一套。架子是 `ListBackedContainer`，不是 `WorldlyContainer`，
 //! 三格都能用。
 //!
-//! 一次 `with_container` 里槽位真的变了，结束时通知一次比较器，对应官方 `setItem` /
-//! `removeItem` 里的 `setChanged`。官方漏斗成功之后还会再调一次 `setChanged`，那一下在
-//! 漏斗自己的代码里。
+//! 熔炉的 `setItem` 只有原料格换成另一种物品才 `setChanged`，`removeItem` 拿走东西才通知。
+//! 燃料格和产物格写回去不通知：漏斗吸不走时会把物品放回，这一下不能再叫醒比较器。
+//! 酿造台和架子按自己的 `setItem` / `removeItem`：写过就通知，拿走非空才通知。
+//! 一次回调里这些通知合并到结束时发一次。漏斗每次只动一个物品，结束时读到的就是当时的内容。
+//! 漏斗和投掷器成功之后还会再调一次 `setChanged`，那一下在它们自己的代码里。
 //!
 //! Furnace family and brewing stands are vanilla `WorldlyContainer`s: hoppers and droppers
 //! pick slots by face, then apply `canPlaceItem` and `canTakeItemThroughFace`. Items live on
 //! the block entity; the block oracle stores slots in the level table and uses the same rules.
 //! A shelf is a `ListBackedContainer`, not a `WorldlyContainer`, so all three slots are open.
 //!
-//! When a `with_container` call actually changes slots, comparators are told once at the end.
-//! That matches `setChanged` inside vanilla `setItem` / `removeItem`. A hopper calls
-//! `setChanged` again after a successful move, in the hopper's own code.
+//! A furnace `setItem` calls `setChanged` only when the input slot changes to a different item.
+//! `removeItem` notifies when it takes something. Putting fuel or a result back does not:
+//! a hopper that fails to pull restores the stack, and that write must not wake the comparator.
+//! Brewing stands and shelves follow their own `setItem` / `removeItem`: a write notifies, a
+//! non-empty removal notifies. Those calls are merged into one update at the end of the
+//! callback. A hopper moves one item, so the slots at the end are what that call would read.
+//! A hopper or dropper calls `setChanged` again after a successful move, in its own code.
+
+use std::cell::Cell;
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{BlockAncestor, items, tags::item_tags};
@@ -28,7 +36,9 @@ use mc_bamboo_recipes::{
 use crate::{
     behaviour::machines::{BrewingStandEntity, FurnaceEntity},
     block_entity::BlockEntity,
-    container::{Container, copy_with_count, redstone_signal, stack_limit},
+    container::{
+        Container, copy_with_count, redstone_signal, same_item_same_components, stack_limit,
+    },
     state::item_is_tagged,
     world::World,
 };
@@ -194,8 +204,8 @@ pub fn entity_container_items(entity: &dyn BlockEntity) -> Option<Vec<ItemStack>
 }
 
 fn with_furnace(world: &mut World, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
-    if let Some(changed) = run_furnace(world, pos, f) {
-        if changed {
+    if let Some(notify) = run_furnace(world, pos, f) {
+        if notify {
             mark_container_changed(world, pos);
         }
         return true;
@@ -205,12 +215,7 @@ fn with_furnace(world: &mut World, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Con
     if world.has_block_entity(pos) {
         return false;
     }
-    if with_slots(world, pos, FURNACE_SLOTS, &mut |slots| {
-        f(&mut SlotView {
-            kind: MachineKind::Furnace,
-            slots,
-        });
-    }) {
+    if with_furnace_slots(world, pos, f) {
         return true;
     }
     let state = world.block_state(pos);
@@ -218,8 +223,8 @@ fn with_furnace(world: &mut World, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Con
         return false;
     };
     world.set_block_entity(Box::new(FurnaceEntity::new(pos, kind)));
-    if let Some(changed) = run_furnace(world, pos, f) {
-        if changed {
+    if let Some(notify) = run_furnace(world, pos, f) {
+        if notify {
             mark_container_changed(world, pos);
         }
         return true;
@@ -232,13 +237,39 @@ fn run_furnace(
     pos: BlockPos,
     f: &mut dyn FnMut(&mut dyn Container),
 ) -> Option<bool> {
-    let mut changed = false;
+    let notify = Cell::new(false);
     let found = world.with_block_entity::<FurnaceEntity, _>(pos, |entity, _| {
-        let before = entity.items().clone();
-        f(&mut FurnaceView { entity });
-        changed = entity.items() != &before;
+        f(&mut FurnaceView {
+            entity,
+            notify: &notify,
+        });
     });
-    found.map(|_| changed)
+    found.map(|_| notify.get())
+}
+
+/// 槽位表上的熔炉。通知规则和方块实体一样，不看“格子变没变”。
+///
+/// A furnace stored in the slot table. The notify rule matches the block entity:
+/// a changed slot is not enough.
+fn with_furnace_slots(
+    world: &mut World,
+    pos: BlockPos,
+    f: &mut dyn FnMut(&mut dyn Container),
+) -> bool {
+    let notify = Cell::new(false);
+    let mut ran = false;
+    let ok = world.with_slots(pos, FURNACE_SLOTS, &mut |slots| {
+        ran = true;
+        f(&mut SlotView {
+            kind: MachineKind::Furnace,
+            slots,
+            furnace_notify: Some(&notify),
+        });
+    });
+    if ok && ran && notify.get() {
+        mark_container_changed(world, pos);
+    }
+    ok && ran
 }
 
 fn with_brewing(world: &mut World, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
@@ -255,6 +286,7 @@ fn with_brewing(world: &mut World, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Con
         f(&mut SlotView {
             kind: MachineKind::Brewing,
             slots,
+            furnace_notify: None,
         });
     }) {
         return true;
@@ -339,7 +371,7 @@ fn split_slot(slots: &mut [ItemStack], slot: usize, count: i32) -> ItemStack {
     taken
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum MachineKind {
     Furnace,
     Brewing,
@@ -347,6 +379,10 @@ enum MachineKind {
 
 struct FurnaceView<'a> {
     entity: &'a mut FurnaceEntity,
+    /// `setItem` / `removeItem` 里要不要 `setChanged`。
+    ///
+    /// Whether `setItem` / `removeItem` should call `setChanged`.
+    notify: &'a Cell<bool>,
 }
 
 impl Container for FurnaceView<'_> {
@@ -359,15 +395,29 @@ impl Container for FurnaceView<'_> {
     }
 
     fn set(&mut self, slot: usize, stack: ItemStack) {
-        if slot < FURNACE_SLOTS {
-            self.entity.set_item(slot, stack);
+        if slot >= FURNACE_SLOTS {
+            return;
+        }
+        // 官方 `setItem` 在截断数量之前比 `same`，只有原料格换成别的物品才 `setChanged`。
+        // Vanilla `setItem` compares `same` before limiting the count, and `setChanged` runs
+        // only when the input slot changes to a different item.
+        let old = self.entity.item(slot);
+        let same = !stack.is_empty() && same_item_same_components(old, &stack);
+        self.entity.set_item(slot, stack);
+        if slot == 0 && !same {
+            self.notify.set(true);
         }
     }
 
     fn remove_item(&mut self, slot: usize, count: i32) -> ItemStack {
-        // 官方 `removeItem` 不经过 `setItem`，原料格的烹饪进度不清零。
-        // Vanilla `removeItem` does not go through `setItem`, so the input slot keeps its cook time.
-        self.entity.remove_item(slot, count)
+        // 官方 `removeItem` 不经过 `setItem`，原料格的烹饪进度不清零。拿走东西就 `setChanged`。
+        // Vanilla `removeItem` does not go through `setItem`, so the input slot keeps its cook
+        // time. Taking something calls `setChanged`.
+        let taken = self.entity.remove_item(slot, count);
+        if !taken.is_empty() {
+            self.notify.set(true);
+        }
+        taken
     }
 
     fn is_worldly(&self) -> bool {
@@ -458,6 +508,10 @@ impl Container for BrewingView<'_> {
 struct SlotView<'a> {
     kind: MachineKind,
     slots: &'a mut [ItemStack],
+    /// 熔炉槽位表上的 `setChanged` 标记。酿造台走外层的“格子变了”。
+    ///
+    /// Furnace slot-table `setChanged` flag. A brewing stand uses the outer "slots changed" check.
+    furnace_notify: Option<&'a Cell<bool>>,
 }
 
 impl Container for SlotView<'_> {
@@ -470,13 +524,29 @@ impl Container for SlotView<'_> {
     }
 
     fn set(&mut self, slot: usize, stack: ItemStack) {
-        if slot < self.slots.len() {
-            self.slots[slot] = limit_stack(stack);
+        if slot >= self.slots.len() {
+            return;
+        }
+        let same = !stack.is_empty() && same_item_same_components(&self.slots[slot], &stack);
+        self.slots[slot] = limit_stack(stack);
+        if self.kind == MachineKind::Furnace
+            && slot == 0
+            && !same
+            && let Some(notify) = self.furnace_notify
+        {
+            notify.set(true);
         }
     }
 
     fn remove_item(&mut self, slot: usize, count: i32) -> ItemStack {
-        split_slot(self.slots, slot, count)
+        let taken = split_slot(self.slots, slot, count);
+        if self.kind == MachineKind::Furnace
+            && !taken.is_empty()
+            && let Some(notify) = self.furnace_notify
+        {
+            notify.set(true);
+        }
+        taken
     }
 
     fn is_worldly(&self) -> bool {
@@ -564,7 +634,7 @@ mod tests {
         BlockState, BlockTicks, Level,
         dispenser::dispense_from,
         hopper::HopperEntity,
-        state::{FACING, HORIZONTAL_FACING, LIT},
+        state::{FACING, FACING_HOPPER, HORIZONTAL_FACING, LIT},
         testing::TestLevel,
         world::UPDATE_ALL,
     };
@@ -608,38 +678,47 @@ mod tests {
         let coal = ItemStack::new(items::COAL, 1);
         let bucket = ItemStack::new(items::BUCKET, 1);
         let water = ItemStack::new(items::WATER_BUCKET, 1);
+        let lava = ItemStack::new(items::LAVA_BUCKET, 1);
         world.with_container(pos, &mut |container| {
             assert!(container.can_place_item(0, &bread));
             assert!(!container.can_place_item(2, &bread));
             assert!(container.can_place_item(1, &coal));
+            assert!(container.can_place_item(1, &lava));
             assert!(container.can_place_item(1, &bucket));
             assert!(!container.can_place_item(1, &bread));
             assert!(!container.can_place_item(1, &water));
             assert!(container.can_place_item_through_face(0, &bread, Some(Direction::Up)));
             assert!(!container.can_place_item_through_face(1, &bread, Some(Direction::North)));
+            assert!(!container.can_place_item_through_face(2, &bread, Some(Direction::Down)));
+            assert!(container.can_place_item_through_face(1, &coal, Some(Direction::Down)));
             assert!(container.can_take_item_through_face(2, &bread, Direction::Down));
             assert!(container.can_take_item_through_face(1, &water, Direction::Down));
             assert!(container.can_take_item_through_face(1, &bucket, Direction::Down));
             assert!(!container.can_take_item_through_face(1, &coal, Direction::Down));
+            assert!(!container.can_take_item_through_face(1, &lava, Direction::Down));
+            assert!(container.can_take_item_through_face(1, &lava, Direction::Up));
             assert!(container.can_take_item_through_face(1, &coal, Direction::North));
             assert!(container.can_take_item_through_face(0, &bread, Direction::Up));
+            assert!(container.can_take_item_through_face(2, &bread, Direction::North));
         });
     }
 
     #[test]
     fn furnace_faces_follow_the_entity_and_the_slot_table() {
-        let mut level = TestLevel::new();
-        let mut ticks = BlockTicks::new();
-        {
+        for block in [blocks::FURNACE, blocks::BLAST_FURNACE, blocks::SMOKER] {
+            let mut level = TestLevel::new();
+            let mut ticks = BlockTicks::new();
+            {
+                let mut world = world_of(&mut level, &mut ticks);
+                place(&mut world, POS, BlockState(block));
+                assert_furnace_rules(&mut world, POS);
+            }
+            let mut level = TestLevel::new();
+            level.set(POS, BlockState(block));
             let mut world = world_of(&mut level, &mut ticks);
-            place(&mut world, POS, BlockState(blocks::FURNACE));
+            assert!(!world.has_block_entity(POS));
             assert_furnace_rules(&mut world, POS);
         }
-        let mut level = TestLevel::new();
-        level.set(POS, BlockState(blocks::BLAST_FURNACE));
-        let mut world = world_of(&mut level, &mut ticks);
-        assert!(!world.has_block_entity(POS));
-        assert_furnace_rules(&mut world, POS);
     }
 
     #[test]
@@ -816,6 +895,176 @@ mod tests {
 
         assert!(slot(&mut world, POS, 0).is_empty());
         assert_eq!(slot(&mut world, furnace, 1), ItemStack::new(items::COAL, 1));
+    }
+
+    #[test]
+    fn a_dropper_below_a_furnace_uses_the_bottom_face() {
+        let furnace = POS.above();
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let facing = Direction::Up;
+        let state = BlockState(blocks::DROPPER).with(FACING, facing);
+        {
+            let mut world = world_of(&mut level, &mut ticks);
+            place(&mut world, POS, state);
+            place(&mut world, furnace, BlockState(blocks::FURNACE));
+        }
+        let mut coal = vec![ItemStack::empty(); 9];
+        coal[0] = ItemStack::new(items::COAL, 1);
+        level.set_container(POS, coal);
+        let mut world = world_of(&mut level, &mut ticks);
+        dispense_from(&mut world, POS, state);
+        assert!(slot(&mut world, POS, 0).is_empty());
+        assert_eq!(slot(&mut world, furnace, 1), ItemStack::new(items::COAL, 1));
+        assert!(slot(&mut world, furnace, 2).is_empty());
+
+        world.with_container(POS, &mut |container| {
+            container.set(0, ItemStack::new(items::BREAD, 1));
+        });
+        let before = world.random().clone();
+        dispense_from(&mut world, POS, state);
+        let once = before;
+        once.next_int(1);
+        assert_eq!(world.random().seed(), once.seed());
+        assert_eq!(slot(&mut world, POS, 0), ItemStack::new(items::BREAD, 1));
+        assert_eq!(slot(&mut world, furnace, 1), ItemStack::new(items::COAL, 1));
+    }
+
+    #[test]
+    fn hoppers_push_into_the_furnace_face_they_point_at() {
+        let furnace = POS;
+        let side = furnace.west();
+        let above = furnace.above();
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = world_of(&mut level, &mut ticks);
+            place(&mut world, furnace, BlockState(blocks::SMOKER));
+            place(
+                &mut world,
+                side,
+                BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::East),
+            );
+            place(
+                &mut world,
+                above,
+                BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
+            );
+        }
+        level
+            .block_entities_mut()
+            .insert(Box::new(HopperEntity::new(side)));
+        level
+            .block_entities_mut()
+            .insert(Box::new(HopperEntity::new(above)));
+        let mut side_slots = vec![ItemStack::empty(); 5];
+        side_slots[0] = ItemStack::new(items::COAL, 1);
+        level.set_container(side, side_slots);
+        let mut above_slots = vec![ItemStack::empty(); 5];
+        above_slots[0] = ItemStack::new(items::BREAD, 1);
+        level.set_container(above, above_slots);
+        level.set(furnace.east().below(), BlockState(blocks::STONE));
+        level.set(
+            furnace.east(),
+            BlockState(blocks::COMPARATOR).with(HORIZONTAL_FACING, Direction::West),
+        );
+        let mut world = world_of(&mut level, &mut ticks);
+        let comparator = furnace.east();
+        let comparator_block = world.block_state(comparator).block();
+        assert!(!world.has_scheduled_tick(comparator, comparator_block));
+
+        world.tick_block_entities();
+
+        assert!(slot(&mut world, side, 0).is_empty());
+        assert!(slot(&mut world, above, 0).is_empty());
+        assert_eq!(
+            slot(&mut world, furnace, 0),
+            ItemStack::new(items::BREAD, 1)
+        );
+        assert_eq!(slot(&mut world, furnace, 1), ItemStack::new(items::COAL, 1));
+        assert!(world.has_scheduled_tick(comparator, comparator_block));
+    }
+
+    #[test]
+    fn a_failed_furnace_pull_does_not_schedule_the_comparator() {
+        // 漏斗吸不走最后一件产物时，官方 `removeItem` 通知的是空格子（信号 0，比较器本来就是 0，不排刻），
+        // 再 `setItem` 放回产物格。产物格的 `setItem` 不 `setChanged`，所以比较器仍然不排刻。
+        //
+        // When a hopper fails to pull the last result, vanilla `removeItem` notifies the empty
+        // slot (signal 0, and the comparator is already 0, so no tick). `setItem` then puts the
+        // result back. That `setItem` does not `setChanged`, so the comparator stays unscheduled.
+        let furnace = POS.above();
+        let mut level = TestLevel::new();
+        level.set(POS, BlockState(blocks::HOPPER));
+        let mut hopper = vec![ItemStack::new(items::COBBLESTONE, 1); 5];
+        hopper[0] = ItemStack::new(items::COBBLESTONE, 64);
+        level.set_container(POS, hopper);
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = world_of(&mut level, &mut ticks);
+            place(&mut world, furnace, BlockState(blocks::FURNACE));
+        }
+        level
+            .block_entities_mut()
+            .insert(Box::new(HopperEntity::new(POS)));
+        level
+            .block_entities_mut()
+            .get_mut::<FurnaceEntity>(furnace)
+            .unwrap()
+            .write_item(2, ItemStack::new(items::IRON_INGOT, 1));
+        let comparator = furnace.west();
+        level.set(comparator.below(), BlockState(blocks::STONE));
+        level.set(
+            comparator,
+            BlockState(blocks::COMPARATOR).with(HORIZONTAL_FACING, Direction::East),
+        );
+        let mut world = world_of(&mut level, &mut ticks);
+        let comparator_block = world.block_state(comparator).block();
+
+        world.tick_block_entities();
+
+        assert_eq!(
+            slot(&mut world, furnace, 2),
+            ItemStack::new(items::IRON_INGOT, 1)
+        );
+        assert_eq!(
+            slot(&mut world, POS, 1),
+            ItemStack::new(items::COBBLESTONE, 1)
+        );
+        assert!(!world.has_scheduled_tick(comparator, comparator_block));
+    }
+
+    #[test]
+    fn a_failed_pull_from_the_slot_table_does_not_schedule_the_comparator() {
+        let furnace = POS.above();
+        let mut level = TestLevel::new();
+        level.set(POS, BlockState(blocks::HOPPER));
+        level.set(furnace, BlockState(blocks::BLAST_FURNACE));
+        let mut hopper = vec![ItemStack::new(items::COBBLESTONE, 1); 5];
+        hopper[0] = ItemStack::new(items::COBBLESTONE, 64);
+        level.set_container(POS, hopper);
+        let mut stored = vec![ItemStack::empty(); 3];
+        stored[2] = ItemStack::new(items::IRON_INGOT, 1);
+        level.set_container(furnace, stored);
+        let mut ticks = BlockTicks::new();
+        let comparator = furnace.west();
+        level.set(comparator.below(), BlockState(blocks::STONE));
+        level.set(
+            comparator,
+            BlockState(blocks::COMPARATOR).with(HORIZONTAL_FACING, Direction::East),
+        );
+        let mut world = world_of(&mut level, &mut ticks);
+        assert!(!world.has_block_entity(furnace));
+        world.set_block_entity(Box::new(HopperEntity::new(POS)));
+        let comparator_block = world.block_state(comparator).block();
+
+        world.tick_block_entities();
+
+        assert_eq!(
+            slot(&mut world, furnace, 2),
+            ItemStack::new(items::IRON_INGOT, 1)
+        );
+        assert!(!world.has_scheduled_tick(comparator, comparator_block));
     }
 
     #[test]

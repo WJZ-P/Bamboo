@@ -1878,6 +1878,17 @@ fn send_outgoing(region: &mut Region, id: PlayerId, container_id: i32, packets: 
     }
 }
 
+/// 官方 `BlockEntity.setChanged` 里通知比较器的那一步。方块是空气时不通知。
+///
+/// The comparator half of vanilla `BlockEntity.setChanged`. Air does not notify.
+fn notify_machine(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if state.is_air() {
+        return;
+    }
+    world.update_neighbour_for_output_signal(pos, state.block());
+}
+
 fn pull_machine(region: &mut Region, station: &mut Station) {
     match station.kind {
         Kind::Furnace | Kind::BlastFurnace | Kind::Smoker => {
@@ -1919,6 +1930,8 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
     match station.kind {
         Kind::Furnace | Kind::BlastFurnace | Kind::Smoker => {
             let stacks = station.slots[..3].to_vec();
+            let touched =
+                set[..3].iter().any(|flag| *flag) || content[..3].iter().any(|flag| *flag);
             let (mut level, ticks) = region.block_level();
             let mut world = World::new(&mut level, ticks);
             let _ = world.with_block_entity::<FurnaceEntity, _>(pos, |entity, world| {
@@ -1933,9 +1946,17 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
                     entity.award_experience(world);
                 }
             });
+            // 菜单格子的 `setChanged`。原料格的 `setItem` 自己也会通知，这里内容已经是最终的，合并成一次。
+            //
+            // A menu slot's `setChanged`. The input `setItem` notifies too; the slots are already
+            // final, so this is the one comparator update.
+            if touched {
+                notify_machine(&mut world, pos);
+            }
         }
         Kind::Brewing => {
             let stacks = station.slots[..5].to_vec();
+            let touched = set.iter().any(|flag| *flag) || content.iter().any(|flag| *flag);
             let (mut level, ticks) = region.block_level();
             let mut world = World::new(&mut level, ticks);
             let _ = world.with_block_entity::<BrewingStandEntity, _>(pos, |entity, _world| {
@@ -1945,6 +1966,12 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
                     }
                 }
             });
+            // 酿造台 `setItem` 和菜单格子都会 `setChanged`。写完再通知一次。
+            //
+            // Brewing `setItem` and the menu slot both call `setChanged`. Notify once after the write.
+            if touched {
+                notify_machine(&mut world, pos);
+            }
         }
         _ => {}
     }

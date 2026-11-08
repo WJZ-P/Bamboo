@@ -121,8 +121,13 @@ impl BrewingStandEntity {
         }
     }
 
-    /// 官方 `setItem`，也就是 `BaseContainerBlockEntity.setItem`：
-    /// 写一格，数量按 `getMaxStackSize(stack)` 截断，然后通知。
+    /// 官方 `BaseContainerBlockEntity.setItem` 的写入：数量按 `getMaxStackSize` 截断。
+    ///
+    /// `setChanged` 不在这里。漏斗那条路在容器包装结束时通知，菜单在写回之后通知。
+    ///
+    /// The write half of vanilla `BaseContainerBlockEntity.setItem`: the count is limited by
+    /// `getMaxStackSize`. `setChanged` is not here. The hopper path notifies at the end of the
+    /// container wrapper, and a menu notifies after it writes the slots back.
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
         let mut stack = stack;
         let limit = mc_bamboo_recipes::max_stack_size(&stack).min(CONTAINER_STACK_LIMIT);
