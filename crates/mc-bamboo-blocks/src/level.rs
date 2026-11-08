@@ -253,4 +253,7 @@ pub enum Effect {
         param_a: i32,
         param_b: i32,
     },
+    /// `levelEvent(1500, pos, data)`：堆肥桶收进一个能堆肥的物品。
+    /// `success` 为真时数据是 1（等级升了），否则是 0。客户端自己播粒子和声音。
+    ComposterFill { pos: BlockPos, success: bool },
 }

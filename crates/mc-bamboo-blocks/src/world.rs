@@ -431,11 +431,19 @@ impl<'a> World<'a> {
     }
 
     /// 这一格的物品栏，见 [`Level::with_container`]。
+    ///
+    /// 堆肥桶没有方块实体，官方 `ComposterBlock.getContainer` 按等级现做一个容器，这里同样处理。
     pub(crate) fn with_container(
         &mut self,
         pos: BlockPos,
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
     ) -> bool {
+        if self
+            .block_state(pos)
+            .is_a(mc_bamboo_data::BlockAncestor::ComposterBlock)
+        {
+            return crate::composter::with_container(self, pos, f);
+        }
         self.level.with_container(pos, f)
     }
 
@@ -1362,7 +1370,8 @@ mod tests {
                 | Effect::SignWaxed { .. }
                 | Effect::OpenSignEditor { .. }
                 | Effect::NoteBlockPlayed { .. }
-                | Effect::BlockEvent { .. } => None,
+                | Effect::BlockEvent { .. }
+                | Effect::ComposterFill { .. } => None,
             })
             .collect()
     }

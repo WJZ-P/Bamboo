@@ -42,6 +42,8 @@ const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
 const SIMULATION_DISTANCE: i32 = 10;
 /// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`：骨粉的粒子。
 const BONE_MEAL_EVENT: i32 = 1505;
+/// `LevelEvent.COMPOSTER_FILL`：堆肥桶收物品的粒子和声音。
+const COMPOSTER_FILL_EVENT: i32 = 1500;
 /// 骨粉事件的数据：粒子的数量。
 const BONE_MEAL_PARTICLES: i32 = 15;
 /// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
@@ -321,6 +323,16 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
             }
             // 音符盒的声音和粒子归“方块声音”那边，这里只消费掉事件。
             Effect::NoteBlockPlayed { .. } => {}
+            // `levelEvent(1500)`：客户端播堆肥的粒子和声音。升级了数据是 1，没升级是 0。
+            Effect::ComposterFill { pos, success } => {
+                let event = LevelEvent {
+                    event: COMPOSTER_FILL_EVENT,
+                    pos,
+                    data: i32::from(success),
+                    global: false,
+                };
+                send_level_event(region, None, pos, &event);
+            }
         }
     }
 }
