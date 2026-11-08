@@ -152,7 +152,7 @@ pub struct BlockOffset {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateTables {
-    pub facts: Vec<u32>,
+    pub facts: Vec<u64>,
     pub fluid: Vec<u8>,
     pub light_dampening: Vec<u8>,
     pub collision: Vec<u16>,
@@ -217,8 +217,12 @@ pub struct BlockMaps {
     pub waxables: Vec<(i32, i32)>,
     /// 方块、`igniteOdds`、`burnOdds`。
     pub fire_odds: Vec<(i32, i32, i32)>,
+    /// `ignitedByLava` 的方块 ID，升序。
+    pub ignited_by_lava: Vec<i32>,
     /// 物品注册表 ID。
     pub campfire_inputs: Vec<i32>,
+    /// 数据包 `context_int_provider/compostable` 下的提供器原文，键是名字。
+    pub compost_layers: BTreeMap<String, serde_json::Value>,
 }
 
 /// 世界层注册表里的一个 `BlockTransformer`，只有改方块的部分。
@@ -296,7 +300,8 @@ pub struct Item {
     pub max_stack_size: i32,
     pub can_destroy_blocks_in_creative: bool,
     pub consumable: bool,
-    pub compostable: bool,
+    /// `compostable` 组件的 `layers`。
+    pub compostable: Option<CompostLayers>,
     pub jukebox_playable: bool,
     /// `block_transformer` 组件指向的注册表条目。
     pub block_transformer: Option<String>,
@@ -318,7 +323,7 @@ struct ItemComponents {
     #[serde(rename = "minecraft:consumable")]
     consumable: Option<serde_json::Value>,
     #[serde(rename = "minecraft:compostable")]
-    compostable: Option<serde_json::Value>,
+    compostable: Option<CompostableComponent>,
     #[serde(rename = "minecraft:jukebox_playable")]
     jukebox_playable: Option<serde_json::Value>,
     /// 报告里写注册表条目的名字。直接内联的写法读不了，生成会失败。
@@ -332,6 +337,128 @@ struct ItemComponents {
 #[derive(Debug, Deserialize)]
 struct ToolComponent {
     can_destroy_blocks_in_creative: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompostableComponent {
+    layers: serde_json::Value,
+}
+
+/// 往堆肥桶里放一个物品加几层。只认原版数据包用到的两种写法，别的写法生成失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompostLayers {
+    /// 固定的层数，不取随机数。
+    Constant(i32),
+    /// 堆肥桶空着时加 `when_empty` 层，否则按权重抽一项：（层数，权重）。
+    Weighted {
+        when_empty: i32,
+        distribution: Vec<(i32, i32)>,
+    },
+}
+
+/// 整数提供器里堆肥用到的写法：内联常数、引用数据包条目、带 `type` 的对象。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum IntProvider {
+    Constant(i32),
+    Reference(String),
+    Typed(TypedIntProvider),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum TypedIntProvider {
+    #[serde(rename = "minecraft:constant")]
+    Constant { value: i32 },
+    #[serde(rename = "minecraft:number_dispatcher")]
+    Dispatcher {
+        cases: Vec<DispatcherCase>,
+        default: Box<IntProvider>,
+    },
+    #[serde(rename = "minecraft:weighted_list")]
+    WeightedList { distribution: Vec<WeightedEntry> },
+}
+
+#[derive(Debug, Deserialize)]
+struct DispatcherCase {
+    condition: serde_json::Value,
+    value: IntProvider,
+}
+
+#[derive(Debug, Deserialize)]
+struct WeightedEntry {
+    data: IntProvider,
+    weight: i32,
+}
+
+/// `compostable` 组件的 `layers` 解析成 [`CompostLayers`]。
+fn compost_layers(
+    layers: &serde_json::Value,
+    providers: &BTreeMap<String, serde_json::Value>,
+) -> Result<CompostLayers, String> {
+    match resolve_int_provider(parse_int_provider(layers)?, providers)? {
+        IntProvider::Typed(TypedIntProvider::Dispatcher { cases, default }) => {
+            let [case] = <[DispatcherCase; 1]>::try_from(cases)
+                .map_err(|_| format!("unsupported compostable layers: {layers}"))?;
+            if !is_empty_composter(&case.condition) {
+                return Err(format!("unsupported compostable condition: {layers}"));
+            }
+            let IntProvider::Typed(TypedIntProvider::WeightedList { distribution }) =
+                resolve_int_provider(*default, providers)?
+            else {
+                return Err(format!("unsupported compostable default: {layers}"));
+            };
+            let distribution = distribution
+                .into_iter()
+                .map(|entry| Ok((constant_int(entry.data, providers)?, entry.weight)))
+                .collect::<Result<_, String>>()?;
+            Ok(CompostLayers::Weighted {
+                when_empty: constant_int(case.value, providers)?,
+                distribution,
+            })
+        }
+        provider => Ok(CompostLayers::Constant(constant_int(provider, providers)?)),
+    }
+}
+
+fn parse_int_provider(value: &serde_json::Value) -> Result<IntProvider, String> {
+    IntProvider::deserialize(value).map_err(|error| format!("bad int provider {value}: {error}"))
+}
+
+/// 引用换成数据包里的条目，别的原样返回。
+fn resolve_int_provider(
+    provider: IntProvider,
+    providers: &BTreeMap<String, serde_json::Value>,
+) -> Result<IntProvider, String> {
+    let IntProvider::Reference(name) = provider else {
+        return Ok(provider);
+    };
+    let value = providers
+        .get(&name)
+        .ok_or_else(|| format!("unknown int provider {name}"))?;
+    resolve_int_provider(parse_int_provider(value)?, providers)
+}
+
+fn constant_int(
+    provider: IntProvider,
+    providers: &BTreeMap<String, serde_json::Value>,
+) -> Result<i32, String> {
+    match resolve_int_provider(provider, providers)? {
+        IntProvider::Constant(value) | IntProvider::Typed(TypedIntProvider::Constant { value }) => {
+            Ok(value)
+        }
+        other => Err(format!("expected a constant int provider, got {other:?}")),
+    }
+}
+
+/// 条件是“方块是 `level` 为 0 的堆肥桶”。
+fn is_empty_composter(condition: &serde_json::Value) -> bool {
+    *condition
+        == serde_json::json!({
+            "type": "minecraft:match_block",
+            "blocks": "minecraft:composter",
+            "state": { "level": "0" },
+        })
 }
 
 /// `registries.json` 里的一个注册表：条目名 → ID。
@@ -392,7 +519,11 @@ pub fn run(
         ITEM_REGISTRY,
         extracted.items.iter().map(|item| &item.name),
     )?;
-    let items = read_items(extracted.items, &reports.join("minecraft/components/item"))?;
+    let items = read_items(
+        extracted.items,
+        &reports.join("minecraft/components/item"),
+        &extracted.block_maps.compost_layers,
+    )?;
     Ok(VersionData {
         version: extracted.version,
         known_packs: extracted.known_packs,
@@ -533,7 +664,11 @@ fn check_registry_order<'a>(
 }
 
 /// 给物品补上组件报告里的数据。
-fn read_items(extracted: Vec<ExtractedItem>, reports: &Path) -> Result<Vec<Item>, String> {
+fn read_items(
+    extracted: Vec<ExtractedItem>,
+    reports: &Path,
+    compost_providers: &BTreeMap<String, serde_json::Value>,
+) -> Result<Vec<Item>, String> {
     extracted
         .into_iter()
         .map(|item| {
@@ -547,7 +682,10 @@ fn read_items(extracted: Vec<ExtractedItem>, reports: &Path) -> Result<Vec<Item>
                 max_stack_size: components.max_stack_size,
                 can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
                 consumable: components.consumable.is_some(),
-                compostable: components.compostable.is_some(),
+                compostable: components
+                    .compostable
+                    .map(|component| compost_layers(&component.layers, compost_providers))
+                    .transpose()?,
                 jukebox_playable: components.jukebox_playable.is_some(),
                 block_transformer: components.block_transformer,
                 blocks_attacks: components.blocks_attacks.is_some(),

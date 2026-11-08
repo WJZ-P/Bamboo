@@ -80,7 +80,7 @@ fn use_water(state: BlockState, world: &mut World, item: i32, pos: BlockPos) -> 
 }
 
 /// `canReceiveStalactiteDrip`。
-fn can_receive_drip(state: BlockState, fluid: Fluid) -> bool {
+pub(super) fn can_receive_drip(state: BlockState, fluid: Fluid) -> bool {
     state.is(blocks::CAULDRON) || state.is(blocks::WATER_CAULDRON) && fluid == Fluid::Water
 }
 

@@ -8,12 +8,12 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Effect,
-    InteractionResult, Level, Outcome, RedstoneMemory, TickPriority, destroy_block,
-    run_action_block_ticks, run_scheduled_ticks,
+    InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory, TickPriority, destroy_block,
+    random_tick, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
-    use_item, use_item_on,
+    tick_chunk, use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use super::{
@@ -66,12 +66,13 @@ pub struct Scheduled {
     pub priority: i32,
 }
 
-/// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。
+/// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。随机源和官方用同一个种子。
 struct OracleLevel {
     blocks: HashMap<BlockPos, BlockState>,
     entities: Vec<Aabb>,
     min_y: i32,
     max_y: i32,
+    random: LevelRandom,
     touched: RefCell<BTreeSet<usize>>,
     /// 每道题一份，和假世界里每道题新建的方块实体一样。
     redstone: RedstoneMemory,
@@ -90,6 +91,7 @@ impl OracleLevel {
             entities: entity_boxes(&case.action),
             min_y: header.min_y,
             max_y: header.max_y,
+            random: LevelRandom::new(case.seed),
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
@@ -196,6 +198,24 @@ impl Level for OracleLevel {
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
     }
+
+    fn random(&self) -> &LevelRandom {
+        &self.random
+    }
+
+    /// 官方假世界的区块段每次都扫一遍场景。
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.blocks.iter().any(|(pos, state)| {
+            pos.chunk() == chunk
+                && pos.y >> 4 == section_y
+                && (state.is_randomly_ticking() || state.is_fluid_randomly_ticking())
+        })
+    }
+
+    /// 官方假世界的 `canSpreadFireAround` 永远是真：场景里的玩家总在目标附近。
+    fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
+        true
+    }
 }
 
 /// `VoxelShape.bounds`。
@@ -294,6 +314,8 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         Kind::Tick => run_one_tick(&mut level, &mut ticks, target, now),
         Kind::Flow => run_flow(&mut level, &mut ticks, target, now, action.steps),
         Kind::Item => use_item(&mut level, &mut ticks, &actor, action.hand),
+        Kind::Random => random_tick(&mut level, &mut ticks, target),
+        Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
     };
     // flow 题在动作里已经走到 `game_time + steps`，后面的刻从那里接着数。
     let after_action = match action.kind {
@@ -359,7 +381,7 @@ fn run_flow(
 
 fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
     match kind {
-        Kind::Tick | Kind::Flow => "ticked",
+        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk => "ticked",
         Kind::Destroy if result == InteractionResult::Fail => "refused",
         Kind::Destroy => "destroyed",
         Kind::Place | Kind::Use | Kind::Item => match result {
@@ -385,7 +407,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             } => Some(Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator)),
             // 火把烧坏只放烟，题里不比较。
             Effect::TorchBurnout { .. } => None,
-            Effect::FilledBucket { .. }
+            Effect::BoneMealUsed { .. }
+            | Effect::FilledBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
@@ -442,6 +465,7 @@ mod tests {
             entities: vec![player],
             min_y: -64,
             max_y: 319,
+            random: LevelRandom::new(0),
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),

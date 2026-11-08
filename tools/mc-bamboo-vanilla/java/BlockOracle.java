@@ -63,6 +63,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.server.RegistryLayer;
@@ -190,6 +191,8 @@ import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.entity.LevelEntityGetter;
 import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
@@ -198,6 +201,7 @@ import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.redstone.CollectingNeighborUpdater;
 import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.level.storage.loot.LootTable;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -542,7 +546,9 @@ public final class BlockOracle {
         DESTROY("destroy"),
         TICK("tick"),
         FLOW("flow"),
-        ITEM("item");
+        ITEM("item"),
+        RANDOM("random"),
+        CHUNK("chunk");
 
         private final String label;
 
@@ -551,9 +557,10 @@ public final class BlockOracle {
         }
     }
 
-    private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, int single, boolean explain) {
+    private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, Set<String> unrandom, int single,
+            boolean explain) {
         private static final String USAGE = "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>]"
-                + " [--untick <classes>] [--case I] [--explain]";
+                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain]";
 
         static Options parse(String[] args) {
             long seed = 1;
@@ -561,6 +568,7 @@ public final class BlockOracle {
             String only = null;
             Set<String> avoid = Set.of();
             Set<String> untick = Set.of();
+            Set<String> unrandom = Set.of();
             int single = -1;
             boolean explain = false;
             for (int i = 0; i < args.length; i++) {
@@ -570,12 +578,13 @@ public final class BlockOracle {
                     case "--only" -> only = value(args, ++i);
                     case "--avoid" -> avoid = Set.of(value(args, ++i).split(","));
                     case "--untick" -> untick = Set.of(value(args, ++i).split(","));
+                    case "--unrandom" -> unrandom = Set.of(value(args, ++i).split(","));
                     case "--case" -> single = Integer.parseInt(value(args, ++i));
                     case "--explain" -> explain = true;
                     default -> throw new IllegalArgumentException(USAGE);
                 }
             }
-            return new Options(seed, cases, only, avoid, untick, single, explain);
+            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain);
         }
 
         private static String value(String[] args, int index) {
@@ -677,7 +686,7 @@ public final class BlockOracle {
 
         @Override
         public ReloadableServerRegistries.Holder reloadableRegistries() {
-            return managers.fullRegistries();
+            return new NoLoot(managers.fullRegistries().lookup());
         }
 
         @Override
@@ -699,6 +708,21 @@ public final class BlockOracle {
         @Override
         public DedicatedPlayerList getPlayerList() {
             return players;
+        }
+    }
+
+    /**
+     * 战利品表都是空的，世界里没有掉落物，和 Bamboo 一样。掉落时官方每一组物品都从世界的随机源取 5 个数
+     * （位置的偏移和速度），组数又取决于战利品表的随机序列，留着它们，后面的随机数就和 Bamboo 对不上了。
+     */
+    private static final class NoLoot extends ReloadableServerRegistries.Holder {
+        NoLoot(HolderLookup.Provider registries) {
+            super(registries);
+        }
+
+        @Override
+        public LootTable getLootTable(ResourceKey<LootTable> id) {
+            return LootTable.EMPTY;
         }
     }
 
@@ -733,7 +757,10 @@ public final class BlockOracle {
         }
     }
 
-    /** level.findBlocksIn 按区块段扫描。这个区块只把段转给假世界，扫描顺序还是官方的。 */
+    /**
+     * level.findBlocksIn 按区块段扫描，ServerLevel.tickChunk 按区块段挑随机刻的格子。这个区块只把段转给假世界，
+     * 扫描和挑格子的顺序还是官方的。
+     */
     private static final class FakeChunk extends LevelChunk {
         private FakeLevel level;
         private int chunkX;
@@ -759,6 +786,42 @@ public final class BlockOracle {
         @Override
         public LevelChunkSection getSection(int sectionY) {
             return FakeSection.of(level, new BlockPos(chunkX << 4, sectionY << 4, chunkZ << 4));
+        }
+
+        /** tickChunk 按下标遍历，下标 0 是世界最低的区块段。 */
+        @Override
+        public LevelChunkSection[] getSections() {
+            LevelChunkSection[] sections = new LevelChunkSection[getSectionsCount()];
+            for (int index = 0; index < sections.length; index++) {
+                sections[index] = getSection(getSectionYFromSectionIndex(index));
+            }
+            return sections;
+        }
+
+        @Override
+        public ChunkPos getPos() {
+            return new ChunkPos(chunkX, chunkZ);
+        }
+
+        @Override
+        public int getMinY() {
+            return level.getMinY();
+        }
+
+        @Override
+        public int getHeight() {
+            return level.getHeight();
+        }
+
+        /** ChunkAccess.getHeight：这一列最高的、符合高度图条件的方块，没有时是世界底部下面一格。 */
+        @Override
+        public int getHeight(Heightmap.Types type, int x, int z) {
+            for (int y = level.getMaxY(); y >= level.getMinY(); y--) {
+                if (type.isOpaque().test(level.getBlockState(new BlockPos((chunkX << 4) + x, y, (chunkZ << 4) + z)))) {
+                    return y;
+                }
+            }
+            return level.getMinY() - 1;
         }
 
         @Override
@@ -798,7 +861,24 @@ public final class BlockOracle {
 
         @Override
         public BlockState getBlockState(int sectionX, int sectionY, int sectionZ) {
-            return level.getBlockState(origin.offset(sectionX, sectionY, sectionZ));
+            BlockState state = level.getBlockState(origin.offset(sectionX, sectionY, sectionZ));
+            level.checkRandomTick(state);
+            return state;
+        }
+
+        /** LevelChunkSection.isRandomlyTicking：tickingBlockCount 或者 tickingFluidCount 不是 0。 */
+        @Override
+        public boolean isRandomlyTicking() {
+            for (Long2ObjectMap.Entry<BlockState> entry : level.blocks.long2ObjectEntrySet()) {
+                BlockPos pos = BlockPos.of(entry.getLongKey());
+                BlockState state = entry.getValue();
+                boolean inside = pos.getX() >> 4 == origin.getX() >> 4 && pos.getY() >> 4 == origin.getY() >> 4
+                        && pos.getZ() >> 4 == origin.getZ() >> 4;
+                if (inside && (state.isRandomlyTicking() || state.getFluidState().isRandomlyTicking())) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -882,10 +962,11 @@ public final class BlockOracle {
     }
 
     /**
-     * 记录每一次取随机数。假世界的 level.getRandom() 和 player.getRandom() 都是它。
+     * 记录每一次取随机数。假世界的 level.getRandom() 是一个，玩家的 getRandom() 是另一个。
      *
-     * <p>大多数用到随机数的地方只是音调和粒子，所以不能一碰到就排除。碰过随机数的场景会换几种随机数重跑，
-     * 世界的结果变了才算依赖随机。LOW 和 HIGH 是两个极端，能抓住 nextInt(5) == 0 这种小概率分支。
+     * <p>SEEDED 就是官方 ServerLevel 用的 LegacyRandomSource，mc-bamboo-blocks 用同样的种子逐位重现它，所以世界的随机源
+     * 不用排除，直接比较。玩家自己的随机源 Bamboo 没有，它碰过的场景会换几种随机数重跑，世界的结果变了才排除。
+     * LOW 和 HIGH 是两个极端，能抓住 nextInt(5) == 0 这种小概率分支。
      */
     private static final class OracleRandom implements RandomSource {
         private static final StackWalker WALKER = StackWalker.getInstance();
@@ -900,13 +981,17 @@ public final class BlockOracle {
         }
 
         private final Mode mode;
-        private final Random seeded;
+        private final RandomSource seeded;
         private final Set<String> sites = new LinkedHashSet<>();
         private int draws;
 
         OracleRandom(Mode mode, long seed) {
+            this(mode, new LegacyRandomSource(seed));
+        }
+
+        private OracleRandom(Mode mode, RandomSource seeded) {
             this.mode = mode;
-            this.seeded = new Random(seed);
+            this.seeded = seeded;
         }
 
         private void touch() {
@@ -933,10 +1018,11 @@ public final class BlockOracle {
                     .orElse("unknown"));
         }
 
+        /** SEEDED 和官方一样取一个 long 做新源的种子，新源的取数照样记在这里。 */
         @Override
         public RandomSource fork() {
             touch();
-            return this;
+            return mode == Mode.SEEDED ? new OracleRandom(mode, seeded.fork()) : this;
         }
 
         @Override
@@ -947,6 +1033,7 @@ public final class BlockOracle {
         @Override
         public void setSeed(long seed) {
             touch();
+            seeded.setSeed(seed);
         }
 
         @Override
@@ -1093,6 +1180,7 @@ public final class BlockOracle {
         private FixedLevelData data;
         private LevelEntityGetter<Entity> entityGetter;
         private int lastEntityId = 100;
+        private Set<String> unrandom;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -1116,6 +1204,7 @@ public final class BlockOracle {
             level.analogContent = false;
             level.data = new FixedLevelData();
             level.entityGetter = new PlayerEntities(level.playersInWorld);
+            level.unrandom = Set.of();
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, MAX_CHAINED_UPDATES));
             set(Level.class, level, "random", random);
             set(Level.class, level, "soundSeedGenerator", official.soundSeeds);
@@ -1287,6 +1376,43 @@ public final class BlockOracle {
                 long now = getGameTime();
                 recordedBlockTicks.tick(now, MAX_TICKS_PER_TICK, (at, block) -> runBlockTick(at, block, untick));
                 recordedFluidTicks.tick(now, MAX_TICKS_PER_TICK, (at, fluid) -> invoke(TICK_FLUID, at, fluid));
+            }
+        }
+
+        /** Level.randValue：getBlockRandomPos 的线性同余，和 random 无关，种子见 Oracle.answer。 */
+        void seedPositions(int value) {
+            set(Level.class, this, "randValue", value);
+        }
+
+        /** random 题：ServerLevel.tickChunk 选中这一格时做的事。 */
+        void randomTick(BlockPos pos) {
+            BlockState state = getBlockState(pos);
+            if (state.isRandomlyTicking()) {
+                state.randomTick(this, pos, random);
+            }
+            FluidState fluid = state.getFluidState();
+            if (fluid.isRandomlyTicking()) {
+                fluid.randomTick(this, pos, random);
+            }
+        }
+
+        /** chunk 题：官方的 tickChunk，碰到 unrandom 里的类的随机刻时这一题只能排除。 */
+        void tickChunk(BlockPos pos, int speed, Set<String> unrandom) {
+            this.unrandom = unrandom;
+            try {
+                tickChunk(FakeChunk.of(this, pos.getX() >> 4, pos.getZ() >> 4), speed);
+            } finally {
+                this.unrandom = Set.of();
+            }
+        }
+
+        /** tickChunk 从区块段读到的状态。要做随机刻的状态落在 unrandom 里时排除这一题。 */
+        void checkRandomTick(BlockState state) {
+            if (!unrandom.isEmpty() && state.isRandomlyTicking()) {
+                String outOfScope = ancestorIn(state.getBlock().getClass(), unrandom);
+                if (outOfScope != null) {
+                    throw new SkipCase("unrandom:" + outOfScope);
+                }
             }
         }
 
@@ -2061,6 +2187,8 @@ public final class BlockOracle {
         int settle;
         /** flow 题在第一个流体刻之后再跑多少刻。 */
         int steps;
+        /** chunk 题的 tickSpeed：每个区块段挑几格。 */
+        int speed;
 
         Case(int id, Kind kind, Subject subject, Height height) {
             this.id = id;
@@ -2234,6 +2362,12 @@ public final class BlockOracle {
             return block.getStateDefinition().getPossibleStates().stream().anyMatch(state -> !state.getFluidState().isEmpty());
         }
 
+        /** 有会随机刻的状态，方块自己的或者流体的。 */
+        static boolean ticksRandomly(Block block) {
+            return block.getStateDefinition().getPossibleStates().stream()
+                    .anyMatch(state -> state.isRandomlyTicking() || state.getFluidState().isRandomlyTicking());
+        }
+
         /** 方块物品的 useOn 就是放置，不算。 */
         static boolean hasOwnUseOn(Item item) {
             return !(item instanceof BlockItem) && (overridesUseOn(item) || new ItemStack(item).has(DataComponents.BLOCK_TRANSFORMER));
@@ -2376,6 +2510,8 @@ public final class BlockOracle {
         private static final float[] INSET_SURFACES = {0.125F, 0.1875F, 0.5F, 0.75F, 0.875F, 0.9375F};
         private static final int DEPENDANT_LAYERS = 3;
         private static final int[] FLOW_STEPS = {0, 1, 5, 10, 20, 40, 80, 120};
+        /** 3 是默认的 random_tick_speed，大的值让场景里的方块在一题里多半都被挑中。 */
+        private static final int[] CHUNK_SPEEDS = {1, 3, 64, 1024};
         private static final double STANDING_EYE_HEIGHT = 1.62;
         private static final double CROUCHING_EYE_HEIGHT = 1.27;
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
@@ -2402,6 +2538,8 @@ public final class BlockOracle {
                 case TICK -> buildTick(c, random);
                 case FLOW -> buildFlow(c, random);
                 case ITEM -> buildItem(c, random);
+                case RANDOM -> buildRandom(c, random);
+                case CHUNK -> buildChunk(c, random);
             };
             // flow 和 item 题考的是流体和物品本身，不加红石电路，也不额外 settle。
             if (kind != Kind.FLOW && kind != Kind.ITEM) {
@@ -3050,6 +3188,50 @@ public final class BlockOracle {
             return target;
         }
 
+        /** 题目的方块多半是会随机刻的状态，有支撑和零散的邻居，脚下常常有一片地面，长和蔓延都有地方。 */
+        private BlockPos buildRandom(Case c, Random random) {
+            BlockPos target = originInWorld(random);
+            BlockState state = tickingState(random, c.subject);
+            c.put(target, state);
+            complete(c, random, target, state);
+            pickActor(c, random, target);
+            addSupports(c, random, target, 60);
+            if (chance(random, 50)) {
+                growthGround(c, random, target);
+            }
+            decorate(c, random, target, Set.of(target.asLong()));
+            c.target = target;
+            return target;
+        }
+
+        /** 和 random 题一样的场景，跑官方的 tickChunk，看挑格子的顺序和区块段的判断。 */
+        private BlockPos buildChunk(Case c, Random random) {
+            BlockPos target = buildRandom(c, random);
+            c.speed = CHUNK_SPEEDS[random.nextInt(CHUNK_SPEEDS.length)];
+            return target;
+        }
+
+        /** 状态里有会随机刻的时候多半挑它们，否则题目大多什么也不做。 */
+        private static BlockState tickingState(Random random, Block block) {
+            List<BlockState> ticking = block.getStateDefinition().getPossibleStates().stream()
+                    .filter(state -> state.isRandomlyTicking() || state.getFluidState().isRandomlyTicking())
+                    .toList();
+            return ticking.isEmpty() || chance(random, 15) ? randomState(random, block) : pick(random, ticking);
+        }
+
+        /** 目标下面一层铺一片 3×3 的地面：草和菌丝的蔓延、茎结瓜、作物看耕地都要它。 */
+        private void growthGround(Case c, Random random, BlockPos target) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos at = target.offset(dx, -1, dz);
+                    if (!c.occupied(at)) {
+                        c.put(at, chance(random, 40) && catalog.allowed(Blocks.DIRT) ? Blocks.DIRT.defaultBlockState()
+                                : catalog.terrain(random));
+                    }
+                }
+            }
+        }
+
         private void addSupports(Case c, Random random, BlockPos target, int percent) {
             SupportInfo info = supports.of(c.subject);
             if (!info.supports.isEmpty() && chance(random, percent)) {
@@ -3391,7 +3573,7 @@ public final class BlockOracle {
         private static final int PROBE_ALL_STATES = 64;
         private static final int PROBE_SAMPLES = 16;
         private static final Kind[] PATTERN = {Kind.PLACE, Kind.USE, Kind.PLACE, Kind.DESTROY, Kind.USE, Kind.PLACE, Kind.TICK, Kind.USE,
-                Kind.FLOW, Kind.ITEM};
+                Kind.FLOW, Kind.ITEM, Kind.RANDOM, Kind.CHUNK, Kind.RANDOM};
 
         private final Map<Kind, List<Subject>> byKind = new LinkedHashMap<>();
         private final List<Kind> pattern = new ArrayList<>();
@@ -3426,6 +3608,7 @@ public final class BlockOracle {
             placing = weighted(placing, random);
             others = weighted(others, random);
             List<Subject> wet = others.stream().filter(subject -> Catalog.holdsFluid(subject.block)).toList();
+            List<Subject> ticking = others.stream().filter(subject -> Catalog.ticksRandomly(subject.block)).toList();
             List<Subject> using = usable.isEmpty() && held.isEmpty() ? withUsableItems(others, catalog, random)
                     : heldOnBlocks(usable, catalog, official, random);
             if (!held.isEmpty()) {
@@ -3437,6 +3620,8 @@ public final class BlockOracle {
                 byKind.put(Kind.DESTROY, others);
                 byKind.put(Kind.TICK, others);
                 byKind.put(Kind.FLOW, wet);
+                byKind.put(Kind.RANDOM, ticking);
+                byKind.put(Kind.CHUNK, ticking);
             }
             byKind.put(Kind.ITEM, using);
             for (Kind kind : PATTERN) {
@@ -3736,49 +3921,66 @@ public final class BlockOracle {
             out.append(line);
         }
 
-        /** 跑一次。碰过随机数就换几种随机数重跑，世界的结果变了就排除。 */
+        /** 世界随机源的种子，写在 case 行里，mc-bamboo-blocks 用它重现同样的随机数。 */
+        private long caseSeed(Case c) {
+            return options.seed * 31 + c.id;
+        }
+
+        /**
+         * 跑一次。世界的随机源和 mc-bamboo-blocks 用同一个种子，结果直接比较。玩家自己的随机源 Bamboo 没有，
+         * 它碰过的题换几种随机数重跑，世界的结果变了就排除。
+         */
         private Outcome answer(Case c) {
-            long seed = options.seed * 31 + c.id;
-            OracleRandom random = new OracleRandom(OracleRandom.Mode.SEEDED, seed);
-            Outcome outcome = execute(c, random);
-            if (random.draws == 0) {
-                return outcome;
-            }
-            outcome.touchedRandom = true;
-            List<OracleRandom> variants = List.of(new OracleRandom(OracleRandom.Mode.LOW, 0), new OracleRandom(OracleRandom.Mode.HIGH, 0),
-                    new OracleRandom(OracleRandom.Mode.SEEDED, ~seed));
-            for (OracleRandom variant : variants) {
-                Outcome other = execute(c, variant);
-                if (!outcome.sameWorld(other)) {
-                    random.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
-                    variant.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
-                    throw new SkipCase("random:" + String.join("+", random.sites));
+            long seed = caseSeed(c);
+            OracleRandom levelRandom = new OracleRandom(OracleRandom.Mode.SEEDED, seed);
+            OracleRandom entityRandom = new OracleRandom(OracleRandom.Mode.SEEDED, -seed);
+            Outcome outcome = execute(c, levelRandom, entityRandom);
+            outcome.touchedRandom = levelRandom.draws > 0 || entityRandom.draws > 0;
+            if (entityRandom.draws > 0) {
+                List<OracleRandom> variants = List.of(new OracleRandom(OracleRandom.Mode.LOW, 0),
+                        new OracleRandom(OracleRandom.Mode.HIGH, 0), new OracleRandom(OracleRandom.Mode.SEEDED, ~seed));
+                for (OracleRandom variant : variants) {
+                    Outcome other = execute(c, new OracleRandom(OracleRandom.Mode.SEEDED, seed), variant);
+                    if (!outcome.sameWorld(other)) {
+                        entityRandom.sites.forEach(site -> decisiveRandom.merge(site, 1, Integer::sum));
+                        throw new SkipCase("random-entity:" + String.join("+", entityRandom.sites));
+                    }
+                    outcome.maskRandomDelays(other);
                 }
-                outcome.maskRandomDelays(other);
             }
-            random.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
+            levelRandom.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
+            entityRandom.sites.forEach(site -> cosmeticRandom.merge(site, 1, Integer::sum));
             return outcome;
         }
 
-        private Outcome execute(Case c, OracleRandom random) {
-            FakeLevel level = FakeLevel.create(official, random);
+        private Outcome execute(Case c, OracleRandom levelRandom, OracleRandom entityRandom) {
+            FakeLevel level = FakeLevel.create(official, levelRandom);
+            level.seedPositions(new LegacyRandomSource(~caseSeed(c)).nextInt());
             level.load(c.scene);
-            FakePlayer actor = FakePlayer.create(level, official, random, 1, c.actor, c.yaw, c.pitch, c.sneak);
+            FakePlayer actor = FakePlayer.create(level, official, entityRandom, 1, c.actor, c.yaw, c.pitch, c.sneak);
             actor.hold(c.main, c.off);
             c.actorBox = actor.getBoundingBox();
             if (c.bystander != null) {
-                c.bystanderBox = FakePlayer.create(level, official, random, 2, c.bystander, 0.0F, 0.0F, false).getBoundingBox();
+                c.bystanderBox = FakePlayer.create(level, official, entityRandom, 2, c.bystander, 0.0F, 0.0F, false).getBoundingBox();
             }
             List<ItemStack> before = inventoryOf(actor);
             String result = switch (c.kind) {
                 case PLACE, USE -> resultName(actor.gameMode.useItemOn(actor, level, actor.getItemInHand(c.hand), c.hand, c.hit));
                 case DESTROY -> actor.gameMode.destroyBlock(c.target) ? "destroyed" : "refused";
                 case TICK -> {
-                    level.getBlockState(c.target).tick(level, c.target, random);
+                    level.getBlockState(c.target).tick(level, c.target, levelRandom);
                     yield "ticked";
                 }
                 case FLOW -> {
                     level.flow(c.target, c.steps, options.untick);
+                    yield "ticked";
+                }
+                case RANDOM -> {
+                    level.randomTick(c.target);
+                    yield "ticked";
+                }
+                case CHUNK -> {
+                    level.tickChunk(c.target, c.speed, options.unrandom);
                     yield "ticked";
                 }
                 case ITEM -> resultName(actor.gameMode.useItem(actor, level, actor.getItemInHand(c.hand), c.hand));
@@ -3871,6 +4073,7 @@ public final class BlockOracle {
             written++;
             line.setLength(0);
             line.append("{\"type\":\"case\",\"id\":").append(c.id);
+            line.append(",\"seed\":").append(caseSeed(c));
             line.append(",\"block\":\"").append(id(c.subject)).append('"');
             line.append(",\"class\":\"").append(className(c.subject)).append('"');
             line.append(",\"scene\":");
@@ -3910,6 +4113,9 @@ public final class BlockOracle {
             }
             if (c.kind == Kind.FLOW) {
                 line.append(",\"steps\":").append(c.steps);
+            }
+            if (c.kind == Kind.CHUNK) {
+                line.append(",\"speed\":").append(c.speed);
             }
             writeActor(c);
             line.append(",\"settle\":").append(c.settle);
@@ -4068,16 +4274,16 @@ public final class BlockOracle {
             printMap("skip reasons", skipReasons);
             printMap("exceptions", exceptions);
             printRandomSites();
-            log.println("per class: place/use/destroy/tick/flow/item cases | changed | placed | skips");
+            log.println("per class: place/use/destroy/tick/flow/item/random/chunk cases | changed | placed | skips");
             stats.forEach(this::printClass);
             printZeroPlacements();
         }
 
-        /** 一次运行里的调用点全部算上，所以音调这种无害的调用点也可能出现在“改变结果”一列，要和“没有影响”一列对照着看。 */
+        /** 第一列是玩家的随机源改变了结果、只能排除的题，第二列是写出来比较的题（世界的随机源直接比较）。 */
         private void printRandomSites() {
             Set<String> sites = new TreeSet<>(decisiveRandom.keySet());
             sites.addAll(cosmeticRandom.keySet());
-            log.println("random sites: cases where the outcome changed | cases where it did not");
+            log.println("random sites: skipped because the entity random changed the outcome | written cases");
             for (String site : sites) {
                 log.printf("  %7d %7d %s%n", decisiveRandom.getOrDefault(site, 0), cosmeticRandom.getOrDefault(site, 0), site);
             }

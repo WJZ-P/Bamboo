@@ -23,4 +23,8 @@ export const PixelInput = styled.input`
   &[aria-invalid="true"] {
     border-color: ${({ theme }) => theme.color.redstone.light};
   }
+
+  &:disabled {
+    opacity: 0.5;
+  }
 `;

@@ -3,12 +3,13 @@
 use std::collections::{HashMap, HashSet};
 
 use mc_bamboo_core::{
-    BlockPos, LightLayer,
+    BlockPos, ChunkPos, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
 
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
+    random::LevelRandom,
     shape::Aabb,
     state::BlockState,
 };
@@ -32,6 +33,16 @@ pub trait Level {
 
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
+
+    /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
+    fn random(&self) -> &LevelRandom;
+
+    /// `LevelChunkSection.isRandomlyTicking`：这个区块里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段里
+    /// 有会随机刻的方块或者流体，也就是有状态的 `is_randomly_ticking` 或者 `is_fluid_randomly_ticking` 为真。
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool;
+
+    /// `ChunkMap.anyPlayerCloseEnoughTo`：有不是旁观者的玩家，脚到这一格最小的角不到 `max_distance` 格。
+    fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool;
 
     /// `getBrightness(layer, pos)`：这一格的天空光或者方块光，0 到 15。
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32;
@@ -158,6 +169,8 @@ pub enum Effect {
     /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
     /// 物品栏里没有 `item` 时放一个进去。
     FilledBucket { item: i32 },
+    /// `levelEvent(1505, pos, 15)`：骨粉起作用的粒子，发给附近所有人。
+    BoneMealUsed { pos: BlockPos },
     /// 告示牌的内容变了，`SignBlockEntity.markUpdated` 里的 `sendBlockUpdated`：
     /// 方块状态没变，但要把方块和方块实体数据重新发给追踪这个区块的玩家。
     SignChanged { pos: BlockPos },

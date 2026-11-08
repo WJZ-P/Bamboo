@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 
 use mc_bamboo_protocol::{
-    packet::play::{GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, SystemChat},
+    packet::{
+        play::{GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, SystemChat},
+        profile::ProfileProperty,
+    },
     text::{Color, Component},
 };
 use uuid::Uuid;
@@ -24,6 +27,8 @@ pub(crate) struct GameTime(pub(crate) i64);
 pub(crate) struct RosterEntry {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
+    /// 皮肤等属性。名单上的人都要带着，别人才能看到真实皮肤。
+    pub(crate) properties: Vec<ProfileProperty>,
     pub(crate) game_mode: GameMode,
     /// 毫秒。
     pub(crate) latency: i32,
@@ -35,6 +40,7 @@ impl RosterEntry {
         PlayerInfoEntry {
             uuid: self.uuid,
             name: &self.name,
+            properties: &self.properties,
             game_mode: self.game_mode,
             listed: true,
             latency: self.latency,
@@ -153,6 +159,7 @@ mod tests {
         RosterEntry {
             uuid: STEVE_UUID,
             name: "Steve".to_owned(),
+            properties: Vec::new(),
             game_mode: GameMode::Creative,
             latency: 42,
             show_hat: true,

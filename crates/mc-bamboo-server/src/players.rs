@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicI32, Ordering},
 };
 
+use mc_bamboo_protocol::packet::profile::ProfileProperty;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 use tracing::info;
 use uuid::Uuid;
@@ -66,6 +67,8 @@ pub(crate) struct PlayerSession {
     signals: SessionSignals,
     pub(crate) name: String,
     pub(crate) uuid: Uuid,
+    /// 代理转发的皮肤等属性。离线模式没有属性。
+    pub(crate) properties: Vec<ProfileProperty>,
     pub(crate) entity_id: i32,
 }
 
@@ -78,6 +81,7 @@ impl PlayerSession {
         shared: &Arc<Shared>,
         name: &str,
         uuid: Uuid,
+        properties: Vec<ProfileProperty>,
     ) -> Result<Self, JoinRefusal> {
         let player = OnlinePlayer {
             info: PlayerInfo {
@@ -104,6 +108,7 @@ impl PlayerSession {
             signals: player.signals(),
             name: name.to_owned(),
             uuid,
+            properties,
             entity_id: NEXT_ENTITY_ID.fetch_add(1, Ordering::Relaxed),
         })
     }

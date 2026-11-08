@@ -210,6 +210,7 @@ impl RequestReader<'_> {
             id: self.player,
             uuid: session.uuid,
             name: session.name.clone(),
+            properties: session.properties.clone(),
             client,
             sink: Box::new(outbound.clone()),
         };

@@ -115,8 +115,8 @@ fn updated_state(
 
 /// `createTopperWithSideChance`：上面一格要长出的苔毯，长不出来时是空气。
 ///
-/// 官方每一侧抛一次硬币。第 1 章说随机分支取一个确定的值，这里和骨粉一样全部保留。
-fn topper(world: &World, pos: BlockPos) -> BlockState {
+/// 放下时每个有面的一侧抛一次硬币，反面就去掉；骨粉全部保留，`flip_coins` 是假。
+fn topper(world: &World, pos: BlockPos, flip_coins: bool) -> BlockState {
     let above = pos.above();
     let previous = world.block_state(above);
     let carpet_above = previous.is(blocks::PALE_MOSS_CARPET);
@@ -129,7 +129,13 @@ fn topper(world: &World, pos: BlockPos) -> BlockState {
         return BlockState::AIR;
     }
     let bare = BlockState(blocks::PALE_MOSS_CARPET).with(BOTTOM, false);
-    let topper = updated_state(bare, world, above, true);
+    let mut topper = updated_state(bare, world, above, true);
+    for side in Direction::HORIZONTAL {
+        let property = side_property(side);
+        if topper.get(property) != WallSide::None && flip_coins && !world.random().next_boolean() {
+            topper = topper.with(property, WallSide::None);
+        }
+    }
     if has_faces(topper) && topper != previous {
         topper
     } else {
@@ -182,7 +188,19 @@ impl Behaviour for MossyCarpet {
     }
 
     fn set_placed_by(&self, _state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
-        let topper = topper(world, pos);
+        let topper = topper(world, pos, true);
+        if !topper.is_air() {
+            world.set_block_and_update(pos.above(), topper);
+        }
+    }
+
+    /// 只有底下那层能用骨粉：上面能长出苔毯。
+    fn is_valid_bonemeal_target(&self, state: BlockState, world: &World, pos: BlockPos) -> bool {
+        state.get(BOTTOM) && !topper(world, pos, false).is_air()
+    }
+
+    fn perform_bonemeal(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
+        let topper = topper(world, pos, false);
         if !topper.is_air() {
             world.set_block_and_update(pos.above(), topper);
         }
@@ -208,9 +226,9 @@ mod tests {
         assert!(level.get(FLOOR.above()).is_air());
     }
 
-    /// 官方的硬币 oracle 比不了，这里固定下来：贴着墙时上面一格总是长出苔毯。
+    /// 贴着墙的一侧抛硬币，测试世界的种子 0 第一次抛出正面，上面一格长出苔毯。
     #[test]
-    fn moss_carpet_always_grows_up_a_wall() {
+    fn moss_carpet_grows_up_a_wall_when_the_coin_says_so() {
         let mut level = level_with_floor();
         let carpet = FLOOR.above();
         level.set(carpet.west(), BlockState(blocks::STONE));

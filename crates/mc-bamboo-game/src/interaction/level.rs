@@ -3,10 +3,10 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockEntities, BlockEvents, BlockState, Level, RedstoneMemory,
+    Aabb, BlockEntities, BlockEvents, BlockState, Level, LevelRandom, RedstoneMemory,
     shape::{self, BooleanOp},
 };
-use mc_bamboo_core::{BlockPos, LightLayer, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::blocks;
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
@@ -18,6 +18,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
+    pub(crate) random: &'a LevelRandom,
     pub(crate) redstone: &'a mut RedstoneMemory,
     pub(crate) block_entities: &'a mut BlockEntities,
     pub(crate) block_events: &'a mut BlockEvents,
@@ -52,6 +53,22 @@ impl Level for RegionLevel<'_> {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn random(&self) -> &LevelRandom {
+        self.random
+    }
+
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.chunks.is_randomly_ticking_section(chunk, section_y)
+    }
+
+    /// 这个世界只有创造模式，没有旁观者。
+    fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool {
+        let corner = pos.corner();
+        self.players
+            .values()
+            .any(|player| player.position.distance_to_sqr(corner).sqrt() < f64::from(max_distance))
     }
 
     /// 读的是上一轮光照算完时的结果，和官方一样：这次操作改的方块要等到下一轮才影响光照。

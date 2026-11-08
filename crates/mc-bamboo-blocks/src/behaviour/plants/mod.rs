@@ -3,8 +3,8 @@
 //!
 //! 一个文件放一组官方类，文件头写着里面有哪些类。这里只有分派和几个类共用的小函数。
 //!
-//! 这里不做生长：官方的 `randomTick` 和骨粉都不在范围里。官方取随机值的地方，
-//! 比如海带和藤蔓放下时的 `age`、珊瑚死亡的延迟，都取一个固定值，oracle 把这些题排除了。
+//! 生长都在随机刻和骨粉里，随机数和官方逐位相同。要世界生成的地物才能长的不做：树苗长成树、
+//! 巨型蘑菇和菌类、骨粉催熟草方块和杜鹃，见 [`vegetation`] 和 oracle 的排除表。
 
 mod bamboo;
 mod cactus;
@@ -14,6 +14,7 @@ mod coral;
 mod crop;
 mod double_plant;
 mod dripleaf;
+mod grass;
 mod growing_plant;
 mod hanging_roots;
 mod multiface;
@@ -31,15 +32,19 @@ use self::{
     chorus::{ChorusFlower, ChorusPlant},
     cocoa::Cocoa,
     coral::{BaseCoralPlant, BaseCoralWallFan, Coral, CoralPlant, CoralWallFan},
-    crop::{AttachedStem, Crop},
+    crop::{AttachedStem, Crop, Stem},
     double_plant::{DoublePlant, PitcherCrop, SmallDripleaf, TallSeagrass},
     dripleaf::{BigDripleaf, BigDripleafStem},
+    grass::Grass,
     growing_plant::{GrowingPlantBody, GrowingPlantHead},
     hanging_roots::HangingRoots,
     multiface::Multiface,
     segmented::{FlowerBed, LeafLitter},
     sugar_cane::SugarCane,
-    vegetation::{MangrovePropagule, Mushroom, Seagrass, SweetBerryBush, Vegetation},
+    vegetation::{
+        MangrovePropagule, Mushroom, NetherFungus, NetherWart, Sapling, Seagrass, SweetBerryBush,
+        Vegetation,
+    },
     vine::Vine,
 };
 use super::Behaviour;
@@ -55,23 +60,23 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
     match class {
         C::AttachedStemBlock => Some(&AttachedStem),
         C::AzaleaBlock
-        | C::BushBlock
         | C::CactusFlowerBlock
         | C::DryVegetationBlock
         | C::EyeblossomBlock
-        | C::FireflyBushBlock
         | C::FlowerBlock
         | C::LilyPadBlock
-        | C::NetherFungusBlock
         | C::NetherRootsBlock
         | C::NetherSproutsBlock
-        | C::NetherWartBlock
-        | C::SaplingBlock
-        | C::ShortDryGrassBlock
-        | C::StemBlock
-        | C::TallDryGrassBlock
-        | C::TallGrassBlock
         | C::WitherRoseBlock => Some(&Vegetation),
+        C::BushBlock
+        | C::FireflyBushBlock
+        | C::ShortDryGrassBlock
+        | C::TallDryGrassBlock
+        | C::TallGrassBlock => Some(&Grass),
+        C::NetherFungusBlock => Some(&NetherFungus),
+        C::NetherWartBlock => Some(&NetherWart),
+        C::SaplingBlock => Some(&Sapling),
+        C::StemBlock => Some(&Stem),
         C::BambooSaplingBlock => Some(&BambooSapling),
         C::BambooStalkBlock => Some(&BambooStalk),
         C::BaseCoralFanBlock | C::BaseCoralPlantBlock => Some(&BaseCoralPlant),
@@ -120,6 +125,29 @@ fn schedule_break_if_unsupported(state: BlockState, world: &mut World, pos: Bloc
     if !state.can_survive(world, pos) {
         world.schedule_tick(pos, state.block(), 1);
     }
+}
+
+/// 蘑菇和藤蔓蔓延前数的范围：水平 4 格，上下 1 格。
+const SPREAD_SEARCH_RADIUS: i32 = 4;
+/// 范围里同种方块（算上自己）多于这个数就不蔓延，`atMostMatched(4)`。
+const SPREAD_MAX_NEIGHBOURS: i32 = 4;
+
+/// `MushroomBlock.canSpread` 和 `VineBlock.canSpread`：周围 9×3×9 的范围里同种方块不多。
+fn can_spread(state: BlockState, world: &World, pos: BlockPos) -> bool {
+    let mut found = 0;
+    for x in -SPREAD_SEARCH_RADIUS..=SPREAD_SEARCH_RADIUS {
+        for y in -1..=1 {
+            for z in -SPREAD_SEARCH_RADIUS..=SPREAD_SEARCH_RADIUS {
+                if world.block_state(pos.offset(x, y, z)).is_same_block(state) {
+                    found += 1;
+                    if found > SPREAD_MAX_NEIGHBOURS {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// `tick` 里“放不住就破坏”这一段。

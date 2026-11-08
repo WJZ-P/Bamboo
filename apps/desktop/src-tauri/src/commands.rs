@@ -46,6 +46,12 @@ pub fn save_settings(app: AppHandle, settings: ServerSettings) -> Result<(), Str
     settings::save(&app, &settings)
 }
 
+/// 出厂设置。界面用它显示每一项的默认值，也用来恢复默认。
+#[tauri::command]
+pub fn default_settings() -> ServerSettings {
+    ServerSettings::default()
+}
+
 #[tauri::command]
 pub fn recent_logs(logs: State<'_, Arc<LogHub>>) -> Vec<LogLine> {
     logs.recent()

@@ -725,7 +725,7 @@ mod tests {
                 let mut stale_rounds = 0;
                 for _ in 0..ROUNDS {
                     let session = runtime
-                        .block_on(PlayerSession::join(&shared, name, uuid))
+                        .block_on(PlayerSession::join(&shared, name, uuid, Vec::new()))
                         .unwrap();
                     barrier.wait();
                     drop(session);

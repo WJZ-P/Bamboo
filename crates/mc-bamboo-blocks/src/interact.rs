@@ -171,7 +171,7 @@ fn run_block_ticks(world: &mut World) {
     }
 }
 
-fn finish(world: World, result: InteractionResult) -> Outcome {
+pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
     Outcome {
         result,
         effects: world.into_effects(),

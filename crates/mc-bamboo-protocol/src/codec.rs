@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 /// 32 位 VarInt 编码后的最大长度。
 pub const MAX_VARINT_LEN: usize = 5;
+/// 64 位 VarLong 编码后的最大长度。
+pub const MAX_VARLONG_LEN: usize = 10;
 
 /// 数据包解码失败的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -13,6 +15,8 @@ pub enum DecodeError {
     UnexpectedEnd,
     #[error("VarInt is longer than 5 bytes")]
     VarIntTooLong,
+    #[error("VarLong is longer than 10 bytes")]
+    VarLongTooLong,
     #[error("string has invalid length {0}")]
     InvalidStringLength(i32),
     #[error("string is longer than {max_chars} characters")]
@@ -149,6 +153,18 @@ impl<'a> Reader<'a> {
         let (value, len) = decode_varint(self.input)?;
         self.input = &self.input[len..];
         Ok(value)
+    }
+
+    pub fn varlong(&mut self) -> Result<i64, DecodeError> {
+        let mut value = 0u64;
+        for index in 0..MAX_VARLONG_LEN {
+            let byte = self.u8()?;
+            value |= u64::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                return Ok(value as i64);
+            }
+        }
+        Err(DecodeError::VarLongTooLong)
     }
 
     pub fn u8(&mut self) -> Result<u8, DecodeError> {
@@ -318,7 +334,22 @@ mod tests {
             let mut out = Vec::new();
             write_varlong(&mut out, value);
             assert_eq!(out, encoded, "encoding {value}");
+            let mut reader = Reader::new(encoded);
+            assert_eq!(reader.varlong(), Ok(value), "decoding {value}");
+            assert_eq!(reader.finish(), Ok(()));
         }
+    }
+
+    #[test]
+    fn varlong_rejects_truncated_and_overlong_input() {
+        assert_eq!(
+            Reader::new(&[0x80, 0x80]).varlong(),
+            Err(DecodeError::UnexpectedEnd)
+        );
+        assert_eq!(
+            Reader::new(&[0x80; MAX_VARLONG_LEN + 1]).varlong(),
+            Err(DecodeError::VarLongTooLong)
+        );
     }
 
     #[test]
