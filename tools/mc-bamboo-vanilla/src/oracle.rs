@@ -1240,9 +1240,9 @@ fn dispenser_bonemeals_a_feature(case: &Case) -> bool {
     })
 }
 
-/// 这题的世界随机源要和官方对上：发射器真的动过，而且不是倒出生物的桶。
+/// 这题的世界随机源要和官方对上：主角是发射器，而且它真的动过。
 ///
-/// This case compares `level.random`: a dispenser actually fired, and it did not pour a mob bucket.
+/// This case compares `level.random`: the subject is a dispenser, and it actually fired.
 fn compares_dispenser_seed(case: &Case) -> bool {
     // 只比这题的主角就是发射器的情况。场景里顺便被带动的发射器不拿来比种子，
     // 旁边的门一类方块可能多取用不上的随机数。
@@ -1253,24 +1253,6 @@ fn compares_dispenser_seed(case: &Case) -> bool {
         && dispenser_positions(case)
             .iter()
             .any(|&pos| dispenser_shot_at(case, pos))
-        && !dispenser_poured_mob_bucket(case)
-}
-
-fn dispenser_poured_mob_bucket(case: &Case) -> bool {
-    const MOB_BUCKETS: &[&str] = &[
-        "minecraft:salmon_bucket",
-        "minecraft:cod_bucket",
-        "minecraft:pufferfish_bucket",
-        "minecraft:tropical_fish_bucket",
-        "minecraft:axolotl_bucket",
-        "minecraft:tadpole_bucket",
-        "minecraft:sulfur_cube_bucket",
-    ];
-    dispenser_positions(case).iter().any(|&pos| {
-        MOB_BUCKETS
-            .iter()
-            .any(|item| dispenser_lost(case, pos, item))
-    })
 }
 
 /// `settle` 里跑过不在范围里的计划刻：官方的世界已经被它改过，这道题比不了。

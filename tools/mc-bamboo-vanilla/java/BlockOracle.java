@@ -745,8 +745,17 @@ public final class BlockOracle {
     }
 
     /**
-     * 战利品表都是空的，世界里没有掉落物，和 Bamboo 一样。掉落时官方每一组物品都从世界的随机源取 5 个数
-     * （位置的偏移和速度），组数又取决于战利品表的随机序列，留着它们，后面的随机数就和 Bamboo 对不上了。
+     * 战利品表都是空的，世界里没有掉落物，和 Bamboo 一样。掉落时官方每一组物品都从世界的随机源取位置偏移，
+     * 组数又取决于战利品表的随机序列，留着它们，后面的随机数就和 Bamboo 对不上了。
+     *
+     * <p>{@code harvest/beehive} 例外：固定掉一组蜜脾，接着 {@code Block.popResource} 从 {@code level.random}
+     * 取 3 次 {@code Mth.nextDouble}。发射器收蜂巢要和这 3 次对上，所以这张表用真的。
+     *
+     * <p>Every other loot table stays empty, matching Bamboo's lack of drops. Each dropped stack would
+     * draw a position offset from the world random, and the stack count depends on the loot sequence.
+     * {@code harvest/beehive} always drops one honeycomb stack, then {@code Block.popResource} draws
+     * three {@code Mth.nextDouble} values from {@code level.random}. A dispenser shearing a hive has to
+     * match those three, so that table is the real one.
      */
     private static final class NoLoot extends ReloadableServerRegistries.Holder {
         NoLoot(HolderLookup.Provider registries) {
@@ -755,6 +764,9 @@ public final class BlockOracle {
 
         @Override
         public LootTable getLootTable(ResourceKey<LootTable> id) {
+            if ("harvest/beehive".equals(id.identifier().getPath())) {
+                return super.getLootTable(id);
+            }
             return LootTable.EMPTY;
         }
     }
@@ -2750,9 +2762,21 @@ public final class BlockOracle {
         private static final double STANDING_EYE_HEIGHT = 1.62;
         private static final double CROUCHING_EYE_HEIGHT = 1.27;
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
-        /** 随机填进场景容器的物品。剑用来试堆叠上限 1。 */
+        /** 随机填进场景容器的物品。剑用来试堆叠上限 1。后面那些是发射器不生成实体的行为，
+         * 放进发射器才会被红石触发并和官方比较。箭、船、矿车、刷怪蛋、盔甲架和 TNT 不放进来，
+         * 那些题会整题排除。
+         *
+         * Items placed into scene containers at random. The sword checks a stack limit of 1.
+         * The rest are dispenser behaviours that do not spawn an entity, so a powered dispenser
+         * actually fires them and the oracle compares the shot. Arrows, boats, minecarts, spawn
+         * eggs, armour stands and TNT are left out. Those cases are excluded wholesale.
+         */
         private static final List<Item> CONTAINER_ITEMS = List.of(Items.STONE, Items.DIRT, Items.OAK_LOG, Items.BREAD,
-                Items.COBBLESTONE, Items.IRON_INGOT, Items.IRON_SWORD);
+                Items.COBBLESTONE, Items.IRON_INGOT, Items.IRON_SWORD, Items.WATER_BUCKET, Items.LAVA_BUCKET,
+                Items.POWDER_SNOW_BUCKET, Items.BUCKET, Items.BONE_MEAL, Items.FLINT_AND_STEEL, Items.SHULKER_BOX,
+                Items.CARVED_PUMPKIN, Items.WITHER_SKELETON_SKULL, Items.GLASS_BOTTLE, Items.POTION, Items.HONEYCOMB,
+                Items.GLOWSTONE, Items.SHEARS, Items.BRUSH, Items.LEATHER_HELMET, Items.ELYTRA, Items.SKELETON_SKULL,
+                Items.COD_BUCKET);
 
         private final Catalog catalog;
         private final Supports supports;

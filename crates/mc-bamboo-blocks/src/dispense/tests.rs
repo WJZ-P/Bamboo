@@ -113,6 +113,20 @@ fn throw_draws(random: &LegacyRandom) {
     }
 }
 
+/// `EntityType.create` 的朝向，加上 `Mob.finalizeSpawn` 的 `triangle` 和左手。
+fn mob_spawn_draws(random: &LegacyRandom) {
+    let _ = random.next_float();
+    let _ = random.triangle(0.0, 0.114_850_000_000_000_01);
+    let _ = random.next_float();
+}
+
+/// `Block.popResource` 的三次位置偏移。
+fn pop_resource_offset(random: &LegacyRandom) {
+    let _ = random.next_double();
+    let _ = random.next_double();
+    let _ = random.next_double();
+}
+
 fn assert_pair(events: &[(i32, BlockPos, i32)], sound: i32, facing: Direction) {
     let smoke = facing.id();
     assert!(
@@ -251,7 +265,23 @@ fn a_fish_bucket_pours_water_and_skips_the_mob() {
     let shot = fire_id(&mut TestLevel::new(), Direction::Up, items::SALMON_BUCKET);
     assert!(shot.front.is(blocks::WATER));
     assert_eq!(shot.left, ItemStack::new(items::BUCKET, 1));
-    assert_eq!(shot.seed, seed_after(slot_roll));
+    assert_eq!(
+        shot.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            mob_spawn_draws(random);
+        })
+    );
+
+    let axolotl = fire_id(&mut TestLevel::new(), Direction::Up, items::AXOLOTL_BUCKET);
+    assert!(axolotl.front.is(blocks::WATER));
+    assert_eq!(
+        axolotl.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            let _ = random.next_float();
+        })
+    );
 }
 
 #[test]
@@ -264,7 +294,13 @@ fn a_sulfur_cube_bucket_plays_the_empty_sound_and_places_nothing() {
     assert!(shot.front.is_air());
     assert_eq!(shot.left, ItemStack::new(items::BUCKET, 1));
     assert!(!sound_ids(&shot.effects).is_empty());
-    assert_eq!(shot.seed, seed_after(slot_roll));
+    assert_eq!(
+        shot.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            mob_spawn_draws(random);
+        })
+    );
 }
 
 #[test]
@@ -691,7 +727,7 @@ fn glowstone_charges_an_anchor_until_it_is_full() {
 }
 
 #[test]
-fn shears_harvest_a_full_hive_without_touching_level_random() {
+fn shears_harvest_a_full_hive_and_draw_the_drop_offset() {
     let mut level = TestLevel::new();
     level.set(
         POS.relative(Direction::East),
@@ -702,7 +738,13 @@ fn shears_harvest_a_full_hive_without_touching_level_random() {
     assert_eq!(damage_of(&hive.left), 1);
     assert!(!sound_ids(&hive.effects).is_empty());
     assert_pair(&level_events(&hive.effects), 1000, Direction::East);
-    assert_eq!(hive.seed, seed_after(slot_roll));
+    assert_eq!(
+        hive.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            pop_resource_offset(random);
+        })
+    );
 
     let mut level = TestLevel::new();
     level.set(POS.relative(Direction::East), BlockState(blocks::STONE));
