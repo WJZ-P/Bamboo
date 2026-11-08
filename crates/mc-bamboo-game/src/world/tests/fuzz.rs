@@ -23,7 +23,7 @@ use mc_bamboo_protocol::{
 use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, chunk::Chunk};
 use uuid::Uuid;
 
-use super::{Client, Frame, Harness, chunk_position};
+use super::{Client, Frame, Harness, chunk_position, section_blocks};
 use crate::{
     chunk_tracking::ChunkView,
     inbound::{Inbound, PlayerId},
@@ -213,7 +213,7 @@ struct Model {
     entities: BTreeMap<i32, Remote>,
     /// 自己的实体。只有元数据有意义，物品栏是客户端自己的。
     own: Remote,
-    /// 值是收到时的区块内容，`None` 表示是模板。再加上之后的 `block_update`。
+    /// 值是收到时的区块内容，`None` 表示是模板。再加上之后的方块更新。
     chunks: BTreeMap<ChunkPos, Option<Chunk>>,
     updates: BTreeMap<ChunkPos, Vec<(BlockPos, u32)>>,
     center: Option<ChunkPos>,
@@ -402,14 +402,27 @@ impl Model {
                 self.updates.remove(&pos);
             }
             clientbound::BLOCK_UPDATE => {
-                assert_eq!(self.acknowledged, None, "{}: update after ack", self.name);
                 let pos = reader.block_pos().unwrap();
                 let state = reader.varint().unwrap();
-                assert!((0..blocks::TOTAL_STATES as i32).contains(&state));
-                // 官方客户端在没加载的区块和世界外写方块时什么也不做。
-                if self.chunks.contains_key(&pos.chunk()) && (MIN_Y..WORLD_TOP).contains(&pos.y) {
-                    let list = self.updates.entry(pos.chunk()).or_default();
-                    list.push((pos, state as u32));
+                self.record_update(pos, state as u32);
+            }
+            clientbound::SECTION_BLOCKS_UPDATE => {
+                let blocks = section_blocks(frame);
+                let distinct: BTreeSet<BlockPos> = blocks.iter().map(|&(pos, _)| pos).collect();
+                // 只改了一格的段发 `block_update`，一段里的格子不重复。
+                assert!(
+                    blocks.len() > 1,
+                    "{}: section update of one block",
+                    self.name
+                );
+                assert_eq!(
+                    distinct.len(),
+                    blocks.len(),
+                    "{}: repeated block",
+                    self.name
+                );
+                for (pos, state) in blocks {
+                    self.record_update(pos, state);
                 }
             }
             clientbound::BLOCK_CHANGED_ACK => {
@@ -418,6 +431,18 @@ impl Model {
             }
             clientbound::CHUNK_BATCH_FINISHED => self.finished_batches += 1,
             _ => {}
+        }
+    }
+
+    /// 一格方块更新。官方客户端在没加载的区块和世界外写方块时什么也不做。
+    fn record_update(&mut self, pos: BlockPos, state: u32) {
+        assert_eq!(self.acknowledged, None, "{}: update after ack", self.name);
+        assert!(state < blocks::TOTAL_STATES, "{}: state {state}", self.name);
+        if self.chunks.contains_key(&pos.chunk()) && (MIN_Y..WORLD_TOP).contains(&pos.y) {
+            self.updates
+                .entry(pos.chunk())
+                .or_default()
+                .push((pos, state));
         }
     }
 

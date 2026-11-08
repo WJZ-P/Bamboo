@@ -15,10 +15,10 @@ use common::{
         DROP_ALL_ITEMS, DROP_ITEM, Disconnect, EAST, ForgetLevelChunk, INPUT_SHIFT,
         LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND, MAX_Y, MIN_Y, NORTH, OFF_HAND, Pos,
         RELEASE_USE_ITEM, SLOT_MAINHAND, SLOT_OFFHAND, SOUTH, START_DESTROY_BLOCK,
-        SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK, SetEquipment, SetHeldSlot, Stack,
-        SwingAnimation, SystemChat, UP, face_center, pick_item_from_block, plain_stack_bytes,
-        player_abilities, player_action, player_input, set_carried_item, set_creative_mode_slot,
-        set_creative_mode_slot_raw, use_item, use_item_on,
+        SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK, SectionBlocksUpdate, SetEquipment,
+        SetHeldSlot, Stack, SwingAnimation, SystemChat, UP, face_center, pick_item_from_block,
+        plain_stack_bytes, player_abilities, player_action, player_input, set_carried_item,
+        set_creative_mode_slot, set_creative_mode_slot_raw, use_item, use_item_on,
     },
 };
 use mc_bamboo_data::{
@@ -176,6 +176,11 @@ async fn the_ack_follows_the_updates_and_there_is_at_most_one_per_tick() {
     for frame in &alice.frames()[mark..] {
         if frame.is::<BlockUpdate>() {
             updated.insert(frame.decode::<BlockUpdate>().pos);
+        }
+        // 同一 tick 在同一段里破坏了几格时，这几格一起发。
+        if frame.is::<SectionBlocksUpdate>() {
+            let packet = frame.decode::<SectionBlocksUpdate>();
+            updated.extend(packet.blocks.iter().map(|&(pos, _)| pos));
         }
         if frame.is::<BlockChangedAck>() {
             let sequence = frame.decode::<BlockChangedAck>().sequence;
@@ -516,8 +521,10 @@ async fn a_torch_goes_with_its_support_and_everyone_gets_the_event() {
     assert_eq!(alice.since::<LevelEvent>(alice_mark), [torch]);
     bob.expect::<LevelEvent>(|packet| packet.pos == SPOT).await;
     bob.expect::<LevelEvent>(|packet| *packet == torch).await;
-    bob.expect::<BlockUpdate>(|packet| *packet == update(ABOVE_SPOT, blocks::AIR))
-        .await;
+    // 草方块和火把在同一段里，一个 `section_blocks_update` 带上两格。
+    let mut gone = bob.expect::<SectionBlocksUpdate>(|_| true).await.blocks;
+    gone.sort_unstable();
+    assert_eq!(gone, [(SPOT, blocks::AIR), (ABOVE_SPOT, blocks::AIR)]);
     assert_eq!(world_state(&server, "Late", ABOVE_SPOT).await, blocks::AIR);
 }
 
