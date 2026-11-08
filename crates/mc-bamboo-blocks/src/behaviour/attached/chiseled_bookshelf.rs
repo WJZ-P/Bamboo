@@ -1,10 +1,17 @@
 //! `ChiseledBookShelfBlock`。
 //!
-//! 书在方块实体里，但是状态上的 `slot_N_occupied` 是它的镜像，这里只改状态。
-//! 比较器读的是最近放进或者拿出书的那一格，记在 [`RedstoneMemory`](crate::RedstoneMemory) 里。
+//! 书在方块实体的物品栏里。`setItem` 会改 `slot_N_occupied`，并记下最近动过的那一格。
+//! 比较器读的是那一格的序号加一，记在 [`RedstoneMemory`](crate::RedstoneMemory) 里。
+//!
+//! `ChiseledBookShelfBlock`.
+//!
+//! Books live in the block entity inventory. `setItem` updates `slot_N_occupied` and remembers
+//! the slot. The comparator reads that slot's index plus one, stored on
+//! [`RedstoneMemory`](crate::RedstoneMemory).
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use super::slot_container::hit_slot;
 use crate::{
@@ -12,6 +19,7 @@ use crate::{
         Behaviour,
         common::{facing_the_player, update_neighbours_after_destroy},
     },
+    block_container::set_bookshelf_slot,
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     state::{
@@ -44,14 +52,6 @@ fn clicked_slot(state: BlockState, ctx: &UseContext) -> Option<usize> {
     hit_slot(&ctx.hit, facing, ROWS, COLUMNS)
 }
 
-/// `ChiseledBookShelfBlockEntity.updateState`：先记下动的是哪一格，再把状态换成书的镜像。
-fn update_state(state: BlockState, world: &mut World, pos: BlockPos, slot: usize, occupied: bool) {
-    world
-        .redstone_memory_mut()
-        .set_last_bookshelf_slot(pos, slot);
-    world.set_block_and_update(pos, state.with(SLOT_OCCUPIED[slot], occupied));
-}
-
 impl Behaviour for ChiseledBookShelf {
     fn state_for_placement(
         &self,
@@ -81,7 +81,7 @@ impl Behaviour for ChiseledBookShelf {
         if state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        update_state(state, world, ctx.clicked_pos(), slot, true);
+        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::new(ctx.item, 1));
         InteractionResult::Success
     }
 
@@ -97,7 +97,7 @@ impl Behaviour for ChiseledBookShelf {
         if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        update_state(state, world, ctx.clicked_pos(), slot, false);
+        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::empty());
         InteractionResult::Success
     }
 

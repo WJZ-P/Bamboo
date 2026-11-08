@@ -904,6 +904,14 @@ fn menu_shape(
                 kind.title(),
             )
         }
+        // 雕纹书架、唱片机和陶罐官方没有菜单。合成器的 `CrafterMenu` 这次不打开。
+        //
+        // Chiseled bookshelves, jukeboxes and pots have no vanilla menu. The crafter's
+        // `CrafterMenu` is not opened in this change.
+        ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => return None,
         _ => (
             Target::Single(pos),
             kind.slots(),

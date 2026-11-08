@@ -49,6 +49,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
     write_file(output_dir, "items.rs", &items)?;
+    write_file(output_dir, "jukebox_songs.rs", &jukebox_songs_file(data))?;
     write_file(output_dir, "recipes.rs", &recipes)?;
     write_file(output_dir, "light.rs", &light)?;
     write_file(output_dir, "states.rs", &states)?;
@@ -329,6 +330,59 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
         .map_err(|error| format!("无法写入 {}：{error}", path.display()))
 }
 
+fn jukebox_songs_file(data: &VersionData) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一张唱片：长度（秒）和比较器输出。下标是 `minecraft:jukebox_song` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "pub struct JukeboxSong {{");
+    let _ = writeln!(out, "    pub length_in_seconds: f32,");
+    let _ = writeln!(out, "    pub comparator_output: i32,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// `JukeboxSongs.bootstrap`，按注册表 ID 排列，不是按注册函数的调用顺序。"
+    );
+    let _ = writeln!(
+        out,
+        "pub static SONGS: [JukeboxSong; {}] = [",
+        data.jukebox_songs.len()
+    );
+    for song in &data.jukebox_songs {
+        let _ = writeln!(
+            out,
+            "    JukeboxSong {{ length_in_seconds: {}, comparator_output: {} }},",
+            float_literal(song.length),
+            song.output
+        );
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 按注册表 ID 取一首歌。ID 不在表里时是 `None`。");
+    let _ = writeln!(
+        out,
+        "pub fn get(id: i32) -> Option<&'static JukeboxSong> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    usize::try_from(id).ok().and_then(|id| SONGS.get(id))"
+    );
+    let _ = writeln!(out, "}}");
+    out
+}
+
+/// `f32` 的 `Display` 会把整数打成 `71`，生成的字面量要写成 `71.0`。
+fn float_literal(value: f32) -> String {
+    let text = value.to_string();
+    if text.contains('.') || text.contains('e') || text.contains('E') {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
 fn module_file() -> String {
     "pub mod block_classes;
 pub mod block_maps;
@@ -339,6 +393,7 @@ pub mod component_registries;
 pub mod heightmaps;
 pub mod item_components;
 pub mod items;
+pub mod jukebox_songs;
 pub mod light;
 pub mod packets;
 pub mod recipes;

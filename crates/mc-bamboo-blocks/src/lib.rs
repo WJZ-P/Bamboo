@@ -12,6 +12,7 @@
 //! [`World::raw_brightness`]。
 
 pub mod behaviour;
+mod block_container;
 pub mod block_entity;
 mod composter;
 pub mod container;

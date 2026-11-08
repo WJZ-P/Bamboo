@@ -6,6 +6,7 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
@@ -124,6 +125,36 @@ pub trait Level {
         let _ = (pos, f);
         false
     }
+
+    /// 雕纹书架、唱片机、饰纹陶罐和合成器的槽位表。没有这张表时不调用 `f`。
+    ///
+    /// Slot list for a chiseled bookshelf, jukebox, decorated pot or crafter. `f` is not called
+    /// when the list is absent.
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let _ = (pos, len, f);
+        false
+    }
+
+    /// 这一格容器现在的槽位。没有容器时是空的。
+    ///
+    /// The container slots at this position, or an empty list when there is no container.
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        let _ = pos;
+        Vec::new()
+    }
+
+    /// 删掉这一格的容器槽位。破坏唱片机时 `setTheItem(EMPTY)` 在通知邻居之前清空。
+    ///
+    /// Drop the container slots at this position. Breaking a jukebox runs `setTheItem(EMPTY)`
+    /// before neighbors are told.
+    fn clear_container(&mut self, pos: BlockPos) {
+        let _ = pos;
+    }
 }
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。
@@ -136,9 +167,18 @@ pub struct RedstoneMemory {
     comparator_outputs: HashMap<BlockPos, i32>,
     /// `ChiseledBookShelfBlockEntity.lastInteractedSlot`。没有记录的格子是 -1，也就是没动过。
     bookshelf_slots: HashMap<BlockPos, usize>,
-    /// `JukeboxBlockEntity` 的 `songPlayer.isPlaying()`。唱片的内容不在范围里，只记哪几格在放。
-    /// 世界生成时直接摆下的 `has_record=true` 唱机没有方块实体，也就没在放。
+    /// `JukeboxBlockEntity` 的 `songPlayer.isPlaying()`。唱片在容器槽位里。
+    /// 场景里直接摆下的 `has_record=true` 唱机没有经过 `setTheItem`，所以没在放。
+    ///
+    /// `JukeboxSongPlayer.isPlaying`. The disc lives in the container slot.
+    /// A scene jukebox placed with `has_record=true` never went through `setTheItem`, so it is
+    /// not playing.
     jukebox_playing: HashSet<BlockPos>,
+    /// `CrafterBlockEntity` 的禁用槽。位 `n` 为 1 表示第 `n` 格禁用。没有记录时全是 0。
+    ///
+    /// Disabled slots of a `CrafterBlockEntity`. Bit `n` set means slot `n` is disabled.
+    /// Missing positions are all enabled.
+    crafter_disabled: HashMap<BlockPos, u16>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
 }
@@ -178,11 +218,30 @@ impl RedstoneMemory {
         }
     }
 
+    /// `CrafterBlockEntity.isSlotDisabled` 的九个位。
+    ///
+    /// The nine bits behind `CrafterBlockEntity.isSlotDisabled`.
+    pub fn crafter_disabled(&self, pos: BlockPos) -> u16 {
+        self.crafter_disabled.get(&pos).copied().unwrap_or(0)
+    }
+
+    /// 写下合成器的禁用槽。全是 0 时不留记录。
+    ///
+    /// Store a crafter's disabled slots. An all-zero mask is not recorded.
+    pub fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
+        if mask == 0 {
+            self.crafter_disabled.remove(&pos);
+        } else {
+            self.crafter_disabled.insert(pos, mask);
+        }
+    }
+
     /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
     pub fn forget_block_entity(&mut self, pos: BlockPos) {
         self.comparator_outputs.remove(&pos);
         self.bookshelf_slots.remove(&pos);
         self.jukebox_playing.remove(&pos);
+        self.crafter_disabled.remove(&pos);
     }
 
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。

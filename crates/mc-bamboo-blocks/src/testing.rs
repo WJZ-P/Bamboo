@@ -68,6 +68,10 @@ impl TestLevel {
     pub(crate) fn set_container(&mut self, pos: BlockPos, slots: Vec<ItemStack>) {
         self.containers.insert(pos, slots);
     }
+
+    pub(crate) fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
+    }
 }
 
 impl Level for TestLevel {
@@ -181,6 +185,31 @@ impl Level for TestLevel {
         let mut container = Slots::new(slots);
         f(&mut container);
         true
+    }
+
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let slots = self
+            .containers
+            .entry(pos)
+            .or_insert_with(|| vec![ItemStack::empty(); len]);
+        if slots.len() != len {
+            *slots = vec![ItemStack::empty(); len];
+        }
+        f(slots);
+        true
+    }
+
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        self.containers.get(&pos).cloned().unwrap_or_default()
+    }
+
+    fn clear_container(&mut self, pos: BlockPos) {
+        self.containers.remove(&pos);
     }
 
     fn own_container_counts(&self, pos: BlockPos) -> Vec<i32> {

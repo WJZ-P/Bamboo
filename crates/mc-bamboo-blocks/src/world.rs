@@ -444,7 +444,29 @@ impl<'a> World<'a> {
         {
             return crate::composter::with_container(self, pos, f);
         }
+        if crate::block_container::is_block_container(self.block_state(pos)) {
+            return crate::block_container::with_container(self, pos, f);
+        }
         self.level.with_container(pos, f)
+    }
+
+    /// 这四种方块容器的槽位表，见 [`Level::with_slots`]。
+    ///
+    /// Slot list for those four block containers. See [`Level::with_slots`].
+    pub(crate) fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [mc_bamboo_protocol::item::ItemStack]),
+    ) -> bool {
+        self.level.with_slots(pos, len, f)
+    }
+
+    /// 这一格容器现在的槽位，见 [`Level::slots_at`]。
+    ///
+    /// The container slots at this position. See [`Level::slots_at`].
+    pub(crate) fn slots_at(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.slots_at(pos)
     }
 
     /// 比较器从这一格的容器读到的模拟信号，见 [`Level::container_signal`]。
@@ -873,6 +895,18 @@ impl<'a> World<'a> {
         // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
         // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
         let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
+        // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`（通知邻居），
+        // 再取两个 `nextFloat`，然后无条件再 `onSongChanged`。物品在第一次通知之前已经是空的。
+        //
+        // Breaking a jukebox runs `popOutTheItem` → `setTheItem(EMPTY)`: a playing song `stop`s
+        // (neighbors are told) before the two `nextFloat`s, then `onSongChanged` runs again.
+        // The item is already empty before the first notification.
+        let jukebox_count = dropped_counts
+            .as_ref()
+            .filter(|_| old.is_a(BlockAncestor::JukeboxBlock))
+            .map(|counts| counts.first().copied().unwrap_or(0))
+            .unwrap_or(0);
+        let jukebox_playing = jukebox_count > 0 && self.level.redstone().is_jukebox_playing(pos);
         if !self.level.write_block(pos, state, flags) {
             return None;
         }
@@ -888,10 +922,19 @@ impl<'a> World<'a> {
         if block_changed {
             self.level.redstone_mut().forget_block_entity(pos);
         }
+        if jukebox_count > 0 {
+            self.level.clear_container(pos);
+            if jukebox_playing {
+                crate::block_container::on_jukebox_song_changed(old, self, pos);
+            }
+        }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
         if let Some(counts) = dropped_counts {
             block_entity::pre_remove_side_effects(old, self, &counts);
+        }
+        if jukebox_count > 0 {
+            crate::block_container::on_jukebox_song_changed(old, self, pos);
         }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
