@@ -71,8 +71,57 @@ pub(crate) fn teleport(
         z,
         yaw: player.yaw,
         pitch: player.pitch,
+        relative: 0,
     };
     links.send(player.id, &packet);
+}
+
+/// `/tp` 的一次传送。包里相对轴传差值，绝对轴传落点，朝向按算好的值。
+///
+/// One `/tp`. Relative axes are deltas, absolute axes are the destination, and rotation is
+/// the value already computed for the packet.
+pub(crate) struct CommandTeleport {
+    pub absolute: Vec3,
+    pub packet_x: f64,
+    pub packet_y: f64,
+    pub packet_z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub packet_yaw: f32,
+    pub packet_pitch: f32,
+    pub relative: i32,
+}
+
+pub(crate) fn teleport_command(
+    player: &mut Player,
+    links: &mut Links,
+    grid: &mut PlayerGrid,
+    now: RegionTick,
+    motion: CommandTeleport,
+) {
+    let teleport_id = player.teleport.next_id();
+    player.teleport.sent_at = now;
+    player.teleport.awaiting_position = Some(motion.absolute);
+    player.set_position(grid, motion.absolute);
+    // 官方 `teleportSetPosition` 把算好的角度直接写上，不再包一层 `wrapDegrees`。
+    //
+    // Official `teleportSetPosition` stores the computed angles without another `wrapDegrees`.
+    player.yaw = motion.yaw;
+    player.head_yaw = motion.yaw;
+    player.pitch = motion.pitch;
+    player.on_ground = true;
+    links.send(
+        player.id,
+        &PlayerPosition {
+            teleport_id,
+            x: motion.packet_x,
+            y: motion.packet_y,
+            z: motion.packet_z,
+            yaw: motion.packet_yaw,
+            pitch: motion.packet_pitch,
+            relative: motion.relative,
+        },
+    );
 }
 
 /// 处理四种移动包。线上没有的字段是 `None`，保持玩家当前的值。

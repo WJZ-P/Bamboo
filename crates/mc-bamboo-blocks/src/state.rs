@@ -87,6 +87,16 @@ impl BlockState {
         Some(slot.def.values[slot.current_index(self)])
     }
 
+    /// 按序列化名改属性。没有这个属性或这个值时返回 `None`。
+    ///
+    /// Sets a property by its serialized names. Returns `None` when the property or the value is missing.
+    #[must_use]
+    pub fn try_with_text(self, name: &str, value: &str) -> Option<Self> {
+        let slot = PropertySlot::find(self, name)?;
+        let target = slot.def.values.iter().position(|&text| text == value)?;
+        Some(slot.with_index(self, target))
+    }
+
     /// 改属性的值。方块没有这个属性或者没有这个值时 panic，和官方的 `setValue` 一样。
     #[must_use]
     pub fn with<T: PropertyValue>(self, property: Property<T>, value: T) -> Self {

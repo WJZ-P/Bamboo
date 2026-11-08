@@ -4,6 +4,7 @@
 
 mod block;
 mod chat;
+mod command;
 mod entity;
 mod menu;
 mod movement;
@@ -12,6 +13,7 @@ mod request;
 
 pub use block::*;
 pub use chat::*;
+pub use command::*;
 pub use entity::*;
 pub use menu::*;
 pub use movement::*;
@@ -117,15 +119,41 @@ impl ClientboundPacket for PlayerAbilities {
     }
 }
 
-/// 把玩家传送到一个绝对位置，客户端要用 [`PlayRequest::AcceptTeleportation`] 确认。
+/// 位置包的相对标志位，官方 `net.minecraft.world.entity.Relative`。
+///
+/// 相对字段在包里传的是差值，客户端加上自己当前的值。
+///
+/// Relative flags from official `net.minecraft.world.entity.Relative`.
+/// A flagged field is a delta; the client adds its current value.
+pub mod relative {
+    pub const X: i32 = 0x01;
+    pub const Y: i32 = 0x02;
+    pub const Z: i32 = 0x04;
+    pub const Y_ROT: i32 = 0x08;
+    pub const X_ROT: i32 = 0x10;
+    pub const DELTA_X: i32 = 0x20;
+    pub const DELTA_Y: i32 = 0x40;
+    pub const DELTA_Z: i32 = 0x80;
+}
+
+/// 把玩家传送到一个位置，客户端要用 [`PlayRequest::AcceptTeleportation`] 确认。
+///
+/// Teleports the player. The client confirms with [`PlayRequest::AcceptTeleportation`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerPosition {
     pub teleport_id: i32,
+    /// 坐标。`relative` 里标了的轴是差值，没标的是绝对值。
+    ///
+    /// Coordinates. Axes set in `relative` are deltas; the others are absolute.
     pub x: f64,
     pub y: f64,
     pub z: f64,
     pub yaw: f32,
     pub pitch: f32,
+    /// 哪些字段是相对值，见 [`relative`]。
+    ///
+    /// Which fields are relative. See [`relative`].
+    pub relative: i32,
 }
 
 impl ClientboundPacket for PlayerPosition {
@@ -140,8 +168,7 @@ impl ClientboundPacket for PlayerPosition {
         out.extend_from_slice(&[0; 24]);
         out.extend_from_slice(&self.yaw.to_be_bytes());
         out.extend_from_slice(&self.pitch.to_be_bytes());
-        // 哪些字段是相对值的位掩码，这里全部是绝对值。
-        out.extend_from_slice(&0i32.to_be_bytes());
+        out.extend_from_slice(&self.relative.to_be_bytes());
     }
 }
 
@@ -151,6 +178,10 @@ pub struct SetTime {
     pub game_time: i64,
     pub clock: i32,
     pub clock_ticks: i64,
+    /// 时钟不足一整刻的部分，官方 `ClockNetworkState.partialTick`。
+    ///
+    /// The fraction of a tick, official `ClockNetworkState.partialTick`.
+    pub clock_partial: f32,
     /// 时钟的流速，0 表示时间静止。
     pub clock_rate: f32,
 }
@@ -163,8 +194,7 @@ impl ClientboundPacket for SetTime {
         write_varint(out, 1);
         write_varint(out, self.clock);
         write_varlong(out, self.clock_ticks);
-        // 不足一刻的部分。
-        out.extend_from_slice(&0f32.to_be_bytes());
+        out.extend_from_slice(&self.clock_partial.to_be_bytes());
         out.extend_from_slice(&self.clock_rate.to_be_bytes());
     }
 }
@@ -180,6 +210,31 @@ impl ClientboundPacket for LevelChunksLoadStart {
         const LEVEL_CHUNKS_LOAD_START: u8 = 13;
         out.push(LEVEL_CHUNKS_LOAD_START);
         out.extend_from_slice(&0f32.to_be_bytes());
+    }
+}
+
+/// 通用的游戏事件。和 [`LevelChunksLoadStart`] 共用 `game_event` 这个包号。
+///
+/// A generic game event. Shares the `game_event` packet id with [`LevelChunksLoadStart`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GameEvent {
+    pub event: u8,
+    pub param: f32,
+}
+
+impl GameEvent {
+    /// 玩家自己的游戏模式变了，参数是新模式。
+    ///
+    /// The player's own game mode changed. The parameter is the new mode.
+    pub const CHANGE_GAME_MODE: u8 = 3;
+}
+
+impl ClientboundPacket for GameEvent {
+    const ID: i32 = clientbound::GAME_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        out.push(self.event);
+        out.extend_from_slice(&self.param.to_be_bytes());
     }
 }
 
@@ -339,11 +394,14 @@ mod tests {
             (BlockEntityData::ID, 6),
             (BlockEvent::ID, 7),
             (BlockUpdate::ID, 8),
+            (CommandSuggestions::ID, 15),
+            (CommandTree::ID, 16),
             (ContainerClose::ID, 17),
             (ContainerSetContent::ID, 18),
             (ContainerSetData::ID, 19),
             (ContainerSetSlot::ID, 20),
             (DisguisedChat::ID, 33),
+            (EntityEvent::ID, 34),
             (EntityPositionSync::ID, 35),
             (ForgetLevelChunk::ID, 38),
             (LevelEvent::ID, 47),
@@ -397,6 +455,7 @@ mod tests {
             z: 0.0,
             yaw: 0.0,
             pitch: 0.0,
+            relative: 0,
         };
         let mut body = Vec::new();
         position.write_body(&mut body);
@@ -413,6 +472,7 @@ mod tests {
             z: 8.5,
             yaw: 0.0,
             pitch: 0.0,
+            relative: 0,
         };
         assert_eq!(
             frame(&position),

@@ -32,6 +32,14 @@ pub(crate) struct Player {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
     pub(crate) game_mode: GameMode,
+    /// 命令权限等级，0 到 4，来自 `ops.json`。
+    ///
+    /// Command permission level, 0 through 4, from `ops.json`.
+    pub(crate) permission_level: u8,
+    /// 是否列在 `ops.json` 里。和权限等级分开，等级 0 的 OP 也算 OP。
+    ///
+    /// Whether the player is listed in `ops.json`. Separate from the level: a level-0 op still counts.
+    pub(crate) is_op: bool,
     /// 实体位置，也就是脚底。只能经 [`Player::set_position`] 改，见 [`PlayerGrid`]。
     ///
     /// Entity position, the feet. Changed only through [`Player::set_position`]; see [`PlayerGrid`].
@@ -75,6 +83,8 @@ impl Player {
             uuid,
             name,
             game_mode,
+            permission_level: 0,
+            is_op: false,
             position,
             yaw: 0.0,
             pitch: 0.0,

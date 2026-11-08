@@ -29,6 +29,7 @@ mod chat;
 mod chunk_broadcast;
 mod chunk_encoding;
 mod chunk_tracking;
+mod command;
 mod container;
 mod entity_sync;
 mod entity_tracking;

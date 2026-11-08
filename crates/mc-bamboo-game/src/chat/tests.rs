@@ -632,7 +632,7 @@ fn everything_the_input_box_can_hold_is_echoed_in_full() {
 }
 
 #[test]
-fn the_longest_commands_are_echoed_up_to_the_limit_on_a_character_boundary() {
+fn the_longest_commands_are_echoed_in_full() {
     for (unit, utf16_units) in [("a", 1), ("竹", 1), ("🎋", 2)] {
         let (mut server, alice, _bob) = alice_and_bob();
         let sent = unit.repeat(MAX_COMMAND_UTF16_UNITS / utf16_units);
@@ -644,10 +644,12 @@ fn the_longest_commands_are_echoed_up_to_the_limit_on_a_character_boundary() {
         server.request(&alice, request);
         server.tick();
 
-        let echoed = unit.repeat(MAX_ECHOED_COMMAND_CHARS);
+        // 官方 `Commands.finishParsing` 不截断回显，整段输入都画在红下划线里。
+        //
+        // Official `Commands.finishParsing` does not truncate the echo. The whole input is underlined.
         assert_eq!(
             take_bodies(&alice, clientbound::SYSTEM_CHAT)[1],
-            system_chat_body(&context_line_echoing(&echoed))
+            system_chat_body(&context_line_echoing(&sent))
         );
         assert!(!alice.is_closed());
     }
@@ -729,11 +731,16 @@ fn join_and_left_messages_match_the_spec_and_skip_the_player_itself() {
 }
 
 #[test]
-fn the_commands_packet_stays_unsent() {
+fn join_sends_the_command_tree() {
     let mut server = Harness::new(2);
     let client = server.join("Kitten");
 
     server.tick();
 
-    assert!(take_bodies(&client, clientbound::COMMANDS).is_empty());
+    // `take_frames` 只能拿一次，两个包都在这一批里。
+    //
+    // `take_frames` can be called only once. Both packets are in this batch.
+    let frames = client.take_frames();
+    assert_eq!(frames_with_id(&frames, clientbound::COMMANDS).len(), 1);
+    assert_eq!(frames_with_id(&frames, clientbound::ENTITY_EVENT).len(), 1);
 }

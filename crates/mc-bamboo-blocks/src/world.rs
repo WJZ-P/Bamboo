@@ -363,6 +363,14 @@ impl<'a> World<'a> {
         (self.min_y()..=self.max_y()).contains(&y)
     }
 
+    /// `hasChunkAt`：只看区块坐标是否在合法范围内，不看这一格有没有真正加载。
+    ///
+    /// `hasChunkAt` for the command position check: the chunk coordinate is in range.
+    /// This world treats every in-range chunk as present.
+    pub fn has_chunk_at(&self, pos: BlockPos) -> bool {
+        (pos.x >> 4).abs() <= VALID_CHUNK_BOUND && (pos.z >> 4).abs() <= VALID_CHUNK_BOUND
+    }
+
     /// `isInWorldBounds`。
     pub fn is_in_world_bounds(&self, pos: BlockPos) -> bool {
         self.is_inside_build_height(pos.y)

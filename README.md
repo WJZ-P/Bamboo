@@ -260,7 +260,8 @@ WebView2 的渲染进程不算在内。
 - 冒险模式 `can_break` 谓词里带方块实体 NBT 的那一类读不出来，一律按不匹配算。
 - 组件还不影响附魔效果、属性数值和食物药水的使用效果，这些是后面的玩法系统。
 - 方块实体的内容有告示牌的文字、容器的物品、熔炉和高炉烟熏炉的燃料与进度、酿造台的药水与燃料、
-  从物品带来的那几项组件和潜影盒的盖子动画，活塞的移动方块实体只有动画进度。蜂箱里的蜜蜂和铜傀儡雕像的自定义名不在这份数据里，
+  从物品带来的那几项组件和潜影盒的盖子动画，
+  活塞的移动方块实体只有动画进度。蜂箱里的蜜蜂和铜傀儡雕像的自定义名不在这份数据里，
   中键带不回来；蜂蜜等级和雕像姿势写在方块状态上，会带上。
   告示牌的文字只有纯文本，没有样式和点击事件（`§` 格式码和官方一样会被去掉）。编辑走离线模式：
   没有聊天过滤，也没有给管理员随时编辑的开关（`allow_op_features`）。染色、墨囊和蜜脾没有音效。
@@ -277,7 +278,7 @@ WebView2 的渲染进程不算在内。
   矿石点亮、龙蛋传送和音符盒发声这些方块 `attack` 已经按官方逻辑执行，音符盒的声音和粒子还没有接上；
   上面头颅的自定义音效已经按官方判定，但 `Effect` 只能存 `Copy` 的数据，音效 ID 还带不过去，
   所以发不发、发哪个音效都还没接。
-- 命令方块这类管理员方块不能放置，调试棒也不能用，Bamboo 没有权限系统。
+- 命令方块这类管理员方块不能放置，调试棒也不能用。权限只来自启动时读的 `ops.json`，没有 `/op`。
 - 书与笔可以写字和署名，成书写回物品栏，并经当前打开的菜单同步。右键成书会发 `open_book`。
   没有聊天过滤，成书不带 `filtered` 文本。选择器、计分板和 NBT 解析不了，页面留原文，仍然标成 `resolved`。
   页面解析后 JSON 超过 32767 时官方会解析失败、不广播格子；这里一律当成解析成功并广播。
@@ -287,7 +288,10 @@ WebView2 的渲染进程不算在内。
   取书只走按钮。旁观者可以打开讲台，按钮全部忽略。冒险模式能翻页，不能取书。
   没有权限系统，所以放置讲台时不读物品里的 `block_entity_data`。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
-- 没有命令，没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
+- 第一批命令已经接上：`/gamemode`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`。
+  语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。没有 `/op`。
+  生存和冒险只改模式和能力，没有饥饿、掉落和耐久。`/give` 多出来的物品会消失（没有物品实体，也没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
+  没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐，但还没接进破坏、死亡和开箱。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
@@ -321,6 +325,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、超平坦，不知道网络 |
 | `crates/mc-bamboo-worldgen` | 世界生成的数学：随机源、噪声、密度函数、气候和群系源，纯函数，还没接进游戏 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
+| `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
 | `crates/mc-bamboo-loot` | 战利品表：方块掉落、实体死亡和箱子填充，纯逻辑，还没接进破坏流程 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
@@ -344,6 +349,7 @@ protocol blocks world
 
 `world` 和 `recipes` 只依赖 `core` 和 `data`；`protocol` 也依赖它们，另外依赖 `nbt`；
 `blocks` 也依赖 `protocol`，容器里的物品直接用 `protocol` 的 `ItemStack`。
+`command` 依赖 `core`、`data`、`blocks` 和 `uuid`；只有 `game` 依赖它。它不认识网络，也不认识世界线程。
 `recipes` 依赖 `data` 和 `protocol`：组装产物要写组件。它不认识数据包的帧，也不认识世界线程。
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 `worldgen` 还没接进游戏，只有开发工具依赖它；它依赖 `data`（官方导出的世界生成数据）和

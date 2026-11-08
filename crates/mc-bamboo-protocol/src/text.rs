@@ -147,6 +147,30 @@ impl From<i32> for TranslateArg {
     }
 }
 
+impl From<i64> for TranslateArg {
+    fn from(value: i64) -> Self {
+        Self(Tag::Long(value))
+    }
+}
+
+impl From<f32> for TranslateArg {
+    fn from(value: f32) -> Self {
+        Self(Tag::Float(value))
+    }
+}
+
+impl From<f64> for TranslateArg {
+    fn from(value: f64) -> Self {
+        Self(Tag::Double(value))
+    }
+}
+
+impl From<bool> for TranslateArg {
+    fn from(value: bool) -> Self {
+        Self(Tag::Byte(i8::from(value)))
+    }
+}
+
 /// 文本的 16 种命名颜色。写错颜色名客户端会断线，所以不接受任意字符串。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -204,9 +228,47 @@ fn unify_elements(elements: &mut [Tag]) {
         let text = match element {
             Tag::String(text) => take(text),
             Tag::Int(value) => value.to_string(),
+            Tag::Long(value) => value.to_string(),
+            Tag::Float(value) => java_float(*value),
+            Tag::Double(value) => java_double(*value),
+            Tag::Byte(value) => (*value != 0).to_string(),
             _ => continue,
         };
         *element = Tag::Compound(vec![("text".to_owned(), Tag::String(text))]);
+    }
+}
+
+/// 官方的 `Float.toString`：整数也带 `.0`，特殊值用 `Infinity` 和 `NaN`。
+///
+/// Official `Float.toString`: integers keep `.0`, and the special values are `Infinity` and `NaN`.
+fn java_float(value: f32) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned();
+    }
+    with_decimal_point(value.to_string())
+}
+
+/// 官方的 `Double.toString`，规则和 [`java_float`] 相同。
+///
+/// Official `Double.toString`, with the same rules as [`java_float`].
+fn java_double(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned();
+    }
+    with_decimal_point(value.to_string())
+}
+
+fn with_decimal_point(text: String) -> String {
+    if text.contains(['.', 'e', 'E']) {
+        text
+    } else {
+        format!("{text}.0")
     }
 }
 

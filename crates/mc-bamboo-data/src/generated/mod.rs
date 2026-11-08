@@ -4,6 +4,7 @@ pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;
 pub mod blocks;
+pub mod command_argument_types;
 pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
