@@ -127,6 +127,13 @@ WebView2 的渲染进程不算在内。
   用官方代码出题比对：全部物品的默认组件、创造模式物品栏的全部物品，加一批手写的组件，
   解码再编码逐字节相同，官方也能把 Bamboo 写出来的字节解回同样的内容；
   按 ID 查表的那 19 个枚举还逐个试越界的 ID，折回的结果和官方一致。
+  存档用的 `Codec`（DFU，写成 NBT）也按官方补齐了：`DataComponents` 里注册的每一种，
+  包括没有网络编解码的 `lock`、`container_loot`、`map_decorations`、`debug_stick_state`、`recipes`。
+  `ItemStack.CODEC`、`DataComponentPatch.CODEC`（键前面加 `!` 表示移除）和 `ItemStackTemplate` 都有。
+  `container_click` 的 `HashedStack` 用 `HashOps`（CRC32C）对每项组件跑这份存档 `Codec`，
+  得到的整数和官方 `HashedPatchMap` 一样比较。SNBT 的解析和打印照 `TagParser`、`StringTagVisitor`
+  和 `SnbtPrinterTagVisitor`，命令还没有接上。同一批物品堆的存档 NBT 和哈希，以及一批 SNBT，
+  也交给官方比对过。
 - 组件接进了玩法：客户端放进创造模式槽位的组件照官方 `ItemStack.validatedStreamCodec` 逐项解析，
   解不开就断开连接（官方抛 `DecoderException`）；数量超过上限的那一格和官方一样静默忽略。
   校验过的组件发给所有人：`set_equipment`、容器槽位和物品栏都带着组件，所以别人看得到附魔的光
@@ -199,18 +206,21 @@ WebView2 的渲染进程不算在内。
   带 `lock` 的物品放下以后，锁留在服务端的方块实体上（上了锁的容器照样能开，见下面），
   中键拿回来的物品上没有它。`custom_data` 和 `intangible_projectile` 的官方 `Codec`
   接受任何复合标签，和我们的编解码一致，照常发出去。
-- `container_click` 里客户端回传的 `HashedStack` 只比较物品和数量：官方用 `HashOps`（CRC32C）
-  给每一项组件算一个哈希，那套哈希要每种组件的 DFU `Codec`，这里没有。带组件的物品一律算「不一致」，
-  结果只是多发一个 `container_set_slot`，不会把客户端手上的东西当成和服务端一样。
+- 只含瞬态组件（`creative_slot_lock`、`map_post_processing`、`additional_trade_cost`）的物品堆，
+  官方 `ItemStack.CODEC` 会写出空的 `components`，再解一次瞬态就没了、这个字段也会被省掉，
+  官方自己也往返不了。算哈希时瞬态组件没有存档 `Codec`，`HashedStack` 对不上，多发一次槽位同步。
+  存档编解码不做 DataFixer 的版本升级，读到别的 `DataVersion` 直接失败，也不写 JSON 形式。
+  SNBT 能解析和打印，命令还没用它。
 - 物品上的 `block_entity_data` 组件不读（官方 `BlockItem.updateCustomBlockEntityTag`）：
-  它要把方块实体的存档 NBT 解回来，也就是整套 DFU 的 `Codec`。所以讲台上的书和唱片机里的唱片
-  还是只有方块状态（`has_book`、`has_record`）和比较器的默认强度，没有真正的物品。
+  组件的存档 `Codec` 能把这个复合标签解出来，但放下方块时还没有按方块实体自己的字段写回去。
+  所以讲台上的书和唱片机里的唱片还是只有方块状态（`has_book`、`has_record`）和比较器的默认强度，
+  没有真正的物品。
   同理，放下的方块实体只留官方 `applyImplicitComponents` 读的那几项，物品上多出来的组件
   （比如旗帜上的 `lore`）不进方块实体，中键也还不回来。
-- 容器的锁（`lock` 组件）存下来也还给物品，但不拦人：官方 `LockCode.canUnlock` 要完整的
-  `ItemPredicate`（物品集合、数量区间和一整套组件谓词），现在还没有，所以上了锁的容器照样能打开。
+- 容器的锁（`lock` 组件）存下来也还给物品，但不拦人：官方 `LockCode.canUnlock` 要拿主手物品去对
+  `ItemPredicate`，这个比对还没接进开门，所以上了锁的容器照样能打开。锁的值本身可以按存档 `Codec` 读写。
 - 饰纹陶罐里的物品（`container` 组件）不进方块实体：官方 `getUpdateTag` 会把它写成 NBT 形式的
-  物品堆，那要组件的 DFU 编解码器。纹样是完整的。
+  物品堆。物品堆的存档 `Codec` 已经有了，但还没接到陶罐的 `getUpdateTag` 上。纹样是完整的。
 - 方块实体的 `getUpdateTag` 只写我们认识的字段：旗帜那张 `components` 表永远是空的，
   NBT 的键序也和官方的 `CompoundTag`（哈希表）不同，客户端照样解得开。
 - 冒险模式 `can_break` 谓词里带方块实体 NBT 的那一类读不出来，一律按不匹配算。
@@ -336,7 +346,10 @@ cargo run --release -p mc-bamboo-vanilla -- menu <java 路径> [--cases N] [--se
 物品组件也一样：官方代码把全部物品的默认组件（还要和生成的 `item_components.rs` 对一遍）、
 创造模式物品栏的全部物品、一批手写的组件，再加上按 ID 查表的枚举的越界输入
 按官方的 `StreamCodec` 编码，`mc-bamboo-protocol` 解码再编码，逐字节比较，
-最后把 Bamboo 写出来的字节交回官方解码，确认解出来的还是同一份组件：
+最后把 Bamboo 写出来的字节交回官方解码，确认解出来的还是同一份组件。
+同一批物品堆再用 `ItemStack.CODEC` 和 `DataComponentPatch.CODEC` 编成 NBT，
+Bamboo 解码再编码后逐项相等，官方也能解回同一份物品堆；每份的 `HashedStack` 哈希也要一致。
+另外比对一批 SNBT 的打印和解析：
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- components <java 路径> [--show N]
