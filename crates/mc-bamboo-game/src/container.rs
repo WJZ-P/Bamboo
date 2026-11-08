@@ -79,6 +79,11 @@ impl ContainerKind {
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,
+    /// 每一格的组件字节是哪名玩家的客户端发来的。
+    ///
+    /// 共享容器里的物品可能是别人放进来的：那几种我们没法完全校验的组件只能发回给来源玩家，
+    /// 别人看到的那一份要滤过，见 [`crate::menu`]。
+    pub(crate) sources: Vec<Option<PlayerId>>,
     /// 官方 `ContainerOpenersCounter.openCount`。潜影盒也用它算盖子开合。
     pub(crate) open_count: i32,
     pub(crate) max_range: f64,
@@ -94,6 +99,7 @@ impl ContainerEntry {
         Self {
             kind,
             slots: vec![ItemStack::empty(); slots],
+            sources: vec![None; slots],
             open_count: 0,
             max_range: 0.0,
             recheck_at: None,

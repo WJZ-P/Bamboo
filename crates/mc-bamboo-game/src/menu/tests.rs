@@ -512,9 +512,110 @@ fn a_second_player_sees_what_the_first_player_put_in() {
         .menus
         .get(&other)
         .expect("第二个菜单应该开着");
-    let slots = display(&fixture.region, other, menu);
+    let (slots, sources) = display(&fixture.region, other, menu);
     assert_eq!(slots[0], ItemStack::new(items::STONE, 10));
+    assert_eq!(sources[0], Some(fixture.id), "组件的来源是放东西的那个人");
     assert_eq!(fixture.entry(pos).open_count, 2);
+}
+
+/// 一件带 `lock` 的物品：放进共享箱子以后，放的人还看得到这一项，别人看到的那一份没有。
+#[test]
+fn only_the_player_who_put_it_in_gets_the_components_we_cannot_check() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture.open(pos);
+
+    *fixture.inventory_slot(36) = locked_chest();
+    fixture.click(Fixture::hotbar(0), 0, ContainerInput::Pickup);
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(
+        fixture.entry(pos).slots[0],
+        locked_chest(),
+        "世界里留着完整的"
+    );
+    assert_eq!(fixture.entry(pos).sources[0], Some(fixture.id));
+
+    // 放的人自己看到的那一份是完整的。
+    let menu = fixture.menu();
+    assert_eq!(
+        network_slots(&fixture.region, fixture.id, menu)[0],
+        locked_chest()
+    );
+
+    // 另一名玩家看到的那一份滤过了。
+    let other = PlayerId(2);
+    spawn(&mut fixture.region, other, 2.5, 2.5);
+    open_block(&mut fixture.region, other, pos);
+    let other_menu = fixture
+        .region
+        .menus
+        .get(&other)
+        .expect("第二个菜单应该开着");
+    assert_eq!(
+        network_slots(&fixture.region, other, other_menu)[0],
+        ItemStack::new(items::CHEST, 1)
+    );
+}
+
+/// 别人把这件物品拿出箱子时，没校验过的组件不跟着走：它到不了别人的客户端。
+#[test]
+fn taking_another_players_item_out_of_a_chest_drops_those_components() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] = locked_chest();
+    // 第一格是别人放的。
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).sources[0] =
+        Some(PlayerId(9));
+    fixture.open(pos);
+
+    fixture.click(0, 0, ContainerInput::Pickup);
+
+    assert_eq!(
+        fixture.menu().carried,
+        ItemStack::new(items::CHEST, 1),
+        "拿到手上的那一份没有锁"
+    );
+    assert!(fixture.entry(pos).slots[0].is_empty());
+}
+
+/// 叠上去只改数量，组件还是原来那名玩家的，所以来源不变。
+#[test]
+fn merging_into_another_players_stack_keeps_the_source() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    let other = PlayerId(9);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).slots[0] =
+        ItemStack::new(items::STONE, 1);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Chest).sources[0] = Some(other);
+    fixture.open(pos);
+
+    fixture.menu_mut().carried = ItemStack::new(items::STONE, 1);
+    fixture.click(0, 0, ContainerInput::Pickup);
+
+    assert_eq!(fixture.entry(pos).slots[0], ItemStack::new(items::STONE, 2));
+    assert_eq!(fixture.entry(pos).sources[0], Some(other));
+
+    // 换成另一种物品就是新的一份字节：两边换位置，这一格的来源跟着换人。
+    fixture.menu_mut().carried = locked_chest();
+    fixture.click(0, 0, ContainerInput::Pickup);
+    assert_eq!(fixture.entry(pos).slots[0], locked_chest());
+    assert_eq!(fixture.entry(pos).sources[0], Some(fixture.id));
+    assert_eq!(fixture.menu().carried, ItemStack::new(items::STONE, 2));
+}
+
+/// 一个带 `lock` 的箱子物品。`lock` 线上是 NBT，我们只校验最外层，所以发不给别人。
+fn locked_chest() -> ItemStack {
+    let mut lock = Vec::new();
+    mc_bamboo_nbt::Tag::Compound(Vec::new()).write_network(&mut lock);
+    ItemStack {
+        item: items::CHEST,
+        count: 1,
+        added: vec![(mc_bamboo_data::registries::data_component_type::LOCK, lock)],
+        removed: Vec::new(),
+    }
 }
 
 /// 末影箱的内容跟着玩家走，换个方块位置再打开还是那些东西。
@@ -543,8 +644,9 @@ fn the_ender_chest_contents_belong_to_the_player() {
     fixture.open(second);
     assert_eq!(fixture.player().ender_chest.active, Some(second));
     let menu = fixture.menu();
-    let slots = display(&fixture.region, fixture.id, menu);
+    let (slots, sources) = display(&fixture.region, fixture.id, menu);
     assert_eq!(slots[0], ItemStack::new(items::DIAMOND, 2));
+    assert_eq!(sources[0], Some(fixture.id), "末影箱永远是自己的");
 }
 
 /// 改了名的箱子打开时标题就是那个名字，官方 `Nameable.getDisplayName`。

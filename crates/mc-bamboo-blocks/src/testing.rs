@@ -20,6 +20,8 @@ pub(crate) struct TestLevel {
     blocks: HashMap<BlockPos, BlockState>,
     /// 告示牌的内容。和区块存储一样，换成别的方块时丢掉。
     pub(crate) signs: HashMap<BlockPos, SignContent>,
+    /// 头颅方块实体的 `note_block_sound`，只有那一格还是头颅时才读得到。
+    pub(crate) note_block_sounds: HashMap<BlockPos, String>,
     /// 按写入顺序记下每一格写过什么，测试连锁顺序时用。
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
@@ -37,6 +39,7 @@ impl TestLevel {
         Self {
             blocks: HashMap::new(),
             signs: HashMap::new(),
+            note_block_sounds: HashMap::new(),
             writes: Vec::new(),
             obstructed: false,
             random: LevelRandom::new(0),
@@ -71,6 +74,7 @@ impl Level for TestLevel {
         }
         if !self.block_state(pos).is_same_block(state) {
             self.signs.remove(&pos);
+            self.note_block_sounds.remove(&pos);
         }
         self.blocks.insert(pos, state);
         self.writes.push((pos, state));
@@ -126,6 +130,18 @@ impl Level for TestLevel {
         }
         self.signs.insert(pos, content);
         true
+    }
+
+    /// 和官方的假世界不同，这里可以给头颅方块实体放一个 `note_block_sound`。
+    /// 换成别的方块以后那个方块实体就没了，和 [`Level::sign`] 一样读不到。
+    fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        if !self
+            .block_state(pos)
+            .is_a(BlockAncestor::AbstractSkullBlock)
+        {
+            return None;
+        }
+        self.note_block_sounds.get(&pos).cloned()
     }
 
     fn block_entities(&self) -> &BlockEntities {

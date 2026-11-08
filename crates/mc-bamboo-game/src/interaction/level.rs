@@ -7,8 +7,11 @@ use mc_bamboo_blocks::{
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
-use mc_bamboo_data::blocks;
-use mc_bamboo_protocol::components::ComponentPatch;
+use mc_bamboo_data::{
+    block_of_state, blocks,
+    registries::{block_entity_type as entities, data_component_type as kinds},
+};
+use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue};
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
@@ -91,6 +94,20 @@ impl Level for RegionLevel<'_> {
 
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         self.chunks.set_sign(pos, content)
+    }
+
+    /// 头颅方块实体认的 `note_block_sound` 存在 [`Self::block_items`] 里，见
+    /// [`crate::block_items`] 的 `apply`。
+    fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        let skull =
+            block_of_state(self.chunks.block(pos)?)?.block_entity_type == Some(entities::SKULL);
+        if !skull {
+            return None;
+        }
+        match self.block_items.get(&pos)?.get(kinds::NOTE_BLOCK_SOUND)? {
+            ComponentValue::NoteBlockSound(sound) => Some(sound.clone()),
+            _ => None,
+        }
     }
 
     fn block_entities(&self) -> &BlockEntities {

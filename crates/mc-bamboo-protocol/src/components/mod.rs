@@ -1304,6 +1304,21 @@ impl ComponentPatch {
             .map(|(_, entry)| entry)
     }
 
+    /// 能发给别人的那几项，见 [`forward`]。移除项只有组件类型，一律留着。
+    pub fn filtered(&self) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(kind, entry)| match entry {
+                    PatchEntry::Set(value) => forward::forwardable_value(*kind, value),
+                    PatchEntry::Removed => true,
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// 官方 `DataComponentPatch.equals`：两份补丁是同一张表。
     ///
     /// 官方存在映射里，条目的先后无所谓；我们按线上的顺序存，所以要逐项查。

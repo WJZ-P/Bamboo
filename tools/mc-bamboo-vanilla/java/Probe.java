@@ -196,6 +196,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.SwingAnimationType;
+import net.minecraft.world.item.component.DebugStickState;
 import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.Enchantments;
@@ -217,6 +218,7 @@ import net.minecraft.world.level.block.entity.BlockEntityTypes;
 import net.minecraft.world.level.block.entity.SignTextSlot;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -1168,6 +1170,24 @@ public final class Probe {
                 ItemStack held = remote.equipment.get(EquipmentSlot.OFFHAND);
                 Component name = held == null ? null : held.get(DataComponents.CUSTOM_NAME);
                 return name != null && SWORD_NAME.equals(name.getString());
+            });
+
+            // `debug_stick_state` 在线上是 NBT，我们只能校验最外层。它属于发来它的玩家：
+            // 换手时服务端把主手和副手两格都发回给这个玩家，副手那一份要原样带着组件。
+            ItemStack debugStick = new ItemStack(Items.DEBUG_STICK);
+            debugStick.set(DataComponents.DEBUG_STICK_STATE, new DebugStickState(Map.of(
+                    BuiltInRegistries.BLOCK.wrapAsHolder(Blocks.OAK_LOG), BlockStateProperties.AXIS)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 2, debugStick));
+            actor.send(new ServerboundSetCarriedItemPacket(2));
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
+            await("components: the owner gets the components we only shape check after moving them", () -> {
+                ItemStack moved = actor.slots.get(OFF_HAND_SLOT);
+                if (moved == null || !moved.is(Items.DEBUG_STICK)) {
+                    return false;
+                }
+                DebugStickState state = moved.getOrDefault(DataComponents.DEBUG_STICK_STATE, DebugStickState.EMPTY);
+                return state.properties().containsValue(BlockStateProperties.AXIS);
             });
 
             // 带图案的旗帜：图案要进方块实体，再编成 NBT 发给所有人。

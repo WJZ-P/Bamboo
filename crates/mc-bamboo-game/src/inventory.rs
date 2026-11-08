@@ -269,7 +269,8 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
     }
 }
 
-/// 把一个槽发给这名玩家。组件也发，发不出去的那几种由 [`ItemStack::write`] 滤掉。
+/// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端
+/// 自己的数据，见 [`ItemStack::write`]。
 fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
     let state_id = player.inventory.next_state_id();
     let packet = ContainerSetSlot {

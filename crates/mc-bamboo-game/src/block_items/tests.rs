@@ -6,9 +6,11 @@ use mc_bamboo_protocol::components::{
 };
 
 use super::*;
-use crate::{region::Region, world::tests::Harness};
+use crate::{inbound::PlayerId, region::Region, world::tests::Harness};
 
 const POS: BlockPos = BlockPos::new(3, -60, 8);
+/// 放下方块的那名玩家。这里不查来源，只要有一个就行。
+const TEST_PLAYER: PlayerId = PlayerId(0);
 
 /// 一个只有方块的世界，方块已经放好。
 fn region_with(block: u32) -> Harness {
@@ -51,7 +53,7 @@ fn a_banner_keeps_its_patterns_and_sends_them_to_the_client() {
         &banner_layers(),
     );
 
-    apply(server.region(), POS, &banner);
+    apply(server.region(), POS, TEST_PLAYER, &banner);
 
     assert_eq!(
         server.region().block_items[&POS].get(kinds::BANNER_PATTERNS),
@@ -72,6 +74,7 @@ fn a_blank_banner_still_has_an_empty_pattern_list() {
     apply(
         server.region(),
         POS,
+        TEST_PLAYER,
         &ItemStack::new(items::WHITE_BANNER, 1),
     );
 
@@ -91,7 +94,7 @@ fn a_named_banner_sends_its_name() {
     let name = ComponentValue::CustomName(Component::text("Standard"));
     let banner = with_component(items::WHITE_BANNER, kinds::CUSTOM_NAME, &name);
 
-    apply(server.region(), POS, &banner);
+    apply(server.region(), POS, TEST_PLAYER, &banner);
 
     let tag = stored_tag(server.region()).expect("旗帜要发方块实体数据");
     let text = String::from_utf8_lossy(&tag).to_string();
@@ -120,7 +123,7 @@ fn a_skull_sends_its_profile_and_note_block_sound() {
     ComponentValue::NoteBlockSound("minecraft:custom.sound".to_owned()).write(&mut sound);
     head.added.push((kinds::NOTE_BLOCK_SOUND, sound));
 
-    apply(server.region(), POS, &head);
+    apply(server.region(), POS, TEST_PLAYER, &head);
 
     let tag = stored_tag(server.region()).expect("头颅要发方块实体数据");
     let text = String::from_utf8_lossy(&tag).to_string();
@@ -149,7 +152,7 @@ fn a_decorated_pot_sends_its_sherds() {
     };
     let pot = with_component(items::DECORATED_POT, kinds::POT_DECORATIONS, &decorations);
 
-    apply(server.region(), POS, &pot);
+    apply(server.region(), POS, TEST_PLAYER, &pot);
 
     let tag = stored_tag(server.region()).expect("陶罐要发方块实体数据");
     let text = String::from_utf8_lossy(&tag).to_string();
@@ -162,7 +165,12 @@ fn a_decorated_pot_sends_its_sherds() {
 #[test]
 fn a_plain_block_entity_has_nothing_to_send() {
     let mut server = region_with(blocks::CHEST);
-    apply(server.region(), POS, &ItemStack::new(items::CHEST, 1));
+    apply(
+        server.region(),
+        POS,
+        TEST_PLAYER,
+        &ItemStack::new(items::CHEST, 1),
+    );
 
     assert_eq!(stored_tag(server.region()), None);
     // 箱子认自定义名和锁，两样都没有时不留条目。
@@ -175,7 +183,7 @@ fn a_named_chest_keeps_its_name_but_sends_no_data() {
     let name = ComponentValue::CustomName(Component::text("Loot"));
     let chest = with_component(items::CHEST, kinds::CUSTOM_NAME, &name);
 
-    apply(server.region(), POS, &chest);
+    apply(server.region(), POS, TEST_PLAYER, &chest);
 
     assert_eq!(
         custom_name(server.region(), POS),
@@ -191,9 +199,30 @@ fn an_empty_lock_counts_as_no_lock() {
     let lock = ComponentValue::Lock(Tag::Compound(Vec::new()));
     let chest = with_component(items::CHEST, kinds::LOCK, &lock);
 
-    apply(server.region(), POS, &chest);
+    apply(server.region(), POS, TEST_PLAYER, &chest);
 
     assert!(!server.region().block_items.contains_key(&POS));
+}
+
+/// 锁留在方块实体上，但不跟着中键选取的物品走：方块实体是共享的，谁都能中键。
+#[test]
+fn a_real_lock_stays_on_the_block_entity_but_not_on_the_item() {
+    let mut server = region_with(blocks::CHEST);
+    let lock = ComponentValue::Lock(Tag::Compound(vec![(
+        "items".to_owned(),
+        Tag::String("minecraft:tripwire_hook".to_owned()),
+    )]));
+    let chest = with_component(items::CHEST, kinds::LOCK, &lock);
+
+    apply(server.region(), POS, TEST_PLAYER, &chest);
+
+    assert_eq!(
+        server.region().block_items[&POS].get(kinds::LOCK),
+        Some(&lock)
+    );
+    assert_eq!(collect(server.region(), POS).get(kinds::LOCK), None);
+    // 容器的 `getUpdateTag` 本来就是空的，锁也不会发出去。
+    assert_eq!(stored_tag(server.region()), None);
 }
 
 #[test]
@@ -209,7 +238,7 @@ fn a_shulker_box_keeps_the_items_from_its_container_component() {
     ]);
     let box_item = with_component(items::SHULKER_BOX, kinds::CONTAINER, &contents);
 
-    apply(server.region(), POS, &box_item);
+    apply(server.region(), POS, TEST_PLAYER, &box_item);
 
     let entry = &server.region().containers[&POS];
     assert!(entry.slots[0].is_empty());
@@ -234,7 +263,7 @@ fn a_container_slot_with_too_many_items_becomes_empty() {
     })]);
     let chest = with_component(items::CHEST, kinds::CONTAINER, &contents);
 
-    apply(server.region(), POS, &chest);
+    apply(server.region(), POS, TEST_PLAYER, &chest);
 
     assert!(server.region().containers[&POS].slots[0].is_empty());
 }
@@ -251,7 +280,7 @@ fn an_unknown_banner_pattern_id_is_left_out() {
     }]);
     let banner = with_component(items::WHITE_BANNER, kinds::BANNER_PATTERNS, &layers);
 
-    apply(server.region(), POS, &banner);
+    apply(server.region(), POS, TEST_PLAYER, &banner);
 
     // 内联的图案定义也写得出来。
     let tag = stored_tag(server.region()).expect("旗帜要发方块实体数据");
@@ -268,7 +297,7 @@ fn the_data_goes_away_with_the_block() {
         kinds::BANNER_PATTERNS,
         &banner_layers(),
     );
-    apply(server.region(), POS, &banner);
+    apply(server.region(), POS, TEST_PLAYER, &banner);
     assert!(stored_tag(server.region()).is_some());
 
     server.region().chunks.set_block(POS, blocks::STONE);

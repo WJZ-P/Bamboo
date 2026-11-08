@@ -688,6 +688,31 @@ fn components_we_only_shape_check_stay_on_the_server() {
     ));
 }
 
+/// 整份补丁的过滤：留下能发给别人的，移除项一律留着。
+#[test]
+fn a_patch_can_be_filtered_for_other_players() {
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::MAX_STACK_SIZE,
+        PatchEntry::Set(ComponentValue::MaxStackSize(16)),
+    );
+    patch.put(
+        kinds::LOCK,
+        PatchEntry::Set(ComponentValue::Lock(Tag::Compound(Vec::new()))),
+    );
+    patch.put(kinds::LORE, PatchEntry::Removed);
+
+    let filtered = patch.filtered();
+    assert_eq!(
+        filtered.get(kinds::MAX_STACK_SIZE),
+        Some(&ComponentValue::MaxStackSize(16))
+    );
+    assert_eq!(filtered.get(kinds::LOCK), None);
+    assert_eq!(filtered.entry(kinds::LORE), Some(&PatchEntry::Removed));
+    // 原来的补丁不动。
+    assert!(patch.get(kinds::LOCK).is_some());
+}
+
 #[test]
 fn text_we_do_not_fully_check_is_not_forwarded() {
     let loose = Component::from_tag(Tag::Compound(vec![(

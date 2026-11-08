@@ -8,9 +8,9 @@
 //! - 文本组件线上也是 NBT，官方会按 `ComponentSerialization.CODEC` 解析，里面有几处
 //!   我们只看了字段类型，见 [`text::is_fully_checked`]。
 //!
-//! 这两类的内容我们没法保证客户端解得开，而解不开的客户端会断线。所以发给第三方的物品里
-//! 不带它们，发给主人的也一样（同一个槽位的内容要和远程槽的记账对得上，见
-//! `mc-bamboo-game` 的 `menu`）。被滤掉的组件照旧留在服务端的物品上。
+//! 这两类的内容我们没法保证客户端解得开，而解不开的客户端会断线。所以发给别人的物品里
+//! 不带它们；发回给物品主人的那一份原样带着，因为字节本来就是它的客户端发来的。
+//! 被滤掉的组件照旧留在服务端的物品上。
 //!
 //! `custom_data` 和 `intangible_projectile` 也没有 `networkSynchronized`，但官方的 `Codec`
 //! 分别接受任何复合标签和任何复合标签（写回去永远是空的），我们的编解码和它们一致，所以能转发。
@@ -50,6 +50,14 @@ pub fn forwardable(kind: i32, bytes: &[u8]) -> bool {
         Ok(value) => cursor.finish().is_ok() && value_is_forwardable(&value),
         Err(_) => false,
     }
+}
+
+/// 这一项组件能不能发给别人，值已经是类型化的。
+///
+/// 和 [`forwardable`] 同一套判定，给已经解析好的补丁用，见
+/// [`ComponentPatch::filtered`](crate::components::ComponentPatch::filtered)。
+pub fn forwardable_value(kind: i32, value: &ComponentValue) -> bool {
+    !UNVERIFIED.contains(&kind) && value_is_forwardable(value)
 }
 
 /// 这个值里的文本组件和嵌套物品堆都是我们完全校验过的。

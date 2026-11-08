@@ -31,7 +31,7 @@ use mc_bamboo_protocol::{
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::{container, region::Region, sign};
+use crate::{container, inbound::PlayerId, region::Region, sign};
 
 /// 旗帜的 `applyImplicitComponents` 和 `collectImplicitComponents` 读写的组件，按官方的顺序。
 const BANNER: [i32; 2] = [kinds::BANNER_PATTERNS, kinds::CUSTOM_NAME];
@@ -109,7 +109,10 @@ fn is_container(kind: i32) -> bool {
 ///
 /// 官方在这之前还有一步 `updateCustomBlockEntityTag`（物品上的 `block_entity_data`），
 /// 那一步要解 NBT 形式的方块实体存档，我们不做，见 README 的已知限制。
-pub(crate) fn apply(region: &mut Region, pos: BlockPos, stack: &ItemStack) {
+///
+/// `placer` 是放下这个方块的玩家。潜影盒的 `container` 组件里的物品是从它的客户端来的，
+/// 记下来源，它自己再打开时才能拿到完整的补丁，见 [`crate::menu`]。
+pub(crate) fn apply(region: &mut Region, pos: BlockPos, placer: PlayerId, stack: &ItemStack) {
     let Some(kind) = block_entity_kind(region, pos) else {
         return;
     };
@@ -131,7 +134,7 @@ pub(crate) fn apply(region: &mut Region, pos: BlockPos, stack: &ItemStack) {
             Some(ComponentValue::Container(slots)) => slots.as_slice(),
             _ => &[],
         };
-        copy_into_container(region, pos, contents);
+        copy_into_container(region, pos, contents, placer);
     }
 
     if implicit.entries().is_empty() {
@@ -143,7 +146,14 @@ pub(crate) fn apply(region: &mut Region, pos: BlockPos, stack: &ItemStack) {
 }
 
 /// 把 `container` 组件里的物品放进这一格的容器，官方 `copyInto`：每一格都写，多出来的格清空。
-fn copy_into_container(region: &mut Region, pos: BlockPos, contents: &[Option<ItemStackTemplate>]) {
+///
+/// 每一格的组件都来自放方块的那名玩家客户端发来的物品，所以整格都记成 `placer` 的。
+fn copy_into_container(
+    region: &mut Region,
+    pos: BlockPos,
+    contents: &[Option<ItemStackTemplate>],
+    placer: PlayerId,
+) {
     let Some(container) = container::kind_at(region, pos) else {
         return;
     };
@@ -156,6 +166,7 @@ fn copy_into_container(region: &mut Region, pos: BlockPos, contents: &[Option<It
             .get(slot)
             .and_then(Option::as_ref)
             .map_or_else(ItemStack::empty, create_stack);
+        entry.sources[slot] = (!entry.slots[slot].is_empty()).then_some(placer);
     }
 }
 
@@ -193,10 +204,14 @@ fn container_contents(slots: &[ItemStack]) -> ComponentValue {
 }
 
 /// 官方 `BlockEntity.collectComponents`：方块实体身上的组件，中键选取时还给物品。
+///
+/// 方块实体是共享的，谁都能中键，所以最后过一遍 [`ComponentPatch::filtered`]：
+/// 没法完全校验的组件（比如容器的锁）留在方块实体上，不跟着物品走。`container` 里嵌套的
+/// 物品堆也在这时一起看，谁放进去的都一样。
 pub(crate) fn collect(region: &Region, pos: BlockPos) -> ComponentPatch {
     let mut patch = region.block_items.get(&pos).cloned().unwrap_or_default();
     let Some(kind) = block_entity_kind(region, pos) else {
-        return patch;
+        return patch.filtered();
     };
     if is_container(kind) {
         let slots = region
@@ -212,7 +227,7 @@ pub(crate) fn collect(region: &Region, pos: BlockPos) -> ComponentPatch {
             PatchEntry::Set(ComponentValue::Container(Vec::new())),
         );
     }
-    patch
+    patch.filtered()
 }
 
 /// 这一格方块实体的自定义名，官方 `Nameable.getCustomName`。
@@ -240,14 +255,15 @@ pub(crate) fn refresh_update_tag(region: &mut Region, pos: BlockPos) {
 
 /// 官方 `BlockEntity.getUpdateTag`：客户端要渲染的那几种方块实体发这段 NBT。
 ///
+/// 这段 NBT 发给所有看得到这一格的玩家，所以组件先过一遍 [`ComponentPatch::filtered`]。
 /// 别的方块实体官方发的是空标签，区块包里写一个 `TAG_End`，所以返回 `None`。
 fn update_tag(region: &Region, pos: BlockPos) -> Option<Tag> {
     let kind = block_entity_kind(region, pos)?;
-    let patch = region.block_items.get(&pos)?;
+    let patch = region.block_items.get(&pos)?.filtered();
     match kind {
-        entities::BANNER => Some(banner_tag(patch)),
-        entities::SKULL => skull_tag(patch),
-        entities::DECORATED_POT => pot_tag(patch),
+        entities::BANNER => Some(banner_tag(&patch)),
+        entities::SKULL => skull_tag(&patch),
+        entities::DECORATED_POT => pot_tag(&patch),
         _ => None,
     }
 }

@@ -440,7 +440,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
             .get(&id)
             .map(|player| player.inventory.held(packet.hand).clone());
         if let Some(stack) = stack {
-            block_items::apply(region, placed, &stack);
+            block_items::apply(region, placed, id, &stack);
         }
     }
     send_effects(region, Some(id), &outcome.effects);
@@ -528,7 +528,7 @@ pub(crate) fn on_use_item(
             .get(&id)
             .map(|player| player.inventory.held(hand).clone());
         if let Some(stack) = stack {
-            block_items::apply(region, placed, &stack);
+            block_items::apply(region, placed, id, &stack);
         }
     }
     send_effects(region, Some(id), &outcome.effects);

@@ -413,6 +413,13 @@ impl<'a> World<'a> {
         self.level.set_sign(pos, content)
     }
 
+    /// `getBlockEntity(pos) instanceof SkullBlockEntity` 时的 `getNoteBlockSound`。
+    ///
+    /// 音符盒的 `getCustomSoundId` 读上面那一格，见 [`crate::behaviour::machines`] 里的音符盒。
+    pub fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        self.level.note_block_sound(pos)
+    }
+
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.level.block_entities().get(pos)
