@@ -77,6 +77,8 @@ import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
 import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
@@ -164,6 +166,7 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
+import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
@@ -253,6 +256,7 @@ public final class Probe {
             "handleKeepAlive",
             "handleLevelChunkWithLight",
             "handleLevelEvent",
+            "handleLightUpdatePacket",
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
@@ -271,6 +275,8 @@ public final class Probe {
             "handleUpdateAttributes");
 
     private static final Map<String, Boolean> CHECKS = new LinkedHashMap<>();
+    /** 第一个玩家进来时世界还没改过，它的第一个区块一定要对一次光照的答案。 */
+    private static volatile boolean flatLightChecked;
 
     private static void check(String name, boolean passed) {
         CHECKS.merge(name, passed, Boolean::logicalAnd);
@@ -297,6 +303,7 @@ public final class Probe {
             try {
                 probeStatus(host, port);
                 new Scenario(host, port, layers).run();
+                check("chunk: an untouched chunk had its light compared", flatLightChecked);
             } catch (Exception error) {
                 // 官方解码器发现格式错误时会断开连接，这里记成一项失败，照常输出汇总。
                 check("connection: no error while talking to the server (" + error + ")", false);
@@ -1320,6 +1327,8 @@ public final class Probe {
                     value -> onForgetChunk((ClientboundForgetLevelChunkPacket) value));
             handlers.put("handleLevelChunkWithLight",
                     value -> onChunk((ClientboundLevelChunkWithLightPacket) value));
+            handlers.put("handleLightUpdatePacket",
+                    value -> onLightUpdate((ClientboundLightUpdatePacket) value));
             handlers.put("handleChunkBatchFinished",
                     value -> onBatchFinished((ClientboundChunkBatchFinishedPacket) value));
             handlers.put("handleSetEntityData", value -> onEntityData((ClientboundSetEntityDataPacket) value));
@@ -1721,14 +1730,90 @@ public final class Probe {
                 check("chunk: heightmap points above the grass", storage.get(0) == 4 && storage.get(255) == 4);
             }
 
-            var light = packet.lightData();
-            check("chunk: layer below the world is dark", light.emptySkyYMask().get(0));
-            check("chunk: every other layer has sky light",
-                    light.skyYMask().cardinality() == LIGHT_LAYERS - 1 && !light.skyYMask().get(0));
-            check("chunk: one light array per layer", light.skyUpdates().size() == LIGHT_LAYERS - 1);
-            check("chunk: light arrays are full size",
-                    light.skyUpdates().stream().allMatch(layer -> layer.length == 2048));
-            check("chunk: no block light", light.blockYMask().isEmpty() && light.blockUpdates().isEmpty());
+            checkLightStructure("chunk", packet.lightData());
+            // 后进来的玩家收到的第一个区块可能已经被别人改过了，光照也跟着变，只有原样的区块能对答案。
+            if (isUntouchedFlat(sections)) {
+                checkFlatLight(packet.lightData());
+            }
+        }
+
+        /** 每一格都和超平坦的地层一样。 */
+        private static boolean isUntouchedFlat(LevelChunkSection[] sections) {
+            Block[] layers = {Blocks.BEDROCK, Blocks.DIRT, Blocks.DIRT, Blocks.GRASS_BLOCK};
+            for (int y = 0; y < 16; y += 1) {
+                for (int z = 0; z < 16; z += 1) {
+                    for (int x = 0; x < 16; x += 1) {
+                        BlockState state = sections[0].getBlockState(x, y, z);
+                        if (y < layers.length ? !state.is(layers[y]) : !state.isAir()) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            for (int index = 1; index < SECTIONS; index += 1) {
+                if (!sections[index].hasOnlyAir()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * 官方超平坦区块的光照：只存地面那段和它上下各一段。世界下面那段没写过，是空的；地面那段草方块以上是 15；
+         * 再上面一段整段是 15，更高的段不存，客户端按 15 算。方块光三段都是空的。
+         */
+        private void checkFlatLight(ClientboundLightUpdatePacketData light) {
+            flatLightChecked = true;
+            check("chunk: sky light is stored around the ground only",
+                    light.skyYMask().equals(bits(1, 2)) && light.emptySkyYMask().equals(bits(0)));
+            check("chunk: block light is stored empty around the ground",
+                    light.blockYMask().isEmpty() && light.emptyBlockYMask().equals(bits(0, 1, 2))
+                            && light.blockUpdates().isEmpty());
+            if (light.skyUpdates().size() != 2) {
+                check("chunk: one sky light array per stored section", false);
+                return;
+            }
+            DataLayer ground = new DataLayer(light.skyUpdates().get(0));
+            DataLayer above = new DataLayer(light.skyUpdates().get(1));
+            boolean groundLit = true;
+            boolean aboveLit = true;
+            for (int y = 0; y < 16; y += 1) {
+                for (int z = 0; z < 16; z += 1) {
+                    for (int x = 0; x < 16; x += 1) {
+                        groundLit &= ground.get(x, y, z) == (y < 4 ? 0 : 15);
+                        aboveLit &= above.get(x, y, z) == 15;
+                    }
+                }
+            }
+            check("chunk: sky light starts above the grass", groundLit);
+            check("chunk: sky light is full above the ground section", aboveLit);
+        }
+
+        /** light_update 只带变了的段，形状和区块包里的光照一样。 */
+        private void onLightUpdate(ClientboundLightUpdatePacket packet) {
+            checkLightStructure("light", packet.lightData());
+        }
+
+        /** 两个掩码不重叠，有数据的段一段一个数组，都在 26 段里。 */
+        private static void checkLightStructure(String scope, ClientboundLightUpdatePacketData light) {
+            check(scope + ": light masks stay inside the light sections",
+                    light.skyYMask().length() <= LIGHT_LAYERS && light.blockYMask().length() <= LIGHT_LAYERS
+                            && light.emptySkyYMask().length() <= LIGHT_LAYERS
+                            && light.emptyBlockYMask().length() <= LIGHT_LAYERS);
+            check(scope + ": a light section is either stored or empty",
+                    !light.skyYMask().intersects(light.emptySkyYMask())
+                            && !light.blockYMask().intersects(light.emptyBlockYMask()));
+            check(scope + ": one light array per stored section",
+                    light.skyUpdates().size() == light.skyYMask().cardinality()
+                            && light.blockUpdates().size() == light.blockYMask().cardinality());
+        }
+
+        private static BitSet bits(int... indexes) {
+            BitSet set = new BitSet();
+            for (int index : indexes) {
+                set.set(index);
+            }
+            return set;
         }
 
         private void onBatchFinished(ClientboundChunkBatchFinishedPacket packet) {

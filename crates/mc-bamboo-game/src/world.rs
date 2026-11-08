@@ -21,7 +21,7 @@ use crate::{
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
-    inventory, movement,
+    inventory, light_updates, movement,
     player::shows_hat,
     region::Region,
 };
@@ -73,10 +73,12 @@ impl World {
         }
     }
 
-    /// 推进一 tick。顺序有约束：计划刻和官方一样紧跟在时间增长之后，新区块排在区块中心和 forget 后面，
-    /// 方块变化排在 ack 前面，区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
+    /// 推进一 tick。顺序有约束：光照和官方一样在处理完请求之后、下一 tick 之前算，计划刻紧跟在时间增长之后，
+    /// 新区块排在区块中心和 forget 后面，光照变化紧挨在方块变化前面，方块变化排在 ack 前面，
+    /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
         self.process_inbox()?;
+        light_updates::run_light_updates(&mut self.region);
 
         self.global.advance_time();
         self.region.advance_tick();
@@ -85,6 +87,7 @@ impl World {
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
+        light_updates::broadcast_light_changes(&mut self.region);
         interaction::broadcast_block_changes(&mut self.region);
         entity_sync::sync_entities(&mut self.region);
         entity_sync::send_equipment_changes(&mut self.region);

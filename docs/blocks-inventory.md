@@ -1063,7 +1063,7 @@ for (Block block : BuiltInRegistries.BLOCK) {
 - 区块 `Section::set_block` 已经维护 `non_air_blocks`。`cave_air`、`void_air` 在官方也算空气，但玩家放不出来。
 - `chunk_encoding::write_section` 写死 `fluid_count = 0`。放置默认含水的方块会让这个值不对。客户端只把它用于 `EntityFluidInteraction` 的快速跳过，不影响渲染。
 - `encode_chunk_body` 写死方块实体数量 0。这个问题多人时必然遇到，见下面的“区块里的方块实体列表”。
-- 光照：`LevelChunk.setBlockState` 在客户端也会调用 `checkBlock`，客户端的 `ClientChunkCache` 有自己的 `LevelLightEngine`，每帧 `runLightUpdates`（`ClientLevel.update`）。所以代码上 `block_update` 不需要配 `light_update`（49）。官方也只把这个包发给“这个区块正好在追踪范围边缘”的玩家（`ChunkHolder.broadcastChanges` 的 `getPlayers(pos, true)`、`ChunkMap.isChunkOnTrackedBorder`），视距内部的玩家本来就靠自己算。实际观感 **UNVERIFIED**。`light.rs` 把所有非空气方块当作不透明，这只影响区块重发时的初始数据。
+- 光照：`LevelChunk.setBlockState` 在客户端也会调用 `checkBlock`，客户端的 `ClientChunkCache` 有自己的 `LevelLightEngine`，每帧 `runLightUpdates`（`ClientLevel.update`）。所以代码上 `block_update` 不需要配 `light_update`（49）。官方也只把这个包发给“这个区块正好在追踪范围边缘”的玩家（`ChunkHolder.broadcastChanges` 的 `getPlayers(pos, true)`、`ChunkMap.isChunkOnTrackedBorder`），视距内部的玩家本来就靠自己算。实际观感 **UNVERIFIED**。现在 Bamboo 用移植的官方光照引擎算光照，区块包带真实的光照，`light_update` 也照官方只发给边缘的玩家。
 - `Reader` 还缺 `i16`、`i32`、`f32`、`bool`。`rest()` 可以用来取走组件字节。
 - `PlayRequest` 派生了 `Copy` 和 `Eq`。加入 `f32` 字段要去掉 `Eq`，加入带 `Vec` 的物品要去掉 `Copy`。
 - ID 大于 127 的包（`update_attributes` 134）用两字节 VarInt，`append_frame` 走 `write_varint` 没有问题。
@@ -1120,7 +1120,7 @@ for (Block block : BuiltInRegistries.BLOCK) {
 | 项目 | 为什么不确定 | 怎么确认 |
 |---|---|---|
 | 不发 `container_set_content`、`set_held_slot` 时一切正常 | 代码看不出依赖，没有实测 | 进服后操作物品栏 |
-| 不发 `light_update` 时光照看起来正确 | 客户端确实重算，官方对视距内部也不发这个包。但起点是 Bamboo 简化的天空光数据，视距边缘的区块官方又是发的 | 挖坑、搭顶，在视距边缘也试一次 |
+| 光照看起来正确 | 服务端的光照和官方逐格比较过，`light_update` 也按官方只发给边缘的玩家，但客户端画面没有看过 | 挖坑、搭顶、插火把，在视距边缘也试一次 |
 | 靠方块实体渲染的方块在收到区块后看不见 | 从 `replaceWithPacketData`、`SectionCompiler` 和模型文件推出，没有看到现象。`Level.getBlockEntity` 是 `IMMEDIATE`，右键等逻辑访问时会补建，补建后这个 section 是否重新编译没有查 | 一名玩家放箱子，另一名玩家从视距外走过来 |
 | 官方发两个 `swing_animation` 时客户端的表现 | javap 确认发两次，`SwingState.startIfAble` 在同一 tick 允许重新开始，看不出可见差异，没有观察过 | 不影响 Bamboo，只发一个 |
 | 蹲下时 `pose` 变化的时机 | 实体阻挡用 1.5 还是 1.8，取决于服务端何时更新姿态。Bamboo 用 `player_input` 的 shift 近似，可能差一 tick。飞行时按 shift 官方仍是站立姿态，近似时会算成蹲下 | 影响很小 |

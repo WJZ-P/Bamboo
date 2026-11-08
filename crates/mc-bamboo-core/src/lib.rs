@@ -449,6 +449,15 @@ impl Direction {
     }
 }
 
+/// 两种光照，官方的 `LightLayer`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LightLayer {
+    /// 天空光：从天上照下来，被挡住的地方往四周散开。
+    Sky,
+    /// 方块光：火把、萤石这些方块自己发的光。
+    Block,
+}
+
 /// 玩家的两只手。枚举值就是网络上的 ID。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hand {

@@ -12,7 +12,7 @@ use mc_bamboo_blocks::{
     shape::{self, BooleanOp},
     use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, LightLayer, Vec3};
 use mc_bamboo_data::{blocks, items};
 
 use super::{
@@ -26,6 +26,8 @@ const STANDING_EYE_HEIGHT: f32 = 1.62;
 const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 /// 创造模式的 `blockInteractionRange`。
 const CREATIVE_INTERACTION_RANGE: f64 = 5.0;
+/// `BlockOracle.java` 假世界的亮度，两种光都是这个值。
+const FULL_BRIGHTNESS: i32 = 15;
 /// 流体的注册表名，下标是 [`mc_bamboo_data::registries::fluid`] 里的 ID。
 pub const FLUID_NAMES: [&str; 5] = [
     "minecraft:empty",
@@ -144,6 +146,11 @@ impl Level for OracleLevel {
 
     fn max_y(&self) -> i32 {
         self.max_y
+    }
+
+    /// 假世界里 `getBrightness` 恒为 15，`getSkyDarken` 是 0。
+    fn brightness(&self, _layer: LightLayer, _pos: BlockPos) -> i32 {
+        FULL_BRIGHTNESS
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Hand, LightLayer, Vec3};
 use mc_bamboo_data::{blocks, items};
 
 use crate::{Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, shape::Aabb};
@@ -18,6 +18,8 @@ pub(crate) struct TestLevel {
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
     pub(crate) obstructed: bool,
+    /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
+    pub(crate) light: Option<(i32, i32)>,
 }
 
 impl TestLevel {
@@ -62,6 +64,14 @@ impl Level for TestLevel {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        let (sky, block) = self.light.unwrap_or((15, 0));
+        match layer {
+            LightLayer::Sky => sky,
+            LightLayer::Block => block,
+        }
     }
 }
 

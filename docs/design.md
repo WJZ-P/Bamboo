@@ -121,10 +121,11 @@ impl Links {
 
 ```text
 1. 取出 inbox 里已有的全部消息，FIFO 处理
+   然后算完排着的光照，记下变了的段（官方在两个 tick 之间做这一步）
 2. game_time + 1
 3. 派生状态：head_yaw、姿势、元数据脏标记
 4. 区块跟踪：比较 (center, vd)，center → forget → pending
-5. 广播方块变化给 isChunkTracked 的玩家
+5. light_update 发给区块在跟踪范围边上的玩家，然后广播方块变化给 isChunkTracked 的玩家
 6. visible 配对和解除，然后每名玩家 send_changes
 7. 比较装备，发 set_equipment
 8. 每名玩家 block_changed_ack

@@ -2,7 +2,7 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::error;
 
@@ -76,8 +76,8 @@ const WORLD_BOUND: i32 = 30_000_000;
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
 /// 默认世界边界的半径。这个世界不能改边界。
 const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
-/// 这个世界没有光照引擎，一律按开阔的白天算。
-const FIXED_BRIGHTNESS: i32 = 15;
+/// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
+const SKY_DARKEN: i32 = 0;
 
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,9 +317,20 @@ impl<'a> World<'a> {
         state.is_face_sturdy(face, support)
     }
 
-    /// `getRawBrightness`。没有光照引擎，固定是 15，这是已知偏差。
-    pub const fn raw_brightness(&self, _pos: BlockPos) -> i32 {
-        FIXED_BRIGHTNESS
+    /// `getBrightness(layer, pos)`：只看天空光或者只看方块光。
+    pub fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
+        self.level.brightness(layer, pos)
+    }
+
+    /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
+    pub fn raw_brightness(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos))
+    }
+
+    /// `getEffectiveSkyBrightness`：天空光减去天色变暗的部分。
+    pub fn effective_sky_brightness(&self, pos: BlockPos) -> i32 {
+        (self.brightness(LightLayer::Sky, pos) - SKY_DARKEN).max(0)
     }
 
     /// `hasNeighborSignal`。世界里没有红石信号。写成函数是为了以后有红石时只改一处。

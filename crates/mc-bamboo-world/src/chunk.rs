@@ -2,12 +2,18 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_data::{block_of_state, blocks};
+use mc_bamboo_data::{block_of_state, blocks, facts, state_facts};
 
 use crate::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
+    light::{SkyLightSources, sources::updated_lowest_source},
     palette::{PalettedContainer, pack_values},
 };
+
+/// `isAir`：空气、洞穴空气和虚空空气。
+fn is_air(state: u32) -> bool {
+    state_facts(state) & facts::AIR != 0
+}
 
 /// 一个方块柱在高度图里占用的位数，要能表示 0 到 384。
 const HEIGHTMAP_BITS: u8 = 9;
@@ -41,7 +47,7 @@ impl Section {
     fn set_block(&mut self, x: usize, y: usize, z: usize, state: u32) {
         let index = Self::block_index(x, y, z);
         let previous = self.blocks.get(index);
-        match (previous == blocks::AIR, state == blocks::AIR) {
+        match (is_air(previous), is_air(state)) {
             (true, false) => self.non_air_blocks += 1,
             (false, true) => self.non_air_blocks -= 1,
             _ => {}
@@ -60,6 +66,11 @@ impl Section {
     /// 非空气方块的数量，客户端用它判断区块段是否为空。
     pub fn block_count(&self) -> u16 {
         self.non_air_blocks
+    }
+
+    /// `hasOnlyAir`。
+    pub fn is_empty(&self) -> bool {
+        self.non_air_blocks == 0
     }
 }
 
@@ -82,19 +93,52 @@ pub struct Chunk {
     sections: Vec<Section>,
     /// 有方块实体的位置和类型。键是 `(y, z, x)`，所以遍历顺序和放置的先后无关。
     block_entities: BTreeMap<(i32, usize, usize), i32>,
+    sky_light_sources: SkyLightSources,
 }
 
 impl Chunk {
-    /// 创建一个全是空气的区块。
+    /// 创建一个全是空气的区块。天空光源表要等 [`initialize_light_sources`](Self::initialize_light_sources) 才算。
     pub fn empty(biome: u32) -> Self {
         Self {
             sections: vec![Section::empty(biome); SECTION_COUNT],
             block_entities: BTreeMap::new(),
+            sky_light_sources: SkyLightSources::default(),
         }
     }
 
     pub fn sections(&self) -> &[Section] {
         &self.sections
+    }
+
+    /// 每一列最低的天空光源。
+    pub fn sky_light_sources(&self) -> &SkyLightSources {
+        &self.sky_light_sources
+    }
+
+    /// `initializeLightSources`：按现在的方块重算天空光源，生成完区块、开始算光照之前调用一次。
+    pub fn initialize_light_sources(&mut self) {
+        self.sky_light_sources = SkyLightSources::fill_from(self);
+    }
+
+    /// `ChunkSkyLightSources.update`：`(x, y, z)` 换了方块，光照性质也变了。
+    pub fn update_sky_light_sources(&mut self, x: usize, y: i32, z: usize) {
+        if let Some(lowest) = updated_lowest_source(self, x, y, z) {
+            self.sky_light_sources.set(x, z, lowest);
+        }
+    }
+
+    /// 和 [`block`](Self::block) 相同，但世界外是空气，官方 `LevelChunk.getBlockState` 的做法。
+    pub fn block_or_air(&self, x: usize, y: i32, z: usize) -> u32 {
+        if (MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            self.block(x, y, z)
+        } else {
+            blocks::AIR
+        }
+    }
+
+    /// 这一高度所在的区块段只有空气。
+    pub fn is_section_empty(&self, y: i32) -> bool {
+        self.sections[Self::locate(y).0].is_empty()
     }
 
     /// 区块里的方块实体，按高度、z、x 升序。

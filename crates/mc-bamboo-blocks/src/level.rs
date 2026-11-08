@@ -1,6 +1,6 @@
 //! 这个 crate 和世界存储的边界。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, LightLayer};
 
 use crate::{shape::Aabb, state::BlockState};
 
@@ -20,6 +20,9 @@ pub trait Level {
 
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
+
+    /// `getBrightness(layer, pos)`：这一格的天空光或者方块光，0 到 15。
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32;
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
