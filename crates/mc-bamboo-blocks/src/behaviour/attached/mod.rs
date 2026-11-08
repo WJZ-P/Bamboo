@@ -20,7 +20,7 @@ mod slot_container;
 mod torch;
 pub mod tripwire_hook;
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::BlockClass;
 
 use self::{
@@ -44,7 +44,10 @@ use super::{
     Behaviour,
     common::{BaseTorch, FaceAttached},
 };
-use crate::{state::BlockState, world::World};
+use crate::{
+    state::{BlockState, POWERED},
+    world::World,
+};
 
 /// 这个家族里类到行为的分派。新版本多出来、还没移植的类是 `None`。
 pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
@@ -84,6 +87,20 @@ fn update_attached_neighbours(state: BlockState, world: &mut World, pos: BlockPo
     let front = FaceAttached::connected_direction(state).opposite();
     world.update_neighbors_at(pos, state.block());
     world.update_neighbors_at(pos.relative(front), state.block());
+}
+
+/// 拉杆和按钮的 `ownSignal`。
+fn attached_own_signal(state: BlockState) -> i32 {
+    if state.get(POWERED) { 15 } else { 0 }
+}
+
+/// 拉杆和按钮的 `getDirectSignal`：只强充能它贴着的那一格。
+fn attached_direct_signal(state: BlockState, direction: Direction) -> i32 {
+    if state.get(POWERED) && FaceAttached::connected_direction(state) == direction {
+        15
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]

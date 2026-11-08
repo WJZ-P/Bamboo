@@ -1,6 +1,8 @@
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -12,6 +14,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -43,6 +46,7 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.PacketDecoder;
+import net.minecraft.network.VarInt;
 import net.minecraft.network.ProtocolInfo;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -118,6 +122,7 @@ import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.network.protocol.game.VecDeltaCodec;
 import net.minecraft.network.protocol.login.ClientLoginPacketListener;
+import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket;
 import net.minecraft.network.protocol.login.ServerboundHelloPacket;
@@ -161,6 +166,7 @@ import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -174,10 +180,14 @@ import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.ticks.ProtoChunkTicks;
 
 /**
  * 用官方 26.3 的网络代码扮演客户端，检查 Bamboo 发的每个包。
@@ -203,6 +213,8 @@ public final class Probe {
     private static final int VIEW_DISTANCE = 8;
     private static final int ALL_SKIN_PARTS = 0x7f;
     private static final int NO_HAT_SKIN_PARTS = 0x3f;
+    /** 官方服务器默认的 `network-compression-threshold`。 */
+    private static final int COMPRESSION_THRESHOLD = 256;
     /** 出生点所在的区块。 */
     private static final ChunkPos SPAWN_CHUNK = new ChunkPos(0, 0);
     /** 全部区块到齐之后走到这个区块，让服务端发 center、forget 和新区块。 */
@@ -1069,6 +1081,7 @@ public final class Probe {
         private boolean forgetBeforeCenter;
         private int keepAlives;
         private boolean latencyUpdated;
+        private boolean compressionSeen;
         private boolean disconnected;
         private boolean ownDataChecked;
         private boolean inBundle;
@@ -1138,6 +1151,7 @@ public final class Probe {
         void start() {
             connection.initiateServerboundPlayConnection(host, port, listener(ClientLoginPacketListener.class, Map.of(
                     "handleLoginFinished", packet -> onLoginFinished((ClientboundLoginFinishedPacket) packet),
+                    "handleCompression", packet -> onCompression((ClientboundLoginCompressionPacket) packet),
                     "handleDisconnect", packet -> onLoginRefused((ClientboundLoginDisconnectPacket) packet))));
             connection.send(new ServerboundHelloPacket(player, uuid));
         }
@@ -1232,6 +1246,10 @@ public final class Probe {
             check("play: first batch is the three by three around the spawn", firstBatchIsAroundTheSpawn());
             check("play: tab list has the player", tab.containsKey(uuid));
             check("play: was not disconnected", !disconnected);
+            check("compression: " + player + " received compressed frames", bridge.compressedFrames > 0);
+            check("compression: " + player + " received raw frames below the threshold", bridge.rawFrames > 0);
+            check("compression: " + player + " never compressed below the threshold",
+                    bridge.belowThresholdFrames == 0);
             playPackets.keySet().forEach(name -> check("play: M2 sends " + name, M2_PACKETS.contains(name)));
             if (walks) {
                 check("walk: center moved first", walkCenterArrived && !forgetBeforeCenter);
@@ -1263,6 +1281,15 @@ public final class Probe {
             return firstBatch.stream().allMatch(pos -> Math.abs(pos.x()) <= 1 && Math.abs(pos.z()) <= 1);
         }
 
+        /** 和官方客户端一样：收到登录压缩包之后才把管线换成压缩帧。 */
+        private void onCompression(ClientboundLoginCompressionPacket packet) {
+            int threshold = packet.getCompressionThreshold();
+            compressionSeen = true;
+            check("login: " + player + " was told the official compression threshold",
+                    threshold == COMPRESSION_THRESHOLD);
+            bridge.enableCompression(threshold);
+        }
+
         private void onLoginRefused(ClientboundLoginDisconnectPacket packet) {
             System.out.println("PROBE login refused: " + packet.reason().getString());
             check("login: accepted", false);
@@ -1272,6 +1299,7 @@ public final class Probe {
             check("login: name is kept", packet.gameProfile().name().equals(player));
             check("login: uuid uses the offline algorithm", packet.gameProfile().id().equals(uuid));
             check("login: session id is present", packet.sessionId() != null);
+            check("login: compression comes before the login success of " + player, compressionSeen);
 
             connection.setupInboundProtocol(ConfigurationProtocols.CLIENTBOUND, listener(
                     ClientConfigurationPacketListener.class, Map.of(
@@ -1749,7 +1777,43 @@ public final class Probe {
                 sections[index].read(buffer);
             }
             check("chunk: all sections were consumed", buffer.readableBytes() == 0);
+            checkChunkData(packet, sections);
             return sections;
+        }
+
+        /** 区块段头的计数和每种高度图都由官方代码从解出来的方块重算，再和收到的值比较。 */
+        private void checkChunkData(ClientboundLevelChunkWithLightPacket packet, LevelChunkSection[] sections) {
+            for (int index = 0; index < sections.length; index += 1) {
+                int receivedBlocks = privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount");
+                int receivedFluids = privateInt(sections[index], LevelChunkSection.class, "fluidCount");
+                sections[index].recalcBlockCounts();
+                check("chunk: section " + index + " block count",
+                        receivedBlocks == privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount"));
+                check("chunk: section " + index + " fluid count",
+                        receivedFluids == privateInt(sections[index], LevelChunkSection.class, "fluidCount"));
+            }
+
+            ProtoChunk chunk = new ProtoChunk(
+                    new ChunkPos(packet.x(), packet.z()),
+                    UpgradeData.EMPTY,
+                    sections,
+                    new ProtoChunkTicks<>(),
+                    new ProtoChunkTicks<>(),
+                    LevelHeightAccessor.create(-64, SECTIONS * 16),
+                    containers,
+                    null);
+            Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS);
+
+            Map<Heightmap.Types, long[]> received = packet.chunkData().getHeightmaps();
+            for (Heightmap.Types type : Heightmap.Types.values()) {
+                check("chunk: " + type + " is sent exactly when the client needs it",
+                        type.sendToClient() == received.containsKey(type));
+            }
+            for (Map.Entry<Heightmap.Types, long[]> entry : received.entrySet()) {
+                long[] expected = chunk.getOrCreateHeightmapUnprimed(entry.getKey()).getRawData();
+                check("chunk: " + entry.getKey() + " heightmap",
+                        Arrays.equals(entry.getValue(), expected));
+            }
         }
 
         /** 记下这个区块里改过的位置和方块实体，后来的玩家要靠它们检查改动。 */
@@ -1956,10 +2020,20 @@ public final class Probe {
 
     /** 在内存里运行官方管线，并把它的字节通过真实的 TCP socket 收发。 */
     private static final class Bridge implements AutoCloseable {
+        /** 官方管线上分帧之后、解压之前的位置，用来检查每个包的长度前缀。 */
+        private static final String FRAME_PROBE = "frame_probe";
+
         final Connection connection = new Connection(PacketFlow.CLIENTBOUND);
         private final EmbeddedChannel channel;
         private final Socket socket;
         private final byte[] chunk = new byte[1 << 16];
+        private int threshold;
+        /** 解压前的帧里长度前缀不为零的个数，也就是真的压缩过的包。 */
+        int compressedFrames;
+        /** 解压前的帧里长度前缀为零的个数，小包就是原样发的。 */
+        int rawFrames;
+        /** 长度前缀不为零但小于阈值的帧。官方不会这样发，客户端也会拒绝。 */
+        int belowThresholdFrames;
 
         Bridge(String host, int port) throws IOException {
             socket = new Socket(host, port);
@@ -1978,6 +2052,37 @@ public final class Probe {
         /** 官方管线关了这条连接。解码出错时走这条路。 */
         boolean channelClosed() {
             return !channel.isOpen();
+        }
+
+        /**
+         * 和官方客户端收到登录压缩包之后做的一样，把管线切换到压缩帧。
+         *
+         * <p>切换完再把探针挂在解压前面：分帧之后、解压之前的帧体带着长度前缀，
+         * 非零就说明服务端真的压了这一个包。
+         */
+        void enableCompression(int threshold) {
+            this.threshold = threshold;
+            connection.setupCompression(threshold, false);
+            channel.pipeline().addBefore("decompress", FRAME_PROBE, new FrameProbe());
+        }
+
+        /** 看一眼还没解压的帧体，只读长度前缀，不动它的读指针。 */
+        private final class FrameProbe extends ChannelInboundHandlerAdapter {
+            @Override
+            public void channelRead(ChannelHandlerContext context, Object message) {
+                if (message instanceof ByteBuf frame && frame.isReadable()) {
+                    int declared = VarInt.read(frame.duplicate());
+                    if (declared == 0) {
+                        rawFrames += 1;
+                    } else {
+                        compressedFrames += 1;
+                        if (declared < threshold) {
+                            belowThresholdFrames += 1;
+                        }
+                    }
+                }
+                context.fireChannelRead(message);
+            }
         }
 
         /** 转发一轮：先发管线里排队的字节，再读一次 socket，读不到时最多等 READ_TIMEOUT_MILLIS。 */

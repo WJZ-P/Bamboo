@@ -2,7 +2,7 @@
 //!
 //! 主世界里用充能的重生锚官方会爆炸，爆炸不在范围里：这里吃掉点击，方块留在原地。
 
-use mc_bamboo_core::Hand;
+use mc_bamboo_core::{BlockPos, Direction, Hand};
 use mc_bamboo_data::items;
 
 use crate::{
@@ -22,6 +22,11 @@ const MAX_CHARGES: i32 = 4;
 /// `canBeCharged`。
 fn can_be_charged(state: BlockState) -> bool {
     state.get(RESPAWN_ANCHOR_CHARGES) < MAX_CHARGES
+}
+
+/// `getScaledChargeLevel`：官方算的是 `floor(charges / 4.0 * maximum)`，充能非负，整数除法一样。
+fn scaled_charge_level(state: BlockState, maximum: i32) -> i32 {
+    state.get(RESPAWN_ANCHOR_CHARGES) * maximum / MAX_CHARGES
 }
 
 impl Behaviour for RespawnAnchor {
@@ -58,11 +63,20 @@ impl Behaviour for RespawnAnchor {
             InteractionResult::SuccessServer
         }
     }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        scaled_charge_level(state, 15)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_core::BlockPos;
     use mc_bamboo_data::blocks;
 
     use super::*;

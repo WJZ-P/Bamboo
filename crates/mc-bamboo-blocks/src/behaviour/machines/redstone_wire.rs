@@ -1,7 +1,9 @@
 //! `RedstoneWireBlock` 和官方的 `DefaultRedstoneWireEvaluator`。
 //!
-//! 世界里没有信号，放下的线永远是 0。状态里写着 `power` 的线只会慢慢熄掉，
-//! 这和官方在没有信号时的结果相同，所以强度的计算照官方写。
+//! 实验性的 `ExperimentalRedstoneWireEvaluator` 不做，默认那套就是原版的行为。
+//!
+//! 算自己的输入时要先把自己的信号关掉，不然导线的功率会绕回自己身上，
+//! 官方用方块实例上的 `shouldSignal` 标记做这件事，见 [`World::wire_block_signal`]。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor, BlockClass, blocks};
@@ -184,8 +186,8 @@ fn incoming_wire_signal(world: &World, pos: BlockPos) -> i32 {
 }
 
 /// `calculateTargetStrength`。
-fn target_strength(world: &World, pos: BlockPos) -> i32 {
-    let block_signal = world.best_neighbor_signal(pos);
+fn target_strength(world: &mut World, pos: BlockPos) -> i32 {
+    let block_signal = world.wire_block_signal(pos);
     if block_signal == 15 {
         block_signal
     } else {
@@ -396,5 +398,38 @@ impl Behaviour for RedstoneWire {
         world.set_block_and_update(pos, updated);
         updates_on_shape_change(world, pos, state, updated);
         InteractionResult::Success
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        state.get(POWER)
+    }
+
+    fn signal(&self, state: BlockState, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        if !world.wire_should_signal() || direction == Direction::Down {
+            return 0;
+        }
+        let power = state.own_signal(world, pos);
+        // 往上和连着的那几面才输出，所以一根直线不会给旁边的方块充能。
+        if power == 0
+            || direction != Direction::Up
+                && !is_connected(connection_state(state, world, pos), direction.opposite())
+        {
+            return 0;
+        }
+        power
+    }
+
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if world.wire_should_signal() {
+            state.signal(world, pos, direction)
+        } else {
+            0
+        }
     }
 }

@@ -276,7 +276,11 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                 except_initiator,
             } => {
                 let except = initiator.filter(|_| except_initiator);
-                send_destroy_event(region, except, pos, state.0);
+                let event = LevelEvent::destroy_block(pos, state.0 as i32);
+                send_level_event(region, except, &event);
+            }
+            Effect::TorchBurnout { pos } => {
+                send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
             }
             Effect::FilledBucket { item } => {
                 if let Some(id) = initiator {
@@ -286,7 +290,7 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
             // `markUpdated` 的 `sendBlockUpdated`：方块没变，广播阶段照样重发这一格。
             Effect::SignChanged { pos } => region.block_changes.changed.push(pos),
             Effect::SignWaxed { pos } => {
-                broadcast_level_event(region, None, &LevelEvent::wax_on_sign(pos));
+                send_level_event(region, None, &LevelEvent::wax_on_sign(pos));
             }
             // `openTextEdit` 只给登记的编辑者发，它一定就是发起者。
             Effect::OpenSignEditor { pos, slot } => {
@@ -298,17 +302,8 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
     }
 }
 
-/// 破坏的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
-fn send_destroy_event(region: &mut Region, except: Option<PlayerId>, pos: BlockPos, state: u32) {
-    broadcast_level_event(
-        region,
-        except,
-        &LevelEvent::destroy_block(pos, state as i32),
-    );
-}
-
-/// `levelEvent`：发给能听到这一格的玩家。
-fn broadcast_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
+/// 世界事件的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
+fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
     let frames = encode_frames(event);
     for player in region.players.values() {
         if Some(player.id) != except && hears_level_event(player, event.pos) {

@@ -1,7 +1,7 @@
 //! `BaseRailBlock` 和它的子类 `RailBlock`、`PoweredRailBlock`、`DetectorRailBlock`，还有 `RailState`。
 //!
-//! 世界里没有矿车，也没有信号：探测铁轨不会被压下，动力铁轨不会通电。
-//! 铁轨之间的连接和失去支撑都不看这些。
+//! 世界里没有矿车：探测铁轨不会被压下，所以它的 `powered` 只在被指令改时才变。
+//! 动力铁轨和激活铁轨看真实信号，也顺着铁轨往两头找通电的同类铁轨。
 
 use mc_bamboo_core::{Axis, BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor, BlockClass, tags::block_tags};
@@ -91,9 +91,106 @@ fn update_junction(state: BlockState, world: &mut World, pos: BlockPos, source: 
     }
 }
 
-/// `PoweredRailBlock.updateState`。官方还顺着铁轨找通电的铁轨，那也要有信号才找得到。
+/// `findPoweredRailSignal` 的搜索深度上限。
+const MAX_RAIL_SEARCH_DEPTH: i32 = 8;
+
+/// `findPoweredRailSignal` 里按形状走出的一步：偏移、折算成直线的形状、要不要再看低一格。
+struct RailStep {
+    offset: (i32, i32, i32),
+    shape: RailShape,
+    check_below: bool,
+}
+
+/// 顺着形状往 `forward` 那一头走一格。爬上斜坡的那一头不看低一格。
+fn rail_step(shape: RailShape, forward: bool) -> RailStep {
+    let flat = |offset, shape| RailStep {
+        offset,
+        shape,
+        check_below: true,
+    };
+    let up = |offset, shape| RailStep {
+        offset,
+        shape,
+        check_below: false,
+    };
+    match (shape, forward) {
+        (RailShape::NorthSouth, true) => flat((0, 0, 1), RailShape::NorthSouth),
+        (RailShape::NorthSouth, false) => flat((0, 0, -1), RailShape::NorthSouth),
+        (RailShape::EastWest, true) => flat((-1, 0, 0), RailShape::EastWest),
+        (RailShape::EastWest, false) => flat((1, 0, 0), RailShape::EastWest),
+        (RailShape::AscendingEast, true) => flat((-1, 0, 0), RailShape::EastWest),
+        (RailShape::AscendingEast, false) => up((1, 1, 0), RailShape::EastWest),
+        (RailShape::AscendingWest, true) => up((-1, 1, 0), RailShape::EastWest),
+        (RailShape::AscendingWest, false) => flat((1, 0, 0), RailShape::EastWest),
+        (RailShape::AscendingNorth, true) => flat((0, 0, 1), RailShape::NorthSouth),
+        (RailShape::AscendingNorth, false) => up((0, 1, -1), RailShape::NorthSouth),
+        (RailShape::AscendingSouth, true) => up((0, 1, 1), RailShape::NorthSouth),
+        (RailShape::AscendingSouth, false) => flat((0, 0, -1), RailShape::NorthSouth),
+        // 动力铁轨只有直的形状，官方的 switch 在这里什么都不改，于是原地查一次。
+        (curve, _) => flat((0, 0, 0), curve),
+    }
+}
+
+/// `isSameRailWithPower` 里那两串条件：两段铁轨横着交叉就不算连着。
+const fn crosses(dir: RailShape, shape: RailShape) -> bool {
+    match dir {
+        RailShape::EastWest => matches!(
+            shape,
+            RailShape::NorthSouth | RailShape::AscendingNorth | RailShape::AscendingSouth
+        ),
+        RailShape::NorthSouth => matches!(
+            shape,
+            RailShape::EastWest | RailShape::AscendingEast | RailShape::AscendingWest
+        ),
+        _ => false,
+    }
+}
+
+/// `isSameRailWithPower`：同一种铁轨、方向对得上、通着电，还得自己有信号或者再往前找得到。
+fn is_same_rail_with_power(
+    world: &World,
+    pos: BlockPos,
+    block: &'static Block,
+    forward: bool,
+    depth: i32,
+    dir: RailShape,
+) -> bool {
+    let state = world.block_state(pos);
+    if !state.is_same_block(default_state(block)) {
+        return false;
+    }
+    if crosses(dir, state.get(RAIL_SHAPE)) || !state.get(POWERED) {
+        return false;
+    }
+    world.has_neighbor_signal(pos)
+        || find_powered_rail_signal(world, pos, state, forward, depth + 1)
+}
+
+/// `findPoweredRailSignal`：顺着铁轨往一头找有信号的同类铁轨。
+fn find_powered_rail_signal(
+    world: &World,
+    pos: BlockPos,
+    state: BlockState,
+    forward: bool,
+    depth: i32,
+) -> bool {
+    if depth >= MAX_RAIL_SEARCH_DEPTH {
+        return false;
+    }
+    let step = rail_step(state.get(RAIL_SHAPE), forward);
+    let (dx, dy, dz) = step.offset;
+    let next = pos.offset(dx, dy, dz);
+    let block = state.block();
+    is_same_rail_with_power(world, next, block, forward, depth, step.shape)
+        || step.check_below
+            && is_same_rail_with_power(world, next.below(), block, forward, depth, step.shape)
+}
+
+/// `PoweredRailBlock.updateState`。
 fn update_powered_rail(state: BlockState, world: &mut World, pos: BlockPos) {
-    let should_power = world.has_neighbor_signal(pos);
+    let should_power = world.has_neighbor_signal(pos)
+        || find_powered_rail_signal(world, pos, state, true, 0)
+        || find_powered_rail_signal(world, pos, state, false, 0);
     if should_power == state.get(POWERED) {
         return;
     }
@@ -182,6 +279,30 @@ impl Behaviour for Rail {
             world.remove_block(pos);
         } else {
             neighbor_update(state, world, pos, source);
+        }
+    }
+
+    /// `DetectorRailBlock.ownSignal`。另外两种铁轨不是信号源，连 `POWERED` 都没有。
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        if state.class() == BlockClass::DetectorRailBlock && state.get(POWERED) {
+            15
+        } else {
+            0
+        }
+    }
+
+    /// `DetectorRailBlock.getDirectSignal`：只强充能上面那一格。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if direction == Direction::Up {
+            state.own_signal(world, pos)
+        } else {
+            0
         }
     }
 }

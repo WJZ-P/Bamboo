@@ -45,6 +45,10 @@ impl Behaviour for DaylightDetector {
         update_signal_strength(toggled, world, pos);
         InteractionResult::Success
     }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        state.get(POWER)
+    }
 }
 
 #[cfg(test)]

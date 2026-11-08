@@ -39,6 +39,7 @@ pub struct Extracted {
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
+    pub heightmaps: Vec<HeightmapType>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +188,19 @@ pub struct LightTables {
     pub face_count: usize,
     /// 两两之间的 `faceShapeOccludes`，Java 的 `long` 是有符号的。
     pub face_occludes: Vec<i64>,
+}
+
+/// `Heightmap.Types` 的一种。区块包按 `id` 排列，`id` 也是网络上的键。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeightmapType {
+    /// 官方的序列化名，比如 `MOTION_BLOCKING_NO_LEAVES`。
+    pub name: String,
+    pub id: i32,
+    /// `sendToClient`：区块包带上这一种。
+    pub send_to_client: bool,
+    /// `keepAfterWorldgen`：区块里一直留着这一种。
+    pub keep_after_worldgen: bool,
 }
 
 /// 官方写在静态表里的方块对应关系，都是方块注册表 ID。
@@ -342,6 +356,8 @@ pub struct VersionData {
     pub block_maps: BlockMaps,
     /// 按名字排序。
     pub block_transformers: Vec<BlockTransformer>,
+    /// 按官方 `Heightmap.Types.values()` 的顺序。
+    pub heightmaps: Vec<HeightmapType>,
     /// 内置注册表名 → 按 ID 排列的条目。
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
@@ -386,6 +402,7 @@ pub fn run(
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
         block_transformers: extracted.block_transformers,
+        heightmaps: extracted.heightmaps,
         builtin_registries,
         packets,
     })

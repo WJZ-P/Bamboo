@@ -50,6 +50,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
@@ -79,6 +80,7 @@ import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.CombiningPredicate;
@@ -127,6 +129,8 @@ public final class Extractor {
     private static final int FACT_ANALOG_OUTPUT = 1 << 27;
     private static final int FACT_PROPAGATES_SKYLIGHT = 1 << 28;
     private static final int FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION = 1 << 29;
+    private static final int FACT_MOTION_BLOCKING = 1 << 30;
+    private static final int FACT_MOTION_BLOCKING_NO_LEAVES = 1 << 31;
     private static final int STURDY_MASK = (1 << 18) - 1;
 
     public static void main(String[] args) throws Exception {
@@ -155,6 +159,7 @@ public final class Extractor {
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
+            root.add("heightmaps", heightmaps());
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -175,6 +180,20 @@ public final class Extractor {
                 .join();
         staticTags.forEach(Registry.PendingTags::apply);
         return initial.replaceFrom(RegistryLayer.WORLD, world);
+    }
+
+    /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */
+    private static JsonArray heightmaps() throws ReflectiveOperationException {
+        JsonArray types = new JsonArray();
+        for (Heightmap.Types type : Heightmap.Types.values()) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", type.getSerializedName());
+            entry.addProperty("id", (int) readField(Heightmap.Types.class, "id", type));
+            entry.addProperty("sendToClient", type.sendToClient());
+            entry.addProperty("keepAfterWorldgen", type.keepAfterWorldgen());
+            types.add(entry);
+        }
+        return types;
     }
 
     private static JsonObject version() {
@@ -777,7 +796,7 @@ public final class Extractor {
             boolean movesShape = movesShape(state.getBlock());
             checkPositionFacts(id, state, movesShape);
 
-            facts.add(stateFacts(state, BlockPos.ZERO));
+            facts.add(Integer.toUnsignedLong(stateFacts(state, BlockPos.ZERO)));
             fluid.add(fluidIndex(state.getFluidState()));
             lightDampening.add(state.getLightDampening());
 
@@ -885,6 +904,8 @@ public final class Extractor {
             facts |= state.hasAnalogOutputSignal() ? FACT_ANALOG_OUTPUT : 0;
             facts |= state.propagatesSkylightDown() ? FACT_PROPAGATES_SKYLIGHT : 0;
             facts |= state.useShapeForLightOcclusion() ? FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION : 0;
+            facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) ? FACT_MOTION_BLOCKING : 0;
+            facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES) ? FACT_MOTION_BLOCKING_NO_LEAVES : 0;
             return facts;
         }
 

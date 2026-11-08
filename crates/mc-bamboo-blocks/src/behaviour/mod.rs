@@ -151,6 +151,46 @@ pub trait Behaviour: Sync {
     /// `tick`：计划刻到期。
     fn tick(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
 
+    /// `ownSignal`：这一格自己发出多强的信号，不算穿过它的强充能。
+    fn own_signal(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        0
+    }
+
+    /// `getSignal`：朝 `direction` 这一侧输出多强的信号。
+    ///
+    /// `direction` 是从接收方指向这一格的方向，也就是信号前进方向的反面。
+    fn signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        state.own_signal(world, pos)
+    }
+
+    /// `getDirectSignal`：朝 `direction` 这一侧强充能多少。只有强充能能穿过导体。
+    fn direct_signal(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        0
+    }
+
+    /// `getAnalogOutputSignal`：比较器从这一格读出来的模拟信号。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        0
+    }
+
     /// `getCollisionShape`。默认读生成的表。
     fn collision_boxes(
         &self,
@@ -660,6 +700,27 @@ impl BlockState {
     /// `tick`。
     pub fn tick(self, world: &mut World, pos: BlockPos) {
         self.behaviour().tick(self, world, pos);
+    }
+
+    /// `getOwnSignal`。
+    pub fn own_signal(self, world: &World, pos: BlockPos) -> i32 {
+        self.behaviour().own_signal(self, world, pos)
+    }
+
+    /// `getSignal`。
+    pub fn signal(self, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        self.behaviour().signal(self, world, pos, direction)
+    }
+
+    /// `getDirectSignal`。
+    pub fn direct_signal(self, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        self.behaviour().direct_signal(self, world, pos, direction)
+    }
+
+    /// `getAnalogOutputSignal`。
+    pub fn analog_output_signal(self, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        self.behaviour()
+            .analog_output_signal(self, world, pos, direction)
     }
 
     /// `getCollisionShape`。

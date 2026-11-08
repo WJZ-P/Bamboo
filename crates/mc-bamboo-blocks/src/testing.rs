@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use mc_bamboo_core::{BlockPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 
-use crate::{Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, shape::Aabb};
+use crate::{
+    Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, level::RedstoneMemory,
+    shape::Aabb,
+};
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -20,6 +23,7 @@ pub(crate) struct TestLevel {
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
     pub(crate) obstructed: bool,
+    redstone: RedstoneMemory,
     /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
     pub(crate) light: Option<(i32, i32)>,
 }
@@ -92,6 +96,14 @@ impl Level for TestLevel {
         }
         self.signs.insert(pos, content);
         true
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
     }
 }
 

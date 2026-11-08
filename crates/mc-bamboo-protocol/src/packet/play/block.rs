@@ -112,6 +112,19 @@ impl LevelEvent {
     /// 告示牌上蜡成功，官方 `HoneycombItem.tryApplyToSign` 里的 `levelEvent(null, 3003, pos, 0)`。
     pub const WAX_ON_SIGN: i32 = 3003;
 
+    /// 红石火把烧坏时的烟。
+    pub const REDSTONE_TORCH_BURNOUT: i32 = 1502;
+
+    /// 红石火把烧坏时的烟。
+    pub const fn redstone_torch_burnout(pos: BlockPos) -> Self {
+        Self {
+            event: Self::REDSTONE_TORCH_BURNOUT,
+            pos,
+            data: 0,
+            global: false,
+        }
+    }
+
     /// 破坏方块的粒子和声音。发起者已经在本地预测过，不要发给他。
     pub const fn destroy_block(pos: BlockPos, state: i32) -> Self {
         Self {

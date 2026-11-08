@@ -1,5 +1,7 @@
 //! 这个 crate 和世界存储的边界。
 
+use std::collections::{HashMap, HashSet};
+
 use mc_bamboo_core::{
     BlockPos, LightLayer,
     sign::{SignContent, SignTextSlot},
@@ -35,6 +37,95 @@ pub trait Level {
 
     /// 改写告示牌的内容，对应 `SignBlockEntity` 里那几个字段。不是告示牌方块时返回 `false`。
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool;
+
+    /// 红石用到的、方块状态装不下的世界数据。
+    fn redstone(&self) -> &RedstoneMemory;
+
+    /// 见 [`Level::redstone`]。
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory;
+}
+
+/// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。
+///
+/// 官方把这些放在方块实体（比较器的输出、雕纹书架最近动过的格子、唱片机在不在放）
+/// 和按世界分组的静态表（火把最近的开关）里。
+#[derive(Debug, Default)]
+pub struct RedstoneMemory {
+    /// `ComparatorBlockEntity.outputSignal`。没有记录的格子是 0，和空的方块实体一样。
+    comparator_outputs: HashMap<BlockPos, i32>,
+    /// `ChiseledBookShelfBlockEntity.lastInteractedSlot`。没有记录的格子是 -1，也就是没动过。
+    bookshelf_slots: HashMap<BlockPos, usize>,
+    /// `JukeboxBlockEntity` 的 `songPlayer.isPlaying()`。唱片的内容不在范围里，只记哪几格在放。
+    /// 世界生成时直接摆下的 `has_record=true` 唱机没有方块实体，也就没在放。
+    jukebox_playing: HashSet<BlockPos>,
+    /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
+    torch_toggles: Vec<(BlockPos, i64)>,
+}
+
+impl RedstoneMemory {
+    /// `ComparatorBlockEntity.getOutputSignal`。
+    pub fn comparator_output(&self, pos: BlockPos) -> i32 {
+        self.comparator_outputs.get(&pos).copied().unwrap_or(0)
+    }
+
+    /// `ComparatorBlockEntity.setOutputSignal`。
+    pub fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
+        self.comparator_outputs.insert(pos, signal);
+    }
+
+    /// `ChiseledBookShelfBlockEntity.getLastInteractedSlot`，没动过时是 `None`。
+    pub fn last_bookshelf_slot(&self, pos: BlockPos) -> Option<usize> {
+        self.bookshelf_slots.get(&pos).copied()
+    }
+
+    /// 放进或者拿出一本书时记下是哪一格。
+    pub fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize) {
+        self.bookshelf_slots.insert(pos, slot);
+    }
+
+    /// `JukeboxSongPlayer.isPlaying`。
+    pub fn is_jukebox_playing(&self, pos: BlockPos) -> bool {
+        self.jukebox_playing.contains(&pos)
+    }
+
+    /// `JukeboxSongPlayer.play`、`stop` 之后记下这一格在不在放。
+    pub fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
+        if playing {
+            self.jukebox_playing.insert(pos);
+        } else {
+            self.jukebox_playing.remove(&pos);
+        }
+    }
+
+    /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
+    pub fn forget_block_entity(&mut self, pos: BlockPos) {
+        self.comparator_outputs.remove(&pos);
+        self.bookshelf_slots.remove(&pos);
+        self.jukebox_playing.remove(&pos);
+    }
+
+    /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
+    pub fn forget_torch_toggles_before(&mut self, when: i64) {
+        let keep = self
+            .torch_toggles
+            .iter()
+            .position(|&(_, toggled_at)| toggled_at >= when)
+            .unwrap_or(self.torch_toggles.len());
+        self.torch_toggles.drain(..keep);
+    }
+
+    /// 记下一次开关。
+    pub fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
+        self.torch_toggles.push((pos, when));
+    }
+
+    /// 这一格还留着几次开关记录。
+    pub fn torch_toggle_count(&self, pos: BlockPos) -> usize {
+        self.torch_toggles
+            .iter()
+            .filter(|&&(toggled, _)| toggled == pos)
+            .count()
+    }
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
@@ -46,6 +137,8 @@ pub enum Effect {
         state: BlockState,
         except_initiator: bool,
     },
+    /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
+    TorchBurnout { pos: BlockPos },
     /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
     /// 物品栏里没有 `item` 时放一个进去。
     FilledBucket { item: i32 },
