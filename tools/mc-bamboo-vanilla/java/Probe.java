@@ -4,6 +4,7 @@ import io.netty.buffer.Unpooled;
 import it.unimi.dsi.fastutil.shorts.ShortIterator;
 import it.unimi.dsi.fastutil.shorts.ShortOpenHashSet;
 import io.netty.channel.Channel;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
@@ -57,6 +58,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.HashedStack;
 import net.minecraft.network.PacketDecoder;
 import net.minecraft.network.PacketSendListener;
 import net.minecraft.network.VarInt;
@@ -90,6 +92,8 @@ import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
+import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundDisguisedChatPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
@@ -100,6 +104,7 @@ import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
+import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
@@ -123,6 +128,8 @@ import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPickItemFromBlockPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket;
@@ -177,6 +184,8 @@ import net.minecraft.world.entity.PositionPath;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.entity.player.ChatVisiblity;
 import net.minecraft.world.entity.player.Input;
+import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -292,6 +301,8 @@ public final class Probe {
             "handleChunkBatchFinished",
             "handleChunkBatchStart",
             "handleChunkBlocksUpdate",
+            "handleContainerClose",
+            "handleContainerContent",
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
@@ -305,6 +316,7 @@ public final class Probe {
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
+            "handleOpenScreen",
             "handleOpenSignEditor",
             "handlePlayerAbilities",
             "handlePlayerInfoRemove",
@@ -566,6 +578,8 @@ public final class Probe {
                 section("inventory" + names, () -> inventory(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
             }
+
+            section("containers", () -> containers(kitten, mochi));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
@@ -1105,6 +1119,120 @@ public final class Probe {
             await("inventory: ctrl+Q takes the stack", () -> isEmpty(remote, EquipmentSlot.MAINHAND));
         }
 
+        /**
+         * 箱子：打开、放进物品、关上、再打开还在，另一名玩家打开能看到同一份内容。
+         * 打开和关闭的人数也通过方块事件同步给附近的人。
+         */
+        private void containers(Join opener, Join watcher) throws IOException {
+            BlockPos chest = chestOf(opener);
+            // 快捷栏第 3 格放苹果，后面 Shift 点击把它推进箱子。官方不回应这个包，
+            // 所以内容要等打开菜单时的完整内容来确认。
+            opener.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 3, new ItemStack(Items.APPLE, 7)));
+            pumpFor(TICK_MILLIS);
+
+            int openerEvents = opener.blockEvents.size();
+            int watcherEvents = watcher.blockEvents.size();
+            int firstId = openChest(opener, chest);
+            check("container: the chest menu is three rows", MenuType.GENERIC_9x3.equals(opener.openMenuType));
+            check("container: the chest menu has sixty-three slots", opener.lastContent.size() == 63);
+            check("container: a new menu starts at state one", opener.lastContentState == 1);
+            check("container: the apple is in the opened inventory",
+                    is(opener.menuSlots.get(54 + 3), Items.APPLE, 7));
+            await("container: the open event reaches both players",
+                    () -> chestEventCount(opener, chest, openerEvents) == 1
+                            && chestEventCount(watcher, chest, watcherEvents) == 1);
+            check("container: opening sets the open count to one", lastChestEvent(opener, chest).getB1() == 1);
+
+            // 箱子有 27 格，后面是玩家背包 27 格，再往后才是快捷栏，所以快捷栏第 3 格是 54 + 3。
+            int clickState = opener.menuStateId;
+            int hotbarSlot = 54 + 3;
+            opener.send(opener.click(hotbarSlot, 0, ContainerInput.QUICK_MOVE));
+            await("container: shift-click moves the apple into the chest",
+                    () -> is(opener.menuSlots.get(0), Items.APPLE, 7)
+                            && opener.menuSlots.getOrDefault(hotbarSlot, ItemStack.EMPTY).isEmpty());
+            check("container: two slots changed, one state id each", opener.menuStateId == clickState + 2);
+            check("container: the shifted stack keeps its count", opener.menuSlots.get(0).getCount() == 7);
+
+            opener.send(new ServerboundContainerClosePacket(opener.openContainerId));
+            await("container: closing brings the open count to zero",
+                    () -> isClosedChest(opener, chest));
+
+            // 再打开，苹果还在。菜单 ID 换了，内容从头发。
+            int secondId = openChest(opener, chest);
+            check("container: reopening uses a new container id", secondId != firstId);
+            check("container: the apple was kept", is(opener.menuSlots.get(0), Items.APPLE, 7));
+            check("container: the reopened menu starts at state one", opener.lastContentState == 1);
+
+            // 第二名玩家走到箱子旁边再打开，看到同一份内容，开盖人数变成二。
+            watcher.moveTo(new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 2.5), true);
+            pumpFor(TICK_MILLIS);
+            openChest(watcher, chest);
+            await("container: the second player sees the apple", () -> is(watcher.menuSlots.get(0), Items.APPLE, 7));
+            await("container: the open count reaches two", () -> lastChestEvent(opener, chest).getB1() == 2);
+            watcher.send(new ServerboundContainerClosePacket(watcher.openContainerId));
+            await("container: the open count goes back to one", () -> lastChestEvent(opener, chest).getB1() == 1);
+            opener.send(new ServerboundContainerClosePacket(opener.openContainerId));
+            await("container: closing the chest is seen by the watcher",
+                    () -> isClosedChest(watcher, chest));
+        }
+
+        /** 这名玩家在 `blocks` 里放下的箱子。 */
+        private static BlockPos chestOf(Join client) {
+            for (Edit edit : client.edits) {
+                if (edit.state.is(Blocks.CHEST)) {
+                    return edit.pos;
+                }
+            }
+            throw new StepFailed(client.player + " placed no chest");
+        }
+
+        /** 右键箱子并等到 open_screen 和完整的 container_set_content 都到了，返回菜单 ID。 */
+        private int openChest(Join client, BlockPos chest) throws IOException {
+            client.openMenuType = null;
+            client.lastContentState = -1;
+            client.menuSlots.clear();
+            int sequence = client.nextSequence();
+            client.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(chest, 1.0), Direction.UP, chest, false),
+                    sequence));
+            await("container: " + client.player + " gets the ack for opening", () -> client.lastAck >= sequence);
+            await("container: " + client.player + " gets the chest screen", () -> client.openMenuType != null);
+            await("container: " + client.player + " gets the chest content", () -> client.lastContentState >= 0);
+            return client.openContainerId;
+        }
+
+        private static int chestEventCount(Join client, BlockPos pos, int start) {
+            int count = 0;
+            for (int index = start; index < client.blockEvents.size(); index += 1) {
+                ClientboundBlockEventPacket event = client.blockEvents.get(index);
+                if (event.getPos().equals(pos) && event.getB0() == 1 && event.getBlock() == Blocks.CHEST) {
+                    count += 1;
+                }
+            }
+            return count;
+        }
+
+        private static ClientboundBlockEventPacket lastChestEvent(Join client, BlockPos pos) {
+            for (int index = client.blockEvents.size() - 1; index >= 0; index -= 1) {
+                ClientboundBlockEventPacket event = client.blockEvents.get(index);
+                if (event.getPos().equals(pos) && event.getB0() == 1 && event.getBlock() == Blocks.CHEST) {
+                    return event;
+                }
+            }
+            return null;
+        }
+
+        /** 最后一条开盖事件是 0，说明服务器认为盖子已经合上。 */
+        private static boolean isClosedChest(Join client, BlockPos pos) {
+            ClientboundBlockEventPacket event = lastChestEvent(client, pos);
+            return event != null && event.getB1() == 0;
+        }
+
+        private static boolean is(ItemStack stack, Item item, int count) {
+            return stack != null && stack.is(item) && stack.getCount() == count;
+        }
+
         private void chat(Join actor, Join observer) throws IOException {
             String expected = "<" + actor.player + "> " + CHAT_TEXT;
             actor.send(new ServerboundChatPacket(
@@ -1268,6 +1396,10 @@ public final class Probe {
         /** 收到过编辑界面的告示牌，值是玩家要编辑的那一面。 */
         final Map<BlockPos, SignTextSlot> signEditors = new HashMap<>();
         final Map<Integer, ItemStack> slots = new HashMap<>();
+        /** 打开的菜单里的槽，和容器 0 的 `slots` 分开记。 */
+        final Map<Integer, ItemStack> menuSlots = new HashMap<>();
+        /** 活塞伸出、收回的动画事件，箱子开合的人数也走这个包。 */
+        final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<Edit> edits = new ArrayList<>();
         /** 放下又消失的方块。地面上的空气 `recordChunk` 不记，所以不能写成 `Edit`。 */
         final List<BlockPos> cleared = new ArrayList<>();
@@ -1275,8 +1407,6 @@ public final class Probe {
         /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
         final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
-        /** 活塞伸出、收回的动画事件。 */
-        final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
@@ -1285,6 +1415,11 @@ public final class Probe {
         int lastAck = -1;
         int acks;
         int stats;
+        int openContainerId = -1;
+        MenuType<?> openMenuType;
+        int menuStateId = -1;
+        int lastContentState = -1;
+        List<ItemStack> lastContent = List.of();
 
         Join(
                 String host,
@@ -1693,8 +1828,12 @@ public final class Probe {
             handlers.put("handleOpenSignEditor",
                     value -> onOpenSignEditor((ClientboundOpenSignEditorPacket) value));
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
-            handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
             handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
+            handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
+            handlers.put("handleOpenScreen", value -> onOpenScreen((ClientboundOpenScreenPacket) value));
+            handlers.put("handleContainerContent",
+                    value -> onContainerContent((ClientboundContainerSetContentPacket) value));
+            handlers.put("handleContainerClose", value -> onContainerClose((ClientboundContainerClosePacket) value));
             handlers.put("handleContainerSetSlot", value -> onSetSlot((ClientboundContainerSetSlotPacket) value));
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
@@ -2041,8 +2180,51 @@ public final class Probe {
         }
 
         private void onSetSlot(ClientboundContainerSetSlotPacket packet) {
-            check("inventory: the player inventory is container zero", packet.getContainerId() == 0);
-            slots.put(packet.getSlot(), packet.getItem());
+            if (packet.getContainerId() == 0) {
+                slots.put(packet.getSlot(), packet.getItem());
+                return;
+            }
+            check("container: slot changes belong to the open menu",
+                    packet.getContainerId() == openContainerId);
+            check("container: the state id goes up", packet.getStateId() > menuStateId);
+            menuStateId = packet.getStateId();
+            menuSlots.put((int) packet.getSlot(), packet.getItem());
+        }
+
+        private void onOpenScreen(ClientboundOpenScreenPacket packet) {
+            openContainerId = packet.getContainerId();
+            openMenuType = packet.getType();
+            menuSlots.clear();
+            menuStateId = -1;
+            events.add("open " + openContainerId);
+        }
+
+        private void onContainerContent(ClientboundContainerSetContentPacket packet) {
+            check("container: content names the open menu", packet.containerId() == openContainerId);
+            menuStateId = packet.stateId();
+            lastContentState = packet.stateId();
+            lastContent = packet.items();
+            menuSlots.clear();
+            for (int index = 0; index < packet.items().size(); index += 1) {
+                menuSlots.put(index, packet.items().get(index));
+            }
+        }
+
+        private void onContainerClose(ClientboundContainerClosePacket packet) {
+            check("container: close names the open menu", packet.getContainerId() == openContainerId);
+            events.add("close " + packet.getContainerId());
+        }
+
+        /** 一次菜单点击。客户端不预测：没有改过的槽，光标是空的。 */
+        Packet<?> click(int slot, int button, ContainerInput input) {
+            return new ServerboundContainerClickPacket(
+                    openContainerId,
+                    menuStateId,
+                    (short) slot,
+                    (byte) button,
+                    input,
+                    new Int2ObjectOpenHashMap<>(),
+                    HashedStack.EMPTY);
         }
 
         private void onSystemChat(ClientboundSystemChatPacket packet) {

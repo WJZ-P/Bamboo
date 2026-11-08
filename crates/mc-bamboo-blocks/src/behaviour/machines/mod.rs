@@ -28,6 +28,9 @@ mod redstone_wire;
 mod tripwire;
 mod workstations;
 
+pub(crate) use self::containers::open_support_shape;
+pub use self::containers::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
+
 use mc_bamboo_data::{Block, BlockClass};
 
 use self::{

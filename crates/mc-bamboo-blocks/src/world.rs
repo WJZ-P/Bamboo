@@ -7,13 +7,14 @@ use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::{error, warn};
 
 use crate::{
+    behaviour::machines::{ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
     fluid::Fluid,
     level::{Effect, Level, RedstoneMemory},
     random::LegacyRandom,
     shape::{self, CollisionContext},
-    state::{BlockState, FluidState, POWER, SupportType},
+    state::{BlockState, FACING, FluidState, POWER, SupportType},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -262,8 +263,8 @@ impl<'a> World<'a> {
         self.handling_tick = false;
     }
 
-    /// 这次操作收集到的结果。
-    pub(crate) fn into_effects(self) -> Vec<Effect> {
+    /// 这次操作收集到的结果。调用方发出去，见 `mc-bamboo-game` 的 `send_effects`。
+    pub fn into_effects(self) -> Vec<Effect> {
         self.effects
     }
 
@@ -354,6 +355,17 @@ impl<'a> World<'a> {
         if state.is(blocks::MOVING_PISTON) {
             let boxes = state.collision_boxes(self, pos, CollisionContext::Empty);
             return shape::is_supporting(&boxes, face, support);
+        }
+        // `ShulkerBoxBlock.getBlockSupportShape`：盖子打开时只剩背面那一层薄板。
+        if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+            let open = self
+                .block_entity::<ShulkerBoxEntity>(pos)
+                .is_some_and(|entity| !entity.is_closed());
+            if open {
+                let boxes = [open_support_shape(state.get(FACING))];
+                return shape::is_supporting(&boxes, face, support);
+            }
+            return shape::is_supporting(&shape::support_boxes(state, pos), face, support);
         }
         if state
             .block()

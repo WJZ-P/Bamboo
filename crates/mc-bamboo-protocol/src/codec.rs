@@ -37,6 +37,8 @@ pub enum DecodeError {
     InvalidItem(i32),
     #[error("invalid item count {0}")]
     InvalidItemCount(i32),
+    #[error("invalid data component type {0}")]
+    InvalidComponentType(i32),
     #[error("malformed NBT: {0}")]
     Nbt(#[from] mc_bamboo_nbt::DecodeError),
     #[error("not a valid resource location")]

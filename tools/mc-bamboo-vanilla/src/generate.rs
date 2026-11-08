@@ -26,6 +26,7 @@ const ENTITY_TYPE_REGISTRY: &str = "minecraft:entity_type";
 const BLOCK_REGISTRY: &str = "minecraft:block";
 const FLUID_REGISTRY: &str = "minecraft:fluid";
 const ITEM_REGISTRY: &str = "minecraft:item";
+const MENU_REGISTRY: &str = "minecraft:menu";
 const WORLD_CLOCK_REGISTRY: &str = "minecraft:world_clock";
 
 pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
@@ -1949,6 +1950,7 @@ fn registries_file(data: &VersionData) -> String {
         DATA_COMPONENT_TYPE_REGISTRY,
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
+    write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
     out
 }
 

@@ -30,6 +30,7 @@ pub mod world;
 mod testing;
 
 pub use behaviour::Behaviour;
+pub use behaviour::machines::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{

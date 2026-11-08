@@ -17,11 +17,11 @@ use tracing::warn;
 use crate::{
     chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    entity_sync,
+    container, entity_sync,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
-    inventory, light_updates, movement,
+    inventory, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
     sign,
@@ -91,6 +91,9 @@ impl World {
         interaction::run_random_ticks(&mut self.region);
         // 方块实体的 tick：告示牌在这里清掉走远的编辑者。
         sign::tick_editors(&mut self.region);
+        // 容器开合人数的重查和菜单同步。
+        container::tick(&mut self.region);
+        menu::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
@@ -188,6 +191,8 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         entity_sync::on_leave(&mut self.region, id);
+        // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
+        menu::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
         if let Some(frames) = self.global.remove_player(id) {
             self.region.links.broadcast(&frames);
@@ -285,6 +290,28 @@ impl World {
                 yaw,
                 pitch,
             } => interaction::on_use_item(region, player, hand, sequence, (yaw, pitch)),
+            PlayRequest::ContainerClick {
+                container_id,
+                state_id,
+                slot,
+                button,
+                input,
+                changed_slots,
+                carried,
+            } => menu::on_click(
+                region,
+                player,
+                menu::ClickPacket {
+                    container_id,
+                    state_id,
+                    slot,
+                    button,
+                    input,
+                    changed_slots,
+                    carried,
+                },
+            ),
+            PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }

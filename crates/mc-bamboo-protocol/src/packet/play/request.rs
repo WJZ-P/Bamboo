@@ -1,10 +1,12 @@
 //! 客户端在 Play 状态发送的数据包。
 
+use std::collections::BTreeMap;
+
 use mc_bamboo_core::{
     BlockPos, Direction, Hand, Vec3,
     sign::{LINES, MAX_LINE_CHARS, SignTextSlot},
 };
-use mc_bamboo_data::packets::play::serverbound;
+use mc_bamboo_data::{items::ITEMS, packets::play::serverbound, registries::data_component_type};
 
 use crate::{
     codec::{DecodeError, Reader},
@@ -14,6 +16,10 @@ use crate::{
 const MAX_CHAT_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 32767;
 const MAX_LANGUAGE_CHARS: usize = 16;
+/// `ServerboundContainerClickPacket` 的 `changedSlots` 最多有多少项。
+const MAX_CHANGED_SLOTS: usize = 128;
+/// `HashedPatchMap` 里增加项和移除项各自的上限。
+const MAX_HASHED_COMPONENTS: usize = 256;
 /// 聊天签名的长度，线上没有长度前缀。
 const SIGNATURE_BYTES: usize = 256;
 /// `LastSeenMessages.Update` 里 20 位定长位集占的字节数。
@@ -122,6 +128,20 @@ pub enum PlayRequest {
         pos: BlockPos,
         include_data: bool,
     },
+    /// 在菜单里点击。`changed_slots` 是客户端预测出来变了的槽，值只有物品的哈希。
+    ContainerClick {
+        container_id: i32,
+        state_id: i32,
+        slot: i16,
+        button: i8,
+        input: ContainerInput,
+        changed_slots: BTreeMap<i16, HashedStack>,
+        carried: HashedStack,
+    },
+    /// 客户端关掉了菜单。
+    ContainerClose {
+        container_id: i32,
+    },
     /// 告示牌编辑器提交的文字，每一行最多 [`MAX_LINE_CHARS`] 个字符。
     SignUpdate {
         pos: BlockPos,
@@ -211,6 +231,10 @@ impl PlayRequest {
                 pos: reader.block_pos()?,
                 include_data: reader.bool()?,
             },
+            serverbound::CONTAINER_CLICK => read_container_click(&mut reader)?,
+            serverbound::CONTAINER_CLOSE => Self::ContainerClose {
+                container_id: reader.varint()?,
+            },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             other => return Ok(Self::Other(other)),
         };
@@ -287,12 +311,123 @@ fn read_creative_mode_slot(mut reader: Reader<'_>) -> Result<PlayRequest, Decode
     })
 }
 
+/// 解码 `container_click`。槽位和按钮的范围由调用方判断，官方也是这样。
+fn read_container_click(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let container_id = reader.varint()?;
+    let state_id = reader.varint()?;
+    let slot = reader.i16()?;
+    let button = reader.i8()?;
+    let input = ContainerInput::from_id(reader.varint()?);
+
+    let count = reader.count(MAX_CHANGED_SLOTS)?;
+    let mut changed_slots = BTreeMap::new();
+    for _ in 0..count {
+        let slot = reader.i16()?;
+        changed_slots.insert(slot, read_hashed_stack(reader)?);
+    }
+
+    Ok(PlayRequest::ContainerClick {
+        container_id,
+        state_id,
+        slot,
+        button,
+        input,
+        changed_slots,
+        carried: read_hashed_stack(reader)?,
+    })
+}
+
+/// `HashedStack.STREAM_CODEC`：没有物品时是一个 `false`，否则物品、数量和组件哈希。
+fn read_hashed_stack(reader: &mut Reader<'_>) -> Result<HashedStack, DecodeError> {
+    if !reader.bool()? {
+        return Ok(HashedStack::Empty);
+    }
+    let item = reader.varint()?;
+    if !usize::try_from(item).is_ok_and(|id| id < ITEMS.len()) {
+        return Err(DecodeError::InvalidItem(item));
+    }
+    let count = reader.varint()?;
+
+    let added_len = reader.count(MAX_HASHED_COMPONENTS)?;
+    let mut added = Vec::with_capacity(added_len);
+    for _ in 0..added_len {
+        added.push((read_component_type(reader)?, reader.i32()?));
+    }
+
+    let removed_len = reader.count(MAX_HASHED_COMPONENTS)?;
+    let mut removed = Vec::with_capacity(removed_len);
+    for _ in 0..removed_len {
+        removed.push(read_component_type(reader)?);
+    }
+
+    Ok(HashedStack::Item(HashedItem {
+        item,
+        count,
+        added,
+        removed,
+    }))
+}
+
+fn read_component_type(reader: &mut Reader<'_>) -> Result<i32, DecodeError> {
+    let kind = reader.varint()?;
+    if u32::try_from(kind).is_ok_and(|kind| kind < data_component_type::TOTAL) {
+        Ok(kind)
+    } else {
+        Err(DecodeError::InvalidComponentType(kind))
+    }
+}
+
 /// 解码官方用 `readEnum` 读的字段。这种字段越界时官方解码失败，不是回绕。
 fn by_ordinal<T: Copy>(values: &[T], id: i32) -> Result<T, DecodeError> {
     usize::try_from(id)
         .ok()
         .and_then(|index| values.get(index).copied())
         .ok_or(DecodeError::InvalidEnum(id))
+}
+
+/// 点击的类型，`ContainerInput`。数值就是网络上的 ID。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerInput {
+    Pickup = 0,
+    QuickMove = 1,
+    Swap = 2,
+    Clone = 3,
+    Throw = 4,
+    QuickCraft = 5,
+    PickupAll = 6,
+}
+
+impl ContainerInput {
+    /// 官方 `ByIdMap.continuous(..., OutOfBoundsStrategy.ZERO)`：越界的值都当成 `PICKUP`。
+    pub const fn from_id(id: i32) -> Self {
+        match id {
+            1 => Self::QuickMove,
+            2 => Self::Swap,
+            3 => Self::Clone,
+            4 => Self::Throw,
+            5 => Self::QuickCraft,
+            6 => Self::PickupAll,
+            _ => Self::Pickup,
+        }
+    }
+}
+
+/// 客户端发来的物品摘要。组件只有哈希，服务端没法还原，见 [`HashedItem`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HashedStack {
+    /// 空物品。
+    Empty,
+    Item(HashedItem),
+}
+
+/// `HashedStack.ActualItem`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashedItem {
+    pub item: i32,
+    pub count: i32,
+    /// 组件类型和官方算出来的 CRC32C 哈希。
+    pub added: Vec<(i32, i32)>,
+    pub removed: Vec<i32>,
 }
 
 /// `client_command` 的动作。
@@ -930,6 +1065,102 @@ mod tests {
                 slot: 36,
                 stack: ItemStack::empty(),
             })
+        );
+    }
+
+    #[test]
+    fn decodes_container_click() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_CLICK, "01 02 00 24 00 00 00 00"),
+            Ok(PlayRequest::ContainerClick {
+                container_id: 1,
+                state_id: 2,
+                slot: 36,
+                button: 0,
+                input: ContainerInput::Pickup,
+                changed_slots: BTreeMap::new(),
+                carried: HashedStack::Empty,
+            })
+        );
+    }
+
+    #[test]
+    fn container_click_keeps_every_hash_and_wraps_an_unknown_input() {
+        assert_eq!(
+            decode_body(
+                serverbound::CONTAINER_CLICK,
+                "01 02 ff ff 01 05
+                 01 00 24 01 01 02 01 01 11 22 33 44 01 0c
+                 01 03 04 00 00"
+            ),
+            Ok(PlayRequest::ContainerClick {
+                container_id: 1,
+                state_id: 2,
+                slot: -1,
+                button: 1,
+                input: ContainerInput::QuickCraft,
+                changed_slots: BTreeMap::from([(
+                    36,
+                    HashedStack::Item(HashedItem {
+                        item: 1,
+                        count: 2,
+                        added: vec![(1, 0x1122_3344)],
+                        removed: vec![12],
+                    })
+                )]),
+                carried: HashedStack::Item(HashedItem {
+                    item: 3,
+                    count: 4,
+                    added: Vec::new(),
+                    removed: Vec::new(),
+                }),
+            })
+        );
+
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_CLICK, "01 02 00 24 00 07 00 00"),
+            Ok(PlayRequest::ContainerClick {
+                container_id: 1,
+                state_id: 2,
+                slot: 36,
+                button: 0,
+                input: ContainerInput::Pickup,
+                changed_slots: BTreeMap::new(),
+                carried: HashedStack::Empty,
+            })
+        );
+    }
+
+    #[test]
+    fn container_click_rejects_unknown_registry_ids_and_oversized_maps() {
+        // 没有注册的物品。
+        assert_eq!(
+            decode_body(
+                serverbound::CONTAINER_CLICK,
+                "01 02 00 24 00 00 00 01 c0 84 3d 01 00 00"
+            ),
+            Err(DecodeError::InvalidItem(1_000_000))
+        );
+        // 没有注册的组件类型。
+        assert_eq!(
+            decode_body(
+                serverbound::CONTAINER_CLICK,
+                "01 02 00 24 00 00 01 00 24 01 01 01 01 ff ff ff ff 0f 00 00"
+            ),
+            Err(DecodeError::InvalidComponentType(-1))
+        );
+        // changedSlots 超过 128 项。
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_CLICK, "01 02 00 24 00 00 81 01"),
+            Err(DecodeError::InvalidCount(129))
+        );
+    }
+
+    #[test]
+    fn decodes_container_close() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_CLOSE, "05"),
+            Ok(PlayRequest::ContainerClose { container_id: 5 })
         );
     }
 
