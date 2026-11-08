@@ -10,9 +10,11 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.ObjIntConsumer;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.Holder;
@@ -47,13 +49,30 @@ import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.Unit;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.EquipmentSlotGroup;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.entity.animal.axolotl.Axolotl;
+import net.minecraft.world.entity.animal.cow.MushroomCow;
+import net.minecraft.world.entity.animal.equine.Llama;
+import net.minecraft.world.entity.animal.fish.Salmon;
+import net.minecraft.world.entity.animal.fish.TropicalFish;
+import net.minecraft.world.entity.animal.fox.Fox;
+import net.minecraft.world.entity.animal.parrot.Parrot;
+import net.minecraft.world.entity.animal.rabbit.Rabbit;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.CreativeModeTab;
 import net.minecraft.world.item.CreativeModeTabs;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Instrument;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.JukeboxSong;
+import net.minecraft.world.item.Rarity;
+import net.minecraft.world.item.SwingAnimationType;
+import net.minecraft.world.item.component.FireworkExplosion;
+import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.component.MapPostProcessing;
 import net.minecraft.world.entity.decoration.painting.PaintingVariant;
 import net.minecraft.world.item.equipment.trim.ArmorTrim;
@@ -135,8 +154,16 @@ public final class ComponentOracle {
         return (RegistryAccess) managers.fullRegistries().lookup();
     }
 
-    /** 一道题：一个名字加一个组件补丁。 */
-    private record Case(String name, DataComponentPatch patch) {}
+    /**
+     * 一道题：一个名字加一个组件补丁。
+     *
+     * `item` 只在「某个物品的默认组件」这种题里有值，Bamboo 会再拿生成的数据比一遍。
+     */
+    private record Case(String name, DataComponentPatch patch, int item) {
+        Case(String name, DataComponentPatch patch) {
+            this(name, patch, -1);
+        }
+    }
 
     private static final class Oracle {
         private final RegistryAccess registries;
@@ -164,6 +191,7 @@ public final class ComponentOracle {
             for (int index = 0; index < cases.size(); index++) {
                 writeCase(index, cases.get(index));
             }
+            writeEnumFolds();
             line("{\"type\":\"end\",\"cases\":" + cases.size() + "}");
             out.flush();
 
@@ -171,17 +199,29 @@ public final class ComponentOracle {
             out.flush();
         }
 
-        /** 每个物品的默认组件，整份搬进一个补丁里。 */
+        /**
+         * 每个物品的默认组件，整份搬进一个补丁里。
+         *
+         * 组件按注册表 ID 排序，和 Extractor 生成 `item_components.rs` 时一样：
+         * 官方的 `DataComponentMap` 超过 8 项就按身份哈希排序，遍历顺序每次运行都可能不同。
+         */
         private void collectItemDefaults() {
             for (Item item : BuiltInRegistries.ITEM) {
-                DataComponentPatch.Builder builder = DataComponentPatch.builder();
+                List<TypedDataComponent<?>> components = new ArrayList<>();
                 for (TypedDataComponent<?> component : item.components()) {
+                    components.add(component);
+                }
+                components.sort(Comparator.comparingInt(
+                        component -> BuiltInRegistries.DATA_COMPONENT_TYPE.getId(component.type())));
+
+                DataComponentPatch.Builder builder = DataComponentPatch.builder();
+                for (TypedDataComponent<?> component : components) {
                     builder.set(component);
                 }
-                DataComponentPatch patch = builder.build();
-                if (!patch.isEmpty()) {
-                    cases.add(new Case("defaults " + BuiltInRegistries.ITEM.getKey(item), patch));
-                }
+                cases.add(new Case(
+                        "defaults " + BuiltInRegistries.ITEM.getKey(item),
+                        builder.build(),
+                        BuiltInRegistries.ITEM.getId(item)));
             }
         }
 
@@ -303,9 +343,58 @@ public final class ComponentOracle {
                     + index
                     + ",\"name\":"
                     + quote(one.name())
+                    + ",\"item\":"
+                    + one.item()
                     + ",\"bytes\":\""
                     + hex(bytes)
                     + "\"}");
+        }
+
+        /**
+         * 按 ID 查表的枚举：喂一个原始 ID 进去，看官方折回成什么。
+         *
+         * 官方这些编解码器不会失败，越界的 ID 会按 `ByIdMap` 的策略折成一个合法值，
+         * 再写出去就和读到的不一样。这里把输入和官方重新编码出来的字节都交给 Bamboo 比。
+         */
+        private void writeEnumFolds() throws Exception {
+            for (EnumProbe probe : enumProbes()) {
+                for (int raw : probe.raws()) {
+                    RegistryFriendlyByteBuf input = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+                    input.writeVarInt(1);
+                    input.writeVarInt(0);
+                    input.writeVarInt(BuiltInRegistries.DATA_COMPONENT_TYPE.getId(probe.type()));
+                    probe.writer().accept(input, raw);
+                    byte[] inputBytes = new byte[input.readableBytes()];
+                    input.getBytes(input.readerIndex(), inputBytes);
+
+                    String error = null;
+                    byte[] outputBytes = inputBytes;
+                    try {
+                        DataComponentPatch decoded = DataComponentPatch.STREAM_CODEC.decode(input);
+                        if (input.readableBytes() != 0) {
+                            error = input.readableBytes() + " trailing bytes";
+                        } else {
+                            RegistryFriendlyByteBuf again =
+                                    new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+                            DataComponentPatch.STREAM_CODEC.encode(again, decoded);
+                            outputBytes = new byte[again.readableBytes()];
+                            again.readBytes(outputBytes);
+                        }
+                    } catch (Exception failure) {
+                        error = String.valueOf(failure);
+                    }
+
+                    line("{\"type\":\"fold\",\"name\":"
+                            + quote(probe.name() + " " + raw)
+                            + ",\"input\":\""
+                            + hex(inputBytes)
+                            + "\",\"output\":\""
+                            + hex(outputBytes)
+                            + "\",\"error\":"
+                            + (error == null ? "null" : quote(error))
+                            + "}");
+                }
+            }
         }
 
         /** 读 Bamboo 写回来的字节，用官方代码解出补丁，和原来的比。 */
@@ -366,6 +455,157 @@ public final class ComponentOracle {
             out.write(text);
             out.write('\n');
         }
+    }
+
+    /** 一个按 ID 查表的枚举：装着它的组件、怎么写出一个完整的值、要试哪些原始 ID。 */
+    private record EnumProbe(
+            String name, DataComponentType<?> type, ObjIntConsumer<RegistryFriendlyByteBuf> writer, int[] raws) {}
+
+    /** 默认要试的原始 ID：负数、第一个、最后一个、刚好越界、越界一格、很大的数。 */
+    private static int[] raws(int count) {
+        return new int[] {-1, 0, count - 1, count, count + 1, 10000};
+    }
+
+    /** 稀疏枚举：负数、表里的第一个和最后一个、表长、表长加一、很大的数。 */
+    private static int[] sparseRaws(int[] ids) {
+        return new int[] {-1, ids[0], ids[ids.length - 1], ids.length, ids.length + 1, 10000};
+    }
+
+    private static int[] packedFishIds() {
+        int[] ids = new int[TropicalFish.Pattern.values().length];
+        for (int index = 0; index < ids.length; index++) {
+            ids[index] = TropicalFish.Pattern.values()[index].getPackedId();
+        }
+        return ids;
+    }
+
+    private static int[] rabbitIds() {
+        int[] ids = new int[Rabbit.Variant.values().length];
+        for (int index = 0; index < ids.length; index++) {
+            ids[index] = Rabbit.Variant.values()[index].id();
+        }
+        return ids;
+    }
+
+    /** 单个 VarInt 就是整个组件值的那些枚举。 */
+    private static EnumProbe single(String name, DataComponentType<?> type, int count) {
+        return new EnumProbe(name, type, (buffer, raw) -> buffer.writeVarInt(raw), raws(count));
+    }
+
+    private static List<EnumProbe> enumProbes() {
+        List<EnumProbe> probes = new ArrayList<>();
+        probes.add(single("rarity", DataComponents.RARITY, Rarity.values().length));
+        probes.add(single("dye_color", DataComponents.DYE, DyeColor.values().length));
+        probes.add(single(
+                "map_post_processing", DataComponents.MAP_POST_PROCESSING, MapPostProcessing.values().length));
+        probes.add(single("fox_variant", DataComponents.FOX_VARIANT, Fox.Variant.values().length));
+        probes.add(single("axolotl_variant", DataComponents.AXOLOTL_VARIANT, Axolotl.Variant.values().length));
+        probes.add(single("salmon_size", DataComponents.SALMON_SIZE, Salmon.Variant.values().length));
+        probes.add(single("parrot_variant", DataComponents.PARROT_VARIANT, Parrot.Variant.values().length));
+        probes.add(single(
+                "mooshroom_variant", DataComponents.MOOSHROOM_VARIANT, MushroomCow.Variant.values().length));
+        probes.add(single("llama_variant", DataComponents.LLAMA_VARIANT, Llama.Variant.values().length));
+        probes.add(single(
+                "horse_variant",
+                DataComponents.HORSE_VARIANT,
+                net.minecraft.world.entity.animal.equine.Variant.values().length));
+
+        probes.add(new EnumProbe(
+                "tropical_fish_pattern",
+                DataComponents.TROPICAL_FISH_PATTERN,
+                (buffer, raw) -> buffer.writeVarInt(raw),
+                sparseRaws(packedFishIds())));
+        probes.add(new EnumProbe(
+                "rabbit_variant",
+                DataComponents.RABBIT_VARIANT,
+                (buffer, raw) -> buffer.writeVarInt(raw),
+                sparseRaws(rabbitIds())));
+
+        // 挥手动画是「类型加时长」。
+        probes.add(new EnumProbe(
+                "swing_animation_type",
+                DataComponents.ATTACK_ANIMATION,
+                (buffer, raw) -> {
+                    buffer.writeVarInt(raw);
+                    buffer.writeVarInt(6);
+                },
+                raws(SwingAnimationType.values().length)));
+
+        // 烟花之星是「形状加两个颜色列表加两个开关」。
+        probes.add(new EnumProbe(
+                "firework_shape",
+                DataComponents.FIREWORK_EXPLOSION,
+                (buffer, raw) -> {
+                    buffer.writeVarInt(raw);
+                    buffer.writeVarInt(0);
+                    buffer.writeVarInt(0);
+                    buffer.writeBoolean(false);
+                    buffer.writeBoolean(false);
+                },
+                raws(FireworkExplosion.Shape.values().length)));
+
+        // 食用动画埋在 consumable 中间，前后的字段都要凑齐。
+        probes.add(new EnumProbe(
+                "item_use_animation",
+                DataComponents.CONSUMABLE,
+                (buffer, raw) -> {
+                    buffer.writeFloat(1.6F);
+                    buffer.writeVarInt(raw);
+                    buffer.writeVarInt(1);
+                    buffer.writeBoolean(false);
+                    buffer.writeVarInt(0);
+                },
+                raws(ItemUseAnimation.values().length)));
+
+        // 装备槽位是 equippable 的第一个字段，后面还有一长串。
+        probes.add(new EnumProbe(
+                "equipment_slot",
+                DataComponents.EQUIPPABLE,
+                (buffer, raw) -> {
+                    buffer.writeVarInt(raw);
+                    buffer.writeVarInt(1);
+                    buffer.writeBoolean(false);
+                    buffer.writeBoolean(false);
+                    buffer.writeBoolean(false);
+                    for (int flag = 0; flag < 5; flag++) {
+                        buffer.writeBoolean(false);
+                    }
+                    buffer.writeVarInt(1);
+                },
+                raws(EquipmentSlot.values().length)));
+
+        // 属性修饰的槽位分组、运算方式和显示方式都在同一条 entry 里。
+        probes.add(new EnumProbe(
+                "equipment_slot_group",
+                DataComponents.ATTRIBUTE_MODIFIERS,
+                (buffer, raw) -> writeAttributeEntry(buffer, 0, raw, 0),
+                raws(EquipmentSlotGroup.values().length)));
+        probes.add(new EnumProbe(
+                "attribute_operation",
+                DataComponents.ATTRIBUTE_MODIFIERS,
+                (buffer, raw) -> writeAttributeEntry(buffer, raw, 0, 0),
+                raws(AttributeModifier.Operation.values().length)));
+        // 显示方式折成 2（override）时后面还要跟一段文本组件，所以不试那个值，
+        // 手写的 SNBT 里已经有带文本的 override。
+        int displays = ItemAttributeModifiers.Display.Type.values().length;
+        probes.add(new EnumProbe(
+                "attribute_display_type",
+                DataComponents.ATTRIBUTE_MODIFIERS,
+                (buffer, raw) -> writeAttributeEntry(buffer, 0, 0, raw),
+                new int[] {-1, 0, 1, displays, displays + 1, 10000}));
+        return probes;
+    }
+
+    /** 一条 `attribute_modifiers`：属性、修饰符、槽位分组、显示方式。 */
+    private static void writeAttributeEntry(
+            RegistryFriendlyByteBuf buffer, int operation, int slotGroup, int display) {
+        buffer.writeVarInt(1);
+        buffer.writeVarInt(0);
+        buffer.writeUtf("bamboo:probe");
+        buffer.writeDouble(1.0);
+        buffer.writeVarInt(operation);
+        buffer.writeVarInt(slotGroup);
+        buffer.writeVarInt(display);
     }
 
     private static String hex(byte[] bytes) {

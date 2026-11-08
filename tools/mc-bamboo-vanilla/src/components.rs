@@ -6,14 +6,19 @@
 //!
 //! 题目来自每个物品的默认组件、创造模式物品栏的全部物品，以及一批手写的组件。
 //! 跑完会列出一个组件类型都没覆盖到的那些类型。
+//!
+//! 还有两组额外的检查：
+//!
+//! - 每个物品的默认组件：生成的 `item_components.rs` 要和官方现在编出来的字节一样；
+//! - 按 ID 查表的枚举：喂一个越界的原始 ID 进去，官方折回成什么，Bamboo 也要折回成什么。
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
 };
 
-use mc_bamboo_data::version;
+use mc_bamboo_data::{item_components, items, version};
 use mc_bamboo_protocol::{
     codec::DecodeError,
     components::{ComponentPatch, cursor::Cursor},
@@ -36,7 +41,17 @@ enum Line {
     Case {
         index: usize,
         name: String,
+        /// 物品的注册表 ID，只有「某个物品的默认组件」这种题才有，其余是 -1。
+        item: i32,
         bytes: String,
+    },
+    /// 一个按 ID 查表的枚举：喂进去的字节和官方折回之后写出来的字节。
+    Fold {
+        name: String,
+        input: String,
+        output: String,
+        /// 官方解不开时的原因，解得开就是空。
+        error: Option<String>,
     },
     Skipped {
         case: String,
@@ -61,6 +76,10 @@ struct Report {
     replies: Vec<String>,
     mismatches: Vec<String>,
     skipped: Vec<String>,
+    /// 检查过默认组件的物品数。
+    item_defaults: usize,
+    /// 试过的枚举名和每个枚举试了几个 ID。
+    folds: BTreeMap<String, usize>,
     show: usize,
     ended: bool,
     verified: Option<usize>,
@@ -132,7 +151,18 @@ impl Report {
                     protocol,
                     component_types,
                 } => self.check_header(&version, protocol, component_types)?,
-                Line::Case { index, name, bytes } => self.check_case(index, &name, &bytes)?,
+                Line::Case {
+                    index,
+                    name,
+                    item,
+                    bytes,
+                } => self.check_case(index, &name, item, &bytes)?,
+                Line::Fold {
+                    name,
+                    input,
+                    output,
+                    error,
+                } => self.check_fold(&name, &input, &output, error.as_deref())?,
                 Line::Skipped { case, error } => self.skipped.push(format!("{case}: {error}")),
                 Line::End { cases } => {
                     self.ended = true;
@@ -166,13 +196,16 @@ impl Report {
     }
 
     /// 解码、再编码、比较，然后记下要回传的字节。
-    fn check_case(&mut self, index: usize, name: &str, hex: &str) -> Result<(), String> {
+    fn check_case(&mut self, index: usize, name: &str, item: i32, hex: &str) -> Result<(), String> {
         if index != self.cases {
             return Err(format!("case {index} arrived as number {}", self.cases));
         }
         self.cases += 1;
 
         let bytes = unhex(hex)?;
+        if item >= 0 {
+            self.check_item_defaults(name, item, &bytes);
+        }
         match decode(&bytes) {
             Ok(patch) => {
                 for (kind, _) in patch.entries() {
@@ -195,6 +228,76 @@ impl Report {
                 // 解不出来就把原样的字节回传，官方那边不会再报一次同样的问题。
                 self.replies.push(format!("{index} {hex}"));
             }
+        }
+        Ok(())
+    }
+
+    /// 生成的默认组件要和官方现在编出来的字节一样，解出来再编回去也要一样。
+    fn check_item_defaults(&mut self, name: &str, item: i32, official: &[u8]) {
+        self.item_defaults += 1;
+        let Some(&(start, end)) = item_components::RANGES.get(item as usize) else {
+            self.mismatch(format!("{name}: 生成的数据里没有物品 {item}"));
+            return;
+        };
+        let generated = &item_components::DEFAULTS[start as usize..end as usize];
+        if generated != official {
+            self.mismatch(format!(
+                "{name}: generated {}, official {}",
+                to_hex(generated),
+                to_hex(official)
+            ));
+            return;
+        }
+
+        match decode(generated) {
+            Ok(patch) => {
+                let mut again = Vec::new();
+                patch.write(&mut again);
+                if again != generated {
+                    self.mismatch(format!(
+                        "{name}: 生成的默认组件写回去变成了 {}",
+                        to_hex(&again)
+                    ));
+                }
+            }
+            Err(error) => {
+                self.mismatch(format!("{name}: 生成的默认组件解不开：{error}"));
+            }
+        }
+    }
+
+    /// 按 ID 查表的枚举：官方折回成什么，Bamboo 也要折回成什么。
+    fn check_fold(
+        &mut self,
+        name: &str,
+        input: &str,
+        output: &str,
+        official_error: Option<&str>,
+    ) -> Result<(), String> {
+        let enum_name = name.split_whitespace().next().unwrap_or(name).to_owned();
+        *self.folds.entry(enum_name).or_default() += 1;
+
+        let input_bytes = unhex(input)?;
+        let expected = unhex(output)?;
+        match (decode(&input_bytes), official_error) {
+            (Ok(patch), None) => {
+                let mut again = Vec::new();
+                patch.write(&mut again);
+                if again != expected {
+                    self.mismatch(format!(
+                        "fold {name}: official {output}, bamboo {}",
+                        to_hex(&again)
+                    ));
+                }
+            }
+            (Ok(_), Some(error)) => self.mismatch(format!(
+                "fold {name}: official rejects it ({error}), bamboo accepts it"
+            )),
+            (Err(error), None) => self.mismatch(format!(
+                "fold {name}: official folds it to {output}, bamboo cannot decode: {error}"
+            )),
+            // 两边都不接受，一致。
+            (Err(_), Some(_)) => {}
         }
         Ok(())
     }
@@ -252,11 +355,33 @@ impl Report {
             .map(|(_, name)| name.as_str())
             .collect();
 
+        if self.item_defaults != items::ITEMS.len() {
+            return Err(format!(
+                "官方给了 {} 个物品的默认组件，物品有 {} 个",
+                self.item_defaults,
+                items::ITEMS.len()
+            ));
+        }
+
         println!(
             "COMPONENTS: {} cases, {} of {} component types covered",
             self.cases,
             self.covered.len(),
             self.component_types.len()
+        );
+        println!(
+            "COMPONENTS ITEM DEFAULTS: {} items match the generated table",
+            self.item_defaults
+        );
+        let folds: Vec<String> = self
+            .folds
+            .iter()
+            .map(|(name, count)| format!("{name}({count})"))
+            .collect();
+        println!(
+            "COMPONENTS ENUM FOLDS: {} enums, {}",
+            self.folds.len(),
+            folds.join(" ")
         );
         if !uncovered.is_empty() {
             println!("COMPONENTS UNCOVERED: {}", uncovered.join(" "));
