@@ -14,6 +14,7 @@ use std::{
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{BlockClass, registries, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     state::{
@@ -120,6 +121,9 @@ impl BlockEntities {
     }
 
     /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。
+    ///
+    /// See [`BlockEntities::get`], but mutable. Returns `None` while that entity is ticking,
+    /// because it is not in the map.
     pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
         self.entities
             .get_mut(&pos)?
@@ -308,6 +312,35 @@ fn drop_stack(world: &mut World, count: i32) {
             world.random().next_double();
         }
     }
+}
+
+/// `Containers.dropItemStack`：空堆只取掉落点，有数量时再按堆切开。
+///
+/// 物品实体不生成。取数和 [`drop_slots`] 是同一套，燃料余料和熔炉拆除共用它。
+///
+/// `Containers.dropItemStack`. Empty stacks only consume the drop point; a count is then
+/// split into piles. No item entity is spawned. The random draws match [`drop_slots`], so
+/// fuel remainders and furnace removal share one sequence.
+pub(crate) fn drop_item_stack(world: &mut World, _pos: BlockPos, stack: &ItemStack) {
+    if stack.is_empty() {
+        drop_empty_slot(world);
+    } else {
+        drop_stack(world, stack.count);
+    }
+}
+
+/// 熔炉系列和酿造台的内容在方块实体上，不在区域的容器表里。
+///
+/// 有实体时由实体的 `preRemoveSideEffects` 掉落；没有实体时仍走按数量的那条。
+///
+/// Furnace-family and brewing contents live on the block entity, not in the region
+/// container table. An entity drops them itself; without one, the count-based drop runs.
+pub(crate) fn drops_own_contents(state: BlockState) -> bool {
+    use registries::block_entity_type as E;
+    matches!(
+        state.block().block_entity_type,
+        Some(E::FURNACE | E::SMOKER | E::BLAST_FURNACE | E::BREWING_STAND)
+    )
 }
 
 /// 一张 `Container` 的槽位表。`counts` 是每格的数量，没有的格子按空槽算。

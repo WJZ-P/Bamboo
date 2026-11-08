@@ -9,10 +9,12 @@
 //! 探测铁轨看矿车这些）不写。要打开界面的方块只吃掉点击。
 
 mod beehive;
+mod brewing;
 mod campfire;
 mod chest;
 mod command_block;
 mod containers;
+mod cooking;
 mod daylight_detector;
 mod diode;
 mod lectern;
@@ -28,8 +30,10 @@ mod redstone_wire;
 mod tripwire;
 mod workstations;
 
+pub use self::brewing::BrewingStandEntity;
 pub(crate) use self::containers::open_support_shape;
 pub use self::containers::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
+pub use self::cooking::FurnaceEntity;
 pub use self::lectern::{reset_lectern, signal_lectern_page};
 
 use mc_bamboo_data::{Block, BlockClass};

@@ -52,16 +52,13 @@ impl ClientboundPacket for ContainerSetContent<'_> {
     }
 }
 
-/// 讲台当前页，官方 `ClientboundContainerSetDataPacket`。`id` 和 `value` 都是 short。
+/// 菜单的一个数据槽变了，官方 `ClientboundContainerSetDataPacket`。`id` 和 `value` 都是 short，不推进 `state_id`。
 ///
-/// The lectern's current page. `id` and `value` are shorts, matching
-/// `ClientboundContainerSetDataPacket`.
+/// One menu data slot changed. `id` and `value` are shorts and do not advance `state_id`.
+/// Furnace progress, the stonecutter selection, and the lectern page all use this packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContainerSetData {
     pub container_id: i32,
-    /// 讲台只有第 0 号数据槽，存的是页码。
-    ///
-    /// Lectern menus have one data slot, the page.
     pub id: i16,
     pub value: i16,
 }
@@ -177,7 +174,15 @@ mod tests {
     }
 
     #[test]
-    fn container_set_data_writes_two_shorts() {
+    fn container_set_data_writes_two_big_endian_shorts() {
+        assert_eq!(
+            body(&ContainerSetData {
+                container_id: 3,
+                id: 1,
+                value: 200
+            }),
+            hex("03 00 01 00 c8")
+        );
         assert_eq!(
             body(&ContainerSetData {
                 container_id: 1,

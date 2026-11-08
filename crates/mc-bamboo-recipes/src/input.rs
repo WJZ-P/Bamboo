@@ -1,49 +1,12 @@
 //! 匹配用的输入：物品栈和三种工作台输入，对应官方的 `ItemStack`、`CraftingInput`、
 //! `SmithingRecipeInput`、`BrewingInput`。
 //!
-//! 物品栈只记物品注册表 ID 和数量，组件按默认值算。
+//! 物品栈直接用协议层的 [`ItemStack`]：组件补丁是不透明字节，需要读组件的配方
+//! 用 [`crate::assemble`] 里的解码函数，见 `mc-bamboo-protocol` 的组件模块。
 
 use mc_bamboo_data::Recipe;
 
-/// 一个物品栈，官方的 `ItemStack`。
-///
-/// 组件仍然是默认值：`mc-bamboo-protocol` 里的组件还是不透明字节，
-/// 这里没有位置放组件改动，特殊配方需要读组件的地方都按默认值处理。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ItemStack {
-    item: i32,
-    count: i32,
-}
-
-impl ItemStack {
-    /// 官方的 `ItemStack.EMPTY`。
-    pub const EMPTY: Self = Self { item: 0, count: 0 };
-
-    /// 一个物品栈。数量小于等于 0，或者物品是空气时，官方当成空栈。
-    pub const fn new(item: i32, count: i32) -> Self {
-        Self { item, count }
-    }
-
-    /// 一个物品，数量 1。
-    pub const fn of(item: i32) -> Self {
-        Self { item, count: 1 }
-    }
-
-    /// 物品注册表 ID。
-    pub const fn item(self) -> i32 {
-        self.item
-    }
-
-    /// 数量。
-    pub const fn count(self) -> i32 {
-        self.count
-    }
-
-    /// 官方的 `ItemStack.isEmpty`：空气或者数量小于等于 0。
-    pub const fn is_empty(self) -> bool {
-        self.item == 0 || self.count <= 0
-    }
-}
+pub use mc_bamboo_protocol::item::ItemStack;
 
 /// 合成网格，官方的 `CraftingInput`。
 ///
@@ -57,17 +20,38 @@ pub struct CraftingInput {
     ingredient_count: usize,
 }
 
+/// 裁剪后的合成输入和它在原网格里的位置，官方的 `CraftingInput.Positioned`。
+///
+/// `left` 和 `top` 是裁剪后的左上角原来在 `width * height` 网格里的坐标。结果槽取走产物时
+/// 要靠它们找到原网格里该扣哪几格（比如 3x3 里摆在右下的 2x2 配方，裁剪后坐标从 0 开始）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionedCraftInput {
+    pub input: CraftingInput,
+    pub left: usize,
+    pub top: usize,
+}
+
 impl CraftingInput {
     /// 官方的 `CraftingInput.of`：从 `width * height` 个格子建输入，并裁剪空行空列。
     pub fn of(width: usize, height: usize, slots: &[ItemStack]) -> Self {
+        Self::of_positioned(width, height, slots).input
+    }
+
+    /// 官方的 `CraftingInput.ofPositioned`：和 [`Self::of`] 一样裁剪，
+    /// 另外带回裁剪掉的左上角偏移。空输入是 `(0, 0)`。
+    pub fn of_positioned(width: usize, height: usize, slots: &[ItemStack]) -> PositionedCraftInput {
         assert_eq!(
             slots.len(),
             width * height,
             "crafting input has {} slots, expected {width} * {height}",
             slots.len()
         );
-        if width == 0 || height == 0 {
-            return Self::empty();
+        if slots.is_empty() {
+            return PositionedCraftInput {
+                input: Self::empty(),
+                left: 0,
+                top: 0,
+            };
         }
 
         let mut left = width - 1;
@@ -75,21 +59,21 @@ impl CraftingInput {
         let mut top = height - 1;
         let mut bottom = 0;
         for y in 0..height {
-            let mut row_empty = true;
             for x in 0..width {
                 if !slots[x + y * width].is_empty() {
                     left = left.min(x);
                     right = right.max(x);
-                    row_empty = false;
+                    top = top.min(y);
+                    bottom = bottom.max(y);
                 }
-            }
-            if !row_empty {
-                top = top.min(y);
-                bottom = bottom.max(y);
             }
         }
         if right < left || bottom < top {
-            return Self::empty();
+            return PositionedCraftInput {
+                input: Self::empty(),
+                left: 0,
+                top: 0,
+            };
         }
 
         let new_width = right - left + 1;
@@ -97,13 +81,17 @@ impl CraftingInput {
         let mut cropped = Vec::with_capacity(new_width * new_height);
         for y in top..=bottom {
             for x in left..=right {
-                cropped.push(slots[x + y * width]);
+                cropped.push(slots[x + y * width].clone());
             }
         }
-        Self::from_slots(new_width, new_height, cropped)
+        PositionedCraftInput {
+            input: Self::from_slots(new_width, new_height, cropped),
+            left,
+            top,
+        }
     }
 
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             width: 0,
             height: 0,
@@ -143,13 +131,13 @@ impl CraftingInput {
     }
 
     /// 按一维下标取格子。
-    pub fn slot(&self, index: usize) -> ItemStack {
-        self.slots[index]
+    pub fn slot(&self, index: usize) -> &ItemStack {
+        &self.slots[index]
     }
 
     /// 按坐标取格子。
-    pub fn get(&self, x: usize, y: usize) -> ItemStack {
-        self.slots[x + y * self.width]
+    pub fn get(&self, x: usize, y: usize) -> &ItemStack {
+        &self.slots[x + y * self.width]
     }
 
     /// 全部格子，按行排列。
@@ -159,7 +147,7 @@ impl CraftingInput {
 }
 
 /// 锻造台输入，官方的 `SmithingRecipeInput`。空位用空栈表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmithingInput {
     pub template: ItemStack,
     pub base: ItemStack,
@@ -167,7 +155,7 @@ pub struct SmithingInput {
 }
 
 impl SmithingInput {
-    pub const fn new(template: ItemStack, base: ItemStack, addition: ItemStack) -> Self {
+    pub fn new(template: ItemStack, base: ItemStack, addition: ItemStack) -> Self {
         Self {
             template,
             base,
@@ -179,7 +167,7 @@ impl SmithingInput {
 /// 酿造台输入，官方的 `BrewingInput`。
 ///
 /// 药水内容在物品组件里，这里单独给出药水注册表 ID；`None` 表示这格不是带药水内容的物品。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrewingInput {
     pub input: ItemStack,
     /// 输入格物品的药水注册表 ID，见 `mc_bamboo_data::recipes::POTIONS`。

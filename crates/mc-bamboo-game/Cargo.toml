@@ -15,6 +15,7 @@ mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
+mc-bamboo-recipes.workspace = true
 mc-bamboo-world.workspace = true
 tracing.workspace = true
 uuid.workspace = true

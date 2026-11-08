@@ -75,6 +75,11 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         "item_components.rs",
         &item_components_file(data)?,
     )?;
+    write_file(
+        output_dir,
+        "crafting_remainders.rs",
+        &crafting_remainders_file(data)?,
+    )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "loot.rs", &loot)?;
     write_file(output_dir, "tags.rs", &tags)?;
@@ -261,6 +266,70 @@ fn item_components_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(out, "    ({start}, {end}),");
     }
     let _ = writeln!(out, "];");
+    Ok(out)
+}
+
+/// `Item.getCraftingRemainder()`。只有声明了余料的物品在表里，按物品 ID 二分查找。
+///
+/// 补丁字节是官方 `DataComponentPatch.STREAM_CODEC`。空补丁不占字节。
+fn crafting_remainders_file(data: &VersionData) -> Result<String, String> {
+    if data.crafting_remainders.len() != data.items.len() {
+        return Err(format!(
+            "导出了 {} 个合成余料，物品有 {} 个",
+            data.crafting_remainders.len(),
+            data.items.len()
+        ));
+    }
+    let mut blob = Vec::new();
+    let mut entries = Vec::new();
+    for (source, remainder) in data.crafting_remainders.iter().enumerate() {
+        let Some((item, count, hex)) = remainder else {
+            continue;
+        };
+        let bytes = if hex.is_empty() || hex == "0000" {
+            Vec::new()
+        } else {
+            decode_hex(hex)
+                .ok_or_else(|| format!("{} 的合成余料组件不是十六进制", data.items[source].name))?
+        };
+        let start = blob.len();
+        blob.extend_from_slice(&bytes);
+        entries.push((source as i32, *item, *count, start, blob.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 合成余料的组件补丁拼在一起，位置见 [`ENTRIES`] 的最后两列。"
+    );
+    let _ = writeln!(out, "pub static PATCHES: &[u8] = b\"{}\";\n", escape(&blob));
+    let _ = writeln!(
+        out,
+        "/// `(物品 ID, 余料物品, 数量, 补丁起点, 补丁终点)`，按物品 ID 排好。"
+    );
+    let _ = writeln!(out, "pub static ENTRIES: &[(i32, i32, i32, u32, u32)] = &[");
+    for (source, item, count, start, end) in entries {
+        let _ = writeln!(out, "    ({source}, {item}, {count}, {start}, {end}),");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 这个物品的 `getCraftingRemainder`。没有余料时是 `None`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub fn of(item: i32) -> Option<(i32, i32, &'static [u8])> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    let index = ENTRIES.binary_search_by_key(&item, |entry| entry.0).ok()?;"
+    );
+    let _ = writeln!(out, "    let entry = ENTRIES[index];");
+    let _ = writeln!(
+        out,
+        "    Some((entry.1, entry.2, &PATCHES[entry.3 as usize..entry.4 as usize]))"
+    );
+    let _ = writeln!(out, "}}");
     Ok(out)
 }
 
@@ -463,6 +532,7 @@ pub mod block_transformers;
 pub mod blocks;
 pub mod component_enums;
 pub mod component_registries;
+pub mod crafting_remainders;
 pub mod entity_types;
 pub mod heightmaps;
 pub mod item_components;
@@ -1581,7 +1651,7 @@ impl<'a> RecipeWriter<'a> {
                 max_material,
                 result_item,
                 result_count,
-                result_has_components,
+                result_components,
                 add_material_count,
             } => {
                 let input = self.ingredient(input)?;
@@ -1596,11 +1666,12 @@ impl<'a> RecipeWriter<'a> {
                 if *result_count <= 0 {
                     return Err(format!("产物数量是 {result_count}"));
                 }
+                let result_components = self.components(result_components)?;
                 format!(
                     "RecipeKind::Transmute {{ input: {input}, material: {material}, \
                      min_material: {min_material}, max_material: {max_material}, \
                      result_item: {result_item}, result_count: {result_count}, \
-                     result_has_components: {result_has_components}, \
+                     result_components: {result_components}, \
                      add_material_count: {add_material_count} }}"
                 )
             }
@@ -1695,13 +1766,13 @@ impl<'a> RecipeWriter<'a> {
                 material,
                 result_item,
                 result_count,
-                result_has_components,
+                result_components,
             } => self.map_extending(
                 map,
                 material,
                 *result_item,
                 *result_count,
-                *result_has_components,
+                result_components,
             )?,
             ExtractedRecipeKind::BannerDuplicate { banner, result } => {
                 self.banner_duplicate(banner, result)?
@@ -1761,14 +1832,32 @@ impl<'a> RecipeWriter<'a> {
             .name_of(format!("&[{}]", names.join(", "))))
     }
 
+    /// 组件补丁的十六进制字节写成 Rust 字节切片。
+    fn components(&self, hex: &str) -> Result<String, String> {
+        let (pairs, rest) = hex.as_bytes().as_chunks::<2>();
+        if !rest.is_empty() {
+            return Err(format!("组件字节的十六进制长度是奇数：{hex}"));
+        }
+        let mut bytes = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let pair =
+                std::str::from_utf8(pair).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            let byte =
+                u8::from_str_radix(pair, 16).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            bytes.push(byte);
+        }
+        Ok(format!("&{bytes:?}"))
+    }
+
     fn stack(&self, stack: &ExtractedStack) -> Result<String, String> {
         check_item(stack.item, self.data)?;
         if stack.count <= 0 {
             return Err(format!("产物数量是 {}", stack.count));
         }
+        let components = self.components(&stack.components)?;
         Ok(format!(
-            "Stack {{ item: {}, count: {}, has_components: {} }}",
-            stack.item, stack.count, stack.has_components
+            "Stack {{ item: {}, count: {}, components: {components} }}",
+            stack.item, stack.count
         ))
     }
 
@@ -1998,7 +2087,7 @@ impl<'a> RecipeWriter<'a> {
         material: &ExtractedIngredient,
         result_item: Option<i32>,
         result_count: i32,
-        result_has_components: bool,
+        result_components: &str,
     ) -> Result<String, String> {
         let map = self.ingredient(map)?;
         let material = self.ingredient(material)?;
@@ -2012,10 +2101,11 @@ impl<'a> RecipeWriter<'a> {
         if result_count <= 0 {
             return Err(format!("产物数量是 {result_count}"));
         }
+        let result_components = self.components(result_components)?;
         Ok(format!(
             "RecipeKind::MapExtending {{ map: {map}, material: {material}, \
              result_item: {result_item}, result_count: {result_count}, \
-             result_has_components: {result_has_components} }}"
+             result_components: {result_components} }}"
         ))
     }
 

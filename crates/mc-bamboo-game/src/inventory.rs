@@ -96,6 +96,20 @@ impl Inventory {
         self.state_id
     }
 
+    /// 物品栏菜单（容器 ID 0）的 `state_id`。合成和 `send_slot` 共用这一份。
+    ///
+    /// `state_id` of the inventory menu (container id 0). Crafting and `send_slot` share it.
+    pub(crate) fn state_id(&self) -> i32 {
+        self.state_id
+    }
+
+    /// 见 [`Inventory::state_id`]。
+    ///
+    /// See [`Inventory::state_id`].
+    pub(crate) fn set_state_id(&mut self, state_id: i32) {
+        self.state_id = state_id;
+    }
+
     /// 中键选取，返回物品变了的菜单槽位，升序。`blocks-inventory.md` 8.4。
     fn pick(&mut self, stack: &ItemStack) -> Vec<usize> {
         match self.find_slot_matching_item(stack) {
@@ -493,6 +507,10 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
 /// 自己的数据，见 [`ItemStack::write`]。
 pub(crate) fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
     let state_id = player.inventory.next_state_id();
+    // 这一格已经发给客户端了，物品栏菜单的远程槽跟上，下次合成点击才不会再发一遍。
+    // The client already has this slot. Update the inventory menu's remote slot so the next
+    // crafting click does not send it again.
+    crate::menu::station::note_inventory_slot(player, slot);
     let packet = ContainerSetSlot {
         container_id: PLAYER_CONTAINER,
         state_id,

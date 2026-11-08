@@ -25,6 +25,8 @@
 //! mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N]
 //!                            [--biome-points N] [--show N]
 //!     让官方代码算世界生成的噪声、密度函数和群系，用 mc-bamboo-worldgen 重算，浮点逐位比较
+//! mc-bamboo-vanilla machine <java 路径>
+//!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
 //!     让官方 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 在假世界里跑，
 //!     用 Bamboo 重放，逐刻比较位置、速度和落地后的方块
@@ -54,6 +56,8 @@ mod light;
 #[cfg(feature = "oracle")]
 mod loot_oracle;
 #[cfg(feature = "oracle")]
+mod machine;
+#[cfg(feature = "oracle")]
 mod menu;
 #[cfg(feature = "probe-online")]
 mod online;
@@ -80,6 +84,8 @@ const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
 #[cfg(feature = "oracle")]
+const MACHINE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MachineOracle.java";
+#[cfg(feature = "oracle")]
 const MENU_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MenuOracle.java";
 #[cfg(feature = "oracle")]
 const COMPONENTS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ComponentOracle.java";
@@ -102,6 +108,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
+      mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>";
 
 fn main() -> ExitCode {
@@ -127,6 +134,7 @@ fn run() -> Result<(), String> {
         ["oracle", java, ref options @ ..] => oracle(java, options),
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
+        ["machine", java] => machine(java),
         ["components", java, ref options @ ..] => components(java, options),
         ["predicate-oracle", java, ref options @ ..] => predicate_oracle(java, options),
         ["recipe-oracle", java, ref options @ ..] => recipe_oracle(java, options),
@@ -229,6 +237,11 @@ fn menu(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn machine(java: &str) -> Result<(), String> {
+    machine::run(official_program(java, MACHINE_SOURCE)?)
+}
+
+#[cfg(feature = "oracle")]
 fn components(java: &str, options: &[&str]) -> Result<(), String> {
     components::run(official_program(java, COMPONENTS_SOURCE)?, options)
 }
@@ -286,6 +299,11 @@ fn light(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn menu(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn machine(_java: &str) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

@@ -334,7 +334,10 @@ impl World {
             PlayRequest::ContainerButtonClick {
                 container_id,
                 button_id,
-            } => lectern::on_button(region, player, container_id, button_id),
+            } => {
+                menu::on_button(region, player, container_id, button_id);
+                lectern::on_button(region, player, container_id, button_id);
+            }
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }
