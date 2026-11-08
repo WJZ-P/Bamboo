@@ -307,6 +307,9 @@ public final class Extractor {
             object.addProperty("hasCollision", hasPlacementCollision(state));
             object.addProperty("hasFluid", !state.getFluidState().isEmpty());
             object.addProperty("twoBlocks", takesTwoBlocks(block, state));
+            object.addProperty("pushReaction", state.getPistonPushReaction().name().toLowerCase(Locale.ROOT));
+            // 活塞推不动也不打碎的方块，`BlockBehaviour.Properties.strength(-1.0F)`。
+            object.addProperty("unbreakable", state.getDestroySpeed(EmptyBlockGetter.INSTANCE, BlockPos.ZERO) == -1.0F);
             addBlockEntityType(object, state);
             object.addProperty("class", className(block.getClass()));
             object.add("ancestors", ancestors(block.getClass()));

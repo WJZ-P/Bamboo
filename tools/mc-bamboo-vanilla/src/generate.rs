@@ -196,7 +196,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef}};"
+        "use crate::{{Block, BlockClass, BlockField, BlockOffset, FieldValue, PropertyDef, PushReaction}};"
     );
     let _ = writeln!(out, "use crate::tags::block_tags;\n");
     let _ = writeln!(out, "/// 方块状态的总数，决定了全局调色板的位数。");
@@ -212,7 +212,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -220,6 +220,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.has_collision,
             block.has_fluid,
             block.two_blocks,
+            push_reaction(&block.push_reaction)?,
+            block.unbreakable,
             block.block_entity_type,
             block.class,
             properties.name_of(property_list(&block.properties)),
@@ -326,6 +328,18 @@ fn field_value(value: &FieldValue, block_tags: &TagIndexes) -> Result<String, St
             format!("FieldValue::Tag(block_tags::{})", constant_name(name))
         }
     })
+}
+
+/// 官方 `PushReaction` 的名字，小写换成 Rust 的常量名。官方加了新的值时这里要跟着加。
+fn push_reaction(name: &str) -> Result<&'static str, String> {
+    match name {
+        "push_pull" => Ok("PushPull"),
+        "push" => Ok("Push"),
+        "popped" => Ok("Popped"),
+        "immoveable" => Ok("Immoveable"),
+        "ignore_entity" => Ok("IgnoreEntity"),
+        other => Err(format!("未知的 PushReaction {other}")),
+    }
 }
 
 fn offset_literal(block: &Block) -> String {
@@ -1049,6 +1063,8 @@ mod tests {
             has_collision: false,
             has_fluid: false,
             two_blocks: false,
+            push_reaction: "push_pull".to_owned(),
+            unbreakable: false,
             block_entity_type: None,
             class: "Block".to_owned(),
             ancestors: Vec::new(),

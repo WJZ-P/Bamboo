@@ -177,6 +177,21 @@ pub struct FluidFacts {
     pub legacy_block: u32,
 }
 
+/// 活塞推动时的反应，官方 `PushReaction`，顺序和官方一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushReaction {
+    /// 跟着活塞走，也能被拉回来。
+    PushPull,
+    /// 能推，不能拉。
+    Push,
+    /// 推的时候直接掉下来。
+    Popped,
+    /// 推不动。
+    Immoveable,
+    /// 只对实体有意义，方块不会碰到。
+    IgnoreEntity,
+}
+
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
@@ -194,6 +209,10 @@ pub struct Block {
     ///
     /// `pitcher_crop` 不算，它有 `half` 属性，但放下时只占一格，长大后才有上半。
     pub two_blocks: bool,
+    /// 活塞推动时的反应，`state.getPistonPushReaction()`。
+    pub push_reaction: PushReaction,
+    /// 破坏速度是 -1：活塞不会推动，也不会打碎它。
+    pub unbreakable: bool,
     /// 方块实体类型的 ID，见 [`registries::block_entity_type`]。
     pub block_entity_type: Option<i32>,
     /// `block.getClass().getSimpleName()`。
@@ -806,6 +825,34 @@ mod tests {
         assert_eq!(block_entity_type(blocks::STONE), None);
         // 26.3 的床已经不是方块实体了。
         assert_eq!(block_entity_type(blocks::RED_BED), None);
+    }
+
+    #[test]
+    fn push_reactions_and_unbreakable_blocks_come_from_the_block_properties() {
+        let block = |state| block_of_state(state).expect("状态属于某个方块");
+        assert_eq!(
+            block(blocks::PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::STICKY_PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::SLIME_BLOCK).push_reaction,
+            PushReaction::PushPull
+        );
+        assert_eq!(
+            block(blocks::OAK_LEAVES).push_reaction,
+            PushReaction::Popped
+        );
+        assert_eq!(block(blocks::WATER).push_reaction, PushReaction::Popped);
+        assert_eq!(block(blocks::STONE).push_reaction, PushReaction::PushPull);
+
+        assert!(block(blocks::BEDROCK).unbreakable);
+        assert!(block(blocks::MOVING_PISTON).unbreakable);
+        assert!(!block(blocks::PISTON).unbreakable);
+        assert!(!block(blocks::OBSIDIAN).unbreakable);
     }
 
     #[test]
