@@ -54,6 +54,20 @@ pub(crate) struct SignedMessage {
     pub(crate) last_seen: Vec<MessageSignatureBytes>,
 }
 
+impl SignedMessage {
+    /// 官方 `PlayerList.verifyChatTrusted`：有签名，而且服务端还没把它当成过期。
+    ///
+    /// Official `PlayerList.verifyChatTrusted`: the message has a signature and the server
+    /// does not consider it expired.
+    pub(crate) fn is_trusted(&self, now_millis: i64) -> bool {
+        self.signature.is_some()
+            && now_millis
+                <= self
+                    .time_millis
+                    .saturating_add(MESSAGE_EXPIRES_AFTER_MILLIS)
+    }
+}
+
 /// 链上的失败。翻译键交给系统消息，再染成红色。
 ///
 /// A chain failure. The translation key becomes a system message, then turns red.
@@ -285,14 +299,18 @@ impl Decoder {
                         key: MISSING_PROFILE_KEY,
                     })
                 } else {
+                    // 官方 `PlayerChatMessage.unsigned`：时间是现在，盐是 0，已读列表是空的。
+                    //
+                    // Official `PlayerChatMessage.unsigned`: the time is now, the salt is 0,
+                    // and the last-seen list is empty.
                     Ok(SignedMessage {
                         sender,
                         index: 0,
                         signature: None,
                         content: body.content.to_owned(),
-                        time_millis: body.time_millis,
-                        salt: body.salt,
-                        last_seen: body.last_seen,
+                        time_millis: body.now_millis,
+                        salt: 0,
+                        last_seen: Vec::new(),
                     })
                 }
             }
@@ -831,10 +849,14 @@ mod tests {
             MISSING_PROFILE_KEY
         );
         let accepted = decoder
-            .unpack(false, Uuid::from_u128(9), None, parts("hi", 0, 0, 0))
+            .unpack(false, Uuid::from_u128(9), None, parts("hi", 5, 9, 42))
             .unwrap();
         assert!(accepted.signature.is_none());
         assert_eq!(accepted.sender, Uuid::from_u128(9));
+        assert_eq!(accepted.index, 0);
+        assert_eq!(accepted.time_millis, 42);
+        assert_eq!(accepted.salt, 0);
+        assert!(accepted.last_seen.is_empty());
     }
 
     #[test]

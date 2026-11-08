@@ -16,7 +16,9 @@ use std::{
     time::Duration,
 };
 
-use mc_bamboo_auth::{ServerKeyPair, Timeouts, fetch_profile_keys, public_keys_url};
+use mc_bamboo_auth::{
+    ProfileKeySchedule, ServerKeyPair, Timeouts, fetch_profile_keys, public_keys_url,
+};
 use mc_bamboo_data::{registries, tags};
 use mc_bamboo_game::{Inbound, ServiceProfileKeys, World, WorldConfig};
 use mc_bamboo_protocol::{
@@ -33,7 +35,7 @@ use mc_bamboo_protocol::{
 use serde_json::json;
 use tokio::{
     net::TcpListener,
-    sync::{OnceCell, Semaphore, broadcast},
+    sync::{Semaphore, broadcast, watch},
     time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -140,10 +142,11 @@ pub(crate) struct Shared {
     /// The keys Mojang uses to sign player public keys. Connection tasks write them.
     /// The world thread only reads.
     pub(crate) profile_keys: Arc<ServiceProfileKeys>,
-    /// 公钥只取一次。失败也记在这里，避免每个玩家都再问一遍。
+    /// 第一次取钥（成功或失败）结束时变成 `true`。登录在这之前等着。
     ///
-    /// The profile keys are fetched once. A failure is recorded too, so later players do not ask again.
-    keys_loaded: OnceCell<()>,
+    /// Becomes `true` when the first key fetch finishes, successfully or not.
+    /// Login waits until then.
+    keys_ready: watch::Sender<bool>,
     /// 发给世界线程的消息。世界线程结束后发送会失败。
     pub(crate) inbox: Sender<Inbound>,
     status: RwLock<Arc<[u8]>>,
@@ -230,6 +233,7 @@ impl Server {
         let config = config.normalized();
         let responses = PreEncodedResponses::new()?;
         let profile_keys = Arc::new(ServiceProfileKeys::empty());
+        let (keys_ready, _) = watch::channel(false);
         let status = encode_status(&config, 0, false)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER_LEN);
         let (inbox_sender, inbox) = mpsc::channel();
@@ -246,7 +250,7 @@ impl Server {
                 session_id: Uuid::new_v4(),
                 keypair,
                 profile_keys,
-                keys_loaded: OnceCell::new(),
+                keys_ready,
                 inbox: inbox_sender,
                 status: RwLock::new(status),
                 players: Mutex::new(HashMap::new()),
@@ -271,12 +275,6 @@ impl Server {
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let config = world_config(&self.shared.config);
         let keys = Arc::clone(&self.shared.profile_keys);
-        if self.shared.config.online_mode {
-            let shared = Arc::clone(&self.shared);
-            tokio::spawn(async move {
-                ensure_profile_keys(&shared).await;
-            });
-        }
         self.run_with_world(
             move |inbox| World::with_service_keys(config, inbox, keys).run(),
             shutdown,
@@ -304,6 +302,13 @@ impl Server {
         if let Err(error) = spawn_world(world, inbox, world_stopped.clone()) {
             error!(%error, "failed to start the world thread");
             world_stopped.cancel();
+        }
+        if shared.config.online_mode {
+            let refreshing = Arc::clone(&shared);
+            let stop = cancel.clone();
+            tokio::spawn(async move {
+                refresh_profile_keys(refreshing, stop).await;
+            });
         }
 
         loop {
@@ -355,38 +360,62 @@ fn enforces_secure_chat(config: &ServerConfig, keys: &ServiceProfileKeys) -> boo
     config.enforce_secure_profile && config.online_mode && keys.can_validate()
 }
 
-/// 正版验证打开时，在连接任务里把 Mojang 的公钥取回来。世界线程不碰网络。
+/// 等第一次取钥结束。取钥在后台按官方的间隔重试，这里不自己发请求。
 ///
-/// When online mode is on, a connection task fetches Mojang's public keys.
-/// The world thread never touches the network.
+/// Waits until the first key fetch finishes. The background task retries on the official
+/// schedule. This function does not send its own request.
 pub(crate) async fn ensure_profile_keys(shared: &Arc<Shared>) {
-    shared
-        .keys_loaded
-        .get_or_init(|| load_profile_keys(Arc::clone(shared)))
-        .await;
-}
-
-async fn load_profile_keys(shared: Arc<Shared>) {
     if !shared.config.online_mode {
         return;
     }
-    let url = public_keys_url(&shared.config.session_server_url);
-    let timeouts = Timeouts {
-        connect: shared.config.auth_connect_timeout,
-        read: shared.config.auth_read_timeout,
-    };
-    match fetch_profile_keys(&url, timeouts).await {
-        Ok(keys) => {
-            if !shared.profile_keys.replace(&keys) {
-                warn!(
-                    "discarding Mojang profile keys because one of them is not an RSA public key"
-                );
-            }
-            let online = shared.players.lock().expect("玩家表的锁不应该中毒").len();
-            shared.refresh_status(online);
+    let mut ready = shared.keys_ready.subscribe();
+    if *ready.borrow() {
+        return;
+    }
+    let _ = ready.changed().await;
+}
+
+/// 后台取 Mojang 的公钥。失败按 `RetryableFetch` 退避，成功后 24 小时刷新。世界线程不碰网络。
+///
+/// Fetches Mojang's public keys in the background. Failures back off like `RetryableFetch`,
+/// and a success refreshes after 24 hours. The world thread never touches the network.
+async fn refresh_profile_keys(shared: Arc<Shared>, cancel: CancellationToken) {
+    let mut schedule = ProfileKeySchedule::default();
+    loop {
+        if cancel.is_cancelled() {
+            let _ = shared.keys_ready.send(true);
+            return;
         }
-        Err(error) => {
-            warn!(%error, "could not fetch Mojang profile keys; secure chat stays off");
+        let url = public_keys_url(&shared.config.session_server_url);
+        let timeouts = Timeouts {
+            connect: shared.config.auth_connect_timeout,
+            read: shared.config.auth_read_timeout,
+        };
+        let delay = match fetch_profile_keys(&url, timeouts).await {
+            Ok(keys) => {
+                if shared.profile_keys.replace(&keys) {
+                    let online = shared.players.lock().expect("玩家表的锁不应该中毒").len();
+                    shared.refresh_status(online);
+                    schedule.after_success()
+                } else {
+                    warn!(
+                        "discarding Mojang profile keys because one of them is not an RSA public key"
+                    );
+                    schedule.after_failure()
+                }
+            }
+            Err(error) => {
+                warn!(%error, "could not fetch Mojang profile keys; will retry");
+                schedule.after_failure()
+            }
+        };
+        let _ = shared.keys_ready.send(true);
+        let stop = tokio::select! {
+            () = cancel.cancelled() => true,
+            () = tokio::time::sleep(delay) => false,
+        };
+        if stop {
+            return;
         }
     }
 }

@@ -17,10 +17,31 @@
 //!
 //! The key material is `playerCertificateKeys[].publicKey`, standard Base64 of an X.509 SPKI.
 //! Verification is `SHA1withRSA` and happens in the game crate. This module only fetches bytes.
+//!
+//! 失败后的重试照 authlib `RetryableFetch`：第一次立刻试，之后是 5 分钟乘以 `2^min(失败次数, 6)`。
+//! 成功后 24 小时再取一次。没有次数上限。
+//!
+//! Retries follow authlib `RetryableFetch`: the first try is immediate, then 5 minutes times
+//! `2^min(failures, 6)`. A success refreshes after 24 hours. There is no attempt cap.
+
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::http::{self, Timeouts};
+
+/// 成功之后隔多久再取。官方 `RetryableFetch.REFRESH_INTERVAL_HOURS`。
+///
+/// How long to wait after a success. Official `RetryableFetch.REFRESH_INTERVAL_HOURS`.
+pub const PROFILE_KEY_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
+/// 失败后退避的底数。官方 `RetryableFetch.BASE_FAILURE_INTERVAL_MINUTES`。
+///
+/// Base failure backoff. Official `RetryableFetch.BASE_FAILURE_INTERVAL_MINUTES`.
+const PROFILE_KEY_BASE_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// 指数的上限。官方 `RetryableFetch.MAX_BACKOFF_EXPONENT`。
+///
+/// Cap on the exponent. Official `RetryableFetch.MAX_BACKOFF_EXPONENT`.
+const PROFILE_KEY_MAX_BACKOFF_EXPONENT: u32 = 6;
 
 const OFFICIAL_PUBLIC_KEYS: &str = "https://api.minecraftservices.com/publickeys";
 const OFFICIAL_SESSION_HOST: &str = "sessionserver.mojang.com";
@@ -142,6 +163,41 @@ pub enum ServicesKeyError {
     Http(String),
 }
 
+/// 第 `failures` 次失败之后要等多久。`failures` 从 0 开始，和 `AtomicInteger.getAndIncrement` 一样。
+///
+/// Delay after failure number `failures`, starting at 0, matching `AtomicInteger.getAndIncrement`.
+pub fn profile_key_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.min(PROFILE_KEY_MAX_BACKOFF_EXPONENT);
+    PROFILE_KEY_BASE_BACKOFF.saturating_mul(1_u32 << exponent)
+}
+
+/// 记住连续失败了几次，用来算下一次等待。
+///
+/// Remembers consecutive failures so the next wait can be calculated.
+#[derive(Debug, Default, Clone)]
+pub struct ProfileKeySchedule {
+    failures: u32,
+}
+
+impl ProfileKeySchedule {
+    /// 这次失败了。返回下一次尝试前要等的时间。
+    ///
+    /// This attempt failed. Returns how long to wait before the next one.
+    pub fn after_failure(&mut self) -> Duration {
+        let delay = profile_key_retry_delay(self.failures);
+        self.failures = self.failures.saturating_add(1);
+        delay
+    }
+
+    /// 这次成功了。失败计数清零，返回 24 小时。
+    ///
+    /// This attempt succeeded. The failure count resets and the wait is 24 hours.
+    pub fn after_success(&mut self) -> Duration {
+        self.failures = 0;
+        PROFILE_KEY_REFRESH
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +227,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed, vec![vec![1, 2, 3, 4]]);
+    }
+
+    #[test]
+    fn retries_use_the_authlib_backoff_and_then_refresh_after_a_day() {
+        let minute = Duration::from_secs(60);
+        let mut schedule = ProfileKeySchedule::default();
+        let expected = [5_u32, 10, 20, 40, 80, 160, 320, 320];
+        for minutes in expected {
+            assert_eq!(schedule.after_failure(), minute * minutes);
+        }
+        assert_eq!(schedule.after_success(), PROFILE_KEY_REFRESH);
+        assert_eq!(schedule.after_failure(), minute * 5);
     }
 }

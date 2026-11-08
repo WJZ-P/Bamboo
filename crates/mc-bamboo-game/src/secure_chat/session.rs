@@ -4,10 +4,10 @@
 
 use mc_bamboo_command::ParsedCommand;
 use mc_bamboo_protocol::{
-    packet::play::{LastSeenUpdate, RemoteChatSession, SignedCommand, SystemChat},
+    packet::play::{ChatVisibility, LastSeenUpdate, RemoteChatSession, SignedCommand, SystemChat},
     text::{Color, Component},
 };
-use rsa::{RsaPublicKey, pkcs8::DecodePublicKey};
+use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -90,9 +90,7 @@ pub(crate) fn on_session(
         key_signature: key.key_signature.clone(),
     });
     if let Some(stored) = &stored
-        && stored.expires_at_millis == session.expires_at_millis
-        && stored.public_key == session.public_key
-        && stored.key_signature == session.key_signature
+        && same_profile_key(stored, &session)
     {
         return None;
     }
@@ -193,9 +191,9 @@ pub(crate) fn apply_last_seen(region: &mut Region, id: PlayerId, update: &LastSe
     }
 }
 
-/// 聊天正文。`Ok(None)` 是没有签名、按伪装聊天转发的消息。
+/// 聊天正文。没有签名时发送者仍是这名玩家，调用方发不带签名的 `player_chat`。
 ///
-/// A chat body. `Ok(None)` is an unsigned message forwarded as disguised chat.
+/// A chat body. An unsigned message still names this player, and the caller sends `player_chat` without a signature.
 pub(crate) fn accept_chat(
     region: &mut Region,
     id: PlayerId,
@@ -203,8 +201,9 @@ pub(crate) fn accept_chat(
     signature: Option<MessageSignatureBytes>,
     time_millis: i64,
     salt: i64,
-) -> Result<Option<SignedMessage>, ()> {
+) -> Result<SignedMessage, ()> {
     let enforced = enforces(region);
+    let now = region.now_millis();
     let unpacked = {
         let Some(player) = region.players.get_mut(&id) else {
             return Err(());
@@ -220,13 +219,12 @@ pub(crate) fn accept_chat(
                 time_millis,
                 salt,
                 last_seen,
-                now_millis: chain::now_millis(),
+                now_millis: now,
             },
         )
     };
     match unpacked {
-        Ok(message) if message.signature.is_some() => Ok(Some(message)),
-        Ok(_) => Ok(None),
+        Ok(message) => Ok(message),
         Err(failure) => {
             tell_failure(region, id, failure);
             Err(())
@@ -253,8 +251,20 @@ pub(crate) fn collect_command(
                 .map(|message| (name.clone(), message.text.clone()))
         })
         .collect();
+    collect_arguments(region, id, &expected, signed)
+}
+
+/// 按已经解析出来的参数名收集签名。解析失败时用的也是这一份。
+///
+/// Collects signatures against the arguments that parsed. A failed parse uses the same list.
+pub(crate) fn collect_arguments(
+    region: &mut Region,
+    id: PlayerId,
+    expected: &[(String, String)],
+    signed: &SignedCommand,
+) -> bool {
     let enforced = enforces(region);
-    let now = chain::now_millis();
+    let now = region.now_millis();
     let outcome = {
         let Some(player) = region.players.get_mut(&id) else {
             return false;
@@ -262,7 +272,7 @@ pub(crate) fn collect_command(
         player.chat.arguments.clear();
         let sender = player.uuid;
         let last_seen = player.chat.pending_seen.clone();
-        collect_into(player, enforced, sender, &expected, signed, &last_seen, now)
+        collect_into(player, enforced, sender, expected, signed, &last_seen, now)
     };
     match outcome {
         Ok(arguments) => {
@@ -353,12 +363,42 @@ pub(crate) fn take_argument(
     Some(player.chat.arguments.swap_remove(index).1)
 }
 
+/// 过期时间、模数、指数和 Mojang 的签名都相同才算同一把钥匙。官方 `PublicKey.equals` 比的是模数和指数。
+///
+/// The same key means the same expiry, modulus, exponent, and Mojang signature.
+/// Official `PublicKey.equals` compares the modulus and the exponent.
+fn same_profile_key(stored: &StoredKey, session: &RemoteChatSession) -> bool {
+    stored.expires_at_millis == session.expires_at_millis
+        && stored.key_signature == session.key_signature
+        && same_rsa_key(&stored.public_key, &session.public_key)
+}
+
+fn same_rsa_key(left: &[u8], right: &[u8]) -> bool {
+    let Ok(left) = RsaPublicKey::from_public_key_der(left) else {
+        return false;
+    };
+    let Ok(right) = RsaPublicKey::from_public_key_der(right) else {
+        return false;
+    };
+    left.n() == right.n() && left.e() == right.e()
+}
+
 fn tell_failure(region: &mut Region, id: PlayerId, failure: ChainFailure) {
     warn!(
         player = id.0,
         key = failure.key,
         "failed to update the secure chat state"
     );
+    // 官方 `sendSystemMessage`：可见性是隐藏、又不是 overlay 时不发。
+    //
+    // Official `sendSystemMessage` skips a non-overlay message when chat is hidden.
+    let hidden = region
+        .players
+        .get(&id)
+        .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Hidden);
+    if hidden {
+        return;
+    }
     let content = Component::translate(failure.key, []).color(Color::Red);
     region.links.send(
         id,
@@ -367,4 +407,36 @@ fn tell_failure(region: &mut Region, id: PlayerId, failure: ChainFailure) {
             overlay: false,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
+    use rsa::traits::PublicKeyParts;
+
+    use super::same_rsa_key;
+
+    #[test]
+    fn public_keys_match_by_modulus_and_exponent() {
+        let mut rng = rand_core::OsRng;
+        let first = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("key");
+        let second = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("key");
+        let first_der = rsa::RsaPublicKey::from(&first)
+            .to_public_key_der()
+            .expect("der")
+            .as_bytes()
+            .to_vec();
+        let second_der = rsa::RsaPublicKey::from(&second)
+            .to_public_key_der()
+            .expect("der")
+            .as_bytes()
+            .to_vec();
+        let parsed = rsa::RsaPublicKey::from_public_key_der(&first_der).expect("parse");
+        let rebuilt = rsa::RsaPublicKey::new(parsed.n().clone(), parsed.e().clone())
+            .expect("rebuild")
+            .to_public_key_der()
+            .expect("der");
+        assert!(same_rsa_key(&first_der, rebuilt.as_bytes()));
+        assert!(!same_rsa_key(&first_der, &second_der));
+    }
 }

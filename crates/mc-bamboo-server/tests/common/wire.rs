@@ -1163,6 +1163,66 @@ impl Packet for DisguisedChat {
     }
 }
 
+/// 未签名或带签名的 `player_chat`。测试只核对玩家聊天用得到的字段。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerChat {
+    pub global_index: i32,
+    pub sender: Uuid,
+    pub index: i32,
+    pub signed: bool,
+    pub content: String,
+    pub salt: i64,
+    /// 线上的值，注册表 ID 加一。
+    pub chat_type: i32,
+    pub name: Nbt,
+    pub target: Option<Nbt>,
+}
+
+impl Packet for PlayerChat {
+    const ID: i32 = clientbound::PLAYER_CHAT;
+
+    fn read(reader: &mut Reader<'_>) -> Self {
+        let global_index = varint(reader);
+        let sender = uuid(reader);
+        let index = varint(reader);
+        let signed = boolean(reader);
+        if signed {
+            for _ in 0..256 {
+                let _ = byte(reader);
+            }
+        }
+        let content = reader.string(256).expect("chat content").to_owned();
+        let _time = reader.i64().expect("time");
+        let salt = reader.i64().expect("salt");
+        let seen = list_len(reader);
+        for _ in 0..seen {
+            let id = varint(reader);
+            if id == 0 {
+                for _ in 0..256 {
+                    let _ = byte(reader);
+                }
+            }
+        }
+        let unsigned = boolean(reader).then(|| Nbt::read(reader));
+        let _ = unsigned;
+        let _filter = varint(reader);
+        let chat_type = varint(reader);
+        let name = Nbt::read(reader);
+        let target = boolean(reader).then(|| Nbt::read(reader));
+        Self {
+            global_index,
+            sender,
+            index,
+            signed,
+            content,
+            salt,
+            chat_type,
+            name,
+            target,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Disconnect {
     pub reason: Nbt,
@@ -1721,6 +1781,7 @@ pub fn packet_name(id: i32) -> String {
         clientbound::CONTAINER_SET_SLOT => "container_set_slot",
         clientbound::DISCONNECT => "disconnect",
         clientbound::DISGUISED_CHAT => "disguised_chat",
+        clientbound::PLAYER_CHAT => "player_chat",
         clientbound::ENTITY_POSITION_SYNC => "entity_position_sync",
         clientbound::FORGET_LEVEL_CHUNK => "forget_level_chunk",
         clientbound::GAME_EVENT => "game_event",

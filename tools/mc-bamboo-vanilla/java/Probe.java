@@ -396,6 +396,7 @@ public final class Probe {
             "handleOpenScreen",
             "handleOpenSignEditor",
             "handlePlayerAbilities",
+            "handlePlayerChat",
             "handlePlayerInfoRemove",
             "handlePlayerInfoUpdate",
             "handleRemoveEntities",
@@ -2093,14 +2094,14 @@ public final class Probe {
             await("commands: clear removes the three stone", () -> stoneCount(actor) == 0);
             check("commands: clear announces the removal", containsText(actor, "Removed 3 item(s) from player " + actor.player));
 
-            actor.send(new ServerboundChatCommandPacket("say hi"));
+            Join.sendLooseCommand(actor, "say hi");
             await("commands: say reaches both players",
                     () -> actor.chats.stream().anyMatch(text -> text.contains("[" + actor.player + "] hi"))
                             && observer.chats.stream().anyMatch(text -> text.contains("[" + actor.player + "] hi")));
-            actor.send(new ServerboundChatCommandPacket("me waves"));
+            Join.sendLooseCommand(actor, "me waves");
             await("commands: me reaches the other player",
                     () -> observer.chats.stream().anyMatch(text -> text.contains(actor.player) && text.contains("waves")));
-            actor.send(new ServerboundChatCommandPacket("msg " + observer.player + " ping"));
+            Join.sendLooseCommand(actor, "msg " + observer.player + " ping");
             await("commands: msg shows the outgoing whisper",
                     () -> actor.chats.stream().anyMatch(text -> text.contains("You whisper to " + observer.player + ": ping")));
             await("commands: msg shows the incoming whisper",
@@ -3420,6 +3421,16 @@ public final class Probe {
             }
         }
 
+        /** 离线客户端对带 `message` 参数的命令发签名包，但签名个数是 0。 */
+        private static void sendLooseCommand(Join actor, String command) throws IOException {
+            actor.send(new ServerboundChatCommandSignedPacket(
+                    command,
+                    Instant.now(),
+                    0L,
+                    new ArgumentSignatures(List.of()),
+                    new LastSeenMessages.Update(0, new BitSet(), (byte) 1)));
+        }
+
         private static LastSeenMessages.Update emptyLastSeen() {
             return new LastSeenMessages.Update(0, new BitSet(20), (byte) 1);
         }
@@ -3455,10 +3466,20 @@ public final class Probe {
                 return;
             }
             MessageSignature signature = packet.signature().orElse(null);
+            if (signature == null) {
+                Component content = packet.unsignedContent().orElseGet(() -> Component.literal(body.get().content()));
+                chats.add(packet.chatType().decorate(content).getString());
+                narrations.add(packet.chatType().decorateNarration(content).getString());
+                String type = packet.chatType().chatType().unwrapKey().map(key -> key.identifier().getPath()).orElse("");
+                if (type.equals("chat") || type.equals("say_command") || type.equals("emote_command")) {
+                    check("chat: player chat has no target", packet.chatType().targetName().isEmpty());
+                }
+                return;
+            }
             signatureCache.push(body.get(), signature);
             SignedMessageValidator validator = peerValidators.get(packet.sender());
             UUID sessionId = peerSessionIds.get(packet.sender());
-            if (validator == null || signature == null || sessionId == null) {
+            if (validator == null || sessionId == null) {
                 check("secure: player chat has a session and a signature", false);
                 return;
             }

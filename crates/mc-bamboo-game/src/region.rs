@@ -166,6 +166,11 @@ pub(crate) struct Region {
     ///
     /// Mojang's `playerCertificateKeys`. The connection task fills them in.
     pub(crate) service_keys: Arc<ServiceProfileKeys>,
+    /// 测试把聊天时钟钉死，两次同样的输入才有同样的字节。`None` 用系统时间，和官方 `Instant.now` 一样。
+    ///
+    /// Tests pin the chat clock so the same input produces the same bytes.
+    /// `None` uses the system clock, matching official `Instant.now`.
+    pub(crate) clock_millis: Option<i64>,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -255,7 +260,16 @@ impl Region {
             online_mode,
             enforce_secure_profile,
             service_keys,
+            clock_millis: None,
         }
+    }
+
+    /// 未签名消息和过期判断用的现在。测试可以钉死。
+    ///
+    /// Now, for unsigned messages and expiry checks. Tests can pin it.
+    pub(crate) fn now_millis(&self) -> i64 {
+        self.clock_millis
+            .unwrap_or_else(crate::secure_chat::now_millis)
     }
 
     pub(crate) fn advance_tick(&mut self) {

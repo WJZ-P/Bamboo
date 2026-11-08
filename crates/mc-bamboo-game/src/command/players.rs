@@ -389,9 +389,10 @@ fn render(region: &Region, source: PlayerId, message: &Message) -> Result<String
     Ok(text)
 }
 
-/// `/say` 和 `/me`。有签名就发 `player_chat`，没有就发 `disguised_chat`。
+/// `/say` 和 `/me`。发送者不是全零 UUID 时发 `player_chat`，否则发 `disguised_chat`。
 ///
-/// `/say` and `/me`. A signature goes out as `player_chat`; otherwise this sends `disguised_chat`.
+/// `/say` and `/me`. A sender other than the nil UUID goes out as `player_chat`.
+/// A nil sender goes out as `disguised_chat`.
 fn publish_command_chat(
     region: &mut Region,
     sender: PlayerId,
@@ -401,18 +402,20 @@ fn publish_command_chat(
     target: Option<&Component>,
 ) {
     let signed = crate::secure_chat::take_argument(region, sender, argument);
-    let name = Component::text(player_name(region, sender));
+    let speaker = player_name(region, sender);
+    let trusted = signed
+        .as_ref()
+        .is_some_and(|message| message.is_trusted(region.now_millis()));
+    crate::chat::log_player_broadcast(trusted, chat_type, &speaker, rendered);
+    let name = Component::text(speaker);
     let unsigned = signed
         .as_ref()
         .filter(|message| message.content != rendered)
         .map(|_| Component::text(rendered));
-    if signed
-        .as_ref()
-        .is_some_and(|message| message.signature.is_some())
-    {
+    if let Some(message) = signed.as_ref().filter(|message| !message.sender.is_nil()) {
         crate::secure_chat::broadcast_signed(
             region,
-            signed.as_ref().expect("checked"),
+            message,
             chat_type,
             &name,
             target,
@@ -465,11 +468,11 @@ fn deliver_one(
     signed: Option<&crate::secure_chat::SignedMessage>,
     chat: &DirectChat<'_>,
 ) {
-    if signed.is_some_and(|message| message.signature.is_some()) {
+    if let Some(message) = signed.filter(|message| !message.sender.is_nil()) {
         crate::secure_chat::send_signed_to(
             region,
             to,
-            signed.expect("checked"),
+            message,
             chat.chat_type,
             chat.name,
             chat.target,

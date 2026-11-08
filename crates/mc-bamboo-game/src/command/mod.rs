@@ -44,6 +44,21 @@ pub(crate) struct Commands {
     actions: Vec<Option<CommandFn>>,
 }
 
+fn reject_unsigned_signable(region: &mut Region, id: PlayerId) {
+    let content = mc_bamboo_protocol::text::Component::translate(
+        "chat.disabled.invalid_command_signature",
+        [],
+    )
+    .color(mc_bamboo_protocol::text::Color::Red);
+    region.links.send(
+        id,
+        &SystemChat {
+            content: &content,
+            overlay: false,
+        },
+    );
+}
+
 pub(crate) fn commands() -> &'static Commands {
     static COMMANDS: OnceLock<Commands> = OnceLock::new();
     COMMANDS.get_or_init(catalog::build)
@@ -101,18 +116,7 @@ pub(crate) fn on_command(
                 && secure_chat::enforces(region)
                 && secure_chat::has_signable_argument(&parsed.arguments)
             {
-                let content = mc_bamboo_protocol::text::Component::translate(
-                    "chat.disabled.invalid_command_signature",
-                    [],
-                )
-                .color(mc_bamboo_protocol::text::Color::Red);
-                region.links.send(
-                    id,
-                    &SystemChat {
-                        content: &content,
-                        overlay: false,
-                    },
-                );
+                reject_unsigned_signable(region, id);
             } else if signed
                 .is_some_and(|signed| !secure_chat::collect_command(region, id, &parsed, signed))
             {
@@ -134,12 +138,32 @@ pub(crate) fn on_command(
             }
         }
         Err(failure) => {
-            feedback::report(
-                region,
-                id,
-                command,
-                &feedback::fail_parse(command, &failure.error, failure.cursor),
-            );
+            // 官方 `performSignedChatCommand` 先对解析结果 `collectSignedArguments`，
+            // 对不上才决定要不要执行。解析失败也一样，不能跳过。
+            //
+            // Official `performSignedChatCommand` calls `collectSignedArguments` on the
+            // parse result before it decides whether to run the command. A failed parse
+            // still goes through that step.
+            let expected = commands().graph.signable_messages(command, level);
+            if let Some(signed) = signed {
+                if secure_chat::collect_arguments(region, id, &expected, signed) {
+                    feedback::report(
+                        region,
+                        id,
+                        command,
+                        &feedback::fail_parse(command, &failure.error, failure.cursor),
+                    );
+                }
+            } else if secure_chat::enforces(region) && !expected.is_empty() {
+                reject_unsigned_signable(region, id);
+            } else {
+                feedback::report(
+                    region,
+                    id,
+                    command,
+                    &feedback::fail_parse(command, &failure.error, failure.cursor),
+                );
+            }
         }
     }
     chat::detect_command_rate_spam(region, id);

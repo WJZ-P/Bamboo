@@ -65,9 +65,6 @@ fn send_one(
     target_name: Option<&Component>,
     unsigned: Option<&Component>,
 ) {
-    let Some(signature) = message.signature else {
-        return;
-    };
     let (global_index, packed) = {
         let Some(player) = region.players.get_mut(&to) else {
             return;
@@ -83,7 +80,7 @@ fn send_one(
             global_index,
             sender: message.sender,
             index: message.index,
-            signature: Some(&signature),
+            signature: message.signature.as_ref(),
             content: &message.content,
             time_millis: message.time_millis,
             salt: message.salt,
@@ -94,6 +91,13 @@ fn send_one(
             target_name,
         },
     );
+    // 没有签名时官方只增加 `nextChatIndex`，不推进已读窗口。
+    //
+    // Without a signature, official code only increments `nextChatIndex`. It does not
+    // advance the seen window.
+    let Some(signature) = message.signature else {
+        return;
+    };
     let Some(player) = region.players.get_mut(&to) else {
         return;
     };

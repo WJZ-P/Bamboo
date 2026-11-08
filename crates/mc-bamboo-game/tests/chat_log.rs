@@ -69,7 +69,7 @@ impl PlayerSink for DiscardingSink {
 }
 
 #[test]
-fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
+fn chat_is_logged_with_the_not_secure_tag() {
     let (inbox, receiver) = mpsc::channel();
     let config = WorldConfig {
         view_distance: 2,
@@ -103,5 +103,8 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
     with_default(console.clone(), || world.run());
 
     let lines = console.0.lock().unwrap();
-    assert_eq!(*lines, [(Level::INFO, "<Kitten> 竹子 hi".to_owned())]);
+    assert_eq!(
+        *lines,
+        [(Level::INFO, "[Not Secure] <Kitten> 竹子 hi".to_owned())]
+    );
 }

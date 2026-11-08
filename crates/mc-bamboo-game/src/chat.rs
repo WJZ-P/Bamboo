@@ -1,7 +1,7 @@
 //! 聊天和命令。
 //!
 //! 聊天是全服的事情：这里只拼出要广播的帧，发给谁由 `World` 决定。
-//! 离线模式的消息没有签名，每名玩家要记住的只有 [`SpamThrottlers`] 里的刷屏计数。
+//! 没签名的玩家聊天仍是 `player_chat`，发送者是这名玩家。刷屏计数在 [`TickThrottler`] 里。
 //!
 //! 命令的解析和执行在 `command`。这里留下聊天，以及命令和聊天共用的刷屏计数。
 //!
@@ -10,9 +10,7 @@
 
 use mc_bamboo_data::registries::chat_type;
 use mc_bamboo_protocol::{
-    packet::play::{
-        AwardStats, ChatVisibility, ClientCommandKind, DisguisedChat, LastSeenUpdate, SystemChat,
-    },
+    packet::play::{AwardStats, ChatVisibility, ClientCommandKind, LastSeenUpdate, SystemChat},
     text::{Color, Component, is_allowed_chat_character},
 };
 use tracing::info;
@@ -144,29 +142,30 @@ pub(crate) fn on_chat(
         None => return false,
     };
     match secure_chat::accept_chat(region, id, &message, signature, time_millis, salt) {
-        Ok(Some(signed)) => {
-            info!("<{name}> {message}");
+        Ok(signed) => {
+            let trusted = signed.is_trusted(region.now_millis());
+            log_player_broadcast(trusted, chat_type::CHAT, &name, &message);
             let display = Component::text(name);
             secure_chat::broadcast_signed(region, &signed, chat_type::CHAT, &display, None, None);
             true
         }
-        Ok(None) => {
-            // 没有公钥、也没强制签名时，官方会发不带签名的 `player_chat`。
-            // 这里仍发 `disguised_chat`，离线探针和现有测试按这个包核对。
-            //
-            // With no key and secure chat not enforced, official servers send unsigned `player_chat`.
-            // This still sends `disguised_chat`, which the offline probe and the existing tests check.
-            info!("<{name}> {message}");
-            deliver_disguised(
-                region,
-                &name,
-                &Component::text(message),
-                chat_type::CHAT,
-                None,
-            );
-            true
-        }
         Err(()) => false,
+    }
+}
+
+/// 官方 `PlayerList.logChatMessage`。不可信的消息前面加 `[Not Secure]`。
+///
+/// Official `PlayerList.logChatMessage`. Untrusted messages are prefixed with `[Not Secure]`.
+pub(crate) fn log_player_broadcast(trusted: bool, chat_type_id: i32, name: &str, content: &str) {
+    let line = match chat_type_id {
+        chat_type::SAY_COMMAND => format!("[{name}] {content}"),
+        chat_type::EMOTE_COMMAND => format!("* {name} {content}"),
+        _ => format!("<{name}> {content}"),
+    };
+    if trusted {
+        info!("{line}");
+    } else {
+        info!("[Not Secure] {line}");
     }
 }
 
@@ -193,36 +192,6 @@ fn send_system_chat(region: &mut Region, id: PlayerId, content: &Component) {
         overlay: false,
     };
     region.links.send(id, &packet);
-}
-
-/// 只发给聊天可见性是“全部”的玩家。官方 `ServerPlayer.acceptsChatMessages`。
-///
-/// Sends only to players whose chat visibility is full. Official `ServerPlayer.acceptsChatMessages`.
-fn deliver_disguised(
-    region: &mut Region,
-    name: &str,
-    message: &Component,
-    chat_type: i32,
-    target_name: Option<&Component>,
-) {
-    let display = Component::text(name);
-    let ids: Vec<PlayerId> = region
-        .players
-        .iter()
-        .filter(|(_, player)| player.client.chat_visibility == ChatVisibility::Full)
-        .map(|(id, _)| *id)
-        .collect();
-    for id in ids {
-        region.links.send(
-            id,
-            &DisguisedChat {
-                message,
-                chat_type,
-                name: &display,
-                target_name,
-            },
-        );
-    }
 }
 
 #[cfg(test)]

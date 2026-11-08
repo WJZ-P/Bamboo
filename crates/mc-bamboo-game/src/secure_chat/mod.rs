@@ -21,10 +21,11 @@ use sha1::Sha1;
 use sha2::Sha256;
 
 pub(crate) use chain::SignedMessage;
+pub(crate) use chain::now_millis;
 pub(crate) use deliver::{broadcast_signed, send_signed_to};
 pub(crate) use session::{
-    PlayerChat, SessionUpdate, accept_chat, apply_last_seen, collect_command, on_ack, on_session,
-    take_argument,
+    PlayerChat, SessionUpdate, accept_chat, apply_last_seen, collect_arguments, collect_command,
+    on_ack, on_session, take_argument,
 };
 
 use crate::region::Region;
@@ -43,15 +44,14 @@ impl ServiceProfileKeys {
         Self::default()
     }
 
-    /// 换成这一批 DER。有一把解不出来就把整批丢掉，官方 `MinecraftServicesKeyInfo.parse` 失败时也是整个结果为空。
+    /// 换成这一批 DER。有一把解不出来就不改原来的那批，官方只在这次响应解析成功时才换掉缓存。
     ///
-    /// Replaces the set with these DER bytes. One unreadable key drops the whole set, matching
-    /// `MinecraftServicesKeyInfo.parse` failing the entire response.
+    /// Replaces the set with these DER bytes. One unreadable key leaves the previous set
+    /// in place. Official code only swaps the cache when this response parses.
     pub fn replace(&self, ders: &[Vec<u8>]) -> bool {
         let mut parsed = Vec::with_capacity(ders.len());
         for der in ders {
             let Ok(key) = RsaPublicKey::from_public_key_der(der) else {
-                *self.keys.write().expect("profile key lock poisoned") = Vec::new();
                 return false;
             };
             parsed.push(key);

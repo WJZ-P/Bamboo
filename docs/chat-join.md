@@ -35,7 +35,7 @@
 
 ## 1. 结论
 
-**实现现状：** 正版验证打开、并且已经拿到服务公钥、`enforce-secure-profile` 为真时，按官方做安全聊天。`chat_session_update` 会校验并广播 `INITIALIZE_CHAT`；签名消息和 `/say`、`/me`、`/msg` 的参数签名转发为 `player_chat`；`chat_ack` 会推进已读窗口。下面第 1–3 条，以及后文写着「签名丢掉」「不处理 `chat_ack`」「不处理 `chat_session_update`」的句子，说的是改动之前的离线做法。离线模式、或者公钥没取到时，`enforces_secure_chat` 仍是 false，未签名玩家聊天仍发 `disguised_chat`（官方离线服发的是没有签名的 `player_chat`）。`delete_chat` 能编码，不会发送。
+**实现现状：** 正版验证打开、并且已经拿到服务公钥、`enforce-secure-profile` 为真时，按官方做安全聊天。公钥按 authlib `RetryableFetch` 在连接任务里重试（5 分钟起、每次翻倍、封顶 320 分钟，成功后 24 小时刷新），钥匙到达后强制立刻生效。`chat_session_update` 会校验并广播 `INITIALIZE_CHAT`；签名消息转发为 `player_chat`；`chat_ack` 会推进已读窗口。发送者不是全零 UUID 的未签名消息也发 `player_chat`（没有签名），控制台对不可信广播加 `[Not Secure]`。不带签名的 `chat_command` 仍是全零发送者，走 `disguised_chat`。下面第 1–3 条，以及后文写着「签名丢掉」「不处理 `chat_ack`」「不处理 `chat_session_update`」「玩家聊天用 `disguised_chat`」的句子，说的是改动之前的离线做法。`delete_chat` 能编码，不会发送。没有发现文档。
 
 1. **离线聊天不需要任何签名。** 默认配置的 `login` 里 `online_mode=false`、`enforces_secure_chat=false`，客户端不创建聊天会话，`chat` 包里签名为空，`chat_session_update` 不会发。
 2. **`LastSeenMessages.Update` 可以解码后丢弃。** 只要服务端不发带签名的 `player_chat`，客户端发来的永远是 `00 00 00 00 01`，`chat_ack` 也永远不会发。
@@ -254,7 +254,7 @@ ID 9（`0x09`），serverbound，Play。来源：`ServerboundChatPacket.STREAM_C
 2. 逐字符检查 `StringUtil.isAllowedChatCharacter`：字符小于 32、等于 127 或等于 167（`§`）都不允许。发现后用 `{translate:"multiplayer.disconnect.illegal_characters"}` 断线。这一步不能省，`§` 能通过 NBT 解码。
 3. 已解析 `client_information` 且可见性是 `HIDDEN` 时，回 `system_chat`：`{translate:"chat.disabled.options",color:"red"}`。正常客户端不会走到这里，见 3.1。
 4. 把消息交给世界线程，按第 5.4 节广播给所有在线玩家，**包括发送者**。
-5. 控制台记录 `<Name> message`。官方对未签名消息的日志是 `[Not Secure] <Name> message`（`PlayerList.broadcastChatMessage` 给 `logChatMessage` 传 `"Not Secure"`），Bamboo 不需要这个前缀。桌面控制台要显示的话，给 `ServerEvent` 加一项。
+5. 控制台记录不可信消息时加 `[Not Secure]`，格式跟 `PlayerList.logChatMessage` 一样：`[Not Secure] <Name> message`。`/say` 是 `[Not Secure] [Name] message`，`/me` 是 `[Not Secure] * Name message`。`/msg` 不进这条广播日志。
 6. 限流可以以后再做。官方是 `TickThrottler(20, 20 * chat-spam-threshold-seconds)`，默认阈值 200（`DedicatedServerProperties`）：每条消息加 20，每 tick 减 1，`count >= 200` 且不是 OP 或单人房主时以 `disconnect.spam` 踢出（`detectRateSpam`）。
 
 timestamp、salt、signature 和 lastSeen 都不使用。
@@ -299,7 +299,7 @@ ID 8（`0x08`），serverbound，Play。来源：`ServerboundChatCommandSignedPa
 00 00 00 00 01               lastSeen
 ```
 
-服务端要做的事：`say`、`me`、`msg` 的参数是 `minecraft:message`，在线客户端会发 `chat_command_signed`。现在会按官方验参数签名，通过后用 `player_chat` 转发；离线客户端签名个数是 0，命令照常执行，聊天仍是 `disguised_chat`。强制安全聊天时，无签名的 `chat_command` 若带 `message` 参数，不执行并回 `chat.disabled.invalid_command_signature`。
+服务端要做的事：`say`、`me`、`msg` 的参数是 `minecraft:message`，在线客户端会发 `chat_command_signed`。现在会按官方验参数签名，通过后用 `player_chat` 转发。离线客户端签名个数是 0 时走 `PlayerChatMessage.unsigned`，发送者是这名玩家，所以也是没有签名的 `player_chat`。解析失败仍收集已经吃进去的参数；客户端带来的参数名对不上就 `setChainBroken()` 并回 `invalid_command_signature`，下一句签名消息被拒。强制安全聊天时，无签名的 `chat_command` 若带 `message` 参数，不执行并回 `chat.disabled.invalid_command_signature`（这条路径的发送者是全零 UUID，官方同样不执行）。
 
 ### `minecraft:chat_ack`
 
