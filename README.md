@@ -63,7 +63,7 @@ WebView2 的渲染进程不算在内。
   和已解析的页面。同步走当前打开的菜单：没开容器时是背包（容器 ID 0，槽位是背包菜单的下标）；
   开着箱子时是箱子菜单的容器 ID 和箱子里的那一格。副手不在箱子菜单里，这时不会另发一格。
   没有聊天过滤，所以不写 `filtered`。右键成书还不会打开阅读界面。
-- 工具对方块的右键：斧子去皮、刮铜、去蜡，锄头耕地，锹压土径，打火石和火焰弹点火、点亮营火和蜡烛、点亮下界传送门，
+- 工具对方块的右键：斧子去皮、刮铜、去蜡，锄头耕地，锹压土径，打火石和火焰弹点火、点燃 TNT、点亮营火和蜡烛、点亮下界传送门，
   蜜脾给铜涂蜡，剪刀让藤蔓停止生长，末影之眼装进末地传送门框架并打开传送门。
 - 水和岩浆会流动：往下落、往四周流、断了源头会干，两格水源中间会生成新的水源，冲掉花草这些方块，
   岩浆碰到水变成黑曜石、圆石或者石头，灵魂土上碰到蓝冰变成玄武岩。水底的灵魂沙和岩浆块会长出气泡柱。
@@ -85,6 +85,10 @@ WebView2 的渲染进程不算在内。
   作物和瓜茎长大、甘蔗和仙人掌长高、竹子长节、海带和下界藤蔓生长、洞穴藤蔓结浆果、甜浆果和可可成熟、下界疣、
   草方块和菌丝长草、菌岩蔓延、树叶枯萎、耕地变干变湿、铜氧化、紫水晶芽长大、钟乳石生长、冰和雪融化、
   红石矿熄灭、珊瑚死亡、火蔓延和熄灭、岩浆点燃附近能烧的方块都按官方逻辑。
+- 下落方块和点燃的 TNT：沙子、砂砾、铁砧、混凝土粉末、滴水石这类方块到了计划刻会变成实体往下掉，
+  落地再放回方块，铁砧按摔落距离可能裂开。打火石、火焰弹、火和红石信号会把 TNT 点成引信 80 刻的实体。
+  爆炸按官方射线和抗爆性破坏方块，并连锁点燃别的 TNT。位置、速度和落地结果用官方
+  `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 逐刻逐位对比。
 - 骨粉：作物、瓜茎、甜浆果、可可和海带按官方成功率和生长量催熟，创造模式不消耗。
 - 光照和官方一样：屋顶下面的天空光从四边漏进来，玻璃透光，树叶和水减弱光，半砖、楼梯这些方块按形状挡光，
   火把、萤石、岩浆这些方块发光。区块包带着真实的天空光和方块光，光照变化按官方的规则发给玩家。
@@ -111,7 +115,10 @@ WebView2 的渲染进程不算在内。
   发射器不发射物品，但空的发射器在计划刻到期时同样发 1001。
   目标正好是空漏斗时按官方规则给它排 8 刻冷却。
   比较器读容器时按官方 `getRedstoneSignalFromContainer` 算：箱子（含双箱）、陷阱箱、铜箱子、木桶、潜影盒、
-  漏斗、发射器和投掷器都有信号，内容变化时会重新读。
+  漏斗、发射器、投掷器和饰纹陶罐都有信号，内容变化时会重新读。
+  雕纹书架、唱片机和合成器也接进了漏斗和投掷器，比较器不走满度：书架读最近动过的那一格加一，
+  唱片机读唱片的 `comparator_output`，合成器读非空或禁用的格子数。
+  唱片机的那一张唱片和陶罐的那一格存在方块实体的物品栏里，玩家右键和漏斗读写同一份。
   多人同时打开同一个容器时看到的是同一份内容，箱子的开合人数通过方块事件发给附近的玩家（盖子的动画）。
   菜单支持拾取放下、Shift 快速移动、数字键交换、F 和副手交换、中键克隆、Q 丢弃、拖动分配和双击收集。
   菜单的槽位、`stateId` 和官方菜单代码逐槽、逐个状态对比验证。容器和活塞共用一套方块事件队列，
@@ -143,6 +150,13 @@ WebView2 的渲染进程不算在内。
   用官方代码出题比对：全部物品的默认组件、创造模式物品栏的全部物品，加一批手写的组件，
   解码再编码逐字节相同，官方也能把 Bamboo 写出来的字节解回同样的内容；
   按 ID 查表的那 19 个枚举还逐个试越界的 ID，折回的结果和官方一致。
+  存档用的 `Codec`（DFU，写成 NBT）也按官方补齐了：`DataComponents` 里注册的每一种，
+  包括没有网络编解码的 `lock`、`container_loot`、`map_decorations`、`debug_stick_state`、`recipes`。
+  `ItemStack.CODEC`、`DataComponentPatch.CODEC`（键前面加 `!` 表示移除）和 `ItemStackTemplate` 都有。
+  `container_click` 的 `HashedStack` 用 `HashOps`（CRC32C）对每项组件跑这份存档 `Codec`，
+  得到的整数和官方 `HashedPatchMap` 一样比较。SNBT 的解析和打印照 `TagParser`、`StringTagVisitor`
+  和 `SnbtPrinterTagVisitor`，命令还没有接上。同一批物品堆的存档 NBT 和哈希，以及一批 SNBT，
+  也交给官方比对过。
 - 组件接进了玩法：客户端放进创造模式槽位的组件照官方 `ItemStack.validatedStreamCodec` 逐项解析，
   解不开就断开连接（官方抛 `DecoderException`）；数量超过上限的那一格和官方一样静默忽略。
   校验过的组件发给所有人：`set_equipment`、容器槽位和物品栏都带着组件，所以别人看得到附魔的光
@@ -185,11 +199,18 @@ WebView2 的渲染进程不算在内。
 - 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
   含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
   按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
-- 红石的已知差异：发射器不真的发射，合成器不真的合成。合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较；合成成功（1049、2010、`crafting` 被设上或格子变了）整题不比较。投掷器朝空气抛出的物品在取完官方要用的随机数后直接消失（世界里没有掉落物）；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，世界里没有这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
-- 活塞不推实体，也不推动玩家：世界里没有实体，推实体和粘实体这两段没写。伸出和收回的音效按官方 `PistonBaseBlock.triggerEvent` 发出。
+- 红石的已知差异：发射器不真的发射，合成器不真的合成也不吐出成品（9 格物品栏和比较器已经接上，菜单和禁用槽的界面没有）。合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较；合成成功（1049、2010、`crafting` 被设上，或格子变了并且容器里的物品合计变了而且跑过合成器的计划刻）整题不比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品在取完官方要用的随机数后直接消失（世界里没有掉落物）；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，世界里没有生物、弹射物和物品实体，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
+- 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但活塞推它们、粘它们这两段没写。伸出和收回的音效按官方 `PistonBaseBlock.triggerEvent` 发出。
   `moveBlocks` 里的破坏事件 2001 官方包在 `level.isClientSide()` 里，服务端不发，客户端处理方块事件时自己放。
   移动中的方块不发方块实体数据，客户端靠方块事件播放动画。
-- 世界里没有方块下落和掉落物。TNT 被点燃时方块消失并播放 `entity.tnt.primed`，不生成会爆炸的实体。
+- 下落方块放不回去、掉出世界、或者下落超过 600 刻时，官方会生成掉落物。这里没有物品实体，方块直接消失。
+  砸到实体的伤害没做（铁砧和滴水石的伤害标记照官方记着，只是不结算）。下落方块不走传送门，落地不恢复方块实体数据。
+  铁砧落地发 1031，摔碎发 1029；滴水石摔碎发 1045，硫磺尖刺发 1052；刷子方块摔碎在碰撞盒中心发 2001。
+  点燃的 TNT 播放 `entity.tnt.primed` 并生成实体。它不走传送门，也不被水推动。爆炸不伤实体、不生成掉落物，
+  也不发 `ClientboundExplodePacket`（官方的爆炸声和粒子在这个包里，不在 `playSound`）。
+  炸到会掉东西的方块时，官方还会从战利品表取随机数，这里不取，所以那种爆炸之后连锁 TNT 的引信可能和官方不一致。
+  游戏规则 `tntExplodes` 没做，TNT 总会被点燃、总会爆炸。非玩家实体的 ID 从 16777216 起，不和玩家共用计数器。
+  实体在方块实体 tick 之后才 tick，官方是在方块实体之前。
   未氧化的铜傀儡雕像被斧头点中时方块消失并播放 `entity.copper_golem.spawn`，不生成铜傀儡。
 - 流体只有主世界的规则，游戏规则是默认值，改不了。岩浆会点燃旁边的方块，岩浆变高时官方随机地慢四倍，
   Bamboo 用同一个随机源。鱼桶倒出来的只有水，没有鱼；倒出声仍按这种桶自己的 `emptySound` 播放。
@@ -203,10 +224,20 @@ WebView2 的渲染进程不算在内。
   音效包里没显式给出的种子，官方来自 `Level.soundSeedGenerator`（由世界种子初始化）。Bamboo 用单独的 `LevelRandom`，
   种子是启动时的纳秒数，和官方的 `threadSafeRandom` 不是同一个序列。这是有记录的随机差异，只影响客户端挑同一音效的哪个变体。
 - 用桶和炼药锅互动时，官方会给创造模式的物品栏补一个空桶或者满桶（原来没有的话），Bamboo 不补。
+  炼药锅其余要看物品组件的条目已经接上：没有自定义效果的水瓶给空锅或没满的水锅加一层水，玩家拿回玻璃瓶；
+  玻璃瓶从水锅里舀走一层，拿到 `potion_contents` 是水的药水；`cauldron_can_remove_dye` 里带 `dyed_color`
+  的物品整堆洗掉颜色；带 `banner_patterns` 的旗帜去掉最后一层，一摞只洗一个；染色潜影盒换成不染色的，
+  其余组件按 `ItemStack.transmuteCopy` 留在新物品上。创造模式按 `ItemUtils.createFilledResult`：
+  不消耗手里那一个，水瓶和玻璃瓶在物品栏里已经有同样的结果时不再加一份，旗帜和潜影盒总是再给一份。
+  洗染料不走这条，创造和生存都是整堆去掉颜色。没有音效（`bottle_empty`、`bottle_fill` 和桶的声音），
+  没有统计（`use_cauldron`、`item_used`、`clean_armor`、`clean_banner`、`clean_shulker_box`、
+  `fill_cauldron`），也没有 `gameEvent`（`fluid_place`、`fluid_pickup`、`block_change`）。
+  生存模式放不下时官方会把剩下的掉在地上，这里没有物品实体，那一份直接消失；创造模式官方本来就会删掉放不进去的那一份。
 - 容器只在方块之间存取：漏斗不捡地上的掉落物（世界里没有物品实体），投掷器朝空气时物品消失，
   发射器不会发射，方块实体没有持久化，关服后内容清空。破坏容器时里面的东西直接消失，没有掉落物。
-  漏斗和投掷器认箱子、木桶、潜影盒、漏斗、发射器、投掷器和堆肥桶。熔炉、高炉、烟熏炉、
-  酿造台、雕纹书架、合成器、饰纹陶罐这些官方也是容器（或部分面能收发）的方块，搬不进去也拿不出来。
+  漏斗和投掷器认箱子、木桶、潜影盒、漏斗、发射器、投掷器、堆肥桶、雕纹书架、唱片机、饰纹陶罐和合成器。
+  熔炉、高炉、烟熏炉、酿造台和架子（`shelf`）这些官方也是容器的方块，搬不进去也拿不出来。
+  玩家从雕纹书架取出的书不进背包，从唱片机弹出的唱片不生成物品实体；破坏时该取的随机数照取，东西直接消失。
   熔炉、酿造台、附魔台、铁砧、工作台和需要配方的方块只吃掉右键。
   箱子、陷阱箱、铜箱子、木桶、末影箱和潜影盒的开合音效按官方 `ContainerOpenersCounter` 发出：
   左半个箱子不响也不取随机数，右半个偏到两箱中间，木桶先响再改 `open`，潜影盒在方块事件之后、人数跨过 0 或 1 时才响。
@@ -216,6 +247,8 @@ WebView2 的渲染进程不算在内。
   整数按 `Integer.parseInt` 解析，包括全角和阿拉伯-印度数字这些 `Character.digit` 认的十进制数字。
   带方块实体 NBT 的谓词读不出来，一律按不匹配算。
   书与笔保存和署名会解析并写回 `writable_book_content` 和 `written_book_content`。
+  炼药锅读 `potion_contents`（没有自定义效果的水）、`dyed_color`（物品在 `cauldron_can_remove_dye` 里）
+  和 `banner_patterns`（去掉最后一层）。染色潜影盒换成不染色的，补丁按 `transmuteCopy` 套到新物品上。
 - 组件的已知限制：有五种组件（`lock`、`container_loot`、`map_decorations`、`debug_stick_state`、
   `recipes`）线上是 NBT，官方客户端还要把它过一遍 DFU 的 `Codec`；文本组件的校验是「宁可放过」，
   实体选择器、NBT 路径、对话框和 `show_item` 里的组件表只看字段类型。这两类我们没法保证客户端解得开，
@@ -227,18 +260,22 @@ WebView2 的渲染进程不算在内。
   带 `lock` 的物品放下以后，锁留在服务端的方块实体上（上了锁的容器照样能开，见下面），
   中键拿回来的物品上没有它。`custom_data` 和 `intangible_projectile` 的官方 `Codec`
   接受任何复合标签，和我们的编解码一致，照常发出去。
-- `container_click` 里客户端回传的 `HashedStack` 只比较物品和数量：官方用 `HashOps`（CRC32C）
-  给每一项组件算一个哈希，那套哈希要每种组件的 DFU `Codec`，这里没有。带组件的物品一律算「不一致」，
-  结果只是多发一个 `container_set_slot`，不会把客户端手上的东西当成和服务端一样。
+- 只含瞬态组件（`creative_slot_lock`、`map_post_processing`、`additional_trade_cost`）的物品堆，
+  官方 `ItemStack.CODEC` 会写出空的 `components`，再解一次瞬态就没了、这个字段也会被省掉，
+  官方自己也往返不了。算哈希时瞬态组件没有存档 `Codec`，`HashedStack` 对不上，多发一次槽位同步。
+  存档编解码不做 DataFixer 的版本升级，读到别的 `DataVersion` 直接失败，也不写 JSON 形式。
+  SNBT 能解析和打印，命令还没用它。
 - 物品上的 `block_entity_data` 组件不读（官方 `BlockItem.updateCustomBlockEntityTag`）：
-  它要把方块实体的存档 NBT 解回来，也就是整套 DFU 的 `Codec`。所以讲台上的书和唱片机里的唱片
-  还是只有方块状态（`has_book`、`has_record`）和比较器的默认强度，没有真正的物品。
+  组件的存档 `Codec` 能把这个复合标签解出来，但放下方块时还没有按方块实体自己的字段写回去。
+  所以讲台上的书还是只有方块状态（`has_book`）。放下去的唱片机如果物品里带着 `RecordItem`，
+  那张唱片不会被读进来；玩法里放进去的唱片存在物品栏里，比较器读的是那张唱片的输出。
   同理，放下的方块实体只留官方 `applyImplicitComponents` 读的那几项，物品上多出来的组件
   （比如旗帜上的 `lore`）不进方块实体，中键也还不回来。
-- 容器的锁（`lock` 组件）存下来也还给物品，但不拦人：官方 `LockCode.canUnlock` 要完整的
-  `ItemPredicate`（物品集合、数量区间和一整套组件谓词），现在还没有，所以上了锁的容器照样能打开。
-- 饰纹陶罐里的物品（`container` 组件）不进方块实体：官方 `getUpdateTag` 会把它写成 NBT 形式的
-  物品堆，那要组件的 DFU 编解码器。纹样是完整的。
+- 容器的锁（`lock` 组件）存下来也还给物品，但不拦人：官方 `LockCode.canUnlock` 要拿主手物品去对
+  `ItemPredicate`，这个比对还没接进开门，所以上了锁的容器照样能打开。锁的值本身可以按存档 `Codec` 读写。
+- 放下饰纹陶罐时，物品上的 `container` 组件不进方块实体：官方 `getUpdateTag` 会把它写成 NBT 形式的
+  物品堆。物品堆的存档 `Codec` 已经有了，但还没接到陶罐的 `getUpdateTag` 上。纹样是完整的。
+  放好之后漏斗和玩家右键读写的是同一格，比较器按这一格算。
 - 方块实体的 `getUpdateTag` 只写我们认识的字段：旗帜那张 `components` 表永远是空的，
   NBT 的键序也和官方的 `CompoundTag`（哈希表）不同，客户端照样解得开。
 - 冒险模式 `can_break` 谓词里带方块实体 NBT 的那一类读不出来，一律按不匹配算。
@@ -252,6 +289,7 @@ WebView2 的渲染进程不算在内。
   骨粉不能让树苗长成树、不能催大型蘑菇和草方块上的植物，刷怪蛋、矿车、盔甲架、拴绳放不出来，水瓶不能把泥土变成泥巴，
   刷子只吃掉点击。世界生成决定的方块（紫颂花生长）和要生成实体（海龟蛋、嗅探兽蛋、青蛙卵）的随机刻也不做。
 - 生存模式的挖掘只有进度和裂纹：不掉落物品、不给经验，工具不掉耐久，不扣饥饿值、不记统计，附魔和状态效果（急迫、挖掘疲劳）都没有。
+  掉什么已经能按官方战利品表算出来（`mc-bamboo-loot`），挖掘、实体死亡和开箱都还没调用它。
   冒险模式按官方 `Player.blockActionRestricted` 判定：主手的 `can_break` 能匹配这一格才挖得动；放置按官方
   `ItemStack.useOn` 的检查，`can_place_on` 能匹配点到的方块才放得下。旁观模式挖不动。传送门没有别的维度，
   折跃门也不存出口，所以旁观者右键只会看到 `spectator.cannot_teleport`，不会真的传送。工作台、熔炉这些菜单
@@ -263,6 +301,13 @@ WebView2 的渲染进程不算在内。
   （官方要发 `open_book`），也没有讲台。没有聊天过滤，成书不带 `filtered` 文本。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
 - 没有命令，没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
+- 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐，但还没接进破坏、死亡和开箱。
+  会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
+  做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
+  没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。
+  数值里的 `score`、`storage`、`environment_attribute`，条件里的 `entity_scores` 和 `environment_attribute_check`，条目里的 `slots` 和战利品表标签（`#`）同样报不支持。
+  位置谓词不查流体和结构。实体谓词里还没做的子谓词（效果、NBT、玩家、装备槽、闪电等）会让整次求值失败，而不是当成不匹配。
+  随机序列不存档，也没有 `salt`、`includeWorldSeed`、`includeSequenceId` 开关（默认 salt 0，后两项都开）。掉落不查物品的功能开关（`isItemEnabled`）。乘客谓词只看第一个乘客。
 - 配方已经有了完整的查找和匹配逻辑（`mc-bamboo-recipes`），但还没接进游戏：工作台、熔炉、
   高炉、烟熏炉、营火、切石机、锻造台和酿造台都不能用，也没有配方书和配方相关的包。
   配方的输入还是只看物品 ID，特殊配方不读组件，所以旗帜复制、书复制、地图放大永远匹配不上；
@@ -285,12 +330,13 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-worldgen` | 世界生成的数学：随机源、噪声、密度函数、气候和群系源，纯函数，还没接进游戏 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
+| `crates/mc-bamboo-loot` | 战利品表：方块掉落、实体死亡和箱子填充，纯逻辑，还没接进破坏流程 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
-| `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、注册表和标签 |
+| `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、物品组件、方块谓词、配方和世界生成 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、物品组件、方块谓词、配方、战利品表和世界生成 |
 
 依赖方向是单向的：
 
@@ -310,6 +356,8 @@ protocol blocks world
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 `worldgen` 还没接进游戏，只有开发工具依赖它；它依赖 `data`（官方导出的世界生成数据）和
 `blocks`（里面有官方的 `LegacyRandomSource`）。
+`loot` 也还没接进游戏，只有开发工具依赖它；它依赖 `data`（嵌入的战利品表 JSON）和
+`blocks`（随机源、方块状态）。
 
 ## 线程模型
 
@@ -348,6 +396,13 @@ session server 顶替 Mojang，让官方客户端代码走完加密登录，全�
 cargo run --release -p mc-bamboo-vanilla -- oracle <java 路径> [--cases N] [--only <方块或类名>]
 ```
 
+下落方块和点燃的 TNT 的物理也一样：官方 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 在假世界里跑，
+`mc-bamboo-blocks` 重放，每刻的位置、速度、落地后的方块和引信按 `Double.doubleToRawLongBits` 逐位比较：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- entity-oracle <java 路径>
+```
+
 光照也一样：官方光照引擎在随机场景里改方块、算光照，`mc-bamboo-world` 重放，逐段比较每个光照值：
 
 ```bash
@@ -363,7 +418,10 @@ cargo run --release -p mc-bamboo-vanilla -- menu <java 路径> [--cases N] [--se
 物品组件也一样：官方代码把全部物品的默认组件（还要和生成的 `item_components.rs` 对一遍）、
 创造模式物品栏的全部物品、一批手写的组件，再加上按 ID 查表的枚举的越界输入
 按官方的 `StreamCodec` 编码，`mc-bamboo-protocol` 解码再编码，逐字节比较，
-最后把 Bamboo 写出来的字节交回官方解码，确认解出来的还是同一份组件：
+最后把 Bamboo 写出来的字节交回官方解码，确认解出来的还是同一份组件。
+同一批物品堆再用 `ItemStack.CODEC` 和 `DataComponentPatch.CODEC` 编成 NBT，
+Bamboo 解码再编码后逐项相等，官方也能解回同一份物品堆；每份的 `HashedStack` 哈希也要一致。
+另外比对一批 SNBT 的打印和解析：
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- components <java 路径> [--show N]
@@ -383,6 +441,15 @@ cargo run -p mc-bamboo-vanilla -- predicate-oracle <java 路径> [--cases N] [--
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- recipe-oracle <java 路径> [--cases N] [--seed S]
+```
+
+战利品表也一样：官方对随机方块状态、工具、爆炸半径和世界种子跑 `LootTable.getRandomItems`，
+箱子题再按 `fill` 放进容器，实体题按 `LivingEntity.dropFromLootTable` 的参数（不放 `LAST_DAMAGE_PLAYER`）跑死亡表。
+`mc-bamboo-loot` 重放，比较物品、数量、两边都能表示的组件，以及跑完后随机源的下一个 `nextLong`。
+造不出的实体、袭击查询和探险地图的结构搜索会记成排除：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
 ```
 
 世界生成的数学也一样：官方代码按一批种子和一批坐标算出每条噪声的两条求值路径、

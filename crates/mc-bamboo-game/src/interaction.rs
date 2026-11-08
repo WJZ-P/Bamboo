@@ -103,6 +103,15 @@ pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
     send_effects(region, None, &outcome.effects);
 }
 
+/// `EntityTickList.forEach`。计划刻里生成的实体这一步才第一次 tick。
+///
+/// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
+pub(crate) fn run_entity_ticks(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
+    send_effects(region, None, &outcome.effects);
+}
+
 /// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
 pub(crate) fn run_random_ticks(region: &mut Region) {
     for chunk in random_ticking_chunks(region) {
@@ -579,12 +588,13 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
 
     let (mut level, ticks) = region.block_level();
     let hit = block_hit(packet);
-    let outcome = mc_bamboo_blocks::use_item_on_checked(
+    let outcome = mc_bamboo_blocks::use_item_on_checked_with_stack(
         &mut level,
         ticks,
         &actor,
         packet.hand,
         &hit,
+        Some(&held),
         |state| actor.may_build || adventure::can_place_on(&held, state),
     );
 
@@ -599,6 +609,11 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         }
     }
     send_effects(region, Some(id), &outcome.effects);
+    // 炼药锅的 `createFilledResult` 和洗染料。方块逻辑只记账，物品栏在这里改。
+    // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.
+    if let Some(exchange) = &outcome.item_exchange {
+        inventory::apply_item_exchange(region, id, packet.hand, exchange);
+    }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item {
         menu::open_block(region, id, packet.pos);

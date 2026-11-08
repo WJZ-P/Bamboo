@@ -941,6 +941,11 @@ impl FluidState {
         self.is_tagged(tags::fluid_tags::LAVA)
     }
 
+    /// `getExplosionResistance`。
+    pub fn explosion_resistance(self) -> f32 {
+        self.0.explosion_resistance
+    }
+
     /// `createLegacyBlock`：这个流体对应的方块，破坏含水方块后留下的就是它。
     pub fn legacy_block(self) -> BlockState {
         BlockState(self.0.legacy_block)

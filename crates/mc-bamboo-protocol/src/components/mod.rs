@@ -10,8 +10,13 @@
 //! - 组件补丁的条目数上限 [`MAX_PATCH_ENTRIES`]；
 //! - 六种没有 `networkSynchronized` 的组件（`lock`、`container_loot`、`map_decorations`、
 //!   `debug_stick_state`、`recipes`、`intangible_projectile`）线上是 NBT，官方会把 NBT 过一遍
-//!   DFU 的 `Codec` 再写回去。这里只保留 NBT 并校验最外层的形状，不复刻 DFU。
+//!   DFU 的 `Codec` 再写回去。网络这条路径只保留 NBT 并校验最外层的形状。
+//!   存档那条路径在 [`archive`]，按每种组件的 `Codec` 重写。
+//!
+//! The six components without `networkSynchronized` stay opaque NBT on the wire.
+//! Their persistent codecs live in [`archive`].
 
+pub mod archive;
 pub mod book;
 pub mod cursor;
 pub mod defaults;

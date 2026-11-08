@@ -12,14 +12,17 @@
 //! [`World::raw_brightness`]。
 
 pub mod behaviour;
+mod block_container;
 pub mod block_entity;
 mod composter;
 pub mod container;
 pub mod context;
 pub mod dispenser;
+pub mod entity;
 pub mod fluid;
 pub mod hopper;
 pub mod interact;
+mod item_exchange;
 mod item_use;
 pub mod level;
 pub mod mining;
@@ -43,11 +46,13 @@ pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::{click_if_empty, dispense_from};
 pub use hopper::HopperEntity;
 pub use interact::{
-    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
-    use_item, use_item_on, use_item_on_checked,
+    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_entity_tick,
+    run_scheduled_ticks, use_item, use_item_on, use_item_on_checked,
+    use_item_on_checked_with_stack, use_item_on_with_stack,
 };
+pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use level::{Effect, Level, RedstoneMemory, custom_sound_name, intern_custom_sound};
-pub use random::{LegacyRandom, LevelRandom};
+pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};

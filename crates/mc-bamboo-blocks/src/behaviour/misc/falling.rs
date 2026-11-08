@@ -1,21 +1,95 @@
-//! `ConcretePowderBlock`、`DragonEggBlock`。
+//! `FallingBlock` 和它的子类 `ConcretePowderBlock`、`DragonEggBlock`，还有自己会掉的 `BrushableBlock`。
 //!
-//! 它们的父类 `FallingBlock` 排的计划刻只用来下落，下落不在范围里，这里都不排。
-//! 没有别的覆盖的子类 `ColoredFallingBlock`、`SandBlock` 不用写结构体。
+//! 沙子和沙砾只覆盖了灰尘颜色，用 [`Falling`] 就够了。下面空着的时候，计划刻把这一格清空，
+//! 换成 [`FallingBlockEntity`](crate::entity) 往下掉。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, BlockAncestor};
 
 use crate::{
     behaviour::{
         Behaviour, Plain,
-        common::{default_state, field_block},
+        common::{default_state, field_block, is_free},
     },
     context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, SupportType},
     world::{UPDATE_CLIENTS, World},
 };
+
+/// `FallingBlock.getDelayAfterPlace()`。
+pub(crate) const DELAY: i32 = 2;
+/// `DragonEggBlock.getDelayAfterPlace()`。
+const DRAGON_EGG_DELAY: i32 = 5;
+/// `BrushableBlock` 的 `scheduleTick(pos, this, 2)`。
+const BRUSHABLE_DELAY: i32 = 2;
+
+/// `FallingBlock`。沙、沙砾这些只改了灰尘颜色的类用它。
+pub(super) struct Falling;
+
+/// `FallingBlock.onPlace` 和 `updateShape` 排的计划刻。
+pub(crate) fn schedule_fall(state: BlockState, world: &mut World, pos: BlockPos, delay: i32) {
+    world.schedule_tick(pos, state.block(), delay);
+}
+
+/// `FallingBlock.tick`：下面空着就掉下去，返回新实体的 ID 给 `falling` 钩子。
+pub(crate) fn fall_if_free(state: BlockState, world: &mut World, pos: BlockPos) -> Option<i32> {
+    let free = is_free(world.block_state(pos.below())) && pos.y >= world.min_y();
+    free.then(|| world.spawn_falling_block(pos, state))
+}
+
+impl Behaviour for Falling {
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        schedule_fall(state, world, pos, DELAY);
+    }
+
+    fn update_shape(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        direction: Direction,
+        neighbor_pos: BlockPos,
+        neighbor: BlockState,
+    ) -> BlockState {
+        schedule_fall(state, world, pos, DELAY);
+        Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        fall_if_free(state, world, pos);
+    }
+}
+
+/// `BrushableBlock`。掉下去时不留掉落物，方块实体的重置不在范围里。
+pub(super) struct Brushable;
+
+impl Behaviour for Brushable {
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        schedule_fall(state, world, pos, BRUSHABLE_DELAY);
+    }
+
+    fn update_shape(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        direction: Direction,
+        neighbor_pos: BlockPos,
+        neighbor: BlockState,
+    ) -> BlockState {
+        schedule_fall(state, world, pos, BRUSHABLE_DELAY);
+        Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if let Some(id) = fall_if_free(state, world, pos)
+            && let Some(entity) = world.entity_mut(id)
+        {
+            entity.disable_drop();
+        }
+    }
+}
 
 /// `ConcretePowderBlock`。
 pub(super) struct ConcretePowder;
@@ -55,6 +129,10 @@ impl Behaviour for ConcretePowder {
         Some(if solid { concrete_of(default) } else { default })
     }
 
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        schedule_fall(state, world, pos, DELAY);
+    }
+
     fn update_shape(
         &self,
         state: BlockState,
@@ -67,7 +145,12 @@ impl Behaviour for ConcretePowder {
         if touches_liquid(world, pos) {
             return concrete_of(state);
         }
+        schedule_fall(state, world, pos, DELAY);
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        fall_if_free(state, world, pos);
     }
 }
 
@@ -109,7 +192,30 @@ impl DragonEgg {
 }
 
 impl Behaviour for DragonEgg {
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        schedule_fall(state, world, pos, DRAGON_EGG_DELAY);
+    }
+
+    fn update_shape(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        direction: Direction,
+        neighbor_pos: BlockPos,
+        neighbor: BlockState,
+    ) -> BlockState {
+        schedule_fall(state, world, pos, DRAGON_EGG_DELAY);
+        Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        fall_if_free(state, world, pos);
+    }
+
     /// `DragonEggBlock.attack`：拿手打一下和右键一样，传送到附近。
+    ///
+    /// `DragonEggBlock.attack`: punching teleports it, the same as a right click.
     fn attack(&self, state: BlockState, world: &mut World, pos: BlockPos, _player: &Actor) {
         Self::teleport(state, world, pos);
     }
@@ -122,6 +228,49 @@ impl Behaviour for DragonEgg {
     ) -> InteractionResult {
         Self::teleport(state, world, ctx.clicked_pos());
         InteractionResult::Success
+    }
+}
+
+/// `Fallable.onLand`：落地之后方块已经放好了。
+///
+/// 铁砧落地报 1031。其他类的覆盖只放音效、粒子，只有混凝土粉末会再改一次世界。
+/// 实体没有 `isSilent`，这里总是发。
+///
+/// `Fallable.onLand`: the block is already placed.
+///
+/// An anvil landing sends 1031. Other overrides only play sounds or particles; only concrete
+/// powder changes the world again. Entities have no `isSilent` here, so the event is always sent.
+pub(crate) fn on_land(world: &mut World, pos: BlockPos, state: BlockState, replaced: BlockState) {
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::ANVIL) {
+        world.level_event(1031, pos, 0);
+    }
+    if state.is_a(BlockAncestor::ConcretePowderBlock)
+        && (can_solidify(replaced) || touches_liquid(world, pos))
+    {
+        world.set_block_and_update(pos, concrete_of(state));
+    }
+}
+
+/// `Fallable.onBrokenAfterFall`。铁砧 1029，滴水石 1045，硫磺尖刺 1052。
+/// 刷子方块在实体碰撞盒中心发 2001，data 是方块状态 ID。
+///
+/// `Fallable.onBrokenAfterFall`. Anvil 1029, pointed dripstone 1045, sulfur spike 1052.
+/// A brushable block sends 2001 at the entity's bounding-box centre, with the block state id.
+pub(crate) fn on_broken_after_fall(
+    world: &mut World,
+    pos: BlockPos,
+    state: BlockState,
+    center: mc_bamboo_core::Vec3,
+) {
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::ANVIL) {
+        world.level_event(1029, pos, 0);
+    } else if state.is_a(BlockAncestor::PointedDripstoneBlock) {
+        world.level_event(1045, pos, 0);
+    } else if state.is_a(BlockAncestor::SulfurSpikeBlock) {
+        world.level_event(1052, pos, 0);
+    } else if state.is_a(BlockAncestor::BrushableBlock) {
+        let state_id = i32::try_from(state.0).unwrap_or(0);
+        world.level_event(2001, mc_bamboo_core::BlockPos::containing(center), state_id);
     }
 }
 

@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::{
     book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    container, entity_sync,
+    container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
@@ -89,6 +89,13 @@ impl World {
         interaction::run_block_ticks(&mut self.region, self.global.time());
         // 官方 `ServerLevel.tick` 里随机刻在 `chunkSource.tick`，方块实体的 tick 在它之后。
         interaction::run_random_ticks(&mut self.region);
+        // 实体刻放在随机刻后面：计划刻里生成的下落方块和 TNT 同一 tick 就动。
+        // 官方实体在方块实体之前，这里方块实体已经在计划刻里跑完了。
+        //
+        // Entity ticks follow random ticks, so a falling block or primed TNT spawned by
+        // a block tick moves in the same game tick. Vanilla ticks entities before block
+        // entities; those already ran inside the scheduled-tick step.
+        interaction::run_entity_ticks(&mut self.region);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
         // 这里跟着玩家 tick 放在随机刻之后。
         interaction::tick_mining(&mut self.region);
@@ -103,6 +110,7 @@ impl World {
         chunk_tracking::update_views(&mut self.region);
         chunk_broadcast::broadcast_changes(&mut self.region);
         entity_sync::sync_entities(&mut self.region);
+        entity_tracking::sync(&mut self.region);
         entity_sync::send_equipment_changes(&mut self.region);
         interaction::send_block_changed_acks(&mut self.region);
         if let Some(frames) = self.global.tick_latency_broadcast() {
@@ -194,6 +202,7 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         entity_sync::on_leave(&mut self.region, id);
+        entity_tracking::on_leave(&mut self.region, id);
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         self.region.players.remove(&id);

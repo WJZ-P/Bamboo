@@ -1,3 +1,4 @@
+import com.google.common.hash.HashCode;
 import io.netty.buffer.Unpooled;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -28,10 +29,25 @@ import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.ByteArrayTag;
+import net.minecraft.nbt.ByteTag;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.DoubleTag;
+import net.minecraft.nbt.FloatTag;
+import net.minecraft.nbt.IntArrayTag;
+import net.minecraft.nbt.IntTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.LongArrayTag;
+import net.minecraft.nbt.LongTag;
 import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.ShortTag;
+import net.minecraft.nbt.SnbtPrinterTagVisitor;
+import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.HashedPatchMap;
+import net.minecraft.network.HashedStack;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
@@ -48,6 +64,7 @@ import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.util.HashOps;
 import net.minecraft.util.Unit;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
@@ -67,6 +84,7 @@ import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Instrument;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.JukeboxSong;
 import net.minecraft.world.item.Rarity;
@@ -168,14 +186,17 @@ public final class ComponentOracle {
     private static final class Oracle {
         private final RegistryAccess registries;
         private final RegistryOps<Tag> ops;
+        private final RegistryOps<HashCode> hashOps;
         private final Writer out;
         private final BufferedReader in;
         private final PrintStream log;
         private final List<Case> cases = new ArrayList<>();
+        private final List<ArchiveCase> archive = new ArrayList<>();
 
         Oracle(RegistryAccess registries, Writer out, BufferedReader in, PrintStream log) {
             this.registries = registries;
             this.ops = registries.createSerializationContext(NbtOps.INSTANCE);
+            this.hashOps = registries.createSerializationContext(HashOps.CRC32C_INSTANCE);
             this.out = out;
             this.in = in;
             this.log = log;
@@ -192,6 +213,8 @@ public final class ComponentOracle {
                 writeCase(index, cases.get(index));
             }
             writeEnumFolds();
+            writeArchive();
+            writeSnbt();
             line("{\"type\":\"end\",\"cases\":" + cases.size() + "}");
             out.flush();
 
@@ -440,6 +463,8 @@ public final class ComponentOracle {
                 }
             }
 
+            verifyArchive(mismatches);
+
             StringBuilder list = new StringBuilder();
             for (String mismatch : mismatches) {
                 if (list.length() > 0) {
@@ -449,6 +474,289 @@ public final class ComponentOracle {
             }
             line("{\"type\":\"verified\",\"checked\":" + checked + ",\"mismatches\":[" + list + "]}");
             log.println("verified " + checked + " cases, " + mismatches.size() + " mismatches");
+        }
+
+        /** 一道存档题：官方编出来的物品堆和原始补丁，用来解 Bamboo 写回的 NBT。 */
+        private record ArchiveCase(String name, ItemStack stack, DataComponentPatch patch, Tag stackTag, Tag patchTag) {}
+
+        /**
+         * 同一批补丁再走存档 {@code Codec}。物品堆用 {@code ItemStack.CODEC}，补丁本身用
+         * {@code DataComponentPatch.CODEC}。哈希是 {@code HashedStack.create}。
+         * 编不出来的（未注册的内联 Holder）记成 skipped，不算差异。只剩瞬态组件的补丁
+         * 编出来是空的 {@code components}，官方自己再解再编也会把这个字段省掉，同样跳过。
+         *
+         * Encode failures (an inline holder with no registry id) are skipped. A patch
+         * whose only entries are transient encodes as an empty {@code components}
+         * compound, and the official codec drops that field on the next encode, so
+         * those tags are skipped too.
+         */
+        private void writeArchive() throws Exception {
+            int index = 0;
+            for (Case one : cases) {
+                if (transientOnly(one.patch())) {
+                    // 只含瞬态组件的补丁编出来是空的 components。再解一次瞬态就没了，
+                    // 空字段也会被省掉，官方自己也往返不了这份标签。
+                    //
+                    // A transient-only patch encodes as an empty components compound.
+                    // Decoding drops the component and the next encode omits the field,
+                    // so the official codec does not round-trip that tag either.
+                    line("{\"type\":\"skipped\",\"case\":"
+                            + quote("archive " + one.name())
+                            + ",\"error\":"
+                            + quote("transient component does not round-trip through ItemStack.CODEC")
+                            + "}");
+                    continue;
+                }
+                try {
+                    Holder<Item> holder = one.item() >= 0
+                            ? BuiltInRegistries.ITEM.get(one.item()).orElseThrow()
+                            : Items.STONE.builtInRegistryHolder();
+                    if (holder == null) {
+                        throw new IllegalStateException("missing item " + one.item());
+                    }
+                    ItemStack stack = new ItemStack(holder, 1, one.patch());
+                    Tag stackTag = ItemStack.CODEC.encodeStart(ops, stack).getOrThrow();
+                    Tag patchTag = DataComponentPatch.CODEC.encodeStart(ops, one.patch()).getOrThrow();
+                    boolean skipHash = false;
+                    String added = "[]";
+                    String removed = "[]";
+                    try {
+                        HashedStack hashed = HashedStack.create(stack, this::hashComponent);
+                        added = addedJson(hashed);
+                        removed = removedJson(hashed);
+                    } catch (RuntimeException error) {
+                        skipHash = true;
+                    }
+                    archive.add(new ArchiveCase(one.name(), stack, one.patch(), stackTag, patchTag));
+                    line("{\"type\":\"archive\",\"index\":"
+                            + index
+                            + ",\"name\":"
+                            + quote(one.name())
+                            + ",\"stack\":\""
+                            + hex(writeTag(stackTag))
+                            + "\",\"patch\":\""
+                            + hex(writeTag(patchTag))
+                            + "\",\"added\":"
+                            + added
+                            + ",\"removed\":"
+                            + removed
+                            + ",\"skip_hash\":"
+                            + skipHash
+                            + "}");
+                    index++;
+                } catch (Exception error) {
+                    line("{\"type\":\"skipped\",\"case\":"
+                            + quote("archive " + one.name())
+                            + ",\"error\":"
+                            + quote(String.valueOf(error.getMessage()))
+                            + "}");
+                }
+            }
+        }
+
+        /** 去掉瞬态以后什么都不剩。空补丁不算。 */
+        private static boolean transientOnly(DataComponentPatch patch) {
+            if (patch.isEmpty()) {
+                return false;
+            }
+            DataComponentPatch.SplitResult split = patch.split();
+            for (DataComponentType<?> type : split.added().keySet()) {
+                if (!type.isTransient()) {
+                    return false;
+                }
+            }
+            for (DataComponentType<?> type : split.removed()) {
+                if (!type.isTransient()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private int hashComponent(TypedDataComponent<?> component) {
+            return component.encodeValue(hashOps).getOrThrow(IllegalStateException::new).asInt();
+        }
+
+        private String addedJson(HashedStack hashed) {
+            if (!(hashed instanceof HashedStack.ActualItem actual)) {
+                return "[]";
+            }
+            StringBuilder out = new StringBuilder("[");
+            boolean first = true;
+            for (var entry : actual.components().addedComponents().entrySet()) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append('[')
+                        .append(BuiltInRegistries.DATA_COMPONENT_TYPE.getId(entry.getKey()))
+                        .append(',')
+                        .append(entry.getValue())
+                        .append(']');
+            }
+            out.append(']');
+            return out.toString();
+        }
+
+        private String removedJson(HashedStack hashed) {
+            if (!(hashed instanceof HashedStack.ActualItem actual)) {
+                return "[]";
+            }
+            StringBuilder out = new StringBuilder("[");
+            boolean first = true;
+            for (DataComponentType<?> type : actual.components().removedComponents()) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append(BuiltInRegistries.DATA_COMPONENT_TYPE.getId(type));
+            }
+            out.append(']');
+            return out.toString();
+        }
+
+        /** Bamboo 写回的 NBT，官方再解一次，要回到同一份物品堆和同一份补丁。 */
+        private void verifyArchive(List<String> mismatches) throws Exception {
+            for (int index = 0; index < archive.size(); index++) {
+                String text = in.readLine();
+                ArchiveCase one = archive.get(index);
+                if (text == null) {
+                    mismatches.add(one.name() + ": missing archive reply");
+                    return;
+                }
+                String[] parts = text.split(" ");
+                if (parts.length != 4 || !"A".equals(parts[0])) {
+                    mismatches.add(one.name() + ": bad archive reply " + text);
+                    continue;
+                }
+                try {
+                    CompoundTag stackTag = readCompound(parts[2]);
+                    ItemStack decoded = ItemStack.CODEC.parse(ops, stackTag).getOrThrow();
+                    if (!ItemStack.matches(decoded, one.stack())) {
+                        Tag again = ItemStack.CODEC.encodeStart(ops, decoded).getOrThrow();
+                        if (!again.equals(one.stackTag())) {
+                            mismatches.add(one.name() + ": official stack readback differs");
+                        }
+                    }
+                } catch (Exception error) {
+                    mismatches.add(one.name() + ": official cannot decode stack: " + error);
+                }
+                try {
+                    CompoundTag patchTag = readCompound(parts[3]);
+                    DataComponentPatch decoded = DataComponentPatch.CODEC.parse(ops, patchTag).getOrThrow();
+                    if (!decoded.equals(one.patch())) {
+                        Tag again = DataComponentPatch.CODEC.encodeStart(ops, decoded).getOrThrow();
+                        if (!again.equals(one.patchTag())) {
+                            mismatches.add(one.name() + ": official patch readback differs");
+                        }
+                    }
+                } catch (Exception error) {
+                    mismatches.add(one.name() + ": official cannot decode patch: " + error);
+                }
+            }
+        }
+
+        private byte[] writeTag(Tag tag) {
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            buffer.writeNbt(tag);
+            byte[] bytes = new byte[buffer.readableBytes()];
+            buffer.readBytes(bytes);
+            return bytes;
+        }
+
+        private CompoundTag readCompound(String text) {
+            byte[] bytes = unhex(text);
+            io.netty.buffer.ByteBuf buffer = Unpooled.wrappedBuffer(bytes);
+            CompoundTag tag = FriendlyByteBuf.readNbt(buffer);
+            if (tag == null) {
+                throw new IllegalStateException("missing compound");
+            }
+            if (buffer.isReadable()) {
+                throw new IllegalStateException(buffer.readableBytes() + " trailing bytes");
+            }
+            return tag;
+        }
+
+        /** 一批 NBT 的两种打印，再加手写 SNBT 和非法输入。 */
+        private void writeSnbt() throws Exception {
+            int index = 0;
+            for (Tag tag : snbtSamples()) {
+                String compact = tag.toString();
+                String pretty = new SnbtPrinterTagVisitor().visit(tag);
+                Tag parsed = TagParser.create(NbtOps.INSTANCE).parseFully(compact);
+                Tag prettyParsed = TagParser.create(NbtOps.INSTANCE).parseFully(pretty);
+                line("{\"type\":\"snbt\",\"name\":"
+                        + quote("sample " + index)
+                        + ",\"source\":\""
+                        + hex(writeTag(tag))
+                        + "\",\"compact\":"
+                        + quote(compact)
+                        + ",\"pretty\":"
+                        + quote(pretty)
+                        + ",\"parsed\":\""
+                        + hex(writeTag(parsed))
+                        + "\",\"pretty_parsed\":\""
+                        + hex(writeTag(prettyParsed))
+                        + "\"}");
+                index++;
+            }
+            for (String text : SNBT_INPUTS) {
+                String error = null;
+                String parsed = null;
+                try {
+                    Tag tag = TagParser.create(NbtOps.INSTANCE).parseFully(text);
+                    parsed = hex(writeTag(tag));
+                } catch (Exception failure) {
+                    error = String.valueOf(failure.getMessage());
+                }
+                line("{\"type\":\"snbtInput\",\"text\":"
+                        + quote(text)
+                        + ",\"error\":"
+                        + (error == null ? "null" : quote(error))
+                        + ",\"parsed\":"
+                        + (parsed == null ? "null" : quote(parsed))
+                        + "}");
+            }
+        }
+
+        private static List<Tag> snbtSamples() {
+            List<Tag> tags = new ArrayList<>();
+            tags.add(ByteTag.valueOf((byte) 1));
+            tags.add(ByteTag.valueOf((byte) -1));
+            tags.add(ShortTag.valueOf((short) 258));
+            tags.add(IntTag.valueOf(-42));
+            tags.add(LongTag.valueOf(1L));
+            tags.add(FloatTag.valueOf(1.5f));
+            tags.add(FloatTag.valueOf(Float.NaN));
+            tags.add(FloatTag.valueOf(Float.POSITIVE_INFINITY));
+            tags.add(FloatTag.valueOf(-0.0f));
+            tags.add(DoubleTag.valueOf(-0.0d));
+            tags.add(DoubleTag.valueOf(Double.NaN));
+            tags.add(StringTag.valueOf("plain"));
+            tags.add(StringTag.valueOf("a'b\"c"));
+            tags.add(StringTag.valueOf("line\n\t"));
+            tags.add(StringTag.valueOf("竹"));
+            tags.add(new ByteArrayTag(new byte[] {1, -2}));
+            tags.add(new IntArrayTag(new int[] {1, 2}));
+            tags.add(new LongArrayTag(new long[] {1L, 2L}));
+            ListTag list = new ListTag();
+            list.add(IntTag.valueOf(1));
+            list.add(IntTag.valueOf(2));
+            tags.add(list);
+            tags.add(new ListTag());
+            tags.add(new CompoundTag());
+            CompoundTag compound = new CompoundTag();
+            compound.putString("b", "x");
+            compound.putInt("a", 1);
+            compound.put("nested", list.copy());
+            compound.putByteArray("bytes", new byte[] {1, 2});
+            tags.add(compound);
+            CompoundTag ordered = new CompoundTag();
+            ordered.putString("DataVersion", "1");
+            ordered.putString("author", "bamboo");
+            ordered.put("size", new ListTag());
+            tags.add(ordered);
+            return tags;
         }
 
         private void line(String text) throws Exception {
@@ -650,6 +958,36 @@ public final class ComponentOracle {
         result.append('"');
         return result.toString();
     }
+
+    /** 手写的 SNBT。前一半合法，后一半非法，两边都要同样接受或拒绝。 */
+    private static final String[] SNBT_INPUTS = {
+        "1b",
+        "1s",
+        "1",
+        "1l",
+        "1L",
+        "1.5f",
+        "1.5d",
+        "true",
+        "false",
+        "'ab'",
+        "\"a\\nb\"",
+        "{a:1,b:2s}",
+        "[1,2,3]",
+        "[B;1b,2b]",
+        "[I;1,2]",
+        "[L;1l,2l]",
+        "{}",
+        "[]",
+        "  { a : 1 }  ",
+        "0x10",
+        "{a:1,a:2}",
+        "{",
+        "{a:}",
+        "1x",
+        "[B;1]",
+        "",
+    };
 
     /** 手写的组件补丁，按 `/give` 的组件语法。每一行至少覆盖一种组件类型。 */
     private static final String[] HAND_WRITTEN = {

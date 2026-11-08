@@ -1,47 +1,27 @@
-//! `JukeboxBlock`。唱片本身在方块实体里，不在范围里，这里只有 `has_record` 和它引起的邻居更新。
+//! `JukeboxBlock`。唱片在方块实体的物品栏里，和漏斗、玩家右键是同一份。
+//!
+//! `JukeboxBlock`. The disc lives in the block entity inventory, shared with hoppers and the
+//! player's right click.
 
-use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::sounds::jukebox_song;
+use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    behaviour::{
-        Behaviour,
-        common::{item_of, update_neighbours_after_destroy},
-    },
+    behaviour::{Behaviour, common::update_neighbours_after_destroy},
+    block_container,
     context::UseContext,
     interact::InteractionResult,
     state::{BlockState, HAS_RECORD},
-    world::{UPDATE_CLIENTS, World},
+    world::World,
 };
 
 /// `JukeboxBlock`。
 pub(super) struct Jukebox;
 
-/// `JukeboxBlockEntity.onSongChanged`：唱机的信号跟着歌变，告诉邻居和比较器。
-fn on_song_changed(state: BlockState, world: &mut World, pos: BlockPos) {
-    world.update_neighbors_at(pos, state.block());
-    world.update_neighbour_for_output_signal(pos, state.block());
-}
-
-/// `popOutTheItem` 拿走唱片以后的部分：`setTheItem(EMPTY)` 里的 `stop`，再弹出掉落物。
-///
-/// 掉落物实体还没有，但官方算它的位置时从世界随机源取了两个数
-/// （`offsetRandomXZ(level.getRandom(), 0.7F)`），后面的随机数要接在这里。
-fn pop_out_the_item(state: BlockState, world: &mut World, pos: BlockPos) {
-    // `JukeboxSongPlayer.stop`：只有正在放歌时才通知。
-    // `JukeboxSongPlayer.stop`：正在放歌才报 1011，然后通知邻居。
-    if world.redstone_memory().is_jukebox_playing(pos) {
-        world.redstone_memory_mut().set_jukebox_playing(pos, false);
-        world.level_event(1011, pos, 0);
-        on_song_changed(state, world, pos);
-    }
-    world.random().next_float();
-    world.random().next_float();
-    on_song_changed(state, world, pos);
-}
-
 impl Behaviour for Jukebox {
-    /// `JukeboxBlock.ownSignal`：歌在放时发 15。唱片在方块实体里，这里记在 `RedstoneMemory` 上。
+    /// `JukeboxBlock.ownSignal`：歌在放时发 15。
+    ///
+    /// `JukeboxBlock.ownSignal`: 15 while a song is playing.
     fn own_signal(&self, _state: BlockState, world: &World, pos: BlockPos) -> i32 {
         if world.redstone_memory().is_jukebox_playing(pos) {
             15
@@ -50,10 +30,27 @@ impl Behaviour for Jukebox {
         }
     }
 
+    /// `JukeboxBlock.getAnalogOutputSignal`：读唱片的 `comparator_output`，没在放也一样。
+    ///
+    /// `JukeboxBlock.getAnalogOutputSignal`: the disc's `comparator_output`, whether or not it
+    /// is playing.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        block_container::jukebox_signal(world, pos)
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         // `JukeboxBlock.affectNeighborsAfterRemoval` 只有 `Containers.updateNeighboursAfterDestroy`。
-        // 有唱片时 `popOutTheItem` 末尾的 `onSongChanged` 在 `setRemoved` 之前，
-        // 见 `World::set_block_state`。两个 `nextFloat` 也在那边取过。
+        // 弹出唱片的 `onSongChanged`、1011 和两个 `nextFloat` 在更早的 `preRemoveSideEffects` 里。
+        //
+        // `JukeboxBlock.affectNeighborsAfterRemoval` is only `Containers.updateNeighboursAfterDestroy`.
+        // The pop-out `onSongChanged`, the 1011, and the two `nextFloat`s already ran in
+        // `preRemoveSideEffects`.
         update_neighbours_after_destroy(state, world, pos);
     }
 
@@ -63,18 +60,12 @@ impl Behaviour for Jukebox {
         world: &mut World,
         ctx: &UseContext,
     ) -> InteractionResult {
-        if state.get(HAS_RECORD) || !item_of(ctx.item).is_some_and(|item| item.jukebox_playable) {
+        if state.get(HAS_RECORD) || !block_container::item_has_jukebox_song(ctx.item) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        let pos = ctx.clicked_pos();
-        world.set_block(pos, state.with(HAS_RECORD, true), UPDATE_CLIENTS);
-        // `JukeboxSongPlayer.play` 报 1010，data 是歌典的注册表 ID；物品组件里带着这个引用。
-        if let Some(song) = jukebox_song(ctx.item) {
-            world.level_event(1010, pos, song);
-        }
-        // `JukeboxBlockEntity.setTheItem` 会开始放歌。
-        world.redstone_memory_mut().set_jukebox_playing(pos, true);
-        on_song_changed(state, world, pos);
+        // `setTheItem` 里的 `play` 会报 1010。这里再报一次就会重复。
+        // `play` inside `setTheItem` sends 1010. Sending it again here would duplicate it.
+        block_container::set_jukebox_item(world, ctx.clicked_pos(), ItemStack::new(ctx.item, 1));
         InteractionResult::Success
     }
 
@@ -87,10 +78,11 @@ impl Behaviour for Jukebox {
         if !state.get(HAS_RECORD) {
             return InteractionResult::Pass;
         }
-        let pos = ctx.clicked_pos();
-        // `popOutTheItem` → `setTheItem(EMPTY)`：先 `notifyItemChangedInJukebox` 写方块，再停歌、弹出。
-        world.set_block(pos, state.with(HAS_RECORD, false), UPDATE_CLIENTS);
-        pop_out_the_item(state, world, pos);
+        // `has_record` 为真就返回成功。物品是空的时 `popOutTheItem` 什么也不做，状态保持不变。
+        //
+        // Success whenever `has_record` is set. `popOutTheItem` does nothing when the item is
+        // empty, and the state stays as it is.
+        block_container::pop_jukebox_record(world, ctx.clicked_pos());
         InteractionResult::Success
     }
 }
@@ -139,11 +131,18 @@ mod tests {
     #[test]
     fn taking_the_disc_out_stops_the_song_and_draws_twice() {
         let mut level = TestLevel::new();
-        level.set(POS, BlockState(blocks::JUKEBOX).with(HAS_RECORD, true));
+        level.set(POS, BlockState(blocks::JUKEBOX));
+        use_item(
+            &mut level,
+            &actor_holding(items::MUSIC_DISC_13),
+            top_hit(POS),
+        );
         let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(POS));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert!(!level.get(POS).get(HAS_RECORD));
-        assert!(level_events(&outcome.effects).is_empty());
+        // 正在放的歌：`stop` 报一次 1011。`setRemoved` 不在玩家取出这条路上。
+        // A playing song: `stop` sends one 1011. `setRemoved` is not on the player's eject path.
+        assert_eq!(level_events(&outcome.effects), [(1011, 0)]);
         let expected = LevelRandom::new(0);
         expected.source().next_float();
         expected.source().next_float();

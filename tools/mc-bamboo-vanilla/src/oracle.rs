@@ -18,6 +18,7 @@
 //!
 //! 那时想单独检查一个类可以加 `--pure`：场景里只放已经移植的方块，结果里就没有 `blocked` 了。
 
+mod cauldron_hand;
 mod lines;
 mod replay;
 mod report;
@@ -34,7 +35,7 @@ use std::{
 
 use mc_bamboo_blocks::{
     BlockState, behaviour::is_ported, state::CRAFTING, state::FACING, state::FACING_HOPPER,
-    state::HAS_RECORD, state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
+    state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
@@ -65,7 +66,6 @@ pub enum Rule {
     ItemUseOn,
     CanDestroyBlock,
     RandomDelay,
-    FallingTick,
     CommandTick,
     TimerTick,
     EntityTick,
@@ -79,7 +79,7 @@ pub enum Rule {
 }
 
 impl Rule {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 20] = [
         Self::AnalogInput,
         Self::EntityRandom,
         Self::RandomLoop,
@@ -90,7 +90,6 @@ impl Rule {
         Self::ItemUseOn,
         Self::CanDestroyBlock,
         Self::RandomDelay,
-        Self::FallingTick,
         Self::CommandTick,
         Self::TimerTick,
         Self::EntityTick,
@@ -115,7 +114,6 @@ impl Rule {
             Self::ItemUseOn => "item useOn",
             Self::CanDestroyBlock => "canDestroyBlock",
             Self::RandomDelay => "random delay",
-            Self::FallingTick => "falling tick",
             Self::CommandTick => "command tick",
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
@@ -133,9 +131,7 @@ impl Rule {
         match self {
             Self::AnalogInput => {
                 "case: a comparator read a block entity Bamboo keeps no contents for \
-                 (lectern, jukebox, furnace, crafter, decorated pot and the like), \
-                 a scene jukebox the fake world fills with a fixed disc, \
-                 or a clicked comparator re-reading such an input"
+                 (lectern, furnace and the like), or a clicked comparator re-reading such an input"
             }
             Self::EntityRandom => {
                 "case: the outcome changed with the player's own random source, Bamboo has none"
@@ -164,7 +160,6 @@ impl Rule {
             Self::RandomDelay => {
                 "tick delay: the player's random source picked it, position and type are compared"
             }
-            Self::FallingTick => "tick: blocks do not fall (chapter 1)",
             Self::CommandTick => "tick: command blocks run commands, out of scope",
             Self::TimerTick => {
                 "tick: growth, hatching and time of day timers are out of scope (eggs, eyeblossoms)"
@@ -178,9 +173,11 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: an item dispenser fired, or a crafter crafted (level event 1049/2010, \
-                 the crafting flag, or its slots changed). A crafter that only plays fail event \
-                 1050 is still compared"
+                "scope: an item dispenser fired (it ticked while holding items, a flow emptied \
+                 one, or level event 1000 landed on a dispenser rather than a dropper), or a \
+                 crafter crafted (level event 1049/2010, the crafting flag turned on, or its \
+                 slots changed while the combined container items changed). A crafter that only \
+                 plays fail event 1050 is still compared"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
@@ -196,8 +193,7 @@ impl Rule {
             }
             Self::UnmodeledContainer => {
                 "case: a hopper or dropper ticked next to a container Bamboo keeps no slot table for \
-                 (shelf, crafter, chiseled bookshelf, furnace, brewing stand, decorated pot), \
-                 so the transfer cannot be replayed"
+                 (shelf, furnace, brewing stand), so the transfer cannot be replayed"
             }
         }
     }
@@ -239,8 +235,6 @@ const OUT_OF_SCOPE_RANDOM_TICKS: &[(BlockAncestor, Rule)] = &[
 /// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
 /// `settle` 或 flow 题往后跑时执行它们的话整题排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
-    (BlockAncestor::FallingBlock, Rule::FallingTick),
-    (BlockAncestor::BrushableBlock, Rule::FallingTick),
     (BlockAncestor::CommandBlock, Rule::CommandTick),
     (BlockAncestor::FrogspawnBlock, Rule::TimerTick),
     (BlockAncestor::SnifferEggBlock, Rule::TimerTick),
@@ -621,11 +615,11 @@ impl Session {
                 return Ok(());
             }
         };
-        if left_to_the_item(case, &replayed) {
+        let mismatch = compare(case, &replayed, &self.names, &mut self.report)?;
+        if left_to_the_item(case, &replayed, &mismatch) {
             self.report.excluded(block, kind, Rule::ItemUseOn);
             return Ok(());
         }
-        let mismatch = compare(case, &replayed, &self.names, &mut self.report)?;
         if mismatch.is_empty() {
             self.report.passed(block, case);
         } else {
@@ -638,17 +632,50 @@ impl Session {
 }
 
 /// 官方的方块没有吃掉这次点击，结果来自还没移植的非方块物品的 `useOn`。
-/// 我们这边也要什么都没做才算：方块多吃了点击，或者动了世界，要照常比较，这是真的不一致。
-fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
+/// 这时官方可以多做事（物品自己的效果），我们做不到；但我们做的每一件事官方都得做了、而且做得一样：
+/// 方块多吃了点击、改了官方没改的格子、多放了官方没有的音效或等级事件，照常算失败。
+/// 两边都有、而且一样的变化（比如场景里的漏斗在之后几刻搬了东西）不妨碍排除。
+/// 音效和等级事件也一样：我们发的每一条官方都得有，官方多出来的可以留下。
+///
+/// The official block passed the click and the result came from a non-block item whose `useOn` is
+/// not ported. Vanilla may do more (the item's own effect), which Bamboo cannot; but everything
+/// Bamboo did must also have happened in vanilla, the same way. A block that consumed the click, a
+/// cell Bamboo changed that vanilla left alone or changed differently, or a sound or level event
+/// Bamboo played that vanilla did not, still counts as a failure. Changes both sides made
+/// identically (say, a hopper in the scene moving items afterwards) do not prevent the exclusion.
+/// The same rule covers sounds and level events: each one Bamboo emitted must be in vanilla's list.
+/// Extra vanilla entries may remain.
+fn left_to_the_item(case: &Case, replayed: &Replayed, mismatch: &Mismatch) -> bool {
+    let changes_also_official = replayed.changes.iter().all(|(&pos, &state)| {
+        case.outcome
+            .changes
+            .iter()
+            .any(|cell| cell.pos() == pos && cell.state() == state)
+    });
     case.action.item_use_on
         && case.outcome.item_reached
         && unported_item_use_on(&case.action.item_class).is_some()
         && replayed.result == "pass"
-        && replayed.changes.is_empty()
-        && replayed.destroyed.is_empty()
-        && replayed.level_events.is_empty()
-        && replayed.sounds.is_empty()
-        && replayed.ticks.is_empty()
+        && changes_also_official
+        && covered_by(&replayed.level_events, &case.outcome.level_events)
+        && covered_by(&replayed.sounds, &case.outcome.sounds)
+        && (replayed.destroyed.is_empty() || !mismatch.destroyed)
+        && (replayed.ticks.is_empty() || !mismatch.ticks)
+        && mismatch.panic.is_none()
+}
+
+/// `done` 里的每一项都在 `official` 里出现过，用掉一次。官方可以多出来。
+///
+/// Every entry in `done` occurs in `official`, each one consumed once. Vanilla may have more.
+fn covered_by<T: PartialEq + Clone>(done: &[T], official: &[T]) -> bool {
+    let mut left = official.to_vec();
+    done.iter().all(|item| {
+        let Some(index) = left.iter().position(|official| official == item) else {
+            return false;
+        };
+        left.remove(index);
+        true
+    })
 }
 
 /// 不用重放就知道不比较的题。
@@ -675,10 +702,6 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
             Some(Rule::AnalogInput)
         }
         Kind::Place | Kind::Use if bone_meals_a_feature_plant(case) => Some(Rule::Worldgen),
-        // 动作附近的比较器会重算输入，其中可能有假世界补出来的唱片。
-        Kind::Place | Kind::Use | Kind::Destroy | Kind::Tick if reads_invented_jukebox(case) => {
-            Some(Rule::AnalogInput)
-        }
         Kind::Tick => tick_exclusion(block),
         Kind::Random => random_tick_exclusion(block),
         _ => None,
@@ -829,7 +852,7 @@ fn scene_state(case: &Case, pos: BlockPos) -> BlockState {
 }
 
 /// 点中的比较器会重新读输入。内容已经建模的容器两边读到的一样，可以比较；
-/// 别的方块实体（讲台、唱机、熔炉这类）Bamboo 没有保留内容，这题只能排除。
+/// 别的方块实体（讲台、熔炉这类）Bamboo 没有保留内容，这题只能排除。
 fn clicks_comparator_with_analog_input(case: &Case) -> bool {
     let state_at = |pos: BlockPos| scene_state(case, pos);
     let pos = case.action.target();
@@ -859,6 +882,10 @@ fn is_modeled_container(state: BlockState) -> bool {
                 | BlockAncestor::ShulkerBoxBlock
                 | BlockAncestor::HopperBlock
                 | BlockAncestor::DispenserBlock
+                | BlockAncestor::JukeboxBlock
+                | BlockAncestor::DecoratedPotBlock
+                | BlockAncestor::ChiseledBookShelfBlock
+                | BlockAncestor::CrafterBlock
         )
     })
 }
@@ -869,11 +896,8 @@ fn is_unmodeled_container(state: BlockState) -> bool {
         matches!(
             ancestor,
             BlockAncestor::ShelfBlock
-                | BlockAncestor::CrafterBlock
-                | BlockAncestor::ChiseledBookShelfBlock
                 | BlockAncestor::AbstractFurnaceBlock
                 | BlockAncestor::BrewingStandBlock
-                | BlockAncestor::DecoratedPotBlock
         )
     })
 }
@@ -946,10 +970,14 @@ fn transfers_with_unmodeled_container(case: &Case) -> bool {
 /// 成功的标志 / A craft succeeded when any of these is true:
 /// - 等级事件 1049（`SOUND_CRAFTER_CRAFT`）或 2010（吐出时的烟）。
 ///   Level event 1049 (`SOUND_CRAFTER_CRAFT`) or 2010 (the ejection smoke).
-/// - `crafting` 从关变成开。`CrafterBlock.dispenseFrom` 在合成成功时 `setBlock`。
-///   `crafting` turns on. `CrafterBlock.dispenseFrom` calls `setBlock` on success.
-/// - 合成器的格子变了，而且这题确实跑过合成器的计划刻。
-///   The crafter's slots changed, and this case did run the crafter's scheduled tick.
+/// - `crafting` 从关变成开。这一刻可以是题目本身，也可以是之后几刻才跑的，不要求 `ran` 里已经记过。
+///   `crafting` turns on. The tick can be the action itself or one that runs later; `ran` is
+///   not required.
+/// - 合成器的格子变了，容器里的物品合计也变了，而且这题确实跑过合成器的计划刻。
+///   漏斗只是把同一件物品搬到另一格，合计不变，不算合成。
+///   The crafter's slots changed, the combined container items changed, and this case did run
+///   the crafter's scheduled tick. A hopper only moves the same items, so the totals stay
+///   equal and that is not a craft.
 fn crafter_crafts(case: &Case) -> bool {
     const CRAFT_EVENTS: [i32; 2] = [1049, 2010];
     if case
@@ -960,30 +988,29 @@ fn crafter_crafts(case: &Case) -> bool {
     {
         return true;
     }
-    if !crafter_ran(case) {
-        return false;
+    if crafting_turned_on(case) {
+        return true;
     }
-    crafting_turned_on(case) || crafter_slots_changed(case)
+    crafter_ran(case) && crafter_slots_changed(case) && container_items_changed(case)
 }
 
 /// 动作本身是合成器的计划刻，或者 `settle` 里跑过它。
+///
 /// The action is the crafter's scheduled tick, or `settle` ran one.
 fn crafter_ran(case: &Case) -> bool {
     case.outcome.ran.iter().any(|id| id == "minecraft:crafter")
         || case.action.kind == Kind::Tick && case.block == "minecraft:crafter"
 }
 
-/// `crafting` 在这题里被设上。
-/// `crafting` was turned on by this case.
+/// 结果里某一格的 `crafting` 从关变成开。不要求 `ran` 里已经记过合成器。
+///
+/// Some cell's `crafting` flag turned on. The crafter does not have to be listed in `ran` yet.
 fn crafting_turned_on(case: &Case) -> bool {
     case.outcome.changes.iter().any(|cell| {
         let Some(state) = state_of(cell.state()) else {
             return false;
         };
-        if !crafting_is_on(state) {
-            return false;
-        }
-        !crafting_is_on(scene_state(case, cell.pos()))
+        crafting_is_on(state) && !crafting_is_on(scene_state(case, cell.pos()))
     })
 }
 
@@ -991,8 +1018,9 @@ fn crafting_is_on(state: BlockState) -> bool {
     state.is_a(BlockAncestor::CrafterBlock) && state.get(CRAFTING)
 }
 
-/// 合成器里的物品和开始时不一样。
-/// The crafter's items differ from the start of the case.
+/// 合成器上的格子和开始时不一样。
+///
+/// The slots on crafters differ from the start of the case.
 fn crafter_slots_changed(case: &Case) -> bool {
     let at_crafter = |stack: &ContainerStack| {
         let pos = stack.pos();
@@ -1013,9 +1041,51 @@ fn crafter_slots_changed(case: &Case) -> bool {
     before != after
 }
 
+/// 全部已建模容器里的物品合计变了。漏斗搬家不会变。
+///
+/// The combined items in every modelled container changed. A hopper move does not.
+fn container_items_changed(case: &Case) -> bool {
+    item_totals(&case.contents) != item_totals(&case.outcome.contents)
+}
+
+fn item_totals(stacks: &[ContainerStack]) -> BTreeMap<&str, i32> {
+    let mut totals = BTreeMap::new();
+    for stack in stacks {
+        *totals.entry(stack.item()).or_default() += stack.count();
+    }
+    totals
+}
+
+/// 官方在发射器（不是投掷器）上发了 1000，说明注册表里的发射行为已经跑过。
+///
+/// Official played 1000 on a dispenser (not a dropper): a registry dispense behaviour ran.
+fn official_dispenser_shot(case: &Case) -> bool {
+    case.outcome.level_events.iter().any(|event| {
+        if event.0 != 1000 {
+            return false;
+        }
+        let pos = BlockPos::new(event.1, event.2, event.3);
+        let state = final_state(case, pos).unwrap_or_else(|| scene_state(case, pos));
+        state.is_a(BlockAncestor::DispenserBlock) && !state.is_a(BlockAncestor::DropperBlock)
+    })
+}
+
 /// 发射器的物品行为（箭、水、盔甲等）不在范围里，Bamboo 的发射器 tick 什么也不做。
-/// 场景里的发射器有东西又真的 tick 了，官方那边已经发出去，这题只能排除。投掷器自己实现了，照常比较。
+/// 场景里的发射器有东西又真的 tick 了，官方那边已经发出去，这题只能排除。
+/// 放下方块时物品在物品组件里，不在开局的容器表里；`settle` 跑完计划刻后，官方会在这个
+/// 发射器上留下 1000（`SOUND_DISPENSER_DISPENSE`）。投掷器抛出时也会发 1000，但投掷器
+/// 自己实现了，照常比较。
+///
+/// Dispenser item behaviours (arrows, water, armour) are out of scope, so a dispenser tick
+/// does nothing. A dispenser that had items and really ticked has already fired on the
+/// official side, and that case is excluded. Items that arrive inside the placed block are
+/// not in the starting container list; after `settle` runs the scheduled tick, official leaves
+/// level event 1000 (`SOUND_DISPENSER_DISPENSE`) on that dispenser. A dropper's throw uses
+/// 1000 too, but droppers are implemented and stay in the comparison.
 fn dispenser_dispenses(case: &Case) -> bool {
+    if official_dispenser_shot(case) {
+        return true;
+    }
     let is_dispenser = |pos: BlockPos| {
         let state = scene_state(case, pos);
         state.is_a(BlockAncestor::DispenserBlock) && !state.is_a(BlockAncestor::DropperBlock)
@@ -1047,49 +1117,6 @@ fn dispenser_dispenses(case: &Case) -> bool {
         let hopper_above = final_state(case, pos.above())
             .is_some_and(|state| state.is_a(BlockAncestor::HopperBlock));
         after.get(&pos).copied().unwrap_or(0) < count && is_dispenser(pos) && !hopper_above
-    })
-}
-
-/// 假世界给场景里带唱片的唱机补了一张固定的 `music_disc_13`（`FakeLevel.syncContents`），
-/// 比较器能从唱机读出模拟信号。Bamboo 不保留唱片内容，读出来是 0，所以动作附近的比较器
-/// 碰到这种唱机时两边比不了。两格以内是邻居更新能碰到的范围。
-fn reads_invented_jukebox(case: &Case) -> bool {
-    let target = case.action.target();
-    let state_at = |pos: BlockPos| {
-        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
-        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
-    };
-    // 场景里的状态 ID 可能不合法（损坏的输入），先查表，别让 panic 漏到守卫外面。
-    let invented = |pos: BlockPos| {
-        let state = state_at(pos);
-        block_id_of_state(state.0) == block_id_of_state(blocks::JUKEBOX) && state.get(HAS_RECORD)
-    };
-    case.scene.iter().any(|cell| {
-        let pos = cell.pos();
-        if (pos.x - target.x).abs() > 2
-            || (pos.y - target.y).abs() > 2
-            || (pos.z - target.z).abs() > 2
-        {
-            return false;
-        }
-        let state = BlockState(cell.state());
-        let Some(block_id) = block_id_of_state(state.0) else {
-            return false;
-        };
-        if !blocks::BLOCKS[block_id]
-            .class
-            .ancestors()
-            .contains(&BlockAncestor::ComparatorBlock)
-        {
-            return false;
-        }
-        let facing = state.get(HORIZONTAL_FACING);
-        let input_pos = pos.relative(facing);
-        let input = state_at(input_pos);
-        invented(input_pos)
-            || (block_id_of_state(input.0).is_some()
-                && input.is_redstone_conductor()
-                && invented(input_pos.relative(facing)))
     })
 }
 
@@ -1272,6 +1299,8 @@ fn blockers(case: &Case, replayed: &Replayed, names: &Names) -> Result<Vec<Block
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_blocks::state::HAS_RECORD;
+
     use super::*;
     use mc_bamboo_data::sounds;
 
@@ -1416,9 +1445,13 @@ mod tests {
     fn a_case_that_settled_an_out_of_scope_tick_is_not_compared() {
         let stone = blocks::STONE;
         let scene = format!("[[0,64,0,{stone}]]");
-        // 官方的沙子落下去了，我们这边不会落，这一题只能排除。
-        let fell = answer_after_ticks("success", "[]", r#""minecraft:sand""#);
-        assert_eq!(verdict_of(&place_stone(&scene, &fell)), Ok(()));
+        // 官方的命令方块在 settle 里跑了计划刻，我们不跑，这一题只能排除。
+        // 沙子以前也走这条排除，下落已经做了，不再用它当例子。
+        //
+        // A command block that ticked during settle is still out of scope, so the case is excluded.
+        // Sand used to take this path; falling is implemented, so it is no longer the example.
+        let command = answer_after_ticks("success", "[]", r#""minecraft:command_block""#);
+        assert_eq!(verdict_of(&place_stone(&scene, &command)), Ok(()));
         let lamp = answer_after_ticks("success", "[]", r#""minecraft:redstone_lamp""#);
         assert!(verdict_of(&place_stone(&scene, &lamp)).is_err());
     }
@@ -1427,7 +1460,7 @@ mod tests {
     fn a_case_that_read_unsupported_container_contents_is_not_compared() {
         let stone = blocks::STONE;
         let scene = format!("[[0,64,0,{stone}]]");
-        // 官方把物品塞进了罐子，比较器读到了 1；Bamboo 一律读 0。
+        // 官方标记了 analogContent：比较器读到了还没建模的容器内容。
         let read =
             answer("fail", "[]").replace("\"analogContent\":false", "\"analogContent\":true");
         assert_eq!(verdict_of(&place_stone(&scene, &read)), Ok(()));
@@ -1490,11 +1523,15 @@ mod tests {
     }
 
     #[test]
-    fn a_comparator_reading_a_scene_jukebox_is_not_compared() {
+    fn a_comparator_reading_a_scene_jukebox_is_compared() {
         let record = BlockState(blocks::JUKEBOX).with(HAS_RECORD, true);
         let scene = format!("[[0,64,0,{}],[0,64,-1,{}]]", blocks::COMPARATOR, record.0);
+        // 假世界补的是 `music_disc_13`，比较器读到 1。错的答案不再被整题跳过。
+        //
+        // The fake world fills `music_disc_13` and the comparator reads 1. A wrong answer is
+        // no longer skipped for the whole case.
         let case = place_stone(&scene, &answer("fail", "[]"));
-        assert_eq!(verdict_of(&case), Ok(()));
+        assert!(verdict_of(&case).is_err());
     }
 
     #[test]
@@ -1535,7 +1572,8 @@ mod tests {
         let java_args = options.java_args();
         assert_eq!(java_args[..4], options.forwarded);
         assert_eq!(java_args[4], "--untick");
-        assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
+        assert!(java_args[5].split(',').any(|class| class == "CommandBlock"));
+        assert!(!java_args[5].split(',').any(|class| class == "FallingBlock"));
         assert_eq!(java_args[6], "--unrandom");
         assert!(
             java_args[7]
@@ -1578,9 +1616,10 @@ mod tests {
         // 世界的随机源和官方逐位相同，不再有这种排除。
         assert_eq!(Rule::of_skip("random:KelpBlock.getStateForPlacement"), None);
         assert_eq!(Rule::of_skip("explosion:x"), Some(Rule::Explosion));
+        assert_eq!(Rule::of_skip("untick:FallingBlock"), None);
         assert_eq!(
-            Rule::of_skip("untick:FallingBlock"),
-            Some(Rule::FallingTick)
+            Rule::of_skip("untick:CommandBlock"),
+            Some(Rule::CommandTick)
         );
         assert_eq!(Rule::of_skip("untick:StairBlock"), None);
         assert_eq!(
@@ -1652,7 +1691,7 @@ mod tests {
     #[test]
     fn out_of_scope_ticks_cover_subclasses() {
         let sand = mc_bamboo_data::block_of_state(blocks::SAND).expect("沙子存在");
-        assert_eq!(tick_exclusion(sand), Some(Rule::FallingTick));
+        assert_eq!(tick_exclusion(sand), None);
         let chain = mc_bamboo_data::block_of_state(blocks::CHAIN_COMMAND_BLOCK).expect("存在");
         assert_eq!(tick_exclusion(chain), Some(Rule::CommandTick));
         let repeater = mc_bamboo_data::block_of_state(blocks::REPEATER).expect("中继器存在");

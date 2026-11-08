@@ -1,9 +1,9 @@
-//! `CrafterBlock`。被信号触发时排一个计划刻。到期时发失败事件 1050：
-//! 真正的合成要方块实体里的物品，不在范围里。官方合成成功的题由 oracle 整题排除。
+//! `CrafterBlock`。被信号触发时排一个计划刻。9 格物品栏给漏斗和比较器用。
+//! 到期时如果没有配方，只发失败事件 1050。合成和吐出物品不在这次范围里，成功的题由 oracle 整题排除。
 //!
-//! `CrafterBlock`. A redstone signal schedules a tick. The tick plays fail event 1050,
-//! because crafting needs the block entity's items, which are out of scope. The oracle
-//! excludes a case where the crafter actually crafted.
+//! `CrafterBlock`. A signal schedules a tick. The 9 slots are there for hoppers and the
+//! comparator. With no recipe the tick only plays fail event 1050. Crafting and ejecting the
+//! result are out of scope; the oracle excludes a case that actually crafted.
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
@@ -94,9 +94,23 @@ impl Behaviour for Crafter {
     fn tick(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
         // `CrafterBlock.tick` -> `dispenseFrom`。没有配方时官方只 `levelEvent(1050)`。
         // 合成成功会改格子并发 1049/2010，那部分不在范围里，oracle 整题排除。
+        //
         // With no recipe, official only sends `levelEvent(1050)`. A successful craft changes
         // the slots and sends 1049/2010; that path is out of scope and the oracle excludes it.
         world.level_event(SOUND_CRAFTER_FAIL, pos, 0);
+    }
+
+    /// `CrafterBlock.getAnalogOutputSignal`：非空或禁用的格子数。
+    ///
+    /// `CrafterBlock.getAnalogOutputSignal`: how many slots are non-empty or disabled.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        crate::block_container::crafter_signal(world, pos)
     }
 }
 

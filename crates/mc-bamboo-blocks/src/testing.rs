@@ -10,8 +10,8 @@ use crate::block_entity::{BlockEntities, BlockEvents};
 
 use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Container, Level, LevelRandom, Outcome, Slots,
-    container::redstone_signal, destroy_block, hopper::HopperEntity, level::RedstoneMemory,
-    shape::Aabb,
+    container::redstone_signal, destroy_block, entity::Entities, hopper::HopperEntity,
+    level::RedstoneMemory, shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
@@ -36,6 +36,7 @@ pub(crate) struct TestLevel {
     pub(crate) containers: HashMap<BlockPos, Vec<ItemStack>>,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    entities: Entities,
 }
 
 impl TestLevel {
@@ -52,6 +53,7 @@ impl TestLevel {
             containers: HashMap::new(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            entities: Entities::default(),
         }
     }
 
@@ -67,6 +69,10 @@ impl TestLevel {
     /// 给这一格放一张槽位表，模拟官方的容器方块实体。
     pub(crate) fn set_container(&mut self, pos: BlockPos, slots: Vec<ItemStack>) {
         self.containers.insert(pos, slots);
+    }
+
+    pub(crate) fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
     }
 }
 
@@ -174,6 +180,14 @@ impl Level for TestLevel {
         &mut self.redstone
     }
 
+    fn entities(&self) -> &Entities {
+        &self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.entities
+    }
+
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
         let Some(slots) = self.containers.get_mut(&pos) else {
             return false;
@@ -181,6 +195,31 @@ impl Level for TestLevel {
         let mut container = Slots::new(slots);
         f(&mut container);
         true
+    }
+
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let slots = self
+            .containers
+            .entry(pos)
+            .or_insert_with(|| vec![ItemStack::empty(); len]);
+        if slots.len() != len {
+            *slots = vec![ItemStack::empty(); len];
+        }
+        f(slots);
+        true
+    }
+
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        self.containers.get(&pos).cloned().unwrap_or_default()
+    }
+
+    fn clear_container(&mut self, pos: BlockPos) {
+        self.containers.remove(&pos);
     }
 
     fn own_container_counts(&self, pos: BlockPos) -> Vec<i32> {

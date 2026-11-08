@@ -1,10 +1,17 @@
 //! `ChiseledBookShelfBlock`。
 //!
-//! 书在方块实体里，但是状态上的 `slot_N_occupied` 是它的镜像，这里只改状态。
-//! 比较器读的是最近放进或者拿出书的那一格，记在 [`RedstoneMemory`](crate::RedstoneMemory) 里。
+//! 书在方块实体的物品栏里。`setItem` 会改 `slot_N_occupied`，并记下最近动过的那一格。
+//! 比较器读的是那一格的序号加一，记在 [`RedstoneMemory`](crate::RedstoneMemory) 里。
+//!
+//! `ChiseledBookShelfBlock`.
+//!
+//! Books live in the block entity inventory. `setItem` updates `slot_N_occupied` and remembers
+//! the slot. The comparator reads that slot's index plus one, stored on
+//! [`RedstoneMemory`](crate::RedstoneMemory).
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, items, sounds::sound_event, tags::item_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use super::slot_container::hit_slot;
 use crate::{
@@ -12,6 +19,7 @@ use crate::{
         Behaviour,
         common::{facing_the_player, update_neighbours_after_destroy},
     },
+    block_container::set_bookshelf_slot,
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     state::{
@@ -44,14 +52,6 @@ fn clicked_slot(state: BlockState, ctx: &UseContext) -> Option<usize> {
     hit_slot(&ctx.hit, facing, ROWS, COLUMNS)
 }
 
-/// `ChiseledBookShelfBlockEntity.updateState`：先记下动的是哪一格，再把状态换成书的镜像。
-fn update_state(state: BlockState, world: &mut World, pos: BlockPos, slot: usize, occupied: bool) {
-    world
-        .redstone_memory_mut()
-        .set_last_bookshelf_slot(pos, slot);
-    world.set_block_and_update(pos, state.with(SLOT_OCCUPIED[slot], occupied));
-}
-
 impl Behaviour for ChiseledBookShelf {
     fn state_for_placement(
         &self,
@@ -82,8 +82,10 @@ impl Behaviour for ChiseledBookShelf {
             return InteractionResult::TryEmptyHandInteraction;
         }
         let pos = ctx.clicked_pos();
-        update_state(state, world, pos, slot, true);
-        // `addBook` 按放进去的是不是附魔书选声音，`null` 作 `except`。
+        set_bookshelf_slot(world, pos, slot, ItemStack::new(ctx.item, 1));
+        // `addBook`：`setItem` 之后按放进去的是不是附魔书选声音，`except` 是空。
+        // `addBook`: after `setItem`, the sound depends on whether the book is enchanted.
+        // `except` is null.
         let sound = if ctx.item == items::ENCHANTED_BOOK {
             "minecraft:block.chiseled_bookshelf.insert.enchanted"
         } else {
@@ -106,14 +108,20 @@ impl Behaviour for ChiseledBookShelf {
             return InteractionResult::Consume;
         }
         let pos = ctx.clicked_pos();
-        update_state(state, world, pos, slot, false);
-        // `removeBook` 按取走的书是不是附魔书选声音。这里不存书的种类，按普通书算。
-        world.play_block_sound(
-            pos,
-            sound_event("minecraft:block.chiseled_bookshelf.pickup"),
-            1.0,
-            1.0,
-        );
+        // `removeBook` 先取出再出声，声音看取出来的那本是不是附魔书。
+        // `removeBook` removes the book first, then plays. The sound follows that book.
+        let taken = world
+            .slots_at(pos)
+            .get(slot)
+            .cloned()
+            .unwrap_or_else(ItemStack::empty);
+        set_bookshelf_slot(world, pos, slot, ItemStack::empty());
+        let sound = if !taken.is_empty() && taken.item == items::ENCHANTED_BOOK {
+            "minecraft:block.chiseled_bookshelf.pickup.enchanted"
+        } else {
+            "minecraft:block.chiseled_bookshelf.pickup"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
         InteractionResult::Success
     }
 

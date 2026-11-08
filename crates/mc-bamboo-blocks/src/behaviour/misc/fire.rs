@@ -193,8 +193,10 @@ fn check_burn_out(world: &mut World, pos: BlockPos, chance: i32, age: i32) {
         world.remove_block(pos);
     }
     if old.is_a(BlockAncestor::TntBlock) {
-        // `TntBlock.prime`：烧掉之后才点燃。随机数和点燃音效都在那里。
-        super::tnt::prime(world, pos);
+        // `TntBlock.prime`：方块已经 `removeBlock` 了，这里只生成实体并放点燃声。
+        // `TntBlock.prime`: the block is already `removeBlock`ed. This only spawns the entity
+        // and plays the primed sound.
+        world.spawn_tnt(pos);
     }
 }
 

@@ -1949,6 +1949,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-loot"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-data",
+ "md-5",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mc-bamboo-nbt"
 version = "0.0.0"
 dependencies = [
@@ -2004,6 +2015,8 @@ dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-game",
+ "mc-bamboo-loot",
+ "mc-bamboo-nbt",
  "mc-bamboo-protocol",
  "mc-bamboo-recipes",
  "mc-bamboo-server",

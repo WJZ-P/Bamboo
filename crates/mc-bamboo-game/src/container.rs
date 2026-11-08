@@ -1,4 +1,7 @@
-//! 有物品栏的方块实体：箱子、木桶、末影箱、潜影盒、漏斗、发射器、投掷器。
+//! 有物品栏的方块实体：箱子、木桶、末影箱、潜影盒、漏斗、发射器、投掷器、雕纹书架、唱片机、饰纹陶罐和合成器。
+//!
+//! Block entities with inventories: chests, barrels, ender chests, shulker boxes, hoppers,
+//! dispensers, droppers, chiseled bookshelves, jukeboxes, decorated pots and crafters.
 //!
 //! 内容按方块位置存在 [`Region`] 里，只有世界线程碰它。这里还管官方的开合计数
 //! （`ContainerOpenersCounter`）和方块事件的排队；事件本身、潜影盒的盖子和动画都在
@@ -42,6 +45,10 @@ pub(crate) enum ContainerKind {
     Hopper,
     Dispenser,
     Dropper,
+    ChiseledBookshelf,
+    Jukebox,
+    DecoratedPot,
+    Crafter,
 }
 
 impl ContainerKind {
@@ -49,8 +56,10 @@ impl ContainerKind {
     pub(crate) const fn slots(self) -> usize {
         match self {
             Self::Hopper => 5,
-            Self::Dispenser | Self::Dropper => 9,
+            Self::Dispenser | Self::Dropper | Self::Crafter => 9,
             Self::EnderChest => 0,
+            Self::ChiseledBookshelf => 6,
+            Self::Jukebox | Self::DecoratedPot => 1,
             Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
         }
     }
@@ -62,6 +71,12 @@ impl ContainerKind {
             Self::ShulkerBox => menu::SHULKER_BOX,
             Self::Hopper => menu::HOPPER,
             Self::Dispenser | Self::Dropper => menu::GENERIC_3X3,
+            // 这三种官方没有菜单。合成器有 `CrafterMenu`，这次不打开，见 `menu_shape`。
+            //
+            // These three have no vanilla menu. The crafter has `CrafterMenu`, which this change
+            // does not open; see `menu_shape`.
+            Self::ChiseledBookshelf | Self::Jukebox | Self::DecoratedPot => menu::GENERIC_9X1,
+            Self::Crafter => menu::CRAFTER_3X3,
         }
     }
 
@@ -75,6 +90,13 @@ impl ContainerKind {
             Self::Hopper => "container.hopper",
             Self::Dispenser => "container.dispenser",
             Self::Dropper => "container.dropper",
+            // 不会发给客户端：`menu_shape` 对这四种返回 `None`。
+            //
+            // Never sent: `menu_shape` returns `None` for these four.
+            Self::ChiseledBookshelf => "container.chiseledBookshelf",
+            Self::Jukebox => "container.jukebox",
+            Self::DecoratedPot => "container.decoratedPot",
+            Self::Crafter => "container.crafter",
         }
     }
 }
@@ -143,6 +165,16 @@ pub(crate) fn kind_of(state: BlockState) -> Option<ContainerKind> {
         (BlockAncestor::DropperBlock, ContainerKind::Dropper),
         (BlockAncestor::DispenserBlock, ContainerKind::Dispenser),
         (BlockAncestor::ChestBlock, ContainerKind::Chest),
+        (
+            BlockAncestor::ChiseledBookShelfBlock,
+            ContainerKind::ChiseledBookshelf,
+        ),
+        (BlockAncestor::JukeboxBlock, ContainerKind::Jukebox),
+        (
+            BlockAncestor::DecoratedPotBlock,
+            ContainerKind::DecoratedPot,
+        ),
+        (BlockAncestor::CrafterBlock, ContainerKind::Crafter),
     ]
     .into_iter()
     .find(|(ancestor, _)| state.is_a(*ancestor))
@@ -287,8 +319,17 @@ pub(crate) fn start_open(region: &mut Region, pos: BlockPos, kind: ContainerKind
         ContainerKind::Chest | ContainerKind::Barrel | ContainerKind::EnderChest => {
             increment_openers(region, pos, kind)
         }
-        // 漏斗、发射器和投掷器用 `Container` 的默认实现，什么也不做。
-        ContainerKind::Hopper | ContainerKind::Dispenser | ContainerKind::Dropper => {}
+        // 漏斗、发射器、投掷器和这四种容器用 `Container` 的默认 `startOpen`，什么也不做。
+        //
+        // Hoppers, dispensers, droppers and these four containers use `Container`'s default
+        // `startOpen`, which does nothing.
+        ContainerKind::Hopper
+        | ContainerKind::Dispenser
+        | ContainerKind::Dropper
+        | ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => {}
     }
 }
 
@@ -299,7 +340,13 @@ pub(crate) fn stop_open(region: &mut Region, pos: BlockPos, kind: ContainerKind)
         ContainerKind::Chest | ContainerKind::Barrel | ContainerKind::EnderChest => {
             decrement_openers(region, pos, kind)
         }
-        ContainerKind::Hopper | ContainerKind::Dispenser | ContainerKind::Dropper => {}
+        ContainerKind::Hopper
+        | ContainerKind::Dispenser
+        | ContainerKind::Dropper
+        | ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => {}
     }
 }
 
@@ -359,7 +406,11 @@ fn on_open(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
         ContainerKind::ShulkerBox
         | ContainerKind::Hopper
         | ContainerKind::Dispenser
-        | ContainerKind::Dropper => {}
+        | ContainerKind::Dropper
+        | ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => {}
     }
 }
 
@@ -374,7 +425,11 @@ fn on_close(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
         ContainerKind::ShulkerBox
         | ContainerKind::Hopper
         | ContainerKind::Dispenser
-        | ContainerKind::Dropper => {}
+        | ContainerKind::Dropper
+        | ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => {}
     }
 }
 

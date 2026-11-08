@@ -12,6 +12,7 @@ use std::{
 use serde::Deserialize;
 
 const BLOCK_REGISTRY: &str = "minecraft:block";
+const ENTITY_TYPE_REGISTRY: &str = "minecraft:entity_type";
 const ITEM_REGISTRY: &str = "minecraft:item";
 /// 官方数据生成器的输出目录，相对于工作目录。
 const GENERATED_DIR: &str = "generated";
@@ -35,6 +36,7 @@ pub struct Extracted {
     pub block_states: BlockStates,
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
+    pub entity_types: Vec<EntityTypeFacts>,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -42,13 +44,51 @@ pub struct Extracted {
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
     pub sound_tables: SoundTables,
+    /// 数据包里的战利品表原文：带命名空间的名字 → JSON。
+    ///
+    /// Loot table JSON from the data pack, keyed by namespaced id.
+    pub loot_tables: BTreeMap<String, String>,
+    /// `predicate` 注册表条目的原文。
+    ///
+    /// Raw JSON of `predicate` registry entries.
+    pub loot_predicates: BTreeMap<String, String>,
+    /// `context_int_provider` 注册表条目的原文。
+    ///
+    /// Raw JSON of `context_int_provider` registry entries.
+    pub context_int_providers: BTreeMap<String, String>,
+    /// `context_float_provider` 注册表条目的原文。
+    ///
+    /// Raw JSON of `context_float_provider` registry entries.
+    pub context_float_providers: BTreeMap<String, String>,
+    /// 数据包里的附魔定义原文：带命名空间的名字 → JSON。
+    ///
+    /// Enchantment definition JSON, keyed by namespaced id.
+    pub enchantments: BTreeMap<String, String>,
+    /// 数据包里的烧炼配方原文，只有 `minecraft:smelting`。
+    ///
+    /// Smelting recipe JSON. Only `minecraft:smelting` is kept.
+    pub smelting_recipes: BTreeMap<String, String>,
+    /// `MobEffect.isInstantaneous()` 为真的效果。
+    ///
+    /// Effects for which `MobEffect.isInstantaneous()` is true.
+    pub instant_mob_effects: Vec<String>,
     /// 属性名字 → 默认值，没有状态效果和附魔时的起点。
     pub attribute_defaults: BTreeMap<String, f64>,
     pub component_enums: ComponentEnums,
     /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
     pub item_components: Vec<String>,
+    /// `minecraft:jukebox_song`，按注册表 ID 排列。旧的提取结果没有这一项。
+    #[serde(default)]
+    pub jukebox_songs: Vec<ExtractedJukeboxSong>,
     /// 世界生成的数据：噪声参数、密度函数、维度设置和多噪声群系预设，原样是 JSON。
     pub worldgen: serde_json::Value,
+}
+
+/// `JukeboxSong`：长度（秒）和比较器输出。
+#[derive(Debug, Deserialize)]
+pub struct ExtractedJukeboxSong {
+    pub length: f32,
+    pub output: i32,
 }
 
 /// 按 ID 查表的枚举：连续的只有常量个数，稀疏的是整张 ID 表。
@@ -58,6 +98,8 @@ pub struct ComponentEnums {
     pub counts: BTreeMap<String, u32>,
     /// 枚举名 → 按声明顺序的 ID。
     pub sparse: BTreeMap<String, Vec<i32>>,
+    /// 枚举名 → 序列化名字，下标和网络上的 ID 一致。没有存档 `Codec` 的瞬态枚举不在里面。
+    pub names: BTreeMap<String, Vec<String>>,
 }
 
 /// 官方数据包的全部配方，`entries` 的顺序就是注册表的顺序。
@@ -323,6 +365,14 @@ pub struct Block {
     pub fields: Vec<BlockField>,
     pub instrument: String,
     pub dynamic_shape: bool,
+    /// `BlockBehaviour.getLootTable`，没有掉落表时是 `None`。
+    pub loot_table: Option<String>,
+    /// `Block.getSpeedFactor`。
+    pub speed_factor: f32,
+    /// `Block.getBounceRestitution`。
+    pub bounce_restitution: f32,
+    /// `Block.getExplosionResistance`。
+    pub explosion_resistance: f32,
     pub offset: Option<BlockOffset>,
     /// 用桶取起这个方块时播的声音，`sound_event` 注册表 ID。
     #[serde(default)]
@@ -414,6 +464,8 @@ pub struct FluidState {
     pub amount: u8,
     pub falling: bool,
     pub legacy_block: u32,
+    /// `FluidState.getExplosionResistance`。
+    pub explosion_resistance: f32,
 }
 
 /// 光照引擎要的表，`Extractor.java` 的 `LightTables`。
@@ -586,6 +638,21 @@ pub struct ExtractedItem {
     pub overrides_can_destroy_block: bool,
 }
 
+/// 一个实体类型。列表里的位置就是它的注册表 ID。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityTypeFacts {
+    pub name: String,
+    pub client_tracking_range: i32,
+    /// -1 表示官方写的是 `Integer.MAX_VALUE`，也就是 `UpdateInterval.NEVER`。
+    pub update_interval: i32,
+    pub track_deltas: bool,
+    /// `EntityDimensions.width`。
+    pub width: f32,
+    /// `EntityDimensions.height`。
+    pub height: f32,
+}
+
 /// 一个物品。列表里的位置就是它的注册表 ID。
 pub struct Item {
     pub name: String,
@@ -594,6 +661,10 @@ pub struct Item {
     pub wall_block: Option<i32>,
     pub attachment: Option<i32>,
     pub max_stack_size: i32,
+    /// `max_damage` 组件，没有这个组件时物品不能受损。
+    pub max_damage: Option<i32>,
+    /// `enchantable` 组件的 `value`，附魔台的等级计算要用。
+    pub enchantable: Option<i32>,
     pub can_destroy_blocks_in_creative: bool,
     pub consumable: bool,
     /// `compostable` 组件的 `layers`。
@@ -628,6 +699,10 @@ struct ItemReport {
 struct ItemComponents {
     #[serde(rename = "minecraft:max_stack_size")]
     max_stack_size: i32,
+    #[serde(rename = "minecraft:max_damage")]
+    max_damage: Option<i32>,
+    #[serde(rename = "minecraft:enchantable")]
+    enchantable: Option<EnchantableComponent>,
     #[serde(rename = "minecraft:tool")]
     tool: Option<ToolComponent>,
     #[serde(rename = "minecraft:consumable")]
@@ -642,9 +717,6 @@ struct ItemComponents {
     block_transformer: Option<String>,
     #[serde(rename = "minecraft:blocks_attacks")]
     blocks_attacks: Option<serde_json::Value>,
-    /// 修复物品配方要求输入带 `max_damage` 和 `damage`。
-    #[serde(rename = "minecraft:max_damage")]
-    max_damage: Option<serde_json::Value>,
     /// 染色类配方要求染料物品带 `dye` 组件。
     #[serde(rename = "minecraft:dye")]
     dye: Option<serde_json::Value>,
@@ -655,6 +727,11 @@ struct ItemComponents {
 #[derive(Debug, Deserialize)]
 struct ToolComponent {
     can_destroy_blocks_in_creative: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnchantableComponent {
+    value: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,6 +877,7 @@ pub struct VersionData {
     pub block_states: BlockStates,
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
+    pub entity_types: Vec<EntityTypeFacts>,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -815,10 +893,31 @@ pub struct VersionData {
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
+    /// 战利品表原文：带命名空间的名字 → JSON。
+    ///
+    /// Loot table JSON, keyed by namespaced id.
+    pub loot_tables: BTreeMap<String, String>,
+    pub loot_predicates: BTreeMap<String, String>,
+    pub context_int_providers: BTreeMap<String, String>,
+    pub context_float_providers: BTreeMap<String, String>,
+    /// 附魔定义原文：带命名空间的名字 → JSON。
+    ///
+    /// Enchantment definition JSON, keyed by namespaced id.
+    pub enchantments: BTreeMap<String, String>,
+    /// 烧炼配方原文，只有 `minecraft:smelting`。
+    ///
+    /// Smelting recipe JSON. Only `minecraft:smelting` is kept.
+    pub smelting_recipes: BTreeMap<String, String>,
+    /// `MobEffect.isInstantaneous()` 为真的效果。
+    ///
+    /// Effects for which `MobEffect.isInstantaneous()` is true.
+    pub instant_mob_effects: Vec<String>,
     /// 组件里按 ID 查表的枚举。
     pub component_enums: ComponentEnums,
     /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
     pub item_components: Vec<String>,
+    /// `minecraft:jukebox_song`，按注册表 ID 排列。
+    pub jukebox_songs: Vec<ExtractedJukeboxSong>,
     /// 世界生成的数据，原样写进 `mc-bamboo-data` 的 `worldgen.json`。
     pub worldgen: serde_json::Value,
 }
@@ -830,6 +929,29 @@ pub fn run(
     workspace_root: &Path,
 ) -> Result<VersionData, String> {
     run_reports(java, server_jar, work_dir)?;
+    read_version_data(java, work_dir, workspace_root)
+}
+
+/// 不重新跑官方数据生成器，直接用上一次留下的报告重新运行 `Extractor.java`。
+///
+/// 报告只由服务端 jar 决定，换 jar 时必须先跑一遍 `generate`。
+pub fn extract_existing(
+    java: &str,
+    work_dir: &Path,
+    workspace_root: &Path,
+) -> Result<VersionData, String> {
+    let reports = work_dir.join(GENERATED_DIR).join("reports");
+    if !reports.is_dir() {
+        return Err(format!("{} 不存在，先运行一次 generate", reports.display()));
+    }
+    read_version_data(java, work_dir, workspace_root)
+}
+
+fn read_version_data(
+    java: &str,
+    work_dir: &Path,
+    workspace_root: &Path,
+) -> Result<VersionData, String> {
     let extracted_path = work_dir.join("extracted.json");
     run_extractor(java, work_dir, workspace_root, &extracted_path)?;
 
@@ -847,6 +969,11 @@ pub fn run(
         ITEM_REGISTRY,
         extracted.items.iter().map(|item| &item.name),
     )?;
+    check_registry_order(
+        &builtin_registries,
+        ENTITY_TYPE_REGISTRY,
+        extracted.entity_types.iter().map(|type_| &type_.name),
+    )?;
     let (items, damageable, dyed) = read_items(
         extracted.items,
         &reports.join("minecraft/components/item"),
@@ -861,6 +988,7 @@ pub fn run(
         block_states: extracted.block_states,
         blocks: extracted.blocks,
         items,
+        entity_types: extracted.entity_types,
         state_tables: extracted.state_tables,
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
@@ -875,8 +1003,16 @@ pub fn run(
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
+        loot_tables: extracted.loot_tables,
+        loot_predicates: extracted.loot_predicates,
+        context_int_providers: extracted.context_int_providers,
+        context_float_providers: extracted.context_float_providers,
+        enchantments: extracted.enchantments,
+        smelting_recipes: extracted.smelting_recipes,
+        instant_mob_effects: extracted.instant_mob_effects,
         component_enums: extracted.component_enums,
         item_components: extracted.item_components,
+        jukebox_songs: extracted.jukebox_songs,
         worldgen: extracted.worldgen,
     })
 }
@@ -1032,6 +1168,8 @@ fn read_items(
             .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
         items.push(Item {
             max_stack_size: components.max_stack_size,
+            max_damage: components.max_damage,
+            enchantable: components.enchantable.map(|component| component.value),
             can_destroy_blocks_in_creative: tool_allows && !item.overrides_can_destroy_block,
             consumable: components.consumable.is_some(),
             compostable: components
