@@ -272,7 +272,7 @@ pub(crate) fn update_views(region: &mut Region) {
     }
 }
 
-/// tick 第 10 阶段：每名玩家最多发一批。
+/// tick 第 10 阶段：每名玩家最多发一批，发完把没人跟踪的区块从编码缓存里丢掉。
 pub(crate) fn send_chunks(region: &mut Region) {
     for (&id, player) in &mut region.players {
         if !region.links.is_open(id) {
@@ -285,7 +285,12 @@ pub(crate) fn send_chunks(region: &mut Region) {
 
         region.links.send(id, &ChunkBatchStart);
         for &pos in &batch {
-            let body = chunk_body(&region.chunks, &region.template_body, pos);
+            let body = chunk_body(
+                &mut region.chunk_cache,
+                &region.chunks,
+                &region.template_body,
+                pos,
+            );
             let packet = LevelChunkWithLight {
                 x: pos.x,
                 z: pos.z,
@@ -296,6 +301,19 @@ pub(crate) fn send_chunks(region: &mut Region) {
         let batch_size = batch.len() as i32;
         region.links.send(id, &ChunkBatchFinished { batch_size });
     }
+    drop_untracked_bodies(region);
+}
+
+/// 缓存只留下还在某名玩家跟踪范围里的区块，包括还在 `pending` 里等着发的。
+fn drop_untracked_bodies(region: &mut Region) {
+    let views: Vec<ChunkView> = region
+        .players
+        .values()
+        .filter_map(|player| player.chunks.view)
+        .collect();
+    region
+        .chunk_cache
+        .retain(|pos| views.iter().any(|view| view.contains(pos)));
 }
 
 /// 处理客户端的 `chunk_batch_received`。

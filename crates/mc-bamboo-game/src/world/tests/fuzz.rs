@@ -373,6 +373,16 @@ impl Model {
             }
             clientbound::LEVEL_CHUNK_WITH_LIGHT => {
                 let pos = chunk_position(frame);
+                // 改过的区块走编码缓存。发完区块以后这一 tick 没再改世界，收到的字节要和现在重新编码的一样。
+                let chunks = &world.region.chunks;
+                if !chunks.is_template(pos) {
+                    let fresh = crate::chunk_encoding::encode_chunk(chunks, pos);
+                    assert!(
+                        frame.body[8..] == fresh[..],
+                        "{}: stale chunk {pos:?}",
+                        self.name
+                    );
+                }
                 let center = self.center.expect("中心先于区块");
                 let distance = (pos.x - center.x).abs().max((pos.z - center.z).abs());
                 assert!(distance <= 35, "{}: chunk out of range", self.name);

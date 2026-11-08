@@ -279,6 +279,14 @@ impl LevelLight {
     pub fn is_materialized(&self, pos: ChunkPos) -> bool {
         self.sky.storage.is_materialized(pos) || self.block.storage.is_materialized(pos)
     }
+
+    /// 这个区块柱两层光照的版本号，天空光在前。每写一次都换成没用过的新值，没写过的柱是 0。
+    pub fn revision(&self, pos: ChunkPos) -> [u64; 2] {
+        [
+            self.sky.storage.revision(pos),
+            self.block.storage.revision(pos),
+        ]
+    }
 }
 
 /// 模板区块四周的一片区块，x 在外层。

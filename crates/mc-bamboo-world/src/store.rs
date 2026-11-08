@@ -3,8 +3,13 @@
 //! 超平坦世界的区块内容都相同，所以只存一个模板，第一次改动一个区块时才给它一份自己的拷贝。
 //! 光照也跟着区块走：改方块时记下光照要检查的地方，[`run_light_updates`](ChunkStore::run_light_updates) 时一起算。
 //! 以后加 ticket 和卸载时，也只需要改这一个地方。
+//!
+//! 每个区块有一个版本号 [`ChunkRevision`]，区块和它那一列光照每被写一次就换一个新值，区块包的缓存靠它判断内容变没变。
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Deref,
+};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::{block_of_state, facts, registries::block_entity_type, state_facts};
@@ -22,8 +27,50 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ChunkStore {
     template: Chunk,
-    edited: HashMap<ChunkPos, Chunk>,
+    edited: EditedChunks,
     light: LevelLight,
+}
+
+/// 改过的区块和它们的版本号。
+///
+/// 读的时候就是一张普通的表。写只能经过 [`chunk_mut`](Self::chunk_mut)，它顺便换一个新的版本号：
+/// 这里故意不实现 `DerefMut`，以后加新的写法时绕不过去，区块包的缓存也就不会漏掉修改。
+#[derive(Debug, Clone, Default)]
+struct EditedChunks {
+    chunks: HashMap<ChunkPos, Chunk>,
+    revisions: HashMap<ChunkPos, u64>,
+    /// 发出去的最后一个版本号。
+    last_revision: u64,
+}
+
+impl EditedChunks {
+    /// 要改这个区块了，第一次改时从模板复制一份。
+    fn chunk_mut(&mut self, pos: ChunkPos, template: &Chunk) -> &mut Chunk {
+        self.last_revision += 1;
+        self.revisions.insert(pos, self.last_revision);
+        self.chunks.entry(pos).or_insert_with(|| template.clone())
+    }
+
+    /// 没改过的区块是 0。
+    fn revision(&self, pos: ChunkPos) -> u64 {
+        self.revisions.get(&pos).copied().unwrap_or_default()
+    }
+}
+
+impl Deref for EditedChunks {
+    type Target = HashMap<ChunkPos, Chunk>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.chunks
+    }
+}
+
+/// 一个区块的版本号，见 [`ChunkStore::revision`]。只用来比较是否相等。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkRevision {
+    chunk: u64,
+    /// 天空光和方块光。
+    light: [u64; 2],
 }
 
 impl ChunkStore {
@@ -33,7 +80,7 @@ impl ChunkStore {
         let light = LevelLight::for_template(&template);
         Self {
             template,
-            edited: HashMap::new(),
+            edited: EditedChunks::default(),
             light,
         }
     }
@@ -61,6 +108,15 @@ impl ChunkStore {
     /// 这个区块的方块和光照都和模板一样，可以共用模板的编码。
     pub fn is_template(&self, pos: ChunkPos) -> bool {
         !self.edited.contains_key(&pos) && !self.light.is_materialized(pos)
+    }
+
+    /// 这个区块现在的版本号。方块、高度图、方块实体、告示牌和这一列的光照，任何一样被写过都会换成
+    /// 没用过的新值。所以两次取到的值相同，这个区块编出来的区块包就一个字节都不差。
+    pub fn revision(&self, pos: ChunkPos) -> ChunkRevision {
+        ChunkRevision {
+            chunk: self.edited.revision(pos),
+            light: self.light.revision(pos),
+        }
     }
 
     /// 读取方块状态。高度超出世界时返回 `None`，坐标可以直接来自客户端。
@@ -97,11 +153,7 @@ impl ChunkStore {
             return false;
         }
         let (x, z) = (local(pos.x), local(pos.z));
-        let template = &self.template;
-        let chunk = self
-            .edited
-            .entry(pos.chunk())
-            .or_insert_with(|| template.clone());
+        let chunk = self.edited.chunk_mut(pos.chunk(), &self.template);
         chunk.set_block(x, pos.y, z, state);
         let is_empty = chunk.is_section_empty(pos.y);
         let light_changed = has_different_light_properties(previous, state);
@@ -145,11 +197,7 @@ impl ChunkStore {
         if !is_sign(self.chunk(pos.chunk()).block(x, pos.y, z)) {
             return false;
         }
-        let template = &self.template;
-        let chunk = self
-            .edited
-            .entry(pos.chunk())
-            .or_insert_with(|| template.clone());
+        let chunk = self.edited.chunk_mut(pos.chunk(), &self.template);
         chunk.set_sign(x, pos.y, z, content);
         true
     }
@@ -341,6 +389,46 @@ mod tests {
         let mut store = ChunkStore::flat();
         assert!(!store.set_sign(BlockPos::new(0, -61, 0), SignContent::default()));
         assert!(store.edited(ChunkPos::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn revision_changes_with_every_write_to_the_chunk() {
+        let mut store = ChunkStore::flat();
+        let pos = BlockPos::new(3, -60, 3);
+        let untouched = store.revision(pos.chunk());
+        assert_eq!(store.revision(ChunkPos::new(-40, 70)), untouched);
+
+        assert!(!store.set_block(BlockPos::new(3, -61, 3), blocks::GRASS_BLOCK));
+        assert_eq!(store.revision(pos.chunk()), untouched);
+
+        store.set_block(pos, blocks::OAK_SIGN);
+        let placed = store.revision(pos.chunk());
+        assert_ne!(placed, untouched);
+
+        store.set_sign(pos, SignContent::default());
+        let signed = store.revision(pos.chunk());
+        assert_ne!(signed, placed);
+
+        // 读不改版本号，别的区块也不受影响。
+        assert_eq!(store.sign(pos), Some(SignContent::default()));
+        assert_eq!(store.block(pos), Some(blocks::OAK_SIGN));
+        assert_eq!(store.revision(pos.chunk()), signed);
+        assert_eq!(store.revision(ChunkPos::new(-40, 70)), untouched);
+    }
+
+    #[test]
+    fn light_written_next_door_changes_the_neighbor_revision() {
+        let mut store = ChunkStore::flat();
+        let neighbor = ChunkPos::new(1, 0);
+        let far = ChunkPos::new(5, 5);
+        // 光从 (0, 0) 的东边照进 (1, 0)。
+        store.set_block(BlockPos::new(15, -60, 3), blocks::GLOWSTONE);
+        let before = (store.revision(neighbor), store.revision(far));
+
+        store.run_light_updates();
+
+        assert_ne!(store.revision(neighbor), before.0);
+        assert_eq!(store.revision(far), before.1);
     }
 
     #[test]
