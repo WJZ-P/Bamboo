@@ -7,7 +7,12 @@ use mc_bamboo_core::{
     sign::{SignContent, SignTextSlot},
 };
 
-use crate::{random::LevelRandom, shape::Aabb, state::BlockState};
+use crate::{
+    block_entity::{BlockEntities, BlockEvents},
+    random::LevelRandom,
+    shape::Aabb,
+    state::BlockState,
+};
 
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
 pub trait Level {
@@ -15,7 +20,10 @@ pub trait Level {
     fn block_state(&self, pos: BlockPos) -> BlockState;
 
     /// 写入一格，不做任何连锁。高度超出世界时什么也不做，返回 `false`。
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool;
+    ///
+    /// `flags` 是 [`set_block`](crate::World::set_block) 的那一组，存储只需要看
+    /// [`UPDATE_CLIENTS`](crate::world::UPDATE_CLIENTS)：官方只在带这个标记时才把改动发给客户端。
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool;
 
     /// 这些盒子（世界坐标）和所有挡路的实体都没有正体积重叠。
     fn is_unobstructed(&self, boxes: &[Aabb]) -> bool;
@@ -47,6 +55,15 @@ pub trait Level {
 
     /// 改写告示牌的内容，对应 `SignBlockEntity` 里那几个字段。不是告示牌方块时返回 `false`。
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool;
+
+    /// 这一格的方块实体和它们的 ticker。
+    fn block_entities(&self) -> &BlockEntities;
+
+    /// 见 [`Level::block_entities`]。
+    fn block_entities_mut(&mut self) -> &mut BlockEntities;
+
+    /// `Level.blockEvents`：`level.blockEvent` 排进来的事件。
+    fn block_events(&mut self) -> &mut BlockEvents;
 
     /// 红石用到的、方块状态装不下的世界数据。
     fn redstone(&self) -> &RedstoneMemory;
@@ -161,4 +178,12 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// `ServerLevel.runBlockEvents` 里的 `ClientboundBlockEventPacket`：方块事件处理成功了，
+    /// 把这一项发给附近 64 格内的玩家。`block` 是方块的注册表 ID，官方包里的第三个字段。
+    BlockEvent {
+        pos: BlockPos,
+        block: usize,
+        param_a: i32,
+        param_b: i32,
+    },
 }

@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockState, Level, LevelRandom, RedstoneMemory,
+    Aabb, BlockEntities, BlockEvents, BlockState, Level, LevelRandom, RedstoneMemory,
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
@@ -20,6 +20,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
     pub(crate) random: &'a LevelRandom,
     pub(crate) redstone: &'a mut RedstoneMemory,
+    pub(crate) block_entities: &'a mut BlockEntities,
+    pub(crate) block_events: &'a mut BlockEvents,
 }
 
 impl Level for RegionLevel<'_> {
@@ -27,9 +29,11 @@ impl Level for RegionLevel<'_> {
         BlockState(self.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
     }
 
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool {
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
         let written = self.chunks.set_block(pos, state.0);
-        if written {
+        // 官方 `Level.setBlock` 只在 `UPDATE_CLIENTS` 时才 `sendBlockUpdated`，
+        // 活塞的移动方块用 `UPDATE_INVISIBLE` 写，客户端会自己播放动画。
+        if written && flags & mc_bamboo_blocks::world::UPDATE_CLIENTS != 0 {
             self.changes.changed.push(pos);
         }
         written
@@ -78,6 +82,18 @@ impl Level for RegionLevel<'_> {
 
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         self.chunks.set_sign(pos, content)
+    }
+
+    fn block_entities(&self) -> &BlockEntities {
+        self.block_entities
+    }
+
+    fn block_entities_mut(&mut self) -> &mut BlockEntities {
+        self.block_entities
+    }
+
+    fn block_events(&mut self) -> &mut BlockEvents {
+        self.block_events
     }
 
     fn redstone(&self) -> &RedstoneMemory {

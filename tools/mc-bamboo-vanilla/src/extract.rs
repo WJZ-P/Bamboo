@@ -93,6 +93,10 @@ pub struct Block {
     pub has_collision: bool,
     pub has_fluid: bool,
     pub two_blocks: bool,
+    /// 活塞推动时的反应，官方 `PushReaction` 名字的小写形式。
+    pub push_reaction: String,
+    /// 破坏速度是 -1：活塞推不动，也打不碎。
+    pub unbreakable: bool,
     pub block_entity_type: Option<i32>,
     /// 官方的类名，比如 `SlabBlock`。
     pub class: String,

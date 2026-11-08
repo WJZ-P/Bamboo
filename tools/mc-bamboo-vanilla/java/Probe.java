@@ -86,6 +86,7 @@ import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
@@ -192,6 +193,7 @@ import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
 import net.minecraft.world.level.block.entity.SignTextSlot;
+import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
@@ -284,6 +286,7 @@ public final class Probe {
             "handleAwardStats",
             "handleBlockChangedAck",
             "handleBlockEntityData",
+            "handleBlockEvent",
             "handleBlockUpdate",
             "handleBundlePacket",
             "handleChunkBatchFinished",
@@ -558,6 +561,7 @@ public final class Probe {
                 section("equipment" + names, () -> equipment(actor, observer));
                 section("blocks" + names, () -> blocks(actor, observer));
                 section("placement" + names, () -> placement(actor, observer));
+                section("pistons" + names, () -> pistons(actor, observer));
                 section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
@@ -954,6 +958,61 @@ public final class Probe {
             actor.send(new ServerboundSetCarriedItemPacket(0));
         }
 
+        private static boolean extended(BlockState state) {
+            return state != null && state.is(Blocks.STICKY_PISTON) && state.getValue(PistonBaseBlock.EXTENDED);
+        }
+
+        private static boolean retracted(BlockState state) {
+            return state != null && state.is(Blocks.STICKY_PISTON) && !state.getValue(PistonBaseBlock.EXTENDED);
+        }
+
+        /** 粘性活塞推出方块再拉回来：客户端要收到方块事件，被推的方块要出现在新位置。 */
+        private void pistons(Join actor, Join observer) throws IOException {
+            BlockPos ground = BlockPos.containing(actor.position).offset(0, -1, 3);
+            BlockPos piston = ground.above();
+            BlockPos stone = piston.north();
+            BlockPos pushed = stone.north();
+            BlockPos power = ground.west().above();
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState stoneState = Blocks.STONE.defaultBlockState();
+
+            // 朝北放：yaw 0 时官方取玩家的朝向，活塞朝玩家的反方向。
+            actor.send(new ServerboundMovePlayerPacket.Rot(0.0f, 0.0f, true, false));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            useOn(actor, Items.STICKY_PISTON, ground, Direction.UP, Vec3.upFromBottomCenterOf(ground, 1.0));
+            await("pistons: " + observer.player + " sees the sticky piston",
+                    () -> retracted(observer.blocks.get(piston)));
+            useOn(actor, Items.STONE, ground.north(), Direction.UP, Vec3.upFromBottomCenterOf(ground.north(), 1.0));
+            await("pistons: " + observer.player + " sees the block to push",
+                    () -> stoneState.equals(observer.blocks.get(stone)));
+
+            int extending = observer.blockEvents.size();
+            useOn(actor, Items.REDSTONE_BLOCK, ground.west(), Direction.UP, Vec3.upFromBottomCenterOf(ground.west(), 1.0));
+            await("pistons: the piston extends", () -> extended(observer.blocks.get(piston)));
+            await("pistons: the head arrives",
+                    () -> observer.blocks.get(stone) != null && observer.blocks.get(stone).is(Blocks.PISTON_HEAD));
+            await("pistons: the block lands one step further", () -> stoneState.equals(observer.blocks.get(pushed)));
+            pumpFor(SETTLE_MILLIS);
+            check("pistons: extending sends one block event", observer.blockEvents.size() == extending + 1);
+            ClientboundBlockEventPacket extend = observer.blockEvents.getLast();
+            check("pistons: the extension event names the piston",
+                    extend.getPos().equals(piston) && extend.getBlock() == Blocks.STICKY_PISTON && extend.getB0() == 0);
+
+            int retracting = observer.blockEvents.size();
+            int breaking = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, power, Direction.UP, breaking));
+            await("pistons: the power block breaks", () -> actor.lastAck >= breaking);
+            await("pistons: the piston retracts", () -> retracted(observer.blocks.get(piston)));
+            await("pistons: the block comes back", () -> stoneState.equals(observer.blocks.get(stone)));
+            await("pistons: the space behind is open again", () -> air.equals(observer.blocks.get(pushed)));
+            pumpFor(SETTLE_MILLIS);
+            check("pistons: retracting sends one block event", observer.blockEvents.size() == retracting + 1);
+            ClientboundBlockEventPacket retract = observer.blockEvents.getLast();
+            check("pistons: the retraction event names the piston",
+                    retract.getPos().equals(piston) && retract.getBlock() == Blocks.STICKY_PISTON && retract.getB0() == 1);
+        }
+
         /** 放下的告示牌只给放置者打开编辑界面，写进去的字另一个客户端从方块实体数据里读得到。 */
         private void signs(Join actor, Join observer) throws IOException {
             BlockPos ground = BlockPos.containing(actor.position).offset(2, -1, 2);
@@ -1216,6 +1275,8 @@ public final class Probe {
         /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
         final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
+        /** 活塞伸出、收回的动画事件。 */
+        final List<ClientboundBlockEventPacket> blockEvents = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
@@ -1633,6 +1694,7 @@ public final class Probe {
                     value -> onOpenSignEditor((ClientboundOpenSignEditorPacket) value));
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
+            handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleContainerSetSlot", value -> onSetSlot((ClientboundContainerSetSlotPacket) value));
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
@@ -1971,6 +2033,11 @@ public final class Probe {
         private void onLevelEvent(ClientboundLevelEventPacket packet) {
             levelEvents.add(packet);
             events.add("event " + packet.getPos().toShortString());
+        }
+
+        private void onBlockEvent(ClientboundBlockEventPacket packet) {
+            blockEvents.add(packet);
+            events.add("blockevent " + packet.getPos().toShortString());
         }
 
         private void onSetSlot(ClientboundContainerSetSlotPacket packet) {

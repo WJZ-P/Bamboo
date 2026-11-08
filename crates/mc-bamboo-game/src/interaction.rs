@@ -16,8 +16,8 @@ use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{blocks, items};
 use mc_bamboo_protocol::{
     packet::play::{
-        BlockChangedAck, BlockUpdate, GameMode, LevelEvent, OpenSignEditor, PlayerActionKind,
-        SystemChat,
+        BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
+        PlayerActionKind, SystemChat,
     },
     text::{Color, Component},
 };
@@ -178,6 +178,8 @@ fn actor_of(player: &Player) -> Actor {
         block_interaction_range: BLOCK_INTERACTION_RANGE,
         // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
+        // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
+        prevents_block_drops: matches!(player.game_mode, GameMode::Creative),
     }
 }
 
@@ -273,10 +275,11 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
             } => {
                 let except = initiator.filter(|_| except_initiator);
                 let event = LevelEvent::destroy_block(pos, state.0 as i32);
-                send_level_event(region, except, &event);
+                send_level_event(region, except, pos, &event);
             }
             Effect::TorchBurnout { pos } => {
-                send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
+                let event = LevelEvent::redstone_torch_burnout(pos);
+                send_level_event(region, None, pos, &event);
             }
             Effect::FilledBucket { item } => {
                 if let Some(id) = initiator {
@@ -290,12 +293,33 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                     data: BONE_MEAL_PARTICLES,
                     global: false,
                 };
-                send_level_event(region, None, &event);
+                send_level_event(region, None, pos, &event);
             }
             // `markUpdated` 的 `sendBlockUpdated`：方块没变，广播阶段照样重发这一格。
             Effect::SignChanged { pos } => region.block_changes.changed.push(pos),
             Effect::SignWaxed { pos } => {
-                send_level_event(region, None, &LevelEvent::wax_on_sign(pos));
+                let event = LevelEvent::wax_on_sign(pos);
+                send_level_event(region, None, pos, &event);
+            }
+            // 活塞伸出、收回的动画。官方广播给 64 格内的所有玩家，发起者也要。
+            Effect::BlockEvent {
+                pos,
+                block,
+                param_a,
+                param_b,
+            } => {
+                let block = i32::try_from(block).expect("方块注册表 ID 放得进 i32");
+                send_level_event(
+                    region,
+                    None,
+                    pos,
+                    &BlockEvent {
+                        pos,
+                        block,
+                        param_a,
+                        param_b,
+                    },
+                );
             }
             // `openTextEdit` 只给登记的编辑者发，它一定就是发起者。
             Effect::OpenSignEditor { pos, slot } => {
@@ -307,11 +331,16 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
     }
 }
 
-/// 世界事件的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
-fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
+/// 世界事件和方块事件的粒子和动画发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
+fn send_level_event(
+    region: &mut Region,
+    except: Option<PlayerId>,
+    pos: BlockPos,
+    event: &impl mc_bamboo_protocol::packet::ClientboundPacket,
+) {
     let frames = encode_frames(event);
     for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, event.pos) {
+        if Some(player.id) != except && hears_level_event(player, pos) {
             region.links.send_frames(player.id, &frames);
         }
     }

@@ -30,6 +30,9 @@ pub struct Actor {
     pub block_interaction_range: f64,
     /// `player.mayBuild()`：创造模式和冒险模式是真。这个世界只有创造模式。
     pub may_build: bool,
+    /// `player.preventsBlockDrops()`：创造模式的 `instabuild` 能力。活塞头在玩家破坏时
+    /// 只有它为真才拆底座，生存模式改由形状更新拆。
+    pub prevents_block_drops: bool,
 }
 
 impl Actor {
