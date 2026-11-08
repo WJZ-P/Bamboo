@@ -1,7 +1,7 @@
 //! `PotentSulfurBlock`：状态只看上下两格，喷发的倒计时在方块实体里，不在范围里。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, registries::fluid, tags::block_tags};
+use mc_bamboo_data::{Block, registries::fluid, sounds::sound_event, tags::block_tags};
 
 use crate::{
     behaviour::{Behaviour, common::default_state},
@@ -47,6 +47,20 @@ impl Behaviour for PotentSulfur {
         world: &World,
     ) -> Option<BlockState> {
         Some(valid_state(default_state(block), world, ctx.clicked_pos()))
+    }
+
+    /// `onPlace`：放下时就在喷，先放喷发的声音（方块事件在方块实体里，不在范围）。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        let sound = match state.get(POTENT_SULFUR_STATE) {
+            PotentSulfurState::Continuous => {
+                Some("minecraft:block.potent_sulfur.geyser_continuous_eruption")
+            }
+            PotentSulfurState::Erupting => Some("minecraft:block.potent_sulfur.geyser_eruption"),
+            PotentSulfurState::Dormant | PotentSulfurState::Wet | PotentSulfurState::Dry => None,
+        };
+        if let Some(sound) = sound {
+            world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
+        }
     }
 
     fn update_shape(

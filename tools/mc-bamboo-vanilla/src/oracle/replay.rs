@@ -25,7 +25,10 @@ use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
     Names,
-    lines::{Action, Case, Cell, ContainerStack, Destroyed, Double, Header, Kind},
+    lines::{
+        Action, Case, Cell, ContainerStack, Destroyed, Double, Float, Header, Kind, LevelPlay,
+        SoundPlay,
+    },
 };
 
 /// `Player.DEFAULT_EYE_HEIGHT`。
@@ -52,6 +55,10 @@ pub struct Replayed {
     /// 和场景不同的格子。
     pub changes: BTreeMap<BlockPos, u32>,
     pub destroyed: Vec<Destroyed>,
+    /// 全部世界事件，包括 2001，按发生顺序。
+    pub level_events: Vec<LevelPlay>,
+    /// 全部音效，按发生顺序。种子不比较。
+    pub sounds: Vec<SoundPlay>,
     /// 结束时所有已建模容器的非空格子，按坐标和槽位排序。
     pub contents: Vec<ContainerStack>,
     /// 走完 `settle` 之后还排着的计划刻，方块的在前，流体的在后，各自按执行顺序，
@@ -715,10 +722,13 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     let end = after_action + i64::from(action.settle);
     settle(&mut level, &mut ticks, after_action, end, &mut outcome);
 
+    let (level_events, sounds) = events_of(&outcome);
     Ok(Replayed {
         result: result_name(action.kind, outcome.result),
         changes: level.changes(&case.scene),
         destroyed: destroyed_of(&outcome),
+        level_events,
+        sounds,
         contents: contents_of(&level),
         ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
@@ -836,6 +846,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
+            | Effect::Sound { .. }
+            | Effect::LevelEvent { .. }
             | Effect::NoteBlockPlayed { .. }
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. }
@@ -845,6 +857,112 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::PageTurned { .. } => None,
         })
         .collect()
+}
+
+/// 把这一题留下的效应拆成世界事件和音效两个列表，各自按发生顺序。
+fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
+    let mut events = Vec::new();
+    let mut sounds = Vec::new();
+    for effect in &outcome.effects {
+        match *effect {
+            Effect::Destroyed {
+                pos,
+                state,
+                except_initiator,
+            } => events.push(LevelPlay(
+                2001,
+                pos.x,
+                pos.y,
+                pos.z,
+                state.0 as i32,
+                except_initiator,
+            )),
+            Effect::TorchBurnout { pos } => {
+                events.push(LevelPlay(1502, pos.x, pos.y, pos.z, 0, false));
+            }
+            Effect::BoneMealUsed { pos } => {
+                events.push(LevelPlay(1505, pos.x, pos.y, pos.z, 15, false));
+            }
+            Effect::SignWaxed { pos } => {
+                events.push(LevelPlay(3003, pos.x, pos.y, pos.z, 0, false));
+            }
+            Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator,
+            } => events.push(LevelPlay(
+                event,
+                pos.x,
+                pos.y,
+                pos.z,
+                data,
+                except_initiator,
+            )),
+            // `ComposterBlock` 的 `levelEvent(1500)`。官方 `except` 是 null。
+            Effect::ComposterFill { pos, success } => events.push(LevelPlay(
+                1500,
+                pos.x,
+                pos.y,
+                pos.z,
+                i32::from(success),
+                false,
+            )),
+            Effect::Sound {
+                sound,
+                source,
+                x,
+                y,
+                z,
+                volume,
+                pitch,
+                except_initiator,
+                ..
+            } => sounds.push(SoundPlay(
+                sound,
+                Double(x),
+                Double(y),
+                Double(z),
+                source.id(),
+                Float(volume),
+                Float(pitch),
+                except_initiator,
+            )),
+            // `NoteBlock.triggerEvent` 的 `playSeededSound`。自定义头颅是直接 Holder，注册表 ID 是 -1。
+            Effect::NoteBlockPlayed {
+                pos,
+                instrument,
+                pitch,
+                custom,
+                ..
+            } => {
+                let id = if custom.is_some() {
+                    -1
+                } else {
+                    i32::from(instrument.sound())
+                };
+                sounds.push(SoundPlay(
+                    id,
+                    Double(f64::from(pos.x) + 0.5),
+                    Double(f64::from(pos.y) + 0.5),
+                    Double(f64::from(pos.z) + 0.5),
+                    mc_bamboo_data::sounds::RECORDS.id(),
+                    Float(3.0),
+                    Float(pitch),
+                    false,
+                ));
+            }
+            Effect::FilledBucket { .. }
+            | Effect::SignChanged { .. }
+            | Effect::OpenSignEditor { .. }
+            | Effect::BlockEvent { .. }
+            // 讲台翻页是菜单里的 `levelEvent(1043)`，方块题不比较。游戏层会把它发出去。
+            // A lectern page turn is menu `levelEvent(1043)`. Block cases do not compare it.
+            // The game layer still sends it.
+            | Effect::PageTurned { .. } => {}
+        }
+    }
+    (events, sounds)
 }
 
 /// 舀起来的东西。假玩家的物品栏里只有两只手上的物品，已经有同样的物品时官方不再放。

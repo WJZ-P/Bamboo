@@ -70,8 +70,12 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
@@ -92,12 +96,15 @@ import net.minecraft.world.entity.animal.parrot.Parrot;
 import net.minecraft.world.entity.animal.rabbit.Rabbit;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.BucketItem;
 import net.minecraft.world.item.DyeColor;
+import net.minecraft.world.item.MobBucketItem;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.JukeboxSong;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.SolidBucketItem;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.Rarity;
 import net.minecraft.world.item.StandingAndWallBlockItem;
@@ -118,6 +125,8 @@ import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BucketPickup;
+import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.CandleCakeBlock;
 import net.minecraft.world.level.block.FireBlock;
 import net.minecraft.world.level.block.FlowerPotBlock;
@@ -129,6 +138,7 @@ import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.NoteBlockInstrument;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.EnumProperty;
 import net.minecraft.world.level.block.state.properties.IntegerProperty;
@@ -231,6 +241,7 @@ public final class Extractor {
             root.add("itemDamageEnchantments", itemDamageEnchantments(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("soundTables", new SoundTables().build());
             root.add("lootTables", dataFiles(resources, "loot_table"));
             root.add("lootPredicates", dataFiles(resources, "predicate"));
             root.add("contextIntProviders", dataFiles(resources, "context_int_provider"));
@@ -678,6 +689,10 @@ public final class Extractor {
             // 爆炸射线消耗用的抗性，见 `Block.getExplosionResistance`。
             object.addProperty("explosionResistance", block.getExplosionResistance());
             addOffset(object, block);
+            SoundEvent pickupSound = block instanceof BucketPickup pickup ? pickup.getPickupSound().orElse(null) : null;
+            if (pickupSound != null) {
+                object.addProperty("pickupSound", BuiltInRegistries.SOUND_EVENT.getId(pickupSound));
+            }
             blocks.add(object);
         }
         return blocks;
@@ -871,6 +886,8 @@ public final class Extractor {
         }
         if (value instanceof WoodType woodType) {
             addField(fields, name + ".name", new Name(woodType.name()));
+            addField(fields, name + ".fenceGateClose", BuiltInRegistries.SOUND_EVENT.getId(woodType.fenceGateClose()));
+            addField(fields, name + ".fenceGateOpen", BuiltInRegistries.SOUND_EVENT.getId(woodType.fenceGateOpen()));
             addSetType(fields, name + ".setType", woodType.setType());
             return;
         }
@@ -889,6 +906,17 @@ public final class Extractor {
         addField(fields, name + ".canOpenByWindCharge", type.canOpenByWindCharge());
         addField(fields, name + ".canButtonBeActivatedByArrows", type.canButtonBeActivatedByArrows());
         addField(fields, name + ".pressurePlateSensitivity", type.pressurePlateSensitivity());
+        // 门、活板门、栅栏门、按钮、压力板的声音。和别的注册表 ID 一样存整数。
+        addField(fields, name + ".doorClose", BuiltInRegistries.SOUND_EVENT.getId(type.doorClose()));
+        addField(fields, name + ".doorOpen", BuiltInRegistries.SOUND_EVENT.getId(type.doorOpen()));
+        addField(fields, name + ".trapdoorClose", BuiltInRegistries.SOUND_EVENT.getId(type.trapdoorClose()));
+        addField(fields, name + ".trapdoorOpen", BuiltInRegistries.SOUND_EVENT.getId(type.trapdoorOpen()));
+        addField(fields, name + ".pressurePlateClickOff",
+                BuiltInRegistries.SOUND_EVENT.getId(type.pressurePlateClickOff()));
+        addField(fields, name + ".pressurePlateClickOn",
+                BuiltInRegistries.SOUND_EVENT.getId(type.pressurePlateClickOn()));
+        addField(fields, name + ".buttonClickOff", BuiltInRegistries.SOUND_EVENT.getId(type.buttonClickOff()));
+        addField(fields, name + ".buttonClickOn", BuiltInRegistries.SOUND_EVENT.getId(type.buttonClickOn()));
     }
 
     /** 枚举和记录的名字。和普通字符串分开，普通字符串字段不导出。 */
@@ -981,6 +1009,32 @@ public final class Extractor {
                 Direction attachment = (Direction) readField(StandingAndWallBlockItem.class, "attachmentDirection", wallItem);
                 object.addProperty("wallBlock", BuiltInRegistries.BLOCK.getId(wallBlock));
                 object.addProperty("attachment", attachment.get3DDataValue());
+            }
+            if (item instanceof SolidBucketItem solidBucket) {
+                // 细雪桶放下了自己的声音，不用方块声音表里的放置声音。
+                // Powder snow places with its own sound, not the block sound type.
+                SoundEvent placeSound = (SoundEvent) readField(SolidBucketItem.class, "placeSound", solidBucket);
+                object.addProperty("placeSound", BuiltInRegistries.SOUND_EVENT.getId(placeSound));
+            }
+            // `BucketItem.playEmptySound`：岩浆标签用 `BUCKET_EMPTY_LAVA`，否则 `BUCKET_EMPTY`，来源 `BLOCKS`。
+            // `MobBucketItem` 覆盖成自己的 `emptySound`，来源 `NEUTRAL`。
+            // `BucketItem.playEmptySound`: the lava tag uses `BUCKET_EMPTY_LAVA`, otherwise `BUCKET_EMPTY`, source `BLOCKS`.
+            // `MobBucketItem` overrides that with its own `emptySound` and source `NEUTRAL`.
+            if (item instanceof MobBucketItem mobBucket) {
+                SoundEvent emptySound = (SoundEvent) readField(MobBucketItem.class, "emptySound", mobBucket);
+                object.addProperty("emptySound", BuiltInRegistries.SOUND_EVENT.getId(emptySound));
+                object.addProperty("emptySource", SoundSource.NEUTRAL.ordinal());
+                // `MobBucketItem.type`：倒出来的生物。它的 `playAmbientSound` 用 `entity.<注册表路径>.` 下的音效。
+                // `MobBucketItem.type`: the mob that is poured out. Its `playAmbientSound` uses events under
+                // `entity.<registry path>.`.
+                EntityType<?> mob = (EntityType<?>) readField(MobBucketItem.class, "type", mobBucket);
+                object.addProperty("bucketEntity", BuiltInRegistries.ENTITY_TYPE.getKey(mob).toString());
+            } else if (item instanceof BucketItem bucket) {
+                SoundEvent emptySound = bucket.getContent().is(FluidTags.LAVA)
+                        ? SoundEvents.BUCKET_EMPTY_LAVA
+                        : SoundEvents.BUCKET_EMPTY;
+                object.addProperty("emptySound", BuiltInRegistries.SOUND_EVENT.getId(emptySound));
+                object.addProperty("emptySource", SoundSource.BLOCKS.ordinal());
             }
             object.addProperty("overridesCanDestroyBlock", overridesCanDestroyBlock(item));
             items.add(object);
@@ -1439,6 +1493,17 @@ public final class Extractor {
         transform.addProperty("updateFromNeighbors", data.updateFromNeighbors());
         transform.addProperty("consumeOnUse", data.consumeOnUse());
         transform.addProperty("itemDamagePerUse", data.itemDamagePerUse());
+        // 没配声音时字段是 `SoundEvents.EMPTY`，不导出，生成器按 `None` 处理。
+        SoundEvent sound = data.sound().value();
+        if (sound != SoundEvents.EMPTY) {
+            transform.addProperty("sound", BuiltInRegistries.SOUND_EVENT.getId(sound));
+        }
+        // `TransformParticle` 发的等级事件，`NONE` 是 0。
+        transform.addProperty("particle", data.particle().getLevelEvent());
+        // `transform_type == COPPER_CHEST`：改完方块还要给大箱子的另一半发一次粒子。
+        transform.addProperty(
+                "copperChest",
+                data.transformType() == BlockTransformer.TransformType.COPPER_CHEST);
         return transform;
     }
 
@@ -1768,6 +1833,88 @@ public final class Extractor {
                 }
             }
             return facts;
+        }
+    }
+
+    /**
+     * 音效表：每个状态的 `getSoundType`、去重后的 `SoundType`、`sound_event` 注册表和音符盒乐器。
+     *
+     * <p>`SoundType` 的五个声音都是注册表 ID，Rust 侧直接拿来发 `sound` 包。注册表顺序就是网络上的
+     * Holder ID，所以事件表按注册表顺序排列。
+     */
+    private static final class SoundTables {
+        private final JsonArray stateTypes = new JsonArray();
+        private final JsonArray types = new JsonArray();
+        private final Map<List<Object>, Integer> typeIndexes = new HashMap<>();
+        private final JsonArray events = new JsonArray();
+
+        JsonObject build() {
+            for (int id = 0; id < Block.BLOCK_STATE_REGISTRY.size(); id++) {
+                stateTypes.add(soundTypeIndex(Block.BLOCK_STATE_REGISTRY.byId(id).getSoundType()));
+            }
+            for (SoundEvent event : BuiltInRegistries.SOUND_EVENT) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("name", BuiltInRegistries.SOUND_EVENT.getKey(event).toString());
+                event.fixedRange().ifPresent(range -> entry.addProperty("fixedRange", range));
+                events.add(entry);
+            }
+
+            JsonObject tables = new JsonObject();
+            tables.add("stateTypes", stateTypes);
+            tables.add("types", types);
+            tables.add("events", events);
+            tables.add("instruments", instruments());
+            tables.add("sources", sources());
+            return tables;
+        }
+
+        private int soundTypeIndex(SoundType type) {
+            List<Object> key = List.of(
+                    type.getVolume(),
+                    type.getPitch(),
+                    soundId(type.getBreakSound()),
+                    soundId(type.getStepSound()),
+                    soundId(type.getPlaceSound()),
+                    soundId(type.getHitSound()),
+                    soundId(type.getFallSound()));
+            return typeIndexes.computeIfAbsent(key, ignored -> {
+                JsonArray entry = new JsonArray();
+                entry.add(type.getVolume());
+                entry.add(type.getPitch());
+                entry.add(soundId(type.getBreakSound()));
+                entry.add(soundId(type.getStepSound()));
+                entry.add(soundId(type.getPlaceSound()));
+                entry.add(soundId(type.getHitSound()));
+                entry.add(soundId(type.getFallSound()));
+                types.add(entry);
+                return types.size() - 1;
+            });
+        }
+
+        private static int soundId(SoundEvent event) {
+            return BuiltInRegistries.SOUND_EVENT.getId(event);
+        }
+
+        private static JsonArray instruments() {
+            JsonArray instruments = new JsonArray();
+            for (NoteBlockInstrument instrument : NoteBlockInstrument.values()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("name", instrument.getSerializedName());
+                entry.addProperty("sound", soundId(instrument.getSoundEvent().value()));
+                entry.addProperty("tunable", instrument.isTunable());
+                entry.addProperty("customSound", instrument.hasCustomSound());
+                instruments.add(entry);
+            }
+            return instruments;
+        }
+
+        /** 声音来源的枚举，Rust 侧按序号发，名字只用来核对顺序。 */
+        private static JsonArray sources() {
+            JsonArray sources = new JsonArray();
+            for (SoundSource source : SoundSource.values()) {
+                sources.add(source.getName());
+            }
+            return sources;
         }
     }
 

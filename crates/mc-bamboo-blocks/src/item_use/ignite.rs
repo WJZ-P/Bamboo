@@ -3,7 +3,8 @@
 //! 两者只差写方块的标记，打火石多一个 `UPDATE_IMMEDIATE`。火点亮传送门框架在火的 `onPlace` 里。
 //! 点 TNT 在 `TntBlock.useItemOn` 里，轮不到这里。
 
-use mc_bamboo_data::tags::block_tags;
+use mc_bamboo_core::BlockPos;
+use mc_bamboo_data::{sounds::sound_event, tags::block_tags};
 
 use crate::{
     behaviour::misc::fire,
@@ -13,16 +14,37 @@ use crate::{
     world::{UPDATE_ALL, UPDATE_ALL_IMMEDIATE, World},
 };
 
-/// `FlintAndSteelItem.useOn`。音效的音调取一个随机数。
-pub(super) fn flint_and_steel(world: &mut World, ctx: &UseContext) -> InteractionResult {
-    ignite(world, ctx, UPDATE_ALL_IMMEDIATE, 1, Spend::Hurt)
+/// 两种物品点燃时的声音和音调，音调用的随机数个数不同。
+#[derive(Debug, Clone, Copy)]
+enum IgniteSound {
+    FlintAndSteel,
+    FireCharge,
 }
 
-/// `FireChargeItem.useOn`：`setBlockAndUpdate`。音效的音调取两个随机数。成功后 `shrink(1)`。
-///
-/// `FireChargeItem.useOn`: `setBlockAndUpdate`. The pitch draws two random numbers. Success calls `shrink(1)`.
-pub(super) fn fire_charge(world: &mut World, ctx: &UseContext) -> InteractionResult {
-    ignite(world, ctx, UPDATE_ALL, 2, Spend::Shrink)
+impl IgniteSound {
+    /// 官方的 `playSound` 在写方块之前。打火石跳过点火的玩家，火焰弹不跳过。
+    fn play(self, world: &mut World, pos: BlockPos) {
+        match self {
+            Self::FlintAndSteel => {
+                let pitch = world.random().next_float() * 0.4 + 0.8;
+                world.play_block_sound_except(
+                    pos,
+                    sound_event("minecraft:item.flintandsteel.use"),
+                    1.0,
+                    pitch,
+                );
+            }
+            Self::FireCharge => {
+                let pitch = (world.random().next_float() - world.random().next_float()) * 0.2 + 1.0;
+                world.play_block_sound(
+                    pos,
+                    sound_event("minecraft:item.firecharge.use"),
+                    1.0,
+                    pitch,
+                );
+            }
+        }
+    }
 }
 
 /// 成功之后怎么消耗手上的物品。
@@ -37,21 +59,44 @@ enum Spend {
     Shrink,
 }
 
-/// 点着点中的方块，或者在点中的面前生火。火也放不下时是 `FAIL`。
+/// `FlintAndSteelItem.useOn`。音效的音调取一个随机数。成功后 `hurtAndBreak(1)`。
 ///
-/// 音效不做，但官方在写方块之前为音调取了 `sound_draws` 个随机数，火放下时又要取数排计划刻，
-/// 所以这几个数照取。
+/// `FlintAndSteelItem.useOn`. The pitch draws one random number. Success calls `hurtAndBreak(1)`.
+pub(super) fn flint_and_steel(world: &mut World, ctx: &UseContext) -> InteractionResult {
+    ignite(
+        world,
+        ctx,
+        UPDATE_ALL_IMMEDIATE,
+        IgniteSound::FlintAndSteel,
+        Spend::Hurt,
+    )
+}
+
+/// `FireChargeItem.useOn`：`setBlockAndUpdate`。音效的音调取两个随机数。成功后 `shrink(1)`。
+///
+/// `FireChargeItem.useOn`: `setBlockAndUpdate`. The pitch draws two random numbers. Success calls `shrink(1)`.
+pub(super) fn fire_charge(world: &mut World, ctx: &UseContext) -> InteractionResult {
+    ignite(
+        world,
+        ctx,
+        UPDATE_ALL,
+        IgniteSound::FireCharge,
+        Spend::Shrink,
+    )
+}
+
+/// 点着点中的方块，或者在点中的面前生火。火也放不下时是 `FAIL`。
 fn ignite(
     world: &mut World,
     ctx: &UseContext,
     flags: u32,
-    sound_draws: usize,
+    sound: IgniteSound,
     spend: Spend,
 ) -> InteractionResult {
     let pos = ctx.clicked_pos();
     let state = world.block_state(pos);
     if can_light(state) {
-        draw_sound_pitch(world, sound_draws);
+        sound.play(world, pos);
         world.set_block(pos, state.with(LIT, true), flags);
         spend_held(world, ctx, spend);
         return InteractionResult::Success;
@@ -60,7 +105,7 @@ fn ignite(
     if !fire::can_be_placed_at(world, fire_pos, ctx.horizontal_direction()) {
         return InteractionResult::Fail;
     }
-    draw_sound_pitch(world, sound_draws);
+    sound.play(world, fire_pos);
     let fire_state = fire::state_at(world, fire_pos);
     world.set_block(fire_pos, fire_state, flags);
     spend_held(world, ctx, spend);
@@ -74,13 +119,6 @@ fn spend_held(world: &mut World, ctx: &UseContext, spend: Spend) {
     match spend {
         Spend::Hurt => crate::durability::hurt_hand(world, ctx.hand, 1),
         Spend::Shrink => crate::durability::shrink_hand(ctx.hand, 1),
-    }
-}
-
-/// 音效音调的 `nextFloat`。
-fn draw_sound_pitch(world: &World, draws: usize) {
-    for _ in 0..draws {
-        world.random().next_float();
     }
 }
 

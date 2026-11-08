@@ -10,7 +10,7 @@
 //! [`RedstoneMemory`](crate::RedstoneMemory).
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_data::{Block, items, sounds::sound_event, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::slot_container::hit_slot;
@@ -81,7 +81,17 @@ impl Behaviour for ChiseledBookShelf {
         if state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::new(ctx.item, 1));
+        let pos = ctx.clicked_pos();
+        set_bookshelf_slot(world, pos, slot, ItemStack::new(ctx.item, 1));
+        // `addBook`：`setItem` 之后按放进去的是不是附魔书选声音，`except` 是空。
+        // `addBook`: after `setItem`, the sound depends on whether the book is enchanted.
+        // `except` is null.
+        let sound = if ctx.item == items::ENCHANTED_BOOK {
+            "minecraft:block.chiseled_bookshelf.insert.enchanted"
+        } else {
+            "minecraft:block.chiseled_bookshelf.insert"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
         InteractionResult::Success
     }
 
@@ -97,7 +107,21 @@ impl Behaviour for ChiseledBookShelf {
         if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::empty());
+        let pos = ctx.clicked_pos();
+        // `removeBook` 先取出再出声，声音看取出来的那本是不是附魔书。
+        // `removeBook` removes the book first, then plays. The sound follows that book.
+        let taken = world
+            .slots_at(pos)
+            .get(slot)
+            .cloned()
+            .unwrap_or_else(ItemStack::empty);
+        set_bookshelf_slot(world, pos, slot, ItemStack::empty());
+        let sound = if !taken.is_empty() && taken.item == items::ENCHANTED_BOOK {
+            "minecraft:block.chiseled_bookshelf.pickup.enchanted"
+        } else {
+            "minecraft:block.chiseled_bookshelf.pickup"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
         InteractionResult::Success
     }
 

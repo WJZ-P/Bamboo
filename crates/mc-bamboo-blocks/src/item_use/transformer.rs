@@ -4,13 +4,15 @@
 //! 掉落物不在范围里。
 
 use mc_bamboo_core::{BlockPos, Hand};
-use mc_bamboo_data::{BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule};
+use mc_bamboo_data::{
+    BlockAncestor, BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule,
+};
 
 use crate::{
-    behaviour::common::item_of,
+    behaviour::{common::item_of, machines::chest::connected_direction},
     context::UseContext,
     interact::InteractionResult,
-    state::BlockState,
+    state::{BlockState, CHEST_TYPE, ChestType},
     world::{UPDATE_ALL_IMMEDIATE, World},
 };
 
@@ -33,6 +35,7 @@ pub(super) fn transform_block(
     let Some((transform, state)) = found else {
         return InteractionResult::Pass;
     };
+    let old = world.block_state(pos);
     let state = fitted_to_neighbours(transform, world, state, pos);
     // 掉落物表在官方这里取随机数，还没做。耐久在写方块之前扣，和 `transformBlock` 一样。
     //
@@ -44,6 +47,21 @@ pub(super) fn transform_block(
         transform.item_damage_per_use,
     );
     world.set_block(pos, state, UPDATE_ALL_IMMEDIATE);
+    // `transformBlock`：写方块之后按这一项配的音效和粒子出声，都跳过动手的玩家。
+    if let Some(sound) = transform.sound {
+        world.play_block_sound_except(pos, sound, 1.0, 1.0);
+    }
+    if transform.particle != 0 {
+        world.level_event_except(transform.particle, pos, 0);
+        // `transformType == COPPER_CHEST`：涂蜡和刮削要把粒子也发给大箱子的另一半。
+        if transform.copper_chest
+            && old.is_a(BlockAncestor::CopperChestBlock)
+            && old.get(CHEST_TYPE) != ChestType::Single
+        {
+            let neighbor = pos.relative(connected_direction(old));
+            world.level_event_except(transform.particle, neighbor, 0);
+        }
+    }
     InteractionResult::Success
 }
 

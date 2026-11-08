@@ -8,7 +8,9 @@ use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
-        common::{default_state, field_bool, is_water_source, tick_water_if_waterlogged},
+        common::{
+            default_state, field_bool, field_sound, is_water_source, tick_water_if_waterlogged,
+        },
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
@@ -18,6 +20,22 @@ use crate::{
 
 /// `TrapDoorBlock`。
 pub(super) struct TrapDoor;
+
+/// `TrapDoorBlock.playSound`：开、关活板门的声音，音高是 `getRandom().nextFloat() * 0.1F + 0.9F`。
+fn play_sound(world: &mut World, pos: BlockPos, block: &Block, opening: bool, except: bool) {
+    let name = if opening {
+        "type.trapdoorOpen"
+    } else {
+        "type.trapdoorClose"
+    };
+    let sound = field_sound(block, name);
+    let pitch = world.random().next_float() * 0.1 + 0.9;
+    if except {
+        world.play_block_sound_except(pos, sound, 1.0, pitch);
+    } else {
+        world.play_block_sound(pos, sound, 1.0, pitch);
+    }
+}
 
 /// 点在侧面时贴着点中的方块，上下看点击点；别的情况朝着玩家，上下看点的是顶面还是底面。
 fn attachment(ctx: &PlaceContext) -> (Direction, Half) {
@@ -84,8 +102,7 @@ impl Behaviour for TrapDoor {
         let signal = world.has_neighbor_signal(pos);
         if signal != state.get(POWERED) {
             if state.get(OPEN) != signal {
-                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
-                world.random().next_float();
+                play_sound(world, pos, state.block(), signal, false);
             }
             let updated = state.with(OPEN, signal).with(POWERED, signal);
             world.set_block(pos, updated, UPDATE_CLIENTS);
@@ -107,7 +124,7 @@ impl Behaviour for TrapDoor {
         world.set_block(pos, toggled, UPDATE_CLIENTS);
         tick_water_if_waterlogged(toggled, world, pos);
         // `playSound` 在计划流体刻之后取音高。
-        world.random().next_float();
+        play_sound(world, pos, state.block(), toggled.get(OPEN), true);
         InteractionResult::Success
     }
 }

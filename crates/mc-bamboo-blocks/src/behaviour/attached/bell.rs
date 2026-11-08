@@ -1,7 +1,7 @@
 //! `BellBlock`。
 
 use mc_bamboo_core::{Axis, BlockPos, Direction};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -42,6 +42,11 @@ fn is_proper_hit(state: BlockState, clicked: Direction, click_y: f64) -> bool {
         BellAttachType::SingleWall | BellAttachType::DoubleWall => !along_facing,
         BellAttachType::Ceiling => true,
     }
+}
+
+/// `attemptToRing`。官方要先有钟的方块实体才响，钟放下时总会建一个，这里当它一直在。
+fn ring(world: &mut World, pos: BlockPos) {
+    world.play_block_sound(pos, sound_event("minecraft:block.bell.use"), 2.0, 1.0);
 }
 
 /// 点在顶面或者底面：立在地上或者挂在天花板上。
@@ -175,6 +180,10 @@ impl Behaviour for Bell {
     ) {
         let signal = world.has_neighbor_signal(pos);
         if signal != state.get(POWERED) {
+            if signal {
+                // 官方先敲钟再改状态。
+                ring(world, pos);
+            }
             world.set_block_and_update(pos, state.with(POWERED, signal));
         }
     }
@@ -182,11 +191,12 @@ impl Behaviour for Bell {
     fn use_without_item(
         &self,
         state: BlockState,
-        _world: &mut World,
+        world: &mut World,
         ctx: &UseContext,
     ) -> InteractionResult {
         let click_y = ctx.click_location().y - f64::from(ctx.clicked_pos().y);
         if is_proper_hit(state, ctx.clicked_face(), click_y) {
+            ring(world, ctx.clicked_pos());
             InteractionResult::Success
         } else {
             InteractionResult::Pass
