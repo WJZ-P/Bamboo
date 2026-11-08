@@ -31,6 +31,8 @@ pub(crate) struct LightColumn {
     states: [u8; LIGHT_SECTION_COUNT],
     /// `columnsWithSources`：这一列打开了光照。
     light_on: bool,
+    /// 最后一次写这一柱时拿到的版本号，见 [`LightStorage::revision`]。
+    revision: u64,
 }
 
 impl LightColumn {
@@ -40,6 +42,7 @@ impl LightColumn {
             layers: [const { None }; LIGHT_SECTION_COUNT],
             states: [0; LIGHT_SECTION_COUNT],
             light_on: false,
+            revision: 0,
         }
     }
 
@@ -64,6 +67,8 @@ pub(crate) struct LightStorage {
     /// `sectionsAffectedByLightUpdates`：这一轮写过的段和它们的邻居。
     affected: BTreeSet<SectionPos>,
     has_inconsistencies: bool,
+    /// 发出去的最后一个版本号。
+    last_revision: u64,
 }
 
 /// 光照段在区块柱里的下标。超出 26 段时没有。
@@ -87,12 +92,17 @@ impl LightStorage {
     pub(crate) fn new(layer: LightLayer, template: LightColumn, lowest_section: i32) -> Self {
         Self {
             layer,
-            template,
+            // 模板柱的版本号是 0，写过的柱从 1 往上数，两者不会撞上。
+            template: LightColumn {
+                revision: 0,
+                ..template
+            },
             columns: HashMap::new(),
             lowest_section,
             to_remove: BTreeSet::new(),
             affected: BTreeSet::new(),
             has_inconsistencies: false,
+            last_revision: 0,
         }
     }
 
@@ -104,15 +114,27 @@ impl LightStorage {
         self.columns.get(&pos).unwrap_or(&self.template)
     }
 
-    /// 要写这个区块柱了，没有自己一份的话先从模板复制。
+    /// 要写这个区块柱了，没有自己一份的话先从模板复制。所有写都经过这里，每次换一个新的版本号。
     fn column_mut(&mut self, pos: ChunkPos) -> &mut LightColumn {
+        self.last_revision += 1;
+        let revision = self.last_revision;
         let template = &self.template;
-        self.columns.entry(pos).or_insert_with(|| template.clone())
+        let column = self.columns.entry(pos).or_insert_with(|| template.clone());
+        column.revision = revision;
+        column
     }
 
     /// 这个区块柱写过，内容可能和模板不同。
     pub(crate) fn is_materialized(&self, pos: ChunkPos) -> bool {
         self.columns.contains_key(&pos)
+    }
+
+    /// 这个区块柱的版本号。每写一次都换成没用过的新值，没写过的柱是 0，
+    /// 所以两次读到的值相同就说明中间没写过。
+    ///
+    /// 不看受影响的段：一轮结束时丢掉的段不算受影响，区块包里却少了它们。
+    pub(crate) fn revision(&self, pos: ChunkPos) -> u64 {
+        self.column(pos).revision
     }
 
     /// 复制一个区块柱，算模板的时候用。
@@ -437,6 +459,28 @@ mod tests {
         let layer = storage.layer(SectionPos::new(0, 0, 0)).expect("刚存了光照");
         assert_eq!(layer.get(5, 9, 5), 6);
         assert_eq!(layer.get(4, 9, 5), 15);
+    }
+
+    #[test]
+    fn every_write_gives_the_column_a_new_revision() {
+        let mut storage = sky();
+        let column = ChunkPos::new(0, 0);
+        assert_eq!(storage.revision(column), 0);
+
+        storage.update_section_status(ORIGIN, false);
+        let created = storage.revision(column);
+        assert_ne!(created, 0);
+
+        storage.set_stored_level(BlockPos::new(1, -60, 1), 7);
+        let written = storage.revision(column);
+        assert_ne!(written, created);
+
+        // 丢掉段也是写，哪怕没有一格光照变了。
+        storage.update_section_status(ORIGIN, true);
+        let emptied = storage.revision(column);
+        storage.mark_new_inconsistencies();
+        assert_ne!(storage.revision(column), emptied);
+        assert!(!storage.storing_light_for_section(ORIGIN));
     }
 
     #[test]
