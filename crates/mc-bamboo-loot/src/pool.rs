@@ -6,14 +6,13 @@
 
 use serde_json::Value;
 
+use crate::Result;
 use crate::condition::LootCondition;
 use crate::context::LootContext;
-use crate::entry::{Candidate, LootEntry};
-use crate::function::{parse_modifier, LootFunction};
+use crate::entry::{Candidate, ItemSink, LootEntry};
+use crate::function::{LootFunction, parse_modifier};
 use crate::json::{array, field, object, required};
-use crate::number::{parse_float_provider, parse_int_provider, FloatProvider, IntProvider};
-use crate::stack::LootStack;
-use crate::Result;
+use crate::number::{FloatProvider, IntProvider, parse_float_provider, parse_int_provider};
 
 /// 一个战利品池。
 #[derive(Debug)]
@@ -51,23 +50,28 @@ impl LootPool {
         })
     }
 
-    /// `LootPool.addRandomItems`。`outer` 是外面一层的 `modifier`（表的），
-    /// 官方把它包在最外层，所以这里在池自己的 modifier 之后应用。
+    /// `LootPool.addRandomItems`。`output` 已经包了表的 modifier。
+    /// 池自己的 modifier 在每件物品交给它之前应用。
+    ///
+    /// `LootPool.addRandomItems`. `output` is already wrapped with the table modifier.
+    /// This pool's modifier runs on each stack before that.
     pub(crate) fn add_random_items(
         &self,
         context: &LootContext<'_, '_, '_>,
-        outer: Option<&LootFunction>,
-        output: &mut Vec<LootStack>,
+        output: &mut dyn ItemSink,
     ) -> Result<()> {
-        if let Some(condition) = &self.condition {
-            if !condition.test(context)? {
-                return Ok(());
-            }
+        if let Some(condition) = &self.condition
+            && !condition.test(context)?
+        {
+            return Ok(());
         }
+        // 官方先取 `rolls` 再取 `bonus_rolls`，两边都可能用随机数，顺序不能换。
+        // Official reads `rolls` before `bonus_rolls`. Both can draw random numbers.
+        let rolls = self.rolls.get(context)?;
         let bonus = self.bonus_rolls.get(context)? * context.luck();
-        let count = self.rolls.get(context)? + bonus.floor() as i32;
+        let count = rolls + bonus.floor() as i32;
         for _ in 0..count {
-            self.add_random_item(context, outer, output)?;
+            self.add_random_item(context, output)?;
         }
         Ok(())
     }
@@ -76,14 +80,14 @@ impl LootPool {
     fn add_random_item(
         &self,
         context: &LootContext<'_, '_, '_>,
-        outer: Option<&LootFunction>,
-        output: &mut Vec<LootStack>,
+        output: &mut dyn ItemSink,
     ) -> Result<()> {
         let mut candidates = Vec::new();
         for entry in &self.entries {
             entry.expand(context, 0, &mut Vec::new(), &mut candidates)?;
         }
-        let valid: Vec<&Candidate<'_>> = candidates.iter().filter(|entry| entry.weight > 0).collect();
+        let valid: Vec<&Candidate<'_>> =
+            candidates.iter().filter(|entry| entry.weight > 0).collect();
         let total = valid
             .iter()
             .fold(0_i32, |sum, entry| sum.wrapping_add(entry.weight));
@@ -107,16 +111,14 @@ impl LootPool {
             };
             chosen
         };
-        for mut stack in chosen.create(context, 0)? {
-            if let Some(modifier) = &self.modifier {
-                stack = modifier.apply(stack, context)?;
-            }
-            if let Some(modifier) = outer {
-                stack = modifier.apply(stack, context)?;
-            }
-            output.push(stack);
-        }
-        Ok(())
+        let modifier = self.modifier.as_ref();
+        chosen.create(context, 0, &mut |stack| {
+            let stack = match modifier {
+                Some(modifier) => modifier.apply(stack, context)?,
+                None => stack,
+            };
+            output.accept(stack)
+        })
     }
 }
 
@@ -147,13 +149,21 @@ mod tests {
         let random = LegacyRandom::new(0);
         let context = LootContext::new(&params, &random);
         let mut output = Vec::new();
-        pool.add_random_items(&context, None, &mut output).unwrap();
+        pool.add_random_items(&context, &mut |stack| {
+            output.push(stack);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(output.len(), 1);
 
         // 和官方一样先取 [0, 4) 里的下标，再按顺序减权重。
         let twin = LegacyRandom::new(0);
         let index = twin.next_int(4);
-        let expected = if index == 0 { items::STONE } else { items::DIRT };
+        let expected = if index == 0 {
+            items::STONE
+        } else {
+            items::DIRT
+        };
         assert_eq!(output[0].item, expected);
         assert_eq!(random.seed(), twin.seed());
     }
@@ -170,7 +180,11 @@ mod tests {
         let random = LegacyRandom::new(7);
         let context = LootContext::new(&params, &random);
         let mut output = Vec::new();
-        pool.add_random_items(&context, None, &mut output).unwrap();
+        pool.add_random_items(&context, &mut |stack| {
+            output.push(stack);
+            Ok(())
+        })
+        .unwrap();
         // 一个候选时官方直接创建，不取随机数。
         assert_eq!(output.len(), 3);
         assert!(output.iter().all(|stack| stack.item == items::STONE));
@@ -189,7 +203,11 @@ mod tests {
         let random = LegacyRandom::new(1);
         let context = LootContext::new(&params, &random);
         let mut output = Vec::new();
-        pool.add_random_items(&context, None, &mut output).unwrap();
+        pool.add_random_items(&context, &mut |stack| {
+            output.push(stack);
+            Ok(())
+        })
+        .unwrap();
         assert!(output.is_empty());
     }
 
@@ -204,7 +222,11 @@ mod tests {
         let random = LegacyRandom::new(2);
         let context = LootContext::new(&params, &random);
         let mut output = Vec::new();
-        pool.add_random_items(&context, None, &mut output).unwrap();
+        pool.add_random_items(&context, &mut |stack| {
+            output.push(stack);
+            Ok(())
+        })
+        .unwrap();
         assert!(output.is_empty());
         assert_eq!(random.seed(), LegacyRandom::new(2).seed());
     }

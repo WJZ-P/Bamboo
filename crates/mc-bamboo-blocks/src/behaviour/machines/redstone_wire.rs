@@ -61,9 +61,10 @@ fn cross_state(wire: BlockState) -> BlockState {
     state
 }
 
-/// `canSurviveOn`。形状跟着渲染偏移走的方块都不是整面，查表的结果在任何位置上都对。
-fn can_survive_on(state: BlockState) -> bool {
-    state.is_face_sturdy(Direction::Up, SupportType::Full) || state.is(blocks::HOPPER)
+/// `canSurviveOn`。支撑面要按位置算：移动活塞的碰撞形状跟着方块实体，渲染偏移的方块跟着位置。
+fn can_survive_on(world: &World, pos: BlockPos) -> bool {
+    world.is_face_sturdy(pos, Direction::Up, SupportType::Full)
+        || world.block_state(pos).is(blocks::HOPPER)
 }
 
 /// `shouldRedstoneWireConnectTo`，官方的 `direction` 是空时这里是 `None`。
@@ -90,10 +91,10 @@ fn connecting_side(
     let relative = world.block_state(relative_pos);
     if can_connect_up {
         let placeable_above =
-            relative.is_a(BlockAncestor::TrapDoorBlock) || can_survive_on(relative);
+            relative.is_a(BlockAncestor::TrapDoorBlock) || can_survive_on(world, relative_pos);
         let above = world.block_state(relative_pos.above());
         if placeable_above && should_connect_to(above, None) {
-            return if relative.is_face_sturdy(direction.opposite(), SupportType::Full) {
+            return if world.is_face_sturdy(relative_pos, direction.opposite(), SupportType::Full) {
                 RedstoneSide::Up
             } else {
                 RedstoneSide::Side
@@ -282,7 +283,7 @@ impl Behaviour for RedstoneWire {
     }
 
     fn can_survive(&self, _state: BlockState, world: &World, pos: BlockPos) -> bool {
-        can_survive_on(world.block_state(pos.below()))
+        can_survive_on(world, pos.below())
     }
 
     fn update_shape(
@@ -291,11 +292,11 @@ impl Behaviour for RedstoneWire {
         world: &mut World,
         pos: BlockPos,
         direction: Direction,
-        _neighbor_pos: BlockPos,
-        neighbor: BlockState,
+        neighbor_pos: BlockPos,
+        _neighbor: BlockState,
     ) -> BlockState {
         if direction == Direction::Down {
-            return if can_survive_on(neighbor) {
+            return if can_survive_on(world, neighbor_pos) {
                 state
             } else {
                 BlockState::AIR

@@ -43,7 +43,9 @@ pub(crate) fn opt_string<'a>(
     name: &str,
     what: &str,
 ) -> Result<Option<&'a str>> {
-    field(object, name).map(|value| string(value, what)).transpose()
+    field(object, name)
+        .map(|value| string(value, what))
+        .transpose()
 }
 
 /// 只接受字符串的数组，单个字符串也当成只有一项的数组。

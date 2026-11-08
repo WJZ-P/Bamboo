@@ -19,12 +19,17 @@
 //! | `chunk_broadcast` | 每 tick 逐个区块发光照和方块的变化 |
 //! | `light_updates` | 算光照，发 `light_update` |
 //! | `sign` | 告示牌的方块实体数据 |
+//! | `block_items` | 方块实体从物品上带来的组件和它的 `getUpdateTag` |
+//! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
+mod block_items;
+mod book;
 mod chat;
 mod chunk_broadcast;
 mod chunk_encoding;
 mod chunk_tracking;
+mod container;
 mod entity_sync;
 mod global;
 mod inbound;
@@ -32,11 +37,14 @@ mod interaction;
 mod inventory;
 mod light_updates;
 mod links;
+mod menu;
 mod movement;
 mod player;
+mod player_grid;
 mod region;
 mod sign;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use world::{World, WorldConfig};

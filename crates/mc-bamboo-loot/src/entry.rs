@@ -9,15 +9,18 @@ use serde_json::{Map, Value};
 
 use crate::condition::LootCondition;
 use crate::context::LootContext;
-use crate::function::{parse_modifier, LootFunction};
+use crate::function::{LootFunction, parse_modifier};
 use crate::json::{object, opt_bool, opt_i32, required, string, type_name};
 use crate::names::{self, Registry};
 use crate::stack::LootStack;
 use crate::table::LootTable;
 use crate::{LootError, Result};
 
-/// 嵌套表的递归上限。官方用访问过的表集合防环，这里没有可比较的表身份，
-/// 改用深度上限；数据包里没有环，正常求值不会碰到。
+/// 嵌套表的递归上限。环由表指针组成的访问栈拦住，和官方
+/// `pushVisitedElement` 一样直接跳过；这个深度只挡住坏掉的数据包。
+///
+/// Recursion cap for nested tables. Cycles are skipped by the visited-table
+/// stack, matching `pushVisitedElement`. This depth only stops corrupt data.
 pub(crate) const MAX_DEPTH: u32 = 32;
 
 /// 一个战利品条目，对应官方的一个 `LootPoolEntryContainer` 子类。
@@ -56,6 +59,23 @@ enum EntryBody {
 pub(crate) enum TableValue {
     Named(String),
     Inline(Box<LootTable>),
+}
+
+/// 物品一产出就交给它，对应官方包在 `Consumer<ItemStack>` 上的 modifier。
+///
+/// Accepts an item as soon as it is produced. Official modifiers wrap this consumer,
+/// so later rolls see the random numbers those modifiers already drew.
+pub(crate) trait ItemSink {
+    fn accept(&mut self, stack: LootStack) -> Result<()>;
+}
+
+impl<F> ItemSink for F
+where
+    F: FnMut(LootStack) -> Result<()>,
+{
+    fn accept(&mut self, stack: LootStack) -> Result<()> {
+        self(stack)
+    }
 }
 
 /// 展开出来的一个候选条目。`modifiers` 是从内到外的应用顺序。
@@ -113,10 +133,10 @@ impl LootEntry {
         modifiers: &mut Vec<&'a LootFunction>,
         output: &mut Vec<Candidate<'a>>,
     ) -> Result<bool> {
-        if let Some(condition) = &self.condition {
-            if !condition.test(context)? {
-                return Ok(false);
-            }
+        if let Some(condition) = &self.condition
+            && !condition.test(context)?
+        {
+            return Ok(false);
         }
         if let Some(modifier) = &self.modifier {
             modifiers.push(modifier);
@@ -142,9 +162,7 @@ impl LootEntry {
             EntryBody::Sequence(children) => {
                 expand_sequence(children, context, depth, modifiers, output)
             }
-            EntryBody::Group(children) => {
-                expand_group(children, context, depth, modifiers, output)
-            }
+            EntryBody::Group(children) => expand_group(children, context, depth, modifiers, output),
             _ => {
                 self.expand_leaf(context, modifiers, output);
                 Ok(true)
@@ -228,56 +246,59 @@ impl LootEntry {
 }
 
 impl Candidate<'_> {
-    /// 产出这个候选条目的物品。返回值里的每个栈都已经过条目、池、表的 modifier。
+    /// 产出这个候选条目的物品。条目自己的 modifier 在交给 `output` 之前应用，
+    /// 嵌套表每产出一件就立刻走这条链，和官方 `createItemStack` 的消费者一样。
+    ///
+    /// Emits this candidate. Entry modifiers run before `output`. A nested table
+    /// forwards each stack immediately, matching `createItemStack`'s consumer.
     pub(crate) fn create(
         &self,
         context: &LootContext<'_, '_, '_>,
         depth: u32,
-    ) -> Result<Vec<LootStack>> {
-        let mut stacks = match &self.body {
-            CandidateBody::Empty => Vec::new(),
-            CandidateBody::Item(item) => vec![LootStack::new(*item, 1)],
-            CandidateBody::Dynamic(name) => {
-                let mut stacks = Vec::new();
-                context.add_dynamic_drops(name, &mut stacks)?;
-                stacks
-            }
-            CandidateBody::Items(items) => {
-                (*items).iter().map(|item| LootStack::new(*item, 1)).collect()
-            }
-            CandidateBody::Tables(tables) => {
-                let mut stacks = Vec::new();
-                for table in *tables {
-                    match table {
-                        TableValue::Named(name) => {
-                            let table = LootTable::from_name(name)?;
-                            table.get_random_items_raw(context, depth + 1, &mut stacks)?;
-                        }
-                        TableValue::Inline(table) => {
-                            table.get_random_items_raw(context, depth + 1, &mut stacks)?;
-                        }
-                    }
-                }
-                stacks
-            }
-            CandidateBody::Slots => {
-                return Err(LootError::Unsupported(
-                    "slot loot needs an entity or container to read items from".to_owned(),
-                ))
-            }
-        };
-        if self.modifiers.is_empty() {
-            return Ok(stacks);
-        }
-        let mut decorated = Vec::with_capacity(stacks.len());
-        for stack in stacks.drain(..) {
+        output: &mut dyn ItemSink,
+    ) -> Result<()> {
+        let mut emit = |stack: LootStack| {
             let mut stack = stack;
             for modifier in &self.modifiers {
                 stack = modifier.apply(stack, context)?;
             }
-            decorated.push(stack);
+            output.accept(stack)
+        };
+        match &self.body {
+            CandidateBody::Empty => Ok(()),
+            CandidateBody::Item(item) => emit(LootStack::new(*item, 1)),
+            CandidateBody::Dynamic(name) => {
+                let mut stacks = Vec::new();
+                context.add_dynamic_drops(name, &mut stacks);
+                for stack in stacks {
+                    emit(stack)?;
+                }
+                Ok(())
+            }
+            CandidateBody::Items(items) => {
+                for item in *items {
+                    emit(LootStack::new(*item, 1))?;
+                }
+                Ok(())
+            }
+            CandidateBody::Tables(tables) => {
+                for table in *tables {
+                    match table {
+                        TableValue::Named(name) => {
+                            let table = LootTable::from_name(name)?;
+                            table.get_random_items_raw(context, depth + 1, &mut emit)?;
+                        }
+                        TableValue::Inline(table) => {
+                            table.get_random_items_raw(context, depth + 1, &mut emit)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            CandidateBody::Slots => Err(LootError::Unsupported(
+                "slot loot needs an entity or container to read items from".to_owned(),
+            )),
         }
-        Ok(decorated)
     }
 }
 

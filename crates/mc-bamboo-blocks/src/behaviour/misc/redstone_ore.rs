@@ -4,7 +4,7 @@ use mc_bamboo_core::{Axis, BlockPos, Direction};
 
 use crate::{
     behaviour::Behaviour,
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, LIT, block_of_item},
     world::World,
@@ -51,6 +51,14 @@ impl Behaviour for RedstoneOre {
             InteractionResult::Pass
         } else {
             InteractionResult::Success
+        }
+    }
+
+    /// `RedStoneOreBlock.attack`：拿手打一下和右键一样，亮起来并冒粒子。
+    fn attack(&self, state: BlockState, world: &mut World, pos: BlockPos, _player: &Actor) {
+        consume_particle_random(world, pos);
+        if !state.get(LIT) {
+            world.set_block_and_update(pos, state.with(LIT, true));
         }
     }
 

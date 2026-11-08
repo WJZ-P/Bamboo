@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 use mc_bamboo_data::{blocks, items, loot, registries, tags};
 use serde_json::Value;
 
-use crate::json::{invalid, object, opt_i32, required, string, holder_name};
 use crate::Result;
+use crate::json::{holder_name, invalid, object, opt_i32, required, string};
 
 /// 战利品表会引用到的注册表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,13 +216,16 @@ pub fn holder_set(value: &Value, registry: Registry, what: &str) -> Result<Vec<i
         let (name, is_tag) = holder_name(raw);
         if is_tag {
             let ids = tag_ids(registry.tag_group(), name).ok_or_else(|| {
-                invalid(format!("unknown {} tag `{raw}` in {what}", registry.describe()))
+                invalid(format!(
+                    "unknown {} tag `{raw}` in {what}",
+                    registry.describe()
+                ))
             })?;
             result.extend_from_slice(ids);
         } else {
-            let id = registry
-                .id(name)
-                .ok_or_else(|| invalid(format!("unknown {} `{raw}` in {what}", registry.describe())))?;
+            let id = registry.id(name).ok_or_else(|| {
+                invalid(format!("unknown {} `{raw}` in {what}", registry.describe()))
+            })?;
             result.push(id);
         }
     }
@@ -307,7 +310,9 @@ fn enchantment_defs() -> &'static Vec<EnchantmentDef> {
     DEFS.get_or_init(|| {
         loot::ENCHANTMENTS
             .iter()
-            .map(|(name, raw)| parse_enchantment(name, raw).expect("生成器导出的附魔数据必须能解析"))
+            .map(|(name, raw)| {
+                parse_enchantment(name, raw).expect("生成器导出的附魔数据必须能解析")
+            })
             .collect()
     })
 }

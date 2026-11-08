@@ -12,9 +12,7 @@ use mc_bamboo_blocks::BlockState;
 use serde_json::{Map, Value};
 
 use crate::context::{DamageSourceView, EntityView, LevelView, LootContext, Position};
-use crate::json::{
-    field, i32_value, invalid, object, opt_bool, required, string,
-};
+use crate::json::{field, i32_value, invalid, object, opt_bool, required, string};
 use crate::names::{self, Registry};
 use crate::stack::LootStack;
 use crate::{LootError, Result};
@@ -57,10 +55,10 @@ impl IntBounds {
             },
             _ => return Err(invalid(format!("{what} must be an int or an int range"))),
         };
-        if let (Some(min), Some(max)) = (bounds.min, bounds.max) {
-            if min > max {
-                return Err(invalid(format!("{what} has swapped bounds")));
-            }
+        if let (Some(min), Some(max)) = (bounds.min, bounds.max)
+            && min > max
+        {
+            return Err(invalid(format!("{what} has swapped bounds")));
         }
         Ok(bounds)
     }
@@ -130,10 +128,10 @@ impl DoubleBounds {
                 )));
             }
         };
-        if let (Some(min), Some(max)) = (bounds.min, bounds.max) {
-            if min > max {
-                return Err(invalid(format!("{what} has swapped bounds")));
-            }
+        if let (Some(min), Some(max)) = (bounds.min, bounds.max)
+            && min > max
+        {
+            return Err(invalid(format!("{what} has swapped bounds")));
         }
         Ok(bounds)
     }
@@ -143,8 +141,7 @@ impl DoubleBounds {
     }
 
     pub fn matches_sqr(&self, value_sqr: f64) -> bool {
-        self.min_sqr
-            .is_none_or(|min| min <= value_sqr)
+        self.min_sqr.is_none_or(|min| min <= value_sqr)
             && self.max_sqr.is_none_or(|max| value_sqr <= max)
     }
 }
@@ -178,9 +175,7 @@ impl EnchantmentPredicate {
             });
         }
         if !self.level.is_any() {
-            return levels
-                .values()
-                .any(|level| self.level.matches(*level));
+            return levels.values().any(|level| self.level.matches(*level));
         }
         !levels.is_empty()
     }
@@ -420,46 +415,24 @@ impl StatePropertiesPredicate {
 
     pub fn matches(&self, state: BlockState) -> bool {
         self.properties.iter().all(|(name, matcher)| match matcher {
-            ValueMatcher::Exact(expected) => state.property_state(name) == Some(expected.as_str()),
+            ValueMatcher::Exact(expected) => mc_bamboo_blocks::predicate::property_text_matches(
+                state,
+                name,
+                Some(expected),
+                None,
+                None,
+            ),
             ValueMatcher::Ranged { min, max } => {
-                let Some(actual) = state.property_state(name) else {
-                    return false;
-                };
-                let compare = |other: &str| compare_property(state, name, actual, other);
-                if let Some(min) = min {
-                    if compare(min).is_none_or(|ordering| ordering.is_lt()) {
-                        return false;
-                    }
-                }
-                if let Some(max) = max {
-                    if compare(max).is_none_or(|ordering| ordering.is_gt()) {
-                        return false;
-                    }
-                }
-                true
+                mc_bamboo_blocks::predicate::property_text_matches(
+                    state,
+                    name,
+                    None,
+                    min.as_deref(),
+                    max.as_deref(),
+                )
             }
         })
     }
-}
-
-/// 属性值比较。数值按数值，布尔按 `false < true`，其余按方块状态里的声明顺序，
-/// 对应官方 `Comparable` 的 `compareTo`。
-fn compare_property(
-    state: BlockState,
-    name: &str,
-    actual: &str,
-    other: &str,
-) -> Option<std::cmp::Ordering> {
-    if let (Ok(left), Ok(right)) = (actual.parse::<i32>(), other.parse::<i32>()) {
-        return Some(left.cmp(&right));
-    }
-    if let (Ok(left), Ok(right)) = (actual.parse::<bool>(), other.parse::<bool>()) {
-        return Some(left.cmp(&right));
-    }
-    let values = state.property_values(name)?;
-    let left = values.iter().position(|value| *value == actual)?;
-    let right = values.iter().position(|value| *value == other)?;
-    Some(left.cmp(&right))
 }
 
 /// `ItemPredicate`。
@@ -484,10 +457,10 @@ impl ItemPredicate {
     }
 
     pub fn matches(&self, stack: &LootStack) -> Result<bool> {
-        if let Some(items) = &self.items {
-            if !items.contains(&stack.item) {
-                return Ok(false);
-            }
+        if let Some(items) = &self.items
+            && !items.contains(&stack.item)
+        {
+            return Ok(false);
         }
         if !self.count.matches(stack.count) {
             return Ok(false);
@@ -521,10 +494,10 @@ impl BlockPredicate {
     }
 
     pub fn matches_state(&self, state: BlockState) -> bool {
-        if let Some(blocks) = &self.blocks {
-            if !blocks.contains(&(state.block_id() as i32)) {
-                return false;
-            }
+        if let Some(blocks) = &self.blocks
+            && !blocks.contains(&(state.block_id() as i32))
+        {
+            return false;
         }
         self.properties
             .as_ref()
@@ -566,9 +539,7 @@ impl BlockPredicate {
             Some(true) => {}
             Some(false) => return Ok(false),
             None => {
-                return Err(unsupported(
-                    "block predicate needs LevelView::is_loaded",
-                ));
+                return Err(unsupported("block predicate needs LevelView::is_loaded"));
             }
         }
         let state = level
@@ -705,9 +676,7 @@ impl LocationPredicate {
                 Some(actual) if actual == dimension => {}
                 Some(_) => return Ok(false),
                 None => {
-                    return Err(unsupported(
-                        "location predicate needs LevelView::dimension",
-                    ));
+                    return Err(unsupported("location predicate needs LevelView::dimension"));
                 }
             }
         }
@@ -715,9 +684,7 @@ impl LocationPredicate {
         let loaded = match level.is_loaded(bx, by, bz) {
             Some(loaded) => loaded,
             None => {
-                return Err(unsupported(
-                    "location predicate needs LevelView::is_loaded",
-                ));
+                return Err(unsupported("location predicate needs LevelView::is_loaded"));
             }
         };
         if let Some(biomes) = &self.biomes {
@@ -745,15 +712,15 @@ impl LocationPredicate {
                 return Ok(false);
             }
         }
-        if let Some(light) = &self.light {
-            if !light.matches(level, bx, by, bz)? {
-                return Ok(false);
-            }
+        if let Some(light) = &self.light
+            && !light.matches(level, bx, by, bz)?
+        {
+            return Ok(false);
         }
-        if let Some(block) = &self.block {
-            if !block.matches(context, bx, by, bz)? {
-                return Ok(false);
-            }
+        if let Some(block) = &self.block
+            && !block.matches(context, bx, by, bz)?
+        {
+            return Ok(false);
         }
         if self.has_fluid {
             return Err(unsupported("location predicate fluid"));
@@ -801,25 +768,46 @@ impl EntityFlagsPredicate {
     }
 
     pub fn matches(&self, entity: &EntityView) -> bool {
-        if self.is_on_ground.is_some_and(|value| value != entity.is_on_ground) {
+        if self
+            .is_on_ground
+            .is_some_and(|value| value != entity.is_on_ground)
+        {
             return false;
         }
-        if self.is_on_fire.is_some_and(|value| value != entity.is_on_fire) {
+        if self
+            .is_on_fire
+            .is_some_and(|value| value != entity.is_on_fire)
+        {
             return false;
         }
-        if self.is_sneaking.is_some_and(|value| value != entity.is_sneaking) {
+        if self
+            .is_sneaking
+            .is_some_and(|value| value != entity.is_sneaking)
+        {
             return false;
         }
-        if self.is_sprinting.is_some_and(|value| value != entity.is_sprinting) {
+        if self
+            .is_sprinting
+            .is_some_and(|value| value != entity.is_sprinting)
+        {
             return false;
         }
-        if self.is_swimming.is_some_and(|value| value != entity.is_swimming) {
+        if self
+            .is_swimming
+            .is_some_and(|value| value != entity.is_swimming)
+        {
             return false;
         }
-        if self.is_flying.is_some_and(|value| value != entity.is_flying) {
+        if self
+            .is_flying
+            .is_some_and(|value| value != entity.is_flying)
+        {
             return false;
         }
-        if self.is_in_water.is_some_and(|value| value != entity.is_in_water) {
+        if self
+            .is_in_water
+            .is_some_and(|value| value != entity.is_in_water)
+        {
             return false;
         }
         // 官方只在实体是 LivingEntity 时比较这两个标记。
@@ -1009,14 +997,18 @@ impl EntityTagPredicate {
 
     pub fn matches(&self, tags: &[String]) -> bool {
         let contains = |tag: &str| tags.iter().any(|actual| actual == tag);
-        if self.any_of.as_ref().is_some_and(|any_of| {
-            !any_of.iter().any(|tag| contains(tag))
-        }) {
+        if self
+            .any_of
+            .as_ref()
+            .is_some_and(|any_of| !any_of.iter().any(|tag| contains(tag)))
+        {
             return false;
         }
-        if self.none_of.as_ref().is_some_and(|none_of| {
-            none_of.iter().any(|tag| contains(tag))
-        }) {
+        if self
+            .none_of
+            .as_ref()
+            .is_some_and(|none_of| none_of.iter().any(|tag| contains(tag)))
+        {
             return false;
         }
         self.all_of
@@ -1154,43 +1146,45 @@ impl EntityPredicate {
         let Some(entity) = entity else {
             return Ok(false);
         };
-        if let Some(types) = &self.entity_type {
-            if !types.contains(&entity.entity_type) {
-                return Ok(false);
-            }
+        if let Some(types) = &self.entity_type
+            && !types.contains(&entity.entity_type)
+        {
+            return Ok(false);
         }
         if !self.components.matches_components(&entity.components)? {
             return Ok(false);
         }
-        if let Some(flags) = &self.flags {
-            if !flags.matches(entity) {
-                return Ok(false);
-            }
+        if let Some(flags) = &self.flags
+            && !flags.matches(entity)
+        {
+            return Ok(false);
         }
-        if let Some(equipment) = &self.equipment {
-            if !equipment.matches(entity)? {
-                return Ok(false);
-            }
+        if let Some(equipment) = &self.equipment
+            && !equipment.matches(entity)?
+        {
+            return Ok(false);
         }
-        if let Some(vehicle) = &self.vehicle {
-            if !vehicle.matches(context, position, entity.vehicle.as_deref())? {
-                return Ok(false);
-            }
+        if let Some(vehicle) = &self.vehicle
+            && !vehicle.matches(context, position, entity.vehicle.as_deref())?
+        {
+            return Ok(false);
         }
         if let Some(passenger) = &self.passenger {
             // 官方遍历所有乘客，任一匹配就通过；本实现只建模第一个乘客。
             let matches = match entity.passenger.as_deref() {
-                Some(passenger_entity) => passenger.matches(context, position, Some(passenger_entity))?,
+                Some(passenger_entity) => {
+                    passenger.matches(context, position, Some(passenger_entity))?
+                }
                 None => false,
             };
             if !matches {
                 return Ok(false);
             }
         }
-        if let Some(targeted) = &self.targeted_entity {
-            if !targeted.matches(context, position, entity.targeted_entity.as_deref())? {
-                return Ok(false);
-            }
+        if let Some(targeted) = &self.targeted_entity
+            && !targeted.matches(context, position, entity.targeted_entity.as_deref())?
+        {
+            return Ok(false);
         }
         if let Some(location) = &self.location {
             let (x, y, z) = entity_position(entity)?;
@@ -1242,9 +1236,7 @@ impl EntityPredicate {
                 return Err(unsupported("movement needs EntityView::movement"));
             };
             let Some(fall_distance) = entity.fall_distance else {
-                return Err(unsupported(
-                    "movement needs EntityView::fall_distance",
-                ));
+                return Err(unsupported("movement needs EntityView::fall_distance"));
             };
             if !movement.matches(
                 velocity.x * 20.0,
@@ -1263,28 +1255,27 @@ impl EntityPredicate {
                 return Ok(false);
             }
         }
-        if let Some(in_open_water) = self.fishing_hook_in_open_water {
-            if !entity.is_fishing_hook || entity.in_open_water != in_open_water {
-                return Ok(false);
-            }
+        if let Some(in_open_water) = self.fishing_hook_in_open_water
+            && (!entity.is_fishing_hook || entity.in_open_water != in_open_water)
+        {
+            return Ok(false);
         }
-        if let Some(sheared) = self.sheep_sheared {
-            if !entity.is_sheep || entity.sheep_sheared != sheared {
-                return Ok(false);
-            }
+        if let Some(sheared) = self.sheep_sheared
+            && (!entity.is_sheep || entity.sheep_sheared != sheared)
+        {
+            return Ok(false);
         }
-        if let Some(raider) = &self.raider {
-            if !entity.is_raider
+        if let Some(raider) = &self.raider
+            && (!entity.is_raider
                 || entity.has_raid != raider.has_raid
-                || entity.is_captain != raider.is_captain
-            {
-                return Ok(false);
-            }
+                || entity.is_captain != raider.is_captain)
+        {
+            return Ok(false);
         }
-        if let Some(tags) = &self.entity_tags {
-            if !tags.matches(&entity.scoreboard_tags) {
-                return Ok(false);
-            }
+        if let Some(tags) = &self.entity_tags
+            && !tags.matches(&entity.scoreboard_tags)
+        {
+            return Ok(false);
         }
         if let Some(periodic_tick) = self.periodic_tick {
             let Some(tick_count) = entity.tick_count else {
@@ -1363,20 +1354,20 @@ impl DamageSourcePredicate {
                 return Ok(false);
             }
         }
-        if let Some(predicate) = &self.direct_entity {
-            if !predicate.matches(context, position, source.direct_entity.as_deref())? {
-                return Ok(false);
-            }
+        if let Some(predicate) = &self.direct_entity
+            && !predicate.matches(context, position, source.direct_entity.as_deref())?
+        {
+            return Ok(false);
         }
-        if let Some(predicate) = &self.source_entity {
-            if !predicate.matches(context, position, source.source_entity.as_deref())? {
-                return Ok(false);
-            }
+        if let Some(predicate) = &self.source_entity
+            && !predicate.matches(context, position, source.source_entity.as_deref())?
+        {
+            return Ok(false);
         }
-        if let Some(is_direct) = self.is_direct {
-            if source.is_direct != is_direct {
-                return Ok(false);
-            }
+        if let Some(is_direct) = self.is_direct
+            && source.is_direct != is_direct
+        {
+            return Ok(false);
         }
         Ok(true)
     }

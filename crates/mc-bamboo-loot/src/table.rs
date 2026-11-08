@@ -13,11 +13,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 
-use mc_bamboo_blocks::random::{shuffle, LegacyRandom, RandomSource, XoroshiroRandom};
+use mc_bamboo_blocks::random::{LegacyRandom, RandomSource, XoroshiroRandom, shuffle};
 
 use crate::context::{LootContext, LootParams};
-use crate::function::{parse_modifier, LootFunction};
-use crate::json::{opt_array, opt_string, object};
+use crate::entry::ItemSink;
+use crate::function::{LootFunction, parse_modifier};
+use crate::json::{object, opt_array, opt_string};
 use crate::pool::LootPool;
 use crate::random_sequence::RandomSequences;
 use crate::stack::LootStack;
@@ -48,9 +49,13 @@ impl LootTable {
     pub fn parse(value: &Value) -> Result<Self> {
         let map = object(value, "loot table")?;
         let param_set = opt_string(map, "type", "loot table type")?.map(str::to_owned);
-        let random_sequence = opt_string(map, "random_sequence", "random_sequence")?.map(str::to_owned);
+        let random_sequence =
+            opt_string(map, "random_sequence", "random_sequence")?.map(str::to_owned);
         let pools = match opt_array(map, "pools", "pools")? {
-            Some(pools) => pools.iter().map(LootPool::parse).collect::<Result<Vec<_>>>()?,
+            Some(pools) => pools
+                .iter()
+                .map(LootPool::parse)
+                .collect::<Result<Vec<_>>>()?,
             None => Vec::new(),
         };
         let modifier = parse_modifier(crate::json::field(map, "modifier"))?;
@@ -102,7 +107,10 @@ impl LootTable {
     ) -> Result<Vec<LootStack>> {
         let context = LootContext::new(params, random);
         let mut stacks = Vec::new();
-        self.get_random_items_raw(&context, 0, &mut stacks)?;
+        self.get_random_items_raw(&context, 0, &mut |stack| {
+            stacks.push(stack);
+            Ok(())
+        })?;
         Ok(create_stack_splitter(stacks))
     }
 
@@ -123,20 +131,45 @@ impl LootTable {
 
     /// `LootTable.getRandomItemsRaw`：跑所有池，嵌套表也会走到这里。
     ///
-    /// 官方用访问过的表集合防无限循环；这里没有可比较的表身份，改用深度上限。
+    /// 正在求值的表记在上下文里。再走进同一张表时官方只打警告并跳过，这里也跳过，
+    /// 不再取随机数。深度上限是数据包坏掉时的保险。
+    ///
+    /// `LootTable.getRandomItemsRaw`. A table already on the visited stack is skipped,
+    /// and no further random numbers are drawn. The depth cap only stops corrupt data.
     pub(crate) fn get_random_items_raw(
         &self,
         context: &LootContext<'_, '_, '_>,
         depth: u32,
-        output: &mut Vec<LootStack>,
+        output: &mut dyn ItemSink,
     ) -> Result<()> {
         if depth > crate::entry::MAX_DEPTH {
             return Err(LootError::Invalid(
                 "loot table nests deeper than the depth limit".to_owned(),
             ));
         }
+        let id = std::ptr::from_ref(self).cast::<()>();
+        if !context.enter_table(id) {
+            return Ok(());
+        }
+        let result = self.run_pools(context, output);
+        context.leave_table(id);
+        result
+    }
+
+    fn run_pools(
+        &self,
+        context: &LootContext<'_, '_, '_>,
+        output: &mut dyn ItemSink,
+    ) -> Result<()> {
         for pool in &self.pools {
-            pool.add_random_items(context, self.modifier.as_ref(), output)?;
+            let modifier = self.modifier.as_ref();
+            pool.add_random_items(context, &mut |stack| {
+                let stack = match modifier {
+                    Some(modifier) => modifier.apply(stack, context)?,
+                    None => stack,
+                };
+                output.accept(stack)
+            })?;
         }
         Ok(())
     }
@@ -153,9 +186,27 @@ impl LootTable {
         let mut legacy = None;
         let mut cached = None;
         let source = self.resolve_source(seed, sequences, fallback, &mut legacy, &mut cached)?;
+        self.fill_with_source(container, params, source)
+    }
+
+    /// `LootTable.fill` 在随机源已经选好之后的部分。
+    ///
+    /// 调用方拿着同一个随机源，填完还能再取 `nextLong`，和官方 `context.getRandom()` 是同一条流。
+    ///
+    /// The part of `LootTable.fill` after the random source is chosen. The caller keeps
+    /// that source, so a later `nextLong` continues the same stream as `context.getRandom()`.
+    pub fn fill_with_source(
+        &self,
+        container: &mut dyn LootContainer,
+        params: &LootParams<'_>,
+        source: &dyn RandomSource,
+    ) -> Result<()> {
         let context = LootContext::new(params, source);
         let mut stacks = Vec::new();
-        self.get_random_items_raw(&context, 0, &mut stacks)?;
+        self.get_random_items_raw(&context, 0, &mut |stack| {
+            stacks.push(stack);
+            Ok(())
+        })?;
         let mut stacks = create_stack_splitter(stacks);
 
         let random = context.random();
@@ -164,6 +215,7 @@ impl LootTable {
         for stack in stacks {
             let Some(slot) = available_slots.pop() else {
                 // 官方这里打一条警告就把剩下的物品丢掉。
+                // Official logs a warning and drops the rest.
                 return Ok(());
             };
             let stack = if stack.is_empty() {
@@ -231,10 +283,7 @@ pub fn create_stack_splitter(stacks: Vec<LootStack>) -> Vec<LootStack> {
 }
 
 /// `LootTable.getAvailableSlots`：空槽位列表洗一遍。
-fn get_available_slots(
-    container: &dyn LootContainer,
-    random: &dyn RandomSource,
-) -> Vec<usize> {
+fn get_available_slots(container: &dyn LootContainer, random: &dyn RandomSource) -> Vec<usize> {
     let mut slots: Vec<usize> = (0..container.slot_count())
         .filter(|slot| container.is_slot_empty(*slot))
         .collect();
@@ -294,8 +343,7 @@ mod tests {
     #[test]
     fn all_packaged_tables_parse() {
         for &(name, _) in loot::LOOT_TABLES {
-            LootTable::from_name(name)
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            LootTable::from_name(name).unwrap_or_else(|error| panic!("{name}: {error}"));
         }
     }
 
@@ -394,13 +442,7 @@ mod tests {
         let mut container = FixedContainer::new(27);
         let fallback = LegacyRandom::new(9);
         table
-            .fill(
-                &mut container,
-                &params,
-                424_242,
-                None,
-                &fallback,
-            )
+            .fill(&mut container, &params, 424_242, None, &fallback)
             .unwrap();
         let filled = container.slots.iter().filter(|slot| slot.is_some()).count();
         assert!(filled > 0);

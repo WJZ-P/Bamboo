@@ -12,6 +12,8 @@ mod context;
 mod drops;
 mod entry;
 mod error;
+#[cfg(test)]
+mod eval_tests;
 mod function;
 mod json;
 mod names;
@@ -24,18 +26,18 @@ mod table;
 
 pub use condition::{FloatRangePredicate, IntRangePredicate, LootCondition};
 pub use context::{
-    entity_enchantment_level, BlockEntityView, DamageSourceView, EntityTarget, EntityView,
-    EquipmentSlot, LevelView, LootContext, LootParams, Position,
+    BlockEntityView, DamageSourceView, EntityTarget, EntityView, EquipmentSlot, LevelView,
+    LootContext, LootParams, Position, entity_enchantment_level,
 };
 pub use drops::{
-    block_drops, chest_loot, entity_death_drops, BlockDropParams, ChestParams, EntityDeathParams,
+    BlockDropParams, ChestParams, EntityDeathParams, block_drops, chest_loot, entity_death_drops,
 };
 pub use error::{LootError, Result};
 pub use function::LootFunction;
 pub use names::{
-    biome_id, block_id, block_name, enchantment_def, enchantment_defs_all, enchantment_id,
-    enchantment_name, entity_type_id, entity_type_name, instrument_name, item_id, item_name,
-    mob_effect_name, potion_name, tag_ids, EnchantmentDef, Registry,
+    EnchantmentDef, Registry, biome_id, block_id, block_name, enchantment_def,
+    enchantment_defs_all, enchantment_id, enchantment_name, entity_type_id, entity_type_name,
+    instrument_name, item_id, item_name, mob_effect_name, potion_name, tag_ids,
 };
 pub use number::{FloatProvider, IntProvider, LevelBasedValue};
 pub use pool::LootPool;
@@ -47,4 +49,4 @@ pub use predicate::{
 };
 pub use random_sequence::{RandomSequence, RandomSequences};
 pub use stack::{Components, EnchantmentLevels, LootStack, NoEnchantments};
-pub use table::{create_stack_splitter, shuffle_and_split_items, LootContainer, LootTable};
+pub use table::{LootContainer, LootTable, create_stack_splitter, shuffle_and_split_items};

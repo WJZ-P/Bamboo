@@ -6,10 +6,11 @@
 //!
 //! 随机源和官方一样可以显式传（箱子种子）或按序列名取（`random_sequence`）。
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use mc_bamboo_blocks::random::RandomSource;
 use mc_bamboo_blocks::BlockState;
+use mc_bamboo_blocks::random::RandomSource;
 use serde_json::Value;
 
 use crate::names;
@@ -279,11 +280,40 @@ impl<'w> LootParams<'w> {
 pub struct LootContext<'p, 'w, 'r> {
     pub params: &'p LootParams<'w>,
     pub random: &'r dyn RandomSource,
+    /// `LootContext.visitedElements`：正在求值的表，防止嵌套引用绕回去。
+    ///
+    /// Tables currently being evaluated. Matches `LootContext.visitedElements`.
+    visited: RefCell<Vec<*const ()>>,
 }
 
 impl<'p, 'w, 'r> LootContext<'p, 'w, 'r> {
     pub fn new(params: &'p LootParams<'w>, random: &'r dyn RandomSource) -> Self {
-        Self { params, random }
+        Self {
+            params,
+            random,
+            visited: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// `pushVisitedElement`。已经在栈上时返回 `false`，调用方要跳过这张表。
+    ///
+    /// `pushVisitedElement`. Returns false when the table is already on the stack;
+    /// the caller skips it, matching the official infinite-loop guard.
+    pub(crate) fn enter_table(&self, table: *const ()) -> bool {
+        let mut visited = self.visited.borrow_mut();
+        if visited.contains(&table) {
+            return false;
+        }
+        visited.push(table);
+        true
+    }
+
+    /// `popVisitedElement`。
+    pub(crate) fn leave_table(&self, table: *const ()) {
+        let mut visited = self.visited.borrow_mut();
+        if let Some(index) = visited.iter().rposition(|entry| *entry == table) {
+            visited.remove(index);
+        }
     }
 
     pub fn random(&self) -> &'r dyn RandomSource {
@@ -313,16 +343,14 @@ impl<'p, 'w, 'r> LootContext<'p, 'w, 'r> {
     }
 
     /// `LootContext.addDynamicDrops`：按名字把调用方给的动态掉落塞进输出。
-    pub fn add_dynamic_drops(
-        &self,
-        name: &str,
-        output: &mut Vec<LootStack>,
-    ) -> Result<()> {
-        let drops = self.params.dynamic_drops.get(name).ok_or_else(|| {
-            LootError::Invalid(format!("dynamic drop `{name}` is not provided by the caller"))
-        })?;
-        output.extend(drops.iter().cloned());
-        Ok(())
+    /// 调用方没提供这个名字时官方什么都不做。
+    ///
+    /// `LootContext.addDynamicDrops`. A missing name is a no-op, matching
+    /// `LootParams.addDynamicDrops`.
+    pub fn add_dynamic_drops(&self, name: &str, output: &mut Vec<LootStack>) {
+        if let Some(drops) = self.params.dynamic_drops.get(name) {
+            output.extend(drops.iter().cloned());
+        }
     }
 }
 
@@ -373,11 +401,7 @@ pub fn entity_enchantment_level(entity: &EntityView, enchantment: i32) -> i32 {
     };
     let mut level = 0;
     for slot in EquipmentSlot::ALL {
-        if !definition
-            .slots
-            .iter()
-            .any(|group| slot.in_group(group))
-        {
+        if !definition.slots.iter().any(|group| slot.in_group(group)) {
             continue;
         }
         if let Some(stack) = entity.equipment_stack(slot) {

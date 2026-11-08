@@ -9,10 +9,19 @@ mod generated;
 
 use mc_bamboo_core::Aabb;
 
+/// 配方表的数据结构和官方数据包导出的全部配方。
+pub mod recipe;
+
+pub use recipe::{
+    CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, RecipeKind, RecipeType,
+    Stack, has_dye_component, is_damageable,
+};
+
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, heightmaps, items, light, loot, packets, registries,
-    shapes, states, tags, version,
+    block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
+    item_components, items, light, loot, packets, recipes, registries, shapes, states, tags,
+    version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -124,6 +133,23 @@ pub struct FluidTag {
 pub struct PropertyDef {
     pub name: &'static str,
     pub values: &'static [&'static str],
+    pub kind: PropertyKind,
+}
+
+/// 方块属性的官方类型，以及 `StatePropertiesPredicate` 做区间比较时用的顺序。
+///
+/// 官方的 `Property` 只有三个子类，属性值的 `compareTo` 各按各的顺序比：
+/// 整数按数值，布尔 `false < true`，枚举按枚举常量的声明序号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyKind {
+    /// `IntegerProperty`：取值是 `min..=max` 的连续整数，按数值比较。
+    Integer { min: i32, max: i32 },
+    /// `BooleanProperty`：取值列表是 `[true, false]`，比较时 `false < true`。
+    Boolean,
+    /// `EnumProperty`：取值列表可能是常量的乱序子集，比较时用常量的声明序号。
+    ///
+    /// 下标和 [`PropertyDef::values`] 一一对应。
+    Enum { ordinals: &'static [u16] },
 }
 
 /// 一个构造参数或者只读方法的结果，名字和官方的字段名相同，方法名后面带括号。
@@ -185,8 +211,23 @@ pub struct FluidFacts {
     pub legacy_block: u32,
 }
 
+/// 活塞推动时的反应，官方 `PushReaction`，顺序和官方一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushReaction {
+    /// 跟着活塞走，也能被拉回来。
+    PushPull,
+    /// 能推，不能拉。
+    Push,
+    /// 推的时候直接掉下来。
+    Popped,
+    /// 推不动。
+    Immoveable,
+    /// 只对实体有意义，方块不会碰到。
+    IgnoreEntity,
+}
+
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
     pub name: &'static str,
     /// 第一个状态的 ID。这个方块的状态一直连续到下一个方块的 `first_state` 之前。
@@ -202,6 +243,10 @@ pub struct Block {
     ///
     /// `pitcher_crop` 不算，它有 `half` 属性，但放下时只占一格，长大后才有上半。
     pub two_blocks: bool,
+    /// 活塞推动时的反应，`state.getPistonPushReaction()`。
+    pub push_reaction: PushReaction,
+    /// 破坏速度是 -1：活塞不会推动，也不会打碎它。
+    pub unbreakable: bool,
     /// 方块实体类型的 ID，见 [`registries::block_entity_type`]。
     pub block_entity_type: Option<i32>,
     /// `block.getClass().getSimpleName()`。
@@ -216,7 +261,14 @@ pub struct Block {
     pub offset: Option<BlockOffset>,
     /// `hasDynamicShape`：官方不缓存这种方块的形状，读取时要带上世界和位置。
     pub dynamic_shape: bool,
+    /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
+    pub destroy_time: f32,
+    /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
+    pub requires_correct_tool_for_drops: bool,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for Block {}
 
 impl Block {
     /// 官方类的字段或者方法结果。名字写错时返回 `None`，见 [`BlockField`]。
@@ -284,8 +336,13 @@ pub struct Item {
     pub attachment: Option<i32>,
     pub max_stack_size: i32,
     /// `max_damage` 组件，没有这个组件时物品不能受损。
+    ///
+    /// The `max_damage` component. The item cannot take damage when this is absent.
     pub max_damage: Option<i32>,
     /// `enchantable` 组件的 `value`，附魔台算等级时用；没有这个组件就不能附魔。
+    ///
+    /// The `value` of the `enchantable` component. Enchanting cost uses it; items without
+    /// the component cannot be enchanted.
     pub enchantable: Option<i32>,
     /// 手持这个物品时，创造模式玩家能不能破坏方块。
     pub can_destroy_blocks_in_creative: bool,
@@ -859,6 +916,34 @@ mod tests {
         assert_eq!(block_entity_type(blocks::STONE), None);
         // 26.3 的床已经不是方块实体了。
         assert_eq!(block_entity_type(blocks::RED_BED), None);
+    }
+
+    #[test]
+    fn push_reactions_and_unbreakable_blocks_come_from_the_block_properties() {
+        let block = |state| block_of_state(state).expect("状态属于某个方块");
+        assert_eq!(
+            block(blocks::PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::STICKY_PISTON).push_reaction,
+            PushReaction::Immoveable
+        );
+        assert_eq!(
+            block(blocks::SLIME_BLOCK).push_reaction,
+            PushReaction::PushPull
+        );
+        assert_eq!(
+            block(blocks::OAK_LEAVES).push_reaction,
+            PushReaction::Popped
+        );
+        assert_eq!(block(blocks::WATER).push_reaction, PushReaction::Popped);
+        assert_eq!(block(blocks::STONE).push_reaction, PushReaction::PushPull);
+
+        assert!(block(blocks::BEDROCK).unbreakable);
+        assert!(block(blocks::MOVING_PISTON).unbreakable);
+        assert!(!block(blocks::PISTON).unbreakable);
+        assert!(!block(blocks::OBSIDIAN).unbreakable);
     }
 
     #[test]

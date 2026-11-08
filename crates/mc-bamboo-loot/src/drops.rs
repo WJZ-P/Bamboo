@@ -9,11 +9,13 @@
 
 use mc_bamboo_blocks::BlockState;
 
-use crate::context::{BlockEntityView, DamageSourceView, EntityView, LevelView, LootParams, Position};
+use crate::Result;
+use crate::context::{
+    BlockEntityView, DamageSourceView, EntityView, LevelView, LootParams, Position,
+};
 use crate::random_sequence::RandomSequences;
 use crate::stack::LootStack;
 use crate::table::{LootContainer, LootTable};
-use crate::Result;
 
 /// `Block.getDrops` 的参数。
 pub struct BlockDropParams<'a> {
@@ -88,7 +90,12 @@ pub struct EntityDeathParams<'a> {
 }
 
 impl EntityDeathParams<'_> {
-    fn loot_params(&self) -> LootParams<'_> {
+    /// 组装 `LootContextParamSets.ENTITY` 的参数，顺序和
+    /// `LivingEntity.dropFromLootTable` 放进 `LootParams.Builder` 的一样。
+    ///
+    /// Builds the `LootContextParamSets.ENTITY` parameters in the same order
+    /// `LivingEntity.dropFromLootTable` fills `LootParams.Builder`.
+    pub fn loot_params(&self) -> LootParams<'_> {
         LootParams {
             level: self.level,
             origin: Some(self.origin),

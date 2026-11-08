@@ -46,7 +46,9 @@ impl LegacyRandom {
     }
 
     /// `next(bits)`：线性同余走一步，取高 `bits` 位。
-    fn next(&self, bits: u32) -> i32 {
+    ///
+    /// 官方 `WorldgenRandom` 包着这个源时直接调用它，所以这里是公开的。
+    pub fn next(&self, bits: u32) -> i32 {
         let seed = self
             .seed
             .get()
@@ -408,8 +410,7 @@ impl XoroshiroRandom {
         let s1 = self.seed_hi.get();
         let result = s0.wrapping_add(s1).rotate_left(17).wrapping_add(s0);
         let mixed = s1 ^ s0;
-        self.seed_lo
-            .set(s0.rotate_left(49) ^ mixed ^ (mixed << 21));
+        self.seed_lo.set(s0.rotate_left(49) ^ mixed ^ (mixed << 21));
         self.seed_hi.set(mixed.rotate_left(28));
         result
     }

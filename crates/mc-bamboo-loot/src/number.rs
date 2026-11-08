@@ -42,7 +42,10 @@ fn arithmetic() -> NumberError {
 pub enum IntProvider {
     Constant(i32),
     Uniform(Box<Self>, Box<Self>),
-    Binomial { n: Box<Self>, p: Box<FloatProvider> },
+    Binomial {
+        n: Box<Self>,
+        p: Box<FloatProvider>,
+    },
     Conditional {
         /// box 起来是为了断开和 [`LootCondition`] 的循环包含。
         condition: Box<LootCondition>,
@@ -203,10 +206,8 @@ impl IntProvider {
                 default.get_unsafe(context)
             }
             Self::WeightedList(values) => {
-                let index = pick_weighted(
-                    context,
-                    values.iter().map(|(_, weight)| *weight).collect(),
-                )?;
+                let index =
+                    pick_weighted(context, values.iter().map(|(_, weight)| *weight).collect())?;
                 values[index].0.get_unsafe(context)
             }
             Self::Aggregate(op, inputs) => {
@@ -321,10 +322,8 @@ impl FloatProvider {
                 default.get_float_unsafe(context)
             }
             Self::WeightedList(values) => {
-                let index = pick_weighted(
-                    context,
-                    values.iter().map(|(_, weight)| *weight).collect(),
-                )?;
+                let index =
+                    pick_weighted(context, values.iter().map(|(_, weight)| *weight).collect())?;
                 values[index].0.get_float_unsafe(context)
             }
             Self::Aggregate(op, inputs) => {
@@ -428,16 +427,12 @@ impl LevelBasedValue {
             }
             Self::Clamped { value, min, max } => {
                 let value = value.calculate(level);
-                if value < *min {
-                    *min
-                } else {
-                    value.min(*max)
-                }
+                if value < *min { *min } else { value.min(*max) }
             }
-            Self::Exponent { base, power } => {
-                f64::powf(f64::from(base.calculate(level)), f64::from(power.calculate(level)))
-                    as f32
-            }
+            Self::Exponent { base, power } => f64::powf(
+                f64::from(base.calculate(level)),
+                f64::from(power.calculate(level)),
+            ) as f32,
             Self::Fraction {
                 numerator,
                 denominator,
@@ -457,11 +452,10 @@ impl LevelBasedValue {
 
 /// 按权重取一个下标。官方 `WeightedList.getRandomOrThrow` 从总权重里取一次数，
 /// 然后按顺序减，第一个减成负数的是结果。
-fn pick_weighted(
-    context: &LootContext<'_, '_, '_>,
-    weights: Vec<i32>,
-) -> NumResult<usize> {
-    let total: i32 = weights.iter().fold(0_i32, |sum, weight| sum.wrapping_add(*weight));
+fn pick_weighted(context: &LootContext<'_, '_, '_>, weights: Vec<i32>) -> NumResult<usize> {
+    let total: i32 = weights
+        .iter()
+        .fold(0_i32, |sum, weight| sum.wrapping_add(*weight));
     if total <= 0 {
         return Err(NumberError::Loot(LootError::Invalid(
             "weighted list has no positive total weight".to_owned(),
@@ -573,11 +567,7 @@ fn java_max(left: f32, right: f32) -> f32 {
         // Java 的 `Math.max` 在 -0.0 和 +0.0 里返回 +0.0。
         return 0.0;
     }
-    if left >= right {
-        left
-    } else {
-        right
-    }
+    if left >= right { left } else { right }
 }
 
 fn java_min(left: f32, right: f32) -> f32 {
@@ -587,11 +577,7 @@ fn java_min(left: f32, right: f32) -> f32 {
     if left == 0.0 && right == 0.0 {
         return -0.0;
     }
-    if left <= right {
-        left
-    } else {
-        right
-    }
+    if left <= right { left } else { right }
 }
 
 fn mth_ceil(value: f32) -> f32 {
@@ -816,9 +802,11 @@ fn parse_int_provider_at(value: &Value, what: &str, depth: usize) -> Result<IntP
                 depth + 1,
             )?),
         )),
-        "minecraft:from_float" => Ok(IntProvider::FromFloat(Box::new(
-            parse_float_provider_at(required(object, "input", what)?, "input", depth + 1)?,
-        ))),
+        "minecraft:from_float" => Ok(IntProvider::FromFloat(Box::new(parse_float_provider_at(
+            required(object, "input", what)?,
+            "input",
+            depth + 1,
+        )?))),
         "minecraft:pow" => Ok(IntProvider::Power(
             Box::new(parse_int_provider_at(
                 required(object, "base", what)?,
@@ -833,9 +821,9 @@ fn parse_int_provider_at(value: &Value, what: &str, depth: usize) -> Result<IntP
         )),
         "minecraft:score" => Ok(IntProvider::Unsupported("int provider `score`")),
         "minecraft:storage" => Ok(IntProvider::Unsupported("int provider `storage`")),
-        "minecraft:environment_attribute" => {
-            Ok(IntProvider::Unsupported("int provider `environment_attribute`"))
-        }
+        "minecraft:environment_attribute" => Ok(IntProvider::Unsupported(
+            "int provider `environment_attribute`",
+        )),
         other => Err(LootError::Unsupported(format!(
             "int provider `{other}` in {what}"
         ))),
@@ -1006,9 +994,11 @@ fn parse_float_provider_at(value: &Value, what: &str, depth: usize) -> Result<Fl
         "minecraft:sqrt" => unary_float(object, UnaryOp::SquareRoot, what, depth),
         "minecraft:sin" => unary_float(object, UnaryOp::Sin, what, depth),
         "minecraft:cos" => unary_float(object, UnaryOp::Cos, what, depth),
-        "minecraft:from_int" => Ok(FloatProvider::FromInt(Box::new(
-            parse_int_provider_at(required(object, "input", what)?, "input", depth + 1)?,
-        ))),
+        "minecraft:from_int" => Ok(FloatProvider::FromInt(Box::new(parse_int_provider_at(
+            required(object, "input", what)?,
+            "input",
+            depth + 1,
+        )?))),
         "minecraft:pow" => Ok(FloatProvider::Power(
             Box::new(parse_float_provider_at(
                 required(object, "base", what)?,
@@ -1083,11 +1073,10 @@ fn parse_weighted<T>(
 }
 
 /// 解析 `LevelBasedValue`，普通数字是常量。
-pub fn parse_level_based_value(
-    value: &Value,
-    what: &str,
-    depth: usize,
-) -> Result<LevelBasedValue> {
+pub fn parse_level_based_value(value: &Value, what: &str, depth: usize) -> Result<LevelBasedValue> {
+    if depth > 32 {
+        return Err(LootError::Invalid(format!("{what} nests too deeply")));
+    }
     if value.is_number() {
         return Ok(LevelBasedValue::Constant(f32_value(value, what)?));
     }

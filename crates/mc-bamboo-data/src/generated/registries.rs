@@ -557,6 +557,7 @@ pub mod fluid {
     pub const LAVA: i32 = 4;
 }
 
+
 pub mod potion {
     pub const TOTAL: u32 = 46;
     /// 条目名，下标就是注册表 ID。
@@ -702,5 +703,80 @@ pub mod banner_pattern {
     pub const TRIANGLE_TOP: i32 = 40;
     pub const TRIANGLES_BOTTOM: i32 = 41;
     pub const TRIANGLES_TOP: i32 = 42;
+}
+
+
+pub mod menu {
+    pub const TOTAL: u32 = 25;
+    pub const GENERIC_9X1: i32 = 0;
+    pub const GENERIC_9X2: i32 = 1;
+    pub const GENERIC_9X3: i32 = 2;
+    pub const GENERIC_9X4: i32 = 3;
+    pub const GENERIC_9X5: i32 = 4;
+    pub const GENERIC_9X6: i32 = 5;
+    pub const GENERIC_3X3: i32 = 6;
+    pub const CRAFTER_3X3: i32 = 7;
+    pub const ANVIL: i32 = 8;
+    pub const BEACON: i32 = 9;
+    pub const BLAST_FURNACE: i32 = 10;
+    pub const BREWING_STAND: i32 = 11;
+    pub const CRAFTING: i32 = 12;
+    pub const ENCHANTMENT: i32 = 13;
+    pub const FURNACE: i32 = 14;
+    pub const GRINDSTONE: i32 = 15;
+    pub const HOPPER: i32 = 16;
+    pub const LECTERN: i32 = 17;
+    pub const LOOM: i32 = 18;
+    pub const MERCHANT: i32 = 19;
+    pub const SHULKER_BOX: i32 = 20;
+    pub const SMITHING: i32 = 21;
+    pub const SMOKER: i32 = 22;
+    pub const CARTOGRAPHY_TABLE: i32 = 23;
+    pub const STONECUTTER: i32 = 24;
+}
+
+/// 属性的默认值，没有任何状态效果和附魔时的起点。
+pub mod attribute_defaults {
+    pub const AIR_DRAG_MODIFIER: f64 = 1.0;
+    pub const ARMOR: f64 = 0.0;
+    pub const ARMOR_TOUGHNESS: f64 = 0.0;
+    pub const ATTACK_DAMAGE: f64 = 2.0;
+    pub const ATTACK_KNOCKBACK: f64 = 0.0;
+    pub const ATTACK_SPEED: f64 = 4.0;
+    pub const BELOW_NAME_DISTANCE: f64 = 10.0;
+    pub const BLOCK_BREAK_SPEED: f64 = 1.0;
+    pub const BLOCK_INTERACTION_RANGE: f64 = 4.5;
+    pub const BOUNCINESS: f64 = 0.0;
+    pub const BURNING_TIME: f64 = 1.0;
+    pub const CAMERA_DISTANCE: f64 = 4.0;
+    pub const ENTITY_INTERACTION_RANGE: f64 = 3.0;
+    pub const EXPLOSION_KNOCKBACK_RESISTANCE: f64 = 0.0;
+    pub const FALL_DAMAGE_MULTIPLIER: f64 = 1.0;
+    pub const FLYING_SPEED: f64 = 0.4;
+    pub const FOLLOW_RANGE: f64 = 32.0;
+    pub const FRICTION_MODIFIER: f64 = 1.0;
+    pub const GRAVITY: f64 = 0.08;
+    pub const JUMP_STRENGTH: f64 = 0.41999998688697815;
+    pub const KNOCKBACK_RESISTANCE: f64 = 0.0;
+    pub const LUCK: f64 = 0.0;
+    pub const MAX_ABSORPTION: f64 = 0.0;
+    pub const MAX_HEALTH: f64 = 20.0;
+    pub const MINING_EFFICIENCY: f64 = 0.0;
+    pub const MOVEMENT_EFFICIENCY: f64 = 0.0;
+    pub const MOVEMENT_SPEED: f64 = 0.7;
+    pub const NAME_TAG_DISTANCE: f64 = 64.0;
+    pub const OXYGEN_BONUS: f64 = 0.0;
+    pub const SAFE_FALL_DISTANCE: f64 = 3.0;
+    pub const SCALE: f64 = 1.0;
+    pub const SNEAKING_SPEED: f64 = 0.3;
+    pub const SPAWN_REINFORCEMENTS: f64 = 0.0;
+    pub const STEP_HEIGHT: f64 = 0.6;
+    pub const SUBMERGED_MINING_SPEED: f64 = 0.2;
+    pub const SWEEPING_DAMAGE_RATIO: f64 = 0.0;
+    pub const TEMPT_RANGE: f64 = 10.0;
+    pub const WATER_MOVEMENT_EFFICIENCY: f64 = 0.0;
+    pub const WAYPOINT_RECEIVE_RANGE: f64 = 0.0;
+    pub const WAYPOINT_TRANSMIT_RANGE: f64 = 0.0;
+
 }
 

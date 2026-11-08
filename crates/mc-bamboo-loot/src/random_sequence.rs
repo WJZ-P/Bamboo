@@ -11,8 +11,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use mc_bamboo_blocks::random::{Seed128, XoroshiroRandom, upgrade_seed_to_128bit_unmixed};
 use md5::{Digest, Md5};
-use mc_bamboo_blocks::random::{upgrade_seed_to_128bit_unmixed, Seed128, XoroshiroRandom};
 
 /// `RandomSupport.seedFromHashOf`：序列名 UTF-8 的 MD5，前 8 字节是低位，
 /// 后 8 字节是高位，都按大端读成 long。

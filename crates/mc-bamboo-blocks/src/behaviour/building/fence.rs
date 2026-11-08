@@ -29,11 +29,17 @@ fn is_same_fence(fence: BlockState, other: BlockState) -> bool {
         && other.is_tagged(block_tags::WOODEN_FENCES) == fence.is_tagged(block_tags::WOODEN_FENCES)
 }
 
-/// `connectsTo`。`face` 是 `other` 朝着栅栏的面。
-fn connects_to(fence: BlockState, other: BlockState, face: Direction) -> bool {
+/// `connectsTo`。`face` 是 `other` 朝着栅栏的面，`other_pos` 是它的位置。
+fn connects_to(
+    world: &World,
+    fence: BlockState,
+    other_pos: BlockPos,
+    other: BlockState,
+    face: Direction,
+) -> bool {
     let gate =
         other.is_a(BlockAncestor::FenceGateBlock) && fence_gate::connects_to_direction(other, face);
-    !is_exception_for_connection(other) && has_full_face(other, face)
+    !is_exception_for_connection(other) && has_full_face(world, other_pos, other, face)
         || is_same_fence(fence, other)
         || gate
 }
@@ -50,11 +56,11 @@ impl Behaviour for Fence {
         let state = Direction::HORIZONTAL
             .into_iter()
             .fold(default, |state, side| {
-                let neighbor = world.block_state(pos.relative(side));
-                state.with(
-                    pipe_property(side),
-                    connects_to(default, neighbor, side.opposite()),
-                )
+                let neighbor_pos = pos.relative(side);
+                let neighbor = world.block_state(neighbor_pos);
+                let connected =
+                    connects_to(world, default, neighbor_pos, neighbor, side.opposite());
+                state.with(pipe_property(side), connected)
             });
         Some(state.with(WATERLOGGED, is_water_source(world, pos)))
     }
@@ -70,7 +76,7 @@ impl Behaviour for Fence {
     ) -> BlockState {
         tick_water_if_waterlogged(state, world, pos);
         if direction.axis().is_horizontal() {
-            let connected = connects_to(state, neighbor, direction.opposite());
+            let connected = connects_to(world, state, neighbor_pos, neighbor, direction.opposite());
             state.with(pipe_property(direction), connected)
         } else {
             Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)

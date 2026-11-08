@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use mc_bamboo_blocks::random::RandomSource;
 use mc_bamboo_data::{items, loot};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::condition::LootCondition;
 use crate::context::{EntityTarget, LootContext};
@@ -19,10 +19,10 @@ use crate::json::{
     array, f32_value, field, i32_value, object, opt_bool, required, string, type_name,
 };
 use crate::names::{self, Registry};
-use crate::number::{parse_float_provider, parse_int_provider, FloatProvider, IntProvider};
+use crate::number::{FloatProvider, IntProvider, parse_float_provider, parse_int_provider};
 use crate::predicate::ItemPredicate;
 use crate::stack::{
-    LootStack, ADDITIONAL_TRADE_COST, BLOCK_STATE, CUSTOM_NAME, INSTRUMENT, ITEM_NAME,
+    ADDITIONAL_TRADE_COST, BLOCK_STATE, CUSTOM_NAME, INSTRUMENT, ITEM_NAME, LootStack,
     OMINOUS_BOTTLE_AMPLIFIER, POTION_CONTENTS, SUSPICIOUS_STEW_EFFECTS,
 };
 use crate::{LootError, Result};
@@ -155,9 +155,7 @@ impl LootFunction {
 
     fn parse_at(value: &Value, depth: usize) -> Result<Self> {
         if depth > MAX_DEPTH {
-            return Err(LootError::Invalid(
-                "function nests too deeply".to_owned(),
-            ));
+            return Err(LootError::Invalid("function nests too deeply".to_owned()));
         }
         match value {
             Value::Array(items) => {
@@ -219,7 +217,8 @@ impl LootFunction {
             "minecraft:copy_components" => FunctionBody::CopyComponents {
                 source: parse_component_source(required(map, "source", kind)?)?,
                 include: super::json::opt_string_list(map, "include", "include")?,
-                exclude: super::json::opt_string_list(map, "exclude", "exclude")?.unwrap_or_default(),
+                exclude: super::json::opt_string_list(map, "exclude", "exclude")?
+                    .unwrap_or_default(),
             },
             "minecraft:copy_state" => {
                 let block = names::single_registry_id(
@@ -227,11 +226,17 @@ impl LootFunction {
                     Registry::Block,
                     "block",
                 )?;
-                let declared = super::json::string_list(required(map, "properties", kind)?, "properties")?;
+                let declared =
+                    super::json::string_list(required(map, "properties", kind)?, "properties")?;
                 let block = &mc_bamboo_data::blocks::BLOCKS[block as usize];
                 let properties = declared
                     .into_iter()
-                    .filter(|name| block.properties.iter().any(|property| property.name == *name))
+                    .filter(|name| {
+                        block
+                            .properties
+                            .iter()
+                            .any(|property| property.name == *name)
+                    })
                     .collect();
                 FunctionBody::CopyState { properties }
             }
@@ -239,12 +244,22 @@ impl LootFunction {
             "minecraft:enchant_randomly" => FunctionBody::EnchantRandomly {
                 options: names::opt_holder_set(map, "options", Registry::Enchantment, "options")?,
                 only_compatible: opt_bool(map, "only_compatible", kind, true)?,
-                include_additional_cost: opt_bool(map, "include_additional_cost_component", kind, false)?,
+                include_additional_cost: opt_bool(
+                    map,
+                    "include_additional_cost_component",
+                    kind,
+                    false,
+                )?,
             },
             "minecraft:enchant_with_levels" => FunctionBody::EnchantWithLevels {
                 levels: parse_int_provider(required(map, "levels", kind)?, "levels")?,
                 options: names::opt_holder_set(map, "options", Registry::Enchantment, "options")?,
-                include_additional_cost: opt_bool(map, "include_additional_cost_component", kind, false)?,
+                include_additional_cost: opt_bool(
+                    map,
+                    "include_additional_cost_component",
+                    kind,
+                    false,
+                )?,
             },
             "minecraft:enchanted_count_increase" => FunctionBody::EnchantedCountIncrease {
                 enchantment: names::single_registry_id(
@@ -286,9 +301,14 @@ impl LootFunction {
                 if let Some(value) = field(map, "enchantments") {
                     for (name, provider) in object(value, "enchantments")? {
                         let enchantment = names::enchantment_id(name).ok_or_else(|| {
-                            LootError::Invalid(format!("unknown enchantment `{name}` in enchantments"))
+                            LootError::Invalid(format!(
+                                "unknown enchantment `{name}` in enchantments"
+                            ))
                         })?;
-                        enchantments.push((enchantment, parse_int_provider(provider, "enchantment level")?));
+                        enchantments.push((
+                            enchantment,
+                            parse_int_provider(provider, "enchantment level")?,
+                        ));
                     }
                 }
                 FunctionBody::SetEnchantments {
@@ -308,7 +328,7 @@ impl LootFunction {
                     Some(other) => {
                         return Err(LootError::Invalid(format!(
                             "unknown set_name target `{other}`"
-                        )))
+                        )));
                     }
                 };
                 let entity = match super::json::opt_string(map, "entity", "entity")? {
@@ -323,12 +343,9 @@ impl LootFunction {
                     entity,
                 }
             }
-            "minecraft:set_ominous_bottle_amplifier" => {
-                FunctionBody::SetOminousBottleAmplifier(parse_int_provider(
-                    required(map, "amplifier", kind)?,
-                    "amplifier",
-                )?)
-            }
+            "minecraft:set_ominous_bottle_amplifier" => FunctionBody::SetOminousBottleAmplifier(
+                parse_int_provider(required(map, "amplifier", kind)?, "amplifier")?,
+            ),
             "minecraft:set_potion" => FunctionBody::SetPotion(names::single_registry_id(
                 required(map, "id", kind)?,
                 Registry::Potion,
@@ -336,7 +353,8 @@ impl LootFunction {
             )?),
             "minecraft:set_stew_effect" => {
                 let mut effects = Vec::new();
-                for value in super::json::opt_array(map, "effects", "effects")?.unwrap_or_default() {
+                for value in super::json::opt_array(map, "effects", "effects")?.unwrap_or_default()
+                {
                     let entry = object(value, "stew effect")?;
                     effects.push((
                         names::single_registry_id(
@@ -362,22 +380,18 @@ impl LootFunction {
             other => {
                 return Err(LootError::Invalid(format!(
                     "unknown loot function type `{other}`"
-                )))
+                )));
             }
         };
         Ok(Self { condition, body })
     }
 
     /// 按官方 `LootItemConditionalFunction.apply` 的顺序：条件不成立就原样返回。
-    pub fn apply(
-        &self,
-        stack: LootStack,
-        context: &LootContext<'_, '_, '_>,
-    ) -> Result<LootStack> {
-        if let Some(condition) = &self.condition {
-            if !condition.test(context)? {
-                return Ok(stack);
-            }
+    pub fn apply(&self, stack: LootStack, context: &LootContext<'_, '_, '_>) -> Result<LootStack> {
+        if let Some(condition) = &self.condition
+            && !condition.test(context)?
+        {
+            return Ok(stack);
         }
         self.run(stack, context)
     }
@@ -446,7 +460,8 @@ impl LootFunction {
                 include_additional_cost,
             } => {
                 let cost = levels.get(context)?;
-                let mut result = enchant_with_levels(stack, cost, options.as_deref(), context.random());
+                let mut result =
+                    enchant_with_levels(stack, cost, options.as_deref(), context.random());
                 if *include_additional_cost
                     && context.params.additional_cost_component_allowed.is_some()
                     && !result.is_empty()
@@ -700,7 +715,12 @@ fn parse_component_source(value: &Value) -> Result<ComponentSource> {
 }
 
 /// `ApplyBonusCount.run`：工具上附魔等级决定额外数量。
-fn apply_bonus(stack: &mut LootStack, formula: BonusFormula, level: i32, random: &dyn RandomSource) {
+fn apply_bonus(
+    stack: &mut LootStack,
+    formula: BonusFormula,
+    level: i32,
+    random: &dyn RandomSource,
+) {
     match formula {
         BonusFormula::Binomial { extra, probability } => {
             let mut count = stack.count;
@@ -743,7 +763,7 @@ fn copy_components(
         ComponentSource::Entity => {
             return Err(LootError::Unsupported(
                 "copy_components from an entity or item stack is not implemented".to_owned(),
-            ))
+            ));
         }
     };
     for (name, value) in components {
@@ -759,11 +779,7 @@ fn copy_components(
 }
 
 /// `CopyBlockState.run`：把当前方块状态里同名的属性写进 `block_state` 组件。
-fn copy_state(
-    stack: &mut LootStack,
-    properties: &[String],
-    context: &LootContext<'_, '_, '_>,
-) {
+fn copy_state(stack: &mut LootStack, properties: &[String], context: &LootContext<'_, '_, '_>) {
     let Some(state) = context.params.block_state else {
         return;
     };
@@ -773,7 +789,7 @@ fn copy_state(
         .cloned()
         .unwrap_or_default();
     for property in properties {
-        if let Some(value) = state.property_state(property) {
+        if let Some(value) = state.property_text(property) {
             values.insert(property.clone(), Value::from(value));
         }
     }
@@ -862,7 +878,9 @@ fn select_enchantment(
     };
     cost += 1 + random.next_int(enchantable / 4 + 1) + random.next_int(enchantable / 4 + 1);
     let span = (random.next_float() + random.next_float() - 1.0) * 0.15;
-    cost = (cost as f32 + cost as f32 * span).round().clamp(1.0, i32::MAX as f32) as i32;
+    cost = (cost as f32 + cost as f32 * span)
+        .round()
+        .clamp(1.0, i32::MAX as f32) as i32;
     let mut candidates = available_enchantments(cost, stack, options);
     if candidates.is_empty() {
         return results;
@@ -988,15 +1006,16 @@ fn smelting_recipes() -> &'static Vec<SmeltingRecipe> {
     RECIPES.get_or_init(|| {
         loot::SMELTING_RECIPES
             .iter()
-            .map(|(name, raw)| parse_smelting_recipe(name, raw).expect("生成器导出的熔炉配方必须能解析"))
+            .map(|(name, raw)| {
+                parse_smelting_recipe(name, raw).expect("生成器导出的熔炉配方必须能解析")
+            })
             .collect()
     })
 }
 
 fn parse_smelting_recipe(name: &str, raw: &str) -> Result<SmeltingRecipe> {
-    let value: Value = serde_json::from_str(raw).map_err(|error| {
-        LootError::Invalid(format!("smelting recipe `{name}`: {error}"))
-    })?;
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|error| LootError::Invalid(format!("smelting recipe `{name}`: {error}")))?;
     let map = object(&value, name)?;
     let mut ingredients = Vec::new();
     for raw in super::json::string_or_list(required(map, "ingredient", name)?, "ingredient")? {
@@ -1014,7 +1033,8 @@ fn parse_smelting_recipe(name: &str, raw: &str) -> Result<SmeltingRecipe> {
         }
     }
     let result = object(required(map, "result", name)?, "result")?;
-    let result_item = names::single_registry_id(required(result, "id", "result")?, Registry::Item, "result")?;
+    let result_item =
+        names::single_registry_id(required(result, "id", "result")?, Registry::Item, "result")?;
     let count = super::json::opt_i32(result, "count", "result", 1)?;
     Ok(SmeltingRecipe {
         ingredients,

@@ -6,7 +6,7 @@
 use std::{collections::BTreeSet, mem};
 
 use mc_bamboo_core::{Hand, Vec3};
-use mc_bamboo_data::{items::AIR, registries::entity_type};
+use mc_bamboo_data::registries::entity_type;
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
@@ -50,18 +50,9 @@ const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
     EquipmentSlot::Head,
 ];
 
-/// 判断一个装备槽变没变时比较的内容：物品和数量。组件不发给观察者，所以不比较。
-type EquipmentKey = (i32, i32);
-
-const NO_EQUIPMENT: EquipmentKey = (AIR, 0);
-
-fn equipment_key(stack: &ItemStack) -> EquipmentKey {
-    if stack.is_empty() {
-        NO_EQUIPMENT
-    } else {
-        (stack.item, stack.count)
-    }
-}
+/// 上次发出去的装备。官方 `LivingEntity.equipmentHasChanged` 用 `ItemStack.matches` 比，
+/// 所以物品、数量和组件任何一样变了都要重发。
+const NO_EQUIPMENT: ItemStack = ItemStack::empty();
 
 /// 玩家元数据里服务端维护的部分。其余 index 一直是默认值，不用发。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,7 +130,7 @@ pub(crate) struct EntitySync {
     /// 上次发出去的元数据。
     sent_metadata: Metadata,
     /// 上次比较时的装备，和 [`EQUIPMENT_SLOTS`] 一一对应。
-    sent_equipment: [EquipmentKey; EQUIPMENT_SLOTS.len()],
+    sent_equipment: [ItemStack; EQUIPMENT_SLOTS.len()],
     /// 看得见这名玩家的人。它们的客户端里有这个实体。
     seen_by: BTreeSet<PlayerId>,
 }
@@ -168,7 +159,7 @@ impl EntitySync {
                 model_customisation: client.model_customisation,
                 ..Metadata::DEFAULT
             },
-            sent_equipment: [NO_EQUIPMENT; EQUIPMENT_SLOTS.len()],
+            sent_equipment: [const { NO_EQUIPMENT }; EQUIPMENT_SLOTS.len()],
             seen_by: BTreeSet::new(),
         }
     }
@@ -266,8 +257,8 @@ fn is_visible(viewer: &Player, target: &Player, server_view_distance: i32) -> bo
         return false;
     }
     let range = visible_range(viewer.view_distance(server_view_distance));
-    let dx = viewer.position.x - target.position.x;
-    let dz = viewer.position.z - target.position.z;
+    let dx = viewer.position().x - target.position().x;
+    let dz = viewer.position().z - target.position().z;
     // 区块还没发到时不配对：`add_entity` 到达时区块要已经加载了。
     dx * dx + dz * dz <= range * range && viewer.chunks.is_chunk_tracked(target.chunk_pos())
 }
@@ -364,7 +355,7 @@ fn run_cycle(player: &mut Player, links: &mut Links) {
 
     if let Some(movement) = movement {
         if movement.has_position() {
-            player.sync.base = player.position;
+            player.sync.base = player.position();
         }
         if movement.has_rotation() {
             player.sync.last_yaw = yaw;
@@ -415,7 +406,7 @@ impl Movement {
         match self {
             Self::Sync => encode_frames(&EntityPositionSync {
                 entity_id,
-                path: position_path(player.position, ticks),
+                path: position_path(player.position(), ticks),
                 yaw: player.yaw,
                 pitch: player.pitch,
                 on_ground,
@@ -460,6 +451,7 @@ fn position_path(position: Vec3, ticks: i32) -> PositionPath {
 }
 
 fn choose_movement(player: &mut Player, yaw: u8, pitch: u8) -> Option<Movement> {
+    let position = player.position();
     let sync = &mut player.sync;
     if sync.teleport_delay > FORCED_SYNC_CYCLES || sync.was_on_ground != player.on_ground {
         sync.was_on_ground = player.on_ground;
@@ -468,13 +460,13 @@ fn choose_movement(player: &mut Player, yaw: u8, pitch: u8) -> Option<Movement> 
     }
 
     let send_rotation = yaw != sync.last_yaw || pitch != sync.last_pitch;
-    let send_position = has_moved(sync.base, player.position)
-        || sync.tick_count.is_multiple_of(FORCED_POSITION_PERIOD);
+    let send_position =
+        has_moved(sync.base, position) || sync.tick_count.is_multiple_of(FORCED_POSITION_PERIOD);
     if !send_position {
         return send_rotation.then_some(Movement::Rotation);
     }
     // 位移放不进 Short 时也是全量同步，但和上面不同，这里不重置 `teleport_delay`。
-    Some(match PositionDelta::between(sync.base, player.position) {
+    Some(match PositionDelta::between(sync.base, position) {
         None => Movement::Sync,
         Some(delta) if send_rotation => Movement::PositionRotation(delta),
         Some(delta) => Movement::Position(delta),
@@ -522,9 +514,8 @@ fn send_equipment_change(player: &mut Player, links: &mut Links) {
         let Some(stack) = player.inventory.equipment(slot) else {
             continue;
         };
-        let current = equipment_key(stack);
-        if *sent != current {
-            *sent = current;
+        if !sent.matches(stack) {
+            *sent = stack.clone();
             changed.push((slot, stack));
         }
     }

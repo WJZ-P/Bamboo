@@ -14,10 +14,10 @@ use serde_json::Value;
 use crate::context::{EntityTarget, LootContext};
 use crate::json::{array, f32_value, field, object, required, string, type_name};
 use crate::names::{self, Registry};
+use crate::number::{FloatProvider, IntProvider, LevelBasedValue};
 use crate::number::{parse_float_provider, parse_int_provider, parse_level_based_value};
 use crate::predicate::{BlockPredicate, DamageSourcePredicate, EntityPredicate, ItemPredicate};
 use crate::{LootError, Result};
-use crate::number::{FloatProvider, IntProvider, LevelBasedValue};
 
 /// 条件里引用别的条件或提供器时的最大展开深度，防止数据循环引用。
 const MAX_DEPTH: usize = 32;
@@ -31,16 +31,21 @@ pub enum LootCondition {
     AnyOf(Vec<Self>),
     Inverted(Box<Self>),
     /// `table_bonus`：工具上附魔等级决定概率。
-    BonusLevelTable { enchantment: i32, chances: Vec<f32> },
-    DamageSource(Option<DamageSourcePredicate>),
-    EnchantmentActive { active: bool },
+    BonusLevelTable {
+        enchantment: i32,
+        chances: Vec<f32>,
+    },
+    DamageSource(Option<Box<DamageSourcePredicate>>),
+    EnchantmentActive {
+        active: bool,
+    },
     /// `entity_scores`：需要积分板，求值时报不支持。
     EntityScores {
         scores: BTreeMap<String, IntRangePredicate>,
         target: EntityTarget,
     },
     EntityProperties {
-        predicate: Option<EntityPredicate>,
+        predicate: Option<Box<EntityPredicate>>,
         target: EntityTarget,
     },
     KilledByPlayer,
@@ -52,10 +57,10 @@ pub enum LootCondition {
     },
     Explosion,
     LocationCheck {
-        predicate: Option<crate::predicate::LocationPredicate>,
+        predicate: Option<Box<crate::predicate::LocationPredicate>>,
         offset: (i32, i32, i32),
     },
-    MatchBlock(BlockPredicate),
+    MatchBlock(Box<BlockPredicate>),
     MatchTool(Option<ItemPredicate>),
     TimeCheck {
         clock: String,
@@ -86,9 +91,7 @@ impl LootCondition {
 
     fn parse_at(value: &Value, what: &str, depth: usize) -> Result<Self> {
         if depth > MAX_DEPTH {
-            return Err(LootError::Invalid(format!(
-                "{what} expands too deeply"
-            )));
+            return Err(LootError::Invalid(format!("{what} expands too deeply")));
         }
         if let Some(name) = value.as_str() {
             return parse_reference(name, what, depth + 1);
@@ -113,7 +116,7 @@ impl LootCondition {
             }),
             "minecraft:damage_source_properties" => Ok(Self::DamageSource(
                 field(map, "predicate")
-                    .map(|value| DamageSourcePredicate::parse(value, what))
+                    .map(|value| DamageSourcePredicate::parse(value, what).map(Box::new))
                     .transpose()?,
             )),
             "minecraft:enchantment_active_check" => {
@@ -134,7 +137,7 @@ impl LootCondition {
             }
             "minecraft:entity_properties" => Ok(Self::EntityProperties {
                 predicate: field(map, "predicate")
-                    .map(|value| EntityPredicate::parse(value, what))
+                    .map(|value| EntityPredicate::parse(value, what).map(Box::new))
                     .transpose()?,
                 target: parse_entity_target(map, what)?,
             }),
@@ -173,12 +176,16 @@ impl LootCondition {
                 );
                 Ok(Self::LocationCheck {
                     predicate: field(map, "predicate")
-                        .map(|value| crate::predicate::LocationPredicate::parse(value, what))
+                        .map(|value| {
+                            crate::predicate::LocationPredicate::parse(value, what).map(Box::new)
+                        })
                         .transpose()?,
                     offset,
                 })
             }
-            "minecraft:match_block" => Ok(Self::MatchBlock(BlockPredicate::parse(value, what)?)),
+            "minecraft:match_block" => Ok(Self::MatchBlock(Box::new(BlockPredicate::parse(
+                value, what,
+            )?))),
             "minecraft:match_tool" => Ok(Self::MatchTool(
                 field(map, "predicate")
                     .map(|value| ItemPredicate::parse(value, what))
@@ -196,10 +203,7 @@ impl LootCondition {
                 Ok(Self::TimeCheck {
                     clock,
                     period,
-                    value: IntRangePredicate::parse(
-                        required(map, "value", what)?,
-                        "time value",
-                    )?,
+                    value: IntRangePredicate::parse(required(map, "value", what)?, "time value")?,
                 })
             }
             "minecraft:int_value_check" => Ok(Self::IntValueCheck {
@@ -215,9 +219,9 @@ impl LootCondition {
                 thundering: optional_bool_field(map, "thundering", what)?,
             }),
             // 官方 26.3 的条件类型，本实现没有对应的世界数据。
-            "minecraft:environment_attribute_check" => {
-                Ok(Self::Unsupported("condition `environment_attribute_check`".to_owned()))
-            }
+            "minecraft:environment_attribute_check" => Ok(Self::Unsupported(
+                "condition `environment_attribute_check`".to_owned(),
+            )),
             other => Err(LootError::Unsupported(format!(
                 "loot condition `{other}` in {what}"
             ))),
@@ -433,15 +437,15 @@ impl IntRangePredicate {
         match self {
             Self::Point(value) => Ok(value.get(context)? == input),
             Self::Line { min, max } => {
-                if let Some(min) = min {
-                    if input < min.get(context)? {
-                        return Ok(false);
-                    }
+                if let Some(min) = min
+                    && input < min.get(context)?
+                {
+                    return Ok(false);
                 }
-                if let Some(max) = max {
-                    if input > max.get(context)? {
-                        return Ok(false);
-                    }
+                if let Some(max) = max
+                    && input > max.get(context)?
+                {
+                    return Ok(false);
                 }
                 Ok(true)
             }
@@ -479,15 +483,15 @@ impl FloatRangePredicate {
         match self {
             Self::Point(value) => Ok(value.get(context)? == input),
             Self::Line { min, max } => {
-                if let Some(min) = min {
-                    if input < min.get(context)? {
-                        return Ok(false);
-                    }
+                if let Some(min) = min
+                    && input < min.get(context)?
+                {
+                    return Ok(false);
                 }
-                if let Some(max) = max {
-                    if input > max.get(context)? {
-                        return Ok(false);
-                    }
+                if let Some(max) = max
+                    && input > max.get(context)?
+                {
+                    return Ok(false);
                 }
                 Ok(true)
             }
@@ -528,15 +532,14 @@ fn parse_chances(value: &Value, what: &str) -> Result<Vec<f32>> {
         .map(|value| f32_value(value, "chance"))
         .collect::<Result<_>>()?;
     if chances.is_empty() {
-        return Err(LootError::Invalid(format!("{what} chances must not be empty")));
+        return Err(LootError::Invalid(format!(
+            "{what} chances must not be empty"
+        )));
     }
     Ok(chances)
 }
 
-fn parse_entity_target(
-    map: &serde_json::Map<String, Value>,
-    what: &str,
-) -> Result<EntityTarget> {
+fn parse_entity_target(map: &serde_json::Map<String, Value>, what: &str) -> Result<EntityTarget> {
     let name = string(required(map, "entity", what)?, "entity")?;
     EntityTarget::from_name(name)
         .ok_or_else(|| LootError::Invalid(format!("unknown entity target `{name}` in {what}")))
@@ -583,7 +586,10 @@ mod tests {
 
     use crate::context::{LootParams, Position};
 
-    fn context<'a>(params: &'a LootParams<'a>, random: &'a LegacyRandom) -> LootContext<'a, 'a, 'a> {
+    fn context<'a>(
+        params: &'a LootParams<'a>,
+        random: &'a LegacyRandom,
+    ) -> LootContext<'a, 'a, 'a> {
         LootContext::new(params, random)
     }
 
@@ -617,8 +623,7 @@ mod tests {
     #[test]
     fn references_expand_to_registered_conditions() {
         // 官方数据包里的 `minecraft:tool/can_shear` 是 `match_tool` 剪刀。
-        let condition =
-            LootCondition::parse(&json!("minecraft:tool/can_shear")).unwrap();
+        let condition = LootCondition::parse(&json!("minecraft:tool/can_shear")).unwrap();
         let mut params = LootParams::new(0.0);
         let random = LegacyRandom::new(1);
         assert!(!condition.test(&context(&params, &random)).unwrap());

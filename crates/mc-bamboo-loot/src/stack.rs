@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_data::{items, Item};
+use mc_bamboo_data::{Item, items};
 use serde_json::{Map, Value};
 
 use crate::names;
