@@ -1,10 +1,14 @@
 //! 实体：世界线程拥有、按 ID 引用的下落方块和点燃的 TNT。
 //!
 //! 实体只有一个线程碰得到（见 `docs/folia.md`），所以这里没有锁，也没有引用：
-//! [`Entities`] 按 ID 存在世界里，别的代码只拿到 ID。一个 tick 的顺序和官方
-//! `ServerLevel.tick` 一样：方块刻、流体刻，然后才轮到实体。
-//!
+//! [`Entities`] 按 ID 存在世界里，别的代码只拿到 ID。实体在计划刻和随机刻之后 tick。
+//! 官方实体在方块实体之前，这里方块实体已经在计划刻里跑完了。
 //! 只有两种实体：下落的方块和点燃的 TNT。别的实体以后按 [`EntityKind`] 加。
+//!
+//! Entities are owned by the world thread and referenced by id, with no locks.
+//! They tick after scheduled ticks and random ticks. Vanilla ticks entities before
+//! block entities; those already ran inside the scheduled-tick step.
+//! Only falling blocks and primed TNT exist so far. Later kinds go on [`EntityKind`].
 
 pub mod random;
 
@@ -26,8 +30,6 @@ pub use random::JavaRandom;
 pub const FIRST_ENTITY_ID: i32 = 1 << 24;
 
 /// 这个世界随机源的固定种子。官方用 `RandomSupport.generateUniqueSeed()`，每次开服都不同。
-const RANDOM_SEED: i64 = 0x5EED_0000_0000_0001;
-
 /// 每个实体的随机源的种子是这个常数和实体 ID 异或出来的。官方实体的随机源是独立的，
 /// 种子同样不可复现；这里让它只由 ID 决定，测试才比得了。
 pub const ENTITY_RANDOM_SEED: i64 = 0x0DDB_1A5E_5BAD_5EED;
@@ -210,17 +212,23 @@ impl Entity {
             f64::from(pos.y),
             f64::from(pos.z) + 0.5,
         );
-        Self::new(EntityKind::FallingBlock(FallingBlock::new(state, pos)), position)
+        Self::new(
+            EntityKind::FallingBlock(FallingBlock::new(state, pos)),
+            position,
+        )
     }
 
-    /// 点燃的 TNT，位置是方块的底心。初速度是官方构造器里的随机水平方向。
+    /// 点燃的 TNT，位置是方块的底心。`angle` 是 `level.getRandom().nextDouble()`，
+    /// 调用方负责取数，这样和方块逻辑共用同一个随机源。
     ///
-    /// 官方用 `level.getRandom()`，所以世界随机源要传进来。
-    pub fn primed_tnt(position: Vec3, random: &mut JavaRandom) -> Self {
+    /// `angle` is `level.getRandom().nextDouble()`. The caller draws it so block logic
+    /// and the entity share one random source.
+    pub fn primed_tnt(position: Vec3, angle: f64) -> Self {
         let mut entity = Self::new(EntityKind::Tnt(PrimedTnt::new()), position);
         // `(float) (Math.PI * 2)`，官方先算成 `float` 再乘。
+        // Official casts `Math.PI * 2` to `float` before multiplying.
         let full_turn = f64::from((std::f64::consts::PI * 2.0) as f32);
-        let rotation = random.next_double() * full_turn;
+        let rotation = angle * full_turn;
         entity.delta = Vec3::new(
             -rotation.sin() * 0.02,
             f64::from(0.2_f32),
@@ -319,29 +327,22 @@ pub struct Entities {
     active: BTreeMap<i32, Entity>,
     pending: Vec<Entity>,
     ticking: bool,
-    random: JavaRandom,
 }
 
 impl Default for Entities {
     fn default() -> Self {
-        Self::with_seed(RANDOM_SEED)
+        Self {
+            next_id: FIRST_ENTITY_ID,
+            active: BTreeMap::new(),
+            pending: Vec::new(),
+            ticking: false,
+        }
     }
 }
 
 impl Entities {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// 指定世界随机源的种子。oracle 用它和官方对齐。
-    pub fn with_seed(seed: i64) -> Self {
-        Self {
-            next_id: FIRST_ENTITY_ID,
-            active: BTreeMap::new(),
-            pending: Vec::new(),
-            ticking: false,
-            random: JavaRandom::new(seed),
-        }
     }
 
     /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
@@ -389,11 +390,6 @@ impl Entities {
 
     pub fn is_empty(&self) -> bool {
         self.active.is_empty()
-    }
-
-    /// 世界随机源，官方的 `level.getRandom()`。
-    pub fn random(&mut self) -> &mut JavaRandom {
-        &mut self.random
     }
 
     pub(crate) fn ids(&self) -> Vec<i32> {

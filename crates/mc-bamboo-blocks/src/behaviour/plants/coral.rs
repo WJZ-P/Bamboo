@@ -1,7 +1,7 @@
 //! 珊瑚。`BaseCoralPlantBlock`、`BaseCoralFanBlock`、`BaseCoralWallFanBlock` 是死的，
 //! `CoralPlantBlock`、`CoralFanBlock`、`CoralWallFanBlock`、`CoralBlock` 是活的。
 //!
-//! 活珊瑚离开水后过一会儿变成死珊瑚。官方的延迟是 60 到 99 刻的随机数，这里固定取 [`DIE_DELAY`]。
+//! 活珊瑚离开水后过一会儿变成死珊瑚，延迟是 60 到 99 刻的随机数，见 [`die_delay`]。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
@@ -19,8 +19,15 @@ use crate::{
     world::{UPDATE_CLIENTS, World},
 };
 
-/// 活珊瑚离开水到死去的计划刻延迟。
-const DIE_DELAY: i32 = 80;
+/// 活珊瑚离开水到死去的最短延迟。
+const MIN_DIE_DELAY: i32 = 60;
+/// 在最短延迟上再随机加 0 到这个数减一。
+const DIE_DELAY_SPREAD: i32 = 40;
+
+/// 活珊瑚离开水到死去的计划刻延迟：`60 + random.nextInt(40)`。
+fn die_delay(world: &World) -> i32 {
+    MIN_DIE_DELAY + world.random().next_int(DIE_DELAY_SPREAD)
+}
 
 /// `CoralBlock.scanForWater`：六个邻居里有水。
 fn has_water_nearby(world: &World, pos: BlockPos) -> bool {
@@ -37,7 +44,7 @@ fn scan_for_water(state: BlockState, world: &World, pos: BlockPos) -> bool {
 /// `tryScheduleDieTick`。
 fn try_schedule_die_tick(state: BlockState, world: &mut World, pos: BlockPos) {
     if !scan_for_water(state, world, pos) {
-        world.schedule_tick(pos, state.block(), DIE_DELAY);
+        world.schedule_tick(pos, state.block(), die_delay(world));
     }
 }
 
@@ -220,7 +227,7 @@ impl Behaviour for Coral {
     fn before_placement(&self, block: &'static Block, ctx: &PlaceContext, world: &mut World) {
         let pos = ctx.clicked_pos();
         if !has_water_nearby(world, pos) {
-            world.schedule_tick(pos, block, DIE_DELAY);
+            world.schedule_tick(pos, block, die_delay(world));
         }
     }
 
@@ -234,7 +241,7 @@ impl Behaviour for Coral {
         neighbor: BlockState,
     ) -> BlockState {
         if !has_water_nearby(world, pos) {
-            world.schedule_tick(pos, state.block(), DIE_DELAY);
+            world.schedule_tick(pos, state.block(), die_delay(world));
         }
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
     }
@@ -271,21 +278,27 @@ mod tests {
         (level, ticks)
     }
 
-    /// 官方的延迟是随机的，oracle 只比位置和类型，这里把延迟固定下来。
+    /// 延迟是世界随机源取的第一个数。
+    fn expected_delay() -> i64 {
+        let random = crate::LevelRandom::new(0);
+        i64::from(MIN_DIE_DELAY + random.source().next_int(DIE_DELAY_SPREAD))
+    }
+
     #[test]
-    fn a_coral_block_on_dry_land_dies_after_the_fixed_delay() {
+    fn a_coral_block_on_dry_land_dies_after_a_random_delay() {
         let (mut level, mut ticks) = placed_on_dry_land(items::TUBE_CORAL_BLOCK);
-        run_scheduled_ticks(&mut level, &mut ticks, i64::from(DIE_DELAY) - 1);
+        let delay = expected_delay();
+        run_scheduled_ticks(&mut level, &mut ticks, delay - 1);
         assert!(level.get(CORAL).is(blocks::TUBE_CORAL_BLOCK));
-        run_scheduled_ticks(&mut level, &mut ticks, i64::from(DIE_DELAY));
+        run_scheduled_ticks(&mut level, &mut ticks, delay);
         assert!(level.get(CORAL).is(blocks::DEAD_TUBE_CORAL_BLOCK));
     }
 
     #[test]
-    fn a_coral_plant_on_dry_land_dies_after_the_fixed_delay() {
+    fn a_coral_plant_on_dry_land_dies_after_a_random_delay() {
         let (mut level, mut ticks) = placed_on_dry_land(items::TUBE_CORAL);
         assert_eq!(level.get(CORAL).try_get(WATERLOGGED), Some(false));
-        run_scheduled_ticks(&mut level, &mut ticks, i64::from(DIE_DELAY));
+        run_scheduled_ticks(&mut level, &mut ticks, expected_delay());
         let dead = BlockState(blocks::DEAD_TUBE_CORAL).with(WATERLOGGED, false);
         assert_eq!(level.get(CORAL), dead);
     }

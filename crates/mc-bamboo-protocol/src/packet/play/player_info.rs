@@ -6,7 +6,10 @@ use uuid::Uuid;
 use super::GameMode;
 use crate::{
     codec::{write_bool, write_string, write_uuid, write_varint},
-    packet::ClientboundPacket,
+    packet::{
+        ClientboundPacket,
+        profile::{ProfileProperty, write_profile_properties},
+    },
     text::Component,
 };
 
@@ -15,6 +18,8 @@ use crate::{
 pub struct PlayerInfoEntry<'a> {
     pub uuid: Uuid,
     pub name: &'a str,
+    /// 皮肤等属性。别人的客户端靠这些字段显示皮肤，离线模式没有属性。
+    pub properties: &'a [ProfileProperty],
     pub game_mode: GameMode,
     pub listed: bool,
     /// 毫秒。
@@ -29,8 +34,7 @@ impl PlayerInfoEntry<'_> {
         write_uuid(out, self.uuid);
         if actions & PlayerInfoUpdate::ADD_PLAYER != 0 {
             write_string(out, self.name);
-            // 皮肤等属性的数量。离线模式没有属性。
-            write_varint(out, 0);
+            write_profile_properties(out, self.properties);
         }
         if actions & PlayerInfoUpdate::INITIALIZE_CHAT != 0 {
             // 聊天会话。离线模式没有。
@@ -127,6 +131,7 @@ mod tests {
         PlayerInfoEntry {
             uuid: STEVE,
             name: "Steve",
+            properties: &[],
             game_mode: GameMode::Creative,
             listed: true,
             latency: 42,
@@ -158,6 +163,27 @@ mod tests {
                  00
                  01"
             ))
+        );
+    }
+
+    #[test]
+    fn adding_a_player_writes_the_skin_properties() {
+        let properties = [ProfileProperty {
+            name: "textures".to_owned(),
+            value: "value".to_owned(),
+            signature: Some("signature".to_owned()),
+        }];
+        let entry = PlayerInfoEntry {
+            properties: &properties,
+            ..steve()
+        };
+
+        let mut expected = format!("01 01 {STEVE_HEX} 05 53 74 65 76 65 01");
+        expected.push_str(" 08 74 65 78 74 75 72 65 73 05 76 61 6c 75 65 01");
+        expected.push_str(" 09 73 69 67 6e 61 74 75 72 65");
+        assert_eq!(
+            update(PlayerInfoUpdate::ADD_PLAYER, &[entry]),
+            hex(&expected)
         );
     }
 
@@ -222,6 +248,34 @@ mod tests {
         assert_eq!(
             update(actions, &[entry]),
             hex(&format!("60 01 {STEVE_HEX} 01 08 00 02 68 69 ac 02"))
+        );
+    }
+
+    /// 皮肤跟着 ADD_PLAYER 一起发出去，别人的客户端才看得到。
+    #[test]
+    fn add_player_carries_the_skin() {
+        let properties = [ProfileProperty {
+            name: "textures".to_owned(),
+            value: "ewo=".to_owned(),
+            signature: Some("c2ln".to_owned()),
+        }];
+        let entry = PlayerInfoEntry {
+            properties: &properties,
+            ..steve()
+        };
+        assert_eq!(
+            update(PlayerInfoUpdate::ADD_PLAYER, &[entry]),
+            hex(&format!(
+                "01
+                 01
+                 {STEVE_HEX}
+                 05 53 74 65 76 65
+                 01
+                 08 74 65 78 74 75 72 65 73
+                 04 65 77 6f 3d
+                 01
+                 04 63 32 6c 6e"
+            ))
         );
     }
 

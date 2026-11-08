@@ -1465,10 +1465,10 @@ async fn packets_the_server_does_not_decode_are_dropped_quietly() {
     let mark = alice.mark();
 
     // `coverage.md` 1.3：真实客户端会发、服务端可以丢弃的包，内容是什么都不算错。
+    // `container_close` 不在里面：它现在会被解码，坏包和官方一样让连接断开。
     for id in [
         serverbound::CLIENT_TICK_END,
         serverbound::PLAYER_LOADED,
-        serverbound::CONTAINER_CLOSE,
         serverbound::SEEN_ADVANCEMENTS,
         serverbound::ATTACK,
         serverbound::INTERACT,

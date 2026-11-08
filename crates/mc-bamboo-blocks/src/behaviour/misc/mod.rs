@@ -9,6 +9,10 @@ mod cake;
 mod candle;
 mod cauldron;
 mod composter;
+
+pub(crate) use composter::{
+    MAX_LEVEL as COMPOST_MAX_LEVEL, READY as COMPOST_READY, compost_empty, compost_fill,
+};
 mod copper;
 mod crafter;
 mod creaking_heart;
@@ -24,6 +28,7 @@ mod jukebox;
 mod leaves;
 mod liquid;
 mod menu;
+mod nylium;
 mod portal;
 mod potent_sulfur;
 mod pumpkin;
@@ -33,6 +38,7 @@ mod respawn_anchor;
 mod scaffolding;
 mod sculk;
 mod sea_pickle;
+mod sniffer_egg;
 mod snow;
 mod soil;
 mod speleothem;
@@ -46,12 +52,12 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::BlockClass;
 
 use self::{
-    amethyst::AmethystCluster,
+    amethyst::{AmethystCluster, BuddingAmethyst},
     cake::{Cake, CandleCake},
     candle::Candle,
     cauldron::Cauldron,
     composter::Composter,
-    copper::{CopperBulb, CopperGolemStatue, WeatheringCopperGolemStatue},
+    copper::{CopperBulb, CopperGolemStatue, WeatheringCopperFull, WeatheringCopperGolemStatue},
     crafter::Crafter,
     creaking_heart::CreakingHeart,
     decorated_pot::DecoratedPot,
@@ -60,12 +66,13 @@ use self::{
     fire::{Fire, SoulFire},
     flower_pot::FlowerPot,
     frogspawn::Frogspawn,
-    frosted_ice::FrostedIce,
+    frosted_ice::{FrostedIce, Ice},
     hanging::{HangingMoss, ShelfMushroom, SporeBlossom},
     jukebox::Jukebox,
     leaves::Leaves,
     liquid::{BubbleColumn, Liquid},
     menu::{BrewingStand, Menu},
+    nylium::{Netherrack, Nylium},
     portal::NetherPortal,
     potent_sulfur::PotentSulfur,
     pumpkin::Pumpkin,
@@ -76,7 +83,7 @@ use self::{
     sculk::{CalibratedSculkSensor, SculkCatalyst, SculkSensor, SculkShrieker},
     sea_pickle::SeaPickle,
     snow::{PowderSnow, SnowLayer},
-    soil::{DirtPath, Farmland},
+    soil::{DirtPath, Farmland, RootedDirt},
     speleothem::Speleothem,
     sponge::Sponge,
     test_block::TestBlock,
@@ -162,25 +169,27 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         C::TurtleEggBlock => Some(&TurtleEgg),
         C::VaultBlock => Some(&Vault),
         C::WeatheringCopperGolemStatueBlock => Some(&WeatheringCopperGolemStatue),
+        C::BuddingAmethystBlock => Some(&BuddingAmethyst),
+        C::IceBlock => Some(&Ice),
+        C::NetherrackBlock => Some(&Netherrack),
+        C::NyliumBlock => Some(&Nylium),
+        C::RootedDirtBlock => Some(&RootedDirt),
+        C::WeatheringCopperFullBlock => Some(&WeatheringCopperFull),
         // 官方这些类不覆盖 `Behaviour` 的任何方法，只有形状或者和范围无关的东西。
+        // `BonemealableFeaturePlacerBlock`（苔藓块）的骨粉要世界生成的地物，不做。
         C::AirBlock
         | C::AmethystBlock
         | C::Block
         | C::BonemealableFeaturePlacerBlock
-        | C::BuddingAmethystBlock
         | C::CryingObsidianBlock
         | C::DropExperienceBlock
         | C::EndGatewayBlock
         | C::EndPortalBlock
         | C::HalfTransparentBlock
         | C::HoneyBlock
-        | C::IceBlock
         | C::InfestedBlock
         | C::MagmaBlock
         | C::MudBlock
-        | C::NetherrackBlock
-        | C::NyliumBlock
-        | C::RootedDirtBlock
         | C::SculkBlock
         | C::SlimeBlock
         | C::SoulSandBlock
@@ -190,15 +199,17 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::TintedGlassBlock
         | C::TransparentBlock
         | C::TrialSpawnerBlock
-        | C::WeatheringCopperFullBlock
         | C::WebBlock => Some(&Plain),
+        C::SnifferEggBlock => Some(&sniffer_egg::SnifferEgg),
         // 官方的覆盖在这个世界里都走不到：孵化的计划刻不在范围里，主世界的水不会蒸发，
         // `GameMasterBlock` 要权限，别的只碰方块实体的内容。
-        C::JigsawBlock
-        | C::SnifferEggBlock
-        | C::StructureBlock
-        | C::TestInstanceBlock
-        | C::WetSpongeBlock => Some(&Plain),
+        //
+        // The official overrides never run here: hatching ticks are out of scope, overworld
+        // water does not evaporate, `GameMasterBlock` needs permission, and the rest only
+        // touch block-entity contents.
+        C::JigsawBlock | C::StructureBlock | C::TestInstanceBlock | C::WetSpongeBlock => {
+            Some(&Plain)
+        }
         _ => None,
     }
 }
@@ -206,8 +217,8 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
 /// `FallingBlockEntity.fall`：这一格只剩流体，方块本身变成实体从这一格的中心开始掉。
 ///
 /// 脚手架和滴水石锥自己也调它，它们不是 `FallingBlock`。
-fn fall(world: &mut World, pos: BlockPos, state: BlockState) {
-    world.spawn_falling_block(pos, state);
+fn fall(world: &mut World, pos: BlockPos, state: BlockState) -> i32 {
+    world.spawn_falling_block(pos, state)
 }
 
 #[cfg(test)]

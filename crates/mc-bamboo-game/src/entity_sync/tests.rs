@@ -122,7 +122,7 @@ impl Stage {
     }
 
     fn with_client(position: Vec3, client: ClientInformation) -> Self {
-        let mut region = Region::new(8, 20);
+        let mut region = Region::new(8, 20, false);
         let own = Recorder::default();
         let watcher = Recorder::default();
         region.links.add(STEVE, Box::new(own.clone()));
@@ -137,7 +137,7 @@ impl Stage {
             position,
         );
         player.sync.seen_by.insert(WATCHER);
-        region.players.insert(STEVE, player);
+        region.insert_player(player);
 
         Self {
             region,
@@ -153,9 +153,9 @@ impl Stage {
     }
 
     fn shift(&mut self, dx: f64, dy: f64, dz: f64) {
-        let player = self.player();
-        let Vec3 { x, y, z } = player.position;
-        player.position = Vec3::new(x + dx, y + dy, z + dz);
+        let Vec3 { x, y, z } = self.player().position();
+        self.region
+            .move_player(STEVE, Vec3::new(x + dx, y + dy, z + dz));
     }
 
     /// 只跑 `send_changes`，和官方跑 `sendChanges` 的 trace 一样。
@@ -336,7 +336,7 @@ fn first_cycle_uses_a_linear_delta() {
     stage.player().on_ground = true;
     stage.player().sync.was_on_ground = true;
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.run(1);
 
     assert_eq!(
@@ -355,7 +355,7 @@ fn later_cycles_use_one_step_with_the_ticks_since_the_last_cycle() {
     stage.player().sync.was_on_ground = true;
     stage.skip_first_cycle();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.run(1);
 
     assert_eq!(
@@ -372,7 +372,7 @@ fn moving_and_turning_matches_official_bytes() {
     let mut stage = Stage::at(POSITION);
     stage.skip_first_cycle();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.player().pitch = -45.0;
     stage.run(1);
@@ -572,7 +572,7 @@ fn one_cycle_sends_movement_then_metadata_then_the_head() {
     let mut stage = Stage::at(POSITION);
     stage.skip_first_cycle();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.player().sync.shared_flags = ENTITY_FLAG_SPRINTING;
     stage.step();
@@ -635,7 +635,7 @@ fn sync_state_moves_on_while_nobody_watches() {
     let mut stage = Stage::at(POSITION);
     stage.player().sync.seen_by.clear();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.run(4);
 
@@ -738,7 +738,7 @@ fn pairing_starts_from_what_was_last_sent_not_from_the_current_state() {
     stage.skip_first_cycle();
 
     // 这些变化还没进入周期。
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.player().pitch = 45.0;
     stage.player().head_yaw = 90.0;
@@ -1047,7 +1047,7 @@ fn equipment_is_only_sent_for_the_slots_that_changed() {
 }
 
 #[test]
-fn components_neither_count_as_a_change_nor_reach_the_viewers() {
+fn components_reach_the_viewers_and_count_as_a_change() {
     let mut stage = Stage::at(POSITION);
     stage.player().inventory.slots[HOTBAR_SLOT] = ItemStack {
         item: STONE,
@@ -1058,25 +1058,49 @@ fn components_neither_count_as_a_change_nor_reach_the_viewers() {
     send_equipment_changes(&mut stage.region);
     assert_eq!(
         stage.flush_watcher(),
-        [frame(clientbound::SET_EQUIPMENT, "07 00 02 01 00 00")]
+        [frame(
+            clientbound::SET_EQUIPMENT,
+            "07 00 02 01 01 01 01 10 0c"
+        )]
     );
 
+    // 官方 `equipmentHasChanged` 用 `ItemStack.matches` 比，组件变了也要重发。
     stage.player().inventory.slots[HOTBAR_SLOT].added.clear();
     send_equipment_changes(&mut stage.region);
-    assert!(stage.flush_watcher().is_empty());
+    assert_eq!(
+        stage.flush_watcher(),
+        [frame(clientbound::SET_EQUIPMENT, "07 00 02 01 00 01 0c")]
+    );
 
     let frames = parse_frames(&pairing_frames(stage.player()));
-    assert_eq!(frames[3].body, hex("07 00 02 01 00 00"));
+    assert_eq!(frames[3].body, hex("07 00 02 01 00 01 0c"));
 }
 
 #[test]
-fn stacks_that_count_as_empty_are_all_the_same_empty_slot() {
+fn a_stack_with_a_zero_count_is_the_same_as_an_empty_slot() {
     let mut stage = Stage::at(POSITION);
 
     stage.player().inventory.slots[HOTBAR_SLOT] = ItemStack::new(STONE, 0);
-    stage.player().inventory.slots[OFF_HAND_SLOT] = ItemStack::new(0, 5);
     send_equipment_changes(&mut stage.region);
 
+    assert!(stage.flush_watcher().is_empty());
+}
+
+/// 数量不是零的空气照官方 `ItemStack.matches` 算变了一次，发出去的还是一个空槽位。
+///
+/// 客户端发不出这种物品：`set_creative_mode_slot` 里空气一律变成空物品堆。
+#[test]
+fn air_with_a_count_counts_as_a_change_once() {
+    let mut stage = Stage::at(POSITION);
+
+    stage.player().inventory.slots[OFF_HAND_SLOT] = ItemStack::new(0, 5);
+    send_equipment_changes(&mut stage.region);
+    assert_eq!(
+        stage.flush_watcher(),
+        [frame(clientbound::SET_EQUIPMENT, "07 01 00")]
+    );
+
+    send_equipment_changes(&mut stage.region);
     assert!(stage.flush_watcher().is_empty());
 }
 

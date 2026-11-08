@@ -4,6 +4,7 @@
 //! 也能被任何传输层复用。
 
 pub mod codec;
+pub mod components;
 pub mod compression;
 pub mod frame;
 pub mod item;

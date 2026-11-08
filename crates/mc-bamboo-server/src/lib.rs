@@ -12,7 +12,9 @@ mod event;
 mod players;
 mod server;
 
-pub use config::ServerConfig;
+pub use config::{
+    CLIENT_READ_TIMEOUT, ForwardingMode, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE, ServerConfig,
+};
 pub use event::{PlayerInfo, ServerEvent};
 pub use mc_bamboo_protocol::{GAME_VERSION, PROTOCOL_VERSION};
 pub use server::{Server, ServerHandle};

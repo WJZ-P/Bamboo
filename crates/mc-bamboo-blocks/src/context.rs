@@ -29,8 +29,11 @@ pub struct Actor {
     pub eye_height: f64,
     /// `blockInteractionRange`。
     pub block_interaction_range: f64,
-    /// `player.mayBuild()`：创造模式和冒险模式是真。这个世界只有创造模式。
+    /// `player.mayBuild()`：生存模式和创造模式是真，冒险模式和旁观模式是假。
     pub may_build: bool,
+    /// `player.preventsBlockDrops()`：创造模式的 `instabuild` 能力。活塞头在玩家破坏时
+    /// 只有它为真才拆底座，生存模式改由形状更新拆。
+    pub prevents_block_drops: bool,
 }
 
 impl Actor {
@@ -145,6 +148,10 @@ pub struct PlaceContext<'a> {
 }
 
 /// `DirectionalPlaceContext` 里没有玩家。放置判定读不到它，这里给一份空的。
+/// 没有玩家时 `preventsBlockDrops` 是假。
+///
+/// `DirectionalPlaceContext` has no player. Placement checks never read this stand-in.
+/// `preventsBlockDrops` is false when there is no player.
 static NOBODY: LazyLock<Actor> = LazyLock::new(|| Actor {
     uuid: [0; 16],
     position: Vec3::new(0.0, 0.0, 0.0),
@@ -157,6 +164,7 @@ static NOBODY: LazyLock<Actor> = LazyLock::new(|| Actor {
     eye_height: 0.0,
     block_interaction_range: 0.0,
     may_build: false,
+    prevents_block_drops: false,
 });
 
 impl<'a> PlaceContext<'a> {

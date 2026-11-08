@@ -4,17 +4,23 @@
 //! M2 只有创造模式：破坏一步完成，放置不扣物品。
 //! 客户端在本地预测这些操作，结果靠 `block_update` 和 `block_changed_ack` 收敛到服务端。
 
+pub(crate) mod adventure;
 pub(crate) mod level;
+pub(crate) mod mining;
 pub(crate) mod rules;
 
-use std::mem;
+pub(crate) use mining::tick_mining;
 
-use mc_bamboo_blocks::{Actor, BlockHit, Effect, InteractionResult, Level};
-use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{block_of_state, blocks, items};
+use std::{collections::BTreeSet, mem};
+
+use mc_bamboo_blocks::{
+    Actor, BlockHit, BlockState, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult,
+};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
+use mc_bamboo_data::{BlockAncestor, items, registries::attribute_defaults};
 use mc_bamboo_protocol::{
     packet::play::{
-        BlockChangedAck, BlockEntityData, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
+        BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
         PlayerActionKind, SystemChat,
     },
     text::{Color, Component},
@@ -23,20 +29,27 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    entity_sync,
+    block_items, container, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory,
     links::{Links, encode_frames},
-    movement,
+    menu, movement,
     player::Player,
     region::Region,
-    sign,
 };
 
 const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
+/// `server.properties` 的 `simulation-distance` 默认值，单位是区块。
+const SIMULATION_DISTANCE: i32 = 10;
+/// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`：骨粉的粒子。
+const BONE_MEAL_EVENT: i32 = 1505;
+/// `LevelEvent.COMPOSTER_FILL`：堆肥桶收物品的粒子和声音。
+const COMPOSTER_FILL_EVENT: i32 = 1500;
+/// 骨粉事件的数据：粒子的数量。
+const BONE_MEAL_PARTICLES: i32 = 15;
 /// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
-const BLOCK_INTERACTION_RANGE: f64 = 5.0;
+pub(crate) const BLOCK_INTERACTION_RANGE: f64 = 5.0;
 /// 官方判定时多给的一格，服务端记录的位置可能比客户端晚一点。
 const REACH_BUFFER: f64 = 1.0;
 /// 点击点离方块中心的最大偏差，官方的比较是严格小于。
@@ -90,44 +103,42 @@ pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
     send_effects(region, None, &outcome.effects);
 }
 
-/// tick 第 5 阶段：把改过的方块发给 `is_chunk_tracked` 的玩家。`blocks-inventory.md` 第 11 章。
+/// `EntityTickList.forEach`。计划刻里生成的实体这一步才第一次 tick。
 ///
-/// 区块还在 `pending` 里的玩家不用发，它们收到的区块就是最新内容。
-pub(crate) fn broadcast_block_changes(region: &mut Region) {
-    let mut changed = mem::take(&mut region.block_changes.changed);
-    // 同一格这一 tick 改了几次时，只有最后的状态要发。
-    changed.sort_unstable();
-    changed.dedup();
-    for pos in changed {
-        let Some(state) = region.chunks.block(pos) else {
-            continue;
-        };
-        let frames = encode_frames(&block_update(pos, state));
-        // `broadcastBlockEntityIfNeeded` 跟在方块更新后面，用 `getUpdateTag` 的内容。
-        let entity_frames = sign_data_frames(region, pos, state);
-        let chunk = pos.chunk();
-        for player in region.players.values() {
-            if player.chunks.is_chunk_tracked(chunk) {
-                region.links.send_frames(player.id, &frames);
-                if let Some(frames) = &entity_frames {
-                    region.links.send_frames(player.id, frames);
-                }
-            }
-        }
+/// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
+pub(crate) fn run_entity_ticks(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
+    send_effects(region, None, &outcome.effects);
+}
+
+/// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
+pub(crate) fn run_random_ticks(region: &mut Region) {
+    for chunk in random_ticking_chunks(region) {
+        let (mut level, ticks) = region.block_level();
+        let outcome =
+            mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, DEFAULT_RANDOM_TICK_SPEED);
+        send_effects(region, None, &outcome.effects);
     }
 }
 
-/// 这一格是告示牌时，广播还要带上方块实体的内容。
+/// 官方跑随机刻的区块：离某名玩家所在的区块（切比雪夫距离）不超过模拟距离，而且加载到了能跑方块刻的程度，
+/// 也就是不超过视距加一：视距以内有 `PLAYER_LOADING` 票，再往外一圈是 `BLOCK_TICKING`。
 ///
-/// 别的方块实体还没有内容模型，编不出官方的 `getUpdateTag`，只能发方块更新。
-fn sign_data_frames(region: &Region, pos: BlockPos, state: u32) -> Option<Vec<u8>> {
-    let content = region.chunks.sign(pos)?;
-    let kind = block_of_state(state)?.block_entity_type?;
-    Some(encode_frames(&BlockEntityData {
-        pos,
-        kind,
-        data: &sign::update_tag(&content),
-    }))
+/// 官方按 `Long2ByteOpenHashMap` 的哈希顺序遍历，这里按坐标排序。所有区块共用一个随机源，
+/// 所以和官方逐位相同的只有单个区块，几个区块一起跑时每个区块拿到的随机数不一样，概率相同。
+fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
+    let radius = SIMULATION_DISTANCE.min(region.view_distance + 1);
+    let mut chunks = BTreeSet::new();
+    for player in region.players.values() {
+        let center = player.chunk_pos();
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                chunks.insert(ChunkPos::new(center.x + dx, center.z + dz));
+            }
+        }
+    }
+    chunks
 }
 
 /// tick 第 8 阶段：每名玩家发 `block_changed_ack`。必须晚于第 5 阶段，`blocks-inventory.md` 4.3。
@@ -170,7 +181,7 @@ fn actor_of(player: &Player) -> Actor {
     };
     Actor {
         uuid: *player.uuid.as_bytes(),
-        position: player.position,
+        position: player.position(),
         yaw: player.yaw,
         head_yaw: player.head_yaw,
         pitch: player.pitch,
@@ -179,28 +190,53 @@ fn actor_of(player: &Player) -> Actor {
         main_hand: held(Hand::Main),
         off_hand: held(Hand::Off),
         eye_height: player.eye_height(),
-        block_interaction_range: BLOCK_INTERACTION_RANGE,
+        block_interaction_range: interaction_range(player.game_mode),
         // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
+        // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
+        prevents_block_drops: matches!(player.game_mode, GameMode::Creative),
+    }
+}
+
+/// `Player.blockInteractionRange()`：属性的基础值 4.5，
+/// 创造模式的 `ServerPlayer.updatePlayerAttributes` 再加 0.5 的修饰符。
+pub(crate) fn interaction_range(game_mode: GameMode) -> f64 {
+    let base = attribute_defaults::BLOCK_INTERACTION_RANGE;
+    if game_mode == GameMode::Creative {
+        base + 0.5
+    } else {
+        base
     }
 }
 
 /// 玩家能不能够到这个方块。`blocks-inventory.md` 6.1。
 pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
-    within_block_interaction_range(player, pos, REACH_BUFFER)
+    within_block_interaction_range(
+        player.position(),
+        player.eye_height(),
+        interaction_range(player.game_mode),
+        pos,
+        REACH_BUFFER,
+    )
 }
 
 /// `Player.isWithinBlockInteractionRange(pos, buffer)`：眼睛到方块单位立方体的距离。
-pub(crate) fn within_block_interaction_range(player: &Player, pos: BlockPos, buffer: f64) -> bool {
-    let Vec3 { x, y, z } = player.position;
+pub(crate) fn within_block_interaction_range(
+    position: Vec3,
+    eye_height: f64,
+    range: f64,
+    pos: BlockPos,
+    buffer: f64,
+) -> bool {
+    let Vec3 { x, y, z } = position;
     let axis = |low: i32, eye: f64| {
         let low = f64::from(low);
         (low - eye).max(eye - (low + 1.0)).max(0.0)
     };
     let dx = axis(pos.x, x);
-    let dy = axis(pos.y, y + player.eye_height());
+    let dy = axis(pos.y, y + eye_height);
     let dz = axis(pos.z, z);
-    let range = BLOCK_INTERACTION_RANGE + buffer;
+    let range = range + buffer;
     dx * dx + dy * dy + dz * dz < range * range
 }
 
@@ -212,19 +248,17 @@ pub(crate) fn on_player_action(
     id: PlayerId,
     action: PlayerActionKind,
     pos: BlockPos,
+    face: Direction,
     sequence: i32,
 ) {
     match action {
-        PlayerActionKind::StartDestroyBlock => {
-            if record_sequence(region, id, sequence) {
-                destroy_block(region, id, pos);
-            }
-        }
-        // 创造模式不发这三个，收到了也只结束预测。
-        PlayerActionKind::ChangeDestroyDirection
+        PlayerActionKind::StartDestroyBlock
+        | PlayerActionKind::ChangeDestroyDirection
         | PlayerActionKind::AbortDestroyBlock
         | PlayerActionKind::StopDestroyBlock => {
-            record_sequence(region, id, sequence);
+            if record_sequence(region, id, sequence) {
+                mining::handle_block_break_action(region, id, action, pos, face);
+            }
         }
         PlayerActionKind::DropAllItems => inventory::drop_held_item(region, id, true),
         PlayerActionKind::DropItem => inventory::drop_held_item(region, id, false),
@@ -233,41 +267,8 @@ pub(crate) fn on_player_action(
     }
 }
 
-/// 创造模式破坏方块，官方 `handleBlockBreakAction` 和 `destroyBlock` 的顺序。
-/// `blocks-inventory.md` 5.2。
-///
-/// 够不到时什么也不发，靠 ack 回滚客户端的预测。
-fn destroy_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
-    let Some(player) = region.players.get(&id) else {
-        return;
-    };
-    if !within_reach(player, pos) {
-        return;
-    }
-    if pos.y > MAX_Y {
-        region.links.send(id, &block_update(pos, blocks::VOID_AIR));
-        return;
-    }
-    if !rules::can_destroy(player.inventory.held(Hand::Main)) {
-        send_current_block(region, id, pos);
-        return;
-    }
-
-    let actor = actor_of(player);
-    let (mut level, ticks) = region.block_level();
-    // 世界下面读到的是 `void_air`。破坏空气世界不变，官方还会发一个客户端不看的 2001，这里省掉。
-    if level.block_state(pos).is_air() {
-        return;
-    }
-    let outcome = mc_bamboo_blocks::destroy_block(&mut level, ticks, &actor, pos);
-    send_effects(region, Some(id), &outcome.effects);
-    if outcome.result == InteractionResult::Fail {
-        send_current_block(region, id, pos);
-    }
-}
-
-/// 把方块逻辑留下的结果发出去。`initiator` 是发起动作的玩家，计划刻没有发起者。
-fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
+/// 把方块逻辑留下的结果发出去。`initiator` 是发起动作的玩家，计划刻和容器开合没有发起者。
+pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Effect]) {
     for effect in effects {
         match *effect {
             Effect::Destroyed {
@@ -275,22 +276,55 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                 state,
                 except_initiator,
             } => {
+                // 容器里的东西没有掉落物，等打开着的菜单关掉后一起丢掉。
+                container::on_block_destroyed(region, pos);
                 let except = initiator.filter(|_| except_initiator);
                 let event = LevelEvent::destroy_block(pos, state.0 as i32);
-                send_level_event(region, except, &event);
+                send_level_event(region, except, pos, &event);
             }
             Effect::TorchBurnout { pos } => {
-                send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
+                let event = LevelEvent::redstone_torch_burnout(pos);
+                send_level_event(region, None, pos, &event);
             }
             Effect::FilledBucket { item } => {
                 if let Some(id) = initiator {
                     inventory::add_filled_bucket(region, id, item);
                 }
             }
+            Effect::BoneMealUsed { pos } => {
+                let event = LevelEvent {
+                    event: BONE_MEAL_EVENT,
+                    pos,
+                    data: BONE_MEAL_PARTICLES,
+                    global: false,
+                };
+                send_level_event(region, None, pos, &event);
+            }
             // `markUpdated` 的 `sendBlockUpdated`：方块没变，广播阶段照样重发这一格。
             Effect::SignChanged { pos } => region.block_changes.changed.push(pos),
             Effect::SignWaxed { pos } => {
-                send_level_event(region, None, &LevelEvent::wax_on_sign(pos));
+                let event = LevelEvent::wax_on_sign(pos);
+                send_level_event(region, None, pos, &event);
+            }
+            // 活塞伸出、收回的动画。官方广播给 64 格内的所有玩家，发起者也要。
+            Effect::BlockEvent {
+                pos,
+                block,
+                param_a,
+                param_b,
+            } => {
+                let block = i32::try_from(block).expect("方块注册表 ID 放得进 i32");
+                send_level_event(
+                    region,
+                    None,
+                    pos,
+                    &BlockEvent {
+                        pos,
+                        block,
+                        param_a,
+                        param_b,
+                    },
+                );
             }
             // `openTextEdit` 只给登记的编辑者发，它一定就是发起者。
             Effect::OpenSignEditor { pos, slot } => {
@@ -298,22 +332,65 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                     region.links.send(id, &OpenSignEditor { pos, slot });
                 }
             }
+            // 音符盒的声音和粒子归“方块声音”那边，这里只消费掉事件。
+            Effect::NoteBlockPlayed { .. } => {}
+            // `levelEvent(1500)`：客户端播堆肥的粒子和声音。升级了数据是 1，没升级是 0。
+            Effect::ComposterFill { pos, success } => {
+                let event = LevelEvent {
+                    event: COMPOSTER_FILL_EVENT,
+                    pos,
+                    data: i32::from(success),
+                    global: false,
+                };
+                send_level_event(region, None, pos, &event);
+            }
         }
     }
 }
 
-/// 世界事件的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
-fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
+/// 世界事件和方块事件的粒子和动画发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
+fn send_level_event(
+    region: &mut Region,
+    except: Option<PlayerId>,
+    pos: BlockPos,
+    event: &impl mc_bamboo_protocol::packet::ClientboundPacket,
+) {
     let frames = encode_frames(event);
-    for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, event.pos) {
-            region.links.send_frames(player.id, &frames);
+    // 先从网格挑出附近的候选，再做和官方一样的距离判断。
+    // Pick nearby candidates from the grid, then apply the same distance check as vanilla.
+    let Region {
+        players,
+        player_grid,
+        links,
+        ..
+    } = region;
+    let x = f64::from(pos.x);
+    let z = f64::from(pos.z);
+    let mut sent = 0;
+    for id in player_grid.near(x, z, LEVEL_EVENT_RADIUS) {
+        if Some(id) != except
+            && players
+                .get(&id)
+                .is_some_and(|player| hears_level_event(player, pos))
+        {
+            links.send_frames(id, &frames);
+            sent += 1;
         }
     }
+    // 网格漏记了谁，这名玩家就会悄悄收不到包。测试构建里每次都和全量扫描对一遍。
+    // A player missing from the grid would silently miss packets, so debug builds compare against a full scan.
+    debug_assert_eq!(
+        sent,
+        players
+            .values()
+            .filter(|player| Some(player.id) != except && hears_level_event(player, pos))
+            .count(),
+        "player grid is out of sync with player positions"
+    );
 }
 
-fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
-    let Vec3 { x, y, z } = player.position;
+pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
+    let Vec3 { x, y, z } = player.position();
     let dx = f64::from(pos.x) - x;
     let dy = f64::from(pos.y) - y;
     let dz = f64::from(pos.z) - z;
@@ -398,18 +475,74 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
+    // 官方 `ServerPlayerGameMode.useItemOn` 在功能开关之后、物品 `useOn` 之前单独处理旁观者。
+    // 能打开的容器打开，传送门走目的地（这里没有别的维度和折跃出口，一律提示），其余直接放过，
+    // 不会因为 `can_place_on` 走到放置。
+    if player.game_mode == GameMode::Spectator {
+        spectator_use_item_on(region, id, packet);
+        return;
+    }
     let actor = actor_of(player);
-    let is_placement_attempt = rules::is_placement_attempt(player.inventory.held(packet.hand));
+    // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
+    let held = player.inventory.held(packet.hand).clone();
+    let is_placement_attempt = rules::is_placement_attempt(&held);
 
     let (mut level, ticks) = region.block_level();
     let hit = block_hit(packet);
-    let outcome = mc_bamboo_blocks::use_item_on(&mut level, ticks, &actor, packet.hand, &hit);
+    let outcome = mc_bamboo_blocks::use_item_on_checked(
+        &mut level,
+        ticks,
+        &actor,
+        packet.hand,
+        &hit,
+        |state| actor.may_build || adventure::can_place_on(&held, state),
+    );
 
+    // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
+    if let Some(placed) = outcome.placed_at {
+        let stack = region
+            .players
+            .get(&id)
+            .map(|player| player.inventory.held(packet.hand).clone());
+        if let Some(stack) = stack {
+            block_items::apply(region, placed, id, &stack);
+        }
+    }
     send_effects(region, Some(id), &outcome.effects);
+    // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
+    if outcome.used_without_item {
+        menu::open_block(region, id, packet.pos);
+    }
     if is_placement_attempt && !outcome.result.consumes_action() {
         send_limit_hint(&mut region.links, id, packet);
     }
     swing(region, id, packet.hand, outcome.result);
+}
+
+/// 旁观者右键方块。`getMenuProvider` 非空就打开并 `CONSUME`；传送门无论找不找得到出口都 `CONSUME`
+/// （找不到时发 `spectator.cannot_teleport`）；其余 `PASS`，不调用物品的 `useOn`。
+fn spectator_use_item_on(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
+    if menu::open_block(region, id, packet.pos) {
+        swing(region, id, packet.hand, InteractionResult::Consume);
+        return;
+    }
+    let portal = region
+        .chunks
+        .block(packet.pos)
+        .is_some_and(|state| BlockState(state).is_a(BlockAncestor::Portal));
+    if portal {
+        let content = Component::translate("spectator.cannot_teleport", []).color(Color::Red);
+        region.links.send(
+            id,
+            &SystemChat {
+                content: &content,
+                overlay: true,
+            },
+        );
+        swing(region, id, packet.hand, InteractionResult::Consume);
+        return;
+    }
+    swing(region, id, packet.hand, InteractionResult::Pass);
 }
 
 /// `BlockHitResult`。点击点和官方解码时一样，是整数坐标加上 `f32` 的偏移。
@@ -474,11 +607,25 @@ pub(crate) fn on_use_item(
     }
     // 视线找水面用的是包里的朝向，不是上一次移动包的。
     movement::snap_rotation(player, yaw, pitch);
+    // 官方 `useItem` 对旁观者直接 `PASS`，对着空气也不会把睡莲、桶这类放出去。
+    if player.game_mode == GameMode::Spectator {
+        return;
+    }
     let actor = actor_of(player);
 
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::use_item(&mut level, ticks, &actor, hand);
 
+    // 睡莲这类 `PlaceOnWaterBlockItem` 的放置走这条路，一样要把组件留给方块实体。
+    if let Some(placed) = outcome.placed_at {
+        let stack = region
+            .players
+            .get(&id)
+            .map(|player| player.inventory.held(hand).clone());
+        if let Some(stack) = stack {
+            block_items::apply(region, placed, id, &stack);
+        }
+    }
     send_effects(region, Some(id), &outcome.effects);
     swing(region, id, hand, outcome.result);
 }

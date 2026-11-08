@@ -11,10 +11,10 @@ use crate::{
         Behaviour, Plain,
         common::{default_state, field_block, is_free},
     },
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, SupportType},
-    world::World,
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// `FallingBlock.getDelayAfterPlace()`。
@@ -154,8 +154,33 @@ impl Behaviour for ConcretePowder {
     }
 }
 
-/// `DragonEggBlock`。传送的目标格是随机的，第 1 章说随机分支取一个确定的值，这里留在原地。
+/// `DragonEggBlock`：右键时传送到附近随机一个下面有东西的空格。
 pub(super) struct DragonEgg;
+
+/// 传送最多试这么多次。
+const TELEPORT_ATTEMPTS: i32 = 1000;
+
+impl DragonEgg {
+    /// `teleport`。传送的粒子（`levelEvent(2015)`）不做。
+    fn teleport(state: BlockState, world: &mut World, pos: BlockPos) {
+        for _ in 0..TELEPORT_ATTEMPTS {
+            let random = world.random();
+            let dx = random.next_int(16) - random.next_int(16);
+            let dy = random.next_int(8) - random.next_int(8);
+            let dz = random.next_int(16) - random.next_int(16);
+            let target = pos.offset(dx, dy, dz);
+            if world.block_state(target).is_air()
+                && !world.block_state(target.below()).is_air()
+                && world.is_within_world_border(target)
+                && world.is_inside_build_height(target.y)
+            {
+                world.set_block(target, state, UPDATE_CLIENTS);
+                world.remove_block(pos);
+                return;
+            }
+        }
+    }
+}
 
 impl Behaviour for DragonEgg {
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
@@ -179,12 +204,20 @@ impl Behaviour for DragonEgg {
         fall_if_free(state, world, pos);
     }
 
+    /// `DragonEggBlock.attack`：拿手打一下和右键一样，传送到附近。
+    ///
+    /// `DragonEggBlock.attack`: punching teleports it, the same as a right click.
+    fn attack(&self, state: BlockState, world: &mut World, pos: BlockPos, _player: &Actor) {
+        Self::teleport(state, world, pos);
+    }
+
     fn use_without_item(
         &self,
-        _state: BlockState,
-        _world: &mut World,
-        _ctx: &UseContext,
+        state: BlockState,
+        world: &mut World,
+        ctx: &UseContext,
     ) -> InteractionResult {
+        Self::teleport(state, world, ctx.clicked_pos());
         InteractionResult::Success
     }
 }
@@ -207,14 +240,20 @@ mod tests {
     use super::*;
     use crate::testing::{TestLevel, actor_holding, top_hit, use_item};
 
-    /// 官方的传送是随机的，oracle 比不了，这里固定下来：龙蛋留在原地，点击被吃掉。
+    /// 只有一格能落脚时，龙蛋迟早传送到那里。
     #[test]
-    fn a_dragon_egg_stays_where_it_is() {
+    fn a_dragon_egg_teleports_onto_a_block() {
         let pos = BlockPos::new(0, 64, 0);
+        let landing = BlockPos::new(3, 64, -2);
         let mut level = TestLevel::new();
         level.set(pos, BlockState(blocks::DRAGON_EGG));
+        level.set(pos.below(), BlockState(blocks::STONE));
+        level.set(landing.below(), BlockState(blocks::STONE));
         let outcome = use_item(&mut level, &actor_holding(items::AIR), top_hit(pos));
         assert_eq!(outcome.result, InteractionResult::Success);
-        assert!(level.get(pos).is(blocks::DRAGON_EGG));
+        let egg = BlockState(blocks::DRAGON_EGG);
+        let moved = level.get(landing) == egg && level.get(pos).is_air();
+        let stayed = level.get(pos) == egg;
+        assert!(moved || stayed);
     }
 }

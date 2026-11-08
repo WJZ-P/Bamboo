@@ -7,6 +7,8 @@
 //! 体素；形状表里一个盒子就是一个格子，所以那条沿体素走的循环退化成逐盒子的判定，
 //! 结果和官方逐位相同。
 
+use std::cmp::Ordering;
+
 use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
@@ -28,6 +30,23 @@ pub(crate) fn air_drag() -> f64 {
 /// `Mth.equal`：两个 double 差得足够小就算相等。官方写的是 `1.0E-5F`。
 fn nearly_equal(first: f64, second: f64) -> bool {
     (second - first).abs() < f64::from(1.0e-5_f32)
+}
+
+/// Java 的 `!(left > right)`。NaN 的比较是假，取反之后是真，不能写成 `<=`。
+///
+/// Java's `!(left > right)`. A NaN comparison is false, so the negation is true; `<=` is not.
+fn java_not_gt<T: PartialOrd>(left: T, right: T) -> bool {
+    left.partial_cmp(&right) != Some(Ordering::Greater)
+}
+
+/// Java 的 `!(left <= right)`。NaN 时为真。
+///
+/// Java's `!(left <= right)`. True when either side is NaN.
+fn java_not_le<T: PartialOrd>(left: T, right: T) -> bool {
+    !matches!(
+        left.partial_cmp(&right),
+        Some(Ordering::Less | Ordering::Equal)
+    )
 }
 
 /// `AxisCycle.FORWARD.cycle(axis)`：X 转到 Y，Y 转到 Z，Z 转到 X。
@@ -110,7 +129,9 @@ impl Entity {
         if movement_length > 1.0e-7 || delta.length_sqr() - movement_length < 1.0e-7 {
             if self.fall_distance != 0.0 && movement_length >= 1.0 {
                 let check_distance = movement.length().min(8.0);
-                let check_to = self.position.add(movement.normalize().scale(check_distance));
+                let check_to = self
+                    .position
+                    .add(movement.normalize().scale(check_distance));
                 if world.clip_fall_damage_resetting(self.position, check_to) {
                     self.reset_fall_distance();
                 }
@@ -142,7 +163,12 @@ impl Entity {
             return;
         }
         if moved_vertically && self.vertical_collision || self.horizontal_collision {
-            self.restitute_movement_after_collisions(effect_state, x_collision, z_collision, movement);
+            self.restitute_movement_after_collisions(
+                effect_state,
+                x_collision,
+                z_collision,
+                movement,
+            );
         }
         // 移动的音效和 `gameEvent` 不在范围里。
         let factor = f64::from(self.block_speed_factor(world));
@@ -152,8 +178,7 @@ impl Entity {
     /// `Entity.collide`：把位移按轴拆开，撞到方块就停在方块前面。
     fn collide(&self, world: &World, movement: Vec3) -> Vec3 {
         let bounds = self.bounding_box();
-        let target =
-            bounds.expand_towards(movement.x, movement.y, movement.z);
+        let target = bounds.expanded_towards(movement.x, movement.y, movement.z);
         let collisions = world.block_collisions(target, self.collision_context());
         if collisions.is_empty() {
             return movement;
@@ -222,11 +247,11 @@ impl Entity {
     /// 有撑着的方块时优先用它；篱笆、墙、栅栏门在低的偏移下也算自己的位置。
     pub(crate) fn on_pos(&self, world: &World, offset: f32) -> BlockPos {
         if let Some(main) = self.main_supporting_block {
-            if !(offset > 1.0e-5_f32) {
+            if java_not_gt(offset, 1.0e-5_f32) {
                 return main;
             }
             let below = world.block_state(main);
-            let drops_down = (!(offset <= 0.5_f32) || !below.is_tagged(block_tags::FENCES))
+            let drops_down = (java_not_le(offset, 0.5_f32) || !below.is_tagged(block_tags::FENCES))
                 && !below.is_tagged(block_tags::WALLS)
                 && !below.is_a(BlockAncestor::FenceGateBlock);
             return if drops_down {
@@ -302,7 +327,7 @@ impl Entity {
         }
         if self.vertical_collision {
             if self.vertical_collision_below {
-                restitution = if !(-current.y <= GRAVITY)
+                restitution = if java_not_le(-current.y, GRAVITY)
                     && !effect_state.is_tagged(block_tags::SUPPRESSES_BOUNCE)
                 {
                     // `getBlockBounciness`：非生物只拿方块的八成。
@@ -382,8 +407,13 @@ impl Entity {
                         let axis_move = axis_component(delta, axis);
                         if axis_move != 0.0 {
                             let to = offset_along(pos, axis, axis_move);
-                            max_iterations -=
-                                self.check_inside_between(world, pos, to, &mut visited, max_iterations);
+                            max_iterations -= self.check_inside_between(
+                                world,
+                                pos,
+                                to,
+                                &mut visited,
+                                max_iterations,
+                            );
                             pos = to;
                         }
                     }
@@ -478,12 +508,7 @@ fn offset_along(pos: Vec3, axis: Axis, distance: f64) -> Vec3 {
 
 /// 形状表里的盒子是相对方块的，挪到世界坐标。
 fn world_boxes(boxes: &[Aabb], pos: BlockPos) -> Vec<Aabb> {
-    shape::moved(
-        boxes,
-        f64::from(pos.x),
-        f64::from(pos.y),
-        f64::from(pos.z),
-    )
+    shape::moved(boxes, f64::from(pos.x), f64::from(pos.y), f64::from(pos.z))
 }
 
 /// `Shapes.collide`：沿一根轴扫掠，返回实际能走的距离。
@@ -795,7 +820,11 @@ fn between_corners_in_direction_box(bounds: Aabb, direction: Vec3) -> Vec<BlockP
 }
 
 /// `BlockPos.betweenCornersInDirection`：按 `axisStepOrder` 的顺序走一个盒子里的所有方块。
-fn between_corners_in_direction(first: BlockPos, second: BlockPos, direction: Vec3) -> Vec<BlockPos> {
+fn between_corners_in_direction(
+    first: BlockPos,
+    second: BlockPos,
+    direction: Vec3,
+) -> Vec<BlockPos> {
     let min = BlockPos::new(
         first.x.min(second.x),
         first.y.min(second.y),

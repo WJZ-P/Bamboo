@@ -23,7 +23,7 @@ use mc_bamboo_protocol::{
 use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, chunk::Chunk};
 use uuid::Uuid;
 
-use super::{Client, Frame, Harness, chunk_position};
+use super::{Client, Frame, Harness, chunk_position, section_blocks};
 use crate::{
     chunk_tracking::ChunkView,
     inbound::{Inbound, PlayerId},
@@ -213,7 +213,7 @@ struct Model {
     entities: BTreeMap<i32, Remote>,
     /// 自己的实体。只有元数据有意义，物品栏是客户端自己的。
     own: Remote,
-    /// 值是收到时的区块内容，`None` 表示是模板。再加上之后的 `block_update`。
+    /// 值是收到时的区块内容，`None` 表示是模板。再加上之后的方块更新。
     chunks: BTreeMap<ChunkPos, Option<Chunk>>,
     updates: BTreeMap<ChunkPos, Vec<(BlockPos, u32)>>,
     center: Option<ChunkPos>,
@@ -373,6 +373,16 @@ impl Model {
             }
             clientbound::LEVEL_CHUNK_WITH_LIGHT => {
                 let pos = chunk_position(frame);
+                // 改过的区块走编码缓存。发完区块以后这一 tick 没再改世界，收到的字节要和现在重新编码的一样。
+                let chunks = &world.region.chunks;
+                if !chunks.is_template(pos) {
+                    let fresh = crate::chunk_encoding::encode_chunk(chunks, pos);
+                    assert!(
+                        frame.body[8..] == fresh[..],
+                        "{}: stale chunk {pos:?}",
+                        self.name
+                    );
+                }
                 let center = self.center.expect("中心先于区块");
                 let distance = (pos.x - center.x).abs().max((pos.z - center.z).abs());
                 assert!(distance <= 35, "{}: chunk out of range", self.name);
@@ -392,14 +402,27 @@ impl Model {
                 self.updates.remove(&pos);
             }
             clientbound::BLOCK_UPDATE => {
-                assert_eq!(self.acknowledged, None, "{}: update after ack", self.name);
                 let pos = reader.block_pos().unwrap();
                 let state = reader.varint().unwrap();
-                assert!((0..blocks::TOTAL_STATES as i32).contains(&state));
-                // 官方客户端在没加载的区块和世界外写方块时什么也不做。
-                if self.chunks.contains_key(&pos.chunk()) && (MIN_Y..WORLD_TOP).contains(&pos.y) {
-                    let list = self.updates.entry(pos.chunk()).or_default();
-                    list.push((pos, state as u32));
+                self.record_update(pos, state as u32);
+            }
+            clientbound::SECTION_BLOCKS_UPDATE => {
+                let blocks = section_blocks(frame);
+                let distinct: BTreeSet<BlockPos> = blocks.iter().map(|&(pos, _)| pos).collect();
+                // 只改了一格的段发 `block_update`，一段里的格子不重复。
+                assert!(
+                    blocks.len() > 1,
+                    "{}: section update of one block",
+                    self.name
+                );
+                assert_eq!(
+                    distinct.len(),
+                    blocks.len(),
+                    "{}: repeated block",
+                    self.name
+                );
+                for (pos, state) in blocks {
+                    self.record_update(pos, state);
                 }
             }
             clientbound::BLOCK_CHANGED_ACK => {
@@ -408,6 +431,18 @@ impl Model {
             }
             clientbound::CHUNK_BATCH_FINISHED => self.finished_batches += 1,
             _ => {}
+        }
+    }
+
+    /// 一格方块更新。官方客户端在没加载的区块和世界外写方块时什么也不做。
+    fn record_update(&mut self, pos: BlockPos, state: u32) {
+        assert_eq!(self.acknowledged, None, "{}: update after ack", self.name);
+        assert!(state < blocks::TOTAL_STATES, "{}: state {state}", self.name);
+        if self.chunks.contains_key(&pos.chunk()) && (MIN_Y..WORLD_TOP).contains(&pos.y) {
+            self.updates
+                .entry(pos.chunk())
+                .or_default()
+                .push((pos, state));
         }
     }
 
@@ -844,7 +879,7 @@ fn check_tick(server: &Harness, actor: &mut Actor) {
     let acknowledged = actor.model.acknowledged.take();
     let expected = actor.expected_ack.take();
     if actor.client.is_closed() {
-        let position = server.player(&actor.client).position;
+        let position = server.player(&actor.client).position();
         let kicked_at = *actor.kicked_at.get_or_insert(position);
         assert_eq!(
             position, kicked_at,
@@ -972,8 +1007,8 @@ fn check_convergence(server: &Harness, actors: &[Actor], view_distance: i32) {
 /// `viewer` 的客户端应该有 `target` 这个实体。`entities.md` 第 4 节。
 fn should_see(viewer: &Player, target: &Player, view_distance: i32) -> bool {
     let range = f64::from((viewer.view_distance(view_distance) * 16).min(512));
-    let dx = viewer.position.x - target.position.x;
-    let dz = viewer.position.z - target.position.z;
+    let dx = viewer.position().x - target.position().x;
+    let dz = viewer.position().z - target.position().z;
     viewer.id != target.id
         && dx * dx + dz * dz <= range * range
         && viewer.chunks.is_chunk_tracked(target.chunk_pos())

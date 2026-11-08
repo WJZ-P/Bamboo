@@ -13,19 +13,20 @@ use common::{
     wire::{
         ABILITY_FLYING, AddEntity, BlockChangedAck, BlockUpdate, ContainerSetSlot, DOWN,
         DROP_ALL_ITEMS, DROP_ITEM, Disconnect, EAST, ForgetLevelChunk, INPUT_SHIFT,
-        LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND, MAX_Y, MIN_Y, NORTH, OFF_HAND, Pos,
+        LEVEL_EVENT_BREAK, LevelEvent, MAIN_HAND, MAX_Y, MIN_Y, NORTH, Nbt, OFF_HAND, Pos,
         RELEASE_USE_ITEM, SLOT_MAINHAND, SLOT_OFFHAND, SOUTH, START_DESTROY_BLOCK,
-        SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK, SetEquipment, SetHeldSlot, Stack,
-        SwingAnimation, SystemChat, UP, face_center, pick_item_from_block, plain_stack_bytes,
-        player_abilities, player_action, player_input, set_carried_item, set_creative_mode_slot,
-        set_creative_mode_slot_raw, use_item, use_item_on,
+        SWAP_ITEM_WITH_OFFHAND, SWING_DURATION, SWING_WHACK, SectionBlocksUpdate, SetEquipment,
+        SetHeldSlot, Stack, SwingAnimation, SystemChat, UP, face_center, pick_item_from_block,
+        plain_stack_bytes, player_abilities, player_action, player_input, set_carried_item,
+        set_creative_mode_slot, set_creative_mode_slot_raw, use_item, use_item_on,
     },
 };
 use mc_bamboo_data::{
     block_of_state, blocks, items,
     packets::play::{clientbound, serverbound},
-    registries::block_entity_type,
+    registries::{block_entity_type, data_component_type},
 };
+use mc_bamboo_protocol::components::{ComponentValue, PatchEntry};
 use mc_bamboo_server::ServerConfig;
 use tokio::time::sleep;
 
@@ -176,6 +177,11 @@ async fn the_ack_follows_the_updates_and_there_is_at_most_one_per_tick() {
     for frame in &alice.frames()[mark..] {
         if frame.is::<BlockUpdate>() {
             updated.insert(frame.decode::<BlockUpdate>().pos);
+        }
+        // 同一 tick 在同一段里破坏了几格时，这几格一起发。
+        if frame.is::<SectionBlocksUpdate>() {
+            let packet = frame.decode::<SectionBlocksUpdate>();
+            updated.extend(packet.blocks.iter().map(|&(pos, _)| pos));
         }
         if frame.is::<BlockChangedAck>() {
             let sequence = frame.decode::<BlockChangedAck>().sequence;
@@ -516,8 +522,10 @@ async fn a_torch_goes_with_its_support_and_everyone_gets_the_event() {
     assert_eq!(alice.since::<LevelEvent>(alice_mark), [torch]);
     bob.expect::<LevelEvent>(|packet| packet.pos == SPOT).await;
     bob.expect::<LevelEvent>(|packet| *packet == torch).await;
-    bob.expect::<BlockUpdate>(|packet| *packet == update(ABOVE_SPOT, blocks::AIR))
-        .await;
+    // 草方块和火把在同一段里，一个 `section_blocks_update` 带上两格。
+    let mut gone = bob.expect::<SectionBlocksUpdate>(|_| true).await.blocks;
+    gone.sort_unstable();
+    assert_eq!(gone, [(SPOT, blocks::AIR), (ABOVE_SPOT, blocks::AIR)]);
     assert_eq!(world_state(&server, "Late", ABOVE_SPOT).await, blocks::AIR);
 }
 
@@ -1129,7 +1137,7 @@ async fn off_hand_placing_swings_the_off_hand() {
 }
 
 #[tokio::test]
-async fn components_come_back_to_the_owner_and_never_reach_other_players() {
+async fn components_come_back_to_the_owner_and_reach_other_players() {
     let server = TestServer::start(small_world()).await;
     let mut alice = server.enter("Alice").await;
     let mut bob = server.enter("Bob").await;
@@ -1166,11 +1174,19 @@ async fn components_come_back_to_the_owner_and_never_reach_other_players() {
             .iter()
             .filter(|frame| frame.is::<SetEquipment>())
             .any(|frame| {
-                frame.decode::<SetEquipment>().slot(SLOT_OFFHAND)
+                let packet = frame.decode::<SetEquipment>();
+                // 别人也看得到组件：上限改成了 16，`rarity` 被移除。
+                packet.slot(SLOT_OFFHAND)
                     == Some(Some(Stack {
                         item: items::STONE,
                         count: 2,
                     }))
+                    && packet.patch(SLOT_OFFHAND).is_some_and(|patch| {
+                        patch.get(data_component_type::MAX_STACK_SIZE)
+                            == Some(&ComponentValue::MaxStackSize(16))
+                            && patch.entry(data_component_type::RARITY)
+                                == Some(&PatchEntry::Removed)
+                    })
             })
     })
     .await;
@@ -1308,10 +1324,20 @@ async fn a_late_joiner_gets_the_edited_chunk_and_the_block_entities() {
     assert_eq!(entry.packed_xz, 0x35);
     assert_eq!(entry.y, -60);
     assert_eq!(entry.kind, block_entity_type::CHEST);
+    // 箱子的 `getUpdateTag` 是空的，官方不写 NBT。
+    assert_eq!(entry.data, None);
     let entry = chunk
         .block_entity_at(banner)
         .expect("the banner must be listed");
     assert_eq!(entry.kind, block_entity_type::BANNER);
+    // 旗帜走 `saveWithoutMetadata`，至少带一张空的组件表。
+    assert_eq!(
+        entry.data,
+        Some(Nbt::Compound(vec![(
+            "components".to_owned(),
+            Nbt::Compound(Vec::new())
+        )]))
+    );
     assert_eq!(chunk.block_entities.len(), 2);
 }
 

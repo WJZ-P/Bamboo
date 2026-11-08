@@ -2,10 +2,11 @@
 //!
 //! 流体的计划刻有自己的队列，每一刻在方块的计划刻之后跑，见 [`run_scheduled_ticks`](crate::run_scheduled_ticks)。
 //! 世界是主世界，游戏规则都是默认值：水能生成新的源头，岩浆不能；岩浆不是下界那种快速的岩浆。
-//! 岩浆的随机刻（点燃旁边的方块）不在范围里。
+//! 岩浆的随机刻会点燃附近能烧的方块，见 [`random_tick`]。
 
 pub mod bucket;
 mod flowing;
+mod lava;
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{blocks, items, registries::fluid};
@@ -157,6 +158,13 @@ pub(crate) fn tick(world: &mut World, pos: BlockPos, fluid: i32) {
         && let Some(kind) = Fluid::of(current)
     {
         flowing::tick(world, kind, pos, state, current);
+    }
+}
+
+/// `FluidState.randomTick`：只有岩浆有，见 `lava`。只对 `is_fluid_randomly_ticking` 的状态调用。
+pub(crate) fn random_tick(world: &mut World, pos: BlockPos, fluid: FluidState) {
+    if Fluid::of(fluid) == Some(Fluid::Lava) {
+        lava::random_tick(world, pos);
     }
 }
 

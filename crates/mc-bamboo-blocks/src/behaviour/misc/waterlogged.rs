@@ -5,6 +5,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, items};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -12,7 +13,7 @@ use crate::{
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{BlockState, HORIZONTAL_FACING, WATERLOGGED},
+    state::{BlockState, DRIED_GHAST_HYDRATION_LEVELS, HORIZONTAL_FACING, WATERLOGGED},
     world::World,
 };
 
@@ -20,6 +21,11 @@ use crate::{
 pub(super) struct Waterlogged;
 
 impl Behaviour for Waterlogged {
+    /// `WeatheringCopperGrateBlock` 在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -147,7 +153,18 @@ impl Behaviour for DriedGhast {
     ) -> BlockState {
         Waterlogged.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
     }
+
+    /// 泡着水或者已经吸了水时排一个吸水的计划刻。吸满后生成恶魂实体，那个计划刻不在范围里。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        let hydrating = state.get(WATERLOGGED) || state.get(DRIED_GHAST_HYDRATION_LEVELS) > 0;
+        if hydrating && !world.has_scheduled_tick(pos, state.block()) {
+            world.schedule_tick(pos, state.block(), DRIED_GHAST_HYDRATION_DELAY);
+        }
+    }
 }
+
+/// `DriedGhastBlock.HYDRATION_TICK_DELAY`：吸一次水要等的刻数。
+const DRIED_GHAST_HYDRATION_DELAY: i32 = 5000;
 
 /// `LightBlock`：放置不含水。调亮度要权限，这个世界没有权限，所以只吃掉点击。
 pub(super) struct Light;

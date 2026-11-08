@@ -11,6 +11,9 @@ use mc_bamboo_data::{
     facts, items, registries, state_facts, state_fluid, tags,
 };
 
+/// `getLightDampeningInto` 里形状完全挡住光时的值，比最大的 15 还大。
+const BLOCKED_LIGHT: i32 = 16;
+
 /// 一个方块状态，内容是全局状态 ID。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockState(pub u32);
@@ -76,6 +79,14 @@ impl BlockState {
         self.try_get(property).is_some()
     }
 
+    /// 属性当前值的官方序列化名，方块没有这个属性时返回 `None`。
+    ///
+    /// 按名字查属性，给 `can_break` 这类从数据里读到属性名的谓词用；类型化的取值走 [`Self::try_get`]。
+    pub fn property_text(self, name: &str) -> Option<&'static str> {
+        let slot = PropertySlot::find(self, name)?;
+        Some(slot.def.values[slot.current_index(self)])
+    }
+
     /// 改属性的值。方块没有这个属性或者没有这个值时 panic，和官方的 `setValue` 一样。
     #[must_use]
     pub fn with<T: PropertyValue>(self, property: Property<T>, value: T) -> Self {
@@ -134,7 +145,7 @@ impl BlockState {
         result
     }
 
-    fn fact(self, bit: u32) -> bool {
+    fn fact(self, bit: u64) -> bool {
         state_facts(self.0) & bit != 0
     }
 
@@ -206,9 +217,39 @@ impl BlockState {
         mc_bamboo_data::light_dampening(self.0)
     }
 
+    /// `isRandomlyTicking`。
+    pub fn is_randomly_ticking(self) -> bool {
+        self.fact(facts::RANDOMLY_TICKING)
+    }
+
+    /// `getFluidState().isRandomlyTicking()`。
+    pub fn is_fluid_randomly_ticking(self) -> bool {
+        self.fact(facts::FLUID_RANDOMLY_TICKING)
+    }
+
+    /// `LightEngine.getLightDampeningInto(below, self, UP, self.getLightDampening())`，`below` 是一个不用形状挡光的
+    /// 完整方块（草方块、菌岩都是）。
+    pub fn light_dampening_from_plain_block_below(self) -> i32 {
+        if self.fact(facts::BLOCKS_LIGHT_FROM_BELOW) {
+            BLOCKED_LIGHT
+        } else {
+            i32::from(self.light_dampening())
+        }
+    }
+
     /// `hasBlockEntity`。
     pub fn has_block_entity(self) -> bool {
         self.block().block_entity_type.is_some()
+    }
+
+    /// `getPistonPushReaction`，方块属性里的值，和状态无关。
+    pub fn push_reaction(self) -> mc_bamboo_data::PushReaction {
+        self.block().push_reaction
+    }
+
+    /// `getDestroySpeed == -1`，活塞推不动，也打不碎。
+    pub fn is_unbreakable(self) -> bool {
+        self.block().unbreakable
     }
 
     /// `instrument()`，这个方块放在音符盒下面时的乐器。
@@ -866,6 +907,11 @@ impl FluidState {
     /// `is(FluidTags.LAVA)`。
     pub fn is_lava(self) -> bool {
         self.is_tagged(tags::fluid_tags::LAVA)
+    }
+
+    /// `getExplosionResistance`。
+    pub fn explosion_resistance(self) -> f32 {
+        self.0.explosion_resistance
     }
 
     /// `createLegacyBlock`：这个流体对应的方块，破坏含水方块后留下的就是它。

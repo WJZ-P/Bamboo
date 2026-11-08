@@ -20,6 +20,7 @@ pub mod common;
 pub mod machines;
 pub mod misc;
 pub mod plants;
+mod weathering;
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockClass, registries};
@@ -87,6 +88,18 @@ pub trait Behaviour: Sync {
     /// `onPlace`。
     fn on_place(&self, _state: BlockState, _world: &mut World, _pos: BlockPos, _old: BlockState) {}
 
+    /// `triggerEvent`：处理一个方块事件，返回是否处理成功。成功的事件要发给客户端播放动画。
+    fn trigger_event(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        _param_a: i32,
+        _param_b: i32,
+    ) -> bool {
+        false
+    }
+
     /// `affectNeighborsAfterRemoval`。
     fn affect_neighbors_after_removal(
         &self,
@@ -116,6 +129,10 @@ pub trait Behaviour: Sync {
     ) {
     }
 
+    /// `destroy`：方块真的被移除了，官方 `ServerPlayerGameMode.destroyBlock` 在 `removeBlock`
+    /// 之后调用。`state` 是 `playerWillDestroy` 返回的状态。
+    fn destroy(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
+
     /// `playerWillDestroy`：返回破坏前的状态，官方后面的掉落物计算要用它，这里只用来和官方对照。
     fn player_will_destroy(
         &self,
@@ -127,6 +144,9 @@ pub trait Behaviour: Sync {
         state.spawn_destroy_by_entity_particles(world, pos, true);
         state
     }
+
+    /// `attack`：生存模式的玩家开始挖这一格，官方的 `ServerPlayerGameMode.handleBlockBreakAction`。
+    fn attack(&self, _state: BlockState, _world: &mut World, _pos: BlockPos, _player: &Actor) {}
 
     /// `useItemOn`。
     fn use_item_on(
@@ -150,6 +170,22 @@ pub trait Behaviour: Sync {
 
     /// `tick`：计划刻到期。
     fn tick(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
+
+    /// `randomTick`：随机刻选中了这一格。只有 `is_randomly_ticking` 的状态会走到这里。
+    fn random_tick(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
+
+    /// `BonemealableBlock.isValidBonemealTarget`，只对这个接口的方块调用。
+    fn is_valid_bonemeal_target(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `BonemealableBlock.isBonemealSuccess`，只对这个接口的方块调用。
+    fn is_bonemeal_success(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> bool {
+        true
+    }
+
+    /// `BonemealableBlock.performBonemeal`，只对这个接口的方块调用。
+    fn perform_bonemeal(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
 
     /// `ownSignal`：这一格自己发出多强的信号，不算穿过它的强充能。
     fn own_signal(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
@@ -660,6 +696,18 @@ impl BlockState {
         self.behaviour().on_place(self, world, pos, old);
     }
 
+    /// `triggerEvent`。
+    pub fn trigger_event(
+        self,
+        world: &mut World,
+        pos: BlockPos,
+        param_a: i32,
+        param_b: i32,
+    ) -> bool {
+        self.behaviour()
+            .trigger_event(self, world, pos, param_a, param_b)
+    }
+
     /// `affectNeighborsAfterRemoval`。
     pub fn affect_neighbors_after_removal(self, world: &mut World, pos: BlockPos) {
         self.behaviour()
@@ -676,6 +724,11 @@ impl BlockState {
         self.behaviour().set_placed_by(self, world, pos, placer);
     }
 
+    /// `destroy`。
+    pub fn destroy(self, world: &mut World, pos: BlockPos) {
+        self.behaviour().destroy(self, world, pos);
+    }
+
     /// `playerWillDestroy`。
     pub fn player_will_destroy(
         self,
@@ -685,6 +738,11 @@ impl BlockState {
     ) -> BlockState {
         self.behaviour()
             .player_will_destroy(self, world, pos, player)
+    }
+
+    /// `attack`。
+    pub fn attack(self, world: &mut World, pos: BlockPos, player: &Actor) {
+        self.behaviour().attack(self, world, pos, player);
     }
 
     /// `useItemOn`。
@@ -700,6 +758,26 @@ impl BlockState {
     /// `tick`。
     pub fn tick(self, world: &mut World, pos: BlockPos) {
         self.behaviour().tick(self, world, pos);
+    }
+
+    /// `randomTick`。
+    pub fn random_tick(self, world: &mut World, pos: BlockPos) {
+        self.behaviour().random_tick(self, world, pos);
+    }
+
+    /// `BonemealableBlock.isValidBonemealTarget`。
+    pub fn is_valid_bonemeal_target(self, world: &World, pos: BlockPos) -> bool {
+        self.behaviour().is_valid_bonemeal_target(self, world, pos)
+    }
+
+    /// `BonemealableBlock.isBonemealSuccess`。
+    pub fn is_bonemeal_success(self, world: &World, pos: BlockPos) -> bool {
+        self.behaviour().is_bonemeal_success(self, world, pos)
+    }
+
+    /// `BonemealableBlock.performBonemeal`。
+    pub fn perform_bonemeal(self, world: &mut World, pos: BlockPos) {
+        self.behaviour().perform_bonemeal(self, world, pos);
     }
 
     /// `getOwnSignal`。

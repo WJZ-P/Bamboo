@@ -58,6 +58,9 @@ fn applicator_of(item: i32) -> Option<Applicator> {
 }
 
 /// `SignApplicator.tryApplyToSign`。成功时内容已经写进世界。
+///
+/// 官方的音效走 `Level.playSound`，声种取自单独的 `soundSeedGenerator`，不碰 `Level.random`；
+/// 这里的音高也全是常数 1.0，所以不取随机数。
 fn apply(applicator: Applicator, world: &mut World, pos: BlockPos, slot: SignTextSlot) -> bool {
     match applicator {
         Applicator::Dye(color) => update_text(world, pos, slot, |text| text.with_color(color)),

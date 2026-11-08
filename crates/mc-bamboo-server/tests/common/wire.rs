@@ -6,7 +6,10 @@
 use std::mem;
 
 use mc_bamboo_data::packets::play::{clientbound, serverbound};
-use mc_bamboo_protocol::codec::{Reader, write_string, write_varint};
+use mc_bamboo_protocol::{
+    codec::{Reader, write_string, write_varint},
+    components::{ComponentPatch, cursor::Cursor},
+};
 use uuid::Uuid;
 
 use super::frame;
@@ -493,11 +496,21 @@ impl Packet for PlayerPosition {
     }
 }
 
+/// Tab 列表里的一档案属性，比如签名过的皮肤。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabProperty {
+    pub name: String,
+    pub value: String,
+    pub signature: Option<String>,
+}
+
 /// Tab 列表的一条记录。只有动作掩码里有的字段才是 `Some`。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TabEntry {
     pub uuid: Uuid,
     pub name: Option<String>,
+    /// 跟着名字一起来的档案属性，离线模式是空列表。
+    pub properties: Vec<TabProperty>,
     pub game_mode: Option<i32>,
     pub listed: Option<bool>,
     pub latency: Option<i32>,
@@ -544,7 +557,8 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
     };
     if actions & 0x01 != 0 {
         entry.name = Some(reader.string(16).expect("name").to_owned());
-        assert_eq!(varint(reader), 0, "offline players have no properties");
+        let count = list_len(reader);
+        entry.properties = (0..count).map(|_| read_tab_property(reader)).collect();
     }
     if actions & 0x02 != 0 {
         assert!(!boolean(reader), "offline players have no chat session");
@@ -568,6 +582,19 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
         entry.show_hat = Some(boolean(reader));
     }
     entry
+}
+
+/// 档案上的一项属性，签名是可选的。
+fn read_tab_property(reader: &mut Reader<'_>) -> TabProperty {
+    let name = reader.string(64).expect("property name").to_owned();
+    let value = reader.string(32767).expect("property value").to_owned();
+    let signature =
+        boolean(reader).then(|| reader.string(1024).expect("property signature").to_owned());
+    TabProperty {
+        name,
+        value,
+        signature,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -894,30 +921,38 @@ impl Packet for SwingAnimation {
     }
 }
 
-/// 不带组件的物品。
+/// 线上的一个物品，不含组件。组件另外看，见 [`read_stack`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stack {
     pub item: i32,
     pub count: i32,
 }
 
-/// 读一个发给别人的物品，空物品是 `None`。别人收到的物品一律不带组件。
-fn read_plain_stack(reader: &mut Reader<'_>) -> Option<Stack> {
+/// 读一个 clientbound 的物品，空物品是 `None`。第二个返回值是它带的组件。
+///
+/// 组件的值没有长度前缀，只能按每种组件自己的格式解析，所以这里借
+/// `ComponentPatch::read`：那一层的字节由 `components` 对照和官方代码逐项比过。
+fn read_stack(reader: &mut Reader<'_>) -> (Option<Stack>, ComponentPatch) {
     let count = varint(reader);
     if count <= 0 {
-        return None;
+        return (None, ComponentPatch::new());
     }
     let item = varint(reader);
-    assert_eq!(varint(reader), 0, "other players get no added components");
-    assert_eq!(varint(reader), 0, "other players get no removed components");
-    Some(Stack { item, count })
+    let rest = reader.remaining();
+    let mut cursor = Cursor::new(rest);
+    let patch = ComponentPatch::read(&mut cursor).expect("component patch");
+    let used = rest.len() - cursor.remaining().len();
+    reader.bytes(used).expect("component patch bytes");
+    (Some(Stack { item, count }), patch)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SetEquipment {
     pub entity: i32,
     /// 槽位的 ordinal 和物品，线上的顺序。
     pub slots: Vec<(u8, Option<Stack>)>,
+    /// 每一项物品带的组件，和 [`Self::slots`] 一一对应。
+    pub components: Vec<ComponentPatch>,
 }
 
 impl SetEquipment {
@@ -927,6 +962,12 @@ impl SetEquipment {
             .find(|(slot, _)| *slot == ordinal)
             .map(|(_, stack)| *stack)
     }
+
+    /// 这个槽位里物品带的组件。
+    pub fn patch(&self, ordinal: u8) -> Option<&ComponentPatch> {
+        let index = self.slots.iter().position(|(slot, _)| *slot == ordinal)?;
+        self.components.get(index)
+    }
 }
 
 impl Packet for SetEquipment {
@@ -935,11 +976,18 @@ impl Packet for SetEquipment {
     fn read(reader: &mut Reader<'_>) -> Self {
         let entity = varint(reader);
         let mut slots = Vec::new();
+        let mut components = Vec::new();
         loop {
             let slot = byte(reader);
-            slots.push((slot & 0x7f, read_plain_stack(reader)));
+            let (stack, patch) = read_stack(reader);
+            slots.push((slot & 0x7f, stack));
+            components.push(patch);
             if slot & 0x80 == 0 {
-                return Self { entity, slots };
+                return Self {
+                    entity,
+                    slots,
+                    components,
+                };
             }
         }
     }
@@ -959,6 +1007,36 @@ impl Packet for BlockUpdate {
             pos: position(reader),
             state: varint(reader) as u32,
         }
+    }
+}
+
+/// 一段里同一 tick 改了几格。坐标已经换成世界坐标，按包里的顺序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionBlocksUpdate {
+    pub blocks: Vec<(Pos, u32)>,
+}
+
+impl Packet for SectionBlocksUpdate {
+    const ID: i32 = clientbound::SECTION_BLOCKS_UPDATE;
+
+    fn read(reader: &mut Reader<'_>) -> Self {
+        // 段坐标是 `x(22) | z(22) | y(20)`。
+        let section = reader.i64().expect("section position");
+        let origin = Pos::new(
+            (section >> 42) as i32 * 16,
+            (section << 44 >> 44) as i32 * 16,
+            (section << 22 >> 42) as i32 * 16,
+        );
+        let blocks = (0..list_len(reader))
+            .map(|_| {
+                // 状态 ID 在高位，低 12 位是段内的 `x << 8 | z << 4 | y`。
+                let entry = reader.varlong().expect("VarLong");
+                let local = (entry & 0xfff) as i32;
+                let pos = origin.offset(local >> 8, local & 15, (local >> 4) & 15);
+                (pos, (entry >> 12) as u32)
+            })
+            .collect();
+        Self { blocks }
     }
 }
 
@@ -1160,11 +1238,13 @@ impl Packet for ForgetLevelChunk {
 }
 
 /// 区块包里的一个方块实体。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityEntry {
     pub packed_xz: u8,
     pub y: i16,
     pub kind: i32,
+    /// 官方 `getUpdateTag` 的内容。空标签写成一个 `TAG_End`，这时是 `None`。
+    pub data: Option<Nbt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1174,7 +1254,7 @@ pub struct ChunkSection {
     pub blocks: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LevelChunk {
     pub x: i32,
     pub z: i32,
@@ -1195,11 +1275,10 @@ impl LevelChunk {
         section.blocks[index as usize]
     }
 
-    pub fn block_entity_at(&self, pos: Pos) -> Option<BlockEntityEntry> {
+    pub fn block_entity_at(&self, pos: Pos) -> Option<&BlockEntityEntry> {
         let packed_xz = (((pos.x & 15) << 4) | (pos.z & 15)) as u8;
         self.block_entities
             .iter()
-            .copied()
             .find(|entry| entry.packed_xz == packed_xz && i32::from(entry.y) == pos.y)
     }
 }
@@ -1282,13 +1361,17 @@ fn read_container(reader: &mut Reader<'_>, entries: usize, max_indirect_bits: u8
 }
 
 fn read_block_entity(reader: &mut Reader<'_>) -> BlockEntityEntry {
-    let entry = BlockEntityEntry {
-        packed_xz: byte(reader),
-        y: short(reader),
-        kind: varint(reader),
-    };
-    assert_eq!(byte(reader), 0, "M2 writes no block entity NBT");
-    entry
+    let packed_xz = byte(reader);
+    let y = short(reader);
+    let kind = varint(reader);
+    let tag = byte(reader);
+    let data = (tag != 0).then(|| Nbt::read_payload(reader, tag));
+    BlockEntityEntry {
+        packed_xz,
+        y,
+        kind,
+        data,
+    }
 }
 
 fn skip_light(reader: &mut Reader<'_>) {
@@ -1655,6 +1738,7 @@ pub fn packet_name(id: i32) -> String {
         clientbound::PONG_RESPONSE => "pong_response",
         clientbound::REMOVE_ENTITIES => "remove_entities",
         clientbound::ROTATE_HEAD => "rotate_head",
+        clientbound::SECTION_BLOCKS_UPDATE => "section_blocks_update",
         clientbound::SET_CHUNK_CACHE_CENTER => "set_chunk_cache_center",
         clientbound::SET_ENTITY_DATA => "set_entity_data",
         clientbound::SET_EQUIPMENT => "set_equipment",

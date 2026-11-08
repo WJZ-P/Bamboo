@@ -9,7 +9,6 @@ use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::BlockAncestor;
 
 use crate::{
-    fluid::Fluid,
     state::{BlockState, FluidState},
     world::World,
 };
@@ -24,9 +23,6 @@ const STEP: f32 = 0.3;
 const RESISTANCE_BONUS: f32 = 0.3;
 /// 每点抗性消耗多少爆炸强度，官方的 `0.3F`。
 const RESISTANCE_COST: f32 = 0.3;
-/// `FlowingFluid.getExplosionResistance`：水和岩浆都挡爆炸，空的流体不挡。
-const FLUID_EXPLOSION_RESISTANCE: f32 = 100.0;
-
 impl World<'_> {
     /// `PrimedTnt.explode` 走到 `ServerLevel.explode` 和 `ServerExplosion.explode`，
     /// 这里只保留破坏方块和连锁点燃 TNT。
@@ -35,7 +31,7 @@ impl World<'_> {
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32) {
         let mut broken = self.calculate_exploded_positions(center, radius);
         // `Util.shuffle(toBlow, level.random)`。
-        self.entity_random().shuffle(&mut broken);
+        self.random().shuffle(&mut broken);
         for pos in broken {
             let state = self.block_state(pos);
             if state.is_air() {
@@ -75,8 +71,7 @@ impl World<'_> {
                     let zd = f64::from(zz as f32 / 15.0 * 2.0 - 1.0);
                     let length = (xd * xd + yd * yd + zd * zd).sqrt();
                     let (xd, yd, zd) = (xd / length, yd / length, zd / length);
-                    let mut remaining =
-                        radius * (0.7 + self.entity_random().next_float() * 0.6);
+                    let mut remaining = radius * (0.7 + self.random().next_float() * 0.6);
                     let (mut xp, mut yp, mut zp) = (center.x, center.y, center.z);
                     while remaining > 0.0 {
                         let pos = BlockPos::new(mth::floor(xp), mth::floor(yp), mth::floor(zp));
@@ -107,12 +102,11 @@ impl World<'_> {
     }
 }
 
-/// `FluidState.getExplosionResistance()`。水和岩浆是 100，空的流体是 0。
+/// `FluidState.getExplosionResistance()`。数值来自生成的流体表。
+///
+/// `FluidState.getExplosionResistance()`, from the generated fluid table.
 fn fluid_resistance(fluid: FluidState) -> f32 {
-    match Fluid::of(fluid) {
-        Some(_) => FLUID_EXPLOSION_RESISTANCE,
-        None => 0.0,
-    }
+    fluid.explosion_resistance()
 }
 
 /// 爆炸破坏的方块表，官方的 `HashSet<BlockPos>`。

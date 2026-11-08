@@ -1,6 +1,9 @@
 //! 把世界层的区块转换成网络格式。
 //!
 //! `mc-bamboo-world` 不知道网络，`mc-bamboo-protocol` 不知道世界，两者在这里对接。
+//! 没改过的区块共用模板的编码，改过的区块按版本号缓存，见 [`ChunkCache`]。
+
+mod cache;
 
 use std::borrow::Cow;
 
@@ -17,6 +20,8 @@ use mc_bamboo_world::{
     store::ChunkStore,
 };
 
+pub(crate) use cache::ChunkCache;
+
 use crate::sign;
 
 /// 方块和光照都没改过的区块共用模板的编码，随便取一个还没改过的位置编出来就行。
@@ -24,8 +29,9 @@ const TEMPLATE_POS: ChunkPos = ChunkPos::new(0, 0);
 /// 光照段全选：区块包带上全部 26 段。
 const ALL_SECTIONS: u32 = (1 << LIGHT_SECTION_COUNT) - 1;
 
-/// 一个区块此刻的内容。没改过的区块共用 `template_body`，改过的每次重新编码。
+/// 一个区块此刻的内容。没改过的区块共用 `template_body`，改过的从 `cache` 拿。
 pub(crate) fn chunk_body<'a>(
+    cache: &'a mut ChunkCache,
     store: &ChunkStore,
     template_body: &'a [u8],
     pos: ChunkPos,
@@ -33,7 +39,7 @@ pub(crate) fn chunk_body<'a>(
     if store.is_template(pos) {
         Cow::Borrowed(template_body)
     } else {
-        Cow::Owned(encode_chunk(store, pos))
+        cache.body(store, pos)
     }
 }
 
@@ -43,6 +49,9 @@ pub(crate) fn encode_template(store: &ChunkStore) -> Vec<u8> {
 }
 
 /// 编码区块包里坐标之后的全部内容。
+///
+/// 只读 `store` 里这个区块和它那一列光照，[`ChunkCache`] 靠 [`ChunkStore::revision`] 判断它们变没变。
+/// 以后要从别处读数据写进区块包，那里的修改也得让版本号变，不然缓存会发旧内容。
 pub(crate) fn encode_chunk(store: &ChunkStore, pos: ChunkPos) -> Vec<u8> {
     let chunk = store.chunk(pos);
     let mut sections = Vec::new();
@@ -56,18 +65,21 @@ pub(crate) fn encode_chunk(store: &ChunkStore, pos: ChunkPos) -> Vec<u8> {
         .map(|(kind, data)| Heightmap { kind: *kind, data })
         .collect();
 
-    // 告示牌的文字不放在区块里，要编成官方的 `getUpdateTag` 一起发。
+    // 告示牌的文字、旗帜的图案这些不放在区块的方块里，要编成官方的 `getUpdateTag` 一起发。
     let block_entities: Vec<(BlockEntityInfo, Option<Vec<u8>>)> = chunk
         .block_entities()
         .map(|entity| {
-            // 表里存的是区块内坐标，查告示牌内容要用世界坐标。
+            // 表里存的是区块内坐标，查方块实体的内容要用世界坐标。
             let local = BlockPos::new(entity.x as i32, entity.y, entity.z as i32);
             let world = BlockPos::new(
                 pos.x * 16 + entity.x as i32,
                 entity.y,
                 pos.z * 16 + entity.z as i32,
             );
-            let data = store.sign(world).map(|content| sign::update_tag(&content));
+            let data = store
+                .sign(world)
+                .map(|content| sign::update_tag(&content))
+                .or_else(|| store.update_tag(world).map(<[u8]>::to_vec));
             (
                 BlockEntityInfo {
                     pos: local,
@@ -202,8 +214,9 @@ mod tests {
     fn untouched_chunks_share_the_template_bytes() {
         let store = ChunkStore::flat();
         let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
 
-        let body = chunk_body(&store, &template_body, ChunkPos::new(3, -9));
+        let body = chunk_body(&mut cache, &store, &template_body, ChunkPos::new(3, -9));
 
         assert!(matches!(body, Cow::Borrowed(_)));
         assert_eq!(*body, *template_body);
@@ -213,10 +226,11 @@ mod tests {
     fn edited_chunks_are_encoded_with_their_current_content() {
         let mut store = ChunkStore::flat();
         let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
         let pos = BlockPos::new(1, -60, 1);
 
         store.set_block(pos, blocks::STONE);
-        let edited = chunk_body(&store, &template_body, pos.chunk());
+        let edited = chunk_body(&mut cache, &store, &template_body, pos.chunk());
         assert_ne!(*edited, *template_body);
         assert_eq!(*edited, *encode_chunk(&store, pos.chunk()));
     }
@@ -225,14 +239,16 @@ mod tests {
     fn chunks_lit_from_a_neighbor_are_encoded_on_their_own() {
         let mut store = ChunkStore::flat();
         let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
 
         store.set_block(BlockPos::new(15, -60, 3), blocks::GLOWSTONE);
-        store.run_light_updates();
+        store.finish_light_updates();
 
         // 方块在 (0, 0)，光照进了 (1, 0)。
-        let lit = chunk_body(&store, &template_body, ChunkPos::new(1, 0));
-        assert!(matches!(lit, Cow::Owned(_)));
+        let neighbor = ChunkPos::new(1, 0);
+        let lit = chunk_body(&mut cache, &store, &template_body, neighbor);
         assert_ne!(*lit, *template_body);
+        assert_eq!(*lit, *encode_chunk(&store, neighbor));
     }
 
     #[test]
@@ -253,12 +269,13 @@ mod tests {
     fn block_entities_are_written_with_positions_inside_the_chunk() {
         let mut store = ChunkStore::flat();
         let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
         // 这个箱子在 (1, -1) 区块，世界坐标不是区块内坐标。
         let pos = BlockPos::new(19, -60, -11);
 
         store.set_block(pos, blocks::CHEST);
 
-        let body = chunk_body(&store, &template_body, pos.chunk());
+        let body = chunk_body(&mut cache, &store, &template_body, pos.chunk());
         assert!(contains(&body, &CHEST_ENTRY));
     }
 
@@ -272,11 +289,12 @@ mod tests {
     fn blank_signs_are_written_with_an_empty_tag() {
         let mut store = ChunkStore::flat();
         let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
         let pos = BlockPos::new(19, -60, -11);
 
         store.set_block(pos, blocks::OAK_SIGN);
 
-        let body = chunk_body(&store, &template_body, pos.chunk());
+        let body = chunk_body(&mut cache, &store, &template_body, pos.chunk());
         assert!(contains(&body, &SIGN_ENTRY));
     }
 
@@ -284,6 +302,7 @@ mod tests {
     fn written_signs_carry_their_text_in_the_chunk() {
         let mut store = ChunkStore::flat();
         let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
         let pos = BlockPos::new(19, -60, -11);
         let mut content = SignContent::default();
         content.front.messages[0] = "hello".to_owned();
@@ -291,7 +310,7 @@ mod tests {
         store.set_block(pos, blocks::OAK_SIGN);
         store.set_sign(pos, content);
 
-        let body = chunk_body(&store, &template_body, pos.chunk());
+        let body = chunk_body(&mut cache, &store, &template_body, pos.chunk());
         assert!(contains(&body, &SIGN_ENTRY));
         // `messages` 列表里的第一行，字符串标签的长度前缀是两字节。
         assert!(contains(&body, b"\x00\x05hello"));

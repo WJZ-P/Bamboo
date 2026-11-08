@@ -4,7 +4,9 @@ use mc_bamboo_core::{BlockPos, sign::SignTextSlot};
 use mc_bamboo_data::packets::play::clientbound;
 
 use crate::{
-    codec::{write_block_pos, write_bool, write_i16, write_i32, write_varint},
+    codec::{
+        write_block_pos, write_bool, write_i16, write_i32, write_i64, write_varint, write_varlong,
+    },
     item::ItemStack,
     packet::{
         ClientboundPacket,
@@ -47,7 +49,91 @@ impl ClientboundPacket for BlockUpdate {
     }
 }
 
-/// 确认到 `sequence` 为止的所有预测。必须排在这些改动的 [`BlockUpdate`] 后面。
+/// 让客户端播放方块动画，官方的 `ClientboundBlockEventPacket`。活塞伸出、收回靠它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEvent {
+    pub pos: BlockPos,
+    /// `minecraft:block` 注册表 ID，不是状态 ID。官方线上写的是 `writeByte` 的低 8 位。
+    pub block: i32,
+    pub param_a: i32,
+    pub param_b: i32,
+}
+
+impl ClientboundPacket for BlockEvent {
+    const ID: i32 = clientbound::BLOCK_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_block_pos(out, self.pos);
+        out.push(self.param_a as u8);
+        out.push(self.param_b as u8);
+        write_varint(out, self.block);
+    }
+}
+
+/// 一个区块段里这一 tick 改了不止一格，官方的 `ClientboundSectionBlocksUpdatePacket`。
+///
+/// 只改了一格时官方发 [`BlockUpdate`]。客户端对两种包做的事一样，逐格写进世界。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionBlocksUpdate<'a> {
+    /// 段坐标：x、z 就是区块坐标，y 是方块 `y >> 4`。
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    /// 按这个顺序发，客户端也按这个顺序写。
+    pub blocks: &'a [SectionBlock],
+}
+
+/// [`SectionBlocksUpdate`] 里的一格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionBlock {
+    /// 段内坐标，官方的 `SectionPos.sectionRelativePos`：`x << 8 | z << 4 | y`，
+    /// 每个分量是世界坐标的低 4 位。
+    pub local: u16,
+    /// 方块状态 ID。
+    pub state: i32,
+}
+
+impl ClientboundPacket for SectionBlocksUpdate<'_> {
+    const ID: i32 = clientbound::SECTION_BLOCKS_UPDATE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_i64(out, pack_section(self.x, self.y, self.z));
+        write_varint(out, self.blocks.len() as i32);
+        for block in self.blocks {
+            write_varlong(out, (i64::from(block.state) << 12) | i64::from(block.local));
+        }
+    }
+}
+
+/// 官方的 `SectionPos.asLong`：从高位到低位是 `x(22) | z(22) | y(20)`。
+const fn pack_section(x: i32, y: i32, z: i32) -> i64 {
+    ((x as i64 & 0x3f_ffff) << 42) | ((z as i64 & 0x3f_ffff) << 20) | (y as i64 & 0xf_ffff)
+}
+
+/// 某个玩家正在挖方块，其余玩家看到裂纹。官方的 `ClientboundBlockDestructionPacket`。
+///
+/// `progress` 是 `0` 到 `10` 的裂纹阶段，`-1` 表示不挖了。它按无符号字节写，
+/// 客户端读出来再当成 `int`，所以 `-1` 是 `255`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockDestruction {
+    /// 正在挖的玩家实体 ID。发包的 `id` 就是它，收包的人据此排除自己。
+    pub id: i32,
+    pub pos: BlockPos,
+    pub progress: i8,
+}
+
+impl ClientboundPacket for BlockDestruction {
+    const ID: i32 = clientbound::BLOCK_DESTRUCTION;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.id);
+        write_block_pos(out, self.pos);
+        out.push(self.progress as u8);
+    }
+}
+
+/// 确认到 `sequence` 为止的所有预测。必须排在这些改动的 [`BlockUpdate`] 和
+/// [`SectionBlocksUpdate`] 后面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockChangedAck {
     pub sequence: i32,
@@ -214,6 +300,59 @@ mod tests {
     }
 
     #[test]
+    fn section_blocks_update_matches_official_bytes() {
+        // `blocks-inventory.md` 3.2 的实测字节：段 (1, -4, -1)，(18, -61, -7) 设成 stone(1)，
+        // (31, -49, -1) 设成 oak_slab 的默认状态 15180。
+        let packet = SectionBlocksUpdate {
+            x: 1,
+            y: -4,
+            z: -1,
+            blocks: &[
+                SectionBlock {
+                    local: 0x293,
+                    state: 1,
+                },
+                SectionBlock {
+                    local: 0xfff,
+                    state: 15180,
+                },
+            ],
+        };
+        assert_eq!(
+            body(&packet),
+            hex("00 00 07 ff ff ff ff fc 02 93 25 ff 9f d3 1d")
+        );
+    }
+
+    #[test]
+    fn section_position_keeps_the_low_bits_of_each_axis() {
+        // x 占高 22 位，z 占中间 22 位，y 占低 20 位，负数按补码截断。
+        assert_eq!(pack_section(0, 0, 0), 0);
+        assert_eq!(pack_section(-1, -1, -1), -1);
+        assert_eq!(pack_section(0x20_0000, 0, 0), i64::MIN);
+        assert_eq!(pack_section(0, -1, 0), 0xf_ffff);
+        assert_eq!(pack_section(0, 0, -1), 0x3f_ffff << 20);
+    }
+
+    #[test]
+    fn section_blocks_update_puts_the_state_above_the_position() {
+        // 状态 ID 左移 12 位再拼上段内坐标，VarLong 写出来要 4 个字节。
+        let packet = SectionBlocksUpdate {
+            x: 0,
+            y: 0,
+            z: 0,
+            blocks: &[SectionBlock {
+                local: 0x80f,
+                state: 30_000,
+            }],
+        };
+        let mut expected = hex("00 00 00 00 00 00 00 00 01");
+        write_varlong(&mut expected, (30_000 << 12) | 0x80f);
+        assert_eq!(expected.len(), 8 + 1 + 4);
+        assert_eq!(body(&packet), expected);
+    }
+
+    #[test]
     fn light_update_writes_varint_coordinates_before_the_light_data() {
         let layer = [0x12; 2048];
         let packet = LightUpdate {
@@ -252,6 +391,33 @@ mod tests {
             data: &[0x08, 0x00],
         };
         assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 2a 08 00"));
+    }
+
+    #[test]
+    fn block_destruction_matches_official_bytes() {
+        let packet = BlockDestruction {
+            id: 1,
+            pos: BlockPos::new(8, -61, 8),
+            progress: 5,
+        };
+        assert_eq!(body(&packet), hex("01 00 00 02 00 00 00 8f c3 05"));
+        // 停止挖掘时发 -1，按无符号字节写是 255。
+        let cancelled = BlockDestruction {
+            progress: -1,
+            ..packet
+        };
+        assert_eq!(body(&cancelled), hex("01 00 00 02 00 00 00 8f c3 ff"));
+    }
+
+    #[test]
+    fn block_event_writes_the_block_and_two_bytes() {
+        let packet = BlockEvent {
+            pos: BlockPos::new(8, -60, 8),
+            block: 42,
+            param_a: 0,
+            param_b: 1,
+        };
+        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 00 01 2a"));
     }
 
     #[test]

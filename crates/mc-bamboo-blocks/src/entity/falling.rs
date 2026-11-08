@@ -46,14 +46,18 @@ impl Entity {
             let context = self.collision_context();
             if let Some(hit) =
                 world.clip_collider_source_water(self.old_position, self.position, context)
+                && world.fluid_state(hit.pos).is_water()
             {
-                if world.fluid_state(hit.pos).is_water() {
-                    pos = hit.pos;
-                    stuck_in_water = true;
-                }
+                pos = hit.pos;
+                stuck_in_water = true;
             }
         }
         if !self.on_ground && !stuck_in_water {
+            // 官方比的是方块坐标：`pos.getY() <= getMinY() || pos.getY() > getMaxY()`。
+            // `LevelHeightAccessor.getMaxY()` 是 `minY + height - 1`，和这里的 `max_y` 一样含顶层。
+            //
+            // Official compares the block position: `pos.getY() <= getMinY() || pos.getY() > getMaxY()`.
+            // `LevelHeightAccessor.getMaxY()` is `minY + height - 1`, the same inclusive top as `max_y`.
             let out_of_world = pos.y <= world.min_y() || pos.y > world.max_y();
             if data.time > 100 && out_of_world || data.time > 600 {
                 // `dropItem` 决定要不要生成掉落物，这个世界没有掉落物，只剩消失。
@@ -66,12 +70,17 @@ impl Entity {
                 if data.cancel_drop {
                     self.discard();
                 } else {
-                    let land_here = self.can_land(data, current_state, is_concrete, stuck_in_water, world, pos);
+                    let land_here =
+                        self.can_land(data, current_state, is_concrete, stuck_in_water, world, pos);
                     if land_here {
                         let mut placed = data.state;
                         if placed.has(WATERLOGGED) {
-                            let fluid = world.fluid_state(pos);
-                            if fluid.is_water() && fluid.is_source() {
+                            // `FluidState.is(Fluids.WATER)` 只认水源，流动的水不算。
+                            // `FluidState.is(Fluids.WATER)` is the source fluid, not flowing water.
+                            if world
+                                .fluid_state(pos)
+                                .is(mc_bamboo_data::registries::fluid::WATER)
+                            {
                                 placed = placed.with(WATERLOGGED, true);
                             }
                         }
@@ -100,7 +109,11 @@ impl Entity {
     /// `FallingBlockEntity.causeFallDamage`。砸到实体的伤害不在范围里，但铁砧会摔裂，
     /// 所以伤害数值和那一颗骰子照官方算。
     ///
-    /// 返回的永远是假：官方最后返回的是 `super.causeFallDamage`，而下落方块自己不受伤。
+    /// 返回的永远是假：官方这个方法最后也是 `return false`，下落方块自己不受伤。
+    ///
+    /// Entity damage is out of scope, but an anvil can crack, so the damage value and that one roll follow vanilla.
+    ///
+    /// This always returns false: vanilla's method also ends with `return false`. A falling block does not hurt itself.
     pub(crate) fn falling_block_cause_fall_damage(
         &mut self,
         mut data: FallingBlock,
@@ -117,6 +130,7 @@ impl Entity {
         let damage = mth::floor(f64::from(distance as f32 * data.fall_damage_per_distance))
             .min(data.fall_damage_max);
         // 骰子只在既是铁砧、伤害又大于零的时候掷。
+        // The roll happens only for an anvil whose fall damage is above zero.
         if data.state.is_tagged(block_tags::ANVIL)
             && damage > 0
             && self.random.next_float() < 0.05_f32 + distance as f32 * 0.05_f32
@@ -146,8 +160,8 @@ impl Entity {
         // `DirectionalPlaceContext`：空手，点的是这一格的上面。
         let ctx = PlaceContext::directional(world, pos, Direction::Up);
         let may_replace = current_state.can_be_replaced(&ctx, world);
-        let would_continue_falling = is_free(world.block_state(pos.below()))
-            && (!is_concrete || !stuck_in_water);
+        let would_continue_falling =
+            is_free(world.block_state(pos.below())) && (!is_concrete || !stuck_in_water);
         may_replace && data.state.can_survive(world, pos) && !would_continue_falling
     }
 }

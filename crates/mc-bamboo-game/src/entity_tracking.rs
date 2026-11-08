@@ -266,8 +266,8 @@ fn is_visible(player: &Player, snapshot: &Snapshot, view_distance: i32) -> bool 
     let entity_range = entity_tracking_range(snapshot.entity_type);
     let player_range = player.view_distance(view_distance) * BLOCKS_PER_CHUNK;
     let range = f64::from(entity_range.min(player_range));
-    let dx = player.position.x - snapshot.position.x;
-    let dz = player.position.z - snapshot.position.z;
+    let dx = player.position().x - snapshot.position.x;
+    let dz = player.position().z - snapshot.position.z;
     // 区块还没发到时不配对：`add_entity` 到达时区块要已经加载了。
     dx * dx + dz * dz <= range * range && player.chunks.is_chunk_tracked(snapshot.chunk)
 }
@@ -378,10 +378,12 @@ fn choose_movement(snapshot: &Snapshot, tracked: &mut TrackedEntity) -> Option<M
     if !should_send_position {
         return None;
     }
-    Some(match PositionDelta::between(tracked.base, snapshot.position) {
-        Some(delta) => Movement::Position(delta),
-        None => Movement::Sync,
-    })
+    Some(
+        match PositionDelta::between(tracked.base, snapshot.position) {
+            Some(delta) => Movement::Position(delta),
+            None => Movement::Sync,
+        },
+    )
 }
 
 /// `positionCodec.delta(position).lengthSqr() >= 7.6293945E-6F`。

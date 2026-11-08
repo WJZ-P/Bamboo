@@ -6,6 +6,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor, block_maps, blocks, tags::block_tags};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -174,6 +175,20 @@ impl Behaviour for Chest {
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
     }
 
+    /// `ChestBlockEntity.triggerEvent`：事件 1 是开盖人数，客户端自己播盖子的动画。
+    ///
+    /// 箱子内容在 `mc-bamboo-game` 里，方块层没有箱子实体，所以不能像官方那样查实体在不在。
+    fn trigger_event(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        param_a: i32,
+        _param_b: i32,
+    ) -> bool {
+        param_a == 1
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         update_neighbours_after_destroy(state, world, pos);
     }
@@ -185,6 +200,18 @@ impl Behaviour for Chest {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `ChestBlock.getAnalogOutputSignal`：`getContainer(..., false)`，压住时读不到，
+    /// 双箱按合并后的 54 格算。位置上的规则在 `Level::container_signal` 里。
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world.container_signal(pos)
     }
 }
 
@@ -261,6 +288,13 @@ pub(super) fn chest_from_copper_block(
 }
 
 impl Behaviour for CopperChest {
+    /// `WeatheringCopperChestBlock`：右半边不氧化，交给左半边。没有人打开箱子，世界里没有实体。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.get(CHEST_TYPE) != ChestType::Right {
+            change_over_time(state, world, pos);
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -290,6 +324,17 @@ impl Behaviour for CopperChest {
         updated
     }
 
+    fn trigger_event(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        param_a: i32,
+        param_b: i32,
+    ) -> bool {
+        Chest.trigger_event(state, world, pos, param_a, param_b)
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         Chest.affect_neighbors_after_removal(state, world, pos);
     }
@@ -301,6 +346,16 @@ impl Behaviour for CopperChest {
         ctx: &UseContext,
     ) -> InteractionResult {
         Chest.use_without_item(state, world, ctx)
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        Chest.analog_output_signal(state, world, pos, direction)
     }
 }
 
@@ -329,6 +384,18 @@ impl Behaviour for EnderChest {
     ) -> BlockState {
         tick_water_if_waterlogged(state, world, pos);
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    /// `EnderChestBlockEntity.triggerEvent`，和箱子一样只认事件 1。
+    fn trigger_event(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        param_a: i32,
+        _param_b: i32,
+    ) -> bool {
+        param_a == 1
     }
 
     fn use_without_item(

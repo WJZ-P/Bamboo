@@ -134,6 +134,13 @@ impl BlockTicks {
         self.now
     }
 
+    /// 把时钟拨到 `now`，不取出也不运行任何计划刻。
+    ///
+    /// 官方的假世界直接从一个游戏时间开始，没有先跑一刻；重放动作之前也只要把时钟对上。
+    pub fn set_time(&mut self, now: i64) {
+        self.now = now;
+    }
+
     fn order(&mut self, delay: i32, priority: TickPriority) -> TickOrder {
         let order = TickOrder {
             trigger_tick: self.now + i64::from(delay),

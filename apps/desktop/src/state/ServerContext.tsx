@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import {
+  defaultSettings,
   getSnapshot,
   loadSettings,
   onPlayersChanged,
@@ -23,6 +24,8 @@ import {
 interface ServerContextValue {
   snapshot: ServerSnapshot | null;
   settings: ServerSettings | null;
+  /** 出厂设置，设置页用它显示每一项的默认值。 */
+  defaults: ServerSettings | null;
   /** 正在启动或停止，这期间按钮不能再点。 */
   busy: boolean;
   error: string | null;
@@ -40,6 +43,7 @@ const errorText = (error: unknown) => (typeof error === "string" ? error : Strin
 export function ServerProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<ServerSnapshot | null>(null);
   const [settings, setSettings] = useState<ServerSettings | null>(null);
+  const [defaults, setDefaults] = useState<ServerSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,6 +61,9 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       .catch((reason) => setError(errorText(reason)));
     loadSettings()
       .then((value) => !disposed && setSettings(value))
+      .catch((reason) => setError(errorText(reason)));
+    defaultSettings()
+      .then((value) => !disposed && setDefaults(value))
       .catch((reason) => setError(errorText(reason)));
 
     return () => {
@@ -100,8 +107,18 @@ export function ServerProvider({ children }: { children: ReactNode }) {
   const dismissError = useCallback(() => setError(null), []);
 
   const value = useMemo(
-    () => ({ snapshot, settings, busy, error, start, stop, updateSettings, dismissError }),
-    [snapshot, settings, busy, error, start, stop, updateSettings, dismissError],
+    () => ({
+      snapshot,
+      settings,
+      defaults,
+      busy,
+      error,
+      start,
+      stop,
+      updateSettings,
+      dismissError,
+    }),
+    [snapshot, settings, defaults, busy, error, start, stop, updateSettings, dismissError],
   );
 
   return <ServerContext.Provider value={value}>{children}</ServerContext.Provider>;

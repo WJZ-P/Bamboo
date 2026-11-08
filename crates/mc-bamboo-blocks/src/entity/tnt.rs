@@ -24,15 +24,20 @@ impl Entity {
         }
 
         data.fuse -= 1;
+        // 归零的那一拍也要把引信写回去：实体这一拍还在，同步和比对都看得到 0。
+        // Write the fuse back on the tick it hits zero too. The entity is still reported, and both sync and comparison see 0.
+        self.kind = EntityKind::Tnt(data);
+        // 官方接着调 `updateFluidInteraction`，它只影响水流推动和雨天灭火，
+        // 两样都不在范围里，所以 `wasTouchingWater` 一直是假。
+        //
+        // Vanilla then calls `updateFluidInteraction`. That only pushes with water and puts fire out in rain,
+        // neither of which is in scope, so `wasTouchingWater` stays false.
         if data.fuse <= 0 {
             self.discard();
             // 爆炸点是 `getY(0.0625)`，不是实体原点。
+            // The explosion is at `getY(0.0625)`, not the entity origin.
             let center = Vec3::new(self.position.x, self.y_at(0.0625), self.position.z);
             world.explode_tnt(center, 4.0);
-        } else {
-            // 官方接着调 `updateFluidInteraction`，它只影响水流推动和雨天灭火，
-            // 两样都不在范围里，所以 `wasTouchingWater` 一直是假。
-            self.kind = EntityKind::Tnt(data);
         }
         self.set_requires_precise_position(self.horizontal_collision || self.vertical_collision);
     }

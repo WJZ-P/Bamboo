@@ -149,7 +149,14 @@ pub struct Section {
     blocks: PalettedContainer,
     biomes: PalettedContainer,
     non_air_blocks: u16,
+    /// 会随机刻的方块数，官方 `tickingBlockCount` 和 `tickingFluidCount` 合在一起。
+    random_tickers: u16,
     fluids: u16,
+}
+
+/// 这个状态的方块或者它的流体有随机刻。
+fn ticks_randomly(state: u32) -> bool {
+    state_facts(state) & (facts::RANDOMLY_TICKING | facts::FLUID_RANDOMLY_TICKING) != 0
 }
 
 impl Section {
@@ -158,6 +165,7 @@ impl Section {
             blocks: PalettedContainer::blocks(blocks::AIR),
             biomes: PalettedContainer::biomes(biome),
             non_air_blocks: 0,
+            random_tickers: 0,
             fluids: 0,
         }
     }
@@ -179,12 +187,19 @@ impl Section {
             (false, true) => self.non_air_blocks -= 1,
             _ => {}
         }
+        self.random_tickers -= u16::from(ticks_randomly(previous));
+        self.random_tickers += u16::from(ticks_randomly(state));
         match (fluid_is_empty(previous), fluid_is_empty(state)) {
             (true, false) => self.fluids += 1,
             (false, true) => self.fluids -= 1,
             _ => {}
         }
         self.blocks.set(index, state);
+    }
+
+    /// `LevelChunkSection.isRandomlyTicking`：里面有会随机刻的方块或者流体。
+    pub fn is_randomly_ticking(&self) -> bool {
+        self.random_tickers > 0
     }
 
     pub fn blocks(&self) -> &PalettedContainer {
@@ -243,6 +258,10 @@ pub struct Chunk {
     block_entities: BTreeMap<(i32, usize, usize), i32>,
     /// 有内容的告示牌。没有条目时内容是空白的，和官方按状态临时建出来的方块实体一样。
     signs: BTreeMap<(i32, usize, usize), SignContent>,
+    /// 方块实体要发给客户端的那段 NBT，官方 `BlockEntity.getUpdateTag` 编好的网络字节。
+    ///
+    /// 内容由上层算（旗帜的图案、头颅的档案这些来自物品的组件），这里只跟着方块一起存和丢。
+    update_tags: BTreeMap<(i32, usize, usize), Vec<u8>>,
     sky_light_sources: SkyLightSources,
 }
 
@@ -254,6 +273,7 @@ impl Chunk {
             heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
             block_entities: BTreeMap::new(),
             signs: BTreeMap::new(),
+            update_tags: BTreeMap::new(),
             sky_light_sources: SkyLightSources::default(),
         }
     }
@@ -317,6 +337,19 @@ impl Chunk {
             .map(|(&(y, z, x), content)| (x, y, z, content))
     }
 
+    /// 这一格的方块实体要发给客户端的 NBT。没有时返回 `None`，和官方的空标签一样不发。
+    pub fn update_tag(&self, x: usize, y: i32, z: usize) -> Option<&[u8]> {
+        self.update_tags.get(&(y, z, x)).map(Vec::as_slice)
+    }
+
+    /// 写入方块实体要发给客户端的 NBT。`None` 表示这一格没有要发的内容。
+    pub fn set_update_tag(&mut self, x: usize, y: i32, z: usize, tag: Option<Vec<u8>>) {
+        match tag {
+            Some(tag) => self.update_tags.insert((y, z, x), tag),
+            None => self.update_tags.remove(&(y, z, x)),
+        };
+    }
+
     /// 把世界高度拆成区块段下标和段内高度。
     fn locate(y: i32) -> (usize, usize) {
         let offset = y - MIN_Y;
@@ -352,6 +385,7 @@ impl Chunk {
         let key = (y, z, x);
         if !is_same_block(previous, state) {
             self.signs.remove(&key);
+            self.update_tags.remove(&key);
         }
         match block_of_state(state).and_then(|block| block.block_entity_type) {
             Some(kind) => self.block_entities.insert(key, kind),
@@ -407,6 +441,22 @@ mod tests {
 
         chunk.set_block(0, 0, 0, blocks::AIR);
         assert_eq!(chunk.sections()[4].block_count(), 0);
+    }
+
+    #[test]
+    fn sections_know_when_something_ticks_randomly() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        assert!(!chunk.sections()[4].is_randomly_ticking());
+
+        chunk.set_block(0, 0, 0, blocks::GRASS_BLOCK);
+        chunk.set_block(1, 0, 0, blocks::LAVA);
+        assert!(chunk.sections()[4].is_randomly_ticking());
+
+        chunk.set_block(0, 0, 0, blocks::DIRT);
+        assert!(chunk.sections()[4].is_randomly_ticking());
+        chunk.set_block(1, 0, 0, blocks::AIR);
+        assert!(!chunk.sections()[4].is_randomly_ticking());
     }
 
     #[test]

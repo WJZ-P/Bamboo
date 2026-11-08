@@ -4,6 +4,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -32,6 +33,11 @@ impl Behaviour for RotatedPillar {
 pub(super) struct Chain;
 
 impl Behaviour for Chain {
+    /// `WeatheringCopperChainBlock` 在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

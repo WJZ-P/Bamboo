@@ -9,15 +9,17 @@ use mc_bamboo_blocks::{
 };
 use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{
-    blocks, items, items::ITEMS, packets::play::clientbound, registries::block_entity_type,
+    block_id_of_state, blocks, items, items::ITEMS, packets::play::clientbound,
+    registries::block_entity_type, registries::data_component_type as kinds,
 };
 use mc_bamboo_protocol::{
+    components::{ComponentValue, cursor::HolderSet, predicate::BlockPredicate},
     item::ItemStack,
     packet::{
         ClientboundPacket,
         play::{
-            BlockChangedAck, BlockUpdate, Disconnect, LevelEvent, PlayRequest, PlayerActionKind,
-            SwingAnimation, SystemChat,
+            BlockChangedAck, BlockUpdate, Disconnect, GameMode, LevelEvent, PlayRequest,
+            PlayerActionKind, SectionBlock, SectionBlocksUpdate, SwingAnimation, SystemChat,
         },
     },
     text::{Color, Component},
@@ -28,8 +30,8 @@ use crate::{
     links::encode_frames,
     player::Player,
     world::tests::{
-        Client, Frame, Harness, SPAWN_X, SPAWN_Y, SPAWN_Z, body_of, chunk_body, chunk_position,
-        client_requesting, frames_with_id,
+        Client, Frame, Harness, SPAWN_X, SPAWN_Y, SPAWN_Z, block_changes, body_of, chunk_body,
+        chunk_position, client_requesting, frames_with_id,
     },
 };
 
@@ -71,6 +73,24 @@ fn update(pos: BlockPos, state: u32) -> Frame {
     })
 }
 
+/// 同一段里改了几格时的那个包，`blocks` 要按官方发送的顺序写。
+fn section_update(blocks: &[(BlockPos, u32)]) -> Frame {
+    let (first, _) = blocks[0];
+    let blocks: Vec<SectionBlock> = blocks
+        .iter()
+        .map(|&(pos, state)| SectionBlock {
+            local: (((pos.x & 15) << 8) | ((pos.z & 15) << 4) | (pos.y & 15)) as u16,
+            state: state as i32,
+        })
+        .collect();
+    frame_of(&SectionBlocksUpdate {
+        x: first.x >> 4,
+        y: first.y >> 4,
+        z: first.z >> 4,
+        blocks: &blocks,
+    })
+}
+
 fn ack(sequence: i32) -> Frame {
     frame_of(&BlockChangedAck { sequence })
 }
@@ -106,6 +126,7 @@ fn block_frames(client: &Client) -> Vec<Frame> {
             matches!(
                 frame.id,
                 clientbound::BLOCK_UPDATE
+                    | clientbound::SECTION_BLOCKS_UPDATE
                     | clientbound::BLOCK_CHANGED_ACK
                     | clientbound::LEVEL_EVENT
             )
@@ -1155,13 +1176,19 @@ fn right_clicking_a_chest_places_nothing() {
     server.tick();
 
     assert_eq!(block_at(&mut server, TWO_ABOVE), Some(blocks::AIR));
+    // 右键打开箱子：菜单包在请求里就发，方块事件和 ack 等到这一 tick 后面的阶段。
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
     assert_eq!(
-        client.take_frames(),
+        ids,
         [
-            update(ABOVE, blocks::CHEST),
-            update(TWO_ABOVE, blocks::AIR),
-            ack(1),
-        ]
+            clientbound::OPEN_SCREEN,
+            clientbound::CONTAINER_SET_CONTENT,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_EVENT,
+            clientbound::BLOCK_CHANGED_ACK,
+        ],
+        "frames: {ids:?}"
     );
 }
 
@@ -1624,7 +1651,13 @@ fn a_water_bucket_pours_a_source_that_flows_on_later_ticks() {
     }
     let flowing = BlockState::WATER.with(LEVEL, 1).0;
     assert_eq!(block_at(&mut server, ABOVE.east()), Some(flowing));
-    assert!(block_frames(&client).contains(&update(ABOVE.east(), flowing)));
+    // 四格在同一段，同一 tick 流过去，一起发。
+    let frames = client.take_frames();
+    assert_eq!(
+        frames_with_id(&frames, clientbound::SECTION_BLOCKS_UPDATE).len(),
+        1
+    );
+    assert!(block_changes(&frames).contains(&(ABOVE.east(), flowing)));
 }
 
 #[test]
@@ -2017,18 +2050,16 @@ fn a_torch_goes_with_its_support_and_everyone_sees_it() {
     server.tick();
 
     assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
-    let gone = [update(GROUND, blocks::AIR), update(ABOVE, blocks::AIR)];
+    // 两格在同一段，合成一个包，顺序是官方 `ShortOpenHashSet` 的遍历顺序。
+    let gone = section_update(&[(GROUND, blocks::AIR), (ABOVE, blocks::AIR)]);
     // 官方的连锁里破坏的是世界，不是发起者，所以火把的事件发起者也要收到。
     let torch = destroyed(ABOVE, blocks::TORCH);
     let grass = destroyed(GROUND, blocks::GRASS_BLOCK);
     assert_eq!(
         block_frames(&breaker),
-        [torch.clone(), gone[0].clone(), gone[1].clone(), ack(2)]
+        [torch.clone(), gone.clone(), ack(2)]
     );
-    assert_eq!(
-        block_frames(&watcher),
-        [grass, torch, gone[0].clone(), gone[1].clone()]
-    );
+    assert_eq!(block_frames(&watcher), [grass, torch, gone]);
 }
 
 #[test]
@@ -2098,10 +2129,13 @@ fn a_player_arriving_later_gets_chests_and_banners_in_the_chunk() {
         .find(|frame| chunk_position(frame) == ChunkPos::new(0, 0))
         .expect("第一批里有出生点的区块");
     let banner = block_entity_type::BANNER as u8;
+    // 箱子的 `getUpdateTag` 是空的，官方写一个 `TAG_End`。
     assert!(contains(chunk_body(chunk), &[0x35, 0xff, 0xc4, 0x01, 0x00]));
+    // 旗帜的 `getUpdateTag` 走 `saveWithoutMetadata`，至少带一张空的组件表，
+    // 所以后面跟的是一个 `TAG_Compound`。
     assert!(contains(
         chunk_body(chunk),
-        &[0x45, 0xff, 0xc4, banner, 0x00]
+        &[0x45, 0xff, 0xc4, banner, 0x0a, 0x0a, 0x00, 0x0a]
     ));
 }
 
@@ -2191,16 +2225,19 @@ fn arbitrary_requests_never_panic_and_never_end_in_a_ghost() {
 
         // 每一 tick 的 ack 都排在所有方块更新后面。
         let frames = client.take_frames();
-        let last_update = frames
-            .iter()
-            .rposition(|frame| frame.id == clientbound::BLOCK_UPDATE);
+        let last_update = frames.iter().rposition(|frame| {
+            matches!(
+                frame.id,
+                clientbound::BLOCK_UPDATE | clientbound::SECTION_BLOCKS_UPDATE
+            )
+        });
         let ack = frames
             .iter()
             .position(|frame| frame.id == clientbound::BLOCK_CHANGED_ACK);
         if let (Some(last_update), Some(ack)) = (last_update, ack) {
             assert!(last_update < ack);
         }
-        updates += frames_with_id(&frames, clientbound::BLOCK_UPDATE).len();
+        updates += block_changes(&frames).len();
     }
 
     assert!(!client.is_closed());
@@ -2211,4 +2248,311 @@ fn arbitrary_requests_never_panic_and_never_end_in_a_ghost() {
     let inventory = &server.player(&client).inventory;
     assert!(inventory.selected < 9);
     assert_eq!(inventory.slots.len(), 46);
+}
+
+/// 直接放进主手，不走 `SetCreativeModeSlot`：冒险模式收不了那个包。
+fn hold_stack(server: &mut Harness, client: &Client, stack: ItemStack) {
+    player_mut(server, client).inventory.slots[36] = stack;
+}
+
+fn set_adventure(server: &mut Harness, client: &Client) {
+    player_mut(server, client).game_mode = GameMode::Adventure;
+}
+
+/// 只包含 `state` 这一种方块的谓词。
+fn block_predicate(state: u32) -> BlockPredicate {
+    BlockPredicate {
+        blocks: Some(HolderSet::Ids(vec![
+            block_id_of_state(state).unwrap() as i32
+        ])),
+        properties: None,
+        nbt: None,
+        components: Default::default(),
+    }
+}
+
+/// 一个物品，挂上 `kind` 组件里的一条谓词。
+fn with_component(item: i32, kind: i32, state: u32) -> ItemStack {
+    let mut value = Vec::new();
+    let predicates = vec![block_predicate(state)];
+    match kind {
+        kinds::CAN_BREAK => ComponentValue::CanBreak(predicates).write(&mut value),
+        kinds::CAN_PLACE_ON => ComponentValue::CanPlaceOn(predicates).write(&mut value),
+        _ => unreachable!("测试只用这两个组件"),
+    }
+    ItemStack {
+        item,
+        count: 1,
+        added: vec![(kind, value)],
+        removed: Vec::new(),
+    }
+}
+
+#[test]
+fn adventure_mode_places_stone_where_can_place_on_matches() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    // 点的是脚下的草方块，`can_place_on` 写的也是草方块。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::GRASS_BLOCK),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    // 草方块换成别的方块后谓词就不再匹配，这里看的是点击那一刻的草方块。
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::STONE));
+}
+
+#[test]
+fn adventure_mode_refuses_placement_where_can_place_on_does_not_match() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::DIRT),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    // 被拒绝的预测照样要 ack。
+    assert_eq!(client.take_frames().last(), Some(&ack(1)));
+}
+
+#[test]
+fn creative_mode_ignores_can_place_on() {
+    let (mut server, client) = settled();
+    // 创造模式能建造，谓词匹配不上也照放。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::DIRT),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::STONE));
+}
+
+#[test]
+fn adventure_mode_breaks_a_block_that_can_break_lists() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    // 矮草没有硬度，进度一到就挖穿。
+    set_block(&mut server, ABOVE, blocks::SHORT_GRASS);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STICK, kinds::CAN_BREAK, blocks::SHORT_GRASS),
+    );
+
+    destroy(&server, &client, ABOVE, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    assert_eq!(client.take_frames(), [update(ABOVE, blocks::AIR), ack(1)]);
+}
+
+#[test]
+fn adventure_mode_cannot_break_a_block_outside_can_break() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    set_block(&mut server, ABOVE, blocks::SHORT_GRASS);
+    // 组件里写的是泥土，矮草不在列表里。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STICK, kinds::CAN_BREAK, blocks::DIRT),
+    );
+
+    destroy(&server, &client, ABOVE, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::SHORT_GRASS));
+    assert_eq!(
+        client.take_frames(),
+        [update(ABOVE, blocks::SHORT_GRASS), ack(1)]
+    );
+}
+
+fn set_spectator(server: &mut Harness, client: &Client) {
+    player_mut(server, client).game_mode = GameMode::Spectator;
+}
+
+#[test]
+fn spectator_can_place_on_does_not_place() {
+    let (mut server, client) = settled();
+    set_spectator(&mut server, &client);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::GRASS_BLOCK),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    assert_eq!(client.take_frames().last(), Some(&ack(1)));
+}
+
+#[test]
+fn spectator_opens_a_chest_instead_of_placing_while_sneaking() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::CHEST);
+    set_spectator(&mut server, &client);
+    press_shift(&mut server, &client);
+    // 潜行状态自己会同步一个包，先清掉，后面只看这次右键。
+    server.tick();
+    client.take_frames();
+    // 潜行加 `can_place_on` 在别的模式会跳过箱子、把方块放上去。旁观者先看菜单。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::CHEST),
+    );
+
+    click_top(&server, &client, ABOVE, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, TWO_ABOVE), Some(blocks::AIR));
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert_eq!(
+        ids,
+        [
+            clientbound::OPEN_SCREEN,
+            clientbound::CONTAINER_SET_CONTENT,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_CHANGED_ACK,
+        ],
+        "frames: {ids:?}"
+    );
+    // `ChestBlockEntity.startOpen` 跳过旁观者：不计数，所以没有开盖的方块事件。
+    assert_eq!(
+        server
+            .region()
+            .containers
+            .get(&ABOVE)
+            .map_or(0, |entry| entry.open_count),
+        0
+    );
+}
+
+#[test]
+fn spectator_passes_a_blocked_chest_without_placing() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::CHEST);
+    // 上面是红石导体，官方 `ChestBlock.getMenuProvider` 返回 null。
+    set_block(&mut server, TWO_ABOVE, blocks::STONE);
+    set_spectator(&mut server, &client);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::CHEST),
+    );
+
+    let beside = ABOVE.relative(Direction::North);
+    server.request(
+        &client,
+        use_item_at(ABOVE, Direction::North, (0.5, 0.5, 0.0)),
+    );
+    server.tick();
+
+    assert_eq!(block_at(&mut server, beside), Some(blocks::AIR));
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(!ids.contains(&clientbound::OPEN_SCREEN), "frames: {ids:?}");
+    assert_eq!(ids.last(), Some(&clientbound::BLOCK_CHANGED_ACK));
+}
+
+#[test]
+fn spectator_portals_say_they_cannot_teleport() {
+    let (mut server, client) = settled();
+    set_spectator(&mut server, &client);
+    for portal in [
+        blocks::NETHER_PORTAL,
+        blocks::END_PORTAL,
+        blocks::END_GATEWAY,
+    ] {
+        set_block(&mut server, GROUND, portal);
+        hold_stack(
+            &mut server,
+            &client,
+            with_component(items::STONE, kinds::CAN_PLACE_ON, portal),
+        );
+
+        click_top(&server, &client, GROUND, 1);
+        server.tick();
+
+        assert_eq!(block_at(&mut server, GROUND), Some(portal));
+        assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+        let frames = client.take_frames();
+        let chat = frames
+            .iter()
+            .find(|frame| frame.id == clientbound::SYSTEM_CHAT)
+            .expect("传送失败要有快捷栏上方的提示");
+        assert!(
+            chat.body
+                .windows(b"spectator.cannot_teleport".len())
+                .any(|window| window == b"spectator.cannot_teleport"),
+            "portal {portal}"
+        );
+        assert_eq!(frames.last(), Some(&ack(1)));
+    }
+}
+
+#[test]
+fn spectator_use_item_does_not_place_a_lily_pad() {
+    let (mut server, client) = settled();
+    set_block(&mut server, GROUND, blocks::WATER);
+    move_player(&server, &client, 11.5, -59.0, 8.5);
+    set_spectator(&mut server, &client);
+    hold_stack(&mut server, &client, ItemStack::new(items::LILY_PAD, 1));
+    server.tick();
+    client.take_frames();
+
+    server.request(
+        &client,
+        PlayRequest::UseItem {
+            hand: Hand::Main,
+            sequence: 1,
+            yaw: 0.0,
+            pitch: 90.0,
+        },
+    );
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(
+        !ids.contains(&clientbound::SWING_ANIMATION),
+        "frames: {ids:?}"
+    );
+    assert!(
+        ids.contains(&clientbound::BLOCK_CHANGED_ACK),
+        "frames: {ids:?}"
+    );
+}
+
+#[test]
+fn adventure_mode_can_break_does_not_allow_placing() {
+    let (mut server, client) = settled();
+    set_adventure(&mut server, &client);
+    // `can_break` 只管挖，放置要看 `can_place_on`。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_BREAK, blocks::GRASS_BLOCK),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
 }

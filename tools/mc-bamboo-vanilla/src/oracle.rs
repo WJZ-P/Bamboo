@@ -33,8 +33,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::HAS_RECORD, state::HORIZONTAL_FACING,
-    world::MAX_CHAINED_NEIGHBOR_UPDATES,
+    BlockState, behaviour::is_ported, state::FACING, state::FACING_HOPPER, state::HAS_RECORD,
+    state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
@@ -56,7 +56,7 @@ const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Rule {
     AnalogInput,
-    RandomOutcome,
+    EntityRandom,
     RandomLoop,
     RandomPositional,
     Explosion,
@@ -65,21 +65,20 @@ pub enum Rule {
     ItemUseOn,
     CanDestroyBlock,
     RandomDelay,
-    FallingTick,
-    FireTick,
     CommandTick,
     TimerTick,
     EntityTick,
-    Piston,
+    EntityRandomTick,
     EntityTrigger,
     Dispensing,
     DaylightTimer,
+    UnmodeledContainer,
 }
 
 impl Rule {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::AnalogInput,
-        Self::RandomOutcome,
+        Self::EntityRandom,
         Self::RandomLoop,
         Self::RandomPositional,
         Self::Explosion,
@@ -88,21 +87,20 @@ impl Rule {
         Self::ItemUseOn,
         Self::CanDestroyBlock,
         Self::RandomDelay,
-        Self::FallingTick,
-        Self::FireTick,
         Self::CommandTick,
         Self::TimerTick,
         Self::EntityTick,
-        Self::Piston,
+        Self::EntityRandomTick,
         Self::EntityTrigger,
         Self::Dispensing,
         Self::DaylightTimer,
+        Self::UnmodeledContainer,
     ];
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::AnalogInput => "analog input",
-            Self::RandomOutcome => "random outcome",
+            Self::EntityRandom => "entity random",
             Self::RandomLoop => "random loop",
             Self::RandomPositional => "positional random",
             Self::Explosion => "explosion",
@@ -111,37 +109,40 @@ impl Rule {
             Self::ItemUseOn => "item useOn",
             Self::CanDestroyBlock => "canDestroyBlock",
             Self::RandomDelay => "random delay",
-            Self::FallingTick => "falling tick",
-            Self::FireTick => "fire tick",
             Self::CommandTick => "command tick",
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
-            Self::Piston => "piston",
+            Self::EntityRandomTick => "entity random tick",
             Self::EntityTrigger => "entity trigger",
             Self::Dispensing => "dispensing",
             Self::DaylightTimer => "daylight timer",
+            Self::UnmodeledContainer => "unmodeled container",
         }
     }
 
     pub const fn reason(self) -> &'static str {
         match self {
             Self::AnalogInput => {
-                "case: a comparator read analog input the fake world cannot reproduce, \
-                 either container contents Bamboo does not keep (chiseled bookshelf excepted), \
+                "case: a comparator read a block entity Bamboo keeps no contents for \
+                 (lectern, jukebox, furnace, crafter, decorated pot and the like), \
                  a scene jukebox the fake world fills with a fixed disc, \
-                 or a clicked comparator re-reading its input"
+                 or a clicked comparator re-reading such an input"
             }
-            Self::RandomOutcome => {
-                "case: the official outcome changes with the random source (chapter 1)"
+            Self::EntityRandom => {
+                "case: the outcome changed with the player's own random source, Bamboo has none"
             }
-            Self::RandomLoop => "case: extreme random values made the official code spin",
+            Self::RandomLoop => {
+                "case: extreme values of the player's random source made the official code spin"
+            }
             Self::RandomPositional => {
                 "case: the official code asked for a position derived random source"
             }
             Self::Explosion => {
                 "case: explosions are out of scope (respawn anchor in the overworld)"
             }
-            Self::Worldgen => "case: world generation is out of scope (bone meal growing a tree)",
+            Self::Worldgen => {
+                "case: world generation is out of scope (trees, huge mushrooms, bone meal on grass)"
+            }
             Self::ImpossibleScene => {
                 "case: a half of a broken structure made the official code throw"
             }
@@ -152,61 +153,75 @@ impl Rule {
                 "case: Item.canDestroyBlock refused, the caller checks it before destroy_block"
             }
             Self::RandomDelay => {
-                "tick delay: the official delay is random, position and type are still compared"
+                "tick delay: the player's random source picked it, position and type are compared"
             }
-            Self::FallingTick => "tick: blocks do not fall (chapter 1)",
-            Self::FireTick => "tick: fire does not spread (chapter 1)",
             Self::CommandTick => "tick: command blocks run commands, out of scope",
-            Self::TimerTick => "tick: growth and hatching timers are out of scope (chapter 1)",
+            Self::TimerTick => {
+                "tick: growth, hatching and time of day timers are out of scope (eggs, eyeblossoms)"
+            }
             Self::EntityTick => "tick: only entities trigger or read this tick, none are simulated",
-            Self::Piston => {
-                "scope: block events are dropped, pistons never move, pushing is the next step"
+            Self::EntityRandomTick => {
+                "random tick: it spawns entities (turtles hatching, piglins from portals)"
             }
             Self::EntityTrigger => {
                 "scope: plates, detector rails, tripwires, targets, sculk sensors, lightning rods \
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: dispensers, droppers and crafters are empty, they never dispense or craft"
+                "scope: an item dispenser fired, its item behaviours (arrows, water, armor) are out of scope"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
+            }
+            Self::UnmodeledContainer => {
+                "case: a hopper or dropper ticked next to a container Bamboo keeps no slot table for \
+                 (shelf, crafter, chiseled bookshelf, furnace, brewing stand, decorated pot), \
+                 so the transfer cannot be replayed"
             }
         }
     }
 
     /// `skip` 行的原因前缀对应的规则。`exception:` 不在这里：那是假世界的 bug，要算失败。
     ///
-    /// `untick:<类名>` 是 flow 题往后跑时碰到了范围外的计划刻，按那个类的规则计数。
+    /// `untick:<类名>` 是 flow 题往后跑时碰到了范围外的计划刻，`unrandom:<类名>` 是 chunk 题碰到了
+    /// 范围外的随机刻，都按那个类的规则计数。
     fn of_skip(reason: &str) -> Option<Self> {
         let (prefix, detail) = reason.split_once(':')?;
         match prefix {
-            "random" => Some(Self::RandomOutcome),
+            "random-entity" => Some(Self::EntityRandom),
             "random-loop" => Some(Self::RandomLoop),
             "random-positional" => Some(Self::RandomPositional),
             "explosion" => Some(Self::Explosion),
             "worldgen" => Some(Self::Worldgen),
             "impossible" => Some(Self::ImpossibleScene),
-            "untick" => OUT_OF_SCOPE_TICKS
-                .iter()
-                .find(|(ancestor, _)| format!("{ancestor:?}") == detail)
-                .map(|&(_, rule)| rule),
+            "untick" => rule_of_class(OUT_OF_SCOPE_TICKS, detail),
+            "unrandom" => rule_of_class(OUT_OF_SCOPE_RANDOM_TICKS, detail),
             _ => None,
         }
     }
 }
 
+/// 表里官方类名是 `name` 的那一项的规则。
+fn rule_of_class(table: &[(BlockAncestor, Rule)], name: &str) -> Option<Rule> {
+    table
+        .iter()
+        .find(|(ancestor, _)| format!("{ancestor:?}") == name)
+        .map(|&(_, rule)| rule)
+}
+
+/// 不在范围里的随机刻：这些类的 random 题不比较，chunk 题要随机刻到它们时整题排除。
+const OUT_OF_SCOPE_RANDOM_TICKS: &[(BlockAncestor, Rule)] = &[
+    (BlockAncestor::TurtleEggBlock, Rule::EntityRandomTick),
+    (BlockAncestor::NetherPortalBlock, Rule::EntityRandomTick),
+];
+
 /// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
 /// `settle` 或 flow 题往后跑时执行它们的话整题排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
-    (BlockAncestor::FallingBlock, Rule::FallingTick),
-    (BlockAncestor::BrushableBlock, Rule::FallingTick),
-    (BlockAncestor::FireBlock, Rule::FireTick),
     (BlockAncestor::CommandBlock, Rule::CommandTick),
     (BlockAncestor::FrogspawnBlock, Rule::TimerTick),
     (BlockAncestor::SnifferEggBlock, Rule::TimerTick),
     (BlockAncestor::DriedGhastBlock, Rule::TimerTick),
-    (BlockAncestor::FrostedIceBlock, Rule::TimerTick),
     (BlockAncestor::EyeblossomBlock, Rule::TimerTick),
     (BlockAncestor::CreakingHeartBlock, Rule::TimerTick),
     (BlockAncestor::BasePressurePlateBlock, Rule::EntityTick),
@@ -214,10 +229,11 @@ const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::TripWireBlock, Rule::EntityTick),
 ];
 
-/// 这条规则排除了哪些类的计划刻，打印排除表时用。
+/// 这条规则排除了哪些类的计划刻或者随机刻，打印排除表时用。
 fn tick_classes(rule: Rule) -> Vec<BlockAncestor> {
     OUT_OF_SCOPE_TICKS
         .iter()
+        .chain(OUT_OF_SCOPE_RANDOM_TICKS)
         .filter(|(_, entry)| *entry == rule)
         .map(|&(ancestor, _)| ancestor)
         .collect()
@@ -226,12 +242,8 @@ fn tick_classes(rule: Rule) -> Vec<BlockAncestor> {
 /// 没有移植 `useOn` 的非方块物品类，官方类名和原因。点击轮到这些物品时不比较。
 ///
 /// 斧子、锄头、锹（类就是 `Item`，靠 `block_transformer` 组件）、打火石、火焰弹、蜜脾、剪刀、末影之眼、
-/// 调试棒和刷子移植了，照常比较。桶、玻璃瓶和睡莲走 `Item.use`，不经过 `useOn`，所以不在这张表里。
+/// 调试棒、刷子和骨粉移植了，照常比较。桶、玻璃瓶和睡莲走 `Item.use`，不经过 `useOn`，所以不在这张表里。
 const UNPORTED_ITEM_USE_ON: &[(&str, &str)] = &[
-    (
-        "BoneMealItem",
-        "growth is random, saplings and fungi run world generation",
-    ),
     ("SpawnEggItem", "spawns an entity"),
     ("ArmorStandItem", "spawns an entity"),
     ("CushionItem", "spawns an entity"),
@@ -264,8 +276,18 @@ fn unported_item_use_on(class: &str) -> Option<&'static str> {
 
 /// 这个方块的计划刻不在比较的范围里时，返回原因。
 fn tick_exclusion(block: &Block) -> Option<Rule> {
+    class_exclusion(OUT_OF_SCOPE_TICKS, block)
+}
+
+/// 这个方块的随机刻不在比较的范围里时，返回原因。
+fn random_tick_exclusion(block: &Block) -> Option<Rule> {
+    class_exclusion(OUT_OF_SCOPE_RANDOM_TICKS, block)
+}
+
+/// 方块的类或者它的父类在表里时，返回那一项的规则。
+fn class_exclusion(table: &[(BlockAncestor, Rule)], block: &Block) -> Option<Rule> {
     let ancestors = block.class.ancestors();
-    OUT_OF_SCOPE_TICKS
+    table
         .iter()
         .find(|(ancestor, _)| ancestors.contains(ancestor))
         .map(|&(_, rule)| rule)
@@ -315,7 +337,11 @@ impl Options {
         if self.pure {
             args.extend(["--avoid".to_owned(), unported_classes().join(",")]);
         }
-        args.extend(["--untick".to_owned(), untick_classes().join(",")]);
+        args.extend(["--untick".to_owned(), class_names(OUT_OF_SCOPE_TICKS)]);
+        args.extend([
+            "--unrandom".to_owned(),
+            class_names(OUT_OF_SCOPE_RANDOM_TICKS),
+        ]);
         args
     }
 
@@ -334,12 +360,13 @@ impl Options {
     }
 }
 
-/// 计划刻不在范围里的类，官方类名就是 `BlockAncestor` 的变体名。
-fn untick_classes() -> Vec<String> {
-    OUT_OF_SCOPE_TICKS
+/// 表里的类名，逗号隔开。官方类名就是 `BlockAncestor` 的变体名。
+fn class_names(table: &[(BlockAncestor, Rule)]) -> String {
+    table
         .iter()
         .map(|(ancestor, _)| format!("{ancestor:?}"))
-        .collect()
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// 还没移植的类的名字，官方类名就是 `BlockClass` 的变体名。
@@ -506,7 +533,14 @@ impl Session {
             Line::Case(case) => self.accept_case(&case),
             Line::Skip(skip) => {
                 let block = self.names.block(&skip.block)?;
-                match Rule::of_skip(&skip.reason) {
+                // 本来就不比较的刻里官方代码抛了异常（比如传送门随机刻在假世界里生成僵尸猪灵），
+                // 照不比较算，不算假世界坏了。
+                let out_of_scope = match skip.kind {
+                    Kind::Tick => tick_exclusion(block),
+                    Kind::Random => random_tick_exclusion(block),
+                    _ => None,
+                };
+                match Rule::of_skip(&skip.reason).or(out_of_scope) {
                     Some(rule) => self.report.skipped(block, skip.kind, rule),
                     None => self.report.broken_oracle(block, skip.kind, &skip.reason),
                 }
@@ -593,6 +627,12 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if case.outcome.analog_content {
         return Ok(Some(Rule::AnalogInput));
     }
+    if dispenser_dispenses(case) {
+        return Ok(Some(Rule::Dispensing));
+    }
+    if transfers_with_unmodeled_container(case) {
+        return Ok(Some(Rule::UnmodeledContainer));
+    }
     let rule = match case.action.kind {
         Kind::Destroy
             if case.outcome.result == "refused"
@@ -606,11 +646,13 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
         Kind::Place | Kind::Use if clicks_comparator_with_analog_input(case) => {
             Some(Rule::AnalogInput)
         }
+        Kind::Place | Kind::Use if bone_meals_a_feature_plant(case) => Some(Rule::Worldgen),
         // 动作附近的比较器会重算输入，其中可能有假世界补出来的唱片。
         Kind::Place | Kind::Use | Kind::Destroy | Kind::Tick if reads_invented_jukebox(case) => {
             Some(Rule::AnalogInput)
         }
         Kind::Tick => tick_exclusion(block),
+        Kind::Random => random_tick_exclusion(block),
         _ => None,
     };
     match rule {
@@ -619,13 +661,30 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     }
 }
 
-/// 点中的比较器会重新读输入。假世界把 `Level` 上的信号都屏蔽了，方块自己的模拟输出还在，
-/// 官方的比较器这时可能亮起来。Bamboo 有信号，但容器内容不算，两种情况下这题都比不了。
+/// 骨粉在这些方块上能不能用、成不成功都要读树和巨型蘑菇的地物配置。只比类本身，
+/// 红树胎生苗是 `SaplingBlock` 的子类，它的骨粉不用地物，照常比较。
+const BONE_MEAL_NEEDS_FEATURES: [BlockClass; 3] = [
+    BlockClass::SaplingBlock,
+    BlockClass::AzaleaBlock,
+    BlockClass::MushroomBlock,
+];
+
+/// 拿着骨粉点上面这些方块。
+fn bone_meals_a_feature_plant(case: &Case) -> bool {
+    case.action.item_class == "BoneMealItem"
+        && BONE_MEAL_NEEDS_FEATURES.contains(&scene_state(case, case.action.target()).class())
+}
+
+/// 题目开始时这一格的状态。
+fn scene_state(case: &Case, pos: BlockPos) -> BlockState {
+    let cell = case.scene.iter().find(|cell| cell.pos() == pos);
+    BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
+}
+
+/// 点中的比较器会重新读输入。内容已经建模的容器两边读到的一样，可以比较；
+/// 别的方块实体（讲台、唱机、熔炉这类）Bamboo 没有保留内容，这题只能排除。
 fn clicks_comparator_with_analog_input(case: &Case) -> bool {
-    let state_at = |pos: BlockPos| {
-        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
-        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
-    };
+    let state_at = |pos: BlockPos| scene_state(case, pos);
     let pos = case.action.target();
     let clicked = state_at(pos);
     if block_id_of_state(clicked.0) != block_id_of_state(blocks::COMPARATOR) {
@@ -634,9 +693,137 @@ fn clicks_comparator_with_analog_input(case: &Case) -> bool {
     let facing = clicked.get(HORIZONTAL_FACING);
     let input_pos = pos.relative(facing);
     let input = state_at(input_pos);
+    let behind = state_at(input_pos.relative(facing));
+    let modeled = |state: BlockState| is_modeled_container(state);
+    if modeled(input) || input.is_redstone_conductor() && modeled(behind) {
+        return false;
+    }
     input.has_analog_output_signal()
-        || input.is_redstone_conductor()
-            && state_at(input_pos.relative(facing)).has_analog_output_signal()
+        || input.is_redstone_conductor() && behind.has_analog_output_signal()
+}
+
+/// 内容已经在重放里建模的容器方块。末影箱的槽位在玩家身上，不算。
+fn is_modeled_container(state: BlockState) -> bool {
+    state.class().ancestors().iter().any(|ancestor| {
+        matches!(
+            ancestor,
+            BlockAncestor::ChestBlock
+                | BlockAncestor::BarrelBlock
+                | BlockAncestor::ShulkerBoxBlock
+                | BlockAncestor::HopperBlock
+                | BlockAncestor::DispenserBlock
+        )
+    })
+}
+
+/// Bamboo 没保留内容的容器方块实体。漏斗吸不出来也放不进去，比较器和投掷器碰不到它们。
+fn is_unmodeled_container(state: BlockState) -> bool {
+    state.class().ancestors().iter().any(|ancestor| {
+        matches!(
+            ancestor,
+            BlockAncestor::ShelfBlock
+                | BlockAncestor::CrafterBlock
+                | BlockAncestor::ChiseledBookShelfBlock
+                | BlockAncestor::AbstractFurnaceBlock
+                | BlockAncestor::BrewingStandBlock
+                | BlockAncestor::DecoratedPotBlock
+        )
+    })
+}
+
+/// 状态 ID 不在注册表里时返回 `None`：这题照常交给重放，panic 在那边算一道失败。
+/// 排除判断比重放先跑，不能自己碰不合法的 ID。
+fn state_of(id: u32) -> Option<BlockState> {
+    block_id_of_state(id).map(|_| BlockState(id))
+}
+
+/// 动作和 settle 走完之后这一格的状态：`changes` 里记录的是和场景不同的格子。
+fn final_state(case: &Case, pos: BlockPos) -> Option<BlockState> {
+    let cell = case
+        .outcome
+        .changes
+        .iter()
+        .find(|cell| cell.pos() == pos)
+        .or_else(|| case.scene.iter().find(|cell| cell.pos() == pos));
+    match cell {
+        Some(cell) => state_of(cell.state()),
+        None => Some(BlockState::AIR),
+    }
+}
+
+/// 漏斗每刻都从上方吸、往出口放，投掷器 tick 时只往出口放，两边都要读容器的槽位表。
+/// 碰到 Bamboo 没建模的容器时，搬物品的结果没法重放，这题只能排除。
+fn transfers_with_unmodeled_container(case: &Case) -> bool {
+    let scene = case
+        .scene
+        .iter()
+        .filter_map(|cell| Some((cell.pos(), state_of(cell.state())?)));
+    let changed = case
+        .outcome
+        .changes
+        .iter()
+        .filter_map(|cell| Some((cell.pos(), state_of(cell.state())?)));
+    // 漏斗从上方吸，出口在 `facing` 那一格。
+    let hopper_hits = scene
+        .clone()
+        .chain(changed.clone())
+        .filter(|(_, state)| state.is_a(BlockAncestor::HopperBlock))
+        .any(|(pos, state)| {
+            final_state(case, pos.above()).is_some_and(is_unmodeled_container)
+                || final_state(case, pos.relative(state.get(FACING_HOPPER)))
+                    .is_some_and(is_unmodeled_container)
+        });
+    if hopper_hits {
+        return true;
+    }
+    // 投掷器没有 ticker，只有动作那一下（或者场景里被红石排上刻）才会动手。
+    let target = case.action.target();
+    let dropper_ran = case.outcome.ran.iter().any(|id| id == "minecraft:dropper");
+    if !(dropper_ran || case.action.kind == Kind::Tick) {
+        return false;
+    }
+    let Some(state) = final_state(case, target) else {
+        return false;
+    };
+    state.is_a(BlockAncestor::DropperBlock)
+        && final_state(case, target.relative(state.get(FACING))).is_some_and(is_unmodeled_container)
+}
+
+/// 发射器的物品行为（箭、水、盔甲等）不在范围里，Bamboo 的发射器 tick 什么也不做。
+/// 场景里的发射器有东西又真的 tick 了，官方那边已经发出去，这题只能排除。投掷器自己实现了，照常比较。
+fn dispenser_dispenses(case: &Case) -> bool {
+    let is_dispenser = |pos: BlockPos| {
+        let state = scene_state(case, pos);
+        state.is_a(BlockAncestor::DispenserBlock) && !state.is_a(BlockAncestor::DropperBlock)
+    };
+    let ticked = case
+        .outcome
+        .ran
+        .iter()
+        .any(|id| id == "minecraft:dispenser")
+        || case.action.kind == Kind::Tick && case.block == "minecraft:dispenser";
+    if ticked {
+        return case.contents.iter().any(|stack| is_dispenser(stack.pos()));
+    }
+    // 流动题里被红石排上的发射器刻由官方假世界反射调用 `ServerLevel.tickBlock`，
+    // 不经过 FakeLevel 记 `ran` 的那一层，所以上面看不出来。官方发出去之后槽位里的东西变少，
+    // 用前后的数量判断。上面有漏斗的格子排除：那是漏斗正常吸走一件，Bamboo 能重放。
+    if case.action.kind != Kind::Flow {
+        return false;
+    }
+    let mut before: BTreeMap<BlockPos, i32> = BTreeMap::new();
+    for stack in &case.contents {
+        *before.entry(stack.pos()).or_default() += stack.count();
+    }
+    let mut after: BTreeMap<BlockPos, i32> = BTreeMap::new();
+    for stack in &case.outcome.contents {
+        *after.entry(stack.pos()).or_default() += stack.count();
+    }
+    before.iter().any(|(&pos, &count)| {
+        let hopper_above = final_state(case, pos.above())
+            .is_some_and(|state| state.is_a(BlockAncestor::HopperBlock));
+        after.get(&pos).copied().unwrap_or(0) < count && is_dispenser(pos) && !hopper_above
+    })
 }
 
 /// 假世界给场景里带唱片的唱机补了一张固定的 `music_disc_13`（`FakeLevel.syncContents`），
@@ -721,6 +908,7 @@ fn compare(
         result: answer.result != replayed.result,
         cells: differing_cells(case, replayed),
         destroyed: answer.destroyed != replayed.destroyed,
+        contents: answer.contents != replayed.contents,
         ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
         gained: answer.gained != replayed.gained,
@@ -893,12 +1081,18 @@ mod tests {
         )
         .replace('\n', " ");
         format!(
-            r#"{{"type":"case","id":0,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
+            r#"{{"type":"case","id":0,"seed":31,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
         )
     }
 
     fn answer(result: &str, changes: &str) -> String {
-        answer_after_ticks(result, changes, "")
+        answer_with_ticks(result, changes, "[]")
+    }
+
+    fn answer_with_ticks(result: &str, changes: &str, ticks: &str) -> String {
+        format!(
+            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":{ticks},"ran":[],"analogContent":false,"itemReached":true,"spawned":[],"rng":false}}"#
+        )
     }
 
     /// `ran` 是 `settle` 里跑过计划刻的方块，用逗号隔开的带引号的 ID。
@@ -942,9 +1136,13 @@ mod tests {
     fn a_case_that_settled_an_out_of_scope_tick_is_not_compared() {
         let stone = blocks::STONE;
         let scene = format!("[[0,64,0,{stone}]]");
-        // 官方的沙子落下去了，我们这边不会落，这一题只能排除。
-        let fell = answer_after_ticks("success", "[]", r#""minecraft:sand""#);
-        assert_eq!(verdict_of(&place_stone(&scene, &fell)), Ok(()));
+        // 官方的命令方块在 settle 里跑了计划刻，我们不跑，这一题只能排除。
+        // 沙子以前也走这条排除，下落已经做了，不再用它当例子。
+        //
+        // A command block that ticked during settle is still out of scope, so the case is excluded.
+        // Sand used to take this path; falling is implemented, so it is no longer the example.
+        let command = answer_after_ticks("success", "[]", r#""minecraft:command_block""#);
+        assert_eq!(verdict_of(&place_stone(&scene, &command)), Ok(()));
         let lamp = answer_after_ticks("success", "[]", r#""minecraft:redstone_lamp""#);
         assert!(verdict_of(&place_stone(&scene, &lamp)).is_err());
     }
@@ -966,11 +1164,13 @@ mod tests {
         let scene = format!("[[0,64,0,{}]]", blocks::STONE);
         let fire = format!("[[0,65,0,{}]]", blocks::FIRE);
         let flint = "minecraft:flint_and_steel";
+        // 点着的火在自己身上排了下一个刻，延迟来自世界随机源，写成官方的“随机延迟”。
+        let fire_tick = r#"[[0,65,0,"block","minecraft:fire",-1,0]]"#;
         let lit = click_top(
             flint,
             "FlintAndSteelItem",
             &scene,
-            &answer("success", &fire),
+            &answer_with_ticks("success", &fire, fire_tick),
         );
         assert_eq!(verdict_of(&lit), Ok(()));
         let left_alone = click_top(flint, "FlintAndSteelItem", &scene, &answer("pass", "[]"));
@@ -979,16 +1179,16 @@ mod tests {
 
     #[test]
     fn an_unported_item_use_on_is_not_compared() {
-        let scene = format!("[[0,64,0,{}]]", blocks::GRASS_BLOCK);
-        let grown = format!("[[0,65,0,{}]]", blocks::SHORT_GRASS);
+        let scene = format!("[[0,64,0,{}]]", blocks::STONE);
+        let hung = format!("[[0,64,1,{}]]", blocks::STONE);
         let case = click_top(
-            "minecraft:bone_meal",
-            "BoneMealItem",
+            "minecraft:painting",
+            "HangingEntityItem",
             &scene,
-            &answer("success", &grown),
+            &answer("success", &hung),
         );
         assert_eq!(verdict_of(&case), Ok(()));
-        assert!(unported_item_use_on("FlintAndSteelItem").is_none());
+        assert!(unported_item_use_on("BoneMealItem").is_none());
     }
 
     #[test]
@@ -1048,7 +1248,14 @@ mod tests {
         let java_args = options.java_args();
         assert_eq!(java_args[..4], options.forwarded);
         assert_eq!(java_args[4], "--untick");
-        assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
+        assert!(java_args[5].split(',').any(|class| class == "CommandBlock"));
+        assert!(!java_args[5].split(',').any(|class| class == "FallingBlock"));
+        assert_eq!(java_args[6], "--unrandom");
+        assert!(
+            java_args[7]
+                .split(',')
+                .any(|class| class == "TurtleEggBlock")
+        );
         assert_eq!(options.rerun_args(), "--only SlabBlock");
         assert!(Options::parse(&["--seed"]).is_err());
         assert!(Options::parse(&["--show", "many"]).is_err());
@@ -1079,15 +1286,22 @@ mod tests {
     #[test]
     fn skip_reasons_map_to_rules_but_exceptions_do_not() {
         assert_eq!(
-            Rule::of_skip("random:KelpBlock.getStateForPlacement"),
-            Some(Rule::RandomOutcome)
+            Rule::of_skip("random-entity:Player.eat"),
+            Some(Rule::EntityRandom)
         );
+        // 世界的随机源和官方逐位相同，不再有这种排除。
+        assert_eq!(Rule::of_skip("random:KelpBlock.getStateForPlacement"), None);
         assert_eq!(Rule::of_skip("explosion:x"), Some(Rule::Explosion));
+        assert_eq!(Rule::of_skip("untick:FallingBlock"), None);
         assert_eq!(
-            Rule::of_skip("untick:FallingBlock"),
-            Some(Rule::FallingTick)
+            Rule::of_skip("untick:CommandBlock"),
+            Some(Rule::CommandTick)
         );
         assert_eq!(Rule::of_skip("untick:StairBlock"), None);
+        assert_eq!(
+            Rule::of_skip("unrandom:TurtleEggBlock"),
+            Some(Rule::EntityRandomTick)
+        );
         assert_eq!(Rule::of_skip("exception:NullPointerException"), None);
     }
 
@@ -1116,7 +1330,7 @@ mod tests {
     #[test]
     fn out_of_scope_ticks_cover_subclasses() {
         let sand = mc_bamboo_data::block_of_state(blocks::SAND).expect("沙子存在");
-        assert_eq!(tick_exclusion(sand), Some(Rule::FallingTick));
+        assert_eq!(tick_exclusion(sand), None);
         let chain = mc_bamboo_data::block_of_state(blocks::CHAIN_COMMAND_BLOCK).expect("存在");
         assert_eq!(tick_exclusion(chain), Some(Rule::CommandTick));
         let repeater = mc_bamboo_data::block_of_state(blocks::REPEATER).expect("中继器存在");

@@ -4,6 +4,7 @@ use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
 
 use super::clicked_upper_half;
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -38,6 +39,11 @@ fn attachment(ctx: &PlaceContext) -> (Direction, Half) {
 }
 
 impl Behaviour for TrapDoor {
+    /// `WeatheringCopperTrapDoorBlock` 在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,
@@ -77,6 +83,10 @@ impl Behaviour for TrapDoor {
     ) {
         let signal = world.has_neighbor_signal(pos);
         if signal != state.get(POWERED) {
+            if state.get(OPEN) != signal {
+                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
+                world.random().next_float();
+            }
             let updated = state.with(OPEN, signal).with(POWERED, signal);
             world.set_block(pos, updated, UPDATE_CLIENTS);
             tick_water_if_waterlogged(state, world, pos);
@@ -96,6 +106,8 @@ impl Behaviour for TrapDoor {
         let toggled = state.cycle(OPEN);
         world.set_block(pos, toggled, UPDATE_CLIENTS);
         tick_water_if_waterlogged(toggled, world, pos);
+        // `playSound` 在计划流体刻之后取音高。
+        world.random().next_float();
         InteractionResult::Success
     }
 }

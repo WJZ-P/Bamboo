@@ -4,12 +4,16 @@
 //! `RandomSupport.generateUniqueSeed()`，每次开服都不同。这个世界没有真的随机源，
 //! 用固定种子的 [`JavaRandom`] 代替，同一个动作每次都得到相同的结果。
 
-/// `java.util.Random` 的乘法常数。
-const MULTIPLIER: u64 = 0x5DE_EECE_66D;
+/// `java.util.Random` 的乘法常数，也是 `LegacyRandomSource.MULTIPLIER`。
+const MULTIPLIER: u64 = 0x5_DEEC_E66D;
 /// `java.util.Random` 的加法常数。
 const ADDEND: u64 = 0xB;
 /// 内部状态只有 48 位。
 const MASK: u64 = (1 << 48) - 1;
+/// `BitRandomSource.FLOAT_MULTIPLIER`，2 的 -24 次方。
+const FLOAT_MULTIPLIER: f32 = 5.960_464_5e-8;
+/// `BitRandomSource.DOUBLE_MULTIPLIER`。官方那个 float 字面量换成 double 正好是 2 的 -53 次方。
+const DOUBLE_MULTIPLIER: f64 = 1.110_223e-16_f32 as f64;
 
 /// 和 `java.util.Random` 完全一样的线性同余生成器。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,16 +64,18 @@ impl JavaRandom {
         ((i64::from(self.next(32))) << 32).wrapping_add(i64::from(self.next(32)))
     }
 
-    /// `nextFloat()`。官方的除法在 `float` 上做，24 位分子能精确表示。
+    /// `nextFloat()`。官方乘的是 `5.9604645E-8F`，不是先做除法。
+    ///
+    /// Official multiplies by `5.9604645E-8F` instead of dividing.
     pub fn next_float(&mut self) -> f32 {
-        self.next(24) as f32 / (1 << 24) as f32
+        self.next(24) as f32 * FLOAT_MULTIPLIER
     }
 
     /// `nextDouble()`。
     pub fn next_double(&mut self) -> f64 {
         let high = i64::from(self.next(26)) << 27;
         let low = i64::from(self.next(27));
-        (high + low) as f64 / (1u64 << 53) as f64
+        (high + low) as f64 * DOUBLE_MULTIPLIER
     }
 
     /// `Collections.shuffle(list, random)`：从后往前换，`int` 的 `nextInt(bound)` 取下标。
@@ -105,12 +111,13 @@ mod tests {
 
         let mut random = JavaRandom::new(-1234567890123);
         assert_eq!(random.next_int(), 7952977);
-        assert_eq!(random.next_int_bounded(1000), 610);
+        assert_eq!(random.next_int_bounded(1000), 883);
     }
 
     #[test]
     fn floats_match_java() {
         // 先取 `nextInt()`、`nextInt(100)`、`nextInt(1)`，再取这两个。
+        // Draw `nextInt()`, `nextInt(100)` and `nextInt(1)` first, then these two.
         let mut random = JavaRandom::new(42);
         let _ = random.next_int();
         let _ = random.next_int_bounded(100);
@@ -122,6 +129,10 @@ mod tests {
         let _ = random.next_int();
         assert_eq!(random.next_float().to_bits(), 974_312_448);
         assert_eq!(random.next_double().to_bits(), 4_604_076_210_556_129_097);
+
+        // 铁砧摔裂用的就是种子 1 的第一颗 `nextFloat`。
+        // Anvil cracking uses the first `nextFloat` from seed 1.
+        assert_eq!(JavaRandom::new(1).next_float().to_bits(), 1_060_838_101);
     }
 
     #[test]

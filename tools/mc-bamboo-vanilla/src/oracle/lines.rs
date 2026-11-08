@@ -43,8 +43,13 @@ pub struct Skip {
 #[derive(Debug, Deserialize)]
 pub struct Case {
     pub id: u64,
+    /// 官方假世界的随机源的种子，重放时用同一个种子。
+    pub seed: i64,
     pub block: String,
     pub scene: Vec<Cell>,
+    /// 场景里容器方块的内容。列表里没有的容器是空的。
+    #[serde(default)]
+    pub contents: Vec<ContainerStack>,
     pub action: Action,
     pub outcome: Answer,
 }
@@ -61,6 +66,10 @@ pub enum Kind {
     Flow,
     /// `use_item` 包：物品自己从眼睛看出去找目标。
     Item,
+    /// 一格的随机刻。
+    Random,
+    /// 一个区块的随机刻，官方的 `tickChunk`。
+    Chunk,
 }
 
 impl Kind {
@@ -72,6 +81,8 @@ impl Kind {
             Self::Tick => "tick",
             Self::Flow => "flow",
             Self::Item => "item",
+            Self::Random => "random",
+            Self::Chunk => "chunk",
         }
     }
 }
@@ -93,6 +104,28 @@ impl Cell {
 /// `levelEvent(2001)`：坐标、状态 ID、是否跳过发起的玩家。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct Destroyed(pub i32, pub i32, pub i32, pub u32, pub bool);
+
+/// 容器里一个非空的格子：坐标、槽位、物品 ID、数量。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ContainerStack(pub i32, pub i32, pub i32, pub u32, pub String, pub i32);
+
+impl ContainerStack {
+    pub const fn pos(&self) -> BlockPos {
+        BlockPos::new(self.0, self.1, self.2)
+    }
+
+    pub const fn slot(&self) -> u32 {
+        self.3
+    }
+
+    pub fn item(&self) -> &str {
+        &self.4
+    }
+
+    pub const fn count(&self) -> i32 {
+        self.5
+    }
+}
 
 /// 一个计划刻：坐标、`"block"` 或 `"fluid"`、注册表 ID、延迟、优先级。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -150,6 +183,9 @@ pub struct Action {
     /// 只有 flow 题有：第一个流体刻之后再跑多少刻。
     #[serde(default)]
     pub steps: u32,
+    /// 只有 chunk 题有：`tickChunk` 的 `tickSpeed`。
+    #[serde(default)]
+    pub speed: i32,
     pub actor: [Double; 3],
     pub yaw: Float,
     pub pitch: Float,
@@ -182,6 +218,9 @@ pub struct Answer {
     pub result: String,
     pub changes: Vec<Cell>,
     pub destroyed: Vec<Destroyed>,
+    /// 结束时所有已建模容器的非空格子，按坐标和槽位排序。
+    #[serde(default)]
+    pub contents: Vec<ContainerStack>,
     pub ticks: Vec<Tick>,
     /// `settle` 里真的运行过 `tick` 的方块的注册表 ID。
     pub ran: Vec<String>,
@@ -238,8 +277,9 @@ fn face<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Direction>,
 mod tests {
     use super::*;
 
-    const CASE: &str = r#"{"type":"case","id":3,"block":"minecraft:stone","class":"Block",
+    const CASE: &str = r#"{"type":"case","id":3,"seed":34,"block":"minecraft:stone","class":"Block",
         "scene":[[1,64,2,1]],
+        "contents":[[1,64,2,0,"minecraft:stone",1]],
         "action":{"kind":"place","main":"minecraft:stone","off":"minecraft:air","hand":"off",
             "itemClass":"BlockItem","itemUseOn":false,"pos":[1,64,2],"face":"up",
             "loc":["3ff8000000000000","4050400000000000","4004000000000000"],"inside":false,
@@ -248,6 +288,7 @@ mod tests {
             "box":["bfd3333333333333","4050000000000000","bfd3333333333333",
                    "3fd3333333333333","4051000000000000","3fd3333333333333"],"others":[],"settle":3},
         "outcome":{"result":"success","changes":[[1,65,2,1]],"destroyed":[[0,1,2,3,true]],
+            "contents":[[1,64,2,0,"minecraft:stone",2]],
             "ticks":[[1,2,3,"fluid","minecraft:water",5,0]],"ran":["minecraft:repeater"],
             "analogContent":true,"itemReached":true,"spawned":[],"rng":false}}"#;
 
@@ -258,6 +299,10 @@ mod tests {
         };
         assert_eq!(case.id, 3);
         assert_eq!(case.scene, [Cell(1, 64, 2, 1)]);
+        assert_eq!(
+            case.contents,
+            [ContainerStack(1, 64, 2, 0, "minecraft:stone".to_owned(), 1)]
+        );
         assert_eq!(case.action.kind, Kind::Place);
         assert_eq!(case.action.hand, Hand::Off);
         assert_eq!(case.action.used_item(), "minecraft:air");
@@ -282,12 +327,15 @@ mod tests {
                 r#""loc":["3ff8000000000000","4050400000000000","4004000000000000"],"inside":false,"#,
                 "",
             );
+        let line = line.replace(r#""contents":[[1,64,2,0,"minecraft:stone",1]],"#, "");
         let Line::Case(case) = serde_json::from_str(&line).expect("这一行符合格式") else {
             panic!("这是 case 行");
         };
         assert_eq!(case.action.kind, Kind::Destroy);
         assert_eq!(case.action.face, None);
         assert_eq!(case.action.loc, None);
+        // 没有 contents 的旧格式行也读得进来。
+        assert!(case.contents.is_empty());
     }
 
     #[test]

@@ -9,6 +9,7 @@ use tauri::{AppHandle, State};
 use crate::{
     controller::{ServerController, ServerSnapshot},
     log_bridge::{LogHub, LogLine},
+    metrics::{MetricsHub, MetricsSample},
     settings::{self, ServerSettings},
 };
 
@@ -46,7 +47,19 @@ pub fn save_settings(app: AppHandle, settings: ServerSettings) -> Result<(), Str
     settings::save(&app, &settings)
 }
 
+/// 出厂设置。界面用它显示每一项的默认值，也用来恢复默认。
+#[tauri::command]
+pub fn default_settings() -> ServerSettings {
+    ServerSettings::default()
+}
+
 #[tauri::command]
 pub fn recent_logs(logs: State<'_, Arc<LogHub>>) -> Vec<LogLine> {
     logs.recent()
+}
+
+/// 最近 60 秒的性能采样，打开界面时用它把曲线补齐。
+#[tauri::command]
+pub fn recent_metrics(metrics: State<'_, Arc<MetricsHub>>) -> Vec<MetricsSample> {
+    metrics.recent()
 }

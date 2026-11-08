@@ -14,7 +14,7 @@
 
 ## 0. 结论
 
-1. **69 个 serverbound 包全部分类完。** 20 个必须处理，2 个只要回最小回应，10 个真实客户端会发但可以丢弃，37 个在 M2 里不会发（第 1 节）。
+1. **69 个 serverbound 包全部分类完。** 21 个必须处理，2 个只要回最小回应，9 个真实客户端会发但可以丢弃，37 个在 M2 里不会发（第 1 节）。
 2. **发现一处真正的卡死。** `player_command` 的 `START_FALL_FLYING` 原来标成“忽略”。客户端已经先在本地进入滑翔，这个状态只有服务端能清。不回应时玩家落地后走不了路（1.2，已写入 `entities.md` 第 10 节）。
 3. **发现一处多人必现的问题。** 区块包的方块实体列表一直是空的。放箱子的人看得到，之后才收到这个区块的人看不到。84 个方块受影响（已写入 `blocks-inventory.md` 第 11 章）。
 4. **客户端只有一处等待没有自己的超时：** 加载画面的 `WaitingForServer`，只能靠 `game_event` 13 离开。M1 已经在发（第 2 节）。
@@ -37,7 +37,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 - 只有 Bamboo 解码的包才可能因为内容畸形断开。帧层错误（`FrameError`）仍然断开。
 - `set_creative_mode_slot` 不能调用 `finish()`（`blocks-inventory.md` 2.5）。
 
-### 1.1 必须处理（20 个）
+### 1.1 必须处理（21 个）
 
 | ID | 包 | 客户端什么时候发 | 不处理的后果 | 规格 |
 |---|---|---|---|---|
@@ -46,6 +46,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 9 | `chat` | `ClientPacketListener.sendChat` | 所有人都看不到消息 | `chat-join.md` 第 4 节 |
 | 11 | `chunk_batch_received` | `handleChunkBatchFinished`，每批一个 | 只发第一批 9 个就停 | `chunks-movement.md` 7.3 |
 | 14 | `client_information` | Configuration 一次，之后 `Options.save` 触发 | 皮肤外层和主手错，视距不生效 | `entities.md` 第 10 节，`chat-join.md` 第 4 节 |
+| 24 | `edit_book` | 关掉书与笔或署名，`BookEditScreen.saveChanges`、`BookSignScreen.saveChanges` | 写下的字关掉就没了，署名后还是书与笔 | `ServerGamePacketListenerImpl.handleEditBook` |
 | 28 | `keep_alive` | 收到 clientbound `keep_alive` 时 | 最多 30 秒后断开 | `chat-join.md` 第 4 节，本文第 5 节 |
 | 30 | `move_player_pos` | `LocalPlayer.sendPosition` | 区块不跟随，别人看不到移动 | `chunks-movement.md` 2.1 |
 | 31 | `move_player_pos_rot` | 同上 | 同上 | `chunks-movement.md` 2.2 |
@@ -78,7 +79,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 
 原规格里只有这一项被标成忽略，却会卡住客户端。同类的 `autoSpinAttackTicks`（`LivingEntity` 里也只有服务端清 flag）要激流三叉戟和水，M2 走不到。
 
-### 1.3 真实客户端会发，可以丢弃（10 个）
+### 1.3 真实客户端会发，可以丢弃（9 个）
 
 | ID | 包 | 什么时候发 | 确认：丢弃后不卡、不失步、不断线 |
 |---|---|---|---|
@@ -87,7 +88,6 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 13 | `client_tick_end` | 每个客户端 tick | 官方只用来清 `receivedPositionThisTick` 和 `knownMovement`，见 `chunks-movement.md` 2.7 |
 | 19 | `container_close` | 关创造模式界面，`LocalPlayer.closeContainer` | 同一个方法里 `clientSideCloseContainer`，不等回包 |
 | 23 | `debug_subscription_request` | 打开 FPS 图表时集合变化，`ClientDebugSubscriber.tick` | 发完不等回包，服务端 tick 图表没有数据 |
-| 24 | `edit_book` | 右键书与笔保存或署名，`BookEditScreen.saveChanges`、`BookSignScreen.saveChanges` | 保存时先 `updateLocalCopy` 改本地物品，界面直接关闭。署名不生效，书还是书与笔 |
 | 26 | `interact` | 右键其他玩家，`MultiPlayerGameMode.interact` | 发完本地 `interactOn`，结果只决定本地要不要继续 `use_item`。官方在这里写潜行标志，M2 的潜行来自 `player_input` |
 | 37 | `pick_item_from_entity` | 中键点其他玩家 | 客户端不预测。官方 `getPickResult` 对玩家是 null，也什么都不做 |
 | 44 | `player_loaded` | `ClientPacketListener.notifyPlayerLoaded` | 官方只结束 60 tick 门限，没有回包，见 `chunks-movement.md` 2.6 |
@@ -269,7 +269,7 @@ tick 循环：20 tick 每秒，按绝对时间排下一次，不要在工作完�
 | 客户端 | 加载画面 | 30 秒 | 放行玩家 | `LevelLoadTracker` | 2.1 第 5 项 |
 | 官方服务端 | `ReadTimeoutHandler` | 30 秒没收到字节 | 断开 | `ServerConnectionListener` | 不需要单独实现，心跳已覆盖 |
 | 官方服务端 | 心跳 | 每 15 秒，上一次没回就断开 | `disconnect.timeout` | `ServerCommonPacketListenerImpl.keepConnectionAlive` | M1 相同，`keep_alive_interval` 15 秒 |
-| 官方服务端 | 登录 | 600 tick | 断开 | `ServerLoginPacketListenerImpl` | M1 的 `pre_play_timeout` 30 秒覆盖 Login 和 Configuration |
+| 官方服务端 | 登录 | 600 tick | `multiplayer.disconnect.slow_login` | `ServerLoginPacketListenerImpl.tick` 的 `MAX_TICKS_BEFORE_LOGIN` | `pre_play_timeout` 30 秒覆盖 Login 和 Configuration，时长相同。在 Login 阶段到点时也发同一个翻译键，别的阶段官方没有时限，直接断开 |
 | Bamboo M1 | `CHUNK_SEND_TIMEOUT` | 60 秒 | 断开 | `connection/play.rs` | 删除。批次确认取代它 |
 
 客户端正常时每秒至少发 20 个 `client_tick_end`，所以读超时只在客户端真的挂了时才有意义。
@@ -332,7 +332,7 @@ tick 循环：20 tick 每秒，按绝对时间排下一次，不要在工作完�
 | 右键穿盔甲别人看不到，打开物品栏后才同步 | `blocks-inventory.md` 8.2 |
 | 听不到别人的脚步声 | 官方由服务端的 `Entity.move` 产生声音发给其他人，`Player.playSound` 排除自己。Bamboo 没有服务端物理 |
 | 食物吃不完，松手结束 | 2.2 |
-| 告示牌不能写字，书不能署名 | 没有 `open_sign_editor`，`edit_book` 丢弃 |
+| 右键成书打不开 | 没有 `open_book`。写字和署名已经按 `handleEditBook` 做了，槽位会同步回去 |
 | 丢出的物品消失 | 没有物品实体 |
 | 重连回到出生点，物品栏清空 | 不存档。出生点被方块占了时玩家会卡在方块里，创造模式可以飞出来 |
 | 掉进虚空一直往下掉 | 官方由服务端扣血。客户端 `LivingEntity.onBelowWorld` 调 `Entity.hurt`，它只在 `ServerLevel` 上生效。可以飞回来 |
