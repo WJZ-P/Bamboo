@@ -361,10 +361,11 @@ import sun.misc.Unsafe;
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
  *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
  *     计划刻    场景开始时没有排队的计划刻。队列是官方的 LevelTicks。除了 flow 题，这次动作排的不运行。tick 题只运行
- *               目标方块自己的 BlockState.tick 一次。flow 题第一下直接运行目标格的 FluidState.tick，然后每刻用官方的
- *               LevelTicks.tick 先跑到期的方块计划刻（ServerLevel.tickBlock），再跑流体的（ServerLevel.tickFluid），
- *               每条队列每刻最多 65536 个。settle 每刻也按同样的顺序跑这两条队列。
- *     方块事件  level.blockEvent 排进官方的顺序，settle 每刻在计划刻之后、方块实体之前执行，同一项只排一次。
+ *               目标方块自己的 BlockState.tick 一次。flow 题第一下直接运行目标格的 FluidState.tick，之后每往后走一步都
+ *               按 ServerLevel.tick 的顺序跑：先跑到期的方块计划刻（ServerLevel.tickBlock），再跑流体的
+ *               （ServerLevel.tickFluid），再跑方块事件，最后跑方块实体，每条队列每刻最多 65536 个。第一下那刻也一样跑
+ *               方块事件和方块实体。settle 每刻也按同样的顺序完整跑一刻。
+ *     方块事件  level.blockEvent 排进官方的顺序，settle 和 flow 每刻在计划刻之后、方块实体之前执行，同一项只排一次。
  *               动作期间排的也在第一刻执行，所以放下红石块活塞会在下一刻动。活塞的整个动画要走三刻：第一刻推方块并
  *               推进半格，第二刻再推进半格，第三刻把真正的方块放回去。
  *     活塞题    随机题之外另有几道固定的活塞题（推出、收回、粘性收回、粘液块分支、推不动、打掉火把），同样的场景和动作
@@ -1366,16 +1367,25 @@ public final class BlockOracle {
         }
 
         /**
-         * flow 题：先跑这一格的流体刻，再按官方 ServerLevel.tick 的顺序往后跑 steps 刻，每刻方块的计划刻在前，流体的在后。
+         * flow 题：先跑这一格的流体刻，再按官方 ServerLevel.tick 的顺序往后跑 steps 刻，每刻方块的计划刻在前，
+         * 流体的在后，然后是方块事件和方块实体。动作自己那一格也一样，流体刻之后跑方块事件和方块实体。
          * 方块的计划刻要是落在 untick 里的类上（下落、红石这些范围外的刻），这一题只能排除。
          */
         void flow(BlockPos pos, int steps, Set<String> untick) {
+            set(ServerLevel.class, this, "handlingTick", true);
             getFluidState(pos).tick(this, pos, getBlockState(pos));
+            runBlockEvents();
+            set(ServerLevel.class, this, "handlingTick", false);
+            tickRegisteredTickers();
             for (int step = 1; step <= steps; step++) {
                 data.gameTime = GAME_TIME + step;
                 long now = getGameTime();
+                set(ServerLevel.class, this, "handlingTick", true);
                 recordedBlockTicks.tick(now, MAX_TICKS_PER_TICK, (at, block) -> runBlockTick(at, block, untick));
                 recordedFluidTicks.tick(now, MAX_TICKS_PER_TICK, (at, fluid) -> invoke(TICK_FLUID, at, fluid));
+                runBlockEvents();
+                set(ServerLevel.class, this, "handlingTick", false);
+                tickRegisteredTickers();
             }
         }
 
