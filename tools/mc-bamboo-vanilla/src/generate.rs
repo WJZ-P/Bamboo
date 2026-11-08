@@ -54,8 +54,163 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         "component_registries.rs",
         &component_registries_file(data)?,
     )?;
+    write_file(
+        output_dir,
+        "component_enums.rs",
+        &component_enums_file(data)?,
+    )?;
+    write_file(
+        output_dir,
+        "item_components.rs",
+        &item_components_file(data)?,
+    )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "tags.rs", &tags)
+}
+
+/// 组件里按 ID 查表的枚举：连续的常量个数，稀疏的整张 ID 表。
+///
+/// 官方 `ByIdMap.continuous` 要求 ID 刚好是 0 到个数减一的排列，所以连续的枚举只要个数。
+/// 越界时怎么折回（`ZERO`、`CLAMP`、`WRAP`）是代码，留在 `mc-bamboo-protocol` 里。
+fn component_enums_file(data: &VersionData) -> Result<String, String> {
+    /// 官方加了新枚举或者改了名字时要在这里跟着改，顺序就是生成文件里的顺序。
+    const COUNTS: &[&str] = &[
+        "attribute_display_type",
+        "attribute_operation",
+        "axolotl_variant",
+        "dye_color",
+        "equipment_slot",
+        "equipment_slot_group",
+        "firework_shape",
+        "fox_variant",
+        "horse_variant",
+        "item_use_animation",
+        "llama_variant",
+        "map_post_processing",
+        "mooshroom_variant",
+        "parrot_variant",
+        "rarity",
+        "salmon_size",
+        "swing_animation_type",
+    ];
+    const SPARSE: &[&str] = &["rabbit_variant", "tropical_fish_pattern"];
+
+    let enums = &data.component_enums;
+    check_enum_names("counts", COUNTS, enums.counts.keys())?;
+    check_enum_names("sparse", SPARSE, enums.sparse.keys())?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 连续枚举的常量个数，ID 就是 0 到这个数减一。");
+    let _ = writeln!(out, "pub mod counts {{");
+    for name in COUNTS {
+        let count = enums.counts[*name];
+        if count == 0 {
+            return Err(format!("枚举 {name} 一个常量都没有"));
+        }
+        let _ = writeln!(out, "    pub const {}: i32 = {count};", upper(name));
+    }
+    let _ = writeln!(out, "}}\n");
+
+    let _ = writeln!(
+        out,
+        "/// 稀疏枚举的 ID，按官方的声明顺序。官方的默认值都是第一个声明的常量。"
+    );
+    let _ = writeln!(out, "pub mod sparse {{");
+    for name in SPARSE {
+        let ids = &enums.sparse[*name];
+        if ids.is_empty() {
+            return Err(format!("枚举 {name} 一个常量都没有"));
+        }
+        let _ = writeln!(out, "    pub const {}: &[i32] = &{ids:?};", upper(name));
+    }
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+/// 生成文件里的名字和官方导出的名字必须一一对应，官方加了新枚举时要报错。
+fn check_enum_names<'a>(
+    kind: &str,
+    expected: &[&str],
+    found: impl Iterator<Item = &'a String>,
+) -> Result<(), String> {
+    let found: BTreeSet<&str> = found.map(String::as_str).collect();
+    let expected: BTreeSet<&str> = expected.iter().copied().collect();
+    if found != expected {
+        return Err(format!(
+            "{kind} 里的枚举和生成器对不上：官方 {found:?}，生成器 {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn upper(name: &str) -> String {
+    name.to_uppercase()
+}
+
+/// 每个物品的默认组件，按官方 `DataComponentPatch.STREAM_CODEC` 编出来的字节。
+///
+/// 全部字节拼成一个 `&[u8]`，`RANGES` 给出每个物品在里面的位置，下标是物品的注册表 ID。
+/// 分成一千多个字节串字面量会让生成文件大一倍，编译也慢。
+fn item_components_file(data: &VersionData) -> Result<String, String> {
+    if data.item_components.len() != data.items.len() {
+        return Err(format!(
+            "导出了 {} 个物品的默认组件，物品有 {} 个",
+            data.item_components.len(),
+            data.items.len()
+        ));
+    }
+
+    let mut blob: Vec<u8> = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(data.item_components.len());
+    for (index, hex) in data.item_components.iter().enumerate() {
+        let bytes = decode_hex(hex)
+            .ok_or_else(|| format!("{} 的默认组件不是十六进制", data.items[index].name))?;
+        let start = blob.len();
+        blob.extend_from_slice(&bytes);
+        ranges.push((start, blob.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 全部物品的默认组件拼在一起，每个物品的位置见 [`RANGES`]。"
+    );
+    let _ = writeln!(out, "pub const DEFAULTS: &[u8] = b\"{}\";\n", escape(&blob));
+    let _ = writeln!(
+        out,
+        "/// 每个物品的默认组件在 [`DEFAULTS`] 里的起止位置，下标是物品的注册表 ID。"
+    );
+    let _ = writeln!(out, "pub const RANGES: &[(u32, u32)] = &[");
+    for (start, end) in ranges {
+        let _ = writeln!(out, "    ({start}, {end}),");
+    }
+    let _ = writeln!(out, "];");
+    Ok(out)
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len() / 2)
+        .map(|index| u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok())
+        .collect()
+}
+
+/// 把字节写成 Rust 的字节串字面量，能直接认出来的 ASCII 保持原样。
+fn escape(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => {
+                let _ = write!(out, "\\x{byte:02x}");
+            }
+        }
+    }
+    out
 }
 
 /// 物品组件解码要用到的注册表大小，外加几个要按 ID 分派的小注册表的常量。
@@ -136,7 +291,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod component_registries;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod component_enums;\npub mod component_registries;\npub mod heightmaps;\npub mod item_components;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 

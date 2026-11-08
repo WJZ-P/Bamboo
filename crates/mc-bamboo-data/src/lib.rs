@@ -11,8 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, component_registries, heightmaps, items, light,
-    packets, registries, shapes, states, tags, version,
+    block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
+    item_components, items, light, packets, registries, shapes, states, tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
