@@ -86,6 +86,15 @@ const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
+/// `level.getWorldBorder().isWithinBounds(pos)`：这个世界不能改边界，半径是默认的 29999984。
+///
+/// 方块坐标转成 `double` 再比，左边含、右边不含。
+pub fn is_within_world_border(pos: BlockPos) -> bool {
+    let inside =
+        |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
+    inside(pos.x) && inside(pos.z)
+}
+
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipFluid {
@@ -342,9 +351,7 @@ impl<'a> World<'a> {
 
     /// `getWorldBorder().isWithinBounds(pos)`。
     pub fn is_within_world_border(&self, pos: BlockPos) -> bool {
-        let inside =
-            |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
-        inside(pos.x) && inside(pos.z)
+        is_within_world_border(pos)
     }
 
     /// `isFaceSturdy`：世界里这一格的这个面能不能支撑东西。
@@ -1312,6 +1319,7 @@ mod tests {
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }
                 | Effect::OpenSignEditor { .. }
+                | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. } => None,
             })
             .collect()

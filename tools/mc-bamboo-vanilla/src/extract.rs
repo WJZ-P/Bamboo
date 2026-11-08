@@ -41,9 +41,13 @@ pub struct Extracted {
     pub block_transformers: Vec<BlockTransformer>,
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
+    /// 属性名字 → 默认值，没有状态效果和附魔时的起点。
+    pub attribute_defaults: BTreeMap<String, f64>,
     pub component_enums: ComponentEnums,
     /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
     pub item_components: Vec<String>,
+    /// 世界生成的数据：噪声参数、密度函数、维度设置和多噪声群系预设，原样是 JSON。
+    pub worldgen: serde_json::Value,
 }
 
 /// 按 ID 查表的枚举：连续的只有常量个数，稀疏的是整张 ID 表。
@@ -319,6 +323,9 @@ pub struct Block {
     pub instrument: String,
     pub dynamic_shape: bool,
     pub offset: Option<BlockOffset>,
+    /// `defaultDestroyTime`，也就是硬度。
+    pub destroy_time: f32,
+    pub requires_correct_tool_for_drops: bool,
 }
 
 /// 一个方块属性，顺序和取值都是官方 `StateDefinition` 里的。
@@ -551,7 +558,8 @@ struct ItemComponents {
     dye: Option<serde_json::Value>,
 }
 
-/// 字段等于默认值 `true` 时报告不写它。
+/// 只取 `can_destroy_blocks_in_creative`：规则本身由协议 crate 从官方导出的组件字节里解。
+/// 字段等于默认值时不写，所以缺省是 `true`。
 #[derive(Debug, Deserialize)]
 struct ToolComponent {
     can_destroy_blocks_in_creative: Option<bool>,
@@ -708,6 +716,8 @@ pub struct VersionData {
     pub recipes: RecipesFile,
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
+    /// 属性名字 → 默认值。
+    pub attribute_defaults: BTreeMap<String, f64>,
     /// 内置注册表名 → 按 ID 排列的条目。
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
@@ -716,6 +726,8 @@ pub struct VersionData {
     pub component_enums: ComponentEnums,
     /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
     pub item_components: Vec<String>,
+    /// 世界生成的数据，原样写进 `mc-bamboo-data` 的 `worldgen.json`。
+    pub worldgen: serde_json::Value,
 }
 
 pub fn run(
@@ -766,10 +778,12 @@ pub fn run(
             ..extracted.recipes
         },
         heightmaps: extracted.heightmaps,
+        attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
         component_enums: extracted.component_enums,
         item_components: extracted.item_components,
+        worldgen: extracted.worldgen,
     })
 }
 
@@ -920,6 +934,7 @@ fn read_items(
         }
         let tool_allows = components
             .tool
+            .as_ref()
             .is_none_or(|tool| tool.can_destroy_blocks_in_creative != Some(false));
         items.push(Item {
             max_stack_size: components.max_stack_size,

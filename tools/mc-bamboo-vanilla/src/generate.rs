@@ -70,7 +70,41 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         &item_components_file(data)?,
     )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
-    write_file(output_dir, "tags.rs", &tags)
+    write_file(output_dir, "tags.rs", &tags)?;
+    write_worldgen(data, output_dir)
+}
+
+/// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。
+///
+/// 这几个注册表是递归的树（密度函数里套密度函数、样条里套样条），生成等价的 Rust 结构
+/// 会是一大堆嵌套字面量，升级版本时也看不出差异；JSON 是官方 codec 的原始形态，
+/// `mc-bamboo-worldgen` 用同一套 codec 的语义解析，所以这里原样存。
+fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&data.worldgen)
+        .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
+    let path = output_dir.join("worldgen.json");
+    fs::write(&path, format!("{json}\n"))
+        .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 官方数据包里世界生成的几个注册表：`worldgen/noise`、`worldgen/density_function`、"
+    );
+    let _ = writeln!(
+        out,
+        "/// `worldgen/noise_settings`、两个多噪声群系预设和末地的五个群系。"
+    );
+    let _ = writeln!(out, "///");
+    let _ = writeln!(
+        out,
+        "/// 前三个是官方 codec 编出来的 JSON，预设是量化好的定点数。解析在 `mc-bamboo-worldgen`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLDGEN: &str = include_str!(\"worldgen.json\");"
+    );
+    write_file(output_dir, "worldgen.rs", &out)
 }
 
 /// 组件里按 ID 查表的枚举：连续的常量个数，稀疏的整张 ID 表。
@@ -313,6 +347,7 @@ pub mod shapes;
 pub mod states;
 pub mod tags;
 pub mod version;
+pub mod worldgen;
 "
     .to_owned()
 }
@@ -466,7 +501,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -483,6 +518,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.instrument,
             offset_literal(block),
             block.dynamic_shape,
+            block.destroy_time,
+            block.requires_correct_tool_for_drops,
         );
     }
 
@@ -1951,6 +1988,17 @@ fn registries_file(data: &VersionData) -> String {
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+
+    let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
+    let _ = writeln!(out, "pub mod attribute_defaults {{");
+    for (name, value) in &data.attribute_defaults {
+        let _ = writeln!(
+            out,
+            "    pub const {}: f64 = {value:?};",
+            constant_name(name)
+        );
+    }
+    let _ = writeln!(out, "}}\n");
     out
 }
 
@@ -2083,6 +2131,8 @@ mod tests {
             instrument: "harp".to_owned(),
             dynamic_shape: false,
             offset: None,
+            destroy_time: 0.0,
+            requires_correct_tool_for_drops: false,
         }
     }
 

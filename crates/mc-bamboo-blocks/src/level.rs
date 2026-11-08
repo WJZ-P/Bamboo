@@ -11,7 +11,7 @@ use crate::{
     block_entity::{BlockEntities, BlockEvents},
     random::LevelRandom,
     shape::Aabb,
-    state::BlockState,
+    state::{BlockState, NoteBlockInstrument},
 };
 
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
@@ -156,7 +156,7 @@ impl RedstoneMemory {
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
@@ -178,6 +178,17 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
+    /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
+    ///
+    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里。
+    NoteBlockPlayed {
+        pos: BlockPos,
+        instrument: NoteBlockInstrument,
+        note: i32,
+        pitch: f32,
+        seed: i64,
+    },
     /// `ServerLevel.runBlockEvents` 里的 `ClientboundBlockEventPacket`：方块事件处理成功了，
     /// 把这一项发给附近 64 格内的玩家。`block` 是方块的注册表 ID，官方包里的第三个字段。
     BlockEvent {

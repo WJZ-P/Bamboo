@@ -79,6 +79,14 @@ impl BlockState {
         self.try_get(property).is_some()
     }
 
+    /// 属性当前值的官方序列化名，方块没有这个属性时返回 `None`。
+    ///
+    /// 按名字查属性，给 `can_break` 这类从数据里读到属性名的谓词用；类型化的取值走 [`Self::try_get`]。
+    pub fn property_text(self, name: &str) -> Option<&'static str> {
+        let slot = PropertySlot::find(self, name)?;
+        Some(slot.def.values[slot.current_index(self)])
+    }
+
     /// 改属性的值。方块没有这个属性或者没有这个值时 panic，和官方的 `setValue` 一样。
     #[must_use]
     pub fn with<T: PropertyValue>(self, property: Property<T>, value: T) -> Self {

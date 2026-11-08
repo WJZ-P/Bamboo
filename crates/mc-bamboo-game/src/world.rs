@@ -89,6 +89,9 @@ impl World {
         interaction::run_block_ticks(&mut self.region, self.global.time());
         // 官方 `ServerLevel.tick` 里随机刻在 `chunkSource.tick`，方块实体的 tick 在它之后。
         interaction::run_random_ticks(&mut self.region);
+        // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
+        // 这里跟着玩家 tick 放在随机刻之后。
+        interaction::tick_mining(&mut self.region);
         // 方块实体的 tick：告示牌在这里清掉走远的编辑者。
         sign::tick_editors(&mut self.region);
         // 容器开合人数的重查和菜单同步。
@@ -262,9 +265,9 @@ impl World {
             PlayRequest::PlayerAction {
                 action,
                 pos,
+                face,
                 sequence,
-                ..
-            } => interaction::on_player_action(region, player, action, pos, sequence),
+            } => interaction::on_player_action(region, player, action, pos, face, sequence),
             PlayRequest::UseItemOn {
                 hand,
                 pos,
