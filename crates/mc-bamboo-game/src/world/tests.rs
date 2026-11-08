@@ -1145,6 +1145,11 @@ fn every_decoded_request_reaches_a_module_without_disconnecting() {
             yaw: 0.0,
             pitch: 0.0,
         },
+        PlayRequest::EditBook {
+            slot: -1,
+            pages: vec!["hi".to_owned()],
+            title: None,
+        },
         // 这三种本来不会发到世界线程。
         PlayRequest::KeepAlive(1),
         PlayRequest::PingRequest(1),

@@ -15,7 +15,7 @@ use mc_bamboo_protocol::{
 use tracing::warn;
 
 use crate::{
-    chat, chunk_broadcast,
+    book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     container, entity_sync,
     global::{Global, RosterEntry},
@@ -317,6 +317,9 @@ impl World {
             PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
+            }
+            PlayRequest::EditBook { slot, pages, title } => {
+                book::on_edit_book(region, player, slot, pages, title);
             }
             // 这三种连接任务就地处理了，不会发到这里。
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}

@@ -135,6 +135,7 @@ import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ServerboundEditBookPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPickItemFromBlockPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerAbilitiesPacket;
@@ -196,6 +197,8 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.SwingAnimationType;
+import net.minecraft.world.item.component.WritableBookContent;
+import net.minecraft.world.item.component.WrittenBookContent;
 import net.minecraft.world.item.component.DebugStickState;
 import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.item.enchantment.Enchantment;
@@ -599,6 +602,7 @@ public final class Probe {
                 section("chat" + names, () -> chat(actor, observer));
             }
 
+            section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
@@ -610,6 +614,8 @@ public final class Probe {
 
             section("long running", () -> {
                 await("play: keep-alives and the latency broadcast arrived", JOIN_TIMEOUT_MILLIS, kitten::longRunningDone);
+                await("play: another client received the latency update", JOIN_TIMEOUT_MILLIS,
+                        () -> late.latencyUpdated);
             });
 
             for (Join client : clients) {
@@ -1289,6 +1295,70 @@ public final class Probe {
                     .parse(registries.createSerializationContext(NbtOps.INSTANCE), profile)
                     .result()
                     .orElse(null);
+        }
+
+        /**
+         * 官方客户端保存书与笔再署名。署名不改本地物品，服务端必须把成书同步回来，
+         * 标题、作者和页面用官方组件 codec 解出来。
+         */
+        private void books(Join actor) throws IOException {
+            int inventorySlot = 4;
+            int menuSlot = HOTBAR_START + inventorySlot;
+            List<String> pages = List.of("Hello", "第二页");
+            actor.send(new ServerboundSetCreativeModeSlotPacket(menuSlot, new ItemStack(Items.WRITABLE_BOOK)));
+            actor.send(new ServerboundEditBookPacket(inventorySlot, pages, Optional.empty()));
+            await("book: the edited pages come back", () -> writablePages(actor.slots.get(menuSlot), pages));
+            check("book: editing keeps it a book and quill", actor.slots.get(menuSlot).is(Items.WRITABLE_BOOK));
+
+            String title = "My Title";
+            actor.send(new ServerboundEditBookPacket(inventorySlot, pages, Optional.of(title)));
+            await("book: signing turns it into a written book",
+                    () -> actor.slots.getOrDefault(menuSlot, ItemStack.EMPTY).is(Items.WRITTEN_BOOK));
+            ItemStack stack = actor.slots.get(menuSlot);
+            WrittenBookContent book = stack.get(DataComponents.WRITTEN_BOOK_CONTENT);
+            check("book: the written content is present", book != null);
+            if (book == null) {
+                return;
+            }
+            check("book: the count is unchanged", stack.getCount() == 1);
+            check("book: the title matches", title.equals(book.title().raw()));
+            check("book: the title was not filtered", book.title().filtered().isEmpty());
+            check("book: the author is the player name", actor.player.equals(book.author()));
+            check("book: generation is the original", book.generation() == 0);
+            check("book: the book is already resolved", book.resolved());
+            check("book: the pages match and were not filtered", writtenPages(book, pages));
+        }
+
+        /** 书与笔的页面：原文对得上，没有过滤文本。 */
+        private static boolean writablePages(ItemStack stack, List<String> pages) {
+            if (stack == null || !stack.is(Items.WRITABLE_BOOK)) {
+                return false;
+            }
+            WritableBookContent content = stack.get(DataComponents.WRITABLE_BOOK_CONTENT);
+            if (content == null || content.pages().size() != pages.size()) {
+                return false;
+            }
+            for (int i = 0; i < pages.size(); i++) {
+                var page = content.pages().get(i);
+                if (!pages.get(i).equals(page.raw()) || page.filtered().isPresent()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** 成书的页面是字面文本组件。 */
+        private static boolean writtenPages(WrittenBookContent book, List<String> pages) {
+            if (book.pages().size() != pages.size()) {
+                return false;
+            }
+            for (int i = 0; i < pages.size(); i++) {
+                var page = book.pages().get(i);
+                if (!pages.get(i).equals(page.raw().getString()) || page.filtered().isPresent()) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /**
@@ -2103,6 +2173,8 @@ public final class Probe {
             check("play: periodic tab update names the player",
                     packet.entries().stream().anyMatch(entry -> entry.profileId().equals(uuid)));
             check("play: periodic tab update lists everyone online", packet.entries().size() == tab.size());
+            check("play: latency is a non-negative millisecond count",
+                    packet.entries().stream().allMatch(entry -> entry.latency() >= 0));
             latencyUpdated = true;
         }
 
