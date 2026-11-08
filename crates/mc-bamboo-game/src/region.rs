@@ -6,6 +6,7 @@
 
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -34,6 +35,7 @@ use crate::{
     movement,
     player::Player,
     player_grid::PlayerGrid,
+    secure_chat::ServiceProfileKeys,
 };
 
 const DIMENSION: &str = "minecraft:overworld";
@@ -155,7 +157,15 @@ pub(crate) struct Region {
     pub(crate) view_distance: i32,
     max_players: i32,
     /// 写进 `login` 包的那一位，官方取的是 `MinecraftServer.usesAuthentication()`。
-    online_mode: bool,
+    pub(crate) online_mode: bool,
+    /// 配置里的 `enforce-secure-profile`。真正强制还要正版验证和公钥都在。
+    ///
+    /// Configured `enforce-secure-profile`. Enforcement also needs online mode and service keys.
+    pub(crate) enforce_secure_profile: bool,
+    /// Mojang 的 `playerCertificateKeys`。连接任务负责填充。
+    ///
+    /// Mojang's `playerCertificateKeys`. The connection task fills them in.
+    pub(crate) service_keys: Arc<ServiceProfileKeys>,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -195,7 +205,27 @@ impl Region {
         self.players.insert(player.id, player);
     }
 
+    #[cfg(test)]
     pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {
+        Self::with_keys(
+            view_distance,
+            max_players,
+            online_mode,
+            false,
+            crate::secure_chat::empty_keys(),
+        )
+    }
+
+    /// 正版验证和公钥从 `World::with_service_keys` 进来。测试走 [`Self::new`]。
+    ///
+    /// Online mode and the profile keys arrive through `World::with_service_keys`. Tests use [`Self::new`].
+    pub(crate) fn with_keys(
+        view_distance: i32,
+        max_players: i32,
+        online_mode: bool,
+        enforce_secure_profile: bool,
+        service_keys: Arc<ServiceProfileKeys>,
+    ) -> Self {
         let chunks = ChunkStore::flat();
         let template_body = encode_template(&chunks);
         Self {
@@ -223,6 +253,8 @@ impl Region {
             view_distance,
             max_players,
             online_mode,
+            enforce_secure_profile,
+            service_keys,
         }
     }
 
@@ -278,6 +310,7 @@ impl Region {
             is_flat: true,
             sea_level: flat::SEA_LEVEL,
             online_mode: self.online_mode,
+            enforces_secure_chat: crate::secure_chat::enforces(self),
         };
         self.links.send(id, &login);
         self.links.send(id, &ABILITIES);

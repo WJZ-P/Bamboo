@@ -24,7 +24,7 @@ oracle = [
     "dep:mc-bamboo-worldgen",
 ]
 # probe 里开了 online_mode 的那一项检查，要在工具进程里再起一个服务端。
-probe-online = ["dep:mc-bamboo-server", "dep:tokio"]
+probe-online = ["dep:mc-bamboo-server", "dep:rand_core", "dep:rsa", "dep:tokio"]
 
 [dependencies]
 mc-bamboo-blocks = { workspace = true, optional = true }
@@ -38,6 +38,8 @@ mc-bamboo-recipes = { workspace = true, optional = true }
 mc-bamboo-server = { workspace = true, optional = true }
 mc-bamboo-world = { workspace = true, optional = true }
 mc-bamboo-worldgen = { workspace = true, optional = true }
+rand_core = { workspace = true, optional = true }
+rsa = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, optional = true }

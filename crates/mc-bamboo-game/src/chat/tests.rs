@@ -93,15 +93,11 @@ fn context_line_echoing(command: &str) -> Tag {
 }
 
 fn chat(message: &str) -> PlayRequest {
-    PlayRequest::Chat {
-        message: message.to_owned(),
-    }
+    PlayRequest::unsigned_chat(message)
 }
 
 fn command(command: &str) -> PlayRequest {
-    PlayRequest::ChatCommand {
-        command: command.to_owned(),
-    }
+    PlayRequest::unsigned_command(command)
 }
 
 /// 离线客户端的 `chat` 包：没有签名，`lastSeen` 总是 `00 00 00 00 01`。
@@ -182,7 +178,15 @@ fn chat_frame_matches_the_official_bytes() {
         0x08, 0x00, 0x06, 0x4b, 0x69, 0x74, 0x74, 0x65, 0x6e, // name "Kitten"
         0x00, // 没有 targetName
     ];
-    assert_eq!(chat_frames("Kitten", "hi".to_owned()), expected);
+    let message = mc_bamboo_protocol::text::Component::text("hi");
+    let name = mc_bamboo_protocol::text::Component::text("Kitten");
+    let frames = crate::links::encode_frames(&mc_bamboo_protocol::packet::play::DisguisedChat {
+        message: &message,
+        chat_type: mc_bamboo_data::registries::chat_type::CHAT,
+        name: &name,
+        target_name: None,
+    });
+    assert_eq!(frames, expected);
 }
 
 #[test]

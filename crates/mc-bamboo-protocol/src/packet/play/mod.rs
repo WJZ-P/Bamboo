@@ -10,6 +10,7 @@ mod menu;
 mod movement;
 mod player_info;
 mod request;
+mod secure;
 mod sound;
 
 pub use block::*;
@@ -20,6 +21,7 @@ pub use menu::*;
 pub use movement::*;
 pub use player_info::*;
 pub use request::*;
+pub use secure::*;
 pub use sound::*;
 
 use mc_bamboo_data::packets::play::clientbound;
@@ -54,6 +56,10 @@ pub struct Login<'a> {
     pub is_flat: bool,
     pub sea_level: i32,
     pub online_mode: bool,
+    /// 官方 `ClientboundLoginPacket.enforcesSecureChat`。
+    ///
+    /// Official `ClientboundLoginPacket.enforcesSecureChat`.
+    pub enforces_secure_chat: bool,
 }
 
 impl ClientboundPacket for Login<'_> {
@@ -91,8 +97,10 @@ impl ClientboundPacket for Login<'_> {
         write_varint(out, self.sea_level);
 
         write_bool(out, self.online_mode);
-        // 强制聊天签名。
-        write_bool(out, false);
+        // 强制安全聊天。官方 `enforcesSecureChat`，要正版验证、配置打开、而且公钥已经取到。
+        //
+        // Enforced secure chat. Official `enforcesSecureChat`: online mode, the config flag, and keys already fetched.
+        write_bool(out, self.enforces_secure_chat);
     }
 }
 

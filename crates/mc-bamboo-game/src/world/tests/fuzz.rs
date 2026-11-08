@@ -685,12 +685,8 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 pitch,
             }
         }
-        9 => PlayRequest::Chat {
-            message: random_text(rng, 12, hostile),
-        },
-        10 => PlayRequest::ChatCommand {
-            command: random_text(rng, 300, hostile),
-        },
+        9 => PlayRequest::unsigned_chat(random_text(rng, 12, hostile)),
+        10 => PlayRequest::unsigned_command(random_text(rng, 300, hostile)),
         11 => PlayRequest::ClientInformation(random_information(rng)),
         12 => PlayRequest::ClientCommand {
             action: rng.pick(&[

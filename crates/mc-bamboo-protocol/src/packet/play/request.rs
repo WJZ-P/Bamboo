@@ -75,17 +75,34 @@ pub enum PlayRequest {
     ChunkBatchReceived {
         desired_chunks_per_tick: f32,
     },
-    /// 聊天消息。时间戳、盐、签名和已读窗口都解码后丢弃了，离线模式用不上。
+    /// 聊天消息。签名、时间戳、盐和已读窗口都留着，校验在世界线程上做。
+    ///
+    /// A chat message. The signature, timestamp, salt, and seen-window stay attached;
+    /// the world thread checks them.
     Chat {
         message: String,
+        signature: Option<Box<crate::packet::play::MessageSignatureBytes>>,
+        time_millis: i64,
+        salt: i64,
+        last_seen: crate::packet::play::LastSeenUpdate,
     },
-    /// 没有开头 `/` 的命令。签名版和普通版都归到这里，离线模式用不上签名。
+    /// 没有开头 `/` 的命令。`signed` 只有 `chat_command_signed` 才有。
     ///
-    /// A command without the leading `/`. Signed and unsigned packets both land here;
-    /// offline mode does not use the signature.
+    /// A command without the leading `/`. `signed` is set only for `chat_command_signed`.
     ChatCommand {
         command: String,
+        signed: Option<crate::packet::play::SignedCommand>,
     },
+    /// 客户端把已读窗口往前推。官方 `ServerboundChatAckPacket`。
+    ///
+    /// The client advances its seen window. Official `ServerboundChatAckPacket`.
+    ChatAck {
+        offset: i32,
+    },
+    /// 玩家上报聊天公钥。官方 `ServerboundChatSessionUpdatePacket`。
+    ///
+    /// The player reports a chat public key. Official `ServerboundChatSessionUpdatePacket`.
+    ChatSession(crate::packet::play::RemoteChatSession),
     /// 客户端请求命令补全。`command` 是输入框里的整段文字，可能以 `/` 开头。
     ///
     /// The client asks for suggestions. `command` is the whole input and may start with `/`.
@@ -190,6 +207,29 @@ pub enum PlayRequest {
 }
 
 impl PlayRequest {
+    /// 没有签名的聊天。测试和离线客户端用。
+    ///
+    /// Unsigned chat. Used by tests and offline clients.
+    pub fn unsigned_chat(message: impl Into<String>) -> Self {
+        Self::Chat {
+            message: message.into(),
+            signature: None,
+            time_millis: 0,
+            salt: 0,
+            last_seen: super::LastSeenUpdate::EMPTY,
+        }
+    }
+
+    /// 没有签名的命令。
+    ///
+    /// An unsigned command.
+    pub fn unsigned_command(command: impl Into<String>) -> Self {
+        Self::ChatCommand {
+            command: command.into(),
+            signed: None,
+        }
+    }
+
     /// 解码一帧的负载，负载以数据包 ID 开头。
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
@@ -224,8 +264,13 @@ impl PlayRequest {
             serverbound::CHAT => read_chat(&mut reader)?,
             serverbound::CHAT_COMMAND => Self::ChatCommand {
                 command: reader.string(MAX_COMMAND_CHARS)?.to_owned(),
+                signed: None,
             },
             serverbound::CHAT_COMMAND_SIGNED => read_signed_command(&mut reader)?,
+            serverbound::CHAT_ACK => Self::ChatAck {
+                offset: reader.varint()?,
+            },
+            serverbound::CHAT_SESSION_UPDATE => read_chat_session(&mut reader)?,
             serverbound::COMMAND_SUGGESTION => Self::CommandSuggestion {
                 id: reader.varint()?,
                 command: reader.string(MAX_SUGGESTION_CHARS)?.to_owned(),
@@ -309,43 +354,85 @@ fn read_rotation(reader: &mut Reader<'_>) -> Result<(f32, f32), DecodeError> {
 
 fn read_chat(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let message = reader.string(MAX_CHAT_CHARS)?.to_owned();
-    // 时间戳和盐。
-    reader.i64()?;
-    reader.i64()?;
-    if reader.bool()? {
-        reader.bytes(SIGNATURE_BYTES)?;
-    }
-    // LastSeenMessages.Update：偏移、确认窗口、校验和。
-    reader.varint()?;
-    reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?;
-    reader.i8()?;
-    Ok(PlayRequest::Chat { message })
+    let time_millis = reader.i64()?;
+    let salt = reader.i64()?;
+    let signature = if reader.bool()? {
+        Some(Box::new(read_signature(reader)?))
+    } else {
+        None
+    };
+    let last_seen = read_last_seen(reader)?;
+    Ok(PlayRequest::Chat {
+        message,
+        signature,
+        time_millis,
+        salt,
+        last_seen,
+    })
 }
 
-/// 解码带签名的命令。时间戳、盐、参数签名和已读窗口都读掉后丢弃。
+/// 解码带签名的命令。参数签名和已读窗口留给世界线程。
 ///
-/// Decodes a signed command. The timestamp, salt, argument signatures, and seen window are discarded.
+/// Decodes a signed command. Argument signatures and the seen window are left for the world thread.
 fn read_signed_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let command = reader.string(MAX_COMMAND_CHARS)?.to_owned();
-    // 时间戳和盐。
-    //
-    // Timestamp and salt.
-    reader.i64()?;
-    reader.i64()?;
-    // ArgumentSignatures：参数名加定长签名。
-    //
-    // ArgumentSignatures: a name plus a fixed-length signature.
-    for _ in 0..reader.count(MAX_SIGNED_ARGUMENTS)? {
-        reader.string(MAX_LANGUAGE_CHARS)?;
-        reader.bytes(SIGNATURE_BYTES)?;
+    let time_millis = reader.i64()?;
+    let salt = reader.i64()?;
+    let count = reader.count(MAX_SIGNED_ARGUMENTS)?;
+    let mut arguments = Vec::with_capacity(count);
+    for _ in 0..count {
+        arguments.push(crate::packet::play::ArgumentSignature {
+            name: reader.string(MAX_LANGUAGE_CHARS)?.to_owned(),
+            signature: read_signature(reader)?,
+        });
     }
-    // LastSeenMessages.Update：偏移、确认窗口、校验和。
-    //
-    // LastSeenMessages.Update: offset, acknowledged window, checksum.
-    reader.varint()?;
-    reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?;
-    reader.i8()?;
-    Ok(PlayRequest::ChatCommand { command })
+    let last_seen = read_last_seen(reader)?;
+    Ok(PlayRequest::ChatCommand {
+        command,
+        signed: Some(crate::packet::play::SignedCommand {
+            time_millis,
+            salt,
+            arguments,
+            last_seen,
+        }),
+    })
+}
+
+fn read_chat_session(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    Ok(PlayRequest::ChatSession(
+        crate::packet::play::RemoteChatSession {
+            session_id: reader.uuid()?,
+            expires_at_millis: reader.i64()?,
+            public_key: reader
+                .byte_array(crate::packet::play::MAX_PUBLIC_KEY_BYTES)?
+                .to_vec(),
+            key_signature: reader
+                .byte_array(crate::packet::play::MAX_KEY_SIGNATURE_BYTES)?
+                .to_vec(),
+        },
+    ))
+}
+
+fn read_signature(
+    reader: &mut Reader<'_>,
+) -> Result<crate::packet::play::MessageSignatureBytes, DecodeError> {
+    let mut signature = [0; SIGNATURE_BYTES];
+    signature.copy_from_slice(reader.bytes(SIGNATURE_BYTES)?);
+    Ok(signature)
+}
+
+fn read_last_seen(
+    reader: &mut Reader<'_>,
+) -> Result<crate::packet::play::LastSeenUpdate, DecodeError> {
+    let offset = reader.varint()?;
+    let mut acknowledged = [0; LAST_SEEN_ACKNOWLEDGED_BYTES];
+    acknowledged.copy_from_slice(reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?);
+    let checksum = reader.i8()?;
+    Ok(crate::packet::play::LastSeenUpdate {
+        offset,
+        acknowledged,
+        checksum,
+    })
 }
 
 /// 解码 `sign_update`：方块坐标、四行文字、哪一面。官方按这个顺序写。
@@ -690,6 +777,7 @@ impl HumanoidArm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::play::{ArgumentSignature, LastSeenUpdate, SignedCommand};
     use crate::{
         codec::{write_string, write_varint},
         frame::{MAX_FRAME_LEN, find_frame},
@@ -832,13 +920,17 @@ mod tests {
         assert_eq!(
             decode_body(serverbound::CHAT, CHAT_BODY),
             Ok(PlayRequest::Chat {
-                message: "hi".to_owned()
+                message: "hi".to_owned(),
+                signature: None,
+                time_millis: 0x0000_018b_cfe5_6800,
+                salt: 0x1122_3344_5566_7788,
+                last_seen: LastSeenUpdate::EMPTY,
             })
         );
     }
 
     #[test]
-    fn chat_discards_a_non_empty_last_seen_update() {
+    fn chat_keeps_a_non_empty_last_seen_update() {
         assert_eq!(
             decode_body(
                 serverbound::CHAT,
@@ -849,13 +941,21 @@ mod tests {
                  03 01 02 08 5a"
             ),
             Ok(PlayRequest::Chat {
-                message: "hi".to_owned()
+                message: "hi".to_owned(),
+                signature: None,
+                time_millis: 0x0000_018b_cfe5_6800,
+                salt: 0x1122_3344_5566_7788,
+                last_seen: LastSeenUpdate {
+                    offset: 3,
+                    acknowledged: [0x01, 0x02, 0x08],
+                    checksum: 0x5a,
+                },
             })
         );
     }
 
     #[test]
-    fn chat_skips_a_signature_when_present() {
+    fn chat_keeps_a_signature_when_present() {
         let mut payload = vec![serverbound::CHAT as u8];
         payload.extend(hex("02 68 69"));
         payload.extend([0; 16]);
@@ -866,7 +966,11 @@ mod tests {
         assert_eq!(
             PlayRequest::decode(&payload),
             Ok(PlayRequest::Chat {
-                message: "hi".to_owned()
+                message: "hi".to_owned(),
+                signature: Some(Box::new([0xab; SIGNATURE_BYTES])),
+                time_millis: 0,
+                salt: 0,
+                last_seen: LastSeenUpdate::EMPTY,
             })
         );
     }
@@ -880,7 +984,11 @@ mod tests {
         assert_eq!(
             PlayRequest::decode(&payload),
             Ok(PlayRequest::Chat {
-                message: "竹".repeat(MAX_CHAT_CHARS)
+                message: "竹".repeat(MAX_CHAT_CHARS),
+                signature: None,
+                time_millis: 0,
+                salt: 0,
+                last_seen: LastSeenUpdate::EMPTY,
             })
         );
 
@@ -910,9 +1018,7 @@ mod tests {
     fn decodes_chat_command() {
         assert_eq!(
             decode_body(serverbound::CHAT_COMMAND, "07 66 6f 6f 20 62 61 72"),
-            Ok(PlayRequest::ChatCommand {
-                command: "foo bar".to_owned()
-            })
+            Ok(PlayRequest::unsigned_command("foo bar"))
         );
     }
 
@@ -1623,9 +1729,11 @@ mod tests {
             Ok(PlayRequest::Other(serverbound::CLIENT_TICK_END))
         );
         // 不调用 finish，所以内容是什么都行。
+        //
+        // `finish` is not called, so the body can be anything.
         assert_eq!(
-            decode_body(serverbound::CHAT_ACK, "ff ff ff"),
-            Ok(PlayRequest::Other(serverbound::CHAT_ACK))
+            decode_body(serverbound::CHAT_SESSION_UPDATE, ""),
+            Err(DecodeError::UnexpectedEnd)
         );
         assert_eq!(decode_body(0x7f, "01 02 03"), Ok(PlayRequest::Other(0x7f)));
     }
@@ -1654,13 +1762,19 @@ mod tests {
                  00 00 00 00 01"
             ),
             Ok(PlayRequest::ChatCommand {
-                command: "say hi".to_owned()
+                command: "say hi".to_owned(),
+                signed: Some(SignedCommand {
+                    time_millis: 0x0000_018b_cfe5_6800,
+                    salt: 0x1122_3344_5566_7788,
+                    arguments: Vec::new(),
+                    last_seen: LastSeenUpdate::EMPTY,
+                }),
             })
         );
     }
 
     #[test]
-    fn signed_chat_command_skips_argument_signatures() {
+    fn signed_chat_command_keeps_argument_signatures() {
         let mut body = Vec::new();
         write_string(&mut body, "say hi");
         body.extend([0; 16]);
@@ -1671,8 +1785,25 @@ mod tests {
         assert_eq!(
             decode_body(serverbound::CHAT_COMMAND_SIGNED, &hex_text(&body)),
             Ok(PlayRequest::ChatCommand {
-                command: "say hi".to_owned()
+                command: "say hi".to_owned(),
+                signed: Some(SignedCommand {
+                    time_millis: 0,
+                    salt: 0,
+                    arguments: vec![ArgumentSignature {
+                        name: "message".to_owned(),
+                        signature: [0xab; SIGNATURE_BYTES],
+                    }],
+                    last_seen: LastSeenUpdate::EMPTY,
+                }),
             })
+        );
+    }
+
+    #[test]
+    fn decodes_chat_ack() {
+        assert_eq!(
+            decode_body(serverbound::CHAT_ACK, "05"),
+            Ok(PlayRequest::ChatAck { offset: 5 })
         );
     }
 

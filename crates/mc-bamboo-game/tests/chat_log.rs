@@ -75,6 +75,7 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
         view_distance: 2,
         max_players: 20,
         online_mode: false,
+        enforce_secure_profile: false,
     };
     let world = World::new(config, receiver);
     let player = PlayerId(1);
@@ -91,9 +92,7 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
     let quota = Arc::new(AtomicUsize::new(0));
     let chat = Inbound::Request {
         player,
-        request: PlayRequest::Chat {
-            message: "竹子 hi".to_owned(),
-        },
+        request: PlayRequest::unsigned_chat("竹子 hi"),
         in_flight: InFlight::acquire(&quota, 1).expect("配额还没用"),
     };
     inbox.send(Inbound::Join(Box::new(join))).unwrap();

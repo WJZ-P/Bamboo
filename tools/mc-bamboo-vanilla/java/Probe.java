@@ -1,3 +1,4 @@
+import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.properties.Property;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -16,12 +17,21 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -53,6 +63,7 @@ import javax.crypto.SecretKey;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandBuildContext;
+import net.minecraft.commands.arguments.ArgumentSignatures;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
@@ -79,6 +90,14 @@ import net.minecraft.network.ProtocolInfo;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.LastSeenMessages;
+import net.minecraft.network.chat.MessageSignature;
+import net.minecraft.network.chat.MessageSignatureCache;
+import net.minecraft.network.chat.PlayerChatMessage;
+import net.minecraft.network.chat.RemoteChatSession;
+import net.minecraft.network.chat.SignedMessageBody;
+import net.minecraft.network.chat.SignedMessageChain;
+import net.minecraft.network.chat.SignedMessageLink;
+import net.minecraft.network.chat.SignedMessageValidator;
 import net.minecraft.network.chat.TextColor;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketFlow;
@@ -126,6 +145,7 @@ import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerChatPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
@@ -144,6 +164,8 @@ import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundChatCommandSignedPacket;
+import net.minecraft.network.protocol.game.ServerboundChatSessionUpdatePacket;
 import net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
@@ -197,6 +219,9 @@ import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.util.Crypt;
+import net.minecraft.util.SignatureValidator;
+import net.minecraft.util.Signer;
+import net.minecraft.world.entity.player.ProfilePublicKey;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityType;
@@ -542,6 +567,78 @@ public final class Probe {
             sakura.finishChecks();
         } finally {
             sakura.close();
+        }
+        probeSecureChat(host, port, layers, sessionUrl);
+    }
+
+    /**
+     * 两名正版玩家互发签名消息。接收方用官方 {@code SignedMessageValidator} 验过才算通过。
+     * 改过一个字节的签名必须被拒绝，而且下一句也会因为链断了被拒绝。
+     *
+     * <p>Two online players exchange signed messages. The receiver accepts one only when the official
+     * {@code SignedMessageValidator} does. A signature with one flipped byte is rejected, and the
+     * next message is rejected because the chain is broken.
+     */
+    private static void probeSecureChat(
+            String host, int port, LayeredRegistryAccess<RegistryLayer> layers, String sessionUrl) throws IOException {
+        Join momo = new Join(host, port, layers, "Momo", HumanoidArm.RIGHT, false, sessionUrl);
+        Join nori = new Join(host, port, layers, "Nori", HumanoidArm.LEFT, false, sessionUrl);
+        try {
+            momo.start();
+            waitOnline(momo);
+            nori.start();
+            waitOnline(nori);
+            momo.installChatSession(sessionUrl);
+            nori.installChatSession(sessionUrl);
+            waitUntil(momo, "secure: Momo sees Nori's chat session", () -> momo.hasPeerSession(nori.uuid));
+            waitUntil(nori, "secure: Nori sees Momo's chat session", () -> nori.hasPeerSession(momo.uuid));
+
+            momo.sendSignedChat("signed hello");
+            waitUntil(nori, "secure: Nori's client verified Momo's chat", () -> nori.verifiedSigned("signed hello"));
+            waitUntil(momo, "secure: Momo's client verified its own chat", () -> momo.verifiedSigned("signed hello"));
+
+            int noriBefore = nori.verifiedCount();
+            momo.sendTamperedChat("tampered");
+            waitUntil(momo, "secure: a tampered signature is rejected",
+                    () -> momo.sawTranslation("chat.disabled.invalid_signature"));
+            pumpBoth(momo, nori, 400);
+            check("secure: the tampered message was not delivered", nori.verifiedCount() == noriBefore);
+
+            momo.sendSignedChat("after the break");
+            waitUntil(momo, "secure: the next message is rejected because the chain broke",
+                    () -> momo.sawTranslation("chat.disabled.chain_broken"));
+            pumpBoth(momo, nori, 400);
+            check("secure: a broken chain is not delivered", !nori.verifiedSigned("after the break"));
+
+            nori.sendSignedEmote("waves");
+            waitUntil(momo, "secure: Momo's client verified the signed /me", () -> momo.verifiedSigned("waves"));
+        } finally {
+            momo.close();
+            nori.close();
+        }
+    }
+
+    private static void waitOnline(Join join) throws IOException {
+        long deadline = System.currentTimeMillis() + JOIN_TIMEOUT_MILLIS;
+        while (!join.onlineJoinDone() && !join.closed && System.currentTimeMillis() < deadline) {
+            join.pump();
+        }
+        check("secure: " + join.player + " joined", join.onlineJoinDone());
+    }
+
+    private static void waitUntil(Join join, String what, BooleanSupplier ready) throws IOException {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (!ready.getAsBoolean() && !join.closed && System.currentTimeMillis() < deadline) {
+            join.pump();
+        }
+        check(what, ready.getAsBoolean());
+    }
+
+    private static void pumpBoth(Join first, Join second, long millis) throws IOException {
+        long deadline = System.currentTimeMillis() + millis;
+        while (System.currentTimeMillis() < deadline) {
+            first.pump();
+            second.pump();
         }
     }
 
@@ -2140,6 +2237,13 @@ public final class Probe {
         private final UUID offlineUuid;
         /** 假 session server 的根地址。非空就表示这条连接要走正版验证。 */
         private final String sessionUrl;
+        private SignatureValidator serviceValidator;
+        private SignedMessageChain.Encoder chatEncoder;
+        private final MessageSignatureCache signatureCache = MessageSignatureCache.createDefault();
+        private final Map<UUID, SignedMessageValidator> peerValidators = new HashMap<>();
+        private final Map<UUID, UUID> peerSessionIds = new HashMap<>();
+        private final List<String> signedLines = new ArrayList<>();
+        private int nextChatIndex;
         private final LayeredRegistryAccess<RegistryLayer> layers;
         private final RegistryAccess.Frozen registries;
         private final PalettedContainerFactory containers;
@@ -2666,6 +2770,7 @@ public final class Probe {
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
             handlers.put("handleDisguisedChat", value -> onDisguisedChat((ClientboundDisguisedChatPacket) value));
+            handlers.put("handlePlayerChat", value -> onPlayerChat((ClientboundPlayerChatPacket) value));
             handlers.put("handleAwardStats", value -> onAwardStats((ClientboundAwardStatsPacket) value));
             return handlers;
         }
@@ -2733,6 +2838,7 @@ public final class Probe {
             check("play: view distance", packet.chunkRadius() == VIEW_DISTANCE);
             if (online()) {
                 check("online: the login packet says the server is in online mode", packet.onlineMode());
+                check("online: the login packet enforces secure chat", packet.enforcesSecureChat());
             } else {
                 check("play: offline mode", !packet.onlineMode());
             }
@@ -2778,6 +2884,10 @@ public final class Probe {
                 });
                 return;
             }
+            if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.INITIALIZE_CHAT))) {
+                rememberChatSessions(packet);
+                return;
+            }
             if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_HAT))) {
                 packet.entries().forEach(entry -> hats.put(entry.profileId(), entry.showHat()));
                 return;
@@ -2794,8 +2904,13 @@ public final class Probe {
             for (var entry : packet.entries()) {
                 String name = entry.profile().name();
                 if (online()) {
-                    check("online: the tab uuid comes from the session server",
-                            entry.profileId().equals(expectedUuid));
+                    if (name.equals(player)) {
+                        check("online: the tab uuid comes from the session server",
+                                entry.profileId().equals(expectedUuid));
+                    } else {
+                        check("online: another player's tab uuid is not the offline one",
+                                !entry.profileId().equals(UUIDUtil.createOfflinePlayerUUID(name)));
+                    }
                     checkSkin("online: the skin from the session server reached the tab list",
                             entry.profile().properties().get("textures"));
                 } else {
@@ -3206,6 +3321,159 @@ public final class Probe {
         private void onSystemChat(ClientboundSystemChatPacket packet) {
             systemMessages.add(packet);
             events.add("system " + packet.content().getString());
+        }
+
+        void installChatSession(String root) throws IOException {
+            try {
+                byte[] pkcs8 = Base64.getDecoder().decode(httpGet(root + "/probe/service-private"));
+                KeyFactory factory = KeyFactory.getInstance("RSA");
+                PrivateKey service = factory.generatePrivate(new PKCS8EncodedKeySpec(pkcs8));
+                var crt = (java.security.interfaces.RSAPrivateCrtKey) service;
+                PublicKey servicePublic = factory.generatePublic(
+                        new java.security.spec.RSAPublicKeySpec(crt.getModulus(), crt.getPublicExponent()));
+                serviceValidator = SignatureValidator.from(servicePublic, "SHA1withRSA");
+
+                KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+                generator.initialize(2048);
+                var pair = generator.generateKeyPair();
+                Instant expires = Instant.now().plus(Duration.ofDays(1));
+                UUID sessionId = UUID.randomUUID();
+                byte[] keyBytes = pair.getPublic().getEncoded();
+                ByteBuffer buffer = ByteBuffer.allocate(24 + keyBytes.length).order(ByteOrder.BIG_ENDIAN);
+                buffer.putLong(uuid.getMostSignificantBits());
+                buffer.putLong(uuid.getLeastSignificantBits());
+                buffer.putLong(expires.toEpochMilli());
+                buffer.put(keyBytes);
+                Signature signer = Signature.getInstance("SHA1withRSA");
+                signer.initSign(service);
+                signer.update(buffer.array());
+                byte[] keySignature = signer.sign();
+                var data = new ProfilePublicKey.Data(expires, pair.getPublic(), keySignature);
+                send(new ServerboundChatSessionUpdatePacket(new RemoteChatSession.Data(sessionId, data)));
+                chatEncoder = new SignedMessageChain(uuid, sessionId)
+                        .encoder(Signer.from(pair.getPrivate(), "SHA256withRSA"));
+            } catch (Exception error) {
+                check("secure: " + player + " could install a chat session (" + error + ")", false);
+            }
+        }
+
+        boolean hasPeerSession(UUID id) {
+            return peerValidators.containsKey(id);
+        }
+
+        boolean verifiedSigned(String text) {
+            return signedLines.stream().anyMatch(line -> line.contains(text));
+        }
+
+        int verifiedCount() {
+            return signedLines.size();
+        }
+
+        boolean sawTranslation(String key) {
+            for (ClientboundSystemChatPacket message : systemMessages) {
+                if (message.content().getContents()
+                        instanceof net.minecraft.network.chat.contents.TranslatableContents contents
+                        && contents.getKey().equals(key)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void sendSignedChat(String text) throws IOException {
+            sendSigned(text, null);
+        }
+
+        void sendSignedEmote(String action) throws IOException {
+            sendSigned(action, "action");
+        }
+
+        void sendTamperedChat(String text) throws IOException {
+            if (chatEncoder == null) {
+                check("secure: " + player + " has a chat encoder", false);
+                return;
+            }
+            Instant time = Instant.now();
+            LastSeenMessages.Update update = emptyLastSeen();
+            SignedMessageBody body = new SignedMessageBody(text, time, 7L, LastSeenMessages.EMPTY);
+            MessageSignature signature = chatEncoder.pack(body);
+            byte[] raw = signature.bytes().clone();
+            raw[0] ^= 0x01;
+            send(new ServerboundChatPacket(text, time, 7L, Optional.of(new MessageSignature(raw)), update));
+        }
+
+        private void sendSigned(String text, String argument) throws IOException {
+            if (chatEncoder == null) {
+                check("secure: " + player + " has a chat encoder", false);
+                return;
+            }
+            Instant time = Instant.now();
+            LastSeenMessages.Update update = emptyLastSeen();
+            SignedMessageBody body = new SignedMessageBody(text, time, 7L, LastSeenMessages.EMPTY);
+            MessageSignature signature = chatEncoder.pack(body);
+            if (argument == null) {
+                send(new ServerboundChatPacket(text, time, 7L, Optional.of(signature), update));
+            } else {
+                var entries = List.of(new ArgumentSignatures.Entry(argument, signature));
+                send(new ServerboundChatCommandSignedPacket(
+                        "me " + text, time, 7L, new ArgumentSignatures(entries), update));
+            }
+        }
+
+        private static LastSeenMessages.Update emptyLastSeen() {
+            return new LastSeenMessages.Update(0, new BitSet(20), (byte) 1);
+        }
+
+        private void rememberChatSessions(ClientboundPlayerInfoUpdatePacket packet) {
+            if (serviceValidator == null) {
+                return;
+            }
+            for (var entry : packet.entries()) {
+                RemoteChatSession.Data data = entry.chatSession();
+                if (data == null) {
+                    continue;
+                }
+                try {
+                    String name = tab.getOrDefault(entry.profileId(), player);
+                    RemoteChatSession session = data.validate(new GameProfile(entry.profileId(), name), serviceValidator);
+                    peerSessionIds.put(entry.profileId(), session.sessionId());
+                    peerValidators.put(
+                            entry.profileId(),
+                            session.createMessageValidator(ProfilePublicKey.EXPIRY_GRACE_PERIOD));
+                } catch (Exception error) {
+                    check("secure: " + player + " accepted a peer profile key (" + error + ")", false);
+                }
+            }
+        }
+
+        private void onPlayerChat(ClientboundPlayerChatPacket packet) {
+            check("secure: player chat indexes are contiguous", packet.globalIndex() == nextChatIndex);
+            nextChatIndex += 1;
+            var body = packet.body().unpack(signatureCache);
+            check("secure: last-seen signatures unpack", body.isPresent());
+            if (body.isEmpty()) {
+                return;
+            }
+            MessageSignature signature = packet.signature().orElse(null);
+            signatureCache.push(body.get(), signature);
+            SignedMessageValidator validator = peerValidators.get(packet.sender());
+            UUID sessionId = peerSessionIds.get(packet.sender());
+            if (validator == null || signature == null || sessionId == null) {
+                check("secure: player chat has a session and a signature", false);
+                return;
+            }
+            SignedMessageLink link = new SignedMessageLink(packet.index(), packet.sender(), sessionId);
+            PlayerChatMessage message = new PlayerChatMessage(
+                    link,
+                    signature,
+                    body.get(),
+                    packet.unsignedContent().orElse(null),
+                    packet.filterMask());
+            PlayerChatMessage accepted = validator.updateAndValidate(message);
+            check("secure: the official validator accepted the message", accepted != null);
+            if (accepted != null) {
+                signedLines.add(packet.chatType().decorate(accepted.decoratedContent()).getString());
+            }
         }
 
         private void onDisguisedChat(ClientboundDisguisedChatPacket packet) {

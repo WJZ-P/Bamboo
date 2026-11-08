@@ -35,7 +35,9 @@
 
 ## 1. 结论
 
-1. **聊天不需要任何签名。** Bamboo 的 `login` 里 `online_mode=false`、`enforces_secure_chat=false`，客户端不创建聊天会话，`chat` 包里签名为空，`chat_session_update` 不会发。
+**实现现状：** 正版验证打开、并且已经拿到服务公钥、`enforce-secure-profile` 为真时，按官方做安全聊天。`chat_session_update` 会校验并广播 `INITIALIZE_CHAT`；签名消息和 `/say`、`/me`、`/msg` 的参数签名转发为 `player_chat`；`chat_ack` 会推进已读窗口。下面第 1–3 条，以及后文写着「签名丢掉」「不处理 `chat_ack`」「不处理 `chat_session_update`」的句子，说的是改动之前的离线做法。离线模式、或者公钥没取到时，`enforces_secure_chat` 仍是 false，未签名玩家聊天仍发 `disguised_chat`（官方离线服发的是没有签名的 `player_chat`）。`delete_chat` 能编码，不会发送。
+
+1. **离线聊天不需要任何签名。** 默认配置的 `login` 里 `online_mode=false`、`enforces_secure_chat=false`，客户端不创建聊天会话，`chat` 包里签名为空，`chat_session_update` 不会发。
 2. **`LastSeenMessages.Update` 可以解码后丢弃。** 只要服务端不发带签名的 `player_chat`，客户端发来的永远是 `00 00 00 00 01`，`chat_ack` 也永远不会发。
 3. **玩家聊天用 `disguised_chat`。** body 是 `message NBT + VarInt 1 + name NBT + 00`。显示 `<Name> message`，尊重客户端的聊天设置，叙述也正确，所有接收者共用一份字节。`system_chat` 留给加入、离开和错误提示。
 4. **服务端不处理 `chat` 时，发送者什么也看不到。** 客户端没有本地回显，也不会报错。
@@ -297,7 +299,7 @@ ID 8（`0x08`），serverbound，Play。来源：`ServerboundChatCommandSignedPa
 00 00 00 00 01               lastSeen
 ```
 
-服务端要做的事：`say`、`me`、`msg` 的参数是 `minecraft:message`，客户端会发 `chat_command_signed`。签名丢掉，剩下的 `command` 按 `chat_command` 执行。
+服务端要做的事：`say`、`me`、`msg` 的参数是 `minecraft:message`，在线客户端会发 `chat_command_signed`。现在会按官方验参数签名，通过后用 `player_chat` 转发；离线客户端签名个数是 0，命令照常执行，聊天仍是 `disguised_chat`。强制安全聊天时，无签名的 `chat_command` 若带 `message` 参数，不执行并回 `chat.disabled.invalid_command_signature`。
 
 ### `minecraft:chat_ack`
 
@@ -307,7 +309,7 @@ ID 6（`0x06`），serverbound，Play。来源：`ServerboundChatAckPacket`，`C
 |---|---|
 | `offset` | `VarInt` |
 
-只有 `offset > 0` 才发，发送时机是窗口累计超过 64 或进入 Configuration。没有签名消息时不会发生。服务端要做的事：不处理，归入 `Other`。
+只有 `offset > 0` 才发，发送时机是窗口累计超过 64 或进入 Configuration。没有签名消息时不会发生。服务端要做的事：按官方 `LastSeenMessagesValidator.applyOffset` 前移窗口，失败断开 `multiplayer.disconnect.chat_validation_failed`。
 
 ### `minecraft:chat_session_update`
 
@@ -320,7 +322,7 @@ ID 10（`0x0A`），serverbound，Play。来源：`ServerboundChatSessionUpdateP
 | `publicKey` | `VarInt` 长度（≤ 512）+ 字节 |
 | `keySignature` | `VarInt` 长度（≤ 4096）+ 字节 |
 
-只由 `setKeyPair` 发送，而密钥对只在 `online_mode=true` 时准备。服务端要做的事：不处理，归入 `Other`。
+只由 `setKeyPair` 发送，而密钥对只在客户端 `online_mode=true` 时准备。服务端要做的事：用服务公钥做 `SHA1withRSA` 校验（`ProfilePublicKey.createValidated`），失败断开 `multiplayer.disconnect.invalid_public_key_signature`；通过后广播只有 `INITIALIZE_CHAT` 的 `player_info_update`。没有服务公钥时记一条警告并忽略，不断开。
 
 ### `minecraft:client_information`
 

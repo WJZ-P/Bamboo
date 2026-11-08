@@ -10,16 +10,14 @@
 
 use mc_bamboo_data::registries::chat_type;
 use mc_bamboo_protocol::{
-    packet::play::{AwardStats, ChatVisibility, ClientCommandKind, DisguisedChat, SystemChat},
+    packet::play::{
+        AwardStats, ChatVisibility, ClientCommandKind, DisguisedChat, LastSeenUpdate, SystemChat,
+    },
     text::{Color, Component, is_allowed_chat_character},
 };
 use tracing::info;
 
-use crate::{
-    inbound::PlayerId,
-    links::{Links, encode_frames},
-    region::Region,
-};
+use crate::{inbound::PlayerId, links::Links, region::Region, secure_chat};
 
 const ILLEGAL_CHARACTERS: &str = "multiplayer.disconnect.illegal_characters";
 const SPAM: &str = "disconnect.spam";
@@ -108,22 +106,68 @@ pub(crate) fn reject_illegal_command(region: &mut Region, id: PlayerId, command:
     true
 }
 
-/// `chat`：编码一次，返回发给所有已进入 Play 的玩家的帧。发送者也要收到，客户端没有本地回显。
-/// 广播之后要调用 [`detect_chat_rate_spam`]，没有返回帧的消息不计数。`chat-join.md` 第 4、5 节。
-pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: String) -> Option<Vec<u8>> {
+/// `handleChat`。返回 `true` 时调用方要记一次聊天刷屏，和官方一样只有真的广播了才计数。
+///
+/// `handleChat`. The caller counts chat spam when this returns `true`. Official servers do that
+/// only after a message was actually broadcast.
+pub(crate) fn on_chat(
+    region: &mut Region,
+    id: PlayerId,
+    message: String,
+    signature: Option<[u8; 256]>,
+    time_millis: i64,
+    salt: i64,
+    last_seen: &LastSeenUpdate,
+) -> bool {
+    // 已读窗口在非法字符和隐藏聊天之前套用，官方 `unpackAndApplyLastSeen` 也是这样。
+    //
+    // The seen window is applied before the illegal-character and hidden-chat checks.
+    // Official `unpackAndApplyLastSeen` does the same.
+    if !secure_chat::apply_last_seen(region, id, last_seen) {
+        return false;
+    }
     if !is_legal(&message) {
         kick_for_illegal_characters(region, id);
-        return None;
+        return false;
     }
-    let player = region.players.get(&id)?;
-    if player.client.chat_visibility == ChatVisibility::Hidden {
+    let hidden = region
+        .players
+        .get(&id)
+        .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Hidden);
+    if hidden {
         let notice = Component::translate(CHAT_DISABLED, []).color(Color::Red);
         send_system_chat(region, id, &notice);
-        return None;
+        return false;
     }
-    // 官方这里多一个 `[Not Secure]` 前缀。Bamboo 的聊天全都没有签名，这个前缀不提供信息。
-    info!("<{}> {message}", player.name);
-    Some(chat_frames(&player.name, message))
+    let name = match region.players.get(&id) {
+        Some(player) => player.name.clone(),
+        None => return false,
+    };
+    match secure_chat::accept_chat(region, id, &message, signature, time_millis, salt) {
+        Ok(Some(signed)) => {
+            info!("<{name}> {message}");
+            let display = Component::text(name);
+            secure_chat::broadcast_signed(region, &signed, chat_type::CHAT, &display, None, None);
+            true
+        }
+        Ok(None) => {
+            // 没有公钥、也没强制签名时，官方会发不带签名的 `player_chat`。
+            // 这里仍发 `disguised_chat`，离线探针和现有测试按这个包核对。
+            //
+            // With no key and secure chat not enforced, official servers send unsigned `player_chat`.
+            // This still sends `disguised_chat`, which the offline probe and the existing tests check.
+            info!("<{name}> {message}");
+            deliver_disguised(
+                region,
+                &name,
+                &Component::text(message),
+                chat_type::CHAT,
+                None,
+            );
+            true
+        }
+        Err(()) => false,
+    }
 }
 
 /// `client_command`：`RequestStats` 回 `award_stats`，其他动作忽略。`chat-join.md` 第 4 节。
@@ -151,14 +195,34 @@ fn send_system_chat(region: &mut Region, id: PlayerId, content: &Component) {
     region.links.send(id, &packet);
 }
 
-/// 所有接收者共用的帧。客户端按 `minecraft:chat` 的模板拼出 `<name> message`。
-fn chat_frames(name: &str, message: String) -> Vec<u8> {
-    encode_frames(&DisguisedChat {
-        message: &Component::text(message),
-        chat_type: chat_type::CHAT,
-        name: &Component::text(name),
-        target_name: None,
-    })
+/// 只发给聊天可见性是“全部”的玩家。官方 `ServerPlayer.acceptsChatMessages`。
+///
+/// Sends only to players whose chat visibility is full. Official `ServerPlayer.acceptsChatMessages`.
+fn deliver_disguised(
+    region: &mut Region,
+    name: &str,
+    message: &Component,
+    chat_type: i32,
+    target_name: Option<&Component>,
+) {
+    let display = Component::text(name);
+    let ids: Vec<PlayerId> = region
+        .players
+        .iter()
+        .filter(|(_, player)| player.client.chat_visibility == ChatVisibility::Full)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        region.links.send(
+            id,
+            &DisguisedChat {
+                message,
+                chat_type,
+                name: &display,
+                target_name,
+            },
+        );
+    }
 }
 
 #[cfg(test)]

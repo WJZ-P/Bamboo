@@ -10,7 +10,8 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::registries::{attribute, attribute_defaults};
 use mc_bamboo_protocol::{
     packet::play::{
-        AttributeSnapshot, DisguisedChat, GameEvent, GameMode, PlayerAbilities, UpdateAttributes,
+        AttributeSnapshot, ChatVisibility, DisguisedChat, GameEvent, GameMode, PlayerAbilities,
+        UpdateAttributes,
     },
     text::{Component, TranslateArg},
 };
@@ -22,7 +23,6 @@ use crate::{
     },
     global::Global,
     inbound::PlayerId,
-    links::encode_frames,
     player::Player,
     region::{self, Region},
 };
@@ -75,8 +75,16 @@ pub(crate) fn say(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let _ = global;
-    let message = render(region, id, required_message(parsed, "message")?)?;
-    broadcast_chat(region, id, &message, chat_type::SAY_COMMAND, None);
+    let raw = required_message(parsed, "message")?;
+    let rendered = render(region, id, raw)?;
+    publish_command_chat(
+        region,
+        id,
+        "message",
+        &rendered,
+        chat_type::SAY_COMMAND,
+        None,
+    );
     Ok(())
 }
 
@@ -87,8 +95,16 @@ pub(crate) fn me(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let _ = global;
-    let message = render(region, id, required_message(parsed, "action")?)?;
-    broadcast_chat(region, id, &message, chat_type::EMOTE_COMMAND, None);
+    let raw = required_message(parsed, "action")?;
+    let rendered = render(region, id, raw)?;
+    publish_command_chat(
+        region,
+        id,
+        "action",
+        &rendered,
+        chat_type::EMOTE_COMMAND,
+        None,
+    );
     Ok(())
 }
 
@@ -101,26 +117,39 @@ pub(crate) fn msg(
     let _ = global;
     let selector = required_players(parsed, "targets")?;
     let targets = select::players(region, id, level_of(region, id), selector)?;
-    let message = render(region, id, required_message(parsed, "message")?)?;
+    let raw = required_message(parsed, "message")?;
+    let rendered = render(region, id, raw)?;
     let source_name = player_name(region, id);
     let sender = Component::text(source_name);
+    let signed = crate::secure_chat::take_argument(region, id, "message");
+    let unsigned = signed.as_ref().and_then(|message| {
+        (message.content != rendered).then(|| Component::text(rendered.clone()))
+    });
     for target in targets {
         let target_name = Component::text(player_name(region, target));
-        send_chat(
+        deliver_one(
             region,
             id,
-            &message,
-            chat_type::MSG_COMMAND_OUTGOING,
-            &sender,
-            Some(&target_name),
+            signed.as_ref(),
+            &DirectChat {
+                rendered: &rendered,
+                unsigned: unsigned.as_ref(),
+                chat_type: chat_type::MSG_COMMAND_OUTGOING,
+                name: &sender,
+                target: Some(&target_name),
+            },
         );
-        send_chat(
+        deliver_one(
             region,
             target,
-            &message,
-            chat_type::MSG_COMMAND_INCOMING,
-            &sender,
-            None,
+            signed.as_ref(),
+            &DirectChat {
+                rendered: &rendered,
+                unsigned: unsigned.as_ref(),
+                chat_type: chat_type::MSG_COMMAND_INCOMING,
+                name: &sender,
+                target: None,
+            },
         );
     }
     Ok(())
@@ -180,7 +209,7 @@ pub(crate) fn kick(
     let selector = required_players(parsed, "targets")?;
     let targets = select::players(region, id, level_of(region, id), selector)?;
     let reason = if let Some(message) = parsed.get("reason").and_then(Value::as_message) {
-        render(region, id, message)?
+        Component::text(render(region, id, message)?)
     } else {
         Component::translate("multiplayer.disconnect.kicked", [])
     };
@@ -336,9 +365,9 @@ fn near_ground(chunks: &mc_bamboo_world::store::ChunkStore, player: &Player) -> 
         .is_some_and(|state| !BlockState(state).is_air())
 }
 
-fn render(region: &Region, source: PlayerId, message: &Message) -> Result<Component, CommandFail> {
+fn render(region: &Region, source: PlayerId, message: &Message) -> Result<String, CommandFail> {
     if message.parts.is_empty() {
-        return Ok(Component::text(message.text.clone()));
+        return Ok(message.text.clone());
     }
     let chars: Vec<char> = message.text.chars().collect();
     let mut text = String::new();
@@ -357,7 +386,42 @@ fn render(region: &Region, source: PlayerId, message: &Message) -> Result<Compon
     if cursor < chars.len() {
         text.extend(chars[cursor..].iter().copied());
     }
-    Ok(Component::text(text))
+    Ok(text)
+}
+
+/// `/say` 和 `/me`。有签名就发 `player_chat`，没有就发 `disguised_chat`。
+///
+/// `/say` and `/me`. A signature goes out as `player_chat`; otherwise this sends `disguised_chat`.
+fn publish_command_chat(
+    region: &mut Region,
+    sender: PlayerId,
+    argument: &str,
+    rendered: &str,
+    chat_type: i32,
+    target: Option<&Component>,
+) {
+    let signed = crate::secure_chat::take_argument(region, sender, argument);
+    let name = Component::text(player_name(region, sender));
+    let unsigned = signed
+        .as_ref()
+        .filter(|message| message.content != rendered)
+        .map(|_| Component::text(rendered));
+    if signed
+        .as_ref()
+        .is_some_and(|message| message.signature.is_some())
+    {
+        crate::secure_chat::broadcast_signed(
+            region,
+            signed.as_ref().expect("checked"),
+            chat_type,
+            &name,
+            target,
+            unsigned.as_ref(),
+        );
+        return;
+    }
+    let message = Component::text(rendered);
+    broadcast_chat(region, sender, &message, chat_type, target);
 }
 
 fn broadcast_chat(
@@ -368,13 +432,60 @@ fn broadcast_chat(
     target: Option<&Component>,
 ) {
     let name = Component::text(player_name(region, sender));
-    let frames = encode_frames(&DisguisedChat {
-        message,
-        chat_type,
-        name: &name,
-        target_name: target,
-    });
-    region.links.broadcast(&frames);
+    let ids: Vec<PlayerId> = region
+        .players
+        .iter()
+        .filter(|(_, player)| player.client.chat_visibility == ChatVisibility::Full)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        region.links.send(
+            id,
+            &DisguisedChat {
+                message,
+                chat_type,
+                name: &name,
+                target_name: target,
+            },
+        );
+    }
+}
+
+struct DirectChat<'a> {
+    rendered: &'a str,
+    unsigned: Option<&'a Component>,
+    chat_type: i32,
+    name: &'a Component,
+    target: Option<&'a Component>,
+}
+
+fn deliver_one(
+    region: &mut Region,
+    to: PlayerId,
+    signed: Option<&crate::secure_chat::SignedMessage>,
+    chat: &DirectChat<'_>,
+) {
+    if signed.is_some_and(|message| message.signature.is_some()) {
+        crate::secure_chat::send_signed_to(
+            region,
+            to,
+            signed.expect("checked"),
+            chat.chat_type,
+            chat.name,
+            chat.target,
+            chat.unsigned,
+        );
+        return;
+    }
+    let visible = region
+        .players
+        .get(&to)
+        .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Full);
+    if !visible {
+        return;
+    }
+    let message = Component::text(chat.rendered);
+    send_chat(region, to, &message, chat.chat_type, chat.name, chat.target);
 }
 
 fn send_chat(

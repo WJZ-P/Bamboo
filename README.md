@@ -137,6 +137,19 @@ WebView2 的渲染进程不算在内。
   配置是 `ServerConfig` 里的 `forwarding`（`Off`、`Legacy`、`Modern`）和 `forwarding_secret`；
   `Modern` 没有密钥时启动会退回 `Off`，桌面端的设置页里也能改。
 - 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。
+  离线模式不签名：未签名的玩家聊天仍发 `disguised_chat`（官方离线服发的是没有签名的 `player_chat`），
+  控制台日志是 `<名字> 消息`，没有官方的 `[Not Secure]` 前缀。
+  `enforce-secure-profile` 默认 true，但只在 `online_mode` 打开、并且连接任务已经从 session server
+  同源的 `publickeys` 接口拿到至少一把 RSA 公钥时才生效（官方是发现文档里的 `getPublicKeys`，正式环境是
+  `https://api.minecraftservices.com/publickeys`；session host 不是 `sessionserver.mojang.com` 时改问同一个源，
+  这样探针不访问外网）。生效时 `login` 和状态 JSON 的 `enforcesSecureChat` 为 true。
+  `chat_session_update` 用 `SHA1withRSA` 验玩家公钥（过期时间、公钥 DER、Mojang 的签名必须属于这名玩家），
+  失败按官方翻译键断开。验过之后广播只有 `INITIALIZE_CHAT` 的 `player_info_update`。
+  签名聊天和带 `message` 参数的签名命令（`/say`、`/me`、`/msg`）走消息链和 `LastSeenMessages`：
+  链断了、签名错了、时间倒退只给发送者发红色系统消息；已读窗口不合法则断开。
+  合法的签名消息按接收者打包成 `player_chat`，对方客户端能验过。
+  取公钥失败只试一次，不按官方 `RetryableFetch` 重试，也不每 24 小时刷新，失败时安全聊天保持关闭、服务器照常开。
+  没有聊天过滤和举报。`delete_chat` 的编码在，原版专用服务器不会发，这里也不发。
 - 网络压缩：登录末尾告诉客户端阈值（默认 256，负值关闭），之后两个方向都按官方格式收发压缩帧，
   小于阈值的包原样发。压缩只在连接任务里做，世界线程交出的帧本身不变。
 - 正版验证和加密（`online_mode`，默认关闭）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
@@ -342,7 +355,7 @@ WebView2 的渲染进程不算在内。
   不记统计、不发配方音效、不触发进度。有限合成（`limitedCrafting`）没做，默认和官方一样是关的。
 - 正版验证的限制：`online_mode` 默认关闭，命令行版用的是默认配置，桌面端的设置页里可以打开。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
-  没有玩家公钥和聊天签名，开了正版验证的聊天也是不签名的。
+  正版验证打开且公钥取到了之后，聊天按上面一节签名。公钥一次没取到就不再试，安全聊天保持关闭。
   RSA 解密用的 `rsa` crate 有 RUSTSEC-2023-0071（Marvin 计时侧信道），上游还没有修好的版本，
   Bamboo 用 `decrypt_blinded` 做盲化缓解，详见 `crates/mc-bamboo-auth/src/keypair.rs` 的注释。
 

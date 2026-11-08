@@ -27,6 +27,10 @@ pub struct PlayerInfoEntry<'a> {
     pub display_name: Option<&'a Component>,
     pub list_order: i32,
     pub show_hat: bool,
+    /// 只有 `INITIALIZE_CHAT` 会写。没有会话时是一个 `false`。
+    ///
+    /// Written only for `INITIALIZE_CHAT`. Absence is a single `false`.
+    pub chat_session: Option<super::ChatSessionView<'a>>,
 }
 
 impl PlayerInfoEntry<'_> {
@@ -37,8 +41,7 @@ impl PlayerInfoEntry<'_> {
             write_profile_properties(out, self.properties);
         }
         if actions & PlayerInfoUpdate::INITIALIZE_CHAT != 0 {
-            // 聊天会话。离线模式没有。
-            write_bool(out, false);
+            super::write_chat_session(out, self.chat_session);
         }
         if actions & PlayerInfoUpdate::UPDATE_GAME_MODE != 0 {
             write_varint(out, self.game_mode as i32);
@@ -138,6 +141,7 @@ mod tests {
             display_name: None,
             list_order: 0,
             show_hat: true,
+            chat_session: None,
         }
     }
 

@@ -46,10 +46,12 @@ mod movement;
 mod player;
 mod player_grid;
 mod region;
+mod secure_chat;
 mod sign;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use menu::replay::{Replay, ReplayShape, Snapshot};
+pub use secure_chat::ServiceProfileKeys;
 pub use world::{World, WorldConfig};

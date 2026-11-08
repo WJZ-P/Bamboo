@@ -68,6 +68,16 @@ pub struct ServerConfig {
     pub auth_connect_timeout: Duration,
     /// 等 session server 吐下一段字节的时限，对应 authlib `MinecraftClient.READ_TIMEOUT_MS`。
     pub auth_read_timeout: Duration,
+    /// 正版玩家的聊天必须带 Mojang 签过的公钥，对应官方的 `enforce-secure-profile`。
+    ///
+    /// 默认打开。没开正版验证、或者服务公钥还没取到时不生效，和官方
+    /// `DedicatedServer.enforceSecureProfile` 一样。
+    ///
+    /// Signed chat from online-mode players, matching official `enforce-secure-profile`.
+    ///
+    /// On by default. It does nothing until online mode is on and the service keys have been
+    /// fetched, matching `DedicatedServer.enforceSecureProfile`.
+    pub enforce_secure_profile: bool,
     /// 玩家信息由谁提供。
     pub forwarding: ForwardingMode,
     /// Velocity 现代转发用的签名密钥，和代理的 `forwarding.secret` 文件内容相同。
@@ -92,6 +102,7 @@ impl Default for ServerConfig {
             session_server_url: SESSION_SERVER_URL.to_owned(),
             auth_connect_timeout: CONNECT_TIMEOUT,
             auth_read_timeout: READ_TIMEOUT,
+            enforce_secure_profile: true,
             forwarding: ForwardingMode::Off,
             forwarding_secret: String::new(),
         }

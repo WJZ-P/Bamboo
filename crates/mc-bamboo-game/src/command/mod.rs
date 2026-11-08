@@ -24,12 +24,13 @@ use mc_bamboo_command::{
 };
 use mc_bamboo_protocol::packet::play::{
     ArgumentNode, ArgumentProperties, CommandNode, CommandNodeKind, CommandSuggestions,
-    CommandTree, EntityEvent, PERMISSION_LEVEL_ALL, StringProperty, Suggestion,
+    CommandTree, EntityEvent, PERMISSION_LEVEL_ALL, SignedCommand, StringProperty, Suggestion,
+    SystemChat,
 };
 
 use crate::{
     chat, command::feedback::CommandFail, global::Global, inbound::PlayerId, links::Links,
-    region::Region,
+    region::Region, secure_chat,
 };
 
 /// 一个可执行节点对应的函数。下标是命令树节点的 ID。
@@ -75,26 +76,61 @@ pub(crate) fn send_session(links: &mut Links, id: PlayerId, level: u8, entity_id
     );
 }
 
-/// 官方 `chat_command` / `chat_command_signed`。签名在解码时已经丢掉。
+/// 官方 `chat_command` / `chat_command_signed`。
 ///
-/// Official `chat_command` / `chat_command_signed`. The signature was dropped while decoding.
-pub(crate) fn on_command(global: &mut Global, region: &mut Region, id: PlayerId, command: &str) {
+/// Official `chat_command` / `chat_command_signed`.
+pub(crate) fn on_command(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    command: &str,
+    signed: Option<&SignedCommand>,
+) {
+    if let Some(signed) = signed
+        && !secure_chat::apply_last_seen(region, id, &signed.last_seen)
+    {
+        return;
+    }
     if chat::reject_illegal_command(region, id, command) {
         return;
     }
     let level = level_of(region, id);
     match commands().graph.parse(command, level) {
         Ok(parsed) => {
-            let action = commands()
-                .actions
-                .get(parsed.action)
-                .and_then(|action| *action);
-            if let Some(action) = action {
-                if let Err(failure) = action(global, region, id, &parsed) {
-                    feedback::report(region, id, command, &failure);
-                }
+            if signed.is_none()
+                && secure_chat::enforces(region)
+                && secure_chat::has_signable_argument(&parsed.arguments)
+            {
+                let content = mc_bamboo_protocol::text::Component::translate(
+                    "chat.disabled.invalid_command_signature",
+                    [],
+                )
+                .color(mc_bamboo_protocol::text::Color::Red);
+                region.links.send(
+                    id,
+                    &SystemChat {
+                        content: &content,
+                        overlay: false,
+                    },
+                );
+            } else if signed
+                .is_some_and(|signed| !secure_chat::collect_command(region, id, &parsed, signed))
+            {
+                // 签名对不上时系统消息已经发出去了，命令不执行。
+                //
+                // A signature mismatch already sent the system message. The command does not run.
             } else {
-                feedback::report(region, id, command, &feedback::fail("command.failed"));
+                let action = commands()
+                    .actions
+                    .get(parsed.action)
+                    .and_then(|action| *action);
+                if let Some(action) = action {
+                    if let Err(failure) = action(global, region, id, &parsed) {
+                        feedback::report(region, id, command, &failure);
+                    }
+                } else {
+                    feedback::report(region, id, command, &feedback::fail("command.failed"));
+                }
             }
         }
         Err(failure) => {
@@ -342,6 +378,7 @@ mod tests {
             &mut region,
             id,
             &format!("setblock 8 {y} 8 stone"),
+            None,
         );
         assert_eq!(
             region.chunks.block(BlockPos::new(8, y, 8)),
@@ -356,10 +393,10 @@ mod tests {
             .clock_named_mut("minecraft:overworld")
             .expect("overworld clock")
             .partial_tick = 0.5;
-        on_command(&mut global, &mut region, id, "time set 6000");
+        on_command(&mut global, &mut region, id, "time set 6000", None);
         assert_eq!(global.clock().total_ticks, 6000);
         assert_eq!(global.clock().partial_tick, 0.5);
-        on_command(&mut global, &mut region, id, "time set 1000");
+        on_command(&mut global, &mut region, id, "time set 1000", None);
         assert_eq!(global.clock().total_ticks, 1000);
         assert_eq!(global.clock().partial_tick, 0.0);
     }
@@ -367,9 +404,9 @@ mod tests {
     #[test]
     fn gamemode_survival_clears_creative_and_give_adds_stone() {
         let (mut global, mut region, id) = world_with("Kitten", 2);
-        on_command(&mut global, &mut region, id, "gamemode survival");
+        on_command(&mut global, &mut region, id, "gamemode survival", None);
         assert_eq!(region.players[&id].game_mode, GameMode::Survival);
-        on_command(&mut global, &mut region, id, "give Kitten stone 3");
+        on_command(&mut global, &mut region, id, "give Kitten stone 3", None);
         let count: i32 = region.players[&id]
             .inventory
             .slots
