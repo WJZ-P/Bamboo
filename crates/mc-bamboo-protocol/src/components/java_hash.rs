@@ -44,34 +44,70 @@ pub(crate) fn iteration_order(keys: &[String]) -> Vec<usize> {
 /// 把复合标签的键按「当前顺序就是 `put` 顺序」重排成 `HashMap` 的遍历顺序。
 ///
 /// 嵌套的复合标签同样处理。列表保持原顺序，因为 `ListTag` 是 `ArrayList`。
+/// 嵌套走堆上的栈：512 层是合法的 NBT，不能靠调用栈。
 ///
 /// Reorder a compound as if its current key order were the `put` order.
 ///
 /// Nested compounds are reordered the same way. Lists stay put because `ListTag`
-/// is an `ArrayList`.
+/// is an `ArrayList`. Nesting uses a heap stack: 512 levels are legal NBT and
+/// must not use the call stack.
 pub(crate) fn hash_order(tag: Tag) -> Tag {
-    match tag {
-        Tag::Compound(entries) => {
-            let entries: Vec<(String, Tag)> = entries
-                .into_iter()
-                .map(|(key, value)| (key, hash_order(value)))
-                .collect();
-            let order = iteration_order(
-                &entries
-                    .iter()
-                    .map(|(key, _)| key.clone())
-                    .collect::<Vec<_>>(),
-            );
-            Tag::Compound(
-                order
-                    .into_iter()
-                    .map(|index| entries[index].clone())
-                    .collect(),
-            )
-        }
-        Tag::List(items) => Tag::List(items.into_iter().map(hash_order).collect()),
-        other => other,
+    enum Job {
+        Enter(Tag),
+        FinishCompound(Vec<String>),
+        FinishList(usize),
     }
+
+    let mut jobs = vec![Job::Enter(tag)];
+    let mut results = Vec::new();
+    while let Some(job) = jobs.pop() {
+        match job {
+            Job::Enter(Tag::Compound(entries)) => {
+                let mut keys = Vec::with_capacity(entries.len());
+                let mut values = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    keys.push(key);
+                    values.push(value);
+                }
+                jobs.push(Job::FinishCompound(keys));
+                for value in values.into_iter().rev() {
+                    jobs.push(Job::Enter(value));
+                }
+            }
+            Job::Enter(Tag::List(items)) => {
+                let count = items.len();
+                jobs.push(Job::FinishList(count));
+                for item in items.into_iter().rev() {
+                    jobs.push(Job::Enter(item));
+                }
+            }
+            Job::Enter(other) => results.push(other),
+            Job::FinishCompound(keys) => {
+                let start = results.len() - keys.len();
+                let children: Vec<Tag> = results.drain(start..).collect();
+                let entries: Vec<(String, Tag)> = keys.into_iter().zip(children).collect();
+                let order = iteration_order(
+                    &entries
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let mut sources: Vec<Option<(String, Tag)>> =
+                    entries.into_iter().map(Some).collect();
+                let mut ordered = Vec::with_capacity(sources.len());
+                for index in order {
+                    ordered.push(sources[index].take().expect("each key is visited once"));
+                }
+                results.push(Tag::Compound(ordered));
+            }
+            Job::FinishList(count) => {
+                let start = results.len() - count;
+                let children = results.drain(start..).collect();
+                results.push(Tag::List(children));
+            }
+        }
+    }
+    results.pop().expect("hash order produces one tag")
 }
 
 #[derive(Default)]

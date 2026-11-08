@@ -287,4 +287,37 @@ fn creative_slot_nesting_stays_on_a_1mb_stack() {
         )),
         Slot::Rejected
     );
+
+    // 锁里的 `custom_data` 会整棵重排再写成 SNBT。总深度 512 仍是合法 NBT。
+    //
+    // A lock's `custom_data` is reordered and written as SNBT. A total depth of 512
+    // is still legal NBT.
+    assert_eq!(
+        decode_on_1mb(creative(
+            kinds::LOCK,
+            &nbt_bytes(lock_custom_data(MAX_DEPTH as usize))
+        )),
+        Slot::Accepted
+    );
+    assert_eq!(
+        decode_on_1mb(creative(
+            kinds::LOCK,
+            &nbt_bytes(lock_custom_data(MAX_DEPTH as usize + 1))
+        )),
+        Slot::Rejected
+    );
+}
+
+/// 锁谓词，里面一份 `custom_data`。`levels` 是从根数起的复合标签层数。
+///
+/// A lock predicate whose body is `custom_data`. `levels` counts compound layers
+/// from the root.
+fn lock_custom_data(levels: usize) -> Tag {
+    Tag::Compound(vec![(
+        "predicates".to_owned(),
+        Tag::Compound(vec![(
+            "minecraft:custom_data".to_owned(),
+            compounds(levels - 2),
+        )]),
+    )])
 }
