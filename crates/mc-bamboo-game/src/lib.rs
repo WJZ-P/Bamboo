@@ -31,6 +31,7 @@ mod chunk_encoding;
 mod chunk_tracking;
 mod command;
 mod container;
+mod durability;
 mod entity_sync;
 mod entity_tracking;
 mod global;

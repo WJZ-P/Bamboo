@@ -11,6 +11,7 @@ pub mod crafting_remainders;
 pub mod entity_types;
 pub mod heightmaps;
 pub mod item_components;
+pub mod item_damage;
 pub mod items;
 pub mod jukebox_songs;
 pub mod light;

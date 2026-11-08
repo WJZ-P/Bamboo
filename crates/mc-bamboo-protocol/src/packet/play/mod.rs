@@ -492,6 +492,24 @@ mod tests {
     }
 
     #[test]
+    fn change_game_mode_and_entity_event_match_official_layout() {
+        assert_eq!(
+            frame(&GameEvent {
+                event: GameEvent::CHANGE_GAME_MODE,
+                param: 0.0,
+            }),
+            hex("06 27 03 00 00 00 00")
+        );
+        assert_eq!(
+            frame(&EntityEvent {
+                entity_id: 7,
+                event: 47
+            }),
+            hex("06 22 00 00 00 07 2f")
+        );
+    }
+
+    #[test]
     fn disconnect_reason_is_an_nbt_string() {
         let reason = Component::text("hi");
         assert_eq!(body(&Disconnect { reason: &reason }), [8, 0, 2, b'h', b'i']);

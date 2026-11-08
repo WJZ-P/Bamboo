@@ -264,6 +264,9 @@ impl World {
                     chat::detect_chat_rate_spam(region, player);
                 }
             }
+            // 聊天命令和建议在上面处理过了，这里只是让匹配穷尽。
+            //
+            // Chat commands and suggestions are handled above. This arm only makes the match exhaustive.
             PlayRequest::ChatCommand { .. } | PlayRequest::CommandSuggestion { .. } => {}
             PlayRequest::ClientCommand { action } => {
                 chat::on_client_command(region, player, action);

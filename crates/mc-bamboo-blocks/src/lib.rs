@@ -18,6 +18,7 @@ mod composter;
 pub mod container;
 pub mod context;
 pub mod dispenser;
+pub mod durability;
 pub mod entity;
 pub mod fluid;
 pub mod hopper;

@@ -74,6 +74,10 @@ impl Behaviour for Campfire {
             // 官方的 `levelEvent(null, 1009, ...)` 在灭掉之前。
             world.level_event(1009, ctx.clicked_pos(), 0);
             world.set_block_and_update(ctx.clicked_pos(), state.with(LIT, false));
+            // `hurtAndBreak(1)` 在熄灭之后。1009 音效没有随机数。
+            //
+            // `hurtAndBreak(1)` happens after the douse. Level event 1009 draws nothing.
+            crate::durability::hurt_hand(world, ctx.hand, 1);
             return InteractionResult::Success;
         }
         InteractionResult::TryEmptyHandInteraction
