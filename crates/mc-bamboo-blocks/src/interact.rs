@@ -43,7 +43,7 @@ impl InteractionResult {
 }
 
 /// 一次操作的结果。世界的变化已经通过 [`Level::write_block`] 写进去了。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
     pub result: InteractionResult,
     /// 这次点击走了方块的 `useWithoutItem`。容器就是在这里打开的，调用方要接着接线。

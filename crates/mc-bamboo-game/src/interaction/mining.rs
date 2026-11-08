@@ -407,6 +407,7 @@ fn tick_destroying(region: &mut Region, snapshot: &mut Snapshot) {
     send_level_event(
         region,
         None,
+        pos,
         &LevelEvent {
             event,
             pos,
