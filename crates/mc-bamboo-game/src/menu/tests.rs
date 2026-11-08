@@ -160,7 +160,7 @@ fn spawn(region: &mut Region, id: PlayerId, x: f64, z: f64) {
         ClientInformation::default(),
         position,
     );
-    region.players.insert(id, player);
+    region.insert_player(player);
 }
 
 /// 护甲槽在菜单里是 5 到 8，官方 `Inventory` 里是 39 到 36，顺序相反。
@@ -834,12 +834,10 @@ fn walking_away_closes_the_menu() {
     fixture.open(pos);
     fixture.take_frames();
 
-    fixture
-        .region
-        .players
-        .get_mut(&fixture.id)
-        .unwrap()
-        .position = Vec3::new(100.0, f64::from(flat::surface_y()), 100.0);
+    fixture.region.move_player(
+        fixture.id,
+        Vec3::new(100.0, f64::from(flat::surface_y()), 100.0),
+    );
     tick(&mut fixture.region);
 
     assert!(!fixture.region.menus.contains_key(&fixture.id));

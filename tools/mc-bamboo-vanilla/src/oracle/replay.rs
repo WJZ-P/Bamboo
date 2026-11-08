@@ -733,7 +733,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::LevelEvent { .. }
             | Effect::NoteBlockPlayed { .. }
             // 方块事件只发给客户端播放动画，假世界没有客户端。
-            | Effect::BlockEvent { .. } => None,
+            | Effect::BlockEvent { .. }
+            // 堆肥的粒子和声音，题里不比较。
+            | Effect::ComposterFill { .. } => None,
         })
         .collect()
 }
@@ -777,6 +779,15 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
                 pos.z,
                 data,
                 except_initiator,
+            )),
+            // `ComposterBlock` 的 `levelEvent(1500)`。官方 `except` 是 null。
+            Effect::ComposterFill { pos, success } => events.push(LevelPlay(
+                1500,
+                pos.x,
+                pos.y,
+                pos.z,
+                i32::from(success),
+                false,
             )),
             Effect::Sound {
                 sound,

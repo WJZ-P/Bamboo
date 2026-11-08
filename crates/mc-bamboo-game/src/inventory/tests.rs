@@ -1,8 +1,9 @@
 //! 物品栏的测试：驱动 `World::tick`，看客户端收到的帧。
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{blocks, items, packets::play::clientbound};
+use mc_bamboo_data::{blocks, items, packets::play::clientbound, registries::block_entity_type};
 use mc_bamboo_protocol::{
+    components::{ComponentPatch, PatchEntry},
     item::ItemStack,
     packet::play::{GameMode, PlayRequest, PlayerActionKind},
 };
@@ -989,6 +990,182 @@ fn a_full_inventory_drops_the_filled_bucket_like_the_game() {
         inventory.slots[slot] = ItemStack::new(items::STONE, 1);
     }
     assert_eq!(inventory.add_filled(items::WATER_BUCKET), None);
+}
+
+#[test]
+fn clone_overrides_swap_in_the_vanilla_item() {
+    let cases = [
+        (blocks::WHEAT, items::WHEAT_SEEDS),
+        (blocks::CARROTS, items::CARROT),
+        (blocks::POTATOES, items::POTATO),
+        (blocks::BEETROOTS, items::BEETROOT_SEEDS),
+        (blocks::TORCHFLOWER_CROP, items::TORCHFLOWER_SEEDS),
+        (blocks::CAVE_VINES, items::GLOW_BERRIES),
+        (blocks::CAVE_VINES_PLANT, items::GLOW_BERRIES),
+        (blocks::KELP_PLANT, items::KELP),
+        (blocks::WEEPING_VINES_PLANT, items::WEEPING_VINES),
+        (blocks::TWISTING_VINES_PLANT, items::TWISTING_VINES),
+        (blocks::SWEET_BERRY_BUSH, items::SWEET_BERRIES),
+        (blocks::NETHER_WART, items::NETHER_WART),
+        (blocks::BAMBOO_SAPLING, items::BAMBOO),
+        (blocks::BIG_DRIPLEAF_STEM, items::BIG_DRIPLEAF),
+        (blocks::TALL_SEAGRASS, items::SEAGRASS),
+        (blocks::FLOWER_POT, items::FLOWER_POT),
+        (blocks::POTTED_DANDELION, items::DANDELION),
+        (blocks::POTTED_OAK_SAPLING, items::OAK_SAPLING),
+        (blocks::ATTACHED_PUMPKIN_STEM, items::PUMPKIN_SEEDS),
+        (blocks::ATTACHED_MELON_STEM, items::MELON_SEEDS),
+        (blocks::CANDLE_CAKE, items::CAKE),
+        (blocks::BLACK_CANDLE_CAKE, items::CAKE),
+    ];
+    for (state, item) in cases {
+        let picked = pick_clone(state, false);
+        assert_eq!(picked, ItemStack::new(item, 1), "state {state}");
+    }
+}
+
+#[test]
+fn piston_heads_clone_as_the_piston_they_belong_to() {
+    let sticky = mc_bamboo_blocks::state::BlockState(blocks::PISTON_HEAD)
+        .with(
+            mc_bamboo_blocks::state::PISTON_TYPE,
+            mc_bamboo_blocks::state::PistonType::Sticky,
+        )
+        .0;
+    let normal = mc_bamboo_blocks::state::BlockState(blocks::PISTON_HEAD)
+        .with(
+            mc_bamboo_blocks::state::PISTON_TYPE,
+            mc_bamboo_blocks::state::PistonType::Normal,
+        )
+        .0;
+    assert_eq!(
+        pick_clone(sticky, false),
+        ItemStack::new(items::STICKY_PISTON, 1)
+    );
+    assert_eq!(pick_clone(normal, false), ItemStack::new(items::PISTON, 1));
+}
+
+#[test]
+fn blocks_whose_clone_stack_is_empty_are_not_picked() {
+    for state in [
+        blocks::MOVING_PISTON,
+        blocks::NETHER_PORTAL,
+        blocks::END_PORTAL,
+        blocks::END_GATEWAY,
+        blocks::FROSTED_ICE,
+    ] {
+        let (mut server, client) = settled();
+        set_block(&mut server, ABOVE, state);
+        pick(&server, &client, ABOVE);
+        server.tick();
+        assert!(
+            client.take_frames().is_empty(),
+            "state {state} should not be picked"
+        );
+        assert!(inventory(&server, &client).slots[36].is_empty());
+    }
+}
+
+#[test]
+fn light_and_test_blocks_carry_their_state_without_ctrl() {
+    let light = mc_bamboo_blocks::state::BlockState(blocks::LIGHT)
+        .with(mc_bamboo_blocks::state::LEVEL, 3)
+        .with(mc_bamboo_blocks::state::WATERLOGGED, true)
+        .0;
+    let picked = pick_clone(light, false);
+    assert_eq!(picked.item, items::LIGHT);
+    assert_eq!(
+        block_state_component(&picked),
+        Some(vec![("level".to_owned(), "3".to_owned())])
+    );
+
+    let test_block = mc_bamboo_blocks::state::BlockState(blocks::TEST_BLOCK)
+        .with(
+            mc_bamboo_blocks::state::TEST_BLOCK_MODE,
+            mc_bamboo_blocks::state::TestBlockMode::Fail,
+        )
+        .0;
+    let picked = pick_clone(test_block, false);
+    assert_eq!(picked.item, items::TEST_BLOCK);
+    assert_eq!(
+        block_state_component(&picked),
+        Some(vec![("mode".to_owned(), "fail".to_owned())])
+    );
+}
+
+#[test]
+fn beehives_carry_honey_level_only_when_data_is_included() {
+    let nest = mc_bamboo_blocks::state::BlockState(blocks::BEE_NEST)
+        .with(mc_bamboo_blocks::state::LEVEL_HONEY, 4)
+        .0;
+    let plain = pick_clone(nest, false);
+    assert_eq!(plain, ItemStack::new(items::BEE_NEST, 1));
+
+    let with_data = pick_clone(nest, true);
+    assert_eq!(with_data.item, items::BEE_NEST);
+    assert_eq!(
+        block_state_component(&with_data),
+        Some(vec![("honey_level".to_owned(), "4".to_owned())])
+    );
+
+    // 蜂蜜是 0 也写进组件，官方 `with(HONEY_LEVEL, 0)` 并不省略。
+    let empty = pick_clone(blocks::BEEHIVE, true);
+    assert_eq!(
+        block_state_component(&empty),
+        Some(vec![("honey_level".to_owned(), "0".to_owned())])
+    );
+}
+
+#[test]
+fn copper_statues_carry_pose_and_any_stored_components() {
+    let (mut server, client) = settled();
+    let state = mc_bamboo_blocks::state::BlockState(blocks::WAXED_OXIDIZED_COPPER_GOLEM_STATUE)
+        .with(
+            mc_bamboo_blocks::state::COPPER_GOLEM_POSE,
+            mc_bamboo_blocks::state::CopperGolemPose::Sitting,
+        )
+        .0;
+    set_block(&mut server, ABOVE, state);
+    let name = ComponentValue::CustomName(mc_bamboo_protocol::text::Component::text("Ada"));
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        data_component_type::CUSTOM_NAME,
+        PatchEntry::Set(name.clone()),
+    );
+    server.region().block_items.insert(ABOVE, patch);
+
+    pick(&server, &client, ABOVE);
+    server.tick();
+
+    let picked = inventory(&server, &client).slots[36].clone();
+    assert_eq!(picked.item, items::WAXED_OXIDIZED_COPPER_GOLEM_STATUE);
+    assert_eq!(
+        picked.patch().get(data_component_type::CUSTOM_NAME),
+        Some(&name)
+    );
+    assert_eq!(
+        block_state_component(&picked),
+        Some(vec![("copper_golem_pose".to_owned(), "sitting".to_owned())])
+    );
+}
+
+fn pick_clone(state: u32, include_data: bool) -> ItemStack {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, state);
+    if include_data {
+        pick_with_data(&server, &client, ABOVE);
+    } else {
+        pick(&server, &client, ABOVE);
+    }
+    server.tick();
+    inventory(&server, &client).slots[HOTBAR_START].clone()
+}
+
+fn block_state_component(stack: &ItemStack) -> Option<Vec<(String, String)>> {
+    match stack.patch().get(data_component_type::BLOCK_STATE) {
+        Some(ComponentValue::BlockState(properties)) => Some(properties.clone()),
+        _ => None,
+    }
 }
 
 #[test]

@@ -231,7 +231,7 @@ impl BlockEntities {
 }
 
 /// `BlockEventData`：`level.blockEvent` 排进队列的一项。方块是注册表 ID。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockEvent {
     pub pos: BlockPos,
     pub block: usize,
@@ -241,24 +241,36 @@ pub struct BlockEvent {
 
 /// `Level.blockEvents`：官方的 `LinkedHashSet`，同一项只排一次。
 ///
+/// 队列管顺序，集合管查重，两边始终是同一批事件。出队以后集合里也删掉，
+/// 所以和官方一样，处理过的事件同一轮里还能再排进来。
+///
 /// 官方在方块所在区块没有加载时把事件往后挪。这个世界里队列只碰得到的方块，
 /// 不需要重排，见 `ServerLevel.runBlockEvents`。
+///
+/// Vanilla's `LinkedHashSet`: an event is queued only once. The deque keeps the order and the
+/// set answers the duplicate check; both always hold the same events. Popping removes the event
+/// from the set too, so, as in vanilla, a processed event can be queued again in the same round.
+/// Vanilla postpones events in unloaded chunks; this queue only touches reachable blocks, so
+/// nothing is postponed.
 #[derive(Debug, Default)]
 pub struct BlockEvents {
     queue: VecDeque<BlockEvent>,
+    queued: HashSet<BlockEvent>,
 }
 
 impl BlockEvents {
     /// `ServerLevel.blockEvent`。
     pub fn push(&mut self, event: BlockEvent) {
-        if !self.queue.contains(&event) {
+        if self.queued.insert(event) {
             self.queue.push_back(event);
         }
     }
 
     /// 按排队的顺序取出一项。
     pub fn pop(&mut self) -> Option<BlockEvent> {
-        self.queue.pop_front()
+        let event = self.queue.pop_front()?;
+        self.queued.remove(&event);
+        Some(event)
     }
 }
 
@@ -378,5 +390,39 @@ pub(crate) fn keeps_block_entity(state: BlockState, old: BlockState) -> bool {
             old.is_tagged(block_tags::COPPER_GOLEM_STATUES)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(x: i32, param_b: i32) -> BlockEvent {
+        BlockEvent {
+            pos: BlockPos::new(x, 64, 0),
+            block: 1,
+            param_a: 0,
+            param_b,
+        }
+    }
+
+    #[test]
+    fn block_events_keep_order_and_skip_queued_duplicates() {
+        let mut events = BlockEvents::default();
+        events.push(event(1, 0));
+        events.push(event(2, 0));
+        events.push(event(1, 0));
+        // 参数不同就是另一项。
+        // Different parameters make a different event.
+        events.push(event(1, 3));
+
+        assert_eq!(events.pop(), Some(event(1, 0)));
+        // 出队以后同一项可以再排进来，排在最后。
+        // Once popped, the same event can be queued again, at the back.
+        events.push(event(1, 0));
+        assert_eq!(events.pop(), Some(event(2, 0)));
+        assert_eq!(events.pop(), Some(event(1, 3)));
+        assert_eq!(events.pop(), Some(event(1, 0)));
+        assert_eq!(events.pop(), None);
     }
 }

@@ -793,7 +793,7 @@ fn nan_position_kicks_and_later_requests_are_ignored() {
     assert_eq!(client.take_frames(), [expected]);
     assert!(client.is_closed());
     // 被踢的玩家留到 `Leave`，请求和写入都不再有效果。
-    assert_eq!(server.player(&client).position.x, SPAWN_X);
+    assert_eq!(server.player(&client).position().x, SPAWN_X);
 
     server.leave(&client);
     server.tick();

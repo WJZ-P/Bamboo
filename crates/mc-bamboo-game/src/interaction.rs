@@ -13,9 +13,11 @@ pub(crate) use mining::tick_mining;
 
 use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_blocks::{Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult};
+use mc_bamboo_blocks::{
+    Actor, BlockHit, BlockState, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult,
+};
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{SOUND_EVENTS, items, registries::attribute_defaults, sounds};
+use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
 use mc_bamboo_protocol::{
     packet::play::{
         BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
@@ -42,6 +44,8 @@ const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
 const SIMULATION_DISTANCE: i32 = 10;
 /// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`：骨粉的粒子。
 const BONE_MEAL_EVENT: i32 = 1505;
+/// `LevelEvent.COMPOSTER_FILL`：堆肥桶收物品的粒子和声音。
+const COMPOSTER_FILL_EVENT: i32 = 1500;
 /// 骨粉事件的数据：粒子的数量。
 const BONE_MEAL_PARTICLES: i32 = 15;
 /// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
@@ -168,7 +172,7 @@ fn actor_of(player: &Player) -> Actor {
     };
     Actor {
         uuid: *player.uuid.as_bytes(),
-        position: player.position,
+        position: player.position(),
         yaw: player.yaw,
         head_yaw: player.head_yaw,
         pitch: player.pitch,
@@ -199,7 +203,7 @@ pub(crate) fn interaction_range(game_mode: GameMode) -> f64 {
 /// 玩家能不能够到这个方块。`blocks-inventory.md` 6.1。
 pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
     within_block_interaction_range(
-        player.position,
+        player.position(),
         player.eye_height(),
         interaction_range(player.game_mode),
         pos,
@@ -386,6 +390,16 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_sound(region, None, &packet);
             }
+            // `levelEvent(1500)`：客户端播堆肥的粒子和声音。升级了数据是 1，没升级是 0。
+            Effect::ComposterFill { pos, success } => {
+                let event = LevelEvent {
+                    event: COMPOSTER_FILL_EVENT,
+                    pos,
+                    data: i32::from(success),
+                    global: false,
+                };
+                send_level_event(region, None, pos, &event);
+            }
         }
     }
 }
@@ -398,11 +412,37 @@ fn send_level_event(
     event: &impl mc_bamboo_protocol::packet::ClientboundPacket,
 ) {
     let frames = encode_frames(event);
-    for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, pos) {
-            region.links.send_frames(player.id, &frames);
+    // 先从网格挑出附近的候选，再做和官方一样的距离判断。
+    // Pick nearby candidates from the grid, then apply the same distance check as vanilla.
+    let Region {
+        players,
+        player_grid,
+        links,
+        ..
+    } = region;
+    let x = f64::from(pos.x);
+    let z = f64::from(pos.z);
+    let mut sent = 0;
+    for id in player_grid.near(x, z, LEVEL_EVENT_RADIUS) {
+        if Some(id) != except
+            && players
+                .get(&id)
+                .is_some_and(|player| hears_level_event(player, pos))
+        {
+            links.send_frames(id, &frames);
+            sent += 1;
         }
     }
+    // 网格漏记了谁，这名玩家就会悄悄收不到包。测试构建里每次都和全量扫描对一遍。
+    // A player missing from the grid would silently miss packets, so debug builds compare against a full scan.
+    debug_assert_eq!(
+        sent,
+        players
+            .values()
+            .filter(|player| Some(player.id) != except && hears_level_event(player, pos))
+            .count(),
+        "player grid is out of sync with player positions"
+    );
 }
 
 /// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
@@ -429,7 +469,7 @@ fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
         if Some(player.id) == except {
             continue;
         }
-        let Vec3 { x, y, z } = player.position;
+        let Vec3 { x, y, z } = player.position();
         let dx = sound.x - x;
         let dy = sound.y - y;
         let dz = sound.z - z;
@@ -440,7 +480,7 @@ fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
 }
 
 pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
-    let Vec3 { x, y, z } = player.position;
+    let Vec3 { x, y, z } = player.position();
     let dx = f64::from(pos.x) - x;
     let dy = f64::from(pos.y) - y;
     let dz = f64::from(pos.z) - z;
@@ -525,6 +565,13 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
+    // 官方 `ServerPlayerGameMode.useItemOn` 在功能开关之后、物品 `useOn` 之前单独处理旁观者。
+    // 能打开的容器打开，传送门走目的地（这里没有别的维度和折跃出口，一律提示），其余直接放过，
+    // 不会因为 `can_place_on` 走到放置。
+    if player.game_mode == GameMode::Spectator {
+        spectator_use_item_on(region, id, packet);
+        return;
+    }
     let actor = actor_of(player);
     // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
     let held = player.inventory.held(packet.hand).clone();
@@ -560,6 +607,32 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         send_limit_hint(&mut region.links, id, packet);
     }
     swing(region, id, packet.hand, outcome.result);
+}
+
+/// 旁观者右键方块。`getMenuProvider` 非空就打开并 `CONSUME`；传送门无论找不找得到出口都 `CONSUME`
+/// （找不到时发 `spectator.cannot_teleport`）；其余 `PASS`，不调用物品的 `useOn`。
+fn spectator_use_item_on(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
+    if menu::open_block(region, id, packet.pos) {
+        swing(region, id, packet.hand, InteractionResult::Consume);
+        return;
+    }
+    let portal = region
+        .chunks
+        .block(packet.pos)
+        .is_some_and(|state| BlockState(state).is_a(BlockAncestor::Portal));
+    if portal {
+        let content = Component::translate("spectator.cannot_teleport", []).color(Color::Red);
+        region.links.send(
+            id,
+            &SystemChat {
+                content: &content,
+                overlay: true,
+            },
+        );
+        swing(region, id, packet.hand, InteractionResult::Consume);
+        return;
+    }
+    swing(region, id, packet.hand, InteractionResult::Pass);
 }
 
 /// `BlockHitResult`。点击点和官方解码时一样，是整数坐标加上 `f32` 的偏移。
@@ -624,6 +697,10 @@ pub(crate) fn on_use_item(
     }
     // 视线找水面用的是包里的朝向，不是上一次移动包的。
     movement::snap_rotation(player, yaw, pitch);
+    // 官方 `useItem` 对旁观者直接 `PASS`，对着空气也不会把睡莲、桶这类放出去。
+    if player.game_mode == GameMode::Spectator {
+        return;
+    }
     let actor = actor_of(player);
 
     let (mut level, ticks) = region.block_level();

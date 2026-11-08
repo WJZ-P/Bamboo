@@ -462,7 +462,7 @@ fn send_destroy_progress(region: &mut Region, breaker: i32, pos: BlockPos, progr
         if player.id.0 == breaker {
             continue;
         }
-        let Vec3 { x, y, z } = player.position;
+        let Vec3 { x, y, z } = player.position();
         let dx = f64::from(pos.x) - x;
         let dy = f64::from(pos.y) - y;
         let dz = f64::from(pos.z) - z;

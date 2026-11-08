@@ -137,7 +137,7 @@ impl Stage {
             position,
         );
         player.sync.seen_by.insert(WATCHER);
-        region.players.insert(STEVE, player);
+        region.insert_player(player);
 
         Self {
             region,
@@ -153,9 +153,9 @@ impl Stage {
     }
 
     fn shift(&mut self, dx: f64, dy: f64, dz: f64) {
-        let player = self.player();
-        let Vec3 { x, y, z } = player.position;
-        player.position = Vec3::new(x + dx, y + dy, z + dz);
+        let Vec3 { x, y, z } = self.player().position();
+        self.region
+            .move_player(STEVE, Vec3::new(x + dx, y + dy, z + dz));
     }
 
     /// 只跑 `send_changes`，和官方跑 `sendChanges` 的 trace 一样。
@@ -336,7 +336,7 @@ fn first_cycle_uses_a_linear_delta() {
     stage.player().on_ground = true;
     stage.player().sync.was_on_ground = true;
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.run(1);
 
     assert_eq!(
@@ -355,7 +355,7 @@ fn later_cycles_use_one_step_with_the_ticks_since_the_last_cycle() {
     stage.player().sync.was_on_ground = true;
     stage.skip_first_cycle();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.run(1);
 
     assert_eq!(
@@ -372,7 +372,7 @@ fn moving_and_turning_matches_official_bytes() {
     let mut stage = Stage::at(POSITION);
     stage.skip_first_cycle();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.player().pitch = -45.0;
     stage.run(1);
@@ -572,7 +572,7 @@ fn one_cycle_sends_movement_then_metadata_then_the_head() {
     let mut stage = Stage::at(POSITION);
     stage.skip_first_cycle();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.player().sync.shared_flags = ENTITY_FLAG_SPRINTING;
     stage.step();
@@ -635,7 +635,7 @@ fn sync_state_moves_on_while_nobody_watches() {
     let mut stage = Stage::at(POSITION);
     stage.player().sync.seen_by.clear();
 
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.run(4);
 
@@ -738,7 +738,7 @@ fn pairing_starts_from_what_was_last_sent_not_from_the_current_state() {
     stage.skip_first_cycle();
 
     // 这些变化还没进入周期。
-    stage.player().position = MOVED;
+    stage.region.move_player(STEVE, MOVED);
     stage.player().yaw = 90.0;
     stage.player().pitch = 45.0;
     stage.player().head_yaw = 90.0;

@@ -2433,6 +2433,165 @@ fn adventure_mode_cannot_break_a_block_outside_can_break() {
     );
 }
 
+fn set_spectator(server: &mut Harness, client: &Client) {
+    player_mut(server, client).game_mode = GameMode::Spectator;
+}
+
+#[test]
+fn spectator_can_place_on_does_not_place() {
+    let (mut server, client) = settled();
+    set_spectator(&mut server, &client);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::GRASS_BLOCK),
+    );
+
+    click_top(&server, &client, GROUND, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    assert_eq!(client.take_frames().last(), Some(&ack(1)));
+}
+
+#[test]
+fn spectator_opens_a_chest_instead_of_placing_while_sneaking() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::CHEST);
+    set_spectator(&mut server, &client);
+    press_shift(&mut server, &client);
+    // 潜行状态自己会同步一个包，先清掉，后面只看这次右键。
+    server.tick();
+    client.take_frames();
+    // 潜行加 `can_place_on` 在别的模式会跳过箱子、把方块放上去。旁观者先看菜单。
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::CHEST),
+    );
+
+    click_top(&server, &client, ABOVE, 1);
+    server.tick();
+
+    assert_eq!(block_at(&mut server, TWO_ABOVE), Some(blocks::AIR));
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert_eq!(
+        ids,
+        [
+            clientbound::OPEN_SCREEN,
+            clientbound::CONTAINER_SET_CONTENT,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_CHANGED_ACK,
+        ],
+        "frames: {ids:?}"
+    );
+    // `ChestBlockEntity.startOpen` 跳过旁观者：不计数，所以没有开盖的方块事件。
+    assert_eq!(
+        server
+            .region()
+            .containers
+            .get(&ABOVE)
+            .map_or(0, |entry| entry.open_count),
+        0
+    );
+}
+
+#[test]
+fn spectator_passes_a_blocked_chest_without_placing() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::CHEST);
+    // 上面是红石导体，官方 `ChestBlock.getMenuProvider` 返回 null。
+    set_block(&mut server, TWO_ABOVE, blocks::STONE);
+    set_spectator(&mut server, &client);
+    hold_stack(
+        &mut server,
+        &client,
+        with_component(items::STONE, kinds::CAN_PLACE_ON, blocks::CHEST),
+    );
+
+    let beside = ABOVE.relative(Direction::North);
+    server.request(
+        &client,
+        use_item_at(ABOVE, Direction::North, (0.5, 0.5, 0.0)),
+    );
+    server.tick();
+
+    assert_eq!(block_at(&mut server, beside), Some(blocks::AIR));
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(!ids.contains(&clientbound::OPEN_SCREEN), "frames: {ids:?}");
+    assert_eq!(ids.last(), Some(&clientbound::BLOCK_CHANGED_ACK));
+}
+
+#[test]
+fn spectator_portals_say_they_cannot_teleport() {
+    let (mut server, client) = settled();
+    set_spectator(&mut server, &client);
+    for portal in [
+        blocks::NETHER_PORTAL,
+        blocks::END_PORTAL,
+        blocks::END_GATEWAY,
+    ] {
+        set_block(&mut server, GROUND, portal);
+        hold_stack(
+            &mut server,
+            &client,
+            with_component(items::STONE, kinds::CAN_PLACE_ON, portal),
+        );
+
+        click_top(&server, &client, GROUND, 1);
+        server.tick();
+
+        assert_eq!(block_at(&mut server, GROUND), Some(portal));
+        assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+        let frames = client.take_frames();
+        let chat = frames
+            .iter()
+            .find(|frame| frame.id == clientbound::SYSTEM_CHAT)
+            .expect("传送失败要有快捷栏上方的提示");
+        assert!(
+            chat.body
+                .windows(b"spectator.cannot_teleport".len())
+                .any(|window| window == b"spectator.cannot_teleport"),
+            "portal {portal}"
+        );
+        assert_eq!(frames.last(), Some(&ack(1)));
+    }
+}
+
+#[test]
+fn spectator_use_item_does_not_place_a_lily_pad() {
+    let (mut server, client) = settled();
+    set_block(&mut server, GROUND, blocks::WATER);
+    move_player(&server, &client, 11.5, -59.0, 8.5);
+    set_spectator(&mut server, &client);
+    hold_stack(&mut server, &client, ItemStack::new(items::LILY_PAD, 1));
+    server.tick();
+    client.take_frames();
+
+    server.request(
+        &client,
+        PlayRequest::UseItem {
+            hand: Hand::Main,
+            sequence: 1,
+            yaw: 0.0,
+            pitch: 90.0,
+        },
+    );
+    server.tick();
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(
+        !ids.contains(&clientbound::SWING_ANIMATION),
+        "frames: {ids:?}"
+    );
+    assert!(
+        ids.contains(&clientbound::BLOCK_CHANGED_ACK),
+        "frames: {ids:?}"
+    );
+}
+
 #[test]
 fn adventure_mode_can_break_does_not_allow_placing() {
     let (mut server, client) = settled();

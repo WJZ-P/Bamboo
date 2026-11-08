@@ -21,12 +21,16 @@ pub fn any_matches(predicates: &[BlockPredicate], state: BlockState) -> bool {
 }
 
 /// 官方 `BlockPredicate.matches(BlockInWorld)`：方块、方块状态属性、方块实体 NBT。
+///
+/// 状态 ID 不在注册表里就没有方块，直接不匹配。不能当成空气，空气的方块 ID 正好是 0。
 pub fn matches(predicate: &BlockPredicate, state: BlockState) -> bool {
-    if let Some(blocks) = &predicate.blocks {
-        let block = block_id_of_state(state.0).unwrap_or_default() as i32;
-        if !blocks_match(blocks, block) {
-            return false;
-        }
+    let Some(block) = block_id_of_state(state.0) else {
+        return false;
+    };
+    if let Some(blocks) = &predicate.blocks
+        && !blocks_match(blocks, block as i32)
+    {
+        return false;
     }
     if let Some(properties) = &predicate.properties
         && !properties_match(properties, state)
@@ -90,9 +94,7 @@ fn property_matches(matcher: &PropertyMatcher, state: BlockState) -> bool {
 /// `true` 和 `false`；枚举属性按序列化名查表，再换成枚举常量的声明序号。
 fn parse_value(def: &PropertyDef, text: &str) -> Option<Value> {
     match def.kind {
-        PropertyKind::Integer { min, max } => text
-            .parse::<i32>()
-            .ok()
+        PropertyKind::Integer { min, max } => parse_java_int(text)
             .filter(|value| (min..=max).contains(value))
             .map(Value::Integer),
         PropertyKind::Boolean => match text {
@@ -105,6 +107,68 @@ fn parse_value(def: &PropertyDef, text: &str) -> Option<Value> {
             ordinals.get(index).map(|&ordinal| Value::Enum(ordinal))
         }
     }
+}
+
+/// OpenJDK 26.0.1 里 `Character.digit(codeUnit, 10) >= 0` 的基本多文种平面区间起点。
+///
+/// 每个区间连续 10 个码元，数值是 `码元 - 起点`。补充平面也有这样的区间，但
+/// `Integer.parseInt` 按 UTF-16 码元调用 `Character.digit(char, 10)`，代理项不是数字，
+/// 那些区间不在这里。
+const DECIMAL_DIGIT_ZERO: &[u16] = &[
+    0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6,
+    0x0D66, 0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80,
+    0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0,
+    0xFF10,
+];
+
+/// `Character.digit(codeUnit, 10)`。认不出来时返回 `None`，官方返回 `-1`。
+fn java_digit(unit: u16) -> Option<i32> {
+    DECIMAL_DIGIT_ZERO.iter().find_map(|&zero| {
+        let offset = unit.wrapping_sub(zero);
+        (offset < 10).then_some(i32::from(offset))
+    })
+}
+
+/// `Integer.parseInt`，进制固定 10。溢出、空串、多余字符都是 `None`。
+///
+/// 符号只认 ASCII 的 `+` 和 `-`。数字按 UTF-16 码元交给 [`java_digit`]，和官方
+/// `s.charAt` 再 `Character.digit(char, 10)` 一样。累加用负数，这样 `Integer.MIN_VALUE` 放得下。
+fn parse_java_int(text: &str) -> Option<i32> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let len = units.len();
+    if len == 0 {
+        return None;
+    }
+    let mut negative = false;
+    let mut index = 0;
+    let mut limit = -i32::MAX;
+    if units[0] < u16::from(b'0') {
+        if units[0] == u16::from(b'-') {
+            negative = true;
+            limit = i32::MIN;
+        } else if units[0] != u16::from(b'+') {
+            return None;
+        }
+        if len == 1 {
+            return None;
+        }
+        index += 1;
+    }
+    let multmin = limit / 10;
+    let mut result = 0i32;
+    while index < len {
+        let digit = java_digit(units[index])?;
+        index += 1;
+        if result < multmin {
+            return None;
+        }
+        let product = result.checked_mul(10)?;
+        if product < limit + digit {
+            return None;
+        }
+        result = product - digit;
+    }
+    Some(if negative { result } else { -result })
 }
 
 /// 属性值在官方 `compareTo` 里的顺序：整数按数值，布尔 `false < true`，枚举按声明序号。
@@ -169,6 +233,20 @@ mod tests {
             .iter()
             .find(|property| property.name == name)
             .expect("这块方块有这个属性")
+    }
+
+    #[test]
+    fn an_unknown_state_id_does_not_match_even_an_air_predicate() {
+        let unknown = BlockState(blocks::TOTAL_STATES);
+        let air = predicate(Some(block_ids(&[blocks::AIR])), None, None);
+        // 以前查不到就当成方块 0，空气谓词会误匹配。
+        assert!(!matches(&air, unknown));
+        assert!(!matches(&predicate(None, None, None), unknown));
+        assert!(!matches(
+            &predicate(None, Some(exact("axis", "y")), None),
+            unknown
+        ));
+        assert!(matches(&air, BlockState(blocks::AIR)));
     }
 
     #[test]
@@ -256,9 +334,62 @@ mod tests {
         assert!(matches_at("3"));
         assert!(matches_at("03"));
         assert!(matches_at("+3"));
+        // 全角 `３`、阿拉伯-印度数字 `٣`，`Character.digit` 都是 3。
+        assert!(matches_at("\u{FF13}"));
+        assert!(matches_at("\u{0663}"));
+        assert!(matches_at("+\u{FF13}"));
+        assert!(matches_at("\u{FF10}\u{FF13}"));
+        // 全角加号不是 `+`，上标 `³` 也不是十进制数字。
+        assert!(!matches_at("\u{FF0B}\u{FF13}"));
+        assert!(!matches_at("\u{00B3}"));
         // 超出属性的取值范围，官方解析成空。
         assert!(!matches_at("30"));
         assert!(!matches_at("not a number"));
+    }
+
+    #[test]
+    fn java_int_accepts_every_bmp_decimal_run_and_rejects_the_rest() {
+        assert_eq!(parse_java_int("-2147483648"), Some(i32::MIN));
+        assert_eq!(parse_java_int("2147483647"), Some(i32::MAX));
+        assert_eq!(parse_java_int("2147483648"), None);
+        assert_eq!(parse_java_int("-2147483649"), None);
+        assert_eq!(parse_java_int(""), None);
+        assert_eq!(parse_java_int("+"), None);
+        assert_eq!(parse_java_int("-"), None);
+        assert_eq!(parse_java_int("++3"), None);
+        assert_eq!(parse_java_int(" 3"), None);
+        assert_eq!(parse_java_int("3 "), None);
+        assert_eq!(parse_java_int("3a"), None);
+        assert_eq!(parse_java_int("-\u{FF10}"), Some(0));
+        // 补充平面的十进制数字，`Character.digit(codePoint)` 认，`parseInt` 不认。
+        assert_eq!(parse_java_int("\u{104A0}"), None);
+        assert_eq!(parse_java_int("\u{1D7CE}"), None);
+        assert_eq!(parse_java_int("\u{1D7D2}"), None);
+
+        let snow = BlockState(blocks::SNOW);
+        let layers = def(snow, "layers");
+        for &zero in DECIMAL_DIGIT_ZERO {
+            let digit = char::from_u32(u32::from(zero) + 3).unwrap();
+            assert_eq!(
+                parse_value(layers, &digit.to_string()),
+                Some(Value::Integer(3)),
+                "U+{zero:04X}"
+            );
+            let before = char::from_u32(u32::from(zero) - 1).unwrap();
+            assert_eq!(
+                parse_java_int(&before.to_string()),
+                None,
+                "U+{:04X}",
+                zero - 1
+            );
+            let after = char::from_u32(u32::from(zero) + 10).unwrap();
+            assert_eq!(
+                parse_java_int(&after.to_string()),
+                None,
+                "U+{:04X}",
+                zero + 10
+            );
+        }
     }
 
     #[test]

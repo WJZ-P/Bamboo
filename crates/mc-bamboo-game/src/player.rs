@@ -15,6 +15,7 @@ use crate::{
     interaction::{BlockPrediction, mining::Mining},
     inventory::Inventory,
     movement::Teleport,
+    player_grid::PlayerGrid,
 };
 
 const STANDING_EYE_HEIGHT: f64 = 1.62;
@@ -30,8 +31,10 @@ pub(crate) struct Player {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
     pub(crate) game_mode: GameMode,
-    /// 实体位置，也就是脚底。
-    pub(crate) position: Vec3,
+    /// 实体位置，也就是脚底。只能经 [`Player::set_position`] 改，见 [`PlayerGrid`]。
+    ///
+    /// Entity position, the feet. Changed only through [`Player::set_position`]; see [`PlayerGrid`].
+    position: Vec3,
     pub(crate) yaw: f32,
     pub(crate) pitch: f32,
     /// 每 tick 由派生状态的阶段写成 `yaw`。
@@ -83,6 +86,22 @@ impl Player {
             ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),
         }
+    }
+
+    /// 实体位置，也就是脚底。
+    ///
+    /// Entity position, the feet.
+    pub(crate) fn position(&self) -> Vec3 {
+        self.position
+    }
+
+    /// 改位置，网格跟着更新。广播靠网格找附近的玩家，绕过这里改位置会让玩家漏收包。
+    ///
+    /// Moves the player and updates the grid. Broadcasts find nearby players through the grid,
+    /// so changing the position any other way would make the player miss packets.
+    pub(crate) fn set_position(&mut self, grid: &mut PlayerGrid, position: Vec3) {
+        self.position = position;
+        grid.place(self.id, position);
     }
 
     /// 玩家所在的区块。
