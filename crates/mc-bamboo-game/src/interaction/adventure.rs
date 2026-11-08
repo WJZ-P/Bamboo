@@ -1,22 +1,12 @@
-//! 冒险模式的 `can_break` 组件，官方 `ItemStack.canBreakBlockInAdventureMode`、
-//! `AdventureModePredicate` 和 `BlockPredicate.matches(BlockInWorld)`。
+//! 冒险模式的 `can_break` 和 `can_place_on` 组件，官方 `ItemStack.canBreakBlockInAdventureMode`、
+//! `canPlaceOnBlockInAdventureMode` 和 `AdventureModePredicate`。
 //!
-//! 谓词里的方块和方块状态属性都按官方匹配；方块实体 NBT 读不出来，见
-//! [`predicate_matches`] 里的说明。
+//! 谓词的匹配在 [`mc_bamboo_blocks::predicate`] 里，和 `can_break` 共用一套代码。
 
-use std::cmp::Ordering;
-
-use mc_bamboo_blocks::BlockState;
-use mc_bamboo_data::{
-    PropertyDef, block_id_of_state, block_tag, registries::data_component_type as kinds,
-};
+use mc_bamboo_blocks::{BlockState, predicate};
+use mc_bamboo_data::registries::data_component_type as kinds;
 use mc_bamboo_protocol::{
-    components::{
-        ComponentPatch, ComponentValue,
-        cursor::HolderSet,
-        defaults,
-        predicate::{BlockPredicate, PropertyMatcher, StateProperties, ValueMatcher},
-    },
+    components::{ComponentPatch, ComponentValue, defaults},
     item::ItemStack,
 };
 
@@ -24,136 +14,32 @@ use mc_bamboo_protocol::{
 ///
 /// `can_break` 不存在、读不出来或者一条谓词都不匹配时都是 `false`。
 pub(crate) fn can_break(held: &ItemStack, state: BlockState) -> bool {
+    predicates_match(held, kinds::CAN_BREAK, state)
+}
+
+/// 手持物品在冒险模式下能不能用在这一格上，官方 `ItemStack.canPlaceOnBlockInAdventureMode`。
+///
+/// `can_place_on` 不存在、读不出来或者一条谓词都不匹配时都是 `false`。
+pub(crate) fn can_place_on(held: &ItemStack, state: BlockState) -> bool {
+    predicates_match(held, kinds::CAN_PLACE_ON, state)
+}
+
+/// 官方 `AdventureModePredicate.test`：有一条谓词匹配就算匹配。
+fn predicates_match(held: &ItemStack, kind: i32, state: BlockState) -> bool {
     if held.is_empty() {
         return false;
     }
     let Ok(patch) = ComponentPatch::from_opaque(held) else {
         return false;
     };
-    let Some(ComponentValue::CanBreak(predicates)) =
-        defaults::resolve(held.item, &patch, kinds::CAN_BREAK)
-    else {
+    let Some(value) = defaults::resolve(held.item, &patch, kind) else {
         return false;
     };
-    predicates
-        .iter()
-        .any(|predicate| predicate_matches(predicate, state))
-}
-
-/// 官方 `BlockPredicate.matches(BlockInWorld)`：方块、方块状态属性、方块实体 NBT。
-///
-/// 官方的 `BlockInWorld` 重载**不检查** `components` 字段（那是给 `matches(ServerLevel, pos)`
-/// 用的），所以这里也不看。NBT 要求方块实体存在，Bamboo 还读不出方块实体的 NBT，
-/// 带 `nbt` 的谓词一律按不匹配算。
-fn predicate_matches(predicate: &BlockPredicate, state: BlockState) -> bool {
-    if let Some(blocks) = &predicate.blocks {
-        let block = block_id_of_state(state.0).unwrap_or_default() as i32;
-        if !blocks_match(blocks, block) {
-            return false;
+    match value {
+        ComponentValue::CanBreak(predicates) | ComponentValue::CanPlaceOn(predicates) => {
+            predicate::any_matches(predicates, state)
         }
-    }
-    if let Some(properties) = &predicate.properties
-        && !properties_match(properties, state)
-    {
-        return false;
-    }
-    predicate.nbt.is_none()
-}
-
-/// 官方 `BlockPredicate.matchesState` 里 `state.is(blocks)` 那一半。
-fn blocks_match(blocks: &HolderSet, block: i32) -> bool {
-    match blocks {
-        HolderSet::Tag(name) => block_tag(name).is_some_and(|ids| ids.contains(&block)),
-        HolderSet::Ids(ids) => ids.contains(&block),
-    }
-}
-
-/// 官方 `StatePropertiesPredicate.matches(BlockState)`：每一条都要满足。
-fn properties_match(properties: &StateProperties, state: BlockState) -> bool {
-    properties
-        .0
-        .iter()
-        .all(|matcher| property_matches(matcher, state))
-}
-
-/// 官方 `PropertyMatcher.match`：找不到属性名就是不匹配。
-fn property_matches(matcher: &PropertyMatcher, state: BlockState) -> bool {
-    let Some(actual) = state.property_text(&matcher.name) else {
-        return false;
-    };
-    let Some(def) = state
-        .block()
-        .properties
-        .iter()
-        .find(|property| property.name == matcher.name)
-    else {
-        return false;
-    };
-    match &matcher.matcher {
-        ValueMatcher::Exact(expected) => exact_matches(def, actual, expected),
-        ValueMatcher::Ranged { min, max } => {
-            // 当前值越过端点，或者端点解析不出来，都是不匹配。
-            let inside = |bound: &str, too_far: Ordering| {
-                compare(def, actual, bound).is_some_and(|order| order != too_far)
-            };
-            min.as_deref().is_none_or(|min| inside(min, Ordering::Less))
-                && max
-                    .as_deref()
-                    .is_none_or(|max| inside(max, Ordering::Greater))
-        }
-    }
-}
-
-/// 官方 `ExactMatcher.match`：整数属性先把字符串按 `Integer.parseInt` 解析，
-/// 其余类型按序列化名精确比较。
-fn exact_matches(def: &PropertyDef, actual: &str, expected: &str) -> bool {
-    if let Some((min, max)) = integer_bounds(def) {
-        let Ok(expected) = expected.parse::<i32>() else {
-            return false;
-        };
-        return (min..=max).contains(&expected) && actual.parse::<i32>() == Ok(expected);
-    }
-    actual == expected
-}
-
-/// 官方按属性值的类型比较。
-///
-/// 生成的数据里 `values` 是官方 `Property` 的取值列表，只有名字，类型从取值推：
-/// 整数属性（`IntegerProperty`）比数值；布尔和枚举比顺序。布尔属性的取值列表是
-/// `[true, false]`，但 `Boolean.compareTo` 里 `false < true`；`vertical_direction`
-/// 官方的取值列表是 `[UP, DOWN]`，而 `Direction` 枚举里 `DOWN < UP`。这两处按下标
-/// 反过来，其余的枚举取值列表就是声明顺序。
-///
-/// 端点不在属性的取值范围里时返回 `None`，和官方 `property.getValue` 返回空一样。
-fn compare(def: &PropertyDef, actual: &str, bound: &str) -> Option<Ordering> {
-    if let Some((min, max)) = integer_bounds(def) {
-        let bound = bound
-            .parse::<i32>()
-            .ok()
-            .filter(|bound| (min..=max).contains(bound))?;
-        return Some(actual.parse::<i32>().ok()?.cmp(&bound));
-    }
-    Some(rank(def, actual)?.cmp(&rank(def, bound)?))
-}
-
-/// 整数属性的取值范围。官方的 `IntegerProperty` 取值是 `min..=max` 的连续整数，
-/// 所以全部取值都能解析成整数，首尾就是端点。
-fn integer_bounds(def: &PropertyDef) -> Option<(i32, i32)> {
-    let mut values = def.values.iter().map(|value| value.parse::<i32>());
-    let min = values.next()?.ok()?;
-    let mut max = min;
-    for value in values {
-        max = value.ok()?;
-    }
-    Some((min, max))
-}
-
-/// 取值在官方 `compareTo` 里的位置。
-fn rank(def: &PropertyDef, text: &str) -> Option<usize> {
-    let index = def.values.iter().position(|value| *value == text)?;
-    match def.values {
-        ["true", "false"] | ["up", "down"] => Some(def.values.len() - 1 - index),
-        _ => Some(index),
+        _ => false,
     }
 }
 
@@ -165,6 +51,14 @@ mod tests {
         block_id_of_state, blocks, items, registries::data_component_type as kinds,
     };
     use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::{
+        components::{
+            ComponentValue,
+            cursor::HolderSet,
+            predicate::{BlockPredicate, PropertyMatcher, StateProperties, ValueMatcher},
+        },
+        item::ItemStack,
+    };
 
     fn predicate(
         blocks: Option<HolderSet>,
@@ -187,6 +81,18 @@ mod tests {
             item: items::STICK,
             count: 1,
             added: vec![(kinds::CAN_BREAK, value)],
+            removed: Vec::new(),
+        }
+    }
+
+    /// 一个带 `can_place_on` 组件的物品。
+    fn placeable(predicates: Vec<BlockPredicate>) -> ItemStack {
+        let mut value = Vec::new();
+        ComponentValue::CanPlaceOn(predicates).write(&mut value);
+        ItemStack {
+            item: items::STICK,
+            count: 1,
+            added: vec![(kinds::CAN_PLACE_ON, value)],
             removed: Vec::new(),
         }
     }
@@ -386,5 +292,20 @@ mod tests {
     fn nbt_predicates_never_match_because_block_entities_cannot_be_read() {
         let stack = stack(vec![predicate(None, None, Some(Vec::new()))]);
         assert!(!can_break(&stack, stone()));
+    }
+
+    #[test]
+    fn can_place_on_is_independent_of_can_break() {
+        // `can_break` 的组件管不了放置，反过来也一样。
+        let placeable = placeable(vec![predicate(
+            Some(block_ids(&[blocks::STONE])),
+            None,
+            None,
+        )]);
+        assert!(can_place_on(&placeable, stone()));
+        assert!(!can_break(&placeable, stone()));
+        assert!(!can_place_on(&stack(Vec::new()), stone()));
+        assert!(!can_place_on(&ItemStack::empty(), stone()));
+        assert!(!can_place_on(&ItemStack::new(items::STICK, 1), stone()));
     }
 }

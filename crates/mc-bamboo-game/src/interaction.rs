@@ -427,11 +427,20 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         return;
     };
     let actor = actor_of(player);
-    let is_placement_attempt = rules::is_placement_attempt(player.inventory.held(packet.hand));
+    // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
+    let held = player.inventory.held(packet.hand).clone();
+    let is_placement_attempt = rules::is_placement_attempt(&held);
 
     let (mut level, ticks) = region.block_level();
     let hit = block_hit(packet);
-    let outcome = mc_bamboo_blocks::use_item_on(&mut level, ticks, &actor, packet.hand, &hit);
+    let outcome = mc_bamboo_blocks::use_item_on_checked(
+        &mut level,
+        ticks,
+        &actor,
+        packet.hand,
+        &hit,
+        |state| actor.may_build || adventure::can_place_on(&held, state),
+    );
 
     send_effects(region, Some(id), &outcome.effects);
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。

@@ -20,6 +20,7 @@ mod item_use;
 pub mod level;
 pub mod mining;
 pub mod placement;
+pub mod predicate;
 pub mod random;
 pub mod random_tick;
 pub mod shape;
@@ -36,7 +37,7 @@ pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
     InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
-    use_item, use_item_on,
+    use_item, use_item_on, use_item_on_checked,
 };
 pub use level::{Effect, Level, RedstoneMemory};
 pub use random::{LegacyRandom, LevelRandom};

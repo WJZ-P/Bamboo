@@ -333,6 +333,21 @@ pub struct Block {
 pub struct Property {
     pub name: String,
     pub values: Vec<String>,
+    #[serde(flatten)]
+    pub kind: PropertyKind,
+}
+
+/// 属性的官方类，以及属性值 `compareTo` 用的顺序。字段含义见
+/// [`mc_bamboo_data::PropertyKind`]。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PropertyKind {
+    /// `IntegerProperty`，取值是 `min..=max` 的连续整数。
+    Integer { min: i32, max: i32 },
+    /// `BooleanProperty`，取值列表是 `[true, false]`，比较时 `false < true`。
+    Boolean,
+    /// `EnumProperty`，和 `values` 一一对应的枚举常量声明序号。
+    Enum { ordinals: Vec<u16> },
 }
 
 /// 类的一个构造参数或者只读方法的结果。方法名后面带括号。
