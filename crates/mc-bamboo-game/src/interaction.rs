@@ -13,9 +13,12 @@ use mc_bamboo_blocks::{
     Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult, Level,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_data::{block_of_state, blocks, items};
 use mc_bamboo_protocol::{
-    packet::play::{BlockChangedAck, BlockUpdate, LevelEvent, PlayerActionKind, SystemChat},
+    packet::play::{
+        BlockChangedAck, BlockEntityData, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
+        PlayerActionKind, SystemChat,
+    },
     text::{Color, Component},
 };
 use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
@@ -30,6 +33,7 @@ use crate::{
     movement,
     player::Player,
     region::Region,
+    sign,
 };
 
 const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
@@ -127,22 +131,40 @@ fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
 ///
 /// 区块还在 `pending` 里的玩家不用发，它们收到的区块就是最新内容。
 pub(crate) fn broadcast_block_changes(region: &mut Region) {
-    let changed = &mut region.block_changes.changed;
+    let mut changed = mem::take(&mut region.block_changes.changed);
     // 同一格这一 tick 改了几次时，只有最后的状态要发。
     changed.sort_unstable();
     changed.dedup();
-    for pos in changed.drain(..) {
+    for pos in changed {
         let Some(state) = region.chunks.block(pos) else {
             continue;
         };
         let frames = encode_frames(&block_update(pos, state));
+        // `broadcastBlockEntityIfNeeded` 跟在方块更新后面，用 `getUpdateTag` 的内容。
+        let entity_frames = sign_data_frames(region, pos, state);
         let chunk = pos.chunk();
         for player in region.players.values() {
             if player.chunks.is_chunk_tracked(chunk) {
                 region.links.send_frames(player.id, &frames);
+                if let Some(frames) = &entity_frames {
+                    region.links.send_frames(player.id, frames);
+                }
             }
         }
     }
+}
+
+/// 这一格是告示牌时，广播还要带上方块实体的内容。
+///
+/// 别的方块实体还没有内容模型，编不出官方的 `getUpdateTag`，只能发方块更新。
+fn sign_data_frames(region: &Region, pos: BlockPos, state: u32) -> Option<Vec<u8>> {
+    let content = region.chunks.sign(pos)?;
+    let kind = block_of_state(state)?.block_entity_type?;
+    Some(encode_frames(&BlockEntityData {
+        pos,
+        kind,
+        data: &sign::update_tag(&content),
+    }))
 }
 
 /// tick 第 8 阶段：每名玩家发 `block_changed_ack`。必须晚于第 5 阶段，`blocks-inventory.md` 4.3。
@@ -184,6 +206,7 @@ fn actor_of(player: &Player) -> Actor {
         }
     };
     Actor {
+        uuid: *player.uuid.as_bytes(),
         position: player.position,
         yaw: player.yaw,
         head_yaw: player.head_yaw,
@@ -194,13 +217,19 @@ fn actor_of(player: &Player) -> Actor {
         off_hand: held(Hand::Off),
         eye_height: player.eye_height(),
         block_interaction_range: BLOCK_INTERACTION_RANGE,
+        // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
+        may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
     }
 }
 
 /// 玩家能不能够到这个方块。`blocks-inventory.md` 6.1。
 pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
+    within_block_interaction_range(player, pos, REACH_BUFFER)
+}
+
+/// `Player.isWithinBlockInteractionRange(pos, buffer)`：眼睛到方块单位立方体的距离。
+pub(crate) fn within_block_interaction_range(player: &Player, pos: BlockPos, buffer: f64) -> bool {
     let Vec3 { x, y, z } = player.position;
-    // 眼睛到方块单位立方体的距离。
     let axis = |low: i32, eye: f64| {
         let low = f64::from(low);
         (low - eye).max(eye - (low + 1.0)).max(0.0)
@@ -208,7 +237,7 @@ pub(crate) fn within_reach(player: &Player, pos: BlockPos) -> bool {
     let dx = axis(pos.x, x);
     let dy = axis(pos.y, y + player.eye_height());
     let dz = axis(pos.z, z);
-    let range = BLOCK_INTERACTION_RANGE + REACH_BUFFER;
+    let range = BLOCK_INTERACTION_RANGE + buffer;
     dx * dx + dy * dy + dz * dz < range * range
 }
 
@@ -303,6 +332,17 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                     global: false,
                 };
                 send_level_event(region, None, &event);
+            }
+            // `markUpdated` 的 `sendBlockUpdated`：方块没变，广播阶段照样重发这一格。
+            Effect::SignChanged { pos } => region.block_changes.changed.push(pos),
+            Effect::SignWaxed { pos } => {
+                send_level_event(region, None, &LevelEvent::wax_on_sign(pos));
+            }
+            // `openTextEdit` 只给登记的编辑者发，它一定就是发起者。
+            Effect::OpenSignEditor { pos, slot } => {
+                if let Some(id) = initiator {
+                    region.links.send(id, &OpenSignEditor { pos, slot });
+                }
             }
         }
     }

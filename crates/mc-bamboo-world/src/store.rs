@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
-use mc_bamboo_data::{facts, state_facts};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
+use mc_bamboo_data::{block_of_state, facts, registries::block_entity_type, state_facts};
 
 use crate::{
     MIN_Y, WORLD_HEIGHT,
@@ -120,6 +120,53 @@ impl ChunkStore {
         true
     }
 
+    /// 这一格的告示牌内容，对应官方 `getBlockEntity` 拿到 `SignBlockEntity` 后读的字段。
+    ///
+    /// 告示牌方块还没写过字时返回空白内容：官方也是按状态临时建一个空的方块实体。
+    /// 不是告示牌方块时返回 `None`。
+    pub fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        if !is_inside_world(pos.y) {
+            return None;
+        }
+        let (x, z) = (local(pos.x), local(pos.z));
+        let chunk = self.chunk(pos.chunk());
+        match chunk.sign(x, pos.y, z) {
+            Some(content) => Some(content.clone()),
+            None => is_sign(chunk.block(x, pos.y, z)).then(SignContent::default),
+        }
+    }
+
+    /// 改写告示牌内容。这一格不是告示牌方块时什么也不做，返回 `false`。
+    pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        if !is_inside_world(pos.y) {
+            return false;
+        }
+        let (x, z) = (local(pos.x), local(pos.z));
+        if !is_sign(self.chunk(pos.chunk()).block(x, pos.y, z)) {
+            return false;
+        }
+        let template = &self.template;
+        let chunk = self
+            .edited
+            .entry(pos.chunk())
+            .or_insert_with(|| template.clone());
+        chunk.set_sign(x, pos.y, z, content);
+        true
+    }
+
+    /// 正在被某名玩家编辑的告示牌和它们的编辑器。
+    pub fn sign_editors(&self) -> impl Iterator<Item = (BlockPos, [u8; 16])> + '_ {
+        self.edited.iter().flat_map(|(chunk_pos, chunk)| {
+            chunk.signs().filter_map(move |(x, y, z, content)| {
+                content.editor.map(|editor| {
+                    let pos =
+                        BlockPos::new(chunk_pos.x * 16 + x as i32, y, chunk_pos.z * 16 + z as i32);
+                    (pos, editor)
+                })
+            })
+        })
+    }
+
     /// 把攒着的光照更新算完。官方在两个 tick 之间做这件事。
     pub fn run_light_updates(&mut self) {
         self.light
@@ -149,6 +196,14 @@ const fn is_inside_world(y: i32) -> bool {
 /// `isAir`。
 fn is_air(state: u32) -> bool {
     state_facts(state) & facts::AIR != 0
+}
+
+/// 这个方块的方块实体是告示牌，站着、挂着、贴在墙上的都算。
+fn is_sign(state: u32) -> bool {
+    matches!(
+        block_of_state(state).and_then(|block| block.block_entity_type),
+        Some(block_entity_type::SIGN | block_entity_type::HANGING_SIGN)
+    )
 }
 
 /// 世界坐标在区块里的下标。`&` 对负数也是对的，`-1` 是区块里的第 15 格。
@@ -246,5 +301,59 @@ mod tests {
         let chunk = store.edited(ChunkPos::new(1, -1)).expect("这个区块改过了");
         let entity = chunk.block_entities().next().expect("箱子有方块实体");
         assert_eq!((entity.x, entity.y, entity.z), (3, -60, 5));
+    }
+
+    #[test]
+    fn signs_start_blank_and_keep_what_is_written() {
+        let mut store = ChunkStore::flat();
+        let pos = BlockPos::new(3, -60, 3);
+
+        assert_eq!(store.sign(pos), None);
+
+        store.set_block(pos, blocks::OAK_SIGN);
+        assert_eq!(store.sign(pos), Some(SignContent::default()));
+
+        let mut content = SignContent::default();
+        content.front.messages[0] = "hello".to_owned();
+        assert!(store.set_sign(pos, content.clone()));
+        assert_eq!(store.sign(pos), Some(content));
+    }
+
+    #[test]
+    fn sign_content_does_not_survive_a_different_block() {
+        let mut store = ChunkStore::flat();
+        let pos = BlockPos::new(3, -60, 3);
+        store.set_block(pos, blocks::OAK_SIGN);
+        let mut content = SignContent::default();
+        content.front.messages[0] = "hello".to_owned();
+        store.set_sign(pos, content);
+
+        // 含水或者转向都还是同一个方块，内容要留着。
+        store.set_block(pos, blocks::OAK_SIGN + 1);
+        assert!(store.sign(pos).is_some_and(|sign| sign.front.has_message()));
+
+        store.set_block(pos, blocks::STONE);
+        assert_eq!(store.sign(pos), None);
+    }
+
+    #[test]
+    fn sign_content_cannot_be_written_to_another_block() {
+        let mut store = ChunkStore::flat();
+        assert!(!store.set_sign(BlockPos::new(0, -61, 0), SignContent::default()));
+        assert!(store.edited(ChunkPos::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn editors_are_reported_with_their_world_position() {
+        let mut store = ChunkStore::flat();
+        let pos = BlockPos::new(19, -60, -11);
+        store.set_block(pos, blocks::OAK_WALL_SIGN);
+        let content = SignContent {
+            editor: Some([7; 16]),
+            ..SignContent::default()
+        };
+        store.set_sign(pos, content);
+
+        assert_eq!(store.sign_editors().collect::<Vec<_>>(), [(pos, [7; 16])]);
     }
 }

@@ -55,11 +55,13 @@ pub struct Heightmap<'a> {
 ///
 /// 收到区块时客户端只创建列表里的方块实体，漏掉的方块（比如箱子）就看不见了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockEntityInfo {
+pub struct BlockEntityInfo<'a> {
     /// 世界坐标。水平方向只取区块内的低 4 位。
     pub pos: BlockPos,
     /// `minecraft:block_entity_type` 注册表 ID。
     pub kind: i32,
+    /// 方块实体保存的数据，官方的 `getUpdateTag`。`None` 表示不写数据。
+    pub data: Option<&'a [u8]>,
 }
 
 /// 区块的光照数据。掩码的第 n 位对应从世界底部下一层算起的第 n 个区块段。
@@ -87,15 +89,18 @@ fn write_bit_set(out: &mut Vec<u8>, mask: u64) {
     out.extend_from_slice(&mask.to_le_bytes()[..used_bytes]);
 }
 
-fn write_block_entities(out: &mut Vec<u8>, block_entities: &[BlockEntityInfo]) {
+fn write_block_entities(out: &mut Vec<u8>, block_entities: &[BlockEntityInfo<'_>]) {
     write_varint(out, block_entities.len() as i32);
     for block_entity in block_entities {
         let BlockPos { x, y, z } = block_entity.pos;
         out.push(((x & 15) << 4 | (z & 15)) as u8);
         write_i16(out, y as i16);
         write_varint(out, block_entity.kind);
-        // 没有 NBT。客户端按方块状态创建默认的方块实体。
-        out.push(0);
+        // 没有数据时写一个结束标记，客户端按方块状态创建默认的方块实体。
+        match block_entity.data {
+            Some(data) => out.extend_from_slice(data),
+            None => out.push(0),
+        }
     }
 }
 
@@ -190,6 +195,20 @@ mod tests {
         let block_entity = BlockEntityInfo {
             pos: BlockPos::new(3, -60, 5),
             kind: 1,
+            data: None,
+        };
+        let mut out = Vec::new();
+        write_block_entities(&mut out, &[block_entity]);
+        assert_eq!(out, [1, 0x35, 0xff, 0xc4, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn block_entity_data_is_copied_after_the_type() {
+        // 一个空 Compound：结束标记 0，和没有数据时的写法一模一样，但字节来自 `data`。
+        let block_entity = BlockEntityInfo {
+            pos: BlockPos::new(3, -60, 5),
+            kind: 1,
+            data: Some(&[0]),
         };
         let mut out = Vec::new();
         write_block_entities(&mut out, &[block_entity]);
@@ -201,6 +220,7 @@ mod tests {
         let block_entity = BlockEntityInfo {
             pos: BlockPos::new(-13, 70, 37),
             kind: 300,
+            data: None,
         };
         let mut out = Vec::new();
         write_block_entities(&mut out, &[block_entity]);
@@ -224,6 +244,7 @@ mod tests {
         let block_entities = [BlockEntityInfo {
             pos: BlockPos::new(3, -60, 5),
             kind: 1,
+            data: None,
         }];
         let body = encode_chunk_body(&heightmaps, &[7, 8], &block_entities, &light);
 

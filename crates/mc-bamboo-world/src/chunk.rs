@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use mc_bamboo_core::sign::SignContent;
 use mc_bamboo_data::{
     block_of_state, blocks, facts, heightmaps, registries, state_facts, state_fluid,
 };
@@ -15,6 +16,11 @@ use crate::{
 /// `isAir`：空气、洞穴空气和虚空空气。
 fn is_air(state: u32) -> bool {
     state_facts(state) & facts::AIR != 0
+}
+
+/// 官方 `BlockState.is(Block)`：两个状态属于同一个方块，不看朝向之类的属性。
+fn is_same_block(first: u32, second: u32) -> bool {
+    block_of_state(first).map(|block| block.name) == block_of_state(second).map(|block| block.name)
 }
 
 /// `FluidState.isEmpty()`：只有空流体才算没有流体。含水方块的流体不是空的。
@@ -250,6 +256,8 @@ pub struct Chunk {
     heightmaps: [Heightmap; HeightmapKind::ALL.len()],
     /// 有方块实体的位置和类型。键是 `(y, z, x)`，所以遍历顺序和放置的先后无关。
     block_entities: BTreeMap<(i32, usize, usize), i32>,
+    /// 有内容的告示牌。没有条目时内容是空白的，和官方按状态临时建出来的方块实体一样。
+    signs: BTreeMap<(i32, usize, usize), SignContent>,
     sky_light_sources: SkyLightSources,
 }
 
@@ -260,6 +268,7 @@ impl Chunk {
             sections: vec![Section::empty(biome); SECTION_COUNT],
             heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
             block_entities: BTreeMap::new(),
+            signs: BTreeMap::new(),
             sky_light_sources: SkyLightSources::default(),
         }
     }
@@ -306,6 +315,23 @@ impl Chunk {
             .map(|(&(y, z, x), &kind)| BlockEntity { x, y, z, kind })
     }
 
+    /// 这一格的告示牌内容。没写过时返回 `None`。
+    pub fn sign(&self, x: usize, y: i32, z: usize) -> Option<&SignContent> {
+        self.signs.get(&(y, z, x))
+    }
+
+    /// 写入告示牌内容。
+    pub fn set_sign(&mut self, x: usize, y: i32, z: usize, content: SignContent) {
+        self.signs.insert((y, z, x), content);
+    }
+
+    /// 有内容的告示牌，键和 [`block_entities`](Self::block_entities) 的顺序相同。
+    pub fn signs(&self) -> impl Iterator<Item = (usize, i32, usize, &SignContent)> + '_ {
+        self.signs
+            .iter()
+            .map(|(&(y, z, x), content)| (x, y, z, content))
+    }
+
     /// 把世界高度拆成区块段下标和段内高度。
     fn locate(y: i32) -> (usize, usize) {
         let offset = y - MIN_Y;
@@ -326,7 +352,11 @@ impl Chunk {
     }
 
     /// 设置方块状态。`x` 和 `z` 是区块内坐标，`y` 是世界高度。
+    ///
+    /// 和官方 `LevelChunk.setBlockState` 一样，只有换成别的方块时才丢掉方块实体：
+    /// 旋转、含水这些状态变化不影响告示牌上的字。
     pub fn set_block(&mut self, x: usize, y: i32, z: usize, state: u32) {
+        let previous = self.block(x, y, z);
         let (section, local_y) = Self::locate(y);
         self.sections[section].set_block(x, local_y, z, state);
         // 官方 `LevelChunk.setBlockState`：区块段先写，再用新状态更新每一张高度图。
@@ -335,6 +365,9 @@ impl Chunk {
         }
 
         let key = (y, z, x);
+        if !is_same_block(previous, state) {
+            self.signs.remove(&key);
+        }
         match block_of_state(state).and_then(|block| block.block_entity_type) {
             Some(kind) => self.block_entities.insert(key, kind),
             None => self.block_entities.remove(&key),

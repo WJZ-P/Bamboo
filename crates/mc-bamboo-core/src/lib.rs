@@ -3,6 +3,7 @@
 //! 协议层和世界层互不依赖，但都要表达“世界里的一个位置”，所以这些类型放在它们下面。
 
 pub mod mth;
+pub mod sign;
 
 mod shape;
 

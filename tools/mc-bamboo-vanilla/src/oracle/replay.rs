@@ -12,8 +12,8 @@ use mc_bamboo_blocks::{
     shape::{self, BooleanOp},
     tick_chunk, use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use super::{
     Names,
@@ -159,6 +159,20 @@ impl Level for OracleLevel {
         FULL_BRIGHTNESS
     }
 
+    /// 官方的假世界每次 `getBlockEntity` 都按状态新建一个空的告示牌实体，
+    /// 所以这里看到的永远是空白告示牌。
+    fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        let state = self.block_state(pos);
+        state
+            .is_a(BlockAncestor::SignBlock)
+            .then(SignContent::default)
+    }
+
+    /// 写进来的内容不留下，下一次读还是那个新建的空实体。
+    fn set_sign(&mut self, pos: BlockPos, _content: SignContent) -> bool {
+        self.block_state(pos).is_a(BlockAncestor::SignBlock)
+    }
+
     fn redstone(&self) -> &RedstoneMemory {
         &self.redstone
     }
@@ -235,6 +249,8 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         STANDING_EYE_HEIGHT
     };
     Ok(Actor {
+        // 假世界每次 `getBlockEntity` 都新建空告示牌，编辑器登记不上，UUID 看不出来。
+        uuid: [0; 16],
         position: Vec3::new(x, y, z),
         yaw: action.yaw.0,
         // 官方的题里头和身体的朝向相同。
@@ -245,6 +261,8 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         off_hand: names.item(&action.off)?.0,
         eye_height: f64::from(eye_height),
         block_interaction_range: CREATIVE_INTERACTION_RANGE,
+        // 题目的玩家一直是创造模式。
+        may_build: true,
     })
 }
 
@@ -371,7 +389,11 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             } => Some(Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator)),
             // 火把烧坏只放烟，题里不比较。
             Effect::TorchBurnout { .. } => None,
-            Effect::BoneMealUsed { .. } | Effect::FilledBucket { .. } => None,
+            Effect::BoneMealUsed { .. }
+            | Effect::FilledBucket { .. }
+            | Effect::SignChanged { .. }
+            | Effect::SignWaxed { .. }
+            | Effect::OpenSignEditor { .. } => None,
         })
         .collect()
 }

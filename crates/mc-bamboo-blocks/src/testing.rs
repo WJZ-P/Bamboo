@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Level, LevelRandom, Outcome, destroy_block,
@@ -16,6 +16,8 @@ const MAX_Y: i32 = 319;
 /// 方块存在表里，没写过的格子是空气，世界外是 `void_air`。随机数的种子固定是 0，玩家总在附近。
 pub(crate) struct TestLevel {
     blocks: HashMap<BlockPos, BlockState>,
+    /// 告示牌的内容。和区块存储一样，换成别的方块时丢掉。
+    pub(crate) signs: HashMap<BlockPos, SignContent>,
     /// 按写入顺序记下每一格写过什么，测试连锁顺序时用。
     pub(crate) writes: Vec<(BlockPos, BlockState)>,
     /// 假装有实体挡在任何有碰撞的方块上。
@@ -30,6 +32,7 @@ impl TestLevel {
     pub(crate) fn new() -> Self {
         Self {
             blocks: HashMap::new(),
+            signs: HashMap::new(),
             writes: Vec::new(),
             obstructed: false,
             random: LevelRandom::new(0),
@@ -59,6 +62,9 @@ impl Level for TestLevel {
     fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return false;
+        }
+        if !self.block_state(pos).is_same_block(state) {
+            self.signs.remove(&pos);
         }
         self.blocks.insert(pos, state);
         self.writes.push((pos, state));
@@ -101,6 +107,21 @@ impl Level for TestLevel {
         }
     }
 
+    fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        if !self.block_state(pos).is_a(BlockAncestor::SignBlock) {
+            return None;
+        }
+        Some(self.signs.get(&pos).cloned().unwrap_or_default())
+    }
+
+    fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        if !self.block_state(pos).is_a(BlockAncestor::SignBlock) {
+            return false;
+        }
+        self.signs.insert(pos, content);
+        true
+    }
+
     fn redstone(&self) -> &RedstoneMemory {
         &self.redstone
     }
@@ -110,9 +131,10 @@ impl Level for TestLevel {
     }
 }
 
-/// 站在原点、看着南方的玩家，主手拿着 `item`。
+/// 站在原点、看着南方的玩家，主手拿着 `item`。UUID 全是零，创造模式。
 pub(crate) fn actor_holding(item: i32) -> Actor {
     Actor {
+        uuid: [0; 16],
         position: Vec3::new(0.5, 70.0, 0.5),
         yaw: 0.0,
         head_yaw: 0.0,
@@ -122,6 +144,7 @@ pub(crate) fn actor_holding(item: i32) -> Actor {
         off_hand: items::AIR,
         eye_height: 1.62,
         block_interaction_range: 5.0,
+        may_build: true,
     }
 }
 

@@ -17,6 +17,8 @@ use mc_bamboo_world::{
     store::ChunkStore,
 };
 
+use crate::sign;
+
 /// 方块和光照都没改过的区块共用模板的编码，随便取一个还没改过的位置编出来就行。
 const TEMPLATE_POS: ChunkPos = ChunkPos::new(0, 0);
 /// 光照段全选：区块包带上全部 26 段。
@@ -54,11 +56,33 @@ pub(crate) fn encode_chunk(store: &ChunkStore, pos: ChunkPos) -> Vec<u8> {
         .map(|(kind, data)| Heightmap { kind: *kind, data })
         .collect();
 
-    let block_entities: Vec<BlockEntityInfo> = chunk
+    // 告示牌的文字不放在区块里，要编成官方的 `getUpdateTag` 一起发。
+    let block_entities: Vec<(BlockEntityInfo, Option<Vec<u8>>)> = chunk
         .block_entities()
-        .map(|entity| BlockEntityInfo {
-            pos: BlockPos::new(entity.x as i32, entity.y, entity.z as i32),
-            kind: entity.kind,
+        .map(|entity| {
+            // 表里存的是区块内坐标，查告示牌内容要用世界坐标。
+            let local = BlockPos::new(entity.x as i32, entity.y, entity.z as i32);
+            let world = BlockPos::new(
+                pos.x * 16 + entity.x as i32,
+                entity.y,
+                pos.z * 16 + entity.z as i32,
+            );
+            let data = store.sign(world).map(|content| sign::update_tag(&content));
+            (
+                BlockEntityInfo {
+                    pos: local,
+                    kind: entity.kind,
+                    data: None,
+                },
+                data,
+            )
+        })
+        .collect();
+    let block_entities: Vec<BlockEntityInfo> = block_entities
+        .iter()
+        .map(|(entity, data)| BlockEntityInfo {
+            data: data.as_deref(),
+            ..*entity
         })
         .collect();
 
@@ -158,12 +182,17 @@ fn write_container(out: &mut Vec<u8>, container: &PalettedContainer) {
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_core::sign::SignContent;
     use mc_bamboo_data::blocks;
 
     use super::*;
 
     /// `blocks-inventory.md` 第 11 章的实测字节：区块内 (3, -60, 5) 的箱子。
     const CHEST_ENTRY: [u8; 5] = [0x35, 0xff, 0xc4, 0x01, 0x00];
+
+    /// 区块内 (3, -60, 5) 的告示牌：类型 ID 之后是 NBT 根 Compound，网络格式的根没有名字，
+    /// 所以接着就是第一个条目 `front_text` 的类型和名字。
+    const SIGN_ENTRY: [u8; 8] = [0x35, 0xff, 0xc4, 0x07, 0x0a, 0x0a, 0x00, 0x0a];
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|part| part == needle)
@@ -237,5 +266,34 @@ mod tests {
     fn flat_chunk_has_no_block_entities() {
         let body = encode_template(&ChunkStore::flat());
         assert!(!contains(&body, &CHEST_ENTRY));
+    }
+
+    #[test]
+    fn blank_signs_are_written_with_an_empty_tag() {
+        let mut store = ChunkStore::flat();
+        let template_body = encode_template(&store);
+        let pos = BlockPos::new(19, -60, -11);
+
+        store.set_block(pos, blocks::OAK_SIGN);
+
+        let body = chunk_body(&store, &template_body, pos.chunk());
+        assert!(contains(&body, &SIGN_ENTRY));
+    }
+
+    #[test]
+    fn written_signs_carry_their_text_in_the_chunk() {
+        let mut store = ChunkStore::flat();
+        let template_body = encode_template(&store);
+        let pos = BlockPos::new(19, -60, -11);
+        let mut content = SignContent::default();
+        content.front.messages[0] = "hello".to_owned();
+
+        store.set_block(pos, blocks::OAK_SIGN);
+        store.set_sign(pos, content);
+
+        let body = chunk_body(&store, &template_body, pos.chunk());
+        assert!(contains(&body, &SIGN_ENTRY));
+        // `messages` 列表里的第一行，字符串标签的长度前缀是两字节。
+        assert!(contains(&body, b"\x00\x05hello"));
     }
 }

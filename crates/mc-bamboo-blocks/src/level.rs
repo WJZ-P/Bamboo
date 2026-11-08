@@ -2,7 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
+use mc_bamboo_core::{
+    BlockPos, ChunkPos, LightLayer,
+    sign::{SignContent, SignTextSlot},
+};
 
 use crate::{random::LevelRandom, shape::Aabb, state::BlockState};
 
@@ -35,6 +38,15 @@ pub trait Level {
 
     /// `getBrightness(layer, pos)`：这一格的天空光或者方块光，0 到 15。
     fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32;
+
+    /// `getBlockEntity(pos) instanceof SignBlockEntity` 之后读到的内容。
+    ///
+    /// 还没写过字的告示牌返回 [`SignContent::BLANK`]，官方也是按状态新建一个空的方块实体。
+    /// 不是告示牌方块时返回 `None`。
+    fn sign(&self, pos: BlockPos) -> Option<SignContent>;
+
+    /// 改写告示牌的内容，对应 `SignBlockEntity` 里那几个字段。不是告示牌方块时返回 `false`。
+    fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool;
 
     /// 红石用到的、方块状态装不下的世界数据。
     fn redstone(&self) -> &RedstoneMemory;
@@ -142,4 +154,11 @@ pub enum Effect {
     FilledBucket { item: i32 },
     /// `levelEvent(1505, pos, 15)`：骨粉起作用的粒子，发给附近所有人。
     BoneMealUsed { pos: BlockPos },
+    /// 告示牌的内容变了，`SignBlockEntity.markUpdated` 里的 `sendBlockUpdated`：
+    /// 方块状态没变，但要把方块和方块实体数据重新发给追踪这个区块的玩家。
+    SignChanged { pos: BlockPos },
+    /// 上蜡成功的光照效果，`levelEvent(null, 3003, pos, 0)`。
+    SignWaxed { pos: BlockPos },
+    /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
+    OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
 }
