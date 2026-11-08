@@ -1852,6 +1852,7 @@ dependencies = [
  "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-world",
  "serde",
  "serde_json",
 ]

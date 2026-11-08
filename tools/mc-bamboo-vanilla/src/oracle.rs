@@ -426,7 +426,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
 }
 
 /// 官方日志在另一个线程里读，不然管道写满时 JVM 会停住。只留最后几行，JVM 失败时才看。
-fn collect_log(child: &mut Child) -> Result<mpsc::Receiver<Vec<String>>, String> {
+pub(crate) fn collect_log(child: &mut Child) -> Result<mpsc::Receiver<Vec<String>>, String> {
     let stderr = child.stderr.take().ok_or("java has no stderr")?;
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {

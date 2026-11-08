@@ -11,11 +11,17 @@ publish = false
 [features]
 default = ["oracle"]
 # 这几个 crate 依赖生成的数据。生成文件坏了的时候用 --no-default-features 编译，generate 才跑得起来。
-oracle = ["dep:mc-bamboo-blocks", "dep:mc-bamboo-core", "dep:mc-bamboo-data"]
+oracle = [
+    "dep:mc-bamboo-blocks",
+    "dep:mc-bamboo-core",
+    "dep:mc-bamboo-data",
+    "dep:mc-bamboo-world",
+]
 
 [dependencies]
 mc-bamboo-blocks = { workspace = true, optional = true }
 mc-bamboo-core = { workspace = true, optional = true }
 mc-bamboo-data = { workspace = true, optional = true }
+mc-bamboo-world = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
