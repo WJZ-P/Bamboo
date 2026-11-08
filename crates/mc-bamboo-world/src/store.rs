@@ -223,6 +223,10 @@ impl ChunkStore {
         {
             return false;
         }
+        // 内容没变就不动区块：版本号不变，区块包的缓存也不用重新编码。
+        if self.update_tag(pos) == tag.as_deref() {
+            return true;
+        }
         let chunk = self.edited.chunk_mut(pos.chunk(), &self.template);
         chunk.set_update_tag(x, pos.y, z, tag);
         true
