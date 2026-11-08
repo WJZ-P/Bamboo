@@ -4,6 +4,7 @@ use std::ops::Deref;
 
 use mc_bamboo_core::{Axis, BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::items;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{state::BlockState, world::World};
 
@@ -85,6 +86,10 @@ pub struct UseContext<'a> {
     pub hit: BlockHit,
     /// 这只手上的物品，方块的 `useItemOn` 里的 `itemStack`。
     pub item: i32,
+    /// 这只手上的物品堆。没有传进来时，组件按这个物品的默认值判断。
+    ///
+    /// The stack in this hand. When it is absent, component checks use the item's defaults.
+    pub stack: Option<&'a ItemStack>,
 }
 
 impl<'a> UseContext<'a> {
@@ -94,6 +99,7 @@ impl<'a> UseContext<'a> {
             hand,
             hit,
             item: actor.item_in(hand),
+            stack: None,
         }
     }
 

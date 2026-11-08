@@ -20,6 +20,7 @@ pub mod dispenser;
 pub mod fluid;
 pub mod hopper;
 pub mod interact;
+mod item_exchange;
 mod item_use;
 pub mod level;
 pub mod mining;
@@ -44,8 +45,10 @@ pub use dispenser::dispense_from;
 pub use hopper::HopperEntity;
 pub use interact::{
     InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_scheduled_ticks,
-    use_item, use_item_on, use_item_on_checked,
+    use_item, use_item_on, use_item_on_checked, use_item_on_checked_with_stack,
+    use_item_on_with_stack,
 };
+pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use level::{Effect, Level, RedstoneMemory};
 pub use random::{LegacyRandom, LevelRandom};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};

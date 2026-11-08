@@ -179,7 +179,18 @@ impl ItemStack {
             return false;
         }
         let patch = self.patch();
-        validate::max_stack_size(self.item, &patch) > 1 && !self.is_damaged(&patch)
+        validate::max_stack_size(self.item, &patch) > 1 && !self.damage_is_positive(&patch)
+    }
+
+    /// 官方 `ItemStack.isDamaged`：能损坏，而且耐久掉过。
+    ///
+    /// `ItemStack.isDamaged`: the item can take damage, and its damage is above zero.
+    pub fn is_damaged(&self) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let patch = self.patch();
+        self.damage_is_positive(&patch)
     }
 
     /// 官方 `ItemStack.isSameItem`：只看物品，空物品堆都是空气。
@@ -213,8 +224,10 @@ impl ItemStack {
         ComponentPatch::from_opaque(self).unwrap_or_default()
     }
 
-    /// 官方 `ItemStack.isDamaged`：能损坏，而且耐久掉过。
-    fn is_damaged(&self, patch: &ComponentPatch) -> bool {
+    /// 官方 `ItemStack.isDamaged` 里看补丁的那一半。
+    ///
+    /// The patch half of `ItemStack.isDamaged`.
+    fn damage_is_positive(&self, patch: &ComponentPatch) -> bool {
         let resolve = |kind| defaults::resolve(self.item, patch, kind);
         let int = |kind| match resolve(kind) {
             Some(ComponentValue::MaxDamage(value) | ComponentValue::Damage(value)) => Some(*value),
