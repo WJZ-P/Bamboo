@@ -185,7 +185,7 @@ pub struct FluidFacts {
 }
 
 /// 一个方块。除了状态 ID，其余字段都描述默认状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Block {
     pub name: &'static str,
     /// 第一个状态的 ID。这个方块的状态一直连续到下一个方块的 `first_state` 之前。
@@ -215,7 +215,14 @@ pub struct Block {
     pub offset: Option<BlockOffset>,
     /// `hasDynamicShape`：官方不缓存这种方块的形状，读取时要带上世界和位置。
     pub dynamic_shape: bool,
+    /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
+    pub destroy_time: f32,
+    /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
+    pub requires_correct_tool_for_drops: bool,
 }
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for Block {}
 
 impl Block {
     /// 官方类的字段或者方法结果。名字写错时返回 `None`，见 [`BlockField`]。
@@ -294,6 +301,80 @@ pub struct Item {
     pub block_transformer: Option<&'static BlockTransformer>,
     /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
     pub blocks_attacks: bool,
+    /// `minecraft:tool` 组件，决定挖掘速度和有没有掉落物。
+    pub tool: Option<Tool>,
+}
+
+/// `minecraft:tool` 组件。工具和一部分物品有它，没有的物品用手挖的速度。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tool {
+    /// 按顺序匹配，第一条给出速度或者掉落规则的算数。
+    pub rules: &'static [ToolRule],
+    /// 所有规则都不管这块方块时的速度，官方的 `default_mining_speed`。
+    pub default_mining_speed: f32,
+}
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for Tool {}
+
+impl Tool {
+    /// 官方的 `Tool.getMiningSpeed`：第一条规定了这块方块速度的规则。
+    pub fn mining_speed(&self, block: i32) -> f32 {
+        self.rules
+            .iter()
+            .find(|rule| rule.speed.is_some() && rule.blocks(block))
+            .and_then(|rule| rule.speed)
+            .unwrap_or(self.default_mining_speed)
+    }
+
+    /// 官方的 `Tool.isCorrectForDrops`：第一条规定了这块方块掉落的规则，都没规定就没有掉落物。
+    pub fn is_correct_for_drops(&self, block: i32) -> bool {
+        self.rules
+            .iter()
+            .find(|rule| rule.correct_for_drops.is_some() && rule.blocks(block))
+            .and_then(|rule| rule.correct_for_drops)
+            .unwrap_or(false)
+    }
+}
+
+/// 一条工具规则，官方的 `Tool.Rule`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToolRule {
+    /// 规则管哪些方块。官方的 `HolderSet<Block>`，是一组标签和单个方块。
+    pub blocks: &'static [BlockSet],
+    /// 挖这块方块的速度，`None` 表示这条规则不管速度。
+    pub speed: Option<f32>,
+    /// 挖掉有没有掉落物，`None` 表示这条规则不管掉落。
+    pub correct_for_drops: Option<bool>,
+}
+
+impl ToolRule {
+    /// 这块方块在不在这条规则管的范围里。
+    pub fn blocks(&self, block: i32) -> bool {
+        self.blocks.iter().any(|set| set.contains(block))
+    }
+}
+
+// 表里的浮点数都来自官方的常量，没有 NaN。
+impl Eq for ToolRule {}
+
+/// 工具规则匹配的方块集合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockSet {
+    /// 一个方块标签，常量在 [`tags::block_tags`]。
+    Tag(BlockTag),
+    /// 单个方块的注册表 ID。
+    Block(i32),
+}
+
+impl BlockSet {
+    /// 这块方块在不在这里面。
+    pub fn contains(self, block: i32) -> bool {
+        match self {
+            Self::Tag(tag) => block_tag(tag.name).is_some_and(|ids| ids.contains(&block)),
+            Self::Block(id) => id == block,
+        }
+    }
 }
 
 /// `compostable` 组件的 `layers`，数据包 `context_int_provider/compostable` 里的整数提供器。

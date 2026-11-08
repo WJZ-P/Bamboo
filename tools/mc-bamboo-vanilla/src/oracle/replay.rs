@@ -393,7 +393,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::FilledBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
-            | Effect::OpenSignEditor { .. } => None,
+            | Effect::OpenSignEditor { .. }
+            | Effect::NoteBlockPlayed { .. } => None,
         })
         .collect()
 }

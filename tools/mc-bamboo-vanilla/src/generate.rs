@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, CompostLayers, FieldValue, HeightmapType, Item, Property,
-    StateProvider, TagGroup, VersionData,
+    Block, BlockField, BlockPredicate, BlockSet, CompostLayers, FieldValue, HeightmapType, Item,
+    Property, StateProvider, TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -212,7 +212,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -227,6 +227,8 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.instrument,
             offset_literal(block),
             block.dynamic_shape,
+            block.destroy_time,
+            block.requires_correct_tool_for_drops,
         );
     }
 
@@ -809,8 +811,12 @@ fn check_state_ids(blocks: &[Block], total: u32) -> Result<(), String> {
 }
 
 fn items_file(data: &VersionData) -> Result<String, String> {
+    let block_tags = tag_indexes(&data.tags, BLOCK_REGISTRY)?;
     let mut out = String::new();
-    let _ = writeln!(out, "use crate::{{CompostLayers, Item, ItemKind}};\n");
+    let _ = writeln!(
+        out,
+        "use crate::{{BlockSet, CompostLayers, Item, ItemKind, Tool, ToolRule}};\n"
+    );
     let _ = writeln!(out, "/// 各物品的注册表 ID。");
     for (id, item) in data.items.iter().enumerate() {
         let _ = writeln!(out, "pub const {}: i32 = {id};", constant_name(&item.name));
@@ -821,7 +827,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {}, tool: {} }},",
             item.name,
             item_kind(item)?,
             item.block,
@@ -833,7 +839,8 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             compost_layers_of(item),
             item.jukebox_playable,
             block_transformer_of(item, data)?,
-            item.blocks_attacks
+            item.blocks_attacks,
+            tool_of(item, &block_tags)?
         );
     }
     let _ = writeln!(out, "];");
@@ -872,6 +879,48 @@ fn block_transformer_of(item: &Item, data: &VersionData) -> Result<String, Strin
     Ok(format!(
         "Some(&crate::block_transformers::{})",
         constant_name(name)
+    ))
+}
+
+/// 物品的 `minecraft:tool` 组件。规则按数据包里的顺序写，先匹配到的算数。
+fn tool_of(item: &Item, block_tags: &TagIndexes) -> Result<String, String> {
+    let Some(tool) = &item.tool else {
+        return Ok("None".to_owned());
+    };
+    let rules = tool
+        .rules
+        .iter()
+        .map(|rule| {
+            let blocks = rule
+                .blocks
+                .iter()
+                .map(|set| match set {
+                    BlockSet::Tag(name) => {
+                        if !block_tags.contains_key(name.as_str()) {
+                            return Err(format!(
+                                "{} 的工具规则引用了不存在的方块标签 {name}",
+                                item.name
+                            ));
+                        }
+                        Ok(format!(
+                            "BlockSet::Tag(crate::tags::block_tags::{})",
+                            constant_name(name)
+                        ))
+                    }
+                    BlockSet::Block(id) => Ok(format!("BlockSet::Block({id})")),
+                })
+                .collect::<Result<Vec<String>, String>>()?
+                .join(", ");
+            Ok(format!(
+                "ToolRule {{ blocks: &[{blocks}], speed: {:?}, correct_for_drops: {:?} }}",
+                rule.speed, rule.correct_for_drops
+            ))
+        })
+        .collect::<Result<Vec<String>, String>>()?;
+    Ok(format!(
+        "Some(Tool {{ rules: &[{}], default_mining_speed: {:?} }})",
+        rules.join(", "),
+        tool.default_mining_speed
     ))
 }
 
@@ -954,6 +1003,17 @@ fn registries_file(data: &VersionData) -> String {
         DATA_COMPONENT_TYPE_REGISTRY,
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
+
+    let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
+    let _ = writeln!(out, "pub mod attribute_defaults {{");
+    for (name, value) in &data.attribute_defaults {
+        let _ = writeln!(
+            out,
+            "    pub const {}: f64 = {value:?};",
+            constant_name(name)
+        );
+    }
+    let _ = writeln!(out, "}}\n");
     out
 }
 
@@ -1081,6 +1141,8 @@ mod tests {
             instrument: "harp".to_owned(),
             dynamic_shape: false,
             offset: None,
+            destroy_time: 0.0,
+            requires_correct_tool_for_drops: false,
         }
     }
 
@@ -1105,6 +1167,7 @@ mod tests {
             jukebox_playable: false,
             block_transformer: None,
             blocks_attacks: false,
+            tool: None,
         }
     }
 

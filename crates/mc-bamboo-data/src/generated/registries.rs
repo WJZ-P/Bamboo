@@ -539,3 +539,47 @@ pub mod fluid {
     pub const LAVA: i32 = 4;
 }
 
+/// 属性的默认值，没有任何状态效果和附魔时的起点。
+pub mod attribute_defaults {
+    pub const AIR_DRAG_MODIFIER: f64 = 1.0;
+    pub const ARMOR: f64 = 0.0;
+    pub const ARMOR_TOUGHNESS: f64 = 0.0;
+    pub const ATTACK_DAMAGE: f64 = 2.0;
+    pub const ATTACK_KNOCKBACK: f64 = 0.0;
+    pub const ATTACK_SPEED: f64 = 4.0;
+    pub const BELOW_NAME_DISTANCE: f64 = 10.0;
+    pub const BLOCK_BREAK_SPEED: f64 = 1.0;
+    pub const BLOCK_INTERACTION_RANGE: f64 = 4.5;
+    pub const BOUNCINESS: f64 = 0.0;
+    pub const BURNING_TIME: f64 = 1.0;
+    pub const CAMERA_DISTANCE: f64 = 4.0;
+    pub const ENTITY_INTERACTION_RANGE: f64 = 3.0;
+    pub const EXPLOSION_KNOCKBACK_RESISTANCE: f64 = 0.0;
+    pub const FALL_DAMAGE_MULTIPLIER: f64 = 1.0;
+    pub const FLYING_SPEED: f64 = 0.4;
+    pub const FOLLOW_RANGE: f64 = 32.0;
+    pub const FRICTION_MODIFIER: f64 = 1.0;
+    pub const GRAVITY: f64 = 0.08;
+    pub const JUMP_STRENGTH: f64 = 0.41999998688697815;
+    pub const KNOCKBACK_RESISTANCE: f64 = 0.0;
+    pub const LUCK: f64 = 0.0;
+    pub const MAX_ABSORPTION: f64 = 0.0;
+    pub const MAX_HEALTH: f64 = 20.0;
+    pub const MINING_EFFICIENCY: f64 = 0.0;
+    pub const MOVEMENT_EFFICIENCY: f64 = 0.0;
+    pub const MOVEMENT_SPEED: f64 = 0.7;
+    pub const NAME_TAG_DISTANCE: f64 = 64.0;
+    pub const OXYGEN_BONUS: f64 = 0.0;
+    pub const SAFE_FALL_DISTANCE: f64 = 3.0;
+    pub const SCALE: f64 = 1.0;
+    pub const SNEAKING_SPEED: f64 = 0.3;
+    pub const SPAWN_REINFORCEMENTS: f64 = 0.0;
+    pub const STEP_HEIGHT: f64 = 0.6;
+    pub const SUBMERGED_MINING_SPEED: f64 = 0.2;
+    pub const SWEEPING_DAMAGE_RATIO: f64 = 0.0;
+    pub const TEMPT_RANGE: f64 = 10.0;
+    pub const WATER_MOVEMENT_EFFICIENCY: f64 = 0.0;
+    pub const WAYPOINT_RECEIVE_RANGE: f64 = 0.0;
+    pub const WAYPOINT_TRANSMIT_RANGE: f64 = 0.0;
+}
+

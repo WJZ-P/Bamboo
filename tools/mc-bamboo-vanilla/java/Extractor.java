@@ -55,6 +55,7 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.HoneycombItem;
@@ -165,6 +166,7 @@ public final class Extractor {
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("attributeDefaults", attributeDefaults());
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -318,11 +320,24 @@ public final class Extractor {
             object.add("properties", properties(block));
             object.add("fields", fields(block));
             object.addProperty("instrument", state.instrument().getSerializedName());
+            object.addProperty("destroyTime", block.defaultDestroyTime());
+            object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
             addOffset(object, block);
             blocks.add(object);
         }
         return blocks;
+    }
+
+    /** 属性的默认值。玩家没有状态效果、没有附魔时的起点。 */
+    private static JsonObject attributeDefaults() {
+        JsonObject defaults = new JsonObject();
+        for (Attribute attribute : BuiltInRegistries.ATTRIBUTE) {
+            defaults.addProperty(
+                    BuiltInRegistries.ATTRIBUTE.getKey(attribute).toString(),
+                    attribute.getDefaultValue());
+        }
+        return defaults;
     }
 
     /** 分派表按类名走。匿名类没有名字，官方以后用了要先决定它算哪一类。 */
