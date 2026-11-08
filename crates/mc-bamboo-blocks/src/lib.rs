@@ -9,6 +9,8 @@
 //!
 //! 世界里没有红石信号和光照引擎，见 [`World::has_neighbor_signal`] 和 [`World::raw_brightness`]。
 
+mod block_entity;
+
 pub mod behaviour;
 pub mod context;
 pub mod fluid;

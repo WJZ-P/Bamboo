@@ -865,8 +865,12 @@ mod tests {
     }
 
     fn answer(result: &str, changes: &str) -> String {
+        answer_with_ticks(result, changes, "[]")
+    }
+
+    fn answer_with_ticks(result: &str, changes: &str, ticks: &str) -> String {
         format!(
-            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":[],"itemReached":true,"spawned":[],"rng":false}}"#
+            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":{ticks},"itemReached":true,"spawned":[],"rng":false}}"#
         )
     }
 
@@ -905,11 +909,13 @@ mod tests {
         let scene = format!("[[0,64,0,{}]]", blocks::STONE);
         let fire = format!("[[0,65,0,{}]]", blocks::FIRE);
         let flint = "minecraft:flint_and_steel";
+        // 点着的火在自己身上排了下一个刻，延迟来自世界随机源，写成官方的“随机延迟”。
+        let fire_tick = r#"[[0,65,0,"block","minecraft:fire",-1,0]]"#;
         let lit = click_top(
             flint,
             "FlintAndSteelItem",
             &scene,
-            &answer("success", &fire),
+            &answer_with_ticks("success", &fire, fire_tick),
         );
         assert_eq!(verdict_of(&lit), Ok(()));
         let left_alone = click_top(flint, "FlintAndSteelItem", &scene, &answer("pass", "[]"));
@@ -981,7 +987,11 @@ mod tests {
         assert_eq!(java_args[4], "--untick");
         assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
         assert_eq!(java_args[6], "--unrandom");
-        assert!(java_args[7].split(',').any(|class| class == "TurtleEggBlock"));
+        assert!(
+            java_args[7]
+                .split(',')
+                .any(|class| class == "TurtleEggBlock")
+        );
         assert_eq!(options.rerun_args(), "--only SlabBlock");
         assert!(Options::parse(&["--seed"]).is_err());
         assert!(Options::parse(&["--show", "many"]).is_err());

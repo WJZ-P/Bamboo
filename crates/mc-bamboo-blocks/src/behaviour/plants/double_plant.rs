@@ -231,10 +231,9 @@ impl Behaviour for PitcherCrop {
     }
 
     fn is_valid_bonemeal_target(&self, state: BlockState, world: &World, pos: BlockPos) -> bool {
-        pitcher_lower_half(state, world, pos)
-            .is_some_and(|(lower_pos, lower)| {
-                pitcher_can_grow(lower, world, lower_pos, lower.get(AGE_4) + 1)
-            })
+        pitcher_lower_half(state, world, pos).is_some_and(|(lower_pos, lower)| {
+            pitcher_can_grow(lower, world, lower_pos, lower.get(AGE_4) + 1)
+        })
     }
 
     fn perform_bonemeal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
@@ -250,7 +249,11 @@ fn is_pitcher_lower(state: BlockState) -> bool {
 }
 
 /// `getLowerHalf`：点中的是上半时往下找。
-fn pitcher_lower_half(state: BlockState, world: &World, pos: BlockPos) -> Option<(BlockPos, BlockState)> {
+fn pitcher_lower_half(
+    state: BlockState,
+    world: &World,
+    pos: BlockPos,
+) -> Option<(BlockPos, BlockState)> {
     if is_pitcher_lower(state) {
         return Some((pos, state));
     }

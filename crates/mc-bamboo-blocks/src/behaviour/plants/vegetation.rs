@@ -14,8 +14,8 @@ use crate::{
     behaviour::{
         Behaviour, Plain,
         common::{
-            default_state, field_block, field_tag, is_full_water, is_water_source, may_place_vegetation_on,
-            tick_water_if_waterlogged, vegetation_update_shape,
+            default_state, field_block, field_tag, is_full_water, is_water_source,
+            may_place_vegetation_on, tick_water_if_waterlogged, vegetation_update_shape,
         },
     },
     context::{PlaceContext, UseContext},
@@ -432,7 +432,8 @@ impl Behaviour for Seagrass {
 
     /// 长成两格高的海草。
     fn perform_bonemeal(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
-        let lower = BlockState(blocks::TALL_SEAGRASS).with(DOUBLE_BLOCK_HALF, DoubleBlockHalf::Lower);
+        let lower =
+            BlockState(blocks::TALL_SEAGRASS).with(DOUBLE_BLOCK_HALF, DoubleBlockHalf::Lower);
         let upper = lower.with(DOUBLE_BLOCK_HALF, DoubleBlockHalf::Upper);
         world.set_block(pos, lower, UPDATE_CLIENTS);
         world.set_block(pos.above(), upper, UPDATE_CLIENTS);
@@ -482,6 +483,8 @@ impl Behaviour for SweetBerryBush {
         if state.get(AGE_3) <= PICKED_BUSH_AGE {
             return Plain.use_without_item(state, world, ctx);
         }
+        // `useWithoutItem` 放摘果子的声音，音量随机；不出声也要取这个数，后面的计划刻才不错开。
+        world.random().next_float();
         let picked = state.with(AGE_3, PICKED_BUSH_AGE);
         world.set_block(ctx.clicked_pos(), picked, UPDATE_CLIENTS);
         InteractionResult::Success

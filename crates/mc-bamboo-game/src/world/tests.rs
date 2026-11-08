@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use mc_bamboo_blocks::LevelRandom;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand};
 use mc_bamboo_data::{blocks, packets::play::clientbound};
 use mc_bamboo_protocol::{
@@ -158,8 +159,11 @@ impl Harness {
             view_distance,
             max_players: 20,
         };
+        let mut world = World::new(config, receiver);
+        // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。
+        world.region.random = LevelRandom::new(0);
         Self {
-            world: World::new(config, receiver),
+            world,
             inbox,
             in_flight: Arc::default(),
             next_id: 1,

@@ -98,7 +98,8 @@ pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
 pub(crate) fn run_random_ticks(region: &mut Region) {
     for chunk in random_ticking_chunks(region) {
         let (mut level, ticks) = region.block_level();
-        let outcome = mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, DEFAULT_RANDOM_TICK_SPEED);
+        let outcome =
+            mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, DEFAULT_RANDOM_TICK_SPEED);
         send_effects(region, None, &outcome.effects);
     }
 }
@@ -305,7 +306,11 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
 
 /// 破坏的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
 fn send_destroy_event(region: &mut Region, except: Option<PlayerId>, pos: BlockPos, state: u32) {
-    send_level_event(region, except, &LevelEvent::destroy_block(pos, state as i32));
+    send_level_event(
+        region,
+        except,
+        &LevelEvent::destroy_block(pos, state as i32),
+    );
 }
 
 /// 把一个 `level_event` 发给听得到的人，`except` 除外。

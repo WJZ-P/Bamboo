@@ -107,7 +107,9 @@ fn place_part(world: &mut World, block: u32, pos: BlockPos, fluid: FluidState, f
 /// `BigDripleafBlock.placeWithRandomHeight`：从 `bottom` 往上长出一株 2 到 5 格高的大型垂滴叶，
 /// 长不了这么高时能长多高长多高。
 pub(super) fn place_with_random_height(world: &mut World, bottom: BlockPos, facing: Direction) {
-    let desired = world.random().mth_next_int(MIN_GROWN_HEIGHT, MAX_GROWN_HEIGHT);
+    let desired = world
+        .random()
+        .mth_next_int(MIN_GROWN_HEIGHT, MAX_GROWN_HEIGHT);
     let mut height = 0;
     while height < desired && can_grow_into(world, bottom.relative_by(Direction::Up, height)) {
         height += 1;

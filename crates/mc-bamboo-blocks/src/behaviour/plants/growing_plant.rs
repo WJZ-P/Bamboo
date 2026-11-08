@@ -32,7 +32,10 @@ const NETHER_VINES_GROWTH_DECAY: f64 = 0.826;
 fn grow_per_tick_probability(block: &Block) -> f64 {
     match block.field("growPerTickProbability") {
         Some(FieldValue::Double(probability)) => probability,
-        other => panic!("field growPerTickProbability of {} is {other:?}", block.name),
+        other => panic!(
+            "field growPerTickProbability of {} is {other:?}",
+            block.name
+        ),
     }
 }
 
@@ -212,6 +215,8 @@ fn pick_berries(state: BlockState, world: &mut World, pos: BlockPos) -> Interact
     if state.try_get(BERRIES) != Some(true) {
         return InteractionResult::Pass;
     }
+    // `CaveVines.use` 摘果子前取一个音高，`Mth.randomBetween` 只用一个 `nextFloat`。
+    world.random().next_float();
     world.set_block(pos, state.with(BERRIES, false), UPDATE_CLIENTS);
     InteractionResult::Success
 }

@@ -150,6 +150,10 @@ impl Behaviour for Door {
         let other_half = if lower { pos.above() } else { pos.below() };
         let signal = has_signal(world, pos, other_half);
         if !state.is(source.default_state) && signal != state.get(POWERED) {
+            if signal != state.get(OPEN) {
+                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
+                world.random().next_float();
+            }
             let updated = state.with(POWERED, signal).with(OPEN, signal);
             world.set_block(pos, updated, UPDATE_CLIENTS);
         }
@@ -186,6 +190,8 @@ impl Behaviour for Door {
             toggled,
             UPDATE_CLIENTS | UPDATE_IMMEDIATE,
         );
+        // `playSound` 在放下新状态之后取音高，后面的随机刻要接在这里。
+        world.random().next_float();
         InteractionResult::Success
     }
 }

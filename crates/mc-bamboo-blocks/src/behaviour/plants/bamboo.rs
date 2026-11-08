@@ -116,7 +116,10 @@ fn grow_stalk(state: BlockState, world: &mut World, pos: BlockPos, height: i32) 
         } else {
             leaves = BambooLeaves::Large;
             if two_below.is(blocks::BAMBOO) {
-                world.set_block_and_update(below_pos, below.with(BAMBOO_LEAVES, BambooLeaves::Small));
+                world.set_block_and_update(
+                    below_pos,
+                    below.with(BAMBOO_LEAVES, BambooLeaves::Small),
+                );
                 world.set_block_and_update(
                     two_below_pos,
                     two_below.with(BAMBOO_LEAVES, BambooLeaves::None),
@@ -228,10 +231,10 @@ impl Behaviour for BambooStalk {
 
     /// 从最上面一节往上长一到两节，长不了时停下。
     fn perform_bonemeal(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
-        let mut above = height_above(world, pos);
-        let mut height = above + height_below(world, pos) + 1;
+        let first = height_above(world, pos);
+        let height = first + height_below(world, pos) + 1;
         let count = 1 + world.random().next_int(2);
-        for _ in 0..count {
+        for (height, above) in (height..).zip((first..).take(count as usize)) {
             let top_pos = pos.relative_by(Direction::Up, above);
             let top = world.block_state(top_pos);
             let growth = top_pos.above();
@@ -243,8 +246,6 @@ impl Behaviour for BambooStalk {
                 return;
             }
             grow_stalk(top, world, top_pos, height);
-            above += 1;
-            height += 1;
         }
     }
 }

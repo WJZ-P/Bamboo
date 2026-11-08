@@ -107,13 +107,11 @@ impl Behaviour for FrostedIce {
 
     /// 三分之一的机会，或者同种邻居少的时候，够亮就化一级。主世界看天空和方块光里亮的那个。
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        if world.random().next_int(3) == 0 || has_fewer_neighbours(state, world, pos, NEIGHBORS_TO_AGE)
+        if world.random().next_int(3) == 0
+            || has_fewer_neighbours(state, world, pos, NEIGHBORS_TO_AGE)
         {
-            let threshold =
-                MELT_BRIGHTNESS - state.get(AGE_3) - i32::from(state.light_dampening());
-            if world.max_local_raw_brightness(pos) > threshold
-                && slightly_melt(state, world, pos)
-            {
+            let threshold = MELT_BRIGHTNESS - state.get(AGE_3) - i32::from(state.light_dampening());
+            if world.max_local_raw_brightness(pos) > threshold && slightly_melt(state, world, pos) {
                 melt_neighbours(state, world, pos);
                 return;
             }

@@ -83,6 +83,10 @@ impl Behaviour for TrapDoor {
     ) {
         let signal = world.has_neighbor_signal(pos);
         if signal != state.get(POWERED) {
+            if state.get(OPEN) != signal {
+                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
+                world.random().next_float();
+            }
             let updated = state.with(OPEN, signal).with(POWERED, signal);
             world.set_block(pos, updated, UPDATE_CLIENTS);
             tick_water_if_waterlogged(state, world, pos);
@@ -102,6 +106,8 @@ impl Behaviour for TrapDoor {
         let toggled = state.cycle(OPEN);
         world.set_block(pos, toggled, UPDATE_CLIENTS);
         tick_water_if_waterlogged(toggled, world, pos);
+        // `playSound` 在计划流体刻之后取音高。
+        world.random().next_float();
         InteractionResult::Success
     }
 }

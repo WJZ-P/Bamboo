@@ -163,7 +163,11 @@ fn spread_sideways(state: BlockState, world: &mut World, pos: BlockPos, directio
     if world.block_state(test_pos).is_air() {
         spread_into_air(state, world, pos, direction);
     } else if is_acceptable_neighbour(world, test_pos, direction) {
-        world.set_block(pos, state.with(pipe_property(direction), true), UPDATE_CLIENTS);
+        world.set_block(
+            pos,
+            state.with(pipe_property(direction), true),
+            UPDATE_CLIENTS,
+        );
     }
 }
 
@@ -180,19 +184,35 @@ fn spread_into_air(state: BlockState, world: &mut World, pos: BlockPos, directio
     let fresh = state.default_state();
     let opposite = direction.opposite();
     if has_clockwise && is_acceptable_neighbour(world, clockwise_pos, clockwise) {
-        world.set_block(test_pos, fresh.with(pipe_property(clockwise), true), UPDATE_CLIENTS);
+        world.set_block(
+            test_pos,
+            fresh.with(pipe_property(clockwise), true),
+            UPDATE_CLIENTS,
+        );
     } else if has_counter && is_acceptable_neighbour(world, counter_pos, counter) {
-        world.set_block(test_pos, fresh.with(pipe_property(counter), true), UPDATE_CLIENTS);
+        world.set_block(
+            test_pos,
+            fresh.with(pipe_property(counter), true),
+            UPDATE_CLIENTS,
+        );
     } else if has_clockwise
         && world.is_empty_block(clockwise_pos)
         && is_acceptable_neighbour(world, pos.relative(clockwise), opposite)
     {
-        world.set_block(clockwise_pos, fresh.with(pipe_property(opposite), true), UPDATE_CLIENTS);
+        world.set_block(
+            clockwise_pos,
+            fresh.with(pipe_property(opposite), true),
+            UPDATE_CLIENTS,
+        );
     } else if has_counter
         && world.is_empty_block(counter_pos)
         && is_acceptable_neighbour(world, pos.relative(counter), opposite)
     {
-        world.set_block(counter_pos, fresh.with(pipe_property(opposite), true), UPDATE_CLIENTS);
+        world.set_block(
+            counter_pos,
+            fresh.with(pipe_property(opposite), true),
+            UPDATE_CLIENTS,
+        );
     } else if f64::from(world.random().next_float()) < CLIMB_UP_CHANCE
         && is_acceptable_neighbour(world, test_pos.above(), Direction::Up)
     {

@@ -42,12 +42,8 @@ fn pick_weighted(distribution: &[(i32, i32)], random: &LegacyRandom) -> i32 {
 fn layers_to_add(layers: CompostLayers, state: BlockState, world: &World) -> i32 {
     match layers {
         CompostLayers::Constant(layers) => layers,
-        CompostLayers::Weighted { when_empty, .. } if state.get(LEVEL_COMPOSTER) == 0 => {
-            when_empty
-        }
-        CompostLayers::Weighted { distribution, .. } => {
-            pick_weighted(distribution, world.random())
-        }
+        CompostLayers::Weighted { when_empty, .. } if state.get(LEVEL_COMPOSTER) == 0 => when_empty,
+        CompostLayers::Weighted { distribution, .. } => pick_weighted(distribution, world.random()),
     }
 }
 
@@ -97,6 +93,10 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) != READY {
             return InteractionResult::Pass;
         }
+        // `extractProduce` 先给掉出来的骨粉算落点，`Vec3.offsetRandomXZ` 取两个 `nextFloat`。
+        // 世界里没有物品实体，这两个数照样要取。
+        world.random().next_float();
+        world.random().next_float();
         world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_COMPOSTER, 0));
         InteractionResult::Success
     }
@@ -128,7 +128,10 @@ mod tests {
     fn an_empty_composter_always_takes_a_layer() {
         let mut level = TestLevel::new();
         level.set(COMPOSTER, BlockState(blocks::COMPOSTER));
-        assert_eq!(compost(&mut level, items::WHEAT_SEEDS), InteractionResult::Success);
+        assert_eq!(
+            compost(&mut level, items::WHEAT_SEEDS),
+            InteractionResult::Success
+        );
         assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), 1);
     }
 
@@ -137,27 +140,42 @@ mod tests {
     fn seeds_add_a_layer_on_a_thirty_percent_draw() {
         let mut level = TestLevel::new();
         let expected = LegacyRandom::new(0).next_int(100) < 30;
-        level.set(COMPOSTER, BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 3));
-        assert_eq!(compost(&mut level, items::WHEAT_SEEDS), InteractionResult::Success);
-        assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), 3 + i32::from(expected));
+        level.set(
+            COMPOSTER,
+            BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 3),
+        );
+        assert_eq!(
+            compost(&mut level, items::WHEAT_SEEDS),
+            InteractionResult::Success
+        );
+        assert_eq!(
+            level.get(COMPOSTER).get(LEVEL_COMPOSTER),
+            3 + i32::from(expected)
+        );
     }
 
     #[test]
     fn a_cake_always_adds_a_layer() {
         let mut level = TestLevel::new();
-        level.set(COMPOSTER, BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 6));
+        level.set(
+            COMPOSTER,
+            BlockState(blocks::COMPOSTER).with(LEVEL_COMPOSTER, 6),
+        );
         compost(&mut level, items::CAKE);
         assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), MAX_LEVEL);
     }
 
     #[test]
     fn stone_is_not_compostable() {
+        // 堆肥桶不认石头，官方接着让物品自己试，石头是方块物品，会在上面放下来。
+        // 要点是堆肥桶没有加层。
         let mut level = TestLevel::new();
         level.set(COMPOSTER, BlockState(blocks::COMPOSTER));
         assert_eq!(
             compost(&mut level, items::STONE),
-            InteractionResult::TryEmptyHandInteraction
+            InteractionResult::Success
         );
+        assert_eq!(level.get(COMPOSTER).get(LEVEL_COMPOSTER), 0);
     }
 
     #[test]

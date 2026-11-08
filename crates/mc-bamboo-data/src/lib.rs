@@ -524,7 +524,9 @@ mod tests {
         assert_eq!(count(ItemKind::GameMaster), 7);
         assert_eq!(count(ItemKind::Scaffolding), 1);
         assert_eq!(count(ItemKind::SolidBucket), 1);
-        assert_eq!(count(ItemKind::Other), 510);
+        assert_eq!(count(ItemKind::Brush), 1);
+        assert_eq!(count(ItemKind::BoneMeal), 1);
+        assert_eq!(count(ItemKind::Other), 509);
 
         assert_eq!(item(items::LILY_PAD).kind, ItemKind::PlaceOnWater);
         assert_eq!(item(items::COMMAND_BLOCK).kind, ItemKind::GameMaster);
@@ -536,11 +538,12 @@ mod tests {
         assert_eq!(item(items::ENDER_EYE).kind, ItemKind::EnderEye);
         assert_eq!(item(items::DEBUG_STICK).kind, ItemKind::DebugStick);
         assert_eq!(item(items::BRUSH).kind, ItemKind::Brush);
+        assert_eq!(item(items::BONE_MEAL).kind, ItemKind::BoneMeal);
     }
 
     #[test]
     fn only_block_items_have_a_block() {
-        const NOT_BLOCK_ITEMS: [ItemKind; 8] = [
+        const NOT_BLOCK_ITEMS: [ItemKind; 9] = [
             ItemKind::FlintAndSteel,
             ItemKind::FireCharge,
             ItemKind::Honeycomb,
@@ -548,6 +551,7 @@ mod tests {
             ItemKind::EnderEye,
             ItemKind::DebugStick,
             ItemKind::Brush,
+            ItemKind::BoneMeal,
             ItemKind::Other,
         ];
         assert_eq!(block_items().count(), 1141);
@@ -675,7 +679,9 @@ mod tests {
 
     #[test]
     fn compostable_comes_from_the_components() {
-        let compostable = items::ITEMS.iter().filter(|item| item.compostable.is_some());
+        let compostable = items::ITEMS
+            .iter()
+            .filter(|item| item.compostable.is_some());
         assert_eq!(compostable.count(), 122);
         assert!(item(items::OAK_LEAVES).compostable.is_some());
         assert!(item(items::STONE).compostable.is_none());

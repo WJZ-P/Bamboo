@@ -139,7 +139,11 @@ impl Behaviour for Multiface {
 }
 
 /// `MultifaceSpreader.DEFAULT_SPREAD_ORDER`：同一格换一面、同一平面的邻格、绕过拐角。
-fn spread_positions(pos: BlockPos, spread: Direction, from: Direction) -> [(BlockPos, Direction); 3] {
+fn spread_positions(
+    pos: BlockPos,
+    spread: Direction,
+    from: Direction,
+) -> [(BlockPos, Direction); 3] {
     let beside = pos.relative(spread);
     [
         (pos, spread),
@@ -174,7 +178,12 @@ fn can_spread_into(lichen: BlockState, world: &World, target: BlockPos, face: Di
 }
 
 /// `spreadToFace`：在落点加上这一面，世界真的变了才算蔓延出去。
-fn spread_to_face(lichen: BlockState, world: &mut World, target: BlockPos, face: Direction) -> bool {
+fn spread_to_face(
+    lichen: BlockState,
+    world: &mut World,
+    target: BlockPos,
+    face: Direction,
+) -> bool {
     let old = world.block_state(target);
     state_on_face(lichen.default_state(), old, world, target, face)
         .is_some_and(|spread| world.set_block(target, spread, UPDATE_CLIENTS))

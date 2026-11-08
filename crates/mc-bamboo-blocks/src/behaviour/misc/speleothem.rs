@@ -393,7 +393,9 @@ fn can_grow(own: BlockState, world: &World, pos: BlockPos) -> bool {
     let Some(FieldValue::State(grow_on)) = block.field("blockToGrowOn") else {
         panic!("field blockToGrowOn of {} is not a state", block.name);
     };
-    let on_base = world.block_state(pos.above()).is_same_block(BlockState(grow_on));
+    let on_base = world
+        .block_state(pos.above())
+        .is_same_block(BlockState(grow_on));
     if !own.is(blocks::POINTED_DRIPSTONE) {
         return on_base;
     }
@@ -453,8 +455,20 @@ fn create_merged_tips(own: BlockState, world: &mut World, tip_state: BlockState,
     } else {
         (tip, tip.below())
     };
-    create_speleothem(own, world, stalactite, Direction::Down, SpeleothemThickness::TipMerge);
-    create_speleothem(own, world, stalagmite, Direction::Up, SpeleothemThickness::TipMerge);
+    create_speleothem(
+        own,
+        world,
+        stalactite,
+        Direction::Down,
+        SpeleothemThickness::TipMerge,
+    );
+    create_speleothem(
+        own,
+        world,
+        stalagmite,
+        Direction::Up,
+        SpeleothemThickness::TipMerge,
+    );
 }
 
 /// `growStalagmiteBelow`：往下找最多 10 格，长高已有的石笋，或者在地上长一根新的。

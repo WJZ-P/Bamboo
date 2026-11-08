@@ -112,7 +112,13 @@ fn wants_to_grow_up(plant: BlockState, world: &World, pos: BlockPos) -> (bool, b
 }
 
 /// 往随机的水平方向试着分叉，一个都没分出去时枯死。
-fn branch(flower: BlockState, plant: BlockState, world: &mut World, pos: BlockPos, on_support: bool) {
+fn branch(
+    flower: BlockState,
+    plant: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    on_support: bool,
+) {
     let attempts = world.random().next_int(4) + i32::from(on_support);
     let age = flower.get(AGE_5);
     let mut branched = false;
@@ -147,7 +153,11 @@ fn place_grown_flower(flower: BlockState, world: &mut World, pos: BlockPos, age:
 
 /// `placeDeadFlower`。
 fn place_dead_flower(flower: BlockState, world: &mut World, pos: BlockPos) {
-    world.set_block(pos, flower.default_state().with(AGE_5, DEAD_AGE), UPDATE_CLIENTS);
+    world.set_block(
+        pos,
+        flower.default_state().with(AGE_5, DEAD_AGE),
+        UPDATE_CLIENTS,
+    );
 }
 
 /// `allNeighborsEmpty`：四个水平邻居都是空气，`ignore` 那一面不看。

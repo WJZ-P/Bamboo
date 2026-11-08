@@ -27,7 +27,12 @@ pub(super) fn fire_charge(world: &mut World, ctx: &UseContext) -> InteractionRes
 ///
 /// 音效不做，但官方在写方块之前为音调取了 `sound_draws` 个随机数，火放下时又要取数排计划刻，
 /// 所以这几个数照取。
-fn ignite(world: &mut World, ctx: &UseContext, flags: u32, sound_draws: usize) -> InteractionResult {
+fn ignite(
+    world: &mut World,
+    ctx: &UseContext,
+    flags: u32,
+    sound_draws: usize,
+) -> InteractionResult {
     let pos = ctx.clicked_pos();
     let state = world.block_state(pos);
     if can_light(state) {

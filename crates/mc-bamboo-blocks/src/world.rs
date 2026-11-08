@@ -7,6 +7,7 @@ use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::error;
 
 use crate::{
+    block_entity,
     context::BlockHit,
     fluid::Fluid,
     level::{Effect, Level},
@@ -528,6 +529,14 @@ impl<'a> World<'a> {
 
         let block_changed = !old.is_same_block(state);
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
+        // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
+        if block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0
+        {
+            block_entity::pre_remove_side_effects(old, self);
+        }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
             old.affect_neighbors_after_removal(self, pos);

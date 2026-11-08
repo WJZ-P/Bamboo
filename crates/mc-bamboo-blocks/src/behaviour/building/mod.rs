@@ -32,7 +32,7 @@ use self::{
     iron_bars::IronBars,
     pillar::{Chain, RotatedPillar},
     slab::Slab,
-    snowy::{SpreadingSnowy, Snowy},
+    snowy::{Snowy, SpreadingSnowy},
     stairs::Stair,
     trapdoor::TrapDoor,
     wall::Wall,
