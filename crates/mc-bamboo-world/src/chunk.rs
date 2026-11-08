@@ -2,15 +2,140 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_data::{block_of_state, blocks, facts, state_facts};
+use mc_bamboo_data::{
+    block_of_state, blocks, facts, heightmaps, registries, state_facts, state_fluid,
+};
 
 use crate::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
-    palette::{PalettedContainer, pack_values},
+    light::{SkyLightSources, sources::updated_lowest_source},
+    palette::{PaletteView, PalettedContainer, pack_values},
 };
 
-/// 一个方块柱在高度图里占用的位数，要能表示 0 到 384。
-const HEIGHTMAP_BITS: u8 = 9;
+/// `isAir`：空气、洞穴空气和虚空空气。
+fn is_air(state: u32) -> bool {
+    state_facts(state) & facts::AIR != 0
+}
+
+/// `FluidState.isEmpty()`：只有空流体才算没有流体。含水方块的流体不是空的。
+fn fluid_is_empty(state: u32) -> bool {
+    state_fluid(state).fluid == registries::fluid::EMPTY
+}
+
+/// 区块里一直留着的高度图，官方 `ChunkStatus.FINAL_HEIGHTMAPS`。每种用不同的判定找地面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeightmapKind {
+    /// 最高的非空气方块。
+    WorldSurface,
+    /// 最高的 `BLOCKS_MOTION_IN_HEIGHTMAP` 方块，水不算。
+    OceanFloor,
+    /// 最高的挡运动方块，水也算。
+    MotionBlocking,
+    /// 和 [`MotionBlocking`](Self::MotionBlocking) 一样，但树叶不算。
+    MotionBlockingNoLeaves,
+}
+
+impl HeightmapKind {
+    /// 全部种类。
+    pub const ALL: [Self; 4] = [
+        Self::WorldSurface,
+        Self::OceanFloor,
+        Self::MotionBlocking,
+        Self::MotionBlockingNoLeaves,
+    ];
+
+    /// 生成数据里的类型对应的种类。只在世界生成时用、区块里不留的类型返回 `None`。
+    pub fn of_type(heightmap: &heightmaps::HeightmapType) -> Option<Self> {
+        Some(match heightmap.name {
+            "WORLD_SURFACE" => Self::WorldSurface,
+            "OCEAN_FLOOR" => Self::OceanFloor,
+            "MOTION_BLOCKING" => Self::MotionBlocking,
+            "MOTION_BLOCKING_NO_LEAVES" => Self::MotionBlockingNoLeaves,
+            _ => return None,
+        })
+    }
+
+    /// 官方的 `Types.isOpaque()`：这一格算不算这一列的地面。
+    fn is_opaque(self, state: u32) -> bool {
+        let found = state_facts(state);
+        match self {
+            Self::WorldSurface => found & facts::AIR == 0,
+            Self::OceanFloor => found & facts::MOTION_BLOCKING != 0,
+            Self::MotionBlocking => found & facts::MOTION_BLOCKING != 0 || !fluid_is_empty(state),
+            Self::MotionBlockingNoLeaves => {
+                found & facts::MOTION_BLOCKING_NO_LEAVES != 0 || !fluid_is_empty(state)
+            }
+        }
+    }
+}
+
+/// 一张高度图：256 列，每列是这一列最高地面的上面一格相对世界底部的高度。
+#[derive(Debug, Clone, Copy)]
+struct Heightmap {
+    columns: [u32; 256],
+}
+
+impl Heightmap {
+    /// 还没有方块的高度图，每列都在世界底部。
+    const EMPTY: Self = Self { columns: [0; 256] };
+
+    const fn index(x: usize, z: usize) -> usize {
+        x + z * 16
+    }
+
+    /// 官方的 `Heightmap.update`：`(x, y, z)` 换成了 `state`。
+    fn update(
+        &mut self,
+        kind: HeightmapKind,
+        sections: &[Section],
+        x: usize,
+        y: i32,
+        z: usize,
+        state: u32,
+    ) {
+        let index = Self::index(x, z);
+        let first_available = self.columns[index] as i32 + MIN_Y;
+        if y <= first_available - 2 {
+            return;
+        }
+
+        if kind.is_opaque(state) {
+            if y >= first_available {
+                self.set_height(index, y + 1);
+            }
+        } else if first_available - 1 == y {
+            // 移走了这一列最高的地面，往下找下一格。方块已经写进区块段了。
+            for found in (MIN_Y..y).rev() {
+                if kind.is_opaque(section_block(sections, x, found, z)) {
+                    self.set_height(index, found + 1);
+                    return;
+                }
+            }
+            self.set_height(index, MIN_Y);
+        }
+    }
+
+    fn set_height(&mut self, index: usize, height: i32) {
+        self.columns[index] = (height - MIN_Y) as u32;
+    }
+}
+
+/// 区块段里 `(x, y, z)` 的方块。`y` 是世界高度，调用前保证在世界里。
+fn section_block(sections: &[Section], x: usize, y: i32, z: usize) -> u32 {
+    let offset = (y - MIN_Y) as usize;
+    sections[offset / SECTION_SIZE as usize].block(x, offset % SECTION_SIZE as usize, z)
+}
+
+/// 高度图每列占的位数，官方 `Mth.ceillog2(getHeight() + 1)`。
+const fn heightmap_bits() -> u8 {
+    let mut bits = 0;
+    while (1 << bits) < WORLD_HEIGHT as u32 + 1 {
+        bits += 1;
+    }
+    bits
+}
+
+const HEIGHTMAP_BITS: u8 = heightmap_bits();
 
 /// 16×16×16 的区块段。
 #[derive(Debug, Clone)]
@@ -20,6 +145,7 @@ pub struct Section {
     non_air_blocks: u16,
     /// 会随机刻的方块数，官方 `tickingBlockCount` 和 `tickingFluidCount` 合在一起。
     random_tickers: u16,
+    fluids: u16,
 }
 
 /// 这个状态的方块或者它的流体有随机刻。
@@ -34,6 +160,7 @@ impl Section {
             biomes: PalettedContainer::biomes(biome),
             non_air_blocks: 0,
             random_tickers: 0,
+            fluids: 0,
         }
     }
 
@@ -49,13 +176,18 @@ impl Section {
     fn set_block(&mut self, x: usize, y: usize, z: usize, state: u32) {
         let index = Self::block_index(x, y, z);
         let previous = self.blocks.get(index);
-        match (previous == blocks::AIR, state == blocks::AIR) {
+        match (is_air(previous), is_air(state)) {
             (true, false) => self.non_air_blocks += 1,
             (false, true) => self.non_air_blocks -= 1,
             _ => {}
         }
         self.random_tickers -= u16::from(ticks_randomly(previous));
         self.random_tickers += u16::from(ticks_randomly(state));
+        match (fluid_is_empty(previous), fluid_is_empty(state)) {
+            (true, false) => self.fluids += 1,
+            (false, true) => self.fluids -= 1,
+            _ => {}
+        }
         self.blocks.set(index, state);
     }
 
@@ -76,6 +208,25 @@ impl Section {
     pub fn block_count(&self) -> u16 {
         self.non_air_blocks
     }
+
+    /// 有流体的方块数量，区块段头里的 `fluidCount`。
+    pub fn fluid_count(&self) -> u16 {
+        self.fluids
+    }
+
+    /// `hasOnlyAir`。
+    pub fn is_empty(&self) -> bool {
+        self.non_air_blocks == 0
+    }
+
+    /// `maybeHas`：调色板里有满足条件的状态。没有调色板时不知道，按有算。
+    pub fn maybe_has(&self, predicate: impl Fn(u32) -> bool) -> bool {
+        match self.blocks.palette() {
+            PaletteView::Single(state) => predicate(state),
+            PaletteView::Indirect(states) => states.iter().any(|&state| predicate(state)),
+            PaletteView::Global => true,
+        }
+    }
 }
 
 /// 区块里的一个方块实体。现在只有位置和类型，内容都是默认值。
@@ -95,21 +246,57 @@ pub struct BlockEntity {
 #[derive(Debug, Clone)]
 pub struct Chunk {
     sections: Vec<Section>,
+    /// 和 [`HeightmapKind::ALL`] 一一对应。
+    heightmaps: [Heightmap; HeightmapKind::ALL.len()],
     /// 有方块实体的位置和类型。键是 `(y, z, x)`，所以遍历顺序和放置的先后无关。
     block_entities: BTreeMap<(i32, usize, usize), i32>,
+    sky_light_sources: SkyLightSources,
 }
 
 impl Chunk {
-    /// 创建一个全是空气的区块。
+    /// 创建一个全是空气的区块。天空光源表要等 [`initialize_light_sources`](Self::initialize_light_sources) 才算。
     pub fn empty(biome: u32) -> Self {
         Self {
             sections: vec![Section::empty(biome); SECTION_COUNT],
+            heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
             block_entities: BTreeMap::new(),
+            sky_light_sources: SkyLightSources::default(),
         }
     }
 
     pub fn sections(&self) -> &[Section] {
         &self.sections
+    }
+
+    /// 每一列最低的天空光源。
+    pub fn sky_light_sources(&self) -> &SkyLightSources {
+        &self.sky_light_sources
+    }
+
+    /// `initializeLightSources`：按现在的方块重算天空光源，生成完区块、开始算光照之前调用一次。
+    pub fn initialize_light_sources(&mut self) {
+        self.sky_light_sources = SkyLightSources::fill_from(self);
+    }
+
+    /// `ChunkSkyLightSources.update`：`(x, y, z)` 换了方块，光照性质也变了。
+    pub fn update_sky_light_sources(&mut self, x: usize, y: i32, z: usize) {
+        if let Some(lowest) = updated_lowest_source(self, x, y, z) {
+            self.sky_light_sources.set(x, z, lowest);
+        }
+    }
+
+    /// 和 [`block`](Self::block) 相同，但世界外是空气，官方 `LevelChunk.getBlockState` 的做法。
+    pub fn block_or_air(&self, x: usize, y: i32, z: usize) -> u32 {
+        if (MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            self.block(x, y, z)
+        } else {
+            blocks::AIR
+        }
+    }
+
+    /// 这一高度所在的区块段只有空气。
+    pub fn is_section_empty(&self, y: i32) -> bool {
+        self.sections[Self::locate(y).0].is_empty()
     }
 
     /// 区块里的方块实体，按高度、z、x 升序。
@@ -142,6 +329,10 @@ impl Chunk {
     pub fn set_block(&mut self, x: usize, y: i32, z: usize, state: u32) {
         let (section, local_y) = Self::locate(y);
         self.sections[section].set_block(x, local_y, z, state);
+        // 官方 `LevelChunk.setBlockState`：区块段先写，再用新状态更新每一张高度图。
+        for (kind, heightmap) in HeightmapKind::ALL.into_iter().zip(&mut self.heightmaps) {
+            heightmap.update(kind, &self.sections, x, y, z, state);
+        }
 
         let key = (y, z, x);
         match block_of_state(state).and_then(|block| block.block_entity_type) {
@@ -158,13 +349,16 @@ impl Chunk {
             .map_or(MIN_Y, |y| y + 1)
     }
 
-    /// 编码高度图：每列存表面相对世界底部的高度，下标顺序是 z、x。
-    pub fn heightmap(&self) -> Vec<u64> {
-        let columns = (0..256).map(|index| {
-            let (x, z) = (index % 16, index / 16);
-            (self.surface_y(x, z) - MIN_Y) as u32
-        });
-        pack_values(columns.collect::<Vec<_>>().into_iter(), HEIGHTMAP_BITS)
+    /// 编码一种高度图：每列存地面上面一格相对世界底部的高度，下标顺序是 z、x。
+    pub fn heightmap(&self, kind: HeightmapKind) -> Vec<u64> {
+        let position = HeightmapKind::ALL
+            .iter()
+            .position(|&candidate| candidate == kind)
+            .expect("HeightmapKind::ALL 里有每一种高度图");
+        pack_values(
+            self.heightmaps[position].columns.into_iter(),
+            HEIGHTMAP_BITS,
+        )
     }
 }
 
@@ -222,15 +416,150 @@ mod tests {
         assert_eq!(chunk.surface_y(0, 0), 11);
     }
 
+    /// 从编码好的高度图里读出 `(x, z)` 这一列。
+    fn column_height(chunk: &Chunk, kind: HeightmapKind, x: usize, z: usize) -> u32 {
+        let heightmap = chunk.heightmap(kind);
+        let index = x + z * 16;
+        let per_word = 64 / HEIGHTMAP_BITS as usize;
+        let shift = (index % per_word) * HEIGHTMAP_BITS as usize;
+        ((heightmap[index / per_word] >> shift) & ((1 << HEIGHTMAP_BITS) - 1)) as u32
+    }
+
     #[test]
     fn heightmap_is_relative_to_the_world_bottom() {
         let mut chunk = Chunk::empty(0);
         chunk.set_block(1, MIN_Y, 0, blocks::STONE);
 
-        let heightmap = chunk.heightmap();
+        let heightmap = chunk.heightmap(HeightmapKind::WorldSurface);
         assert_eq!(heightmap.len(), 37);
         // 第二列的高度是 1，紧跟在第一列的 9 位之后。
         assert_eq!(heightmap[0], 1 << 9);
+        assert_eq!(column_height(&chunk, HeightmapKind::WorldSurface, 1, 0), 1);
+    }
+
+    #[test]
+    fn breaking_the_top_block_finds_the_next_ground() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, MIN_Y, 0, blocks::STONE);
+        chunk.set_block(0, MIN_Y + 1, 0, blocks::DIRT);
+        assert_eq!(column_height(&chunk, HeightmapKind::WorldSurface, 0, 0), 2);
+
+        chunk.set_block(0, MIN_Y + 1, 0, blocks::AIR);
+        assert_eq!(column_height(&chunk, HeightmapKind::WorldSurface, 0, 0), 1);
+
+        chunk.set_block(0, MIN_Y, 0, blocks::AIR);
+        assert_eq!(column_height(&chunk, HeightmapKind::WorldSurface, 0, 0), 0);
+    }
+
+    #[test]
+    fn leaves_count_for_every_heightmap_except_the_one_without_leaves() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        chunk.set_block(0, 5, 0, blocks::OAK_LEAVES);
+
+        let height = |kind| column_height(&chunk, kind, 0, 0);
+        // 世界底部是 -64，地面在 (0, 0, 0)，树叶在 (0, 5, 0)，高度从世界底部算。
+        assert_eq!(height(HeightmapKind::WorldSurface), 70);
+        assert_eq!(height(HeightmapKind::OceanFloor), 70);
+        assert_eq!(height(HeightmapKind::MotionBlocking), 70);
+        assert_eq!(height(HeightmapKind::MotionBlockingNoLeaves), 65);
+
+        chunk.set_block(0, 5, 0, blocks::AIR);
+        assert_eq!(
+            column_height(&chunk, HeightmapKind::MotionBlocking, 0, 0),
+            65
+        );
+    }
+
+    #[test]
+    fn water_counts_only_where_the_predicate_accepts_fluid() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        chunk.set_block(0, 5, 0, blocks::WATER);
+
+        let height = |kind| column_height(&chunk, kind, 0, 0);
+        // 水不是空气，所以是最高的非空气方块；它不在挡运动标签里，海洋地面不看它。
+        assert_eq!(height(HeightmapKind::WorldSurface), 70);
+        assert_eq!(height(HeightmapKind::OceanFloor), 65);
+        assert_eq!(height(HeightmapKind::MotionBlocking), 70);
+        assert_eq!(height(HeightmapKind::MotionBlockingNoLeaves), 70);
+    }
+
+    #[test]
+    fn glass_counts_because_it_is_in_the_motion_tags() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        chunk.set_block(0, 5, 0, blocks::GLASS);
+
+        let height = |kind| column_height(&chunk, kind, 0, 0);
+        assert_eq!(height(HeightmapKind::WorldSurface), 70);
+        assert_eq!(height(HeightmapKind::OceanFloor), 70);
+        assert_eq!(height(HeightmapKind::MotionBlocking), 70);
+        assert_eq!(height(HeightmapKind::MotionBlockingNoLeaves), 70);
+    }
+
+    #[test]
+    fn short_grass_is_surface_but_not_motion_blocking() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        chunk.set_block(0, 5, 0, blocks::SHORT_GRASS);
+
+        let height = |kind| column_height(&chunk, kind, 0, 0);
+        assert_eq!(height(HeightmapKind::WorldSurface), 70);
+        assert_eq!(height(HeightmapKind::OceanFloor), 65);
+        assert_eq!(height(HeightmapKind::MotionBlocking), 65);
+        assert_eq!(height(HeightmapKind::MotionBlockingNoLeaves), 65);
+    }
+
+    #[test]
+    fn waterlogged_blocks_count_as_fluid() {
+        let mut chunk = Chunk::empty(0);
+        // 海草默认含水，但不在挡运动的标签里。
+        chunk.set_block(0, MIN_Y, 0, blocks::SEAGRASS);
+        assert_ne!(chunk.sections()[0].fluid_count(), 0);
+        assert_eq!(
+            column_height(&chunk, HeightmapKind::MotionBlocking, 0, 0),
+            1
+        );
+        assert_eq!(column_height(&chunk, HeightmapKind::OceanFloor, 0, 0), 0);
+    }
+
+    #[test]
+    fn section_header_counts_blocks_and_fluids() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::WATER);
+        chunk.set_block(1, 0, 0, blocks::STONE);
+
+        let section = &chunk.sections()[4];
+        assert_eq!(section.block_count(), 2);
+        assert_eq!(section.fluid_count(), 1);
+
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        assert_eq!(chunk.sections()[4].block_count(), 2);
+        assert_eq!(chunk.sections()[4].fluid_count(), 0);
+    }
+
+    #[test]
+    fn generated_heightmap_types_have_a_kind() {
+        let live: Vec<HeightmapKind> = heightmaps::TYPES
+            .iter()
+            .filter(|heightmap| heightmap.keep_after_worldgen)
+            .filter_map(HeightmapKind::of_type)
+            .collect();
+        assert_eq!(live.len(), HeightmapKind::ALL.len());
+        for kind in HeightmapKind::ALL {
+            assert!(live.contains(&kind), "{kind:?}");
+        }
+        for heightmap in heightmaps::TYPES
+            .iter()
+            .filter(|heightmap| heightmap.send_to_client)
+        {
+            assert!(
+                HeightmapKind::of_type(heightmap).is_some(),
+                "{}",
+                heightmap.name
+            );
+        }
     }
 
     #[test]

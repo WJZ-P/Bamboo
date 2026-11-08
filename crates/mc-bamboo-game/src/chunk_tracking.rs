@@ -237,6 +237,19 @@ impl ChunkTracker {
     pub(crate) fn is_chunk_tracked(&self, pos: ChunkPos) -> bool {
         self.view.is_some_and(|view| view.contains(pos)) && !self.sender.is_pending(pos)
     }
+
+    /// `ChunkMap.isChunkOnTrackedBorder`：这个区块已经发给客户端了，8 个邻居里却有没发的。
+    ///
+    /// `light_update` 只发给满足这个条件的玩家，客户端缺邻居时自己算不准这个区块的光照。
+    pub(crate) fn is_chunk_on_tracked_border(&self, pos: ChunkPos) -> bool {
+        self.is_chunk_tracked(pos)
+            && (-1..=1).any(|dx| {
+                (-1..=1).any(|dz| {
+                    (dx, dz) != (0, 0)
+                        && !self.is_chunk_tracked(ChunkPos::new(pos.x + dx, pos.z + dz))
+                })
+            })
+    }
 }
 
 /// 让这名玩家的视图跟上它现在的位置和视距。位置和视距都没变时什么也不做。
@@ -725,5 +738,22 @@ mod tests {
         assert!(tracker.is_chunk_tracked(ORIGIN));
         assert!(!tracker.is_chunk_tracked(chunk(3, 0)));
         assert!(!tracker.is_chunk_tracked(chunk(4, 0)));
+    }
+
+    #[test]
+    fn border_chunks_have_an_untracked_neighbour() {
+        let (mut tracker, mut links, _recorder) = tracker_with_links();
+        tracker.apply_view(PLAYER, view(0, 0, 2), &mut links);
+        tracker.sender.pending.clear();
+
+        assert!(!tracker.is_chunk_on_tracked_border(ORIGIN));
+        assert!(tracker.is_chunk_on_tracked_border(chunk(3, 0)));
+        assert!(tracker.is_chunk_on_tracked_border(chunk(3, 3)));
+        assert!(!tracker.is_chunk_on_tracked_border(chunk(2, 2)));
+        assert!(!tracker.is_chunk_on_tracked_border(chunk(4, 0)));
+
+        // 中间的区块旁边还有没发出去的区块时，它也算在边上。
+        tracker.sender.mark_pending(chunk(1, 0));
+        assert!(tracker.is_chunk_on_tracked_border(ORIGIN));
     }
 }

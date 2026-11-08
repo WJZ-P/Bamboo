@@ -22,6 +22,7 @@ mc-bamboo-server = { path = "crates/mc-bamboo-server", version = "0.0.0" }
 mc-bamboo-world = { path = "crates/mc-bamboo-world", version = "0.0.0" }
 
 bytes = "1.12.1"
+flate2 = "1.1.11"
 md-5 = "0.10"
 serde_json = "1.0.154"
 thiserror = "2.0.21"

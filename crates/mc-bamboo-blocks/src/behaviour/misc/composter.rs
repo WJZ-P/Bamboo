@@ -2,7 +2,7 @@
 //!
 //! 放一个物品加几层由物品的 `compostable` 组件决定，抽签用世界的随机数，和官方逐位相同。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::CompostLayers;
 
 use crate::{
@@ -105,6 +105,16 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) == MAX_LEVEL {
             world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, READY));
         }
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        state.get(LEVEL_COMPOSTER)
     }
 }
 

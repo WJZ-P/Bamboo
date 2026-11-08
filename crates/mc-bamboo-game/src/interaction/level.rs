@@ -3,10 +3,10 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockState, Level, LevelRandom,
+    Aabb, BlockState, Level, LevelRandom, RedstoneMemory,
     shape::{self, BooleanOp},
 };
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::blocks;
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
@@ -19,6 +19,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) changes: &'a mut BlockChanges,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
     pub(crate) random: &'a LevelRandom,
+    pub(crate) redstone: &'a mut RedstoneMemory,
 }
 
 impl Level for RegionLevel<'_> {
@@ -64,5 +65,18 @@ impl Level for RegionLevel<'_> {
         self.players
             .values()
             .any(|player| player.position.distance_to_sqr(corner).sqrt() < f64::from(max_distance))
+    }
+
+    /// 读的是上一轮光照算完时的结果，和官方一样：这次操作改的方块要等到下一轮才影响光照。
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
+        i32::from(self.chunks.light_value(layer, pos))
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        self.redstone
     }
 }

@@ -7,7 +7,9 @@
 //! 够距检查、序列号和发包都在调用方。入口在 [`use_item_on`]、[`use_item`]、[`destroy_block`]、
 //! [`run_scheduled_ticks`] 和随机刻的 [`tick_chunk`]。随机数和官方逐位相同，见 [`random`]。
 //!
-//! 世界里没有红石信号和光照引擎，见 [`World::has_neighbor_signal`] 和 [`World::raw_brightness`]。
+//! 红石信号是真的，见 [`World::signal`] 和 [`World::has_neighbor_signal`]；
+//! 流体流动和光照引擎在别处算好，这里只读，见 [`World::schedule_fluid_tick`] 和
+//! [`World::raw_brightness`]。
 
 mod block_entity;
 
@@ -33,7 +35,7 @@ pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
     InteractionResult, Outcome, destroy_block, run_scheduled_ticks, use_item, use_item_on,
 };
-pub use level::{Effect, Level};
+pub use level::{Effect, Level, RedstoneMemory};
 pub use random::{LegacyRandom, LevelRandom};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext};

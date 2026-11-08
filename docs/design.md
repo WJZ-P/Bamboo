@@ -17,7 +17,7 @@
 
 做到：两个真实 26.3 客户端能走动（区块跟随）、互相看见、一起破坏和放置方块、聊天，长时间不断线。
 
-不做：正版验证和加密、压缩、存档、世界生成、生存模式、服务端物理、方块更新和红石、性能优化（光照裁剪、区块缓存、`section_blocks_update`、`light_update`）。
+不做：正版验证和加密、存档、世界生成、生存模式、服务端物理、方块更新和红石、性能优化（光照裁剪、区块缓存、`section_blocks_update`、`light_update`）。
 
 ## 2. 决定
 
@@ -121,10 +121,11 @@ impl Links {
 
 ```text
 1. 取出 inbox 里已有的全部消息，FIFO 处理
+   然后算完排着的光照，记下变了的段（官方在两个 tick 之间做这一步）
 2. game_time + 1
 3. 派生状态：head_yaw、姿势、元数据脏标记
 4. 区块跟踪：比较 (center, vd)，center → forget → pending
-5. 广播方块变化给 isChunkTracked 的玩家
+5. light_update 发给区块在跟踪范围边上的玩家，然后广播方块变化给 isChunkTracked 的玩家
 6. visible 配对和解除，然后每名玩家 send_changes
 7. 比较装备，发 set_equipment
 8. 每名玩家 block_changed_ack

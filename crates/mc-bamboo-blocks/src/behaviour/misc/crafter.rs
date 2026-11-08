@@ -1,4 +1,4 @@
-//! `CrafterBlock`。合成的计划刻和方块实体的内容不在范围里，世界里没有信号，所以只会被关掉。
+//! `CrafterBlock`。被信号触发时排一个计划刻，真正的合成要方块实体里的物品，不在范围里。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
@@ -8,11 +8,14 @@ use crate::{
         Behaviour,
         common::{default_state, update_neighbours_after_destroy},
     },
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, CRAFTING, FrontAndTop, ORIENTATION, PropertyValue, TRIGGERED},
     world::{UPDATE_CLIENTS, World},
 };
+
+/// `CRAFTING_TICK_DELAY`：被触发之后隔这么多刻合成。
+const CRAFTING_TICK_DELAY: i32 = 4;
 
 /// `CrafterBlock`。
 pub(super) struct Crafter;
@@ -47,6 +50,12 @@ impl Behaviour for Crafter {
         update_neighbours_after_destroy(state, world, pos);
     }
 
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
+        if state.get(TRIGGERED) {
+            world.schedule_tick(pos, state.block(), CRAFTING_TICK_DELAY);
+        }
+    }
+
     fn neighbor_changed(
         &self,
         state: BlockState,
@@ -54,7 +63,11 @@ impl Behaviour for Crafter {
         pos: BlockPos,
         _source: &'static Block,
     ) {
-        if !world.has_neighbor_signal(pos) && state.get(TRIGGERED) {
+        let should_trigger = world.has_neighbor_signal(pos);
+        if should_trigger && !state.get(TRIGGERED) {
+            world.schedule_tick(pos, state.block(), CRAFTING_TICK_DELAY);
+            world.set_block(pos, state.with(TRIGGERED, true), UPDATE_CLIENTS);
+        } else if !should_trigger && state.get(TRIGGERED) {
             let released = state.with(TRIGGERED, false).with(CRAFTING, false);
             world.set_block(pos, released, UPDATE_CLIENTS);
         }

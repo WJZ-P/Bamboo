@@ -137,7 +137,7 @@ impl BlockState {
         result
     }
 
-    fn fact(self, bit: u32) -> bool {
+    fn fact(self, bit: u64) -> bool {
         state_facts(self.0) & bit != 0
     }
 

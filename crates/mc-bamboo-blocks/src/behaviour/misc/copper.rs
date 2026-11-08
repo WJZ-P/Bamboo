@@ -16,7 +16,8 @@ use crate::{
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     state::{
-        BlockState, COPPER_GOLEM_POSE, HORIZONTAL_FACING, LIT, POWERED, WATERLOGGED, item_is_tagged,
+        BlockState, COPPER_GOLEM_POSE, CopperGolemPose, HORIZONTAL_FACING, LIT, POWERED,
+        WATERLOGGED, item_is_tagged,
     },
     world::World,
 };
@@ -68,6 +69,16 @@ impl Behaviour for CopperBulb {
     ) {
         check_and_flip(state, world, pos);
     }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.get(LIT) { 15 } else { 0 }
+    }
 }
 
 /// `CopperGolemStatueBlock`。
@@ -76,6 +87,16 @@ pub(super) struct CopperGolemStatue;
 /// `updatePose`。
 fn update_pose(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block_and_update(pos, state.cycle(COPPER_GOLEM_POSE));
+}
+
+/// `getAnalogOutputSignal`：姿势的序号加一，顺序和官方的 `Pose` 一样。
+fn pose_signal(state: BlockState) -> i32 {
+    match state.get(COPPER_GOLEM_POSE) {
+        CopperGolemPose::Standing => 1,
+        CopperGolemPose::Sitting => 2,
+        CopperGolemPose::Running => 3,
+        CopperGolemPose::Star => 4,
+    }
 }
 
 impl Behaviour for CopperGolemStatue {
@@ -121,6 +142,16 @@ impl Behaviour for CopperGolemStatue {
         }
         update_pose(state, world, ctx.clicked_pos());
         InteractionResult::Success
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        pose_signal(state)
     }
 }
 
@@ -181,5 +212,15 @@ impl Behaviour for WeatheringCopperGolemStatue {
         }
         update_pose(state, world, pos);
         InteractionResult::Success
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        pose_signal(state)
     }
 }

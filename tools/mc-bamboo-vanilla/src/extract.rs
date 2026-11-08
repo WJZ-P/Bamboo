@@ -36,8 +36,10 @@ pub struct Extracted {
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
     pub state_tables: StateTables,
+    pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
+    pub heightmaps: Vec<HeightmapType>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,7 +148,7 @@ pub struct BlockOffset {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateTables {
-    pub facts: Vec<u32>,
+    pub facts: Vec<u64>,
     pub fluid: Vec<u8>,
     pub light_dampening: Vec<u8>,
     pub collision: Vec<u16>,
@@ -170,6 +172,35 @@ pub struct FluidState {
     pub amount: u8,
     pub falling: bool,
     pub legacy_block: u32,
+}
+
+/// 光照引擎要的表，`Extractor.java` 的 `LightTables`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightTables {
+    /// 每个状态的 `getLightEmission`。
+    pub emission: Vec<u8>,
+    /// 每个状态在 `occlusion_faces` 里的下标。
+    pub occlusion: Vec<u16>,
+    /// 去重后的 6 个面的遮挡形状，按 `Direction` 的 ID 排列，第一项全是空形状。
+    pub occlusion_faces: Vec<[u16; 6]>,
+    /// 去重后的面形状个数。
+    pub face_count: usize,
+    /// 两两之间的 `faceShapeOccludes`，Java 的 `long` 是有符号的。
+    pub face_occludes: Vec<i64>,
+}
+
+/// `Heightmap.Types` 的一种。区块包按 `id` 排列，`id` 也是网络上的键。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeightmapType {
+    /// 官方的序列化名，比如 `MOTION_BLOCKING_NO_LEAVES`。
+    pub name: String,
+    pub id: i32,
+    /// `sendToClient`：区块包带上这一种。
+    pub send_to_client: bool,
+    /// `keepAfterWorldgen`：区块里一直留着这一种。
+    pub keep_after_worldgen: bool,
 }
 
 /// 官方写在静态表里的方块对应关系，都是方块注册表 ID。
@@ -448,9 +479,12 @@ pub struct VersionData {
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
     pub state_tables: StateTables,
+    pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     /// 按名字排序。
     pub block_transformers: Vec<BlockTransformer>,
+    /// 按官方 `Heightmap.Types.values()` 的顺序。
+    pub heightmaps: Vec<HeightmapType>,
     /// 内置注册表名 → 按 ID 排列的条目。
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
@@ -496,8 +530,10 @@ pub fn run(
         blocks: extracted.blocks,
         items,
         state_tables: extracted.state_tables,
+        light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
         block_transformers: extracted.block_transformers,
+        heightmaps: extracted.heightmaps,
         builtin_registries,
         packets,
     })

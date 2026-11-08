@@ -1,8 +1,8 @@
 //! `BigDripleafBlock`、`BigDripleafStemBlock`。`SmallDripleafBlock` 是高植物，
 //! 在 [`double_plant`](super::double_plant) 里。
 //!
-//! 叶子只有实体和弹射物才能压倒，这里没有实体，`tick` 不用移植。
-//! 官方的 `neighborChanged` 只看红石信号，世界里没有信号，也不用移植。
+//! 叶子只有实体和弹射物才能压倒，这里没有实体，`entityInside` 不用移植。
+//! 倾倒之后的几步靠计划刻走，有信号就立刻复位，这两条和实体无关，都移植了。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, blocks, registries, tags::block_tags};
@@ -14,13 +14,54 @@ use crate::{
         common::{default_state, is_water_source, tick_water_if_waterlogged},
     },
     context::PlaceContext,
-    state::{BlockState, FluidState, HORIZONTAL_FACING, WATERLOGGED},
-    world::World,
+    state::{BlockState, FluidState, HORIZONTAL_FACING, TILT, Tilt, WATERLOGGED},
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// 小型垂滴叶用骨粉长成的大型垂滴叶有 2 到 5 格高。
 const MIN_GROWN_HEIGHT: i32 = 2;
 const MAX_GROWN_HEIGHT: i32 = 5;
+
+/// `NO_TICK`：这个倾斜状态之后不再排计划刻。
+const NO_TICK: i32 = -1;
+
+/// `DELAY_UNTIL_NEXT_TILT_STATE`。
+fn delay_until_next_tilt(tilt: Tilt) -> i32 {
+    match tilt {
+        Tilt::Unstable | Tilt::Partial => 10,
+        Tilt::Full => 100,
+        Tilt::None => NO_TICK,
+    }
+}
+
+/// `setTilt`。
+fn set_tilt(state: BlockState, world: &mut World, pos: BlockPos, tilt: Tilt) {
+    world.set_block(pos, state.with(TILT, tilt), UPDATE_CLIENTS);
+}
+
+/// `playTiltSound`：音高由 `Mth.randomBetween` 从世界随机源取，取的这个数后面的随机刻和计划刻都要用。
+fn play_tilt_sound(world: &mut World) {
+    world.random().next_float();
+}
+
+/// `setTiltAndScheduleTick`：倾倒和复位都会响一声，先响再排刻。
+fn set_tilt_and_schedule_tick(state: BlockState, world: &mut World, pos: BlockPos, tilt: Tilt) {
+    set_tilt(state, world, pos, tilt);
+    play_tilt_sound(world);
+    let delay = delay_until_next_tilt(tilt);
+    if delay != NO_TICK {
+        world.schedule_tick(pos, state.block(), delay);
+    }
+}
+
+/// `resetTilt`：原来是倾斜的才响，已经水平的不响。
+fn reset_tilt(state: BlockState, world: &mut World, pos: BlockPos) {
+    let previous = state.get(TILT);
+    set_tilt(state, world, pos, Tilt::None);
+    if previous != Tilt::None {
+        play_tilt_sound(world);
+    }
+}
 
 /// `BigDripleafBlock`。
 pub(super) struct BigDripleaf;
@@ -84,6 +125,32 @@ impl Behaviour for BigDripleaf {
             place_part(world, blocks::BIG_DRIPLEAF_STEM, pos, state.fluid(), facing);
             let above_fluid = world.fluid_state(above);
             place_part(world, blocks::BIG_DRIPLEAF, above, above_fluid, facing);
+        }
+    }
+
+    /// 有信号就复位，没有就倒下去一格。
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if world.has_neighbor_signal(pos) {
+            reset_tilt(state, world, pos);
+            return;
+        }
+        match state.get(TILT) {
+            Tilt::Unstable => set_tilt_and_schedule_tick(state, world, pos, Tilt::Partial),
+            Tilt::Partial => set_tilt_and_schedule_tick(state, world, pos, Tilt::Full),
+            Tilt::Full => reset_tilt(state, world, pos),
+            Tilt::None => {}
+        }
+    }
+
+    fn neighbor_changed(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        _source: &'static Block,
+    ) {
+        if world.has_neighbor_signal(pos) {
+            reset_tilt(state, world, pos);
         }
     }
 }

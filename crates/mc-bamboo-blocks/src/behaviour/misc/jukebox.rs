@@ -23,6 +23,15 @@ fn on_song_changed(state: BlockState, world: &mut World, pos: BlockPos) {
 }
 
 impl Behaviour for Jukebox {
+    /// `JukeboxBlock.ownSignal`：歌在放时发 15。唱片在方块实体里，这里记在 `RedstoneMemory` 上。
+    fn own_signal(&self, _state: BlockState, world: &World, pos: BlockPos) -> i32 {
+        if world.redstone_memory().is_jukebox_playing(pos) {
+            15
+        } else {
+            0
+        }
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         // 方块实体的 `preRemoveSideEffects`：破坏时弹出唱片。
         if state.get(HAS_RECORD) {
@@ -42,6 +51,8 @@ impl Behaviour for Jukebox {
         }
         let pos = ctx.clicked_pos();
         world.set_block(pos, state.with(HAS_RECORD, true), UPDATE_CLIENTS);
+        // `JukeboxBlockEntity.setTheItem` 会开始放歌。
+        world.redstone_memory_mut().set_jukebox_playing(pos, true);
         on_song_changed(state, world, pos);
         InteractionResult::Success
     }
@@ -57,6 +68,8 @@ impl Behaviour for Jukebox {
         }
         let pos = ctx.clicked_pos();
         world.set_block(pos, state.with(HAS_RECORD, false), UPDATE_CLIENTS);
+        // `popOutTheItem` 之后歌停了。
+        world.redstone_memory_mut().set_jukebox_playing(pos, false);
         on_song_changed(state, world, pos);
         InteractionResult::Success
     }

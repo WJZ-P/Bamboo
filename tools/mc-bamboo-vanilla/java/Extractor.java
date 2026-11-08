@@ -12,6 +12,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -48,6 +50,7 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
@@ -77,6 +80,7 @@ import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
@@ -88,6 +92,7 @@ import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvi
 import net.minecraft.world.level.levelgen.feature.stateproviders.CopyPropertiesProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.RuleBasedStateProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.SimpleStateProvider;
+import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.material.FlowingFluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -113,20 +118,23 @@ public final class Extractor {
             new BlockPos(-77, 12, 29),
             new BlockPos(1000, -30, -2000));
     /** 这些位的含义写在 mc-bamboo-data 的 lib.rs 里，两边要一起改。 */
-    private static final int FACT_AIR = 1 << 18;
-    private static final int FACT_CAN_OCCLUDE = 1 << 19;
-    private static final int FACT_SOLID = 1 << 20;
-    private static final int FACT_LIQUID = 1 << 21;
-    private static final int FACT_REPLACEABLE = 1 << 22;
-    private static final int FACT_REDSTONE_CONDUCTOR = 1 << 23;
-    private static final int FACT_COLLISION_FULL_BLOCK = 1 << 24;
-    private static final int FACT_SOLID_RENDER = 1 << 25;
-    private static final int FACT_SIGNAL_SOURCE = 1 << 26;
-    private static final int FACT_ANALOG_OUTPUT = 1 << 27;
-    private static final int FACT_PROPAGATES_SKYLIGHT = 1 << 28;
-    private static final int FACT_RANDOMLY_TICKING = 1 << 29;
-    private static final int FACT_FLUID_RANDOMLY_TICKING = 1 << 30;
-    private static final int FACT_BLOCKS_LIGHT_FROM_BELOW = 1 << 31;
+    private static final long FACT_AIR = 1L << 18;
+    private static final long FACT_CAN_OCCLUDE = 1L << 19;
+    private static final long FACT_SOLID = 1L << 20;
+    private static final long FACT_LIQUID = 1L << 21;
+    private static final long FACT_REPLACEABLE = 1L << 22;
+    private static final long FACT_REDSTONE_CONDUCTOR = 1L << 23;
+    private static final long FACT_COLLISION_FULL_BLOCK = 1L << 24;
+    private static final long FACT_SOLID_RENDER = 1L << 25;
+    private static final long FACT_SIGNAL_SOURCE = 1L << 26;
+    private static final long FACT_ANALOG_OUTPUT = 1L << 27;
+    private static final long FACT_PROPAGATES_SKYLIGHT = 1L << 28;
+    private static final long FACT_RANDOMLY_TICKING = 1L << 29;
+    private static final long FACT_FLUID_RANDOMLY_TICKING = 1L << 30;
+    private static final long FACT_BLOCKS_LIGHT_FROM_BELOW = 1L << 31;
+    private static final long FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION = 1L << 32;
+    private static final long FACT_MOTION_BLOCKING = 1L << 33;
+    private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
 
@@ -153,8 +161,10 @@ public final class Extractor {
             root.add("blocks", blocks());
             root.add("items", items());
             root.add("stateTables", new StateTables().build());
+            root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
+            root.add("heightmaps", heightmaps());
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -175,6 +185,20 @@ public final class Extractor {
                 .join();
         staticTags.forEach(Registry.PendingTags::apply);
         return initial.replaceFrom(RegistryLayer.WORLD, world);
+    }
+
+    /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */
+    private static JsonArray heightmaps() throws ReflectiveOperationException {
+        JsonArray types = new JsonArray();
+        for (Heightmap.Types type : Heightmap.Types.values()) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", type.getSerializedName());
+            entry.addProperty("id", (int) readField(Heightmap.Types.class, "id", type));
+            entry.addProperty("sendToClient", type.sendToClient());
+            entry.addProperty("keepAfterWorldgen", type.keepAfterWorldgen());
+            types.add(entry);
+        }
+        return types;
     }
 
     private static JsonObject version() {
@@ -807,8 +831,7 @@ public final class Extractor {
             boolean movesShape = movesShape(state.getBlock());
             checkPositionFacts(id, state, movesShape);
 
-            // 最高位也用上了，按无符号数写。
-            facts.add(Integer.toUnsignedLong(stateFacts(state, BlockPos.ZERO)));
+            facts.add(stateFacts(state, BlockPos.ZERO));
             fluid.add(fluidIndex(state.getFluidState()));
             lightDampening.add(state.getLightDampening());
 
@@ -864,11 +887,11 @@ public final class Extractor {
 
         /** 形状可以随位置变，但只能是跟着偏移平移。其余事实不能变，变了说明生成的表不够用。 */
         private void checkPositionFacts(int id, BlockState state, boolean movesShape) {
-            int expected = stateFacts(state, BlockPos.ZERO);
+            long expected = stateFacts(state, BlockPos.ZERO);
             Vec3 zeroOffset = state.getOffset(BlockPos.ZERO);
+            long mask = movesShape ? ~STURDY_MASK : ~0L;
             for (BlockPos pos : SAMPLE_POSITIONS) {
-                int found = stateFacts(state, pos);
-                int mask = movesShape ? ~STURDY_MASK : ~0;
+                long found = stateFacts(state, pos);
                 if ((found & mask) != (expected & mask)) {
                     throw new IllegalStateException(state + " 的事实和位置有关：" + pos);
                 }
@@ -878,7 +901,7 @@ public final class Extractor {
                     if (!shapeKey(moved).equals(shapeKey(state.getShape(EMPTY, pos)))) {
                         throw new IllegalStateException(state + " 的形状不只是跟着偏移平移：" + pos);
                     }
-                    addOffsetSturdySample(id, pos, found);
+                    addOffsetSturdySample(id, pos, (int) (found & STURDY_MASK));
                 }
             }
         }
@@ -895,8 +918,8 @@ public final class Extractor {
 
         /** isSolid 和 liquid 官方标了过时，但方块类还在用，这里要原样读出来。 */
         @SuppressWarnings("deprecation")
-        private static int stateFacts(BlockState state, BlockPos pos) {
-            int facts = 0;
+        private static long stateFacts(BlockState state, BlockPos pos) {
+            long facts = 0;
             for (SupportType support : SupportType.values()) {
                 for (Direction direction : Direction.values()) {
                     if (state.isFaceSturdy(EMPTY, pos, direction, support)) {
@@ -921,6 +944,9 @@ public final class Extractor {
             BlockState below = Blocks.STONE.defaultBlockState();
             boolean blocksLight = LightEngine.getLightDampeningInto(below, state, Direction.UP, 0) == LIGHT_BLOCKED;
             facts |= blocksLight ? FACT_BLOCKS_LIGHT_FROM_BELOW : 0;
+            facts |= state.useShapeForLightOcclusion() ? FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION : 0;
+            facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) ? FACT_MOTION_BLOCKING : 0;
+            facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES) ? FACT_MOTION_BLOCKING_NO_LEAVES : 0;
             return facts;
         }
 
@@ -976,6 +1002,86 @@ public final class Extractor {
                 }
             }
             return facts;
+        }
+    }
+
+    /**
+     * 光照引擎要的表：每个状态的发光等级，和光照引擎看到的 6 个面的遮挡形状。
+     *
+     * <p>面的形状用 LightEngine.getOcclusionShape 取，它已经把 canOcclude 和 useShapeForLightOcclusion 算进去了。
+     * 去重后两两之间的 Shapes.faceShapeOccludes 也在这里算好，Rust 只查表，不做形状运算。
+     */
+    private static final class LightTables {
+        private final JsonArray emission = new JsonArray();
+        private final JsonArray occlusion = new JsonArray();
+        private final JsonArray occlusionFaces = new JsonArray();
+        private final Map<String, Integer> occlusionIndexes = new HashMap<>();
+        private final List<VoxelShape> faces = new ArrayList<>();
+        private final Map<String, Integer> faceIndexes = new HashMap<>();
+
+        JsonObject build() {
+            // 空形状是 0，完整方块是 1，和 StateTables 的形状表一样固定下来。
+            faceIndex(Shapes.empty());
+            faceIndex(Shapes.block());
+            occlusionIndex(new int[6]);
+            for (int id = 0; id < Block.BLOCK_STATE_REGISTRY.size(); id++) {
+                BlockState state = Block.BLOCK_STATE_REGISTRY.byId(id);
+                emission.add(state.getLightEmission());
+                occlusion.add(occlusionIndex(stateFaces(state)));
+            }
+
+            JsonObject tables = new JsonObject();
+            tables.add("emission", emission);
+            tables.add("occlusion", occlusion);
+            tables.add("occlusionFaces", occlusionFaces);
+            tables.addProperty("faceCount", faces.size());
+            tables.add("faceOccludes", faceOccludes());
+            return tables;
+        }
+
+        private int[] stateFaces(BlockState state) {
+            int[] ids = new int[6];
+            for (Direction direction : Direction.values()) {
+                ids[direction.get3DDataValue()] = faceIndex(LightEngine.getOcclusionShape(state, direction));
+            }
+            return ids;
+        }
+
+        private int occlusionIndex(int[] ids) {
+            return occlusionIndexes.computeIfAbsent(Arrays.toString(ids), key -> {
+                JsonArray array = new JsonArray();
+                for (int id : ids) {
+                    array.add(id);
+                }
+                occlusionFaces.add(array);
+                return occlusionFaces.size() - 1;
+            });
+        }
+
+        private int faceIndex(VoxelShape face) {
+            return faceIndexes.computeIfAbsent(face.toAabbs().toString(), key -> {
+                faces.add(face);
+                return faces.size() - 1;
+            });
+        }
+
+        /** 第 a * faceCount + b 位是 faceShapeOccludes(a, b)，每 64 位一个 long，低位在前。 */
+        private JsonArray faceOccludes() {
+            int count = faces.size();
+            long[] words = new long[(count * count + 63) / 64];
+            for (int a = 0; a < count; a++) {
+                for (int b = 0; b < count; b++) {
+                    if (Shapes.faceShapeOccludes(faces.get(a), faces.get(b))) {
+                        int bit = a * count + b;
+                        words[bit / 64] |= 1L << (bit % 64);
+                    }
+                }
+            }
+            JsonArray array = new JsonArray();
+            for (long word : words) {
+                array.add(word);
+            }
+            return array;
         }
     }
 }

@@ -16,6 +16,7 @@
 //! | `movement` | 移动包和传送确认 |
 //! | `chunk_tracking` | 跟踪范围和发送速度 |
 //! | `chunk_encoding` | 区块的网络格式 |
+//! | `light_updates` | 算光照，发 `light_update` |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
 mod chat;
@@ -26,6 +27,7 @@ mod global;
 mod inbound;
 mod interaction;
 mod inventory;
+mod light_updates;
 mod links;
 mod movement;
 mod player;

@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3};
 use mc_bamboo_data::{blocks, items};
 
 use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Level, LevelRandom, Outcome, destroy_block,
-    shape::Aabb,
+    level::RedstoneMemory, shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
@@ -21,6 +21,9 @@ pub(crate) struct TestLevel {
     /// 假装有实体挡在任何有碰撞的方块上。
     pub(crate) obstructed: bool,
     pub(crate) random: LevelRandom,
+    redstone: RedstoneMemory,
+    /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
+    pub(crate) light: Option<(i32, i32)>,
 }
 
 impl TestLevel {
@@ -30,6 +33,8 @@ impl TestLevel {
             writes: Vec::new(),
             obstructed: false,
             random: LevelRandom::new(0),
+            redstone: RedstoneMemory::default(),
+            light: None,
         }
     }
 
@@ -86,6 +91,22 @@ impl Level for TestLevel {
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
         true
+    }
+
+    fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        let (sky, block) = self.light.unwrap_or((15, 0));
+        match layer {
+            LightLayer::Sky => sky,
+            LightLayer::Block => block,
+        }
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
     }
 }
 

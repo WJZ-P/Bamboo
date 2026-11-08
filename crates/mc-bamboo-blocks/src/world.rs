@@ -2,7 +2,7 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::error;
 
@@ -10,10 +10,10 @@ use crate::{
     block_entity,
     context::BlockHit,
     fluid::Fluid,
-    level::{Effect, Level},
+    level::{Effect, Level, RedstoneMemory},
     random::LegacyRandom,
     shape::{self, CollisionContext},
-    state::{BlockState, FluidState, SupportType},
+    state::{BlockState, FluidState, POWER, SupportType},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -78,12 +78,12 @@ const WORLD_BOUND: i32 = 30_000_000;
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
 /// 默认世界边界的半径。这个世界不能改边界。
 const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
-/// 这个世界没有光照引擎，一律按开阔的白天算。
-const FIXED_BRIGHTNESS: i32 = 15;
 /// `Difficulty.NORMAL.getId()`。
 const NORMAL_DIFFICULTY: i32 = 2;
 /// 游戏规则 `fire_spread_radius_around_player` 的默认值。
 const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
+/// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
+const SKY_DARKEN: i32 = 0;
 
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +226,8 @@ pub struct World<'a> {
     ticks: &'a mut BlockTicks,
     updates: NeighborQueue,
     effects: Vec<Effect>,
+    /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
+    wire_should_signal: bool,
 }
 
 impl<'a> World<'a> {
@@ -235,6 +237,7 @@ impl<'a> World<'a> {
             ticks,
             updates: NeighborQueue::default(),
             effects: Vec::new(),
+            wire_should_signal: true,
         }
     }
 
@@ -323,20 +326,20 @@ impl<'a> World<'a> {
         state.is_face_sturdy(face, support)
     }
 
-    /// `getRawBrightness`。没有光照引擎，固定是 15，这是已知偏差。
-    pub const fn raw_brightness(&self, _pos: BlockPos) -> i32 {
-        FIXED_BRIGHTNESS
+    /// `getBrightness(layer, pos)`：只看天空光或者只看方块光。
+    pub fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
+        self.level.brightness(layer, pos)
     }
 
-    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗，
-    /// 所以就是 [`raw_brightness`](Self::raw_brightness)。
-    pub const fn max_local_raw_brightness(&self, pos: BlockPos) -> i32 {
-        self.raw_brightness(pos)
+    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
+    pub fn max_local_raw_brightness(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - SKY_DARKEN)
     }
 
-    /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。没有光照引擎，和 `raw_brightness` 一样固定是 15。
-    pub const fn block_light(&self, _pos: BlockPos) -> i32 {
-        FIXED_BRIGHTNESS
+    /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
+    pub fn block_light(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
     }
 
     /// `isRaining`。这个世界永远是晴天。
@@ -381,19 +384,131 @@ impl<'a> World<'a> {
             .any_player_close_enough_to(pos, FIRE_SPREAD_RADIUS_AROUND_PLAYER)
     }
 
-    /// `hasNeighborSignal`。世界里没有红石信号。写成函数是为了以后有红石时只改一处。
-    pub const fn has_neighbor_signal(&self, _pos: BlockPos) -> bool {
-        false
+    /// `getRawBrightness(pos, 0)`：天空光和方块光里亮的那个，不算天色。
+    pub fn raw_brightness(&self, pos: BlockPos) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos))
     }
 
-    /// `getSignal`。世界里没有红石信号。
-    pub const fn signal(&self, _pos: BlockPos, _direction: Direction) -> i32 {
-        0
+    /// `getEffectiveSkyBrightness`：天空光减去天色变暗的部分。
+    pub fn effective_sky_brightness(&self, pos: BlockPos) -> i32 {
+        (self.brightness(LightLayer::Sky, pos) - SKY_DARKEN).max(0)
     }
 
-    /// `getBestNeighborSignal`。世界里没有红石信号。
-    pub const fn best_neighbor_signal(&self, _pos: BlockPos) -> i32 {
-        0
+    /// `getSignal`：`pos` 这一格朝 `direction` 输出多强的信号。
+    ///
+    /// 导体还要算上强充能它的邻居，这就是红石线能被旁边的方块“穿过”充能的原因。
+    pub fn signal(&self, pos: BlockPos, direction: Direction) -> i32 {
+        let state = self.block_state(pos);
+        let signal = state.signal(self, pos, direction);
+        if state.is_redstone_conductor() {
+            signal.max(self.direct_signal_to(pos))
+        } else {
+            signal
+        }
+    }
+
+    /// `hasSignal`。
+    pub fn has_signal(&self, pos: BlockPos, direction: Direction) -> bool {
+        self.signal(pos, direction) > 0
+    }
+
+    /// `getDirectSignal`。
+    pub fn direct_signal(&self, pos: BlockPos, direction: Direction) -> i32 {
+        self.block_state(pos).direct_signal(self, pos, direction)
+    }
+
+    /// `getDirectSignalTo`：周围六格强充能 `pos` 的最大值。
+    pub fn direct_signal_to(&self, pos: BlockPos) -> i32 {
+        let mut best = 0;
+        for direction in Direction::ALL {
+            best = best.max(self.direct_signal(pos.relative(direction), direction));
+            if best >= 15 {
+                break;
+            }
+        }
+        best
+    }
+
+    /// `getControlInputSignal`：中继器和比较器读侧面的输入。
+    /// `only_diodes` 为真时只认中继器和比较器，锁定用的是这种。
+    pub fn control_input_signal(
+        &self,
+        pos: BlockPos,
+        direction: Direction,
+        only_diodes: bool,
+    ) -> i32 {
+        let state = self.block_state(pos);
+        if only_diodes {
+            if state.is_a(BlockAncestor::DiodeBlock) {
+                self.direct_signal(pos, direction)
+            } else {
+                0
+            }
+        } else if state.is(blocks::REDSTONE_BLOCK) {
+            15
+        } else if state.is(blocks::REDSTONE_WIRE) {
+            state.get(POWER)
+        } else if state.is_signal_source() {
+            self.direct_signal(pos, direction)
+        } else {
+            0
+        }
+    }
+
+    /// `hasNeighborSignal`。
+    pub fn has_neighbor_signal(&self, pos: BlockPos) -> bool {
+        Direction::ALL
+            .into_iter()
+            .any(|direction| self.has_signal(pos.relative(direction), direction))
+    }
+
+    /// `getBestNeighborSignal`：周围六格给 `pos` 的最强信号。
+    pub fn best_neighbor_signal(&self, pos: BlockPos) -> i32 {
+        let mut best = 0;
+        for direction in Direction::ALL {
+            let signal = self.signal(pos.relative(direction), direction);
+            if signal >= 15 {
+                return 15;
+            }
+            best = best.max(signal);
+        }
+        best
+    }
+
+    /// `getBestOwnOrNeighbourSignal`。
+    pub fn best_own_or_neighbour_signal(&self, pos: BlockPos) -> i32 {
+        let state = self.block_state(pos);
+        let own = if state.is_signal_source() {
+            state.own_signal(self, pos)
+        } else {
+            0
+        };
+        self.best_neighbor_signal(pos).max(own)
+    }
+
+    /// `RedstoneWireBlock.getBlockSignal`：算导线的输入时先把导线的信号关掉，
+    /// 不然导线自己的功率会绕回自己身上。官方的 `shouldSignal` 是方块实例上的字段。
+    pub fn wire_block_signal(&mut self, pos: BlockPos) -> i32 {
+        self.wire_should_signal = false;
+        let signal = self.best_neighbor_signal(pos);
+        self.wire_should_signal = true;
+        signal
+    }
+
+    /// 红石线此刻算不算信号源，见 [`World::wire_block_signal`]。
+    pub const fn wire_should_signal(&self) -> bool {
+        self.wire_should_signal
+    }
+
+    /// 比较器的输出和火把最近的开关，见 [`RedstoneMemory`]。
+    pub fn redstone_memory(&self) -> &RedstoneMemory {
+        self.level.redstone()
+    }
+
+    /// 见 [`World::redstone_memory`]。
+    pub fn redstone_memory_mut(&mut self) -> &mut RedstoneMemory {
+        self.level.redstone_mut()
     }
 
     /// `getGameTime`。
@@ -528,6 +643,10 @@ impl<'a> World<'a> {
         }
 
         let block_changed = !old.is_same_block(state);
+        // 换了方块，官方把方块实体一起删掉，比较器存的输出也就跟着没了。
+        if block_changed {
+            self.level.redstone_mut().forget_block_entity(pos);
+        }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
         if block_changed
@@ -997,7 +1116,9 @@ mod tests {
             .iter()
             .filter_map(|effect| match *effect {
                 Effect::Destroyed { pos, .. } => Some(pos),
-                Effect::FilledBucket { .. } | Effect::BoneMealUsed { .. } => None,
+                Effect::BoneMealUsed { .. }
+                | Effect::TorchBurnout { .. }
+                | Effect::FilledBucket { .. } => None,
             })
             .collect()
     }

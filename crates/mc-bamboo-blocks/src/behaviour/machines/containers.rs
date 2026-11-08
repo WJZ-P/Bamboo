@@ -159,7 +159,11 @@ impl Behaviour for Hopper {
     }
 }
 
-/// `DispenserBlock` 和 `DropperBlock`，它们只有发射的方式不同，发射要信号，这里走不到。
+/// `TRIGGER_DURATION`：发射器被触发之后隔这么多刻发射。
+const TRIGGER_DURATION: i32 = 4;
+
+/// `DispenserBlock` 和 `DropperBlock`。被信号触发时排一个计划刻，真正发射物品要方块实体里的
+/// 内容，不在范围里。两个类只有发射的方式不同。
 pub(super) struct Dispenser;
 
 impl Behaviour for Dispenser {
@@ -185,7 +189,10 @@ impl Behaviour for Dispenser {
     ) {
         let should_trigger =
             world.has_neighbor_signal(pos) || world.has_neighbor_signal(pos.above());
-        if !should_trigger && state.get(TRIGGERED) {
+        if should_trigger && !state.get(TRIGGERED) {
+            world.schedule_tick(pos, state.block(), TRIGGER_DURATION);
+            world.set_block(pos, state.with(TRIGGERED, true), UPDATE_CLIENTS);
+        } else if !should_trigger && state.get(TRIGGERED) {
             world.set_block(pos, state.with(TRIGGERED, false), UPDATE_CLIENTS);
         }
     }

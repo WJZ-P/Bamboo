@@ -398,7 +398,7 @@ mod tests {
     const SUPPORT_TYPES: [SupportType; 3] =
         [SupportType::Full, SupportType::Center, SupportType::Rigid];
 
-    fn sturdy_bits(shape: &[Aabb]) -> u32 {
+    fn sturdy_bits(shape: &[Aabb]) -> u64 {
         let mut bits = 0;
         for (index, support) in SUPPORT_TYPES.into_iter().enumerate() {
             for face in Direction::ALL {
@@ -461,7 +461,7 @@ mod tests {
             let pos = BlockPos::new(x, y, z);
             assert_eq!(
                 sturdy_bits(&support_boxes(state, pos)),
-                bits,
+                u64::from(bits),
                 "{} ({id}) 在 {pos:?}",
                 state.block().name
             );

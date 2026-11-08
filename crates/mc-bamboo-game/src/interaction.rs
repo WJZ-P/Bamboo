@@ -284,7 +284,11 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                 except_initiator,
             } => {
                 let except = initiator.filter(|_| except_initiator);
-                send_destroy_event(region, except, pos, state.0);
+                let event = LevelEvent::destroy_block(pos, state.0 as i32);
+                send_level_event(region, except, &event);
+            }
+            Effect::TorchBurnout { pos } => {
+                send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
             }
             Effect::FilledBucket { item } => {
                 if let Some(id) = initiator {
@@ -304,16 +308,7 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
     }
 }
 
-/// 破坏的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
-fn send_destroy_event(region: &mut Region, except: Option<PlayerId>, pos: BlockPos, state: u32) {
-    send_level_event(
-        region,
-        except,
-        &LevelEvent::destroy_block(pos, state as i32),
-    );
-}
-
-/// 把一个 `level_event` 发给听得到的人，`except` 除外。
+/// 世界事件的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
 fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
     let frames = encode_frames(event);
     for player in region.players.values() {

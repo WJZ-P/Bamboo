@@ -1,5 +1,6 @@
 //! 放下时面朝玩家的方块：`EndPortalFrameBlock`、`VaultBlock`。
 
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
 
 use crate::{
@@ -21,6 +22,16 @@ impl Behaviour for EndPortalFrame {
         _world: &World,
     ) -> Option<BlockState> {
         Some(facing_the_player(block, ctx).with(EYE, false))
+    }
+
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        if state.get(EYE) { 15 } else { 0 }
     }
 }
 

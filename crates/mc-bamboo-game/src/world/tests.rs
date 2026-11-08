@@ -819,7 +819,8 @@ fn edited_chunk_is_resent_with_the_edit() {
         .find(|frame| chunk_position(frame) == edited)
         .expect("这个区块又进入了视图");
     let store = &server.world.region.chunks;
-    let current = encode_chunk(store.edited(edited).expect("这个区块改过了"));
+    assert!(store.edited(edited).is_some(), "这个区块改过了");
+    let current = encode_chunk(store, edited);
     assert_eq!(chunk_body(resent), current);
     assert_ne!(chunk_body(resent), flat);
 

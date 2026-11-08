@@ -1,20 +1,27 @@
 //! `DiodeBlock` 和它的子类 `RepeaterBlock`、`ComparatorBlock`。
 //!
-//! 世界里没有信号。输入只可能来自状态里写着 `power` 的红石线，这样的线也是 0，
-//! 所以 `tick`、`checkTickOnNeighbor`、`setPlacedBy` 排的计划刻都不做。
-//! 这里留下的是存活、形状更新、右键和前方邻居的更新。
+//! 官方把 `getDelay`、`isLocked`、`getInputSignal`、`shouldTurnOn`、`getOutputSignal`
+//! 和 `checkTickOnNeighbor` 都写成虚方法，子类各覆盖一部分。这里的自由函数按
+//! `state.is_a(...)` 分派，效果和虚调用一样。
+//!
+//! 比较器的输出强度存在方块实体里，这里放在 [`RedstoneMemory`](crate::RedstoneMemory)。
+//! 容器和实体都没有，所以模拟信号只有方块状态能决定的那些有值。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, blocks};
+use mc_bamboo_data::{Block, BlockAncestor, blocks};
 
 use crate::{
-    behaviour::{Behaviour, Plain, common::facing_the_player},
-    context::{PlaceContext, UseContext},
+    behaviour::{
+        Behaviour, Plain,
+        common::{facing_the_player, field_bool},
+    },
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{
         BlockState, ComparatorMode, DELAY, HORIZONTAL_FACING, LOCKED, MODE_COMPARATOR, POWER,
         POWERED, SupportType,
     },
+    ticks::TickPriority,
     world::{UPDATE_CLIENTS, World},
 };
 
@@ -34,17 +41,190 @@ fn update_neighbors_in_front(state: BlockState, world: &mut World, pos: BlockPos
     world.update_neighbors_at_except_from_facing(front, state.block(), facing);
 }
 
-/// `getInputSignal`。比较器读方块的模拟信号的部分不做，那是红石信号。
-fn input_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
+/// `getDelay`：中继器按档位，比较器固定两刻。
+fn delay(state: BlockState) -> i32 {
+    if state.is_a(BlockAncestor::RepeaterBlock) {
+        state.get(DELAY) * 2
+    } else {
+        2
+    }
+}
+
+/// `getAlternateSignal`：两侧的输入里强的那个。
+fn alternate_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
+    let facing = state.get(HORIZONTAL_FACING);
+    let diodes_only = field_bool(state.block(), "sideInputDiodesOnly()");
+    let side = |side: Direction| world.control_input_signal(pos.relative(side), side, diodes_only);
+    side(facing.clockwise()).max(side(facing.counter_clockwise()))
+}
+
+/// `isLocked`：只有中继器会被两侧的中继器或者比较器锁住。
+fn is_locked(state: BlockState, world: &World, pos: BlockPos) -> bool {
+    state.is_a(BlockAncestor::RepeaterBlock) && alternate_signal(state, world, pos) > 0
+}
+
+/// `DiodeBlock.getInputSignal`：正后方那一格的信号，导线的功率要单独看一眼。
+fn diode_input_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
     let facing = state.get(HORIZONTAL_FACING);
     let target_pos = pos.relative(facing);
+    let input = world.signal(target_pos, facing);
+    if input >= 15 {
+        return input;
+    }
     let target = world.block_state(target_pos);
     let wire_power = if target.is(blocks::REDSTONE_WIRE) {
         target.get(POWER)
     } else {
         0
     };
-    world.signal(target_pos, facing).max(wire_power)
+    input.max(wire_power)
+}
+
+/// `ComparatorBlock.getInputSignal`：后面是导体时，隔着它读下一格的模拟信号。
+/// 官方还要看那一格的物品展示框，这个世界里没有实体。
+fn comparator_input_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
+    let signal = diode_input_signal(state, world, pos);
+    let facing = state.get(HORIZONTAL_FACING);
+    let target_pos = pos.relative(facing);
+    let target = world.block_state(target_pos);
+    if target.has_analog_output_signal() {
+        return target.analog_output_signal(world, target_pos, facing.opposite());
+    }
+    if signal >= 15 || !target.is_redstone_conductor() {
+        return signal;
+    }
+    let behind_pos = target_pos.relative(facing);
+    let behind = world.block_state(behind_pos);
+    if behind.has_analog_output_signal() {
+        behind.analog_output_signal(world, behind_pos, facing.opposite())
+    } else {
+        signal
+    }
+}
+
+/// `getInputSignal`。
+fn input_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
+    if state.is_a(BlockAncestor::ComparatorBlock) {
+        comparator_input_signal(state, world, pos)
+    } else {
+        diode_input_signal(state, world, pos)
+    }
+}
+
+/// `ComparatorBlock.shouldTurnOn`：比较模式下两边一样大也算亮。
+fn comparator_should_turn_on(state: BlockState, world: &World, pos: BlockPos) -> bool {
+    let input = input_signal(state, world, pos);
+    if input == 0 {
+        return false;
+    }
+    let side = alternate_signal(state, world, pos);
+    input > side || input == side && state.get(MODE_COMPARATOR) == ComparatorMode::Compare
+}
+
+/// `shouldTurnOn`。
+fn should_turn_on(state: BlockState, world: &World, pos: BlockPos) -> bool {
+    if state.is_a(BlockAncestor::ComparatorBlock) {
+        comparator_should_turn_on(state, world, pos)
+    } else {
+        input_signal(state, world, pos) > 0
+    }
+}
+
+/// `getOutputSignal`：中继器永远是满的，比较器输出算好的那个数。
+fn output_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
+    if state.is_a(BlockAncestor::ComparatorBlock) {
+        world.redstone_memory().comparator_output(pos)
+    } else {
+        15
+    }
+}
+
+/// `shouldPrioritize`：正后方是一个不冲着自己的二极管，也就是官方说的“排成一列”。
+fn should_prioritize(state: BlockState, world: &World, pos: BlockPos) -> bool {
+    let behind = state.get(HORIZONTAL_FACING).opposite();
+    let other = world.block_state(pos.relative(behind));
+    other.is_a(BlockAncestor::DiodeBlock) && other.get(HORIZONTAL_FACING) != behind
+}
+
+/// `ComparatorBlock.calculateOutputSignal`。
+fn calculate_output_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
+    let input = input_signal(state, world, pos);
+    if input == 0 {
+        return 0;
+    }
+    let alternate = alternate_signal(state, world, pos);
+    if alternate > input {
+        return 0;
+    }
+    if state.get(MODE_COMPARATOR) == ComparatorMode::Subtract {
+        input - alternate
+    } else {
+        input
+    }
+}
+
+/// `ComparatorBlock.refreshOutputState`：输出强度变了，或者在比较模式下，都要更新前方。
+fn refresh_output_state(state: BlockState, world: &mut World, pos: BlockPos) {
+    let output = calculate_output_signal(state, world, pos);
+    let old = world.redstone_memory().comparator_output(pos);
+    world
+        .redstone_memory_mut()
+        .set_comparator_output(pos, output);
+    if old == output && state.get(MODE_COMPARATOR) != ComparatorMode::Compare {
+        return;
+    }
+    let source_on = should_turn_on(state, world, pos);
+    if state.get(POWERED) != source_on {
+        world.set_block(pos, state.with(POWERED, source_on), UPDATE_CLIENTS);
+    }
+    update_neighbors_in_front(state, world, pos);
+}
+
+/// `ComparatorBlock.checkTickOnNeighbor`：输出强度也算变化，所以比中继器多看一个数。
+fn comparator_check_tick_on_neighbor(state: BlockState, world: &mut World, pos: BlockPos) {
+    if world.will_tick_this_tick(pos, state.block()) {
+        return;
+    }
+    let output = calculate_output_signal(state, world, pos);
+    let old = world.redstone_memory().comparator_output(pos);
+    if output == old && state.get(POWERED) == should_turn_on(state, world, pos) {
+        return;
+    }
+    let priority = if should_prioritize(state, world, pos) {
+        TickPriority::High
+    } else {
+        TickPriority::Normal
+    };
+    world.schedule_tick_with_priority(pos, state.block(), 2, priority);
+}
+
+/// `DiodeBlock.checkTickOnNeighbor`。
+fn diode_check_tick_on_neighbor(state: BlockState, world: &mut World, pos: BlockPos) {
+    if is_locked(state, world, pos) {
+        return;
+    }
+    let on = state.get(POWERED);
+    let turning_on = should_turn_on(state, world, pos);
+    if on == turning_on || world.will_tick_this_tick(pos, state.block()) {
+        return;
+    }
+    let priority = if should_prioritize(state, world, pos) {
+        TickPriority::ExtremelyHigh
+    } else if on {
+        TickPriority::VeryHigh
+    } else {
+        TickPriority::High
+    };
+    world.schedule_tick_with_priority(pos, state.block(), delay(state), priority);
+}
+
+/// `checkTickOnNeighbor`。
+fn check_tick_on_neighbor(state: BlockState, world: &mut World, pos: BlockPos) {
+    if state.is_a(BlockAncestor::ComparatorBlock) {
+        comparator_check_tick_on_neighbor(state, world, pos);
+    } else {
+        diode_check_tick_on_neighbor(state, world, pos);
+    }
 }
 
 impl Behaviour for Diode {
@@ -76,7 +256,11 @@ impl Behaviour for Diode {
         pos: BlockPos,
         _source: &'static Block,
     ) {
-        if !world.block_state(pos).is_same_block(state) || state.can_survive(world, pos) {
+        if !world.block_state(pos).is_same_block(state) {
+            return;
+        }
+        if state.can_survive(world, pos) {
+            check_tick_on_neighbor(state, world, pos);
             return;
         }
         world.remove_block(pos);
@@ -84,17 +268,64 @@ impl Behaviour for Diode {
             world.update_neighbors_at(pos.relative(direction), state.block());
         }
     }
+
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
+        if should_turn_on(state, world, pos) {
+            world.schedule_tick(pos, state.block(), 1);
+        }
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if is_locked(state, world, pos) {
+            return;
+        }
+        let on = state.get(POWERED);
+        let turning_on = should_turn_on(state, world, pos);
+        if on && !turning_on {
+            world.set_block(pos, state.with(POWERED, false), UPDATE_CLIENTS);
+        } else if !on {
+            world.set_block(pos, state.with(POWERED, true), UPDATE_CLIENTS);
+            if !turning_on {
+                // 输入已经没了，再排一刻把自己关掉，这就是中继器的脉冲延长。
+                world.schedule_tick_with_priority(
+                    pos,
+                    state.block(),
+                    delay(state),
+                    TickPriority::VeryHigh,
+                );
+            }
+        }
+    }
+
+    fn own_signal(&self, state: BlockState, world: &World, pos: BlockPos) -> i32 {
+        if state.get(POWERED) {
+            output_signal(state, world, pos)
+        } else {
+            0
+        }
+    }
+
+    fn signal(&self, state: BlockState, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        if state.get(HORIZONTAL_FACING) == direction {
+            state.own_signal(world, pos)
+        } else {
+            0
+        }
+    }
+
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        state.signal(world, pos, direction)
+    }
 }
 
 /// `RepeaterBlock`。
 pub(super) struct Repeater;
-
-/// `isLocked`：两侧有中继器或者比较器的信号时锁住。
-fn is_locked(state: BlockState, world: &World, pos: BlockPos) -> bool {
-    let facing = state.get(HORIZONTAL_FACING);
-    let side_signal = |side: Direction| world.signal(pos.relative(side), side);
-    side_signal(facing.clockwise()).max(side_signal(facing.counter_clockwise())) > 0
-}
 
 impl Behaviour for Repeater {
     fn state_for_placement(
@@ -147,6 +378,10 @@ impl Behaviour for Repeater {
         Diode.neighbor_changed(state, world, pos, source);
     }
 
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, placer: &Actor) {
+        Diode.set_placed_by(state, world, pos, placer);
+    }
+
     fn use_without_item(
         &self,
         state: BlockState,
@@ -156,23 +391,32 @@ impl Behaviour for Repeater {
         world.set_block_and_update(ctx.clicked_pos(), state.cycle(DELAY));
         InteractionResult::Success
     }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        Diode.tick(state, world, pos);
+    }
+
+    fn own_signal(&self, state: BlockState, world: &World, pos: BlockPos) -> i32 {
+        Diode.own_signal(state, world, pos)
+    }
+
+    fn signal(&self, state: BlockState, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        Diode.signal(state, world, pos, direction)
+    }
+
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        Diode.direct_signal(state, world, pos, direction)
+    }
 }
 
 /// `ComparatorBlock`。
 pub(super) struct Comparator;
-
-/// `refreshOutputState`。两侧没有信号，所以输出就是输入。方块实体里记的旧输出不做，当作 0。
-fn refresh_output_state(state: BlockState, world: &mut World, pos: BlockPos) {
-    let output = input_signal(state, world, pos);
-    if output == 0 && state.get(MODE_COMPARATOR) != ComparatorMode::Compare {
-        return;
-    }
-    let source_on = output > 0;
-    if state.get(POWERED) != source_on {
-        world.set_block(pos, state.with(POWERED, source_on), UPDATE_CLIENTS);
-    }
-    update_neighbors_in_front(state, world, pos);
-}
 
 impl Behaviour for Comparator {
     fn state_for_placement(
@@ -221,6 +465,10 @@ impl Behaviour for Comparator {
         Diode.neighbor_changed(state, world, pos, source);
     }
 
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, placer: &Actor) {
+        Diode.set_placed_by(state, world, pos, placer);
+    }
+
     fn use_without_item(
         &self,
         state: BlockState,
@@ -234,5 +482,27 @@ impl Behaviour for Comparator {
             refresh_output_state(cycled, world, pos);
         }
         InteractionResult::Success
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        refresh_output_state(state, world, pos);
+    }
+
+    fn own_signal(&self, state: BlockState, world: &World, pos: BlockPos) -> i32 {
+        Diode.own_signal(state, world, pos)
+    }
+
+    fn signal(&self, state: BlockState, world: &World, pos: BlockPos, direction: Direction) -> i32 {
+        Diode.signal(state, world, pos, direction)
+    }
+
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        Diode.direct_signal(state, world, pos, direction)
     }
 }

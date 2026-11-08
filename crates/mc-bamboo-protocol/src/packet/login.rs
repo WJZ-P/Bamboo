@@ -49,6 +49,20 @@ impl ClientboundPacket for LoginDisconnect<'_> {
     }
 }
 
+/// 告诉客户端从下一个包开始启用压缩，以及压缩的阈值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginCompression {
+    pub threshold: i32,
+}
+
+impl ClientboundPacket for LoginCompression {
+    const ID: i32 = clientbound::LOGIN_COMPRESSION;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.threshold);
+    }
+}
+
 /// 登录成功。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoginFinished<'a> {
@@ -118,6 +132,14 @@ mod tests {
         let mut out = Vec::new();
         append_frame(&mut out, &LoginDisconnect { reason_json: "{}" }).unwrap();
         assert_eq!(out, [0x04, 0x00, 0x02, b'{', b'}']);
+    }
+
+    #[test]
+    fn encodes_login_compression() {
+        let mut out = Vec::new();
+        append_frame(&mut out, &LoginCompression { threshold: 256 }).unwrap();
+        // 帧长 3：包 ID 0x03，阈值 256 的 VarInt 是 0x80 0x02。
+        assert_eq!(out, [0x03, 0x03, 0x80, 0x02]);
     }
 
     #[test]

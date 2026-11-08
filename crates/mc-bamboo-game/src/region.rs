@@ -9,17 +9,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mc_bamboo_blocks::{BlockTicks, LevelRandom};
-use mc_bamboo_core::Vec3;
+use mc_bamboo_blocks::{BlockTicks, LevelRandom, RedstoneMemory};
+use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameMode,
     LevelChunksLoadStart, Login, PlayerAbilities, SetEntityData, SetTime, UpdateAttributes,
 };
-use mc_bamboo_world::{flat, store::ChunkStore};
+use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
 use crate::{
-    chunk_encoding::encode_chunk,
+    chunk_encoding::encode_template,
     chunk_tracking,
     global::GameTime,
     inbound::{JoinRequest, PlayerId},
@@ -88,10 +88,14 @@ pub(crate) struct Region {
     pub(crate) template_body: Vec<u8>,
     /// 这一 tick 改过的方块，等广播阶段发出去。
     pub(crate) block_changes: BlockChanges,
+    /// 这一 tick 开头算完光照以后变了的段，等广播阶段发出去。
+    pub(crate) light_changes: BTreeMap<ChunkPos, LightChanges>,
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
+    redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
     /// 服务端视距，已经 clamp 到合法范围。
     pub(crate) view_distance: i32,
@@ -114,15 +118,17 @@ const _: () = {
 impl Region {
     pub(crate) fn new(view_distance: i32, max_players: i32) -> Self {
         let chunks = ChunkStore::flat();
-        let template_body = encode_chunk(chunks.template());
+        let template_body = encode_template(&chunks);
         Self {
             players: BTreeMap::new(),
             links: Links::default(),
             chunks,
             template_body,
             block_changes: BlockChanges::default(),
+            light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
             random: LevelRandom::new(unique_seed()),
+            redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
             max_players,
@@ -140,6 +146,7 @@ impl Region {
             changes: &mut self.block_changes,
             players: &self.players,
             random: &self.random,
+            redstone: &mut self.redstone,
         };
         (level, &mut self.block_ticks)
     }

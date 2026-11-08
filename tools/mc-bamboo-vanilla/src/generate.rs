@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, CompostLayers, FieldValue, Item, Property, StateProvider,
-    TagGroup, VersionData,
+    Block, BlockField, BlockPredicate, CompostLayers, FieldValue, HeightmapType, Item, Property,
+    StateProvider, TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -31,8 +31,10 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let items = items_file(data)?;
     let states = states_file(data)?;
     let shapes = shapes_file(data)?;
+    let light = light_file(data)?;
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
+    let heightmaps = heightmaps_file(data)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
@@ -42,9 +44,11 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
     write_file(output_dir, "items.rs", &items)?;
+    write_file(output_dir, "light.rs", &light)?;
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
+    write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "tags.rs", &tags)
 }
 
@@ -55,7 +59,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod items;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -77,6 +81,83 @@ fn version_file(data: &VersionData) -> String {
         version.data_version
     );
     out
+}
+
+/// 官方的 `Heightmap.Types`。区块包按 `id` 排列，`id` 也是网络上的键。
+fn heightmaps_file(data: &VersionData) -> Result<String, String> {
+    check_heightmap_types(&data.heightmaps)?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 一个高度图类型。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct HeightmapType {{");
+    let _ = writeln!(
+        out,
+        "    /// 官方的序列化名，比如 `MOTION_BLOCKING_NO_LEAVES`。"
+    );
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// 网络上的键，也是官方 `Types` 的声明顺序。");
+    let _ = writeln!(out, "    pub id: i32,");
+    let _ = writeln!(out, "    /// `sendToClient`：区块包带上这一种。");
+    let _ = writeln!(out, "    pub send_to_client: bool,");
+    let _ = writeln!(out, "    /// `keepAfterWorldgen`：区块里一直留着这一种。");
+    let _ = writeln!(out, "    pub keep_after_worldgen: bool,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+
+    for type_ in &data.heightmaps {
+        let _ = writeln!(out, "/// `{}`。", type_.name);
+        let _ = writeln!(
+            out,
+            "pub const {}: HeightmapType = HeightmapType {{",
+            constant_name(&type_.name)
+        );
+        let _ = writeln!(out, "    name: {:?},", type_.name);
+        let _ = writeln!(out, "    id: {},", type_.id);
+        let _ = writeln!(out, "    send_to_client: {},", type_.send_to_client);
+        let _ = writeln!(
+            out,
+            "    keep_after_worldgen: {},",
+            type_.keep_after_worldgen
+        );
+        let _ = writeln!(out, "}};");
+        let _ = writeln!(out);
+    }
+
+    let constants: Vec<String> = data
+        .heightmaps
+        .iter()
+        .map(|type_| constant_name(&type_.name))
+        .collect();
+    let _ = writeln!(out, "/// 全部类型，顺序和官方 `Types.values()` 相同。");
+    let _ = writeln!(
+        out,
+        "pub static TYPES: &[HeightmapType] = &[{}];",
+        constants.join(", ")
+    );
+    Ok(out)
+}
+
+/// 生成的文件按下标取类型，所以 `id` 必须是从 0 开始连续的，名字也要唯一。
+fn check_heightmap_types(types: &[HeightmapType]) -> Result<(), String> {
+    if types.is_empty() {
+        return Err("没有导出高度图类型".to_owned());
+    }
+    for (index, type_) in types.iter().enumerate() {
+        if type_.id != index as i32 {
+            return Err(format!(
+                "高度图 {} 的 id 是 {}，应该是 {index}",
+                type_.name, type_.id
+            ));
+        }
+    }
+    let mut names: Vec<&str> = types.iter().map(|type_| type_.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.len() != types.len() {
+        return Err("高度图类型的名字不唯一".to_owned());
+    }
+    Ok(())
 }
 
 /// `minecraft:level_chunk_with_light` → `LEVEL_CHUNK_WITH_LIGHT`。
@@ -538,7 +619,7 @@ fn states_file(data: &VersionData) -> Result<String, String> {
         &mut out,
         "每个状态的事实，位的含义见 [`crate::facts`]。",
         "STATE_FACTS",
-        "u32",
+        "u64",
         &tables.facts,
     );
     write_state_table(
@@ -640,6 +721,65 @@ fn shapes_file(data: &VersionData) -> Result<String, String> {
         out,
         "pub static OFFSET_STURDY_SAMPLES: &[(u32, i32, i32, i32, u32)] = &{:?};",
         tables.offset_sturdy_samples
+    );
+    Ok(out)
+}
+
+fn light_file(data: &VersionData) -> Result<String, String> {
+    let tables = &data.light_tables;
+    let total = data.block_states.total;
+    check_table_length("LIGHT_EMISSION", &tables.emission, total)?;
+    check_table_length("LIGHT_OCCLUSION", &tables.occlusion, total)?;
+    let words = (tables.face_count * tables.face_count).div_ceil(64);
+    if tables.face_occludes.len() != words {
+        return Err(format!(
+            "FACE_OCCLUDES 有 {} 项，{} 个面形状要 {words} 项",
+            tables.face_occludes.len(),
+            tables.face_count
+        ));
+    }
+
+    let mut out = String::new();
+    write_state_table(
+        &mut out,
+        "每个状态的 `getLightEmission`。",
+        "LIGHT_EMISSION",
+        "u8",
+        &tables.emission,
+    );
+    write_state_table(
+        &mut out,
+        "每个状态在 [`OCCLUSION_FACES`] 里的下标。",
+        "LIGHT_OCCLUSION",
+        "u16",
+        &tables.occlusion,
+    );
+    let _ = writeln!(
+        out,
+        "/// 去重后的 `LightEngine.getOcclusionShape`，按 `Direction` 的 ID 排列 6 个面形状的编号。\n/// 第一项全是空形状。编号 0 是空形状，1 是完整方块。"
+    );
+    let _ = writeln!(out, "pub static OCCLUSION_FACES: &[[u16; 6]] = &[");
+    for faces in &tables.occlusion_faces {
+        let _ = writeln!(out, "    {faces:?},");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(out, "/// 去重后的面形状个数。");
+    let _ = writeln!(
+        out,
+        "pub const FACE_SHAPE_COUNT: usize = {};\n",
+        tables.face_count
+    );
+    let occludes: Vec<u64> = tables
+        .face_occludes
+        .iter()
+        .map(|&word| word as u64)
+        .collect();
+    write_state_table(
+        &mut out,
+        "第 `a * FACE_SHAPE_COUNT + b` 位是官方的 `Shapes.faceShapeOccludes(a, b)`，低位在前。",
+        "FACE_OCCLUDES",
+        "u64",
+        &occludes,
     );
     Ok(out)
 }
@@ -1049,5 +1189,25 @@ mod tests {
             Ok("FlintAndSteel")
         );
         assert_eq!(item_kind(&item("Item", None)), Ok("Other"));
+    }
+
+    fn heightmap(name: &str, id: i32) -> HeightmapType {
+        HeightmapType {
+            name: name.to_owned(),
+            id,
+            send_to_client: false,
+            keep_after_worldgen: true,
+        }
+    }
+
+    #[test]
+    fn heightmap_ids_are_the_declaration_order() {
+        assert_eq!(
+            check_heightmap_types(&[heightmap("A", 0), heightmap("B", 1)]),
+            Ok(())
+        );
+        assert!(check_heightmap_types(&[]).is_err());
+        assert!(check_heightmap_types(&[heightmap("A", 1)]).is_err());
+        assert!(check_heightmap_types(&[heightmap("A", 0), heightmap("A", 1)]).is_err());
     }
 }

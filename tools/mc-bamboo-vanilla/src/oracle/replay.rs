@@ -8,11 +8,11 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, LevelRandom,
-    Outcome, TickPriority, destroy_block, random_tick, run_scheduled_ticks,
+    Outcome, RedstoneMemory, TickPriority, destroy_block, random_tick, run_scheduled_ticks,
     shape::{self, BooleanOp},
     tick_chunk, use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3};
 use mc_bamboo_data::{blocks, items};
 
 use super::{
@@ -26,6 +26,8 @@ const STANDING_EYE_HEIGHT: f32 = 1.62;
 const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 /// 创造模式的 `blockInteractionRange`。
 const CREATIVE_INTERACTION_RANGE: f64 = 5.0;
+/// `BlockOracle.java` 假世界的亮度，两种光都是这个值。
+const FULL_BRIGHTNESS: i32 = 15;
 /// 流体的注册表名，下标是 [`mc_bamboo_data::registries::fluid`] 里的 ID。
 pub const FLUID_NAMES: [&str; 5] = [
     "minecraft:empty",
@@ -42,7 +44,8 @@ pub struct Replayed {
     /// 和场景不同的格子。
     pub changes: BTreeMap<BlockPos, u32>,
     pub destroyed: Vec<Destroyed>,
-    /// 这次动作留在队列里的计划刻，方块的在前，流体的在后，各自按执行顺序。
+    /// 走完 `settle` 之后还排着的计划刻，方块的在前，流体的在后，各自按执行顺序，
+    /// 延迟相对结束的时刻。
     pub ticks: Vec<Scheduled>,
     /// 物品栏里新出现的物品。
     pub gained: Vec<String>,
@@ -70,6 +73,8 @@ struct OracleLevel {
     max_y: i32,
     random: LevelRandom,
     touched: RefCell<BTreeSet<usize>>,
+    /// 每道题一份，和假世界里每道题新建的方块实体一样。
+    redstone: RedstoneMemory,
 }
 
 impl OracleLevel {
@@ -84,6 +89,7 @@ impl OracleLevel {
             max_y: header.max_y,
             random: LevelRandom::new(case.seed),
             touched: RefCell::new(BTreeSet::new()),
+            redstone: RedstoneMemory::default(),
         }
     }
 
@@ -146,6 +152,19 @@ impl Level for OracleLevel {
 
     fn max_y(&self) -> i32 {
         self.max_y
+    }
+
+    /// 假世界里 `getBrightness` 恒为 15，`getSkyDarken` 是 0。
+    fn brightness(&self, _layer: LightLayer, _pos: BlockPos) -> i32 {
+        FULL_BRIGHTNESS
+    }
+
+    fn redstone(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
     }
 
     fn random(&self) -> &LevelRandom {
@@ -250,7 +269,7 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     let actor = actor_of(action, names)?;
     let target = action.target();
     let now = header.game_time;
-    let outcome = match action.kind {
+    let mut outcome = match action.kind {
         Kind::Place | Kind::Use => {
             let hit = hit_of(action)?;
             use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit)
@@ -262,15 +281,36 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         Kind::Random => random_tick(&mut level, &mut ticks, target),
         Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
     };
+    // flow 题在动作里已经走到 `game_time + steps`，后面的刻从那里接着数。
+    let after_action = match action.kind {
+        Kind::Flow => now + i64::from(action.steps),
+        _ => now,
+    };
+    let end = after_action + i64::from(action.settle);
+    settle(&mut level, &mut ticks, after_action, end, &mut outcome);
 
     Ok(Replayed {
         result: result_name(action.kind, outcome.result),
         changes: level.changes(&case.scene),
         destroyed: destroyed_of(&outcome),
-        ticks: scheduled_of(&ticks, now),
+        ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
     })
+}
+
+/// 动作之后一直走到 `end`：每一刻和世界线程一样，时间加一再跑到期的计划刻。破坏事件接在动作的后面。
+fn settle(
+    level: &mut OracleLevel,
+    ticks: &mut BlockTicks,
+    start: i64,
+    end: i64,
+    outcome: &mut Outcome,
+) {
+    for now in start + 1..=end {
+        let settled = run_scheduled_ticks(level, ticks, now);
+        outcome.effects.extend(settled.effects);
+    }
 }
 
 /// 官方的题直接调用 `state.tick`，这里排一个立刻到期的刻，走真正的入口。
@@ -329,7 +369,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
                 state,
                 except_initiator,
             } => Some(Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator)),
-            Effect::FilledBucket { .. } | Effect::BoneMealUsed { .. } => None,
+            // 火把烧坏只放烟，题里不比较。
+            Effect::TorchBurnout { .. } => None,
+            Effect::BoneMealUsed { .. } | Effect::FilledBucket { .. } => None,
         })
         .collect()
 }
@@ -383,6 +425,7 @@ mod tests {
             max_y: 319,
             random: LevelRandom::new(0),
             touched: RefCell::new(BTreeSet::new()),
+            redstone: RedstoneMemory::default(),
         }
     }
 

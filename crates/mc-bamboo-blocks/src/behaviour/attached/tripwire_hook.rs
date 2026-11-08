@@ -210,6 +210,25 @@ impl Behaviour for TripWireHook {
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         calculate_state(world, pos, state, false, true, None);
     }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        if state.get(POWERED) { 15 } else { 0 }
+    }
+
+    /// 只强充能它挂着的那一格。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if state.get(POWERED) && state.get(HORIZONTAL_FACING) == direction {
+            15
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]

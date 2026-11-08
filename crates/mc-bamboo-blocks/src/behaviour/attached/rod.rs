@@ -38,9 +38,18 @@ impl Behaviour for EndRod {
     }
 }
 
-/// `LightningRodBlock`。`onPlace` 和 `tick` 只管闪电打中以后的 8 刻信号，这个世界没有闪电，
-/// 不移植，oracle 的计划刻排除表里有这一项。
+/// `LightningRodBlock`。这个世界没有闪电，打中以后亮起来的那一步不移植，oracle 的排除表里有这一项。
+/// `onPlace` 只管带着信号放下的避雷针，玩家放的不会带。8 刻以后把信号收回来的 `tick` 移植了。
 pub(super) struct LightningRod;
+
+/// `ACTIVATION_TICKS`：被闪电打中以后亮多久。
+const ACTIVATION_TICKS: i32 = 8;
+
+/// `updateNeighbours`：信号只穿过它插着的那一格。
+fn update_neighbours(state: BlockState, world: &mut World, pos: BlockPos) {
+    let front = state.get(FACING).opposite();
+    world.update_neighbors_at(pos.relative(front), state.block());
+}
 
 impl Behaviour for LightningRod {
     /// `WeatheringLightningRodBlock` 在随机刻里氧化，别的类不会被随机刻选中。
@@ -73,10 +82,43 @@ impl Behaviour for LightningRod {
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
     }
 
+    /// `onPlace`：带着信号放的避雷针要排一个刻把信号收回来。涂蜡、去蜡换成另一块方块时也算放下。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if state.is_same_block(old) {
+            return;
+        }
+        if state.get(POWERED) && !world.has_scheduled_tick(pos, state.block()) {
+            world.schedule_tick(pos, state.block(), ACTIVATION_TICKS);
+        }
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(POWERED) {
-            let front = state.get(FACING).opposite();
-            world.update_neighbors_at(pos.relative(front), state.block());
+            update_neighbours(state, world, pos);
+        }
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        world.set_block_and_update(pos, state.with(POWERED, false));
+        update_neighbours(state, world, pos);
+    }
+
+    fn own_signal(&self, state: BlockState, _world: &World, _pos: BlockPos) -> i32 {
+        if state.get(POWERED) { 15 } else { 0 }
+    }
+
+    /// 只强充能它插着的那一格。
+    fn direct_signal(
+        &self,
+        state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if state.get(POWERED) && state.get(FACING) == direction {
+            15
+        } else {
+            0
         }
     }
 }

@@ -1761,7 +1761,8 @@ fn a_pending_chunk_arrives_with_the_change_instead_of_an_update() {
         .find(|frame| chunk_position(frame) == edited)
         .expect("这一批最多 64 个，近的先发");
     let region = server.region();
-    let current = encode_chunk(region.chunks.edited(edited).expect("这个区块改过了"));
+    assert!(region.chunks.edited(edited).is_some(), "这个区块改过了");
+    let current = encode_chunk(&region.chunks, edited);
     assert_eq!(chunk_body(chunk), current);
     assert_ne!(chunk_body(chunk), region.template_body);
 }
@@ -1813,7 +1814,8 @@ fn a_chunk_sent_again_has_the_edit_and_the_block_entity() {
     let resent = walk_away_and_back(&mut server, &client, chunk);
 
     let region = server.region();
-    let current = encode_chunk(region.chunks.edited(chunk).expect("这个区块改过了"));
+    assert!(region.chunks.edited(chunk).is_some(), "这个区块改过了");
+    let current = encode_chunk(&region.chunks, chunk);
     assert_eq!(resent, current);
     assert_ne!(resent, region.template_body);
     assert!(contains(&resent, &CHEST_ENTRY));

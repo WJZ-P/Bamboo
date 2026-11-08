@@ -60,6 +60,39 @@ async fn player_joins_and_receives_the_world() {
     assert_eq!(players[0].name, "Kitten");
 }
 
+/// 默认配置和官方一样：登录时收到阈值 256，之后两个方向都是压缩帧。
+#[tokio::test]
+async fn the_server_turns_compression_on_by_default() {
+    let server = TestServer::start(small_world()).await;
+    let mut client = server.join("Kitten").await;
+
+    assert_eq!(client.compression_threshold(), Some(256));
+    // 登录之后的大包都走压缩，假客户端解不开就会在这里失败。
+    assert_eq!(
+        packet_id(&client.read_frame().await),
+        play::clientbound::LOGIN
+    );
+    assert_eq!(client.read_chunks(CHUNKS).await, CHUNKS);
+}
+
+/// 负的阈值关掉压缩，客户端照常能进服。
+#[tokio::test]
+async fn players_can_still_join_with_compression_off() {
+    let config = ServerConfig {
+        compression_threshold: -1,
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.join("Kitten").await;
+
+    assert_eq!(client.compression_threshold(), None);
+    assert_eq!(
+        packet_id(&client.read_frame().await),
+        play::clientbound::LOGIN
+    );
+    assert_eq!(client.read_chunks(CHUNKS).await, CHUNKS);
+}
+
 #[tokio::test]
 async fn join_order_matches_the_official_server() {
     let server = TestServer::start(small_world()).await;

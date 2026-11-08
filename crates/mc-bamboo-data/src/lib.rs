@@ -11,8 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, items, packets, registries, shapes, states, tags,
-    version,
+    block_maps, block_transformers, blocks, heightmaps, items, light, packets, registries, shapes,
+    states, tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -28,36 +28,42 @@ pub mod facts {
     /// `isFaceSturdy(RIGID)` 的起始位。
     pub const STURDY_RIGID: u32 = 12;
     /// 全部 `isFaceSturdy` 的位。
-    pub const STURDY_MASK: u32 = (1 << 18) - 1;
+    pub const STURDY_MASK: u64 = (1 << 18) - 1;
     /// `isAir`。
-    pub const AIR: u32 = 1 << 18;
+    pub const AIR: u64 = 1 << 18;
     /// `canOcclude`。
-    pub const CAN_OCCLUDE: u32 = 1 << 19;
+    pub const CAN_OCCLUDE: u64 = 1 << 19;
     /// `isSolid`，官方标了 `@Deprecated` 的那个粗略判定，告示牌、蛋糕之类的存活要用它。
-    pub const SOLID: u32 = 1 << 20;
+    pub const SOLID: u64 = 1 << 20;
     /// `liquid`，方块属性里的标记，不是“含有流体”。
-    pub const LIQUID: u32 = 1 << 21;
+    pub const LIQUID: u64 = 1 << 21;
     /// `canBeReplaced()`，不带放置上下文的那个重载。
-    pub const REPLACEABLE: u32 = 1 << 22;
+    pub const REPLACEABLE: u64 = 1 << 22;
     /// `isRedstoneConductor`。
-    pub const REDSTONE_CONDUCTOR: u32 = 1 << 23;
+    pub const REDSTONE_CONDUCTOR: u64 = 1 << 23;
     /// `isCollisionShapeFullBlock`。
-    pub const COLLISION_FULL_BLOCK: u32 = 1 << 24;
+    pub const COLLISION_FULL_BLOCK: u64 = 1 << 24;
     /// `isSolidRender`。
-    pub const SOLID_RENDER: u32 = 1 << 25;
+    pub const SOLID_RENDER: u64 = 1 << 25;
     /// `isSignalSource`。
-    pub const SIGNAL_SOURCE: u32 = 1 << 26;
+    pub const SIGNAL_SOURCE: u64 = 1 << 26;
     /// `hasAnalogOutputSignal`。
-    pub const ANALOG_OUTPUT: u32 = 1 << 27;
+    pub const ANALOG_OUTPUT: u64 = 1 << 27;
     /// `propagatesSkylightDown`。
-    pub const PROPAGATES_SKYLIGHT: u32 = 1 << 28;
+    pub const PROPAGATES_SKYLIGHT: u64 = 1 << 28;
     /// `isRandomlyTicking`：随机刻会调用这个状态的 `randomTick`。
-    pub const RANDOMLY_TICKING: u32 = 1 << 29;
+    pub const RANDOMLY_TICKING: u64 = 1 << 29;
     /// `getFluidState().isRandomlyTicking`：随机刻会调用这一格的流体的 `randomTick`。
-    pub const FLUID_RANDOMLY_TICKING: u32 = 1 << 30;
+    pub const FLUID_RANDOMLY_TICKING: u64 = 1 << 30;
     /// 下面是一个不用形状挡光的完整方块时，`LightEngine.getLightDampeningInto(下面, 这个状态, UP, _)` 是 16：
     /// 这个状态用自己的形状挡光，而且挡光形状的底面是满的，比如下半台阶。
-    pub const BLOCKS_LIGHT_FROM_BELOW: u32 = 1 << 31;
+    pub const BLOCKS_LIGHT_FROM_BELOW: u64 = 1 << 31;
+    /// `useShapeForLightOcclusion`，没有和 `canOcclude` 合并的原值。
+    pub const USE_SHAPE_FOR_LIGHT_OCCLUSION: u64 = 1 << 32;
+    /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP)`，`MOTION_BLOCKING` 和 `OCEAN_FLOOR` 用。
+    pub const MOTION_BLOCKING: u64 = 1 << 33;
+    /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES)`，`MOTION_BLOCKING_NO_LEAVES` 用。
+    pub const MOTION_BLOCKING_NO_LEAVES: u64 = 1 << 34;
 }
 
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
@@ -379,7 +385,7 @@ pub fn state_count(block_id: usize) -> u32 {
 }
 
 /// 状态的事实，位的含义见 [`facts`]。状态 ID 不存在时 panic。
-pub fn state_facts(state: u32) -> u32 {
+pub fn state_facts(state: u32) -> u64 {
     states::STATE_FACTS[state as usize]
 }
 
@@ -391,6 +397,24 @@ pub fn state_fluid(state: u32) -> &'static FluidFacts {
 /// 状态的 `getLightDampening`。状态 ID 不存在时 panic。
 pub fn light_dampening(state: u32) -> u8 {
     states::LIGHT_DAMPENING[state as usize]
+}
+
+/// 状态的 `getLightEmission`。状态 ID 不存在时 panic。
+pub fn light_emission(state: u32) -> u8 {
+    light::LIGHT_EMISSION[state as usize]
+}
+
+/// 光照引擎看到的 6 个面的遮挡形状编号，官方的 `LightEngine.getOcclusionShape`，按 `Direction` 的 ID 排列。
+///
+/// 编号 0 是空形状，1 是完整方块，两个编号之间能不能挡住光看 [`face_shape_occludes`]。状态 ID 不存在时 panic。
+pub fn light_occlusion_faces(state: u32) -> &'static [u16; 6] {
+    &light::OCCLUSION_FACES[usize::from(light::LIGHT_OCCLUSION[state as usize])]
+}
+
+/// 官方的 `Shapes.faceShapeOccludes`：两个面形状合起来盖满整个面。参数是 [`light_occlusion_faces`] 的编号。
+pub fn face_shape_occludes(shape: u16, occluder: u16) -> bool {
+    let bit = usize::from(shape) * light::FACE_SHAPE_COUNT + usize::from(occluder);
+    light::FACE_OCCLUDES[bit / 64] >> (bit % 64) & 1 == 1
 }
 
 /// `CollisionContext.empty()` 下的碰撞形状。[`BlockOffset::moves_shape`] 的方块要自己加上偏移。
