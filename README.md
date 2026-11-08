@@ -89,6 +89,11 @@ WebView2 的渲染进程不算在内。
   两种情况各用官方的翻译键。连接和读取各 5 秒，也和 authlib 的两个常量一样。
   问 session server 在连接任务里做，世界线程不等这段 IO。session server 给的 UUID、皮肤和签名原样进 Tab 列表。
   和代理转发互斥，两个都开时转发赢。
+- 物品的数据组件能完整解码和编码：122 种组件每种一个类型，格式照官方每一种的 `StreamCodec`，
+  包括文本组件（线上是 NBT）、`Holder` 和 `HolderSet`、方块谓词、嵌套的物品堆（容器、收纳袋、
+  弩的弹药）和带 NBT 的组件，还有物品堆组件的合法性校验。NBT 也补齐了解码，带官方的配额和深度上限。
+  用官方代码出题比对：全部物品的默认组件、创造模式物品栏的全部物品，加一批手写的组件，
+  解码再编码逐字节相同，官方也能把 Bamboo 写出来的字节解回同样的内容。
 - 红石信号、邻居更新和计划刻按官方逻辑计算（计划刻带优先级）：导线、火把（含烧坏）、中继器、比较器、侦测器、按钮、拉杆、红石灯、铜灯、门、活板门、栅栏门、音符盒、唱片机、动力铁轨、发射器、投掷器和合成器的计划刻都能用。
 - 活塞和粘性活塞：信号变化时排方块事件，下一刻开始推；最多推 12 格，粘液块和蜂蜜块会带上一串方块，
   黑曜石、基岩这些推不动的挡住整排，花、火把这类会被弹掉。要移动的方块换成 `moving_piston` 和方块实体，
@@ -104,7 +109,14 @@ WebView2 的渲染进程不算在内。
 - 流体只有主世界的规则，游戏规则是默认值，改不了。岩浆会点燃旁边的方块，岩浆变高时官方随机地慢四倍，
   Bamboo 用同一个随机源。鱼桶倒出来的只有水，没有鱼。没有音效和粒子：岩浆凝固的嘶嘶声、桶的声音都没有。
 - 用桶和炼药锅互动时，官方会给创造模式的物品栏补一个空桶或者满桶（原来没有的话），Bamboo 不补。
-- 方块实体里只有告示牌有内容（活塞的移动方块实体只有动画进度），箱子这类容器打不开，只吃掉点击。物品组件不影响放下的方块。
+- 物品组件只做到编解码，还没接到玩法上：`ItemStack` 里的组件仍然是不透明的字节，
+  只原样还给发来它的玩家，发给其他玩家时整个丢掉，所以别人还是看不到附魔的光和改过的名字。
+  组件也不影响放下的方块、挖掘速度和配方。
+  六种没有网络编解码器的组件（`lock`、`container_loot`、`map_decorations`、`debug_stick_state`、
+  `recipes`、`intangible_projectile`）线上是 NBT，Bamboo 保留原来的 NBT 并校验最外层的形状，
+  不复刻官方的 DFU 编解码器，所以里面的内容没有逐字段校验。
+  文本组件的校验是「宁可放过」：实体选择器、NBT 路径、对话框和 `show_item` 里的组件表只看字段类型。
+- 方块实体里只有告示牌有内容（活塞的移动方块实体只有动画进度），箱子这类容器打不开，只吃掉点击。
   告示牌的文字只有纯文本，没有样式和点击事件（`§` 格式码和官方一样会被去掉）。编辑走离线模式：
   没有聊天过滤，也没有给管理员随时编辑的开关（`allow_op_features`）。染色、墨囊和蜜脾没有音效。
 - 工具的右键只改方块：没有耐久、音效和粒子，锄头翻生根泥土不掉垂根。要生成实体、改世界生成或者看物品组件的物品还不能用：
@@ -126,12 +138,12 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo` | 命令行入口，可执行文件 `bamboo` |
 | `crates/mc-bamboo-server` | 网络层：监听、连接状态机、读写队列、登录准入 |
 | `crates/mc-bamboo-game` | 世界线程：tick、玩家、区块跟踪、实体同步、方块交互、聊天，不依赖 tokio |
-| `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包，只处理字节 |
+| `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包、物品数据组件，只处理字节 |
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、世界生成，不知道网络 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
-| `crates/mc-bamboo-nbt` | NBT 编码 |
+| `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
 | `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为和光照 |
@@ -192,6 +204,14 @@ cargo run --release -p mc-bamboo-vanilla -- oracle <java 路径> [--cases N] [--
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- light <java 路径> [--scenes N] [--seed S]
+```
+
+物品组件也一样：官方代码把全部物品的默认组件、创造模式物品栏的全部物品和一批手写的组件
+按官方的 `StreamCodec` 编码，`mc-bamboo-protocol` 解码再编码，逐字节比较，
+最后把 Bamboo 写出来的字节交回官方解码，确认解出来的还是同一份组件：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- components <java 路径> [--show N]
 ```
 
 这些命令需要 Java 25 或更新版本。

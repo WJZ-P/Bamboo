@@ -83,6 +83,19 @@ impl Component {
         self.0.write_network(out);
     }
 
+    /// 从线上读到的 NBT 标签构造。调用方要先按 [`crate::components::text`] 校验过。
+    ///
+    /// 原样保留标签而不是解析成结构体：官方的 `CompoundTag` 用 `HashMap`，
+    /// 键序由哈希决定，复述读到的顺序才能把字节原样写回去。
+    pub(crate) const fn from_tag(tag: Tag) -> Self {
+        Self(tag)
+    }
+
+    /// 线上的 NBT 标签。
+    pub const fn tag(&self) -> &Tag {
+        &self.0
+    }
+
     fn into_entries(self) -> Vec<(String, Tag)> {
         match self.0 {
             Tag::Compound(entries) => entries,
