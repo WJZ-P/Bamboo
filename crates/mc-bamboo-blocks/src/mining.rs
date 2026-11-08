@@ -30,7 +30,7 @@ pub struct Miner {
 /// `MobEffectUtil.hasDigSpeed` 和 `MINING_FATIGUE` 在这里是恒假。
 pub fn destroy_speed(state: u32, miner: Miner) -> f32 {
     let block = block_id_of_state(state).unwrap_or_default() as i32;
-    let item = &items::ITEMS[miner.main_hand.max(0) as usize];
+    let item = item_of(miner.main_hand);
     let mut speed = item.tool.map_or(1.0, |tool| tool.mining_speed(block));
     if speed > 1.0 {
         speed += attribute_defaults::MINING_EFFICIENCY as f32;
@@ -72,9 +72,20 @@ pub fn is_correct_for_drops(state: u32, main_hand: i32) -> bool {
         return true;
     }
     let block_id = block_id_of_state(state).unwrap_or_default() as i32;
-    let tool = &items::ITEMS[main_hand.max(0) as usize];
+    let tool = item_of(main_hand);
     tool.tool
         .is_some_and(|tool| tool.is_correct_for_drops(block_id))
+}
+
+/// 物品 ID 对应的物品。注册表里没有的 ID 按空手算。
+///
+/// 官方客户端和服务器都只会给出注册表里的物品；创造模式发包时 ID 是客户端写的，
+/// 越界的数在这里不能把世界线程弄崩。
+fn item_of(id: i32) -> &'static mc_bamboo_data::Item {
+    usize::try_from(id)
+        .ok()
+        .and_then(|id| items::ITEMS.get(id))
+        .unwrap_or(&items::ITEMS[items::AIR as usize])
 }
 
 /// 眼睛是不是泡在水里，官方的 `Entity.isEyeInFluid(FluidTags.WATER)`。
@@ -139,6 +150,17 @@ mod tests {
             0.0
         );
         assert_eq!(destroy_progress(blocks::BEDROCK, miner(items::AIR)), 0.0);
+    }
+
+    #[test]
+    fn unknown_item_ids_behave_like_an_empty_hand() {
+        let air_speed = destroy_speed(blocks::STONE, miner(items::AIR));
+        assert_eq!(destroy_speed(blocks::STONE, miner(-1)), air_speed);
+        assert_eq!(destroy_speed(blocks::STONE, miner(i32::MAX)), air_speed);
+        assert_eq!(
+            is_correct_for_drops(blocks::STONE, i32::MAX),
+            is_correct_for_drops(blocks::STONE, items::AIR)
+        );
     }
 
     #[test]
