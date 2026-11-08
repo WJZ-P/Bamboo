@@ -475,6 +475,9 @@ impl<'a> World<'a> {
         if crate::block_container::is_block_container(self.block_state(pos)) {
             return crate::block_container::with_container(self, pos, f);
         }
+        if let Some(found) = crate::machine_container::try_with_container(self, pos, f) {
+            return found;
+        }
         self.level.with_container(pos, f)
     }
 
@@ -539,18 +542,24 @@ impl<'a> World<'a> {
         self.level.block_entities_mut().remove(pos);
     }
 
-    /// 带着这一格的方块实体运行一段代码。实体在运行期间不在表里，所以这段代码用
-    /// `getBlockEntity(pos)` 找不到它自己，别的地方和官方相同。
+    /// 带着这一格的方块实体运行一段代码。表里暂时没有它，但 [`BlockEntities::get`] 仍能
+    /// 读到正在用的这一份，和官方方块实体留在区块里一样。`get_mut` 仍然是 `None`。
+    ///
+    /// Runs code with this cell's block entity. It is out of the map for the call, but
+    /// [`BlockEntities::get`] still sees that same value, matching vanilla where the block
+    /// entity stays in the chunk. `get_mut` is still `None`.
     pub fn with_block_entity<T: BlockEntity, R>(
         &mut self,
         pos: BlockPos,
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
         let (id, mut entity) = self.level.block_entities_mut().take_at(pos)?;
+        let guard = block_entity::expose_ticking(pos, entity.as_ref());
         let result = entity
             .as_any_mut()
             .downcast_mut::<T>()
             .map(|typed| f(typed, self));
+        drop(guard);
         self.level.block_entities_mut().put(pos, id, entity);
         result
     }
@@ -593,13 +602,25 @@ impl<'a> World<'a> {
     }
 
     /// `Level.tickBlockEntities`：按 ticker 列表的顺序运行每刻的方块实体。
+    ///
+    /// 实体在 tick 期间不在表里，查询仍读到这一份。顺序不改。方块 oracle 会跳过熔炉和酿造台。
+    ///
+    /// `Level.tickBlockEntities` runs each block entity in ticker order.
+    ///
+    /// The entity is out of the map while it ticks, and queries still see that value.
+    /// The order does not change. The block oracle skips furnaces and brewing stands.
     pub fn tick_block_entities(&mut self) {
         self.level.block_entities_mut().begin_tick();
         while let Some((pos, id)) = self.level.block_entities_mut().next_ticker() {
+            if !self.level.runs_block_entity_tick(pos) {
+                continue;
+            }
             let Some(mut entity) = self.level.block_entities_mut().take(pos, id) else {
                 continue;
             };
+            let guard = block_entity::expose_ticking(pos, entity.as_ref());
             entity.tick(self);
+            drop(guard);
             self.level.block_entities_mut().put(pos, id, entity);
         }
         self.level.block_entities_mut().end_tick();

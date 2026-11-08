@@ -73,6 +73,18 @@ pub trait Level {
     /// 见 [`Level::block_entities`]。
     fn block_entities_mut(&mut self) -> &mut BlockEntities;
 
+    /// 这一格的方块实体这一刻要不要跑。默认要跑。
+    ///
+    /// 方块 oracle 的假世界只登记漏斗和移动中的活塞，熔炉和酿造台不跑。
+    ///
+    /// Whether this cell's block entity ticks. The default is yes.
+    ///
+    /// The block oracle's fake level only registers hoppers and moving pistons, so furnaces
+    /// and brewing stands do not tick.
+    fn runs_block_entity_tick(&self, _pos: BlockPos) -> bool {
+        true
+    }
+
     /// `Level.blockEvents`：`level.blockEvent` 排进来的事件。
     fn block_events(&mut self) -> &mut BlockEvents;
 

@@ -11,8 +11,8 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{Recipe, RecipeType};
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{
-    BrewingInput, RecipeManager, assemble, brewing_fuel, crafting_remainder, is_brewing_fuel,
-    is_brewing_potion_input, is_brewing_reagent, potion_id,
+    BrewingInput, RecipeManager, assemble, brewing_fuel, crafting_remainder, is_brewing_reagent,
+    potion_id,
 };
 
 use crate::{
@@ -151,14 +151,7 @@ impl BrewingStandEntity {
     /// 官方 `canPlaceItem`。`level` 一定有；材料格查 `BREWING_REAGENTS`，
     /// 药水格要求是药水输入并且这一格现在是空的。
     pub fn can_place_item(&self, slot: usize, stack: &ItemStack) -> bool {
-        if slot == SLOT_FUEL {
-            return is_brewing_fuel(stack);
-        }
-        if slot == SLOT_INGREDIENT {
-            is_brewing_reagent(stack.item)
-        } else {
-            is_brewing_potion_input(stack.item) && self.items[slot].is_empty()
-        }
+        crate::machine_container::brewing_can_place(&self.items, slot, stack)
     }
 
     /// 官方 `RecipeManager.CachedCheck.getRecipeFor`。
@@ -253,6 +246,9 @@ impl BrewingStandEntity {
                     drop_item_stack(world, self.pos, &remainder);
                 }
             }
+            // 官方消耗燃料后立刻 `setChanged`。
+            // Vanilla calls `setChanged` immediately after consuming fuel.
+            crate::machine_container::mark_container_changed(world, self.pos);
         }
 
         let brewable = self.is_brewable();
@@ -265,6 +261,9 @@ impl BrewingStandEntity {
             } else if !brewable || self.ingredient != Some(self.items[SLOT_INGREDIENT].item) {
                 self.brew_time = 0;
             }
+            // 官方酿造倒计时的每一刻都 `setChanged`。
+            // Vanilla calls `setChanged` on every brewing tick.
+            crate::machine_container::mark_container_changed(world, self.pos);
         } else if brewable && self.fuel > 0 {
             let speed = if self.speed_multiplier > 0.0 {
                 self.speed_multiplier
@@ -275,6 +274,9 @@ impl BrewingStandEntity {
             self.brew_time = (BREWING_TIME_TICKS / speed).ceil() as i32;
             self.total_brew_time = self.brew_time;
             self.ingredient = Some(self.items[SLOT_INGREDIENT].item);
+            // 官方开始酿造时 `setChanged`。
+            // Vanilla calls `setChanged` when a brew starts.
+            crate::machine_container::mark_container_changed(world, self.pos);
         }
 
         let bits = self.potion_bits();

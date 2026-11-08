@@ -44,6 +44,10 @@ pub(crate) enum ContainerKind {
     Jukebox,
     DecoratedPot,
     Crafter,
+    /// 架子。三格在容器表里，没有菜单。
+    ///
+    /// A shelf. Three slots live in the container table and it has no menu.
+    Shelf,
 }
 
 impl ContainerKind {
@@ -56,6 +60,7 @@ impl ContainerKind {
             Self::ChiseledBookshelf => 6,
             Self::Jukebox | Self::DecoratedPot => 1,
             Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
+            Self::Shelf => 3,
         }
     }
 
@@ -66,11 +71,13 @@ impl ContainerKind {
             Self::ShulkerBox => menu::SHULKER_BOX,
             Self::Hopper => menu::HOPPER,
             Self::Dispenser | Self::Dropper => menu::GENERIC_3X3,
-            // 这三种官方没有菜单。合成器有 `CrafterMenu`，这次不打开，见 `menu_shape`。
+            // 这四种官方没有菜单。合成器有 `CrafterMenu`，这次不打开，见 `menu_shape`。
             //
-            // These three have no vanilla menu. The crafter has `CrafterMenu`, which this change
+            // These four have no vanilla menu. The crafter has `CrafterMenu`, which this change
             // does not open; see `menu_shape`.
-            Self::ChiseledBookshelf | Self::Jukebox | Self::DecoratedPot => menu::GENERIC_9X1,
+            Self::ChiseledBookshelf | Self::Jukebox | Self::DecoratedPot | Self::Shelf => {
+                menu::GENERIC_9X1
+            }
             Self::Crafter => menu::CRAFTER_3X3,
         }
     }
@@ -92,6 +99,10 @@ impl ContainerKind {
             Self::Jukebox => "container.jukebox",
             Self::DecoratedPot => "container.decoratedPot",
             Self::Crafter => "container.crafter",
+            // 不会发给客户端：架子没有 `MenuProvider`。
+            //
+            // Never sent: a shelf has no `MenuProvider`.
+            Self::Shelf => "container.shelf",
         }
     }
 }
@@ -170,6 +181,7 @@ pub(crate) fn kind_of(state: BlockState) -> Option<ContainerKind> {
             ContainerKind::DecoratedPot,
         ),
         (BlockAncestor::CrafterBlock, ContainerKind::Crafter),
+        (BlockAncestor::ShelfBlock, ContainerKind::Shelf),
     ]
     .into_iter()
     .find(|(ancestor, _)| state.is_a(*ancestor))
@@ -324,7 +336,8 @@ pub(crate) fn start_open(region: &mut Region, pos: BlockPos, kind: ContainerKind
         | ContainerKind::ChiseledBookshelf
         | ContainerKind::Jukebox
         | ContainerKind::DecoratedPot
-        | ContainerKind::Crafter => {}
+        | ContainerKind::Crafter
+        | ContainerKind::Shelf => {}
     }
 }
 
@@ -341,7 +354,8 @@ pub(crate) fn stop_open(region: &mut Region, pos: BlockPos, kind: ContainerKind)
         | ContainerKind::ChiseledBookshelf
         | ContainerKind::Jukebox
         | ContainerKind::DecoratedPot
-        | ContainerKind::Crafter => {}
+        | ContainerKind::Crafter
+        | ContainerKind::Shelf => {}
     }
 }
 

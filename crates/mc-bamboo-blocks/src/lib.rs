@@ -25,6 +25,7 @@ pub mod interact;
 mod item_exchange;
 mod item_use;
 pub mod level;
+mod machine_container;
 pub mod mining;
 pub mod placement;
 pub mod predicate;
@@ -55,6 +56,7 @@ pub use interact::{
 };
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use level::{Effect, LecternFacts, Level, RedstoneMemory};
+pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext};

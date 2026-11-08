@@ -9,6 +9,7 @@
 
 use std::{
     any::Any,
+    cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
 };
 
@@ -116,8 +117,19 @@ impl BlockEntities {
     }
 
     /// `getBlockEntity(pos)` 之后按类型取，类型不对时是 `None`。
+    ///
+    /// 正在 tick 或被 [`World::with_block_entity`](crate::World::with_block_entity) 拿出来的那一个
+    /// 不在表里，这里仍返回它。表里如果已经放了新的，新的优先。
+    ///
+    /// `getBlockEntity(pos)`, then downcast. The wrong type is `None`.
+    ///
+    /// An entity that is ticking, or held by [`World::with_block_entity`](crate::World::with_block_entity),
+    /// is not in the map and is still returned. A replacement already stored in the map wins.
     pub fn get<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
-        self.entities.get(&pos)?.entity.as_any().downcast_ref()
+        if let Some(stored) = self.entities.get(&pos) {
+            return stored.entity.as_any().downcast_ref();
+        }
+        exposed_entity(pos)?.as_any().downcast_ref()
     }
 
     /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。
@@ -132,9 +144,11 @@ impl BlockEntities {
             .downcast_mut()
     }
 
-    /// 这一格有没有方块实体。
+    /// 这一格有没有方块实体。正在 tick、还没被删掉的那一个也算。
+    ///
+    /// Whether this cell has a block entity. One that is ticking and has not been removed counts.
     pub fn contains(&self, pos: BlockPos) -> bool {
-        self.entities.contains_key(&pos)
+        self.entities.contains_key(&pos) || exposed_entity(pos).is_some()
     }
 
     /// `removeBlockEntity(pos)` 加上 `setRemoved`。ticker 槽位在下一次 tick 开头回收。
@@ -142,6 +156,9 @@ impl BlockEntities {
     /// 实体正在 tick 时（已经从表里拿出来）调用它表示把自己删掉：返回值是 `None`，
     /// 放回去的时候会扔掉。
     pub fn remove(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
+        // 删掉这一格之后，正在 tick 的那一份也不能再被查到。
+        // After this cell is removed, the copy that is ticking must not stay visible.
+        mark_exposed_removed(pos);
         if let Some(stored) = self.entities.remove(&pos) {
             return Some(stored.entity);
         }
@@ -173,6 +190,15 @@ impl BlockEntities {
             return;
         }
         self.entities.insert(pos, Stored { id, entity });
+    }
+
+    /// 表里每个还在的方块实体。正在 tick、被拿出来的那一个不在这里。
+    ///
+    /// Every block entity still in the map. The one taken out for its tick is not included.
+    pub fn visit(&self, mut visit: impl FnMut(BlockPos, &dyn BlockEntity)) {
+        for (&pos, stored) in &self.entities {
+            visit(pos, stored.entity.as_ref());
+        }
     }
 
     /// `Level.tickBlockEntities` 的开头：并进上一刻新登记的，回收已经删掉的槽位。
@@ -410,6 +436,73 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, coun
         // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
         _ => {}
     }
+}
+
+/// 正在 tick 的方块实体。指针不放进 [`BlockEntities`]，否则它不再是 `Send`。
+///
+/// The block entity that is ticking. The pointer stays out of [`BlockEntities`], which
+/// would otherwise stop being `Send`.
+struct Exposed {
+    pos: BlockPos,
+    ptr: *const dyn BlockEntity,
+    removed: bool,
+}
+
+thread_local! {
+    static TICKING: RefCell<Vec<Exposed>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 把这一份实体暴露给同一条线程上的 `get` / `contains`。离开作用域就收起来。
+///
+/// Exposes this entity to `get` / `contains` on the same thread. Dropping the guard hides it.
+pub(crate) fn expose_ticking(pos: BlockPos, entity: &dyn BlockEntity) -> ExposedGuard {
+    let ptr: *const dyn BlockEntity = entity;
+    TICKING.with(|stack| {
+        stack.borrow_mut().push(Exposed {
+            pos,
+            ptr,
+            removed: false,
+        });
+    });
+    ExposedGuard
+}
+
+pub(crate) struct ExposedGuard;
+
+impl Drop for ExposedGuard {
+    fn drop(&mut self) {
+        TICKING.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+fn mark_exposed_removed(pos: BlockPos) {
+    TICKING.with(|stack| {
+        if let Some(entry) = stack
+            .borrow_mut()
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.pos == pos)
+        {
+            entry.removed = true;
+        }
+    });
+}
+
+fn exposed_entity(pos: BlockPos) -> Option<&'static dyn BlockEntity> {
+    let ptr = TICKING.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .rev()
+            .find(|entry| entry.pos == pos && !entry.removed)
+            .map(|entry| entry.ptr)
+    })?;
+    // SAFETY: 指针来自还没结束的 tick，那份 `&mut` 仍握着实体。调用方只在这次重入借用里使用返回值。
+    // The pointer comes from a tick that has not returned; that `&mut` still owns the entity.
+    // Callers use the reference only for this re-entrant borrow.
+    Some(unsafe { &*ptr })
 }
 
 /// `state.shouldChangedStateKeepBlockEntity(old)`：新状态的方块决定旧的方块实体留不留。

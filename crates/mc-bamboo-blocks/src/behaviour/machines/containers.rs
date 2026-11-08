@@ -362,10 +362,11 @@ impl Behaviour for Furnace {
 
     /// `AbstractFurnaceBlock.getAnalogOutputSignal`：比较器读三格内容。
     ///
-    /// 实体正在 tick、不在表里时读到 0。空熔炉本来就是 0。
+    /// 正在 tick 的实体仍可读。没有实体时读槽位表。
     ///
-    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots. While the entity
-    /// is ticking it is out of the map, so this returns 0. An empty furnace is 0 anyway.
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots.
+    ///
+    /// An entity that is ticking stays readable. With no entity, the slot table is used.
     fn analog_output_signal(
         &self,
         _state: BlockState,
@@ -373,10 +374,7 @@ impl Behaviour for Furnace {
         pos: BlockPos,
         _direction: Direction,
     ) -> i32 {
-        world
-            .block_entity::<FurnaceEntity>(pos)
-            .map(|entity| crate::container::redstone_signal(entity.items().iter(), 3))
-            .unwrap_or(0)
+        crate::machine_container::furnace_signal(world, pos)
     }
 
     fn use_without_item(

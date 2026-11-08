@@ -111,6 +111,9 @@ enum ContainerKind {
     Jukebox,
     DecoratedPot,
     Crafter,
+    Furnace,
+    Brewing,
+    Shelf,
 }
 
 impl ContainerKind {
@@ -130,6 +133,9 @@ impl ContainerKind {
             (BlockAncestor::JukeboxBlock, Self::Jukebox),
             (BlockAncestor::DecoratedPotBlock, Self::DecoratedPot),
             (BlockAncestor::CrafterBlock, Self::Crafter),
+            (BlockAncestor::AbstractFurnaceBlock, Self::Furnace),
+            (BlockAncestor::BrewingStandBlock, Self::Brewing),
+            (BlockAncestor::ShelfBlock, Self::Shelf),
         ]
         .into_iter()
         .find(|(ancestor, _)| state.is_a(*ancestor))
@@ -143,6 +149,8 @@ impl ContainerKind {
             Self::ChiseledBookshelf => 6,
             Self::Jukebox | Self::DecoratedPot => 1,
             Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
+            Self::Furnace | Self::Shelf => 3,
+            Self::Brewing => 5,
         }
     }
 }
@@ -353,6 +361,16 @@ impl OracleLevel {
 }
 
 impl Level for OracleLevel {
+    fn runs_block_entity_tick(&self, pos: BlockPos) -> bool {
+        // 方块 oracle 不跑熔炉和酿造台。漏斗、移动活塞和潜影盒仍按原来的 ticker 跑。
+        //
+        // The block oracle does not tick furnaces or brewing stands. Hoppers, moving pistons
+        // and shulkers keep the ticker they already had.
+        let state = self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
+        !state.is_a(BlockAncestor::AbstractFurnaceBlock)
+            && !state.is_a(BlockAncestor::BrewingStandBlock)
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !self.contains(pos) {
             return BlockState(blocks::VOID_AIR);
@@ -788,19 +806,36 @@ fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
 
 /// 结束时所有已建模容器的非空格子。顺序和官方一样：先按 `BlockPos.asLong`（x、z、y），再按槽位。
 fn contents_of(level: &OracleLevel) -> Vec<ContainerStack> {
-    let mut positions: Vec<BlockPos> = level.containers.keys().copied().collect();
-    positions.sort_by_key(|pos| pos.pack());
-    let mut contents = Vec::new();
-    for pos in positions {
+    // 场景里的熔炉和酿造台在槽位表里。玩家这题放下的那一台物品在方块实体上，实体盖过空表。
+    //
+    // Scene furnaces and brewing stands live in the slot table. One placed during the case
+    // keeps items on its block entity, and that entity replaces the empty table.
+    let mut lists: BTreeMap<i64, (BlockPos, Vec<ItemStack>)> = BTreeMap::new();
+    for (pos, slots) in &level.containers {
+        let state = level.blocks.get(pos).copied().unwrap_or(BlockState::AIR);
         // 雕纹书架的内容是状态的镜像，官方 `collectContents` 不把它写进内容表。
         //
         // A chiseled bookshelf mirrors its contents in the block state. Vanilla
         // `collectContents` leaves it out of the contents list.
-        let state = level.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
         if state.is_a(BlockAncestor::ChiseledBookShelfBlock) {
             continue;
         }
-        for (slot, stack) in level.containers[&pos].iter().enumerate() {
+        lists.insert(pos.pack(), (*pos, slots.clone()));
+    }
+    level.block_entities.visit(|pos, entity| {
+        let Some(items) = mc_bamboo_blocks::entity_container_items(entity) else {
+            return;
+        };
+        let state = level.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
+        if state.is_a(BlockAncestor::AbstractFurnaceBlock)
+            || state.is_a(BlockAncestor::BrewingStandBlock)
+        {
+            lists.insert(pos.pack(), (pos, items));
+        }
+    });
+    let mut contents = Vec::new();
+    for (_, (pos, slots)) in lists {
+        for (slot, stack) in slots.iter().enumerate() {
             if stack.is_empty() {
                 continue;
             }

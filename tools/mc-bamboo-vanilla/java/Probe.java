@@ -260,6 +260,8 @@ public final class Probe {
     private static final String PLAYER = "Kitten";
     private static final String SECOND_PLAYER = "Mochi";
     private static final String LATE_PLAYER = "Latecomer";
+    /** 以旁观模式进服，右键工作台。能力包仍是创造模式那一份。 */
+    private static final String SPECTATOR_PLAYER = "Spectator";
     /** 走正版验证进服的那名玩家，它连的是另一个服务端，所以用一个别处没有的名字。 */
     private static final String ONLINE_PLAYER = "Sakura";
     /** 客户端请求的视距，和 Bamboo 的默认值相同，所以 chunkRadius 和跟踪范围都用它。 */
@@ -614,6 +616,7 @@ public final class Probe {
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
             section("crafting", () -> crafting(kitten));
+            section("spectator crafting", () -> spectatorCrafting(kitten));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
@@ -1587,6 +1590,50 @@ public final class Probe {
             pumpFor(TICK_MILLIS);
         }
 
+        /**
+         * 创造模式在出生点放下工作台，旁观者空手右键应打开合成菜单，然后离开。
+         * 晚加入的玩家断言 Tab 只有三个人，所以旁观者必须先走。
+         * Creative mode places a crafting table at spawn. A spectator's empty right click opens the
+         * crafting menu, then that client leaves. The late joiner asserts a tab of three, so the
+         * spectator has to disconnect first.
+         */
+        private void spectatorCrafting(Join creative) throws IOException {
+            creative.moveTo(new Vec3(SPAWN_X, SPAWN_Y, SPAWN_Z), true);
+            BlockPos ground = BlockPos.containing(SPAWN_X, SPAWN_Y, SPAWN_Z).offset(0, -1, 1);
+            BlockPos table = ground.above();
+            creative.send(new ServerboundSetCreativeModeSlotPacket(
+                    HOTBAR_START + 6, new ItemStack(Items.CRAFTING_TABLE)));
+            creative.send(new ServerboundSetCarriedItemPacket(6));
+            int placing = creative.nextSequence();
+            creative.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    placing));
+            await("spectator: the table is placed",
+                    () -> creative.blocks.containsKey(table) && creative.blocks.get(table).is(Blocks.CRAFTING_TABLE));
+            creative.send(new ServerboundSetCarriedItemPacket(0));
+
+            Join spectator = connect(SPECTATOR_PLAYER, HumanoidArm.RIGHT, false);
+            await("spectator: spawn chunks arrived", JOIN_TIMEOUT_MILLIS, spectator::spawnChunksDone);
+            spectator.openMenuType = null;
+            spectator.lastContentState = -1;
+            spectator.menuSlots.clear();
+            int opening = spectator.nextSequence();
+            spectator.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(table, 1.0), Direction.UP, table, false),
+                    opening));
+            await("spectator: the crafting screen opens", () -> MenuType.CRAFTING.equals(spectator.openMenuType));
+            await("spectator: the grid arrives", () -> spectator.lastContentState >= 0);
+            check("spectator: the menu has forty-six slots", spectator.lastContent.size() == 46);
+            spectator.send(new ServerboundContainerClosePacket(spectator.openContainerId));
+            spectator.finishChecks();
+            spectator.close();
+            clients.remove(spectator);
+            await("spectator: the creative player sees them leave",
+                    () -> creative.systemTexts().contains(SPECTATOR_PLAYER + " left the game"));
+        }
+
         /** 这名玩家在 `blocks` 里放下的箱子。 */
         private static BlockPos chestOf(Join client) {
             for (Edit edit : client.edits) {
@@ -2279,7 +2326,11 @@ public final class Probe {
             check("play: login lists the overworld", packet.levels().contains(Level.OVERWORLD));
             check("play: dimension type is the overworld", spawn.dimensionType().is(BuiltinDimensionTypes.OVERWORLD));
             check("play: spawn dimension is the overworld", spawn.dimension().equals(Level.OVERWORLD));
-            check("play: game mode is creative", spawn.gameType() == GameType.CREATIVE);
+            if (SPECTATOR_PLAYER.equals(player)) {
+                check("play: game mode is spectator", spawn.gameType() == GameType.SPECTATOR);
+            } else {
+                check("play: game mode is creative", spawn.gameType() == GameType.CREATIVE);
+            }
             check("play: no previous game mode", spawn.previousGameType().isEmpty());
             check("play: world is flat", spawn.isFlat());
             check("play: sea level matches the flat preset", spawn.seaLevel() == -63);
@@ -2292,6 +2343,8 @@ public final class Probe {
         }
 
         private void onAbilities(ClientboundPlayerAbilitiesPacket packet) {
+            // 旁观者也收到这一份创造模式能力包。触及距离另按游戏模式算。
+            // Spectators receive this same creative abilities packet. Reach uses the game mode.
             check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
         }
 
@@ -2329,7 +2382,10 @@ public final class Probe {
                     check("play: an offline tab entry has no skin", entry.profile().properties().isEmpty());
                 }
                 check("play: tab entry is listed", entry.listed());
-                check("play: tab entry has the game mode", entry.gameMode() == GameType.CREATIVE);
+                GameType mode = SPECTATOR_PLAYER.equals(name)
+                        ? GameType.SPECTATOR
+                        : GameType.CREATIVE;
+                check("play: tab entry has the game mode", entry.gameMode() == mode);
                 check("play: tab entry has no chat session", entry.chatSession() == null);
                 check("play: tab entry has no display name", entry.displayName() == null);
                 check("play: tab entry shows the hat", entry.showHat());

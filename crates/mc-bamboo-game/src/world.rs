@@ -164,17 +164,25 @@ impl World {
             warn!(player = id.0, "ignoring a second join with the same id");
             return;
         }
+        // 探针用这个名字进旁观模式。别的名字仍是创造模式。
+        //
+        // The probe joins under this name as a spectator. Every other name stays creative.
+        let game_mode = if request.name == "Spectator" {
+            GameMode::Spectator
+        } else {
+            GAME_MODE
+        };
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
             // 皮肤只有名单要用，直接搬过来。
             properties: std::mem::take(&mut request.properties),
-            game_mode: GAME_MODE,
+            game_mode,
             latency: 0,
             show_hat: shows_hat(&request.client),
         };
 
-        self.region.add_player(request, GAME_MODE);
+        self.region.add_player(request, game_mode);
 
         if let Some(frames) = self.global.tab_list() {
             self.region.links.send_frames(id, &frames);
