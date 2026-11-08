@@ -2,7 +2,8 @@
 //!
 //! 活塞要信号才动：`checkIfExtend` 只发方块事件，事件在下一刻由 `runBlockEvents` 执行，
 //! 这时才真的推方块。要移动的方块换成 `moving_piston` 加一个方块实体，两刻后放回原处，
-//! 见 [`piston_entity`](super::piston_entity)。世界里没有实体和声音，推实体和播放音效的两段没写。
+//! 见 [`piston_entity`](super::piston_entity)。世界里没有实体和声音，推实体和播放音效的两段没写，
+//! 但音效的音调是官方从世界随机源取的，照取，后面的随机数才对得上。
 
 mod delete_after_move;
 
@@ -86,6 +87,9 @@ impl Behaviour for PistonBase {
                     return false;
                 }
                 world.set_block(pos, extended_state, EXTENDED_FLAGS);
+                // `playSound(PISTON_EXTEND, ..., 0.5F, random.nextFloat() * 0.25F + 0.6F)`：
+                // 音效还没做，音调用的随机数照取，和官方后面的随机数对齐。
+                world.random().next_float();
             }
             1 | 2 => {
                 world.with_block_entity::<PistonMoving, _>(
@@ -114,6 +118,9 @@ impl Behaviour for PistonBase {
                 } else {
                     world.remove_block(pos.relative(direction));
                 }
+                // `playSound(PISTON_CONTRACT, ..., 0.5F, random.nextFloat() * 0.15F + 0.6F)`：
+                // 音效还没做，音调用的随机数照取，和官方后面的随机数对齐。
+                world.random().next_float();
             }
             _ => {}
         }
@@ -553,6 +560,47 @@ mod tests {
 
         assert!(level.get(BASE).is(blocks::MOVING_PISTON));
         assert!(level.get(top).is(blocks::REPEATER));
+    }
+
+    /// 取一次音调之后世界随机源的内部种子。
+    fn seed_after_one_pitch(level: &TestLevel) -> i64 {
+        let random = level.random.clone();
+        random.source().next_float();
+        random.source().seed()
+    }
+
+    /// 伸出和收回的音效还没做，但官方从世界随机源取一次音调。少取这一次，
+    /// 后面所有随机数都会错开（oracle 种子 20261109 第 170043 题的火计划刻）。
+    #[test]
+    fn the_extend_event_takes_the_sound_pitch_from_the_level_random() {
+        let mut level = TestLevel::new();
+        let base = BlockState(blocks::PISTON).with(FACING, Direction::Up);
+        level.set(BASE, base);
+        level.set(BASE.below(), BlockState(blocks::REDSTONE_BLOCK));
+        let expected = seed_after_one_pitch(&level);
+
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.block_event(BASE, base.block(), 0, 0);
+        world.run_block_events();
+
+        assert!(world.block_state(BASE).get(EXTENDED));
+        assert_eq!(world.random().seed(), expected);
+    }
+
+    #[test]
+    fn the_retract_event_takes_the_sound_pitch_from_the_level_random() {
+        let mut level = extended_piston();
+        let base = level.get(BASE);
+        let expected = seed_after_one_pitch(&level);
+
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.block_event(BASE, base.block(), 1, 0);
+        world.run_block_events();
+
+        assert!(world.block_state(BASE).is(blocks::MOVING_PISTON));
+        assert_eq!(world.random().seed(), expected);
     }
 
     /// 创造模式在 `player_will_destroy` 里先拆底座，生存模式留到头被移除时的形状更新。
