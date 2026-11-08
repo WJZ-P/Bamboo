@@ -21,6 +21,7 @@ pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
     item_components, items, light, packets, recipes, registries, shapes, states, tags, version,
+    worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";

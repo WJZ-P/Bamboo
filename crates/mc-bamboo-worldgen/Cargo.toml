@@ -1,0 +1,16 @@
+[package]
+name = "mc-bamboo-worldgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "World generation math of the Bamboo Minecraft server: random sources, noise, density functions and biomes."
+keywords = ["minecraft"]
+categories = ["games"]
+
+[dependencies]
+mc-bamboo-blocks.workspace = true
+mc-bamboo-data.workspace = true
+md-5.workspace = true
+serde_json.workspace = true

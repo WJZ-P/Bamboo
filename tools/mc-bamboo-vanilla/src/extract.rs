@@ -44,6 +44,8 @@ pub struct Extracted {
     pub component_enums: ComponentEnums,
     /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
     pub item_components: Vec<String>,
+    /// 世界生成的数据：噪声参数、密度函数、维度设置和多噪声群系预设，原样是 JSON。
+    pub worldgen: serde_json::Value,
 }
 
 /// 按 ID 查表的枚举：连续的只有常量个数，稀疏的是整张 ID 表。
@@ -716,6 +718,8 @@ pub struct VersionData {
     pub component_enums: ComponentEnums,
     /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
     pub item_components: Vec<String>,
+    /// 世界生成的数据，原样写进 `mc-bamboo-data` 的 `worldgen.json`。
+    pub worldgen: serde_json::Value,
 }
 
 pub fn run(
@@ -770,6 +774,7 @@ pub fn run(
         packets,
         component_enums: extracted.component_enums,
         item_components: extracted.item_components,
+        worldgen: extracted.worldgen,
     })
 }
 
