@@ -103,8 +103,24 @@ WebView2 的渲染进程不算在内。
   每刻推进半格，到一格时把方块放回去并更新邻居，动画期间被破坏也有官方的处理。官方客户端会收到方块事件，
   播放伸出和收回的动画。`PushReaction` 和推不动的方块来自官方导出的数据。
 
+世界生成的数学已经移植好了，但**还没有接进游戏**，世界还是超平坦：
+
+- `mc-bamboo-worldgen` 是「种子 + 坐标 → 数值」的纯函数：官方的随机源（`XoroshiroRandomSource`、
+  `RandomSupport` 的种子混合、两种 `PositionalRandomFactory`、`WorldgenRandom` 的种子设置）、
+  `synth` 下的全部噪声、全部密度函数类型和三次样条、气候参数的 R 树查找，
+  还有主世界、下界、末地的群系源。给一个种子和一个坐标，能算出噪声路由的八个输出和那一格的群系。
+- 官方的密度函数有两条求值路径（单点的 `sampleValue` 和成批的 `sampleVolume`），
+  浮点运算的顺序不同，最后一位会差，两条都移植了。
+- 数据（`worldgen/noise`、`worldgen/density_function`、`worldgen/noise_settings` 和两个
+  多噪声群系预设）由生成器从官方导出，存在 `mc-bamboo-data/src/generated/worldgen.json` 里。
+- 用官方代码出题比对：几十万个点上每条噪声的两条路径、每条注册表密度函数和七套维度设置的
+  噪声路由的两条路径、三个维度的群系，浮点按 `Float.floatToRawIntBits` 逐位相同。
+
 已知限制：
 
+- 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
+  含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
+  按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
 - 红石的已知差异：方块实体没有内容，比较器读容器一律是 0（雕纹书架是例外，书在状态里）；发射器和投掷器不真的发射，合成器不真的合成；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，世界里没有这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。
 - 活塞不推实体，也不推动玩家：世界里没有实体，推实体和粘实体这两段没写。活塞没有音效和粒子，
   粘液块拉回方块时也没有声音。移动中的方块不发方块实体数据，客户端靠方块事件播放动画。
@@ -142,14 +158,15 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-server` | 网络层：监听、连接状态机、读写队列、登录准入 |
 | `crates/mc-bamboo-game` | 世界线程：tick、玩家、区块跟踪、实体同步、方块交互、聊天，不依赖 tokio |
 | `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包、物品数据组件，只处理字节 |
-| `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、世界生成，不知道网络 |
+| `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、超平坦，不知道网络 |
+| `crates/mc-bamboo-worldgen` | 世界生成的数学：随机源、噪声、密度函数、气候和群系源，纯函数，还没接进游戏 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为和光照 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、物品组件和世界生成 |
 
 依赖方向是单向的：
 
@@ -165,6 +182,8 @@ protocol blocks world
 
 `protocol`、`blocks` 和 `world` 互不依赖，它们都依赖 `core` 和 `data`，`protocol` 还依赖 `nbt`。
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
+`worldgen` 还没接进游戏，只有开发工具依赖它；它依赖 `data`（官方导出的世界生成数据）和
+`blocks`（里面有官方的 `LegacyRandomSource`）。
 
 ## 线程模型
 
@@ -216,6 +235,15 @@ cargo run --release -p mc-bamboo-vanilla -- light <java 路径> [--scenes N] [--
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- components <java 路径> [--show N]
+```
+
+世界生成的数学也一样：官方代码按一批种子和一批坐标算出每条噪声的两条求值路径、
+每条注册表密度函数和七套维度设置的噪声路由的两条路径，还有三个维度的群系，
+`mc-bamboo-worldgen` 重算，浮点按 `Float.floatToRawIntBits` 逐位比较：
+
+```bash
+cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
+    [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
 ```
 
 这些命令需要 Java 25 或更新版本。
