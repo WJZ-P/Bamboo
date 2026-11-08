@@ -7,7 +7,9 @@
 use std::cmp::Ordering;
 
 use mc_bamboo_blocks::BlockState;
-use mc_bamboo_data::{block_id_of_state, block_tag, registries::data_component_type as kinds};
+use mc_bamboo_data::{
+    PropertyDef, block_id_of_state, block_tag, registries::data_component_type as kinds,
+};
 use mc_bamboo_protocol::{
     components::{
         ComponentPatch, ComponentValue,
@@ -79,12 +81,20 @@ fn property_matches(matcher: &PropertyMatcher, state: BlockState) -> bool {
     let Some(actual) = state.property_text(&matcher.name) else {
         return false;
     };
+    let Some(def) = state
+        .block()
+        .properties
+        .iter()
+        .find(|property| property.name == matcher.name)
+    else {
+        return false;
+    };
     match &matcher.matcher {
-        ValueMatcher::Exact(expected) => actual == expected,
+        ValueMatcher::Exact(expected) => exact_matches(def, actual, expected),
         ValueMatcher::Ranged { min, max } => {
             // 当前值越过端点，或者端点解析不出来，都是不匹配。
             let inside = |bound: &str, too_far: Ordering| {
-                compare(state, &matcher.name, actual, bound).is_some_and(|order| order != too_far)
+                compare(def, actual, bound).is_some_and(|order| order != too_far)
             };
             min.as_deref().is_none_or(|min| inside(min, Ordering::Less))
                 && max
@@ -94,21 +104,57 @@ fn property_matches(matcher: &PropertyMatcher, state: BlockState) -> bool {
     }
 }
 
-/// 官方按属性值的类型比较：整数比数值，枚举和布尔按声明顺序。
-///
-/// 生成的数据里 `values` 就是官方 `Property` 的声明顺序，所以非整数按下标比。
-/// 区间端点不在属性的值里时返回 `None`，和官方 `property.getValue` 返回空一样。
-fn compare(state: BlockState, name: &str, actual: &str, bound: &str) -> Option<Ordering> {
-    let def = state
-        .block()
-        .properties
-        .iter()
-        .find(|property| property.name == name)?;
-    if let (Ok(actual), Ok(bound)) = (actual.parse::<i64>(), bound.parse::<i64>()) {
-        return Some(actual.cmp(&bound));
+/// 官方 `ExactMatcher.match`：整数属性先把字符串按 `Integer.parseInt` 解析，
+/// 其余类型按序列化名精确比较。
+fn exact_matches(def: &PropertyDef, actual: &str, expected: &str) -> bool {
+    if let Some((min, max)) = integer_bounds(def) {
+        let Ok(expected) = expected.parse::<i32>() else {
+            return false;
+        };
+        return (min..=max).contains(&expected) && actual.parse::<i32>() == Ok(expected);
     }
-    let position = |text: &str| def.values.iter().position(|value| *value == text);
-    Some(position(actual)?.cmp(&position(bound)?))
+    actual == expected
+}
+
+/// 官方按属性值的类型比较。
+///
+/// 生成的数据里 `values` 是官方 `Property` 的取值列表，只有名字，类型从取值推：
+/// 整数属性（`IntegerProperty`）比数值；布尔和枚举比顺序。布尔属性的取值列表是
+/// `[true, false]`，但 `Boolean.compareTo` 里 `false < true`；`vertical_direction`
+/// 官方的取值列表是 `[UP, DOWN]`，而 `Direction` 枚举里 `DOWN < UP`。这两处按下标
+/// 反过来，其余的枚举取值列表就是声明顺序。
+///
+/// 端点不在属性的取值范围里时返回 `None`，和官方 `property.getValue` 返回空一样。
+fn compare(def: &PropertyDef, actual: &str, bound: &str) -> Option<Ordering> {
+    if let Some((min, max)) = integer_bounds(def) {
+        let bound = bound
+            .parse::<i32>()
+            .ok()
+            .filter(|bound| (min..=max).contains(bound))?;
+        return Some(actual.parse::<i32>().ok()?.cmp(&bound));
+    }
+    Some(rank(def, actual)?.cmp(&rank(def, bound)?))
+}
+
+/// 整数属性的取值范围。官方的 `IntegerProperty` 取值是 `min..=max` 的连续整数，
+/// 所以全部取值都能解析成整数，首尾就是端点。
+fn integer_bounds(def: &PropertyDef) -> Option<(i32, i32)> {
+    let mut values = def.values.iter().map(|value| value.parse::<i32>());
+    let min = values.next()?.ok()?;
+    let mut max = min;
+    for value in values {
+        max = value.ok()?;
+    }
+    Some((min, max))
+}
+
+/// 取值在官方 `compareTo` 里的位置。
+fn rank(def: &PropertyDef, text: &str) -> Option<usize> {
+    let index = def.values.iter().position(|value| *value == text)?;
+    match def.values {
+        ["true", "false"] | ["up", "down"] => Some(def.values.len() - 1 - index),
+        _ => Some(index),
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +323,63 @@ mod tests {
         assert!(matches(Some("y"), None));
         assert!(!matches(Some("z"), None));
         assert!(!matches(None, Some("x")));
+    }
+
+    #[test]
+    fn exact_integer_properties_parse_the_value_like_java() {
+        let snow = BlockState(blocks::SNOW).with(LAYERS, 3);
+        let matches = |expected| {
+            can_break(
+                &stack(vec![predicate(None, Some(exact("layers", expected)), None)]),
+                snow,
+            )
+        };
+        // `IntegerProperty.getValue` 用的是 `Integer.parseInt`，前导零和正号都行。
+        assert!(matches("3"));
+        assert!(matches("03"));
+        assert!(matches("+3"));
+        // 超出属性的取值范围，官方解析成空。
+        assert!(!matches("30"));
+        assert!(!matches("not a number"));
+    }
+
+    #[test]
+    fn ranged_boolean_properties_order_false_before_true() {
+        // 官方 `BooleanProperty` 的取值列表是 [true, false]，而 `false < true`。
+        let stairs = BlockState(blocks::OAK_STAIRS);
+        let matches = |min, max| {
+            can_break(
+                &stack(vec![predicate(
+                    None,
+                    Some(ranged("waterlogged", min, max)),
+                    None,
+                )]),
+                stairs,
+            )
+        };
+        assert!(matches(Some("false"), None));
+        assert!(!matches(Some("true"), None));
+        assert!(matches(None, Some("false")));
+        assert!(matches(None, Some("true")));
+    }
+
+    #[test]
+    fn ranged_vertical_direction_uses_the_enum_order() {
+        // 官方的取值列表是 [UP, DOWN]，但 `Direction` 枚举里 `DOWN < UP`，默认是 up。
+        let dripstone = BlockState(blocks::POINTED_DRIPSTONE);
+        let matches = |min, max| {
+            can_break(
+                &stack(vec![predicate(
+                    None,
+                    Some(ranged("vertical_direction", min, max)),
+                    None,
+                )]),
+                dripstone,
+            )
+        };
+        assert!(matches(Some("down"), None));
+        assert!(matches(Some("up"), Some("up")));
+        assert!(!matches(None, Some("down")));
     }
 
     #[test]
