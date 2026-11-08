@@ -297,6 +297,13 @@ impl RequestReader<'_> {
     ) -> Result<(), ConnectionError> {
         match request {
             PlayRequest::KeepAlive(id) => {
+                // 官方 `handleKeepAlive`：只有正在等的那个 id 才更新延迟。
+                // 对不上，或者当前没在等，都用 `disconnect.timeout` 断开。
+                // 单人房主是例外，Bamboo 没有单人模式。
+                //
+                // Official `handleKeepAlive` updates latency only for the pending id.
+                // A mismatch, or a response while none is pending, disconnects with
+                // `disconnect.timeout`. The singleplayer-owner exception does not apply.
                 let millis = keep_alive
                     .answer(id, Instant::now())
                     .ok_or(ConnectionError::KeepAliveTimeout)?;
