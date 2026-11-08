@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -148,6 +149,10 @@ public final class MovementOracle {
             Official official = Official.load(resources);
             stats = new ServerStatsCounter(official.server, Path.of("move-oracle-stats.json"));
             advancements = allocate(PlayerAdvancements.class);
+            // 没跑构造函数的空壳要一张空的监听表：摔落伤害会走 EntityHurtPlayerTrigger，官方拿到 null 时什么也不做。
+            // The allocated stub needs an empty listener map: fall damage reaches EntityHurtPlayerTrigger, which
+            // does nothing when the official lookup finds no listeners.
+            put(PlayerAdvancements.class, advancements, "activeTriggers", new IdentityHashMap<>());
             official.server.setPlayerList(allocate(StubList.class));
             put(MinecraftServer.class, official.server, "packetProcessor", new PacketProcessor(Thread.currentThread()));
             out.write("{\"type\":\"header\",\"version\":\"");
