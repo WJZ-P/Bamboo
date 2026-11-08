@@ -1,7 +1,7 @@
 //! `TripWireHookBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, blocks};
+use mc_bamboo_data::{Block, blocks, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -84,17 +84,44 @@ fn notify_neighbors(block: &'static Block, world: &mut World, pos: BlockPos, dir
     world.update_neighbors_at(pos.relative(front), block);
 }
 
-/// `emitState` 的四个分支里只有最后一个取随机数：`1.2F / (nextFloat() * 0.2F + 0.9F)` 的音高。
-/// 前面三个分支的声音音高是固定的，通电状态的变化先命中，所以要先排除。
-fn detach_sound(
+/// `emitState`：四个分支互斥。只有断开时的音高要从世界随机源取，取的这个数后面的随机刻还要用。
+fn emit_state(
+    world: &mut World,
+    pos: BlockPos,
     attached: bool,
     powered: bool,
     was_attached: bool,
     was_powered: bool,
-    world: &mut World,
 ) {
-    if !powered && !was_powered && !attached && was_attached {
-        world.random().next_float();
+    if powered && !was_powered {
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.tripwire.click_on"),
+            0.4,
+            0.6,
+        );
+    } else if !powered && was_powered {
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.tripwire.click_off"),
+            0.4,
+            0.5,
+        );
+    } else if attached && !was_attached {
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.tripwire.attach"),
+            0.4,
+            0.7,
+        );
+    } else if !attached && was_attached {
+        let pitch = 1.2 / (world.random().next_float() * 0.2 + 0.9);
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.tripwire.detach"),
+            0.4,
+            pitch,
+        );
     }
 }
 
@@ -141,9 +168,16 @@ pub fn calculate_state(
             return;
         }
         // 对面钩子的 `emitState` 用的是这个钩子的旧状态。
-        detach_sound(attached, powered, was_attached, was_powered, world);
+        emit_state(
+            world,
+            receiver_pos,
+            attached,
+            powered,
+            was_attached,
+            was_powered,
+        );
     }
-    detach_sound(attached, powered, was_attached, was_powered, world);
+    emit_state(world, pos, attached, powered, was_attached, was_powered);
     if !is_being_destroyed {
         world.set_block_and_update(pos, new_state.with(HORIZONTAL_FACING, direction));
         if can_update {
@@ -237,7 +271,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockTicks,
+        BlockTicks, Effect,
         behaviour::attached::test_support::hit_side,
         interact::run_scheduled_ticks,
         testing::{TestLevel, actor_holding, use_item},
@@ -322,7 +356,15 @@ mod tests {
         assert_line(&level, true, true);
 
         let outcome = run_scheduled_ticks(&mut level, &mut ticks, i64::from(RECHECK_PERIOD));
-        assert!(outcome.effects.is_empty());
+        // 先响对面钩子，再响自己：两个都是断电的点击声。
+        assert!(matches!(
+            outcome.effects.as_slice(),
+            [
+                Effect::Sound { sound: first, volume: 0.4, pitch: 0.5, x: 1.5, .. },
+                Effect::Sound { sound: second, volume: 0.4, pitch: 0.5, x: 4.5, .. }
+            ] if *first == i32::from(sound_event("minecraft:block.tripwire.click_off"))
+                && *second == i32::from(sound_event("minecraft:block.tripwire.click_off"))
+        ));
         assert_line(&level, false, false);
         assert!(!level.get(WIRES[0]).get(ATTACHED));
     }

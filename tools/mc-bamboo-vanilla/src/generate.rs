@@ -30,6 +30,7 @@ const BANNER_PATTERN_REGISTRY: &str = "minecraft:banner_pattern";
 const BLOCK_REGISTRY: &str = "minecraft:block";
 const FLUID_REGISTRY: &str = "minecraft:fluid";
 const ITEM_REGISTRY: &str = "minecraft:item";
+const JUKEBOX_SONG_REGISTRY: &str = "minecraft:jukebox_song";
 const MENU_REGISTRY: &str = "minecraft:menu";
 const WORLD_CLOCK_REGISTRY: &str = "minecraft:world_clock";
 
@@ -44,6 +45,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let transformers = block_transformers_file(data)?;
     let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
+    let sounds = sounds_file(data)?;
     let loot = loot_file(data)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
@@ -87,6 +89,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         &crafting_remainders_file(data)?,
     )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
+    write_file(output_dir, "sounds.rs", &sounds)?;
     write_file(output_dir, "loot.rs", &loot)?;
     write_file(output_dir, "tags.rs", &tags)?;
     write_worldgen(data, output_dir)
@@ -551,6 +554,7 @@ pub mod packets;
 pub mod recipes;
 pub mod registries;
 pub mod shapes;
+pub mod sounds;
 pub mod states;
 pub mod tags;
 pub mod version;
@@ -656,6 +660,247 @@ fn check_heightmap_types(types: &[HeightmapType]) -> Result<(), String> {
     Ok(())
 }
 
+/// 音效表：每个状态的 `SoundType`、`sound_event` 注册表和音符盒乐器。
+fn sounds_file(data: &VersionData) -> Result<String, String> {
+    let tables = &data.sound_tables;
+    check_table_length(
+        "STATE_SOUND_TYPE",
+        &tables.state_types,
+        data.block_states.total,
+    )?;
+    if tables.events.len() > usize::from(u16::MAX) {
+        return Err(format!("音效事件有 {} 个，超出 u16", tables.events.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// `sound_event` 注册表的一项，下标就是网络上的 Holder ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct SoundEventDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(
+        out,
+        "    /// 固定传播范围，`None` 表示按音量算（16 或 16 × 音量）。"
+    );
+    let _ = writeln!(out, "    pub fixed_range: Option<f32>,");
+    let _ = writeln!(out, "}}\n");
+
+    let _ = writeln!(out, "/// 全部音效事件，下标就是注册表 ID。");
+    let _ = writeln!(out, "pub static SOUND_EVENTS: &[SoundEventDef] = &[");
+    for event in &tables.events {
+        let _ = writeln!(
+            out,
+            "    SoundEventDef {{ name: {:?}, fixed_range: {:?} }},",
+            event.name, event.fixed_range
+        );
+    }
+    let _ = writeln!(out, "];\n");
+
+    let _ = writeln!(
+        out,
+        "/// 去重后的 `SoundType`，字段顺序和官方的构造参数一致。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct SoundTypeDef {{");
+    let _ = writeln!(out, "    pub volume: f32,");
+    let _ = writeln!(out, "    pub pitch: f32,");
+    let _ = writeln!(out, "    pub break_sound: u16,");
+    let _ = writeln!(out, "    pub step_sound: u16,");
+    let _ = writeln!(out, "    pub place_sound: u16,");
+    let _ = writeln!(out, "    pub hit_sound: u16,");
+    let _ = writeln!(out, "    pub fall_sound: u16,");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "/// 去重后的 `SoundType`。");
+    let _ = writeln!(out, "pub static SOUND_TYPES: &[SoundTypeDef] = &[");
+    for (volume, pitch, break_sound, step_sound, place_sound, hit_sound, fall_sound) in
+        &tables.types
+    {
+        let _ = writeln!(
+            out,
+            "    SoundTypeDef {{ volume: {volume:?}, pitch: {pitch:?}, break_sound: {break_sound}, step_sound: {step_sound}, place_sound: {place_sound}, hit_sound: {hit_sound}, fall_sound: {fall_sound} }},"
+        );
+    }
+    let _ = writeln!(out, "];\n");
+    write_state_table(
+        &mut out,
+        "每个状态的 `getSoundType` 在 [`SOUND_TYPES`] 里的下标。第 0 项对应空音效，空音效不存在。",
+        "STATE_SOUND_TYPE",
+        "u16",
+        &tables.state_types,
+    );
+
+    let _ = writeln!(
+        out,
+        "/// 音符盒乐器，顺序和 `NoteBlockInstrument` 的枚举序号一致。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct NoteBlockInstrumentDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// 乐器声音的 `sound_event` 注册表 ID。");
+    let _ = writeln!(out, "    pub sound: u16,");
+    let _ = writeln!(out, "    /// 基础乐器，音符改变音高。");
+    let _ = writeln!(out, "    pub tunable: bool,");
+    let _ = writeln!(
+        out,
+        "    /// 自定义头颅，声音由方块实体决定，这里只是默认值。"
+    );
+    let _ = writeln!(out, "    pub custom_sound: bool,");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "/// 音符盒乐器。");
+    let _ = writeln!(
+        out,
+        "pub static NOTE_BLOCK_INSTRUMENTS: &[NoteBlockInstrumentDef] = &["
+    );
+    for instrument in &tables.instruments {
+        let _ = writeln!(
+            out,
+            "    NoteBlockInstrumentDef {{ name: {:?}, sound: {}, tunable: {}, custom_sound: {} }},",
+            instrument.name, instrument.sound, instrument.tunable, instrument.custom_sound
+        );
+    }
+    let _ = writeln!(out, "];\n");
+
+    let _ = writeln!(
+        out,
+        "/// 按名字找音符盒乐器，名字是方块状态里 `instrument` 属性的值。"
+    );
+    let _ = writeln!(
+        out,
+        "pub fn note_block_instrument(name: &str) -> Option<&'static NoteBlockInstrumentDef> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    NOTE_BLOCK_INSTRUMENTS.iter().find(|instrument| instrument.name == name)"
+    );
+    let _ = writeln!(out, "}}\n");
+
+    let mut sorted: Vec<(&str, usize)> = tables
+        .events
+        .iter()
+        .enumerate()
+        .map(|(id, event)| (event.name.as_str(), id))
+        .collect();
+    sorted.sort_unstable_by_key(|(name, _)| *name);
+    if let Some(pair) = sorted.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        return Err(format!("音效事件名字重复：{}", pair[0].0));
+    }
+    let _ = writeln!(
+        out,
+        "/// `sound_event` 按名字排序，供 [`sound_event`] 二分查找。"
+    );
+    let _ = writeln!(out, "static SOUND_EVENT_IDS: &[(&str, u16)] = &[");
+    for row in sorted.chunks(4) {
+        let row: Vec<String> = row
+            .iter()
+            .map(|(name, id)| format!("({name:?}, {id})"))
+            .collect();
+        let _ = writeln!(out, "    {},", row.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 按注册表名字找音效事件 ID。名字写错说明和官方版本不一致。"
+    );
+    let _ = writeln!(out, "pub fn sound_event(name: &str) -> u16 {{");
+    let _ = writeln!(out, "    let index = SOUND_EVENT_IDS");
+    let _ = writeln!(
+        out,
+        "        .binary_search_by(|(sound, _)| (*sound).cmp(name))"
+    );
+    let _ = writeln!(
+        out,
+        "        .unwrap_or_else(|_| panic!(\"未知的音效事件：{{name}}\"));"
+    );
+    let _ = writeln!(out, "    SOUND_EVENT_IDS[index].1");
+    let _ = writeln!(out, "}}\n");
+
+    write_jukebox_songs(&mut out, data)?;
+
+    let _ = writeln!(
+        out,
+        "/// 声音来源的序号和名字，序号就是网络上 `writeEnum` 写的值。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct SoundSource(u8);\n");
+    let _ = writeln!(out, "impl SoundSource {{");
+    let _ = writeln!(out, "    pub const fn id(self) -> u8 {{");
+    let _ = writeln!(out, "        self.0");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    /// 序号就是官方 `SoundSource.ordinal()`。");
+    let _ = writeln!(
+        out,
+        "    /// The number is official `SoundSource.ordinal()`."
+    );
+    let _ = writeln!(out, "    pub const fn from_id(id: u8) -> Self {{");
+    let _ = writeln!(out, "        Self(id)");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "}}\n");
+    for (id, name) in tables.sources.iter().enumerate() {
+        let constant = match name.as_str() {
+            "block" | "record" | "player" => format!("{}S", name.to_uppercase()),
+            other => other.to_uppercase(),
+        };
+        let _ = writeln!(out, "/// `{name}`。");
+        let _ = writeln!(
+            out,
+            "pub const {constant}: SoundSource = SoundSource({id});"
+        );
+    }
+    Ok(out)
+}
+
+/// 带 `jukebox_playable` 组件的物品 → `jukebox_song` 注册表 ID。
+///
+/// 唱片放进唱片机时 `JukeboxSongPlayer.play` 用这个 ID 发 1010 的等级事件。
+fn write_jukebox_songs(out: &mut String, data: &VersionData) -> Result<(), String> {
+    let songs = registry_entries(data, JUKEBOX_SONG_REGISTRY)
+        .ok_or_else(|| format!("没有 {JUKEBOX_SONG_REGISTRY} 注册表"))?;
+    if songs.is_empty() {
+        return Err(format!("{JUKEBOX_SONG_REGISTRY} 是空的"));
+    }
+    let mut rows: Vec<(i32, i32)> = Vec::new();
+    for (item_id, item) in data.items.iter().enumerate() {
+        let Some(song) = &item.jukebox_song else {
+            continue;
+        };
+        let song_id = songs
+            .iter()
+            .position(|candidate| candidate == song)
+            .ok_or_else(|| format!("{} 的 jukebox_playable 指向不存在的歌典 {song}", item.name))?;
+        rows.push((item_id as i32, song_id as i32));
+    }
+
+    let _ = writeln!(
+        out,
+        "/// 带 `jukebox_playable` 组件的物品 → `jukebox_song` 注册表 ID，按物品 ID 排序。"
+    );
+    let _ = writeln!(out, "static JUKEBOX_SONGS: &[(i32, i32)] = &[");
+    for row in rows.chunks(4) {
+        let row: Vec<String> = row
+            .iter()
+            .map(|(item, song)| format!("({item}, {song})"))
+            .collect();
+        let _ = writeln!(out, "    {},", row.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 物品带着的歌典 ID，没有 `jukebox_playable` 组件时是 `None`。"
+    );
+    let _ = writeln!(out, "pub fn jukebox_song(item: i32) -> Option<i32> {{");
+    let _ = writeln!(out, "    JUKEBOX_SONGS");
+    let _ = writeln!(
+        out,
+        "        .binary_search_by_key(&item, |&(item, _)| item)"
+    );
+    let _ = writeln!(out, "        .ok()");
+    let _ = writeln!(out, "        .map(|index| JUKEBOX_SONGS[index].1)");
+    let _ = writeln!(out, "}}\n");
+    Ok(())
+}
+
 /// `minecraft:level_chunk_with_light` → `LEVEL_CHUNK_WITH_LIGHT`。
 fn constant_name(identifier: &str) -> String {
     let path = identifier.strip_prefix("minecraft:").unwrap_or(identifier);
@@ -712,7 +957,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {}, speed_factor: {}, bounce_restitution: {}, explosion_resistance: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {}, pickup_sound: {:?}, speed_factor: {}, bounce_restitution: {}, explosion_resistance: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -731,6 +976,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.dynamic_shape,
             block.destroy_time,
             block.requires_correct_tool_for_drops,
+            block.pickup_sound,
             float_literal(block.speed_factor),
             float_literal(block.bounce_restitution),
             float_literal(block.explosion_resistance),
@@ -1079,12 +1325,19 @@ fn block_transformers_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(out, "    name: {:?},", transformer.name);
         let _ = writeln!(out, "    transforms: &[");
         for transform in &transformer.transforms {
+            let sound = match transform.sound {
+                Some(id) => format!("Some({id})"),
+                None => "None".to_owned(),
+            };
             let _ = writeln!(
                 out,
-                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {} }},",
+                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {}, sound: {}, particle: {}, copper_chest: {} }},",
                 state_provider(&transform.provider, data, &block_tags)?,
                 transform.disallowed_faces,
-                transform.update_from_neighbors
+                transform.update_from_neighbors,
+                sound,
+                transform.particle,
+                transform.copper_chest
             );
         }
         let _ = writeln!(out, "    ],");
@@ -1404,7 +1657,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, max_damage: {}, enchantable: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, max_damage: {}, enchantable: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {}, place_sound: {:?}, empty_sound: {:?}, empty_source: {:?}, bucket_entity: {:?} }},",
             item.name,
             item_kind(item)?,
             item.block,
@@ -1420,7 +1673,11 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             compost_layers_of(item),
             item.jukebox_playable,
             block_transformer_of(item, data)?,
-            item.blocks_attacks
+            item.blocks_attacks,
+            item.place_sound,
+            item.empty_sound,
+            item.empty_source,
+            item.bucket_entity
         );
     }
     let _ = writeln!(out, "];");
@@ -2367,7 +2624,6 @@ fn registry_entries<'a>(data: &'a VersionData, registry: &str) -> Option<&'a [St
 /// 把一个注册表的条目写成常量，数字 ID 就是条目在列表里的位置。
 fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, registry: &str) {
     let entries = registry_entries(data, registry).unwrap_or(&[]);
-
     let _ = writeln!(out, "pub mod {module} {{");
     let _ = writeln!(out, "    pub const TOTAL: u32 = {};", entries.len());
     let _ = writeln!(
@@ -2654,6 +2910,7 @@ mod tests {
             offset: None,
             destroy_time: 0.0,
             requires_correct_tool_for_drops: false,
+            pickup_sound: None,
         }
     }
 
@@ -2682,8 +2939,13 @@ mod tests {
             consumable: false,
             compostable: None,
             jukebox_playable: false,
+            jukebox_song: None,
             block_transformer: None,
             blocks_attacks: false,
+            place_sound: None,
+            empty_sound: None,
+            empty_source: None,
+            bucket_entity: None,
         }
     }
 

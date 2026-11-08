@@ -160,8 +160,16 @@ pub(super) struct DragonEgg;
 /// 传送最多试这么多次。
 const TELEPORT_ATTEMPTS: i32 = 1000;
 
+/// `BlockUtil.packDifferenceInPosition`：横向半径 16、纵向 8，位移加上半径后各取一字节。
+fn packed_difference(from: BlockPos, to: BlockPos) -> i32 {
+    let x = (to.x - from.x + 16) & 0xFF;
+    let y = (to.y - from.y + 8) & 0xFF;
+    let z = (to.z - from.z + 16) & 0xFF;
+    x << 16 | y << 8 | z
+}
+
 impl DragonEgg {
-    /// `teleport`。传送的粒子（`levelEvent(2015)`）不做。
+    /// `teleport`：找到位置后先报粒子，再挪方块。
     fn teleport(state: BlockState, world: &mut World, pos: BlockPos) {
         for _ in 0..TELEPORT_ATTEMPTS {
             let random = world.random();
@@ -174,6 +182,7 @@ impl DragonEgg {
                 && world.is_within_world_border(target)
                 && world.is_inside_build_height(target.y)
             {
+                world.level_event(2015, pos, packed_difference(pos, target));
                 world.set_block(target, state, UPDATE_CLIENTS);
                 world.remove_block(pos);
                 return;
@@ -224,12 +233,44 @@ impl Behaviour for DragonEgg {
 
 /// `Fallable.onLand`：落地之后方块已经放好了。
 ///
-/// 其他类的覆盖只放音效、粒子，只有混凝土粉末会再改一次世界。
+/// 铁砧落地报 1031。其他类的覆盖只放音效、粒子，只有混凝土粉末会再改一次世界。
+/// 实体没有 `isSilent`，这里总是发。
+///
+/// `Fallable.onLand`: the block is already placed.
+///
+/// An anvil landing sends 1031. Other overrides only play sounds or particles; only concrete
+/// powder changes the world again. Entities have no `isSilent` here, so the event is always sent.
 pub(crate) fn on_land(world: &mut World, pos: BlockPos, state: BlockState, replaced: BlockState) {
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::ANVIL) {
+        world.level_event(1031, pos, 0);
+    }
     if state.is_a(BlockAncestor::ConcretePowderBlock)
         && (can_solidify(replaced) || touches_liquid(world, pos))
     {
         world.set_block_and_update(pos, concrete_of(state));
+    }
+}
+
+/// `Fallable.onBrokenAfterFall`。铁砧 1029，滴水石 1045，硫磺尖刺 1052。
+/// 刷子方块在实体碰撞盒中心发 2001，data 是方块状态 ID。
+///
+/// `Fallable.onBrokenAfterFall`. Anvil 1029, pointed dripstone 1045, sulfur spike 1052.
+/// A brushable block sends 2001 at the entity's bounding-box centre, with the block state id.
+pub(crate) fn on_broken_after_fall(
+    world: &mut World,
+    pos: BlockPos,
+    state: BlockState,
+    center: mc_bamboo_core::Vec3,
+) {
+    if state.is_tagged(mc_bamboo_data::tags::block_tags::ANVIL) {
+        world.level_event(1029, pos, 0);
+    } else if state.is_a(BlockAncestor::PointedDripstoneBlock) {
+        world.level_event(1045, pos, 0);
+    } else if state.is_a(BlockAncestor::SulfurSpikeBlock) {
+        world.level_event(1052, pos, 0);
+    } else if state.is_a(BlockAncestor::BrushableBlock) {
+        let state_id = i32::try_from(state.0).unwrap_or(0);
+        world.level_event(2001, mc_bamboo_core::BlockPos::containing(center), state_id);
     }
 }
 

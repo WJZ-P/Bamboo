@@ -21,8 +21,13 @@ pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, heightmaps, item_components, items,
-    jukebox_songs, light, loot, packets, recipes, registries, shapes, states, tags, version,
-    worldgen,
+    jukebox_songs, light, loot, packets, recipes, registries, shapes, sounds, states, tags,
+    version, worldgen,
+};
+
+pub use generated::sounds::{
+    NOTE_BLOCK_INSTRUMENTS, NoteBlockInstrumentDef, SOUND_EVENTS, SOUND_TYPES, STATE_SOUND_TYPE,
+    SoundEventDef, SoundSource, SoundTypeDef, jukebox_song, note_block_instrument, sound_event,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -267,6 +272,8 @@ pub struct Block {
     pub offset: Option<BlockOffset>,
     /// `hasDynamicShape`：官方不缓存这种方块的形状，读取时要带上世界和位置。
     pub dynamic_shape: bool,
+    /// 用桶取起这个方块时播的声音，`sound_event` 注册表 ID。只有实现 `BucketPickup` 的方块有。
+    pub pickup_sound: Option<i32>,
     /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
     pub destroy_time: f32,
     /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
@@ -374,6 +381,19 @@ pub struct Item {
     pub block_transformer: Option<&'static BlockTransformer>,
     /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
     pub blocks_attacks: bool,
+    /// `SolidBucketItem.placeSound`：放下时播放的声音，只有细雪桶有。
+    /// `SolidBucketItem.placeSound`. Only the powder-snow bucket has one.
+    pub place_sound: Option<i32>,
+    /// `BucketItem.playEmptySound` 或 `MobBucketItem.emptySound`。只有这两种桶有。
+    /// `BucketItem.playEmptySound`, or `MobBucketItem.emptySound`. Only those buckets have one.
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。生物桶是 `NEUTRAL`，其余是 `BLOCKS`。
+    /// `SoundSource` ordinal when emptying. `NEUTRAL` for a mob bucket, `BLOCKS` otherwise.
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名。倒出后 `playAmbientSound` 的音效挂在 `entity.<这段路径>.` 下。
+    /// Registry name of `MobBucketItem.type`. `playAmbientSound` after pouring uses events under
+    /// `entity.<this path>.`.
+    pub bucket_entity: Option<&'static str>,
 }
 
 /// `compostable` 组件的 `layers`，数据包 `context_int_provider/compostable` 里的整数提供器。
@@ -396,7 +416,7 @@ pub struct BlockTransformer {
     pub transforms: &'static [BlockTransform],
 }
 
-/// `BlockTransformer.BlockTransformData` 里改方块的部分。音效、粒子、耐久和掉落物不在这里。
+/// `BlockTransformer.BlockTransformData` 里改方块的部分。耐久和掉落物不在这里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockTransform {
     pub provider: StateProvider,
@@ -404,6 +424,12 @@ pub struct BlockTransform {
     pub disallowed_faces: &'static [i32],
     /// `updateFromNeighbors`：写入前先按六个邻居更新一遍状态。
     pub update_from_neighbors: bool,
+    /// `sound`：写入后放的音效事件，没配时官方用的是 `SoundEvents.EMPTY`。
+    pub sound: Option<u16>,
+    /// `particle`：`TransformParticle` 发的等级事件，`NONE` 是 0。
+    pub particle: i32,
+    /// `transform_type == COPPER_CHEST`：改完方块还要给大箱子的另一半发一次粒子。
+    pub copper_chest: bool,
 }
 
 /// 官方的 `BlockStateProvider`，只有官方数据用到的几种，生成器遇到别的会报错。

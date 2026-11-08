@@ -44,7 +44,9 @@ pub struct FallingBlock {
     pub time: i32,
     /// `dropItem`。这个世界没有掉落物，字段留着是为了让落地判定和官方一致。
     pub drop_item: bool,
-    /// `cancelDrop`：落地时不放回方块，也不走 `onBrokenAfterFall`。
+    /// `cancelDrop`：落地时不放回方块。官方仍会 `callOnBrokenAfterFall`。
+    ///
+    /// `cancelDrop`: the block is not placed. Vanilla still calls `callOnBrokenAfterFall`.
     pub cancel_drop: bool,
     /// `hurtEntities`、`fallDamagePerDistance`、`fallDamageMax`：砸到实体的伤害不在范围里，
     /// 但铁砧靠它决定要不要裂开，所以照官方算。

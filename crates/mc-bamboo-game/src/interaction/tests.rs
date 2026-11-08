@@ -10,7 +10,7 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{
     block_id_of_state, blocks, items, items::ITEMS, packets::play::clientbound,
-    registries::block_entity_type, registries::data_component_type as kinds,
+    registries::block_entity_type, registries::data_component_type as kinds, sounds,
 };
 use mc_bamboo_protocol::{
     components::{ComponentValue, cursor::HolderSet, predicate::BlockPredicate},
@@ -19,7 +19,7 @@ use mc_bamboo_protocol::{
         ClientboundPacket,
         play::{
             BlockChangedAck, BlockUpdate, Disconnect, GameMode, LevelEvent, PlayRequest,
-            PlayerActionKind, SectionBlock, SectionBlocksUpdate, SwingAnimation, SystemChat,
+            PlayerActionKind, SectionBlock, SectionBlocksUpdate, Sound, SwingAnimation, SystemChat,
         },
     },
     text::{Color, Component},
@@ -460,6 +460,57 @@ fn level_event_stops_at_64_blocks_from_the_block_corner() {
         |client: &Client| frames_with_id(&client.take_frames(), clientbound::LEVEL_EVENT).len();
     assert_eq!(events(&near), 1);
     assert_eq!(events(&far), 0);
+}
+
+/// 出生点正东方 `dx` 格、音量 `volume` 的一个音效。
+fn sound_east(dx: f64, volume: f32) -> Sound {
+    Sound {
+        sound: i32::from(sounds::sound_event("minecraft:block.stone.place")),
+        inline: None,
+        source: sounds::BLOCKS,
+        x: SPAWN_X + dx,
+        y: SPAWN_Y,
+        z: SPAWN_Z,
+        volume,
+        pitch: 1.0,
+        seed: 0,
+    }
+}
+
+fn sounds_heard(client: &Client) -> usize {
+    frames_with_id(&client.take_frames(), clientbound::SOUND).len()
+}
+
+/// `playSeededSound` 的范围：固定范围优先，否则音量大过 1 时是 16 × 音量，再否则 16；
+/// 判定是严格小于，站在范围边上的人听不到。
+#[test]
+fn a_sound_reaches_exactly_as_far_as_its_volume_allows() {
+    let (mut server, client) = settled();
+    let cases = [
+        (15.9, 0.5, 1),
+        (16.0, 0.5, 0),
+        (15.9, 1.0, 1),
+        (16.0, 1.0, 0),
+        (31.9, 2.0, 1),
+        (32.0, 2.0, 0),
+    ];
+
+    for (dx, volume, heard) in cases {
+        super::send_sound(server.region(), None, &sound_east(dx, volume));
+        server.tick();
+        assert_eq!(sounds_heard(&client), heard, "dx {dx}, volume {volume}");
+    }
+}
+
+#[test]
+fn the_excluded_player_hears_nothing() {
+    let (mut server, first, second) = two_players();
+
+    super::send_sound(server.region(), Some(first.id), &sound_east(0.0, 1.0));
+    server.tick();
+
+    assert_eq!(sounds_heard(&first), 0);
+    assert_eq!(sounds_heard(&second), 1);
 }
 
 #[test]
@@ -1176,11 +1227,12 @@ fn right_clicking_a_chest_places_nothing() {
     server.tick();
 
     assert_eq!(block_at(&mut server, TWO_ABOVE), Some(blocks::AIR));
-    // 右键打开箱子：菜单包在请求里就发，方块事件和 ack 等到这一 tick 后面的阶段。
+    // 右键打开箱子：开箱音效和菜单包在请求里就发，方块事件和 ack 等到这一 tick 后面的阶段。
     let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
     assert_eq!(
         ids,
         [
+            clientbound::SOUND,
             clientbound::OPEN_SCREEN,
             clientbound::CONTAINER_SET_CONTENT,
             clientbound::BLOCK_UPDATE,

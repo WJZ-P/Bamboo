@@ -1,15 +1,18 @@
 //! `CauldronBlock`、`LayeredCauldronBlock`、`LavaCauldronBlock` 和官方的 `CauldronInteractions`。
 //!
 //! 桶的条目不看组件。水瓶、玻璃瓶、可洗染料的物品、旗帜和染色潜影盒按官方那张表处理。
-//! 音效、统计和 `gameEvent` 没有对应的系统，这里不发。
+//! 桶和玻璃瓶在改完方块之后放 `BOTTLE_EMPTY`、`BOTTLE_FILL` 或对应的桶音效。洗染料、旗帜和潜影盒官方不出声。
+//! 统计和 `gameEvent` 没有对应的系统，这里不发。
 //!
 //! Bucket entries ignore components. Water bottles, glass bottles, dyeable items, banners and
-//! dyed shulker boxes follow the vanilla table. Sounds, statistics and `gameEvent` have no
-//! system here, so they are not emitted.
+//! dyed shulker boxes follow the vanilla table. Buckets and glass bottles play `BOTTLE_EMPTY`,
+//! `BOTTLE_FILL`, or the matching bucket sound after the block changes. Washing dye, banners
+//! and shulker boxes is silent in vanilla. Statistics and `gameEvent` have no system here.
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{
-    BlockAncestor, blocks, items, registries::data_component_type as kinds, tags::item_tags,
+    BlockAncestor, blocks, items, registries::data_component_type as kinds, sounds::sound_event,
+    tags::item_tags,
 };
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue, defaults, value::BannerLayer},
@@ -44,22 +47,38 @@ fn lower_fill_level(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block_and_update(pos, lowered);
 }
 
-/// `emptyBucket` 的结果：换成 `filled`。
-fn fill_with(filled: BlockState, world: &mut World, pos: BlockPos) -> InteractionResult {
+/// 炼药锅交互里的声音都是 `BLOCKS`，音量音高都是 1，`except` 是空。
+///
+/// Cauldron interaction sounds are `BLOCKS`, volume and pitch 1, and `except` is null.
+fn play_cauldron_sound(world: &mut World, pos: BlockPos, sound: &str) {
+    world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
+}
+
+/// `emptyBucket` 的结果：换成 `filled`，然后放倒空的声音。
+///
+/// `emptyBucket`: replace the block, then play the empty sound.
+fn fill_with(
+    filled: BlockState,
+    sound: &str,
+    world: &mut World,
+    pos: BlockPos,
+) -> InteractionResult {
     world.set_block_and_update(pos, filled);
+    play_cauldron_sound(world, pos, sound);
     InteractionResult::Success
 }
 
 /// `fillLavaInteraction`、`fillPowderSnowInteraction`：水下倒不进去，但是吃掉这次点击。
 fn fill_with_unless_under_water(
     filled: BlockState,
+    sound: &str,
     world: &mut World,
     pos: BlockPos,
 ) -> InteractionResult {
     if world.is_water_at(pos.above()) {
         InteractionResult::Consume
     } else {
-        fill_with(filled, world, pos)
+        fill_with(filled, sound, world, pos)
     }
 }
 
@@ -71,7 +90,14 @@ fn fill_bucket(state: BlockState, world: &mut World, pos: BlockPos) -> Interacti
     {
         return InteractionResult::TryEmptyHandInteraction;
     }
-    fill_with(BlockState(blocks::CAULDRON), world, pos)
+    let sound = if state.is(blocks::LAVA_CAULDRON) {
+        "minecraft:item.bucket.fill_lava"
+    } else if state.is(blocks::POWDER_SNOW_CAULDRON) {
+        "minecraft:item.bucket.fill_powder_snow"
+    } else {
+        "minecraft:item.bucket.fill"
+    };
+    fill_with(BlockState(blocks::CAULDRON), sound, world, pos)
 }
 
 /// 分层炼药锅灌满时的状态。
@@ -173,6 +199,9 @@ fn pour_potion(
         BlockState(blocks::WATER_CAULDRON)
     };
     world.set_block_and_update(pos, filled);
+    // `BOTTLE_EMPTY`，在方块换成水之后。
+    // `BOTTLE_EMPTY`, after the block becomes water.
+    play_cauldron_sound(world, pos, "minecraft:item.bottle.empty");
     InteractionResult::Success
 }
 
@@ -190,6 +219,9 @@ fn fill_bottle(
     }
     record_fill(world, ctx, item_exchange::water_potion_stack(), true);
     lower_fill_level(state, world, pos);
+    // `BOTTLE_FILL`，在用掉一层水之后。洗染料、旗帜和潜影盒不出声。
+    // `BOTTLE_FILL`, after one level of water is used. Dye, banners and shulker boxes stay silent.
+    play_cauldron_sound(world, pos, "minecraft:item.bottle.fill");
     InteractionResult::Success
 }
 
@@ -299,13 +331,24 @@ impl Behaviour for Cauldron {
             return wash_dye(state, world, ctx, pos);
         }
         match item {
-            items::WATER_BUCKET => fill_with(full_layered(blocks::WATER_CAULDRON), world, pos),
-            items::LAVA_BUCKET => {
-                fill_with_unless_under_water(BlockState(blocks::LAVA_CAULDRON), world, pos)
-            }
-            items::POWDER_SNOW_BUCKET => {
-                fill_with_unless_under_water(full_layered(blocks::POWDER_SNOW_CAULDRON), world, pos)
-            }
+            items::WATER_BUCKET => fill_with(
+                full_layered(blocks::WATER_CAULDRON),
+                "minecraft:item.bucket.empty",
+                world,
+                pos,
+            ),
+            items::LAVA_BUCKET => fill_with_unless_under_water(
+                BlockState(blocks::LAVA_CAULDRON),
+                "minecraft:item.bucket.empty_lava",
+                world,
+                pos,
+            ),
+            items::POWDER_SNOW_BUCKET => fill_with_unless_under_water(
+                full_layered(blocks::POWDER_SNOW_CAULDRON),
+                "minecraft:item.bucket.empty_powder_snow",
+                world,
+                pos,
+            ),
             items::BUCKET => fill_bucket(state, world, pos),
             items::POTION => pour_potion(state, world, ctx, pos),
             items::GLASS_BOTTLE => fill_bottle(state, world, ctx, pos),

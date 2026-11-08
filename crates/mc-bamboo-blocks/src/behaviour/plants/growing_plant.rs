@@ -6,7 +6,8 @@
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{
-    Block, BlockAncestor, BlockClass, FieldValue, blocks, registries::fluid, tags::block_tags,
+    Block, BlockAncestor, BlockClass, FieldValue, blocks, registries::fluid, sounds::sound_event,
+    tags::block_tags,
 };
 
 use super::{break_if_unsupported, schedule_break_if_unsupported};
@@ -216,7 +217,14 @@ fn pick_berries(state: BlockState, world: &mut World, pos: BlockPos) -> Interact
         return InteractionResult::Pass;
     }
     // `CaveVines.use` 摘果子前取一个音高，`Mth.randomBetween` 只用一个 `nextFloat`。
-    world.random().next_float();
+    // 它乘的是 `max - min`，和手写的 0.4 差最后一位。
+    let pitch = world.random().next_float() * (1.2 - 0.8) + 0.8;
+    world.play_block_sound(
+        pos,
+        sound_event("minecraft:block.cave_vines.pick_berries"),
+        1.0,
+        pitch,
+    );
     world.set_block(pos, state.with(BERRIES, false), UPDATE_CLIENTS);
     InteractionResult::Success
 }

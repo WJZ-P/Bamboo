@@ -202,10 +202,11 @@ mod tests {
     fn chunk_position_rounds_down() {
         let mut player = player_requesting(2);
 
-        player.position = Vec3::new(-0.5, 500.0, 16.0);
+        let mut grid = PlayerGrid::default();
+        player.set_position(&mut grid, Vec3::new(-0.5, 500.0, 16.0));
         assert_eq!(player.chunk_pos(), ChunkPos::new(-1, 1));
 
-        player.position = Vec3::new(3.0e7, 0.0, -3.0e7);
+        player.set_position(&mut grid, Vec3::new(3.0e7, 0.0, -3.0e7));
         assert_eq!(player.chunk_pos(), ChunkPos::new(1_875_000, -1_875_000));
     }
 

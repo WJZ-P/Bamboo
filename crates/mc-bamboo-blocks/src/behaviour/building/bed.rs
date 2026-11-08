@@ -95,9 +95,11 @@ impl Behaviour for Bed {
         }
     }
 
-    /// `StrawBedBlock` 放的是 2014 号事件，不是破坏效果，这里没有东西要记。
+    /// `StrawBedBlock` 放的是 2014 号事件，不是破坏效果。
     fn spawn_destroy_particles(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        if state.class() != BlockClass::StrawBedBlock {
+        if state.class() == BlockClass::StrawBedBlock {
+            world.level_event(2014, pos, state.0 as i32);
+        } else {
             Plain.spawn_destroy_particles(state, world, pos);
         }
     }
@@ -188,19 +190,29 @@ mod tests {
     }
 
     #[test]
-    fn straw_beds_leave_no_destroy_effect_when_a_neighbour_breaks_them() {
+    fn a_straw_bed_reports_its_break_as_a_level_event() {
         let mut level = level_with_floor();
         level.set(FLOOR.south(), BlockState(blocks::STONE));
         use_item(&mut level, &actor_holding(items::STRAW_BED), top_of(FLOOR));
+        let foot = level.get(FOOT);
         let head = level.get(FOOT.south());
         let outcome = break_block(&mut level, FOOT.south());
         assert_eq!(
             outcome.effects,
-            [Effect::Destroyed {
-                pos: FOOT.south(),
-                state: head,
-                except_initiator: true,
-            }]
+            [
+                Effect::Destroyed {
+                    pos: FOOT.south(),
+                    state: head,
+                    except_initiator: true,
+                },
+                // 被连带拆掉的床尾走 `destroyBlock`，`StrawBedBlock` 报的是 2014 号事件。
+                Effect::LevelEvent {
+                    event: 2014,
+                    pos: FOOT,
+                    data: foot.0 as i32,
+                    except_initiator: false,
+                },
+            ]
         );
         assert!(level.get(FOOT).is_air());
     }

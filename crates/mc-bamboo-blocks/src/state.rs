@@ -37,6 +37,11 @@ impl BlockState {
         self.block().class
     }
 
+    /// `getSoundType()`：音量、音高和放置、破坏、脚步、击打、落地五种声音。
+    pub fn sound_type(self) -> &'static mc_bamboo_data::SoundTypeDef {
+        &mc_bamboo_data::SOUND_TYPES[usize::from(mc_bamboo_data::STATE_SOUND_TYPE[self.0 as usize])]
+    }
+
     /// `instanceof`。
     pub fn is_a(self, ancestor: BlockAncestor) -> bool {
         self.class().ancestors().contains(&ancestor)
@@ -555,6 +560,33 @@ property_enum!(
         CustomHead => "custom_head",
     }
 );
+
+impl NoteBlockInstrument {
+    /// 官方 `getSoundEvent()` 的声音，`sound_event` 注册表 ID。
+    pub fn sound(self) -> u16 {
+        self.definition().sound
+    }
+
+    /// `isTunable()`：基础乐器，音符改变音高。
+    pub fn is_tunable(self) -> bool {
+        self.definition().tunable
+    }
+
+    /// `worksAboveNoteBlock()`：不是基础乐器时，它放在音符盒上方也能决定乐器。
+    pub fn works_above_note_block(self) -> bool {
+        !self.is_tunable()
+    }
+
+    /// `hasCustomSound()`：自定义头颅的声音由方块实体决定。
+    pub fn has_custom_sound(self) -> bool {
+        self.definition().custom_sound
+    }
+
+    fn definition(self) -> &'static mc_bamboo_data::NoteBlockInstrumentDef {
+        mc_bamboo_data::note_block_instrument(self.name())
+            .expect("生成的乐器名都在表里，测试校验过")
+    }
+}
 property_enum!(
     /// `PistonType`。
     PistonType {

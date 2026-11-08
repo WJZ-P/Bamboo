@@ -1,8 +1,12 @@
 //! `CopperBulbBlock`、`WeatheringCopperBulbBlock`、`CopperGolemStatueBlock`、
 //! `WeatheringCopperGolemStatueBlock`。
 
-use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, items, tags::item_tags};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{
+    Block, items,
+    sounds::{self, sound_event},
+    tags::item_tags,
+};
 
 use crate::behaviour::weathering::change_over_time;
 use crate::{
@@ -34,7 +38,14 @@ fn check_and_flip(state: BlockState, world: &mut World, pos: BlockPos) {
     let flipped = if state.get(POWERED) {
         state
     } else {
-        state.cycle(LIT)
+        let flipped = state.cycle(LIT);
+        let sound = if flipped.get(LIT) {
+            sound_event("minecraft:block.copper_bulb.turn_on")
+        } else {
+            sound_event("minecraft:block.copper_bulb.turn_off")
+        };
+        world.play_block_sound(pos, sound, 1.0, 1.0);
+        flipped
     };
     world.set_block_and_update(pos, flipped.with(POWERED, signal));
 }
@@ -84,8 +95,14 @@ impl Behaviour for CopperBulb {
 /// `CopperGolemStatueBlock`。
 pub(super) struct CopperGolemStatue;
 
-/// `updatePose`。
+/// `updatePose`：先响再换姿势。
 fn update_pose(state: BlockState, world: &mut World, pos: BlockPos) {
+    world.play_block_sound(
+        pos,
+        sound_event("minecraft:entity.copper_golem_become_statue"),
+        1.0,
+        1.0,
+    );
     world.set_block_and_update(pos, state.cycle(COPPER_GOLEM_POSE));
 }
 
@@ -163,6 +180,20 @@ fn revive_statue(state: BlockState, world: &mut World, pos: BlockPos) -> Interac
     if field_name(state.block(), "getAge()") != "unaffected" {
         return InteractionResult::Pass;
     }
+    // `initCopperGolem` 的 `playSpawnSound`，在 `removeBlock` 之前。
+    // 实体站在方块中心的 x/z 上，y 是方块的 y，来源是 `NEUTRAL`。
+    world.play_sound(
+        Vec3 {
+            x: f64::from(pos.x) + 0.5,
+            y: f64::from(pos.y),
+            z: f64::from(pos.z) + 0.5,
+        },
+        sound_event("minecraft:entity.copper_golem.spawn"),
+        sounds::NEUTRAL,
+        1.0,
+        1.0,
+        false,
+    );
     world.remove_block(pos);
     InteractionResult::Success
 }

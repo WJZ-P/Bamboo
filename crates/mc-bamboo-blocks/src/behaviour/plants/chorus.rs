@@ -149,6 +149,7 @@ fn become_plant(plant: BlockState, world: &mut World, pos: BlockPos) {
 /// `placeGrownFlower`。
 fn place_grown_flower(flower: BlockState, world: &mut World, pos: BlockPos, age: i32) {
     world.set_block(pos, flower.default_state().with(AGE_5, age), UPDATE_CLIENTS);
+    world.level_event(1033, pos, 0);
 }
 
 /// `placeDeadFlower`。
@@ -158,6 +159,7 @@ fn place_dead_flower(flower: BlockState, world: &mut World, pos: BlockPos) {
         flower.default_state().with(AGE_5, DEAD_AGE),
         UPDATE_CLIENTS,
     );
+    world.level_event(1034, pos, 0);
 }
 
 /// `allNeighborsEmpty`：四个水平邻居都是空气，`ignore` 那一面不看。

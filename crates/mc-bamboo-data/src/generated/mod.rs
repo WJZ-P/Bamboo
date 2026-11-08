@@ -19,6 +19,7 @@ pub mod packets;
 pub mod recipes;
 pub mod registries;
 pub mod shapes;
+pub mod sounds;
 pub mod states;
 pub mod tags;
 pub mod version;

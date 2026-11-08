@@ -4,7 +4,10 @@ use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, tags::block_tags};
 
 use crate::{
-    behaviour::{Behaviour, Plain, common::default_state},
+    behaviour::{
+        Behaviour, Plain,
+        common::{default_state, field_sound},
+    },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, HORIZONTAL_FACING, IN_WALL, OPEN, POWERED},
@@ -21,6 +24,22 @@ pub(super) fn connects_to_direction(gate: BlockState, direction: Direction) -> b
 
 fn is_wall(state: BlockState) -> bool {
     state.is_tagged(block_tags::WALLS)
+}
+
+/// 开、关栅栏门的声音，音高是 `getRandom().nextFloat() * 0.1F + 0.9F`。
+fn play_sound(world: &mut World, pos: BlockPos, block: &Block, opens: bool, except: bool) {
+    let name = if opens {
+        "type.fenceGateOpen"
+    } else {
+        "type.fenceGateClose"
+    };
+    let sound = field_sound(block, name);
+    let pitch = world.random().next_float() * 0.1 + 0.9;
+    if except {
+        world.play_block_sound_except(pos, sound, 1.0, pitch);
+    } else {
+        world.play_block_sound(pos, sound, 1.0, pitch);
+    }
 }
 
 /// 门的两侧有墙时，门整体矮一点，和墙对齐。
@@ -76,8 +95,8 @@ impl Behaviour for FenceGate {
             let updated = state.with(POWERED, power).with(OPEN, power);
             world.set_block(pos, updated, UPDATE_CLIENTS);
             if state.get(OPEN) != power {
-                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
-                world.random().next_float();
+                // 官方在放下新状态之后才出声，音高是此刻的随机数。
+                play_sound(world, pos, state.block(), power, false);
             }
         }
     }
@@ -106,7 +125,13 @@ impl Behaviour for FenceGate {
             UPDATE_CLIENTS | UPDATE_IMMEDIATE,
         );
         // `playSound` 在放下新状态之后取音高。
-        world.random().next_float();
+        play_sound(
+            world,
+            ctx.clicked_pos(),
+            state.block(),
+            toggled.get(OPEN),
+            true,
+        );
         InteractionResult::Success
     }
 }

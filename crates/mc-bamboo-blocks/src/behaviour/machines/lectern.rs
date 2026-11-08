@@ -9,7 +9,7 @@
 //! oracle inserts, signal 15.
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{items, tags::item_tags};
+use mc_bamboo_data::{items, sounds::sound_event, tags::item_tags};
 
 use crate::{
     behaviour::{Behaviour, common::facing_the_player},
@@ -82,6 +82,8 @@ fn place_book(state: BlockState, world: &mut World, pos: BlockPos, item: i32) {
     let with_book = state.with(POWERED, false).with(HAS_BOOK, true);
     world.set_block_and_update(pos, with_book);
     update_below(state, world, pos);
+    // `placeBook` 最后才出声。
+    world.play_block_sound(pos, sound_event("minecraft:item.book.put"), 1.0, 1.0);
 }
 
 /// `LecternBlock.resetBookState`。`has_book` 为假时丢掉页码。

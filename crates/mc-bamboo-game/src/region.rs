@@ -133,6 +133,11 @@ pub(crate) struct Region {
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
+    ///
+    /// Seed for sound packets, vanilla `Level.soundSeedGenerator`. Separate from the world
+    /// random; it only picks which sound variant the client plays.
+    pub(crate) sound_seed_generator: LevelRandom,
     /// 下落的方块和点燃的 TNT。世界线程独占，见 `docs/folia.md`。
     ///
     /// Falling blocks and primed TNT. The world thread owns them; see `docs/folia.md`.
@@ -210,6 +215,7 @@ impl Region {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
+            sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
             redstone: RedstoneMemory::default(),

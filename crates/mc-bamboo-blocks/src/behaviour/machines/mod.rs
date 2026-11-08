@@ -11,7 +11,7 @@
 mod beehive;
 mod brewing;
 mod campfire;
-mod chest;
+pub(crate) mod chest;
 mod command_block;
 mod containers;
 mod cooking;

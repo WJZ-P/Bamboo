@@ -3,7 +3,7 @@
 //! `LightBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, items};
+use mc_bamboo_data::{Block, items, sounds::sound_event};
 
 use crate::behaviour::weathering::change_over_time;
 use crate::{
@@ -11,9 +11,9 @@ use crate::{
         Behaviour, Plain,
         common::{default_state, is_full_water, is_water_source, tick_water_if_waterlogged},
     },
-    context::{PlaceContext, UseContext},
+    context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{BlockState, DRIED_GHAST_HYDRATION_LEVELS, HORIZONTAL_FACING, WATERLOGGED},
+    state::{BlockState, DRIED_GHAST_HYDRATION_LEVELS, FluidState, HORIZONTAL_FACING, WATERLOGGED},
     world::World,
 };
 
@@ -152,6 +152,36 @@ impl Behaviour for DriedGhast {
         neighbor: BlockState,
     ) -> BlockState {
         Waterlogged.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    /// `setPlacedBy`：泡着水放下时是另一个声音。
+    fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
+        let sound = if state.get(WATERLOGGED) {
+            "minecraft:block.dried_ghast.place_in_water"
+        } else {
+            "minecraft:block.dried_ghast.place"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
+    }
+
+    /// `placeLiquid`：换完方块、排好流体刻之后放换水的声音。
+    fn place_liquid(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        fluid: FluidState,
+    ) -> bool {
+        if !Plain.place_liquid(state, world, pos, fluid) {
+            return false;
+        }
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.dried_ghast.place_in_water"),
+            1.0,
+            1.0,
+        );
+        true
     }
 
     /// 泡着水或者已经吸了水时排一个吸水的计划刻。吸满后生成恶魂实体，那个计划刻不在范围里。
