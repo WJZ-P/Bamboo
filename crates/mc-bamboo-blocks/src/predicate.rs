@@ -21,12 +21,16 @@ pub fn any_matches(predicates: &[BlockPredicate], state: BlockState) -> bool {
 }
 
 /// 官方 `BlockPredicate.matches(BlockInWorld)`：方块、方块状态属性、方块实体 NBT。
+///
+/// 状态 ID 不在注册表里就没有方块，直接不匹配。不能当成空气，空气的方块 ID 正好是 0。
 pub fn matches(predicate: &BlockPredicate, state: BlockState) -> bool {
-    if let Some(blocks) = &predicate.blocks {
-        let block = block_id_of_state(state.0).unwrap_or_default() as i32;
-        if !blocks_match(blocks, block) {
-            return false;
-        }
+    let Some(block) = block_id_of_state(state.0) else {
+        return false;
+    };
+    if let Some(blocks) = &predicate.blocks
+        && !blocks_match(blocks, block as i32)
+    {
+        return false;
     }
     if let Some(properties) = &predicate.properties
         && !properties_match(properties, state)
@@ -229,6 +233,20 @@ mod tests {
             .iter()
             .find(|property| property.name == name)
             .expect("这块方块有这个属性")
+    }
+
+    #[test]
+    fn an_unknown_state_id_does_not_match_even_an_air_predicate() {
+        let unknown = BlockState(blocks::TOTAL_STATES);
+        let air = predicate(Some(block_ids(&[blocks::AIR])), None, None);
+        // 以前查不到就当成方块 0，空气谓词会误匹配。
+        assert!(!matches(&air, unknown));
+        assert!(!matches(&predicate(None, None, None), unknown));
+        assert!(!matches(
+            &predicate(None, Some(exact("axis", "y")), None),
+            unknown
+        ));
+        assert!(matches(&air, BlockState(blocks::AIR)));
     }
 
     #[test]
