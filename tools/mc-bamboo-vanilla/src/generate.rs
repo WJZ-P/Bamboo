@@ -1080,10 +1080,7 @@ fn check_state_ids(blocks: &[Block], total: u32) -> Result<(), String> {
 
 fn items_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "use crate::{{CompostLayers, Item, ItemKind}};\n"
-    );
+    let _ = writeln!(out, "use crate::{{CompostLayers, Item, ItemKind}};\n");
     let _ = writeln!(out, "/// 各物品的注册表 ID。");
     for (id, item) in data.items.iter().enumerate() {
         let _ = writeln!(out, "pub const {}: i32 = {id};", constant_name(&item.name));

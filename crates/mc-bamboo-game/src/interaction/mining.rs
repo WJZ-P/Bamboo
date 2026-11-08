@@ -20,8 +20,8 @@ use mc_bamboo_protocol::packet::play::{
 use tracing::{debug, warn};
 
 use super::{
-    MAX_Y, REACH_BUFFER, actor_of, rules, send_current_block, send_effects, send_level_event,
-    within_block_interaction_range,
+    MAX_Y, REACH_BUFFER, actor_of, adventure, rules, send_current_block, send_effects,
+    send_level_event, within_block_interaction_range,
 };
 use crate::{inbound::PlayerId, links::encode_frames, region::Region};
 
@@ -122,10 +122,29 @@ fn crack_state(progress: f32) -> i32 {
     (progress * 10.0) as i32
 }
 
-/// `Player.blockActionRestricted`。这个世界没有权限系统，冒险模式里能用的 `can_break` 组件
-/// 也还读不出来，按组件不存在算，所以冒险模式和旁观模式一样，什么都挖不动。
-fn block_action_restricted(snapshot: &Snapshot) -> bool {
-    !snapshot.actor.may_build
+/// `Player.blockActionRestricted`。
+///
+/// 只有冒险和旁观两种模式受限（`GameType.isBlockPlacingRestricted`）：旁观一律拦，
+/// 冒险看主手的 `can_break` 组件，空手或者没有能匹配这一格的谓词就拦。
+/// 没有权限系统，官方的 `mayBuild()` 就是 `actor.may_build`。
+fn block_action_restricted(region: &Region, snapshot: &Snapshot, pos: BlockPos) -> bool {
+    if !matches!(
+        snapshot.game_mode,
+        GameMode::Adventure | GameMode::Spectator
+    ) {
+        return false;
+    }
+    if snapshot.game_mode == GameMode::Spectator {
+        return true;
+    }
+    if snapshot.actor.may_build {
+        return false;
+    }
+    let Some(player) = region.players.get(&snapshot.id) else {
+        return true;
+    };
+    let held = player.inventory.held(Hand::Main);
+    held.is_empty() || !adventure::can_break(held, block_state(region, pos))
 }
 
 /// `ServerPlayerGameMode.handleBlockBreakAction`。四个破坏动作都从这里过。
@@ -197,7 +216,7 @@ fn start_destroy_block(
         destroy_and_ack(region, snapshot, pos);
         return;
     }
-    if block_action_restricted(snapshot) {
+    if block_action_restricted(region, snapshot, pos) {
         send_current_block(region, snapshot.id, pos);
         debug!(player = snapshot.id.0, ?pos, "block action restricted");
         return;
@@ -319,7 +338,7 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
         return false;
     }
     // 官方在 `destroyBlock` 里又查一遍，中途切到冒险模式时 STOP 也会被拒。
-    if block_action_restricted(snapshot) {
+    if block_action_restricted(region, snapshot, pos) {
         return false;
     }
     // 世界下面读到的是 `void_air`。破坏空气世界不变；官方还会发一个客户端不看的 2001，
@@ -455,8 +474,12 @@ fn send_destroy_progress(region: &mut Region, breaker: i32, pos: BlockPos, progr
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_data::{blocks, items, packets::play::clientbound};
+    use mc_bamboo_data::{
+        block_id_of_state, blocks, items, packets::play::clientbound,
+        registries::data_component_type as kinds,
+    };
     use mc_bamboo_protocol::{
+        components::{ComponentValue, cursor::HolderSet, predicate::BlockPredicate},
         item::ItemStack,
         packet::{
             ClientboundPacket,
@@ -833,6 +856,69 @@ mod tests {
                 [update(GROUND, blocks::STONE), ack(1)]
             );
         }
+    }
+
+    /// 只允许挖 `block` 这一种方块的 `can_break` 组件，挂在木棍上。
+    fn can_break_stack(block: u32) -> ItemStack {
+        let predicate = BlockPredicate {
+            blocks: Some(HolderSet::Ids(vec![
+                block_id_of_state(block).unwrap() as i32
+            ])),
+            properties: None,
+            nbt: None,
+            components: Default::default(),
+        };
+        let mut value = Vec::new();
+        ComponentValue::CanBreak(vec![predicate]).write(&mut value);
+        ItemStack {
+            item: items::STICK,
+            count: 1,
+            added: vec![(kinds::CAN_BREAK, value)],
+            removed: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn adventure_mode_breaks_only_what_the_can_break_component_allows() {
+        let (mut server, client) = settled();
+        survive(&mut server, &client, items::AIR);
+        player_mut(&mut server, &client).game_mode = GameMode::Adventure;
+        player_mut(&mut server, &client).inventory.slots[36] = can_break_stack(blocks::STONE);
+        set_block(&mut server, GROUND, blocks::STONE);
+        set_block(&mut server, ABOVE, blocks::DIRT);
+
+        // 泥土不在谓词里：开始失败，把这一格发回去。
+        start(&server, &client, ABOVE, Direction::Up, 1);
+        server.tick();
+        assert_eq!(client.take_frames(), [update(ABOVE, blocks::DIRT), ack(1)]);
+        assert_eq!(block_at(&mut server, ABOVE), Some(blocks::DIRT));
+
+        // 石头在谓词里：开始被接受，下一刻开始攒进度。
+        start(&server, &client, GROUND, Direction::Up, 2);
+        server.tick();
+        assert_eq!(
+            client.take_frames(),
+            [level_event(2019, GROUND, Direction::Up.id()), ack(2)]
+        );
+        assert_eq!(block_at(&mut server, GROUND), Some(blocks::STONE));
+    }
+
+    #[test]
+    fn spectator_mode_ignores_the_can_break_component() {
+        let (mut server, client) = settled();
+        survive(&mut server, &client, items::AIR);
+        player_mut(&mut server, &client).game_mode = GameMode::Spectator;
+        player_mut(&mut server, &client).inventory.slots[36] = can_break_stack(blocks::STONE);
+        set_block(&mut server, GROUND, blocks::STONE);
+
+        start(&server, &client, GROUND, Direction::Up, 1);
+        server.tick();
+
+        assert_eq!(block_at(&mut server, GROUND), Some(blocks::STONE));
+        assert_eq!(
+            client.take_frames(),
+            [update(GROUND, blocks::STONE), ack(1)]
+        );
     }
 
     #[test]

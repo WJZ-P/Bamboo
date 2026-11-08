@@ -224,7 +224,12 @@ mod tests {
 
         assert_eq!(
             played(&outcome),
-            [(NoteBlockInstrument::Harp, expected_note, pitch_from_note(expected_note), seed)]
+            [(
+                NoteBlockInstrument::Harp,
+                expected_note,
+                pitch_from_note(expected_note),
+                seed
+            )]
         );
         // 方块事件本身也要广播（官方 `triggerEvent` 返回 `true` 时发包）。
         assert!(
@@ -258,11 +263,7 @@ mod tests {
         let mut ticks = BlockTicks::new();
         {
             let mut world = World::new(&mut level, &mut ticks);
-            state.neighbor_changed(
-                &mut world,
-                POS,
-                BlockState(blocks::REDSTONE_BLOCK).block(),
-            );
+            state.neighbor_changed(&mut world, POS, BlockState(blocks::REDSTONE_BLOCK).block());
         }
         assert!(level.get(POS).get(POWERED));
 

@@ -9,7 +9,9 @@ use mc_bamboo_data::{
     block_id_of_state, block_of_state, block_tag,
     registries::{attribute_defaults, data_component_type as kinds},
 };
-use mc_bamboo_protocol::components::{ComponentValue, cursor::HolderSet, defaults, value::ToolRule};
+use mc_bamboo_protocol::components::{
+    ComponentValue, cursor::HolderSet, defaults, value::ToolRule,
+};
 
 use crate::{
     fluid::Fluid,
@@ -34,8 +36,7 @@ pub struct Miner {
 /// `MobEffectUtil.hasDigSpeed` 和 `MINING_FATIGUE` 在这里是恒假。
 pub fn destroy_speed(state: u32, miner: Miner) -> f32 {
     let block = block_id_of_state(state).unwrap_or_default() as i32;
-    let mut speed = tool_of(miner.main_hand)
-        .map_or(1.0, |tool| tool.mining_speed(block));
+    let mut speed = tool_of(miner.main_hand).map_or(1.0, |tool| tool.mining_speed(block));
     if speed > 1.0 {
         speed += attribute_defaults::MINING_EFFICIENCY as f32;
     }

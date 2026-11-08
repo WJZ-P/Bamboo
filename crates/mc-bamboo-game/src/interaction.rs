@@ -4,6 +4,7 @@
 //! M2 只有创造模式：破坏一步完成，放置不扣物品。
 //! 客户端在本地预测这些操作，结果靠 `block_update` 和 `block_changed_ack` 收敛到服务端。
 
+pub(crate) mod adventure;
 pub(crate) mod level;
 pub(crate) mod mining;
 pub(crate) mod rules;
