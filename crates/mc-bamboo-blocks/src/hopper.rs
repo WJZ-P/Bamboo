@@ -13,7 +13,9 @@ use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     block_entity::BlockEntity,
-    container::{Container, item_max, remove_item, same_item_same_components},
+    container::{
+        CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
+    },
     state::{ENABLED, FACING_HOPPER},
     world::World,
 };
@@ -253,6 +255,18 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
             from_ticked_game_time = Some(hopper.ticked_game_time());
         });
     }
+    // `canTakeItem(into, slot, stack)` 看的是目标漏斗此刻的整张槽位表，不是即将取出的那一个。
+    // 成功拿走一件就返回，所以这一份快照够用。
+    //
+    // `canTakeItem(into, slot, stack)` looks at the destination hopper's whole slot list, not the
+    // single item about to be removed. The first success returns, so this snapshot stays valid.
+    let (into_max, into_slots) = query(world, pos, &mut |container| {
+        let slots = (0..container.size())
+            .map(|slot| container.get(slot))
+            .collect::<Vec<_>>();
+        (container.max_stack_size(), slots)
+    })
+    .unwrap_or((CONTAINER_STACK_LIMIT, Vec::new()));
 
     for slot in slots {
         let Some(item) = query(world, above, &mut |container| container.get(slot)) else {
@@ -262,7 +276,14 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
             continue;
         }
         let can_take = query(world, above, &mut |container| {
-            can_take_item_from_container(container, &item, slot, Direction::Down)
+            can_take_item_from_container(
+                container,
+                &item,
+                slot,
+                Direction::Down,
+                &into_slots,
+                into_max,
+            )
         })
         .unwrap_or(false);
         if !can_take {
@@ -333,16 +354,19 @@ fn can_place_item_in_container(
             && !container.can_place_item_through_face(slot, stack, direction))
 }
 
-/// `canTakeItemFromContainer`。
+/// `canTakeItemFromContainer`。`into` 是目标容器的槽位，`into_max` 是它的 `getMaxStackSize()`。
 ///
-/// 官方还把放进来的容器（`into`）传给 `canTakeItem`，现有的容器都没有用它，所以这里省掉。
+/// `canTakeItemFromContainer`. `into` is the destination container's slots and `into_max` is
+/// its `getMaxStackSize()`.
 fn can_take_item_from_container(
     container: &dyn Container,
     stack: &ItemStack,
     slot: usize,
     direction: Direction,
+    into: &[ItemStack],
+    into_max: i32,
 ) -> bool {
-    container.can_take_item(slot, stack)
+    container.can_take_item_into(slot, stack, into, into_max)
         && !(container.is_worldly()
             && !container.can_take_item_through_face(slot, stack, direction))
 }

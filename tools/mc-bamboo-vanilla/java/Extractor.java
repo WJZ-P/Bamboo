@@ -93,6 +93,7 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.JukeboxSong;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.Rarity;
@@ -230,6 +231,7 @@ public final class Extractor {
             root.add("instantMobEffects", instantMobEffects());
             root.add("attributeDefaults", attributeDefaults());
             root.add("componentEnums", componentEnums());
+            root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
             root.add("itemComponents", itemComponents(resources, layers));
@@ -271,6 +273,22 @@ public final class Extractor {
      * 才读得到，所以这里照 WorldLoader.load 的后半段再加载一次服务端资源。
      * `PendingTags.apply` 只是重新绑定同样的内容，重复调用没有副作用。
      */
+    /** `JukeboxSongs` 注册表，按注册表 ID 排序。比较器读 `comparatorOutput`。 */
+    private static JsonArray jukeboxSongs(RegistryAccess registries) {
+        Registry<JukeboxSong> registry = registries.lookupOrThrow(Registries.JUKEBOX_SONG);
+        List<Holder.Reference<JukeboxSong>> songs = new ArrayList<>();
+        registry.listElements().forEach(songs::add);
+        songs.sort(Comparator.comparingInt(song -> registry.getId(song.value())));
+        JsonArray array = new JsonArray();
+        for (Holder.Reference<JukeboxSong> song : songs) {
+            JsonObject object = new JsonObject();
+            object.addProperty("length", song.value().lengthInSeconds());
+            object.addProperty("output", song.value().comparatorOutput());
+            array.add(object);
+        }
+        return array;
+    }
+
     private static JsonArray itemComponents(
             CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers) throws Exception {
         ReloadableServerResources managers = ReloadableServerResources

@@ -181,6 +181,8 @@ import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.entity.ChiseledBookShelfBlockEntity;
+import net.minecraft.world.level.block.entity.CrafterBlockEntity;
+import net.minecraft.world.level.block.entity.DecoratedPotBlockEntity;
 import net.minecraft.world.level.block.entity.DispenserBlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.level.block.entity.JukeboxBlockEntity;
@@ -1279,8 +1281,22 @@ public final class BlockOracle {
                 if (!(entity instanceof Container container)) {
                     continue;
                 }
-                NonNullList<ItemStack> stored = storedItems((BaseContainerBlockEntity) entity);
                 NonNullList<ItemStack> stacks = contents.get(key);
+                // 唱片机和饰纹陶罐不是 BaseContainerBlockEntity，物品在自己的 `item` 字段里。
+                // 直接写字段，不走 setTheItem：场景加载不放歌，也不通知比较器。
+                if (entity instanceof JukeboxBlockEntity jukebox) {
+                    if (!stacks.isEmpty()) {
+                        set(JukeboxBlockEntity.class, jukebox, "item", stacks.get(0).copy());
+                    }
+                    continue;
+                }
+                if (entity instanceof DecoratedPotBlockEntity pot) {
+                    if (!stacks.isEmpty()) {
+                        set(DecoratedPotBlockEntity.class, pot, "item", stacks.get(0).copy());
+                    }
+                    continue;
+                }
+                NonNullList<ItemStack> stored = storedItems((BaseContainerBlockEntity) entity);
                 for (int slot = 0; slot < Math.min(container.getContainerSize(), stacks.size()); slot++) {
                     stored.set(slot, stacks.get(slot).copy());
                 }
@@ -1304,7 +1320,10 @@ public final class BlockOracle {
                     || entity instanceof BarrelBlockEntity
                     || entity instanceof ShulkerBoxBlockEntity
                     || entity instanceof HopperBlockEntity
-                    || entity instanceof DispenserBlockEntity;
+                    || entity instanceof DispenserBlockEntity
+                    || entity instanceof JukeboxBlockEntity
+                    || entity instanceof DecoratedPotBlockEntity
+                    || entity instanceof CrafterBlockEntity;
         }
 
         /** 这几种方块的状态是内容的镜像。场景里只有状态，内容要补成一致，否则右键的结果是真实世界到不了的。 */

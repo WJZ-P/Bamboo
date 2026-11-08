@@ -34,7 +34,7 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::FACING, state::FACING_HOPPER, state::HAS_RECORD,
+    BlockState, behaviour::is_ported, state::CRAFTING, state::FACING, state::FACING_HOPPER,
     state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
@@ -42,7 +42,7 @@ use mc_bamboo_data::{
     Block, BlockAncestor, BlockClass, Item, block_id_of_state, blocks, items, version,
 };
 
-use lines::{Case, Header, Kind, Line, Tick};
+use lines::{Case, ContainerStack, Header, Kind, Line, Tick};
 use replay::{FLUID_NAMES, Replayed, Scheduled, replay};
 use report::{Mismatch, Report};
 
@@ -128,9 +128,7 @@ impl Rule {
         match self {
             Self::AnalogInput => {
                 "case: a comparator read a block entity Bamboo keeps no contents for \
-                 (lectern, jukebox, furnace, crafter, decorated pot and the like), \
-                 a scene jukebox the fake world fills with a fixed disc, \
-                 or a clicked comparator re-reading such an input"
+                 (lectern, furnace and the like), or a clicked comparator re-reading such an input"
             }
             Self::EntityRandom => {
                 "case: the outcome changed with the player's own random source, Bamboo has none"
@@ -173,15 +171,14 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: an item dispenser fired, its item behaviours (arrows, water, armor) are out of scope"
+                "scope: an item dispenser fired, its item behaviours (arrows, water, armor) are out of scope; a crafter that crafted (the crafting flag turned on, or its slots changed while the combined container items changed) is also out of scope. A crafter tick that fails to craft is still compared"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
             }
             Self::UnmodeledContainer => {
                 "case: a hopper or dropper ticked next to a container Bamboo keeps no slot table for \
-                 (shelf, crafter, chiseled bookshelf, furnace, brewing stand, decorated pot), \
-                 so the transfer cannot be replayed"
+                 (shelf, furnace, brewing stand), so the transfer cannot be replayed"
             }
         }
     }
@@ -634,7 +631,7 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if case.outcome.analog_content {
         return Ok(Some(Rule::AnalogInput));
     }
-    if dispenser_dispenses(case) {
+    if dispenser_dispenses(case) || crafter_crafts(case) {
         return Ok(Some(Rule::Dispensing));
     }
     if transfers_with_unmodeled_container(case) {
@@ -654,10 +651,6 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
             Some(Rule::AnalogInput)
         }
         Kind::Place | Kind::Use if bone_meals_a_feature_plant(case) => Some(Rule::Worldgen),
-        // 动作附近的比较器会重算输入，其中可能有假世界补出来的唱片。
-        Kind::Place | Kind::Use | Kind::Destroy | Kind::Tick if reads_invented_jukebox(case) => {
-            Some(Rule::AnalogInput)
-        }
         Kind::Tick => tick_exclusion(block),
         Kind::Random => random_tick_exclusion(block),
         _ => None,
@@ -689,7 +682,7 @@ fn scene_state(case: &Case, pos: BlockPos) -> BlockState {
 }
 
 /// 点中的比较器会重新读输入。内容已经建模的容器两边读到的一样，可以比较；
-/// 别的方块实体（讲台、唱机、熔炉这类）Bamboo 没有保留内容，这题只能排除。
+/// 别的方块实体（讲台、熔炉这类）Bamboo 没有保留内容，这题只能排除。
 fn clicks_comparator_with_analog_input(case: &Case) -> bool {
     let state_at = |pos: BlockPos| scene_state(case, pos);
     let pos = case.action.target();
@@ -719,6 +712,10 @@ fn is_modeled_container(state: BlockState) -> bool {
                 | BlockAncestor::ShulkerBoxBlock
                 | BlockAncestor::HopperBlock
                 | BlockAncestor::DispenserBlock
+                | BlockAncestor::JukeboxBlock
+                | BlockAncestor::DecoratedPotBlock
+                | BlockAncestor::ChiseledBookShelfBlock
+                | BlockAncestor::CrafterBlock
         )
     })
 }
@@ -729,11 +726,8 @@ fn is_unmodeled_container(state: BlockState) -> bool {
         matches!(
             ancestor,
             BlockAncestor::ShelfBlock
-                | BlockAncestor::CrafterBlock
-                | BlockAncestor::ChiseledBookShelfBlock
                 | BlockAncestor::AbstractFurnaceBlock
                 | BlockAncestor::BrewingStandBlock
-                | BlockAncestor::DecoratedPotBlock
         )
     })
 }
@@ -796,6 +790,87 @@ fn transfers_with_unmodeled_container(case: &Case) -> bool {
         && final_state(case, target.relative(state.get(FACING))).is_some_and(is_unmodeled_container)
 }
 
+/// 合成成功才整题排除。没有配方时官方只发失败事件 1050，方块和格子都不变，那题照常比较。
+///
+/// 成功的痕迹：`crafting` 被设上，或者合成器的格子变了并且容器里的物品种类或数量变了。
+/// 漏斗只是把同一件物品搬到另一格，两边的物品合计不变，不算合成。
+/// `CrafterBlock.dispenseFrom` 和 `serverTick` 不在这次范围里。
+///
+/// Only a successful craft excludes the case. With no recipe, vanilla only plays fail event
+/// 1050, the block and the slots stay put, and that case is still compared.
+///
+/// Success is the `crafting` flag turning on, or the crafter's slots changing while the
+/// combined container items change. A hopper only moves the same items, so the totals stay
+/// equal and that is not a craft. `CrafterBlock.dispenseFrom` and `serverTick` are out of scope.
+fn crafter_crafts(case: &Case) -> bool {
+    if !crafter_ran(case) {
+        return false;
+    }
+    crafting_turned_on(case) || (crafter_slots_changed(case) && container_items_changed(case))
+}
+
+/// 动作本身是合成器的计划刻，或者 `settle` 里跑过它。
+///
+/// The action is the crafter's scheduled tick, or `settle` ran one.
+fn crafter_ran(case: &Case) -> bool {
+    case.outcome.ran.iter().any(|id| id == "minecraft:crafter")
+        || case.action.kind == Kind::Tick && case.block == "minecraft:crafter"
+}
+
+/// 结果里某一格的 `crafting` 从关变成开。
+///
+/// Some cell's `crafting` flag turned on.
+fn crafting_turned_on(case: &Case) -> bool {
+    case.outcome.changes.iter().any(|cell| {
+        let Some(state) = state_of(cell.state()) else {
+            return false;
+        };
+        crafting_is_on(state) && !crafting_is_on(scene_state(case, cell.pos()))
+    })
+}
+
+fn crafting_is_on(state: BlockState) -> bool {
+    state.is_a(BlockAncestor::CrafterBlock) && state.get(CRAFTING)
+}
+
+/// 合成器上的非空格子和开始时不一样。
+///
+/// The non-empty slots on crafters differ from the start of the case.
+fn crafter_slots_changed(case: &Case) -> bool {
+    let at_crafter = |stack: &ContainerStack| {
+        let pos = stack.pos();
+        scene_state(case, pos).is_a(BlockAncestor::CrafterBlock)
+            || final_state(case, pos).is_some_and(|state| state.is_a(BlockAncestor::CrafterBlock))
+    };
+    let before: Vec<_> = case
+        .contents
+        .iter()
+        .filter(|stack| at_crafter(stack))
+        .collect();
+    let after: Vec<_> = case
+        .outcome
+        .contents
+        .iter()
+        .filter(|stack| at_crafter(stack))
+        .collect();
+    before != after
+}
+
+/// 全部已建模容器里的物品合计变了。漏斗搬家不会变。
+///
+/// The combined items in every modelled container changed. A hopper move does not.
+fn container_items_changed(case: &Case) -> bool {
+    item_totals(&case.contents) != item_totals(&case.outcome.contents)
+}
+
+fn item_totals(stacks: &[ContainerStack]) -> BTreeMap<&str, i32> {
+    let mut totals = BTreeMap::new();
+    for stack in stacks {
+        *totals.entry(stack.item()).or_default() += stack.count();
+    }
+    totals
+}
+
 /// 发射器的物品行为（箭、水、盔甲等）不在范围里，Bamboo 的发射器 tick 什么也不做。
 /// 场景里的发射器有东西又真的 tick 了，官方那边已经发出去，这题只能排除。投掷器自己实现了，照常比较。
 fn dispenser_dispenses(case: &Case) -> bool {
@@ -830,49 +905,6 @@ fn dispenser_dispenses(case: &Case) -> bool {
         let hopper_above = final_state(case, pos.above())
             .is_some_and(|state| state.is_a(BlockAncestor::HopperBlock));
         after.get(&pos).copied().unwrap_or(0) < count && is_dispenser(pos) && !hopper_above
-    })
-}
-
-/// 假世界给场景里带唱片的唱机补了一张固定的 `music_disc_13`（`FakeLevel.syncContents`），
-/// 比较器能从唱机读出模拟信号。Bamboo 不保留唱片内容，读出来是 0，所以动作附近的比较器
-/// 碰到这种唱机时两边比不了。两格以内是邻居更新能碰到的范围。
-fn reads_invented_jukebox(case: &Case) -> bool {
-    let target = case.action.target();
-    let state_at = |pos: BlockPos| {
-        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
-        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
-    };
-    // 场景里的状态 ID 可能不合法（损坏的输入），先查表，别让 panic 漏到守卫外面。
-    let invented = |pos: BlockPos| {
-        let state = state_at(pos);
-        block_id_of_state(state.0) == block_id_of_state(blocks::JUKEBOX) && state.get(HAS_RECORD)
-    };
-    case.scene.iter().any(|cell| {
-        let pos = cell.pos();
-        if (pos.x - target.x).abs() > 2
-            || (pos.y - target.y).abs() > 2
-            || (pos.z - target.z).abs() > 2
-        {
-            return false;
-        }
-        let state = BlockState(cell.state());
-        let Some(block_id) = block_id_of_state(state.0) else {
-            return false;
-        };
-        if !blocks::BLOCKS[block_id]
-            .class
-            .ancestors()
-            .contains(&BlockAncestor::ComparatorBlock)
-        {
-            return false;
-        }
-        let facing = state.get(HORIZONTAL_FACING);
-        let input_pos = pos.relative(facing);
-        let input = state_at(input_pos);
-        invented(input_pos)
-            || (block_id_of_state(input.0).is_some()
-                && input.is_redstone_conductor()
-                && invented(input_pos.relative(facing)))
     })
 }
 
@@ -1045,6 +1077,8 @@ fn blockers(case: &Case, replayed: &Replayed, names: &Names) -> Result<Vec<Block
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_blocks::state::HAS_RECORD;
+
     use super::*;
 
     fn scheduled(x: i32, delay: i32) -> Scheduled {
@@ -1154,7 +1188,7 @@ mod tests {
     fn a_case_that_read_unsupported_container_contents_is_not_compared() {
         let stone = blocks::STONE;
         let scene = format!("[[0,64,0,{stone}]]");
-        // 官方把物品塞进了罐子，比较器读到了 1；Bamboo 一律读 0。
+        // 官方标记了 analogContent：比较器读到了还没建模的容器内容。
         let read =
             answer("fail", "[]").replace("\"analogContent\":false", "\"analogContent\":true");
         assert_eq!(verdict_of(&place_stone(&scene, &read)), Ok(()));
@@ -1206,11 +1240,15 @@ mod tests {
     }
 
     #[test]
-    fn a_comparator_reading_a_scene_jukebox_is_not_compared() {
+    fn a_comparator_reading_a_scene_jukebox_is_compared() {
         let record = BlockState(blocks::JUKEBOX).with(HAS_RECORD, true);
         let scene = format!("[[0,64,0,{}],[0,64,-1,{}]]", blocks::COMPARATOR, record.0);
+        // 假世界补的是 `music_disc_13`，比较器读到 1。错的答案不再被整题跳过。
+        //
+        // The fake world fills `music_disc_13` and the comparator reads 1. A wrong answer is
+        // no longer skipped for the whole case.
         let case = place_stone(&scene, &answer("fail", "[]"));
-        assert_eq!(verdict_of(&case), Ok(()));
+        assert!(verdict_of(&case).is_err());
     }
 
     #[test]

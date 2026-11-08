@@ -1,4 +1,7 @@
-//! `DecoratedPotBlock`。里面的物品在方块实体里，不在范围里，所以罐子永远是空的，什么物品都放得进去。
+//! `DecoratedPotBlock`。罐子里的那一格和漏斗共用。玩家右键能叠才放进去并摇晃，漏斗放进去不摇。
+//!
+//! `DecoratedPotBlock`. The single slot is shared with hoppers. A player's right click inserts
+//! only when the item stacks, and wobbles; a hopper insert does not wobble.
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, tags::item_tags};
@@ -11,6 +14,7 @@ use crate::{
             update_neighbours_after_destroy,
         },
     },
+    block_container::{insert_pot_item, pot_accepts, pot_signal},
     context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, CRACKED, HORIZONTAL_FACING, WATERLOGGED, item_is_tagged},
@@ -74,20 +78,58 @@ impl Behaviour for DecoratedPot {
         world: &mut World,
         ctx: &UseContext,
     ) -> InteractionResult {
-        if ctx.hand_is_empty() {
+        let pos = ctx.clicked_pos();
+        if ctx.hand_is_empty() || !pot_accepts(world, pos, ctx.item) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        // 方块实体的 `setChanged`：放进东西后比较器要重新读。
-        world.update_neighbour_for_output_signal(ctx.clicked_pos(), state.block());
+        // `wobble(POSITIVE)` 在 `setTheItem` 和 `setChanged` 之前。漏斗不走这个方法。
+        //
+        // `wobble(POSITIVE)` runs before `setTheItem` and `setChanged`. Hoppers do not use this.
+        world.block_event(pos, state.block(), 1, 0);
+        insert_pot_item(world, pos, ctx.item);
+        world.update_neighbour_for_output_signal(pos, state.block());
         InteractionResult::Success
     }
 
     fn use_without_item(
         &self,
+        state: BlockState,
+        world: &mut World,
+        ctx: &UseContext,
+    ) -> InteractionResult {
+        // 放不进去时的 `wobble(NEGATIVE)`。官方同时播失败音，音效不在这次范围里。
+        //
+        // `wobble(NEGATIVE)` when the item does not fit. Vanilla also plays the fail sound;
+        // sounds are out of scope here.
+        world.block_event(ctx.clicked_pos(), state.block(), 1, 1);
+        InteractionResult::Success
+    }
+
+    /// `DecoratedPotBlock.getAnalogOutputSignal`。
+    ///
+    /// `DecoratedPotBlock.getAnalogOutputSignal`.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        pot_signal(world, pos)
+    }
+
+    /// `DecoratedPotBlockEntity.triggerEvent`：事件 1、数据 0 或 1 是摇晃，只改客户端动画。
+    ///
+    /// `DecoratedPotBlockEntity.triggerEvent`: event 1 with data 0 or 1 is a wobble. It only
+    /// drives the client animation.
+    fn trigger_event(
+        &self,
         _state: BlockState,
         _world: &mut World,
-        _ctx: &UseContext,
-    ) -> InteractionResult {
-        InteractionResult::Success
+        _pos: BlockPos,
+        param_a: i32,
+        param_b: i32,
+    ) -> bool {
+        param_a == 1 && (param_b == 0 || param_b == 1)
     }
 }

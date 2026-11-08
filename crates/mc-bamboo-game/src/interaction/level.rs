@@ -13,7 +13,10 @@ use mc_bamboo_data::{
     block_of_state, blocks,
     registries::{block_entity_type as entities, data_component_type as kinds},
 };
-use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue};
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, ComponentValue},
+    item::ItemStack,
+};
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
@@ -178,6 +181,34 @@ impl Level for RegionLevel<'_> {
             f(&mut slots);
         }
         true
+    }
+
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let Some(kind) = crate::container::kind_in(self.chunks, pos) else {
+            return false;
+        };
+        if kind.slots() != len {
+            return false;
+        }
+        let entry = crate::container::entry_in(self.containers, pos, kind);
+        f(&mut entry.slots);
+        true
+    }
+
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        self.containers
+            .get(&pos)
+            .map(|entry| entry.slots.clone())
+            .unwrap_or_default()
+    }
+
+    fn clear_container(&mut self, pos: BlockPos) {
+        self.containers.remove(&pos);
     }
 
     /// `BlockEntity.preRemoveSideEffects` 掉落的是这一格方块实体自己的槽位表，

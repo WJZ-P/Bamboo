@@ -9,6 +9,7 @@ pub mod component_registries;
 pub mod heightmaps;
 pub mod item_components;
 pub mod items;
+pub mod jukebox_songs;
 pub mod light;
 pub mod loot;
 pub mod packets;
