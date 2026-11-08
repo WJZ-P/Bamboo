@@ -84,7 +84,7 @@ impl Inventory {
     }
 
     /// 这只手的菜单槽位。
-    fn hand_slot(&self, hand: Hand) -> usize {
+    pub(crate) fn hand_slot(&self, hand: Hand) -> usize {
         match hand {
             Hand::Main => HOTBAR_START + usize::from(self.selected),
             Hand::Off => OFF_HAND,
@@ -264,7 +264,7 @@ impl Inventory {
     /// 官方 `Inventory.add(ItemStack)`，也就是 `add(-1, stack)`。
     ///
     /// `Inventory.add(ItemStack)`, which is `add(-1, stack)`.
-    fn add(&mut self, mut incoming: ItemStack, creative: bool) -> bool {
+    pub(crate) fn add(&mut self, mut incoming: ItemStack, creative: bool) -> bool {
         if incoming.is_empty() {
             return false;
         }
@@ -474,6 +474,33 @@ pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     send_slot(player, &mut region.links, OFF_HAND);
 }
 
+/// 官方 `Inventory.add`：放进背包，并同步变过的槽。
+///
+/// 创造模式放不下也算成功，剩下的一份没有物品实体，直接消失。生存模式放不下的部分同样消失。
+///
+/// `Inventory.add`. Creative mode reports success even when nothing fits. A remainder has
+/// no item entity, so it vanishes in either game mode.
+pub(crate) fn give(region: &mut Region, id: PlayerId, stack: ItemStack) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let creative = player.game_mode == GameMode::Creative;
+    let before = player.inventory.slots.clone();
+    player.inventory.add(stack, creative);
+    let changed: Vec<usize> = player
+        .inventory
+        .slots
+        .iter()
+        .zip(&before)
+        .enumerate()
+        .filter(|(_, (now, was))| *now != *was)
+        .map(|(slot, _)| slot)
+        .collect();
+    for slot in changed {
+        send_slot(player, &mut region.links, slot);
+    }
+}
+
 /// 炼药锅记下的物品交换。创造模式就是官方的 `hasInfiniteMaterials`。
 ///
 /// Apply a cauldron's item exchange. Creative mode is vanilla `hasInfiniteMaterials`.
@@ -501,6 +528,94 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
     if let Some(slot) = player.inventory.add_filled(item) {
         send_slot(player, &mut region.links, slot);
     }
+}
+
+/// 把物品栏里每个槽发给这名玩家。`/give` 和 `/clear` 改完之后用它同步。
+///
+/// Sends every inventory slot. `/give` and `/clear` use this after they change the inventory.
+pub(crate) fn send_all_slots(player: &mut Player, links: &mut Links) {
+    for slot in 0..MENU_SLOTS {
+        send_slot(player, links, slot);
+    }
+}
+
+/// 官方 `Inventory.clearOrCountMatchingItems`。`amount_to_remove` 是负数时不限量。
+///
+/// Official `Inventory.clearOrCountMatchingItems`. A negative `amount_to_remove` is unlimited.
+pub(crate) fn clear_or_count(
+    inventory: &mut Inventory,
+    predicate: &dyn Fn(&ItemStack) -> bool,
+    counting_only: bool,
+    amount_to_remove: i32,
+) -> i32 {
+    let mut count = 0;
+    // 顺序和官方 `Inventory` 的容器一致：快捷栏和背包、盔甲、副手，最后是合成格。
+    //
+    // Same order as official `Inventory`: hotbar and storage, armour, off hand, then the craft grid.
+    for index in 0..INVENTORY_ITEMS {
+        count += clear_slot(
+            &mut inventory.slots[menu_slot(index)],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    for slot in (ARMOR_START..ARMOR_START + 4).rev() {
+        count += clear_slot(
+            &mut inventory.slots[slot],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    count += clear_slot(
+        &mut inventory.slots[OFF_HAND],
+        predicate,
+        amount_to_remove - count,
+        counting_only,
+    );
+    // Bamboo 的 0 号是合成结果，输入格是 1 到 4，和官方的 craftSlots 对应。
+    //
+    // Slot 0 is the crafting result. Slots 1 through 4 are the inputs, matching official craftSlots.
+    for slot in 1..ARMOR_START {
+        count += clear_slot(
+            &mut inventory.slots[slot],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    // 光标上的物品官方也会清掉，Bamboo 不保存它。
+    //
+    // Official also clears the cursor item. Bamboo does not store it.
+    count
+}
+
+/// 官方 `ContainerHelper.clearOrCountMatchingItems` 处理一个物品堆的部分。
+///
+/// The per-stack part of official `ContainerHelper.clearOrCountMatchingItems`.
+fn clear_slot(
+    stack: &mut ItemStack,
+    predicate: &dyn Fn(&ItemStack) -> bool,
+    amount_to_remove: i32,
+    counting_only: bool,
+) -> i32 {
+    if stack.is_empty() || !predicate(stack) {
+        return 0;
+    }
+    if counting_only {
+        return stack.count;
+    }
+    let removed = if amount_to_remove < 0 {
+        stack.count
+    } else {
+        amount_to_remove.min(stack.count)
+    };
+    stack.count -= removed;
+    if stack.count <= 0 {
+        *stack = ItemStack::empty();
+    }
+    removed
 }
 
 /// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端

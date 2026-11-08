@@ -9,8 +9,8 @@ use std::{
 };
 
 use common::{
-    Client, TEST_DEADLINE, TestServer, accept_teleportation, client_information, disconnect_body,
-    frame, move_player_pos, packet_id, translated,
+    Client, TEST_DEADLINE, TestServer, accept_teleportation, client_information, client_tick_end,
+    disconnect_body, frame, move_player_pos, packet_id, player_loaded, translated,
 };
 use mc_bamboo_data::packets::play;
 use mc_bamboo_protocol::codec::Reader;
@@ -198,11 +198,13 @@ async fn keep_alive_keeps_running_while_the_player_plays() {
     let mut client = server.join("Kitten").await;
     client.read_chunks(CHUNKS).await;
     client.send(&accept_teleportation(8.5, SPAWN_Y, 8.5)).await;
+    client.send(&player_loaded()).await;
 
     let started = Instant::now();
     let mut rounds = 0;
     while started.elapsed() < Duration::from_millis(1200) {
         client.send(&move_player_pos(8.5, SPAWN_Y, 8.5)).await;
+        client.send(&client_tick_end()).await;
         let keep_alive = client
             .read_until_answering(play::clientbound::KEEP_ALIVE)
             .await;
@@ -365,8 +367,10 @@ async fn walking_over_a_chunk_border_moves_the_view() {
     let mut client = server.join("Kitten").await;
     client.read_chunks(CHUNKS).await;
     client.send(&accept_teleportation(8.5, SPAWN_Y, 8.5)).await;
+    client.send(&player_loaded()).await;
 
     client.send(&move_player_pos(16.5, SPAWN_Y, 8.5)).await;
+    client.send(&client_tick_end()).await;
 
     let center = client
         .read_until_answering(play::clientbound::SET_CHUNK_CACHE_CENTER)

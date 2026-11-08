@@ -13,7 +13,7 @@ use std::{
 };
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{BlockClass, registries, tags::block_tags};
+use mc_bamboo_data::{BlockClass, registries, sounds::sound_event, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -444,6 +444,24 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, coun
         // itself lives in the game layer, so this arm neither drops it nor draws.
         E::LECTERN => {}
         // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
+        _ => {}
+    }
+}
+
+/// `BlockEntity.setRemoved`：这个位置在 `preRemoveSideEffects` 之后，不管跳过副作用与否都会走到。
+pub(crate) fn removed_side_effects(state: BlockState, world: &mut World, pos: BlockPos) {
+    match state.block().block_entity_type {
+        // `BeaconBlockEntity.setRemoved`。
+        Some(registries::block_entity_type::BEACON) => {
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:block.beacon.deactivate"),
+                1.0,
+                1.0,
+            );
+        }
+        // `JukeboxBlockEntity.setRemoved`：没在放歌也报 1011。
+        Some(registries::block_entity_type::JUKEBOX) => world.level_event(1011, pos, 0),
         _ => {}
     }
 }

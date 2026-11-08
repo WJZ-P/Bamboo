@@ -6,7 +6,7 @@ use mc_bamboo_core::{
     BlockPos, Direction, Vec3, mth,
     sign::{DyeColor, SignContent, SignText, SignTextSlot},
 };
-use mc_bamboo_data::{Block, BlockAncestor, items};
+use mc_bamboo_data::{Block, BlockAncestor, items, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -57,26 +57,42 @@ fn applicator_of(item: i32) -> Option<Applicator> {
     }
 }
 
-/// `SignApplicator.tryApplyToSign`。成功时内容已经写进世界。
+/// `SignApplicator.tryApplyToSign`。成功时内容已经写进世界，最后放这一种物品自己的音效。
 ///
 /// 官方的音效走 `Level.playSound`，声种取自单独的 `soundSeedGenerator`，不碰 `Level.random`；
 /// 这里的音高也全是常数 1.0，所以不取随机数。
 fn apply(applicator: Applicator, world: &mut World, pos: BlockPos, slot: SignTextSlot) -> bool {
-    match applicator {
-        Applicator::Dye(color) => update_text(world, pos, slot, |text| text.with_color(color)),
-        Applicator::GlowInkSac => {
-            update_text(world, pos, slot, |text| text.with_glowing_text(true))
+    let sound = match applicator {
+        Applicator::Dye(color) => {
+            if !update_text(world, pos, slot, |text| text.with_color(color)) {
+                return false;
+            }
+            "minecraft:item.dye.use"
         }
-        Applicator::InkSac => update_text(world, pos, slot, |text| text.with_glowing_text(false)),
-        // `HoneycombItem.tryApplyToSign`：上蜡成功后再发 3003 的光照效果。
+        Applicator::GlowInkSac => {
+            if !update_text(world, pos, slot, |text| text.with_glowing_text(true)) {
+                return false;
+            }
+            "minecraft:item.glow_ink_sac.use"
+        }
+        Applicator::InkSac => {
+            if !update_text(world, pos, slot, |text| text.with_glowing_text(false)) {
+                return false;
+            }
+            "minecraft:item.ink_sac.use"
+        }
+        // `HoneycombItem.tryApplyToSign`：上蜡成功后再发 3003 的光照效果，然后出声。
         Applicator::Honeycomb => {
             if !set_waxed(world, pos, true) {
                 return false;
             }
             world.push_effect(Effect::SignWaxed { pos });
-            true
+            "minecraft:item.honeycomb.wax_on"
         }
-    }
+    };
+    // 四种物品都是 `playSound(null, pos, ..., BLOCKS, 1.0, 1.0)`。
+    world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
+    true
 }
 
 /// `SignBlockEntity.updateText`：新的一面和旧的一样时返回 `false`，不碰世界。
@@ -239,7 +255,13 @@ impl Behaviour for Sign {
         let slot = slot_player_is_facing(state, pos, ctx.actor);
         // `executeClickCommandsIfPresent` 只看每行样式里的点击事件，这里存的都是纯文本。
         if sign.waxed {
-            // 官方的 `WAXED_SIGN_INTERACT_FAIL` 音效。
+            // `SignBlockEntity.getSignInteractionFailedSoundEvent`，吊牌是另一个声音事件。
+            let sound = if state.is_a(BlockAncestor::HangingSignBlock) {
+                "minecraft:block.hanging_sign.waxed_interact_fail"
+            } else {
+                "minecraft:block.sign.waxed_interact_fail"
+            };
+            world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
             return InteractionResult::SuccessServer;
         }
         if other_player_is_editing_sign(&sign, ctx.actor)
@@ -408,6 +430,14 @@ mod tests {
         level.set_sign(SIGN, content);
     }
 
+    /// 音效单独断言，剩下的方块事件逐条比。
+    fn without_sounds(effects: Vec<Effect>) -> Vec<Effect> {
+        effects
+            .into_iter()
+            .filter(|effect| !matches!(effect, Effect::Sound { .. }))
+            .collect()
+    }
+
     /// 站在告示牌南边（正面）或者北边（背面）的玩家。
     fn actor_holding_on(item: i32, south: bool) -> Actor {
         let mut actor = actor_holding(item);
@@ -525,7 +555,15 @@ mod tests {
             top_hit(SIGN),
         );
         assert_eq!(outcome.result, InteractionResult::Success);
-        assert_eq!(outcome.effects, [Effect::SignChanged { pos: SIGN }]);
+        assert!(matches!(
+            outcome.effects.last(),
+            Some(Effect::Sound { sound, .. })
+                if *sound == i32::from(sound_event("minecraft:item.dye.use"))
+        ));
+        assert_eq!(
+            without_sounds(outcome.effects),
+            [Effect::SignChanged { pos: SIGN }]
+        );
 
         let content = level.sign(SIGN).expect("告示牌");
         assert_eq!(content.front.color, DyeColor::Red);
@@ -602,8 +640,13 @@ mod tests {
             top_hit(SIGN),
         );
         assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(matches!(
+            outcome.effects.last(),
+            Some(Effect::Sound { sound, .. })
+                if *sound == i32::from(sound_event("minecraft:item.honeycomb.wax_on"))
+        ));
         assert_eq!(
-            outcome.effects,
+            without_sounds(outcome.effects),
             [
                 Effect::SignChanged { pos: SIGN },
                 Effect::SignWaxed { pos: SIGN }
@@ -617,7 +660,11 @@ mod tests {
             top_hit(SIGN),
         );
         assert_eq!(again.result, InteractionResult::SuccessServer);
-        assert!(again.effects.is_empty());
+        assert!(matches!(
+            again.effects.as_slice(),
+            [Effect::Sound { sound, .. }]
+                if *sound == i32::from(sound_event("minecraft:block.sign.waxed_interact_fail"))
+        ));
     }
 
     #[test]
@@ -634,7 +681,11 @@ mod tests {
             top_hit(SIGN),
         );
         assert_eq!(outcome.result, InteractionResult::SuccessServer);
-        assert!(outcome.effects.is_empty());
+        assert!(matches!(
+            outcome.effects.as_slice(),
+            [Effect::Sound { sound, .. }]
+                if *sound == i32::from(sound_event("minecraft:block.sign.waxed_interact_fail"))
+        ));
         assert_eq!(
             level.sign(SIGN).expect("告示牌").front.color,
             DyeColor::Black
@@ -690,8 +741,10 @@ mod tests {
         level.set(FLOOR, BlockState(blocks::STONE));
         let outcome = use_item(&mut level, &actor_holding(items::OAK_SIGN), top_hit(FLOOR));
         assert_eq!(outcome.result, InteractionResult::Success);
+        // 放置的木头音效跟在打开编辑器后面。
+        assert!(matches!(outcome.effects.last(), Some(Effect::Sound { .. })));
         assert_eq!(
-            outcome.effects,
+            without_sounds(outcome.effects),
             [Effect::OpenSignEditor {
                 pos: SIGN,
                 slot: SignTextSlot::Front
@@ -711,8 +764,9 @@ mod tests {
             bottom_hit(CEILING),
         );
         assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(matches!(outcome.effects.last(), Some(Effect::Sound { .. })));
         assert_eq!(
-            outcome.effects,
+            without_sounds(outcome.effects),
             [Effect::OpenSignEditor {
                 pos: SIGN,
                 slot: SignTextSlot::Front

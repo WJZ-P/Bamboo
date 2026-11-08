@@ -26,7 +26,7 @@ use crate::{
     chunk_tracking,
     container::ContainerEntry,
     entity_tracking::EntityTracking,
-    global::GameTime,
+    global::{Clock, GameTime},
     inbound::{JoinRequest, PlayerId},
     interaction::{BlockChanges, level::RegionLevel},
     links::Links,
@@ -40,8 +40,6 @@ const DIMENSION: &str = "minecraft:overworld";
 /// 出生点在 (0, 0) 区块的中心。
 const SPAWN_X: f64 = 8.5;
 const SPAWN_Z: f64 = 8.5;
-/// 正午。世界时钟的流速是 0，所以时间一直停在这里。
-const NOON_TICKS: i64 = 6000;
 
 const ABILITIES: PlayerAbilities = PlayerAbilities {
     invulnerable: true,
@@ -53,7 +51,9 @@ const ABILITIES: PlayerAbilities = PlayerAbilities {
 };
 
 /// 创造模式的触及距离加成完全由服务端下发，客户端代码里没有这两个数。
-const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
+///
+/// The creative reach bonus is sent by the server. The client code does not contain these numbers.
+pub(crate) const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
     AttributeSnapshot {
         attribute: attribute::BLOCK_INTERACTION_RANGE,
         base: 4.5,
@@ -133,6 +133,11 @@ pub(crate) struct Region {
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
+    ///
+    /// Seed for sound packets, vanilla `Level.soundSeedGenerator`. Separate from the world
+    /// random; it only picks which sound variant the client plays.
+    pub(crate) sound_seed_generator: LevelRandom,
     /// 下落的方块和点燃的 TNT。世界线程独占，见 `docs/folia.md`。
     ///
     /// Falling blocks and primed TNT. The world thread owns them; see `docs/folia.md`.
@@ -210,6 +215,7 @@ impl Region {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
+            sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
             redstone: RedstoneMemory::default(),
@@ -241,7 +247,10 @@ impl Region {
         (level, &mut self.block_ticks)
     }
 
-    /// 进服第 1 到 3 步：`login`、`player_abilities`、`player_position`。
+    /// 进服开头：`login`、`player_abilities`、权限事件、命令树、`player_position`。
+    ///
+    /// The start of join: `login`, `player_abilities`, the permission event, the command tree,
+    /// then `player_position`.
     pub(crate) fn add_player(&mut self, request: JoinRequest, game_mode: GameMode) {
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
@@ -250,6 +259,8 @@ impl Region {
             name,
             properties: _,
             client,
+            permission_level,
+            is_op,
             sink,
         } = request;
         self.links.add(id, sink);
@@ -270,9 +281,15 @@ impl Region {
         };
         self.links.send(id, &login);
         self.links.send(id, &ABILITIES);
+        // 官方在能力包之后、传送之前发权限事件和命令树。
+        //
+        // Official sends the permission event and the command tree after abilities and before the teleport.
+        crate::command::send_session(&mut self.links, id, permission_level, id.0);
 
         let spawn = Vec3::new(SPAWN_X, f64::from(flat::surface_y()), SPAWN_Z);
         let mut player = Player::new(id, uuid, name, game_mode, client, spawn);
+        player.permission_level = permission_level;
+        player.is_op = is_op;
         movement::teleport(
             &mut player,
             &mut self.links,
@@ -310,19 +327,59 @@ impl Region {
 
     /// 进服第 8 到 10 步：`set_time`、`game_event` 13、`set_chunk_cache_center`。
     /// 跟踪范围里的区块都进 `pending`，这一 tick 末尾发第一批。
-    pub(crate) fn start_loading_chunks(&mut self, id: PlayerId, time: GameTime) {
-        let time = SetTime {
-            game_time: time.0,
-            clock: world_clock::OVERWORLD,
-            clock_ticks: NOON_TICKS,
-            clock_rate: 0.0,
-        };
-        self.links.send(id, &time);
+    pub(crate) fn start_loading_chunks(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
+        self.send_time(id, time, clock);
         // 客户端收不到它就永远停在加载画面。
         self.links.send(id, &LevelChunksLoadStart);
         if let Some(player) = self.players.get_mut(&id) {
             chunk_tracking::update_player_view(player, &mut self.links, self.view_distance);
         }
+    }
+
+    /// 把主世界时钟的当前状态发给所有人。`/time` 改了主世界之后调用。
+    ///
+    /// Broadcasts the overworld clock. Called after `/time` changes it.
+    pub(crate) fn broadcast_time(&mut self, time: GameTime, clock: Clock) {
+        self.broadcast_clock(time, world_clock::OVERWORLD, clock);
+    }
+
+    /// 把指定注册表 ID 的时钟发给所有人。末地时钟不进登录时的那一包，改了才发。
+    ///
+    /// Broadcasts one clock by registry id. The End clock is absent from the login packet
+    /// and is sent only after a command changes it.
+    pub(crate) fn broadcast_clock(&mut self, time: GameTime, clock_id: i32, clock: Clock) {
+        let packet = SetTime {
+            game_time: time.0,
+            clock: clock_id,
+            clock_ticks: clock.total_ticks,
+            clock_partial: clock.partial_tick,
+            clock_rate: clock.network_rate(),
+        };
+        self.links.broadcast(&crate::links::encode_frames(&packet));
+    }
+
+    fn send_time(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
+        self.links.send(id, &time_packet(time, clock));
+    }
+
+    /// 登录包里的玩家上限。
+    ///
+    /// The player cap written into the login packet.
+    pub(crate) fn max_players(&self) -> i32 {
+        self.max_players
+    }
+}
+
+/// 主世界时钟的 `set_time` 包。登录时只带这一项。
+///
+/// The overworld `set_time` packet. Login sends only this clock.
+fn time_packet(time: GameTime, clock: Clock) -> SetTime {
+    SetTime {
+        game_time: time.0,
+        clock: world_clock::OVERWORLD,
+        clock_ticks: clock.total_ticks,
+        clock_partial: clock.partial_tick,
+        clock_rate: clock.network_rate(),
     }
 }
 

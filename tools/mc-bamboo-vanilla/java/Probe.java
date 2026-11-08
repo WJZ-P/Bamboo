@@ -41,10 +41,18 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.ParseResults;
+import com.mojang.brigadier.arguments.ArgumentType;
+import com.mojang.brigadier.builder.ArgumentBuilder;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
+import com.mojang.brigadier.context.CommandContextBuilder;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
+import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
@@ -54,6 +62,7 @@ import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
+import net.minecraft.advancements.predicates.ItemPredicate;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -97,10 +106,14 @@ import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
+import net.minecraft.network.protocol.game.ClientboundCommandSuggestionsPacket;
+import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundDisguisedChatPacket;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
 import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
 import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
@@ -125,12 +138,16 @@ import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.network.protocol.game.ClientboundSwingAnimationPacket;
 import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
+import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
@@ -178,6 +195,8 @@ import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.util.Crypt;
@@ -197,7 +216,11 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.LockCode;
+import net.minecraft.world.entity.Relative;
+import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.item.component.WritableBookContent;
 import net.minecraft.world.item.component.WrittenBookContent;
@@ -213,6 +236,7 @@ import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.RotatedPillarBlock;
 import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.entity.BannerPattern;
@@ -314,12 +338,16 @@ public final class Probe {
     /** 改过名的箱子，打开时的菜单标题就是它。 */
     private static final String CHEST_NAME = "小猫的箱子";
     private static final String UNKNOWN_COMMAND = "Unknown or incomplete command. See below for error";
+    /** `LivingEntity.entityEventForEquipmentBreak` 的主手。 */
+    // Main hand in `LivingEntity.entityEventForEquipmentBreak`.
+    private static final byte EQUIPMENT_BREAK_MAIN_HAND = 47;
 
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
     private static final Set<String> M2_PACKETS = Set.of(
             "handleAddEntity",
             "handleAwardStats",
             "handleBlockChangedAck",
+            "handleBlockDestruction",
             "handleBlockEntityData",
             "handleBlockEvent",
             "handleBlockUpdate",
@@ -327,11 +355,14 @@ public final class Probe {
             "handleChunkBatchFinished",
             "handleChunkBatchStart",
             "handleChunkBlocksUpdate",
+            "handleCommandSuggestions",
+            "handleCommands",
             "handleContainerClose",
             "handleContainerContent",
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
+            "handleEntityEvent",
             "handleEntityPositionSync",
             "handleForgetLevelChunk",
             "handleGameEvent",
@@ -360,6 +391,7 @@ public final class Probe {
             "handleSetHeldSlot",
             "handleSetPlayerInventory",
             "handleSetTime",
+            "handleSoundEvent",
             "handleSwingAnimation",
             "handleSystemChat",
             "handleUpdateAttributes");
@@ -555,6 +587,34 @@ public final class Probe {
         }
     }
 
+    /** 和客户端 `ClientPacketListener` 一样，把命令包还原成 Brigadier 节点。
+     *
+     * <p>Rebuild the command packet into Brigadier nodes the same way `ClientPacketListener` does.
+     */
+    private static ClientboundCommandsPacket.NodeBuilder<Object> commandNodes() {
+        return new ClientboundCommandsPacket.NodeBuilder<>() {
+            @Override
+            public ArgumentBuilder<Object, ?> createLiteral(String id) {
+                return LiteralArgumentBuilder.literal(id);
+            }
+
+            @Override
+            public ArgumentBuilder<Object, ?> createArgument(
+                    String id, ArgumentType<?> argumentType, Identifier suggestionId) {
+                return RequiredArgumentBuilder.argument(id, argumentType);
+            }
+
+            @Override
+            public ArgumentBuilder<Object, ?> configure(
+                    ArgumentBuilder<Object, ?> builder, boolean executable, boolean restricted) {
+                if (executable) {
+                    builder.executes(context -> 0);
+                }
+                return builder;
+            }
+        };
+    }
+
     /** 一步超时了，这一段剩下的步骤没法做。 */
     private static final class StepFailed extends RuntimeException {
         StepFailed(String step) {
@@ -605,6 +665,7 @@ public final class Probe {
                 section("equipment" + names, () -> equipment(actor, observer));
                 section("blocks" + names, () -> blocks(actor, observer));
                 section("placement" + names, () -> placement(actor, observer));
+                section("sounds" + names, () -> sounds(actor, observer));
                 section("pistons" + names, () -> pistons(actor, observer));
                 section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
@@ -612,6 +673,7 @@ public final class Probe {
                 section("chat" + names, () -> chat(actor, observer));
             }
 
+            section("tool durability", () -> toolDurability(kitten, mochi));
             section("world entities", () -> worldEntities(kitten, mochi));
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
@@ -623,6 +685,7 @@ public final class Probe {
                 await("join: " + LATE_PLAYER + " got the spawn chunks", JOIN_TIMEOUT_MILLIS, late::spawnChunksDone);
                 checkEditedChunks(kitten, mochi, late);
             });
+            section("commands", () -> commands(kitten, mochi, late));
             section("leaving", () -> leaving(kitten, mochi, late));
 
             section("long running", () -> {
@@ -717,6 +780,40 @@ public final class Probe {
             return TextColor.fromLegacyFormat(color).equals(component.getStyle().getColor());
         }
 
+        /**
+         * 走一段服务端按「这一 tick 的起点」计量也会接受的路。一步 4 格，两步落在同一个 tick 里仍低于 100。
+         *
+         * Walk a path the server accepts when it measures from the start of the tick. A 4-block step stays
+         * under the 100 limit even if two steps land in the same tick.
+         */
+        private void moveClose(Join actor, Vec3 target, boolean onGround) throws IOException {
+            // 地面上有这一轮放下的方块。先升到它们上面，水平过去，再落下来。
+            //
+            // This section's blocks sit on the ground. Climb above them, cross, then drop.
+            double cruise = Math.max(Math.max(actor.position.y, target.y), -10.0);
+            stepTowards(actor, new Vec3(actor.position.x, cruise, actor.position.z));
+            stepTowards(actor, new Vec3(target.x, cruise, target.z));
+            stepTowards(actor, target);
+            if (actor.position.distanceToSqr(target) <= 16.0) {
+                actor.moveTo(target, onGround);
+                pumpFor(TICK_MILLIS * 2);
+            }
+        }
+
+        private void stepTowards(Join actor, Vec3 target) throws IOException {
+            final double maxStep = 4.0;
+            for (int guard = 0; guard < 32 && actor.position.distanceToSqr(target) > maxStep * maxStep; guard += 1) {
+                Vec3 before = actor.position;
+                Vec3 delta = target.subtract(before);
+                double length = Math.sqrt(before.distanceToSqr(target));
+                actor.moveTo(before.add(delta.scale(maxStep / length)), false);
+                pumpFor(TICK_MILLIS * 2);
+                if (actor.position.distanceToSqr(target) > before.distanceToSqr(target) - 1.0) {
+                    return;
+                }
+            }
+        }
+
         private void walkAndWait(Join actor, Join observer, double deltaZ) throws IOException {
             Vec3 start = actor.position;
             for (int step = 1; step <= WALK_STEPS; step += 1) {
@@ -769,6 +866,89 @@ public final class Probe {
             check("movement: the big move ends at the real position", near(remote.position, far));
             actor.moveTo(ground, true);
             await("movement: and back", () -> near(remote.position, ground));
+
+            Vec3 home = ground;
+            BlockPos wall = BlockPos.containing(home).offset(1, 0, 0);
+            placeStone(actor, wall);
+            int beforeWall = actor.pullbacks;
+            actor.moveTo(actor.position.add(0.0, 0.0, 0.4), true);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: walking beside a block is not pulled back", actor.pullbacks == beforeWall);
+
+            Vec3 onGround = actor.position;
+            int beforeSolid = actor.pullbacks;
+            actor.expectPullback = true;
+            actor.moveTo(onGround.add(0.0, -0.2, 0.0), true);
+            await("movement: moving into a solid block is pulled back", () -> actor.pullbacks > beforeSolid);
+            check("movement: the solid block does not disconnect", !actor.disconnected);
+            check("movement: the solid-block pull-back stays put", near(actor.position, onGround));
+
+            BlockPos stepGround = BlockPos.containing(actor.position).offset(0, -1, 1);
+            placeSlab(actor, stepGround);
+            Vec3 ontoStep = new Vec3(stepGround.getX() + 0.5, stepGround.getY() + 1.5, stepGround.getZ() + 0.5);
+            int beforeStep = actor.pullbacks;
+            actor.moveTo(ontoStep, true);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: stepping onto a slab is not pulled back", actor.pullbacks == beforeStep);
+
+            Vec3 high = actor.position.add(0.0, 4.0, 0.0);
+            int beforeFall = actor.pullbacks;
+            actor.moveTo(high, false);
+            actor.moveTo(actor.position.add(0.0, -3.0, 0.0), false);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: a short fall is not pulled back", actor.pullbacks == beforeFall);
+
+            Vec3 beforeLeap = actor.position;
+            int beforeLeapBack = actor.pullbacks;
+            actor.expectPullback = true;
+            actor.moveTo(beforeLeap.add(100.0, 0.0, 0.0), true);
+            await("movement: a 100 block move is pulled back", () -> actor.pullbacks > beforeLeapBack);
+            check("movement: the pull-back stays at the old position", near(actor.position, beforeLeap));
+            check("movement: a pull-back does not disconnect", !actor.disconnected);
+
+            // 拆掉探测放的方块，再走回原来的落点。后面的方块测试仍然对着草方块。
+            //
+            // Remove the blocks this section placed, then walk back. Later block tests still expect grass.
+            clearPlaced(actor, wall);
+            clearPlaced(actor, stepGround.above());
+            int beforeHome = actor.pullbacks;
+            actor.moveTo(home, true);
+            pumpFor(SETTLE_MILLIS);
+            check("movement: returning home is not pulled back", actor.pullbacks == beforeHome);
+        }
+
+        private void clearPlaced(Join actor, BlockPos at) throws IOException {
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, at, Direction.UP, sequence));
+            await("movement: the placed block is gone", () -> {
+                BlockState state = actor.blocks.get(at);
+                return state != null && state.isAir();
+            });
+        }
+
+        private void placeStone(Join actor, BlockPos at) throws IOException {
+            BlockPos ground = at.below();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE)));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    sequence));
+            await("movement: the wall block is placed", () -> actor.blocks.get(at) != null && actor.blocks.get(at).is(Blocks.STONE));
+        }
+
+        private void placeSlab(Join actor, BlockPos ground) throws IOException {
+            BlockPos at = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE_SLAB)));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    sequence));
+            await("movement: the step is placed", () -> actor.blocks.get(at) != null && actor.blocks.get(at).is(Blocks.STONE_SLAB));
         }
 
         private static Object dataValue(Join viewer, Join target, int index) {
@@ -1011,6 +1191,82 @@ public final class Probe {
             actor.send(new ServerboundSetCarriedItemPacket(0));
         }
 
+        /**
+         * 放门和开门都会发声音包，坐标是方块中心，动手的玩家自己听不到。
+         * 放下的音量和音高来自 `SoundType`，开门的是随机音高。
+         */
+        private void sounds(Join actor, Join observer) throws IOException {
+            // 两个玩家隔着 16 格。先朝观察者走一格，门的声音才落在 16 格的广播范围内。
+            double step = observer.position.x < actor.position.x ? -WALK_STEP : WALK_STEP;
+            Vec3 start = actor.position;
+            for (int walked = 1; walked <= 5; walked += 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+            // 自己脚下这一格一定是空气，点它就把门放在这一格，声音的坐标就是方块中心。
+            BlockPos door = BlockPos.containing(actor.position);
+            Vec3 center = Vec3.atCenterOf(door);
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int otherSounds = observer.sounds.size();
+            int ownSounds = actor.sounds.size();
+
+            useOn(actor, Items.OAK_DOOR, door, Direction.UP, Vec3.upFromBottomCenterOf(door, 1.0));
+            // 放置失败时服务端也会把这一格当空气发回来，所以要看到门本身。
+            await("sound: " + observer.player + " sees the door", () -> {
+                BlockState state = observer.blocks.get(door);
+                return state != null && state.is(Blocks.OAK_DOOR);
+            });
+            await("sound: " + observer.player + " hears the door being placed",
+                    () -> observer.sounds.size() == otherSounds + 1);
+            ClientboundSoundPacket placed = observer.sounds.getLast();
+            check("sound: the place sound is the wood one", placed.getSound().value() == SoundEvents.WOOD_PLACE);
+            check("sound: the place sound comes from the block", placed.getSource() == SoundSource.BLOCKS);
+            check("sound: the place sound is at the block center",
+                    near(center, new Vec3(placed.getX(), placed.getY(), placed.getZ())));
+            check("sound: the place sound has the block volume", placed.getVolume() == 1.0f);
+            check("sound: the place sound has the block pitch", placed.getPitch() == 0.8f);
+            pumpFor(SETTLE_MILLIS);
+            check("sound: the placer hears nothing", actor.sounds.size() == ownSounds);
+
+            // `DoorBlock.playSound`：`getRandom().nextFloat() * 0.1F + 0.9F`。
+            int beforeOpen = observer.sounds.size();
+            int ownBeforeOpen = actor.sounds.size();
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.atCenterOf(door), Direction.UP, door, false),
+                    sequence));
+            await("sound: the door opens", () -> observer.blocks.containsKey(door)
+                    && observer.blocks.get(door).getValue(DoorBlock.OPEN));
+            await("sound: " + observer.player + " hears the door open",
+                    () -> observer.sounds.size() == beforeOpen + 1);
+            ClientboundSoundPacket opened = observer.sounds.getLast();
+            check("sound: the open sound is the wooden door one",
+                    opened.getSound().value() == SoundEvents.WOODEN_DOOR_OPEN);
+            check("sound: the open sound comes from the block", opened.getSource() == SoundSource.BLOCKS);
+            check("sound: the open sound is at the door",
+                    near(center, new Vec3(opened.getX(), opened.getY(), opened.getZ())));
+            check("sound: the open sound has volume one", opened.getVolume() == 1.0f);
+            check("sound: the open sound has a random pitch",
+                    opened.getPitch() >= 0.9f && opened.getPitch() < 1.0f);
+            pumpFor(SETTLE_MILLIS);
+            check("sound: the door opener hears nothing", actor.sounds.size() == ownBeforeOpen);
+
+            // 门会挡住另一个玩家这一段，从下半截破坏，两格一起走。
+            int breaking = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, door, Direction.UP, breaking));
+            await("sound: the door is gone", () -> actor.lastAck >= breaking);
+            actor.cleared.add(door);
+            actor.cleared.add(door.above());
+
+            // 走回原来的位置，后面的段落用和以前一样的坐标。
+            for (int walked = 4; walked >= 0; walked -= 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+        }
+
         private static boolean extended(BlockState state) {
             return state != null && state.is(Blocks.STICKY_PISTON) && state.getValue(PistonBaseBlock.EXTENDED);
         }
@@ -1021,7 +1277,15 @@ public final class Probe {
 
         /** 粘性活塞推出方块再拉回来：客户端要收到方块事件，被推的方块要出现在新位置。 */
         private void pistons(Join actor, Join observer) throws IOException {
-            BlockPos ground = BlockPos.containing(actor.position).offset(0, -1, 3);
+            // 动手的人先往北走了约 4 格，再往南放活塞就出了观察者的 16 格。
+            // 朝观察者走近不到一格，活塞放在北面 3 格，测完走回去。
+            double step = observer.position.x < actor.position.x ? -WALK_STEP : WALK_STEP;
+            Vec3 start = actor.position;
+            for (int walked = 1; walked <= 3; walked += 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+            BlockPos ground = BlockPos.containing(actor.position).offset(0, -1, -3);
             BlockPos piston = ground.above();
             BlockPos stone = piston.north();
             BlockPos pushed = stone.north();
@@ -1040,6 +1304,7 @@ public final class Probe {
                     () -> stoneState.equals(observer.blocks.get(stone)));
 
             int extending = observer.blockEvents.size();
+            int heard = observer.sounds.size();
             useOn(actor, Items.REDSTONE_BLOCK, ground.west(), Direction.UP, Vec3.upFromBottomCenterOf(ground.west(), 1.0));
             await("pistons: the piston extends", () -> extended(observer.blocks.get(piston)));
             await("pistons: the head arrives",
@@ -1050,6 +1315,20 @@ public final class Probe {
             ClientboundBlockEventPacket extend = observer.blockEvents.getLast();
             check("pistons: the extension event names the piston",
                     extend.getPos().equals(piston) && extend.getBlock() == Blocks.STICKY_PISTON && extend.getB0() == 0);
+            boolean heardExtend = false;
+            for (ClientboundSoundPacket sound : observer.sounds.subList(heard, observer.sounds.size())) {
+                if (sound.getSound().value() != SoundEvents.PISTON_EXTEND) {
+                    continue;
+                }
+                heardExtend = true;
+                check("pistons: the extend sound comes from the block", sound.getSource() == SoundSource.BLOCKS);
+                check("pistons: the extend sound is at the piston",
+                        near(Vec3.atCenterOf(piston), new Vec3(sound.getX(), sound.getY(), sound.getZ())));
+                check("pistons: the extend sound has volume 0.5", sound.getVolume() == 0.5f);
+                check("pistons: the extend sound has the piston pitch",
+                        sound.getPitch() >= 0.6f && sound.getPitch() < 0.85f);
+            }
+            check("pistons: the other client hears the piston extend", heardExtend);
 
             int retracting = observer.blockEvents.size();
             int breaking = actor.nextSequence();
@@ -1064,6 +1343,10 @@ public final class Probe {
             ClientboundBlockEventPacket retract = observer.blockEvents.getLast();
             check("pistons: the retraction event names the piston",
                     retract.getPos().equals(piston) && retract.getBlock() == Blocks.STICKY_PISTON && retract.getB0() == 1);
+            for (int walked = 2; walked >= 0; walked -= 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
         }
 
         /** 放下的告示牌只给放置者打开编辑界面，写进去的字另一个客户端从方块实体数据里读得到。 */
@@ -1268,6 +1551,7 @@ public final class Probe {
                     actor.openMenuTitle != null && CHEST_NAME.equals(actor.openMenuTitle.getString()));
             actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
             pumpFor(TICK_MILLIS);
+            forwardedComponents(actor, observer);
 
             // 清掉这一段用的槽位，后面几段按空物品栏算。
             actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, ItemStack.EMPTY));
@@ -1276,6 +1560,114 @@ public final class Probe {
             actor.send(new ServerboundSetCarriedItemPacket(0));
             await("components: the hands are empty again",
                     () -> isEmpty(remote, EquipmentSlot.OFFHAND) && isEmpty(remote, EquipmentSlot.MAINHAND));
+        }
+
+        /**
+         * 创造模式放进箱子的锁和自定义文本，另一名玩家打开时要用官方 codec 解得开，内容一样。
+         * 带锁的箱子没有钥匙打不开，主手拿着绊线钩才能开。
+         */
+        private void forwardedComponents(Join actor, Join observer) throws IOException {
+            Vec3 actorHome = actor.position;
+            Vec3 observerHome = observer.position;
+            LockCode key = new LockCode(ItemPredicate.Builder.item()
+                    .of(actor.registries.lookupOrThrow(Registries.ITEM), Items.TRIPWIRE_HOOK)
+                    .build());
+            ItemStack note = new ItemStack(Items.PAPER);
+            note.set(DataComponents.CUSTOM_NAME, Component.literal("Sealed Note"));
+            note.set(DataComponents.LOCK, key);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 3, note));
+            pumpFor(TICK_MILLIS);
+
+            BlockPos ground = BlockPos.containing(actor.position).offset(3, -1, -1);
+            BlockPos chest = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(Items.CHEST)));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    placing));
+            await("components: " + actor.player + " gets the ack for the storage chest",
+                    () -> actor.lastAck >= placing);
+            await("components: " + actor.player + " sees the storage chest",
+                    () -> actor.blocks.get(chest) != null && actor.blocks.get(chest).is(Blocks.CHEST));
+            openChest(actor, chest);
+            int noteSlot = 54 + 3;
+            actor.send(actor.click(noteSlot, 0, ContainerInput.QUICK_MOVE));
+            await("components: the sealed note moves into the chest",
+                    () -> is(actor.menuSlots.get(0), Items.PAPER, 1));
+            check("components: the placer still has the custom name",
+                    "Sealed Note".equals(actor.menuSlots.get(0).getHoverName().getString()));
+            check("components: the placer still has the lock", key.equals(actor.menuSlots.get(0).get(DataComponents.LOCK)));
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
+
+            moveClose(observer, new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 1.5), true);
+            pumpFor(TICK_MILLIS);
+            openChest(observer, chest);
+            await("components: the other player sees the sealed note",
+                    () -> is(observer.menuSlots.get(0), Items.PAPER, 1));
+            ItemStack seen = observer.menuSlots.get(0);
+            check("components: the other player reads the same name",
+                    "Sealed Note".equals(seen.getHoverName().getString()));
+            check("components: the other player reads the same lock", key.equals(seen.get(DataComponents.LOCK)));
+            check("components: the lock matches a tripwire hook",
+                    seen.get(DataComponents.LOCK).predicate().test(new ItemStack(Items.TRIPWIRE_HOOK)));
+            check("components: the lock rejects a stone",
+                    !seen.get(DataComponents.LOCK).predicate().test(new ItemStack(Items.STONE)));
+            observer.send(new ServerboundContainerClosePacket(observer.openContainerId));
+            pumpFor(TICK_MILLIS);
+
+            BlockPos vaultGround = BlockPos.containing(actor.position).offset(3, -1, 1);
+            BlockPos vault = vaultGround.above();
+            ItemStack locked = new ItemStack(Items.CHEST);
+            locked.set(DataComponents.CUSTOM_NAME, Component.literal("Vault"));
+            locked.set(DataComponents.LOCK, key);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, locked));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int placingVault = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(vaultGround, 1.0), Direction.UP, vaultGround, false),
+                    placingVault));
+            await("components: " + actor.player + " gets the ack for the locked chest",
+                    () -> actor.lastAck >= placingVault);
+            await("components: " + actor.player + " sees the locked chest",
+                    () -> actor.blocks.get(vault) != null && actor.blocks.get(vault).is(Blocks.CHEST));
+
+            observer.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, ItemStack.EMPTY));
+            observer.send(new ServerboundSetCarriedItemPacket(0));
+            moveClose(observer, new Vec3(vault.getX() + 0.5, SPAWN_Y, vault.getZ() + 1.5), true);
+            pumpFor(TICK_MILLIS);
+            observer.openMenuType = null;
+            int messages = observer.systemMessages.size();
+            int refused = observer.nextSequence();
+            observer.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(vault, 1.0), Direction.UP, vault, false),
+                    refused));
+            await("components: " + observer.player + " gets the ack for the locked chest",
+                    () -> observer.lastAck >= refused);
+            pumpFor(TICK_MILLIS * 3);
+            check("components: a locked chest stays closed without the key", observer.openMenuType == null);
+            check("components: the lock notice is an overlay",
+                    observer.systemMessages.size() > messages
+                            && observer.systemMessages.get(observer.systemMessages.size() - 1).overlay());
+
+            observer.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.TRIPWIRE_HOOK)));
+            observer.send(new ServerboundSetCarriedItemPacket(0));
+            pumpFor(TICK_MILLIS);
+            openChest(observer, vault);
+            check("components: the key opens the locked chest",
+                    observer.openMenuTitle != null && "Vault".equals(observer.openMenuTitle.getString()));
+            observer.send(new ServerboundContainerClosePacket(observer.openContainerId));
+            pumpFor(TICK_MILLIS);
+            // 后面的箱子测试还站在原来的箱子旁边。分步走回去：一个包挪太远会被移动校验拉回。
+            // The later chest test still stands beside the original chest. Walk back in steps, since one
+            // packet that moves too far is pulled back by movement validation.
+            moveClose(actor, actorHome, true);
+            moveClose(observer, observerHome, true);
+            pumpFor(TICK_MILLIS);
         }
 
         /** 一面红色花朵图案的旗帜，和探针放下去的那一面一样。 */
@@ -1358,7 +1750,7 @@ public final class Probe {
             BlockPos tntGround = feet.offset(0, -1, 20);
             // 站在旁边，不要站进即将放下去的 TNT 里。
             // Stand beside the spot so the player is not inside the TNT about to be placed.
-            actor.moveTo(new Vec3(tntGround.getX() - 1.5, origin.y, tntGround.getZ() + 0.5), true);
+            moveClose(actor, new Vec3(tntGround.getX() - 1.5, origin.y, tntGround.getZ() + 0.5), true);
             useOn(actor, Items.TNT, tntGround, Direction.UP, Vec3.upFromBottomCenterOf(tntGround, 1.0));
             BlockPos tnt = tntGround.above();
             useOn(actor, Items.STONE, tnt, Direction.NORTH, Vec3.atCenterOf(tnt).add(0.0, 0.0, -0.5));
@@ -1385,14 +1777,14 @@ public final class Probe {
             // from chunk section 0, so this air is indistinguishable from the original cell.
 
             BlockPos redGround = feet.offset(-20, -1, 0);
-            actor.moveTo(new Vec3(redGround.getX() - 1.5, origin.y, redGround.getZ() + 0.5), true);
+            moveClose(actor, new Vec3(redGround.getX() - 1.5, origin.y, redGround.getZ() + 0.5), true);
             useOn(actor, Items.TNT, redGround, Direction.UP, Vec3.upFromBottomCenterOf(redGround, 1.0));
             BlockPos redTnt = redGround.above();
             useOn(actor, Items.REDSTONE_BLOCK, redTnt, Direction.NORTH, Vec3.atCenterOf(redTnt).add(0.0, 0.0, -0.5));
             await("tnt: redstone lights another primed tnt", 10_000, () -> findEntity(observer, EntityTypes.TNT) != null);
             await("tnt: the redstone-lit block is gone", 10_000,
                     () -> Blocks.AIR.defaultBlockState().equals(observer.blocks.get(redTnt)));
-            actor.moveTo(origin, true);
+            moveClose(actor, origin, true);
             actor.send(new ServerboundSetCarriedItemPacket(0));
         }
 
@@ -1534,7 +1926,7 @@ public final class Probe {
             check("container: the reopened menu starts at state one", opener.lastContentState == 1);
 
             // 第二名玩家走到箱子旁边再打开，看到同一份内容，开盖人数变成二。
-            watcher.moveTo(new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 2.5), true);
+            moveClose(watcher, new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 2.5), true);
             pumpFor(TICK_MILLIS);
             openChest(watcher, chest);
             await("container: the second player sees the apple", () -> is(watcher.menuSlots.get(0), Items.APPLE, 7));
@@ -1718,6 +2110,59 @@ public final class Probe {
             check("chat: statistics only go to the requester", observer.stats == otherStats);
         }
 
+        /**
+         * 耐久只剩 1 的镐挖掉一块草方块。先用正式的 `/gamemode survival`（命令包不带前导斜杠），
+         * 客户端收到损坏事件，快捷栏那格变空，再用 `/gamemode creative` 回到创造模式。
+         *
+         * A pickaxe with one durability mines one grass block. The official `/gamemode survival`
+         * command (the packet has no leading slash) runs first. The client gets the break event,
+         * that hotbar slot becomes empty, then `/gamemode creative` restores creative.
+         */
+        private void toolDurability(Join actor, Join observer) throws IOException {
+            ItemStack pick = new ItemStack(Items.DIAMOND_PICKAXE);
+            pick.setDamageValue(pick.getMaxDamage() - 1);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, pick));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            // 创造模式写槽不回包。清掉旧记录，后面必须看到这一格被写成空。
+            //
+            // Creative slot writes are not echoed. Drop the old record so the empty slot has to arrive.
+            actor.slots.remove(HOTBAR_START);
+            BlockPos feet = BlockPos.containing(actor.position);
+            BlockPos grass = feet.offset(3, -1, 1);
+            actor.edits.add(new Edit(grass, Blocks.AIR.defaultBlockState()));
+            int ownEvents = actor.entityEvents.size();
+            int otherEvents = observer.entityEvents.size();
+            boolean survival = false;
+            try {
+                actor.gameModeParam = Float.NaN;
+                actor.send(new ServerboundChatCommandPacket("gamemode survival"));
+                await("durability: the game mode becomes survival", () -> actor.gameModeParam == 0.0f);
+                survival = true;
+                // 生存模式不会在进度到 1 时自己挖穿，停手后不够 0.7 会转成延迟破坏，几刻后挖掉。
+                //
+                // Survival does not finish a block when progress reaches 1. Stopping under 0.7 becomes a delayed break.
+                int sequence = actor.nextSequence();
+                actor.send(new ServerboundPlayerActionPacket(
+                        ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, grass, Direction.UP, sequence));
+                actor.send(new ServerboundPlayerActionPacket(
+                        ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, grass, Direction.UP, actor.nextSequence()));
+                await("durability: the pickaxe breaks", () -> actor.entityEvents.size() > ownEvents
+                        && actor.slots.containsKey(HOTBAR_START)
+                        && actor.slots.get(HOTBAR_START).isEmpty());
+                check("durability: the break event is 47",
+                        actor.entityEvents.get(ownEvents) == EQUIPMENT_BREAK_MAIN_HAND);
+                await("durability: the observer sees the break", () -> observer.entityEvents.size() > otherEvents);
+                check("durability: the observer's break event is 47",
+                        observer.entityEvents.get(otherEvents) == EQUIPMENT_BREAK_MAIN_HAND);
+            } finally {
+                if (survival) {
+                    actor.gameModeParam = Float.NaN;
+                    actor.send(new ServerboundChatCommandPacket("gamemode creative"));
+                    await("durability: the game mode returns to creative", () -> actor.gameModeParam == 1.0f);
+                }
+            }
+        }
+
         /** 后来的玩家看到的区块要有之前所有的改动，方块实体也要在列表里。 */
         private void checkEditedChunks(Join first, Join second, Join late) throws IOException {
             await("late: the tab list holds three players", () -> late.tab.size() == 3);
@@ -1748,6 +2193,168 @@ public final class Probe {
                     check("late: blocks that went away are not in the chunk", !late.blocks.containsKey(pos));
                 }
             }
+        }
+
+        /**
+         * 用客户端收到的命令树解析，再把几条命令真的发出去。
+         *
+         * <p>Parse with the command tree the client received, then send a few commands for real.
+         */
+        private void commands(Join actor, Join observer, Join late) throws IOException {
+            check("commands: literals the client can run parse",
+                    actor.commandParses("list")
+                            && actor.commandParses("help")
+                            && actor.commandParses("gamemode survival")
+                            && actor.commandParses("tp ~1 ~ ~")
+                            && actor.commandParses("teleport " + observer.player)
+                            && actor.commandParses("time set noon")
+                            && actor.commandParses("time query gametime")
+                            && actor.commandParses("give " + actor.player + " stone 3")
+                            && actor.commandParses("clear " + actor.player + " stone")
+                            && actor.commandParses("setblock 4 -59 4 stone")
+                            && actor.commandParses("setblock 4 -58 4 oak_stairs[facing=east]")
+                            && actor.commandParses("fill 6 -59 6 7 -59 7 dirt")
+                            && actor.commandParses("say hi")
+                            && actor.commandParses("me waves")
+                            && actor.commandParses("msg " + observer.player + " ping")
+                            && actor.commandParses("tell " + observer.player + " ping")
+                            && actor.commandParses("w " + late.player + " ping")
+                            && actor.commandParses("kick " + late.player));
+            check("commands: incomplete or unknown input fails in the client tree",
+                    !actor.commandParses("nope")
+                            && !actor.commandParses("gamemode")
+                            && !actor.commandParses("time set")
+                            && !actor.commandParses("give " + actor.player)
+                            && !actor.commandParses("setblock 1 2 3")
+                            && !actor.commandParses("setblock 4 -58 4 oak_stairs[facing=foo]")
+                            && !actor.commandParses("kick"));
+
+            actor.send(new ServerboundChatCommandPacket("time set noon"));
+            await("commands: noon is already the clock",
+                    () -> containsText(actor, "already at time marker"));
+
+            actor.send(new ServerboundChatCommandPacket("time set 1000"));
+            await("commands: time set is announced", () -> containsText(actor, "Set minecraft:overworld to 1000 tick(s)"));
+            check("commands: other ops see the admin broadcast",
+                    containsText(observer, "[Kitten: Set minecraft:overworld to 1000 tick(s)]"));
+
+            BlockPos stone = new BlockPos(4, -59, 4);
+            BlockPos stairs = new BlockPos(4, -58, 4);
+            actor.send(new ServerboundChatCommandPacket("setblock 4 -59 4 stone"));
+            await("commands: setblock places stone", () -> actor.blocks.get(stone) != null && actor.blocks.get(stone).is(Blocks.STONE));
+            await("commands: the other player sees the stone",
+                    () -> observer.blocks.get(stone) != null && observer.blocks.get(stone).is(Blocks.STONE));
+            check("commands: setblock announces the position", containsText(actor, "Changed the block at 4, -59, 4"));
+
+            actor.send(new ServerboundChatCommandPacket("setblock 4 -58 4 oak_stairs[facing=east]"));
+            await("commands: stairs keep the named facing", () -> {
+                BlockState state = actor.blocks.get(stairs);
+                return state != null && state.is(Blocks.OAK_STAIRS) && state.getValue(StairBlock.FACING) == Direction.EAST;
+            });
+
+            actor.send(new ServerboundChatCommandPacket("fill 6 -59 6 7 -59 7 dirt"));
+            await("commands: fill covers the rectangle", () -> filledWithDirt(actor));
+            check("commands: fill announces the count", containsText(actor, "Successfully filled 4 block(s)"));
+
+            actor.send(new ServerboundChatCommandPacket("gamemode survival"));
+            await("commands: gamemode tells the player", () -> containsText(actor, "Set own game mode to Survival Mode"));
+            await("commands: the tab list shows survival", () -> actor.ownGameMode == GameType.SURVIVAL);
+            check("commands: survival cannot fly", !actor.canFly);
+
+            // 前面的物品栏脚本放过石头。先清掉，再给 3 个，数量才对得上。
+            //
+            // Earlier inventory steps left stone behind. Clear it first so a give of 3 is exact.
+            actor.send(new ServerboundChatCommandPacket("clear " + actor.player + " stone"));
+            await("commands: the old stone is gone", () -> stoneCount(actor) == 0);
+            actor.send(new ServerboundChatCommandPacket("give " + actor.player + " stone 3"));
+            await("commands: give puts three stone in the inventory", () -> stoneCount(actor) == 3);
+            check("commands: give announces the stack", containsText(actor, "Gave 3"));
+            actor.send(new ServerboundChatCommandPacket("clear " + actor.player + " stone"));
+            await("commands: clear removes the three stone", () -> stoneCount(actor) == 0);
+            check("commands: clear announces the removal", containsText(actor, "Removed 3 item(s) from player " + actor.player));
+
+            actor.send(new ServerboundChatCommandPacket("say hi"));
+            await("commands: say reaches both players",
+                    () -> actor.chats.stream().anyMatch(text -> text.contains("[" + actor.player + "] hi"))
+                            && observer.chats.stream().anyMatch(text -> text.contains("[" + actor.player + "] hi")));
+            actor.send(new ServerboundChatCommandPacket("me waves"));
+            await("commands: me reaches the other player",
+                    () -> observer.chats.stream().anyMatch(text -> text.contains(actor.player) && text.contains("waves")));
+            actor.send(new ServerboundChatCommandPacket("msg " + observer.player + " ping"));
+            await("commands: msg shows the outgoing whisper",
+                    () -> actor.chats.stream().anyMatch(text -> text.contains("You whisper to " + observer.player + ": ping")));
+            await("commands: msg shows the incoming whisper",
+                    () -> observer.chats.stream().anyMatch(text -> text.contains("whispers to you: ping")));
+
+            actor.send(new ServerboundChatCommandPacket("list"));
+            await("commands: list counts the three players", () -> containsText(actor, "There are 3 of a max of"));
+            actor.send(new ServerboundChatCommandPacket("help gamemode"));
+            await("commands: help prints the gamemode usage", () -> containsText(actor, "/gamemode"));
+
+            // 落在走路之后的区块 (1, 0) 里，避免再改跟踪范围。
+            //
+            // Land inside chunk (1, 0), where the walk already left the player, so tracking does not change.
+            // 整数坐标按官方 `Vec3Argument` 把 x/z 对齐到方块中心。
+            //
+            // Integer coordinates are centred on the block, matching official `Vec3Argument`.
+            actor.expectedTeleports += 1;
+            actor.send(new ServerboundChatCommandPacket("tp 24 -60 8"));
+            await("commands: an absolute teleport moves the player",
+                    () -> Math.abs(actor.position.x - 24.5) < 0.01 && Math.abs(actor.position.z - 8.5) < 0.01);
+            check("commands: teleport announces the destination", containsText(actor, "Teleported " + actor.player));
+            actor.expectedTeleports += 1;
+            actor.send(new ServerboundChatCommandPacket("tp ~1 ~ ~"));
+            await("commands: a relative teleport adds one block", () -> Math.abs(actor.position.x - 25.5) < 0.01);
+
+            actor.suggestions = null;
+            actor.send(new ServerboundCommandSuggestionPacket(7, "/g"));
+            await("commands: literal suggestions arrive",
+                    () -> actor.suggestions != null && actor.suggestions.id() == 7);
+            check("commands: g completes gamemode and give", suggestionTexts(actor).contains("gamemode")
+                    && suggestionTexts(actor).contains("give"));
+            actor.suggestions = null;
+            actor.send(new ServerboundCommandSuggestionPacket(8, "/teleport "));
+            await("commands: player-name suggestions arrive",
+                    () -> actor.suggestions != null && actor.suggestions.id() == 8);
+            check("commands: teleport completes online names",
+                    suggestionTexts(actor).contains(actor.player)
+                            && suggestionTexts(actor).contains(observer.player)
+                            && suggestionTexts(actor).contains(late.player));
+
+            actor.send(new ServerboundChatCommandPacket("gamemode creative"));
+            await("commands: creative is restored", () -> actor.ownGameMode == GameType.CREATIVE);
+            actor.send(new ServerboundChatCommandPacket("time set 6000"));
+            await("commands: the clock returns to noon", () -> containsText(actor, "Set minecraft:overworld to 6000 tick(s)"));
+        }
+
+        private static int stoneCount(Join client) {
+            return client.slots.values().stream()
+                    .filter(stack -> stack.is(Items.STONE))
+                    .mapToInt(ItemStack::getCount)
+                    .sum();
+        }
+
+        private static boolean containsText(Join client, String part) {
+            return client.systemTexts().stream().anyMatch(text -> text.contains(part));
+        }
+
+        private static boolean filledWithDirt(Join client) {
+            for (int x = 6; x <= 7; x += 1) {
+                for (int z = 6; z <= 7; z += 1) {
+                    BlockState state = client.blocks.get(new BlockPos(x, -59, z));
+                    if (state == null || !state.is(Blocks.DIRT)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static List<String> suggestionTexts(Join client) {
+            if (client.suggestions == null) {
+                return List.of();
+            }
+            return client.suggestions.suggestions().stream().map(ClientboundCommandSuggestionsPacket.Entry::text).toList();
         }
 
         private void leaving(Join stays, Join leaves, Join late) throws IOException {
@@ -1835,6 +2442,13 @@ public final class Probe {
         private boolean spawnCenterChecked;
         private boolean walked;
         private boolean walkCenterArrived;
+        private boolean spawnAccepted;
+        private boolean expectPullback;
+        private int pullbacks;
+        // 已经发出、还没收到位置包的指令传送。
+        //
+        // Command teleports sent whose position packet has not arrived yet.
+        private int expectedTeleports;
         private boolean forgetBeforeCenter;
         private int keepAlives;
         private boolean latencyUpdated;
@@ -1854,6 +2468,16 @@ public final class Probe {
 
         int entityId;
         Vec3 position = new Vec3(SPAWN_X, SPAWN_Y, SPAWN_Z);
+        CommandDispatcher<Object> commands = new CommandDispatcher<>();
+        ClientboundCommandSuggestionsPacket suggestions;
+        GameType ownGameMode = GameType.CREATIVE;
+        boolean canFly = true;
+        private boolean commandTreeChecked;
+        private boolean permissionEventChecked;
+        private boolean abilitiesChecked;
+        private boolean attributesChecked;
+        private boolean timeChecked;
+        private boolean loadEventChecked;
         final Map<UUID, String> tab = new HashMap<>();
         final Map<UUID, Boolean> hats = new HashMap<>();
         final Map<Integer, Remote> remotes = new HashMap<>();
@@ -1876,12 +2500,19 @@ public final class Probe {
         /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
         final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
+        final List<ClientboundSoundPacket> sounds = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
         int entityDataPackets;
         int heldSlot = -1;
         int lastAck = -1;
+        /** 最近一次 `CHANGE_GAME_MODE` 的参数。还没收到时是 NaN。 */
+        // The latest `CHANGE_GAME_MODE` parameter. NaN until one arrives.
+        float gameModeParam = Float.NaN;
+        /** 收到的实体事件字节。物品损坏是 47 或 48。 */
+        // Entity-event bytes. An item break is 47 or 48.
+        final List<Byte> entityEvents = new ArrayList<>();
         int acks;
         int stats;
         int openContainerId = -1;
@@ -1980,6 +2611,7 @@ public final class Probe {
         void moveTo(Vec3 target, boolean onGround) throws IOException {
             position = target;
             send(new ServerboundMovePlayerPacket.Pos(target, onGround, false));
+            send(ServerboundClientTickEndPacket.INSTANCE);
         }
 
         int nextSequence() {
@@ -2267,6 +2899,9 @@ public final class Probe {
         private Map<String, Consumer<Object>> playHandlers() {
             Map<String, Consumer<Object>> handlers = new HashMap<>();
             handlers.put("handleLogin", value -> onLogin((ClientboundLoginPacket) value));
+            handlers.put("handleCommands", value -> onCommands((ClientboundCommandsPacket) value));
+            handlers.put("handleEntityEvent", value -> onEntityEvent((ClientboundEntityEventPacket) value));
+            handlers.put("handleCommandSuggestions", value -> suggestions = (ClientboundCommandSuggestionsPacket) value);
             handlers.put("handlePlayerAbilities", value -> onAbilities((ClientboundPlayerAbilitiesPacket) value));
             handlers.put("handleMovePlayer", value -> onPosition((ClientboundPlayerPositionPacket) value));
             handlers.put("handlePlayerInfoUpdate", value -> onPlayerInfo((ClientboundPlayerInfoUpdatePacket) value));
@@ -2307,6 +2942,7 @@ public final class Probe {
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
+            handlers.put("handleSoundEvent", value -> onSound((ClientboundSoundPacket) value));
             handlers.put("handleOpenBook", value -> onOpenBook((ClientboundOpenBookPacket) value));
             handlers.put("handleOpenScreen", value -> onOpenScreen((ClientboundOpenScreenPacket) value));
             handlers.put("handleContainerContent",
@@ -2318,6 +2954,56 @@ public final class Probe {
             handlers.put("handleDisguisedChat", value -> onDisguisedChat((ClientboundDisguisedChatPacket) value));
             handlers.put("handleAwardStats", value -> onAwardStats((ClientboundAwardStatsPacket) value));
             return handlers;
+        }
+
+        /** 官方客户端用收到的树解析。重定向要看最深一层有没有可执行节点。
+         *
+         * <p>Parse with the tree the client received. A redirect counts only when its deepest node executes.
+         */
+        boolean commandParses(String input) {
+            try {
+                ParseResults<Object> results = commands.parse(input, null);
+                CommandContextBuilder<Object> context = results.getContext();
+                while (context.getChild() != null) {
+                    context = context.getChild();
+                }
+                return context.getCommand() != null && !results.getReader().canRead();
+            } catch (RuntimeException error) {
+                return false;
+            }
+        }
+
+        private void onCommands(ClientboundCommandsPacket packet) {
+            try {
+                commands = new CommandDispatcher<>(packet.getRoot(
+                        CommandBuildContext.simple(registries, FeatureFlags.VANILLA_SET), commandNodes()));
+            } catch (RuntimeException error) {
+                check("commands: the client accepted the command tree (" + error + ")", false);
+                return;
+            }
+            if (!commandTreeChecked) {
+                commandTreeChecked = true;
+                check("commands: the client accepted the command tree", !commands.getRoot().getChildren().isEmpty());
+            }
+        }
+
+        private void onEntityEvent(ClientboundEntityEventPacket packet) {
+            entityEvents.add(packet.getEventId());
+            if (permissionEventChecked) {
+                return;
+            }
+            permissionEventChecked = true;
+            int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
+            check("commands: the permission event names this player", entity == entityId);
+            // 离线探针的工作目录里 ops.json 把这几名玩家写成 4。正版那台服务端没有这份名单。
+            //
+            // The offline probe's ops.json lists these players at level 4. The online-mode
+            // server has no op list.
+            if (online()) {
+                check("commands: a player absent from ops.json is level 0", packet.getEventId() == 24);
+            } else {
+                check("commands: the permission event is owners", packet.getEventId() == 28);
+            }
         }
 
         private void onLogin(ClientboundLoginPacket packet) {
@@ -2343,24 +3029,66 @@ public final class Probe {
         }
 
         private void onAbilities(ClientboundPlayerAbilitiesPacket packet) {
-            // 旁观者也收到这一份创造模式能力包。触及距离另按游戏模式算。
-            // Spectators receive this same creative abilities packet. Reach uses the game mode.
-            check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
+            canFly = packet.canFly();
+            // 进服第一包是创造，旁观者也是这份。后面的 `/gamemode` 会再发。
+            //
+            // The first packet is creative, including for a spectator. Later `/gamemode`
+            // packets replace it.
+            if (!abilitiesChecked) {
+                abilitiesChecked = true;
+                check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
+            }
         }
 
         private void onPosition(ClientboundPlayerPositionPacket packet) {
-            var target = packet.change().position();
-            check("play: spawn is above the grass", target.y() == SPAWN_Y);
-            check("play: position is absolute", packet.relatives().isEmpty());
-            connection.send(new ServerboundAcceptTeleportationPacket(
-                    packet.id(), target.x(), target.y(), target.z(), 0f, 0f));
+            var incoming = packet.change().position();
+            var relatives = packet.relatives();
+            // 相对轴上的值是差值，绝对轴上的值就是落点。
+            //
+            // A relative axis carries a delta. An absolute axis carries the destination.
+            double x = relatives.contains(Relative.X) ? position.x + incoming.x : incoming.x;
+            double y = relatives.contains(Relative.Y) ? position.y + incoming.y : incoming.y;
+            double z = relatives.contains(Relative.Z) ? position.z + incoming.z : incoming.z;
+            if (!spawnAccepted) {
+                spawnAccepted = true;
+                check("play: spawn is above the grass", incoming.y == SPAWN_Y);
+                check("play: position is absolute", relatives.isEmpty());
+                position = new Vec3(x, y, z);
+                connection.send(new ServerboundAcceptTeleportationPacket(packet.id(), x, y, z, 0f, 0f));
+                connection.send(new ServerboundPlayerLoadedPacket());
+                return;
+            }
+            // 指令传送是探针自己要的，不算拉回。其余的位置包都必须是预期中的拉回。
+            //
+            // A command teleport was asked for by the probe and is not a pullback. Every other
+            // position packet must be a pullback the probe expected.
+            if (expectedTeleports > 0) {
+                expectedTeleports -= 1;
+            } else {
+                pullbacks += 1;
+                check("play: a later position packet is a correction the probe expected", expectPullback);
+                expectPullback = false;
+            }
+            position = new Vec3(x, y, z);
+            connection.send(new ServerboundAcceptTeleportationPacket(packet.id(), x, y, z, 0f, 0f));
         }
 
         private void onPlayerInfo(ClientboundPlayerInfoUpdatePacket packet) {
-            // 不带 ADD_PLAYER 的包里 profile 是 null，这种包是周期性的延迟广播和帽子变化。
+            // 不带 ADD_PLAYER 的包里 profile 是 null，这种包是周期性的延迟广播、帽子变化和模式变化。
             var actions = packet.actions();
+            if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_GAME_MODE))) {
+                packet.entries().forEach(entry -> {
+                    if (entry.profileId().equals(uuid)) {
+                        ownGameMode = entry.gameMode();
+                    }
+                });
+                return;
+            }
             if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_HAT))) {
                 packet.entries().forEach(entry -> hats.put(entry.profileId(), entry.showHat()));
+                return;
+            }
+            if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_GAME_MODE))) {
                 return;
             }
             if (!actions.contains(ClientboundPlayerInfoUpdatePacket.Action.ADD_PLAYER)) {
@@ -2415,6 +3143,13 @@ public final class Probe {
         }
 
         private void onSetTime(ClientboundSetTimePacket packet) {
+            // 登录只核对第一包。后面的 `/time` 会改主世界钟，也可能带上末地钟。
+            //
+            // Only the first packet is the login clock. Later `/time` changes it and may include the end clock.
+            if (timeChecked) {
+                return;
+            }
+            timeChecked = true;
             check("play: one clock is synced", packet.clockUpdates().size() == 1);
             packet.clockUpdates().forEach((clock, state) -> {
                 check("play: clock is the overworld one",
@@ -2424,6 +3159,15 @@ public final class Probe {
         }
 
         private void onGameEvent(ClientboundGameEventPacket packet) {
+            if (loadEventChecked) {
+                check("play: later game events are mode changes",
+                        packet.getEvent() == ClientboundGameEventPacket.CHANGE_GAME_MODE);
+                if (packet.getEvent() == ClientboundGameEventPacket.CHANGE_GAME_MODE) {
+                    gameModeParam = packet.getParam();
+                }
+                return;
+            }
+            loadEventChecked = true;
             check("play: chunk loading event", packet.getEvent() == ClientboundGameEventPacket.LEVEL_CHUNKS_LOAD_START);
         }
 
@@ -2493,6 +3237,13 @@ public final class Probe {
 
         private void onAttributes(ClientboundUpdateAttributesPacket packet) {
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
+            // 进服第一包是创造触及距离。`/gamemode` 之后还会再发。
+            //
+            // The first packet is the creative reach. `/gamemode` sends another one later.
+            if (attributesChecked) {
+                return;
+            }
+            attributesChecked = true;
             var names = packet.getValues().stream()
                     .map(snapshot -> snapshot.attribute().unwrapKey().orElseThrow().identifier().getPath())
                     .toList();
@@ -2699,10 +3450,13 @@ public final class Probe {
             events.add("event " + packet.getPos().toShortString());
         }
 
+        private void onSound(ClientboundSoundPacket packet) {
+            sounds.add(packet);
+        }
+
         private void onBlockEvent(ClientboundBlockEventPacket packet) {
             blockEvents.add(packet);
-            events.add("blockevent " + packet.getPos().toShortString());
-        }
+            events.add("blockevent " + packet.getPos().toShortString());        }
 
         private void onSetSlot(ClientboundContainerSetSlotPacket packet) {
             if (packet.getContainerId() == 0) {
@@ -2766,7 +3520,13 @@ public final class Probe {
         private void onDisguisedChat(ClientboundDisguisedChatPacket packet) {
             chats.add(packet.chatType().decorate(packet.message()).getString());
             narrations.add(packet.chatType().decorateNarration(packet.message()).getString());
-            check("chat: player chat has no target", packet.chatType().targetName().isEmpty());
+            // `/msg` 带目标名字。普通聊天、`/say` 和 `/me` 没有。
+            //
+            // `/msg` carries a target name. Player chat, `/say`, and `/me` do not.
+            String type = packet.chatType().chatType().unwrapKey().map(key -> key.identifier().getPath()).orElse("");
+            if (type.equals("chat") || type.equals("say_command") || type.equals("emote_command")) {
+                check("chat: player chat has no target", packet.chatType().targetName().isEmpty());
+            }
         }
 
         private void onAwardStats(ClientboundAwardStatsPacket packet) {
@@ -2977,9 +3737,14 @@ public final class Probe {
             connection.send(new ServerboundChunkBatchReceivedPacket(20f));
             if (walks && !walked && spawnChunks.size() == expectedSpawnChunks.size()) {
                 walked = true;
-                double blockX = WALK_TARGET.x() * 16 + SPAWN_X;
+                // 一格 16 格超过“移动太快”的一包上限。先走 8 格，人已经进了目标区块。
+                //
+                // Sixteen blocks in one packet exceeds the moved-too-quickly limit.
+                // Eight blocks already enters the target chunk.
+                double blockX = SPAWN_X + 8.0;
                 position = new Vec3(blockX, SPAWN_Y, SPAWN_Z);
                 connection.send(new ServerboundMovePlayerPacket.Pos(blockX, SPAWN_Y, SPAWN_Z, true, false));
+                connection.send(ServerboundClientTickEndPacket.INSTANCE);
             }
         }
 

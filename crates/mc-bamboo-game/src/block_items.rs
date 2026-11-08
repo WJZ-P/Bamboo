@@ -107,12 +107,12 @@ fn is_container(kind: i32) -> bool {
 
 /// 官方 `BlockItem.updateBlockEntityComponents`：把放下去的物品上的组件搬进方块实体。
 ///
-/// 官方在这之前还有一步 `updateCustomBlockEntityTag`（物品上的 `block_entity_data`），
-/// 那一步要解 NBT 形式的方块实体存档，我们不做，见 README 的已知限制。
+/// 官方在这之前先走 `updateCustomBlockEntityTag`。没有权限系统，一律按非管理员：
+/// `onlyOpCanSetNbt` 的方块实体不写入这段 NBT。
 ///
-/// `placer` 是放下这个方块的玩家。潜影盒的 `container` 组件里的物品是从它的客户端来的，
-/// 记下来源，它自己再打开时才能拿到完整的补丁，见 [`crate::menu`]。
-pub(crate) fn apply(region: &mut Region, pos: BlockPos, placer: PlayerId, stack: &ItemStack) {
+/// `updateCustomBlockEntityTag` runs first. There is no permission system, so every
+/// player is treated as a non-operator and `onlyOpCanSetNbt` block entities skip the tag.
+pub(crate) fn apply(region: &mut Region, pos: BlockPos, _placer: PlayerId, stack: &ItemStack) {
     let Some(kind) = block_entity_kind(region, pos) else {
         return;
     };
@@ -128,13 +128,22 @@ pub(crate) fn apply(region: &mut Region, pos: BlockPos, placer: PlayerId, stack:
         }
     }
 
-    // 容器的 `container` 组件直接变成方块实体的物品栏，官方 `ItemContainerContents.copyInto`。
-    if is_container(kind) {
+    // 容器、陶罐和雕纹书架的 `container` 用 `getOrDefault(EMPTY)`，没有组件也把格子清空。
+    //
+    // Containers, pots and chiseled bookshelves use `getOrDefault(EMPTY)`, so a missing
+    // component clears the slots too.
+    if stores_items(kind) {
         let contents = match defaults::resolve(stack.item, &patch, kinds::CONTAINER) {
             Some(ComponentValue::Container(slots)) => slots.as_slice(),
             _ => &[],
         };
-        copy_into_container(region, pos, contents, placer);
+        copy_into_container(region, pos, contents);
+    }
+    // 非管理员：`onlyOpCanSetNbt` 的方块实体不吃 `block_entity_data`。
+    //
+    // Non-operators: block entities in `onlyOpCanSetNbt` ignore `block_entity_data`.
+    if !only_op_can_set_nbt(kind) {
+        merge_block_entity_data(region, pos, kind, &patch, &mut implicit);
     }
 
     if implicit.entries().is_empty() {
@@ -147,13 +156,10 @@ pub(crate) fn apply(region: &mut Region, pos: BlockPos, placer: PlayerId, stack:
 
 /// 把 `container` 组件里的物品放进这一格的容器，官方 `copyInto`：每一格都写，多出来的格清空。
 ///
-/// 每一格的组件都来自放方块的那名玩家客户端发来的物品，所以整格都记成 `placer` 的。
-fn copy_into_container(
-    region: &mut Region,
-    pos: BlockPos,
-    contents: &[Option<ItemStackTemplate>],
-    placer: PlayerId,
-) {
+/// 官方 `ItemContainerContents.copyInto`。
+///
+/// Official `ItemContainerContents.copyInto`.
+fn copy_into_container(region: &mut Region, pos: BlockPos, contents: &[Option<ItemStackTemplate>]) {
     let Some(container) = container::kind_at(region, pos) else {
         return;
     };
@@ -166,7 +172,6 @@ fn copy_into_container(
             .get(slot)
             .and_then(Option::as_ref)
             .map_or_else(ItemStack::empty, create_stack);
-        entry.sources[slot] = (!entry.slots[slot].is_empty()).then_some(placer);
     }
 }
 
@@ -205,29 +210,34 @@ fn container_contents(slots: &[ItemStack]) -> ComponentValue {
 
 /// 官方 `BlockEntity.collectComponents`：方块实体身上的组件，中键选取时还给物品。
 ///
-/// 方块实体是共享的，谁都能中键，所以最后过一遍 [`ComponentPatch::filtered`]：
-/// 没法完全校验的组件（比如容器的锁）留在方块实体上，不跟着物品走。`container` 里嵌套的
-/// 物品堆也在这时一起看，谁放进去的都一样。
+/// 方块实体是共享的，组件原样还给物品，和官方 `collectComponents` 一样。
+///
+/// The block entity is shared. Components go back onto the item as `collectComponents` writes them.
 pub(crate) fn collect(region: &Region, pos: BlockPos) -> ComponentPatch {
     let mut patch = region.block_items.get(&pos).cloned().unwrap_or_default();
     let Some(kind) = block_entity_kind(region, pos) else {
-        return patch.filtered();
+        return patch;
     };
-    if is_container(kind) {
+    if stores_items(kind) {
         let slots = region
             .containers
             .get(&pos)
             .map_or(&[][..], |entry| entry.slots.as_slice());
         patch.put(kinds::CONTAINER, PatchEntry::Set(container_contents(slots)));
     }
-    // 陶罐里的物品我们不存，官方这里放的是罐子里那一格。
-    if kind == entities::DECORATED_POT {
-        patch.put(
-            kinds::CONTAINER,
-            PatchEntry::Set(ComponentValue::Container(Vec::new())),
-        );
+    patch
+}
+
+/// 这一格的锁。空谓词和没有锁一样，返回 `None`。
+///
+/// This block's lock. An empty predicate is the same as no lock, so it returns `None`.
+pub(crate) fn lock_tag(region: &Region, pos: BlockPos) -> Option<Tag> {
+    match region.block_items.get(&pos)?.get(kinds::LOCK) {
+        Some(ComponentValue::Lock(tag)) if !matches!(tag, Tag::Compound(entries) if entries.is_empty()) => {
+            Some(tag.clone())
+        }
+        _ => None,
     }
-    patch.filtered()
 }
 
 /// 这一格方块实体的自定义名，官方 `Nameable.getCustomName`。
@@ -255,15 +265,19 @@ pub(crate) fn refresh_update_tag(region: &mut Region, pos: BlockPos) {
 
 /// 官方 `BlockEntity.getUpdateTag`：客户端要渲染的那几种方块实体发这段 NBT。
 ///
-/// 这段 NBT 发给所有看得到这一格的玩家，所以组件先过一遍 [`ComponentPatch::filtered`]。
 /// 别的方块实体官方发的是空标签，区块包里写一个 `TAG_End`，所以返回 `None`。
+///
+/// Other block entities send an empty tag, which the chunk packet writes as `TAG_End`, so this returns `None`.
 fn update_tag(region: &Region, pos: BlockPos) -> Option<Tag> {
     let kind = block_entity_kind(region, pos)?;
-    let patch = region.block_items.get(&pos)?.filtered();
+    if kind == entities::DECORATED_POT {
+        let patch = region.block_items.get(&pos).cloned().unwrap_or_default();
+        return pot_tag(region, pos, &patch);
+    }
+    let patch = region.block_items.get(&pos)?.clone();
     match kind {
         entities::BANNER => Some(banner_tag(&patch)),
         entities::SKULL => skull_tag(&patch),
-        entities::DECORATED_POT => pot_tag(&patch),
         _ => None,
     }
 }
@@ -401,35 +415,55 @@ fn uuid_tag(uuid: Uuid) -> Tag {
     ])
 }
 
-/// 饰纹陶罐的 `getUpdateTag`：只有 `sherds`，罐子里的物品我们不存。
-fn pot_tag(patch: &ComponentPatch) -> Option<Tag> {
-    let ComponentValue::PotDecorations {
+/// 饰纹陶罐的 `getUpdateTag`：`sherds` 之后是罐子里那一格的 `item`。
+///
+/// A decorated pot's `getUpdateTag`: `sherds`, then the stored slot as `item`.
+fn pot_tag(region: &Region, pos: BlockPos, patch: &ComponentPatch) -> Option<Tag> {
+    let mut entries = Vec::new();
+    if let Some(ComponentValue::PotDecorations {
         back,
         left,
         right,
         front,
-    } = patch.get(kinds::POT_DECORATIONS)?
-    else {
-        return None;
-    };
-    let sides = [
-        ("back", back),
-        ("left", left),
-        ("right", right),
-        ("front", front),
-    ];
-    let mut entries = Vec::new();
-    for (key, side) in sides {
-        let Some(side) = side else { continue };
-        let Some(tag) = template_tag(side) else {
-            debug!("skipping pot sherds: a sherd carries components we cannot write");
-            return None;
-        };
-        entries.push((key.to_owned(), tag));
+    }) = patch.get(kinds::POT_DECORATIONS)
+    {
+        let sides = [
+            ("back", back),
+            ("left", left),
+            ("right", right),
+            ("front", front),
+        ];
+        for (key, side) in sides {
+            let Some(side) = side else { continue };
+            let Some(tag) = template_tag(side) else {
+                debug!("skipping pot sherds: a sherd carries components we cannot write");
+                return None;
+            };
+            entries.push((key.to_owned(), tag));
+        }
     }
-    // 官方只在四面都空着的时候不写 `sherds`。
-    (!entries.is_empty())
-        .then(|| Tag::Compound(vec![("sherds".to_owned(), Tag::Compound(entries))]))
+    let mut tag = Vec::new();
+    if !entries.is_empty() {
+        tag.push(("sherds".to_owned(), Tag::Compound(entries)));
+    }
+    if let Some(item) = pot_item_tag(region, pos) {
+        tag.push(("item".to_owned(), item));
+    }
+    (!tag.is_empty()).then_some(Tag::Compound(tag))
+}
+
+fn pot_item_tag(region: &Region, pos: BlockPos) -> Option<Tag> {
+    let stack = region.containers.get(&pos)?.slots.first()?;
+    if stack.is_empty() {
+        return None;
+    }
+    let encoded = mc_bamboo_protocol::components::archive::stack::encode_stack(
+        stack.item,
+        stack.count,
+        &stack.patch(),
+    )
+    .ok()?;
+    Some(encoded.to_tag())
 }
 
 /// 官方 `ItemStackTemplate.MAP_CODEC`：`count` 是 1、组件是空的时候都不写。
@@ -488,6 +522,9 @@ pub(crate) fn add_block_data(region: &Region, pos: BlockPos, stack: &mut ItemSta
 
 /// `saveCustomOnly` 减去 `removeComponentsFromTag` 丢掉的键之后还剩的内容。
 fn block_entity_data(region: &Region, pos: BlockPos, kind: i32) -> Option<ComponentValue> {
+    if kind == entities::JUKEBOX {
+        return jukebox_record_data(region, pos, kind);
+    }
     if kind != entities::SIGN && kind != entities::HANGING_SIGN {
         return None;
     }
@@ -499,6 +536,123 @@ fn block_entity_data(region: &Region, pos: BlockPos, kind: i32) -> Option<Compon
     Some(ComponentValue::BlockEntityData(
         mc_bamboo_protocol::components::value::TypedEntityData { kind, tag },
     ))
+}
+
+/// 官方 `BaseContainerBlockEntity`、陶罐和雕纹书架都会把 `container` 写进格子。
+///
+/// Containers, pots and chiseled bookshelves all copy `container` into their slots.
+fn stores_items(kind: i32) -> bool {
+    is_container(kind) || kind == entities::DECORATED_POT || kind == entities::CHISELED_BOOKSHELF
+}
+
+/// 官方 `BlockEntityType.onlyOpCanSetNbt`。没有权限系统，这些类型不吃自定义 NBT。
+///
+/// `BlockEntityType.onlyOpCanSetNbt`. With no permission system these types skip custom NBT.
+fn only_op_can_set_nbt(kind: i32) -> bool {
+    matches!(
+        kind,
+        entities::COMMAND_BLOCK
+            | entities::LECTERN
+            | entities::SIGN
+            | entities::HANGING_SIGN
+            | entities::MOB_SPAWNER
+            | entities::TRIAL_SPAWNER
+    )
+}
+
+/// `TypedEntityData.loadInto` 里我们认的字段。组件随后盖掉同名的 NBT。
+///
+/// The fields `TypedEntityData.loadInto` understands here. Components overwrite the same names.
+fn merge_block_entity_data(
+    region: &mut Region,
+    pos: BlockPos,
+    kind: i32,
+    patch: &ComponentPatch,
+    implicit: &mut ComponentPatch,
+) {
+    let Some(ComponentValue::BlockEntityData(data)) = patch.get(kinds::BLOCK_ENTITY_DATA) else {
+        return;
+    };
+    if data.kind != kind {
+        return;
+    }
+    if kind == entities::JUKEBOX
+        && let Some(stack) = record_item(&data.tag)
+    {
+        set_first_slot(region, pos, stack);
+    }
+    if implicit.entry(kinds::CUSTOM_NAME).is_none()
+        && let Some(name) = field(&data.tag, "CustomName")
+            .and_then(mc_bamboo_protocol::components::text::checked_component)
+    {
+        implicit.put(
+            kinds::CUSTOM_NAME,
+            PatchEntry::Set(ComponentValue::CustomName(name)),
+        );
+    }
+    if implicit.entry(kinds::LOCK).is_none()
+        && let Some(Tag::Compound(entries)) = field(&data.tag, "lock")
+        && !entries.is_empty()
+    {
+        implicit.put(
+            kinds::LOCK,
+            PatchEntry::Set(ComponentValue::Lock(Tag::Compound(entries.clone()))),
+        );
+    }
+}
+
+fn record_item(tag: &[(String, Tag)]) -> Option<ItemStack> {
+    let Tag::Compound(_) = field(tag, "RecordItem")? else {
+        return None;
+    };
+    let tag = field(tag, "RecordItem")?;
+    let (item, count, patch) =
+        mc_bamboo_protocol::components::archive::stack::decode_stack(tag).ok()?;
+    let (added, removed) = patch.to_opaque();
+    let stack = ItemStack {
+        item,
+        count,
+        added,
+        removed,
+    };
+    (!stack.is_empty()).then_some(stack)
+}
+
+fn set_first_slot(region: &mut Region, pos: BlockPos, stack: ItemStack) {
+    let Some(kind) = container::kind_at(region, pos) else {
+        return;
+    };
+    let entry = container::entry_at(region, pos, kind);
+    if let Some(slot) = entry.slots.first_mut() {
+        *slot = stack;
+    }
+}
+
+fn jukebox_record_data(region: &Region, pos: BlockPos, kind: i32) -> Option<ComponentValue> {
+    let stack = region.containers.get(&pos)?.slots.first()?;
+    if stack.is_empty() {
+        return None;
+    }
+    let item = mc_bamboo_protocol::components::archive::stack::encode_stack(
+        stack.item,
+        stack.count,
+        &stack.patch(),
+    )
+    .ok()?
+    .to_tag();
+    Some(ComponentValue::BlockEntityData(
+        mc_bamboo_protocol::components::value::TypedEntityData {
+            kind,
+            tag: vec![("RecordItem".to_owned(), item)],
+        },
+    ))
+}
+
+fn field<'a>(entries: &'a [(String, Tag)], name: &str) -> Option<&'a Tag> {
+    entries
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
 }
 
 #[cfg(test)]

@@ -1,7 +1,11 @@
 //! 玩家移动和传送确认。
 //!
-//! 客户端说了算：M2 没有服务端物理，所以这里只挡非法值，再把位置记下来。
+//! 位置是否接受由 `player_move` 按官方 `handleMovePlayer` 决定。这里负责传送包和朝向。
 //! 区块由 tick 的跟踪阶段根据新位置处理，实体同步也是每 tick 比较位置。
+//!
+//! Whether a position is accepted is decided in `player_move`, matching `handleMovePlayer`.
+//! This module owns the teleport packet and the facing. Chunk tracking and entity sync
+//! still read the position once per tick.
 
 use mc_bamboo_core::Vec3;
 use mc_bamboo_protocol::{packet::play::PlayerPosition, text::Component};
@@ -14,11 +18,12 @@ use crate::{
     region::{Region, RegionTick},
 };
 
-const MAX_HORIZONTAL: f64 = 3.0e7;
-const MAX_VERTICAL: f64 = 2.0e7;
 const MAX_PITCH: f32 = 90.0;
 /// 一次传送多久没被确认就重发。只有收到移动包时才检查，不是定时器。
-const TELEPORT_RESEND_TICKS: u64 = 20;
+///
+/// How long an unconfirmed teleport waits before it is sent again. Checked only when a move
+/// packet arrives, not on a timer.
+pub(crate) const TELEPORT_RESEND_TICKS: u64 = 20;
 
 const INVALID_MOVEMENT: &str = "multiplayer.disconnect.invalid_player_movement";
 
@@ -29,11 +34,11 @@ const INVALID_MOVEMENT: &str = "multiplayer.disconnect.invalid_player_movement";
 #[derive(Debug, Default)]
 pub(crate) struct Teleport {
     /// 最新一次传送的 id。第一次是 1，和 `player_position` 里的相同。
-    latest_id: i32,
+    pub(crate) latest_id: i32,
     /// 有传送没被确认时，是传送之后的服务端位置。
-    awaiting_position: Option<Vec3>,
+    pub(crate) awaiting_position: Option<Vec3>,
     /// 最新一次传送发出的时刻。
-    sent_at: RegionTick,
+    pub(crate) sent_at: RegionTick,
 }
 
 impl Teleport {
@@ -71,91 +76,131 @@ pub(crate) fn teleport(
         z,
         yaw: player.yaw,
         pitch: player.pitch,
+        relative: 0,
     };
     links.send(player.id, &packet);
 }
 
+/// `/tp` 的一次传送。包里相对轴传差值，绝对轴传落点，朝向按算好的值。
+///
+/// One `/tp`. Relative axes are deltas, absolute axes are the destination, and rotation is
+/// the value already computed for the packet.
+pub(crate) struct CommandTeleport {
+    pub absolute: Vec3,
+    pub packet_x: f64,
+    pub packet_y: f64,
+    pub packet_z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub packet_yaw: f32,
+    pub packet_pitch: f32,
+    pub relative: i32,
+}
+
+pub(crate) fn teleport_command(
+    player: &mut Player,
+    links: &mut Links,
+    grid: &mut PlayerGrid,
+    now: RegionTick,
+    motion: CommandTeleport,
+) {
+    let teleport_id = player.teleport.next_id();
+    player.teleport.sent_at = now;
+    player.teleport.awaiting_position = Some(motion.absolute);
+    player.set_position(grid, motion.absolute);
+    // 官方 `teleportSetPosition` 把算好的角度直接写上，不再包一层 `wrapDegrees`。
+    //
+    // Official `teleportSetPosition` stores the computed angles without another `wrapDegrees`.
+    player.yaw = motion.yaw;
+    player.head_yaw = motion.yaw;
+    player.pitch = motion.pitch;
+    player.on_ground = true;
+    links.send(
+        player.id,
+        &PlayerPosition {
+            teleport_id,
+            x: motion.packet_x,
+            y: motion.packet_y,
+            z: motion.packet_z,
+            yaw: motion.packet_yaw,
+            pitch: motion.packet_pitch,
+            relative: motion.relative,
+        },
+    );
+}
+
 /// 处理四种移动包。线上没有的字段是 `None`，保持玩家当前的值。
+///
+/// Handles the four move packets. A field that was not on the wire is `None` and keeps
+/// the player's current value.
 pub(crate) fn on_move_player(
     region: &mut Region,
     id: PlayerId,
     position: Option<Vec3>,
     rotation: Option<(f32, f32)>,
     on_ground: bool,
+    horizontal_collision: bool,
 ) {
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
-    };
-    if has_invalid_values(position.unwrap_or_default(), rotation.unwrap_or_default()) {
-        region.links.kick(id, &invalid_movement());
-        return;
-    }
-
-    if let Some(awaiting) = player.teleport.awaiting_position {
-        // 这个包可能是传送之前发的，位置不能信。朝向不影响别的东西，可以照常更新。
-        if region.tick.since(player.teleport.sent_at) > TELEPORT_RESEND_TICKS {
-            teleport(
-                player,
-                &mut region.links,
-                &mut region.player_grid,
-                region.tick,
-                awaiting,
-            );
-        }
-        if let Some((yaw, pitch)) = rotation {
-            set_rotation(player, yaw, pitch);
-        }
-        return;
-    }
-
-    let position = position.unwrap_or(player.position());
-    let (yaw, pitch) = rotation.unwrap_or((player.yaw, player.pitch));
-    accept_movement(
-        player,
-        &mut region.player_grid,
+    crate::player_move::on_move_player(
+        region,
+        id,
         position,
-        yaw,
-        pitch,
+        rotation,
         on_ground,
+        horizontal_collision,
     );
 }
 
 /// 处理 `accept_teleportation`。
 ///
 /// 客户端确认之后不再发移动包，所以确认包里的位置就是它的下一次移动。
+///
+/// Handles `accept_teleportation`. The client sends no further move packet, so the position
+/// in the confirmation is its next movement.
 pub(crate) fn on_accept_teleportation(
     region: &mut Region,
     id: PlayerId,
     teleport_id: i32,
     position: Vec3,
-    (yaw, pitch): (f32, f32),
+    rotation: (f32, f32),
 ) {
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
-    };
-    // 重发之后旧 id 的确认走这里，位置继续被挡住。
-    if teleport_id != player.teleport.latest_id {
-        return;
-    }
-    let Some(awaiting) = player.teleport.awaiting_position.take() else {
-        region.links.kick(id, &invalid_movement());
-        return;
-    };
-    if has_invalid_values(position, (yaw, pitch)) {
-        region.links.kick(id, &invalid_movement());
-        return;
-    }
-
-    player.set_position(&mut region.player_grid, awaiting);
-    accept_movement(player, &mut region.player_grid, position, yaw, pitch, false);
+    crate::player_move::on_accept_teleportation(region, id, teleport_id, position, rotation);
 }
 
-fn invalid_movement() -> Component {
-    Component::translate(INVALID_MOVEMENT, [])
+/// 一个服务端 tick 收完包之后的飞行和加载检查。
+///
+/// Flying and client-load checks after a server tick has finished its packets.
+pub(crate) fn finish_tick(region: &mut Region) {
+    crate::player_move::finish_tick(region);
+}
+
+/// `client_tick_end`。标记只由这个包清掉，服务端 tick 不清。
+///
+/// `client_tick_end`. Only this packet clears the flag; the server tick does not.
+pub(crate) fn on_client_tick_end(region: &mut Region, id: PlayerId) {
+    crate::player_move::on_client_tick_end(region, id);
+}
+
+/// `player_loaded`。
+///
+/// `player_loaded`.
+pub(crate) fn on_player_loaded(region: &mut Region, id: PlayerId) {
+    crate::player_move::on_player_loaded(region, id);
+}
+
+pub(crate) fn invalid_movement() -> Component {
+    translated(INVALID_MOVEMENT)
+}
+
+pub(crate) fn translated(key: &str) -> Component {
+    Component::translate(key, [])
 }
 
 /// 位置是 NaN，或者朝向不是有限值。±无穷的位置不算非法，后面会被 clamp。
-fn has_invalid_values(position: Vec3, (yaw, pitch): (f32, f32)) -> bool {
+///
+/// The position is NaN, or a rotation is not finite. Infinite positions are not invalid;
+/// they are clamped later.
+pub(crate) fn invalid_position(position: Vec3, (yaw, pitch): (f32, f32)) -> bool {
     position.x.is_nan()
         || position.y.is_nan()
         || position.z.is_nan()
@@ -163,25 +208,7 @@ fn has_invalid_values(position: Vec3, (yaw, pitch): (f32, f32)) -> bool {
         || !pitch.is_finite()
 }
 
-fn accept_movement(
-    player: &mut Player,
-    grid: &mut PlayerGrid,
-    position: Vec3,
-    yaw: f32,
-    pitch: f32,
-    on_ground: bool,
-) {
-    let position = Vec3::new(
-        position.x.clamp(-MAX_HORIZONTAL, MAX_HORIZONTAL),
-        position.y.clamp(-MAX_VERTICAL, MAX_VERTICAL),
-        position.z.clamp(-MAX_HORIZONTAL, MAX_HORIZONTAL),
-    );
-    player.set_position(grid, position);
-    set_rotation(player, yaw, pitch);
-    player.on_ground = on_ground;
-}
-
-fn set_rotation(player: &mut Player, yaw: f32, pitch: f32) {
+pub(crate) fn set_rotation(player: &mut Player, yaw: f32, pitch: f32) {
     player.yaw = wrap_degrees(yaw);
     player.pitch = wrap_degrees(pitch).clamp(-MAX_PITCH, MAX_PITCH);
 }
@@ -211,8 +238,8 @@ fn wrap_degrees(angle: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_core::ChunkPos;
-    use mc_bamboo_data::packets::play::serverbound;
+    use mc_bamboo_core::{BlockPos, ChunkPos};
+    use mc_bamboo_data::{blocks, packets::play::serverbound};
     use mc_bamboo_protocol::{
         codec::Reader,
         frame::{MAX_FRAME_LEN, find_frame},
@@ -303,6 +330,9 @@ mod tests {
             SPAWN,
         );
         region.insert_player(player);
+        let joined = region.players.get_mut(&PLAYER).expect("刚放进去");
+        joined.motion.sync_goods(SPAWN);
+        joined.motion.mark_loaded();
         (region, recorder)
     }
 
@@ -317,7 +347,7 @@ mod tests {
     }
 
     fn move_to(region: &mut Region, position: Vec3) {
-        on_move_player(region, PLAYER, Some(position), None, true);
+        on_move_player(region, PLAYER, Some(position), None, true, false);
     }
 
     #[test]
@@ -333,7 +363,7 @@ mod tests {
 
         let (mut region, _) = settled_region();
         for (input, expected) in [(120.0, 90.0), (200.0, -90.0)] {
-            on_move_player(&mut region, PLAYER, None, Some((0.0, input)), false);
+            on_move_player(&mut region, PLAYER, None, Some((0.0, input)), false, false);
             assert_eq!(player(&region).pitch, expected, "pitch {input}");
         }
     }
@@ -349,6 +379,7 @@ mod tests {
                     position: None,
                     rotation: None,
                     on_ground,
+                    horizontal_collision: flags & 0x02 != 0,
                 }),
                 "flags {flags:#x}"
             );
@@ -387,13 +418,15 @@ mod tests {
         let (mut region, recorder) = settled_region();
 
         move_to(&mut region, Vec3::new(5.0e7, 9.0e9, -5.0e7));
-        assert_eq!(player(&region).position(), Vec3::new(3.0e7, 2.0e7, -3.0e7));
+        assert_eq!(player(&region).position(), SPAWN);
+        assert!(player(&region).teleport.is_awaiting());
 
+        on_client_tick_end(&mut region, PLAYER);
         move_to(
             &mut region,
             Vec3::new(f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
         );
-        assert_eq!(player(&region).position(), Vec3::new(3.0e7, -2.0e7, -3.0e7));
+        assert_eq!(player(&region).position(), SPAWN);
         assert!(!recorder.closed());
     }
 
@@ -429,7 +462,7 @@ mod tests {
         ] {
             let (mut region, recorder) = settled_region();
 
-            on_move_player(&mut region, PLAYER, None, Some(bad), false);
+            on_move_player(&mut region, PLAYER, None, Some(bad), false, false);
 
             assert!(recorder.closed());
         }
@@ -438,23 +471,31 @@ mod tests {
     #[test]
     fn missing_fields_keep_the_current_values() {
         let (mut region, _) = settled_region();
-        let target = Vec3::new(1.0, 2.0, 3.0);
+        let target = Vec3::new(9.0, -60.0, 8.5);
 
-        on_move_player(&mut region, PLAYER, Some(target), Some((90.0, -45.0)), true);
+        on_move_player(
+            &mut region,
+            PLAYER,
+            Some(target),
+            Some((90.0, -45.0)),
+            true,
+            false,
+        );
         assert_eq!(player(&region).position(), target);
         assert_eq!((player(&region).yaw, player(&region).pitch), (90.0, -45.0));
         assert!(player(&region).on_ground);
 
-        on_move_player(&mut region, PLAYER, None, Some((10.0, 20.0)), false);
+        on_client_tick_end(&mut region, PLAYER);
+        on_move_player(&mut region, PLAYER, None, Some((10.0, 20.0)), false, false);
         assert_eq!(player(&region).position(), target);
         assert_eq!((player(&region).yaw, player(&region).pitch), (10.0, 20.0));
         assert!(!player(&region).on_ground);
 
-        on_move_player(&mut region, PLAYER, Some(SPAWN), None, true);
+        on_move_player(&mut region, PLAYER, Some(SPAWN), None, true, false);
         assert_eq!(player(&region).position(), SPAWN);
         assert_eq!((player(&region).yaw, player(&region).pitch), (10.0, 20.0));
 
-        on_move_player(&mut region, PLAYER, None, None, false);
+        on_move_player(&mut region, PLAYER, None, None, false, false);
         assert_eq!(player(&region).position(), SPAWN);
         assert_eq!((player(&region).yaw, player(&region).pitch), (10.0, 20.0));
         assert!(!player(&region).on_ground);
@@ -464,12 +505,17 @@ mod tests {
     fn walking_up_and_down_stays_in_the_same_chunk() {
         let (mut region, _) = settled_region();
 
-        move_to(&mut region, Vec3::new(8.5, 300.0, 8.5));
+        move_to(&mut region, Vec3::new(8.5, -50.0, 8.5));
 
-        assert_eq!(player(&region).position().y, 300.0);
+        assert_eq!(player(&region).position().y, -50.0);
         assert_eq!(player(&region).chunk_pos(), ChunkPos::new(0, 0));
 
-        move_to(&mut region, Vec3::new(-0.5, 300.0, 16.5));
+        on_client_tick_end(&mut region, PLAYER);
+        finish_tick(&mut region);
+        move_to(&mut region, Vec3::new(-0.5, -50.0, 8.5));
+        on_client_tick_end(&mut region, PLAYER);
+        finish_tick(&mut region);
+        move_to(&mut region, Vec3::new(-0.5, -50.0, 16.5));
         assert_eq!(player(&region).chunk_pos(), ChunkPos::new(-1, 1));
     }
 
@@ -483,6 +529,7 @@ mod tests {
             Some(Vec3::new(100.0, 0.0, 100.0)),
             Some((190.0, 120.0)),
             true,
+            false,
         );
 
         let waiting = player(&region);
@@ -527,7 +574,8 @@ mod tests {
             (0.0, 0.0),
         );
 
-        assert_eq!(player(&region).position(), Vec3::new(3.0e7, 0.0, 0.0));
+        assert_eq!(player(&region).position(), SPAWN);
+        assert!(player(&region).teleport.is_awaiting());
     }
 
     #[test]
@@ -581,6 +629,11 @@ mod tests {
         move_to(&mut region, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(recorder_ids(&mut region, &recorder), [1]);
 
+        // 同一个客户端 tick 里第二份位置包会被判成非法移动。重发要等下一份客户端 tick。
+        //
+        // A second position packet in the same client tick is invalid movement. The resend waits
+        // for the next client tick.
+        on_client_tick_end(&mut region, PLAYER);
         advance(&mut region, 1);
         move_to(&mut region, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(recorder_ids(&mut region, &recorder), [1, 2]);
@@ -617,5 +670,241 @@ mod tests {
         assert_eq!(state.next_id(), i32::MAX - 1);
         assert_eq!(state.next_id(), 0);
         assert_eq!(state.next_id(), 1);
+    }
+
+    fn player_mut(region: &mut Region) -> &mut Player {
+        region.players.get_mut(&PLAYER).expect("玩家在世界里")
+    }
+
+    fn set_mode(region: &mut Region, mode: GameMode) {
+        player_mut(region).game_mode = mode;
+    }
+
+    /// 速度检查允许的上限是 100，等于正好 10 格。再远一格就拉回。
+    #[test]
+    fn ten_blocks_is_allowed_and_one_more_is_pulled_back() {
+        let (mut region, recorder) = settled_region();
+        let ten = Vec3::new(SPAWN.x + 10.0, SPAWN.y, SPAWN.z);
+        move_to(&mut region, ten);
+        assert_eq!(player(&region).position(), ten);
+        assert!(!recorder.closed());
+
+        on_client_tick_end(&mut region, PLAYER);
+        finish_tick(&mut region);
+        move_to(&mut region, Vec3::new(ten.x + 10.0 + 1.0e-6, ten.y, ten.z));
+        assert_eq!(player(&region).position(), ten);
+        assert!(player(&region).teleport.is_awaiting());
+        assert!(!recorder.closed());
+    }
+
+    #[test]
+    fn a_hundred_block_move_is_pulled_back_without_a_kick() {
+        let (mut region, recorder) = settled_region();
+        move_to(&mut region, Vec3::new(SPAWN.x + 100.0, SPAWN.y, SPAWN.z));
+        assert_eq!(player(&region).position(), SPAWN);
+        assert!(player(&region).teleport.is_awaiting());
+        assert!(!recorder.closed());
+    }
+
+    #[test]
+    fn the_sixth_move_packet_in_one_tick_is_judged_as_one_packet() {
+        let (mut region, recorder) = settled_region();
+        finish_tick(&mut region);
+        for step in 1..=5 {
+            move_to(
+                &mut region,
+                Vec3::new(SPAWN.x + f64::from(step) * 0.2, SPAWN.y, SPAWN.z),
+            );
+            on_client_tick_end(&mut region, PLAYER);
+        }
+        let far = Vec3::new(SPAWN.x + 15.0, SPAWN.y, SPAWN.z);
+        move_to(&mut region, far);
+        assert_eq!(player(&region).position().x, SPAWN.x + 1.0);
+        assert!(player(&region).teleport.is_awaiting());
+        assert!(!recorder.closed());
+
+        let (mut region, _) = settled_region();
+        finish_tick(&mut region);
+        for step in 1..=4 {
+            move_to(
+                &mut region,
+                Vec3::new(SPAWN.x + f64::from(step) * 0.2, SPAWN.y, SPAWN.z),
+            );
+            on_client_tick_end(&mut region, PLAYER);
+        }
+        move_to(&mut region, far);
+        assert_eq!(player(&region).position(), far);
+    }
+
+    #[test]
+    fn walking_into_stone_is_pulled_back_for_survival_and_creative() {
+        for mode in [GameMode::Survival, GameMode::Creative, GameMode::Adventure] {
+            let (mut region, recorder) = settled_region();
+            set_mode(&mut region, mode);
+            region
+                .chunks
+                .set_block(BlockPos::new(9, -60, 8), blocks::STONE);
+            move_to(&mut region, Vec3::new(9.2, SPAWN.y, SPAWN.z));
+            assert_eq!(player(&region).position(), SPAWN, "{mode:?}");
+            assert!(player(&region).teleport.is_awaiting(), "{mode:?}");
+            assert!(!recorder.closed(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_player_already_inside_a_block_may_move_within_it() {
+        let (mut region, _) = settled_region();
+        set_mode(&mut region, GameMode::Survival);
+        region
+            .chunks
+            .set_block(BlockPos::new(8, -60, 8), blocks::STONE);
+        let inside = Vec3::new(8.6, SPAWN.y, SPAWN.z);
+        move_to(&mut region, inside);
+        assert_eq!(player(&region).position(), inside);
+        assert!(!player(&region).teleport.is_awaiting());
+    }
+
+    #[test]
+    fn a_spectator_passes_through_stone_only_after_the_tick_sets_no_physics() {
+        let (mut region, _) = settled_region();
+        set_mode(&mut region, GameMode::Spectator);
+        region
+            .chunks
+            .set_block(BlockPos::new(9, -60, 8), blocks::STONE);
+        let into = Vec3::new(9.2, SPAWN.y, SPAWN.z);
+        move_to(&mut region, into);
+        assert_eq!(player(&region).position(), SPAWN);
+        assert!(player(&region).teleport.is_awaiting());
+
+        on_client_tick_end(&mut region, PLAYER);
+        let teleport_id = player(&region).teleport.latest_id;
+        on_accept_teleportation(&mut region, PLAYER, teleport_id, SPAWN, (0.0, 0.0));
+        finish_tick(&mut region);
+        move_to(&mut region, into);
+        assert_eq!(player(&region).position(), into);
+    }
+
+    #[test]
+    fn floating_for_81_ticks_kicks_survival_and_adventure_only() {
+        for mode in [GameMode::Survival, GameMode::Adventure] {
+            let (mut region, recorder) = settled_region();
+            set_mode(&mut region, mode);
+            crate::player_move::place_player(&mut region, PLAYER, Vec3::new(8.5, 80.0, 8.5));
+            move_to(&mut region, Vec3::new(8.5, 80.0, 8.5));
+            assert!(player(&region).motion.client_is_floating, "{mode:?}");
+            for _ in 0..80 {
+                finish_tick(&mut region);
+            }
+            assert!(!recorder.closed(), "{mode:?}");
+            finish_tick(&mut region);
+            assert!(recorder.closed(), "{mode:?}");
+        }
+
+        for mode in [GameMode::Creative, GameMode::Spectator] {
+            let (mut region, recorder) = settled_region();
+            set_mode(&mut region, mode);
+            crate::player_move::place_player(&mut region, PLAYER, Vec3::new(8.5, 80.0, 8.5));
+            move_to(&mut region, Vec3::new(8.5, 80.0, 8.5));
+            assert!(!player(&region).motion.client_is_floating, "{mode:?}");
+            for _ in 0..81 {
+                finish_tick(&mut region);
+            }
+            assert!(!recorder.closed(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn movement_before_the_client_has_loaded_is_ignored() {
+        let mut region = Region::new(8, 20, false);
+        let recorder = Recorder::default();
+        region.links.add(PLAYER, Box::new(recorder.clone()));
+        let mut joined = Player::new(
+            PLAYER,
+            Uuid::nil(),
+            "Kitten".to_owned(),
+            GameMode::Creative,
+            ClientInformation::default(),
+            SPAWN,
+        );
+        joined.motion.sync_goods(SPAWN);
+        region.insert_player(joined);
+
+        move_to(&mut region, Vec3::new(9.0, SPAWN.y, SPAWN.z));
+        assert_eq!(player(&region).position(), SPAWN);
+        assert!(!recorder.closed());
+    }
+
+    #[test]
+    fn two_position_packets_in_one_client_tick_kick() {
+        let (mut region, recorder) = settled_region();
+        move_to(&mut region, Vec3::new(9.0, SPAWN.y, SPAWN.z));
+        move_to(&mut region, Vec3::new(10.0, SPAWN.y, SPAWN.z));
+        assert!(recorder.closed());
+    }
+
+    #[test]
+    fn a_client_tick_end_allows_another_position() {
+        let (mut region, recorder) = settled_region();
+        let first = Vec3::new(9.0, SPAWN.y, SPAWN.z);
+        move_to(&mut region, first);
+        on_client_tick_end(&mut region, PLAYER);
+        finish_tick(&mut region);
+        let second = Vec3::new(10.0, SPAWN.y, SPAWN.z);
+        move_to(&mut region, second);
+        assert_eq!(player(&region).position(), second);
+        assert!(!recorder.closed());
+    }
+
+    #[test]
+    fn fall_distance_accumulates_and_resets_on_ground_without_damage() {
+        let (mut region, _) = settled_region();
+        crate::player_move::place_player(&mut region, PLAYER, Vec3::new(8.5, 80.0, 8.5));
+        on_move_player(
+            &mut region,
+            PLAYER,
+            Some(Vec3::new(8.5, 78.0, 8.5)),
+            None,
+            false,
+            false,
+        );
+        let fell = player(&region).motion.fall_distance;
+        // 服务端玩家不算 `move` 里面那次摔落，只记接受之后的 `doCheckFallDamage`，所以是 2 不是 4。
+        //
+        // A server player skips the fall record inside `move` and keeps only `doCheckFallDamage`
+        // after the move is accepted, so this is 2 rather than 4.
+        assert!((fell - 2.0).abs() < 1.0e-6, "{fell}");
+
+        on_client_tick_end(&mut region, PLAYER);
+        finish_tick(&mut region);
+        move_to(&mut region, Vec3::new(8.5, 78.0, 8.5));
+        assert_eq!(player(&region).motion.fall_distance, 0.0);
+        assert!(player(&region).on_ground);
+    }
+
+    #[test]
+    fn a_legal_position_past_the_horizontal_limit_is_clamped_and_kept() {
+        let (mut region, recorder) = settled_region();
+        let near = Vec3::new(29_999_995.0, SPAWN.y, SPAWN.z);
+        crate::player_move::place_player(&mut region, PLAYER, near);
+        finish_tick(&mut region);
+        move_to(&mut region, Vec3::new(30_000_010.0, SPAWN.y, SPAWN.z));
+        assert_eq!(player(&region).position().x, 30_000_000.0);
+        assert!(!player(&region).teleport.is_awaiting());
+        assert!(!recorder.closed());
+    }
+
+    #[test]
+    fn the_horizontal_collision_flag_is_stored() {
+        let (mut region, _) = settled_region();
+        on_move_player(
+            &mut region,
+            PLAYER,
+            Some(Vec3::new(8.7, SPAWN.y, SPAWN.z)),
+            None,
+            true,
+            true,
+        );
+        assert!(player(&region).motion.client_horizontal_collision);
+        assert!(player(&region).on_ground);
     }
 }

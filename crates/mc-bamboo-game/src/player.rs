@@ -17,6 +17,7 @@ use crate::{
     menu::station::InventoryCursor,
     movement::Teleport,
     player_grid::PlayerGrid,
+    player_move::Motion,
 };
 
 const STANDING_EYE_HEIGHT: f64 = 1.62;
@@ -32,6 +33,14 @@ pub(crate) struct Player {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
     pub(crate) game_mode: GameMode,
+    /// 命令权限等级，0 到 4，来自 `ops.json`。
+    ///
+    /// Command permission level, 0 through 4, from `ops.json`.
+    pub(crate) permission_level: u8,
+    /// 是否列在 `ops.json` 里。和权限等级分开，等级 0 的 OP 也算 OP。
+    ///
+    /// Whether the player is listed in `ops.json`. Separate from the level: a level-0 op still counts.
+    pub(crate) is_op: bool,
     /// 实体位置，也就是脚底。只能经 [`Player::set_position`] 改，见 [`PlayerGrid`]。
     ///
     /// Entity position, the feet. Changed only through [`Player::set_position`]; see [`PlayerGrid`].
@@ -41,6 +50,10 @@ pub(crate) struct Player {
     /// 每 tick 由派生状态的阶段写成 `yaw`。
     pub(crate) head_yaw: f32,
     pub(crate) on_ground: bool,
+    /// 移动校验用的服务端状态，对应 `ServerGamePacketListenerImpl` 里跟位置有关的字段。
+    ///
+    /// Server-side movement state, the position fields of `ServerGamePacketListenerImpl`.
+    pub(crate) motion: Motion,
     /// 最近一次收到的客户端设置。
     pub(crate) client: ClientInformation,
     pub(crate) teleport: Teleport,
@@ -75,11 +88,14 @@ impl Player {
             uuid,
             name,
             game_mode,
+            permission_level: 0,
+            is_op: false,
             position,
             yaw: 0.0,
             pitch: 0.0,
             head_yaw: 0.0,
             on_ground: false,
+            motion: Motion::new(position),
             sync: EntitySync::new(position, &client),
             client,
             teleport: Teleport::default(),
@@ -192,10 +208,11 @@ mod tests {
     fn chunk_position_rounds_down() {
         let mut player = player_requesting(2);
 
-        player.position = Vec3::new(-0.5, 500.0, 16.0);
+        let mut grid = PlayerGrid::default();
+        player.set_position(&mut grid, Vec3::new(-0.5, 500.0, 16.0));
         assert_eq!(player.chunk_pos(), ChunkPos::new(-1, 1));
 
-        player.position = Vec3::new(3.0e7, 0.0, -3.0e7);
+        player.set_position(&mut grid, Vec3::new(3.0e7, 0.0, -3.0e7));
         assert_eq!(player.chunk_pos(), ChunkPos::new(1_875_000, -1_875_000));
     }
 

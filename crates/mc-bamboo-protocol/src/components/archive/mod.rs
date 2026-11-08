@@ -14,6 +14,8 @@
 //! either turned into NBT or hashed with CRC32C. Optional fields follow the three
 //! DataFixerUpper shapes, and numbers are accepted from any numeric tag.
 
+use mc_bamboo_nbt::Tag;
+
 pub mod components;
 pub mod dynamic;
 pub mod read;
@@ -24,3 +26,10 @@ pub mod write;
 
 pub use dynamic::Dyn;
 pub use read::{Error, Result};
+
+/// 官方 `ResolvableProfile.CODEC`。文本里的玩家头和档案组件都走这一份。
+///
+/// `ResolvableProfile.CODEC`, shared by player-head text and profile components.
+pub(crate) fn decode_profile_tag(tag: &Tag) -> Result<crate::components::value::ResolvableProfile> {
+    records::decode_profile(tag)
+}

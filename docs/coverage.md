@@ -37,12 +37,14 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 - 只有 Bamboo 解码的包才可能因为内容畸形断开。帧层错误（`FrameError`）仍然断开。
 - `set_creative_mode_slot` 不能调用 `finish()`（`blocks-inventory.md` 2.5）。
 
-### 1.1 必须处理（21 个）
+### 1.1 必须处理（23 个）
 
 | ID | 包 | 客户端什么时候发 | 不处理的后果 | 规格 |
 |---|---|---|---|---|
 | 0 | `accept_teleportation` | `ClientPacketListener.handleMovePlayer`，每次 `player_position` 后立刻发 | M2 只有进服一次传送，暂时不影响。不解码时至少不能当错误 | `chunks-movement.md` 2.5、5.2 |
 | 7 | `chat_command` | `ClientPacketListener.sendCommand` | 玩家什么也看不到 | `chat-join.md` 第 4 节、7.4 |
+| 8 | `chat_command_signed` | `say`、`me`、`msg` 的 `minecraft:message` | 签名丢掉，按 `chat_command` 执行。不解码就断线 | `chat-join.md` 第 4 节 |
+| 15 | `command_suggestion` | 字面量和在线玩家名的 `ask_server` | 不回时补全一直转，下次请求会取消上一次 | `chat-join.md` 第 7 节 |
 | 9 | `chat` | `ClientPacketListener.sendChat` | 所有人都看不到消息 | `chat-join.md` 第 4 节 |
 | 11 | `chunk_batch_received` | `handleChunkBatchFinished`，每批一个 | 只发第一批 9 个就停 | `chunks-movement.md` 7.3 |
 | 14 | `client_information` | Configuration 一次，之后 `Options.save` 触发 | 皮肤外层和主手错，视距不生效 | `entities.md` 第 10 节，`chat-join.md` 第 4 节 |
@@ -93,9 +95,9 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 44 | `player_loaded` | `ClientPacketListener.notifyPlayerLoaded` | 官方只结束 60 tick 门限，没有回包，见 `chunks-movement.md` 2.6 |
 | 51 | `seen_advancements` | 关进度界面，`AdvancementsScreen.removed` | 官方只处理 `OPENED_TAB`。没有 `update_advancements` 时选中页是 null，`OPENED_TAB` 不会发 |
 
-### 1.4 M2 里不会发（37 个）
+### 1.4 M2 里不会发（35 个）
 
-全部归入 `Other`，收到也丢弃。权限判断依据：Bamboo 不发 `entity_event` 24..28，客户端的权限一直是 `NO_PERMISSIONS`。
+全部归入 `Other`，收到也丢弃。权限来自启动目录的 `ops.json`：在名单里的玩家进服时收到对应的 `entity_event` 24..28，不在名单里的是 24。
 
 | ID | 包 | 为什么不会发 |
 |---|---|---|
@@ -103,9 +105,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 4 | `change_difficulty` | `WorldOptionsScreen` 的按钮没有权限时 `active = false` |
 | 5 | `change_game_mode` | F3+N、F3+F4 要 `GameModeCommand.PERMISSION_CHECK` |
 | 6 | `chat_ack` | 只有签名消息才累计 offset（`chat-join.md` 第 4 节） |
-| 8 | `chat_command_signed` | 命令树里没有 `minecraft:message` |
 | 10 | `chat_session_update` | 只有 `online_mode=true` 才准备密钥 |
-| 15 | `command_suggestion` | 命令树里没有 `ask_server`。以后加了不回也只是没有补全：`ClientSuggestionProvider.customSuggestion` 的 future 不完成，下次请求时取消 |
 | 16 | `configuration_acknowledged` | 只回应 `start_configuration` |
 | 17 | `container_button_click` | 附魔台、讲台、织布机、切石机界面，都要服务端打开 |
 | 18 | `container_click` | `AbstractContainerScreen.slotClicked` 才发，创造模式界面覆盖了它 |

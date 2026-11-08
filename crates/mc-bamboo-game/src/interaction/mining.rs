@@ -3,9 +3,9 @@
 //! 一个玩家一份状态 [`Mining`]，`tick_mining` 每 tick 推进一次。开始挖、换方向、停下和放弃
 //! 这四种动作都走 [`handle_block_break_action`]，和官方同名。
 //!
-//! 掉落物、经验、工具耐久和统计都还没有：官方的 `destroyBlock` 在 `removeBlock` 之后调用
-//! `Block.playerDestroy`（`Block.dropResources`）和 `popExperience`，这里在
-//! [`destroy_block`] 里留了注释标出位置。
+//! 掉落物、经验和统计都还没有：官方的 `destroyBlock` 在 `removeBlock` 之后调用
+//! `Block.playerDestroy`（`Block.dropResources`）和 `popExperience`。工具耐久在
+//! [`destroy_block`] 里扣。
 
 use mc_bamboo_blocks::{
     Actor, BlockState, InteractionResult, Level,
@@ -23,7 +23,7 @@ use super::{
     MAX_Y, REACH_BUFFER, actor_of, adventure, rules, send_current_block, send_effects,
     send_level_event, within_block_interaction_range,
 };
-use crate::{inbound::PlayerId, links::encode_frames, region::Region};
+use crate::{durability, inbound::PlayerId, links::encode_frames, region::Region};
 
 /// `LevelEvent.PARTICLES_DESTROY_PROGRESS`：挖到一半的裂纹和声音。
 const DESTROY_PROGRESS_EVENT: i32 = 2019;
@@ -348,16 +348,19 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     }
     // 方块的 `GameMasterBlock` 检查在这里面：没有权限系统，命令方块这类一律挖不动，
     // 返回 `Fail`，调用方把这一格发回去。
-    let outcome = {
+    let outcome = durability::run(region, snapshot.id, Hand::Main, |region| {
         let (mut level, ticks) = region.block_level();
         mc_bamboo_blocks::destroy_block(&mut level, ticks, &snapshot.actor, pos)
-    };
+    });
     send_effects(region, Some(snapshot.id), &outcome.effects);
     if outcome.result != InteractionResult::Success {
         return false;
     }
-    // 官方接下来调用 `Block.playerDestroy`（`Block.dropResources`）和 `popExperience`，
-    // 掉落物和经验还没做；工具耐久和统计也没有。`Block.destroy` 也没有对应的移植。
+    // 官方接下来调用 `Block.playerDestroy`（`Block.dropResources`）和 `popExperience`。
+    // 掉落物、经验和统计还没做。工具耐久在 `destroy_block` 里扣。
+    //
+    // Vanilla then calls `Block.playerDestroy` (`Block.dropResources`) and `popExperience`.
+    // Drops, experience and statistics are not implemented. Tool durability is spent inside `destroy_block`.
     true
 }
 
@@ -483,7 +486,10 @@ mod tests {
         item::ItemStack,
         packet::{
             ClientboundPacket,
-            play::{BlockDestruction, GameMode, LevelEvent, PlayRequest, PlayerActionKind},
+            play::{
+                BlockDestruction, ContainerSetSlot, EquipmentSlot, GameMode, LevelEvent,
+                PlayRequest, PlayerActionKind, SetEquipment,
+            },
         },
     };
 
@@ -619,6 +625,35 @@ mod tests {
         frame_of(&mc_bamboo_protocol::packet::play::BlockChangedAck { sequence })
     }
 
+    /// 钻石镐挖掉一块石头后耐久变成 1。`damage` 组件的值是一个 varint。
+    ///
+    /// A diamond pickaxe has damage 1 after breaking one stone. The `damage` value is a varint.
+    fn worn_pickaxe() -> ItemStack {
+        ItemStack {
+            item: items::DIAMOND_PICKAXE,
+            count: 1,
+            added: vec![(kinds::DAMAGE, vec![1])],
+            removed: Vec::new(),
+        }
+    }
+
+    fn worn_pickaxe_slot() -> Frame {
+        let stack = worn_pickaxe();
+        frame_of(&ContainerSetSlot {
+            container_id: 0,
+            state_id: 1,
+            slot: 36,
+            stack: &stack,
+        })
+    }
+
+    fn worn_pickaxe_equipment(entity_id: i32) -> Frame {
+        let stack = worn_pickaxe();
+        let slots = [(EquipmentSlot::MainHand, &stack)];
+        let packet = SetEquipment::new(entity_id, &slots).expect("one slot");
+        frame_of(&packet)
+    }
+
     fn update(pos: BlockPos, state: u32) -> Frame {
         frame_of(&mc_bamboo_protocol::packet::play::BlockUpdate {
             pos,
@@ -668,7 +703,13 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        assert_eq!(client.take_frames(), [update(GROUND, blocks::AIR), ack(2)]);
+        // 挖穿时镐子扣 1 点耐久，先把那一格同步给自己，再广播方块和 ack。
+        //
+        // Breaking the block spends one point, so the slot is sent before the block update and ack.
+        assert_eq!(
+            client.take_frames(),
+            [worn_pickaxe_slot(), update(GROUND, blocks::AIR), ack(2)]
+        );
     }
 
     #[test]
@@ -694,8 +735,13 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        // 延迟破坏没有 sequence，只广播方块变化，不发 ack。
-        assert_eq!(client.take_frames(), [update(GROUND, blocks::AIR)]);
+        // 延迟破坏没有 sequence，只广播方块变化，不发 ack。镐子同样扣 1 点。
+        //
+        // A delayed break has no sequence, so there is no ack. The pickaxe still loses one point.
+        assert_eq!(
+            client.take_frames(),
+            [worn_pickaxe_slot(), update(GROUND, blocks::AIR)]
+        );
     }
 
     #[test]
@@ -751,6 +797,10 @@ mod tests {
                 crack(breaker, GROUND, -1),
                 level_event(2001, GROUND, blocks::STONE as i32),
                 update(GROUND, blocks::AIR),
+                // 主手物品变了，刻末的装备同步把扣过耐久的镐子发给旁边的人。
+                //
+                // The main hand changed, so the end-of-tick equipment sync shows the worn pickaxe.
+                worn_pickaxe_equipment(breaker),
             ]
         );
     }
@@ -821,6 +871,7 @@ mod tests {
                 position: Some(Vec3::new(8.25, -60.0, 8.5)),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             },
         );
         let pos = BlockPos::new(14, -59, 8);

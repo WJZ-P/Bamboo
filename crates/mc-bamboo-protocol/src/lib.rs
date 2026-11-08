@@ -5,7 +5,11 @@
 
 pub mod codec;
 pub mod components;
+mod stack_hop;
+
 pub mod compression;
+#[cfg(test)]
+mod deep_stack;
 pub mod frame;
 pub mod item;
 pub mod packet;

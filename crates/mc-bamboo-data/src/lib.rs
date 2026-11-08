@@ -19,9 +19,15 @@ pub use recipe::{
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, component_enums, component_registries,
-    crafting_remainders, entity_types, heightmaps, item_components, items, jukebox_songs, light,
-    loot, packets, recipes, registries, shapes, states, tags, version, worldgen,
+    block_maps, block_transformers, blocks, command_argument_types, component_enums,
+    component_registries, crafting_remainders, entity_types, heightmaps, item_components,
+    item_damage, items, jukebox_songs, light, loot, packets, recipes, registries, shapes, sounds,
+    states, tags, version, worldgen,
+};
+
+pub use generated::sounds::{
+    NOTE_BLOCK_INSTRUMENTS, NoteBlockInstrumentDef, SOUND_EVENTS, SOUND_TYPES, STATE_SOUND_TYPE,
+    SoundEventDef, SoundSource, SoundTypeDef, jukebox_song, note_block_instrument, sound_event,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -266,6 +272,8 @@ pub struct Block {
     pub offset: Option<BlockOffset>,
     /// `hasDynamicShape`：官方不缓存这种方块的形状，读取时要带上世界和位置。
     pub dynamic_shape: bool,
+    /// 用桶取起这个方块时播的声音，`sound_event` 注册表 ID。只有实现 `BucketPickup` 的方块有。
+    pub pickup_sound: Option<i32>,
     /// `defaultDestroyTime`，也就是硬度。`-1` 表示挖不动。
     pub destroy_time: f32,
     /// `requiresCorrectToolForDrops`：不带正确的工具时挖得慢，而且没有掉落物。
@@ -373,6 +381,19 @@ pub struct Item {
     pub block_transformer: Option<&'static BlockTransformer>,
     /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
     pub blocks_attacks: bool,
+    /// `SolidBucketItem.placeSound`：放下时播放的声音，只有细雪桶有。
+    /// `SolidBucketItem.placeSound`. Only the powder-snow bucket has one.
+    pub place_sound: Option<i32>,
+    /// `BucketItem.playEmptySound` 或 `MobBucketItem.emptySound`。只有这两种桶有。
+    /// `BucketItem.playEmptySound`, or `MobBucketItem.emptySound`. Only those buckets have one.
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。生物桶是 `NEUTRAL`，其余是 `BLOCKS`。
+    /// `SoundSource` ordinal when emptying. `NEUTRAL` for a mob bucket, `BLOCKS` otherwise.
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名。倒出后 `playAmbientSound` 的音效挂在 `entity.<这段路径>.` 下。
+    /// Registry name of `MobBucketItem.type`. `playAmbientSound` after pouring uses events under
+    /// `entity.<this path>.`.
+    pub bucket_entity: Option<&'static str>,
 }
 
 /// `compostable` 组件的 `layers`，数据包 `context_int_provider/compostable` 里的整数提供器。
@@ -395,7 +416,9 @@ pub struct BlockTransformer {
     pub transforms: &'static [BlockTransform],
 }
 
-/// `BlockTransformer.BlockTransformData` 里改方块的部分。音效、粒子、耐久和掉落物不在这里。
+/// `BlockTransformer.BlockTransformData` 里改方块的部分。掉落物不在这里。
+///
+/// The block-changing part of `BlockTransformer.BlockTransformData`. Loot is not included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockTransform {
     pub provider: StateProvider,
@@ -403,6 +426,119 @@ pub struct BlockTransform {
     pub disallowed_faces: &'static [i32],
     /// `updateFromNeighbors`：写入前先按六个邻居更新一遍状态。
     pub update_from_neighbors: bool,
+    /// `consumeOnUse`：可堆叠物品用完时减 1。codec 缺省是 true。
+    ///
+    /// `consumeOnUse`: a stackable item loses one when this is true. The codec default is true.
+    pub consume_on_use: bool,
+    /// `itemDamagePerUse`：不可堆叠时交给 `hurtAndBreak` 的点数。codec 缺省是 0，这里是加载后的值。
+    ///
+    /// `itemDamagePerUse`: the `hurtAndBreak` amount for an unstackable item. The codec default is 0; this is the loaded value.
+    pub item_damage_per_use: i32,
+
+    /// `sound`：写入后放的音效事件，没配时官方用的是 `SoundEvents.EMPTY`。
+    pub sound: Option<u16>,
+    /// `particle`：`TransformParticle` 发的等级事件，`NONE` 是 0。
+    pub particle: i32,
+    /// `transform_type == COPPER_CHEST`：改完方块还要给大箱子的另一半发一次粒子。
+    pub copper_chest: bool,
+}
+
+/// 一条附魔上的 `minecraft:item_damage` 效果，数据在 [`item_damage`]。
+///
+/// One enchantment's `minecraft:item_damage` effects. The table is [`item_damage`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemDamageEnchantment {
+    /// 附魔注册表 ID。
+    ///
+    /// Enchantment registry id.
+    pub enchantment: i32,
+    pub effects: &'static [ItemDamageEffect],
+}
+
+/// `ConditionalEffect<EnchantmentValueEffect>`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemDamageEffect {
+    pub effect: ValueEffect,
+    /// `None` 表示没有 `requirements`，效果总是生效。
+    ///
+    /// `None` means the effect has no `requirements` and always runs.
+    pub requirement: Option<ToolMatch>,
+}
+
+/// `EnchantmentValueEffect`。只有 `RemoveBinomial` 会取随机数。
+///
+/// `EnchantmentValueEffect`. Only `RemoveBinomial` draws from the random source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValueEffect {
+    /// `AddValue`：加上算出来的值。
+    ///
+    /// `AddValue`: add the calculated value.
+    Add(LevelBasedValue),
+    /// `MultiplyValue`。
+    Multiply(LevelBasedValue),
+    /// `SetValue`。
+    Set(LevelBasedValue),
+    /// `RemoveBinomial`：按概率从点数里丢掉若干。
+    ///
+    /// `RemoveBinomial`: drop some of the points with the calculated chance.
+    RemoveBinomial { chance: LevelBasedValue },
+    /// `ScaleExponentially`：`input * base^exponent`。
+    ///
+    /// `ScaleExponentially`: `input * base^exponent`.
+    Exponential {
+        base: LevelBasedValue,
+        exponent: LevelBasedValue,
+    },
+    /// `AllOf.ValueEffects`：按顺序套用。
+    ///
+    /// `AllOf.ValueEffects`: apply each effect in order.
+    AllOf(&'static [ValueEffect]),
+}
+
+/// `LevelBasedValue.calculate`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LevelBasedValue {
+    Constant(f32),
+    Linear {
+        base: f32,
+        per_level_above_first: f32,
+    },
+    Fraction {
+        numerator: &'static LevelBasedValue,
+        denominator: &'static LevelBasedValue,
+    },
+    Clamped {
+        value: &'static LevelBasedValue,
+        min: f32,
+        max: f32,
+    },
+    LevelsSquared {
+        added: f32,
+    },
+    Exponent {
+        base: &'static LevelBasedValue,
+        power: &'static LevelBasedValue,
+    },
+    Lookup {
+        values: &'static [f32],
+        fallback: &'static LevelBasedValue,
+    },
+}
+
+/// `MatchTool` 以及包住它的 `inverted` / `all_of` / `any_of`。条件本身不取随机数。
+///
+/// `MatchTool`, plus `inverted` / `all_of` / `any_of` around it. Conditions do not draw random numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMatch {
+    /// 没有物品谓词，或者谓词没有 `items`：手里的物品都算匹配。
+    ///
+    /// No item predicate, or a predicate without `items`: any held item matches.
+    Any,
+    Tag(ItemTag),
+    Items(&'static [i32]),
+    Inverted(&'static ToolMatch),
+    AllOf(&'static [ToolMatch]),
+    AnyOf(&'static [ToolMatch]),
 }
 
 /// 官方的 `BlockStateProvider`，只有官方数据用到的几种，生成器遇到别的会报错。
@@ -521,6 +657,20 @@ pub fn support_shape(state: u32) -> &'static [Aabb] {
 
 fn shape_at(index: u16) -> &'static [Aabb] {
     shapes::SHAPES[usize::from(index)]
+}
+
+/// 按注册名找方块。名字要带命名空间，比如 `minecraft:stone`。
+///
+/// Looks up a block by registry name. The name includes the namespace, such as `minecraft:stone`.
+pub fn block_by_name(name: &str) -> Option<&'static Block> {
+    blocks::BLOCKS.iter().find(|block| block.name == name)
+}
+
+/// 按注册名找物品。名字要带命名空间，比如 `minecraft:stick`。
+///
+/// Looks up an item by registry name. The name includes the namespace, such as `minecraft:stick`.
+pub fn item_by_name(name: &str) -> Option<&'static Item> {
+    items::ITEMS.iter().find(|item| item.name == name)
 }
 
 /// 一个方块标签包含的方块注册表 ID，标签不存在时返回 `None`。
@@ -724,6 +874,8 @@ mod tests {
         };
         assert_eq!(path.disallowed_faces, [0]);
         assert!(path.update_from_neighbors);
+        assert!(path.consume_on_use);
+        assert_eq!(path.item_damage_per_use, 1);
         let StateProvider::RuleBased { rules, fallback } = path.provider else {
             panic!("the shovel uses rules");
         };

@@ -3,8 +3,10 @@
 //! 聊天是全服的事情：这里只拼出要广播的帧，发给谁由 `World` 决定。
 //! 离线模式的消息没有签名，每名玩家要记住的只有 [`SpamThrottlers`] 里的刷屏计数。
 //!
-//! Bamboo 还没有命令，所以不发 `commands` 包：客户端没收到时命令树是空的根节点，
-//! 和收到最小命令树完全一样，输入的命令照样走 `chat_command`（`chat-join.md` 7.3）。
+//! 命令的解析和执行在 `command`。这里留下聊天，以及命令和聊天共用的刷屏计数。
+//!
+//! Command parsing and execution live in `command`. This module keeps chat and the
+//! spam counters shared by chat and commands.
 
 use mc_bamboo_data::registries::chat_type;
 use mc_bamboo_protocol::{
@@ -22,12 +24,6 @@ use crate::{
 const ILLEGAL_CHARACTERS: &str = "multiplayer.disconnect.illegal_characters";
 const SPAM: &str = "disconnect.spam";
 const CHAT_DISABLED: &str = "chat.disabled.options";
-const UNKNOWN_COMMAND: &str = "command.unknown.command";
-const CONTEXT_HERE: &str = "command.context.here";
-
-/// 回显命令时最多写多少个字符。协议允许 32767 个，但客户端的输入框只放得下 256 个，
-/// 所以只有改过的客户端才会被截断，回应的大小也不会跟着发来的内容增长。
-const MAX_ECHOED_COMMAND_CHARS: usize = 256;
 
 /// 每条消息或者命令给 [`TickThrottler`] 加多少。
 const SPAM_INCREMENT_STEP: i32 = 20;
@@ -74,23 +70,42 @@ pub(crate) fn tick_spam_throttlers(region: &mut Region) {
 /// `detectChatRateSpam`：`World` 广播之后才调用，压线的那条消息所有人都收得到。
 pub(crate) fn detect_chat_rate_spam(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
-        detect_rate_spam(&mut region.links, id, &mut player.spam.chat);
+        let is_op = player.is_op;
+        detect_rate_spam(&mut region.links, id, &mut player.spam.chat, is_op);
     }
 }
 
-/// `detectCommandRateSpam`。
-fn detect_command_rate_spam(region: &mut Region, id: PlayerId) {
+/// `detectCommandRateSpam`。命令无论成败都计数。
+///
+/// `detectCommandRateSpam`. Counted whether the command succeeded or failed.
+pub(crate) fn detect_command_rate_spam(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
-        detect_rate_spam(&mut region.links, id, &mut player.spam.command);
+        let is_op = player.is_op;
+        detect_rate_spam(&mut region.links, id, &mut player.spam.command, is_op);
     }
 }
 
-/// `detectRateSpam`。官方不踢 OP 和单人游戏的房主，Bamboo 没有这两种玩家。
-fn detect_rate_spam(links: &mut Links, id: PlayerId, throttler: &mut TickThrottler) {
+/// `detectRateSpam`。官方不踢 OP，也不踢单人游戏的房主。Bamboo 没有单人房主。
+///
+/// `detectRateSpam`. Official servers do not kick ops, or the owner of a singleplayer world.
+/// Bamboo has no singleplayer owner.
+fn detect_rate_spam(links: &mut Links, id: PlayerId, throttler: &mut TickThrottler, is_op: bool) {
     throttler.increment();
-    if !throttler.is_under_threshold() {
+    if !throttler.is_under_threshold() && !is_op {
         links.kick(id, &Component::translate(SPAM, []));
     }
+}
+
+/// 命令文本里有官方不允许的字符时踢掉玩家，并返回 `true`。
+///
+/// Kicks the player when the command text contains a character the official server rejects,
+/// and returns `true`.
+pub(crate) fn reject_illegal_command(region: &mut Region, id: PlayerId, command: &str) -> bool {
+    if is_legal(command) {
+        return false;
+    }
+    kick_for_illegal_characters(region, id);
+    true
 }
 
 /// `chat`：编码一次，返回发给所有已进入 Play 的玩家的帧。发送者也要收到，客户端没有本地回显。
@@ -109,18 +124,6 @@ pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: String) -> Opt
     // 官方这里多一个 `[Not Secure]` 前缀。Bamboo 的聊天全都没有签名，这个前缀不提供信息。
     info!("<{}> {message}", player.name);
     Some(chat_frames(&player.name, message))
-}
-
-/// `chat_command`：Bamboo 没有命令，回官方的两行红字之后才计数。`chat-join.md` 7.4。
-pub(crate) fn on_chat_command(region: &mut Region, id: PlayerId, command: String) {
-    if !is_legal(&command) {
-        kick_for_illegal_characters(region, id);
-        return;
-    }
-    let unknown = failure(Component::translate(UNKNOWN_COMMAND, []));
-    send_system_chat(region, id, &unknown);
-    send_system_chat(region, id, &failure(parse_context(&command)));
-    detect_command_rate_spam(region, id);
 }
 
 /// `client_command`：`RequestStats` 回 `award_stats`，其他动作忽略。`chat-join.md` 第 4 节。
@@ -156,36 +159,6 @@ fn chat_frames(name: &str, message: String) -> Vec<u8> {
         name: &Component::text(name),
         target_name: None,
     })
-}
-
-/// 官方的 `sendFailure` 在消息外面包的那层红色。
-fn failure(message: Component) -> Component {
-    Component::text("").color(Color::Red).extra(message)
-}
-
-/// 出错的位置，显示成 `foo bar<--[HERE]`，点击时把命令填回聊天框。
-///
-/// 命令树是空的，解析停在开头，所以整段输入都是解析不了的部分。
-fn parse_context(command: &str) -> Component {
-    let command = echoed_part(command);
-    let mut context = Component::text("")
-        .color(Color::Gray)
-        .suggest_command(&format!("/{command}"));
-    if !command.is_empty() {
-        context = context.extra(Component::text(command).color(Color::Red).underlined());
-    }
-    context.extra(
-        Component::translate(CONTEXT_HERE, [])
-            .color(Color::Red)
-            .italic(),
-    )
-}
-
-fn echoed_part(command: &str) -> &str {
-    match command.char_indices().nth(MAX_ECHOED_COMMAND_CHARS) {
-        Some((end, _)) => &command[..end],
-        None => command,
-    }
 }
 
 #[cfg(test)]

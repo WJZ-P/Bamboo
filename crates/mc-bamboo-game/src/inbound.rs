@@ -36,6 +36,14 @@ pub struct JoinRequest {
     pub properties: Vec<ProfileProperty>,
     /// Configuration 阶段收到的客户端设置，没收到时是默认值。
     pub client: ClientInformation,
+    /// `ops.json` 里的权限等级，0 到 4。不在表里就是 0。
+    ///
+    /// Permission level from `ops.json`, 0 through 4. Missing players are 0.
+    pub permission_level: u8,
+    /// 是否列在 `ops.json` 里。等级 0 的 OP 也算 OP，刷屏豁免按这个判断。
+    ///
+    /// Whether the player is listed in `ops.json`. A level-0 op still counts for the spam exemption.
+    pub is_op: bool,
     pub sink: Box<dyn PlayerSink>,
 }
 

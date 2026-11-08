@@ -8,7 +8,7 @@
 //! slot modelled and the rest of the hotbar treated as empty.
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{Block, tags::block_tags};
+use mc_bamboo_data::{Block, sounds::sound_event, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::slot_container::hit_slot;
@@ -314,10 +314,20 @@ fn swap_single_item(world: &mut World, ctx: &UseContext, slot: usize) -> Interac
     }
     notify_shelf(world, ctx.clicked_pos());
     if removed.is_empty() && held.is_empty() {
-        InteractionResult::Pass
-    } else {
-        InteractionResult::SuccessServer
+        return InteractionResult::Pass;
     }
+    // 拿出东西是 `take_item` 或 `single_swap`，空架子放上东西是 `place_item`。
+    //
+    // Taking an item is `take_item` or `single_swap`. Placing onto an empty slot is `place_item`.
+    let sound = if removed.is_empty() {
+        "minecraft:block.shelf.place_item"
+    } else if held.is_empty() {
+        "minecraft:block.shelf.take_item"
+    } else {
+        "minecraft:block.shelf.single_swap"
+    };
+    world.play_block_sound(ctx.clicked_pos(), sound_event(sound), 1.0, 1.0);
+    InteractionResult::SuccessServer
 }
 
 /// `swapHotbar`：这一排架子和快捷栏对换。没换到东西是 `CONSUME`，换到了是 `SUCCESS_SERVER`。
@@ -356,6 +366,12 @@ fn swap_hotbar(world: &mut World, ctx: &UseContext) -> InteractionResult {
         }
     }
     if any_swapped {
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.shelf.multi_swap"),
+            1.0,
+            1.0,
+        );
         InteractionResult::SuccessServer
     } else {
         InteractionResult::Consume
@@ -422,6 +438,12 @@ impl Behaviour for Shelf {
             updated = updated.with(SIDE_CHAIN_PART, SideChainPart::Unconnected);
         }
         world.set_block_and_update(pos, updated);
+        let sound = if signal {
+            "minecraft:block.shelf.activate"
+        } else {
+            "minecraft:block.shelf.deactivate"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
     }
 
     /// `ShelfBlock.getAnalogOutputSignal`：只从背面读，三格占用各占一位。

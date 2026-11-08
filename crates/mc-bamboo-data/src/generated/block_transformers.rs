@@ -33,7 +33,7 @@ pub static AXE: BlockTransformer = BlockTransformer {
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[82] }, then: StateProvider::CopyProperties(&StateProvider::Simple(262)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[59] }, then: StateProvider::CopyProperties(&StateProvider::Simple(202)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[63] }, then: StateProvider::CopyProperties(&StateProvider::Simple(208)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true, sound: Some(88), particle: 0, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1125] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31139)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1126] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31140)) },
@@ -74,17 +74,17 @@ pub static AXE: BlockTransformer = BlockTransformer {
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[402] }, then: StateProvider::CopyProperties(&StateProvider::Simple(9989)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[403] }, then: StateProvider::CopyProperties(&StateProvider::Simple(9995)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[404] }, then: StateProvider::CopyProperties(&StateProvider::Simple(10001)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true, sound: Some(89), particle: 3005, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1199] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32926)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1200] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32950)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1201] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32974)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false, sound: Some(89), particle: 3005, copper_chest: true, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1167] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31864)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1168] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31928)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1169] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31992)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false, sound: Some(89), particle: 3005, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1128] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31139)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1129] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31140)) },
@@ -138,19 +138,19 @@ pub static AXE: BlockTransformer = BlockTransformer {
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[406] }, then: StateProvider::CopyProperties(&StateProvider::Simple(9995)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[407] }, then: StateProvider::CopyProperties(&StateProvider::Simple(10001)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[408] }, then: StateProvider::CopyProperties(&StateProvider::Simple(10007)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true, sound: Some(90), particle: 3004, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1202] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32926)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1203] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32950)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1204] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32974)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1205] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32998)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false, sound: Some(90), particle: 3004, copper_chest: true, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1170] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31864)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1171] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31928)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1172] }, then: StateProvider::CopyProperties(&StateProvider::Simple(31992)) },
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1173] }, then: StateProvider::CopyProperties(&StateProvider::Simple(32056)) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: false, sound: Some(90), particle: 3004, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
     ],
 };
 
@@ -161,10 +161,10 @@ pub static HOE: BlockTransformer = BlockTransformer {
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::AllOf(&[BlockPredicate::MatchingBlockTag { offset: [0, 0, 0], tag: block_tags::TURNS_INTO_FARMLAND }, BlockPredicate::MatchingBlockTag { offset: [0, 1, 0], tag: block_tags::AIR }]), then: StateProvider::Simple(6875) },
             StateRule { if_true: BlockPredicate::AllOf(&[BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[10] }, BlockPredicate::MatchingBlockTag { offset: [0, 1, 0], tag: block_tags::AIR }]), then: StateProvider::Simple(10) },
-        ], fallback: None }, disallowed_faces: &[0], update_from_neighbors: true },
+        ], fallback: None }, disallowed_faces: &[0], update_from_neighbors: true, sound: Some(828), particle: 0, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::MatchingBlocks { offset: [0, 0, 0], blocks: &[1239] }, then: StateProvider::Simple(10) },
-        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true },
+        ], fallback: None }, disallowed_faces: &[], update_from_neighbors: true, sound: Some(828), particle: 0, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
     ],
 };
 
@@ -174,6 +174,6 @@ pub static SHOVEL: BlockTransformer = BlockTransformer {
     transforms: &[
         BlockTransform { provider: StateProvider::RuleBased { rules: &[
             StateRule { if_true: BlockPredicate::AllOf(&[BlockPredicate::MatchingBlockTag { offset: [0, 0, 0], tag: block_tags::TURNS_INTO_DIRT_PATH }, BlockPredicate::MatchingBlockTag { offset: [0, 1, 0], tag: block_tags::AIR }]), then: StateProvider::Simple(16796) },
-        ], fallback: None }, disallowed_faces: &[0], update_from_neighbors: true },
+        ], fallback: None }, disallowed_faces: &[0], update_from_neighbors: true, sound: Some(1466), particle: 0, copper_chest: false, consume_on_use: true, item_damage_per_use: 1 },
     ],
 };

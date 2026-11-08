@@ -16,12 +16,8 @@ use mc_bamboo_protocol::{
 use super::{Ctx, HashedStack, Menu, Target};
 use crate::{
     container::ContainerKind,
-    inbound::PlayerId,
     inventory::{HOTBAR_START, Inventory, OFF_HAND},
 };
-
-/// 重放里只有一名玩家，容器里的东西都算它放的。
-const VIEWER: PlayerId = PlayerId(0);
 
 /// 菜单对应的方块种类。箱子要带行数，双箱是 6 行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,8 +120,6 @@ pub struct Snapshot {
 pub struct Replay {
     menu: Menu,
     container: Vec<ItemStack>,
-    /// 每个容器格的组件来自哪名玩家。重放里只有一名玩家，所以都是它。
-    sources: Vec<Option<PlayerId>>,
     inventory: Inventory,
     creative: bool,
     station: Option<super::station::Station>,
@@ -154,7 +148,6 @@ impl Replay {
                 size,
             ),
             container: slots,
-            sources: vec![Some(VIEWER); size],
             inventory: player,
             creative: true,
             station: None,
@@ -238,9 +231,7 @@ impl Replay {
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
-            viewer: VIEWER,
             container: &mut self.container,
-            sources: &mut self.sources,
             inventory: &mut self.inventory,
             carried: &mut self.menu.carried,
             quickcraft_status: &mut self.menu.quickcraft_status,
@@ -286,9 +277,7 @@ impl Replay {
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
-            viewer: VIEWER,
             container: &mut self.container,
-            sources: &mut self.sources,
             inventory: &mut self.inventory,
             carried: &mut self.menu.carried,
             quickcraft_status: &mut self.menu.quickcraft_status,

@@ -4,8 +4,8 @@
 //! 朝着的方向有容器就塞一个进去，没有就把物品抛出去。这个世界没有物品实体，
 //! 抛出去的那一个直接消失，但官方抛出去时要取的随机数照取，见 [`spawn_item_random`]。
 //!
-//! 发射器（`DispenserBlock`）用的注册表行为（箭、水、盔甲等）不在范围里，见
-//! `Dispenser` 方块的 tick，不调用这里。
+//! 发射器（`DispenserBlock`）用的注册表行为（箭、水、盔甲等）不在范围里。
+//! 空的发射器仍然走 `dispenseFrom` 开头那一步，报 `levelEvent(1001)`。
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::BlockAncestor;
@@ -67,8 +67,21 @@ fn limited(stack: ItemStack) -> ItemStack {
     stack
 }
 
-/// `DropperBlock.dispenseFrom`。
-pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
+/// `DispenserBlock.dispenseFrom` 在槽位是 `-1` 时的那一下。
+///
+/// 有物品时官方走注册表里的发射行为，那些不在范围里，这里什么都不发。
+/// 找不到方块实体时官方只打警告，不报 1001。
+pub fn click_if_empty(world: &mut World, pos: BlockPos) {
+    let Some(occupied) = occupied_slots(world, pos) else {
+        return;
+    };
+    if random_slot(world, &occupied) < 0 {
+        world.level_event(1001, pos, 0);
+    }
+}
+
+/// 九个槽是不是非空。没有方块实体时是 `None`。
+fn occupied_slots(world: &mut World, pos: BlockPos) -> Option<Vec<bool>> {
     let mut occupied = None;
     if !world.with_container(pos, &mut |container| {
         occupied = Some(
@@ -77,16 +90,22 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
                 .collect::<Vec<_>>(),
         );
     }) {
-        // 官方找不到方块实体时只打一条警告。
-        return;
+        return None;
     }
-    let Some(occupied) = occupied else {
+    occupied
+}
+
+/// `DropperBlock.dispenseFrom`。
+pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
+    // 官方找不到方块实体时只打一条警告。
+    let Some(occupied) = occupied_slots(world, pos) else {
         return;
     };
 
     let slot = random_slot(world, &occupied);
     if slot < 0 {
-        // `levelEvent(1001)`：客户端的空发射器音效，服务端状态不变。
+        // `levelEvent(1001)`：空的投掷器，客户端自己放音效。
+        world.level_event(1001, pos, 0);
         return;
     }
 
@@ -126,7 +145,10 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
         }
     } else {
         // 官方在这里生成物品实体。没有实体，东西凭空消失，随机数照取。
+        // `DefaultDispenseItemBehavior.dispense`：先 `execute`（随机数），再 1000，再 2000。
         spawn_item_random(world);
+        world.level_event(1000, pos, 0);
+        world.level_event(2000, pos, direction.id());
         without_one(&item)
     };
 

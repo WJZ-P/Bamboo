@@ -8,6 +8,7 @@ use std::{
 };
 
 use mc_bamboo_core::Vec3;
+use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
@@ -17,7 +18,7 @@ use tracing::warn;
 use crate::{
     book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    container, entity_sync, entity_tracking,
+    command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
@@ -119,6 +120,7 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         chunk_tracking::send_chunks(&mut self.region);
+        movement::finish_tick(&mut self.region);
         self.region.links.flush();
         ControlFlow::Continue(())
     }
@@ -196,7 +198,8 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
-        self.region.start_loading_chunks(id, self.global.time());
+        self.region
+            .start_loading_chunks(id, self.global.time(), self.global.clock());
     }
 
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
@@ -228,6 +231,19 @@ impl World {
         if !self.region.links.is_open(player) {
             return;
         }
+        match &request {
+            PlayRequest::ChatCommand { command } => {
+                let command = command.clone();
+                command::on_command(&mut self.global, &mut self.region, player, &command);
+                return;
+            }
+            PlayRequest::CommandSuggestion { id, command } => {
+                let (transaction, command) = (*id, command.clone());
+                command::on_suggestion(&mut self.region, player, transaction, &command);
+                return;
+            }
+            _ => {}
+        }
         let region = &mut self.region;
         match request {
             PlayRequest::AcceptTeleportation {
@@ -245,7 +261,15 @@ impl World {
                 position,
                 rotation,
                 on_ground,
-            } => movement::on_move_player(region, player, position, rotation, on_ground),
+                horizontal_collision,
+            } => movement::on_move_player(
+                region,
+                player,
+                position,
+                rotation,
+                on_ground,
+                horizontal_collision,
+            ),
             PlayRequest::ChunkBatchReceived {
                 desired_chunks_per_tick,
             } => chunk_tracking::on_chunk_batch_received(region, player, desired_chunks_per_tick),
@@ -258,9 +282,10 @@ impl World {
                     chat::detect_chat_rate_spam(region, player);
                 }
             }
-            PlayRequest::ChatCommand { command } => {
-                chat::on_chat_command(region, player, command);
-            }
+            // 聊天命令和建议在上面处理过了，这里只是让匹配穷尽。
+            //
+            // Chat commands and suggestions are handled above. This arm only makes the match exhaustive.
+            PlayRequest::ChatCommand { .. } | PlayRequest::CommandSuggestion { .. } => {}
             PlayRequest::ClientCommand { action } => {
                 chat::on_client_command(region, player, action);
             }
@@ -352,7 +377,15 @@ impl World {
             PlayRequest::EditBook { slot, pages, title } => {
                 book::on_edit_book(region, player, slot, pages, title);
             }
-            // 这三种连接任务就地处理了，不会发到这里。
+            // 连接任务把这两种转过来。其余 `Other` 它自己丢掉。
+            //
+            // The connection forwards these two. It drops every other `Other` packet.
+            PlayRequest::Other(id) if id == serverbound::CLIENT_TICK_END => {
+                movement::on_client_tick_end(region, player);
+            }
+            PlayRequest::Other(id) if id == serverbound::PLAYER_LOADED => {
+                movement::on_player_loaded(region, player);
+            }
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }
     }

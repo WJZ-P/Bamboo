@@ -7,11 +7,11 @@ use std::{
 
 use mc_bamboo_blocks::behaviour::{Family, family_of, is_ported};
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{Block, BlockClass, block_of_state, blocks};
+use mc_bamboo_data::{Block, BlockClass, SOUND_EVENTS, block_of_state, blocks};
 
 use super::{
     Rule, UNPORTED_ITEM_USE_ON,
-    lines::{Case, Cell, ContainerStack, Destroyed, Header, Kind},
+    lines::{Case, Cell, ContainerStack, Destroyed, Header, Kind, LevelPlay, SoundPlay},
     replay::{Replayed, Scheduled},
     tick_classes,
 };
@@ -26,6 +26,9 @@ pub struct Mismatch {
     /// 结果不同的格子。
     pub cells: BTreeSet<BlockPos>,
     pub destroyed: bool,
+    /// 世界事件和音效的列表不同。
+    pub level_events: bool,
+    pub sounds: bool,
     /// 容器内容不同。
     pub contents: bool,
     pub ticks: bool,
@@ -41,6 +44,8 @@ impl Mismatch {
         !self.result
             && self.cells.is_empty()
             && !self.destroyed
+            && !self.level_events
+            && !self.sounds
             && !self.contents
             && !self.ticks
             && !self.gained
@@ -95,6 +100,15 @@ pub struct Report {
     broken: Vec<String>,
     /// `case` 和 `skip` 行的数量，和 `end` 行对账。
     lines: (u64, u64),
+    /// `dispensing` 里合成成功的题。1050 的失败声不在这里。
+    /// Successful crafter crafts inside `dispensing`. The fail event 1050 is not one of these.
+    crafter_crafted: u64,
+    /// `dispensing` 里发射器真的射出东西的题。
+    /// Dispenser cases inside `dispensing` where an item was actually fired.
+    dispenser_fired: u64,
+    /// 比较生物桶时从官方列表去掉的、生物自己的声音条数。题本身仍然比较。
+    /// Spawned-mob sounds dropped from the official list. The case is still compared.
+    mob_sounds_dropped: u64,
 }
 
 impl Report {
@@ -110,7 +124,23 @@ impl Report {
             details: Vec::new(),
             broken: Vec::new(),
             lines: (0, 0),
+            crafter_crafted: 0,
+            dispenser_fired: 0,
+            mob_sounds_dropped: 0,
         }
+    }
+
+    /// 记下一道 `dispensing` 排除是合成成功、发射器射出，还是两样都有。
+    /// Record whether a `dispensing` exclusion was a craft, a fired dispenser, or both.
+    pub fn note_dispensing(&mut self, crafted: bool, fired: bool) {
+        self.crafter_crafted += u64::from(crafted);
+        self.dispenser_fired += u64::from(fired);
+    }
+
+    /// 这道生物桶题从官方列表去掉了几声生物自己的声音。
+    /// How many spawned-mob sounds this mob-bucket case dropped from the official list.
+    pub fn note_mob_sounds(&mut self, dropped: u64) {
+        self.mob_sounds_dropped += dropped;
     }
 
     pub fn start(&mut self, header: &Header) {
@@ -275,6 +305,22 @@ impl Report {
         for rule in Rule::ALL {
             let hits = self.rules.get(&rule).copied().unwrap_or(0);
             println!("  {hits:>7} {:<18} {}", rule.name(), rule.reason());
+            if rule == Rule::Dispensing {
+                println!(
+                    "          {:<18} crafter crafted {} (1049/2010, crafting flag, or its slots; 1050 is compared)",
+                    "", self.crafter_crafted
+                );
+                println!(
+                    "          {:<18} dispenser fired {}",
+                    "", self.dispenser_fired
+                );
+            }
+            if rule == Rule::EntitySound {
+                println!(
+                    "          {:<18} mob sounds dropped from the official list: {} (the case is still compared)",
+                    "", self.mob_sounds_dropped
+                );
+            }
             let classes = tick_classes(rule);
             if !classes.is_empty() {
                 println!("          {:<18} {classes:?}", "");
@@ -556,6 +602,8 @@ fn render_official(text: &mut String, case: &Case, mismatch: &Mismatch) {
     let cells: Vec<_> = answer.changes.iter().map(|&c| to_pair(c)).collect();
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &answer.destroyed, mismatch.destroyed);
+    level_event_lines(text, &answer.level_events, mismatch.level_events);
+    sound_lines(text, &answer.sounds, mismatch.sounds);
     contents_lines(text, &answer.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.0, mismatch.ticks);
     gained_lines(text, &answer.gained, mismatch.gained);
@@ -576,9 +624,38 @@ fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mism
         .collect();
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &replayed.destroyed, mismatch.destroyed);
+    level_event_lines(text, &replayed.level_events, mismatch.level_events);
+    sound_lines(text, &replayed.sounds, mismatch.sounds);
     contents_lines(text, &replayed.contents, mismatch.contents);
     tick_lines(text, &mismatch.compared_ticks.1, mismatch.ticks);
     gained_lines(text, &replayed.gained, mismatch.gained);
+}
+
+fn level_event_lines(text: &mut String, events: &[LevelPlay], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for &LevelPlay(kind, x, y, z, data, excluded) in events {
+        let who = if excluded { " (skips the player)" } else { "" };
+        let _ = writeln!(
+            text,
+            "  {mark}    level event {kind} {} data {data}{who}",
+            pos_text(BlockPos::new(x, y, z))
+        );
+    }
+}
+
+fn sound_lines(text: &mut String, sounds: &[SoundPlay], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for &SoundPlay(id, x, y, z, source, volume, pitch, excluded) in sounds {
+        let who = if excluded { " (skips the player)" } else { "" };
+        let name = SOUND_EVENTS
+            .get(id as usize)
+            .map_or("<direct>", |sound| short(sound.name));
+        let _ = writeln!(
+            text,
+            "  {mark}    sound {name} ({}, {}, {}) source {source} volume {} pitch {}{who}",
+            x.0, y.0, z.0, volume.0, pitch.0
+        );
+    }
 }
 
 const fn to_pair(cell: Cell) -> (BlockPos, u32) {

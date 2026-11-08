@@ -14,9 +14,11 @@
 //! 别的物品类的 `useOn` 要生成实体、看物品组件，或者只改手上的物品（刷怪蛋、矿车、指南针这些），
 //! 这里返回 `Pass`。`mc-bamboo-vanilla` 的 oracle 排除表列着它们和原因。
 //!
-//! 全部按创造模式写。官方 `ServerPlayerGameMode.useItemOn` 在 `hasInfiniteMaterials` 时把数量改回去，
-//! 也不按结果换手上的物品；这里的物品都不在 `useOn` 里自己换物品，所以只剩世界的变化。
-//! 耐久、音效、掉落物和游戏事件都不做，骨粉的粒子发给玩家。
+//! 创造模式的数量由游戏层在动作结束后改回去。手上有玩家时，`hurtAndBreak` 和 `shrink` 在官方的位置执行。
+//! 音效、掉落物和游戏事件仍不做，骨粉的粒子发给玩家。
+//!
+//! Creative mode restores the count in the game layer after the action. When a player is installed, `hurtAndBreak` and `shrink` run where vanilla runs them.
+//! Sounds, drops and game events are still omitted. Bone meal particles are sent to the player.
 
 mod bone_meal;
 mod ender_eye;

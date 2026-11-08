@@ -73,6 +73,10 @@ pub fn decode_stack(tag: &Tag) -> Result<(i32, i32, ComponentPatch)> {
     decode_item(tag, 0)
 }
 
+pub(crate) fn encode_template_tag(template: &ItemStackTemplate) -> Result<Tag> {
+    Ok(encode_template(template, 0)?.to_tag())
+}
+
 pub(super) fn encode_template(template: &ItemStackTemplate, depth: u32) -> Result<Dyn> {
     let depth = deeper(depth)?;
     encode_item(
@@ -82,6 +86,13 @@ pub(super) fn encode_template(template: &ItemStackTemplate, depth: u32) -> Resul
         depth,
         false,
     )
+}
+
+/// 官方 `ItemStackTemplate.CODEC`，给 `show_item` 这类嵌在文本里的物品用。
+///
+/// `ItemStackTemplate.CODEC`, for an item nested in text such as `show_item`.
+pub(crate) fn decode_template_tag(tag: &Tag) -> Result<ItemStackTemplate> {
+    decode_template(tag, 0)
 }
 
 pub(super) fn decode_template(tag: &Tag, depth: u32) -> Result<ItemStackTemplate> {

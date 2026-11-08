@@ -3,7 +3,7 @@
 //! 主世界里用充能的重生锚官方会爆炸，爆炸不在范围里：这里吃掉点击，方块留在原地。
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::items;
+use mc_bamboo_data::{items, sounds::sound_event};
 
 use crate::{
     behaviour::Behaviour,
@@ -39,7 +39,15 @@ impl Behaviour for RespawnAnchor {
         if ctx.item == items::GLOWSTONE && can_be_charged(state) {
             let charges = state.get(RESPAWN_ANCHOR_CHARGES) + 1;
             let charged = state.with(RESPAWN_ANCHOR_CHARGES, charges);
-            world.set_block_and_update(ctx.clicked_pos(), charged);
+            let pos = ctx.clicked_pos();
+            world.set_block_and_update(pos, charged);
+            // `charge`：方块中心出声，`null` 作 `except`。
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:block.respawn_anchor.charge"),
+                1.0,
+                1.0,
+            );
             return InteractionResult::Success;
         }
         // 主手点不了，让副手的荧石来充能。

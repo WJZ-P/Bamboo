@@ -1,0 +1,16 @@
+[package]
+name = "mc-bamboo-command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Brigadier-compatible command parsing for the Bamboo Minecraft server."
+keywords = ["minecraft"]
+categories = ["games"]
+
+[dependencies]
+mc-bamboo-blocks.workspace = true
+mc-bamboo-core.workspace = true
+mc-bamboo-data.workspace = true
+uuid.workspace = true

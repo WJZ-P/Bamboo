@@ -204,9 +204,11 @@ fn an_empty_lock_counts_as_no_lock() {
     assert!(!server.region().block_items.contains_key(&POS));
 }
 
-/// 锁留在方块实体上，但不跟着中键选取的物品走：方块实体是共享的，谁都能中键。
+/// 锁留在方块实体上，中键选取把同一把锁还给物品。
+///
+/// The lock stays on the block entity, and middle-click copies it back onto the item.
 #[test]
-fn a_real_lock_stays_on_the_block_entity_but_not_on_the_item() {
+fn a_real_lock_stays_on_the_block_entity_and_comes_back_on_the_item() {
     let mut server = region_with(blocks::CHEST);
     let lock = ComponentValue::Lock(Tag::Compound(vec![(
         "items".to_owned(),
@@ -220,8 +222,9 @@ fn a_real_lock_stays_on_the_block_entity_but_not_on_the_item() {
         server.region().block_items[&POS].get(kinds::LOCK),
         Some(&lock)
     );
-    assert_eq!(collect(server.region(), POS).get(kinds::LOCK), None);
-    // 容器的 `getUpdateTag` 本来就是空的，锁也不会发出去。
+    assert_eq!(collect(server.region(), POS).get(kinds::LOCK), Some(&lock));
+    // 容器的 `getUpdateTag` 本来就是空的，锁不进区块包。
+    // A container `getUpdateTag` is empty, so the lock is not in the chunk packet.
     assert_eq!(stored_tag(server.region()), None);
 }
 

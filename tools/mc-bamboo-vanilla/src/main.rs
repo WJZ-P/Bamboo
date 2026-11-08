@@ -30,6 +30,9 @@
 //! mc-bamboo-vanilla entity-oracle <java 路径>
 //!     让官方 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 在假世界里跑，
 //!     用 Bamboo 重放，逐刻比较位置、速度和落地后的方块
+//! mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
+//!     让官方 `handleMovePlayer` 对一组移动包出题，用 Bamboo 重放，
+//!     比较接受、拉回还是断开，以及最终位置和摔落距离
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -59,6 +62,8 @@ mod loot_oracle;
 mod machine;
 #[cfg(feature = "oracle")]
 mod menu;
+#[cfg(feature = "oracle")]
+mod move_oracle;
 #[cfg(feature = "probe-online")]
 mod online;
 #[cfg(feature = "oracle")]
@@ -99,6 +104,8 @@ const WORLDGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldgenOracle.java"
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
+#[cfg(feature = "oracle")]
+const MOVE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MovementOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -109,7 +116,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
       mc-bamboo-vanilla machine <java 路径>
-      mc-bamboo-vanilla entity-oracle <java 路径>";
+      mc-bamboo-vanilla entity-oracle <java 路径>
+      mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -141,6 +149,7 @@ fn run() -> Result<(), String> {
         ["loot-oracle", java, ref options @ ..] => loot_oracle(java, options),
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
         ["entity-oracle", java] => entity_oracle(java),
+        ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -271,6 +280,11 @@ fn entity_oracle(java: &str) -> Result<(), String> {
     entity_oracle::run(official_program(java, ENTITY_ORACLE_SOURCE)?)
 }
 
+#[cfg(feature = "oracle")]
+fn move_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    move_oracle::run(official_program(java, MOVE_ORACLE_SOURCE)?, options)
+}
+
 /// 用官方解压出来的 jar 当 classpath，运行一个单文件 Java 程序。
 #[cfg(feature = "oracle")]
 fn official_program(java: &str, source: &str) -> Result<Command, String> {
@@ -334,6 +348,11 @@ fn loot_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn entity_oracle(_java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn move_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

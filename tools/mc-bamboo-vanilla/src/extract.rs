@@ -41,8 +41,11 @@ pub struct Extracted {
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
+    /// 带 `minecraft:item_damage` 效果的附魔，按名字排序。
+    pub item_damage_enchantments: Vec<ItemDamageEnchantment>,
     pub recipes: RecipesFile,
     pub heightmaps: Vec<HeightmapType>,
+    pub sound_tables: SoundTables,
     /// 数据包里的战利品表原文：带命名空间的名字 → JSON。
     ///
     /// Loot table JSON from the data pack, keyed by namespaced id.
@@ -376,6 +379,9 @@ pub struct Block {
     /// `Block.getExplosionResistance`。
     pub explosion_resistance: f32,
     pub offset: Option<BlockOffset>,
+    /// 用桶取起这个方块时播的声音，`sound_event` 注册表 ID。
+    #[serde(default)]
+    pub pickup_sound: Option<i32>,
     /// `defaultDestroyTime`，也就是硬度。
     pub destroy_time: f32,
     pub requires_correct_tool_for_drops: bool,
@@ -483,6 +489,39 @@ pub struct LightTables {
     pub face_occludes: Vec<i64>,
 }
 
+/// 音效表，`Extractor.java` 的 `SoundTables`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundTables {
+    /// 每个状态的 `getSoundType` 在 [`Self::types`] 里的下标。
+    pub state_types: Vec<u16>,
+    /// 去重后的 `SoundType`：音量、音高、破坏、踩踏、放置、击中、落地声音的注册表 ID。
+    pub types: Vec<(f32, f32, i32, i32, i32, i32, i32)>,
+    /// `sound_event` 注册表，下标就是网络上的 Holder ID。
+    pub events: Vec<SoundEventRow>,
+    /// `NoteBlockInstrument.values()`，按枚举序号排列。
+    pub instruments: Vec<InstrumentRow>,
+    /// `SoundSource` 的名字，按枚举序号排列。
+    pub sources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundEventRow {
+    pub name: String,
+    #[serde(default)]
+    pub fixed_range: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstrumentRow {
+    pub name: String,
+    pub sound: i32,
+    pub tunable: bool,
+    pub custom_sound: bool,
+}
+
 /// `Heightmap.Types` 的一种。区块包按 `id` 排列，`id` 也是网络上的键。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -528,6 +567,124 @@ pub struct BlockTransform {
     /// `Direction` 的 ID。
     pub disallowed_faces: Vec<i32>,
     pub update_from_neighbors: bool,
+    /// `consumeOnUse`。可堆叠物品用完时是否减 1。
+    pub consume_on_use: bool,
+    /// `itemDamagePerUse`。不可堆叠时 `hurtAndBreak` 的点数。codec 缺省是 0，生成器导出加载后的值。
+    pub item_damage_per_use: i32,
+
+    /// `sound`：音效事件的注册表 ID，没配时官方给 `SoundEvents.EMPTY`，那边不导出。
+    #[serde(default)]
+    pub sound: Option<i32>,
+    /// `particle`：`TransformParticle` 的等级事件 ID，`NONE` 是 0。
+    #[serde(default)]
+    pub particle: i32,
+    /// `transform_type == COPPER_CHEST`：改完方块还要给大箱子的另一半发一次粒子。
+    #[serde(default)]
+    pub copper_chest: bool,
+}
+
+/// 一个附魔上的 `minecraft:item_damage` 效果。
+#[derive(Debug, Deserialize)]
+pub struct ItemDamageEnchantment {
+    pub name: String,
+    pub effects: Vec<ConditionalValueEffect>,
+}
+
+/// `ConditionalEffect`：效果，以及可选的战利品条件。
+#[derive(Debug, Deserialize)]
+pub struct ConditionalValueEffect {
+    pub effect: ValueEffectJson,
+    #[serde(default)]
+    pub requirements: Option<LootConditionJson>,
+}
+
+/// `EnchantmentValueEffect` 的 codec。不认识的 `type` 让反序列化失败，生成器因此停下来。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ValueEffectJson {
+    #[serde(rename = "minecraft:add")]
+    Add { value: LevelValueJson },
+    #[serde(rename = "minecraft:all_of")]
+    AllOf { effects: Vec<ValueEffectJson> },
+    #[serde(rename = "minecraft:multiply")]
+    Multiply { factor: LevelValueJson },
+    #[serde(rename = "minecraft:remove_binomial")]
+    RemoveBinomial { chance: LevelValueJson },
+    #[serde(rename = "minecraft:exponential")]
+    Exponential {
+        base: LevelValueJson,
+        exponent: LevelValueJson,
+    },
+    #[serde(rename = "minecraft:set")]
+    Set { value: LevelValueJson },
+}
+
+/// `LevelBasedValue`。裸数字是 `Constant`，其余按 `type` 分派。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum LevelValueJson {
+    Constant(f32),
+    Typed(TypedLevelJson),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum TypedLevelJson {
+    #[serde(rename = "minecraft:clamped")]
+    Clamped {
+        value: Box<LevelValueJson>,
+        min: f32,
+        max: f32,
+    },
+    #[serde(rename = "minecraft:constant")]
+    Constant { value: f32 },
+    #[serde(rename = "minecraft:exponent")]
+    Exponent {
+        base: Box<LevelValueJson>,
+        power: Box<LevelValueJson>,
+    },
+    #[serde(rename = "minecraft:fraction")]
+    Fraction {
+        numerator: Box<LevelValueJson>,
+        denominator: Box<LevelValueJson>,
+    },
+    #[serde(rename = "minecraft:levels_squared")]
+    LevelsSquared { added: f32 },
+    #[serde(rename = "minecraft:linear")]
+    Linear {
+        base: f32,
+        per_level_above_first: f32,
+    },
+    #[serde(rename = "minecraft:lookup")]
+    Lookup {
+        values: Vec<f32>,
+        fallback: Box<LevelValueJson>,
+    },
+}
+
+/// `item_damage` 用到的战利品条件。别的条件类型会让反序列化失败。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum LootConditionJson {
+    #[serde(rename = "minecraft:all_of")]
+    AllOf { terms: Vec<LootConditionJson> },
+    #[serde(rename = "minecraft:any_of")]
+    AnyOf { terms: Vec<LootConditionJson> },
+    #[serde(rename = "minecraft:inverted")]
+    Inverted { term: Box<LootConditionJson> },
+    #[serde(rename = "minecraft:match_tool")]
+    MatchTool {
+        #[serde(default)]
+        predicate: Option<ItemPredicateJson>,
+    },
+}
+
+/// `MatchTool` 的物品谓词。出现 `count` 或 `components` 时拒绝，避免把没实现的比较当成通过。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemPredicateJson {
+    #[serde(default)]
+    pub items: Option<serde_json::Value>,
 }
 
 /// `Extractor.java` 只导出这几种状态提供器，别的在那边就报错。
@@ -576,6 +733,22 @@ pub struct ExtractedItem {
     pub block: Option<i32>,
     pub wall_block: Option<i32>,
     pub attachment: Option<i32>,
+    /// `SolidBucketItem.placeSound`，只有细雪桶有。
+    /// `SolidBucketItem.placeSound`. Only the powder-snow bucket has one.
+    #[serde(default)]
+    pub place_sound: Option<i32>,
+    /// `BucketItem.playEmptySound` 或 `MobBucketItem.emptySound`。
+    /// `BucketItem.playEmptySound`, or `MobBucketItem.emptySound`.
+    #[serde(default)]
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。生物桶是 `NEUTRAL`，其余桶是 `BLOCKS`。
+    /// `SoundSource` ordinal when emptying. `NEUTRAL` for a mob bucket, `BLOCKS` otherwise.
+    #[serde(default)]
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名，比如 `minecraft:salmon`。
+    /// Registry name of `MobBucketItem.type`, for example `minecraft:salmon`.
+    #[serde(default)]
+    pub bucket_entity: Option<String>,
     pub overrides_can_destroy_block: bool,
 }
 
@@ -611,9 +784,23 @@ pub struct Item {
     /// `compostable` 组件的 `layers`。
     pub compostable: Option<CompostLayers>,
     pub jukebox_playable: bool,
+    /// `jukebox_playable` 组件指向的 `jukebox_song` 注册表条目。
+    pub jukebox_song: Option<String>,
     /// `block_transformer` 组件指向的注册表条目。
     pub block_transformer: Option<String>,
     pub blocks_attacks: bool,
+    /// `SolidBucketItem.placeSound`，放下时播放的声音。
+    /// `SolidBucketItem.placeSound`, played when the bucket places its block.
+    pub place_sound: Option<i32>,
+    /// 倒空时的音效。只有 `BucketItem`（含生物桶）有。
+    /// Sound played when the bucket empties. Only `BucketItem`, including mob buckets.
+    pub empty_sound: Option<i32>,
+    /// 倒空时 `SoundSource` 的序号。
+    /// `SoundSource` ordinal when the bucket empties.
+    pub empty_source: Option<i32>,
+    /// `MobBucketItem.type` 的注册表名。别的物品是 `None`。
+    /// Registry name of `MobBucketItem.type`. `None` for every other item.
+    pub bucket_entity: Option<String>,
 }
 
 /// `reports/minecraft/components/item` 里一个物品的报告，只取用到的组件。
@@ -636,8 +823,9 @@ struct ItemComponents {
     consumable: Option<serde_json::Value>,
     #[serde(rename = "minecraft:compostable")]
     compostable: Option<CompostableComponent>,
+    /// 报告里写歌典的名字。直接内联的写法读不了，生成会失败。
     #[serde(rename = "minecraft:jukebox_playable")]
-    jukebox_playable: Option<serde_json::Value>,
+    jukebox_playable: Option<String>,
     /// 报告里写注册表条目的名字。直接内联的写法读不了，生成会失败。
     #[serde(rename = "minecraft:block_transformer")]
     block_transformer: Option<String>,
@@ -809,9 +997,12 @@ pub struct VersionData {
     pub block_maps: BlockMaps,
     /// 按名字排序。
     pub block_transformers: Vec<BlockTransformer>,
+    /// 带 `minecraft:item_damage` 效果的附魔，按名字排序。
+    pub item_damage_enchantments: Vec<ItemDamageEnchantment>,
     pub recipes: RecipesFile,
     /// 按官方 `Heightmap.Types.values()` 的顺序。
     pub heightmaps: Vec<HeightmapType>,
+    pub sound_tables: SoundTables,
     /// 属性名字 → 默认值。
     pub attribute_defaults: BTreeMap<String, f64>,
     /// 内置注册表名 → 按 ID 排列的条目。
@@ -920,12 +1111,14 @@ fn read_version_data(
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
         block_transformers: extracted.block_transformers,
+        item_damage_enchantments: extracted.item_damage_enchantments,
         recipes: RecipesFile {
             damageable,
             dyed,
             ..extracted.recipes
         },
         heightmaps: extracted.heightmaps,
+        sound_tables: extracted.sound_tables,
         attribute_defaults: extracted.attribute_defaults,
         builtin_registries,
         packets,
@@ -1104,7 +1297,12 @@ fn read_items(
                 .map(|component| compost_layers(&component.layers, compost_providers))
                 .transpose()?,
             jukebox_playable: components.jukebox_playable.is_some(),
+            jukebox_song: components.jukebox_playable.clone(),
             block_transformer: components.block_transformer,
+            place_sound: item.place_sound,
+            empty_sound: item.empty_sound,
+            empty_source: item.empty_source,
+            bucket_entity: item.bucket_entity,
             blocks_attacks: components.blocks_attacks.is_some(),
             name: item.name,
             class: item.class,
