@@ -15,6 +15,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use mc_bamboo_protocol::{
     GAME_VERSION, PROTOCOL_VERSION,
     codec::DecodeError,
+    compression::{self, CompressionError},
     frame::{FrameError, MAX_FRAME_LEN, append_frame, find_frame},
     packet::{
         handshake::{Handshake, Intent},
@@ -49,6 +50,8 @@ enum ConnectionError {
     Frame(#[from] FrameError),
     #[error(transparent)]
     Decode(#[from] DecodeError),
+    #[error(transparent)]
+    Compression(#[from] CompressionError),
     #[error("connection closed in the middle of a frame")]
     TruncatedFrame,
     #[error("connection closed before joining the game")]
@@ -200,11 +203,16 @@ async fn read_frame<R: AsyncRead + Unpin>(
     stream: &mut R,
     buffer: &mut BytesMut,
     max_frame_len: usize,
+    compression: Option<i32>,
 ) -> Result<Option<Bytes>, ConnectionError> {
     loop {
         if let Some(frame) = find_frame(buffer, max_frame_len)? {
             buffer.advance(frame.header_len);
-            return Ok(Some(buffer.split_to(frame.payload_len).freeze()));
+            let payload = buffer.split_to(frame.payload_len).freeze();
+            return Ok(Some(match compression {
+                Some(threshold) => compression::decode(&payload, threshold)?.into(),
+                None => payload,
+            }));
         }
         if stream.read_buf(buffer).await? == 0 {
             return if buffer.is_empty() {
@@ -233,6 +241,8 @@ struct Connection {
     stream: TcpStream,
     read_buffer: BytesMut,
     max_frame_len: usize,
+    /// 压缩启用后是服务端声明的阈值，两个方向都换成压缩帧。
+    compression: Option<i32>,
 }
 
 impl Connection {
@@ -241,6 +251,7 @@ impl Connection {
             stream,
             read_buffer: BytesMut::with_capacity(MAX_PRE_LOGIN_FRAME_LEN),
             max_frame_len: MAX_PRE_LOGIN_FRAME_LEN,
+            compression: None,
         }
     }
 
@@ -249,12 +260,30 @@ impl Connection {
         self.max_frame_len = MAX_FRAME_LEN;
     }
 
-    async fn next_frame(&mut self) -> Result<Option<Bytes>, ConnectionError> {
-        read_frame(&mut self.stream, &mut self.read_buffer, self.max_frame_len).await
+    /// 从下一个包开始两个方向都用压缩帧。调用前要保证登录压缩包已经写进 socket。
+    fn enable_compression(&mut self, threshold: i32) {
+        self.compression = Some(threshold);
     }
 
-    async fn write(&mut self, frames: &[u8]) -> io::Result<()> {
-        self.stream.write_all(frames).await
+    async fn next_frame(&mut self) -> Result<Option<Bytes>, ConnectionError> {
+        read_frame(
+            &mut self.stream,
+            &mut self.read_buffer,
+            self.max_frame_len,
+            self.compression,
+        )
+        .await
+    }
+
+    /// 写一批帧。压缩启用后逐个包压缩，世界线程交来的帧本身不压缩。
+    async fn write(&mut self, frames: &[u8]) -> Result<(), ConnectionError> {
+        match self.compression {
+            Some(threshold) => {
+                let compressed = compression::encode_frames(frames, threshold)?;
+                Ok(self.stream.write_all(&compressed).await?)
+            }
+            None => Ok(self.stream.write_all(frames).await?),
+        }
     }
 
     /// 发送登录阶段的断开消息并关闭连接。

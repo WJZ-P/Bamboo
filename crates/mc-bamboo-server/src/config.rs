@@ -29,6 +29,10 @@ pub struct ServerConfig {
     ///
     /// 必须大于 0 且小于 30 秒，否则客户端会先超时，启动时会换成默认值。
     pub keep_alive_interval: Duration,
+    /// 登录之后启用压缩的阈值，单位是包负载的字节数，和官方的 `network-compression-threshold` 相同。
+    ///
+    /// 小于 0 表示关闭压缩，0 表示每个包都压缩。默认 256。
+    pub compression_threshold: i32,
 }
 
 impl Default for ServerConfig {
@@ -40,6 +44,7 @@ impl Default for ServerConfig {
             pre_play_timeout: Duration::from_secs(30),
             max_pre_play_connections: 1024,
             keep_alive_interval: Duration::from_secs(15),
+            compression_threshold: 256,
         }
     }
 }
@@ -61,6 +66,9 @@ impl ServerConfig {
             );
             self.keep_alive_interval = default;
         }
+
+        // 所有负数都表示关闭压缩，统一成 -1，后面只比较这一个值。
+        self.compression_threshold = self.compression_threshold.max(-1);
         self
     }
 }
@@ -83,6 +91,14 @@ mod tests {
             ..ServerConfig::default()
         };
         config.normalized().keep_alive_interval
+    }
+
+    fn with_compression(compression_threshold: i32) -> i32 {
+        let config = ServerConfig {
+            compression_threshold,
+            ..ServerConfig::default()
+        };
+        config.normalized().compression_threshold
     }
 
     #[test]
@@ -118,5 +134,22 @@ mod tests {
             with_keep_alive(Duration::ZERO),
             ServerConfig::default().keep_alive_interval
         );
+    }
+
+    #[test]
+    fn the_default_compression_threshold_matches_the_official_server() {
+        assert_eq!(ServerConfig::default().compression_threshold, 256);
+    }
+
+    #[test]
+    fn negative_compression_thresholds_all_mean_off() {
+        // 官方只看阈值是不是非负，这里统一成 -1 方便比较。
+        assert_eq!(with_compression(i32::MIN), -1);
+        assert_eq!(with_compression(-256), -1);
+        assert_eq!(with_compression(-1), -1);
+        // 0 是合法的：每个包都压缩。
+        assert_eq!(with_compression(0), 0);
+        assert_eq!(with_compression(256), 256);
+        assert_eq!(with_compression(i32::MAX), i32::MAX);
     }
 }
