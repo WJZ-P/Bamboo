@@ -800,6 +800,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     let Some((target, container_size, menu_type, title)) = menu_shape(region, pos, kind) else {
         return false;
     };
+    crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }

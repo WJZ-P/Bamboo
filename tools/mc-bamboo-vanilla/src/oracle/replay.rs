@@ -840,7 +840,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. }
             // 堆肥的粒子和声音，题里不比较。
-            | Effect::ComposterFill { .. } => None,
+            | Effect::ComposterFill { .. }
+            // 讲台翻页的声音，题里不比较。
+            | Effect::PageTurned { .. } => None,
         })
         .collect()
 }

@@ -192,6 +192,44 @@ pub struct RedstoneMemory {
     crafter_disabled: HashMap<BlockPos, u16>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
+    /// `LecternBlockEntity` 的页码。比较器只读得了这三项，书本身在游戏层。
+    ///
+    /// Page, page count, and whether the book has writable or written content.
+    /// The item stack itself lives in the game layer.
+    lecterns: HashMap<BlockPos, LecternFacts>,
+    /// 这次右键即将放上的书。方块逻辑看不见物品组件，由调用方先放进来。
+    ///
+    /// The book about to be placed. Block logic cannot see item components,
+    /// so the caller deposits the facts before the use.
+    pending_lectern: Option<LecternFacts>,
+}
+
+/// 讲台比较器要的三项，对应 `LecternBlockEntity` 的 `page`、`pageCount` 和 `hasBook()`。
+///
+/// The three facts a lectern comparator reads: `page`, `pageCount`, and `hasBook()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LecternFacts {
+    pub page: i32,
+    pub page_count: i32,
+    pub has_content: bool,
+}
+
+impl LecternFacts {
+    /// `LecternBlockEntity.getRedstoneSignal`。
+    ///
+    /// `pageCount > 1` 时进度是 `page / (pageCount - 1)`，否则是 1。
+    /// `Mth.floor` 先把 float 提升成 double。
+    ///
+    /// Progress is `page / (pageCount - 1)` when `pageCount > 1`, otherwise 1.
+    /// `Mth.floor` widens the float to double before truncating.
+    pub fn signal(self) -> i32 {
+        let progress = if self.page_count > 1 {
+            self.page as f32 / (self.page_count as f32 - 1.0_f32)
+        } else {
+            1.0_f32
+        };
+        mc_bamboo_core::mth::floor(f64::from(progress * 14.0_f32)) + i32::from(self.has_content)
+    }
 }
 
 impl RedstoneMemory {
@@ -253,6 +291,42 @@ impl RedstoneMemory {
         self.bookshelf_slots.remove(&pos);
         self.jukebox_playing.remove(&pos);
         self.crafter_disabled.remove(&pos);
+        self.lecterns.remove(&pos);
+    }
+
+    /// 这次交互要放上的书。方块行为在 `placeBook` 里取走。
+    ///
+    /// Facts for the book the current interaction is placing. `placeBook` takes them.
+    pub fn set_pending_lectern(&mut self, facts: LecternFacts) {
+        self.pending_lectern = Some(facts);
+    }
+
+    /// 取走上一段放进来的书。没有就返回 `None`。
+    ///
+    /// Takes the facts deposited for this interaction, if any.
+    pub fn take_pending_lectern(&mut self) -> Option<LecternFacts> {
+        self.pending_lectern.take()
+    }
+
+    /// 记下这一格讲台的页码。
+    ///
+    /// Stores the lectern facts at `pos`.
+    pub fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.lecterns.insert(pos, facts);
+    }
+
+    /// 这一格讲台的页码。没有记录时是 `None`。
+    ///
+    /// Lectern facts at `pos`, if a book was recorded there.
+    pub fn lectern(&self, pos: BlockPos) -> Option<LecternFacts> {
+        self.lecterns.get(&pos).copied()
+    }
+
+    /// 取书或拆掉讲台时丢掉页码。
+    ///
+    /// Drops the lectern facts when the book is removed or the block goes away.
+    pub fn clear_lectern(&mut self, pos: BlockPos) {
+        self.lecterns.remove(&pos);
     }
 
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
@@ -326,4 +400,10 @@ pub enum Effect {
     /// `levelEvent(1500, pos, data)`：堆肥桶收进一个能堆肥的物品。
     /// `success` 为真时数据是 1（等级升了），否则是 0。客户端自己播粒子和声音。
     ComposterFill { pos: BlockPos, success: bool },
+    /// 讲台翻页，`levelEvent(1043, pos, 0)`。客户端自己播翻页的声音。
+    ///
+    /// `LecternBlock.signalPageChange` emits `levelEvent(1043, pos, 0)`.
+    /// The client plays the page-turn sound. Nearby players, including the one
+    /// who turned the page, all receive it.
+    PageTurned { pos: BlockPos },
 }
