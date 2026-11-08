@@ -111,11 +111,20 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) != READY {
             return InteractionResult::Pass;
         }
-        // `extractProduce` 先给掉出来的骨粉算落点，`Vec3.offsetRandomXZ` 取两个 `nextFloat`。
-        // 世界里没有物品实体，这两个数照样要取。
-        world.random().next_float();
-        world.random().next_float();
-        world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_COMPOSTER, 0));
+        // `extractProduce`：`offsetRandomXZ` 两个 `nextFloat`，再生成骨粉，然后把层数清零。
+        // `extractProduce`: two `nextFloat`s, then a bone meal item, then the level is cleared.
+        let pos = ctx.clicked_pos();
+        let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+        let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+        world.spawn_at_location(
+            mc_bamboo_core::Vec3::new(
+                f64::from(pos.x) + 0.5 + f64::from(dx),
+                f64::from(pos.y) + 1.01,
+                f64::from(pos.z) + 0.5 + f64::from(dz),
+            ),
+            mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::BONE_MEAL, 1),
+        );
+        world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
         InteractionResult::Success
     }
 

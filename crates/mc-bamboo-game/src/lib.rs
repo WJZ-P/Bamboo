@@ -23,6 +23,7 @@
 //! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
+mod block_drops;
 mod block_items;
 mod book;
 mod chat;
@@ -30,6 +31,7 @@ mod chunk_broadcast;
 mod chunk_encoding;
 mod chunk_tracking;
 mod container;
+mod drops;
 mod entity_sync;
 mod entity_tracking;
 mod global;

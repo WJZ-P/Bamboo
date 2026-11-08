@@ -133,6 +133,10 @@ pub(crate) struct Region {
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
+    ///
+    /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
+    pub(crate) loot_sequences: mc_bamboo_loot::RandomSequences,
     /// 下落的方块和点燃的 TNT。世界线程独占，见 `docs/folia.md`。
     ///
     /// Falling blocks and primed TNT. The world thread owns them; see `docs/folia.md`.
@@ -210,6 +214,7 @@ impl Region {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
             redstone: RedstoneMemory::default(),

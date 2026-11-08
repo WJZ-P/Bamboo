@@ -1,10 +1,15 @@
 //! `BlockTransformer.transformBlock`：斧子、锄头、锹右键时按数据驱动的规则改方块。
 //!
-//! 规则是从官方注册表生成的，在 `mc_bamboo_data::block_transformers`。官方锄头翻生根泥土时还会掉出垂根，
-//! 掉落物不在范围里。
+//! 规则是从官方注册表生成的，在 `mc_bamboo_data::block_transformers`。锄头翻生根泥土时
+//! 在改方块之前按点击的面 `popResourceFromFace` 掉一根垂根。
+//!
+//! Hoeing rooted dirt calls `popResourceFromFace` for one hanging roots before the block changes.
 
 use mc_bamboo_core::{BlockPos, Hand};
-use mc_bamboo_data::{BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule};
+use mc_bamboo_data::{
+    BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule, blocks, items,
+};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     behaviour::common::item_of,
@@ -34,6 +39,15 @@ pub(super) fn transform_block(
         return InteractionResult::Pass;
     };
     let state = fitted_to_neighbours(transform, world, state, pos);
+    // `BlockTransformer` 先掉落再 `setBlock`。只有锄头翻生根泥土这一项带掉落表，结果是常量 1。
+    // Loot runs before `setBlock`. Only hoeing rooted dirt has a table, and it is a constant 1.
+    if world.block_state(pos).is(blocks::ROOTED_DIRT) {
+        world.pop_resource_from_face(
+            pos,
+            ctx.clicked_face(),
+            ItemStack::new(items::HANGING_ROOTS, 1),
+        );
+    }
     world.set_block(pos, state, UPDATE_ALL_IMMEDIATE);
     InteractionResult::Success
 }

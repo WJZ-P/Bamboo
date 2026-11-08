@@ -5,6 +5,7 @@
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, items};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     behaviour::{Behaviour, Plain, common::facing_the_player},
@@ -38,6 +39,12 @@ impl Behaviour for Beehive {
     ) -> InteractionResult {
         let harvests = ctx.item == items::SHEARS || ctx.item == items::GLASS_BOTTLE;
         if state.get(LEVEL_HONEY) >= MAX_HONEY_LEVELS && harvests {
+            // `HARVEST_BEEHIVE` 是常量 3 个蜜脾，`popResource` 在改方块之前。玻璃瓶不掉蜜脾。
+            // `HARVEST_BEEHIVE` is a constant 3 honeycomb. `popResource` runs before the block changes.
+            // A glass bottle does not drop honeycomb.
+            if ctx.item == items::SHEARS {
+                world.pop_resource(ctx.clicked_pos(), ItemStack::new(items::HONEYCOMB, 3));
+            }
             world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;
         }

@@ -88,7 +88,7 @@ import sun.misc.Unsafe;
  * handleContainerClick 的顺序点一串随机点击。讲台按 handleContainerButtonClick 的顺序按一串随机按钮，
  * 页码夹取和取书清页由一个只实现了 LecternBlockEntity 容器行为的 Container 完成，不创建真的方块实体。
  * 假玩家是 Unsafe.allocateInstance 出来的 ServerPlayer，只补了 level、inventory 和 abilities.instabuild；
- * 掉落的物品被 override 成空操作，因为 Bamboo 也没有物品实体。
+ * 掉落被 override 成空操作。菜单比较只看槽位，不看地上的物品实体。
  *
  * <p>随机题按“从不预测”的模型模拟：每次点击的 changedSlots 是空的，carriedItem 恒为 {@link HashedStack#EMPTY}。
  * 最后另有一道带组件的题，客户端按 {@code MultiPlayerGameMode.handleContainerInput} 把变过的槽
@@ -920,7 +920,7 @@ public final class MenuOracle {
             return player;
         }
 
-        /** Bamboo 没有物品实体，丢掉的东西直接消失。 */
+        /** 菜单比较不看地上的物品，这里丢掉的东西不生成实体。 */
         @Override
         public ItemEntity drop(ItemStack itemStack, boolean thrownFromHand, Prediction prediction) {
             return null;

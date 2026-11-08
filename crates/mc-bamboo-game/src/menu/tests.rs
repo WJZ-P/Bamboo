@@ -350,7 +350,9 @@ fn middle_click_clones_a_full_stack() {
     );
 }
 
-/// Q 丢弃，光标空时丢一格里的东西。没有物品实体，东西直接消失。
+/// Q 丢弃，光标空时丢一格里的东西。丢出的物品生成物品实体。
+///
+/// Throwing with an empty cursor drops the slot. The thrown stack becomes an item entity.
 #[test]
 fn throwing_empties_the_slot() {
     let mut fixture = Fixture::new();

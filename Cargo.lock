@@ -1941,6 +1941,7 @@ dependencies = [
  "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-loot",
  "mc-bamboo-nbt",
  "mc-bamboo-protocol",
  "mc-bamboo-world",

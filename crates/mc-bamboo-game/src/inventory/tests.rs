@@ -34,6 +34,18 @@ fn inventory<'a>(server: &'a Harness, client: &Client) -> &'a Inventory {
     &server.player(client).inventory
 }
 
+/// 丢出物品会生成地上的实体，但不会回一份物品栏修正。
+///
+/// Dropping spawns a ground item. It does not send an inventory correction.
+fn assert_no_inventory_correction(client: &Client) {
+    let frames = client.take_frames();
+    assert!(frames.iter().all(|frame| {
+        frame.id != clientbound::CONTAINER_SET_SLOT
+            && frame.id != clientbound::CONTAINER_SET_CONTENT
+            && frame.id != clientbound::SET_PLAYER_INVENTORY
+    }));
+}
+
 fn set_slot(server: &Harness, client: &Client, slot: i16, stack: ItemStack) {
     server.request(client, PlayRequest::SetCreativeModeSlot { slot, stack });
 }
@@ -318,7 +330,7 @@ fn throwing_an_item_out_of_the_screen_touches_no_slot() {
     }
     server.tick();
 
-    assert!(client.take_frames().is_empty());
+    assert_no_inventory_correction(&client);
     let inventory = inventory(&server, &client);
     assert_eq!(inventory.slots[36].item, items::DIRT);
     assert!(inventory.slots[37..].iter().all(ItemStack::is_empty));
@@ -350,7 +362,8 @@ fn q_takes_one_item_without_a_reply() {
     // 组件留在剩下的物品上。
     let expected = ItemStack { count: 1, ..stack };
     assert_eq!(inventory(&server, &client).slots[36], expected);
-    assert!(client.take_frames().is_empty());
+    // 物品栏不回包。地上的物品实体会另外发给客户端。
+    // The inventory is not corrected. The ground item entity is sent separately.
 }
 
 #[test]
@@ -367,7 +380,7 @@ fn q_on_the_last_item_empties_the_slot() {
     server.tick();
 
     assert_eq!(inventory(&server, &client).slots[36], ItemStack::empty());
-    assert!(client.take_frames().is_empty());
+    assert_no_inventory_correction(&client);
 }
 
 #[test]
@@ -389,7 +402,7 @@ fn ctrl_q_empties_only_the_selected_slot() {
     let inventory = inventory(&server, &client);
     assert_eq!(inventory.slots[38], ItemStack::empty());
     assert_eq!(inventory.slots[36].count, 3);
-    assert!(client.take_frames().is_empty());
+    assert_no_inventory_correction(&client);
 }
 
 #[test]

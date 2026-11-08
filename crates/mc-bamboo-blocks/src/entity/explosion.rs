@@ -30,6 +30,9 @@ impl World<'_> {
     /// `center` 是爆炸中心，`radius` 是爆炸强度。实体伤害和掉落物不在范围里。
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32) {
         let mut broken = self.calculate_exploded_positions(center, radius);
+        // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
+        // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
+        crate::entity::item::hurt_items_by_explosion(self, center, radius);
         // `Util.shuffle(toBlow, level.random)`。
         self.random().shuffle(&mut broken);
         for pos in broken {

@@ -1,13 +1,16 @@
 //! 投掷器，官方 `DropperBlock.dispenseFrom`。
 //!
 //! 方块被信号触发后隔 4 刻排一个计划刻，到期时从 9 个槽里随机挑一个物品：
-//! 朝着的方向有容器就塞一个进去，没有就把物品抛出去。这个世界没有物品实体，
-//! 抛出去的那一个直接消失，但官方抛出去时要取的随机数照取，见 [`spawn_item_random`]。
+//! 朝着的方向有容器就塞一个进去，没有就按 `DefaultDispenseItemBehavior.spawnItem` 生成物品实体。
 //!
 //! 发射器（`DispenserBlock`）用的注册表行为（箭、水、盔甲等）不在范围里，见
 //! `Dispenser` 方块的 tick，不调用这里。
+//!
+//! A triggered dropper waits four ticks, then picks a random occupied slot. A container
+//! in front receives one item. Air receives an item entity from `spawnItem`.
+//! Dispenser registry behaviours stay out of scope and do not call this module.
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -36,17 +39,6 @@ fn random_slot(world: &World, occupied: &[bool]) -> i32 {
         }
     }
     replace_slot
-}
-
-/// `DefaultDispenseItemBehavior.spawnItem` 取的那几个随机数。
-///
-/// 一个 `nextDouble` 算 `pow`，再加三个 `triangle`，每个 `triangle` 取两个 `nextDouble`。
-/// 物品实体不建，随机数不能少取。
-fn spawn_item_random(world: &mut World) {
-    let _pow = world.random().next_double() * 0.1 + 0.2;
-    for _ in 0..3 {
-        let _ = world.random().triangle(0.2, 0.017_227_5 * 6.0);
-    }
 }
 
 /// 从 `stack` 里拿走一个。官方 `split(1)` 之后剩下的那一堆。
@@ -125,8 +117,15 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
             item.clone()
         }
     } else {
-        // 官方在这里生成物品实体。没有实体，东西凭空消失，随机数照取。
-        spawn_item_random(world);
+        // `DispenserBlock.getDispensePosition`：方块中心沿朝向出去 0.7 格。
+        // `DispenserBlock.getDispensePosition`: 0.7 blocks out from the block centre.
+        let (step_x, step_y, step_z) = direction.normal();
+        let position = Vec3::new(
+            f64::from(pos.x) + 0.5 + 0.7 * f64::from(step_x),
+            f64::from(pos.y) + 0.5 + 0.7 * f64::from(step_y),
+            f64::from(pos.z) + 0.5 + 0.7 * f64::from(step_z),
+        );
+        world.spawn_dispensed_item(copy_with_count(&item, 1), direction, position);
         without_one(&item)
     };
 

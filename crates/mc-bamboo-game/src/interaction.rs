@@ -129,6 +129,10 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
 ///
 /// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
 pub(crate) fn run_entity_ticks(region: &mut Region) {
+    // 玩家不在实体列表里。官方玩家通常先于后生成的物品 tick，捡起看到的是移动前的位置。
+    // Players are not in the entity list. Vanilla players usually tick before later items,
+    // so pickup sees the item where it was before this tick's movement.
+    crate::drops::pickup_before_entities(region);
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
     send_effects(region, None, &outcome.effects);
@@ -282,8 +286,8 @@ pub(crate) fn on_player_action(
                 mining::handle_block_break_action(region, id, action, pos, face);
             }
         }
-        PlayerActionKind::DropAllItems => inventory::drop_held_item(region, id, true),
-        PlayerActionKind::DropItem => inventory::drop_held_item(region, id, false),
+        PlayerActionKind::DropAllItems => crate::drops::drop_held(region, id, true),
+        PlayerActionKind::DropItem => crate::drops::drop_held(region, id, false),
         PlayerActionKind::SwapItemWithOffhand => inventory::swap_hands(region, id),
         PlayerActionKind::ReleaseUseItem | PlayerActionKind::Stab => {}
     }

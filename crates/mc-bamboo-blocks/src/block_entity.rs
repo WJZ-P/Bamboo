@@ -4,16 +4,20 @@
 //! 具体的实体在所属的方块模块里。方块事件是活塞这类方块动画的第一步，官方在
 //! `ServerLevel.tick` 里统一执行，见 [`World::run_block_events`]。
 //!
-//! 方块实体被移除时官方还会按容器内容掉落物品。这个世界没有物品实体，但掉落要取随机数，
-//! 数漏了后面的随机刻和计划刻就全错开，所以 [`pre_remove_side_effects`] 照官方容器补上取数。
+//! 方块实体被移除时按容器内容生成物品实体。取数次数和官方 `dropContents` 一样，
+//! 空槽也要取掉落点，否则后面的随机刻和计划刻会错开。
+//!
+//! Removing a block entity spawns item entities from its container. The number of draws
+//! matches `dropContents`, including the drop point of every empty slot.
 
 use std::{
     any::Any,
     collections::{HashMap, HashSet, VecDeque},
 };
 
-use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{BlockClass, registries, tags::block_tags};
+use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_data::{BlockClass, items, registries, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     state::{
@@ -284,47 +288,46 @@ const SLOT_OCCUPIED: [Property<bool>; 6] = [
     SLOT_5_OCCUPIED,
 ];
 
-/// `Containers.dropItemStack` 开头的掉落点：`floor(x/y/z)` 之后各取一个 double。
-fn drop_point(world: &mut World) {
-    for _ in 0..3 {
-        world.random().next_double();
-    }
-}
-
-/// 一格空的槽位：`dropContents` 对每一格都调用 `dropItemStack`，空堆只取掉落点。
-fn drop_empty_slot(world: &mut World) {
-    drop_point(world);
-}
-
-/// 一格装 `count` 件物品的槽位。掉落点之后，每一堆取一次 `nextInt(21) + 10`
-/// （最后一堆不足时只拿走剩下的），再取 `setDeltaMovement` 里三个 `triangle` 的六个 double。
-fn drop_stack(world: &mut World, count: i32) {
-    drop_point(world);
-    let mut left = count;
-    while left > 0 {
-        let split = (world.random().next_int(21) + 10).min(left);
-        left -= split;
-        for _ in 0..6 {
-            world.random().next_double();
-        }
-    }
-}
-
-/// 一张 `Container` 的槽位表。`counts` 是每格的数量，没有的格子按空槽算。
+/// `Containers.dropContents`：从第 0 格到 `size - 1`，空格也调用 `dropItemStack`。
 ///
-/// 官方 `dropContents` 从第 0 格数到 `getContainerSize() - 1`，空格也照样调用
-/// `dropItemStack`，所以槽位数不能省。
-fn drop_slots(world: &mut World, slots: i32, counts: &[i32]) {
+/// `Containers.dropContents`: every slot from 0 to `size - 1` calls `dropItemStack`, including empty ones.
+fn drop_slots(world: &mut World, pos: BlockPos, slots: i32, stacks: &[ItemStack]) {
+    let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
     for slot in 0..slots {
-        match counts.get(slot as usize).copied().unwrap_or(0) {
-            0 => drop_empty_slot(world),
-            count => drop_stack(world, count),
-        }
+        let stack = stacks
+            .get(slot as usize)
+            .cloned()
+            .unwrap_or_else(ItemStack::empty);
+        world.drop_container_stack(x, y, z, stack);
     }
 }
 
-/// `BlockEntity.preRemoveSideEffects`。`counts` 是这一格自己那张物品表每格的数量。
-pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, counts: &[i32]) {
+/// `JukeboxBlockEntity.popOutTheItem`：非空时 `offsetRandomXZ` 两个 `nextFloat`，再生成物品。
+///
+/// `JukeboxBlockEntity.popOutTheItem`: a non-empty record draws two `nextFloat`s, then spawns the item.
+fn pop_jukebox(world: &mut World, pos: BlockPos, stack: ItemStack) {
+    if stack.is_empty() {
+        return;
+    }
+    let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+    let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+    let at = Vec3::new(
+        f64::from(pos.x) + 0.5 + f64::from(dx),
+        f64::from(pos.y) + 1.01,
+        f64::from(pos.z) + 0.5 + f64::from(dz),
+    );
+    world.spawn_at_location(at, stack);
+}
+
+/// `BlockEntity.preRemoveSideEffects`。`stacks` 是这一格自己那张物品表。
+///
+/// `BlockEntity.preRemoveSideEffects`. `stacks` is this block entity's own item list.
+pub(crate) fn pre_remove_side_effects(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    stacks: &[ItemStack],
+) {
     let Some(entity) = state.block().block_entity_type else {
         return;
     };
@@ -332,41 +335,47 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, coun
 
     match entity {
         // `ChestBlockEntity`、`TrappedChestBlockEntity`（铜箱子也是这个实体）、`BarrelBlockEntity`。
-        E::CHEST | E::TRAPPED_CHEST | E::BARREL => drop_slots(world, 27, counts),
-        // `AbstractFurnaceBlockEntity`：三格燃料，经验来自空的 `recipesUsed`，不取数。
-        E::FURNACE | E::SMOKER | E::BLAST_FURNACE => drop_slots(world, 3, counts),
-        E::HOPPER | E::BREWING_STAND => drop_slots(world, 5, counts),
-        E::DISPENSER | E::DROPPER | E::CRAFTER => drop_slots(world, 9, counts),
-        E::SHELF => drop_slots(world, 3, counts),
-        E::DECORATED_POT => drop_slots(world, 1, counts),
-        E::CAMPFIRE => drop_slots(world, 4, counts),
-        // 书架有 6 格物品栏时按数量掉。没有条目时退回 `SLOT_OCCUPIED`，每格一本。
+        E::CHEST | E::TRAPPED_CHEST | E::BARREL => drop_slots(world, pos, 27, stacks),
+        // `AbstractFurnaceBlockEntity`：三格。经验来自空的 `recipesUsed`，不取数。
         //
-        // A bookshelf with a 6-slot list drops by count. Without one, fall back to
-        // `SLOT_OCCUPIED`, one book per occupied slot.
+        // `AbstractFurnaceBlockEntity`: three slots. Experience comes from an empty `recipesUsed` and draws nothing.
+        E::FURNACE | E::SMOKER | E::BLAST_FURNACE => drop_slots(world, pos, 3, stacks),
+        E::HOPPER | E::BREWING_STAND => drop_slots(world, pos, 5, stacks),
+        E::DISPENSER | E::DROPPER | E::CRAFTER => drop_slots(world, pos, 9, stacks),
+        E::SHELF => drop_slots(world, pos, 3, stacks),
+        E::DECORATED_POT => drop_slots(world, pos, 1, stacks),
+        E::CAMPFIRE => drop_slots(world, pos, 4, stacks),
+        // 有 6 格物品栏时按堆掉。没有条目时退回 `SLOT_OCCUPIED`，占着的格子掉一本普通书。
+        //
+        // A 6-slot list drops those stacks. Without one, fall back to `SLOT_OCCUPIED`:
+        // each occupied slot drops one plain book.
         E::CHISELED_BOOKSHELF => {
-            if counts.len() == 6 {
-                drop_slots(world, 6, counts);
+            if stacks.len() == 6 {
+                drop_slots(world, pos, 6, stacks);
             } else {
-                for slot in SLOT_OCCUPIED {
-                    if state.get(slot) {
-                        drop_stack(world, 1);
-                    } else {
-                        drop_empty_slot(world);
-                    }
-                }
+                let books: Vec<ItemStack> = SLOT_OCCUPIED
+                    .iter()
+                    .map(|slot| {
+                        if state.get(*slot) {
+                            ItemStack::new(items::BOOK, 1)
+                        } else {
+                            ItemStack::empty()
+                        }
+                    })
+                    .collect();
+                drop_slots(world, pos, 6, &books);
             }
         }
-        // `JukeboxBlockEntity.preRemoveSideEffects` → `popOutTheItem`：物品非空时
-        // `offsetRandomXZ` 取两个 `nextFloat`。通知邻居在 `World::set_block_state` 里，
-        // 正在放的那一次在取数之前，另一次在取数之后。
+        // 通知邻居在 `World::set_block_state` 里：正在放的那一次在取数之前，另一次在取数之后。
         //
-        // `JukeboxBlockEntity.preRemoveSideEffects` → `popOutTheItem`: a non-empty item takes
-        // two `nextFloat`s in `offsetRandomXZ`. Neighbor notifications live in
-        // `World::set_block_state`: the playing song's one is before the rolls, the other after.
-        E::JUKEBOX if counts.first().copied().unwrap_or(0) > 0 => {
-            world.random().next_float();
-            world.random().next_float();
+        // Neighbor notifications live in `World::set_block_state`: the playing song's one is
+        // before the rolls, the other after.
+        E::JUKEBOX => {
+            pop_jukebox(
+                world,
+                pos,
+                stacks.first().cloned().unwrap_or_else(ItemStack::empty),
+            );
         }
         // `LecternBlockEntity.preRemoveSideEffects` 生成的 `ItemEntity` 用实体自己的
         // `RandomSource`，不取 `level.random`。书在游戏层，这里不掉落、不取数。

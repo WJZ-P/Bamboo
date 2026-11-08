@@ -458,6 +458,22 @@ impl<'a> World<'a> {
         self.level.block_entities().contains(pos)
     }
 
+    /// 这一格容器里非空的物品。对照漏斗吸物品时用。
+    ///
+    /// Non-empty stacks in the container at this cell. Used when comparing a hopper pull.
+    pub fn container_contents(&mut self, pos: BlockPos) -> Vec<(i32, i32)> {
+        let mut found = Vec::new();
+        let _ = self.with_container(pos, &mut |container| {
+            for slot in 0..container.size() {
+                let stack = container.get(slot);
+                if !stack.is_empty() {
+                    found.push((stack.item, stack.count));
+                }
+            }
+        });
+        found
+    }
+
     /// 这一格的物品栏，见 [`Level::with_container`]。
     ///
     /// 堆肥桶没有方块实体，官方 `ComposterBlock.getContainer` 按等级现做一个容器，这里同样处理。
@@ -921,18 +937,21 @@ impl<'a> World<'a> {
             && !block_entity::keeps_block_entity(state, old)
             && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0;
         // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
-        // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
-        let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
+        // 所以先抄一份槽位；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
+        //
+        // The draw count depends on how many items each slot holds. The list is replaced after
+        // the write, so copy the slots first. A double chest drops only this half.
+        let dropped_stacks = drops_own_contents.then(|| self.slots_at(pos));
         // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`（通知邻居），
         // 再取两个 `nextFloat`，然后无条件再 `onSongChanged`。物品在第一次通知之前已经是空的。
         //
         // Breaking a jukebox runs `popOutTheItem` → `setTheItem(EMPTY)`: a playing song `stop`s
         // (neighbors are told) before the two `nextFloat`s, then `onSongChanged` runs again.
         // The item is already empty before the first notification.
-        let jukebox_count = dropped_counts
+        let jukebox_count = dropped_stacks
             .as_ref()
             .filter(|_| old.is_a(BlockAncestor::JukeboxBlock))
-            .map(|counts| counts.first().copied().unwrap_or(0))
+            .map(|stacks| stacks.first().map(|stack| stack.count).unwrap_or(0))
             .unwrap_or(0);
         let jukebox_playing = jukebox_count > 0 && self.level.redstone().is_jukebox_playing(pos);
         if !self.level.write_block(pos, state, flags) {
@@ -958,8 +977,8 @@ impl<'a> World<'a> {
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        if let Some(counts) = dropped_counts {
-            block_entity::pre_remove_side_effects(old, self, &counts);
+        if let Some(stacks) = dropped_stacks {
+            block_entity::pre_remove_side_effects(old, self, pos, &stacks);
         }
         if jukebox_count > 0 {
             crate::block_container::on_jukebox_song_changed(old, self, pos);
@@ -1279,6 +1298,27 @@ impl<'a> World<'a> {
         self.level.entities_mut().get_mut_including_pending(id)
     }
 
+    /// 已经在 tick 列表里的实体。正在 tick 的那一个不在里面。
+    ///
+    /// An entity already in the tick list. The one currently ticking is not in it.
+    pub fn entity(&self, id: i32) -> Option<&Entity> {
+        self.level.entities().get(id)
+    }
+
+    /// 这一拍会 tick 的实体 ID，按 ID 升序。
+    ///
+    /// Entity ids that tick this step, in ascending id order.
+    pub fn entity_ids(&self) -> Vec<i32> {
+        self.level.entities().ids()
+    }
+
+    /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
+    ///
+    /// Removes an entity from the tick list. The entity currently ticking is only marked `discard`.
+    pub fn remove_entity(&mut self, id: i32) {
+        self.level.entities_mut().remove(id);
+    }
+
     /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
@@ -1288,7 +1328,11 @@ impl<'a> World<'a> {
             let Some(mut entity) = self.level.entities_mut().take(id) else {
                 continue;
             };
-            entity.tick(self);
+            // 这一拍已经被别的实体丢掉的，官方不再 tick，名单里也不再留下。
+            // An entity another one discarded earlier this tick is not ticked. Vanilla drops it from the list.
+            if !entity.removed {
+                entity.tick(self);
+            }
             if !entity.removed {
                 self.level.entities_mut().put(entity);
             }
@@ -1310,7 +1354,11 @@ impl<'a> World<'a> {
             let Some(mut entity) = self.level.entities_mut().take(id) else {
                 continue;
             };
-            entity.tick(self);
+            // 合并把对方丢掉之后，对方这一拍还在快照里，但是不再 tick。
+            // After a merge discards the other item, it stays in this tick's snapshot and does not tick.
+            if !entity.removed {
+                entity.tick(self);
+            }
             after.push(entity.clone());
             if !entity.removed {
                 self.level.entities_mut().put(entity);
@@ -1468,6 +1516,22 @@ impl<'a> World<'a> {
             let state = self.block_state(pos);
             let outline = outline_seen_holding(state, pos, main_hand);
             self.clip_one_block(pos, from, to, &outline, state, fluid)
+        })
+    }
+
+    /// `ClipContext.Block.COLLIDER` 加 `Fluid.NONE`。爆炸的遮挡采样用它。
+    ///
+    /// `ClipContext.Block.COLLIDER` with `Fluid.NONE`. Explosion exposure samples use it.
+    pub(crate) fn clip_collider(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        context: CollisionContext,
+    ) -> Option<BlockHit> {
+        traverse_blocks(from, to, |pos| {
+            let state = self.block_state(pos);
+            let collider = shape::collision_boxes(state, pos, context);
+            self.clip_one_block(pos, from, to, &collider, state, ClipFluid::None)
         })
     }
 
@@ -2023,7 +2087,9 @@ mod tests {
 
     /// 容器被换掉时，官方 `preRemoveSideEffects` 按每格的数量取随机数：每一格三个
     /// double 的掉落点，非空的堆再按 `split(nextInt(21) + 10)` 一块一块取六个 double。
-    /// 这个世界没有物品实体，但随机数一个都不能少，否则后面的随机刻会错开。
+    /// 同时生成物品实体。随机数一个都不能少，否则后面的随机刻会错开。
+    ///
+    /// Breaking a container draws those numbers and spawns the item entities.
     #[test]
     fn destroying_a_container_consumes_the_drop_random_numbers() {
         let mut level = TestLevel::new();
@@ -2035,6 +2101,9 @@ mod tests {
         level.set_container(CENTER, slots);
         with_world(&mut level, |world| {
             world.set_block(CENTER, BlockState::AIR, UPDATE_ALL);
+            // 一件和三件各成一堆，空槽不生成实体。
+            // One item and three items each become one entity. Empty slots do not.
+            assert_eq!(world.entity_ids().len(), 2);
         });
 
         let expected = LegacyRandom::new(0);

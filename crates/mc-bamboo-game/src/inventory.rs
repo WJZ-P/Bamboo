@@ -84,7 +84,7 @@ impl Inventory {
     }
 
     /// 这只手的菜单槽位。
-    fn hand_slot(&self, hand: Hand) -> usize {
+    pub(crate) fn hand_slot(&self, hand: Hand) -> usize {
         match hand {
             Hand::Main => HOTBAR_START + usize::from(self.selected),
             Hand::Off => OFF_HAND,
@@ -183,7 +183,9 @@ impl Inventory {
 
     /// 官方 `ItemUtils.createFilledResult` 和洗染料的 `remove`。
     ///
-    /// 返回物品变了的菜单槽位。生存模式放不下的那一份没有物品实体，直接消失。
+    /// 返回物品变了的菜单槽位。生存模式放不下的那一份由调用方生成物品实体。
+    ///
+    /// Returns the menu slots that changed. The caller spawns an item entity for what does not fit.
     ///
     /// `ItemUtils.createFilledResult`, and `remove` for dyed items.
     ///
@@ -250,12 +252,26 @@ impl Inventory {
     /// 官方 `Inventory.add(ItemStack)`，也就是 `add(-1, stack)`。
     ///
     /// `Inventory.add(ItemStack)`, which is `add(-1, stack)`.
-    fn add(&mut self, mut incoming: ItemStack, creative: bool) -> bool {
+    fn add(&mut self, incoming: ItemStack, creative: bool) -> bool {
         if incoming.is_empty() {
             return false;
         }
+        let before = incoming.count;
+        let left = self.receive(incoming, creative);
+        left.count < before || (creative && left.is_empty())
+    }
+
+    /// 官方 `Inventory.add` 会改掉传入的那一堆。返回没放进去的部分。
+    /// 创造模式放不下时把剩下的清成空堆，调用方看起来像是放进去了。
+    ///
+    /// Vanilla `Inventory.add` mutates the stack it is given. This returns what did not fit.
+    /// Creative mode clears the leftover, so the caller sees a successful add.
+    pub(crate) fn receive(&mut self, mut incoming: ItemStack, creative: bool) -> ItemStack {
+        if incoming.is_empty() {
+            return incoming;
+        }
         if incoming.is_damaged() {
-            return self.add_damaged(incoming, creative);
+            return self.receive_damaged(incoming, creative);
         }
         let mut last;
         loop {
@@ -267,9 +283,17 @@ impl Inventory {
             }
         }
         if incoming.count == last && creative {
-            true
+            ItemStack::empty()
         } else {
-            incoming.count < last
+            incoming
+        }
+    }
+
+    fn receive_damaged(&mut self, incoming: ItemStack, creative: bool) -> ItemStack {
+        if self.add_damaged(incoming.clone(), creative) {
+            ItemStack::empty()
+        } else {
+            incoming
         }
     }
 
@@ -414,38 +438,40 @@ pub(crate) fn on_set_carried_item(region: &mut Region, id: PlayerId, slot: i16) 
 
 /// `set_creative_mode_slot`：改了一个槽。`blocks-inventory.md` 8.2、8.3。
 ///
-/// 不回包。负数的槽是丢到界面外，M2 没有物品实体，物品就这么没了，所以什么也不用做。
+/// 不回包。负数的槽是拖出界面，生成物品实体。
 /// 槽 0 是合成结果，它和超出范围、数量超限的包一样静默忽略。
+///
+/// No inventory reply. A negative slot drops the stack as an item entity.
+/// Slot 0 is the crafting result and is ignored, same as an out-of-range or oversized stack.
 pub(crate) fn on_set_creative_mode_slot(
     region: &mut Region,
     id: PlayerId,
     slot: i16,
     stack: ItemStack,
 ) {
+    let creative = region
+        .players
+        .get(&id)
+        .is_some_and(|player| player.game_mode == GameMode::Creative);
+    if !creative || !count_is_valid(&stack) {
+        return;
+    }
+    // 负数槽是拖出界面。限流在 [`crate::drops::creative_drop_outside`]。
+    // A negative slot is a drag outside the screen. The throttle lives in
+    // [`crate::drops::creative_drop_outside`].
+    if slot < 0 {
+        crate::drops::creative_drop_outside(region, id, stack);
+        return;
+    }
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
-    if player.game_mode != GameMode::Creative || !count_is_valid(&stack) {
-        return;
-    }
     if (1..MENU_SLOTS as i16).contains(&slot) {
         player.inventory.slots[slot as usize] = stack;
     }
 }
 
 /// Q 和 Ctrl+Q：客户端已经在本地扣掉了，这里跟上，不回包。`blocks-inventory.md` 8.3。
-pub(crate) fn drop_held_item(region: &mut Region, id: PlayerId, all: bool) {
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
-    };
-    let slot = player.inventory.hand_slot(Hand::Main);
-    let stack = &mut player.inventory.slots[slot];
-    stack.count -= 1;
-    if all || stack.count <= 0 {
-        *stack = ItemStack::empty();
-    }
-}
-
 /// F：客户端不预测，所以要把两个槽发回去。`blocks-inventory.md` 8.3。
 pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get_mut(&id) else {

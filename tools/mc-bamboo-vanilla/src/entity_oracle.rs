@@ -1,12 +1,12 @@
-//! 用官方的 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 对照 Bamboo 的实体物理。
+//! 用官方实体 tick 对照 Bamboo 的下落方块、点燃的 TNT 和地上的物品。
 //!
 //! `EntityOracle.java` 在假世界里跑官方实体，每 tick 记下位置、速度、是否落地、方块状态和世界里的方块。
-//! 这里用同一个种子重放，浮点按原始位比较。
+//! 物品还记下堆叠、年龄、拾取延迟和生命。这里用同一个种子重放，浮点按原始位比较。
 //!
-//! Compares Bamboo's entity physics with official `FallingBlockEntity.tick` and `PrimedTnt.tick`.
-//! `EntityOracle.java` runs the official entities in a fake world and records position, velocity,
-//! grounding, block state and the world blocks every tick. This replays the same seeds and
-//! compares the floats by their raw bits.
+//! Compares Bamboo with official falling-block, primed-TNT and ground-item ticks.
+//! `EntityOracle.java` records position, velocity, grounding, block state and the world blocks
+//! every tick. Items also record the stack, age, pickup delay and health. This replays the same
+//! seeds and compares the floats by their raw bits.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -15,11 +15,13 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockState, BlockTicks, Level, LevelRandom, World,
+    BlockEntities, BlockEvents, BlockState, BlockTicks, Container, HopperEntity, Level,
+    LevelRandom, Slots, World,
     entity::{Entities, Entity, EntityKind, JavaRandom},
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
-use mc_bamboo_data::version;
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_data::{BlockAncestor, version};
+use mc_bamboo_protocol::item::ItemStack;
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
@@ -56,12 +58,45 @@ struct Case {
     fuse: Option<i32>,
     blocks: Vec<[i32; 4]>,
     steps: Vec<Step>,
+    /// 物品场景才有。下落方块和 TNT 的题不写这些字段。
+    ///
+    /// Present on item scenes. Falling-block and TNT cases omit them.
+    #[serde(default)]
+    item: i32,
+    #[serde(default)]
+    count: i32,
+    #[serde(default)]
+    px: f64,
+    #[serde(default)]
+    py: f64,
+    #[serde(default)]
+    pz: f64,
+    #[serde(default)]
+    pickup_delay: Option<i32>,
+    #[serde(default)]
+    extras: Vec<ExtraItem>,
+    #[serde(default)]
+    hopper: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtraItem {
+    item: i32,
+    count: i32,
+    x: f64,
+    y: f64,
+    z: f64,
 }
 
 #[derive(Debug, Deserialize)]
 struct Step {
     entities: Vec<OfficialEntity>,
     blocks: Vec<[i32; 4]>,
+    /// 漏斗槽里非空的物品。没有漏斗时是空表。
+    ///
+    /// Non-empty hopper slots. Empty when the scene has no hopper.
+    #[serde(default)]
+    containers: Vec<[i32; 5]>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -78,6 +113,23 @@ struct OfficialEntity {
     dz: i64,
     block: i32,
     fuse: i32,
+    /// 物品 id。不是物品时是 -1。
+    ///
+    /// Item id. `-1` when this entity is not an item.
+    #[serde(default = "unknown_item")]
+    item: i32,
+    #[serde(default)]
+    count: i32,
+    #[serde(default = "unknown_item")]
+    age: i32,
+    #[serde(default = "unknown_item")]
+    pickup: i32,
+    #[serde(default = "unknown_item")]
+    health: i32,
+}
+
+fn unknown_item() -> i32 {
+    -1
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +151,7 @@ struct PhysicsLevel {
     block_entities: BlockEntities,
     block_events: BlockEvents,
     entities: Entities,
+    containers: HashMap<BlockPos, Vec<ItemStack>>,
 }
 
 impl PhysicsLevel {
@@ -110,6 +163,7 @@ impl PhysicsLevel {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             entities: Entities::new(),
+            containers: HashMap::new(),
         }
     }
 
@@ -211,6 +265,19 @@ impl Level for PhysicsLevel {
     fn entities_mut(&mut self) -> &mut Entities {
         &mut self.entities
     }
+
+    fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        if !self.block_state(pos).is_a(BlockAncestor::HopperBlock) {
+            return false;
+        }
+        let slots = self
+            .containers
+            .entry(pos)
+            .or_insert_with(|| vec![ItemStack::empty(); 5]);
+        let mut view = Slots::new(slots);
+        f(&mut view);
+        true
+    }
 }
 
 /// 启动官方进程，逐题重放。
@@ -301,12 +368,43 @@ impl Report {
                 BlockState(case.state as u32),
             ),
             "tnt" => world.spawn_tnt(BlockPos::new(case.x, case.y, case.z)),
+            "item" => {
+                spawn_ground_item(
+                    &mut world,
+                    case.px,
+                    case.py,
+                    case.pz,
+                    case.item,
+                    case.count,
+                    case.pickup_delay.unwrap_or(10),
+                );
+                for extra in &case.extras {
+                    spawn_ground_item(
+                        &mut world,
+                        extra.x,
+                        extra.y,
+                        extra.z,
+                        extra.item,
+                        extra.count,
+                        case.pickup_delay.unwrap_or(10),
+                    );
+                }
+                for &[x, y, z, state] in &case.blocks {
+                    let pos = BlockPos::new(x, y, z);
+                    if BlockState(state as u32).is_a(BlockAncestor::HopperBlock) {
+                        world.set_block_entity(Box::new(HopperEntity::new(pos)));
+                    }
+                }
+                0
+            }
             other => {
                 self.mismatch(format!("{}: unknown kind {other}", case.name));
                 return;
             }
         };
-        if let Some(entity) = world.entity_mut(id) {
+        if case.kind != "item"
+            && let Some(entity) = world.entity_mut(id)
+        {
             if let Some([per_distance, max]) = case.hurts {
                 entity.set_hurts_entities(per_distance, max as i32);
             }
@@ -319,11 +417,23 @@ impl Report {
             self.mismatch(format!("{}: no steps", case.name));
             return;
         }
-        self.compare_step(&case.name, 0, &world, &[], &case.steps[0]);
+        let hoppers = hopper_cells(case);
+        self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
         for (index, step) in case.steps.iter().enumerate().skip(1) {
-            let ticked = world.tick_entities_kept();
+            let mut ticked = world.tick_entities_kept();
+            // 下落方块和 TNT 摔出来的物品不在这道题里。物品题才逐个比较。
+            // Items broken out of a falling block or TNT are not part of those cases.
+            if case.kind != "item" {
+                ticked.retain(|entity| !matches!(entity.kind, EntityKind::Item(_)));
+            }
+            if case.hopper {
+                // 官方先 tick 实体，再 tick 漏斗。漏斗吸走的物品这一拍也要留在快照里。
+                // Vanilla ticks entities, then hoppers. An item pulled this tick stays in the snapshot.
+                world.tick_block_entities();
+                refresh_after_hopper(&mut world, &mut ticked);
+            }
             self.steps += 1;
-            self.compare_step(&case.name, index, &world, &ticked, step);
+            self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
             if self.mismatches.len() >= 12 {
                 return;
             }
@@ -334,9 +444,10 @@ impl Report {
         &mut self,
         name: &str,
         index: usize,
-        world: &World,
-        ticked: &[Entity],
+        world: &mut World,
+        ticked: Option<&[Entity]>,
         official: &Step,
+        hoppers: &[BlockPos],
     ) {
         let mut ours = ours_entities(world, ticked);
         let mut expected = official.entities.clone();
@@ -353,6 +464,31 @@ impl Report {
             self.compare_entity(name, index, ours, expected);
         }
         self.compare_blocks(name, index, world, &official.blocks);
+        self.compare_containers(name, index, world, hoppers, &official.containers);
+    }
+
+    fn compare_containers(
+        &mut self,
+        name: &str,
+        index: usize,
+        world: &mut World,
+        hoppers: &[BlockPos],
+        official: &[[i32; 5]],
+    ) {
+        let mut ours = Vec::new();
+        for pos in hoppers {
+            for (item, count) in world.container_contents(*pos) {
+                ours.push([pos.x, pos.y, pos.z, item, count]);
+            }
+        }
+        let mut expected = official.to_vec();
+        ours.sort();
+        expected.sort();
+        if ours != expected {
+            self.mismatch(format!(
+                "{name} step {index}: containers: official {expected:?}, bamboo {ours:?}"
+            ));
+        }
     }
 
     fn compare_entity(
@@ -397,6 +533,36 @@ impl Report {
             self.mismatch(format!(
                 "{place}: fuse: official {}, bamboo {}",
                 official.fuse, ours.fuse
+            ));
+        }
+        if ours.item != official.item {
+            self.mismatch(format!(
+                "{place}: item: official {}, bamboo {}",
+                official.item, ours.item
+            ));
+        }
+        if ours.count != official.count {
+            self.mismatch(format!(
+                "{place}: count: official {}, bamboo {}",
+                official.count, ours.count
+            ));
+        }
+        if ours.age != official.age {
+            self.mismatch(format!(
+                "{place}: age: official {}, bamboo {}",
+                official.age, ours.age
+            ));
+        }
+        if ours.pickup != official.pickup {
+            self.mismatch(format!(
+                "{place}: pickup: official {}, bamboo {}",
+                official.pickup, ours.pickup
+            ));
+        }
+        if ours.health != official.health {
+            self.mismatch(format!(
+                "{place}: health: official {}, bamboo {}",
+                official.health, ours.health
             ));
         }
     }
@@ -479,22 +645,40 @@ fn entity_key(entity: &OfficialEntity) -> (String, i64, i64, i64, bool) {
     )
 }
 
-fn ours_entities(world: &World, ticked: &[Entity]) -> Vec<OfficialEntity> {
-    // 空列表表示还没 tick，用世界上活着的实体。tick 之后的列表里有刚被丢掉的。
-    // An empty list means nothing has ticked yet, so use the live entities.
-    // After a tick the list also contains the ones just discarded.
-    let listed = if ticked.is_empty() {
-        world.live_entities()
-    } else {
-        ticked.to_vec()
+fn ours_entities(world: &World, ticked: Option<&[Entity]>) -> Vec<OfficialEntity> {
+    // `None` 表示还没 tick，用世界上活着的实体。tick 之后的列表里有刚被丢掉的，空列表就是真的没有。
+    // `None` means nothing has ticked yet, so use the live entities.
+    // After a tick the list also contains the ones just discarded. An empty list means none.
+    let listed = match ticked {
+        None => world.live_entities(),
+        Some(ticked) => ticked.to_vec(),
     };
     listed.into_iter().map(snap_of).collect()
 }
 
 fn snap_of(entity: Entity) -> OfficialEntity {
-    let (kind, block, fuse) = match entity.kind {
-        EntityKind::FallingBlock(data) => ("falling".to_owned(), data.state.0 as i32, -1),
-        EntityKind::Tnt(data) => ("tnt".to_owned(), -1, data.fuse),
+    let (kind, block, fuse, item, count, age, pickup, health) = match entity.kind {
+        EntityKind::FallingBlock(data) => (
+            "falling".to_owned(),
+            data.state.0 as i32,
+            -1,
+            -1,
+            0,
+            -1,
+            -1,
+            -1,
+        ),
+        EntityKind::Tnt(data) => ("tnt".to_owned(), -1, data.fuse, -1, 0, -1, -1, -1),
+        EntityKind::Item(data) => (
+            "item".to_owned(),
+            -1,
+            -1,
+            data.stack.item,
+            data.stack.count,
+            data.age,
+            data.pickup_delay,
+            data.health,
+        ),
     };
     OfficialEntity {
         kind,
@@ -508,6 +692,51 @@ fn snap_of(entity: Entity) -> OfficialEntity {
         dz: entity.delta.z.to_bits() as i64,
         block,
         fuse,
+        item,
+        count,
+        age,
+        pickup,
+        health,
+    }
+}
+
+/// `spawnAtLocation`：实体随机源在分配 ID 之后取朝向和初速度，拾取延迟 10。
+///
+/// `spawnAtLocation`: facing and velocity are drawn after the id is assigned. Pickup delay is 10.
+fn spawn_ground_item(world: &mut World, x: f64, y: f64, z: f64, item: i32, count: i32, delay: i32) {
+    let Some(id) = world.spawn_at_location(Vec3::new(x, y, z), ItemStack::new(item, count)) else {
+        return;
+    };
+    if delay != 10
+        && let Some(entity) = world.entity_mut(id)
+        && let Some(ground) = entity.ground_mut()
+    {
+        ground.set_pickup_delay(delay);
+    }
+}
+
+fn hopper_cells(case: &Case) -> Vec<BlockPos> {
+    case.blocks
+        .iter()
+        .filter(|block| BlockState(block[3] as u32).is_a(BlockAncestor::HopperBlock))
+        .map(|block| BlockPos::new(block[0], block[1], block[2]))
+        .collect()
+}
+
+/// 漏斗 tick 在实体 tick 之后。被吸走的物品从世界上拿掉，快照里记成丢掉、堆叠清空。
+///
+/// The hopper ticks after the entities. A pulled item leaves the world; the snapshot keeps it
+/// removed, with an empty stack.
+fn refresh_after_hopper(world: &mut World, ticked: &mut [Entity]) {
+    for entity in ticked {
+        if let Some(current) = world.entity(entity.id).cloned() {
+            *entity = current;
+        } else {
+            entity.removed = true;
+            if let EntityKind::Item(item) = &mut entity.kind {
+                item.stack = ItemStack::empty();
+            }
+        }
     }
 }
 

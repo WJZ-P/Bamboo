@@ -234,15 +234,29 @@ pub(crate) fn set_jukebox_item(world: &mut World, pos: BlockPos, stack: ItemStac
 /// No item entity is spawned. The stop notification inside `setTheItem(EMPTY)` happens before
 /// the random calls.
 pub(crate) fn pop_jukebox_record(world: &mut World, pos: BlockPos) {
-    let empty = world.slots_at(pos).first().is_none_or(ItemStack::is_empty);
-    if empty {
+    let stack = world
+        .slots_at(pos)
+        .into_iter()
+        .next()
+        .unwrap_or_else(ItemStack::empty);
+    if stack.is_empty() {
         return;
     }
     with_container(world, pos, &mut |container| {
         container.set(0, ItemStack::empty());
     });
-    world.random().next_float();
-    world.random().next_float();
+    // `popOutTheItem`：先清空，再 `offsetRandomXZ` 两个 `nextFloat`，然后生成物品。
+    // `popOutTheItem`: clear first, then two `nextFloat`s in `offsetRandomXZ`, then the item.
+    let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+    let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+    world.spawn_at_location(
+        mc_bamboo_core::Vec3::new(
+            f64::from(pos.x) + 0.5 + f64::from(dx),
+            f64::from(pos.y) + 1.01,
+            f64::from(pos.z) + 0.5 + f64::from(dz),
+        ),
+        stack,
+    );
     on_jukebox_song_changed(world.block_state(pos), world, pos);
 }
 

@@ -14,6 +14,7 @@ pub mod random;
 
 mod explosion;
 mod falling;
+mod item;
 mod physics;
 mod tnt;
 
@@ -21,9 +22,11 @@ use std::collections::BTreeMap;
 
 use mc_bamboo_core::{Axis, BlockPos, Vec3};
 use mc_bamboo_data::entity_types;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{shape::Aabb, state::BlockState, world::World};
 
+pub use item::{can_pick_up, set_throw_velocity, take_stack};
 pub use random::JavaRandom;
 
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。
@@ -42,7 +45,9 @@ pub struct FallingBlock {
     pub start_pos: BlockPos,
     /// `time`：落了多少 tick，超过 100 或者 600 会被丢掉。
     pub time: i32,
-    /// `dropItem`。这个世界没有掉落物，字段留着是为了让落地判定和官方一致。
+    /// `dropItem`。为假时超时和放不回去都不生成物品。
+    ///
+    /// `dropItem`. When false, a timeout or a failed landing spawns nothing.
     pub drop_item: bool,
     /// `cancelDrop`：落地时不放回方块，也不走 `onBrokenAfterFall`。
     pub cancel_drop: bool,
@@ -103,29 +108,63 @@ impl Default for PrimedTnt {
     }
 }
 
-/// 实体类型。新实体按这里加分支。
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 地上的物品，对应 `ItemEntity`。字段在 [`item`] 里读写。
+///
+/// A ground item, vanilla `ItemEntity`. [`item`] reads and writes the fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroundItem {
+    pub stack: ItemStack,
+    /// `age`。到 6000 消失，`-32768` 表示无限。
+    ///
+    /// `age`. The item vanishes at 6000. `-32768` means infinite.
+    pub age: i32,
+    /// `pickupDelay`。`32767` 表示永远捡不起来。
+    ///
+    /// `pickupDelay`. `32767` means the item can never be picked up.
+    pub pickup_delay: i32,
+    /// `health`，默认 5。
+    pub health: i32,
+    /// `bobOffs`。只在构造时取一次，不同步。
+    ///
+    /// `bobOffs`. Drawn once in the constructor and never synced.
+    pub bob_offs: f32,
+    /// 三参数构造要取速度，四参数构造不取。
+    ///
+    /// The position constructor draws a velocity. The delta constructor does not.
+    pub(crate) roll_velocity: bool,
+    /// `target`。只有这个 UUID 能捡。没有成就系统，丢出时可以先空着。
+    ///
+    /// `target`. Only this UUID can pick the item up.
+    pub target: Option<[u8; 16]>,
+}
+
+/// 实体类型。物品堆不能 `Copy`，所以这个枚举也不再 `Copy`。
+///
+/// An item stack is not `Copy`, so neither is this enum.
+#[derive(Debug, Clone, PartialEq)]
 pub enum EntityKind {
     FallingBlock(FallingBlock),
     Tnt(PrimedTnt),
+    Item(GroundItem),
 }
 
 impl EntityKind {
     /// 注册表 ID，发 `add_entity` 包时用。
-    pub const fn entity_type(self) -> i32 {
+    pub const fn entity_type(&self) -> i32 {
         match self {
             Self::FallingBlock(_) => mc_bamboo_data::registries::entity_type::FALLING_BLOCK,
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
+            Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
         }
     }
 
     /// `EntityDimensions`。
-    pub fn dimensions(self) -> (f32, f32) {
+    pub fn dimensions(&self) -> (f32, f32) {
         let facts = &entity_types::FACTS[self.entity_type() as usize];
         (facts.width, facts.height)
     }
 
-    pub const fn is_falling_block(self) -> bool {
+    pub const fn is_falling_block(&self) -> bool {
         matches!(self, Self::FallingBlock(_))
     }
 }
@@ -176,6 +215,16 @@ pub struct Entity {
     pub(crate) requires_precise_position: bool,
     /// 这个实体自己的随机源，官方的 `this.random`。
     pub random: JavaRandom,
+    /// `yRot`。物品构造时取一次，配对时发给客户端。
+    ///
+    /// `yRot`. An item draws it once in the constructor and sends it when pairing.
+    pub y_rot: f32,
+    /// `firstTick`。物品的 `baseTick` 用它判断岩浆和溅水。
+    ///
+    /// `firstTick`. An item's `baseTick` uses it for lava and the splash.
+    pub first_tick: bool,
+    /// `remainingFireTicks`。
+    pub remaining_fire_ticks: i32,
 }
 
 impl Entity {
@@ -202,6 +251,9 @@ impl Entity {
             final_movements: Vec::new(),
             requires_precise_position: false,
             random: JavaRandom::new(ENTITY_RANDOM_SEED),
+            y_rot: 0.0,
+            first_tick: true,
+            remaining_fire_ticks: 0,
         }
     }
 
@@ -264,9 +316,16 @@ impl Entity {
     /// 这个 tick 的 `tick()`。
     pub(crate) fn tick(&mut self, world: &mut World) {
         self.common_tick();
-        match self.kind {
-            EntityKind::FallingBlock(data) => self.tick_falling_block(data, world),
-            EntityKind::Tnt(data) => self.tick_tnt(data, world),
+        match &self.kind {
+            EntityKind::FallingBlock(data) => {
+                let data = *data;
+                self.tick_falling_block(data, world);
+            }
+            EntityKind::Tnt(data) => {
+                let data = *data;
+                self.tick_tnt(data, world);
+            }
+            EntityKind::Item(_) => self.tick_item(world),
         }
     }
 
@@ -309,12 +368,11 @@ impl Entity {
     /// `causeFallDamage`。这两个实体都不受伤，但下落方块会覆写它：铁砧摔下来可能裂开。
     /// TNT 用的是基类实现，它只扣实体自己的血，这里没有生命值，所以直接跳过。
     pub(crate) fn cause_fall_damage(&mut self, fall_distance: f64) -> bool {
-        match self.kind {
-            EntityKind::FallingBlock(data) => {
-                self.falling_block_cause_fall_damage(data, fall_distance)
-            }
-            EntityKind::Tnt(_) => false,
-        }
+        let EntityKind::FallingBlock(data) = &self.kind else {
+            return false;
+        };
+        let data = *data;
+        self.falling_block_cause_fall_damage(data, fall_distance)
     }
 }
 
@@ -350,6 +408,9 @@ impl Entities {
         entity.id = self.next_id;
         self.next_id += 1;
         entity.random = JavaRandom::new(i64::from(entity.id) ^ ENTITY_RANDOM_SEED);
+        // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
+        // An item's facing and initial velocity use the entity random source just seeded, not `level.random`.
+        entity.finish_item_random();
         let id = entity.id;
         if self.ticking {
             self.pending.push(entity);

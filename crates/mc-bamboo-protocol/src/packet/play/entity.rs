@@ -17,6 +17,10 @@ use crate::{
 const SERIALIZER_BYTE: i32 = 0;
 const SERIALIZER_INT: i32 = 1;
 const SERIALIZER_FLOAT: i32 = 3;
+/// `EntityDataSerializers.ITEM_STACK`，注册顺序里的第 8 个。
+///
+/// `EntityDataSerializers.ITEM_STACK`, the eighth `registerSerializer` call.
+const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BLOCK_POS: i32 = 10;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
 const SERIALIZER_POSE: i32 = 20;
@@ -92,13 +96,20 @@ pub enum Pose {
     Dying = 7,
 }
 
-/// 玩家实体的一项元数据。
+/// 玩家实体或物品实体的一项元数据。
 ///
 /// 序列化器和 index 对不上时客户端会断线，所以每个 index 一个变体，不接受任意组合。
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 物品堆不能 `Copy`，所以这个枚举也不再 `Copy`。
+///
+/// An item stack is not `Copy`, so neither is this enum.
+#[derive(Debug, Clone, PartialEq)]
 pub enum EntityData {
     /// index 0，BYTE。`ENTITY_FLAG_*` 的组合。
     SharedFlags(u8),
+    /// index 8，ITEM_STACK。地上的物品实体拿着的那一堆。
+    ///
+    /// index 8, ITEM_STACK. The stack a ground item entity is carrying.
+    Item(ItemStack),
     /// index 8，BLOCK_POS。下落的方块从哪一格掉下来。
     FallingBlockStart(BlockPos),
     /// index 8，INT。点燃的 TNT 还剩多少 tick 爆炸。
@@ -123,39 +134,45 @@ pub const ENTITY_FLAG_SPRINTING: u8 = 0x08;
 pub const ENTITY_FLAG_FALL_FLYING: u8 = 0x80;
 
 impl EntityData {
-    fn write(self, out: &mut Vec<u8>) {
+    fn write(&self, out: &mut Vec<u8>) {
         match self {
+            Self::Item(stack) => {
+                write_data_header(out, 8, SERIALIZER_ITEM_STACK);
+                // 观察者不是这堆组件的来源，滤掉发不出去的组件。
+                // Viewers did not send this patch, so skip components we cannot forward.
+                stack.write_for_others(out);
+            }
             Self::SharedFlags(flags) => {
                 write_data_header(out, 0, SERIALIZER_BYTE);
-                out.push(flags);
+                out.push(*flags);
             }
             Self::FallingBlockStart(pos) => {
                 write_data_header(out, 8, SERIALIZER_BLOCK_POS);
-                write_block_pos(out, pos);
+                write_block_pos(out, *pos);
             }
             Self::TntFuse(fuse) => {
                 write_data_header(out, 8, SERIALIZER_INT);
-                write_varint(out, fuse);
+                write_varint(out, *fuse);
             }
             Self::TntBlockState(state) => {
                 write_data_header(out, 9, SERIALIZER_BLOCK_STATE);
-                write_varint(out, state);
+                write_varint(out, *state);
             }
             Self::Pose(pose) => {
                 write_data_header(out, 6, SERIALIZER_POSE);
-                write_varint(out, pose as i32);
+                write_varint(out, *pose as i32);
             }
             Self::Health(health) => {
                 write_data_header(out, 9, SERIALIZER_FLOAT);
-                write_f32(out, health);
+                write_f32(out, *health);
             }
             Self::MainHand(arm) => {
                 write_data_header(out, 15, SERIALIZER_HUMANOID_ARM);
-                write_varint(out, arm as i32);
+                write_varint(out, *arm as i32);
             }
             Self::ModelCustomisation(parts) => {
                 write_data_header(out, 16, SERIALIZER_BYTE);
-                out.push(parts);
+                out.push(*parts);
             }
         }
     }
@@ -182,6 +199,28 @@ impl ClientboundPacket for SetEntityData<'_> {
             item.write(out);
         }
         out.push(ENTITY_DATA_END);
+    }
+}
+
+/// 玩家捡起地上的物品，`ClientboundTakeItemEntityPacket`。
+///
+/// 三个 varint：物品实体、捡起它的玩家、这次拿走的数量。
+///
+/// A player picks up a ground item. Three varints: the item entity, the player, the amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TakeItemEntity {
+    pub item_id: i32,
+    pub player_id: i32,
+    pub amount: i32,
+}
+
+impl ClientboundPacket for TakeItemEntity {
+    const ID: i32 = clientbound::TAKE_ITEM_ENTITY;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.item_id);
+        write_varint(out, self.player_id);
+        write_varint(out, self.amount);
     }
 }
 

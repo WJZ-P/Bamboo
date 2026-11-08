@@ -387,7 +387,8 @@ import sun.misc.Unsafe;
  *               随时间重算。
  *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
- *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
+ *               容器拆掉时 `dropContents` 生成的物品实体会进世界，漏斗在 settle 里能吸到它们。
+ *     实体      世界里有场景的玩家，以及这次动作生成的物品实体。别的 spawned 实体不进世界，不挡路。
  *     计划刻    场景开始时没有排队的计划刻。队列是官方的 LevelTicks。除了 flow 题，这次动作排的不运行。tick 题只运行
  *               目标方块自己的 BlockState.tick 一次。flow 题第一下直接运行目标格的 FluidState.tick，之后每往后走一步都
  *               按 ServerLevel.tick 的顺序跑：先跑到期的方块计划刻（ServerLevel.tickBlock），再跑流体的
@@ -1204,6 +1205,8 @@ public final class BlockOracle {
         private RecordingTicks<Block> recordedBlockTicks;
         private RecordingTicks<Fluid> recordedFluidTicks;
         private List<ServerPlayer> playersInWorld;
+        /** 容器掉落生成的物品。漏斗的 `getItemsAtAndAbove` 要找得到它们。 */
+        private List<Entity> groundItems;
         private List<Destroyed> destroyed;
         private List<String> spawned;
         private Set<String> ranBlocks;
@@ -1230,12 +1233,13 @@ public final class BlockOracle {
             level.recordedBlockTicks = new RecordingTicks<>();
             level.recordedFluidTicks = new RecordingTicks<>();
             level.playersInWorld = new ArrayList<>();
+            level.groundItems = new ArrayList<>();
             level.destroyed = new ArrayList<>();
             level.spawned = new ArrayList<>();
             level.ranBlocks = new LinkedHashSet<>();
             level.analogContent = false;
             level.data = new FixedLevelData();
-            level.entityGetter = new PlayerEntities(level.playersInWorld);
+            level.entityGetter = new PlayerEntities(level.playersInWorld, level.groundItems);
             level.unrandom = Set.of();
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, MAX_CHAINED_UPDATES));
             set(Level.class, level, "random", random);
@@ -1840,6 +1844,13 @@ public final class BlockOracle {
         @Override
         public boolean addFreshEntity(Entity entity) {
             spawned.add(EntityType.getKey(entity.getType()).toString());
+            // 物品要留在世界上，settle 里的漏斗才吸得到。下落方块和 TNT 仍然只记账。
+            //
+            // Items stay in the world so a hopper can suck them during settle.
+            // Falling blocks and TNT are still only recorded.
+            if (entity.getType() == EntityTypes.ITEM) {
+                groundItems.add(entity);
+            }
             return true;
         }
 
@@ -1982,26 +1993,54 @@ public final class BlockOracle {
     }
 
     /** 世界里只有玩家这一种实体，查询直接遍历。 */
-    private record PlayerEntities(List<ServerPlayer> players) implements LevelEntityGetter<Entity> {
+    private record PlayerEntities(List<ServerPlayer> players, List<Entity> items) implements LevelEntityGetter<Entity> {
         @Override
         public Entity get(int id) {
-            return players.stream().filter(player -> player.getId() == id).findFirst().orElse(null);
+            for (ServerPlayer player : players) {
+                if (player.getId() == id) {
+                    return player;
+                }
+            }
+            for (Entity item : items) {
+                if (item.getId() == id) {
+                    return item;
+                }
+            }
+            return null;
         }
 
         @Override
         public Entity get(UUID id) {
-            return players.stream().filter(player -> player.getUUID().equals(id)).findFirst().orElse(null);
+            for (ServerPlayer player : players) {
+                if (player.getUUID().equals(id)) {
+                    return player;
+                }
+            }
+            for (Entity item : items) {
+                if (item.getUUID().equals(id)) {
+                    return item;
+                }
+            }
+            return null;
         }
 
         @Override
         public Iterable<Entity> getAll() {
-            return new ArrayList<>(players);
+            List<Entity> all = new ArrayList<>(players);
+            all.addAll(items);
+            return all;
         }
 
         @Override
         public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AbortableIterationConsumer<U> consumer) {
             for (ServerPlayer player : players) {
                 U cast = type.tryCast(player);
+                if (cast != null && consumer.accept(cast).shouldAbort()) {
+                    return;
+                }
+            }
+            for (Entity item : items) {
+                U cast = type.tryCast(item);
                 if (cast != null && consumer.accept(cast).shouldAbort()) {
                     return;
                 }
@@ -2015,6 +2054,11 @@ public final class BlockOracle {
                     output.accept(player);
                 }
             }
+            for (Entity item : items) {
+                if (item.getBoundingBox().intersects(bb) && !item.isRemoved()) {
+                    output.accept(item);
+                }
+            }
         }
 
         @Override
@@ -2022,6 +2066,14 @@ public final class BlockOracle {
             for (ServerPlayer player : players) {
                 if (player.getBoundingBox().intersects(bb)) {
                     U cast = type.tryCast(player);
+                    if (cast != null && consumer.accept(cast).shouldAbort()) {
+                        return;
+                    }
+                }
+            }
+            for (Entity item : items) {
+                if (item.getBoundingBox().intersects(bb) && !item.isRemoved()) {
+                    U cast = type.tryCast(item);
                     if (cast != null && consumer.accept(cast).shouldAbort()) {
                         return;
                     }

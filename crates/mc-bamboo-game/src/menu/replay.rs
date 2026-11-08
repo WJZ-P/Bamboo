@@ -124,6 +124,7 @@ impl Replay {
         if !self.menu.valid_slot_index(slot) {
             return self.snapshot();
         }
+        let mut thrown = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -136,6 +137,7 @@ impl Replay {
             quickcraft_type: &mut self.menu.quickcraft_type,
             quickcraft_slots: &mut self.menu.quickcraft_slots,
             creative: self.creative,
+            thrown: &mut thrown,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         // 客户端从不预测，回传的总是空光标。
@@ -161,6 +163,7 @@ impl Replay {
             return (self.snapshot(), Vec::new(), false);
         }
         let before = self.menu_slots();
+        let mut thrown = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -173,6 +176,7 @@ impl Replay {
             quickcraft_type: &mut self.menu.quickcraft_type,
             quickcraft_slots: &mut self.menu.quickcraft_slots,
             creative: self.creative,
+            thrown: &mut thrown,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         let after = self.menu_slots();

@@ -1,11 +1,14 @@
 //! 下落的方块，官方 `FallingBlockEntity`。
 //!
 //! 这类实体不调 `baseTick`：重力、移动、方块效果都在 `tick` 里自己做，落地之后
-//! 把方块放回去。放不回去的时候官方会生成一个掉落物实体，这个世界没有掉落物，
-//! 所以方块直接消失。
+//! 把方块放回去。放不回去、或者掉出世界时，`dropItem` 为真就 `spawnAtLocation`。
+//!
+//! These entities do not call `baseTick`. When the block cannot be placed back, or it
+//! falls out of the world, `dropItem` spawns the block's item via `spawnAtLocation`.
 
 use mc_bamboo_core::{BlockPos, Direction, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     behaviour::common::is_free,
@@ -34,8 +37,8 @@ impl Entity {
         let movement = self.delta;
         self.move_entity(world, movement);
         // `move` 里的摔落伤害可能把铁砧摔裂，`blockState` 换成了裂开的那种。
-        if let EntityKind::FallingBlock(updated) = self.kind {
-            *data = updated;
+        if let EntityKind::FallingBlock(updated) = &self.kind {
+            *data = *updated;
         }
         self.apply_effects_from_blocks(world);
         // `handlePortal` 不在范围里。
@@ -60,7 +63,11 @@ impl Entity {
             // `LevelHeightAccessor.getMaxY()` is `minY + height - 1`, the same inclusive top as `max_y`.
             let out_of_world = pos.y <= world.min_y() || pos.y > world.max_y();
             if data.time > 100 && out_of_world || data.time > 600 {
-                // `dropItem` 决定要不要生成掉落物，这个世界没有掉落物，只剩消失。
+                // 超时先 `spawnAtLocation` 再 `discard`。`cancelDrop` 不参与这一支。
+                // A timeout calls `spawnAtLocation` before `discard`. `cancelDrop` does not apply.
+                if data.drop_item {
+                    self.spawn_falling_drop(world, data.state);
+                }
                 self.discard();
             }
         } else {
@@ -94,16 +101,32 @@ impl Entity {
                                 current_state,
                             );
                         } else if data.drop_item {
+                            // 放不回去：先丢掉实体，再 `callOnBrokenAfterFall`，再生成掉落。
+                            // 音效和 `onBrokenAfterFall` 不取 `level.random`。
+                            //
+                            // Placement failed: discard, then `callOnBrokenAfterFall`, then the drop.
+                            // The sound and `onBrokenAfterFall` do not draw from `level.random`.
                             self.discard();
+                            self.spawn_falling_drop(world, data.state);
                         }
                     } else {
                         self.discard();
+                        if data.drop_item {
+                            self.spawn_falling_drop(world, data.state);
+                        }
                     }
                 }
             }
         }
         self.delta = self.delta.scale(physics::air_drag());
         !self.removed
+    }
+
+    /// `Entity.spawnAtLocation(level, block)`：用方块对应的物品，空气不生成也不取实体随机数。
+    ///
+    /// `Entity.spawnAtLocation(level, block)`: the block's item. Air spawns nothing and draws no entity random.
+    fn spawn_falling_drop(&self, world: &mut World, state: BlockState) {
+        world.spawn_at_location(self.position, ItemStack::new(state.block().item, 1));
     }
 
     /// `FallingBlockEntity.causeFallDamage`。砸到实体的伤害不在范围里，但铁砧会摔裂，

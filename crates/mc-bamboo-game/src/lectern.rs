@@ -1,11 +1,11 @@
 //! 讲台上的书和 `LecternMenu`。
 //!
 //! 书按真实物品存在这一层，比较器用的页码在 `mc-bamboo-blocks` 的红石记忆里。
-//! 菜单只有一格，不含玩家物品栏。世界里没有物品实体：物品栏放不下的书、拆掉讲台时台上的书都消失。
+//! 菜单只有一格，不含玩家物品栏。放不下的书按 `Player.drop` 丢出，拆掉讲台时按朝向生成物品实体。
 //!
 //! The book is a real item stack. Comparator facts live in the block layer.
-//! The menu has one slot and no player inventory. This world has no item entities,
-//! so a book that does not fit, and a book on a lectern that is broken, both disappear.
+//! The menu has one slot and no player inventory. A book that does not fit is thrown
+//! with `Player.drop`. Breaking the lectern spawns the book from its facing.
 
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ use mc_bamboo_blocks::{
     BlockState, LecternFacts, World, reset_lectern, signal_lectern_page,
     state::{self, HAS_BOOK},
 };
-use mc_bamboo_core::{BlockPos, Hand};
+use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{blocks, items, registries::menu, tags::item_tags};
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -62,6 +62,11 @@ struct Book {
     page: i32,
     page_count: i32,
     has_content: bool,
+    /// 放书时的朝向。拆掉以后方块状态没了，`preRemoveSideEffects` 还要用它算落点。
+    ///
+    /// Facing when the book was placed. The block state is gone after a break, and
+    /// `preRemoveSideEffects` still needs it for the drop position.
+    facing: Direction,
     /// 放书的人。别人看到的是 [`ItemStack::filtered`]。
     owner: Option<PlayerId>,
 }
@@ -257,6 +262,7 @@ pub(crate) fn complete_use(
             page: 0,
             page_count,
             has_content,
+            facing: lectern_facing(region, pos),
             owner: Some(id),
         },
     );
@@ -376,11 +382,12 @@ pub(crate) fn tick(region: &mut Region) {
         .filter(|pos| !block_keeps_book(region, *pos))
         .collect();
     for pos in stale {
-        region.lecterns.books.remove(&pos);
-        debug!(
-            ?pos,
-            "a lectern book disappeared with its block; this world has no item entities"
-        );
+        let Some(book) = region.lecterns.books.remove(&pos) else {
+            continue;
+        };
+        // `LecternBlockEntity.preRemoveSideEffects`：朝向偏移 0.25，高度在方块顶上。
+        // `LecternBlockEntity.preRemoveSideEffects`: 0.25 along the facing, one block above.
+        spawn_lectern_book(region, pos, book.facing, book.stack);
     }
     flush_pending(region);
 }
@@ -437,28 +444,32 @@ fn take_book(region: &mut Region, id: PlayerId, pos: BlockPos) {
         world.update_neighbour_for_output_signal(pos, block);
     });
     send_effects(region, None, &effects);
-    remember_return(region, id, book.stack);
+    let leftover = remember_return(region, id, book.stack);
+    if !leftover.is_empty() {
+        // `LecternMenu`：`Inventory.add` 失败后 `player.drop(book, false, PREDICTED)`。
+        // `LecternMenu`: `player.drop` after `Inventory.add` fails.
+        crate::drops::spawn_throw(region, id, leftover);
+    }
     notify_empty(region, id);
 }
 
-fn remember_return(region: &mut Region, id: PlayerId, stack: ItemStack) {
-    let Some(player) = region.players.get_mut(&id) else {
-        debug!(
-            player = id.0,
-            "dropping a lectern book; the player is already gone and this world has no item entities"
-        );
-        return;
+fn remember_return(region: &mut Region, id: PlayerId, stack: ItemStack) -> ItemStack {
+    let (leftover, slots) = {
+        let Some(player) = region.players.get_mut(&id) else {
+            debug!(
+                player = id.0,
+                "a lectern book was taken but the player is already gone"
+            );
+            return stack;
+        };
+        let creative = player.game_mode == GameMode::Creative;
+        give(&mut player.inventory, creative, stack)
     };
-    let creative = player.game_mode == GameMode::Creative;
-    let (kept, slots) = give(&mut player.inventory, creative, stack);
-    if !kept {
-        debug!(
-            player = id.0,
-            "dropping a lectern book; the inventory is full and this world has no item entities"
-        );
+    if leftover.is_empty() && slots.is_empty() {
+        return leftover;
     }
     if slots.is_empty() {
-        return;
+        return leftover;
     }
     let pending = region.lecterns.pending.entry(id).or_default();
     for slot in slots {
@@ -467,6 +478,7 @@ fn remember_return(region: &mut Region, id: PlayerId, stack: ItemStack) {
         }
     }
     pending.deliver_at = region.tick.plus(2);
+    leftover
 }
 
 fn flush_pending(region: &mut Region) {
@@ -533,9 +545,34 @@ fn ensure_book(region: &mut Region, pos: BlockPos) {
             page,
             page_count,
             has_content,
+            facing: lectern_facing(region, pos),
             owner: None,
         },
     );
+}
+
+/// 讲台朝向。方块已经没了时按北，和默认状态一样。
+///
+/// Lectern facing. North matches the default state once the block is gone.
+fn lectern_facing(region: &Region, pos: BlockPos) -> Direction {
+    lectern_state(region, pos)
+        .map(|block| block.get(state::HORIZONTAL_FACING))
+        .unwrap_or(Direction::North)
+}
+
+/// `LecternBlockEntity.preRemoveSideEffects` 的落点。不取 `level.random`。
+///
+/// The drop position from `LecternBlockEntity.preRemoveSideEffects`. It does not draw `level.random`.
+fn spawn_lectern_book(region: &mut Region, pos: BlockPos, facing: Direction, stack: ItemStack) {
+    let (step_x, _, step_z) = facing.normal();
+    let at = Vec3::new(
+        f64::from(pos.x) + 0.5 + f64::from(0.25_f32 * step_x as f32),
+        f64::from(pos.y) + 1.0,
+        f64::from(pos.z) + 0.5 + f64::from(0.25_f32 * step_z as f32),
+    );
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    world.spawn_at_location(at, stack);
 }
 
 fn send_open(region: &mut Region, id: PlayerId, pos: BlockPos, container_id: i32) {
@@ -732,19 +769,19 @@ fn requested_page(page: i32, button_id: i32) -> i32 {
     }
 }
 
-/// 官方 `Inventory.add`。放不下时返回 `false`，调用方丢掉剩下的。
+/// 官方 `Inventory.add`。返回没放进去的那一份。
 ///
-/// 创造模式在一次也塞不进去时把剩余数量清零并返回 `true`，物品消失，不掉在地上。
+/// 创造模式在一次也塞不进去时把剩余数量清零，不掉在地上。
 ///
-/// Vanilla `Inventory.add`. `false` means the caller drops what is left.
-/// Creative mode clears the leftover and returns `true` when nothing more fits.
+/// Vanilla `Inventory.add`. Returns what did not fit.
+/// Creative mode clears that remainder instead of dropping it.
 fn give(
     inventory: &mut crate::inventory::Inventory,
     creative: bool,
     mut stack: ItemStack,
-) -> (bool, Vec<usize>) {
+) -> (ItemStack, Vec<usize>) {
     if stack.is_empty() {
-        return (false, Vec::new());
+        return (ItemStack::empty(), Vec::new());
     }
     let mut changed = Vec::new();
     let mut last;
@@ -756,9 +793,9 @@ fn give(
         }
     }
     if stack.count == last && creative {
-        return (true, changed);
+        return (ItemStack::empty(), changed);
     }
-    (stack.count < last, changed)
+    (stack, changed)
 }
 
 fn add_resource(
