@@ -17,7 +17,7 @@ use crate::{
     },
     block_entity::BlockEntity,
     context::{PlaceContext, UseContext},
-    dispenser::dispense_from,
+    dispenser::{click_if_empty, dispense_from},
     hopper::HopperEntity,
     interact::InteractionResult,
     shape::{Aabb, Boxes, CollisionContext},
@@ -510,12 +510,15 @@ impl Behaviour for Dispenser {
         InteractionResult::Success
     }
 
-    /// `DispenserBlock.tick`：计划刻到期，投掷器把物品发出去。
+    /// `DispenserBlock.tick`：计划刻到期。投掷器把物品发出去。
     ///
-    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里，发射器这一支什么也不做。
+    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里。空的发射器仍报 1001，
+    /// 和 `dispenseFrom` 在 `getRandomSlot` 得到 `-1` 时一样。
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.is_a(BlockAncestor::DropperBlock) {
             dispense_from(world, pos, state);
+        } else {
+            click_if_empty(world, pos);
         }
     }
 

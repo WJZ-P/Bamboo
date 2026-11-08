@@ -11,10 +11,7 @@
 use mc_bamboo_blocks::behaviour::machines::CampfireEntity;
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::{
-    components::{ComponentPatch, archive::stack::encode_stack},
-    item::ItemStack,
-};
+use mc_bamboo_protocol::{components::archive::stack::encode_stack, item::ItemStack};
 
 use crate::region::Region;
 
@@ -48,10 +45,7 @@ fn stack_tag(slot: usize, stack: &ItemStack) -> Option<Tag> {
     if stack.is_empty() {
         return None;
     }
-    let patch = ComponentPatch::from_opaque(stack)
-        .unwrap_or_default()
-        .filtered();
-    let encoded = encode_stack(stack.item, stack.count, &patch).ok()?;
+    let encoded = encode_stack(stack.item, stack.count, &stack.patch()).ok()?;
     let Tag::Compound(mut entries) = encoded.to_tag() else {
         return None;
     };

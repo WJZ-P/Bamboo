@@ -6,6 +6,7 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
+use mc_bamboo_data::SoundSource;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -376,18 +377,41 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// `playSound` / `playSeededSound`：坐标乘 8 截断后发给范围内的玩家。
+    Sound {
+        /// `sound_event` 注册表 ID。
+        sound: i32,
+        source: SoundSource,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+        /// 官方传的 `except` 是发起这次操作的玩家。
+        except_initiator: bool,
+        /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
+        seed: Option<i64>,
+    },
+    /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
+    LevelEvent {
+        event: i32,
+        pos: BlockPos,
+        data: i32,
+        except_initiator: bool,
+    },
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///
     /// 上面是带 `note_block_sound` 的头颅时，官方播放的是那个音效，不按乐器查表。
-    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里；自定义音效的名字等音效实现
-    /// 时再加进这一项，`Effect` 要能按值拷贝，装不下 `String`。
+    /// 名字在这一次操作的自定义音效表里，[`NoteBlockPlayed::custom`] 是下标。
     NoteBlockPlayed {
         pos: BlockPos,
         instrument: NoteBlockInstrument,
         note: i32,
         pitch: f32,
         seed: i64,
+        /// 自定义音效在 [`intern_custom_sound`] 那张表里的下标。`None` 用乐器表。
+        custom: Option<u32>,
     },
     /// `ServerLevel.runBlockEvents` 里的 `ClientboundBlockEventPacket`：方块事件处理成功了，
     /// 把这一项发给附近 64 格内的玩家。`block` 是方块的注册表 ID，官方包里的第三个字段。
@@ -410,4 +434,30 @@ pub enum Effect {
     ///
     /// Food on a campfire changed. `CampfireBlockEntity.getUpdateTag` has to be sent again.
     CampfireChanged { pos: BlockPos },
+}
+
+/// 自定义音效的名字。`Effect` 要能按值拷贝，名字放在这里，效果里只留下标。
+///
+/// 一次结算会把好几个世界的效果拼到一起，这张表不能挂在某一个世界上。
+static CUSTOM_SOUNDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 记下一个 `SoundEvent.createVariableRangeEvent` 的标识符，返回下标。
+pub fn intern_custom_sound(name: &str) -> u32 {
+    let mut table = CUSTOM_SOUNDS.lock().expect("custom sound table");
+    if let Some(index) = table.iter().position(|existing| existing == name) {
+        return u32::try_from(index).expect("custom sound index");
+    }
+    let index = u32::try_from(table.len()).expect("custom sound index");
+    table.push(name.to_owned());
+    index
+}
+
+/// 按下标取回自定义音效的标识符。
+pub fn custom_sound_name(index: u32) -> String {
+    CUSTOM_SOUNDS
+        .lock()
+        .expect("custom sound table")
+        .get(index as usize)
+        .cloned()
+        .expect("custom sound index")
 }

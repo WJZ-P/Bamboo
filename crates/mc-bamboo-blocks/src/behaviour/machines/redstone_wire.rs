@@ -61,10 +61,19 @@ fn cross_state(wire: BlockState) -> BlockState {
     state
 }
 
-/// `canSurviveOn`。支撑面要按位置算：移动活塞的碰撞形状跟着方块实体，渲染偏移的方块跟着位置。
+/// `canSurviveOn`。支撑面按传进来的状态算，不重新读这一格。
+/// 形状更新带来的邻居状态可能比世界里的旧，官方用的就是传来的那个。
+/// Support comes from the given state, not a fresh read.
+/// A shape update can carry a neighbour that is older than the world. Official uses that state.
+fn survives_on(world: &World, pos: BlockPos, below: BlockState) -> bool {
+    world.is_state_face_sturdy(below, pos, Direction::Up, SupportType::Full)
+        || below.is(blocks::HOPPER)
+}
+
+/// 现读下面一格。`canSurvive` 和连线看的是这一刻的世界。
+/// Reads the block below now. `canSurvive` and the connections use the live world.
 fn can_survive_on(world: &World, pos: BlockPos) -> bool {
-    world.is_face_sturdy(pos, Direction::Up, SupportType::Full)
-        || world.block_state(pos).is(blocks::HOPPER)
+    survives_on(world, pos, world.block_state(pos))
 }
 
 /// `shouldRedstoneWireConnectTo`，官方的 `direction` 是空时这里是 `None`。
@@ -293,10 +302,10 @@ impl Behaviour for RedstoneWire {
         pos: BlockPos,
         direction: Direction,
         neighbor_pos: BlockPos,
-        _neighbor: BlockState,
+        neighbor: BlockState,
     ) -> BlockState {
         if direction == Direction::Down {
-            return if can_survive_on(world, neighbor_pos) {
+            return if survives_on(world, neighbor_pos, neighbor) {
                 state
             } else {
                 BlockState::AIR

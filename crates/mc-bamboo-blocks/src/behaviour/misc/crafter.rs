@@ -1,7 +1,9 @@
-//! `CrafterBlock`。被信号触发时排一个计划刻。9 格物品栏给漏斗和比较器用，合成和吐出物品不在这次范围里。
+//! `CrafterBlock`。被信号触发时排一个计划刻。9 格物品栏给漏斗和比较器用。
+//! 到期时如果没有配方，只发失败事件 1050。合成和吐出物品不在这次范围里，成功的题由 oracle 整题排除。
 //!
 //! `CrafterBlock`. A signal schedules a tick. The 9 slots are there for hoppers and the
-//! comparator. Crafting and ejecting the result are out of scope.
+//! comparator. With no recipe the tick only plays fail event 1050. Crafting and ejecting the
+//! result are out of scope; the oracle excludes a case that actually crafted.
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
@@ -18,7 +20,11 @@ use crate::{
 };
 
 /// `CRAFTING_TICK_DELAY`：被触发之后隔这么多刻合成。
+/// Ticks between the redstone trigger and the craft attempt.
 const CRAFTING_TICK_DELAY: i32 = 4;
+/// `LevelEvent.SOUND_CRAFTER_FAIL`。没有配方，或者产物是空的。合成成功不发这个。
+/// No recipe, or the result is empty. A successful craft does not send this.
+const SOUND_CRAFTER_FAIL: i32 = 1050;
 
 /// `CrafterBlock`。
 pub(super) struct Crafter;
@@ -85,6 +91,15 @@ impl Behaviour for Crafter {
         InteractionResult::Success
     }
 
+    fn tick(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
+        // `CrafterBlock.tick` -> `dispenseFrom`。没有配方时官方只 `levelEvent(1050)`。
+        // 合成成功会改格子并发 1049/2010，那部分不在范围里，oracle 整题排除。
+        //
+        // With no recipe, official only sends `levelEvent(1050)`. A successful craft changes
+        // the slots and sends 1049/2010; that path is out of scope and the oracle excludes it.
+        world.level_event(SOUND_CRAFTER_FAIL, pos, 0);
+    }
+
     /// `CrafterBlock.getAnalogOutputSignal`：非空或禁用的格子数。
     ///
     /// `CrafterBlock.getAnalogOutputSignal`: how many slots are non-empty or disabled.
@@ -96,5 +111,33 @@ impl Behaviour for Crafter {
         _direction: Direction,
     ) -> i32 {
         crate::block_container::crafter_signal(world, pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    use super::*;
+    use crate::{BlockState, BlockTicks, World, level::Effect, testing::TestLevel};
+
+    #[test]
+    fn a_crafter_tick_plays_the_fail_event() {
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(0, 64, 0);
+        level.set(pos, BlockState(blocks::CRAFTER));
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.block_state(pos).tick(&mut world, pos);
+        assert_eq!(
+            world.into_effects(),
+            vec![Effect::LevelEvent {
+                event: SOUND_CRAFTER_FAIL,
+                pos,
+                data: 0,
+                except_initiator: false,
+            }]
+        );
     }
 }

@@ -3,7 +3,7 @@
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
-use mc_bamboo_data::{Block, BlockAncestor, blocks};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
 use tracing::{error, warn};
 
 use crate::{
@@ -86,6 +86,15 @@ const NORMAL_DIFFICULTY: i32 = 2;
 const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
+
+/// 官方 `Level.playSound(null, pos, ...)` 用的坐标：方块的中心。
+fn block_center(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    )
+}
 
 /// `level.getWorldBorder().isWithinBounds(pos)`：这个世界不能改边界，半径是默认的 29999984。
 ///
@@ -244,6 +253,11 @@ pub struct World<'a> {
     /// The item this click hands back. Block behaviour only records it; the game layer edits
     /// the inventory.
     item_exchange: Option<crate::item_exchange::ItemExchange>,
+    /// 这次右键要从方块里拿进物品栏的一堆，比如雕纹书架取出的书。
+    ///
+    /// A stack this click moves from a block into the inventory, such as a book
+    /// taken from a chiseled bookshelf.
+    gained: Option<mc_bamboo_protocol::item::ItemStack>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -259,6 +273,7 @@ impl<'a> World<'a> {
             effects: Vec::new(),
             placed_at: None,
             item_exchange: None,
+            gained: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -319,6 +334,20 @@ impl<'a> World<'a> {
         self.item_exchange.as_ref()
     }
 
+    /// 记下这次要从方块拿进物品栏的物品。
+    ///
+    /// Record a stack this click should move from the block into the inventory.
+    pub(crate) fn set_gained(&mut self, stack: mc_bamboo_protocol::item::ItemStack) {
+        self.gained = Some(stack);
+    }
+
+    /// 这次右键记下的、要放进物品栏的物品。
+    ///
+    /// The stack recorded for this click, to be added to the inventory.
+    pub(crate) fn gained(&self) -> Option<&mc_bamboo_protocol::item::ItemStack> {
+        self.gained.as_ref()
+    }
+
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {
         self.ticks
     }
@@ -326,6 +355,103 @@ impl<'a> World<'a> {
     /// 记下一个发给玩家的结果，官方的 `levelEvent`。
     pub fn push_effect(&mut self, effect: Effect) {
         self.effects.push(effect);
+    }
+
+    /// `playSound(null, pos, sound, BLOCKS, volume, pitch)`，坐标是方块中心。
+    pub fn play_block_sound(&mut self, pos: BlockPos, sound: u16, volume: f32, pitch: f32) {
+        self.play_sound(
+            block_center(pos),
+            sound,
+            sounds::BLOCKS,
+            volume,
+            pitch,
+            false,
+        );
+    }
+
+    /// 同上，但跳过发起这次操作的玩家，官方传的是 `player` 作 `except`。
+    pub fn play_block_sound_except(&mut self, pos: BlockPos, sound: u16, volume: f32, pitch: f32) {
+        self.play_sound_except(pos, sound, sounds::BLOCKS, volume, pitch);
+    }
+
+    /// `Level.playSound(player, pos, sound, source, volume, pitch)`。
+    /// 坐标是方块中心，跳过发起的玩家。
+    /// Block centre; the player who started it is skipped.
+    pub fn play_sound_except(
+        &mut self,
+        pos: BlockPos,
+        sound: u16,
+        source: sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+    ) {
+        self.play_sound(block_center(pos), sound, source, volume, pitch, true);
+    }
+
+    /// `playSound(except, x, y, z, sound, source, volume, pitch)`，允许任意坐标和声音来源。
+    pub fn play_sound(
+        &mut self,
+        position: Vec3,
+        sound: u16,
+        source: sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+        except_initiator: bool,
+    ) {
+        self.push_effect(Effect::Sound {
+            sound: i32::from(sound),
+            source,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume,
+            pitch,
+            except_initiator,
+            seed: None,
+        });
+    }
+
+    /// `playSeededSound(null, x, y, z, sound, source, volume, pitch, seed)`，音符盒用。
+    pub fn play_seeded_sound(
+        &mut self,
+        position: Vec3,
+        sound: u16,
+        source: sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.push_effect(Effect::Sound {
+            sound: i32::from(sound),
+            source,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume,
+            pitch,
+            except_initiator: false,
+            seed: Some(seed),
+        });
+    }
+
+    /// `levelEvent(null, type, pos, data)`。
+    pub fn level_event(&mut self, event: i32, pos: BlockPos, data: i32) {
+        self.push_effect(Effect::LevelEvent {
+            event,
+            pos,
+            data,
+            except_initiator: false,
+        });
+    }
+
+    /// 同上，但跳过发起这次操作的玩家，官方传的是 `player` 作 `source`。
+    pub fn level_event_except(&mut self, event: i32, pos: BlockPos, data: i32) {
+        self.push_effect(Effect::LevelEvent {
+            event,
+            pos,
+            data,
+            except_initiator: true,
+        });
     }
 
     /// `getBlockState`。世界外是 `void_air`。
@@ -361,6 +487,14 @@ impl<'a> World<'a> {
     /// `isInsideBuildHeight`。
     pub fn is_inside_build_height(&self, y: i32) -> bool {
         (self.min_y()..=self.max_y()).contains(&y)
+    }
+
+    /// `hasChunkAt`：只看区块坐标是否在合法范围内，不看这一格有没有真正加载。
+    ///
+    /// `hasChunkAt` for the command position check: the chunk coordinate is in range.
+    /// This world treats every in-range chunk as present.
+    pub fn has_chunk_at(&self, pos: BlockPos) -> bool {
+        (pos.x >> 4).abs() <= VALID_CHUNK_BOUND && (pos.z >> 4).abs() <= VALID_CHUNK_BOUND
     }
 
     /// `isInWorldBounds`。
@@ -923,12 +1057,16 @@ impl<'a> World<'a> {
         // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
         // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
         let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
-        // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`（通知邻居），
-        // 再取两个 `nextFloat`，然后无条件再 `onSongChanged`。物品在第一次通知之前已经是空的。
+        // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`
+        // （`levelEvent(1011)` 然后通知邻居），再取两个 `nextFloat`，然后无条件再 `onSongChanged`。
+        // `setRemoved` 在这之后再无条件报一次 1011。物品在第一次通知之前已经是空的。
+        // `forget_block_entity` 会清掉正在放的歌，所以要在写入之前记下。
         //
         // Breaking a jukebox runs `popOutTheItem` → `setTheItem(EMPTY)`: a playing song `stop`s
-        // (neighbors are told) before the two `nextFloat`s, then `onSongChanged` runs again.
-        // The item is already empty before the first notification.
+        // (`levelEvent(1011)`, then neighbors) before the two `nextFloat`s, then `onSongChanged`
+        // runs again. `setRemoved` sends another unconditional 1011 after that. The item is
+        // already empty before the first notification. `forget_block_entity` clears the playing
+        // flag, so remember it before the write.
         let jukebox_count = dropped_counts
             .as_ref()
             .filter(|_| old.is_a(BlockAncestor::JukeboxBlock))
@@ -958,22 +1096,38 @@ impl<'a> World<'a> {
         }
         if jukebox_count > 0 {
             self.level.clear_container(pos);
+            // `JukeboxSongPlayer.stop`：正在放才报 1011，然后 `onSongChanged`。两个 `nextFloat` 在这之后。
+            // `JukeboxSongPlayer.stop`: 1011 only while a song is playing, then `onSongChanged`.
+            // The two `nextFloat`s come after that.
             if jukebox_playing {
+                self.level_event(1011, pos, 0);
                 crate::block_container::on_jukebox_song_changed(old, self, pos);
             }
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        // 熔炉和酿造台有实体时已经在上面掉过，这里再掉一次随机数会翻倍。
+        // 熔炉和酿造台有实体时已经在上面掉过，这里再掉一次随机数会翻倍。唱片机不在那一组里，
+        // 弹出唱片的两个 `nextFloat` 仍走下面的 `pre_remove_side_effects`。
+        //
         // Vanilla drops before `affectNeighborsAfterRemoval`. A furnace or brewing stand
         // that still had an entity already dropped above; dropping again would double the draws.
+        // A jukebox is not in that group, so the two `nextFloat`s of popping the disc still run
+        // in `pre_remove_side_effects` below.
         if let Some(counts) = dropped_counts
             && !entity_dropped_contents
         {
             block_entity::pre_remove_side_effects(old, self, &counts);
         }
         if jukebox_count > 0 {
+            // `popOutTheItem` 末尾的 `onSongChanged`，在 `setRemoved` 的 1011 之前。
+            // The `onSongChanged` at the end of `popOutTheItem`, before `setRemoved`'s 1011.
             crate::block_container::on_jukebox_song_changed(old, self, pos);
+        }
+        // `removeBlockEntity` 不看跳过副作用的标志，`setRemoved` 一定会走。
+        // `removeBlockEntity` ignores the skip-side-effects flag, so `setRemoved` always runs.
+        if block_changed && old.has_block_entity() && !block_entity::keeps_block_entity(state, old)
+        {
+            block_entity::removed_side_effects(old, self, pos);
         }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
@@ -1269,9 +1423,22 @@ impl<'a> World<'a> {
     /// `TntBlock.prime`: spawns a primed TNT with the default fuse. The caller removes the block.
     /// The yaw comes from `level.getRandom()`, the same source block logic uses.
     pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+        let position = block_center_bottom(pos);
         let angle = self.random().next_double();
-        let entity = Entity::primed_tnt(block_center_bottom(pos), angle);
-        self.spawn_entity(entity)
+        let entity = Entity::primed_tnt(position, angle);
+        let id = self.spawn_entity(entity);
+        // `TntBlock.prime` 在 `addFreshEntity` 之后，于实体脚底播放。被爆炸点燃的短引信不走这里。
+        // `TntBlock.prime` plays this at the entity's feet after `addFreshEntity`.
+        // Short-fuse TNT lit by an explosion does not.
+        self.play_sound(
+            position,
+            sounds::sound_event("minecraft:entity.tnt.primed"),
+            sounds::BLOCKS,
+            1.0,
+            1.0,
+            false,
+        );
+        id
     }
 
     /// `TntBlock.wasExploded`：被爆炸点着的 TNT 引信比默认的短一截。
@@ -1709,6 +1876,8 @@ mod tests {
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }
                 | Effect::OpenSignEditor { .. }
+                | Effect::Sound { .. }
+                | Effect::LevelEvent { .. }
                 | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. }
                 | Effect::ComposterFill { .. }

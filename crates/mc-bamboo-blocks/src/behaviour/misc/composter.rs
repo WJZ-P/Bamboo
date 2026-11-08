@@ -3,7 +3,7 @@
 //! 放一个物品加几层由物品的 `compostable` 组件决定，抽签用世界的随机数，和官方逐位相同。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::CompostLayers;
+use mc_bamboo_data::{CompostLayers, sounds::sound_event};
 
 use crate::{
     behaviour::{Behaviour, common::item_of},
@@ -115,13 +115,27 @@ impl Behaviour for Composter {
         // 世界里没有物品实体，这两个数照样要取。
         world.random().next_float();
         world.random().next_float();
-        world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_COMPOSTER, 0));
+        let pos = ctx.clicked_pos();
+        world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
+        // `extractProduce` 在 `empty` 之后出声，`null` 作 `except`。
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.composter.empty"),
+            1.0,
+            1.0,
+        );
         InteractionResult::Success
     }
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(LEVEL_COMPOSTER) == MAX_LEVEL {
             world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, READY));
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:block.composter.ready"),
+                1.0,
+                1.0,
+            );
         }
     }
 

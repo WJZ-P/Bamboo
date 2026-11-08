@@ -1,0 +1,70 @@
+// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。
+
+pub mod argument_type {
+    pub const TOTAL: u32 = 62;
+    /// 条目名，下标就是注册表 ID。
+    pub static NAMES: &[&str] = &["brigadier:bool", "brigadier:float", "brigadier:double", "brigadier:integer", "brigadier:long", "brigadier:string", "minecraft:entity", "minecraft:game_profile", "minecraft:block_pos", "minecraft:column_pos", "minecraft:vec3", "minecraft:vec2", "minecraft:block_state", "minecraft:block_predicate", "minecraft:item_stack", "minecraft:item_predicate", "minecraft:team_color", "minecraft:hex_color", "minecraft:component", "minecraft:style", "minecraft:message", "minecraft:nbt_compound_tag", "minecraft:nbt_tag", "minecraft:nbt_path", "minecraft:objective", "minecraft:objective_criteria", "minecraft:operation", "minecraft:particle", "minecraft:angle", "minecraft:rotation", "minecraft:scoreboard_slot", "minecraft:score_holder", "minecraft:swizzle", "minecraft:team", "minecraft:item_slot", "minecraft:item_slots", "minecraft:resource_location", "minecraft:function", "minecraft:entity_anchor", "minecraft:int_range", "minecraft:float_range", "minecraft:dimension", "minecraft:gamemode", "minecraft:time", "minecraft:resource_or_tag", "minecraft:resource_or_tag_key", "minecraft:resource", "minecraft:resource_key", "minecraft:resource_selector", "minecraft:template_mirror", "minecraft:template_rotation", "minecraft:heightmap", "minecraft:loot_table", "minecraft:loot_predicate", "minecraft:loot_modifier", "minecraft:context_float_provider", "minecraft:context_int_provider", "minecraft:slot_source", "minecraft:dialog", "minecraft:feature", "minecraft:swing_animation", "minecraft:uuid"];
+    pub const BRIGADIER_BOOL: i32 = 0;
+    pub const BRIGADIER_FLOAT: i32 = 1;
+    pub const BRIGADIER_DOUBLE: i32 = 2;
+    pub const BRIGADIER_INTEGER: i32 = 3;
+    pub const BRIGADIER_LONG: i32 = 4;
+    pub const BRIGADIER_STRING: i32 = 5;
+    pub const ENTITY: i32 = 6;
+    pub const GAME_PROFILE: i32 = 7;
+    pub const BLOCK_POS: i32 = 8;
+    pub const COLUMN_POS: i32 = 9;
+    pub const VEC3: i32 = 10;
+    pub const VEC2: i32 = 11;
+    pub const BLOCK_STATE: i32 = 12;
+    pub const BLOCK_PREDICATE: i32 = 13;
+    pub const ITEM_STACK: i32 = 14;
+    pub const ITEM_PREDICATE: i32 = 15;
+    pub const TEAM_COLOR: i32 = 16;
+    pub const HEX_COLOR: i32 = 17;
+    pub const COMPONENT: i32 = 18;
+    pub const STYLE: i32 = 19;
+    pub const MESSAGE: i32 = 20;
+    pub const NBT_COMPOUND_TAG: i32 = 21;
+    pub const NBT_TAG: i32 = 22;
+    pub const NBT_PATH: i32 = 23;
+    pub const OBJECTIVE: i32 = 24;
+    pub const OBJECTIVE_CRITERIA: i32 = 25;
+    pub const OPERATION: i32 = 26;
+    pub const PARTICLE: i32 = 27;
+    pub const ANGLE: i32 = 28;
+    pub const ROTATION: i32 = 29;
+    pub const SCOREBOARD_SLOT: i32 = 30;
+    pub const SCORE_HOLDER: i32 = 31;
+    pub const SWIZZLE: i32 = 32;
+    pub const TEAM: i32 = 33;
+    pub const ITEM_SLOT: i32 = 34;
+    pub const ITEM_SLOTS: i32 = 35;
+    pub const RESOURCE_LOCATION: i32 = 36;
+    pub const FUNCTION: i32 = 37;
+    pub const ENTITY_ANCHOR: i32 = 38;
+    pub const INT_RANGE: i32 = 39;
+    pub const FLOAT_RANGE: i32 = 40;
+    pub const DIMENSION: i32 = 41;
+    pub const GAMEMODE: i32 = 42;
+    pub const TIME: i32 = 43;
+    pub const RESOURCE_OR_TAG: i32 = 44;
+    pub const RESOURCE_OR_TAG_KEY: i32 = 45;
+    pub const RESOURCE: i32 = 46;
+    pub const RESOURCE_KEY: i32 = 47;
+    pub const RESOURCE_SELECTOR: i32 = 48;
+    pub const TEMPLATE_MIRROR: i32 = 49;
+    pub const TEMPLATE_ROTATION: i32 = 50;
+    pub const HEIGHTMAP: i32 = 51;
+    pub const LOOT_TABLE: i32 = 52;
+    pub const LOOT_PREDICATE: i32 = 53;
+    pub const LOOT_MODIFIER: i32 = 54;
+    pub const CONTEXT_FLOAT_PROVIDER: i32 = 55;
+    pub const CONTEXT_INT_PROVIDER: i32 = 56;
+    pub const SLOT_SOURCE: i32 = 57;
+    pub const DIALOG: i32 = 58;
+    pub const FEATURE: i32 = 59;
+    pub const SWING_ANIMATION: i32 = 60;
+    pub const UUID: i32 = 61;
+}
+

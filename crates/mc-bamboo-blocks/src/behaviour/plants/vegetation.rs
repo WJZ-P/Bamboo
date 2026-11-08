@@ -6,6 +6,7 @@ use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{
     Block, BlockClass, blocks, items,
     registries::fluid,
+    sounds::sound_event,
     tags::{block_tags, fluid_tags},
 };
 
@@ -483,8 +484,14 @@ impl Behaviour for SweetBerryBush {
         if state.get(AGE_3) <= PICKED_BUSH_AGE {
             return Plain.use_without_item(state, world, ctx);
         }
-        // `useWithoutItem` 放摘果子的声音，音量随机；不出声也要取这个数，后面的计划刻才不错开。
-        world.random().next_float();
+        // `useWithoutItem` 放摘果子的声音，音高随机；不出声也要取这个数，后面的计划刻才不错开。
+        let pitch = 0.8 + world.random().next_float() * 0.4;
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.sweet_berry_bush.pick_berries"),
+            1.0,
+            pitch,
+        );
         let picked = state.with(AGE_3, PICKED_BUSH_AGE);
         world.set_block(ctx.clicked_pos(), picked, UPDATE_CLIENTS);
         InteractionResult::Success

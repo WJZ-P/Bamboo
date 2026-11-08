@@ -1,6 +1,7 @@
 //! `TurtleEggBlock`。踩碎和孵化都和实体、随机刻有关，不在范围里。
 
-use mc_bamboo_data::Block;
+use mc_bamboo_core::BlockPos;
+use mc_bamboo_data::{Block, tags::block_tags};
 
 use crate::{
     behaviour::{Behaviour, Plain, common::default_state},
@@ -36,5 +37,12 @@ impl Behaviour for TurtleEgg {
             && ctx.item == state.block().item
             && state.get(EGGS) < MAX_EGGS;
         adds_an_egg || Plain.can_be_replaced(state, ctx, world)
+    }
+
+    /// `onPlace`：放在沙子上时发 2012 号粒子事件。
+    fn on_place(&self, _state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        if world.block_state(pos.below()).is_tagged(block_tags::SAND) {
+            world.level_event(2012, pos, 15);
+        }
     }
 }

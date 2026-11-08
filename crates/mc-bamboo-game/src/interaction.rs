@@ -1,7 +1,7 @@
 //! 方块交互的网络一侧：够距、点击点、序列号和确认、高度提示、把当前的方块发回去。
 //!
 //! 方块的逻辑都在 `mc_bamboo_blocks` 里，这里只把玩家的动作交给它，再把结果发给客户端。
-//! M2 只有创造模式：破坏一步完成，放置不扣物品。
+//! 创造模式破坏一步完成，也不扣物品数量。生存模式按挖掘进度破坏，工具会掉耐久。
 //! 客户端在本地预测这些操作，结果靠 `block_update` 和 `block_changed_ack` 收敛到服务端。
 
 pub(crate) mod adventure;
@@ -17,11 +17,11 @@ use mc_bamboo_blocks::{
     Actor, BlockHit, BlockState, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{BlockAncestor, items, registries::attribute_defaults};
+use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
 use mc_bamboo_protocol::{
     packet::play::{
         BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
-        PlayerActionKind, SystemChat,
+        PlayerActionKind, Sound, SystemChat,
     },
     text::{Color, Component},
 };
@@ -29,7 +29,7 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    block_items, book, container, entity_sync,
+    block_items, book, container, durability, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory, lectern,
@@ -354,8 +354,73 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     region.links.send(id, &OpenSignEditor { pos, slot });
                 }
             }
-            // 音符盒的声音和粒子归“方块声音”那边，这里只消费掉事件。
-            Effect::NoteBlockPlayed { .. } => {}
+            Effect::Sound {
+                sound,
+                source,
+                x,
+                y,
+                z,
+                volume,
+                pitch,
+                except_initiator,
+                seed,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let packet = Sound {
+                    sound,
+                    inline: None,
+                    source,
+                    x,
+                    y,
+                    z,
+                    volume,
+                    pitch,
+                    seed: seed.unwrap_or_else(|| region.sound_seed_generator.source().next_long()),
+                };
+                send_sound(region, except, &packet);
+            }
+            Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let packet = LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    global: false,
+                };
+                send_level_event(region, except, pos, &packet);
+            }
+            // 音符盒的声音在方块事件里算好了，这里换成音效包。粒子仍靠方块事件。
+            Effect::NoteBlockPlayed {
+                pos,
+                instrument,
+                pitch,
+                seed,
+                custom,
+                ..
+            } => {
+                let inline = custom.map(mc_bamboo_blocks::custom_sound_name);
+                let packet = Sound {
+                    sound: if inline.is_some() {
+                        0
+                    } else {
+                        i32::from(instrument.sound())
+                    },
+                    inline,
+                    source: sounds::RECORDS,
+                    x: f64::from(pos.x) + 0.5,
+                    y: f64::from(pos.y) + 0.5,
+                    z: f64::from(pos.z) + 0.5,
+                    volume: 3.0,
+                    pitch,
+                    seed,
+                };
+                send_sound(region, None, &packet);
+            }
             // `levelEvent(1500)`：客户端播堆肥的粒子和声音。升级了数据是 1，没升级是 0。
             Effect::ComposterFill { pos, success } => {
                 let event = LevelEvent {
@@ -421,6 +486,40 @@ fn send_level_event(
             .count(),
         "player grid is out of sync with player positions"
     );
+}
+
+/// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
+/// 内联的音效是 `createVariableRangeEvent`，没有固定范围。
+fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
+    let range = if sound.inline.is_some() {
+        if sound.volume > 1.0 {
+            16.0 * sound.volume
+        } else {
+            16.0
+        }
+    } else {
+        SOUND_EVENTS[sound.sound as usize]
+            .fixed_range
+            .unwrap_or(if sound.volume > 1.0 {
+                16.0 * sound.volume
+            } else {
+                16.0
+            })
+    };
+    let range = f64::from(range);
+    let frames = encode_frames(sound);
+    for player in region.players.values() {
+        if Some(player.id) == except {
+            continue;
+        }
+        let Vec3 { x, y, z } = player.position();
+        let dx = sound.x - x;
+        let dy = sound.y - y;
+        let dz = sound.z - z;
+        if dx * dx + dy * dy + dz * dz < range * range {
+            region.links.send_frames(player.id, &frames);
+        }
+    }
 }
 
 pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
@@ -522,17 +621,19 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let is_placement_attempt = rules::is_placement_attempt(&held);
     let armed_book = lectern::arm_book(region, id, packet.pos, packet.hand);
 
-    let (mut level, ticks) = region.block_level();
-    let hit = block_hit(packet);
-    let outcome = mc_bamboo_blocks::use_item_on_checked_with_stack(
-        &mut level,
-        ticks,
-        &actor,
-        packet.hand,
-        &hit,
-        Some(&held),
-        |state| actor.may_build || adventure::can_place_on(&held, state),
-    );
+    let outcome = durability::run(region, id, packet.hand, |region| {
+        let (mut level, ticks) = region.block_level();
+        let hit = block_hit(packet);
+        mc_bamboo_blocks::use_item_on_checked_with_stack(
+            &mut level,
+            ticks,
+            &actor,
+            packet.hand,
+            &hit,
+            Some(&held),
+            |state| actor.may_build || adventure::can_place_on(&held, state),
+        )
+    });
 
     // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {
@@ -549,6 +650,13 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.
     if let Some(exchange) = &outcome.item_exchange {
         inventory::apply_item_exchange(region, id, packet.hand, exchange);
+    }
+    // 雕纹书架取出的书。官方放不下就 `player.drop`，这里没有物品实体，剩下的消失。
+    //
+    // A book taken from a chiseled bookshelf. Vanilla drops what does not fit.
+    // There is no item entity here, so a remainder vanishes.
+    if let Some(gained) = outcome.gained.clone() {
+        inventory::give(region, id, gained);
     }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item && !menu::open_block(region, id, packet.pos) {

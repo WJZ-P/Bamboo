@@ -16,6 +16,10 @@ use crate::{
 
 const MAX_CHAT_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 32767;
+/// 补全请求里的命令长度上限。官方 `ServerboundCommandSuggestionPacket` 用 32500。
+///
+/// Command length limit in a suggestion request. Official `ServerboundCommandSuggestionPacket` uses 32500.
+const MAX_SUGGESTION_CHARS: usize = 32500;
 const MAX_LANGUAGE_CHARS: usize = 16;
 /// `ServerboundContainerClickPacket` 的 `changedSlots` 最多有多少项。
 const MAX_CHANGED_SLOTS: usize = 128;
@@ -25,6 +29,10 @@ const MAX_HASHED_COMPONENTS: usize = 256;
 const SIGNATURE_BYTES: usize = 256;
 /// `LastSeenMessages.Update` 里 20 位定长位集占的字节数。
 const LAST_SEEN_ACKNOWLEDGED_BYTES: usize = 3;
+/// 签名命令里最多带几个参数签名。官方 `ArgumentSignatures` 用 8。
+///
+/// Maximum argument signatures on a signed command. Official `ArgumentSignatures` uses 8.
+const MAX_SIGNED_ARGUMENTS: usize = 8;
 
 /// 移动包 `flags` 里表示站在地上的位。
 const MOVE_FLAG_ON_GROUND: u8 = 0x01;
@@ -71,8 +79,18 @@ pub enum PlayRequest {
     Chat {
         message: String,
     },
-    /// 没有开头 `/` 的命令。
+    /// 没有开头 `/` 的命令。签名版和普通版都归到这里，离线模式用不上签名。
+    ///
+    /// A command without the leading `/`. Signed and unsigned packets both land here;
+    /// offline mode does not use the signature.
     ChatCommand {
+        command: String,
+    },
+    /// 客户端请求命令补全。`command` 是输入框里的整段文字，可能以 `/` 开头。
+    ///
+    /// The client asks for suggestions. `command` is the whole input and may start with `/`.
+    CommandSuggestion {
+        id: i32,
         command: String,
     },
     ClientInformation(ClientInformation),
@@ -207,6 +225,11 @@ impl PlayRequest {
             serverbound::CHAT_COMMAND => Self::ChatCommand {
                 command: reader.string(MAX_COMMAND_CHARS)?.to_owned(),
             },
+            serverbound::CHAT_COMMAND_SIGNED => read_signed_command(&mut reader)?,
+            serverbound::COMMAND_SUGGESTION => Self::CommandSuggestion {
+                id: reader.varint()?,
+                command: reader.string(MAX_SUGGESTION_CHARS)?.to_owned(),
+            },
             serverbound::CLIENT_INFORMATION => {
                 Self::ClientInformation(ClientInformation::read(&mut reader)?)
             }
@@ -299,6 +322,32 @@ fn read_chat(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     Ok(PlayRequest::Chat { message })
 }
 
+/// 解码带签名的命令。时间戳、盐、参数签名和已读窗口都读掉后丢弃。
+///
+/// Decodes a signed command. The timestamp, salt, argument signatures, and seen window are discarded.
+fn read_signed_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let command = reader.string(MAX_COMMAND_CHARS)?.to_owned();
+    // 时间戳和盐。
+    //
+    // Timestamp and salt.
+    reader.i64()?;
+    reader.i64()?;
+    // ArgumentSignatures：参数名加定长签名。
+    //
+    // ArgumentSignatures: a name plus a fixed-length signature.
+    for _ in 0..reader.count(MAX_SIGNED_ARGUMENTS)? {
+        reader.string(MAX_LANGUAGE_CHARS)?;
+        reader.bytes(SIGNATURE_BYTES)?;
+    }
+    // LastSeenMessages.Update：偏移、确认窗口、校验和。
+    //
+    // LastSeenMessages.Update: offset, acknowledged window, checksum.
+    reader.varint()?;
+    reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?;
+    reader.i8()?;
+    Ok(PlayRequest::ChatCommand { command })
+}
+
 /// 解码 `sign_update`：方块坐标、四行文字、哪一面。官方按这个顺序写。
 fn read_sign_update(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let pos = reader.block_pos()?;
@@ -345,10 +394,28 @@ fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeErr
 /// 帧有长度前缀，物品后面多余的字节不会让字节流错位。
 fn read_creative_mode_slot(mut reader: Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let slot = reader.i16()?;
-    Ok(match ItemStack::read_delimited(&mut reader) {
-        Ok(stack) => PlayRequest::SetCreativeModeSlot { slot, stack },
-        Err(_) => PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT),
-    })
+    match ItemStack::read_delimited(&mut reader) {
+        Ok(stack) => Ok(PlayRequest::SetCreativeModeSlot { slot, stack }),
+        // 嵌套超过上限时官方抛 `DecoderException`，这条连接要断。别的畸形物品仍然
+        // 忽略，槽位保持不动：规格允许这样，已有测试也按这个结果写。
+        //
+        // Nesting past the cap is a `DecoderException` officially, so this
+        // connection drops. Other malformed items are still ignored and the slot
+        // stays put: the spec allows that, and the existing tests expect it.
+        Err(error) if nesting_limit(&error) => Err(error),
+        Err(_) => Ok(PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT)),
+    }
+}
+
+/// 这种错误表示嵌套深过上限。收下它会在转发时把别人的连接打掉，或者在解码时把进程打崩。
+fn nesting_limit(error: &DecodeError) -> bool {
+    match error {
+        DecodeError::Nbt(mc_bamboo_nbt::DecodeError::TooDeep { .. })
+        | DecodeError::StacksTooDeep { .. } => true,
+        DecodeError::InvalidTextComponent(message) => *message == "nested too deep",
+        DecodeError::InvalidComponentValue(message) => message.contains("nested too deep"),
+        _ => false,
+    }
 }
 
 /// 解码 `container_click`。槽位和按钮的范围由调用方判断，官方也是这样。
@@ -1591,6 +1658,10 @@ mod tests {
             decode_frame("01 0d"),
             PlayRequest::Other(serverbound::CLIENT_TICK_END)
         );
+    }
+
+    #[test]
+    fn decodes_signed_chat_command() {
         assert_eq!(
             decode_body(
                 serverbound::CHAT_COMMAND_SIGNED,
@@ -1600,7 +1671,46 @@ mod tests {
                  00
                  00 00 00 00 01"
             ),
-            Ok(PlayRequest::Other(serverbound::CHAT_COMMAND_SIGNED))
+            Ok(PlayRequest::ChatCommand {
+                command: "say hi".to_owned()
+            })
         );
+    }
+
+    #[test]
+    fn signed_chat_command_skips_argument_signatures() {
+        let mut body = Vec::new();
+        write_string(&mut body, "say hi");
+        body.extend([0; 16]);
+        body.push(1);
+        write_string(&mut body, "message");
+        body.extend([0xab; SIGNATURE_BYTES]);
+        body.extend(hex("00 00 00 00 01"));
+        assert_eq!(
+            decode_body(serverbound::CHAT_COMMAND_SIGNED, &hex_text(&body)),
+            Ok(PlayRequest::ChatCommand {
+                command: "say hi".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_command_suggestion() {
+        assert_eq!(
+            decode_body(serverbound::COMMAND_SUGGESTION, "07 04 2f 74 69 6d"),
+            Ok(PlayRequest::CommandSuggestion {
+                id: 7,
+                command: "/tim".to_owned()
+            })
+        );
+    }
+
+    /// 测试里把现成的字节写成 `decode_body` 要的十六进制文本。
+    fn hex_text(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }

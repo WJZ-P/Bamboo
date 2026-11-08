@@ -137,6 +137,14 @@ impl Behaviour for Note {
         {
             return false;
         }
+        // 官方 `Holder.direct(createVariableRangeEvent)`，名字不进注册表查询。
+        let custom = if instrument == NoteBlockInstrument::CustomHead {
+            world
+                .note_block_sound(pos.above())
+                .map(|name| crate::intern_custom_sound(&name))
+        } else {
+            None
+        };
         let seed = world.random().next_long();
         world.push_effect(Effect::NoteBlockPlayed {
             pos,
@@ -144,6 +152,7 @@ impl Behaviour for Note {
             note,
             pitch,
             seed,
+            custom,
         });
         true
     }

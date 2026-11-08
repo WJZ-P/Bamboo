@@ -2184,18 +2184,27 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
     }
 }
 
-/// 砂轮取出结果时的经验。重放没有 `in_world`，这里的表是空的。
+/// 砂轮取出结果时的经验和 `levelEvent(1042)`。重放没有 `in_world`，这里的表是空的。
 ///
-/// Experience for a grindstone take. A replay has no `in_world`, so the list is empty.
+/// Experience and `levelEvent(1042)` for a grindstone take. A replay has no `in_world`, so the
+/// list is empty.
 fn roll_grindstone(region: &mut Region, station: &mut Station) {
     if station.awards.is_empty() {
         return;
     }
-    let (mut level, ticks) = region.block_level();
-    let world = World::new(&mut level, ticks);
-    for amount in std::mem::take(&mut station.awards) {
-        grindstone::award(world.random(), amount);
-    }
+    let pos = station.pos;
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        for amount in std::mem::take(&mut station.awards) {
+            grindstone::award(world.random(), amount);
+            // 官方在经验取完之后发 `levelEvent(1042)`。这一下不取随机数。
+            // Vanilla sends `levelEvent(1042)` after the experience draws. This one draws nothing.
+            world.level_event(1042, pos, 0);
+        }
+        world.drain_effects()
+    };
+    crate::interaction::send_effects(region, None, &effects);
 }
 
 fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet: &ClickPacket) {

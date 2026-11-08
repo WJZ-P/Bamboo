@@ -5,7 +5,7 @@
 //! 倾倒之后的几步靠计划刻走，有信号就立刻复位，这两条和实体无关，都移植了。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, blocks, registries, tags::block_tags};
+use mc_bamboo_data::{Block, blocks, registries, sounds::sound_event, tags::block_tags};
 
 use super::{break_if_unsupported, schedule_break_if_unsupported};
 use crate::{
@@ -40,14 +40,22 @@ fn set_tilt(state: BlockState, world: &mut World, pos: BlockPos, tilt: Tilt) {
 }
 
 /// `playTiltSound`：音高由 `Mth.randomBetween` 从世界随机源取，取的这个数后面的随机刻和计划刻都要用。
-fn play_tilt_sound(world: &mut World) {
-    world.random().next_float();
+fn play_tilt_sound(world: &mut World, pos: BlockPos, sound: &str) {
+    // `Mth.randomBetween` 用的是 `max - min`，和手写的 0.4 差最后一位。
+    let pitch = world.random().next_float() * (1.2 - 0.8) + 0.8;
+    world.play_block_sound(pos, sound_event(sound), 1.0, pitch);
 }
 
 /// `setTiltAndScheduleTick`：倾倒和复位都会响一声，先响再排刻。
-fn set_tilt_and_schedule_tick(state: BlockState, world: &mut World, pos: BlockPos, tilt: Tilt) {
+fn set_tilt_and_schedule_tick(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    tilt: Tilt,
+    sound: &str,
+) {
     set_tilt(state, world, pos, tilt);
-    play_tilt_sound(world);
+    play_tilt_sound(world, pos, sound);
     let delay = delay_until_next_tilt(tilt);
     if delay != NO_TICK {
         world.schedule_tick(pos, state.block(), delay);
@@ -59,7 +67,7 @@ fn reset_tilt(state: BlockState, world: &mut World, pos: BlockPos) {
     let previous = state.get(TILT);
     set_tilt(state, world, pos, Tilt::None);
     if previous != Tilt::None {
-        play_tilt_sound(world);
+        play_tilt_sound(world, pos, "minecraft:block.big_dripleaf.tilt_up");
     }
 }
 
@@ -135,8 +143,20 @@ impl Behaviour for BigDripleaf {
             return;
         }
         match state.get(TILT) {
-            Tilt::Unstable => set_tilt_and_schedule_tick(state, world, pos, Tilt::Partial),
-            Tilt::Partial => set_tilt_and_schedule_tick(state, world, pos, Tilt::Full),
+            Tilt::Unstable => set_tilt_and_schedule_tick(
+                state,
+                world,
+                pos,
+                Tilt::Partial,
+                "minecraft:block.big_dripleaf.tilt_down",
+            ),
+            Tilt::Partial => set_tilt_and_schedule_tick(
+                state,
+                world,
+                pos,
+                Tilt::Full,
+                "minecraft:block.big_dripleaf.tilt_down",
+            ),
             Tilt::Full => reset_tilt(state, world, pos),
             Tilt::None => {}
         }

@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::{
     book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    container, entity_sync, entity_tracking,
+    command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
@@ -188,7 +188,8 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
-        self.region.start_loading_chunks(id, self.global.time());
+        self.region
+            .start_loading_chunks(id, self.global.time(), self.global.clock());
     }
 
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
@@ -220,6 +221,19 @@ impl World {
         if !self.region.links.is_open(player) {
             return;
         }
+        match &request {
+            PlayRequest::ChatCommand { command } => {
+                let command = command.clone();
+                command::on_command(&mut self.global, &mut self.region, player, &command);
+                return;
+            }
+            PlayRequest::CommandSuggestion { id, command } => {
+                let (transaction, command) = (*id, command.clone());
+                command::on_suggestion(&mut self.region, player, transaction, &command);
+                return;
+            }
+            _ => {}
+        }
         let region = &mut self.region;
         match request {
             PlayRequest::AcceptTeleportation {
@@ -250,9 +264,10 @@ impl World {
                     chat::detect_chat_rate_spam(region, player);
                 }
             }
-            PlayRequest::ChatCommand { command } => {
-                chat::on_chat_command(region, player, command);
-            }
+            // 聊天命令和建议在上面处理过了，这里只是让匹配穷尽。
+            //
+            // Chat commands and suggestions are handled above. This arm only makes the match exhaustive.
+            PlayRequest::ChatCommand { .. } | PlayRequest::CommandSuggestion { .. } => {}
             PlayRequest::ClientCommand { action } => {
                 chat::on_client_command(region, player, action);
             }

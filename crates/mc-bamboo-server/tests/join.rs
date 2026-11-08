@@ -112,6 +112,8 @@ async fn join_order_matches_the_official_server() {
         [
             play::clientbound::LOGIN,
             play::clientbound::PLAYER_ABILITIES,
+            play::clientbound::ENTITY_EVENT,
+            play::clientbound::COMMANDS,
             play::clientbound::PLAYER_POSITION,
             play::clientbound::PLAYER_INFO_UPDATE,
             play::clientbound::SET_ENTITY_DATA,

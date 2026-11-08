@@ -32,6 +32,14 @@ pub(crate) struct Player {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
     pub(crate) game_mode: GameMode,
+    /// 命令权限等级，0 到 4，来自 `ops.json`。
+    ///
+    /// Command permission level, 0 through 4, from `ops.json`.
+    pub(crate) permission_level: u8,
+    /// 是否列在 `ops.json` 里。和权限等级分开，等级 0 的 OP 也算 OP。
+    ///
+    /// Whether the player is listed in `ops.json`. Separate from the level: a level-0 op still counts.
+    pub(crate) is_op: bool,
     /// 实体位置，也就是脚底。只能经 [`Player::set_position`] 改，见 [`PlayerGrid`]。
     ///
     /// Entity position, the feet. Changed only through [`Player::set_position`]; see [`PlayerGrid`].
@@ -75,6 +83,8 @@ impl Player {
             uuid,
             name,
             game_mode,
+            permission_level: 0,
+            is_op: false,
             position,
             yaw: 0.0,
             pitch: 0.0,
@@ -192,10 +202,11 @@ mod tests {
     fn chunk_position_rounds_down() {
         let mut player = player_requesting(2);
 
-        player.position = Vec3::new(-0.5, 500.0, 16.0);
+        let mut grid = PlayerGrid::default();
+        player.set_position(&mut grid, Vec3::new(-0.5, 500.0, 16.0));
         assert_eq!(player.chunk_pos(), ChunkPos::new(-1, 1));
 
-        player.position = Vec3::new(3.0e7, 0.0, -3.0e7);
+        player.set_position(&mut grid, Vec3::new(3.0e7, 0.0, -3.0e7));
         assert_eq!(player.chunk_pos(), ChunkPos::new(1_875_000, -1_875_000));
     }
 
