@@ -1949,6 +1949,9 @@ dependencies = [
 [[package]]
 name = "mc-bamboo-nbt"
 version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "mc-bamboo-protocol"
@@ -1991,6 +1994,7 @@ dependencies = [
  "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-protocol",
  "mc-bamboo-server",
  "mc-bamboo-world",
  "serde",
