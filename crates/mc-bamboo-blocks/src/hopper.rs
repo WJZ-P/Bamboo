@@ -1,6 +1,7 @@
 //! 漏斗，官方 `HopperBlockEntity` 和它用的取放物品算法。
 //!
 //! 每刻把朝向那一格的容器塞一个物品，再从上面一格的容器吸一个，冷却 8 刻。
+//! 堆肥桶没有物品栏，但是官方把它也当成容器，见 [`crate::composter`]。
 //! 这个世界没有物品实体，所以官方从地上和上方吸物品实体的那一段没写：方块位置上面没有容器时
 //! 什么也不做，和上面被完整方块压住时的官方行为一样。
 
@@ -435,6 +436,16 @@ pub fn set_changed(world: &mut World, pos: BlockPos) {
     for changed in world.container_positions(pos) {
         let state = world.block_state(changed);
         if state.is_air() {
+            continue;
+        }
+        // 堆肥桶的容器不是方块实体：官方 `InputContainer` / `OutputContainer` 的 `setChanged`
+        // 只加层或清空（在 [`crate::composter`] 里已经做过），再调一次时槽已空或状态没变，
+        // 不会通知比较器。等级变化引起的通知走的是 `setBlock`。
+        // A composter's container is not a block entity: vanilla `InputContainer` /
+        // `OutputContainer.setChanged` only adds a layer or empties it (already done in
+        // [`crate::composter`]); a second call finds the slot empty or the state unchanged and
+        // notifies no comparator. Level changes reach comparators through `setBlock`.
+        if state.is_a(BlockAncestor::ComposterBlock) {
             continue;
         }
         world.update_neighbour_for_output_signal(changed, state.block());

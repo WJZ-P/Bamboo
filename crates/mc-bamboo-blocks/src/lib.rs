@@ -13,6 +13,7 @@
 
 pub mod behaviour;
 pub mod block_entity;
+mod composter;
 pub mod container;
 pub mod context;
 pub mod dispenser;
