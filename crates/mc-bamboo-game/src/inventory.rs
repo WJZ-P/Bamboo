@@ -327,7 +327,8 @@ pub(crate) fn on_pick_item_from_block(
 /// 官方 `BlockBehaviour.getCloneItemStack`。
 ///
 /// 旗帜和饰纹陶罐的覆盖不看 `includeData`：它们总是带上方块实体的那几项组件。
-/// 别的方块我们按默认实现，只有物品本身。
+/// 官方还有二十来个别的覆盖（作物给种子、洞穴藤蔓给发光浆果、花盆给花、`light` 给带亮度的物品
+/// 这些），这里都还是默认实现，只有方块自己的物品。
 fn clone_item_stack(region: &Region, pos: BlockPos, item: i32) -> ItemStack {
     let mut stack = ItemStack::new(item, 1);
     let kind = region
