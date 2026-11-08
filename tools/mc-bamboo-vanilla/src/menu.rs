@@ -1,7 +1,8 @@
 //! 用官方的菜单代码检查 `mc-bamboo-game` 的容器点击逻辑。
 //!
 //! `MenuOracle.java` 在 JVM 里给每种容器菜单出题：随机的初始内容、随机的创造模式开关和随机的一串点击。
-//! 每一步之后它报告菜单的全部槽位、光标和 `state_id`。这里用 [`Replay`] 跑同一串点击，逐槽、逐个 `state_id` 比较。
+//! 讲台走 `LecternMenu` 的按钮，不走槽位点击。每一步之后它报告菜单的全部槽位、光标、`state_id`，
+//! 讲台再加页码。箱子菜单用 [`Replay`] 重放，讲台用 [`mc_bamboo_game::LecternReplay`]。
 //!
 //! 随机题是“客户端从不预测”：点击自带的 `changed_slots` 是空的，光标永远是空物品。
 //! 最后一道带组件的题改成官方 `MultiPlayerGameMode.handleContainerInput` 的预测，
@@ -19,7 +20,7 @@ use std::{
 };
 
 use mc_bamboo_data::version;
-use mc_bamboo_game::{Replay, ReplayShape, Snapshot};
+use mc_bamboo_game::{LecternReplay, LecternSnapshot, Replay, ReplayShape, Snapshot};
 use mc_bamboo_protocol::{
     components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
@@ -53,6 +54,13 @@ struct Case {
     id: u32,
     shape: String,
     creative: bool,
+    /// 讲台才有。箱子题不写这两项。
+    ///
+    /// Present on lectern cases. Chest cases omit both.
+    #[serde(default)]
+    page_count: i32,
+    #[serde(default)]
+    may_build: bool,
     container: Vec<[i32; 2]>,
     inventory: Vec<[i32; 2]>,
     open: Outcome,
@@ -80,6 +88,11 @@ struct Step {
     slot: i16,
     button: i8,
     input: u8,
+    /// 讲台的 `container_button_click`。箱子题不写，默认 0。
+    ///
+    /// Lectern `container_button_click`. Chest cases omit it and it defaults to 0.
+    #[serde(rename = "buttonId", default)]
+    button_id: i32,
     outcome: Outcome,
     /// 这次点击之后服务端补发的槽位。只有预测题才有。
     ///
@@ -99,6 +112,11 @@ struct Outcome {
     state: i32,
     carried: [i32; 2],
     slots: Vec<[i32; 2]>,
+    /// 讲台的当前页。箱子题不写。
+    ///
+    /// Lectern page. Chest cases omit it.
+    #[serde(default)]
+    page: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,6 +234,9 @@ impl Report {
 
     /// 重放一道题：打开菜单，然后一步一步点。
     fn replay(&mut self, case: &Case) -> Result<(), String> {
+        if case.shape == "lectern" {
+            return self.replay_lectern(case);
+        }
         let shape = shape_of(&case.shape)
             .ok_or_else(|| format!("case {}: unknown menu shape {:?}", case.id, case.shape))?;
         self.cases += 1;
@@ -260,6 +281,27 @@ impl Report {
         Ok(())
     }
 
+    /// `LecternMenu`：按钮改页码或取书，比对槽位、光标、`state_id` 和页码。
+    ///
+    /// Replays lectern buttons and compares slots, the cursor, `state_id`, and the page.
+    fn replay_lectern(&mut self, case: &Case) -> Result<(), String> {
+        self.cases += 1;
+        let [item, count] = case.container.first().copied().unwrap_or([0, 0]);
+        let (mut replay, snapshot) =
+            LecternReplay::open(item, count, case.page_count, case.may_build);
+        self.compare_lectern(&format!("case {} open", case.id), &snapshot, &case.open);
+        for (index, step) in case.steps.iter().enumerate() {
+            let snapshot = replay.press(step.button_id);
+            self.steps += 1;
+            self.compare_lectern(
+                &format!("case {} step {index}", case.id),
+                &snapshot,
+                &step.outcome,
+            );
+        }
+        Ok(())
+    }
+
     fn compare(&mut self, place: &str, ours: &Snapshot, official: &Outcome) {
         self.checks += 1;
         if ours.state_id != official.state {
@@ -284,11 +326,52 @@ impl Report {
             return;
         }
         self.slots += ours.slots.len();
-        for (index, (ours, official)) in ours.slots.iter().zip(&official.slots).enumerate() {
-            if [ours.item, ours.count] != *official {
+        for (index, (ours, official_slot)) in ours.slots.iter().zip(&official.slots).enumerate() {
+            if [ours.item, ours.count] != *official_slot {
                 self.mismatch(format!(
                     "{place}: slot {index}: official {:?}, bamboo {}",
-                    official,
+                    official_slot,
+                    describe(ours)
+                ));
+            }
+        }
+    }
+
+    fn compare_lectern(&mut self, place: &str, ours: &LecternSnapshot, official: &Outcome) {
+        self.checks += 1;
+        if ours.state_id != official.state {
+            self.mismatch(format!(
+                "{place}: state id: official {}, bamboo {}",
+                official.state, ours.state_id
+            ));
+        }
+        if ours.page != official.page {
+            self.mismatch(format!(
+                "{place}: page: official {}, bamboo {}",
+                official.page, ours.page
+            ));
+        }
+        if [ours.carried.item, ours.carried.count] != official.carried {
+            self.mismatch(format!(
+                "{place}: carried: official {:?}, bamboo {}",
+                official.carried,
+                describe(&ours.carried)
+            ));
+        }
+        if ours.slots.len() != official.slots.len() {
+            self.mismatch(format!(
+                "{place}: menu has {} slots, official {}",
+                ours.slots.len(),
+                official.slots.len()
+            ));
+            return;
+        }
+        self.slots += ours.slots.len();
+        for (index, (ours, official_slot)) in ours.slots.iter().zip(&official.slots).enumerate() {
+            if [ours.item, ours.count] != *official_slot {
+                self.mismatch(format!(
+                    "{place}: slot {index}: official {:?}, bamboo {}",
+                    official_slot,
                     describe(ours)
                 ));
             }

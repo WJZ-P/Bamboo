@@ -21,7 +21,7 @@ use crate::{
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
-    inventory, light_updates, menu, movement,
+    inventory, lectern, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
     sign,
@@ -86,16 +86,17 @@ impl World {
 
         self.global.advance_time();
         self.region.advance_tick();
-        interaction::run_block_ticks(&mut self.region, self.global.time());
-        // 官方 `ServerLevel.tick` 里随机刻在 `chunkSource.tick`，方块实体的 tick 在它之后。
-        interaction::run_random_ticks(&mut self.region);
-        // 实体刻放在随机刻后面：计划刻里生成的下落方块和 TNT 同一 tick 就动。
-        // 官方实体在方块实体之前，这里方块实体已经在计划刻里跑完了。
+        // 官方 `ServerLevel.tick` 的顺序：方块和流体的计划刻、`chunkSource.tick` 里的随机刻、
+        // 方块事件、实体、方块实体。计划刻和随机刻里生成的下落方块和 TNT 同一 tick 就动。
         //
-        // Entity ticks follow random ticks, so a falling block or primed TNT spawned by
-        // a block tick moves in the same game tick. Vanilla ticks entities before block
-        // entities; those already ran inside the scheduled-tick step.
+        // Vanilla `ServerLevel.tick` order: block and fluid ticks, random ticks inside
+        // `chunkSource.tick`, block events, entities, then block entities. Falling blocks and
+        // primed TNT spawned by block or random ticks move in the same game tick.
+        interaction::run_block_ticks(&mut self.region, self.global.time());
+        interaction::run_random_ticks(&mut self.region);
+        interaction::run_block_events(&mut self.region);
         interaction::run_entity_ticks(&mut self.region);
+        interaction::run_block_entity_ticks(&mut self.region);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
         // 这里跟着玩家 tick 放在随机刻之后。
         interaction::tick_mining(&mut self.region);
@@ -104,6 +105,7 @@ impl World {
         // 容器开合人数的重查和菜单同步。
         container::tick(&mut self.region);
         menu::tick(&mut self.region);
+        lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
@@ -205,6 +207,7 @@ impl World {
         entity_tracking::on_leave(&mut self.region, id);
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
+        lectern::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {
@@ -324,7 +327,14 @@ impl World {
                     carried,
                 },
             ),
-            PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
+            PlayRequest::ContainerClose { .. } => {
+                menu::on_close_request(region, player);
+                lectern::on_player_close(region, player);
+            }
+            PlayRequest::ContainerButtonClick {
+                container_id,
+                button_id,
+            } => lectern::on_button(region, player, container_id, button_id),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }

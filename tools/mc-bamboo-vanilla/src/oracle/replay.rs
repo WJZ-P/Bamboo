@@ -852,7 +852,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. }
             // 堆肥的粒子和声音，题里不比较。
-            | Effect::ComposterFill { .. } => None,
+            | Effect::ComposterFill { .. }
+            // 讲台翻页的声音，题里不比较。
+            | Effect::PageTurned { .. } => None,
         })
         .collect()
 }
@@ -953,7 +955,11 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             Effect::FilledBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::OpenSignEditor { .. }
-            | Effect::BlockEvent { .. } => {}
+            | Effect::BlockEvent { .. }
+            // 讲台翻页是菜单里的 `levelEvent(1043)`，方块题不比较。游戏层会把它发出去。
+            // A lectern page turn is menu `levelEvent(1043)`. Block cases do not compare it.
+            // The game layer still sends it.
+            | Effect::PageTurned { .. } => {}
         }
     }
     (events, sounds)

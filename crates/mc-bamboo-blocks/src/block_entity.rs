@@ -368,6 +368,12 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, coun
             world.random().next_float();
             world.random().next_float();
         }
+        // `LecternBlockEntity.preRemoveSideEffects` 生成的 `ItemEntity` 用实体自己的
+        // `RandomSource`，不取 `level.random`。书在游戏层，这里不掉落、不取数。
+        //
+        // The item entity uses its own `RandomSource`, not `level.random`. The book
+        // itself lives in the game layer, so this arm neither drops it nor draws.
+        E::LECTERN => {}
         // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
         _ => {}
     }

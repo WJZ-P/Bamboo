@@ -109,6 +109,7 @@ import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
+import net.minecraft.network.protocol.game.ClientboundOpenBookPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenScreenPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket;
@@ -343,6 +344,7 @@ public final class Probe {
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
+            "handleOpenBook",
             "handleOpenScreen",
             "handleOpenSignEditor",
             "handlePlayerAbilities",
@@ -1539,6 +1541,21 @@ public final class Probe {
             check("book: generation is the original", book.generation() == 0);
             check("book: the book is already resolved", book.resolved());
             check("book: the pages match and were not filtered", writtenPages(book, pages));
+
+            int before = actor.openBooks;
+            actor.send(new ServerboundSetCarriedItemPacket(inventorySlot));
+            int using = actor.nextSequence();
+            actor.send(new ServerboundUseItemPacket(InteractionHand.MAIN_HAND, using, 0.0f, 0.0f));
+            await("book: using a written book opens it",
+                    () -> actor.openBooks == before + 1 && actor.openBook == InteractionHand.MAIN_HAND);
+            check("book: the open book is in the main hand", actor.openBook == InteractionHand.MAIN_HAND);
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 5, new ItemStack(Items.WRITABLE_BOOK)));
+            actor.send(new ServerboundSetCarriedItemPacket(5));
+            int quill = actor.nextSequence();
+            actor.send(new ServerboundUseItemPacket(InteractionHand.MAIN_HAND, quill, 0.0f, 0.0f));
+            await("book: using a book and quill is acked", () -> actor.lastAck >= quill);
+            check("book: a book and quill does not open", actor.openBooks == before + 1);
         }
 
         /** 书与笔的页面：原文对得上，没有过滤文本。 */
@@ -1882,6 +1899,12 @@ public final class Probe {
         int acks;
         int stats;
         int openContainerId = -1;
+        /** 右键成书收到的 `open_book`。
+         *
+         * <p>The `open_book` packet from using a written book.
+         */
+        InteractionHand openBook;
+        int openBooks;
         MenuType<?> openMenuType;
         /** 最后一次 `open_screen` 的标题。 */
         Component openMenuTitle;
@@ -2299,6 +2322,7 @@ public final class Probe {
             handlers.put("handleBlockEvent", value -> onBlockEvent((ClientboundBlockEventPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
             handlers.put("handleSoundEvent", value -> onSound((ClientboundSoundPacket) value));
+            handlers.put("handleOpenBook", value -> onOpenBook((ClientboundOpenBookPacket) value));
             handlers.put("handleOpenScreen", value -> onOpenScreen((ClientboundOpenScreenPacket) value));
             handlers.put("handleContainerContent",
                     value -> onContainerContent((ClientboundContainerSetContentPacket) value));
@@ -2699,6 +2723,11 @@ public final class Probe {
             check("container: the state id goes up", packet.getStateId() > menuStateId);
             menuStateId = packet.getStateId();
             menuSlots.put((int) packet.getSlot(), packet.getItem());
+        }
+
+        private void onOpenBook(ClientboundOpenBookPacket packet) {
+            openBook = packet.hand();
+            openBooks++;
         }
 
         private void onOpenScreen(ClientboundOpenScreenPacket packet) {

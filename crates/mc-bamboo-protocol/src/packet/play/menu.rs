@@ -1,8 +1,14 @@
 //! 菜单和容器。
 
+use mc_bamboo_core::Hand;
 use mc_bamboo_data::packets::play::clientbound;
 
-use crate::{codec::write_varint, item::ItemStack, packet::ClientboundPacket, text::Component};
+use crate::{
+    codec::{write_i16, write_varint},
+    item::ItemStack,
+    packet::ClientboundPacket,
+    text::Component,
+};
 
 /// 打开一个菜单。`menu_type` 是 `minecraft:menu` 注册表 ID，`title` 是窗口标题。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +49,46 @@ impl ClientboundPacket for ContainerSetContent<'_> {
             stack.write(out);
         }
         self.carried.write(out);
+    }
+}
+
+/// 讲台当前页，官方 `ClientboundContainerSetDataPacket`。`id` 和 `value` 都是 short。
+///
+/// The lectern's current page. `id` and `value` are shorts, matching
+/// `ClientboundContainerSetDataPacket`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerSetData {
+    pub container_id: i32,
+    /// 讲台只有第 0 号数据槽，存的是页码。
+    ///
+    /// Lectern menus have one data slot, the page.
+    pub id: i16,
+    pub value: i16,
+}
+
+impl ClientboundPacket for ContainerSetData {
+    const ID: i32 = clientbound::CONTAINER_SET_DATA;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.container_id);
+        write_i16(out, self.id);
+        write_i16(out, self.value);
+    }
+}
+
+/// 打开手里的成书，官方 `ClientboundOpenBookPacket`。手是 varint。
+///
+/// Opens the written book in `hand`. The hand is a varint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenBook {
+    pub hand: Hand,
+}
+
+impl ClientboundPacket for OpenBook {
+    const ID: i32 = clientbound::OPEN_BOOK;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.hand as i32);
     }
 }
 
@@ -128,6 +174,24 @@ mod tests {
             carried: &carried,
         };
         assert_eq!(body(&packet), hex("07 ac 02 02 02 01 00 00 00 04 03 00 00"));
+    }
+
+    #[test]
+    fn container_set_data_writes_two_shorts() {
+        assert_eq!(
+            body(&ContainerSetData {
+                container_id: 1,
+                id: 0,
+                value: -1,
+            }),
+            hex("01 00 00 ff ff")
+        );
+    }
+
+    #[test]
+    fn open_book_writes_the_hand() {
+        assert_eq!(body(&OpenBook { hand: Hand::Main }), hex("00"));
+        assert_eq!(body(&OpenBook { hand: Hand::Off }), hex("01"));
     }
 
     #[test]

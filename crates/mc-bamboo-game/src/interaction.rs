@@ -29,10 +29,10 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    block_items, container, entity_sync,
+    block_items, book, container, entity_sync,
     global::GameTime,
     inbound::PlayerId,
-    inventory,
+    inventory, lectern,
     links::{Links, encode_frames},
     menu, movement,
     player::Player,
@@ -44,6 +44,10 @@ const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
 const SIMULATION_DISTANCE: i32 = 10;
 /// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`：骨粉的粒子。
 const BONE_MEAL_EVENT: i32 = 1505;
+/// 讲台翻页，`LecternBlock.signalPageChange` 的 `levelEvent(1043, pos, 0)`。
+///
+/// Page turn, `levelEvent(1043, pos, 0)` from `LecternBlock.signalPageChange`.
+const LECTERN_PAGE_TURN_EVENT: i32 = 1043;
 /// `LevelEvent.COMPOSTER_FILL`：堆肥桶收物品的粒子和声音。
 const COMPOSTER_FILL_EVENT: i32 = 1500;
 /// 骨粉事件的数据：粒子的数量。
@@ -99,7 +103,25 @@ pub(crate) struct UseItemOn {
 /// tick 第 2 阶段之后：到期的计划刻。官方 `ServerLevel.tick` 在时间加一之后、区块广播之前跑它们。
 pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
     let (mut level, ticks) = region.block_level();
-    let outcome = mc_bamboo_blocks::run_scheduled_ticks(&mut level, ticks, time.0);
+    let outcome = mc_bamboo_blocks::run_due_ticks(&mut level, ticks, time.0);
+    send_effects(region, None, &outcome.effects);
+}
+
+/// `ServerLevel.runBlockEvents`：随机刻之后、实体之前。
+///
+/// `ServerLevel.runBlockEvents`: after random ticks, before entities.
+pub(crate) fn run_block_events(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_block_event_phase(&mut level, ticks);
+    send_effects(region, None, &outcome.effects);
+}
+
+/// `Level.tickBlockEntities`：实体之后。
+///
+/// `Level.tickBlockEntities`: after entities.
+pub(crate) fn run_block_entity_ticks(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_block_entity_tick(&mut level, ticks);
     send_effects(region, None, &outcome.effects);
 }
 
@@ -409,6 +431,17 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_level_event(region, None, pos, &event);
             }
+            // 翻页的声音发给附近所有人，包括翻页的那名玩家。
+            // The page-turn sound goes to everyone nearby, including the player who turned it.
+            Effect::PageTurned { pos } => {
+                let event = LevelEvent {
+                    event: LECTERN_PAGE_TURN_EVENT,
+                    pos,
+                    data: 0,
+                    global: false,
+                };
+                send_level_event(region, None, pos, &event);
+            }
         }
     }
 }
@@ -585,6 +618,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     // `can_place_on` 要在借出 `level` 之前从物品栏读出来。
     let held = player.inventory.held(packet.hand).clone();
     let is_placement_attempt = rules::is_placement_attempt(&held);
+    let armed_book = lectern::arm_book(region, id, packet.pos, packet.hand);
 
     let (mut level, ticks) = region.block_level();
     let hit = block_hit(packet);
@@ -615,9 +649,10 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         inventory::apply_item_exchange(region, id, packet.hand, exchange);
     }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
-    if outcome.used_without_item {
-        menu::open_block(region, id, packet.pos);
+    if outcome.used_without_item && !menu::open_block(region, id, packet.pos) {
+        lectern::open(region, id, packet.pos);
     }
+    lectern::complete_use(region, id, packet.pos, packet.hand, armed_book);
     if is_placement_attempt && !outcome.result.consumes_action() {
         send_limit_hint(&mut region.links, id, packet);
     }
@@ -627,7 +662,7 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
 /// 旁观者右键方块。`getMenuProvider` 非空就打开并 `CONSUME`；传送门无论找不找得到出口都 `CONSUME`
 /// （找不到时发 `spectator.cannot_teleport`）；其余 `PASS`，不调用物品的 `useOn`。
 fn spectator_use_item_on(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
-    if menu::open_block(region, id, packet.pos) {
+    if menu::open_block(region, id, packet.pos) || lectern::open(region, id, packet.pos) {
         swing(region, id, packet.hand, InteractionResult::Consume);
         return;
     }
@@ -732,7 +767,11 @@ pub(crate) fn on_use_item(
         }
     }
     send_effects(region, Some(id), &outcome.effects);
-    swing(region, id, hand, outcome.result);
+    let mut result = outcome.result;
+    if !result.consumes_action() && book::use_in_hand(region, id, hand) {
+        result = InteractionResult::Success;
+    }
+    swing(region, id, hand, result);
 }
 
 #[cfg(test)]
