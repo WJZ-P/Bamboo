@@ -211,6 +211,16 @@ impl BlockState {
         self.block().block_entity_type.is_some()
     }
 
+    /// `getPistonPushReaction`，方块属性里的值，和状态无关。
+    pub fn push_reaction(self) -> mc_bamboo_data::PushReaction {
+        self.block().push_reaction
+    }
+
+    /// `getDestroySpeed == -1`，活塞推不动，也打不碎。
+    pub fn is_unbreakable(self) -> bool {
+        self.block().unbreakable
+    }
+
     /// `instrument()`，这个方块放在音符盒下面时的乐器。
     pub fn instrument(self) -> NoteBlockInstrument {
         NoteBlockInstrument::from_name(self.block().instrument)

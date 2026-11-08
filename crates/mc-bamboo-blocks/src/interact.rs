@@ -128,26 +128,47 @@ pub fn destroy_block(
     if state.is_a(BlockAncestor::GameMasterBlock) {
         return finish(world, InteractionResult::Fail);
     }
-    state.player_will_destroy(&mut world, pos, actor);
-    world.remove_block(pos);
+    let state = state.player_will_destroy(&mut world, pos, actor);
+    if world.remove_block(pos) {
+        state.destroy(&mut world, pos);
+    }
     finish(world, InteractionResult::Success)
 }
 
-/// 到期的计划刻，`now` 是这一刻的 `gameTime`。和官方 `ServerLevel.tick` 一样先跑方块的，再跑流体的。
+/// 一刻里的世界，`now` 是这一刻的 `gameTime`。
+///
+/// 和官方 `ServerLevel.tick` 一样按顺序跑：到期的方块刻、到期的流体刻、方块事件、方块实体。
 pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
     ticks.collect_due(now);
-    let mut world = World::new(level, ticks);
-    while let Some((pos, block)) = world.ticks_mut().next_due() {
-        let state = world.block_state(pos);
-        if state.block_id() == block {
-            state.tick(&mut world, pos);
-        }
-    }
+    let mut world = World::in_world_tick(level, ticks);
+    run_block_ticks(&mut world);
     world.ticks_mut().collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
         fluid::tick(&mut world, pos, fluid);
     }
+    world.run_block_events();
+    world.end_handling_tick();
+    world.tick_block_entities();
     finish(world, InteractionResult::Pass)
+}
+
+/// oracle 的 tick 题：官方的题在动作里直接调用这一格的 `state.tick`，还没进 `ServerLevel.tick`，
+/// 所以只跑到期的方块刻，流体刻、方块事件和方块实体都留到后面的刻。
+pub fn run_action_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
+    ticks.collect_due(now);
+    let mut world = World::new(level, ticks);
+    run_block_ticks(&mut world);
+    finish(world, InteractionResult::Pass)
+}
+
+/// 到期的方块计划刻，`ServerLevel.tick` 和 tick 题的动作都用这一段。
+fn run_block_ticks(world: &mut World) {
+    while let Some((pos, block)) = world.ticks_mut().next_due() {
+        let state = world.block_state(pos);
+        if state.block_id() == block {
+            state.tick(world, pos);
+        }
+    }
 }
 
 fn finish(world: World, result: InteractionResult) -> Outcome {

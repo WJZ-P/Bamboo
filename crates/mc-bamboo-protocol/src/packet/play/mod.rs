@@ -335,6 +335,7 @@ mod tests {
             (AwardStats::ID, 3),
             (BlockChangedAck::ID, 4),
             (BlockEntityData::ID, 6),
+            (BlockEvent::ID, 7),
             (BlockUpdate::ID, 8),
             (ContainerSetSlot::ID, 20),
             (DisguisedChat::ID, 33),

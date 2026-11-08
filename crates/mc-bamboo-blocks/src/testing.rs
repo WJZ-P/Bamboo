@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use mc_bamboo_core::{BlockPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 
+use crate::block_entity::{BlockEntities, BlockEvents};
+
 use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, level::RedstoneMemory,
     shape::Aabb,
@@ -26,6 +28,8 @@ pub(crate) struct TestLevel {
     redstone: RedstoneMemory,
     /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
     pub(crate) light: Option<(i32, i32)>,
+    block_entities: BlockEntities,
+    block_events: BlockEvents,
 }
 
 impl TestLevel {
@@ -51,7 +55,7 @@ impl Level for TestLevel {
         self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR)
     }
 
-    fn write_block(&mut self, pos: BlockPos, state: BlockState) -> bool {
+    fn write_block(&mut self, pos: BlockPos, state: BlockState, _flags: u32) -> bool {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return false;
         }
@@ -96,6 +100,18 @@ impl Level for TestLevel {
         }
         self.signs.insert(pos, content);
         true
+    }
+
+    fn block_entities(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
     }
 
     fn redstone(&self) -> &RedstoneMemory {

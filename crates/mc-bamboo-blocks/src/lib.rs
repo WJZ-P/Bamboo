@@ -12,6 +12,7 @@
 //! [`World::raw_brightness`]。
 
 pub mod behaviour;
+pub mod block_entity;
 pub mod context;
 pub mod fluid;
 pub mod interact;
@@ -27,9 +28,11 @@ pub mod world;
 mod testing;
 
 pub use behaviour::Behaviour;
+pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
-    InteractionResult, Outcome, destroy_block, run_scheduled_ticks, use_item, use_item_on,
+    InteractionResult, Outcome, destroy_block, run_action_block_ticks, run_scheduled_ticks,
+    use_item, use_item_on,
 };
 pub use level::{Effect, Level, RedstoneMemory};
 pub use shape::{Aabb, Boxes, CollisionContext};

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_blocks::{BlockTicks, RedstoneMemory};
+use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, RedstoneMemory};
 use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{
@@ -89,6 +89,10 @@ pub(crate) struct Region {
     pub(crate) light_changes: BTreeMap<ChunkPos, LightChanges>,
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
+    /// 活塞这类会动的方块实体。
+    block_entities: BlockEntities,
+    /// 等这一刻末尾处理的方块事件，官方的 `Level.blockEvents`。
+    block_events: BlockEvents,
     /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
     redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
@@ -115,6 +119,8 @@ impl Region {
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
+            block_entities: BlockEntities::default(),
+            block_events: BlockEvents::default(),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
@@ -133,6 +139,8 @@ impl Region {
             changes: &mut self.block_changes,
             players: &self.players,
             redstone: &mut self.redstone,
+            block_entities: &mut self.block_entities,
+            block_events: &mut self.block_events,
         };
         (level, &mut self.block_ticks)
     }
