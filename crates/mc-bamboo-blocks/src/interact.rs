@@ -253,6 +253,48 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
     outcome_from(world, InteractionResult::Pass, false)
 }
 
+/// `ServerLevel.tick` 开头的两段：到期的方块刻，然后到期的流体刻。`handlingTick` 为真。
+///
+/// 游戏循环按官方顺序分几步调用：[`run_due_ticks`]、随机刻（[`tick_chunk`](crate::tick_chunk)）、
+/// [`run_block_event_phase`]、[`run_entity_tick`]、[`run_block_entity_tick`]。
+/// [`run_scheduled_ticks`] 是去掉随机刻和实体的整段，给只关心方块的测试用。
+///
+/// The first two parts of `ServerLevel.tick`: due block ticks, then due fluid ticks, with
+/// `handlingTick` set. The game loop calls the phases in vanilla order: [`run_due_ticks`], random
+/// ticks ([`tick_chunk`](crate::tick_chunk)), [`run_block_event_phase`], [`run_entity_tick`], then
+/// [`run_block_entity_tick`]. [`run_scheduled_ticks`] runs the whole thing without random ticks
+/// and entities, for tests that only care about blocks.
+pub fn run_due_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
+    ticks.collect_due(now);
+    let mut world = World::in_world_tick(level, ticks);
+    run_block_ticks(&mut world);
+    world.ticks_mut().collect_due_fluids();
+    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        fluid::tick(&mut world, pos, fluid);
+    }
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `ServerLevel.runBlockEvents`：在随机刻之后、实体之前，`handlingTick` 仍为真。
+///
+/// `ServerLevel.runBlockEvents`: after random ticks and before entities, while `handlingTick`
+/// is still set.
+pub fn run_block_event_phase(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::in_world_tick(level, ticks);
+    world.run_block_events();
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `Level.tickBlockEntities`：一刻的最后一段，在实体之后，`handlingTick` 已经放回假。
+///
+/// `Level.tickBlockEntities`: the last part of the tick, after entities, once `handlingTick`
+/// is cleared.
+pub fn run_block_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::new(level, ticks);
+    world.tick_block_entities();
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
 /// oracle 的 tick 题：官方的题在动作里直接调用这一格的 `state.tick`，还没进 `ServerLevel.tick`，
 /// 所以只跑到期的方块刻，流体刻、方块事件和方块实体都留到后面的刻。
 pub fn run_action_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {

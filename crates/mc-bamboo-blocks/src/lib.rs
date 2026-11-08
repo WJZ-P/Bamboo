@@ -46,7 +46,8 @@ pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::dispense_from;
 pub use hopper::HopperEntity;
 pub use interact::{
-    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks, run_entity_tick,
+    InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks,
+    run_block_entity_tick, run_block_event_phase, run_due_ticks, run_entity_tick,
     run_scheduled_ticks, use_item, use_item_on, use_item_on_checked,
     use_item_on_checked_with_stack, use_item_on_with_stack,
 };

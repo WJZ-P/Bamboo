@@ -99,7 +99,25 @@ pub(crate) struct UseItemOn {
 /// tick 第 2 阶段之后：到期的计划刻。官方 `ServerLevel.tick` 在时间加一之后、区块广播之前跑它们。
 pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
     let (mut level, ticks) = region.block_level();
-    let outcome = mc_bamboo_blocks::run_scheduled_ticks(&mut level, ticks, time.0);
+    let outcome = mc_bamboo_blocks::run_due_ticks(&mut level, ticks, time.0);
+    send_effects(region, None, &outcome.effects);
+}
+
+/// `ServerLevel.runBlockEvents`：随机刻之后、实体之前。
+///
+/// `ServerLevel.runBlockEvents`: after random ticks, before entities.
+pub(crate) fn run_block_events(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_block_event_phase(&mut level, ticks);
+    send_effects(region, None, &outcome.effects);
+}
+
+/// `Level.tickBlockEntities`：实体之后。
+///
+/// `Level.tickBlockEntities`: after entities.
+pub(crate) fn run_block_entity_ticks(region: &mut Region) {
+    let (mut level, ticks) = region.block_level();
+    let outcome = mc_bamboo_blocks::run_block_entity_tick(&mut level, ticks);
     send_effects(region, None, &outcome.effects);
 }
 

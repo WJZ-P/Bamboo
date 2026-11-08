@@ -212,7 +212,7 @@ fn opening_a_chest_sends_a_block_event() {
     fixture.open(pos);
     fixture.take_ids();
 
-    crate::interaction::run_block_ticks(&mut fixture.region, crate::global::GameTime(0));
+    crate::interaction::run_block_events(&mut fixture.region);
     let frames = fixture.take_frames();
     let events: Vec<&Frame> = frames
         .iter()
