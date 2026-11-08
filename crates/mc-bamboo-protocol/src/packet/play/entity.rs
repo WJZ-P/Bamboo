@@ -1,19 +1,24 @@
 //! 把实体介绍给客户端，以及移动之外的实体状态。
 
-use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_core::{BlockPos, Hand, Vec3};
 use mc_bamboo_data::packets::play::clientbound;
 use uuid::Uuid;
 
 use super::{HumanoidArm, write_lp_vec3};
 use crate::{
-    codec::{write_f32, write_f64, write_string, write_uuid, write_varint, write_vec3},
+    codec::{
+        write_block_pos, write_f32, write_f64, write_string, write_uuid, write_varint, write_vec3,
+    },
     item::ItemStack,
     packet::ClientboundPacket,
 };
 
-/// 实体元数据序列化器的 ID。
+/// 实体元数据序列化器的 ID。顺序是 `EntityDataSerializers` 静态块里 `registerSerializer` 的调用顺序。
 const SERIALIZER_BYTE: i32 = 0;
+const SERIALIZER_INT: i32 = 1;
 const SERIALIZER_FLOAT: i32 = 3;
+const SERIALIZER_BLOCK_POS: i32 = 10;
+const SERIALIZER_BLOCK_STATE: i32 = 14;
 const SERIALIZER_POSE: i32 = 20;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
@@ -94,6 +99,12 @@ pub enum Pose {
 pub enum EntityData {
     /// index 0，BYTE。`ENTITY_FLAG_*` 的组合。
     SharedFlags(u8),
+    /// index 8，BLOCK_POS。下落的方块从哪一格掉下来。
+    FallingBlockStart(BlockPos),
+    /// index 8，INT。点燃的 TNT 还剩多少 tick 爆炸。
+    TntFuse(i32),
+    /// index 9，BLOCK_STATE。点燃的 TNT 渲染成什么方块。
+    TntBlockState(i32),
     /// index 6，POSE。
     Pose(Pose),
     /// index 9，FLOAT。
@@ -117,6 +128,18 @@ impl EntityData {
             Self::SharedFlags(flags) => {
                 write_data_header(out, 0, SERIALIZER_BYTE);
                 out.push(flags);
+            }
+            Self::FallingBlockStart(pos) => {
+                write_data_header(out, 8, SERIALIZER_BLOCK_POS);
+                write_block_pos(out, pos);
+            }
+            Self::TntFuse(fuse) => {
+                write_data_header(out, 8, SERIALIZER_INT);
+                write_varint(out, fuse);
+            }
+            Self::TntBlockState(state) => {
+                write_data_header(out, 9, SERIALIZER_BLOCK_STATE);
+                write_varint(out, state);
             }
             Self::Pose(pose) => {
                 write_data_header(out, 6, SERIALIZER_POSE);
@@ -210,24 +233,6 @@ impl ClientboundPacket for UpdateAttributes<'_> {
                 write_varint(out, modifier.operation as i32);
             }
         }
-    }
-}
-
-/// `ClientboundEntityEventPacket`：物品损坏时是 47 到 52，按装备槽。
-///
-/// `ClientboundEntityEventPacket`: item breaks use 47 through 52, one per equipment slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntityEvent {
-    pub entity_id: i32,
-    pub event: u8,
-}
-
-impl ClientboundPacket for EntityEvent {
-    const ID: i32 = clientbound::ENTITY_EVENT;
-
-    fn write_body(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.entity_id.to_be_bytes());
-        out.push(self.event);
     }
 }
 
@@ -379,6 +384,28 @@ mod tests {
                  0f 2a 00
                  10 00 7f
                  ff")
+        );
+    }
+
+    #[test]
+    fn world_entity_data_uses_their_own_indices() {
+        // 下落的方块：index 8 的 BLOCK_POS，打包成 long。
+        assert_eq!(
+            set_entity_data(
+                ENTITY,
+                &[EntityData::FallingBlockStart(BlockPos::new(1, 2, 3))]
+            ),
+            hex("07 08 0a 00 00 00 40 00 00 30 02 ff")
+        );
+        // TNT 的引信和起点都占 index 8，靠序列化器区分。
+        assert_eq!(
+            set_entity_data(ENTITY, &[EntityData::TntFuse(80)]),
+            hex("07 08 01 50 ff")
+        );
+        // 方块状态的 index 9 和玩家的生命值一样，同样靠序列化器区分。
+        assert_eq!(
+            set_entity_data(ENTITY, &[EntityData::TntBlockState(300)]),
+            hex("07 09 0e ac 02 ff")
         );
     }
 

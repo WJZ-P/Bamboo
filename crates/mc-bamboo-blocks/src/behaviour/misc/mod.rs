@@ -18,7 +18,7 @@ mod crafter;
 mod creaking_heart;
 mod decorated_pot;
 mod facing;
-mod falling;
+pub(crate) mod falling;
 pub(crate) mod fire;
 mod flower_pot;
 mod frogspawn;
@@ -62,7 +62,7 @@ use self::{
     creaking_heart::CreakingHeart,
     decorated_pot::DecoratedPot,
     facing::{EndPortalFrame, Vault},
-    falling::{ConcretePowder, DragonEgg},
+    falling::{Brushable, ConcretePowder, DragonEgg, Falling},
     fire::{Fire, SoulFire},
     flower_pot::FlowerPot,
     frogspawn::Frogspawn,
@@ -111,6 +111,8 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::EnchantingTableBlock
         | C::SmithingTableBlock => Some(&Menu),
         C::BrewingStandBlock => Some(&BrewingStand),
+        C::BrushableBlock => Some(&Brushable),
+        C::ColoredFallingBlock | C::SandBlock => Some(&Falling),
         C::BubbleColumnBlock => Some(&BubbleColumn),
         C::CakeBlock => Some(&Cake),
         C::CalibratedSculkSensorBlock => Some(&CalibratedSculkSensor),
@@ -199,22 +201,24 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::TrialSpawnerBlock
         | C::WebBlock => Some(&Plain),
         C::SnifferEggBlock => Some(&sniffer_egg::SnifferEgg),
-        // 官方的覆盖在这个世界里都走不到：下落和孵化的计划刻不在范围里，主世界的水不会蒸发，
+        // 官方的覆盖在这个世界里都走不到：孵化的计划刻不在范围里，主世界的水不会蒸发，
         // `GameMasterBlock` 要权限，别的只碰方块实体的内容。
-        C::BrushableBlock
-        | C::ColoredFallingBlock
-        | C::JigsawBlock
-        | C::SandBlock
-        | C::StructureBlock
-        | C::TestInstanceBlock
-        | C::WetSpongeBlock => Some(&Plain),
+        //
+        // The official overrides never run here: hatching ticks are out of scope, overworld
+        // water does not evaporate, `GameMasterBlock` needs permission, and the rest only
+        // touch block-entity contents.
+        C::JigsawBlock | C::StructureBlock | C::TestInstanceBlock | C::WetSpongeBlock => {
+            Some(&Plain)
+        }
         _ => None,
     }
 }
 
-/// `FallingBlockEntity.fall` 在世界里留下的变化：这一格只剩流体。掉下去的实体不在范围里。
-fn fall(world: &mut World, pos: BlockPos, state: BlockState) {
-    world.set_block_and_update(pos, state.fluid().legacy_block());
+/// `FallingBlockEntity.fall`：这一格只剩流体，方块本身变成实体从这一格的中心开始掉。
+///
+/// 脚手架和滴水石锥自己也调它，它们不是 `FallingBlock`。
+fn fall(world: &mut World, pos: BlockPos, state: BlockState) -> i32 {
+    world.spawn_falling_block(pos, state)
 }
 
 #[cfg(test)]

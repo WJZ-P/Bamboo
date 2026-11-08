@@ -14,11 +14,12 @@ use std::{
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{BlockClass, registries, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     state::{
-        BlockState, HAS_RECORD, Property, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED, SLOT_2_OCCUPIED,
-        SLOT_3_OCCUPIED, SLOT_4_OCCUPIED, SLOT_5_OCCUPIED,
+        BlockState, Property, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED, SLOT_2_OCCUPIED, SLOT_3_OCCUPIED,
+        SLOT_4_OCCUPIED, SLOT_5_OCCUPIED,
     },
     world::World,
 };
@@ -120,6 +121,9 @@ impl BlockEntities {
     }
 
     /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。
+    ///
+    /// See [`BlockEntities::get`], but mutable. Returns `None` while that entity is ticking,
+    /// because it is not in the map.
     pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
         self.entities
             .get_mut(&pos)?
@@ -310,6 +314,35 @@ fn drop_stack(world: &mut World, count: i32) {
     }
 }
 
+/// `Containers.dropItemStack`：空堆只取掉落点，有数量时再按堆切开。
+///
+/// 物品实体不生成。取数和 [`drop_slots`] 是同一套，燃料余料和熔炉拆除共用它。
+///
+/// `Containers.dropItemStack`. Empty stacks only consume the drop point; a count is then
+/// split into piles. No item entity is spawned. The random draws match [`drop_slots`], so
+/// fuel remainders and furnace removal share one sequence.
+pub(crate) fn drop_item_stack(world: &mut World, _pos: BlockPos, stack: &ItemStack) {
+    if stack.is_empty() {
+        drop_empty_slot(world);
+    } else {
+        drop_stack(world, stack.count);
+    }
+}
+
+/// 熔炉系列和酿造台的内容在方块实体上，不在区域的容器表里。
+///
+/// 有实体时由实体的 `preRemoveSideEffects` 掉落；没有实体时仍走按数量的那条。
+///
+/// Furnace-family and brewing contents live on the block entity, not in the region
+/// container table. An entity drops them itself; without one, the count-based drop runs.
+pub(crate) fn drops_own_contents(state: BlockState) -> bool {
+    use registries::block_entity_type as E;
+    matches!(
+        state.block().block_entity_type,
+        Some(E::FURNACE | E::SMOKER | E::BLAST_FURNACE | E::BREWING_STAND)
+    )
+}
+
 /// 一张 `Container` 的槽位表。`counts` 是每格的数量，没有的格子按空槽算。
 ///
 /// 官方 `dropContents` 从第 0 格数到 `getContainerSize() - 1`，空格也照样调用
@@ -340,24 +373,41 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World, coun
         E::SHELF => drop_slots(world, 3, counts),
         E::DECORATED_POT => drop_slots(world, 1, counts),
         E::CAMPFIRE => drop_slots(world, 4, counts),
-        // 书架的 `SLOT_OCCUPIED` 就是它那六格的内容：每格一本书，数量是一。
+        // 书架有 6 格物品栏时按数量掉。没有条目时退回 `SLOT_OCCUPIED`，每格一本。
+        //
+        // A bookshelf with a 6-slot list drops by count. Without one, fall back to
+        // `SLOT_OCCUPIED`, one book per occupied slot.
         E::CHISELED_BOOKSHELF => {
-            for slot in SLOT_OCCUPIED {
-                if state.get(slot) {
-                    drop_stack(world, 1);
-                } else {
-                    drop_empty_slot(world);
+            if counts.len() == 6 {
+                drop_slots(world, 6, counts);
+            } else {
+                for slot in SLOT_OCCUPIED {
+                    if state.get(slot) {
+                        drop_stack(world, 1);
+                    } else {
+                        drop_empty_slot(world);
+                    }
                 }
             }
         }
-        // `JukeboxBlockEntity.preRemoveSideEffects` → `popOutTheItem`：唱片非空时
-        // `offsetRandomXZ` 取两个 `nextFloat`。`LevelChunk.setBlockState` 在
-        // `affectNeighborsAfterRemoval` 之前调用，那边不要再取。
-        // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
-        E::JUKEBOX if state.get(HAS_RECORD) => {
+        // `JukeboxBlockEntity.preRemoveSideEffects` → `popOutTheItem`：物品非空时
+        // `offsetRandomXZ` 取两个 `nextFloat`。通知邻居在 `World::set_block_state` 里，
+        // 正在放的那一次在取数之前，另一次在取数之后。
+        //
+        // `JukeboxBlockEntity.preRemoveSideEffects` → `popOutTheItem`: a non-empty item takes
+        // two `nextFloat`s in `offsetRandomXZ`. Neighbor notifications live in
+        // `World::set_block_state`: the playing song's one is before the rolls, the other after.
+        E::JUKEBOX if counts.first().copied().unwrap_or(0) > 0 => {
             world.random().next_float();
             world.random().next_float();
         }
+        // `LecternBlockEntity.preRemoveSideEffects` 生成的 `ItemEntity` 用实体自己的
+        // `RandomSource`，不取 `level.random`。书在游戏层，这里不掉落、不取数。
+        //
+        // The item entity uses its own `RandomSource`, not `level.random`. The book
+        // itself lives in the game layer, so this arm neither drops it nor draws.
+        E::LECTERN => {}
+        // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
         _ => {}
     }
 }

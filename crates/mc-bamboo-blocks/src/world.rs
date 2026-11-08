@@ -2,7 +2,7 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::{error, warn};
 
@@ -10,11 +10,12 @@ use crate::{
     behaviour::machines::{ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
+    entity::{Entity, PrimedTnt},
     fluid::Fluid,
     level::{Effect, Level, RedstoneMemory},
     random::LegacyRandom,
     shape::{self, CollisionContext},
-    state::{BlockState, FACING, FluidState, POWER, SupportType},
+    state::{BlockState, FACING, FluidState, POWER, SupportType, WATERLOGGED},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -238,6 +239,11 @@ pub struct World<'a> {
     effects: Vec<Effect>,
     /// `BlockItem.place` 刚放下的那一格，官方在这里读物品上的组件，见 [`World::placed_at`]。
     placed_at: Option<BlockPos>,
+    /// 这次右键要换给玩家的物品。方块逻辑只记账，游戏层再改物品栏。
+    ///
+    /// The item this click hands back. Block behaviour only records it; the game layer edits
+    /// the inventory.
+    item_exchange: Option<crate::item_exchange::ItemExchange>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -252,6 +258,7 @@ impl<'a> World<'a> {
             updates: NeighborQueue::default(),
             effects: Vec::new(),
             placed_at: None,
+            item_exchange: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -280,6 +287,13 @@ impl<'a> World<'a> {
         self.effects
     }
 
+    /// 和 [`Self::into_effects`] 一样，但世界还要继续用。
+    ///
+    /// Same collected effects, leaving the world usable afterwards.
+    pub fn drain_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
     /// 这次操作放下的那一格方块，官方 `BlockItem.place` 里 `updateBlockEntityComponents`
     /// 看的位置。组件在 `mc-bamboo-protocol`，这一层看不见，所以只报位置，由调用方接着做。
     pub const fn placed_at(&self) -> Option<BlockPos> {
@@ -289,6 +303,20 @@ impl<'a> World<'a> {
     /// `BlockItem.place` 放成功时记下这一格。
     pub(crate) fn set_placed_at(&mut self, pos: BlockPos) {
         self.placed_at = Some(pos);
+    }
+
+    /// 记下这次右键要换给玩家的物品。
+    ///
+    /// Record the item this click hands back to the player.
+    pub(crate) fn set_item_exchange(&mut self, exchange: crate::item_exchange::ItemExchange) {
+        self.item_exchange = Some(exchange);
+    }
+
+    /// 这次右键记下的物品交换。
+    ///
+    /// The item exchange recorded for this click.
+    pub(crate) fn item_exchange(&self) -> Option<&crate::item_exchange::ItemExchange> {
+        self.item_exchange.as_ref()
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {
@@ -333,6 +361,14 @@ impl<'a> World<'a> {
     /// `isInsideBuildHeight`。
     pub fn is_inside_build_height(&self, y: i32) -> bool {
         (self.min_y()..=self.max_y()).contains(&y)
+    }
+
+    /// `hasChunkAt`：只看区块坐标是否在合法范围内，不看这一格有没有真正加载。
+    ///
+    /// `hasChunkAt` for the command position check: the chunk coordinate is in range.
+    /// This world treats every in-range chunk as present.
+    pub fn has_chunk_at(&self, pos: BlockPos) -> bool {
+        (pos.x >> 4).abs() <= VALID_CHUNK_BOUND && (pos.z >> 4).abs() <= VALID_CHUNK_BOUND
     }
 
     /// `isInWorldBounds`。
@@ -444,7 +480,29 @@ impl<'a> World<'a> {
         {
             return crate::composter::with_container(self, pos, f);
         }
+        if crate::block_container::is_block_container(self.block_state(pos)) {
+            return crate::block_container::with_container(self, pos, f);
+        }
         self.level.with_container(pos, f)
+    }
+
+    /// 这四种方块容器的槽位表，见 [`Level::with_slots`]。
+    ///
+    /// Slot list for those four block containers. See [`Level::with_slots`].
+    pub(crate) fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [mc_bamboo_protocol::item::ItemStack]),
+    ) -> bool {
+        self.level.with_slots(pos, len, f)
+    }
+
+    /// 这一格容器现在的槽位，见 [`Level::slots_at`]。
+    ///
+    /// The container slots at this position. See [`Level::slots_at`].
+    pub(crate) fn slots_at(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.slots_at(pos)
     }
 
     /// 比较器从这一格的容器读到的模拟信号，见 [`Level::container_signal`]。
@@ -873,14 +931,32 @@ impl<'a> World<'a> {
         // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
         // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
         let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
+        // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`（通知邻居），
+        // 再取两个 `nextFloat`，然后无条件再 `onSongChanged`。物品在第一次通知之前已经是空的。
+        //
+        // Breaking a jukebox runs `popOutTheItem` → `setTheItem(EMPTY)`: a playing song `stop`s
+        // (neighbors are told) before the two `nextFloat`s, then `onSongChanged` runs again.
+        // The item is already empty before the first notification.
+        let jukebox_count = dropped_counts
+            .as_ref()
+            .filter(|_| old.is_a(BlockAncestor::JukeboxBlock))
+            .map(|counts| counts.first().copied().unwrap_or(0))
+            .unwrap_or(0);
+        let jukebox_playing = jukebox_count > 0 && self.level.redstone().is_jukebox_playing(pos);
         if !self.level.write_block(pos, state, flags) {
             return None;
         }
 
         // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
-        if block_changed && old.has_block_entity() {
-            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
+        // 新状态自己声明要留下实体时（铜箱子这些）两步都跳过。
+        let mut entity_dropped_contents = false;
+        if block_changed && old.has_block_entity() && !block_entity::keeps_block_entity(state, old)
+        {
+            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 && self.has_block_entity(pos) {
+                // 活塞的 `finalTick`、熔炉和酿造台的掉落都在实体自己的回调里。
+                // Piston `finalTick`, and furnace or brewing drops, run on the entity.
                 self.pre_remove_block_entity(pos, old);
+                entity_dropped_contents = block_entity::drops_own_contents(old);
             }
             self.remove_block_entity(pos);
         }
@@ -888,10 +964,24 @@ impl<'a> World<'a> {
         if block_changed {
             self.level.redstone_mut().forget_block_entity(pos);
         }
+        if jukebox_count > 0 {
+            self.level.clear_container(pos);
+            if jukebox_playing {
+                crate::block_container::on_jukebox_song_changed(old, self, pos);
+            }
+        }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        if let Some(counts) = dropped_counts {
+        // 熔炉和酿造台有实体时已经在上面掉过，这里再掉一次随机数会翻倍。
+        // Vanilla drops before `affectNeighborsAfterRemoval`. A furnace or brewing stand
+        // that still had an entity already dropped above; dropping again would double the draws.
+        if let Some(counts) = dropped_counts
+            && !entity_dropped_contents
+        {
             block_entity::pre_remove_side_effects(old, self, &counts);
+        }
+        if jukebox_count > 0 {
+            crate::block_container::on_jukebox_song_changed(old, self, pos);
         }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
@@ -1161,6 +1251,228 @@ impl<'a> World<'a> {
         self.update_or_destroy(current, updated, pos, flags, limit);
     }
 
+    /// `addFreshEntity`：放进世界，返回实体 ID。tick 的时候生成的实体下一 tick 才开始动。
+    pub fn spawn_entity(&mut self, entity: Entity) -> i32 {
+        self.level.entities_mut().spawn(entity)
+    }
+
+    /// `FallingBlockEntity.fall`：这一格只剩流体，方块本身变成实体从这一格的中心开始掉。
+    ///
+    /// 生成时 `WATERLOGGED` 要清掉，落地时再按那一格的水重新设。
+    pub fn spawn_falling_block(&mut self, pos: BlockPos, state: BlockState) -> i32 {
+        let falling = if state.has(WATERLOGGED) {
+            state.with(WATERLOGGED, false)
+        } else {
+            state
+        };
+        let entity = Entity::falling_block(pos, falling);
+        self.set_block_and_update(pos, state.fluid().legacy_block());
+        self.spawn_entity(entity)
+    }
+
+    /// `TntBlock.prime`：在这一格生成一个默认引信的 TNT。方块本身的移除由调用方负责。
+    ///
+    /// 朝向取自 `level.getRandom()`，和方块逻辑共用同一个随机源。
+    ///
+    /// `TntBlock.prime`: spawns a primed TNT with the default fuse. The caller removes the block.
+    /// The yaw comes from `level.getRandom()`, the same source block logic uses.
+    pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+        let angle = self.random().next_double();
+        let entity = Entity::primed_tnt(block_center_bottom(pos), angle);
+        self.spawn_entity(entity)
+    }
+
+    /// `TntBlock.wasExploded`：被爆炸点着的 TNT 引信比默认的短一截。
+    ///
+    /// `TntBlock.wasExploded`: TNT lit by an explosion gets a shorter fuse.
+    pub fn spawn_short_fuse_tnt(&mut self, pos: BlockPos) -> i32 {
+        let angle = self.random().next_double();
+        let mut entity = Entity::primed_tnt(block_center_bottom(pos), angle);
+        let fuse = short_fuse(PrimedTnt::DEFAULT_FUSE, self.random());
+        entity.set_fuse(fuse);
+        self.spawn_entity(entity)
+    }
+
+    /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
+    pub fn entity_mut(&mut self, id: i32) -> Option<&mut Entity> {
+        self.level.entities_mut().get_mut_including_pending(id)
+    }
+
+    /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
+    ///
+    /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
+    pub fn tick_entities(&mut self) {
+        self.level.entities_mut().begin_tick();
+        for id in self.level.entities().ids() {
+            let Some(mut entity) = self.level.entities_mut().take(id) else {
+                continue;
+            };
+            entity.tick(self);
+            if !entity.removed {
+                self.level.entities_mut().put(entity);
+            }
+        }
+        self.level.entities_mut().end_tick();
+    }
+
+    /// 和 [`World::tick_entities`] 同一套顺序，但把这一拍 tick 过的实体留下。
+    ///
+    /// 已经 `discard` 的也在里面，后面是这一拍新生成、还没 tick 的。实体物理对照要拿落地后的位置。
+    ///
+    /// Same order as [`World::tick_entities`], but the entities ticked this step are kept.
+    /// Discarded ones stay in the list; entities spawned this step and not yet ticked follow them.
+    /// The physics comparison needs the position after landing.
+    pub fn tick_entities_kept(&mut self) -> Vec<crate::entity::Entity> {
+        self.level.entities_mut().begin_tick();
+        let mut after = Vec::new();
+        for id in self.level.entities().ids() {
+            let Some(mut entity) = self.level.entities_mut().take(id) else {
+                continue;
+            };
+            entity.tick(self);
+            after.push(entity.clone());
+            if !entity.removed {
+                self.level.entities_mut().put(entity);
+            }
+        }
+        self.level.entities_mut().end_tick();
+        let spawned: Vec<_> = self
+            .level
+            .entities()
+            .iter()
+            .filter(|entity| after.iter().all(|ticked| ticked.id != entity.id))
+            .cloned()
+            .collect();
+        after.extend(spawned);
+        after
+    }
+
+    /// 还在世界里的实体。已经 `discard` 的不在里面。
+    ///
+    /// Entities still in the world. Discarded ones are absent.
+    pub fn live_entities(&self) -> Vec<crate::entity::Entity> {
+        self.level.entities().iter().cloned().collect()
+    }
+
+    /// `CollisionGetter.getBlockCollisions`：和 `box_` 碰上的方块的碰撞形状，按 `Cursor3D` 的顺序。
+    ///
+    /// 返回的形状已经是世界坐标。顺序有影响：官方在运动被完全挡住后就不再往后看。
+    pub(crate) fn block_collisions(
+        &self,
+        box_: shape::Aabb,
+        context: CollisionContext,
+    ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
+        let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
+        let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
+        let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
+        let y_max = mth::floor(box_.max_y + shape::EPSILON) + 1;
+        let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
+        let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
+        let mut collisions = Vec::new();
+        for z in z_min..=z_max {
+            for y in y_min..=y_max {
+                for x in x_min..=x_max {
+                    let corner = u8::from(x == x_min || x == x_max)
+                        + u8::from(y == y_min || y == y_max)
+                        + u8::from(z == z_min || z == z_max);
+                    if corner == 3 {
+                        continue;
+                    }
+                    let pos = BlockPos::new(x, y, z);
+                    let state = self.block_state(pos);
+                    if corner == 1 && !shape::has_large_collision_shape(state) {
+                        continue;
+                    }
+                    if corner == 2 && !state.is(blocks::MOVING_PISTON) {
+                        continue;
+                    }
+                    let boxes = shape::collision_boxes(state, pos, context);
+                    if boxes.is_empty() {
+                        continue;
+                    }
+                    let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
+                    let matched = if shape::is_unit_cube(&boxes) {
+                        box_.intersects_coords(
+                            x_origin,
+                            y_origin,
+                            z_origin,
+                            x_origin + 1.0,
+                            y_origin + 1.0,
+                            z_origin + 1.0,
+                        )
+                    } else {
+                        let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
+                        shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
+                    };
+                    if matched {
+                        collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
+                    }
+                }
+            }
+        }
+        collisions
+    }
+
+    /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
+    ///
+    /// 距离一样时取坐标大的那个，`Vec3i.compareTo` 先比 y 再比 z 最后比 x。
+    pub(crate) fn find_supporting_block(
+        &self,
+        position: Vec3,
+        box_: shape::Aabb,
+        context: CollisionContext,
+    ) -> Option<BlockPos> {
+        let mut main = None;
+        let mut main_distance = f64::MAX;
+        for (pos, _) in self.block_collisions(box_, context) {
+            let center = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            );
+            let distance = position.distance_to_sqr(center);
+            let larger = main.is_none_or(|main: BlockPos| compare_positions(main, pos).is_lt());
+            if distance < main_distance || distance == main_distance && larger {
+                main = Some(pos);
+                main_distance = distance;
+            }
+        }
+        main
+    }
+
+    /// `ClipContext.Block.FALLDAMAGE_RESETTING` 加 `ClipContext.Fluid.WATER` 的射线。
+    ///
+    /// 只用它判断碰没碰到，落到哪一格不要。
+    pub(crate) fn clip_fall_damage_resetting(&self, from: Vec3, to: Vec3) -> bool {
+        const FULL: [shape::Aabb; 1] = [shape::Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
+        traverse_blocks(from, to, |pos| {
+            let state = self.block_state(pos);
+            let block_hit =
+                if state.is_tagged(mc_bamboo_data::tags::block_tags::FALL_DAMAGE_RESETTING) {
+                    shape::clip(&FULL, from, to, pos)
+                } else {
+                    None
+                };
+            let fluid = state.fluid();
+            let fluid_hit = if fluid.is_water() && !fluid.is_empty() {
+                let bounds =
+                    shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
+                shape::clip(&[bounds], from, to, pos)
+            } else {
+                None
+            };
+            let distance = |hit: Option<BlockHit>| {
+                hit.map_or(f64::MAX, |hit| from.distance_to_sqr(hit.location))
+            };
+            if distance(block_hit) <= distance(fluid_hit) {
+                block_hit.map(|_| ())
+            } else {
+                fluid_hit.map(|_| ())
+            }
+        })
+        .is_some()
+    }
+
     /// `BlockGetter.clip`：从 `from` 到 `to` 的视线碰到的第一个方块或者流体，什么也没碰到时是 `None`。
     ///
     /// 方块的上下文是 `ClipContext.Block.OUTLINE`，选中框要看玩家主手拿着什么，所以要传 `main_hand`。
@@ -1172,7 +1484,23 @@ impl<'a> World<'a> {
         main_hand: i32,
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
-            self.clip_one_block(pos, from, to, fluid, main_hand)
+            let state = self.block_state(pos);
+            let outline = outline_seen_holding(state, pos, main_hand);
+            self.clip_one_block(pos, from, to, &outline, state, fluid)
+        })
+    }
+
+    /// `ClipContext.Block.COLLIDER` 加 `Fluid.SOURCE_ONLY` 的射线，混凝土粉末掉进水里时用。
+    pub(crate) fn clip_collider_source_water(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        context: CollisionContext,
+    ) -> Option<BlockHit> {
+        traverse_blocks(from, to, |pos| {
+            let state = self.block_state(pos);
+            let collider = shape::collision_boxes(state, pos, context);
+            self.clip_one_block(pos, from, to, &collider, state, ClipFluid::SourceOnly)
         })
     }
 
@@ -1181,12 +1509,11 @@ impl<'a> World<'a> {
         pos: BlockPos,
         from: Vec3,
         to: Vec3,
+        boxes: &[shape::Aabb],
+        state: BlockState,
         fluid: ClipFluid,
-        main_hand: i32,
     ) -> Option<BlockHit> {
-        let state = self.block_state(pos);
-        let outline = outline_seen_holding(state, pos, main_hand);
-        let block_hit = clip_with_interaction_override(&outline, state, from, to, pos);
+        let block_hit = clip_with_interaction_override(boxes, state, from, to, pos);
         let fluid_hit = match fluid {
             ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
             ClipFluid::None => None,
@@ -1199,6 +1526,27 @@ impl<'a> World<'a> {
             fluid_hit
         }
     }
+}
+
+/// `Vec3i.compareTo`：先比 y，再比 z，最后比 x。
+fn compare_positions(first: BlockPos, second: BlockPos) -> std::cmp::Ordering {
+    (first.y, first.z, first.x).cmp(&(second.y, second.z, second.x))
+}
+
+/// 方块的底心，官方生成实体的位置：`pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5`。
+fn block_center_bottom(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y),
+        f64::from(pos.z) + 0.5,
+    )
+}
+
+/// `PrimedTnt.getRandomShortFuse`。
+///
+/// `PrimedTnt.getRandomShortFuse`.
+fn short_fuse(fuse: i32, random: &crate::random::LegacyRandom) -> i32 {
+    random.next_int((fuse / 4).max(1)) + fuse / 8
 }
 
 /// `EntityCollisionContext` 下的选中框：主手拿着光源方块或者脚手架时，它们的选中框是整格。
@@ -1371,7 +1719,8 @@ mod tests {
                 | Effect::OpenSignEditor { .. }
                 | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. }
-                | Effect::ComposterFill { .. } => None,
+                | Effect::ComposterFill { .. }
+                | Effect::PageTurned { .. } => None,
             })
             .collect()
     }

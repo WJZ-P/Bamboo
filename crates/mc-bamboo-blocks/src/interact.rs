@@ -4,6 +4,7 @@
 
 use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_data::{BlockAncestor, items};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     context::{Actor, BlockHit, UseContext},
@@ -11,6 +12,7 @@ use crate::{
         self,
         bucket::{self, Bucket},
     },
+    item_exchange::ItemExchange,
     level::{Effect, Level},
     placement,
     state::BlockState,
@@ -51,6 +53,10 @@ pub struct Outcome {
     /// `BlockItem.place` 放下的那一格。调用方要把物品上的组件搬进这一格的方块实体，
     /// 见 [`World::placed_at`]。
     pub placed_at: Option<BlockPos>,
+    /// 这次右键要换给玩家的物品。没有时是 `None`。
+    ///
+    /// The item this click hands back to the player, or `None` when the hand stays as it is.
+    pub item_exchange: Option<ItemExchange>,
     pub effects: Vec<Effect>,
 }
 
@@ -80,14 +86,44 @@ pub fn use_item_on_checked(
     hit: &BlockHit,
     may_use_on: impl FnOnce(BlockState) -> bool,
 ) -> Outcome {
+    use_item_on_checked_with_stack(level, ticks, actor, hand, hit, None, may_use_on)
+}
+
+/// 和 [`use_item_on_checked`] 一样，另外带上这只手里的物品堆。
+///
+/// 炼药锅要看 `potion_contents`、`dyed_color` 和 `banner_patterns`。没传物品堆时按默认组件判断。
+///
+/// [`use_item_on_checked`] plus the stack in that hand.
+///
+/// Cauldrons read `potion_contents`, `dyed_color` and `banner_patterns`. Without a stack, those
+/// checks use the item's default components.
+pub fn use_item_on_checked_with_stack(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    actor: &Actor,
+    hand: Hand,
+    hit: &BlockHit,
+    stack: Option<&ItemStack>,
+    may_use_on: impl FnOnce(BlockState) -> bool,
+) -> Outcome {
     let mut world = World::new(level, ticks);
-    let (result, used_without_item) = run_use_item_on(&mut world, actor, hand, *hit, may_use_on);
-    Outcome {
-        result,
-        used_without_item,
-        placed_at: world.placed_at(),
-        effects: world.into_effects(),
-    }
+    let (result, used_without_item) =
+        run_use_item_on(&mut world, actor, hand, *hit, stack, may_use_on);
+    outcome_from(world, result, used_without_item)
+}
+
+/// [`use_item_on`] 带上这只手里的物品堆。
+///
+/// [`use_item_on`] with the stack in that hand.
+pub fn use_item_on_with_stack(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    actor: &Actor,
+    hand: Hand,
+    hit: &BlockHit,
+    stack: &ItemStack,
+) -> Outcome {
+    use_item_on_checked_with_stack(level, ticks, actor, hand, hit, Some(stack), |_| true)
 }
 
 fn run_use_item_on(
@@ -95,10 +131,17 @@ fn run_use_item_on(
     actor: &Actor,
     hand: Hand,
     hit: BlockHit,
+    stack: Option<&ItemStack>,
     may_use_on: impl FnOnce(BlockState) -> bool,
 ) -> (InteractionResult, bool) {
     let state = world.block_state(hit.pos);
-    let ctx = UseContext::new(actor, hand, hit);
+    let mut ctx = UseContext::new(actor, hand, hit);
+    ctx.stack = stack;
+    // 空物品堆在官方就是空气，不覆盖调用方已经放好的物品 ID。
+    // An empty stack is air in vanilla, so it does not replace the item id the caller set.
+    if let Some(stack) = stack.filter(|stack| !stack.is_empty()) {
+        ctx.item = stack.item;
+    }
     let holds_something = actor.main_hand != items::AIR || actor.off_hand != items::AIR;
     if !(actor.secondary_use && holds_something)
         && let Some((result, used_without_item)) = use_block(state, world, &ctx)
@@ -147,7 +190,7 @@ pub fn use_item(
         Some(bucket) => bucket::use_bucket(&mut world, actor, bucket),
         None => placement::use_in_air(&mut world, actor, hand),
     };
-    finish(world, result)
+    outcome_from(world, result, false)
 }
 
 /// `state.attack(level, pos, player)`：生存模式开始挖时打的那一下。
@@ -163,7 +206,7 @@ pub fn attack(
     let mut world = World::new(level, ticks);
     let state = world.block_state(pos);
     state.attack(&mut world, pos, actor);
-    finish(world, InteractionResult::Pass)
+    outcome_from(world, InteractionResult::Pass, false)
 }
 
 /// `ServerPlayerGameMode.destroyBlock` 里 `canDestroyBlock` 之后的部分。
@@ -179,7 +222,7 @@ pub fn destroy_block(
     let mut world = World::new(level, ticks);
     let state = world.block_state(pos);
     if state.is_a(BlockAncestor::GameMasterBlock) {
-        return finish(world, InteractionResult::Fail);
+        return outcome_from(world, InteractionResult::Fail, false);
     }
     let state = state.player_will_destroy(&mut world, pos, actor);
     if world.remove_block(pos) {
@@ -191,12 +234,17 @@ pub fn destroy_block(
     if !actor.prevents_block_drops {
         crate::durability::mine_block(&world, state);
     }
-    finish(world, InteractionResult::Success)
+    outcome_from(world, InteractionResult::Success, false)
 }
 
 /// 一刻里的世界，`now` 是这一刻的 `gameTime`。
 ///
 /// 和官方 `ServerLevel.tick` 一样按顺序跑：到期的方块刻、到期的流体刻、方块事件、方块实体。
+/// 实体刻不在这里。官方的方块 oracle 不 tick 实体，游戏循环另外调 [`run_entity_tick`]。
+///
+/// Scheduled block ticks, fluid ticks, block events, then block entities, matching
+/// that part of `ServerLevel.tick`. Entity ticks are separate: the block oracle does
+/// not tick entities, and the game loop calls [`run_entity_tick`] on its own.
 pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
     ticks.collect_due(now);
     let mut world = World::in_world_tick(level, ticks);
@@ -208,7 +256,49 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
     world.run_block_events();
     world.end_handling_tick();
     world.tick_block_entities();
-    finish(world, InteractionResult::Pass)
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `ServerLevel.tick` 开头的两段：到期的方块刻，然后到期的流体刻。`handlingTick` 为真。
+///
+/// 游戏循环按官方顺序分几步调用：[`run_due_ticks`]、随机刻（[`tick_chunk`](crate::tick_chunk)）、
+/// [`run_block_event_phase`]、[`run_entity_tick`]、[`run_block_entity_tick`]。
+/// [`run_scheduled_ticks`] 是去掉随机刻和实体的整段，给只关心方块的测试用。
+///
+/// The first two parts of `ServerLevel.tick`: due block ticks, then due fluid ticks, with
+/// `handlingTick` set. The game loop calls the phases in vanilla order: [`run_due_ticks`], random
+/// ticks ([`tick_chunk`](crate::tick_chunk)), [`run_block_event_phase`], [`run_entity_tick`], then
+/// [`run_block_entity_tick`]. [`run_scheduled_ticks`] runs the whole thing without random ticks
+/// and entities, for tests that only care about blocks.
+pub fn run_due_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
+    ticks.collect_due(now);
+    let mut world = World::in_world_tick(level, ticks);
+    run_block_ticks(&mut world);
+    world.ticks_mut().collect_due_fluids();
+    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        fluid::tick(&mut world, pos, fluid);
+    }
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `ServerLevel.runBlockEvents`：在随机刻之后、实体之前，`handlingTick` 仍为真。
+///
+/// `ServerLevel.runBlockEvents`: after random ticks and before entities, while `handlingTick`
+/// is still set.
+pub fn run_block_event_phase(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::in_world_tick(level, ticks);
+    world.run_block_events();
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `Level.tickBlockEntities`：一刻的最后一段，在实体之后，`handlingTick` 已经放回假。
+///
+/// `Level.tickBlockEntities`: the last part of the tick, after entities, once `handlingTick`
+/// is cleared.
+pub fn run_block_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::new(level, ticks);
+    world.tick_block_entities();
+    outcome_from(world, InteractionResult::Pass, false)
 }
 
 /// oracle 的 tick 题：官方的题在动作里直接调用这一格的 `state.tick`，还没进 `ServerLevel.tick`，
@@ -217,6 +307,17 @@ pub fn run_action_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now
     ticks.collect_due(now);
     let mut world = World::new(level, ticks);
     run_block_ticks(&mut world);
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// `EntityTickList.forEach`：世界里的每个实体各走一个 tick。tick 期间生成的实体
+/// 下一 tick 才开始动。
+///
+/// `EntityTickList.forEach`: each live entity ticks once. Entities spawned during
+/// the tick wait until the next one.
+pub fn run_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::new(level, ticks);
+    world.tick_entities();
     finish(world, InteractionResult::Pass)
 }
 
@@ -231,10 +332,20 @@ fn run_block_ticks(world: &mut World) {
 }
 
 pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
+    outcome_from(world, result, false)
+}
+
+/// 把这一次操作收成 [`Outcome`]。
+///
+/// Fold one operation into an [`Outcome`].
+fn outcome_from(world: World, result: InteractionResult, used_without_item: bool) -> Outcome {
+    let placed_at = world.placed_at();
+    let item_exchange = world.item_exchange().cloned();
     Outcome {
         result,
-        used_without_item: false,
-        placed_at: world.placed_at(),
+        used_without_item,
+        placed_at,
+        item_exchange,
         effects: world.into_effects(),
     }
 }

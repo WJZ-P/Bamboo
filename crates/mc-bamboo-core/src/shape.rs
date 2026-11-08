@@ -70,6 +70,138 @@ impl Aabb {
         }
     }
 
+    /// `AABB.inflate(dx, dy, dz)`：三根轴上各往外撑一点。
+    ///
+    /// `AABB.inflate(dx, dy, dz)`: grow the box outward on each axis.
+    pub const fn inflate(self, dx: f64, dy: f64, dz: f64) -> Self {
+        Self::new(
+            self.min_x - dx,
+            self.min_y - dy,
+            self.min_z - dz,
+            self.max_x + dx,
+            self.max_y + dy,
+            self.max_z + dz,
+        )
+    }
+
+    /// `AABB.deflate(dx, dy, dz)`：三根轴上各往里收一点。
+    ///
+    /// `AABB.deflate(dx, dy, dz)`: shrink the box inward on each axis.
+    pub const fn deflate(self, dx: f64, dy: f64, dz: f64) -> Self {
+        self.inflate(-dx, -dy, -dz)
+    }
+
+    /// `AABB.intersects(min, max)`：有正体积的重叠，连 `EPSILON` 都不给。
+    ///
+    /// 和 [`Aabb::intersects`] 是同一种判断，参数是六个坐标而不是另一个盒子。
+    ///
+    /// `AABB.intersects(minX, minY, minZ, maxX, maxY, maxZ)`. Same test as
+    /// [`Aabb::intersects`], taking six coordinates instead of another box.
+    pub const fn intersects_coords(
+        self,
+        min_x: f64,
+        min_y: f64,
+        min_z: f64,
+        max_x: f64,
+        max_y: f64,
+        max_z: f64,
+    ) -> bool {
+        self.min_x < max_x
+            && self.max_x > min_x
+            && self.min_y < max_y
+            && self.max_y > min_y
+            && self.min_z < max_z
+            && self.max_z > min_z
+    }
+
+    /// `AABB.contains(Vec3)`：下界算在里面，上界不算。
+    ///
+    /// `AABB.contains`: the minimum is inside, the maximum is not.
+    pub fn contains(self, x: f64, y: f64, z: f64) -> bool {
+        x >= self.min_x
+            && x < self.max_x
+            && y >= self.min_y
+            && y < self.max_y
+            && z >= self.min_z
+            && z < self.max_z
+    }
+
+    /// `AABB.getCenter`。
+    pub const fn center(self) -> crate::Vec3 {
+        crate::Vec3::new(
+            (self.min_x + self.max_x) / 2.0,
+            (self.min_y + self.max_y) / 2.0,
+            (self.min_z + self.max_z) / 2.0,
+        )
+    }
+
+    /// `AABB.getXsize`、`getYsize`、`getZsize`。
+    pub const fn size(self, axis: Axis) -> f64 {
+        self.max(axis) - self.min(axis)
+    }
+
+    /// 线段 `from` 到 `to` 和这个盒子有没有交点，对应官方的 `AABB.clip(...).isPresent()`。
+    ///
+    /// 线段完全在盒子里时也算碰到；起点和终点重合时只看点在不在盒子里。
+    ///
+    /// Whether the segment from `from` to `to` hits this box, matching
+    /// `AABB.clip(...).isPresent()`. A segment fully inside the box counts;
+    /// a zero-length segment only counts when the point is inside.
+    pub fn clip_is_present(self, from: crate::Vec3, to: crate::Vec3) -> bool {
+        if self.contains(from.x, from.y, from.z) || self.contains(to.x, to.y, to.z) {
+            return true;
+        }
+        let mut near = 0.0_f64;
+        let mut far = 1.0_f64;
+        let axes = [
+            (from.x, to.x - from.x, self.min_x, self.max_x),
+            (from.y, to.y - from.y, self.min_y, self.max_y),
+            (from.z, to.z - from.z, self.min_z, self.max_z),
+        ];
+        for (start, delta, min, max) in axes {
+            if delta.abs() < EPSILON {
+                if start < min || start >= max {
+                    return false;
+                }
+            } else {
+                let first = (min - start) / delta;
+                let second = (max - start) / delta;
+                let (low, high) = if first < second {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                near = near.max(low);
+                far = far.min(high);
+                if near > far {
+                    return false;
+                }
+            }
+        }
+        near < 1.0 && far > 0.0
+    }
+
+    /// `AABB.collidedAlongVector`：盒子扫过这个向量时有没有碰到 `parts` 里的任何一个。
+    ///
+    /// 把 `parts` 按盒子自己的一半尺寸撑大，再看向量的两端在不在里面、线段穿不穿过去。
+    ///
+    /// Inflate `parts` by half this box, then test the segment ends and the segment itself.
+    pub fn collided_along_vector(self, vector: crate::Vec3, parts: &[Aabb]) -> bool {
+        let from = self.center();
+        let to = from.add(vector);
+        let half = [
+            self.size(Axis::X) * 0.5 - EPSILON,
+            self.size(Axis::Y) * 0.5 - EPSILON,
+            self.size(Axis::Z) * 0.5 - EPSILON,
+        ];
+        parts.iter().any(|&part| {
+            let inflated = part.inflate(half[0], half[1], half[2]);
+            inflated.contains(to.x, to.y, to.z)
+                || inflated.contains(from.x, from.y, from.z)
+                || inflated.clip_is_present(from, to)
+        })
+    }
+
     /// 每个方向都向外扩大 `value`。官方的 `inflate`。
     pub const fn inflated(self, value: f64) -> Self {
         Self::new(

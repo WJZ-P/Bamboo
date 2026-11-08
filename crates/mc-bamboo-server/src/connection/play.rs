@@ -230,12 +230,20 @@ impl RequestReader<'_> {
         client: ClientInformation,
         outbound: &Outbound,
     ) -> Result<(), ConnectionError> {
+        let op = self.shared.ops.get(session.uuid);
         let request = JoinRequest {
             id: self.player,
             uuid: session.uuid,
             name: session.name.clone(),
             properties: session.properties.clone(),
             client,
+            // 官方 `PlayerList.getPermissions` 只按 UUID 查 OP 表，没列出来的都是 0。
+            // `is_op` 供刷屏豁免使用，等级 0 的 OP 也算 OP。
+            //
+            // Official `PlayerList.getPermissions` looks the UUID up in the op list.
+            // Anyone missing from it is level 0. `is_op` is the spam exemption, so a level-0 op still counts.
+            permission_level: op.map_or(0, |entry| entry.level),
+            is_op: op.is_some(),
             sink: Box::new(outbound.clone()),
         };
         self.send_to_world(Inbound::Join(Box::new(request)))
@@ -297,6 +305,13 @@ impl RequestReader<'_> {
     ) -> Result<(), ConnectionError> {
         match request {
             PlayRequest::KeepAlive(id) => {
+                // 官方 `handleKeepAlive`：只有正在等的那个 id 才更新延迟。
+                // 对不上，或者当前没在等，都用 `disconnect.timeout` 断开。
+                // 单人房主是例外，Bamboo 没有单人模式。
+                //
+                // Official `handleKeepAlive` updates latency only for the pending id.
+                // A mismatch, or a response while none is pending, disconnects with
+                // `disconnect.timeout`. The singleplayer-owner exception does not apply.
                 let millis = keep_alive
                     .answer(id, Instant::now())
                     .ok_or(ConnectionError::KeepAliveTimeout)?;

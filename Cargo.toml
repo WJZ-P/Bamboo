@@ -14,9 +14,11 @@ repository = "https://github.com/WJZ-P/Bamboo"
 [workspace.dependencies]
 mc-bamboo-auth = { path = "crates/mc-bamboo-auth", version = "0.0.0" }
 mc-bamboo-blocks = { path = "crates/mc-bamboo-blocks", version = "0.0.0" }
+mc-bamboo-command = { path = "crates/mc-bamboo-command", version = "0.0.0" }
 mc-bamboo-core = { path = "crates/mc-bamboo-core", version = "0.0.0" }
 mc-bamboo-data = { path = "crates/mc-bamboo-data", version = "0.0.0" }
 mc-bamboo-game = { path = "crates/mc-bamboo-game", version = "0.0.0" }
+mc-bamboo-loot = { path = "crates/mc-bamboo-loot", version = "0.0.0" }
 mc-bamboo-nbt = { path = "crates/mc-bamboo-nbt", version = "0.0.0" }
 mc-bamboo-protocol = { path = "crates/mc-bamboo-protocol", version = "0.0.0" }
 mc-bamboo-recipes = { path = "crates/mc-bamboo-recipes", version = "0.0.0" }

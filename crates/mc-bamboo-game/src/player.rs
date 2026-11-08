@@ -14,6 +14,7 @@ use crate::{
     inbound::PlayerId,
     interaction::{BlockPrediction, mining::Mining},
     inventory::Inventory,
+    menu::station::InventoryCursor,
     movement::Teleport,
     player_grid::PlayerGrid,
 };
@@ -31,6 +32,14 @@ pub(crate) struct Player {
     pub(crate) uuid: Uuid,
     pub(crate) name: String,
     pub(crate) game_mode: GameMode,
+    /// 命令权限等级，0 到 4，来自 `ops.json`。
+    ///
+    /// Command permission level, 0 through 4, from `ops.json`.
+    pub(crate) permission_level: u8,
+    /// 是否列在 `ops.json` 里。和权限等级分开，等级 0 的 OP 也算 OP。
+    ///
+    /// Whether the player is listed in `ops.json`. Separate from the level: a level-0 op still counts.
+    pub(crate) is_op: bool,
     /// 实体位置，也就是脚底。只能经 [`Player::set_position`] 改，见 [`PlayerGrid`]。
     ///
     /// Entity position, the feet. Changed only through [`Player::set_position`]; see [`PlayerGrid`].
@@ -49,6 +58,10 @@ pub(crate) struct Player {
     /// 正在挖哪个方块、挖了多久，官方 `ServerPlayerGameMode` 的那几个字段。
     pub(crate) mining: Mining,
     pub(crate) inventory: Inventory,
+    /// 没有方块菜单时，玩家物品栏里的 2×2 合成。光标和远程槽都在这里。
+    ///
+    /// The 2×2 crafting grid while no block menu is open. The cursor and remote slots live here.
+    pub(crate) inventory_cursor: InventoryCursor,
     /// 官方 `containerCounter`，每打开一次菜单加一，100 回绕到 1。
     pub(crate) container_counter: i32,
     /// 这名玩家自己的末影箱，每个玩家一份。
@@ -70,6 +83,8 @@ impl Player {
             uuid,
             name,
             game_mode,
+            permission_level: 0,
+            is_op: false,
             position,
             yaw: 0.0,
             pitch: 0.0,
@@ -82,6 +97,7 @@ impl Player {
             prediction: BlockPrediction::default(),
             mining: Mining::default(),
             inventory: Inventory::default(),
+            inventory_cursor: InventoryCursor::new(),
             container_counter: 0,
             ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),

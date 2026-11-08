@@ -57,9 +57,27 @@ pub fn copy_with_count(stack: &ItemStack, count: i32) -> ItemStack {
     copy
 }
 
-/// 官方 `Container.removeItem(slot, count)`，也就是 `ContainerHelper.removeItem`：
-/// 拿出 `count` 个，剩下的留在原来的槽里，槽空了就换成空堆。
+/// 官方 `Container.removeItem(slot, count)`。
+///
+/// 默认是 `ContainerHelper.removeItem`：拿出 `count` 个，剩下的留在原来的槽里。
+/// 唱片机和雕纹书架各自覆盖，见 [`Container::remove_item`]。
+///
+/// Vanilla `Container.removeItem(slot, count)`.
+///
+/// The default is `ContainerHelper.removeItem`: take `count` and leave the rest in the slot.
+/// The jukebox and chiseled bookshelf override this; see [`Container::remove_item`].
 pub fn remove_item(container: &mut dyn Container, slot: usize, count: i32) -> ItemStack {
+    container.remove_item(slot, count)
+}
+
+/// `ContainerHelper.removeItem`。
+///
+/// `ContainerHelper.removeItem`.
+pub(crate) fn helper_remove_item<C: Container + ?Sized>(
+    container: &mut C,
+    slot: usize,
+    count: i32,
+) -> ItemStack {
     let stack = container.get(slot);
     if stack.is_empty() || count <= 0 {
         return ItemStack::empty();
@@ -91,6 +109,13 @@ pub trait Container {
     /// `setItem`。
     fn set(&mut self, slot: usize, stack: ItemStack);
 
+    /// `removeItem`。默认是 `ContainerHelper.removeItem`。
+    ///
+    /// `removeItem`. The default is `ContainerHelper.removeItem`.
+    fn remove_item(&mut self, slot: usize, count: i32) -> ItemStack {
+        helper_remove_item(self, slot, count)
+    }
+
     /// `isEmpty`。
     fn is_empty(&self) -> bool {
         (0..self.size()).all(|slot| self.get(slot).is_empty())
@@ -119,6 +144,22 @@ pub trait Container {
     /// `canTakeItem`。
     fn can_take_item(&self, _slot: usize, _stack: &ItemStack) -> bool {
         true
+    }
+
+    /// `canTakeItem`。`into` 是要放进去的那张槽位表，`into_max` 是它的 `getMaxStackSize()`。
+    /// 现有容器不用目标，所以默认转给 [`Container::can_take_item`]。
+    ///
+    /// `canTakeItem`. `into` is the destination slot list and `into_max` is its
+    /// `getMaxStackSize()`. Existing containers ignore the destination, so the default
+    /// forwards to [`Container::can_take_item`].
+    fn can_take_item_into(
+        &self,
+        slot: usize,
+        stack: &ItemStack,
+        _into: &[ItemStack],
+        _into_max: i32,
+    ) -> bool {
+        self.can_take_item(slot, stack)
     }
 
     /// `WorldlyContainer.getSlotsForFace`。不是 `WorldlyContainer` 时是 `None`。

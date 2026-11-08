@@ -10,11 +10,16 @@ use mc_bamboo_data::{items::ITEMS, packets::play::serverbound, registries::data_
 
 use crate::{
     codec::{DecodeError, Reader},
+    components::book::{MAX_PAGES, PAGE_EDIT_LENGTH, TITLE_MAX_LENGTH},
     item::ItemStack,
 };
 
 const MAX_CHAT_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 32767;
+/// 补全请求里的命令长度上限。官方 `ServerboundCommandSuggestionPacket` 用 32500。
+///
+/// Command length limit in a suggestion request. Official `ServerboundCommandSuggestionPacket` uses 32500.
+const MAX_SUGGESTION_CHARS: usize = 32500;
 const MAX_LANGUAGE_CHARS: usize = 16;
 /// `ServerboundContainerClickPacket` 的 `changedSlots` 最多有多少项。
 const MAX_CHANGED_SLOTS: usize = 128;
@@ -24,12 +29,10 @@ const MAX_HASHED_COMPONENTS: usize = 256;
 const SIGNATURE_BYTES: usize = 256;
 /// `LastSeenMessages.Update` 里 20 位定长位集占的字节数。
 const LAST_SEEN_ACKNOWLEDGED_BYTES: usize = 3;
-/// `ServerboundEditBookPacket` 的页数上限，`ByteBufCodecs.list(100)`。
-const MAX_BOOK_PAGES: usize = 100;
-/// 每一页的字符上限，`stringUtf8(1024)`，也是 `WritableBookContent.PAGE_EDIT_LENGTH`。
-const MAX_BOOK_PAGE_CHARS: usize = 1024;
-/// 标题的字符上限，`stringUtf8(32)`，也是 `WrittenBookContent.TITLE_MAX_LENGTH`。
-const MAX_BOOK_TITLE_CHARS: usize = 32;
+/// 签名命令里最多带几个参数签名。官方 `ArgumentSignatures` 用 8。
+///
+/// Maximum argument signatures on a signed command. Official `ArgumentSignatures` uses 8.
+const MAX_SIGNED_ARGUMENTS: usize = 8;
 
 /// 移动包 `flags` 里表示站在地上的位。
 const MOVE_FLAG_ON_GROUND: u8 = 0x01;
@@ -76,8 +79,18 @@ pub enum PlayRequest {
     Chat {
         message: String,
     },
-    /// 没有开头 `/` 的命令。
+    /// 没有开头 `/` 的命令。签名版和普通版都归到这里，离线模式用不上签名。
+    ///
+    /// A command without the leading `/`. Signed and unsigned packets both land here;
+    /// offline mode does not use the signature.
     ChatCommand {
+        command: String,
+    },
+    /// 客户端请求命令补全。`command` 是输入框里的整段文字，可能以 `/` 开头。
+    ///
+    /// The client asks for suggestions. `command` is the whole input and may start with `/`.
+    CommandSuggestion {
+        id: i32,
         command: String,
     },
     ClientInformation(ClientInformation),
@@ -148,6 +161,14 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
+    /// 菜单按钮。切石机用它选结果，讲台用它翻页。`button_id` 是 varint，讲台从 100 起是跳到的页码加 100。
+    ///
+    /// A menu button. The stonecutter selects a result; the lectern turns pages.
+    /// `button_id` is a varint, and lectern values from 100 jump to `button_id - 100`.
+    ContainerButtonClick {
+        container_id: i32,
+        button_id: i32,
+    },
     /// 告示牌编辑器提交的文字，每一行最多 [`MAX_LINE_CHARS`] 个字符。
     SignUpdate {
         pos: BlockPos,
@@ -204,6 +225,11 @@ impl PlayRequest {
             serverbound::CHAT_COMMAND => Self::ChatCommand {
                 command: reader.string(MAX_COMMAND_CHARS)?.to_owned(),
             },
+            serverbound::CHAT_COMMAND_SIGNED => read_signed_command(&mut reader)?,
+            serverbound::COMMAND_SUGGESTION => Self::CommandSuggestion {
+                id: reader.varint()?,
+                command: reader.string(MAX_SUGGESTION_CHARS)?.to_owned(),
+            },
             serverbound::CLIENT_INFORMATION => {
                 Self::ClientInformation(ClientInformation::read(&mut reader)?)
             }
@@ -251,6 +277,10 @@ impl PlayRequest {
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
             },
+            serverbound::CONTAINER_BUTTON_CLICK => Self::ContainerButtonClick {
+                container_id: reader.varint()?,
+                button_id: reader.varint()?,
+            },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             serverbound::EDIT_BOOK => read_edit_book(&mut reader)?,
             other => return Ok(Self::Other(other)),
@@ -292,6 +322,32 @@ fn read_chat(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     Ok(PlayRequest::Chat { message })
 }
 
+/// 解码带签名的命令。时间戳、盐、参数签名和已读窗口都读掉后丢弃。
+///
+/// Decodes a signed command. The timestamp, salt, argument signatures, and seen window are discarded.
+fn read_signed_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let command = reader.string(MAX_COMMAND_CHARS)?.to_owned();
+    // 时间戳和盐。
+    //
+    // Timestamp and salt.
+    reader.i64()?;
+    reader.i64()?;
+    // ArgumentSignatures：参数名加定长签名。
+    //
+    // ArgumentSignatures: a name plus a fixed-length signature.
+    for _ in 0..reader.count(MAX_SIGNED_ARGUMENTS)? {
+        reader.string(MAX_LANGUAGE_CHARS)?;
+        reader.bytes(SIGNATURE_BYTES)?;
+    }
+    // LastSeenMessages.Update：偏移、确认窗口、校验和。
+    //
+    // LastSeenMessages.Update: offset, acknowledged window, checksum.
+    reader.varint()?;
+    reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?;
+    reader.i8()?;
+    Ok(PlayRequest::ChatCommand { command })
+}
+
 /// 解码 `sign_update`：方块坐标、四行文字、哪一面。官方按这个顺序写。
 fn read_sign_update(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let pos = reader.block_pos()?;
@@ -306,13 +362,13 @@ fn read_sign_update(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError>
 /// 解码 `edit_book`：槽位、页面、可选的标题。官方 `ServerboundEditBookPacket.STREAM_CODEC`。
 fn read_edit_book(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let slot = reader.varint()?;
-    let page_count = reader.count(MAX_BOOK_PAGES)?;
+    let page_count = reader.count(MAX_PAGES)?;
     let mut pages = Vec::with_capacity(page_count);
     for _ in 0..page_count {
-        pages.push(reader.string(MAX_BOOK_PAGE_CHARS)?.to_owned());
+        pages.push(reader.string(PAGE_EDIT_LENGTH)?.to_owned());
     }
     let title = if reader.bool()? {
-        Some(reader.string(MAX_BOOK_TITLE_CHARS)?.to_owned())
+        Some(reader.string(TITLE_MAX_LENGTH)?.to_owned())
     } else {
         None
     };
@@ -1195,6 +1251,24 @@ mod tests {
             decode_body(serverbound::CONTAINER_CLOSE, "05"),
             Ok(PlayRequest::ContainerClose { container_id: 5 })
         );
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_BUTTON_CLICK, "01 64"),
+            Ok(PlayRequest::ContainerButtonClick {
+                container_id: 1,
+                button_id: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_container_button_click() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_BUTTON_CLICK, "05 02"),
+            Ok(PlayRequest::ContainerButtonClick {
+                container_id: 5,
+                button_id: 2,
+            })
+        );
     }
 
     #[test]
@@ -1487,35 +1561,35 @@ mod tests {
 
     #[test]
     fn edit_book_rejects_too_many_pages_or_too_long_text() {
-        let hundred = vec![String::new(); MAX_BOOK_PAGES];
+        let hundred = vec![String::new(); MAX_PAGES];
         assert!(PlayRequest::decode(&edit_book_bytes(0, &hundred, None)).is_ok());
 
         let mut too_many = Vec::new();
         write_varint(&mut too_many, serverbound::EDIT_BOOK);
         write_varint(&mut too_many, 0);
-        write_varint(&mut too_many, (MAX_BOOK_PAGES + 1) as i32);
+        write_varint(&mut too_many, (MAX_PAGES + 1) as i32);
         assert_eq!(
             PlayRequest::decode(&too_many),
-            Err(DecodeError::InvalidCount((MAX_BOOK_PAGES + 1) as i32))
+            Err(DecodeError::InvalidCount((MAX_PAGES + 1) as i32))
         );
 
-        let page = "竹".repeat(MAX_BOOK_PAGE_CHARS);
+        let page = "竹".repeat(PAGE_EDIT_LENGTH);
         assert!(PlayRequest::decode(&edit_book_bytes(0, &[page], None)).is_ok());
-        let too_long = "竹".repeat(MAX_BOOK_PAGE_CHARS + 1);
+        let too_long = "竹".repeat(PAGE_EDIT_LENGTH + 1);
         assert_eq!(
             PlayRequest::decode(&edit_book_bytes(0, std::slice::from_ref(&too_long), None)),
             Err(DecodeError::StringTooLong {
-                max_chars: MAX_BOOK_PAGE_CHARS
+                max_chars: PAGE_EDIT_LENGTH
             })
         );
 
-        let title = "a".repeat(MAX_BOOK_TITLE_CHARS);
+        let title = "a".repeat(TITLE_MAX_LENGTH);
         assert!(PlayRequest::decode(&edit_book_bytes(0, &[], Some(&title))).is_ok());
-        let title = "a".repeat(MAX_BOOK_TITLE_CHARS + 1);
+        let title = "a".repeat(TITLE_MAX_LENGTH + 1);
         assert_eq!(
             PlayRequest::decode(&edit_book_bytes(0, &[], Some(&title))),
             Err(DecodeError::StringTooLong {
-                max_chars: MAX_BOOK_TITLE_CHARS
+                max_chars: TITLE_MAX_LENGTH
             })
         );
     }
@@ -1566,6 +1640,10 @@ mod tests {
             decode_frame("01 0d"),
             PlayRequest::Other(serverbound::CLIENT_TICK_END)
         );
+    }
+
+    #[test]
+    fn decodes_signed_chat_command() {
         assert_eq!(
             decode_body(
                 serverbound::CHAT_COMMAND_SIGNED,
@@ -1575,7 +1653,46 @@ mod tests {
                  00
                  00 00 00 00 01"
             ),
-            Ok(PlayRequest::Other(serverbound::CHAT_COMMAND_SIGNED))
+            Ok(PlayRequest::ChatCommand {
+                command: "say hi".to_owned()
+            })
         );
+    }
+
+    #[test]
+    fn signed_chat_command_skips_argument_signatures() {
+        let mut body = Vec::new();
+        write_string(&mut body, "say hi");
+        body.extend([0; 16]);
+        body.push(1);
+        write_string(&mut body, "message");
+        body.extend([0xab; SIGNATURE_BYTES]);
+        body.extend(hex("00 00 00 00 01"));
+        assert_eq!(
+            decode_body(serverbound::CHAT_COMMAND_SIGNED, &hex_text(&body)),
+            Ok(PlayRequest::ChatCommand {
+                command: "say hi".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_command_suggestion() {
+        assert_eq!(
+            decode_body(serverbound::COMMAND_SUGGESTION, "07 04 2f 74 69 6d"),
+            Ok(PlayRequest::CommandSuggestion {
+                id: 7,
+                command: "/tim".to_owned()
+            })
+        );
+    }
+
+    /// 测试里把现成的字节写成 `decode_body` 要的十六进制文本。
+    fn hex_text(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }

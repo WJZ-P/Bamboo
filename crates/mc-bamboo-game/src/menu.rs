@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+pub(crate) mod station;
+
 use mc_bamboo_blocks::{BlockState, World, hopper::set_changed};
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
@@ -123,6 +125,10 @@ pub(crate) struct Menu {
     quickcraft_status: i32,
     quickcraft_type: i32,
     quickcraft_slots: Vec<usize>,
+    /// 工作台、熔炉、酿造台。有它时箱子那一套槽位不用。
+    ///
+    /// Crafting, furnace, and brewing. When set, the chest slot path is not used.
+    pub(crate) station: Option<station::Station>,
 }
 
 impl Menu {
@@ -140,6 +146,7 @@ impl Menu {
             quickcraft_status: 0,
             quickcraft_type: 0,
             quickcraft_slots: Vec::new(),
+            station: None,
         }
     }
 
@@ -792,7 +799,7 @@ fn place_count(size: usize, kind: i32, stack: &ItemStack) -> i32 {
 /// 打不开（不是容器、被挡住、潜影盒被挡住）时返回 `false`，调用方据此判断有没有菜单。
 pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
     let Some(kind) = container::kind_at(region, pos) else {
-        return false;
+        return station::try_open(region, id, pos);
     };
     if !region.players.contains_key(&id) {
         return false;
@@ -800,6 +807,7 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     let Some((target, container_size, menu_type, title)) = menu_shape(region, pos, kind) else {
         return false;
     };
+    crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }
@@ -904,6 +912,14 @@ fn menu_shape(
                 kind.title(),
             )
         }
+        // 雕纹书架、唱片机和陶罐官方没有菜单。合成器的 `CrafterMenu` 这次不打开。
+        //
+        // Chiseled bookshelves, jukeboxes and pots have no vanilla menu. The crafter's
+        // `CrafterMenu` is not opened in this change.
+        ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter => return None,
         _ => (
             Target::Single(pos),
             kind.slots(),
@@ -938,13 +954,24 @@ pub(crate) fn on_close_request(region: &mut Region, id: PlayerId) {
 /// 玩家断开。官方这时不把光标上的东西放回物品栏，因为没有连接可发了。
 pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
     let Some(mut menu) = region.menus.remove(&id) else {
+        station::return_player_grid(region, id);
         return;
     };
     finish_menu(region, id, &mut menu, false);
+    station::return_player_grid(region, id);
+}
+
+/// 切石机选结果。官方 `handleContainerButtonClick`。
+pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, button: i32) {
+    station::on_button(region, id, container_id, button);
 }
 
 /// 官方 `AbstractContainerMenu.removed` 加子类的 `stopOpen`。
 fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items: bool) {
+    if menu.station.is_some() {
+        station::finish(region, id, menu, return_items);
+        return;
+    }
     let carried = std::mem::take(&mut menu.carried);
     if return_items {
         place_item_back_in_inventory(region, id, carried);
@@ -1065,32 +1092,57 @@ fn official_index(slot: usize) -> Option<i32> {
     }
 }
 
-/// 每个 tick：先关掉已经失效的菜单，再把变化发给客户端。官方 `ServerPlayer.tick`。
+/// 每个 tick：先把变化发给客户端，再关掉已经失效的菜单。官方 `ServerPlayer.tick`。
+///
+/// Each tick broadcasts changes, then closes a menu that is no longer valid. Vanilla
+/// `ServerPlayer.tick` calls `broadcastChanges` before `stillValid`.
 pub(crate) fn tick(region: &mut Region) {
     let ids: Vec<PlayerId> = region.menus.keys().copied().collect();
     for id in ids {
-        let valid = region
+        // 工作台这一类菜单自己同步熔炉和酿造台的进度，不走箱子那套槽位广播。
+        // Workstation menus sync furnace and brewing progress themselves.
+        if region
             .menus
             .get(&id)
-            .is_some_and(|menu| still_valid(region, id, menu));
+            .is_some_and(|menu| menu.station.is_some())
+        {
+            station::tick_menu(region, id);
+            let valid = region
+                .menus
+                .get(&id)
+                .is_some_and(|menu| still_valid(region, id, menu));
+            if !valid {
+                warn!(
+                    player = id.0,
+                    "closing a menu whose block is gone or out of reach"
+                );
+                close_menu(region, id);
+            }
+            continue;
+        }
+        // 官方先 `broadcastChanges`，再看 `stillValid`：失效这一刻的槽位变化也会先发出去。
+        // Vanilla broadcasts before `stillValid`, so the last slot changes still go out.
+        let Some(mut menu) = region.menus.remove(&id) else {
+            continue;
+        };
+        broadcast_changes(region, id, &mut menu);
+        let valid = still_valid(region, id, &menu);
+        region.menus.insert(id, menu);
         if !valid {
             warn!(
                 player = id.0,
                 "closing a menu whose block is gone or out of reach"
             );
             close_menu(region, id);
-            continue;
         }
-        let Some(mut menu) = region.menus.remove(&id) else {
-            continue;
-        };
-        broadcast_changes(region, id, &mut menu);
-        region.menus.insert(id, menu);
     }
 }
 
 /// 官方 `Container.stillValidBlockEntity` 和 `PlayerEnderChestContainer.stillValid`。
 fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
+    if let Some(station) = &menu.station {
+        return station.still_valid(region, id);
+    }
     let Some(player) = region.players.get(&id) else {
         return false;
     };
@@ -1126,6 +1178,23 @@ fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3) -> b
 
 /// 官方 `handleContainerClick`。
 pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    if packet.container_id == 0 {
+        // 方块菜单开着时，容器 ID 0 不是当前菜单。
+        // Container id 0 is not the open menu while a block menu is up.
+        if region.menus.contains_key(&id) {
+            return;
+        }
+        station::click_inventory(region, id, packet);
+        return;
+    }
+    if region
+        .menus
+        .get(&id)
+        .is_some_and(|menu| menu.station.is_some())
+    {
+        station::click_menu(region, id, packet);
+        return;
+    }
     let Some(menu) = region.menus.get(&id) else {
         return;
     };
@@ -1373,22 +1442,34 @@ fn same_component_bytes(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.added == b.added && a.removed == b.removed
 }
 
-/// 官方 `HashedStack.matches`。
+/// 官方 `HashedStack.matches` / `HashedPatchMap.matches`。
 ///
-/// 官方把每一项组件按 `HashOps`（CRC32C）算成一个整数再比。那套哈希要整个组件的 DFU
-/// `Codec`，我们没有，见 README 的已知限制。这里保守处理：带组件的物品一律算不一致，
-/// 结果只是多发一个 `container_set_slot`，不会误以为客户端手上的东西和服务端一样。
+/// 每一项增加的组件按存档 `Codec` 走 `HashOps`（CRC32C）得到 `HashCode.asInt()`，
+/// 再和客户端发来的整数比较。移除项只比组件类型。解不开本地组件、或者某项没有
+/// 存档 `Codec`（瞬态组件）时不算匹配，结果只是多发一次槽位同步。
+///
+/// `HashedStack.matches` / `HashedPatchMap.matches`.
+///
+/// Each added component is hashed with its persistent codec through `HashOps`
+/// (CRC32C) and compared as `HashCode.asInt()`. Removals compare component types
+/// only. A component that cannot be decoded, or that has no persistent codec,
+/// does not match, so the slot is synchronized again.
 fn hashed_matches(hash: &HashedStack, local: &ItemStack) -> bool {
     match hash {
         HashedStack::Empty => local.is_empty(),
         HashedStack::Item(hashed) => {
-            !local.is_empty()
-                && hashed.item == local.item
-                && hashed.count == local.count
-                && hashed.added.is_empty()
-                && hashed.removed.is_empty()
-                && local.added.is_empty()
-                && local.removed.is_empty()
+            if local.is_empty() || hashed.item != local.item || hashed.count != local.count {
+                return false;
+            }
+            let Ok(patch) = mc_bamboo_protocol::components::ComponentPatch::from_opaque(local)
+            else {
+                return false;
+            };
+            mc_bamboo_protocol::components::archive::stack::matches_hashed(
+                &patch,
+                &hashed.added,
+                &hashed.removed,
+            )
         }
     }
 }

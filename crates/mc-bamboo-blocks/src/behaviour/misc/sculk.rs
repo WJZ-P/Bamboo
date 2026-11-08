@@ -78,6 +78,11 @@ impl Behaviour for SculkSensor {
             SculkSensorPhase::Cooldown => {
                 let inactive = state.with(SCULK_SENSOR_PHASE, SculkSensorPhase::Inactive);
                 world.set_block_and_update(pos, inactive);
+                // 不含水时官方播停止音，音高取世界随机源的一个 float。声音没有，这个数照取。
+                // Vanilla plays the stop sound when not waterlogged and reads one level-random float. The draw still happens.
+                if !state.get(WATERLOGGED) {
+                    world.random().next_float();
+                }
             }
             SculkSensorPhase::Inactive => {}
         }

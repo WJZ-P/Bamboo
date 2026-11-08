@@ -10,8 +10,14 @@
 //! - 组件补丁的条目数上限 [`MAX_PATCH_ENTRIES`]；
 //! - 六种没有 `networkSynchronized` 的组件（`lock`、`container_loot`、`map_decorations`、
 //!   `debug_stick_state`、`recipes`、`intangible_projectile`）线上是 NBT，官方会把 NBT 过一遍
-//!   DFU 的 `Codec` 再写回去。这里只保留 NBT 并校验最外层的形状，不复刻 DFU。
+//!   DFU 的 `Codec` 再写回去。网络这条路径只保留 NBT 并校验最外层的形状。
+//!   存档那条路径在 [`archive`]，按每种组件的 `Codec` 重写。
+//!
+//! The six components without `networkSynchronized` stay opaque NBT on the wire.
+//! Their persistent codecs live in [`archive`].
 
+pub mod archive;
+pub mod book;
 pub mod cursor;
 pub mod defaults;
 pub mod forward;
@@ -59,12 +65,6 @@ const MAX_EXPLOSIONS: usize = 256;
 const MAX_CHARGED_PROJECTILES: usize = 1024;
 /// 官方 `ItemContainerContents.MAX_SIZE`。
 const MAX_CONTAINER_SLOTS: usize = 256;
-/// 官方 `WritableBookContent.MAX_PAGES`。
-const MAX_BOOK_PAGES: usize = 100;
-/// 官方 `WritableBookContent.PAGE_EDIT_LENGTH`。
-const MAX_WRITABLE_PAGE: usize = 1024;
-/// 官方 `WrittenBookContent.TITLE_MAX_LENGTH`。
-const MAX_BOOK_TITLE: usize = 32;
 /// 官方 `WrittenBookContent.MAX_GENERATION`。
 const MAX_BOOK_GENERATION: i32 = 3;
 
@@ -570,12 +570,13 @@ impl ComponentValue {
                 Self::SuspiciousStewEffects(cursor.list(usize::MAX, StewEffect::read)?)
             }
             kinds::WRITABLE_BOOK_CONTENT => {
-                Self::WritableBookContent(cursor.list(MAX_BOOK_PAGES, |cursor| {
-                    Filterable::read(cursor, |cursor| cursor.string(MAX_WRITABLE_PAGE))
+                Self::WritableBookContent(cursor.list(book::MAX_PAGES, |cursor| {
+                    Filterable::read(cursor, |cursor| cursor.string(book::PAGE_EDIT_LENGTH))
                 })?)
             }
             kinds::WRITTEN_BOOK_CONTENT => {
-                let title = Filterable::read(cursor, |cursor| cursor.string(MAX_BOOK_TITLE))?;
+                let title =
+                    Filterable::read(cursor, |cursor| cursor.string(book::TITLE_MAX_LENGTH))?;
                 let author = cursor.string(MAX_STRING)?;
                 let generation = cursor.varint()?;
                 // 官方 `WrittenBookContent` 的构造方法要求代数在 0 到 3 之间。
@@ -1344,6 +1345,15 @@ impl ComponentPatch {
             Some(existing) => existing.1 = entry,
             None => self.entries.push((kind, entry)),
         }
+    }
+
+    /// 官方用 `Map.remove`：去掉一个组件类型的条目，返回原来那一项。
+    ///
+    /// `PatchedDataComponentMap.set` 在值等于默认组件时会走这条路径，
+    /// 所以补丁里不会留下和默认值相同的条目。
+    pub fn remove(&mut self, kind: i32) -> Option<PatchEntry> {
+        let index = self.entries.iter().position(|(id, _)| *id == kind)?;
+        Some(self.entries.remove(index).1)
     }
 }
 

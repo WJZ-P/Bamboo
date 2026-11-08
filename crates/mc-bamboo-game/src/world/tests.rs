@@ -222,6 +222,8 @@ impl Harness {
             name: name.to_owned(),
             properties: Vec::new(),
             client,
+            permission_level: 0,
+            is_op: false,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -336,6 +338,8 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
     let mut expected = vec![
         clientbound::LOGIN,
         clientbound::PLAYER_ABILITIES,
+        clientbound::ENTITY_EVENT,
+        clientbound::COMMANDS,
         clientbound::PLAYER_POSITION,
         clientbound::PLAYER_INFO_UPDATE,
         clientbound::SET_ENTITY_DATA,
@@ -360,12 +364,14 @@ fn second_player_gets_the_roster_first_and_the_others_get_the_new_player() {
     server.tick();
 
     let frames = second.take_frames();
-    let ids: Vec<i32> = frames.iter().take(6).map(|frame| frame.id).collect();
+    let ids: Vec<i32> = frames.iter().take(8).map(|frame| frame.id).collect();
     assert_eq!(
         ids,
         [
             clientbound::LOGIN,
             clientbound::PLAYER_ABILITIES,
+            clientbound::ENTITY_EVENT,
+            clientbound::COMMANDS,
             clientbound::PLAYER_POSITION,
             clientbound::PLAYER_INFO_UPDATE,
             clientbound::PLAYER_INFO_UPDATE,
@@ -373,7 +379,11 @@ fn second_player_gets_the_roster_first_and_the_others_get_the_new_player() {
         ]
     );
     // 已有的玩家先发给新玩家，然后才是它自己，两次都是全部 8 个动作。
-    for (frame, uuid) in [(&frames[3], first.uuid), (&frames[4], second.uuid)] {
+    // 权限事件和命令树插在能力包和传送之间，所以名单从第 6 个包开始。
+    //
+    // The permission event and command tree sit between abilities and the teleport,
+    // so the roster starts at the sixth packet.
+    for (frame, uuid) in [(&frames[5], first.uuid), (&frames[6], second.uuid)] {
         assert_eq!(frame.body[..2], [0xff, 0x01]);
         assert_eq!(frame.body[2..18], *uuid.as_bytes());
     }
@@ -731,6 +741,8 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         name: "Kitten".to_owned(),
         properties: Vec::new(),
         client: client_requesting(2),
+        permission_level: 0,
+        is_op: false,
         sink: Box::new(sink),
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();

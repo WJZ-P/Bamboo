@@ -7,7 +7,11 @@
 //! 官方客户端会预测，但那是另一条路径；两边用同一个模型才比得了。
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_protocol::{item::ItemStack, packet::play::ContainerInput};
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, archive::stack::component_hashes},
+    item::ItemStack,
+    packet::play::{ContainerInput, HashedItem},
+};
 
 use super::{Ctx, HashedStack, Menu, Target};
 use crate::{
@@ -26,6 +30,17 @@ pub enum ReplayShape {
     Hopper,
     Dispenser,
     ShulkerBox,
+    /// 玩家物品栏里的 2×2。
+    ///
+    /// The player's 2×2 crafting grid.
+    Inventory,
+    Crafting,
+    Stonecutter,
+    Smithing,
+    Furnace,
+    BlastFurnace,
+    Smoker,
+    Brewing,
 }
 
 impl ReplayShape {
@@ -35,6 +50,52 @@ impl ReplayShape {
             Self::Hopper => ContainerKind::Hopper,
             Self::Dispenser => ContainerKind::Dispenser,
             Self::ShulkerBox => ContainerKind::ShulkerBox,
+            Self::Inventory
+            | Self::Crafting
+            | Self::Stonecutter
+            | Self::Smithing
+            | Self::Furnace
+            | Self::BlastFurnace
+            | Self::Smoker
+            | Self::Brewing => ContainerKind::Chest,
+        }
+    }
+
+    fn workstation(self) -> Option<super::station::WorkKind> {
+        use super::station::WorkKind;
+        match self {
+            Self::Inventory => Some(WorkKind::Inventory),
+            Self::Crafting => Some(WorkKind::Crafting),
+            Self::Stonecutter => Some(WorkKind::Stonecutter),
+            Self::Smithing => Some(WorkKind::Smithing),
+            Self::Furnace => Some(WorkKind::Furnace),
+            Self::BlastFurnace => Some(WorkKind::BlastFurnace),
+            Self::Smoker => Some(WorkKind::Smoker),
+            Self::Brewing => Some(WorkKind::Brewing),
+            _ => None,
+        }
+    }
+
+    /// 工作台、熔炉、酿造台这一类，格子不在单独的容器里。
+    ///
+    /// Crafting, furnaces, and the brewing stand keep their grid on the menu itself.
+    pub fn is_workstation(self) -> bool {
+        self.workstation().is_some()
+    }
+
+    /// 合成格的材料放进菜单时要往后挪一格，结果格是算出来的。
+    ///
+    /// Crafting ingredients land one slot later. The result slot is computed.
+    fn seed_slot(self, index: usize) -> Option<usize> {
+        match self {
+            Self::Inventory | Self::Crafting => Some(index + 1),
+            Self::Stonecutter
+            | Self::Smithing
+            | Self::Furnace
+            | Self::BlastFurnace
+            | Self::Smoker
+            | Self::Brewing => Some(index),
+            _ => None,
         }
     }
 
@@ -53,6 +114,10 @@ pub struct Snapshot {
     pub slots: Vec<ItemStack>,
     pub carried: ItemStack,
     pub state_id: i32,
+    /// 进度条和切石机选中项。箱子没有。
+    ///
+    /// Progress bars and the stonecutter selection. Chests have none.
+    pub data: Vec<i32>,
 }
 
 /// 一个打开着的菜单，只有点击逻辑，没有世界。
@@ -63,6 +128,7 @@ pub struct Replay {
     sources: Vec<Option<PlayerId>>,
     inventory: Inventory,
     creative: bool,
+    station: Option<super::station::Station>,
 }
 
 impl Replay {
@@ -91,16 +157,70 @@ impl Replay {
             sources: vec![Some(VIEWER); size],
             inventory: player,
             creative: true,
+            station: None,
         }
+    }
+
+    /// 工作台菜单。`grid` 是菜单自己的材料格，空位用 `(0, 0)`，按顺序放进去。
+    ///
+    /// A workstation menu. `grid` is the menu's own ingredient slots, with `(0, 0)` for empty ones,
+    /// applied in order.
+    pub fn workstation(
+        shape: ReplayShape,
+        grid: &[(i32, i32)],
+        inventory: &[(i32, i32)],
+        data: &[i32],
+        creative: bool,
+    ) -> Self {
+        let kind = shape.workstation().expect("workstation shape");
+        let mut seeds = Vec::new();
+        for (index, &(item, count)) in grid.iter().enumerate() {
+            if item == 0 || count <= 0 {
+                continue;
+            }
+            if let Some(slot) = shape.seed_slot(index) {
+                seeds.push((slot, stack(item, count)));
+            }
+        }
+        let mut replay = Self::new(ReplayShape::Chest(1), &[], &[]);
+        replay.creative = creative;
+        replay.station = Some(super::station::prepare_replay(
+            kind,
+            &bamboo_inventory(inventory),
+            &seeds,
+            data,
+            creative,
+        ));
+        replay
     }
 
     /// 非创造模式时中键克隆什么也不做。
     pub fn set_creative(&mut self, creative: bool) {
         self.creative = creative;
+        if let Some(station) = self.station.as_mut() {
+            station.set_replay_creative(creative);
+        }
+    }
+
+    /// 打开之前换掉容器里的一格。组件点击题用它放上带补丁的物品。
+    ///
+    /// Replace one container slot before the menu opens.
+    pub fn set_container(&mut self, index: usize, stack: ItemStack) {
+        if index < self.container.len() {
+            self.container[index] = stack;
+        }
     }
 
     /// 模拟 `sendAllDataToRemote`，打开菜单后的第一个 state_id 是 1。
+    /// 工作台如果事先放了合成材料，每次重算结果还会再加一次。
+    ///
+    /// Simulates `sendAllDataToRemote`. The first state id is 1.
+    /// A workstation that was seeded with crafting ingredients increments once more per recompute.
     pub fn open(&mut self) -> Snapshot {
+        if let Some(station) = self.station.as_mut() {
+            let view = station.replay_open();
+            return Self::from_station(view);
+        }
         let slots = self.menu_slots();
         self.menu.take_full_state(&slots);
         self.snapshot()
@@ -108,6 +228,10 @@ impl Replay {
 
     /// 点一下。槽位不合法时和官方一样什么也不做。
     pub fn click(&mut self, slot: i16, button: i8, input: ContainerInput) -> Snapshot {
+        if let Some(station) = self.station.as_mut() {
+            let view = station.replay_click(i32::from(slot), i32::from(button), input);
+            return Self::from_station(view);
+        }
         if !self.menu.valid_slot_index(slot) {
             return self.snapshot();
         }
@@ -133,11 +257,83 @@ impl Replay {
         self.snapshot()
     }
 
+    /// 切石机的 `container_button_click`。别的菜单点了等于没点。
+    ///
+    /// The stonecutter's `container_button_click`. Other menus ignore it.
+    pub fn button(&mut self, button: i8) -> Snapshot {
+        if let Some(station) = self.station.as_mut() {
+            let view = station.replay_button(i32::from(button));
+            return Self::from_station(view);
+        }
+        self.snapshot()
+    }
+
+    /// 官方 `MultiPlayerGameMode.handleContainerInput` 的预测：变过的槽和光标都回传
+    /// `HashedStack.create`。返回这次服务端补发的槽位，以及光标有没有被补发。
+    ///
+    /// The predicting client from `MultiPlayerGameMode.handleContainerInput`.
+    /// Returns the slots the server resent, and whether the carried item was resent.
+    pub fn click_predicting(
+        &mut self,
+        slot: i16,
+        button: i8,
+        input: ContainerInput,
+    ) -> (Snapshot, Vec<i16>, bool) {
+        if !self.menu.valid_slot_index(slot) {
+            return (self.snapshot(), Vec::new(), false);
+        }
+        let before = self.menu_slots();
+        let mut ctx = Ctx {
+            kind: self.menu.kind,
+            container_size: self.menu.container_size,
+            viewer: VIEWER,
+            container: &mut self.container,
+            sources: &mut self.sources,
+            inventory: &mut self.inventory,
+            carried: &mut self.menu.carried,
+            quickcraft_status: &mut self.menu.quickcraft_status,
+            quickcraft_type: &mut self.menu.quickcraft_type,
+            quickcraft_slots: &mut self.menu.quickcraft_slots,
+            creative: self.creative,
+        };
+        super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
+        let after = self.menu_slots();
+        for (index, (previous, current)) in before.iter().zip(&after).enumerate() {
+            if !previous.matches(current) {
+                self.menu.remote_slots[index].receive(hashed_stack(current));
+            }
+        }
+        self.menu
+            .remote_carried
+            .receive(hashed_stack(&self.menu.carried));
+        let resent = self
+            .menu
+            .take_slot_changes(&after)
+            .iter()
+            .map(|(_, index, _)| *index as i16)
+            .collect();
+        let carried_resent = self.menu.take_carried_change().is_some();
+        (self.snapshot(), resent, carried_resent)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
+        if let Some(station) = &self.station {
+            return Self::from_station(station.replay_view());
+        }
         Snapshot {
             slots: self.menu_slots(),
             carried: self.menu.carried.clone(),
             state_id: self.menu.state_id,
+            data: Vec::new(),
+        }
+    }
+
+    fn from_station(view: super::station::StationSnapshot) -> Snapshot {
+        Snapshot {
+            slots: view.slots,
+            carried: view.carried,
+            state_id: view.state_id,
+            data: view.data,
         }
     }
 
@@ -159,6 +355,47 @@ fn official_slot(index: usize) -> Option<usize> {
         40 => Some(OFF_HAND),
         _ => None,
     }
+}
+
+fn bamboo_inventory(official: &[(i32, i32)]) -> Vec<ItemStack> {
+    let mut slots = vec![ItemStack::empty(); 46];
+    for (index, &(item, count)) in official.iter().enumerate() {
+        if let Some(slot) = official_slot(index) {
+            slots[slot] = stack(item, count);
+        }
+    }
+    slots
+}
+
+/// 官方 `HashedStack.create`。算不出哈希时放一个对不上的值，服务端会把这格再发一次。
+///
+/// `HashedStack.create`. A value that cannot be hashed does not match, so the
+/// server sends the slot again.
+fn hashed_stack(stack: &ItemStack) -> HashedStack {
+    if stack.is_empty() {
+        return HashedStack::Empty;
+    }
+    let Ok(patch) = ComponentPatch::from_opaque(stack) else {
+        return hashed_mismatch(stack);
+    };
+    match component_hashes(&patch) {
+        Some(hashed) => HashedStack::Item(HashedItem {
+            item: stack.item,
+            count: stack.count,
+            added: hashed.added,
+            removed: hashed.removed,
+        }),
+        None => hashed_mismatch(stack),
+    }
+}
+
+fn hashed_mismatch(stack: &ItemStack) -> HashedStack {
+    HashedStack::Item(HashedItem {
+        item: stack.item,
+        count: stack.count,
+        added: vec![(i32::MIN, 0)],
+        removed: Vec::new(),
+    })
 }
 
 fn stack(item: i32, count: i32) -> ItemStack {
@@ -231,5 +468,16 @@ mod tests {
         assert_eq!(official_slot(39), Some(5));
         assert_eq!(official_slot(40), Some(45));
         assert_eq!(official_slot(41), None);
+    }
+
+    /// 一格橡木原木放进工作台，打开之后结果是四块木板，state id 被重算和整包各推进一次。
+    #[test]
+    fn a_crafting_table_opens_with_planks() {
+        let grid = [(items::OAK_LOG, 1)];
+        let mut replay = Replay::workstation(ReplayShape::Crafting, &grid, &[], &[], false);
+        let snapshot = replay.open();
+        assert_eq!(snapshot.slots[0], ItemStack::new(items::OAK_PLANKS, 4));
+        assert_eq!(snapshot.slots[1], ItemStack::new(items::OAK_LOG, 1));
+        assert_eq!(snapshot.state_id, 2);
     }
 }

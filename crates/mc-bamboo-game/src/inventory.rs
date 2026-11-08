@@ -3,7 +3,7 @@
 //! 物品栏由客户端决定，服务端只是一份镜像：客户端改的槽不回包，
 //! 服务端自己改了（换手、中键）才发 `container_set_slot`。
 
-use mc_bamboo_blocks::BlockState;
+use mc_bamboo_blocks::{BlockState, ItemExchange, wash_dyed_color};
 use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_data::{block_of_state, registries::data_component_type};
 use mc_bamboo_protocol::{
@@ -29,6 +29,14 @@ pub(crate) const OFF_HAND: usize = 45;
 const HOTBAR_SIZE: usize = 9;
 /// 官方 `Inventory.items` 的长度：快捷栏和背包。
 const INVENTORY_ITEMS: usize = 36;
+/// 官方 `Inventory.SLOT_OFFHAND`。副手不在 `items` 里。
+///
+/// `Inventory.SLOT_OFFHAND`. The off hand is not part of `items`.
+const OFFHAND_INDEX: usize = 40;
+/// 官方 `Container.getMaxStackSize` 的默认值。
+///
+/// The default `Container.getMaxStackSize`.
+const CONTAINER_STACK_LIMIT: i32 = 99;
 /// 玩家物品栏的容器 ID。
 const PLAYER_CONTAINER: i32 = 0;
 /// `state_id` 回绕的掩码。
@@ -86,6 +94,20 @@ impl Inventory {
     fn next_state_id(&mut self) -> i32 {
         self.state_id = (self.state_id + 1) & STATE_ID_MASK;
         self.state_id
+    }
+
+    /// 物品栏菜单（容器 ID 0）的 `state_id`。合成和 `send_slot` 共用这一份。
+    ///
+    /// `state_id` of the inventory menu (container id 0). Crafting and `send_slot` share it.
+    pub(crate) fn state_id(&self) -> i32 {
+        self.state_id
+    }
+
+    /// 见 [`Inventory::state_id`]。
+    ///
+    /// See [`Inventory::state_id`].
+    pub(crate) fn set_state_id(&mut self, state_id: i32) {
+        self.state_id = state_id;
     }
 
     /// 中键选取，返回物品变了的菜单槽位，升序。`blocks-inventory.md` 8.4。
@@ -172,6 +194,201 @@ impl Inventory {
         self.select(index);
         HOTBAR_START + index
     }
+
+    /// 官方 `ItemUtils.createFilledResult` 和洗染料的 `remove`。
+    ///
+    /// 返回物品变了的菜单槽位。生存模式放不下的那一份没有物品实体，直接消失。
+    ///
+    /// `ItemUtils.createFilledResult`, and `remove` for dyed items.
+    ///
+    /// Returns the menu slots that changed. A survival remainder has no item entity, so it vanishes.
+    fn apply_exchange(
+        &mut self,
+        hand: Hand,
+        exchange: &ItemExchange,
+        creative: bool,
+    ) -> Vec<usize> {
+        let before = self.slots.clone();
+        match exchange {
+            ItemExchange::RemoveDyedColor => {
+                let slot = self.hand_slot(hand);
+                wash_dyed_color(&mut self.slots[slot]);
+            }
+            ItemExchange::Fill {
+                replacement,
+                limit_creative,
+            } => self.fill_hand(hand, replacement.clone(), creative, *limit_creative),
+        }
+        self.slots
+            .iter()
+            .zip(&before)
+            .enumerate()
+            .filter(|(_, (now, was))| *now != *was)
+            .map(|(slot, _)| slot)
+            .collect()
+    }
+
+    /// 官方 `createFilledResult`：先处理创造模式的上限，再消耗手里的一个。
+    ///
+    /// `createFilledResult`: apply the creative limit, then consume one from the hand.
+    fn fill_hand(
+        &mut self,
+        hand: Hand,
+        replacement: ItemStack,
+        creative: bool,
+        limit_creative: bool,
+    ) {
+        if limit_creative && creative {
+            if !self.contains(&replacement) {
+                self.add(replacement, true);
+            }
+            return;
+        }
+        let menu = self.hand_slot(hand);
+        if !creative {
+            // 官方 `ItemStack.consume`：没有无限材料才减数量。
+            // `ItemStack.consume`: the count shrinks only without infinite materials.
+            let stack = &mut self.slots[menu];
+            stack.count -= 1;
+            if stack.is_empty() {
+                *stack = ItemStack::empty();
+            }
+        }
+        if self.slots[menu].is_empty() {
+            self.slots[menu] = replacement;
+        } else {
+            self.add(replacement, creative);
+        }
+    }
+
+    /// 官方 `Inventory.add(ItemStack)`，也就是 `add(-1, stack)`。
+    ///
+    /// `Inventory.add(ItemStack)`, which is `add(-1, stack)`.
+    pub(crate) fn add(&mut self, mut incoming: ItemStack, creative: bool) -> bool {
+        if incoming.is_empty() {
+            return false;
+        }
+        if incoming.is_damaged() {
+            return self.add_damaged(incoming, creative);
+        }
+        let mut last;
+        loop {
+            last = incoming.count;
+            let left = self.add_resource(&incoming);
+            incoming.count = left;
+            if incoming.is_empty() || incoming.count >= last {
+                break;
+            }
+        }
+        if incoming.count == last && creative {
+            true
+        } else {
+            incoming.count < last
+        }
+    }
+
+    /// 损坏的物品只进空格子，不和别的堆叠。
+    ///
+    /// A damaged stack only goes into an empty slot. It does not stack.
+    fn add_damaged(&mut self, incoming: ItemStack, creative: bool) -> bool {
+        match self.free_slot() {
+            Some(index) => {
+                let menu = self.menu_index(index);
+                self.slots[menu] = incoming;
+                true
+            }
+            None if creative => true,
+            None => false,
+        }
+    }
+
+    /// 官方 `addResource(ItemStack)`：先找还能叠的格子，没有再找空格子。
+    ///
+    /// `addResource(ItemStack)`: a slot with room first, otherwise an empty slot.
+    fn add_resource(&mut self, incoming: &ItemStack) -> i32 {
+        let index = self.slot_with_space(incoming).or_else(|| self.free_slot());
+        match index {
+            Some(index) => self.add_resource_to(index, incoming),
+            None => incoming.count,
+        }
+    }
+
+    /// 官方 `addResource(int, ItemStack)`。
+    ///
+    /// `addResource(int, ItemStack)`.
+    fn add_resource_to(&mut self, index: usize, incoming: &ItemStack) -> i32 {
+        let count = incoming.count;
+        let menu = self.menu_index(index);
+        let limit = if self.slots[menu].is_empty() {
+            inventory_max(incoming)
+        } else {
+            inventory_max(&self.slots[menu])
+        };
+        let to_add = count.min(limit - self.slots[menu].count);
+        if to_add == 0 {
+            return count;
+        }
+        if self.slots[menu].is_empty() {
+            let mut placed = incoming.clone();
+            placed.count = 0;
+            self.slots[menu] = placed;
+        }
+        self.slots[menu].count += to_add;
+        count - to_add
+    }
+
+    /// 官方 `getSlotWithRemainingSpace`：选中格、副手，再从头扫 `items`。
+    ///
+    /// `getSlotWithRemainingSpace`: the selected slot, the off hand, then `items` from the start.
+    fn slot_with_space(&self, incoming: &ItemStack) -> Option<usize> {
+        let selected = usize::from(self.selected);
+        if has_space(self.stack_at(selected), incoming) {
+            return Some(selected);
+        }
+        if has_space(self.stack_at(OFFHAND_INDEX), incoming) {
+            return Some(OFFHAND_INDEX);
+        }
+        (0..INVENTORY_ITEMS).find(|&index| has_space(self.stack_at(index), incoming))
+    }
+
+    /// 官方 `getFreeSlot`：只扫 `items`，不放进盔甲或副手。
+    ///
+    /// `getFreeSlot`: only `items`. Armour and the off hand are not free slots.
+    fn free_slot(&self) -> Option<usize> {
+        (0..INVENTORY_ITEMS).find(|&index| self.stack_at(index).is_empty())
+    }
+
+    fn stack_at(&self, index: usize) -> &ItemStack {
+        &self.slots[self.menu_index(index)]
+    }
+
+    /// `items` 的下标，或者副手的 40，换成菜单槽位。
+    ///
+    /// An `items` index, or off-hand index 40, as a menu slot.
+    fn menu_index(&self, index: usize) -> usize {
+        if index == OFFHAND_INDEX {
+            OFF_HAND
+        } else {
+            menu_slot(index)
+        }
+    }
+}
+
+/// 官方 `Inventory.getMaxStackSize(ItemStack)`：容器上限和物品上限里较小的那个。
+///
+/// `Inventory.getMaxStackSize(ItemStack)`: the smaller of the container limit and the item limit.
+fn inventory_max(stack: &ItemStack) -> i32 {
+    stack.max_stack_size().min(CONTAINER_STACK_LIMIT)
+}
+
+/// 官方 `hasRemainingSpaceForItem`。
+///
+/// `hasRemainingSpaceForItem`.
+fn has_space(slot: &ItemStack, incoming: &ItemStack) -> bool {
+    !slot.is_empty()
+        && slot.is_same_item_same_components(incoming)
+        && slot.is_stackable()
+        && slot.count < inventory_max(slot)
 }
 
 /// 官方 `Inventory.items` 的下标换算成菜单槽位。
@@ -257,6 +474,25 @@ pub(crate) fn swap_hands(region: &mut Region, id: PlayerId) {
     send_slot(player, &mut region.links, OFF_HAND);
 }
 
+/// 炼药锅记下的物品交换。创造模式就是官方的 `hasInfiniteMaterials`。
+///
+/// Apply a cauldron's item exchange. Creative mode is vanilla `hasInfiniteMaterials`.
+pub(crate) fn apply_item_exchange(
+    region: &mut Region,
+    id: PlayerId,
+    hand: Hand,
+    exchange: &ItemExchange,
+) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    let creative = player.game_mode == GameMode::Creative;
+    let changed = player.inventory.apply_exchange(hand, exchange, creative);
+    for slot in changed {
+        send_slot(player, &mut region.links, slot);
+    }
+}
+
 /// 用空桶舀起了 `item`。客户端在本地放进了同一格，官方在这一刻末尾把这一格同步过去，这里直接发。
 pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
     let Some(player) = region.players.get_mut(&id) else {
@@ -267,10 +503,102 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
     }
 }
 
+/// 把物品栏里每个槽发给这名玩家。`/give` 和 `/clear` 改完之后用它同步。
+///
+/// Sends every inventory slot. `/give` and `/clear` use this after they change the inventory.
+pub(crate) fn send_all_slots(player: &mut Player, links: &mut Links) {
+    for slot in 0..MENU_SLOTS {
+        send_slot(player, links, slot);
+    }
+}
+
+/// 官方 `Inventory.clearOrCountMatchingItems`。`amount_to_remove` 是负数时不限量。
+///
+/// Official `Inventory.clearOrCountMatchingItems`. A negative `amount_to_remove` is unlimited.
+pub(crate) fn clear_or_count(
+    inventory: &mut Inventory,
+    predicate: &dyn Fn(&ItemStack) -> bool,
+    counting_only: bool,
+    amount_to_remove: i32,
+) -> i32 {
+    let mut count = 0;
+    // 顺序和官方 `Inventory` 的容器一致：快捷栏和背包、盔甲、副手，最后是合成格。
+    //
+    // Same order as official `Inventory`: hotbar and storage, armour, off hand, then the craft grid.
+    for index in 0..INVENTORY_ITEMS {
+        count += clear_slot(
+            &mut inventory.slots[menu_slot(index)],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    for slot in (ARMOR_START..ARMOR_START + 4).rev() {
+        count += clear_slot(
+            &mut inventory.slots[slot],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    count += clear_slot(
+        &mut inventory.slots[OFF_HAND],
+        predicate,
+        amount_to_remove - count,
+        counting_only,
+    );
+    // Bamboo 的 0 号是合成结果，输入格是 1 到 4，和官方的 craftSlots 对应。
+    //
+    // Slot 0 is the crafting result. Slots 1 through 4 are the inputs, matching official craftSlots.
+    for slot in 1..ARMOR_START {
+        count += clear_slot(
+            &mut inventory.slots[slot],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    // 光标上的物品官方也会清掉，Bamboo 不保存它。
+    //
+    // Official also clears the cursor item. Bamboo does not store it.
+    count
+}
+
+/// 官方 `ContainerHelper.clearOrCountMatchingItems` 处理一个物品堆的部分。
+///
+/// The per-stack part of official `ContainerHelper.clearOrCountMatchingItems`.
+fn clear_slot(
+    stack: &mut ItemStack,
+    predicate: &dyn Fn(&ItemStack) -> bool,
+    amount_to_remove: i32,
+    counting_only: bool,
+) -> i32 {
+    if stack.is_empty() || !predicate(stack) {
+        return 0;
+    }
+    if counting_only {
+        return stack.count;
+    }
+    let removed = if amount_to_remove < 0 {
+        stack.count
+    } else {
+        amount_to_remove.min(stack.count)
+    };
+    stack.count -= removed;
+    if stack.count <= 0 {
+        *stack = ItemStack::empty();
+    }
+    removed
+}
+
 /// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端
 /// 自己的数据，见 [`ItemStack::write`]。
 pub(crate) fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
     let state_id = player.inventory.next_state_id();
+    // 这一格已经发给客户端了，物品栏菜单的远程槽跟上，下次合成点击才不会再发一遍。
+    // The client already has this slot. Update the inventory menu's remote slot so the next
+    // crafting click does not send it again.
+    crate::menu::station::note_inventory_slot(player, slot);
     let packet = ContainerSetSlot {
         container_id: PLAYER_CONTAINER,
         state_id,
@@ -328,5 +656,7 @@ pub(crate) fn on_pick_item_from_block(
 
 mod clone;
 
+#[cfg(test)]
+mod exchange;
 #[cfg(test)]
 mod tests;

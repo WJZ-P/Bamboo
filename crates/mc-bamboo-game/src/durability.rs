@@ -165,13 +165,12 @@ mod tests {
         };
         let pos = BlockPos::new(8, -60, 9);
         server.region().chunks.set_block(pos, blocks::SHORT_GRASS);
-        server.request(
-            &client,
-            PlayRequest::ChatCommand {
-                command: "gamemode survival".to_owned(),
-            },
-        );
-        server.tick();
+        server
+            .region()
+            .players
+            .get_mut(&client.id)
+            .unwrap()
+            .game_mode = GameMode::Survival;
         client.take_frames();
 
         server.request(

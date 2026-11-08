@@ -112,6 +112,8 @@ async fn join_order_matches_the_official_server() {
         [
             play::clientbound::LOGIN,
             play::clientbound::PLAYER_ABILITIES,
+            play::clientbound::ENTITY_EVENT,
+            play::clientbound::COMMANDS,
             play::clientbound::PLAYER_POSITION,
             play::clientbound::PLAYER_INFO_UPDATE,
             play::clientbound::SET_ENTITY_DATA,
@@ -217,6 +219,37 @@ async fn wrong_keep_alive_answer_disconnects_with_the_timeout_reason() {
     client.read_until(play::clientbound::KEEP_ALIVE).await;
     let mut answer = vec![play::serverbound::KEEP_ALIVE as u8];
     answer.extend_from_slice(&(-1i64).to_be_bytes());
+    client.send(&frame(&answer)).await;
+
+    let disconnect = client.read_until(play::clientbound::DISCONNECT).await;
+    assert_eq!(
+        disconnect_body(&disconnect),
+        translated("disconnect.timeout")
+    );
+    client.assert_closed().await;
+}
+
+/// 官方 `handleKeepAlive`：当前没在等心跳时，任何 id 都是 `disconnect.timeout`。
+///
+/// Official `handleKeepAlive`: any id disconnects with `disconnect.timeout` when no
+/// challenge is pending.
+#[tokio::test]
+async fn unsolicited_keep_alive_disconnects_with_the_timeout_reason() {
+    let config = ServerConfig {
+        // 第一跳在这一跳发出之前，回应都算“没在等”。读完区块用不到这么久。
+        // The first challenge has not been sent yet, so a reply is unsolicited.
+        // Reading the chunks finishes well inside this interval.
+        keep_alive_interval: Duration::from_secs(20),
+        ..small_world()
+    };
+    let server = TestServer::start(config).await;
+    let mut client = server.join("Kitten").await;
+    client.read_chunks(CHUNKS).await;
+
+    // 服务端的第一跳 id 是 1。如果其实已经在等，这个回应会被接受，测试就会失败。
+    // The first challenge id is 1. If one is already pending, this reply is accepted and the test fails.
+    let mut answer = vec![play::serverbound::KEEP_ALIVE as u8];
+    answer.extend_from_slice(&1i64.to_be_bytes());
     client.send(&frame(&answer)).await;
 
     let disconnect = client.read_until(play::clientbound::DISCONNECT).await;

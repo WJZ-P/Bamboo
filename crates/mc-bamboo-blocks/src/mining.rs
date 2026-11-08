@@ -3,10 +3,17 @@
 //! 官方的进度是 `getDestroyProgress(state) * (挖了几刻 + 1)`，见 `ServerPlayerGameMode`。
 //! 这里只算每一刻的基础进度，攒进度和判断阈值在 `mc-bamboo-game`。
 //! 没有状态效果，所以急迫和挖掘疲劳都按没有算。
+//!
+//! 官方这些方法拿到的 `BlockState` 一定在注册表里。状态 ID 不存在时这里不把它当成空气
+//! （方块 ID 0）：进度是 0，工具规则也不套。这是 Bamboo 的防御，不是官方的一个分支。
+//!
+//! Official methods always receive a registered `BlockState`. An unknown state id is not
+//! treated as air (block id 0): progress is 0 and tool rules are not applied. That guard
+//! belongs to Bamboo; vanilla has no such branch.
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
-    block_id_of_state, block_of_state, block_tag,
+    block_id_of_state, block_of_state, block_tag, blocks,
     registries::{attribute_defaults, data_component_type as kinds},
 };
 use mc_bamboo_protocol::components::{
@@ -34,9 +41,18 @@ pub struct Miner {
 ///
 /// 附魔和状态效果都还没有：`MINING_EFFICIENCY` 只是属性的默认值，
 /// `MobEffectUtil.hasDigSpeed` 和 `MINING_FATIGUE` 在这里是恒假。
+///
+/// 状态 ID 不在注册表里时没有方块可拿去 `state.is(rule.blocks)`，不能当成空气。
+/// 有工具就用 `Tool.getMiningSpeed` 一条规则都没中时的 `defaultMiningSpeed`，否则是 1。
+///
+/// An unregistered state id is not a block, so it is not air. A tool then uses
+/// `Tool.defaultMiningSpeed`, which is what `getMiningSpeed` returns when no rule matches;
+/// an empty hand stays at 1.
 pub fn destroy_speed(state: u32, miner: Miner) -> f32 {
-    let block = block_id_of_state(state).unwrap_or_default() as i32;
-    let mut speed = tool_of(miner.main_hand).map_or(1.0, |tool| tool.mining_speed(block));
+    let mut speed = tool_of(miner.main_hand).map_or(1.0, |tool| match block_id_of_state(state) {
+        Some(block) => tool.mining_speed(block as i32),
+        None => tool.default_mining_speed,
+    });
     if speed > 1.0 {
         speed += attribute_defaults::MINING_EFFICIENCY as f32;
     }
@@ -53,6 +69,11 @@ pub fn destroy_speed(state: u32, miner: Miner) -> f32 {
 /// 挖一下增加多少进度，官方的 `BlockBehaviour.getDestroyProgress`。
 ///
 /// 硬度是 `-1`（挖不动）时是 0。带对了工具时除以 30，否则除以 100。
+/// 状态 ID 不在注册表里时没有硬度，同样按挖不动算。官方不会拿到这种状态。
+///
+/// Hardness `-1` yields 0. The divisor is 30 with the correct tool and 100 otherwise.
+/// An unregistered state id has no hardness and is treated the same way. Vanilla never
+/// observes that id.
 pub fn destroy_progress(state: u32, miner: Miner) -> f32 {
     let hardness = block_of_state(state).map_or(-1.0, |block| block.destroy_time);
     if hardness == -1.0 {
@@ -69,15 +90,23 @@ pub fn destroy_progress(state: u32, miner: Miner) -> f32 {
 /// 手里这件工具挖这块方块会不会有掉落物，官方的 `Player.hasCorrectToolForDrops`。
 ///
 /// 掉落物本身还没有，但进度快慢取决于它。
+/// 状态 ID 不在注册表里就没有方块，不算带对了工具，也不能落到方块 ID 0。
+/// 官方的参数总是注册表里的 `BlockState`。
+///
+/// Drops are not implemented, but the progress divisor depends on this. An unregistered
+/// state id is not a block and does not count as the correct tool; it must not fall
+/// through to block id 0. Vanilla always passes a registered `BlockState`.
 pub fn is_correct_for_drops(state: u32, main_hand: i32) -> bool {
-    let Some(block) = block_of_state(state) else {
+    let Some(block_id) = block_id_of_state(state) else {
+        return false;
+    };
+    let Some(block) = blocks::BLOCKS.get(block_id) else {
         return false;
     };
     if !block.requires_correct_tool_for_drops {
         return true;
     }
-    let block_id = block_id_of_state(state).unwrap_or_default() as i32;
-    tool_of(main_hand).is_some_and(|tool| tool.is_correct_for_drops(block_id))
+    tool_of(main_hand).is_some_and(|tool| tool.is_correct_for_drops(block_id as i32))
 }
 
 /// 一个物品的 `tool` 组件，官方 `ItemStack.get(DataComponents.TOOL)`。
@@ -195,6 +224,34 @@ mod tests {
             0.0
         );
         assert_eq!(destroy_progress(blocks::BEDROCK, miner(items::AIR)), 0.0);
+    }
+
+    #[test]
+    fn an_unknown_state_id_is_not_mined_as_air() {
+        let unknown = blocks::TOTAL_STATES;
+        let pick = miner(items::DIAMOND_PICKAXE);
+
+        // 空气不要求特定工具，所以带对了；不存在的状态没有方块，不算带对。
+        // Air does not require a tool, so it counts as correct. An unknown state is
+        // not a block, so it does not.
+        assert!(is_correct_for_drops(blocks::AIR, items::DIAMOND_PICKAXE));
+        assert!(!is_correct_for_drops(unknown, items::DIAMOND_PICKAXE));
+        assert!(!is_correct_for_drops(u32::MAX, items::AIR));
+        assert_eq!(destroy_progress(unknown, pick), 0.0);
+        assert_eq!(destroy_progress(u32::MAX, pick), 0.0);
+
+        // 速度按“一条规则都没中”算，不拿方块 ID 0 去套规则。
+        // 泥土不在镐的规则里，和这个结果相同。
+        // Speed is the no-rule result, not a lookup of block id 0. Dirt is outside the
+        // pickaxe rules, so it produces the same speed.
+        assert_eq!(
+            destroy_speed(unknown, pick),
+            destroy_speed(blocks::DIRT, pick)
+        );
+        assert_eq!(
+            destroy_speed(unknown, miner(items::AIR)),
+            destroy_speed(blocks::STONE, miner(items::AIR))
+        );
     }
 
     #[test]

@@ -131,8 +131,17 @@ fn drop_stalactite(state: BlockState, world: &mut World, pos: BlockPos) {
     let mut fall_pos = pos;
     let mut fall_state = state;
     while is_stalactite(fall_state) {
-        fall(world, fall_pos, fall_state);
+        let id = fall(world, fall_pos, fall_state);
         if is_tip_or_merged(fall_state) {
+            // `SpeleothemBlock.spawnFallingStalactite`：尖端 `setHurtsEntities(1 * size, 40)`。
+            // 砸到实体的伤害不做，但铁砧裂开用的是同一个标记，这里也要设上。
+            //
+            // The tip calls `setHurtsEntities`. Entity damage is skipped, but the flag
+            // is what an anvil reads before it rolls to crack, and dripstone sets it too.
+            let size = (1 + pos.y - fall_pos.y).max(6);
+            if let Some(entity) = world.entity_mut(id) {
+                entity.set_hurts_entities(size as f32, 40);
+            }
             break;
         }
         fall_pos = fall_pos.below();

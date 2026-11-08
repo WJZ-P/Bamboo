@@ -1,4 +1,7 @@
-//! `CrafterBlock`。被信号触发时排一个计划刻，真正的合成要方块实体里的物品，不在范围里。
+//! `CrafterBlock`。被信号触发时排一个计划刻。9 格物品栏给漏斗和比较器用，合成和吐出物品不在这次范围里。
+//!
+//! `CrafterBlock`. A signal schedules a tick. The 9 slots are there for hoppers and the
+//! comparator. Crafting and ejecting the result are out of scope.
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
@@ -80,5 +83,18 @@ impl Behaviour for Crafter {
         _ctx: &UseContext,
     ) -> InteractionResult {
         InteractionResult::Success
+    }
+
+    /// `CrafterBlock.getAnalogOutputSignal`：非空或禁用的格子数。
+    ///
+    /// `CrafterBlock.getAnalogOutputSignal`: how many slots are non-empty or disabled.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        crate::block_container::crafter_signal(world, pos)
     }
 }

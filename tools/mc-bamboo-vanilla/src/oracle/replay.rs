@@ -9,13 +9,17 @@ use std::{
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Combined, Container,
     Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
-    ShulkerSlots, Slots, TickPriority, destroy_block, random_tick, redstone_signal,
-    run_action_block_ticks, run_scheduled_ticks,
+    ShulkerSlots, Slots, TickPriority, destroy_block,
+    entity::Entities,
+    random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
-    state::{CHEST_TYPE, ChestType, FACING},
-    tick_chunk, use_item, use_item_on,
+    state::{
+        CHEST_TYPE, ChestType, FACING, HAS_RECORD, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED,
+        SLOT_2_OCCUPIED, SLOT_3_OCCUPIED, SLOT_4_OCCUPIED, SLOT_5_OCCUPIED,
+    },
+    tick_chunk, use_item, use_item_on, use_item_on_with_stack,
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -78,6 +82,11 @@ struct OracleLevel {
     /// `CompoundContainer` 拼起来。末影箱的槽位在玩家身上，不是容器，不在这里。
     containers: BTreeMap<BlockPos, Vec<ItemStack>>,
     entities: Vec<Aabb>,
+    /// 下落方块和 TNT。方块 oracle 不 tick 它们，只是让 `addFreshEntity` 有地方放。
+    ///
+    /// Falling blocks and primed TNT. The block oracle does not tick them; the store
+    /// only gives `addFreshEntity` somewhere to land.
+    world_entities: Entities,
     min_y: i32,
     max_y: i32,
     random: LevelRandom,
@@ -98,6 +107,10 @@ enum ContainerKind {
     Hopper,
     Dispenser,
     Dropper,
+    ChiseledBookshelf,
+    Jukebox,
+    DecoratedPot,
+    Crafter,
 }
 
 impl ContainerKind {
@@ -110,6 +123,13 @@ impl ContainerKind {
             (BlockAncestor::DropperBlock, Self::Dropper),
             (BlockAncestor::DispenserBlock, Self::Dispenser),
             (BlockAncestor::ChestBlock, Self::Chest),
+            (
+                BlockAncestor::ChiseledBookShelfBlock,
+                Self::ChiseledBookshelf,
+            ),
+            (BlockAncestor::JukeboxBlock, Self::Jukebox),
+            (BlockAncestor::DecoratedPotBlock, Self::DecoratedPot),
+            (BlockAncestor::CrafterBlock, Self::Crafter),
         ]
         .into_iter()
         .find(|(ancestor, _)| state.is_a(*ancestor))
@@ -119,7 +139,9 @@ impl ContainerKind {
     const fn slots(self) -> usize {
         match self {
             Self::Hopper => 5,
-            Self::Dispenser | Self::Dropper => 9,
+            Self::Dispenser | Self::Dropper | Self::Crafter => 9,
+            Self::ChiseledBookshelf => 6,
+            Self::Jukebox | Self::DecoratedPot => 1,
             Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
         }
     }
@@ -130,6 +152,32 @@ impl ContainerKind {
 struct DoubleChest {
     first: BlockPos,
     second: BlockPos,
+}
+
+/// `FakeLevel.syncContents` 里直接写字段的那两种。不调用 `setItem`，所以书架的
+/// `lastInteractedSlot` 仍是 -1，唱机也不开始放歌。
+///
+/// The two `FakeLevel.syncContents` cases that write fields directly. They do not call
+/// `setItem`, so a bookshelf keeps `lastInteractedSlot` at -1 and a jukebox does not play.
+fn seed_mirrored_contents(slots: &mut [ItemStack], state: BlockState) {
+    if state.is_a(BlockAncestor::ChiseledBookShelfBlock) {
+        let occupied = [
+            SLOT_0_OCCUPIED,
+            SLOT_1_OCCUPIED,
+            SLOT_2_OCCUPIED,
+            SLOT_3_OCCUPIED,
+            SLOT_4_OCCUPIED,
+            SLOT_5_OCCUPIED,
+        ];
+        for (slot, property) in occupied.into_iter().enumerate() {
+            if state.get(property) {
+                slots[slot] = ItemStack::new(items::BOOK, 1);
+            }
+        }
+    }
+    if state.is_a(BlockAncestor::JukeboxBlock) && state.get(HAS_RECORD) && !slots.is_empty() {
+        slots[0] = ItemStack::new(items::MUSIC_DISC_13, 1);
+    }
 }
 
 impl OracleLevel {
@@ -147,7 +195,15 @@ impl OracleLevel {
         let mut block_entities = BlockEntities::default();
         for &(pos, state) in &cells {
             if let Some(kind) = ContainerKind::of(state) {
-                containers.insert(pos, vec![ItemStack::empty(); kind.slots()]);
+                let mut slots = vec![ItemStack::empty(); kind.slots()];
+                // `FakeLevel.syncContents`：书架的占用格补成书，带唱片的唱机补成 `music_disc_13` 且不放歌。
+                // 内容表随后覆盖这些格子，仍然不走 `setItem`。
+                //
+                // `FakeLevel.syncContents`: occupied bookshelf slots become books, and a jukebox
+                // with a record becomes `music_disc_13` without starting playback. Later contents
+                // overwrite those slots and still do not call `setItem`.
+                seed_mirrored_contents(&mut slots, state);
+                containers.insert(pos, slots);
             }
             // 官方的 `LevelChunk` 在场景加载时给每个有方块实体的格子建实体，漏斗的
             // ticker 这时登记，tick 顺序就是这里插入的顺序。
@@ -173,6 +229,7 @@ impl OracleLevel {
             blocks: cells.into_iter().collect(),
             containers,
             entities: entity_boxes(&case.action),
+            world_entities: Entities::default(),
             min_y: header.min_y,
             max_y: header.max_y,
             random: LevelRandom::new(case.seed),
@@ -386,6 +443,14 @@ impl Level for OracleLevel {
         &mut self.redstone
     }
 
+    fn entities(&self) -> &Entities {
+        &self.world_entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.world_entities
+    }
+
     fn random(&self) -> &LevelRandom {
         &self.random
     }
@@ -405,6 +470,30 @@ impl Level for OracleLevel {
     }
 
     /// `getBlockContainer`：漏斗取物品时会忽略压住箱子的方块，双箱按 `CompoundContainer` 合并。
+    fn with_slots(
+        &mut self,
+        pos: BlockPos,
+        len: usize,
+        f: &mut dyn FnMut(&mut [ItemStack]),
+    ) -> bool {
+        let Some(kind) = self.kind(pos) else {
+            return false;
+        };
+        if kind.slots() != len {
+            return false;
+        }
+        f(self.slots_mut(pos, kind));
+        true
+    }
+
+    fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
+        self.containers.get(&pos).cloned().unwrap_or_default()
+    }
+
+    fn clear_container(&mut self, pos: BlockPos) {
+        self.containers.remove(&pos);
+    }
+
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
         let Some(kind) = self.kind(pos) else {
             return false;
@@ -589,7 +678,27 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     let mut outcome = match action.kind {
         Kind::Place | Kind::Use => {
             let hit = hit_of(action)?;
-            use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit)
+            let held = match action.hand {
+                Hand::Main => &action.main,
+                Hand::Off => &action.off,
+            };
+            // 点到炼药锅时给手里的物品挂上和 Java 同一套组件，两边才能比到水瓶、染料和旗帜。
+            // A cauldron click gets the same components Java attaches, so water, dye and banners compare.
+            match super::cauldron_hand::stack(
+                level.block_state(hit.pos),
+                names.item(held)?.0,
+                action.sneak,
+            ) {
+                Some(stack) => use_item_on_with_stack(
+                    &mut level,
+                    &mut ticks,
+                    &actor,
+                    action.hand,
+                    &hit,
+                    &stack,
+                ),
+                None => use_item_on(&mut level, &mut ticks, &actor, action.hand, &hit),
+            }
         }
         Kind::Destroy => destroy_block(&mut level, &mut ticks, &actor, target),
         Kind::Tick => run_one_tick(&mut level, &mut ticks, target, now),
@@ -683,6 +792,14 @@ fn contents_of(level: &OracleLevel) -> Vec<ContainerStack> {
     positions.sort_by_key(|pos| pos.pack());
     let mut contents = Vec::new();
     for pos in positions {
+        // 雕纹书架的内容是状态的镜像，官方 `collectContents` 不把它写进内容表。
+        //
+        // A chiseled bookshelf mirrors its contents in the block state. Vanilla
+        // `collectContents` leaves it out of the contents list.
+        let state = level.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
+        if state.is_a(BlockAncestor::ChiseledBookShelfBlock) {
+            continue;
+        }
         for (slot, stack) in level.containers[&pos].iter().enumerate() {
             if stack.is_empty() {
                 continue;
@@ -723,7 +840,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. }
             // 堆肥的粒子和声音，题里不比较。
-            | Effect::ComposterFill { .. } => None,
+            | Effect::ComposterFill { .. }
+            // 讲台翻页的声音，题里不比较。
+            | Effect::PageTurned { .. } => None,
         })
         .collect()
 }
@@ -774,6 +893,7 @@ mod tests {
             blocks: HashMap::new(),
             containers: BTreeMap::new(),
             entities: vec![player],
+            world_entities: Entities::default(),
             min_y: -64,
             max_y: 319,
             random: LevelRandom::new(0),
