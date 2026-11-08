@@ -276,7 +276,7 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
 }
 
 /// 把一个槽发给物品的主人，组件只能发回给它。
-fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
+pub(crate) fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
     let state_id = player.inventory.next_state_id();
     let packet = ContainerSetSlot {
         container_id: PLAYER_CONTAINER,

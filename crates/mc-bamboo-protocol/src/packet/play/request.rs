@@ -24,6 +24,12 @@ const MAX_HASHED_COMPONENTS: usize = 256;
 const SIGNATURE_BYTES: usize = 256;
 /// `LastSeenMessages.Update` 里 20 位定长位集占的字节数。
 const LAST_SEEN_ACKNOWLEDGED_BYTES: usize = 3;
+/// `ServerboundEditBookPacket` 的页数上限，`ByteBufCodecs.list(100)`。
+const MAX_BOOK_PAGES: usize = 100;
+/// 每一页的字符上限，`stringUtf8(1024)`，也是 `WritableBookContent.PAGE_EDIT_LENGTH`。
+const MAX_BOOK_PAGE_CHARS: usize = 1024;
+/// 标题的字符上限，`stringUtf8(32)`，也是 `WrittenBookContent.TITLE_MAX_LENGTH`。
+const MAX_BOOK_TITLE_CHARS: usize = 32;
 
 /// 移动包 `flags` 里表示站在地上的位。
 const MOVE_FLAG_ON_GROUND: u8 = 0x01;
@@ -148,6 +154,16 @@ pub enum PlayRequest {
         lines: [String; LINES],
         slot: SignTextSlot,
     },
+    /// 书与笔保存页面，或者带标题时署名。
+    ///
+    /// `slot` 是官方 `Inventory` 的下标，不是菜单槽：快捷栏 0 到 8，副手 40。
+    /// 页数、每页长度和标题长度是 `ServerboundEditBookPacket` 的解码上限。
+    EditBook {
+        slot: i32,
+        pages: Vec<String>,
+        /// 有标题就是署名，没有就是只保存页面。
+        title: Option<String>,
+    },
     /// 服务端不解码的包，内容是包 ID。
     Other(i32),
 }
@@ -236,6 +252,7 @@ impl PlayRequest {
                 container_id: reader.varint()?,
             },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
+            serverbound::EDIT_BOOK => read_edit_book(&mut reader)?,
             other => return Ok(Self::Other(other)),
         };
         reader.finish()?;
@@ -284,6 +301,22 @@ fn read_sign_update(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError>
     }
     let slot = SignTextSlot::from_id(reader.varint()?);
     Ok(PlayRequest::SignUpdate { pos, lines, slot })
+}
+
+/// 解码 `edit_book`：槽位、页面、可选的标题。官方 `ServerboundEditBookPacket.STREAM_CODEC`。
+fn read_edit_book(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let slot = reader.varint()?;
+    let page_count = reader.count(MAX_BOOK_PAGES)?;
+    let mut pages = Vec::with_capacity(page_count);
+    for _ in 0..page_count {
+        pages.push(reader.string(MAX_BOOK_PAGE_CHARS)?.to_owned());
+    }
+    let title = if reader.bool()? {
+        Some(reader.string(MAX_BOOK_TITLE_CHARS)?.to_owned())
+    } else {
+        None
+    };
+    Ok(PlayRequest::EditBook { slot, pages, title })
 }
 
 fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
@@ -1401,6 +1434,99 @@ mod tests {
                 "00 00 02 00 00 00 8f c3  00  00  00"
             ),
             Err(DecodeError::UnexpectedEnd)
+        );
+    }
+
+    fn edit_book_bytes(slot: i32, pages: &[String], title: Option<&str>) -> Vec<u8> {
+        let mut payload = Vec::new();
+        write_varint(&mut payload, serverbound::EDIT_BOOK);
+        write_varint(&mut payload, slot);
+        write_varint(&mut payload, pages.len() as i32);
+        for page in pages {
+            write_string(&mut payload, page);
+        }
+        match title {
+            Some(title) => {
+                payload.push(1);
+                write_string(&mut payload, title);
+            }
+            None => payload.push(0),
+        }
+        payload
+    }
+
+    #[test]
+    fn decodes_edit_book_pages_and_an_optional_title() {
+        let pages = ["一".to_owned(), String::new(), "c".to_owned()];
+        assert_eq!(
+            PlayRequest::decode(&edit_book_bytes(4, &pages, None)).unwrap(),
+            PlayRequest::EditBook {
+                slot: 4,
+                pages: pages.to_vec(),
+                title: None,
+            }
+        );
+        assert_eq!(
+            PlayRequest::decode(&edit_book_bytes(40, &pages, Some(" 标题 "))).unwrap(),
+            PlayRequest::EditBook {
+                slot: 40,
+                pages: pages.to_vec(),
+                title: Some(" 标题 ".to_owned()),
+            }
+        );
+        // 槽位合不合法是处理时的事，解码照单全收，和官方一样。
+        assert_eq!(
+            PlayRequest::decode(&edit_book_bytes(-1, &[], None)).unwrap(),
+            PlayRequest::EditBook {
+                slot: -1,
+                pages: Vec::new(),
+                title: None,
+            }
+        );
+    }
+
+    #[test]
+    fn edit_book_rejects_too_many_pages_or_too_long_text() {
+        let hundred = vec![String::new(); MAX_BOOK_PAGES];
+        assert!(PlayRequest::decode(&edit_book_bytes(0, &hundred, None)).is_ok());
+
+        let mut too_many = Vec::new();
+        write_varint(&mut too_many, serverbound::EDIT_BOOK);
+        write_varint(&mut too_many, 0);
+        write_varint(&mut too_many, (MAX_BOOK_PAGES + 1) as i32);
+        assert_eq!(
+            PlayRequest::decode(&too_many),
+            Err(DecodeError::InvalidCount((MAX_BOOK_PAGES + 1) as i32))
+        );
+
+        let page = "竹".repeat(MAX_BOOK_PAGE_CHARS);
+        assert!(PlayRequest::decode(&edit_book_bytes(0, &[page], None)).is_ok());
+        let too_long = "竹".repeat(MAX_BOOK_PAGE_CHARS + 1);
+        assert_eq!(
+            PlayRequest::decode(&edit_book_bytes(0, std::slice::from_ref(&too_long), None)),
+            Err(DecodeError::StringTooLong {
+                max_chars: MAX_BOOK_PAGE_CHARS
+            })
+        );
+
+        let title = "a".repeat(MAX_BOOK_TITLE_CHARS);
+        assert!(PlayRequest::decode(&edit_book_bytes(0, &[], Some(&title))).is_ok());
+        let title = "a".repeat(MAX_BOOK_TITLE_CHARS + 1);
+        assert_eq!(
+            PlayRequest::decode(&edit_book_bytes(0, &[], Some(&title))),
+            Err(DecodeError::StringTooLong {
+                max_chars: MAX_BOOK_TITLE_CHARS
+            })
+        );
+    }
+
+    #[test]
+    fn edit_book_rejects_trailing_bytes() {
+        let mut payload = edit_book_bytes(0, &["hi".to_owned()], None);
+        payload.push(0);
+        assert_eq!(
+            PlayRequest::decode(&payload),
+            Err(DecodeError::TrailingBytes(1))
         );
     }
 
