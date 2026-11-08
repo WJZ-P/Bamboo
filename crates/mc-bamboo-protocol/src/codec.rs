@@ -33,6 +33,8 @@ pub enum DecodeError {
     InvalidItem(i32),
     #[error("invalid item count {0}")]
     InvalidItemCount(i32),
+    #[error("invalid data component type {0}")]
+    InvalidComponentType(i32),
 }
 
 /// 从 `input` 开头解码一个 VarInt，返回它的值和占用的字节数。

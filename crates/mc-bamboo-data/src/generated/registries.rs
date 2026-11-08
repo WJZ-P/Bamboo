@@ -539,3 +539,32 @@ pub mod fluid {
     pub const LAVA: i32 = 4;
 }
 
+pub mod menu {
+    pub const TOTAL: u32 = 25;
+    pub const GENERIC_9X1: i32 = 0;
+    pub const GENERIC_9X2: i32 = 1;
+    pub const GENERIC_9X3: i32 = 2;
+    pub const GENERIC_9X4: i32 = 3;
+    pub const GENERIC_9X5: i32 = 4;
+    pub const GENERIC_9X6: i32 = 5;
+    pub const GENERIC_3X3: i32 = 6;
+    pub const CRAFTER_3X3: i32 = 7;
+    pub const ANVIL: i32 = 8;
+    pub const BEACON: i32 = 9;
+    pub const BLAST_FURNACE: i32 = 10;
+    pub const BREWING_STAND: i32 = 11;
+    pub const CRAFTING: i32 = 12;
+    pub const ENCHANTMENT: i32 = 13;
+    pub const FURNACE: i32 = 14;
+    pub const GRINDSTONE: i32 = 15;
+    pub const HOPPER: i32 = 16;
+    pub const LECTERN: i32 = 17;
+    pub const LOOM: i32 = 18;
+    pub const MERCHANT: i32 = 19;
+    pub const SHULKER_BOX: i32 = 20;
+    pub const SMITHING: i32 = 21;
+    pub const SMOKER: i32 = 22;
+    pub const CARTOGRAPHY_TABLE: i32 = 23;
+    pub const STONECUTTER: i32 = 24;
+}
+

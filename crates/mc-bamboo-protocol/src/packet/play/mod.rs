@@ -5,6 +5,7 @@
 mod block;
 mod chat;
 mod entity;
+mod menu;
 mod movement;
 mod player_info;
 mod request;
@@ -12,6 +13,7 @@ mod request;
 pub use block::*;
 pub use chat::*;
 pub use entity::*;
+pub use menu::*;
 pub use movement::*;
 pub use player_info::*;
 pub use request::*;
@@ -334,7 +336,10 @@ mod tests {
             (AddEntity::ID, 1),
             (AwardStats::ID, 3),
             (BlockChangedAck::ID, 4),
+            (BlockEvent::ID, 7),
             (BlockUpdate::ID, 8),
+            (ContainerClose::ID, 17),
+            (ContainerSetContent::ID, 18),
             (ContainerSetSlot::ID, 20),
             (DisguisedChat::ID, 33),
             (EntityPositionSync::ID, 35),
@@ -343,11 +348,13 @@ mod tests {
             (MoveEntityPos::ID, 54),
             (MoveEntityPosRot::ID, 55),
             (MoveEntityRot::ID, 57),
+            (OpenScreen::ID, 60),
             (PongResponse::ID, 63),
             (PlayerInfoRemove::ID, 70),
             (PlayerInfoUpdate::ID, 71),
             (RemoveEntities::ID, 78),
             (RotateHead::ID, 85),
+            (SetCursorItem::ID, 98),
             (SetEntityData::ID, 101),
             (SetEquipment::ID, 104),
             (SetHeldSlot::ID, 107),
