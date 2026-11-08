@@ -12,6 +12,7 @@
 //!   `debug_stick_state`、`recipes`、`intangible_projectile`）线上是 NBT，官方会把 NBT 过一遍
 //!   DFU 的 `Codec` 再写回去。这里只保留 NBT 并校验最外层的形状，不复刻 DFU。
 
+pub mod book;
 pub mod cursor;
 pub mod defaults;
 pub mod forward;
@@ -59,12 +60,6 @@ const MAX_EXPLOSIONS: usize = 256;
 const MAX_CHARGED_PROJECTILES: usize = 1024;
 /// 官方 `ItemContainerContents.MAX_SIZE`。
 const MAX_CONTAINER_SLOTS: usize = 256;
-/// 官方 `WritableBookContent.MAX_PAGES`。
-const MAX_BOOK_PAGES: usize = 100;
-/// 官方 `WritableBookContent.PAGE_EDIT_LENGTH`。
-const MAX_WRITABLE_PAGE: usize = 1024;
-/// 官方 `WrittenBookContent.TITLE_MAX_LENGTH`。
-const MAX_BOOK_TITLE: usize = 32;
 /// 官方 `WrittenBookContent.MAX_GENERATION`。
 const MAX_BOOK_GENERATION: i32 = 3;
 
@@ -570,12 +565,13 @@ impl ComponentValue {
                 Self::SuspiciousStewEffects(cursor.list(usize::MAX, StewEffect::read)?)
             }
             kinds::WRITABLE_BOOK_CONTENT => {
-                Self::WritableBookContent(cursor.list(MAX_BOOK_PAGES, |cursor| {
-                    Filterable::read(cursor, |cursor| cursor.string(MAX_WRITABLE_PAGE))
+                Self::WritableBookContent(cursor.list(book::MAX_PAGES, |cursor| {
+                    Filterable::read(cursor, |cursor| cursor.string(book::PAGE_EDIT_LENGTH))
                 })?)
             }
             kinds::WRITTEN_BOOK_CONTENT => {
-                let title = Filterable::read(cursor, |cursor| cursor.string(MAX_BOOK_TITLE))?;
+                let title =
+                    Filterable::read(cursor, |cursor| cursor.string(book::TITLE_MAX_LENGTH))?;
                 let author = cursor.string(MAX_STRING)?;
                 let generation = cursor.varint()?;
                 // 官方 `WrittenBookContent` 的构造方法要求代数在 0 到 3 之间。
