@@ -1,8 +1,8 @@
 //! 这个 crate 和世界存储的边界。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, LightLayer};
 
 use crate::{shape::Aabb, state::BlockState};
 
@@ -23,6 +23,9 @@ pub trait Level {
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
 
+    /// `getBrightness(layer, pos)`：这一格的天空光或者方块光，0 到 15。
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32;
+
     /// 红石用到的、方块状态装不下的世界数据。
     fn redstone(&self) -> &RedstoneMemory;
 
@@ -32,14 +35,17 @@ pub trait Level {
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。
 ///
-/// 官方把这些放在方块实体（比较器的输出、雕纹书架最近动过的格子）和按世界分组的静态表
-/// （火把最近的开关）里。
+/// 官方把这些放在方块实体（比较器的输出、雕纹书架最近动过的格子、唱片机在不在放）
+/// 和按世界分组的静态表（火把最近的开关）里。
 #[derive(Debug, Default)]
 pub struct RedstoneMemory {
     /// `ComparatorBlockEntity.outputSignal`。没有记录的格子是 0，和空的方块实体一样。
     comparator_outputs: HashMap<BlockPos, i32>,
     /// `ChiseledBookShelfBlockEntity.lastInteractedSlot`。没有记录的格子是 -1，也就是没动过。
     bookshelf_slots: HashMap<BlockPos, usize>,
+    /// `JukeboxBlockEntity` 的 `songPlayer.isPlaying()`。唱片的内容不在范围里，只记哪几格在放。
+    /// 世界生成时直接摆下的 `has_record=true` 唱机没有方块实体，也就没在放。
+    jukebox_playing: HashSet<BlockPos>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
 }
@@ -65,10 +71,25 @@ impl RedstoneMemory {
         self.bookshelf_slots.insert(pos, slot);
     }
 
+    /// `JukeboxSongPlayer.isPlaying`。
+    pub fn is_jukebox_playing(&self, pos: BlockPos) -> bool {
+        self.jukebox_playing.contains(&pos)
+    }
+
+    /// `JukeboxSongPlayer.play`、`stop` 之后记下这一格在不在放。
+    pub fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
+        if playing {
+            self.jukebox_playing.insert(pos);
+        } else {
+            self.jukebox_playing.remove(&pos);
+        }
+    }
+
     /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
     pub fn forget_block_entity(&mut self, pos: BlockPos) {
         self.comparator_outputs.remove(&pos);
         self.bookshelf_slots.remove(&pos);
+        self.jukebox_playing.remove(&pos);
     }
 
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
@@ -106,4 +127,7 @@ pub enum Effect {
     },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
+    /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
+    /// 物品栏里没有 `item` 时放一个进去。
+    FilledBucket { item: i32 },
 }

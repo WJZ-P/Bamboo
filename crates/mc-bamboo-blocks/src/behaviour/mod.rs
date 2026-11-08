@@ -22,14 +22,14 @@ pub mod misc;
 pub mod plants;
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockClass};
+use mc_bamboo_data::{Block, BlockClass, registries};
 
 use crate::{
     context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
     level::Effect,
     shape::{self, Boxes, CollisionContext},
-    state::BlockState,
+    state::{BlockState, FluidState},
     world::World,
 };
 
@@ -230,6 +230,44 @@ pub trait Behaviour: Sync {
         _pos: BlockPos,
     ) -> bool {
         true
+    }
+
+    /// `LiquidBlockContainer.canPlaceLiquid`，只对这个接口的方块调用。`fluid` 是流体的注册表 ID。
+    ///
+    /// 默认是 `SimpleWaterloggedBlock` 的：只收水源。`by_player` 表示官方的 `user` 是玩家，
+    /// 这个世界的玩家都是创造模式；流体自己流过来时是假。
+    fn can_place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        fluid: i32,
+        _by_player: bool,
+    ) -> bool {
+        fluid == registries::fluid::WATER
+    }
+
+    /// `LiquidBlockContainer.placeLiquid`，只对这个接口的方块调用。默认是 `SimpleWaterloggedBlock` 的。
+    fn place_liquid(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        fluid: FluidState,
+    ) -> bool {
+        common::waterlog(state, world, pos, fluid)
+    }
+
+    /// `BucketPickup.pickupBlock`：舀起这一格，返回桶里装上的物品，舀不了时是空气。
+    /// 只对这个接口的方块调用。默认是 `SimpleWaterloggedBlock` 的，`by_player` 的含义同上。
+    fn pickup_block(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        _by_player: bool,
+    ) -> i32 {
+        common::drain_waterlogged(state, world, pos)
     }
 }
 
@@ -704,6 +742,28 @@ impl BlockState {
     ) {
         self.behaviour()
             .spawn_destroy_by_entity_particles(self, world, pos, by_player);
+    }
+
+    /// `LiquidBlockContainer.canPlaceLiquid`。
+    pub fn can_place_liquid(
+        self,
+        world: &World,
+        pos: BlockPos,
+        fluid: i32,
+        by_player: bool,
+    ) -> bool {
+        self.behaviour()
+            .can_place_liquid(self, world, pos, fluid, by_player)
+    }
+
+    /// `LiquidBlockContainer.placeLiquid`。
+    pub fn place_liquid(self, world: &mut World, pos: BlockPos, fluid: FluidState) -> bool {
+        self.behaviour().place_liquid(self, world, pos, fluid)
+    }
+
+    /// `BucketPickup.pickupBlock`。
+    pub fn pickup_block(self, world: &mut World, pos: BlockPos, by_player: bool) -> i32 {
+        self.behaviour().pickup_block(self, world, pos, by_player)
     }
 }
 

@@ -27,7 +27,8 @@ M2 放下的方块总是默认状态，门和床放不了，邻居不会更新�
 - 流体流动、方块下落、火蔓延、植物生长、随机刻、掉落物、音效（D4 不变）。
 - 方块实体的内容：告示牌文字、箱子物品、旗帜图案、头颅皮肤。
 - 物品组件带来的差异：`block_state` 组件、`block_entity_data`。
-- 需要光照引擎的判定：`getRawBrightness` 一律按 15 算（开阔的白天）。这是已知偏差，要写进 README 的已知限制。
+- 需要光照引擎的判定：`getRawBrightness` 和 `getBrightness` 通过 `Level::brightness` 读世界的光照（`mc-bamboo-world` 的光照引擎）。
+  oracle 的假世界恒为 15，重放时也按 15 答。
 - 需要 `level.getRandom()` 的分支。官方用随机数的地方要列出来，oracle 把这些情况排除。
 
 D3（拒绝两格方块、默认含水方块、PlaceOnWater）作废，改成官方逻辑。GameMaster 物品仍然放不了：
@@ -106,7 +107,8 @@ pub trait Level {
 - `destroy_block(pos, limit) -> bool`：`Level.destroyBlock`，不掉落。
 - `neighbor_shape_changed`、`update_neighbors_at`：`CollectingNeighborUpdater` 的完整移植，包括分层栈的顺序。
 - `schedule_tick(pos, block, delay)`。
-- `raw_brightness(pos) -> i32`：固定 15。
+- `raw_brightness(pos) -> i32`、`brightness(layer, pos) -> i32`、`effective_sky_brightness(pos) -> i32`：读 `Level::brightness`，
+  天色固定是正午，`getSkyDarken` 是 0。
 - `has_neighbor_signal(pos) -> bool`：固定 `false`，写成函数是为了以后有红石时只改一处。
 
 `Effect` 现在只有一种：

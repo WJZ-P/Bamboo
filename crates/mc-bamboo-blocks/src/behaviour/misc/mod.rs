@@ -15,7 +15,7 @@ mod creaking_heart;
 mod decorated_pot;
 mod facing;
 mod falling;
-mod fire;
+pub(crate) mod fire;
 mod flower_pot;
 mod frogspawn;
 mod frosted_ice;
@@ -75,14 +75,14 @@ use self::{
     scaffolding::Scaffolding,
     sculk::{CalibratedSculkSensor, SculkCatalyst, SculkSensor, SculkShrieker},
     sea_pickle::SeaPickle,
-    snow::SnowLayer,
+    snow::{PowderSnow, SnowLayer},
     soil::{DirtPath, Farmland},
     speleothem::Speleothem,
     sponge::Sponge,
     test_block::TestBlock,
     tnt::Tnt,
     turtle_egg::TurtleEgg,
-    waterlogged::{Conduit, DriedGhast, Light, Waterlogged},
+    waterlogged::{Barrier, Conduit, DriedGhast, Light, Waterlogged},
 };
 use super::{Behaviour, Plain};
 use crate::{state::BlockState, world::World};
@@ -93,8 +93,8 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
 
     match class {
         C::AmethystClusterBlock => Some(&AmethystCluster),
-        C::BarrierBlock
-        | C::HeavyCoreBlock
+        C::BarrierBlock => Some(&Barrier),
+        C::HeavyCoreBlock
         | C::MangroveRootsBlock
         | C::WaterloggedTransparentBlock
         | C::WeatheringCopperGrateBlock => Some(&Waterlogged),
@@ -138,6 +138,7 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         C::PathBlock => Some(&DirtPath),
         C::PointedDripstoneBlock | C::SulfurSpikeBlock => Some(&Speleothem),
         C::PotentSulfurBlock => Some(&PotentSulfur),
+        C::PowderSnowBlock => Some(&PowderSnow),
         C::PoweredBlock => Some(&Powered),
         C::PumpkinBlock => Some(&Pumpkin),
         C::RedStoneOreBlock => Some(&RedstoneOre),
@@ -177,7 +178,6 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         | C::MudBlock
         | C::NetherrackBlock
         | C::NyliumBlock
-        | C::PowderSnowBlock
         | C::RootedDirtBlock
         | C::SculkBlock
         | C::SlimeBlock

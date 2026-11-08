@@ -253,6 +253,11 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
             Effect::TorchBurnout { pos } => {
                 send_level_event(region, None, &LevelEvent::redstone_torch_burnout(pos));
             }
+            Effect::FilledBucket { item } => {
+                if let Some(id) = initiator {
+                    inventory::add_filled_bucket(region, id, item);
+                }
+            }
         }
     }
 }

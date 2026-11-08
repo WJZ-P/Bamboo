@@ -1,9 +1,7 @@
 //! 物品的规则里 `mc_bamboo_blocks` 不管的部分：官方在进入方块逻辑之前和之后看的东西。
 
-use mc_bamboo_data::{
-    Item,
-    items::{self, ITEMS},
-};
+use mc_bamboo_blocks::fluid::bucket::Bucket;
+use mc_bamboo_data::{Item, items::ITEMS};
 use mc_bamboo_protocol::item::ItemStack;
 
 /// 注册表 ID 对应的物品。
@@ -17,26 +15,18 @@ pub(super) fn can_destroy(held: &ItemStack) -> bool {
 }
 
 /// 官方的 `wasBlockPlacementAttempt`：这次右键算放置尝试，到高度上限时才有提示。
+///
+/// 桶里 `getContent()` 不是空的也算。`powder_snow_bucket` 是方块物品，走前一个条件。
 pub(super) fn is_placement_attempt(held: &ItemStack) -> bool {
     !held.is_empty()
         && (item(held.item).is_some_and(|item| item.block.is_some())
-            || FLUID_BUCKETS.contains(&held.item))
+            || Bucket::of(held.item).is_some_and(|bucket| bucket.content.is_some()))
 }
-
-/// 官方 `BucketItem` 里 `getContent()` 不是空的物品。`powder_snow_bucket` 是方块物品，不在这里。
-const FLUID_BUCKETS: [i32; 8] = [
-    items::WATER_BUCKET,
-    items::LAVA_BUCKET,
-    items::PUFFERFISH_BUCKET,
-    items::SALMON_BUCKET,
-    items::COD_BUCKET,
-    items::TROPICAL_FISH_BUCKET,
-    items::AXOLOTL_BUCKET,
-    items::TADPOLE_BUCKET,
-];
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_data::items;
+
     use super::*;
 
     fn stack(item: i32) -> ItemStack {

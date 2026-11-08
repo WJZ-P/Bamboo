@@ -19,7 +19,7 @@ use crate::{
         FluidState, HORIZONTAL_FACING, NORTH, Property, SOUTH, STABILITY_DISTANCE, SupportType, UP,
         WATERLOGGED, WEST,
     },
-    world::{Fluid, UPDATE_ALL, UPDATE_SUPPRESS_DROPS, World},
+    world::{UPDATE_ALL, UPDATE_LIMIT, UPDATE_SUPPRESS_DROPS, World},
 };
 
 /// `ScaffoldingBlock.STABILITY_MAX_DISTANCE`。
@@ -171,8 +171,31 @@ pub fn is_full_water(fluid: FluidState) -> bool {
 /// 含水方块 `updateShape` 开头的那一段：含水时给水排一个刻。
 pub fn tick_water_if_waterlogged(state: BlockState, world: &mut World, pos: BlockPos) {
     if state.get(WATERLOGGED) {
-        world.schedule_fluid_tick(pos, Fluid::Water);
+        world.schedule_fluid_tick(pos, fluid::WATER);
     }
+}
+
+/// `SimpleWaterloggedBlock.placeLiquid`：不含水时放进水源，给水排一个刻。
+pub fn waterlog(state: BlockState, world: &mut World, pos: BlockPos, liquid: FluidState) -> bool {
+    if state.get(WATERLOGGED) || !liquid.is(fluid::WATER) {
+        return false;
+    }
+    world.set_block_and_update(pos, state.with(WATERLOGGED, true));
+    world.schedule_fluid_tick(pos, liquid.fluid());
+    true
+}
+
+/// `SimpleWaterloggedBlock.pickupBlock`：舀走水，没了水活不下去的方块跟着碎掉。返回水桶，没有水时是空气。
+pub fn drain_waterlogged(state: BlockState, world: &mut World, pos: BlockPos) -> i32 {
+    if !state.get(WATERLOGGED) {
+        return items::AIR;
+    }
+    world.set_block_and_update(pos, state.with(WATERLOGGED, false));
+    // 官方用的是舀水之前的状态。
+    if !state.can_survive(world, pos) {
+        world.destroy_block(pos, UPDATE_LIMIT);
+    }
+    items::WATER_BUCKET
 }
 
 /// `Containers.updateNeighboursAfterDestroy`：告诉比较器这里的内容没了。

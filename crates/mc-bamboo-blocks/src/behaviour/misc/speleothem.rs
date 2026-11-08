@@ -11,12 +11,13 @@ use crate::{
         common::{default_state, is_water_source, tick_water_if_waterlogged},
     },
     context::PlaceContext,
+    fluid::Fluid,
     shape::{self, Aabb, BooleanOp, CollisionContext},
     state::{
         BlockState, SPELEOTHEM_THICKNESS, SpeleothemThickness, SupportType, VERTICAL_DIRECTION,
         WATERLOGGED,
     },
-    world::{Fluid, UPDATE_LIMIT, World},
+    world::{UPDATE_LIMIT, World},
 };
 
 /// `SpeleothemBlock`。

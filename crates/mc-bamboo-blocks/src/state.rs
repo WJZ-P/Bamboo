@@ -112,12 +112,18 @@ impl BlockState {
     /// `Block.withPropertiesOf`：`target` 的默认状态上，复制 `self` 里两边都有的属性。
     #[must_use]
     pub fn copied_onto(self, target: &Block) -> Self {
-        let mut result = Self(target.default_state);
-        for def in self.block().properties {
-            let Some(slot) = PropertySlot::find(self, def.name) else {
+        Self(target.default_state).with_properties_of(self)
+    }
+
+    /// `BlockState.withPropertiesOf`：复制 `source` 里两边都有的属性。
+    #[must_use]
+    pub fn with_properties_of(self, source: Self) -> Self {
+        let mut result = self;
+        for def in source.block().properties {
+            let Some(slot) = PropertySlot::find(source, def.name) else {
                 continue;
             };
-            let name = def.values[slot.current_index(self)];
+            let name = def.values[slot.current_index(source)];
             let Some(target_slot) = PropertySlot::find(result, def.name) else {
                 continue;
             };

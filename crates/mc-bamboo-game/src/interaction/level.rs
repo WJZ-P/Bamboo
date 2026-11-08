@@ -6,7 +6,7 @@ use mc_bamboo_blocks::{
     Aabb, BlockState, Level, RedstoneMemory,
     shape::{self, BooleanOp},
 };
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, LightLayer};
 use mc_bamboo_data::blocks;
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
@@ -48,6 +48,11 @@ impl Level for RegionLevel<'_> {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    /// 读的是上一轮光照算完时的结果，和官方一样：这次操作改的方块要等到下一轮才影响光照。
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
+        i32::from(self.chunks.light_value(layer, pos))
     }
 
     fn redstone(&self) -> &RedstoneMemory {

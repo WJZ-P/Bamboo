@@ -5,7 +5,7 @@
 
 use mc_bamboo_blocks::{
     BlockState, InteractionResult, TickPriority,
-    state::{AXIS, HORIZONTAL_FACING, SLAB_TYPE, SlabType},
+    state::{AXIS, HORIZONTAL_FACING, LEVEL, SLAB_TYPE, SlabType},
 };
 use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{
@@ -1588,6 +1588,63 @@ fn a_lily_pad_lands_on_the_water_in_view() {
     );
 }
 
+/// 浮在 `GROUND` 正上方往下看，拿着 `item` 用一下。
+fn use_looking_down(server: &mut Harness, client: &Client, item: i32) {
+    move_player(server, client, 11.5, -59.0, 8.5);
+    hold(server, client, item);
+    server.tick();
+    client.take_frames();
+    let request = PlayRequest::UseItem {
+        hand: Hand::Main,
+        sequence: 1,
+        yaw: 0.0,
+        pitch: 90.0,
+    };
+    server.request(client, request);
+    server.tick();
+}
+
+#[test]
+fn a_water_bucket_pours_a_source_that_flows_on_later_ticks() {
+    let (mut server, client) = settled();
+    use_looking_down(&mut server, &client, items::WATER_BUCKET);
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::WATER));
+    assert_eq!(
+        block_frames(&client),
+        [update(ABOVE, blocks::WATER), ack(1)]
+    );
+    // 创造模式倒完手里还是满桶。
+    let held = server.player(&client).inventory.held(Hand::Main).item;
+    assert_eq!(held, items::WATER_BUCKET);
+
+    // 水的计划刻 5 刻以后到期，往四周流一格。
+    for _ in 0..4 {
+        server.tick();
+    }
+    let flowing = BlockState::WATER.with(LEVEL, 1).0;
+    assert_eq!(block_at(&mut server, ABOVE.east()), Some(flowing));
+    assert!(block_frames(&client).contains(&update(ABOVE.east(), flowing)));
+}
+
+#[test]
+fn an_empty_bucket_scoops_a_source_into_the_inventory() {
+    let (mut server, client) = settled();
+    set_block(&mut server, ABOVE, blocks::LAVA);
+    use_looking_down(&mut server, &client, items::BUCKET);
+
+    assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
+    let inventory = &server.player(&client).inventory;
+    assert_eq!(inventory.held(Hand::Main).item, items::BUCKET);
+    // 主手占着快捷栏第一格，装满的桶进了第二格。
+    assert_eq!(inventory.slots[37].item, items::LAVA_BUCKET);
+    let frames = client.take_frames();
+    assert_eq!(
+        frames_with_id(&frames, clientbound::CONTAINER_SET_SLOT).len(),
+        1
+    );
+}
+
 #[test]
 fn one_ack_covers_the_largest_sequence_of_the_tick() {
     let (mut server, client) = settled();
@@ -1704,7 +1761,8 @@ fn a_pending_chunk_arrives_with_the_change_instead_of_an_update() {
         .find(|frame| chunk_position(frame) == edited)
         .expect("这一批最多 64 个，近的先发");
     let region = server.region();
-    let current = encode_chunk(region.chunks.edited(edited).expect("这个区块改过了"));
+    assert!(region.chunks.edited(edited).is_some(), "这个区块改过了");
+    let current = encode_chunk(&region.chunks, edited);
     assert_eq!(chunk_body(chunk), current);
     assert_ne!(chunk_body(chunk), region.template_body);
 }
@@ -1756,7 +1814,8 @@ fn a_chunk_sent_again_has_the_edit_and_the_block_entity() {
     let resent = walk_away_and_back(&mut server, &client, chunk);
 
     let region = server.region();
-    let current = encode_chunk(region.chunks.edited(chunk).expect("这个区块改过了"));
+    assert!(region.chunks.edited(chunk).is_some(), "这个区块改过了");
+    let current = encode_chunk(&region.chunks, chunk);
     assert_eq!(resent, current);
     assert_ne!(resent, region.template_body);
     assert!(contains(&resent, &CHEST_ENTRY));

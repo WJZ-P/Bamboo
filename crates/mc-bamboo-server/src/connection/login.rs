@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use mc_bamboo_protocol::{
     frame::append_frame,
-    packet::login::{LoginFinished, LoginRequest, MAX_PLAYER_NAME_CHARS},
+    packet::login::{LoginCompression, LoginFinished, LoginRequest, MAX_PLAYER_NAME_CHARS},
 };
 use md5::{Digest, Md5};
 use uuid::{Builder, Uuid};
@@ -36,12 +36,23 @@ pub(super) async fn admit(
     }
 }
 
-/// 告诉客户端登录成功，等它确认。
+/// 先告诉客户端压缩阈值，再告诉它登录成功并等它确认。
+///
+/// 和官方一样，压缩包写出去之后才切换编码，所以压缩包本身是未压缩的；
+/// 之后的登录成功包开始就带压缩层。
 pub(super) async fn finish(
     connection: &mut Connection,
     session: &PlayerSession,
     shared: &Shared,
 ) -> Result<(), ConnectionError> {
+    let threshold = shared.config.compression_threshold;
+    if threshold >= 0 {
+        let mut frame = Vec::new();
+        append_frame(&mut frame, &LoginCompression { threshold })?;
+        connection.write(&frame).await?;
+        connection.enable_compression(threshold);
+    }
+
     let mut frame = Vec::new();
     append_frame(
         &mut frame,

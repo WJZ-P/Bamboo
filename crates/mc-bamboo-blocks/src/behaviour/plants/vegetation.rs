@@ -19,8 +19,8 @@ use crate::{
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
-    state::{AGE_3, AGE_4, BlockState, HANGING, SupportType, WATERLOGGED},
-    world::{Fluid, UPDATE_CLIENTS, World},
+    state::{AGE_3, AGE_4, BlockState, FluidState, HANGING, SupportType, WATERLOGGED},
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// `MushroomBlock.canSurvive` 要求亮度低于这个值。
@@ -209,9 +209,31 @@ impl Behaviour for Seagrass {
     ) -> BlockState {
         let updated = vegetation_update_shape(state, world, pos);
         if !updated.is_air() {
-            world.schedule_fluid_tick(pos, Fluid::Water);
+            world.schedule_fluid_tick(pos, fluid::WATER);
         }
         updated
+    }
+
+    /// 海草本来就泡在水里，装不了别的。
+    fn can_place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &World,
+        _pos: BlockPos,
+        _fluid: i32,
+        _by_player: bool,
+    ) -> bool {
+        false
+    }
+
+    fn place_liquid(
+        &self,
+        _state: BlockState,
+        _world: &mut World,
+        _pos: BlockPos,
+        _fluid: FluidState,
+    ) -> bool {
+        false
     }
 }
 

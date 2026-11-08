@@ -41,6 +41,9 @@ impl Behaviour for EndRod {
 /// `onPlace` 只管带着信号放下的避雷针，玩家放的不会带。8 刻以后把信号收回来的 `tick` 移植了。
 pub(super) struct LightningRod;
 
+/// `ACTIVATION_TICKS`：被闪电打中以后亮多久。
+const ACTIVATION_TICKS: i32 = 8;
+
 /// `updateNeighbours`：信号只穿过它插着的那一格。
 fn update_neighbours(state: BlockState, world: &mut World, pos: BlockPos) {
     let front = state.get(FACING).opposite();
@@ -71,6 +74,16 @@ impl Behaviour for LightningRod {
     ) -> BlockState {
         tick_water_if_waterlogged(state, world, pos);
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    /// `onPlace`：带着信号放的避雷针要排一个刻把信号收回来。涂蜡、去蜡换成另一块方块时也算放下。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if state.is_same_block(old) {
+            return;
+        }
+        if state.get(POWERED) && !world.has_scheduled_tick(pos, state.block()) {
+            world.schedule_tick(pos, state.block(), ACTIVATION_TICKS);
+        }
     }
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {

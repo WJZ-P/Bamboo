@@ -1,8 +1,9 @@
 //! 用官方代码检查 `mc-bamboo-blocks`。
 //!
-//! `BlockOracle.java` 在 JVM 里运行官方的 `useItemOn`、`destroyBlock`，有的题之后再走几个游戏刻，
-//! 一题一行写到 stdout。这里边读边在同样的场景里重放，比较 `InteractionResult`、世界的变化、
-//! 破坏事件和范围内还排着的计划刻。
+//! `BlockOracle.java` 在 JVM 里运行官方的 `useItemOn`、`useItem`、`destroyBlock`、计划刻和流体的流动，
+//! 有的题之后再走几个游戏刻，一题一行写到 stdout。这里边读边在同样的场景里重放，比较
+//! `InteractionResult`、世界的变化、破坏事件、物品栏里多出的物品和范围内还排着的计划刻，
+//! 方块和流体的计划刻是两条队列，各自按执行顺序比较。
 //! 题目不落盘，20 万题的输出有一百多 MB。
 //!
 //! 一题的结论是下面四种之一：
@@ -31,14 +32,17 @@ use std::{
     thread,
 };
 
-use mc_bamboo_blocks::{behaviour::is_ported, world::MAX_CHAINED_NEIGHBOR_UPDATES};
+use mc_bamboo_blocks::{
+    BlockState, behaviour::is_ported, state::HAS_RECORD, state::HORIZONTAL_FACING,
+    world::MAX_CHAINED_NEIGHBOR_UPDATES,
+};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
     Block, BlockAncestor, BlockClass, Item, block_id_of_state, blocks, items, version,
 };
 
 use lines::{Case, Header, Kind, Line, Tick};
-use replay::{Replayed, Scheduled, replay};
+use replay::{FLUID_NAMES, Replayed, Scheduled, replay};
 use report::{Mismatch, Report};
 
 /// 同时留着的官方日志行数，只在 JVM 失败时打印。
@@ -60,7 +64,6 @@ pub enum Rule {
     ImpossibleScene,
     ItemUseOn,
     CanDestroyBlock,
-    FluidTick,
     RandomDelay,
     FallingTick,
     FireTick,
@@ -74,7 +77,7 @@ pub enum Rule {
 }
 
 impl Rule {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 19] = [
         Self::AnalogInput,
         Self::RandomOutcome,
         Self::RandomLoop,
@@ -84,7 +87,6 @@ impl Rule {
         Self::ImpossibleScene,
         Self::ItemUseOn,
         Self::CanDestroyBlock,
-        Self::FluidTick,
         Self::RandomDelay,
         Self::FallingTick,
         Self::FireTick,
@@ -108,7 +110,6 @@ impl Rule {
             Self::ImpossibleScene => "impossible scene",
             Self::ItemUseOn => "item useOn",
             Self::CanDestroyBlock => "canDestroyBlock",
-            Self::FluidTick => "fluid tick",
             Self::RandomDelay => "random delay",
             Self::FallingTick => "falling tick",
             Self::FireTick => "fire tick",
@@ -125,8 +126,10 @@ impl Rule {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::AnalogInput => {
-                "case: a container changed its contents and a comparator read them, \
-                 Bamboo keeps no container contents (chiseled bookshelf excepted)"
+                "case: a comparator read analog input the fake world cannot reproduce, \
+                 either container contents Bamboo does not keep (chiseled bookshelf excepted), \
+                 a scene jukebox the fake world fills with a fixed disc, \
+                 or a clicked comparator re-reading its input"
             }
             Self::RandomOutcome => {
                 "case: the official outcome changes with the random source (chapter 1)"
@@ -142,11 +145,12 @@ impl Rule {
             Self::ImpossibleScene => {
                 "case: a half of a broken structure made the official code throw"
             }
-            Self::ItemUseOn => "case: both sides left the click to a non block item's own useOn",
+            Self::ItemUseOn => {
+                "case: the click reached a non block item whose own useOn is not ported"
+            }
             Self::CanDestroyBlock => {
                 "case: Item.canDestroyBlock refused, the caller checks it before destroy_block"
             }
-            Self::FluidTick => "tick entry: fluids do not flow, only recorded (chapter 1)",
             Self::RandomDelay => {
                 "tick delay: the official delay is random, position and type are still compared"
             }
@@ -172,8 +176,10 @@ impl Rule {
     }
 
     /// `skip` 行的原因前缀对应的规则。`exception:` 不在这里：那是假世界的 bug，要算失败。
+    ///
+    /// `untick:<类名>` 是 flow 题往后跑时碰到了范围外的计划刻，按那个类的规则计数。
     fn of_skip(reason: &str) -> Option<Self> {
-        let (prefix, _) = reason.split_once(':')?;
+        let (prefix, detail) = reason.split_once(':')?;
         match prefix {
             "random" => Some(Self::RandomOutcome),
             "random-loop" => Some(Self::RandomLoop),
@@ -181,19 +187,21 @@ impl Rule {
             "explosion" => Some(Self::Explosion),
             "worldgen" => Some(Self::Worldgen),
             "impossible" => Some(Self::ImpossibleScene),
+            "untick" => OUT_OF_SCOPE_TICKS
+                .iter()
+                .find(|(ancestor, _)| format!("{ancestor:?}") == detail)
+                .map(|&(_, rule)| rule),
             _ => None,
         }
     }
 }
 
 /// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
-/// `settle` 里跑过它们的题整道排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
+/// `settle` 或 flow 题往后跑时执行它们的话整题排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::FallingBlock, Rule::FallingTick),
     (BlockAncestor::BrushableBlock, Rule::FallingTick),
     (BlockAncestor::FireBlock, Rule::FireTick),
-    (BlockAncestor::LiquidBlock, Rule::FluidTick),
-    (BlockAncestor::BubbleColumnBlock, Rule::FluidTick),
     (BlockAncestor::CommandBlock, Rule::CommandTick),
     (BlockAncestor::FrogspawnBlock, Rule::TimerTick),
     (BlockAncestor::SnifferEggBlock, Rule::TimerTick),
@@ -213,6 +221,45 @@ fn tick_classes(rule: Rule) -> Vec<BlockAncestor> {
         .filter(|(_, entry)| *entry == rule)
         .map(|&(ancestor, _)| ancestor)
         .collect()
+}
+
+/// 没有移植 `useOn` 的非方块物品类，官方类名和原因。点击轮到这些物品时不比较。
+///
+/// 斧子、锄头、锹（类就是 `Item`，靠 `block_transformer` 组件）、打火石、火焰弹、蜜脾、剪刀、末影之眼、
+/// 调试棒和刷子移植了，照常比较。桶、玻璃瓶和睡莲走 `Item.use`，不经过 `useOn`，所以不在这张表里。
+const UNPORTED_ITEM_USE_ON: &[(&str, &str)] = &[
+    (
+        "BoneMealItem",
+        "growth is random, saplings and fungi run world generation",
+    ),
+    ("SpawnEggItem", "spawns an entity"),
+    ("ArmorStandItem", "spawns an entity"),
+    ("CushionItem", "spawns an entity"),
+    ("EndCrystalItem", "spawns an entity"),
+    ("FireworkRocketItem", "spawns an entity"),
+    ("HangingEntityItem", "spawns an entity"),
+    ("ItemFrameItem", "spawns an entity"),
+    ("LeadItem", "spawns an entity"),
+    ("MinecartItem", "spawns an entity"),
+    (
+        "PotionItem",
+        "turning dirt into mud needs the potion_contents component, actors only carry item ids",
+    ),
+    ("SplashPotionItem", "inherits the useOn of PotionItem"),
+    ("LingeringPotionItem", "inherits the useOn of PotionItem"),
+    (
+        "CompassItem",
+        "a lodestone only changes the held item, no block",
+    ),
+    ("MapItem", "banner markers live in the map data, no block"),
+];
+
+/// 物品类不在 [`UNPORTED_ITEM_USE_ON`] 里时是 `None`。
+fn unported_item_use_on(class: &str) -> Option<&'static str> {
+    UNPORTED_ITEM_USE_ON
+        .iter()
+        .find(|(name, _)| *name == class)
+        .map(|&(_, reason)| reason)
 }
 
 /// 这个方块的计划刻不在比较的范围里时，返回原因。
@@ -268,6 +315,7 @@ impl Options {
         if self.pure {
             args.extend(["--avoid".to_owned(), unported_classes().join(",")]);
         }
+        args.extend(["--untick".to_owned(), untick_classes().join(",")]);
         args
     }
 
@@ -284,6 +332,14 @@ impl Options {
         }
         args.join(" ")
     }
+}
+
+/// 计划刻不在范围里的类，官方类名就是 `BlockAncestor` 的变体名。
+fn untick_classes() -> Vec<String> {
+    OUT_OF_SCOPE_TICKS
+        .iter()
+        .map(|(ancestor, _)| format!("{ancestor:?}"))
+        .collect()
 }
 
 /// 还没移植的类的名字，官方类名就是 `BlockClass` 的变体名。
@@ -389,7 +445,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
 }
 
 /// 官方日志在另一个线程里读，不然管道写满时 JVM 会停住。只留最后几行，JVM 失败时才看。
-fn collect_log(child: &mut Child) -> Result<mpsc::Receiver<Vec<String>>, String> {
+pub(crate) fn collect_log(child: &mut Child) -> Result<mpsc::Receiver<Vec<String>>, String> {
     let stderr = child.stderr.take().ok_or("java has no stderr")?;
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -520,11 +576,12 @@ impl Session {
     }
 }
 
-/// 官方的方块没有吃掉这次点击，结果来自非方块物品自己的 `useOn`，那不在这个 crate 里。
+/// 官方的方块没有吃掉这次点击，结果来自还没移植的非方块物品的 `useOn`。
 /// 我们这边也要什么都没做才算：方块多吃了点击，或者动了世界，要照常比较，这是真的不一致。
 fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
     case.action.item_use_on
         && case.outcome.item_reached
+        && unported_item_use_on(&case.action.item_class).is_some()
         && replayed.result == "pass"
         && replayed.changes.is_empty()
         && replayed.destroyed.is_empty()
@@ -546,6 +603,13 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
         {
             Some(Rule::CanDestroyBlock)
         }
+        Kind::Place | Kind::Use if clicks_comparator_with_analog_input(case) => {
+            Some(Rule::AnalogInput)
+        }
+        // 动作附近的比较器会重算输入，其中可能有假世界补出来的唱片。
+        Kind::Place | Kind::Use | Kind::Destroy | Kind::Tick if reads_invented_jukebox(case) => {
+            Some(Rule::AnalogInput)
+        }
         Kind::Tick => tick_exclusion(block),
         _ => None,
     };
@@ -553,6 +617,69 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
         Some(rule) => Ok(Some(rule)),
         None => settled_out_of_scope(case, names),
     }
+}
+
+/// 点中的比较器会重新读输入。假世界把 `Level` 上的信号都屏蔽了，方块自己的模拟输出还在，
+/// 官方的比较器这时可能亮起来。Bamboo 有信号，但容器内容不算，两种情况下这题都比不了。
+fn clicks_comparator_with_analog_input(case: &Case) -> bool {
+    let state_at = |pos: BlockPos| {
+        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
+        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
+    };
+    let pos = case.action.target();
+    let clicked = state_at(pos);
+    if block_id_of_state(clicked.0) != block_id_of_state(blocks::COMPARATOR) {
+        return false;
+    }
+    let facing = clicked.get(HORIZONTAL_FACING);
+    let input_pos = pos.relative(facing);
+    let input = state_at(input_pos);
+    input.has_analog_output_signal()
+        || input.is_redstone_conductor()
+            && state_at(input_pos.relative(facing)).has_analog_output_signal()
+}
+
+/// 假世界给场景里带唱片的唱机补了一张固定的 `music_disc_13`（`FakeLevel.syncContents`），
+/// 比较器能从唱机读出模拟信号。Bamboo 不保留唱片内容，读出来是 0，所以动作附近的比较器
+/// 碰到这种唱机时两边比不了。两格以内是邻居更新能碰到的范围。
+fn reads_invented_jukebox(case: &Case) -> bool {
+    let target = case.action.target();
+    let state_at = |pos: BlockPos| {
+        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
+        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
+    };
+    // 场景里的状态 ID 可能不合法（损坏的输入），先查表，别让 panic 漏到守卫外面。
+    let invented = |pos: BlockPos| {
+        let state = state_at(pos);
+        block_id_of_state(state.0) == block_id_of_state(blocks::JUKEBOX) && state.get(HAS_RECORD)
+    };
+    case.scene.iter().any(|cell| {
+        let pos = cell.pos();
+        if (pos.x - target.x).abs() > 2
+            || (pos.y - target.y).abs() > 2
+            || (pos.z - target.z).abs() > 2
+        {
+            return false;
+        }
+        let state = BlockState(cell.state());
+        let Some(block_id) = block_id_of_state(state.0) else {
+            return false;
+        };
+        if !blocks::BLOCKS[block_id]
+            .class
+            .ancestors()
+            .contains(&BlockAncestor::ComparatorBlock)
+        {
+            return false;
+        }
+        let facing = state.get(HORIZONTAL_FACING);
+        let input_pos = pos.relative(facing);
+        let input = state_at(input_pos);
+        invented(input_pos)
+            || (block_id_of_state(input.0).is_some()
+                && input.is_redstone_conductor()
+                && invented(input_pos.relative(facing)))
+    })
 }
 
 /// `settle` 里跑过不在范围里的计划刻：官方的世界已经被它改过，这道题比不了。
@@ -594,10 +721,25 @@ fn compare(
         result: answer.result != replayed.result,
         cells: differing_cells(case, replayed),
         destroyed: answer.destroyed != replayed.destroyed,
-        ticks: !same_ticks(&official, &ours),
+        ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
+        gained: answer.gained != replayed.gained,
         panic: None,
     })
+}
+
+/// 方块和流体是两条队列，各自比较。
+fn same_queues(official: &[Scheduled], ours: &[Scheduled]) -> bool {
+    let queue = |ticks: &[Scheduled], fluid: bool| -> Vec<Scheduled> {
+        ticks
+            .iter()
+            .filter(|tick| tick.fluid == fluid)
+            .cloned()
+            .collect()
+    };
+    [false, true]
+        .into_iter()
+        .all(|fluid| same_ticks(&queue(official, fluid), &queue(ours, fluid)))
 }
 
 /// 两边结束时状态不同的格子。
@@ -617,7 +759,7 @@ fn differing_cells(case: &Case, replayed: &Replayed) -> BTreeSet<BlockPos> {
         .collect()
 }
 
-/// 官方的计划刻里要比较的部分，按执行顺序排好。不比较的条目计入排除表。
+/// 官方的计划刻里要比较的部分，每条队列按执行顺序排好。不比较的条目计入排除表。
 fn comparable_ticks(
     ticks: &[Tick],
     names: &Names,
@@ -625,33 +767,44 @@ fn comparable_ticks(
 ) -> Result<Vec<Scheduled>, String> {
     let mut comparable = Vec::with_capacity(ticks.len());
     for tick in ticks {
-        if tick.is_fluid() {
-            report.excluded_entry(Rule::FluidTick);
-            continue;
-        }
-        let block = names.block(tick.id())?;
-        if let Some(rule) = tick_exclusion(block) {
-            report.excluded_entry(rule);
-            continue;
-        }
+        let id = if tick.is_fluid() {
+            fluid_name(tick.id())?
+        } else {
+            let block = names.block(tick.id())?;
+            if let Some(rule) = tick_exclusion(block) {
+                report.excluded_entry(rule);
+                continue;
+            }
+            block.name
+        };
         if tick.delay() == Tick::RANDOM_DELAY {
             report.excluded_entry(Rule::RandomDelay);
         }
         comparable.push(Scheduled {
             pos: tick.pos(),
-            block: block.name,
+            fluid: tick.is_fluid(),
+            id,
             delay: tick.delay(),
             priority: tick.priority(),
         });
     }
-    comparable.sort_by_key(|tick| (tick.delay, tick.priority));
+    comparable.sort_by_key(|tick| (tick.fluid, tick.delay, tick.priority));
     Ok(comparable)
+}
+
+/// 官方的流体名，也就是 [`FLUID_NAMES`] 里的那一个。
+fn fluid_name(name: &str) -> Result<&'static str, String> {
+    FLUID_NAMES
+        .iter()
+        .find(|&&known| known == name)
+        .copied()
+        .ok_or_else(|| format!("unknown fluid {name}, are the generated files stale?"))
 }
 
 fn in_scope_scheduled(ticks: &[Scheduled], names: &Names) -> Result<Vec<Scheduled>, String> {
     let mut comparable = Vec::with_capacity(ticks.len());
     for tick in ticks {
-        if tick_exclusion(names.block(tick.block)?).is_none() {
+        if tick.fluid || tick_exclusion(names.block(tick.id)?).is_none() {
             comparable.push(tick.clone());
         }
     }
@@ -671,7 +824,7 @@ fn same_ticks(official: &[Scheduled], ours: &[Scheduled]) -> bool {
     official.iter().all(|tick| {
         let found = remaining.iter().position(|candidate| {
             candidate.pos == tick.pos
-                && candidate.block == tick.block
+                && candidate.id == tick.id
                 && candidate.priority == tick.priority
                 && (tick.delay == Tick::RANDOM_DELAY || candidate.delay == tick.delay)
         });
@@ -680,16 +833,12 @@ fn same_ticks(official: &[Scheduled], ours: &[Scheduled]) -> bool {
 }
 
 /// 这道题碰过的、还没移植的类。手上方块物品放的方块不一定进了世界，也算碰过。
-///
-/// 水不算：`LiquidBlock` 只有岩浆才写世界，水的逻辑全是流体的计划刻，而这些不比较。
 fn blockers(case: &Case, replayed: &Replayed, names: &Names) -> Result<Vec<BlockClass>, String> {
-    let water = block_id_of_state(blocks::WATER);
     let (_, held) = names.item(case.action.used_item())?;
     let held_blocks = [held.block, held.wall_block].into_iter().flatten();
     let mut classes: Vec<BlockClass> = replayed
         .touched
         .iter()
-        .filter(|&&id| Some(id) != water)
         .map(|&id| blocks::BLOCKS[id].class)
         .chain(held_blocks.map(|id| blocks::BLOCKS[id as usize].class))
         .filter(|&class| !is_ported(class))
@@ -706,9 +855,18 @@ mod tests {
     fn scheduled(x: i32, delay: i32) -> Scheduled {
         Scheduled {
             pos: BlockPos::new(x, 64, 0),
-            block: "minecraft:sugar_cane",
+            fluid: false,
+            id: "minecraft:sugar_cane",
             delay,
             priority: 0,
+        }
+    }
+
+    fn fluid_tick(x: i32, delay: i32) -> Scheduled {
+        Scheduled {
+            fluid: true,
+            id: "minecraft:water",
+            ..scheduled(x, delay)
         }
     }
 
@@ -718,15 +876,22 @@ mod tests {
 
     /// 在 (0, 64, 0) 的石头顶面放一块石头，`scene` 和 `outcome` 由测试给。
     fn place_stone(scene: &str, outcome: &str) -> String {
-        let action =
-            r#"{"kind":"place","main":"minecraft:stone","off":"minecraft:air","hand":"main",
-            "itemClass":"BlockItem","itemUseOn":false,"pos":[0,64,0],"face":"up",
+        click_top("minecraft:stone", "BlockItem", scene, outcome)
+    }
+
+    /// 主手拿着 `item` 点 (0, 64, 0) 的顶面。
+    fn click_top(item: &str, class: &str, scene: &str, outcome: &str) -> String {
+        let use_on = class != "BlockItem";
+        let action = format!(
+            r#"{{"kind":"use","main":"{item}","off":"minecraft:air","hand":"main",
+            "itemClass":"{class}","itemUseOn":{use_on},"pos":[0,64,0],"face":"up",
             "loc":["3fe0000000000000","4050400000000000","3fe0000000000000"],"inside":false,
             "actor":["4014000000000000","4050400000000000","4014000000000000"],
             "yaw":"00000000","pitch":"00000000","sneak":false,
             "box":["4012666666666666","4050400000000000","4012666666666666",
-                   "4015999999999999","4050c00000000000","4015999999999999"],"others":[],"settle":0}"#
-                .replace('\n', " ");
+                   "4015999999999999","4050c00000000000","4015999999999999"],"others":[],"settle":0}}"#
+        )
+        .replace('\n', " ");
         format!(
             r#"{{"type":"case","id":0,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
         )
@@ -797,6 +962,55 @@ mod tests {
     }
 
     #[test]
+    fn a_ported_item_use_on_is_compared() {
+        let scene = format!("[[0,64,0,{}]]", blocks::STONE);
+        let fire = format!("[[0,65,0,{}]]", blocks::FIRE);
+        let flint = "minecraft:flint_and_steel";
+        let lit = click_top(
+            flint,
+            "FlintAndSteelItem",
+            &scene,
+            &answer("success", &fire),
+        );
+        assert_eq!(verdict_of(&lit), Ok(()));
+        let left_alone = click_top(flint, "FlintAndSteelItem", &scene, &answer("pass", "[]"));
+        assert!(verdict_of(&left_alone).is_err());
+    }
+
+    #[test]
+    fn an_unported_item_use_on_is_not_compared() {
+        let scene = format!("[[0,64,0,{}]]", blocks::GRASS_BLOCK);
+        let grown = format!("[[0,65,0,{}]]", blocks::SHORT_GRASS);
+        let case = click_top(
+            "minecraft:bone_meal",
+            "BoneMealItem",
+            &scene,
+            &answer("success", &grown),
+        );
+        assert_eq!(verdict_of(&case), Ok(()));
+        assert!(unported_item_use_on("FlintAndSteelItem").is_none());
+    }
+
+    #[test]
+    fn a_comparator_reading_an_analog_output_is_not_compared() {
+        let scene = format!(
+            "[[0,64,0,{}],[0,64,-1,{}]]",
+            blocks::COMPARATOR,
+            blocks::LECTERN
+        );
+        let case = place_stone(&scene, &answer("fail", "[]"));
+        assert_eq!(verdict_of(&case), Ok(()));
+    }
+
+    #[test]
+    fn a_comparator_reading_a_scene_jukebox_is_not_compared() {
+        let record = BlockState(blocks::JUKEBOX).with(HAS_RECORD, true);
+        let scene = format!("[[0,64,0,{}],[0,64,-1,{}]]", blocks::COMPARATOR, record.0);
+        let case = place_stone(&scene, &answer("fail", "[]"));
+        assert_eq!(verdict_of(&case), Ok(()));
+    }
+
+    #[test]
     fn a_panic_fails_the_case_and_the_run_goes_on() {
         // 不存在的状态 ID：读到这一格时 mc-bamboo-blocks 会 panic。
         let case = place_stone("[[0,64,0,4000000]]", &answer("success", "[]"));
@@ -831,7 +1045,10 @@ mod tests {
         assert_eq!(options.forwarded, ["--seed", "2", "--only", "SlabBlock"]);
         assert_eq!(options.show, 5);
         assert!(!options.show_blocked);
-        assert_eq!(options.java_args(), options.forwarded);
+        let java_args = options.java_args();
+        assert_eq!(java_args[..4], options.forwarded);
+        assert_eq!(java_args[4], "--untick");
+        assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
         assert_eq!(options.rerun_args(), "--only SlabBlock");
         assert!(Options::parse(&["--seed"]).is_err());
         assert!(Options::parse(&["--show", "many"]).is_err());
@@ -866,7 +1083,34 @@ mod tests {
             Some(Rule::RandomOutcome)
         );
         assert_eq!(Rule::of_skip("explosion:x"), Some(Rule::Explosion));
+        assert_eq!(
+            Rule::of_skip("untick:FallingBlock"),
+            Some(Rule::FallingTick)
+        );
+        assert_eq!(Rule::of_skip("untick:StairBlock"), None);
         assert_eq!(Rule::of_skip("exception:NullPointerException"), None);
+    }
+
+    #[test]
+    fn block_and_fluid_queues_are_compared_separately() {
+        let official = [scheduled(1, 5), fluid_tick(2, 5)];
+        assert!(same_queues(&official, &[fluid_tick(2, 5), scheduled(1, 5)]));
+        assert!(!same_queues(&official, &[scheduled(1, 5)]));
+        assert!(!same_queues(
+            &official,
+            &[scheduled(1, 5), fluid_tick(2, 30)]
+        ));
+    }
+
+    #[test]
+    fn liquids_tick_inside_the_comparison() {
+        let water = mc_bamboo_data::block_of_state(blocks::WATER).expect("水存在");
+        assert_eq!(tick_exclusion(water), None);
+        assert_eq!(
+            fluid_name("minecraft:flowing_lava"),
+            Ok("minecraft:flowing_lava")
+        );
+        assert!(fluid_name("minecraft:honey").is_err());
     }
 
     #[test]

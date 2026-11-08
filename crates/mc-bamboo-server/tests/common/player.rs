@@ -18,6 +18,7 @@ use std::{
 use mc_bamboo_data::packets::play::{clientbound, serverbound};
 use mc_bamboo_protocol::{
     codec::Reader,
+    compression,
     frame::{MAX_FRAME_LEN, find_frame},
 };
 use md5::{Digest, Md5};
@@ -31,7 +32,7 @@ use tokio::{
 use uuid::{Builder, Uuid};
 
 use super::{
-    Client, chunk_batch_received,
+    Client, chunk_batch_received, encode_outgoing,
     wire::{
         AddEntity, AwardStats, BlockChangedAck, BlockUpdate, BundleDelimiter, ContainerSetSlot,
         Disconnect, DisguisedChat, EntityPositionSync, ForgetLevelChunk, Frame, LevelChunk,
@@ -136,6 +137,7 @@ async fn read_loop(
     mut buffer: Vec<u8>,
     writer: Writer,
     shared: Arc<Shared>,
+    compression: Option<i32>,
 ) {
     loop {
         loop {
@@ -150,9 +152,20 @@ async fn read_loop(
                 break;
             };
             let end = bounds.header_len + bounds.payload_len;
-            let frame = Frame::parse(&buffer[bounds.header_len..end]);
+            let payload = &buffer[bounds.header_len..end];
+            let payload = match compression {
+                Some(threshold) => match compression::decode(payload, threshold) {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        shared.close();
+                        return;
+                    }
+                },
+                None => payload.to_vec(),
+            };
             buffer.drain(..end);
-            answer(&frame, &writer, &shared).await;
+            let frame = Frame::parse(&payload);
+            answer(&frame, &writer, &shared, compression).await;
             shared.record(frame);
         }
         if !matches!(stream.read_buf(&mut buffer).await, Ok(1..)) {
@@ -163,7 +176,7 @@ async fn read_loop(
 }
 
 /// 真实客户端会自动发的回应。写失败说明连接已经结束，读循环马上也会发现。
-async fn answer(frame: &Frame, writer: &Writer, shared: &Shared) {
+async fn answer(frame: &Frame, writer: &Writer, shared: &Shared, compression: Option<i32>) {
     let reply = match frame.id {
         clientbound::KEEP_ALIVE if shared.answer_keep_alive.load(Ordering::Relaxed) => {
             let mut payload = vec![serverbound::KEEP_ALIVE as u8];
@@ -181,6 +194,7 @@ async fn answer(frame: &Frame, writer: &Writer, shared: &Shared) {
         }
         _ => return,
     };
+    let reply = encode_outgoing(&reply, compression);
     let _ = writer.lock().await.write_all(&reply).await;
 }
 
@@ -198,6 +212,8 @@ pub struct Player {
     cursor: usize,
     /// 上一次用的 sequence。真实客户端先加一再用，所以第一个值是 1。
     sequence: i32,
+    /// 登录时服务端声明的压缩阈值，关着压缩时是 `None`。
+    compression: Option<i32>,
 }
 
 impl Drop for Player {
@@ -210,7 +226,12 @@ impl Drop for Player {
 impl Player {
     /// 接管 `finish_configuration` 之后的连接，等到 `login`。游标留在最前面，测试能看到整个进服过程。
     pub async fn attach(client: Client, name: &str, answers: Answers) -> Self {
-        let Client { stream, buffer } = client;
+        let Client {
+            stream,
+            buffer,
+            compression,
+            ..
+        } = client;
         let (read_half, write_half) = stream.into_split();
         let writer = Arc::new(AsyncMutex::new(write_half));
         let shared = Arc::new(Shared::new(answers));
@@ -219,6 +240,7 @@ impl Player {
             buffer,
             Arc::clone(&writer),
             Arc::clone(&shared),
+            compression,
         ));
 
         let mut player = Self {
@@ -231,6 +253,7 @@ impl Player {
             task,
             cursor: 0,
             sequence: 0,
+            compression,
         };
         player.entity_id = player.expect::<Login>(|_| true).await.entity_id;
         player.cursor = 0;
@@ -239,14 +262,16 @@ impl Player {
 
     /// 服务端可能已经把这名玩家踢了，写不进去也不算错。
     pub async fn send_ignoring_errors(&self, bytes: &[u8]) {
-        let _ = self.writer.lock().await.write_all(bytes).await;
+        let bytes = encode_outgoing(bytes, self.compression);
+        let _ = self.writer.lock().await.write_all(&bytes).await;
     }
 
     pub async fn send(&self, bytes: &[u8]) {
+        let bytes = encode_outgoing(bytes, self.compression);
         self.writer
             .lock()
             .await
-            .write_all(bytes)
+            .write_all(&bytes)
             .await
             .unwrap_or_else(|error| panic!("{}: cannot write to the server: {error}", self.name));
     }

@@ -3,11 +3,11 @@
 //! `LightBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, items};
 
 use crate::{
     behaviour::{
-        Behaviour,
+        Behaviour, Plain,
         common::{default_state, is_full_water, is_water_source, tick_water_if_waterlogged},
     },
     context::{PlaceContext, UseContext},
@@ -41,6 +41,57 @@ impl Behaviour for Waterlogged {
     ) -> BlockState {
         tick_water_if_waterlogged(state, world, pos);
         state
+    }
+}
+
+/// `BarrierBlock`：只有创造模式的玩家能往里倒水、舀水，流体和海绵都不行。
+pub(super) struct Barrier;
+
+impl Behaviour for Barrier {
+    fn state_for_placement(
+        &self,
+        block: &'static Block,
+        ctx: &PlaceContext,
+        world: &World,
+    ) -> Option<BlockState> {
+        Waterlogged.state_for_placement(block, ctx, world)
+    }
+
+    fn update_shape(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        direction: Direction,
+        neighbor_pos: BlockPos,
+        neighbor: BlockState,
+    ) -> BlockState {
+        Waterlogged.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn can_place_liquid(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        fluid: i32,
+        by_player: bool,
+    ) -> bool {
+        by_player && Plain.can_place_liquid(state, world, pos, fluid, by_player)
+    }
+
+    fn pickup_block(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        by_player: bool,
+    ) -> i32 {
+        if by_player {
+            Plain.pickup_block(state, world, pos, by_player)
+        } else {
+            items::AIR
+        }
     }
 }
 

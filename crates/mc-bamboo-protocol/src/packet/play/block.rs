@@ -6,8 +6,29 @@ use mc_bamboo_data::packets::play::clientbound;
 use crate::{
     codec::{write_block_pos, write_bool, write_i16, write_i32, write_varint},
     item::ItemStack,
-    packet::ClientboundPacket,
+    packet::{
+        ClientboundPacket,
+        chunk::{LightData, write_light_data},
+    },
 };
+
+/// 一个区块的光照变了，官方的 `ClientboundLightUpdatePacket`。只带变了的段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LightUpdate<'a> {
+    pub x: i32,
+    pub z: i32,
+    pub light: LightData<'a>,
+}
+
+impl ClientboundPacket for LightUpdate<'_> {
+    const ID: i32 = clientbound::LIGHT_UPDATE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.x);
+        write_varint(out, self.z);
+        write_light_data(out, &self.light);
+    }
+}
 
 /// 一个方块变了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +163,28 @@ mod tests {
             ..stone
         };
         assert_eq!(body(&oak_log), hex("00 00 02 00 00 00 8f c4 8c 01"));
+    }
+
+    #[test]
+    fn light_update_writes_varint_coordinates_before_the_light_data() {
+        let layer = [0x12; 2048];
+        let packet = LightUpdate {
+            x: -1,
+            z: 300,
+            light: LightData {
+                sky_mask: 0b10,
+                block_mask: 0,
+                empty_sky_mask: 0,
+                empty_block_mask: 0b100,
+                sky_updates: &[&layer],
+                block_updates: &[],
+            },
+        };
+
+        let mut expected = hex("ff ff ff ff 0f ac 02 01 02 00 00 01 04 01 80 10");
+        expected.extend_from_slice(&layer);
+        expected.push(0);
+        assert_eq!(body(&packet), expected);
     }
 
     #[test]

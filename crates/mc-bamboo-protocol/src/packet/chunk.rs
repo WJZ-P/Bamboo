@@ -63,15 +63,17 @@ pub struct BlockEntityInfo {
 }
 
 /// 区块的光照数据。掩码的第 n 位对应从世界底部下一层算起的第 n 个区块段。
+///
+/// 一段在两个掩码里都没有，表示服务端不存这一段的光照，客户端按默认值算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LightData<'a> {
     /// 有天空光数据的区块段。
     pub sky_mask: u64,
     /// 有方块光数据的区块段。
     pub block_mask: u64,
-    /// 天空光全为零的区块段。
+    /// 天空光是空数据的区块段：服务端还没写过，全为零。
     pub empty_sky_mask: u64,
-    /// 方块光全为零的区块段。
+    /// 方块光是空数据的区块段。
     pub empty_block_mask: u64,
     /// 每段 2048 字节，顺序对应掩码里置位的区块段。
     pub sky_updates: &'a [&'a [u8]],
@@ -105,6 +107,16 @@ fn write_light_layers(out: &mut Vec<u8>, layers: &[&[u8]]) {
     }
 }
 
+/// 写入光照数据，官方的 `ClientboundLightUpdatePacketData`。区块包和 `light_update` 都用它。
+pub fn write_light_data(out: &mut Vec<u8>, light: &LightData<'_>) {
+    write_bit_set(out, light.sky_mask);
+    write_bit_set(out, light.block_mask);
+    write_bit_set(out, light.empty_sky_mask);
+    write_bit_set(out, light.empty_block_mask);
+    write_light_layers(out, light.sky_updates);
+    write_light_layers(out, light.block_updates);
+}
+
 /// 编码区块包里坐标之后的全部内容。
 ///
 /// `sections` 是所有区块段依次写好的结果。内容和坐标无关，相同的区块可以共用这段字节。
@@ -129,13 +141,7 @@ pub fn encode_chunk_body(
     out.extend_from_slice(sections);
 
     write_block_entities(&mut out, block_entities);
-
-    write_bit_set(&mut out, light.sky_mask);
-    write_bit_set(&mut out, light.block_mask);
-    write_bit_set(&mut out, light.empty_sky_mask);
-    write_bit_set(&mut out, light.empty_block_mask);
-    write_light_layers(&mut out, light.sky_updates);
-    write_light_layers(&mut out, light.block_updates);
+    write_light_data(&mut out, light);
     out
 }
 

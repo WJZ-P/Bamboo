@@ -57,6 +57,10 @@ pub enum Kind {
     Use,
     Destroy,
     Tick,
+    /// 跑一格的流体刻，再往后跑几刻。
+    Flow,
+    /// `use_item` 包：物品自己从眼睛看出去找目标。
+    Item,
 }
 
 impl Kind {
@@ -66,6 +70,8 @@ impl Kind {
             Self::Use => "use",
             Self::Destroy => "destroy",
             Self::Tick => "tick",
+            Self::Flow => "flow",
+            Self::Item => "item",
         }
     }
 }
@@ -133,12 +139,17 @@ pub struct Action {
     pub off: String,
     #[serde(deserialize_with = "hand")]
     pub hand: Hand,
+    /// 这只手上物品的官方类名。
+    pub item_class: String,
     pub item_use_on: bool,
     pub pos: [i32; 3],
     #[serde(default, deserialize_with = "face")]
     pub face: Option<Direction>,
     pub loc: Option<[Double; 3]>,
     pub inside: Option<bool>,
+    /// 只有 flow 题有：第一个流体刻之后再跑多少刻。
+    #[serde(default)]
+    pub steps: u32,
     pub actor: [Double; 3],
     pub yaw: Float,
     pub pitch: Float,
@@ -177,6 +188,9 @@ pub struct Answer {
     /// 改了容器内容，旁边又有比较器读得到。Bamboo 不保留容器内容，这题比不了。
     pub analog_content: bool,
     pub item_reached: bool,
+    /// 物品栏里新出现的物品，只有 item 题有内容。
+    #[serde(default)]
+    pub gained: Vec<String>,
 }
 
 /// 写成 IEEE 754 位的 `double`：十进制不保证往返，这些数在边界上差一位结果就变。
@@ -274,6 +288,32 @@ mod tests {
         assert_eq!(case.action.kind, Kind::Destroy);
         assert_eq!(case.action.face, None);
         assert_eq!(case.action.loc, None);
+    }
+
+    #[test]
+    fn flow_and_item_cases_carry_their_extra_fields() {
+        let flow = CASE
+            .replace(r#""kind":"place""#, r#""kind":"flow""#)
+            .replace(r#""inside":false,"#, r#""inside":false,"steps":40,"#);
+        let Line::Case(case) = serde_json::from_str(&flow).expect("这一行符合格式") else {
+            panic!("这是 case 行");
+        };
+        assert_eq!(case.action.kind, Kind::Flow);
+        assert_eq!(case.action.steps, 40);
+        assert!(case.outcome.gained.is_empty());
+
+        let item = CASE
+            .replace(r#""kind":"place""#, r#""kind":"item""#)
+            .replace(
+                r#""itemReached":true"#,
+                r#""itemReached":false,"gained":["minecraft:water_bucket"]"#,
+            );
+        let Line::Case(case) = serde_json::from_str(&item).expect("这一行符合格式") else {
+            panic!("这是 case 行");
+        };
+        assert_eq!(case.action.kind, Kind::Item);
+        assert_eq!(case.action.steps, 0);
+        assert_eq!(case.outcome.gained, ["minecraft:water_bucket"]);
     }
 
     #[test]

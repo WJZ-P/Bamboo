@@ -369,10 +369,16 @@ mod tests {
 
     const DEADLINE: Duration = Duration::from_secs(5);
 
+    /// 这里的连接只检查进出游戏之外的部分，所以关掉压缩；
+    /// 压缩由 `tests/` 里的客户端覆盖。
     async fn test_server() -> (Server, SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = Server::new(listener, ServerConfig::default()).unwrap();
+        let config = ServerConfig {
+            compression_threshold: -1,
+            ..ServerConfig::default()
+        };
+        let server = Server::new(listener, config).unwrap();
         (server, address)
     }
 
@@ -592,6 +598,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let config = ServerConfig {
             keep_alive_interval: Duration::from_millis(50),
+            compression_threshold: -1,
             ..ServerConfig::default()
         };
         let server = Server::new(listener, config).unwrap();

@@ -1,6 +1,8 @@
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -12,6 +14,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -42,6 +45,7 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.PacketDecoder;
+import net.minecraft.network.VarInt;
 import net.minecraft.network.ProtocolInfo;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -77,6 +81,8 @@ import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
 import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.network.protocol.game.ClientboundLightUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundMoveEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
@@ -112,6 +118,7 @@ import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.network.protocol.game.VecDeltaCodec;
 import net.minecraft.network.protocol.login.ClientLoginPacketListener;
+import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginDisconnectPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket;
 import net.minecraft.network.protocol.login.ServerboundHelloPacket;
@@ -155,6 +162,7 @@ import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -164,12 +172,17 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.entity.BlockEntityTypes;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
+import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.ticks.ProtoChunkTicks;
 
 /**
  * 用官方 26.3 的网络代码扮演客户端，检查 Bamboo 发的每个包。
@@ -195,6 +208,8 @@ public final class Probe {
     private static final int VIEW_DISTANCE = 8;
     private static final int ALL_SKIN_PARTS = 0x7f;
     private static final int NO_HAT_SKIN_PARTS = 0x3f;
+    /** 官方服务器默认的 `network-compression-threshold`。 */
+    private static final int COMPRESSION_THRESHOLD = 256;
     /** 出生点所在的区块。 */
     private static final ChunkPos SPAWN_CHUNK = new ChunkPos(0, 0);
     /** 全部区块到齐之后走到这个区块，让服务端发 center、forget 和新区块。 */
@@ -253,6 +268,7 @@ public final class Probe {
             "handleKeepAlive",
             "handleLevelChunkWithLight",
             "handleLevelEvent",
+            "handleLightUpdatePacket",
             "handleLogin",
             "handleMoveEntity",
             "handleMovePlayer",
@@ -271,6 +287,8 @@ public final class Probe {
             "handleUpdateAttributes");
 
     private static final Map<String, Boolean> CHECKS = new LinkedHashMap<>();
+    /** 第一个玩家进来时世界还没改过，它的第一个区块一定要对一次光照的答案。 */
+    private static volatile boolean flatLightChecked;
 
     private static void check(String name, boolean passed) {
         CHECKS.merge(name, passed, Boolean::logicalAnd);
@@ -297,6 +315,7 @@ public final class Probe {
             try {
                 probeStatus(host, port);
                 new Scenario(host, port, layers).run();
+                check("chunk: an untouched chunk had its light compared", flatLightChecked);
             } catch (Exception error) {
                 // 官方解码器发现格式错误时会断开连接，这里记成一项失败，照常输出汇总。
                 check("connection: no error while talking to the server (" + error + ")", false);
@@ -1011,6 +1030,7 @@ public final class Probe {
         private boolean forgetBeforeCenter;
         private int keepAlives;
         private boolean latencyUpdated;
+        private boolean compressionSeen;
         private boolean disconnected;
         private boolean ownDataChecked;
         private boolean inBundle;
@@ -1076,6 +1096,7 @@ public final class Probe {
         void start() {
             connection.initiateServerboundPlayConnection(host, port, listener(ClientLoginPacketListener.class, Map.of(
                     "handleLoginFinished", packet -> onLoginFinished((ClientboundLoginFinishedPacket) packet),
+                    "handleCompression", packet -> onCompression((ClientboundLoginCompressionPacket) packet),
                     "handleDisconnect", packet -> onLoginRefused((ClientboundLoginDisconnectPacket) packet))));
             connection.send(new ServerboundHelloPacket(player, uuid));
         }
@@ -1170,6 +1191,10 @@ public final class Probe {
             check("play: first batch is the three by three around the spawn", firstBatchIsAroundTheSpawn());
             check("play: tab list has the player", tab.containsKey(uuid));
             check("play: was not disconnected", !disconnected);
+            check("compression: " + player + " received compressed frames", bridge.compressedFrames > 0);
+            check("compression: " + player + " received raw frames below the threshold", bridge.rawFrames > 0);
+            check("compression: " + player + " never compressed below the threshold",
+                    bridge.belowThresholdFrames == 0);
             playPackets.keySet().forEach(name -> check("play: M2 sends " + name, M2_PACKETS.contains(name)));
             if (walks) {
                 check("walk: center moved first", walkCenterArrived && !forgetBeforeCenter);
@@ -1201,6 +1226,15 @@ public final class Probe {
             return firstBatch.stream().allMatch(pos -> Math.abs(pos.x()) <= 1 && Math.abs(pos.z()) <= 1);
         }
 
+        /** 和官方客户端一样：收到登录压缩包之后才把管线换成压缩帧。 */
+        private void onCompression(ClientboundLoginCompressionPacket packet) {
+            int threshold = packet.getCompressionThreshold();
+            compressionSeen = true;
+            check("login: " + player + " was told the official compression threshold",
+                    threshold == COMPRESSION_THRESHOLD);
+            bridge.enableCompression(threshold);
+        }
+
         private void onLoginRefused(ClientboundLoginDisconnectPacket packet) {
             System.out.println("PROBE login refused: " + packet.reason().getString());
             check("login: accepted", false);
@@ -1210,6 +1244,7 @@ public final class Probe {
             check("login: name is kept", packet.gameProfile().name().equals(player));
             check("login: uuid uses the offline algorithm", packet.gameProfile().id().equals(uuid));
             check("login: session id is present", packet.sessionId() != null);
+            check("login: compression comes before the login success of " + player, compressionSeen);
 
             connection.setupInboundProtocol(ConfigurationProtocols.CLIENTBOUND, listener(
                     ClientConfigurationPacketListener.class, Map.of(
@@ -1320,6 +1355,8 @@ public final class Probe {
                     value -> onForgetChunk((ClientboundForgetLevelChunkPacket) value));
             handlers.put("handleLevelChunkWithLight",
                     value -> onChunk((ClientboundLevelChunkWithLightPacket) value));
+            handlers.put("handleLightUpdatePacket",
+                    value -> onLightUpdate((ClientboundLightUpdatePacket) value));
             handlers.put("handleChunkBatchFinished",
                     value -> onBatchFinished((ClientboundChunkBatchFinishedPacket) value));
             handlers.put("handleSetEntityData", value -> onEntityData((ClientboundSetEntityDataPacket) value));
@@ -1668,7 +1705,43 @@ public final class Probe {
                 sections[index].read(buffer);
             }
             check("chunk: all sections were consumed", buffer.readableBytes() == 0);
+            checkChunkData(packet, sections);
             return sections;
+        }
+
+        /** 区块段头的计数和每种高度图都由官方代码从解出来的方块重算，再和收到的值比较。 */
+        private void checkChunkData(ClientboundLevelChunkWithLightPacket packet, LevelChunkSection[] sections) {
+            for (int index = 0; index < sections.length; index += 1) {
+                int receivedBlocks = privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount");
+                int receivedFluids = privateInt(sections[index], LevelChunkSection.class, "fluidCount");
+                sections[index].recalcBlockCounts();
+                check("chunk: section " + index + " block count",
+                        receivedBlocks == privateInt(sections[index], LevelChunkSection.class, "nonEmptyBlockCount"));
+                check("chunk: section " + index + " fluid count",
+                        receivedFluids == privateInt(sections[index], LevelChunkSection.class, "fluidCount"));
+            }
+
+            ProtoChunk chunk = new ProtoChunk(
+                    new ChunkPos(packet.x(), packet.z()),
+                    UpgradeData.EMPTY,
+                    sections,
+                    new ProtoChunkTicks<>(),
+                    new ProtoChunkTicks<>(),
+                    LevelHeightAccessor.create(-64, SECTIONS * 16),
+                    containers,
+                    null);
+            Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS);
+
+            Map<Heightmap.Types, long[]> received = packet.chunkData().getHeightmaps();
+            for (Heightmap.Types type : Heightmap.Types.values()) {
+                check("chunk: " + type + " is sent exactly when the client needs it",
+                        type.sendToClient() == received.containsKey(type));
+            }
+            for (Map.Entry<Heightmap.Types, long[]> entry : received.entrySet()) {
+                long[] expected = chunk.getOrCreateHeightmapUnprimed(entry.getKey()).getRawData();
+                check("chunk: " + entry.getKey() + " heightmap",
+                        Arrays.equals(entry.getValue(), expected));
+            }
         }
 
         /** 记下这个区块里改过的位置和方块实体，后来的玩家要靠它们检查改动。 */
@@ -1721,14 +1794,90 @@ public final class Probe {
                 check("chunk: heightmap points above the grass", storage.get(0) == 4 && storage.get(255) == 4);
             }
 
-            var light = packet.lightData();
-            check("chunk: layer below the world is dark", light.emptySkyYMask().get(0));
-            check("chunk: every other layer has sky light",
-                    light.skyYMask().cardinality() == LIGHT_LAYERS - 1 && !light.skyYMask().get(0));
-            check("chunk: one light array per layer", light.skyUpdates().size() == LIGHT_LAYERS - 1);
-            check("chunk: light arrays are full size",
-                    light.skyUpdates().stream().allMatch(layer -> layer.length == 2048));
-            check("chunk: no block light", light.blockYMask().isEmpty() && light.blockUpdates().isEmpty());
+            checkLightStructure("chunk", packet.lightData());
+            // 后进来的玩家收到的第一个区块可能已经被别人改过了，光照也跟着变，只有原样的区块能对答案。
+            if (isUntouchedFlat(sections)) {
+                checkFlatLight(packet.lightData());
+            }
+        }
+
+        /** 每一格都和超平坦的地层一样。 */
+        private static boolean isUntouchedFlat(LevelChunkSection[] sections) {
+            Block[] layers = {Blocks.BEDROCK, Blocks.DIRT, Blocks.DIRT, Blocks.GRASS_BLOCK};
+            for (int y = 0; y < 16; y += 1) {
+                for (int z = 0; z < 16; z += 1) {
+                    for (int x = 0; x < 16; x += 1) {
+                        BlockState state = sections[0].getBlockState(x, y, z);
+                        if (y < layers.length ? !state.is(layers[y]) : !state.isAir()) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            for (int index = 1; index < SECTIONS; index += 1) {
+                if (!sections[index].hasOnlyAir()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * 官方超平坦区块的光照：只存地面那段和它上下各一段。世界下面那段没写过，是空的；地面那段草方块以上是 15；
+         * 再上面一段整段是 15，更高的段不存，客户端按 15 算。方块光三段都是空的。
+         */
+        private void checkFlatLight(ClientboundLightUpdatePacketData light) {
+            flatLightChecked = true;
+            check("chunk: sky light is stored around the ground only",
+                    light.skyYMask().equals(bits(1, 2)) && light.emptySkyYMask().equals(bits(0)));
+            check("chunk: block light is stored empty around the ground",
+                    light.blockYMask().isEmpty() && light.emptyBlockYMask().equals(bits(0, 1, 2))
+                            && light.blockUpdates().isEmpty());
+            if (light.skyUpdates().size() != 2) {
+                check("chunk: one sky light array per stored section", false);
+                return;
+            }
+            DataLayer ground = new DataLayer(light.skyUpdates().get(0));
+            DataLayer above = new DataLayer(light.skyUpdates().get(1));
+            boolean groundLit = true;
+            boolean aboveLit = true;
+            for (int y = 0; y < 16; y += 1) {
+                for (int z = 0; z < 16; z += 1) {
+                    for (int x = 0; x < 16; x += 1) {
+                        groundLit &= ground.get(x, y, z) == (y < 4 ? 0 : 15);
+                        aboveLit &= above.get(x, y, z) == 15;
+                    }
+                }
+            }
+            check("chunk: sky light starts above the grass", groundLit);
+            check("chunk: sky light is full above the ground section", aboveLit);
+        }
+
+        /** light_update 只带变了的段，形状和区块包里的光照一样。 */
+        private void onLightUpdate(ClientboundLightUpdatePacket packet) {
+            checkLightStructure("light", packet.lightData());
+        }
+
+        /** 两个掩码不重叠，有数据的段一段一个数组，都在 26 段里。 */
+        private static void checkLightStructure(String scope, ClientboundLightUpdatePacketData light) {
+            check(scope + ": light masks stay inside the light sections",
+                    light.skyYMask().length() <= LIGHT_LAYERS && light.blockYMask().length() <= LIGHT_LAYERS
+                            && light.emptySkyYMask().length() <= LIGHT_LAYERS
+                            && light.emptyBlockYMask().length() <= LIGHT_LAYERS);
+            check(scope + ": a light section is either stored or empty",
+                    !light.skyYMask().intersects(light.emptySkyYMask())
+                            && !light.blockYMask().intersects(light.emptyBlockYMask()));
+            check(scope + ": one light array per stored section",
+                    light.skyUpdates().size() == light.skyYMask().cardinality()
+                            && light.blockUpdates().size() == light.blockYMask().cardinality());
+        }
+
+        private static BitSet bits(int... indexes) {
+            BitSet set = new BitSet();
+            for (int index : indexes) {
+                set.set(index);
+            }
+            return set;
         }
 
         private void onBatchFinished(ClientboundChunkBatchFinishedPacket packet) {
@@ -1787,10 +1936,20 @@ public final class Probe {
 
     /** 在内存里运行官方管线，并把它的字节通过真实的 TCP socket 收发。 */
     private static final class Bridge implements AutoCloseable {
+        /** 官方管线上分帧之后、解压之前的位置，用来检查每个包的长度前缀。 */
+        private static final String FRAME_PROBE = "frame_probe";
+
         final Connection connection = new Connection(PacketFlow.CLIENTBOUND);
         private final EmbeddedChannel channel;
         private final Socket socket;
         private final byte[] chunk = new byte[1 << 16];
+        private int threshold;
+        /** 解压前的帧里长度前缀不为零的个数，也就是真的压缩过的包。 */
+        int compressedFrames;
+        /** 解压前的帧里长度前缀为零的个数，小包就是原样发的。 */
+        int rawFrames;
+        /** 长度前缀不为零但小于阈值的帧。官方不会这样发，客户端也会拒绝。 */
+        int belowThresholdFrames;
 
         Bridge(String host, int port) throws IOException {
             socket = new Socket(host, port);
@@ -1809,6 +1968,37 @@ public final class Probe {
         /** 官方管线关了这条连接。解码出错时走这条路。 */
         boolean channelClosed() {
             return !channel.isOpen();
+        }
+
+        /**
+         * 和官方客户端收到登录压缩包之后做的一样，把管线切换到压缩帧。
+         *
+         * <p>切换完再把探针挂在解压前面：分帧之后、解压之前的帧体带着长度前缀，
+         * 非零就说明服务端真的压了这一个包。
+         */
+        void enableCompression(int threshold) {
+            this.threshold = threshold;
+            connection.setupCompression(threshold, false);
+            channel.pipeline().addBefore("decompress", FRAME_PROBE, new FrameProbe());
+        }
+
+        /** 看一眼还没解压的帧体，只读长度前缀，不动它的读指针。 */
+        private final class FrameProbe extends ChannelInboundHandlerAdapter {
+            @Override
+            public void channelRead(ChannelHandlerContext context, Object message) {
+                if (message instanceof ByteBuf frame && frame.isReadable()) {
+                    int declared = VarInt.read(frame.duplicate());
+                    if (declared == 0) {
+                        rawFrames += 1;
+                    } else {
+                        compressedFrames += 1;
+                        if (declared < threshold) {
+                            belowThresholdFrames += 1;
+                        }
+                    }
+                }
+                context.fireChannelRead(message);
+            }
         }
 
         /** 转发一轮：先发管线里排队的字节，再读一次 socket，读不到时最多等 READ_TIMEOUT_MILLIS。 */

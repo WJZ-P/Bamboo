@@ -36,7 +36,10 @@ pub struct Extracted {
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
     pub state_tables: StateTables,
+    pub light_tables: LightTables,
     pub block_maps: BlockMaps,
+    pub block_transformers: Vec<BlockTransformer>,
+    pub heightmaps: Vec<HeightmapType>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +174,35 @@ pub struct FluidState {
     pub legacy_block: u32,
 }
 
+/// 光照引擎要的表，`Extractor.java` 的 `LightTables`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightTables {
+    /// 每个状态的 `getLightEmission`。
+    pub emission: Vec<u8>,
+    /// 每个状态在 `occlusion_faces` 里的下标。
+    pub occlusion: Vec<u16>,
+    /// 去重后的 6 个面的遮挡形状，按 `Direction` 的 ID 排列，第一项全是空形状。
+    pub occlusion_faces: Vec<[u16; 6]>,
+    /// 去重后的面形状个数。
+    pub face_count: usize,
+    /// 两两之间的 `faceShapeOccludes`，Java 的 `long` 是有符号的。
+    pub face_occludes: Vec<i64>,
+}
+
+/// `Heightmap.Types` 的一种。区块包按 `id` 排列，`id` 也是网络上的键。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeightmapType {
+    /// 官方的序列化名，比如 `MOTION_BLOCKING_NO_LEAVES`。
+    pub name: String,
+    pub id: i32,
+    /// `sendToClient`：区块包带上这一种。
+    pub send_to_client: bool,
+    /// `keepAfterWorldgen`：区块里一直留着这一种。
+    pub keep_after_worldgen: bool,
+}
+
 /// 官方写在静态表里的方块对应关系，都是方块注册表 ID。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +215,58 @@ pub struct BlockMaps {
     pub fire_odds: Vec<(i32, i32, i32)>,
     /// 物品注册表 ID。
     pub campfire_inputs: Vec<i32>,
+}
+
+/// 世界层注册表里的一个 `BlockTransformer`，只有改方块的部分。
+#[derive(Debug, Deserialize)]
+pub struct BlockTransformer {
+    pub name: String,
+    pub transforms: Vec<BlockTransform>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockTransform {
+    pub provider: StateProvider,
+    /// `Direction` 的 ID。
+    pub disallowed_faces: Vec<i32>,
+    pub update_from_neighbors: bool,
+}
+
+/// `Extractor.java` 只导出这几种状态提供器，别的在那边就报错。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StateProvider {
+    /// 状态 ID。
+    Simple(u32),
+    CopyProperties(Box<StateProvider>),
+    RuleBased {
+        rules: Vec<StateRule>,
+        fallback: Option<Box<StateProvider>>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateRule {
+    pub if_true: BlockPredicate,
+    pub then: StateProvider,
+}
+
+/// `Extractor.java` 只导出这几种方块判定，别的在那边就报错。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockPredicate {
+    /// 方块注册表 ID。
+    MatchingBlocks {
+        offset: [i32; 3],
+        blocks: Vec<i32>,
+    },
+    MatchingBlockTag {
+        offset: [i32; 3],
+        tag: String,
+    },
+    AllOf(Vec<BlockPredicate>),
 }
 
 /// `Extractor.java` 导出的物品。物品组件在官方报告里，见 [`Item`]。
@@ -210,6 +294,9 @@ pub struct Item {
     pub consumable: bool,
     pub compostable: bool,
     pub jukebox_playable: bool,
+    /// `block_transformer` 组件指向的注册表条目。
+    pub block_transformer: Option<String>,
+    pub blocks_attacks: bool,
 }
 
 /// `reports/minecraft/components/item` 里一个物品的报告，只取用到的组件。
@@ -230,6 +317,11 @@ struct ItemComponents {
     compostable: Option<serde_json::Value>,
     #[serde(rename = "minecraft:jukebox_playable")]
     jukebox_playable: Option<serde_json::Value>,
+    /// 报告里写注册表条目的名字。直接内联的写法读不了，生成会失败。
+    #[serde(rename = "minecraft:block_transformer")]
+    block_transformer: Option<String>,
+    #[serde(rename = "minecraft:blocks_attacks")]
+    blocks_attacks: Option<serde_json::Value>,
 }
 
 /// 字段等于默认值 `true` 时报告不写它。
@@ -260,7 +352,12 @@ pub struct VersionData {
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
     pub state_tables: StateTables,
+    pub light_tables: LightTables,
     pub block_maps: BlockMaps,
+    /// 按名字排序。
+    pub block_transformers: Vec<BlockTransformer>,
+    /// 按官方 `Heightmap.Types.values()` 的顺序。
+    pub heightmaps: Vec<HeightmapType>,
     /// 内置注册表名 → 按 ID 排列的条目。
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
@@ -302,7 +399,10 @@ pub fn run(
         blocks: extracted.blocks,
         items,
         state_tables: extracted.state_tables,
+        light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
+        block_transformers: extracted.block_transformers,
+        heightmaps: extracted.heightmaps,
         builtin_registries,
         packets,
     })
@@ -445,6 +545,8 @@ fn read_items(extracted: Vec<ExtractedItem>, reports: &Path) -> Result<Vec<Item>
                 consumable: components.consumable.is_some(),
                 compostable: components.compostable.is_some(),
                 jukebox_playable: components.jukebox_playable.is_some(),
+                block_transformer: components.block_transformer,
+                blocks_attacks: components.blocks_attacks.is_some(),
                 name: item.name,
                 class: item.class,
                 block: item.block,

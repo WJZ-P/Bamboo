@@ -10,7 +10,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{Block, BlockClass, block_of_state, blocks};
 
 use super::{
-    Rule,
+    Rule, UNPORTED_ITEM_USE_ON,
     lines::{Case, Cell, Destroyed, Header, Kind},
     replay::{Replayed, Scheduled},
     tick_classes,
@@ -29,6 +29,8 @@ pub struct Mismatch {
     pub ticks: bool,
     /// 官方和我们范围内的计划刻。
     pub compared_ticks: (Vec<Scheduled>, Vec<Scheduled>),
+    /// 物品栏里新出现的物品不同。
+    pub gained: bool,
     pub panic: Option<String>,
 }
 
@@ -38,6 +40,7 @@ impl Mismatch {
             && self.cells.is_empty()
             && !self.destroyed
             && !self.ticks
+            && !self.gained
             && self.panic.is_none()
     }
 }
@@ -273,6 +276,11 @@ impl Report {
             if !classes.is_empty() {
                 println!("          {:<18} {classes:?}", "");
             }
+            if rule == Rule::ItemUseOn {
+                for (class, reason) in UNPORTED_ITEM_USE_ON {
+                    println!("          {:<18} {class}: {reason}", "");
+                }
+            }
         }
         println!(
             "  {:>7} {:<18} outcome fields that only record",
@@ -429,14 +437,22 @@ fn destroyed_lines(text: &mut String, events: &[Destroyed], differ: bool) {
 fn tick_lines(text: &mut String, ticks: &[Scheduled], differ: bool) {
     let mark = if differ { "*" } else { " " };
     for tick in ticks {
+        let queue = if tick.fluid { "fluid tick" } else { "tick" };
         let _ = writeln!(
             text,
-            "  {mark}    tick {} {} delay {} priority {}",
+            "  {mark}    {queue} {} {} delay {} priority {}",
             pos_text(tick.pos),
-            short(tick.block),
+            short(tick.id),
             tick.delay,
             tick.priority
         );
+    }
+}
+
+fn gained_lines(text: &mut String, gained: &[String], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for item in gained {
+        let _ = writeln!(text, "  {mark}    gained {}", short(item));
     }
 }
 
@@ -450,6 +466,11 @@ fn click_line(case: &Case) -> String {
             x.0,
             y.0,
             z.0
+        ),
+        _ if action.kind == Kind::Flow => format!(
+            "target {} then {} ticks",
+            pos_text(action.target()),
+            action.steps
         ),
         _ => format!("target {}", pos_text(action.target())),
     }
@@ -514,6 +535,7 @@ fn render_official(text: &mut String, case: &Case, mismatch: &Mismatch) {
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &answer.destroyed, mismatch.destroyed);
     tick_lines(text, &mismatch.compared_ticks.0, mismatch.ticks);
+    gained_lines(text, &answer.gained, mismatch.gained);
 }
 
 fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mismatch) {
@@ -532,6 +554,7 @@ fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mism
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &replayed.destroyed, mismatch.destroyed);
     tick_lines(text, &mismatch.compared_ticks.1, mismatch.ticks);
+    gained_lines(text, &replayed.gained, mismatch.gained);
 }
 
 const fn to_pair(cell: Cell) -> (BlockPos, u32) {
