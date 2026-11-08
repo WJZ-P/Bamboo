@@ -13,6 +13,7 @@
 
 pub mod behaviour;
 pub mod context;
+pub mod entity;
 pub mod fluid;
 pub mod interact;
 mod item_use;
@@ -29,7 +30,8 @@ mod testing;
 pub use behaviour::Behaviour;
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use interact::{
-    InteractionResult, Outcome, destroy_block, run_scheduled_ticks, use_item, use_item_on,
+    InteractionResult, Outcome, destroy_block, run_block_ticks, run_entity_tick,
+    run_scheduled_ticks, use_item, use_item_on,
 };
 pub use level::{Effect, Level, RedstoneMemory};
 pub use shape::{Aabb, Boxes, CollisionContext};

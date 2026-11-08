@@ -24,6 +24,7 @@ mod chat;
 mod chunk_encoding;
 mod chunk_tracking;
 mod entity_sync;
+mod entity_tracking;
 mod global;
 mod inbound;
 mod interaction;

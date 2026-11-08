@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::{
     chat,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    entity_sync,
+    entity_sync, entity_tracking,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
@@ -93,6 +93,7 @@ impl World {
         light_updates::broadcast_light_changes(&mut self.region);
         interaction::broadcast_block_changes(&mut self.region);
         entity_sync::sync_entities(&mut self.region);
+        entity_tracking::sync(&mut self.region);
         entity_sync::send_equipment_changes(&mut self.region);
         interaction::send_block_changed_acks(&mut self.region);
         if let Some(frames) = self.global.tick_latency_broadcast() {
@@ -182,6 +183,7 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         entity_sync::on_leave(&mut self.region, id);
+        entity_tracking::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
         if let Some(frames) = self.global.remove_player(id) {
             self.region.links.broadcast(&frames);

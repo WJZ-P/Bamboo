@@ -8,7 +8,9 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, Outcome,
-    RedstoneMemory, TickPriority, destroy_block, run_scheduled_ticks,
+    RedstoneMemory, TickPriority, destroy_block,
+    entity::Entities,
+    run_scheduled_ticks,
     shape::{self, BooleanOp},
     use_item, use_item_on,
 };
@@ -68,12 +70,15 @@ pub struct Scheduled {
 /// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。
 struct OracleLevel {
     blocks: HashMap<BlockPos, BlockState>,
-    entities: Vec<Aabb>,
+    /// 场景里的玩家，挡路判定用。
+    player_boxes: Vec<Aabb>,
     min_y: i32,
     max_y: i32,
     touched: RefCell<BTreeSet<usize>>,
     /// 每道题一份，和假世界里每道题新建的方块实体一样。
     redstone: RedstoneMemory,
+    /// 题目不比较实体，但 `Level` 要有它。
+    entities: Entities,
 }
 
 impl OracleLevel {
@@ -83,11 +88,12 @@ impl OracleLevel {
             blocks: scene
                 .map(|cell| (cell.pos(), BlockState(cell.state())))
                 .collect(),
-            entities: entity_boxes(&case.action),
+            player_boxes: entity_boxes(&case.action),
             min_y: header.min_y,
             max_y: header.max_y,
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
+            entities: Entities::new(),
         }
     }
 
@@ -138,7 +144,7 @@ impl Level for OracleLevel {
     /// `EntityGetter.isUnobstructed`：先用外框筛一遍实体，再做精确的形状运算。
     fn is_unobstructed(&self, boxes: &[Aabb]) -> bool {
         let bounds = bounds_of(boxes);
-        !self.entities.iter().any(|entity| {
+        !self.player_boxes.iter().any(|entity| {
             intersects(bounds, *entity)
                 && shape::join_is_not_empty(boxes, slice::from_ref(entity), BooleanOp::And)
         })
@@ -177,6 +183,14 @@ impl Level for OracleLevel {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        &self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.entities
     }
 }
 
@@ -419,11 +433,12 @@ mod tests {
     fn level_with_player(player: Aabb) -> OracleLevel {
         OracleLevel {
             blocks: HashMap::new(),
-            entities: vec![player],
+            player_boxes: vec![player],
             min_y: -64,
             max_y: 319,
             touched: RefCell::new(BTreeSet::new()),
             redstone: RedstoneMemory::default(),
+            entities: Entities::new(),
         }
     }
 

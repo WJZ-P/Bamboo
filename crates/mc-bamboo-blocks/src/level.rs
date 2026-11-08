@@ -7,7 +7,7 @@ use mc_bamboo_core::{
     sign::{SignContent, SignTextSlot},
 };
 
-use crate::{shape::Aabb, state::BlockState};
+use crate::{entity::Entities, shape::Aabb, state::BlockState};
 
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
 pub trait Level {
@@ -43,6 +43,12 @@ pub trait Level {
 
     /// 见 [`Level::redstone`]。
     fn redstone_mut(&mut self) -> &mut RedstoneMemory;
+
+    /// 这个世界里的实体。实体由世界线程拥有，见 `docs/folia.md`。
+    fn entities(&self) -> &Entities;
+
+    /// 见 [`Level::entities`]。
+    fn entities_mut(&mut self) -> &mut Entities;
 }
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。

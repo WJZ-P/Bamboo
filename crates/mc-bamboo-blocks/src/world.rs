@@ -2,16 +2,17 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3, sign::SignContent};
+use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
 use tracing::error;
 
 use crate::{
     context::BlockHit,
+    entity::{Entity, JavaRandom, PrimedTnt},
     fluid::Fluid,
     level::{Effect, Level, RedstoneMemory},
     shape::{self, CollisionContext},
-    state::{BlockState, FluidState, POWER, SupportType},
+    state::{BlockState, FluidState, POWER, SupportType, WATERLOGGED},
     ticks::{BlockTicks, TickPriority},
 };
 
@@ -858,6 +859,185 @@ impl<'a> World<'a> {
         self.update_or_destroy(current, updated, pos, flags, limit);
     }
 
+    /// `addFreshEntity`：放进世界，返回实体 ID。tick 的时候生成的实体下一 tick 才开始动。
+    pub fn spawn_entity(&mut self, entity: Entity) -> i32 {
+        self.level.entities_mut().spawn(entity)
+    }
+
+    /// `FallingBlockEntity.fall`：这一格只剩流体，方块本身变成实体从这一格的中心开始掉。
+    ///
+    /// 生成时 `WATERLOGGED` 要清掉，落地时再按那一格的水重新设。
+    pub fn spawn_falling_block(&mut self, pos: BlockPos, state: BlockState) -> i32 {
+        let falling = if state.has(WATERLOGGED) {
+            state.with(WATERLOGGED, false)
+        } else {
+            state
+        };
+        let entity = Entity::falling_block(pos, falling);
+        self.set_block_and_update(pos, state.fluid().legacy_block());
+        self.spawn_entity(entity)
+    }
+
+    /// `TntBlock.prime`：在这一格生成一个默认引信的 TNT。方块本身的移除由调用方负责。
+    pub fn spawn_tnt(&mut self, pos: BlockPos) -> i32 {
+        let entity = Entity::primed_tnt(block_center_bottom(pos), self.entity_random());
+        self.spawn_entity(entity)
+    }
+
+    /// `TntBlock.wasExploded`：被爆炸点着的 TNT 引信比默认的短一截。
+    pub fn spawn_short_fuse_tnt(&mut self, pos: BlockPos) -> i32 {
+        let mut entity = Entity::primed_tnt(block_center_bottom(pos), self.entity_random());
+        let fuse = short_fuse(PrimedTnt::DEFAULT_FUSE, self.entity_random());
+        entity.set_fuse(fuse);
+        self.spawn_entity(entity)
+    }
+
+    /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
+    pub fn entity_mut(&mut self, id: i32) -> Option<&mut Entity> {
+        self.level.entities_mut().get_mut_including_pending(id)
+    }
+
+    /// `level.getRandom()`：世界自己的随机源。
+    pub fn entity_random(&mut self) -> &mut JavaRandom {
+        self.level.entities_mut().random()
+    }
+
+    /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
+    ///
+    /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
+    pub fn tick_entities(&mut self) {
+        self.level.entities_mut().begin_tick();
+        for id in self.level.entities().ids() {
+            let Some(mut entity) = self.level.entities_mut().take(id) else {
+                continue;
+            };
+            entity.tick(self);
+            if !entity.removed {
+                self.level.entities_mut().put(entity);
+            }
+        }
+        self.level.entities_mut().end_tick();
+    }
+
+    /// `CollisionGetter.getBlockCollisions`：和 `box_` 碰上的方块的碰撞形状，按 `Cursor3D` 的顺序。
+    ///
+    /// 返回的形状已经是世界坐标。顺序有影响：官方在运动被完全挡住后就不再往后看。
+    pub(crate) fn block_collisions(
+        &self,
+        box_: shape::Aabb,
+        context: CollisionContext,
+    ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
+        let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
+        let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
+        let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
+        let y_max = mth::floor(box_.max_y + shape::EPSILON) + 1;
+        let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
+        let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
+        let mut collisions = Vec::new();
+        for z in z_min..=z_max {
+            for y in y_min..=y_max {
+                for x in x_min..=x_max {
+                    let corner = u8::from(x == x_min || x == x_max)
+                        + u8::from(y == y_min || y == y_max)
+                        + u8::from(z == z_min || z == z_max);
+                    if corner == 3 {
+                        continue;
+                    }
+                    let pos = BlockPos::new(x, y, z);
+                    let state = self.block_state(pos);
+                    if corner == 1 && !shape::has_large_collision_shape(state) {
+                        continue;
+                    }
+                    if corner == 2 && !state.is(blocks::MOVING_PISTON) {
+                        continue;
+                    }
+                    let boxes = shape::collision_boxes(state, pos, context);
+                    if boxes.is_empty() {
+                        continue;
+                    }
+                    let (x_origin, y_origin, z_origin) =
+                        (f64::from(x), f64::from(y), f64::from(z));
+                    let matched = if shape::is_unit_cube(&boxes) {
+                        box_.intersects(
+                            x_origin,
+                            y_origin,
+                            z_origin,
+                            x_origin + 1.0,
+                            y_origin + 1.0,
+                            z_origin + 1.0,
+                        )
+                    } else {
+                        let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
+                        shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
+                    };
+                    if matched {
+                        collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
+                    }
+                }
+            }
+        }
+        collisions
+    }
+
+    /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
+    ///
+    /// 距离一样时取坐标大的那个，`Vec3i.compareTo` 先比 y 再比 z 最后比 x。
+    pub(crate) fn find_supporting_block(
+        &self,
+        position: Vec3,
+        box_: shape::Aabb,
+        context: CollisionContext,
+    ) -> Option<BlockPos> {
+        let mut main = None;
+        let mut main_distance = f64::MAX;
+        for (pos, _) in self.block_collisions(box_, context) {
+            let center = Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            );
+            let distance = position.distance_to_sqr(center);
+            let larger = main.is_none_or(|main: BlockPos| compare_positions(main, pos).is_lt());
+            if distance < main_distance || distance == main_distance && larger {
+                main = Some(pos);
+                main_distance = distance;
+            }
+        }
+        main
+    }
+
+    /// `ClipContext.Block.FALLDAMAGE_RESETTING` 加 `ClipContext.Fluid.WATER` 的射线。
+    ///
+    /// 只用它判断碰没碰到，落到哪一格不要。
+    pub(crate) fn clip_fall_damage_resetting(&self, from: Vec3, to: Vec3) -> bool {
+        const FULL: [shape::Aabb; 1] = [shape::Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
+        traverse_blocks(from, to, |pos| {
+            let state = self.block_state(pos);
+            let block_hit = if state.is_tagged(mc_bamboo_data::tags::block_tags::FALL_DAMAGE_RESETTING)
+            {
+                shape::clip(&FULL, from, to, pos)
+            } else {
+                None
+            };
+            let fluid = state.fluid();
+            let fluid_hit = if fluid.is_water() && !fluid.is_empty() {
+                let bounds = shape::Aabb::new(0.0, 0.0, 0.0, 1.0, f64::from(fluid.own_height()), 1.0);
+                shape::clip(&[bounds], from, to, pos)
+            } else {
+                None
+            };
+            let distance = |hit: Option<BlockHit>| {
+                hit.map_or(f64::MAX, |hit| from.distance_to_sqr(hit.location))
+            };
+            if distance(block_hit) <= distance(fluid_hit) {
+                block_hit.map(|_| ())
+            } else {
+                fluid_hit.map(|_| ())
+            }
+        })
+        .is_some()
+    }
+
     /// `BlockGetter.clip`：从 `from` 到 `to` 的视线碰到的第一个方块或者流体，什么也没碰到时是 `None`。
     ///
     /// 方块的上下文是 `ClipContext.Block.OUTLINE`，选中框要看玩家主手拿着什么，所以要传 `main_hand`。
@@ -869,7 +1049,23 @@ impl<'a> World<'a> {
         main_hand: i32,
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
-            self.clip_one_block(pos, from, to, fluid, main_hand)
+            let state = self.block_state(pos);
+            let outline = outline_seen_holding(state, pos, main_hand);
+            self.clip_one_block(pos, from, to, &outline, state, fluid)
+        })
+    }
+
+    /// `ClipContext.Block.COLLIDER` 加 `Fluid.SOURCE_ONLY` 的射线，混凝土粉末掉进水里时用。
+    pub(crate) fn clip_collider_source_water(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        context: CollisionContext,
+    ) -> Option<BlockHit> {
+        traverse_blocks(from, to, |pos| {
+            let state = self.block_state(pos);
+            let collider = shape::collision_boxes(state, pos, context);
+            self.clip_one_block(pos, from, to, &collider, state, ClipFluid::SourceOnly)
         })
     }
 
@@ -878,12 +1074,11 @@ impl<'a> World<'a> {
         pos: BlockPos,
         from: Vec3,
         to: Vec3,
+        boxes: &[shape::Aabb],
+        state: BlockState,
         fluid: ClipFluid,
-        main_hand: i32,
     ) -> Option<BlockHit> {
-        let state = self.block_state(pos);
-        let outline = outline_seen_holding(state, pos, main_hand);
-        let block_hit = clip_with_interaction_override(&outline, state, from, to, pos);
+        let block_hit = clip_with_interaction_override(boxes, state, from, to, pos);
         let fluid_hit = match fluid {
             ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
             ClipFluid::None => None,
@@ -896,6 +1091,25 @@ impl<'a> World<'a> {
             fluid_hit
         }
     }
+}
+
+/// `Vec3i.compareTo`：先比 y，再比 z，最后比 x。
+fn compare_positions(first: BlockPos, second: BlockPos) -> std::cmp::Ordering {
+    (first.y, first.z, first.x).cmp(&(second.y, second.z, second.x))
+}
+
+/// 方块的底心，官方生成实体的位置：`pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5`。
+fn block_center_bottom(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y),
+        f64::from(pos.z) + 0.5,
+    )
+}
+
+/// `PrimedTnt.getRandomShortFuse`。
+fn short_fuse(fuse: i32, random: &mut JavaRandom) -> i32 {
+    random.next_int_bounded((fuse / 4).max(1)) + fuse / 8
 }
 
 /// `EntityCollisionContext` 下的选中框：主手拿着光源方块或者脚手架时，它们的选中框是整格。

@@ -133,8 +133,11 @@ pub fn destroy_block(
     finish(world, InteractionResult::Success)
 }
 
-/// 到期的计划刻，`now` 是这一刻的 `gameTime`。和官方 `ServerLevel.tick` 一样先跑方块的，再跑流体的。
-pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
+/// 到期的方块和流体的计划刻，`now` 是这一刻的 `gameTime`，这是 `ServerLevel.tick`
+/// 里实体之前的那一半。
+///
+/// 官方的方块 oracle 只走这一半：实体由 [`run_entity_tick`] 单独跑。
+pub fn run_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
     ticks.collect_due(now);
     let mut world = World::new(level, ticks);
     while let Some((pos, block)) = world.ticks_mut().next_due() {
@@ -148,6 +151,22 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
         fluid::tick(&mut world, pos, fluid);
     }
     finish(world, InteractionResult::Pass)
+}
+
+/// `EntityTickList.forEach`：世界里的每个实体各走一个 tick。tick 期间生成的实体
+/// 下一 tick 才开始动。
+pub fn run_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
+    let mut world = World::new(level, ticks);
+    world.tick_entities();
+    finish(world, InteractionResult::Pass)
+}
+
+/// 一个完整的 tick：方块刻、流体刻，然后实体。和官方 `ServerLevel.tick` 的顺序一样。
+pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
+    let mut outcome = run_block_ticks(level, ticks, now);
+    let entities = run_entity_tick(level, ticks);
+    outcome.effects.extend(entities.effects);
+    outcome
 }
 
 fn finish(world: World, result: InteractionResult) -> Outcome {

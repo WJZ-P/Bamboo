@@ -12,11 +12,11 @@ use mc_bamboo_data::{Block, BlockAncestor, BlockOffset};
 
 use crate::{
     context::BlockHit,
-    state::{BlockState, FACING_HOPPER, SupportType},
+    state::{BOTTOM, BlockState, FACING_HOPPER, STABILITY_DISTANCE, SupportType},
 };
 
 /// 比这更近的两个坐标算同一个。官方合并形状时用的是同一个阈值。
-const EPSILON: f64 = 1.0e-7;
+pub(crate) const EPSILON: f64 = 1.0e-7;
 /// `VoxelShape.calculateFace` 取切片的位置：离方块的面差一点点，切在形状里面。
 const FACE_NEAR: f64 = 1.0e-7;
 const FACE_FAR: f64 = 0.9999999;
@@ -42,13 +42,40 @@ const RIGID_SUPPORT: &[Aabb] = &[
 /// 一个形状，相对方块的最小角。不跟着渲染偏移走的形状直接借用生成的表。
 pub type Boxes = Cow<'static, [Aabb]>;
 
-/// `CollisionContext`。只有这两种上下文影响放置，别的上下文都和实体的运动有关。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `CollisionContext`。前两种影响放置，最后一种影响实体的运动。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CollisionContext {
     /// `CollisionContext.empty()`。
     Empty,
     /// `CollisionContext.placementContext(player)`。
     Placement,
+    /// `CollisionContext.of(entity)`，见 [`EntityContext`]。
+    Entity(EntityContext),
+}
+
+/// 实体的碰撞上下文，对应官方的 `EntityCollisionContext` 里和运动有关的那几项。
+///
+/// 官方的 `isDescending()` 是 `isShiftKeyDown()`，下落的方块和点燃的 TNT 都不会潜行，
+/// 所以这里没有这一项。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityContext {
+    /// `fallDistance`。细雪靠它判断要不要托住实体。
+    pub fall_distance: f64,
+    /// `entityBottom`，官方的 `entity.getY()`。
+    pub bottom: f64,
+    /// 是不是 `FallingBlockEntity`。细雪的碰撞形状和这个有关。
+    pub falling_block: bool,
+}
+
+impl EntityContext {
+    /// `EntityCollisionContext.isAbove`。
+    fn is_above(&self, shape: &[Aabb], pos: BlockPos) -> bool {
+        let max = shape
+            .iter()
+            .map(|bounds| bounds.max_y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        self.bottom > f64::from(pos.y) + max - f64::from(1.0e-5_f32)
+    }
 }
 
 /// `BooleanOp` 里用得到的几个。
@@ -112,11 +139,84 @@ pub fn moved(shape: &[Aabb], dx: f64, dy: f64, dz: f64) -> Vec<Aabb> {
 
 /// 表里的碰撞形状，`Behaviour::collision_boxes` 的默认实现。
 pub fn collision_boxes(state: BlockState, pos: BlockPos, context: CollisionContext) -> Boxes {
-    let shape = match context {
-        CollisionContext::Empty => mc_bamboo_data::collision_shape(state.0),
-        CollisionContext::Placement => mc_bamboo_data::placement_collision_shape(state.0),
-    };
-    at_position(shape, state.block(), pos)
+    match context {
+        CollisionContext::Entity(entity) => entity_collision_boxes(state, pos, entity),
+        CollisionContext::Empty => {
+            at_position(mc_bamboo_data::collision_shape(state.0), state.block(), pos)
+        }
+        CollisionContext::Placement => {
+            at_position(mc_bamboo_data::placement_collision_shape(state.0), state.block(), pos)
+        }
+    }
+}
+
+/// `PowderSnowBlock.FALLING_COLLISION_SHAPE`：`Shapes.box(0, 0, 0, 1, 0.9, 1)`。
+const POWDER_SNOW_FALLING: Aabb = Aabb::new(0.0, 0.0, 0.0, 1.0, 0.9, 1.0);
+
+/// `ScaffoldingBlock.SHAPE_STABLE`：上面一整块加四根角柱。
+const SCAFFOLDING_STABLE: &[Aabb] = &[
+    Aabb::new(0.0, 14.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
+    Aabb::new(0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 2.0 / 16.0),
+    Aabb::new(14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0),
+    Aabb::new(14.0 / 16.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0),
+    Aabb::new(0.0, 0.0, 14.0 / 16.0, 2.0 / 16.0, 1.0, 1.0),
+];
+
+/// `ScaffoldingBlock.SHAPE_UNSTABLE_BOTTOM`：`Block.column(16.0, 0.0, 2.0)`。
+const SCAFFOLDING_UNSTABLE_BOTTOM: Aabb = Aabb::new(0.0, 0.0, 0.0, 1.0, 2.0 / 16.0, 1.0);
+
+/// 实体上下文下的碰撞形状。只有细雪和脚手架按实体改形状，别的方块和空上下文一样。
+fn entity_collision_boxes(state: BlockState, pos: BlockPos, entity: EntityContext) -> Boxes {
+    if state.is_a(BlockAncestor::PowderSnowBlock) {
+        // `fallDistance > 2.5` 时整块都托住；下落的方块永远拿 `super.getCollisionShape`，
+        // 也就是整格。生物穿皮革靴子的那个分支走不到这里。
+        if entity.fall_distance > 2.5 {
+            return at_position(&[POWDER_SNOW_FALLING], state.block(), pos);
+        }
+        if entity.falling_block {
+            return outline_boxes(state, pos);
+        }
+        return Cow::Borrowed(&[]);
+    }
+    if state.is_a(BlockAncestor::ScaffoldingBlock) {
+        if entity.is_above(FULL_BLOCK, pos) {
+            return at_position(SCAFFOLDING_STABLE, state.block(), pos);
+        }
+        let bottom = state.get(BOTTOM);
+        let dangling = state.get(STABILITY_DISTANCE) != 0 && bottom;
+        // `isAbove(SHAPE_BELOW_BLOCK, pos, true)`：下面那格的顶面是 `pos.y`。
+        let above_below = entity.bottom > f64::from(pos.y) - f64::from(1.0e-5_f32);
+        if dangling && above_below {
+            return at_position(&[SCAFFOLDING_UNSTABLE_BOTTOM], state.block(), pos);
+        }
+        return Cow::Borrowed(&[]);
+    }
+    at_position(mc_bamboo_data::collision_shape(state.0), state.block(), pos)
+}
+
+/// `BlockState.hasLargeCollisionShape`：碰撞形状伸出 0 到 1 以外。
+///
+/// 官方的 `BlockCollisions` 只在实体盒子碰到搜索范围边界时才看这个：没有伸出格的形状
+/// 不可能碰到边上的方块。
+pub fn has_large_collision_shape(state: BlockState) -> bool {
+    mc_bamboo_data::collision_shape(state.0)
+        .iter()
+        .any(|bounds| {
+            [Axis::X, Axis::Y, Axis::Z]
+                .into_iter()
+                .any(|axis| bounds.min(axis) < 0.0 || bounds.max(axis) > 1.0)
+        })
+}
+
+/// `BlockState.getEntityInsideCollisionShape`：判断实体“在这一格里”用的形状。
+///
+/// 细雪的碰撞形状对普通实体是空的，但在里面判定时按整格算。
+pub fn entity_inside_boxes(state: BlockState, pos: BlockPos, entity: EntityContext) -> Boxes {
+    let boxes = collision_boxes(state, pos, CollisionContext::Entity(entity));
+    if boxes.is_empty() && state.is_a(BlockAncestor::PowderSnowBlock) {
+        return at_position(FULL_BLOCK, state.block(), pos);
+    }
+    boxes
 }
 
 /// `getShape`，也就是选中框。
@@ -185,6 +285,13 @@ pub fn is_supporting(shape: &[Aabb], face: Direction, support: SupportType) -> b
         SupportType::Rigid => RIGID_SUPPORT,
     };
     !join_is_not_empty(&face_shape(shape, face), required, BooleanOp::OnlySecond)
+}
+
+/// 形状就是那一格整块，`blockShape == Shapes.block()`。
+///
+/// 状态表里的整块形状都是同一个盒子，按值比和官方的按引用比等价。
+pub fn is_unit_cube(shape: &[Aabb]) -> bool {
+    shape == FULL_BLOCK
 }
 
 /// `Block.isShapeFullBlock`。

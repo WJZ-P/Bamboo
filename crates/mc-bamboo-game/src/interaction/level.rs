@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
     Aabb, BlockState, Level, RedstoneMemory,
+    entity::Entities,
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::{BlockPos, LightLayer, sign::SignContent};
@@ -19,6 +20,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) changes: &'a mut BlockChanges,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
     pub(crate) redstone: &'a mut RedstoneMemory,
+    pub(crate) entities: &'a mut Entities,
 }
 
 impl Level for RegionLevel<'_> {
@@ -69,5 +71,13 @@ impl Level for RegionLevel<'_> {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        self.entities
     }
 }

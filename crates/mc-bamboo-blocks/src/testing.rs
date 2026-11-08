@@ -6,8 +6,8 @@ use mc_bamboo_core::{BlockPos, Direction, Hand, LightLayer, Vec3, sign::SignCont
 use mc_bamboo_data::{BlockAncestor, blocks, items};
 
 use crate::{
-    Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, level::RedstoneMemory,
-    shape::Aabb,
+    Actor, BlockHit, BlockState, BlockTicks, Level, Outcome, destroy_block, entity::Entities,
+    level::RedstoneMemory, shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
@@ -26,6 +26,8 @@ pub(crate) struct TestLevel {
     redstone: RedstoneMemory,
     /// 每一格的天空光和方块光。没设时是开阔的白天：天空光 15，方块光 0。
     pub(crate) light: Option<(i32, i32)>,
+    /// 世界里的实体。
+    pub(crate) entities: Entities,
 }
 
 impl TestLevel {
@@ -104,6 +106,14 @@ impl Level for TestLevel {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        &self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.entities
     }
 }
 

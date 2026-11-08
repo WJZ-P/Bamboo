@@ -1,4 +1,6 @@
-//! `TntBlock`。点燃后的实体和爆炸不在范围里，方块和官方一样消失。
+//! `TntBlock`。点燃时生成一个 [`PrimedTnt`](crate::entity::PrimedTnt)，方块随之消失。
+//!
+//! 火和火焰弹点燃的路子不在范围里：这个世界没有火焰 tick，火焰箭也没有。
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{Block, items};
@@ -14,9 +16,10 @@ use crate::{
 /// `TntBlock`。
 pub(super) struct Tnt;
 
-/// `onPlace` 和 `neighborChanged`：有信号时点燃，方块消失，点燃的实体不生成。
+/// `TntBlock.prime` 加 `removeBlock`：有信号时点燃这一格，方块换成空气或者流体。
 fn prime_if_powered(world: &mut World, pos: BlockPos) {
     if world.has_neighbor_signal(pos) {
+        world.spawn_tnt(pos);
         world.remove_block(pos);
     }
 }
@@ -47,6 +50,8 @@ impl Behaviour for Tnt {
         if ctx.item != items::FLINT_AND_STEEL && ctx.item != items::FIRE_CHARGE {
             return Plain.use_item_on(state, world, ctx);
         }
+        // 官方的 `prime` 先放实体，再用 11 号标志位把方块换成空气。
+        world.spawn_tnt(ctx.clicked_pos());
         world.set_block(ctx.clicked_pos(), BlockState::AIR, UPDATE_ALL_IMMEDIATE);
         InteractionResult::Success
     }
