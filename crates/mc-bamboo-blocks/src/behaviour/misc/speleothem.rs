@@ -131,8 +131,17 @@ fn drop_stalactite(state: BlockState, world: &mut World, pos: BlockPos) {
     let mut fall_pos = pos;
     let mut fall_state = state;
     while is_stalactite(fall_state) {
-        fall(world, fall_pos, fall_state);
+        let id = fall(world, fall_pos, fall_state);
         if is_tip_or_merged(fall_state) {
+            // `SpeleothemBlock.spawnFallingStalactite`：尖端 `setHurtsEntities(1 * size, 40)`。
+            // 砸到实体的伤害不做，但铁砧裂开用的是同一个标记，这里也要设上。
+            //
+            // The tip calls `setHurtsEntities`. Entity damage is skipped, but the flag
+            // is what an anvil reads before it rolls to crack, and dripstone sets it too.
+            let size = (1 + pos.y - fall_pos.y).max(6);
+            if let Some(entity) = world.entity_mut(id) {
+                entity.set_hurts_entities(size as f32, 40);
+            }
             break;
         }
         fall_pos = fall_pos.below();
@@ -350,7 +359,11 @@ fn transfer_fluid(state: BlockState, world: &mut World, pos: BlockPos, value: f3
     };
     if source.is(blocks::MUD) {
         world.set_block_and_update(source_pos, BlockState(blocks::CLAY));
+        // 泥巴变成黏土之后，在尖端那里放滴落的粒子。
+        world.level_event(1504, tip, 0);
     } else if let Some(cauldron) = fillable_cauldron_below(world, tip, fluid) {
+        // 官方在排炼药锅的刻之前发这个事件，炼药锅那一声是 `1046`/`1047`。
+        world.level_event(1504, tip, 0);
         let delay = DRIP_DELAY + tip.y - cauldron.y;
         let cauldron_block = world.block_state(cauldron).block();
         world.schedule_tick(cauldron, cauldron_block, delay);

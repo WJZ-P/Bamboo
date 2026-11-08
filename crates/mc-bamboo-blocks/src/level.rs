@@ -6,11 +6,13 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
+use mc_bamboo_data::SoundSource;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
     container::Container,
+    entity::Entities,
     hopper::HopperEntity,
     random::LevelRandom,
     shape::Aabb,
@@ -80,6 +82,16 @@ pub trait Level {
 
     /// 见 [`Level::redstone`]。
     fn redstone_mut(&mut self) -> &mut RedstoneMemory;
+
+    /// 这个世界里的实体。实体由世界线程拥有，见 `docs/folia.md`。
+    ///
+    /// Entities in this world. The world thread owns them; see `docs/folia.md`.
+    fn entities(&self) -> &Entities;
+
+    /// 见 [`Level::entities`]。
+    ///
+    /// See [`Level::entities`].
+    fn entities_mut(&mut self) -> &mut Entities;
 
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
@@ -181,6 +193,44 @@ pub struct RedstoneMemory {
     crafter_disabled: HashMap<BlockPos, u16>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
+    /// `LecternBlockEntity` 的页码。比较器只读得了这三项，书本身在游戏层。
+    ///
+    /// Page, page count, and whether the book has writable or written content.
+    /// The item stack itself lives in the game layer.
+    lecterns: HashMap<BlockPos, LecternFacts>,
+    /// 这次右键即将放上的书。方块逻辑看不见物品组件，由调用方先放进来。
+    ///
+    /// The book about to be placed. Block logic cannot see item components,
+    /// so the caller deposits the facts before the use.
+    pending_lectern: Option<LecternFacts>,
+}
+
+/// 讲台比较器要的三项，对应 `LecternBlockEntity` 的 `page`、`pageCount` 和 `hasBook()`。
+///
+/// The three facts a lectern comparator reads: `page`, `pageCount`, and `hasBook()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LecternFacts {
+    pub page: i32,
+    pub page_count: i32,
+    pub has_content: bool,
+}
+
+impl LecternFacts {
+    /// `LecternBlockEntity.getRedstoneSignal`。
+    ///
+    /// `pageCount > 1` 时进度是 `page / (pageCount - 1)`，否则是 1。
+    /// `Mth.floor` 先把 float 提升成 double。
+    ///
+    /// Progress is `page / (pageCount - 1)` when `pageCount > 1`, otherwise 1.
+    /// `Mth.floor` widens the float to double before truncating.
+    pub fn signal(self) -> i32 {
+        let progress = if self.page_count > 1 {
+            self.page as f32 / (self.page_count as f32 - 1.0_f32)
+        } else {
+            1.0_f32
+        };
+        mc_bamboo_core::mth::floor(f64::from(progress * 14.0_f32)) + i32::from(self.has_content)
+    }
 }
 
 impl RedstoneMemory {
@@ -242,6 +292,42 @@ impl RedstoneMemory {
         self.bookshelf_slots.remove(&pos);
         self.jukebox_playing.remove(&pos);
         self.crafter_disabled.remove(&pos);
+        self.lecterns.remove(&pos);
+    }
+
+    /// 这次交互要放上的书。方块行为在 `placeBook` 里取走。
+    ///
+    /// Facts for the book the current interaction is placing. `placeBook` takes them.
+    pub fn set_pending_lectern(&mut self, facts: LecternFacts) {
+        self.pending_lectern = Some(facts);
+    }
+
+    /// 取走上一段放进来的书。没有就返回 `None`。
+    ///
+    /// Takes the facts deposited for this interaction, if any.
+    pub fn take_pending_lectern(&mut self) -> Option<LecternFacts> {
+        self.pending_lectern.take()
+    }
+
+    /// 记下这一格讲台的页码。
+    ///
+    /// Stores the lectern facts at `pos`.
+    pub fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.lecterns.insert(pos, facts);
+    }
+
+    /// 这一格讲台的页码。没有记录时是 `None`。
+    ///
+    /// Lectern facts at `pos`, if a book was recorded there.
+    pub fn lectern(&self, pos: BlockPos) -> Option<LecternFacts> {
+        self.lecterns.get(&pos).copied()
+    }
+
+    /// 取书或拆掉讲台时丢掉页码。
+    ///
+    /// Drops the lectern facts when the book is removed or the block goes away.
+    pub fn clear_lectern(&mut self, pos: BlockPos) {
+        self.lecterns.remove(&pos);
     }
 
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
@@ -291,18 +377,41 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// `playSound` / `playSeededSound`：坐标乘 8 截断后发给范围内的玩家。
+    Sound {
+        /// `sound_event` 注册表 ID。
+        sound: i32,
+        source: SoundSource,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+        /// 官方传的 `except` 是发起这次操作的玩家。
+        except_initiator: bool,
+        /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
+        seed: Option<i64>,
+    },
+    /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
+    LevelEvent {
+        event: i32,
+        pos: BlockPos,
+        data: i32,
+        except_initiator: bool,
+    },
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///
     /// 上面是带 `note_block_sound` 的头颅时，官方播放的是那个音效，不按乐器查表。
-    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里；自定义音效的名字等音效实现
-    /// 时再加进这一项，`Effect` 要能按值拷贝，装不下 `String`。
+    /// 名字在这一次操作的自定义音效表里，[`NoteBlockPlayed::custom`] 是下标。
     NoteBlockPlayed {
         pos: BlockPos,
         instrument: NoteBlockInstrument,
         note: i32,
         pitch: f32,
         seed: i64,
+        /// 自定义音效在 [`intern_custom_sound`] 那张表里的下标。`None` 用乐器表。
+        custom: Option<u32>,
     },
     /// `ServerLevel.runBlockEvents` 里的 `ClientboundBlockEventPacket`：方块事件处理成功了，
     /// 把这一项发给附近 64 格内的玩家。`block` 是方块的注册表 ID，官方包里的第三个字段。
@@ -315,4 +424,36 @@ pub enum Effect {
     /// `levelEvent(1500, pos, data)`：堆肥桶收进一个能堆肥的物品。
     /// `success` 为真时数据是 1（等级升了），否则是 0。客户端自己播粒子和声音。
     ComposterFill { pos: BlockPos, success: bool },
+    /// 讲台翻页，`levelEvent(1043, pos, 0)`。客户端自己播翻页的声音。
+    ///
+    /// `LecternBlock.signalPageChange` emits `levelEvent(1043, pos, 0)`.
+    /// The client plays the page-turn sound. Nearby players, including the one
+    /// who turned the page, all receive it.
+    PageTurned { pos: BlockPos },
+}
+
+/// 自定义音效的名字。`Effect` 要能按值拷贝，名字放在这里，效果里只留下标。
+///
+/// 一次结算会把好几个世界的效果拼到一起，这张表不能挂在某一个世界上。
+static CUSTOM_SOUNDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 记下一个 `SoundEvent.createVariableRangeEvent` 的标识符，返回下标。
+pub fn intern_custom_sound(name: &str) -> u32 {
+    let mut table = CUSTOM_SOUNDS.lock().expect("custom sound table");
+    if let Some(index) = table.iter().position(|existing| existing == name) {
+        return u32::try_from(index).expect("custom sound index");
+    }
+    let index = u32::try_from(table.len()).expect("custom sound index");
+    table.push(name.to_owned());
+    index
+}
+
+/// 按下标取回自定义音效的标识符。
+pub fn custom_sound_name(index: u32) -> String {
+    CUSTOM_SOUNDS
+        .lock()
+        .expect("custom sound table")
+        .get(index as usize)
+        .cloned()
+        .expect("custom sound index")
 }

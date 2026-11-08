@@ -3,7 +3,7 @@
 //! 烤架上的食物在方块实体里，这里只看手上的东西能不能放上去，放满四个的情况走不到。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, block_maps, blocks, registries, tags::item_tags};
+use mc_bamboo_data::{Block, block_maps, blocks, registries, sounds::sound_event, tags::item_tags};
 
 use crate::{
     behaviour::{
@@ -71,7 +71,13 @@ impl Behaviour for Campfire {
             return InteractionResult::SuccessServer;
         }
         if item_is_tagged(ctx.item, item_tags::DOUSES_CAMPFIRES) && state.get(LIT) {
+            // 官方的 `levelEvent(null, 1009, ...)` 在灭掉之前。
+            world.level_event(1009, ctx.clicked_pos(), 0);
             world.set_block_and_update(ctx.clicked_pos(), state.with(LIT, false));
+            // `hurtAndBreak(1)` 在熄灭之后。1009 音效没有随机数。
+            //
+            // `hurtAndBreak(1)` happens after the douse. Level event 1009 draws nothing.
+            crate::durability::hurt_hand(world, ctx.hand, 1);
             return InteractionResult::Success;
         }
         InteractionResult::TryEmptyHandInteraction
@@ -87,6 +93,15 @@ impl Behaviour for Campfire {
     ) -> bool {
         if state.get(WATERLOGGED) || !fluid.is(registries::fluid::WATER) {
             return false;
+        }
+        if state.get(LIT) {
+            // `placeLiquid` 里点着的营火先放灭火的声音，再换状态。
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:entity.generic.extinguish_fire"),
+                1.0,
+                1.0,
+            );
         }
         let doused = state.with(WATERLOGGED, true).with(LIT, false);
         world.set_block_and_update(pos, doused);

@@ -84,6 +84,8 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
         name: "Kitten".to_owned(),
         properties: Vec::new(),
         client: ClientInformation::default(),
+        permission_level: 0,
+        is_op: false,
         sink: Box::new(DiscardingSink),
     };
     let quota = Arc::new(AtomicUsize::new(0));

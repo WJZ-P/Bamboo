@@ -3,7 +3,7 @@
 //! 架子上的物品不做，所以这里的架子总是空的。
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{Block, tags::block_tags};
+use mc_bamboo_data::{Block, sounds::sound_event, tags::block_tags};
 
 use super::slot_container::hit_slot;
 use crate::{
@@ -246,6 +246,13 @@ fn swap_single_item(state: BlockState, world: &mut World, ctx: &UseContext) -> I
     if ctx.hand_is_empty() {
         InteractionResult::Pass
     } else {
+        // 架子是空的，拿不出东西，手上有物品就是放上去，官方放 `SHELF_PLACE_ITEM`。
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.shelf.place_item"),
+            1.0,
+            1.0,
+        );
         InteractionResult::SuccessServer
     }
 }
@@ -262,6 +269,12 @@ fn swap_hotbar(world: &mut World, ctx: &UseContext) -> InteractionResult {
     }
     let reaches_first_slot = chain.len() * COLUMNS >= HOTBAR_SLOTS;
     if reaches_first_slot && !ctx.hand_is_empty() {
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.shelf.multi_swap"),
+            1.0,
+            1.0,
+        );
         InteractionResult::SuccessServer
     } else {
         InteractionResult::Consume
@@ -328,6 +341,12 @@ impl Behaviour for Shelf {
             updated = updated.with(SIDE_CHAIN_PART, SideChainPart::Unconnected);
         }
         world.set_block_and_update(pos, updated);
+        let sound = if signal {
+            "minecraft:block.shelf.activate"
+        } else {
+            "minecraft:block.shelf.deactivate"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
     }
 
     fn use_item_on(

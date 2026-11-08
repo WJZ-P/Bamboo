@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+pub(crate) mod station;
+
 use mc_bamboo_blocks::{BlockState, World, hopper::set_changed};
 use mc_bamboo_core::{Aabb, BlockPos, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks, registries::menu};
@@ -124,6 +126,10 @@ pub(crate) struct Menu {
     quickcraft_status: i32,
     quickcraft_type: i32,
     quickcraft_slots: Vec<usize>,
+    /// 工作台、熔炉、酿造台。有它时箱子那一套槽位不用。
+    ///
+    /// Crafting, furnace, and brewing. When set, the chest slot path is not used.
+    pub(crate) station: Option<station::Station>,
 }
 
 impl Menu {
@@ -141,6 +147,7 @@ impl Menu {
             quickcraft_status: 0,
             quickcraft_type: 0,
             quickcraft_slots: Vec::new(),
+            station: None,
         }
     }
 
@@ -768,7 +775,7 @@ fn place_count(size: usize, kind: i32, stack: &ItemStack) -> i32 {
 /// 打不开（不是容器、被挡住、潜影盒被挡住）时返回 `false`，调用方据此判断有没有菜单。
 pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
     let Some(kind) = container::kind_at(region, pos) else {
-        return false;
+        return station::try_open(region, id, pos);
     };
     if !region.players.contains_key(&id) {
         return false;
@@ -777,12 +784,15 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
         return false;
     };
     // 潜影盒先看头顶有没有空，锁在菜单创建时才查。末影箱不是 `BaseContainerBlockEntity`。
+    // 打得开才收起讲台。
     //
     // A shulker checks the space above first. The lock is checked when the menu is created.
-    // An ender chest is not a `BaseContainerBlockEntity`.
+    // An ender chest is not a `BaseContainerBlockEntity`. The lectern closes only when this
+    // menu will actually open.
     if locked_message(region, id, &target, title) {
         return false;
     }
+    crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }
@@ -964,13 +974,24 @@ pub(crate) fn on_close_request(region: &mut Region, id: PlayerId) {
 /// 玩家断开。官方这时不把光标上的东西放回物品栏，因为没有连接可发了。
 pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
     let Some(mut menu) = region.menus.remove(&id) else {
+        station::return_player_grid(region, id);
         return;
     };
     finish_menu(region, id, &mut menu, false);
+    station::return_player_grid(region, id);
+}
+
+/// 切石机选结果。官方 `handleContainerButtonClick`。
+pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, button: i32) {
+    station::on_button(region, id, container_id, button);
 }
 
 /// 官方 `AbstractContainerMenu.removed` 加子类的 `stopOpen`。
 fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items: bool) {
+    if menu.station.is_some() {
+        station::finish(region, id, menu, return_items);
+        return;
+    }
     let carried = std::mem::take(&mut menu.carried);
     if return_items {
         place_item_back_in_inventory(region, id, carried);
@@ -1091,14 +1112,36 @@ fn official_index(slot: usize) -> Option<i32> {
     }
 }
 
-/// 每个 tick：先关掉已经失效的菜单，再把变化发给客户端。官方 `ServerPlayer.tick`。
+/// 每个 tick：先把变化发给客户端，再关掉已经失效的菜单。官方 `ServerPlayer.tick`。
+///
+/// Each tick broadcasts changes, then closes a menu that is no longer valid. Vanilla
+/// `ServerPlayer.tick` calls `broadcastChanges` before `stillValid`.
 pub(crate) fn tick(region: &mut Region) {
     let ids: Vec<PlayerId> = region.menus.keys().copied().collect();
     for id in ids {
-        // 官方 `ServerPlayer.tick` 先 `broadcastChanges`，再看 `stillValid`：
-        // 菜单失效的这一刻，最后的槽位变化也会先发出去。
-        // Vanilla `ServerPlayer.tick` calls `broadcastChanges` before `stillValid`, so the last
-        // slot changes still go out in the tick the menu becomes invalid.
+        // 工作台这一类菜单自己同步熔炉和酿造台的进度，不走箱子那套槽位广播。
+        // Workstation menus sync furnace and brewing progress themselves.
+        if region
+            .menus
+            .get(&id)
+            .is_some_and(|menu| menu.station.is_some())
+        {
+            station::tick_menu(region, id);
+            let valid = region
+                .menus
+                .get(&id)
+                .is_some_and(|menu| still_valid(region, id, menu));
+            if !valid {
+                warn!(
+                    player = id.0,
+                    "closing a menu whose block is gone or out of reach"
+                );
+                close_menu(region, id);
+            }
+            continue;
+        }
+        // 官方先 `broadcastChanges`，再看 `stillValid`：失效这一刻的槽位变化也会先发出去。
+        // Vanilla broadcasts before `stillValid`, so the last slot changes still go out.
         let Some(mut menu) = region.menus.remove(&id) else {
             continue;
         };
@@ -1117,6 +1160,9 @@ pub(crate) fn tick(region: &mut Region) {
 
 /// 官方 `Container.stillValidBlockEntity` 和 `PlayerEnderChestContainer.stillValid`。
 fn still_valid(region: &Region, id: PlayerId, menu: &Menu) -> bool {
+    if let Some(station) = &menu.station {
+        return station.still_valid(region, id);
+    }
     let Some(player) = region.players.get(&id) else {
         return false;
     };
@@ -1152,6 +1198,23 @@ fn in_reach(region: &Region, pos: BlockPos, kind: ContainerKind, eye: Vec3) -> b
 
 /// 官方 `handleContainerClick`。
 pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
+    if packet.container_id == 0 {
+        // 方块菜单开着时，容器 ID 0 不是当前菜单。
+        // Container id 0 is not the open menu while a block menu is up.
+        if region.menus.contains_key(&id) {
+            return;
+        }
+        station::click_inventory(region, id, packet);
+        return;
+    }
+    if region
+        .menus
+        .get(&id)
+        .is_some_and(|menu| menu.station.is_some())
+    {
+        station::click_menu(region, id, packet);
+        return;
+    }
     let Some(menu) = region.menus.get(&id) else {
         return;
     };

@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -69,12 +70,17 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
@@ -90,11 +96,15 @@ import net.minecraft.world.entity.animal.parrot.Parrot;
 import net.minecraft.world.entity.animal.rabbit.Rabbit;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.BucketItem;
 import net.minecraft.world.item.DyeColor;
+import net.minecraft.world.item.MobBucketItem;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.JukeboxSong;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.SolidBucketItem;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.item.Rarity;
 import net.minecraft.world.item.StandingAndWallBlockItem;
@@ -103,6 +113,10 @@ import net.minecraft.world.item.component.FireworkExplosion;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.component.MapPostProcessing;
 import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.enchantment.ConditionalEffect;
+import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.effects.EnchantmentValueEffect;
 import net.minecraft.world.item.alchemy.Potion;
 import net.minecraft.world.item.ItemStackTemplate;
 import net.minecraft.world.item.crafting.*;
@@ -111,6 +125,8 @@ import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BucketPickup;
+import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.CandleCakeBlock;
 import net.minecraft.world.level.block.FireBlock;
 import net.minecraft.world.level.block.FlowerPotBlock;
@@ -122,6 +138,7 @@ import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.NoteBlockInstrument;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.EnumProperty;
 import net.minecraft.world.level.block.state.properties.IntegerProperty;
@@ -216,12 +233,15 @@ public final class Extractor {
             root.add("blockStates", blockStates());
             root.add("blocks", blocks());
             root.add("items", items());
+            root.add("entityTypes", entityTypes());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
+            root.add("itemDamageEnchantments", itemDamageEnchantments(layers.compositeAccess()));
             root.add("recipes", recipes(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("soundTables", new SoundTables().build());
             root.add("lootTables", dataFiles(resources, "loot_table"));
             root.add("lootPredicates", dataFiles(resources, "predicate"));
             root.add("contextIntProviders", dataFiles(resources, "context_int_provider"));
@@ -234,7 +254,11 @@ public final class Extractor {
             root.add("jukeboxSongs", jukeboxSongs(layers.compositeAccess()));
             root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
-            root.add("itemComponents", itemComponents(resources, layers));
+            JsonArray itemComponents = new JsonArray();
+            JsonArray craftingRemainders = new JsonArray();
+            itemComponents(resources, layers, itemComponents, craftingRemainders);
+            root.add("itemComponents", itemComponents);
+            root.add("craftingRemainders", craftingRemainders);
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -268,6 +292,7 @@ public final class Extractor {
 
     /**
      * 每个物品的默认组件，按官方 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+     * 同时导出 `Item.getCraftingRemainder()`，那是物品上的字段，不是 `use_remainder` 组件。
      *
      * 默认组件是数据驱动的，`Item.components()` 要等 `ReloadableServerResources` 把它们绑上去
      * 才读得到，所以这里照 WorldLoader.load 的后半段再加载一次服务端资源。
@@ -289,8 +314,9 @@ public final class Extractor {
         return array;
     }
 
-    private static JsonArray itemComponents(
-            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers) throws Exception {
+    private static void itemComponents(
+            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers,
+            JsonArray items, JsonArray remainders) throws Exception {
         ReloadableServerResources managers = ReloadableServerResources
                 .loadResources(resources, layers, STATIC_TAGS, FeatureFlags.DEFAULT_FLAGS,
                         Commands.CommandSelection.DEDICATED, LevelBasedPermissionSet.GAMEMASTER,
@@ -299,7 +325,6 @@ public final class Extractor {
         managers.updateComponentsAndStaticRegistryTags();
         RegistryAccess registries = (RegistryAccess) managers.fullRegistries().lookup();
 
-        JsonArray items = new JsonArray();
         for (Item item : BuiltInRegistries.ITEM) {
             // 官方的 DataComponentMap 超过 8 项就换成按身份哈希排序的映射，遍历顺序每次运行都可能不同。
             // 组件补丁里的顺序没有含义，所以这里按组件类型的注册表 ID 排一遍，生成的字节才稳定。
@@ -314,19 +339,32 @@ public final class Extractor {
             for (TypedDataComponent<?> component : components) {
                 patch.set(component);
             }
-            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
-            DataComponentPatch.STREAM_CODEC.encode(buffer, patch.build());
-            byte[] bytes = new byte[buffer.readableBytes()];
-            buffer.readBytes(bytes);
+            items.add(encodePatch(patch.build(), registries));
 
-            StringBuilder hex = new StringBuilder(bytes.length * 2);
-            for (byte value : bytes) {
-                hex.append(Character.forDigit((value >> 4) & 0xf, 16));
-                hex.append(Character.forDigit(value & 0xf, 16));
+            ItemStackTemplate remainder = item.getCraftingRemainder();
+            if (remainder == null) {
+                remainders.add(JsonNull.INSTANCE);
+            } else {
+                JsonArray triple = new JsonArray();
+                triple.add(BuiltInRegistries.ITEM.getId(remainder.item().value()));
+                triple.add(remainder.count());
+                triple.add(encodePatch(remainder.components(), registries));
+                remainders.add(triple);
             }
-            items.add(hex.toString());
         }
-        return items;
+    }
+
+    private static String encodePatch(DataComponentPatch patch, RegistryAccess registries) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            hex.append(Character.forDigit((value >> 4) & 0xf, 16));
+            hex.append(Character.forDigit(value & 0xf, 16));
+        }
+        return hex.toString();
     }
 
     /**
@@ -645,7 +683,16 @@ public final class Extractor {
             object.addProperty("requiresCorrectToolForDrops", state.requiresCorrectToolForDrops());
             object.addProperty("dynamicShape", block.hasDynamicShape());
             object.addProperty("lootTable", block.getLootTable().map(key -> key.identifier().toString()).orElse(null));
+            // 实体移动用的两个系数，见 `Block.getSpeedFactor`、`Block.getBounceRestitution`。
+            object.addProperty("speedFactor", block.getSpeedFactor());
+            object.addProperty("bounceRestitution", block.getBounceRestitution());
+            // 爆炸射线消耗用的抗性，见 `Block.getExplosionResistance`。
+            object.addProperty("explosionResistance", block.getExplosionResistance());
             addOffset(object, block);
+            SoundEvent pickupSound = block instanceof BucketPickup pickup ? pickup.getPickupSound().orElse(null) : null;
+            if (pickupSound != null) {
+                object.addProperty("pickupSound", BuiltInRegistries.SOUND_EVENT.getId(pickupSound));
+            }
             blocks.add(object);
         }
         return blocks;
@@ -785,9 +832,28 @@ public final class Extractor {
                 }
             }
         }
+        // 下面三个方法在 `Block`/`BlockBehaviour` 上，上面按类往上找时停在了 `Block.class` 之前。
+        // 实体运动、爆炸和落地要用它们，子类覆盖过的同名结果已经在上面导出了。
+        addNonDefaultFloat(fields, block, "getExplosionResistance", 0.0F);
+        addNonDefaultFloat(fields, block, "getSpeedFactor", 1.0F);
+        addNonDefaultFloat(fields, block, "getBounceRestitution", 0.0F);
         JsonArray result = new JsonArray();
         new TreeMap<>(fields).values().forEach(result::add);
         return result;
+    }
+
+    /** 只导出和默认值不同的结果。绝大多数方块都是默认值，全写进去只会让生成文件变大。 */
+    private static void addNonDefaultFloat(Map<String, JsonObject> fields, Block block, String name, float expected)
+            throws ReflectiveOperationException {
+        if (fields.containsKey(name + "()")) {
+            return;
+        }
+        Method method = Block.class.getDeclaredMethod(name);
+        method.setAccessible(true);
+        float value = (float) method.invoke(block);
+        if (value != expected) {
+            addField(fields, name + "()", value);
+        }
     }
 
     private static boolean isFactMethod(Method method) {
@@ -820,6 +886,8 @@ public final class Extractor {
         }
         if (value instanceof WoodType woodType) {
             addField(fields, name + ".name", new Name(woodType.name()));
+            addField(fields, name + ".fenceGateClose", BuiltInRegistries.SOUND_EVENT.getId(woodType.fenceGateClose()));
+            addField(fields, name + ".fenceGateOpen", BuiltInRegistries.SOUND_EVENT.getId(woodType.fenceGateOpen()));
             addSetType(fields, name + ".setType", woodType.setType());
             return;
         }
@@ -838,6 +906,17 @@ public final class Extractor {
         addField(fields, name + ".canOpenByWindCharge", type.canOpenByWindCharge());
         addField(fields, name + ".canButtonBeActivatedByArrows", type.canButtonBeActivatedByArrows());
         addField(fields, name + ".pressurePlateSensitivity", type.pressurePlateSensitivity());
+        // 门、活板门、栅栏门、按钮、压力板的声音。和别的注册表 ID 一样存整数。
+        addField(fields, name + ".doorClose", BuiltInRegistries.SOUND_EVENT.getId(type.doorClose()));
+        addField(fields, name + ".doorOpen", BuiltInRegistries.SOUND_EVENT.getId(type.doorOpen()));
+        addField(fields, name + ".trapdoorClose", BuiltInRegistries.SOUND_EVENT.getId(type.trapdoorClose()));
+        addField(fields, name + ".trapdoorOpen", BuiltInRegistries.SOUND_EVENT.getId(type.trapdoorOpen()));
+        addField(fields, name + ".pressurePlateClickOff",
+                BuiltInRegistries.SOUND_EVENT.getId(type.pressurePlateClickOff()));
+        addField(fields, name + ".pressurePlateClickOn",
+                BuiltInRegistries.SOUND_EVENT.getId(type.pressurePlateClickOn()));
+        addField(fields, name + ".buttonClickOff", BuiltInRegistries.SOUND_EVENT.getId(type.buttonClickOff()));
+        addField(fields, name + ".buttonClickOn", BuiltInRegistries.SOUND_EVENT.getId(type.buttonClickOn()));
     }
 
     /** 枚举和记录的名字。和普通字符串分开，普通字符串字段不导出。 */
@@ -931,17 +1010,60 @@ public final class Extractor {
                 object.addProperty("wallBlock", BuiltInRegistries.BLOCK.getId(wallBlock));
                 object.addProperty("attachment", attachment.get3DDataValue());
             }
+            if (item instanceof SolidBucketItem solidBucket) {
+                // 细雪桶放下了自己的声音，不用方块声音表里的放置声音。
+                // Powder snow places with its own sound, not the block sound type.
+                SoundEvent placeSound = (SoundEvent) readField(SolidBucketItem.class, "placeSound", solidBucket);
+                object.addProperty("placeSound", BuiltInRegistries.SOUND_EVENT.getId(placeSound));
+            }
+            // `BucketItem.playEmptySound`：岩浆标签用 `BUCKET_EMPTY_LAVA`，否则 `BUCKET_EMPTY`，来源 `BLOCKS`。
+            // `MobBucketItem` 覆盖成自己的 `emptySound`，来源 `NEUTRAL`。
+            // `BucketItem.playEmptySound`: the lava tag uses `BUCKET_EMPTY_LAVA`, otherwise `BUCKET_EMPTY`, source `BLOCKS`.
+            // `MobBucketItem` overrides that with its own `emptySound` and source `NEUTRAL`.
+            if (item instanceof MobBucketItem mobBucket) {
+                SoundEvent emptySound = (SoundEvent) readField(MobBucketItem.class, "emptySound", mobBucket);
+                object.addProperty("emptySound", BuiltInRegistries.SOUND_EVENT.getId(emptySound));
+                object.addProperty("emptySource", SoundSource.NEUTRAL.ordinal());
+                // `MobBucketItem.type`：倒出来的生物。它的 `playAmbientSound` 用 `entity.<注册表路径>.` 下的音效。
+                // `MobBucketItem.type`: the mob that is poured out. Its `playAmbientSound` uses events under
+                // `entity.<registry path>.`.
+                EntityType<?> mob = (EntityType<?>) readField(MobBucketItem.class, "type", mobBucket);
+                object.addProperty("bucketEntity", BuiltInRegistries.ENTITY_TYPE.getKey(mob).toString());
+            } else if (item instanceof BucketItem bucket) {
+                SoundEvent emptySound = bucket.getContent().is(FluidTags.LAVA)
+                        ? SoundEvents.BUCKET_EMPTY_LAVA
+                        : SoundEvents.BUCKET_EMPTY;
+                object.addProperty("emptySound", BuiltInRegistries.SOUND_EVENT.getId(emptySound));
+                object.addProperty("emptySource", SoundSource.BLOCKS.ordinal());
+            }
             object.addProperty("overridesCanDestroyBlock", overridesCanDestroyBlock(item));
             items.add(object);
         }
         return items;
     }
 
+    /** 按注册表 ID 排列的实体类型。跟踪范围和更新间隔是 `ChunkMap.addEntity` 用的值。 */
+    private static JsonArray entityTypes() {
+        JsonArray types = new JsonArray();
+        for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
+            JsonObject object = new JsonObject();
+            object.addProperty("name", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+            object.addProperty("clientTrackingRange", type.clientTrackingRange());
+            // 官方的 `Integer.MAX_VALUE` 表示 `UpdateInterval.NEVER`，这里写成 -1。
+            object.addProperty("updateInterval", type.hasUpdateInterval() ? type.updateInterval() : -1);
+            object.addProperty("trackDeltas", type.trackDeltas());
+            object.addProperty("width", type.getDimensions().width());
+            object.addProperty("height", type.getDimensions().height());
+            types.add(object);
+        }
+        return types;
+    }
+
     /** 官方数据包的全部配方，按注册表的顺序。`getRecipeFor` 取第一条匹配的，先后由这个顺序决定。 */
     private static JsonObject recipes(RegistryAccess registries) throws ReflectiveOperationException {
         JsonArray entries = new JsonArray();
         for (RecipeHolder<?> holder : new RecipeManager(registries).getRecipes()) {
-            entries.add(recipe(holder));
+            entries.add(recipe(holder, registries));
         }
         JsonObject object = new JsonObject();
         object.add("potions", potions());
@@ -958,7 +1080,8 @@ public final class Extractor {
         return potions;
     }
 
-    private static JsonObject recipe(RecipeHolder<?> holder) throws ReflectiveOperationException {
+    private static JsonObject recipe(RecipeHolder<?> holder, RegistryAccess registries)
+            throws ReflectiveOperationException {
         Recipe<?> recipe = holder.value();
         JsonObject object = new JsonObject();
         object.addProperty("id", holder.id().identifier().toString());
@@ -968,11 +1091,11 @@ public final class Extractor {
             object.addProperty("width", shaped.getWidth());
             object.addProperty("height", shaped.getHeight());
             object.add("pattern", pattern(shaped.getIngredients()));
-            object.add("result", stack((ItemStackTemplate) readField(ShapedRecipe.class, "result", shaped)));
+            object.add("result", stack((ItemStackTemplate) readField(ShapedRecipe.class, "result", shaped), registries));
         } else if (recipe instanceof ShapelessRecipe shapeless) {
             object.addProperty("kind", "shapeless");
             object.add("ingredients", ingredients((List<Ingredient>) readField(ShapelessRecipe.class, "ingredients", shapeless)));
-            object.add("result", stack((ItemStackTemplate) readField(ShapelessRecipe.class, "result", shapeless)));
+            object.add("result", stack((ItemStackTemplate) readField(ShapelessRecipe.class, "result", shapeless), registries));
         } else if (recipe instanceof TransmuteRecipe transmute) {
             object.addProperty("kind", "transmute");
             object.add("input", ingredient((Ingredient) readField(TransmuteRecipe.class, "input", transmute)));
@@ -980,37 +1103,37 @@ public final class Extractor {
             MinMaxBounds.Ints bounds = (MinMaxBounds.Ints) readField(TransmuteRecipe.class, "materialCount", transmute);
             object.addProperty("minMaterial", bounds.min().orElse(1));
             object.addProperty("maxMaterial", bounds.max().orElse(8));
-            transmuteResult(object, (TransmuteResult) readField(TransmuteRecipe.class, "result", transmute));
+            transmuteResult(object, (TransmuteResult) readField(TransmuteRecipe.class, "result", transmute), registries);
             object.addProperty("addMaterialCount", (boolean) readField(TransmuteRecipe.class, "addMaterialCountToResult", transmute));
         } else if (recipe instanceof DyeRecipe dye) {
             object.addProperty("kind", "dye");
             object.add("target", ingredient((Ingredient) readField(DyeRecipe.class, "target", dye)));
             object.add("dye", ingredient((Ingredient) readField(DyeRecipe.class, "dye", dye)));
-            object.add("result", stack((ItemStackTemplate) readField(DyeRecipe.class, "result", dye)));
+            object.add("result", stack((ItemStackTemplate) readField(DyeRecipe.class, "result", dye), registries));
         } else if (recipe instanceof ImbueRecipe imbue) {
             object.addProperty("kind", "imbue");
             object.add("source", ingredient((Ingredient) readField(ImbueRecipe.class, "source", imbue)));
             object.add("material", ingredient((Ingredient) readField(ImbueRecipe.class, "material", imbue)));
-            object.add("result", stack((ItemStackTemplate) readField(ImbueRecipe.class, "result", imbue)));
+            object.add("result", stack((ItemStackTemplate) readField(ImbueRecipe.class, "result", imbue), registries));
         } else if (recipe instanceof AbstractCookingRecipe cooking) {
             String kind = recipe instanceof SmeltingRecipe ? "smelting"
                     : recipe instanceof BlastingRecipe ? "blasting"
                     : recipe instanceof SmokingRecipe ? "smoking" : "campfire_cooking";
             object.addProperty("kind", kind);
             object.add("ingredient", ingredient((Ingredient) readField(SingleItemRecipe.class, "input", cooking)));
-            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", cooking)));
+            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", cooking), registries));
             object.addProperty("experience", cooking.experience());
             object.addProperty("time", cooking.cookingTime());
         } else if (recipe instanceof StonecutterRecipe stonecutting) {
             object.addProperty("kind", "stonecutting");
             object.add("ingredient", ingredient((Ingredient) readField(SingleItemRecipe.class, "input", stonecutting)));
-            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", stonecutting)));
+            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", stonecutting), registries));
         } else if (recipe instanceof SmithingTransformRecipe transform) {
             object.addProperty("kind", "smithing_transform");
             object.add("template", optionalIngredient(transform.templateIngredient()));
             object.add("base", ingredient(transform.baseIngredient()));
             object.add("addition", optionalIngredient(transform.additionIngredient()));
-            object.add("result", stack((ItemStackTemplate) readField(SmithingTransformRecipe.class, "result", transform)));
+            object.add("result", stack((ItemStackTemplate) readField(SmithingTransformRecipe.class, "result", transform), registries));
         } else if (recipe instanceof SmithingTrimRecipe trim) {
             object.addProperty("kind", "smithing_trim");
             object.add("template", ingredient(trim.templateIngredient().orElseThrow()));
@@ -1022,13 +1145,13 @@ public final class Extractor {
             object.addProperty("kind", "brewing");
             object.add("input", potionIngredient(brewing.getInput()));
             object.add("reagent", potionIngredient(brewing.getReagent()));
-            object.add("result", stack(brewing.getOutput()));
+            object.add("result", stack(brewing.getOutput(), registries));
         } else if (recipe instanceof FireworkRocketRecipe rocket) {
             object.addProperty("kind", "firework_rocket");
             object.add("shell", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "shell", rocket)));
             object.add("fuel", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "fuel", rocket)));
             object.add("star", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "star", rocket)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkRocketRecipe.class, "result", rocket)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkRocketRecipe.class, "result", rocket), registries));
         } else if (recipe instanceof FireworkStarRecipe star) {
             object.addProperty("kind", "firework_star");
             JsonArray shapes = new JsonArray();
@@ -1044,21 +1167,21 @@ public final class Extractor {
             object.add("twinkle", ingredient((Ingredient) readField(FireworkStarRecipe.class, "twinkle", star)));
             object.add("fuel", ingredient((Ingredient) readField(FireworkStarRecipe.class, "fuel", star)));
             object.add("dye", ingredient((Ingredient) readField(FireworkStarRecipe.class, "dye", star)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkStarRecipe.class, "result", star)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkStarRecipe.class, "result", star), registries));
         } else if (recipe instanceof FireworkStarFadeRecipe fade) {
             object.addProperty("kind", "firework_star_fade");
             object.add("target", ingredient((Ingredient) readField(FireworkStarFadeRecipe.class, "target", fade)));
             object.add("dye", ingredient((Ingredient) readField(FireworkStarFadeRecipe.class, "dye", fade)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkStarFadeRecipe.class, "result", fade)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkStarFadeRecipe.class, "result", fade), registries));
         } else if (recipe instanceof MapExtendingRecipe map) {
             object.addProperty("kind", "mapextending");
             object.add("map", ingredient((Ingredient) readField(MapExtendingRecipe.class, "map", map)));
             object.add("material", ingredient((Ingredient) readField(MapExtendingRecipe.class, "material", map)));
-            transmuteResult(object, (TransmuteResult) readField(MapExtendingRecipe.class, "result", map));
+            transmuteResult(object, (TransmuteResult) readField(MapExtendingRecipe.class, "result", map), registries);
         } else if (recipe instanceof BannerDuplicateRecipe banner) {
             object.addProperty("kind", "banner_duplicate");
             object.add("banner", ingredient((Ingredient) readField(BannerDuplicateRecipe.class, "banner", banner)));
-            object.add("result", stack((ItemStackTemplate) readField(BannerDuplicateRecipe.class, "result", banner)));
+            object.add("result", stack((ItemStackTemplate) readField(BannerDuplicateRecipe.class, "result", banner), registries));
         } else if (recipe instanceof BookCloningRecipe book) {
             object.addProperty("kind", "book_cloning");
             object.add("source", ingredient((Ingredient) readField(BookCloningRecipe.class, "source", book)));
@@ -1066,12 +1189,12 @@ public final class Extractor {
             MinMaxBounds.Ints bounds = (MinMaxBounds.Ints) readField(BookCloningRecipe.class, "allowedGenerations", book);
             object.addProperty("minGeneration", bounds.min().orElse(0));
             object.addProperty("maxGeneration", bounds.max().orElse(Integer.MAX_VALUE));
-            object.add("result", stack((ItemStackTemplate) readField(BookCloningRecipe.class, "result", book)));
+            object.add("result", stack((ItemStackTemplate) readField(BookCloningRecipe.class, "result", book), registries));
         } else if (recipe instanceof ShieldDecorationRecipe shield) {
             object.addProperty("kind", "shield_decoration");
             object.add("banner", ingredient((Ingredient) readField(ShieldDecorationRecipe.class, "banner", shield)));
             object.add("target", ingredient((Ingredient) readField(ShieldDecorationRecipe.class, "target", shield)));
-            object.add("result", stack((ItemStackTemplate) readField(ShieldDecorationRecipe.class, "result", shield)));
+            object.add("result", stack((ItemStackTemplate) readField(ShieldDecorationRecipe.class, "result", shield), registries));
         } else if (recipe instanceof RepairItemRecipe) {
             object.addProperty("kind", "repair_item");
         } else if (recipe instanceof DecoratedPotRecipe pot) {
@@ -1080,7 +1203,7 @@ public final class Extractor {
             object.add("left", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "leftPattern", pot)));
             object.add("right", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "rightPattern", pot)));
             object.add("front", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "frontPattern", pot)));
-            object.add("result", stack((ItemStackTemplate) readField(DecoratedPotRecipe.class, "result", pot)));
+            object.add("result", stack((ItemStackTemplate) readField(DecoratedPotRecipe.class, "result", pot), registries));
         } else {
             throw new IllegalStateException("unsupported recipe " + holder.id());
         }
@@ -1140,18 +1263,27 @@ public final class Extractor {
         return object;
     }
 
-    private static JsonObject stack(ItemStackTemplate template) {
+    private static JsonObject stack(ItemStackTemplate template, RegistryAccess registries) {
         JsonObject object = new JsonObject();
         object.addProperty("item", BuiltInRegistries.ITEM.getId(template.item().value()));
         object.addProperty("count", template.count());
-        object.addProperty("hasComponents", !template.components().isEmpty());
+        object.addProperty("components", hex(template.components(), registries));
         return object;
     }
 
-    private static void transmuteResult(JsonObject object, TransmuteResult result) {
+    private static void transmuteResult(JsonObject object, TransmuteResult result, RegistryAccess registries) {
         result.item().ifPresent(item -> object.addProperty("resultItem", BuiltInRegistries.ITEM.getId(item.value())));
         object.addProperty("resultCount", result.count());
-        object.addProperty("resultHasComponents", !result.components().isEmpty());
+        object.addProperty("resultComponents", hex(result.components(), registries));
+    }
+
+    /** 组件补丁按官方的网络编码写成十六进制，Bamboo 那边用同一套编解码还原。 */
+    private static String hex(DataComponentPatch patch, RegistryAccess registries) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
     }
 
     private static Object readField(Class<?> owner, String name, Object target) throws ReflectiveOperationException {
@@ -1359,7 +1491,48 @@ public final class Extractor {
         transform.add("provider", stateProvider(data.blockStateProvider().value()));
         transform.add("disallowedFaces", faces);
         transform.addProperty("updateFromNeighbors", data.updateFromNeighbors());
+        transform.addProperty("consumeOnUse", data.consumeOnUse());
+        transform.addProperty("itemDamagePerUse", data.itemDamagePerUse());
+        // 没配声音时字段是 `SoundEvents.EMPTY`，不导出，生成器按 `None` 处理。
+        SoundEvent sound = data.sound().value();
+        if (sound != SoundEvents.EMPTY) {
+            transform.addProperty("sound", BuiltInRegistries.SOUND_EVENT.getId(sound));
+        }
+        // `TransformParticle` 发的等级事件，`NONE` 是 0。
+        transform.addProperty("particle", data.particle().getLevelEvent());
+        // `transform_type == COPPER_CHEST`：改完方块还要给大箱子的另一半发一次粒子。
+        transform.addProperty(
+                "copperChest",
+                data.transformType() == BlockTransformer.TransformType.COPPER_CHEST);
         return transform;
+    }
+
+    /**
+     * 带 {@code minecraft:item_damage} 效果的附魔。耐久附魔是数据驱动的，这里用官方 codec 把效果原样编出来。
+     *
+     * <p>没有这个效果的附魔不出现。效果列表的顺序就是 {@code Enchantment.getEffects} 的顺序。
+     *
+     * <p>Enchantments whose {@code minecraft:item_damage} list is non-empty. The codec output is kept as-is, in
+     * {@code Enchantment.getEffects} order.
+     */
+    private static JsonArray itemDamageEnchantments(RegistryAccess registries) {
+        Registry<Enchantment> registry = registries.lookupOrThrow(Registries.ENCHANTMENT);
+        Codec<List<ConditionalEffect<EnchantmentValueEffect>>> codec =
+                ConditionalEffect.codec(EnchantmentValueEffect.CODEC).listOf();
+        RegistryOps<JsonElement> ops = registries.createSerializationContext(JsonOps.INSTANCE);
+        JsonArray enchantments = new JsonArray();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            List<ConditionalEffect<EnchantmentValueEffect>> effects =
+                    registry.getValue(name).getEffects(EnchantmentEffectComponents.ITEM_DAMAGE);
+            if (effects.isEmpty()) {
+                continue;
+            }
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", name.toString());
+            entry.add("effects", codec.encodeStart(ops, effects).getOrThrow());
+            enchantments.add(entry);
+        }
+        return enchantments;
     }
 
     private static JsonObject stateProvider(BlockStateProvider provider) throws ReflectiveOperationException {
@@ -1614,6 +1787,8 @@ public final class Extractor {
                 object.addProperty("amount", added.getAmount());
                 object.addProperty("falling", added.hasProperty(FlowingFluid.FALLING) && added.getValue(FlowingFluid.FALLING));
                 object.addProperty("legacyBlock", Block.BLOCK_STATE_REGISTRY.getId(added.createLegacyBlock()));
+                // 爆炸射线里取方块和流体抗性的较大者，见 `FluidState.getExplosionResistance`。
+                object.addProperty("explosionResistance", added.getExplosionResistance());
                 fluidStates.add(object);
                 return fluidStates.size() - 1;
             });
@@ -1658,6 +1833,88 @@ public final class Extractor {
                 }
             }
             return facts;
+        }
+    }
+
+    /**
+     * 音效表：每个状态的 `getSoundType`、去重后的 `SoundType`、`sound_event` 注册表和音符盒乐器。
+     *
+     * <p>`SoundType` 的五个声音都是注册表 ID，Rust 侧直接拿来发 `sound` 包。注册表顺序就是网络上的
+     * Holder ID，所以事件表按注册表顺序排列。
+     */
+    private static final class SoundTables {
+        private final JsonArray stateTypes = new JsonArray();
+        private final JsonArray types = new JsonArray();
+        private final Map<List<Object>, Integer> typeIndexes = new HashMap<>();
+        private final JsonArray events = new JsonArray();
+
+        JsonObject build() {
+            for (int id = 0; id < Block.BLOCK_STATE_REGISTRY.size(); id++) {
+                stateTypes.add(soundTypeIndex(Block.BLOCK_STATE_REGISTRY.byId(id).getSoundType()));
+            }
+            for (SoundEvent event : BuiltInRegistries.SOUND_EVENT) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("name", BuiltInRegistries.SOUND_EVENT.getKey(event).toString());
+                event.fixedRange().ifPresent(range -> entry.addProperty("fixedRange", range));
+                events.add(entry);
+            }
+
+            JsonObject tables = new JsonObject();
+            tables.add("stateTypes", stateTypes);
+            tables.add("types", types);
+            tables.add("events", events);
+            tables.add("instruments", instruments());
+            tables.add("sources", sources());
+            return tables;
+        }
+
+        private int soundTypeIndex(SoundType type) {
+            List<Object> key = List.of(
+                    type.getVolume(),
+                    type.getPitch(),
+                    soundId(type.getBreakSound()),
+                    soundId(type.getStepSound()),
+                    soundId(type.getPlaceSound()),
+                    soundId(type.getHitSound()),
+                    soundId(type.getFallSound()));
+            return typeIndexes.computeIfAbsent(key, ignored -> {
+                JsonArray entry = new JsonArray();
+                entry.add(type.getVolume());
+                entry.add(type.getPitch());
+                entry.add(soundId(type.getBreakSound()));
+                entry.add(soundId(type.getStepSound()));
+                entry.add(soundId(type.getPlaceSound()));
+                entry.add(soundId(type.getHitSound()));
+                entry.add(soundId(type.getFallSound()));
+                types.add(entry);
+                return types.size() - 1;
+            });
+        }
+
+        private static int soundId(SoundEvent event) {
+            return BuiltInRegistries.SOUND_EVENT.getId(event);
+        }
+
+        private static JsonArray instruments() {
+            JsonArray instruments = new JsonArray();
+            for (NoteBlockInstrument instrument : NoteBlockInstrument.values()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("name", instrument.getSerializedName());
+                entry.addProperty("sound", soundId(instrument.getSoundEvent().value()));
+                entry.addProperty("tunable", instrument.isTunable());
+                entry.addProperty("customSound", instrument.hasCustomSound());
+                instruments.add(entry);
+            }
+            return instruments;
+        }
+
+        /** 声音来源的枚举，Rust 侧按序号发，名字只用来核对顺序。 */
+        private static JsonArray sources() {
+            JsonArray sources = new JsonArray();
+            for (SoundSource source : SoundSource.values()) {
+                sources.add(source.getName());
+            }
+            return sources;
         }
     }
 

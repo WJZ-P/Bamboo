@@ -1383,6 +1383,15 @@ impl ComponentPatch {
             None => self.entries.push((kind, entry)),
         }
     }
+
+    /// 官方用 `Map.remove`：去掉一个组件类型的条目，返回原来那一项。
+    ///
+    /// `PatchedDataComponentMap.set` 在值等于默认组件时会走这条路径，
+    /// 所以补丁里不会留下和默认值相同的条目。
+    pub fn remove(&mut self, kind: i32) -> Option<PatchEntry> {
+        let index = self.entries.iter().position(|(id, _)| *id == kind)?;
+        Some(self.entries.remove(index).1)
+    }
 }
 
 fn count(value: i32) -> Result<usize, DecodeError> {

@@ -84,7 +84,7 @@ impl Inventory {
     }
 
     /// 这只手的菜单槽位。
-    fn hand_slot(&self, hand: Hand) -> usize {
+    pub(crate) fn hand_slot(&self, hand: Hand) -> usize {
         match hand {
             Hand::Main => HOTBAR_START + usize::from(self.selected),
             Hand::Off => OFF_HAND,
@@ -94,6 +94,20 @@ impl Inventory {
     fn next_state_id(&mut self) -> i32 {
         self.state_id = (self.state_id + 1) & STATE_ID_MASK;
         self.state_id
+    }
+
+    /// 物品栏菜单（容器 ID 0）的 `state_id`。合成和 `send_slot` 共用这一份。
+    ///
+    /// `state_id` of the inventory menu (container id 0). Crafting and `send_slot` share it.
+    pub(crate) fn state_id(&self) -> i32 {
+        self.state_id
+    }
+
+    /// 见 [`Inventory::state_id`]。
+    ///
+    /// See [`Inventory::state_id`].
+    pub(crate) fn set_state_id(&mut self, state_id: i32) {
+        self.state_id = state_id;
     }
 
     /// 中键选取，返回物品变了的菜单槽位，升序。`blocks-inventory.md` 8.4。
@@ -250,7 +264,7 @@ impl Inventory {
     /// 官方 `Inventory.add(ItemStack)`，也就是 `add(-1, stack)`。
     ///
     /// `Inventory.add(ItemStack)`, which is `add(-1, stack)`.
-    fn add(&mut self, mut incoming: ItemStack, creative: bool) -> bool {
+    pub(crate) fn add(&mut self, mut incoming: ItemStack, creative: bool) -> bool {
         if incoming.is_empty() {
             return false;
         }
@@ -516,10 +530,102 @@ pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
     }
 }
 
+/// 把物品栏里每个槽发给这名玩家。`/give` 和 `/clear` 改完之后用它同步。
+///
+/// Sends every inventory slot. `/give` and `/clear` use this after they change the inventory.
+pub(crate) fn send_all_slots(player: &mut Player, links: &mut Links) {
+    for slot in 0..MENU_SLOTS {
+        send_slot(player, links, slot);
+    }
+}
+
+/// 官方 `Inventory.clearOrCountMatchingItems`。`amount_to_remove` 是负数时不限量。
+///
+/// Official `Inventory.clearOrCountMatchingItems`. A negative `amount_to_remove` is unlimited.
+pub(crate) fn clear_or_count(
+    inventory: &mut Inventory,
+    predicate: &dyn Fn(&ItemStack) -> bool,
+    counting_only: bool,
+    amount_to_remove: i32,
+) -> i32 {
+    let mut count = 0;
+    // 顺序和官方 `Inventory` 的容器一致：快捷栏和背包、盔甲、副手，最后是合成格。
+    //
+    // Same order as official `Inventory`: hotbar and storage, armour, off hand, then the craft grid.
+    for index in 0..INVENTORY_ITEMS {
+        count += clear_slot(
+            &mut inventory.slots[menu_slot(index)],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    for slot in (ARMOR_START..ARMOR_START + 4).rev() {
+        count += clear_slot(
+            &mut inventory.slots[slot],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    count += clear_slot(
+        &mut inventory.slots[OFF_HAND],
+        predicate,
+        amount_to_remove - count,
+        counting_only,
+    );
+    // Bamboo 的 0 号是合成结果，输入格是 1 到 4，和官方的 craftSlots 对应。
+    //
+    // Slot 0 is the crafting result. Slots 1 through 4 are the inputs, matching official craftSlots.
+    for slot in 1..ARMOR_START {
+        count += clear_slot(
+            &mut inventory.slots[slot],
+            predicate,
+            amount_to_remove - count,
+            counting_only,
+        );
+    }
+    // 光标上的物品官方也会清掉，Bamboo 不保存它。
+    //
+    // Official also clears the cursor item. Bamboo does not store it.
+    count
+}
+
+/// 官方 `ContainerHelper.clearOrCountMatchingItems` 处理一个物品堆的部分。
+///
+/// The per-stack part of official `ContainerHelper.clearOrCountMatchingItems`.
+fn clear_slot(
+    stack: &mut ItemStack,
+    predicate: &dyn Fn(&ItemStack) -> bool,
+    amount_to_remove: i32,
+    counting_only: bool,
+) -> i32 {
+    if stack.is_empty() || !predicate(stack) {
+        return 0;
+    }
+    if counting_only {
+        return stack.count;
+    }
+    let removed = if amount_to_remove < 0 {
+        stack.count
+    } else {
+        amount_to_remove.min(stack.count)
+    };
+    stack.count -= removed;
+    if stack.count <= 0 {
+        *stack = ItemStack::empty();
+    }
+    removed
+}
+
 /// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端
 /// 自己的数据，见 [`ItemStack::write`]。
 pub(crate) fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {
     let state_id = player.inventory.next_state_id();
+    // 这一格已经发给客户端了，物品栏菜单的远程槽跟上，下次合成点击才不会再发一遍。
+    // The client already has this slot. Update the inventory menu's remote slot so the next
+    // crafting click does not send it again.
+    crate::menu::station::note_inventory_slot(player, slot);
     let packet = ContainerSetSlot {
         container_id: PLAYER_CONTAINER,
         state_id,

@@ -27,7 +27,11 @@ fn hatch_boost(world: &World, pos: BlockPos) -> bool {
 impl Behaviour for SnifferEgg {
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
         // 孵化本身不在范围里，但这次计划刻要照官方从世界随机源取数，不然后面的随机数都会错位。
-        let hatch_time = if hatch_boost(world, pos) {
+        let boosted = hatch_boost(world, pos);
+        if boosted {
+            world.level_event(3009, pos, 0);
+        }
+        let hatch_time = if boosted {
             BOOSTED_HATCH_TIME
         } else {
             HATCH_TIME

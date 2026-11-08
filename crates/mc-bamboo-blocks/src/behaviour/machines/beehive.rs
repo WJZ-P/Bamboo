@@ -4,7 +4,10 @@
 //! 掉落的部分没有东西要做。采蜜后不管有没有烟，蜜都清零，有烟只是不放蜜蜂。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, items};
+use mc_bamboo_data::{
+    Block, items,
+    sounds::{self, sound_event},
+};
 
 use crate::{
     behaviour::{Behaviour, Plain, common::facing_the_player},
@@ -38,7 +41,37 @@ impl Behaviour for Beehive {
     ) -> InteractionResult {
         let harvests = ctx.item == items::SHEARS || ctx.item == items::GLASS_BOTTLE;
         if state.get(LEVEL_HONEY) >= MAX_HONEY_LEVELS && harvests {
-            world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_HONEY, 0));
+            let pos = ctx.clicked_pos();
+            // 采蜜的声音在写方块之前，坐标是玩家所在的位置。剪刀用 `null` 作 `except`，
+            // 玻璃瓶跳过动手的玩家。剪刀在掉蜜脾之后、清零之前 `hurtAndBreak(1)`。
+            // 掉落表的随机数还没做。玻璃瓶官方会 `shrink(1)` 并给出蜂蜜瓶，这里还不消耗瓶子。
+            //
+            // The harvest sound plays before the block write, at the player's position.
+            // Shears pass `null` as `except`; a bottle skips the player who used it.
+            // Shears call `hurtAndBreak(1)` after the honeycomb drop and before the reset.
+            // The loot random draws are not implemented. A glass bottle `shrink(1)`s and yields a
+            // honey bottle in vanilla; the bottle is not consumed here yet.
+            if ctx.item == items::SHEARS {
+                world.play_sound(
+                    ctx.actor.position,
+                    sound_event("minecraft:block.beehive.shear"),
+                    sounds::BLOCKS,
+                    1.0,
+                    1.0,
+                    false,
+                );
+                crate::durability::hurt_hand(world, ctx.hand, 1);
+            } else {
+                world.play_sound(
+                    ctx.actor.position,
+                    sound_event("minecraft:item.bottle.fill"),
+                    sounds::BLOCKS,
+                    1.0,
+                    1.0,
+                    true,
+                );
+            }
+            world.set_block_and_update(pos, state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;
         }
         Plain.use_item_on(state, world, ctx)

@@ -4,7 +4,7 @@
 //! 这里只有放置、含水、把状态放回去的计划刻，还有被破坏时的邻居更新。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -78,6 +78,18 @@ impl Behaviour for SculkSensor {
             SculkSensorPhase::Cooldown => {
                 let inactive = state.with(SCULK_SENSOR_PHASE, SculkSensorPhase::Inactive);
                 world.set_block_and_update(pos, inactive);
+                // 冷却结束响一声，泡在水里时官方不响。音高在换完方块之后才取。
+                // The cooldown end plays one sound unless the sensor is waterlogged.
+                // The pitch is drawn after the block has changed.
+                if !state.get(WATERLOGGED) {
+                    let pitch = world.random().next_float() * 0.2 + 0.8;
+                    world.play_block_sound(
+                        pos,
+                        sound_event("minecraft:block.sculk_sensor.clicking_stop"),
+                        1.0,
+                        pitch,
+                    );
+                }
             }
             SculkSensorPhase::Inactive => {}
         }

@@ -8,7 +8,7 @@
 //! 容器和实体都没有，所以模拟信号只有方块状态能决定的那些有值。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockAncestor, blocks};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -476,7 +476,19 @@ impl Behaviour for Comparator {
         ctx: &UseContext,
     ) -> InteractionResult {
         let pos = ctx.clicked_pos();
+        // 官方先按换过模式的状态定音高、出声，再写方块。
         let cycled = state.cycle(MODE_COMPARATOR);
+        let pitch = if cycled.get(MODE_COMPARATOR) == ComparatorMode::Subtract {
+            0.55
+        } else {
+            0.5
+        };
+        world.play_block_sound_except(
+            pos,
+            sound_event("minecraft:block.comparator.click"),
+            0.3,
+            pitch,
+        );
         world.set_block(pos, cycled, UPDATE_CLIENTS);
         if world.block_state(pos).is_same_block(state) {
             refresh_output_state(cycled, world, pos);

@@ -108,6 +108,17 @@ fn place(world: &mut World, item: &Item, ctx: PlaceContext) -> InteractionResult
         }
         placed.set_placed_by(world, pos, ctx.actor);
     }
+    // `BlockItem.place`：音量和音高跟着 `setPlacedBy` 之前读到的 `placedState`。
+    let sound_type = placed.sound_type();
+    let sound = item.place_sound.map_or(sound_type.place_sound, |id| {
+        u16::try_from(id).expect("音效事件的注册表 ID 在 u16 范围内")
+    });
+    world.play_block_sound_except(
+        pos,
+        sound,
+        (sound_type.volume + 1.0) / 2.0,
+        sound_type.pitch * 0.8,
+    );
     InteractionResult::Success
 }
 

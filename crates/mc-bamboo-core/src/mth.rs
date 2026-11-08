@@ -39,6 +39,11 @@ pub fn floor(value: f64) -> i32 {
     value.floor() as i32
 }
 
+/// `Mth.ceil`。
+pub fn ceil(value: f64) -> i32 {
+    value.ceil() as i32
+}
+
 /// `Mth.frac`。
 pub fn frac(value: f64) -> f64 {
     value - value.floor()

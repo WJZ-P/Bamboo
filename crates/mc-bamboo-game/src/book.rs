@@ -4,11 +4,13 @@
 //! 没有聊天过滤，`TextFilter.DUMMY` 给出的 `FilteredText` 是原文，
 //! `filterableFromOutgoing` 因此没有 `filtered`。
 
+use mc_bamboo_core::Hand;
 use mc_bamboo_data::{items, registries::data_component_type as kinds};
 use mc_bamboo_protocol::{
     codec::DecodeError,
     components::{ComponentValue, cursor::Cursor, defaults, value::Filterable},
     item::ItemStack,
+    packet::play::OpenBook,
     text::Component,
 };
 
@@ -17,6 +19,17 @@ use crate::{
     inventory::{self, HOTBAR_START, OFF_HAND},
     region::Region,
 };
+
+/// 这只手现在的菜单槽。玩家不在了就是 `None`。
+///
+/// Menu slot of `hand`, or `None` when the player is gone.
+fn held_index(region: &Region, id: PlayerId, hand: Hand) -> Option<usize> {
+    let player = region.players.get(&id)?;
+    Some(match hand {
+        Hand::Main => HOTBAR_START + usize::from(player.inventory.selected),
+        Hand::Off => OFF_HAND,
+    })
+}
 
 /// 官方 `Inventory.isHotbarSlot`：快捷栏是 0 到 8。副手是另一项判断，下标 40。
 fn menu_slot_for(slot: i32) -> Option<usize> {
@@ -78,14 +91,131 @@ pub(crate) fn on_edit_book(
 /// With nothing else open that is the inventory menu, container id 0. An open chest
 /// uses the chest menu's id and slot; `menu::tick` sends it later in this tick.
 /// The offhand is not a chest slot, so vanilla does not sync it then either.
-fn sync_edited_slot(region: &mut Region, id: PlayerId, inventory_slot: usize) {
+pub(crate) fn sync_edited_slot(region: &mut Region, id: PlayerId, inventory_slot: usize) {
     if region.menus.contains_key(&id) {
+        return;
+    }
+    // 讲台菜单不含玩家格子。官方这时背包菜单也不广播，等讲台关上再发。
+    // A lectern menu has no player slots. Vanilla does not broadcast the inventory
+    // menu either, so the slot waits until the lectern closes.
+    if crate::lectern::menu_open(region, id) {
+        crate::lectern::defer_slot(region, id, inventory_slot);
         return;
     }
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
     inventory::send_slot(player, &mut region.links, inventory_slot);
+}
+
+/// 讲台和成书右键用的页数。有成书或书与笔组件就是 `hasBook()`。
+///
+/// Page count for a lectern. `has_content` is `LecternBlockEntity.hasBook()`.
+pub(crate) struct PlacedBook {
+    pub(crate) page_count: i32,
+    pub(crate) has_content: bool,
+}
+
+/// `LecternBlockEntity.getPageCount` 和 `hasBook`。
+///
+/// `getPageCount` prefers written pages, then writable pages, otherwise 0.
+pub(crate) fn placed_book(stack: &ItemStack) -> PlacedBook {
+    let patch = stack.patch();
+    // `ItemStack.get` 先看补丁，没有再看物品默认组件。书与笔的空内容在默认组件里。
+    // `ItemStack.get` checks the patch, then the item prototype. A book and quill's
+    // empty content lives on the prototype.
+    if let Some(ComponentValue::WrittenBookContent { pages, .. }) =
+        defaults::resolve(stack.item, &patch, kinds::WRITTEN_BOOK_CONTENT)
+    {
+        return PlacedBook {
+            page_count: pages.len() as i32,
+            has_content: true,
+        };
+    }
+    if let Some(ComponentValue::WritableBookContent(pages)) =
+        defaults::resolve(stack.item, &patch, kinds::WRITABLE_BOOK_CONTENT)
+    {
+        return PlacedBook {
+            page_count: pages.len() as i32,
+            has_content: true,
+        };
+    }
+    PlacedBook {
+        page_count: 0,
+        has_content: false,
+    }
+}
+
+/// `WrittenBookContent.resolveForItem`。
+///
+/// 没有命令和记分板，选择器、计分板、NBT 都走官方 `resolvePage` 的异常分支：留下原文。
+/// 页面解析之后 JSON 超过 32767 的失败路径这里做不到，所以未解析的书一律写成 `resolved`。
+/// 已经解析过的不改物品，返回 `false`（调用方仍然可以发 `open_book`）。
+///
+/// Selectors, scores, and NBT take the `resolvePage` catch path and keep the original
+/// component. The failure path where the resolved JSON exceeds 32767 characters is not
+/// implemented, so an unresolved book is always stored with `resolved` set.
+/// An already resolved book is left untouched and this returns `false`.
+pub(crate) fn resolve_for_item(stack: &mut ItemStack) -> bool {
+    let Some(ComponentValue::WrittenBookContent {
+        title,
+        author,
+        generation,
+        pages,
+        resolved: false,
+    }) = stack.patch().get(kinds::WRITTEN_BOOK_CONTENT).cloned()
+    else {
+        return false;
+    };
+    set_component(
+        stack,
+        kinds::WRITTEN_BOOK_CONTENT,
+        &ComponentValue::WrittenBookContent {
+            title,
+            author,
+            generation,
+            pages,
+            resolved: true,
+        },
+    );
+    true
+}
+
+/// `WrittenBookItem.use` 和 `WritableBookItem.use`：都返回 `SUCCESS`。
+///
+/// 只有成书带 `written_book_content` 时才发 `open_book`。`resolveForItem` 改了物品才广播格子。
+/// 不记 `Stats.ITEM_USED`。
+///
+/// Both items return `SUCCESS`. `open_book` is sent only when the stack has
+/// `written_book_content`. The slot is broadcast only when `resolveForItem` changes it.
+/// `Stats.ITEM_USED` is not awarded.
+pub(crate) fn use_in_hand(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
+    let Some(index) = held_index(region, id, hand) else {
+        return false;
+    };
+    let item = region
+        .players
+        .get(&id)
+        .map(|player| player.inventory.slots[index].item);
+    if item != Some(items::WRITTEN_BOOK) && item != Some(items::WRITABLE_BOOK) {
+        return false;
+    }
+    let changed = region
+        .players
+        .get_mut(&id)
+        .is_some_and(|player| resolve_for_item(&mut player.inventory.slots[index]));
+    let open = region.players.get(&id).is_some_and(|player| {
+        let stack = &player.inventory.slots[index];
+        defaults::resolve(stack.item, &stack.patch(), kinds::WRITTEN_BOOK_CONTENT)
+            .is_some_and(|value| matches!(value, ComponentValue::WrittenBookContent { .. }))
+    });
+    if changed {
+        sync_edited_slot(region, id, index);
+    }
+    if open {
+        region.links.send(id, &OpenBook { hand });
+    }
+    true
 }
 
 /// 官方 `updateBookContents`：整份换成新的页面，物品种类不变。

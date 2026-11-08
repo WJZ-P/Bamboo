@@ -1,13 +1,16 @@
 //! 只有界面的工作方块：`AnvilBlock`、`GrindstoneBlock`、`StonecutterBlock`、`LoomBlock`。
 //!
-//! 铁砧继承 `FallingBlock`，下落不在范围里，放下和形状更新排的计划刻都不做。
+//! 铁砧继承 `FallingBlock`，会掉下去；它只在 `falling(entity)` 里多设了砸实体的伤害，
+//! 而实体伤害不在范围里，所以剩下的和沙土一样。
 
+use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
 
 use crate::{
     behaviour::{
-        Behaviour,
+        Behaviour, Plain,
         common::{FaceAttached, default_state, facing_the_player},
+        misc::falling::{DELAY, fall_if_free, schedule_fall},
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
@@ -27,6 +30,32 @@ impl Behaviour for Anvil {
     ) -> Option<BlockState> {
         let facing = ctx.horizontal_direction().clockwise();
         Some(default_state(block).with(HORIZONTAL_FACING, facing))
+    }
+
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, _old: BlockState) {
+        schedule_fall(state, world, pos, DELAY);
+    }
+
+    fn update_shape(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        direction: Direction,
+        neighbor_pos: BlockPos,
+        neighbor: BlockState,
+    ) -> BlockState {
+        schedule_fall(state, world, pos, DELAY);
+        Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if let Some(id) = fall_if_free(state, world, pos)
+            && let Some(entity) = world.entity_mut(id)
+        {
+            // `AnvilBlock.falling`：`setHurtsEntities(2.0F, 40)`。
+            entity.set_hurts_entities(2.0, 40);
+        }
     }
 
     fn use_without_item(

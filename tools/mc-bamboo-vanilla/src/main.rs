@@ -25,6 +25,11 @@
 //! mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N]
 //!                            [--biome-points N] [--show N]
 //!     让官方代码算世界生成的噪声、密度函数和群系，用 mc-bamboo-worldgen 重算，浮点逐位比较
+//! mc-bamboo-vanilla machine <java 路径>
+//!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
+//! mc-bamboo-vanilla entity-oracle <java 路径>
+//!     让官方 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 在假世界里跑，
+//!     用 Bamboo 重放，逐刻比较位置、速度和落地后的方块
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -42,12 +47,16 @@
 
 #[cfg(feature = "oracle")]
 mod components;
+#[cfg(feature = "oracle")]
+mod entity_oracle;
 mod extract;
 mod generate;
 #[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
 mod loot_oracle;
+#[cfg(feature = "oracle")]
+mod machine;
 #[cfg(feature = "oracle")]
 mod menu;
 #[cfg(feature = "probe-online")]
@@ -75,6 +84,8 @@ const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
 #[cfg(feature = "oracle")]
+const MACHINE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MachineOracle.java";
+#[cfg(feature = "oracle")]
 const MENU_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MenuOracle.java";
 #[cfg(feature = "oracle")]
 const COMPONENTS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ComponentOracle.java";
@@ -86,6 +97,8 @@ const RECIPE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/RecipeOracle.ja
 const WORLDGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldgenOracle.java";
 #[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
+#[cfg(feature = "oracle")]
+const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -94,7 +107,9 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
-      mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]";
+      mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
+      mc-bamboo-vanilla machine <java 路径>
+      mc-bamboo-vanilla entity-oracle <java 路径>";
 
 fn main() -> ExitCode {
     match run() {
@@ -119,11 +134,13 @@ fn run() -> Result<(), String> {
         ["oracle", java, ref options @ ..] => oracle(java, options),
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
+        ["machine", java] => machine(java),
         ["components", java, ref options @ ..] => components(java, options),
         ["predicate-oracle", java, ref options @ ..] => predicate_oracle(java, options),
         ["recipe-oracle", java, ref options @ ..] => recipe_oracle(java, options),
         ["loot-oracle", java, ref options @ ..] => loot_oracle(java, options),
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
+        ["entity-oracle", java] => entity_oracle(java),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -220,6 +237,11 @@ fn menu(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn machine(java: &str) -> Result<(), String> {
+    machine::run(official_program(java, MACHINE_SOURCE)?)
+}
+
+#[cfg(feature = "oracle")]
 fn components(java: &str, options: &[&str]) -> Result<(), String> {
     components::run(official_program(java, COMPONENTS_SOURCE)?, options)
 }
@@ -242,6 +264,11 @@ fn worldgen(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn entity_oracle(java: &str) -> Result<(), String> {
+    entity_oracle::run(official_program(java, ENTITY_ORACLE_SOURCE)?)
 }
 
 /// 用官方解压出来的 jar 当 classpath，运行一个单文件 Java 程序。
@@ -276,6 +303,11 @@ fn menu(_java: &str, _options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "oracle"))]
+fn machine(_java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
 fn components(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
@@ -297,6 +329,11 @@ fn worldgen(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn loot_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn entity_oracle(_java: &str) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

@@ -7,6 +7,7 @@ use std::{
     io,
     net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::Path,
     sync::{
         Arc, Mutex, RwLock,
         mpsc::{self, Receiver, Sender},
@@ -43,6 +44,7 @@ use crate::{
     config::ServerConfig,
     connection,
     event::{PlayerInfo, ServerEvent},
+    ops::{OPS_FILE, Ops},
     players::{AddPlayerError, OnlinePlayer},
 };
 
@@ -120,6 +122,10 @@ fn encode_status(config: &ServerConfig, online: usize) -> Result<Arc<[u8]>, Fram
 pub(crate) struct Shared {
     pub(crate) config: ServerConfig,
     pub(crate) responses: PreEncodedResponses,
+    /// 启动时从工作目录读到的 OP 表。之后不再读盘。
+    ///
+    /// The op list read from the working directory at startup. It is not read again.
+    pub(crate) ops: Ops,
     /// 每次服务端启动时生成的会话 ID。
     pub(crate) session_id: Uuid,
     /// 这次启动的 RSA 密钥对，只有开了正版验证才有。官方不管开不开都生成，
@@ -218,6 +224,10 @@ impl Server {
             shared: Arc::new(Shared {
                 config,
                 responses,
+                // 官方也是在世界线程启动之前读一次 `ops.json`。
+                //
+                // Official also reads `ops.json` once before the world thread starts.
+                ops: Ops::load(Path::new(OPS_FILE)),
                 session_id: Uuid::new_v4(),
                 keypair,
                 inbox: inbox_sender,

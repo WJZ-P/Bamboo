@@ -184,16 +184,21 @@ fn opening_a_chest_sends_the_screen_then_the_content() {
 
     let frames = fixture.take_frames();
     let ids: Vec<i32> = frames.iter().map(|frame| frame.id).collect();
+    // `ChestMenu` 的构造里 `startOpen` 先响，再发 `open_screen`。
     assert_eq!(
         ids,
-        [clientbound::OPEN_SCREEN, clientbound::CONTAINER_SET_CONTENT]
+        [
+            clientbound::SOUND,
+            clientbound::OPEN_SCREEN,
+            clientbound::CONTAINER_SET_CONTENT
+        ]
     );
 
-    let mut open = frames[0].reader();
+    let mut open = frames[1].reader();
     assert_eq!(open.varint(), Ok(1));
     assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X3));
 
-    let mut content = frames[1].reader();
+    let mut content = frames[2].reader();
     assert_eq!(content.varint(), Ok(1));
     assert_eq!(content.varint(), Ok(1), "第一个包的 state_id 是 1");
     assert_eq!(content.varint(), Ok(63), "27 格容器加 36 格物品栏");
@@ -212,7 +217,7 @@ fn opening_a_chest_sends_a_block_event() {
     fixture.open(pos);
     fixture.take_ids();
 
-    crate::interaction::run_block_ticks(&mut fixture.region, crate::global::GameTime(0));
+    crate::interaction::run_block_events(&mut fixture.region);
     let frames = fixture.take_frames();
     let events: Vec<&Frame> = frames
         .iter()
@@ -254,7 +259,12 @@ fn a_double_chest_has_fifty_four_slots_and_its_own_title() {
     assert_eq!(fixture.entry(BlockPos::new(-1, y, 0)).open_count, 1);
 
     let frames = fixture.take_frames();
-    let mut content = frames[1].reader();
+    // 开箱音效、打开界面、然后才是内容。右半边响一声，左半边不响。
+    let content_frame = frames
+        .iter()
+        .find(|frame| frame.id == clientbound::CONTAINER_SET_CONTENT)
+        .expect("content");
+    let mut content = content_frame.reader();
     content.varint().unwrap();
     content.varint().unwrap();
     assert_eq!(content.varint(), Ok(90));
@@ -465,7 +475,8 @@ fn closing_puts_the_carried_stack_back_into_the_inventory() {
         fixture.take_ids(),
         [
             clientbound::SET_PLAYER_INVENTORY,
-            clientbound::SET_PLAYER_INVENTORY
+            clientbound::SET_PLAYER_INVENTORY,
+            clientbound::SOUND
         ],
         "每一格都单独告诉客户端"
     );
@@ -661,7 +672,11 @@ fn a_named_chest_opens_with_its_name_as_the_title() {
     fixture.open(pos);
 
     let frames = fixture.take_frames();
-    let mut open = frames[0].reader();
+    let open_frame = frames
+        .iter()
+        .find(|frame| frame.id == clientbound::OPEN_SCREEN)
+        .expect("open screen");
+    let mut open = open_frame.reader();
     assert_eq!(open.varint(), Ok(1));
     assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X3));
     // 标题是一段 NBT 文本组件，内容就是那个名字。
@@ -680,7 +695,11 @@ fn a_double_chest_takes_the_name_of_either_half() {
 
     fixture.open(right);
     let frames = fixture.take_frames();
-    let mut open = frames[0].reader();
+    let open_frame = frames
+        .iter()
+        .find(|frame| frame.id == clientbound::OPEN_SCREEN)
+        .expect("open screen");
+    let mut open = open_frame.reader();
     assert_eq!(open.varint(), Ok(1));
     assert_eq!(open.varint(), Ok(menu_types::GENERIC_9X6));
     let mut title = Vec::new();

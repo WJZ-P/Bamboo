@@ -1,10 +1,12 @@
 //! 各类配方的 `matches`，一一对应官方的配方类。
 
 use mc_bamboo_data::{
-    FireworkShape, Ingredient, ItemKind, PotionIngredient, Recipe, RecipeKind, has_dye_component,
-    is_damageable, items,
+    FireworkShape, Ingredient, ItemKind, PotionIngredient, Recipe, RecipeKind, is_damageable,
+    items, registries::data_component_type as kinds,
 };
+use mc_bamboo_protocol::components::{ComponentValue, defaults};
 
+use crate::assemble::{applied, patch_of, template_patch};
 use crate::input::{BrewingInput, CraftingInput, ItemStack, RecipeInput, SmithingInput};
 
 impl RecipeInput for CraftingInput {
@@ -19,13 +21,13 @@ impl RecipeInput for CraftingInput {
 
 impl RecipeInput for ItemStack {
     fn is_empty(&self) -> bool {
-        ItemStack::is_empty(*self)
+        ItemStack::is_empty(self)
     }
 
     fn matches(&self, recipe: &Recipe) -> bool {
         match &recipe.kind {
             RecipeKind::Cooking { ingredient, .. }
-            | RecipeKind::Stonecutting { ingredient, .. } => ingredient_matches(*ingredient, *self),
+            | RecipeKind::Stonecutting { ingredient, .. } => ingredient_matches(*ingredient, self),
             _ => false,
         }
     }
@@ -44,9 +46,9 @@ impl RecipeInput for SmithingInput {
                 addition,
                 ..
             } => {
-                optional_ingredient_matches(*template, self.template)
-                    && ingredient_matches(*base, self.base)
-                    && optional_ingredient_matches(*addition, self.addition)
+                optional_ingredient_matches(*template, &self.template)
+                    && ingredient_matches(*base, &self.base)
+                    && optional_ingredient_matches(*addition, &self.addition)
             }
             RecipeKind::SmithingTrim {
                 template,
@@ -54,9 +56,9 @@ impl RecipeInput for SmithingInput {
                 addition,
                 ..
             } => {
-                ingredient_matches(*template, self.template)
-                    && ingredient_matches(*base, self.base)
-                    && ingredient_matches(*addition, self.addition)
+                ingredient_matches(*template, &self.template)
+                    && ingredient_matches(*base, &self.base)
+                    && ingredient_matches(*addition, &self.addition)
             }
             _ => false,
         }
@@ -71,8 +73,8 @@ impl RecipeInput for BrewingInput {
     fn matches(&self, recipe: &Recipe) -> bool {
         match &recipe.kind {
             RecipeKind::Brewing { input, reagent, .. } => {
-                potion_ingredient_matches(*input, self.input, self.input_potion)
-                    && potion_ingredient_matches(*reagent, self.reagent, self.reagent_potion)
+                potion_ingredient_matches(*input, &self.input, self.input_potion)
+                    && potion_ingredient_matches(*reagent, &self.reagent, self.reagent_potion)
             }
             _ => false,
         }
@@ -132,12 +134,12 @@ fn crafting_matches(input: &CraftingInput, kind: &RecipeKind) -> bool {
 }
 
 /// 官方的 `Ingredient.test(ItemStack)`：空栈永远不匹配。
-fn ingredient_matches(ingredient: Ingredient, stack: ItemStack) -> bool {
-    !stack.is_empty() && ingredient.test(stack.item())
+fn ingredient_matches(ingredient: Ingredient, stack: &ItemStack) -> bool {
+    !stack.is_empty() && ingredient.test(stack.item)
 }
 
 /// 官方的 `Ingredient.testOptionalIngredient`：没有原料时要求这一格是空的。
-fn optional_ingredient_matches(ingredient: Option<Ingredient>, stack: ItemStack) -> bool {
+fn optional_ingredient_matches(ingredient: Option<Ingredient>, stack: &ItemStack) -> bool {
     match ingredient {
         Some(ingredient) => ingredient_matches(ingredient, stack),
         None => stack.is_empty(),
@@ -223,10 +225,9 @@ fn shapeless_matches(input: &CraftingInput, ingredients: &[Ingredient]) -> bool 
 
     // 官方的 `StackedContents` 是二分图匹配：每种物品的容量是这种物品的非空格子数。
     // 每个原料只要一份，所以就是原料到格子的完美匹配。
-    let slots: Vec<ItemStack> = input
+    let slots: Vec<&ItemStack> = input
         .slots()
         .iter()
-        .copied()
         .filter(|slot| !slot.is_empty())
         .collect();
     let mut assigned = vec![None; slots.len()];
@@ -242,12 +243,12 @@ fn shapeless_matches(input: &CraftingInput, ingredients: &[Ingredient]) -> bool 
 fn assign_ingredient(
     ingredient: usize,
     ingredients: &[Ingredient],
-    slots: &[ItemStack],
+    slots: &[&ItemStack],
     assigned: &mut [Option<usize>],
     visited: &mut [bool],
 ) -> bool {
     for (slot, stack) in slots.iter().enumerate() {
-        if visited[slot] || !ingredient_matches(ingredients[ingredient], *stack) {
+        if visited[slot] || !ingredient_matches(ingredients[ingredient], stack) {
             continue;
         }
         visited[slot] = true;
@@ -271,8 +272,8 @@ fn transmute_matches(input: &CraftingInput, kind: &RecipeKind) -> bool {
         max_material,
         result_item,
         result_count,
+        result_components,
         add_material_count,
-        ..
     } = *kind
     else {
         return false;
@@ -288,13 +289,13 @@ fn transmute_matches(input: &CraftingInput, kind: &RecipeKind) -> bool {
         if slot.is_empty() {
             continue;
         }
-        if input_ingredient.test(slot.item()) {
+        if input_ingredient.test(slot.item) {
             if found_input.is_some() {
                 return false;
             }
-            found_input = Some(*slot);
+            found_input = Some(slot);
         } else {
-            if !material.test(slot.item()) {
+            if !material.test(slot.item) {
                 return false;
             }
             material_count += 1;
@@ -319,8 +320,13 @@ fn transmute_matches(input: &CraftingInput, kind: &RecipeKind) -> bool {
         return true;
     }
     // 官方比较产物和输入是不是同一个物品、同一套组件。产物沿用输入的组件改动，
-    // 默认组件下两者相同，所以只有物品不同才算能合成。
-    result_item.unwrap_or(found_input.item()) != found_input.item()
+    // 模板自己带的组件再叠上去，所以要真的合并一遍补丁再比。
+    if result_item.unwrap_or(found_input.item) != found_input.item {
+        return true;
+    }
+    let template = template_patch(result_components);
+    let result = applied(found_input.item, &patch_of(found_input), &template);
+    result != patch_of(found_input)
 }
 
 /// `DyeRecipe.matches`。
@@ -334,12 +340,12 @@ fn dye_matches(input: &CraftingInput, target: Ingredient, dye: Ingredient) -> bo
         if slot.is_empty() {
             continue;
         }
-        if target.test(slot.item()) {
+        if target.test(slot.item) {
             if has_target {
                 return false;
             }
             has_target = true;
-        } else if !dye.test(slot.item()) || !has_dye_component(slot.item()) {
+        } else if !dye.test(slot.item) || !has_component(slot, kinds::DYE) {
             return false;
         } else {
             has_dyes = true;
@@ -380,17 +386,17 @@ fn firework_rocket_matches(
         if slot.is_empty() {
             continue;
         }
-        if shell.test(slot.item()) {
+        if shell.test(slot.item) {
             if has_shell {
                 return false;
             }
             has_shell = true;
-        } else if fuel.test(slot.item()) {
+        } else if fuel.test(slot.item) {
             fuel_count += 1;
             if fuel_count > 3 {
                 return false;
             }
-        } else if !star.test(slot.item()) {
+        } else if !star.test(slot.item) {
             return false;
         }
     }
@@ -418,27 +424,27 @@ fn firework_star_matches(
         if slot.is_empty() {
             continue;
         }
-        if twinkle.test(slot.item()) {
+        if twinkle.test(slot.item) {
             if has_twinkle {
                 return false;
             }
             has_twinkle = true;
-        } else if trail.test(slot.item()) {
+        } else if trail.test(slot.item) {
             if has_trail {
                 return false;
             }
             has_trail = true;
-        } else if fuel.test(slot.item()) {
+        } else if fuel.test(slot.item) {
             if has_fuel {
                 return false;
             }
             has_fuel = true;
-        } else if dye.test(slot.item()) && has_dye_component(slot.item()) {
+        } else if dye.test(slot.item) && has_component(slot, kinds::DYE) {
             has_dye = true;
         } else {
             if !shapes
                 .iter()
-                .any(|(_, ingredient)| ingredient.test(slot.item()))
+                .any(|(_, ingredient)| ingredient.test(slot.item))
             {
                 return false;
             }
@@ -462,10 +468,10 @@ fn firework_star_fade_matches(input: &CraftingInput, target: Ingredient, dye: In
         if slot.is_empty() {
             continue;
         }
-        if dye.test(slot.item()) && has_dye_component(slot.item()) {
+        if dye.test(slot.item) && has_component(slot, kinds::DYE) {
             has_dye = true;
         } else {
-            if !target.test(slot.item()) {
+            if !target.test(slot.item) {
                 return false;
             }
             if has_target {
@@ -480,16 +486,15 @@ fn firework_star_fade_matches(input: &CraftingInput, target: Ingredient, dye: In
 /// `MapExtendingRecipe.matches`。
 ///
 /// 官方摆法是 `###/#x#/###`，`x` 是地图；之后还要找带 `MAP_ID` 的地图，
-/// 再查地图存档的缩放等级。原版 `filled_map` 默认没有 `MAP_ID` 组件，
-/// 所以默认物品栈上这一步一定失败，匹配结果恒为 false。
+/// 再查地图存档的缩放等级。这里能读到 `MAP_ID`，但地图存档（缩放等级）还没有，
+/// 所以匹配结果仍恒为 false，见最终报告的“没做的”。
 fn map_extending_matches(_input: &CraftingInput) -> bool {
     false
 }
 
 /// `BannerDuplicateRecipe.matches`。
 ///
-/// 官方要求一面旗帜带 1..=6 层图案，另一面不带。原版旗帜的 `BANNER_PATTERNS`
-/// 默认是空图案，默认物品栈上永远找不到带图案的源，匹配结果恒为 false。
+/// 官方要求一面旗帜带 1..=6 层图案，另一面不带；两面颜色相同。
 fn banner_duplicate_matches(input: &CraftingInput, banner: Ingredient) -> bool {
     if input.ingredient_count() != 2 {
         return false;
@@ -501,15 +506,15 @@ fn banner_duplicate_matches(input: &CraftingInput, banner: Ingredient) -> bool {
         if slot.is_empty() {
             continue;
         }
-        if !banner.test(slot.item()) || !is_banner_item(slot.item()) {
+        if !banner.test(slot.item) || !is_banner_item(slot.item) {
             return false;
         }
         match color {
-            None => color = Some(slot.item()),
-            Some(item) if item != slot.item() => return false,
+            None => color = Some(slot.item),
+            Some(item) if item != slot.item => return false,
             Some(_) => {}
         }
-        let patterns = banner_pattern_count(*slot);
+        let patterns = banner_pattern_count(slot);
         if patterns > 6 {
             return false;
         }
@@ -530,8 +535,7 @@ fn banner_duplicate_matches(input: &CraftingInput, banner: Ingredient) -> bool {
 
 /// `BookCloningRecipe.matches`。
 ///
-/// 官方要求源物品带 `WRITTEN_BOOK_CONTENT`，世代在允许范围内。原版成书没有默认的
-/// `WRITTEN_BOOK_CONTENT` 组件，默认物品栈上永远找不到源，匹配结果恒为 false。
+/// 官方要求源物品带 `WRITTEN_BOOK_CONTENT`，世代在允许范围内。
 fn book_cloning_matches(
     input: &CraftingInput,
     source: Ingredient,
@@ -548,8 +552,10 @@ fn book_cloning_matches(
         if slot.is_empty() {
             continue;
         }
-        if source.test(slot.item()) {
-            let generation = written_book_generation(*slot);
+        if source.test(slot.item) {
+            let Some(generation) = written_book_generation(slot) else {
+                return false;
+            };
             if !(min_generation..=max_generation).contains(&generation) {
                 return false;
             }
@@ -558,7 +564,7 @@ fn book_cloning_matches(
             }
             has_source = true;
         } else {
-            if !material.test(slot.item()) {
+            if !material.test(slot.item) {
                 return false;
             }
             has_material = true;
@@ -569,8 +575,7 @@ fn book_cloning_matches(
 
 /// `ShieldDecorationRecipe.matches`。
 ///
-/// 一面旗帜加一个空图案的目标。原版旗帜和盾牌的 `BANNER_PATTERNS` 默认都是空图案，
-/// 所以只需要检查物品和原料。
+/// 一面旗帜加一个空图案的目标。
 fn shield_decoration_matches(
     input: &CraftingInput,
     banner: Ingredient,
@@ -585,16 +590,19 @@ fn shield_decoration_matches(
         if slot.is_empty() {
             continue;
         }
-        if banner.test(slot.item()) && is_banner_item(slot.item()) {
+        if banner.test(slot.item) && is_banner_item(slot.item) {
             if has_pattern_banner {
                 return false;
             }
             has_pattern_banner = true;
         } else {
-            if !target.test(slot.item()) {
+            if !target.test(slot.item) {
                 return false;
             }
             if has_clear_target {
+                return false;
+            }
+            if banner_pattern_count(slot) != 0 {
                 return false;
             }
             has_clear_target = true;
@@ -614,20 +622,20 @@ fn repair_item_matches(input: &CraftingInput) -> bool {
             continue;
         }
         let Some(first) = first else {
-            first = Some(*slot);
+            first = Some(slot);
             continue;
         };
-        return repair_pair(first, *slot);
+        return repair_pair(first, slot);
     }
     false
 }
 
-fn repair_pair(first: ItemStack, second: ItemStack) -> bool {
-    second.item() == first.item()
-        && first.count() == 1
-        && second.count() == 1
-        && is_damageable(first.item())
-        && is_damageable(second.item())
+fn repair_pair(first: &ItemStack, second: &ItemStack) -> bool {
+    second.item == first.item
+        && first.count == 1
+        && second.count == 1
+        && is_damageable(first.item)
+        && is_damageable(second.item)
 }
 
 /// `DecoratedPotRecipe.matches`：四块陶片在田字格的四个边上。
@@ -649,7 +657,7 @@ fn decorated_pot_matches(
 
 fn potion_ingredient_matches(
     ingredient: PotionIngredient,
-    stack: ItemStack,
+    stack: &ItemStack,
     potion: Option<i32>,
 ) -> bool {
     if !ingredient_matches(ingredient.item, stack) {
@@ -669,15 +677,35 @@ fn is_banner_item(item: i32) -> bool {
         .is_some_and(|entry| entry.kind == ItemKind::Banner)
 }
 
-/// 默认物品栈上 `BANNER_PATTERNS` 的层数。原版默认都是空图案。
-fn banner_pattern_count(_stack: ItemStack) -> usize {
-    0
+/// 一个物品栈上某个组件的生效值，官方的 `ItemStack.get`。
+pub(crate) fn resolved(stack: &ItemStack, kind: i32) -> Option<ComponentValue> {
+    match mc_bamboo_protocol::components::ComponentPatch::from_opaque(stack) {
+        Ok(patch) => defaults::resolve(stack.item, &patch, kind).cloned(),
+        // 客户端的组件在进背包前会经过 `validate_stack`；真解不开时按默认组件算，
+        // 不让配方查找把世界线程带崩。
+        Err(_) => defaults::of_item(stack.item).get(kind).cloned(),
+    }
 }
 
-/// 默认物品栈上 `WRITTEN_BOOK_CONTENT` 的世代。原版成书没有这个组件的默认值。
-fn written_book_generation(_stack: ItemStack) -> i32 {
-    // 取一个一定不在允许范围（0..=2）里的值，等价于官方的“没有内容，匹配失败”。
-    i32::MIN
+/// 官方的 `ItemStack.has(type)`。
+fn has_component(stack: &ItemStack, kind: i32) -> bool {
+    resolved(stack, kind).is_some()
+}
+
+/// 旗帜上 `BANNER_PATTERNS` 的层数，官方 `getOrDefault(BANNER_PATTERNS, EMPTY).layers().size()`。
+fn banner_pattern_count(stack: &ItemStack) -> usize {
+    match resolved(stack, kinds::BANNER_PATTERNS) {
+        Some(ComponentValue::BannerPatterns(layers)) => layers.len(),
+        _ => 0,
+    }
+}
+
+/// 成书的世代，官方 `WrittenBookContent.generation()`。没有内容时返回 `None`。
+fn written_book_generation(stack: &ItemStack) -> Option<i32> {
+    match resolved(stack, kinds::WRITTEN_BOOK_CONTENT) {
+        Some(ComponentValue::WrittenBookContent { generation, .. }) => Some(generation),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -696,14 +724,18 @@ mod tests {
         items: &[ITEM_B],
     };
 
+    fn one(item: i32) -> ItemStack {
+        ItemStack::new(item, 1)
+    }
+
     fn grid(width: usize, height: usize, items: &[i32]) -> CraftingInput {
         let slots: Vec<ItemStack> = items
             .iter()
             .map(|&item| {
                 if item == 0 {
-                    ItemStack::EMPTY
+                    ItemStack::empty()
                 } else {
-                    ItemStack::of(item)
+                    one(item)
                 }
             })
             .collect();
@@ -757,5 +789,20 @@ mod tests {
         assert!(!shapeless_matches(&input, &INGREDIENTS));
         let with_extra = grid(2, 2, &[ITEM_A, ITEM_B, ITEM_C, 0]);
         assert!(!shapeless_matches(&with_extra, &INGREDIENTS));
+    }
+
+    #[test]
+    fn empty_checks_use_the_protocol_stack() {
+        assert!(ItemStack::empty().is_empty());
+        assert!(!ItemStack::new(ITEM_A, 1).is_empty());
+        assert_eq!(
+            CraftingInput::of(
+                3,
+                3,
+                &std::array::from_fn::<_, 9, _>(|_| ItemStack::empty())
+            )
+            .size(),
+            0
+        );
     }
 }

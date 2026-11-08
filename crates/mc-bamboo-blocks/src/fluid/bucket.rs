@@ -5,7 +5,7 @@
 //! 全按创造模式写：倒完手里还是满桶，舀完手里还是空桶。
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{BlockAncestor, BlockClass, items};
+use mc_bamboo_data::{BlockAncestor, BlockClass, items, sounds};
 
 use super::Fluid;
 use crate::{
@@ -19,10 +19,18 @@ use crate::{
 /// 一种桶。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bucket {
-    /// `content`：桶里的流体，空桶和装着硫磺史莱姆的桶是 `None`。
+    /// `content`：桶里的流体，空桶和装着硫磺立方的桶是 `None`。
+    /// The fluid inside. `None` for an empty bucket and for the sulfur-cube bucket.
     pub content: Option<Fluid>,
     /// `MobBucketItem`：桶里还有一只生物。这个世界没有实体，倒出来的只有水。
+    /// `MobBucketItem`: the bucket also holds a mob. This world has no entities, so only the water comes out.
     pub mob: bool,
+    /// `playEmptySound` 的音效，生成器从官方导出。
+    /// The `playEmptySound` event, exported from official by the generator.
+    pub empty_sound: u16,
+    /// `SoundSource` 的序号。生物桶是 `NEUTRAL`，其余是 `BLOCKS`。
+    /// `SoundSource` ordinal. `NEUTRAL` for a mob bucket, `BLOCKS` otherwise.
+    pub empty_source: u8,
 }
 
 impl Bucket {
@@ -41,7 +49,23 @@ impl Bucket {
             items::SULFUR_CUBE_BUCKET => (None, true),
             _ => return None,
         };
-        Some(Self { content, mob })
+        let facts = items::ITEMS[item as usize];
+        // 注册表 ID 和来源序号都落在 u16 / u8 里，生成器写出来的就是这两个数。
+        // The registry id and the source ordinal fit in u16 / u8. The generator writes those numbers.
+        let Some(empty_sound) = facts.empty_sound else {
+            return None;
+        };
+        let Some(empty_source) = facts.empty_source else {
+            return None;
+        };
+        let empty_sound = empty_sound as u16;
+        let empty_source = empty_source as u8;
+        Some(Self {
+            content,
+            mob,
+            empty_sound,
+            empty_source,
+        })
     }
 
     /// `getFluidContext`：空桶的视线停在源头上，别的桶穿过流体。
@@ -77,23 +101,52 @@ pub(crate) fn use_bucket(world: &mut World, actor: &Actor, bucket: Bucket) -> In
         return InteractionResult::Success;
     }
     if bucket.content.is_none() {
-        return pick_up(world, pos);
+        return pick_up(world, actor, pos);
     }
     InteractionResult::Fail
 }
 
 /// 空桶舀起 `pos` 的东西。
-fn pick_up(world: &mut World, pos: BlockPos) -> InteractionResult {
+fn pick_up(world: &mut World, actor: &Actor, pos: BlockPos) -> InteractionResult {
     let state = world.block_state(pos);
     if !state.is_a(BlockAncestor::BucketPickup) {
         return InteractionResult::Fail;
     }
+    // `BucketPickup.getPickupSound`，生成器写在方块上。`ifPresent`：没有声音就不放。
+    // `BucketPickup.getPickupSound`, stored on the block by the generator. No sound means silence.
+    let pickup_sound = state.block().pickup_sound;
     let taken = state.pickup_block(world, pos, true);
     if taken == items::AIR {
         return InteractionResult::Fail;
     }
     world.push_effect(Effect::FilledBucket { item: taken });
+    if let Some(sound) = pickup_sound {
+        // 官方的 `player.playSound`：`PLAYERS` 来源，在玩家脚下，跳过这名玩家。
+        // `Player.playSound`: source `PLAYERS`, at the player's feet, skipping that player.
+        world.play_sound(
+            actor.position,
+            u16::try_from(sound).expect("音效事件的注册表 ID 在 u16 范围内"),
+            sounds::PLAYERS,
+            1.0,
+            1.0,
+            true,
+        );
+    }
     InteractionResult::Success
+}
+
+/// `playEmptySound`：音效和来源都在物品上，生物桶是 `NEUTRAL`，其余是 `BLOCKS`。
+/// 坐标是方块中心，跳过倒桶的玩家。
+/// The event and the source come from the item. A mob bucket uses `NEUTRAL`, the rest `BLOCKS`.
+/// The position is the block centre, and the player who poured is skipped.
+fn play_empty_sound(world: &mut World, pos: BlockPos, bucket: Bucket) {
+    world.play_sound_except(
+        pos,
+        bucket.empty_sound,
+        sounds::SoundSource::from_id(bucket.empty_source),
+        1.0,
+        1.0,
+    );
 }
 
 /// `emptyContents`：把桶里的东西倒在 `pos`。`hit` 是视线的结果，倒不进去时改倒在它的面外面一格，
@@ -105,9 +158,16 @@ fn empty_contents(
     pos: BlockPos,
     hit: Option<BlockHit>,
 ) -> bool {
-    // 空桶不是 `FlowingFluid`，倒不出东西；`MobBucketItem` 里没有流体时只放出生物，算成功。
+    // 空桶不是 `FlowingFluid`，倒不出东西。硫磺立方桶的 `content` 是 `Fluids.EMPTY`，
+    // `MobBucketItem.emptyContents` 只放 `emptySound` 然后返回真，不放方块。
+    // An empty bucket is not a `FlowingFluid`. The sulfur-cube bucket's content is `Fluids.EMPTY`:
+    // `MobBucketItem.emptyContents` plays `emptySound` and returns true, without placing a block.
     let Some(fluid) = bucket.content else {
-        return bucket.mob;
+        if bucket.mob {
+            play_empty_sound(world, pos, bucket);
+            return true;
+        }
+        return false;
     };
     let state = world.block_state(pos);
     let may_replace = can_be_replaced_by_fluid(state);
@@ -124,13 +184,19 @@ fn empty_contents(
     // 主世界的水不会蒸发。
     if state.is_a(BlockAncestor::LiquidBlockContainer) && fluid == Fluid::Water {
         state.place_liquid(world, pos, fluid.source_state());
+        play_empty_sound(world, pos, bucket);
         return true;
     }
     if may_replace && !state.is_liquid() {
         world.destroy_block(pos, UPDATE_LIMIT);
     }
     let placed = fluid.source_state().legacy_block();
-    world.set_block(pos, placed, UPDATE_ALL_IMMEDIATE) || state.fluid().is_source()
+    let placed_now =
+        world.set_block(pos, placed, UPDATE_ALL_IMMEDIATE) || state.fluid().is_source();
+    if placed_now {
+        play_empty_sound(world, pos, bucket);
+    }
+    placed_now
 }
 
 /// `canBeReplaced(Fluid)`：能替换的方块和不算实心的方块。只有末地传送门和末地折跃门覆盖了它，永远不行。
@@ -147,7 +213,7 @@ fn can_be_replaced_by_fluid(state: BlockState) -> bool {
 #[cfg(test)]
 mod tests {
     use mc_bamboo_core::{Hand, Vec3};
-    use mc_bamboo_data::{blocks, items};
+    use mc_bamboo_data::{blocks, items, sounds::sound_event};
 
     use super::*;
     use crate::{
@@ -170,13 +236,55 @@ mod tests {
         crate::use_item(level, &mut BlockTicks::new(), actor, Hand::Main)
     }
 
+    fn exported(item: i32, name: &str, source: sounds::SoundSource) {
+        let bucket = Bucket::of(item).expect(name);
+        assert_eq!(bucket.empty_sound, sound_event(name));
+        assert_eq!(sounds::SoundSource::from_id(bucket.empty_source), source);
+    }
+
     #[test]
     fn every_bucket_item_is_known() {
         let water = Bucket::of(items::WATER_BUCKET).expect("水桶是桶");
         assert_eq!(water.content, Some(Fluid::Water));
-        assert_eq!(
-            Bucket::of(items::COD_BUCKET).map(|bucket| bucket.mob),
-            Some(true)
+        assert!(!water.mob);
+        exported(
+            items::WATER_BUCKET,
+            "minecraft:item.bucket.empty",
+            sounds::BLOCKS,
+        );
+        exported(
+            items::LAVA_BUCKET,
+            "minecraft:item.bucket.empty_lava",
+            sounds::BLOCKS,
+        );
+        for item in [
+            items::PUFFERFISH_BUCKET,
+            items::SALMON_BUCKET,
+            items::COD_BUCKET,
+            items::TROPICAL_FISH_BUCKET,
+        ] {
+            let bucket = Bucket::of(item).expect("鱼桶");
+            assert!(bucket.mob);
+            assert_eq!(bucket.content, Some(Fluid::Water));
+            exported(item, "minecraft:item.bucket.empty_fish", sounds::NEUTRAL);
+        }
+        exported(
+            items::AXOLOTL_BUCKET,
+            "minecraft:item.bucket.empty_axolotl",
+            sounds::NEUTRAL,
+        );
+        exported(
+            items::TADPOLE_BUCKET,
+            "minecraft:item.bucket.empty_tadpole",
+            sounds::NEUTRAL,
+        );
+        let sulfur = Bucket::of(items::SULFUR_CUBE_BUCKET).expect("硫磺立方桶");
+        assert!(sulfur.mob);
+        assert_eq!(sulfur.content, None);
+        exported(
+            items::SULFUR_CUBE_BUCKET,
+            "minecraft:item.bucket.empty_sulfur_cube",
+            sounds::NEUTRAL,
         );
         assert_eq!(Bucket::of(items::POWDER_SNOW_BUCKET), None);
         assert_eq!(Bucket::of(items::MILK_BUCKET), None);
@@ -189,22 +297,74 @@ mod tests {
         let outcome = use_in_air(&mut level, &looking_down(items::WATER_BUCKET));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(FLOOR.above()), BlockState::WATER);
-        assert!(outcome.effects.is_empty());
+        // 倒水的声音在方块中心，跳过倒水的玩家。
+        assert!(matches!(
+            outcome.effects.as_slice(),
+            [Effect::Sound {
+                sound,
+                source,
+                volume,
+                pitch,
+                except_initiator: true,
+                ..
+            }] if *sound == i32::from(sound_event("minecraft:item.bucket.empty"))
+                && *source == sounds::BLOCKS
+                && *volume == 1.0
+                && *pitch == 1.0
+        ));
     }
 
     #[test]
     fn an_empty_bucket_scoops_up_a_source() {
         let mut level = TestLevel::new();
-        level.set(FLOOR, BlockState(blocks::LAVA));
+        let lava = BlockState(blocks::LAVA);
+        let expected = lava.block().pickup_sound.expect("岩浆能被舀起");
+        level.set(FLOOR, lava);
         let outcome = use_in_air(&mut level, &looking_down(items::BUCKET));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert!(level.get(FLOOR).is_air());
         assert_eq!(
-            outcome.effects,
-            [Effect::FilledBucket {
+            outcome.effects[0],
+            Effect::FilledBucket {
                 item: items::LAVA_BUCKET
-            }]
+            }
         );
+        // 舀岩浆的声音在玩家脚下，跳过这名玩家。
+        assert!(matches!(
+            outcome.effects.get(1),
+            Some(Effect::Sound {
+                sound,
+                source,
+                except_initiator: true,
+                ..
+            }) if *sound == expected
+                && *sound == i32::from(sound_event("minecraft:item.bucket.fill_lava"))
+                && *source == sounds::PLAYERS
+        ));
+    }
+
+    #[test]
+    fn an_empty_bucket_scoops_powder_snow() {
+        let mut level = TestLevel::new();
+        let snow = BlockState(blocks::POWDER_SNOW);
+        let expected = snow.block().pickup_sound.expect("细雪能被舀起");
+        level.set(FLOOR, snow);
+        let outcome = use_in_air(&mut level, &looking_down(items::BUCKET));
+        assert_eq!(outcome.result, InteractionResult::Success);
+        assert!(level.get(FLOOR).is_air());
+        // 舀走细雪官方还发一个破坏事件，声音在它后面。
+        // Scooping powder snow also sends a destroy event; the sound follows it.
+        assert!(outcome.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Sound {
+                sound,
+                source,
+                except_initiator: true,
+                ..
+            } if *sound == expected
+                && *sound == i32::from(sound_event("minecraft:item.bucket.fill_powder_snow"))
+                && *source == sounds::PLAYERS
+        )));
     }
 
     #[test]
@@ -238,10 +398,22 @@ mod tests {
     fn a_waterlogged_block_can_be_drained() {
         let mut level = TestLevel::new();
         let wet = BlockState(blocks::OAK_SLAB).with(WATERLOGGED, true);
+        let expected = wet.block().pickup_sound.expect("含水台阶能被舀起");
         level.set(FLOOR, wet);
         let outcome = use_in_air(&mut level, &looking_down(items::BUCKET));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(FLOOR), wet.with(WATERLOGGED, false));
+        assert!(matches!(
+            outcome.effects.get(1),
+            Some(Effect::Sound {
+                sound,
+                source,
+                except_initiator: true,
+                ..
+            }) if *sound == expected
+                && *sound == i32::from(sound_event("minecraft:item.bucket.fill"))
+                && *source == sounds::PLAYERS
+        ));
     }
 
     #[test]
@@ -258,13 +430,13 @@ mod tests {
         let outcome = use_in_air(&mut level, &actor);
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(plant), BlockState(blocks::LAVA));
-        assert!(matches!(
-            outcome.effects.as_slice(),
-            [Effect::Destroyed {
+        assert!(outcome.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Destroyed {
                 except_initiator: false,
                 ..
-            }]
-        ));
+            }
+        )));
     }
 
     #[test]
@@ -287,14 +459,37 @@ mod tests {
         assert_eq!(outcome.result, InteractionResult::Pass);
     }
 
+    fn poured(outcome: &Outcome, bucket: Bucket, name: &str) {
+        assert!(matches!(
+            outcome.effects.as_slice(),
+            [Effect::Sound {
+                sound,
+                source,
+                volume,
+                pitch,
+                except_initiator: true,
+                ..
+            }] if *sound == i32::from(bucket.empty_sound)
+                && *sound == i32::from(sound_event(name))
+                && *source == sounds::SoundSource::from_id(bucket.empty_source)
+                && *volume == 1.0
+                && *pitch == 1.0
+        ));
+    }
+
     #[test]
     fn a_fish_bucket_pours_water_and_a_sulfur_cube_bucket_only_succeeds() {
         let mut level = TestLevel::new();
         level.set(FLOOR, BlockState(blocks::STONE));
+        let sulfur = Bucket::of(items::SULFUR_CUBE_BUCKET).expect("硫磺立方桶");
         let outcome = use_in_air(&mut level, &looking_down(items::SULFUR_CUBE_BUCKET));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert!(level.get(FLOOR.above()).is_air());
-        use_in_air(&mut level, &looking_down(items::SALMON_BUCKET));
+        poured(&outcome, sulfur, "minecraft:item.bucket.empty_sulfur_cube");
+        let salmon = Bucket::of(items::SALMON_BUCKET).expect("鲑鱼桶");
+        let outcome = use_in_air(&mut level, &looking_down(items::SALMON_BUCKET));
+        assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(FLOOR.above()), BlockState::WATER);
+        poured(&outcome, salmon, "minecraft:item.bucket.empty_fish");
     }
 }

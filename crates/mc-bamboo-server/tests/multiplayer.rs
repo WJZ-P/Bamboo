@@ -190,6 +190,8 @@ async fn second_player_gets_the_merged_join_sequence() {
         [
             clientbound::LOGIN,
             clientbound::PLAYER_ABILITIES,
+            clientbound::ENTITY_EVENT,
+            clientbound::COMMANDS,
             clientbound::PLAYER_POSITION,
             clientbound::PLAYER_INFO_UPDATE,
             clientbound::PLAYER_INFO_UPDATE,

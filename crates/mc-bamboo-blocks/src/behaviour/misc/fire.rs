@@ -8,7 +8,8 @@ use mc_bamboo_data::{BlockAncestor, block_maps::FIRE_ODDS, blocks, tags::block_t
 
 use super::portal::{PortalShape, is_frame};
 use crate::{
-    behaviour::Behaviour,
+    behaviour::{Behaviour, Plain},
+    context::Actor,
     state::{AGE_15, BlockState, EAST, NORTH, Property, SOUTH, SupportType, UP, WATERLOGGED, WEST},
     world::{UPDATE_NONE, World},
 };
@@ -126,6 +127,17 @@ fn state_with_age(world: &World, pos: BlockPos, age: i32) -> BlockState {
     }
 }
 
+/// `BaseFireBlock.playerWillDestroy`：玩家打掉火时先放一团灭火的烟。
+fn extinguish_by_player(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    player: &Actor,
+) -> BlockState {
+    world.level_event(1009, pos, 0);
+    Plain.player_will_destroy(state, world, pos, player)
+}
+
 /// `BaseFireBlock.onPlace`：点燃传送门框架，或者放不住时灭掉。
 fn on_place(state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
     if old.is_same_block(state) {
@@ -181,9 +193,10 @@ fn check_burn_out(world: &mut World, pos: BlockPos, chance: i32, age: i32) {
         world.remove_block(pos);
     }
     if old.is_a(BlockAncestor::TntBlock) {
-        // `TntBlock.prime`：点燃的 TNT 实体在构造时从世界随机源取一个数定方向。这个世界不生成实体，
-        // 数照取，后面的随机数才和官方对得上。
-        world.random().next_double();
+        // `TntBlock.prime`：方块已经 `removeBlock` 了，这里只生成实体并放点燃声。
+        // `TntBlock.prime`: the block is already `removeBlock`ed. This only spawns the entity
+        // and plays the primed sound.
+        world.spawn_tnt(pos);
     }
 }
 
@@ -294,6 +307,16 @@ impl Behaviour for Fire {
         world.schedule_tick(pos, state.block(), fire_tick_delay(world));
     }
 
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        extinguish_by_player(state, world, pos, player)
+    }
+
     fn spawn_destroy_by_entity_particles(
         &self,
         _state: BlockState,
@@ -327,6 +350,16 @@ impl Behaviour for SoulFire {
 
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         on_place(state, world, pos, old);
+    }
+
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        extinguish_by_player(state, world, pos, player)
     }
 
     fn spawn_destroy_by_entity_particles(

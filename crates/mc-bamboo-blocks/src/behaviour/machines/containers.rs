@@ -9,7 +9,7 @@ use std::any::Any;
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{Block, BlockAncestor};
 
-use super::facing_the_view;
+use super::{cooking::FurnaceEntity, facing_the_view};
 use crate::{
     behaviour::{
         Behaviour,
@@ -17,7 +17,7 @@ use crate::{
     },
     block_entity::BlockEntity,
     context::{PlaceContext, UseContext},
-    dispenser::dispense_from,
+    dispenser::{click_if_empty, dispense_from},
     hopper::HopperEntity,
     interact::InteractionResult,
     shape::{Aabb, Boxes, CollisionContext},
@@ -346,8 +346,37 @@ impl Behaviour for Furnace {
         Some(facing_the_player(block, ctx))
     }
 
+    /// `newBlockEntity`：放下熔炉系列时建一个空实体，种类由方块决定。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state)
+            && !world.has_block_entity(pos)
+            && let Some(kind) = FurnaceEntity::kind_of(state.class())
+        {
+            world.set_block_entity(Box::new(FurnaceEntity::new(pos, kind)));
+        }
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         update_neighbours_after_destroy(state, world, pos);
+    }
+
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal`：比较器读三格内容。
+    ///
+    /// 实体正在 tick、不在表里时读到 0。空熔炉本来就是 0。
+    ///
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots. While the entity
+    /// is ticking it is out of the map, so this returns 0. An empty furnace is 0 anyway.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        world
+            .block_entity::<FurnaceEntity>(pos)
+            .map(|entity| crate::container::redstone_signal(entity.items().iter(), 3))
+            .unwrap_or(0)
     }
 
     fn use_without_item(
@@ -481,12 +510,15 @@ impl Behaviour for Dispenser {
         InteractionResult::Success
     }
 
-    /// `DispenserBlock.tick`：计划刻到期，投掷器把物品发出去。
+    /// `DispenserBlock.tick`：计划刻到期。投掷器把物品发出去。
     ///
-    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里，发射器这一支什么也不做。
+    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里。空的发射器仍报 1001，
+    /// 和 `dispenseFrom` 在 `getRandomSlot` 得到 `-1` 时一样。
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.is_a(BlockAncestor::DropperBlock) {
             dispense_from(world, pos, state);
+        } else {
+            click_if_empty(world, pos);
         }
     }
 

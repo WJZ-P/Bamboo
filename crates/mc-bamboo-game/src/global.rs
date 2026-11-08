@@ -18,9 +18,105 @@ use crate::{inbound::PlayerId, links::encode_frames};
 /// 官方的条件是 `++counter > 600`，所以实际周期是 601 tick。
 const LATENCY_BROADCAST_THRESHOLD: u32 = 600;
 
+/// 主世界时钟刚开服时停在正午。`/time` 的 `resume` 可以让它重新走起来。
+///
+/// The overworld clock starts paused at noon. `/time resume` can start it again.
+pub(crate) const NOON_TICKS: i64 = 6000;
+
 /// 世界时间。和 [`RegionTick`](crate::region::RegionTick) 同步增长，但不是一回事，不能互相比较。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct GameTime(pub(crate) i64);
+
+/// 一个世界时钟的状态，官方 `ServerClockInstance`。
+///
+/// 26.x 起主世界和末地各有一个。主世界开服时停在正午，末地用 [`Clock::official`]。
+///
+/// Since 26.x the overworld and the End each have one. The overworld starts paused at noon;
+/// the End uses [`Clock::official`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Clock {
+    pub(crate) total_ticks: i64,
+    /// 不足一整刻的部分。流速不是整数时靠它攒出下一整刻。
+    ///
+    /// The fraction of a tick. A non-integer rate accumulates the next whole tick here.
+    pub(crate) partial_tick: f32,
+    pub(crate) rate: f32,
+    pub(crate) paused: bool,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self {
+            total_ticks: NOON_TICKS,
+            partial_tick: 0.0,
+            rate: 1.0,
+            paused: true,
+        }
+    }
+}
+
+impl Clock {
+    /// 官方新时钟的初值，不是 Bamboo 主世界那个停在正午的特例。
+    ///
+    /// The official initial clock, rather than Bamboo's overworld clock paused at noon.
+    pub(crate) fn official() -> Self {
+        Self {
+            total_ticks: 0,
+            partial_tick: 0.0,
+            rate: 1.0,
+            paused: false,
+        }
+    }
+
+    /// 官方 `ServerClockInstance.tick`。暂停时什么都不做。
+    ///
+    /// Official `ServerClockInstance.tick`. A paused clock does nothing.
+    pub(crate) fn tick(&mut self) {
+        if self.paused {
+            return;
+        }
+        self.partial_tick += self.rate;
+        let full = self.partial_tick.floor();
+        self.partial_tick -= full;
+        self.total_ticks += full as i64;
+    }
+
+    /// 官方 `setTotalTicks`：不足一整刻的部分清零。
+    ///
+    /// Official `setTotalTicks`: the partial tick is cleared.
+    pub(crate) fn set_total_ticks(&mut self, ticks: i64) {
+        self.total_ticks = ticks;
+        self.partial_tick = 0.0;
+    }
+
+    /// 官方 `addTicks`：加上这些刻，结果不低于 0，不足一整刻的部分保留。
+    ///
+    /// Official `addTicks`: add this many ticks, clamp at 0, and keep the partial tick.
+    pub(crate) fn add_ticks(&mut self, ticks: i64) {
+        self.total_ticks = (self.total_ticks + ticks).max(0);
+    }
+
+    /// 发给客户端的流速。暂停时是 0，官方的 `packNetworkState` 也是这样。
+    ///
+    /// The rate sent to the client. A paused clock sends 0, matching official `packNetworkState`.
+    pub(crate) fn network_rate(&self) -> f32 {
+        if self.paused { 0.0 } else { self.rate }
+    }
+
+    /// 官方 `setPaused`。
+    ///
+    /// Official `setPaused`.
+    pub(crate) fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// 官方 `setRate`。
+    ///
+    /// Official `setRate`.
+    pub(crate) fn set_rate(&mut self, rate: f32) {
+        self.rate = rate;
+    }
+}
 
 /// 名单上的一名玩家。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +149,31 @@ impl RosterEntry {
 }
 
 /// 不属于任何区块的状态。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Global {
     time: GameTime,
+    /// 主世界时钟。开服时停在正午，和现有的 `set_time` 包一致。
+    ///
+    /// The overworld clock. It starts paused at noon, matching the existing `set_time` packet.
+    clock: Clock,
+    /// 末地时钟。官方 `ServerClockInstance` 的初值：0 刻、流速 1、没有暂停。
+    ///
+    /// The End clock. Official `ServerClockInstance` defaults: tick 0, rate 1, not paused.
+    end_clock: Clock,
     roster: BTreeMap<PlayerId, RosterEntry>,
     ticks_since_latency_broadcast: u32,
+}
+
+impl Default for Global {
+    fn default() -> Self {
+        Self {
+            time: GameTime::default(),
+            clock: Clock::default(),
+            end_clock: Clock::official(),
+            roster: BTreeMap::new(),
+            ticks_since_latency_broadcast: 0,
+        }
+    }
 }
 
 impl Global {
@@ -65,8 +181,40 @@ impl Global {
         self.time
     }
 
+    pub(crate) fn clock(&self) -> Clock {
+        self.clock
+    }
+
+    /// 按注册名取时钟。只有主世界和末地，别的名字返回 `None`。
+    ///
+    /// Looks up a clock by registry name. Only the overworld and the End exist.
+    pub(crate) fn clock_named(&self, name: &str) -> Option<&Clock> {
+        match name {
+            "minecraft:overworld" => Some(&self.clock),
+            "minecraft:the_end" => Some(&self.end_clock),
+            _ => None,
+        }
+    }
+
+    /// [`clock_named`](Self::clock_named) 的可变版本。
+    ///
+    /// Mutable [`clock_named`](Self::clock_named).
+    pub(crate) fn clock_named_mut(&mut self, name: &str) -> Option<&mut Clock> {
+        match name {
+            "minecraft:overworld" => Some(&mut self.clock),
+            "minecraft:the_end" => Some(&mut self.end_clock),
+            _ => None,
+        }
+    }
+
     pub(crate) fn advance_time(&mut self) {
         self.time.0 += 1;
+        self.clock.tick();
+        // 末地时钟和主世界一起走。登录时的 `set_time` 仍然只带主世界。
+        //
+        // The End clock advances with the overworld. The login `set_time` packet still carries
+        // only the overworld.
+        self.end_clock.tick();
     }
 
     /// 名单上的所有人，发给刚进入的玩家。名单是空的时候返回 `None`。
@@ -128,6 +276,19 @@ impl Global {
         }
         entry.show_hat = show_hat;
         update_frames(PlayerInfoUpdate::UPDATE_HAT, &[entry.tab_entry()])
+    }
+
+    /// 更新名单上的游戏模式，返回发给所有人的 Tab 列表更新。`/gamemode` 靠它让别的玩家看到新模式。
+    ///
+    /// Updates the roster game mode and returns the tab-list update for everyone.
+    /// `/gamemode` uses this so other players see the new mode.
+    pub(crate) fn set_game_mode(&mut self, id: PlayerId, game_mode: GameMode) -> Option<Vec<u8>> {
+        let entry = self.roster.get_mut(&id)?;
+        if entry.game_mode == game_mode {
+            return None;
+        }
+        entry.game_mode = game_mode;
+        update_frames(PlayerInfoUpdate::UPDATE_GAME_MODE, &[entry.tab_entry()])
     }
 
     /// 每 tick 调用一次，到周期时返回所有人的延迟。

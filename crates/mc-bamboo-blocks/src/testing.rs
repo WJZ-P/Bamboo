@@ -10,8 +10,8 @@ use crate::block_entity::{BlockEntities, BlockEvents};
 
 use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Container, Level, LevelRandom, Outcome, Slots,
-    container::redstone_signal, destroy_block, hopper::HopperEntity, level::RedstoneMemory,
-    shape::Aabb,
+    container::redstone_signal, destroy_block, entity::Entities, hopper::HopperEntity,
+    level::RedstoneMemory, shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
@@ -36,6 +36,7 @@ pub(crate) struct TestLevel {
     pub(crate) containers: HashMap<BlockPos, Vec<ItemStack>>,
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    entities: Entities,
 }
 
 impl TestLevel {
@@ -52,6 +53,7 @@ impl TestLevel {
             containers: HashMap::new(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            entities: Entities::default(),
         }
     }
 
@@ -176,6 +178,14 @@ impl Level for TestLevel {
 
     fn redstone_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
+    }
+
+    fn entities(&self) -> &Entities {
+        &self.entities
+    }
+
+    fn entities_mut(&mut self) -> &mut Entities {
+        &mut self.entities
     }
 
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
