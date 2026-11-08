@@ -54,7 +54,7 @@ const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Rule {
     AnalogInput,
-    RandomOutcome,
+    EntityRandom,
     RandomLoop,
     RandomPositional,
     Explosion,
@@ -64,16 +64,16 @@ pub enum Rule {
     CanDestroyBlock,
     RandomDelay,
     FallingTick,
-    FireTick,
     RedstoneTick,
     TimerTick,
     EntityTick,
+    EntityRandomTick,
 }
 
 impl Rule {
     pub const ALL: [Self; 15] = [
         Self::AnalogInput,
-        Self::RandomOutcome,
+        Self::EntityRandom,
         Self::RandomLoop,
         Self::RandomPositional,
         Self::Explosion,
@@ -83,16 +83,16 @@ impl Rule {
         Self::CanDestroyBlock,
         Self::RandomDelay,
         Self::FallingTick,
-        Self::FireTick,
         Self::RedstoneTick,
         Self::TimerTick,
         Self::EntityTick,
+        Self::EntityRandomTick,
     ];
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::AnalogInput => "analog input",
-            Self::RandomOutcome => "random outcome",
+            Self::EntityRandom => "entity random",
             Self::RandomLoop => "random loop",
             Self::RandomPositional => "positional random",
             Self::Explosion => "explosion",
@@ -102,10 +102,10 @@ impl Rule {
             Self::CanDestroyBlock => "canDestroyBlock",
             Self::RandomDelay => "random delay",
             Self::FallingTick => "falling tick",
-            Self::FireTick => "fire tick",
             Self::RedstoneTick => "redstone tick",
             Self::TimerTick => "timer tick",
             Self::EntityTick => "entity tick",
+            Self::EntityRandomTick => "entity random tick",
         }
     }
 
@@ -114,17 +114,21 @@ impl Rule {
             Self::AnalogInput => {
                 "case: a clicked comparator read an analog output, signals do not exist (chapter 1)"
             }
-            Self::RandomOutcome => {
-                "case: the official outcome changes with the random source (chapter 1)"
+            Self::EntityRandom => {
+                "case: the outcome changed with the player's own random source, Bamboo has none"
             }
-            Self::RandomLoop => "case: extreme random values made the official code spin",
+            Self::RandomLoop => {
+                "case: extreme values of the player's random source made the official code spin"
+            }
             Self::RandomPositional => {
                 "case: the official code asked for a position derived random source"
             }
             Self::Explosion => {
                 "case: explosions are out of scope (respawn anchor in the overworld)"
             }
-            Self::Worldgen => "case: world generation is out of scope (bone meal growing a tree)",
+            Self::Worldgen => {
+                "case: world generation is out of scope (trees, huge mushrooms, bone meal on grass)"
+            }
             Self::ImpossibleScene => {
                 "case: a half of a broken structure made the official code throw"
             }
@@ -135,43 +139,59 @@ impl Rule {
                 "case: Item.canDestroyBlock refused, the caller checks it before destroy_block"
             }
             Self::RandomDelay => {
-                "tick delay: the official delay is random, position and type are still compared"
+                "tick delay: the player's random source picked it, position and type are compared"
             }
             Self::FallingTick => "tick: blocks do not fall (chapter 1)",
-            Self::FireTick => "tick: fire does not spread (chapter 1)",
             Self::RedstoneTick => "tick: signals do not exist, powered only changes by hand",
-            Self::TimerTick => "tick: growth and hatching timers are out of scope (chapter 1)",
+            Self::TimerTick => {
+                "tick: hatching and time of day timers are out of scope (eggs, eyeblossoms)"
+            }
             Self::EntityTick => "tick: only entities trigger or read this tick, none are simulated",
+            Self::EntityRandomTick => {
+                "random tick: it spawns entities (turtles hatching, piglins from portals)"
+            }
         }
     }
 
     /// `skip` 行的原因前缀对应的规则。`exception:` 不在这里：那是假世界的 bug，要算失败。
     ///
-    /// `untick:<类名>` 是 flow 题往后跑时碰到了范围外的计划刻，按那个类的规则计数。
+    /// `untick:<类名>` 是 flow 题往后跑时碰到了范围外的计划刻，`unrandom:<类名>` 是 chunk 题碰到了
+    /// 范围外的随机刻，都按那个类的规则计数。
     fn of_skip(reason: &str) -> Option<Self> {
         let (prefix, detail) = reason.split_once(':')?;
         match prefix {
-            "random" => Some(Self::RandomOutcome),
+            "random-entity" => Some(Self::EntityRandom),
             "random-loop" => Some(Self::RandomLoop),
             "random-positional" => Some(Self::RandomPositional),
             "explosion" => Some(Self::Explosion),
             "worldgen" => Some(Self::Worldgen),
             "impossible" => Some(Self::ImpossibleScene),
-            "untick" => OUT_OF_SCOPE_TICKS
-                .iter()
-                .find(|(ancestor, _)| format!("{ancestor:?}") == detail)
-                .map(|&(_, rule)| rule),
+            "untick" => rule_of_class(OUT_OF_SCOPE_TICKS, detail),
+            "unrandom" => rule_of_class(OUT_OF_SCOPE_RANDOM_TICKS, detail),
             _ => None,
         }
     }
 }
+
+/// 表里官方类名是 `name` 的那一项的规则。
+fn rule_of_class(table: &[(BlockAncestor, Rule)], name: &str) -> Option<Rule> {
+    table
+        .iter()
+        .find(|(ancestor, _)| format!("{ancestor:?}") == name)
+        .map(|&(_, rule)| rule)
+}
+
+/// 不在范围里的随机刻：这些类的 random 题不比较，chunk 题要随机刻到它们时整题排除。
+const OUT_OF_SCOPE_RANDOM_TICKS: &[(BlockAncestor, Rule)] = &[
+    (BlockAncestor::TurtleEggBlock, Rule::EntityRandomTick),
+    (BlockAncestor::NetherPortalBlock, Rule::EntityRandomTick),
+];
 
 /// 第 1 章第 5 条以外的计划刻：这些方块排的刻不比较，它们的 `tick` 题也不比较，
 /// flow 题往后跑时要执行它们的话整题排除。以后做了其中某一种时，把它从表里删掉，比较就打开了。
 const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::FallingBlock, Rule::FallingTick),
     (BlockAncestor::BrushableBlock, Rule::FallingTick),
-    (BlockAncestor::FireBlock, Rule::FireTick),
     (BlockAncestor::DiodeBlock, Rule::RedstoneTick),
     (BlockAncestor::ObserverBlock, Rule::RedstoneTick),
     (BlockAncestor::RedstoneTorchBlock, Rule::RedstoneTick),
@@ -186,7 +206,6 @@ const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::FrogspawnBlock, Rule::TimerTick),
     (BlockAncestor::SnifferEggBlock, Rule::TimerTick),
     (BlockAncestor::DriedGhastBlock, Rule::TimerTick),
-    (BlockAncestor::FrostedIceBlock, Rule::TimerTick),
     (BlockAncestor::EyeblossomBlock, Rule::TimerTick),
     (BlockAncestor::CreakingHeartBlock, Rule::TimerTick),
     (BlockAncestor::BasePressurePlateBlock, Rule::EntityTick),
@@ -195,10 +214,11 @@ const OUT_OF_SCOPE_TICKS: &[(BlockAncestor, Rule)] = &[
     (BlockAncestor::BigDripleafBlock, Rule::EntityTick),
 ];
 
-/// 这条规则排除了哪些类的计划刻，打印排除表时用。
+/// 这条规则排除了哪些类的计划刻或者随机刻，打印排除表时用。
 fn tick_classes(rule: Rule) -> Vec<BlockAncestor> {
     OUT_OF_SCOPE_TICKS
         .iter()
+        .chain(OUT_OF_SCOPE_RANDOM_TICKS)
         .filter(|(_, entry)| *entry == rule)
         .map(|&(ancestor, _)| ancestor)
         .collect()
@@ -207,12 +227,8 @@ fn tick_classes(rule: Rule) -> Vec<BlockAncestor> {
 /// 没有移植 `useOn` 的非方块物品类，官方类名和原因。点击轮到这些物品时不比较。
 ///
 /// 斧子、锄头、锹（类就是 `Item`，靠 `block_transformer` 组件）、打火石、火焰弹、蜜脾、剪刀、末影之眼、
-/// 调试棒和刷子移植了，照常比较。桶、玻璃瓶和睡莲走 `Item.use`，不经过 `useOn`，所以不在这张表里。
+/// 调试棒、刷子和骨粉移植了，照常比较。桶、玻璃瓶和睡莲走 `Item.use`，不经过 `useOn`，所以不在这张表里。
 const UNPORTED_ITEM_USE_ON: &[(&str, &str)] = &[
-    (
-        "BoneMealItem",
-        "growth is random, saplings and fungi run world generation",
-    ),
     ("SpawnEggItem", "spawns an entity"),
     ("ArmorStandItem", "spawns an entity"),
     ("CushionItem", "spawns an entity"),
@@ -245,8 +261,18 @@ fn unported_item_use_on(class: &str) -> Option<&'static str> {
 
 /// 这个方块的计划刻不在比较的范围里时，返回原因。
 fn tick_exclusion(block: &Block) -> Option<Rule> {
+    class_exclusion(OUT_OF_SCOPE_TICKS, block)
+}
+
+/// 这个方块的随机刻不在比较的范围里时，返回原因。
+fn random_tick_exclusion(block: &Block) -> Option<Rule> {
+    class_exclusion(OUT_OF_SCOPE_RANDOM_TICKS, block)
+}
+
+/// 方块的类或者它的父类在表里时，返回那一项的规则。
+fn class_exclusion(table: &[(BlockAncestor, Rule)], block: &Block) -> Option<Rule> {
     let ancestors = block.class.ancestors();
-    OUT_OF_SCOPE_TICKS
+    table
         .iter()
         .find(|(ancestor, _)| ancestors.contains(ancestor))
         .map(|&(_, rule)| rule)
@@ -296,7 +322,11 @@ impl Options {
         if self.pure {
             args.extend(["--avoid".to_owned(), unported_classes().join(",")]);
         }
-        args.extend(["--untick".to_owned(), untick_classes().join(",")]);
+        args.extend(["--untick".to_owned(), class_names(OUT_OF_SCOPE_TICKS)]);
+        args.extend([
+            "--unrandom".to_owned(),
+            class_names(OUT_OF_SCOPE_RANDOM_TICKS),
+        ]);
         args
     }
 
@@ -315,12 +345,13 @@ impl Options {
     }
 }
 
-/// 计划刻不在范围里的类，官方类名就是 `BlockAncestor` 的变体名。
-fn untick_classes() -> Vec<String> {
-    OUT_OF_SCOPE_TICKS
+/// 表里的类名，逗号隔开。官方类名就是 `BlockAncestor` 的变体名。
+fn class_names(table: &[(BlockAncestor, Rule)]) -> String {
+    table
         .iter()
         .map(|(ancestor, _)| format!("{ancestor:?}"))
-        .collect()
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// 还没移植的类的名字，官方类名就是 `BlockClass` 的变体名。
@@ -584,18 +615,37 @@ fn case_exclusion(case: &Case, block: &Block) -> Option<Rule> {
         Kind::Place | Kind::Use if clicks_comparator_with_analog_input(case) => {
             Some(Rule::AnalogInput)
         }
+        Kind::Place | Kind::Use if bone_meals_a_feature_plant(case) => Some(Rule::Worldgen),
         Kind::Tick => tick_exclusion(block),
+        Kind::Random => random_tick_exclusion(block),
         _ => None,
     }
+}
+
+/// 骨粉在这些方块上能不能用、成不成功都要读树和巨型蘑菇的地物配置。只比类本身，
+/// 红树胎生苗是 `SaplingBlock` 的子类，它的骨粉不用地物，照常比较。
+const BONE_MEAL_NEEDS_FEATURES: [BlockClass; 3] = [
+    BlockClass::SaplingBlock,
+    BlockClass::AzaleaBlock,
+    BlockClass::MushroomBlock,
+];
+
+/// 拿着骨粉点上面这些方块。
+fn bone_meals_a_feature_plant(case: &Case) -> bool {
+    case.action.item_class == "BoneMealItem"
+        && BONE_MEAL_NEEDS_FEATURES.contains(&scene_state(case, case.action.target()).class())
+}
+
+/// 题目开始时这一格的状态。
+fn scene_state(case: &Case, pos: BlockPos) -> BlockState {
+    let cell = case.scene.iter().find(|cell| cell.pos() == pos);
+    BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
 }
 
 /// 点中的比较器会重新读输入。假世界把 `Level` 上的信号都屏蔽了，方块自己的模拟输出还在，
 /// 官方的比较器这时可能亮起来。世界里没有信号，比较器的 `powered` 不跟着变。
 fn clicks_comparator_with_analog_input(case: &Case) -> bool {
-    let state_at = |pos: BlockPos| {
-        let cell = case.scene.iter().find(|cell| cell.pos() == pos);
-        BlockState(cell.map_or(blocks::AIR, |cell| cell.state()))
-    };
+    let state_at = |pos: BlockPos| scene_state(case, pos);
     let pos = case.action.target();
     let clicked = state_at(pos);
     if block_id_of_state(clicked.0) != block_id_of_state(blocks::COMPARATOR) {
@@ -810,7 +860,7 @@ mod tests {
         )
         .replace('\n', " ");
         format!(
-            r#"{{"type":"case","id":0,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
+            r#"{{"type":"case","id":0,"seed":31,"block":"minecraft:stone","class":"Block","scene":{scene},"action":{action},"outcome":{outcome}}}"#
         )
     }
 
@@ -868,16 +918,16 @@ mod tests {
 
     #[test]
     fn an_unported_item_use_on_is_not_compared() {
-        let scene = format!("[[0,64,0,{}]]", blocks::GRASS_BLOCK);
-        let grown = format!("[[0,65,0,{}]]", blocks::SHORT_GRASS);
+        let scene = format!("[[0,64,0,{}]]", blocks::STONE);
+        let hung = format!("[[0,64,1,{}]]", blocks::STONE);
         let case = click_top(
-            "minecraft:bone_meal",
-            "BoneMealItem",
+            "minecraft:painting",
+            "HangingEntityItem",
             &scene,
-            &answer("success", &grown),
+            &answer("success", &hung),
         );
         assert_eq!(verdict_of(&case), Ok(()));
-        assert!(unported_item_use_on("FlintAndSteelItem").is_none());
+        assert!(unported_item_use_on("BoneMealItem").is_none());
     }
 
     #[test]
@@ -930,6 +980,8 @@ mod tests {
         assert_eq!(java_args[..4], options.forwarded);
         assert_eq!(java_args[4], "--untick");
         assert!(java_args[5].split(',').any(|class| class == "FallingBlock"));
+        assert_eq!(java_args[6], "--unrandom");
+        assert!(java_args[7].split(',').any(|class| class == "TurtleEggBlock"));
         assert_eq!(options.rerun_args(), "--only SlabBlock");
         assert!(Options::parse(&["--seed"]).is_err());
         assert!(Options::parse(&["--show", "many"]).is_err());
@@ -960,15 +1012,21 @@ mod tests {
     #[test]
     fn skip_reasons_map_to_rules_but_exceptions_do_not() {
         assert_eq!(
-            Rule::of_skip("random:KelpBlock.getStateForPlacement"),
-            Some(Rule::RandomOutcome)
+            Rule::of_skip("random-entity:Player.eat"),
+            Some(Rule::EntityRandom)
         );
+        // 世界的随机源和官方逐位相同，不再有这种排除。
+        assert_eq!(Rule::of_skip("random:KelpBlock.getStateForPlacement"), None);
         assert_eq!(Rule::of_skip("explosion:x"), Some(Rule::Explosion));
         assert_eq!(
             Rule::of_skip("untick:FallingBlock"),
             Some(Rule::FallingTick)
         );
         assert_eq!(Rule::of_skip("untick:StairBlock"), None);
+        assert_eq!(
+            Rule::of_skip("unrandom:TurtleEggBlock"),
+            Some(Rule::EntityRandomTick)
+        );
         assert_eq!(Rule::of_skip("exception:NullPointerException"), None);
     }
 

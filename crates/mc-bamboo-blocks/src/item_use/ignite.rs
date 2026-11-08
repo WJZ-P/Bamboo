@@ -13,21 +13,25 @@ use crate::{
     world::{UPDATE_ALL, UPDATE_ALL_IMMEDIATE, World},
 };
 
-/// `FlintAndSteelItem.useOn`。
+/// `FlintAndSteelItem.useOn`。音效的音调取一个随机数。
 pub(super) fn flint_and_steel(world: &mut World, ctx: &UseContext) -> InteractionResult {
-    ignite(world, ctx, UPDATE_ALL_IMMEDIATE)
+    ignite(world, ctx, UPDATE_ALL_IMMEDIATE, 1)
 }
 
-/// `FireChargeItem.useOn`：`setBlockAndUpdate`。
+/// `FireChargeItem.useOn`：`setBlockAndUpdate`。音效的音调取两个随机数。
 pub(super) fn fire_charge(world: &mut World, ctx: &UseContext) -> InteractionResult {
-    ignite(world, ctx, UPDATE_ALL)
+    ignite(world, ctx, UPDATE_ALL, 2)
 }
 
 /// 点着点中的方块，或者在点中的面前生火。火也放不下时是 `FAIL`。
-fn ignite(world: &mut World, ctx: &UseContext, flags: u32) -> InteractionResult {
+///
+/// 音效不做，但官方在写方块之前为音调取了 `sound_draws` 个随机数，火放下时又要取数排计划刻，
+/// 所以这几个数照取。
+fn ignite(world: &mut World, ctx: &UseContext, flags: u32, sound_draws: usize) -> InteractionResult {
     let pos = ctx.clicked_pos();
     let state = world.block_state(pos);
     if can_light(state) {
+        draw_sound_pitch(world, sound_draws);
         world.set_block(pos, state.with(LIT, true), flags);
         return InteractionResult::Success;
     }
@@ -35,9 +39,17 @@ fn ignite(world: &mut World, ctx: &UseContext, flags: u32) -> InteractionResult 
     if !fire::can_be_placed_at(world, fire_pos, ctx.horizontal_direction()) {
         return InteractionResult::Fail;
     }
+    draw_sound_pitch(world, sound_draws);
     let fire_state = fire::state_at(world, fire_pos);
     world.set_block(fire_pos, fire_state, flags);
     InteractionResult::Success
+}
+
+/// 音效音调的 `nextFloat`。
+fn draw_sound_pitch(world: &World, draws: usize) {
+    for _ in 0..draws {
+        world.random().next_float();
+    }
 }
 
 /// `CampfireBlock.canLight`、`CandleBlock.canLight`、`CandleCakeBlock.canLight`：

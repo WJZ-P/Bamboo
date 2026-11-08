@@ -12,8 +12,8 @@ use crate::{
         },
     },
     context::PlaceContext,
-    state::{BlockState, TIP},
-    world::{UPDATE_LIMIT, World},
+    state::{AGE_1, BlockState, TIP},
+    world::{UPDATE_CLIENTS, UPDATE_LIMIT, World},
 };
 
 /// `HangingMossBlock`。
@@ -51,6 +51,29 @@ impl Behaviour for HangingMoss {
             world.destroy_block(pos, UPDATE_LIMIT);
         }
     }
+
+    /// 最下面一节下面是空气时能长。
+    fn is_valid_bonemeal_target(&self, state: BlockState, world: &World, pos: BlockPos) -> bool {
+        let grow_pos = moss_tip(state, world, pos).below();
+        world.block_state(grow_pos).is_air() && world.is_inside_build_height(grow_pos.y)
+    }
+
+    /// 在最下面一节下面再挂一节。
+    fn perform_bonemeal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        let grow_pos = moss_tip(state, world, pos).below();
+        if world.block_state(grow_pos).is_air() {
+            world.set_block_and_update(grow_pos, state.with(TIP, true));
+        }
+    }
+}
+
+/// `HangingMossBlock.getTip`：往下数，最后一节连着的垂苔。
+fn moss_tip(state: BlockState, world: &World, pos: BlockPos) -> BlockPos {
+    let mut forward = pos.below();
+    while world.block_state(forward).is_same_block(state) {
+        forward = forward.below();
+    }
+    forward.above()
 }
 
 /// `SporeBlossomBlock`。
@@ -107,5 +130,13 @@ impl Behaviour for ShelfMushroom {
             return BlockState::AIR;
         }
         Plain.update_shape(state, world, pos, direction, neighbor_pos, neighbor)
+    }
+
+    fn is_valid_bonemeal_target(&self, state: BlockState, _world: &World, _pos: BlockPos) -> bool {
+        state.get(AGE_1) < 1
+    }
+
+    fn perform_bonemeal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        world.set_block(pos, state.with(AGE_1, state.get(AGE_1) + 1), UPDATE_CLIENTS);
     }
 }

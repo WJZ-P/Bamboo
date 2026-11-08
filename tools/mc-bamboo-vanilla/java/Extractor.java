@@ -78,6 +78,7 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
+import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.CombiningPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.MatchingBlockTagPredicate;
@@ -123,6 +124,10 @@ public final class Extractor {
     private static final int FACT_SIGNAL_SOURCE = 1 << 26;
     private static final int FACT_ANALOG_OUTPUT = 1 << 27;
     private static final int FACT_PROPAGATES_SKYLIGHT = 1 << 28;
+    private static final int FACT_RANDOMLY_TICKING = 1 << 29;
+    private static final int FACT_FLUID_RANDOMLY_TICKING = 1 << 30;
+    private static final int FACT_BLOCKS_LIGHT_FROM_BELOW = 1 << 31;
+    private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
 
     public static void main(String[] args) throws Exception {
@@ -556,8 +561,38 @@ public final class Extractor {
         maps.add("weathering", blockPairs(WeatheringCopper.NEXT_BY_BLOCK.get()));
         maps.add("waxables", blockPairs(HoneycombItem.WAXABLES.get()));
         maps.add("fireOdds", fireOdds());
+        maps.add("ignitedByLava", ignitedByLava());
         maps.add("campfireInputs", campfireInputs(resources, registries));
+        maps.add("compostLayers", compostLayers(resources));
         return maps;
+    }
+
+    /** 数据包 context_int_provider/compostable 下的整数提供器原文，键是物品组件引用它用的名字。 */
+    private static JsonObject compostLayers(ResourceManager resources) throws IOException {
+        String directory = "context_int_provider/";
+        Map<String, JsonElement> providers = new TreeMap<>();
+        for (var entry : resources.listResources(directory + "compostable", id -> id.getPath().endsWith(".json")).entrySet()) {
+            Identifier file = entry.getKey();
+            String path = file.getPath();
+            String name = file.getNamespace() + ":" + path.substring(directory.length(), path.length() - ".json".length());
+            try (Reader reader = entry.getValue().openAsReader()) {
+                providers.put(name, JsonParser.parseReader(reader));
+            }
+        }
+        JsonObject layers = new JsonObject();
+        providers.forEach(layers::add);
+        return layers;
+    }
+
+    /** BlockBehaviour.Properties.ignitedByLava 是整个方块的属性，按方块 ID 列出来。 */
+    private static JsonArray ignitedByLava() {
+        JsonArray ids = new JsonArray();
+        for (Block block : BuiltInRegistries.BLOCK) {
+            if (block.defaultBlockState().ignitedByLava()) {
+                ids.add(BuiltInRegistries.BLOCK.getId(block));
+            }
+        }
+        return ids;
     }
 
     /** RecipePropertySet.CAMPFIRE_INPUT：官方加载配方时从营火配方的原料收集出这个集合。 */
@@ -772,7 +807,8 @@ public final class Extractor {
             boolean movesShape = movesShape(state.getBlock());
             checkPositionFacts(id, state, movesShape);
 
-            facts.add(stateFacts(state, BlockPos.ZERO));
+            // 最高位也用上了，按无符号数写。
+            facts.add(Integer.toUnsignedLong(stateFacts(state, BlockPos.ZERO)));
             fluid.add(fluidIndex(state.getFluidState()));
             lightDampening.add(state.getLightDampening());
 
@@ -879,6 +915,12 @@ public final class Extractor {
             facts |= state.isSignalSource() ? FACT_SIGNAL_SOURCE : 0;
             facts |= state.hasAnalogOutputSignal() ? FACT_ANALOG_OUTPUT : 0;
             facts |= state.propagatesSkylightDown() ? FACT_PROPAGATES_SKYLIGHT : 0;
+            facts |= state.isRandomlyTicking() ? FACT_RANDOMLY_TICKING : 0;
+            facts |= state.getFluidState().isRandomlyTicking() ? FACT_FLUID_RANDOMLY_TICKING : 0;
+            // 下面是石头：不用形状挡光的完整方块，草方块、菌岩这些也是。
+            BlockState below = Blocks.STONE.defaultBlockState();
+            boolean blocksLight = LightEngine.getLightDampeningInto(below, state, Direction.UP, 0) == LIGHT_BLOCKED;
+            facts |= blocksLight ? FACT_BLOCKS_LIGHT_FROM_BELOW : 0;
             return facts;
         }
 

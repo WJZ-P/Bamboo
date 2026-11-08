@@ -73,7 +73,7 @@ impl World {
         }
     }
 
-    /// 推进一 tick。顺序有约束：计划刻和官方一样紧跟在时间增长之后，新区块排在区块中心和 forget 后面，
+    /// 推进一 tick。顺序有约束：计划刻和随机刻和官方一样紧跟在时间增长之后，新区块排在区块中心和 forget 后面，
     /// 方块变化排在 ack 前面，区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
         self.process_inbox()?;
@@ -81,6 +81,7 @@ impl World {
         self.global.advance_time();
         self.region.advance_tick();
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        interaction::run_random_ticks(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);

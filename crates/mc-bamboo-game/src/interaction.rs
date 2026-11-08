@@ -7,10 +7,12 @@
 pub(crate) mod level;
 pub(crate) mod rules;
 
-use std::mem;
+use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_blocks::{Actor, BlockHit, Effect, InteractionResult, Level};
-use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
+use mc_bamboo_blocks::{
+    Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult, Level,
+};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{blocks, items};
 use mc_bamboo_protocol::{
     packet::play::{BlockChangedAck, BlockUpdate, LevelEvent, PlayerActionKind, SystemChat},
@@ -31,6 +33,12 @@ use crate::{
 };
 
 const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
+/// `server.properties` 的 `simulation-distance` 默认值，单位是区块。
+const SIMULATION_DISTANCE: i32 = 10;
+/// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`：骨粉的粒子。
+const BONE_MEAL_EVENT: i32 = 1505;
+/// 骨粉事件的数据：粒子的数量。
+const BONE_MEAL_PARTICLES: i32 = 15;
 /// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
 const BLOCK_INTERACTION_RANGE: f64 = 5.0;
 /// 官方判定时多给的一格，服务端记录的位置可能比客户端晚一点。
@@ -84,6 +92,34 @@ pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_scheduled_ticks(&mut level, ticks, time.0);
     send_effects(region, None, &outcome.effects);
+}
+
+/// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
+pub(crate) fn run_random_ticks(region: &mut Region) {
+    for chunk in random_ticking_chunks(region) {
+        let (mut level, ticks) = region.block_level();
+        let outcome = mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, DEFAULT_RANDOM_TICK_SPEED);
+        send_effects(region, None, &outcome.effects);
+    }
+}
+
+/// 官方跑随机刻的区块：离某名玩家所在的区块（切比雪夫距离）不超过模拟距离，而且加载到了能跑方块刻的程度，
+/// 也就是不超过视距加一：视距以内有 `PLAYER_LOADING` 票，再往外一圈是 `BLOCK_TICKING`。
+///
+/// 官方按 `Long2ByteOpenHashMap` 的哈希顺序遍历，这里按坐标排序。所有区块共用一个随机源，
+/// 所以和官方逐位相同的只有单个区块，几个区块一起跑时每个区块拿到的随机数不一样，概率相同。
+fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
+    let radius = SIMULATION_DISTANCE.min(region.view_distance + 1);
+    let mut chunks = BTreeSet::new();
+    for player in region.players.values() {
+        let center = player.chunk_pos();
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                chunks.insert(ChunkPos::new(center.x + dx, center.z + dz));
+            }
+        }
+    }
+    chunks
 }
 
 /// tick 第 5 阶段：把改过的方块发给 `is_chunk_tracked` 的玩家。`blocks-inventory.md` 第 11 章。
@@ -254,15 +290,29 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                     inventory::add_filled_bucket(region, id, item);
                 }
             }
+            Effect::BoneMealUsed { pos } => {
+                let event = LevelEvent {
+                    event: BONE_MEAL_EVENT,
+                    pos,
+                    data: BONE_MEAL_PARTICLES,
+                    global: false,
+                };
+                send_level_event(region, None, &event);
+            }
         }
     }
 }
 
 /// 破坏的粒子和声音发给附近的人。`except` 是不用发的玩家，它自己已经在本地预测过了。
 fn send_destroy_event(region: &mut Region, except: Option<PlayerId>, pos: BlockPos, state: u32) {
-    let frames = encode_frames(&LevelEvent::destroy_block(pos, state as i32));
+    send_level_event(region, except, &LevelEvent::destroy_block(pos, state as i32));
+}
+
+/// 把一个 `level_event` 发给听得到的人，`except` 除外。
+fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &LevelEvent) {
+    let frames = encode_frames(event);
     for player in region.players.values() {
-        if Some(player.id) != except && hears_level_event(player, pos) {
+        if Some(player.id) != except && hears_level_event(player, event.pos) {
             region.links.send_frames(player.id, &frames);
         }
     }

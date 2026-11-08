@@ -43,6 +43,8 @@ pub struct Skip {
 #[derive(Debug, Deserialize)]
 pub struct Case {
     pub id: u64,
+    /// 官方假世界的随机源的种子，重放时用同一个种子。
+    pub seed: i64,
     pub block: String,
     pub scene: Vec<Cell>,
     pub action: Action,
@@ -61,6 +63,10 @@ pub enum Kind {
     Flow,
     /// `use_item` 包：物品自己从眼睛看出去找目标。
     Item,
+    /// 一格的随机刻。
+    Random,
+    /// 一个区块的随机刻，官方的 `tickChunk`。
+    Chunk,
 }
 
 impl Kind {
@@ -72,6 +78,8 @@ impl Kind {
             Self::Tick => "tick",
             Self::Flow => "flow",
             Self::Item => "item",
+            Self::Random => "random",
+            Self::Chunk => "chunk",
         }
     }
 }
@@ -150,6 +158,9 @@ pub struct Action {
     /// 只有 flow 题有：第一个流体刻之后再跑多少刻。
     #[serde(default)]
     pub steps: u32,
+    /// 只有 chunk 题有：`tickChunk` 的 `tickSpeed`。
+    #[serde(default)]
+    pub speed: i32,
     pub actor: [Double; 3],
     pub yaw: Float,
     pub pitch: Float,
@@ -232,7 +243,7 @@ fn face<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Direction>,
 mod tests {
     use super::*;
 
-    const CASE: &str = r#"{"type":"case","id":3,"block":"minecraft:stone","class":"Block",
+    const CASE: &str = r#"{"type":"case","id":3,"seed":34,"block":"minecraft:stone","class":"Block",
         "scene":[[1,64,2,1]],
         "action":{"kind":"place","main":"minecraft:stone","off":"minecraft:air","hand":"off",
             "itemClass":"BlockItem","itemUseOn":false,"pos":[1,64,2],"face":"up",

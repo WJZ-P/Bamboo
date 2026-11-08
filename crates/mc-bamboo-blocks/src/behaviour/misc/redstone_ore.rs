@@ -1,4 +1,6 @@
-//! `RedStoneOreBlock`：点一下就亮，熄灭在随机刻里，不在范围里。
+//! `RedStoneOreBlock`：点一下就亮，随机刻时熄灭。
+
+use mc_bamboo_core::BlockPos;
 
 use crate::{
     behaviour::Behaviour,
@@ -26,6 +28,12 @@ impl Behaviour for RedstoneOre {
             InteractionResult::Pass
         } else {
             InteractionResult::Success
+        }
+    }
+
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.get(LIT) {
+            world.set_block_and_update(pos, state.with(LIT, false));
         }
     }
 }

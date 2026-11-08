@@ -4,8 +4,8 @@
 //! `mc-bamboo-vanilla` 的 `oracle` 命令用官方代码检查它们。
 //!
 //! 这是纯逻辑：给一个能读写方块的 [`Level`]，算出世界的变化。`mc-bamboo-game` 给它做适配，
-//! 够距检查、序列号和发包都在调用方。入口在 [`use_item_on`]、[`use_item`]、[`destroy_block`]
-//! 和 [`run_scheduled_ticks`]。
+//! 够距检查、序列号和发包都在调用方。入口在 [`use_item_on`]、[`use_item`]、[`destroy_block`]、
+//! [`run_scheduled_ticks`] 和随机刻的 [`tick_chunk`]。随机数和官方逐位相同，见 [`random`]。
 //!
 //! 世界里没有红石信号和光照引擎，见 [`World::has_neighbor_signal`] 和 [`World::raw_brightness`]。
 
@@ -16,6 +16,8 @@ pub mod interact;
 mod item_use;
 pub mod level;
 pub mod placement;
+pub mod random;
+pub mod random_tick;
 pub mod shape;
 pub mod state;
 pub mod ticks;
@@ -30,6 +32,8 @@ pub use interact::{
     InteractionResult, Outcome, destroy_block, run_scheduled_ticks, use_item, use_item_on,
 };
 pub use level::{Effect, Level};
+pub use random::{LegacyRandom, LevelRandom};
+pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
 pub use ticks::{BlockTicks, ScheduledFluidTick, ScheduledTick, TickPriority};

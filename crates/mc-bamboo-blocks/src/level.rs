@@ -1,8 +1,8 @@
 //! 这个 crate 和世界存储的边界。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, ChunkPos};
 
-use crate::{shape::Aabb, state::BlockState};
+use crate::{random::LevelRandom, shape::Aabb, state::BlockState};
 
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
 pub trait Level {
@@ -20,6 +20,16 @@ pub trait Level {
 
     /// 世界最高的一层（含），`getMaxY`。
     fn max_y(&self) -> i32;
+
+    /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
+    fn random(&self) -> &LevelRandom;
+
+    /// `LevelChunkSection.isRandomlyTicking`：这个区块里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段里
+    /// 有会随机刻的方块或者流体，也就是有状态的 `is_randomly_ticking` 或者 `is_fluid_randomly_ticking` 为真。
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool;
+
+    /// `ChunkMap.anyPlayerCloseEnoughTo`：有不是旁观者的玩家，脚到这一格最小的角不到 `max_distance` 格。
+    fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool;
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
@@ -34,4 +44,6 @@ pub enum Effect {
     /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
     /// 物品栏里没有 `item` 时放一个进去。
     FilledBucket { item: i32 },
+    /// `levelEvent(1505, pos, 15)`：骨粉起作用的粒子，发给附近所有人。
+    BoneMealUsed { pos: BlockPos },
 }

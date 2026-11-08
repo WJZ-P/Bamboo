@@ -20,6 +20,7 @@ pub mod common;
 pub mod machines;
 pub mod misc;
 pub mod plants;
+mod weathering;
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockClass, registries};
@@ -150,6 +151,22 @@ pub trait Behaviour: Sync {
 
     /// `tick`：计划刻到期。
     fn tick(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
+
+    /// `randomTick`：随机刻选中了这一格。只有 `is_randomly_ticking` 的状态会走到这里。
+    fn random_tick(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
+
+    /// `BonemealableBlock.isValidBonemealTarget`，只对这个接口的方块调用。
+    fn is_valid_bonemeal_target(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `BonemealableBlock.isBonemealSuccess`，只对这个接口的方块调用。
+    fn is_bonemeal_success(&self, _state: BlockState, _world: &World, _pos: BlockPos) -> bool {
+        true
+    }
+
+    /// `BonemealableBlock.performBonemeal`，只对这个接口的方块调用。
+    fn perform_bonemeal(&self, _state: BlockState, _world: &mut World, _pos: BlockPos) {}
 
     /// `getCollisionShape`。默认读生成的表。
     fn collision_boxes(
@@ -660,6 +677,26 @@ impl BlockState {
     /// `tick`。
     pub fn tick(self, world: &mut World, pos: BlockPos) {
         self.behaviour().tick(self, world, pos);
+    }
+
+    /// `randomTick`。
+    pub fn random_tick(self, world: &mut World, pos: BlockPos) {
+        self.behaviour().random_tick(self, world, pos);
+    }
+
+    /// `BonemealableBlock.isValidBonemealTarget`。
+    pub fn is_valid_bonemeal_target(self, world: &World, pos: BlockPos) -> bool {
+        self.behaviour().is_valid_bonemeal_target(self, world, pos)
+    }
+
+    /// `BonemealableBlock.isBonemealSuccess`。
+    pub fn is_bonemeal_success(self, world: &World, pos: BlockPos) -> bool {
+        self.behaviour().is_bonemeal_success(self, world, pos)
+    }
+
+    /// `BonemealableBlock.performBonemeal`。
+    pub fn perform_bonemeal(self, world: &mut World, pos: BlockPos) {
+        self.behaviour().perform_bonemeal(self, world, pos);
     }
 
     /// `getCollisionShape`。

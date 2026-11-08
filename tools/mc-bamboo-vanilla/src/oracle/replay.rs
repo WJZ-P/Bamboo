@@ -7,12 +7,12 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, Outcome,
-    TickPriority, destroy_block, run_scheduled_ticks,
+    Aabb, Actor, BlockHit, BlockState, BlockTicks, Effect, InteractionResult, Level, LevelRandom,
+    Outcome, TickPriority, destroy_block, random_tick, run_scheduled_ticks,
     shape::{self, BooleanOp},
-    use_item, use_item_on,
+    tick_chunk, use_item, use_item_on,
 };
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{blocks, items};
 
 use super::{
@@ -62,12 +62,13 @@ pub struct Scheduled {
     pub priority: i32,
 }
 
-/// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。
+/// 假世界：方块在表里，世界外是 `void_air`，实体只有场景里的玩家。随机源和官方用同一个种子。
 struct OracleLevel {
     blocks: HashMap<BlockPos, BlockState>,
     entities: Vec<Aabb>,
     min_y: i32,
     max_y: i32,
+    random: LevelRandom,
     touched: RefCell<BTreeSet<usize>>,
 }
 
@@ -81,6 +82,7 @@ impl OracleLevel {
             entities: entity_boxes(&case.action),
             min_y: header.min_y,
             max_y: header.max_y,
+            random: LevelRandom::new(case.seed),
             touched: RefCell::new(BTreeSet::new()),
         }
     }
@@ -144,6 +146,24 @@ impl Level for OracleLevel {
 
     fn max_y(&self) -> i32 {
         self.max_y
+    }
+
+    fn random(&self) -> &LevelRandom {
+        &self.random
+    }
+
+    /// 官方假世界的区块段每次都扫一遍场景。
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.blocks.iter().any(|(pos, state)| {
+            pos.chunk() == chunk
+                && pos.y >> 4 == section_y
+                && (state.is_randomly_ticking() || state.is_fluid_randomly_ticking())
+        })
+    }
+
+    /// 官方假世界的 `canSpreadFireAround` 永远是真：场景里的玩家总在目标附近。
+    fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
+        true
     }
 }
 
@@ -239,6 +259,8 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         Kind::Tick => run_one_tick(&mut level, &mut ticks, target, now),
         Kind::Flow => run_flow(&mut level, &mut ticks, target, now, action.steps),
         Kind::Item => use_item(&mut level, &mut ticks, &actor, action.hand),
+        Kind::Random => random_tick(&mut level, &mut ticks, target),
+        Kind::Chunk => tick_chunk(&mut level, &mut ticks, target.chunk(), action.speed),
     };
 
     Ok(Replayed {
@@ -283,7 +305,7 @@ fn run_flow(
 
 fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
     match kind {
-        Kind::Tick | Kind::Flow => "ticked",
+        Kind::Tick | Kind::Flow | Kind::Random | Kind::Chunk => "ticked",
         Kind::Destroy if result == InteractionResult::Fail => "refused",
         Kind::Destroy => "destroyed",
         Kind::Place | Kind::Use | Kind::Item => match result {
@@ -307,7 +329,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
                 state,
                 except_initiator,
             } => Some(Destroyed(pos.x, pos.y, pos.z, state.0, except_initiator)),
-            Effect::FilledBucket { .. } => None,
+            Effect::FilledBucket { .. } | Effect::BoneMealUsed { .. } => None,
         })
         .collect()
 }
@@ -359,6 +381,7 @@ mod tests {
             entities: vec![player],
             min_y: -64,
             max_y: 319,
+            random: LevelRandom::new(0),
             touched: RefCell::new(BTreeSet::new()),
         }
     }

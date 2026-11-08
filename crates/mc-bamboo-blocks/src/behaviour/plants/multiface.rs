@@ -1,7 +1,8 @@
-//! `MultifaceBlock`、`GlowLichenBlock`、`SculkVeinBlock`。后两个只多了蔓延，这里不做。
+//! `MultifaceBlock`、`GlowLichenBlock`、`SculkVeinBlock`。发光地衣的骨粉蔓延在这里，
+//! 幽匿脉络的蔓延靠幽匿催发体，不在范围里。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, registries::fluid};
+use mc_bamboo_data::{Block, blocks, registries::fluid};
 
 use crate::{
     behaviour::{
@@ -13,7 +14,7 @@ use crate::{
     },
     context::PlaceContext,
     state::{BlockState, WATERLOGGED},
-    world::World,
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// `MultifaceBlock`。
@@ -109,4 +110,72 @@ impl Behaviour for Multiface {
             state
         }
     }
+
+    /// 只有 `GlowLichenBlock` 能用骨粉：有一面能往某个方向蔓延。
+    fn is_valid_bonemeal_target(&self, state: BlockState, world: &World, pos: BlockPos) -> bool {
+        Direction::ALL.into_iter().any(|face| {
+            Direction::ALL
+                .into_iter()
+                .any(|spread| spread_target(state, world, pos, face.opposite(), spread).is_some())
+        })
+    }
+
+    /// `spreadFromRandomFaceTowardRandomDirection`：面和方向都洗乱了试，蔓延出去一格就停。
+    /// 每换一个面都重新洗一次方向，和官方的流一样按需取随机数。
+    fn perform_bonemeal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        for from in world.random().shuffled_directions() {
+            if !has_face(state, from) {
+                continue;
+            }
+            for spread in world.random().shuffled_directions() {
+                if let Some((target, face)) = spread_target(state, world, pos, from, spread)
+                    && spread_to_face(state, world, target, face)
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `MultifaceSpreader.DEFAULT_SPREAD_ORDER`：同一格换一面、同一平面的邻格、绕过拐角。
+fn spread_positions(pos: BlockPos, spread: Direction, from: Direction) -> [(BlockPos, Direction); 3] {
+    let beside = pos.relative(spread);
+    [
+        (pos, spread),
+        (beside, from),
+        (beside.relative(from), spread.opposite()),
+    ]
+}
+
+/// `getSpreadFromFaceTowardDirection`：从 `from` 这一面朝 `spread` 方向能蔓延到的第一个落点。
+fn spread_target(
+    state: BlockState,
+    world: &World,
+    pos: BlockPos,
+    from: Direction,
+    spread: Direction,
+) -> Option<(BlockPos, Direction)> {
+    if spread.axis() == from.axis() || !has_face(state, from) || has_face(state, spread) {
+        return None;
+    }
+    spread_positions(pos, spread, from)
+        .into_iter()
+        .find(|&(target, face)| can_spread_into(state, world, target, face))
+}
+
+/// `DefaultSpreaderConfig.canSpreadInto`：落点是空气、水源或者同种方块，那一面又贴得住。
+fn can_spread_into(lichen: BlockState, world: &World, target: BlockPos, face: Direction) -> bool {
+    let existing = world.block_state(target);
+    let replaceable = existing.is_air()
+        || existing.is_same_block(lichen)
+        || existing.is(blocks::WATER) && existing.fluid().is_source();
+    replaceable && state_on_face(lichen.default_state(), existing, world, target, face).is_some()
+}
+
+/// `spreadToFace`：在落点加上这一面，世界真的变了才算蔓延出去。
+fn spread_to_face(lichen: BlockState, world: &mut World, target: BlockPos, face: Direction) -> bool {
+    let old = world.block_state(target);
+    state_on_face(lichen.default_state(), old, world, target, face)
+        .is_some_and(|spread| world.set_block(target, spread, UPDATE_CLIENTS))
 }

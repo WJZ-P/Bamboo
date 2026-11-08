@@ -3,10 +3,10 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockState, Level,
+    Aabb, BlockState, Level, LevelRandom,
     shape::{self, BooleanOp},
 };
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, ChunkPos};
 use mc_bamboo_data::blocks;
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
@@ -18,6 +18,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
     pub(crate) players: &'a BTreeMap<PlayerId, Player>,
+    pub(crate) random: &'a LevelRandom,
 }
 
 impl Level for RegionLevel<'_> {
@@ -47,5 +48,21 @@ impl Level for RegionLevel<'_> {
 
     fn max_y(&self) -> i32 {
         MAX_Y
+    }
+
+    fn random(&self) -> &LevelRandom {
+        self.random
+    }
+
+    fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
+        self.chunks.is_randomly_ticking_section(chunk, section_y)
+    }
+
+    /// 这个世界只有创造模式，没有旁观者。
+    fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool {
+        let corner = pos.corner();
+        self.players
+            .values()
+            .any(|player| player.position.distance_to_sqr(corner).sqrt() < f64::from(max_distance))
     }
 }

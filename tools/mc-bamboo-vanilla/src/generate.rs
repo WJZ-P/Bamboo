@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, FieldValue, Item, Property, StateProvider, TagGroup,
-    VersionData,
+    Block, BlockField, BlockPredicate, CompostLayers, FieldValue, Item, Property, StateProvider,
+    TagGroup, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -383,6 +383,15 @@ fn block_maps_file(data: &VersionData) -> String {
     );
     let _ = writeln!(
         out,
+        "/// `ignitedByLava` 的方块 ID，升序。岩浆的随机刻只点燃旁边的这些方块。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const IGNITED_BY_LAVA: &[i32] = &{:?};\n",
+        maps.ignited_by_lava
+    );
+    let _ = writeln!(
+        out,
         "/// `RecipePropertySet.CAMPFIRE_INPUT`：能放上营火的物品 ID。"
     );
     let _ = writeln!(
@@ -661,7 +670,7 @@ fn check_state_ids(blocks: &[Block], total: u32) -> Result<(), String> {
 
 fn items_file(data: &VersionData) -> Result<String, String> {
     let mut out = String::new();
-    let _ = writeln!(out, "use crate::{{Item, ItemKind}};\n");
+    let _ = writeln!(out, "use crate::{{CompostLayers, Item, ItemKind}};\n");
     let _ = writeln!(out, "/// 各物品的注册表 ID。");
     for (id, item) in data.items.iter().enumerate() {
         let _ = writeln!(out, "pub const {}: i32 = {id};", constant_name(&item.name));
@@ -681,7 +690,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             item.max_stack_size,
             item.can_destroy_blocks_in_creative,
             item.consumable,
-            item.compostable,
+            compost_layers_of(item),
             item.jukebox_playable,
             block_transformer_of(item, data)?,
             item.blocks_attacks
@@ -689,6 +698,20 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     }
     let _ = writeln!(out, "];");
     Ok(out)
+}
+
+/// 物品的 `compostable` 组件。
+fn compost_layers_of(item: &Item) -> String {
+    match &item.compostable {
+        None => "None".to_owned(),
+        Some(CompostLayers::Constant(layers)) => format!("Some(CompostLayers::Constant({layers}))"),
+        Some(CompostLayers::Weighted {
+            when_empty,
+            distribution,
+        }) => format!(
+            "Some(CompostLayers::Weighted {{ when_empty: {when_empty}, distribution: &{distribution:?} }})"
+        ),
+    }
 }
 
 /// 物品的 `block_transformer` 组件，指向 `block_transformers.rs` 里的条目。
@@ -723,6 +746,7 @@ fn item_kind(item: &Item) -> Result<&'static str, String> {
         "EnderEyeItem" => Ok("EnderEye"),
         "DebugStickItem" => Ok("DebugStick"),
         "BrushItem" => Ok("Brush"),
+        "BoneMealItem" => Ok("BoneMeal"),
         "BlockItem" => Ok("Block"),
         "StandingAndWallBlockItem" => Ok("StandingAndWall"),
         "BannerItem" => Ok("Banner"),
@@ -937,7 +961,7 @@ mod tests {
             max_stack_size: 64,
             can_destroy_blocks_in_creative: true,
             consumable: false,
-            compostable: false,
+            compostable: None,
             jukebox_playable: false,
             block_transformer: None,
             blocks_attacks: false,

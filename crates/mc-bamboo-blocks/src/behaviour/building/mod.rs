@@ -32,7 +32,7 @@ use self::{
     iron_bars::IronBars,
     pillar::{Chain, RotatedPillar},
     slab::Slab,
-    snowy::Snowy,
+    snowy::{SpreadingSnowy, Snowy},
     stairs::Stair,
     trapdoor::TrapDoor,
     wall::Wall,
@@ -55,7 +55,8 @@ pub(super) fn of(class: BlockClass) -> Option<&'static dyn Behaviour> {
         C::FenceBlock => Some(&Fence),
         C::FenceGateBlock => Some(&FenceGate),
         C::GlazedTerracottaBlock => Some(&GlazedTerracotta),
-        C::GrassBlock | C::MyceliumBlock | C::SnowyBlock => Some(&Snowy),
+        C::GrassBlock | C::MyceliumBlock => Some(&SpreadingSnowy),
+        C::SnowyBlock => Some(&Snowy),
         C::HugeMushroomBlock => Some(&HugeMushroom),
         C::IronBarsBlock | C::StainedGlassPaneBlock | C::WeatheringCopperBarsBlock => {
             Some(&IronBars)

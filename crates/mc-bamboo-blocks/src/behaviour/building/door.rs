@@ -3,6 +3,7 @@
 use mc_bamboo_core::{Axis, BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -73,6 +74,13 @@ fn hinge_from_click(ctx: &PlaceContext) -> DoorHingeSide {
 }
 
 impl Behaviour for Door {
+    /// `WeatheringCopperDoorBlock` 的下半在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.get(DOUBLE_BLOCK_HALF) == DoubleBlockHalf::Lower {
+            change_over_time(state, world, pos);
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

@@ -51,6 +51,13 @@ pub mod facts {
     pub const ANALOG_OUTPUT: u32 = 1 << 27;
     /// `propagatesSkylightDown`。
     pub const PROPAGATES_SKYLIGHT: u32 = 1 << 28;
+    /// `isRandomlyTicking`：随机刻会调用这个状态的 `randomTick`。
+    pub const RANDOMLY_TICKING: u32 = 1 << 29;
+    /// `getFluidState().isRandomlyTicking`：随机刻会调用这一格的流体的 `randomTick`。
+    pub const FLUID_RANDOMLY_TICKING: u32 = 1 << 30;
+    /// 下面是一个不用形状挡光的完整方块时，`LightEngine.getLightDampeningInto(下面, 这个状态, UP, _)` 是 16：
+    /// 这个状态用自己的形状挡光，而且挡光形状的底面是满的，比如下半台阶。
+    pub const BLOCKS_LIGHT_FROM_BELOW: u32 = 1 << 31;
 }
 
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
@@ -251,6 +258,8 @@ pub enum ItemKind {
     DebugStick,
     /// `BrushItem`：开始刷，结果在后面的使用刻里。
     Brush,
+    /// `BoneMealItem`：催熟能长的方块，或者在水里长海草。
+    BoneMeal,
     /// 别的非方块物品，`useOn` 只看 [`Item::block_transformer`]。
     Other,
 }
@@ -271,14 +280,26 @@ pub struct Item {
     pub can_destroy_blocks_in_creative: bool,
     /// 有 `consumable` 组件：放置失败时官方会开始吃。
     pub consumable: bool,
-    /// 有 `compostable` 组件。
-    pub compostable: bool,
+    /// `compostable` 组件：能放进堆肥桶，放一个加几层。
+    pub compostable: Option<CompostLayers>,
     /// 有 `jukebox_playable` 组件。
     pub jukebox_playable: bool,
     /// `block_transformer` 组件：斧子、锄头、锹右键时改方块的规则。
     pub block_transformer: Option<&'static BlockTransformer>,
     /// 有 `blocks_attacks` 组件，也就是盾牌。拿在副手时主手的 `block_transformer` 不起作用。
     pub blocks_attacks: bool,
+}
+
+/// `compostable` 组件的 `layers`，数据包 `context_int_provider/compostable` 里的整数提供器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompostLayers {
+    /// 固定加这么多层，不取随机数。
+    Constant(i32),
+    /// 堆肥桶空着时加 `when_empty` 层；否则 `nextInt(总权重)` 按权重抽一项，元素是（层数，权重）。
+    Weighted {
+        when_empty: i32,
+        distribution: &'static [(i32, i32)],
+    },
 }
 
 /// 数据驱动的 `BlockTransformer`，条目在 [`block_transformers`]。
@@ -654,12 +675,22 @@ mod tests {
 
     #[test]
     fn compostable_comes_from_the_components() {
-        let compostable = items::ITEMS.iter().filter(|item| item.compostable);
+        let compostable = items::ITEMS.iter().filter(|item| item.compostable.is_some());
         assert_eq!(compostable.count(), 122);
-        assert!(item(items::OAK_LEAVES).compostable);
-        assert!(item(items::WHEAT_SEEDS).compostable);
-        assert!(!item(items::STONE).compostable);
-        assert!(!item(items::AIR).compostable);
+        assert!(item(items::OAK_LEAVES).compostable.is_some());
+        assert!(item(items::STONE).compostable.is_none());
+        assert!(item(items::AIR).compostable.is_none());
+        assert_eq!(
+            item(items::WHEAT_SEEDS).compostable,
+            Some(CompostLayers::Weighted {
+                when_empty: 1,
+                distribution: &[(1, 30), (0, 70)],
+            })
+        );
+        assert_eq!(
+            item(items::CAKE).compostable,
+            Some(CompostLayers::Constant(1))
+        );
     }
 
     #[test]
@@ -1001,7 +1032,7 @@ mod tests {
     #[test]
     fn item_components_are_summarised() {
         assert!(item(items::SWEET_BERRIES).consumable);
-        assert!(item(items::SWEET_BERRIES).compostable);
+        assert!(item(items::SWEET_BERRIES).compostable.is_some());
         assert!(!item(items::STONE).consumable);
         assert!(item(items::MUSIC_DISC_CAT).jukebox_playable);
     }
