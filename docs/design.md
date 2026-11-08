@@ -121,7 +121,9 @@ impl Links {
 
 ```text
 1. 取出 inbox 里已有的全部消息，FIFO 处理
-   然后算完排着的光照，记下变了的段（官方在两个 tick 之间做这一步）
+   然后算排着的光照，记下变了的段（官方的光照线程在两个 tick 之间做这一步）。
+   每 tick 最多做 8 万步（release 构建约 10 ms），一轮可以停在半路，剩下的下一 tick 接着算；
+   一轮算完才换上新的光照
 2. game_time + 1
 3. 派生状态：head_yaw、姿势、元数据脏标记
 4. 区块跟踪：比较 (center, vd)，center → forget → pending

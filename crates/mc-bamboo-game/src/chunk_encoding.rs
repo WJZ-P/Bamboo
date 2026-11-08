@@ -239,7 +239,7 @@ mod tests {
         let mut cache = ChunkCache::default();
 
         store.set_block(BlockPos::new(15, -60, 3), blocks::GLOWSTONE);
-        store.run_light_updates();
+        store.finish_light_updates();
 
         // 方块在 (0, 0)，光照进了 (1, 0)。
         let neighbor = ChunkPos::new(1, 0);

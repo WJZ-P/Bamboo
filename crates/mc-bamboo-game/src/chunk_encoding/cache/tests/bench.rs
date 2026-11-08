@@ -83,7 +83,7 @@ fn built_up_area() -> (ChunkStore, Vec<ChunkPos>) {
     for &chunk in &chunks {
         build_house(&mut store, chunk);
     }
-    store.run_light_updates();
+    store.finish_light_updates();
     (store, chunks)
 }
 

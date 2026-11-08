@@ -160,7 +160,7 @@ impl RandomRun {
                 self.check(pos);
             }
         }
-        self.store.run_light_updates();
+        self.store.finish_light_updates();
         for x in -CHECK_RADIUS..=CHECK_RADIUS {
             for z in -CHECK_RADIUS..=CHECK_RADIUS {
                 self.check(ChunkPos::new(x, z));
@@ -169,7 +169,7 @@ impl RandomRun {
         self.counts
     }
 
-    /// 随机改一下世界：放方块、改告示牌，或者把攒着的光照算完。
+    /// 随机改一下世界：放方块、改告示牌，或者算一点攒着的光照，有时一轮只算到一半。
     fn change(&mut self) {
         let rng = &mut self.rng;
         match rng.below(10) {
@@ -184,7 +184,10 @@ impl RandomRun {
                 let pos = self.signs[rng.below(self.signs.len() as u64) as usize];
                 self.store.set_sign(pos, random_content(rng));
             }
-            _ => self.store.run_light_updates(),
+            _ => {
+                let budget = 1 + rng.below(4000) as usize;
+                self.store.run_light_updates(budget);
+            }
         }
     }
 
@@ -256,11 +259,11 @@ fn light_sections_dropped_next_door_refresh_the_neighbor() {
     let neighbor = ChunkPos::new(1, 0);
 
     store.set_block(stone, blocks::STONE);
-    store.run_light_updates();
+    store.finish_light_updates();
     let with_sections = chunk_body(&mut cache, &store, &template_body, neighbor).into_owned();
 
     store.set_block(stone, blocks::AIR);
-    store.run_light_updates();
+    store.finish_light_updates();
 
     let fresh = encode_chunk(&store, neighbor);
     assert_ne!(fresh, with_sections);
