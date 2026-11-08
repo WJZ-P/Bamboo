@@ -472,6 +472,11 @@ fn click_line(case: &Case) -> String {
             pos_text(action.target()),
             action.steps
         ),
+        _ if action.kind == Kind::Chunk => format!(
+            "chunk of {} at speed {}",
+            pos_text(action.target()),
+            action.speed
+        ),
         _ => format!("target {}", pos_text(action.target())),
     }
 }

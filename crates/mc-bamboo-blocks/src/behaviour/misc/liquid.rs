@@ -111,6 +111,11 @@ fn check_spread(state: BlockState, world: &mut World, pos: BlockPos) {
 }
 
 impl Behaviour for Liquid {
+    /// `LiquidBlock.randomTick` 交给流体。随机刻接着又对同一个流体做一次，所以岩浆一次随机刻点两次火。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        crate::fluid::random_tick(world, pos, state.fluid());
+    }
+
     fn update_shape(
         &self,
         state: BlockState,

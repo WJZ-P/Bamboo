@@ -6,6 +6,7 @@
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, BlockAncestor, block_maps, blocks, tags::block_tags};
 
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -261,6 +262,13 @@ pub(super) fn chest_from_copper_block(
 }
 
 impl Behaviour for CopperChest {
+    /// `WeatheringCopperChestBlock`：右半边不氧化，交给左半边。没有人打开箱子，世界里没有实体。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if state.get(CHEST_TYPE) != ChestType::Right {
+            change_over_time(state, world, pos);
+        }
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

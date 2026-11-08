@@ -11,7 +11,7 @@ use mc_bamboo_data::{block_of_state, facts, registries::block_entity_type, state
 
 use crate::{
     MIN_Y, WORLD_HEIGHT,
-    chunk::Chunk,
+    chunk::{Chunk, Section},
     flat,
     light::{Chunks, LevelLight, LightChanges, SectionPos, has_different_light_properties},
 };
@@ -72,6 +72,16 @@ impl ChunkStore {
             self.chunk(pos.chunk())
                 .block(local(pos.x), pos.y, local(pos.z)),
         )
+    }
+
+    /// 区块 `pos` 里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段有会随机刻的方块。
+    /// 超出世界高度的区块段没有方块。
+    pub fn is_randomly_ticking_section(&self, pos: ChunkPos, section_y: i32) -> bool {
+        let chunk = self.edited.get(&pos).unwrap_or(&self.template);
+        usize::try_from(section_y - (MIN_Y >> 4))
+            .ok()
+            .and_then(|index| chunk.sections().get(index))
+            .is_some_and(Section::is_randomly_ticking)
     }
 
     /// 设置方块状态，返回方块是否真的变了。高度超出世界时什么也不做。
@@ -218,6 +228,19 @@ mod tests {
         );
         assert_eq!(store.block(BlockPos::new(5, -60, 5)), Some(blocks::AIR));
         assert!(store.edited(ChunkPos::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn the_grass_section_ticks_randomly() {
+        let mut store = ChunkStore::flat();
+        let chunk = ChunkPos::new(3, -2);
+        assert!(store.is_randomly_ticking_section(chunk, -4));
+        assert!(!store.is_randomly_ticking_section(chunk, -3));
+        assert!(!store.is_randomly_ticking_section(chunk, -5));
+        assert!(!store.is_randomly_ticking_section(chunk, 20));
+
+        store.set_block(BlockPos::new(48, 0, -32), blocks::WHEAT);
+        assert!(store.is_randomly_ticking_section(chunk, 0));
     }
 
     #[test]

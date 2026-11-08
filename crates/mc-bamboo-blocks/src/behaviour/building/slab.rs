@@ -4,6 +4,7 @@ use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::Block;
 
 use super::clicked_upper_half;
+use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -18,6 +19,11 @@ use crate::{
 pub(super) struct Slab;
 
 impl Behaviour for Slab {
+    /// `WeatheringCopperSlabBlock` 在随机刻里氧化，别的类不会被随机刻选中。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        change_over_time(state, world, pos);
+    }
+
     fn state_for_placement(
         &self,
         block: &'static Block,

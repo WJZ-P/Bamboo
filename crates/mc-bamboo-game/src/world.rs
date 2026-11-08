@@ -74,9 +74,10 @@ impl World {
         }
     }
 
-    /// 推进一 tick。顺序有约束：光照和官方一样在处理完请求之后、下一 tick 之前算，计划刻紧跟在时间增长之后，
-    /// 新区块排在区块中心和 forget 后面，光照变化紧挨在方块变化前面，方块变化排在 ack 前面，
-    /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
+    /// 推进一 tick。顺序有约束：光照和官方一样在处理完请求之后、下一 tick 之前算，计划刻、随机刻和
+    /// 方块实体的 tick 紧跟在时间增长之后（官方 `ServerLevel.tick` 的顺序），新区块排在区块中心和
+    /// forget 后面，光照变化紧挨在方块变化前面，方块变化排在 ack 前面，区块批次放在最后，
+    /// 这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
         self.process_inbox()?;
         light_updates::run_light_updates(&mut self.region);
@@ -84,6 +85,8 @@ impl World {
         self.global.advance_time();
         self.region.advance_tick();
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        // 官方 `ServerLevel.tick` 里随机刻在 `chunkSource.tick`，方块实体的 tick 在它之后。
+        interaction::run_random_ticks(&mut self.region);
         // 方块实体的 tick：告示牌在这里清掉走远的编辑者。
         sign::tick_editors(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);

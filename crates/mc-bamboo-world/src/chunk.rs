@@ -149,7 +149,14 @@ pub struct Section {
     blocks: PalettedContainer,
     biomes: PalettedContainer,
     non_air_blocks: u16,
+    /// 会随机刻的方块数，官方 `tickingBlockCount` 和 `tickingFluidCount` 合在一起。
+    random_tickers: u16,
     fluids: u16,
+}
+
+/// 这个状态的方块或者它的流体有随机刻。
+fn ticks_randomly(state: u32) -> bool {
+    state_facts(state) & (facts::RANDOMLY_TICKING | facts::FLUID_RANDOMLY_TICKING) != 0
 }
 
 impl Section {
@@ -158,6 +165,7 @@ impl Section {
             blocks: PalettedContainer::blocks(blocks::AIR),
             biomes: PalettedContainer::biomes(biome),
             non_air_blocks: 0,
+            random_tickers: 0,
             fluids: 0,
         }
     }
@@ -179,12 +187,19 @@ impl Section {
             (false, true) => self.non_air_blocks -= 1,
             _ => {}
         }
+        self.random_tickers -= u16::from(ticks_randomly(previous));
+        self.random_tickers += u16::from(ticks_randomly(state));
         match (fluid_is_empty(previous), fluid_is_empty(state)) {
             (true, false) => self.fluids += 1,
             (false, true) => self.fluids -= 1,
             _ => {}
         }
         self.blocks.set(index, state);
+    }
+
+    /// `LevelChunkSection.isRandomlyTicking`：里面有会随机刻的方块或者流体。
+    pub fn is_randomly_ticking(&self) -> bool {
+        self.random_tickers > 0
     }
 
     pub fn blocks(&self) -> &PalettedContainer {
@@ -407,6 +422,22 @@ mod tests {
 
         chunk.set_block(0, 0, 0, blocks::AIR);
         assert_eq!(chunk.sections()[4].block_count(), 0);
+    }
+
+    #[test]
+    fn sections_know_when_something_ticks_randomly() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(0, 0, 0, blocks::STONE);
+        assert!(!chunk.sections()[4].is_randomly_ticking());
+
+        chunk.set_block(0, 0, 0, blocks::GRASS_BLOCK);
+        chunk.set_block(1, 0, 0, blocks::LAVA);
+        assert!(chunk.sections()[4].is_randomly_ticking());
+
+        chunk.set_block(0, 0, 0, blocks::DIRT);
+        assert!(chunk.sections()[4].is_randomly_ticking());
+        chunk.set_block(1, 0, 0, blocks::AIR);
+        assert!(!chunk.sections()[4].is_randomly_ticking());
     }
 
     #[test]

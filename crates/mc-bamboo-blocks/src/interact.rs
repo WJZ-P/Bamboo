@@ -150,7 +150,7 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
     finish(world, InteractionResult::Pass)
 }
 
-fn finish(world: World, result: InteractionResult) -> Outcome {
+pub(crate) fn finish(world: World, result: InteractionResult) -> Outcome {
     Outcome {
         result,
         effects: world.into_effects(),

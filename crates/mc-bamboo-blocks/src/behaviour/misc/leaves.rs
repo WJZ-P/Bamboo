@@ -2,7 +2,7 @@
 //! `MangroveLeavesBlock`。子类只多了粒子和骨粉。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockAncestor, tags::block_tags};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, tags::block_tags};
 
 use crate::{
     behaviour::{
@@ -10,8 +10,8 @@ use crate::{
         common::{default_state, is_water_source, tick_water_if_waterlogged},
     },
     context::PlaceContext,
-    state::{BlockState, DISTANCE, PERSISTENT, WATERLOGGED},
-    world::World,
+    state::{AGE_4, BlockState, DISTANCE, HANGING, PERSISTENT, WATERLOGGED},
+    world::{UPDATE_CLIENTS, World},
 };
 
 /// `LeavesBlock`。
@@ -79,5 +79,24 @@ impl Behaviour for Leaves {
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         let updated = update_distance(state, world, pos);
         world.set_block_and_update(pos, updated);
+    }
+
+    /// 离原木太远、又不是玩家放的叶子消失。官方先掉落物品，这个世界没有掉落物。
+    fn random_tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
+        if !state.get(PERSISTENT) && state.get(DISTANCE) == DECAY_DISTANCE {
+            world.remove_block(pos);
+        }
+    }
+
+    /// 只有 `MangroveLeavesBlock` 能用骨粉：下面是空气时挂一个红树胎生苗。
+    fn is_valid_bonemeal_target(&self, _state: BlockState, world: &World, pos: BlockPos) -> bool {
+        world.block_state(pos.below()).is_air()
+    }
+
+    fn perform_bonemeal(&self, _state: BlockState, world: &mut World, pos: BlockPos) {
+        let propagule = BlockState(blocks::MANGROVE_PROPAGULE)
+            .with(HANGING, true)
+            .with(AGE_4, 0);
+        world.set_block(pos.below(), propagule, UPDATE_CLIENTS);
     }
 }

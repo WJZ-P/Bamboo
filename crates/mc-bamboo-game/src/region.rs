@@ -4,9 +4,12 @@
 //! [`World`](crate::World) 串起来。现在只有一个 `Region`，将来有多个时，
 //! 玩家和它的链路一起搬家。
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use mc_bamboo_blocks::{BlockTicks, RedstoneMemory};
+use mc_bamboo_blocks::{BlockTicks, LevelRandom, RedstoneMemory};
 use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{
@@ -89,12 +92,21 @@ pub(crate) struct Region {
     pub(crate) light_changes: BTreeMap<ChunkPos, LightChanges>,
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
+    /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
+    pub(crate) random: LevelRandom,
     /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
     redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
     /// 服务端视距，已经 clamp 到合法范围。
     pub(crate) view_distance: i32,
     max_players: i32,
+}
+
+/// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
+fn unique_seed() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as i64)
 }
 
 // 世界线程以后要能把 `Region` 交给线程池，所以它必须能在线程之间移动。
@@ -115,6 +127,7 @@ impl Region {
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
+            random: LevelRandom::new(unique_seed()),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
@@ -132,6 +145,7 @@ impl Region {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
             players: &self.players,
+            random: &self.random,
             redstone: &mut self.redstone,
         };
         (level, &mut self.block_ticks)
