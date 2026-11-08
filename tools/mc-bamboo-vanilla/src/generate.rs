@@ -213,7 +213,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, speed_factor: {}, bounce_restitution: {}, explosion_resistance: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -228,6 +228,9 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.instrument,
             offset_literal(block),
             block.dynamic_shape,
+            float_literal(block.speed_factor),
+            float_literal(block.bounce_restitution),
+            float_literal(block.explosion_resistance),
         );
     }
 
@@ -327,6 +330,11 @@ fn field_value(value: &FieldValue, block_tags: &TagIndexes) -> Result<String, St
             format!("FieldValue::Tag(block_tags::{})", constant_name(name))
         }
     })
+}
+
+/// `f32` 的 `Debug` 输出了最短的往返写法，也是合法的 Rust 字面量。
+fn float_literal(value: f32) -> String {
+    format!("{value:?}")
 }
 
 fn offset_literal(block: &Block) -> String {
@@ -634,8 +642,13 @@ fn states_file(data: &VersionData) -> Result<String, String> {
     for state in &tables.fluid_states {
         let _ = writeln!(
             out,
-            "    FluidFacts {{ fluid: {}, source: {}, amount: {}, falling: {}, legacy_block: {} }},",
-            state.fluid, state.source, state.amount, state.falling, state.legacy_block
+            "    FluidFacts {{ fluid: {}, source: {}, amount: {}, falling: {}, legacy_block: {}, explosion_resistance: {} }},",
+            state.fluid,
+            state.source,
+            state.amount,
+            state.falling,
+            state.legacy_block,
+            float_literal(state.explosion_resistance)
         );
     }
     let _ = writeln!(out, "];");
@@ -938,7 +951,7 @@ fn registries_file(data: &VersionData) -> String {
 fn entity_types_file(data: &VersionData) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "/// 一个实体类型的跟踪参数。");
-    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq)]");
     let _ = writeln!(out, "pub struct EntityTypeFacts {{");
     let _ = writeln!(out, "    /// 官方的注册表名。");
     let _ = writeln!(out, "    pub name: &'static str,");
@@ -954,6 +967,10 @@ fn entity_types_file(data: &VersionData) -> String {
         "    /// `trackDeltas`：速度变了要不要给跟踪的玩家发速度包。"
     );
     let _ = writeln!(out, "    pub track_deltas: bool,");
+    let _ = writeln!(out, "    /// `EntityDimensions.width`。");
+    let _ = writeln!(out, "    pub width: f32,");
+    let _ = writeln!(out, "    /// `EntityDimensions.height`。");
+    let _ = writeln!(out, "    pub height: f32,");
     let _ = writeln!(out, "}}\n");
     let _ = writeln!(
         out,
@@ -963,8 +980,13 @@ fn entity_types_file(data: &VersionData) -> String {
     for type_ in &data.entity_types {
         let _ = writeln!(
             out,
-            "    EntityTypeFacts {{ name: {:?}, client_tracking_range: {}, update_interval: {}, track_deltas: {} }},",
-            type_.name, type_.client_tracking_range, type_.update_interval, type_.track_deltas
+            "    EntityTypeFacts {{ name: {:?}, client_tracking_range: {}, update_interval: {}, track_deltas: {}, width: {}, height: {} }},",
+            type_.name,
+            type_.client_tracking_range,
+            type_.update_interval,
+            type_.track_deltas,
+            float_literal(type_.width),
+            float_literal(type_.height),
         );
     }
     let _ = writeln!(out, "];");
@@ -1094,6 +1116,9 @@ mod tests {
             fields: Vec::new(),
             instrument: "harp".to_owned(),
             dynamic_shape: false,
+            speed_factor: 1.0,
+            bounce_restitution: 0.0,
+            explosion_resistance: 0.0,
             offset: None,
         }
     }

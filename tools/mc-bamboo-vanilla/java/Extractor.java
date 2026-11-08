@@ -316,6 +316,11 @@ public final class Extractor {
             object.add("fields", fields(block));
             object.addProperty("instrument", state.instrument().getSerializedName());
             object.addProperty("dynamicShape", block.hasDynamicShape());
+            // 实体移动用的两个系数，见 `Block.getSpeedFactor`、`Block.getBounceRestitution`。
+            object.addProperty("speedFactor", block.getSpeedFactor());
+            object.addProperty("bounceRestitution", block.getBounceRestitution());
+            // 爆炸射线消耗用的抗性，见 `Block.getExplosionResistance`。
+            object.addProperty("explosionResistance", block.getExplosionResistance());
             addOffset(object, block);
             blocks.add(object);
         }
@@ -596,6 +601,8 @@ public final class Extractor {
             // 官方的 `Integer.MAX_VALUE` 表示 `UpdateInterval.NEVER`，这里写成 -1。
             object.addProperty("updateInterval", type.hasUpdateInterval() ? type.updateInterval() : -1);
             object.addProperty("trackDeltas", type.trackDeltas());
+            object.addProperty("width", type.getDimensions().width());
+            object.addProperty("height", type.getDimensions().height());
             types.add(object);
         }
         return types;
@@ -953,6 +960,8 @@ public final class Extractor {
                 object.addProperty("amount", added.getAmount());
                 object.addProperty("falling", added.hasProperty(FlowingFluid.FALLING) && added.getValue(FlowingFluid.FALLING));
                 object.addProperty("legacyBlock", Block.BLOCK_STATE_REGISTRY.getId(added.createLegacyBlock()));
+                // 爆炸射线里取方块和流体抗性的较大者，见 `FluidState.getExplosionResistance`。
+                object.addProperty("explosionResistance", added.getExplosionResistance());
                 fluidStates.add(object);
                 return fluidStates.size() - 1;
             });

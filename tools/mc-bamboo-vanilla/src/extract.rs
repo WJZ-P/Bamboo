@@ -104,6 +104,12 @@ pub struct Block {
     pub fields: Vec<BlockField>,
     pub instrument: String,
     pub dynamic_shape: bool,
+    /// `Block.getSpeedFactor`。
+    pub speed_factor: f32,
+    /// `Block.getBounceRestitution`。
+    pub bounce_restitution: f32,
+    /// `Block.getExplosionResistance`。
+    pub explosion_resistance: f32,
     pub offset: Option<BlockOffset>,
 }
 
@@ -174,6 +180,8 @@ pub struct FluidState {
     pub amount: u8,
     pub falling: bool,
     pub legacy_block: u32,
+    /// `FluidState.getExplosionResistance`。
+    pub explosion_resistance: f32,
 }
 
 /// 光照引擎要的表，`Extractor.java` 的 `LightTables`。
@@ -293,6 +301,10 @@ pub struct EntityTypeFacts {
     /// -1 表示官方写的是 `Integer.MAX_VALUE`，也就是 `UpdateInterval.NEVER`。
     pub update_interval: i32,
     pub track_deltas: bool,
+    /// `EntityDimensions.width`。
+    pub width: f32,
+    /// `EntityDimensions.height`。
+    pub height: f32,
 }
 
 /// 一个物品。列表里的位置就是它的注册表 ID。

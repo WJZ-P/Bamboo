@@ -142,6 +142,21 @@ impl Vec3 {
         Self::new(self.x * factor, self.y * factor, self.z * factor)
     }
 
+    /// 分量各自乘一个系数，`Vec3.multiply(double, double, double)`。
+    pub const fn multiply(self, x: f64, y: f64, z: f64) -> Self {
+        Self::new(self.x * x, self.y * y, self.z * z)
+    }
+
+    /// `Vec3.lengthSqr`。
+    pub const fn length_sqr(self) -> f64 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    /// `Vec3.length`。
+    pub fn length(self) -> f64 {
+        self.length_sqr().sqrt()
+    }
+
     /// 到 `other` 距离的平方。
     pub const fn distance_to_sqr(self, other: Self) -> f64 {
         let delta = self.subtract(other);
