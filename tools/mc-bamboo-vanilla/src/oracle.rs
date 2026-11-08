@@ -34,8 +34,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::CRAFTING, state::FACING, state::FACING_HOPPER,
-    state::HORIZONTAL_FACING, world::MAX_CHAINED_NEIGHBOR_UPDATES,
+    BlockState, behaviour::is_ported, state::CRAFTING, state::HORIZONTAL_FACING,
+    world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{
@@ -75,11 +75,10 @@ pub enum Rule {
     DaylightTimer,
     EntitySound,
     BlockEntityEvent,
-    UnmodeledContainer,
 }
 
 impl Rule {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 19] = [
         Self::AnalogInput,
         Self::EntityRandom,
         Self::RandomLoop,
@@ -99,7 +98,6 @@ impl Rule {
         Self::DaylightTimer,
         Self::EntitySound,
         Self::BlockEntityEvent,
-        Self::UnmodeledContainer,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -123,7 +121,6 @@ impl Rule {
             Self::DaylightTimer => "daylight timer",
             Self::EntitySound => "entity sound",
             Self::BlockEntityEvent => "block entity event",
-            Self::UnmodeledContainer => "unmodeled container",
         }
     }
 
@@ -131,7 +128,7 @@ impl Rule {
         match self {
             Self::AnalogInput => {
                 "case: a comparator read a block entity Bamboo keeps no contents for \
-                 (lectern, furnace and the like), or a clicked comparator re-reading such an input"
+                 (a lectern), or a clicked comparator re-reading such an input"
             }
             Self::EntityRandom => {
                 "case: the outcome changed with the player's own random source, Bamboo has none"
@@ -190,10 +187,6 @@ impl Rule {
             Self::BlockEntityEvent => {
                 "scope: the official outcome contains a vault block-entity sound or state event \
                  3015-3017; a vault that did not fire one is still compared"
-            }
-            Self::UnmodeledContainer => {
-                "case: a hopper or dropper ticked next to a container Bamboo keeps no slot table for \
-                 (shelf, furnace, brewing stand), so the transfer cannot be replayed"
             }
         }
     }
@@ -696,9 +689,6 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if dispenser_dispenses(case) || crafter_crafts(case) {
         return Ok(Some(Rule::Dispensing));
     }
-    if transfers_with_unmodeled_container(case) {
-        return Ok(Some(Rule::UnmodeledContainer));
-    }
     if fires_a_vault_event(case) {
         return Ok(Some(Rule::BlockEntityEvent));
     }
@@ -862,7 +852,7 @@ fn scene_state(case: &Case, pos: BlockPos) -> BlockState {
 }
 
 /// 点中的比较器会重新读输入。内容已经建模的容器两边读到的一样，可以比较；
-/// 别的方块实体（讲台、熔炉这类）Bamboo 没有保留内容，这题只能排除。
+/// 讲台这类还没保留内容的方块实体，这题只能排除。
 fn clicks_comparator_with_analog_input(case: &Case) -> bool {
     let state_at = |pos: BlockPos| scene_state(case, pos);
     let pos = case.action.target();
@@ -896,18 +886,9 @@ fn is_modeled_container(state: BlockState) -> bool {
                 | BlockAncestor::DecoratedPotBlock
                 | BlockAncestor::ChiseledBookShelfBlock
                 | BlockAncestor::CrafterBlock
-        )
-    })
-}
-
-/// Bamboo 没保留内容的容器方块实体。漏斗吸不出来也放不进去，比较器和投掷器碰不到它们。
-fn is_unmodeled_container(state: BlockState) -> bool {
-    state.class().ancestors().iter().any(|ancestor| {
-        matches!(
-            ancestor,
-            BlockAncestor::ShelfBlock
                 | BlockAncestor::AbstractFurnaceBlock
                 | BlockAncestor::BrewingStandBlock
+                | BlockAncestor::ShelfBlock
         )
     })
 }
@@ -930,44 +911,6 @@ fn final_state(case: &Case, pos: BlockPos) -> Option<BlockState> {
         Some(cell) => state_of(cell.state()),
         None => Some(BlockState::AIR),
     }
-}
-
-/// 漏斗每刻都从上方吸、往出口放，投掷器 tick 时只往出口放，两边都要读容器的槽位表。
-/// 碰到 Bamboo 没建模的容器时，搬物品的结果没法重放，这题只能排除。
-fn transfers_with_unmodeled_container(case: &Case) -> bool {
-    let scene = case
-        .scene
-        .iter()
-        .filter_map(|cell| Some((cell.pos(), state_of(cell.state())?)));
-    let changed = case
-        .outcome
-        .changes
-        .iter()
-        .filter_map(|cell| Some((cell.pos(), state_of(cell.state())?)));
-    // 漏斗从上方吸，出口在 `facing` 那一格。
-    let hopper_hits = scene
-        .clone()
-        .chain(changed.clone())
-        .filter(|(_, state)| state.is_a(BlockAncestor::HopperBlock))
-        .any(|(pos, state)| {
-            final_state(case, pos.above()).is_some_and(is_unmodeled_container)
-                || final_state(case, pos.relative(state.get(FACING_HOPPER)))
-                    .is_some_and(is_unmodeled_container)
-        });
-    if hopper_hits {
-        return true;
-    }
-    // 投掷器没有 ticker，只有动作那一下（或者场景里被红石排上刻）才会动手。
-    let target = case.action.target();
-    let dropper_ran = case.outcome.ran.iter().any(|id| id == "minecraft:dropper");
-    if !(dropper_ran || case.action.kind == Kind::Tick) {
-        return false;
-    }
-    let Some(state) = final_state(case, target) else {
-        return false;
-    };
-    state.is_a(BlockAncestor::DropperBlock)
-        && final_state(case, target.relative(state.get(FACING))).is_some_and(is_unmodeled_container)
 }
 
 /// 合成成功才整题排除。没有配方或产物是空的时官方只发 `SOUND_CRAFTER_FAIL`（1050），

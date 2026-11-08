@@ -2,6 +2,8 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
+use std::collections::VecDeque;
+
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
 use tracing::{error, warn};
@@ -238,6 +240,88 @@ struct NeighborQueue {
     count: u32,
 }
 
+/// 方块实体不在表里时不能读它。这些检查先排着，放回去之后按请求顺序再跑。
+///
+/// These checks need a block entity that is out of the map. They run, in request order, after
+/// that entity is put back.
+#[derive(Clone, Copy)]
+pub(crate) enum DeferredRead {
+    /// `updateNeighbourForOutputSignal`。源格子的实体被拿着。
+    ///
+    /// `updateNeighbourForOutputSignal` while the source cell's entity is out of the map.
+    OutputSignal {
+        pos: BlockPos,
+        block: &'static Block,
+    },
+    /// 比较器 `neighborChanged`。输入要读被拿着的熔炉或酿造台。
+    ///
+    /// Comparator `neighborChanged`. Its input would read a furnace or brewing stand that is out.
+    ComparatorNeighbor {
+        pos: BlockPos,
+        source: &'static Block,
+    },
+    /// 比较器 `setPlacedBy`。
+    ///
+    /// Comparator `setPlacedBy`.
+    ComparatorPlaced { pos: BlockPos },
+    /// 比较器 `refreshOutputState`。
+    ///
+    /// Comparator `refreshOutputState`.
+    ComparatorRefresh { pos: BlockPos },
+    /// 潜影盒 `doNeighborUpdates`。打开时的形状在方块实体上。
+    ///
+    /// Shulker `doNeighborUpdates`. The open shape lives on the block entity.
+    ShulkerNeighbors { pos: BlockPos },
+}
+
+impl DeferredRead {
+    fn pos(self) -> BlockPos {
+        match self {
+            Self::OutputSignal { pos, .. }
+            | Self::ComparatorNeighbor { pos, .. }
+            | Self::ComparatorPlaced { pos }
+            | Self::ComparatorRefresh { pos }
+            | Self::ShulkerNeighbors { pos } => pos,
+        }
+    }
+
+    fn is_blocked(self, world: &World) -> bool {
+        match self {
+            Self::OutputSignal { pos, .. } | Self::ShulkerNeighbors { pos } => {
+                world.block_entity_is_taken(pos)
+            }
+            Self::ComparatorNeighbor { pos, .. }
+            | Self::ComparatorPlaced { pos }
+            | Self::ComparatorRefresh { pos } => {
+                crate::behaviour::machines::comparator_reads_taken_entity(world, pos)
+            }
+        }
+    }
+
+    fn run(self, world: &mut World) {
+        match self {
+            Self::OutputSignal { pos, block } => {
+                world.update_neighbour_for_output_signal(pos, block);
+            }
+            Self::ComparatorNeighbor { pos, source } => {
+                let state = world.block_state(pos);
+                if state.is(blocks::COMPARATOR) {
+                    state.neighbor_changed(world, pos, source);
+                }
+            }
+            Self::ComparatorPlaced { pos } => {
+                crate::behaviour::machines::resume_comparator_placed(world, pos);
+            }
+            Self::ComparatorRefresh { pos } => {
+                crate::behaviour::machines::resume_comparator_refresh(world, pos);
+            }
+            Self::ShulkerNeighbors { pos } => {
+                crate::behaviour::machines::apply_shulker_neighbor_updates(world, pos);
+            }
+        }
+    }
+}
+
 /// 一次操作期间的世界。
 pub struct World<'a> {
     level: &'a mut dyn Level,
@@ -260,6 +344,11 @@ pub struct World<'a> {
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
     handling_tick: bool,
+    /// 方块实体被拿出去时排进来的比较器读取和潜影盒邻居更新。一层对应一次拿出。
+    ///
+    /// Comparator reads and shulker neighbour updates queued while a block entity is out of
+    /// the map. One frame per take.
+    held_reads: Vec<VecDeque<DeferredRead>>,
 }
 
 /// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读。
@@ -338,6 +427,7 @@ impl<'a> World<'a> {
             gained: None,
             wire_should_signal: true,
             handling_tick: false,
+            held_reads: Vec::new(),
         }
     }
 
@@ -671,6 +761,9 @@ impl<'a> World<'a> {
         if crate::block_container::is_block_container(self.block_state(pos)) {
             return crate::block_container::with_container(self, pos, f);
         }
+        if let Some(found) = crate::machine_container::try_with_container(self, pos, f) {
+            return found;
+        }
         self.level.with_container(pos, f)
     }
 
@@ -735,19 +828,27 @@ impl<'a> World<'a> {
         self.level.block_entities_mut().remove(pos);
     }
 
-    /// 带着这一格的方块实体运行一段代码。实体在运行期间不在表里，所以这段代码用
-    /// `getBlockEntity(pos)` 找不到它自己，别的地方和官方相同。
+    /// 带着这一格的方块实体运行一段代码。这段时间它不在表里，[`BlockEntities::get`] 是 `None`，
+    /// [`BlockEntities::contains`] 仍算它在，除非回调里把它删了。要读它的比较器检查先排进队列，
+    /// 放回去之后按请求顺序再跑，然后这个函数才返回。
+    ///
+    /// Runs code with this cell's block entity. For the call it is out of the map, so
+    /// [`BlockEntities::get`] is `None`, while [`BlockEntities::contains`] still counts it unless
+    /// the callback removes it. Comparator checks that need it are queued and run, in request
+    /// order, after it is put back and before this function returns.
     pub fn with_block_entity<T: BlockEntity, R>(
         &mut self,
         pos: BlockPos,
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
         let (id, mut entity) = self.level.block_entities_mut().take_at(pos)?;
+        self.begin_held_reads();
         let result = entity
             .as_any_mut()
             .downcast_mut::<T>()
             .map(|typed| f(typed, self));
         self.level.block_entities_mut().put(pos, id, entity);
+        self.end_held_reads();
         result
     }
 
@@ -789,16 +890,105 @@ impl<'a> World<'a> {
     }
 
     /// `Level.tickBlockEntities`：按 ticker 列表的顺序运行每刻的方块实体。
+    ///
+    /// 实体在 tick 期间不在表里，`get` 是 `None`。要读它的比较器检查和潜影盒的邻居更新先排进队列，
+    /// 放回去之后、下一个 ticker 之前按请求顺序跑完。顺序不改。方块 oracle 会跳过熔炉和酿造台。
+    ///
+    /// `Level.tickBlockEntities` runs each block entity in ticker order.
+    ///
+    /// The entity is out of the map while it ticks, so `get` is `None`. Comparator checks that
+    /// need it, and a shulker's neighbour updates, are queued and run in request order after it
+    /// is put back and before the next ticker. The order does not change. The block oracle skips
+    /// furnaces and brewing stands.
     pub fn tick_block_entities(&mut self) {
         self.level.block_entities_mut().begin_tick();
         while let Some((pos, id)) = self.level.block_entities_mut().next_ticker() {
-            let Some(mut entity) = self.level.block_entities_mut().take(pos, id) else {
+            if !self.level.runs_block_entity_tick(pos) {
+                continue;
+            }
+            let Some(entity) = self.level.block_entities_mut().take(pos, id) else {
                 continue;
             };
-            entity.tick(self);
-            self.level.block_entities_mut().put(pos, id, entity);
+            self.run_taken_block_entity(pos, id, entity);
         }
         self.level.block_entities_mut().end_tick();
+    }
+
+    /// 拿出的实体跑完 `tick` 再放回去，然后按请求顺序做排队的读取。
+    /// 酿造台会在燃料通知之后停一次，读完再继续。
+    ///
+    /// Runs `tick` for an entity that was taken out, puts it back, then runs queued reads in
+    /// request order. A brewing stand pauses after the fuel notification so those reads see the
+    /// items from that moment.
+    fn run_taken_block_entity(&mut self, pos: BlockPos, id: u64, mut entity: Box<dyn BlockEntity>) {
+        // 燃料和后面的酿造最多两段。多出来的次数只是拦住停不下来的实现。
+        // Fuel and the brew after it are at most two segments. The extra iterations only stop
+        // an implementation that never clears its resume flag.
+        for _ in 0..4 {
+            self.begin_held_reads();
+            entity.tick(self);
+            let again = entity.resume_tick();
+            self.level.block_entities_mut().put(pos, id, entity);
+            self.end_held_reads();
+            if !again {
+                return;
+            }
+            let Some(next) = self.level.block_entities_mut().take(pos, id) else {
+                return;
+            };
+            entity = next;
+        }
+        self.level.block_entities_mut().put(pos, id, entity);
+    }
+
+    /// 这一格的方块实体是不是正被拿在外面。
+    ///
+    /// Whether this cell's block entity is currently out of the map.
+    pub(crate) fn block_entity_is_taken(&self, pos: BlockPos) -> bool {
+        self.level.block_entities().is_taken(pos)
+    }
+
+    fn begin_held_reads(&mut self) {
+        self.held_reads.push(VecDeque::new());
+    }
+
+    /// 放回之后跑这一层里不再被挡住的读取。还要读更外层那份实体的，按原顺序交回去。
+    ///
+    /// After the put, runs reads in this frame that are no longer blocked. Reads that still
+    /// need an outer taken entity are handed back in the same order.
+    fn end_held_reads(&mut self) {
+        let Some(mut frame) = self.held_reads.pop() else {
+            return;
+        };
+        while let Some(item) = frame.pop_front() {
+            if item.is_blocked(self) {
+                self.defer_block_entity_read(item);
+                for rest in frame.drain(..) {
+                    self.defer_block_entity_read(rest);
+                }
+                return;
+            }
+            item.run(self);
+        }
+    }
+
+    /// 现在有拿出的实体时排进当前这一层，否则马上跑。
+    ///
+    /// Queues onto the current frame while an entity is out. Otherwise runs it now.
+    pub(crate) fn defer_block_entity_read(&mut self, item: DeferredRead) {
+        if let Some(frame) = self.held_reads.last_mut() {
+            frame.push_back(item);
+            return;
+        }
+        if item.is_blocked(self) {
+            let pos = item.pos();
+            error!(
+                "deferred block-entity read at {} {} {} is still blocked",
+                pos.x, pos.y, pos.z
+            );
+            return;
+        }
+        item.run(self);
     }
 
     /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
@@ -1218,13 +1408,19 @@ impl<'a> World<'a> {
         Some(old)
     }
 
-    /// `BlockEntity.preRemoveSideEffects`。实体在回调期间不在表里，和 [`World::with_block_entity`] 一样。
+    /// `BlockEntity.preRemoveSideEffects`。实体在回调期间不在表里。要读它的比较器检查先排着，
+    /// 放回去之后、调用方 `remove` 之前跑完。
+    ///
+    /// The entity is out of the map for the callback. Comparator checks that need it stay queued
+    /// and run after it is put back, before the caller's `remove`.
     fn pre_remove_block_entity(&mut self, pos: BlockPos, state: BlockState) {
         let Some((id, mut entity)) = self.level.block_entities_mut().take_at(pos) else {
             return;
         };
+        self.begin_held_reads();
         entity.pre_remove_side_effects(self, pos, state);
         self.level.block_entities_mut().put(pos, id, entity);
+        self.end_held_reads();
     }
 
     /// `removeBlock(pos, false)`：换成这一格的流体，没有流体时是空气。
@@ -1365,7 +1561,16 @@ impl<'a> World<'a> {
     }
 
     /// `updateNeighbourForOutputSignal`：告诉旁边和隔一格的比较器这里的信号变了。
+    ///
+    /// 这一格的实体正被拿着时先排进队列。放回去再跑，比较器读到的是放回去之后的那一份。
+    ///
+    /// While this cell's entity is out of the map the call is queued. It runs after the put, so
+    /// the comparator reads that put-back value.
     pub fn update_neighbour_for_output_signal(&mut self, pos: BlockPos, block: &'static Block) {
+        if self.block_entity_is_taken(pos) {
+            self.defer_block_entity_read(DeferredRead::OutputSignal { pos, block });
+            return;
+        }
         for direction in Direction::HORIZONTAL {
             let relative = pos.relative(direction);
             let state = self.block_state(relative);
