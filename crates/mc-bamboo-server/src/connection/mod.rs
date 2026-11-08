@@ -210,7 +210,10 @@ async fn read_frame<R: AsyncRead + Unpin>(
             buffer.advance(frame.header_len);
             let payload = buffer.split_to(frame.payload_len).freeze();
             return Ok(Some(match compression {
-                Some(threshold) => compression::decode(&payload, threshold)?.into(),
+                Some(threshold) => {
+                    compression::decode_limited(&payload, threshold, max_packet_len(max_frame_len))?
+                        .into()
+                }
                 None => payload,
             }));
         }
@@ -221,6 +224,16 @@ async fn read_frame<R: AsyncRead + Unpin>(
                 Err(ConnectionError::TruncatedFrame)
             };
         }
+    }
+}
+
+/// 解压后的包最多多长。进入 Play 之前帧被限制得比官方小，解压后也照这个限制；
+/// 之后和官方一样，只受协议的解压上限约束。
+fn max_packet_len(max_frame_len: usize) -> usize {
+    if max_frame_len < MAX_FRAME_LEN {
+        max_frame_len
+    } else {
+        compression::MAX_UNCOMPRESSED_LEN
     }
 }
 

@@ -74,6 +74,19 @@ pub fn encode(out: &mut Vec<u8>, payload: &[u8], threshold: i32) -> Result<(), C
 ///
 /// `threshold` 是服务端声明的阈值。和官方一样，长度非 0 但小于阈值的包直接判为畸形。
 pub fn decode(payload: &[u8], threshold: i32) -> Result<Vec<u8>, CompressionError> {
+    decode_limited(payload, threshold, MAX_UNCOMPRESSED_LEN)
+}
+
+/// 和 [`decode`] 相同，但解压后的长度不能超过 `max_len`，在分配内存之前就检查。
+///
+/// 进入 Play 之前 Bamboo 把帧限制得比官方小，压缩打开后这个限制要管到解压后的包，
+/// 不然一个很小的压缩帧也能让服务端分配到协议上限那么大的内存。
+pub fn decode_limited(
+    payload: &[u8],
+    threshold: i32,
+    max_len: usize,
+) -> Result<Vec<u8>, CompressionError> {
+    let max_len = max_len.min(MAX_UNCOMPRESSED_LEN);
     let (declared, header_len) = decode_varint(payload)?;
     let data = &payload[header_len..];
     if declared == 0 {
@@ -85,10 +98,10 @@ pub fn decode(payload: &[u8], threshold: i32) -> Result<Vec<u8>, CompressionErro
             threshold,
         });
     }
-    if declared > MAX_UNCOMPRESSED_LEN as i32 {
+    if declared as usize > max_len {
         return Err(CompressionError::UncompressedTooLong {
             size: declared,
-            max: MAX_UNCOMPRESSED_LEN,
+            max: max_len,
         });
     }
 
@@ -238,6 +251,21 @@ mod tests {
             Err(CompressionError::LengthMismatch {
                 declared: 11,
                 actual: 10
+            })
+        ));
+    }
+
+    #[test]
+    fn a_limit_below_the_declared_length_rejects_before_inflating() {
+        let mut frame = Vec::new();
+        encode(&mut frame, &[7; 2000], 256).expect("够阈值的包能压缩");
+
+        assert!(decode_limited(&frame, 256, 2000).is_ok());
+        assert!(matches!(
+            decode_limited(&frame, 256, 1024),
+            Err(CompressionError::UncompressedTooLong {
+                size: 2000,
+                max: 1024
             })
         ));
     }
