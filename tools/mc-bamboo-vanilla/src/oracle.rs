@@ -74,10 +74,12 @@ pub enum Rule {
     EntityTrigger,
     Dispensing,
     DaylightTimer,
+    EntitySound,
+    BlockEntityEvent,
 }
 
 impl Rule {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::AnalogInput,
         Self::EntityRandom,
         Self::RandomLoop,
@@ -97,6 +99,8 @@ impl Rule {
         Self::EntityTrigger,
         Self::Dispensing,
         Self::DaylightTimer,
+        Self::EntitySound,
+        Self::BlockEntityEvent,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -120,6 +124,8 @@ impl Rule {
             Self::EntityTrigger => "entity trigger",
             Self::Dispensing => "dispensing",
             Self::DaylightTimer => "daylight timer",
+            Self::EntitySound => "entity sound",
+            Self::BlockEntityEvent => "block entity event",
         }
     }
 
@@ -179,6 +185,13 @@ impl Rule {
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
+            }
+            Self::EntitySound => {
+                "scope: entities and their sounds are not simulated (mob buckets spawn a mob)"
+            }
+            Self::BlockEntityEvent => {
+                "scope: block entity lifecycle events are not modelled \
+                 (jukebox stop 1011, vault sounds and state events)"
             }
         }
     }
@@ -623,6 +636,8 @@ fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
         && replayed.result == "pass"
         && replayed.changes.is_empty()
         && replayed.destroyed.is_empty()
+        && replayed.level_events.is_empty()
+        && replayed.sounds.is_empty()
         && replayed.ticks.is_empty()
 }
 
@@ -630,6 +645,18 @@ fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
 fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Rule>, String> {
     if case.outcome.analog_content {
         return Ok(Some(Rule::AnalogInput));
+    }
+    if moves_a_piston(case) {
+        return Ok(Some(Rule::Piston));
+    }
+    if stops_a_jukebox(case) || fires_a_vault_event(case) {
+        return Ok(Some(Rule::BlockEntityEvent));
+    }
+    if uses_a_mob_bucket(case) {
+        return Ok(Some(Rule::EntitySound));
+    }
+    if dispenses(case) {
+        return Ok(Some(Rule::Dispensing));
     }
     let rule = match case.action.kind {
         Kind::Destroy
@@ -657,6 +684,60 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
         Some(rule) => Ok(Some(rule)),
         None => settled_out_of_scope(case, names),
     }
+}
+
+/// 官方把活塞或者移动中的活塞改了。活塞不在范围里，这一题的方块更新和声音都比不了。
+fn moves_a_piston(case: &Case) -> bool {
+    case.outcome.changes.iter().any(|cell| {
+        block_id_of_state(cell.state()).is_some_and(|id| {
+            let ancestors = blocks::BLOCKS[id].class.ancestors();
+            ancestors.contains(&BlockAncestor::PistonBaseBlock)
+                || ancestors.contains(&BlockAncestor::MovingPistonBlock)
+        })
+    })
+}
+
+/// 方块实体被移除时会自己报事件，唱机停下是 1011。Bamboo 不保留方块实体，报不出来。
+fn stops_a_jukebox(case: &Case) -> bool {
+    case.outcome
+        .level_events
+        .iter()
+        .any(|event| event.0 == 1011)
+}
+
+/// 宝库的方块实体在状态切换、插钥匙和吐战利品时自己报事件、放音效。Bamboo 没有方块实体。
+fn fires_a_vault_event(case: &Case) -> bool {
+    const SOUNDS: [&str; 6] = [
+        "minecraft:block.vault.insert_item",
+        "minecraft:block.vault.insert_item_fail",
+        "minecraft:block.vault.reject_rewarded_player",
+        "minecraft:block.vault.open_shutter",
+        "minecraft:block.vault.close_shutter",
+        "minecraft:block.vault.eject_item",
+    ];
+    const EVENTS: [i32; 3] = [3015, 3016, 3017];
+    case.outcome.sounds.iter().any(|sound| {
+        SOUNDS
+            .iter()
+            .any(|name| i32::from(mc_bamboo_data::sounds::sound_event(name)) == sound.0)
+    }) || case
+        .outcome
+        .level_events
+        .iter()
+        .any(|event| EVENTS.contains(&event.0))
+}
+
+/// 发射器、投掷器和合成器发了 1001 或 1050 号方块事件。Bamboo 的容器是空的，不会装东西也不会发射。
+fn dispenses(case: &Case) -> bool {
+    case.outcome
+        .level_events
+        .iter()
+        .any(|event| event.0 == 1001 || event.0 == 1050)
+}
+
+/// 生物桶的 `Item.use` 会生成一只生物，并让它叫一声。生物和它的随机源都不在范围里。
+fn uses_a_mob_bucket(case: &Case) -> bool {
+    case.action.kind == Kind::Item && case.action.item_class == "MobBucketItem"
 }
 
 /// 骨粉在这些方块上能不能用、成不成功都要读树和巨型蘑菇的地物配置。只比类本身，
@@ -778,6 +859,8 @@ fn compare(
         result: answer.result != replayed.result,
         cells: differing_cells(case, replayed),
         destroyed: answer.destroyed != replayed.destroyed,
+        level_events: answer.level_events != replayed.level_events,
+        sounds: answer.sounds != replayed.sounds,
         ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
         gained: answer.gained != replayed.gained,
@@ -908,6 +991,7 @@ fn blockers(case: &Case, replayed: &Replayed, names: &Names) -> Result<Vec<Block
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_bamboo_data::sounds;
 
     fn scheduled(x: i32, delay: i32) -> Scheduled {
         Scheduled {
@@ -959,8 +1043,39 @@ mod tests {
     }
 
     fn answer_with_ticks(result: &str, changes: &str, ticks: &str) -> String {
+        answer_with_sounds_and_ticks(result, changes, "[]", ticks)
+    }
+
+    fn answer_with_sounds_and_ticks(
+        result: &str,
+        changes: &str,
+        sounds: &str,
+        ticks: &str,
+    ) -> String {
         format!(
-            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":{ticks},"ran":[],"analogContent":false,"itemReached":true,"spawned":[],"rng":false}}"#
+            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"sounds":{sounds},"ticks":{ticks},"ran":[],"analogContent":false,"itemReached":true,"spawned":[],"rng":false}}"#
+        )
+    }
+
+    /// 一条官方 `playSeededSound` 的 JSON，浮点写成位的十六进制。
+    fn sound(
+        id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        source: mc_bamboo_data::sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+    ) -> String {
+        format!(
+            "[{},\"{:016x}\",\"{:016x}\",\"{:016x}\",{},\"{:08x}\",\"{:08x}\",true]",
+            mc_bamboo_data::sounds::sound_event(id),
+            x.to_bits(),
+            y.to_bits(),
+            z.to_bits(),
+            source.id(),
+            volume.to_bits(),
+            pitch.to_bits(),
         )
     }
 
@@ -984,9 +1099,23 @@ mod tests {
     #[test]
     fn the_official_answer_passes() {
         let stone = blocks::STONE;
+        let place = sound(
+            "minecraft:block.stone.place",
+            0.5,
+            65.5,
+            0.5,
+            sounds::BLOCKS,
+            1.0,
+            0.8,
+        );
         let case = place_stone(
             &format!("[[0,64,0,{stone}]]"),
-            &answer("success", &format!("[[0,65,0,{stone}]]")),
+            &answer_with_sounds_and_ticks(
+                "success",
+                &format!("[[0,65,0,{stone}]]"),
+                &format!("[{place}]"),
+                "[]",
+            ),
         );
         assert_eq!(verdict_of(&case), Ok(()));
     }
@@ -1031,11 +1160,22 @@ mod tests {
         let flint = "minecraft:flint_and_steel";
         // 点着的火在自己身上排了下一个刻，延迟来自世界随机源，写成官方的“随机延迟”。
         let fire_tick = r#"[[0,65,0,"block","minecraft:fire",-1,0]]"#;
+        // 声音在点火之前，音高是世界随机源的第一个 `nextFloat`。
+        let pitch = mc_bamboo_blocks::LevelRandom::new(31).source().next_float() * 0.4 + 0.8;
+        let use_sound = sound(
+            "minecraft:item.flintandsteel.use",
+            0.5,
+            65.5,
+            0.5,
+            sounds::BLOCKS,
+            1.0,
+            pitch,
+        );
         let lit = click_top(
             flint,
             "FlintAndSteelItem",
             &scene,
-            &answer_with_ticks("success", &fire, fire_tick),
+            &answer_with_sounds_and_ticks("success", &fire, &format!("[{use_sound}]"), fire_tick),
         );
         assert_eq!(verdict_of(&lit), Ok(()));
         let left_alone = click_top(flint, "FlintAndSteelItem", &scene, &answer("pass", "[]"));

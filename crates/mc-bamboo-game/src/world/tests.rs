@@ -200,8 +200,9 @@ impl Harness {
             online_mode: false,
         };
         let mut world = World::new(config, receiver);
-        // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。
+        // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.region.random = LevelRandom::new(0);
+        world.region.sound_seed_generator = LevelRandom::new(0);
         Self {
             world,
             inbox,

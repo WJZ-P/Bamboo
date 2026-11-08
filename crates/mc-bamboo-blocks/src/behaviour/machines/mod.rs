@@ -9,7 +9,7 @@
 
 mod beehive;
 mod campfire;
-mod chest;
+pub(crate) mod chest;
 mod command_block;
 mod containers;
 mod daylight_detector;

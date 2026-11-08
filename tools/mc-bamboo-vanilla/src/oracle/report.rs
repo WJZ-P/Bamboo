@@ -7,11 +7,11 @@ use std::{
 
 use mc_bamboo_blocks::behaviour::{Family, family_of, is_ported};
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::{Block, BlockClass, block_of_state, blocks};
+use mc_bamboo_data::{Block, BlockClass, SOUND_EVENTS, block_of_state, blocks};
 
 use super::{
     Rule, UNPORTED_ITEM_USE_ON,
-    lines::{Case, Cell, Destroyed, Header, Kind},
+    lines::{Case, Cell, Destroyed, Header, Kind, LevelPlay, SoundPlay},
     replay::{Replayed, Scheduled},
     tick_classes,
 };
@@ -26,6 +26,9 @@ pub struct Mismatch {
     /// 结果不同的格子。
     pub cells: BTreeSet<BlockPos>,
     pub destroyed: bool,
+    /// 世界事件和音效的列表不同。
+    pub level_events: bool,
+    pub sounds: bool,
     pub ticks: bool,
     /// 官方和我们范围内的计划刻。
     pub compared_ticks: (Vec<Scheduled>, Vec<Scheduled>),
@@ -39,6 +42,8 @@ impl Mismatch {
         !self.result
             && self.cells.is_empty()
             && !self.destroyed
+            && !self.level_events
+            && !self.sounds
             && !self.ticks
             && !self.gained
             && self.panic.is_none()
@@ -539,6 +544,8 @@ fn render_official(text: &mut String, case: &Case, mismatch: &Mismatch) {
     let cells: Vec<_> = answer.changes.iter().map(|&c| to_pair(c)).collect();
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &answer.destroyed, mismatch.destroyed);
+    level_event_lines(text, &answer.level_events, mismatch.level_events);
+    sound_lines(text, &answer.sounds, mismatch.sounds);
     tick_lines(text, &mismatch.compared_ticks.0, mismatch.ticks);
     gained_lines(text, &answer.gained, mismatch.gained);
 }
@@ -558,8 +565,37 @@ fn render_bamboo(text: &mut String, replayed: Option<&Replayed>, mismatch: &Mism
         .collect();
     cell_lines(text, &cells, &mismatch.cells);
     destroyed_lines(text, &replayed.destroyed, mismatch.destroyed);
+    level_event_lines(text, &replayed.level_events, mismatch.level_events);
+    sound_lines(text, &replayed.sounds, mismatch.sounds);
     tick_lines(text, &mismatch.compared_ticks.1, mismatch.ticks);
     gained_lines(text, &replayed.gained, mismatch.gained);
+}
+
+fn level_event_lines(text: &mut String, events: &[LevelPlay], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for &LevelPlay(kind, x, y, z, data, excluded) in events {
+        let who = if excluded { " (skips the player)" } else { "" };
+        let _ = writeln!(
+            text,
+            "  {mark}    level event {kind} {} data {data}{who}",
+            pos_text(BlockPos::new(x, y, z))
+        );
+    }
+}
+
+fn sound_lines(text: &mut String, sounds: &[SoundPlay], differ: bool) {
+    let mark = if differ { "*" } else { " " };
+    for &SoundPlay(id, x, y, z, source, volume, pitch, excluded) in sounds {
+        let who = if excluded { " (skips the player)" } else { "" };
+        let name = SOUND_EVENTS
+            .get(id as usize)
+            .map_or("<direct>", |sound| short(sound.name));
+        let _ = writeln!(
+            text,
+            "  {mark}    sound {name} ({}, {}, {}) source {source} volume {} pitch {}{who}",
+            x.0, y.0, z.0, volume.0, pitch.0
+        );
+    }
 }
 
 const fn to_pair(cell: Cell) -> (BlockPos, u32) {

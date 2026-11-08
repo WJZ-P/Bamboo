@@ -1,13 +1,13 @@
 //! `DecoratedPotBlock`。里面的物品在方块实体里，不在范围里，所以罐子永远是空的，什么物品都放得进去。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_data::{Block, sounds::sound_event, tags::item_tags};
 
 use crate::{
     behaviour::{
         Behaviour, Plain,
         common::{
-            default_state, is_water_source, tick_water_if_waterlogged,
+            default_state, is_water_source, item_of, tick_water_if_waterlogged,
             update_neighbours_after_destroy,
         },
     },
@@ -77,6 +77,15 @@ impl Behaviour for DecoratedPot {
         if ctx.hand_is_empty() {
             return InteractionResult::TryEmptyHandInteraction;
         }
+        // 罐子总是空的，放进一个：`pitchBend` 是 `1 / maxStackSize`。音效在 `setChanged` 之前。
+        let max_stack_size = item_of(ctx.item).map_or(1, |item| item.max_stack_size);
+        let pitch = 0.7 + 0.5 * (1.0 / max_stack_size as f32);
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.decorated_pot.insert"),
+            1.0,
+            pitch,
+        );
         // 方块实体的 `setChanged`：放进东西后比较器要重新读。
         world.update_neighbour_for_output_signal(ctx.clicked_pos(), state.block());
         InteractionResult::Success
@@ -85,9 +94,15 @@ impl Behaviour for DecoratedPot {
     fn use_without_item(
         &self,
         _state: BlockState,
-        _world: &mut World,
-        _ctx: &UseContext,
+        world: &mut World,
+        ctx: &UseContext,
     ) -> InteractionResult {
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.decorated_pot.insert_fail"),
+            1.0,
+            1.0,
+        );
         InteractionResult::Success
     }
 }

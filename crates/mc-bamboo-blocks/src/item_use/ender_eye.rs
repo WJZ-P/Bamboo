@@ -28,6 +28,7 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
     }
     world.set_block(pos, state.with(EYE, true), UPDATE_CLIENTS);
     world.update_neighbour_for_output_signal(pos, state.block());
+    world.level_event(1503, pos, 0);
     if let Some(corner) = find_portal_frame(world, pos) {
         fill_portal(world, corner.offset(-3, 0, -3));
     }
@@ -118,7 +119,10 @@ mod tests {
     use mc_bamboo_data::items;
 
     use super::*;
-    use crate::testing::{TestLevel, actor_holding, top_hit, use_item};
+    use crate::{
+        level::Effect,
+        testing::{TestLevel, actor_holding, top_hit, use_item},
+    };
 
     /// 平放的一圈框架，中间 3×3 从 (1, 64, 1) 到 (3, 64, 3)，都朝里。
     fn ring(level: &mut TestLevel, eyes: bool) -> Vec<BlockPos> {
@@ -159,9 +163,19 @@ mod tests {
                 assert!(level.get(BlockPos::new(x, 64, z)).is(blocks::END_PORTAL));
             }
         }
+        // 官方先报 1503，再填传送门，中间的石英方块在这一步被替换掉。
+        assert_eq!(
+            outcome.effects.first(),
+            Some(&Effect::LevelEvent {
+                event: 1503,
+                pos: last,
+                data: 0,
+                except_initiator: false,
+            })
+        );
         assert_eq!(
             outcome.effects.len(),
-            1,
+            2,
             "the stone in the middle is destroyed"
         );
     }

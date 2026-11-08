@@ -6,6 +6,7 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
+use mc_bamboo_data::SoundSource;
 
 use crate::{random::LevelRandom, shape::Aabb, state::BlockState};
 
@@ -139,7 +140,7 @@ impl RedstoneMemory {
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
     Destroyed {
@@ -161,4 +162,34 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// `playSound` / `playSeededSound`：坐标乘 8 截断后发给范围内的玩家。
+    Sound {
+        /// `sound_event` 注册表 ID。
+        sound: i32,
+        source: SoundSource,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+        /// 官方传的 `except` 是发起这次操作的玩家。
+        except_initiator: bool,
+        /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
+        seed: Option<i64>,
+    },
+    /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
+    LevelEvent {
+        event: i32,
+        pos: BlockPos,
+        data: i32,
+        except_initiator: bool,
+    },
+    /// `blockEvent`：客户端调用方块自己的 `triggerEvent`，音符盒的声音和音符粒子都靠它。
+    BlockEvent {
+        pos: BlockPos,
+        /// `minecraft:block` 注册表 ID。
+        block: i32,
+        b0: u8,
+        b1: u8,
+    },
 }

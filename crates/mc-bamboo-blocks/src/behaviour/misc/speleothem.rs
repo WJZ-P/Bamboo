@@ -350,7 +350,11 @@ fn transfer_fluid(state: BlockState, world: &mut World, pos: BlockPos, value: f3
     };
     if source.is(blocks::MUD) {
         world.set_block_and_update(source_pos, BlockState(blocks::CLAY));
+        // 泥巴变成黏土之后，在尖端那里放滴落的粒子。
+        world.level_event(1504, tip, 0);
     } else if let Some(cauldron) = fillable_cauldron_below(world, tip, fluid) {
+        // 官方在排炼药锅的刻之前发这个事件，炼药锅那一声是 `1046`/`1047`。
+        world.level_event(1504, tip, 0);
         let delay = DRIP_DELAY + tip.y - cauldron.y;
         let cauldron_block = world.block_state(cauldron).block();
         world.schedule_tick(cauldron, cauldron_block, delay);

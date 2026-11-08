@@ -102,6 +102,24 @@ impl Cell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct Destroyed(pub i32, pub i32, pub i32, pub u32, pub bool);
 
+/// 一次 `levelEvent`：类型、坐标、数据、是否跳过发起的玩家。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct LevelPlay(pub i32, pub i32, pub i32, pub i32, pub i32, pub bool);
+
+/// 一次 `playSeededSound`：音效 ID、坐标、来源、音量、音调、是否跳过发起的玩家。
+/// 种子不比较，只影响客户端挑哪个变体。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct SoundPlay(
+    pub i32,
+    pub Double,
+    pub Double,
+    pub Double,
+    pub u8,
+    pub Float,
+    pub Float,
+    pub bool,
+);
+
 /// 一个计划刻：坐标、`"block"` 或 `"fluid"`、注册表 ID、延迟、优先级。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Tick(
@@ -193,6 +211,12 @@ pub struct Answer {
     pub result: String,
     pub changes: Vec<Cell>,
     pub destroyed: Vec<Destroyed>,
+    /// 全部 `levelEvent`，包括 2001。
+    #[serde(default)]
+    pub level_events: Vec<LevelPlay>,
+    /// 全部 `playSeededSound`。
+    #[serde(default)]
+    pub sounds: Vec<SoundPlay>,
     pub ticks: Vec<Tick>,
     /// `settle` 里真的运行过 `tick` 的方块的注册表 ID。
     pub ran: Vec<String>,
@@ -259,6 +283,9 @@ mod tests {
             "box":["bfd3333333333333","4050000000000000","bfd3333333333333",
                    "3fd3333333333333","4051000000000000","3fd3333333333333"],"others":[],"settle":3},
         "outcome":{"result":"success","changes":[[1,65,2,1]],"destroyed":[[0,1,2,3,true]],
+            "levelEvents":[[1505,1,2,3,15,false],[2001,0,1,2,3,true]],
+            "sounds":[[157,"3ff8000000000000","4050400000000000","4004000000000000",4,
+                       "3f800000","3f000000",true]],
             "ticks":[[1,2,3,"fluid","minecraft:water",5,0]],"ran":["minecraft:repeater"],
             "analogContent":true,"itemReached":true,"spawned":[],"rng":false}}"#;
 
@@ -282,6 +309,18 @@ mod tests {
         assert!(case.outcome.ticks[0].is_fluid());
         assert_eq!(case.outcome.ran, ["minecraft:repeater"]);
         assert_eq!(case.outcome.destroyed, [Destroyed(0, 1, 2, 3, true)]);
+        assert_eq!(
+            case.outcome.level_events,
+            [
+                LevelPlay(1505, 1, 2, 3, 15, false),
+                LevelPlay(2001, 0, 1, 2, 3, true)
+            ]
+        );
+        let sound = case.outcome.sounds[0];
+        assert_eq!((sound.0, sound.4), (157, 4));
+        assert_eq!((sound.1.0, sound.2.0, sound.3.0), (1.5, 65.0, 2.5));
+        assert_eq!((sound.5.0, sound.6.0), (1.0, 0.5));
+        assert!(sound.7);
     }
 
     #[test]

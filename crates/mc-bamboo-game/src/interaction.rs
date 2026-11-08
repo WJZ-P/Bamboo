@@ -13,11 +13,11 @@ use mc_bamboo_blocks::{
     Actor, BlockHit, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult, Level,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_data::{SOUND_EVENTS, blocks, items};
 use mc_bamboo_protocol::{
     packet::play::{
-        BlockChangedAck, BlockUpdate, GameMode, LevelEvent, OpenSignEditor, PlayerActionKind,
-        SystemChat,
+        BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
+        PlayerActionKind, Sound, SystemChat,
     },
     text::{Color, Component},
 };
@@ -303,6 +303,54 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                     region.links.send(id, &OpenSignEditor { pos, slot });
                 }
             }
+            Effect::Sound {
+                sound,
+                source,
+                x,
+                y,
+                z,
+                volume,
+                pitch,
+                except_initiator,
+                seed,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let packet = Sound {
+                    sound,
+                    source,
+                    x,
+                    y,
+                    z,
+                    volume,
+                    pitch,
+                    seed: seed.unwrap_or_else(|| region.sound_seed_generator.source().next_long()),
+                };
+                send_sound(region, except, &packet);
+            }
+            Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let packet = LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    global: false,
+                };
+                send_level_event(region, except, &packet);
+            }
+            // `blockEvent` 的广播范围也是 64 格，不过它没有排除的玩家。
+            Effect::BlockEvent { pos, block, b0, b1 } => {
+                let frames = encode_frames(&BlockEvent { pos, block, b0, b1 });
+                for player in region.players.values() {
+                    if hears_level_event(player, pos) {
+                        region.links.send_frames(player.id, &frames);
+                    }
+                }
+            }
         }
     }
 }
@@ -312,6 +360,31 @@ fn send_level_event(region: &mut Region, except: Option<PlayerId>, event: &Level
     let frames = encode_frames(event);
     for player in region.players.values() {
         if Some(player.id) != except && hears_level_event(player, event.pos) {
+            region.links.send_frames(player.id, &frames);
+        }
+    }
+}
+
+/// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
+fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
+    let range = SOUND_EVENTS[sound.sound as usize]
+        .fixed_range
+        .unwrap_or(if sound.volume > 1.0 {
+            16.0 * sound.volume
+        } else {
+            16.0
+        });
+    let range = f64::from(range);
+    let frames = encode_frames(sound);
+    for player in region.players.values() {
+        if Some(player.id) == except {
+            continue;
+        }
+        let Vec3 { x, y, z } = player.position;
+        let dx = sound.x - x;
+        let dy = sound.y - y;
+        let dz = sound.z - z;
+        if dx * dx + dy * dy + dz * dz < range * range {
             region.links.send_frames(player.id, &frames);
         }
     }

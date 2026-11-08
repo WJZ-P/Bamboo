@@ -7,7 +7,7 @@ use crate::behaviour::weathering::change_over_time;
 use crate::{
     behaviour::{
         Behaviour, Plain,
-        common::{default_state, field_bool, prevent_drop_from_bottom_part},
+        common::{default_state, field_bool, field_sound, prevent_drop_from_bottom_part},
     },
     context::{Actor, PlaceContext, UseContext},
     interact::InteractionResult,
@@ -35,6 +35,22 @@ fn full_blocks_at(world: &World, pos: BlockPos) -> i32 {
 /// 这一格是门的下半。
 fn is_lower_door(state: BlockState) -> bool {
     state.is_a(BlockAncestor::DoorBlock) && state.get(DOUBLE_BLOCK_HALF) == DoubleBlockHalf::Lower
+}
+
+/// `DoorBlock.playSound`：开门、关门的声音，音高是 `getRandom().nextFloat() * 0.1F + 0.9F`。
+fn play_sound(world: &mut World, pos: BlockPos, block: &Block, open: bool, except: bool) {
+    let name = if open {
+        "type.doorOpen"
+    } else {
+        "type.doorClose"
+    };
+    let sound = field_sound(block, name);
+    let pitch = world.random().next_float() * 0.1 + 0.9;
+    if except {
+        world.play_block_sound_except(pos, sound, 1.0, pitch);
+    } else {
+        world.play_block_sound(pos, sound, 1.0, pitch);
+    }
 }
 
 /// `getHinge`：先贴着另一扇门，再贴着实心方块，都一样时看点在门的哪一边。
@@ -151,8 +167,7 @@ impl Behaviour for Door {
         let signal = has_signal(world, pos, other_half);
         if !state.is(source.default_state) && signal != state.get(POWERED) {
             if signal != state.get(OPEN) {
-                // `playSound` 的音高是 `getRandom().nextFloat()`；不出声也要取这个数。
-                world.random().next_float();
+                play_sound(world, pos, state.block(), signal, false);
             }
             let updated = state.with(POWERED, signal).with(OPEN, signal);
             world.set_block(pos, updated, UPDATE_CLIENTS);
@@ -191,7 +206,13 @@ impl Behaviour for Door {
             UPDATE_CLIENTS | UPDATE_IMMEDIATE,
         );
         // `playSound` 在放下新状态之后取音高，后面的随机刻要接在这里。
-        world.random().next_float();
+        play_sound(
+            world,
+            ctx.clicked_pos(),
+            state.block(),
+            toggled.get(OPEN),
+            true,
+        );
         InteractionResult::Success
     }
 }

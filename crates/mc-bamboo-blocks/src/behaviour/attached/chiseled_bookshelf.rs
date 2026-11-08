@@ -4,7 +4,7 @@
 //! 比较器读的是最近放进或者拿出书的那一格，记在 [`RedstoneMemory`](crate::RedstoneMemory) 里。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_data::{Block, items, sounds::sound_event, tags::item_tags};
 
 use super::slot_container::hit_slot;
 use crate::{
@@ -81,7 +81,15 @@ impl Behaviour for ChiseledBookShelf {
         if state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        update_state(state, world, ctx.clicked_pos(), slot, true);
+        let pos = ctx.clicked_pos();
+        update_state(state, world, pos, slot, true);
+        // `addBook` 按放进去的是不是附魔书选声音，`null` 作 `except`。
+        let sound = if ctx.item == items::ENCHANTED_BOOK {
+            "minecraft:block.chiseled_bookshelf.insert.enchanted"
+        } else {
+            "minecraft:block.chiseled_bookshelf.insert"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
         InteractionResult::Success
     }
 
@@ -97,7 +105,15 @@ impl Behaviour for ChiseledBookShelf {
         if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        update_state(state, world, ctx.clicked_pos(), slot, false);
+        let pos = ctx.clicked_pos();
+        update_state(state, world, pos, slot, false);
+        // `removeBook` 按取走的书是不是附魔书选声音。这里不存书的种类，按普通书算。
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.chiseled_bookshelf.pickup"),
+            1.0,
+            1.0,
+        );
         InteractionResult::Success
     }
 

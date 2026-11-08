@@ -2,7 +2,7 @@
 //! `WeatheringCopperGolemStatueBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, items, tags::item_tags};
+use mc_bamboo_data::{Block, items, sounds::sound_event, tags::item_tags};
 
 use crate::behaviour::weathering::change_over_time;
 use crate::{
@@ -34,7 +34,14 @@ fn check_and_flip(state: BlockState, world: &mut World, pos: BlockPos) {
     let flipped = if state.get(POWERED) {
         state
     } else {
-        state.cycle(LIT)
+        let flipped = state.cycle(LIT);
+        let sound = if flipped.get(LIT) {
+            sound_event("minecraft:block.copper_bulb.turn_on")
+        } else {
+            sound_event("minecraft:block.copper_bulb.turn_off")
+        };
+        world.play_block_sound(pos, sound, 1.0, 1.0);
+        flipped
     };
     world.set_block_and_update(pos, flipped.with(POWERED, signal));
 }
@@ -84,8 +91,14 @@ impl Behaviour for CopperBulb {
 /// `CopperGolemStatueBlock`。
 pub(super) struct CopperGolemStatue;
 
-/// `updatePose`。
+/// `updatePose`：先响再换姿势。
 fn update_pose(state: BlockState, world: &mut World, pos: BlockPos) {
+    world.play_block_sound(
+        pos,
+        sound_event("minecraft:entity.copper_golem_become_statue"),
+        1.0,
+        1.0,
+    );
     world.set_block_and_update(pos, state.cycle(COPPER_GOLEM_POSE));
 }
 

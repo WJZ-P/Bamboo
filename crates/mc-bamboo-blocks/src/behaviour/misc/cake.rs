@@ -1,7 +1,9 @@
 //! `CakeBlock`、`CandleCakeBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{BlockAncestor, block_maps::CANDLE_CAKES, blocks, items, tags::item_tags};
+use mc_bamboo_data::{
+    BlockAncestor, block_maps::CANDLE_CAKES, blocks, items, sounds::sound_event, tags::item_tags,
+};
 
 use super::candle::extinguish;
 use crate::{
@@ -106,6 +108,13 @@ impl Behaviour for Cake {
             && candle.is_a(BlockAncestor::CandleBlock)
             && let Some(cake) = candle_cake_of(candle)
         {
+            // `useItemOn`：插蜡烛的声音在写方块之前。
+            world.play_block_sound(
+                ctx.clicked_pos(),
+                sound_event("minecraft:block.cake.add_candle"),
+                1.0,
+                1.0,
+            );
             world.set_block_and_update(ctx.clicked_pos(), cake);
             return InteractionResult::Success;
         }

@@ -3,7 +3,7 @@
 //! 放一个物品加几层由物品的 `compostable` 组件决定，抽签用世界的随机数，和官方逐位相同。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::CompostLayers;
+use mc_bamboo_data::{CompostLayers, sounds::sound_event};
 
 use crate::{
     behaviour::{Behaviour, common::item_of},
@@ -47,17 +47,18 @@ fn layers_to_add(layers: CompostLayers, state: BlockState, world: &World) -> i32
     }
 }
 
-/// `addLayer`：没抽中时什么也不改。
-fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) {
+/// `addLayer`：没抽中时什么也不改。返回值是方块有没有变，等级事件要看它。
+fn add_layer(state: BlockState, world: &mut World, pos: BlockPos, layers: CompostLayers) -> bool {
     let added = layers_to_add(layers, state, world);
     if added <= 0 {
-        return;
+        return false;
     }
     let level = (state.get(LEVEL_COMPOSTER) + added).clamp(0, MAX_LEVEL);
     world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, level));
     if level == MAX_LEVEL {
         world.schedule_tick(pos, state.block(), READY_DELAY);
     }
+    true
 }
 
 impl Behaviour for Composter {
@@ -79,7 +80,10 @@ impl Behaviour for Composter {
             return InteractionResult::TryEmptyHandInteraction;
         };
         if level < MAX_LEVEL {
-            add_layer(state, world, ctx.clicked_pos(), layers);
+            let pos = ctx.clicked_pos();
+            let changed = add_layer(state, world, pos, layers);
+            // `1500`：填充的声音和碎屑都在客户端那边，数据是这一下有没有加层。
+            world.level_event(1500, pos, i32::from(changed));
         }
         InteractionResult::Success
     }
@@ -97,13 +101,27 @@ impl Behaviour for Composter {
         // 世界里没有物品实体，这两个数照样要取。
         world.random().next_float();
         world.random().next_float();
-        world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_COMPOSTER, 0));
+        let pos = ctx.clicked_pos();
+        world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
+        // `extractProduce` 在 `empty` 之后出声，`null` 作 `except`。
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.composter.empty"),
+            1.0,
+            1.0,
+        );
         InteractionResult::Success
     }
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(LEVEL_COMPOSTER) == MAX_LEVEL {
             world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, READY));
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:block.composter.ready"),
+                1.0,
+                1.0,
+            );
         }
     }
 

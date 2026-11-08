@@ -6,7 +6,7 @@
 //! 官方这时按读完了算：`floor(1.0 * 14) + 1`，所以有书就是 15。
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_data::{Block, sounds::sound_event, tags::item_tags};
 
 use crate::{
     behaviour::{Behaviour, common::facing_the_player},
@@ -33,6 +33,8 @@ fn place_book(state: BlockState, world: &mut World, pos: BlockPos) {
     let with_book = state.with(POWERED, false).with(HAS_BOOK, true);
     world.set_block_and_update(pos, with_book);
     update_below(state, world, pos);
+    // `placeBook` 最后才出声。
+    world.play_block_sound(pos, sound_event("minecraft:item.book.put"), 1.0, 1.0);
 }
 
 impl Behaviour for Lectern {

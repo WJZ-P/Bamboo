@@ -8,6 +8,7 @@ mod entity;
 mod movement;
 mod player_info;
 mod request;
+mod sound;
 
 pub use block::*;
 pub use chat::*;
@@ -15,6 +16,7 @@ pub use entity::*;
 pub use movement::*;
 pub use player_info::*;
 pub use request::*;
+pub use sound::*;
 
 use mc_bamboo_data::packets::play::clientbound;
 

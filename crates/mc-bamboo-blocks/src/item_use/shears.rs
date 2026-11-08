@@ -2,7 +2,7 @@
 //!
 //! 剪南瓜、给蜂巢取蜜脾这些在方块自己的 `useItemOn` 里。
 
-use mc_bamboo_data::BlockAncestor;
+use mc_bamboo_data::{BlockAncestor, sounds::sound_event};
 
 use crate::{context::UseContext, interact::InteractionResult, state::AGE_25, world::World};
 
@@ -16,6 +16,13 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> Option<InteractionR
     if !state.is_a(BlockAncestor::GrowingPlantHeadBlock) || state.get(AGE_25) == MAX_AGE {
         return None;
     }
+    // `useOn`：剪的声音在写方块之前，跳过动手的玩家。
+    world.play_block_sound_except(
+        pos,
+        sound_event("minecraft:block.growing_plant.crop"),
+        1.0,
+        1.0,
+    );
     world.set_block_and_update(pos, state.with(AGE_25, MAX_AGE));
     Some(InteractionResult::Success)
 }

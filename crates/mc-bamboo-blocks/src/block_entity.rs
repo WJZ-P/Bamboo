@@ -4,7 +4,8 @@
 //! 要看状态。官方即使内容为空，`Containers.dropItemStack` 也会先取三个 `nextDouble`，
 //! 数漏了后面的随机刻和计划刻就全错开，所以槽位数量要照抄官方容器的 `getContainerSize`。
 
-use mc_bamboo_data::{BlockClass, registries, tags::block_tags};
+use mc_bamboo_core::BlockPos;
+use mc_bamboo_data::{BlockClass, registries, sounds::sound_event, tags::block_tags};
 
 use crate::{
     state::{
@@ -86,6 +87,19 @@ pub(crate) fn pre_remove_side_effects(state: BlockState, world: &mut World) {
             world.random().next_float();
         }
         _ => {}
+    }
+}
+
+/// `BlockEntity.setRemoved`：这个位置在 `preRemoveSideEffects` 之后，不管跳过副作用与否都会走到。
+/// 目前只有信标在这一步出声。
+pub(crate) fn removed_side_effects(state: BlockState, world: &mut World, pos: BlockPos) {
+    if state.block().block_entity_type == Some(registries::block_entity_type::BEACON) {
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.beacon.deactivate"),
+            1.0,
+            1.0,
+        );
     }
 }
 

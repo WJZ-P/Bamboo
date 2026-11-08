@@ -77,8 +77,16 @@ pub(super) struct DragonEgg;
 /// 传送最多试这么多次。
 const TELEPORT_ATTEMPTS: i32 = 1000;
 
+/// `BlockUtil.packDifferenceInPosition`：横向半径 16、纵向 8，位移加上半径后各取一字节。
+fn packed_difference(from: BlockPos, to: BlockPos) -> i32 {
+    let x = (to.x - from.x + 16) & 0xFF;
+    let y = (to.y - from.y + 8) & 0xFF;
+    let z = (to.z - from.z + 16) & 0xFF;
+    x << 16 | y << 8 | z
+}
+
 impl DragonEgg {
-    /// `teleport`。传送的粒子（`levelEvent(2015)`）不做。
+    /// `teleport`：找到位置后先报粒子，再挪方块。
     fn teleport(state: BlockState, world: &mut World, pos: BlockPos) {
         for _ in 0..TELEPORT_ATTEMPTS {
             let random = world.random();
@@ -91,6 +99,7 @@ impl DragonEgg {
                 && world.is_within_world_border(target)
                 && world.is_inside_build_height(target.y)
             {
+                world.level_event(2015, pos, packed_difference(pos, target));
                 world.set_block(target, state, UPDATE_CLIENTS);
                 world.remove_block(pos);
                 return;

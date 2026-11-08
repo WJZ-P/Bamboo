@@ -8,7 +8,8 @@ use mc_bamboo_data::{BlockAncestor, block_maps::FIRE_ODDS, blocks, tags::block_t
 
 use super::portal::{PortalShape, is_frame};
 use crate::{
-    behaviour::Behaviour,
+    behaviour::{Behaviour, Plain},
+    context::Actor,
     state::{AGE_15, BlockState, EAST, NORTH, Property, SOUTH, SupportType, UP, WATERLOGGED, WEST},
     world::{UPDATE_NONE, World},
 };
@@ -124,6 +125,17 @@ fn state_with_age(world: &World, pos: BlockPos, age: i32) -> BlockState {
     } else {
         state
     }
+}
+
+/// `BaseFireBlock.playerWillDestroy`：玩家打掉火时先放一团灭火的烟。
+fn extinguish_by_player(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    player: &Actor,
+) -> BlockState {
+    world.level_event(1009, pos, 0);
+    Plain.player_will_destroy(state, world, pos, player)
 }
 
 /// `BaseFireBlock.onPlace`：点燃传送门框架，或者放不住时灭掉。
@@ -294,6 +306,16 @@ impl Behaviour for Fire {
         world.schedule_tick(pos, state.block(), fire_tick_delay(world));
     }
 
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        extinguish_by_player(state, world, pos, player)
+    }
+
     fn spawn_destroy_by_entity_particles(
         &self,
         _state: BlockState,
@@ -327,6 +349,16 @@ impl Behaviour for SoulFire {
 
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         on_place(state, world, pos, old);
+    }
+
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        extinguish_by_player(state, world, pos, player)
     }
 
     fn spawn_destroy_by_entity_particles(

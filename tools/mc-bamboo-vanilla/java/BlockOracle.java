@@ -301,6 +301,10 @@ import sun.misc.Unsafe;
  *     changes   [[x,y,z,state],...] 结束时和 scene 不同的每一格的最终状态，变成空气时 state 是 0。顺序没有含义。
  *     destroyed [[x,y,z,state,excluded],...] levelEvent(2001) 按发生顺序的列表。state 是事件的数据，也就是被破坏的方块状态。
  *               excluded 为 true 表示 source 是发起的玩家，官方广播时跳过他，对应 Effect::Destroyed 的 except_initiator。
+ *     levelEvents [[type,x,y,z,data,excluded],...] 全部 levelEvent 按发生顺序的列表，包括 2001。excluded 的含义和 destroyed 相同。
+ *     sounds    [[id,x,y,z,source,volume,pitch,excluded],...] playSeededSound 按发生顺序的列表。id 是 sound_event 注册表 ID，
+ *               Holder.direct 的音效没有注册表 ID，写 -1。x、y、z 是 double 的位，source 是 SoundSource.ordinal()，
+ *               volume、pitch 是 float 的位，excluded 表示 except 是玩家，官方广播时跳过他。
  *     ticks     [[x,y,z,"block"|"fluid",id,delay,priority],...] 动作和 settle 走完之后还排着的计划刻，按执行顺序
  *               （ScheduledTick.DRAIN_ORDER：触发时刻、优先级、排进来的次序），同一格同一类型重复的已经去掉，和
  *               LevelChunkTicks 的规则相同。id 是方块或流体的注册表 ID。先写方块的，再写流体的，各自按执行顺序。
@@ -358,7 +362,8 @@ import sun.misc.Unsafe;
  *               目标方块自己的 BlockState.tick 一次。flow 题第一下直接运行目标格的 FluidState.tick，然后每刻用官方的
  *               LevelTicks.tick 先跑到期的方块计划刻（ServerLevel.tickBlock），再跑流体的（ServerLevel.tickFluid），
  *               每条队列每刻最多 65536 个。settle 每刻也按同样的顺序跑这两条队列。
- *     方块事件  level.blockEvent 丢弃，活塞不会真的动。
+ *     方块事件  level.blockEvent 立刻在这一格跑 state.triggerEvent（官方是在这一 tick 末尾），状态不是事件的方块时什么也不做。
+ *               活塞不会真的动。
  *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
  *               updateNeighborsAt、updateNeighbourShapes，邻居队列是真正的 CollectingNeighborUpdater，
  *               链长限制是 header 里的 maxChainedUpdates。
@@ -367,7 +372,7 @@ import sun.misc.Unsafe;
  * 四、随机数
  *
  * level.getRandom() 和 player.getRandom() 是同一个计数的随机源。一题没有碰过它时答案就是唯一的。碰过时换全取最小值、全取最大值、
- * 另一个种子再跑三遍：result、changes、destroyed、ran（不看顺序）、ticks（不看 delay，按格子和类型配对，随机的延迟会打乱执行顺序）
+ * 另一个种子再跑三遍：result、changes、destroyed、levelEvents、sounds、ran（不看顺序）、ticks（不看 delay，按格子和类型配对，随机的延迟会打乱执行顺序）
  * 有一项不同就写 skip，全部相同才写 case，rng 是真。只有 delay 不同时那一条写成 -1，比较时不看它。stderr 的汇总列出每个调用点改变和没有改变结果的次数。
  *
  *
@@ -1154,6 +1159,8 @@ public final class BlockOracle {
         private RecordingTicks<Fluid> recordedFluidTicks;
         private List<ServerPlayer> playersInWorld;
         private List<Destroyed> destroyed;
+        private List<LevelPlay> levelEvents;
+        private List<SoundPlay> sounds;
         private List<String> spawned;
         private Set<String> ranBlocks;
         private boolean analogContent;
@@ -1175,6 +1182,8 @@ public final class BlockOracle {
             level.recordedFluidTicks = new RecordingTicks<>();
             level.playersInWorld = new ArrayList<>();
             level.destroyed = new ArrayList<>();
+            level.levelEvents = new ArrayList<>();
+            level.sounds = new ArrayList<>();
             level.spawned = new ArrayList<>();
             level.ranBlocks = new LinkedHashSet<>();
             level.analogContent = false;
@@ -1546,6 +1555,7 @@ public final class BlockOracle {
 
         @Override
         public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            levelEvents.add(new LevelPlay(type, pos.immutable(), data, source instanceof Player));
             if (type == LEVEL_EVENT_BLOCK_DESTROYED) {
                 destroyed.add(new Destroyed(pos.immutable(), data, source instanceof Player));
             }
@@ -1570,15 +1580,22 @@ public final class BlockOracle {
         @Override
         public void playSeededSound(Entity except, double x, double y, double z, Holder<SoundEvent> sound, SoundSource source,
                 float volume, float pitch, long seed) {
+            sounds.add(new SoundPlay(BuiltInRegistries.SOUND_EVENT.getId(sound.value()), x, y, z, source.ordinal(), volume, pitch,
+                    except instanceof Player));
         }
 
         @Override
         public void playSeededSound(Entity except, Entity sourceEntity, Holder<SoundEvent> sound, SoundSource source, float volume,
                 float pitch, long seed) {
+            playSeededSound(except, sourceEntity.getX(), sourceEntity.getY(), sourceEntity.getZ(), sound, source, volume, pitch, seed);
         }
 
         @Override
         public void blockEvent(BlockPos pos, Block block, int b0, int b1) {
+            BlockState state = getBlockState(pos);
+            if (state.is(block)) {
+                state.triggerEvent(this, pos, b0, b1);
+            }
         }
 
         @Override
@@ -1842,6 +1859,8 @@ public final class BlockOracle {
             firstTick = true;
             blocksBuilding = true;
             set(LivingEntity.class, this, "attributes", new AttributeMap(DefaultAttributes.getSupplier(EntityTypes.PLAYER)));
+            // 真实的 `LivingEntity` 在构造时就有大脑，敲钟时 `BellBlockEntity` 会往附近生物的大脑里写记忆。
+            set(LivingEntity.class, this, "brain", new net.minecraft.world.entity.ai.Brain<>());
             set(LivingEntity.class, this, "activeEffects", new HashMap<>());
             set(Entity.class, this, "entityData", defaultEntityData());
             setHealth(getMaxHealth());
@@ -1961,6 +1980,14 @@ public final class BlockOracle {
         }
     }
 
+    /** 一次 levelEvent：类型、坐标、数据、官方广播时跳过的玩家。 */
+    private record LevelPlay(int type, BlockPos pos, int data, boolean excluded) {
+    }
+
+    /** 一次 playSeededSound：音效、坐标、来源、音量、音调、官方广播时跳过的玩家。 */
+    private record SoundPlay(int id, double x, double y, double z, int source, float volume, float pitch, boolean excluded) {
+    }
+
     private record ScheduledBlockTick(BlockPos pos, boolean fluid, String type, int delay, int priority) {
         /** 同一格同一类型只会排着一个，所以这三样能认出是哪一个计划刻。 */
         TickKey key() {
@@ -1976,6 +2003,8 @@ public final class BlockOracle {
         final String result;
         final Long2ObjectOpenHashMap<BlockState> changes = new Long2ObjectOpenHashMap<>();
         final List<Destroyed> destroyed;
+        final List<LevelPlay> levelEvents;
+        final List<SoundPlay> sounds;
         final List<ScheduledBlockTick> ticks = new ArrayList<>();
         final List<String> spawned;
         final List<String> ran;
@@ -1989,6 +2018,8 @@ public final class BlockOracle {
             this.itemReached = itemReached;
             this.gained = gained;
             this.destroyed = level.destroyed;
+            this.levelEvents = level.levelEvents;
+            this.sounds = level.sounds;
             this.spawned = level.spawned;
             this.ran = List.copyOf(level.ranBlocks);
             this.analogContent = level.analogContent;
@@ -2023,6 +2054,7 @@ public final class BlockOracle {
 
         boolean sameWorld(Outcome other) {
             return result.equals(other.result) && changes.equals(other.changes) && destroyed.equals(other.destroyed)
+                    && levelEvents.equals(other.levelEvents) && sounds.equals(other.sounds)
                     && gained.equals(other.gained)
                     && Set.copyOf(ran).equals(Set.copyOf(other.ran)) && sameTicksExceptDelay(other);
         }
@@ -3915,6 +3947,33 @@ public final class BlockOracle {
                 }
                 line.append('[').append(event.pos.getX()).append(',').append(event.pos.getY()).append(',').append(event.pos.getZ());
                 line.append(',').append(event.state).append(',').append(event.initiatorExcluded).append(']');
+            }
+            line.append("],\"levelEvents\":[");
+            for (int i = 0; i < outcome.levelEvents.size(); i++) {
+                LevelPlay event = outcome.levelEvents.get(i);
+                if (i > 0) {
+                    line.append(',');
+                }
+                line.append('[').append(event.type).append(',').append(event.pos.getX()).append(',').append(event.pos.getY());
+                line.append(',').append(event.pos.getZ()).append(',').append(event.data).append(',').append(event.excluded).append(']');
+            }
+            line.append("],\"sounds\":[");
+            for (int i = 0; i < outcome.sounds.size(); i++) {
+                SoundPlay sound = outcome.sounds.get(i);
+                if (i > 0) {
+                    line.append(',');
+                }
+                line.append('[').append(sound.id).append(',');
+                hex(sound.x);
+                line.append(',');
+                hex(sound.y);
+                line.append(',');
+                hex(sound.z);
+                line.append(',').append(sound.source).append(',');
+                hex(sound.volume);
+                line.append(',');
+                hex(sound.pitch);
+                line.append(',').append(sound.excluded).append(']');
             }
             line.append("],\"ticks\":[");
             for (int i = 0; i < outcome.ticks.size(); i++) {

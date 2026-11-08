@@ -3,7 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockAncestor, blocks, items};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, items, sounds::sound_event};
 
 use crate::{
     behaviour::Behaviour,
@@ -66,6 +66,7 @@ fn remove_water(world: &mut World, start: BlockPos) -> bool {
 fn try_absorb_water(world: &mut World, pos: BlockPos) {
     if remove_water(world, pos) {
         world.set_block(pos, BlockState(blocks::WET_SPONGE), UPDATE_CLIENTS);
+        world.play_block_sound(pos, sound_event("minecraft:block.sponge.absorb"), 1.0, 1.0);
     }
 }
 

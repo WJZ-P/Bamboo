@@ -113,6 +113,7 @@ import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.network.protocol.game.ClientboundSwingAnimationPacket;
 import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
@@ -163,6 +164,8 @@ import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.util.Crypt;
@@ -187,6 +190,7 @@ import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.RotatedPillarBlock;
 import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.entity.BlockEntityType;
@@ -313,6 +317,7 @@ public final class Probe {
             "handleSetEquipment",
             "handleSetHeldSlot",
             "handleSetTime",
+            "handleSoundEvent",
             "handleSwingAnimation",
             "handleSystemChat",
             "handleUpdateAttributes");
@@ -558,6 +563,7 @@ public final class Probe {
                 section("equipment" + names, () -> equipment(actor, observer));
                 section("blocks" + names, () -> blocks(actor, observer));
                 section("placement" + names, () -> placement(actor, observer));
+                section("sounds" + names, () -> sounds(actor, observer));
                 section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
@@ -954,6 +960,82 @@ public final class Probe {
             actor.send(new ServerboundSetCarriedItemPacket(0));
         }
 
+        /**
+         * 放门和开门都会发声音包，坐标是方块中心，动手的玩家自己听不到。
+         * 放下的音量和音高来自 `SoundType`，开门的是随机音高。
+         */
+        private void sounds(Join actor, Join observer) throws IOException {
+            // 两个玩家隔着 16 格。先朝观察者走一格，门的声音才落在 16 格的广播范围内。
+            double step = observer.position.x < actor.position.x ? -WALK_STEP : WALK_STEP;
+            Vec3 start = actor.position;
+            for (int walked = 1; walked <= 5; walked += 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+            // 自己脚下这一格一定是空气，点它就把门放在这一格，声音的坐标就是方块中心。
+            BlockPos door = BlockPos.containing(actor.position);
+            Vec3 center = Vec3.atCenterOf(door);
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int otherSounds = observer.sounds.size();
+            int ownSounds = actor.sounds.size();
+
+            useOn(actor, Items.OAK_DOOR, door, Direction.UP, Vec3.upFromBottomCenterOf(door, 1.0));
+            // 放置失败时服务端也会把这一格当空气发回来，所以要看到门本身。
+            await("sound: " + observer.player + " sees the door", () -> {
+                BlockState state = observer.blocks.get(door);
+                return state != null && state.is(Blocks.OAK_DOOR);
+            });
+            await("sound: " + observer.player + " hears the door being placed",
+                    () -> observer.sounds.size() == otherSounds + 1);
+            ClientboundSoundPacket placed = observer.sounds.getLast();
+            check("sound: the place sound is the wood one", placed.getSound().value() == SoundEvents.WOOD_PLACE);
+            check("sound: the place sound comes from the block", placed.getSource() == SoundSource.BLOCKS);
+            check("sound: the place sound is at the block center",
+                    near(center, new Vec3(placed.getX(), placed.getY(), placed.getZ())));
+            check("sound: the place sound has the block volume", placed.getVolume() == 1.0f);
+            check("sound: the place sound has the block pitch", placed.getPitch() == 0.8f);
+            pumpFor(SETTLE_MILLIS);
+            check("sound: the placer hears nothing", actor.sounds.size() == ownSounds);
+
+            // `DoorBlock.playSound`：`getRandom().nextFloat() * 0.1F + 0.9F`。
+            int beforeOpen = observer.sounds.size();
+            int ownBeforeOpen = actor.sounds.size();
+            int sequence = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.atCenterOf(door), Direction.UP, door, false),
+                    sequence));
+            await("sound: the door opens", () -> observer.blocks.containsKey(door)
+                    && observer.blocks.get(door).getValue(DoorBlock.OPEN));
+            await("sound: " + observer.player + " hears the door open",
+                    () -> observer.sounds.size() == beforeOpen + 1);
+            ClientboundSoundPacket opened = observer.sounds.getLast();
+            check("sound: the open sound is the wooden door one",
+                    opened.getSound().value() == SoundEvents.WOODEN_DOOR_OPEN);
+            check("sound: the open sound comes from the block", opened.getSource() == SoundSource.BLOCKS);
+            check("sound: the open sound is at the door",
+                    near(center, new Vec3(opened.getX(), opened.getY(), opened.getZ())));
+            check("sound: the open sound has volume one", opened.getVolume() == 1.0f);
+            check("sound: the open sound has a random pitch",
+                    opened.getPitch() >= 0.9f && opened.getPitch() < 1.0f);
+            pumpFor(SETTLE_MILLIS);
+            check("sound: the door opener hears nothing", actor.sounds.size() == ownBeforeOpen);
+
+            // 门会挡住另一个玩家这一段，从下半截破坏，两格一起走。
+            int breaking = actor.nextSequence();
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, door, Direction.UP, breaking));
+            await("sound: the door is gone", () -> actor.lastAck >= breaking);
+            actor.cleared.add(door);
+            actor.cleared.add(door.above());
+
+            // 走回原来的位置，后面的段落用和以前一样的坐标。
+            for (int walked = 4; walked >= 0; walked -= 1) {
+                actor.moveTo(start.add(step * walked, 0.0, 0.0), true);
+                pumpFor(TICK_MILLIS);
+            }
+        }
+
         /** 放下的告示牌只给放置者打开编辑界面，写进去的字另一个客户端从方块实体数据里读得到。 */
         private void signs(Join actor, Join observer) throws IOException {
             BlockPos ground = BlockPos.containing(actor.position).offset(2, -1, 2);
@@ -1216,6 +1298,7 @@ public final class Probe {
         /** 每个 `section_blocks_update` 里的格子，按包里的顺序。 */
         final List<List<BlockPos>> sectionUpdates = new ArrayList<>();
         final List<ClientboundLevelEventPacket> levelEvents = new ArrayList<>();
+        final List<ClientboundSoundPacket> sounds = new ArrayList<>();
         final List<ClientboundSystemChatPacket> systemMessages = new ArrayList<>();
         final List<String> chats = new ArrayList<>();
         final List<String> narrations = new ArrayList<>();
@@ -1633,6 +1716,7 @@ public final class Probe {
                     value -> onOpenSignEditor((ClientboundOpenSignEditorPacket) value));
             handlers.put("handleBlockChangedAck", value -> onAck((ClientboundBlockChangedAckPacket) value));
             handlers.put("handleLevelEvent", value -> onLevelEvent((ClientboundLevelEventPacket) value));
+            handlers.put("handleSoundEvent", value -> onSound((ClientboundSoundPacket) value));
             handlers.put("handleContainerSetSlot", value -> onSetSlot((ClientboundContainerSetSlotPacket) value));
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
@@ -1971,6 +2055,10 @@ public final class Probe {
         private void onLevelEvent(ClientboundLevelEventPacket packet) {
             levelEvents.add(packet);
             events.add("event " + packet.getPos().toShortString());
+        }
+
+        private void onSound(ClientboundSoundPacket packet) {
+            sounds.add(packet);
         }
 
         private void onSetSlot(ClientboundContainerSetSlotPacket packet) {

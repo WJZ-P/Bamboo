@@ -43,7 +43,7 @@ impl InteractionResult {
 }
 
 /// 一次操作的结果。世界的变化已经通过 [`Level::write_block`] 写进去了。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
     pub result: InteractionResult,
     pub effects: Vec<Effect>,

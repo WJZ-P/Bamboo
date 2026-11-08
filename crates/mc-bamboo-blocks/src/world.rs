@@ -3,7 +3,7 @@
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
-use mc_bamboo_data::{Block, BlockAncestor, blocks};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
 use tracing::error;
 
 use crate::{
@@ -84,6 +84,15 @@ const NORMAL_DIFFICULTY: i32 = 2;
 const FIRE_SPREAD_RADIUS_AROUND_PLAYER: i32 = 128;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
+
+/// 官方 `Level.playSound(null, pos, ...)` 用的坐标：方块的中心。
+fn block_center(pos: BlockPos) -> Vec3 {
+    Vec3::new(
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    )
+}
 
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +262,107 @@ impl<'a> World<'a> {
     /// 记下一个发给玩家的结果，官方的 `levelEvent`。
     pub fn push_effect(&mut self, effect: Effect) {
         self.effects.push(effect);
+    }
+
+    /// `playSound(null, pos, sound, BLOCKS, volume, pitch)`，坐标是方块中心。
+    pub fn play_block_sound(&mut self, pos: BlockPos, sound: u16, volume: f32, pitch: f32) {
+        self.play_sound(
+            block_center(pos),
+            sound,
+            sounds::BLOCKS,
+            volume,
+            pitch,
+            false,
+        );
+    }
+
+    /// 同上，但跳过发起这次操作的玩家，官方传的是 `player` 作 `except`。
+    pub fn play_block_sound_except(&mut self, pos: BlockPos, sound: u16, volume: f32, pitch: f32) {
+        self.play_sound(
+            block_center(pos),
+            sound,
+            sounds::BLOCKS,
+            volume,
+            pitch,
+            true,
+        );
+    }
+
+    /// `playSound(except, x, y, z, sound, source, volume, pitch)`，允许任意坐标和声音来源。
+    pub fn play_sound(
+        &mut self,
+        position: Vec3,
+        sound: u16,
+        source: sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+        except_initiator: bool,
+    ) {
+        self.push_effect(Effect::Sound {
+            sound: i32::from(sound),
+            source,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume,
+            pitch,
+            except_initiator,
+            seed: None,
+        });
+    }
+
+    /// `playSeededSound(null, x, y, z, sound, source, volume, pitch, seed)`，音符盒用。
+    pub fn play_seeded_sound(
+        &mut self,
+        position: Vec3,
+        sound: u16,
+        source: sounds::SoundSource,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.push_effect(Effect::Sound {
+            sound: i32::from(sound),
+            source,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume,
+            pitch,
+            except_initiator: false,
+            seed: Some(seed),
+        });
+    }
+
+    /// `levelEvent(null, type, pos, data)`。
+    pub fn level_event(&mut self, event: i32, pos: BlockPos, data: i32) {
+        self.push_effect(Effect::LevelEvent {
+            event,
+            pos,
+            data,
+            except_initiator: false,
+        });
+    }
+
+    /// 同上，但跳过发起这次操作的玩家，官方传的是 `player` 作 `source`。
+    pub fn level_event_except(&mut self, event: i32, pos: BlockPos, data: i32) {
+        self.push_effect(Effect::LevelEvent {
+            event,
+            pos,
+            data,
+            except_initiator: true,
+        });
+    }
+
+    /// `blockEvent(pos, block, b0, b1)`。方块 ID 从这一格现在的状态取，和官方传的 `this` 一样。
+    pub fn block_event(&mut self, pos: BlockPos, b0: u8, b1: u8) {
+        let state = self.block_state(pos);
+        self.push_effect(Effect::BlockEvent {
+            pos,
+            block: state.block_id() as i32,
+            b0,
+            b1,
+        });
     }
 
     /// `getBlockState`。世界外是 `void_air`。
@@ -659,12 +769,13 @@ impl<'a> World<'a> {
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
         // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        if block_changed
-            && old.has_block_entity()
-            && !block_entity::keeps_block_entity(state, old)
-            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0
+        if block_changed && old.has_block_entity() && !block_entity::keeps_block_entity(state, old)
         {
-            block_entity::pre_remove_side_effects(old, self);
+            if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
+                block_entity::pre_remove_side_effects(old, self);
+            }
+            // `removeBlockEntity` 不看跳过副作用的标志，`setRemoved` 一定会走。
+            block_entity::removed_side_effects(old, self, pos);
         }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
@@ -1131,7 +1242,10 @@ mod tests {
                 | Effect::FilledBucket { .. }
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }
-                | Effect::OpenSignEditor { .. } => None,
+                | Effect::OpenSignEditor { .. }
+                | Effect::Sound { .. }
+                | Effect::LevelEvent { .. }
+                | Effect::BlockEvent { .. } => None,
             })
             .collect()
     }

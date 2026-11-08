@@ -96,6 +96,8 @@ pub(crate) struct Region {
     pub(crate) block_ticks: BlockTicks,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
+    pub(crate) sound_seed_generator: LevelRandom,
     /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
     redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
@@ -133,6 +135,7 @@ impl Region {
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
             random: LevelRandom::new(unique_seed()),
+            sound_seed_generator: LevelRandom::new(unique_seed()),
             redstone: RedstoneMemory::default(),
             tick: RegionTick::default(),
             view_distance,
