@@ -288,6 +288,8 @@ import sun.misc.Unsafe;
  *               流体的计划刻只是记录，流体不流动也不运行，不在范围内。
  *     ran       [block id,...] settle 里真的运行过 tick 的方块的注册表 ID，去重，顺序没有含义。名单里有不在比较范围里的
  *               计划刻（比如方块下落）时，世界已经被它改过，重放的一方只能排除这道题。
+ *     analogContent 动作或者 settle 改了方块实体的内容，旁边又有比较器读得到，而且那个方块实体不是书架。Bamboo 不保留容器内容，
+ *               比较器读到的模拟信号两边会不一样，重放的一方只能排除这道题。
  *     itemReached  place、use：方块没有吃掉这次点击，轮到了手里的物品（ServerPlayerGameMode 走到了 itemStack.useOn）。
  *               和 itemUseOn 同时为真时结果来自物品自己的 useOn，不在 mc-bamboo-blocks 的范围里。别的题永远是假。
  *     spawned   [entity type id,...] 这次动作生成的实体，比如掉落物。只是记录，不用比较。
@@ -1015,6 +1017,7 @@ public final class BlockOracle {
         private List<Destroyed> destroyed;
         private List<String> spawned;
         private Set<String> ranBlocks;
+        private boolean analogContent;
         private FixedLevelData data;
         private LevelEntityGetter<Entity> entityGetter;
         private int lastEntityId = 100;
@@ -1034,6 +1037,7 @@ public final class BlockOracle {
             level.destroyed = new ArrayList<>();
             level.spawned = new ArrayList<>();
             level.ranBlocks = new LinkedHashSet<>();
+            level.analogContent = false;
             level.data = new FixedLevelData();
             level.entityGetter = new PlayerEntities(level.playersInWorld);
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, MAX_CHAINED_UPDATES));
@@ -1279,8 +1283,34 @@ public final class BlockOracle {
             }
         }
 
+        /**
+         * BlockEntity.setChanged 先调这里，再让旁边的比较器重读模拟信号。
+         *
+         * <p>容器内容 Bamboo 不保留，只有书架的格子做成了状态，读到的数和官方一样。别的方块实体改了内容
+         * 又有比较器能读到，这道题的世界两边就不一样了。
+         */
         @Override
         public void blockEntityChanged(BlockPos pos) {
+            BlockEntity entity = existingBlockEntity(pos);
+            if (entity != null && !(entity instanceof ChiseledBookShelfBlockEntity) && readsAnalogOutput(pos)) {
+                analogContent = true;
+            }
+        }
+
+        /** Level.updateNeighbourForOutputSignal 找的是哪些比较器：隔着导电方块也读得到。 */
+        private boolean readsAnalogOutput(BlockPos pos) {
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                BlockPos relativePos = pos.relative(direction);
+                BlockState state = getBlockState(relativePos);
+                if (state.is(Blocks.COMPARATOR)) {
+                    return true;
+                }
+                if (state.isRedstoneConductor(this, relativePos)
+                        && getBlockState(relativePos.relative(direction)).is(Blocks.COMPARATOR)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         @Override
@@ -1725,6 +1755,7 @@ public final class BlockOracle {
         final List<String> spawned;
         final List<String> ran;
         final boolean itemReached;
+        final boolean analogContent;
         boolean touchedRandom;
 
         Outcome(String result, FakeLevel level, Long2ObjectMap<BlockState> scene, boolean itemReached) {
@@ -1733,6 +1764,7 @@ public final class BlockOracle {
             this.destroyed = level.destroyed;
             this.spawned = level.spawned;
             this.ran = List.copyOf(level.ranBlocks);
+            this.analogContent = level.analogContent;
             collectChanges(level, scene);
             collectTicks(level);
         }
@@ -3308,7 +3340,8 @@ public final class BlockOracle {
             for (int i = 0; i < outcome.ran.size(); i++) {
                 line.append(i > 0 ? ",\"" : "\"").append(outcome.ran.get(i)).append('"');
             }
-            line.append("],\"itemReached\":").append(outcome.itemReached);
+            line.append("],\"analogContent\":").append(outcome.analogContent);
+            line.append(",\"itemReached\":").append(outcome.itemReached);
             line.append(",\"spawned\":[");
             for (int i = 0; i < outcome.spawned.size(); i++) {
                 line.append(i > 0 ? ",\"" : "\"").append(outcome.spawned.get(i)).append('"');

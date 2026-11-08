@@ -174,6 +174,8 @@ pub struct Answer {
     pub ticks: Vec<Tick>,
     /// `settle` 里真的运行过 `tick` 的方块的注册表 ID。
     pub ran: Vec<String>,
+    /// 改了容器内容，旁边又有比较器读得到。Bamboo 不保留容器内容，这题比不了。
+    pub analog_content: bool,
     pub item_reached: bool,
 }
 
@@ -233,7 +235,7 @@ mod tests {
                    "3fd3333333333333","4051000000000000","3fd3333333333333"],"others":[],"settle":3},
         "outcome":{"result":"success","changes":[[1,65,2,1]],"destroyed":[[0,1,2,3,true]],
             "ticks":[[1,2,3,"fluid","minecraft:water",5,0]],"ran":["minecraft:repeater"],
-            "itemReached":true,"spawned":[],"rng":false}}"#;
+            "analogContent":true,"itemReached":true,"spawned":[],"rng":false}}"#;
 
     #[test]
     fn a_case_line_parses_with_exact_floats() {
@@ -250,6 +252,7 @@ mod tests {
         // -45.000004 是 -45 往外一位的 float，走十进制很容易丢掉。
         assert_eq!(case.action.yaw.0.to_bits(), 0xc234_0001);
         assert_eq!(case.action.settle, 3);
+        assert!(case.outcome.analog_content);
         assert!(case.outcome.item_reached);
         assert!(case.outcome.ticks[0].is_fluid());
         assert_eq!(case.outcome.ran, ["minecraft:repeater"]);

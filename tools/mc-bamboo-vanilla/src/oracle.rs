@@ -125,7 +125,8 @@ impl Rule {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::AnalogInput => {
-                "case: a comparator read a jukebox, the record is block entity content Bamboo does not keep"
+                "case: a container changed its contents and a comparator read them, \
+                 Bamboo keeps no container contents (chiseled bookshelf excepted)"
             }
             Self::RandomOutcome => {
                 "case: the official outcome changes with the random source (chapter 1)"
@@ -532,6 +533,9 @@ fn left_to_the_item(case: &Case, replayed: &Replayed) -> bool {
 
 /// 不用重放就知道不比较的题。
 fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Rule>, String> {
+    if case.outcome.analog_content {
+        return Ok(Some(Rule::AnalogInput));
+    }
     let rule = match case.action.kind {
         Kind::Destroy
             if case.outcome.result == "refused"
@@ -735,7 +739,7 @@ mod tests {
     /// `ran` 是 `settle` 里跑过计划刻的方块，用逗号隔开的带引号的 ID。
     fn answer_after_ticks(result: &str, changes: &str, ran: &str) -> String {
         format!(
-            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":[],"ran":[{ran}],"itemReached":true,"spawned":[],"rng":false}}"#
+            r#"{{"result":"{result}","changes":{changes},"destroyed":[],"ticks":[],"ran":[{ran}],"analogContent":false,"itemReached":true,"spawned":[],"rng":false}}"#
         )
     }
 
@@ -778,6 +782,18 @@ mod tests {
         assert_eq!(verdict_of(&place_stone(&scene, &fell)), Ok(()));
         let lamp = answer_after_ticks("success", "[]", r#""minecraft:redstone_lamp""#);
         assert!(verdict_of(&place_stone(&scene, &lamp)).is_err());
+    }
+
+    #[test]
+    fn a_case_that_read_unsupported_container_contents_is_not_compared() {
+        let stone = blocks::STONE;
+        let scene = format!("[[0,64,0,{stone}]]");
+        // 官方把物品塞进了罐子，比较器读到了 1；Bamboo 一律读 0。
+        let read =
+            answer("fail", "[]").replace("\"analogContent\":false", "\"analogContent\":true");
+        assert_eq!(verdict_of(&place_stone(&scene, &read)), Ok(()));
+        // 同一道题不标记时照常比较，结果是错的就失败。
+        assert!(verdict_of(&place_stone(&scene, &answer("fail", "[]"))).is_err());
     }
 
     #[test]
