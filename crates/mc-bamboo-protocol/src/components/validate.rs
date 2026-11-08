@@ -2,12 +2,15 @@
 //!
 //! 官方解码不检查这些，只有 `ItemStackTemplate.create` 和 `ItemStack.validatedStreamCodec`
 //! 会检查。想把客户端发来的组件转发给其他玩家时，先过一遍这里。
+//!
+//! 和官方一样看的是「物品的默认组件被补丁覆盖之后」的结果，默认组件来自
+//! [`crate::components::defaults`]。收纳袋的总重量没算，见 README 的已知限制。
 
-use mc_bamboo_data::items::ITEMS;
+use mc_bamboo_data::registries::data_component_type as kinds;
 
 use crate::{
     codec::DecodeError,
-    components::{ComponentPatch, ComponentValue, PatchEntry, stack::ItemStackTemplate},
+    components::{ComponentPatch, ComponentValue, PatchEntry, defaults, stack::ItemStackTemplate},
     item::ItemStack,
 };
 
@@ -19,23 +22,19 @@ pub fn validate_stack(stack: &ItemStack) -> Result<(), DecodeError> {
         return Ok(());
     }
     let patch = ComponentPatch::from_opaque(stack)?;
-    validate_components(&patch)?;
+    validate_components(stack.item, &patch)?;
 
-    let max = max_stack_size(stack.item, &patch);
-    if stack.count > max {
+    if stack.count > max_stack_size(stack.item, &patch) {
         return Err(DecodeError::InvalidItemCount(stack.count));
     }
     Ok(())
 }
 
 /// 官方 `ItemStack.validateComponents`。
-pub fn validate_components(patch: &ComponentPatch) -> Result<(), DecodeError> {
-    // 官方：既能损坏又能堆叠是非法的。官方看的是物品默认组件和补丁合起来的结果，
-    // 这里只有补丁里的 `max_damage` 和物品的默认堆叠上限，见模块文档里的限制。
-    if patch
-        .get(mc_bamboo_data::registries::data_component_type::MAX_DAMAGE)
-        .is_some()
-        && patch.max_stack_size().unwrap_or(1) > 1
+pub fn validate_components(item: i32, patch: &ComponentPatch) -> Result<(), DecodeError> {
+    // 官方：既能损坏又能堆叠是非法的。
+    if defaults::resolve(item, patch, kinds::MAX_DAMAGE).is_some()
+        && max_stack_size(item, patch) > 1
     {
         return Err(DecodeError::InvalidComponentValue(
             "item cannot be both damageable and stackable",
@@ -68,15 +67,15 @@ fn validate_contained(stack: &ItemStackTemplate) -> Result<(), DecodeError> {
     if stack.count > stack.max_stack_size() {
         return Err(DecodeError::InvalidItemCount(stack.count));
     }
-    validate_components(&stack.components)
+    validate_components(stack.item, &stack.components)
 }
 
-/// 一个物品堆的堆叠上限：补丁里的 `max_stack_size`，否则物品自己的默认值。
-fn max_stack_size(item: i32, patch: &ComponentPatch) -> i32 {
-    patch.max_stack_size().unwrap_or_else(|| {
-        usize::try_from(item)
-            .ok()
-            .and_then(|id| ITEMS.get(id))
-            .map_or(1, |item| item.max_stack_size)
-    })
+/// 官方 `ItemStack.getMaxStackSize`：补丁和默认组件合起来之后的 `max_stack_size`。
+///
+/// 官方 `Item.getDefaultMaxStackSize` 的兜底值也是 1。
+pub fn max_stack_size(item: i32, patch: &ComponentPatch) -> i32 {
+    match defaults::resolve(item, patch, kinds::MAX_STACK_SIZE) {
+        Some(ComponentValue::MaxStackSize(size)) => *size,
+        _ => 1,
+    }
 }

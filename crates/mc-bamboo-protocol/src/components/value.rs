@@ -1,7 +1,10 @@
 //! 组件里反复出现的那些小类型，每个都对应官方的一个 `StreamCodec`。
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_data::component_registries::consume_effect_type;
+use mc_bamboo_data::{
+    component_enums::{counts, sparse},
+    component_registries::consume_effect_type,
+};
 use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
 
@@ -40,50 +43,67 @@ impl EnumDef {
 }
 
 /// 官方 `Rarity`：common、uncommon、rare、epic。
-pub const RARITY: EnumDef = EnumDef::new(4, OutOfBounds::Zero);
-/// 官方 `DyeColor`，white 到 black 十六种。
-pub const DYE_COLOR: EnumDef = EnumDef::new(16, OutOfBounds::Zero);
-/// 官方 `ItemUseAnimation`，none 到 spear 十二种。
-pub const ITEM_USE_ANIMATION: EnumDef = EnumDef::new(12, OutOfBounds::Zero);
+pub const RARITY: EnumDef = EnumDef::new(counts::RARITY, OutOfBounds::Zero);
+/// 官方 `DyeColor`，white 到 black。
+pub const DYE_COLOR: EnumDef = EnumDef::new(counts::DYE_COLOR, OutOfBounds::Zero);
+/// 官方 `ItemUseAnimation`，none 到 spear。
+pub const ITEM_USE_ANIMATION: EnumDef = EnumDef::new(counts::ITEM_USE_ANIMATION, OutOfBounds::Zero);
 /// 官方 `SwingAnimationType`：none、whack、stab。
-pub const SWING_ANIMATION_TYPE: EnumDef = EnumDef::new(3, OutOfBounds::Zero);
-/// 官方 `EquipmentSlot`，mainhand 到 saddle 八种。
-pub const EQUIPMENT_SLOT: EnumDef = EnumDef::new(8, OutOfBounds::Zero);
-/// 官方 `EquipmentSlotGroup`，any 到 saddle 十一种。
-pub const EQUIPMENT_SLOT_GROUP: EnumDef = EnumDef::new(11, OutOfBounds::Zero);
+pub const SWING_ANIMATION_TYPE: EnumDef =
+    EnumDef::new(counts::SWING_ANIMATION_TYPE, OutOfBounds::Zero);
+/// 官方 `EquipmentSlot`，mainhand 到 saddle。
+pub const EQUIPMENT_SLOT: EnumDef = EnumDef::new(counts::EQUIPMENT_SLOT, OutOfBounds::Zero);
+/// 官方 `EquipmentSlotGroup`，any 到 saddle。
+pub const EQUIPMENT_SLOT_GROUP: EnumDef =
+    EnumDef::new(counts::EQUIPMENT_SLOT_GROUP, OutOfBounds::Zero);
 /// 官方 `AttributeModifier.Operation`：add_value、add_multiplied_base、add_multiplied_total。
-pub const ATTRIBUTE_OPERATION: EnumDef = EnumDef::new(3, OutOfBounds::Zero);
+pub const ATTRIBUTE_OPERATION: EnumDef =
+    EnumDef::new(counts::ATTRIBUTE_OPERATION, OutOfBounds::Zero);
 /// 官方 `ItemAttributeModifiers.Display.Type`：default、hidden、override。
-pub const ATTRIBUTE_DISPLAY_TYPE: EnumDef = EnumDef::new(3, OutOfBounds::Zero);
-/// 官方 `FireworkExplosion.Shape` 五种。
-pub const FIREWORK_SHAPE: EnumDef = EnumDef::new(5, OutOfBounds::Zero);
+pub const ATTRIBUTE_DISPLAY_TYPE: EnumDef =
+    EnumDef::new(counts::ATTRIBUTE_DISPLAY_TYPE, OutOfBounds::Zero);
+/// 官方 `FireworkExplosion.Shape`。
+pub const FIREWORK_SHAPE: EnumDef = EnumDef::new(counts::FIREWORK_SHAPE, OutOfBounds::Zero);
 /// 官方 `MapPostProcessing`：lock、scale。
-pub const MAP_POST_PROCESSING: EnumDef = EnumDef::new(2, OutOfBounds::Zero);
+pub const MAP_POST_PROCESSING: EnumDef =
+    EnumDef::new(counts::MAP_POST_PROCESSING, OutOfBounds::Zero);
 /// 官方 `Fox.Variant`：red、snow。
-pub const FOX_VARIANT: EnumDef = EnumDef::new(2, OutOfBounds::Zero);
-/// 官方 `Axolotl.Variant` 五种。
-pub const AXOLOTL_VARIANT: EnumDef = EnumDef::new(5, OutOfBounds::Zero);
+pub const FOX_VARIANT: EnumDef = EnumDef::new(counts::FOX_VARIANT, OutOfBounds::Zero);
+/// 官方 `Axolotl.Variant`。
+pub const AXOLOTL_VARIANT: EnumDef = EnumDef::new(counts::AXOLOTL_VARIANT, OutOfBounds::Zero);
 /// 官方 `Salmon.Variant`：small、medium、large，超范围时夹住。
-pub const SALMON_SIZE: EnumDef = EnumDef::new(3, OutOfBounds::Clamp);
-/// 官方 `Parrot.Variant` 五种，超范围时夹住。
-pub const PARROT_VARIANT: EnumDef = EnumDef::new(5, OutOfBounds::Clamp);
+pub const SALMON_SIZE: EnumDef = EnumDef::new(counts::SALMON_SIZE, OutOfBounds::Clamp);
+/// 官方 `Parrot.Variant`，超范围时夹住。
+pub const PARROT_VARIANT: EnumDef = EnumDef::new(counts::PARROT_VARIANT, OutOfBounds::Clamp);
 /// 官方 `MushroomCow.Variant`：red、brown，超范围时夹住。
-pub const MOOSHROOM_VARIANT: EnumDef = EnumDef::new(2, OutOfBounds::Clamp);
-/// 官方 `Llama.Variant` 四种，超范围时夹住。
-pub const LLAMA_VARIANT: EnumDef = EnumDef::new(4, OutOfBounds::Clamp);
-/// 官方 equine 的 `Variant` 七种，超范围时取模。
-pub const HORSE_VARIANT: EnumDef = EnumDef::new(7, OutOfBounds::Wrap);
+pub const MOOSHROOM_VARIANT: EnumDef = EnumDef::new(counts::MOOSHROOM_VARIANT, OutOfBounds::Clamp);
+/// 官方 `Llama.Variant`，超范围时夹住。
+pub const LLAMA_VARIANT: EnumDef = EnumDef::new(counts::LLAMA_VARIANT, OutOfBounds::Clamp);
+/// 官方 equine 的 `Variant`，超范围时取模。
+pub const HORSE_VARIANT: EnumDef = EnumDef::new(counts::HORSE_VARIANT, OutOfBounds::Wrap);
 
-/// 官方 `TropicalFish.Pattern` 的 ID：`base.id | index << 8`，稀疏表，默认 kob。
-pub const TROPICAL_FISH_PATTERNS: [i32; 12] =
-    [0, 256, 512, 768, 1024, 1280, 1, 257, 513, 769, 1025, 1281];
-/// 官方 `Rabbit.Variant` 的 ID：0 到 5 加上 99（杀手兔）。
-pub const RABBIT_VARIANTS: [i32; 7] = [0, 1, 2, 3, 4, 5, 99];
-
-/// 读一个稀疏表里的 ID，不在表里时用 `default`。
-pub fn read_sparse(cursor: &mut Cursor<'_>, ids: &[i32], default: i32) -> Result<i32, DecodeError> {
-    Ok(sparse_id(cursor.varint()?, ids, default))
+/// 一个稀疏的官方枚举：ID 表，不在表里时折回第一个声明的常量。
+#[derive(Debug, Clone, Copy)]
+pub struct SparseEnum {
+    pub ids: &'static [i32],
 }
+
+impl SparseEnum {
+    const fn new(ids: &'static [i32]) -> Self {
+        Self { ids }
+    }
+
+    pub fn read(self, cursor: &mut Cursor<'_>) -> Result<i32, DecodeError> {
+        // 官方 `ByIdMap.sparse` 的默认值都是第一个声明的常量，生成的表保持声明顺序。
+        let default = self.ids.first().copied().unwrap_or_default();
+        Ok(sparse_id(cursor.varint()?, self.ids, default))
+    }
+}
+
+/// 官方 `TropicalFish.Pattern` 的 ID：`base.id | index << 8`，默认 kob。
+pub const TROPICAL_FISH_PATTERN: SparseEnum = SparseEnum::new(sparse::TROPICAL_FISH_PATTERN);
+/// 官方 `Rabbit.Variant` 的 ID，默认 brown，99 是杀手兔。
+pub const RABBIT_VARIANT: SparseEnum = SparseEnum::new(sparse::RABBIT_VARIANT);
 
 /// 官方 `SoundEvent`：可以是注册表里的音效，也可以内联一份定义。
 #[derive(Debug, Clone, PartialEq)]

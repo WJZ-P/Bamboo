@@ -451,11 +451,17 @@ fn validation_follows_the_official_rules() {
 fn a_patched_max_stack_size_lifts_the_limit() {
     use crate::components::validate::validate_stack;
 
+    // 末影珍珠默认只能堆 16 个。
+    assert_eq!(
+        validate_stack(&ItemStack::new(items::ENDER_PEARL, 99)),
+        Err(DecodeError::InvalidItemCount(99))
+    );
+
     let mut value = Vec::new();
     write_varint(&mut value, 99);
     let stack = ItemStack {
-        item: items::DIAMOND_SWORD,
-        count: 2,
+        item: items::ENDER_PEARL,
+        count: 99,
         added: vec![(kinds::MAX_STACK_SIZE, value)],
         removed: Vec::new(),
     };
@@ -466,6 +472,7 @@ fn a_patched_max_stack_size_lifts_the_limit() {
 fn damageable_and_stackable_at_once_is_rejected() {
     use crate::components::validate::validate_stack;
 
+    // 补丁里同时给了两样。
     let mut max_damage = Vec::new();
     write_varint(&mut max_damage, 100);
     let mut max_stack = Vec::new();
@@ -480,6 +487,33 @@ fn damageable_and_stackable_at_once_is_rejected() {
         removed: Vec::new(),
     };
     assert!(validate_stack(&stack).is_err());
+
+    // 剑的 `max_damage` 来自默认组件，只补一个堆叠上限也不行。
+    let mut max_stack = Vec::new();
+    write_varint(&mut max_stack, 16);
+    let stack = ItemStack {
+        item: items::DIAMOND_SWORD,
+        count: 1,
+        added: vec![(kinds::MAX_STACK_SIZE, max_stack)],
+        removed: Vec::new(),
+    };
+    assert_eq!(
+        validate_stack(&stack),
+        Err(DecodeError::InvalidComponentValue(
+            "item cannot be both damageable and stackable"
+        ))
+    );
+
+    // 把默认的 `max_damage` 移掉之后就可以堆了。
+    let mut max_stack = Vec::new();
+    write_varint(&mut max_stack, 16);
+    let stack = ItemStack {
+        item: items::DIAMOND_SWORD,
+        count: 16,
+        added: vec![(kinds::MAX_STACK_SIZE, max_stack)],
+        removed: vec![kinds::MAX_DAMAGE],
+    };
+    assert_eq!(validate_stack(&stack), Ok(()));
 }
 
 #[test]

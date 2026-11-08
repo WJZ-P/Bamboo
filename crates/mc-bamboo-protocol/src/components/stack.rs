@@ -52,13 +52,6 @@ impl ItemStackTemplate {
 
     /// 官方 `ItemStack.validateContainedItemSizes` 看的那个上限。
     pub fn max_stack_size(&self) -> i32 {
-        let item = usize::try_from(self.item)
-            .ok()
-            .and_then(|id| mc_bamboo_data::items::ITEMS.get(id));
-        // 组件补丁可以改写 `max_stack_size`，先看补丁再看物品自己的默认值。
-        self.components
-            .max_stack_size()
-            .or_else(|| item.map(|item| item.max_stack_size))
-            .unwrap_or(1)
+        crate::components::validate::max_stack_size(self.item, &self.components)
     }
 }

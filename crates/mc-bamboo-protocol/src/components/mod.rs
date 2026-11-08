@@ -13,6 +13,7 @@
 //!   DFU 的 `Codec` 再写回去。这里只保留 NBT 并校验最外层的形状，不复刻 DFU。
 
 pub mod cursor;
+pub mod defaults;
 pub mod predicate;
 pub mod stack;
 pub mod text;
@@ -38,9 +39,9 @@ use value::{
     DYE_COLOR, DamageReduction, Equippable, FOX_VARIANT, Filterable, FireworkExplosion, GlobalPos,
     HORSE_VARIANT, ITEM_USE_ANIMATION, Instrument, ItemDamageFunction, JukeboxSong,
     KineticCondition, LLAMA_VARIANT, MAP_POST_PROCESSING, MOOSHROOM_VARIANT, MobEffectInstance,
-    PARROT_VARIANT, PaintingVariant, RABBIT_VARIANTS, RARITY, ResolvableFloat, ResolvableInt,
+    PARROT_VARIANT, PaintingVariant, RABBIT_VARIANT, RARITY, ResolvableFloat, ResolvableInt,
     ResolvableProfile, SALMON_SIZE, SignText, SoundEvent, StewEffect, SwingAnimation,
-    TROPICAL_FISH_PATTERNS, ToolRule, TrimMaterial, TrimPattern, TypedEntityData, read_sparse,
+    TROPICAL_FISH_PATTERN, ToolRule, TrimMaterial, TrimPattern, TypedEntityData,
 };
 
 /// 一个组件补丁里增加项和移除项的总数上限。
@@ -354,7 +355,7 @@ pub enum ComponentValue {
     SalmonSize(i32),
     /// `parrot/variant`，见 [`PARROT_VARIANT`]。
     ParrotVariant(i32),
-    /// `tropical_fish/pattern`，见 [`TROPICAL_FISH_PATTERNS`]。
+    /// `tropical_fish/pattern`，见 [`TROPICAL_FISH_PATTERN`]。
     TropicalFishPattern(i32),
     /// `tropical_fish/base_color`，见 [`DYE_COLOR`]。
     TropicalFishBaseColor(i32),
@@ -362,7 +363,7 @@ pub enum ComponentValue {
     TropicalFishPatternColor(i32),
     /// `mooshroom/variant`，见 [`MOOSHROOM_VARIANT`]。
     MooshroomVariant(i32),
-    /// `rabbit/variant`，见 [`RABBIT_VARIANTS`]。
+    /// `rabbit/variant`，见 [`RABBIT_VARIANT`]。
     RabbitVariant(i32),
     /// `pig/variant`。
     PigVariant(i32),
@@ -675,14 +676,14 @@ impl ComponentValue {
             kinds::SALMON_SIZE => Self::SalmonSize(SALMON_SIZE.read(cursor)?),
             kinds::PARROT_VARIANT => Self::ParrotVariant(PARROT_VARIANT.read(cursor)?),
             kinds::TROPICAL_FISH_PATTERN => {
-                Self::TropicalFishPattern(read_sparse(cursor, &TROPICAL_FISH_PATTERNS, 0)?)
+                Self::TropicalFishPattern(TROPICAL_FISH_PATTERN.read(cursor)?)
             }
             kinds::TROPICAL_FISH_BASE_COLOR => Self::TropicalFishBaseColor(DYE_COLOR.read(cursor)?),
             kinds::TROPICAL_FISH_PATTERN_COLOR => {
                 Self::TropicalFishPatternColor(DYE_COLOR.read(cursor)?)
             }
             kinds::MOOSHROOM_VARIANT => Self::MooshroomVariant(MOOSHROOM_VARIANT.read(cursor)?),
-            kinds::RABBIT_VARIANT => Self::RabbitVariant(read_sparse(cursor, &RABBIT_VARIANTS, 0)?),
+            kinds::RABBIT_VARIANT => Self::RabbitVariant(RABBIT_VARIANT.read(cursor)?),
             kinds::PIG_VARIANT => Self::PigVariant(cursor.registry_id(Registry::PIG_VARIANT)?),
             kinds::PIG_SOUND_VARIANT => {
                 Self::PigSoundVariant(cursor.registry_id(Registry::PIG_SOUND_VARIANT)?)
@@ -1161,6 +1162,13 @@ pub struct ComponentPatch {
 }
 
 impl ComponentPatch {
+    /// 一个空补丁。
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
     /// 官方 `DataComponentPatch.STREAM_CODEC`：值前面没有长度。
     pub fn read(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         let added = cursor.varint()?;
@@ -1281,13 +1289,18 @@ impl ComponentPatch {
 
     /// 一个组件类型在这个补丁里的值。
     pub fn get(&self, kind: i32) -> Option<&ComponentValue> {
+        match self.entry(kind) {
+            Some(PatchEntry::Set(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// 一个组件类型在这个补丁里的那一项，能区分「没提到」和「移除」。
+    pub fn entry(&self, kind: i32) -> Option<&PatchEntry> {
         self.entries
             .iter()
             .find(|(id, _)| *id == kind)
-            .and_then(|(_, entry)| match entry {
-                PatchEntry::Set(value) => Some(value),
-                PatchEntry::Removed => None,
-            })
+            .map(|(_, entry)| entry)
     }
 
     /// 补丁里的 `max_stack_size`。
@@ -1299,7 +1312,7 @@ impl ComponentPatch {
     }
 
     /// 官方用 `Map.put`：同一个组件类型出现两次时后面的赢，位置不变。
-    fn put(&mut self, kind: i32, entry: PatchEntry) {
+    pub(crate) fn put(&mut self, kind: i32, entry: PatchEntry) {
         match self.entries.iter_mut().find(|(id, _)| *id == kind) {
             Some(existing) => existing.1 = entry,
             None => self.entries.push((kind, entry)),
