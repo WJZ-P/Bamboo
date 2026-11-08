@@ -52,7 +52,13 @@ import net.minecraft.world.inventory.ChestMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.ContainerSynchronizer;
 import net.minecraft.world.inventory.DispenserMenu;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.network.Filterable;
+import net.minecraft.util.Mth;
+import net.minecraft.world.inventory.ContainerData;
 import net.minecraft.world.inventory.HopperMenu;
+import net.minecraft.world.inventory.LecternMenu;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.RemoteSlot;
 import net.minecraft.world.inventory.ShulkerBoxMenu;
@@ -60,13 +66,17 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.WritableBookContent;
+import net.minecraft.world.item.component.WrittenBookContent;
 import sun.misc.Unsafe;
 
 /**
  * 容器菜单的 oracle：官方代码出题、给答案，tools/mc-bamboo-vanilla/src/menu.rs 用 mc-bamboo-game 的 Replay 跑同样的题来比较。
  *
  * <p>不启动服务端，也不打开真正的方块。每道题是官方的一个菜单（ChestMenu 三行和六行、HopperMenu、DispenserMenu、
- * ShulkerBoxMenu）配一个 SimpleContainer 和一名假玩家的 Inventory，再按 handleContainerClick 的顺序点一串随机点击。
+ * ShulkerBoxMenu、LecternMenu）配一个 SimpleContainer 和一名假玩家的 Inventory。箱子那几类按
+ * handleContainerClick 的顺序点一串随机点击。讲台按 handleContainerButtonClick 的顺序按一串随机按钮，
+ * 页码夹取和取书清页由一个只实现了 LecternBlockEntity 容器行为的 Container 完成，不创建真的方块实体。
  * 假玩家是 Unsafe.allocateInstance 出来的 ServerPlayer，只补了 level、inventory 和 abilities.instabuild；
  * 掉落的物品被 override 成空操作，因为 Bamboo 也没有物品实体。
  *
@@ -248,6 +258,9 @@ public final class MenuOracle {
         private JsonObject caseOf(int id) {
             Random random = new Random(options.seed() * 1_000_003L + id);
             Shape shape = Shape.values()[random.nextInt(Shape.values().length)];
+            if (shape == Shape.LECTERN) {
+                return lecternCase(id, random);
+            }
             boolean creative = random.nextInt(4) != 0;
             FakePlayer player = FakePlayer.create(creative);
             Inventory inventory = player.getInventory();
@@ -293,6 +306,51 @@ public final class MenuOracle {
             line.add("steps", steps);
             return line;
         }
+
+        /**
+         * 官方 {@link LecternMenu} 的按钮。不创建 {@code LecternBlockEntity}：它的 {@code setPage} 会改方块，
+         * {@code stillValid} 没有世界时永远是假。页码夹取和 {@code removeItemNoUpdate} 清页写在旁边的容器里。
+         */
+        private JsonObject lecternCase(int id, Random random) {
+            boolean creative = random.nextInt(4) != 0;
+            boolean mayBuild = random.nextInt(5) != 0;
+            int pageCount = random.nextInt(6);
+            boolean written = random.nextBoolean();
+            FakePlayer player = FakePlayer.create(creative, mayBuild);
+            LecternSlots lectern = new LecternSlots();
+            lectern.setBook(bookStack(written, pageCount));
+            AbstractContainerMenu menu = new LecternMenu(CONTAINER_ID, lectern, lectern.data);
+            menu.setSynchronizer(new Sync());
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", "lectern");
+            line.addProperty("creative", creative);
+            line.addProperty("mayBuild", mayBuild);
+            line.addProperty("pageCount", pageCount);
+            line.add("container", items(lectern, 1));
+            line.add("inventory", inventoryItems(player.getInventory()));
+            line.add("open", outcome(menu, lectern));
+
+            JsonArray steps = new JsonArray();
+            int count = 2 + random.nextInt(18);
+            for (int i = 0; i < count; i++) {
+                int buttonId = lecternButton(random, pageCount);
+                if (menu.stillValid(player) && menu.clickMenuButton(player, buttonId)) {
+                    menu.broadcastChanges();
+                }
+                JsonObject step = new JsonObject();
+                step.addProperty("slot", 0);
+                step.addProperty("button", 0);
+                step.addProperty("input", 0);
+                step.addProperty("buttonId", buttonId);
+                step.add("outcome", outcome(menu, lectern));
+                steps.add(step);
+            }
+            line.add("steps", steps);
+            return line;
+        }
     }
 
     /** 菜单的形状。名字和 Rust 的 ReplayShape 对应。 */
@@ -301,7 +359,8 @@ public final class MenuOracle {
         CHEST_6(54, "chest6"),
         HOPPER(5, "hopper"),
         DISPENSER(9, "dispenser"),
-        SHULKER(27, "shulker");
+        SHULKER(27, "shulker"),
+        LECTERN(1, "lectern");
 
         final int size;
         final String id;
@@ -318,6 +377,7 @@ public final class MenuOracle {
                 case HOPPER -> new HopperMenu(CONTAINER_ID, inventory, container);
                 case DISPENSER -> new DispenserMenu(CONTAINER_ID, inventory, container);
                 case SHULKER -> new ShulkerBoxMenu(CONTAINER_ID, inventory, container);
+                case LECTERN -> throw new IllegalStateException("lectern cases build their own menu");
             };
         }
     }
@@ -438,6 +498,10 @@ public final class MenuOracle {
     }
 
     private static JsonObject outcome(AbstractContainerMenu menu) {
+        return outcome(menu, null);
+    }
+
+    private static JsonObject outcome(AbstractContainerMenu menu, LecternSlots lectern) {
         JsonObject outcome = new JsonObject();
         outcome.addProperty("state", menu.getStateId());
         outcome.add("carried", pair(menu.getCarried()));
@@ -446,7 +510,165 @@ public final class MenuOracle {
             slots.add(pair(slot.getItem()));
         }
         outcome.add("slots", slots);
+        if (lectern != null) {
+            outcome.addProperty("page", lectern.page);
+        }
         return outcome;
+    }
+
+    /** {@code LecternMenu} 的按钮。100 以上是跳页，3 是取书。 */
+    private static int lecternButton(Random random, int pageCount) {
+        int[] pool = {
+            1, 2, 3, 0, 4, 99, 100, 101, 102, 104, 100 + pageCount, Integer.MAX_VALUE, Integer.MIN_VALUE, -50,
+        };
+        return pool[random.nextInt(pool.length)];
+    }
+
+    /** 讲台上的那一本。页数为 0 的成书仍带着组件，{@code hasBook} 才是真。 */
+    private static ItemStack bookStack(boolean written, int pageCount) {
+        ItemStack stack = new ItemStack(written ? Items.WRITTEN_BOOK : Items.WRITABLE_BOOK);
+        if (written) {
+            List<Filterable<Component>> pages = new ArrayList<>();
+            for (int i = 0; i < pageCount; i++) {
+                pages.add(Filterable.passThrough(Component.literal("p" + i)));
+            }
+            stack.set(
+                    DataComponents.WRITTEN_BOOK_CONTENT,
+                    new WrittenBookContent(Filterable.passThrough("Title"), "Author", 0, pages, true));
+        } else if (pageCount > 0) {
+            List<Filterable<String>> pages = new ArrayList<>();
+            for (int i = 0; i < pageCount; i++) {
+                pages.add(Filterable.passThrough("p" + i));
+            }
+            stack.set(DataComponents.WRITABLE_BOOK_CONTENT, new WritableBookContent(pages));
+        }
+        return stack;
+    }
+
+    /**
+     * {@code LecternBlockEntity} 的书槽和页码。{@code set} 走 {@code Mth.clamp}，
+     * {@code removeItemNoUpdate} 把页码和页数写成 0。{@code stillValid} 只看有没有书组件。
+     */
+    private static final class LecternSlots implements Container {
+        private ItemStack book = ItemStack.EMPTY;
+        private int page;
+        private int pageCount;
+        final PageData data = new PageData();
+
+        void setBook(ItemStack book) {
+            this.book = book;
+            this.page = 0;
+            this.pageCount = pageCountOf(book);
+        }
+
+        void setPage(int requested) {
+            int next = Mth.clamp(requested, 0, this.pageCount - 1);
+            if (next != this.page) {
+                this.page = next;
+            }
+        }
+
+        @Override
+        public int getContainerSize() {
+            return 1;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return this.book.isEmpty();
+        }
+
+        @Override
+        public ItemStack getItem(int slot) {
+            return slot == 0 ? this.book : ItemStack.EMPTY;
+        }
+
+        @Override
+        public ItemStack removeItem(int slot, int count) {
+            if (slot != 0) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack result = this.book.split(count);
+            if (this.book.isEmpty()) {
+                onRemove();
+            }
+            return result;
+        }
+
+        @Override
+        public ItemStack removeItemNoUpdate(int slot) {
+            if (slot != 0) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack previous = this.book;
+            this.book = ItemStack.EMPTY;
+            onRemove();
+            return previous;
+        }
+
+        private void onRemove() {
+            this.page = 0;
+            this.pageCount = 0;
+        }
+
+        @Override
+        public void setItem(int slot, ItemStack itemStack) {
+        }
+
+        @Override
+        public int getMaxStackSize() {
+            return 1;
+        }
+
+        @Override
+        public void setChanged() {
+        }
+
+        @Override
+        public boolean stillValid(Player player) {
+            return hasBook();
+        }
+
+        @Override
+        public boolean canPlaceItem(int slot, ItemStack itemStack) {
+            return false;
+        }
+
+        @Override
+        public void clearContent() {
+        }
+
+        private boolean hasBook() {
+            return this.book.has(DataComponents.WRITABLE_BOOK_CONTENT) || this.book.has(DataComponents.WRITTEN_BOOK_CONTENT);
+        }
+
+        private final class PageData implements ContainerData {
+            @Override
+            public int get(int dataId) {
+                return dataId == 0 ? LecternSlots.this.page : 0;
+            }
+
+            @Override
+            public void set(int dataId, int value) {
+                if (dataId == 0) {
+                    LecternSlots.this.setPage(value);
+                }
+            }
+
+            @Override
+            public int getCount() {
+                return 1;
+            }
+        }
+    }
+
+    private static int pageCountOf(ItemStack book) {
+        WrittenBookContent written = book.get(DataComponents.WRITTEN_BOOK_CONTENT);
+        if (written != null) {
+            return written.pages().size();
+        }
+        WritableBookContent writable = book.get(DataComponents.WRITABLE_BOOK_CONTENT);
+        return writable == null ? 0 : writable.pages().size();
     }
 
     /** 物品写成 [注册表 ID, 数量]，空槽是 [0, 0]。 */
@@ -511,11 +733,16 @@ public final class MenuOracle {
         }
 
         static FakePlayer create(boolean creative) {
+            return create(creative, true);
+        }
+
+        static FakePlayer create(boolean creative, boolean mayBuild) {
             FakePlayer player = allocate(FakePlayer.class);
             set(Entity.class, player, "level", FakeLevel.create());
             set(Player.class, player, "inventory", new Inventory(player, new PlayerEquipment(player)));
             Abilities abilities = new Abilities();
             abilities.instabuild = creative;
+            abilities.mayBuild = mayBuild;
             set(Player.class, player, "abilities", abilities);
             return player;
         }

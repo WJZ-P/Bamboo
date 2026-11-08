@@ -143,6 +143,14 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
+    /// 讲台翻页、跳页或取书。`button_id` 是 varint，100 起是跳到的页码加 100。
+    ///
+    /// Lectern page controls. `button_id` is a varint; values from 100 jump to
+    /// `button_id - 100`.
+    ContainerButtonClick {
+        container_id: i32,
+        button_id: i32,
+    },
     /// 告示牌编辑器提交的文字，每一行最多 [`MAX_LINE_CHARS`] 个字符。
     SignUpdate {
         pos: BlockPos,
@@ -245,6 +253,10 @@ impl PlayRequest {
             serverbound::CONTAINER_CLICK => read_container_click(&mut reader)?,
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
+            },
+            serverbound::CONTAINER_BUTTON_CLICK => Self::ContainerButtonClick {
+                container_id: reader.varint()?,
+                button_id: reader.varint()?,
             },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             serverbound::EDIT_BOOK => read_edit_book(&mut reader)?,
@@ -1189,6 +1201,13 @@ mod tests {
         assert_eq!(
             decode_body(serverbound::CONTAINER_CLOSE, "05"),
             Ok(PlayRequest::ContainerClose { container_id: 5 })
+        );
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_BUTTON_CLICK, "01 64"),
+            Ok(PlayRequest::ContainerButtonClick {
+                container_id: 1,
+                button_id: 100,
+            })
         );
     }
 

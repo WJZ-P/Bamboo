@@ -120,14 +120,20 @@ pub(crate) struct Region {
     pub(crate) block_items: BTreeMap<BlockPos, ComponentPatch>,
     /// 每名玩家打开的菜单。物品栏菜单不在里面，它没有状态要同步。
     pub(crate) menus: BTreeMap<PlayerId, Menu>,
+    /// 讲台上的书和打开着的讲台菜单。
+    ///
+    /// Books on lecterns, and the lectern menus currently open.
+    pub(crate) lecterns: crate::lectern::Tables,
     /// 活塞这类会动的方块实体。
     block_entities: BlockEntities,
     /// 等这一刻末尾处理的方块事件，官方的 `Level.blockEvents`。
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
-    /// 比较器的输出、书架最近动的格子和红石火把最近的开关。
-    redstone: RedstoneMemory,
+    /// 比较器的输出、书架最近动的格子、红石火把最近的开关，还有讲台的页码。
+    ///
+    /// Comparator output, bookshelf slots, redstone-torch toggles, and lectern pages.
+    pub(crate) redstone: RedstoneMemory,
     pub(crate) tick: RegionTick,
     /// 服务端视距，已经 clamp 到合法范围。
     pub(crate) view_distance: i32,
@@ -189,6 +195,7 @@ impl Region {
             containers: BTreeMap::new(),
             block_items: BTreeMap::new(),
             menus: BTreeMap::new(),
+            lecterns: crate::lectern::Tables::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),

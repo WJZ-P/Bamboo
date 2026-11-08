@@ -21,7 +21,7 @@ use crate::{
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
-    inventory, light_updates, menu, movement,
+    inventory, lectern, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
     sign,
@@ -97,6 +97,7 @@ impl World {
         // 容器开合人数的重查和菜单同步。
         container::tick(&mut self.region);
         menu::tick(&mut self.region);
+        lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
@@ -196,6 +197,7 @@ impl World {
         entity_sync::on_leave(&mut self.region, id);
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
+        lectern::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {
@@ -315,7 +317,14 @@ impl World {
                     carried,
                 },
             ),
-            PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
+            PlayRequest::ContainerClose { .. } => {
+                menu::on_close_request(region, player);
+                lectern::on_player_close(region, player);
+            }
+            PlayRequest::ContainerButtonClick {
+                container_id,
+                button_id,
+            } => lectern::on_button(region, player, container_id, button_id),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }

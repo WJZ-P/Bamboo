@@ -280,6 +280,13 @@ impl<'a> World<'a> {
         self.effects
     }
 
+    /// 和 [`Self::into_effects`] 一样，但世界还要继续用。
+    ///
+    /// Same collected effects, leaving the world usable afterwards.
+    pub fn drain_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
     /// 这次操作放下的那一格方块，官方 `BlockItem.place` 里 `updateBlockEntityComponents`
     /// 看的位置。组件在 `mc-bamboo-protocol`，这一层看不见，所以只报位置，由调用方接着做。
     pub const fn placed_at(&self) -> Option<BlockPos> {
@@ -1371,7 +1378,8 @@ mod tests {
                 | Effect::OpenSignEditor { .. }
                 | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. }
-                | Effect::ComposterFill { .. } => None,
+                | Effect::ComposterFill { .. }
+                | Effect::PageTurned { .. } => None,
             })
             .collect()
     }

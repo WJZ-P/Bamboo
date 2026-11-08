@@ -35,6 +35,7 @@ mod global;
 mod inbound;
 mod interaction;
 mod inventory;
+mod lectern;
 mod light_updates;
 mod links;
 mod menu;
@@ -46,5 +47,6 @@ mod sign;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use lectern::{LecternReplay, LecternSnapshot};
 pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use world::{World, WorldConfig};
