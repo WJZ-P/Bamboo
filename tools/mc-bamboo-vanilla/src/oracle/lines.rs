@@ -11,6 +11,30 @@ pub enum Line {
     Case(Box<Case>),
     Skip(Skip),
     End(End),
+    /// 生存模式挖掉一块，比较掉落和 `level.random` 的种子。
+    ///
+    /// One survival mining check. Compares the drops and the `level.random` seed.
+    Mine(Mine),
+}
+
+/// 生存挖掘的一题。30 万道创造模式题不走这里。
+///
+/// One survival-mining case. The 300k creative cases do not use this line.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mine {
+    pub block: String,
+    pub state: u32,
+    pub tool: String,
+    pub seed: i64,
+    pub drops: Vec<MineDrop>,
+    pub random_seed: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MineDrop {
+    pub item: String,
+    pub count: i32,
 }
 
 #[derive(Debug, Deserialize)]

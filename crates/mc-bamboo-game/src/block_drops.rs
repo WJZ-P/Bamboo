@@ -61,16 +61,57 @@ pub(crate) fn drop_broken_block(
     let (mut level, ticks) = region.block_level();
     let mut world = World::new(&mut level, ticks);
     for stack in stacks {
-        if stack.is_empty() {
-            continue;
+        pop_loot_stack(&mut world, pos, stack);
+    }
+}
+
+/// 爆炸里 `state.getDrops`。工具是空的，没有爆炸半径。
+///
+/// `state.getDrops` during an explosion. The tool is empty and there is no explosion radius.
+pub(crate) fn explosion_loot(
+    chunks: &ChunkStore,
+    sequences: &mc_bamboo_loot::RandomSequences,
+    fallback: &dyn mc_bamboo_blocks::random::RandomSource,
+    state: BlockState,
+    pos: BlockPos,
+) -> Vec<ItemStack> {
+    let view = ChunkLevel { chunks };
+    let params = BlockDropParams {
+        state,
+        pos: (pos.x, pos.y, pos.z),
+        level: &view,
+        block_entity: None,
+        breaker: None,
+        tool: None,
+        explosion_radius: None,
+        luck: 0.0,
+    };
+    match block_drops(&params, Some(sequences), fallback) {
+        Ok(stacks) => stacks.into_iter().map(plain_stack).collect(),
+        Err(error) => {
+            debug!(%error, "skipping explosion drops: the loot table needs data this world does not have");
+            Vec::new()
         }
-        if !stack.components.is_empty() {
-            debug!(
-                item = stack.item,
-                "dropping a block item without its loot components"
-            );
-        }
-        world.pop_resource(pos, ItemStack::new(stack.item, stack.count));
+    }
+}
+
+fn pop_loot_stack(world: &mut World, pos: BlockPos, stack: LootStack) {
+    // 空堆也要 `popResource`，三个位置 double 照取。
+    // An empty stack still runs `popResource`, so the three position doubles are drawn.
+    if !stack.components.is_empty() {
+        debug!(
+            item = stack.item,
+            "dropping a block item without its loot components"
+        );
+    }
+    world.pop_resource(pos, plain_stack(stack));
+}
+
+fn plain_stack(stack: LootStack) -> ItemStack {
+    if stack.is_empty() {
+        ItemStack::empty()
+    } else {
+        ItemStack::new(stack.item, stack.count)
     }
 }
 

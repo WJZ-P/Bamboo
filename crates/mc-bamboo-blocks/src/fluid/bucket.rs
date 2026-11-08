@@ -2,7 +2,10 @@
 //!
 //! 桶不覆盖 `useOn`，点方块时方块不接，官方的客户端接着发 `use_item`，服务端从眼睛看出去找目标，
 //! 所以这里只有 [`use_item`](crate::use_item) 一个入口。细雪桶是方块物品，放置在 `placement` 里。
-//! 全按创造模式写：倒完手里还是满桶，舀完手里还是空桶。
+//! 倒和舀都只记下 `Effect`，游戏层按 `ItemUtils.createFilledResult` 交还物品。
+//!
+//! Pouring and scooping only record an `Effect`. The game layer hands the item back with
+//! `ItemUtils.createFilledResult`.
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{BlockAncestor, BlockClass, items};
@@ -55,7 +58,12 @@ impl Bucket {
 }
 
 /// `BucketItem.use`。
-pub(crate) fn use_bucket(world: &mut World, actor: &Actor, bucket: Bucket) -> InteractionResult {
+pub(crate) fn use_bucket(
+    world: &mut World,
+    actor: &Actor,
+    hand: mc_bamboo_core::Hand,
+    bucket: Bucket,
+) -> InteractionResult {
     let (from, to) = actor.view_segment();
     let Some(hit) = world.clip(from, to, bucket.clip_fluid(), actor.main_hand) else {
         return InteractionResult::Pass;
@@ -74,16 +82,21 @@ pub(crate) fn use_bucket(world: &mut World, actor: &Actor, bucket: Bucket) -> In
         pos.relative(hit.face)
     };
     if empty_contents(world, actor, bucket, place_pos, Some(hit)) {
+        // 装着流体的桶倒成功才交还空桶。只有生物、没有流体的桶不在这里消耗。
+        // A bucket that held fluid hands an empty one back. A mob-only bucket is not consumed here.
+        if bucket.content.is_some() {
+            world.push_effect(Effect::EmptiedBucket { hand });
+        }
         return InteractionResult::Success;
     }
     if bucket.content.is_none() {
-        return pick_up(world, pos);
+        return pick_up(world, pos, hand);
     }
     InteractionResult::Fail
 }
 
 /// 空桶舀起 `pos` 的东西。
-fn pick_up(world: &mut World, pos: BlockPos) -> InteractionResult {
+fn pick_up(world: &mut World, pos: BlockPos, hand: mc_bamboo_core::Hand) -> InteractionResult {
     let state = world.block_state(pos);
     if !state.is_a(BlockAncestor::BucketPickup) {
         return InteractionResult::Fail;
@@ -92,7 +105,7 @@ fn pick_up(world: &mut World, pos: BlockPos) -> InteractionResult {
     if taken == items::AIR {
         return InteractionResult::Fail;
     }
-    world.push_effect(Effect::FilledBucket { item: taken });
+    world.push_effect(Effect::FilledBucket { item: taken, hand });
     InteractionResult::Success
 }
 
@@ -189,7 +202,10 @@ mod tests {
         let outcome = use_in_air(&mut level, &looking_down(items::WATER_BUCKET));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(FLOOR.above()), BlockState::WATER);
-        assert!(outcome.effects.is_empty());
+        assert_eq!(
+            outcome.effects,
+            [Effect::EmptiedBucket { hand: Hand::Main }]
+        );
     }
 
     #[test]
@@ -202,7 +218,8 @@ mod tests {
         assert_eq!(
             outcome.effects,
             [Effect::FilledBucket {
-                item: items::LAVA_BUCKET
+                item: items::LAVA_BUCKET,
+                hand: Hand::Main,
             }]
         );
     }
@@ -260,10 +277,13 @@ mod tests {
         assert_eq!(level.get(plant), BlockState(blocks::LAVA));
         assert!(matches!(
             outcome.effects.as_slice(),
-            [Effect::Destroyed {
-                except_initiator: false,
-                ..
-            }]
+            [
+                Effect::Destroyed {
+                    except_initiator: false,
+                    ..
+                },
+                Effect::EmptiedBucket { hand: Hand::Main }
+            ]
         ));
     }
 

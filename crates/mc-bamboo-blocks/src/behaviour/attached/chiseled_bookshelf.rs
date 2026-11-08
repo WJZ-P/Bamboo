@@ -22,6 +22,7 @@ use crate::{
     block_container::set_bookshelf_slot,
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
+    item_exchange::ItemExchange,
     state::{
         BlockState, HORIZONTAL_FACING, Property, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED, SLOT_2_OCCUPIED,
         SLOT_3_OCCUPIED, SLOT_4_OCCUPIED, SLOT_5_OCCUPIED, item_is_tagged,
@@ -97,7 +98,19 @@ impl Behaviour for ChiseledBookShelf {
         if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::empty());
+        // `removeItem(slot, 1)`，放不进背包时 `Player.drop(..., SERVER_ONLY)`。
+        // `removeItem(slot, 1)`. What does not fit is `Player.drop(..., SERVER_ONLY)`.
+        let pos = ctx.clicked_pos();
+        let current = world
+            .slots_at(pos)
+            .into_iter()
+            .nth(slot)
+            .unwrap_or_else(ItemStack::empty);
+        let (taken, left) = split_one(current);
+        if !taken.is_empty() {
+            world.set_item_exchange(ItemExchange::AddOrDrop(taken));
+        }
+        set_bookshelf_slot(world, pos, slot, left);
         InteractionResult::Success
     }
 
@@ -114,4 +127,20 @@ impl Behaviour for ChiseledBookShelf {
             .last_bookshelf_slot(pos)
             .map_or(0, |slot| slot as i32 + 1)
     }
+}
+
+/// `Container.removeItem(slot, 1)`：拿走一件，剩下的留在格子里。
+///
+/// `Container.removeItem(slot, 1)`: take one item and leave the rest in the slot.
+fn split_one(mut stack: ItemStack) -> (ItemStack, ItemStack) {
+    if stack.is_empty() {
+        return (ItemStack::empty(), ItemStack::empty());
+    }
+    let mut taken = stack.clone();
+    taken.count = 1;
+    stack.count -= 1;
+    if stack.count <= 0 {
+        stack = ItemStack::empty();
+    }
+    (taken, stack)
 }

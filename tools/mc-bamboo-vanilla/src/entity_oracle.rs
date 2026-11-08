@@ -15,12 +15,14 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockState, BlockTicks, Container, HopperEntity, Level,
+    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, HopperEntity, Level,
     LevelRandom, Slots, World,
-    entity::{Entities, Entity, EntityKind, JavaRandom},
+    entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, version};
+use mc_bamboo_game::receive_like_player;
+use mc_bamboo_loot::{BlockDropParams, LevelView, LootStack, RandomSequences, block_drops};
 use mc_bamboo_protocol::item::ItemStack;
 use serde::Deserialize;
 
@@ -77,6 +79,26 @@ struct Case {
     extras: Vec<ExtraItem>,
     #[serde(default)]
     hopper: bool,
+    /// 玩家捡起才有。脚的位置固定在 (0.5, 64, 0.5)。
+    ///
+    /// Present when a player picks the item up. The feet stay at (0.5, 64, 0.5).
+    #[serde(default)]
+    player: Option<PlayerSetup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerSetup {
+    creative: bool,
+    spectator: bool,
+    /// 小于 0 时 36 格都装满 `fill_item`。大于 0 时只填快捷栏第 0 格。
+    ///
+    /// Below zero fills all 36 slots with `fill_item`. Above zero fills hotbar slot 0 only.
+    prefill: i32,
+    #[serde(default)]
+    fill_item: i32,
+    #[serde(default)]
+    fill_count: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +119,11 @@ struct Step {
     /// Non-empty hopper slots. Empty when the scene has no hopper.
     #[serde(default)]
     containers: Vec<[i32; 5]>,
+    /// 物品栏里非空的格子，`[物品栏下标, 物品, 数量]`。
+    ///
+    /// Non-empty inventory slots: `[inventory index, item, count]`.
+    #[serde(default)]
+    inventory: Vec<[i32; 3]>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -418,8 +445,18 @@ impl Report {
             return;
         }
         let hoppers = hopper_cells(case);
+        let mut slots = case.player.as_ref().map(player_slots);
         self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
+        if let Some(slots) = slots.as_deref() {
+            self.compare_inventory(&case.name, 0, slots, &case.steps[0].inventory);
+        }
         for (index, step) in case.steps.iter().enumerate().skip(1) {
+            if let Some(player) = &case.player
+                && !player.spectator
+                && let Some(slots) = slots.as_mut()
+            {
+                touch_player(&mut world, slots, player.creative);
+            }
             let mut ticked = world.tick_entities_kept();
             // 下落方块和 TNT 摔出来的物品不在这道题里。物品题才逐个比较。
             // Items broken out of a falling block or TNT are not part of those cases.
@@ -434,6 +471,9 @@ impl Report {
             }
             self.steps += 1;
             self.compare_step(&case.name, index, &mut world, Some(&ticked), step, &hoppers);
+            if let Some(slots) = slots.as_deref() {
+                self.compare_inventory(&case.name, index, slots, &step.inventory);
+            }
             if self.mismatches.len() >= 12 {
                 return;
             }
@@ -465,6 +505,24 @@ impl Report {
         }
         self.compare_blocks(name, index, world, &official.blocks);
         self.compare_containers(name, index, world, hoppers, &official.containers);
+    }
+
+    fn compare_inventory(
+        &mut self,
+        name: &str,
+        index: usize,
+        slots: &[ItemStack],
+        official: &[[i32; 3]],
+    ) {
+        let mut ours = inventory_slots(slots);
+        let mut expected = official.to_vec();
+        ours.sort();
+        expected.sort();
+        if ours != expected {
+            self.mismatch(format!(
+                "{name} step {index}: inventory: official {expected:?}, bamboo {ours:?}"
+            ));
+        }
     }
 
     fn compare_containers(
@@ -712,6 +770,190 @@ fn spawn_ground_item(world: &mut World, x: f64, y: f64, z: f64, item: i32, count
         && let Some(ground) = entity.ground_mut()
     {
         ground.set_pickup_delay(delay);
+    }
+}
+
+/// 玩家脚在 (0.5, 64, 0.5)，身体宽 0.6、高 1.8，再按 `Player.aiStep` 膨胀 (1, 0.5, 1)。
+///
+/// Feet at (0.5, 64, 0.5), body 0.6 by 1.8, then the `Player.aiStep` inflate of (1, 0.5, 1).
+fn player_reach() -> Aabb {
+    Aabb::new(0.2, 64.0, 0.2, 0.8, 65.8, 0.8).inflate(1.0, 0.5, 1.0)
+}
+
+fn player_slots(player: &PlayerSetup) -> Vec<ItemStack> {
+    let mut slots = vec![ItemStack::empty(); 46];
+    if player.prefill < 0 {
+        let fill = ItemStack::new(player.fill_item, player.fill_count);
+        for index in 0..36 {
+            slots[menu_index(index)] = fill.clone();
+        }
+    } else if player.prefill > 0 {
+        slots[menu_index(0)] = ItemStack::new(player.fill_item, player.fill_count);
+    }
+    slots
+}
+
+/// 官方 `Inventory.items` 的下标换成菜单槽位。
+///
+/// An `Inventory.items` index as a menu slot.
+fn menu_index(index: usize) -> usize {
+    if index < 9 { 36 + index } else { index }
+}
+
+fn inventory_slots(slots: &[ItemStack]) -> Vec<[i32; 3]> {
+    let mut listed = Vec::new();
+    for index in 0..36 {
+        let stack = &slots[menu_index(index)];
+        if !stack.is_empty() {
+            listed.push([index as i32, stack.item, stack.count]);
+        }
+    }
+    let off_hand = &slots[45];
+    if !off_hand.is_empty() {
+        listed.push([40, off_hand.item, off_hand.count]);
+    }
+    listed
+}
+
+/// `ItemEntity.playerTouch`，发生在这一拍的实体 tick 之前。
+///
+/// `ItemEntity.playerTouch`, before this tick's entity ticks.
+fn touch_player(world: &mut World, slots: &mut [ItemStack], creative: bool) {
+    let reach = player_reach();
+    let owner = [0_u8; 16];
+    for id in world.entity_ids() {
+        let Some(entity) = world.entity(id) else {
+            continue;
+        };
+        if !entity.bounding_box().intersects(reach) || !can_pick_up(entity, &owner) {
+            continue;
+        }
+        let stack = entity
+            .ground()
+            .map(|item| item.stack.clone())
+            .unwrap_or_else(ItemStack::empty);
+        let original = stack.count;
+        let left = receive_like_player(slots, 0, stack, creative);
+        let picked = left.count < original || (creative && left.is_empty() && original > 0);
+        if !picked {
+            continue;
+        }
+        if let Some(entity) = world.entity_mut(id) {
+            take_stack(entity, left);
+        }
+    }
+}
+
+/// 生存挖掘：工具对了才 `getDrops` 再 `popResource`。返回掉落和之后的 `level.random` 种子。
+///
+/// Survival mining: `getDrops` then `popResource` only with the right tool. Returns the drops and
+/// the `level.random` seed afterwards.
+pub(crate) fn mined_outcome(
+    seed: i64,
+    state: u32,
+    tool: i32,
+) -> Result<(Vec<(i32, i32)>, i64), String> {
+    let pos = BlockPos::new(0, 64, 0);
+    let mut level = PhysicsLevel::new(seed);
+    level.blocks.insert(pos, BlockState(state));
+    let stacks = if mc_bamboo_blocks::mining::is_correct_for_drops(state, tool) {
+        let view = OneBlock {
+            state: BlockState(state),
+            pos,
+        };
+        let tool_stack = if tool == 0 {
+            None
+        } else {
+            Some(LootStack::new(tool, 1))
+        };
+        let params = BlockDropParams {
+            state: BlockState(state),
+            pos: (pos.x, pos.y, pos.z),
+            level: &view,
+            block_entity: None,
+            breaker: None,
+            tool: tool_stack,
+            explosion_radius: None,
+            luck: 0.0,
+        };
+        let sequences = RandomSequences::new(seed);
+        block_drops(&params, Some(&sequences), level.random.source())
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let drops = {
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        for stack in stacks {
+            let item = if stack.is_empty() {
+                ItemStack::empty()
+            } else {
+                ItemStack::new(stack.item, stack.count)
+            };
+            world.pop_resource(pos, item);
+        }
+        let mut drops = Vec::new();
+        for id in world.entity_ids() {
+            if let Some(ground) = world.entity(id).and_then(|entity| entity.ground())
+                && !ground.stack.is_empty()
+            {
+                drops.push((ground.stack.item, ground.stack.count));
+            }
+        }
+        drops.sort();
+        drops
+    };
+    Ok((drops, level.random.source().seed()))
+}
+
+/// 战利品条件只看这一格。
+///
+/// Loot conditions only see this one block.
+struct OneBlock {
+    state: BlockState,
+    pos: BlockPos,
+}
+
+impl LevelView for OneBlock {
+    fn is_loaded(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+        Some(true)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<BlockState> {
+        if x == self.pos.x && y == self.pos.y && z == self.pos.z {
+            Some(self.state)
+        } else {
+            Some(BlockState::AIR)
+        }
+    }
+
+    fn biome(&self, _: i32, _: i32, _: i32) -> Option<i32> {
+        None
+    }
+
+    fn can_see_sky(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+        None
+    }
+
+    fn is_raining(&self) -> Option<bool> {
+        None
+    }
+
+    fn is_thundering(&self) -> Option<bool> {
+        None
+    }
+
+    fn day_time(&self) -> Option<i64> {
+        None
+    }
+
+    fn game_time(&self) -> Option<i64> {
+        None
+    }
+
+    fn dimension(&self) -> Option<&'static str> {
+        Some("minecraft:overworld")
     }
 }
 

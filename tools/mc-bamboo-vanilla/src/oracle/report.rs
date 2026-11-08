@@ -198,6 +198,20 @@ impl Report {
         }
     }
 
+    /// 生存挖掘题。算进 `end` 行的 case 数。
+    ///
+    /// A survival-mining case. It counts toward the `end` line's case total.
+    pub fn mine_checked(&mut self, block: &Block, ok: bool, detail: &str) {
+        self.lines.0 += 1;
+        let row = self.row(block, Kind::Destroy);
+        if ok {
+            row.passed += 1;
+        } else {
+            row.failed += 1;
+            self.details.push((0, detail.to_owned()));
+        }
+    }
+
     /// 和 `end` 行对账，少了行说明读漏了。
     pub fn check_totals(&self, cases: u64, skipped: u64) -> Result<(), String> {
         if self.lines == (cases, skipped) {

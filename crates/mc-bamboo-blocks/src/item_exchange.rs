@@ -32,6 +32,15 @@ pub enum ItemExchange {
     /// `itemInHand.remove(DataComponents.DYED_COLOR)`: the whole stack loses its colour and
     /// keeps its count.
     RemoveDyedColor,
+    /// `Inventory.add`，放不下的部分由游戏层按 `Player.drop` 丢掉。
+    ///
+    /// `Inventory.add`. The game layer `Player.drop`s whatever does not fit.
+    AddOrDrop(ItemStack),
+    /// `BeehiveBlock` 用玻璃瓶：哪怕创造模式也先 `shrink(1)`，空了就换上蜜瓶，否则 `add`。
+    ///
+    /// A glass bottle on a beehive: `shrink(1)` even in creative. An empty hand becomes a honey
+    /// bottle; otherwise `Inventory.add` takes it.
+    BottleHoney,
 }
 
 /// 官方 `PotionContents.createItemStack(Items.POTION, Potions.WATER)`。

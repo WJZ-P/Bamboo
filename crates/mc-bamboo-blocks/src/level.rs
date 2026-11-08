@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use mc_bamboo_core::{
-    BlockPos, ChunkPos, LightLayer,
+    BlockPos, ChunkPos, Hand, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
 use mc_bamboo_protocol::item::ItemStack;
@@ -165,6 +165,21 @@ pub trait Level {
     /// before neighbors are told.
     fn clear_container(&mut self, pos: BlockPos) {
         let _ = pos;
+    }
+
+    /// `BlockBehaviour.onExplosionHit` 里的 `state.getDrops`。
+    ///
+    /// TNT 的 `tntExplosionDropDecay` 默认是假，所以没有 `EXPLOSION_RADIUS`，`explosion_decay`
+    /// 不取数。假世界没有战利品表时返回空，这样不会多取 `level.random`。
+    ///
+    /// `state.getDrops` inside `BlockBehaviour.onExplosionHit`.
+    ///
+    /// `tntExplosionDropDecay` defaults to false, so there is no `EXPLOSION_RADIUS` and
+    /// `explosion_decay` draws nothing. A world without loot tables returns nothing, and does
+    /// not draw extra `level.random` values.
+    fn explosion_block_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        let _ = (state, pos);
+        Vec::new()
     }
 }
 
@@ -364,9 +379,16 @@ pub enum Effect {
     },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
-    /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
-    /// 物品栏里没有 `item` 时放一个进去。
-    FilledBucket { item: i32 },
+    /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。
+    ///
+    /// An empty bucket picked something up. The game layer runs `ItemUtils.createFilledResult`
+    /// and puts `item` back into `hand`.
+    FilledBucket { item: i32, hand: Hand },
+    /// 满桶倒成功了。生存模式交还空桶，创造模式交还手里原来的那一堆。
+    ///
+    /// A full bucket emptied successfully. Survival hands back an empty bucket. Creative hands
+    /// back the stack that was already in the hand.
+    EmptiedBucket { hand: Hand },
     /// `levelEvent(1505, pos, 15)`：骨粉起作用的粒子，发给附近所有人。
     BoneMealUsed { pos: BlockPos },
     /// 告示牌的内容变了，`SignBlockEntity.markUpdated` 里的 `sendBlockUpdated`：

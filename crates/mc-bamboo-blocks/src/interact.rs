@@ -187,7 +187,7 @@ pub fn use_item(
 ) -> Outcome {
     let mut world = World::new(level, ticks);
     let result = match Bucket::of(actor.item_in(hand)) {
-        Some(bucket) => bucket::use_bucket(&mut world, actor, bucket),
+        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket),
         None => placement::use_in_air(&mut world, actor, hand),
     };
     outcome_from(world, result, false)

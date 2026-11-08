@@ -19,6 +19,7 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, items, registries::attribute_defaults};
 use mc_bamboo_protocol::{
+    item::ItemStack,
     packet::play::{
         BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
         PlayerActionKind, SystemChat,
@@ -312,10 +313,28 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 let event = LevelEvent::redstone_torch_burnout(pos);
                 send_level_event(region, None, pos, &event);
             }
-            Effect::FilledBucket { item } => {
+            Effect::FilledBucket { item, hand } => {
                 if let Some(id) = initiator {
-                    inventory::add_filled_bucket(region, id, item);
+                    inventory::give_filled_result(region, id, hand, ItemStack::new(item, 1), true);
                 }
+            }
+            Effect::EmptiedBucket { hand } => {
+                let Some(id) = initiator else {
+                    continue;
+                };
+                // 创造模式交还手里原来的那一堆，`contains` 为真，什么也不加。
+                // Creative mode hands back the stack already held. `contains` is true, so nothing is added.
+                let replacement = {
+                    let Some(player) = region.players.get(&id) else {
+                        continue;
+                    };
+                    if player.game_mode == GameMode::Creative {
+                        player.inventory.held(hand).clone()
+                    } else {
+                        ItemStack::new(items::BUCKET, 1)
+                    }
+                };
+                inventory::give_filled_result(region, id, hand, replacement, true);
             }
             Effect::BoneMealUsed { pos } => {
                 let event = LevelEvent {

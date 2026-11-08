@@ -36,6 +36,7 @@ import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.stats.Stat;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
@@ -55,7 +56,13 @@ import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.item.PrimedTnt;
+import net.minecraft.world.entity.player.Abilities;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.player.PlayerEquipment;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
@@ -144,6 +151,12 @@ public final class EntityOracle {
             cases += itemMerge(official, out);
             cases += itemHopper(official, out);
             cases += itemAboveHopper(official, out);
+            cases += itemPickup(official, out);
+            cases += itemPickupPartial(official, out);
+            cases += itemPickupCreativeFull(official, out);
+            cases += itemPickupSpectator(official, out);
+            cases += itemPickupDelay(official, out);
+            cases += itemPickupInfinite(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -340,6 +353,116 @@ public final class EntityOracle {
         return 1;
     }
 
+    /** 生存模式，延迟为 0，站在物品上就捡走。 */
+    private static int itemPickup(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup", 5, 0, false, false, 0, 4);
+        return 1;
+    }
+
+    /** 快捷栏已经有 63 个，再捡 5 个，剩下的留在地上。 */
+    private static int itemPickupPartial(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_partial", 5, 0, false, false, 63, 4);
+        return 1;
+    }
+
+    /** 创造模式背包全满时，捡不进去的物品被清掉，地上也不留。 */
+    private static int itemPickupCreativeFull(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_creative_full", 1, 0, true, false, -1, 4);
+        return 1;
+    }
+
+    /** 旁观模式不捡。 */
+    private static int itemPickupSpectator(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_spectator", 1, 0, false, true, 0, 20);
+        return 1;
+    }
+
+    /** 默认延迟 10。捡起发生在延迟减到 0 的下一拍。 */
+    private static int itemPickupDelay(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_delay", 1, 10, false, false, 0, 16);
+        return 1;
+    }
+
+    /** `INFINITE_PICKUP_DELAY` 不减，也捡不起来。 */
+    private static int itemPickupInfinite(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_infinite", 1, 32767, false, false, 0, 8);
+        return 1;
+    }
+
+    private static void playPickup(
+            Official official,
+            Writer out,
+            String name,
+            int count,
+            int pickupDelay,
+            boolean creative,
+            boolean spectator,
+            int prefill,
+            int ticks)
+            throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        Scene scene = Scene.items(official, blocks, false);
+        scene.player = touchPlayer(creative);
+        scene.spectator = spectator;
+        if (prefill < 0) {
+            ItemStack stone = new ItemStack(Items.STONE, Items.STONE.getDefaultMaxStackSize());
+            for (int slot = 0; slot < 36; slot++) {
+                scene.player.getInventory().setItem(slot, stone.copy());
+            }
+        } else if (prefill > 0) {
+            scene.player.getInventory().setItem(0, new ItemStack(Items.COBBLESTONE, prefill));
+        }
+        scene.spawnItem(0.5, 64.5, 0.5, new ItemStack(Items.COBBLESTONE, count), pickupDelay, true);
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"");
+        out.write(name);
+        out.write("\",\"kind\":\"item\",\"state\":0,\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"item\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(Items.COBBLESTONE)));
+        out.write(",\"count\":");
+        out.write(Integer.toString(count));
+        out.write(",\"px\":0.5,\"py\":64.5,\"pz\":0.5,\"pickupDelay\":");
+        out.write(Integer.toString(pickupDelay));
+        out.write(",\"hopper\":false,\"player\":{\"creative\":");
+        out.write(Boolean.toString(creative));
+        out.write(",\"spectator\":");
+        out.write(Boolean.toString(spectator));
+        out.write(",\"prefill\":");
+        out.write(Integer.toString(prefill));
+        Item fill = prefill < 0 ? Items.STONE : Items.COBBLESTONE;
+        int fillCount = prefill < 0 ? Items.STONE.getDefaultMaxStackSize() : Math.max(prefill, 0);
+        out.write(",\"fillItem\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(fill)));
+        out.write(",\"fillCount\":");
+        out.write(Integer.toString(fillCount));
+        out.write("},\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+    }
+
+    /** 不跑构造函数。`take`、`awardStat`、`onItemPickup` 都是空的，避免假玩家碰到空的统计和区块。 */
+    private static TouchPlayer touchPlayer(boolean creative) {
+        TouchPlayer player = allocate(TouchPlayer.class);
+        Abilities abilities = new Abilities();
+        abilities.instabuild = creative;
+        put(player, Player.class, "abilities", abilities);
+        Inventory inventory = new Inventory(player, new PlayerEquipment(player));
+        put(player, Player.class, "inventory", inventory);
+        return player;
+    }
+
     private static void playItem(
             Official official,
             Writer out,
@@ -494,6 +617,8 @@ public final class EntityOracle {
          */
         final List<Entity> snapshot = new ArrayList<>();
         final List<HopperBlockEntity> hoppers = new ArrayList<>();
+        TouchPlayer player;
+        boolean spectator;
         boolean ticked;
 
         private Scene(FakeLevel level) {
@@ -523,6 +648,10 @@ public final class EntityOracle {
         }
 
         void spawnItem(double x, double y, double z, ItemStack stack, int pickupDelay) {
+            spawnItem(x, y, z, stack, pickupDelay, false);
+        }
+
+        void spawnItem(double x, double y, double z, ItemStack stack, int pickupDelay, boolean exactDelay) {
             ItemEntity item = new ItemEntity(level, x, y, z, stack);
             level.addFreshEntity(item);
             // 构造函数先用了未设种子的随机源。换成和 Bamboo 一样的 `id ^ seed` 之后，把朝向和速度重新取一遍。
@@ -532,7 +661,9 @@ public final class EntityOracle {
             random.nextFloat();
             item.setYRot(random.nextFloat() * 360.0F);
             item.setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2, random.nextDouble() * 0.2 - 0.1);
-            if (pickupDelay == 0) {
+            if (exactDelay) {
+                item.setPickUpDelay(pickupDelay);
+            } else if (pickupDelay == 0) {
                 item.setNoPickUpDelay();
             } else {
                 item.setDefaultPickUpDelay();
@@ -577,6 +708,17 @@ public final class EntityOracle {
         }
 
         void tick() {
+            // 玩家不在实体名单里。官方玩家通常先 tick，捡起看到的是物品移动前的位置。
+            // The player is not in the entity list. Vanilla players usually tick first, so pickup
+            // sees the item where it was before this tick's movement.
+            if (player != null && !spectator) {
+                AABB reach = new AABB(0.2, 64.0, 0.2, 0.8, 65.8, 0.8).inflate(1.0, 0.5, 1.0);
+                for (Entity entity : new ArrayList<>(active)) {
+                    if (entity instanceof ItemEntity item && item.getBoundingBox().intersects(reach)) {
+                        item.playerTouch(player);
+                    }
+                }
+            }
             List<Entity> ticking = new ArrayList<>(active);
             level.fresh.clear();
             snapshot.clear();
@@ -623,6 +765,10 @@ public final class EntityOracle {
             out.append(blockArray(level.blocks));
             out.append(",\"containers\":");
             out.append(containerArray(hoppers));
+            if (player != null) {
+                out.append(",\"inventory\":");
+                out.append(inventoryArray(player.getInventory()));
+            }
             out.append('}');
         }
     }
@@ -762,6 +908,61 @@ public final class EntityOracle {
         } catch (InstantiationException error) {
             throw new IllegalStateException(error);
         }
+    }
+
+    private static String inventoryArray(Inventory inventory) {
+        StringBuilder out = new StringBuilder();
+        out.append('[');
+        boolean first = true;
+        for (int slot = 0; slot < 36; slot++) {
+            first = appendSlot(out, first, slot, inventory.getItem(slot));
+        }
+        appendSlot(out, first, 40, inventory.getItem(40));
+        out.append(']');
+        return out.toString();
+    }
+
+    private static boolean appendSlot(StringBuilder out, boolean first, int slot, ItemStack stack) {
+        if (stack.isEmpty()) {
+            return first;
+        }
+        if (!first) {
+            out.append(',');
+        }
+        out.append('[')
+                .append(slot)
+                .append(',')
+                .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                .append(',')
+                .append(stack.getCount())
+                .append(']');
+        return false;
+    }
+
+    /** `abilities` 和 `inventory` 是 final，普通反射写不进去。 */
+    private static void put(Object target, Class<?> owner, String name, Object value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static final class TouchPlayer extends ServerPlayer {
+        private TouchPlayer() {
+            super(null, null, null, null);
+        }
+
+        @Override
+        public void take(Entity entity, int orgCount) {}
+
+        @Override
+        public void awardStat(Stat<?> stat, int count) {}
+
+        @Override
+        public void onItemPickup(ItemEntity entity) {}
     }
 
     private static void set(Class<?> owner, Object target, String name, Object value) {

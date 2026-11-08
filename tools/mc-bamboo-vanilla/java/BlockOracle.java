@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -94,9 +95,11 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
+import net.minecraft.util.debug.ServerDebugSubscribers;
 import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.Container;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.RandomSequences;
 import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -105,6 +108,7 @@ import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -696,6 +700,11 @@ public final class BlockOracle {
         private ReloadableServerResources managers;
         private GameRules rules;
         private DedicatedPlayerList players;
+        private ServerDebugSubscribers debugSubscribers;
+        /** 生存挖掘题才打开真的战利品表。30 万道题保持空表。 */
+        private boolean mineDrops;
+        private RandomSequences mineSequences;
+        private long mineSeed;
 
         private FakeServer() {
             super(null, null, null, null, null, null, null, null, null, null);
@@ -706,7 +715,15 @@ public final class BlockOracle {
             server.managers = managers;
             server.rules = rules;
             server.players = allocate(FakePlayerList.class);
+            // 活塞推实体时 `checkInsideBlocks` 会问这个。空的就表示没人在听调试事件。
+            // A piston pushing an entity asks this from `checkInsideBlocks`. Empty means nobody is subscribed.
+            server.debugSubscribers = new ServerDebugSubscribers(server);
             return server;
+        }
+
+        @Override
+        public ServerDebugSubscribers debugSubscribers() {
+            return debugSubscribers;
         }
 
         @Override
@@ -716,6 +733,9 @@ public final class BlockOracle {
 
         @Override
         public ReloadableServerRegistries.Holder reloadableRegistries() {
+            if (mineDrops) {
+                return managers.fullRegistries();
+            }
             return new NoLoot(managers.fullRegistries().lookup());
         }
 
@@ -729,9 +749,12 @@ public final class BlockOracle {
             return false;
         }
 
-        /** 只有掉落物的战利品表用它，掉落物不进答案。 */
+        /** 平时每次都新建一条种子 0 的序列，掉落不进 30 万题的答案。生存挖掘题用真正的序列。 */
         @Override
         public RandomSource getRandomSequence(Identifier key) {
+            if (mineDrops && mineSequences != null) {
+                return mineSequences.get(key, mineSeed);
+            }
             return RandomSource.create(0L);
         }
 
@@ -4159,6 +4182,9 @@ public final class BlockOracle {
         int placed;
     }
 
+    /** 一道生存挖掘题。 */
+    private record MineSpec(Block block, Item tool, long seed) {}
+
     /** 跑题、写答案、做汇总。 */
     private static final class Oracle {
         private static final char[] HEX = "0123456789abcdef".toCharArray();
@@ -4221,9 +4247,11 @@ public final class BlockOracle {
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
             boolean hoppers = single ? options.single >= HOPPER_CASE_BASE : includesHopperCases();
+            List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
-                    + (hoppers ? hopperCases.size() : 0));
+                    + (hoppers ? hopperCases.size() : 0)
+                    + mines.size());
             int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
@@ -4246,6 +4274,9 @@ public final class BlockOracle {
                         runBuilt(c, statsOf(c.subject));
                     }
                 }
+            }
+            for (MineSpec spec : mines) {
+                writeMine(spec);
             }
             writeEnd();
             out.flush();
@@ -4277,6 +4308,86 @@ public final class BlockOracle {
                 }
             }
             return false;
+        }
+
+        /** 生存挖掘。不进 30 万道创造模式题，单独比较掉落和 `level.random`。 */
+        private List<MineSpec> mineSpecs() {
+            MineSpec[] specs = {
+                    new MineSpec(Blocks.DIRT, Items.AIR, 11L),
+                    new MineSpec(Blocks.SAND, Items.AIR, 12L),
+                    new MineSpec(Blocks.GRAVEL, Items.AIR, 13L),
+                    new MineSpec(Blocks.OAK_LOG, Items.AIR, 14L),
+                    new MineSpec(Blocks.GLASS, Items.AIR, 15L),
+                    new MineSpec(Blocks.STONE, Items.AIR, 16L),
+                    new MineSpec(Blocks.STONE, Items.WOODEN_PICKAXE, 17L),
+                    new MineSpec(Blocks.COBBLESTONE, Items.AIR, 18L),
+            };
+            List<MineSpec> matched = new ArrayList<>();
+            for (MineSpec spec : specs) {
+                if (options.only == null || Subjects.matches(options.only, spec.block)) {
+                    matched.add(spec);
+                }
+            }
+            return matched;
+        }
+
+        private void writeMine(MineSpec spec) throws IOException {
+            FakeServer server = official.server;
+            server.mineDrops = true;
+            server.mineSequences = new RandomSequences();
+            server.mineSeed = spec.seed;
+            try {
+                BlockPos pos = new BlockPos(0, 64, 0);
+                FakeLevel level = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.SEEDED, spec.seed));
+                LegacyRandomSource random = new LegacyRandomSource(spec.seed);
+                set(Level.class, level, "random", random);
+                BlockState state = spec.block.defaultBlockState();
+                level.blocks.put(pos.asLong(), state);
+                ItemStack tool = spec.tool == Items.AIR ? ItemStack.EMPTY : new ItemStack(spec.tool);
+                level.groundItems.clear();
+                // `Player.hasCorrectToolForDrops`：不要求工具的方块，空手也掉。
+                if (!state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state)) {
+                    Block.dropResources(state, level, pos, null, null, tool);
+                }
+                List<String> rows = new ArrayList<>();
+                for (Entity entity : level.groundItems) {
+                    if (entity instanceof ItemEntity item && !item.getItem().isEmpty()) {
+                        rows.add("{\"item\":\"" + BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "\",\"count\":"
+                                + item.getItem().getCount() + "}");
+                    }
+                }
+                Collections.sort(rows);
+                written++;
+                line.setLength(0);
+                line.append("{\"type\":\"mine\",\"block\":\"")
+                        .append(BuiltInRegistries.BLOCK.getKey(spec.block))
+                        .append('"');
+                line.append(",\"state\":").append(Block.getId(state));
+                line.append(",\"tool\":\"").append(BuiltInRegistries.ITEM.getKey(spec.tool)).append('"');
+                line.append(",\"seed\":").append(spec.seed);
+                line.append(",\"drops\":[");
+                for (int i = 0; i < rows.size(); i++) {
+                    if (i > 0) {
+                        line.append(',');
+                    }
+                    line.append(rows.get(i));
+                }
+                line.append("],\"randomSeed\":").append(legacySeed(random)).append("}\n");
+                out.append(line);
+            } finally {
+                server.mineDrops = false;
+                server.mineSequences = null;
+            }
+        }
+
+        private static long legacySeed(LegacyRandomSource random) {
+            try {
+                Field field = LegacyRandomSource.class.getDeclaredField("seed");
+                field.setAccessible(true);
+                return ((AtomicLong) field.get(random)).get();
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
         }
 
         private void runCase(int id, Kind kind, Subject subject) throws IOException {

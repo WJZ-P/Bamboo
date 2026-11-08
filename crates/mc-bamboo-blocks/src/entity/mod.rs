@@ -1,14 +1,13 @@
-//! 实体：世界线程拥有、按 ID 引用的下落方块和点燃的 TNT。
+//! 实体：世界线程拥有、按 ID 引用的下落方块、点燃的 TNT 和地上的物品。
 //!
 //! 实体只有一个线程碰得到（见 `docs/folia.md`），所以这里没有锁，也没有引用：
 //! [`Entities`] 按 ID 存在世界里，别的代码只拿到 ID。实体在计划刻和随机刻之后 tick。
 //! 官方实体在方块实体之前，这里方块实体已经在计划刻里跑完了。
-//! 只有两种实体：下落的方块和点燃的 TNT。别的实体以后按 [`EntityKind`] 加。
 //!
 //! Entities are owned by the world thread and referenced by id, with no locks.
+//! Falling blocks, primed TNT, and ground items live here.
 //! They tick after scheduled ticks and random ticks. Vanilla ticks entities before
 //! block entities; those already ran inside the scheduled-tick step.
-//! Only falling blocks and primed TNT exist so far. Later kinds go on [`EntityKind`].
 
 pub mod random;
 
@@ -26,6 +25,7 @@ use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{shape::Aabb, state::BlockState, world::World};
 
+pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
 pub use random::JavaRandom;
 

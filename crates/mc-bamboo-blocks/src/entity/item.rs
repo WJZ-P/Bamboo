@@ -50,6 +50,10 @@ const REST_TICKS: i32 = 4;
 const REST_SPEED: f64 = 1.0e-5_f32 as f64;
 /// `merge` 写死的上限，不是物品自己的最大堆叠数。
 const MERGE_LIMIT: i32 = 64;
+/// `ServerExplosion.StackCollector.tryMerge` 传给 `ItemEntity.merge` 的上限。
+///
+/// The cap `ServerExplosion.StackCollector.tryMerge` passes to `ItemEntity.merge`.
+const EXPLOSION_MERGE_LIMIT: i32 = 16;
 /// 物品宽高都是 0.25，`popResource` 用高度的一半。
 const HALF_ITEM_HEIGHT: f64 = 0.125;
 /// `Containers.dropItemStack` 里三个 `triangle` 的展开宽度，官方的字面量。
@@ -182,10 +186,12 @@ impl Entity {
         // 官方在移动前把 `xo/yo/zo` 改成当前位置，盖掉 `commonTick` 记下的旧位置。
         // Vanilla overwrites `xo/yo/zo` with the current position before moving.
         self.old_position = self.position;
-        let in_water = self.in_water && scan.water > 0.1;
+        // `0.1F` 先是 float，比较时扩成 double。
+        // `0.1F` is a float and widens to double in the comparison.
+        let in_water = self.in_water && scan.water > f64::from(0.1_f32);
         // `isInLava()` 在 `baseTick` 末尾把 `firstTick` 清掉之后才为真。
         // `isInLava()` becomes true only after `baseTick` clears `firstTick`.
-        let in_lava = scan.lava > 0.1;
+        let in_lava = scan.lava > f64::from(0.1_f32);
         if in_water {
             // `setFluidMovement(0.99F)`：先是 float，再扩成 double，不是 double 字面量 0.99。
             // `setFluidMovement(0.99F)` widens a float. It is not the double literal 0.99.
@@ -709,8 +715,26 @@ fn stacks_can_merge(this_stack: &ItemStack, other_stack: &ItemStack) -> bool {
 ///
 /// `ItemEntity.merge`. The cap is 64; anything past it stays on `from`.
 fn merge_stacks(to_stack: &mut ItemStack, from_stack: &mut ItemStack) {
-    let room = (to_stack.max_stack_size().min(MERGE_LIMIT) - to_stack.count).max(0);
+    move_into(to_stack, from_stack, MERGE_LIMIT);
+}
+
+/// `ItemEntity.merge`，上限是爆炸收集堆的 16。合并不了时两边都不动。
+///
+/// `ItemEntity.merge` with the explosion collector's cap of 16. Nothing moves when the stacks
+/// cannot merge.
+pub(crate) fn merge_explosion(to_stack: &mut ItemStack, from_stack: &mut ItemStack) {
+    if !stacks_can_merge(to_stack, from_stack) {
+        return;
+    }
+    move_into(to_stack, from_stack, EXPLOSION_MERGE_LIMIT);
+}
+
+fn move_into(to_stack: &mut ItemStack, from_stack: &mut ItemStack, limit: i32) {
+    let room = (to_stack.max_stack_size().min(limit) - to_stack.count).max(0);
     let moved = room.min(from_stack.count);
+    if moved == 0 {
+        return;
+    }
     to_stack.count += moved;
     from_stack.count -= moved;
     if from_stack.count <= 0 {
@@ -1266,10 +1290,13 @@ pub fn can_pick_up(entity: &Entity, player: &[u8; 16]) -> bool {
 pub fn take_stack(entity: &mut Entity, stack: ItemStack) -> i32 {
     let original = entity.ground().map(|item| item.stack.count).unwrap_or(0);
     if let Some(item) = entity.ground_mut() {
-        item.stack = stack;
-        if item.stack.is_empty() {
+        if stack.is_empty() {
+            // 官方先 `setCount(0)`，空了再 `setCount(orgCount)`，物品种类不变。
+            // Vanilla `setCount(0)`s, then `setCount(orgCount)` on the same stack. The item stays.
             item.stack.count = original;
             entity.discard();
+        } else {
+            item.stack = stack;
         }
     }
     original

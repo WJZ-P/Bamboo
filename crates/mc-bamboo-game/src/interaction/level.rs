@@ -40,6 +40,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_events: &'a mut BlockEvents,
     pub(crate) containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
     pub(crate) entities: &'a mut Entities,
+    pub(crate) loot_sequences: &'a mc_bamboo_loot::RandomSequences,
 }
 
 impl Level for RegionLevel<'_> {
@@ -277,5 +278,19 @@ impl Level for RegionLevel<'_> {
         };
         f(hopper);
         true
+    }
+
+    /// TNT 爆炸的 `getDrops`。没有爆炸半径，因为 `tntExplosionDropDecay` 默认是假。
+    ///
+    /// `getDrops` for a TNT explosion. There is no explosion radius because
+    /// `tntExplosionDropDecay` defaults to false.
+    fn explosion_block_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        crate::block_drops::explosion_loot(
+            self.chunks,
+            self.loot_sequences,
+            self.random.source(),
+            state,
+            pos,
+        )
     }
 }

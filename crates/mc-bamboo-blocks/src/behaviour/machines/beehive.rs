@@ -11,6 +11,7 @@ use crate::{
     behaviour::{Behaviour, Plain, common::facing_the_player},
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
+    item_exchange::ItemExchange,
     state::{BlockState, LEVEL_HONEY},
     world::World,
 };
@@ -44,6 +45,11 @@ impl Behaviour for Beehive {
             // A glass bottle does not drop honeycomb.
             if ctx.item == items::SHEARS {
                 world.pop_resource(ctx.clicked_pos(), ItemStack::new(items::HONEYCOMB, 3));
+            } else {
+                // 玻璃瓶先 `shrink(1)`，创造模式也减。交还蜜瓶在改方块之前记下。
+                // A glass bottle `shrink(1)`s even in creative. The honey bottle is recorded
+                // before the block changes.
+                world.set_item_exchange(ItemExchange::BottleHoney);
             }
             world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;

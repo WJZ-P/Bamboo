@@ -242,6 +242,7 @@ impl Region {
             block_events: &mut self.block_events,
             containers: &mut self.containers,
             entities: &mut self.entities,
+            loot_sequences: &self.loot_sequences,
         };
         (level, &mut self.block_ticks)
     }

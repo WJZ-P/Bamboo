@@ -833,6 +833,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             Effect::TorchBurnout { .. } => None,
             Effect::BoneMealUsed { .. }
             | Effect::FilledBucket { .. }
+            | Effect::EmptiedBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
@@ -852,7 +853,7 @@ fn gained_of(outcome: &Outcome, actor: &Actor) -> Vec<String> {
     let mut held = vec![actor.main_hand, actor.off_hand];
     let mut gained = Vec::new();
     for effect in &outcome.effects {
-        if let Effect::FilledBucket { item } = *effect
+        if let Effect::FilledBucket { item, .. } = *effect
             && !held.contains(&item)
         {
             held.push(item);

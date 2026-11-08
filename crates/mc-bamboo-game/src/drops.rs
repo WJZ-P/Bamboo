@@ -161,17 +161,15 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
                 inventory::send_slot(player, &mut region.links, slot);
             }
         }
-        let (shown, removed) = {
+        let shown = {
             let Some(entity) = region.entities.get_mut(entity_id) else {
                 continue;
             };
-            let shown = mc_bamboo_blocks::entity::take_stack(entity, left);
-            (shown, entity.removed)
+            mc_bamboo_blocks::entity::take_stack(entity, left)
         };
         entity_tracking::broadcast_take(region, entity_id, id, shown);
-        if removed {
-            region.entities.remove(entity_id);
-        }
+        // `discard` 只打上标记。实体还留在这一拍的名单里，轮到它时不再 tick，然后才删掉。
+        // `discard` only marks the entity. It stays on this tick's list, skips its tick, then goes.
     }
 }
 

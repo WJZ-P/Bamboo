@@ -50,6 +50,7 @@ mod sign;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use world::{World, WorldConfig};

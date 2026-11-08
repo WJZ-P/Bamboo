@@ -652,6 +652,17 @@ impl<'a> World<'a> {
         self.level.random().source()
     }
 
+    /// `BlockBehaviour.onExplosionHit` 里的 `getDrops`。假世界默认是空的。
+    ///
+    /// `getDrops` from `BlockBehaviour.onExplosionHit`. A world without loot returns nothing.
+    pub(crate) fn explosion_block_drops(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.explosion_block_drops(state, pos)
+    }
+
     /// `getBlockRandomPos`。
     pub(crate) fn block_random_pos(&self, origin: BlockPos, y_mask: i32) -> BlockPos {
         self.level.random().block_random_pos(origin, y_mask)
@@ -1759,6 +1770,7 @@ mod tests {
                 Effect::BoneMealUsed { .. }
                 | Effect::TorchBurnout { .. }
                 | Effect::FilledBucket { .. }
+                | Effect::EmptiedBucket { .. }
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }
                 | Effect::OpenSignEditor { .. }

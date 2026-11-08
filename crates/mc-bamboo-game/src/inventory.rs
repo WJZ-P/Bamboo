@@ -5,7 +5,7 @@
 
 use mc_bamboo_blocks::{BlockState, ItemExchange, wash_dyed_color};
 use mc_bamboo_core::{BlockPos, Hand};
-use mc_bamboo_data::{block_of_state, registries::data_component_type};
+use mc_bamboo_data::{block_of_state, items, registries::data_component_type};
 use mc_bamboo_protocol::{
     components::{ComponentValue, defaults},
     item::ItemStack,
@@ -154,9 +154,12 @@ impl Inventory {
             .any(|candidate| !candidate.is_empty() && candidate.is_same_item_same_components(stack))
     }
 
-    /// 创造模式的 `ItemUtils.createFilledResult`：物品栏里没有时放进第一个空槽，返回那个菜单槽位。
+    /// 创造模式的 `Inventory.add`：物品栏里已经有同样的结果就不再加。
+    /// 放不下时清掉剩下的，调用方看起来像是成功了，官方并不生成掉落。
     ///
-    /// 舀起来的东西都不能叠放，所以不用找能叠上去的槽。没有空槽时官方直接丢掉它。
+    /// Creative `Inventory.add`: skip a result the inventory already holds.
+    /// When nothing fits, the leftover is cleared. Vanilla does not spawn a drop.
+    #[cfg(test)]
     fn add_filled(&mut self, item: i32) -> Option<usize> {
         let stack = ItemStack::new(item, 1);
         if self.contains(&stack) {
@@ -183,54 +186,63 @@ impl Inventory {
 
     /// 官方 `ItemUtils.createFilledResult` 和洗染料的 `remove`。
     ///
-    /// 返回物品变了的菜单槽位。生存模式放不下的那一份由调用方生成物品实体。
-    ///
-    /// Returns the menu slots that changed. The caller spawns an item entity for what does not fit.
+    /// 返回物品变了的菜单槽位，以及生存模式放不下、要按 `Player.drop` 丢掉的那一堆。
+    /// 创造模式放不下时这一堆是空的：官方 `Inventory.add` 会把剩下的清掉。
     ///
     /// `ItemUtils.createFilledResult`, and `remove` for dyed items.
     ///
-    /// Returns the menu slots that changed. A survival remainder has no item entity, so it vanishes.
+    /// Returns the menu slots that changed, and the stack a survival player must `Player.drop`.
+    /// Creative mode returns an empty stack: `Inventory.add` clears what does not fit.
     fn apply_exchange(
         &mut self,
         hand: Hand,
         exchange: &ItemExchange,
         creative: bool,
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, ItemStack) {
         let before = self.slots.clone();
-        match exchange {
+        let leftover = match exchange {
             ItemExchange::RemoveDyedColor => {
                 let slot = self.hand_slot(hand);
                 wash_dyed_color(&mut self.slots[slot]);
+                ItemStack::empty()
             }
             ItemExchange::Fill {
                 replacement,
                 limit_creative,
             } => self.fill_hand(hand, replacement.clone(), creative, *limit_creative),
-        }
-        self.slots
+            ItemExchange::AddOrDrop(stack) => self.receive(stack.clone(), creative),
+            ItemExchange::BottleHoney => self.bottle_honey(hand, creative),
+        };
+        let changed = self
+            .slots
             .iter()
             .zip(&before)
             .enumerate()
             .filter(|(_, (now, was))| *now != *was)
             .map(|(slot, _)| slot)
-            .collect()
+            .collect();
+        (changed, leftover)
     }
 
     /// 官方 `createFilledResult`：先处理创造模式的上限，再消耗手里的一个。
     ///
+    /// 放不进物品栏的部分返回给调用方。创造模式这一份是空的。
+    ///
     /// `createFilledResult`: apply the creative limit, then consume one from the hand.
+    ///
+    /// What does not fit is returned. Creative mode returns an empty stack.
     fn fill_hand(
         &mut self,
         hand: Hand,
         replacement: ItemStack,
         creative: bool,
         limit_creative: bool,
-    ) {
+    ) -> ItemStack {
         if limit_creative && creative {
             if !self.contains(&replacement) {
                 self.add(replacement, true);
             }
-            return;
+            return ItemStack::empty();
         }
         let menu = self.hand_slot(hand);
         if !creative {
@@ -244,8 +256,31 @@ impl Inventory {
         }
         if self.slots[menu].is_empty() {
             self.slots[menu] = replacement;
+            ItemStack::empty()
         } else {
-            self.add(replacement, creative);
+            self.receive(replacement, creative)
+        }
+    }
+
+    /// `BeehiveBlock` 的玻璃瓶：先减一，空了就换成蜜瓶，否则 `Inventory.add`。
+    ///
+    /// A glass bottle on a beehive: shrink by one, replace an empty hand with a honey bottle,
+    /// otherwise `Inventory.add`.
+    fn bottle_honey(&mut self, hand: Hand, creative: bool) -> ItemStack {
+        let menu = self.hand_slot(hand);
+        let stack = &mut self.slots[menu];
+        if !stack.is_empty() {
+            stack.count -= 1;
+            if stack.count <= 0 {
+                *stack = ItemStack::empty();
+            }
+        }
+        let honey = ItemStack::new(items::HONEY_BOTTLE, 1);
+        if self.slots[menu].is_empty() {
+            self.slots[menu] = honey;
+            ItemStack::empty()
+        } else {
+            self.receive(honey, creative)
         }
     }
 
@@ -495,24 +530,66 @@ pub(crate) fn apply_item_exchange(
     hand: Hand,
     exchange: &ItemExchange,
 ) {
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
+    let leftover = {
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
+        };
+        let creative = player.game_mode == GameMode::Creative;
+        let (changed, leftover) = player.inventory.apply_exchange(hand, exchange, creative);
+        for slot in changed {
+            send_slot(player, &mut region.links, slot);
+        }
+        leftover
     };
-    let creative = player.game_mode == GameMode::Creative;
-    let changed = player.inventory.apply_exchange(hand, exchange, creative);
-    for slot in changed {
-        send_slot(player, &mut region.links, slot);
+    if !leftover.is_empty() {
+        // 官方 `player.drop`。预测和 `SERVER_ONLY` 这里都只在服务端生成一个实体。
+        // Vanilla `player.drop`. Predicted and `SERVER_ONLY` drops both spawn one server entity.
+        crate::drops::spawn_throw(region, id, leftover);
     }
 }
 
-/// 用空桶舀起了 `item`。客户端在本地放进了同一格，官方在这一刻末尾把这一格同步过去，这里直接发。
-pub(crate) fn add_filled_bucket(region: &mut Region, id: PlayerId, item: i32) {
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
-    };
-    if let Some(slot) = player.inventory.add_filled(item) {
-        send_slot(player, &mut region.links, slot);
+/// `ItemUtils.createFilledResult`：交还舀起或倒出之后的那一堆。
+///
+/// `ItemUtils.createFilledResult`: hand back the stack from a scoop or a pour.
+pub(crate) fn give_filled_result(
+    region: &mut Region,
+    id: PlayerId,
+    hand: Hand,
+    replacement: ItemStack,
+    limit_creative: bool,
+) {
+    apply_item_exchange(
+        region,
+        id,
+        hand,
+        &ItemExchange::Fill {
+            replacement,
+            limit_creative,
+        },
+    );
+}
+
+/// 用玩家物品栏的规则收下 `incoming`，返回没放进去的部分。`slots` 是 46 格菜单。
+///
+/// Accepts `incoming` with the player inventory rules and returns what did not fit.
+/// `slots` is the 46-slot menu.
+pub fn receive_like_player(
+    slots: &mut [ItemStack],
+    selected: u8,
+    incoming: ItemStack,
+    creative: bool,
+) -> ItemStack {
+    if slots.len() != MENU_SLOTS {
+        return incoming;
     }
+    let mut inventory = Inventory {
+        slots: slots.to_vec(),
+        selected,
+        state_id: 0,
+    };
+    let left = inventory.receive(incoming, creative);
+    slots.clone_from_slice(&inventory.slots);
+    left
 }
 
 /// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端
