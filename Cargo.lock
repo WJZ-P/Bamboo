@@ -1910,6 +1910,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-command"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "uuid",
+]
+
+[[package]]
 name = "mc-bamboo-core"
 version = "0.0.0"
 
@@ -1940,6 +1950,7 @@ name = "mc-bamboo-game"
 version = "0.0.0"
 dependencies = [
  "mc-bamboo-blocks",
+ "mc-bamboo-command",
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",

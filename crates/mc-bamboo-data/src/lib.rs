@@ -19,9 +19,10 @@ pub use recipe::{
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, component_enums, component_registries,
-    crafting_remainders, entity_types, heightmaps, item_components, items, jukebox_songs, light,
-    loot, packets, recipes, registries, shapes, states, tags, version, worldgen,
+    block_maps, block_transformers, blocks, command_argument_types, component_enums,
+    component_registries, crafting_remainders, entity_types, heightmaps, item_components, items,
+    jukebox_songs, light, loot, packets, recipes, registries, shapes, states, tags, version,
+    worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -521,6 +522,20 @@ pub fn support_shape(state: u32) -> &'static [Aabb] {
 
 fn shape_at(index: u16) -> &'static [Aabb] {
     shapes::SHAPES[usize::from(index)]
+}
+
+/// 按注册名找方块。名字要带命名空间，比如 `minecraft:stone`。
+///
+/// Looks up a block by registry name. The name includes the namespace, such as `minecraft:stone`.
+pub fn block_by_name(name: &str) -> Option<&'static Block> {
+    blocks::BLOCKS.iter().find(|block| block.name == name)
+}
+
+/// 按注册名找物品。名字要带命名空间，比如 `minecraft:stick`。
+///
+/// Looks up an item by registry name. The name includes the namespace, such as `minecraft:stick`.
+pub fn item_by_name(name: &str) -> Option<&'static Item> {
+    items::ITEMS.iter().find(|item| item.name == name)
 }
 
 /// 一个方块标签包含的方块注册表 ID，标签不存在时返回 `None`。

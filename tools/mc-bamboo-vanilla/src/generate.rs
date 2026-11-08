@@ -19,6 +19,7 @@ const ATTRIBUTE_REGISTRY: &str = "minecraft:attribute";
 const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const BLOCK_ENTITY_TYPE_REGISTRY: &str = "minecraft:block_entity_type";
 const CHAT_TYPE_REGISTRY: &str = "minecraft:chat_type";
+const COMMAND_ARGUMENT_TYPE_REGISTRY: &str = "minecraft:command_argument_type";
 const CONSUME_EFFECT_TYPE_REGISTRY: &str = "minecraft:consume_effect_type";
 const DATA_COMPONENT_TYPE_REGISTRY: &str = "minecraft:data_component_type";
 const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
@@ -49,6 +50,11 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "version.rs", &version_file(data))?;
     write_file(output_dir, "packets.rs", &packets_file(data))?;
     write_file(output_dir, "blocks.rs", &blocks)?;
+    write_file(
+        output_dir,
+        "command_argument_types.rs",
+        &command_argument_types_file(data),
+    )?;
     write_file(output_dir, "block_classes.rs", &block_classes_file(data))?;
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
@@ -530,6 +536,7 @@ fn module_file() -> String {
 pub mod block_maps;
 pub mod block_transformers;
 pub mod blocks;
+pub mod command_argument_types;
 pub mod component_enums;
 pub mod component_registries;
 pub mod crafting_remainders;
@@ -652,7 +659,11 @@ fn check_heightmap_types(types: &[HeightmapType]) -> Result<(), String> {
 /// `minecraft:level_chunk_with_light` → `LEVEL_CHUNK_WITH_LIGHT`。
 fn constant_name(identifier: &str) -> String {
     let path = identifier.strip_prefix("minecraft:").unwrap_or(identifier);
-    path.replace(['/', '.', '-'], "_").to_uppercase()
+    // `brigadier:bool` 这类参数类型带别的命名空间，冒号也要换成下划线。
+    //
+    // Argument types such as `brigadier:bool` keep another namespace, so the colon
+    // becomes an underscore too.
+    path.replace(['/', '.', '-', ':'], "_").to_uppercase()
 }
 
 fn packets_file(data: &VersionData) -> String {
@@ -2372,6 +2383,20 @@ fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, regist
         let _ = writeln!(out, "    pub const {}: i32 = {id};", constant_name(name));
     }
     let _ = writeln!(out, "}}\n");
+}
+
+/// 命令参数类型在 `commands` 包里的数字 ID，由官方注册表导出。
+///
+/// Numeric ids of command argument types in the `commands` packet, exported from the official registry.
+fn command_argument_types_file(data: &VersionData) -> String {
+    let mut out = String::new();
+    write_registry_ids(
+        &mut out,
+        data,
+        "argument_type",
+        COMMAND_ARGUMENT_TYPE_REGISTRY,
+    );
+    out
 }
 
 /// 一个注册表下的标签：名字 → 它在 `TagGroup` 里的下标。

@@ -41,10 +41,18 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.ParseResults;
+import com.mojang.brigadier.arguments.ArgumentType;
+import com.mojang.brigadier.builder.ArgumentBuilder;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
+import com.mojang.brigadier.context.CommandContextBuilder;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
+import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
@@ -97,7 +105,10 @@ import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
+import net.minecraft.network.protocol.game.ClientboundCommandSuggestionsPacket;
+import net.minecraft.network.protocol.game.ClientboundCommandsPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerClosePacket;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundDisguisedChatPacket;
@@ -131,6 +142,7 @@ import net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket;
 import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundCommandSuggestionPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
@@ -197,7 +209,10 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.entity.Relative;
+import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.item.component.WritableBookContent;
 import net.minecraft.world.item.component.WrittenBookContent;
@@ -325,11 +340,14 @@ public final class Probe {
             "handleChunkBatchFinished",
             "handleChunkBatchStart",
             "handleChunkBlocksUpdate",
+            "handleCommandSuggestions",
+            "handleCommands",
             "handleContainerClose",
             "handleContainerContent",
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
+            "handleEntityEvent",
             "handleEntityPositionSync",
             "handleForgetLevelChunk",
             "handleGameEvent",
@@ -349,14 +367,10 @@ public final class Probe {
             "handleRemoveEntities",
             "handleRotateMob",
             "handleSetChunkCacheCenter",
-            // 光标变化时官方发 `set_cursor_item`。关菜单把材料退回物品栏时发 `set_player_inventory`。
-            // Vanilla sends `set_cursor_item` when the cursor changes, and `set_player_inventory` when closing a menu returns items.
-            "handleSetCursorItem",
             "handleSetEntityData",
             "handleSetEntityMotion",
             "handleSetEquipment",
             "handleSetHeldSlot",
-            "handleSetPlayerInventory",
             "handleSetTime",
             "handleSwingAnimation",
             "handleSystemChat",
@@ -553,6 +567,34 @@ public final class Probe {
         }
     }
 
+    /** 和客户端 `ClientPacketListener` 一样，把命令包还原成 Brigadier 节点。
+     *
+     * <p>Rebuild the command packet into Brigadier nodes the same way `ClientPacketListener` does.
+     */
+    private static ClientboundCommandsPacket.NodeBuilder<Object> commandNodes() {
+        return new ClientboundCommandsPacket.NodeBuilder<>() {
+            @Override
+            public ArgumentBuilder<Object, ?> createLiteral(String id) {
+                return LiteralArgumentBuilder.literal(id);
+            }
+
+            @Override
+            public ArgumentBuilder<Object, ?> createArgument(
+                    String id, ArgumentType<?> argumentType, Identifier suggestionId) {
+                return RequiredArgumentBuilder.argument(id, argumentType);
+            }
+
+            @Override
+            public ArgumentBuilder<Object, ?> configure(
+                    ArgumentBuilder<Object, ?> builder, boolean executable, boolean restricted) {
+                if (executable) {
+                    builder.executes(context -> 0);
+                }
+                return builder;
+            }
+        };
+    }
+
     /** 一步超时了，这一段剩下的步骤没法做。 */
     private static final class StepFailed extends RuntimeException {
         StepFailed(String step) {
@@ -613,13 +655,13 @@ public final class Probe {
             section("world entities", () -> worldEntities(kitten, mochi));
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
-            section("crafting", () -> crafting(kitten));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
                 await("join: " + LATE_PLAYER + " got the spawn chunks", JOIN_TIMEOUT_MILLIS, late::spawnChunksDone);
                 checkEditedChunks(kitten, mochi, late);
             });
+            section("commands", () -> commands(kitten, mochi, late));
             section("leaving", () -> leaving(kitten, mochi, late));
 
             section("long running", () -> {
@@ -1543,50 +1585,6 @@ public final class Probe {
                     () -> isClosedChest(watcher, chest));
         }
 
-        /**
-         * 放下工作台，把一根橡木原木放进合成格，结果格应是四块橡木木板。
-         * Place a crafting table, put an oak log in the grid, and expect four oak planks.
-         */
-        private void crafting(Join actor) throws IOException {
-            // (2, -1, 2) 上已经有告示牌。换一格空地，避免放不下去。
-            // A sign already stands at (2, -1, 2). Use an empty cell so the table can be placed.
-            BlockPos ground = BlockPos.containing(actor.position).offset(1, -1, 2);
-            BlockPos table = ground.above();
-            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 6, new ItemStack(Items.CRAFTING_TABLE)));
-            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 7, new ItemStack(Items.OAK_LOG)));
-            actor.send(new ServerboundSetCarriedItemPacket(6));
-            int placing = actor.nextSequence();
-            actor.send(new ServerboundUseItemOnPacket(
-                    InteractionHand.MAIN_HAND,
-                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
-                    placing));
-            await("crafting: the table is placed",
-                    () -> actor.blocks.containsKey(table) && actor.blocks.get(table).is(Blocks.CRAFTING_TABLE));
-
-            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 8, ItemStack.EMPTY));
-            actor.send(new ServerboundSetCarriedItemPacket(8));
-            actor.openMenuType = null;
-            actor.lastContentState = -1;
-            actor.menuSlots.clear();
-            int opening = actor.nextSequence();
-            actor.send(new ServerboundUseItemOnPacket(
-                    InteractionHand.MAIN_HAND,
-                    new BlockHitResult(Vec3.upFromBottomCenterOf(table, 1.0), Direction.UP, table, false),
-                    opening));
-            await("crafting: the screen opens", () -> MenuType.CRAFTING.equals(actor.openMenuType));
-            await("crafting: the grid arrives", () -> actor.lastContentState >= 0);
-            check("crafting: the menu has forty-six slots", actor.lastContent.size() == 46);
-
-            int logSlot = 37 + 7;
-            actor.send(actor.click(logSlot, 0, ContainerInput.PICKUP));
-            actor.send(actor.click(1, 0, ContainerInput.PICKUP));
-            await("crafting: one log becomes four oak planks",
-                    () -> is(actor.menuSlots.get(0), Items.OAK_PLANKS, 4)
-                            && is(actor.menuSlots.get(1), Items.OAK_LOG, 1));
-            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
-            pumpFor(TICK_MILLIS);
-        }
-
         /** 这名玩家在 `blocks` 里放下的箱子。 */
         private static BlockPos chestOf(Join client) {
             for (Edit edit : client.edits) {
@@ -1703,6 +1701,166 @@ public final class Probe {
             }
         }
 
+        /**
+         * 用客户端收到的命令树解析，再把几条命令真的发出去。
+         *
+         * <p>Parse with the command tree the client received, then send a few commands for real.
+         */
+        private void commands(Join actor, Join observer, Join late) throws IOException {
+            check("commands: literals the client can run parse",
+                    actor.commandParses("list")
+                            && actor.commandParses("help")
+                            && actor.commandParses("gamemode survival")
+                            && actor.commandParses("tp ~1 ~ ~")
+                            && actor.commandParses("teleport " + observer.player)
+                            && actor.commandParses("time set noon")
+                            && actor.commandParses("time query gametime")
+                            && actor.commandParses("give " + actor.player + " stone 3")
+                            && actor.commandParses("clear " + actor.player + " stone")
+                            && actor.commandParses("setblock 4 -59 4 stone")
+                            && actor.commandParses("setblock 4 -58 4 oak_stairs[facing=east]")
+                            && actor.commandParses("fill 6 -59 6 7 -59 7 dirt")
+                            && actor.commandParses("say hi")
+                            && actor.commandParses("me waves")
+                            && actor.commandParses("msg " + observer.player + " ping")
+                            && actor.commandParses("tell " + observer.player + " ping")
+                            && actor.commandParses("w " + late.player + " ping")
+                            && actor.commandParses("kick " + late.player));
+            check("commands: incomplete or unknown input fails in the client tree",
+                    !actor.commandParses("nope")
+                            && !actor.commandParses("gamemode")
+                            && !actor.commandParses("time set")
+                            && !actor.commandParses("give " + actor.player)
+                            && !actor.commandParses("setblock 1 2 3")
+                            && !actor.commandParses("setblock 4 -58 4 oak_stairs[facing=foo]")
+                            && !actor.commandParses("kick"));
+
+            actor.send(new ServerboundChatCommandPacket("time set noon"));
+            await("commands: noon is already the clock",
+                    () -> containsText(actor, "already at time marker"));
+
+            actor.send(new ServerboundChatCommandPacket("time set 1000"));
+            await("commands: time set is announced", () -> containsText(actor, "Set minecraft:overworld to 1000 tick(s)"));
+            check("commands: other ops see the admin broadcast",
+                    containsText(observer, "[Kitten: Set minecraft:overworld to 1000 tick(s)]"));
+
+            BlockPos stone = new BlockPos(4, -59, 4);
+            BlockPos stairs = new BlockPos(4, -58, 4);
+            actor.send(new ServerboundChatCommandPacket("setblock 4 -59 4 stone"));
+            await("commands: setblock places stone", () -> actor.blocks.get(stone) != null && actor.blocks.get(stone).is(Blocks.STONE));
+            await("commands: the other player sees the stone",
+                    () -> observer.blocks.get(stone) != null && observer.blocks.get(stone).is(Blocks.STONE));
+            check("commands: setblock announces the position", containsText(actor, "Changed the block at 4, -59, 4"));
+
+            actor.send(new ServerboundChatCommandPacket("setblock 4 -58 4 oak_stairs[facing=east]"));
+            await("commands: stairs keep the named facing", () -> {
+                BlockState state = actor.blocks.get(stairs);
+                return state != null && state.is(Blocks.OAK_STAIRS) && state.getValue(StairBlock.FACING) == Direction.EAST;
+            });
+
+            actor.send(new ServerboundChatCommandPacket("fill 6 -59 6 7 -59 7 dirt"));
+            await("commands: fill covers the rectangle", () -> filledWithDirt(actor));
+            check("commands: fill announces the count", containsText(actor, "Successfully filled 4 block(s)"));
+
+            actor.send(new ServerboundChatCommandPacket("gamemode survival"));
+            await("commands: gamemode tells the player", () -> containsText(actor, "Set own game mode to Survival Mode"));
+            await("commands: the tab list shows survival", () -> actor.ownGameMode == GameType.SURVIVAL);
+            check("commands: survival cannot fly", !actor.canFly);
+
+            // 前面的物品栏脚本放过石头。先清掉，再给 3 个，数量才对得上。
+            //
+            // Earlier inventory steps left stone behind. Clear it first so a give of 3 is exact.
+            actor.send(new ServerboundChatCommandPacket("clear " + actor.player + " stone"));
+            await("commands: the old stone is gone", () -> stoneCount(actor) == 0);
+            actor.send(new ServerboundChatCommandPacket("give " + actor.player + " stone 3"));
+            await("commands: give puts three stone in the inventory", () -> stoneCount(actor) == 3);
+            check("commands: give announces the stack", containsText(actor, "Gave 3"));
+            actor.send(new ServerboundChatCommandPacket("clear " + actor.player + " stone"));
+            await("commands: clear removes the three stone", () -> stoneCount(actor) == 0);
+            check("commands: clear announces the removal", containsText(actor, "Removed 3 item(s) from player " + actor.player));
+
+            actor.send(new ServerboundChatCommandPacket("say hi"));
+            await("commands: say reaches both players",
+                    () -> actor.chats.stream().anyMatch(text -> text.contains("[" + actor.player + "] hi"))
+                            && observer.chats.stream().anyMatch(text -> text.contains("[" + actor.player + "] hi")));
+            actor.send(new ServerboundChatCommandPacket("me waves"));
+            await("commands: me reaches the other player",
+                    () -> observer.chats.stream().anyMatch(text -> text.contains(actor.player) && text.contains("waves")));
+            actor.send(new ServerboundChatCommandPacket("msg " + observer.player + " ping"));
+            await("commands: msg shows the outgoing whisper",
+                    () -> actor.chats.stream().anyMatch(text -> text.contains("You whisper to " + observer.player + ": ping")));
+            await("commands: msg shows the incoming whisper",
+                    () -> observer.chats.stream().anyMatch(text -> text.contains("whispers to you: ping")));
+
+            actor.send(new ServerboundChatCommandPacket("list"));
+            await("commands: list counts the three players", () -> containsText(actor, "There are 3 of a max of"));
+            actor.send(new ServerboundChatCommandPacket("help gamemode"));
+            await("commands: help prints the gamemode usage", () -> containsText(actor, "/gamemode"));
+
+            // 落在走路之后的区块 (1, 0) 里，避免再改跟踪范围。
+            //
+            // Land inside chunk (1, 0), where the walk already left the player, so tracking does not change.
+            // 整数坐标按官方 `Vec3Argument` 把 x/z 对齐到方块中心。
+            //
+            // Integer coordinates are centred on the block, matching official `Vec3Argument`.
+            actor.send(new ServerboundChatCommandPacket("tp 24 -60 8"));
+            await("commands: an absolute teleport moves the player",
+                    () -> Math.abs(actor.position.x - 24.5) < 0.01 && Math.abs(actor.position.z - 8.5) < 0.01);
+            check("commands: teleport announces the destination", containsText(actor, "Teleported " + actor.player));
+            actor.send(new ServerboundChatCommandPacket("tp ~1 ~ ~"));
+            await("commands: a relative teleport adds one block", () -> Math.abs(actor.position.x - 25.5) < 0.01);
+
+            actor.suggestions = null;
+            actor.send(new ServerboundCommandSuggestionPacket(7, "/g"));
+            await("commands: literal suggestions arrive",
+                    () -> actor.suggestions != null && actor.suggestions.id() == 7);
+            check("commands: g completes gamemode and give", suggestionTexts(actor).contains("gamemode")
+                    && suggestionTexts(actor).contains("give"));
+            actor.suggestions = null;
+            actor.send(new ServerboundCommandSuggestionPacket(8, "/teleport "));
+            await("commands: player-name suggestions arrive",
+                    () -> actor.suggestions != null && actor.suggestions.id() == 8);
+            check("commands: teleport completes online names",
+                    suggestionTexts(actor).contains(actor.player)
+                            && suggestionTexts(actor).contains(observer.player)
+                            && suggestionTexts(actor).contains(late.player));
+
+            actor.send(new ServerboundChatCommandPacket("gamemode creative"));
+            await("commands: creative is restored", () -> actor.ownGameMode == GameType.CREATIVE);
+            actor.send(new ServerboundChatCommandPacket("time set 6000"));
+            await("commands: the clock returns to noon", () -> containsText(actor, "Set minecraft:overworld to 6000 tick(s)"));
+        }
+
+        private static int stoneCount(Join client) {
+            return client.slots.values().stream()
+                    .filter(stack -> stack.is(Items.STONE))
+                    .mapToInt(ItemStack::getCount)
+                    .sum();
+        }
+
+        private static boolean containsText(Join client, String part) {
+            return client.systemTexts().stream().anyMatch(text -> text.contains(part));
+        }
+
+        private static boolean filledWithDirt(Join client) {
+            for (int x = 6; x <= 7; x += 1) {
+                for (int z = 6; z <= 7; z += 1) {
+                    BlockState state = client.blocks.get(new BlockPos(x, -59, z));
+                    if (state == null || !state.is(Blocks.DIRT)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static List<String> suggestionTexts(Join client) {
+            if (client.suggestions == null) {
+                return List.of();
+            }
+            return client.suggestions.suggestions().stream().map(ClientboundCommandSuggestionsPacket.Entry::text).toList();
+        }
+
         private void leaving(Join stays, Join leaves, Join late) throws IOException {
             String expected = leaves.player + " left the game";
             int leaverId = leaves.entityId;
@@ -1807,6 +1965,17 @@ public final class Probe {
 
         int entityId;
         Vec3 position = new Vec3(SPAWN_X, SPAWN_Y, SPAWN_Z);
+        CommandDispatcher<Object> commands = new CommandDispatcher<>();
+        ClientboundCommandSuggestionsPacket suggestions;
+        GameType ownGameMode = GameType.CREATIVE;
+        boolean canFly = true;
+        private boolean commandTreeChecked;
+        private boolean permissionEventChecked;
+        private boolean abilitiesChecked;
+        private boolean attributesChecked;
+        private boolean timeChecked;
+        private boolean loadEventChecked;
+        private boolean spawnPositionChecked;
         final Map<UUID, String> tab = new HashMap<>();
         final Map<UUID, Boolean> hats = new HashMap<>();
         final Map<Integer, Remote> remotes = new HashMap<>();
@@ -2220,6 +2389,9 @@ public final class Probe {
         private Map<String, Consumer<Object>> playHandlers() {
             Map<String, Consumer<Object>> handlers = new HashMap<>();
             handlers.put("handleLogin", value -> onLogin((ClientboundLoginPacket) value));
+            handlers.put("handleCommands", value -> onCommands((ClientboundCommandsPacket) value));
+            handlers.put("handleEntityEvent", value -> onEntityEvent((ClientboundEntityEventPacket) value));
+            handlers.put("handleCommandSuggestions", value -> suggestions = (ClientboundCommandSuggestionsPacket) value);
             handlers.put("handlePlayerAbilities", value -> onAbilities((ClientboundPlayerAbilitiesPacket) value));
             handlers.put("handleMovePlayer", value -> onPosition((ClientboundPlayerPositionPacket) value));
             handlers.put("handlePlayerInfoUpdate", value -> onPlayerInfo((ClientboundPlayerInfoUpdatePacket) value));
@@ -2273,6 +2445,55 @@ public final class Probe {
             return handlers;
         }
 
+        /** 官方客户端用收到的树解析。重定向要看最深一层有没有可执行节点。
+         *
+         * <p>Parse with the tree the client received. A redirect counts only when its deepest node executes.
+         */
+        boolean commandParses(String input) {
+            try {
+                ParseResults<Object> results = commands.parse(input, null);
+                CommandContextBuilder<Object> context = results.getContext();
+                while (context.getChild() != null) {
+                    context = context.getChild();
+                }
+                return context.getCommand() != null && !results.getReader().canRead();
+            } catch (RuntimeException error) {
+                return false;
+            }
+        }
+
+        private void onCommands(ClientboundCommandsPacket packet) {
+            try {
+                commands = new CommandDispatcher<>(packet.getRoot(
+                        CommandBuildContext.simple(registries, FeatureFlags.VANILLA_SET), commandNodes()));
+            } catch (RuntimeException error) {
+                check("commands: the client accepted the command tree (" + error + ")", false);
+                return;
+            }
+            if (!commandTreeChecked) {
+                commandTreeChecked = true;
+                check("commands: the client accepted the command tree", !commands.getRoot().getChildren().isEmpty());
+            }
+        }
+
+        private void onEntityEvent(ClientboundEntityEventPacket packet) {
+            if (permissionEventChecked) {
+                return;
+            }
+            permissionEventChecked = true;
+            int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
+            check("commands: the permission event names this player", entity == entityId);
+            // 离线探针的工作目录里 ops.json 把这几名玩家写成 4。正版那台服务端没有这份名单。
+            //
+            // The offline probe's ops.json lists these players at level 4. The online-mode
+            // server has no op list.
+            if (online()) {
+                check("commands: a player absent from ops.json is level 0", packet.getEventId() == 24);
+            } else {
+                check("commands: the permission event is owners", packet.getEventId() == 28);
+            }
+        }
+
         private void onLogin(ClientboundLoginPacket packet) {
             var spawn = packet.commonPlayerSpawnInfo();
             entityId = packet.playerId();
@@ -2292,20 +2513,45 @@ public final class Probe {
         }
 
         private void onAbilities(ClientboundPlayerAbilitiesPacket packet) {
-            check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
+            canFly = packet.canFly();
+            // 进服第一包是创造。后面的 `/gamemode` 会再发。
+            //
+            // The first packet is creative. Later `/gamemode` packets replace it.
+            if (!abilitiesChecked) {
+                abilitiesChecked = true;
+                check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
+            }
         }
 
         private void onPosition(ClientboundPlayerPositionPacket packet) {
-            var target = packet.change().position();
-            check("play: spawn is above the grass", target.y() == SPAWN_Y);
-            check("play: position is absolute", packet.relatives().isEmpty());
-            connection.send(new ServerboundAcceptTeleportationPacket(
-                    packet.id(), target.x(), target.y(), target.z(), 0f, 0f));
+            var incoming = packet.change().position();
+            var relatives = packet.relatives();
+            // 相对轴上的值是差值，绝对轴上的值就是落点。
+            //
+            // A relative axis carries a delta. An absolute axis carries the destination.
+            double x = relatives.contains(Relative.X) ? position.x + incoming.x : incoming.x;
+            double y = relatives.contains(Relative.Y) ? position.y + incoming.y : incoming.y;
+            double z = relatives.contains(Relative.Z) ? position.z + incoming.z : incoming.z;
+            if (!spawnPositionChecked) {
+                spawnPositionChecked = true;
+                check("play: spawn is above the grass", incoming.y == SPAWN_Y);
+                check("play: position is absolute", relatives.isEmpty());
+            }
+            position = new Vec3(x, y, z);
+            connection.send(new ServerboundAcceptTeleportationPacket(packet.id(), x, y, z, 0f, 0f));
         }
 
         private void onPlayerInfo(ClientboundPlayerInfoUpdatePacket packet) {
-            // 不带 ADD_PLAYER 的包里 profile 是 null，这种包是周期性的延迟广播和帽子变化。
+            // 不带 ADD_PLAYER 的包里 profile 是 null，这种包是周期性的延迟广播、帽子变化和模式变化。
             var actions = packet.actions();
+            if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_GAME_MODE))) {
+                packet.entries().forEach(entry -> {
+                    if (entry.profileId().equals(uuid)) {
+                        ownGameMode = entry.gameMode();
+                    }
+                });
+                return;
+            }
             if (actions.equals(EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_HAT))) {
                 packet.entries().forEach(entry -> hats.put(entry.profileId(), entry.showHat()));
                 return;
@@ -2359,6 +2605,13 @@ public final class Probe {
         }
 
         private void onSetTime(ClientboundSetTimePacket packet) {
+            // 登录只核对第一包。后面的 `/time` 会改主世界钟，也可能带上末地钟。
+            //
+            // Only the first packet is the login clock. Later `/time` changes it and may include the end clock.
+            if (timeChecked) {
+                return;
+            }
+            timeChecked = true;
             check("play: one clock is synced", packet.clockUpdates().size() == 1);
             packet.clockUpdates().forEach((clock, state) -> {
                 check("play: clock is the overworld one",
@@ -2368,6 +2621,12 @@ public final class Probe {
         }
 
         private void onGameEvent(ClientboundGameEventPacket packet) {
+            if (loadEventChecked) {
+                check("play: later game events are mode changes",
+                        packet.getEvent() == ClientboundGameEventPacket.CHANGE_GAME_MODE);
+                return;
+            }
+            loadEventChecked = true;
             check("play: chunk loading event", packet.getEvent() == ClientboundGameEventPacket.LEVEL_CHUNKS_LOAD_START);
         }
 
@@ -2437,6 +2696,13 @@ public final class Probe {
 
         private void onAttributes(ClientboundUpdateAttributesPacket packet) {
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
+            // 进服第一包是创造触及距离。`/gamemode` 之后还会再发。
+            //
+            // The first packet is the creative reach. `/gamemode` sends another one later.
+            if (attributesChecked) {
+                return;
+            }
+            attributesChecked = true;
             var names = packet.getValues().stream()
                     .map(snapshot -> snapshot.attribute().unwrapKey().orElseThrow().identifier().getPath())
                     .toList();
@@ -2710,7 +2976,13 @@ public final class Probe {
         private void onDisguisedChat(ClientboundDisguisedChatPacket packet) {
             chats.add(packet.chatType().decorate(packet.message()).getString());
             narrations.add(packet.chatType().decorateNarration(packet.message()).getString());
-            check("chat: player chat has no target", packet.chatType().targetName().isEmpty());
+            // `/msg` 带目标名字。普通聊天、`/say` 和 `/me` 没有。
+            //
+            // `/msg` carries a target name. Player chat, `/say`, and `/me` do not.
+            String type = packet.chatType().chatType().unwrapKey().map(key -> key.identifier().getPath()).orElse("");
+            if (type.equals("chat") || type.equals("say_command") || type.equals("emote_command")) {
+                check("chat: player chat has no target", packet.chatType().targetName().isEmpty());
+            }
         }
 
         private void onAwardStats(ClientboundAwardStatsPacket packet) {
