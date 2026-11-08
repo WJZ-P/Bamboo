@@ -1116,6 +1116,51 @@ mod tests {
     }
 
     #[test]
+    fn items_placed_inside_with_block_entity_reach_the_comparator() {
+        let furnace = POS;
+        let comparator = furnace.west();
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = world_of(&mut level, &mut ticks);
+            place(&mut world, furnace, BlockState(blocks::FURNACE));
+        }
+        level.set(comparator.below(), BlockState(blocks::STONE));
+        level.set(
+            comparator,
+            BlockState(blocks::COMPARATOR).with(HORIZONTAL_FACING, Direction::East),
+        );
+        let mut world = world_of(&mut level, &mut ticks);
+        let comparator_block = BlockState(blocks::COMPARATOR).block();
+        assert!(!world.has_scheduled_tick(comparator, comparator_block));
+
+        let held = world.with_block_entity::<FurnaceEntity, _>(furnace, |entity, world| {
+            assert!(world.has_block_entity(furnace));
+            assert!(world.block_entity::<FurnaceEntity>(furnace).is_none());
+            entity.set_item(0, ItemStack::new(items::COBBLESTONE, 1));
+            mark_container_changed(world, furnace);
+            // 通知先排着。这时候去读会落到空的槽位表，比较器不会被排上。
+            //
+            // The notification is queued. Reading now would see the empty slot table and the
+            // comparator would not be scheduled.
+            assert!(!world.has_scheduled_tick(comparator, comparator_block));
+        });
+        assert!(held.is_some());
+
+        assert!(world.has_scheduled_tick(comparator, comparator_block));
+        let signal =
+            world
+                .block_state(furnace)
+                .analog_output_signal(&world, furnace, Direction::West);
+        let entity = world.block_entity::<FurnaceEntity>(furnace).unwrap();
+        assert_eq!(
+            signal,
+            redstone_signal(entity.items().iter(), FURNACE_SLOTS)
+        );
+        assert!(signal > 0);
+    }
+
+    #[test]
     fn a_shelf_takes_any_item_and_reports_occupancy_from_the_back() {
         let mut level = TestLevel::new();
         let mut ticks = BlockTicks::new();

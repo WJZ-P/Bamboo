@@ -50,11 +50,12 @@ impl Behaviour for BrewingStand {
 
     /// `BrewingStandBlock.getAnalogOutputSignal`。
     ///
-    /// 正在 tick 的实体仍可读。没有实体时读槽位表。
+    /// 实体被拿出去时这里读不到它，比较器会等它放回去再读。没有实体时用槽位表。
     ///
     /// `BrewingStandBlock.getAnalogOutputSignal`.
     ///
-    /// An entity that is ticking stays readable. With no entity, the slot table is used.
+    /// While the entity is out of the map this cannot see it; comparators read it after it is
+    /// put back. With no entity, the slot table is used.
     fn analog_output_signal(
         &self,
         _state: BlockState,
