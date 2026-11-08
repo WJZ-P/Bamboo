@@ -173,11 +173,11 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: an item dispenser fired (it ticked while holding items, a flow emptied \
-                 one, or level event 1000 landed on a dispenser rather than a dropper), or a \
-                 crafter crafted (level event 1049/2010, the crafting flag turned on, or its \
-                 slots changed while the combined container items changed). A crafter that only \
-                 plays fail event 1050 is still compared"
+                "scope: a dispenser fired an entity (projectile events 1002/1004/1018/1051, \
+                 primed TNT, or an armour stand or spawn egg left the dispenser), or a crafter \
+                 crafted (level event 1049/2010, the crafting flag turned on, or its slots \
+                 changed while the combined container items changed). Other dispenser shots are \
+                 compared. A crafter that only plays fail event 1050 is still compared"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
@@ -686,6 +686,9 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if dispenser_dispenses(case) || crafter_crafts(case) {
         return Ok(Some(Rule::Dispensing));
     }
+    if dispenser_bonemeals_a_feature(case) {
+        return Ok(Some(Rule::Worldgen));
+    }
     if transfers_with_unmodeled_container(case) {
         return Ok(Some(Rule::UnmodeledContainer));
     }
@@ -794,11 +797,25 @@ fn spawned_mob_sound(sound: &SoundPlay, entity: &str) -> bool {
 /// The mob this bucket spawns. `None` when the case is not a mob bucket, and the sound lists
 /// are compared in full.
 fn mob_bucket_entity<'a>(case: &Case, names: &'a Names) -> Option<&'a str> {
-    if !pours_a_mob_bucket(case) {
-        return None;
-    }
+    let from_hand = pours_a_mob_bucket(case).then(|| case.action.used_item());
+    let from_dispenser = dispenser_positions(case).iter().find_map(|&pos| {
+        const MOB_BUCKETS: &[&str] = &[
+            "minecraft:salmon_bucket",
+            "minecraft:cod_bucket",
+            "minecraft:pufferfish_bucket",
+            "minecraft:tropical_fish_bucket",
+            "minecraft:axolotl_bucket",
+            "minecraft:tadpole_bucket",
+            "minecraft:sulfur_cube_bucket",
+        ];
+        MOB_BUCKETS
+            .iter()
+            .copied()
+            .find(|item| dispenser_lost(case, pos, item))
+    });
+    let name = from_hand.or(from_dispenser)?;
     names
-        .item(case.action.used_item())
+        .item(name)
         .ok()
         .and_then(|(_, item)| item.bucket_entity)
 }
@@ -1056,67 +1073,203 @@ fn item_totals(stacks: &[ContainerStack]) -> BTreeMap<&str, i32> {
     totals
 }
 
-/// 官方在发射器（不是投掷器）上发了 1000，说明注册表里的发射行为已经跑过。
+/// 弹射物发射用的世界事件。箭和蛋是 1002，烟花 1004，火焰弹 1018，风弹 1051。
 ///
-/// Official played 1000 on a dispenser (not a dropper): a registry dispense behaviour ran.
-fn official_dispenser_shot(case: &Case) -> bool {
-    case.outcome.level_events.iter().any(|event| {
-        if event.0 != 1000 {
-            return false;
-        }
-        let pos = BlockPos::new(event.1, event.2, event.3);
-        let state = final_state(case, pos).unwrap_or_else(|| scene_state(case, pos));
+/// Level events used by projectile dispense. Arrows and eggs use 1002, fireworks 1004,
+/// fire charges 1018, wind charges 1051.
+const PROJECTILE_EVENTS: [i32; 4] = [1002, 1004, 1018, 1051];
+
+/// 这一格是发射器，不是投掷器。
+///
+/// This cell is a dispenser, not a dropper.
+fn is_dispenser_at(case: &Case, pos: BlockPos) -> bool {
+    // 排除判断比重放先跑。不合法的状态 ID 留给重放里的 panic，这里当成不是发射器。
+    //
+    // Exclusion runs before the replay. An illegal state id is left for that panic
+    // and is not treated as a dispenser here.
+    known_scene_state(case, pos).is_some_and(|state| {
         state.is_a(BlockAncestor::DispenserBlock) && !state.is_a(BlockAncestor::DropperBlock)
     })
 }
 
-/// 发射器的物品行为（箭、水、盔甲等）不在范围里，Bamboo 的发射器 tick 什么也不做。
-/// 场景里的发射器有东西又真的 tick 了，官方那边已经发出去，这题只能排除。
-/// 放下方块时物品在物品组件里，不在开局的容器表里；`settle` 跑完计划刻后，官方会在这个
-/// 发射器上留下 1000（`SOUND_DISPENSER_DISPENSE`）。投掷器抛出时也会发 1000，但投掷器
-/// 自己实现了，照常比较。
+/// 场景里这一格的状态。ID 不在注册表里时是 `None`。
 ///
-/// Dispenser item behaviours (arrows, water, armour) are out of scope, so a dispenser tick
-/// does nothing. A dispenser that had items and really ticked has already fired on the
-/// official side, and that case is excluded. Items that arrive inside the placed block are
-/// not in the starting container list; after `settle` runs the scheduled tick, official leaves
-/// level event 1000 (`SOUND_DISPENSER_DISPENSE`) on that dispenser. A dropper's throw uses
-/// 1000 too, but droppers are implemented and stay in the comparison.
+/// The scene state at this cell. `None` when the id is not in the registry.
+fn known_scene_state(case: &Case, pos: BlockPos) -> Option<BlockState> {
+    let id = case
+        .scene
+        .iter()
+        .find(|cell| cell.pos() == pos)
+        .map_or(blocks::AIR, |cell| cell.state());
+    state_of(id)
+}
+
+/// 上面有漏斗。数量变少可能是漏斗吸走的，不是发射器自己发出去的。
+///
+/// A hopper sits above. A smaller count may be the hopper pulling, not the dispenser firing.
+fn hopper_above(case: &Case, pos: BlockPos) -> bool {
+    final_state(case, pos.above()).is_some_and(|state| state.is_a(BlockAncestor::HopperBlock))
+        || known_scene_state(case, pos.above())
+            .is_some_and(|state| state.is_a(BlockAncestor::HopperBlock))
+}
+
+fn stack_count(stacks: &[ContainerStack], pos: BlockPos, item: &str) -> i32 {
+    stacks
+        .iter()
+        .filter(|stack| stack.pos() == pos && stack.item() == item)
+        .map(|stack| stack.count())
+        .sum()
+}
+
+/// 这个发射器里某种物品变少了，而且上面没有漏斗。
+///
+/// This item got smaller in the dispenser, and no hopper sits above it.
+fn dispenser_lost(case: &Case, pos: BlockPos, item: &str) -> bool {
+    is_dispenser_at(case, pos)
+        && !hopper_above(case, pos)
+        && stack_count(&case.contents, pos, item) > stack_count(&case.outcome.contents, pos, item)
+}
+
+fn dispenser_positions(case: &Case) -> Vec<BlockPos> {
+    let mut positions = Vec::new();
+    for cell in &case.scene {
+        if is_dispenser_at(case, cell.pos()) && !positions.contains(&cell.pos()) {
+            positions.push(cell.pos());
+        }
+    }
+    positions
+}
+
+/// 官方在发射器上放了弹射物事件，或者 TNT 被点燃，或者盔甲架、刷怪蛋从发射器里少了。
+/// 这些都会生成实体。别的发射照常比较。
+///
+/// Official played a projectile event on a dispenser, primed TNT, or an armour stand or spawn
+/// egg left a dispenser. Those spawn an entity. Every other shot is compared.
 fn dispenser_dispenses(case: &Case) -> bool {
-    if official_dispenser_shot(case) {
+    let projectile = case.outcome.level_events.iter().any(|event| {
+        PROJECTILE_EVENTS.contains(&event.0)
+            && is_dispenser_at(case, BlockPos::new(event.1, event.2, event.3))
+    });
+    if projectile {
         return true;
     }
-    let is_dispenser = |pos: BlockPos| {
-        let state = scene_state(case, pos);
-        state.is_a(BlockAncestor::DispenserBlock) && !state.is_a(BlockAncestor::DropperBlock)
-    };
-    let ticked = case
+    let primed = case
         .outcome
-        .ran
+        .sounds
         .iter()
-        .any(|id| id == "minecraft:dispenser")
-        || case.action.kind == Kind::Tick && case.block == "minecraft:dispenser";
-    if ticked {
-        return case.contents.iter().any(|stack| is_dispenser(stack.pos()));
+        .any(|sound| sound_name(sound.0) == Some("minecraft:entity.tnt.primed"));
+    if primed
+        && dispenser_positions(case)
+            .iter()
+            .any(|&pos| dispenser_shot_at(case, pos))
+    {
+        return true;
     }
-    // 流动题里被红石排上的发射器刻由官方假世界反射调用 `ServerLevel.tickBlock`，
-    // 不经过 FakeLevel 记 `ran` 的那一层，所以上面看不出来。官方发出去之后槽位里的东西变少，
-    // 用前后的数量判断。上面有漏斗的格子排除：那是漏斗正常吸走一件，Bamboo 能重放。
-    if case.action.kind != Kind::Flow {
-        return false;
-    }
-    let mut before: BTreeMap<BlockPos, i32> = BTreeMap::new();
-    for stack in &case.contents {
-        *before.entry(stack.pos()).or_default() += stack.count();
-    }
-    let mut after: BTreeMap<BlockPos, i32> = BTreeMap::new();
-    for stack in &case.outcome.contents {
-        *after.entry(stack.pos()).or_default() += stack.count();
-    }
-    before.iter().any(|(&pos, &count)| {
-        let hopper_above = final_state(case, pos.above())
-            .is_some_and(|state| state.is_a(BlockAncestor::HopperBlock));
-        after.get(&pos).copied().unwrap_or(0) < count && is_dispenser(pos) && !hopper_above
+    dispenser_positions(case).iter().any(|&pos| {
+        lost_named(case, pos, "minecraft:armor_stand")
+            || case.contents.iter().any(|stack| {
+                stack.pos() == pos
+                    && stack.item().ends_with("_spawn_egg")
+                    && dispenser_lost(case, pos, stack.item())
+            })
+    })
+}
+
+/// 这一格的发射器发过 1000 或 1001，或者它的物品变少了。
+///
+/// This dispenser played 1000 or 1001, or its items got smaller.
+fn dispenser_shot_at(case: &Case, pos: BlockPos) -> bool {
+    let event = case.outcome.level_events.iter().any(|event| {
+        (event.0 == 1000 || event.0 == 1001) && BlockPos::new(event.1, event.2, event.3) == pos
+    });
+    event || total_at(case, pos) > total_after(case, pos)
+}
+
+fn total_at(case: &Case, pos: BlockPos) -> i32 {
+    case.contents
+        .iter()
+        .filter(|stack| stack.pos() == pos)
+        .map(|stack| stack.count())
+        .sum()
+}
+
+fn total_after(case: &Case, pos: BlockPos) -> i32 {
+    case.outcome
+        .contents
+        .iter()
+        .filter(|stack| stack.pos() == pos)
+        .map(|stack| stack.count())
+        .sum()
+}
+
+fn lost_named(case: &Case, pos: BlockPos, item: &str) -> bool {
+    dispenser_lost(case, pos, item)
+}
+
+fn sound_name(id: i32) -> Option<&'static str> {
+    let index = usize::try_from(id).ok()?;
+    mc_bamboo_data::sounds::SOUND_EVENTS
+        .get(index)
+        .map(|event| event.name)
+}
+
+/// 骨粉从发射器打到要世界生成的方块上。树、蘑菇、菌、草方块和苔藓都不比较。
+///
+/// Bone meal from a dispenser hit a block that needs world generation. Trees, mushrooms,
+/// fungi, grass blocks and moss are not compared.
+fn dispenser_bonemeals_a_feature(case: &Case) -> bool {
+    const FEATURES: &[BlockClass] = &[
+        BlockClass::SaplingBlock,
+        BlockClass::AzaleaBlock,
+        BlockClass::MushroomBlock,
+        BlockClass::NetherFungusBlock,
+        BlockClass::GrassBlock,
+        BlockClass::MyceliumBlock,
+        BlockClass::BonemealableFeaturePlacerBlock,
+    ];
+    dispenser_positions(case).iter().any(|&pos| {
+        if !dispenser_lost(case, pos, "minecraft:bone_meal") {
+            return false;
+        }
+        let Some(dispenser) = known_scene_state(case, pos) else {
+            return false;
+        };
+        let facing = dispenser.get(FACING);
+        known_scene_state(case, pos.relative(facing))
+            .is_some_and(|front| FEATURES.contains(&front.class()))
+    })
+}
+
+/// 这题的世界随机源要和官方对上：发射器真的动过，而且不是倒出生物的桶。
+///
+/// This case compares `level.random`: a dispenser actually fired, and it did not pour a mob bucket.
+fn compares_dispenser_seed(case: &Case) -> bool {
+    // 只比这题的主角就是发射器的情况。场景里顺便被带动的发射器不拿来比种子，
+    // 旁边的门一类方块可能多取用不上的随机数。
+    //
+    // Only cases whose subject is the dispenser compare seeds. A dispenser that
+    // fired as a side effect does not. A door beside it may draw unused random.
+    case.block == "minecraft:dispenser"
+        && dispenser_positions(case)
+            .iter()
+            .any(|&pos| dispenser_shot_at(case, pos))
+        && !dispenser_poured_mob_bucket(case)
+}
+
+fn dispenser_poured_mob_bucket(case: &Case) -> bool {
+    const MOB_BUCKETS: &[&str] = &[
+        "minecraft:salmon_bucket",
+        "minecraft:cod_bucket",
+        "minecraft:pufferfish_bucket",
+        "minecraft:tropical_fish_bucket",
+        "minecraft:axolotl_bucket",
+        "minecraft:tadpole_bucket",
+        "minecraft:sulfur_cube_bucket",
+    ];
+    dispenser_positions(case).iter().any(|&pos| {
+        MOB_BUCKETS
+            .iter()
+            .any(|item| dispenser_lost(case, pos, item))
     })
 }
 
@@ -1173,6 +1326,10 @@ fn compare(
         ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
         gained: answer.gained != replayed.gained,
+        random: compares_dispenser_seed(case)
+            && answer
+                .random_seed
+                .is_some_and(|seed| seed != replayed.random_seed),
         panic: None,
     })
 }

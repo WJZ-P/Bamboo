@@ -5,8 +5,11 @@
 //! 一个文件放一组官方类，文件头写着里面有哪些类。这里只有分派和几个类共用的小函数。
 //!
 //! 红石信号和元件的计划刻都移植了。活塞的方块事件和移动方块实体也移植了，世界里没有实体和
-//! 声音，所以推实体、播放音效两段没写。要方块实体内容或者实体才走得到的分支（发射物品、
-//! 探测铁轨看矿车这些）不写。要打开界面的方块只吃掉点击。
+//! 声音，所以推实体、播放音效两段没写。探测铁轨看矿车要实体，不写。发射器的物品行为在
+//! `crate::dispense`。要打开界面的方块只吃掉点击。
+//!
+//! Detector rails that look for a minecart need an entity and are not implemented.
+//! Dispenser item behaviour lives in `crate::dispense`. Blocks that open a screen only consume the click.
 
 mod beehive;
 mod brewing;
@@ -35,6 +38,7 @@ pub(crate) use self::containers::open_support_shape;
 pub use self::containers::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
 pub use self::cooking::FurnaceEntity;
 pub use self::lectern::{reset_lectern, signal_lectern_page};
+pub(crate) use self::pumpkin::can_spawn_golem;
 
 use mc_bamboo_data::{Block, BlockClass};
 

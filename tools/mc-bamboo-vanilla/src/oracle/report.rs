@@ -36,6 +36,10 @@ pub struct Mismatch {
     pub compared_ticks: (Vec<Scheduled>, Vec<Scheduled>),
     /// 物品栏里新出现的物品不同。
     pub gained: bool,
+    /// 发射器题的世界随机源种子不同。
+    ///
+    /// The world random seed differs on a dispenser case.
+    pub random: bool,
     pub panic: Option<String>,
 }
 
@@ -49,6 +53,7 @@ impl Mismatch {
             && !self.contents
             && !self.ticks
             && !self.gained
+            && !self.random
             && self.panic.is_none()
     }
 }
@@ -587,6 +592,14 @@ fn render_case(
 
     render_official(&mut text, case, mismatch);
     render_bamboo(&mut text, replayed, mismatch);
+    if mismatch.random {
+        let _ = writeln!(
+            text,
+            "  random seed official {:?} bamboo {}",
+            case.outcome.random_seed,
+            replayed.map(|replayed| replayed.random_seed).unwrap_or(0)
+        );
+    }
     if !blockers.is_empty() {
         let names: Vec<String> = blockers.iter().map(|class| format!("{class:?}")).collect();
         let _ = writeln!(text, "  unported {}", names.join(", "));

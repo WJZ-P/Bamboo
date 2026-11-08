@@ -7,16 +7,18 @@ use mc_bamboo_blocks::{
     LevelRandom, RedstoneMemory, ShulkerSlots, Slots,
     container::redstone_signal,
     entity::Entities,
+    level::EquipTarget,
     shape::{self, BooleanOp},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::{
     block_of_state, blocks,
-    registries::{block_entity_type as entities, data_component_type as kinds},
+    registries::{block_entity_type as entities, data_component_type as kinds, entity_type},
 };
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue},
     item::ItemStack,
+    packet::play::GameMode,
 };
 use mc_bamboo_world::{MIN_Y, store::ChunkStore};
 
@@ -33,7 +35,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) changes: &'a mut BlockChanges,
     /// 方块实体从物品带来的组件，换了方块就丢，见 [`crate::block_items`]。
     pub(crate) block_items: &'a mut BTreeMap<BlockPos, ComponentPatch>,
-    pub(crate) players: &'a BTreeMap<PlayerId, Player>,
+    pub(crate) players: &'a mut BTreeMap<PlayerId, Player>,
     pub(crate) random: &'a LevelRandom,
     pub(crate) redstone: &'a mut RedstoneMemory,
     pub(crate) block_entities: &'a mut BlockEntities,
@@ -277,5 +279,58 @@ impl Level for RegionLevel<'_> {
         };
         f(hopper);
         true
+    }
+
+    /// `getEntitiesOfClass(LivingEntity)`。玩家按 `PlayerId` 排序，和实体列表的顺序不一定相同。
+    ///
+    /// `getEntitiesOfClass(LivingEntity)`. Players are ordered by `PlayerId`, which is not
+    /// necessarily the entity-list order.
+    fn dispenser_targets(&self) -> Vec<EquipTarget> {
+        self.players.values().map(equip_target).collect()
+    }
+
+    /// 写进玩家物品栏。`Body` 和 `Saddle` 这套物品栏没有，返回 `None`。
+    ///
+    /// Write into the player inventory. This inventory has no `Body` or `Saddle` slot, so those
+    /// return `None`.
+    fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        let player = self
+            .players
+            .values_mut()
+            .find(|player| player.id.0 == entity_id)?;
+        let slot =
+            crate::inventory::set_dispenser_slot(&mut player.inventory, component_slot, stack)?;
+        u16::try_from(slot).ok()
+    }
+}
+
+/// 一名玩家能被发射器看到的装备。身体和鞍是 `None`。
+///
+/// Equipment a dispenser can see on one player. Body and saddle are `None`.
+fn equip_target(player: &Player) -> EquipTarget {
+    let worn = |slot| player.inventory.equipment(slot).cloned();
+    use mc_bamboo_protocol::packet::play::EquipmentSlot::{
+        Body, Chest, Feet, Head, Legs, MainHand, OffHand, Saddle,
+    };
+    EquipTarget {
+        entity_id: player.id.0,
+        bounds: player.bounding_box(),
+        spectator: player.game_mode == GameMode::Spectator,
+        entity_type: entity_type::PLAYER,
+        equipment: [
+            worn(MainHand),
+            worn(Feet),
+            worn(Legs),
+            worn(Chest),
+            worn(Head),
+            worn(OffHand),
+            worn(Body),
+            worn(Saddle),
+        ],
     }
 }

@@ -253,6 +253,11 @@ pub struct Answer {
     /// 物品栏里新出现的物品，只有 item 题有内容。
     #[serde(default)]
     pub gained: Vec<String>,
+    /// 官方 `level.random` 跑完这题之后的内部种子。旧的题目行没有这个字段。
+    ///
+    /// The internal seed of official `level.random` after the case. Older lines omit it.
+    #[serde(default)]
+    pub random_seed: Option<i64>,
 }
 
 /// 写成 IEEE 754 位的 `double`：十进制不保证往返，这些数在边界上差一位结果就变。

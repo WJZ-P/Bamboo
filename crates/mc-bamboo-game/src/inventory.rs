@@ -591,6 +591,28 @@ fn clear_slot(
     removed
 }
 
+/// 发射器穿上的那一格。下标是组件 `equipment_slot`。身体和鞍没有菜单槽。
+///
+/// The slot a dispenser equips. The index is the component `equipment_slot`.
+/// Body and saddle have no menu slot.
+pub(crate) fn set_dispenser_slot(
+    inventory: &mut Inventory,
+    component_slot: i32,
+    stack: ItemStack,
+) -> Option<usize> {
+    let index = match component_slot {
+        0 => inventory.hand_slot(Hand::Main),
+        1 => 8,
+        2 => 7,
+        3 => 6,
+        4 => 5,
+        5 => OFF_HAND,
+        _ => return None,
+    };
+    *inventory.slots.get_mut(index)? = stack;
+    Some(index)
+}
+
 /// 把一个槽发给这名玩家。组件原样发：这些字节本来就是它的客户端发来的，或者来自服务端
 /// 自己的数据，见 [`ItemStack::write`]。
 pub(crate) fn send_slot(player: &mut Player, links: &mut Links, slot: usize) {

@@ -19,9 +19,12 @@
 //! 耐久、音效、掉落物和游戏事件都不做，骨粉的粒子发给玩家。
 
 mod bone_meal;
+pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod ender_eye;
 mod honeycomb;
+pub(crate) use honeycomb::waxed;
 mod ignite;
+pub(crate) use ignite::can_light;
 mod shears;
 mod transformer;
 

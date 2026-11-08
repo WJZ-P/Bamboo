@@ -17,6 +17,7 @@ pub mod block_entity;
 mod composter;
 pub mod container;
 pub mod context;
+pub mod dispense;
 pub mod dispenser;
 pub mod entity;
 pub mod fluid;
@@ -45,7 +46,7 @@ pub use behaviour::machines::{
 pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
-pub use dispenser::{click_if_empty, dispense_from};
+pub use dispenser::dispense_from;
 pub use hopper::HopperEntity;
 pub use interact::{
     InteractionResult, Outcome, attack, destroy_block, run_action_block_ticks,

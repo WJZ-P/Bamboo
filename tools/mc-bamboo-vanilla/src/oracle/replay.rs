@@ -11,6 +11,7 @@ use mc_bamboo_blocks::{
     Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
     ShulkerSlots, Slots, TickPriority, destroy_block,
     entity::Entities,
+    level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
     state::{
@@ -20,7 +21,7 @@ use mc_bamboo_blocks::{
     tick_chunk, use_item, use_item_on, use_item_on_with_stack,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
-use mc_bamboo_data::{BlockAncestor, blocks, items, tags::block_tags};
+use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
@@ -68,6 +69,10 @@ pub struct Replayed {
     pub gained: Vec<String>,
     /// 读写过的方块的注册表 ID。结果不对时看它们里面有没有还没移植的类。
     pub touched: BTreeSet<usize>,
+    /// 跑完之后 `level.random` 的内部种子。
+    ///
+    /// The internal seed of `level.random` after the case.
+    pub random_seed: i64,
 }
 
 /// 排着队的计划刻。
@@ -103,6 +108,10 @@ struct OracleLevel {
     /// 活塞这类会动的方块实体，见 `BlockOracle.java` 的方块事件和 ticker。
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 假玩家。先是操作的那一个，再是 `others` 里的旁观者。
+    ///
+    /// The fake players. The actor comes first, then the bystanders in `others`.
+    living: Vec<EquipTarget>,
 }
 
 /// 已建模的容器，槽位数和官方一致。
@@ -244,6 +253,7 @@ impl OracleLevel {
             redstone: RedstoneMemory::default(),
             block_entities,
             block_events: BlockEvents::default(),
+            living: equip_targets(&case.action, names)?,
         })
     }
 
@@ -462,6 +472,30 @@ impl Level for OracleLevel {
         &self.random
     }
 
+    /// 官方 `FakePlayer` 先加进世界，再加旁观者。格子都是空的，主副手用题目里的物品。
+    ///
+    /// Official adds the `FakePlayer` first, then bystanders. Armour slots start empty.
+    /// The hands use the items from the case.
+    fn dispenser_targets(&self) -> Vec<EquipTarget> {
+        self.living.clone()
+    }
+
+    fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        let target = self
+            .living
+            .iter_mut()
+            .find(|target| target.entity_id == entity_id)?;
+        let index = usize::try_from(component_slot).ok()?;
+        let stored = target.equipment.get_mut(index)?.as_mut()?;
+        *stored = stack;
+        u16::try_from(component_slot).ok()
+    }
+
     /// 官方假世界的区块段每次都扫一遍场景。
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
         self.blocks.iter().any(|(pos, state)| {
@@ -622,6 +656,65 @@ fn intersects(first: Aabb, second: Aabb) -> bool {
         && first.max_z > second.min_z
 }
 
+/// 发射器能穿上的假玩家。创造模式，不是旁观者，八个槽都在。
+///
+/// Fake players a dispenser can equip. Creative, not spectating, and all eight slots exist.
+fn equip_targets(action: &Action, names: &Names) -> Result<Vec<EquipTarget>, String> {
+    let mut targets = vec![player_target(
+        1,
+        &action.actor_box,
+        &action.main,
+        &action.off,
+        names,
+    )?];
+    for (index, bounds) in action.others.iter().enumerate() {
+        let id = i32::try_from(index).unwrap_or(0).saturating_add(2);
+        targets.push(player_target(
+            id,
+            bounds,
+            "minecraft:air",
+            "minecraft:air",
+            names,
+        )?);
+    }
+    Ok(targets)
+}
+
+fn player_target(
+    entity_id: i32,
+    bounds: &[Double; 6],
+    main: &str,
+    off: &str,
+    names: &Names,
+) -> Result<EquipTarget, String> {
+    let empty = Some(ItemStack::empty());
+    Ok(EquipTarget {
+        entity_id,
+        bounds: aabb(bounds),
+        spectator: false,
+        entity_type: entity_type::PLAYER,
+        equipment: [
+            Some(held_stack(names, main)?),
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            Some(held_stack(names, off)?),
+            empty.clone(),
+            empty,
+        ],
+    })
+}
+
+fn held_stack(names: &Names, name: &str) -> Result<ItemStack, String> {
+    let (id, _) = names.item(name)?;
+    if id == items::AIR {
+        Ok(ItemStack::empty())
+    } else {
+        Ok(ItemStack::new(id, 1))
+    }
+}
+
 fn entity_boxes(action: &Action) -> Vec<Aabb> {
     std::iter::once(&action.actor_box)
         .chain(&action.others)
@@ -733,6 +826,7 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
+        random_seed: level.random.source().seed(),
     })
 }
 
@@ -854,7 +948,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 堆肥的粒子和声音，题里不比较。
             | Effect::ComposterFill { .. }
             // 讲台翻页的声音，题里不比较。
-            | Effect::PageTurned { .. } => None,
+            | Effect::PageTurned { .. }
+            | Effect::DispenserEquipped { .. } => None,
         })
         .collect()
 }
@@ -959,7 +1054,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             // 讲台翻页是菜单里的 `levelEvent(1043)`，方块题不比较。游戏层会把它发出去。
             // A lectern page turn is menu `levelEvent(1043)`. Block cases do not compare it.
             // The game layer still sends it.
-            | Effect::PageTurned { .. } => {}
+            | Effect::PageTurned { .. }
+            | Effect::DispenserEquipped { .. } => {}
         }
     }
     (events, sounds)
@@ -1019,6 +1115,7 @@ mod tests {
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            living: Vec::new(),
         }
     }
 

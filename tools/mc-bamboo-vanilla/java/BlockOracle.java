@@ -34,6 +34,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -1024,6 +1025,26 @@ public final class BlockOracle {
         private OracleRandom(Mode mode, RandomSource seeded) {
             this.mode = mode;
             this.seeded = seeded;
+        }
+
+        /** 官方 `LegacyRandomSource` 的私有 `AtomicLong` 种子。 */
+        long legacySeed() {
+            Class<?> type = this.seeded.getClass();
+            while (type != null) {
+                for (Field field : type.getDeclaredFields()) {
+                    if (!AtomicLong.class.isAssignableFrom(field.getType())) {
+                        continue;
+                    }
+                    try {
+                        field.setAccessible(true);
+                        return ((AtomicLong) field.get(this.seeded)).get();
+                    } catch (IllegalAccessException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+                type = type.getSuperclass();
+            }
+            throw new IllegalStateException("LegacyRandomSource has no AtomicLong seed");
         }
 
         private void touch() {
@@ -2246,6 +2267,8 @@ public final class BlockOracle {
         final boolean analogContent;
         final List<String> gained;
         boolean touchedRandom;
+        /** `LegacyRandomSource` 跑完这题之后的种子，和 Bamboo 的 `LevelRandom::source().seed()` 对。 */
+        long randomSeed;
 
         Outcome(String result, FakeLevel level, Case c, boolean itemReached, List<String> gained) {
             this.result = result;
@@ -4340,6 +4363,7 @@ public final class BlockOracle {
             OracleRandom entityRandom = new OracleRandom(OracleRandom.Mode.SEEDED, -seed);
             Outcome outcome = execute(c, levelRandom, entityRandom);
             outcome.touchedRandom = levelRandom.draws > 0 || entityRandom.draws > 0;
+            outcome.randomSeed = levelRandom.legacySeed();
             if (entityRandom.draws > 0) {
                 List<OracleRandom> variants = List.of(new OracleRandom(OracleRandom.Mode.LOW, 0),
                         new OracleRandom(OracleRandom.Mode.HIGH, 0), new OracleRandom(OracleRandom.Mode.SEEDED, ~seed));
@@ -4641,7 +4665,8 @@ public final class BlockOracle {
             line.append(",\"itemReached\":").append(outcome.itemReached);
             strings("gained", outcome.gained);
             strings("spawned", outcome.spawned);
-            line.append(",\"rng\":").append(outcome.touchedRandom).append('}');
+            line.append(",\"rng\":").append(outcome.touchedRandom);
+            line.append(",\"randomSeed\":").append(outcome.randomSeed).append('}');
         }
 
         private void strings(String name, List<String> values) {

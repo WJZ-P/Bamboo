@@ -4,8 +4,7 @@
 //! 朝着的方向有容器就塞一个进去，没有就把物品抛出去。这个世界没有物品实体，
 //! 抛出去的那一个直接消失，但官方抛出去时要取的随机数照取，见 [`spawn_item_random`]。
 //!
-//! 发射器（`DispenserBlock`）用的注册表行为（箭、水、盔甲等）不在范围里。
-//! 空的发射器仍然走 `dispenseFrom` 开头那一步，报 `levelEvent(1001)`。
+//! 发射器走 [`crate::dispense`]，不走这个函数。空槽的 `levelEvent(1001)` 两边相同。
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::BlockAncestor;
@@ -22,7 +21,7 @@ use crate::{
 ///
 /// 每个非空的槽都抽一次 `nextInt(replaceOdds++)`，抽到 0 就把结果换成这一格，
 /// 越靠后的槽越容易被选中。`occupied` 是 9 个槽是不是非空。
-fn random_slot(world: &World, occupied: &[bool]) -> i32 {
+pub(crate) fn random_slot(world: &World, occupied: &[bool]) -> i32 {
     let mut replace_slot = -1;
     let mut replace_odds = 1;
     for (slot, &non_empty) in occupied.iter().enumerate() {
@@ -42,7 +41,7 @@ fn random_slot(world: &World, occupied: &[bool]) -> i32 {
 ///
 /// 一个 `nextDouble` 算 `pow`，再加三个 `triangle`，每个 `triangle` 取两个 `nextDouble`。
 /// 物品实体不建，随机数不能少取。
-fn spawn_item_random(world: &mut World) {
+pub(crate) fn spawn_item_random(world: &mut World) {
     let _pow = world.random().next_double() * 0.1 + 0.2;
     for _ in 0..3 {
         let _ = world.random().triangle(0.2, 0.017_227_5 * 6.0);
@@ -50,7 +49,7 @@ fn spawn_item_random(world: &mut World) {
 }
 
 /// 从 `stack` 里拿走一个。官方 `split(1)` 之后剩下的那一堆。
-fn without_one(stack: &ItemStack) -> ItemStack {
+pub(crate) fn without_one(stack: &ItemStack) -> ItemStack {
     if stack.count <= 1 {
         ItemStack::empty()
     } else {
@@ -59,7 +58,7 @@ fn without_one(stack: &ItemStack) -> ItemStack {
 }
 
 /// `BaseContainerBlockEntity.setItem` 里的 `limitSize(getMaxStackSize(itemStack))`。
-fn limited(stack: ItemStack) -> ItemStack {
+pub(crate) fn limited(stack: ItemStack) -> ItemStack {
     let mut stack = stack;
     if !stack.is_empty() {
         stack.count = stack.count.min(stack_limit(&stack));
@@ -67,21 +66,8 @@ fn limited(stack: ItemStack) -> ItemStack {
     stack
 }
 
-/// `DispenserBlock.dispenseFrom` 在槽位是 `-1` 时的那一下。
-///
-/// 有物品时官方走注册表里的发射行为，那些不在范围里，这里什么都不发。
-/// 找不到方块实体时官方只打警告，不报 1001。
-pub fn click_if_empty(world: &mut World, pos: BlockPos) {
-    let Some(occupied) = occupied_slots(world, pos) else {
-        return;
-    };
-    if random_slot(world, &occupied) < 0 {
-        world.level_event(1001, pos, 0);
-    }
-}
-
 /// 九个槽是不是非空。没有方块实体时是 `None`。
-fn occupied_slots(world: &mut World, pos: BlockPos) -> Option<Vec<bool>> {
+pub(crate) fn occupied_slots(world: &mut World, pos: BlockPos) -> Option<Vec<bool>> {
     let mut occupied = None;
     if !world.with_container(pos, &mut |container| {
         occupied = Some(
