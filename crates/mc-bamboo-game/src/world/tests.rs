@@ -176,6 +176,7 @@ impl Harness {
             id,
             uuid,
             name: name.to_owned(),
+            properties: Vec::new(),
             client,
             sink: Box::new(sink.clone()),
         };
@@ -684,6 +685,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         id: new_id,
         uuid: old.uuid,
         name: "Kitten".to_owned(),
+        properties: Vec::new(),
         client: client_requesting(2),
         sink: Box::new(sink),
     };

@@ -1,21 +1,32 @@
-//! Login 状态：确认玩家身份。目前只支持离线模式，不做正版验证和加密。
+//! Login 状态：确认玩家身份。默认是离线模式，也可以信任代理转发的 UUID、名字和皮肤。
 
 use std::sync::Arc;
 
 use mc_bamboo_protocol::{
     frame::append_frame,
-    packet::login::{LoginCompression, LoginFinished, LoginRequest, MAX_PLAYER_NAME_CHARS},
+    packet::{
+        login::{LoginCompression, LoginFinished, LoginRequest, MAX_PLAYER_NAME_CHARS},
+        profile::ProfileProperty,
+    },
 };
 use md5::{Digest, Md5};
 use uuid::{Builder, Uuid};
 
-use super::{Connection, ConnectionError};
+use super::{Connection, ConnectionError, forwarding};
 use crate::{players::PlayerSession, server::Shared};
+
+/// 这次登录最终采用的身份。
+struct Profile {
+    uuid: Uuid,
+    name: String,
+    properties: Vec<ProfileProperty>,
+}
 
 /// 读取玩家名并把玩家加入玩家表。同名玩家在线时要等它离开。玩家被拒绝或中途离开时返回 `None`。
 pub(super) async fn admit(
     connection: &mut Connection,
     shared: &Arc<Shared>,
+    identity: forwarding::Identity,
 ) -> Result<Option<PlayerSession>, ConnectionError> {
     let Some(payload) = connection.next_frame().await? else {
         return Ok(None);
@@ -27,7 +38,32 @@ pub(super) async fn admit(
         return Err(ConnectionError::InvalidPlayerName);
     }
 
-    match PlayerSession::join(shared, name, offline_uuid(name)).await {
+    let profile = match identity {
+        forwarding::Identity::Offline => Profile {
+            uuid: offline_uuid(name),
+            name: name.to_owned(),
+            properties: Vec::new(),
+        },
+        // legacy 只转发 UUID 和属性，名字还是握手之后客户端自己报的。
+        forwarding::Identity::Legacy(legacy) => Profile {
+            uuid: legacy.uuid,
+            name: name.to_owned(),
+            properties: legacy.properties,
+        },
+        forwarding::Identity::Modern => {
+            let Some(profile) = forwarding::authenticate(connection, shared).await? else {
+                return Ok(None);
+            };
+            // 和官方一样，代理给的名字直接采用，不再按本地玩家名规则检查。
+            Profile {
+                uuid: profile.uuid,
+                name: profile.name,
+                properties: profile.properties,
+            }
+        }
+    };
+
+    match PlayerSession::join(shared, &profile.name, profile.uuid, profile.properties).await {
         Ok(session) => Ok(Some(session)),
         Err(refusal) => {
             connection.refuse_login(refusal.message()).await?;
@@ -59,6 +95,7 @@ pub(super) async fn finish(
         &LoginFinished {
             uuid: session.uuid,
             name: &session.name,
+            properties: &session.properties,
             session_id: shared.session_id,
         },
     )?;
@@ -72,7 +109,9 @@ pub(super) async fn finish(
             connection.allow_full_size_frames();
             Ok(())
         }
-        LoginRequest::Hello { .. } => Err(ConnectionError::UnexpectedPacket),
+        LoginRequest::Hello { .. } | LoginRequest::PluginResponse { .. } => {
+            Err(ConnectionError::UnexpectedPacket)
+        }
     }
 }
 

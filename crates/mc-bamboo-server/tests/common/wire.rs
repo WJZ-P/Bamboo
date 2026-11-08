@@ -493,11 +493,21 @@ impl Packet for PlayerPosition {
     }
 }
 
+/// Tab 列表里的一档案属性，比如签名过的皮肤。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabProperty {
+    pub name: String,
+    pub value: String,
+    pub signature: Option<String>,
+}
+
 /// Tab 列表的一条记录。只有动作掩码里有的字段才是 `Some`。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TabEntry {
     pub uuid: Uuid,
     pub name: Option<String>,
+    /// 跟着名字一起来的档案属性，离线模式是空列表。
+    pub properties: Vec<TabProperty>,
     pub game_mode: Option<i32>,
     pub listed: Option<bool>,
     pub latency: Option<i32>,
@@ -544,7 +554,8 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
     };
     if actions & 0x01 != 0 {
         entry.name = Some(reader.string(16).expect("name").to_owned());
-        assert_eq!(varint(reader), 0, "offline players have no properties");
+        let count = list_len(reader);
+        entry.properties = (0..count).map(|_| read_tab_property(reader)).collect();
     }
     if actions & 0x02 != 0 {
         assert!(!boolean(reader), "offline players have no chat session");
@@ -568,6 +579,18 @@ fn read_tab_entry(reader: &mut Reader<'_>, actions: u8) -> TabEntry {
         entry.show_hat = Some(boolean(reader));
     }
     entry
+}
+
+fn read_tab_property(reader: &mut Reader<'_>) -> TabProperty {
+    let name = reader.string(64).expect("property name").to_owned();
+    let value = reader.string(32767).expect("property value").to_owned();
+    let signature =
+        boolean(reader).then(|| reader.string(1024).expect("property signature").to_owned());
+    TabProperty {
+        name,
+        value,
+        signature,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

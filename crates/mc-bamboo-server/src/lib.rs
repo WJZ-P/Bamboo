@@ -12,7 +12,7 @@ mod event;
 mod players;
 mod server;
 
-pub use config::ServerConfig;
+pub use config::{ForwardingMode, ServerConfig};
 pub use event::{PlayerInfo, ServerEvent};
 pub use mc_bamboo_protocol::{GAME_VERSION, PROTOCOL_VERSION};
 pub use server::{Server, ServerHandle};

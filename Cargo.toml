@@ -23,8 +23,11 @@ mc-bamboo-world = { path = "crates/mc-bamboo-world", version = "0.0.0" }
 
 bytes = "1.12.1"
 flate2 = "1.1.11"
+hmac = "0.12.1"
 md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10.9"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }

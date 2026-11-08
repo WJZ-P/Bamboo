@@ -139,10 +139,12 @@ impl Region {
 
     /// 进服第 1 到 3 步：`login`、`player_abilities`、`player_position`。
     pub(crate) fn add_player(&mut self, request: JoinRequest, game_mode: GameMode) {
+        // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
             id,
             uuid,
             name,
+            properties: _,
             client,
             sink,
         } = request;

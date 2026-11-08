@@ -147,6 +147,7 @@ impl World {
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
+            properties: request.properties.clone(),
             game_mode: GAME_MODE,
             latency: 0,
             show_hat: shows_hat(&request.client),

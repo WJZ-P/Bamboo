@@ -4,6 +4,7 @@
 //! 每个状态放在一个子模块里，这里只负责分发和帧的收发。
 
 mod configuration;
+mod forwarding;
 mod login;
 mod outbound;
 mod play;
@@ -18,7 +19,7 @@ use mc_bamboo_protocol::{
     compression::{self, CompressionError},
     frame::{FrameError, MAX_FRAME_LEN, append_frame, find_frame},
     packet::{
-        handshake::{Handshake, Intent},
+        handshake::{Handshake, Intent, MAX_LEGACY_SERVER_ADDRESS_CHARS, MAX_SERVER_ADDRESS_CHARS},
         login::LoginDisconnect,
         play::ClientInformation,
     },
@@ -33,7 +34,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::{players::PlayerSession, server::Shared};
+use crate::{config::ForwardingMode, players::PlayerSession, server::Shared};
 
 #[cfg(test)]
 pub(crate) use outbound::MAX_QUEUED_BYTES;
@@ -41,6 +42,12 @@ pub(crate) use outbound::MAX_QUEUED_BYTES;
 /// 登录之前的帧都很小：最大的合法握手包只有 780 字节。
 /// 把上限压到远低于协议允许的 2 MiB，未认证的连接就占不了多少内存。
 const MAX_PRE_LOGIN_FRAME_LEN: usize = 1024;
+
+/// 打开转发后，登录前就要收下带皮肤属性的握手包和插件回应。
+///
+/// legacy 的地址上限是 32767 个 UTF-16 码元，按每个三字节算约 96 KiB；
+/// 128 KiB 足够装下最长的合法握手包，同时仍然远低于协议的 2 MiB。
+const MAX_FORWARDING_FRAME_LEN: usize = 128 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 enum ConnectionError {
@@ -62,6 +69,8 @@ enum ConnectionError {
     InvalidPlayerName,
     #[error("packet is not allowed at this point")]
     UnexpectedPacket,
+    #[error("invalid forwarded player data: {0}")]
+    InvalidForwarding(String),
     #[error("client does not know the official data packs")]
     UnknownDataPacks,
     #[error("client did not answer the keep-alive")]
@@ -114,7 +123,7 @@ pub(crate) async fn handle(
         debug!(%peer, %error, "failed to disable Nagle's algorithm");
     }
 
-    let mut connection = Connection::new(stream);
+    let mut connection = Connection::new(stream, pre_login_frame_len(shared.config.forwarding));
     let time_limit = shared.config.pre_play_timeout;
     let pre_play = timeout(time_limit, pre_play(&mut connection, &shared));
     let joined = tokio::select! {
@@ -155,7 +164,12 @@ async fn pre_play(
     let Some(payload) = connection.next_frame().await? else {
         return Ok(None);
     };
-    let handshake = Handshake::decode(&payload)?;
+    // Spigot 为了让 legacy 转发把皮肤塞进地址，把握手的地址上限提高到了 32767。
+    let max_address_chars = match shared.config.forwarding {
+        ForwardingMode::Legacy => MAX_LEGACY_SERVER_ADDRESS_CHARS,
+        _ => MAX_SERVER_ADDRESS_CHARS,
+    };
+    let handshake = Handshake::decode_with_address_limit(&payload, max_address_chars)?;
     debug!(?handshake, "received handshake");
 
     match handshake.intent {
@@ -174,7 +188,16 @@ async fn pre_play(
             Ok(None)
         }
         Intent::Login => {
-            let Some(session) = login::admit(connection, shared).await? else {
+            let identity =
+                match forwarding::identity(shared.config.forwarding, handshake.server_address) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        debug!(%error, "invalid forwarding data");
+                        connection.refuse_login(forwarding::BAD_LEGACY_DATA).await?;
+                        return Ok(None);
+                    }
+                };
+            let Some(session) = login::admit(connection, shared, identity).await? else {
                 return Ok(None);
             };
             // 还没进入 Play 时被同名玩家顶掉，连接直接结束就好，客户端看到的是连接断开。
@@ -227,6 +250,14 @@ async fn read_frame<R: AsyncRead + Unpin>(
     }
 }
 
+/// 登录之前允许的帧大小。转发打开时要把带皮肤属性的握手包和插件回应也收下。
+fn pre_login_frame_len(mode: ForwardingMode) -> usize {
+    match mode {
+        ForwardingMode::Off => MAX_PRE_LOGIN_FRAME_LEN,
+        ForwardingMode::Legacy | ForwardingMode::Modern => MAX_FORWARDING_FRAME_LEN,
+    }
+}
+
 /// 解压后的包最多多长。进入 Play 之前帧被限制得比官方小，解压后也照这个限制；
 /// 之后和官方一样，只受协议的解压上限约束。
 fn max_packet_len(max_frame_len: usize) -> usize {
@@ -259,11 +290,11 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, max_frame_len: usize) -> Self {
         Self {
             stream,
-            read_buffer: BytesMut::with_capacity(MAX_PRE_LOGIN_FRAME_LEN),
-            max_frame_len: MAX_PRE_LOGIN_FRAME_LEN,
+            read_buffer: BytesMut::with_capacity(max_frame_len),
+            max_frame_len,
             compression: None,
         }
     }

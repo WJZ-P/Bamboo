@@ -3,7 +3,10 @@
 use mc_bamboo_data::packets::login::{clientbound, serverbound};
 use uuid::Uuid;
 
-use super::ClientboundPacket;
+use super::{
+    ClientboundPacket,
+    profile::{ProfileProperty, write_profile_properties},
+};
 use crate::codec::{DecodeError, Reader, write_string, write_uuid, write_varint};
 
 /// 玩家名的最大长度。
@@ -14,6 +17,11 @@ pub const MAX_PLAYER_NAME_CHARS: usize = 16;
 pub enum LoginRequest<'a> {
     /// 登录请求，带着玩家名。
     Hello { name: &'a str, uuid: Uuid },
+    /// 对登录插件询问的回应。`data` 为 `None` 表示客户端不认识这个频道。
+    PluginResponse {
+        message_id: i32,
+        data: Option<&'a [u8]>,
+    },
     /// 客户端已经收到登录成功，准备进入 Configuration 状态。
     Acknowledged,
 }
@@ -22,16 +30,49 @@ impl<'a> LoginRequest<'a> {
     /// 解码一帧的负载，负载以数据包 ID 开头。
     pub fn decode(payload: &'a [u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
-        let request = match reader.varint()? {
-            serverbound::HELLO => Self::Hello {
-                name: reader.string(MAX_PLAYER_NAME_CHARS)?,
-                uuid: reader.uuid()?,
-            },
-            serverbound::LOGIN_ACKNOWLEDGED => Self::Acknowledged,
-            unknown => return Err(DecodeError::UnknownPacket(unknown)),
-        };
-        reader.finish()?;
-        Ok(request)
+        match reader.varint()? {
+            serverbound::HELLO => {
+                let hello = Self::Hello {
+                    name: reader.string(MAX_PLAYER_NAME_CHARS)?,
+                    uuid: reader.uuid()?,
+                };
+                reader.finish()?;
+                Ok(hello)
+            }
+            serverbound::CUSTOM_QUERY_ANSWER => {
+                let message_id = reader.varint()?;
+                // 回应里先是一个布尔，表示有没有数据，之后是裸的负载字节。
+                let data = if reader.bool()? {
+                    Some(reader.rest())
+                } else {
+                    None
+                };
+                Ok(Self::PluginResponse { message_id, data })
+            }
+            serverbound::LOGIN_ACKNOWLEDGED => {
+                reader.finish()?;
+                Ok(Self::Acknowledged)
+            }
+            unknown => Err(DecodeError::UnknownPacket(unknown)),
+        }
+    }
+}
+
+/// 询问客户端（代理）要转发的玩家信息。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginPluginRequest<'a> {
+    pub message_id: i32,
+    pub channel: &'a str,
+    pub data: &'a [u8],
+}
+
+impl ClientboundPacket for LoginPluginRequest<'_> {
+    const ID: i32 = clientbound::CUSTOM_QUERY;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.message_id);
+        write_string(out, self.channel);
+        out.extend_from_slice(self.data);
     }
 }
 
@@ -68,6 +109,8 @@ impl ClientboundPacket for LoginCompression {
 pub struct LoginFinished<'a> {
     pub uuid: Uuid,
     pub name: &'a str,
+    /// 皮肤等属性。离线模式没有属性。
+    pub properties: &'a [ProfileProperty],
     /// 每次服务端启动时生成的会话 ID，从 26.3 开始才有这个字段。
     pub session_id: Uuid,
 }
@@ -78,8 +121,7 @@ impl ClientboundPacket for LoginFinished<'_> {
     fn write_body(&self, out: &mut Vec<u8>) {
         write_uuid(out, self.uuid);
         write_string(out, self.name);
-        // 皮肤等属性的数量。离线模式没有属性。
-        write_varint(out, 0);
+        write_profile_properties(out, self.properties);
         write_uuid(out, self.session_id);
     }
 }
@@ -148,6 +190,7 @@ mod tests {
         let packet = LoginFinished {
             uuid: Uuid::from_u128(1),
             name: "Kitten",
+            properties: &[],
             session_id,
         };
         let mut body = Vec::new();
@@ -155,5 +198,78 @@ mod tests {
 
         assert_eq!(&body[body.len() - 16..], session_id.as_bytes());
         assert_eq!(body[body.len() - 17], 0, "properties list should be empty");
+    }
+
+    #[test]
+    fn login_finished_carries_the_skin_properties() {
+        let properties = [ProfileProperty {
+            name: "textures".to_owned(),
+            value: "value".to_owned(),
+            signature: Some("signature".to_owned()),
+        }];
+        let packet = LoginFinished {
+            uuid: Uuid::from_u128(1),
+            name: "Kitten",
+            properties: &properties,
+            session_id: Uuid::from_u128(2),
+        };
+        let mut body = Vec::new();
+        packet.write_body(&mut body);
+
+        let mut expected = Vec::new();
+        write_uuid(&mut expected, Uuid::from_u128(1));
+        write_string(&mut expected, "Kitten");
+        write_varint(&mut expected, 1);
+        write_string(&mut expected, "textures");
+        write_string(&mut expected, "value");
+        crate::codec::write_bool(&mut expected, true);
+        write_string(&mut expected, "signature");
+        write_uuid(&mut expected, Uuid::from_u128(2));
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn encodes_a_login_plugin_request() {
+        let mut out = Vec::new();
+        append_frame(
+            &mut out,
+            &LoginPluginRequest {
+                message_id: 7,
+                channel: "velocity:player_info",
+                data: &[4],
+            },
+        )
+        .unwrap();
+
+        let mut reader = Reader::new(&out);
+        let frame_len = reader.varint().unwrap();
+        assert_eq!(frame_len as usize, out.len() - 1);
+        assert_eq!(reader.varint(), Ok(clientbound::CUSTOM_QUERY));
+        assert_eq!(reader.varint(), Ok(7));
+        assert_eq!(reader.string(32767), Ok("velocity:player_info"));
+        assert_eq!(reader.rest(), [4]);
+    }
+
+    #[test]
+    fn decodes_plugin_responses_with_and_without_data() {
+        let mut present = vec![serverbound::CUSTOM_QUERY_ANSWER as u8, 7, 1, 0xaa, 0xbb];
+        assert_eq!(
+            LoginRequest::decode(&present),
+            Ok(LoginRequest::PluginResponse {
+                message_id: 7,
+                data: Some(&[0xaa, 0xbb]),
+            })
+        );
+
+        present.pop();
+        present.pop();
+        present[2] = 0;
+        assert_eq!(
+            LoginRequest::decode(&present),
+            Ok(LoginRequest::PluginResponse {
+                message_id: 7,
+                data: None,
+            })
+        );
     }
 }

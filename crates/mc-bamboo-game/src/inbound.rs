@@ -5,7 +5,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use mc_bamboo_protocol::packet::play::{ClientInformation, PlayRequest};
+use mc_bamboo_protocol::packet::{
+    play::{ClientInformation, PlayRequest},
+    profile::ProfileProperty,
+};
 use uuid::Uuid;
 
 /// 一次登录对应的玩家 ID，同时也是这名玩家的实体 ID。
@@ -29,6 +32,8 @@ pub struct JoinRequest {
     pub id: PlayerId,
     pub uuid: Uuid,
     pub name: String,
+    /// 代理转发来的皮肤等属性。离线模式没有属性。
+    pub properties: Vec<ProfileProperty>,
     /// Configuration 阶段收到的客户端设置，没收到时是默认值。
     pub client: ClientInformation,
     pub sink: Box<dyn PlayerSink>,

@@ -9,6 +9,18 @@ const MAX_VIEW_DISTANCE: u8 = 32;
 /// 客户端这么久收不到任何字节就断开。没有别的流量时，心跳是唯一能让它收到字节的东西。
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 从代理接收玩家信息的方式。默认关闭，和以前一样由服务端自己生成离线 UUID。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ForwardingMode {
+    /// 不信任代理。握手地址里的 NUL 分隔内容只是普通文本。
+    #[default]
+    Off,
+    /// BungeeCord 的旧式转发：握手包的服务器地址里带 IP、UUID 和属性。
+    Legacy,
+    /// Velocity 的现代转发：登录时在 `velocity:player_info` 频道询问，回应带 HMAC-SHA256 签名。
+    Modern,
+}
+
 /// 服务端运行参数。
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -33,6 +45,13 @@ pub struct ServerConfig {
     ///
     /// 小于 0 表示关闭压缩，0 表示每个包都压缩。默认 256。
     pub compression_threshold: i32,
+    /// 玩家信息由谁提供。
+    pub forwarding: ForwardingMode,
+    /// Velocity 现代转发用的签名密钥，和代理的 `forwarding.secret` 文件内容相同。
+    ///
+    /// 只有 [`ForwardingMode::Modern`] 会用到。留空时启动会退回 [`ForwardingMode::Off`]，
+    /// 因为没有密钥就无法验证代理的回应。
+    pub forwarding_secret: String,
 }
 
 impl Default for ServerConfig {
@@ -45,6 +64,8 @@ impl Default for ServerConfig {
             max_pre_play_connections: 1024,
             keep_alive_interval: Duration::from_secs(15),
             compression_threshold: 256,
+            forwarding: ForwardingMode::Off,
+            forwarding_secret: String::new(),
         }
     }
 }
@@ -69,6 +90,12 @@ impl ServerConfig {
 
         // 所有负数都表示关闭压缩，统一成 -1，后面只比较这一个值。
         self.compression_threshold = self.compression_threshold.max(-1);
+
+        // 没有密钥就验不了签名，与其让每个代理都连不上，不如退回关闭模式。
+        if self.forwarding == ForwardingMode::Modern && self.forwarding_secret.is_empty() {
+            warn!("modern forwarding needs a secret, forwarding is disabled");
+            self.forwarding = ForwardingMode::Off;
+        }
         self
     }
 }
@@ -99,6 +126,15 @@ mod tests {
             ..ServerConfig::default()
         };
         config.normalized().compression_threshold
+    }
+
+    fn with_forwarding(forwarding: ForwardingMode, secret: &str) -> ForwardingMode {
+        let config = ServerConfig {
+            forwarding,
+            forwarding_secret: secret.to_owned(),
+            ..ServerConfig::default()
+        };
+        config.normalized().forwarding
     }
 
     #[test]
@@ -151,5 +187,35 @@ mod tests {
         assert_eq!(with_compression(0), 0);
         assert_eq!(with_compression(256), 256);
         assert_eq!(with_compression(i32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn forwarding_is_off_by_default() {
+        assert_eq!(ServerConfig::default().forwarding, ForwardingMode::Off);
+        assert!(ServerConfig::default().forwarding_secret.is_empty());
+    }
+
+    #[test]
+    fn modern_forwarding_without_a_secret_falls_back_to_off() {
+        assert_eq!(
+            with_forwarding(ForwardingMode::Modern, ""),
+            ForwardingMode::Off
+        );
+        assert_eq!(
+            with_forwarding(ForwardingMode::Modern, "secret"),
+            ForwardingMode::Modern
+        );
+    }
+
+    #[test]
+    fn legacy_forwarding_needs_no_secret() {
+        assert_eq!(
+            with_forwarding(ForwardingMode::Legacy, ""),
+            ForwardingMode::Legacy
+        );
+        assert_eq!(
+            with_forwarding(ForwardingMode::Legacy, "unused"),
+            ForwardingMode::Legacy
+        );
     }
 }

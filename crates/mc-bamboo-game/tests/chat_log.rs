@@ -81,6 +81,7 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
         id: player,
         uuid: Uuid::from_u128(1),
         name: "Kitten".to_owned(),
+        properties: Vec::new(),
         client: ClientInformation::default(),
         sink: Box::new(DiscardingSink),
     };
