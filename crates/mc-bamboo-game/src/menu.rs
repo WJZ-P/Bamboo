@@ -788,22 +788,24 @@ fn place_count(size: usize, kind: i32, stack: &ItemStack) -> i32 {
 }
 
 /// 打开一个容器方块，对应官方 `useWithoutItem` 里的 `player.openMenu`。
-pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
+///
+/// 打不开（不是容器、被挡住、潜影盒被挡住）时返回 `false`，调用方据此判断有没有菜单。
+pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
     let Some(kind) = container::kind_at(region, pos) else {
-        return;
+        return false;
     };
     if !region.players.contains_key(&id) {
-        return;
+        return false;
     }
     let Some((target, container_size, menu_type, title)) = menu_shape(region, pos, kind) else {
-        return;
+        return false;
     };
     if region.menus.contains_key(&id) {
         close_menu(region, id);
     }
     let container_id = {
         let Some(player) = region.players.get_mut(&id) else {
-            return;
+            return false;
         };
         player.container_counter = player.container_counter % 100 + 1;
         player.container_counter
@@ -829,10 +831,11 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
         },
     );
     let Some(mut menu) = region.menus.remove(&id) else {
-        return;
+        return false;
     };
     broadcast_full_state(region, id, &mut menu);
     region.menus.insert(id, menu);
+    true
 }
 
 /// 菜单的标题，官方 `Nameable.getDisplayName`：方块实体有自定义名就用它。
