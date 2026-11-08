@@ -54,6 +54,7 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BlockItem;
@@ -155,6 +156,7 @@ public final class Extractor {
             root.add("blockStates", blockStates());
             root.add("blocks", blocks());
             root.add("items", items());
+            root.add("entityTypes", entityTypes());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
@@ -413,9 +415,28 @@ public final class Extractor {
                 }
             }
         }
+        // 下面三个方法在 `Block`/`BlockBehaviour` 上，上面按类往上找时停在了 `Block.class` 之前。
+        // 实体运动、爆炸和落地要用它们，子类覆盖过的同名结果已经在上面导出了。
+        addNonDefaultFloat(fields, block, "getExplosionResistance", 0.0F);
+        addNonDefaultFloat(fields, block, "getSpeedFactor", 1.0F);
+        addNonDefaultFloat(fields, block, "getBounceRestitution", 0.0F);
         JsonArray result = new JsonArray();
         new TreeMap<>(fields).values().forEach(result::add);
         return result;
+    }
+
+    /** 只导出和默认值不同的结果。绝大多数方块都是默认值，全写进去只会让生成文件变大。 */
+    private static void addNonDefaultFloat(Map<String, JsonObject> fields, Block block, String name, float expected)
+            throws ReflectiveOperationException {
+        if (fields.containsKey(name + "()")) {
+            return;
+        }
+        Method method = Block.class.getDeclaredMethod(name);
+        method.setAccessible(true);
+        float value = (float) method.invoke(block);
+        if (value != expected) {
+            addField(fields, name + "()", value);
+        }
     }
 
     private static boolean isFactMethod(Method method) {
@@ -563,6 +584,21 @@ public final class Extractor {
             items.add(object);
         }
         return items;
+    }
+
+    /** 按注册表 ID 排列的实体类型。跟踪范围和更新间隔是 `ChunkMap.addEntity` 用的值。 */
+    private static JsonArray entityTypes() {
+        JsonArray types = new JsonArray();
+        for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
+            JsonObject object = new JsonObject();
+            object.addProperty("name", BuiltInRegistries.ENTITY_TYPE.getKey(type).toString());
+            object.addProperty("clientTrackingRange", type.clientTrackingRange());
+            // 官方的 `Integer.MAX_VALUE` 表示 `UpdateInterval.NEVER`，这里写成 -1。
+            object.addProperty("updateInterval", type.hasUpdateInterval() ? type.updateInterval() : -1);
+            object.addProperty("trackDeltas", type.trackDeltas());
+            types.add(object);
+        }
+        return types;
     }
 
     private static Object readField(Class<?> owner, String name, Object target) throws ReflectiveOperationException {

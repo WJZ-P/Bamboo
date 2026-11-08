@@ -11,8 +11,8 @@ use mc_bamboo_core::Aabb;
 
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
-    block_maps, block_transformers, blocks, heightmaps, items, light, packets, registries, shapes,
-    states, tags, version,
+    block_maps, block_transformers, blocks, entity_types, heightmaps, items, light, packets,
+    registries, shapes, states, tags, version,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
@@ -494,6 +494,21 @@ mod tests {
                 version: "26.3",
             }]
         );
+    }
+
+    #[test]
+    fn entity_types_are_indexed_by_registry_id() {
+        assert_eq!(
+            entity_types::FACTS.len(),
+            registries::entity_type::TOTAL as usize
+        );
+        let falling_block =
+            &entity_types::FACTS[registries::entity_type::FALLING_BLOCK as usize];
+        assert_eq!(falling_block.name, "minecraft:falling_block");
+        assert_eq!(falling_block.update_interval, 20);
+        let tnt = &entity_types::FACTS[registries::entity_type::TNT as usize];
+        assert_eq!(tnt.name, "minecraft:tnt");
+        assert_eq!(tnt.update_interval, 10);
     }
 
     #[test]

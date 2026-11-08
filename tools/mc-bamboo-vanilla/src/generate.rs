@@ -48,6 +48,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "states.rs", &states)?;
     write_file(output_dir, "shapes.rs", &shapes)?;
     write_file(output_dir, "registries.rs", &registries_file(data))?;
+    write_file(output_dir, "entity_types.rs", &entity_types_file(data))?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
     write_file(output_dir, "tags.rs", &tags)
 }
@@ -59,7 +60,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod entity_types;\npub mod heightmaps;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
         .to_owned()
 }
 
@@ -930,6 +931,43 @@ fn registries_file(data: &VersionData) -> String {
         DATA_COMPONENT_TYPE_REGISTRY,
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
+    out
+}
+
+/// `ChunkMap.addEntity` 给每个实体建的 `TrackedEntity` 用的值。下标就是实体类型的 ID。
+fn entity_types_file(data: &VersionData) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "/// 一个实体类型的跟踪参数。");
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct EntityTypeFacts {{");
+    let _ = writeln!(out, "    /// 官方的注册表名。");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// `clientTrackingRange`，单位是区块。");
+    let _ = writeln!(out, "    pub client_tracking_range: i32,");
+    let _ = writeln!(
+        out,
+        "    /// `UpdateInterval.periodic` 的周期，-1 表示 `UpdateInterval.NEVER`。"
+    );
+    let _ = writeln!(out, "    pub update_interval: i32,");
+    let _ = writeln!(
+        out,
+        "    /// `trackDeltas`：速度变了要不要给跟踪的玩家发速度包。"
+    );
+    let _ = writeln!(out, "    pub track_deltas: bool,");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(
+        out,
+        "/// 全部实体类型，下标就是注册表 ID，和 [`crate::registries::entity_type`] 的常量一致。"
+    );
+    let _ = writeln!(out, "pub static FACTS: &[EntityTypeFacts] = &[");
+    for type_ in &data.entity_types {
+        let _ = writeln!(
+            out,
+            "    EntityTypeFacts {{ name: {:?}, client_tracking_range: {}, update_interval: {}, track_deltas: {} }},",
+            type_.name, type_.client_tracking_range, type_.update_interval, type_.track_deltas
+        );
+    }
+    let _ = writeln!(out, "];");
     out
 }
 

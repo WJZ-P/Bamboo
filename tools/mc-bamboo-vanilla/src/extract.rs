@@ -12,6 +12,7 @@ use std::{
 use serde::Deserialize;
 
 const BLOCK_REGISTRY: &str = "minecraft:block";
+const ENTITY_TYPE_REGISTRY: &str = "minecraft:entity_type";
 const ITEM_REGISTRY: &str = "minecraft:item";
 /// 官方数据生成器的输出目录，相对于工作目录。
 const GENERATED_DIR: &str = "generated";
@@ -35,6 +36,7 @@ pub struct Extracted {
     pub block_states: BlockStates,
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
+    pub entity_types: Vec<EntityTypeFacts>,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -282,6 +284,17 @@ pub struct ExtractedItem {
     pub overrides_can_destroy_block: bool,
 }
 
+/// 一个实体类型。列表里的位置就是它的注册表 ID。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityTypeFacts {
+    pub name: String,
+    pub client_tracking_range: i32,
+    /// -1 表示官方写的是 `Integer.MAX_VALUE`，也就是 `UpdateInterval.NEVER`。
+    pub update_interval: i32,
+    pub track_deltas: bool,
+}
+
 /// 一个物品。列表里的位置就是它的注册表 ID。
 pub struct Item {
     pub name: String,
@@ -351,6 +364,7 @@ pub struct VersionData {
     pub block_states: BlockStates,
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
+    pub entity_types: Vec<EntityTypeFacts>,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -388,6 +402,11 @@ pub fn run(
         ITEM_REGISTRY,
         extracted.items.iter().map(|item| &item.name),
     )?;
+    check_registry_order(
+        &builtin_registries,
+        ENTITY_TYPE_REGISTRY,
+        extracted.entity_types.iter().map(|type_| &type_.name),
+    )?;
     let items = read_items(extracted.items, &reports.join("minecraft/components/item"))?;
     Ok(VersionData {
         version: extracted.version,
@@ -398,6 +417,7 @@ pub fn run(
         block_states: extracted.block_states,
         blocks: extracted.blocks,
         items,
+        entity_types: extracted.entity_types,
         state_tables: extracted.state_tables,
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,
