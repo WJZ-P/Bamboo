@@ -9,9 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory,
-};
+use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory};
 use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::packet::play::{

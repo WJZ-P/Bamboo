@@ -178,6 +178,8 @@ fn actor_of(player: &Player) -> Actor {
         block_interaction_range: BLOCK_INTERACTION_RANGE,
         // `GameType.applyAbilities`：冒险模式和旁观模式不能建造。
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
+        // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
+        prevents_block_drops: matches!(player.game_mode, GameMode::Creative),
     }
 }
 

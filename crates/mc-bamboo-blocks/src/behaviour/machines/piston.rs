@@ -4,9 +4,12 @@
 //! 这时才真的推方块。要移动的方块换成 `moving_piston` 加一个方块实体，两刻后放回原处，
 //! 见 [`piston_entity`](super::piston_entity)。世界里没有实体和声音，推实体和播放音效的两段没写。
 
+mod delete_after_move;
+
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, PushReaction, blocks};
 
+use self::delete_after_move::DeleteAfterMove;
 use super::{
     facing_the_view, piston_entity::PistonMoving, piston_structure::PistonStructureResolver,
 };
@@ -279,12 +282,14 @@ fn move_blocks(
     let push_direction = resolver.push_direction();
 
     // 官方先用 `deleteAfterMove` 记下这些格子原来的样子，换完方块后剩下的写成空气。
-    let mut delete_after_move: Vec<(BlockPos, BlockState)> = to_push
-        .iter()
-        .map(|&pos| (pos, world.block_state(pos)))
-        .collect();
-    let to_push_shapes: Vec<BlockState> =
-        delete_after_move.iter().map(|&(_, state)| state).collect();
+    // 遍历顺序是 `HashMap` 的桶顺序，见 [`DeleteAfterMove`]。
+    let mut delete_after_move = DeleteAfterMove::default();
+    let mut to_push_shapes = Vec::with_capacity(to_push.len());
+    for &pos in &to_push {
+        let state = world.block_state(pos);
+        delete_after_move.put(pos, state);
+        to_push_shapes.push(state);
+    }
 
     let mut to_update = Vec::with_capacity(to_push.len() + to_destroy.len());
 
@@ -299,7 +304,7 @@ fn move_blocks(
         let pos = to_push[i];
         let block_state = world.block_state(pos);
         let moved = pos.relative(push_direction);
-        remove_entry(&mut delete_after_move, moved);
+        delete_after_move.remove(moved);
         // 被推的方块只记朝向，`TYPE` 留在默认的 normal，官方的 `moveBlocks` 就是这样。
         let actual = BlockState(blocks::MOVING_PISTON).with(FACING, direction);
         world.set_block(moved, actual, MOVING_FLAGS);
@@ -323,7 +328,7 @@ fn move_blocks(
             .with(FACING, direction)
             .with(PISTON_TYPE, piston_type);
         let moving = moving_piston_state(direction, sticky);
-        remove_entry(&mut delete_after_move, arm_pos);
+        delete_after_move.remove(arm_pos);
         world.set_block(arm_pos, moving, MOVING_FLAGS);
         world.set_block_entity(Box::new(PistonMoving::new(
             arm_pos, head, direction, true, true,
@@ -331,10 +336,10 @@ fn move_blocks(
     }
 
     let air = BlockState::AIR;
-    for &(pos, _) in &delete_after_move {
+    for (pos, _) in delete_after_move.iter() {
         world.set_block(pos, air, LEFTOVER_FLAGS);
     }
-    for &(pos, old_state) in &delete_after_move {
+    for (pos, old_state) in delete_after_move.iter() {
         old_state.update_indirect_neighbour_shapes(world, pos, UPDATE_CLIENTS, UPDATE_LIMIT);
         world.update_neighbour_shapes(air, pos, UPDATE_CLIENTS, UPDATE_LIMIT);
         air.update_indirect_neighbour_shapes(world, pos, UPDATE_CLIENTS, UPDATE_LIMIT);
@@ -357,13 +362,6 @@ fn move_blocks(
         world.update_neighbors_at(arm_pos, BlockState(blocks::PISTON_HEAD).block());
     }
     true
-}
-
-/// 从 `Vec` 里按位置拿掉一项。
-fn remove_entry(entries: &mut Vec<(BlockPos, BlockState)>, pos: BlockPos) {
-    if let Some(index) = entries.iter().position(|&(pushed, _)| pushed == pos) {
-        entries.remove(index);
-    }
 }
 
 /// `MovingPistonBlock` 的默认状态加上朝向和类型。收回时活塞自己那一格和活塞头用这个。
@@ -437,9 +435,8 @@ impl Behaviour for PistonHead {
         }
     }
 
-    /// 官方只在创造模式（`preventsBlockDrops`）时在这里拆底座，生存模式改由
-    /// `affectNeighborsAfterRemoval` 拆。两边最后都是底座没了，这个世界又不掉物品，
-    /// 所以不区分，直接拆。
+    /// 官方只在玩家不掉落方块（创造模式的 `preventsBlockDrops`）时在这里拆底座，
+    /// 生存模式改由 [`PistonHead::affect_neighbors_after_removal`] 拆。
     fn player_will_destroy(
         &self,
         state: BlockState,
@@ -447,9 +444,11 @@ impl Behaviour for PistonHead {
         pos: BlockPos,
         player: &Actor,
     ) -> BlockState {
-        let base = base_pos(state, pos);
-        if is_fitting_base(state, world.block_state(base)) {
-            world.destroy_block(base, UPDATE_LIMIT);
+        if player.prevents_block_drops {
+            let base = base_pos(state, pos);
+            if is_fitting_base(state, world.block_state(base)) {
+                world.destroy_block(base, UPDATE_LIMIT);
+            }
         }
         Plain.player_will_destroy(state, world, pos, player)
     }
@@ -494,5 +493,54 @@ impl Behaviour for MovingPiston {
             Some(entity) => entity.collision_boxes(),
             None => std::borrow::Cow::Owned(Vec::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::items;
+
+    use super::*;
+    use crate::{
+        BlockTicks,
+        testing::{TestLevel, actor_holding},
+    };
+
+    const BASE: BlockPos = BlockPos::new(0, 64, 0);
+    const HEAD: BlockPos = BlockPos::new(0, 65, 0);
+
+    /// 朝上伸出的活塞和它的活塞头。
+    fn extended_piston() -> TestLevel {
+        let mut level = TestLevel::new();
+        let base = BlockState(blocks::PISTON)
+            .with(FACING, Direction::Up)
+            .with(EXTENDED, true);
+        let head = BlockState(blocks::PISTON_HEAD)
+            .with(FACING, Direction::Up)
+            .with(PISTON_TYPE, PistonType::Normal);
+        level.set(BASE, base);
+        level.set(HEAD, head);
+        level
+    }
+
+    fn break_head(level: &mut TestLevel, prevents_block_drops: bool) {
+        let mut actor = actor_holding(items::AIR);
+        actor.prevents_block_drops = prevents_block_drops;
+        crate::destroy_block(level, &mut BlockTicks::new(), &actor, HEAD);
+    }
+
+    /// 创造模式在 `player_will_destroy` 里先拆底座，生存模式留到头被移除时的形状更新。
+    /// 写方块的先后能看出走的是哪条路，最后底座都没了。
+    #[test]
+    fn creative_players_break_the_base_first() {
+        let mut creative = extended_piston();
+        break_head(&mut creative, true);
+        assert_eq!(creative.writes[0].0, BASE);
+        assert_eq!(creative.get(BASE), BlockState::AIR);
+
+        let mut survival = extended_piston();
+        break_head(&mut survival, false);
+        assert_eq!(survival.writes[0].0, HEAD);
+        assert_eq!(survival.get(BASE), BlockState::AIR);
     }
 }

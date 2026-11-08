@@ -163,6 +163,7 @@ pub(crate) fn actor_holding(item: i32) -> Actor {
         eye_height: 1.62,
         block_interaction_range: 5.0,
         may_build: true,
+        prevents_block_drops: true,
     }
 }
 

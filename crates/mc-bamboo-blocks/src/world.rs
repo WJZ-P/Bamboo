@@ -4,7 +4,7 @@
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
     block_entity::{self, BlockEntity, BlockEvent},
@@ -377,10 +377,19 @@ impl<'a> World<'a> {
         self.level.block_entities().contains(pos)
     }
 
-    /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做。
+    /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做，
+    /// 只打一条警告，说明有地方放错了。
     pub fn set_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
         let pos = entity.pos();
-        if !self.block_state(pos).has_block_entity() {
+        let state = self.block_state(pos);
+        if !state.has_block_entity() {
+            warn!(
+                "Trying to set block entity at {} {} {}, but state {} does not allow it",
+                pos.x,
+                pos.y,
+                pos.z,
+                state.block().name
+            );
             return;
         }
         self.level.block_entities_mut().insert(entity);

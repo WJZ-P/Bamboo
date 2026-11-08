@@ -281,6 +281,7 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         block_interaction_range: CREATIVE_INTERACTION_RANGE,
         // 题目的玩家一直是创造模式。
         may_build: true,
+        prevents_block_drops: true,
     })
 }
 
