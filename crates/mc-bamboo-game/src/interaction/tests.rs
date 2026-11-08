@@ -1155,13 +1155,19 @@ fn right_clicking_a_chest_places_nothing() {
     server.tick();
 
     assert_eq!(block_at(&mut server, TWO_ABOVE), Some(blocks::AIR));
+    // 右键打开箱子：菜单包在请求里就发，方块事件和 ack 等到这一 tick 后面的阶段。
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
     assert_eq!(
-        client.take_frames(),
+        ids,
         [
-            update(ABOVE, blocks::CHEST),
-            update(TWO_ABOVE, blocks::AIR),
-            ack(1),
-        ]
+            clientbound::OPEN_SCREEN,
+            clientbound::CONTAINER_SET_CONTENT,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_UPDATE,
+            clientbound::BLOCK_EVENT,
+            clientbound::BLOCK_CHANGED_ACK,
+        ],
+        "frames: {ids:?}"
     );
 }
 

@@ -20,19 +20,19 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    entity_sync,
+    container, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory,
     links::{Links, encode_frames},
-    movement,
+    menu, movement,
     player::Player,
     region::Region,
 };
 
 const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
 /// 创造模式的 `block_interaction_range`：基础值 4.5 加修饰符 0.5。
-const BLOCK_INTERACTION_RANGE: f64 = 5.0;
+pub(crate) const BLOCK_INTERACTION_RANGE: f64 = 5.0;
 /// 官方判定时多给的一格，服务端记录的位置可能比客户端晚一点。
 const REACH_BUFFER: f64 = 1.0;
 /// 点击点离方块中心的最大偏差，官方的比较是严格小于。
@@ -246,6 +246,8 @@ fn send_effects(region: &mut Region, initiator: Option<PlayerId>, effects: &[Eff
                 state,
                 except_initiator,
             } => {
+                // 容器里的东西没有掉落物，等打开着的菜单关掉后一起丢掉。
+                container::on_block_destroyed(region, pos);
                 let except = initiator.filter(|_| except_initiator);
                 send_destroy_event(region, except, pos, state.0);
             }
@@ -268,7 +270,7 @@ fn send_destroy_event(region: &mut Region, except: Option<PlayerId>, pos: BlockP
     }
 }
 
-fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
+pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
     let Vec3 { x, y, z } = player.position;
     let dx = f64::from(pos.x) - x;
     let dy = f64::from(pos.y) - y;
@@ -362,6 +364,10 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let outcome = mc_bamboo_blocks::use_item_on(&mut level, ticks, &actor, packet.hand, &hit);
 
     send_effects(region, Some(id), &outcome.effects);
+    // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
+    if outcome.used_without_item {
+        menu::open_block(region, id, packet.pos);
+    }
     if is_placement_attempt && !outcome.result.consumes_action() {
         send_limit_hint(&mut region.links, id, packet);
     }

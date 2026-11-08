@@ -17,11 +17,11 @@ use tracing::warn;
 use crate::{
     chat,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    entity_sync,
+    container, entity_sync,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
-    inventory, light_updates, movement,
+    inventory, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
 };
@@ -83,6 +83,9 @@ impl World {
         self.global.advance_time();
         self.region.advance_tick();
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        // 方块事件和方块实体在玩家之前，官方 `ServerLevel.tick` 也是这个顺序。
+        container::tick(&mut self.region);
+        menu::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
@@ -179,6 +182,8 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         entity_sync::on_leave(&mut self.region, id);
+        // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
+        menu::on_leave(&mut self.region, id);
         self.region.players.remove(&id);
         if let Some(frames) = self.global.remove_player(id) {
             self.region.links.broadcast(&frames);
@@ -276,6 +281,28 @@ impl World {
                 yaw,
                 pitch,
             } => interaction::on_use_item(region, player, hand, sequence, (yaw, pitch)),
+            PlayRequest::ContainerClick {
+                container_id,
+                state_id,
+                slot,
+                button,
+                input,
+                changed_slots,
+                carried,
+            } => menu::on_click(
+                region,
+                player,
+                menu::ClickPacket {
+                    container_id,
+                    state_id,
+                    slot,
+                    button,
+                    input,
+                    changed_slots,
+                    carried,
+                },
+            ),
+            PlayRequest::ContainerClose { .. } => menu::on_close_request(region, player),
             // 这三种连接任务就地处理了，不会发到这里。
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }

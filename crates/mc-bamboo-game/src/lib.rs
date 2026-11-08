@@ -22,6 +22,7 @@
 mod chat;
 mod chunk_encoding;
 mod chunk_tracking;
+mod container;
 mod entity_sync;
 mod global;
 mod inbound;
@@ -29,10 +30,12 @@ mod interaction;
 mod inventory;
 mod light_updates;
 mod links;
+mod menu;
 mod movement;
 mod player;
 mod region;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use world::{World, WorldConfig};

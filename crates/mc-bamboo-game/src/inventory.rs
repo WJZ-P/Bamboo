@@ -24,8 +24,8 @@ const MENU_SLOTS: usize = 46;
 /// 头盔的菜单槽位，盔甲、背包、快捷栏和副手从这里一直排到最后，官方 `Inventory` 迭代的就是这些槽。
 const ARMOR_START: usize = 5;
 /// 快捷栏第一格的菜单槽位。
-const HOTBAR_START: usize = 36;
-const OFF_HAND: usize = 45;
+pub(crate) const HOTBAR_START: usize = 36;
+pub(crate) const OFF_HAND: usize = 45;
 /// 快捷栏的格数。
 const HOTBAR_SIZE: usize = 9;
 /// 官方 `Inventory.items` 的长度：快捷栏和背包。
@@ -179,7 +179,7 @@ impl Inventory {
 }
 
 /// 官方 `Inventory.items` 的下标换算成菜单槽位。
-const fn menu_slot(index: usize) -> usize {
+pub(crate) const fn menu_slot(index: usize) -> usize {
     if index < HOTBAR_SIZE {
         HOTBAR_START + index
     } else {

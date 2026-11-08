@@ -3,11 +3,7 @@
 use std::collections::BTreeMap;
 
 use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{
-    items::ITEMS,
-    packets::play::serverbound,
-    registries::data_component_type,
-};
+use mc_bamboo_data::{items::ITEMS, packets::play::serverbound, registries::data_component_type};
 
 use crate::{
     codec::{DecodeError, Reader},
@@ -1118,7 +1114,10 @@ mod tests {
     fn container_click_rejects_unknown_registry_ids_and_oversized_maps() {
         // 没有注册的物品。
         assert_eq!(
-            decode_body(serverbound::CONTAINER_CLICK, "01 02 00 24 00 00 00 01 c0 84 3d 01 00 00"),
+            decode_body(
+                serverbound::CONTAINER_CLICK,
+                "01 02 00 24 00 00 00 01 c0 84 3d 01 00 00"
+            ),
             Err(DecodeError::InvalidItem(1_000_000))
         );
         // 没有注册的组件类型。

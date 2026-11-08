@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     chat::SpamThrottlers,
     chunk_tracking::{ChunkTracker, MIN_VIEW_DISTANCE},
+    container::EnderChest,
     entity_sync::EntitySync,
     inbound::PlayerId,
     interaction::BlockPrediction,
@@ -43,6 +44,10 @@ pub(crate) struct Player {
     pub(crate) sync: EntitySync,
     pub(crate) prediction: BlockPrediction,
     pub(crate) inventory: Inventory,
+    /// 官方 `containerCounter`，每打开一次菜单加一，100 回绕到 1。
+    pub(crate) container_counter: i32,
+    /// 这名玩家自己的末影箱，每个玩家一份。
+    pub(crate) ender_chest: EnderChest,
     pub(crate) spam: SpamThrottlers,
 }
 
@@ -71,6 +76,8 @@ impl Player {
             chunks: ChunkTracker::default(),
             prediction: BlockPrediction::default(),
             inventory: Inventory::default(),
+            container_counter: 0,
+            ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),
         }
     }

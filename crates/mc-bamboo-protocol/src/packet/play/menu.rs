@@ -102,6 +102,25 @@ impl ClientboundPacket for SetCursorItem<'_> {
     }
 }
 
+/// 玩家物品栏里一个槽位的内容变了，官方 `ClientboundSetPlayerInventoryPacket`。
+///
+/// 箱子开着时不能改用 `container_set_slot`：客户端只在 `container_id` 和当前菜单一致时应用它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPlayerInventory<'a> {
+    /// 官方 `Inventory` 的下标：0 到 8 是快捷栏，9 到 35 是背包，40 是副手。
+    pub slot: i32,
+    pub stack: &'a ItemStack,
+}
+
+impl ClientboundPacket for SetPlayerInventory<'_> {
+    const ID: i32 = clientbound::SET_PLAYER_INVENTORY;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.slot);
+        self.stack.write(out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,10 +160,7 @@ mod tests {
 
     #[test]
     fn container_close_is_a_var_int() {
-        assert_eq!(
-            body(&ContainerClose { container_id: 300 }),
-            hex("ac 02")
-        );
+        assert_eq!(body(&ContainerClose { container_id: 300 }), hex("ac 02"));
     }
 
     #[test]
@@ -155,10 +171,7 @@ mod tests {
             data: 2,
             block: 300,
         };
-        assert_eq!(
-            body(&packet),
-            hex("00 00 02 00 00 00 8f c4 01 02 ac 02")
-        );
+        assert_eq!(body(&packet), hex("00 00 02 00 00 00 8f c4 01 02 ac 02"));
     }
 
     #[test]
@@ -174,6 +187,24 @@ mod tests {
                 stack: &ItemStack::empty()
             }),
             hex("00")
+        );
+    }
+
+    #[test]
+    fn set_player_inventory_writes_the_official_slot_index() {
+        assert_eq!(
+            body(&SetPlayerInventory {
+                slot: 36,
+                stack: &ItemStack::new(1, 2)
+            }),
+            hex("24 02 01 00 00")
+        );
+        assert_eq!(
+            body(&SetPlayerInventory {
+                slot: 40,
+                stack: &ItemStack::empty()
+            }),
+            hex("28 00")
         );
     }
 }
