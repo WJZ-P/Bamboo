@@ -8,22 +8,30 @@
 //!
 //! - 嵌套物品堆的层数上限 [`cursor::MAX_STACK_DEPTH`]；
 //! - 组件补丁的条目数上限 [`MAX_PATCH_ENTRIES`]；
-//! - 六种没有 `networkSynchronized` 的组件（`lock`、`container_loot`、`map_decorations`、
-//!   `debug_stick_state`、`recipes`、`intangible_projectile`）线上是 NBT，官方会把 NBT 过一遍
-//!   DFU 的 `Codec` 再写回去。网络这条路径只保留 NBT 并校验最外层的形状。
-//!   存档那条路径在 [`archive`]，按每种组件的 `Codec` 重写。
+//! - 嵌套物品堆的层数上限 [`cursor::MAX_STACK_DEPTH`]；
+//! - 组件补丁的条目数上限 [`MAX_PATCH_ENTRIES`]；
+//! - `lock`、`container_loot`、`map_decorations`、`debug_stick_state`、`recipes` 线上是 NBT，
+//!   按官方 `fromCodecWithRegistries` 过一遍 `Codec` 再写回去，见 [`nbt_wire`]。
+//!   `intangible_projectile` 走 `Unit.CODEC`，写回去永远是空复合标签。
 //!
-//! The six components without `networkSynchronized` stay opaque NBT on the wire.
-//! Their persistent codecs live in [`archive`].
+//! `lock`, `container_loot`, `map_decorations`, `debug_stick_state` and `recipes` are NBT
+//! on the wire. They are decoded and written back through the official `Codec`, see
+//! [`nbt_wire`]. `intangible_projectile` uses `Unit.CODEC` and always writes an empty compound.
 
 pub mod archive;
 pub mod book;
 pub mod cursor;
 pub mod defaults;
-pub mod forward;
+mod dialog;
+pub mod java_hash;
+mod nbt_path;
+pub mod nbt_wire;
 pub mod predicate;
+mod selector;
 pub mod stack;
+mod syntax;
 pub mod text;
+mod text_wire;
 pub mod validate;
 pub mod value;
 
@@ -547,9 +555,7 @@ impl ComponentValue {
             kinds::DYE => Self::Dye(DYE_COLOR.read(cursor)?),
             kinds::DYED_COLOR => Self::DyedColor(cursor.i32()?),
             kinds::MAP_ID => Self::MapId(cursor.varint()?),
-            kinds::MAP_DECORATIONS => {
-                Self::MapDecorations(read_nbt_shaped(cursor, Shape::Compound)?)
-            }
+            kinds::MAP_DECORATIONS => Self::MapDecorations(canonical_nbt(cursor, kind)?),
             kinds::MAP_POST_PROCESSING => {
                 Self::MapPostProcessing(MAP_POST_PROCESSING.read(cursor)?)
             }
@@ -598,9 +604,7 @@ impl ComponentValue {
                 material: TrimMaterial::read(cursor)?,
                 pattern: TrimPattern::read(cursor)?,
             },
-            kinds::DEBUG_STICK_STATE => {
-                Self::DebugStickState(read_nbt_shaped(cursor, Shape::Compound)?)
-            }
+            kinds::DEBUG_STICK_STATE => Self::DebugStickState(canonical_nbt(cursor, kind)?),
             kinds::ENTITY_DATA => {
                 Self::EntityData(TypedEntityData::read(cursor, Registry::ENTITY_TYPE)?)
             }
@@ -617,7 +621,7 @@ impl ComponentValue {
             kinds::PROVIDES_BANNER_PATTERNS => {
                 Self::ProvidesBannerPatterns(cursor.holder_set(Registry::BANNER_PATTERN)?)
             }
-            kinds::RECIPES => Self::Recipes(read_nbt_shaped(cursor, Shape::List)?),
+            kinds::RECIPES => Self::Recipes(canonical_nbt(cursor, kind)?),
             kinds::LODESTONE_TRACKER => Self::LodestoneTracker {
                 target: cursor.optional(GlobalPos::read)?,
                 tracked: cursor.bool()?,
@@ -650,8 +654,8 @@ impl ComponentValue {
             )?)),
             kinds::BEES => Self::Bees(cursor.list(usize::MAX, BeeOccupant::read)?),
             kinds::SULFUR_CUBE_CONTENT => Self::SulfurCubeContent(ItemStackTemplate::read(cursor)?),
-            kinds::LOCK => Self::Lock(read_nbt_shaped(cursor, Shape::Compound)?),
-            kinds::CONTAINER_LOOT => Self::ContainerLoot(read_nbt_shaped(cursor, Shape::Compound)?),
+            kinds::LOCK => Self::Lock(canonical_nbt(cursor, kind)?),
+            kinds::CONTAINER_LOOT => Self::ContainerLoot(canonical_nbt(cursor, kind)?),
             kinds::BREAK_SOUND => Self::BreakSound(SoundEvent::read(cursor)?),
             kinds::COMPOSTABLE => Self::Compostable(ResolvableInt::read(cursor)?),
             kinds::COOKING_FUEL => Self::CookingFuel {
@@ -1116,35 +1120,13 @@ fn write_enchantments(out: &mut Vec<u8>, levels: &[(i32, i32)]) {
     }
 }
 
-/// 没有 `networkSynchronized` 的那几种组件在线上的 NBT 最外层应该是什么。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shape {
-    /// 官方的 `Codec` 最外层是个 map。
-    Compound,
-    /// 官方的 `Codec` 最外层是个 list。
-    List,
-}
-
-/// 读一个 NBT 标签并校验最外层的形状。
+/// 官方 `fromCodecWithRegistries`：NBT 过一遍 `Codec`，存 `Codec` 写回来的标签。
 ///
-/// 这几种组件官方会把 NBT 过一遍 DFU 的 `Codec`，再按解出来的值写回去。
-/// 我们保留原来的标签，所以官方写出来的字节能原样写回；但只校验到最外层。
-fn read_nbt_shaped(cursor: &mut Cursor<'_>, shape: Shape) -> Result<Tag, DecodeError> {
+/// `fromCodecWithRegistries`: run the tag through the `Codec` and store what it writes back.
+fn canonical_nbt(cursor: &mut Cursor<'_>, kind: i32) -> Result<Tag, DecodeError> {
     let tag = cursor.nbt_tag()?;
-    let matches = match shape {
-        Shape::Compound => matches!(tag, Tag::Compound(_)),
-        Shape::List => matches!(
-            tag,
-            Tag::List(_) | Tag::ByteArray(_) | Tag::IntArray(_) | Tag::LongArray(_)
-        ),
-    };
-    if matches {
-        Ok(tag)
-    } else {
-        Err(DecodeError::InvalidComponentValue(
-            "component NBT has the wrong shape",
-        ))
-    }
+    nbt_wire::canonicalize(kind, &tag)
+        .map_err(|_| DecodeError::InvalidComponentValue("nbt component codec rejected the value"))
 }
 
 /// 补丁里的一项：设成某个值，或者移除。
@@ -1303,21 +1285,6 @@ impl ComponentPatch {
             .iter()
             .find(|(id, _)| *id == kind)
             .map(|(_, entry)| entry)
-    }
-
-    /// 能发给别人的那几项，见 [`forward`]。移除项只有组件类型，一律留着。
-    pub fn filtered(&self) -> Self {
-        Self {
-            entries: self
-                .entries
-                .iter()
-                .filter(|(kind, entry)| match entry {
-                    PatchEntry::Set(value) => forward::forwardable_value(*kind, value),
-                    PatchEntry::Removed => true,
-                })
-                .cloned()
-                .collect(),
-        }
     }
 
     /// 官方 `DataComponentPatch.equals`：两份补丁是同一张表。

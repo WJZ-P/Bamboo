@@ -228,8 +228,10 @@ pub enum EquipmentSlot {
 
 /// 更新实体的装备，发给看得到这个实体的其他玩家。
 ///
-/// 物品带着组件：客户端要靠它们画附魔光效和改过的名字。收包的一定不是物品的主人，
-/// 所以走 [`ItemStack::write_for_others`]，没法完全校验的那几种组件不发。
+/// 物品带着组件：客户端要靠它们画附魔光效和改过的名字。组件原样写，和官方一样。
+///
+/// Updates an entity's equipment for players who can see it. Components are written
+/// as stored, matching vanilla.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetEquipment<'a> {
     entity_id: i32,
@@ -251,7 +253,7 @@ impl ClientboundPacket for SetEquipment<'_> {
         for (index, (slot, stack)) in self.slots.iter().enumerate() {
             let is_last = index + 1 == self.slots.len();
             out.push(*slot as u8 | if is_last { 0 } else { EQUIPMENT_CONTINUE });
-            stack.write_for_others(out);
+            stack.write(out);
         }
     }
 }

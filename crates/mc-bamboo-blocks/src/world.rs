@@ -243,6 +243,11 @@ pub struct World<'a> {
     /// The item this click hands back. Block behaviour only records it; the game layer edits
     /// the inventory.
     item_exchange: Option<crate::item_exchange::ItemExchange>,
+    /// 这次右键要从方块里拿进物品栏的一堆，比如雕纹书架取出的书。
+    ///
+    /// A stack this click moves from a block into the inventory, such as a book
+    /// taken from a chiseled bookshelf.
+    gained: Option<mc_bamboo_protocol::item::ItemStack>,
     /// `RedstoneWireBlock.shouldSignal`，见 [`World::wire_block_signal`]。
     wire_should_signal: bool,
     /// `ServerLevel.isHandlingTick`：这次操作在世界刻里。
@@ -258,6 +263,7 @@ impl<'a> World<'a> {
             effects: Vec::new(),
             placed_at: None,
             item_exchange: None,
+            gained: None,
             wire_should_signal: true,
             handling_tick: false,
         }
@@ -309,6 +315,20 @@ impl<'a> World<'a> {
     /// The item exchange recorded for this click.
     pub(crate) fn item_exchange(&self) -> Option<&crate::item_exchange::ItemExchange> {
         self.item_exchange.as_ref()
+    }
+
+    /// 记下这次要从方块拿进物品栏的物品。
+    ///
+    /// Record a stack this click should move from the block into the inventory.
+    pub(crate) fn set_gained(&mut self, stack: mc_bamboo_protocol::item::ItemStack) {
+        self.gained = Some(stack);
+    }
+
+    /// 这次右键记下的、要放进物品栏的物品。
+    ///
+    /// The stack recorded for this click, to be added to the inventory.
+    pub(crate) fn gained(&self) -> Option<&mc_bamboo_protocol::item::ItemStack> {
+        self.gained.as_ref()
     }
 
     pub(crate) fn ticks_mut(&mut self) -> &mut BlockTicks {

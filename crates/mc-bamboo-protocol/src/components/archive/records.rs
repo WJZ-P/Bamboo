@@ -2777,7 +2777,7 @@ fn decode_fireworks(tag: &Tag) -> Result<ComponentValue> {
     })
 }
 
-fn decode_profile(tag: &Tag) -> Result<ResolvableProfile> {
+pub(super) fn decode_profile(tag: &Tag) -> Result<ResolvableProfile> {
     if let Tag::String(name) = tag {
         return Ok(ResolvableProfile {
             profile: Err(PartialProfile {

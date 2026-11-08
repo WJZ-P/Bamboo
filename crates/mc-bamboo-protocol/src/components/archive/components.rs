@@ -24,6 +24,20 @@ use super::{
 };
 use crate::components::{ComponentValue, cursor::Registry};
 
+/// 把一个组件的存档标签按官方 `Codec` 解一遍再编回去。
+///
+/// Decode one component's archive tag with the official `Codec` and encode it again.
+pub(crate) fn transcode_persistent(kind: i32, tag: &Tag) -> Result<Tag> {
+    Ok(encode_value(&decode_value(kind, tag, 0)?, 0)?.to_tag())
+}
+
+/// 存档标签按官方 `Codec` 解出来以后，和这份组件值是不是同一个。
+///
+/// Whether an archive tag decodes to this component value through the official `Codec`.
+pub fn same_decoded(kind: i32, expected: &Tag, actual: &ComponentValue) -> bool {
+    decode_value(kind, expected, 0).is_ok_and(|decoded| &decoded == actual)
+}
+
 pub(super) fn encode_value(value: &ComponentValue, depth: u32) -> Result<Dyn> {
     encode_early(value, depth)
         .or_else(|| encode_items(value, depth))

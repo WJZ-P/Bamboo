@@ -44,34 +44,70 @@ fn lower_fill_level(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block_and_update(pos, lowered);
 }
 
-/// `emptyBucket` 的结果：换成 `filled`。
-fn fill_with(filled: BlockState, world: &mut World, pos: BlockPos) -> InteractionResult {
+/// `emptyBucket`：倒进去，创造模式按 `createFilledResult` 补一个空桶。
+///
+/// `emptyBucket`: pour, then `createFilledResult` may add an empty bucket in creative.
+fn pour_bucket(
+    filled: BlockState,
+    world: &mut World,
+    ctx: &UseContext,
+    pos: BlockPos,
+    replacement: i32,
+) -> InteractionResult {
     world.set_block_and_update(pos, filled);
+    record_fill(world, ctx, ItemStack::new(replacement, 1), true);
     InteractionResult::Success
 }
 
-/// `fillLavaInteraction`、`fillPowderSnowInteraction`：水下倒不进去，但是吃掉这次点击。
-fn fill_with_unless_under_water(
+/// 水下倒不进去时是 `CONSUME`，桶还在手里，不补空桶。
+///
+/// Under water the click is `CONSUME` and the bucket stays, so no empty bucket is added.
+fn pour_bucket_unless_under_water(
     filled: BlockState,
     world: &mut World,
+    ctx: &UseContext,
     pos: BlockPos,
+    replacement: i32,
 ) -> InteractionResult {
     if world.is_water_at(pos.above()) {
         InteractionResult::Consume
     } else {
-        fill_with(filled, world, pos)
+        pour_bucket(filled, world, ctx, pos, replacement)
     }
 }
 
-/// `fillBucket`：水和细雪要满了才能舀，岩浆总是满的。
-fn fill_bucket(state: BlockState, world: &mut World, pos: BlockPos) -> InteractionResult {
-    let is_layered = state.is(blocks::WATER_CAULDRON) || state.is(blocks::POWDER_SNOW_CAULDRON);
-    if !state.is(blocks::LAVA_CAULDRON)
-        && !(is_layered && state.get(LEVEL_CAULDRON) == MAX_FILL_LEVEL)
-    {
+/// `fillBucket`：舀满，创造模式按 `createFilledResult` 补一个满桶。
+///
+/// `fillBucket`: scoop, then `createFilledResult` may add the filled bucket in creative.
+fn scoop_bucket(
+    state: BlockState,
+    world: &mut World,
+    ctx: &UseContext,
+    pos: BlockPos,
+) -> InteractionResult {
+    let Some(replacement) = scooped_bucket(state) else {
         return InteractionResult::TryEmptyHandInteraction;
+    };
+    world.set_block_and_update(pos, BlockState(blocks::CAULDRON));
+    record_fill(world, ctx, ItemStack::new(replacement, 1), true);
+    InteractionResult::Success
+}
+
+/// 水和细雪要满了才能舀，岩浆总是满的。舀不了时返回 `None`。
+///
+/// Water and powder snow must be full. Lava always is. `None` means the bucket does nothing.
+fn scooped_bucket(state: BlockState) -> Option<i32> {
+    if state.is(blocks::LAVA_CAULDRON) {
+        return Some(items::LAVA_BUCKET);
     }
-    fill_with(BlockState(blocks::CAULDRON), world, pos)
+    let full = state.get(LEVEL_CAULDRON) == MAX_FILL_LEVEL;
+    if state.is(blocks::WATER_CAULDRON) && full {
+        Some(items::WATER_BUCKET)
+    } else if state.is(blocks::POWDER_SNOW_CAULDRON) && full {
+        Some(items::POWDER_SNOW_BUCKET)
+    } else {
+        None
+    }
 }
 
 /// 分层炼药锅灌满时的状态。
@@ -299,14 +335,28 @@ impl Behaviour for Cauldron {
             return wash_dye(state, world, ctx, pos);
         }
         match item {
-            items::WATER_BUCKET => fill_with(full_layered(blocks::WATER_CAULDRON), world, pos),
-            items::LAVA_BUCKET => {
-                fill_with_unless_under_water(BlockState(blocks::LAVA_CAULDRON), world, pos)
-            }
-            items::POWDER_SNOW_BUCKET => {
-                fill_with_unless_under_water(full_layered(blocks::POWDER_SNOW_CAULDRON), world, pos)
-            }
-            items::BUCKET => fill_bucket(state, world, pos),
+            items::WATER_BUCKET => pour_bucket(
+                full_layered(blocks::WATER_CAULDRON),
+                world,
+                ctx,
+                pos,
+                items::BUCKET,
+            ),
+            items::LAVA_BUCKET => pour_bucket_unless_under_water(
+                BlockState(blocks::LAVA_CAULDRON),
+                world,
+                ctx,
+                pos,
+                items::BUCKET,
+            ),
+            items::POWDER_SNOW_BUCKET => pour_bucket_unless_under_water(
+                full_layered(blocks::POWDER_SNOW_CAULDRON),
+                world,
+                ctx,
+                pos,
+                items::BUCKET,
+            ),
+            items::BUCKET => scoop_bucket(state, world, ctx, pos),
             items::POTION => pour_potion(state, world, ctx, pos),
             items::GLASS_BOTTLE => fill_bottle(state, world, ctx, pos),
             item if state.is(blocks::WATER_CAULDRON)
@@ -913,19 +963,23 @@ mod tests {
     }
 
     #[test]
-    fn buckets_still_fill_and_empty_without_an_item_exchange() {
+    fn buckets_fill_and_empty_through_create_filled_result() {
         let water_bucket = ItemStack::new(items::WATER_BUCKET, 1);
         let filled_up = click_stack(BlockState(blocks::CAULDRON), &water_bucket);
         assert_eq!(filled_up.result, InteractionResult::Success);
         assert_eq!(filled_up.state, full_layered(blocks::WATER_CAULDRON));
-        assert!(filled_up.exchange.is_none());
+        let (replacement, limit) = filled(&filled_up.exchange);
+        assert_eq!(replacement, &ItemStack::new(items::BUCKET, 1));
+        assert!(limit);
 
         let bucket = ItemStack::new(items::BUCKET, 1);
         assert_unchanged(&click_stack(water(2), &bucket), water(2));
         let emptied = click_stack(water(3), &bucket);
         assert_eq!(emptied.result, InteractionResult::Success);
         assert_eq!(emptied.state, BlockState(blocks::CAULDRON));
-        assert!(emptied.exchange.is_none());
+        let (replacement, limit) = filled(&emptied.exchange);
+        assert_eq!(replacement, &ItemStack::new(items::WATER_BUCKET, 1));
+        assert!(limit);
     }
 
     #[test]

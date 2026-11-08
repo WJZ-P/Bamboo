@@ -7,7 +7,7 @@ use mc_bamboo_data::{
 
 use crate::{
     codec::{DecodeError, Reader, write_varint},
-    components::{ComponentPatch, ComponentValue, defaults, forward, validate},
+    components::{ComponentPatch, ComponentValue, defaults, validate},
 };
 
 /// 官方校验的数量上限（`ItemStack.MAP_CODEC`）。
@@ -21,11 +21,11 @@ const MAX_PATCH_ENTRIES: usize = 256;
 
 /// 一堆物品。组件的值在这里是不透明的字节，类型化的视图在 [`crate::components`]。
 ///
-/// 字节来自客户端时，`set_creative_mode_slot` 已经像官方一样解过每一项组件（见
-/// [`crate::components::validate`]）。发回给**发来它的那名玩家**用
-/// [`write`](Self::write)，写完整的补丁；发给**别人**用
-/// [`write_for_others`](Self::write_for_others)，它会滤掉我们没法完全校验的那几种组件，
-/// 见 [`crate::components::forward`]。
+/// 字节来自客户端时，`set_creative_mode_slot` 已经按官方 `Codec` 解过并写回。
+/// 发给任何玩家都用 [`write`](Self::write)，组件原样出去。
+///
+/// Bytes from a client have already been decoded and written back through the official
+/// codec. [`write`](Self::write) sends that patch to every player.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemStack {
     /// `minecraft:item` 注册表 ID。
@@ -104,61 +104,42 @@ impl ItemStack {
             added,
             removed,
         };
-        // 每一项组件的值都要解得开，解不开的物品官方也收不下。
-        ComponentPatch::from_opaque(&stack)?;
-        Ok(stack)
+        // 官方 `validatedStreamCodec`：每项组件按 `Codec` 解，再按解出来的值写回去，
+        // 最后整堆物品还要过得了 `ItemStack.CODEC`。
+        //
+        // `validatedStreamCodec`: decode every component, store what its codec writes
+        // back, then require the whole stack to encode through `ItemStack.CODEC`.
+        let patch = ComponentPatch::from_opaque(&stack)?;
+        crate::components::archive::stack::encode_stack(item, count, &patch).map_err(|_| {
+            DecodeError::InvalidComponentValue("item stack codec rejected the value")
+        })?;
+        let (added, removed) = patch.to_opaque();
+        Ok(Self {
+            item,
+            count,
+            added,
+            removed,
+        })
     }
 
     /// 按可信格式写入，也就是所有 clientbound 包用的格式：组件的值前面没有长度。
     ///
-    /// 补丁原样写出去，和官方一样。**只能发给这份组件的来源玩家自己**：它的客户端刚把这些字节
-    /// 发给我们，所以一定解得开。发给别人时用 [`write_for_others`](Self::write_for_others)。
+    /// 补丁原样写出去，和官方一样。
+    ///
+    /// Trusted clientbound format: component values have no length prefix.
+    /// The patch is written as stored, matching vanilla.
     pub fn write(&self, out: &mut Vec<u8>) {
-        self.write_patch(out, false);
-    }
-
-    /// 发给其他玩家时的写法：滤掉我们没法完全校验的组件，见 [`crate::components::forward`]。
-    pub fn write_for_others(&self, out: &mut Vec<u8>) {
-        self.write_patch(out, true);
-    }
-
-    /// `for_others` 为真时跳过发不出去的组件。
-    fn write_patch(&self, out: &mut Vec<u8>, for_others: bool) {
         if self.write_empty_or_header(out) {
             return;
         }
-        let added: Vec<&(i32, Vec<u8>)> = self
-            .added
-            .iter()
-            .filter(|(kind, value)| !for_others || forward::forwardable(*kind, value))
-            .collect();
-        write_varint(out, added.len() as i32);
+        write_varint(out, self.added.len() as i32);
         write_varint(out, self.removed.len() as i32);
-        for (kind, value) in added {
+        for (kind, value) in &self.added {
             write_varint(out, *kind);
             out.extend_from_slice(value);
         }
         for &kind in &self.removed {
             write_varint(out, kind);
-        }
-    }
-
-    /// 别的玩家会收到的那一份：滤掉发不出去的组件，见 [`crate::components::forward`]。
-    ///
-    /// 没有组件时是一份普通的拷贝。物品从一名玩家手里转到另一名玩家手里时也用它，
-    /// 这样没校验过的字节不会跟着物品跑到别人的客户端上。
-    pub fn filtered(&self) -> Self {
-        if self.added.is_empty() {
-            return self.clone();
-        }
-        Self {
-            added: self
-                .added
-                .iter()
-                .filter(|(kind, value)| forward::forwardable(*kind, value))
-                .cloned()
-                .collect(),
-            ..self.clone()
         }
     }
 
@@ -283,13 +264,9 @@ mod tests {
         out
     }
 
-    fn for_others(stack: &ItemStack) -> Vec<u8> {
-        let mut out = Vec::new();
-        stack.write_for_others(&mut out);
-        out
-    }
-
-    /// 一项我们不敢转发的组件：`lock` 线上是 NBT，官方客户端要过一遍 DFU 的 `Codec`。
+    /// `lock` 线上是 NBT，解过 `Codec` 之后原样发给所有人。
+    ///
+    /// `lock` is NBT. After the codec accepts it, every player receives the same bytes.
     fn locked() -> ItemStack {
         let mut lock = Vec::new();
         Tag::Compound(Vec::new()).write_network(&mut lock);
@@ -338,19 +315,11 @@ mod tests {
     }
 
     #[test]
-    fn other_players_see_the_components_we_can_check() {
+    fn every_player_sees_the_same_components() {
         assert_eq!(trusted(&with_components()), hex("02 01 01 01 01 10 0c"));
-        assert_eq!(for_others(&with_components()), hex("02 01 01 01 01 10 0c"));
-        assert_eq!(with_components().filtered(), with_components());
-    }
-
-    #[test]
-    fn the_owner_gets_the_components_we_cannot_check_but_others_do_not() {
-        // 发回给物品主人的是完整的补丁：`lock` 的值是一个空复合标签。
+        // 空的 `lock` 是一个空复合标签，发给谁都是这份字节。
+        // An empty `lock` is an empty compound, and every player gets those bytes.
         assert_eq!(trusted(&locked()), hex("02 01 01 00 51 0a 00"));
-        // 发给别人的那一份里没有这一项，服务端的物品还留着它。
-        assert_eq!(for_others(&locked()), hex("02 01 00 00"));
-        assert_eq!(locked().filtered(), ItemStack::new(1, 2));
         assert_eq!(locked().added.len(), 1);
     }
 

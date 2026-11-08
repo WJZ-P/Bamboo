@@ -37,6 +37,7 @@ mod interaction;
 mod inventory;
 mod light_updates;
 mod links;
+mod lock;
 mod menu;
 mod movement;
 mod player;

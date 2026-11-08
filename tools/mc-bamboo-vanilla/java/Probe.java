@@ -54,6 +54,7 @@ import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.UUIDUtil;
+import net.minecraft.advancements.predicates.ItemPredicate;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -195,6 +196,7 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.LockCode;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.SwingAnimationType;
 import net.minecraft.world.item.component.WritableBookContent;
@@ -1255,6 +1257,7 @@ public final class Probe {
                     actor.openMenuTitle != null && CHEST_NAME.equals(actor.openMenuTitle.getString()));
             actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
             pumpFor(TICK_MILLIS);
+            forwardedComponents(actor, observer);
 
             // 清掉这一段用的槽位，后面几段按空物品栏算。
             actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, ItemStack.EMPTY));
@@ -1263,6 +1266,113 @@ public final class Probe {
             actor.send(new ServerboundSetCarriedItemPacket(0));
             await("components: the hands are empty again",
                     () -> isEmpty(remote, EquipmentSlot.OFFHAND) && isEmpty(remote, EquipmentSlot.MAINHAND));
+        }
+
+        /**
+         * 创造模式放进箱子的锁和自定义文本，另一名玩家打开时要用官方 codec 解得开，内容一样。
+         * 带锁的箱子没有钥匙打不开，主手拿着绊线钩才能开。
+         */
+        private void forwardedComponents(Join actor, Join observer) throws IOException {
+            Vec3 actorHome = actor.position;
+            Vec3 observerHome = observer.position;
+            LockCode key = new LockCode(ItemPredicate.Builder.item()
+                    .of(actor.registries.lookupOrThrow(Registries.ITEM), Items.TRIPWIRE_HOOK)
+                    .build());
+            ItemStack note = new ItemStack(Items.PAPER);
+            note.set(DataComponents.CUSTOM_NAME, Component.literal("Sealed Note"));
+            note.set(DataComponents.LOCK, key);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 3, note));
+            pumpFor(TICK_MILLIS);
+
+            BlockPos ground = BlockPos.containing(actor.position).offset(3, -1, -1);
+            BlockPos chest = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(Items.CHEST)));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    placing));
+            await("components: " + actor.player + " gets the ack for the storage chest",
+                    () -> actor.lastAck >= placing);
+            await("components: " + actor.player + " sees the storage chest",
+                    () -> actor.blocks.get(chest) != null && actor.blocks.get(chest).is(Blocks.CHEST));
+            openChest(actor, chest);
+            int noteSlot = 54 + 3;
+            actor.send(actor.click(noteSlot, 0, ContainerInput.QUICK_MOVE));
+            await("components: the sealed note moves into the chest",
+                    () -> is(actor.menuSlots.get(0), Items.PAPER, 1));
+            check("components: the placer still has the custom name",
+                    "Sealed Note".equals(actor.menuSlots.get(0).getHoverName().getString()));
+            check("components: the placer still has the lock", key.equals(actor.menuSlots.get(0).get(DataComponents.LOCK)));
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
+
+            observer.moveTo(new Vec3(chest.getX() + 0.5, SPAWN_Y, chest.getZ() + 1.5), true);
+            pumpFor(TICK_MILLIS);
+            openChest(observer, chest);
+            await("components: the other player sees the sealed note",
+                    () -> is(observer.menuSlots.get(0), Items.PAPER, 1));
+            ItemStack seen = observer.menuSlots.get(0);
+            check("components: the other player reads the same name",
+                    "Sealed Note".equals(seen.getHoverName().getString()));
+            check("components: the other player reads the same lock", key.equals(seen.get(DataComponents.LOCK)));
+            check("components: the lock matches a tripwire hook",
+                    seen.get(DataComponents.LOCK).predicate().test(new ItemStack(Items.TRIPWIRE_HOOK)));
+            check("components: the lock rejects a stone",
+                    !seen.get(DataComponents.LOCK).predicate().test(new ItemStack(Items.STONE)));
+            observer.send(new ServerboundContainerClosePacket(observer.openContainerId));
+            pumpFor(TICK_MILLIS);
+
+            BlockPos vaultGround = BlockPos.containing(actor.position).offset(3, -1, 1);
+            BlockPos vault = vaultGround.above();
+            ItemStack locked = new ItemStack(Items.CHEST);
+            locked.set(DataComponents.CUSTOM_NAME, Component.literal("Vault"));
+            locked.set(DataComponents.LOCK, key);
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, locked));
+            actor.send(new ServerboundSetCarriedItemPacket(1));
+            int placingVault = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(vaultGround, 1.0), Direction.UP, vaultGround, false),
+                    placingVault));
+            await("components: " + actor.player + " gets the ack for the locked chest",
+                    () -> actor.lastAck >= placingVault);
+            await("components: " + actor.player + " sees the locked chest",
+                    () -> actor.blocks.get(vault) != null && actor.blocks.get(vault).is(Blocks.CHEST));
+
+            observer.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, ItemStack.EMPTY));
+            observer.send(new ServerboundSetCarriedItemPacket(0));
+            observer.moveTo(new Vec3(vault.getX() + 0.5, SPAWN_Y, vault.getZ() + 1.5), true);
+            pumpFor(TICK_MILLIS);
+            observer.openMenuType = null;
+            int messages = observer.systemMessages.size();
+            int refused = observer.nextSequence();
+            observer.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(vault, 1.0), Direction.UP, vault, false),
+                    refused));
+            await("components: " + observer.player + " gets the ack for the locked chest",
+                    () -> observer.lastAck >= refused);
+            pumpFor(TICK_MILLIS * 3);
+            check("components: a locked chest stays closed without the key", observer.openMenuType == null);
+            check("components: the lock notice is an overlay",
+                    observer.systemMessages.size() > messages
+                            && observer.systemMessages.get(observer.systemMessages.size() - 1).overlay());
+
+            observer.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.TRIPWIRE_HOOK)));
+            observer.send(new ServerboundSetCarriedItemPacket(0));
+            pumpFor(TICK_MILLIS);
+            openChest(observer, vault);
+            check("components: the key opens the locked chest",
+                    observer.openMenuTitle != null && "Vault".equals(observer.openMenuTitle.getString()));
+            observer.send(new ServerboundContainerClosePacket(observer.openContainerId));
+            pumpFor(TICK_MILLIS);
+            // 后面的箱子测试还站在原来的箱子旁边。走回去，免得人站到够不着的地方。
+            // The later chest test still stands beside the original chest, so walk back.
+            actor.moveTo(actorHome, true);
+            observer.moveTo(observerHome, true);
+            pumpFor(TICK_MILLIS);
         }
 
         /** 一面红色花朵图案的旗帜，和探针放下去的那一面一样。 */

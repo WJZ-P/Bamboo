@@ -97,7 +97,20 @@ impl Behaviour for ChiseledBookShelf {
         if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::empty());
+        let pos = ctx.clicked_pos();
+        // 官方 `removeItem` 不看数量，整格拿走。音效和 `gameEvent` 没有对应的包。
+        //
+        // `removeItem` ignores the count and takes the whole slot. The pickup sound and
+        // `gameEvent` have no packet here.
+        let book = world
+            .slots_at(pos)
+            .into_iter()
+            .nth(slot)
+            .filter(|stack| !stack.is_empty());
+        set_bookshelf_slot(world, pos, slot, ItemStack::empty());
+        if let Some(book) = book {
+            world.set_gained(book);
+        }
         InteractionResult::Success
     }
 
