@@ -8,3 +8,6 @@ repository.workspace = true
 description = "NBT encoding for the Bamboo Minecraft server."
 keywords = ["minecraft", "nbt"]
 categories = ["encoding"]
+
+[dependencies]
+thiserror.workspace = true

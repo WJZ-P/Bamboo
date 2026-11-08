@@ -4,6 +4,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.serialization.JsonOps;
+import io.netty.buffer.Unpooled;
 import java.io.IOException;
 import java.io.Reader;
 import java.lang.reflect.Field;
@@ -25,6 +26,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ForkJoinPool;
 import net.minecraft.SharedConstants;
+import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -34,14 +36,18 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.Vec3i;
 import net.minecraft.core.component.BlockTransformer;
+import net.minecraft.core.component.DataComponentPatch;
+import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
+import net.minecraft.server.ReloadableServerResources;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.KnownPack;
 import net.minecraft.server.packs.repository.PackRepository;
@@ -50,17 +56,36 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.tags.TagNetworkSerialization;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.entity.animal.axolotl.Axolotl;
+import net.minecraft.world.entity.animal.cow.MushroomCow;
+import net.minecraft.world.entity.animal.equine.Llama;
+import net.minecraft.world.entity.animal.fish.Salmon;
+import net.minecraft.world.entity.animal.fish.TropicalFish;
+import net.minecraft.world.entity.animal.fox.Fox;
+import net.minecraft.world.entity.animal.parrot.Parrot;
+import net.minecraft.world.entity.animal.rabbit.Rabbit;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.HoneycombItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemUseAnimation;
+import net.minecraft.world.item.Rarity;
 import net.minecraft.world.item.StandingAndWallBlockItem;
+import net.minecraft.world.item.SwingAnimationType;
+import net.minecraft.world.item.component.FireworkExplosion;
+import net.minecraft.world.item.component.ItemAttributeModifiers;
+import net.minecraft.world.item.component.MapPostProcessing;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.ItemLike;
@@ -137,6 +162,8 @@ public final class Extractor {
     private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
+    /** loadRegistries 加载的静态注册表标签，itemComponents 再加载服务端资源时还要用。 */
+    private static List<Registry.PendingTags<?>> STATIC_TAGS = List.of();
 
     public static void main(String[] args) throws Exception {
         Path output = Path.of(args[0]);
@@ -165,6 +192,9 @@ public final class Extractor {
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
+            root.add("componentEnums", componentEnums());
+            // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
+            root.add("itemComponents", itemComponents(resources, layers));
 
             Files.writeString(output, new GsonBuilder().create().toJson(root));
         }
@@ -178,6 +208,7 @@ public final class Extractor {
         LayeredRegistryAccess<RegistryLayer> initial = RegistryLayer.createRegistryAccess();
         List<Registry.PendingTags<?>> staticTags =
                 TagLoader.loadTagsForExistingRegistries(resources, initial.getLayer(RegistryLayer.STATIC));
+        STATIC_TAGS = staticTags;
         RegistryAccess.Frozen context = initial.getAccessForLoading(RegistryLayer.WORLD);
         List<HolderLookup.RegistryLookup<?>> lookups = TagLoader.buildUpdatedLookups(context, staticTags);
         RegistryAccess.Frozen world = RegistryDataLoader
@@ -185,6 +216,97 @@ public final class Extractor {
                 .join();
         staticTags.forEach(Registry.PendingTags::apply);
         return initial.replaceFrom(RegistryLayer.WORLD, world);
+    }
+
+    /**
+     * 每个物品的默认组件，按官方 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+     *
+     * 默认组件是数据驱动的，`Item.components()` 要等 `ReloadableServerResources` 把它们绑上去
+     * 才读得到，所以这里照 WorldLoader.load 的后半段再加载一次服务端资源。
+     * `PendingTags.apply` 只是重新绑定同样的内容，重复调用没有副作用。
+     */
+    private static JsonArray itemComponents(
+            CloseableResourceManager resources, LayeredRegistryAccess<RegistryLayer> layers) throws Exception {
+        ReloadableServerResources managers = ReloadableServerResources
+                .loadResources(resources, layers, STATIC_TAGS, FeatureFlags.DEFAULT_FLAGS,
+                        Commands.CommandSelection.DEDICATED, LevelBasedPermissionSet.GAMEMASTER,
+                        ForkJoinPool.commonPool(), Runnable::run)
+                .get();
+        managers.updateComponentsAndStaticRegistryTags();
+        RegistryAccess registries = (RegistryAccess) managers.fullRegistries().lookup();
+
+        JsonArray items = new JsonArray();
+        for (Item item : BuiltInRegistries.ITEM) {
+            // 官方的 DataComponentMap 超过 8 项就换成按身份哈希排序的映射，遍历顺序每次运行都可能不同。
+            // 组件补丁里的顺序没有含义，所以这里按组件类型的注册表 ID 排一遍，生成的字节才稳定。
+            List<TypedDataComponent<?>> components = new ArrayList<>();
+            for (TypedDataComponent<?> component : item.components()) {
+                components.add(component);
+            }
+            components.sort(Comparator.comparingInt(
+                    component -> BuiltInRegistries.DATA_COMPONENT_TYPE.getId(component.type())));
+
+            DataComponentPatch.Builder patch = DataComponentPatch.builder();
+            for (TypedDataComponent<?> component : components) {
+                patch.set(component);
+            }
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            DataComponentPatch.STREAM_CODEC.encode(buffer, patch.build());
+            byte[] bytes = new byte[buffer.readableBytes()];
+            buffer.readBytes(bytes);
+
+            StringBuilder hex = new StringBuilder(bytes.length * 2);
+            for (byte value : bytes) {
+                hex.append(Character.forDigit((value >> 4) & 0xf, 16));
+                hex.append(Character.forDigit(value & 0xf, 16));
+            }
+            items.add(hex.toString());
+        }
+        return items;
+    }
+
+    /**
+     * 按 ID 查表的枚举：连续的只要常量个数，稀疏的要整张 ID 表。
+     *
+     * 官方 `ByIdMap.continuous` 要求 ID 刚好是 0 到个数减一的排列，不然构造时就抛异常，
+     * 所以连续的枚举只导出个数就够。越界时怎么折回（ZERO、CLAMP、WRAP）是代码，留在 Rust 里。
+     */
+    private static JsonObject componentEnums() {
+        JsonObject counts = new JsonObject();
+        counts.addProperty("rarity", Rarity.values().length);
+        counts.addProperty("dye_color", DyeColor.values().length);
+        counts.addProperty("item_use_animation", ItemUseAnimation.values().length);
+        counts.addProperty("swing_animation_type", SwingAnimationType.values().length);
+        counts.addProperty("equipment_slot", EquipmentSlot.values().length);
+        counts.addProperty("equipment_slot_group", EquipmentSlotGroup.values().length);
+        counts.addProperty("attribute_operation", AttributeModifier.Operation.values().length);
+        counts.addProperty("attribute_display_type", ItemAttributeModifiers.Display.Type.values().length);
+        counts.addProperty("firework_shape", FireworkExplosion.Shape.values().length);
+        counts.addProperty("map_post_processing", MapPostProcessing.values().length);
+        counts.addProperty("fox_variant", Fox.Variant.values().length);
+        counts.addProperty("axolotl_variant", Axolotl.Variant.values().length);
+        counts.addProperty("salmon_size", Salmon.Variant.values().length);
+        counts.addProperty("parrot_variant", Parrot.Variant.values().length);
+        counts.addProperty("mooshroom_variant", MushroomCow.Variant.values().length);
+        counts.addProperty("llama_variant", Llama.Variant.values().length);
+        counts.addProperty("horse_variant", net.minecraft.world.entity.animal.equine.Variant.values().length);
+
+        JsonObject sparse = new JsonObject();
+        JsonArray patterns = new JsonArray();
+        for (TropicalFish.Pattern pattern : TropicalFish.Pattern.values()) {
+            patterns.add(pattern.getPackedId());
+        }
+        sparse.add("tropical_fish_pattern", patterns);
+        JsonArray rabbits = new JsonArray();
+        for (Rabbit.Variant variant : Rabbit.Variant.values()) {
+            rabbits.add(variant.id());
+        }
+        sparse.add("rabbit_variant", rabbits);
+
+        JsonObject enums = new JsonObject();
+        enums.add("counts", counts);
+        enums.add("sparse", sparse);
+        return enums;
     }
 
     /** 官方的 `Heightmap.Types`，区块包按 `id` 排列，`id` 也是网络上的键。 */

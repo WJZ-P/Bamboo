@@ -12,6 +12,8 @@
 //!     让官方光照引擎在随机场景里算光照，用 mc-bamboo-world 重放，逐段比较
 //! mc-bamboo-vanilla menu <java 路径> [--cases N] [--seed S] [--case I] [--show N]
 //!     让官方容器菜单跑随机点击，用 mc-bamboo-game 重放，逐槽、逐个 state_id 比较
+//! mc-bamboo-vanilla components <java 路径> [--show N]
+//!     让官方代码编码一大批物品组件，用 mc-bamboo-protocol 解码再编码，逐字节比较
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -27,6 +29,8 @@
 //! `oracle` 和 `probe-online` 依赖生成的数据。生成文件坏了、这个工具编译不过时，
 //! 用 `--no-default-features` 编译，`generate` 不需要它们。
 
+#[cfg(feature = "oracle")]
+mod components;
 mod extract;
 mod generate;
 #[cfg(feature = "oracle")]
@@ -53,10 +57,12 @@ const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
 #[cfg(feature = "oracle")]
 const MENU_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MenuOracle.java";
+const COMPONENTS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ComponentOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
-      mc-bamboo-vanilla menu <java 路径> [--cases N] [--seed S] [--case I] [--show N]";
+      mc-bamboo-vanilla menu <java 路径> [--cases N] [--seed S] [--case I] [--show N]
+      mc-bamboo-vanilla components <java 路径> [--show N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -79,6 +85,7 @@ fn run() -> Result<(), String> {
         ["oracle", java, ref options @ ..] => oracle(java, options),
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
+        ["components", java, ref options @ ..] => components(java, options),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -157,6 +164,11 @@ fn menu(java: &str, options: &[&str]) -> Result<(), String> {
     menu::run(official_program(java, MENU_SOURCE)?, options)
 }
 
+#[cfg(feature = "oracle")]
+fn components(java: &str, options: &[&str]) -> Result<(), String> {
+    components::run(official_program(java, COMPONENTS_SOURCE)?, options)
+}
+
 /// 用官方解压出来的 jar 当 classpath，运行一个单文件 Java 程序。
 #[cfg(feature = "oracle")]
 fn official_program(java: &str, source: &str) -> Result<Command, String> {
@@ -185,6 +197,11 @@ fn light(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn menu(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn components(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

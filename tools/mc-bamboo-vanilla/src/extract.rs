@@ -40,6 +40,18 @@ pub struct Extracted {
     pub block_maps: BlockMaps,
     pub block_transformers: Vec<BlockTransformer>,
     pub heightmaps: Vec<HeightmapType>,
+    pub component_enums: ComponentEnums,
+    /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+    pub item_components: Vec<String>,
+}
+
+/// 按 ID 查表的枚举：连续的只有常量个数，稀疏的是整张 ID 表。
+#[derive(Debug, Deserialize)]
+pub struct ComponentEnums {
+    /// 枚举名 → 常量个数。
+    pub counts: BTreeMap<String, u32>,
+    /// 枚举名 → 按声明顺序的 ID。
+    pub sparse: BTreeMap<String, Vec<i32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,6 +505,10 @@ pub struct VersionData {
     pub builtin_registries: BTreeMap<String, Vec<String>>,
     /// 连接状态 → 方向 → 包名 → ID。
     pub packets: BTreeMap<String, PacketReport>,
+    /// 组件里按 ID 查表的枚举。
+    pub component_enums: ComponentEnums,
+    /// 每个物品的默认组件，按 `DataComponentPatch.STREAM_CODEC` 编成十六进制。
+    pub item_components: Vec<String>,
 }
 
 pub fn run(
@@ -540,6 +556,8 @@ pub fn run(
         heightmaps: extracted.heightmaps,
         builtin_registries,
         packets,
+        component_enums: extracted.component_enums,
+        item_components: extracted.item_components,
     })
 }
 
