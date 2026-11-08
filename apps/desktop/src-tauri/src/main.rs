@@ -42,6 +42,7 @@ fn main() {
             commands::stop_server,
             commands::load_settings,
             commands::save_settings,
+            commands::default_settings,
             commands::recent_logs,
         ])
         .run(tauri::generate_context!())

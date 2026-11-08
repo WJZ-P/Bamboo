@@ -4,10 +4,12 @@ use std::time::Duration;
 
 use tracing::warn;
 
-const MIN_VIEW_DISTANCE: u8 = 2;
-const MAX_VIEW_DISTANCE: u8 = 32;
+/// 视距的下限，再小客户端就没有可渲染的区块了。
+pub const MIN_VIEW_DISTANCE: u8 = 2;
+/// 视距的上限，和官方的 `view-distance` 相同。
+pub const MAX_VIEW_DISTANCE: u8 = 32;
 /// 客户端这么久收不到任何字节就断开。没有别的流量时，心跳是唯一能让它收到字节的东西。
-const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 从代理接收玩家信息的方式。默认关闭，和以前一样由服务端自己生成离线 UUID。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
