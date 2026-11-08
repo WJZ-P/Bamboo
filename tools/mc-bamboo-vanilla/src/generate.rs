@@ -65,7 +65,41 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         &item_components_file(data)?,
     )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
-    write_file(output_dir, "tags.rs", &tags)
+    write_file(output_dir, "tags.rs", &tags)?;
+    write_worldgen(data, output_dir)
+}
+
+/// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。
+///
+/// 这几个注册表是递归的树（密度函数里套密度函数、样条里套样条），生成等价的 Rust 结构
+/// 会是一大堆嵌套字面量，升级版本时也看不出差异；JSON 是官方 codec 的原始形态，
+/// `mc-bamboo-worldgen` 用同一套 codec 的语义解析，所以这里原样存。
+fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&data.worldgen)
+        .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
+    let path = output_dir.join("worldgen.json");
+    fs::write(&path, format!("{json}\n"))
+        .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 官方数据包里世界生成的几个注册表：`worldgen/noise`、`worldgen/density_function`、"
+    );
+    let _ = writeln!(
+        out,
+        "/// `worldgen/noise_settings`、两个多噪声群系预设和末地的五个群系。"
+    );
+    let _ = writeln!(out, "///");
+    let _ = writeln!(
+        out,
+        "/// 前三个是官方 codec 编出来的 JSON，预设是量化好的定点数。解析在 `mc-bamboo-worldgen`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLDGEN: &str = include_str!(\"worldgen.json\");"
+    );
+    write_file(output_dir, "worldgen.rs", &out)
 }
 
 /// 组件里按 ID 查表的枚举：连续的常量个数，稀疏的整张 ID 表。
@@ -291,7 +325,7 @@ fn write_file(output_dir: &Path, name: &str, content: &str) -> Result<(), String
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod component_enums;\npub mod component_registries;\npub mod heightmaps;\npub mod item_components;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\n"
+    "pub mod block_classes;\npub mod block_maps;\npub mod block_transformers;\npub mod blocks;\npub mod component_enums;\npub mod component_registries;\npub mod heightmaps;\npub mod item_components;\npub mod items;\npub mod light;\npub mod packets;\npub mod registries;\npub mod shapes;\npub mod states;\npub mod tags;\npub mod version;\npub mod worldgen;\n"
         .to_owned()
 }
 

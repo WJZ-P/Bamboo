@@ -12,7 +12,7 @@ use mc_bamboo_core::Aabb;
 pub use generated::{
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, component_enums, component_registries, heightmaps,
-    item_components, items, light, packets, registries, shapes, states, tags, version,
+    item_components, items, light, packets, registries, shapes, states, tags, version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";

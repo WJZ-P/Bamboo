@@ -16,3 +16,4 @@ pub mod shapes;
 pub mod states;
 pub mod tags;
 pub mod version;
+pub mod worldgen;

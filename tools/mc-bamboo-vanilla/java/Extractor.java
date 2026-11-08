@@ -3,6 +3,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.datafixers.util.Pair;
+import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
 import io.netty.buffer.Unpooled;
 import java.io.IOException;
@@ -29,6 +31,7 @@ import net.minecraft.SharedConstants;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.LayeredRegistryAccess;
@@ -105,7 +108,14 @@ import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
+import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
@@ -193,6 +203,7 @@ public final class Extractor {
             root.add("blockTransformers", blockTransformers(layers.compositeAccess()));
             root.add("heightmaps", heightmaps());
             root.add("componentEnums", componentEnums());
+            root.add("worldgen", worldgen(layers.compositeAccess()));
             // 这一步会加载服务端资源，物品的默认组件要绑定上去才读得到，放在最后。
             root.add("itemComponents", itemComponents(resources, layers));
 
@@ -731,6 +742,78 @@ public final class Extractor {
         JsonObject layers = new JsonObject();
         providers.forEach(layers::add);
         return layers;
+    }
+
+    /**
+     * 世界生成的纯计算部分要用的几个注册表。
+     *
+     * <p>噪声参数、密度函数和维度设置按官方 codec 原样编回 JSON，Bamboo 用同一套 codec 的语义解析，
+     * 所以升级版本时数据和解析一起动，不会对不上。密度函数里对注册表的引用还是引用（字符串），
+     * Bamboo 解析时才展开，和官方编译前跑 `DfRewriteRule.INLINE_REFERENCE` 的效果一样。
+     *
+     * <p>多噪声群系预设不走 codec：官方的 `Climate.Parameter` 在 codec 里是浮点，
+     * 而内存里是「原值乘一万再截断」的定点数，来回换算会差一两个最低位，
+     * 所以这里直接导出定点数。顺序就是官方 `ParameterList` 里的顺序，R 树靠它建。
+     */
+    private static JsonObject worldgen(RegistryAccess registries) {
+        RegistryOps<JsonElement> ops = registries.createSerializationContext(JsonOps.INSTANCE);
+        JsonObject worldgen = new JsonObject();
+        worldgen.add("noise", encodeRegistry(registries, ops, Registries.NOISE, NormalNoise.DIRECT_CODEC));
+        worldgen.add("density_function",
+                encodeRegistry(registries, ops, Registries.DENSITY_FUNCTION, DensityFunction.CODEC));
+        worldgen.add("noise_settings",
+                encodeRegistry(registries, ops, Registries.NOISE_SETTINGS, NoiseGeneratorSettings.DIRECT_CODEC));
+        worldgen.add("multi_noise_presets", multiNoisePresets(registries));
+        worldgen.add("end_biomes", endBiomes());
+        return worldgen;
+    }
+
+    /** 一个注册表的全部条目，按名字排序，每一条用给定的 codec 编成 JSON。 */
+    private static <T> JsonObject encodeRegistry(RegistryAccess registries, RegistryOps<JsonElement> ops,
+            ResourceKey<Registry<T>> key, Codec<T> codec) {
+        Registry<T> registry = registries.lookupOrThrow(key);
+        JsonObject entries = new JsonObject();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            entries.add(name.toString(), codec.encodeStart(ops, registry.getValue(name)).getOrThrow());
+        }
+        return entries;
+    }
+
+    /** 两个多噪声群系预设，每条是群系 ID 加十三个定点数（六个区间的上下界和 offset）。 */
+    private static JsonObject multiNoisePresets(RegistryAccess registries) {
+        Registry<MultiNoiseBiomeSourceParameterList> registry =
+                registries.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST);
+        JsonObject presets = new JsonObject();
+        for (Identifier name : registry.keySet().stream().sorted().toList()) {
+            JsonArray entries = new JsonArray();
+            for (Pair<Climate.ParameterPoint, Holder<Biome>> entry : registry.getValue(name).parameters().values()) {
+                Climate.ParameterPoint point = entry.getFirst();
+                JsonArray parameters = new JsonArray();
+                for (Climate.Parameter parameter : List.of(point.temperature(), point.humidity(),
+                        point.continentalness(), point.erosion(), point.depth(), point.weirdness())) {
+                    parameters.add(parameter.min());
+                    parameters.add(parameter.max());
+                }
+                parameters.add(point.offset());
+                JsonObject item = new JsonObject();
+                item.addProperty("biome", entry.getSecond().unwrapKey().orElseThrow().identifier().toString());
+                item.add("parameters", parameters);
+                entries.add(item);
+            }
+            presets.add(name.toString(), entries);
+        }
+        return presets;
+    }
+
+    /** TheEndBiomeSource 的五个群系，顺序和官方构造参数一致。 */
+    private static JsonObject endBiomes() {
+        JsonObject biomes = new JsonObject();
+        biomes.addProperty("end", Biomes.THE_END.identifier().toString());
+        biomes.addProperty("highlands", Biomes.END_HIGHLANDS.identifier().toString());
+        biomes.addProperty("midlands", Biomes.END_MIDLANDS.identifier().toString());
+        biomes.addProperty("islands", Biomes.SMALL_END_ISLANDS.identifier().toString());
+        biomes.addProperty("barrens", Biomes.END_BARRENS.identifier().toString());
+        return biomes;
     }
 
     /** BlockBehaviour.Properties.ignitedByLava 是整个方块的属性，按方块 ID 列出来。 */
