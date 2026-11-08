@@ -1069,23 +1069,23 @@ fn official_index(slot: usize) -> Option<i32> {
 pub(crate) fn tick(region: &mut Region) {
     let ids: Vec<PlayerId> = region.menus.keys().copied().collect();
     for id in ids {
-        let valid = region
-            .menus
-            .get(&id)
-            .is_some_and(|menu| still_valid(region, id, menu));
+        // 官方 `ServerPlayer.tick` 先 `broadcastChanges`，再看 `stillValid`：
+        // 菜单失效的这一刻，最后的槽位变化也会先发出去。
+        // Vanilla `ServerPlayer.tick` calls `broadcastChanges` before `stillValid`, so the last
+        // slot changes still go out in the tick the menu becomes invalid.
+        let Some(mut menu) = region.menus.remove(&id) else {
+            continue;
+        };
+        broadcast_changes(region, id, &mut menu);
+        let valid = still_valid(region, id, &menu);
+        region.menus.insert(id, menu);
         if !valid {
             warn!(
                 player = id.0,
                 "closing a menu whose block is gone or out of reach"
             );
             close_menu(region, id);
-            continue;
         }
-        let Some(mut menu) = region.menus.remove(&id) else {
-            continue;
-        };
-        broadcast_changes(region, id, &mut menu);
-        region.menus.insert(id, menu);
     }
 }
 

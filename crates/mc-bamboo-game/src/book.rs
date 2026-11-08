@@ -38,19 +38,20 @@ pub(crate) fn on_edit_book(
     let Some(menu_slot) = menu_slot_for(slot) else {
         return;
     };
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
-    };
-    if !has_component(
-        &player.inventory.slots[menu_slot],
-        kinds::WRITABLE_BOOK_CONTENT,
-    ) {
-        return;
-    }
-
-    // 作者是档案名，官方 `getPlainTextName`。离线模式就是进服时的名字。
-    let author = player.name.clone();
     let changed = {
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
+        };
+        if !has_component(
+            &player.inventory.slots[menu_slot],
+            kinds::WRITABLE_BOOK_CONTENT,
+        ) {
+            return;
+        }
+
+        // 作者是档案名，官方 `getPlainTextName`。离线模式就是进服时的名字。
+        // The author is the profile name, official `getPlainTextName`. Offline mode uses the join name.
+        let author = player.name.clone();
         let stack = &mut player.inventory.slots[menu_slot];
         let before = stack.clone();
         match title {
@@ -60,8 +61,31 @@ pub(crate) fn on_edit_book(
         *stack != before
     };
     if changed {
-        inventory::send_slot(player, &mut region.links, menu_slot);
+        sync_edited_slot(region, id, menu_slot);
     }
+}
+
+/// 改过的格子交给当前打开的菜单去同步。
+///
+/// 官方 `updateBookContents` 和 `signBook` 写完物品就返回。发包是之后
+/// `ServerPlayer.tick` 里的 `containerMenu.broadcastChanges()`，不一定是背包菜单。
+/// 没开容器时这个菜单就是背包，容器 ID 是 0，槽位是背包菜单的下标。
+/// 开着箱子时用箱子菜单的容器 ID 和槽位，由这一 tick 后面的 `menu::tick` 发出。
+/// 副手不在箱子菜单里，官方那时也不会同步副手。
+///
+/// Official `updateBookContents` and `signBook` do not send packets. `ServerPlayer.tick`
+/// later calls `containerMenu.broadcastChanges()`, which is whichever menu is open.
+/// With nothing else open that is the inventory menu, container id 0. An open chest
+/// uses the chest menu's id and slot; `menu::tick` sends it later in this tick.
+/// The offhand is not a chest slot, so vanilla does not sync it then either.
+fn sync_edited_slot(region: &mut Region, id: PlayerId, inventory_slot: usize) {
+    if region.menus.contains_key(&id) {
+        return;
+    }
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    inventory::send_slot(player, &mut region.links, inventory_slot);
 }
 
 /// 官方 `updateBookContents`：整份换成新的页面，物品种类不变。
@@ -240,9 +264,9 @@ mod tests {
         defaults::resolve(stack.item, &patch, kind).cloned()
     }
 
-    fn slot_frame(state_id: i32, slot: usize, stack: &ItemStack) -> Frame {
+    fn slot_frame(container_id: i32, state_id: i32, slot: usize, stack: &ItemStack) -> Frame {
         let packet = ContainerSetSlot {
-            container_id: 0,
+            container_id,
             state_id,
             slot: slot as i16,
             stack,
@@ -324,7 +348,10 @@ mod tests {
                 plain("第二页".to_owned()),
             ]))
         );
-        assert_eq!(slot_echoes(&client), vec![slot_frame(1, menu_slot, &stack)]);
+        assert_eq!(
+            slot_echoes(&client),
+            vec![slot_frame(0, 1, menu_slot, &stack)]
+        );
 
         // 内容没变就不再发，官方 `broadcastChanges` 也是比过才发。
         edit(&server, &client, 1, &["Hello", "第二页"], None);
@@ -355,7 +382,10 @@ mod tests {
             resolved(&stack, kinds::WRITABLE_BOOK_CONTENT),
             Some(ComponentValue::WritableBookContent(vec![]))
         );
-        assert_eq!(slot_echoes(&client), vec![slot_frame(2, menu_slot, &stack)]);
+        assert_eq!(
+            slot_echoes(&client),
+            vec![slot_frame(0, 2, menu_slot, &stack)]
+        );
     }
 
     #[test]
@@ -409,7 +439,10 @@ mod tests {
             defaults::of_item(items::WRITTEN_BOOK).get(kinds::ENCHANTMENT_GLINT_OVERRIDE),
             Some(&ComponentValue::EnchantmentGlintOverride(true))
         );
-        assert_eq!(slot_echoes(&client), vec![slot_frame(1, menu_slot, &stack)]);
+        assert_eq!(
+            slot_echoes(&client),
+            vec![slot_frame(0, 1, menu_slot, &stack)]
+        );
     }
 
     #[test]
@@ -444,6 +477,64 @@ mod tests {
                 resolved: true,
             })
         );
-        assert_eq!(slot_echoes(&client), vec![slot_frame(1, OFF_HAND, &stack)]);
+        assert_eq!(
+            slot_echoes(&client),
+            vec![slot_frame(0, 1, OFF_HAND, &stack)]
+        );
+    }
+
+    /// 单箱 27 格，后面是背包 27 格，再是快捷栏。快捷栏第 2 格是菜单槽 55。
+    ///
+    /// A single chest has 27 slots, then 27 inventory slots, then the hotbar.
+    /// Hotbar slot 1 is menu slot 55.
+    const CHEST_HOTBAR_SLOT: usize = 27 + 27 + 1;
+
+    fn open_chest(server: &mut Harness, client: &Client) {
+        let pos = mc_bamboo_core::BlockPos::new(8, mc_bamboo_world::flat::surface_y(), 8);
+        assert!(
+            server
+                .region()
+                .chunks
+                .set_block(pos, mc_bamboo_data::blocks::CHEST),
+            "the spawn chunk should already be loaded"
+        );
+        assert!(crate::menu::open_block(server.region(), client.id, pos));
+        server.tick();
+        client.take_frames();
+    }
+
+    #[test]
+    fn signing_while_a_chest_is_open_syncs_the_chest_menu() {
+        let (mut server, client) = settled();
+        let menu_slot = HOTBAR_START + 1;
+        give(&mut server, &client, menu_slot, book());
+        open_chest(&mut server, &client);
+        let container_id = server.region().menus[&client.id].container_id;
+
+        edit(&server, &client, 1, &["page"], Some("My Title"));
+        server.tick();
+
+        let stack = slot_of(&server, &client, menu_slot).clone();
+        assert_eq!(stack.item, items::WRITTEN_BOOK);
+        assert_eq!(
+            slot_echoes(&client),
+            vec![slot_frame(container_id, 2, CHEST_HOTBAR_SLOT, &stack)]
+        );
+    }
+
+    #[test]
+    fn signing_the_offhand_while_a_chest_is_open_sends_nothing() {
+        let (mut server, client) = settled();
+        give(&mut server, &client, OFF_HAND, book());
+        open_chest(&mut server, &client);
+
+        edit(&server, &client, 40, &["page"], Some("Off"));
+        server.tick();
+
+        assert_eq!(
+            slot_of(&server, &client, OFF_HAND).item,
+            items::WRITTEN_BOOK
+        );
+        assert!(slot_echoes(&client).is_empty());
     }
 }

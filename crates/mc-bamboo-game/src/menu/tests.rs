@@ -498,7 +498,15 @@ fn breaking_the_chest_closes_the_menu_and_discards_the_contents() {
     tick(&mut fixture.region);
 
     assert!(!fixture.region.menus.contains_key(&fixture.id));
-    assert_eq!(fixture.take_ids(), [clientbound::CONTAINER_CLOSE]);
+    // 官方 `ServerPlayer.tick` 先广播、后关：上面直接改的那一格先发出去，再关菜单。
+    // Vanilla broadcasts before closing: the slot changed above goes out, then the menu closes.
+    assert_eq!(
+        fixture.take_ids(),
+        [
+            clientbound::CONTAINER_SET_SLOT,
+            clientbound::CONTAINER_CLOSE
+        ]
+    );
     container::tick(&mut fixture.region);
     assert!(!fixture.region.containers.contains_key(&pos));
 }
