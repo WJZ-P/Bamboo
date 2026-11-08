@@ -1312,11 +1312,20 @@ impl ComponentPatch {
     }
 
     /// 官方用 `Map.put`：同一个组件类型出现两次时后面的赢，位置不变。
-    pub(crate) fn put(&mut self, kind: i32, entry: PatchEntry) {
+    pub fn put(&mut self, kind: i32, entry: PatchEntry) {
         match self.entries.iter_mut().find(|(id, _)| *id == kind) {
             Some(existing) => existing.1 = entry,
             None => self.entries.push((kind, entry)),
         }
+    }
+
+    /// 官方用 `Map.remove`：去掉一个组件类型的条目，返回原来那一项。
+    ///
+    /// `PatchedDataComponentMap.set` 在值等于默认组件时会走这条路径，
+    /// 所以补丁里不会留下和默认值相同的条目。
+    pub fn remove(&mut self, kind: i32) -> Option<PatchEntry> {
+        let index = self.entries.iter().position(|(id, _)| *id == kind)?;
+        Some(self.entries.remove(index).1)
     }
 }
 

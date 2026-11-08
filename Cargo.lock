@@ -1903,6 +1903,8 @@ version = "0.0.0"
 dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-protocol",
+ "mc-bamboo-recipes",
  "tracing",
 ]
 
@@ -1970,6 +1972,7 @@ name = "mc-bamboo-recipes"
 version = "0.0.0"
 dependencies = [
  "mc-bamboo-data",
+ "mc-bamboo-protocol",
 ]
 
 [[package]]

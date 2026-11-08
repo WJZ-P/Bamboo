@@ -142,6 +142,11 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
+    /// 点了菜单里的按钮。切石机用它选结果。
+    ContainerButtonClick {
+        container_id: i32,
+        button: i32,
+    },
     /// 告示牌编辑器提交的文字，每一行最多 [`MAX_LINE_CHARS`] 个字符。
     SignUpdate {
         pos: BlockPos,
@@ -234,6 +239,10 @@ impl PlayRequest {
             serverbound::CONTAINER_CLICK => read_container_click(&mut reader)?,
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
+            },
+            serverbound::CONTAINER_BUTTON_CLICK => Self::ContainerButtonClick {
+                container_id: reader.varint()?,
+                button: reader.varint()?,
             },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             other => return Ok(Self::Other(other)),
@@ -1161,6 +1170,17 @@ mod tests {
         assert_eq!(
             decode_body(serverbound::CONTAINER_CLOSE, "05"),
             Ok(PlayRequest::ContainerClose { container_id: 5 })
+        );
+    }
+
+    #[test]
+    fn decodes_container_button_click() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_BUTTON_CLICK, "05 02"),
+            Ok(PlayRequest::ContainerButtonClick {
+                container_id: 5,
+                button: 2,
+            })
         );
     }
 

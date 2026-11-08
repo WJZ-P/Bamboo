@@ -9,7 +9,7 @@ use std::any::Any;
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::Block;
 
-use super::facing_the_view;
+use super::{cooking::FurnaceEntity, facing_the_view};
 use crate::{
     behaviour::{
         Behaviour,
@@ -320,6 +320,16 @@ impl Behaviour for Furnace {
         _world: &World,
     ) -> Option<BlockState> {
         Some(facing_the_player(block, ctx))
+    }
+
+    /// `newBlockEntity`：放下熔炉系列时建一个空实体，种类由方块决定。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state)
+            && !world.has_block_entity(pos)
+            && let Some(kind) = FurnaceEntity::kind_of(state.class())
+        {
+            world.set_block_entity(Box::new(FurnaceEntity::new(pos, kind)));
+        }
     }
 
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {

@@ -2,7 +2,12 @@
 
 use mc_bamboo_data::packets::play::clientbound;
 
-use crate::{codec::write_varint, item::ItemStack, packet::ClientboundPacket, text::Component};
+use crate::{
+    codec::{write_i16, write_varint},
+    item::ItemStack,
+    packet::ClientboundPacket,
+    text::Component,
+};
 
 /// 打开一个菜单。`menu_type` 是 `minecraft:menu` 注册表 ID，`title` 是窗口标题。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +48,26 @@ impl ClientboundPacket for ContainerSetContent<'_> {
             stack.write(out);
         }
         self.carried.write(out);
+    }
+}
+
+/// 菜单的一个数据槽变了，官方 `ClientboundContainerSetDataPacket`。
+///
+/// 熔炉的燃烧进度、切石机选中的结果编号都存在数据槽里，不推进 `state_id`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerSetData {
+    pub container_id: i32,
+    pub data_id: i16,
+    pub value: i16,
+}
+
+impl ClientboundPacket for ContainerSetData {
+    const ID: i32 = clientbound::CONTAINER_SET_DATA;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.container_id);
+        write_i16(out, self.data_id);
+        write_i16(out, self.value);
     }
 }
 
@@ -128,6 +153,18 @@ mod tests {
             carried: &carried,
         };
         assert_eq!(body(&packet), hex("07 ac 02 02 02 01 00 00 00 04 03 00 00"));
+    }
+
+    #[test]
+    fn container_set_data_writes_two_big_endian_shorts() {
+        assert_eq!(
+            body(&ContainerSetData {
+                container_id: 3,
+                data_id: 1,
+                value: 200
+            }),
+            hex("03 00 01 00 c8")
+        );
     }
 
     #[test]

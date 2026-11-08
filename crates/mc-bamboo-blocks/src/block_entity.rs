@@ -14,6 +14,7 @@ use std::{
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{BlockClass, registries, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     state::{
@@ -117,6 +118,11 @@ impl BlockEntities {
     /// `getBlockEntity(pos)` 之后按类型取，类型不对时是 `None`。
     pub fn get<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
+    }
+
+    /// 可变版本，菜单点击时直接改熔炉、酿造台的内容。
+    pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
+        self.entities.get_mut(&pos)?.entity.as_any_mut().downcast_mut()
     }
 
     /// 这一格有没有方块实体。
@@ -262,6 +268,37 @@ const SLOT_OCCUPIED: [Property<bool>; 6] = [
     SLOT_4_OCCUPIED,
     SLOT_5_OCCUPIED,
 ];
+
+/// `EntityType.ITEM` 注册时的宽高，`Containers.dropItemStack` 用宽度算掉落点的抖动范围。
+const ITEM_ENTITY_SIZE: f64 = 0.25;
+/// `ItemEntity.setDeltaMovement` 里三个 `triangle` 的分散度。
+const ITEM_SPREAD: f64 = 0.114_850_001_711_398_36;
+
+/// `Containers.dropItemStack`：把一堆物品掉在方块角上。
+///
+/// 世界里没有物品实体，但掉落点和速度的随机数照抽：空堆取三个 `nextDouble`，
+/// 每轮分堆取一个 `nextInt(21)`，再取三个 `triangle`（每个两次 `nextDouble`）。
+/// `stack` 按官方的 `split` 语义在这里被分完，调用方传副本。
+pub(crate) fn drop_item_stack(world: &mut World, pos: BlockPos, stack: &ItemStack) {
+    let center_range = 1.0 - ITEM_ENTITY_SIZE;
+    let half_size = ITEM_ENTITY_SIZE / 2.0;
+    let _x = f64::from(pos.x) + world.random().next_double() * center_range + half_size;
+    let _y = f64::from(pos.y) + world.random().next_double() * center_range;
+    let _z = f64::from(pos.z) + world.random().next_double() * center_range + half_size;
+
+    let mut stack = stack.clone();
+    while !stack.is_empty() {
+        let count = world.random().next_int(21) + 10;
+        stack.count -= count.min(stack.count);
+        if stack.count <= 0 {
+            stack = ItemStack::empty();
+        }
+        // `new Vec3(random.triangle(0.0, ...), random.triangle(0.2, ...), random.triangle(0.0, ...))`
+        world.random().triangle(0.0, ITEM_SPREAD);
+        world.random().triangle(0.2, ITEM_SPREAD);
+        world.random().triangle(0.0, ITEM_SPREAD);
+    }
+}
 
 /// `Containers.dropItemStack` 在堆是空的时候取的三对 double：掉落点的 `x/y/z`。
 fn drop_empty_stack(world: &mut World) {

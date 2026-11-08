@@ -804,9 +804,19 @@ impl<'a> World<'a> {
 
         let block_changed = !old.is_same_block(state);
         // 换了方块，官方把方块实体一起删掉：先跑 remove 之前的副作用，再 remove。
-        if block_changed && old.has_block_entity() {
+        // 新状态自己声明要留下实体时（铜箱子这些）两步都跳过。
+        if block_changed
+            && old.has_block_entity()
+            && !block_entity::keeps_block_entity(state, old)
+        {
             if flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0 {
-                self.pre_remove_block_entity(pos, old);
+                // 登记过的实体用的是它自己的 `preRemoveSideEffects`，熔炉和酿造台在这里掉内容、
+                // 发经验。没有实体的（世界生成直接摆下的箱子之类）按方块类型补官方的取数。
+                if self.has_block_entity(pos) {
+                    self.pre_remove_block_entity(pos, old);
+                } else {
+                    block_entity::pre_remove_side_effects(old, self);
+                }
             }
             self.remove_block_entity(pos);
         }
@@ -815,14 +825,6 @@ impl<'a> World<'a> {
             self.level.redstone_mut().forget_block_entity(pos);
         }
         let moved_by_piston = flags & UPDATE_MOVE_BY_PISTON != 0;
-        // 官方的方块实体在 `affectNeighborsAfterRemoval` 之前掉落，顺序影响取数。
-        if block_changed
-            && old.has_block_entity()
-            && !block_entity::keeps_block_entity(state, old)
-            && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0
-        {
-            block_entity::pre_remove_side_effects(old, self);
-        }
         let is_rail = state.is_a(BlockAncestor::BaseRailBlock);
         if (block_changed || is_rail) && (flags & UPDATE_NEIGHBORS != 0 || moved_by_piston) {
             old.affect_neighbors_after_removal(self, pos);

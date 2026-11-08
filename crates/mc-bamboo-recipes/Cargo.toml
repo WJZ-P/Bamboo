@@ -11,3 +11,4 @@ categories = ["games"]
 
 [dependencies]
 mc-bamboo-data.workspace = true
+mc-bamboo-protocol.workspace = true

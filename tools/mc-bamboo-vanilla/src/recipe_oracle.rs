@@ -334,7 +334,7 @@ fn build_input(case: &Line) -> Result<CaseInput, String> {
             let slots: Vec<ItemStack> = case
                 .slots
                 .iter()
-                .map(|slot| slot.as_ref().map_or(ItemStack::EMPTY, StackJson::stack))
+                .map(|slot| slot.as_ref().map_or(ItemStack::empty(), StackJson::stack))
                 .collect();
             Ok(CaseInput::Crafting(CraftingInput::of(
                 case.width,
@@ -363,7 +363,7 @@ fn build_input(case: &Line) -> Result<CaseInput, String> {
 }
 
 fn stack(stack: Option<&StackJson>) -> ItemStack {
-    stack.map_or(ItemStack::EMPTY, StackJson::stack)
+    stack.map_or(ItemStack::empty(), StackJson::stack)
 }
 
 fn recipe_type(case: &Line) -> Result<RecipeType, String> {
@@ -403,8 +403,8 @@ fn expected_result(recipe: &Recipe, input: &CaseInput) -> Option<(i32, i32)> {
                 if stack.is_empty() {
                     continue;
                 }
-                if ingredient.test(stack.item()) {
-                    found = Some(stack.item());
+                if ingredient.test(stack.item) {
+                    found = Some(stack.item);
                 } else {
                     material += 1;
                 }
@@ -423,12 +423,12 @@ fn expected_result(recipe: &Recipe, input: &CaseInput) -> Option<(i32, i32)> {
                 .slots()
                 .iter()
                 .find(|stack| !stack.is_empty())?
-                .item(),
+                .item,
             1,
         )),
         // 纹饰的产物是基础物品，数量 1。
         (RecipeKind::SmithingTrim { .. }, CaseInput::Smithing(smithing)) => {
-            Some((smithing.base.item(), 1))
+            Some((smithing.base.item, 1))
         }
         _ => recipe
             .result()

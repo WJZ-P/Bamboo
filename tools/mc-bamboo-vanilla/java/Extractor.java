@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -718,7 +719,7 @@ public final class Extractor {
     private static JsonObject recipes(RegistryAccess registries) throws ReflectiveOperationException {
         JsonArray entries = new JsonArray();
         for (RecipeHolder<?> holder : new RecipeManager(registries).getRecipes()) {
-            entries.add(recipe(holder));
+            entries.add(recipe(holder, registries));
         }
         JsonObject object = new JsonObject();
         object.add("potions", potions());
@@ -735,7 +736,8 @@ public final class Extractor {
         return potions;
     }
 
-    private static JsonObject recipe(RecipeHolder<?> holder) throws ReflectiveOperationException {
+    private static JsonObject recipe(RecipeHolder<?> holder, RegistryAccess registries)
+            throws ReflectiveOperationException {
         Recipe<?> recipe = holder.value();
         JsonObject object = new JsonObject();
         object.addProperty("id", holder.id().identifier().toString());
@@ -745,11 +747,11 @@ public final class Extractor {
             object.addProperty("width", shaped.getWidth());
             object.addProperty("height", shaped.getHeight());
             object.add("pattern", pattern(shaped.getIngredients()));
-            object.add("result", stack((ItemStackTemplate) readField(ShapedRecipe.class, "result", shaped)));
+            object.add("result", stack((ItemStackTemplate) readField(ShapedRecipe.class, "result", shaped), registries));
         } else if (recipe instanceof ShapelessRecipe shapeless) {
             object.addProperty("kind", "shapeless");
             object.add("ingredients", ingredients((List<Ingredient>) readField(ShapelessRecipe.class, "ingredients", shapeless)));
-            object.add("result", stack((ItemStackTemplate) readField(ShapelessRecipe.class, "result", shapeless)));
+            object.add("result", stack((ItemStackTemplate) readField(ShapelessRecipe.class, "result", shapeless), registries));
         } else if (recipe instanceof TransmuteRecipe transmute) {
             object.addProperty("kind", "transmute");
             object.add("input", ingredient((Ingredient) readField(TransmuteRecipe.class, "input", transmute)));
@@ -757,37 +759,37 @@ public final class Extractor {
             MinMaxBounds.Ints bounds = (MinMaxBounds.Ints) readField(TransmuteRecipe.class, "materialCount", transmute);
             object.addProperty("minMaterial", bounds.min().orElse(1));
             object.addProperty("maxMaterial", bounds.max().orElse(8));
-            transmuteResult(object, (TransmuteResult) readField(TransmuteRecipe.class, "result", transmute));
+            transmuteResult(object, (TransmuteResult) readField(TransmuteRecipe.class, "result", transmute), registries);
             object.addProperty("addMaterialCount", (boolean) readField(TransmuteRecipe.class, "addMaterialCountToResult", transmute));
         } else if (recipe instanceof DyeRecipe dye) {
             object.addProperty("kind", "dye");
             object.add("target", ingredient((Ingredient) readField(DyeRecipe.class, "target", dye)));
             object.add("dye", ingredient((Ingredient) readField(DyeRecipe.class, "dye", dye)));
-            object.add("result", stack((ItemStackTemplate) readField(DyeRecipe.class, "result", dye)));
+            object.add("result", stack((ItemStackTemplate) readField(DyeRecipe.class, "result", dye), registries));
         } else if (recipe instanceof ImbueRecipe imbue) {
             object.addProperty("kind", "imbue");
             object.add("source", ingredient((Ingredient) readField(ImbueRecipe.class, "source", imbue)));
             object.add("material", ingredient((Ingredient) readField(ImbueRecipe.class, "material", imbue)));
-            object.add("result", stack((ItemStackTemplate) readField(ImbueRecipe.class, "result", imbue)));
+            object.add("result", stack((ItemStackTemplate) readField(ImbueRecipe.class, "result", imbue), registries));
         } else if (recipe instanceof AbstractCookingRecipe cooking) {
             String kind = recipe instanceof SmeltingRecipe ? "smelting"
                     : recipe instanceof BlastingRecipe ? "blasting"
                     : recipe instanceof SmokingRecipe ? "smoking" : "campfire_cooking";
             object.addProperty("kind", kind);
             object.add("ingredient", ingredient((Ingredient) readField(SingleItemRecipe.class, "input", cooking)));
-            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", cooking)));
+            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", cooking), registries));
             object.addProperty("experience", cooking.experience());
             object.addProperty("time", cooking.cookingTime());
         } else if (recipe instanceof StonecutterRecipe stonecutting) {
             object.addProperty("kind", "stonecutting");
             object.add("ingredient", ingredient((Ingredient) readField(SingleItemRecipe.class, "input", stonecutting)));
-            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", stonecutting)));
+            object.add("result", stack((ItemStackTemplate) readField(SingleItemRecipe.class, "result", stonecutting), registries));
         } else if (recipe instanceof SmithingTransformRecipe transform) {
             object.addProperty("kind", "smithing_transform");
             object.add("template", optionalIngredient(transform.templateIngredient()));
             object.add("base", ingredient(transform.baseIngredient()));
             object.add("addition", optionalIngredient(transform.additionIngredient()));
-            object.add("result", stack((ItemStackTemplate) readField(SmithingTransformRecipe.class, "result", transform)));
+            object.add("result", stack((ItemStackTemplate) readField(SmithingTransformRecipe.class, "result", transform), registries));
         } else if (recipe instanceof SmithingTrimRecipe trim) {
             object.addProperty("kind", "smithing_trim");
             object.add("template", ingredient(trim.templateIngredient().orElseThrow()));
@@ -799,13 +801,13 @@ public final class Extractor {
             object.addProperty("kind", "brewing");
             object.add("input", potionIngredient(brewing.getInput()));
             object.add("reagent", potionIngredient(brewing.getReagent()));
-            object.add("result", stack(brewing.getOutput()));
+            object.add("result", stack(brewing.getOutput(), registries));
         } else if (recipe instanceof FireworkRocketRecipe rocket) {
             object.addProperty("kind", "firework_rocket");
             object.add("shell", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "shell", rocket)));
             object.add("fuel", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "fuel", rocket)));
             object.add("star", ingredient((Ingredient) readField(FireworkRocketRecipe.class, "star", rocket)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkRocketRecipe.class, "result", rocket)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkRocketRecipe.class, "result", rocket), registries));
         } else if (recipe instanceof FireworkStarRecipe star) {
             object.addProperty("kind", "firework_star");
             JsonArray shapes = new JsonArray();
@@ -821,21 +823,21 @@ public final class Extractor {
             object.add("twinkle", ingredient((Ingredient) readField(FireworkStarRecipe.class, "twinkle", star)));
             object.add("fuel", ingredient((Ingredient) readField(FireworkStarRecipe.class, "fuel", star)));
             object.add("dye", ingredient((Ingredient) readField(FireworkStarRecipe.class, "dye", star)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkStarRecipe.class, "result", star)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkStarRecipe.class, "result", star), registries));
         } else if (recipe instanceof FireworkStarFadeRecipe fade) {
             object.addProperty("kind", "firework_star_fade");
             object.add("target", ingredient((Ingredient) readField(FireworkStarFadeRecipe.class, "target", fade)));
             object.add("dye", ingredient((Ingredient) readField(FireworkStarFadeRecipe.class, "dye", fade)));
-            object.add("result", stack((ItemStackTemplate) readField(FireworkStarFadeRecipe.class, "result", fade)));
+            object.add("result", stack((ItemStackTemplate) readField(FireworkStarFadeRecipe.class, "result", fade), registries));
         } else if (recipe instanceof MapExtendingRecipe map) {
             object.addProperty("kind", "mapextending");
             object.add("map", ingredient((Ingredient) readField(MapExtendingRecipe.class, "map", map)));
             object.add("material", ingredient((Ingredient) readField(MapExtendingRecipe.class, "material", map)));
-            transmuteResult(object, (TransmuteResult) readField(MapExtendingRecipe.class, "result", map));
+            transmuteResult(object, (TransmuteResult) readField(MapExtendingRecipe.class, "result", map), registries);
         } else if (recipe instanceof BannerDuplicateRecipe banner) {
             object.addProperty("kind", "banner_duplicate");
             object.add("banner", ingredient((Ingredient) readField(BannerDuplicateRecipe.class, "banner", banner)));
-            object.add("result", stack((ItemStackTemplate) readField(BannerDuplicateRecipe.class, "result", banner)));
+            object.add("result", stack((ItemStackTemplate) readField(BannerDuplicateRecipe.class, "result", banner), registries));
         } else if (recipe instanceof BookCloningRecipe book) {
             object.addProperty("kind", "book_cloning");
             object.add("source", ingredient((Ingredient) readField(BookCloningRecipe.class, "source", book)));
@@ -843,12 +845,12 @@ public final class Extractor {
             MinMaxBounds.Ints bounds = (MinMaxBounds.Ints) readField(BookCloningRecipe.class, "allowedGenerations", book);
             object.addProperty("minGeneration", bounds.min().orElse(0));
             object.addProperty("maxGeneration", bounds.max().orElse(Integer.MAX_VALUE));
-            object.add("result", stack((ItemStackTemplate) readField(BookCloningRecipe.class, "result", book)));
+            object.add("result", stack((ItemStackTemplate) readField(BookCloningRecipe.class, "result", book), registries));
         } else if (recipe instanceof ShieldDecorationRecipe shield) {
             object.addProperty("kind", "shield_decoration");
             object.add("banner", ingredient((Ingredient) readField(ShieldDecorationRecipe.class, "banner", shield)));
             object.add("target", ingredient((Ingredient) readField(ShieldDecorationRecipe.class, "target", shield)));
-            object.add("result", stack((ItemStackTemplate) readField(ShieldDecorationRecipe.class, "result", shield)));
+            object.add("result", stack((ItemStackTemplate) readField(ShieldDecorationRecipe.class, "result", shield), registries));
         } else if (recipe instanceof RepairItemRecipe) {
             object.addProperty("kind", "repair_item");
         } else if (recipe instanceof DecoratedPotRecipe pot) {
@@ -857,7 +859,7 @@ public final class Extractor {
             object.add("left", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "leftPattern", pot)));
             object.add("right", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "rightPattern", pot)));
             object.add("front", ingredient((Ingredient) readField(DecoratedPotRecipe.class, "frontPattern", pot)));
-            object.add("result", stack((ItemStackTemplate) readField(DecoratedPotRecipe.class, "result", pot)));
+            object.add("result", stack((ItemStackTemplate) readField(DecoratedPotRecipe.class, "result", pot), registries));
         } else {
             throw new IllegalStateException("unsupported recipe " + holder.id());
         }
@@ -917,18 +919,27 @@ public final class Extractor {
         return object;
     }
 
-    private static JsonObject stack(ItemStackTemplate template) {
+    private static JsonObject stack(ItemStackTemplate template, RegistryAccess registries) {
         JsonObject object = new JsonObject();
         object.addProperty("item", BuiltInRegistries.ITEM.getId(template.item().value()));
         object.addProperty("count", template.count());
-        object.addProperty("hasComponents", !template.components().isEmpty());
+        object.addProperty("components", hex(template.components(), registries));
         return object;
     }
 
-    private static void transmuteResult(JsonObject object, TransmuteResult result) {
+    private static void transmuteResult(JsonObject object, TransmuteResult result, RegistryAccess registries) {
         result.item().ifPresent(item -> object.addProperty("resultItem", BuiltInRegistries.ITEM.getId(item.value())));
         object.addProperty("resultCount", result.count());
-        object.addProperty("resultHasComponents", !result.components().isEmpty());
+        object.addProperty("resultComponents", hex(result.components(), registries));
+    }
+
+    /** 组件补丁按官方的网络编码写成十六进制，Bamboo 那边用同一套编解码还原。 */
+    private static String hex(DataComponentPatch patch, RegistryAccess registries) {
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+        DataComponentPatch.STREAM_CODEC.encode(buffer, patch);
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.readBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
     }
 
     private static Object readField(Class<?> owner, String name, Object target) throws ReflectiveOperationException {

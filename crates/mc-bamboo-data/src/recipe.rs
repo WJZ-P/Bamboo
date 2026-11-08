@@ -45,12 +45,13 @@ pub fn has_dye_component(item: i32) -> bool {
 
 /// 一个配方的产物，官方的 `ItemStackTemplate`。
 ///
-/// `has_components` 表示模板自带组件改动。组件还是不透明字节，这里只记有没有。
+/// `components` 是模板自带组件补丁，按官方 `DataComponentPatch.STREAM_CODEC`
+/// 编码的字节，由 `mc-bamboo-protocol` 解码；空切片表示没有组件改动。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stack {
     pub item: i32,
     pub count: i32,
-    pub has_components: bool,
+    pub components: &'static [u8],
 }
 
 /// 酿造配方的原料，官方的 `PotionIngredient`。
@@ -159,7 +160,7 @@ pub enum RecipeKind {
         max_material: i32,
         result_item: Option<i32>,
         result_count: i32,
-        result_has_components: bool,
+        result_components: &'static [u8],
         add_material_count: bool,
     },
     /// `DyeRecipe`：皮革盔甲染色。
@@ -237,7 +238,7 @@ pub enum RecipeKind {
         material: Ingredient,
         result_item: Option<i32>,
         result_count: i32,
-        result_has_components: bool,
+        result_components: &'static [u8],
     },
     /// `BannerDuplicateRecipe`：两个同色旗帜，一个带图案一个不带。
     /// 原版旗帜的 `BANNER_PATTERNS` 默认是空图案，所以默认物品栈永远凑不齐“带图案的源”，

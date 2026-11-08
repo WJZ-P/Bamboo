@@ -14,13 +14,13 @@ use mc_bamboo_recipes::{
 
 fn grid(stacks: &[ItemStack]) -> CraftingInput {
     assert!(stacks.len() <= 9);
-    let mut slots = [ItemStack::EMPTY; 9];
-    slots[..stacks.len()].copy_from_slice(stacks);
+    let mut slots: [ItemStack; 9] = std::array::from_fn(|_| ItemStack::empty());
+    slots[..stacks.len()].clone_from_slice(stacks);
     CraftingInput::of(3, 3, &slots)
 }
 
 fn grid_from_items(items: &[i32]) -> CraftingInput {
-    let stacks: Vec<ItemStack> = items.iter().map(|&item| ItemStack::of(item)).collect();
+    let stacks: Vec<ItemStack> = items.iter().map(|&item| ItemStack::new(item, 1)).collect();
     grid(&stacks)
 }
 
@@ -35,11 +35,11 @@ fn shaped_grid(kind: &RecipeKind) -> Option<CraftingInput> {
     else {
         return None;
     };
-    let mut slots = [ItemStack::EMPTY; 9];
+    let mut slots: [ItemStack; 9] = std::array::from_fn(|_| ItemStack::empty());
     for y in 0..usize::from(*height) {
         for x in 0..usize::from(*width) {
             if let Some(ingredient) = pattern[x + y * usize::from(*width)] {
-                slots[x + y * 3] = ItemStack::of(ingredient.items[0]);
+                slots[x + y * 3] = ItemStack::new(ingredient.items[0], 1);
             }
         }
     }
@@ -52,7 +52,7 @@ fn shapeless_grid(kind: &RecipeKind) -> Option<CraftingInput> {
     };
     let stacks: Vec<ItemStack> = ingredients
         .iter()
-        .map(|ingredient| ItemStack::of(ingredient.items[0]))
+        .map(|ingredient| ItemStack::new(ingredient.items[0], 1))
         .collect();
     Some(grid(&stacks))
 }
@@ -256,7 +256,7 @@ fn every_recipe_matches_its_own_ingredients() {
             }
             RecipeKind::Cooking { ingredient, .. }
             | RecipeKind::Stonecutting { ingredient, .. } => {
-                let stack = ItemStack::of(ingredient.items[0]);
+                let stack = ItemStack::new(ingredient.items[0], 1);
                 assert!(stack.matches(recipe), "{} 不认自己的输入", recipe.id);
             }
             RecipeKind::SmithingTransform {
@@ -267,7 +267,7 @@ fn every_recipe_matches_its_own_ingredients() {
             } => {
                 let input = SmithingInput::new(
                     optional_stack(*template),
-                    ItemStack::of(base.items[0]),
+                    ItemStack::new(base.items[0], 1),
                     optional_stack(*addition),
                 );
                 assert!(input.matches(recipe), "{} 不认自己的输入", recipe.id);
@@ -279,17 +279,17 @@ fn every_recipe_matches_its_own_ingredients() {
                 ..
             } => {
                 let input = SmithingInput::new(
-                    ItemStack::of(template.items[0]),
-                    ItemStack::of(base.items[0]),
-                    ItemStack::of(addition.items[0]),
+                    ItemStack::new(template.items[0], 1),
+                    ItemStack::new(base.items[0], 1),
+                    ItemStack::new(addition.items[0], 1),
                 );
                 assert!(input.matches(recipe), "{} 不认自己的输入", recipe.id);
             }
             RecipeKind::Brewing { input, reagent, .. } => {
                 let brewing = BrewingInput::new(
-                    ItemStack::of(input.item.items[0]),
+                    ItemStack::new(input.item.items[0], 1),
                     input.potions.map(|potions| potions[0]),
-                    ItemStack::of(reagent.item.items[0]),
+                    ItemStack::new(reagent.item.items[0], 1),
                     reagent.potions.map(|potions| potions[0]),
                 );
                 assert!(brewing.matches(recipe), "{} 不认自己的输入", recipe.id);
@@ -300,17 +300,17 @@ fn every_recipe_matches_its_own_ingredients() {
 }
 
 fn optional_stack(ingredient: Option<Ingredient>) -> ItemStack {
-    ingredient.map_or(ItemStack::EMPTY, |ingredient| {
-        ItemStack::of(ingredient.items[0])
+    ingredient.map_or(ItemStack::empty(), |ingredient| {
+        ItemStack::new(ingredient.items[0], 1)
     })
 }
 
 /// 把裁剪后的网格左右翻转。
 fn mirror(input: &CraftingInput) -> CraftingInput {
-    let mut slots = vec![ItemStack::EMPTY; input.width() * input.height()];
+    let mut slots = vec![ItemStack::empty(); input.width() * input.height()];
     for y in 0..input.height() {
         for x in 0..input.width() {
-            slots[input.width() - 1 - x + y * input.width()] = input.get(x, y);
+            slots[input.width() - 1 - x + y * input.width()] = input.get(x, y).clone();
         }
     }
     CraftingInput::of(input.width(), input.height(), &slots)
@@ -338,7 +338,8 @@ fn manager_prefers_the_hinted_recipe() {
 #[test]
 fn empty_input_matches_nothing() {
     let manager = RecipeManager::global();
-    let empty = CraftingInput::of(3, 3, &[ItemStack::EMPTY; 9]);
+    let slots: [ItemStack; 9] = std::array::from_fn(|_| ItemStack::empty());
+    let empty = CraftingInput::of(3, 3, &slots);
     assert!(empty.is_empty());
     for kind in [
         RecipeType::Crafting,
@@ -347,7 +348,7 @@ fn empty_input_matches_nothing() {
     ] {
         assert!(manager.get_recipe_for(kind, &empty, None).is_none());
     }
-    let empty_stack = ItemStack::EMPTY;
+    let empty_stack = ItemStack::empty();
     assert!(empty_stack.is_empty());
     for kind in [
         RecipeType::Smelting,
@@ -358,13 +359,13 @@ fn empty_input_matches_nothing() {
     ] {
         assert!(manager.get_recipe_for(kind, &empty_stack, None).is_none());
     }
-    let empty_smithing = SmithingInput::new(ItemStack::EMPTY, ItemStack::EMPTY, ItemStack::EMPTY);
+    let empty_smithing = SmithingInput::new(ItemStack::empty(), ItemStack::empty(), ItemStack::empty());
     assert!(
         manager
             .get_recipe_for(RecipeType::Smithing, &empty_smithing, None)
             .is_none()
     );
-    let empty_brewing = BrewingInput::new(ItemStack::EMPTY, None, ItemStack::EMPTY, None);
+    let empty_brewing = BrewingInput::new(ItemStack::empty(), None, ItemStack::empty(), None);
     assert!(
         manager
             .get_recipe_for(RecipeType::Brewing, &empty_brewing, None)
@@ -391,8 +392,8 @@ fn repair_item_needs_two_single_damageable_items() {
         .recipe("minecraft:repair_item")
         .expect("没有修复物品");
     let one_each = grid(&[
-        ItemStack::of(items::DIAMOND_PICKAXE),
-        ItemStack::of(items::DIAMOND_PICKAXE),
+        ItemStack::new(items::DIAMOND_PICKAXE, 1),
+        ItemStack::new(items::DIAMOND_PICKAXE, 1),
     ]);
     assert!(one_each.matches(recipe));
     let stacked = grid(&[

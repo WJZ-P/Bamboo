@@ -105,8 +105,8 @@ pub enum ExtractedRecipeKind {
         result_item: Option<i32>,
         #[serde(rename = "resultCount")]
         result_count: i32,
-        #[serde(rename = "resultHasComponents")]
-        result_has_components: bool,
+        #[serde(rename = "resultComponents")]
+        result_components: String,
         #[serde(rename = "addMaterialCount")]
         add_material_count: bool,
     },
@@ -193,8 +193,8 @@ pub enum ExtractedRecipeKind {
         result_item: Option<i32>,
         #[serde(rename = "resultCount")]
         result_count: i32,
-        #[serde(rename = "resultHasComponents")]
-        result_has_components: bool,
+        #[serde(rename = "resultComponents")]
+        result_components: String,
     },
     BannerDuplicate {
         banner: ExtractedIngredient,
@@ -237,7 +237,8 @@ pub struct ExtractedIngredient {
 pub struct ExtractedStack {
     pub item: i32,
     pub count: i32,
-    pub has_components: bool,
+    /// 官方 `DataComponentPatch.STREAM_CODEC` 的字节，十六进制。
+    pub components: String,
 }
 
 #[derive(Debug, Deserialize)]

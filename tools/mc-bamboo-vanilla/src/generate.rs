@@ -1343,7 +1343,7 @@ impl<'a> RecipeWriter<'a> {
                 max_material,
                 result_item,
                 result_count,
-                result_has_components,
+                result_components,
                 add_material_count,
             } => {
                 let input = self.ingredient(input)?;
@@ -1358,11 +1358,12 @@ impl<'a> RecipeWriter<'a> {
                 if *result_count <= 0 {
                     return Err(format!("产物数量是 {result_count}"));
                 }
+                let result_components = self.components(result_components)?;
                 format!(
                     "RecipeKind::Transmute {{ input: {input}, material: {material}, \
                      min_material: {min_material}, max_material: {max_material}, \
                      result_item: {result_item}, result_count: {result_count}, \
-                     result_has_components: {result_has_components}, \
+                     result_components: {result_components}, \
                      add_material_count: {add_material_count} }}"
                 )
             }
@@ -1457,13 +1458,13 @@ impl<'a> RecipeWriter<'a> {
                 material,
                 result_item,
                 result_count,
-                result_has_components,
+                result_components,
             } => self.map_extending(
                 map,
                 material,
                 *result_item,
                 *result_count,
-                *result_has_components,
+                result_components,
             )?,
             ExtractedRecipeKind::BannerDuplicate { banner, result } => {
                 self.banner_duplicate(banner, result)?
@@ -1523,14 +1524,30 @@ impl<'a> RecipeWriter<'a> {
             .name_of(format!("&[{}]", names.join(", "))))
     }
 
+    /// 组件补丁的十六进制字节写成 Rust 字节切片。
+    fn components(&self, hex: &str) -> Result<String, String> {
+        if hex.len() % 2 != 0 {
+            return Err(format!("组件字节的十六进制长度是奇数：{hex}"));
+        }
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks_exact(2) {
+            let pair = std::str::from_utf8(pair).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            let byte = u8::from_str_radix(pair, 16)
+                .map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            bytes.push(byte);
+        }
+        Ok(format!("&{bytes:?}"))
+    }
+
     fn stack(&self, stack: &ExtractedStack) -> Result<String, String> {
         check_item(stack.item, self.data)?;
         if stack.count <= 0 {
             return Err(format!("产物数量是 {}", stack.count));
         }
+        let components = self.components(&stack.components)?;
         Ok(format!(
-            "Stack {{ item: {}, count: {}, has_components: {} }}",
-            stack.item, stack.count, stack.has_components
+            "Stack {{ item: {}, count: {}, components: {components} }}",
+            stack.item, stack.count
         ))
     }
 
@@ -1760,7 +1777,7 @@ impl<'a> RecipeWriter<'a> {
         material: &ExtractedIngredient,
         result_item: Option<i32>,
         result_count: i32,
-        result_has_components: bool,
+        result_components: &str,
     ) -> Result<String, String> {
         let map = self.ingredient(map)?;
         let material = self.ingredient(material)?;
@@ -1774,10 +1791,11 @@ impl<'a> RecipeWriter<'a> {
         if result_count <= 0 {
             return Err(format!("产物数量是 {result_count}"));
         }
+        let result_components = self.components(result_components)?;
         Ok(format!(
             "RecipeKind::MapExtending {{ map: {map}, material: {material}, \
              result_item: {result_item}, result_count: {result_count}, \
-             result_has_components: {result_has_components} }}"
+             result_components: {result_components} }}"
         ))
     }
 

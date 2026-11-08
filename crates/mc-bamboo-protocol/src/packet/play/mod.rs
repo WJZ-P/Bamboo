@@ -341,6 +341,7 @@ mod tests {
             (BlockUpdate::ID, 8),
             (ContainerClose::ID, 17),
             (ContainerSetContent::ID, 18),
+            (ContainerSetData::ID, 19),
             (ContainerSetSlot::ID, 20),
             (DisguisedChat::ID, 33),
             (EntityPositionSync::ID, 35),
