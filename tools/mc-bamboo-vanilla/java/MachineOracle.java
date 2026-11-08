@@ -42,16 +42,22 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.inventory.ContainerData;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.alchemy.PotionContents;
 import net.minecraft.world.item.alchemy.Potions;
+import net.minecraft.world.item.crafting.CampfireCookingRecipe;
 import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.item.crafting.RecipeType;
+import net.minecraft.world.item.crafting.SingleRecipeInput;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CampfireBlock;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.BlastFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.BrewingStandBlockEntity;
+import net.minecraft.world.level.block.entity.CampfireBlockEntity;
 import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.SmokerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -117,6 +123,10 @@ public final class MachineOracle {
                 ItemStack.EMPTY, ItemStack.EMPTY, ItemStack.EMPTY,
                 new int[] {0, 0, 10, 200}));
         runs.add(brew(17L, 410));
+        // 进度 598，第 2 刻烧完并弹出。熄灭从 5 往回减。木棍没有配方，到点把原物品弹出去。
+        runs.add(campfire(18L, true, 4, Items.POTATO, 598, 600));
+        runs.add(campfire(19L, false, 4, Items.POTATO, 5, 600));
+        runs.add(campfire(20L, true, 2, Items.STICK, 0, 1));
 
         JsonObject root = new JsonObject();
         root.add("runs", runs);
@@ -178,6 +188,62 @@ public final class MachineOracle {
         }
         run.add("ticks", frames);
         return run;
+    }
+
+    private static JsonObject campfire(long seed, boolean lit, int ticks, Item item, int progress, int time)
+            throws Exception {
+        BlockState state = Blocks.CAMPFIRE.defaultBlockState();
+        if (!lit) {
+            state = state.setValue(CampfireBlock.LIT, false);
+        }
+        MachineLevel level = MachineLevel.create(seed);
+        level.state = state;
+        CampfireBlockEntity entity = new CampfireBlockEntity(POS, state);
+        entity.setLevel(level);
+        entity.getItems().set(0, new ItemStack(item));
+        int[] cookingProgress = ints(entity, "cookingProgress");
+        int[] cookingTime = ints(entity, "cookingTime");
+        cookingProgress[0] = progress;
+        cookingTime[0] = time;
+        JsonObject run = header("campfire", seed, state, campfireSlots(entity), campfireData(cookingProgress, cookingTime));
+        JsonArray frames = new JsonArray();
+        RecipeManager.CachedCheck<SingleRecipeInput, CampfireCookingRecipe> check =
+                RecipeManager.createCheck(RecipeType.CAMPFIRE_COOKING);
+        for (int tick = 0; tick < ticks; tick++) {
+            if (level.state.getValue(CampfireBlock.LIT)) {
+                CampfireBlockEntity.cookTick(level, POS, level.state, entity, check);
+            } else {
+                CampfireBlockEntity.cooldownTick(level, POS, level.state, entity);
+            }
+            frames.add(frame(level, campfireSlots(entity), campfireData(cookingProgress, cookingTime)));
+        }
+        run.add("ticks", frames);
+        return run;
+    }
+
+    private static int[] ints(CampfireBlockEntity entity, String name) throws Exception {
+        Field field = CampfireBlockEntity.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return (int[]) field.get(entity);
+    }
+
+    private static JsonArray campfireSlots(CampfireBlockEntity entity) {
+        JsonArray slots = new JsonArray();
+        for (ItemStack stack : entity.getItems()) {
+            slots.add(stack(stack));
+        }
+        return slots;
+    }
+
+    private static JsonArray campfireData(int[] progress, int[] time) {
+        JsonArray values = new JsonArray();
+        for (int value : progress) {
+            values.add(value);
+        }
+        for (int value : time) {
+            values.add(value);
+        }
+        return values;
     }
 
     private static JsonObject header(String kind, long seed, BlockState state, JsonArray slots, JsonArray data) {
@@ -361,6 +427,15 @@ public final class MachineOracle {
 
         @Override
         public void blockEntityChanged(BlockPos pos) {
+        }
+
+        @Override
+        public void sendBlockUpdated(BlockPos pos, BlockState oldState, BlockState newState, int flags) {
+        }
+
+        @Override
+        public void gameEvent(net.minecraft.core.Holder<net.minecraft.world.level.gameevent.GameEvent> event, Vec3 pos,
+                net.minecraft.world.level.gameevent.GameEvent.Context context) {
         }
 
         @Override

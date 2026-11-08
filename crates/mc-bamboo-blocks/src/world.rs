@@ -1712,7 +1712,8 @@ mod tests {
                 | Effect::NoteBlockPlayed { .. }
                 | Effect::BlockEvent { .. }
                 | Effect::ComposterFill { .. }
-                | Effect::PageTurned { .. } => None,
+                | Effect::PageTurned { .. }
+                | Effect::CampfireChanged { .. } => None,
             })
             .collect()
     }

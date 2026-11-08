@@ -842,7 +842,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             // 堆肥的粒子和声音，题里不比较。
             | Effect::ComposterFill { .. }
             // 讲台翻页的声音，题里不比较。
-            | Effect::PageTurned { .. } => None,
+            | Effect::PageTurned { .. }
+            // 营火食物的方块实体包，题里不比较。
+            | Effect::CampfireChanged { .. } => None,
         })
         .collect()
 }

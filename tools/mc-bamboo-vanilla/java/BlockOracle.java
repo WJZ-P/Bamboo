@@ -139,7 +139,10 @@ import net.minecraft.world.item.alchemy.PotionContents;
 import net.minecraft.world.item.alchemy.Potions;
 import net.minecraft.world.item.component.DyedItemColor;
 import net.minecraft.world.item.context.UseOnContext;
+import net.minecraft.world.item.crafting.CampfireCookingRecipe;
 import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.item.crafting.RecipeType;
+import net.minecraft.world.item.crafting.SingleRecipeInput;
 import net.minecraft.world.level.BlockEventData;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
@@ -158,6 +161,7 @@ import net.minecraft.world.level.block.BaseRailBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CakeBlock;
+import net.minecraft.world.level.block.CampfireBlock;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.ChiseledBookShelfBlock;
 import net.minecraft.world.level.block.ComposterBlock;
@@ -181,6 +185,7 @@ import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.entity.ChiseledBookShelfBlockEntity;
+import net.minecraft.world.level.block.entity.CampfireBlockEntity;
 import net.minecraft.world.level.block.entity.CrafterBlockEntity;
 import net.minecraft.world.level.block.entity.DecoratedPotBlockEntity;
 import net.minecraft.world.level.block.entity.DispenserBlockEntity;
@@ -381,10 +386,9 @@ import sun.misc.Unsafe;
  *     亮度      getRawBrightness、getBrightness 恒为 15。
  *     信号      官方真实的实现，方块状态里的 powered、power 真的会产生信号。
  *     方块实体  场景加载时新建，容器内容按 contents 填，别的为空。有三种方块的状态是内容的镜像，内容按状态补齐：
- *               chiseled_bookshelf 的书、jukebox 的唱片、lectern 的书。只有漏斗和移动活塞（moving_piston 上的
- *               PistonMovingBlockEntity）的 ticker 会跑：漏斗每刻按官方 HopperBlockEntity.pushItemsTick 搬物品，
- *               同一次 tick 里漏斗按登记顺序（坐标顺序）在前，活塞在后。别的方块实体都不 tick，所以阳光探测器不会
- *               随时间重算。
+ *               chiseled_bookshelf 的书、jukebox 的唱片、lectern 的书。漏斗、移动活塞和营火的 ticker 会跑：
+ *               漏斗每刻按官方 HopperBlockEntity.pushItemsTick 搬物品，同一次 tick 里漏斗在前，然后是活塞和营火。
+ *               点着的营火走 cookTick，灭了走 cooldownTick。别的方块实体都不 tick，所以阳光探测器不会随时间重算。
  *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
  *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
@@ -1192,14 +1196,16 @@ public final class BlockOracle {
         private LinkedHashSet<BlockEventData> blockEvents;
         /**
          * 移动方块实体的 ticker，按登记顺序。官方的完整机制是
-         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里登记活塞和漏斗：
-         * Bamboo 别的方块实体都不 tick。漏斗单独一张表，每刻先跑，和 Bamboo 方块实体表里漏斗总在活塞前面一致；
+         * {@code Level.tickBlockEntities} 加 {@code LevelChunk.tickersInLevel}，这里登记活塞、漏斗和营火。
+         * 漏斗单独一张表，每刻先跑，和 Bamboo 方块实体表里漏斗总在别的实体前面一致；
          * 表里按坐标顺序登记，见 {@link #load}。
          */
         private LinkedHashMap<BlockPos, BlockEntity> tickers;
         private LinkedHashMap<BlockPos, HopperBlockEntity> hopperTickers;
         /** tick 阶段里新登记的 ticker，下一刻开头并进上面两张表。 */
         private LinkedHashMap<BlockPos, BlockEntity> pendingTickers;
+        /** 营火点着时的配方缓存。熄灭或换实体时丢掉，和官方重做 `getTicker` 一样。 */
+        private Map<BlockPos, RecipeManager.CachedCheck<SingleRecipeInput, CampfireCookingRecipe>> campfireChecks;
         private boolean tickingBlockEntities;
         private RecordingTicks<Block> recordedBlockTicks;
         private RecordingTicks<Fluid> recordedFluidTicks;
@@ -1226,6 +1232,7 @@ public final class BlockOracle {
             level.tickers = new LinkedHashMap<>();
             level.hopperTickers = new LinkedHashMap<>();
             level.pendingTickers = new LinkedHashMap<>();
+            level.campfireChecks = new HashMap<>();
             level.tickingBlockEntities = false;
             level.recordedBlockTicks = new RecordingTicks<>();
             level.recordedFluidTicks = new RecordingTicks<>();
@@ -1445,6 +1452,8 @@ public final class BlockOracle {
                             if (piston.getType().isValid(state)) {
                                 PistonMovingBlockEntity.tick(this, pos, state, piston);
                             }
+                        } else if (entry.getValue() instanceof CampfireBlockEntity campfire && !campfire.isRemoved()) {
+                            tickCampfire(pos, campfire);
                         }
                     }
                 });
@@ -1455,14 +1464,36 @@ public final class BlockOracle {
             }
         }
 
-        /** LevelChunk.updateBlockEntityTicker：登记移动活塞和漏斗，见 {@link #tickers}。 */
+        /** 点着走 `cookTick`，灭了走 `cooldownTick`。状态变化时丢掉配方缓存。 */
+        private void tickCampfire(BlockPos pos, CampfireBlockEntity campfire) {
+            BlockState state = getBlockState(pos);
+            if (!campfire.getType().isValid(state)) {
+                campfireChecks.remove(pos);
+                return;
+            }
+            if (state.getValue(CampfireBlock.LIT)) {
+                RecipeManager.CachedCheck<SingleRecipeInput, CampfireCookingRecipe> check = campfireChecks
+                        .computeIfAbsent(pos, ignored -> RecipeManager.createCheck(RecipeType.CAMPFIRE_COOKING));
+                CampfireBlockEntity.cookTick(this, pos, state, campfire, check);
+            } else {
+                campfireChecks.remove(pos);
+                CampfireBlockEntity.cooldownTick(this, pos, state, campfire);
+            }
+        }
+
+        /** LevelChunk.updateBlockEntityTicker：登记移动活塞、漏斗和营火，见 {@link #tickers}。 */
         private void registerTicker(BlockEntity blockEntity) {
             boolean registered = blockEntity instanceof PistonMovingBlockEntity piston
                             && getBlockState(piston.getBlockPos()).is(Blocks.MOVING_PISTON)
                     || blockEntity instanceof HopperBlockEntity hopper
-                            && getBlockState(hopper.getBlockPos()).is(Blocks.HOPPER);
+                            && getBlockState(hopper.getBlockPos()).is(Blocks.HOPPER)
+                    || blockEntity instanceof CampfireBlockEntity campfire
+                            && campfire.getType().isValid(getBlockState(campfire.getBlockPos()));
             if (!registered) {
                 return;
+            }
+            if (blockEntity instanceof CampfireBlockEntity campfire) {
+                campfireChecks.remove(campfire.getBlockPos());
             }
             if (tickingBlockEntities) {
                 pendingTickers.put(blockEntity.getBlockPos(), blockEntity);
@@ -1736,6 +1767,7 @@ public final class BlockOracle {
             tickers.remove(pos);
             hopperTickers.remove(pos);
             pendingTickers.remove(pos);
+            campfireChecks.remove(pos);
         }
 
         /**

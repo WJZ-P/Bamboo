@@ -32,6 +32,10 @@ pub enum ItemExchange {
     /// `itemInHand.remove(DataComponents.DYED_COLOR)`: the whole stack loses its colour and
     /// keeps its count.
     RemoveDyedColor,
+    /// `ItemStack.consumeAndReturn(1, player)`：生存模式从手里拿走一个。
+    ///
+    /// `ItemStack.consumeAndReturn(1, player)`: survival mode removes one from the held stack.
+    Shrink,
 }
 
 /// 官方 `PotionContents.createItemStack(Items.POTION, Potions.WATER)`。

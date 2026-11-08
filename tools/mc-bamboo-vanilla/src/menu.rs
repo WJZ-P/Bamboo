@@ -448,6 +448,8 @@ fn shape_of(name: &str) -> Option<ReplayShape> {
         "blast_furnace" => Some(ReplayShape::BlastFurnace),
         "smoker" => Some(ReplayShape::Smoker),
         "brewing" => Some(ReplayShape::Brewing),
+        "loom" => Some(ReplayShape::Loom),
+        "grindstone" => Some(ReplayShape::Grindstone),
         _ => None,
     }
 }
@@ -538,6 +540,8 @@ mod tests {
             ("blast_furnace", ReplayShape::BlastFurnace),
             ("smoker", ReplayShape::Smoker),
             ("brewing", ReplayShape::Brewing),
+            ("loom", ReplayShape::Loom),
+            ("grindstone", ReplayShape::Grindstone),
         ] {
             assert_eq!(shape_of(name), Some(shape));
         }

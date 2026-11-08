@@ -41,6 +41,8 @@ pub enum ReplayShape {
     BlastFurnace,
     Smoker,
     Brewing,
+    Loom,
+    Grindstone,
 }
 
 impl ReplayShape {
@@ -57,7 +59,9 @@ impl ReplayShape {
             | Self::Furnace
             | Self::BlastFurnace
             | Self::Smoker
-            | Self::Brewing => ContainerKind::Chest,
+            | Self::Brewing
+            | Self::Loom
+            | Self::Grindstone => ContainerKind::Chest,
         }
     }
 
@@ -72,6 +76,8 @@ impl ReplayShape {
             Self::BlastFurnace => Some(WorkKind::BlastFurnace),
             Self::Smoker => Some(WorkKind::Smoker),
             Self::Brewing => Some(WorkKind::Brewing),
+            Self::Loom => Some(WorkKind::Loom),
+            Self::Grindstone => Some(WorkKind::Grindstone),
             _ => None,
         }
     }
@@ -94,7 +100,9 @@ impl ReplayShape {
             | Self::Furnace
             | Self::BlastFurnace
             | Self::Smoker
-            | Self::Brewing => Some(index),
+            | Self::Brewing
+            | Self::Loom
+            | Self::Grindstone => Some(index),
             _ => None,
         }
     }

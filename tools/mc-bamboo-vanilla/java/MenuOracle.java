@@ -81,8 +81,10 @@ import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.DataSlot;
 import net.minecraft.world.inventory.DispenserMenu;
 import net.minecraft.world.inventory.FurnaceMenu;
+import net.minecraft.world.inventory.GrindstoneMenu;
 import net.minecraft.world.inventory.HopperMenu;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.inventory.LoomMenu;
 import net.minecraft.server.network.Filterable;
 import net.minecraft.util.Mth;
 import net.minecraft.world.inventory.LecternMenu;
@@ -570,7 +572,9 @@ public final class MenuOracle {
         FURNACE(3, "furnace", true, true),
         BLAST_FURNACE(3, "blast_furnace", true, true),
         SMOKER(3, "smoker", true, true),
-        BREWING(5, "brewing", true, true);
+        BREWING(5, "brewing", true, true),
+        LOOM(3, "loom", true, false),
+        GRINDSTONE(2, "grindstone", true, false);
 
         final int size;
         final String id;
@@ -608,6 +612,8 @@ public final class MenuOracle {
                 case BLAST_FURNACE -> new BlastFurnaceMenu(CONTAINER_ID, inventory);
                 case SMOKER -> new SmokerMenu(CONTAINER_ID, inventory);
                 case BREWING -> new BrewingStandMenu(CONTAINER_ID, inventory);
+                case LOOM -> new LoomMenu(CONTAINER_ID, inventory);
+                case GRINDSTONE -> new GrindstoneMenu(CONTAINER_ID, inventory);
             };
         }
     }

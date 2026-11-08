@@ -6,6 +6,9 @@
 
 use std::collections::BTreeMap;
 
+mod grindstone;
+mod item_patch;
+mod loom;
 pub(crate) mod station;
 
 use mc_bamboo_blocks::{BlockState, World, hopper::set_changed};

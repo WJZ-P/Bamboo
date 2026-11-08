@@ -134,6 +134,7 @@ import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
 import net.minecraft.network.protocol.game.ServerboundChatPacket;
 import net.minecraft.network.protocol.game.ServerboundChunkBatchReceivedPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ServerboundEditBookPacket;
@@ -327,6 +328,9 @@ public final class Probe {
             "handleChunkBlocksUpdate",
             "handleContainerClose",
             "handleContainerContent",
+            // 织布机选图案时官方发 `container_set_data`。
+            // Vanilla sends `container_set_data` when the loom selects a pattern.
+            "handleContainerSetData",
             "handleContainerSetSlot",
             "handleDisconnect",
             "handleDisguisedChat",
@@ -614,6 +618,7 @@ public final class Probe {
             section("books", () -> books(kitten));
             section("containers", () -> containers(kitten, mochi));
             section("crafting", () -> crafting(kitten));
+            section("loom", () -> loom(kitten));
 
             Join late = connect(LATE_PLAYER, HumanoidArm.RIGHT, false);
             section("late joiner", () -> {
@@ -1585,6 +1590,70 @@ public final class Probe {
                             && is(actor.menuSlots.get(1), Items.OAK_LOG, 1));
             actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
             pumpFor(TICK_MILLIS);
+        }
+
+        /**
+         * 放下织布机，给白色旗帜加一层不需要图案物品的图案。
+         * Place a loom and add one pattern that does not need a pattern item to a white banner.
+         */
+        private void loom(Join actor) throws IOException {
+            // 工作台在 offset(1, -1, 2)，告示牌在 (2, -1, 2)。再往旁边放。
+            // The crafting table is at offset(1, -1, 2) and the sign is at (2, -1, 2). Step aside.
+            BlockPos ground = BlockPos.containing(actor.position).offset(3, -1, 2);
+            BlockPos loom = ground.above();
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 4, new ItemStack(Items.LOOM)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.BANNER.white(), 2)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(Items.DYE.white(), 2)));
+            actor.send(new ServerboundSetCarriedItemPacket(4));
+            int placing = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    placing));
+            await("loom: the loom is placed",
+                    () -> actor.blocks.containsKey(loom) && actor.blocks.get(loom).is(Blocks.LOOM));
+
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 8, ItemStack.EMPTY));
+            actor.send(new ServerboundSetCarriedItemPacket(8));
+            actor.openMenuType = null;
+            actor.lastContentState = -1;
+            actor.menuSlots.clear();
+            int opening = actor.nextSequence();
+            actor.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(loom, 1.0), Direction.UP, loom, false),
+                    opening));
+            await("loom: the screen opens", () -> MenuType.LOOM.equals(actor.openMenuType));
+            await("loom: the grid arrives", () -> actor.lastContentState >= 0);
+            check("loom: the menu has forty slots", actor.lastContent.size() == 40);
+
+            // 快捷栏 0、1 在织布机菜单里是 31、32。
+            // Hotbar 0 and 1 are menu slots 31 and 32.
+            actor.send(actor.click(31, 0, ContainerInput.PICKUP));
+            actor.send(actor.click(0, 0, ContainerInput.PICKUP));
+            actor.send(actor.click(32, 0, ContainerInput.PICKUP));
+            actor.send(actor.click(1, 0, ContainerInput.PICKUP));
+            await("loom: the banner and dye are in the input slots",
+                    () -> is(actor.menuSlots.get(0), Items.BANNER.white(), 2)
+                            && is(actor.menuSlots.get(1), Items.DYE.white(), 2));
+            actor.send(new ServerboundContainerButtonClickPacket(actor.openContainerId, 0));
+            await("loom: the result banner has one pattern layer", () -> bannerLayers(actor.menuSlots.get(3)) == 1);
+            actor.send(actor.click(3, 0, ContainerInput.PICKUP));
+            await("loom: taking the result consumes one banner and one dye",
+                    () -> is(actor.menuSlots.get(0), Items.BANNER.white(), 1)
+                            && is(actor.menuSlots.get(1), Items.DYE.white(), 1)
+                            && bannerLayers(actor.menuSlots.get(3)) == 1);
+            actor.send(new ServerboundContainerClosePacket(actor.openContainerId));
+            pumpFor(TICK_MILLIS);
+        }
+
+        /** 旗帜上的图案层数。没有这个组件时是 0。 */
+        private static int bannerLayers(ItemStack stack) {
+            if (stack == null || stack.isEmpty()) {
+                return 0;
+            }
+            BannerPatternLayers layers = stack.get(DataComponents.BANNER_PATTERNS);
+            return layers == null ? 0 : layers.layers().size();
         }
 
         /** 这名玩家在 `blocks` 里放下的箱子。 */

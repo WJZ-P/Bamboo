@@ -1,10 +1,13 @@
 //! `CampfireBlock`。
 //!
-//! 烤架上的食物在方块实体里，这里只看手上的东西能不能放上去，放满四个的情况走不到。
+//! 右键食物走 `placeFood`。熄灭和被水浇灭都不把食物弹出来：26.3 的 `douse` 和
+//! `placeLiquid` 只改 `lit`。浇灭不扣工具耐久，耐久还没接进右键。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{Block, block_maps, blocks, registries, tags::item_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
+use super::campfire_entity::CampfireEntity;
 use crate::{
     behaviour::{
         Behaviour, Plain,
@@ -12,6 +15,7 @@ use crate::{
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
+    item_exchange::ItemExchange,
     state::{
         BlockState, FluidState, HORIZONTAL_FACING, LIT, SIGNAL_FIRE, WATERLOGGED, item_is_tagged,
     },
@@ -66,9 +70,7 @@ impl Behaviour for Campfire {
         ctx: &UseContext,
     ) -> InteractionResult {
         if block_maps::CAMPFIRE_INPUTS.contains(&ctx.item) {
-            // `placeFood` 的 `setChanged`。
-            world.update_neighbour_for_output_signal(ctx.clicked_pos(), state.block());
-            return InteractionResult::SuccessServer;
+            return place_food(state, world, ctx);
         }
         if item_is_tagged(ctx.item, item_tags::DOUSES_CAMPFIRES) && state.get(LIT) {
             world.set_block_and_update(ctx.clicked_pos(), state.with(LIT, false));
@@ -77,7 +79,15 @@ impl Behaviour for Campfire {
         InteractionResult::TryEmptyHandInteraction
     }
 
-    /// 进水的同时熄火。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state) && !world.has_block_entity(pos) {
+            world.set_block_entity(Box::new(CampfireEntity::new(pos)));
+        }
+    }
+
+    /// 进水的同时熄火。食物留在格子里，下一刻走 `cooldownTick`。
+    ///
+    /// Waterlogs and extinguishes. Food stays in the slots; the next tick is `cooldownTick`.
     fn place_liquid(
         &self,
         state: BlockState,
@@ -93,4 +103,42 @@ impl Behaviour for Campfire {
         world.schedule_fluid_tick(pos, fluid.fluid());
         true
     }
+}
+
+/// 官方 `useItemOn` 里 `CAMPFIRE_INPUT` 那一支。
+///
+/// 放成功是 `SUCCESS_SERVER`，格子满了或者没有配方是 `CONSUME`。
+/// 创造模式不消耗手里那一个，和 `consumeAndReturn` 一样。
+///
+/// The `CAMPFIRE_INPUT` branch of vanilla `useItemOn`.
+///
+/// A successful place is `SUCCESS_SERVER`. A full campfire or a missing recipe is `CONSUME`.
+/// Creative mode does not consume the held item, matching `consumeAndReturn`.
+fn place_food(state: BlockState, world: &mut World, ctx: &UseContext) -> InteractionResult {
+    let pos = ctx.clicked_pos();
+    if !state.has_block_entity() {
+        return InteractionResult::Consume;
+    }
+    if !world.has_block_entity(pos) {
+        world.set_block_entity(Box::new(CampfireEntity::new(pos)));
+    }
+    let owned;
+    let stack = if let Some(stack) = ctx.stack {
+        stack
+    } else {
+        owned = ItemStack::new(ctx.item, 1);
+        &owned
+    };
+    let placed = world
+        .with_block_entity::<CampfireEntity, _>(pos, |entity, world| {
+            entity.place_food(world, stack)
+        })
+        .unwrap_or(false);
+    if !placed {
+        return InteractionResult::Consume;
+    }
+    if !ctx.actor.prevents_block_drops {
+        world.set_item_exchange(ItemExchange::Shrink);
+    }
+    InteractionResult::SuccessServer
 }
