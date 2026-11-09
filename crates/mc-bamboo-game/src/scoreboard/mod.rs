@@ -23,7 +23,9 @@ use mc_bamboo_protocol::{
 
 use crate::{links::encode_frames, region::Region};
 
-pub(crate) use boss::BossBars;
+#[allow(unused_imports)]
+pub(crate) use boss::{BossBars, BossColor, BossStyle};
+#[allow(unused_imports)]
 pub(crate) use format::{boss_name, format_green_names, format_list, objective_name, team_name};
 
 /// 一次改分数时的记分板名字。`display` 只有在线玩家才有。
@@ -163,7 +165,8 @@ impl Scoreboard {
     }
 
     pub(crate) fn is_read_only(&self, name: &str) -> bool {
-        self.objective(name).is_some_and(|objective| objective.read_only)
+        self.objective(name)
+            .is_some_and(|objective| objective.read_only)
     }
 
     pub(crate) fn is_trigger(&self, name: &str) -> bool {
@@ -172,7 +175,8 @@ impl Scoreboard {
     }
 
     pub(crate) fn criteria_name(&self, name: &str) -> Option<&str> {
-        self.objective(name).map(|objective| objective.criteria.as_str())
+        self.objective(name)
+            .map(|objective| objective.criteria.as_str())
     }
 
     pub(crate) fn objective_count(&self) -> usize {
@@ -180,10 +184,7 @@ impl Scoreboard {
     }
 
     pub(crate) fn objective_entries(&self) -> Vec<Component> {
-        self.objectives
-            .iter()
-            .map(Objective::formatted)
-            .collect()
+        self.objectives.iter().map(Objective::formatted).collect()
     }
 
     pub(crate) fn formatted_objective(&self, name: &str) -> Option<Component> {
@@ -240,8 +241,7 @@ impl Scoreboard {
         objective: &str,
         contains: impl Fn(i32) -> bool,
     ) -> bool {
-        self.score_value(player, objective)
-            .is_some_and(contains)
+        self.score_value(player, objective).is_some_and(contains)
             && self.objective_exists(objective)
     }
 
@@ -338,7 +338,11 @@ impl Scoreboard {
         true
     }
 
-    pub(crate) fn remove_objective(&mut self, name: &str, region: &mut Region) -> Option<Component> {
+    pub(crate) fn remove_objective(
+        &mut self,
+        name: &str,
+        region: &mut Region,
+    ) -> Option<Component> {
         let formatted = self.formatted_objective(name)?;
         for slot in 0..self.display.len() {
             if self.display[slot].as_deref() == Some(name) {
@@ -362,7 +366,10 @@ impl Scoreboard {
         display: Component,
         region: &mut Region,
     ) -> bool {
-        let Some(objective) = self.objectives.iter_mut().find(|objective| objective.name == name)
+        let Some(objective) = self
+            .objectives
+            .iter_mut()
+            .find(|objective| objective.name == name)
         else {
             return false;
         };
@@ -379,7 +386,10 @@ impl Scoreboard {
 
     pub(crate) fn set_render(&mut self, name: &str, hearts: bool, region: &mut Region) -> bool {
         let render = i32::from(hearts);
-        let Some(objective) = self.objectives.iter_mut().find(|objective| objective.name == name)
+        let Some(objective) = self
+            .objectives
+            .iter_mut()
+            .find(|objective| objective.name == name)
         else {
             return false;
         };
@@ -394,8 +404,16 @@ impl Scoreboard {
         true
     }
 
-    pub(crate) fn set_auto_update(&mut self, name: &str, enabled: bool, region: &mut Region) -> bool {
-        let Some(objective) = self.objectives.iter_mut().find(|objective| objective.name == name)
+    pub(crate) fn set_auto_update(
+        &mut self,
+        name: &str,
+        enabled: bool,
+        region: &mut Region,
+    ) -> bool {
+        let Some(objective) = self
+            .objectives
+            .iter_mut()
+            .find(|objective| objective.name == name)
         else {
             return false;
         };
@@ -416,7 +434,10 @@ impl Scoreboard {
         format: Option<NumberFormat>,
         region: &mut Region,
     ) {
-        let Some(objective) = self.objectives.iter_mut().find(|objective| objective.name == name)
+        let Some(objective) = self
+            .objectives
+            .iter_mut()
+            .find(|objective| objective.name == name)
         else {
             return;
         };
@@ -433,13 +454,13 @@ impl Scoreboard {
         };
         let old = current.clone();
         *current = next.map(str::to_owned);
-        if old.as_deref() != next {
-            if let Some(old_name) = old {
-                if self.slot_count(&old_name) > 0 {
-                    send_slot(region, slot, next.unwrap_or(""));
-                } else {
-                    self.stop_tracking(&old_name, region);
-                }
+        if old.as_deref() != next
+            && let Some(old_name) = old
+        {
+            if self.slot_count(&old_name) > 0 {
+                send_slot(region, slot, next.unwrap_or(""));
+            } else {
+                self.stop_tracking(&old_name, region);
             }
         }
         if let Some(next) = next {
@@ -451,7 +472,13 @@ impl Scoreboard {
         }
     }
 
-    pub(crate) fn set_score(&mut self, holder: &Holder, objective: &str, value: i32, region: &mut Region) {
+    pub(crate) fn set_score(
+        &mut self,
+        holder: &Holder,
+        objective: &str,
+        value: i32,
+        region: &mut Region,
+    ) {
         let _ = self.write_score(holder, objective, value, false, region);
     }
 
@@ -592,14 +619,23 @@ impl Scoreboard {
     ) -> Result<(), ScoreFailure> {
         let left_fresh = self.ensure_score(&target.name, target_objective);
         let right_fresh = self.ensure_score(&source.name, source_objective);
-        let left = self.score_value(&target.name, target_objective).unwrap_or(0);
-        let right = self.score_value(&source.name, source_objective).unwrap_or(0);
+        let left = self
+            .score_value(&target.name, target_objective)
+            .unwrap_or(0);
+        let right = self
+            .score_value(&source.name, source_objective)
+            .unwrap_or(0);
         self.write_with_fresh(target, target_objective, right, left_fresh, false, region)?;
         self.write_with_fresh(source, source_objective, left, right_fresh, false, region)?;
         Ok(())
     }
 
-    pub(crate) fn create_team(&mut self, name: &str, display: Component, region: &mut Region) -> bool {
+    pub(crate) fn create_team(
+        &mut self,
+        name: &str,
+        display: Component,
+        region: &mut Region,
+    ) -> bool {
         if self.team_exists(name) {
             return false;
         }
@@ -654,9 +690,7 @@ impl Scoreboard {
         let players = [player.to_owned()];
         region.links.broadcast(&encode_frames(&SetPlayerTeam {
             name: team_name,
-            action: TeamAction::Join {
-                players: &players,
-            },
+            action: TeamAction::Join { players: &players },
         }));
         true
     }
@@ -697,7 +731,12 @@ impl Scoreboard {
         self.update_team(name, region, |team| team.color = color);
     }
 
-    pub(crate) fn set_team_friendly_fire(&mut self, name: &str, allowed: bool, region: &mut Region) {
+    pub(crate) fn set_team_friendly_fire(
+        &mut self,
+        name: &str,
+        allowed: bool,
+        region: &mut Region,
+    ) {
         self.update_team(name, region, |team| team.friendly_fire = allowed);
     }
 
@@ -738,7 +777,7 @@ impl Scoreboard {
             }));
         }
         let mut sent = BTreeSet::new();
-        for (slot, objective) in self.display.iter().enumerate() {
+        for objective in &self.display {
             let Some(name) = objective else {
                 continue;
             };
@@ -873,13 +912,12 @@ impl Scoreboard {
             return Ok(());
         };
         let mut changed = fresh;
-        if auto {
-            if let Some(display) = &holder.display {
-                if score.display.as_ref() != Some(display) {
-                    score.display = Some(display.clone());
-                    changed = true;
-                }
-            }
+        if auto
+            && let Some(display) = &holder.display
+            && score.display.as_ref() != Some(display)
+        {
+            score.display = Some(display.clone());
+            changed = true;
         }
         if score.value != value {
             score.value = value;
@@ -895,7 +933,11 @@ impl Scoreboard {
         if !self.tracked.contains(objective) {
             return;
         }
-        let Some(score) = self.scores.get(player).and_then(|scores| scores.get(objective)) else {
+        let Some(score) = self
+            .scores
+            .get(player)
+            .and_then(|scores| scores.get(objective))
+        else {
             return;
         };
         region.links.broadcast(&encode_frames(&SetScore {
@@ -990,7 +1032,9 @@ fn send_slot(region: &mut Region, slot: u8, objective: &str) {
 }
 
 fn send_reset(region: &mut Region, owner: &str, objective: Option<&str>) {
-    region.links.broadcast(&encode_frames(&ResetScore { owner, objective }));
+    region
+        .links
+        .broadcast(&encode_frames(&ResetScore { owner, objective }));
 }
 
 fn send_team_add(region: &mut Region, team: &Team) {
@@ -1012,7 +1056,11 @@ fn send_team_change(region: &mut Region, team: &Team) {
     }));
 }
 
-fn apply_operation(operation: mc_bamboo_command::ScoreOperation, left: i32, right: i32) -> Result<i32, ScoreFailure> {
+fn apply_operation(
+    operation: mc_bamboo_command::ScoreOperation,
+    left: i32,
+    right: i32,
+) -> Result<i32, ScoreFailure> {
     Ok(match operation {
         mc_bamboo_command::ScoreOperation::Assign => right,
         mc_bamboo_command::ScoreOperation::Add => left.wrapping_add(right),
@@ -1048,4 +1096,3 @@ fn floor_mod(left: i32, right: i32) -> Result<i32, ScoreFailure> {
     let divided = floor_div(left, right)?;
     Ok(left.wrapping_sub(divided.wrapping_mul(right)))
 }
-

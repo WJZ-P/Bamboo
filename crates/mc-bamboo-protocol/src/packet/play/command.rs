@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn argument_properties_use_the_official_encodings() {
-        let cases: [(ArgumentProperties, &str); 10] = [
+        let cases: [(ArgumentProperties, &str); 12] = [
             (
                 ArgumentProperties::String(StringProperty::GreedyPhrase),
                 "02",

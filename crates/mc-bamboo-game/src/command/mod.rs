@@ -314,6 +314,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         },
         ArgumentType::Time { minimum } => ArgumentProperties::Time { minimum },
         ArgumentType::Resource { registry } => ArgumentProperties::Registry(registry),
+        ArgumentType::ScoreHolder { multiple } => ArgumentProperties::ScoreHolder { multiple },
         ArgumentType::Bool
         | ArgumentType::GameMode
         | ArgumentType::EntityAnchor
@@ -325,7 +326,15 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::Item
         | ArgumentType::ItemPredicate
         | ArgumentType::Message
-        | ArgumentType::ResourceLocation => ArgumentProperties::None,
+        | ArgumentType::ResourceLocation
+        | ArgumentType::Objective
+        | ArgumentType::Team
+        | ArgumentType::Criteria
+        | ArgumentType::Operation
+        | ArgumentType::DisplaySlot
+        | ArgumentType::Component
+        | ArgumentType::Style
+        | ArgumentType::TeamColor => ArgumentProperties::None,
     }
 }
 

@@ -515,10 +515,7 @@ impl<'a> EntityParser<'a> {
             self.reader.expect('=')?;
             self.reader.skip_whitespace();
             let bounds = parse_bounds(self.reader, parse_int, "parsing.int.invalid", true)?;
-            if let Some(existing) = filters
-                .iter_mut()
-                .find(|(name, _)| name == &objective)
-            {
+            if let Some(existing) = filters.iter_mut().find(|(name, _)| name == &objective) {
                 existing.1 = bounds;
             } else {
                 filters.push((objective, bounds));

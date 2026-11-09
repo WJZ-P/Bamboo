@@ -22,6 +22,12 @@
 //! | `block_items` | 方块实体从物品上带来的组件和它的 `getUpdateTag` |
 //! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
+//! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
+
+// 命令还在接入，计分板模块暂时只在测试里读写。
+//
+// The commands are still being wired up; the scoreboard module is only exercised by tests.
+#![allow(dead_code)]
 
 mod block_items;
 mod book;
@@ -52,6 +58,7 @@ mod player;
 mod player_grid;
 mod player_move;
 mod region;
+mod scoreboard;
 mod secure_chat;
 mod sign;
 mod world;

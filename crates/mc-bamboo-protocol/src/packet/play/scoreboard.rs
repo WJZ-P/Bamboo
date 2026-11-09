@@ -162,7 +162,7 @@ impl ClientboundPacket for SetDisplayObjective<'_> {
 /// 队伍参数。颜色空着时不写 id。
 ///
 /// Team parameters. An absent color omits the id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TeamParameters<'a> {
     pub display: &'a Component,
     pub prefix: &'a Component,
@@ -176,7 +176,7 @@ pub struct TeamParameters<'a> {
 /// `set_player_team` 的动作。
 ///
 /// One action of `set_player_team`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TeamAction<'a> {
     Add {
         parameters: TeamParameters<'a>,
@@ -197,7 +197,7 @@ pub enum TeamAction<'a> {
 /// `set_player_team`。
 ///
 /// `set_player_team`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SetPlayerTeam<'a> {
     pub name: &'a str,
     pub action: TeamAction<'a>,

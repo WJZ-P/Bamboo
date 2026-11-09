@@ -86,13 +86,6 @@ impl StringReader {
         self.input.iter().collect()
     }
 
-    /// 光标后面还没读的字符。
-    ///
-    /// The characters that have not been read yet.
-    pub fn remaining(&self) -> String {
-        self.input[self.cursor..].iter().collect()
-    }
-
     pub fn read_unquoted_string(&mut self) -> String {
         let start = self.cursor;
         while self.can_read() && is_allowed_in_unquoted_string(self.peek()) {

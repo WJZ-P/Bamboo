@@ -170,7 +170,10 @@ pub fn parse_display_slot(reader: &mut StringReader) -> Result<Value, ParseError
     let name = reader.read_unquoted_string();
     match DisplaySlot::parse(&name) {
         Some(slot) => Ok(Value::DisplaySlot(slot)),
-        None => Err(ParseError::text("argument.scoreboardDisplaySlot.invalid", name)),
+        None => Err(ParseError::text(
+            "argument.scoreboardDisplaySlot.invalid",
+            name,
+        )),
     }
 }
 
@@ -204,7 +207,7 @@ pub fn parse_score_holder(
         if !multiple && selector.max_results > 1 {
             return Err(ParseError::new("argument.entity.toomany"));
         }
-        return Ok(Value::ScoreHolder(ScoreHolderSpec::Selector(*selector)));
+        return Ok(Value::ScoreHolder(ScoreHolderSpec::Selector(selector)));
     }
     let text = read_until_space(reader);
     let spec = if text == "*" {
@@ -220,9 +223,8 @@ pub fn parse_score_holder(
 /// Official `ComponentArgument`: one SNBT value, then the text `Codec`.
 pub fn parse_component(reader: &mut StringReader) -> Result<Value, ParseError> {
     let tag = read_snbt(reader, "argument.component.invalid")?;
-    let checked = checked_component(&tag).ok_or_else(|| {
-        ParseError::text("argument.component.invalid", "invalid component")
-    })?;
+    let checked = checked_component(&tag)
+        .ok_or_else(|| ParseError::text("argument.component.invalid", "invalid component"))?;
     Ok(Value::Component(checked.tag().clone()))
 }
 

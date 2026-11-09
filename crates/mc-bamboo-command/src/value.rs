@@ -506,7 +506,7 @@ impl TeamColorId {
 pub enum ScoreHolderSpec {
     Wildcard,
     Text(String),
-    Selector(EntitySelector),
+    Selector(Box<EntitySelector>),
 }
 
 /// 消息里的一段实体选择器。位置是字符下标，从消息开头算。
