@@ -1004,20 +1004,30 @@ fn fluid_box(world: &World, pos: BlockPos, fluid: FluidState) -> Option<Aabb> {
 }
 
 impl World<'_> {
-    /// `Block.popResource`。位置的三次 `nextDouble` 即使物品是空的也要取。
+    /// `Block.popResource`。位置的三次 `nextDouble` 无条件取，然后才看 `BLOCK_DROPS`
+    /// 和物品是不是空的：私有 `popResource(level, supplier, stack)` 只在
+    /// `ServerLevel && !stack.isEmpty() && gameRules.get(BLOCK_DROPS)` 时调 `supplier.get()`，
+    /// 也就是物品实体的构造（速度两个 `nextDouble`）、拾取延迟和 `addFreshEntity`。
     ///
-    /// `Block.popResource`. The three position `nextDouble`s are drawn even when the stack is empty.
+    /// `Block.popResource`. Three position `nextDouble`s are always drawn. The private
+    /// `popResource(level, supplier, stack)` only calls `supplier.get()` (the ItemEntity
+    /// constructor, its two velocity doubles, pickup delay and `addFreshEntity`) when
+    /// `ServerLevel && !stack.isEmpty() && gameRules.get(BLOCK_DROPS)`.
     pub fn pop_resource(&mut self, pos: BlockPos, stack: ItemStack) {
         let x = f64::from(pos.x) + 0.5 + self.random().mth_next_double(-0.25, 0.25);
         let y =
             f64::from(pos.y) + 0.5 + self.random().mth_next_double(-0.25, 0.25) - HALF_ITEM_HEIGHT;
         let z = f64::from(pos.z) + 0.5 + self.random().mth_next_double(-0.25, 0.25);
-        self.spawn_dropped_item(Vec3::new(x, y, z), stack, true, 10);
+        if self.block_game_rules().block_drops {
+            self.spawn_dropped_item(Vec3::new(x, y, z), stack, true, 10);
+        }
     }
 
-    /// `Block.popResourceFromFace`。空堆也按面取位置和速度的随机数。
+    /// `Block.popResourceFromFace`。位置和速度的随机数都无条件按面取，
+    /// 但只有 `BLOCK_DROPS` 为真且物品非空时才生成实体。
     ///
-    /// `Block.popResourceFromFace`. An empty stack still draws the position and velocity for that face.
+    /// `Block.popResourceFromFace`. All position and velocity draws happen for the face,
+    /// but the entity only spawns when `BLOCK_DROPS` is on and the stack is non-empty.
     pub fn pop_resource_from_face(&mut self, pos: BlockPos, face: Direction, stack: ItemStack) {
         let (step_x, step_y, step_z) = face.normal();
         let random_x = if step_x == 0 {
@@ -1060,9 +1070,11 @@ impl World<'_> {
         let z = f64::from(pos.z)
             + 0.5
             + random_z.unwrap_or(f64::from(step_z) * (0.5 + HALF_ITEM_HEIGHT));
-        let id = self.spawn_dropped_item(Vec3::new(x, y, z), stack, false, 10);
-        if let Some(entity) = self.entity_mut(id) {
-            entity.delta = Vec3::new(delta_x, delta_y, delta_z);
+        if self.block_game_rules().block_drops {
+            let id = self.spawn_dropped_item(Vec3::new(x, y, z), stack, false, 10);
+            if let Some(entity) = self.entity_mut(id) {
+                entity.delta = Vec3::new(delta_x, delta_y, delta_z);
+            }
         }
     }
 
@@ -1315,5 +1327,121 @@ pub fn set_throw_velocity(entity: &mut Entity, delta: Vec3) {
     entity.delta = delta;
     if let Some(item) = entity.ground_mut() {
         item.set_pickup_delay(40);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use crate::{BlockTicks, LegacyRandom, testing::TestLevel, world::World};
+
+    const POS: BlockPos = BlockPos::new(0, 64, 0);
+
+    /// `Block.popResource`：三次位置 double 无条件取，规则为假时不生成实体。
+    #[test]
+    fn block_drops_off_still_draws_the_position_offsets() {
+        let mut level = TestLevel::new();
+        level.rules.block_drops = false;
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.pop_resource(POS, ItemStack::new(items::STONE, 1));
+        assert!(world.entity_ids().is_empty());
+        assert_eq!(
+            world.random().seed(),
+            seed_after(|random| {
+                for _ in 0..3 {
+                    random.next_double();
+                }
+            })
+        );
+    }
+
+    /// `BLOCK_DROPS` 为真时生成实体；实体的两次速度 double 用自己的随机源，不动 `level.random`。
+    #[test]
+    fn block_drops_on_spawns_the_item() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.pop_resource(POS, ItemStack::new(items::STONE, 1));
+        assert_eq!(world.entity_ids().len(), 1);
+        assert_eq!(
+            world.random().seed(),
+            seed_after(|random| {
+                for _ in 0..3 {
+                    random.next_double();
+                }
+            })
+        );
+    }
+
+    /// `popResourceFromFace` 的位置与速度随机数按面取，规则为假时只取数不生成实体。
+    #[test]
+    fn block_drops_off_still_draws_the_face_offsets() {
+        use mc_bamboo_core::Direction;
+
+        let mut level = TestLevel::new();
+        level.rules.block_drops = false;
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.pop_resource_from_face(POS, Direction::Up, ItemStack::new(items::STONE, 1));
+        assert!(world.entity_ids().is_empty());
+        // 上面：X/Z 的位置、Y/Z 的速度各两次 `nextDouble`，X 的速度是常量 0。
+        assert_eq!(
+            world.random().seed(),
+            seed_after(|random| {
+                for _ in 0..4 {
+                    random.next_double();
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn block_drops_on_spawns_the_face_item() {
+        use mc_bamboo_core::Direction;
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.pop_resource_from_face(POS, Direction::Up, ItemStack::new(items::STONE, 1));
+        assert_eq!(world.entity_ids().len(), 1);
+        assert_eq!(
+            world.random().seed(),
+            seed_after(|random| {
+                for _ in 0..4 {
+                    random.next_double();
+                }
+            })
+        );
+    }
+
+    /// 侧面：`step_x != 0` 让 X 的位置和速度都不取随机数，Y/Z 的位置和速度都取。
+    #[test]
+    fn a_horizontal_face_draws_its_own_offsets() {
+        use mc_bamboo_core::Direction;
+
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.pop_resource_from_face(POS, Direction::East, ItemStack::new(items::STONE, 1));
+        assert_eq!(world.entity_ids().len(), 1);
+        // Y、Z 的位置两次，Y、Z 的速度两次，合计四次。
+        assert_eq!(
+            world.random().seed(),
+            seed_after(|random| {
+                for _ in 0..4 {
+                    random.next_double();
+                }
+            })
+        );
+    }
+
+    fn seed_after(draws: impl FnOnce(&LegacyRandom)) -> i64 {
+        let random = LegacyRandom::new(0);
+        draws(&random);
+        random.seed()
     }
 }
