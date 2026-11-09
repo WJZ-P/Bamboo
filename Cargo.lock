@@ -1960,6 +1960,7 @@ dependencies = [
  "mc-bamboo-protocol",
  "mc-bamboo-recipes",
  "mc-bamboo-world",
+ "mc-bamboo-worldgen",
  "rand_core",
  "rsa",
  "serde_json",
