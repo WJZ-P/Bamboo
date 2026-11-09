@@ -4,10 +4,7 @@
 //! 创建、删除、改属性和成员变化都广播 `set_player_team`。
 
 use mc_bamboo_command::{ParsedCommand, ScoreHolderSpec, TeamColorId, Value, permission};
-use mc_bamboo_protocol::{
-    components::text::component_from_checked_tag,
-    text::{Component, TranslateArg},
-};
+use mc_bamboo_protocol::text::{Component, TranslateArg};
 
 use crate::{
     command::{
@@ -51,13 +48,14 @@ fn formatted(global: &Global, name: &str) -> Result<Component, CommandFail> {
         .ok_or_else(|| fail("command.failed"))
 }
 
-fn component(parsed: &ParsedCommand, name: &str) -> Result<Component, CommandFail> {
-    parsed
-        .get(name)
-        .and_then(Value::as_component_tag)
-        .cloned()
-        .map(component_from_checked_tag)
-        .ok_or_else(|| fail("command.failed"))
+fn component(
+    global: &Global,
+    region: &Region,
+    source: PlayerId,
+    parsed: &ParsedCommand,
+    name: &str,
+) -> Result<Component, CommandFail> {
+    crate::command::text::resolved_component(global, region, source, parsed, name)
 }
 
 /// 队伍成员也是 `score_holder`。`*` 是全部有分数的名字。
@@ -170,7 +168,7 @@ pub(crate) fn add(
         return Err(fail("commands.team.add.duplicate"));
     }
     let display = match parsed.get("displayName") {
-        Some(_) => component(parsed, "displayName")?,
+        Some(_) => component(global, region, id, parsed, "displayName")?,
         None => Component::text(name),
     };
     global.scoreboard_mut().create_team(name, display, region);
@@ -315,7 +313,7 @@ pub(crate) fn display_name(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let name = team(global, parsed)?;
-    let display = component(parsed, "displayName")?;
+    let display = component(global, region, id, parsed, "displayName")?;
     if global
         .scoreboard()
         .team_display(&name)
@@ -344,7 +342,7 @@ pub(crate) fn prefix(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let name = team(global, parsed)?;
-    let text = component(parsed, "prefix")?;
+    let text = component(global, region, id, parsed, "prefix")?;
     global
         .scoreboard_mut()
         .set_team_prefix(&name, text.clone(), region);
@@ -365,7 +363,7 @@ pub(crate) fn suffix(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let name = team(global, parsed)?;
-    let text = component(parsed, "suffix")?;
+    let text = component(global, region, id, parsed, "suffix")?;
     global
         .scoreboard_mut()
         .set_team_suffix(&name, text.clone(), region);
@@ -899,5 +897,27 @@ mod tests {
         let (mut server, client) = operator("Op");
         run(&mut server, &client, "team remove ghost");
         assert!(has_key(&system_text(&client), "team.notFound"));
+    }
+
+    #[test]
+    fn team_names_resolve_selectors_before_they_are_stored() {
+        let (mut server, client) = operator("Kitten");
+        run(&mut server, &client, r#"team add red {selector:"@a"}"#);
+        let display = server
+            .global()
+            .scoreboard()
+            .team_display("red")
+            .expect("队伍还在");
+        let mut bytes = Vec::new();
+        display.write(&mut bytes);
+        assert!(
+            bytes.windows(6).any(|window| window == b"Kitten"),
+            "selector 应展开成命令源的名字: {display:?}"
+        );
+        run(&mut server, &client, r#"team modify red prefix {text:"["}"#);
+        assert!(has_key(
+            &system_text(&client),
+            "commands.team.option.prefix.success"
+        ));
     }
 }

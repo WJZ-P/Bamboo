@@ -5,7 +5,6 @@
 
 use mc_bamboo_command::{ObjectiveCriteria, ParsedCommand, ScoreHolderSpec, Value, permission};
 use mc_bamboo_protocol::{
-    components::text::component_from_checked_tag,
     packet::play::NumberFormat,
     text::{Component, TranslateArg},
 };
@@ -109,13 +108,14 @@ fn writable(global: &Global, parsed: &ParsedCommand, name: &str) -> Result<Strin
     Ok(objective)
 }
 
-fn component(parsed: &ParsedCommand, name: &str) -> Result<Component, CommandFail> {
-    parsed
-        .get(name)
-        .and_then(Value::as_component_tag)
-        .cloned()
-        .map(component_from_checked_tag)
-        .ok_or_else(|| fail("command.failed"))
+fn component(
+    global: &Global,
+    region: &Region,
+    source: PlayerId,
+    parsed: &ParsedCommand,
+    name: &str,
+) -> Result<Component, CommandFail> {
+    crate::command::text::resolved_component(global, region, source, parsed, name)
 }
 
 /// 把 SNBT 参数转成数字格式。`blank` 是空格式，`styled` 用样式标签，`fixed` 用组件。
@@ -128,8 +128,13 @@ fn styled(parsed: &ParsedCommand) -> Result<NumberFormat, CommandFail> {
         .ok_or_else(|| fail("command.failed"))
 }
 
-fn fixed(parsed: &ParsedCommand) -> Result<NumberFormat, CommandFail> {
-    component(parsed, "contents")
+fn fixed(
+    global: &Global,
+    region: &Region,
+    id: PlayerId,
+    parsed: &ParsedCommand,
+) -> Result<NumberFormat, CommandFail> {
+    component(global, region, id, parsed, "contents")
         .map(NumberFormat::Fixed)
         .map_err(|_| fail("command.failed"))
 }
@@ -234,7 +239,7 @@ pub(crate) fn objectives_add(
         .and_then(Value::as_criteria)
         .ok_or_else(|| fail("command.failed"))?;
     let display = match parsed.get("displayName") {
-        Some(_) => component(parsed, "displayName")?,
+        Some(_) => component(global, region, id, parsed, "displayName")?,
         None => Component::text(name),
     };
     if global.scoreboard().objective_exists(name) {
@@ -339,7 +344,7 @@ pub(crate) fn objectives_displayname(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let name = goal(global, parsed, "objective")?;
-    let display = component(parsed, "displayName")?;
+    let display = component(global, region, id, parsed, "displayName")?;
     if global
         .scoreboard_mut()
         .set_objective_display(&name, display, region)
@@ -467,7 +472,7 @@ pub(crate) fn objectives_format_fixed(
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let format = fixed(parsed)?;
+    let format = fixed(global, region, id, parsed)?;
     objectives_numberformat(global, region, id, parsed, Some(format))
 }
 
@@ -931,7 +936,7 @@ pub(crate) fn players_display_name(
     let display = if is_clear {
         None
     } else {
-        Some(component(parsed, "name")?)
+        Some(component(global, region, id, parsed, "name")?)
     };
     for name in &holders.names {
         let holder = holder_of(global, name);
@@ -1068,7 +1073,7 @@ pub(crate) fn players_format_fixed(
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let format = fixed(parsed)?;
+    let format = fixed(global, region, id, parsed)?;
     players_display_numberformat(global, region, id, parsed, Some(format))
 }
 
@@ -1567,5 +1572,41 @@ mod tests {
         );
         assert!(system_text(&client).is_empty());
         assert_eq!(server.global().scoreboard().objective_count(), 1);
+    }
+
+    #[test]
+    fn component_arguments_are_resolved_before_they_are_stored() {
+        let (mut server, client) = operator("Kitten");
+        run(
+            &mut server,
+            &client,
+            "scoreboard objectives add kills dummy",
+        );
+        run(
+            &mut server,
+            &client,
+            r#"scoreboard objectives modify kills displayname {score:{name:"*",objective:"kills"}}"#,
+        );
+        run(
+            &mut server,
+            &client,
+            "scoreboard players set Kitten kills 7",
+        );
+        run(
+            &mut server,
+            &client,
+            r#"scoreboard objectives modify kills displayname {score:{name:"*",objective:"kills"}}"#,
+        );
+        let display = server
+            .global()
+            .scoreboard()
+            .raw_objective_display("kills")
+            .expect("目标还在");
+        let mut bytes = Vec::new();
+        display.write(&mut bytes);
+        assert!(
+            bytes.windows(1).any(|window| window == b"7"),
+            "解析后的显示名应带上分数 7: {display:?}"
+        );
     }
 }

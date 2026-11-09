@@ -74,7 +74,6 @@ pub(crate) fn run(
     parsed: &ParsedCommand,
     action: Action,
 ) -> Result<(), CommandFail> {
-    let _ = global;
     let selector = parsed
         .get("targets")
         .and_then(Value::as_entity)
@@ -120,7 +119,7 @@ pub(crate) fn run(
                     .get(target)
                     .map(|player| player.uuid)
                     .unwrap_or_default();
-                let resolved = text::resolve(region, id, *target, uuid, raw.tag(), 0);
+                let resolved = text::resolve(global, region, id, *target, uuid, raw.tag(), 0);
                 match action {
                     Action::Title => region
                         .links

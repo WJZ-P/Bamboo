@@ -26,7 +26,10 @@ pub fn parse_component(reader: &mut StringReader) -> Result<Value, ParseError> {
     let (tag, used) = match parse_snbt_prefix(&rest) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return Err(ParseError::text("argument.component.invalid", error.message));
+            return Err(ParseError::text(
+                "argument.component.invalid",
+                error.message,
+            ));
         }
     };
     let Some(checked) = checked_component(&tag) else {
@@ -54,10 +57,7 @@ mod tests {
     fn components_are_snbt_literals_and_stop_at_the_next_argument() {
         let mut reader = StringReader::new("{text:\"hi\"} 3");
         let value = parse_component(&mut reader).unwrap();
-        assert_eq!(
-            value.as_component(),
-            Some(&Tag::String("hi".into()))
-        );
+        assert_eq!(value.as_component(), Some(&Tag::String("hi".into())));
         assert_eq!(reader.remaining(), " 3");
     }
 

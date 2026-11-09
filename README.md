@@ -370,9 +370,11 @@ WebView2 的渲染进程不算在内。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿，破坏也不掉落。`/give` 多出来的物品会消失（没有物品实体，也没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
-  不是 JSON 文本组件。组件过一遍官方 `Codec`，`selector` 会展开成玩家名列表；Bamboo 还没有计分板和实体 NBT，
-  所以 `score`、`nbt` 和 `object` 按「查不到值」处理（空文本），`keybind` 原样保留，`object` 没有数据源。
-  `ComponentArgument` 校验失败时的详细 DFU 文案固定写成 `invalid component`。
+  不是 JSON 文本组件。组件过一遍官方 `Codec`；执行时按 `ComponentUtils.resolve` 展开：
+  `selector` 变成玩家名列表，`score` 查 `/scoreboard` 的分数并套用数字格式（`*` 指接收者，名字当选择器编译），
+  `keybind` 和合法的 `object`（图集精灵、玩家头像）原样保留并解析 `fallback`。
+  `nbt` 组件和 `block` 数据源还没做：Bamboo 的方块实体是类型化结构，没有统一的 NBT 树和 NbtPath 求值器，
+  所以按「没有数据源」返回空文本。`ComponentArgument` 校验失败时的详细 DFU 文案固定写成 `invalid component`。
   `/title` 六种动作都有，成功消息按目标数用 `.single` / `.multiple`；`times` 的 `t`/`s`/`d` 照官方换算成刻。
   `/playsound` 的 `sound` 带 `minecraft:available_sounds` 补全（官方命令树的快照里没有写 suggestion_id，
   这里让客户端来问服务端），11 种来源、位置、音量、音高和 `minVolume` 都在；
@@ -380,7 +382,7 @@ WebView2 的渲染进程不算在内。
   `minVolume` > 0 会把音源挪到玩家附近两格。
   `/particle` 能解析注册表里全部 128 种粒子名；带选项的 19 种按官方 `ParticleTypes.STREAM_CODEC` 编码
   （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
-  `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源。
+  `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源（官方也拒绝 entity 来源）。
   两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
 - 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
   `/scoreboard objectives` 支持 `list|add|remove|setdisplay|modify`（`displayname`、`rendertype`、`displayautoupdate`、`numberformat` 的 `blank`/`styled`/`fixed`）；

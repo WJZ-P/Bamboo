@@ -49,6 +49,33 @@ pub(crate) fn component(parsed: &ParsedCommand, name: &str) -> Result<Component,
     })
 }
 
+/// 官方 `ComponentArgument.getResolvedComponent(context, name)`：按命令来源解析一次。
+///
+/// `ResolutionContext.create(source)` 没有 entity override，所以 `score` 里的 `*`
+/// 指命令来源自己；`/tellraw` 和 `/title` 才用带接收者覆盖的 [`resolve`]。
+///
+/// Official `ComponentArgument.getResolvedComponent(context, name)`: resolve once
+/// against the command source. `ResolutionContext.create(source)` has no entity
+/// override, so `*` in a score component means the source itself.
+pub(crate) fn resolved_component(
+    global: &Global,
+    region: &Region,
+    source: PlayerId,
+    parsed: &ParsedCommand,
+    name: &str,
+) -> Result<Component, CommandFail> {
+    let tag = parsed
+        .get(name)
+        .and_then(Value::as_component)
+        .ok_or_else(|| fail("command.failed"))?;
+    let uuid = region
+        .players
+        .get(&source)
+        .map(|player| player.uuid)
+        .unwrap_or_default();
+    Ok(resolve(global, region, source, source, uuid, tag, 0))
+}
+
 /// 官方 `ComponentUtils.resolve`：发给每个目标前把动态内容展开。
 ///
 /// `ResolutionContext.withEntityOverride(target)` 只影响 `@s` 和 `score` 的 `*` 名字，
@@ -58,6 +85,7 @@ pub(crate) fn component(parsed: &ParsedCommand, name: &str) -> Result<Component,
 /// inside a `score`/`selector` component resolves to; the source still owns the
 /// selector's position and permission checks.
 pub(crate) fn resolve(
+    global: &Global,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -72,7 +100,7 @@ pub(crate) fn resolve(
         Tag::List(items) => {
             let mut first = Component::text("");
             for (index, item) in items.iter().enumerate() {
-                let part = resolve(region, source, target, target_uuid, item, depth + 1);
+                let part = resolve(global, region, source, target, target_uuid, item, depth + 1);
                 if index == 0 {
                     first = part;
                 } else {
@@ -82,10 +110,12 @@ pub(crate) fn resolve(
             first
         }
         Tag::Compound(entries) => {
-            let mut out = resolve_content(region, source, target, target_uuid, entries, depth);
+            let mut out =
+                resolve_content(global, region, source, target, target_uuid, entries, depth);
             if let Some(Tag::List(children)) = field(entries, "extra") {
                 for child in children {
                     out = out.extra(resolve(
+                        global,
                         region,
                         source,
                         target,
@@ -104,6 +134,7 @@ pub(crate) fn resolve(
 }
 
 fn resolve_content(
+    global: &Global,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -120,7 +151,9 @@ fn resolve_content(
             () if field(entries, "nbt").is_some() => "nbt",
             () if field(entries, "translate").is_some() => "translatable",
             () if field(entries, "keybind").is_some() => "keybind",
-            () if field(entries, "object").is_some() => "object",
+            () if field(entries, "sprite").is_some() || field(entries, "player").is_some() => {
+                "object"
+            }
             () => "text",
         },
     };
@@ -132,9 +165,16 @@ fn resolve_content(
             if let Some(Tag::List(with)) = field(entries, "with") {
                 for value in with {
                     let arg = match value {
-                        Tag::Compound(_) | Tag::List(_) => {
-                            resolve(region, source, target, target_uuid, value, depth + 1).into()
-                        }
+                        Tag::Compound(_) | Tag::List(_) => resolve(
+                            global,
+                            region,
+                            source,
+                            target,
+                            target_uuid,
+                            value,
+                            depth + 1,
+                        )
+                        .into(),
                         Tag::String(text) => text.clone().into(),
                         Tag::Byte(value) => i32::from(*value).into(),
                         Tag::Short(value) => i32::from(*value).into(),
@@ -153,18 +193,110 @@ fn resolve_content(
             "keybind",
             Tag::String(string_field(entries, "keybind").unwrap_or_default()),
         ),
-        "selector" => selector_text(region, source, target, target_uuid, entries, depth),
-        // 没有计分板和实体 NBT，官方这两类在查不到值时都是空文本。
-        //
-        // No scoreboard or entity NBT here; both officially resolve to empty text when
-        // there is no value.
-        // `object` 客户端按图集或玩家档案解析，这里没有对应的数据源。
-        "score" | "nbt" | "object" => Component::text(""),
+        "selector" => selector_text(global, region, source, target, target_uuid, entries, depth),
+        "score" => score_text(global, region, source, target, target_uuid, entries),
+        "object" => object_text(global, region, source, target, target_uuid, entries, depth),
+        // 没有实体和方块实体的 NBT 数据源：官方 `NbtContents.resolve` 在取不到数据时
+        // 把流 reduce 成空，结果就是空文本。
+        "nbt" => Component::text(""),
         _ => Component::text(""),
     }
 }
 
+/// 官方 `ScoreContents.resolve`：`*` 换成接收者，选择器要求正好一个实体，
+/// 然后按 `ScoreContents.getScore` 到计分板取分数并套用数字格式。
+fn score_text(
+    global: &Global,
+    region: &Region,
+    source: PlayerId,
+    target: PlayerId,
+    target_uuid: uuid::Uuid,
+    entries: &[(String, Tag)],
+) -> Component {
+    let Some(Tag::Compound(score)) = field(entries, "score") else {
+        return Component::text("");
+    };
+    let objective = string_field(score, "objective").unwrap_or_default();
+    let name = string_field(score, "name").unwrap_or_default();
+    let holder = if name == "*" {
+        scoreboard_name(region, target)
+    } else {
+        // `ScoreContents.INNER_CODEC` 把 name 编成 `Either<选择器, 字符串>`：
+        // 所有非空名字都先当选择器编译（玩家名也是合法选择器），只有 `*` 走上面的分支。
+        let mut reader = mc_bamboo_command::StringReader::new(&name);
+        let Ok(Value::Entity(selector)) = parse_entity(&mut reader, false, false) else {
+            return Component::text("");
+        };
+        if reader.can_read() {
+            return Component::text("");
+        }
+        let found = select::mention(region, source, level_of(region, source), &selector)
+            .unwrap_or_default();
+        let [only] = found.as_slice() else {
+            // 官方 `findTargetName`：零个结果退回原文，多个结果报错（这里按空文本）。
+            return if found.is_empty() {
+                global
+                    .scoreboard()
+                    .formatted_score(&name, &objective)
+                    .unwrap_or_else(|| Component::text(""))
+            } else {
+                Component::text("")
+            };
+        };
+        scoreboard_name(region, *only)
+    };
+    let _ = target_uuid;
+    global
+        .scoreboard()
+        .formatted_score(&holder, &objective)
+        .unwrap_or_else(|| Component::text(""))
+}
+
+fn scoreboard_name(region: &Region, id: PlayerId) -> String {
+    region
+        .players
+        .get(&id)
+        .map(|player| player.name.clone())
+        .unwrap_or_default()
+}
+
+/// 官方 `ObjectContents.resolve`：默认的对象校验器恒为真，所以图集精灵和玩家头像
+/// 都原样保留；`fallback` 先按 `ComponentUtils.resolve` 展开，再一起写回去。
+fn object_text(
+    global: &Global,
+    region: &Region,
+    source: PlayerId,
+    target: PlayerId,
+    target_uuid: uuid::Uuid,
+    entries: &[(String, Tag)],
+    depth: u32,
+) -> Component {
+    let mut out = Component::text("");
+    for (key, value) in entries {
+        if matches!(
+            key.as_str(),
+            "object" | "sprite" | "atlas" | "player" | "hat"
+        ) {
+            out = out.with_entry(key, value.clone());
+        }
+    }
+    if let Some(fallback) = field(entries, "fallback") {
+        let resolved = resolve(
+            global,
+            region,
+            source,
+            target,
+            target_uuid,
+            fallback,
+            depth + 1,
+        );
+        out = out.with_entry("fallback", resolved.tag().clone());
+    }
+    out
+}
+
 fn selector_text(
+    global: &Global,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -201,7 +333,7 @@ fn selector_text(
         })
         .collect::<Vec<_>>();
     let separator = match field(entries, "separator") {
-        Some(tag) => resolve(region, source, target, target_uuid, tag, depth + 1),
+        Some(tag) => resolve(global, region, source, target, target_uuid, tag, depth + 1),
         None => Component::text(DEFAULT_SEPARATOR).color(mc_bamboo_protocol::text::Color::Gray),
     };
     let mut list = Component::text("");
@@ -234,7 +366,6 @@ pub(crate) fn tellraw(
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
     let selector = parsed
         .get("targets")
         .and_then(Value::as_entity)
@@ -255,7 +386,7 @@ pub(crate) fn tellraw(
             .get(&target)
             .map(|player| player.uuid)
             .unwrap_or_default();
-        let resolved = resolve(region, id, target, target_uuid, raw.tag(), 0);
+        let resolved = resolve(global, region, id, target, target_uuid, raw.tag(), 0);
         region.links.send(
             target,
             &SystemChat {
@@ -283,8 +414,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_score_and_nbt_contents_resolve_to_empty_text() {
-        let (_, region, id) = crate::command::tests::world_with("Kitten", 2);
+    fn score_components_read_the_scoreboard_and_nbt_stays_empty() {
+        let (mut global, mut region, id) = crate::command::tests::world_with("Kitten", 2);
+        global.scoreboard_mut().add_objective(
+            "kills",
+            "dummy",
+            false,
+            false,
+            Component::text("kills"),
+        );
+        global.scoreboard_mut().set_score(
+            &crate::scoreboard::Holder {
+                name: "Kitten".into(),
+                display: None,
+            },
+            "kills",
+            7,
+            &mut region,
+        );
         let score = Tag::Compound(vec![(
             "score".into(),
             Tag::Compound(vec![
@@ -293,28 +440,46 @@ mod tests {
             ]),
         )]);
         assert_eq!(
-            resolve(&region, id, id, Uuid::nil(), &score, 0),
-            Component::text("")
+            resolve(&global, &region, id, id, Uuid::nil(), &score, 0),
+            Component::text("7")
         );
         let nbt = Tag::Compound(vec![
             ("nbt".into(), Tag::String("Inventory".into())),
             ("entity".into(), Tag::String("@s".into())),
         ]);
         assert_eq!(
-            resolve(&region, id, id, Uuid::nil(), &nbt, 0),
+            resolve(&global, &region, id, id, Uuid::nil(), &nbt, 0),
             Component::text("")
         );
     }
 
     #[test]
     fn selectors_are_joined_with_the_official_separator() {
-        let (_, region, id) = crate::command::tests::world_with("Kitten", 2);
+        let (global, region, id) = crate::command::tests::world_with("Kitten", 2);
         let selector = Tag::Compound(vec![("selector".into(), Tag::String("@a".into()))]);
-        let resolved = resolve(&region, id, id, Uuid::nil(), &selector, 0);
+        let resolved = resolve(&global, &region, id, id, Uuid::nil(), &selector, 0);
         let mut out = Vec::new();
         resolved.write(&mut out);
         // 一个目标时不写分隔符；转成标签后检查名字在里面。
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Kitten"), "{text:?}");
+    }
+
+    #[test]
+    fn object_components_keep_their_sprite_and_resolve_their_fallback() {
+        let (global, region, id) = crate::command::tests::world_with("Kitten", 2);
+        let component = Tag::Compound(vec![
+            ("sprite".into(), Tag::String("minecraft:block/stone".into())),
+            ("fallback".into(), Tag::String("stone".into())),
+        ]);
+        let resolved = resolve(&global, &region, id, id, Uuid::nil(), &component, 0);
+        let Tag::Compound(entries) = resolved.tag() else {
+            panic!("object 应该还是复合标签");
+        };
+        assert!(
+            entries.iter().any(|(key, value)| key == "sprite"
+                && *value == Tag::String("minecraft:block/stone".into()))
+        );
+        assert!(entries.iter().any(|(key, _)| key == "fallback"));
     }
 }
