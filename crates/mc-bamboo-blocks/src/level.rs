@@ -226,17 +226,32 @@ pub trait Level {
         Vec::new()
     }
 
-    /// `Block.getDrops`，也就是 `destroyBlock` 在成功移除方块后生成的东西。
+    /// `Block.getDrops`，`destroyBlock` 在移除方块之前按战利品表算出的每一组。
     ///
     /// 空堆也交给调用方 `popResource`：官方对每一组都取三次位置偏移。
     /// 方块 oracle 把表换成空表，这里默认返回空，不额外取数。
     ///
-    /// `Block.getDrops`, the stacks `destroyBlock` spawns after removing the block.
+    /// `Block.getDrops`, the stacks `destroyBlock` computes before removing the block.
     /// Even an empty stack reaches `popResource` in vanilla, which draws three position
     /// offsets. The block oracle empties those tables, so the default here draws nothing.
     fn block_loot_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
         let _ = (state, pos);
         Vec::new()
+    }
+
+    /// `BlockState.spawnAfterBreak` 里 `tryDropExperience` 和虫蚀方块生成蠹虫
+    /// 可能要取的 `level.random` 数。没有经验球和生物时实体不生成，取数仍要照官方。
+    ///
+    /// `DropExperienceBlock` 的 `xpRange.sample(level.random)` 和 `ExperienceOrb.award`
+    /// 的拆分次数都在这里；虫蚀方块不取 `level.random`。默认没有方块需要取数。
+    ///
+    /// The `level.random` draws inside `BlockState.spawnAfterBreak`: ore experience and
+    /// infested-block spawns. Experience orbs and silverfish are not spawned, but the
+    /// draws still follow vanilla. `DropExperienceBlock` samples `xpRange` and splits
+    /// the amount in `ExperienceOrb.award`; infested blocks draw none. The default draws
+    /// nothing.
+    fn spawn_after_break_random(&mut self, state: BlockState, pos: BlockPos) {
+        let _ = (state, pos);
     }
     /// `getEntitiesOfClass(LivingEntity, box)` 能看见的生物。默认没有。
     ///

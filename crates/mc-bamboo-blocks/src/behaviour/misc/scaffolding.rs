@@ -84,7 +84,7 @@ impl Behaviour for Scaffolding {
         } else if state.get(STABILITY_DISTANCE) == SCAFFOLDING_MAX_DISTANCE {
             fall(world, pos, updated);
         } else {
-            world.destroy_block(pos, UPDATE_LIMIT);
+            world.destroy_block(pos, true, UPDATE_LIMIT);
         }
     }
 }

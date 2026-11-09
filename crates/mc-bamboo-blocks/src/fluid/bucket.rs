@@ -243,7 +243,7 @@ fn empty_contents(
         return true;
     }
     if may_replace && !state.is_liquid() {
-        world.destroy_block(pos, UPDATE_LIMIT);
+        world.destroy_block(pos, true, UPDATE_LIMIT);
     }
     let placed = fluid.source_state().legacy_block();
     let placed_now =

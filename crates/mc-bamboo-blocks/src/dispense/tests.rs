@@ -15,7 +15,7 @@ use mc_bamboo_protocol::{
 
 use super::dispense_from;
 use crate::{
-    Aabb, BlockTicks, Effect, LegacyRandom, Level,
+    Aabb, BlockTicks, Effect, LegacyRandom,
     entity::EntityKind,
     item_exchange::{set_component, water_potion_stack},
     item_use::{grow_crop, grow_water_plant},

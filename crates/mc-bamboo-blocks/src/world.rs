@@ -1068,6 +1068,11 @@ impl<'a> World<'a> {
         self.level.block_loot_drops(state, pos)
     }
 
+    /// `BlockState.spawnAfterBreak` 的随机取数，见 [`Level::spawn_after_break_random`]。
+    pub(crate) fn spawn_after_break_random(&mut self, state: BlockState, pos: BlockPos) {
+        self.level.spawn_after_break_random(state, pos);
+    }
+
     /// `getBlockRandomPos`。
     pub(crate) fn block_random_pos(&self, origin: BlockPos, y_mask: i32) -> BlockPos {
         self.level.random().block_random_pos(origin, y_mask)
@@ -1473,28 +1478,32 @@ impl<'a> World<'a> {
         self.set_block(pos, fluid.legacy_block(), UPDATE_ALL)
     }
 
-    /// `destroyBlock(pos, drop, null, updateLimit)`。
+    /// `Level.destroyBlock(pos, dropResources, null, updateLimit)`。
     ///
-    /// 官方在 `removeBlock` 之后按 `getDrops` 一组一组地 `popResource`。方块 oracle 把
-    /// 这些表换成空表，所以假世界没有额外取数；真实世界由 `Level` 提供掉落表。
+    /// 官方顺序是取状态、破碎粒子、`dropResources` 为真的 `Block.dropResources`
+    /// （先 `getDrops` 再一组一组 `popResource`，最后 `spawnAfterBreak`），
+    /// 然后才换成这一格的流体方块。掉落必须排在改方块之前，否则邻居更新
+    /// 和后续计划刻拿到的随机数会和官方错开。方块 oracle 把这些表换成空表。
     ///
-    /// `destroyBlock(pos, drop, null, updateLimit)`. After `removeBlock`, vanilla
-    /// `popResource`s each stack from `getDrops`. The block oracle empties those tables,
-    /// so the fake world draws nothing; the real `Level` supplies loot tables.
-    pub fn destroy_block(&mut self, pos: BlockPos, limit: u32) -> bool {
+    /// `Level.destroyBlock(pos, dropResources, null, updateLimit)`: state, break
+    /// particles, then `Block.dropResources` when requested (getDrops, popResource
+    /// for each stack, spawnAfterBreak), and only then the fluid's legacy block.
+    /// Drops precede the block write so neighbour updates consume the same random draws.
+    /// The block oracle empties those loot tables.
+    pub fn destroy_block(&mut self, pos: BlockPos, drop: bool, limit: u32) -> bool {
         let state = self.block_state(pos);
         if state.is_air() {
             return false;
         }
         state.spawn_destroy_particles(self, pos);
+        if drop {
+            for stack in self.block_loot_drops(state, pos) {
+                self.pop_resource(pos, stack);
+            }
+            self.spawn_after_break_random(state, pos);
+        }
         let fluid = self.fluid_state(pos);
-        if !self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit) {
-            return false;
-        }
-        for stack in self.block_loot_drops(state, pos) {
-            self.pop_resource(pos, stack);
-        }
-        true
+        self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)
     }
 
     /// `Block.updateOrDestroy`。
@@ -1510,7 +1519,9 @@ impl<'a> World<'a> {
             return;
         }
         if new.is_air() {
-            self.destroy_block(pos, limit);
+            // 官方 `updateOrDestroy` 的 `flags & 32` 会关掉掉落。
+            // Official `updateOrDestroy` disables drops when `flags & 32` is set.
+            self.destroy_block(pos, flags & UPDATE_SUPPRESS_DROPS == 0, limit);
         } else {
             self.set_block_limited(pos, new, flags & !UPDATE_SUPPRESS_DROPS, limit);
         }
@@ -2400,11 +2411,72 @@ mod tests {
         );
     }
 
+    /// 官方 `Level.destroyBlock` 的掉落和 `spawnAfterBreak` 都在写方块之前。
+    #[test]
+    fn drops_precede_the_block_write() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::STONE));
+        level.loot = vec![ItemStack::new(items::STONE, 2)];
+        let dropped = with_world(&mut level, |world| {
+            world.destroy_block(CENTER, true, UPDATE_LIMIT)
+        });
+        assert!(dropped);
+        // 两次 "drops"/"after_break" 都看到 0 次写入，最后的 "write" 才看到 1 次。
+        assert_eq!(level.drop_order.len(), 3);
+        assert_eq!(level.drop_order[0].0, "drops");
+        assert_eq!(level.drop_order[1].0, "after_break");
+        assert_eq!(level.drop_order[2].0, "write");
+        assert!(level.drop_order[..2].iter().all(|(_, writes)| *writes == 0));
+        assert_eq!(level.drop_order[2].1, 1);
+        // 掉落堆变成一个物品实体，三个位置 double 照取。
+        assert_eq!(level.entities().len(), 1);
+        assert_eq!(
+            level
+                .entities()
+                .iter()
+                .next()
+                .and_then(|entity| entity.ground())
+                .map(|item| item.stack.clone()),
+            Some(ItemStack::new(items::STONE, 2))
+        );
+    }
+
+    /// `dropResources` 为假时既不算掉落也不调 `spawnAfterBreak`，但仍写方块。
+    #[test]
+    fn destroy_without_drops_skips_the_loot_hooks() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::STONE));
+        level.loot = vec![ItemStack::new(items::STONE, 2)];
+        assert!(with_world(&mut level, |world| {
+            world.destroy_block(CENTER, false, UPDATE_LIMIT)
+        }));
+        assert_eq!(level.drop_order, [("write", 1)]);
+        assert!(level.entities().is_empty());
+    }
+
+    /// `Block.updateOrDestroy` 的 `UPDATE_SUPPRESS_DROPS` 关掉掉落。
+    #[test]
+    fn suppress_drops_flag_skips_the_loot_hooks() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::STONE));
+        with_world(&mut level, |world| {
+            world.update_or_destroy(
+                BlockState(blocks::STONE),
+                BlockState::AIR,
+                CENTER,
+                UPDATE_ALL | UPDATE_SUPPRESS_DROPS,
+                UPDATE_LIMIT,
+            );
+        });
+        assert_eq!(level.drop_order, [("write", 1)]);
+        assert!(level.entities().is_empty());
+    }
+
     #[test]
     fn destroying_air_does_nothing() {
         let mut level = TestLevel::new();
         let destroyed = with_world(&mut level, |world| {
-            world.destroy_block(CENTER, UPDATE_LIMIT)
+            world.destroy_block(CENTER, true, UPDATE_LIMIT)
         });
         assert!(!destroyed);
     }
