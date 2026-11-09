@@ -1314,3 +1314,19 @@ fn schedule_skips_ahead_when_it_is_too_far_behind() {
     // 不再补那 10 秒，下一 tick 从现在算起。
     assert_eq!(schedule.after_tick(now), Duration::from_millis(50));
 }
+
+#[test]
+fn join_remembers_the_profile_for_admin_name_lookups() {
+    let mut server = Harness::new(2);
+    let client = server.join("Kitten");
+    server.tick();
+    assert_eq!(
+        server
+            .world
+            .global
+            .admin
+            .known_player("kItTeN")
+            .map(|player| player.uuid),
+        Some(client.uuid)
+    );
+}

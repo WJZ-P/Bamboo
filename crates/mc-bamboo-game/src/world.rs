@@ -265,6 +265,11 @@ impl World {
         let op = self.global.admin.op(request.uuid);
         let permission_level = op.map_or(0, |entry| entry.level);
         let is_op = op.is_some();
+        // 官方 `CachedUserNameToIdResolver.add` 在进服时记下档案。
+        self.global.admin.remember_player(&crate::admin::NameAndId {
+            uuid: request.uuid,
+            name: request.name.clone(),
+        });
 
         let game_mode = GAME_MODE;
         let entry = RosterEntry {

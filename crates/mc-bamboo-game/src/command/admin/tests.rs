@@ -363,3 +363,72 @@ fn version_requires_gamemasters() {
 
 use crate::admin::NameAndId;
 use crate::command::admin::tick_idle;
+
+#[test]
+fn online_mode_resolves_names_from_the_session_profile_cache() {
+    let (mut global, mut region, sinks) = world_with(&[("Kitten", 4)]);
+    region.online_mode = true;
+    let (admin, sink) = sinks[0].clone();
+    let seen = NameAndId {
+        uuid: Uuid::from_u128(99),
+        name: "Mochi".to_owned(),
+    };
+    global.admin.remember_player(&seen);
+
+    // 缓存里的人能认出来，即使只在白名单里也查不到（不查白名单）。
+    global.admin.whitelist.insert(
+        Uuid::from_u128(98),
+        NameAndId {
+            uuid: Uuid::from_u128(98),
+            name: "Whitelisted".to_owned(),
+        },
+    );
+    run(&mut global, &mut region, admin, "op Mochi");
+    assert_eq!(global.admin.op(seen.uuid).map(|op| op.level), Some(4));
+    assert_eq!(global.admin.whitelist.len(), 1);
+    assert!(feedback_keys(&sink).contains(&"commands.op.success".to_owned()));
+
+    // 白名单不是官方的档案缓存。
+    sink.0.lock().expect("测试输出锁不该中毒").clear();
+    run(&mut global, &mut region, admin, "op Whitelisted");
+    assert_eq!(global.admin.ops.len(), 1);
+    let failed = feedback_keys(&sink);
+    assert!(failed.is_empty(), "查不到应该只回红色错误：{failed:?}");
+
+    // 完全没见过的名字也按官方「查不到」报错。
+    sink.0.lock().expect("测试输出锁不该中毒").clear();
+    run(&mut global, &mut region, admin, "op Stranger");
+    assert_eq!(global.admin.ops.len(), 1);
+    assert!(feedback_keys(&sink).is_empty());
+}
+
+#[test]
+fn joins_remember_the_player_for_later_name_lookups() {
+    let (mut global, mut region, sinks) = world_with(&[("Admin", 4), ("Mochi", 0)]);
+    region.online_mode = true;
+    let (admin, _) = sinks[0].clone();
+    let (target, _) = sinks[1].clone();
+    let player = NameAndId {
+        uuid: region.players[&target].uuid,
+        name: "Mochi".to_owned(),
+    };
+    global.admin.remember_player(&player);
+    // 玩家离线后还留在本次启动的缓存里。
+    region.players.remove(&target);
+    run(&mut global, &mut region, admin, "op mochi");
+    assert_eq!(global.admin.op(player.uuid).map(|op| op.level), Some(4));
+}
+
+#[test]
+fn the_profile_cache_is_case_insensitive() {
+    let (mut global, _region, _sinks) = world_with(&[]);
+    let player = NameAndId {
+        uuid: Uuid::from_u128(7),
+        name: "Joined".to_owned(),
+    };
+    global.admin.remember_player(&player);
+    assert_eq!(
+        global.admin.known_player("JOINED").map(|p| p.uuid),
+        Some(player.uuid)
+    );
+}

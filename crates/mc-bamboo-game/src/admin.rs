@@ -75,11 +75,25 @@ pub struct AdminState {
     pub idle_timeout_minutes: i32,
     /// `/stop` 发的成功消息已经进了出站缓冲，这一 tick 末尾走现有关服流程。
     pub stop_requested: bool,
+    /// 本次启动以来进过服的玩家档案，键是小写名字。官方
+    /// `CachedUserNameToIdResolver` 会把它持久化到 `usercache.json`，Bamboo 不写盘。
+    pub known_players: BTreeMap<String, NameAndId>,
 }
 
 impl AdminState {
     /// 官方 `operatorUserPermissions` 默认 OWNER（4）。
     pub const OP_LEVEL: u8 = 4;
+
+    /// 官方 `CachedUserNameToIdResolver.add`：进服时按小写名字记住档案。
+    pub fn remember_player(&mut self, player: &NameAndId) {
+        self.known_players
+            .insert(player.name.to_lowercase(), player.clone());
+    }
+
+    /// 本次启动见过的玩家，按小写名字查。
+    pub fn known_player(&self, name: &str) -> Option<&NameAndId> {
+        self.known_players.get(&name.to_lowercase())
+    }
 
     pub fn op(&self, uuid: Uuid) -> Option<OpEntry> {
         self.ops.get(&uuid).map(|entry| entry.entry)

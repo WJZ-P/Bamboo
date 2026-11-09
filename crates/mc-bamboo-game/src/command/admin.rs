@@ -173,15 +173,15 @@ fn game_profiles(
                     name: player.name.clone(),
                 }]);
             }
-            // 名单里记着这个人的 UUID 时按官方的档案缓存直接认出来。
-            if region.online_mode
-                && let Some(entry) = global
+            // 官方 `CachedUserNameToIdResolver.get` 先查本次启动见过的档案缓存，
+            // 再问 Mojang。Bamboo 没有 Mojang 查询，查不到就走官方的错误分支。
+            if region.online_mode {
+                return global
                     .admin
-                    .whitelist
-                    .values()
-                    .find(|entry| entry.name.eq_ignore_ascii_case(name))
-            {
-                return Ok(vec![entry.clone()]);
+                    .known_player(name)
+                    .cloned()
+                    .map(|entry| vec![entry])
+                    .ok_or_else(|| fail("argument.player.unknown"));
             }
             Ok(vec![offline_name(region, name)?])
         }
@@ -207,17 +207,13 @@ fn offline_uuid(name: &str) -> Uuid {
     Builder::from_md5_bytes(digest.into()).into_uuid()
 }
 
-/// 官方 `NameAndId.createOffline`，名字不在线时用它。
+/// 官方 `NameAndId.createOffline`，离线模式名字不在线时用它。
 fn offline_name(region: &Region, name: &str) -> Result<NameAndId, CommandFail> {
-    if region.online_mode {
-        // 没有 Mojang 查询，走官方 `UserNameToIdResolver` 查不到的分支。
-        Err(fail("argument.player.unknown"))
-    } else {
-        Ok(NameAndId {
-            uuid: offline_uuid(name),
-            name: name.to_owned(),
-        })
-    }
+    let _ = region;
+    Ok(NameAndId {
+        uuid: offline_uuid(name),
+        name: name.to_owned(),
+    })
 }
 
 /// 官方 `PlayerList.op/deop` 之后的 `sendPlayerPermissionLevel`：
