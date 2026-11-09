@@ -216,7 +216,8 @@ pub struct AdminSnapshot {
 }
 
 impl AdminSnapshot {
-    /// 变成世界线程里的权威副本。两个开关都按官方默认值，重启后恢复。
+    /// 变成世界线程里的权威副本。`enforce-whitelist` 和空闲超时按官方默认值，
+    /// 重启后恢复；`/whitelist on|off` 的开关在名单文件之外，重启恢复 false。
     pub fn into_state(self) -> AdminState {
         AdminState {
             ops: self.ops,

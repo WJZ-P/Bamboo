@@ -81,7 +81,7 @@ impl World {
         Self::build(config, inbox, keys, None)
     }
 
-    /// 连接层把启动时读到的名单和两条管理通道交给世界线程。
+    /// 连接层把启动时读到的名单和发布变更的通道交给世界线程。
     /// 名单变更作为 owned 消息发给连接层，世界线程不会等它。
     pub fn with_admin(
         config: WorldConfig,
