@@ -43,6 +43,20 @@ pub enum ReplayShape {
     Brewing,
     Loom,
     Grindstone,
+    Anvil,
+    Cartography,
+    Enchantment,
+}
+
+/// 重放题里假世界的固定状态：附魔种子、地图比例/锁定、书架数和换出的新种子。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReplayWorld {
+    pub seed: i32,
+    pub fixed: bool,
+    pub map_scale: i32,
+    pub map_locked: bool,
+    pub bookshelves: i32,
+    pub next_seed: Option<i32>,
 }
 
 impl ReplayShape {
@@ -62,6 +76,9 @@ impl ReplayShape {
             | Self::Brewing
             | Self::Loom
             | Self::Grindstone
+            | Self::Anvil
+            | Self::Cartography
+            | Self::Enchantment
             | Self::Crafter => ContainerKind::Chest,
         }
     }
@@ -80,6 +97,9 @@ impl ReplayShape {
             Self::Brewing => Some(WorkKind::Brewing),
             Self::Loom => Some(WorkKind::Loom),
             Self::Grindstone => Some(WorkKind::Grindstone),
+            Self::Anvil => Some(WorkKind::Anvil),
+            Self::Cartography => Some(WorkKind::Cartography),
+            Self::Enchantment => Some(WorkKind::Enchantment),
             _ => None,
         }
     }
@@ -105,6 +125,9 @@ impl ReplayShape {
             | Self::Brewing
             | Self::Loom
             | Self::Grindstone
+            | Self::Anvil
+            | Self::Cartography
+            | Self::Enchantment
             | Self::Crafter => Some(index),
             _ => None,
         }
@@ -179,6 +202,7 @@ impl Replay {
         inventory: &[(i32, i32)],
         data: &[i32],
         creative: bool,
+        world: ReplayWorld,
     ) -> Self {
         let kind = shape.workstation().expect("workstation shape");
         let mut seeds = Vec::new();
@@ -192,14 +216,25 @@ impl Replay {
         }
         let mut replay = Self::new(ReplayShape::Chest(1), &[], &[]);
         replay.creative = creative;
-        replay.station = Some(super::station::prepare_replay(
+        let station = super::station::prepare_replay(
             kind,
             &bamboo_inventory(inventory),
             &seeds,
             data,
             creative,
-        ));
+            world,
+        );
+        replay.station = Some(station);
         replay
+    }
+
+    /// `ServerboundRenameItemPacket`。官方只认铁砧菜单。
+    pub fn rename(&mut self, name: &str) -> Snapshot {
+        if let Some(station) = self.station.as_mut() {
+            let view = station.replay_rename(name);
+            return Self::from_station(view);
+        }
+        self.snapshot()
     }
 
     /// 非创造模式时中键克隆什么也不做。
@@ -492,7 +527,14 @@ mod tests {
     #[test]
     fn a_crafting_table_opens_with_planks() {
         let grid = [(items::OAK_LOG, 1)];
-        let mut replay = Replay::workstation(ReplayShape::Crafting, &grid, &[], &[], false);
+        let mut replay = Replay::workstation(
+            ReplayShape::Crafting,
+            &grid,
+            &[],
+            &[],
+            false,
+            ReplayWorld::default(),
+        );
         let snapshot = replay.open();
         assert_eq!(snapshot.slots[0], ItemStack::new(items::OAK_PLANKS, 4));
         assert_eq!(snapshot.slots[1], ItemStack::new(items::OAK_LOG, 1));

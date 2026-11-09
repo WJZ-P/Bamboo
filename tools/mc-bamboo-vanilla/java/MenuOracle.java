@@ -74,6 +74,8 @@ import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractFurnaceMenu;
+import net.minecraft.world.inventory.AnvilMenu;
+import net.minecraft.world.inventory.CartographyTableMenu;
 import net.minecraft.world.inventory.BlastFurnaceMenu;
 import net.minecraft.world.inventory.BrewingStandMenu;
 import net.minecraft.world.inventory.ChestMenu;
@@ -85,6 +87,7 @@ import net.minecraft.world.inventory.CrafterMenu;
 import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.DataSlot;
 import net.minecraft.world.inventory.DispenserMenu;
+import net.minecraft.world.inventory.EnchantmentMenu;
 import net.minecraft.world.inventory.FurnaceMenu;
 import net.minecraft.world.inventory.GrindstoneMenu;
 import net.minecraft.world.inventory.HopperMenu;
@@ -122,6 +125,18 @@ import net.minecraft.world.item.crafting.ShapelessRecipe;
 import net.minecraft.world.item.crafting.SingleItemRecipe;
 import net.minecraft.world.item.crafting.SmithingRecipe;
 import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.saveddata.maps.MapId;
+import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.LevelSettings;
+import net.minecraft.world.level.storage.PrimaryLevelData;
+import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LevelSettings.DifficultySettings;
+import net.minecraft.world.Difficulty;
+import com.mojang.serialization.Lifecycle;
 import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.gamerules.GameRules;
 import sun.misc.Unsafe;
@@ -311,6 +326,10 @@ public final class MenuOracle {
             if (options.only() < 0) {
                 write(componentCase(written));
                 written++;
+                for (int index = 0; index < 24; index++) {
+                    write(stationCase(written, index, options.seed()));
+                    written++;
+                }
             }
 
             JsonObject end = new JsonObject();
@@ -434,6 +453,178 @@ public final class MenuOracle {
             }
             line.add("steps", steps);
             return line;
+        }
+
+        /**
+         * 铁砧、制图台、附魔台的固定题。
+         *
+         * 铁砧的名字、附魔台的种子（进服时的 `enchantmentSeed`）和玩家的实体随机源都在题目里固定，
+         * 这样官方和 Bamboo 的每槽、每个 stateId、每个 data 槽都能逐项比较。题目用
+         * `ContainerLevelAccess.NULL`，所以制图台和附魔台的 `access.execute` 根本不跑。
+         */
+        private JsonObject stationCase(int id, int variant, long baseSeed) {
+            Random random = new Random(baseSeed * 7_000_003L + variant);
+            Shape shape = switch (variant % 3) {
+                case 0 -> Shape.ANVIL;
+                case 1 -> Shape.CARTOGRAPHY;
+                default -> Shape.ENCHANTMENT;
+            };
+            boolean creative = variant % 2 == 0;
+            int seed = variant * 31 + 17;
+            FakePlayer player = FakePlayer.create(seed, creative);
+            Inventory inventory = player.getInventory();
+            ItemStack[] grid = new ItemStack[shape.size];
+            for (int i = 0; i < grid.length; i++) {
+                grid[i] = ItemStack.EMPTY;
+            }
+            if (shape == Shape.ANVIL) {
+                grid[0] = anvilInput(variant);
+                if (variant % 3 != 0) {
+                    grid[1] = anvilAddition(variant);
+                }
+            } else if (shape == Shape.CARTOGRAPHY) {
+                grid[0] = mapInput(variant);
+                grid[1] = switch (variant % 4) {
+                    case 0 -> new ItemStack(Items.PAPER, 1 + random.nextInt(4));
+                    case 1 -> new ItemStack(Items.MAP, 1 + random.nextInt(4));
+                    case 2 -> new ItemStack(Items.GLASS_PANE, 1 + random.nextInt(4));
+                    default -> new ItemStack(Items.STICK, 1 + random.nextInt(4));
+                };
+            } else {
+                grid[0] = variant % 2 == 0
+                        ? new ItemStack(Items.BOOK, 1)
+                        : new ItemStack(Items.DIAMOND_SWORD, 1);
+                grid[1] = new ItemStack(Items.LAPIS_LAZULI, 1 + random.nextInt(8));
+                inventory.setItem(random.nextInt(36), new ItemStack(Items.LAPIS_LAZULI, 3));
+            }
+
+            MapId mapId = new MapId(variant + 1);
+            byte scale = (byte) (variant % 5);
+            boolean locked = variant % 4 == 0;
+            FakeLevel level = FakeLevel.create(
+                    seed, shape == Shape.ENCHANTMENT && variant % 2 == 0, mapId, scale, locked);
+            set(Entity.class, player, "level", level);
+            ContainerLevelAccess access = ContainerLevelAccess.create(level, BlockPos.ZERO);
+            AbstractContainerMenu menu = switch (shape) {
+                case ANVIL -> new AnvilMenu(CONTAINER_ID, inventory, access);
+                case CARTOGRAPHY -> new CartographyTableMenu(CONTAINER_ID, inventory, access);
+                case ENCHANTMENT -> new EnchantmentMenu(CONTAINER_ID, inventory, access);
+                default -> shape.create(inventory, null, player);
+            };
+            placeGrid(menu, shape, grid);
+            menu.setSynchronizer(new Sync());
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", shape.id);
+            line.addProperty("creative", creative);
+            line.addProperty("seed", seed);
+            line.addProperty("fixedWorld", true);
+            line.addProperty("mapScale", scale);
+            line.addProperty("mapLocked", locked);
+            line.addProperty("bookshelves", shape == Shape.ENCHANTMENT && variant % 2 == 0 ? 15 : 0);
+            if (shape == Shape.ENCHANTMENT) {
+                // `onEnchantmentPerformed` 从玩家自己的随机源换种子；这里提前算出来。
+                net.minecraft.util.RandomSource playerRandom =
+                        net.minecraft.util.RandomSource.create(seed);
+                line.addProperty("nextSeed", playerRandom.nextInt());
+            }
+            line.add("container", stacks(grid));
+            line.add("inventory", inventoryItems(inventory));
+            line.add("data", dataSlots(menu));
+            JsonArray patches = gridPatches(grid);
+            if (!patches.isEmpty()) {
+                line.add("patches", patches);
+            }
+            line.add("open", outcome(menu));
+
+            JsonArray steps = new JsonArray();
+            if (shape == Shape.ANVIL) {
+                JsonObject rename = new JsonObject();
+                rename.addProperty("slot", 0);
+                rename.addProperty("button", 0);
+                rename.addProperty("input", 0);
+                rename.addProperty("menuButton", false);
+                rename.addProperty("rename", anvilName(variant));
+                ((AnvilMenu) menu).setItemName(anvilName(variant));
+                rename.add("outcome", outcome(menu));
+                steps.add(rename);
+            }
+            for (int[] click : clickSequence(random, menu.slots.size())) {
+                boolean menuButton = click.length > 3 && click[3] == 1;
+                if (menuButton) {
+                    if (menu.clickMenuButton(player, click[1])) {
+                        menu.broadcastChanges();
+                    }
+                } else {
+                    menu.suppressRemoteUpdates();
+                    menu.clicked(click[0], click[1], INPUTS[click[2]], player);
+                    menu.setRemoteCarried(HashedStack.EMPTY);
+                    menu.resumeRemoteUpdates();
+                    menu.broadcastChanges();
+                }
+                JsonObject step = new JsonObject();
+                step.addProperty("slot", click[0]);
+                step.addProperty("button", click[1]);
+                step.addProperty("input", click[2]);
+                step.addProperty("menuButton", menuButton);
+                step.add("outcome", outcome(menu));
+                steps.add(step);
+            }
+            line.add("steps", steps);
+            return line;
+        }
+
+        private static String anvilName(int variant) {
+            return switch (variant % 4) {
+                case 0 -> "Blade";
+                case 1 -> "";
+                case 2 -> "A very long name that is still under fifty characters";
+                default -> "a\u007fb";
+            };
+        }
+
+        private static ItemStack anvilInput(int variant) {
+            ItemStack stack = switch (variant % 4) {
+                case 0 -> new ItemStack(Items.DIAMOND_SWORD, 1);
+                case 1 -> new ItemStack(Items.IRON_PICKAXE, 1);
+                case 2 -> new ItemStack(Items.BOOK, 1);
+                default -> new ItemStack(Items.DIAMOND_CHESTPLATE, 1);
+            };
+            if (variant % 3 == 0) {
+                stack.setDamageValue(20 + variant);
+            }
+            if (variant % 5 == 0) {
+                ItemEnchantments.Mutable mutable = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+                mutable.set(
+                        REGISTRIES.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS),
+                        1 + variant % 3);
+                stack.set(DataComponents.ENCHANTMENTS, mutable.toImmutable());
+            }
+            return stack;
+        }
+
+        private static ItemStack anvilAddition(int variant) {
+            if (variant % 3 == 1) {
+                ItemStack book = new ItemStack(Items.ENCHANTED_BOOK, 1);
+                ItemEnchantments.Mutable mutable = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+                mutable.set(
+                        REGISTRIES.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS),
+                        1 + variant % 2);
+                book.set(DataComponents.STORED_ENCHANTMENTS, mutable.toImmutable());
+                return book;
+            }
+            return switch (variant % 3) {
+                case 0 -> new ItemStack(Items.DIAMOND, 1 + variant % 3);
+                default -> new ItemStack(Items.IRON_PICKAXE, 1);
+            };
+        }
+
+        private static ItemStack mapInput(int variant) {
+            ItemStack map = new ItemStack(Items.FILLED_MAP, 1 + variant % 3);
+            map.set(DataComponents.MAP_ID, new MapId(variant + 1));
+            return map;
         }
 
         /**
@@ -612,7 +803,10 @@ public final class MenuOracle {
         SMOKER(3, "smoker", true, true),
         BREWING(5, "brewing", true, true),
         LOOM(3, "loom", true, false),
-        GRINDSTONE(2, "grindstone", true, false);
+        GRINDSTONE(2, "grindstone", true, false),
+        ANVIL(2, "anvil", true, false),
+        CARTOGRAPHY(2, "cartography", true, false),
+        ENCHANTMENT(2, "enchantment", true, false);
 
         final int size;
         final String id;
@@ -654,6 +848,9 @@ public final class MenuOracle {
                 case BREWING -> new BrewingStandMenu(CONTAINER_ID, inventory);
                 case LOOM -> new LoomMenu(CONTAINER_ID, inventory);
                 case GRINDSTONE -> new GrindstoneMenu(CONTAINER_ID, inventory);
+                case ANVIL -> new AnvilMenu(CONTAINER_ID, inventory);
+                case CARTOGRAPHY -> new CartographyTableMenu(CONTAINER_ID, inventory);
+                case ENCHANTMENT -> new EnchantmentMenu(CONTAINER_ID, inventory);
             };
         }
 
@@ -1349,16 +1546,127 @@ public final class MenuOracle {
         }
     }
 
-    /** 假世界里没有方块，菜单也不看世界，只有 enabledFeatures 会被物品的点击覆盖逻辑问到。 */
+    /**
+     * 假世界：方块、地图存档和随机数都存在内存里，够制图台、附魔台和铁砧的
+     * `access.execute` 用。官方的 `Level.setBlock` 和 chunk 那一层整个跳过。
+     */
     private static final class FakeLevel extends ServerLevel {
+        private Map<BlockPos, BlockState> blocks;
+        private Map<MapId, MapItemSavedData> maps;
+        private int seed;
+        private int nextMapId = 1000;
+
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
+            this.seed = 0;
         }
 
-        /** 和 BlockOracle 一样跳过构造函数：真的 ServerLevel 要一个完整的服务端。 */
         static FakeLevel create() {
             return allocate(FakeLevel.class);
         }
+
+        static FakeLevel create(int seed, boolean bookshelves, MapId mapId, byte scale, boolean locked) {
+            FakeLevel level = allocate(FakeLevel.class);
+            level.init(seed, bookshelves, mapId, scale, locked);
+            return level;
+        }
+
+        private void init(int seed, boolean bookshelves, MapId mapId, byte scale, boolean locked) {
+            this.blocks = new HashMap<>();
+            this.maps = new HashMap<>();
+            this.nextMapId = 1000;
+            set(Level.class, this, "registryAccess", REGISTRIES);
+            set(Level.class, this, "random", net.minecraft.util.RandomSource.create(seed));
+            set(Level.class, this, "soundSeedGenerator", net.minecraft.util.RandomSource.create(seed + 1));
+            set(Level.class, this, "dimension", net.minecraft.world.level.Level.OVERWORLD);
+            LevelSettings settings = new LevelSettings(
+                    "oracle", GameType.SURVIVAL, DifficultySettings.DEFAULT, true,
+                    WorldDataConfiguration.DEFAULT);
+            PrimaryLevelData data = new PrimaryLevelData(
+                    settings, PrimaryLevelData.SpecialWorldProperty.NONE, Lifecycle.stable());
+            data.setGameTime(1);
+            set(Level.class, this, "levelData", data);
+            set(Level.class, this, "isClientSide", false);
+            set(Level.class, this, "isDebug", false);
+            this.seed = seed;
+            if (bookshelves) {
+                for (int x = -2; x <= 2; x++) {
+                    for (int y = 0; y <= 1; y++) {
+                        for (int z = -2; z <= 2; z++) {
+                            if (Math.abs(x) != 2 && Math.abs(z) != 2) {
+                                continue;
+                            }
+                            BlockPos at = BlockPos.ZERO.offset(x, y, z);
+                            blocks.put(at, Blocks.BOOKSHELF.defaultBlockState());
+                            blocks.put(BlockPos.ZERO.offset(x / 2, y, z / 2), Blocks.AIR.defaultBlockState());
+                        }
+                    }
+                }
+            }
+            blocks.put(BlockPos.ZERO, Blocks.ANVIL.defaultBlockState());
+            MapItemSavedData map = MapItemSavedData.createForClient(scale, locked, Level.OVERWORLD);
+            maps.put(mapId, map);
+        }
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            return blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+        }
+
+        @Override
+        public boolean isInValidBounds(BlockPos pos) {
+            return true;
+        }
+
+        @Override
+        public net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
+            return net.minecraft.world.level.material.Fluids.EMPTY.defaultFluidState();
+        }
+
+        @Override
+        public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
+            blocks.put(pos, state);
+            return true;
+        }
+
+        @Override
+        public boolean removeBlock(BlockPos pos, boolean moving) {
+            blocks.put(pos, Blocks.AIR.defaultBlockState());
+            return true;
+        }
+
+        @Override
+        public net.minecraft.world.level.chunk.LevelChunk getChunk(int x, int z) {
+            return null;
+        }
+
+        @Override
+        public MapItemSavedData getMapData(MapId id) {
+            return maps.get(id);
+        }
+
+        @Override
+        public void setMapData(MapId id, MapItemSavedData data) {
+            maps.put(id, data);
+        }
+
+        @Override
+        public MapId getFreeMapId() {
+            return new MapId(nextMapId++);
+        }
+
+        @Override
+        public long getGameTime() {
+            return 1;
+        }
+
+        @Override
+        public void playSeededSound(Entity entity, double x, double y, double z,
+                net.minecraft.core.Holder<net.minecraft.sounds.SoundEvent> sound,
+                net.minecraft.sounds.SoundSource source, float volume, float pitch, long seed) {}
+
+        @Override
+        public void levelEvent(Entity entity, int event, BlockPos pos, int data) {}
 
         @Override
         public FeatureFlagSet enabledFeatures() {
@@ -1439,6 +1747,8 @@ public final class MenuOracle {
             FakePlayer player = allocate(FakePlayer.class);
             set(Entity.class, player, "level", FakeLevel.create());
             set(Player.class, player, "inventory", new Inventory(player, new PlayerEquipment(player)));
+            set(Player.class, player, "gameProfile",
+                    new com.mojang.authlib.GameProfile(java.util.UUID.nameUUIDFromBytes(new byte[]{1}), "Oracle"));
             Abilities abilities = new Abilities();
             abilities.instabuild = creative;
             abilities.mayBuild = mayBuild;
@@ -1447,7 +1757,17 @@ public final class MenuOracle {
             return player;
         }
 
+        /** 固定实体随机源和附魔种子，附魔台和铁砧的题才能重放。 */
+        static FakePlayer create(int seed, boolean creative) {
+            FakePlayer player = create(creative);
+            set(Entity.class, player, "random", net.minecraft.util.RandomSource.create(seed));
+            set(Player.class, player, "enchantmentSeed", seed);
+            set(Player.class, player, "experienceLevel", 0);
+            return player;
+        }
+
         /** 菜单比较不看地上的物品，这里丢掉的东西不生成实体。 */
+
         @Override
         public ItemEntity drop(ItemStack itemStack, boolean thrownFromHand, Prediction prediction) {
             return null;
@@ -1481,6 +1801,12 @@ public final class MenuOracle {
         @Override
         public PlayerAdvancements getAdvancements() {
             return EmptyAdvancements.INSTANCE;
+        }
+
+        /** 铁砧取结果时会异步过滤名字，假玩家没有聊天过滤器。 */
+        @Override
+        public net.minecraft.server.network.TextFilter getTextFilter() {
+            return net.minecraft.server.network.TextFilter.DUMMY;
         }
     }
 

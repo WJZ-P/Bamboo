@@ -12,13 +12,13 @@
 //! passes `null`. The hint is only for `place_recipe`, which is out of scope here.
 
 use mc_bamboo_blocks::{
-    BlockState, World,
+    BlockState, LegacyRandom, World,
     behaviour::machines::{BrewingStandEntity, FurnaceEntity},
     hopper::set_changed,
     state::TRIGGERED,
 };
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
-use mc_bamboo_data::{CookingKind, Recipe, RecipeType, blocks, items, registries::menu};
+use mc_bamboo_data::{CookingKind, Recipe, RecipeType, blocks, items, registries::menu, sounds};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
@@ -35,7 +35,10 @@ use mc_bamboo_recipes::{
 };
 use tracing::debug;
 
-use super::{ClickPacket, ContainerKind, Menu, RemoteSlot, Target, grindstone, loom};
+use super::{
+    ClickPacket, ContainerKind, Menu, RemoteSlot, Target, anvil, cartography, enchantment,
+    grindstone, loom,
+};
 use crate::{
     container::{self, CONTAINER_BUFFER},
     inbound::PlayerId,
@@ -108,6 +111,9 @@ enum Kind {
     Brewing,
     Loom,
     Grindstone,
+    Anvil,
+    Cartography,
+    Enchantment,
 }
 
 impl Kind {
@@ -134,6 +140,12 @@ impl Kind {
             Some(Self::Loom)
         } else if is(blocks::GRINDSTONE) {
             Some(Self::Grindstone)
+        } else if is(blocks::ANVIL) || is(blocks::CHIPPED_ANVIL) || is(blocks::DAMAGED_ANVIL) {
+            Some(Self::Anvil)
+        } else if is(blocks::CARTOGRAPHY_TABLE) {
+            Some(Self::Cartography)
+        } else if is(blocks::ENCHANTING_TABLE) {
+            Some(Self::Enchantment)
         } else {
             None
         }
@@ -148,13 +160,16 @@ impl Kind {
             Self::Brewing => 41,
             Self::Loom => 40,
             Self::Grindstone => 39,
+            Self::Anvil | Self::Cartography => 39,
+            Self::Enchantment => 38,
         }
     }
 
     fn data_len(self) -> usize {
         match self {
-            Self::Stonecutter | Self::Smithing | Self::Loom => 1,
+            Self::Stonecutter | Self::Smithing | Self::Loom | Self::Anvil => 1,
             Self::Furnace | Self::BlastFurnace | Self::Smoker | Self::Brewing => 4,
+            Self::Enchantment => enchantment::DATA_LEN,
             // 九个禁用位加一个 `triggered`，官方 `CrafterBlockEntity.NUM_DATA`。
             Self::Crafter => 10,
             _ => 0,
@@ -173,6 +188,8 @@ impl Kind {
             Self::Brewing => 5,
             Self::Loom => 4,
             Self::Grindstone => 3,
+            Self::Anvil | Self::Cartography => 3,
+            Self::Enchantment => 2,
         }
     }
 
@@ -209,6 +226,9 @@ impl Kind {
             Self::Brewing => menu::BREWING_STAND,
             Self::Loom => menu::LOOM,
             Self::Grindstone => menu::GRINDSTONE,
+            Self::Anvil => menu::ANVIL,
+            Self::Cartography => menu::CARTOGRAPHY_TABLE,
+            Self::Enchantment => menu::ENCHANTMENT,
         }
     }
 
@@ -224,6 +244,9 @@ impl Kind {
             Self::Brewing => "container.brewing",
             Self::Loom => "container.loom",
             Self::Grindstone => "container.grindstone",
+            Self::Anvil => "container.repair",
+            Self::Cartography => "container.cartography_table",
+            Self::Enchantment => "container.enchant",
         }
     }
 }
@@ -246,6 +269,7 @@ enum Outgoing {
     Carried(ItemStack),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Craft,
     CraftResult,
@@ -267,6 +291,13 @@ enum Role {
     LoomResult,
     GrindInput,
     GrindResult,
+    AnvilInput,
+    AnvilResult,
+    CartoMap,
+    CartoAdditional,
+    CartoResult,
+    EnchantItem,
+    EnchantLapis,
     Machine,
     Armor(i32),
     Player,
@@ -335,7 +366,45 @@ pub(crate) struct Station {
     ///
     /// The menu was opened on a real world. Replays do not draw grindstone experience.
     in_world: bool,
+    /// 重放题有可用的假世界（`access.execute` 会执行）。
+    replay_world: bool,
+    /// 重放题里附魔成功后官方换出的新种子。
+    replay_next_seed: Option<i32>,
+    /// 铁砧改名框里当前的名字。`None` 是还没发过 `rename_item`。
+    ///
+    /// The anvil name field. `None` means no `rename_item` has arrived.
+    item_name: Option<String>,
+    /// 铁砧的 `repairItemCountCost` 和 `onlyRenaming`，在 `createResult` 里算。
+    ///
+    /// The anvil's `repairItemCountCost` and `onlyRenaming`, computed by `createResult`.
+    anvil_outcome: anvil::Outcome,
+    /// 附魔台和铁砧自己的随机源，`LegacyRandomSource`。
+    ///
+    /// A menu-owned `LegacyRandomSource` for the enchanting table and anvil.
+    menu_random: LegacyRandom,
+    /// 世界上数出来的有效书架数，由调用方在打开/点击/tick 时刷新。
+    ///
+    /// The number of valid bookshelves, refreshed by the caller on open, click and tick.
+    bookshelves: i32,
+    /// 重放题里假世界的地图比例和锁定状态；真实世界没有地图存档。
+    map_scale: i32,
+    map_locked: bool,
+    /// 真实世界里取出铁砧/制图台/附魔台结果时要结算的世界效果。
+    ///
+    /// World effects to settle when an anvil, cartography, or enchantment result is taken in a real world.
+    effects: Vec<WorldEffect>,
     packets: Vec<Outgoing>,
+}
+
+/// 一次取出结果后世界线程要做的动作，顺序和官方 `onTake` 一致。
+#[derive(Debug, Clone, Copy)]
+enum WorldEffect {
+    /// 铁砧：12% 损坏判定，以及 1029/1030 事件。
+    Anvil,
+    /// 制图台：取结果音效。
+    Cartography,
+    /// 附魔台：附魔音效（音调从 `level.random` 取）。
+    Enchant,
 }
 
 impl Station {
@@ -367,6 +436,15 @@ impl Station {
             patterns: Vec::new(),
             awards: Vec::new(),
             in_world: false,
+            replay_world: false,
+            replay_next_seed: None,
+            item_name: None,
+            anvil_outcome: anvil::Outcome::default(),
+            menu_random: LegacyRandom::new(0),
+            bookshelves: 0,
+            map_scale: 0,
+            map_locked: false,
+            effects: Vec::new(),
             packets: Vec::new(),
         }
     }
@@ -506,6 +584,22 @@ impl Station {
                 2 => Role::GrindResult,
                 _ => Role::Player,
             },
+            Kind::Anvil => match index {
+                0 | 1 => Role::AnvilInput,
+                2 => Role::AnvilResult,
+                _ => Role::Player,
+            },
+            Kind::Cartography => match index {
+                0 => Role::CartoMap,
+                1 => Role::CartoAdditional,
+                2 => Role::CartoResult,
+                _ => Role::Player,
+            },
+            Kind::Enchantment => match index {
+                0 => Role::EnchantItem,
+                1 => Role::EnchantLapis,
+                _ => Role::Player,
+            },
             Kind::Furnace | Kind::BlastFurnace | Kind::Smoker | Kind::Brewing => {
                 if index < self.kind.machine_len() {
                     Role::Machine
@@ -519,7 +613,11 @@ impl Station {
     fn takes_all(&self, index: usize) -> bool {
         matches!(
             self.role(index),
-            Role::CraftResult | Role::StoneResult | Role::SmithResult
+            Role::CraftResult
+                | Role::StoneResult
+                | Role::SmithResult
+                | Role::AnvilResult
+                | Role::CartoResult
         )
     }
 
@@ -528,8 +626,15 @@ impl Station {
         // 合成器的结果格是 `NonInteractiveResultSlot`，根本取不出来。
         //
         // Binding curse (`PREVENT_ARMOR_CHANGE`) is not implemented, so armor can always be taken.
-        // The crafter's result slot is a `NonInteractiveResultSlot` and cannot be picked up.
-        !matches!(self.role(index), Role::CrafterResult)
+        if matches!(self.role(index), Role::CrafterResult) {
+            // 合成器的结果格是 `NonInteractiveResultSlot`，根本取不出来。
+            return false;
+        }
+        if self.kind == Kind::Anvil && matches!(self.role(index), Role::AnvilResult) {
+            // Bamboo 没有经验系统：生存模式按 0 级处理。
+            return anvil::may_pickup(self.data.first().copied().unwrap_or(0), self.creative, 0);
+        }
+        true
     }
 
     fn may_place(&self, index: usize, stack: &ItemStack) -> bool {
@@ -539,7 +644,12 @@ impl Station {
             | Role::SmithResult
             | Role::LoomResult
             | Role::GrindResult
+            | Role::AnvilResult
+            | Role::CartoResult
             | Role::CrafterResult => false,
+            Role::CartoMap => cartography::is_map(stack),
+            Role::CartoAdditional => cartography::is_additional(stack),
+            Role::EnchantLapis => stack.item == items::LAPIS_LAZULI,
             Role::CrafterGrid => self.data.get(index).copied().unwrap_or(0) != 1,
             Role::LoomBanner => loom::is_banner(stack),
             Role::LoomDye => loom::is_dye(stack),
@@ -552,7 +662,11 @@ impl Station {
                 _ => is_smithing_addition(stack.item),
             },
             Role::Machine => self.machine_may_place(index, stack),
-            Role::Craft | Role::StoneInput | Role::Player => true,
+            Role::Craft
+            | Role::StoneInput
+            | Role::Player
+            | Role::AnvilInput
+            | Role::EnchantItem => true,
         }
     }
 
@@ -573,6 +687,9 @@ impl Station {
     }
 
     fn slot_max(&self, index: usize, stack: &ItemStack) -> i32 {
+        if self.kind == Kind::Enchantment && index == 0 {
+            return 1;
+        }
         let bucket_fuel = self.kind.is_furnace()
             && index == 1
             && !stack.is_empty()
@@ -590,7 +707,14 @@ impl Station {
     fn limits_on_set(&self, index: usize) -> bool {
         matches!(
             self.role(index),
-            Role::StoneInput | Role::SmithInput | Role::Machine
+            Role::StoneInput
+                | Role::SmithInput
+                | Role::Machine
+                | Role::AnvilInput
+                | Role::CartoMap
+                | Role::CartoAdditional
+                | Role::EnchantItem
+                | Role::EnchantLapis
         )
     }
 
@@ -631,6 +755,9 @@ impl Station {
             Role::SmithInput => self.refresh_smithing(),
             Role::LoomBanner | Role::LoomDye | Role::LoomPattern => self.refresh_loom(),
             Role::GrindInput => self.refresh_grindstone(),
+            Role::AnvilInput => self.refresh_anvil(),
+            Role::CartoMap | Role::CartoAdditional => self.refresh_cartography(),
+            Role::EnchantItem | Role::EnchantLapis => self.refresh_enchantment(),
             Role::Machine => self.mark_set(index),
             _ => {}
         }
@@ -643,6 +770,9 @@ impl Station {
             Role::SmithInput => self.refresh_smithing(),
             Role::LoomBanner | Role::LoomDye | Role::LoomPattern => self.refresh_loom(),
             Role::GrindInput => self.refresh_grindstone(),
+            Role::AnvilInput => self.refresh_anvil(),
+            Role::CartoMap | Role::CartoAdditional => self.refresh_cartography(),
+            Role::EnchantItem | Role::EnchantLapis => self.refresh_enchantment(),
             Role::Machine => self.mark_content(index),
             _ => {}
         }
@@ -1107,7 +1237,78 @@ impl Station {
             Kind::Brewing => self.route_brewing(index, stack, clicked),
             Kind::Loom => self.route_loom(index, stack),
             Kind::Grindstone => self.route_grindstone(index, stack),
+            Kind::Anvil => self.route_combiner(index, stack),
+            Kind::Cartography => self.route_cartography(index, stack),
+            Kind::Enchantment => self.route_enchantment(index, stack),
         }
+    }
+
+    /// `ItemCombinerMenu.quickMoveStack`：铁砧的两个输入 + 结果格。
+    fn route_combiner(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index == 2 {
+            return Self::moved_or_stop(self.move_items(stack, 3, 39, true), true);
+        }
+        if index < 2 {
+            return Self::moved_or_stop(self.move_items(stack, 3, 39, false), false);
+        }
+        if (3..39).contains(&index) && !stack.is_empty() {
+            if self.move_items(stack, 0, 2, false) {
+                return MoveResult::Moved { crafted: false };
+            }
+            if (3..30).contains(&index) {
+                return Self::moved_or_stop(self.move_items(stack, 30, 39, false), false);
+            }
+            if (30..39).contains(&index) {
+                return Self::moved_or_stop(self.move_items(stack, 3, 30, false), false);
+            }
+        }
+        MoveResult::Moved { crafted: false }
+    }
+
+    /// `CartographyTableMenu.quickMoveStack`。
+    fn route_cartography(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index == 2 {
+            return Self::moved_or_stop(self.move_items(stack, 3, 39, true), true);
+        }
+        if index == 0 || index == 1 {
+            return Self::moved_or_stop(self.move_items(stack, 3, 39, false), false);
+        }
+        if cartography::has_map_id(stack) {
+            return Self::moved_or_stop(self.move_items(stack, 0, 1, false), false);
+        }
+        if cartography::is_additional(stack) {
+            return Self::moved_or_stop(self.move_items(stack, 1, 2, false), false);
+        }
+        if (3..30).contains(&index) {
+            return Self::moved_or_stop(self.move_items(stack, 30, 39, false), false);
+        }
+        if (30..39).contains(&index) {
+            return Self::moved_or_stop(self.move_items(stack, 3, 30, false), false);
+        }
+        MoveResult::Moved { crafted: false }
+    }
+
+    /// `EnchantmentMenu.quickMoveStack`。
+    ///
+    /// 玩家格里的物品只可能进青金石格或第一格（一次一个），官方不做背包和快捷栏互换。
+    fn route_enchantment(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index == 0 || index == 1 {
+            return Self::moved_or_stop(self.move_items(stack, 2, 38, true), false);
+        }
+        if stack.item == items::LAPIS_LAZULI {
+            return Self::moved_or_stop(self.move_items(stack, 1, 2, true), false);
+        }
+        if self.slots[0].is_empty() && self.may_place(0, stack) {
+            let mut one = stack.clone();
+            one.count = 1;
+            stack.count -= 1;
+            self.set_by_player(0, one);
+            if stack.count <= 0 {
+                *stack = ItemStack::empty();
+            }
+            return MoveResult::Moved { crafted: false };
+        }
+        MoveResult::Stop { write_back: false }
     }
 
     fn route_inventory(
@@ -1361,6 +1562,8 @@ impl Station {
             Role::SmithResult => self.take_smith_result(),
             Role::LoomResult => self.take_loom_result(),
             Role::GrindResult => self.take_grindstone_result(),
+            Role::AnvilResult => self.take_anvil_result(),
+            Role::CartoResult => self.take_cartography_result(),
             Role::Machine if self.kind.is_furnace() && index == 2 => self.furnace_awards += 1,
             _ => {}
         }
@@ -1493,6 +1696,16 @@ impl Station {
     fn click_button(&mut self, button: i32) -> bool {
         if self.kind == Kind::Loom {
             return self.click_loom(button);
+        }
+        if self.kind == Kind::Enchantment {
+            if self.replay_world {
+                // 重放的假世界执行官方附魔 lambda；新种子由题目给出。
+                let seed = self
+                    .replay_next_seed
+                    .unwrap_or_else(|| self.data.get(enchantment::SEED_SLOT).copied().unwrap_or(0));
+                return self.click_enchantment(button, seed);
+            }
+            return false;
         }
         if self.kind != Kind::Stonecutter {
             return false;
@@ -1690,6 +1903,158 @@ impl Station {
         }
         self.set_by_player(0, ItemStack::empty());
         self.set_by_player(1, ItemStack::empty());
+    }
+
+    /// `AnvilMenu.createResult` 加末尾的 `broadcastChanges`。
+    fn refresh_anvil(&mut self) {
+        let mut result = ItemStack::empty();
+        let outcome = anvil::create_result(
+            &self.slots[0],
+            &self.slots[1],
+            self.item_name.as_deref(),
+            self.creative,
+            &mut result,
+        );
+        self.slots[2] = result;
+        self.anvil_outcome = outcome;
+        if let Some(slot) = self.data.first_mut() {
+            *slot = outcome.cost;
+        }
+        self.broadcast();
+    }
+
+    /// `AnvilMenu.onTake`。
+    fn take_anvil_result(&mut self) {
+        let outcome = self.anvil_outcome;
+        let cost = self.data.first().copied().unwrap_or(0);
+        if outcome.repair_item_count_cost > 0 {
+            let mut additional = self.slots[1].clone();
+            if !additional.is_empty() && additional.count > outcome.repair_item_count_cost {
+                additional.count -= outcome.repair_item_count_cost;
+                self.set_by_player(1, additional);
+            } else {
+                self.set_by_player(1, ItemStack::empty());
+            }
+        } else if !outcome.only_renaming {
+            self.set_by_player(1, ItemStack::empty());
+        }
+        if let Some(slot) = self.data.first_mut() {
+            *slot = 0;
+        }
+        self.set_by_player(0, ItemStack::empty());
+        if self.in_world {
+            self.effects.push(WorldEffect::Anvil);
+        }
+        let _ = cost;
+    }
+
+    /// `AnvilMenu.setItemName`：先改结果槽的组件，再重算结果。
+    fn set_item_name(&mut self, name: &str) -> bool {
+        let Some(filtered) = anvil::validate_name(name) else {
+            return false;
+        };
+        if self.item_name.as_deref() == Some(filtered.as_str()) {
+            return false;
+        }
+        self.item_name = Some(filtered.clone());
+        if !self.slots[2].is_empty() {
+            anvil::apply_name_to_result(&mut self.slots[2], &filtered);
+        }
+        self.refresh_anvil();
+        true
+    }
+
+    /// `CartographyTableMenu.slotsChanged`。
+    ///
+    /// 官方在 `access.execute` 里查地图存档；没有地图数据时整个 lambda 直接 return。
+    /// Bamboo 真实世界走这个分支，重放则由假世界给出比例和锁定状态。
+    fn refresh_cartography(&mut self) {
+        let map = self.slots[0].clone();
+        let additional = self.slots[1].clone();
+        let old = self.slots[2].clone();
+        if !old.is_empty() && (map.is_empty() || additional.is_empty()) {
+            self.slots[2] = ItemStack::empty();
+        }
+        if !map.is_empty() && !additional.is_empty() && self.replay_world {
+            self.slots[2] =
+                cartography::result(&map, &additional, &old, self.map_scale, self.map_locked);
+        }
+        self.broadcast();
+    }
+
+    /// `CartographyTableMenu$5.onTake`：两个输入各减一，然后放音效。
+    fn take_cartography_result(&mut self) {
+        self.shrink_input(0);
+        self.shrink_input(1);
+        if self.in_world {
+            self.effects.push(WorldEffect::Cartography);
+        }
+    }
+
+    /// `EnchantmentMenu.slotsChanged`。
+    ///
+    /// 菜单 oracle 的 `ContainerLevelAccess.NULL` 让官方整个 lambda 都不跑；
+    /// 重放里不重算数据槽。真实世界里按官方公式算书架和三个选项。
+    fn refresh_enchantment(&mut self) {
+        let stack = self.slots[0].clone();
+        if stack.is_empty() || !enchantment::is_enchantable(&stack) {
+            // 官方 `slotsChanged` 的这一段不走 `access.execute`，重放也要跑。
+            for index in 0..enchantment::OPTIONS {
+                self.data[index] = 0;
+                self.data[enchantment::CLUE_SLOT + index] = -1;
+                self.data[enchantment::LEVEL_SLOT + index] = -1;
+            }
+            self.broadcast();
+            return;
+        }
+        if !self.replay_world {
+            return;
+        }
+        enchantment::refresh(&self.menu_random, &mut self.data, &stack, self.bookshelves);
+        self.broadcast();
+    }
+
+    /// `EnchantmentMenu.clickMenuButton` 的 `access.execute` 部分。
+    fn click_enchantment(&mut self, button: i32, seed: i32) -> bool {
+        let item = self.slots[0].clone();
+        let lapis = self.slots[1].clone();
+        // 官方的假玩家 `experienceLevel` 固定为 0；Bamboo 真实世界也按 0 级。
+        let ok = enchantment::can_click(button, &self.data, &item, &lapis, self.creative, 0);
+        if !ok {
+            return false;
+        }
+        let level = self.data[button as usize];
+        // `getEnchantmentList` 用 `seed + slot` 重设菜单随机源。
+        self.menu_random
+            .set_seed(i64::from(self.data[enchantment::SEED_SLOT]) + i64::from(button));
+        let list = enchantment::select(&self.menu_random, &item, button, level);
+        if list.is_empty() {
+            return false;
+        }
+        // `onEnchantmentPerformed` 换新种子，官方从玩家自己的随机源取；种子由调用方传入。
+        let mut enchanted = item.clone();
+        if enchanted.item == items::BOOK {
+            enchanted = enchantment::transmute_book(&enchanted);
+        }
+        enchantment::enchant(&mut enchanted, &list);
+        self.slots[0] = enchanted;
+        let mut used = lapis;
+        if !self.creative && !used.is_empty() {
+            used.count = (used.count - (button + 1)).max(0);
+        }
+        self.slots[1] = if used.count <= 0 {
+            ItemStack::empty()
+        } else {
+            used
+        };
+        if let Some(slot) = self.data.get_mut(enchantment::SEED_SLOT) {
+            *slot = seed;
+        }
+        self.refresh_enchantment();
+        if self.in_world {
+            self.effects.push(WorldEffect::Enchant);
+        }
+        true
     }
 
     fn official_get(&self, official: usize) -> ItemStack {
@@ -1893,6 +2258,8 @@ impl Station {
             Kind::Smithing => 0..3,
             Kind::Loom => 0..3,
             Kind::Grindstone => 0..2,
+            Kind::Anvil | Kind::Cartography => 0..2,
+            Kind::Enchantment => 0..2,
             _ => 0..0,
         };
         range
@@ -1935,8 +2302,37 @@ impl Station {
         self.replay_view()
     }
 
+    /// 重放铁砧改名。官方 `handleRenameItem` 调到 `setItemName`。
+    pub(crate) fn replay_rename(&mut self, name: &str) -> StationSnapshot {
+        self.set_item_name(name);
+        self.replay_view()
+    }
+
     pub(crate) fn set_replay_creative(&mut self, creative: bool) {
         self.creative = creative;
+    }
+
+    /// 重放的假世界：附魔台的种子、书架数，制图台的地图比例和锁定状态都固定下来。
+    pub(crate) fn replay_seed(
+        &mut self,
+        seed: i32,
+        fixed_world: bool,
+        map_scale: i32,
+        map_locked: bool,
+        bookshelves: i32,
+    ) {
+        if self.kind == Kind::Enchantment {
+            if let Some(slot) = self.data.get_mut(enchantment::SEED_SLOT) {
+                *slot = seed;
+            }
+            self.bookshelves = bookshelves;
+        }
+        if self.kind == Kind::Cartography {
+            self.map_scale = map_scale;
+            self.map_locked = map_locked;
+        }
+        self.replay_world =
+            fixed_world && matches!(self.kind, Kind::Enchantment | Kind::Cartography);
     }
 
     /// 打开前换掉一格材料。同步压住，`slotsChanged` 会重算结果，state id 不动。
@@ -1976,6 +2372,9 @@ pub(crate) enum WorkKind {
     Brewing,
     Loom,
     Grindstone,
+    Anvil,
+    Cartography,
+    Enchantment,
 }
 
 impl From<WorkKind> for Kind {
@@ -1992,6 +2391,9 @@ impl From<WorkKind> for Kind {
             WorkKind::Brewing => Self::Brewing,
             WorkKind::Loom => Self::Loom,
             WorkKind::Grindstone => Self::Grindstone,
+            WorkKind::Anvil => Self::Anvil,
+            WorkKind::Cartography => Self::Cartography,
+            WorkKind::Enchantment => Self::Enchantment,
         }
     }
 }
@@ -2019,14 +2421,30 @@ pub(crate) fn prepare_replay(
     seeds: &[(usize, ItemStack)],
     data: &[i32],
     creative: bool,
+    world: super::replay::ReplayWorld,
 ) -> Station {
     let mut station = Station::create(kind.into(), 1, BlockPos::new(0, 0, 0));
     station.creative = creative;
+    station.replay_seed(
+        world.seed,
+        world.fixed,
+        world.map_scale,
+        world.map_locked,
+        world.bookshelves,
+    );
+    station.replay_next_seed = world.next_seed;
     let mut slots = vec![ItemStack::empty(); 46];
     for (index, stack) in inventory.iter().enumerate().take(slots.len()) {
         slots[index] = stack.clone();
     }
     station.load_player(&slots, 0);
+    if station.kind == Kind::Enchantment {
+        // 官方构造时把两条 clue 数组都填成 -1。
+        for index in 0..enchantment::OPTIONS {
+            station.data[enchantment::CLUE_SLOT + index] = -1;
+            station.data[enchantment::LEVEL_SLOT + index] = -1;
+        }
+    }
     for (index, value) in data.iter().enumerate() {
         if let Some(slot) = station.data.get_mut(index) {
             *slot = *value;
@@ -2337,6 +2755,102 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
 ///
 /// Experience and `levelEvent(1042)` for a grindstone take. A replay has no `in_world`, so the
 /// list is empty.
+/// 数真实世界里的有效书架。
+fn refresh_bookshelves(region: &Region, pos: BlockPos) -> i32 {
+    enchantment::bookshelf_count(|at| region.chunks.block(at), pos)
+}
+
+/// 取出铁砧、制图台、附魔台结果时的世界效果，顺序和官方 `onTake` 一致。
+fn roll_world_effects(region: &mut Region, id: PlayerId, station: &mut Station) {
+    if station.effects.is_empty() {
+        return;
+    }
+    let pos = station.pos;
+    let draw = region
+        .players
+        .get_mut(&id)
+        .map(|player| player.random.next_float() < 0.12)
+        .unwrap_or(false);
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        for effect in std::mem::take(&mut station.effects) {
+            match effect {
+                WorldEffect::Anvil => {
+                    let state = world.block_state(pos);
+                    let damaged =
+                        if draw && state.is_tagged(mc_bamboo_data::tags::block_tags::ANVIL) {
+                            damage_anvil(state)
+                        } else {
+                            None
+                        };
+                    if draw && state.is_tagged(mc_bamboo_data::tags::block_tags::ANVIL) {
+                        match damaged {
+                            None => {
+                                world.remove_block(pos);
+                                world.level_event(1029, pos, 0);
+                            }
+                            Some(next) => {
+                                world.set_block(pos, next, 2);
+                                world.level_event(1030, pos, 0);
+                            }
+                        }
+                    } else {
+                        world.level_event(1030, pos, 0);
+                    }
+                }
+                WorldEffect::Cartography => {
+                    world.play_sound(
+                        Vec3::new(
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y) + 0.5,
+                            f64::from(pos.z) + 0.5,
+                        ),
+                        sounds::sound_event("minecraft:ui.cartography_table.take_result"),
+                        sounds::BLOCKS,
+                        1.0,
+                        1.0,
+                        false,
+                    );
+                }
+                WorldEffect::Enchant => {
+                    let pitch = 0.9 + world.random().next_float() * 0.1;
+                    world.play_sound(
+                        Vec3::new(
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y) + 0.5,
+                            f64::from(pos.z) + 0.5,
+                        ),
+                        sounds::sound_event("minecraft:block.enchantment_table.use"),
+                        sounds::BLOCKS,
+                        1.0,
+                        pitch,
+                        false,
+                    );
+                }
+            }
+        }
+        world.drain_effects()
+    };
+    crate::interaction::send_effects(region, None, &effects);
+}
+
+/// `AnvilBlock.damage`：保留朝向，最后一档返回 `None`。
+fn damage_anvil(state: BlockState) -> Option<BlockState> {
+    let facing = state.try_get(mc_bamboo_blocks::state::HORIZONTAL_FACING);
+    let next = if state.is(blocks::ANVIL) {
+        Some(BlockState(blocks::CHIPPED_ANVIL))
+    } else if state.is(blocks::CHIPPED_ANVIL) {
+        Some(BlockState(blocks::DAMAGED_ANVIL))
+    } else {
+        None
+    }?;
+    Some(match facing {
+        Some(facing) => next.with(mc_bamboo_blocks::state::HORIZONTAL_FACING, facing),
+        None => next,
+    })
+}
+
 fn roll_grindstone(region: &mut Region, station: &mut Station) {
     if station.awards.is_empty() {
         return;
@@ -2369,6 +2883,9 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
     };
     station.creative = creative;
     station.load_player(&inv, selected);
+    if station.kind == Kind::Enchantment {
+        station.bookshelves = refresh_bookshelves(region, station.pos);
+    }
     pull_machine(region, station);
     let before = station.state_id;
     station.click(
@@ -2381,6 +2898,7 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
     }
     station.remote_carried.receive(packet.carried.clone());
     roll_grindstone(region, station);
+    roll_world_effects(region, id, station);
     if let Some(player) = region.players.get_mut(&id) {
         station.write_player(&mut player.inventory);
     }
@@ -2425,6 +2943,17 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     station.creative = creative;
     station.in_world = true;
     station.load_player(&inv, selected);
+    if kind == Kind::Enchantment {
+        let seed = region
+            .players
+            .get(&id)
+            .map(|player| player.enchantment_seed)
+            .unwrap_or(0);
+        station.bookshelves = refresh_bookshelves(region, pos);
+        if let Some(slot) = station.data.get_mut(enchantment::SEED_SLOT) {
+            *slot = seed;
+        }
+    }
     pull_machine(region, &mut station);
     station.send_all();
     let title = Component::translate(kind.title(), []);
@@ -2624,12 +3153,49 @@ pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, bu
         return;
     };
     if let Some(station) = menu.station.as_mut() {
-        if station.click_button(button) {
+        if station.kind == Kind::Enchantment {
+            station.bookshelves = refresh_bookshelves(region, station.pos);
+            let mut seed = station
+                .data
+                .get(enchantment::SEED_SLOT)
+                .copied()
+                .unwrap_or(0);
+            if let Some(player) = region.players.get_mut(&id) {
+                // 官方 `onEnchantmentPerformed` 从玩家自己的随机源换新种子。
+                seed = player.random.next_int();
+                player.enchantment_seed = seed;
+            }
+            if station.click_enchantment(button, seed) {
+                station.broadcast();
+            }
+            roll_world_effects(region, id, station);
+        } else if station.click_button(button) {
             station.broadcast();
         }
         let packets = std::mem::take(&mut station.packets);
         let container_id = station.container_id;
         send_outgoing(region, id, container_id, packets);
+    }
+    region.menus.insert(id, menu);
+}
+
+/// `handleRenameItem`：只有当前打开的、有效的铁砧菜单才处理。
+pub(crate) fn on_rename(region: &mut Region, id: PlayerId, name: &str) {
+    if spectator(region, id) {
+        return;
+    }
+    let Some(mut menu) = region.menus.remove(&id) else {
+        return;
+    };
+    if let Some(station) = menu.station.as_mut() {
+        if station.kind == Kind::Anvil && station.still_valid(region, id) {
+            station.set_item_name(name);
+            let packets = std::mem::take(&mut station.packets);
+            let container_id = station.container_id;
+            send_outgoing(region, id, container_id, packets);
+        } else {
+            debug!(player = id.0, "ignoring a rename for another menu");
+        }
     }
     region.menus.insert(id, menu);
 }
