@@ -260,6 +260,12 @@ pub struct Answer {
     /// 物品栏里新出现的物品，只有 item 题有内容。
     #[serde(default)]
     pub gained: Vec<String>,
+    /// 结束时官方世界随机源的内部种子。取数次数不同就会不一样。
+    ///
+    /// The official world random's internal seed at the end. A different number of draws
+    /// changes it.
+    #[serde(default)]
+    pub world_random_seed: Option<i64>,
 }
 
 /// 写成 IEEE 754 位的 `double`：十进制不保证往返，这些数在边界上差一位结果就变。

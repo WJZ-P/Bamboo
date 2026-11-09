@@ -66,6 +66,10 @@ pub struct Replayed {
     pub ticks: Vec<Scheduled>,
     /// 物品栏里新出现的物品。
     pub gained: Vec<String>,
+    /// 结束时世界随机源的内部种子，和官方逐位比较。
+    ///
+    /// The world random's internal seed at the end, compared bit for bit with vanilla.
+    pub random_seed: i64,
     /// 读写过的方块的注册表 ID。结果不对时看它们里面有没有还没移植的类。
     pub touched: BTreeSet<usize>,
 }
@@ -771,6 +775,7 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         contents: contents_of(&level),
         ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
+        random_seed: level.random.source().seed(),
         touched: level.touched.into_inner(),
     })
 }
