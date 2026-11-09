@@ -48,6 +48,17 @@ pub enum ReplayShape {
     Enchantment,
 }
 
+/// 重放题里假世界的固定状态：附魔种子、地图比例/锁定、书架数和换出的新种子。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReplayWorld {
+    pub seed: i32,
+    pub fixed: bool,
+    pub map_scale: i32,
+    pub map_locked: bool,
+    pub bookshelves: i32,
+    pub next_seed: Option<i32>,
+}
+
 impl ReplayShape {
     fn kind(self) -> ContainerKind {
         match self {
@@ -191,12 +202,7 @@ impl Replay {
         inventory: &[(i32, i32)],
         data: &[i32],
         creative: bool,
-        seed: i32,
-        fixed_world: bool,
-        map_scale: i32,
-        map_locked: bool,
-        bookshelves: i32,
-        next_seed: Option<i32>,
+        world: ReplayWorld,
     ) -> Self {
         let kind = shape.workstation().expect("workstation shape");
         let mut seeds = Vec::new();
@@ -216,12 +222,7 @@ impl Replay {
             &seeds,
             data,
             creative,
-            seed,
-            fixed_world,
-            map_scale,
-            map_locked,
-            bookshelves,
-            next_seed,
+            world,
         );
         replay.station = Some(station);
         replay
@@ -532,12 +533,7 @@ mod tests {
             &[],
             &[],
             false,
-            0,
-            false,
-            0,
-            false,
-            0,
-            None,
+            ReplayWorld::default(),
         );
         let snapshot = replay.open();
         assert_eq!(snapshot.slots[0], ItemStack::new(items::OAK_PLANKS, 4));

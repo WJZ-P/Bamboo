@@ -63,7 +63,7 @@ mod world;
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
 pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
-pub use menu::replay::{Replay, ReplayShape, Snapshot};
+pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{World, WorldConfig};

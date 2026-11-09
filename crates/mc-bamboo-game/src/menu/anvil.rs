@@ -27,7 +27,7 @@ pub(super) fn validate_name(name: &str) -> Option<String> {
         .chars()
         .filter(|&c| {
             let value = c as u32;
-            value <= 0xffff && value >= 0x20 && value != 0x7f && value != 0xa7 && value != 0xfffd
+            (0x20..=0xffff).contains(&value) && value != 0x7f && value != 0xa7 && value != 0xfffd
         })
         .collect();
     (filtered.encode_utf16().count() <= MAX_NAME_LENGTH).then_some(filtered)
@@ -195,8 +195,10 @@ pub(super) fn create_result(
     creative: bool,
     result: &mut ItemStack,
 ) -> Outcome {
-    let mut outcome = Outcome::default();
-    outcome.cost = 1;
+    let mut outcome = Outcome {
+        cost: 1,
+        ..Default::default()
+    };
     let mut cost = 0i32;
     let mut base = 0i64;
     let mut rename = 0i32;

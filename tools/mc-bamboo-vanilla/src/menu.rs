@@ -20,7 +20,7 @@ use std::{
 };
 
 use mc_bamboo_data::version;
-use mc_bamboo_game::{LecternReplay, LecternSnapshot, Replay, ReplayShape, Snapshot};
+use mc_bamboo_game::{LecternReplay, LecternSnapshot, Replay, ReplayShape, ReplayWorld, Snapshot};
 use mc_bamboo_protocol::{
     components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
@@ -276,12 +276,14 @@ impl Report {
                 &pairs(&case.inventory),
                 &case.data,
                 case.creative,
-                case.seed,
-                case.fixed_world,
-                case.map_scale,
-                case.map_locked,
-                case.bookshelves,
-                case.next_seed,
+                ReplayWorld {
+                    seed: case.seed,
+                    fixed: case.fixed_world,
+                    map_scale: case.map_scale,
+                    map_locked: case.map_locked,
+                    bookshelves: case.bookshelves,
+                    next_seed: case.next_seed,
+                },
             );
             // 材料先按物品和数量放进去，再盖上组件。下标是格子序号，合成格要加一。
             // Ingredients land as item and count first, then the component patch. The index is the

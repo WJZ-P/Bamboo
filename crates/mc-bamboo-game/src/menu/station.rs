@@ -1251,7 +1251,7 @@ impl Station {
         if index < 2 {
             return Self::moved_or_stop(self.move_items(stack, 3, 39, false), false);
         }
-        if index >= 3 && index < 39 && !stack.is_empty() {
+        if (3..39).contains(&index) && !stack.is_empty() {
             if self.move_items(stack, 0, 2, false) {
                 return MoveResult::Moved { crafted: false };
             }
@@ -2421,17 +2421,18 @@ pub(crate) fn prepare_replay(
     seeds: &[(usize, ItemStack)],
     data: &[i32],
     creative: bool,
-    seed: i32,
-    fixed_world: bool,
-    map_scale: i32,
-    map_locked: bool,
-    bookshelves: i32,
-    next_seed: Option<i32>,
+    world: super::replay::ReplayWorld,
 ) -> Station {
     let mut station = Station::create(kind.into(), 1, BlockPos::new(0, 0, 0));
     station.creative = creative;
-    station.replay_seed(seed, fixed_world, map_scale, map_locked, bookshelves);
-    station.replay_next_seed = next_seed;
+    station.replay_seed(
+        world.seed,
+        world.fixed,
+        world.map_scale,
+        world.map_locked,
+        world.bookshelves,
+    );
+    station.replay_next_seed = world.next_seed;
     let mut slots = vec![ItemStack::empty(); 46];
     for (index, stack) in inventory.iter().enumerate().take(slots.len()) {
         slots[index] = stack.clone();
