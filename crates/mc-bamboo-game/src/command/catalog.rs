@@ -82,6 +82,7 @@ pub(crate) fn build() -> Commands {
     register_difficulty(&mut builder, root);
     register_default_gamemode(&mut builder, root);
     register_seed(&mut builder, root);
+    register_spawns(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -352,6 +353,24 @@ fn register_difficulty(builder: &mut Builder, root: usize) {
 fn register_seed(builder: &mut Builder, root: usize) {
     let seed = builder.literal(root, "seed", permission::GAMEMASTERS);
     builder.run(seed, world_settings::seed);
+}
+
+fn register_spawns(builder: &mut Builder, root: usize) {
+    let world_spawn = builder.literal(root, "setworldspawn", permission::GAMEMASTERS);
+    builder.run(world_spawn, world_settings::set_world_spawn);
+    let pos = builder.argument(world_spawn, "pos", ArgumentType::BlockPos, 0);
+    builder.run(pos, world_settings::set_world_spawn);
+    let rotation = builder.argument(pos, "rotation", ArgumentType::Rotation, 0);
+    builder.run(rotation, world_settings::set_world_spawn);
+
+    let spawnpoint = builder.literal(root, "spawnpoint", permission::GAMEMASTERS);
+    builder.run(spawnpoint, world_settings::spawnpoint);
+    let targets = builder.argument(spawnpoint, "targets", players_argument(), 0);
+    builder.run(targets, world_settings::spawnpoint);
+    let pos = builder.argument(targets, "pos", ArgumentType::BlockPos, 0);
+    builder.run(pos, world_settings::spawnpoint);
+    let rotation = builder.argument(pos, "rotation", ArgumentType::Rotation, 0);
+    builder.run(rotation, world_settings::spawnpoint);
 }
 
 fn register_default_gamemode(builder: &mut Builder, root: usize) {

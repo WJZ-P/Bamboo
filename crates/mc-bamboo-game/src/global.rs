@@ -8,7 +8,7 @@ use mc_bamboo_protocol::{
     packet::{
         play::{
             ChangeDifficulty, GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
-            SystemChat,
+            SetDefaultSpawnPosition, SystemChat,
         },
         profile::ProfileProperty,
     },
@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     inbound::PlayerId,
     links::encode_frames,
-    world_state::{Difficulty, WorldState},
+    world_state::{Difficulty, RespawnData, WorldState},
 };
 
 /// 官方的条件是 `++counter > 600`，所以实际周期是 601 tick。
@@ -259,6 +259,20 @@ impl Global {
 
     pub(crate) fn set_difficulty(&mut self, difficulty: Difficulty) {
         self.state.difficulty = difficulty;
+    }
+
+    /// 官方 `MinecraftServer.setRespawnData`：只在真的变化时广播出生点包。
+    pub(crate) fn set_spawn(&mut self, spawn: RespawnData) -> Vec<u8> {
+        if self.state.spawn == spawn {
+            return Vec::new();
+        }
+        self.state.spawn = spawn;
+        encode_frames(&SetDefaultSpawnPosition {
+            dimension: crate::region::DIMENSION,
+            pos: spawn.pos,
+            yaw: spawn.yaw,
+            pitch: spawn.pitch,
+        })
     }
 
     /// 按注册名取时钟。只有主世界和末地，别的名字返回 `None`。

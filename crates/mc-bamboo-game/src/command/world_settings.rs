@@ -1,20 +1,21 @@
-//! 世界设置类命令：`/difficulty`。
+//! 世界设置类命令：难度、默认模式、种子、世界出生点和玩家重生点。
 //!
-//! 语法、权限和反馈跟官方 `DifficultyCommand` 一致；状态写在 [`Global`]，
-//! 改动后按官方 `MinecraftServer.setDifficulty` 给所有人发 `change_difficulty`。
+//! 状态写在 [`Global`]，难度和世界出生点改动后按官方广播对应的包。
 
-use mc_bamboo_command::{NodeKind, ParsedCommand, Value};
-use mc_bamboo_protocol::text::Component;
+use mc_bamboo_command::{Coordinates, NodeKind, ParsedCommand, Value};
+use mc_bamboo_core::BlockPos;
+use mc_bamboo_protocol::text::{Component, TranslateArg};
 
 use crate::{
     command::{
         feedback::{self, CommandFail, fail, fail_with},
-        players,
+        players, select,
     },
     global::Global,
     inbound::PlayerId,
-    region::Region,
-    world_state::{Difficulty, FORCE_GAME_MODE},
+    player::Player,
+    region::{DIMENSION, Region},
+    world_state::{Difficulty, FORCE_GAME_MODE, RespawnData},
 };
 
 /// 查询当前难度。根节点可执行，官方 `sendSuccess(..., false)`。
@@ -121,6 +122,127 @@ pub(crate) fn default_gamemode(
     Ok(())
 }
 
+/// 官方 `BlockPosArgument.getSpawnablePos`：超出世界边界时报 `argument.pos.outofbounds`。
+fn spawnable_pos(pos: BlockPos) -> Result<BlockPos, CommandFail> {
+    // `Level.isInSpawnableBounds`：水平坐标在 [-30000000, 30000000)，y 在世界高度内。
+    const HORIZONTAL: i32 = 30_000_000;
+    if pos.x < -HORIZONTAL
+        || pos.x >= HORIZONTAL
+        || pos.z < -HORIZONTAL
+        || pos.z >= HORIZONTAL
+        || pos.y < mc_bamboo_world::MIN_Y
+        || pos.y >= mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT
+    {
+        return Err(fail("argument.pos.outofbounds"));
+    }
+    Ok(pos)
+}
+
+/// 解析两个命令共用的 pos / rotation。不写坐标时用来源脚底位置，
+/// 不写旋转时用官方的 `ZERO_ROTATION`。
+fn target_spawn(
+    region: &Region,
+    id: PlayerId,
+    parsed: &ParsedCommand,
+) -> Result<RespawnData, CommandFail> {
+    let player = region
+        .players
+        .get(&id)
+        .ok_or_else(|| fail("permissions.requires.player"))?;
+    let pos = if let Some(coords) = parsed.get("pos").and_then(Value::as_block_pos) {
+        block_pos(coords, player)
+    } else {
+        BlockPos::containing(player.position())
+    };
+    let pos = spawnable_pos(pos)?;
+    let (yaw, pitch) = parsed
+        .get("rotation")
+        .and_then(Value::as_rotation)
+        .map(|rotation| rotation.resolve(player.yaw, player.pitch))
+        .unwrap_or((0.0, 0.0));
+    Ok(RespawnData::of(pos, yaw, pitch))
+}
+
+fn block_pos(coords: Coordinates, player: &Player) -> BlockPos {
+    BlockPos::containing(coords.position(player.position(), player.yaw, player.pitch))
+}
+
+/// `/setworldspawn`：世界出生点，改动时按官方广播 `set_default_spawn_position`。
+pub(crate) fn set_world_spawn(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    parsed: &ParsedCommand,
+) -> Result<(), CommandFail> {
+    let spawn = target_spawn(region, id, parsed)?;
+    let frames = global.set_spawn(spawn);
+    if !frames.is_empty() {
+        region.links.broadcast(&frames);
+    }
+    feedback::success(
+        region,
+        id,
+        Component::translate("commands.setworldspawn.success", spawn_args(spawn)),
+        true,
+    );
+    Ok(())
+}
+
+/// `/spawnpoint`：只把 `RespawnData` 存到玩家状态，没有死亡重生。
+///
+/// 官方 `CommandResponseTracker` 按目标人数选 single/multiple 的反馈。
+pub(crate) fn spawnpoint(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    parsed: &ParsedCommand,
+) -> Result<(), CommandFail> {
+    let _ = global;
+    let spawn = target_spawn(region, id, parsed)?;
+    let targets = if let Some(selector) = parsed.get("targets").and_then(Value::as_entity) {
+        select::players(region, id, players::level_of(region, id), selector)?
+    } else {
+        vec![id]
+    };
+    for target in &targets {
+        if let Some(player) = region.players.get_mut(target) {
+            player.respawn = Some(spawn);
+        }
+    }
+    let args = spawn_args(spawn);
+    let (key, last): (&str, TranslateArg) = match targets.as_slice() {
+        [only] => (
+            "commands.spawnpoint.success.single",
+            region
+                .players
+                .get(only)
+                .map(|player| Component::text(player.name.clone()).into())
+                .unwrap_or_else(|| "".into()),
+        ),
+        _ => (
+            "commands.spawnpoint.success.multiple",
+            TranslateArg::from(targets.len() as i32),
+        ),
+    };
+    let mut all = args.to_vec();
+    all.push(last);
+    feedback::success(region, id, Component::translate(key, all), true);
+    Ok(())
+}
+
+/// 官方 `lambda$setSpawn$0` / `lambda$static$0` 里的六个参数：
+/// x、y、z、yaw、pitch、维度。翻译键没用到的参数客户端自己忽略。
+fn spawn_args(spawn: RespawnData) -> [TranslateArg; 6] {
+    [
+        spawn.pos.x.into(),
+        spawn.pos.y.into(),
+        spawn.pos.z.into(),
+        TranslateArg::from(spawn.yaw),
+        TranslateArg::from(spawn.pitch),
+        DIMENSION.into(),
+    ]
+}
+
 /// 四个难度字面量共用的入口，难度从命令树的字面量名字查出来。
 pub(crate) fn difficulty_literal(
     global: &mut Global,
@@ -148,7 +270,7 @@ mod tests {
         frame::{MAX_FRAME_LEN, find_frame},
         packet::{
             ClientboundPacket,
-            play::{ChangeDifficulty, GameMode, SystemChat},
+            play::{ChangeDifficulty, GameMode, SetDefaultSpawnPosition, SystemChat},
         },
     };
     use uuid::Uuid;
@@ -298,6 +420,68 @@ mod tests {
         assert!(text.contains("String(\"0\")"), "{text}");
         assert!(commands().graph.parse("seed", 0).is_err());
         assert!(commands().graph.parse("seed", 2).is_ok());
+    }
+
+    #[test]
+    fn setworldspawn_broadcasts_and_updates_the_join_spawn() {
+        let (mut global, mut region, id, sink) = world();
+        command::on_command(
+            &mut global,
+            &mut region,
+            id,
+            "setworldspawn 10 -60 12 90 45",
+            None,
+        );
+        let spawn = global.state().spawn;
+        assert_eq!(spawn.pos, mc_bamboo_core::BlockPos::new(10, -60, 12));
+        assert_eq!(spawn.yaw, 90.0);
+        assert_eq!(spawn.pitch, 45.0);
+        region.links.flush();
+        let sent = packets(&sink.0.lock().unwrap());
+        let mut body = Reader::new(&sent[0].1);
+        assert_eq!(sent[0].0, SetDefaultSpawnPosition::ID);
+        assert_eq!(body.string(32767).unwrap(), "minecraft:overworld");
+        assert_eq!(body.i64().unwrap(), spawn.pos.pack());
+        assert_eq!(body.f32().unwrap(), spawn.yaw);
+        assert_eq!(body.f32().unwrap(), spawn.pitch);
+        body.finish().unwrap();
+        assert_eq!(sent[1].0, SystemChat::ID);
+
+        // 同样的位置再执行一次不广播。
+        sink.0.lock().unwrap().clear();
+        command::on_command(
+            &mut global,
+            &mut region,
+            id,
+            "setworldspawn 10 -60 12 90 45",
+            None,
+        );
+        region.links.flush();
+        assert_eq!(packets(&sink.0.lock().unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn spawnpoint_stores_the_per_player_position() {
+        let (mut global, mut region, id, _sink) = world();
+        command::on_command(&mut global, &mut region, id, "spawnpoint", None);
+        assert_eq!(
+            region.players[&id].respawn.unwrap().pos,
+            mc_bamboo_core::BlockPos::new(8, -59, 8)
+        );
+        command::on_command(
+            &mut global,
+            &mut region,
+            id,
+            "spawnpoint Kitten 3 -60 4",
+            None,
+        );
+        assert_eq!(
+            region.players[&id].respawn.unwrap().pos,
+            mc_bamboo_core::BlockPos::new(3, -60, 4)
+        );
+        // 世界出生点不受玩家重生点影响。
+        assert_eq!(global.state().spawn.pos.x, 8);
+        assert!(commands().graph.parse("spawnpoint @a", 0).is_err());
     }
 
     #[test]

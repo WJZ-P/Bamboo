@@ -575,7 +575,7 @@ fn required_players<'a>(
         .ok_or_else(|| fail("command.failed"))
 }
 
-fn level_of(region: &Region, id: PlayerId) -> u8 {
+pub(crate) fn level_of(region: &Region, id: PlayerId) -> u8 {
     region
         .players
         .get(&id)

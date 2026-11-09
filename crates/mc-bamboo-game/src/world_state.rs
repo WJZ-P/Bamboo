@@ -65,7 +65,6 @@ pub(crate) struct RespawnData {
     pub(crate) pitch: f32,
 }
 
-#[allow(dead_code)]
 impl RespawnData {
     pub(crate) fn of(pos: BlockPos, mut yaw: f32, mut pitch: f32) -> Self {
         // `Mth.wrapDegrees` 的结果落在 [-180, 180)。官方 `clamp` 只约束俯仰角。
