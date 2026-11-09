@@ -1516,6 +1516,26 @@ public final class Probe {
             BlockPos stone = feet.offset(-2, 0, 0);
             BlockPos dirt = feet.below(2);
 
+            // 前面的 placement 段打掉支撑时火把会按战利品表掉在地上，玩家可能已经把它
+            // 捡进了快捷栏空格。这一段假设 0 格是石头、1 格是箱子、其余为空，所以先把
+            // 2..8 格清空，再摆回这一段的初始物品栏；不能靠前面几段碰巧留下的状态。
+            //
+            // Breaking the support in the placement section drops the torch as a real
+            // item now, and the player may have picked it into an empty hotbar slot.
+            // This section assumes slot 0 holds stone, slot 1 a chest and 2..8 are
+            // empty, so clear those slots and re-establish that state explicitly.
+            for (int menuSlot = HOTBAR_START + 2; menuSlot < HOTBAR_START + 9; menuSlot++) {
+                actor.send(new ServerboundSetCreativeModeSlotPacket(menuSlot, ItemStack.EMPTY));
+            }
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE, STACK)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(Items.CHEST)));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            // 创造模式改槽没有回包，等服务端的世界线程把这几笔处理完再往下走。
+            //
+            // Creative slot edits get no reply; let the world thread process them.
+            pumpFor(SETTLE_MILLIS);
+
             // 石头在快捷栏第 0 格，选中第 2 格时中键把选中格切回去。
             actor.send(new ServerboundSetCarriedItemPacket(2));
             actor.send(new ServerboundPickItemFromBlockPacket(stone, false));
