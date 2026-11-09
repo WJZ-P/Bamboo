@@ -7,8 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, clone, gamerule, items, players, stopsound, teleport, time,
-    world_settings,
+    CommandFn, Commands, blocks, clone, gamerule, items, players, random, stopsound, teleport,
+    time, world_settings,
 };
 
 struct Builder {
@@ -86,6 +86,7 @@ pub(crate) fn build() -> Commands {
     register_spawns(&mut builder, root);
     register_clone(&mut builder, root);
     register_stopsound(&mut builder, root);
+    register_random(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -464,6 +465,47 @@ fn register_stopsound(builder: &mut Builder, root: usize) {
 fn add_sound_name(builder: &mut Builder, parent: usize) {
     let sound = builder.argument(parent, "sound", ArgumentType::ResourceLocation, 0);
     builder.run(sound, stopsound::stop_sound);
+}
+
+fn register_random(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "random", 0);
+    let actions: [(&str, CommandFn); 2] = [("value", random::value), ("roll", random::roll)];
+    for (name, action) in actions {
+        let branch = builder.literal(command, name, 0);
+        let range = builder.argument(branch, "range", ArgumentType::IntRange, 0);
+        builder.run(range, action);
+        let sequence = builder.argument(
+            range,
+            "sequence",
+            ArgumentType::ResourceLocation,
+            permission::GAMEMASTERS,
+        );
+        builder.run(sequence, action);
+    }
+    let reset = builder.literal(command, "reset", permission::GAMEMASTERS);
+    let all = builder.literal(reset, "*", 0);
+    builder.run(all, random::reset);
+    add_reset_seed(builder, all);
+    let sequence = builder.argument(reset, "sequence", ArgumentType::ResourceLocation, 0);
+    builder.run(sequence, random::reset);
+    add_reset_seed(builder, sequence);
+}
+
+fn add_reset_seed(builder: &mut Builder, parent: usize) {
+    let seed = builder.argument(
+        parent,
+        "seed",
+        ArgumentType::Integer {
+            min: i32::MIN,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(seed, random::reset);
+    let world = builder.argument(seed, "includeWorldSeed", ArgumentType::Bool, 0);
+    builder.run(world, random::reset);
+    let sequence_id = builder.argument(world, "includeSequenceId", ArgumentType::Bool, 0);
+    builder.run(sequence_id, random::reset);
 }
 
 fn register_seed(builder: &mut Builder, root: usize) {

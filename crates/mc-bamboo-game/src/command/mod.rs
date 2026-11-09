@@ -17,6 +17,7 @@ mod feedback;
 mod gamerule;
 mod items;
 mod players;
+mod random;
 mod select;
 mod stopsound;
 mod teleport;

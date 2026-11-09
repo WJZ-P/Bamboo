@@ -142,26 +142,14 @@ pub fn parse_int_range(reader: &mut StringReader) -> Result<Value, ParseError> {
     if !reader.can_read() {
         return Err(ParseError::new("argument.range.empty"));
     }
-    let (min, separator) = if reader.peek() == '.' {
-        (None, true)
-    } else {
-        let value = reader.read_int()?;
-        let separator = reader.can_read() && reader.peek() == '.';
-        (Some(value), separator)
-    };
-    if !separator {
-        return Ok(Value::IntBounds { min, max: min });
-    }
-    // `read_int` 会把小数点也算进数字里，所以回到开头按范围语法重新读。
-    reader.set_cursor(start);
     let rest = reader.remaining();
     let end = rest
         .find(|c: char| c != '.' && !c.is_ascii_digit() && c != '-')
         .unwrap_or(rest.len());
     let text = &rest[..end];
-    let Some((min, max)) = text.split_once("..") else {
+    if text.is_empty() {
         return Err(ParseError::new("argument.range.empty"));
-    };
+    }
     let parse = |part: &str| -> Result<Option<i32>, ParseError> {
         if part.is_empty() {
             return Ok(None);
@@ -170,12 +158,20 @@ pub fn parse_int_range(reader: &mut StringReader) -> Result<Value, ParseError> {
             .map(Some)
             .map_err(|_| ParseError::new("argument.range.ints"))
     };
-    let min = parse(min)?;
-    let max = parse(max)?;
+    let (min, max) = match text.split_once("..") {
+        Some((min, max)) => (parse(min)?, parse(max)?),
+        None => {
+            let value = parse(text)?;
+            (value, value)
+        }
+    };
     if let (Some(min), Some(max)) = (min, max)
         && min > max
     {
         return Err(ParseError::new("argument.range.swapped"));
+    }
+    if min.is_none() && max.is_none() {
+        return Err(ParseError::new("argument.range.empty"));
     }
     reader.set_cursor(start + end);
     Ok(Value::IntBounds { min, max })

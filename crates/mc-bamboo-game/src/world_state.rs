@@ -104,8 +104,7 @@ pub(crate) struct WorldState {
     pub(crate) seed: i64,
     pub(crate) spawn: RespawnData,
     pub(crate) weather: Weather,
-    /// `/random` 和带 `random_sequence` 的战利品表共用；后续命令接上。
-    #[allow(dead_code)]
+    /// `/random` 和带 `random_sequence` 的战利品表共用。
     pub(crate) sequences: RandomSequences,
 }
 

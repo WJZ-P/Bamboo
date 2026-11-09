@@ -11,6 +11,7 @@ use serde_json::Value;
 const ROOTS: &[&str] = &[
     "clone",
     "defaultgamemode",
+    "random",
     "difficulty",
     "seed",
     "setworldspawn",
@@ -104,7 +105,15 @@ fn permission_object(level: u8) -> Value {
 /// 参数类型和属性。没有属性时返回 `None`，和报告里省略 `properties` 一致。
 fn argument_properties(kind: &ArgumentType) -> Option<Value> {
     Some(match *kind {
+        ArgumentType::Integer {
+            min: i32::MIN,
+            max: i32::MAX,
+        } => return None,
         ArgumentType::Integer { min, max } => serde_json::json!({"min": min, "max": max}),
+        ArgumentType::Long {
+            min: i64::MIN,
+            max: i64::MAX,
+        } => return None,
         ArgumentType::Long { min, max } => serde_json::json!({"min": min, "max": max}),
         ArgumentType::Float { min, max } => serde_json::json!({"min": min, "max": max}),
         ArgumentType::Double { min, max } => serde_json::json!({"min": min, "max": max}),
