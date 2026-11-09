@@ -238,6 +238,7 @@ pub trait Level {
         let _ = (state, pos);
         Vec::new()
     }
+
     /// 官方 `RandomizableContainer.unpackLootTable` 的调用点。有战利品表的容器在
     /// 第一次被读或写之前先填好内容。默认空实现用于没有战利品表的假世界。
     ///
