@@ -623,6 +623,6 @@ mod tests {
         ] {
             assert_eq!(shape_of(name), Some(shape));
         }
-        assert_eq!(shape_of("anvil"), None);
+        assert_eq!(shape_of("unknown_menu"), None);
     }
 }
