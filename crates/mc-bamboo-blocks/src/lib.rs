@@ -38,6 +38,7 @@ pub mod random_tick;
 pub mod shape;
 pub mod state;
 pub mod ticks;
+pub mod weather;
 pub mod world;
 
 #[cfg(test)]
@@ -71,4 +72,5 @@ pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
 pub use shape::{Aabb, Boxes, CollisionContext, EntityContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
 pub use ticks::{BlockTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
+pub use weather::{BlockWeather, Precipitation, PrecipitationFacts};
 pub use world::World;

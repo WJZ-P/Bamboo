@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ForkJoinPool;
 import net.minecraft.SharedConstants;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
@@ -186,6 +187,7 @@ public final class WorldgenOracle {
                 }
                 writeBiomes(seed);
             }
+            writeTemperatures();
 
             JsonObject end = new JsonObject();
             end.addProperty("type", "end");
@@ -372,6 +374,47 @@ public final class WorldgenOracle {
             entry.add(Float.floatToRawIntBits(direct));
             entry.add(Float.floatToRawIntBits(volume));
             return entry;
+        }
+
+        /**
+         * 群系温度：每个群系在几个高度和坐标上问官方的 `warmEnoughToRain`、
+         * `coldEnoughToSnow` 和 `getPrecipitationAt`，并把温度换成浮点位。
+         * `Biome.getTemperature` 是私有的，用 `warmEnoughToRain` 的判定和
+         * `getHeightAdjustedTemperature` 的等价式没法拿到 float，所以这里反射调用一次。
+         */
+        private void writeTemperatures() throws Exception {
+            Registry<Biome> biomes = this.registries.lookupOrThrow(Registries.BIOME);
+            var temperature = Biome.class.getDeclaredMethod("getTemperature", BlockPos.class, int.class);
+            temperature.setAccessible(true);
+            JsonArray rows = new JsonArray();
+            for (Biome biome : biomes) {
+                int id = biomes.getId(biome);
+                for (int i = 0; i < 8; i++) {
+                    int x = (i * 37 - 91) * 13;
+                    int y = i % 2 == 0 ? 64 + i * 8 : 90 + i * 41;
+                    int z = (i * 19 - 47) * 29;
+                    BlockPos pos = new BlockPos(x, y, z);
+                    float actual = (Float) temperature.invoke(biome, pos, 63);
+                    boolean rain = biome.warmEnoughToRain(pos, 63);
+                    boolean snow = biome.coldEnoughToSnow(pos, 63);
+                    JsonArray row = new JsonArray();
+                    row.add(id);
+                    row.add(x);
+                    row.add(y);
+                    row.add(z);
+                    // Java 的 int 位写成有符号数；Rust 那边 as u32 还原。
+                    row.add(Float.floatToRawIntBits(actual) & 0xFFFF_FFFFL);
+                    row.add(rain);
+                    row.add(snow);
+                    row.add(biome.getPrecipitationAt(pos, 63).getSerializedName());
+                    rows.add(row);
+                    this.checks += 1;
+                }
+            }
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "temperature");
+            line.add("samples", rows);
+            write(line);
         }
 
         private void write(JsonObject line) throws Exception {

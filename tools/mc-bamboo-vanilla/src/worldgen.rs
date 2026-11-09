@@ -65,6 +65,10 @@ enum Line {
         seed: i64,
         samples: Vec<BiomeSample>,
     },
+    /// 每个群系在几处坐标上的温度、能不能下雨、降水类型。
+    Temperature {
+        samples: Vec<TemperatureSample>,
+    },
     End {
         checks: u64,
     },
@@ -77,6 +81,10 @@ struct Sample(i32, i32, i32, i32, i32);
 /// quart x、y、z、群系 ID。
 #[derive(Debug, Deserialize)]
 struct BiomeSample(i32, i32, i32, String);
+
+/// 群系 ID、x、y、z、温度的 float 位、warmEnoughToRain、coldEnoughToSnow、降水类型。
+#[derive(Debug, Deserialize)]
+struct TemperatureSample(i32, i32, i32, i32, u32, bool, bool, String);
 
 #[derive(Debug, Default)]
 struct Options {
@@ -118,6 +126,7 @@ struct Report {
     noise_checks: u64,
     function_checks: u64,
     biome_checks: u64,
+    temperature_checks: u64,
     skipped_volume: u64,
     seeds: Vec<i64>,
     mismatches: Vec<String>,
@@ -145,6 +154,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         noise_checks: 0,
         function_checks: 0,
         biome_checks: 0,
+        temperature_checks: 0,
         skipped_volume: 0,
         seeds: Vec::new(),
         mismatches: Vec::new(),
@@ -199,11 +209,13 @@ impl Report {
                     seed,
                     samples,
                 } => self.compare_biomes(&settings, &preset, seed, &samples)?,
+                Line::Temperature { samples } => self.compare_temperatures(&samples)?,
                 Line::End { checks } => {
                     self.ended = true;
                     let ours = self.noise_checks
                         + self.function_checks
                         + self.biome_checks
+                        + self.temperature_checks
                         + self.skipped_volume;
                     if checks != ours {
                         return Err(format!("java wrote {checks} checks, {ours} arrived"));
@@ -389,6 +401,43 @@ impl Report {
         Ok(())
     }
 
+    /// 官方 `Biome.getTemperature` 和 Bamboo 的浮点位逐位比较。
+    fn compare_temperatures(&mut self, samples: &[TemperatureSample]) -> Result<(), String> {
+        use mc_bamboo_worldgen::biome_temperature::{BiomeClimate, precipitation_at};
+
+        for sample in samples {
+            let climate = BiomeClimate::of(sample.0);
+            let ours = climate.temperature_at(sample.1, sample.2, sample.3, 63);
+            let rain = climate.warm_enough_to_rain(sample.1, sample.2, sample.3, 63);
+            let snow = climate.cold_enough_to_snow(sample.1, sample.2, sample.3, 63);
+            let precipitation = match precipitation_at(climate, sample.1, sample.2, sample.3, 63) {
+                mc_bamboo_worldgen::biome_temperature::Precipitation::None => "none",
+                mc_bamboo_worldgen::biome_temperature::Precipitation::Rain => "rain",
+                mc_bamboo_worldgen::biome_temperature::Precipitation::Snow => "snow",
+            };
+            let expected = f32::from_bits(sample.4);
+            self.temperature_checks += 1;
+            if ours.to_bits() != sample.4
+                || rain != sample.5
+                || snow != sample.6
+                || precipitation != sample.7
+            {
+                self.mismatch(format!(
+                    "biome {} at ({}, {}, {}): official {}, {}, {}, {}; bamboo {ours}, {rain}, {snow}, {precipitation}",
+                    sample.0,
+                    sample.1,
+                    sample.2,
+                    sample.3,
+                    expected,
+                    sample.5,
+                    sample.6,
+                    sample.7
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// 群系按到达顺序重放：官方 R 树的「上一次结果」会影响平局，顺序有意义。
     fn compare_biomes(
         &mut self,
@@ -461,12 +510,13 @@ impl Report {
             return Err("WorldgenOracle.java stopped before its end line".to_owned());
         }
         println!(
-            "worldgen: {} seeds, {} dimension states; compared {} noise values, {} density function values, {} biomes",
+            "worldgen: {} seeds, {} dimension states; compared {} noise values, {} density function values, {} biomes, {} temperatures",
             self.seeds.len(),
             self.dimension_states,
             self.noise_checks,
             self.function_checks,
-            self.biome_checks
+            self.biome_checks,
+            self.temperature_checks
         );
         println!(
             "skipped {} sampleVolume checks on functions that contain interpolated (not a point function)",

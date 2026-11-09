@@ -238,8 +238,11 @@ fn spread_to(world: &mut World, target: BlockPos, rate: i32, age: i32) {
         return;
     }
     let odds = (ignite + 40 + world.difficulty_id() * 7) / (age + 30);
-    // 下雨时官方还要看那一格附近在不在下雨，这个世界不下雨，这一项总是真。
-    if odds > 0 && world.random().next_int(rate) <= odds && !world.is_raining() {
+    // 官方先取 `nextInt(rate)`，再看目标格附近在不在下雨，两项都过了才放火。
+    if odds > 0
+        && world.random().next_int(rate) <= odds
+        && !(world.is_raining() && world.is_near_rain(target))
+    {
         let spread_age = (age + world.random().next_int(5) / 4).min(MAX_AGE);
         let fire = state_with_age(world, target, spread_age);
         world.set_block_and_update(target, fire);
@@ -248,7 +251,7 @@ fn spread_to(world: &mut World, target: BlockPos, rate: i32, age: i32) {
 
 impl Fire {
     /// `FireBlock.tick` 里火还在的部分：慢慢变老、烧掉旁边的方块、往外蔓延。
-    /// 返回 `false` 表示火灭了，官方在这里返回。下雨灭火的分支走不到，这个世界不下雨。
+    /// 返回 `false` 表示火灭了，官方在这里返回。下雨灭火在调用方先判。
     fn burn(state: BlockState, world: &mut World, pos: BlockPos, infiniburn: bool) -> bool {
         let age = state.get(AGE_15);
         let new_age = (age + world.random().next_int(3) / 2).min(MAX_AGE);
@@ -292,6 +295,16 @@ impl Behaviour for Fire {
         let infiniburn = world
             .block_state(pos.below())
             .is_tagged(block_tags::INFINIBURN_OVERWORLD);
+        // `FireBlock.tick` 的雨熄分支在变老之前：`nextFloat() < 0.2 + age * 0.03`。
+        let age = state.get(AGE_15);
+        if !infiniburn
+            && world.is_raining()
+            && world.is_near_rain(pos)
+            && world.random().next_float() < 0.2 + age as f32 * 0.03
+        {
+            world.remove_block(pos);
+            return;
+        }
         if !Self::burn(state, world, pos, infiniburn) {
             return;
         }
