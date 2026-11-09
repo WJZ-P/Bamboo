@@ -6,7 +6,7 @@
 //! [`spawn_dispensed_item`]。这里不保存官方 `RecipeCache` 的那张表，查找仍然是
 //! 注册表里的第一条匹配，结果和有缓存时一样。
 //!
-//! `CrafterBlock.dispenseFrom`. A due tick looks up the 3×3 recipe. No recipe, or an empty
+//! `CrafterBlock.dispenseFrom`. A due tick looks up the 3x3 recipe. No recipe, or an empty
 //! result, only plays fail event 1050. A success turns `crafting` on for six ticks, ejects the
 //! result and the remainders forward, then shrinks every non-empty grid stack by one.
 //! A container in front is filled with `HopperBlockEntity.addItem`. Whatever does not fit goes
@@ -14,27 +14,27 @@
 //! is still the first registry match, so the result is the same as a cache hit.
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{BlockAncestor, RecipeType};
+use mc_bamboo_data::{BlockAncestor, Recipe, RecipeType};
 use mc_bamboo_protocol::item::ItemStack;
-use mc_bamboo_recipes::{CraftingInput, RecipeManager, assemble, remaining_items};
+use mc_bamboo_recipes::{CraftingInput, RecipeInput, RecipeManager, assemble, remaining_items};
 
 use crate::{
     container::copy_with_count,
     hopper::{Added, add_item, apply_hopper_cooldown, set_changed},
-    state::{BlockState, CRAFTING, FrontAndTop},
+    state::{BlockState, CRAFTING, FrontAndTop, ORIENTATION},
     world::{UPDATE_CLIENTS, World},
 };
 
 /// 合成格的边长。官方 `CrafterBlockEntity.getWidth`。
 ///
 /// Width of the crafting grid. Vanilla `CrafterBlockEntity.getWidth`.
-const GRID: usize = 3;
+pub const GRID: usize = 3;
 /// `CrafterBlock.MAX_CRAFTING_TICKS`。`crafting` 亮着的刻数。
 ///
 /// How many ticks `crafting` stays on.
 const MAX_CRAFTING_TICKS: i32 = 6;
 /// `LevelEvent.SOUND_CRAFTER_FAIL`。
-const SOUND_CRAFTER_FAIL: i32 = 1050;
+pub const SOUND_CRAFTER_FAIL: i32 = 1050;
 /// `LevelEvent.SOUND_CRAFTER_CRAFT`。只有没放进容器、变成掉落物时才发。
 ///
 /// Played only when a stack does not fit and becomes a dropped item.
@@ -55,7 +55,12 @@ pub fn potential_result(slots: &[ItemStack]) -> ItemStack {
     let Some(input) = craft_input(slots) else {
         return ItemStack::empty();
     };
-    crafted(&input).unwrap_or_else(ItemStack::empty)
+    let Some(recipe) = find_recipe(&input) else {
+        return ItemStack::empty();
+    };
+    assemble(recipe, input.slots())
+        .filter(|stack| !stack.is_empty())
+        .unwrap_or_else(ItemStack::empty)
 }
 
 /// `CrafterBlock.dispenseFrom`。这一格不是合成器，或者读不到九格时什么都不做。
@@ -72,12 +77,11 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
     // 官方先 `getPotentialResults`，再 `assemble`。两步有一步是空的都只发 1050。
     //
     // Vanilla looks up the recipe, then `assemble`. Either step being empty only sends 1050.
-    let Some(result) = crafted(&input) else {
+    let Some(recipe) = find_recipe(&input) else {
         world.level_event(SOUND_CRAFTER_FAIL, pos, 0);
         return;
     };
-    let Some(recipe) = RecipeManager::global().get_recipe_for(RecipeType::Crafting, &input, None)
-    else {
+    let Some(result) = assemble(recipe, input.slots()).filter(|stack| !stack.is_empty()) else {
         world.level_event(SOUND_CRAFTER_FAIL, pos, 0);
         return;
     };
@@ -115,10 +119,13 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
     set_changed(world, pos);
 }
 
-/// 游戏刻末尾减 `craftingTicksRemaining`。方块 oracle 不跑这段，所以比较时 `crafting` 保持亮着。
+/// 官方 `CrafterBlockEntity.serverTick`：每刻减一次倒计时，归零时关掉 `crafting`。
+/// 方块 oracle 不登记合成器的 ticker，所以比较时 `crafting` 保持亮着；只有游戏循环和
+/// 测试用的世界刻会调用这里。
 ///
-/// Decrements `craftingTicksRemaining` at the end of a game tick. The block oracle does not run
-/// this, so `crafting` stays on while a case is compared.
+/// `CrafterBlockEntity.serverTick`: decrement the countdown each tick and clear `crafting` when
+/// it reaches zero. The block oracle does not register a crafter ticker, so `crafting` stays on
+/// while a case is compared; only the game loop and test world ticks call this.
 pub(crate) fn tick_crafting_clocks(world: &mut World) {
     let due = world.redstone_memory_mut().take_crafter_crafting();
     let mut kept = Vec::new();
@@ -159,13 +166,13 @@ pub fn spawn_dispensed_item(world: &mut World, stack: &ItemStack, front: Directi
     let (step_x, _, step_z) = front.normal();
     let pow = world.random().next_double() * 0.1 + 0.2;
     let spread = 0.017_227_5 * f64::from(SPAWN_ACCURACY);
-    let _ = world
-        .random()
-        .triangle(f64::from(step_x) * pow, spread);
+    let _ = world.random().triangle(f64::from(step_x) * pow, spread);
     let _ = world.random().triangle(0.2, spread);
-    let _ = world
-        .random()
-        .triangle(f64::from(step_z) * pow, spread);
+    let _ = world.random().triangle(f64::from(step_z) * pow, spread);
+}
+
+fn find_recipe(input: &CraftingInput) -> Option<&'static Recipe> {
+    RecipeManager::global().get_recipe_for(RecipeType::Crafting, input, None)
 }
 
 fn craft_input(slots: &[ItemStack]) -> Option<CraftingInput> {
@@ -174,13 +181,6 @@ fn craft_input(slots: &[ItemStack]) -> Option<CraftingInput> {
     }
     let input = CraftingInput::of(GRID, GRID, &slots[..GRID * GRID]);
     if input.is_empty() { None } else { Some(input) }
-}
-
-fn crafted(input: &CraftingInput) -> Option<ItemStack> {
-    RecipeManager::global()
-        .get_recipe_for(RecipeType::Crafting, input, None)
-        .and_then(|recipe| assemble(recipe, input.slots()))
-        .filter(|stack| !stack.is_empty())
 }
 
 fn read_grid(world: &mut World, pos: BlockPos) -> Option<Vec<ItemStack>> {
@@ -195,9 +195,7 @@ fn read_grid(world: &mut World, pos: BlockPos) -> Option<Vec<ItemStack>> {
 }
 
 fn is_crafter(world: &World, pos: BlockPos) -> bool {
-    world
-        .block_state(pos)
-        .is_a(BlockAncestor::CrafterBlock)
+    world.block_state(pos).is_a(BlockAncestor::CrafterBlock)
 }
 
 /// `CrafterBlock.dispenseItem`。前方没有方块容器时整堆都吐出去。
@@ -272,19 +270,14 @@ fn insert_one_by_one(
     remaining
 }
 
-fn insert_whole(
-    world: &mut World,
-    dest: BlockPos,
-    stack: ItemStack,
-    into: Direction,
-) -> ItemStack {
+fn insert_whole(world: &mut World, dest: BlockPos, stack: ItemStack, into: Direction) -> ItemStack {
     let mut remaining = stack;
     loop {
         if remaining.is_empty() {
             break;
         }
         let before = remaining.count;
-        let Some(added) = place(world, dest, remaining, into) else {
+        let Some(added) = place(world, dest, remaining.clone(), into) else {
             break;
         };
         let moved = added.remaining.count != before;
@@ -301,8 +294,13 @@ fn insert_whole(
 
 fn place(world: &mut World, dest: BlockPos, stack: ItemStack, into: Direction) -> Option<Added> {
     let mut added = None;
+    let mut stack = Some(stack);
     if !world.with_container(dest, &mut |container| {
-        added = Some(add_item(container, stack, Some(into)));
+        added = Some(add_item(
+            container,
+            stack.take().unwrap_or_default(),
+            Some(into),
+        ));
     }) {
         return None;
     }
@@ -352,7 +350,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockState, BlockTicks, HopperEntity, LegacyRandom,
+        BlockState, BlockTicks, HopperEntity, LegacyRandom, Level,
         level::Effect,
         state::{ORIENTATION, TRIGGERED},
         testing::TestLevel,
@@ -407,6 +405,35 @@ mod tests {
     }
 
     #[test]
+    fn no_recipe_plays_only_the_fail_event() {
+        let mut level = TestLevel::new();
+        facing_north(&mut level, POS);
+        put(&mut level, POS, 0, ItemStack::new(items::STONE, 1));
+        put(&mut level, POS, 1, ItemStack::new(items::DIRT, 1));
+        let seed = level.random.source().seed();
+
+        let effects = tick(&mut level, POS);
+
+        assert_eq!(level_events(&effects), vec![(SOUND_CRAFTER_FAIL, 0)]);
+        assert_eq!(contents(&level, POS)[0], ItemStack::new(items::STONE, 1));
+        assert!(!level.get(POS).get(CRAFTING));
+        assert_eq!(level.random.source().seed(), seed);
+    }
+
+    #[test]
+    fn an_empty_grid_plays_only_the_fail_event() {
+        let mut level = TestLevel::new();
+        facing_north(&mut level, POS);
+        level.set_container(POS, vec![ItemStack::empty(); GRID * GRID]);
+        let seed = level.random.source().seed();
+
+        let effects = tick(&mut level, POS);
+
+        assert_eq!(level_events(&effects), vec![(SOUND_CRAFTER_FAIL, 0)]);
+        assert_eq!(level.random.source().seed(), seed);
+    }
+
+    #[test]
     fn a_log_in_front_of_a_chest_becomes_four_planks() {
         let mut level = TestLevel::new();
         let chest = POS.relative(Direction::North);
@@ -418,7 +445,10 @@ mod tests {
 
         let effects = tick(&mut level, POS);
 
-        assert_eq!(contents(&level, chest)[0], ItemStack::new(items::OAK_PLANKS, 4));
+        assert_eq!(
+            contents(&level, chest)[0],
+            ItemStack::new(items::OAK_PLANKS, 4)
+        );
         assert!(contents(&level, POS)[0].is_empty());
         assert!(level.get(POS).get(CRAFTING));
         assert!(level_events(&effects).is_empty());
@@ -438,11 +468,40 @@ mod tests {
         assert!(level.get(POS).get(CRAFTING));
         assert_eq!(
             level_events(&effects),
-            vec![(SOUND_CRAFTER_CRAFT, 0), (PARTICLES_SHOOT, Direction::North.id())]
+            vec![
+                (SOUND_CRAFTER_CRAFT, 0),
+                (PARTICLES_SHOOT, Direction::North.id())
+            ]
         );
-        let twin = LegacyRandom::new(seed);
+        // `TestLevel` 的 `LevelRandom::new(0)` 和这里同一条序列。
+        //
+        // `TestLevel`'s `LevelRandom::new(0)` is the same sequence as this one.
+        let twin = LegacyRandom::new(0);
+        assert_eq!(twin.seed(), seed);
         spawn_draws(Direction::North, &twin);
         assert_eq!(level.random.source().seed(), twin.seed());
+    }
+
+    #[test]
+    fn a_full_chest_leaves_the_result_to_the_air() {
+        let mut level = TestLevel::new();
+        let chest = POS.relative(Direction::North);
+        facing_north(&mut level, POS);
+        put(&mut level, POS, 0, ItemStack::new(items::OAK_LOG, 1));
+        level.set(chest, BlockState(blocks::CHEST));
+        level.set_container(chest, vec![ItemStack::new(items::STONE, 64); 27]);
+
+        let effects = tick(&mut level, POS);
+
+        assert_eq!(contents(&level, chest)[0], ItemStack::new(items::STONE, 64));
+        assert!(contents(&level, POS)[0].is_empty());
+        assert_eq!(
+            level_events(&effects),
+            vec![
+                (SOUND_CRAFTER_CRAFT, 0),
+                (PARTICLES_SHOOT, Direction::North.id())
+            ]
+        );
     }
 
     #[test]
@@ -451,12 +510,7 @@ mod tests {
         let chest = POS.relative(Direction::North);
         facing_north(&mut level, POS);
         for slot in 0..3 {
-            put(
-                &mut level,
-                POS,
-                slot,
-                ItemStack::new(items::MILK_BUCKET, 1),
-            );
+            put(&mut level, POS, slot, ItemStack::new(items::MILK_BUCKET, 1));
         }
         put(&mut level, POS, 3, ItemStack::new(items::SUGAR, 1));
         put(&mut level, POS, 4, ItemStack::new(items::EGG, 1));
@@ -477,6 +531,24 @@ mod tests {
     }
 
     #[test]
+    fn a_honey_bottle_leaves_a_glass_bottle_in_the_chest() {
+        let mut level = TestLevel::new();
+        let chest = POS.relative(Direction::North);
+        facing_north(&mut level, POS);
+        put(&mut level, POS, 0, ItemStack::new(items::HONEY_BOTTLE, 1));
+        level.set(chest, BlockState(blocks::CHEST));
+        level.set_container(chest, vec![ItemStack::empty(); 27]);
+
+        let effects = tick(&mut level, POS);
+
+        let chest_slots = contents(&level, chest);
+        assert_eq!(chest_slots[0], ItemStack::new(items::SUGAR, 3));
+        assert_eq!(chest_slots[1], ItemStack::new(items::GLASS_BOTTLE, 1));
+        assert!(contents(&level, POS)[0].is_empty());
+        assert!(level_events(&effects).is_empty());
+    }
+
+    #[test]
     fn four_planks_enter_an_empty_crafter_one_at_a_time() {
         let mut level = TestLevel::new();
         let dest = POS.relative(Direction::North);
@@ -487,8 +559,8 @@ mod tests {
         tick(&mut level, POS);
 
         let dest_slots = contents(&level, dest);
-        for slot in 0..4 {
-            assert_eq!(dest_slots[slot], ItemStack::new(items::OAK_PLANKS, 1));
+        for stack in dest_slots.iter().take(4) {
+            assert_eq!(*stack, ItemStack::new(items::OAK_PLANKS, 1));
         }
         assert!(dest_slots[4].is_empty());
     }
@@ -522,7 +594,10 @@ mod tests {
         state.tick(&mut world, POS);
 
         assert_eq!(
-            world.block_entity::<HopperEntity>(hopper).unwrap().cooldown_time(),
+            world
+                .block_entity::<HopperEntity>(hopper)
+                .unwrap()
+                .cooldown_time(),
             8
         );
         assert_eq!(
@@ -555,10 +630,7 @@ mod tests {
     fn dropping_the_signal_clears_the_flag_but_the_clock_still_runs() {
         let mut level = TestLevel::new();
         facing_north(&mut level, POS);
-        let powered = level
-            .get(POS)
-            .with(TRIGGERED, true)
-            .with(CRAFTING, true);
+        let powered = level.get(POS).with(TRIGGERED, true).with(CRAFTING, true);
         level.set(POS, powered);
         level.redstone_mut().set_crafter_crafting(POS, 2);
         let mut ticks = BlockTicks::new();
