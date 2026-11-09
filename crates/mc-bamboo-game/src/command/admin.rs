@@ -76,18 +76,15 @@ pub(crate) fn note_action(region: &mut Region, player: PlayerId, request: &PlayR
             | PlayRequest::ChatCommand { .. }
             | PlayRequest::PlayerInput { .. }
             | PlayRequest::PlayerCommand { .. }
-            | PlayRequest::PlayerAbilities { .. }
             | PlayRequest::Punch
             | PlayRequest::SetCarriedItem { .. }
-            | PlayRequest::SetCreativeModeSlot { .. }
             | PlayRequest::PlayerAction { .. }
             | PlayRequest::UseItemOn { .. }
             | PlayRequest::UseItem { .. }
-            | PlayRequest::PickItemFromBlock { .. }
             | PlayRequest::ContainerClick { .. }
             | PlayRequest::ContainerButtonClick { .. }
             | PlayRequest::SignUpdate { .. }
-            | PlayRequest::ChangeGameMode { .. }
+            | PlayRequest::ClientCommand { .. }
     ) || moved(region, player, request);
     if active && region.last_action_millis.contains_key(&player) {
         region
