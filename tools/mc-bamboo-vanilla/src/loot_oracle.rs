@@ -649,6 +649,25 @@ impl Report {
                 self.mismatch(format!(
                     "{label} {place}: components official {official_components:?}, bamboo {bamboo_components:?}"
                 ));
+                continue;
+            }
+            // 战利品组件还要能转成真正的物品堆。转换会按存档 `Codec` 解一遍，
+            // 解不开的组件在这一层就露出来。
+            // The components must also convert into a real item stack through the
+            // persistent codec; an unsupported component shows up here.
+            let converted = mc_bamboo_game::loot_stack(bamboo);
+            if converted.item != bamboo_item || converted.count != bamboo_count {
+                self.mismatch(format!(
+                    "{label} {place}: converted stack {}:{} differs from {bamboo_item}:{bamboo_count}",
+                    converted.item, converted.count
+                ));
+            }
+            let patch = converted.patch();
+            if !official_components.is_empty() && patch.entries().is_empty() {
+                self.mismatch(format!(
+                    "{label} {place}: all {} loot components were dropped by the conversion",
+                    official_components.len()
+                ));
             }
         }
     }

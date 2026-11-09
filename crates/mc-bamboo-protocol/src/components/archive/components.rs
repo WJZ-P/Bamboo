@@ -49,7 +49,10 @@ fn encode_value_frame(value: &ComponentValue, depth: u32) -> Result<Dyn> {
         .unwrap_or_else(|| Err(Error::new("component has no archive codec")))
 }
 
-pub(super) fn decode_value(kind: i32, tag: &Tag, depth: u32) -> Result<ComponentValue> {
+/// 解一个组件的存档标签，供战利品表这类的调用方用。
+///
+/// Decodes one component's persistent tag for callers such as the loot-table bridge.
+pub fn decode_value(kind: i32, tag: &Tag, depth: u32) -> Result<ComponentValue> {
     if let Some(value) = decode_early(kind, tag, depth)? {
         return Ok(value);
     }

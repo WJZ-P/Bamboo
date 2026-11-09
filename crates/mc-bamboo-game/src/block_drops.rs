@@ -14,7 +14,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_world::store::ChunkStore;
 use tracing::debug;
 
-use crate::{inbound::PlayerId, region::Region};
+use crate::{inbound::PlayerId, loot_stacks, region::Region};
 
 /// 挖掉 `state` 之后生成掉落。工具上的附魔组件还没转成战利品能读的 JSON。
 ///
@@ -87,7 +87,7 @@ pub(crate) fn explosion_loot(
         luck: 0.0,
     };
     match block_drops(&params, Some(sequences), fallback) {
-        Ok(stacks) => stacks.into_iter().map(plain_stack).collect(),
+        Ok(stacks) => stacks.iter().map(loot_stacks::loot_stack).collect(),
         Err(error) => {
             debug!(%error, "skipping explosion drops: the loot table needs data this world does not have");
             Vec::new()
@@ -98,21 +98,7 @@ pub(crate) fn explosion_loot(
 fn pop_loot_stack(world: &mut World, pos: BlockPos, stack: LootStack) {
     // 空堆也要 `popResource`，三个位置 double 照取。
     // An empty stack still runs `popResource`, so the three position doubles are drawn.
-    if !stack.components.is_empty() {
-        debug!(
-            item = stack.item,
-            "dropping a block item without its loot components"
-        );
-    }
-    world.pop_resource(pos, plain_stack(stack));
-}
-
-fn plain_stack(stack: LootStack) -> ItemStack {
-    if stack.is_empty() {
-        ItemStack::empty()
-    } else {
-        ItemStack::new(stack.item, stack.count)
-    }
+    world.pop_resource(pos, loot_stacks::loot_stack(&stack));
 }
 
 /// 战利品条件要问的世界。群系、天气和亮度没有，问到就让求值报不支持。
