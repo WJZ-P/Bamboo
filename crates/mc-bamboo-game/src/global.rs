@@ -178,6 +178,14 @@ pub(crate) struct Global {
     ///
     /// Game rules. They are not saved, so a restart restores the official defaults.
     rules: crate::gamerules::GameRuleSet,
+    /// 全服一份的计分板和队伍。不写存档。
+    ///
+    /// The one scoreboard and team set for the whole server. Never saved.
+    scoreboard: crate::scoreboard::Scoreboard,
+    /// 全服一份的自定义 Boss 栏。不写存档。
+    ///
+    /// The one set of custom boss bars for the whole server. Never saved.
+    boss_bars: crate::scoreboard::BossBars,
     /// OP、封禁和白名单的权威副本。世界线程是唯一写者。
     pub(crate) admin: crate::admin::AdminState,
     /// 名单变更后发布给连接层并写盘的通道。没有连接层时（单元测试）是 `None`。
@@ -193,6 +201,8 @@ impl Default for Global {
             roster: BTreeMap::new(),
             ticks_since_latency_broadcast: 0,
             rules: crate::gamerules::GameRuleSet::vanilla(),
+            scoreboard: crate::scoreboard::Scoreboard::default(),
+            boss_bars: crate::scoreboard::BossBars::default(),
             admin: crate::admin::AdminState::default(),
             admin_messages: None,
         }
@@ -216,6 +226,34 @@ impl Global {
     /// The authoritative game rules, writable.
     pub(crate) fn rules_mut(&mut self) -> &mut crate::gamerules::GameRuleSet {
         &mut self.rules
+    }
+
+    /// 全服的计分板和队伍。
+    ///
+    /// The server-wide scoreboard and teams.
+    pub(crate) fn scoreboard(&self) -> &crate::scoreboard::Scoreboard {
+        &self.scoreboard
+    }
+
+    /// [`scoreboard`](Self::scoreboard) 的可变版本。
+    ///
+    /// Mutable [`scoreboard`](Self::scoreboard).
+    pub(crate) fn scoreboard_mut(&mut self) -> &mut crate::scoreboard::Scoreboard {
+        &mut self.scoreboard
+    }
+
+    /// 全服的自定义 Boss 栏。
+    ///
+    /// The server-wide custom boss bars.
+    pub(crate) fn boss_bars(&self) -> &crate::scoreboard::BossBars {
+        &self.boss_bars
+    }
+
+    /// [`boss_bars`](Self::boss_bars) 的可变版本。
+    ///
+    /// Mutable [`boss_bars`](Self::boss_bars).
+    pub(crate) fn boss_bars_mut(&mut self) -> &mut crate::scoreboard::BossBars {
+        &mut self.boss_bars
     }
 
     pub(crate) fn clock(&self) -> Clock {

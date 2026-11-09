@@ -18,6 +18,7 @@ use mc_bamboo_command::permission;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
 use mc_bamboo_protocol::{
+    item::ItemStack,
     packet::play::{
         BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
         PlayerActionKind, Sound, SystemChat,
@@ -128,6 +129,10 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
 ///
 /// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
 pub(crate) fn run_entity_ticks(region: &mut Region) {
+    // 玩家不在实体列表里。官方玩家通常先于后生成的物品 tick，捡起看到的是移动前的位置。
+    // Players are not in the entity list. Vanilla players usually tick before later items,
+    // so pickup sees the item where it was before this tick's movement.
+    crate::drops::pickup_before_entities(region);
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
     send_effects(region, None, &outcome.effects);
@@ -292,8 +297,8 @@ pub(crate) fn on_player_action(
                 mining::handle_block_break_action(region, id, action, pos, face);
             }
         }
-        PlayerActionKind::DropAllItems => inventory::drop_held_item(region, id, true),
-        PlayerActionKind::DropItem => inventory::drop_held_item(region, id, false),
+        PlayerActionKind::DropAllItems => crate::drops::drop_held(region, id, true),
+        PlayerActionKind::DropItem => crate::drops::drop_held(region, id, false),
         PlayerActionKind::SwapItemWithOffhand => inventory::swap_hands(region, id),
         PlayerActionKind::ReleaseUseItem | PlayerActionKind::Stab => {}
     }
@@ -308,7 +313,7 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 state,
                 except_initiator,
             } => {
-                // 容器里的东西没有掉落物，等打开着的菜单关掉后一起丢掉。
+                // 方块实体已经按 `dropContents` 掉过物品，这里只收掉打开着的菜单留下的记录。
                 container::on_block_destroyed(region, pos);
                 let except = initiator.filter(|_| except_initiator);
                 let event = LevelEvent::destroy_block(pos, state.0 as i32);
@@ -318,10 +323,28 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 let event = LevelEvent::redstone_torch_burnout(pos);
                 send_level_event(region, None, pos, &event);
             }
-            Effect::FilledBucket { item } => {
+            Effect::FilledBucket { item, hand } => {
                 if let Some(id) = initiator {
-                    inventory::add_filled_bucket(region, id, item);
+                    inventory::give_filled_result(region, id, hand, ItemStack::new(item, 1), true);
                 }
+            }
+            Effect::EmptiedBucket { hand } => {
+                let Some(id) = initiator else {
+                    continue;
+                };
+                // 创造模式交还手里原来的那一堆，`contains` 为真，什么也不加。
+                // Creative mode hands back the stack already held. `contains` is true, so nothing is added.
+                let replacement = {
+                    let Some(player) = region.players.get(&id) else {
+                        continue;
+                    };
+                    if player.game_mode == GameMode::Creative {
+                        player.inventory.held(hand).clone()
+                    } else {
+                        ItemStack::new(items::BUCKET, 1)
+                    }
+                };
+                inventory::give_filled_result(region, id, hand, replacement, true);
             }
             Effect::BoneMealUsed { pos } => {
                 let event = LevelEvent {
@@ -707,12 +730,13 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     if let Some(exchange) = &outcome.item_exchange {
         inventory::apply_item_exchange(region, id, packet.hand, exchange);
     }
-    // 雕纹书架取出的书。官方放不下就 `player.drop`，这里没有物品实体，剩下的消失。
+    // 雕纹书架取出的书。整本进背包，生存模式放不下的按 `Player.drop` 丢在地上，
+    // 创造模式放不下的那一份官方直接清掉。
     //
-    // A book taken from a chiseled bookshelf. Vanilla drops what does not fit.
-    // There is no item entity here, so a remainder vanishes.
+    // A book taken from a chiseled bookshelf. The whole stack goes into the inventory;
+    // survival drops what does not fit and creative discards it as vanilla does.
     if let Some(gained) = outcome.gained.clone() {
-        inventory::give(region, id, gained);
+        inventory::give_or_drop(region, id, gained);
     }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item && !menu::open_block(region, id, packet.pos) {

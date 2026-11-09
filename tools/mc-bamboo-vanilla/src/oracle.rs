@@ -34,7 +34,7 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockState, behaviour::is_ported, state::CRAFTING, state::FACING, state::HORIZONTAL_FACING,
+    BlockState, behaviour::is_ported, state::FACING, state::HORIZONTAL_FACING,
     world::MAX_CHAINED_NEIGHBOR_UPDATES,
 };
 use mc_bamboo_core::BlockPos;
@@ -42,7 +42,7 @@ use mc_bamboo_data::{
     Block, BlockAncestor, BlockClass, Item, block_id_of_state, blocks, items, version,
 };
 
-use lines::{Case, ContainerStack, Header, Kind, Line, SoundPlay, Tick};
+use lines::{Case, ContainerStack, Header, Kind, Line, Mine, SoundPlay, Tick};
 use replay::{FLUID_NAMES, Replayed, Scheduled, replay};
 use report::{Mismatch, Report};
 
@@ -171,10 +171,8 @@ impl Rule {
             }
             Self::Dispensing => {
                 "scope: a dispenser fired a projectile (events 1002/1004/1018/1051) or an armour \
-                 stand or spawn egg left the dispenser, or a crafter crafted (level event \
-                 1049/2010, the crafting flag turned on, or its slots changed while the combined \
-                 container items changed). Primed TNT is compared. Other dispenser shots are \
-                 compared. A crafter that only plays fail event 1050 is still compared"
+                 stand or spawn egg left the dispenser. Primed TNT, other dispenser shots and \
+                 crafters that crafted are all compared item by item"
             }
             Self::DaylightTimer => {
                 "scope: daylight detectors follow the sun in a block entity ticker that does not run"
@@ -551,6 +549,7 @@ impl Session {
         match line {
             Line::Header(header) => self.accept_header(header),
             Line::Case(case) => self.accept_case(&case),
+            Line::Mine(mine) => self.accept_mine(&mine),
             Line::Skip(skip) => {
                 let block = self.names.block(&skip.block)?;
                 // 本来就不比较的刻里官方代码抛了异常（比如传送门随机刻在假世界里生成僵尸猪灵），
@@ -594,6 +593,34 @@ impl Session {
         Ok(())
     }
 
+    fn accept_mine(&mut self, mine: &Mine) -> Result<(), String> {
+        let block = self.names.block(&mine.block)?;
+        let (tool, _) = self.names.item(&mine.tool)?;
+        let mut official = mine
+            .drops
+            .iter()
+            .map(|drop| Ok((self.names.item(&drop.item)?.0, drop.count)))
+            .collect::<Result<Vec<_>, String>>()?;
+        official.sort();
+        match crate::entity_oracle::mined_outcome(mine.seed, mine.state, tool) {
+            Ok((ours, seed)) if ours == official && seed == mine.random_seed => {
+                self.report.mine_checked(block, true, "");
+            }
+            Ok((ours, seed)) => self.report.mine_checked(
+                block,
+                false,
+                &format!(
+                    "{}: drops official {official:?} bamboo {ours:?}, random official {} bamboo {seed}",
+                    mine.block, mine.random_seed
+                ),
+            ),
+            Err(error) => {
+                self.report.mine_checked(block, false, &format!("{}: {error}", mine.block));
+            }
+        }
+        Ok(())
+    }
+
     fn accept_case(&mut self, case: &Case) -> Result<(), String> {
         let block = self.names.block(&case.block)?;
         let header = self.header.as_ref().ok_or("case before the header")?;
@@ -605,8 +632,7 @@ impl Session {
         }
         if let Some(rule) = exclusion {
             if rule == Rule::Dispensing {
-                self.report
-                    .note_dispensing(crafter_crafts(case), dispenser_dispenses(case));
+                self.report.note_dispensing(dispenser_dispenses(case));
             }
             self.report.excluded(block, kind, rule);
             return Ok(());
@@ -690,7 +716,7 @@ fn case_exclusion(case: &Case, block: &Block, names: &Names) -> Result<Option<Ru
     if case.outcome.analog_content {
         return Ok(Some(Rule::AnalogInput));
     }
-    if dispenser_dispenses(case) || crafter_crafts(case) {
+    if dispenser_dispenses(case) {
         return Ok(Some(Rule::Dispensing));
     }
     if dispenser_bonemeals_a_feature(case) {
@@ -934,102 +960,6 @@ fn final_state(case: &Case, pos: BlockPos) -> Option<BlockState> {
     }
 }
 
-/// 合成成功才整题排除。没有配方或产物是空的时官方只发 `SOUND_CRAFTER_FAIL`（1050），
-/// 方块和格子都不变，那一声照常比较。
-///
-/// Only a successful craft excludes the case. With no recipe, or an empty result, official
-/// sends only `SOUND_CRAFTER_FAIL` (1050). The block and the slots stay put, and that event
-/// is compared.
-///
-/// 成功的标志 / A craft succeeded when any of these is true:
-/// - 等级事件 1049（`SOUND_CRAFTER_CRAFT`）或 2010（吐出时的烟）。
-///   Level event 1049 (`SOUND_CRAFTER_CRAFT`) or 2010 (the ejection smoke).
-/// - `crafting` 从关变成开。这一刻可以是题目本身，也可以是之后几刻才跑的，不要求 `ran` 里已经记过。
-///   `crafting` turns on. The tick can be the action itself or one that runs later; `ran` is
-///   not required.
-/// - 合成器的格子变了，容器里的物品合计也变了，而且这题确实跑过合成器的计划刻。
-///   漏斗只是把同一件物品搬到另一格，合计不变，不算合成。
-///   The crafter's slots changed, the combined container items changed, and this case did run
-///   the crafter's scheduled tick. A hopper only moves the same items, so the totals stay
-///   equal and that is not a craft.
-fn crafter_crafts(case: &Case) -> bool {
-    const CRAFT_EVENTS: [i32; 2] = [1049, 2010];
-    if case
-        .outcome
-        .level_events
-        .iter()
-        .any(|event| CRAFT_EVENTS.contains(&event.0))
-    {
-        return true;
-    }
-    if crafting_turned_on(case) {
-        return true;
-    }
-    crafter_ran(case) && crafter_slots_changed(case) && container_items_changed(case)
-}
-
-/// 动作本身是合成器的计划刻，或者 `settle` 里跑过它。
-///
-/// The action is the crafter's scheduled tick, or `settle` ran one.
-fn crafter_ran(case: &Case) -> bool {
-    case.outcome.ran.iter().any(|id| id == "minecraft:crafter")
-        || case.action.kind == Kind::Tick && case.block == "minecraft:crafter"
-}
-
-/// 结果里某一格的 `crafting` 从关变成开。不要求 `ran` 里已经记过合成器。
-///
-/// Some cell's `crafting` flag turned on. The crafter does not have to be listed in `ran` yet.
-fn crafting_turned_on(case: &Case) -> bool {
-    case.outcome.changes.iter().any(|cell| {
-        let Some(state) = state_of(cell.state()) else {
-            return false;
-        };
-        crafting_is_on(state) && !crafting_is_on(scene_state(case, cell.pos()))
-    })
-}
-
-fn crafting_is_on(state: BlockState) -> bool {
-    state.is_a(BlockAncestor::CrafterBlock) && state.get(CRAFTING)
-}
-
-/// 合成器上的格子和开始时不一样。
-///
-/// The slots on crafters differ from the start of the case.
-fn crafter_slots_changed(case: &Case) -> bool {
-    let at_crafter = |stack: &ContainerStack| {
-        let pos = stack.pos();
-        scene_state(case, pos).is_a(BlockAncestor::CrafterBlock)
-            || final_state(case, pos).is_some_and(|state| state.is_a(BlockAncestor::CrafterBlock))
-    };
-    let before: Vec<_> = case
-        .contents
-        .iter()
-        .filter(|stack| at_crafter(stack))
-        .collect();
-    let after: Vec<_> = case
-        .outcome
-        .contents
-        .iter()
-        .filter(|stack| at_crafter(stack))
-        .collect();
-    before != after
-}
-
-/// 全部已建模容器里的物品合计变了。漏斗搬家不会变。
-///
-/// The combined items in every modelled container changed. A hopper move does not.
-fn container_items_changed(case: &Case) -> bool {
-    item_totals(&case.contents) != item_totals(&case.outcome.contents)
-}
-
-fn item_totals(stacks: &[ContainerStack]) -> BTreeMap<&str, i32> {
-    let mut totals = BTreeMap::new();
-    for stack in stacks {
-        *totals.entry(stack.item()).or_default() += stack.count();
-    }
-    totals
-}
-
 /// 弹射物发射用的世界事件。箭和蛋是 1002，烟花 1004，火焰弹 1018，风弹 1051。
 ///
 /// Level events used by projectile dispense. Arrows and eggs use 1002, fireworks 1004,
@@ -1236,6 +1166,19 @@ fn run_guarded(
     }
 }
 
+/// 这题跑过合成器的计划刻。合成器吐到空气时会从世界随机源取 7 个 double；
+/// 它和 `compares_dispenser_seed` 一起决定哪些题逐位比较最后的种子。别的题里官方还会
+/// 为没有移植的实体、声音和粒子取数，那是已经记录在 README 里的已知差异。
+///
+/// Whether this case ran a crafter's scheduled tick. A crafter ejecting into air draws seven
+/// doubles from the world random. Together with `compares_dispenser_seed` this decides which
+/// cases compare the final seed bit for bit. In other cases vanilla also draws for unported
+/// entities, sounds and particles, which is a known difference documented in README.
+fn crafter_tick_ran(case: &Case) -> bool {
+    case.action.kind == Kind::Tick && case.block == "minecraft:crafter"
+        || case.outcome.ran.iter().any(|id| id == "minecraft:crafter")
+}
+
 /// 比较一道题，`Mismatch::is_empty` 表示一致。
 fn compare(
     case: &Case,
@@ -1264,7 +1207,7 @@ fn compare(
         ticks: !same_queues(&official, &ours),
         compared_ticks: (official, ours),
         gained: answer.gained != replayed.gained,
-        random: compares_dispenser_seed(case)
+        random: (compares_dispenser_seed(case) || crafter_tick_ran(case))
             && answer
                 .random_seed
                 .is_some_and(|seed| seed != replayed.random_seed),

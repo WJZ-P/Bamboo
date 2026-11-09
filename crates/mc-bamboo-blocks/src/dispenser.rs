@@ -1,10 +1,14 @@
 //! 投掷器，官方 `DropperBlock.dispenseFrom`。
 //!
 //! 方块被信号触发后隔 4 刻排一个计划刻，到期时从 9 个槽里随机挑一个物品：
-//! 朝着的方向有容器就塞一个进去，没有就把物品抛出去。这个世界没有物品实体，
-//! 抛出去的那一个直接消失，速度按官方 `spawnItem` 算好，见 [`spawn_item_random`]。
+//! 朝着的方向有容器就塞一个进去，没有就按 `DefaultDispenseItemBehavior.spawnItem` 生成物品实体。
 //!
-//! 发射器走 [`crate::dispense`]，不走这个函数。空槽的 `levelEvent(1001)` 两边相同。
+//! 发射器（`DispenserBlock`）走 [`crate::dispense`]，按官方 `DispenseItemBehavior` 执行；
+//! 那条路也用 [`spawn_item_random`] 取速度随机数，再生成物品实体。
+//!
+//! A triggered dropper waits four ticks, then picks a random occupied slot. A container
+//! in front receives one item. Air receives an item entity from `spawnItem`.
+//! A dispenser uses the registry behaviours in [`crate::dispense`].
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::BlockAncestor;
@@ -37,20 +41,27 @@ pub(crate) fn random_slot(world: &World, occupied: &[bool]) -> i32 {
     replace_slot
 }
 
-/// `DefaultDispenseItemBehavior.spawnItem` 的速度。`accuracy` 是 6。
+/// `DefaultDispenseItemBehavior.spawnItem` 的精度。发射器和合成器都传 6。
+///
+/// The accuracy passed to `DefaultDispenseItemBehavior.spawnItem`. Dispensers and
+/// crafters both use 6.
+pub(crate) const SPAWN_ACCURACY: f64 = 6.0;
+
+/// `DefaultDispenseItemBehavior.spawnItem` 的速度随机数。`accuracy` 是 [`SPAWN_ACCURACY`]。
 ///
 /// 一个 `nextDouble` 算 `pow`。X、Z 的均值是朝向步长乘 `pow`，Y 的均值是 0.2。
-/// 每个 `triangle` 再取两个 `nextDouble`。物品实体还没接上，调用方用这个速度生成，不要再取一遍。
+/// 每个 `triangle` 再取两个 `nextDouble`。发射器的注册行为只取这几个数，
+/// 生成物品实体时直接套用这个速度，不能重复取数。
 ///
-/// The velocity from `DefaultDispenseItemBehavior.spawnItem`. `accuracy` is 6.
+/// The velocity draws from `DefaultDispenseItemBehavior.spawnItem`. `accuracy` is 6.
 ///
 /// One `nextDouble` computes `pow`. The X and Z means are the facing step times `pow`, and the
-/// Y mean is 0.2. Each `triangle` draws two more `nextDouble`s. Item entities are not spawned
-/// yet. The caller uses this velocity and does not draw again.
+/// Y mean is 0.2. Each `triangle` draws two more `nextDouble`s. A dispenser behaviour takes
+/// these draws once; the item entity is created with the returned velocity.
 pub(crate) fn spawn_item_random(world: &mut World, facing: Direction) -> Vec3 {
     let random = world.random();
     let speed = random.next_double() * 0.1 + 0.2;
-    let spread = 0.017_227_5 * 6.0;
+    let spread = 0.017_227_5 * SPAWN_ACCURACY;
     let (step_x, _, step_z) = facing.normal();
     Vec3::new(
         random.triangle(f64::from(step_x) * speed, spread),
@@ -160,9 +171,21 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
             item.clone()
         }
     } else {
-        // 官方在这里生成物品实体。没有实体，东西凭空消失，随机数照取。
+        // `DispenserBlock.getDispensePosition`：方块中心沿朝向出去 0.7 格。
         // `DefaultDispenseItemBehavior.dispense`：先 `execute`（随机数），再 1000，再 2000。
-        let _velocity = spawn_item_random(world, direction);
+        let (step_x, step_y, step_z) = direction.normal();
+        let position = Vec3::new(
+            f64::from(pos.x) + 0.5 + 0.7 * f64::from(step_x),
+            f64::from(pos.y) + 0.5 + 0.7 * f64::from(step_y),
+            f64::from(pos.z) + 0.5 + 0.7 * f64::from(step_z),
+        );
+        let velocity = spawn_item_random(world, direction);
+        world.spawn_dispensed_item_with_velocity(
+            copy_with_count(&item, 1),
+            direction,
+            position,
+            velocity,
+        );
         world.level_event(1000, pos, 0);
         world.level_event(2000, pos, direction.id());
         without_one(&item)
@@ -270,6 +293,30 @@ mod tests {
             twin.triangle(0.2, 0.017_227_5 * 6.0);
         }
         assert_eq!(world.random().seed(), twin.seed());
+    }
+
+    /// 投掷器朝空气抛出真的物品实体，位置按 `getDispensePosition` 再下移。
+    #[test]
+    fn a_dropper_without_a_container_spawns_a_ground_item() {
+        let mut level = TestLevel::new();
+        let mut dropper = empty(9);
+        dropper[4] = ItemStack::new(items::STONE, 3);
+        level.set_container(POS, dropper);
+        let mut ticks = BlockTicks::new();
+        let mut world = placed_dropper(&mut level, &mut ticks, Direction::Up);
+        let state = world.block_state(POS);
+        dispense_from(&mut world, POS, state);
+        let items: Vec<_> = world
+            .entity_ids()
+            .into_iter()
+            .filter_map(|id| world.entity(id))
+            .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+            .collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(*items[0].1, ItemStack::new(items::STONE, 1));
+        assert!((items[0].0.x - 0.5).abs() < 1.0e-9);
+        assert!((items[0].0.y - 65.2 + 0.125).abs() < 1.0e-9);
+        assert!((items[0].0.z - 0.5).abs() < 1.0e-9);
     }
 
     #[test]

@@ -78,12 +78,12 @@ fn int_default(index: usize) -> i32 {
 /// `Block.dropResources` 会不会生成掉落物。
 ///
 /// 创造模式的 `preventsBlockDrops`（`instabuild`）另外挡住掉落，和这条规则是两回事。
-/// 物品实体还没接上，调用方只留下这个判断。
+/// 调用方在判断为真时再按战利品表生成物品实体。
 ///
 /// Whether `Block.dropResources` would spawn drops.
 ///
-/// Creative `preventsBlockDrops` (`instabuild`) is a separate gate. Item entities are not
-/// wired yet; callers keep this check in place.
+/// Creative `preventsBlockDrops` (`instabuild`) is a separate gate. Callers spawn the
+/// loot-table item entities when this check passes.
 pub fn block_drops_allowed(rules: BlockGameRules, prevents_block_drops: bool) -> bool {
     rules.block_drops && !prevents_block_drops
 }

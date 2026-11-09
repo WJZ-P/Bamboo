@@ -447,25 +447,11 @@ pub const PACK_DATA: &str = "121.0";
 pub mod tests {
     use mc_bamboo_command::{ArgumentType, NodeKind, StringKind};
 
-    /// 返回 `{"op": {...}, "deop": {...}, ...}`，只包含这次加的根节点。
-    pub fn command_tree_json() -> String {
+    /// 返回 `{"op": {...}, ...}`，只包含 `roots` 里点名的根节点。
+    pub fn command_tree_json(roots: &[&str]) -> String {
         let graph = &crate::command::commands().graph;
-        let roots = [
-            "op",
-            "deop",
-            "ban",
-            "ban-ip",
-            "banlist",
-            "pardon",
-            "pardon-ip",
-            "whitelist",
-            "stop",
-            "setidletimeout",
-            "transfer",
-            "version",
-        ];
         let mut out = serde_json::Map::new();
-        for name in roots {
+        for &name in roots {
             let node = graph.node(graph.root()).children.iter().copied().find(
                 |&child| matches!(&graph.node(child).kind, NodeKind::Literal(text) if text == name),
             );

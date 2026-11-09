@@ -36,6 +36,7 @@ import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.stats.Stat;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
@@ -53,7 +54,18 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.item.FallingBlockEntity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.item.PrimedTnt;
+import net.minecraft.world.entity.player.Abilities;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.player.PlayerEquipment;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
@@ -133,6 +145,18 @@ public final class EntityOracle {
             cases += tntInAir(official, out);
             cases += tntBreaksStone(official, out);
             cases += tntChain(official, out);
+            cases += itemFall(official, out);
+            cases += itemWater(official, out);
+            cases += itemLava(official, out);
+            cases += itemMerge(official, out);
+            cases += itemHopper(official, out);
+            cases += itemAboveHopper(official, out);
+            cases += itemPickup(official, out);
+            cases += itemPickupPartial(official, out);
+            cases += itemPickupCreativeFull(official, out);
+            cases += itemPickupSpectator(official, out);
+            cases += itemPickupDelay(official, out);
+            cases += itemPickupInfinite(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -259,6 +283,253 @@ public final class EntityOracle {
         return 1;
     }
 
+    private static final int FIRST_ITEM_ID = 1 << 24;
+    private static final long ENTITY_RANDOM_SEED = 0x0DDB1A5E5BAD5EEDL;
+
+    /** 物品从空中落到石头上。速度用实体自己的随机源，和 `spawnAtLocation` 一样。 */
+    private static int itemFall(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        playItem(official, out, "item_fall", Items.COBBLESTONE, 1, 0.5, 70.0, 0.5, 10, blocks, false, 40);
+        return 1;
+    }
+
+    /** 水里上浮。 */
+    private static int itemWater(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        for (int y = 64; y <= 68; y++) {
+            blocks.put(BlockPos.asLong(0, y, 0), Blocks.WATER.defaultBlockState());
+        }
+        playItem(official, out, "item_water", Items.COBBLESTONE, 1, 0.5, 66.0, 0.5, 10, blocks, false, 40);
+        return 1;
+    }
+
+    /** 岩浆里上浮，并按官方扣血。 */
+    private static int itemLava(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        for (int y = 64; y <= 68; y++) {
+            blocks.put(BlockPos.asLong(0, y, 0), Blocks.LAVA.defaultBlockState());
+        }
+        playItem(official, out, "item_lava", Items.COBBLESTONE, 1, 0.5, 66.0, 0.5, 10, blocks, false, 30);
+        return 1;
+    }
+
+    /** 两堆同类物品靠在一起，按官方合并。 */
+    private static int itemMerge(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        playItem(
+                official,
+                out,
+                "item_merge",
+                Items.COBBLESTONE,
+                20,
+                0.5,
+                65.2,
+                0.5,
+                10,
+                blocks,
+                false,
+                45,
+                new double[] {0.55, 65.2, 0.5, 10});
+        return 1;
+    }
+
+    /** 物品和漏斗方块重叠，走 `HopperBlock.entityInside`。 */
+    private static int itemHopper(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 64, 0), Blocks.HOPPER.defaultBlockState());
+        playItem(official, out, "item_hopper", Items.COBBLESTONE, 1, 0.5, 64.5, 0.5, 10, blocks, true, 8);
+        return 1;
+    }
+
+    /** 物品只在吸取盒上半截，等漏斗 tick 的 `suckInItems`。 */
+    private static int itemAboveHopper(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 64, 0), Blocks.HOPPER.defaultBlockState());
+        playItem(official, out, "item_above_hopper", Items.COBBLESTONE, 1, 0.5, 65.2, 0.5, 0, blocks, true, 8);
+        return 1;
+    }
+
+    /** 生存模式，延迟为 0，站在物品上就捡走。 */
+    private static int itemPickup(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup", 5, 0, false, false, 0, 4);
+        return 1;
+    }
+
+    /** 快捷栏已经有 63 个，再捡 5 个，剩下的留在地上。 */
+    private static int itemPickupPartial(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_partial", 5, 0, false, false, 63, 4);
+        return 1;
+    }
+
+    /** 创造模式背包全满时，捡不进去的物品被清掉，地上也不留。 */
+    private static int itemPickupCreativeFull(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_creative_full", 1, 0, true, false, -1, 4);
+        return 1;
+    }
+
+    /** 旁观模式不捡。 */
+    private static int itemPickupSpectator(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_spectator", 1, 0, false, true, 0, 20);
+        return 1;
+    }
+
+    /** 默认延迟 10。捡起发生在延迟减到 0 的下一拍。 */
+    private static int itemPickupDelay(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_delay", 1, 10, false, false, 0, 16);
+        return 1;
+    }
+
+    /** `INFINITE_PICKUP_DELAY` 不减，也捡不起来。 */
+    private static int itemPickupInfinite(Official official, Writer out) throws Exception {
+        playPickup(official, out, "item_pickup_infinite", 1, 32767, false, false, 0, 8);
+        return 1;
+    }
+
+    private static void playPickup(
+            Official official,
+            Writer out,
+            String name,
+            int count,
+            int pickupDelay,
+            boolean creative,
+            boolean spectator,
+            int prefill,
+            int ticks)
+            throws Exception {
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+        Scene scene = Scene.items(official, blocks, false);
+        scene.player = touchPlayer(creative);
+        scene.spectator = spectator;
+        if (prefill < 0) {
+            ItemStack stone = new ItemStack(Items.STONE, Items.STONE.getDefaultMaxStackSize());
+            for (int slot = 0; slot < 36; slot++) {
+                scene.player.getInventory().setItem(slot, stone.copy());
+            }
+        } else if (prefill > 0) {
+            scene.player.getInventory().setItem(0, new ItemStack(Items.COBBLESTONE, prefill));
+        }
+        scene.spawnItem(0.5, 64.5, 0.5, new ItemStack(Items.COBBLESTONE, count), pickupDelay, true);
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"");
+        out.write(name);
+        out.write("\",\"kind\":\"item\",\"state\":0,\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"item\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(Items.COBBLESTONE)));
+        out.write(",\"count\":");
+        out.write(Integer.toString(count));
+        out.write(",\"px\":0.5,\"py\":64.5,\"pz\":0.5,\"pickupDelay\":");
+        out.write(Integer.toString(pickupDelay));
+        out.write(",\"hopper\":false,\"player\":{\"creative\":");
+        out.write(Boolean.toString(creative));
+        out.write(",\"spectator\":");
+        out.write(Boolean.toString(spectator));
+        out.write(",\"prefill\":");
+        out.write(Integer.toString(prefill));
+        Item fill = prefill < 0 ? Items.STONE : Items.COBBLESTONE;
+        int fillCount = prefill < 0 ? Items.STONE.getDefaultMaxStackSize() : Math.max(prefill, 0);
+        out.write(",\"fillItem\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(fill)));
+        out.write(",\"fillCount\":");
+        out.write(Integer.toString(fillCount));
+        out.write("},\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+    }
+
+    /** 不跑构造函数。`take`、`awardStat`、`onItemPickup` 都是空的，避免假玩家碰到空的统计和区块。 */
+    private static TouchPlayer touchPlayer(boolean creative) {
+        TouchPlayer player = allocate(TouchPlayer.class);
+        Abilities abilities = new Abilities();
+        abilities.instabuild = creative;
+        put(player, Player.class, "abilities", abilities);
+        Inventory inventory = new Inventory(player, new PlayerEquipment(player));
+        put(player, Player.class, "inventory", inventory);
+        return player;
+    }
+
+    private static void playItem(
+            Official official,
+            Writer out,
+            String name,
+            net.minecraft.world.item.Item item,
+            int count,
+            double x,
+            double y,
+            double z,
+            int pickupDelay,
+            Long2ObjectMap<BlockState> blocks,
+            boolean hopper,
+            int ticks,
+            double... extra)
+            throws Exception {
+        Scene scene = Scene.items(official, blocks, hopper);
+        scene.spawnItem(x, y, z, new ItemStack(item, count), pickupDelay);
+        if (extra.length == 4) {
+            scene.spawnItem(extra[0], extra[1], extra[2], new ItemStack(item, (int) extra[3]), pickupDelay);
+        }
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"");
+        out.write(name);
+        out.write("\",\"kind\":\"item\",\"state\":0,\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"item\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(item)));
+        out.write(",\"count\":");
+        out.write(Integer.toString(count));
+        out.write(",\"px\":");
+        out.write(Double.toString(x));
+        out.write(",\"py\":");
+        out.write(Double.toString(y));
+        out.write(",\"pz\":");
+        out.write(Double.toString(z));
+        out.write(",\"pickupDelay\":");
+        out.write(Integer.toString(pickupDelay));
+        out.write(",\"hopper\":");
+        out.write(Boolean.toString(hopper));
+        if (extra.length == 4) {
+            out.write(",\"extras\":[{\"item\":");
+            out.write(Integer.toString(BuiltInRegistries.ITEM.getId(item)));
+            out.write(",\"count\":");
+            out.write(Integer.toString((int) extra[3]));
+            out.write(",\"x\":");
+            out.write(Double.toString(extra[0]));
+            out.write(",\"y\":");
+            out.write(Double.toString(extra[1]));
+            out.write(",\"z\":");
+            out.write(Double.toString(extra[2]));
+            out.write("}]");
+        }
+        out.write(",\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+    }
+
     private static void play(
             Official official,
             Writer out,
@@ -345,10 +616,60 @@ public final class EntityOracle {
          * Entities at the end of the tick, including ones discarded during it.
          */
         final List<Entity> snapshot = new ArrayList<>();
+        final List<HopperBlockEntity> hoppers = new ArrayList<>();
+        TouchPlayer player;
+        boolean spectator;
         boolean ticked;
 
         private Scene(FakeLevel level) {
             this.level = level;
+        }
+
+        /** 物品场景。实体 ID 从 `1 << 24` 起，和 Bamboo 的第一号非玩家实体一样。 */
+        static Scene items(Official official, Long2ObjectMap<BlockState> blocks, boolean hopper) {
+            FakeLevel level = FakeLevel.create(official, 1L);
+            level.nextId = FIRST_ITEM_ID;
+            level.blocks.putAll(blocks);
+            Scene scene = new Scene(level);
+            if (hopper) {
+                long[] keys = blocks.keySet().toLongArray();
+                Arrays.sort(keys);
+                for (long key : keys) {
+                    BlockState state = blocks.get(key);
+                    if (state.getBlock() == Blocks.HOPPER) {
+                        BlockPos pos = BlockPos.of(key);
+                        HopperBlockEntity entity = new HopperBlockEntity(pos, state);
+                        level.blockEntities.put(key, entity);
+                        scene.hoppers.add(entity);
+                    }
+                }
+            }
+            return scene;
+        }
+
+        void spawnItem(double x, double y, double z, ItemStack stack, int pickupDelay) {
+            spawnItem(x, y, z, stack, pickupDelay, false);
+        }
+
+        void spawnItem(double x, double y, double z, ItemStack stack, int pickupDelay, boolean exactDelay) {
+            ItemEntity item = new ItemEntity(level, x, y, z, stack);
+            level.addFreshEntity(item);
+            // 构造函数先用了未设种子的随机源。换成和 Bamboo 一样的 `id ^ seed` 之后，把朝向和速度重新取一遍。
+            long seed = (long) item.getId() ^ ENTITY_RANDOM_SEED;
+            setRandom(item, seed);
+            RandomSource random = item.getRandom();
+            random.nextFloat();
+            item.setYRot(random.nextFloat() * 360.0F);
+            item.setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2, random.nextDouble() * 0.2 - 0.1);
+            if (exactDelay) {
+                item.setPickUpDelay(pickupDelay);
+            } else if (pickupDelay == 0) {
+                item.setNoPickUpDelay();
+            } else {
+                item.setDefaultPickUpDelay();
+            }
+            active.add(item);
+            level.fresh.clear();
         }
 
         static Scene start(
@@ -387,6 +708,17 @@ public final class EntityOracle {
         }
 
         void tick() {
+            // 玩家不在实体名单里。官方玩家通常先 tick，捡起看到的是物品移动前的位置。
+            // The player is not in the entity list. Vanilla players usually tick first, so pickup
+            // sees the item where it was before this tick's movement.
+            if (player != null && !spectator) {
+                AABB reach = new AABB(0.2, 64.0, 0.2, 0.8, 65.8, 0.8).inflate(1.0, 0.5, 1.0);
+                for (Entity entity : new ArrayList<>(active)) {
+                    if (entity instanceof ItemEntity item && item.getBoundingBox().intersects(reach)) {
+                        item.playerTouch(player);
+                    }
+                }
+            }
             List<Entity> ticking = new ArrayList<>(active);
             level.fresh.clear();
             snapshot.clear();
@@ -407,6 +739,15 @@ public final class EntityOracle {
                     active.add(spawned);
                 }
             }
+            // 官方 `ServerLevel.tick`：实体之后才是方块实体。漏斗在这里吸上方的物品。
+            // 被漏斗丢掉的物品要等这一拍结束才离开名单，下一拍不再出现。
+            // Vanilla ticks block entities after entities. An item the hopper discards leaves the list
+            // at the end of this tick, and is absent next tick.
+            level.tracked = active;
+            for (HopperBlockEntity hopper : hoppers) {
+                BlockPos pos = hopper.getBlockPos();
+                HopperBlockEntity.pushItemsTick(level, pos, level.getBlockState(pos), hopper);
+            }
             active.removeIf(Entity::isRemoved);
             ticked = true;
         }
@@ -422,16 +763,67 @@ public final class EntityOracle {
             }
             out.append("],\"blocks\":");
             out.append(blockArray(level.blocks));
+            out.append(",\"containers\":");
+            out.append(containerArray(hoppers));
+            if (player != null) {
+                out.append(",\"inventory\":");
+                out.append(inventoryArray(player.getInventory()));
+            }
             out.append('}');
         }
+    }
+
+    private static String containerArray(List<HopperBlockEntity> hoppers) {
+        StringBuilder out = new StringBuilder();
+        out.append('[');
+        boolean first = true;
+        for (HopperBlockEntity hopper : hoppers) {
+            BlockPos pos = hopper.getBlockPos();
+            for (int slot = 0; slot < hopper.getContainerSize(); slot++) {
+                ItemStack stack = hopper.getItem(slot);
+                if (stack.isEmpty()) {
+                    continue;
+                }
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append('[')
+                        .append(pos.getX())
+                        .append(',')
+                        .append(pos.getY())
+                        .append(',')
+                        .append(pos.getZ())
+                        .append(',')
+                        .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                        .append(',')
+                        .append(stack.getCount())
+                        .append(']');
+            }
+        }
+        out.append(']');
+        return out.toString();
     }
 
     private static void writeEntity(StringBuilder out, Entity entity) {
         Vec3 pos = entity.position();
         Vec3 delta = entity.getDeltaMovement();
-        String kind = entity instanceof PrimedTnt ? "tnt" : "falling";
+        String kind = entity instanceof ItemEntity ? "item" : entity instanceof PrimedTnt ? "tnt" : "falling";
         int block = entity instanceof FallingBlockEntity falling ? Block.getId(falling.getBlockState()) : -1;
         int fuse = entity instanceof PrimedTnt tnt ? tnt.getFuse() : -1;
+        int item = -1;
+        int count = 0;
+        int age = -1;
+        int pickup = -1;
+        int health = -1;
+        if (entity instanceof ItemEntity ground) {
+            ItemStack stack = ground.getItem();
+            item = BuiltInRegistries.ITEM.getId(stack.getItem());
+            count = stack.getCount();
+            age = ground.getAge();
+            pickup = readInt(ground, "pickupDelay");
+            health = readInt(ground, "health");
+        }
         out.append("{\"kind\":\"").append(kind).append('"');
         out.append(",\"removed\":").append(entity.isRemoved());
         out.append(",\"onGround\":").append(entity.onGround());
@@ -443,7 +835,22 @@ public final class EntityOracle {
         out.append(",\"dz\":").append(Double.doubleToRawLongBits(delta.z));
         out.append(",\"block\":").append(block);
         out.append(",\"fuse\":").append(fuse);
+        out.append(",\"item\":").append(item);
+        out.append(",\"count\":").append(count);
+        out.append(",\"age\":").append(age);
+        out.append(",\"pickup\":").append(pickup);
+        out.append(",\"health\":").append(health);
         out.append('}');
+    }
+
+    private static int readInt(Object target, String name) {
+        try {
+            Field field = ItemEntity.class.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.getInt(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static String blockArray(Long2ObjectMap<BlockState> blocks) {
@@ -501,6 +908,61 @@ public final class EntityOracle {
         } catch (InstantiationException error) {
             throw new IllegalStateException(error);
         }
+    }
+
+    private static String inventoryArray(Inventory inventory) {
+        StringBuilder out = new StringBuilder();
+        out.append('[');
+        boolean first = true;
+        for (int slot = 0; slot < 36; slot++) {
+            first = appendSlot(out, first, slot, inventory.getItem(slot));
+        }
+        appendSlot(out, first, 40, inventory.getItem(40));
+        out.append(']');
+        return out.toString();
+    }
+
+    private static boolean appendSlot(StringBuilder out, boolean first, int slot, ItemStack stack) {
+        if (stack.isEmpty()) {
+            return first;
+        }
+        if (!first) {
+            out.append(',');
+        }
+        out.append('[')
+                .append(slot)
+                .append(',')
+                .append(BuiltInRegistries.ITEM.getId(stack.getItem()))
+                .append(',')
+                .append(stack.getCount())
+                .append(']');
+        return false;
+    }
+
+    /** `abilities` 和 `inventory` 是 final，普通反射写不进去。 */
+    private static void put(Object target, Class<?> owner, String name, Object value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static final class TouchPlayer extends ServerPlayer {
+        private TouchPlayer() {
+            super(null, null, null, null);
+        }
+
+        @Override
+        public void take(Entity entity, int orgCount) {}
+
+        @Override
+        public void awardStat(Stat<?> stat, int count) {}
+
+        @Override
+        public void onItemPickup(ItemEntity entity) {}
     }
 
     private static void set(Class<?> owner, Object target, String name, Object value) {
@@ -645,10 +1107,13 @@ public final class EntityOracle {
         private Official official;
         private Long2ObjectOpenHashMap<BlockState> blocks;
         private List<Entity> fresh;
+        private List<Entity> tracked = new ArrayList<>();
+        private Long2ObjectOpenHashMap<BlockEntity> blockEntities;
         private LevelTicks<Block> blockTicks;
         private LevelTicks<Fluid> fluidTicks;
         private ServerChunkCache chunkSource;
         private int nextId = 1;
+        private FluidChunk fluidChunk;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -658,6 +1123,8 @@ public final class EntityOracle {
             FakeLevel level = allocate(FakeLevel.class);
             level.official = official;
             level.fresh = new ArrayList<>();
+            level.tracked = new ArrayList<>();
+            level.blockEntities = new Long2ObjectOpenHashMap<>();
             level.nextId = 1;
             level.blocks = new Long2ObjectOpenHashMap<>();
             level.blockTicks = new LevelTicks<>(key -> true);
@@ -665,9 +1132,11 @@ public final class EntityOracle {
             level.chunkSource = chunkSource();
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, 1_000_000));
             set(Level.class, level, "random", RandomSource.create(seed));
+            set(Level.class, level, "soundSeedGenerator", RandomSource.createThreadSafe());
             set(Level.class, level, "dimensionTypeRegistration", official.overworld);
             set(Level.class, level, "dimension", Level.OVERWORLD);
             set(Level.class, level, "registryAccess", official.registries);
+            set(Level.class, level, "palettedContainerFactory", net.minecraft.world.level.chunk.PalettedContainerFactory.create(official.registries));
             set(Level.class, level, "damageSources", official.damageSources);
             set(Level.class, level, "thread", Thread.currentThread());
             set(ServerLevel.class, level, "players", new ArrayList<ServerPlayer>());
@@ -694,6 +1163,11 @@ public final class EntityOracle {
             }
             BlockState state = blocks.get(pos.asLong());
             return state != null ? state : Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public BlockEntity getBlockEntity(BlockPos pos) {
+            return blockEntities.get(pos.asLong());
         }
 
         @Override
@@ -738,7 +1212,8 @@ public final class EntityOracle {
 
         @Override
         public boolean addFreshEntity(Entity entity) {
-            entity.setId(getNextEntityId());
+            // 构造函数里已经调用过 `getNextEntityId`。这里再分配一次会把 ID 错开一号。
+            // The constructor already called `getNextEntityId`. Assigning again would shift the id by one.
             fresh.add(entity);
             return true;
         }
@@ -785,8 +1260,20 @@ public final class EntityOracle {
 
         @Override
         public ChunkAccess getChunk(int chunkX, int chunkZ, ChunkStatus status, boolean loadOrGenerate) {
-            return null;
+            // 流体扫描先问区块的 section 有没有流体。不加载的那一次只为了这个检查。
+            // The fluid scan asks whether a chunk section contains fluid. The non-loading call is only that check.
+            if (loadOrGenerate) {
+                return null;
+            }
+            if (fluidChunk == null) {
+                fluidChunk = new FluidChunk(this);
+            }
+            return fluidChunk;
         }
+
+        /** 漏斗 `setChanged` 会来问区块。假世界没有区块，标记存档这一步空着。 */
+        @Override
+        public void blockEntityChanged(BlockPos pos) {}
 
         @Override
         public boolean hasChunk(int chunkX, int chunkZ) {
@@ -869,7 +1356,7 @@ public final class EntityOracle {
 
         @Override
         protected LevelEntityGetter<Entity> getEntities() {
-            return EmptyEntities.INSTANCE;
+            return new TrackedEntities(tracked);
         }
 
         @Override
@@ -881,32 +1368,147 @@ public final class EntityOracle {
         }
     }
 
-    private static final class EmptyEntities implements LevelEntityGetter<Entity> {
-        static final EmptyEntities INSTANCE = new EmptyEntities();
+    private static final class TrackedEntities implements LevelEntityGetter<Entity> {
+        private final List<Entity> entities;
+
+        TrackedEntities(List<Entity> entities) {
+            this.entities = entities;
+        }
 
         @Override
         public Entity get(int id) {
+            for (Entity entity : entities) {
+                if (entity.getId() == id) {
+                    return entity;
+                }
+            }
             return null;
         }
 
         @Override
         public Entity get(UUID id) {
+            for (Entity entity : entities) {
+                if (entity.getUUID().equals(id)) {
+                    return entity;
+                }
+            }
             return null;
         }
 
         @Override
         public Iterable<Entity> getAll() {
-            return List.of();
+            return entities;
         }
 
         @Override
-        public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AbortableIterationConsumer<U> consumer) {}
+        public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AbortableIterationConsumer<U> consumer) {
+            for (Entity entity : entities) {
+                U cast = type.tryCast(entity);
+                if (cast != null && consumer.accept(cast).shouldAbort()) {
+                    return;
+                }
+            }
+        }
 
         @Override
-        public void get(AABB box, Consumer<Entity> output) {}
+        public void get(AABB box, Consumer<Entity> output) {
+            for (Entity entity : entities) {
+                if (entity.getBoundingBox().intersects(box)) {
+                    output.accept(entity);
+                }
+            }
+        }
 
         @Override
-        public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AABB box, AbortableIterationConsumer<U> consumer) {}
+        public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AABB box, AbortableIterationConsumer<U> consumer) {
+            for (Entity entity : entities) {
+                U cast = type.tryCast(entity);
+                if (cast != null && entity.getBoundingBox().intersects(box) && consumer.accept(cast).shouldAbort()) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * 流体扫描只看 section 的 `hasFluid`。方块本身仍由 {@code FakeLevel} 回答。
+     *
+     * The fluid scan only checks a section's `hasFluid`. Block lookups still go to {@code FakeLevel}.
+     */
+    private static final class FluidChunk extends ChunkAccess {
+        FluidChunk(Level level) {
+            super(
+                    new net.minecraft.world.level.ChunkPos(0, 0),
+                    net.minecraft.world.level.chunk.UpgradeData.EMPTY,
+                    level,
+                    level.palettedContainerFactory(),
+                    0L,
+                    null,
+                    null);
+            try {
+                Field field = net.minecraft.world.level.chunk.LevelChunkSection.class.getDeclaredField("fluidCount");
+                field.setAccessible(true);
+                for (net.minecraft.world.level.chunk.LevelChunkSection section : getSections()) {
+                    field.setShort(section, (short) 1);
+                }
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        @Override
+        public BlockEntity getBlockEntity(BlockPos pos) {
+            return null;
+        }
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            return Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
+            return net.minecraft.world.level.material.Fluids.EMPTY.defaultFluidState();
+        }
+
+        @Override
+        public BlockState setBlockState(BlockPos pos, BlockState state, int flags) {
+            return null;
+        }
+
+        @Override
+        public void setBlockEntity(BlockEntity blockEntity) {}
+
+        @Override
+        public void addEntity(Entity entity) {}
+
+        @Override
+        public ChunkStatus getPersistedStatus() {
+            return ChunkStatus.FULL;
+        }
+
+        @Override
+        public void removeBlockEntity(BlockPos pos) {}
+
+        @Override
+        public net.minecraft.nbt.CompoundTag getBlockEntityNbtForSaving(BlockPos pos, HolderLookup.Provider registries) {
+            return null;
+        }
+
+        @Override
+        public net.minecraft.world.ticks.TickContainerAccess<Block> getBlockTicks() {
+            return null;
+        }
+
+        @Override
+        public net.minecraft.world.ticks.TickContainerAccess<net.minecraft.world.level.material.Fluid> getFluidTicks() {
+            return null;
+        }
+
+        @Override
+        public PackedTicks getTicksForSerialization(long gameTime) {
+            return null;
+        }
     }
 
     private EntityOracle() {}

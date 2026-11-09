@@ -205,6 +205,14 @@ pub enum PlayRequest {
         container_id: i32,
         button_id: i32,
     },
+    /// 合成器菜单切换禁用槽。`new_state` 为真表示启用这一格。
+    ///
+    /// A crafter menu toggles a disabled slot. `new_state` true means the slot is enabled.
+    ContainerSlotStateChanged {
+        container_id: i32,
+        slot_id: i32,
+        new_state: bool,
+    },
     /// 告示牌编辑器提交的文字，每一行最多 [`MAX_LINE_CHARS`] 个字符。
     SignUpdate {
         pos: BlockPos,
@@ -368,6 +376,11 @@ impl PlayRequest {
             serverbound::CONTAINER_BUTTON_CLICK => Self::ContainerButtonClick {
                 container_id: reader.varint()?,
                 button_id: reader.varint()?,
+            },
+            serverbound::CONTAINER_SLOT_STATE_CHANGED => Self::ContainerSlotStateChanged {
+                slot_id: reader.varint()?,
+                container_id: reader.varint()?,
+                new_state: reader.bool()?,
             },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             serverbound::EDIT_BOOK => read_edit_book(&mut reader)?,
@@ -1506,6 +1519,33 @@ mod tests {
                 container_id: 5,
                 button_id: 2,
             })
+        );
+    }
+
+    #[test]
+    fn decodes_container_slot_state_changed() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_SLOT_STATE_CHANGED, "04 03 01"),
+            Ok(PlayRequest::ContainerSlotStateChanged {
+                slot_id: 4,
+                container_id: 3,
+                new_state: true,
+            })
+        );
+        assert_eq!(
+            decode_body(
+                serverbound::CONTAINER_SLOT_STATE_CHANGED,
+                "ff ff ff ff 0f 02 00"
+            ),
+            Ok(PlayRequest::ContainerSlotStateChanged {
+                slot_id: -1,
+                container_id: 2,
+                new_state: false,
+            })
+        );
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_SLOT_STATE_CHANGED, "00 01"),
+            Err(DecodeError::UnexpectedEnd)
         );
     }
 

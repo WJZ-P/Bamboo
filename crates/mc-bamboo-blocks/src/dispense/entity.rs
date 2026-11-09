@@ -42,7 +42,7 @@ pub(super) fn execute(
 ) -> Shot {
     let item = stack.item;
     if is_projectile(item) {
-        return Shot::plain(throw_one(world, facing, stack));
+        return Shot::plain(throw_one(world, pos, facing, stack));
     }
     if item == items::ARMOR_STAND {
         // `EntityType.spawn` 返回 null：不减数量。外层仍放 1000 和 2000。
@@ -69,10 +69,15 @@ pub(super) fn is_spawn_egg(item: i32) -> bool {
 ///
 /// With `ENTITY_DATA`, follow `spawn` returning null: the item stays and `nextFloat` is not drawn.
 /// Without that component this is a default throw.
-pub(super) fn spawn_egg(world: &mut World, facing: Direction, stack: ItemStack) -> Shot {
+pub(super) fn spawn_egg(
+    world: &mut World,
+    pos: BlockPos,
+    facing: Direction,
+    stack: ItemStack,
+) -> Shot {
     let has_data = defaults::resolve(stack.item, &stack.patch(), kinds::ENTITY_DATA).is_some();
     if !has_data {
-        return Shot::plain(throw_one(world, facing, stack));
+        return Shot::plain(throw_one(world, pos, facing, stack));
     }
     // `type.spawn` 返回 null，或者 `getType` 是 null：物品原样返回，不取 `nextFloat`。
     //

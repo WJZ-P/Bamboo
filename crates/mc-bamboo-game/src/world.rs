@@ -62,6 +62,9 @@ pub struct World {
     global: Global,
     region: Region,
     inbox: Receiver<Inbound>,
+    /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
+    /// 直接嵌 `World::new` 的测试/工具按 `JoinRequest` 传入的等级走。
+    authoritative_admin: bool,
 }
 
 impl World {
@@ -102,11 +105,13 @@ impl World {
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
         let mut global = Global::default();
+        let authoritative_admin = admin.is_some();
         if let Some(init) = admin {
             global.admin = init.snapshot.into_state();
             global.admin_messages = init.messages;
         }
         Self {
+            authoritative_admin,
             global,
             region: Region::with_keys(
                 view_distance,
@@ -161,7 +166,13 @@ impl World {
         menu::tick(&mut self.region);
         lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
+        crate::drops::tick_drop_throttle(&mut self.region);
         crate::command::admin::tick_idle(&mut self.global, &mut self.region);
+        // 官方 `ServerPlayer.doTick` 的六个只读准则。Bamboo 用玩家初值，进服后第一刻各写一次。
+        //
+        // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the
+        // player defaults and writes each once after join.
+        self.global.scoreboard_mut().tick_criteria(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
@@ -251,20 +262,28 @@ impl World {
         }
         // 连接层检查过一次，但封禁命令可能在两次检查之间改了名单。
         // 世界线程按自己的权威副本复查，理由和登录阶段完全一样。
-        let refusal = self.global.admin.login_refusal(
-            request.uuid,
-            &request.peer_ip,
-            self.region.now_millis(),
-        );
+        let refusal = self
+            .authoritative_admin
+            .then(|| {
+                self.global.admin.login_refusal(
+                    request.uuid,
+                    &request.peer_ip,
+                    self.region.now_millis(),
+                )
+            })
+            .flatten();
         if let Some(refusal) = refusal {
             let reason = crate::command::admin::refusal_message(&refusal);
             self.region.links.add(id, request.sink);
             self.region.links.kick(id, &reason);
             return;
         }
-        let op = self.global.admin.op(request.uuid);
-        let permission_level = op.map_or(0, |entry| entry.level);
-        let is_op = op.is_some();
+        let (permission_level, is_op) = if self.authoritative_admin {
+            let op = self.global.admin.op(request.uuid);
+            (op.map_or(0, |entry| entry.level), op.is_some())
+        } else {
+            (request.permission_level, request.is_op)
+        };
         // 官方 `CachedUserNameToIdResolver.add` 在进服时记下档案。
         self.global.admin.remember_player(&crate::admin::NameAndId {
             uuid: request.uuid,
@@ -272,8 +291,9 @@ impl World {
         });
 
         let game_mode = GAME_MODE;
+        let uuid = request.uuid;
         let entry = RosterEntry {
-            uuid: request.uuid,
+            uuid,
             name: request.name.clone(),
             // 皮肤只有名单要用，直接搬过来。
             properties: std::mem::take(&mut request.properties),
@@ -301,6 +321,17 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
+        // 官方 `ServerScoreboard.getStartTrackingPackets` 和 `CustomBossEvents.onPlayerConnect`
+        // 都在进服时只发给这名玩家。
+        //
+        // Official `ServerScoreboard.getStartTrackingPackets` and
+        // `CustomBossEvents.onPlayerConnect` both go only to the joining player.
+        let frames = self.global.scoreboard().join_frames();
+        self.region.links.send_frames(id, &frames);
+        self.global
+            .boss_bars_mut()
+            .on_join(&mut self.region, id, uuid);
+
         self.region
             .start_loading_chunks(id, self.global.time(), self.global.clock());
     }
@@ -324,6 +355,20 @@ impl World {
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         lectern::on_leave(&mut self.region, id);
+        // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；
+        // 分数和 Boss 栏的 UUID 集合都留着，下次进服还会补发 add 包。
+        //
+        // Official `entityRemoved` returns for players without broadcasting reset_score;
+        // scores and boss-bar UUID sets stay so rejoining gets the add packet again.
+        if let Some(name) = self
+            .region
+            .players
+            .get(&id)
+            .map(|player| player.name.clone())
+        {
+            self.global.scoreboard_mut().on_leave(&name);
+            self.global.boss_bars_mut().on_leave(id);
+        }
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {
@@ -408,11 +453,14 @@ impl World {
                 if chat::on_chat(
                     region,
                     player,
-                    message,
-                    signature.map(|bytes| *bytes),
-                    time_millis,
-                    salt,
-                    &last_seen,
+                    chat::ChatMessage {
+                        global: &self.global,
+                        text: message,
+                        signature: signature.map(|bytes| *bytes),
+                        time_millis,
+                        salt,
+                        last_seen: &last_seen,
+                    },
                 ) {
                     chat::detect_chat_rate_spam(region, player);
                 }
@@ -543,6 +591,11 @@ impl World {
                 menu::on_button(region, player, container_id, button_id);
                 lectern::on_button(region, player, container_id, button_id);
             }
+            PlayRequest::ContainerSlotStateChanged {
+                container_id,
+                slot_id,
+                new_state,
+            } => menu::on_slot_state_changed(region, player, container_id, slot_id, new_state),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }

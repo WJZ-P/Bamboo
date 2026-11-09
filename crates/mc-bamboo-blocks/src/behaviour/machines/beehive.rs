@@ -8,11 +8,13 @@ use mc_bamboo_data::{
     Block, items,
     sounds::{self, sound_event},
 };
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     behaviour::{Behaviour, Plain, common::facing_the_player},
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
+    item_exchange::ItemExchange,
     state::{BlockState, LEVEL_HONEY},
     world::World,
 };
@@ -42,26 +44,18 @@ impl Behaviour for Beehive {
         let harvests = ctx.item == items::SHEARS || ctx.item == items::GLASS_BOTTLE;
         if state.get(LEVEL_HONEY) >= MAX_HONEY_LEVELS && harvests {
             let pos = ctx.clicked_pos();
-            // 剪刀先 `dropHoneycomb`。战利品表走自己的 `random_sequence`，不碰 `level.random`。
-            // `Block.popResource` 在物品实体之前取三次 `nextDouble`。物品实体不生成，这三次照取。
-            // 然后是剪刀声、`hurtAndBreak(1)`，再 `releaseBeesAndResetHoneyLevel`。
-            // 蜂巢是空的：没有烟时也不放蜜蜂，`emptyAllLivingFromHive` 不取随机数，只把蜜清零。
-            // 玻璃瓶不掉蜜脾，所以不取那三次。`releaseBeesAndResetHoneyLevel` 同样只清零。
-            // 瓶子的 `shrink(1)` 和蜂蜜瓶还没做。
+            // 剪刀先 `dropHoneycomb`。战利品表是常量 3 个蜜脾，走自己的 `random_sequence`，
+            // 不碰 `level.random`；`Block.popResource` 为该堆取三次位置偏移，然后生成物品实体。
+            // 接着放剪刀声、扣耐久，再 `releaseBeesAndResetHoneyLevel`（这里只把蜜清零）。
+            // 玻璃瓶不掉蜜脾，先把瓶子的消耗和蜜瓶交给游戏层，再放装瓶声，同样清零。
             //
-            // Shears call `dropHoneycomb` first. The loot table uses its own `random_sequence`
-            // and does not touch `level.random`. `Block.popResource` draws three `nextDouble`s
-            // before the item entity. The entity is not spawned; the three draws still happen.
-            // Then the shear sound, `hurtAndBreak(1)`, then `releaseBeesAndResetHoneyLevel`.
-            // The hive is empty: even without smoke no bees are released, and
-            // `emptyAllLivingFromHive` draws nothing. Only the honey is cleared.
-            // A glass bottle does not drop honeycomb, so it does not draw those three.
-            // `releaseBeesAndResetHoneyLevel` only clears the honey. The bottle's `shrink(1)`
-            // and the honey bottle are not done yet.
+            // Shears call `dropHoneycomb` first. The constant three honeycomb use their own
+            // `random_sequence`, not `level.random`; `Block.popResource` draws three position
+            // offsets and spawns the item. Then the shear sound, `hurtAndBreak(1)`, and
+            // `releaseBeesAndResetHoneyLevel` (which here only clears the honey). A glass bottle
+            // drops no honeycomb: record the bottle exchange, then play the fill sound and clear.
             if ctx.item == items::SHEARS {
-                let _ = world.random().next_double();
-                let _ = world.random().next_double();
-                let _ = world.random().next_double();
+                world.pop_resource(pos, ItemStack::new(items::HONEYCOMB, 3));
                 world.play_sound(
                     ctx.actor.position,
                     sound_event("minecraft:block.beehive.shear"),
@@ -72,6 +66,7 @@ impl Behaviour for Beehive {
                 );
                 crate::durability::hurt_hand(world, ctx.hand, 1);
             } else {
+                world.set_item_exchange(ItemExchange::BottleHoney);
                 world.play_sound(
                     ctx.actor.position,
                     sound_event("minecraft:item.bottle.fill"),

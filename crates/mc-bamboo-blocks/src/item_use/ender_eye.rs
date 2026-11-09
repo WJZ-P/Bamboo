@@ -40,7 +40,7 @@ fn fill_portal(world: &mut World, start: BlockPos) {
     for x in 0..3 {
         for z in 0..3 {
             let pos = start.offset(x, 0, z);
-            world.destroy_block(pos, UPDATE_LIMIT);
+            world.destroy_block(pos, true, UPDATE_LIMIT);
             world.set_block(pos, BlockState(blocks::END_PORTAL), UPDATE_CLIENTS);
         }
     }

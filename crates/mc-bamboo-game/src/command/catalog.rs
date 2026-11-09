@@ -7,7 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, admin, blocks, gamerule, items, players, teleport, time,
+    CommandFn, Commands, admin, blocks, bossbar, gamerule, items, particle, players, playsound,
+    scoreboard, team, teleport, text, time, title,
 };
 
 struct Builder {
@@ -65,17 +66,11 @@ impl Builder {
 pub(crate) fn build() -> Commands {
     let mut builder = Builder::new();
     let root = builder.graph.root();
-    register_clear(&mut builder, root);
+    register_bossbar(&mut builder, root);
     register_ban(&mut builder, root);
     register_ban_ip(&mut builder, root);
     register_banlist(&mut builder, root);
     register_deop(&mut builder, root);
-    register_me(&mut builder, root);
-    register_fill(&mut builder, root);
-    register_gamemode(&mut builder, root);
-    register_gamerule(&mut builder, root);
-    register_give(&mut builder, root);
-    register_help(&mut builder, root);
     register_op(&mut builder, root);
     register_pardon(&mut builder, root);
     register_pardon_ip(&mut builder, root);
@@ -84,12 +79,25 @@ pub(crate) fn build() -> Commands {
     register_transfer(&mut builder, root);
     register_version(&mut builder, root);
     register_whitelist(&mut builder, root);
+    register_clear(&mut builder, root);
+    register_me(&mut builder, root);
+    register_fill(&mut builder, root);
+    register_gamemode(&mut builder, root);
+    register_gamerule(&mut builder, root);
+    register_give(&mut builder, root);
+    register_help(&mut builder, root);
     register_kick(&mut builder, root);
     register_list(&mut builder, root);
+    register_playsound(&mut builder, root);
     register_msg(&mut builder, root);
+    register_particle(&mut builder, root);
     register_say(&mut builder, root);
+    register_scoreboard(&mut builder, root);
     register_setblock(&mut builder, root);
+    register_tellraw(&mut builder, root);
+    register_team(&mut builder, root);
     register_teleport(&mut builder, root);
+    register_title(&mut builder, root);
     register_time(&mut builder, root);
     Commands {
         graph: builder.graph,
@@ -138,6 +146,91 @@ fn argument_of(rule: &GameRuleDef) -> ArgumentType {
             max: rule.max,
         },
     }
+}
+
+fn register_bossbar(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "bossbar", permission::GAMEMASTERS);
+    let add = builder.literal(command, "add", 0);
+    let id = builder.argument(add, "id", ArgumentType::ResourceLocation, 0);
+    let name = builder.argument(id, "name", ArgumentType::Component, 0);
+    builder.run(name, bossbar::add);
+
+    let remove = builder.literal(command, "remove", 0);
+    let id = builder.argument(remove, "id", ArgumentType::ResourceLocation, 0);
+    builder.run(id, bossbar::remove);
+    builder.bind_literal(command, "list", bossbar::list);
+
+    let get = builder.literal(command, "get", 0);
+    let id = builder.argument(get, "id", ArgumentType::ResourceLocation, 0);
+    builder.bind_literal(id, "value", bossbar::get_value);
+    builder.bind_literal(id, "max", bossbar::get_max);
+    builder.bind_literal(id, "visible", bossbar::get_visible);
+    builder.bind_literal(id, "players", bossbar::get_players);
+
+    let set = builder.literal(command, "set", 0);
+    let id = builder.argument(set, "id", ArgumentType::ResourceLocation, 0);
+    let name = builder.literal(id, "name", 0);
+    let contents = builder.argument(name, "name", ArgumentType::Component, 0);
+    builder.run(contents, bossbar::set_name);
+    let color = builder.literal(id, "color", 0);
+    for (literal, action) in [
+        ("pink", bossbar::color_pink as CommandFn),
+        ("blue", bossbar::color_blue),
+        ("red", bossbar::color_red),
+        ("green", bossbar::color_green),
+        ("yellow", bossbar::color_yellow),
+        ("purple", bossbar::color_purple),
+        ("white", bossbar::color_white),
+    ] {
+        builder.bind_literal(color, literal, action);
+    }
+    let style = builder.literal(id, "style", 0);
+    for (literal, action) in [
+        ("progress", bossbar::style_progress as CommandFn),
+        ("notched_6", bossbar::style_notched_6),
+        ("notched_10", bossbar::style_notched_10),
+        ("notched_12", bossbar::style_notched_12),
+        ("notched_20", bossbar::style_notched_20),
+    ] {
+        builder.bind_literal(style, literal, action);
+    }
+    let value = builder.literal(id, "value", 0);
+    let number = builder.argument(
+        value,
+        "value",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(number, bossbar::set_value);
+    let max = builder.literal(id, "max", 0);
+    let number = builder.argument(
+        max,
+        "max",
+        ArgumentType::Integer {
+            min: 1,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(number, bossbar::set_max);
+    let visible = builder.literal(id, "visible", 0);
+    let flag = builder.argument(visible, "visible", ArgumentType::Bool, 0);
+    builder.run(flag, bossbar::set_visible);
+    let players = builder.literal(id, "players", 0);
+    builder.run(players, bossbar::set_players);
+    let targets = builder.argument(
+        players,
+        "targets",
+        ArgumentType::Entity {
+            single: false,
+            players_only: true,
+        },
+        0,
+    );
+    builder.run(targets, bossbar::set_players);
 }
 
 fn register_clear(builder: &mut Builder, root: usize) {
@@ -243,6 +336,90 @@ fn register_msg(builder: &mut Builder, root: usize) {
     builder.graph.redirect(whisper, msg);
 }
 
+/// `PlaySoundCommand.register`：`sound` 用 `ResourceLocationArgument` 加
+/// `minecraft:available_sounds` 自定义补全；11 个来源各挂同一条参数链。
+/// `ParticleCommand.register`：`name` 后面 pos/delta/speed/count/force|normal/viewers。
+fn register_particle(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "particle", permission::GAMEMASTERS);
+    let name = builder.argument(command, "name", ArgumentType::Particle, 0);
+    builder.run(name, particle::normal);
+    let pos = builder.argument(name, "pos", ArgumentType::Vec3, 0);
+    builder.run(pos, particle::normal);
+    let spread = builder.argument(pos, "delta", ArgumentType::Vec3Uncentered, 0);
+    let speed = builder.argument(
+        spread,
+        "speed",
+        ArgumentType::Float {
+            min: 0.0,
+            max: f32::MAX,
+        },
+        0,
+    );
+    let count = builder.argument(
+        speed,
+        "count",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(count, particle::normal);
+    let force_action: CommandFn = particle::force;
+    let normal_action: CommandFn = particle::normal;
+    for (mode, action) in [("force", force_action), ("normal", normal_action)] {
+        let branch = builder.literal(count, mode, 0);
+        builder.run(branch, action);
+        let viewers = builder.argument(branch, "viewers", players_argument(), 0);
+        builder.run(viewers, action);
+    }
+}
+
+fn register_playsound(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "playsound", permission::GAMEMASTERS);
+    let sound = builder.argument(command, "sound", ArgumentType::ResourceLocation, 0);
+    builder
+        .graph
+        .suggest_with(sound, playsound::SUGGESTION, playsound::suggest_sounds);
+    builder.run(sound, playsound::sound_only);
+    for (name, action) in playsound::SOURCES
+        .iter()
+        .map(|(name, _)| *name)
+        .zip(playsound::ACTIONS)
+    {
+        let branch = builder.literal(sound, name, 0);
+        builder.run(branch, action);
+        let targets = builder.argument(branch, "targets", players_argument(), 0);
+        builder.run(targets, action);
+        let pos = builder.argument(targets, "pos", ArgumentType::Vec3, 0);
+        builder.run(pos, action);
+        let volume = builder.argument(
+            pos,
+            "volume",
+            ArgumentType::Float {
+                min: 0.0,
+                max: f32::MAX,
+            },
+            0,
+        );
+        builder.run(volume, action);
+        let pitch = builder.argument(
+            volume,
+            "pitch",
+            ArgumentType::Float { min: 0.0, max: 2.0 },
+            0,
+        );
+        builder.run(pitch, action);
+        let min_volume = builder.argument(
+            pitch,
+            "minVolume",
+            ArgumentType::Float { min: 0.0, max: 1.0 },
+            0,
+        );
+        builder.run(min_volume, action);
+    }
+}
+
 fn register_say(builder: &mut Builder, root: usize) {
     let say = builder.literal(root, "say", permission::GAMEMASTERS);
     let message = builder.argument(say, "message", ArgumentType::Message, 0);
@@ -258,6 +435,52 @@ fn register_setblock(builder: &mut Builder, root: usize) {
     builder.bind_literal(block, "keep", blocks::setblock_keep);
     builder.bind_literal(block, "replace", blocks::setblock_replace);
     builder.bind_literal(block, "strict", blocks::setblock_strict);
+}
+
+/// `TellRawCommand.register`：权限 2，只给每个目标发系统消息，没有成功反馈。
+fn register_tellraw(builder: &mut Builder, root: usize) {
+    let tellraw = builder.literal(root, "tellraw", permission::GAMEMASTERS);
+    let targets = builder.argument(tellraw, "targets", players_argument(), 0);
+    let message = builder.argument(targets, "message", ArgumentType::Component, 0);
+    builder.run(message, text::tellraw);
+}
+
+/// `TitleCommand.register`：权限 2，六种动作；`times` 用 `TimeArgument`（min 0）。
+fn register_title(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "title", permission::GAMEMASTERS);
+    let targets = builder.argument(command, "targets", players_argument(), 0);
+    for (name, action) in [
+        ("clear", title::Action::Clear),
+        ("reset", title::Action::Reset),
+    ] {
+        let node = builder.literal(targets, name, 0);
+        builder.run(node, action_fn(action));
+    }
+    for (name, action) in [
+        ("title", title::Action::Title),
+        ("subtitle", title::Action::Subtitle),
+        ("actionbar", title::Action::Actionbar),
+    ] {
+        let branch = builder.literal(targets, name, 0);
+        let text = builder.argument(branch, "title", ArgumentType::Component, 0);
+        builder.run(text, action_fn(action));
+    }
+    let times = builder.literal(targets, "times", 0);
+    let fade_in = builder.argument(times, "fadeIn", ArgumentType::Time { minimum: 0 }, 0);
+    let stay = builder.argument(fade_in, "stay", ArgumentType::Time { minimum: 0 }, 0);
+    let fade_out = builder.argument(stay, "fadeOut", ArgumentType::Time { minimum: 0 }, 0);
+    builder.run(fade_out, title::run_times);
+}
+
+fn action_fn(action: title::Action) -> CommandFn {
+    match action {
+        title::Action::Clear => title::clear,
+        title::Action::Reset => title::reset,
+        title::Action::Title => title::show_title,
+        title::Action::Subtitle => title::show_subtitle,
+        title::Action::Actionbar => title::show_actionbar,
+        title::Action::Times => title::run_times,
+    }
 }
 
 fn register_teleport(builder: &mut Builder, root: usize) {
@@ -347,6 +570,290 @@ fn add_clock_nodes(builder: &mut Builder, parent: usize, gametime: bool) {
     if gametime {
         builder.bind_literal(query, "gametime", time::query_gametime);
     }
+}
+
+fn register_scoreboard(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "scoreboard", permission::GAMEMASTERS);
+    let objectives = builder.literal(command, "objectives", 0);
+    let players = builder.literal(command, "players", 0);
+
+    // objectives list|add|remove|setdisplay|modify
+    builder.bind_literal(objectives, "list", scoreboard::objectives_list);
+    let add = builder.literal(objectives, "add", 0);
+    let objective = builder.argument(
+        add,
+        "objective",
+        ArgumentType::String(StringKind::SingleWord),
+        0,
+    );
+    let criteria = builder.argument(objective, "criteria", ArgumentType::Criteria, 0);
+    builder.run(criteria, scoreboard::objectives_add);
+    let display_name = builder.argument(criteria, "displayName", ArgumentType::Component, 0);
+    builder.run(display_name, scoreboard::objectives_add);
+
+    let remove = builder.literal(objectives, "remove", 0);
+    let target = builder.argument(remove, "objective", ArgumentType::Objective, 0);
+    builder.run(target, scoreboard::objectives_remove);
+
+    let setdisplay = builder.literal(objectives, "setdisplay", 0);
+    let slot = builder.argument(setdisplay, "slot", ArgumentType::DisplaySlot, 0);
+    builder.run(slot, scoreboard::objectives_setdisplay);
+    let shown = builder.argument(slot, "objective", ArgumentType::Objective, 0);
+    builder.run(shown, scoreboard::objectives_setdisplay);
+
+    let modify = builder.literal(objectives, "modify", 0);
+    let objective = builder.argument(modify, "objective", ArgumentType::Objective, 0);
+    let displayname = builder.literal(objective, "displayname", 0);
+    let name = builder.argument(displayname, "displayName", ArgumentType::Component, 0);
+    builder.run(name, scoreboard::objectives_displayname);
+    let rendertype = builder.literal(objective, "rendertype", 0);
+    builder.bind_literal(rendertype, "hearts", scoreboard::objectives_render_hearts);
+    builder.bind_literal(rendertype, "integer", scoreboard::objectives_render_integer);
+    let autoupdate = builder.literal(objective, "displayautoupdate", 0);
+    let value = builder.argument(autoupdate, "value", ArgumentType::Bool, 0);
+    builder.run(value, scoreboard::objectives_autoupdate);
+    add_objective_number_formats(builder, objective);
+
+    // players list|get|set|add|remove|reset|enable|operation|display
+    builder.bind_literal(players, "list", scoreboard::players_list);
+    let list = builder.literal(players, "list", 0);
+    let target = builder.argument(
+        list,
+        "target",
+        ArgumentType::ScoreHolder { multiple: false },
+        0,
+    );
+    builder.run(target, scoreboard::players_list_scores);
+    let get = builder.literal(players, "get", 0);
+    let target = builder.argument(
+        get,
+        "target",
+        ArgumentType::ScoreHolder { multiple: false },
+        0,
+    );
+    let objective = builder.argument(target, "objective", ArgumentType::Objective, 0);
+    builder.run(objective, scoreboard::players_get);
+
+    let set = builder.literal(players, "set", 0);
+    let targets = builder.argument(
+        set,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    let score = builder.argument(
+        objective,
+        "score",
+        ArgumentType::Integer {
+            min: i32::MIN,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(score, scoreboard::players_set);
+    let add = builder.literal(players, "add", 0);
+    let targets = builder.argument(
+        add,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    let score = builder.argument(
+        objective,
+        "score",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(score, scoreboard::players_add);
+    let remove = builder.literal(players, "remove", 0);
+    let targets = builder.argument(
+        remove,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    let score = builder.argument(
+        objective,
+        "score",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(score, scoreboard::players_remove);
+
+    let reset = builder.literal(players, "reset", 0);
+    let targets = builder.argument(
+        reset,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    builder.run(targets, scoreboard::players_reset);
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    builder.run(objective, scoreboard::players_reset);
+
+    let enable = builder.literal(players, "enable", 0);
+    let targets = builder.argument(
+        enable,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    builder.run(objective, scoreboard::players_enable);
+
+    let operation = builder.literal(players, "operation", 0);
+    let targets = builder.argument(
+        operation,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let target_objective = builder.argument(targets, "targetObjective", ArgumentType::Objective, 0);
+    let op = builder.argument(target_objective, "operation", ArgumentType::Operation, 0);
+    let source = builder.argument(
+        op,
+        "source",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let source_objective = builder.argument(source, "sourceObjective", ArgumentType::Objective, 0);
+    builder.run(source_objective, scoreboard::players_operation);
+
+    let display = builder.literal(players, "display", 0);
+    let name = builder.literal(display, "name", 0);
+    let targets = builder.argument(
+        name,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    builder.run(objective, scoreboard::players_display_clear);
+    let contents = builder.argument(objective, "name", ArgumentType::Component, 0);
+    builder.run(contents, scoreboard::players_display_name);
+    let format = builder.literal(display, "numberformat", 0);
+    let targets = builder.argument(
+        format,
+        "targets",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+    builder.run(objective, scoreboard::players_format_clear);
+    add_player_number_formats(builder, objective);
+}
+
+fn add_objective_number_formats(builder: &mut Builder, objective: usize) {
+    let format = builder.literal(objective, "numberformat", 0);
+    builder.run(format, scoreboard::objectives_format_default);
+    builder.bind_literal(format, "blank", scoreboard::objectives_format_blank);
+    let styled = builder.literal(format, "styled", 0);
+    let style = builder.argument(styled, "style", ArgumentType::Style, 0);
+    builder.run(style, scoreboard::objectives_format_styled);
+    let fixed = builder.literal(format, "fixed", 0);
+    let contents = builder.argument(fixed, "contents", ArgumentType::Component, 0);
+    builder.run(contents, scoreboard::objectives_format_fixed);
+}
+
+fn add_player_number_formats(builder: &mut Builder, objective: usize) {
+    builder.bind_literal(objective, "blank", scoreboard::players_format_blank);
+    let styled = builder.literal(objective, "styled", 0);
+    let style = builder.argument(styled, "style", ArgumentType::Style, 0);
+    builder.run(style, scoreboard::players_format_styled);
+    let fixed = builder.literal(objective, "fixed", 0);
+    let contents = builder.argument(fixed, "contents", ArgumentType::Component, 0);
+    builder.run(contents, scoreboard::players_format_fixed);
+}
+
+fn register_team(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "team", permission::GAMEMASTERS);
+    builder.bind_literal(command, "list", team::list);
+    let list = builder.literal(command, "list", 0);
+    let name = builder.argument(list, "team", ArgumentType::Team, 0);
+    builder.run(name, team::list_members);
+
+    let add = builder.literal(command, "add", 0);
+    let name = builder.argument(add, "team", ArgumentType::String(StringKind::SingleWord), 0);
+    builder.run(name, team::add);
+    let display = builder.argument(name, "displayName", ArgumentType::Component, 0);
+    builder.run(display, team::add);
+
+    let remove = builder.literal(command, "remove", 0);
+    let name = builder.argument(remove, "team", ArgumentType::Team, 0);
+    builder.run(name, team::remove);
+
+    let empty = builder.literal(command, "empty", 0);
+    let name = builder.argument(empty, "team", ArgumentType::Team, 0);
+    builder.run(name, team::empty);
+
+    let join = builder.literal(command, "join", 0);
+    let name = builder.argument(join, "team", ArgumentType::Team, 0);
+    builder.run(name, team::join);
+    let members = builder.argument(
+        name,
+        "members",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    builder.run(members, team::join);
+
+    let leave = builder.literal(command, "leave", 0);
+    let members = builder.argument(
+        leave,
+        "members",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    builder.run(members, team::leave);
+
+    let modify = builder.literal(command, "modify", 0);
+    let name = builder.argument(modify, "team", ArgumentType::Team, 0);
+    let display_name = builder.literal(name, "displayName", 0);
+    let display = builder.argument(display_name, "displayName", ArgumentType::Component, 0);
+    builder.run(display, team::display_name);
+    let prefix = builder.literal(name, "prefix", 0);
+    let text = builder.argument(prefix, "prefix", ArgumentType::Component, 0);
+    builder.run(text, team::prefix);
+    let suffix = builder.literal(name, "suffix", 0);
+    let text = builder.argument(suffix, "suffix", ArgumentType::Component, 0);
+    builder.run(text, team::suffix);
+
+    let color = builder.literal(name, "color", 0);
+    let value = builder.argument(color, "value", ArgumentType::TeamColor, 0);
+    builder.run(value, team::color);
+    builder.bind_literal(color, "reset", team::clear_color);
+
+    let friendly = builder.literal(name, "friendlyFire", 0);
+    let allowed = builder.argument(friendly, "allowed", ArgumentType::Bool, 0);
+    builder.run(allowed, team::friendly_fire);
+    let invisibles = builder.literal(name, "seeFriendlyInvisibles", 0);
+    let allowed = builder.argument(invisibles, "allowed", ArgumentType::Bool, 0);
+    builder.run(allowed, team::see_invisibles);
+
+    let nametag = builder.literal(name, "nametagVisibility", 0);
+    builder.bind_literal(nametag, "always", team::nametag_always);
+    builder.bind_literal(nametag, "never", team::nametag_never);
+    builder.bind_literal(nametag, "hideForOtherTeams", team::nametag_hide_other);
+    builder.bind_literal(nametag, "hideForOwnTeam", team::nametag_hide_own);
+    let death = builder.literal(name, "deathMessageVisibility", 0);
+    builder.bind_literal(death, "always", team::death_always);
+    builder.bind_literal(death, "never", team::death_never);
+    builder.bind_literal(death, "hideForOtherTeams", team::death_hide_other);
+    builder.bind_literal(death, "hideForOwnTeam", team::death_hide_own);
+    let collision = builder.literal(name, "collisionRule", 0);
+    builder.bind_literal(collision, "always", team::collision_always);
+    builder.bind_literal(collision, "never", team::collision_never);
+    builder.bind_literal(collision, "pushOtherTeams", team::collision_other);
+    builder.bind_literal(collision, "pushOwnTeam", team::collision_own);
 }
 
 fn register_op(builder: &mut Builder, root: usize) {

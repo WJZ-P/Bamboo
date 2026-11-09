@@ -31,6 +31,10 @@ pub enum ReplayShape {
     /// The player's 2×2 crafting grid.
     Inventory,
     Crafting,
+    /// 合成器：九格材料、玩家 36 格、一个只读结果格。
+    ///
+    /// A crafter: nine grid slots, the player's 36 slots, and a read-only result slot.
+    Crafter,
     Stonecutter,
     Smithing,
     Furnace,
@@ -57,7 +61,8 @@ impl ReplayShape {
             | Self::Smoker
             | Self::Brewing
             | Self::Loom
-            | Self::Grindstone => ContainerKind::Chest,
+            | Self::Grindstone
+            | Self::Crafter => ContainerKind::Chest,
         }
     }
 
@@ -66,6 +71,7 @@ impl ReplayShape {
         match self {
             Self::Inventory => Some(WorkKind::Inventory),
             Self::Crafting => Some(WorkKind::Crafting),
+            Self::Crafter => Some(WorkKind::Crafter),
             Self::Stonecutter => Some(WorkKind::Stonecutter),
             Self::Smithing => Some(WorkKind::Smithing),
             Self::Furnace => Some(WorkKind::Furnace),
@@ -98,7 +104,8 @@ impl ReplayShape {
             | Self::Smoker
             | Self::Brewing
             | Self::Loom
-            | Self::Grindstone => Some(index),
+            | Self::Grindstone
+            | Self::Crafter => Some(index),
             _ => None,
         }
     }
@@ -246,6 +253,7 @@ impl Replay {
         if !self.menu.valid_slot_index(slot) {
             return self.snapshot();
         }
+        let mut thrown = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -256,6 +264,7 @@ impl Replay {
             quickcraft_type: &mut self.menu.quickcraft_type,
             quickcraft_slots: &mut self.menu.quickcraft_slots,
             creative: self.creative,
+            thrown: &mut thrown,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         // 客户端从不预测，回传的总是空光标。
@@ -292,6 +301,7 @@ impl Replay {
             return (self.snapshot(), Vec::new(), false);
         }
         let before = self.menu_slots();
+        let mut thrown = Vec::new();
         let mut ctx = Ctx {
             kind: self.menu.kind,
             container_size: self.menu.container_size,
@@ -302,6 +312,7 @@ impl Replay {
             quickcraft_type: &mut self.menu.quickcraft_type,
             quickcraft_slots: &mut self.menu.quickcraft_slots,
             creative: self.creative,
+            thrown: &mut thrown,
         };
         super::do_click(&mut ctx, i32::from(slot), i32::from(button), input);
         let after = self.menu_slots();
