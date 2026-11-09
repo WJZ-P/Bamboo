@@ -379,19 +379,13 @@ impl BossBars {
             }
             bar.selected.insert(*uuid);
         }
-        // 官方 `setPlayers` 把离线的旧 UUID 也移出集合。
+        // 官方 `setPlayers` 把离线的旧 UUID 也移出集合，只看 UUID 集合有没有变。
         //
-        // Official `setPlayers` also removes stale offline UUIDs from the set.
-        let stale: Vec<Uuid> = bar
-            .selected
-            .iter()
-            .copied()
-            .filter(|uuid| !wanted.contains(uuid))
-            .collect();
-        for uuid in stale {
-            bar.selected.remove(&uuid);
+        // Official `setPlayers` also removes stale offline UUIDs; any change counts.
+        if bar.selected != wanted {
+            bar.selected = wanted;
+            changed = true;
         }
-        bar.selected = wanted;
         Some(changed)
     }
 

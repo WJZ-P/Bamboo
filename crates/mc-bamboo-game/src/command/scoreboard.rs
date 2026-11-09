@@ -908,7 +908,7 @@ pub(crate) fn players_display_name(
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let objective = writable(global, parsed, "objective")?;
+    let objective = goal(global, parsed, "objective")?;
     let holders = holders(global, region, id, parsed, "targets")?;
     let formatted = objective_name(global, &objective)?;
     let is_clear = parsed.get("name").is_none();
@@ -989,7 +989,7 @@ pub(crate) fn players_display_numberformat(
     parsed: &ParsedCommand,
     format: Option<NumberFormat>,
 ) -> Result<(), CommandFail> {
-    let objective = writable(global, parsed, "objective")?;
+    let objective = goal(global, parsed, "objective")?;
     let holders = holders(global, region, id, parsed, "targets")?;
     let formatted = objective_name(global, &objective)?;
     for name in &holders.names {
