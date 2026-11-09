@@ -23,6 +23,7 @@
 //! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 
+pub mod admin;
 mod block_items;
 mod book;
 mod campfire;

@@ -62,8 +62,10 @@ pub(super) async fn serve(
         encryption,
         // 进了 Play 就没有进服时限了，阶段这时用不到。
         phase: _,
+        peer_ip: _,
     } = connection;
     let player = PlayerId(session.entity_id);
+    let peer_ip = connection.peer_ip.clone();
     let leave = LeaveGuard {
         inbox: &shared.inbox,
         player,
@@ -74,6 +76,7 @@ pub(super) async fn serve(
         shared,
         max_frame_len,
         compression,
+        peer_ip,
     };
     let (outcome, flushed) = exchange(
         &mut stream,
@@ -221,6 +224,8 @@ struct RequestReader<'a> {
     shared: &'a Shared,
     max_frame_len: usize,
     compression: Option<i32>,
+    /// 对端 IP 文本，交给世界线程复查 IP 封禁。
+    peer_ip: String,
 }
 
 impl RequestReader<'_> {
@@ -231,7 +236,14 @@ impl RequestReader<'_> {
         client: ClientInformation,
         outbound: &Outbound,
     ) -> Result<(), ConnectionError> {
-        let op = self.shared.ops.get(session.uuid);
+        let op = self
+            .shared
+            .admin
+            .read()
+            .expect("管理名单的锁不应该中毒")
+            .ops
+            .get(&session.uuid)
+            .map(|entry| entry.entry);
         let request = JoinRequest {
             id: self.player,
             uuid: session.uuid,
@@ -245,6 +257,7 @@ impl RequestReader<'_> {
             // Anyone missing from it is level 0. `is_op` is the spam exemption, so a level-0 op still counts.
             permission_level: op.map_or(0, |entry| entry.level),
             is_op: op.is_some(),
+            peer_ip: self.peer_ip.clone(),
             sink: Box::new(outbound.clone()),
         };
         self.send_to_world(Inbound::Join(Box::new(request)))

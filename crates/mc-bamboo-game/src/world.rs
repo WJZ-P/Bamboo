@@ -40,7 +40,7 @@ const GAME_MODE: GameMode = GameMode::Creative;
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
 
 /// 世界的启动参数。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldConfig {
     /// 服务端视距，合法范围是 2 到 32。
     pub view_distance: i32,
@@ -53,6 +53,8 @@ pub struct WorldConfig {
     /// Official `enforce-secure-profile`, on by default. It does nothing until online mode is on
     /// and the profile keys have been fetched.
     pub enforce_secure_profile: bool,
+    /// 启动时读到的管理名单，成为世界线程里的权威副本。
+    pub admin: crate::admin::AdminSnapshot,
 }
 
 /// 所有游戏状态的唯一所有者。
@@ -76,11 +78,36 @@ impl World {
         inbox: Receiver<Inbound>,
         keys: Arc<ServiceProfileKeys>,
     ) -> Self {
+        Self::build(config, inbox, keys, None)
+    }
+
+    /// 连接层把启动时读到的名单和两条管理通道交给世界线程。
+    /// 名单变更作为 owned 消息发给连接层，世界线程不会等它。
+    pub fn with_admin(
+        config: WorldConfig,
+        inbox: Receiver<Inbound>,
+        keys: Arc<ServiceProfileKeys>,
+        admin: crate::admin::AdminInit,
+    ) -> Self {
+        Self::build(config, inbox, keys, Some(admin))
+    }
+
+    fn build(
+        config: WorldConfig,
+        inbox: Receiver<Inbound>,
+        keys: Arc<ServiceProfileKeys>,
+        admin: Option<crate::admin::AdminInit>,
+    ) -> Self {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
+        let mut global = Global::default();
+        if let Some(init) = admin {
+            global.admin = init.snapshot.into_state();
+            global.admin_messages = init.messages;
+        }
         Self {
-            global: Global::default(),
+            global,
             region: Region::with_keys(
                 view_distance,
                 config.max_players,
@@ -134,6 +161,7 @@ impl World {
         menu::tick(&mut self.region);
         lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
+        crate::command::admin::tick_idle(&mut self.global, &mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
@@ -148,7 +176,32 @@ impl World {
         chunk_tracking::send_chunks(&mut self.region);
         movement::finish_tick(&mut self.region);
         self.region.links.flush();
+        if self.global.admin.stop_requested {
+            return self.shut_down();
+        }
+        // 名单变更在这一 tick 末尾统一发布：一条命令改多个目标只写一次盘。
+        let changes = crate::command::admin::take_changes(&mut self.region);
+        if changes.any() {
+            self.publish_admin(changes);
+        }
         ControlFlow::Continue(())
+    }
+
+    /// 把名单快照交给连接层写盘。通道不阻塞，满了只记日志。
+    fn publish_admin(&self, changes: crate::admin::AdminChanges) {
+        let Some(sender) = &self.global.admin_messages else {
+            return;
+        };
+        let update = crate::admin::AdminUpdate {
+            snapshot: self.global.admin.snapshot(),
+            changes,
+        };
+        if sender
+            .send(crate::admin::AdminMessage::Update(update))
+            .is_err()
+        {
+            warn!("admin list update could not reach the connection layer");
+        }
     }
 
     /// 按到达顺序处理这一 tick 之前收到的所有消息。
@@ -176,6 +229,10 @@ impl World {
                 }
                 Inbound::Latency { player, millis } => self.global.set_latency(player, millis),
                 Inbound::Leave { player } => self.on_leave(player),
+                Inbound::WhitelistReload(reload) => {
+                    self.global.admin.whitelist = reload.entries;
+                    crate::command::admin::after_reload(&mut self.global, &mut self.region);
+                }
                 Inbound::Shutdown => return self.shut_down(),
             }
         }
@@ -192,6 +249,23 @@ impl World {
             warn!(player = id.0, "ignoring a second join with the same id");
             return;
         }
+        // 连接层检查过一次，但封禁命令可能在两次检查之间改了名单。
+        // 世界线程按自己的权威副本复查，理由和登录阶段完全一样。
+        let refusal = self.global.admin.login_refusal(
+            request.uuid,
+            &request.peer_ip,
+            self.region.now_millis(),
+        );
+        if let Some(refusal) = refusal {
+            let reason = crate::command::admin::refusal_message(&refusal);
+            self.region.links.add(id, request.sink);
+            self.region.links.kick(id, &reason);
+            return;
+        }
+        let op = self.global.admin.op(request.uuid);
+        let permission_level = op.map_or(0, |entry| entry.level);
+        let is_op = op.is_some();
+
         let game_mode = GAME_MODE;
         let entry = RosterEntry {
             uuid: request.uuid,
@@ -204,7 +278,11 @@ impl World {
             chat_session: None,
         };
 
-        self.region.add_player(request, game_mode);
+        self.region
+            .add_player(request, game_mode, permission_level, is_op);
+        self.region
+            .last_action_millis
+            .insert(id, self.region.now_millis());
 
         if let Some(frames) = self.global.tab_list() {
             self.region.links.send_frames(id, &frames);
@@ -230,6 +308,8 @@ impl World {
         }
         // 连接已经结束了，后面的包都不用写给它。
         self.region.links.remove(id);
+        self.region.last_action_millis.remove(&id);
+        self.region.peer_ips.remove(&id);
 
         if let Some(frames) = self.global.left_message(id) {
             self.region.links.broadcast(&frames);
@@ -251,6 +331,7 @@ impl World {
         if !self.region.links.is_open(player) {
             return;
         }
+        crate::command::admin::note_action(&mut self.region, player, &request);
         match &request {
             PlayRequest::ChatCommand { command, signed } => {
                 let command = command.clone();

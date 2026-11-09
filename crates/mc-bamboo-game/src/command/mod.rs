@@ -10,6 +10,7 @@
 
 pub(crate) use players::change_own_mode;
 
+pub(crate) mod admin;
 mod blocks;
 mod catalog;
 mod feedback;
@@ -316,6 +317,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         ArgumentType::Resource { registry } => ArgumentProperties::Registry(registry),
         ArgumentType::Bool
         | ArgumentType::GameMode
+        | ArgumentType::GameProfile
         | ArgumentType::EntityAnchor
         | ArgumentType::BlockPos
         | ArgumentType::Vec3

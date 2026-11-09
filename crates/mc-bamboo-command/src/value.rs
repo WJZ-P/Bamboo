@@ -389,6 +389,15 @@ pub struct MessagePart {
     pub selector: EntitySelector,
 }
 
+/// 官方 `GameProfileArgument.Result`：一个玩家名，或者一个只选玩家的选择器。
+///
+/// Official `GameProfileArgument.Result`: a player name, or a players-only selector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GameProfileInput {
+    Name(String),
+    Selector(Box<EntitySelector>),
+}
+
 /// 所有参数类型的解析结果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -399,6 +408,7 @@ pub enum Value {
     Double(f64),
     String(String),
     Entity(Box<EntitySelector>),
+    GameProfile(GameProfileInput),
     BlockPos(Coordinates),
     Vec3(Coordinates),
     Rotation(Rotation),
@@ -458,6 +468,13 @@ impl Value {
     pub fn as_entity(&self) -> Option<&EntitySelector> {
         match self {
             Self::Entity(value) => Some(value.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub fn as_game_profile(&self) -> Option<&GameProfileInput> {
+        match self {
+            Self::GameProfile(value) => Some(value),
             _ => None,
         }
     }

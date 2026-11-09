@@ -178,6 +178,10 @@ pub(crate) struct Global {
     ///
     /// Game rules. They are not saved, so a restart restores the official defaults.
     rules: crate::gamerules::GameRuleSet,
+    /// OP、封禁和白名单的权威副本。世界线程是唯一写者。
+    pub(crate) admin: crate::admin::AdminState,
+    /// 名单变更后发布给连接层并写盘的通道。没有连接层时（单元测试）是 `None`。
+    pub(crate) admin_messages: Option<std::sync::mpsc::Sender<crate::admin::AdminMessage>>,
 }
 
 impl Default for Global {
@@ -189,6 +193,8 @@ impl Default for Global {
             roster: BTreeMap::new(),
             ticks_since_latency_broadcast: 0,
             rules: crate::gamerules::GameRuleSet::vanilla(),
+            admin: crate::admin::AdminState::default(),
+            admin_messages: None,
         }
     }
 }
