@@ -76,10 +76,10 @@ impl ContainerKind {
             Self::ShulkerBox => menu::SHULKER_BOX,
             Self::Hopper => menu::HOPPER,
             Self::Dispenser | Self::Dropper => menu::GENERIC_3X3,
-            // 这四种官方没有菜单。合成器有 `CrafterMenu`，这次不打开，见 `menu_shape`。
+            // 这四种官方没有菜单，合成器用 `CrafterMenu`（在 `menu::station` 里打开）。
             //
-            // These four have no vanilla menu. The crafter has `CrafterMenu`, which this change
-            // does not open; see `menu_shape`.
+            // These four have no vanilla menu. A crafter uses `CrafterMenu`, opened in
+            // `menu::station`.
             Self::ChiseledBookshelf | Self::Jukebox | Self::DecoratedPot | Self::Shelf => {
                 menu::GENERIC_9X1
             }
