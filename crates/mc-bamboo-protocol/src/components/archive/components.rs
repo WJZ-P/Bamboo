@@ -38,7 +38,10 @@ pub fn same_decoded(kind: i32, expected: &Tag, actual: &ComponentValue) -> bool 
     decode_value(kind, expected, 0).is_ok_and(|decoded| &decoded == actual)
 }
 
-pub(super) fn encode_value(value: &ComponentValue, depth: u32) -> Result<Dyn> {
+/// 把一个类型化的组件值按官方 `Codec` 编成存档中间值。
+///
+/// Encodes a typed component value into the persistent intermediate form.
+pub fn encode_value(value: &ComponentValue, depth: u32) -> Result<Dyn> {
     crate::stack_hop::guard(|| encode_value_frame(value, depth))
 }
 
@@ -49,7 +52,10 @@ fn encode_value_frame(value: &ComponentValue, depth: u32) -> Result<Dyn> {
         .unwrap_or_else(|| Err(Error::new("component has no archive codec")))
 }
 
-pub(super) fn decode_value(kind: i32, tag: &Tag, depth: u32) -> Result<ComponentValue> {
+/// 解一个组件的存档标签，供战利品表这类的调用方用。
+///
+/// Decodes one component's persistent tag for callers such as the loot-table bridge.
+pub fn decode_value(kind: i32, tag: &Tag, depth: u32) -> Result<ComponentValue> {
     if let Some(value) = decode_early(kind, tag, depth)? {
         return Ok(value);
     }

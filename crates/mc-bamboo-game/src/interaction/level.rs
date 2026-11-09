@@ -54,6 +54,13 @@ impl Level for RegionLevel<'_> {
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
         let previous = self.chunks.block(pos).map(BlockState);
+        // `/setblock` / `/fill` 没有玩家，破坏路径经过这里：官方的
+        // `preRemoveSideEffects` 在读内容之前解包。
+        // `/setblock` and `/fill` have no player; their destruction path passes here,
+        // and vanilla's `preRemoveSideEffects` unpacks before reading the contents.
+        if previous.is_some_and(|previous| !previous.is_same_block(state)) {
+            self.unpack_loot_table(pos);
+        }
         let written = self.chunks.set_block(pos, state.0);
         // 官方 `LevelChunk.setBlockState`：换成别的方块时旧的方块实体就没了。
         // 区块里那份 `getUpdateTag` 由 `Chunk::set_block` 自己丢。
@@ -291,28 +298,66 @@ impl Level for RegionLevel<'_> {
         true
     }
 
+    /// `RandomizableContainer.unpackLootTable`：漏斗、发射器、陶罐和比较器读之前
+    /// 先把这一格的战利品表填进槽位。
+    ///
+    /// `RandomizableContainer.unpackLootTable`: fill the table into the slots before
+    /// a hopper, dispenser, decorated pot or comparator reads this cell.
+    fn unpack_loot_table(&mut self, pos: BlockPos) {
+        crate::container_loot::unpack(
+            crate::container_loot::Unpack {
+                chunks: self.chunks,
+                containers: self.containers,
+                sequences: self.loot_sequences,
+                random: self.random,
+            },
+            pos,
+        );
+    }
+
+    /// `ShulkerBoxBlock.playerWillDestroy` 的创造模式分支。空盒子返回 `None`。
+    ///
+    /// The creative branch of `ShulkerBoxBlock.playerWillDestroy`. An empty box returns `None`.
+    fn creative_container_drop(&mut self, pos: BlockPos, item: i32) -> Option<ItemStack> {
+        let entry = self.containers.get(&pos)?;
+        if entry.slots.iter().all(ItemStack::is_empty) {
+            return None;
+        }
+        let mut stack = ItemStack::new(item, 1);
+        let patch =
+            crate::block_items::collect_components_at(self.block_items, self.containers, pos);
+        let (added, removed) = patch.to_opaque();
+        stack.added = added;
+        stack.removed = removed;
+        Some(stack)
+    }
+
     /// TNT 爆炸的 `getDrops`。没有爆炸半径，因为 `tntExplosionDropDecay` 默认是假。
     ///
     /// `getDrops` for a TNT explosion. There is no explosion radius because
     /// `tntExplosionDropDecay` defaults to false.
     fn explosion_block_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        let block_entity = crate::block_drops::collect_block_entity(self.containers, pos);
         crate::block_drops::explosion_loot(
             self.chunks,
             self.loot_sequences,
             self.random.source(),
             state,
             pos,
+            block_entity,
         )
     }
 
     /// `destroyBlock` 的 `getDrops`。和爆炸一样没有半径，工具是空手。
     fn block_loot_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        let block_entity = crate::block_drops::collect_block_entity(self.containers, pos);
         crate::block_drops::explosion_loot(
             self.chunks,
             self.loot_sequences,
             self.random.source(),
             state,
             pos,
+            block_entity,
         )
     }
 

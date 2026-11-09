@@ -778,6 +778,18 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
     ) -> bool {
+        // 官方 `RandomizableContainerBlockEntity.getItem/removeItem/setItem/isEmpty`
+        // 都先 `unpackLootTable(null)`；漏斗、投掷器和发射器走这条路。双箱两半
+        // 合成一张 `CompoundContainer`，两半都要解包。
+        // Vanilla's `getItem/removeItem/setItem/isEmpty` all unpack the loot table first;
+        // hoppers, droppers and dispensers use this path. A double chest combines both
+        // halves, so both are unpacked.
+        self.level.unpack_loot_table(pos);
+        for other in self.level.container_positions(pos) {
+            if other != pos {
+                self.level.unpack_loot_table(other);
+            }
+        }
         if self
             .block_state(pos)
             .is_a(mc_bamboo_data::BlockAncestor::ComposterBlock)
@@ -802,6 +814,10 @@ impl<'a> World<'a> {
         len: usize,
         f: &mut dyn FnMut(&mut [mc_bamboo_protocol::item::ItemStack]),
     ) -> bool {
+        // 陶罐的 `getTheItem/splitTheItem/setTheItem` 和漏斗/比较器读这一格都解包。
+        // A decorated pot's `getTheItem/splitTheItem/setTheItem`, hoppers and comparators
+        // all unpack the table before touching its single slot.
+        self.level.unpack_loot_table(pos);
         self.level.with_slots(pos, len, f)
     }
 
@@ -1375,6 +1391,13 @@ impl<'a> World<'a> {
         //
         // The draw count depends on how many items each slot holds. The list is replaced after
         // the write, so copy the slots first. A double chest drops only this half.
+        // 破坏容器时官方 `BlockEntity.preRemoveSideEffects` 读的是解包后的表。
+        // 潜影盒的 `playerWillDestroy` 更早，也走同一个钩子。
+        // Vanilla drops the unpacked contents in `preRemoveSideEffects`; a shulker box
+        // unpacks even earlier in `playerWillDestroy`.
+        if drops_own_contents {
+            self.level.unpack_loot_table(pos);
+        }
         let dropped_stacks = drops_own_contents.then(|| self.slots_at(pos));
         // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`（通知邻居），
         // 再取两个 `nextFloat`，然后无条件再 `onSongChanged`。物品在第一次通知之前已经是空的。
@@ -1635,6 +1658,11 @@ impl<'a> World<'a> {
     /// While this cell's entity is out of the map the call is queued. It runs after the put, so
     /// the comparator reads that put-back value.
     pub fn update_neighbour_for_output_signal(&mut self, pos: BlockPos, block: &'static Block) {
+        // 比较器读容器内容时官方先 `unpackLootTable(null)`，见容器的
+        // `getItem` / `isEmpty`。这条通知会触发那次读，解包要排在前面。
+        // A comparator reads `getItem` / `isEmpty`, which unpacks the loot table first.
+        // This notification triggers that read, so unpack before it.
+        self.level.unpack_loot_table(pos);
         if self.block_entity_is_taken(pos) {
             self.defer_block_entity_read(DeferredRead::OutputSignal { pos, block });
             return;
@@ -1743,6 +1771,25 @@ impl<'a> World<'a> {
         }
         let updated = current.update_shape(self, pos, direction, neighbor_pos, neighbor_state);
         self.update_or_destroy(current, updated, pos, flags, limit);
+    }
+
+    /// 官方 `RandomizableContainer.unpackLootTable`：破坏容器前把表填进内容。
+    ///
+    /// Vanilla `RandomizableContainer.unpackLootTable`: fill the table before a
+    /// container's contents are dropped.
+    pub(crate) fn unpack_container_loot(&mut self, pos: BlockPos) {
+        self.level.unpack_loot_table(pos);
+    }
+
+    /// 官方 `ShulkerBoxBlock.playerWillDestroy` 的创造模式分支：生成带组件的内容。
+    ///
+    /// The creative branch of vanilla `ShulkerBoxBlock.playerWillDestroy`.
+    pub(crate) fn creative_container_drop(
+        &mut self,
+        pos: BlockPos,
+        item: i32,
+    ) -> Option<mc_bamboo_protocol::item::ItemStack> {
+        self.level.creative_container_drop(pos, item)
     }
 
     /// `addFreshEntity`：放进世界，返回实体 ID。tick 的时候生成的实体下一 tick 才开始动。

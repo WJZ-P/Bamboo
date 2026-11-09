@@ -98,6 +98,7 @@ impl GameRuleSet {
             fire_spread_radius_around_player: self.int(gamerules::FIRE_SPREAD_RADIUS_AROUND_PLAYER),
             tnt_explodes: self.bool(gamerules::TNT_EXPLODES),
             block_drops: self.bool(gamerules::BLOCK_DROPS),
+            entity_drops: self.bool(gamerules::ENTITY_DROPS),
             water_source_conversion: self.bool(gamerules::WATER_SOURCE_CONVERSION),
             lava_source_conversion: self.bool(gamerules::LAVA_SOURCE_CONVERSION),
             spread_vines: self.bool(gamerules::SPREAD_VINES),

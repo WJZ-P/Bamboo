@@ -142,6 +142,7 @@ public final class EntityOracle {
             cases += concreteIntoWater(official, out);
             cases += dripstoneTip(official, out);
             cases += anvilCrack(official, out);
+            cases += fallingDrops(official, out);
             cases += tntInAir(official, out);
             cases += tntBreaksStone(official, out);
             cases += tntChain(official, out);
@@ -244,7 +245,7 @@ public final class EntityOracle {
             blocks.put(BlockPos.asLong(0, 80, 0), Blocks.ANVIL.defaultBlockState());
             try {
                 Scene scene = Scene.start(
-                        official, "falling", Blocks.ANVIL.defaultBlockState(), 0, 80, 0, blocks, 1L, seed, new float[] {2.0F, 40.0F}, null);
+                        official, "falling", Blocks.ANVIL.defaultBlockState(), 0, 80, 0, blocks, 1L, seed, new float[] {2.0F, 40.0F}, null, 1);
                 for (int tick = 0; tick < 80 && !scene.active.isEmpty(); tick++) {
                     scene.tick();
                 }
@@ -257,6 +258,93 @@ public final class EntityOracle {
             }
         }
         return 1L;
+    }
+
+    /** 下落方块在放不回去、掉出世界和超过 600 刻时生成的物品，以及 `entity_drops` 关掉之后的样子。 */
+    private static int fallingDrops(Official official, Writer out) throws Exception {
+        Long2ObjectOpenHashMap<BlockState> torch = new Long2ObjectOpenHashMap<>();
+        torch.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        torch.put(BlockPos.asLong(0, 65, 0), Blocks.TORCH.defaultBlockState());
+        torch.put(BlockPos.asLong(0, 69, 0), Blocks.SAND.defaultBlockState());
+        torch.put(BlockPos.asLong(0, 70, 0), Blocks.GLASS.defaultBlockState());
+        playDrop(official, out, "falling_on_torch", Blocks.SAND.defaultBlockState(), 0, 69, 0, torch, true, 12);
+        playDrop(official, out, "falling_on_torch_no_drops", Blocks.SAND.defaultBlockState(), 0, 69, 0, torch, false, 12);
+
+        Long2ObjectOpenHashMap<BlockState> anvil = new Long2ObjectOpenHashMap<>();
+        anvil.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        anvil.put(BlockPos.asLong(0, 65, 0), Blocks.TORCH.defaultBlockState());
+        anvil.put(BlockPos.asLong(0, 69, 0), Blocks.ANVIL.defaultBlockState());
+        anvil.put(BlockPos.asLong(0, 70, 0), Blocks.GLASS.defaultBlockState());
+        playDrop(official, out, "falling_anvil_on_torch", Blocks.ANVIL.defaultBlockState(), 0, 69, 0, anvil, true, 12);
+
+        Long2ObjectOpenHashMap<BlockState> voidFall = new Long2ObjectOpenHashMap<>();
+        voidFall.put(BlockPos.asLong(0, -60, 0), Blocks.SAND.defaultBlockState());
+        playDrop(official, out, "falling_out_of_world", Blocks.SAND.defaultBlockState(), 0, -60, 0, voidFall, true, 20);
+        playDrop(official, out, "falling_out_of_world_no_drops", Blocks.SAND.defaultBlockState(), 0, -60, 0, voidFall, false, 20);
+
+        Long2ObjectOpenHashMap<BlockState> high = new Long2ObjectOpenHashMap<>();
+        high.put(BlockPos.asLong(0, 300, 0), Blocks.SAND.defaultBlockState());
+        playDrop(official, out, "falling_timeout", Blocks.SAND.defaultBlockState(), 0, 300, 0, high, true, 20);
+        return 6;
+    }
+
+    private static void playDrop(
+            Official official,
+            Writer out,
+            String name,
+            BlockState state,
+            int x,
+            int y,
+            int z,
+            Long2ObjectOpenHashMap<BlockState> blocks,
+            boolean entityDrops,
+            int ticks)
+            throws Exception {
+        official.gameRules.set(GameRules.ENTITY_DROPS, entityDrops, null);
+        try {
+            // 下落方块和它掉出来的物品都从同一个 ID 起，Bamboo 那边也用这个起点。
+            // The falling block and its item start at the same id on both sides.
+            Scene scene = Scene.start(official, "falling", state, x, y, z, blocks, 1L, 1L, null, null, FIRST_ITEM_ID);
+            scene.fallingDrops = true;
+            // 超时题直接把 `time` 挪到边界前，省掉几百行一样的下落快照。
+            if (name.startsWith("falling_out_of_world") || name.equals("falling_timeout")) {
+                // 从 590 开始，几拍之后就能看到超时那一支；两边都写进题目。
+                // Starting at 590 exposes the timeout branch after a few ticks on both sides.
+                ((FallingBlockEntity) scene.active.get(0)).time = 590;
+            }
+            StringBuilder steps = new StringBuilder();
+            steps.append('[');
+            scene.writeStep(steps);
+            for (int tick = 0; tick < ticks; tick++) {
+                steps.append(',');
+                scene.tick();
+                scene.writeStep(steps);
+            }
+            steps.append(']');
+            out.write("{\"type\":\"case\",\"name\":\"");
+            out.write(name);
+            out.write("\",\"kind\":\"falling\",\"state\":");
+            out.write(Integer.toString(Block.getId(state)));
+            out.write(",\"x\":");
+            out.write(Integer.toString(x));
+            out.write(",\"y\":");
+            out.write(Integer.toString(y));
+            out.write(",\"z\":");
+            out.write(Integer.toString(z));
+            out.write(",\"levelSeed\":1,\"entitySeed\":1,\"entityDrops\":");
+            out.write(Boolean.toString(entityDrops));
+            out.write(",\"firstEntityId\":");
+            out.write(Integer.toString(1 << 24));
+            out.write(",\"startTime\":");
+            out.write(name.startsWith("falling_out_of_world") || name.equals("falling_timeout") ? "590" : "0");
+            out.write(",\"compareDrops\":true,\"hurts\":null,\"fuse\":null,\"blocks\":");
+            writeBlocks(out, blocks);
+            out.write(",\"steps\":");
+            out.write(steps.toString());
+            out.write("}\n");
+        } finally {
+            official.gameRules.set(GameRules.ENTITY_DROPS, true, null);
+        }
     }
 
     private static int tntInAir(Official official, Writer out) throws Exception {
@@ -546,7 +634,7 @@ public final class EntityOracle {
             Integer fuse,
             int ticks)
             throws Exception {
-        Scene scene = Scene.start(official, kind, state, x, y, z, blocks, levelSeed, entitySeed, hurts, fuse);
+        Scene scene = Scene.start(official, kind, state, x, y, z, blocks, levelSeed, entitySeed, hurts, fuse, 1);
         StringBuilder steps = new StringBuilder();
         steps.append('[');
         scene.writeStep(steps);
@@ -620,6 +708,8 @@ public final class EntityOracle {
         TouchPlayer player;
         boolean spectator;
         boolean ticked;
+        /** 官方的 `spawnAtLocation` 已经设过拾取延迟；这一拍新生成的物品不用重取速度。 */
+        boolean fallingDrops;
 
         private Scene(FakeLevel level) {
             this.level = level;
@@ -683,8 +773,10 @@ public final class EntityOracle {
                 long levelSeed,
                 long entitySeed,
                 float[] hurts,
-                Integer fuse) {
+                Integer fuse,
+                int firstId) {
             FakeLevel level = FakeLevel.create(official, levelSeed);
+            level.nextId = firstId;
             level.blocks.putAll(blocks);
             BlockPos pos = new BlockPos(x, y, z);
             Entity entity;
@@ -731,10 +823,30 @@ public final class EntityOracle {
                 // A discarded entity still reports its position for this tick.
                 snapshot.add(entity);
             }
-            // 掉落物实体不在这一步的范围内。官方会生成，我们只核对下落方块和点燃的 TNT。
-            // Item entities are out of scope. Vanilla spawns them; only falling blocks and primed TNT are compared.
+            // 这一拍新生成的下落方块、TNT，以及下落方块掉出来的物品都要留在快照里。
+            // Fresh falling blocks, TNT and items dropped by falling blocks all stay in the snapshot.
             for (Entity spawned : level.fresh) {
-                if (spawned instanceof FallingBlockEntity || spawned instanceof PrimedTnt) {
+                if (spawned instanceof ItemEntity item) {
+                    if (!fallingDrops) {
+                        continue;
+                    }
+                    // `RandomSource.create()` 每次运行都换种子。改成和 Bamboo 一样的
+                    // `id ^ seed`，再按官方构造顺序重放朝向和速度。
+                    // `RandomSource.create()` uses a fresh seed every run. Reseed by
+                    // `id ^ seed` as Bamboo does, then replay the facing and velocity draws.
+                    long seed = (long) item.getId() ^ ENTITY_RANDOM_SEED;
+                    setRandom(item, seed);
+                    RandomSource random = item.getRandom();
+                    random.nextFloat();
+                    item.setYRot(random.nextFloat() * 360.0F);
+                    item.setDeltaMovement(
+                            random.nextDouble() * 0.2 - 0.1,
+                            0.2,
+                            random.nextDouble() * 0.2 - 0.1);
+                    item.setDefaultPickUpDelay();
+                    snapshot.add(spawned);
+                    active.add(spawned);
+                } else if (spawned instanceof FallingBlockEntity || spawned instanceof PrimedTnt) {
                     snapshot.add(spawned);
                     active.add(spawned);
                 }

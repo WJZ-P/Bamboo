@@ -28,6 +28,10 @@ pub struct BlockGameRules {
     ///
     /// `Block.dropResources` checks this before spawning drops.
     pub block_drops: bool,
+    /// `GameRules.ENTITY_DROPS`。`FallingBlockEntity.tick` 在 `spawnAtLocation` 之前看它。
+    ///
+    /// `FallingBlockEntity.tick` checks this before `spawnAtLocation`.
+    pub entity_drops: bool,
     /// `WaterFluid.canConvertToSource` 读的 `GameRules.WATER_SOURCE_CONVERSION`。
     pub water_source_conversion: bool,
     /// `LavaFluid.canConvertToSource` 读的 `GameRules.LAVA_SOURCE_CONVERSION`。
@@ -54,6 +58,7 @@ impl BlockGameRules {
             ),
             tnt_explodes: bool_default(gamerules::TNT_EXPLODES),
             block_drops: bool_default(gamerules::BLOCK_DROPS),
+            entity_drops: bool_default(gamerules::ENTITY_DROPS),
             water_source_conversion: bool_default(gamerules::WATER_SOURCE_CONVERSION),
             lava_source_conversion: bool_default(gamerules::LAVA_SOURCE_CONVERSION),
             spread_vines: bool_default(gamerules::SPREAD_VINES),
@@ -137,6 +142,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
     match name {
         "tnt_explodes" => rules.tnt_explodes = value,
         "block_drops" => rules.block_drops = value,
+        "entity_drops" => rules.entity_drops = value,
         "water_source_conversion" => rules.water_source_conversion = value,
         "lava_source_conversion" => rules.lava_source_conversion = value,
         "spread_vines" => rules.spread_vines = value,
@@ -180,6 +186,10 @@ mod tests {
         assert_eq!(
             rules.block_drops,
             RULES[gamerules::BLOCK_DROPS].default_bool
+        );
+        assert_eq!(
+            rules.entity_drops,
+            RULES[gamerules::ENTITY_DROPS].default_bool
         );
         assert_eq!(
             rules.water_source_conversion,

@@ -133,7 +133,10 @@ pub(super) fn encode_patch(patch: &ComponentPatch, depth: u32) -> Result<Dyn> {
     Ok(Dyn::Map(entries))
 }
 
-pub(super) fn decode_patch(tag: &Tag, depth: u32) -> Result<ComponentPatch> {
+/// 解一张存档形式的组件补丁，供战利品表这类「每项独立转换」的调用方用。
+///
+/// Decodes a persistent component patch for callers that convert each entry on its own.
+pub fn decode_patch(tag: &Tag, depth: u32) -> Result<ComponentPatch> {
     let entries = read::compound(tag)?;
     let mut patch = ComponentPatch::new();
     for (key, value) in entries {

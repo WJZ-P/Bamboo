@@ -2,7 +2,7 @@
 //!
 //! 够距检查、序列号和发包由调用方处理。
 
-use mc_bamboo_core::{BlockPos, Hand};
+use mc_bamboo_core::{BlockPos, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, items};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -243,6 +243,29 @@ pub fn destroy_block(
     // `GameMasterBlock` when the player lacks permission.
     if state.is_a(BlockAncestor::GameMasterBlock) && !actor.can_use_game_master_blocks {
         return outcome_from(world, InteractionResult::Fail, false);
+    }
+    // 官方 `ShulkerBoxBlock.playerWillDestroy` 在挖之前 `unpackLootTable(player)`。
+    // 破坏别的容器时 `preRemoveSideEffects` 也会读内容，这里一并解包，顺序一致。
+    // Vanilla `ShulkerBoxBlock.playerWillDestroy` unpacks the table before mining;
+    // other containers unpack when `preRemoveSideEffects` reads their contents.
+    world.unpack_container_loot(pos);
+    // 官方 `ShulkerBoxBlock.playerWillDestroy`：创造模式（preventsBlockDrops）挖非空
+    // 潜影盒时，不走战利品表，直接掉出 `new ItemStack(block)` 加上
+    // `BlockEntity.collectComponents()`，位置是方块中心、拾取延迟 10。
+    // Vanilla `ShulkerBoxBlock.playerWillDestroy`: in creative mode a non-empty
+    // shulker box drops the block item with the block entity's components.
+    if actor.prevents_block_drops
+        && state.is_a(BlockAncestor::ShulkerBoxBlock)
+        && let Some(stack) = world.creative_container_drop(pos, state.block().item)
+    {
+        world.spawn_at_location(
+            Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ),
+            stack,
+        );
     }
     let state = state.player_will_destroy(&mut world, pos, actor);
     if world.remove_block(pos) {

@@ -1009,3 +1009,362 @@ fn a_slot_state_packet_from_a_spectator_or_without_a_crafter_menu_is_ignored() {
     on_slot_state_changed(&mut fixture.region, fixture.id, id, 4, false);
     assert_eq!(fixture.region.redstone.crafter_disabled(pos), 1 << 4);
 }
+
+/// 官方 `createMenu` 打开带战利品表的箱子时解包，槽位里出现表里的东西。
+#[test]
+fn opening_a_loot_chest_fills_its_slots_before_syncing_them() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    crate::container_loot::set(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::Chest,
+        Some(crate::container_loot::ContainerLoot {
+            table: "minecraft:chests/simple_dungeon".to_owned(),
+            seed: 42,
+        }),
+    );
+    fixture.open(pos);
+    let entry = fixture.entry(pos);
+    assert!(entry.loot_table.is_none(), "表已经解包");
+    assert_eq!(entry.loot_table_seed, 0);
+    let filled = entry.slots.iter().filter(|slot| !slot.is_empty()).count();
+    assert!(filled > 0, "表里至少有一件东西");
+    let menu = fixture.menu();
+    let shown = display(&fixture.region, fixture.id, menu);
+    assert_eq!(&shown[..entry.slots.len()], entry.slots.as_slice());
+}
+
+/// 旁观者能打开，但官方 `canOpen` 在有表时不让他解包。
+#[test]
+fn a_spectator_does_not_unpack_a_loot_chest() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture
+        .region
+        .players
+        .get_mut(&fixture.id)
+        .unwrap()
+        .game_mode = GameMode::Spectator;
+    crate::container_loot::set(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::Chest,
+        Some(crate::container_loot::ContainerLoot {
+            table: "minecraft:chests/simple_dungeon".to_owned(),
+            seed: 42,
+        }),
+    );
+    fixture.open(pos);
+    let entry = fixture.entry(pos);
+    assert_eq!(
+        entry.loot_table.as_deref(),
+        Some("minecraft:chests/simple_dungeon")
+    );
+    assert!(entry.slots.iter().all(ItemStack::is_empty));
+}
+
+/// 同一个种子在两个空箱子里得到同样的内容；解包之后的表不再求值。
+#[test]
+fn the_same_loot_seed_repeats_and_unpacks_only_once() {
+    let mut fixture = Fixture::new();
+    let a = Fixture::chest_pos();
+    let b = BlockPos::new(2, a.y, 0);
+    for pos in [a, b] {
+        fixture.place(pos, blocks::CHEST);
+        crate::container_loot::set(
+            &mut fixture.region.containers,
+            pos,
+            ContainerKind::Chest,
+            Some(crate::container_loot::ContainerLoot {
+                table: "minecraft:chests/simple_dungeon".to_owned(),
+                seed: 12345,
+            }),
+        );
+        crate::container_loot::unpack_at(&mut fixture.region, pos);
+    }
+    let first = fixture.entry(a).slots.clone();
+    assert_eq!(fixture.entry(b).slots, first);
+
+    // 表已经清掉，再解包不会改写内容。
+    crate::container_loot::unpack_at(&mut fixture.region, a);
+    assert_eq!(fixture.entry(a).slots, first);
+}
+
+/// 漏斗和比较器读同一格时先解包：Bamboo 的 `Level` 钩子从这里走。
+#[test]
+fn a_comparator_read_unpacks_the_loot_table() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    crate::container_loot::set(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::Chest,
+        Some(crate::container_loot::ContainerLoot {
+            table: "minecraft:chests/simple_dungeon".to_owned(),
+            seed: 7,
+        }),
+    );
+    let (mut level, _ticks) = fixture.region.block_level();
+    mc_bamboo_blocks::Level::unpack_loot_table(&mut level, pos);
+    assert!(fixture.entry(pos).loot_table.is_none());
+    assert!(
+        fixture
+            .entry(pos)
+            .slots
+            .iter()
+            .any(|stack| !stack.is_empty())
+    );
+}
+
+/// 物品上的 `container_loot` 组件放下后留在方块实体上，解包前中键还给物品。
+#[test]
+fn a_placed_container_loot_component_survives_until_the_first_read() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    let mut stack = ItemStack::new(mc_bamboo_data::items::CHEST, 1);
+    stack.added.push((
+        mc_bamboo_data::registries::data_component_type::CONTAINER_LOOT,
+        {
+            let tag = mc_bamboo_nbt::Tag::Compound(vec![
+                (
+                    "loot_table".to_owned(),
+                    mc_bamboo_nbt::Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+                ),
+                ("seed".to_owned(), mc_bamboo_nbt::Tag::Long(9)),
+            ]);
+            let mut bytes = Vec::new();
+            tag.write_network(&mut bytes);
+            bytes
+        },
+    ));
+    crate::block_items::apply(&mut fixture.region, pos, fixture.id, &stack);
+    assert_eq!(
+        fixture.entry(pos).loot_table.as_deref(),
+        Some("minecraft:chests/simple_dungeon")
+    );
+    let collected = crate::block_items::collect(&fixture.region, pos);
+    assert!(matches!(
+        collected.get(mc_bamboo_data::registries::data_component_type::CONTAINER_LOOT),
+        Some(mc_bamboo_protocol::components::ComponentValue::ContainerLoot(_))
+    ));
+    crate::container_loot::unpack_at(&mut fixture.region, pos);
+    let collected = crate::block_items::collect(&fixture.region, pos);
+    assert!(
+        collected
+            .get(mc_bamboo_data::registries::data_component_type::CONTAINER_LOOT)
+            .is_none()
+    );
+}
+
+/// 官方 `Block.dropResources` 把 `BLOCK_ENTITY` 传进战利品表：装了东西、改过名的
+/// 潜影盒掉出来时带 `container` 和 `custom_name`。
+#[test]
+fn breaking_a_named_shulker_box_keeps_its_contents_and_name() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::SHULKER_BOX);
+    let entry = crate::container::entry_in(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::ShulkerBox,
+    );
+    entry.slots[0] = ItemStack::new(items::DIAMOND, 7);
+    let name = mc_bamboo_protocol::text::Component::text("宝藏".to_owned());
+    fixture.region.block_items.insert(pos, {
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::CUSTOM_NAME,
+            mc_bamboo_protocol::components::PatchEntry::Set(
+                mc_bamboo_protocol::components::ComponentValue::CustomName(name),
+            ),
+        );
+        patch
+    });
+    let block_entity = crate::block_drops::collect_from_region(&fixture.region, pos)
+        .expect("潜影盒的组件要能收集");
+    let json = &block_entity.components;
+    assert!(json.contains_key("minecraft:container"));
+    assert!(json.contains_key("minecraft:custom_name"));
+
+    let view = crate::block_drops::ChunkLevel {
+        chunks: &fixture.region.chunks,
+    };
+    let stacks = mc_bamboo_loot::block_drops(
+        &mc_bamboo_loot::BlockDropParams {
+            state: BlockState(blocks::SHULKER_BOX),
+            pos: (pos.x, pos.y, pos.z),
+            level: &view,
+            block_entity: Some(block_entity),
+            breaker: None,
+            tool: None,
+            explosion_radius: None,
+            luck: 0.0,
+        },
+        Some(&fixture.region.loot_sequences),
+        fixture.region.random.source(),
+    )
+    .expect("潜影盒的战利品表能求值");
+    assert_eq!(stacks.len(), 1);
+    let stack = crate::loot_stacks::loot_stack(&stacks[0]);
+    assert_eq!(stack.item, items::SHULKER_BOX);
+    let patch = stack.patch();
+    assert!(
+        patch
+            .get(mc_bamboo_data::registries::data_component_type::CONTAINER)
+            .is_some()
+    );
+    assert!(
+        patch
+            .get(mc_bamboo_data::registries::data_component_type::CUSTOM_NAME)
+            .is_some()
+    );
+    // 内容确实带上了，不是空盒子。
+    let mc_bamboo_protocol::components::ComponentValue::Container(slots) = patch
+        .get(mc_bamboo_data::registries::data_component_type::CONTAINER)
+        .expect("容器组件")
+    else {
+        panic!("container 组件类型不对");
+    };
+    let held = slots[0].as_ref().expect("第 0 格有东西");
+    assert_eq!(held.item, items::DIAMOND);
+    assert_eq!(held.count, 7);
+}
+
+/// 旗帜和陶罐的方块实体组件也按 `collectImplicitComponents` 传给 `copy_components`。
+#[test]
+fn banners_and_pots_copy_their_block_entity_components() {
+    let mut fixture = Fixture::new();
+    let banner = Fixture::chest_pos();
+    let pot = BlockPos::new(3, banner.y, 0);
+    fixture.place(banner, blocks::WHITE_BANNER);
+    fixture.place(pot, blocks::DECORATED_POT);
+    let patterns = mc_bamboo_protocol::components::ComponentValue::BannerPatterns(vec![]);
+    fixture.region.block_items.insert(banner, {
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::BANNER_PATTERNS,
+            mc_bamboo_protocol::components::PatchEntry::Set(patterns),
+        );
+        patch
+    });
+    fixture.region.block_items.insert(pot, {
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::POT_DECORATIONS,
+            mc_bamboo_protocol::components::PatchEntry::Set(
+                mc_bamboo_protocol::components::ComponentValue::PotDecorations {
+                    back: None,
+                    left: None,
+                    right: None,
+                    front: None,
+                },
+            ),
+        );
+        patch
+    });
+    for (pos, state, name) in [
+        (
+            banner,
+            BlockState(blocks::WHITE_BANNER),
+            "minecraft:banner_patterns",
+        ),
+        (
+            pot,
+            BlockState(blocks::DECORATED_POT),
+            "minecraft:pot_decorations",
+        ),
+    ] {
+        let view = crate::block_drops::ChunkLevel {
+            chunks: &fixture.region.chunks,
+        };
+        let block_entity = crate::block_drops::collect_from_region(&fixture.region, pos);
+        let stacks = mc_bamboo_loot::block_drops(
+            &mc_bamboo_loot::BlockDropParams {
+                state,
+                pos: (pos.x, pos.y, pos.z),
+                level: &view,
+                block_entity,
+                breaker: None,
+                tool: None,
+                explosion_radius: None,
+                luck: 0.0,
+            },
+            Some(&fixture.region.loot_sequences),
+            fixture.region.random.source(),
+        )
+        .unwrap_or_default();
+        let stack = stacks
+            .first()
+            .map(crate::loot_stacks::loot_stack)
+            .unwrap_or_else(ItemStack::empty);
+        assert!(
+            stack.patch().entries().iter().any(|(kind, _)| {
+                mc_bamboo_protocol::components::archive::read::id_name(
+                    mc_bamboo_protocol::components::cursor::Registry::DATA_COMPONENT_TYPE,
+                    *kind,
+                )
+                .is_ok_and(|found| found == name)
+            }),
+            "{name} 要复制到掉落物"
+        );
+    }
+}
+
+/// 创造模式挖非空潜影盒掉带内容的盒子，空盒子不掉。
+#[test]
+fn creative_breaks_only_drop_non_empty_shulker_boxes() {
+    for filled in [true, false] {
+        let mut fixture = Fixture::new();
+        let pos = Fixture::chest_pos();
+        fixture.place(pos, blocks::SHULKER_BOX);
+        let entry = crate::container::entry_in(
+            &mut fixture.region.containers,
+            pos,
+            ContainerKind::ShulkerBox,
+        );
+        if filled {
+            entry.slots[0] = ItemStack::new(items::EMERALD, 3);
+        }
+        // 创造模式（`preventsBlockDrops`）空手。
+        let actor = mc_bamboo_blocks::Actor {
+            uuid: [0; 16],
+            position: Vec3::new(0.5, f64::from(pos.y) + 2.0, 0.5),
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            secondary_use: false,
+            main_hand: items::AIR,
+            off_hand: items::AIR,
+            eye_height: 1.62,
+            block_interaction_range: 5.0,
+            may_build: true,
+            prevents_block_drops: true,
+            can_use_game_master_blocks: false,
+        };
+        let (mut level, ticks) = fixture.region.block_level();
+        let result = mc_bamboo_blocks::destroy_block(&mut level, ticks, &actor, pos);
+        assert_eq!(result.result, mc_bamboo_blocks::InteractionResult::Success);
+        let items: Vec<_> = fixture
+            .region
+            .entities
+            .iter()
+            .filter_map(|entity| entity.ground())
+            .collect();
+        assert_eq!(!items.is_empty(), filled, "filled={filled}");
+        if filled {
+            let stack = &items[0].stack;
+            assert_eq!(stack.item, items::SHULKER_BOX);
+            assert!(
+                stack
+                    .patch()
+                    .get(mc_bamboo_data::registries::data_component_type::CONTAINER)
+                    .is_some()
+            );
+        }
+    }
+}

@@ -356,6 +356,10 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     if broken.is_air() {
         return true;
     }
+    // 官方 `destroyBlock` 在 `removeBlock` 之前先取方块实体，掉落求值时还在。
+    // Vanilla `destroyBlock` takes the block entity before `removeBlock`; the
+    // loot table still sees it.
+    let block_entity = crate::block_drops::collect_from_region(region, pos);
     // `GameMasterBlock` 的权限检查在这里面。没有 `canUseGameMasterBlocks` 时挖不动。
     let outcome = durability::run(region, snapshot.id, Hand::Main, |region| {
         let (mut level, ticks) = region.block_level();
@@ -371,7 +375,7 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     if !matches!(snapshot.game_mode, GameMode::Creative | GameMode::Spectator)
         && block_mining::is_correct_for_drops(broken.0, snapshot.actor.main_hand)
     {
-        crate::block_drops::drop_broken_block(region, broken, pos, snapshot.id);
+        crate::block_drops::drop_broken_block(region, broken, pos, snapshot.id, block_entity);
     }
     true
 }

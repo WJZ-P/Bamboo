@@ -151,7 +151,9 @@ fn loot_command(
             for target in targets {
                 if let Some(player) = region.players.get_mut(&target) {
                     for stack in &stacks {
-                        player.inventory.add(to_stack(stack), true);
+                        player
+                            .inventory
+                            .add(crate::loot_stacks::loot_stack(stack), true);
                     }
                 }
             }
@@ -186,7 +188,7 @@ fn loot_command(
                             .get_mut((slot as usize).saturating_add(offset))
                         {
                             *item = if offset < stacks.len() {
-                                to_stack(stack)
+                                crate::loot_stacks::loot_stack(stack)
                             } else {
                                 ItemStack::empty()
                             };
@@ -234,7 +236,7 @@ fn spawn_items(region: &mut Region, position: Vec3, stacks: &[LootStack]) {
     let (mut level, ticks) = region.block_level();
     let mut world = World::new(&mut level, ticks);
     for loot in stacks {
-        let mut entity = Entity::ground_item(position, to_stack(loot));
+        let mut entity = Entity::ground_item(position, crate::loot_stacks::loot_stack(loot));
         if let EntityKind::Item(item) = &mut entity.kind {
             item.set_default_pickup_delay();
         }
@@ -323,7 +325,8 @@ fn evaluate(
                 .map_err(|_| fail("command.failed"))
         }
         Source::Mine => {
-            // 方块掉落表按注册表查，用官方同样的一组参数求值（不带破坏者/工具）。
+            // 官方 `LootCommand.dropBlockLoot` 先取方块实体，再按方块掉落表求值。
+            // Vanilla `LootCommand.dropBlockLoot` takes the block entity before evaluating.
             let state = region
                 .chunks
                 .block(pos)
@@ -343,19 +346,13 @@ fn evaluate(
                 f64::from(pos.z) + 0.5,
             ));
             params.block_state = Some(state);
+            params.block_entity = crate::block_drops::collect_from_region(region, pos);
             table
                 .get_random_items_with_seed(&params, 0, Some(sequences), fallback)
                 .map_err(|_| fail("command.failed"))
         }
         Source::Kill | Source::Fish => unreachable!("need_entity 已经挡住"),
     }
-}
-
-fn to_stack(loot: &LootStack) -> ItemStack {
-    // TODO: 和 `block_drops::plain_stack` 一样，战利品函数的组件还是 JSON，
-    // 等主仓库统一的转换函数合进来后两处一起接上。
-    let _ = &loot.components;
-    ItemStack::new(loot.item, loot.count)
 }
 
 fn distribute_container(
@@ -370,12 +367,13 @@ fn distribute_container(
         .map(BlockState)
         .and_then(kind_of)
         .ok_or_else(|| fail("command.failed"))?;
+    crate::container::forget_loot_table(region, pos);
     let entry = crate::container::entry_in(&mut region.containers, pos, state);
     let start = slots.map_or(0, |(slot, _)| slot.max(0) as usize);
     let limit = slots.map_or(entry.slots.len(), |(_, count)| count);
     for (offset, stack) in stacks.iter().take(limit).enumerate() {
         if let Some(slot) = entry.slots.get_mut(start + offset) {
-            *slot = to_stack(stack);
+            *slot = crate::loot_stacks::loot_stack(stack);
         }
     }
     Ok(())

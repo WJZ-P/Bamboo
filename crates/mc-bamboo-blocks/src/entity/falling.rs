@@ -1,10 +1,12 @@
 //! 下落的方块，官方 `FallingBlockEntity`。
 //!
 //! 这类实体不调 `baseTick`：重力、移动、方块效果都在 `tick` 里自己做，落地之后
-//! 把方块放回去。放不回去、或者掉出世界时，`dropItem` 为真就 `spawnAtLocation`。
+//! 把方块放回去。放不回去、或者掉出世界时，`dropItem` 且 `entity_drops` 为真
+//! 才 `spawnAtLocation`。
 //!
 //! These entities do not call `baseTick`. When the block cannot be placed back, or it
-//! falls out of the world, `dropItem` spawns the block's item via `spawnAtLocation`.
+//! falls out of the world, `dropItem` spawns the block's item via `spawnAtLocation`,
+//! but only while the `entity_drops` game rule is on.
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
@@ -32,13 +34,18 @@ impl Entity {
 
     /// 掉一格的具体流程。返回假表示实体已经不在了，不用再写回 `kind`。
     fn tick_falling_entity(&mut self, data: &mut FallingBlock, world: &mut World) -> bool {
+        let entity_drops = world.block_game_rules().entity_drops;
         data.time += 1;
         self.apply_gravity();
         let movement = self.delta;
         self.move_entity(world, movement);
-        // `move` 里的摔落伤害可能把铁砧摔裂，`blockState` 换成了裂开的那种。
+        // `move` 里的摔落伤害可能把铁砧摔裂或设上 `cancelDrop`。只取这两个字段：
+        // `data.time` 是这一拍刚加过的，整份拷回来会让 100/600 刻超时永远不触发。
+        // `move` may crack an anvil or set `cancelDrop`. Copy only those fields: `data.time`
+        // was just incremented, and a whole-struct copy would stop the timeout from ever firing.
         if let EntityKind::FallingBlock(updated) = &self.kind {
-            *data = *updated;
+            data.state = updated.state;
+            data.cancel_drop = updated.cancel_drop;
         }
         self.apply_effects_from_blocks(world);
         // `handlePortal` 不在范围里。
@@ -63,9 +70,11 @@ impl Entity {
             // `LevelHeightAccessor.getMaxY()` is `minY + height - 1`, the same inclusive top as `max_y`.
             let out_of_world = pos.y <= world.min_y() || pos.y > world.max_y();
             if data.time > 100 && out_of_world || data.time > 600 {
-                // 超时先 `spawnAtLocation` 再 `discard`。`cancelDrop` 不参与这一支。
-                // A timeout calls `spawnAtLocation` before `discard`. `cancelDrop` does not apply.
-                if data.drop_item {
+                // 超时先 `spawnAtLocation` 再 `discard`。`cancelDrop` 不参与这一支，
+                // 这一支也不调用 `callOnBrokenAfterFall`。
+                // A timeout calls `spawnAtLocation` before `discard`. `cancelDrop` does not
+                // apply, and `callOnBrokenAfterFall` is not invoked on this path.
+                if data.drop_item && entity_drops {
                     self.spawn_falling_drop(world, data.state);
                 }
                 self.discard();
@@ -107,7 +116,7 @@ impl Entity {
                                 data.state,
                                 current_state,
                             );
-                        } else if data.drop_item {
+                        } else if data.drop_item && entity_drops {
                             // 放不回去：先丢掉实体，再 `callOnBrokenAfterFall`，再生成掉落。
                             // 音效和 `onBrokenAfterFall` 不取 `level.random`。
                             //
@@ -124,7 +133,7 @@ impl Entity {
                     } else {
                         let center = bounding_box_center(self);
                         let state = data.state;
-                        let drop_item = data.drop_item;
+                        let drop_item = data.drop_item && entity_drops;
                         self.discard();
                         if drop_item {
                             crate::behaviour::misc::falling::on_broken_after_fall(
@@ -230,5 +239,93 @@ fn anvil_damage(state: BlockState) -> Option<BlockState> {
         Some(BlockState(blocks::DAMAGED_ANVIL).with(HORIZONTAL_FACING, facing))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::{blocks, items};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use crate::{BlockTicks, World, entity::EntityKind, state::BlockState, testing::TestLevel};
+
+    const GROUND: BlockPos = BlockPos::new(0, 64, 0);
+
+    /// 从 `start` 开始掉，直到世界里出现第一个物品实体或下落方块没了。
+    ///
+    /// Drops from `start` until the first ground item appears or the falling block is gone.
+    fn fall_until_spawn(
+        level: &mut TestLevel,
+        start: BlockPos,
+        state: u32,
+        limit: usize,
+    ) -> Vec<crate::entity::Entity> {
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(level, &mut ticks);
+        let id = world.spawn_falling_block(start, BlockState(state));
+        // 官方的 `time > 100 && out_of_world || time > 600`：这里要测的是 600 刻那一支，
+        // 所以把 `time` 直接设到边界前，让方块在没有地面可落的世界里继续掉。
+        if start.y < 0
+            && let Some(entity) = world.entity_mut(id)
+            && let EntityKind::FallingBlock(data) = &mut entity.kind
+        {
+            data.time = 590;
+        }
+        for _ in 0..limit {
+            world.tick_entities();
+            let live = world.live_entities();
+            if live.iter().any(|entity| entity.ground().is_some()) || world.entity_ids().is_empty()
+            {
+                return live;
+            }
+        }
+        world.live_entities()
+    }
+
+    /// 落地放不回去时，只有 `entity_drops` 开着才 `spawnAtLocation`。
+    ///
+    /// Only an enabled `entity_drops` rule spawns the item when landing fails.
+    #[test]
+    fn a_failed_landing_drops_only_when_entity_drops_is_on() {
+        for enabled in [true, false] {
+            let mut level = TestLevel::new();
+            level.rules.entity_drops = enabled;
+            level.set(GROUND, BlockState(blocks::STONE));
+            // 火把占着落点，沙子不能替换它。
+            level.set(BlockPos::new(0, 65, 0), BlockState(blocks::TORCH));
+            let live = fall_until_spawn(&mut level, BlockPos::new(0, 66, 0), blocks::SAND, 8);
+            let items: Vec<_> = live.iter().filter_map(|entity| entity.ground()).collect();
+            assert_eq!(items.len(), usize::from(enabled), "entity_drops={enabled}");
+            if enabled {
+                assert_eq!(items[0].stack, ItemStack::new(items::SAND, 1));
+                assert_eq!(items[0].pickup_delay, 10);
+            }
+        }
+    }
+
+    /// 超过 600 刻时按同一条规则生成掉落物，不调用 `onBrokenAfterFall`。
+    ///
+    /// The 600-tick timeout spawns the item under the same rule, without `onBrokenAfterFall`.
+    #[test]
+    fn a_timeout_drops_only_when_entity_drops_is_on() {
+        for enabled in [true, false] {
+            let mut level = TestLevel::new();
+            level.rules.entity_drops = enabled;
+            // 世界底部又没有地面时，方块一路掉到 `min_y` 以下；`time > 100` 之后
+            // 的那一支和 `time > 600` 共用同一段 `spawnAtLocation` + `discard`。
+            let live = fall_until_spawn(&mut level, BlockPos::new(0, -50, 0), blocks::SAND, 620);
+            eprintln!(
+                "enabled={enabled} live={:?}",
+                live.iter()
+                    .map(|e| (e.id, e.position.y, e.ground().map(|g| g.stack.clone())))
+                    .collect::<Vec<_>>()
+            );
+            let items: Vec<_> = live.iter().filter_map(|entity| entity.ground()).collect();
+            assert_eq!(items.len(), usize::from(enabled), "entity_drops={enabled}");
+            if enabled {
+                assert_eq!(items[0].stack, ItemStack::new(items::SAND, 1));
+            }
+        }
     }
 }

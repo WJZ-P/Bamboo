@@ -815,6 +815,15 @@ pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bo
     if locked_message(region, id, &target, title) {
         return false;
     }
+    // 官方 `RandomizableContainerBlockEntity.createMenu`：`canOpen` 过了之后，
+    // 非旁观者打开时把这一格（双箱的两半）的战利品表解包。
+    // Vanilla `createMenu`: after `canOpen`, a non-spectator unpacks the table of
+    // this cell, or of both halves of a double chest.
+    if !is_spectator(region, id) && !matches!(target, Target::EnderChest(_)) {
+        for menu_pos in target.positions() {
+            crate::container_loot::unpack_at(region, menu_pos);
+        }
+    }
     crate::lectern::close_for_other_menu(region, id);
     if region.menus.contains_key(&id) {
         close_menu(region, id);

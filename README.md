@@ -252,7 +252,11 @@ WebView2 的渲染进程不算在内。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但活塞推它们、粘它们这两段没写。伸出和收回的音效按官方 `PistonBaseBlock.triggerEvent` 发出。
   `moveBlocks` 里的破坏事件 2001 官方包在 `level.isClientSide()` 里，服务端不发，客户端处理方块事件时自己放。
   移动中的方块不发方块实体数据，客户端靠方块事件播放动画。
-- 下落方块放不回去、掉出世界、或者下落超过 600 刻时，`dropItem` 为真会按官方 `spawnAtLocation` 生成对应的物品。
+- 下落方块放不回去、掉出世界、或者下落超过 600 刻时，`dropItem` 且游戏规则 `entity_drops` 为真才按官方
+  `spawnAtLocation(ServerLevel, ItemLike)` 生成方块对应的物品；规则关掉时方块直接消失，不放回也不掉落。
+  落地失败的两条路径先 `discard` 再 `callOnBrokenAfterFall`，超时和掉出世界那一条不调用它。
+  物品实体按自己的随机源取朝向和初速度，拾取延迟 10；`entity-oracle` 逐刻比较它的位置、速度、物品和随机数。
+  `time > 100 && 出界 || time > 600` 是官方的超时条件，`/gamerule entity_drops false` 能挡住这三个分支。
   砸到实体的伤害没做（铁砧和滴水石的伤害标记照官方记着，只是不结算）。下落方块不走传送门，落地不恢复方块实体数据。
   铁砧落地发 1031，摔碎发 1029；滴水石摔碎发 1045，硫磺尖刺发 1052；刷子方块摔碎在碰撞盒中心发 2001。
   点燃的 TNT 播放 `entity.tnt.primed` 并生成实体。它不走传送门，也不被水推动。爆炸会打到地上的物品，
@@ -260,7 +264,11 @@ WebView2 的渲染进程不算在内。
   TNT 爆炸在换成空气之前按 `getDrops` 收集掉落，整圈方块处理完再 `popResource`；`tntExplosionDropDecay` 默认是假，
   所以不传爆炸半径，`explosion_decay` 不取数。TNT 自己的 `dropFromExplosion` 是假，不掉 TNT 物品。
   容器被炸开时，`dropContents` 仍在这一圈里、在后面 TNT 的引信之前取 `level.random`。不调用 `spawnAfterBreak`：
-  矿石和刷怪笼的经验随机数不取，虫蚀方块也不生成蠹虫。掉落物上的战利品组件没有写回去，潜影盒炸开也不保留里面的东西。
+  矿石和刷怪笼的经验随机数不取，虫蚀方块也不生成蠹虫。掉落物上的战利品组件按统一的
+  `JSON → NBT → 组件补丁` 转换写回，解不开的那一项记一条警告后丢掉。方块掉落求值时把方块实体
+  的 `collectComponents` 结果作为 `BLOCK_ENTITY` 参数传给 `copy_components`，所以装了东西、改过名的潜影盒
+  （以及带图案的旗帜、带纹样的陶罐）炸开后掉出来的物品仍带着那些组件；创造模式挖非空潜影盒按官方
+  `playerWillDestroy` 直接掉出带内容的盒子，空盒子不掉。
   游戏规则 `tnt_explodes` 为假时不点燃、不爆炸，也不取朝向和短引信的随机数。默认是真。非玩家实体的 ID 从 16777216 起，不和玩家共用计数器。
   未氧化的铜傀儡雕像被斧头点中时方块消失并播放 `entity.copper_golem.spawn`，不生成铜傀儡。
 - 流体只有主世界的流动速度。源头转换读 `water_source_conversion`（默认真）和 `lava_source_conversion`（默认假）。岩浆会点燃旁边的方块，岩浆变高时官方随机地慢四倍，
@@ -354,8 +362,11 @@ WebView2 的渲染进程不算在内。
   创造模式不扣。冒险模式挖得动的时候照样扣，旁观模式挖不动。耐久用完物品减一，并发实体事件。
   生存和冒险模式挖掉方块后按战利品表生成物品实体，创造和旁观不掉。不给经验，也不调用 `spawnAfterBreak`，
   所以矿石和刷怪笼该从 `level.random` 抽的经验数没有抽。不扣饥饿值、不记统计，急迫、挖掘疲劳、精准采集、时运这些附魔和状态效果都没有：
-  工具只按物品 ID 交给战利品表，掉落上的组件字节也不写回去，方块实体（潜影盒里的东西）不传给战利品表。
-  盔甲受伤、打实体、弓、钓竿、鞘翅和盾牌也不扣耐久。实体死亡和开箱仍然不调用战利品表。
+  工具只按物品 ID 交给战利品表；方块实体按官方 `BlockEntity.collectComponents` 传给 `BLOCK_ENTITY` 参数，
+  `copy_components` 的 `block_entity` 来源把容器内容、自定义名、锁、战利品表、旗帜图案和陶罐纹样带回掉落物。
+  掉落上由战利品函数写出的组件
+  经统一的 `JSON → NBT → 组件补丁` 转换写进物品堆，解不开的单项丢掉并记警告；`/loot` 和开箱填充也用这一份转换。
+  盔甲受伤、打实体、弓、钓竿、鞘翅和盾牌也不扣耐久。实体死亡仍不调用战利品表，开箱已经接上（见下一段）。
   矿石、幽匿这类方块破坏时官方 `spawnAfterBreak` 还会按 `xpRange` 生成经验球并取一份随机数，
   这里没有经验球，也不取这份随机数（`Level::spawn_after_break_random` 只留了钩子）。
   冒险模式按官方 `Player.blockActionRestricted` 判定：主手的 `can_break` 能匹配这一格才挖得动；放置按官方
@@ -379,7 +390,7 @@ WebView2 的渲染进程不算在内。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
   语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
-  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只改天气状态和客户端显示：按官方广播开始/停止下雨以及雨、雷暴强度的 `game_event`，进服时同步当前天气。天气不会随时间自动结束，也没有天气循环；世界侧（随机刻取数、降水、积雪、结冰、炼药锅接雨、雨熄火等）仍按晴天算，`tickPrecipitation` 不读 `max_snow_accumulation_height`。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
+  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只改天气状态和客户端显示：按官方广播开始/停止下雨以及雨、雷暴强度的 `game_event`，进服时同步当前天气。天气不会随时间自动结束，也没有天气循环；世界侧（随机刻取数、降水、积雪、结冰、炼药锅接雨、雨熄火等）仍按晴天算，`tickPrecipitation` 不读 `max_snow_accumulation_height`。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
@@ -399,7 +410,7 @@ WebView2 的渲染进程不算在内。
   两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
   难度默认 `easy`（和官方专用服务器一致，没有 `server.properties` 配置），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存，Bamboo 没有 `gamemode` 配置项）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。没有 `level-seed` 配置，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
   `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（还没有实体死亡和钓鱼系统）。
-- 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸已经调用方块掉落；实体死亡和开箱还没有。序列缓存在世界里，种子是平坦世界的 0，不存档。
+- 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸和 `/loot` 已经调用；实体死亡还没接。容器上的 `LootTable` / `LootTableSeed`（或物品上的 `container_loot` 组件放下后的方块实体）在官方 `unpackLootTable` 的调用点解包：玩家打开菜单、漏斗和投掷器读写、发射器取槽、饰纹陶罐读写、比较器读信号、破坏掉内容之前。填完就清表，旁观者打开不解包。随机源按 `LootContext.Builder.create` 选：种子非 0 用 `LegacyRandomSource(seed)`，种子为 0 且表有 `random_sequence` 用世界共用的序列缓存，都没有才用 `level.random`；结构生成时 `setBlockEntityLootTable` 的 `nextLong` 还没接。未解包的表会原样写回中键物品的 `container_loot`。`/setblock` 的方块 NBT 后缀和 `/give` 的物品组件后缀目前会明确报不支持，所以暂时不能用命令造出带战利品表的箱子；方块实体数据里的 `LootTable` / `LootTableSeed` 和 `container_loot` 组件能直接由物品或 `/clone` 带进游戏。解包不走 `THIS_ENTITY` 参数，玩家幸运值按默认的 0；依赖 `this_entity` 的自定义表会报不支持并清表。`loot-oracle` 的箱子题逐项比较 `fill`，另加了一道带 `BLOCK_ENTITY` 的潜影盒掉落题逐项比组件；`menu` oracle 加了一道「打开带战利品表的箱子」。序列缓存在世界里，种子是平坦世界的 0，不存档。
 - 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
   `/scoreboard objectives` 支持 `list|add|remove|setdisplay|modify`（`displayname`、`rendertype`、`displayautoupdate`、`numberformat` 的 `blank`/`styled`/`fixed`）；
   `players` 支持 `list|get|set|add|remove|reset|enable|operation|display`（`name` 和 `numberformat`）。
@@ -488,7 +499,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
-| `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸和可替换方块的破坏，实体死亡和箱子填充还没接进游戏 |
+| `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸、可替换方块的破坏和 `/loot`，箱子填充接进开箱和容器读写，实体死亡还没接进游戏 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
@@ -515,7 +526,7 @@ protocol blocks world
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 `worldgen` 还没接进游戏，只有开发工具依赖它；它依赖 `data`（官方导出的世界生成数据）和
 `blocks`（里面有官方的 `LegacyRandomSource`）。
-`loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸和 `destroyBlock` 时调用；
+`loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸、`destroyBlock`、`/loot` 和容器第一次读写时调用；
 它依赖 `data`（嵌入的战利品表 JSON）和 `blocks`（随机源、方块状态）。
 
 ## 线程模型

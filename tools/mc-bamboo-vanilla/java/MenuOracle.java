@@ -26,6 +26,7 @@ import net.minecraft.advancements.CriterionTriggerInstance;
 import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.core.HolderGetter;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.HolderSet;
@@ -45,6 +46,7 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
+import net.minecraft.server.ReloadableServerRegistries;
 import net.minecraft.server.ReloadableServerResources;
 import net.minecraft.server.dedicated.DedicatedServer;
 import net.minecraft.server.level.ServerLevel;
@@ -103,6 +105,11 @@ import net.minecraft.world.inventory.SimpleContainerData;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.inventory.SmithingMenu;
 import net.minecraft.world.inventory.SmokerMenu;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+import net.minecraft.world.level.storage.loot.LootParams;
+import net.minecraft.world.level.storage.loot.LootTable;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.inventory.StonecutterMenu;
 import net.minecraft.world.inventory.TransientCraftingContainer;
 import net.minecraft.world.item.DyeColor;
@@ -172,6 +179,7 @@ public final class MenuOracle {
     private static final Map<String, Field> FIELDS = new HashMap<>();
     private static RecipeManager RECIPES;
     private static RegistryAccess.Frozen REGISTRIES;
+    private static ReloadableServerRegistries.Holder LOOT_TABLES;
     private static GameRules RULES;
     private static FakeServer SERVER;
     private static final Map<RecipeType<?>, List<RecipeHolder<?>>> BY_TYPE = new HashMap<>();
@@ -232,6 +240,7 @@ public final class MenuOracle {
             managers.getRecipeManager().finalizeRecipeLoading(FeatureFlags.DEFAULT_FLAGS);
             RECIPES = managers.getRecipeManager();
             REGISTRIES = layers.compositeAccess();
+            LOOT_TABLES = managers.fullRegistries();
         }
         RULES = new GameRules(FeatureFlags.DEFAULT_FLAGS);
         SERVER = FakeServer.create(RECIPES, RULES);
@@ -325,6 +334,8 @@ public final class MenuOracle {
             }
             if (options.only() < 0) {
                 write(componentCase(written));
+                written++;
+                write(lootChestCase(written));
                 written++;
                 for (int index = 0; index < 24; index++) {
                     write(stationCase(written, index, options.seed()));
@@ -625,6 +636,47 @@ public final class MenuOracle {
             ItemStack map = new ItemStack(Items.FILLED_MAP, 1 + variant % 3);
             map.set(DataComponents.MAP_ID, new MapId(variant + 1));
             return map;
+        }
+
+        /**
+         * 打开一个带 `LootTable` 的箱子：官方 `createMenu` 在发初始槽位之前用
+         * `LootTable.fill` 把内容填好。用非零种子固定随机源，Bamboo 那边在
+         * `Replay::new` 收到的是同一份填好的内容。
+         *
+         * Open a chest with a `LootTable`: vanilla `createMenu` fills it before
+         * sending the initial slots. A non-zero seed fixes the random source, and
+         * Bamboo's `Replay` receives the same filled contents.
+         */
+        private JsonObject lootChestCase(int id) {
+            Shape shape = Shape.CHEST_3;
+            FakePlayer player = FakePlayer.create(false);
+            net.minecraft.world.SimpleContainer container = new net.minecraft.world.SimpleContainer(shape.size);
+            // 官方 `RandomizableContainerBlockEntity.createMenu` 在这里解包；本 oracle
+            // 用同一张战利品表和种子调 `LootTable.fill`，把内容交给两边比较。
+            // Vanilla `createMenu` unpacks here; this oracle fills the same table and
+            // seed into the container so both sides compare the filled slots.
+            LootTable table = LOOT_TABLES.getLootTable(
+                    ResourceKey.create(Registries.LOOT_TABLE,
+                            net.minecraft.resources.Identifier.parse("minecraft:chests/simple_dungeon")));
+            LootParams params = new LootParams.Builder(player.level())
+                    .withParameter(LootContextParams.ORIGIN, new Vec3(0.5, 0.5, 0.5))
+                    .withLuck(0.0F)
+                    .create(LootContextParamSets.CHEST);
+            table.fill(container, params, 424242L);
+            AbstractContainerMenu menu = shape.create(player.getInventory(), container, player);
+            menu.setSynchronizer(new RecordingSync(component -> 0));
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", shape.id);
+            line.addProperty("creative", false);
+            line.addProperty("lootChest", true);
+            line.add("container", items(container, shape.size));
+            line.add("inventory", inventoryItems(player.getInventory()));
+            line.add("open", outcome(menu));
+            line.add("steps", new JsonArray());
+            return line;
         }
 
         /**
@@ -1713,6 +1765,11 @@ public final class MenuOracle {
         @Override
         public GameRules getGameRules() {
             return rules;
+        }
+
+        @Override
+        public ReloadableServerRegistries.Holder reloadableRegistries() {
+            return LOOT_TABLES;
         }
     }
 
