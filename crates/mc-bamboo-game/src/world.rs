@@ -27,7 +27,7 @@ use crate::{
     interaction::{self, UseItemOn},
     inventory, lectern, light_updates, menu, movement,
     player::shows_hat,
-    region::Region,
+    region::{JoinSettings, Region},
     secure_chat::{self, ServiceProfileKeys},
     sign,
 };
@@ -302,14 +302,17 @@ impl World {
             chat_session: None,
         };
 
+        let difficulty_frames = self.global.difficulty_frames();
         self.region.add_player(
             request,
-            game_mode,
-            &self.global.difficulty_frames(),
-            self.global.state().spawn,
-            self.global.state().hashed_seed(),
-            permission_level,
-            is_op,
+            JoinSettings {
+                game_mode,
+                difficulty_frames: &difficulty_frames,
+                spawn: self.global.state().spawn,
+                hashed_seed: self.global.state().hashed_seed(),
+                permission_level,
+                is_op,
+            },
         );
         self.region
             .last_action_millis

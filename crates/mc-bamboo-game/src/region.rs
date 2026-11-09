@@ -223,6 +223,20 @@ const _: () = {
     assert_send::<Region>();
 };
 
+/// 进服时世界线程替这名玩家定好的东西：游戏模式、全局状态里的难度包、出生点和种子哈希，
+/// 以及按权威 OP 名单查出的权限。
+///
+/// What the world thread settled for a joining player: the game mode, the difficulty frames,
+/// spawn and seed hash from the world state, and the permissions from the authoritative op list.
+pub(crate) struct JoinSettings<'a> {
+    pub(crate) game_mode: GameMode,
+    pub(crate) difficulty_frames: &'a [u8],
+    pub(crate) spawn: RespawnData,
+    pub(crate) hashed_seed: i64,
+    pub(crate) permission_level: u8,
+    pub(crate) is_op: bool,
+}
+
 impl Region {
     /// 测试里直接把玩家挪到某处，网格跟着更新。
     ///
@@ -348,16 +362,15 @@ impl Region {
     /// The start of join: `login`, `change_difficulty`, `player_abilities`, the permission
     /// event, the command tree, then `player_position`. Official `placeNewPlayer` puts
     /// the difficulty packet right after `login`.
-    pub(crate) fn add_player(
-        &mut self,
-        request: JoinRequest,
-        game_mode: GameMode,
-        difficulty_frames: &[u8],
-        spawn: RespawnData,
-        state_seed_hash: i64,
-        permission_level: u8,
-        is_op: bool,
-    ) {
+    pub(crate) fn add_player(&mut self, request: JoinRequest, settings: JoinSettings<'_>) {
+        let JoinSettings {
+            game_mode,
+            difficulty_frames,
+            spawn,
+            hashed_seed: state_seed_hash,
+            permission_level,
+            is_op,
+        } = settings;
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
             id,
