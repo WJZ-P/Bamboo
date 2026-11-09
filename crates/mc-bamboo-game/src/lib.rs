@@ -36,6 +36,7 @@ mod chunk_tracking;
 pub mod command;
 mod command_block;
 mod container;
+mod container_loot;
 mod debug_stick;
 mod drops;
 mod durability;

@@ -244,6 +244,11 @@ pub fn destroy_block(
     if state.is_a(BlockAncestor::GameMasterBlock) && !actor.can_use_game_master_blocks {
         return outcome_from(world, InteractionResult::Fail, false);
     }
+    // 官方 `ShulkerBoxBlock.playerWillDestroy` 在挖之前 `unpackLootTable(player)`。
+    // 破坏别的容器时 `preRemoveSideEffects` 也会读内容，这里一并解包，顺序一致。
+    // Vanilla `ShulkerBoxBlock.playerWillDestroy` unpacks the table before mining;
+    // other containers unpack when `preRemoveSideEffects` reads their contents.
+    world.unpack_container_loot(pos);
     let state = state.player_will_destroy(&mut world, pos, actor);
     if world.remove_block(pos) {
         state.destroy(&mut world, pos);

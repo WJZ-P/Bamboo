@@ -238,6 +238,12 @@ pub trait Level {
         let _ = (state, pos);
         Vec::new()
     }
+    /// 官方 `RandomizableContainer.unpackLootTable` 的调用点。有战利品表的容器在
+    /// 第一次被读或写之前先填好内容。默认空实现用于没有战利品表的假世界。
+    ///
+    /// The hook for vanilla `RandomizableContainer.unpackLootTable`. A container with a
+    /// loot table is filled before its first read or write. Fake worlds leave this empty.
+    fn unpack_loot_table(&mut self, _pos: BlockPos) {}
 
     /// `BlockState.spawnAfterBreak` 里 `tryDropExperience` 和虫蚀方块生成蠹虫
     /// 可能要取的 `level.random` 数。没有经验球和生物时实体不生成，取数仍要照官方。

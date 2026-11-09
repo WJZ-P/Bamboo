@@ -115,10 +115,16 @@ impl ContainerKind {
 /// 一个容器方块的内容和开合状态。没有内容的容器不留条目。
 ///
 /// 自定义名和锁不在这里，它们是方块实体从物品上带来的组件，见 [`crate::block_items`]。
+/// `loot_table` / `loot_table_seed` 是官方 `RandomizableContainerBlockEntity` 的字段，
+/// 解包之前和容器内容一起走。
 #[derive(Clone)]
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,
+    /// 官方 `lootTable`。`None` 表示这张表已经解包过了。
+    pub(crate) loot_table: Option<String>,
+    /// 官方 `lootTableSeed`。0 表示按表的 `random_sequence` 取随机流。
+    pub(crate) loot_table_seed: i64,
     /// 官方 `ContainerOpenersCounter.openCount`。潜影盒也用它算盖子开合。
     pub(crate) open_count: i32,
     pub(crate) max_range: f64,
@@ -134,6 +140,8 @@ impl ContainerEntry {
         Self {
             kind,
             slots: vec![ItemStack::empty(); slots],
+            loot_table: None,
+            loot_table_seed: 0,
             open_count: 0,
             max_range: 0.0,
             recheck_at: None,
@@ -743,7 +751,11 @@ fn forget_unused(region: &mut Region) {
         .flat_map(|menu| menu.target.positions())
         .collect();
     region.containers.retain(|pos, entry| {
-        let idle = entry.open_count <= 0 && entry.slots.iter().all(ItemStack::is_empty);
+        // 还没解包的战利品表是方块实体数据，空槽也要留着。
+        // A pending loot table is block-entity data, so keep it even with empty slots.
+        let idle = entry.open_count <= 0
+            && entry.loot_table.is_none()
+            && entry.slots.iter().all(ItemStack::is_empty);
         targeted.contains(pos) || !(entry.dead || idle)
     });
 }
@@ -751,6 +763,12 @@ fn forget_unused(region: &mut Region) {
 /// 方块被破坏。方块实体已经按 `dropContents` 掉过物品，这里清掉打开着的菜单留下的记录。
 pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
     crate::block_items::forget(region, pos);
+    // 官方 `dropContents` 之前已经解包，这里顺手把还挂着的表也清掉。
+    // Vanilla unpacks before `dropContents`; clear any table left on this cell.
+    if let Some(entry) = region.containers.get_mut(&pos) {
+        entry.loot_table = None;
+        entry.loot_table_seed = 0;
+    }
     let targeted = region.menus.values().any(|menu| menu.target.contains(pos));
     if !targeted {
         region.containers.remove(&pos);
@@ -758,6 +776,18 @@ pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
     }
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.dead = true;
+    }
+}
+
+/// 命令和其它直接写容器表的地方：把尚未解包的表清掉，避免把方块实体数据
+/// 带到一个已经换成别的内容的容器上。
+///
+/// For commands and other direct writes to the container table: clear a pending
+/// table so block-entity data does not follow replaced contents.
+pub(crate) fn forget_loot_table(region: &mut Region, pos: BlockPos) {
+    if let Some(entry) = region.containers.get_mut(&pos) {
+        entry.loot_table = None;
+        entry.loot_table_seed = 0;
     }
 }
 

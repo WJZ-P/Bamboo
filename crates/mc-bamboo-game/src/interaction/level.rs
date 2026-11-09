@@ -54,6 +54,13 @@ impl Level for RegionLevel<'_> {
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
         let previous = self.chunks.block(pos).map(BlockState);
+        // `/setblock` / `/fill` 没有玩家，破坏路径经过这里：官方的
+        // `preRemoveSideEffects` 在读内容之前解包。
+        // `/setblock` and `/fill` have no player; their destruction path passes here,
+        // and vanilla's `preRemoveSideEffects` unpacks before reading the contents.
+        if previous.is_some_and(|previous| !previous.is_same_block(state)) {
+            self.unpack_loot_table(pos);
+        }
         let written = self.chunks.set_block(pos, state.0);
         // 官方 `LevelChunk.setBlockState`：换成别的方块时旧的方块实体就没了。
         // 区块里那份 `getUpdateTag` 由 `Chunk::set_block` 自己丢。
@@ -289,6 +296,23 @@ impl Level for RegionLevel<'_> {
         };
         f(hopper);
         true
+    }
+
+    /// `RandomizableContainer.unpackLootTable`：漏斗、发射器、陶罐和比较器读之前
+    /// 先把这一格的战利品表填进槽位。
+    ///
+    /// `RandomizableContainer.unpackLootTable`: fill the table into the slots before
+    /// a hopper, dispenser, decorated pot or comparator reads this cell.
+    fn unpack_loot_table(&mut self, pos: BlockPos) {
+        crate::container_loot::unpack(
+            crate::container_loot::Unpack {
+                chunks: self.chunks,
+                containers: self.containers,
+                sequences: self.loot_sequences,
+                random: self.random,
+            },
+            pos,
+        );
     }
 
     /// TNT 爆炸的 `getDrops`。没有爆炸半径，因为 `tntExplosionDropDecay` 默认是假。

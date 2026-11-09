@@ -1009,3 +1009,154 @@ fn a_slot_state_packet_from_a_spectator_or_without_a_crafter_menu_is_ignored() {
     on_slot_state_changed(&mut fixture.region, fixture.id, id, 4, false);
     assert_eq!(fixture.region.redstone.crafter_disabled(pos), 1 << 4);
 }
+
+/// 官方 `createMenu` 打开带战利品表的箱子时解包，槽位里出现表里的东西。
+#[test]
+fn opening_a_loot_chest_fills_its_slots_before_syncing_them() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    crate::container_loot::set(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::Chest,
+        Some(crate::container_loot::ContainerLoot {
+            table: "minecraft:chests/simple_dungeon".to_owned(),
+            seed: 42,
+        }),
+    );
+    fixture.open(pos);
+    let entry = fixture.entry(pos);
+    assert!(entry.loot_table.is_none(), "表已经解包");
+    assert_eq!(entry.loot_table_seed, 0);
+    let filled = entry.slots.iter().filter(|slot| !slot.is_empty()).count();
+    assert!(filled > 0, "表里至少有一件东西");
+    let menu = fixture.menu();
+    let shown = display(&fixture.region, fixture.id, menu);
+    assert_eq!(&shown[..entry.slots.len()], entry.slots.as_slice());
+}
+
+/// 旁观者能打开，但官方 `canOpen` 在有表时不让他解包。
+#[test]
+fn a_spectator_does_not_unpack_a_loot_chest() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    fixture
+        .region
+        .players
+        .get_mut(&fixture.id)
+        .unwrap()
+        .game_mode = GameMode::Spectator;
+    crate::container_loot::set(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::Chest,
+        Some(crate::container_loot::ContainerLoot {
+            table: "minecraft:chests/simple_dungeon".to_owned(),
+            seed: 42,
+        }),
+    );
+    fixture.open(pos);
+    let entry = fixture.entry(pos);
+    assert_eq!(
+        entry.loot_table.as_deref(),
+        Some("minecraft:chests/simple_dungeon")
+    );
+    assert!(entry.slots.iter().all(ItemStack::is_empty));
+}
+
+/// 同一个种子在两个空箱子里得到同样的内容；解包之后的表不再求值。
+#[test]
+fn the_same_loot_seed_repeats_and_unpacks_only_once() {
+    let mut fixture = Fixture::new();
+    let a = Fixture::chest_pos();
+    let b = BlockPos::new(2, a.y, 0);
+    for pos in [a, b] {
+        fixture.place(pos, blocks::CHEST);
+        crate::container_loot::set(
+            &mut fixture.region.containers,
+            pos,
+            ContainerKind::Chest,
+            Some(crate::container_loot::ContainerLoot {
+                table: "minecraft:chests/simple_dungeon".to_owned(),
+                seed: 12345,
+            }),
+        );
+        crate::container_loot::unpack_at(&mut fixture.region, pos);
+    }
+    let first = fixture.entry(a).slots.clone();
+    assert_eq!(fixture.entry(b).slots, first);
+
+    // 表已经清掉，再解包不会改写内容。
+    crate::container_loot::unpack_at(&mut fixture.region, a);
+    assert_eq!(fixture.entry(a).slots, first);
+}
+
+/// 漏斗和比较器读同一格时先解包：Bamboo 的 `Level` 钩子从这里走。
+#[test]
+fn a_comparator_read_unpacks_the_loot_table() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    crate::container_loot::set(
+        &mut fixture.region.containers,
+        pos,
+        ContainerKind::Chest,
+        Some(crate::container_loot::ContainerLoot {
+            table: "minecraft:chests/simple_dungeon".to_owned(),
+            seed: 7,
+        }),
+    );
+    let (mut level, _ticks) = fixture.region.block_level();
+    mc_bamboo_blocks::Level::unpack_loot_table(&mut level, pos);
+    assert!(fixture.entry(pos).loot_table.is_none());
+    assert!(
+        fixture
+            .entry(pos)
+            .slots
+            .iter()
+            .any(|stack| !stack.is_empty())
+    );
+}
+
+/// 物品上的 `container_loot` 组件放下后留在方块实体上，解包前中键还给物品。
+#[test]
+fn a_placed_container_loot_component_survives_until_the_first_read() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CHEST);
+    let mut stack = ItemStack::new(mc_bamboo_data::items::CHEST, 1);
+    stack.added.push((
+        mc_bamboo_data::registries::data_component_type::CONTAINER_LOOT,
+        {
+            let tag = mc_bamboo_nbt::Tag::Compound(vec![
+                (
+                    "loot_table".to_owned(),
+                    mc_bamboo_nbt::Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+                ),
+                ("seed".to_owned(), mc_bamboo_nbt::Tag::Long(9)),
+            ]);
+            let mut bytes = Vec::new();
+            tag.write_network(&mut bytes);
+            bytes
+        },
+    ));
+    crate::block_items::apply(&mut fixture.region, pos, fixture.id, &stack);
+    assert_eq!(
+        fixture.entry(pos).loot_table.as_deref(),
+        Some("minecraft:chests/simple_dungeon")
+    );
+    let collected = crate::block_items::collect(&fixture.region, pos);
+    assert!(matches!(
+        collected.get(mc_bamboo_data::registries::data_component_type::CONTAINER_LOOT),
+        Some(mc_bamboo_protocol::components::ComponentValue::ContainerLoot(_))
+    ));
+    crate::container_loot::unpack_at(&mut fixture.region, pos);
+    let collected = crate::block_items::collect(&fixture.region, pos);
+    assert!(
+        collected
+            .get(mc_bamboo_data::registries::data_component_type::CONTAINER_LOOT)
+            .is_none()
+    );
+}

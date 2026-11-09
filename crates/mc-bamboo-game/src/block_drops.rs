@@ -105,8 +105,8 @@ fn pop_loot_stack(world: &mut World, pos: BlockPos, stack: LootStack) {
 ///
 /// The world loot conditions can ask. Biome, weather, and light are absent, so a
 /// condition that needs them fails as unsupported.
-struct ChunkLevel<'a> {
-    chunks: &'a ChunkStore,
+pub(crate) struct ChunkLevel<'a> {
+    pub(crate) chunks: &'a ChunkStore,
 }
 
 impl LevelView for ChunkLevel<'_> {
