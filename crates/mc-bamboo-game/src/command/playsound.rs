@@ -73,7 +73,7 @@ pub(crate) fn run(
     // 官方 `SoundEvent.getRange`：可变范围时 volume>1 是 16*volume，否则 16。
     let range = if volume > 1.0 { 16.0 * volume } else { 16.0 };
     let range_squared = f64::from(range * range);
-    let seed = region.sound_seed_generator.source().next_long();
+    let seed = region.random.source().next_long();
     let mut delivered = Vec::with_capacity(targets.len());
     for target in targets {
         let Some(player) = region.players.get(&target) else {

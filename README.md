@@ -368,7 +368,8 @@ WebView2 的渲染进程不算在内。
   `/title` 六种动作都有，成功消息按目标数用 `.single` / `.multiple`；`times` 的 `t`/`s`/`d` 照官方换算成刻。
   `/playsound` 的 `sound` 带 `minecraft:available_sounds` 补全（官方命令树的快照里没有写 suggestion_id，
   这里让客户端来问服务端），11 种来源、位置、音量、音高和 `minVolume` 都在；
-  声音按官方走内联定义（网络 ID 0 + 资源名），距离超过 16 或 16×音量时，`minVolume` > 0 会把音源挪到玩家附近两格。
+  声音按官方走内联定义（网络 ID 0 + 资源名），种子取一次 `Level.random`，距离超过 16 或 16×音量时，
+  `minVolume` > 0 会把音源挪到玩家附近两格。
   `/particle` 能解析注册表里全部 128 种粒子名；带选项的 19 种按官方 `ParticleTypes.STREAM_CODEC` 编码
   （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
   `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源。
