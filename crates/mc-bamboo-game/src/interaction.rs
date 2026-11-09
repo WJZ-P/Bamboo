@@ -145,10 +145,14 @@ pub(crate) fn run_entity_ticks(region: &mut Region) {
 /// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
     let chunks: Vec<ChunkPos> = random_ticking_chunks(region).into_iter().collect();
-    for chunk in &chunks {
-        let (mut level, ticks) = region.block_level();
-        let outcome = mc_bamboo_blocks::tick_thunder(&mut level, ticks, *chunk);
-        send_effects(region, None, &outcome.effects);
+    // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
+    // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。
+    if region.block_weather.is_raining() && region.block_weather.is_thundering() {
+        for chunk in &chunks {
+            let (mut level, ticks) = region.block_level();
+            let outcome = mc_bamboo_blocks::tick_thunder(&mut level, ticks, *chunk);
+            send_effects(region, None, &outcome.effects);
+        }
     }
     for chunk in chunks {
         let speed = region.block_rules.random_tick_speed;
