@@ -136,6 +136,8 @@ impl Shared {
     fn close(&self) {
         self.log.lock().unwrap().closed = true;
         self.changed.notify_waiters();
+        // 留一个 permit：在 close 之后才开始等的 waiter 也能立刻看到连接已结束。
+        self.changed.notify_one();
     }
 }
 
