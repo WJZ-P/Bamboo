@@ -130,6 +130,10 @@ pub(crate) struct RosterEntry {
     /// 毫秒。
     pub(crate) latency: i32,
     pub(crate) show_hat: bool,
+    /// 验过的聊天会话。进服时还没有，等 `chat_session_update` 之后再单独广播。
+    ///
+    /// Validated chat session. Join has none; `chat_session_update` broadcasts it afterwards.
+    pub(crate) chat_session: Option<crate::secure_chat::SessionUpdate>,
 }
 
 impl RosterEntry {
@@ -144,6 +148,14 @@ impl RosterEntry {
             display_name: None,
             list_order: 0,
             show_hat: self.show_hat,
+            chat_session: self.chat_session.as_ref().map(|session| {
+                mc_bamboo_protocol::packet::play::ChatSessionView {
+                    session_id: session.session_id,
+                    expires_at_millis: session.expires_at_millis,
+                    public_key: &session.public_key,
+                    key_signature: &session.key_signature,
+                }
+            }),
         }
     }
 }
@@ -253,6 +265,23 @@ impl Global {
         frames
     }
 
+    /// 只带 `INITIALIZE_CHAT` 的名单更新。官方 `resetPlayerChatState` 广播的就是这一个动作。
+    ///
+    /// A tab update that only carries `INITIALIZE_CHAT`. That is what official `resetPlayerChatState` broadcasts.
+    pub(crate) fn initialize_chat(
+        &mut self,
+        id: PlayerId,
+        session: &crate::secure_chat::SessionUpdate,
+    ) -> Option<Vec<u8>> {
+        let entry = self.roster.get_mut(&id)?;
+        entry.chat_session = Some(session.clone());
+        let view = entry.tab_entry();
+        Some(encode_frames(&PlayerInfoUpdate {
+            actions: PlayerInfoUpdate::INITIALIZE_CHAT,
+            entries: &[view],
+        }))
+    }
+
     /// 把玩家从名单上删掉，返回发给所有人的 Tab 列表更新。不在名单上时返回 `None`。
     pub(crate) fn remove_player(&mut self, id: PlayerId) -> Option<Vec<u8>> {
         let entry = self.roster.remove(&id)?;
@@ -344,6 +373,7 @@ mod tests {
             game_mode: GameMode::Creative,
             latency: 42,
             show_hat: true,
+            chat_session: None,
         }
     }
 

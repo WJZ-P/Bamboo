@@ -8,10 +8,13 @@
 //! * `GET /session/minecraft/hasJoined?username=&serverId=`：服务端来问这次登录，
 //!   哈希和客户端报的那个一致才给档案，对不上就回 204。
 //! * `GET /probe/asked`：服务端问过的哈希，客户端拿它和自己算的那个比较。
+//! * `GET /publickeys`：给 Bamboo 的 `playerCertificateKeys`，算法和官方一样是 SHA1withRSA。
+//! * `GET /probe/service-private`：上面那把钥匙的 PKCS#8，探针用它签玩家公钥。
 //!
 //! 这两个服务都只监听 127.0.0.1，探针不会访问外网。
 
 use std::{
+    collections::HashMap,
     io,
     net::SocketAddr,
     sync::mpsc,
@@ -138,6 +141,12 @@ async fn prepare() -> Result<(Server, SocketAddr, String), String> {
         .local_addr()
         .map_err(|error| format!("拿不到服务端的端口：{error}"))?;
 
+    // 公钥在进入 accept 循环之前生成。调试构建里的 RSA 很慢，占着唯一的连接时 hasJoined 进不来。
+    // Generate the key before accept. Debug RSA is slow, and hasJoined cannot get in while it holds the only connection.
+    let service = tokio::task::spawn_blocking(ServiceMaterial::generate)
+        .await
+        .map_err(|error| format!("生成探针公钥的任务失败：{error}"))?;
+
     let config = ServerConfig {
         online_mode: true,
         session_server_url: format!("http://{session_address}/session/minecraft/hasJoined"),
@@ -146,23 +155,35 @@ async fn prepare() -> Result<(Server, SocketAddr, String), String> {
     let server = Server::new(listener, config)
         .map_err(|error| format!("无法创建开了正版验证的服务端：{error}"))?;
 
-    tokio::spawn(session_service(session));
+    tokio::spawn(session_service(session, service));
     Ok((server, address, format!("http://{session_address}")))
 }
 
-/// 客户端报过来的哈希和服务端问过的哈希。
+/// 客户端报过来的哈希和服务端问过的哈希。每个名字一把哈希，Sakura 以外的名字有自己的 UUID。
+///
+/// Digests the clients reported, and the digest the server asked about. Each name has its own
+/// digest. Names other than Sakura get their own UUID.
 #[derive(Default)]
 struct Exchange {
-    expected: String,
+    expected: HashMap<String, String>,
     asked: String,
+    service: Option<ServiceMaterial>,
+}
+
+struct ServiceMaterial {
+    public_b64: String,
+    private_b64: String,
 }
 
 /// 顶替 Mojang 的假 session server。
 ///
 /// 请求一个一个处理：客户端先报哈希，服务端再来问，客户端最后取服务端问过的那个，
 /// 三步本来就是前后发生的，不需要并发。
-async fn session_service(listener: TcpListener) {
-    let mut exchange = Exchange::default();
+async fn session_service(listener: TcpListener, service: Option<ServiceMaterial>) {
+    let mut exchange = Exchange {
+        service,
+        ..Exchange::default()
+    };
     while let Ok((mut stream, _)) = listener.accept().await {
         let Ok(head) = read_head(&mut stream).await else {
             continue;
@@ -200,25 +221,122 @@ fn respond(target: &str, exchange: &mut Exchange) -> String {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match path {
         "/probe/expect" => {
-            exchange.expected = param(query, "hash");
-            text(&format!("{PROFILE_UUID} {SKIN_VALUE} {SKIN_SIGNATURE}"))
+            let name = param(query, "username");
+            exchange.expected.insert(name.clone(), param(query, "hash"));
+            text(&format!(
+                "{} {SKIN_VALUE} {SKIN_SIGNATURE}",
+                profile_uuid(&name)
+            ))
         }
         "/session/minecraft/hasJoined" => has_joined(query, exchange),
         "/probe/asked" => text(&exchange.asked),
+        "/publickeys" => match service_material(exchange) {
+            Some(material) => json(&format!(
+                r#"{{"playerCertificateKeys":[{{"publicKey":"{}"}}],"profilePropertyKeys":[]}}"#,
+                material.public_b64
+            )),
+            None => status("500 Internal Server Error"),
+        },
+        "/probe/service-private" => match service_material(exchange) {
+            Some(material) => text(&material.private_b64),
+            None => status("500 Internal Server Error"),
+        },
         _ => status("404 Not Found"),
     }
 }
 
-/// 服务端问这次登录。哈希和客户端报的那个一致才给档案。
+fn service_material(exchange: &Exchange) -> Option<&ServiceMaterial> {
+    exchange.service.as_ref()
+}
+
+/// Sakura 继续用原来的 UUID。别的名字各自一个，避免第二个玩家被当成重复登录。
+///
+/// Sakura keeps the original UUID. Every other name gets its own, so a second player is not a duplicate login.
+fn profile_uuid(name: &str) -> String {
+    if name == "Sakura" {
+        return PROFILE_UUID.to_owned();
+    }
+    let mut bytes = [0u8; 16];
+    for (index, byte) in name.bytes().enumerate() {
+        bytes[index % 16] ^= byte.wrapping_add(index as u8);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+impl ServiceMaterial {
+    fn generate() -> Option<Self> {
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let mut rng = rand_core::OsRng;
+        let private = RsaPrivateKey::new(&mut rng, 2048).ok()?;
+        let public = RsaPublicKey::from(&private);
+        let public_der = public.to_public_key_der().ok()?;
+        let private_der = private.to_pkcs8_der().ok()?;
+        Some(Self {
+            public_b64: base64(public_der.as_bytes()),
+            private_b64: base64(private_der.as_bytes()),
+        })
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        let triple = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
+        out.push(ALPHABET[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// 服务端问这次登录。哈希和这个名字报过的那个一致才给档案。
+///
+/// The server asks about this login. The profile is returned only when the digest matches the one this name reported.
 fn has_joined(query: &str, exchange: &mut Exchange) -> String {
     exchange.asked = param(query, "serverId");
-    if exchange.asked.is_empty() || exchange.asked != exchange.expected {
+    let name = param(query, "username");
+    let expected = exchange.expected.get(&name).cloned().unwrap_or_default();
+    if exchange.asked.is_empty() || exchange.asked != expected {
         // 官方的 session server 不认这次登录时回的就是 204。
         return status("204 No Content");
     }
 
-    let uuid = PROFILE_UUID.replace('-', "");
-    let name = param(query, "username");
+    let uuid = profile_uuid(&name).replace('-', "");
     json(&format!(
         r#"{{"id":"{uuid}","name":"{name}","properties":[{{"name":"textures","value":"{SKIN_VALUE}","signature":"{SKIN_SIGNATURE}"}}]}}"#
     ))

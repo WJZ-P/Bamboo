@@ -198,6 +198,7 @@ impl Harness {
             view_distance,
             max_players: 20,
             online_mode: false,
+            enforce_secure_profile: false,
         };
         let mut world = World::new(config, receiver);
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
@@ -1171,12 +1172,8 @@ fn every_decoded_request_reaches_a_module_without_disconnecting() {
     let pos = BlockPos::new(1, -61, 1);
 
     let requests = [
-        PlayRequest::Chat {
-            message: "hi".to_owned(),
-        },
-        PlayRequest::ChatCommand {
-            command: "foo".to_owned(),
-        },
+        PlayRequest::unsigned_chat("hi"),
+        PlayRequest::unsigned_command("foo"),
         PlayRequest::ClientCommand {
             action: ClientCommandKind::RequestStats,
         },

@@ -178,12 +178,14 @@ import net.minecraft.world.level.block.JukeboxBlock;
 import net.minecraft.world.level.block.LecternBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.VegetationBlock;
+import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.world.level.block.entity.BannerPattern;
 import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.block.entity.BannerPatterns;
 import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BrewingStandBlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.entity.ChiseledBookShelfBlockEntity;
 import net.minecraft.world.level.block.entity.CampfireBlockEntity;
@@ -192,6 +194,7 @@ import net.minecraft.world.level.block.entity.DecoratedPotBlockEntity;
 import net.minecraft.world.level.block.entity.DispenserBlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.level.block.entity.JukeboxBlockEntity;
+import net.minecraft.world.level.block.entity.ShelfBlockEntity;
 import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
 import net.minecraft.world.level.block.entity.LecternBlockEntity;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
@@ -1351,6 +1354,14 @@ public final class BlockOracle {
                     }
                     continue;
                 }
+                // 架子实现的是 ListBackedContainer，不是 BaseContainerBlockEntity。直接写槽位，不走 setItem。
+                if (entity instanceof ShelfBlockEntity shelf) {
+                    NonNullList<ItemStack> stored = shelf.getItems();
+                    for (int slot = 0; slot < Math.min(shelf.getContainerSize(), stacks.size()); slot++) {
+                        stored.set(slot, stacks.get(slot).copy());
+                    }
+                    continue;
+                }
                 NonNullList<ItemStack> stored = storedItems((BaseContainerBlockEntity) entity);
                 for (int slot = 0; slot < Math.min(container.getContainerSize(), stacks.size()); slot++) {
                     stored.set(slot, stacks.get(slot).copy());
@@ -1378,7 +1389,10 @@ public final class BlockOracle {
                     || entity instanceof DispenserBlockEntity
                     || entity instanceof JukeboxBlockEntity
                     || entity instanceof DecoratedPotBlockEntity
-                    || entity instanceof CrafterBlockEntity;
+                    || entity instanceof CrafterBlockEntity
+                    || entity instanceof AbstractFurnaceBlockEntity
+                    || entity instanceof BrewingStandBlockEntity
+                    || entity instanceof ShelfBlockEntity;
         }
 
         /** 这几种方块的状态是内容的镜像。场景里只有状态，内容要补成一致，否则右键的结果是真实世界到不了的。 */
