@@ -10,7 +10,7 @@
 //! [`RedstoneMemory`](crate::RedstoneMemory).
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_data::{Block, items, sounds::sound_event, tags::item_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::slot_container::hit_slot;
@@ -82,7 +82,17 @@ impl Behaviour for ChiseledBookShelf {
         if state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        set_bookshelf_slot(world, ctx.clicked_pos(), slot, ItemStack::new(ctx.item, 1));
+        let pos = ctx.clicked_pos();
+        set_bookshelf_slot(world, pos, slot, ItemStack::new(ctx.item, 1));
+        // `addBook`：`setItem` 之后按放进去的是不是附魔书选声音，`except` 是空。
+        // `addBook`: after `setItem`, the sound depends on whether the book is enchanted.
+        // `except` is null.
+        let sound = if ctx.item == items::ENCHANTED_BOOK {
+            "minecraft:block.chiseled_bookshelf.insert.enchanted"
+        } else {
+            "minecraft:block.chiseled_bookshelf.insert"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
         InteractionResult::Success
     }
 
@@ -98,19 +108,26 @@ impl Behaviour for ChiseledBookShelf {
         if !state.get(SLOT_OCCUPIED[slot]) {
             return InteractionResult::Consume;
         }
-        // `removeItem(slot, 1)`，放不进背包时 `Player.drop(..., SERVER_ONLY)`。
-        // `removeItem(slot, 1)`. What does not fit is `Player.drop(..., SERVER_ONLY)`.
         let pos = ctx.clicked_pos();
-        let current = world
+        // `removeBook` 先取出再出声。整本交给物品栏，放不下的由游戏层按 `Player.drop` 丢掉。
+        //
+        // `removeBook` removes the book first, then plays. The whole book goes into the
+        // inventory; the game layer `Player.drop`s whatever does not fit.
+        let taken = world
             .slots_at(pos)
-            .into_iter()
-            .nth(slot)
+            .get(slot)
+            .cloned()
             .unwrap_or_else(ItemStack::empty);
-        let (taken, left) = split_one(current);
+        set_bookshelf_slot(world, pos, slot, ItemStack::empty());
         if !taken.is_empty() {
-            world.set_item_exchange(ItemExchange::AddOrDrop(taken));
+            world.set_item_exchange(ItemExchange::AddOrDrop(taken.clone()));
         }
-        set_bookshelf_slot(world, pos, slot, left);
+        let sound = if !taken.is_empty() && taken.item == items::ENCHANTED_BOOK {
+            "minecraft:block.chiseled_bookshelf.pickup.enchanted"
+        } else {
+            "minecraft:block.chiseled_bookshelf.pickup"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
         InteractionResult::Success
     }
 
@@ -127,20 +144,4 @@ impl Behaviour for ChiseledBookShelf {
             .last_bookshelf_slot(pos)
             .map_or(0, |slot| slot as i32 + 1)
     }
-}
-
-/// `Container.removeItem(slot, 1)`：拿走一件，剩下的留在格子里。
-///
-/// `Container.removeItem(slot, 1)`: take one item and leave the rest in the slot.
-fn split_one(mut stack: ItemStack) -> (ItemStack, ItemStack) {
-    if stack.is_empty() {
-        return (ItemStack::empty(), ItemStack::empty());
-    }
-    let mut taken = stack.clone();
-    taken.count = 1;
-    stack.count -= 1;
-    if stack.count <= 0 {
-        stack = ItemStack::empty();
-    }
-    (taken, stack)
 }

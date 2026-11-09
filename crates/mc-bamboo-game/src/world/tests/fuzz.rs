@@ -11,10 +11,12 @@ use mc_bamboo_data::{
     blocks,
     items::{self, ITEMS},
     packets::play::clientbound,
+    registries::data_component_type,
     registries::entity_type,
 };
 use mc_bamboo_protocol::{
-    codec::Reader,
+    codec::{Reader, write_varint},
+    components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
     packet::play::{
         ChatVisibility, ClientCommandKind, ClientInformation, EquipmentSlot, HumanoidArm,
@@ -163,7 +165,15 @@ impl Remote {
             let count = reader.varint().unwrap();
             self.equipment[usize::from(slot & 0x7f)] = if count > 0 {
                 let item = reader.varint().unwrap();
-                assert_eq!((reader.varint(), reader.varint()), (Ok(0), Ok(0)));
+                // 组件现在按官方原样发出去，客户端模型要把补丁读完才能接着读下一个槽。
+                // Components are forwarded as vanilla writes them, so the model has to consume the patch.
+                let consumed = {
+                    let rest = reader.remaining();
+                    let mut cursor = Cursor::new(rest);
+                    ComponentPatch::read(&mut cursor).expect("equipment component patch");
+                    rest.len() - cursor.remaining().len()
+                };
+                reader.bytes(consumed).unwrap();
                 (item, count)
             } else {
                 (items::AIR, 0)
@@ -597,8 +607,16 @@ fn random_stack(rng: &mut Rng) -> ItemStack {
     };
     let mut stack = ItemStack::new(item, rng.below(99) as i32 + 1);
     if rng.chance(10) {
-        let value = vec![rng.below(256) as u8; rng.below(5) as usize];
-        stack.added.push((rng.pick(&[1, 13, 40, -1]), value));
+        // 创造模式槽位的解码器会拒掉解不开的组件。这里只放一个合法的 `max_stack_size`，
+        // 装备包才能按官方补丁格式读完。
+        //
+        // The creative-slot decoder rejects a component it cannot decode. Only a valid
+        // `max_stack_size` is attached here, so the equipment packet stays readable.
+        let mut value = Vec::new();
+        write_varint(&mut value, rng.below(99) as i32 + 1);
+        stack
+            .added
+            .push((data_component_type::MAX_STACK_SIZE, value));
     }
     if rng.chance(5) {
         stack.removed.push(rng.below(122) as i32);
@@ -685,6 +703,7 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 position: rng.chance(90).then_some(position),
                 rotation: rng.chance(50).then(|| random_rotation(rng, hostile)),
                 on_ground: rng.chance(50),
+                horizontal_collision: false,
             }
         }
         8 => {
@@ -703,12 +722,8 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 pitch,
             }
         }
-        9 => PlayRequest::Chat {
-            message: random_text(rng, 12, hostile),
-        },
-        10 => PlayRequest::ChatCommand {
-            command: random_text(rng, 300, hostile),
-        },
+        9 => PlayRequest::unsigned_chat(random_text(rng, 12, hostile)),
+        10 => PlayRequest::unsigned_command(random_text(rng, 300, hostile)),
         11 => PlayRequest::ClientInformation(random_information(rng)),
         12 => PlayRequest::ClientCommand {
             action: rng.pick(&[
@@ -796,6 +811,10 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
 fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
     let mut rng = Rng::new(seed);
     let mut server = Harness::new(view_distance);
+    // 未签名 `player_chat` 带系统时间。钉死以后同一颗种子的字节才一样。
+    //
+    // Unsigned `player_chat` carries the system time. Pin it so one seed has one byte stream.
+    server.region().clock_millis = Some(1_700_000_000_000);
     let mut actors: Vec<Actor> = Vec::new();
     let mut digests = Vec::new();
     let mut joined = 0;
@@ -823,8 +842,22 @@ fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
             if actor.is_alive() {
                 for _ in 0..rng.below(6) {
                     let request = random_request(&mut rng, actor);
+                    let positioned = matches!(
+                        request,
+                        PlayRequest::MovePlayer {
+                            position: Some(_),
+                            ..
+                        }
+                    );
                     actor.expected_ack = actor.expected_ack.max(sequence_of(&request));
                     server.request(&actor.client, request);
+                    // 同一个客户端 tick 的第二个位置包会被踢。非恶意序列在每个位置后面结束这一 tick。
+                    //
+                    // A second position in the same client tick is a kick. End the tick after each
+                    // position so an ordinary sequence stays connected.
+                    if positioned && !actor.hostile {
+                        server.client_tick_end(&actor.client);
+                    }
                 }
                 if rng.chance(5) {
                     let millis = rng.pick(&[0, 40, i32::MAX, i32::MIN]);

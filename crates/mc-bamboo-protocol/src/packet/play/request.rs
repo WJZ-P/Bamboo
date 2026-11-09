@@ -16,6 +16,10 @@ use crate::{
 
 const MAX_CHAT_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 32767;
+/// 补全请求里的命令长度上限。官方 `ServerboundCommandSuggestionPacket` 用 32500。
+///
+/// Command length limit in a suggestion request. Official `ServerboundCommandSuggestionPacket` uses 32500.
+const MAX_SUGGESTION_CHARS: usize = 32500;
 const MAX_LANGUAGE_CHARS: usize = 16;
 /// `ServerboundContainerClickPacket` 的 `changedSlots` 最多有多少项。
 const MAX_CHANGED_SLOTS: usize = 128;
@@ -25,9 +29,28 @@ const MAX_HASHED_COMPONENTS: usize = 256;
 const SIGNATURE_BYTES: usize = 256;
 /// `LastSeenMessages.Update` 里 20 位定长位集占的字节数。
 const LAST_SEEN_ACKNOWLEDGED_BYTES: usize = 3;
+/// 签名命令里最多带几个参数签名。官方 `ArgumentSignatures` 用 8。
+///
+/// Maximum argument signatures on a signed command. Official `ArgumentSignatures` uses 8.
+const MAX_SIGNED_ARGUMENTS: usize = 8;
+/// `FriendlyByteBuf.readUtf` 的默认上限。
+///
+/// The default limit of `FriendlyByteBuf.readUtf`.
+const MAX_UTF: usize = 32_767;
+/// `set_game_rule` 一次最多带几条。官方没有上限。
+///
+/// How many entries one `set_game_rule` may carry. Vanilla has no limit.
+const MAX_GAME_RULE_ENTRIES: usize = 1024;
+const COMMAND_BLOCK_TRACK_OUTPUT: u8 = 1;
+const COMMAND_BLOCK_CONDITIONAL: u8 = 2;
+const COMMAND_BLOCK_AUTOMATIC: u8 = 4;
 
 /// 移动包 `flags` 里表示站在地上的位。
 const MOVE_FLAG_ON_GROUND: u8 = 0x01;
+/// 移动包 `flags` 里表示这一下在水平方向撞到了东西。
+///
+/// The move-packet bit that says this move collided horizontally.
+const MOVE_FLAG_HORIZONTAL_COLLISION: u8 = 0x02;
 
 /// [`PlayRequest::PlayerInput`] 的 `flags` 里表示按住潜行键的位。
 pub const INPUT_FLAG_SHIFT: u8 = 0x20;
@@ -62,17 +85,48 @@ pub enum PlayRequest {
         /// `(yaw, pitch)`。
         rotation: Option<(f32, f32)>,
         on_ground: bool,
+        /// `ServerboundMovePlayerPacket.horizontalCollision`，`flags` 的第 1 位。
+        ///
+        /// `ServerboundMovePlayerPacket.horizontalCollision`, bit 1 of `flags`.
+        horizontal_collision: bool,
     },
     /// 收到了一批区块，并告诉服务端之后每 tick 发几个。
     ChunkBatchReceived {
         desired_chunks_per_tick: f32,
     },
-    /// 聊天消息。时间戳、盐、签名和已读窗口都解码后丢弃了，离线模式用不上。
+    /// 聊天消息。签名、时间戳、盐和已读窗口都留着，校验在世界线程上做。
+    ///
+    /// A chat message. The signature, timestamp, salt, and seen-window stay attached;
+    /// the world thread checks them.
     Chat {
         message: String,
+        signature: Option<Box<crate::packet::play::MessageSignatureBytes>>,
+        time_millis: i64,
+        salt: i64,
+        last_seen: crate::packet::play::LastSeenUpdate,
     },
-    /// 没有开头 `/` 的命令。
+    /// 没有开头 `/` 的命令。`signed` 只有 `chat_command_signed` 才有。
+    ///
+    /// A command without the leading `/`. `signed` is set only for `chat_command_signed`.
     ChatCommand {
+        command: String,
+        signed: Option<crate::packet::play::SignedCommand>,
+    },
+    /// 客户端把已读窗口往前推。官方 `ServerboundChatAckPacket`。
+    ///
+    /// The client advances its seen window. Official `ServerboundChatAckPacket`.
+    ChatAck {
+        offset: i32,
+    },
+    /// 玩家上报聊天公钥。官方 `ServerboundChatSessionUpdatePacket`。
+    ///
+    /// The player reports a chat public key. Official `ServerboundChatSessionUpdatePacket`.
+    ChatSession(crate::packet::play::RemoteChatSession),
+    /// 客户端请求命令补全。`command` 是输入框里的整段文字，可能以 `/` 开头。
+    ///
+    /// The client asks for suggestions. `command` is the whole input and may start with `/`.
+    CommandSuggestion {
+        id: i32,
         command: String,
     },
     ClientInformation(ClientInformation),
@@ -143,10 +197,10 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
-    /// 讲台翻页、跳页或取书。`button_id` 是 varint，100 起是跳到的页码加 100。
+    /// 菜单按钮。切石机用它选结果，讲台用它翻页。`button_id` 是 varint，讲台从 100 起是跳到的页码加 100。
     ///
-    /// Lectern page controls. `button_id` is a varint; values from 100 jump to
-    /// `button_id - 100`.
+    /// A menu button. The stonecutter selects a result; the lectern turns pages.
+    /// `button_id` is a varint, and lectern values from 100 jump to `button_id - 100`.
     ContainerButtonClick {
         container_id: i32,
         button_id: i32,
@@ -167,11 +221,58 @@ pub enum PlayRequest {
         /// 有标题就是署名，没有就是只保存页面。
         title: Option<String>,
     },
+    /// F3+N / F3+F4。模式是 `GameType` 的序号。
+    ///
+    /// F3+N / F3+F4. The mode is the `GameType` ordinal.
+    ChangeGameMode {
+        mode: super::GameMode,
+    },
+    /// 游戏规则界面提交的值。键是 `minecraft:` 标识符，值是序列化文本。
+    ///
+    /// Values submitted by the game-rules screen. The key is a `minecraft:` identifier
+    /// and the value is serialized text.
+    SetGameRule {
+        entries: Vec<(String, String)>,
+    },
+    /// 命令方块界面的保存。
+    ///
+    /// A save from the command-block screen.
+    SetCommandBlock {
+        pos: BlockPos,
+        command: String,
+        mode: CommandBlockMode,
+        track_output: bool,
+        conditional: bool,
+        automatic: bool,
+    },
     /// 服务端不解码的包，内容是包 ID。
     Other(i32),
 }
 
 impl PlayRequest {
+    /// 没有签名的聊天。测试和离线客户端用。
+    ///
+    /// Unsigned chat. Used by tests and offline clients.
+    pub fn unsigned_chat(message: impl Into<String>) -> Self {
+        Self::Chat {
+            message: message.into(),
+            signature: None,
+            time_millis: 0,
+            salt: 0,
+            last_seen: super::LastSeenUpdate::EMPTY,
+        }
+    }
+
+    /// 没有签名的命令。
+    ///
+    /// An unsigned command.
+    pub fn unsigned_command(command: impl Into<String>) -> Self {
+        Self::ChatCommand {
+            command: command.into(),
+            signed: None,
+        }
+    }
+
     /// 解码一帧的负载，负载以数据包 ID 开头。
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(payload);
@@ -206,6 +307,16 @@ impl PlayRequest {
             serverbound::CHAT => read_chat(&mut reader)?,
             serverbound::CHAT_COMMAND => Self::ChatCommand {
                 command: reader.string(MAX_COMMAND_CHARS)?.to_owned(),
+                signed: None,
+            },
+            serverbound::CHAT_COMMAND_SIGNED => read_signed_command(&mut reader)?,
+            serverbound::CHAT_ACK => Self::ChatAck {
+                offset: reader.varint()?,
+            },
+            serverbound::CHAT_SESSION_UPDATE => read_chat_session(&mut reader)?,
+            serverbound::COMMAND_SUGGESTION => Self::CommandSuggestion {
+                id: reader.varint()?,
+                command: reader.string(MAX_SUGGESTION_CHARS)?.to_owned(),
             },
             serverbound::CLIENT_INFORMATION => {
                 Self::ClientInformation(ClientInformation::read(&mut reader)?)
@@ -260,6 +371,13 @@ impl PlayRequest {
             },
             serverbound::SIGN_UPDATE => read_sign_update(&mut reader)?,
             serverbound::EDIT_BOOK => read_edit_book(&mut reader)?,
+            serverbound::CHANGE_GAME_MODE => Self::ChangeGameMode {
+                mode: game_mode(reader.varint()?)?,
+            },
+            serverbound::SET_GAME_RULE => Self::SetGameRule {
+                entries: read_game_rules(&mut reader)?,
+            },
+            serverbound::SET_COMMAND_BLOCK => read_command_block(&mut reader)?,
             other => return Ok(Self::Other(other)),
         };
         reader.finish()?;
@@ -271,6 +389,7 @@ impl PlayRequest {
             position,
             rotation,
             on_ground: flags & MOVE_FLAG_ON_GROUND != 0,
+            horizontal_collision: flags & MOVE_FLAG_HORIZONTAL_COLLISION != 0,
         }
     }
 }
@@ -286,17 +405,85 @@ fn read_rotation(reader: &mut Reader<'_>) -> Result<(f32, f32), DecodeError> {
 
 fn read_chat(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let message = reader.string(MAX_CHAT_CHARS)?.to_owned();
-    // 时间戳和盐。
-    reader.i64()?;
-    reader.i64()?;
-    if reader.bool()? {
-        reader.bytes(SIGNATURE_BYTES)?;
+    let time_millis = reader.i64()?;
+    let salt = reader.i64()?;
+    let signature = if reader.bool()? {
+        Some(Box::new(read_signature(reader)?))
+    } else {
+        None
+    };
+    let last_seen = read_last_seen(reader)?;
+    Ok(PlayRequest::Chat {
+        message,
+        signature,
+        time_millis,
+        salt,
+        last_seen,
+    })
+}
+
+/// 解码带签名的命令。参数签名和已读窗口留给世界线程。
+///
+/// Decodes a signed command. Argument signatures and the seen window are left for the world thread.
+fn read_signed_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let command = reader.string(MAX_COMMAND_CHARS)?.to_owned();
+    let time_millis = reader.i64()?;
+    let salt = reader.i64()?;
+    let count = reader.count(MAX_SIGNED_ARGUMENTS)?;
+    let mut arguments = Vec::with_capacity(count);
+    for _ in 0..count {
+        arguments.push(crate::packet::play::ArgumentSignature {
+            name: reader.string(MAX_LANGUAGE_CHARS)?.to_owned(),
+            signature: read_signature(reader)?,
+        });
     }
-    // LastSeenMessages.Update：偏移、确认窗口、校验和。
-    reader.varint()?;
-    reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?;
-    reader.i8()?;
-    Ok(PlayRequest::Chat { message })
+    let last_seen = read_last_seen(reader)?;
+    Ok(PlayRequest::ChatCommand {
+        command,
+        signed: Some(crate::packet::play::SignedCommand {
+            time_millis,
+            salt,
+            arguments,
+            last_seen,
+        }),
+    })
+}
+
+fn read_chat_session(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    Ok(PlayRequest::ChatSession(
+        crate::packet::play::RemoteChatSession {
+            session_id: reader.uuid()?,
+            expires_at_millis: reader.i64()?,
+            public_key: reader
+                .byte_array(crate::packet::play::MAX_PUBLIC_KEY_BYTES)?
+                .to_vec(),
+            key_signature: reader
+                .byte_array(crate::packet::play::MAX_KEY_SIGNATURE_BYTES)?
+                .to_vec(),
+        },
+    ))
+}
+
+fn read_signature(
+    reader: &mut Reader<'_>,
+) -> Result<crate::packet::play::MessageSignatureBytes, DecodeError> {
+    let mut signature = [0; SIGNATURE_BYTES];
+    signature.copy_from_slice(reader.bytes(SIGNATURE_BYTES)?);
+    Ok(signature)
+}
+
+fn read_last_seen(
+    reader: &mut Reader<'_>,
+) -> Result<crate::packet::play::LastSeenUpdate, DecodeError> {
+    let offset = reader.varint()?;
+    let mut acknowledged = [0; LAST_SEEN_ACKNOWLEDGED_BYTES];
+    acknowledged.copy_from_slice(reader.bytes(LAST_SEEN_ACKNOWLEDGED_BYTES)?);
+    let checksum = reader.i8()?;
+    Ok(crate::packet::play::LastSeenUpdate {
+        offset,
+        acknowledged,
+        checksum,
+    })
 }
 
 /// 解码 `sign_update`：方块坐标、四行文字、哪一面。官方按这个顺序写。
@@ -345,10 +532,28 @@ fn read_player_command(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeErr
 /// 帧有长度前缀，物品后面多余的字节不会让字节流错位。
 fn read_creative_mode_slot(mut reader: Reader<'_>) -> Result<PlayRequest, DecodeError> {
     let slot = reader.i16()?;
-    Ok(match ItemStack::read_delimited(&mut reader) {
-        Ok(stack) => PlayRequest::SetCreativeModeSlot { slot, stack },
-        Err(_) => PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT),
-    })
+    match ItemStack::read_delimited(&mut reader) {
+        Ok(stack) => Ok(PlayRequest::SetCreativeModeSlot { slot, stack }),
+        // 嵌套超过上限时官方抛 `DecoderException`，这条连接要断。别的畸形物品仍然
+        // 忽略，槽位保持不动：规格允许这样，已有测试也按这个结果写。
+        //
+        // Nesting past the cap is a `DecoderException` officially, so this
+        // connection drops. Other malformed items are still ignored and the slot
+        // stays put: the spec allows that, and the existing tests expect it.
+        Err(error) if nesting_limit(&error) => Err(error),
+        Err(_) => Ok(PlayRequest::Other(serverbound::SET_CREATIVE_MODE_SLOT)),
+    }
+}
+
+/// 这种错误表示嵌套深过上限。收下它会在转发时把别人的连接打掉，或者在解码时把进程打崩。
+fn nesting_limit(error: &DecodeError) -> bool {
+    match error {
+        DecodeError::Nbt(mc_bamboo_nbt::DecodeError::TooDeep { .. })
+        | DecodeError::StacksTooDeep { .. } => true,
+        DecodeError::InvalidTextComponent(message) => *message == "nested too deep",
+        DecodeError::InvalidComponentValue(message) => message.contains("nested too deep"),
+        _ => false,
+    }
 }
 
 /// 解码 `container_click`。槽位和按钮的范围由调用方判断，官方也是这样。
@@ -418,6 +623,64 @@ fn read_component_type(reader: &mut Reader<'_>) -> Result<i32, DecodeError> {
 }
 
 /// 解码官方用 `readEnum` 读的字段。这种字段越界时官方解码失败，不是回绕。
+/// `CommandBlockEntity.Mode`。序号就是网上的枚举。
+///
+/// `CommandBlockEntity.Mode`. The ordinal is the enum on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBlockMode {
+    /// 连锁。
+    Sequence = 0,
+    /// 重复。
+    Auto = 1,
+    /// 脉冲。
+    Redstone = 2,
+}
+
+fn game_mode(id: i32) -> Result<super::GameMode, DecodeError> {
+    match id {
+        0 => Ok(super::GameMode::Survival),
+        1 => Ok(super::GameMode::Creative),
+        2 => Ok(super::GameMode::Adventure),
+        3 => Ok(super::GameMode::Spectator),
+        other => Err(DecodeError::InvalidEnum(other)),
+    }
+}
+
+fn command_block_mode(id: i32) -> Result<CommandBlockMode, DecodeError> {
+    match id {
+        0 => Ok(CommandBlockMode::Sequence),
+        1 => Ok(CommandBlockMode::Auto),
+        2 => Ok(CommandBlockMode::Redstone),
+        other => Err(DecodeError::InvalidEnum(other)),
+    }
+}
+
+fn read_game_rules(reader: &mut Reader<'_>) -> Result<Vec<(String, String)>, DecodeError> {
+    let count = reader.count(MAX_GAME_RULE_ENTRIES)?;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let identifier = reader.string(MAX_UTF)?.to_owned();
+        let value = reader.string(MAX_UTF)?.to_owned();
+        entries.push((identifier, value));
+    }
+    Ok(entries)
+}
+
+fn read_command_block(reader: &mut Reader<'_>) -> Result<PlayRequest, DecodeError> {
+    let pos = reader.block_pos()?;
+    let command = reader.string(MAX_UTF)?.to_owned();
+    let mode = command_block_mode(reader.varint()?)?;
+    let flags = reader.u8()?;
+    Ok(PlayRequest::SetCommandBlock {
+        pos,
+        command,
+        mode,
+        track_output: flags & COMMAND_BLOCK_TRACK_OUTPUT != 0,
+        conditional: flags & COMMAND_BLOCK_CONDITIONAL != 0,
+        automatic: flags & COMMAND_BLOCK_AUTOMATIC != 0,
+    })
+}
+
 fn by_ordinal<T: Copy>(values: &[T], id: i32) -> Result<T, DecodeError> {
     usize::try_from(id)
         .ok()
@@ -641,6 +904,7 @@ impl HumanoidArm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::play::{ArgumentSignature, LastSeenUpdate, SignedCommand};
     use crate::{
         codec::{write_string, write_varint},
         frame::{MAX_FRAME_LEN, find_frame},
@@ -717,6 +981,7 @@ mod tests {
                 position: Some(position),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             }
         );
         assert_eq!(
@@ -728,6 +993,7 @@ mod tests {
                 position: Some(position),
                 rotation: Some((90.0, -45.0)),
                 on_ground: true,
+                horizontal_collision: true,
             }
         );
         assert_eq!(
@@ -736,6 +1002,7 @@ mod tests {
                 position: None,
                 rotation: Some((90.0, -45.0)),
                 on_ground: false,
+                horizontal_collision: false,
             }
         );
         assert_eq!(
@@ -744,6 +1011,7 @@ mod tests {
                 position: None,
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             }
         );
     }
@@ -756,6 +1024,7 @@ mod tests {
                 position: None,
                 rotation: None,
                 on_ground: false,
+                horizontal_collision: true,
             })
         );
     }
@@ -783,13 +1052,17 @@ mod tests {
         assert_eq!(
             decode_body(serverbound::CHAT, CHAT_BODY),
             Ok(PlayRequest::Chat {
-                message: "hi".to_owned()
+                message: "hi".to_owned(),
+                signature: None,
+                time_millis: 0x0000_018b_cfe5_6800,
+                salt: 0x1122_3344_5566_7788,
+                last_seen: LastSeenUpdate::EMPTY,
             })
         );
     }
 
     #[test]
-    fn chat_discards_a_non_empty_last_seen_update() {
+    fn chat_keeps_a_non_empty_last_seen_update() {
         assert_eq!(
             decode_body(
                 serverbound::CHAT,
@@ -800,13 +1073,21 @@ mod tests {
                  03 01 02 08 5a"
             ),
             Ok(PlayRequest::Chat {
-                message: "hi".to_owned()
+                message: "hi".to_owned(),
+                signature: None,
+                time_millis: 0x0000_018b_cfe5_6800,
+                salt: 0x1122_3344_5566_7788,
+                last_seen: LastSeenUpdate {
+                    offset: 3,
+                    acknowledged: [0x01, 0x02, 0x08],
+                    checksum: 0x5a,
+                },
             })
         );
     }
 
     #[test]
-    fn chat_skips_a_signature_when_present() {
+    fn chat_keeps_a_signature_when_present() {
         let mut payload = vec![serverbound::CHAT as u8];
         payload.extend(hex("02 68 69"));
         payload.extend([0; 16]);
@@ -817,7 +1098,11 @@ mod tests {
         assert_eq!(
             PlayRequest::decode(&payload),
             Ok(PlayRequest::Chat {
-                message: "hi".to_owned()
+                message: "hi".to_owned(),
+                signature: Some(Box::new([0xab; SIGNATURE_BYTES])),
+                time_millis: 0,
+                salt: 0,
+                last_seen: LastSeenUpdate::EMPTY,
             })
         );
     }
@@ -831,7 +1116,11 @@ mod tests {
         assert_eq!(
             PlayRequest::decode(&payload),
             Ok(PlayRequest::Chat {
-                message: "竹".repeat(MAX_CHAT_CHARS)
+                message: "竹".repeat(MAX_CHAT_CHARS),
+                signature: None,
+                time_millis: 0,
+                salt: 0,
+                last_seen: LastSeenUpdate::EMPTY,
             })
         );
 
@@ -861,9 +1150,7 @@ mod tests {
     fn decodes_chat_command() {
         assert_eq!(
             decode_body(serverbound::CHAT_COMMAND, "07 66 6f 6f 20 62 61 72"),
-            Ok(PlayRequest::ChatCommand {
-                command: "foo bar".to_owned()
-            })
+            Ok(PlayRequest::unsigned_command("foo bar"))
         );
     }
 
@@ -1207,6 +1494,17 @@ mod tests {
             Ok(PlayRequest::ContainerButtonClick {
                 container_id: 1,
                 button_id: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_container_button_click() {
+        assert_eq!(
+            decode_body(serverbound::CONTAINER_BUTTON_CLICK, "05 02"),
+            Ok(PlayRequest::ContainerButtonClick {
+                container_id: 5,
+                button_id: 2,
             })
         );
     }
@@ -1563,9 +1861,11 @@ mod tests {
             Ok(PlayRequest::Other(serverbound::CLIENT_TICK_END))
         );
         // 不调用 finish，所以内容是什么都行。
+        //
+        // `finish` is not called, so the body can be anything.
         assert_eq!(
-            decode_body(serverbound::CHAT_ACK, "ff ff ff"),
-            Ok(PlayRequest::Other(serverbound::CHAT_ACK))
+            decode_body(serverbound::CHAT_SESSION_UPDATE, ""),
+            Err(DecodeError::UnexpectedEnd)
         );
         assert_eq!(decode_body(0x7f, "01 02 03"), Ok(PlayRequest::Other(0x7f)));
     }
@@ -1580,6 +1880,10 @@ mod tests {
             decode_frame("01 0d"),
             PlayRequest::Other(serverbound::CLIENT_TICK_END)
         );
+    }
+
+    #[test]
+    fn decodes_signed_chat_command() {
         assert_eq!(
             decode_body(
                 serverbound::CHAT_COMMAND_SIGNED,
@@ -1589,7 +1893,69 @@ mod tests {
                  00
                  00 00 00 00 01"
             ),
-            Ok(PlayRequest::Other(serverbound::CHAT_COMMAND_SIGNED))
+            Ok(PlayRequest::ChatCommand {
+                command: "say hi".to_owned(),
+                signed: Some(SignedCommand {
+                    time_millis: 0x0000_018b_cfe5_6800,
+                    salt: 0x1122_3344_5566_7788,
+                    arguments: Vec::new(),
+                    last_seen: LastSeenUpdate::EMPTY,
+                }),
+            })
         );
+    }
+
+    #[test]
+    fn signed_chat_command_keeps_argument_signatures() {
+        let mut body = Vec::new();
+        write_string(&mut body, "say hi");
+        body.extend([0; 16]);
+        body.push(1);
+        write_string(&mut body, "message");
+        body.extend([0xab; SIGNATURE_BYTES]);
+        body.extend(hex("00 00 00 00 01"));
+        assert_eq!(
+            decode_body(serverbound::CHAT_COMMAND_SIGNED, &hex_text(&body)),
+            Ok(PlayRequest::ChatCommand {
+                command: "say hi".to_owned(),
+                signed: Some(SignedCommand {
+                    time_millis: 0,
+                    salt: 0,
+                    arguments: vec![ArgumentSignature {
+                        name: "message".to_owned(),
+                        signature: [0xab; SIGNATURE_BYTES],
+                    }],
+                    last_seen: LastSeenUpdate::EMPTY,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_chat_ack() {
+        assert_eq!(
+            decode_body(serverbound::CHAT_ACK, "05"),
+            Ok(PlayRequest::ChatAck { offset: 5 })
+        );
+    }
+
+    #[test]
+    fn decodes_command_suggestion() {
+        assert_eq!(
+            decode_body(serverbound::COMMAND_SUGGESTION, "07 04 2f 74 69 6d"),
+            Ok(PlayRequest::CommandSuggestion {
+                id: 7,
+                command: "/tim".to_owned()
+            })
+        );
+    }
+
+    /// 测试里把现成的字节写成 `decode_body` 要的十六进制文本。
+    fn hex_text(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }

@@ -10,7 +10,7 @@ use common::{
     TestServer, frame,
     player::{Player, QUIET},
     wire::{
-        AwardStats, Disconnect, DisguisedChat, Nbt, PlayerInfoRemove, PlayerInfoUpdate, SystemChat,
+        AwardStats, Disconnect, Nbt, PlayerChat, PlayerInfoRemove, PlayerInfoUpdate, SystemChat,
         chat, chat_command, client_command,
     },
 };
@@ -83,8 +83,12 @@ async fn chat_reaches_everyone_including_the_sender() {
     alice.send(&chat("hello")).await;
 
     for viewer in [&mut alice, &mut bob] {
-        let message = viewer.expect::<DisguisedChat>(|_| true).await;
-        assert_eq!(message.message.as_str(), Some("hello"));
+        let message = viewer.expect::<PlayerChat>(|_| true).await;
+        assert_eq!(message.content, "hello");
+        assert!(!message.signed);
+        assert_eq!(message.index, 0);
+        assert_eq!(message.salt, 0);
+        assert_eq!(message.global_index, 0);
         assert_eq!(message.chat_type, CHAT_TYPE);
         assert_eq!(message.name.as_str(), Some("Alice"));
         assert_eq!(message.target, None);
@@ -99,20 +103,22 @@ async fn chat_frame_matches_the_official_bytes() {
     let mark = kitten.mark();
 
     kitten.send(&chat("hi")).await;
-    kitten.expect::<DisguisedChat>(|_| true).await;
+    let message = kitten.expect::<PlayerChat>(|_| true).await;
 
-    // `chat-join.md` 第 5 节的帧去掉帧长和包 ID。
+    assert_eq!(message.content, "hi");
+    assert!(!message.signed);
+    assert_eq!(message.salt, 0);
+    assert_eq!(message.index, 0);
+    assert_eq!(message.global_index, 0);
+    assert_eq!(message.chat_type, CHAT_TYPE);
+    assert_eq!(message.name.as_str(), Some("Kitten"));
+    assert_eq!(message.target, None);
     let frames = kitten.frames();
-    let body = &frames[mark..]
-        .iter()
-        .find(|frame| frame.id == clientbound::DISGUISED_CHAT)
-        .expect("just received it")
-        .body;
-    let expected = [
-        0x08, 0x00, 0x02, 0x68, 0x69, 0x01, 0x08, 0x00, 0x06, 0x4b, 0x69, 0x74, 0x74, 0x65, 0x6e,
-        0x00,
-    ];
-    assert_eq!(body, &expected);
+    assert!(
+        frames[mark..]
+            .iter()
+            .any(|frame| frame.id == clientbound::PLAYER_CHAT)
+    );
 }
 
 #[tokio::test]
@@ -129,8 +135,8 @@ async fn the_official_chat_packet_is_accepted_byte_for_byte() {
     ]);
     alice.send(&frame(&packet)).await;
 
-    let message = alice.expect::<DisguisedChat>(|_| true).await;
-    assert_eq!(message.message.as_str(), Some("hi"));
+    let message = alice.expect::<PlayerChat>(|_| true).await;
+    assert_eq!(Some(message.content.as_str()), Some("hi"));
 }
 
 #[tokio::test]
@@ -141,8 +147,8 @@ async fn chinese_and_emoji_survive_the_round_trip() {
 
     alice.send(&chat(text)).await;
 
-    let message = bob.expect::<DisguisedChat>(|_| true).await;
-    assert_eq!(message.message.as_str(), Some(text));
+    let message = bob.expect::<PlayerChat>(|_| true).await;
+    assert_eq!(Some(message.content.as_str()), Some(text));
 }
 
 #[tokio::test]
@@ -153,8 +159,8 @@ async fn the_longest_message_goes_through() {
 
     alice.send(&chat(&text)).await;
 
-    let message = bob.expect::<DisguisedChat>(|_| true).await;
-    assert_eq!(message.message.as_str(), Some(text.as_str()));
+    let message = bob.expect::<PlayerChat>(|_| true).await;
+    assert_eq!(Some(message.content.as_str()), Some(text.as_str()));
 }
 
 #[tokio::test]
@@ -167,7 +173,7 @@ async fn a_message_above_the_limit_only_kicks_its_sender() {
 
     alice.wait_closed().await;
     server.wait_for_players(&["Bob"]).await;
-    bob.expect_none::<DisguisedChat>(mark, |_| true).await;
+    bob.expect_none::<PlayerChat>(mark, |_| true).await;
     bob.assert_world_ticks().await;
 }
 
@@ -180,8 +186,8 @@ async fn chat_keeps_the_order_of_each_sender() {
 
     for index in 0..MOST_IN_A_BURST {
         let expected = format!("message {index}");
-        let message = bob.expect::<DisguisedChat>(|_| true).await;
-        assert_eq!(message.message.as_str(), Some(expected.as_str()));
+        let message = bob.expect::<PlayerChat>(|_| true).await;
+        assert_eq!(Some(message.content.as_str()), Some(expected.as_str()));
     }
 }
 
@@ -198,7 +204,7 @@ async fn a_flood_disconnects_the_sender_after_the_message_that_reaches_the_limit
     alice.wait_closed().await;
     server.wait_for_players(&["Bob"]).await;
     bob.assert_world_ticks().await;
-    assert_eq!(bob.since::<DisguisedChat>(mark).len(), MOST_IN_A_BURST + 1);
+    assert_eq!(bob.since::<PlayerChat>(mark).len(), MOST_IN_A_BURST + 1);
 }
 
 #[tokio::test]
@@ -226,7 +232,7 @@ async fn every_player_sees_chat_from_several_senders_in_the_same_order() {
             .wait_until("every message", |frames| {
                 frames
                     .iter()
-                    .filter(|frame| frame.id == clientbound::DISGUISED_CHAT)
+                    .filter(|frame| frame.id == clientbound::PLAYER_CHAT)
                     .count()
                     >= 3 * MOST_IN_A_BURST
             })
@@ -234,9 +240,9 @@ async fn every_player_sees_chat_from_several_senders_in_the_same_order() {
     }
     let order = |player: &Player, mark: usize| -> Vec<String> {
         player
-            .since::<DisguisedChat>(mark)
+            .since::<PlayerChat>(mark)
             .iter()
-            .filter_map(|packet| packet.message.as_str().map(str::to_owned))
+            .map(|packet| packet.content.clone())
             .collect()
     };
     let seen_by_alice = order(&alice, marks[0]);
@@ -264,7 +270,7 @@ async fn illegal_characters_disconnect_the_sender_with_the_translated_reason() {
         assert_eq!(kicked.reason.translate_keys(), [ILLEGAL_CHARACTERS]);
         sender.wait_closed().await;
         server.wait_for_players(&["Bob"]).await;
-        bob.expect_none::<DisguisedChat>(mark, |_| true).await;
+        bob.expect_none::<PlayerChat>(mark, |_| true).await;
         bob.assert_world_ticks().await;
     }
 }
@@ -328,7 +334,7 @@ async fn an_unknown_command_gets_a_red_error_only_for_its_sender() {
         );
     }
     bob.expect_none::<SystemChat>(mark, |_| true).await;
-    alice.expect_none::<DisguisedChat>(own_mark, |_| true).await;
+    alice.expect_none::<PlayerChat>(own_mark, |_| true).await;
 }
 
 #[tokio::test]
@@ -475,7 +481,7 @@ async fn chat_from_a_player_who_just_left_is_still_delivered_in_order() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     drop(alice);
 
-    let message = bob.expect::<DisguisedChat>(|_| true).await;
-    assert_eq!(message.message.as_str(), Some("bye"));
+    let message = bob.expect::<PlayerChat>(|_| true).await;
+    assert_eq!(Some(message.content.as_str()), Some("bye"));
     bob.expect::<SystemChat>(system_message_with(LEFT)).await;
 }

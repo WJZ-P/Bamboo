@@ -7,6 +7,7 @@ use std::{
     io,
     net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::Path,
     sync::{
         Arc, Mutex, RwLock,
         mpsc::{self, Receiver, Sender},
@@ -15,9 +16,11 @@ use std::{
     time::Duration,
 };
 
-use mc_bamboo_auth::ServerKeyPair;
+use mc_bamboo_auth::{
+    ProfileKeySchedule, ServerKeyPair, Timeouts, fetch_profile_keys, public_keys_url,
+};
 use mc_bamboo_data::{registries, tags};
-use mc_bamboo_game::{Inbound, World, WorldConfig};
+use mc_bamboo_game::{Inbound, ServiceProfileKeys, World, WorldConfig};
 use mc_bamboo_protocol::{
     GAME_VERSION, PROTOCOL_VERSION,
     frame::{FrameError, append_frame},
@@ -32,7 +35,7 @@ use mc_bamboo_protocol::{
 use serde_json::json;
 use tokio::{
     net::TcpListener,
-    sync::{Semaphore, broadcast},
+    sync::{Semaphore, broadcast, watch},
     time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -43,6 +46,7 @@ use crate::{
     config::ServerConfig,
     connection,
     event::{PlayerInfo, ServerEvent},
+    ops::{OPS_FILE, Ops},
     players::{AddPlayerError, OnlinePlayer},
 };
 
@@ -102,12 +106,16 @@ impl PreEncodedResponses {
 }
 
 /// 编码服务器列表的响应。只有在线人数变化时才需要重新编码。
-fn encode_status(config: &ServerConfig, online: usize) -> Result<Arc<[u8]>, FrameError> {
+fn encode_status(
+    config: &ServerConfig,
+    online: usize,
+    enforces_secure_chat: bool,
+) -> Result<Arc<[u8]>, FrameError> {
     let status_json = json!({
         "version": { "name": format!("Bamboo {GAME_VERSION}"), "protocol": PROTOCOL_VERSION },
         "players": { "max": config.max_players, "online": online },
         "description": { "text": config.motd },
-        "enforcesSecureChat": false,
+        "enforcesSecureChat": enforces_secure_chat,
     })
     .to_string();
 
@@ -120,11 +128,25 @@ fn encode_status(config: &ServerConfig, online: usize) -> Result<Arc<[u8]>, Fram
 pub(crate) struct Shared {
     pub(crate) config: ServerConfig,
     pub(crate) responses: PreEncodedResponses,
+    /// 启动时从工作目录读到的 OP 表。之后不再读盘。
+    ///
+    /// The op list read from the working directory at startup. It is not read again.
+    pub(crate) ops: Ops,
     /// 每次服务端启动时生成的会话 ID。
     pub(crate) session_id: Uuid,
     /// 这次启动的 RSA 密钥对，只有开了正版验证才有。官方不管开不开都生成，
     /// 但是关掉的时候它一次也用不上，生成 1024 位的钥匙又要花掉启动时间。
     pub(crate) keypair: Option<ServerKeyPair>,
+    /// Mojang 用来签玩家公钥的钥匙。连接任务写，世界线程只读。
+    ///
+    /// The keys Mojang uses to sign player public keys. Connection tasks write them.
+    /// The world thread only reads.
+    pub(crate) profile_keys: Arc<ServiceProfileKeys>,
+    /// 第一次取钥（成功或失败）结束时变成 `true`。登录在这之前等着。
+    ///
+    /// Becomes `true` when the first key fetch finishes, successfully or not.
+    /// Login waits until then.
+    keys_ready: watch::Sender<bool>,
     /// 发给世界线程的消息。世界线程结束后发送会失败。
     pub(crate) inbox: Sender<Inbound>,
     status: RwLock<Arc<[u8]>>,
@@ -142,7 +164,8 @@ impl Shared {
     /// 调用方要拿着玩家表的锁。否则两条连接同时进出时，先算出的人数可能最后才写进缓存，
     /// 服务器列表就会一直显示错的人数，直到下一次有人进出。
     fn refresh_status(&self, online: usize) {
-        match encode_status(&self.config, online) {
+        let enforced = enforces_secure_chat(&self.config, &self.profile_keys);
+        match encode_status(&self.config, online, enforced) {
             Ok(frame) => *self.status.write().expect("状态缓存的锁不应该中毒") = frame,
             Err(error) => warn!(%error, "failed to refresh the server status"),
         }
@@ -209,7 +232,9 @@ impl Server {
     pub fn new(listener: TcpListener, config: ServerConfig) -> Result<Self, FrameError> {
         let config = config.normalized();
         let responses = PreEncodedResponses::new()?;
-        let status = encode_status(&config, 0)?;
+        let profile_keys = Arc::new(ServiceProfileKeys::empty());
+        let (keys_ready, _) = watch::channel(false);
+        let status = encode_status(&config, 0, false)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER_LEN);
         let (inbox_sender, inbox) = mpsc::channel();
         let keypair = config.online_mode.then(ServerKeyPair::generate);
@@ -218,8 +243,14 @@ impl Server {
             shared: Arc::new(Shared {
                 config,
                 responses,
+                // 官方也是在世界线程启动之前读一次 `ops.json`。
+                //
+                // Official also reads `ops.json` once before the world thread starts.
+                ops: Ops::load(Path::new(OPS_FILE)),
                 session_id: Uuid::new_v4(),
                 keypair,
+                profile_keys,
+                keys_ready,
                 inbox: inbox_sender,
                 status: RwLock::new(status),
                 players: Mutex::new(HashMap::new()),
@@ -243,8 +274,12 @@ impl Server {
     /// 持续接受连接，直到 `shutdown` 完成，然后关闭所有连接再返回。
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let config = world_config(&self.shared.config);
-        self.run_with_world(move |inbox| World::new(config, inbox).run(), shutdown)
-            .await;
+        let keys = Arc::clone(&self.shared.profile_keys);
+        self.run_with_world(
+            move |inbox| World::with_service_keys(config, inbox, keys).run(),
+            shutdown,
+        )
+        .await;
     }
 
     /// [`run`](Self::run) 的本体。测试用它换掉世界线程的内容。
@@ -267,6 +302,13 @@ impl Server {
         if let Err(error) = spawn_world(world, inbox, world_stopped.clone()) {
             error!(%error, "failed to start the world thread");
             world_stopped.cancel();
+        }
+        if shared.config.online_mode {
+            let refreshing = Arc::clone(&shared);
+            let stop = cancel.clone();
+            tokio::spawn(async move {
+                refresh_profile_keys(refreshing, stop).await;
+            });
         }
 
         loop {
@@ -314,11 +356,86 @@ impl Server {
     }
 }
 
+fn enforces_secure_chat(config: &ServerConfig, keys: &ServiceProfileKeys) -> bool {
+    config.enforce_secure_profile && config.online_mode && keys.can_validate()
+}
+
+/// 记下第一次取钥已经结束。`watch::Sender::send` 在没有接收者时会丢掉这次写入，值还停在 `false`。
+/// 取钥通常在任何人登录之前就结束，后来的登录必须能直接读到 `true`，否则会一直等到 `slow_login`。
+///
+/// Records that the first key fetch has finished. `watch::Sender::send` drops the write when there
+/// is no receiver, so the value stays `false`. The fetch usually finishes before anyone logs in,
+/// and a later login has to read `true` directly. Otherwise it waits until `slow_login`.
+fn mark_keys_ready(shared: &Shared) {
+    shared.keys_ready.send_replace(true);
+}
+
+/// 等第一次取钥结束。取钥在后台按官方的间隔重试，这里不自己发请求。
+///
+/// Waits until the first key fetch finishes. The background task retries on the official
+/// schedule. This function does not send its own request.
+pub(crate) async fn ensure_profile_keys(shared: &Arc<Shared>) {
+    if !shared.config.online_mode {
+        return;
+    }
+    let mut ready = shared.keys_ready.subscribe();
+    if *ready.borrow() {
+        return;
+    }
+    let _ = ready.changed().await;
+}
+
+/// 后台取 Mojang 的公钥。失败按 `RetryableFetch` 退避，成功后 24 小时刷新。世界线程不碰网络。
+///
+/// Fetches Mojang's public keys in the background. Failures back off like `RetryableFetch`,
+/// and a success refreshes after 24 hours. The world thread never touches the network.
+async fn refresh_profile_keys(shared: Arc<Shared>, cancel: CancellationToken) {
+    let mut schedule = ProfileKeySchedule::default();
+    loop {
+        if cancel.is_cancelled() {
+            mark_keys_ready(&shared);
+            return;
+        }
+        let url = public_keys_url(&shared.config.session_server_url);
+        let timeouts = Timeouts {
+            connect: shared.config.auth_connect_timeout,
+            read: shared.config.auth_read_timeout,
+        };
+        let delay = match fetch_profile_keys(&url, timeouts).await {
+            Ok(keys) => {
+                if shared.profile_keys.replace(&keys) {
+                    let online = shared.players.lock().expect("玩家表的锁不应该中毒").len();
+                    shared.refresh_status(online);
+                    schedule.after_success()
+                } else {
+                    warn!(
+                        "discarding Mojang profile keys because one of them is not an RSA public key"
+                    );
+                    schedule.after_failure()
+                }
+            }
+            Err(error) => {
+                warn!(%error, "could not fetch Mojang profile keys; will retry");
+                schedule.after_failure()
+            }
+        };
+        mark_keys_ready(&shared);
+        let stop = tokio::select! {
+            () = cancel.cancelled() => true,
+            () = tokio::time::sleep(delay) => false,
+        };
+        if stop {
+            return;
+        }
+    }
+}
+
 fn world_config(config: &ServerConfig) -> WorldConfig {
     WorldConfig {
         view_distance: i32::from(config.view_distance),
         max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
         online_mode: config.online_mode,
+        enforce_secure_profile: config.enforce_secure_profile,
     }
 }
 
@@ -580,8 +697,11 @@ mod tests {
         let mut buffer = Vec::new();
         join(&mut stream, &mut buffer).await;
 
-        let tick_end = frame(&[play::serverbound::CLIENT_TICK_END as u8]);
-        stream.write_all(&tick_end.repeat(5000)).await.unwrap();
+        // 没解码、也不会进世界线程的包。`client_tick_end` 现在要转发给世界。
+        //
+        // An undecoded packet that never reaches the world. `client_tick_end` is forwarded now.
+        let ignored = frame(&[0x7f]);
+        stream.write_all(&ignored.repeat(5000)).await.unwrap();
 
         // 连接任务还在正常工作：不进配额的包不影响 ping 的回应。
         let mut ping = vec![play::serverbound::PING_REQUEST as u8];

@@ -1,7 +1,7 @@
 //! `CandleBlock` 和父类 `AbstractCandleBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, registries};
+use mc_bamboo_data::{Block, registries, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -23,6 +23,13 @@ const MAX_CANDLES: i32 = 4;
 /// `AbstractCandleBlock.extinguish`。
 pub(super) fn extinguish(state: BlockState, world: &mut World, pos: BlockPos) {
     world.set_block(pos, state.with(LIT, false), UPDATE_ALL_IMMEDIATE);
+    // 官方在熄灭之后出声，`player` 传的是空。
+    world.play_block_sound(
+        pos,
+        sound_event("minecraft:block.candle.extinguish"),
+        1.0,
+        1.0,
+    );
 }
 
 impl Behaviour for Candle {

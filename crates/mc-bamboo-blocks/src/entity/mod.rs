@@ -27,6 +27,10 @@ use crate::{shape::Aabb, state::BlockState, world::World};
 
 pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
+pub use physics::{
+    TravelSegment, enclosed_in_air, no_block_collision, overlaps_new_blocks, stuck_speed,
+    sweep_movement,
+};
 pub use random::JavaRandom;
 
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。
@@ -49,7 +53,9 @@ pub struct FallingBlock {
     ///
     /// `dropItem`. When false, a timeout or a failed landing spawns nothing.
     pub drop_item: bool,
-    /// `cancelDrop`：落地时不放回方块，也不走 `onBrokenAfterFall`。
+    /// `cancelDrop`：落地时不放回方块。官方仍会 `callOnBrokenAfterFall`。
+    ///
+    /// `cancelDrop`: the block is not placed. Vanilla still calls `callOnBrokenAfterFall`.
     pub cancel_drop: bool,
     /// `hurtEntities`、`fallDamagePerDistance`、`fallDamageMax`：砸到实体的伤害不在范围里，
     /// 但铁砧靠它决定要不要裂开，所以照官方算。

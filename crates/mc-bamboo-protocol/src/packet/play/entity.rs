@@ -138,9 +138,9 @@ impl EntityData {
         match self {
             Self::Item(stack) => {
                 write_data_header(out, 8, SERIALIZER_ITEM_STACK);
-                // 观察者不是这堆组件的来源，滤掉发不出去的组件。
-                // Viewers did not send this patch, so skip components we cannot forward.
-                stack.write_for_others(out);
+                // 组件按官方原样发给所有观察者。
+                // Components are forwarded to every viewer exactly as vanilla does.
+                stack.write(out);
             }
             Self::SharedFlags(flags) => {
                 write_data_header(out, 0, SERIALIZER_BYTE);
@@ -290,8 +290,10 @@ pub enum EquipmentSlot {
 
 /// 更新实体的装备，发给看得到这个实体的其他玩家。
 ///
-/// 物品带着组件：客户端要靠它们画附魔光效和改过的名字。收包的一定不是物品的主人，
-/// 所以走 [`ItemStack::write_for_others`]，没法完全校验的那几种组件不发。
+/// 物品带着组件：客户端要靠它们画附魔光效和改过的名字。组件原样写，和官方一样。
+///
+/// Updates an entity's equipment for players who can see it. Components are written
+/// as stored, matching vanilla.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetEquipment<'a> {
     entity_id: i32,
@@ -313,7 +315,7 @@ impl ClientboundPacket for SetEquipment<'_> {
         for (index, (slot, stack)) in self.slots.iter().enumerate() {
             let is_last = index + 1 == self.slots.len();
             out.push(*slot as u8 | if is_last { 0 } else { EQUIPMENT_CONTINUE });
-            stack.write_for_others(out);
+            stack.write(out);
         }
     }
 }

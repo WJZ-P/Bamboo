@@ -192,18 +192,27 @@ fn apply_bookshelf(world: &mut World, pos: BlockPos, slot: usize) {
 /// playing `stop`s. `play` and `stop` call `onSongChanged` themselves.
 fn apply_jukebox(world: &mut World, pos: BlockPos) {
     let slots = world.slots_at(pos);
-    let has_item = slots.first().is_some_and(|stack| !stack.is_empty());
+    let stack = slots.first().cloned().unwrap_or_else(ItemStack::empty);
+    let has_item = !stack.is_empty();
     let state = world.block_state(pos);
     if state.is_a(BlockAncestor::JukeboxBlock) && state.get(HAS_RECORD) != has_item {
         world.set_block(pos, state.with(HAS_RECORD, has_item), UPDATE_CLIENTS);
     }
-    let playable = has_item && slots.first().is_some_and(has_jukebox_playable);
+    let playable = has_item && has_jukebox_playable(&stack);
     let was_playing = world.redstone_memory().is_jukebox_playing(pos);
     if playable {
         world.redstone_memory_mut().set_jukebox_playing(pos, true);
+        // `JukeboxSongPlayer.play`：1010 的 data 是歌典注册表 ID，然后 `onSongChanged`。
+        // `JukeboxSongPlayer.play`: 1010's data is the song's registry id, then `onSongChanged`.
+        if let Some(song) = jukebox_song_id(&stack) {
+            world.level_event(1010, pos, song);
+        }
         on_jukebox_song_changed(world.block_state(pos), world, pos);
     } else if was_playing {
         world.redstone_memory_mut().set_jukebox_playing(pos, false);
+        // `JukeboxSongPlayer.stop`：正在放才报 1011，然后 `onSongChanged`。
+        // `JukeboxSongPlayer.stop`: 1011 only while a song is playing, then `onSongChanged`.
+        world.level_event(1011, pos, 0);
         on_jukebox_song_changed(world.block_state(pos), world, pos);
     }
 }
@@ -355,6 +364,18 @@ pub(crate) fn has_jukebox_playable(stack: &ItemStack) -> bool {
 /// which matches `Item.jukebox_playable`.
 pub(crate) fn item_has_jukebox_song(item: i32) -> bool {
     has_jukebox_playable(&ItemStack::new(item, 1))
+}
+
+/// `Registry.getId`：1010 的 data。内联的歌不在注册表里，官方返回 -1。
+///
+/// `Registry.getId`, the data of level event 1010. An inline song is not in the registry,
+/// so vanilla returns -1.
+fn jukebox_song_id(stack: &ItemStack) -> Option<i32> {
+    match defaults::resolve(stack.item, &stack.patch(), kinds::JUKEBOX_PLAYABLE) {
+        Some(ComponentValue::JukeboxPlayable(Holder::Id(id))) => Some(*id),
+        Some(ComponentValue::JukeboxPlayable(Holder::Inline(_))) => Some(-1),
+        _ => None,
+    }
 }
 
 fn jukebox_comparator_output(stack: &ItemStack) -> i32 {

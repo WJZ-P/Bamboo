@@ -8,7 +8,7 @@
 //! 容器和实体都没有，所以模拟信号只有方块状态能决定的那些有值。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, BlockAncestor, blocks};
+use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds::sound_event};
 
 use crate::{
     behaviour::{
@@ -22,7 +22,7 @@ use crate::{
         POWERED, SupportType,
     },
     ticks::TickPriority,
-    world::{UPDATE_CLIENTS, World},
+    world::{DeferredRead, UPDATE_CLIENTS, World},
 };
 
 /// `DiodeBlock`。
@@ -163,8 +163,75 @@ fn calculate_output_signal(state: BlockState, world: &World, pos: BlockPos) -> i
     }
 }
 
+/// 比较器的输入是不是正要读一份不在表里的熔炉或酿造台。
+///
+/// 漏斗、箱子、潜影盒的信号在槽位表里，实体拿出去也不影响，这里不算。
+/// 把那种读取推迟到 tick 结束会漏掉漏斗先送出、后吸入之间的那一次信号。
+///
+/// Whether this comparator would read a furnace or brewing stand that is out of the map.
+///
+/// Hopper, chest and shulker signals live in the slot table, so a taken entity does not change
+/// them. Deferring those reads until the end of the tick would drop the signal a hopper
+/// publishes between ejecting and sucking.
+pub(crate) fn comparator_reads_taken_entity(world: &World, pos: BlockPos) -> bool {
+    let state = world.block_state(pos);
+    if !state.is(blocks::COMPARATOR) {
+        return false;
+    }
+    let facing = state.get(HORIZONTAL_FACING);
+    let target_pos = pos.relative(facing);
+    let target = world.block_state(target_pos);
+    if target.has_analog_output_signal() {
+        return world.block_entity_is_taken(target_pos) && signal_is_on_block_entity(target);
+    }
+    if diode_input_signal(state, world, pos) >= 15 || !target.is_redstone_conductor() {
+        return false;
+    }
+    let behind_pos = target_pos.relative(facing);
+    let behind = world.block_state(behind_pos);
+    behind.has_analog_output_signal()
+        && world.block_entity_is_taken(behind_pos)
+        && signal_is_on_block_entity(behind)
+}
+
+/// 熔炉三兄弟和酿造台的比较器信号在方块实体上，不在槽位表里。
+///
+/// Furnace-family and brewing-stand comparator signals live on the block entity, not in the
+/// slot table.
+fn signal_is_on_block_entity(state: BlockState) -> bool {
+    state.is_a(BlockAncestor::AbstractFurnaceBlock) || state.is_a(BlockAncestor::BrewingStandBlock)
+}
+
+/// 比较器放下之后要排的那一刻。实体放回去之后由队列调用。
+///
+/// The tick a comparator schedules when it is placed. The queue calls this after the entity is
+/// put back.
+pub(crate) fn resume_comparator_placed(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if !state.is(blocks::COMPARATOR) {
+        return;
+    }
+    if should_turn_on(state, world, pos) {
+        world.schedule_tick(pos, state.block(), 1);
+    }
+}
+
+/// 比较器 `refreshOutputState`。实体放回去之后由队列调用。
+///
+/// Comparator `refreshOutputState`. The queue calls this after the entity is put back.
+pub(crate) fn resume_comparator_refresh(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if state.is(blocks::COMPARATOR) {
+        refresh_output_state(state, world, pos);
+    }
+}
+
 /// `ComparatorBlock.refreshOutputState`：输出强度变了，或者在比较模式下，都要更新前方。
 fn refresh_output_state(state: BlockState, world: &mut World, pos: BlockPos) {
+    if comparator_reads_taken_entity(world, pos) {
+        world.defer_block_entity_read(DeferredRead::ComparatorRefresh { pos });
+        return;
+    }
     let output = calculate_output_signal(state, world, pos);
     let old = world.redstone_memory().comparator_output(pos);
     world
@@ -254,12 +321,16 @@ impl Behaviour for Diode {
         state: BlockState,
         world: &mut World,
         pos: BlockPos,
-        _source: &'static Block,
+        source: &'static Block,
     ) {
         if !world.block_state(pos).is_same_block(state) {
             return;
         }
         if state.can_survive(world, pos) {
+            if comparator_reads_taken_entity(world, pos) {
+                world.defer_block_entity_read(DeferredRead::ComparatorNeighbor { pos, source });
+                return;
+            }
             check_tick_on_neighbor(state, world, pos);
             return;
         }
@@ -270,6 +341,10 @@ impl Behaviour for Diode {
     }
 
     fn set_placed_by(&self, state: BlockState, world: &mut World, pos: BlockPos, _placer: &Actor) {
+        if comparator_reads_taken_entity(world, pos) {
+            world.defer_block_entity_read(DeferredRead::ComparatorPlaced { pos });
+            return;
+        }
         if should_turn_on(state, world, pos) {
             world.schedule_tick(pos, state.block(), 1);
         }
@@ -476,7 +551,19 @@ impl Behaviour for Comparator {
         ctx: &UseContext,
     ) -> InteractionResult {
         let pos = ctx.clicked_pos();
+        // 官方先按换过模式的状态定音高、出声，再写方块。
         let cycled = state.cycle(MODE_COMPARATOR);
+        let pitch = if cycled.get(MODE_COMPARATOR) == ComparatorMode::Subtract {
+            0.55
+        } else {
+            0.5
+        };
+        world.play_block_sound_except(
+            pos,
+            sound_event("minecraft:block.comparator.click"),
+            0.3,
+            pitch,
+        );
         world.set_block(pos, cycled, UPDATE_CLIENTS);
         if world.block_state(pos).is_same_block(state) {
             refresh_output_state(cycled, world, pos);

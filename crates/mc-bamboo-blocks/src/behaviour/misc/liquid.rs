@@ -52,7 +52,6 @@ fn hardened_lava(world: &World, pos: BlockPos) -> BlockState {
 }
 
 /// `shouldSpreadLiquid`：岩浆碰到水或者灵魂土上的蓝冰时凝固，这时不用流了。
-/// 官方凝固时还有一个嘶嘶声的 `levelEvent`，这个世界没有音效。
 fn should_spread(state: BlockState, world: &mut World, pos: BlockPos) -> bool {
     if !state.is(blocks::LAVA) {
         return true;
@@ -68,6 +67,8 @@ fn should_spread(state: BlockState, world: &mut World, pos: BlockPos) -> bool {
             continue;
         };
         world.set_block_and_update(pos, hardened);
+        // `fizz`：凝固时的嘶嘶声。
+        world.level_event(1501, pos, 0);
         return false;
     }
     true

@@ -8,7 +8,8 @@ use mc_bamboo_data::{BlockAncestor, block_maps::FIRE_ODDS, blocks, tags::block_t
 
 use super::portal::{PortalShape, is_frame};
 use crate::{
-    behaviour::Behaviour,
+    behaviour::{Behaviour, Plain},
+    context::Actor,
     state::{AGE_15, BlockState, EAST, NORTH, Property, SOUTH, SupportType, UP, WATERLOGGED, WEST},
     world::{UPDATE_NONE, World},
 };
@@ -106,14 +107,31 @@ pub(crate) fn can_be_placed_at(world: &World, pos: BlockPos, forward: Direction)
         && (state_at(world, pos).can_survive(world, pos) || is_portal(world, pos, forward))
 }
 
-/// `BaseFireBlock.isPortal`：旁边有框架方块时，按玩家朝向的左手轴优先找空框架。
-/// 官方只在朝向是竖直的时候取随机的轴，玩家的水平朝向永远是水平的。
+/// `BaseFireBlock.isPortal`：旁边有框架方块时，按朝向的左手轴优先找空框架。
+///
+/// `BaseFireBlock.isPortal`: when a frame block is beside the cell, look for an empty portal
+/// along the facing's left-hand axis.
 fn is_portal(world: &World, pos: BlockPos, forward: Direction) -> bool {
-    let beside_frame = Direction::ALL
-        .into_iter()
-        .any(|side| is_frame(world.block_state(pos.relative(side))));
-    beside_frame
-        && PortalShape::find_empty(world, pos, forward.counter_clockwise().axis()).is_some()
+    // 官方在 `Direction.values()` 里碰到第一块框架才取轴。水平朝向用左手轴，竖直朝向
+    // `Direction.Plane.HORIZONTAL.getRandomAxis`：`nextInt(2)`，0 是 X，1 是 Z。
+    //
+    // Official picks the axis at the first frame in `Direction.values()`. Horizontal facing uses
+    // the left-hand axis. Vertical facing uses `Direction.Plane.HORIZONTAL.getRandomAxis`:
+    // `nextInt(2)`, 0 is X and 1 is Z.
+    let mut axis = None;
+    for side in Direction::ALL {
+        if is_frame(world.block_state(pos.relative(side))) {
+            axis = Some(if forward.axis().is_horizontal() {
+                forward.counter_clockwise().axis()
+            } else if world.random().next_int(2) == 0 {
+                Axis::X
+            } else {
+                Axis::Z
+            });
+            break;
+        }
+    }
+    axis.is_some_and(|axis| PortalShape::find_empty(world, pos, axis).is_some())
 }
 
 /// `getStateWithAge`。
@@ -124,6 +142,17 @@ fn state_with_age(world: &World, pos: BlockPos, age: i32) -> BlockState {
     } else {
         state
     }
+}
+
+/// `BaseFireBlock.playerWillDestroy`：玩家打掉火时先放一团灭火的烟。
+fn extinguish_by_player(
+    state: BlockState,
+    world: &mut World,
+    pos: BlockPos,
+    player: &Actor,
+) -> BlockState {
+    world.level_event(1009, pos, 0);
+    Plain.player_will_destroy(state, world, pos, player)
 }
 
 /// `BaseFireBlock.onPlace`：点燃传送门框架，或者放不住时灭掉。
@@ -181,9 +210,10 @@ fn check_burn_out(world: &mut World, pos: BlockPos, chance: i32, age: i32) {
         world.remove_block(pos);
     }
     if old.is_a(BlockAncestor::TntBlock) {
-        // `TntBlock.prime`：点燃的 TNT 实体在构造时从世界随机源取一个数定方向。这个世界不生成实体，
-        // 数照取，后面的随机数才和官方对得上。
-        world.random().next_double();
+        // `TntBlock.prime`：方块已经 `removeBlock` 了，这里只生成实体并放点燃声。
+        // `TntBlock.prime`: the block is already `removeBlock`ed. This only spawns the entity
+        // and plays the primed sound.
+        world.spawn_tnt(pos);
     }
 }
 
@@ -294,6 +324,16 @@ impl Behaviour for Fire {
         world.schedule_tick(pos, state.block(), fire_tick_delay(world));
     }
 
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        extinguish_by_player(state, world, pos, player)
+    }
+
     fn spawn_destroy_by_entity_particles(
         &self,
         _state: BlockState,
@@ -327,6 +367,16 @@ impl Behaviour for SoulFire {
 
     fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
         on_place(state, world, pos, old);
+    }
+
+    fn player_will_destroy(
+        &self,
+        state: BlockState,
+        world: &mut World,
+        pos: BlockPos,
+        player: &Actor,
+    ) -> BlockState {
+        extinguish_by_player(state, world, pos, player)
     }
 
     fn spawn_destroy_by_entity_particles(

@@ -6,17 +6,40 @@ use mc_bamboo_core::{
     BlockPos, ChunkPos, Hand, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
+use mc_bamboo_data::SoundSource;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     block_entity::{BlockEntities, BlockEvents},
     container::Container,
     entity::Entities,
+    gamerules::BlockGameRules,
     hopper::HopperEntity,
     random::LevelRandom,
     shape::Aabb,
     state::{BlockState, NoteBlockInstrument},
 };
+
+/// 发射器前方一格里、可能被穿上装备的生物。
+///
+/// A living entity in front of a dispenser that might receive equipment.
+///
+/// `equipment` 的下标是组件里的 `equipment_slot`：0 主手、1 脚、2 腿、3 胸、4 头、5 副手、
+/// 6 身体、7 鞍。`None` 表示这个实体没有这一格，`Some` 空物品表示格子是空的。
+///
+/// `equipment` is indexed by the component `equipment_slot`: 0 mainhand, 1 feet, 2 legs,
+/// 3 chest, 4 head, 5 offhand, 6 body, 7 saddle. `None` means the entity has no such slot.
+/// `Some` empty stack means the slot exists and is empty.
+#[derive(Clone, Debug)]
+pub struct EquipTarget {
+    pub entity_id: i32,
+    pub bounds: Aabb,
+    /// `isSpectator`。
+    pub spectator: bool,
+    /// `minecraft:entity_type` 的注册表 ID。
+    pub entity_type: i32,
+    pub equipment: [Option<ItemStack>; 8],
+}
 
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
 pub trait Level {
@@ -73,6 +96,18 @@ pub trait Level {
     /// 见 [`Level::block_entities`]。
     fn block_entities_mut(&mut self) -> &mut BlockEntities;
 
+    /// 这一格的方块实体这一刻要不要跑。默认要跑。
+    ///
+    /// 方块 oracle 的假世界只登记漏斗和移动中的活塞，熔炉和酿造台不跑。
+    ///
+    /// Whether this cell's block entity ticks. The default is yes.
+    ///
+    /// The block oracle's fake level only registers hoppers and moving pistons, so furnaces
+    /// and brewing stands do not tick.
+    fn runs_block_entity_tick(&self, _pos: BlockPos) -> bool {
+        true
+    }
+
     /// `Level.blockEvents`：`level.blockEvent` 排进来的事件。
     fn block_events(&mut self) -> &mut BlockEvents;
 
@@ -91,6 +126,13 @@ pub trait Level {
     ///
     /// See [`Level::entities`].
     fn entities_mut(&mut self) -> &mut Entities;
+
+    /// 方块逻辑读到的游戏规则快照。默认是官方默认值。
+    ///
+    /// The game-rule snapshot block logic reads. The default is the vanilla defaults.
+    fn block_game_rules(&self) -> BlockGameRules {
+        BlockGameRules::vanilla()
+    }
 
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
@@ -130,8 +172,10 @@ pub trait Level {
 
     /// 带着这一格的漏斗方块实体运行一段代码。这一格没有漏斗实体时不调用 `f`，返回 `false`。
     ///
-    /// 实体正在 tick 时它已经从方块实体表里拿出来了，这时也取不到，和官方
-    /// `getBlockEntity(pos)` 在 tick 期间找不到自己一样。
+    /// 实体正在 tick 时已经从表里拿出来了，这里取不到。漏斗的物品在槽位表，不在这个实体上。
+    ///
+    /// While the entity is ticking it is out of the map, so this cannot see it.
+    /// Hopper items live in the slot table, not on the entity.
     fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
         let _ = (pos, f);
         false
@@ -180,6 +224,30 @@ pub trait Level {
     fn explosion_block_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
         let _ = (state, pos);
         Vec::new()
+    }
+    /// `getEntitiesOfClass(LivingEntity, box)` 能看见的生物。默认没有。
+    ///
+    /// Living entities visible to `getEntitiesOfClass`. None by default.
+    fn dispenser_targets(&self) -> Vec<EquipTarget> {
+        Vec::new()
+    }
+
+    /// `LivingEntity.setItemSlot`。写不进这一格时返回 `None`。
+    ///
+    /// 返回值是玩家物品栏菜单槽，调用方用它发 `container_set_slot`。不是玩家时可以是任意非空值。
+    ///
+    /// `LivingEntity.setItemSlot`. `None` when the slot cannot be stored.
+    ///
+    /// The value is the player's inventory-menu slot, used to send `container_set_slot`.
+    /// A non-player may return any `Some`.
+    fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        let _ = (entity_id, component_slot, stack);
+        None
     }
 }
 
@@ -398,18 +466,41 @@ pub enum Effect {
     SignWaxed { pos: BlockPos },
     /// `SignBlock.openTextEdit`：给这名玩家打开编辑器，`player.openTextEdit(sign, slot)`。
     OpenSignEditor { pos: BlockPos, slot: SignTextSlot },
+    /// `playSound` / `playSeededSound`：坐标乘 8 截断后发给范围内的玩家。
+    Sound {
+        /// `sound_event` 注册表 ID。
+        sound: i32,
+        source: SoundSource,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+        /// 官方传的 `except` 是发起这次操作的玩家。
+        except_initiator: bool,
+        /// 显式给的种子。音符盒用 `Level.random.nextLong()`，其余由网络层另取。
+        seed: Option<i64>,
+    },
+    /// `levelEvent`：客户端自己放粒子和声音。传播范围是 64 格，坐标是方块整数坐标。
+    LevelEvent {
+        event: i32,
+        pos: BlockPos,
+        data: i32,
+        except_initiator: bool,
+    },
     /// 音符盒响了，`NoteBlock.triggerEvent`。`pitch` 是官方的 `getPitchFromNote(note)`，
     /// `seed` 是官方传给 `playSeededSound` 的那个随机数。
     ///
     /// 上面是带 `note_block_sound` 的头颅时，官方播放的是那个音效，不按乐器查表。
-    /// 音效包还没发，音效那边要的音色、音高和随机数都在这里；自定义音效的名字等音效实现
-    /// 时再加进这一项，`Effect` 要能按值拷贝，装不下 `String`。
+    /// 名字在这一次操作的自定义音效表里，[`NoteBlockPlayed::custom`] 是下标。
     NoteBlockPlayed {
         pos: BlockPos,
         instrument: NoteBlockInstrument,
         note: i32,
         pitch: f32,
         seed: i64,
+        /// 自定义音效在 [`intern_custom_sound`] 那张表里的下标。`None` 用乐器表。
+        custom: Option<u32>,
     },
     /// `ServerLevel.runBlockEvents` 里的 `ClientboundBlockEventPacket`：方块事件处理成功了，
     /// 把这一项发给附近 64 格内的玩家。`block` 是方块的注册表 ID，官方包里的第三个字段。
@@ -428,4 +519,52 @@ pub enum Effect {
     /// The client plays the page-turn sound. Nearby players, including the one
     /// who turned the page, all receive it.
     PageTurned { pos: BlockPos },
+    /// 发射器把一件装备写进了这名玩家的物品栏。菜单槽已经改过，调用方发 `container_set_slot`。
+    ///
+    /// A dispenser wrote equipment into this player's inventory. The menu slot is already
+    /// updated. The caller sends `container_set_slot`.
+    DispenserEquipped { entity_id: i32, menu_slot: u16 },
+    /// 营火上的食物变了，`CampfireBlockEntity.getUpdateTag` 要重新发给客户端。
+    ///
+    /// Food on a campfire changed. `CampfireBlockEntity.getUpdateTag` has to be sent again.
+    CampfireChanged { pos: BlockPos },
+    /// 快捷栏上方的提示。`key` 是翻译键，参数是已经序列化好的文本。
+    ///
+    /// An action-bar message. `key` is the translation key and the arguments are already text.
+    Overlay {
+        key: &'static str,
+        first: Option<&'static str>,
+        second: Option<&'static str>,
+    },
+    /// 有权限的玩家右键了命令方块。客户端自己打开编辑界面，服务端补一份方块实体数据。
+    ///
+    /// A permitted player used a command block. The client opens the editor; the server sends
+    /// the block-entity data.
+    OpenCommandBlock { pos: BlockPos },
+}
+
+/// 自定义音效的名字。`Effect` 要能按值拷贝，名字放在这里，效果里只留下标。
+///
+/// 一次结算会把好几个世界的效果拼到一起，这张表不能挂在某一个世界上。
+static CUSTOM_SOUNDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 记下一个 `SoundEvent.createVariableRangeEvent` 的标识符，返回下标。
+pub fn intern_custom_sound(name: &str) -> u32 {
+    let mut table = CUSTOM_SOUNDS.lock().expect("custom sound table");
+    if let Some(index) = table.iter().position(|existing| existing == name) {
+        return u32::try_from(index).expect("custom sound index");
+    }
+    let index = u32::try_from(table.len()).expect("custom sound index");
+    table.push(name.to_owned());
+    index
+}
+
+/// 按下标取回自定义音效的标识符。
+pub fn custom_sound_name(index: u32) -> String {
+    CUSTOM_SOUNDS
+        .lock()
+        .expect("custom sound table")
+        .get(index as usize)
+        .cloned()
+        .expect("custom sound index")
 }

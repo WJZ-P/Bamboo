@@ -35,11 +35,13 @@
 
 ## 1. 结论
 
-1. **聊天不需要任何签名。** Bamboo 的 `login` 里 `online_mode=false`、`enforces_secure_chat=false`，客户端不创建聊天会话，`chat` 包里签名为空，`chat_session_update` 不会发。
+**实现现状：** 正版验证打开、并且已经拿到服务公钥、`enforce-secure-profile` 为真时，按官方做安全聊天。公钥按 authlib `RetryableFetch` 在连接任务里重试（5 分钟起、每次翻倍、封顶 320 分钟，成功后 24 小时刷新），钥匙到达后强制立刻生效。`chat_session_update` 会校验并广播 `INITIALIZE_CHAT`；签名消息转发为 `player_chat`；`chat_ack` 会推进已读窗口。发送者不是全零 UUID 的未签名消息也发 `player_chat`（没有签名），控制台对不可信广播加 `[Not Secure]`。不带签名的 `chat_command` 仍是全零发送者，走 `disguised_chat`。下面第 1–3 条，以及后文写着「签名丢掉」「不处理 `chat_ack`」「不处理 `chat_session_update`」「玩家聊天用 `disguised_chat`」的句子，说的是改动之前的离线做法。`delete_chat` 能编码，不会发送。没有发现文档。
+
+1. **离线聊天不需要任何签名。** 默认配置的 `login` 里 `online_mode=false`、`enforces_secure_chat=false`，客户端不创建聊天会话，`chat` 包里签名为空，`chat_session_update` 不会发。
 2. **`LastSeenMessages.Update` 可以解码后丢弃。** 只要服务端不发带签名的 `player_chat`，客户端发来的永远是 `00 00 00 00 01`，`chat_ack` 也永远不会发。
 3. **玩家聊天用 `disguised_chat`。** body 是 `message NBT + VarInt 1 + name NBT + 00`。显示 `<Name> message`，尊重客户端的聊天设置，叙述也正确，所有接收者共用一份字节。`system_chat` 留给加入、离开和错误提示。
 4. **服务端不处理 `chat` 时，发送者什么也看不到。** 客户端没有本地回显，也不会报错。
-5. **`commands` 包可以不发。** 没收到时客户端的命令树是空根节点，和收到最小命令树完全一样。玩家输入 `/foo bar` 时客户端照样发 `chat_command`，文本是 `foo bar`。
+5. **进服时发玩家能用的 `commands` 树，并先发 `entity_event` 24..28。** 没收到 `commands` 时客户端的命令树是空根节点，和收到最小命令树完全一样。玩家输入 `/foo bar` 时客户端照样发 `chat_command`，文本是 `foo bar`。
 6. **进服序列里省略的包没有一个会导致崩溃。** 有 5 个问题要处理：
    - 自己的皮肤外层和左手设置不生效，需要 `set_entity_data`。
    - 创造模式触及距离偏短，需要 `update_attributes`。
@@ -252,7 +254,7 @@ ID 9（`0x09`），serverbound，Play。来源：`ServerboundChatPacket.STREAM_C
 2. 逐字符检查 `StringUtil.isAllowedChatCharacter`：字符小于 32、等于 127 或等于 167（`§`）都不允许。发现后用 `{translate:"multiplayer.disconnect.illegal_characters"}` 断线。这一步不能省，`§` 能通过 NBT 解码。
 3. 已解析 `client_information` 且可见性是 `HIDDEN` 时，回 `system_chat`：`{translate:"chat.disabled.options",color:"red"}`。正常客户端不会走到这里，见 3.1。
 4. 把消息交给世界线程，按第 5.4 节广播给所有在线玩家，**包括发送者**。
-5. 控制台记录 `<Name> message`。官方对未签名消息的日志是 `[Not Secure] <Name> message`（`PlayerList.broadcastChatMessage` 给 `logChatMessage` 传 `"Not Secure"`），Bamboo 不需要这个前缀。桌面控制台要显示的话，给 `ServerEvent` 加一项。
+5. 控制台记录不可信消息时加 `[Not Secure]`，格式跟 `PlayerList.logChatMessage` 一样：`[Not Secure] <Name> message`。`/say` 是 `[Not Secure] [Name] message`，`/me` 是 `[Not Secure] * Name message`。`/msg` 不进这条广播日志。
 6. 限流可以以后再做。官方是 `TickThrottler(20, 20 * chat-spam-threshold-seconds)`，默认阈值 200（`DedicatedServerProperties`）：每条消息加 20，每 tick 减 1，`count >= 200` 且不是 OP 或单人房主时以 `disconnect.spam` 踢出（`detectRateSpam`）。
 
 timestamp、salt、signature 和 lastSeen 都不使用。
@@ -297,7 +299,7 @@ ID 8（`0x08`），serverbound，Play。来源：`ServerboundChatCommandSignedPa
 00 00 00 00 01               lastSeen
 ```
 
-服务端要做的事：M2 不需要处理，归入 `Other`。以后加 `minecraft:message` 时按 `chat_command` 处理 `command` 即可。
+服务端要做的事：`say`、`me`、`msg` 的参数是 `minecraft:message`，在线客户端会发 `chat_command_signed`。现在会按官方验参数签名，通过后用 `player_chat` 转发。离线客户端签名个数是 0 时走 `PlayerChatMessage.unsigned`，发送者是这名玩家，所以也是没有签名的 `player_chat`。解析失败仍收集已经吃进去的参数；客户端带来的参数名对不上就 `setChainBroken()` 并回 `invalid_command_signature`，下一句签名消息被拒。强制安全聊天时，无签名的 `chat_command` 若带 `message` 参数，不执行并回 `chat.disabled.invalid_command_signature`（这条路径的发送者是全零 UUID，官方同样不执行）。
 
 ### `minecraft:chat_ack`
 
@@ -307,7 +309,7 @@ ID 6（`0x06`），serverbound，Play。来源：`ServerboundChatAckPacket`，`C
 |---|---|
 | `offset` | `VarInt` |
 
-只有 `offset > 0` 才发，发送时机是窗口累计超过 64 或进入 Configuration。没有签名消息时不会发生。服务端要做的事：不处理，归入 `Other`。
+只有 `offset > 0` 才发，发送时机是窗口累计超过 64 或进入 Configuration。没有签名消息时不会发生。服务端要做的事：按官方 `LastSeenMessagesValidator.applyOffset` 前移窗口，失败断开 `multiplayer.disconnect.chat_validation_failed`。
 
 ### `minecraft:chat_session_update`
 
@@ -320,7 +322,7 @@ ID 10（`0x0A`），serverbound，Play。来源：`ServerboundChatSessionUpdateP
 | `publicKey` | `VarInt` 长度（≤ 512）+ 字节 |
 | `keySignature` | `VarInt` 长度（≤ 4096）+ 字节 |
 
-只由 `setKeyPair` 发送，而密钥对只在 `online_mode=true` 时准备。服务端要做的事：不处理，归入 `Other`。
+只由 `setKeyPair` 发送，而密钥对只在客户端 `online_mode=true` 时准备。服务端要做的事：用服务公钥做 `SHA1withRSA` 校验（`ProfilePublicKey.createValidated`），失败断开 `multiplayer.disconnect.invalid_public_key_signature`；通过后广播只有 `INITIALIZE_CHAT` 的 `player_info_update`。没有服务公钥时记一条警告并忽略，不断开。
 
 ### `minecraft:client_information`
 
@@ -642,7 +644,7 @@ Node（`Entry.write`、`readNode`）：
 
 ### 7.3 没收到 `commands` 时
 
-`ClientPacketListener.commands` 的初值是 `new CommandDispatcher()`，只有一个空根节点。这和收到 7.2 的最小树**完全等价**。Bamboo 还没有命令时可以不发。
+`ClientPacketListener.commands` 的初值是 `new CommandDispatcher()`，只有一个空根节点。这和收到 7.2 的最小树**完全等价**。Bamboo 现在在进服时发送玩家能用的那棵树，见 8.5。下面仍是空树时客户端的行为。
 
 玩家输入 `/foo bar` 时：
 
@@ -694,8 +696,8 @@ Bamboo 的 M2 只回第一条也可以，写成 `{translate:"command.unknown.com
 | 3 | `player_abilities` | 65 | | 有 |
 | 4 | `set_held_slot` | 107 | | 无 |
 | 5 | `update_recipes` | 136 | | 无 |
-| 6 | `entity_event` 24..28 | 34 | `sendPlayerPermissionLevel` | 无 |
-| 7 | `commands` | 16 | 同上 | 无 |
+| 6 | `entity_event` 24..28 | 34 | `sendPlayerPermissionLevel` | 有，按 `ops.json` |
+| 7 | `commands` | 16 | 同上 | 有，只含该玩家能用的节点 |
 | 8 | `recipe_book_settings` | 77 | `sendInitialRecipeBook` | 无 |
 | 9 | `recipe_book_add` | 75 | 同上 | 无 |
 | 10 | 记分板相关 | | `updateEntireScoreboard`，没有记分板时不发 | 不需要 |
@@ -733,8 +735,8 @@ Bamboo 的 M2 只回第一条也可以，写成 `{translate:"command.unknown.com
 | `update_recipes` | `ClientRecipeContainer(Map.of(), empty)`，`propertySet` 返回 `EMPTY` | 影响熔炉类、酿造台、锻造台的槽位过滤和切石机列表（`AbstractFurnaceMenu`、`BrewingStandMenu`、`SmithingMenu`、`StonecutterMenu`），还有 `CampfireBlock.useItemOn` 判断手持物能否放上营火。M2 不开容器，放普通方块不受影响 | 不用补 |
 | `recipe_book_settings` | `RecipeBookSettings` 全 false | 无 | 不用补 |
 | `recipe_book_add` | 配方书为空，`SessionSearchTrees.recipeSearch` 是空树 | 配方书为空 | 不用补 |
-| `entity_event` 24..28 | `LocalPlayer.permissions = NO_PERMISSIONS`，等同事件 24 | 无 bug。F3+F4 切换模式和操作员物品栏不可用，这是非 OP 的正常状态 | 不用补 |
-| `commands` | 空 `CommandDispatcher` | 无，见 7.3 | 不用补 |
+| `entity_event` 24..28 | `LocalPlayer.permissions = NO_PERMISSIONS`，等同事件 24 | 无 bug。F3+F4 切换模式和操作员物品栏不可用，这是非 OP 的正常状态 | 已发。名单来自启动目录的 `ops.json`，不在名单里的是 24 |
+| `commands` | 空 `CommandDispatcher` | 无，见 7.3 | 已发。只含该玩家权限够用的节点 |
 | `server_data` | `ServerData` 保留服务器列表 ping 到的 motd 和图标（`handleServerData` 只负责覆盖） | 无 | 不用补 |
 | `initialize_border` | `ClientLevel.worldBorder = new WorldBorder()`：中心 0,0，大小 59999968，`warningBlocks` 5，`warningTime` 15 | 无 | 不用补 |
 | `set_default_spawn_position` | `ClientLevel` 构造时设为 `(8, 64, 8)` | 客户端代码里只找到指南针读取（`CompassAngleState`）。Bamboo 的出生点是 `(8.5, -60, 8.5)`，水平位置基本相同 | 不用补 |
@@ -941,18 +943,19 @@ ID 3（`0x03`），clientbound，Play。来源：`ClientboundAwardStatsPacket`�
 
 ### 8.5 M2 建议的进服顺序
 
-只列要发的包。第 4、5、7 步要访问在线玩家表，应该放在世界线程里做。这里是所有规格的基准顺序，`chunks-movement.md` 8.3 和 `entities.md` 第 14 节只列各自关心的包。这 10 步全部由世界线程写入同一条出站队列，原因和离开顺序、合并后的 tick 顺序见 `coverage.md` 第 4 节。`set_held_slot` 和 `container_set_content` 不发（8.2）。
+只列要发的包。第 6、7、9 步要访问在线玩家表，应该放在世界线程里做。这里是所有规格的基准顺序，`chunks-movement.md` 8.3 和 `entities.md` 第 14 节只列各自关心的包。这些包全部由世界线程写入同一条出站队列，原因和离开顺序、合并后的 tick 顺序见 `coverage.md` 第 4 节。`set_held_slot` 和 `container_set_content` 不发（8.2）。
 
 1. `login`
 2. `player_abilities`
-3. `player_position`
-4. `player_info_update`：所有已在线玩家 → 新玩家
-5. 把新玩家加入在线列表，`player_info_update`：新玩家 → 所有人，包括他自己
-6. `set_entity_data`、`update_attributes`：给自己
-7. `system_chat` 加入消息：只发给其他已在线玩家。官方在第 3 步之前发。这条消息发给的是别人，和新玩家的包之间没有依赖，放在第 5 步之后实现起来更简单
-8. `set_time`
-9. `game_event` 13
-10. `set_chunk_cache_center`，然后按 `chunks-movement.md` 发区块
+3. `entity_event` 24..28，接着 `commands`（只含该玩家能用的节点）
+4. `player_position`
+5. `player_info_update`：所有已在线玩家 → 新玩家
+6. 把新玩家加入在线列表，`player_info_update`：新玩家 → 所有人，包括他自己
+7. `set_entity_data`、`update_attributes`：给自己
+8. `system_chat` 加入消息：只发给其他已在线玩家。官方在传送之前发。这条消息发给的是别人，和新玩家的包之间没有依赖，放在名单更新之后实现起来更简单
+9. `set_time`
+10. `game_event` 13
+11. `set_chunk_cache_center`，然后按 `chunks-movement.md` 发区块
 
 ---
 

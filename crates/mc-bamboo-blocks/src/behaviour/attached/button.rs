@@ -7,7 +7,7 @@ use super::{attached_direct_signal, attached_own_signal, update_attached_neighbo
 use crate::{
     behaviour::{
         Behaviour,
-        common::{FaceAttached, field_int},
+        common::{FaceAttached, field_int, field_sound},
     },
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
@@ -64,6 +64,8 @@ impl Behaviour for Button {
         world.set_block_and_update(pos, state.with(POWERED, true));
         update_attached_neighbours(state, world, pos);
         world.schedule_tick(pos, block, field_int(block, "ticksToStayPressed"));
+        let sound = field_sound(block, "type.buttonClickOn");
+        world.play_block_sound_except(pos, sound, 1.0, 1.0);
         InteractionResult::Success
     }
 
@@ -72,6 +74,8 @@ impl Behaviour for Button {
         if state.get(POWERED) {
             world.set_block_and_update(pos, state.with(POWERED, false));
             update_attached_neighbours(state, world, pos);
+            let sound = field_sound(state.block(), "type.buttonClickOff");
+            world.play_block_sound(pos, sound, 1.0, 1.0);
         }
     }
 

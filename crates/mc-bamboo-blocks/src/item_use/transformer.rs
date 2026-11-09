@@ -7,15 +7,16 @@
 
 use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_data::{
-    BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule, blocks, items,
+    BlockAncestor, BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule,
+    blocks, items,
 };
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    behaviour::common::item_of,
+    behaviour::{common::item_of, machines::chest::connected_direction},
     context::UseContext,
     interact::InteractionResult,
-    state::BlockState,
+    state::{BlockState, CHEST_TYPE, ChestType},
     world::{UPDATE_ALL_IMMEDIATE, World},
 };
 
@@ -38,9 +39,13 @@ pub(super) fn transform_block(
     let Some((transform, state)) = found else {
         return InteractionResult::Pass;
     };
+    let old = world.block_state(pos);
     let state = fitted_to_neighbours(transform, world, state, pos);
     // `BlockTransformer` 先掉落再 `setBlock`。只有锄头翻生根泥土这一项带掉落表，结果是常量 1。
+    // 耐久也在写方块之前扣，和官方 `transformBlock` 一样。
+    //
     // Loot runs before `setBlock`. Only hoeing rooted dirt has a table, and it is a constant 1.
+    // Durability is spent before the block write too, as in `transformBlock`.
     if world.block_state(pos).is(blocks::ROOTED_DIRT) {
         world.pop_resource_from_face(
             pos,
@@ -48,7 +53,28 @@ pub(super) fn transform_block(
             ItemStack::new(items::HANGING_ROOTS, 1),
         );
     }
+    crate::durability::pay_for_transform(
+        world,
+        ctx,
+        transform.consume_on_use,
+        transform.item_damage_per_use,
+    );
     world.set_block(pos, state, UPDATE_ALL_IMMEDIATE);
+    // `transformBlock`：写方块之后按这一项配的音效和粒子出声，都跳过动手的玩家。
+    if let Some(sound) = transform.sound {
+        world.play_block_sound_except(pos, sound, 1.0, 1.0);
+    }
+    if transform.particle != 0 {
+        world.level_event_except(transform.particle, pos, 0);
+        // `transformType == COPPER_CHEST`：涂蜡和刮削要把粒子也发给大箱子的另一半。
+        if transform.copper_chest
+            && old.is_a(BlockAncestor::CopperChestBlock)
+            && old.get(CHEST_TYPE) != ChestType::Single
+        {
+            let neighbor = pos.relative(connected_direction(old));
+            world.level_event_except(transform.particle, neighbor, 0);
+        }
+    }
     InteractionResult::Success
 }
 

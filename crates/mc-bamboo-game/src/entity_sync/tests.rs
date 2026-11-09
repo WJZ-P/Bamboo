@@ -1314,6 +1314,7 @@ fn distance_ignores_height() {
             position: Some(Vec3::new(SPAWN_X, 300.0, SPAWN_Z)),
             rotation: None,
             on_ground: false,
+            horizontal_collision: false,
         },
     );
     server.tick();
@@ -1581,6 +1582,7 @@ fn turning_reaches_the_viewers_as_rotation_and_head() {
             position: None,
             rotation: Some((90.0, 0.0)),
             on_ground: true,
+            horizontal_collision: false,
         },
     );
     server.tick();
@@ -1612,6 +1614,7 @@ fn every_viewer_gets_the_same_bytes() {
             position: Some(Vec3::new(SPAWN_X + 0.25, SPAWN_Y, SPAWN_Z)),
             rotation: Some((45.0, 10.0)),
             on_ground: true,
+            horizontal_collision: false,
         },
     );
     server.request(&bob, PlayRequest::Punch);
@@ -1701,6 +1704,7 @@ fn kicked_viewer_stays_harmless_until_it_leaves() {
             position: Some(Vec3::new(f64::NAN, 0.0, 0.0)),
             rotation: None,
             on_ground: false,
+            horizontal_collision: false,
         },
     );
     server.request(&bob, PlayRequest::Punch);

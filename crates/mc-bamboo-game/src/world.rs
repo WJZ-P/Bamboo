@@ -2,12 +2,16 @@
 
 use std::{
     ops::ControlFlow,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::{
+        Arc,
+        mpsc::{Receiver, TryRecvError},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use mc_bamboo_core::Vec3;
+use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
@@ -17,13 +21,14 @@ use tracing::warn;
 use crate::{
     book, chat, chunk_broadcast,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
-    container, entity_sync, entity_tracking,
+    command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
     inventory, lectern, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
+    secure_chat::{self, ServiceProfileKeys},
     sign,
 };
 
@@ -43,6 +48,11 @@ pub struct WorldConfig {
     pub max_players: i32,
     /// 服务端有没有开正版验证。只写进 `login` 包，验证本身在连接层做。
     pub online_mode: bool,
+    /// 官方 `enforce-secure-profile`，默认打开。没开正版验证、或者公钥还没取到时不生效。
+    ///
+    /// Official `enforce-secure-profile`, on by default. It does nothing until online mode is on
+    /// and the profile keys have been fetched.
+    pub enforce_secure_profile: bool,
 }
 
 /// 所有游戏状态的唯一所有者。
@@ -55,12 +65,29 @@ pub struct World {
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+        Self::with_service_keys(config, inbox, secure_chat::empty_keys())
+    }
+
+    /// `keys` 和连接任务共用。世界线程只读，不去取。
+    ///
+    /// `keys` is shared with the connection tasks. The world thread only reads them.
+    pub fn with_service_keys(
+        config: WorldConfig,
+        inbox: Receiver<Inbound>,
+        keys: Arc<ServiceProfileKeys>,
+    ) -> Self {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
         Self {
             global: Global::default(),
-            region: Region::new(view_distance, config.max_players, config.online_mode),
+            region: Region::with_keys(
+                view_distance,
+                config.max_players,
+                config.online_mode,
+                config.enforce_secure_profile,
+                keys,
+            ),
             inbox,
         }
     }
@@ -120,6 +147,7 @@ impl World {
             self.region.links.broadcast(&frames);
         }
         chunk_tracking::send_chunks(&mut self.region);
+        movement::finish_tick(&mut self.region);
         self.region.links.flush();
         ControlFlow::Continue(())
     }
@@ -165,17 +193,19 @@ impl World {
             warn!(player = id.0, "ignoring a second join with the same id");
             return;
         }
+        let game_mode = GAME_MODE;
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
             // 皮肤只有名单要用，直接搬过来。
             properties: std::mem::take(&mut request.properties),
-            game_mode: GAME_MODE,
+            game_mode,
             latency: 0,
             show_hat: shows_hat(&request.client),
+            chat_session: None,
         };
 
-        self.region.add_player(request, GAME_MODE);
+        self.region.add_player(request, game_mode);
 
         if let Some(frames) = self.global.tab_list() {
             self.region.links.send_frames(id, &frames);
@@ -189,7 +219,8 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
-        self.region.start_loading_chunks(id, self.global.time());
+        self.region
+            .start_loading_chunks(id, self.global.time(), self.global.clock());
     }
 
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
@@ -221,6 +252,35 @@ impl World {
         if !self.region.links.is_open(player) {
             return;
         }
+        match &request {
+            PlayRequest::ChatCommand { command, signed } => {
+                let command = command.clone();
+                let signed = signed.clone();
+                command::on_command(
+                    &mut self.global,
+                    &mut self.region,
+                    player,
+                    &command,
+                    signed.as_ref(),
+                );
+                return;
+            }
+            PlayRequest::CommandSuggestion { id, command } => {
+                let (transaction, command) = (*id, command.clone());
+                command::on_suggestion(&mut self.region, player, transaction, &command);
+                return;
+            }
+            PlayRequest::ChatSession(session) => {
+                let session = session.clone();
+                if let Some(update) = secure_chat::on_session(&mut self.region, player, session)
+                    && let Some(frames) = self.global.initialize_chat(player, &update)
+                {
+                    self.region.links.broadcast(&frames);
+                }
+                return;
+            }
+            _ => {}
+        }
         let region = &mut self.region;
         match request {
             PlayRequest::AcceptTeleportation {
@@ -238,25 +298,84 @@ impl World {
                 position,
                 rotation,
                 on_ground,
-            } => movement::on_move_player(region, player, position, rotation, on_ground),
+                horizontal_collision,
+            } => movement::on_move_player(
+                region,
+                player,
+                position,
+                rotation,
+                on_ground,
+                horizontal_collision,
+            ),
             PlayRequest::ChunkBatchReceived {
                 desired_chunks_per_tick,
             } => chunk_tracking::on_chunk_batch_received(region, player, desired_chunks_per_tick),
             PlayRequest::ClientInformation(information) => {
                 self.on_client_information(player, information);
             }
-            PlayRequest::Chat { message } => {
-                if let Some(frames) = chat::on_chat(region, player, message) {
-                    region.links.broadcast(&frames);
+            PlayRequest::Chat {
+                message,
+                signature,
+                time_millis,
+                salt,
+                last_seen,
+            } => {
+                if chat::on_chat(
+                    region,
+                    player,
+                    message,
+                    signature.map(|bytes| *bytes),
+                    time_millis,
+                    salt,
+                    &last_seen,
+                ) {
                     chat::detect_chat_rate_spam(region, player);
                 }
             }
-            PlayRequest::ChatCommand { command } => {
-                chat::on_chat_command(region, player, command);
-            }
+            PlayRequest::ChatAck { offset } => secure_chat::on_ack(region, player, offset),
+            // 聊天命令、建议和会话更新在上面处理过了，这里只是让匹配穷尽。
+            //
+            // Chat commands, suggestions, and session updates are handled above. This arm only makes the match exhaustive.
+            PlayRequest::ChatSession(_)
+            | PlayRequest::ChatCommand { .. }
+            | PlayRequest::CommandSuggestion { .. } => {}
             PlayRequest::ClientCommand { action } => {
-                chat::on_client_command(region, player, action);
+                if action
+                    == mc_bamboo_protocol::packet::play::ClientCommandKind::RequestGameRuleValues
+                {
+                    crate::gamerules::on_request_values(&self.global, &mut self.region, player);
+                } else {
+                    chat::on_client_command(&mut self.region, player, action);
+                }
             }
+            PlayRequest::ChangeGameMode { mode } => self.on_change_game_mode(player, mode),
+            PlayRequest::SetGameRule { entries } => {
+                crate::gamerules::on_set_packet(
+                    &mut self.global,
+                    &mut self.region,
+                    player,
+                    entries,
+                );
+            }
+            PlayRequest::SetCommandBlock {
+                pos,
+                command,
+                mode,
+                track_output,
+                conditional,
+                automatic,
+            } => crate::command_block::on_set(
+                region,
+                player,
+                crate::command_block::CommandBlockEdit {
+                    pos,
+                    command,
+                    mode,
+                    track_output,
+                    conditional,
+                    automatic,
+                },
+            ),
             PlayRequest::PlayerInput { flags } => {
                 entity_sync::on_player_input(region, player, flags);
             }
@@ -335,16 +454,50 @@ impl World {
             PlayRequest::ContainerButtonClick {
                 container_id,
                 button_id,
-            } => lectern::on_button(region, player, container_id, button_id),
+            } => {
+                menu::on_button(region, player, container_id, button_id);
+                lectern::on_button(region, player, container_id, button_id);
+            }
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }
             PlayRequest::EditBook { slot, pages, title } => {
                 book::on_edit_book(region, player, slot, pages, title);
             }
-            // 这三种连接任务就地处理了，不会发到这里。
+            // 连接任务把这两种转过来。其余 `Other` 它自己丢掉。
+            //
+            // The connection forwards these two. It drops every other `Other` packet.
+            PlayRequest::Other(id) if id == serverbound::CLIENT_TICK_END => {
+                movement::on_client_tick_end(region, player);
+            }
+            PlayRequest::Other(id) if id == serverbound::PLAYER_LOADED => {
+                movement::on_player_loaded(region, player);
+            }
             PlayRequest::KeepAlive(_) | PlayRequest::PingRequest(_) | PlayRequest::Other(_) => {}
         }
+    }
+
+    /// `handleChangeGameMode`。权限不够时只记日志。
+    ///
+    /// `handleChangeGameMode`. Without permission this only logs.
+    fn on_change_game_mode(&mut self, id: PlayerId, mode: GameMode) {
+        let Some((allowed, name)) = self.region.players.get(&id).map(|player| {
+            (
+                player.permission_level >= mc_bamboo_command::permission::GAMEMASTERS,
+                player.name.clone(),
+            )
+        }) else {
+            return;
+        };
+        if !allowed {
+            warn!(
+                player = %name,
+                ?mode,
+                "tried to change game mode without required permissions"
+            );
+            return;
+        }
+        command::change_own_mode(&mut self.global, &mut self.region, id, mode);
     }
 
     /// 客户端的设置变了。视距由下一次跟踪阶段生效，皮肤外层和主手由实体同步发出去。

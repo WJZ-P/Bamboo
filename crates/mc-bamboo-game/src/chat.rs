@@ -1,37 +1,35 @@
 //! 聊天和命令。
 //!
 //! 聊天是全服的事情：这里只拼出要广播的帧，发给谁由 `World` 决定。
-//! 离线模式的消息没有签名，每名玩家要记住的只有 [`SpamThrottlers`] 里的刷屏计数。
+//! 没签名的玩家聊天仍是 `player_chat`，发送者是这名玩家。刷屏计数在 [`TickThrottler`] 里。
 //!
-//! Bamboo 还没有命令，所以不发 `commands` 包：客户端没收到时命令树是空的根节点，
-//! 和收到最小命令树完全一样，输入的命令照样走 `chat_command`（`chat-join.md` 7.3）。
+//! 命令的解析和执行在 `command`。这里留下聊天，以及命令和聊天共用的刷屏计数。
+//!
+//! Command parsing and execution live in `command`. This module keeps chat and the
+//! spam counters shared by chat and commands.
 
 use mc_bamboo_data::registries::chat_type;
 use mc_bamboo_protocol::{
-    packet::play::{AwardStats, ChatVisibility, ClientCommandKind, DisguisedChat, SystemChat},
+    packet::play::{AwardStats, ChatVisibility, ClientCommandKind, LastSeenUpdate, SystemChat},
     text::{Color, Component, is_allowed_chat_character},
 };
 use tracing::info;
 
-use crate::{
-    inbound::PlayerId,
-    links::{Links, encode_frames},
-    region::Region,
-};
+use crate::{inbound::PlayerId, links::Links, region::Region, secure_chat};
 
 const ILLEGAL_CHARACTERS: &str = "multiplayer.disconnect.illegal_characters";
 const SPAM: &str = "disconnect.spam";
 const CHAT_DISABLED: &str = "chat.disabled.options";
-const UNKNOWN_COMMAND: &str = "command.unknown.command";
-const CONTEXT_HERE: &str = "command.context.here";
-
-/// 回显命令时最多写多少个字符。协议允许 32767 个，但客户端的输入框只放得下 256 个，
-/// 所以只有改过的客户端才会被截断，回应的大小也不会跟着发来的内容增长。
-const MAX_ECHOED_COMMAND_CHARS: usize = 256;
 
 /// 每条消息或者命令给 [`TickThrottler`] 加多少。
 const SPAM_INCREMENT_STEP: i32 = 20;
 /// `chat-spam-threshold-seconds` 和 `command-spam-threshold-seconds` 默认都是 10，阈值是它们的 20 倍。
+///
+/// 这是 `server.properties` 的阈值，不是游戏规则。官方 `ServerGamePacketListenerImpl.detectRateSpam`
+/// 用的也是这个配置。
+///
+/// This is the `server.properties` threshold, not a game rule. Official
+/// `ServerGamePacketListenerImpl.detectRateSpam` uses that setting too.
 const SPAM_THRESHOLD: i32 = 200;
 
 /// `TickThrottler(20, 200)`：动作一次加 20，每 tick 减 1，到阈值就算刷屏。
@@ -74,53 +72,107 @@ pub(crate) fn tick_spam_throttlers(region: &mut Region) {
 /// `detectChatRateSpam`：`World` 广播之后才调用，压线的那条消息所有人都收得到。
 pub(crate) fn detect_chat_rate_spam(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
-        detect_rate_spam(&mut region.links, id, &mut player.spam.chat);
+        let is_op = player.is_op;
+        detect_rate_spam(&mut region.links, id, &mut player.spam.chat, is_op);
     }
 }
 
-/// `detectCommandRateSpam`。
-fn detect_command_rate_spam(region: &mut Region, id: PlayerId) {
+/// `detectCommandRateSpam`。命令无论成败都计数。
+///
+/// `detectCommandRateSpam`. Counted whether the command succeeded or failed.
+pub(crate) fn detect_command_rate_spam(region: &mut Region, id: PlayerId) {
     if let Some(player) = region.players.get_mut(&id) {
-        detect_rate_spam(&mut region.links, id, &mut player.spam.command);
+        let is_op = player.is_op;
+        detect_rate_spam(&mut region.links, id, &mut player.spam.command, is_op);
     }
 }
 
-/// `detectRateSpam`。官方不踢 OP 和单人游戏的房主，Bamboo 没有这两种玩家。
-fn detect_rate_spam(links: &mut Links, id: PlayerId, throttler: &mut TickThrottler) {
+/// `detectRateSpam`。官方不踢 OP，也不踢单人游戏的房主。Bamboo 没有单人房主。
+///
+/// `detectRateSpam`. Official servers do not kick ops, or the owner of a singleplayer world.
+/// Bamboo has no singleplayer owner.
+fn detect_rate_spam(links: &mut Links, id: PlayerId, throttler: &mut TickThrottler, is_op: bool) {
     throttler.increment();
-    if !throttler.is_under_threshold() {
+    if !throttler.is_under_threshold() && !is_op {
         links.kick(id, &Component::translate(SPAM, []));
     }
 }
 
-/// `chat`：编码一次，返回发给所有已进入 Play 的玩家的帧。发送者也要收到，客户端没有本地回显。
-/// 广播之后要调用 [`detect_chat_rate_spam`]，没有返回帧的消息不计数。`chat-join.md` 第 4、5 节。
-pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: String) -> Option<Vec<u8>> {
-    if !is_legal(&message) {
-        kick_for_illegal_characters(region, id);
-        return None;
+/// 命令文本里有官方不允许的字符时踢掉玩家，并返回 `true`。
+///
+/// Kicks the player when the command text contains a character the official server rejects,
+/// and returns `true`.
+pub(crate) fn reject_illegal_command(region: &mut Region, id: PlayerId, command: &str) -> bool {
+    if is_legal(command) {
+        return false;
     }
-    let player = region.players.get(&id)?;
-    if player.client.chat_visibility == ChatVisibility::Hidden {
-        let notice = Component::translate(CHAT_DISABLED, []).color(Color::Red);
-        send_system_chat(region, id, &notice);
-        return None;
-    }
-    // 官方这里多一个 `[Not Secure]` 前缀。Bamboo 的聊天全都没有签名，这个前缀不提供信息。
-    info!("<{}> {message}", player.name);
-    Some(chat_frames(&player.name, message))
+    kick_for_illegal_characters(region, id);
+    true
 }
 
-/// `chat_command`：Bamboo 没有命令，回官方的两行红字之后才计数。`chat-join.md` 7.4。
-pub(crate) fn on_chat_command(region: &mut Region, id: PlayerId, command: String) {
-    if !is_legal(&command) {
-        kick_for_illegal_characters(region, id);
-        return;
+/// `handleChat`。返回 `true` 时调用方要记一次聊天刷屏，和官方一样只有真的广播了才计数。
+///
+/// `handleChat`. The caller counts chat spam when this returns `true`. Official servers do that
+/// only after a message was actually broadcast.
+pub(crate) fn on_chat(
+    region: &mut Region,
+    id: PlayerId,
+    message: String,
+    signature: Option<[u8; 256]>,
+    time_millis: i64,
+    salt: i64,
+    last_seen: &LastSeenUpdate,
+) -> bool {
+    // 已读窗口在非法字符和隐藏聊天之前套用，官方 `unpackAndApplyLastSeen` 也是这样。
+    //
+    // The seen window is applied before the illegal-character and hidden-chat checks.
+    // Official `unpackAndApplyLastSeen` does the same.
+    if !secure_chat::apply_last_seen(region, id, last_seen) {
+        return false;
     }
-    let unknown = failure(Component::translate(UNKNOWN_COMMAND, []));
-    send_system_chat(region, id, &unknown);
-    send_system_chat(region, id, &failure(parse_context(&command)));
-    detect_command_rate_spam(region, id);
+    if !is_legal(&message) {
+        kick_for_illegal_characters(region, id);
+        return false;
+    }
+    let hidden = region
+        .players
+        .get(&id)
+        .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Hidden);
+    if hidden {
+        let notice = Component::translate(CHAT_DISABLED, []).color(Color::Red);
+        send_system_chat(region, id, &notice);
+        return false;
+    }
+    let name = match region.players.get(&id) {
+        Some(player) => player.name.clone(),
+        None => return false,
+    };
+    match secure_chat::accept_chat(region, id, &message, signature, time_millis, salt) {
+        Ok(signed) => {
+            let trusted = signed.is_trusted(region.now_millis());
+            log_player_broadcast(trusted, chat_type::CHAT, &name, &message);
+            let display = Component::text(name);
+            secure_chat::broadcast_signed(region, &signed, chat_type::CHAT, &display, None, None);
+            true
+        }
+        Err(()) => false,
+    }
+}
+
+/// 官方 `PlayerList.logChatMessage`。不可信的消息前面加 `[Not Secure]`。
+///
+/// Official `PlayerList.logChatMessage`. Untrusted messages are prefixed with `[Not Secure]`.
+pub(crate) fn log_player_broadcast(trusted: bool, chat_type_id: i32, name: &str, content: &str) {
+    let line = match chat_type_id {
+        chat_type::SAY_COMMAND => format!("[{name}] {content}"),
+        chat_type::EMOTE_COMMAND => format!("* {name} {content}"),
+        _ => format!("<{name}> {content}"),
+    };
+    if trusted {
+        info!("{line}");
+    } else {
+        info!("[Not Secure] {line}");
+    }
 }
 
 /// `client_command`：`RequestStats` 回 `award_stats`，其他动作忽略。`chat-join.md` 第 4 节。
@@ -146,46 +198,6 @@ fn send_system_chat(region: &mut Region, id: PlayerId, content: &Component) {
         overlay: false,
     };
     region.links.send(id, &packet);
-}
-
-/// 所有接收者共用的帧。客户端按 `minecraft:chat` 的模板拼出 `<name> message`。
-fn chat_frames(name: &str, message: String) -> Vec<u8> {
-    encode_frames(&DisguisedChat {
-        message: &Component::text(message),
-        chat_type: chat_type::CHAT,
-        name: &Component::text(name),
-        target_name: None,
-    })
-}
-
-/// 官方的 `sendFailure` 在消息外面包的那层红色。
-fn failure(message: Component) -> Component {
-    Component::text("").color(Color::Red).extra(message)
-}
-
-/// 出错的位置，显示成 `foo bar<--[HERE]`，点击时把命令填回聊天框。
-///
-/// 命令树是空的，解析停在开头，所以整段输入都是解析不了的部分。
-fn parse_context(command: &str) -> Component {
-    let command = echoed_part(command);
-    let mut context = Component::text("")
-        .color(Color::Gray)
-        .suggest_command(&format!("/{command}"));
-    if !command.is_empty() {
-        context = context.extra(Component::text(command).color(Color::Red).underlined());
-    }
-    context.extra(
-        Component::translate(CONTEXT_HERE, [])
-            .color(Color::Red)
-            .italic(),
-    )
-}
-
-fn echoed_part(command: &str) -> &str {
-    match command.char_indices().nth(MAX_ECHOED_COMMAND_CHARS) {
-        Some((end, _)) => &command[..end],
-        None => command,
-    }
 }
 
 #[cfg(test)]

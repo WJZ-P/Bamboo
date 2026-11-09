@@ -1,7 +1,7 @@
 //! `LeverBlock`。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::Block;
+use mc_bamboo_data::{Block, sounds::sound_event};
 
 use super::{attached_direct_signal, attached_own_signal, update_attached_neighbours};
 use crate::{
@@ -57,6 +57,10 @@ impl Behaviour for Lever {
         let pulled = state.cycle(POWERED);
         world.set_block_and_update(pos, pulled);
         update_attached_neighbours(pulled, world, pos);
+        // `LeverBlock.playSound`：拉下的音高是 0.6，弹回是 0.5。`useWithoutItem` 传的玩家是
+        // `null`，所以发起者自己也收得到。
+        let pitch = if pulled.get(POWERED) { 0.6 } else { 0.5 };
+        world.play_block_sound(pos, sound_event("minecraft:block.lever.click"), 0.3, pitch);
         InteractionResult::Success
     }
 

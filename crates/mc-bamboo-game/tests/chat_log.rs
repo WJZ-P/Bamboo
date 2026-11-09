@@ -69,12 +69,13 @@ impl PlayerSink for DiscardingSink {
 }
 
 #[test]
-fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
+fn chat_is_logged_with_the_not_secure_tag() {
     let (inbox, receiver) = mpsc::channel();
     let config = WorldConfig {
         view_distance: 2,
         max_players: 20,
         online_mode: false,
+        enforce_secure_profile: false,
     };
     let world = World::new(config, receiver);
     let player = PlayerId(1);
@@ -84,14 +85,14 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
         name: "Kitten".to_owned(),
         properties: Vec::new(),
         client: ClientInformation::default(),
+        permission_level: 0,
+        is_op: false,
         sink: Box::new(DiscardingSink),
     };
     let quota = Arc::new(AtomicUsize::new(0));
     let chat = Inbound::Request {
         player,
-        request: PlayRequest::Chat {
-            message: "竹子 hi".to_owned(),
-        },
+        request: PlayRequest::unsigned_chat("竹子 hi"),
         in_flight: InFlight::acquire(&quota, 1).expect("配额还没用"),
     };
     inbox.send(Inbound::Join(Box::new(join))).unwrap();
@@ -102,5 +103,8 @@ fn chat_is_logged_as_name_and_message_without_the_not_secure_tag() {
     with_default(console.clone(), || world.run());
 
     let lines = console.0.lock().unwrap();
-    assert_eq!(*lines, [(Level::INFO, "<Kitten> 竹子 hi".to_owned())]);
+    assert_eq!(
+        *lines,
+        [(Level::INFO, "[Not Secure] <Kitten> 竹子 hi".to_owned())]
+    );
 }

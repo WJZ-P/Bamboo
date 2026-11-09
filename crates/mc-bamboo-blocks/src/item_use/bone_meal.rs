@@ -39,7 +39,9 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
 }
 
 /// `growCrop`：点中的方块能催熟时催熟，成不成功都算用掉了骨粉。
-fn grow_crop(world: &mut World, pos: BlockPos) -> bool {
+///
+/// `growCrop`: a valid bonemeal target counts as used even when the grow roll fails.
+pub(crate) fn grow_crop(world: &mut World, pos: BlockPos) -> bool {
     let state = world.block_state(pos);
     if !state.is_a(BlockAncestor::BonemealableBlock) || !state.is_valid_bonemeal_target(world, pos)
     {
@@ -57,7 +59,14 @@ fn is_full_water_block(world: &World, pos: BlockPos) -> bool {
 }
 
 /// `growWaterPlant`：从这一格水出发随机走几步，在走到的水里长海草。
-fn grow_water_plant(world: &mut World, pos: BlockPos) -> bool {
+///
+/// 发射器传入的 `clickedFace` 是 null。平原不长珊瑚，`j == 0` 的壁挂珊瑚分支取不到数。
+///
+/// `growWaterPlant`: walk randomly out from this water and grow seagrass.
+///
+/// A dispenser passes a null `clickedFace`. The plains biome grows no coral, so the `j == 0`
+/// wall-coral branch draws nothing.
+pub(crate) fn grow_water_plant(world: &mut World, pos: BlockPos) -> bool {
     if !is_full_water_block(world, pos) {
         return false;
     }

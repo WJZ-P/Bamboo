@@ -41,6 +41,10 @@ pub enum ItemExchange {
     /// A glass bottle on a beehive: `shrink(1)` even in creative. An empty hand becomes a honey
     /// bottle; otherwise `Inventory.add` takes it.
     BottleHoney,
+    /// `ItemStack.consumeAndReturn(1, player)`：生存模式从手里拿走一个。
+    ///
+    /// `ItemStack.consumeAndReturn(1, player)`: survival mode removes one from the held stack.
+    Shrink,
 }
 
 /// 官方 `PotionContents.createItemStack(Items.POTION, Potions.WATER)`。

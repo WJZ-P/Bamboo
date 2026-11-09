@@ -10,8 +10,9 @@ use std::{
 use crate::extract::{
     Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
-    ExtractedStack, FieldValue, HeightmapType, Item, Property, PropertyKind, StateProvider,
-    TagGroup, VersionData,
+    ExtractedStack, FieldValue, GameRuleFact, HeightmapType, Item, LevelValueJson,
+    LootConditionJson, Property, PropertyKind, StateProvider, TagGroup, TypedLevelJson,
+    ValueEffectJson, VersionData,
 };
 
 const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。\n\n";
@@ -19,6 +20,7 @@ const ATTRIBUTE_REGISTRY: &str = "minecraft:attribute";
 const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const BLOCK_ENTITY_TYPE_REGISTRY: &str = "minecraft:block_entity_type";
 const CHAT_TYPE_REGISTRY: &str = "minecraft:chat_type";
+const COMMAND_ARGUMENT_TYPE_REGISTRY: &str = "minecraft:command_argument_type";
 const CONSUME_EFFECT_TYPE_REGISTRY: &str = "minecraft:consume_effect_type";
 const DATA_COMPONENT_TYPE_REGISTRY: &str = "minecraft:data_component_type";
 const DIMENSION_TYPE_REGISTRY: &str = "minecraft:dimension_type";
@@ -29,6 +31,7 @@ const BANNER_PATTERN_REGISTRY: &str = "minecraft:banner_pattern";
 const BLOCK_REGISTRY: &str = "minecraft:block";
 const FLUID_REGISTRY: &str = "minecraft:fluid";
 const ITEM_REGISTRY: &str = "minecraft:item";
+const JUKEBOX_SONG_REGISTRY: &str = "minecraft:jukebox_song";
 const MENU_REGISTRY: &str = "minecraft:menu";
 const WORLD_CLOCK_REGISTRY: &str = "minecraft:world_clock";
 
@@ -41,17 +44,26 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let light = light_file(data)?;
     let tags = tags_file(data)?;
     let transformers = block_transformers_file(data)?;
+    let item_damage = item_damage_file(data)?;
     let recipes = recipes_file(data)?;
     let heightmaps = heightmaps_file(data)?;
+    let sounds = sounds_file(data)?;
     let loot = loot_file(data)?;
+    let gamerules = gamerules_file(&data.game_rules)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
     write_file(output_dir, "version.rs", &version_file(data))?;
     write_file(output_dir, "packets.rs", &packets_file(data))?;
     write_file(output_dir, "blocks.rs", &blocks)?;
+    write_file(
+        output_dir,
+        "command_argument_types.rs",
+        &command_argument_types_file(data),
+    )?;
     write_file(output_dir, "block_classes.rs", &block_classes_file(data))?;
     write_file(output_dir, "block_maps.rs", &block_maps_file(data))?;
     write_file(output_dir, "block_transformers.rs", &transformers)?;
+    write_file(output_dir, "item_damage.rs", &item_damage)?;
     write_file(output_dir, "items.rs", &items)?;
     write_file(output_dir, "jukebox_songs.rs", &jukebox_songs_file(data))?;
     write_file(output_dir, "recipes.rs", &recipes)?;
@@ -75,8 +87,17 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         "item_components.rs",
         &item_components_file(data)?,
     )?;
+    write_file(
+        output_dir,
+        "crafting_remainders.rs",
+        &crafting_remainders_file(data)?,
+    )?;
     write_file(output_dir, "heightmaps.rs", &heightmaps)?;
+    write_file(output_dir, "sounds.rs", &sounds)?;
     write_file(output_dir, "loot.rs", &loot)?;
+    if !data.game_rules.is_empty() {
+        write_file(output_dir, "gamerules.rs", &gamerules)?;
+    }
     write_file(output_dir, "tags.rs", &tags)?;
     write_worldgen(data, output_dir)
 }
@@ -261,6 +282,70 @@ fn item_components_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(out, "    ({start}, {end}),");
     }
     let _ = writeln!(out, "];");
+    Ok(out)
+}
+
+/// `Item.getCraftingRemainder()`。只有声明了余料的物品在表里，按物品 ID 二分查找。
+///
+/// 补丁字节是官方 `DataComponentPatch.STREAM_CODEC`。空补丁不占字节。
+fn crafting_remainders_file(data: &VersionData) -> Result<String, String> {
+    if data.crafting_remainders.len() != data.items.len() {
+        return Err(format!(
+            "导出了 {} 个合成余料，物品有 {} 个",
+            data.crafting_remainders.len(),
+            data.items.len()
+        ));
+    }
+    let mut blob = Vec::new();
+    let mut entries = Vec::new();
+    for (source, remainder) in data.crafting_remainders.iter().enumerate() {
+        let Some((item, count, hex)) = remainder else {
+            continue;
+        };
+        let bytes = if hex.is_empty() || hex == "0000" {
+            Vec::new()
+        } else {
+            decode_hex(hex)
+                .ok_or_else(|| format!("{} 的合成余料组件不是十六进制", data.items[source].name))?
+        };
+        let start = blob.len();
+        blob.extend_from_slice(&bytes);
+        entries.push((source as i32, *item, *count, start, blob.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 合成余料的组件补丁拼在一起，位置见 [`ENTRIES`] 的最后两列。"
+    );
+    let _ = writeln!(out, "pub static PATCHES: &[u8] = b\"{}\";\n", escape(&blob));
+    let _ = writeln!(
+        out,
+        "/// `(物品 ID, 余料物品, 数量, 补丁起点, 补丁终点)`，按物品 ID 排好。"
+    );
+    let _ = writeln!(out, "pub static ENTRIES: &[(i32, i32, i32, u32, u32)] = &[");
+    for (source, item, count, start, end) in entries {
+        let _ = writeln!(out, "    ({source}, {item}, {count}, {start}, {end}),");
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 这个物品的 `getCraftingRemainder`。没有余料时是 `None`。"
+    );
+    let _ = writeln!(
+        out,
+        "pub fn of(item: i32) -> Option<(i32, i32, &'static [u8])> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    let index = ENTRIES.binary_search_by_key(&item, |entry| entry.0).ok()?;"
+    );
+    let _ = writeln!(out, "    let entry = ENTRIES[index];");
+    let _ = writeln!(
+        out,
+        "    Some((entry.1, entry.2, &PATCHES[entry.3 as usize..entry.4 as usize]))"
+    );
+    let _ = writeln!(out, "}}");
     Ok(out)
 }
 
@@ -456,16 +541,126 @@ fn float_literal(value: f32) -> String {
     }
 }
 
+/// 把 `Extractor.gameRules` 写成 `gamerules.rs`。
+pub fn write_gamerules(rules: &[GameRuleFact], output_dir: &Path) -> Result<(), String> {
+    write_file(output_dir, "gamerules.rs", &gamerules_file(rules)?)
+}
+
+fn gamerules_file(rules: &[GameRuleFact]) -> Result<String, String> {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一条游戏规则。下标是 `minecraft:game_rule` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct GameRuleDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    pub identifier: &'static str,");
+    let _ = writeln!(out, "    pub category: &'static str,");
+    let _ = writeln!(out, "    pub kind: GameRuleKind,");
+    let _ = writeln!(out, "    pub default_bool: bool,");
+    let _ = writeln!(out, "    pub default_int: i32,");
+    let _ = writeln!(out, "    pub min: i32,");
+    let _ = writeln!(out, "    pub max: i32,");
+    let _ = writeln!(
+        out,
+        "    /// `GameRule.isEnabled(FeatureFlags.DEFAULT_FLAGS)`。"
+    );
+    let _ = writeln!(out, "    pub enabled: bool,");
+    let _ = writeln!(out, "    pub features: &'static [&'static str],");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub enum GameRuleKind {{");
+    let _ = writeln!(out, "    Bool,");
+    let _ = writeln!(out, "    Int,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    for (index, rule) in rules.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "pub const {}: usize = {index};",
+            const_name(&rule.name)?
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "pub static RULES: &[GameRuleDef] = &[");
+    for rule in rules {
+        let (kind, default_bool, default_int, min, max) = match rule.kind.as_str() {
+            "boolean" => (
+                "GameRuleKind::Bool",
+                rule.default_bool
+                    .ok_or_else(|| format!("{} 没有布尔默认值", rule.name))?,
+                0,
+                0,
+                0,
+            ),
+            "integer" => (
+                "GameRuleKind::Int",
+                false,
+                rule.default_int
+                    .ok_or_else(|| format!("{} 没有整数默认值", rule.name))?,
+                rule.min.ok_or_else(|| format!("{} 没有下限", rule.name))?,
+                rule.max.ok_or_else(|| format!("{} 没有上限", rule.name))?,
+            ),
+            other => return Err(format!("{} 的类型 {other} 不认识", rule.name)),
+        };
+        if rule.identifier != format!("minecraft:{}", rule.name) {
+            return Err(format!(
+                "{} 的标识符是 {}，不是 minecraft:{}",
+                rule.name, rule.identifier, rule.name
+            ));
+        }
+        let features = rule
+            .features
+            .iter()
+            .map(|feature| format!("{feature:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "    GameRuleDef {{ name: {:?}, identifier: {:?}, category: {:?}, kind: {kind}, default_bool: {default_bool}, default_int: {default_int}, min: {min}, max: {max}, enabled: {}, features: &[{features}] }},",
+            rule.name, rule.identifier, rule.category, rule.enabled,
+        );
+    }
+    let _ = writeln!(out, "];");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 短名或 `minecraft:` 全名。没注册的返回 `None`。");
+    let _ = writeln!(out, "pub fn find(name: &str) -> Option<usize> {{");
+    let _ = writeln!(
+        out,
+        "    let name = name.strip_prefix(\"minecraft:\").unwrap_or(name);"
+    );
+    let _ = writeln!(out, "    RULES.iter().position(|rule| rule.name == name)");
+    let _ = writeln!(out, "}}");
+    Ok(out)
+}
+
+fn const_name(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return Err(format!("游戏规则名 {name} 不能当成常量"));
+    }
+    Ok(name.to_ascii_uppercase())
+}
+
 fn module_file() -> String {
     "pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;
 pub mod blocks;
+pub mod command_argument_types;
 pub mod component_enums;
 pub mod component_registries;
+pub mod crafting_remainders;
 pub mod entity_types;
+pub mod gamerules;
 pub mod heightmaps;
 pub mod item_components;
+pub mod item_damage;
 pub mod items;
 pub mod jukebox_songs;
 pub mod light;
@@ -474,6 +669,7 @@ pub mod packets;
 pub mod recipes;
 pub mod registries;
 pub mod shapes;
+pub mod sounds;
 pub mod states;
 pub mod tags;
 pub mod version;
@@ -579,10 +775,255 @@ fn check_heightmap_types(types: &[HeightmapType]) -> Result<(), String> {
     Ok(())
 }
 
+/// 音效表：每个状态的 `SoundType`、`sound_event` 注册表和音符盒乐器。
+fn sounds_file(data: &VersionData) -> Result<String, String> {
+    let tables = &data.sound_tables;
+    check_table_length(
+        "STATE_SOUND_TYPE",
+        &tables.state_types,
+        data.block_states.total,
+    )?;
+    if tables.events.len() > usize::from(u16::MAX) {
+        return Err(format!("音效事件有 {} 个，超出 u16", tables.events.len()));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// `sound_event` 注册表的一项，下标就是网络上的 Holder ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct SoundEventDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(
+        out,
+        "    /// 固定传播范围，`None` 表示按音量算（16 或 16 × 音量）。"
+    );
+    let _ = writeln!(out, "    pub fixed_range: Option<f32>,");
+    let _ = writeln!(out, "}}\n");
+
+    let _ = writeln!(out, "/// 全部音效事件，下标就是注册表 ID。");
+    let _ = writeln!(out, "pub static SOUND_EVENTS: &[SoundEventDef] = &[");
+    for event in &tables.events {
+        let _ = writeln!(
+            out,
+            "    SoundEventDef {{ name: {:?}, fixed_range: {:?} }},",
+            event.name, event.fixed_range
+        );
+    }
+    let _ = writeln!(out, "];\n");
+
+    let _ = writeln!(
+        out,
+        "/// 去重后的 `SoundType`，字段顺序和官方的构造参数一致。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct SoundTypeDef {{");
+    let _ = writeln!(out, "    pub volume: f32,");
+    let _ = writeln!(out, "    pub pitch: f32,");
+    let _ = writeln!(out, "    pub break_sound: u16,");
+    let _ = writeln!(out, "    pub step_sound: u16,");
+    let _ = writeln!(out, "    pub place_sound: u16,");
+    let _ = writeln!(out, "    pub hit_sound: u16,");
+    let _ = writeln!(out, "    pub fall_sound: u16,");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "/// 去重后的 `SoundType`。");
+    let _ = writeln!(out, "pub static SOUND_TYPES: &[SoundTypeDef] = &[");
+    for (volume, pitch, break_sound, step_sound, place_sound, hit_sound, fall_sound) in
+        &tables.types
+    {
+        let _ = writeln!(
+            out,
+            "    SoundTypeDef {{ volume: {volume:?}, pitch: {pitch:?}, break_sound: {break_sound}, step_sound: {step_sound}, place_sound: {place_sound}, hit_sound: {hit_sound}, fall_sound: {fall_sound} }},"
+        );
+    }
+    let _ = writeln!(out, "];\n");
+    write_state_table(
+        &mut out,
+        "每个状态的 `getSoundType` 在 [`SOUND_TYPES`] 里的下标。第 0 项对应空音效，空音效不存在。",
+        "STATE_SOUND_TYPE",
+        "u16",
+        &tables.state_types,
+    );
+
+    let _ = writeln!(
+        out,
+        "/// 音符盒乐器，顺序和 `NoteBlockInstrument` 的枚举序号一致。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy)]");
+    let _ = writeln!(out, "pub struct NoteBlockInstrumentDef {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// 乐器声音的 `sound_event` 注册表 ID。");
+    let _ = writeln!(out, "    pub sound: u16,");
+    let _ = writeln!(out, "    /// 基础乐器，音符改变音高。");
+    let _ = writeln!(out, "    pub tunable: bool,");
+    let _ = writeln!(
+        out,
+        "    /// 自定义头颅，声音由方块实体决定，这里只是默认值。"
+    );
+    let _ = writeln!(out, "    pub custom_sound: bool,");
+    let _ = writeln!(out, "}}\n");
+    let _ = writeln!(out, "/// 音符盒乐器。");
+    let _ = writeln!(
+        out,
+        "pub static NOTE_BLOCK_INSTRUMENTS: &[NoteBlockInstrumentDef] = &["
+    );
+    for instrument in &tables.instruments {
+        let _ = writeln!(
+            out,
+            "    NoteBlockInstrumentDef {{ name: {:?}, sound: {}, tunable: {}, custom_sound: {} }},",
+            instrument.name, instrument.sound, instrument.tunable, instrument.custom_sound
+        );
+    }
+    let _ = writeln!(out, "];\n");
+
+    let _ = writeln!(
+        out,
+        "/// 按名字找音符盒乐器，名字是方块状态里 `instrument` 属性的值。"
+    );
+    let _ = writeln!(
+        out,
+        "pub fn note_block_instrument(name: &str) -> Option<&'static NoteBlockInstrumentDef> {{"
+    );
+    let _ = writeln!(
+        out,
+        "    NOTE_BLOCK_INSTRUMENTS.iter().find(|instrument| instrument.name == name)"
+    );
+    let _ = writeln!(out, "}}\n");
+
+    let mut sorted: Vec<(&str, usize)> = tables
+        .events
+        .iter()
+        .enumerate()
+        .map(|(id, event)| (event.name.as_str(), id))
+        .collect();
+    sorted.sort_unstable_by_key(|(name, _)| *name);
+    if let Some(pair) = sorted.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        return Err(format!("音效事件名字重复：{}", pair[0].0));
+    }
+    let _ = writeln!(
+        out,
+        "/// `sound_event` 按名字排序，供 [`sound_event`] 二分查找。"
+    );
+    let _ = writeln!(out, "static SOUND_EVENT_IDS: &[(&str, u16)] = &[");
+    for row in sorted.chunks(4) {
+        let row: Vec<String> = row
+            .iter()
+            .map(|(name, id)| format!("({name:?}, {id})"))
+            .collect();
+        let _ = writeln!(out, "    {},", row.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 按注册表名字找音效事件 ID。名字写错说明和官方版本不一致。"
+    );
+    let _ = writeln!(out, "pub fn sound_event(name: &str) -> u16 {{");
+    let _ = writeln!(out, "    let index = SOUND_EVENT_IDS");
+    let _ = writeln!(
+        out,
+        "        .binary_search_by(|(sound, _)| (*sound).cmp(name))"
+    );
+    let _ = writeln!(
+        out,
+        "        .unwrap_or_else(|_| panic!(\"未知的音效事件：{{name}}\"));"
+    );
+    let _ = writeln!(out, "    SOUND_EVENT_IDS[index].1");
+    let _ = writeln!(out, "}}\n");
+
+    write_jukebox_songs(&mut out, data)?;
+
+    let _ = writeln!(
+        out,
+        "/// 声音来源的序号和名字，序号就是网络上 `writeEnum` 写的值。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    let _ = writeln!(out, "pub struct SoundSource(u8);\n");
+    let _ = writeln!(out, "impl SoundSource {{");
+    let _ = writeln!(out, "    pub const fn id(self) -> u8 {{");
+    let _ = writeln!(out, "        self.0");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    /// 序号就是官方 `SoundSource.ordinal()`。");
+    let _ = writeln!(
+        out,
+        "    /// The number is official `SoundSource.ordinal()`."
+    );
+    let _ = writeln!(out, "    pub const fn from_id(id: u8) -> Self {{");
+    let _ = writeln!(out, "        Self(id)");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "}}\n");
+    for (id, name) in tables.sources.iter().enumerate() {
+        let constant = match name.as_str() {
+            "block" | "record" | "player" => format!("{}S", name.to_uppercase()),
+            other => other.to_uppercase(),
+        };
+        let _ = writeln!(out, "/// `{name}`。");
+        let _ = writeln!(
+            out,
+            "pub const {constant}: SoundSource = SoundSource({id});"
+        );
+    }
+    Ok(out)
+}
+
+/// 带 `jukebox_playable` 组件的物品 → `jukebox_song` 注册表 ID。
+///
+/// 唱片放进唱片机时 `JukeboxSongPlayer.play` 用这个 ID 发 1010 的等级事件。
+fn write_jukebox_songs(out: &mut String, data: &VersionData) -> Result<(), String> {
+    let songs = registry_entries(data, JUKEBOX_SONG_REGISTRY)
+        .ok_or_else(|| format!("没有 {JUKEBOX_SONG_REGISTRY} 注册表"))?;
+    if songs.is_empty() {
+        return Err(format!("{JUKEBOX_SONG_REGISTRY} 是空的"));
+    }
+    let mut rows: Vec<(i32, i32)> = Vec::new();
+    for (item_id, item) in data.items.iter().enumerate() {
+        let Some(song) = &item.jukebox_song else {
+            continue;
+        };
+        let song_id = songs
+            .iter()
+            .position(|candidate| candidate == song)
+            .ok_or_else(|| format!("{} 的 jukebox_playable 指向不存在的歌典 {song}", item.name))?;
+        rows.push((item_id as i32, song_id as i32));
+    }
+
+    let _ = writeln!(
+        out,
+        "/// 带 `jukebox_playable` 组件的物品 → `jukebox_song` 注册表 ID，按物品 ID 排序。"
+    );
+    let _ = writeln!(out, "static JUKEBOX_SONGS: &[(i32, i32)] = &[");
+    for row in rows.chunks(4) {
+        let row: Vec<String> = row
+            .iter()
+            .map(|(item, song)| format!("({item}, {song})"))
+            .collect();
+        let _ = writeln!(out, "    {},", row.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// 物品带着的歌典 ID，没有 `jukebox_playable` 组件时是 `None`。"
+    );
+    let _ = writeln!(out, "pub fn jukebox_song(item: i32) -> Option<i32> {{");
+    let _ = writeln!(out, "    JUKEBOX_SONGS");
+    let _ = writeln!(
+        out,
+        "        .binary_search_by_key(&item, |&(item, _)| item)"
+    );
+    let _ = writeln!(out, "        .ok()");
+    let _ = writeln!(out, "        .map(|index| JUKEBOX_SONGS[index].1)");
+    let _ = writeln!(out, "}}\n");
+    Ok(())
+}
+
 /// `minecraft:level_chunk_with_light` → `LEVEL_CHUNK_WITH_LIGHT`。
 fn constant_name(identifier: &str) -> String {
     let path = identifier.strip_prefix("minecraft:").unwrap_or(identifier);
-    path.replace(['/', '.', '-'], "_").to_uppercase()
+    // `brigadier:bool` 这类参数类型带别的命名空间，冒号也要换成下划线。
+    //
+    // Argument types such as `brigadier:bool` keep another namespace, so the colon
+    // becomes an underscore too.
+    path.replace(['/', '.', '-', ':'], "_").to_uppercase()
 }
 
 fn packets_file(data: &VersionData) -> String {
@@ -631,7 +1072,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
     for block in &data.blocks {
         let _ = writeln!(
             table,
-            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {}, speed_factor: {}, bounce_restitution: {}, explosion_resistance: {} }},",
+            "    Block {{ name: {:?}, first_state: {}, default_state: {}, item: {}, has_collision: {}, has_fluid: {}, two_blocks: {}, push_reaction: PushReaction::{}, unbreakable: {}, block_entity_type: {:?}, class: BlockClass::{}, properties: {}, fields: {}, instrument: {:?}, offset: {}, dynamic_shape: {}, destroy_time: {:?}, requires_correct_tool_for_drops: {}, pickup_sound: {:?}, speed_factor: {}, bounce_restitution: {}, explosion_resistance: {} }},",
             block.name,
             block.states[0],
             block.default_state,
@@ -650,6 +1091,7 @@ fn blocks_file(data: &VersionData) -> Result<String, String> {
             block.dynamic_shape,
             block.destroy_time,
             block.requires_correct_tool_for_drops,
+            block.pickup_sound,
             float_literal(block.speed_factor),
             float_literal(block.bounce_restitution),
             float_literal(block.explosion_resistance),
@@ -998,18 +1440,276 @@ fn block_transformers_file(data: &VersionData) -> Result<String, String> {
         let _ = writeln!(out, "    name: {:?},", transformer.name);
         let _ = writeln!(out, "    transforms: &[");
         for transform in &transformer.transforms {
+            let sound = match transform.sound {
+                Some(id) => format!("Some({id})"),
+                None => "None".to_owned(),
+            };
             let _ = writeln!(
                 out,
-                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {} }},",
+                "        BlockTransform {{ provider: {}, disallowed_faces: &{:?}, update_from_neighbors: {}, sound: {}, particle: {}, copper_chest: {}, consume_on_use: {}, item_damage_per_use: {} }},",
                 state_provider(&transform.provider, data, &block_tags)?,
                 transform.disallowed_faces,
-                transform.update_from_neighbors
+                transform.update_from_neighbors,
+                sound,
+                transform.particle,
+                transform.copper_chest,
+                transform.consume_on_use,
+                transform.item_damage_per_use
             );
         }
         let _ = writeln!(out, "    ],");
         let _ = writeln!(out, "}};");
     }
     Ok(out)
+}
+
+const ENCHANTMENT_REGISTRY: &str = "minecraft:enchantment";
+
+/// `Enchantment.modifyDurabilityChange` 用的 `minecraft:item_damage` 效果。
+fn item_damage_file(data: &VersionData) -> Result<String, String> {
+    let item_tags = tag_indexes(&data.tags, ITEM_REGISTRY)?;
+    let enchantments = registry_entries(data, ENCHANTMENT_REGISTRY)
+        .ok_or_else(|| format!("没有注册表 {ENCHANTMENT_REGISTRY}"))?;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 带 `minecraft:item_damage` 效果的附魔。顺序是附魔名字的字典序，查找按注册表 ID。"
+    );
+    let _ = writeln!(out, "pub static ITEM_DAMAGE: &[ItemDamageEnchantment] = &[");
+    for enchantment in &data.item_damage_enchantments {
+        let id = registry_id(enchantments, &enchantment.name)?;
+        let _ = writeln!(out, "    ItemDamageEnchantment {{");
+        let _ = writeln!(out, "        enchantment: {id},");
+        let _ = writeln!(out, "        effects: &[");
+        for effect in &enchantment.effects {
+            let _ = writeln!(out, "            ItemDamageEffect {{");
+            let _ = writeln!(
+                out,
+                "                effect: {},",
+                value_effect(&effect.effect)?
+            );
+            let requirement = match &effect.requirements {
+                None => "None".to_owned(),
+                Some(condition) => {
+                    format!("Some({})", tool_match(condition, data, &item_tags)?)
+                }
+            };
+            let _ = writeln!(out, "                requirement: {requirement},");
+            let _ = writeln!(out, "            }},");
+        }
+        let _ = writeln!(out, "        ],");
+        let _ = writeln!(out, "    }},");
+    }
+    let _ = writeln!(out, "];");
+    let mut header = "use crate::{\n    ItemDamageEffect, ItemDamageEnchantment, LevelBasedValue, ToolMatch, ValueEffect,\n};\nuse crate::tags::item_tags;\n".to_owned();
+    if out.contains("items::") {
+        header.push_str("use crate::items;\n");
+    }
+    header.push('\n');
+    header.push_str(&out);
+    Ok(header)
+}
+
+fn registry_id(entries: &[String], name: &str) -> Result<i32, String> {
+    entries
+        .iter()
+        .position(|entry| entry == name)
+        .map(|id| i32::try_from(id).unwrap_or(i32::MAX))
+        .ok_or_else(|| format!("{name} 不在注册表里"))
+}
+
+fn value_effect(effect: &ValueEffectJson) -> Result<String, String> {
+    Ok(match effect {
+        ValueEffectJson::Add { value } => {
+            format!("ValueEffect::Add({})", level_value(value)?)
+        }
+        ValueEffectJson::Multiply { factor } => {
+            format!("ValueEffect::Multiply({})", level_value(factor)?)
+        }
+        ValueEffectJson::Set { value } => {
+            format!("ValueEffect::Set({})", level_value(value)?)
+        }
+        ValueEffectJson::RemoveBinomial { chance } => format!(
+            "ValueEffect::RemoveBinomial {{ chance: {} }}",
+            level_value(chance)?
+        ),
+        ValueEffectJson::Exponential { base, exponent } => format!(
+            "ValueEffect::Exponential {{ base: {}, exponent: {} }}",
+            level_value(base)?,
+            level_value(exponent)?
+        ),
+        ValueEffectJson::AllOf { effects } => {
+            let effects = effects
+                .iter()
+                .map(value_effect)
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("ValueEffect::AllOf(&[{}])", effects.join(", "))
+        }
+    })
+}
+
+fn level_value(value: &LevelValueJson) -> Result<String, String> {
+    Ok(match value {
+        LevelValueJson::Constant(number) => {
+            format!("LevelBasedValue::Constant({})", rust_f32(*number))
+        }
+        LevelValueJson::Typed(typed) => match typed {
+            TypedLevelJson::Constant { value } => {
+                format!("LevelBasedValue::Constant({})", rust_f32(*value))
+            }
+            TypedLevelJson::Linear {
+                base,
+                per_level_above_first,
+            } => format!(
+                "LevelBasedValue::Linear {{ base: {}, per_level_above_first: {} }}",
+                rust_f32(*base),
+                rust_f32(*per_level_above_first)
+            ),
+            TypedLevelJson::Fraction {
+                numerator,
+                denominator,
+            } => format!(
+                "LevelBasedValue::Fraction {{ numerator: &{}, denominator: &{} }}",
+                level_value(numerator)?,
+                level_value(denominator)?
+            ),
+            TypedLevelJson::Clamped { value, min, max } => format!(
+                "LevelBasedValue::Clamped {{ value: &{}, min: {}, max: {} }}",
+                level_value(value)?,
+                rust_f32(*min),
+                rust_f32(*max)
+            ),
+            TypedLevelJson::LevelsSquared { added } => {
+                format!(
+                    "LevelBasedValue::LevelsSquared {{ added: {} }}",
+                    rust_f32(*added)
+                )
+            }
+            TypedLevelJson::Exponent { base, power } => format!(
+                "LevelBasedValue::Exponent {{ base: &{}, power: &{} }}",
+                level_value(base)?,
+                level_value(power)?
+            ),
+            TypedLevelJson::Lookup { values, fallback } => format!(
+                "LevelBasedValue::Lookup {{ values: &[{}], fallback: &{} }}",
+                values
+                    .iter()
+                    .map(|value| rust_f32(*value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                level_value(fallback)?
+            ),
+        },
+    })
+}
+
+fn rust_f32(value: f32) -> String {
+    if value.is_nan() {
+        return "f32::NAN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "f32::NEG_INFINITY".to_owned()
+        } else {
+            "f32::INFINITY".to_owned()
+        };
+    }
+    let text = format!("{value:?}");
+    if text.contains(['.', 'e', 'E']) {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
+fn tool_match(
+    condition: &LootConditionJson,
+    data: &VersionData,
+    item_tags: &TagIndexes,
+) -> Result<String, String> {
+    Ok(match condition {
+        LootConditionJson::MatchTool { predicate: None } => "ToolMatch::Any".to_owned(),
+        LootConditionJson::MatchTool {
+            predicate: Some(predicate),
+        } => match &predicate.items {
+            None => "ToolMatch::Any".to_owned(),
+            Some(items) => tool_items(items, data, item_tags)?,
+        },
+        LootConditionJson::Inverted { term } => {
+            format!(
+                "ToolMatch::Inverted(&{})",
+                tool_match(term, data, item_tags)?
+            )
+        }
+        LootConditionJson::AllOf { terms } => {
+            format!(
+                "ToolMatch::AllOf(&[{}])",
+                tool_matches(terms, data, item_tags)?
+            )
+        }
+        LootConditionJson::AnyOf { terms } => {
+            format!(
+                "ToolMatch::AnyOf(&[{}])",
+                tool_matches(terms, data, item_tags)?
+            )
+        }
+    })
+}
+
+fn tool_matches(
+    terms: &[LootConditionJson],
+    data: &VersionData,
+    item_tags: &TagIndexes,
+) -> Result<String, String> {
+    terms
+        .iter()
+        .map(|term| tool_match(term, data, item_tags))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|terms| terms.join(", "))
+}
+
+fn tool_items(
+    items: &serde_json::Value,
+    data: &VersionData,
+    item_tags: &TagIndexes,
+) -> Result<String, String> {
+    match items {
+        serde_json::Value::String(name) => Ok(one_tool_item(name, data, item_tags)?),
+        serde_json::Value::Array(entries) => {
+            let mut ids = Vec::new();
+            for entry in entries {
+                let serde_json::Value::String(name) = entry else {
+                    return Err(format!("物品谓词里有不是字符串的条目：{entry}"));
+                };
+                if name.starts_with('#') {
+                    return Err(format!("物品列表里不能再嵌标签：{name}"));
+                }
+                ids.push(item_constant(data, name)?);
+            }
+            Ok(format!("ToolMatch::Items(&[{}])", ids.join(", ")))
+        }
+        other => Err(format!("不认识的物品谓词：{other}")),
+    }
+}
+
+fn one_tool_item(name: &str, data: &VersionData, item_tags: &TagIndexes) -> Result<String, String> {
+    if let Some(tag) = name.strip_prefix('#') {
+        if !item_tags.contains_key(tag) {
+            return Err(format!("没有物品标签 {tag}"));
+        }
+        return Ok(format!("ToolMatch::Tag(item_tags::{})", constant_name(tag)));
+    }
+    Ok(format!(
+        "ToolMatch::Items(&[{}])",
+        item_constant(data, name)?
+    ))
+}
+
+fn item_constant(data: &VersionData, name: &str) -> Result<String, String> {
+    if !data.items.iter().any(|item| item.name == name) {
+        return Err(format!("没有物品 {name}"));
+    }
+    Ok(format!("items::{}", constant_name(name)))
 }
 
 /// 规则多的提供器一条规则一行，斧子有一百多条。
@@ -1323,7 +2023,7 @@ fn items_file(data: &VersionData) -> Result<String, String> {
     for item in &data.items {
         let _ = writeln!(
             out,
-            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, max_damage: {}, enchantable: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {} }},",
+            "    Item {{ name: {:?}, kind: ItemKind::{}, block: {:?}, wall_block: {:?}, attachment: {:?}, max_stack_size: {}, max_damage: {}, enchantable: {}, can_destroy_blocks_in_creative: {}, consumable: {}, compostable: {}, jukebox_playable: {}, block_transformer: {}, blocks_attacks: {}, place_sound: {:?}, empty_sound: {:?}, empty_source: {:?}, bucket_entity: {:?} }},",
             item.name,
             item_kind(item)?,
             item.block,
@@ -1339,7 +2039,11 @@ fn items_file(data: &VersionData) -> Result<String, String> {
             compost_layers_of(item),
             item.jukebox_playable,
             block_transformer_of(item, data)?,
-            item.blocks_attacks
+            item.blocks_attacks,
+            item.place_sound,
+            item.empty_sound,
+            item.empty_source,
+            item.bucket_entity
         );
     }
     let _ = writeln!(out, "];");
@@ -1581,7 +2285,7 @@ impl<'a> RecipeWriter<'a> {
                 max_material,
                 result_item,
                 result_count,
-                result_has_components,
+                result_components,
                 add_material_count,
             } => {
                 let input = self.ingredient(input)?;
@@ -1596,11 +2300,12 @@ impl<'a> RecipeWriter<'a> {
                 if *result_count <= 0 {
                     return Err(format!("产物数量是 {result_count}"));
                 }
+                let result_components = self.components(result_components)?;
                 format!(
                     "RecipeKind::Transmute {{ input: {input}, material: {material}, \
                      min_material: {min_material}, max_material: {max_material}, \
                      result_item: {result_item}, result_count: {result_count}, \
-                     result_has_components: {result_has_components}, \
+                     result_components: {result_components}, \
                      add_material_count: {add_material_count} }}"
                 )
             }
@@ -1695,13 +2400,13 @@ impl<'a> RecipeWriter<'a> {
                 material,
                 result_item,
                 result_count,
-                result_has_components,
+                result_components,
             } => self.map_extending(
                 map,
                 material,
                 *result_item,
                 *result_count,
-                *result_has_components,
+                result_components,
             )?,
             ExtractedRecipeKind::BannerDuplicate { banner, result } => {
                 self.banner_duplicate(banner, result)?
@@ -1761,14 +2466,32 @@ impl<'a> RecipeWriter<'a> {
             .name_of(format!("&[{}]", names.join(", "))))
     }
 
+    /// 组件补丁的十六进制字节写成 Rust 字节切片。
+    fn components(&self, hex: &str) -> Result<String, String> {
+        let (pairs, rest) = hex.as_bytes().as_chunks::<2>();
+        if !rest.is_empty() {
+            return Err(format!("组件字节的十六进制长度是奇数：{hex}"));
+        }
+        let mut bytes = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let pair =
+                std::str::from_utf8(pair).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            let byte =
+                u8::from_str_radix(pair, 16).map_err(|_| format!("组件字节不是十六进制：{hex}"))?;
+            bytes.push(byte);
+        }
+        Ok(format!("&{bytes:?}"))
+    }
+
     fn stack(&self, stack: &ExtractedStack) -> Result<String, String> {
         check_item(stack.item, self.data)?;
         if stack.count <= 0 {
             return Err(format!("产物数量是 {}", stack.count));
         }
+        let components = self.components(&stack.components)?;
         Ok(format!(
-            "Stack {{ item: {}, count: {}, has_components: {} }}",
-            stack.item, stack.count, stack.has_components
+            "Stack {{ item: {}, count: {}, components: {components} }}",
+            stack.item, stack.count
         ))
     }
 
@@ -1998,7 +2721,7 @@ impl<'a> RecipeWriter<'a> {
         material: &ExtractedIngredient,
         result_item: Option<i32>,
         result_count: i32,
-        result_has_components: bool,
+        result_components: &str,
     ) -> Result<String, String> {
         let map = self.ingredient(map)?;
         let material = self.ingredient(material)?;
@@ -2012,10 +2735,11 @@ impl<'a> RecipeWriter<'a> {
         if result_count <= 0 {
             return Err(format!("产物数量是 {result_count}"));
         }
+        let result_components = self.components(result_components)?;
         Ok(format!(
             "RecipeKind::MapExtending {{ map: {map}, material: {material}, \
              result_item: {result_item}, result_count: {result_count}, \
-             result_has_components: {result_has_components} }}"
+             result_components: {result_components} }}"
         ))
     }
 
@@ -2266,7 +2990,6 @@ fn registry_entries<'a>(data: &'a VersionData, registry: &str) -> Option<&'a [St
 /// 把一个注册表的条目写成常量，数字 ID 就是条目在列表里的位置。
 fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, registry: &str) {
     let entries = registry_entries(data, registry).unwrap_or(&[]);
-
     let _ = writeln!(out, "pub mod {module} {{");
     let _ = writeln!(out, "    pub const TOTAL: u32 = {};", entries.len());
     let _ = writeln!(
@@ -2282,6 +3005,20 @@ fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, regist
         let _ = writeln!(out, "    pub const {}: i32 = {id};", constant_name(name));
     }
     let _ = writeln!(out, "}}\n");
+}
+
+/// 命令参数类型在 `commands` 包里的数字 ID，由官方注册表导出。
+///
+/// Numeric ids of command argument types in the `commands` packet, exported from the official registry.
+fn command_argument_types_file(data: &VersionData) -> String {
+    let mut out = String::new();
+    write_registry_ids(
+        &mut out,
+        data,
+        "argument_type",
+        COMMAND_ARGUMENT_TYPE_REGISTRY,
+    );
+    out
 }
 
 /// 一个注册表下的标签：名字 → 它在 `TagGroup` 里的下标。
@@ -2539,6 +3276,7 @@ mod tests {
             offset: None,
             destroy_time: 0.0,
             requires_correct_tool_for_drops: false,
+            pickup_sound: None,
         }
     }
 
@@ -2567,8 +3305,13 @@ mod tests {
             consumable: false,
             compostable: None,
             jukebox_playable: false,
+            jukebox_song: None,
             block_transformer: None,
             blocks_attacks: false,
+            place_sound: None,
+            empty_sound: None,
+            empty_source: None,
+            bucket_entity: None,
         }
     }
 

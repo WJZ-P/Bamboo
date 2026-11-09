@@ -12,6 +12,7 @@ use crate::{
     behaviour::{Behaviour, Plain},
     context::UseContext,
     interact::InteractionResult,
+    level::Effect,
     state::BlockState,
     world::{UPDATE_ALL_IMMEDIATE, World},
 };
@@ -20,12 +21,17 @@ use crate::{
 pub(super) struct Tnt;
 
 /// `TntBlock.prime` 加 `removeBlock`：有信号时点燃这一格，方块换成空气或者流体。
+/// 点燃声在 `World::spawn_tnt` 里，和官方一样在实体生成之后。被爆炸点着的短引信不走这里。
 ///
 /// `TntBlock.prime` plus `removeBlock`: a neighbor signal primes the block and
-/// replaces it with air or the fluid left behind.
+/// replaces it with air or the fluid left behind. The primed sound is in `World::spawn_tnt`,
+/// after the entity exists, as in vanilla. Short-fuse TNT lit by an explosion does not use this.
 fn prime_if_powered(world: &mut World, pos: BlockPos) {
-    if world.has_neighbor_signal(pos) {
-        world.spawn_tnt(pos);
+    // `TntBlock.neighborChanged`：`prime` 成功才 `removeBlock`。规则为假时 `prime` 不取随机数。
+    //
+    // `TntBlock.neighborChanged` calls `removeBlock` only when `prime` succeeds.
+    // A false rule draws no random.
+    if world.has_neighbor_signal(pos) && world.spawn_tnt(pos) >= 0 {
         world.remove_block(pos);
     }
 }
@@ -56,10 +62,31 @@ impl Behaviour for Tnt {
         if ctx.item != items::FLINT_AND_STEEL && ctx.item != items::FIRE_CHARGE {
             return Plain.use_item_on(state, world, ctx);
         }
-        // 官方的 `prime` 先放实体，再用 11 号标志位把方块换成空气。
-        // Official `prime` spawns the entity, then `setBlock` with flags 11 replaces the block with air.
+        // `TntBlock.useItemOn`：规则为假时提示 `block.minecraft.tnt.disabled`，返回 `PASS`，不消耗物品。
+        //
+        // `TntBlock.useItemOn`: a false rule shows `block.minecraft.tnt.disabled`, returns `PASS`,
+        // and does not consume the item.
+        if !world.block_game_rules().tnt_explodes {
+            world.push_effect(Effect::Overlay {
+                key: "block.minecraft.tnt.disabled",
+                first: None,
+                second: None,
+            });
+            return InteractionResult::Pass;
+        }
+        // 官方的 `prime` 先放实体（`spawn_tnt` 里接着放点燃声），再用 11 号标志位把方块换成空气。
+        // Official `prime` spawns the entity (and `spawn_tnt` then plays the primed sound),
+        // then `setBlock` with flags 11 replaces the block with air.
         world.spawn_tnt(ctx.clicked_pos());
         world.set_block(ctx.clicked_pos(), BlockState::AIR, UPDATE_ALL_IMMEDIATE);
+        // 打火石 `hurtAndBreak(1)`，火焰弹 `consume(1)`。都在方块消失之后。
+        //
+        // Flint and steel uses `hurtAndBreak(1)`; a fire charge uses `consume(1)`. Both happen after the block is gone.
+        if ctx.item == items::FLINT_AND_STEEL {
+            crate::durability::hurt_hand(world, ctx.hand, 1);
+        } else {
+            crate::durability::consume_hand(ctx.hand, 1);
+        }
         InteractionResult::Success
     }
 }

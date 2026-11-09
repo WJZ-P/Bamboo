@@ -3,8 +3,8 @@
 //! 这个世界看不到实体，傀儡不会出现，但是方块的变化和官方一样：
 //! 图案里的方块被拿走，铜傀儡在铜块的位置留下一个箱子。
 
-use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, blocks, tags::block_tags};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
+use mc_bamboo_data::{Block, blocks, sounds, sounds::sound_event, tags::block_tags};
 
 use super::chest::chest_from_copper_block;
 use crate::{
@@ -21,6 +21,10 @@ pub(super) struct CarvedPumpkin;
 /// 图案里的一格。
 #[derive(Clone, Copy)]
 enum Cell {
+    /// 图案里的空格，`BlockPatternBuilder` 里 `' '` 匹配任何方块。
+    ///
+    /// A space in the pattern. `' '` in `BlockPatternBuilder` matches any block.
+    Any,
     Pumpkin,
     Snow,
     Iron,
@@ -31,6 +35,7 @@ enum Cell {
 impl Cell {
     fn matches(self, state: BlockState) -> bool {
         match self {
+            Self::Any => true,
             Self::Pumpkin => state.is(blocks::CARVED_PUMPKIN) || state.is(blocks::JACK_O_LANTERN),
             Self::Snow => state.is(blocks::SNOW_BLOCK),
             Self::Iron => state.is(blocks::IRON_BLOCK),
@@ -50,6 +55,27 @@ const IRON_GOLEM: &[&[Cell]] = &[
 ];
 /// `getOrCreateCopperGolemFull`。
 const COPPER_GOLEM: &[&[Cell]] = &[&[Cell::Pumpkin], &[Cell::Copper]];
+/// `getOrCreateSnowGolemBase`。最上面一格是空格，空气也算。
+///
+/// `getOrCreateSnowGolemBase`. The top cell is a space, so air matches too.
+const SNOW_BASE: &[&[Cell]] = &[&[Cell::Any], &[Cell::Snow], &[Cell::Snow]];
+/// `getOrCreateIronGolemBase`。
+const IRON_BASE: &[&[Cell]] = &[
+    &[Cell::Air, Cell::Any, Cell::Air],
+    &[Cell::Iron, Cell::Iron, Cell::Iron],
+    &[Cell::Air, Cell::Iron, Cell::Air],
+];
+/// `getOrCreateCopperGolemBase`。
+const COPPER_BASE: &[&[Cell]] = &[&[Cell::Any], &[Cell::Copper]];
+
+/// `CarvedPumpkinBlock.canSpawnGolem`。
+///
+/// `CarvedPumpkinBlock.canSpawnGolem`.
+pub(crate) fn can_spawn_golem(world: &World, pos: BlockPos) -> bool {
+    find(world, SNOW_BASE, pos).is_some()
+        || find(world, IRON_BASE, pos).is_some()
+        || find(world, COPPER_BASE, pos).is_some()
+}
 
 /// `BlockPattern.translateAndRotate`，图案只有一层厚，`forwards` 方向不用走。
 fn translate(
@@ -161,6 +187,20 @@ fn try_spawn_golem(world: &mut World, top: BlockPos) {
     if let Some(cells) = find(world, COPPER_GOLEM, top) {
         take_pattern_blocks(world, &cells);
         replace_copper_block_with_chest(world, &cells);
+        // 官方生成铜傀儡后 `CopperGolem.spawn` 会报一声，位置是傀儡脚底往上 0.05 格。
+        let (pumpkin_pos, _) = cells[0];
+        world.play_sound(
+            Vec3::new(
+                f64::from(pumpkin_pos.x) + 0.5,
+                f64::from(pumpkin_pos.y) + 0.05,
+                f64::from(pumpkin_pos.z) + 0.5,
+            ),
+            sound_event("minecraft:entity.copper_golem.spawn"),
+            sounds::NEUTRAL,
+            1.0,
+            1.0,
+            false,
+        );
     }
 }
 
@@ -199,6 +239,14 @@ mod tests {
         use_item(level, &actor, top_hit(TOP.below())).effects
     }
 
+    /// 傀儡取走方块的数量，不算南瓜自己的放置音效。
+    fn destroyed_count(effects: Vec<Effect>) -> usize {
+        effects
+            .iter()
+            .filter(|effect| !matches!(effect, Effect::Sound { .. }))
+            .count()
+    }
+
     #[test]
     fn a_snow_golem_takes_its_blocks() {
         let mut level = TestLevel::new();
@@ -209,7 +257,8 @@ mod tests {
         for pos in [TOP, TOP.below(), TOP.below().below()] {
             assert!(level.get(pos).is_air(), "{pos:?}");
         }
-        assert_eq!(effects.len(), 3);
+        // 另有南瓜自己的放置音效，和傀儡取方块无关。
+        assert_eq!(destroyed_count(effects), 3);
     }
 
     /// 图案里的空气也算一格，官方照样发破坏事件。
@@ -225,7 +274,7 @@ mod tests {
         for pos in [TOP, body, body.west(), body.east(), body.below()] {
             assert!(level.get(pos).is_air(), "{pos:?}");
         }
-        assert_eq!(effects.len(), 9);
+        assert_eq!(destroyed_count(effects), 9);
     }
 
     #[test]
@@ -241,7 +290,7 @@ mod tests {
         let effects = place_pumpkin(&mut level);
         assert!(level.get(TOP).is(blocks::CARVED_PUMPKIN));
         assert!(level.get(body).is(blocks::IRON_BLOCK));
-        assert!(effects.is_empty());
+        assert_eq!(destroyed_count(effects), 0);
     }
 
     #[test]
@@ -255,6 +304,35 @@ mod tests {
         // 玩家朝南，南瓜朝北对着他。
         assert_eq!(chest.get(HORIZONTAL_FACING), Direction::North);
         assert_eq!(chest.get(CHEST_TYPE), ChestType::Single);
+    }
+
+    /// 铜傀儡实体由官方在方块动作里生成，顺手报一声。
+    #[test]
+    fn a_copper_golem_announces_itself() {
+        let mut level = TestLevel::new();
+        level.set(TOP.below(), BlockState(blocks::COPPER_BLOCK));
+        let effects = place_pumpkin(&mut level);
+        let spawn = effects.iter().find(|effect| {
+            matches!(
+                effect,
+                Effect::Sound { sound, .. }
+                    if *sound == i32::from(sound_event("minecraft:entity.copper_golem.spawn"))
+            )
+        });
+        assert_eq!(
+            spawn,
+            Some(&Effect::Sound {
+                sound: i32::from(sound_event("minecraft:entity.copper_golem.spawn")),
+                source: sounds::NEUTRAL,
+                x: 0.5,
+                y: 66.05,
+                z: 0.5,
+                volume: 1.0,
+                pitch: 1.0,
+                except_initiator: false,
+                seed: None,
+            })
+        );
     }
 
     /// 新箱子旁边有朝向相同的单个铜箱子时要合成大箱子，取两半里氧化最少的一种。

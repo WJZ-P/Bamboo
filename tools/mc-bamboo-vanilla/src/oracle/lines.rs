@@ -1,5 +1,7 @@
 //! `BlockOracle.java` 写到 stdout 的行，字段的含义以它顶部的注释为准。
 
+use std::collections::BTreeMap;
+
 use mc_bamboo_core::{BlockPos, Direction, Hand};
 use serde::{Deserialize, Deserializer, de::Error};
 
@@ -47,6 +49,11 @@ pub struct Header {
     pub game_time: i64,
     pub min_y: i32,
     pub max_y: i32,
+    /// 这批题覆盖的游戏规则。空表示官方默认值。
+    ///
+    /// Game rules overridden for this batch. Empty means the official defaults.
+    #[serde(default)]
+    pub rules: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +136,23 @@ impl Cell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct Destroyed(pub i32, pub i32, pub i32, pub u32, pub bool);
 
+/// 一次 `levelEvent`：类型、坐标、数据、是否跳过发起的玩家。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct LevelPlay(pub i32, pub i32, pub i32, pub i32, pub i32, pub bool);
+
+/// 一次 `playSeededSound`：音效 ID、坐标、来源、音量、音调、是否跳过发起的玩家。
+/// 种子不比较，只影响客户端挑哪个变体。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct SoundPlay(
+    pub i32,
+    pub Double,
+    pub Double,
+    pub Double,
+    pub u8,
+    pub Float,
+    pub Float,
+    pub bool,
+);
 /// 容器里一个非空的格子：坐标、槽位、物品 ID、数量。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ContainerStack(pub i32, pub i32, pub i32, pub u32, pub String, pub i32);
@@ -242,6 +266,12 @@ pub struct Answer {
     pub result: String,
     pub changes: Vec<Cell>,
     pub destroyed: Vec<Destroyed>,
+    /// 全部 `levelEvent`，包括 2001。
+    #[serde(default)]
+    pub level_events: Vec<LevelPlay>,
+    /// 全部 `playSeededSound`。
+    #[serde(default)]
+    pub sounds: Vec<SoundPlay>,
     /// 结束时所有已建模容器的非空格子，按坐标和槽位排序。
     #[serde(default)]
     pub contents: Vec<ContainerStack>,
@@ -254,6 +284,11 @@ pub struct Answer {
     /// 物品栏里新出现的物品，只有 item 题有内容。
     #[serde(default)]
     pub gained: Vec<String>,
+    /// 官方 `level.random` 跑完这题之后的内部种子。旧的题目行没有这个字段。
+    ///
+    /// The internal seed of official `level.random` after the case. Older lines omit it.
+    #[serde(default)]
+    pub random_seed: Option<i64>,
 }
 
 /// 写成 IEEE 754 位的 `double`：十进制不保证往返，这些数在边界上差一位结果就变。
@@ -312,6 +347,9 @@ mod tests {
             "box":["bfd3333333333333","4050000000000000","bfd3333333333333",
                    "3fd3333333333333","4051000000000000","3fd3333333333333"],"others":[],"settle":3},
         "outcome":{"result":"success","changes":[[1,65,2,1]],"destroyed":[[0,1,2,3,true]],
+            "levelEvents":[[1505,1,2,3,15,false],[2001,0,1,2,3,true]],
+            "sounds":[[157,"3ff8000000000000","4050400000000000","4004000000000000",4,
+                       "3f800000","3f000000",true]],
             "contents":[[1,64,2,0,"minecraft:stone",2]],
             "ticks":[[1,2,3,"fluid","minecraft:water",5,0]],"ran":["minecraft:repeater"],
             "analogContent":true,"itemReached":true,"spawned":[],"rng":false}}"#;
@@ -340,6 +378,18 @@ mod tests {
         assert!(case.outcome.ticks[0].is_fluid());
         assert_eq!(case.outcome.ran, ["minecraft:repeater"]);
         assert_eq!(case.outcome.destroyed, [Destroyed(0, 1, 2, 3, true)]);
+        assert_eq!(
+            case.outcome.level_events,
+            [
+                LevelPlay(1505, 1, 2, 3, 15, false),
+                LevelPlay(2001, 0, 1, 2, 3, true)
+            ]
+        );
+        let sound = case.outcome.sounds[0];
+        assert_eq!((sound.0, sound.4), (157, 4));
+        assert_eq!((sound.1.0, sound.2.0, sound.3.0), (1.5, 65.0, 2.5));
+        assert_eq!((sound.5.0, sound.6.0), (1.0, 0.5));
+        assert!(sound.7);
     }
 
     #[test]

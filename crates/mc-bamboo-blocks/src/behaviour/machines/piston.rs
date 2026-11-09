@@ -2,13 +2,13 @@
 //!
 //! 活塞要信号才动：`checkIfExtend` 只发方块事件，事件在下一刻由 `runBlockEvents` 执行，
 //! 这时才真的推方块。要移动的方块换成 `moving_piston` 加一个方块实体，两刻后放回原处，
-//! 见 [`piston_entity`](super::piston_entity)。世界里没有实体和声音，推实体和播放音效的两段没写，
-//! 但音效的音调是官方从世界随机源取的，照取，后面的随机数才对得上。
+//! 见 [`piston_entity`](super::piston_entity)。世界里没有实体，推实体的那段没写。
+//! 伸出和收回的音效在 `triggerEvent` 里发出去，音调用的就是官方从世界随机源取的那一个数。
 
 mod delete_after_move;
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, PushReaction, blocks};
+use mc_bamboo_data::{Block, PushReaction, blocks, sounds::sound_event};
 
 use self::delete_after_move::DeleteAfterMove;
 use super::{
@@ -87,9 +87,15 @@ impl Behaviour for PistonBase {
                     return false;
                 }
                 world.set_block(pos, extended_state, EXTENDED_FLAGS);
-                // `playSound(PISTON_EXTEND, ..., 0.5F, random.nextFloat() * 0.25F + 0.6F)`：
-                // 音效还没做，音调用的随机数照取，和官方后面的随机数对齐。
-                world.random().next_float();
+                // `playSound(null, pos, PISTON_EXTEND, BLOCKS, 0.5, nextFloat * 0.25 + 0.6)`。
+                // 分开乘加，对齐 Java `nextFloat() * 0.25F + 0.6F`，不用融合乘加。
+                let pitch = world.random().next_float() * 0.25 + 0.6;
+                world.play_block_sound(
+                    pos,
+                    sound_event("minecraft:block.piston.extend"),
+                    0.5,
+                    pitch,
+                );
             }
             1 | 2 => {
                 world.with_block_entity::<PistonMoving, _>(
@@ -118,9 +124,14 @@ impl Behaviour for PistonBase {
                 } else {
                     world.remove_block(pos.relative(direction));
                 }
-                // `playSound(PISTON_CONTRACT, ..., 0.5F, random.nextFloat() * 0.15F + 0.6F)`：
-                // 音效还没做，音调用的随机数照取，和官方后面的随机数对齐。
-                world.random().next_float();
+                // `playSound(null, pos, PISTON_CONTRACT, BLOCKS, 0.5, nextFloat * 0.15 + 0.6)`。
+                let pitch = world.random().next_float() * 0.15 + 0.6;
+                world.play_block_sound(
+                    pos,
+                    sound_event("minecraft:block.piston.contract"),
+                    0.5,
+                    pitch,
+                );
             }
             _ => {}
         }

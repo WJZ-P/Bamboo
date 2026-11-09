@@ -4,7 +4,7 @@
 //! only when the item stacks, and wobbles; a hopper insert does not wobble.
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, tags::item_tags};
+use mc_bamboo_data::{Block, sounds::sound_event, tags::item_tags};
 
 use crate::{
     behaviour::{
@@ -23,6 +23,26 @@ use crate::{
 
 /// `DecoratedPotBlock`。
 pub(super) struct DecoratedPot;
+
+/// 放进去之后的音高：`0.7 + 0.5 * (count / maxStackSize)`。
+///
+/// Pitch after the insert: `0.7 + 0.5 * (count / maxStackSize)`.
+fn pot_insert_pitch(world: &World, pos: BlockPos) -> f32 {
+    let stack = world.slots_at(pos).into_iter().next();
+    let (count, max_stack) = match stack {
+        Some(stack) if !stack.is_empty() => {
+            let max_stack = usize::try_from(stack.item)
+                .ok()
+                .and_then(|index| mc_bamboo_data::items::ITEMS.get(index))
+                .map(|item| item.max_stack_size)
+                .filter(|size| *size > 0)
+                .unwrap_or(1);
+            (stack.count, max_stack)
+        }
+        _ => (1, 1),
+    };
+    0.7 + 0.5 * (count as f32 / max_stack as f32)
+}
 
 impl Behaviour for DecoratedPot {
     fn state_for_placement(
@@ -82,11 +102,20 @@ impl Behaviour for DecoratedPot {
         if ctx.hand_is_empty() || !pot_accepts(world, pos, ctx.item) {
             return InteractionResult::TryEmptyHandInteraction;
         }
-        // `wobble(POSITIVE)` 在 `setTheItem` 和 `setChanged` 之前。漏斗不走这个方法。
+        // `wobble(POSITIVE)` 在 `setTheItem` 之前。漏斗不走这个方法。
+        // 音高是放进去之后的 `count / maxStackSize`。`DUST_PLUME` 是 `sendParticles`，这里没有粒子包。
         //
-        // `wobble(POSITIVE)` runs before `setTheItem` and `setChanged`. Hoppers do not use this.
+        // `wobble(POSITIVE)` runs before `setTheItem`. Hoppers do not use this method.
+        // Pitch is `count / maxStackSize` after the insert. `DUST_PLUME` is `sendParticles`;
+        // there is no particle packet here.
         world.block_event(pos, state.block(), 1, 0);
         insert_pot_item(world, pos, ctx.item);
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.decorated_pot.insert"),
+            1.0,
+            pot_insert_pitch(world, pos),
+        );
         world.update_neighbour_for_output_signal(pos, state.block());
         InteractionResult::Success
     }
@@ -97,10 +126,14 @@ impl Behaviour for DecoratedPot {
         world: &mut World,
         ctx: &UseContext,
     ) -> InteractionResult {
-        // 放不进去时的 `wobble(NEGATIVE)`。官方同时播失败音，音效不在这次范围里。
-        //
-        // `wobble(NEGATIVE)` when the item does not fit. Vanilla also plays the fail sound;
-        // sounds are out of scope here.
+        // 失败音在 `wobble(NEGATIVE)` 之前。`except` 是空。
+        // The fail sound comes before `wobble(NEGATIVE)`. `except` is null.
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.decorated_pot.insert_fail"),
+            1.0,
+            1.0,
+        );
         world.block_event(ctx.clicked_pos(), state.block(), 1, 1);
         InteractionResult::Success
     }

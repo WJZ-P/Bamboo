@@ -1,7 +1,7 @@
 //! 方块交互的网络一侧：够距、点击点、序列号和确认、高度提示、把当前的方块发回去。
 //!
 //! 方块的逻辑都在 `mc_bamboo_blocks` 里，这里只把玩家的动作交给它，再把结果发给客户端。
-//! M2 只有创造模式：破坏一步完成，放置不扣物品。
+//! 创造模式破坏一步完成，也不扣物品数量。生存模式按挖掘进度破坏，工具会掉耐久。
 //! 客户端在本地预测这些操作，结果靠 `block_update` 和 `block_changed_ack` 收敛到服务端。
 
 pub(crate) mod adventure;
@@ -13,16 +13,15 @@ pub(crate) use mining::tick_mining;
 
 use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_blocks::{
-    Actor, BlockHit, BlockState, DEFAULT_RANDOM_TICK_SPEED, Effect, InteractionResult,
-};
+use mc_bamboo_blocks::{Actor, BlockHit, BlockState, Effect, InteractionResult};
+use mc_bamboo_command::permission;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
-use mc_bamboo_data::{BlockAncestor, items, registries::attribute_defaults};
+use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
         BlockChangedAck, BlockEvent, BlockUpdate, GameMode, LevelEvent, OpenSignEditor,
-        PlayerActionKind, SystemChat,
+        PlayerActionKind, Sound, SystemChat,
     },
     text::{Color, Component},
 };
@@ -30,7 +29,7 @@ use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
 use tracing::debug;
 
 use crate::{
-    block_items, book, container, entity_sync,
+    block_items, book, container, durability, entity_sync,
     global::GameTime,
     inbound::PlayerId,
     inventory, lectern,
@@ -142,9 +141,12 @@ pub(crate) fn run_entity_ticks(region: &mut Region) {
 /// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
 pub(crate) fn run_random_ticks(region: &mut Region) {
     for chunk in random_ticking_chunks(region) {
+        let speed = region.block_rules.random_tick_speed;
         let (mut level, ticks) = region.block_level();
-        let outcome =
-            mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, DEFAULT_RANDOM_TICK_SPEED);
+        // `ServerChunkCache.tickChunks` 把 `GameRules.RANDOM_TICK_SPEED` 传给 `tickChunk`。
+        //
+        // `ServerChunkCache.tickChunks` passes `GameRules.RANDOM_TICK_SPEED` to `tickChunk`.
+        let outcome = mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, speed);
         send_effects(region, None, &outcome.effects);
     }
 }
@@ -222,6 +224,14 @@ fn actor_of(player: &Player) -> Actor {
         may_build: !matches!(player.game_mode, GameMode::Adventure | GameMode::Spectator),
         // `Player.preventsBlockDrops()` 看的是 `instabuild`，只有创造模式有。
         prevents_block_drops: matches!(player.game_mode, GameMode::Creative),
+        // `ServerPlayer.canUseGameMasterBlocks`：`instabuild` 并且至少是游戏管理员。
+        // 旁观模式的 `instant_build` 是假，所以旁观的 OP 也不能用调试棒和命令方块。
+        //
+        // `ServerPlayer.canUseGameMasterBlocks`: `instabuild` and at least gamemaster.
+        // Spectator `instant_build` is false, so a spectator op cannot use the debug stick
+        // or command blocks either.
+        can_use_game_master_blocks: matches!(player.game_mode, GameMode::Creative)
+            && player.permission_level >= permission::GAMEMASTERS,
     }
 }
 
@@ -377,8 +387,73 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     region.links.send(id, &OpenSignEditor { pos, slot });
                 }
             }
-            // 音符盒的声音和粒子归“方块声音”那边，这里只消费掉事件。
-            Effect::NoteBlockPlayed { .. } => {}
+            Effect::Sound {
+                sound,
+                source,
+                x,
+                y,
+                z,
+                volume,
+                pitch,
+                except_initiator,
+                seed,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let packet = Sound {
+                    sound,
+                    inline: None,
+                    source,
+                    x,
+                    y,
+                    z,
+                    volume,
+                    pitch,
+                    seed: seed.unwrap_or_else(|| region.sound_seed_generator.source().next_long()),
+                };
+                send_sound(region, except, &packet);
+            }
+            Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator,
+            } => {
+                let except = initiator.filter(|_| except_initiator);
+                let packet = LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    global: false,
+                };
+                send_level_event(region, except, pos, &packet);
+            }
+            // 音符盒的声音在方块事件里算好了，这里换成音效包。粒子仍靠方块事件。
+            Effect::NoteBlockPlayed {
+                pos,
+                instrument,
+                pitch,
+                seed,
+                custom,
+                ..
+            } => {
+                let inline = custom.map(mc_bamboo_blocks::custom_sound_name);
+                let packet = Sound {
+                    sound: if inline.is_some() {
+                        0
+                    } else {
+                        i32::from(instrument.sound())
+                    },
+                    inline,
+                    source: sounds::RECORDS,
+                    x: f64::from(pos.x) + 0.5,
+                    y: f64::from(pos.y) + 0.5,
+                    z: f64::from(pos.z) + 0.5,
+                    volume: 3.0,
+                    pitch,
+                    seed,
+                };
+                send_sound(region, None, &packet);
+            }
             // `levelEvent(1500)`：客户端播堆肥的粒子和声音。升级了数据是 1，没升级是 0。
             Effect::ComposterFill { pos, success } => {
                 let event = LevelEvent {
@@ -399,6 +474,49 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     global: false,
                 };
                 send_level_event(region, None, pos, &event);
+            }
+            // 穿上的格子已经写进物品栏。本人收 `container_set_slot`，附近的人靠之后的装备同步。
+            //
+            // The slot is already written. This player gets `container_set_slot`. Nearby viewers
+            // see it on the later equipment sync.
+            Effect::DispenserEquipped {
+                entity_id,
+                menu_slot,
+            } => {
+                let players = &mut region.players;
+                let links = &mut region.links;
+                if let Some(player) = players.get_mut(&PlayerId(entity_id)) {
+                    inventory::send_slot(player, links, usize::from(menu_slot));
+                }
+            }
+            Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
+            // `ServerPlayer.sendOverlayMessage`。只发给发起动作的那名玩家。
+            //
+            // `ServerPlayer.sendOverlayMessage`. Only the player who started the action.
+            Effect::Overlay { key, first, second } => {
+                let Some(id) = initiator else {
+                    continue;
+                };
+                let mut args = Vec::new();
+                if let Some(first) = first {
+                    args.push(first.into());
+                }
+                if let Some(second) = second {
+                    args.push(second.into());
+                }
+                let content = Component::translate(key, args);
+                region.links.send(
+                    id,
+                    &SystemChat {
+                        content: &content,
+                        overlay: true,
+                    },
+                );
+            }
+            Effect::OpenCommandBlock { pos } => {
+                if let Some(id) = initiator {
+                    crate::command_block::open(region, id, pos);
+                }
             }
         }
     }
@@ -443,6 +561,40 @@ fn send_level_event(
             .count(),
         "player grid is out of sync with player positions"
     );
+}
+
+/// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
+/// 内联的音效是 `createVariableRangeEvent`，没有固定范围。
+fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
+    let range = if sound.inline.is_some() {
+        if sound.volume > 1.0 {
+            16.0 * sound.volume
+        } else {
+            16.0
+        }
+    } else {
+        SOUND_EVENTS[sound.sound as usize]
+            .fixed_range
+            .unwrap_or(if sound.volume > 1.0 {
+                16.0 * sound.volume
+            } else {
+                16.0
+            })
+    };
+    let range = f64::from(range);
+    let frames = encode_frames(sound);
+    for player in region.players.values() {
+        if Some(player.id) == except {
+            continue;
+        }
+        let Vec3 { x, y, z } = player.position();
+        let dx = sound.x - x;
+        let dy = sound.y - y;
+        let dz = sound.z - z;
+        if dx * dx + dy * dy + dz * dz < range * range {
+            region.links.send_frames(player.id, &frames);
+        }
+    }
 }
 
 pub(crate) fn hears_level_event(player: &Player, pos: BlockPos) -> bool {
@@ -544,17 +696,19 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
     let is_placement_attempt = rules::is_placement_attempt(&held);
     let armed_book = lectern::arm_book(region, id, packet.pos, packet.hand);
 
-    let (mut level, ticks) = region.block_level();
-    let hit = block_hit(packet);
-    let outcome = mc_bamboo_blocks::use_item_on_checked_with_stack(
-        &mut level,
-        ticks,
-        &actor,
-        packet.hand,
-        &hit,
-        Some(&held),
-        |state| actor.may_build || adventure::can_place_on(&held, state),
-    );
+    let outcome = durability::run(region, id, packet.hand, |region| {
+        let (mut level, ticks) = region.block_level();
+        let hit = block_hit(packet);
+        mc_bamboo_blocks::use_item_on_checked_with_stack(
+            &mut level,
+            ticks,
+            &actor,
+            packet.hand,
+            &hit,
+            Some(&held),
+            |state| actor.may_build || adventure::can_place_on(&held, state),
+        )
+    });
 
     // `BlockItem.place` 里的 `updateBlockEntityComponents`：放下去的物品把组件留给方块实体。
     if let Some(placed) = outcome.placed_at {
@@ -565,12 +719,24 @@ fn use_held_item(region: &mut Region, id: PlayerId, packet: &UseItemOn) {
         if let Some(stack) = stack {
             block_items::apply(region, placed, id, &stack);
         }
+        // `CommandBlock.setPlacedBy`。`/setblock` 不走这里。
+        //
+        // `CommandBlock.setPlacedBy`. `/setblock` does not come through here.
+        crate::command_block::on_placed(region, placed);
     }
     send_effects(region, Some(id), &outcome.effects);
     // 炼药锅的 `createFilledResult` 和洗染料。方块逻辑只记账，物品栏在这里改。
     // A cauldron's `createFilledResult` or dye wash. Block behaviour records it; the inventory changes here.
     if let Some(exchange) = &outcome.item_exchange {
         inventory::apply_item_exchange(region, id, packet.hand, exchange);
+    }
+    // 雕纹书架取出的书。整本进背包，生存模式放不下的按 `Player.drop` 丢在地上，
+    // 创造模式放不下的那一份官方直接清掉。
+    //
+    // A book taken from a chiseled bookshelf. The whole stack goes into the inventory;
+    // survival drops what does not fit and creative discards it as vanilla does.
+    if let Some(gained) = outcome.gained.clone() {
+        inventory::give_or_drop(region, id, gained);
     }
     // 官方在 `useWithoutItem` 里直接调 `player.openMenu`，菜单包先于挥手。
     if outcome.used_without_item && !menu::open_block(region, id, packet.pos) {
@@ -689,6 +855,7 @@ pub(crate) fn on_use_item(
         if let Some(stack) = stack {
             block_items::apply(region, placed, id, &stack);
         }
+        crate::command_block::on_placed(region, placed);
     }
     send_effects(region, Some(id), &outcome.effects);
     let mut result = outcome.result;

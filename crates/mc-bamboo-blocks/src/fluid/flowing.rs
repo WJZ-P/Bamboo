@@ -145,7 +145,7 @@ fn new_liquid(world: &World, kind: Fluid, pos: BlockPos, state: BlockState) -> F
         }
     }
 
-    if sources >= 2 && kind.can_convert_to_source() {
+    if sources >= 2 && kind.can_convert_to_source(world) {
         let below = world.block_state(pos.below());
         if below.is_solid() || is_source_of(kind, below.fluid()) {
             return kind.source_state();
@@ -197,13 +197,18 @@ fn spread_to(
         if state.is_a(BlockAncestor::LiquidBlock) {
             world.set_block_and_update(pos, BlockState(blocks::STONE));
         }
+        // `LavaFluid.fizz`。
+        world.level_event(1501, pos, 0);
         return;
     }
     if state.is_a(BlockAncestor::LiquidBlockContainer) {
         state.place_liquid(world, pos, target);
         return;
     }
-    // `beforeDestroyingBlock`：水让方块掉落，岩浆发出嘶嘶声，这个世界都没有。
+    // `beforeDestroyingBlock`：水让方块掉落成物品，这里没有实体；岩浆冲掉方块时嘶一声。
+    if !state.is_air() && kind == Fluid::Lava {
+        world.level_event(1501, pos, 0);
+    }
     world.set_block_and_update(pos, target.legacy_block());
 }
 

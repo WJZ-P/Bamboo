@@ -69,7 +69,7 @@ fn block_of(item: &Item) -> &'static mc_bamboo_data::Block {
 /// `BlockItem.useOn`。
 fn block_item_use_on(world: &mut World, item: &Item, ctx: UseContext) -> InteractionResult {
     let place_ctx = PlaceContext::new(ctx, world);
-    let result = place(world, item, place_ctx);
+    let result = place(world, item, place_ctx, true);
     if result.consumes_action() {
         return result;
     }
@@ -80,8 +80,39 @@ fn block_item_use_on(world: &mut World, item: &Item, ctx: UseContext) -> Interac
     result
 }
 
+/// `ShulkerBoxDispenseBehavior` 用的 `BlockItem.place`。玩家是 null，放置音效不跳过任何人。
+/// 数量由调用方在成功之后减，和 `itemStack.consume(1, null)` 一样。
+///
+/// `BlockItem.place` for `ShulkerBoxDispenseBehavior`. The player is null, so the place sound
+/// skips nobody. The caller shrinks the stack after success, matching `consume(1, null)`.
+pub(crate) fn place_from_dispenser(
+    world: &mut World,
+    item_id: i32,
+    pos: BlockPos,
+    clicked_face: Direction,
+) -> bool {
+    let Some(item) = item_of(item_id) else {
+        return false;
+    };
+    if item.block.is_none() {
+        return false;
+    }
+    let ctx = PlaceContext::directional(world, pos, clicked_face);
+    place(world, item, ctx, false).consumes_action()
+}
+
 /// `BlockItem.place`。
-fn place(world: &mut World, item: &Item, ctx: PlaceContext) -> InteractionResult {
+///
+/// `except_initiator` 为真时跳过动手的玩家。发射器的上下文没有玩家，传假。
+///
+/// When `except_initiator` is set, the player who placed the block is skipped. A dispenser has
+/// no player, so it passes false.
+fn place(
+    world: &mut World,
+    item: &Item,
+    ctx: PlaceContext,
+    except_initiator: bool,
+) -> InteractionResult {
     if !ctx.can_place(world) {
         return InteractionResult::Fail;
     }
@@ -107,6 +138,18 @@ fn place(world: &mut World, item: &Item, ctx: PlaceContext) -> InteractionResult
             world.update_neighbour_for_output_signal(pos, placed.block());
         }
         placed.set_placed_by(world, pos, ctx.actor);
+    }
+    // `BlockItem.place`：音量和音高跟着 `setPlacedBy` 之前读到的 `placedState`。
+    let sound_type = placed.sound_type();
+    let sound = item.place_sound.map_or(sound_type.place_sound, |id| {
+        u16::try_from(id).expect("音效事件的注册表 ID 在 u16 范围内")
+    });
+    let volume = (sound_type.volume + 1.0) / 2.0;
+    let pitch = sound_type.pitch * 0.8;
+    if except_initiator {
+        world.play_block_sound_except(pos, sound, volume, pitch);
+    } else {
+        world.play_block_sound(pos, sound, volume, pitch);
     }
     InteractionResult::Success
 }
@@ -178,8 +221,10 @@ fn placement_state(world: &mut World, item: &Item, ctx: &PlaceContext) -> Option
         | ItemKind::Banner
         | ItemKind::HangingSign
         | ItemKind::PlayerHead => standing_or_wall_state(world, item, ctx),
-        // Bamboo 没有权限系统，官方的 `canUseGameMasterBlocks` 一律是假。
-        ItemKind::GameMaster => None,
+        // `GameMasterBlockItem.getPlacementState`：没有 `canUseGameMasterBlocks` 时返回 null。
+        //
+        // `GameMasterBlockItem.getPlacementState` returns null without `canUseGameMasterBlocks`.
+        ItemKind::GameMaster if !ctx.actor.can_use_game_master_blocks => None,
         _ => {
             let block = block_of(item);
             behaviour_of(block.class).before_placement(block, ctx, world);

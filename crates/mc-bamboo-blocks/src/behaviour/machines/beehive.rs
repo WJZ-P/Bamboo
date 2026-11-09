@@ -4,7 +4,10 @@
 //! 掉落的部分没有东西要做。采蜜后不管有没有烟，蜜都清零，有烟只是不放蜜蜂。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::{Block, items};
+use mc_bamboo_data::{
+    Block, items,
+    sounds::{self, sound_event},
+};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -40,18 +43,40 @@ impl Behaviour for Beehive {
     ) -> InteractionResult {
         let harvests = ctx.item == items::SHEARS || ctx.item == items::GLASS_BOTTLE;
         if state.get(LEVEL_HONEY) >= MAX_HONEY_LEVELS && harvests {
-            // `HARVEST_BEEHIVE` 是常量 3 个蜜脾，`popResource` 在改方块之前。玻璃瓶不掉蜜脾。
-            // `HARVEST_BEEHIVE` is a constant 3 honeycomb. `popResource` runs before the block changes.
-            // A glass bottle does not drop honeycomb.
+            let pos = ctx.clicked_pos();
+            // 剪刀先 `dropHoneycomb`。战利品表是常量 3 个蜜脾，走自己的 `random_sequence`，
+            // 不碰 `level.random`；`Block.popResource` 为该堆取三次位置偏移，然后生成物品实体。
+            // 接着放剪刀声、扣耐久，再 `releaseBeesAndResetHoneyLevel`（这里只把蜜清零）。
+            // 玻璃瓶不掉蜜脾，先把瓶子的消耗和蜜瓶交给游戏层，再放装瓶声，同样清零。
+            //
+            // Shears call `dropHoneycomb` first. The constant three honeycomb use their own
+            // `random_sequence`, not `level.random`; `Block.popResource` draws three position
+            // offsets and spawns the item. Then the shear sound, `hurtAndBreak(1)`, and
+            // `releaseBeesAndResetHoneyLevel` (which here only clears the honey). A glass bottle
+            // drops no honeycomb: record the bottle exchange, then play the fill sound and clear.
             if ctx.item == items::SHEARS {
-                world.pop_resource(ctx.clicked_pos(), ItemStack::new(items::HONEYCOMB, 3));
+                world.pop_resource(pos, ItemStack::new(items::HONEYCOMB, 3));
+                world.play_sound(
+                    ctx.actor.position,
+                    sound_event("minecraft:block.beehive.shear"),
+                    sounds::BLOCKS,
+                    1.0,
+                    1.0,
+                    false,
+                );
+                crate::durability::hurt_hand(world, ctx.hand, 1);
             } else {
-                // 玻璃瓶先 `shrink(1)`，创造模式也减。交还蜜瓶在改方块之前记下。
-                // A glass bottle `shrink(1)`s even in creative. The honey bottle is recorded
-                // before the block changes.
                 world.set_item_exchange(ItemExchange::BottleHoney);
+                world.play_sound(
+                    ctx.actor.position,
+                    sound_event("minecraft:item.bottle.fill"),
+                    sounds::BLOCKS,
+                    1.0,
+                    1.0,
+                    true,
+                );
             }
-            world.set_block_and_update(ctx.clicked_pos(), state.with(LEVEL_HONEY, 0));
+            world.set_block_and_update(pos, state.with(LEVEL_HONEY, 0));
             return InteractionResult::Success;
         }
         Plain.use_item_on(state, world, ctx)

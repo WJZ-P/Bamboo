@@ -3,7 +3,7 @@
 //! Shears carve a pumpkin and drop 4 seeds from `CARVE_PUMPKIN`.
 
 use mc_bamboo_core::{Axis, Vec3};
-use mc_bamboo_data::{blocks, items};
+use mc_bamboo_data::{blocks, items, sounds::sound_event};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -35,10 +35,13 @@ impl Behaviour for Pumpkin {
         };
         let carved = BlockState(blocks::CARVED_PUMPKIN).with(HORIZONTAL_FACING, facing);
         // 表是常量 4，不取序列随机数。构造物品时实体随机速度随后被 `level.random` 的两个 double 盖掉。
-        // The table is a constant 4 and draws no sequence. The entity's random velocity is then
-        // replaced by two `level.random` doubles.
-        let (step_x, _, step_z) = facing.normal();
+        // 雕刻声在写方块之前，剪刀耐久在写方块之后。
+        //
+        // The table is a constant 4 and draws no sequence. The entity's random velocity is
+        // then replaced by two `level.random` doubles. The carve sound comes before the block
+        // write, and the shears spend durability after it.
         let pos = ctx.clicked_pos();
+        let (step_x, _, step_z) = facing.normal();
         let id = world.spawn_at_location(
             Vec3::new(
                 f64::from(pos.x) + 0.5 + f64::from(step_x) * 0.65,
@@ -54,7 +57,9 @@ impl Behaviour for Pumpkin {
         {
             entity.delta = Vec3::new(delta_x, 0.05, delta_z);
         }
+        world.play_block_sound(pos, sound_event("minecraft:block.pumpkin.carve"), 1.0, 1.0);
         world.set_block(pos, carved, UPDATE_ALL_IMMEDIATE);
+        crate::durability::hurt_hand(world, ctx.hand, 1);
         InteractionResult::Success
     }
 }

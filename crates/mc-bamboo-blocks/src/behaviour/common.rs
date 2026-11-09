@@ -83,6 +83,11 @@ pub fn field_int(block: &Block, name: &str) -> i32 {
     }
 }
 
+/// 官方类的音效事件字段，值是 `sound_event` 注册表 ID，比如 `field_sound(block, "type.doorOpen")`。
+pub fn field_sound(block: &Block, name: &str) -> u16 {
+    u16::try_from(field_int(block, name)).expect("音效事件的注册表 ID 放进 u16")
+}
+
 /// 官方类的方块标签字段，比如 `field_tag(block, "supportBlocks")`。
 pub fn field_tag(block: &Block, name: &str) -> BlockTag {
     match field(block, name) {

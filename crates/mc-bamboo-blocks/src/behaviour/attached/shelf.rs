@@ -1,9 +1,15 @@
 //! `ShelfBlock`，连同只有它实现的接口 `SideChainPartBlock`：通了红石的架子左右连成一排。
 //!
-//! 架子上的物品不做，所以这里的架子总是空的。
+//! 三格物品在关卡的容器表里，漏斗和投掷器当普通 `Container` 用。玩家右键按官方对换，
+//! 快捷栏只认手上那一格，其余按空的算。
+//!
+//! The three item slots live in the level's container table. Hoppers and droppers treat the
+//! shelf as a plain `Container`. A player's click follows vanilla's swap, with only the held
+//! slot modelled and the rest of the hotbar treated as empty.
 
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{Block, tags::block_tags};
+use mc_bamboo_data::{Block, sounds::sound_event, tags::block_tags};
+use mc_bamboo_protocol::item::ItemStack;
 
 use super::slot_container::hit_slot;
 use crate::{
@@ -14,6 +20,7 @@ use crate::{
             update_neighbours_after_destroy,
         },
     },
+    container::stack_limit,
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
     state::{BlockState, HORIZONTAL_FACING, POWERED, SIDE_CHAIN_PART, SideChainPart, WATERLOGGED},
@@ -240,28 +247,131 @@ fn update_self_and_neighbors_on_powering_up(
     set_part(world, pos, part);
 }
 
-/// 没通红石时换一件物品：架子是空的，拿不到东西，手上有东西才算放了上去。
-fn swap_single_item(state: BlockState, world: &mut World, ctx: &UseContext) -> InteractionResult {
-    world.update_neighbour_for_output_signal(ctx.clicked_pos(), state.block());
+/// 手上的物品堆。没传堆时按这件物品一个来算。
+///
+/// The stack in the hand. Without a stack, that is one of the held item.
+fn held_stack(ctx: &UseContext) -> ItemStack {
+    if let Some(stack) = ctx.stack {
+        return if stack.is_empty() {
+            ItemStack::empty()
+        } else {
+            stack.clone()
+        };
+    }
     if ctx.hand_is_empty() {
-        InteractionResult::Pass
+        ItemStack::empty()
     } else {
-        InteractionResult::SuccessServer
+        ItemStack::new(ctx.item, 1)
     }
 }
 
-/// `swapHotbar` 的结果：这一排架子和快捷栏的最后几格对换。
+fn limit_held(stack: ItemStack) -> ItemStack {
+    if stack.is_empty() {
+        return ItemStack::empty();
+    }
+    let mut stack = stack;
+    let limit = stack_limit(&stack);
+    if stack.count > limit {
+        stack.count = limit;
+    }
+    stack
+}
+
+/// 快捷栏近似：第 0 格是手上的物品，其余是空的。换下来的物品不写回玩家。
 ///
-/// [`Actor`](crate::Actor) 只知道手上的物品，这里按手上的物品在快捷栏第一格算，别的格子是空的。
-/// 官方的玩家手上的物品在别的格子时，差别只有挥不挥手。
+/// Hotbar approximation: slot 0 is the held stack and the rest are empty. Removed items are
+/// not written back onto the player.
+fn hotbar_stack(held: &ItemStack, inventory_slot: i32) -> Option<ItemStack> {
+    if !(0..HOTBAR_SLOTS as i32).contains(&inventory_slot) {
+        return None;
+    }
+    Some(if inventory_slot == 0 {
+        held.clone()
+    } else {
+        ItemStack::empty()
+    })
+}
+
+fn notify_shelf(world: &mut World, pos: BlockPos) {
+    crate::machine_container::mark_container_changed(world, pos);
+}
+
+/// 没通红石时换点中的那一格。两格都空才是 `PASS`，否则 `SUCCESS_SERVER`。总是 `setChanged`。
+///
+/// Swaps the clicked slot while unpowered. Both empty is `PASS`; otherwise `SUCCESS_SERVER`.
+/// `setChanged` always runs.
+fn swap_single_item(world: &mut World, ctx: &UseContext, slot: usize) -> InteractionResult {
+    let held = held_stack(ctx);
+    let mut removed = ItemStack::empty();
+    let wrote = world.with_slots(ctx.clicked_pos(), COLUMNS, &mut |slots| {
+        removed = slots.get(slot).cloned().unwrap_or_else(ItemStack::empty);
+        if let Some(stored) = slots.get_mut(slot) {
+            *stored = limit_held(held.clone());
+        }
+    });
+    if !wrote {
+        return InteractionResult::Pass;
+    }
+    notify_shelf(world, ctx.clicked_pos());
+    if removed.is_empty() && held.is_empty() {
+        return InteractionResult::Pass;
+    }
+    // 拿出东西是 `take_item` 或 `single_swap`，空架子放上东西是 `place_item`。
+    //
+    // Taking an item is `take_item` or `single_swap`. Placing onto an empty slot is `place_item`.
+    let sound = if removed.is_empty() {
+        "minecraft:block.shelf.place_item"
+    } else if held.is_empty() {
+        "minecraft:block.shelf.take_item"
+    } else {
+        "minecraft:block.shelf.single_swap"
+    };
+    world.play_block_sound(ctx.clicked_pos(), sound_event(sound), 1.0, 1.0);
+    InteractionResult::SuccessServer
+}
+
+/// `swapHotbar`：这一排架子和快捷栏对换。没换到东西是 `CONSUME`，换到了是 `SUCCESS_SERVER`。
+///
+/// 每个架子写完就 `setChanged`。快捷栏只建模第 0 格。
+///
+/// `swapHotbar`: swap this row of shelves with the hotbar. Nothing moved is `CONSUME`;
+/// something moved is `SUCCESS_SERVER`.
+///
+/// Each shelf calls `setChanged` as soon as it is written. Only hotbar slot 0 is modelled.
 fn swap_hotbar(world: &mut World, ctx: &UseContext) -> InteractionResult {
     let chain = all_blocks_connected_to(world, ctx.clicked_pos());
-    for &part in &chain {
-        let block = world.block_state(part).block();
-        world.update_neighbour_for_output_signal(part, block);
+    if chain.is_empty() {
+        return InteractionResult::Consume;
     }
-    let reaches_first_slot = chain.len() * COLUMNS >= HOTBAR_SLOTS;
-    if reaches_first_slot && !ctx.hand_is_empty() {
+    let held = held_stack(ctx);
+    let len = chain.len() as i32;
+    let mut any_swapped = false;
+    for (index, part) in chain.iter().copied().enumerate() {
+        let wrote = world.with_slots(part, COLUMNS, &mut |slots| {
+            for (slot, stored) in slots.iter_mut().enumerate() {
+                let inventory_slot =
+                    HOTBAR_SLOTS as i32 - (len - index as i32) * COLUMNS as i32 + slot as i32;
+                let Some(placed) = hotbar_stack(&held, inventory_slot) else {
+                    continue;
+                };
+                let removed = stored.clone();
+                *stored = limit_held(placed.clone());
+                if !placed.is_empty() || !removed.is_empty() {
+                    any_swapped = true;
+                }
+            }
+        });
+        if wrote {
+            notify_shelf(world, part);
+        }
+    }
+    if any_swapped {
+        world.play_block_sound(
+            ctx.clicked_pos(),
+            sound_event("minecraft:block.shelf.multi_swap"),
+            1.0,
+            1.0,
+        );
         InteractionResult::SuccessServer
     } else {
         InteractionResult::Consume
@@ -328,6 +438,30 @@ impl Behaviour for Shelf {
             updated = updated.with(SIDE_CHAIN_PART, SideChainPart::Unconnected);
         }
         world.set_block_and_update(pos, updated);
+        let sound = if signal {
+            "minecraft:block.shelf.activate"
+        } else {
+            "minecraft:block.shelf.deactivate"
+        };
+        world.play_block_sound(pos, sound_event(sound), 1.0, 1.0);
+    }
+
+    /// `ShelfBlock.getAnalogOutputSignal`：只从背面读，三格占用各占一位。
+    ///
+    /// `ShelfBlock.getAnalogOutputSignal` reads only the back. Each occupied slot is one bit.
+    fn analog_output_signal(
+        &self,
+        state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        direction: Direction,
+    ) -> i32 {
+        if direction != state.get(HORIZONTAL_FACING).opposite() {
+            return 0;
+        }
+        let slots = world.slots_at(pos);
+        let bit = |index: usize| u8::from(slots.get(index).is_some_and(|stack| !stack.is_empty()));
+        i32::from(bit(0) | bit(1) << 1 | bit(2) << 2)
     }
 
     fn use_item_on(
@@ -337,13 +471,147 @@ impl Behaviour for Shelf {
         ctx: &UseContext,
     ) -> InteractionResult {
         let facing = state.get(HORIZONTAL_FACING);
-        if ctx.hand == Hand::Off || hit_slot(&ctx.hit, facing, ROWS, COLUMNS).is_none() {
+        let Some(slot) = hit_slot(&ctx.hit, facing, ROWS, COLUMNS) else {
+            return InteractionResult::Pass;
+        };
+        if ctx.hand == Hand::Off {
             return InteractionResult::Pass;
         }
         if state.get(POWERED) {
             swap_hotbar(world, ctx)
         } else {
-            swap_single_item(state, world, ctx)
+            swap_single_item(world, ctx, slot)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
+    use mc_bamboo_data::{blocks, items};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use super::*;
+    use crate::{
+        BlockState, BlockTicks,
+        behaviour::Behaviour,
+        context::{BlockHit, UseContext},
+        state::{HORIZONTAL_FACING, POWERED, SIDE_CHAIN_PART, SideChainPart},
+        testing::{TestLevel, actor_holding},
+        world::World,
+    };
+
+    const POS: BlockPos = BlockPos::new(0, 64, 0);
+
+    fn south_hit(pos: BlockPos) -> BlockHit {
+        BlockHit {
+            pos,
+            face: Direction::South,
+            location: Vec3::new(pos.x as f64 + 0.1, pos.y as f64 + 0.5, pos.z as f64 + 1.0),
+            inside: false,
+        }
+    }
+
+    fn shelf(facing: Direction, powered: bool) -> BlockState {
+        BlockState(blocks::OAK_SHELF)
+            .with(HORIZONTAL_FACING, facing)
+            .with(POWERED, powered)
+    }
+
+    fn click(world: &mut World, state: BlockState, pos: BlockPos, item: i32) -> InteractionResult {
+        let actor = actor_holding(item);
+        let ctx = UseContext::new(&actor, Hand::Main, south_hit(pos));
+        Shelf.use_item_on(state, world, &ctx)
+    }
+
+    #[test]
+    fn an_empty_hand_clears_one_shelf_slot() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let state = shelf(Direction::South, false);
+        level.set(POS, state);
+        let mut world = World::new(&mut level, &mut ticks);
+        world.with_slots(POS, COLUMNS, &mut |slots| {
+            slots[0] = ItemStack::new(items::DIRT, 1);
+        });
+
+        assert_eq!(
+            click(&mut world, state, POS, items::AIR),
+            InteractionResult::SuccessServer
+        );
+        assert!(world.slots_at(POS)[0].is_empty());
+    }
+
+    #[test]
+    fn an_empty_click_on_an_empty_shelf_passes_and_placing_schedules_the_comparator() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let state = shelf(Direction::South, false);
+        let comparator = POS.north();
+        level.set(POS, state);
+        // 比较器要立在完整方块上，否则 `neighborChanged` 会把它拆掉，排不上刻。
+        //
+        // A comparator has to stand on a full block, or `neighborChanged` breaks it
+        // before it can schedule.
+        level.set(comparator.below(), BlockState(blocks::STONE));
+        level.set(
+            comparator,
+            BlockState(blocks::COMPARATOR).with(HORIZONTAL_FACING, Direction::South),
+        );
+        let mut world = World::new(&mut level, &mut ticks);
+        let comparator_block = BlockState(blocks::COMPARATOR).block();
+
+        assert_eq!(
+            click(&mut world, state, POS, items::AIR),
+            InteractionResult::Pass
+        );
+        assert_eq!(
+            click(&mut world, state, POS, items::DIRT),
+            InteractionResult::SuccessServer
+        );
+        assert_eq!(world.slots_at(POS)[0], ItemStack::new(items::DIRT, 1));
+        assert!(world.has_scheduled_tick(comparator, comparator_block));
+        assert_eq!(state.analog_output_signal(&world, POS, Direction::North), 1);
+        assert_eq!(state.analog_output_signal(&world, POS, Direction::South), 0);
+    }
+
+    #[test]
+    fn a_powered_shelf_swaps_with_the_last_hotbar_slots() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let state = shelf(Direction::South, true);
+        level.set(POS, state);
+        let mut world = World::new(&mut level, &mut ticks);
+        world.with_slots(POS, COLUMNS, &mut |slots| {
+            slots[0] = ItemStack::new(items::DIRT, 1);
+        });
+
+        assert_eq!(
+            click(&mut world, state, POS, items::AIR),
+            InteractionResult::SuccessServer
+        );
+        assert!(world.slots_at(POS).iter().all(ItemStack::is_empty));
+    }
+
+    #[test]
+    fn a_powered_row_puts_the_held_item_on_the_leftmost_shelf() {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let center = POS;
+        let west = center.west();
+        let east = center.east();
+        let part = |end: SideChainPart| shelf(Direction::South, true).with(SIDE_CHAIN_PART, end);
+        level.set(west, part(SideChainPart::Left));
+        level.set(center, part(SideChainPart::Center));
+        level.set(east, part(SideChainPart::Right));
+        let mut world = World::new(&mut level, &mut ticks);
+
+        assert_eq!(
+            click(&mut world, part(SideChainPart::Center), center, items::DIRT),
+            InteractionResult::SuccessServer
+        );
+        assert_eq!(world.slots_at(west)[0], ItemStack::new(items::DIRT, 1));
+        assert!(world.slots_at(center).iter().all(ItemStack::is_empty));
+        assert!(world.slots_at(east).iter().all(ItemStack::is_empty));
     }
 }

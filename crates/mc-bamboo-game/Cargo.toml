@@ -12,10 +12,18 @@ categories = ["games"]
 [dependencies]
 mc-bamboo-blocks.workspace = true
 mc-bamboo-loot.workspace = true
+mc-bamboo-command.workspace = true
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
+mc-bamboo-recipes.workspace = true
 mc-bamboo-world.workspace = true
+rsa.workspace = true
+sha1 = { workspace = true, features = ["oid"] }
+sha2 = { workspace = true, features = ["oid"] }
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true

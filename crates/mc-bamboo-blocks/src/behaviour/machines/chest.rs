@@ -46,7 +46,7 @@ const COPPER_TO_CHEST: [(u32, u32); 8] = [
 pub(super) struct Chest;
 
 /// `getConnectedDirection`：另一半在哪个方向。单个的箱子也有结果，官方靠它判定邻居变化。
-fn connected_direction(state: BlockState) -> Direction {
+pub(crate) fn connected_direction(state: BlockState) -> Direction {
     let facing = state.get(HORIZONTAL_FACING);
     if state.get(CHEST_TYPE) == ChestType::Left {
         facing.clockwise()

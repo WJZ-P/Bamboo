@@ -3,7 +3,7 @@
 //! 放一个物品加几层由物品的 `compostable` 组件决定，抽签用世界的随机数，和官方逐位相同。
 
 use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::CompostLayers;
+use mc_bamboo_data::{CompostLayers, sounds::sound_event};
 
 use crate::{
     behaviour::{Behaviour, common::item_of},
@@ -111,8 +111,11 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) != READY {
             return InteractionResult::Pass;
         }
-        // `extractProduce`：`offsetRandomXZ` 两个 `nextFloat`，再生成骨粉，然后把层数清零。
-        // `extractProduce`: two `nextFloat`s, then a bone meal item, then the level is cleared.
+        // `extractProduce`：`Vec3.offsetRandomXZ` 两个 `nextFloat` 算出骨粉落点，
+        // 生成物品实体后把层数清零，最后 `empty` 的音效（传给 `except` 的是 null）。
+        //
+        // `extractProduce`: two `nextFloat`s pick the bone meal drop point, an item entity is
+        // spawned, the level is cleared, and the `empty` sound follows with a null `except`.
         let pos = ctx.clicked_pos();
         let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
         let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
@@ -125,12 +128,24 @@ impl Behaviour for Composter {
             mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::BONE_MEAL, 1),
         );
         world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
+        world.play_block_sound(
+            pos,
+            sound_event("minecraft:block.composter.empty"),
+            1.0,
+            1.0,
+        );
         InteractionResult::Success
     }
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.get(LEVEL_COMPOSTER) == MAX_LEVEL {
             world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, READY));
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:block.composter.ready"),
+                1.0,
+                1.0,
+            );
         }
     }
 

@@ -58,8 +58,6 @@ const EXPLOSION_MERGE_LIMIT: i32 = 16;
 const HALF_ITEM_HEIGHT: f64 = 0.125;
 /// `Containers.dropItemStack` 里三个 `triangle` 的展开宽度，官方的字面量。
 const DROP_SPREAD: f64 = 0.11485000171139836;
-/// `DefaultDispenseItemBehavior.spawnItem` 的精度系数。
-const DISPENSE_SPREAD: f64 = 0.0172275;
 /// 火和灵魂火的伤害。`FireBlock` 是 1，`SoulFireBlock` 是 2。
 const FIRE_DAMAGE: f32 = 1.0;
 const SOUL_FIRE_DAMAGE: f32 = 2.0;
@@ -1093,12 +1091,27 @@ impl World<'_> {
         }
     }
 
-    /// `DefaultDispenseItemBehavior.spawnItem`。
-    pub fn spawn_dispensed_item(&mut self, stack: ItemStack, direction: Direction, position: Vec3) {
+    /// `DefaultDispenseItemBehavior.spawnItem`，速度随机数由调用方提前取好。
+    ///
+    /// 官方先算好落点，再取一个 `nextDouble` 和三个 `triangle` 的六个 double，
+    /// 然后才 `addFreshEntity`。分两步是为了让"只取数不生成实体"的注册行为
+    /// 保持原来的取数顺序，物品实体仍按这个速度生成。
+    ///
+    /// `DefaultDispenseItemBehavior.spawnItem` with velocity draws already taken by the caller.
+    ///
+    /// Vanilla computes the spawn point, draws one `nextDouble` and the six doubles of three
+    /// `triangle`s, and only then calls `addFreshEntity`. Splitting the draws from the spawn
+    /// keeps the official order for behaviours that draw them without creating an entity.
+    pub fn spawn_dispensed_item_with_velocity(
+        &mut self,
+        stack: ItemStack,
+        direction: Direction,
+        position: Vec3,
+        velocity: Vec3,
+    ) {
         if stack.is_empty() {
             return;
         }
-        let (step_x, _, step_z) = direction.normal();
         let mut spawn = position;
         spawn.y -= if direction.axis() == Axis::Y {
             0.125
@@ -1106,15 +1119,8 @@ impl World<'_> {
             0.15625
         };
         let id = self.spawn_dropped_item(spawn, stack, true, 0);
-        let pow = self.random().next_double() * 0.1 + 0.2;
-        let spread = DISPENSE_SPREAD * 6.0;
-        let delta = Vec3::new(
-            self.random().triangle(f64::from(step_x) * pow, spread),
-            self.random().triangle(0.2, spread),
-            self.random().triangle(f64::from(step_z) * pow, spread),
-        );
         if let Some(entity) = self.entity_mut(id) {
-            entity.delta = delta;
+            entity.delta = velocity;
         }
     }
 

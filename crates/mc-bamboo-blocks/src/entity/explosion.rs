@@ -36,8 +36,15 @@ impl World<'_> {
     ///
     /// `center` 是爆炸中心，`radius` 是爆炸强度。不伤生物，也不给经验。
     ///
+    /// 官方把 `entity.generic.explode` 和爆炸粒子放进 `ClientboundExplodePacket`，不是 `playSound`。
+    /// 协议里还没有这个包，所以这里不另发一条声音，避免和 `playSeededSound` 对不上。
+    ///
     /// `center` is the explosion centre and `radius` is its power. Mobs are not hurt and no
     /// experience is dropped.
+    ///
+    /// Vanilla puts `entity.generic.explode` and the explosion particles on
+    /// `ClientboundExplodePacket`, not `playSound`. That packet is not in the protocol yet,
+    /// so this does not emit a sound that would disagree with `playSeededSound`.
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32) {
         let mut broken = self.calculate_exploded_positions(center, radius);
         // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。

@@ -16,7 +16,7 @@ use std::{
 };
 
 use mc_bamboo_core::{BlockPos, Vec3};
-use mc_bamboo_data::{BlockClass, items, registries, tags::block_tags};
+use mc_bamboo_data::{BlockClass, items, registries, sounds::sound_event, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -36,6 +36,15 @@ pub trait BlockEntity: Any + Send {
 
     /// 每刻运行一次。要删掉自己时调用 [`World::remove_block_entity`]，和官方一样。
     fn tick(&mut self, world: &mut World);
+
+    /// 这次 `tick` 通知比较器之后还会改物品时返回真。
+    /// 驱动把实体放回表、跑完排队的读取，再调用一次 `tick`。
+    ///
+    /// Returns true when this tick notifies a comparator and then still changes items.
+    /// The driver puts the entity back, runs the queued reads, and calls `tick` again.
+    fn resume_tick(&self) -> bool {
+        false
+    }
 
     /// `preRemoveSideEffects`：这一格换成别的方块之前的副作用。
     ///
@@ -119,11 +128,22 @@ impl BlockEntities {
     }
 
     /// `getBlockEntity(pos)` 之后按类型取，类型不对时是 `None`。
+    ///
+    /// 正在 tick 或被 [`World::with_block_entity`](crate::World::with_block_entity) 拿出来的那一个
+    /// 不在表里，这里返回 `None`。比较器要读它时先排进队列，放回去再读。
+    ///
+    /// `getBlockEntity(pos)`, then downcast. The wrong type is `None`.
+    ///
+    /// An entity that is ticking, or held by [`World::with_block_entity`](crate::World::with_block_entity),
+    /// is not in the map, so this returns `None`. Comparator reads are queued and run after it is put back.
     pub fn get<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
     }
 
     /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。
+    ///
+    /// See [`BlockEntities::get`], but mutable. Returns `None` while that entity is ticking,
+    /// because it is not in the map.
     pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
         self.entities
             .get_mut(&pos)?
@@ -132,15 +152,25 @@ impl BlockEntities {
             .downcast_mut()
     }
 
-    /// 这一格有没有方块实体。
+    /// 这一格有没有方块实体。被拿出去、还没被删掉的那一个也算。
+    ///
+    /// Whether this cell has a block entity. One that was taken out and has not been removed counts.
     pub fn contains(&self, pos: BlockPos) -> bool {
-        self.entities.contains_key(&pos)
+        self.entities.contains_key(&pos) || self.taken.contains_key(&pos)
+    }
+
+    /// 这一格的方块实体是不是正被 tick 或 [`World::with_block_entity`](crate::World::with_block_entity) 拿在外面。
+    ///
+    /// Whether this cell's block entity is out of the map for a tick or
+    /// [`World::with_block_entity`](crate::World::with_block_entity).
+    pub fn is_taken(&self, pos: BlockPos) -> bool {
+        self.taken.contains_key(&pos)
     }
 
     /// `removeBlockEntity(pos)` 加上 `setRemoved`。ticker 槽位在下一次 tick 开头回收。
     ///
     /// 实体正在 tick 时（已经从表里拿出来）调用它表示把自己删掉：返回值是 `None`，
-    /// 放回去的时候会扔掉。
+    /// 放回去的时候会扔掉。删掉之后 [`BlockEntities::contains`] 也不再算这一格。
     pub fn remove(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
         if let Some(stored) = self.entities.remove(&pos) {
             return Some(stored.entity);
@@ -173,6 +203,15 @@ impl BlockEntities {
             return;
         }
         self.entities.insert(pos, Stored { id, entity });
+    }
+
+    /// 表里每个还在的方块实体。正在 tick、被拿出来的那一个不在这里。
+    ///
+    /// Every block entity still in the map. The one taken out for its tick is not included.
+    pub fn visit(&self, mut visit: impl FnMut(BlockPos, &dyn BlockEntity)) {
+        for (&pos, stored) in &self.entities {
+            visit(pos, stored.entity.as_ref());
+        }
     }
 
     /// `Level.tickBlockEntities` 的开头：并进上一刻新登记的，回收已经删掉的槽位。
@@ -288,6 +327,31 @@ const SLOT_OCCUPIED: [Property<bool>; 6] = [
     SLOT_5_OCCUPIED,
 ];
 
+/// `Containers.dropItemStack`：生成真的物品实体，取数次数和 `dropContents` 一样。
+///
+/// 熔炉燃料余料和酿造台余料的取数走这里，方块实体拆除走 [`drop_slots`]，两套一致。
+///
+/// `Containers.dropItemStack` spawns the item entities. The draws match `dropContents`.
+/// Fuel and brewing remainders share this sequence with [`drop_slots`].
+pub(crate) fn drop_item_stack(world: &mut World, pos: BlockPos, stack: &ItemStack) {
+    let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+    world.drop_container_stack(x, y, z, stack.clone());
+}
+
+/// 熔炉系列和酿造台的内容在方块实体上，不在区域的容器表里。
+///
+/// 有实体时由实体的 `preRemoveSideEffects` 掉落；没有实体时仍走按数量的那条。
+///
+/// Furnace-family and brewing contents live on the block entity, not in the region
+/// container table. An entity drops them itself; without one, the stack-based drop runs.
+pub(crate) fn drops_own_contents(state: BlockState) -> bool {
+    use registries::block_entity_type as E;
+    matches!(
+        state.block().block_entity_type,
+        Some(E::FURNACE | E::SMOKER | E::BLAST_FURNACE | E::BREWING_STAND | E::CAMPFIRE)
+    )
+}
+
 /// `Containers.dropContents`：从第 0 格到 `size - 1`，空格也调用 `dropItemStack`。
 ///
 /// `Containers.dropContents`: every slot from 0 to `size - 1` calls `dropItemStack`, including empty ones.
@@ -384,6 +448,24 @@ pub(crate) fn pre_remove_side_effects(
         // itself lives in the game layer, so this arm neither drops it nor draws.
         E::LECTERN => {}
         // 潜影盒把 `preRemoveSideEffects` 覆盖成空的。
+        _ => {}
+    }
+}
+
+/// `BlockEntity.setRemoved`：这个位置在 `preRemoveSideEffects` 之后，不管跳过副作用与否都会走到。
+pub(crate) fn removed_side_effects(state: BlockState, world: &mut World, pos: BlockPos) {
+    match state.block().block_entity_type {
+        // `BeaconBlockEntity.setRemoved`。
+        Some(registries::block_entity_type::BEACON) => {
+            world.play_block_sound(
+                pos,
+                sound_event("minecraft:block.beacon.deactivate"),
+                1.0,
+                1.0,
+            );
+        }
+        // `JukeboxBlockEntity.setRemoved`：没在放歌也报 1011。
+        Some(registries::block_entity_type::JUKEBOX) => world.level_event(1011, pos, 0),
         _ => {}
     }
 }

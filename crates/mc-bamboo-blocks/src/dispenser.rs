@@ -3,14 +3,14 @@
 //! 方块被信号触发后隔 4 刻排一个计划刻，到期时从 9 个槽里随机挑一个物品：
 //! 朝着的方向有容器就塞一个进去，没有就按 `DefaultDispenseItemBehavior.spawnItem` 生成物品实体。
 //!
-//! 发射器（`DispenserBlock`）用的注册表行为（箭、水、盔甲等）不在范围里，见
-//! `Dispenser` 方块的 tick，不调用这里。
+//! 发射器（`DispenserBlock`）走 [`crate::dispense`]，按官方 `DispenseItemBehavior` 执行；
+//! 那条路也用 [`spawn_item_random`] 取速度随机数，再生成物品实体。
 //!
 //! A triggered dropper waits four ticks, then picks a random occupied slot. A container
 //! in front receives one item. Air receives an item entity from `spawnItem`.
-//! Dispenser registry behaviours stay out of scope and do not call this module.
+//! A dispenser uses the registry behaviours in [`crate::dispense`].
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -25,7 +25,7 @@ use crate::{
 ///
 /// 每个非空的槽都抽一次 `nextInt(replaceOdds++)`，抽到 0 就把结果换成这一格，
 /// 越靠后的槽越容易被选中。`occupied` 是 9 个槽是不是非空。
-fn random_slot(world: &World, occupied: &[bool]) -> i32 {
+pub(crate) fn random_slot(world: &World, occupied: &[bool]) -> i32 {
     let mut replace_slot = -1;
     let mut replace_odds = 1;
     for (slot, &non_empty) in occupied.iter().enumerate() {
@@ -41,8 +41,31 @@ fn random_slot(world: &World, occupied: &[bool]) -> i32 {
     replace_slot
 }
 
+/// `DefaultDispenseItemBehavior.spawnItem` 的速度随机数。`accuracy` 是 6。
+///
+/// 一个 `nextDouble` 算 `pow`。X、Z 的均值是朝向步长乘 `pow`，Y 的均值是 0.2。
+/// 每个 `triangle` 再取两个 `nextDouble`。发射器的注册行为只取这几个数，
+/// 生成物品实体时直接套用这个速度，不能重复取数。
+///
+/// The velocity draws from `DefaultDispenseItemBehavior.spawnItem`. `accuracy` is 6.
+///
+/// One `nextDouble` computes `pow`. The X and Z means are the facing step times `pow`, and the
+/// Y mean is 0.2. Each `triangle` draws two more `nextDouble`s. A dispenser behaviour takes
+/// these draws once; the item entity is created with the returned velocity.
+pub(crate) fn spawn_item_random(world: &mut World, facing: Direction) -> Vec3 {
+    let random = world.random();
+    let speed = random.next_double() * 0.1 + 0.2;
+    let spread = 0.017_227_5 * 6.0;
+    let (step_x, _, step_z) = facing.normal();
+    Vec3::new(
+        random.triangle(f64::from(step_x) * speed, spread),
+        random.triangle(0.2, spread),
+        random.triangle(f64::from(step_z) * speed, spread),
+    )
+}
+
 /// 从 `stack` 里拿走一个。官方 `split(1)` 之后剩下的那一堆。
-fn without_one(stack: &ItemStack) -> ItemStack {
+pub(crate) fn without_one(stack: &ItemStack) -> ItemStack {
     if stack.count <= 1 {
         ItemStack::empty()
     } else {
@@ -51,7 +74,7 @@ fn without_one(stack: &ItemStack) -> ItemStack {
 }
 
 /// `BaseContainerBlockEntity.setItem` 里的 `limitSize(getMaxStackSize(itemStack))`。
-fn limited(stack: ItemStack) -> ItemStack {
+pub(crate) fn limited(stack: ItemStack) -> ItemStack {
     let mut stack = stack;
     if !stack.is_empty() {
         stack.count = stack.count.min(stack_limit(&stack));
@@ -59,8 +82,27 @@ fn limited(stack: ItemStack) -> ItemStack {
     stack
 }
 
-/// `DropperBlock.dispenseFrom`。
-pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
+/// `DispenserBlock.dispenseFrom` 在槽位是 `-1` 时的那一下。
+///
+/// 计划刻走 [`crate::dispense::dispense_from`]，空槽的 1001 已经包含在里面。
+/// 这个函数留着 main 上的那一截：有物品时不发射，空槽发 1001。
+///
+/// The `-1` slot half of `DispenserBlock.dispenseFrom`.
+///
+/// The scheduled tick uses [`crate::dispense::dispense_from`], which already plays 1001
+/// for an empty slot. This is the function main added: items present do nothing, an empty
+/// slot plays 1001.
+pub fn click_if_empty(world: &mut World, pos: BlockPos) {
+    let Some(occupied) = occupied_slots(world, pos) else {
+        return;
+    };
+    if random_slot(world, &occupied) < 0 {
+        world.level_event(1001, pos, 0);
+    }
+}
+
+/// 九个槽是不是非空。没有方块实体时是 `None`。
+pub(crate) fn occupied_slots(world: &mut World, pos: BlockPos) -> Option<Vec<bool>> {
     let mut occupied = None;
     if !world.with_container(pos, &mut |container| {
         occupied = Some(
@@ -69,16 +111,22 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
                 .collect::<Vec<_>>(),
         );
     }) {
-        // 官方找不到方块实体时只打一条警告。
-        return;
+        return None;
     }
-    let Some(occupied) = occupied else {
+    occupied
+}
+
+/// `DropperBlock.dispenseFrom`。
+pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
+    // 官方找不到方块实体时只打一条警告。
+    let Some(occupied) = occupied_slots(world, pos) else {
         return;
     };
 
     let slot = random_slot(world, &occupied);
     if slot < 0 {
-        // `levelEvent(1001)`：客户端的空发射器音效，服务端状态不变。
+        // `levelEvent(1001)`：空的投掷器，客户端自己放音效。
+        world.level_event(1001, pos, 0);
         return;
     }
 
@@ -118,14 +166,22 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
         }
     } else {
         // `DispenserBlock.getDispensePosition`：方块中心沿朝向出去 0.7 格。
-        // `DispenserBlock.getDispensePosition`: 0.7 blocks out from the block centre.
+        // `DefaultDispenseItemBehavior.dispense`：先 `execute`（随机数），再 1000，再 2000。
         let (step_x, step_y, step_z) = direction.normal();
         let position = Vec3::new(
             f64::from(pos.x) + 0.5 + 0.7 * f64::from(step_x),
             f64::from(pos.y) + 0.5 + 0.7 * f64::from(step_y),
             f64::from(pos.z) + 0.5 + 0.7 * f64::from(step_z),
         );
-        world.spawn_dispensed_item(copy_with_count(&item, 1), direction, position);
+        let velocity = spawn_item_random(world, direction);
+        world.spawn_dispensed_item_with_velocity(
+            copy_with_count(&item, 1),
+            direction,
+            position,
+            velocity,
+        );
+        world.level_event(1000, pos, 0);
+        world.level_event(2000, pos, direction.id());
         without_one(&item)
     };
 

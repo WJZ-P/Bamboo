@@ -37,12 +37,14 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 - 只有 Bamboo 解码的包才可能因为内容畸形断开。帧层错误（`FrameError`）仍然断开。
 - `set_creative_mode_slot` 不能调用 `finish()`（`blocks-inventory.md` 2.5）。
 
-### 1.1 必须处理（21 个）
+### 1.1 必须处理（23 个）
 
 | ID | 包 | 客户端什么时候发 | 不处理的后果 | 规格 |
 |---|---|---|---|---|
 | 0 | `accept_teleportation` | `ClientPacketListener.handleMovePlayer`，每次 `player_position` 后立刻发 | M2 只有进服一次传送，暂时不影响。不解码时至少不能当错误 | `chunks-movement.md` 2.5、5.2 |
 | 7 | `chat_command` | `ClientPacketListener.sendCommand` | 玩家什么也看不到 | `chat-join.md` 第 4 节、7.4 |
+| 8 | `chat_command_signed` | `say`、`me`、`msg` 的 `minecraft:message` | 验参数签名，通过后发 `player_chat`。不解码就断线 | `chat-join.md` 第 4 节 |
+| 15 | `command_suggestion` | 字面量和在线玩家名的 `ask_server` | 不回时补全一直转，下次请求会取消上一次 | `chat-join.md` 第 7 节 |
 | 9 | `chat` | `ClientPacketListener.sendChat` | 所有人都看不到消息 | `chat-join.md` 第 4 节 |
 | 11 | `chunk_batch_received` | `handleChunkBatchFinished`，每批一个 | 只发第一批 9 个就停 | `chunks-movement.md` 7.3 |
 | 14 | `client_information` | Configuration 一次，之后 `Options.save` 触发 | 皮肤外层和主手错，视距不生效 | `entities.md` 第 10 节，`chat-join.md` 第 4 节 |
@@ -93,19 +95,17 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 44 | `player_loaded` | `ClientPacketListener.notifyPlayerLoaded` | 官方只结束 60 tick 门限，没有回包，见 `chunks-movement.md` 2.6 |
 | 51 | `seen_advancements` | 关进度界面，`AdvancementsScreen.removed` | 官方只处理 `OPENED_TAB`。没有 `update_advancements` 时选中页是 null，`OPENED_TAB` 不会发 |
 
-### 1.4 M2 里不会发（37 个）
+### 1.4 M2 里不会发（35 个）
 
-全部归入 `Other`，收到也丢弃。权限判断依据：Bamboo 不发 `entity_event` 24..28，客户端的权限一直是 `NO_PERMISSIONS`。
+权限来自启动目录的 `ops.json`：在名单里的玩家进服时收到对应的 `entity_event` 24..28，不在名单里的是 24。下面这张表是「没有权限时客户端为什么不发」。有了权限之后，`change_game_mode`、`set_game_rule` 和 `set_command_block` 会进来，已经单独处理；其余仍然归入 `Other` 并丢弃，原因写在表后面。
 
 | ID | 包 | 为什么不会发 |
 |---|---|---|
 | 2 | `block_entity_tag_query` | F3+I 查询要 `COMMANDS_GAMEMASTER`（`KeyboardHandler.copyRecreateCommand`） |
 | 4 | `change_difficulty` | `WorldOptionsScreen` 的按钮没有权限时 `active = false` |
 | 5 | `change_game_mode` | F3+N、F3+F4 要 `GameModeCommand.PERMISSION_CHECK` |
-| 6 | `chat_ack` | 只有签名消息才累计 offset（`chat-join.md` 第 4 节） |
-| 8 | `chat_command_signed` | 命令树里没有 `minecraft:message` |
-| 10 | `chat_session_update` | 只有 `online_mode=true` 才准备密钥 |
-| 15 | `command_suggestion` | 命令树里没有 `ask_server`。以后加了不回也只是没有补全：`ClientSuggestionProvider.customSuggestion` 的 future 不完成，下次请求时取消 |
+| 6 | `chat_ack` | 签名消息累计 offset 之后会发；现在按官方前移已读窗口 |
+| 10 | `chat_session_update` | 正版验证且客户端准备了密钥时会发；现在校验并广播 `INITIALIZE_CHAT` |
 | 16 | `configuration_acknowledged` | 只回应 `start_configuration` |
 | 17 | `container_button_click` | 附魔台、讲台、织布机、切石机界面，都要服务端打开 |
 | 18 | `container_click` | `AbstractContainerScreen.slotClicked` 才发，创造模式界面覆盖了它 |
@@ -137,7 +137,19 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 | 65 | `test_instance_block_action` | 同 `jigsaw_generate` |
 | 68 | `custom_click_action` | 只来自 `custom` 点击事件和对话框，Bamboo 不发 |
 
-以后给玩家 OP 权限（`entity_event` 26 以上）时，这张表要重看。第一个受影响的是 `set_game_rule` 和 `client_command` 的 `action=2`：`InWorldGameRulesScreen` 会一直转圈等 `game_rule_values`。
+有权限（`entity_event` 26 以上，游戏管理员是 26）之后，客户端会发的包：
+
+| 包 | 现在 |
+|---|---|
+| `client_command` 的 `action=2`（`REQUEST_GAMERULE_VALUES`） | 等级至少 2 时回 `game_rule_values`，只含当前特性集启用的规则。不够等级只记日志 |
+| `set_game_rule`（58） | 等级至少 2 时照 `ServerGamePacketListenerImpl.handleSetGameRule` 写入并给每个 OP 发普通系统消息。未知规则记日志，反序列化失败忽略 |
+| `change_game_mode`（5） | 等级至少 2 时走 `GameModeCommand.setGameMode`。不够等级只记日志 |
+| `set_command_block`（55） | 等级至少 2 且创造模式的 `instabuild`（`canUseGameMasterBlocks`）时能改模式、命令和条件。命令不执行 |
+| `block_entity_tag_query`（2）、`entity_tag_query`（25） | F3+I 会发。还没有方块实体和实体的 NBT 查询回包 |
+| `change_difficulty`（4）、`lock_difficulty`（29） | 按钮会亮。难度仍是固定值，这两个包丢弃 |
+| `jigsaw_generate`（27）、`set_jigsaw_block`（59）、`set_structure_block`（60）、`set_test_block`（61）、`test_instance_block_action`（65） | 管理员在创造模式可以放下这些方块，没有对应的方块实体，编辑包丢弃 |
+| `set_command_minecart`（56） | 没有命令方块矿车 |
+| `spectator_action`（63）、`teleport_to_entity`（64） | F3+F4 能切到旁观，但旁观点选和传送还没做，包丢弃 |
 
 ---
 
@@ -163,7 +175,7 @@ ID 全部来自 `packets.json` 的 `play.serverbound`，共 69 个，`tablecheck
 
 | 位置 | 等什么 | 结论 |
 |---|---|---|
-| `InWorldGameRulesScreen` | `game_rule_values` | 会一直转圈，但入口按钮没有权限时禁用 |
+| `InWorldGameRulesScreen` | `game_rule_values` | 等级至少 2 时回包，界面能停下。没有权限时入口按钮禁用，服务端收到请求也只记日志 |
 | `ClientSuggestionProvider` | `command_suggestions` | 只是没有补全 |
 | `DebugQueryHandler` | `tag_query` | 回调不触发，没有权限时根本不发 |
 | `DialogScreen` 的 `WAIT_FOR_RESPONSE` | 服务端动作 | 只有服务端发对话框才有 |

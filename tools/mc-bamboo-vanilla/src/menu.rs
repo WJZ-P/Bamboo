@@ -38,7 +38,7 @@ const DEFAULT_SHOW: usize = 5;
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Line {
     Header(Header),
-    Case(Case),
+    Case(Box<Case>),
     End(End),
 }
 
@@ -63,6 +63,8 @@ struct Case {
     may_build: bool,
     container: Vec<[i32; 2]>,
     inventory: Vec<[i32; 2]>,
+    #[serde(default)]
+    data: Vec<i32>,
     open: Outcome,
     steps: Vec<Step>,
     /// 这道题的客户端会按官方预测回传哈希。
@@ -88,6 +90,11 @@ struct Step {
     slot: i16,
     button: i8,
     input: u8,
+    /// 切石机的 `container_button_click`。别的题不写。
+    ///
+    /// Stonecutter `container_button_click`. Other cases omit it.
+    #[serde(default, rename = "menuButton")]
+    menu_button: bool,
     /// 讲台的 `container_button_click`。箱子题不写，默认 0。
     ///
     /// Lectern `container_button_click`. Chest cases omit it and it defaults to 0.
@@ -106,12 +113,15 @@ struct Step {
     carried_resent: bool,
 }
 
-/// 菜单在某一刻的样子。槽位和光标都是 `[物品 ID, 数量]`，空槽是 `[0, 0]`。
+/// 菜单在某一刻的样子。槽位和光标是 `[物品 ID, 数量, 组件补丁的十六进制]`，空槽是 `[0, 0, ""]`。
+/// `data` 是进度条。箱子没有，缺省是空的。
 #[derive(Debug, Deserialize)]
 struct Outcome {
     state: i32,
-    carried: [i32; 2],
-    slots: Vec<[i32; 2]>,
+    carried: (i32, i32, String),
+    slots: Vec<(i32, i32, String)>,
+    #[serde(default)]
+    data: Vec<i32>,
     /// 讲台的当前页。箱子题不写。
     ///
     /// Lectern page. Chest cases omit it.
@@ -240,25 +250,57 @@ impl Report {
         let shape = shape_of(&case.shape)
             .ok_or_else(|| format!("case {}: unknown menu shape {:?}", case.id, case.shape))?;
         self.cases += 1;
-        let mut replay = Replay::new(shape, &pairs(&case.container), &pairs(&case.inventory));
-        replay.set_creative(case.creative);
-        if case.predict {
+        let mut replay = if shape.is_workstation() {
+            let mut replay = Replay::workstation(
+                shape,
+                &pairs(&case.container),
+                &pairs(&case.inventory),
+                &case.data,
+                case.creative,
+            );
+            // 材料先按物品和数量放进去，再盖上组件。下标是格子序号，合成格要加一。
+            // Ingredients land as item and count first, then the component patch. The index is the
+            // grid slot; crafting and the inventory grid sit one slot later.
             for patch in &case.patches {
                 let Some(&[item, count]) = case.container.get(patch.index) else {
                     return Err(format!(
-                        "case {}: patch slot {} is outside the container",
+                        "case {}: patch slot {} is outside the grid",
                         case.id, patch.index
                     ));
                 };
-                replay.set_container(patch.index, stack_with_patch(item, count, &patch.bytes)?);
+                let slot = work_slot(shape, patch.index).ok_or_else(|| {
+                    format!(
+                        "case {}: shape {} has no grid slot {}",
+                        case.id, case.shape, patch.index
+                    )
+                })?;
+                replay.reseed(slot, stack_with_patch(item, count, &patch.bytes)?);
             }
-        }
+            replay
+        } else {
+            let mut replay = Replay::new(shape, &pairs(&case.container), &pairs(&case.inventory));
+            replay.set_creative(case.creative);
+            if case.predict {
+                for patch in &case.patches {
+                    let Some(&[item, count]) = case.container.get(patch.index) else {
+                        return Err(format!(
+                            "case {}: patch slot {} is outside the container",
+                            case.id, patch.index
+                        ));
+                    };
+                    replay.set_container(patch.index, stack_with_patch(item, count, &patch.bytes)?);
+                }
+            }
+            replay
+        };
         let snapshot = replay.open();
         self.compare(&format!("case {} open", case.id), &snapshot, &case.open);
 
         for (index, step) in case.steps.iter().enumerate() {
             let input = ContainerInput::from_id(i32::from(step.input));
-            let snapshot = if case.predict {
+            let snapshot = if step.menu_button {
+                replay.button(step.button)
+            } else if case.predict {
                 let (snapshot, resent, carried_resent) =
                     replay.click_predicting(step.slot, step.button, input);
                 if resent != step.resent || carried_resent != step.carried_resent {
@@ -310,11 +352,17 @@ impl Report {
                 official.state, ours.state_id
             ));
         }
-        if [ours.carried.item, ours.carried.count] != official.carried {
+        if triple(&ours.carried) != official.carried {
             self.mismatch(format!(
                 "{place}: carried: official {:?}, bamboo {}",
                 official.carried,
                 describe(&ours.carried)
+            ));
+        }
+        if ours.data != official.data {
+            self.mismatch(format!(
+                "{place}: data: official {:?}, bamboo {:?}",
+                official.data, ours.data
             ));
         }
         if ours.slots.len() != official.slots.len() {
@@ -326,11 +374,11 @@ impl Report {
             return;
         }
         self.slots += ours.slots.len();
-        for (index, (ours, official_slot)) in ours.slots.iter().zip(&official.slots).enumerate() {
-            if [ours.item, ours.count] != *official_slot {
+        for (index, (ours, official)) in ours.slots.iter().zip(&official.slots).enumerate() {
+            if triple(ours) != *official {
                 self.mismatch(format!(
                     "{place}: slot {index}: official {:?}, bamboo {}",
-                    official_slot,
+                    official,
                     describe(ours)
                 ));
             }
@@ -351,7 +399,9 @@ impl Report {
                 official.page, ours.page
             ));
         }
-        if [ours.carried.item, ours.carried.count] != official.carried {
+        // 讲台重放只放物品和数量。页文本在 `page` 里比，不比组件补丁。
+        // The lectern replay stores the item and count. Page text is the `page` field, not the patch.
+        if id_count(&triple(&ours.carried)) != id_count(&official.carried) {
             self.mismatch(format!(
                 "{place}: carried: official {:?}, bamboo {}",
                 official.carried,
@@ -368,7 +418,7 @@ impl Report {
         }
         self.slots += ours.slots.len();
         for (index, (ours, official_slot)) in ours.slots.iter().zip(&official.slots).enumerate() {
-            if [ours.item, ours.count] != *official_slot {
+            if id_count(&triple(ours)) != id_count(official_slot) {
                 self.mismatch(format!(
                     "{place}: slot {index}: official {:?}, bamboo {}",
                     official_slot,
@@ -409,6 +459,16 @@ fn shape_of(name: &str) -> Option<ReplayShape> {
         "hopper" => Some(ReplayShape::Hopper),
         "dispenser" => Some(ReplayShape::Dispenser),
         "shulker" => Some(ReplayShape::ShulkerBox),
+        "inventory" => Some(ReplayShape::Inventory),
+        "crafting" => Some(ReplayShape::Crafting),
+        "stonecutter" => Some(ReplayShape::Stonecutter),
+        "smithing" => Some(ReplayShape::Smithing),
+        "furnace" => Some(ReplayShape::Furnace),
+        "blast_furnace" => Some(ReplayShape::BlastFurnace),
+        "smoker" => Some(ReplayShape::Smoker),
+        "brewing" => Some(ReplayShape::Brewing),
+        "loom" => Some(ReplayShape::Loom),
+        "grindstone" => Some(ReplayShape::Grindstone),
         _ => None,
     }
 }
@@ -439,17 +499,53 @@ fn unhex(text: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+/// 合成格和工作台材料放进菜单时的槽位。和 `ReplayShape::seed_slot` 一样。
+///
+/// Where a grid index lands in the menu. Matches `ReplayShape::seed_slot`.
+fn work_slot(shape: ReplayShape, index: usize) -> Option<usize> {
+    match shape {
+        ReplayShape::Inventory | ReplayShape::Crafting => Some(index + 1),
+        ReplayShape::Stonecutter
+        | ReplayShape::Smithing
+        | ReplayShape::Furnace
+        | ReplayShape::BlastFurnace
+        | ReplayShape::Smoker
+        | ReplayShape::Brewing
+        | ReplayShape::Loom
+        | ReplayShape::Grindstone => Some(index),
+        _ => None,
+    }
+}
+
 fn pairs(entries: &[[i32; 2]]) -> Vec<(i32, i32)> {
     entries.iter().map(|&[item, count]| (item, count)).collect()
 }
 
-/// 出错时打印成 `(物品, 数量)`，空槽写成 `empty`。
+/// 出错时打印成 `(物品, 数量, 补丁)`，空槽写成 `empty`。
+fn id_count(triple: &(i32, i32, String)) -> [i32; 2] {
+    [triple.0, triple.1]
+}
+
 fn describe(stack: &ItemStack) -> String {
-    if stack.is_empty() {
+    let (item, count, patch) = triple(stack);
+    if item == 0 {
         "empty".to_owned()
+    } else if patch.is_empty() {
+        format!("({item}, {count})")
     } else {
-        format!("({}, {})", stack.item, stack.count)
+        format!("({item}, {count}, {patch})")
     }
+}
+
+/// 官方写出的 `[物品, 数量, 补丁十六进制]`。空物品没有补丁。
+fn triple(stack: &ItemStack) -> (i32, i32, String) {
+    if stack.is_empty() {
+        return (0, 0, String::new());
+    }
+    let mut bytes = Vec::new();
+    stack.patch().write(&mut bytes);
+    let patch = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    (stack.item, stack.count, patch)
 }
 
 #[cfg(test)]
@@ -473,9 +569,19 @@ mod tests {
             ("hopper", ReplayShape::Hopper),
             ("dispenser", ReplayShape::Dispenser),
             ("shulker", ReplayShape::ShulkerBox),
+            ("inventory", ReplayShape::Inventory),
+            ("crafting", ReplayShape::Crafting),
+            ("stonecutter", ReplayShape::Stonecutter),
+            ("smithing", ReplayShape::Smithing),
+            ("furnace", ReplayShape::Furnace),
+            ("blast_furnace", ReplayShape::BlastFurnace),
+            ("smoker", ReplayShape::Smoker),
+            ("brewing", ReplayShape::Brewing),
+            ("loom", ReplayShape::Loom),
+            ("grindstone", ReplayShape::Grindstone),
         ] {
             assert_eq!(shape_of(name), Some(shape));
         }
-        assert_eq!(shape_of("furnace"), None);
+        assert_eq!(shape_of("anvil"), None);
     }
 }

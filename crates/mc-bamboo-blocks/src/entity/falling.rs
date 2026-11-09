@@ -6,7 +6,7 @@
 //! These entities do not call `baseTick`. When the block cannot be placed back, or it
 //! falls out of the world, `dropItem` spawns the block's item via `spawnAtLocation`.
 
-use mc_bamboo_core::{BlockPos, Direction, mth};
+use mc_bamboo_core::{BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -75,7 +75,14 @@ impl Entity {
             self.delta = self.delta.multiply(0.7, -0.5, 0.7);
             if !current_state.is(blocks::MOVING_PISTON) {
                 if data.cancel_drop {
+                    // `cancelDrop` 不放回方块，但 `callOnBrokenAfterFall` 仍然要走。
+                    // `cancelDrop` does not place the block, but `callOnBrokenAfterFall` still runs.
+                    let center = bounding_box_center(self);
+                    let state = data.state;
                     self.discard();
+                    crate::behaviour::misc::falling::on_broken_after_fall(
+                        world, pos, state, center,
+                    );
                 } else {
                     let land_here =
                         self.can_land(data, current_state, is_concrete, stuck_in_water, world, pos);
@@ -106,13 +113,24 @@ impl Entity {
                             //
                             // Placement failed: discard, then `callOnBrokenAfterFall`, then the drop.
                             // The sound and `onBrokenAfterFall` do not draw from `level.random`.
+                            let center = bounding_box_center(self);
+                            let state = data.state;
                             self.discard();
-                            self.spawn_falling_drop(world, data.state);
+                            crate::behaviour::misc::falling::on_broken_after_fall(
+                                world, pos, state, center,
+                            );
+                            self.spawn_falling_drop(world, state);
                         }
                     } else {
+                        let center = bounding_box_center(self);
+                        let state = data.state;
+                        let drop_item = data.drop_item;
                         self.discard();
-                        if data.drop_item {
-                            self.spawn_falling_drop(world, data.state);
+                        if drop_item {
+                            crate::behaviour::misc::falling::on_broken_after_fall(
+                                world, pos, state, center,
+                            );
+                            self.spawn_falling_drop(world, state);
                         }
                     }
                 }
@@ -160,7 +178,9 @@ impl Entity {
         {
             match anvil_damage(data.state) {
                 Some(damaged) => data.state = damaged,
-                // 已经是最破的铁砧：落地时方块直接消失，也不走 `onBrokenAfterFall`。
+                // 已经是最破的铁砧：落地时方块直接消失。`cancelDrop` 仍会走 `onBrokenAfterFall`（1029）。
+                // The anvil is already fully damaged: the block vanishes on landing.
+                // `cancelDrop` still runs `onBrokenAfterFall` (1029).
                 None => data.cancel_drop = true,
             }
         }
@@ -187,6 +207,18 @@ impl Entity {
             is_free(world.block_state(pos.below())) && (!is_concrete || !stuck_in_water);
         may_replace && data.state.can_survive(world, pos) && !would_continue_falling
     }
+}
+
+/// `AABB.getCenter`。刷子方块的 2001 发在碰撞盒中心。
+///
+/// `AABB.getCenter`. A brushable block's 2001 is sent at the bounding-box centre.
+fn bounding_box_center(entity: &Entity) -> Vec3 {
+    let bounds = entity.bounding_box();
+    Vec3::new(
+        (bounds.min_x + bounds.max_x) * 0.5,
+        (bounds.min_y + bounds.max_y) * 0.5,
+        (bounds.min_z + bounds.max_z) * 0.5,
+    )
 }
 
 /// `AnvilBlock.damage`：铁砧裂一级，朝向不变。已经是最破的那种时返回 `None`。

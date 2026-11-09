@@ -6,11 +6,13 @@
 
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory, entity::Entities,
+    BlockEntities, BlockEvents, BlockGameRules, BlockTicks, LevelRandom, RedstoneMemory,
+    entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
@@ -26,7 +28,7 @@ use crate::{
     chunk_tracking,
     container::ContainerEntry,
     entity_tracking::EntityTracking,
-    global::GameTime,
+    global::{Clock, GameTime},
     inbound::{JoinRequest, PlayerId},
     interaction::{BlockChanges, level::RegionLevel},
     links::Links,
@@ -34,14 +36,20 @@ use crate::{
     movement,
     player::Player,
     player_grid::PlayerGrid,
+    secure_chat::ServiceProfileKeys,
 };
 
 const DIMENSION: &str = "minecraft:overworld";
 /// 出生点在 (0, 0) 区块的中心。
+///
+/// `respawn_radius`（旧名 `spawnRadius`）是 `PlayerSpawnFinder` 在死亡重生时用的。
+/// 这里没有死亡重生，超平坦出生点仍然是这一格，不读那条规则。
+///
+/// `respawn_radius` (formerly `spawnRadius`) is what `PlayerSpawnFinder` uses on death.
+/// There is no death respawn here, so the superflat spawn stays on this cell and does
+/// not read that rule.
 const SPAWN_X: f64 = 8.5;
 const SPAWN_Z: f64 = 8.5;
-/// 正午。世界时钟的流速是 0，所以时间一直停在这里。
-const NOON_TICKS: i64 = 6000;
 
 const ABILITIES: PlayerAbilities = PlayerAbilities {
     invulnerable: true,
@@ -53,7 +61,9 @@ const ABILITIES: PlayerAbilities = PlayerAbilities {
 };
 
 /// 创造模式的触及距离加成完全由服务端下发，客户端代码里没有这两个数。
-const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
+///
+/// The creative reach bonus is sent by the server. The client code does not contain these numbers.
+pub(crate) const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
     AttributeSnapshot {
         attribute: attribute::BLOCK_INTERACTION_RANGE,
         base: 4.5,
@@ -137,6 +147,11 @@ pub(crate) struct Region {
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
     pub(crate) loot_sequences: mc_bamboo_loot::RandomSequences,
+    /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
+    ///
+    /// Seed for sound packets, vanilla `Level.soundSeedGenerator`. Separate from the world
+    /// random; it only picks which sound variant the client plays.
+    pub(crate) sound_seed_generator: LevelRandom,
     /// 下落的方块和点燃的 TNT。世界线程独占，见 `docs/folia.md`。
     ///
     /// Falling blocks and primed TNT. The world thread owns them; see `docs/folia.md`.
@@ -154,7 +169,35 @@ pub(crate) struct Region {
     pub(crate) view_distance: i32,
     max_players: i32,
     /// 写进 `login` 包的那一位，官方取的是 `MinecraftServer.usesAuthentication()`。
-    online_mode: bool,
+    pub(crate) online_mode: bool,
+    /// 配置里的 `enforce-secure-profile`。真正强制还要正版验证和公钥都在。
+    ///
+    /// Configured `enforce-secure-profile`. Enforcement also needs online mode and service keys.
+    pub(crate) enforce_secure_profile: bool,
+    /// Mojang 的 `playerCertificateKeys`。连接任务负责填充。
+    ///
+    /// Mojang's `playerCertificateKeys`. The connection task fills them in.
+    pub(crate) service_keys: Arc<ServiceProfileKeys>,
+    /// 测试把聊天时钟钉死，两次同样的输入才有同样的字节。`None` 用系统时间，和官方 `Instant.now` 一样。
+    ///
+    /// Tests pin the chat clock so the same input produces the same bytes.
+    /// `None` uses the system clock, matching official `Instant.now`.
+    pub(crate) clock_millis: Option<i64>,
+    /// 方块逻辑读的游戏规则快照。权威副本在 `Global`，改规则时当场写过来。
+    ///
+    /// The game-rule snapshot block logic reads. The authoritative copy is on `Global`
+    /// and is copied here as soon as a rule changes.
+    pub(crate) block_rules: BlockGameRules,
+    /// `GameRules.SEND_COMMAND_FEEDBACK`。
+    pub(crate) send_command_feedback: bool,
+    /// `GameRules.LOG_ADMIN_COMMANDS`。
+    pub(crate) log_admin_commands: bool,
+    /// `GameRules.COMMAND_BLOCKS_WORK`。
+    pub(crate) command_blocks_work: bool,
+    /// 命令方块里保存的命令。不执行，也不存档。
+    ///
+    /// Commands stored in command blocks. They are not executed and not saved.
+    pub(crate) command_blocks: BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -195,8 +238,28 @@ impl Region {
     }
 
     pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {
+        Self::with_keys(
+            view_distance,
+            max_players,
+            online_mode,
+            false,
+            crate::secure_chat::empty_keys(),
+        )
+    }
+
+    /// 正版验证和公钥从 `World::with_service_keys` 进来。测试走 [`Self::new`]。
+    ///
+    /// Online mode and the profile keys arrive through `World::with_service_keys`. Tests use [`Self::new`].
+    pub(crate) fn with_keys(
+        view_distance: i32,
+        max_players: i32,
+        online_mode: bool,
+        enforce_secure_profile: bool,
+        service_keys: Arc<ServiceProfileKeys>,
+    ) -> Self {
         let chunks = ChunkStore::flat();
         let template_body = encode_template(&chunks);
+        let rules = crate::gamerules::GameRuleSet::vanilla();
         Self {
             players: BTreeMap::new(),
             player_grid: PlayerGrid::default(),
@@ -215,6 +278,7 @@ impl Region {
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
             redstone: RedstoneMemory::default(),
@@ -222,7 +286,23 @@ impl Region {
             view_distance,
             max_players,
             online_mode,
+            enforce_secure_profile,
+            service_keys,
+            clock_millis: None,
+            block_rules: rules.block_snapshot(),
+            send_command_feedback: rules.bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
+            log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
+            command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
+            command_blocks: BTreeMap::new(),
         }
+    }
+
+    /// 未签名消息和过期判断用的现在。测试可以钉死。
+    ///
+    /// Now, for unsigned messages and expiry checks. Tests can pin it.
+    pub(crate) fn now_millis(&self) -> i64 {
+        self.clock_millis
+            .unwrap_or_else(crate::secure_chat::now_millis)
     }
 
     pub(crate) fn advance_tick(&mut self) {
@@ -235,7 +315,7 @@ impl Region {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
             block_items: &mut self.block_items,
-            players: &self.players,
+            players: &mut self.players,
             random: &self.random,
             redstone: &mut self.redstone,
             block_entities: &mut self.block_entities,
@@ -243,11 +323,16 @@ impl Region {
             containers: &mut self.containers,
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
+            block_rules: self.block_rules,
+            command_blocks: &mut self.command_blocks,
         };
         (level, &mut self.block_ticks)
     }
 
-    /// 进服第 1 到 3 步：`login`、`player_abilities`、`player_position`。
+    /// 进服开头：`login`、`player_abilities`、权限事件、命令树、`player_position`。
+    ///
+    /// The start of join: `login`, `player_abilities`, the permission event, the command tree,
+    /// then `player_position`.
     pub(crate) fn add_player(&mut self, request: JoinRequest, game_mode: GameMode) {
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
@@ -256,6 +341,8 @@ impl Region {
             name,
             properties: _,
             client,
+            permission_level,
+            is_op,
             sink,
         } = request;
         self.links.add(id, sink);
@@ -273,12 +360,19 @@ impl Region {
             is_flat: true,
             sea_level: flat::SEA_LEVEL,
             online_mode: self.online_mode,
+            enforces_secure_chat: crate::secure_chat::enforces(self),
         };
         self.links.send(id, &login);
         self.links.send(id, &ABILITIES);
+        // 官方在能力包之后、传送之前发权限事件和命令树。
+        //
+        // Official sends the permission event and the command tree after abilities and before the teleport.
+        crate::command::send_session(&mut self.links, id, permission_level, id.0);
 
         let spawn = Vec3::new(SPAWN_X, f64::from(flat::surface_y()), SPAWN_Z);
         let mut player = Player::new(id, uuid, name, game_mode, client, spawn);
+        player.permission_level = permission_level;
+        player.is_op = is_op;
         movement::teleport(
             &mut player,
             &mut self.links,
@@ -316,19 +410,59 @@ impl Region {
 
     /// 进服第 8 到 10 步：`set_time`、`game_event` 13、`set_chunk_cache_center`。
     /// 跟踪范围里的区块都进 `pending`，这一 tick 末尾发第一批。
-    pub(crate) fn start_loading_chunks(&mut self, id: PlayerId, time: GameTime) {
-        let time = SetTime {
-            game_time: time.0,
-            clock: world_clock::OVERWORLD,
-            clock_ticks: NOON_TICKS,
-            clock_rate: 0.0,
-        };
-        self.links.send(id, &time);
+    pub(crate) fn start_loading_chunks(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
+        self.send_time(id, time, clock);
         // 客户端收不到它就永远停在加载画面。
         self.links.send(id, &LevelChunksLoadStart);
         if let Some(player) = self.players.get_mut(&id) {
             chunk_tracking::update_player_view(player, &mut self.links, self.view_distance);
         }
+    }
+
+    /// 把主世界时钟的当前状态发给所有人。`/time` 改了主世界之后调用。
+    ///
+    /// Broadcasts the overworld clock. Called after `/time` changes it.
+    pub(crate) fn broadcast_time(&mut self, time: GameTime, clock: Clock) {
+        self.broadcast_clock(time, world_clock::OVERWORLD, clock);
+    }
+
+    /// 把指定注册表 ID 的时钟发给所有人。末地时钟不进登录时的那一包，改了才发。
+    ///
+    /// Broadcasts one clock by registry id. The End clock is absent from the login packet
+    /// and is sent only after a command changes it.
+    pub(crate) fn broadcast_clock(&mut self, time: GameTime, clock_id: i32, clock: Clock) {
+        let packet = SetTime {
+            game_time: time.0,
+            clock: clock_id,
+            clock_ticks: clock.total_ticks,
+            clock_partial: clock.partial_tick,
+            clock_rate: clock.network_rate(),
+        };
+        self.links.broadcast(&crate::links::encode_frames(&packet));
+    }
+
+    fn send_time(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
+        self.links.send(id, &time_packet(time, clock));
+    }
+
+    /// 登录包里的玩家上限。
+    ///
+    /// The player cap written into the login packet.
+    pub(crate) fn max_players(&self) -> i32 {
+        self.max_players
+    }
+}
+
+/// 主世界时钟的 `set_time` 包。登录时只带这一项。
+///
+/// The overworld `set_time` packet. Login sends only this clock.
+fn time_packet(time: GameTime, clock: Clock) -> SetTime {
+    SetTime {
+        game_time: time.0,
+        clock: world_clock::OVERWORLD,
+        clock_ticks: clock.total_ticks,
+        clock_partial: clock.partial_tick,
+        clock_rate: clock.network_rate(),
     }
 }
 

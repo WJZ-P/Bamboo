@@ -577,12 +577,14 @@ fn spawn_lectern_book(region: &mut Region, pos: BlockPos, facing: Direction, sta
 
 fn send_open(region: &mut Region, id: PlayerId, pos: BlockPos, container_id: i32) {
     let Some((shown, page)) = region.lecterns.books.get(&pos).map(|book| {
-        let shown = if book.owner == Some(id) {
-            book.stack.clone()
-        } else {
-            book.stack.filtered()
-        };
-        (shown, book.page)
+        // 校验过的组件原样发给所有人，包括后来打开这本讲台的玩家。
+        // 放书的人也是这批人之一，所以 `owner` 只留着标记来源。
+        //
+        // A validated component patch is sent unchanged, including to a player who opens
+        // this lectern afterwards. The placer is one of those viewers, so `owner` only
+        // records who put the book there.
+        let _owner = book.owner;
+        (book.stack.clone(), book.page)
     }) else {
         return;
     };

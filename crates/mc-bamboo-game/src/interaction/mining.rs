@@ -4,11 +4,10 @@
 //! 这四种动作都走 [`handle_block_break_action`]，和官方同名。
 //!
 //! 生存和冒险模式挖掉方块后走 [`crate::block_drops`]（`Block.dropResources`）。
-//! 经验、工具耐久和统计还没有。
+//! 挖掘和工具右键的耐久在 [`durability`] 里扣，经验、统计还没有。
 //!
 //! Survival and adventure breaks call [`crate::block_drops`] (`Block.dropResources`).
-//! Experience, tool damage, and statistics are still absent.
-
+//! Mining and tool durability live in [`durability`]; experience and statistics are absent.
 use mc_bamboo_blocks::{
     Actor, BlockState, InteractionResult, Level,
     mining::{self as block_mining, Miner},
@@ -25,7 +24,7 @@ use super::{
     MAX_Y, REACH_BUFFER, actor_of, adventure, rules, send_current_block, send_effects,
     send_level_event, within_block_interaction_range,
 };
-use crate::{inbound::PlayerId, links::encode_frames, region::Region};
+use crate::{durability, inbound::PlayerId, links::encode_frames, region::Region};
 
 /// `LevelEvent.PARTICLES_DESTROY_PROGRESS`：挖到一半的裂纹和声音。
 const DESTROY_PROGRESS_EVENT: i32 = 2019;
@@ -331,6 +330,14 @@ fn destroy_and_ack(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) {
 ///
 /// 挖成功时方块逻辑会留下破坏粒子；挖不动时什么也没发生，调用方负责回包。
 fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> bool {
+    // `ServerPlayerGameMode.destroyBlock` 最先调用 `ItemStack.canDestroyBlock`。
+    // 调试棒在这里改属性，并且恒返回 false，空气也一样。
+    //
+    // `ServerPlayerGameMode.destroyBlock` calls `ItemStack.canDestroyBlock` first.
+    // A debug stick changes a property here and always returns false, including on air.
+    if crate::debug_stick::on_left_click(region, snapshot.id, &snapshot.actor, pos) {
+        return false;
+    }
     // `ItemStack.canDestroyBlock`：只有带 `tool` 组件又明确不许在创造模式挖的物品才拦，
     // 而且只拦创造模式。
     if snapshot.game_mode == GameMode::Creative
@@ -349,12 +356,11 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     if broken.is_air() {
         return true;
     }
-    // 方块的 `GameMasterBlock` 检查在这里面：没有权限系统，命令方块这类一律挖不动，
-    // 返回 `Fail`，调用方把这一格发回去。
-    let outcome = {
+    // `GameMasterBlock` 的权限检查在这里面。没有 `canUseGameMasterBlocks` 时挖不动。
+    let outcome = durability::run(region, snapshot.id, Hand::Main, |region| {
         let (mut level, ticks) = region.block_level();
         mc_bamboo_blocks::destroy_block(&mut level, ticks, &snapshot.actor, pos)
-    };
+    });
     send_effects(region, Some(snapshot.id), &outcome.effects);
     if outcome.result != InteractionResult::Success {
         return false;
@@ -492,7 +498,10 @@ mod tests {
         item::ItemStack,
         packet::{
             ClientboundPacket,
-            play::{BlockDestruction, GameMode, LevelEvent, PlayRequest, PlayerActionKind},
+            play::{
+                BlockDestruction, ContainerSetSlot, EquipmentSlot, GameMode, LevelEvent,
+                PlayRequest, PlayerActionKind, SetEquipment,
+            },
         },
     };
 
@@ -649,6 +658,35 @@ mod tests {
         frame_of(&mc_bamboo_protocol::packet::play::BlockChangedAck { sequence })
     }
 
+    /// 钻石镐挖掉一块石头后耐久变成 1。`damage` 组件的值是一个 varint。
+    ///
+    /// A diamond pickaxe has damage 1 after breaking one stone. The `damage` value is a varint.
+    fn worn_pickaxe() -> ItemStack {
+        ItemStack {
+            item: items::DIAMOND_PICKAXE,
+            count: 1,
+            added: vec![(kinds::DAMAGE, vec![1])],
+            removed: Vec::new(),
+        }
+    }
+
+    fn worn_pickaxe_slot() -> Frame {
+        let stack = worn_pickaxe();
+        frame_of(&ContainerSetSlot {
+            container_id: 0,
+            state_id: 1,
+            slot: 36,
+            stack: &stack,
+        })
+    }
+
+    fn worn_pickaxe_equipment(entity_id: i32) -> Frame {
+        let stack = worn_pickaxe();
+        let slots = [(EquipmentSlot::MainHand, &stack)];
+        let packet = SetEquipment::new(entity_id, &slots).expect("one slot");
+        frame_of(&packet)
+    }
+
     fn update(pos: BlockPos, state: u32) -> Frame {
         frame_of(&mc_bamboo_protocol::packet::play::BlockUpdate {
             pos,
@@ -698,11 +736,12 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        assert_break_frames(
-            &client.take_frames(),
-            &[update(GROUND, blocks::AIR)],
-            &[ack(2)],
-        );
+        // 挖穿时镐子扣 1 点耐久，先同步那一格；中间的掉落物坐标含随机数，
+        // 只要求有 `add_entity`，确认包在最后。
+        //
+        // Breaking spends one durability point first. The drop position is random, so the
+        // middle only needs an `add_entity`, and the ack stays last.
+        assert_break_frames(&client.take_frames(), &[worn_pickaxe_slot()], &[ack(2)]);
     }
 
     #[test]
@@ -728,9 +767,15 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        // 延迟破坏没有 sequence，只广播方块变化，不发 ack。掉落物跟在后面。
-        // A delayed break has no sequence, so there is no ack. The drop follows the update.
-        assert_break_frames(&client.take_frames(), &[update(GROUND, blocks::AIR)], &[]);
+        // 延迟破坏没有 sequence，只广播方块变化，不发 ack。镐子同样扣 1 点，掉落物跟在后面。
+        //
+        // A delayed break has no sequence, so there is no ack. The pickaxe still loses one
+        // point and the drop follows the update.
+        assert_break_frames(
+            &client.take_frames(),
+            &[worn_pickaxe_slot(), update(GROUND, blocks::AIR)],
+            &[],
+        );
     }
 
     #[test]
@@ -787,7 +832,10 @@ mod tests {
                 level_event(2001, GROUND, blocks::STONE as i32),
                 update(GROUND, blocks::AIR),
             ],
-            &[],
+            // 主手物品变了，刻末的装备同步把扣过耐久的镐子发给旁边的人。
+            //
+            // The main hand changed, so the end-of-tick equipment sync shows the worn pickaxe.
+            &[worn_pickaxe_equipment(breaker)],
         );
     }
 
@@ -857,6 +905,7 @@ mod tests {
                 position: Some(Vec3::new(8.25, -60.0, 8.5)),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             },
         );
         let pos = BlockPos::new(14, -59, 8);

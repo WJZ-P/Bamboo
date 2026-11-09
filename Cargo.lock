@@ -1905,7 +1905,18 @@ dependencies = [
  "mc-bamboo-data",
  "mc-bamboo-nbt",
  "mc-bamboo-protocol",
+ "mc-bamboo-recipes",
  "tracing",
+]
+
+[[package]]
+name = "mc-bamboo-command"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "uuid",
 ]
 
 [[package]]
@@ -1939,12 +1950,18 @@ name = "mc-bamboo-game"
 version = "0.0.0"
 dependencies = [
  "mc-bamboo-blocks",
+ "mc-bamboo-command",
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-loot",
  "mc-bamboo-nbt",
  "mc-bamboo-protocol",
+ "mc-bamboo-recipes",
  "mc-bamboo-world",
+ "rand_core",
+ "rsa",
+ "sha1",
+ "sha2",
  "tracing",
  "uuid",
 ]
@@ -1972,6 +1989,7 @@ name = "mc-bamboo-protocol"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "libc",
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",
@@ -1984,6 +2002,7 @@ name = "mc-bamboo-recipes"
 version = "0.0.0"
 dependencies = [
  "mc-bamboo-data",
+ "mc-bamboo-protocol",
 ]
 
 [[package]]
@@ -2023,6 +2042,8 @@ dependencies = [
  "mc-bamboo-server",
  "mc-bamboo-world",
  "mc-bamboo-worldgen",
+ "rand_core",
+ "rsa",
  "serde",
  "serde_json",
  "tokio",

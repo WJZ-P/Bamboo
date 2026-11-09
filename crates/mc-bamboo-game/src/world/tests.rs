@@ -198,10 +198,12 @@ impl Harness {
             view_distance,
             max_players: 20,
             online_mode: false,
+            enforce_secure_profile: false,
         };
         let mut world = World::new(config, receiver);
-        // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。
+        // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.region.random = LevelRandom::new(0);
+        world.region.sound_seed_generator = LevelRandom::new(0);
         Self {
             world,
             inbox,
@@ -222,6 +224,8 @@ impl Harness {
             name: name.to_owned(),
             properties: Vec::new(),
             client,
+            permission_level: 0,
+            is_op: false,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -276,14 +280,54 @@ impl Harness {
         );
     }
 
-    pub(crate) fn move_to(&self, client: &Client, x: f64, z: f64) {
+    pub(crate) fn move_to(&mut self, client: &Client, x: f64, z: f64) {
+        self.move_to_position(client, Vec3::new(x, SPAWN_Y, z));
+    }
+
+    /// 把玩家放到 `position`。离得远、连接还开着，就直接放过去：测试要的是人已经在那儿。
+    /// 人还没进世界，或者已经被踢，就照常把移动包排进队列。
+    ///
+    /// Puts the player at `position`. A long move on an open connection is applied directly,
+    /// because the test wants them already there. A player who has not joined or was kicked
+    /// still gets a queued move packet.
+    pub(crate) fn move_to_position(&mut self, client: &Client, position: Vec3) {
+        let here = self
+            .world
+            .region
+            .players
+            .get(&client.id)
+            .map(|player| player.position());
+        if let Some(here) = here
+            && !client.is_closed()
+            && position.subtract(here).length_sqr() > 100.0
+        {
+            crate::player_move::place_player(&mut self.world.region, client.id, position);
+            return;
+        }
+        self.load_player(client);
         self.request(
             client,
             PlayRequest::MovePlayer {
-                position: Some(Vec3::new(x, SPAWN_Y, z)),
+                position: Some(position),
                 rotation: None,
                 on_ground: true,
+                horizontal_collision: false,
             },
+        );
+        self.client_tick_end(client);
+    }
+
+    pub(crate) fn load_player(&self, client: &Client) {
+        self.request(
+            client,
+            PlayRequest::Other(mc_bamboo_data::packets::play::serverbound::PLAYER_LOADED),
+        );
+    }
+
+    pub(crate) fn client_tick_end(&self, client: &Client) {
+        self.request(
+            client,
+            PlayRequest::Other(mc_bamboo_data::packets::play::serverbound::CLIENT_TICK_END),
         );
     }
 
@@ -308,6 +352,7 @@ impl Harness {
     pub(crate) fn join_and_settle(&mut self, name: &str) -> Client {
         let client = self.join(name);
         self.confirm_teleport(&client);
+        self.load_player(&client);
         self.receive_all_chunks(&client);
         client
     }
@@ -336,6 +381,8 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
     let mut expected = vec![
         clientbound::LOGIN,
         clientbound::PLAYER_ABILITIES,
+        clientbound::ENTITY_EVENT,
+        clientbound::COMMANDS,
         clientbound::PLAYER_POSITION,
         clientbound::PLAYER_INFO_UPDATE,
         clientbound::SET_ENTITY_DATA,
@@ -360,12 +407,14 @@ fn second_player_gets_the_roster_first_and_the_others_get_the_new_player() {
     server.tick();
 
     let frames = second.take_frames();
-    let ids: Vec<i32> = frames.iter().take(6).map(|frame| frame.id).collect();
+    let ids: Vec<i32> = frames.iter().take(8).map(|frame| frame.id).collect();
     assert_eq!(
         ids,
         [
             clientbound::LOGIN,
             clientbound::PLAYER_ABILITIES,
+            clientbound::ENTITY_EVENT,
+            clientbound::COMMANDS,
             clientbound::PLAYER_POSITION,
             clientbound::PLAYER_INFO_UPDATE,
             clientbound::PLAYER_INFO_UPDATE,
@@ -373,7 +422,11 @@ fn second_player_gets_the_roster_first_and_the_others_get_the_new_player() {
         ]
     );
     // 已有的玩家先发给新玩家，然后才是它自己，两次都是全部 8 个动作。
-    for (frame, uuid) in [(&frames[3], first.uuid), (&frames[4], second.uuid)] {
+    // 权限事件和命令树插在能力包和传送之间，所以名单从第 6 个包开始。
+    //
+    // The permission event and command tree sit between abilities and the teleport,
+    // so the roster starts at the sixth packet.
+    for (frame, uuid) in [(&frames[5], first.uuid), (&frames[6], second.uuid)] {
         assert_eq!(frame.body[..2], [0xff, 0x01]);
         assert_eq!(frame.body[2..18], *uuid.as_bytes());
     }
@@ -577,9 +630,10 @@ fn moving_up_and_down_sends_nothing() {
     server.request(
         &client,
         PlayRequest::MovePlayer {
-            position: Some(Vec3::new(SPAWN_X, 200.0, SPAWN_Z)),
+            position: Some(Vec3::new(SPAWN_X, -50.0, SPAWN_Z)),
             rotation: None,
             on_ground: false,
+            horizontal_collision: false,
         },
     );
     server.tick();
@@ -731,6 +785,8 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         name: "Kitten".to_owned(),
         properties: Vec::new(),
         client: client_requesting(2),
+        permission_level: 0,
+        is_op: false,
         sink: Box::new(sink),
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -779,9 +835,18 @@ fn nan_position_kicks_and_later_requests_are_ignored() {
             position: Some(Vec3::new(f64::NAN, 0.0, 0.0)),
             rotation: None,
             on_ground: false,
+            horizontal_collision: false,
         },
     );
-    server.move_to(&client, 100.0, 100.0);
+    server.request(
+        &client,
+        PlayRequest::MovePlayer {
+            position: Some(Vec3::new(100.0, SPAWN_Y, 100.0)),
+            rotation: None,
+            on_ground: true,
+            horizontal_collision: false,
+        },
+    );
     server.tick();
 
     let reason = Component::translate("multiplayer.disconnect.invalid_player_movement", []);
@@ -806,8 +871,15 @@ fn quota_is_returned_after_each_request() {
     server.tick();
 
     server.acknowledge_batch(&client, 1.0);
-    server.move_to(&client, 1.0, 1.0);
-    assert_eq!(server.in_flight.load(Ordering::Relaxed), 2);
+    // 一步之内，请求才会进队列。再远就直接放过去，不占名额。
+    //
+    // A step this short is queued. Anything past the speed limit is placed and does not
+    // take a quota slot.
+    server.move_to(&client, SPAWN_X + 1.0, SPAWN_Z);
+    // 确认、player_loaded、移动、client_tick_end。
+    //
+    // The acknowledgement, player_loaded, the move, and client_tick_end.
+    assert_eq!(server.in_flight.load(Ordering::Relaxed), 4);
     server.tick();
 
     assert_eq!(server.in_flight.load(Ordering::Relaxed), 0);
@@ -1100,12 +1172,8 @@ fn every_decoded_request_reaches_a_module_without_disconnecting() {
     let pos = BlockPos::new(1, -61, 1);
 
     let requests = [
-        PlayRequest::Chat {
-            message: "hi".to_owned(),
-        },
-        PlayRequest::ChatCommand {
-            command: "foo".to_owned(),
-        },
+        PlayRequest::unsigned_chat("hi"),
+        PlayRequest::unsigned_command("foo"),
         PlayRequest::ClientCommand {
             action: ClientCommandKind::RequestStats,
         },

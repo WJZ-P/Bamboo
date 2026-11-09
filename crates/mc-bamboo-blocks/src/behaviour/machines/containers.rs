@@ -9,7 +9,7 @@ use std::any::Any;
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{Block, BlockAncestor};
 
-use super::facing_the_view;
+use super::{cooking::FurnaceEntity, facing_the_view};
 use crate::{
     behaviour::{
         Behaviour,
@@ -17,12 +17,13 @@ use crate::{
     },
     block_entity::BlockEntity,
     context::{PlaceContext, UseContext},
+    dispense,
     dispenser::dispense_from,
     hopper::HopperEntity,
     interact::InteractionResult,
     shape::{Aabb, Boxes, CollisionContext},
     state::{BlockState, ENABLED, FACING, FACING_HOPPER, TRIGGERED},
-    world::{UPDATE_ALL, UPDATE_CLIENTS, UPDATE_LIMIT, World},
+    world::{DeferredRead, UPDATE_ALL, UPDATE_CLIENTS, UPDATE_LIMIT, World},
 };
 
 /// `BarrelBlock`。
@@ -183,9 +184,34 @@ impl ShulkerBoxEntity {
 }
 
 /// `ShulkerBoxBlockEntity.doNeighborUpdates`：形状变了，告诉邻居重新算。
+///
+/// 实体正被拿着时先排进队列。邻居要问盖子开没开，表里没有实体时会被当成关上。
+///
+/// While the entity is out of the map this is queued. Neighbours ask whether the lid is open,
+/// and a missing entity is treated as closed.
 fn do_neighbor_updates(state: BlockState, world: &mut World, pos: BlockPos) {
+    if world.block_entity_is_taken(pos) {
+        world.defer_block_entity_read(DeferredRead::ShulkerNeighbors { pos });
+        return;
+    }
+    push_shulker_neighbor_updates(state, world, pos);
+}
+
+fn push_shulker_neighbor_updates(state: BlockState, world: &mut World, pos: BlockPos) {
     world.update_neighbour_shapes(state, pos, UPDATE_ALL, UPDATE_LIMIT);
     world.update_neighbors_at(pos, state.block());
+}
+
+/// 潜影盒放回表之后补跑 `doNeighborUpdates`。方块已经不是潜影盒时什么也不做。
+///
+/// Runs `doNeighborUpdates` after the shulker is put back. Does nothing if the cell is no
+/// longer a shulker box.
+pub(crate) fn apply_shulker_neighbor_updates(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if !state.is_a(BlockAncestor::ShulkerBoxBlock) {
+        return;
+    }
+    push_shulker_neighbor_updates(state, world, pos);
 }
 
 impl BlockEntity for ShulkerBoxEntity {
@@ -346,8 +372,36 @@ impl Behaviour for Furnace {
         Some(facing_the_player(block, ctx))
     }
 
+    /// `newBlockEntity`：放下熔炉系列时建一个空实体，种类由方块决定。
+    fn on_place(&self, state: BlockState, world: &mut World, pos: BlockPos, old: BlockState) {
+        if !old.is_same_block(state)
+            && !world.has_block_entity(pos)
+            && let Some(kind) = FurnaceEntity::kind_of(state.class())
+        {
+            world.set_block_entity(Box::new(FurnaceEntity::new(pos, kind)));
+        }
+    }
+
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         update_neighbours_after_destroy(state, world, pos);
+    }
+
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal`：比较器读三格内容。
+    ///
+    /// 实体被拿出去时这里读不到它，比较器会等它放回去再读。没有实体时用槽位表。
+    ///
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots.
+    ///
+    /// While the entity is out of the map this cannot see it; comparators read it after it is
+    /// put back. With no entity, the slot table is used.
+    fn analog_output_signal(
+        &self,
+        _state: BlockState,
+        world: &World,
+        pos: BlockPos,
+        _direction: Direction,
+    ) -> i32 {
+        crate::machine_container::furnace_signal(world, pos)
     }
 
     fn use_without_item(
@@ -481,12 +535,18 @@ impl Behaviour for Dispenser {
         InteractionResult::Success
     }
 
-    /// `DispenserBlock.tick`：计划刻到期，投掷器把物品发出去。
+    /// `DispenserBlock.tick`：计划刻到期。投掷器把物品塞进容器或抛出去。
     ///
-    /// 发射器的行为注册表（箭、水、盔甲等）不在范围里，发射器这一支什么也不做。
+    /// 发射器走 `DispenserBlock.dispenseFrom`，见 [`crate::dispense`]。
+    ///
+    /// `DispenserBlock.tick`: the scheduled tick. A dropper inserts into a container or throws.
+    ///
+    /// A dispenser runs `DispenserBlock.dispenseFrom`. See [`crate::dispense`].
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if state.is_a(BlockAncestor::DropperBlock) {
             dispense_from(world, pos, state);
+        } else {
+            dispense::dispense_from(world, pos, state);
         }
     }
 

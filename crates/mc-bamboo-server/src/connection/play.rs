@@ -10,6 +10,7 @@ use std::{
 
 use bytes::BytesMut;
 use mc_bamboo_auth::{DecryptHalf, EncryptHalf, Encryption};
+use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId};
 use mc_bamboo_protocol::{
     compression,
@@ -230,12 +231,20 @@ impl RequestReader<'_> {
         client: ClientInformation,
         outbound: &Outbound,
     ) -> Result<(), ConnectionError> {
+        let op = self.shared.ops.get(session.uuid);
         let request = JoinRequest {
             id: self.player,
             uuid: session.uuid,
             name: session.name.clone(),
             properties: session.properties.clone(),
             client,
+            // 官方 `PlayerList.getPermissions` 只按 UUID 查 OP 表，没列出来的都是 0。
+            // `is_op` 供刷屏豁免使用，等级 0 的 OP 也算 OP。
+            //
+            // Official `PlayerList.getPermissions` looks the UUID up in the op list.
+            // Anyone missing from it is level 0. `is_op` is the spam exemption, so a level-0 op still counts.
+            permission_level: op.map_or(0, |entry| entry.level),
+            is_op: op.is_some(),
             sink: Box::new(outbound.clone()),
         };
         self.send_to_world(Inbound::Join(Box::new(request)))
@@ -313,7 +322,22 @@ impl RequestReader<'_> {
                 })
             }
             PlayRequest::PingRequest(time) => enqueue(outbound, &PongResponse { time }),
-            // 客户端每 tick 都有这种包，比如 `client_tick_end`，不要转发也不要记日志。
+            // 这两种要进世界线程：一个结束客户端 tick，一个表示区块已经显示出来。
+            // 其余没解码的包仍然留在连接上，不占世界线程的配额。
+            //
+            // These two belong on the world thread: one ends the client tick, the other says the
+            // chunks are on screen. Other undecoded packets stay here and do not take a world slot.
+            PlayRequest::Other(id)
+                if id == serverbound::CLIENT_TICK_END || id == serverbound::PLAYER_LOADED =>
+            {
+                let in_flight = InFlight::acquire(in_flight, IN_FLIGHT_LIMIT)
+                    .ok_or(ConnectionError::TooManyRequests)?;
+                self.send_to_world(Inbound::Request {
+                    player: self.player,
+                    request: PlayRequest::Other(id),
+                    in_flight,
+                })
+            }
             PlayRequest::Other(_) => Ok(()),
             request => {
                 let in_flight = InFlight::acquire(in_flight, IN_FLIGHT_LIMIT)

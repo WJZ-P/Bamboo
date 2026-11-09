@@ -11,10 +11,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
     BlockState, ShulkerBoxEntity, World, open_lid_box,
-    state::{CHEST_TYPE, ChestType, FACING, OPEN},
+    state::{CHEST_TYPE, ChestType, FACING, HORIZONTAL_FACING, OPEN},
 };
-use mc_bamboo_core::{Aabb, BlockPos, Direction};
-use mc_bamboo_data::{BlockAncestor, registries::menu, tags::block_tags};
+use mc_bamboo_core::{Aabb, BlockPos, Direction, Vec3};
+use mc_bamboo_data::{
+    BlockAncestor, blocks,
+    registries::menu,
+    sounds::{self, sound_event},
+    tags::block_tags,
+};
 use mc_bamboo_protocol::{item::ItemStack, packet::play::GameMode};
 use mc_bamboo_world::store::ChunkStore;
 
@@ -44,6 +49,10 @@ pub(crate) enum ContainerKind {
     Jukebox,
     DecoratedPot,
     Crafter,
+    /// 架子。三格在容器表里，没有菜单。
+    ///
+    /// A shelf. Three slots live in the container table and it has no menu.
+    Shelf,
 }
 
 impl ContainerKind {
@@ -56,6 +65,7 @@ impl ContainerKind {
             Self::ChiseledBookshelf => 6,
             Self::Jukebox | Self::DecoratedPot => 1,
             Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
+            Self::Shelf => 3,
         }
     }
 
@@ -66,11 +76,13 @@ impl ContainerKind {
             Self::ShulkerBox => menu::SHULKER_BOX,
             Self::Hopper => menu::HOPPER,
             Self::Dispenser | Self::Dropper => menu::GENERIC_3X3,
-            // 这三种官方没有菜单。合成器有 `CrafterMenu`，这次不打开，见 `menu_shape`。
+            // 这四种官方没有菜单。合成器有 `CrafterMenu`，这次不打开，见 `menu_shape`。
             //
-            // These three have no vanilla menu. The crafter has `CrafterMenu`, which this change
+            // These four have no vanilla menu. The crafter has `CrafterMenu`, which this change
             // does not open; see `menu_shape`.
-            Self::ChiseledBookshelf | Self::Jukebox | Self::DecoratedPot => menu::GENERIC_9X1,
+            Self::ChiseledBookshelf | Self::Jukebox | Self::DecoratedPot | Self::Shelf => {
+                menu::GENERIC_9X1
+            }
             Self::Crafter => menu::CRAFTER_3X3,
         }
     }
@@ -92,6 +104,10 @@ impl ContainerKind {
             Self::Jukebox => "container.jukebox",
             Self::DecoratedPot => "container.decoratedPot",
             Self::Crafter => "container.crafter",
+            // 不会发给客户端：架子没有 `MenuProvider`。
+            //
+            // Never sent: a shelf has no `MenuProvider`.
+            Self::Shelf => "container.shelf",
         }
     }
 }
@@ -102,11 +118,6 @@ impl ContainerKind {
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,
-    /// 每一格的组件字节是哪名玩家的客户端发来的。
-    ///
-    /// 共享容器里的物品可能是别人放进来的：那几种我们没法完全校验的组件只能发回给来源玩家，
-    /// 别人看到的那一份要滤过，见 [`crate::menu`]。
-    pub(crate) sources: Vec<Option<PlayerId>>,
     /// 官方 `ContainerOpenersCounter.openCount`。潜影盒也用它算盖子开合。
     pub(crate) open_count: i32,
     pub(crate) max_range: f64,
@@ -122,7 +133,6 @@ impl ContainerEntry {
         Self {
             kind,
             slots: vec![ItemStack::empty(); slots],
-            sources: vec![None; slots],
             open_count: 0,
             max_range: 0.0,
             recheck_at: None,
@@ -170,6 +180,7 @@ pub(crate) fn kind_of(state: BlockState) -> Option<ContainerKind> {
             ContainerKind::DecoratedPot,
         ),
         (BlockAncestor::CrafterBlock, ContainerKind::Crafter),
+        (BlockAncestor::ShelfBlock, ContainerKind::Shelf),
     ]
     .into_iter()
     .find(|(ancestor, _)| state.is_a(*ancestor))
@@ -324,7 +335,8 @@ pub(crate) fn start_open(region: &mut Region, pos: BlockPos, kind: ContainerKind
         | ContainerKind::ChiseledBookshelf
         | ContainerKind::Jukebox
         | ContainerKind::DecoratedPot
-        | ContainerKind::Crafter => {}
+        | ContainerKind::Crafter
+        | ContainerKind::Shelf => {}
     }
 }
 
@@ -341,7 +353,8 @@ pub(crate) fn stop_open(region: &mut Region, pos: BlockPos, kind: ContainerKind)
         | ContainerKind::ChiseledBookshelf
         | ContainerKind::Jukebox
         | ContainerKind::DecoratedPot
-        | ContainerKind::Crafter => {}
+        | ContainerKind::Crafter
+        | ContainerKind::Shelf => {}
     }
 }
 
@@ -389,17 +402,154 @@ fn decrement_openers(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
     opener_count_changed(region, pos, kind, previous);
 }
 
-/// 从 0 变成有人开。箱子和木桶在官方会播音效，木桶还会改方块状态。
+/// 从 0 变成有人开。音效在改方块之前，官方 `onOpen` 的顺序。
 fn on_open(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
-    if kind == ContainerKind::Barrel {
-        set_open(region, pos, true);
+    match kind {
+        ContainerKind::Chest => play_chest(region, pos, true),
+        ContainerKind::EnderChest => play_center(region, pos, ender_chest_sound(true)),
+        ContainerKind::Barrel => {
+            play_barrel(region, pos, true);
+            set_open(region, pos, true);
+        }
+        ContainerKind::ShulkerBox
+        | ContainerKind::Hopper
+        | ContainerKind::Dispenser
+        | ContainerKind::Dropper
+        | ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter
+        | ContainerKind::Shelf => {}
     }
 }
 
 fn on_close(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
-    if kind == ContainerKind::Barrel {
-        set_open(region, pos, false);
+    match kind {
+        ContainerKind::Chest => play_chest(region, pos, false),
+        ContainerKind::EnderChest => play_center(region, pos, ender_chest_sound(false)),
+        ContainerKind::Barrel => {
+            play_barrel(region, pos, false);
+            set_open(region, pos, false);
+        }
+        ContainerKind::ShulkerBox
+        | ContainerKind::Hopper
+        | ContainerKind::Dispenser
+        | ContainerKind::Dropper
+        | ContainerKind::ChiseledBookshelf
+        | ContainerKind::Jukebox
+        | ContainerKind::DecoratedPot
+        | ContainerKind::Crafter
+        | ContainerKind::Shelf => {}
     }
+}
+
+/// `ChestBlockEntity.playSound`。左半个箱子不响，也不取随机数。
+fn play_chest(region: &mut Region, pos: BlockPos, open: bool) {
+    let Some(state) = region.chunks.block(pos).map(BlockState) else {
+        return;
+    };
+    if !state.has(CHEST_TYPE) || state.get(CHEST_TYPE) == ChestType::Left {
+        return;
+    }
+    let (mut x, y, mut z) = block_center(pos);
+    if state.get(CHEST_TYPE) == ChestType::Right {
+        // `getConnectedDirection`：右半边是朝向的逆时针。
+        let (step_x, _, step_z) = state.get(HORIZONTAL_FACING).counter_clockwise().normal();
+        x += f64::from(step_x) * 0.5;
+        z += f64::from(step_z) * 0.5;
+    }
+    play_hinge(region, x, y, z, sound_event(chest_sound_name(state, open)));
+}
+
+fn chest_sound_name(state: BlockState, open: bool) -> &'static str {
+    let weathered = state.is_same_block(BlockState(blocks::WEATHERED_COPPER_CHEST))
+        || state.is_same_block(BlockState(blocks::WAXED_WEATHERED_COPPER_CHEST));
+    let oxidized = state.is_same_block(BlockState(blocks::OXIDIZED_COPPER_CHEST))
+        || state.is_same_block(BlockState(blocks::WAXED_OXIDIZED_COPPER_CHEST));
+    if weathered {
+        return if open {
+            "minecraft:block.copper_chest_weathered.open"
+        } else {
+            "minecraft:block.copper_chest_weathered.close"
+        };
+    }
+    if oxidized {
+        return if open {
+            "minecraft:block.copper_chest_oxidized.open"
+        } else {
+            "minecraft:block.copper_chest_oxidized.close"
+        };
+    }
+    if state.is_a(BlockAncestor::CopperChestBlock) {
+        return if open {
+            "minecraft:block.copper_chest.open"
+        } else {
+            "minecraft:block.copper_chest.close"
+        };
+    }
+    if open {
+        "minecraft:block.chest.open"
+    } else {
+        "minecraft:block.chest.close"
+    }
+}
+
+fn ender_chest_sound(open: bool) -> u16 {
+    sound_event(if open {
+        "minecraft:block.ender_chest.open"
+    } else {
+        "minecraft:block.ender_chest.close"
+    })
+}
+
+/// `BarrelBlockEntity.playSound`：沿朝向偏出半格。
+fn play_barrel(region: &mut Region, pos: BlockPos, open: bool) {
+    let Some(state) = region.chunks.block(pos).map(BlockState) else {
+        return;
+    };
+    if !state.has(FACING) {
+        return;
+    }
+    let (step_x, step_y, step_z) = state.get(FACING).normal();
+    let (x, y, z) = block_center(pos);
+    let name = if open {
+        "minecraft:block.barrel.open"
+    } else {
+        "minecraft:block.barrel.close"
+    };
+    play_hinge(
+        region,
+        x + f64::from(step_x) / 2.0,
+        y + f64::from(step_y) / 2.0,
+        z + f64::from(step_z) / 2.0,
+        sound_event(name),
+    );
+}
+
+fn play_center(region: &mut Region, pos: BlockPos, sound: u16) {
+    let (x, y, z) = block_center(pos);
+    play_hinge(region, x, y, z, sound);
+}
+
+fn block_center(pos: BlockPos) -> (f64, f64, f64) {
+    (
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    )
+}
+
+/// 开合音效：音量 0.5，音高 `nextFloat * 0.1 + 0.9`，不排除玩家。
+fn play_hinge(region: &mut Region, x: f64, y: f64, z: f64, sound: u16) {
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        // 分开乘加，对齐 Java `nextFloat() * 0.1F + 0.9F`。
+        let pitch = world.random().next_float() * 0.1 + 0.9;
+        world.play_sound(Vec3 { x, y, z }, sound, sounds::BLOCKS, 0.5, pitch, false);
+        world.into_effects()
+    };
+    interaction::send_effects(region, None, &effects);
 }
 
 /// 木桶的 `OPEN` 状态，官方 `BarrelBlockEntity.updateBlockState` 的 `setBlockAndUpdate`。
@@ -442,6 +592,10 @@ fn start_open_shulker(region: &mut Region, pos: BlockPos) {
         entry.open_count
     };
     queue_block_event(region, pos, 1, count);
+    // `ShulkerBoxBlockEntity.startOpen`：人数变成 1 才响，在方块事件之后。
+    if count == 1 {
+        play_center(region, pos, sound_event("minecraft:block.shulker_box.open"));
+    }
 }
 
 fn stop_open_shulker(region: &mut Region, pos: BlockPos) {
@@ -451,6 +605,13 @@ fn stop_open_shulker(region: &mut Region, pos: BlockPos) {
         entry.open_count
     };
     queue_block_event(region, pos, 1, count);
+    if count <= 0 {
+        play_center(
+            region,
+            pos,
+            sound_event("minecraft:block.shulker_box.close"),
+        );
+    }
 }
 
 /// `level.blockEvent(pos, block, 1, count)`：排进这一 tick 的方块事件队列。

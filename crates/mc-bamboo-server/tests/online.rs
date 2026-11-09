@@ -121,9 +121,15 @@ impl FakeSession {
         self.requests.lock().unwrap().clone()
     }
 
-    /// 唯一的那个请求行，一条也没有或者超过一条都算测试失败。
-    fn only_request(&self) -> String {
-        let requests = self.requests();
+    /// `hasJoined` 那一行。公钥接口是另一次请求，不在这里。
+    ///
+    /// The `hasJoined` line. The profile-key request is separate and is not returned here.
+    fn has_joined_request(&self) -> String {
+        let requests: Vec<String> = self
+            .requests()
+            .into_iter()
+            .filter(|line| line.contains("hasJoined"))
+            .collect();
         assert_eq!(requests.len(), 1, "{requests:?}");
         requests.into_iter().next().unwrap()
     }
@@ -228,7 +234,7 @@ async fn an_online_player_joins_with_the_profile_from_the_session_server() {
     client.finish_configuration().await;
 
     // 服务端问的是我们这边算出来的同一个哈希。
-    let request = session.only_request();
+    let request = session.has_joined_request();
     assert!(
         request.contains(&format!("username=Kitten&serverId={digest}")),
         "{request}"
@@ -336,8 +342,58 @@ async fn a_wrong_challenge_ends_the_connection() {
     exchange_keys(&mut client, "Kitten", Some(&[0, 0, 0, 0])).await;
 
     client.assert_closed().await;
-    assert!(session.requests().is_empty());
+    // challenge 对不上时不去问 `hasJoined`。公钥接口和这次登录无关，服务端启动时就会取。
+    //
+    // A mismatched challenge does not ask `hasJoined`. The profile-key fetch is unrelated to this
+    // login and starts when the server does.
+    assert!(
+        session
+            .requests()
+            .iter()
+            .all(|line| !line.contains("hasJoined"))
+    );
     assert!(server.handle.online_players().is_empty());
+}
+
+/// 取钥在登录之前就结束，而且那时还没有人在等。登录仍然要马上拿到加密 hello，不能干等到下一次重试。
+///
+/// The key fetch finishes before login, while nobody is waiting. Login still has to get the
+/// encryption hello immediately instead of sitting until the next retry.
+#[tokio::test]
+async fn a_login_after_the_key_fetch_does_not_wait_for_the_next_retry() {
+    let session = FakeSession::start(Answer::Verified(Uuid::from_u128(1))).await;
+    let server = TestServer::start(online_server(&session)).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if session
+            .requests()
+            .iter()
+            .any(|line| line.contains("/publickeys"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the profile-key fetch never started"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    // 请求行已经记下，再留一点时间让回复写完、结果放进通道。通道里当时没有接收者。
+    //
+    // The request line is recorded. Leave a moment for the response to be written and the result
+    // to be stored. Nothing is subscribed to the channel yet.
+    sleep(Duration::from_millis(200)).await;
+
+    let mut client = server.connect().await;
+    let hello = tokio::time::timeout(Duration::from_secs(2), async {
+        client.send(&handshake(LOGIN_INTENT)).await;
+        client.send(&hello("Kitten")).await;
+        client.read_frame().await
+    })
+    .await
+    .expect("login waited on the key fetch even though it had already finished");
+    let _ = read_login_hello(&hello);
 }
 
 /// 关掉正版验证时服务端不发 hello，客户端照常进服，而且没有皮肤。

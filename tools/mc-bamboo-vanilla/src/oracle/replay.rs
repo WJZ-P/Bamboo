@@ -7,10 +7,11 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, Actor, BlockEntities, BlockEvents, BlockHit, BlockState, BlockTicks, Combined, Container,
-    Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome, RedstoneMemory,
-    ShulkerSlots, Slots, TickPriority, destroy_block,
+    Aabb, Actor, BlockEntities, BlockEvents, BlockGameRules, BlockHit, BlockState, BlockTicks,
+    Combined, Container, Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome,
+    RedstoneMemory, ShulkerSlots, Slots, TickPriority, apply_text, destroy_block,
     entity::Entities,
+    level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
     shape::{self, BooleanOp},
     state::{
@@ -20,12 +21,15 @@ use mc_bamboo_blocks::{
     tick_chunk, use_item, use_item_on, use_item_on_with_stack,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
-use mc_bamboo_data::{BlockAncestor, blocks, items, tags::block_tags};
+use mc_bamboo_data::{BlockAncestor, blocks, items, registries::entity_type, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::{
     Names,
-    lines::{Action, Case, Cell, ContainerStack, Destroyed, Double, Header, Kind},
+    lines::{
+        Action, Case, Cell, ContainerStack, Destroyed, Double, Float, Header, Kind, LevelPlay,
+        SoundPlay,
+    },
 };
 
 /// `Player.DEFAULT_EYE_HEIGHT`。
@@ -52,6 +56,10 @@ pub struct Replayed {
     /// 和场景不同的格子。
     pub changes: BTreeMap<BlockPos, u32>,
     pub destroyed: Vec<Destroyed>,
+    /// 全部世界事件，包括 2001，按发生顺序。
+    pub level_events: Vec<LevelPlay>,
+    /// 全部音效，按发生顺序。种子不比较。
+    pub sounds: Vec<SoundPlay>,
     /// 结束时所有已建模容器的非空格子，按坐标和槽位排序。
     pub contents: Vec<ContainerStack>,
     /// 走完 `settle` 之后还排着的计划刻，方块的在前，流体的在后，各自按执行顺序，
@@ -61,6 +69,10 @@ pub struct Replayed {
     pub gained: Vec<String>,
     /// 读写过的方块的注册表 ID。结果不对时看它们里面有没有还没移植的类。
     pub touched: BTreeSet<usize>,
+    /// 跑完之后 `level.random` 的内部种子。
+    ///
+    /// The internal seed of `level.random` after the case.
+    pub random_seed: i64,
 }
 
 /// 排着队的计划刻。
@@ -96,6 +108,14 @@ struct OracleLevel {
     /// 活塞这类会动的方块实体，见 `BlockOracle.java` 的方块事件和 ticker。
     block_entities: BlockEntities,
     block_events: BlockEvents,
+    /// 假玩家。先是操作的那一个，再是 `others` 里的旁观者。
+    ///
+    /// The fake players. The actor comes first, then the bystanders in `others`.
+    living: Vec<EquipTarget>,
+    /// 这道题的游戏规则。默认值和官方 `new GameRules(DEFAULT_FLAGS)` 一样。
+    ///
+    /// Game rules for this case. Defaults match `new GameRules(DEFAULT_FLAGS)`.
+    block_rules: BlockGameRules,
 }
 
 /// 已建模的容器，槽位数和官方一致。
@@ -111,6 +131,9 @@ enum ContainerKind {
     Jukebox,
     DecoratedPot,
     Crafter,
+    Furnace,
+    Brewing,
+    Shelf,
 }
 
 impl ContainerKind {
@@ -130,6 +153,9 @@ impl ContainerKind {
             (BlockAncestor::JukeboxBlock, Self::Jukebox),
             (BlockAncestor::DecoratedPotBlock, Self::DecoratedPot),
             (BlockAncestor::CrafterBlock, Self::Crafter),
+            (BlockAncestor::AbstractFurnaceBlock, Self::Furnace),
+            (BlockAncestor::BrewingStandBlock, Self::Brewing),
+            (BlockAncestor::ShelfBlock, Self::Shelf),
         ]
         .into_iter()
         .find(|(ancestor, _)| state.is_a(*ancestor))
@@ -143,6 +169,8 @@ impl ContainerKind {
             Self::ChiseledBookshelf => 6,
             Self::Jukebox | Self::DecoratedPot => 1,
             Self::Chest | Self::Barrel | Self::ShulkerBox => 27,
+            Self::Furnace | Self::Shelf => 3,
+            Self::Brewing => 5,
         }
     }
 }
@@ -178,6 +206,14 @@ fn seed_mirrored_contents(slots: &mut [ItemStack], state: BlockState) {
     if state.is_a(BlockAncestor::JukeboxBlock) && state.get(HAS_RECORD) && !slots.is_empty() {
         slots[0] = ItemStack::new(items::MUSIC_DISC_13, 1);
     }
+}
+
+fn block_rules_of(header: &Header) -> Result<BlockGameRules, String> {
+    let mut rules = BlockGameRules::vanilla();
+    for (name, value) in &header.rules {
+        apply_text(&mut rules, name, value)?;
+    }
+    Ok(rules)
 }
 
 impl OracleLevel {
@@ -237,6 +273,8 @@ impl OracleLevel {
             redstone: RedstoneMemory::default(),
             block_entities,
             block_events: BlockEvents::default(),
+            living: equip_targets(&case.action, names)?,
+            block_rules: block_rules_of(header)?,
         })
     }
 
@@ -353,6 +391,16 @@ impl OracleLevel {
 }
 
 impl Level for OracleLevel {
+    fn runs_block_entity_tick(&self, pos: BlockPos) -> bool {
+        // 方块 oracle 不跑熔炉和酿造台。漏斗、移动活塞和潜影盒仍按原来的 ticker 跑。
+        //
+        // The block oracle does not tick furnaces or brewing stands. Hoppers, moving pistons
+        // and shulkers keep the ticker they already had.
+        let state = self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
+        !state.is_a(BlockAncestor::AbstractFurnaceBlock)
+            && !state.is_a(BlockAncestor::BrewingStandBlock)
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !self.contains(pos) {
             return BlockState(blocks::VOID_AIR);
@@ -447,12 +495,40 @@ impl Level for OracleLevel {
         &self.world_entities
     }
 
+    fn block_game_rules(&self) -> BlockGameRules {
+        self.block_rules
+    }
+
     fn entities_mut(&mut self) -> &mut Entities {
         &mut self.world_entities
     }
 
     fn random(&self) -> &LevelRandom {
         &self.random
+    }
+
+    /// 官方 `FakePlayer` 先加进世界，再加旁观者。格子都是空的，主副手用题目里的物品。
+    ///
+    /// Official adds the `FakePlayer` first, then bystanders. Armour slots start empty.
+    /// The hands use the items from the case.
+    fn dispenser_targets(&self) -> Vec<EquipTarget> {
+        self.living.clone()
+    }
+
+    fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        let target = self
+            .living
+            .iter_mut()
+            .find(|target| target.entity_id == entity_id)?;
+        let index = usize::try_from(component_slot).ok()?;
+        let stored = target.equipment.get_mut(index)?.as_mut()?;
+        *stored = stack;
+        u16::try_from(component_slot).ok()
     }
 
     /// 官方假世界的区块段每次都扫一遍场景。
@@ -615,6 +691,65 @@ fn intersects(first: Aabb, second: Aabb) -> bool {
         && first.max_z > second.min_z
 }
 
+/// 发射器能穿上的假玩家。创造模式，不是旁观者，八个槽都在。
+///
+/// Fake players a dispenser can equip. Creative, not spectating, and all eight slots exist.
+fn equip_targets(action: &Action, names: &Names) -> Result<Vec<EquipTarget>, String> {
+    let mut targets = vec![player_target(
+        1,
+        &action.actor_box,
+        &action.main,
+        &action.off,
+        names,
+    )?];
+    for (index, bounds) in action.others.iter().enumerate() {
+        let id = i32::try_from(index).unwrap_or(0).saturating_add(2);
+        targets.push(player_target(
+            id,
+            bounds,
+            "minecraft:air",
+            "minecraft:air",
+            names,
+        )?);
+    }
+    Ok(targets)
+}
+
+fn player_target(
+    entity_id: i32,
+    bounds: &[Double; 6],
+    main: &str,
+    off: &str,
+    names: &Names,
+) -> Result<EquipTarget, String> {
+    let empty = Some(ItemStack::empty());
+    Ok(EquipTarget {
+        entity_id,
+        bounds: aabb(bounds),
+        spectator: false,
+        entity_type: entity_type::PLAYER,
+        equipment: [
+            Some(held_stack(names, main)?),
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            Some(held_stack(names, off)?),
+            empty.clone(),
+            empty,
+        ],
+    })
+}
+
+fn held_stack(names: &Names, name: &str) -> Result<ItemStack, String> {
+    let (id, _) = names.item(name)?;
+    if id == items::AIR {
+        Ok(ItemStack::empty())
+    } else {
+        Ok(ItemStack::new(id, 1))
+    }
+}
+
 fn entity_boxes(action: &Action) -> Vec<Aabb> {
     std::iter::once(&action.actor_box)
         .chain(&action.others)
@@ -650,6 +785,10 @@ fn actor_of(action: &Action, names: &Names) -> Result<Actor, String> {
         // 题目的玩家一直是创造模式。
         may_build: true,
         prevents_block_drops: true,
+        // 假玩家是创造模式，但没有任何权限。`canUseGameMasterBlocks` 是假。
+        //
+        // The fake player is creative and has no permissions, so `canUseGameMasterBlocks` is false.
+        can_use_game_master_blocks: false,
     })
 }
 
@@ -715,14 +854,18 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
     let end = after_action + i64::from(action.settle);
     settle(&mut level, &mut ticks, after_action, end, &mut outcome);
 
+    let (level_events, sounds) = events_of(&outcome);
     Ok(Replayed {
         result: result_name(action.kind, outcome.result),
         changes: level.changes(&case.scene),
         destroyed: destroyed_of(&outcome),
+        level_events,
+        sounds,
         contents: contents_of(&level),
         ticks: scheduled_of(&ticks, end),
         gained: gained_of(&outcome, &actor),
         touched: level.touched.into_inner(),
+        random_seed: level.random.source().seed(),
     })
 }
 
@@ -788,19 +931,36 @@ fn result_name(kind: Kind, result: InteractionResult) -> &'static str {
 
 /// 结束时所有已建模容器的非空格子。顺序和官方一样：先按 `BlockPos.asLong`（x、z、y），再按槽位。
 fn contents_of(level: &OracleLevel) -> Vec<ContainerStack> {
-    let mut positions: Vec<BlockPos> = level.containers.keys().copied().collect();
-    positions.sort_by_key(|pos| pos.pack());
-    let mut contents = Vec::new();
-    for pos in positions {
+    // 场景里的熔炉和酿造台在槽位表里。玩家这题放下的那一台物品在方块实体上，实体盖过空表。
+    //
+    // Scene furnaces and brewing stands live in the slot table. One placed during the case
+    // keeps items on its block entity, and that entity replaces the empty table.
+    let mut lists: BTreeMap<i64, (BlockPos, Vec<ItemStack>)> = BTreeMap::new();
+    for (pos, slots) in &level.containers {
+        let state = level.blocks.get(pos).copied().unwrap_or(BlockState::AIR);
         // 雕纹书架的内容是状态的镜像，官方 `collectContents` 不把它写进内容表。
         //
         // A chiseled bookshelf mirrors its contents in the block state. Vanilla
         // `collectContents` leaves it out of the contents list.
-        let state = level.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
         if state.is_a(BlockAncestor::ChiseledBookShelfBlock) {
             continue;
         }
-        for (slot, stack) in level.containers[&pos].iter().enumerate() {
+        lists.insert(pos.pack(), (*pos, slots.clone()));
+    }
+    level.block_entities.visit(|pos, entity| {
+        let Some(items) = mc_bamboo_blocks::entity_container_items(entity) else {
+            return;
+        };
+        let state = level.blocks.get(&pos).copied().unwrap_or(BlockState::AIR);
+        if state.is_a(BlockAncestor::AbstractFurnaceBlock)
+            || state.is_a(BlockAncestor::BrewingStandBlock)
+        {
+            lists.insert(pos.pack(), (pos, items));
+        }
+    });
+    let mut contents = Vec::new();
+    for (_, (pos, slots)) in lists {
+        for (slot, stack) in slots.iter().enumerate() {
             if stack.is_empty() {
                 continue;
             }
@@ -837,15 +997,138 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
+            | Effect::Sound { .. }
+            | Effect::LevelEvent { .. }
             | Effect::NoteBlockPlayed { .. }
             // 方块事件只发给客户端播放动画，假世界没有客户端。
             | Effect::BlockEvent { .. }
             // 堆肥的粒子和声音，题里不比较。
             | Effect::ComposterFill { .. }
             // 讲台翻页的声音，题里不比较。
-            | Effect::PageTurned { .. } => None,
+            | Effect::PageTurned { .. }
+            | Effect::DispenserEquipped { .. }
+            // 营火食物的方块实体包，题里不比较。
+            | Effect::CampfireChanged { .. }
+            // 快捷栏提示和命令方块编辑器不进方块题的比较。
+            //
+            // Action-bar text and the command-block editor are not part of a block case.
+            | Effect::Overlay { .. }
+            | Effect::OpenCommandBlock { .. } => None,
         })
         .collect()
+}
+
+/// 把这一题留下的效应拆成世界事件和音效两个列表，各自按发生顺序。
+fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
+    let mut events = Vec::new();
+    let mut sounds = Vec::new();
+    for effect in &outcome.effects {
+        match *effect {
+            Effect::Destroyed {
+                pos,
+                state,
+                except_initiator,
+            } => events.push(LevelPlay(
+                2001,
+                pos.x,
+                pos.y,
+                pos.z,
+                state.0 as i32,
+                except_initiator,
+            )),
+            Effect::TorchBurnout { pos } => {
+                events.push(LevelPlay(1502, pos.x, pos.y, pos.z, 0, false));
+            }
+            Effect::BoneMealUsed { pos } => {
+                events.push(LevelPlay(1505, pos.x, pos.y, pos.z, 15, false));
+            }
+            Effect::SignWaxed { pos } => {
+                events.push(LevelPlay(3003, pos.x, pos.y, pos.z, 0, false));
+            }
+            Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator,
+            } => events.push(LevelPlay(
+                event,
+                pos.x,
+                pos.y,
+                pos.z,
+                data,
+                except_initiator,
+            )),
+            // `ComposterBlock` 的 `levelEvent(1500)`。官方 `except` 是 null。
+            Effect::ComposterFill { pos, success } => events.push(LevelPlay(
+                1500,
+                pos.x,
+                pos.y,
+                pos.z,
+                i32::from(success),
+                false,
+            )),
+            Effect::Sound {
+                sound,
+                source,
+                x,
+                y,
+                z,
+                volume,
+                pitch,
+                except_initiator,
+                ..
+            } => sounds.push(SoundPlay(
+                sound,
+                Double(x),
+                Double(y),
+                Double(z),
+                source.id(),
+                Float(volume),
+                Float(pitch),
+                except_initiator,
+            )),
+            // `NoteBlock.triggerEvent` 的 `playSeededSound`。自定义头颅是直接 Holder，注册表 ID 是 -1。
+            Effect::NoteBlockPlayed {
+                pos,
+                instrument,
+                pitch,
+                custom,
+                ..
+            } => {
+                let id = if custom.is_some() {
+                    -1
+                } else {
+                    i32::from(instrument.sound())
+                };
+                sounds.push(SoundPlay(
+                    id,
+                    Double(f64::from(pos.x) + 0.5),
+                    Double(f64::from(pos.y) + 0.5),
+                    Double(f64::from(pos.z) + 0.5),
+                    mc_bamboo_data::sounds::RECORDS.id(),
+                    Float(3.0),
+                    Float(pitch),
+                    false,
+                ));
+            }
+            Effect::FilledBucket { .. }
+            | Effect::EmptiedBucket { .. }
+            | Effect::SignChanged { .. }
+            | Effect::OpenSignEditor { .. }
+            | Effect::BlockEvent { .. }
+            // 讲台翻页是菜单里的 `levelEvent(1043)`，方块题不比较。游戏层会把它发出去。
+            // A lectern page turn is menu `levelEvent(1043)`. Block cases do not compare it.
+            // The game layer still sends it.
+            | Effect::PageTurned { .. }
+            | Effect::DispenserEquipped { .. }
+            // 营火食物的方块实体包，方块题不比较。游戏层会把它发出去。
+            // The campfire food block-entity packet is not compared. The game layer still sends it.
+            | Effect::CampfireChanged { .. }
+            | Effect::Overlay { .. }
+            | Effect::OpenCommandBlock { .. } => {}
+        }
+    }
+    (events, sounds)
 }
 
 /// 舀起来的东西。假玩家的物品栏里只有两只手上的物品，已经有同样的物品时官方不再放。
@@ -902,6 +1185,8 @@ mod tests {
             redstone: RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
+            living: Vec::new(),
+            block_rules: BlockGameRules::vanilla(),
         }
     }
 
