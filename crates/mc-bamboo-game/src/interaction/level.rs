@@ -335,6 +335,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
+            self.block_weather,
             state,
             pos,
         )
@@ -346,6 +347,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
+            self.block_weather,
             state,
             pos,
         )
