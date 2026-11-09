@@ -18,6 +18,7 @@ mod items;
 mod players;
 mod scoreboard;
 mod select;
+mod team;
 mod teleport;
 mod time;
 

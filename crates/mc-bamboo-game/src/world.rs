@@ -350,11 +350,14 @@ impl World {
                 if chat::on_chat(
                     region,
                     player,
-                    message,
-                    signature.map(|bytes| *bytes),
-                    time_millis,
-                    salt,
-                    &last_seen,
+                    chat::ChatMessage {
+                        global: &self.global,
+                        text: message,
+                        signature: signature.map(|bytes| *bytes),
+                        time_millis,
+                        salt,
+                        last_seen: &last_seen,
+                    },
                 ) {
                     chat::detect_chat_rate_spam(region, player);
                 }

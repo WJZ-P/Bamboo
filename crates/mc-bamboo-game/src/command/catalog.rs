@@ -7,7 +7,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, gamerule, items, players, scoreboard, teleport, time,
+    CommandFn, Commands, blocks, gamerule, items, players, scoreboard, team, teleport, time,
 };
 
 struct Builder {
@@ -78,6 +78,7 @@ pub(crate) fn build() -> Commands {
     register_say(&mut builder, root);
     register_scoreboard(&mut builder, root);
     register_setblock(&mut builder, root);
+    register_team(&mut builder, root);
     register_teleport(&mut builder, root);
     register_time(&mut builder, root);
     Commands {
@@ -538,6 +539,88 @@ fn add_player_number_formats(builder: &mut Builder, objective: usize) {
     let fixed = builder.literal(objective, "fixed", 0);
     let contents = builder.argument(fixed, "contents", ArgumentType::Component, 0);
     builder.run(contents, scoreboard::players_format_fixed);
+}
+
+fn register_team(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "team", permission::GAMEMASTERS);
+    builder.bind_literal(command, "list", team::list);
+    let list = builder.literal(command, "list", 0);
+    let name = builder.argument(list, "team", ArgumentType::Team, 0);
+    builder.run(name, team::list_members);
+
+    let add = builder.literal(command, "add", 0);
+    let name = builder.argument(add, "team", ArgumentType::String(StringKind::SingleWord), 0);
+    builder.run(name, team::add);
+    let display = builder.argument(name, "displayName", ArgumentType::Component, 0);
+    builder.run(display, team::add);
+
+    let remove = builder.literal(command, "remove", 0);
+    let name = builder.argument(remove, "team", ArgumentType::Team, 0);
+    builder.run(name, team::remove);
+
+    let empty = builder.literal(command, "empty", 0);
+    let name = builder.argument(empty, "team", ArgumentType::Team, 0);
+    builder.run(name, team::empty);
+
+    let join = builder.literal(command, "join", 0);
+    let name = builder.argument(join, "team", ArgumentType::Team, 0);
+    builder.run(name, team::join);
+    let members = builder.argument(
+        name,
+        "members",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    builder.run(members, team::join);
+
+    let leave = builder.literal(command, "leave", 0);
+    let members = builder.argument(
+        leave,
+        "members",
+        ArgumentType::ScoreHolder { multiple: true },
+        0,
+    );
+    builder.run(members, team::leave);
+
+    let modify = builder.literal(command, "modify", 0);
+    let name = builder.argument(modify, "team", ArgumentType::Team, 0);
+    let display_name = builder.literal(name, "displayName", 0);
+    let display = builder.argument(display_name, "displayName", ArgumentType::Component, 0);
+    builder.run(display, team::display_name);
+    let prefix = builder.literal(name, "prefix", 0);
+    let text = builder.argument(prefix, "prefix", ArgumentType::Component, 0);
+    builder.run(text, team::prefix);
+    let suffix = builder.literal(name, "suffix", 0);
+    let text = builder.argument(suffix, "suffix", ArgumentType::Component, 0);
+    builder.run(text, team::suffix);
+
+    let color = builder.literal(name, "color", 0);
+    let value = builder.argument(color, "value", ArgumentType::TeamColor, 0);
+    builder.run(value, team::color);
+    builder.bind_literal(color, "reset", team::clear_color);
+
+    let friendly = builder.literal(name, "friendlyFire", 0);
+    let allowed = builder.argument(friendly, "allowed", ArgumentType::Bool, 0);
+    builder.run(allowed, team::friendly_fire);
+    let invisibles = builder.literal(name, "seeFriendlyInvisibles", 0);
+    let allowed = builder.argument(invisibles, "allowed", ArgumentType::Bool, 0);
+    builder.run(allowed, team::see_invisibles);
+
+    let nametag = builder.literal(name, "nametagVisibility", 0);
+    builder.bind_literal(nametag, "always", team::nametag_always);
+    builder.bind_literal(nametag, "never", team::nametag_never);
+    builder.bind_literal(nametag, "hideForOtherTeams", team::nametag_hide_other);
+    builder.bind_literal(nametag, "hideForOwnTeam", team::nametag_hide_own);
+    let death = builder.literal(name, "deathMessageVisibility", 0);
+    builder.bind_literal(death, "always", team::death_always);
+    builder.bind_literal(death, "never", team::death_never);
+    builder.bind_literal(death, "hideForOtherTeams", team::death_hide_other);
+    builder.bind_literal(death, "hideForOwnTeam", team::death_hide_own);
+    let collision = builder.literal(name, "collisionRule", 0);
+    builder.bind_literal(collision, "always", team::collision_always);
+    builder.bind_literal(collision, "never", team::collision_never);
+    builder.bind_literal(collision, "pushOtherTeams", team::collision_other);
+    builder.bind_literal(collision, "pushOwnTeam", team::collision_own);
 }
 
 fn players_argument() -> ArgumentType {
