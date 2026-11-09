@@ -19,6 +19,7 @@ const ROOTS: &[&str] = &[
     "setworldspawn",
     "spawnpoint",
     "stopsound",
+    "weather",
 ];
 
 /// 从官方报告里取一个根节点。

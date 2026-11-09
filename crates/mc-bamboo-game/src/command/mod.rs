@@ -24,6 +24,7 @@ mod select;
 mod stopsound;
 mod teleport;
 mod time;
+mod weather;
 mod world_settings;
 
 use std::sync::OnceLock;

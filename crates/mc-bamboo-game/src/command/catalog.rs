@@ -8,7 +8,7 @@ use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
     CommandFn, Commands, blocks, clone, enchant, gamerule, items, loot, players, random, stopsound,
-    teleport, time, world_settings,
+    teleport, time, weather, world_settings,
 };
 
 struct Builder {
@@ -89,6 +89,7 @@ pub(crate) fn build() -> Commands {
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
     register_loot(&mut builder, root);
+    register_weather(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -648,6 +649,16 @@ fn loot_action(target: LootTarget, source: LootSource) -> CommandFn {
 
 fn bind_loot(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
     builder.run(parent, loot_action(target, source));
+}
+
+fn register_weather(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "weather", permission::GAMEMASTERS);
+    for name in ["clear", "rain", "thunder"] {
+        let branch = builder.literal(command, name, 0);
+        builder.run(branch, weather::weather);
+        let duration = builder.argument(branch, "duration", ArgumentType::Time { minimum: 1 }, 0);
+        builder.run(duration, weather::weather);
+    }
 }
 
 fn register_seed(builder: &mut Builder, root: usize) {
