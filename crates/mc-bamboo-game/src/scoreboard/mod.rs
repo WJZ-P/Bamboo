@@ -185,6 +185,30 @@ impl Scoreboard {
             .is_some_and(|objective| objective.criteria == "trigger")
     }
 
+    /// 官方 `ScoreContents.getScore`：取分数，按分数自己的格式、目标的格式、
+    /// 或默认 `StyledFormat.NO_STYLE` 把整数渲染成组件。
+    ///
+    /// `ScoreContents.getScore`: fetch a score and render it with the score's own
+    /// format, the objective's format, or `StyledFormat.NO_STYLE`.
+    pub(crate) fn formatted_score(&self, player: &str, objective: &str) -> Option<Component> {
+        let value = self.score_value(player, objective)?;
+        let format = self
+            .scores
+            .get(player)
+            .and_then(|scores| scores.get(objective))
+            .and_then(|score| score.format.as_ref())
+            .or_else(|| {
+                self.objective(objective)
+                    .and_then(|objective| objective.format.as_ref())
+            });
+        Some(match format {
+            None => Component::text(value.to_string()),
+            Some(NumberFormat::Blank) => Component::text(""),
+            Some(NumberFormat::Fixed(component)) => component.clone(),
+            Some(NumberFormat::Styled(style)) => styled_score(value, style),
+        })
+    }
+
     pub(crate) fn objective_count(&self) -> usize {
         self.objectives.len()
     }
@@ -1128,4 +1152,15 @@ fn floor_div(left: i32, right: i32) -> Result<i32, ScoreFailure> {
 fn floor_mod(left: i32, right: i32) -> Result<i32, ScoreFailure> {
     let divided = floor_div(left, right)?;
     Ok(left.wrapping_sub(divided.wrapping_mul(right)))
+}
+
+/// `StyledFormat.format`：样式字段直接铺在组件上，不是嵌套的 `style` 键。
+fn styled_score(value: i32, style: &mc_bamboo_nbt::Tag) -> Component {
+    let mut out = Component::text(value.to_string());
+    if let mc_bamboo_nbt::Tag::Compound(entries) = style {
+        for (key, value) in entries {
+            out = out.with_entry(key, value.clone());
+        }
+    }
+    out
 }

@@ -4,10 +4,7 @@
 //! 加人发 add，移除发 remove，改属性按动作发 update，隐藏时整体切换 add/remove。
 
 use mc_bamboo_command::{ParsedCommand, Value};
-use mc_bamboo_protocol::{
-    components::text::component_from_checked_tag,
-    text::{Component, TranslateArg},
-};
+use mc_bamboo_protocol::text::{Component, TranslateArg};
 use uuid::Uuid;
 
 use crate::{
@@ -43,13 +40,14 @@ fn identifier(parsed: &ParsedCommand) -> Result<String, CommandFail> {
         .ok_or_else(|| fail("command.failed"))
 }
 
-fn component(parsed: &ParsedCommand, name: &str) -> Result<Component, CommandFail> {
-    parsed
-        .get(name)
-        .and_then(Value::as_component_tag)
-        .cloned()
-        .map(component_from_checked_tag)
-        .ok_or_else(|| fail("command.failed"))
+fn component(
+    global: &Global,
+    region: &Region,
+    source: PlayerId,
+    parsed: &ParsedCommand,
+    name: &str,
+) -> Result<Component, CommandFail> {
+    crate::command::text::resolved_component(global, region, source, parsed, name)
 }
 
 fn amount(parsed: &ParsedCommand, name: &str) -> Result<i32, CommandFail> {
@@ -84,7 +82,7 @@ pub(crate) fn add(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let name = identifier(parsed)?;
-    let display = component(parsed, "name")?;
+    let display = component(global, region, id, parsed, "name")?;
     if !global.boss_bars_mut().create(name.clone(), display) {
         return Err(fail_with(
             "commands.bossbar.create.failed",
@@ -249,7 +247,7 @@ pub(crate) fn set_name(
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
     let name = bar(global, parsed)?;
-    let display = component(parsed, "name")?;
+    let display = component(global, region, id, parsed, "name")?;
     if global.boss_bars_mut().set_name(&name, display, region) == Some(false) {
         return Err(fail("commands.bossbar.set.name.unchanged"));
     }
@@ -723,5 +721,35 @@ mod tests {
                 .iter()
                 .any(|frame| frame.id == clientbound::BOSS_EVENT)
         );
+    }
+
+    #[test]
+    fn bossbar_names_resolve_selectors_before_they_are_stored() {
+        let (mut server, client) = operator("Kitten");
+        run(
+            &mut server,
+            &client,
+            r#"bossbar add minecraft:test {selector:"@a"}"#,
+        );
+        let display = server
+            .global()
+            .boss_bars()
+            .display_name("minecraft:test")
+            .expect("Boss 栏还在");
+        let mut bytes = Vec::new();
+        display.write(&mut bytes);
+        assert!(
+            bytes.windows(6).any(|window| window == b"Kitten"),
+            "selector 应展开成命令源的名字: {display:?}"
+        );
+        run(
+            &mut server,
+            &client,
+            r#"bossbar set minecraft:test name {text:"Renamed"}"#,
+        );
+        assert!(has_key(
+            &system_text(&client),
+            "commands.bossbar.set.name.success"
+        ));
     }
 }

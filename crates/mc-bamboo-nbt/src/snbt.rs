@@ -53,6 +53,13 @@ pub fn parse_snbt_compound(input: &str) -> Result<Vec<(String, Tag)>, SnbtError>
     }
 }
 
+/// 和 [`parse_snbt_prefix`] 相同；命令参数里用这个名字贴近官方 `parseAsArgument`。
+///
+/// Same as [`parse_snbt_prefix`], under the name the official `parseAsArgument` uses.
+pub fn parse_snbt_argument(input: &str) -> Result<(Tag, usize), SnbtError> {
+    parse_snbt_prefix(input)
+}
+
 fn tag_name(tag: &Tag) -> &'static str {
     match tag {
         Tag::Byte(_) => "TAG_Byte",
@@ -1548,6 +1555,23 @@ mod tests {
             Ok(tag) => tag,
             Err(error) => panic!("failed to parse {input:?}: {error}"),
         }
+    }
+
+    #[test]
+    fn arguments_stop_after_one_literal() {
+        let (tag, used) = parse_snbt_argument("{text:\"hi\"} rest").unwrap();
+        assert_eq!(tag, parse("{text:\"hi\"}"));
+        assert_eq!(used, "{text:\"hi\"}".chars().count());
+        let (tag, used) = parse_snbt_argument("[\"a\",\"b\"] trailing").unwrap();
+        assert_eq!(
+            tag,
+            Tag::List(vec![Tag::String("a".into()), Tag::String("b".into())])
+        );
+        assert_eq!(used, "[\"a\",\"b\"]".chars().count());
+        let (tag, used) = parse_snbt_argument("\"hello world\" tail").unwrap();
+        assert_eq!(tag, Tag::String("hello world".into()));
+        assert_eq!(used, "\"hello world\"".chars().count());
+        assert!(parse_snbt_argument("{text:\"hi\"").is_err());
     }
 
     #[test]

@@ -7,8 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, bossbar, gamerule, items, players, scoreboard, team, teleport,
-    time,
+    CommandFn, Commands, blocks, bossbar, gamerule, items, particle, players, playsound,
+    scoreboard, team, teleport, text, time, title,
 };
 
 struct Builder {
@@ -76,12 +76,16 @@ pub(crate) fn build() -> Commands {
     register_help(&mut builder, root);
     register_kick(&mut builder, root);
     register_list(&mut builder, root);
+    register_playsound(&mut builder, root);
     register_msg(&mut builder, root);
+    register_particle(&mut builder, root);
     register_say(&mut builder, root);
     register_scoreboard(&mut builder, root);
     register_setblock(&mut builder, root);
+    register_tellraw(&mut builder, root);
     register_team(&mut builder, root);
     register_teleport(&mut builder, root);
+    register_title(&mut builder, root);
     register_time(&mut builder, root);
     Commands {
         graph: builder.graph,
@@ -320,6 +324,90 @@ fn register_msg(builder: &mut Builder, root: usize) {
     builder.graph.redirect(whisper, msg);
 }
 
+/// `PlaySoundCommand.register`：`sound` 用 `ResourceLocationArgument` 加
+/// `minecraft:available_sounds` 自定义补全；11 个来源各挂同一条参数链。
+/// `ParticleCommand.register`：`name` 后面 pos/delta/speed/count/force|normal/viewers。
+fn register_particle(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "particle", permission::GAMEMASTERS);
+    let name = builder.argument(command, "name", ArgumentType::Particle, 0);
+    builder.run(name, particle::normal);
+    let pos = builder.argument(name, "pos", ArgumentType::Vec3, 0);
+    builder.run(pos, particle::normal);
+    let spread = builder.argument(pos, "delta", ArgumentType::Vec3Uncentered, 0);
+    let speed = builder.argument(
+        spread,
+        "speed",
+        ArgumentType::Float {
+            min: 0.0,
+            max: f32::MAX,
+        },
+        0,
+    );
+    let count = builder.argument(
+        speed,
+        "count",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(count, particle::normal);
+    let force_action: CommandFn = particle::force;
+    let normal_action: CommandFn = particle::normal;
+    for (mode, action) in [("force", force_action), ("normal", normal_action)] {
+        let branch = builder.literal(count, mode, 0);
+        builder.run(branch, action);
+        let viewers = builder.argument(branch, "viewers", players_argument(), 0);
+        builder.run(viewers, action);
+    }
+}
+
+fn register_playsound(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "playsound", permission::GAMEMASTERS);
+    let sound = builder.argument(command, "sound", ArgumentType::ResourceLocation, 0);
+    builder
+        .graph
+        .suggest_with(sound, playsound::SUGGESTION, playsound::suggest_sounds);
+    builder.run(sound, playsound::sound_only);
+    for (name, action) in playsound::SOURCES
+        .iter()
+        .map(|(name, _)| *name)
+        .zip(playsound::ACTIONS)
+    {
+        let branch = builder.literal(sound, name, 0);
+        builder.run(branch, action);
+        let targets = builder.argument(branch, "targets", players_argument(), 0);
+        builder.run(targets, action);
+        let pos = builder.argument(targets, "pos", ArgumentType::Vec3, 0);
+        builder.run(pos, action);
+        let volume = builder.argument(
+            pos,
+            "volume",
+            ArgumentType::Float {
+                min: 0.0,
+                max: f32::MAX,
+            },
+            0,
+        );
+        builder.run(volume, action);
+        let pitch = builder.argument(
+            volume,
+            "pitch",
+            ArgumentType::Float { min: 0.0, max: 2.0 },
+            0,
+        );
+        builder.run(pitch, action);
+        let min_volume = builder.argument(
+            pitch,
+            "minVolume",
+            ArgumentType::Float { min: 0.0, max: 1.0 },
+            0,
+        );
+        builder.run(min_volume, action);
+    }
+}
+
 fn register_say(builder: &mut Builder, root: usize) {
     let say = builder.literal(root, "say", permission::GAMEMASTERS);
     let message = builder.argument(say, "message", ArgumentType::Message, 0);
@@ -335,6 +423,52 @@ fn register_setblock(builder: &mut Builder, root: usize) {
     builder.bind_literal(block, "keep", blocks::setblock_keep);
     builder.bind_literal(block, "replace", blocks::setblock_replace);
     builder.bind_literal(block, "strict", blocks::setblock_strict);
+}
+
+/// `TellRawCommand.register`：权限 2，只给每个目标发系统消息，没有成功反馈。
+fn register_tellraw(builder: &mut Builder, root: usize) {
+    let tellraw = builder.literal(root, "tellraw", permission::GAMEMASTERS);
+    let targets = builder.argument(tellraw, "targets", players_argument(), 0);
+    let message = builder.argument(targets, "message", ArgumentType::Component, 0);
+    builder.run(message, text::tellraw);
+}
+
+/// `TitleCommand.register`：权限 2，六种动作；`times` 用 `TimeArgument`（min 0）。
+fn register_title(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "title", permission::GAMEMASTERS);
+    let targets = builder.argument(command, "targets", players_argument(), 0);
+    for (name, action) in [
+        ("clear", title::Action::Clear),
+        ("reset", title::Action::Reset),
+    ] {
+        let node = builder.literal(targets, name, 0);
+        builder.run(node, action_fn(action));
+    }
+    for (name, action) in [
+        ("title", title::Action::Title),
+        ("subtitle", title::Action::Subtitle),
+        ("actionbar", title::Action::Actionbar),
+    ] {
+        let branch = builder.literal(targets, name, 0);
+        let text = builder.argument(branch, "title", ArgumentType::Component, 0);
+        builder.run(text, action_fn(action));
+    }
+    let times = builder.literal(targets, "times", 0);
+    let fade_in = builder.argument(times, "fadeIn", ArgumentType::Time { minimum: 0 }, 0);
+    let stay = builder.argument(fade_in, "stay", ArgumentType::Time { minimum: 0 }, 0);
+    let fade_out = builder.argument(stay, "fadeOut", ArgumentType::Time { minimum: 0 }, 0);
+    builder.run(fade_out, title::run_times);
+}
+
+fn action_fn(action: title::Action) -> CommandFn {
+    match action {
+        title::Action::Clear => title::clear,
+        title::Action::Reset => title::reset,
+        title::Action::Title => title::show_title,
+        title::Action::Subtitle => title::show_subtitle,
+        title::Action::Actionbar => title::show_actionbar,
+        title::Action::Times => title::run_times,
+    }
 }
 
 fn register_teleport(builder: &mut Builder, root: usize) {

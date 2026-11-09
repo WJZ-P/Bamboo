@@ -4,10 +4,12 @@
 //! [`ArgumentType::parser_name`] 返回的是官方注册名，网络层按它查 ID。
 
 pub mod block;
+pub mod component;
 pub mod coordinates;
 pub mod entity;
 pub mod item;
 pub mod message;
+pub mod particle;
 pub mod primitives;
 pub mod scoreboard;
 
@@ -53,12 +55,18 @@ pub enum ArgumentType {
     },
     BlockPos,
     Vec3,
+    /// `Vec3Argument.vec3(false)`：不把绝对整数居中。`/particle` 的 delta 用它。
+    Vec3Uncentered,
     Rotation,
     BlockState,
     BlockPredicate,
     Item,
     ItemPredicate,
     Message,
+    /// 官方 `ComponentArgument`：一个 SNBT 文本组件。
+    Component,
+    /// 官方 `ParticleArgument`：粒子类型名，后面可以跟一段 SNBT 选项。
+    Particle,
     /// 官方 `IdentifierArgument`。时间标记用它，不查注册表。
     ///
     /// Official `IdentifierArgument`. Time markers use it and do not look up a registry.
@@ -95,10 +103,6 @@ pub enum ArgumentType {
     ScoreHolder {
         multiple: bool,
     },
-    /// 官方 `ComponentArgument`。
-    ///
-    /// Official `ComponentArgument`.
-    Component,
     /// 官方 `StyleArgument`。
     ///
     /// Official `StyleArgument`.
@@ -124,13 +128,15 @@ impl ArgumentType {
             Self::EntityAnchor => "minecraft:entity_anchor",
             Self::Time { .. } => "minecraft:time",
             Self::BlockPos => "minecraft:block_pos",
-            Self::Vec3 => "minecraft:vec3",
+            Self::Vec3 | Self::Vec3Uncentered => "minecraft:vec3",
             Self::Rotation => "minecraft:rotation",
             Self::BlockState => "minecraft:block_state",
             Self::BlockPredicate => "minecraft:block_predicate",
             Self::Item => "minecraft:item_stack",
             Self::ItemPredicate => "minecraft:item_predicate",
             Self::Message => "minecraft:message",
+            Self::Component => "minecraft:component",
+            Self::Particle => "minecraft:particle",
             Self::ResourceLocation => "minecraft:resource_location",
             Self::Resource { .. } => "minecraft:resource",
             Self::Objective => "minecraft:objective",
@@ -139,7 +145,6 @@ impl ArgumentType {
             Self::Operation => "minecraft:operation",
             Self::DisplaySlot => "minecraft:scoreboard_slot",
             Self::ScoreHolder { .. } => "minecraft:score_holder",
-            Self::Component => "minecraft:component",
             Self::Style => "minecraft:style",
             Self::TeamColor => "minecraft:team_color",
         }
@@ -160,13 +165,15 @@ impl ArgumentType {
             Self::EntityAnchor => registry::ENTITY_ANCHOR,
             Self::Time { .. } => registry::TIME,
             Self::BlockPos => registry::BLOCK_POS,
-            Self::Vec3 => registry::VEC3,
+            Self::Vec3 | Self::Vec3Uncentered => registry::VEC3,
             Self::Rotation => registry::ROTATION,
             Self::BlockState => registry::BLOCK_STATE,
             Self::BlockPredicate => registry::BLOCK_PREDICATE,
             Self::Item => registry::ITEM_STACK,
             Self::ItemPredicate => registry::ITEM_PREDICATE,
             Self::Message => registry::MESSAGE,
+            Self::Component => registry::COMPONENT,
+            Self::Particle => registry::PARTICLE,
             Self::ResourceLocation => registry::RESOURCE_LOCATION,
             Self::Resource { .. } => registry::RESOURCE,
             Self::Objective => registry::OBJECTIVE,
@@ -175,7 +182,6 @@ impl ArgumentType {
             Self::Operation => registry::OPERATION,
             Self::DisplaySlot => registry::SCOREBOARD_SLOT,
             Self::ScoreHolder { .. } => registry::SCORE_HOLDER,
-            Self::Component => registry::COMPONENT,
             Self::Style => registry::STYLE,
             Self::TeamColor => registry::TEAM_COLOR,
         }
@@ -225,12 +231,15 @@ impl ArgumentType {
             Self::Time { minimum } => primitives::parse_time(reader, *minimum),
             Self::BlockPos => coordinates::parse_block_pos(reader),
             Self::Vec3 => coordinates::parse_vec3(reader),
+            Self::Vec3Uncentered => coordinates::parse_vec3_without_centering(reader),
             Self::Rotation => coordinates::parse_rotation(reader),
             Self::BlockState => block::parse_block_state(reader),
             Self::BlockPredicate => block::parse_block_predicate(reader),
             Self::Item => item::parse_item(reader),
             Self::ItemPredicate => item::parse_item_predicate(reader),
             Self::Message => message::parse_message(reader, allow_selectors),
+            Self::Component => component::parse_component(reader),
+            Self::Particle => particle::parse_particle(reader),
             Self::ResourceLocation => parse_resource_location(reader),
             Self::Resource { registry } => parse_resource(reader, registry),
             Self::Objective => scoreboard::parse_objective(reader),
@@ -241,7 +250,6 @@ impl ArgumentType {
             Self::ScoreHolder { multiple } => {
                 scoreboard::parse_score_holder(reader, *multiple, allow_selectors)
             }
-            Self::Component => scoreboard::parse_component(reader),
             Self::Style => scoreboard::parse_style(reader),
             Self::TeamColor => scoreboard::parse_team_color(reader),
         }

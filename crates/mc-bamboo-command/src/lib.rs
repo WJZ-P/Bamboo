@@ -24,8 +24,8 @@ pub use reader::StringReader;
 pub use value::{
     BlockPredicateInput, BlockStateInput, Coordinates, DisplaySlot, EntityAnchor, EntitySelector,
     GameMode, ItemInput, ItemPredicateInput, Message, MessagePart, NumberBounds, ObjectiveCriteria,
-    Rotation, ScoreHolderSpec, ScoreOperation, SortOrder, TeamColorId, Value, WorldCoordinate,
-    short_name, wrap_degrees,
+    ParticleInput, Rotation, ScoreHolderSpec, ScoreOperation, SortOrder, TeamColorId, Value,
+    WorldCoordinate, short_name, wrap_degrees,
 };
 
 /// 官方权限等级：所有玩家、管理员、游戏管理员、管理员、服主。

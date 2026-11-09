@@ -13,15 +13,20 @@ pub(crate) use players::change_own_mode;
 mod blocks;
 mod bossbar;
 mod catalog;
+mod effects;
 mod feedback;
 mod gamerule;
 mod items;
+mod particle;
 mod players;
+mod playsound;
 mod scoreboard;
 mod select;
 mod team;
 mod teleport;
+mod text;
 mod time;
+mod title;
 
 use std::sync::OnceLock;
 
@@ -323,19 +328,21 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::EntityAnchor
         | ArgumentType::BlockPos
         | ArgumentType::Vec3
+        | ArgumentType::Vec3Uncentered
         | ArgumentType::Rotation
         | ArgumentType::BlockState
         | ArgumentType::BlockPredicate
         | ArgumentType::Item
         | ArgumentType::ItemPredicate
         | ArgumentType::Message
+        | ArgumentType::Component
+        | ArgumentType::Particle
         | ArgumentType::ResourceLocation
         | ArgumentType::Objective
         | ArgumentType::Team
         | ArgumentType::Criteria
         | ArgumentType::Operation
         | ArgumentType::DisplaySlot
-        | ArgumentType::Component
         | ArgumentType::Style
         | ArgumentType::TeamColor => ArgumentProperties::None,
     }
@@ -386,7 +393,7 @@ mod tests {
     use super::*;
     use crate::{global::Global, inbound::PlayerId, player::Player, region::Region};
 
-    fn world_with(name: &str, level: u8) -> (Global, Region, PlayerId) {
+    pub(super) fn world_with(name: &str, level: u8) -> (Global, Region, PlayerId) {
         let mut region = Region::new(2, 20, false);
         let id = PlayerId(1);
         let mut player = Player::new(
@@ -554,11 +561,92 @@ mod official_tree {
         "/bossbar/set/id/style/progress",
         "/bossbar/set/id/value/value",
         "/bossbar/set/id/visible/visible",
+        "tellraw/targets/message",
+        "title/targets/actionbar/title",
+        "title/targets/clear",
+        "title/targets/reset",
+        "title/targets/subtitle/title",
+        "title/targets/times/fadeIn/stay/fadeOut",
+        "title/targets/title/title",
+        "playsound/sound",
+        "playsound/sound/ambient",
+        "playsound/sound/ambient/targets",
+        "playsound/sound/ambient/targets/pos",
+        "playsound/sound/ambient/targets/pos/volume",
+        "playsound/sound/ambient/targets/pos/volume/pitch",
+        "playsound/sound/ambient/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/block",
+        "playsound/sound/block/targets",
+        "playsound/sound/block/targets/pos",
+        "playsound/sound/block/targets/pos/volume",
+        "playsound/sound/block/targets/pos/volume/pitch",
+        "playsound/sound/block/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/hostile",
+        "playsound/sound/hostile/targets",
+        "playsound/sound/hostile/targets/pos",
+        "playsound/sound/hostile/targets/pos/volume",
+        "playsound/sound/hostile/targets/pos/volume/pitch",
+        "playsound/sound/hostile/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/master",
+        "playsound/sound/master/targets",
+        "playsound/sound/master/targets/pos",
+        "playsound/sound/master/targets/pos/volume",
+        "playsound/sound/master/targets/pos/volume/pitch",
+        "playsound/sound/master/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/music",
+        "playsound/sound/music/targets",
+        "playsound/sound/music/targets/pos",
+        "playsound/sound/music/targets/pos/volume",
+        "playsound/sound/music/targets/pos/volume/pitch",
+        "playsound/sound/music/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/neutral",
+        "playsound/sound/neutral/targets",
+        "playsound/sound/neutral/targets/pos",
+        "playsound/sound/neutral/targets/pos/volume",
+        "playsound/sound/neutral/targets/pos/volume/pitch",
+        "playsound/sound/neutral/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/player",
+        "playsound/sound/player/targets",
+        "playsound/sound/player/targets/pos",
+        "playsound/sound/player/targets/pos/volume",
+        "playsound/sound/player/targets/pos/volume/pitch",
+        "playsound/sound/player/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/record",
+        "playsound/sound/record/targets",
+        "playsound/sound/record/targets/pos",
+        "playsound/sound/record/targets/pos/volume",
+        "playsound/sound/record/targets/pos/volume/pitch",
+        "playsound/sound/record/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/ui",
+        "playsound/sound/ui/targets",
+        "playsound/sound/ui/targets/pos",
+        "playsound/sound/ui/targets/pos/volume",
+        "playsound/sound/ui/targets/pos/volume/pitch",
+        "playsound/sound/ui/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/voice",
+        "playsound/sound/voice/targets",
+        "playsound/sound/voice/targets/pos",
+        "playsound/sound/voice/targets/pos/volume",
+        "playsound/sound/voice/targets/pos/volume/pitch",
+        "playsound/sound/voice/targets/pos/volume/pitch/minVolume",
+        "playsound/sound/weather",
+        "playsound/sound/weather/targets",
+        "playsound/sound/weather/targets/pos",
+        "playsound/sound/weather/targets/pos/volume",
+        "playsound/sound/weather/targets/pos/volume/pitch",
+        "playsound/sound/weather/targets/pos/volume/pitch/minVolume",
+        "particle/name",
+        "particle/name/pos",
+        "particle/name/pos/delta/speed/count",
+        "particle/name/pos/delta/speed/count/force",
+        "particle/name/pos/delta/speed/count/force/viewers",
+        "particle/name/pos/delta/speed/count/normal",
+        "particle/name/pos/delta/speed/count/normal/viewers",
     ];
 
-    /// 深度优先枚举我们树里从三条新根命令出发的可执行节点路径。
+    /// 深度优先枚举我们树里从七条新根命令出发的可执行节点路径。
     ///
-    /// Enumerate executable node paths below the three new root commands.
+    /// Enumerate executable node paths below the seven new root commands.
     fn ours() -> Vec<String> {
         let graph = &commands().graph;
         let mut out = Vec::new();
@@ -568,7 +656,16 @@ mod official_tree {
             .iter()
             .filter_map(|&child| match &graph.node(child).kind {
                 NodeKind::Literal(name)
-                    if matches!(name.as_str(), "scoreboard" | "team" | "bossbar") =>
+                    if matches!(
+                        name.as_str(),
+                        "scoreboard"
+                            | "team"
+                            | "bossbar"
+                            | "tellraw"
+                            | "title"
+                            | "playsound"
+                            | "particle"
+                    ) =>
                 {
                     Some((child, name.clone()))
                 }
@@ -789,9 +886,183 @@ mod official_tree {
         ("/bossbar/set/id/players/targets", "minecraft:entity"),
         ("/bossbar/set/id/value/value", "brigadier:integer"),
         ("/bossbar/set/id/visible/visible", "brigadier:bool"),
+        ("tellraw/targets", "minecraft:entity"),
+        ("tellraw/targets/message", "minecraft:component"),
+        ("title/targets", "minecraft:entity"),
+        ("title/targets/actionbar/title", "minecraft:component"),
+        ("title/targets/subtitle/title", "minecraft:component"),
+        ("title/targets/times/fadeIn", "minecraft:time"),
+        ("title/targets/times/fadeIn/stay", "minecraft:time"),
+        ("title/targets/times/fadeIn/stay/fadeOut", "minecraft:time"),
+        ("title/targets/title/title", "minecraft:component"),
+        ("playsound/sound", "minecraft:resource_location"),
+        ("playsound/sound/ambient/targets", "minecraft:entity"),
+        ("playsound/sound/ambient/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/ambient/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/ambient/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/ambient/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/block/targets", "minecraft:entity"),
+        ("playsound/sound/block/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/block/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/block/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/block/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/hostile/targets", "minecraft:entity"),
+        ("playsound/sound/hostile/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/hostile/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/hostile/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/hostile/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/master/targets", "minecraft:entity"),
+        ("playsound/sound/master/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/master/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/master/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/master/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/music/targets", "minecraft:entity"),
+        ("playsound/sound/music/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/music/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/music/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/music/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/neutral/targets", "minecraft:entity"),
+        ("playsound/sound/neutral/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/neutral/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/neutral/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/neutral/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/player/targets", "minecraft:entity"),
+        ("playsound/sound/player/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/player/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/player/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/player/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/record/targets", "minecraft:entity"),
+        ("playsound/sound/record/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/record/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/record/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/record/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/ui/targets", "minecraft:entity"),
+        ("playsound/sound/ui/targets/pos", "minecraft:vec3"),
+        ("playsound/sound/ui/targets/pos/volume", "brigadier:float"),
+        (
+            "playsound/sound/ui/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/ui/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/voice/targets", "minecraft:entity"),
+        ("playsound/sound/voice/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/voice/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/voice/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/voice/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("playsound/sound/weather/targets", "minecraft:entity"),
+        ("playsound/sound/weather/targets/pos", "minecraft:vec3"),
+        (
+            "playsound/sound/weather/targets/pos/volume",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/weather/targets/pos/volume/pitch",
+            "brigadier:float",
+        ),
+        (
+            "playsound/sound/weather/targets/pos/volume/pitch/minVolume",
+            "brigadier:float",
+        ),
+        ("particle/name", "minecraft:particle"),
+        ("particle/name/pos", "minecraft:vec3"),
+        ("particle/name/pos/delta", "minecraft:vec3"),
+        ("particle/name/pos/delta/speed", "brigadier:float"),
+        ("particle/name/pos/delta/speed/count", "brigadier:integer"),
+        (
+            "particle/name/pos/delta/speed/count/force/viewers",
+            "minecraft:entity",
+        ),
+        (
+            "particle/name/pos/delta/speed/count/normal/viewers",
+            "minecraft:entity",
+        ),
     ];
 
-    /// 枚举我们树里三条新命令下的参数节点。
+    /// 枚举我们树里七条新命令下的参数节点。
     fn argument_nodes() -> Vec<(String, String)> {
         let graph = &commands().graph;
         let mut out = Vec::new();
@@ -801,7 +1072,16 @@ mod official_tree {
             .iter()
             .filter_map(|&child| match &graph.node(child).kind {
                 NodeKind::Literal(name)
-                    if matches!(name.as_str(), "scoreboard" | "team" | "bossbar") =>
+                    if matches!(
+                        name.as_str(),
+                        "scoreboard"
+                            | "team"
+                            | "bossbar"
+                            | "tellraw"
+                            | "title"
+                            | "playsound"
+                            | "particle"
+                    ) =>
                 {
                     Some((child, name.clone()))
                 }

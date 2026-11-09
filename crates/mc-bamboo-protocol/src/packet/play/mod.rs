@@ -9,11 +9,13 @@ mod entity;
 mod gamerule;
 mod menu;
 mod movement;
+mod particle;
 mod player_info;
 mod request;
 mod scoreboard;
 mod secure;
 mod sound;
+mod title;
 
 pub use block::*;
 pub use chat::*;
@@ -22,11 +24,13 @@ pub use entity::*;
 pub use gamerule::*;
 pub use menu::*;
 pub use movement::*;
+pub use particle::*;
 pub use player_info::*;
 pub use request::*;
 pub use scoreboard::*;
 pub use secure::*;
 pub use sound::*;
+pub use title::*;
 
 use mc_bamboo_data::packets::play::clientbound;
 

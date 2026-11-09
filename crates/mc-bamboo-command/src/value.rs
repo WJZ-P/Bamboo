@@ -3,6 +3,7 @@
 use mc_bamboo_blocks::BlockState;
 use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::Item;
+use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
 
 use crate::identifier::Identifier;
@@ -378,6 +379,14 @@ impl ItemPredicateInput {
     }
 }
 
+/// 官方 `ParticleArgument` 的结果：类型 ID、注册名，以及 `ParticleTypes.STREAM_CODEC` 的选项字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticleInput {
+    pub id: i32,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// 官方 `MessageArgument.Message`。`text` 是整段原文，`parts` 是选择器所在的位置。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
@@ -535,6 +544,10 @@ pub enum Value {
     Item(ItemInput),
     ItemPredicate(ItemPredicateInput),
     Message(Message),
+    /// 官方 `ComponentArgument` 解析出的 SNBT 标签，交给网络层的组件 `Codec` 校验。
+    Component(Tag),
+    /// 官方 `ParticleArgument` 的结果：注册表 ID、名字和选项的线上字节。
+    Particle(ParticleInput),
     GameMode(GameMode),
     EntityAnchor(EntityAnchor),
     Time(i32),
@@ -542,10 +555,6 @@ pub enum Value {
     Operation(ScoreOperation),
     DisplaySlot(DisplaySlot),
     ScoreHolder(ScoreHolderSpec),
-    /// 已经按官方文本编解码重写过的组件标签。
-    ///
-    /// A component tag already rewritten by the official text codec.
-    Component(mc_bamboo_nbt::Tag),
     /// 已经校验过的样式标签。
     ///
     /// A style tag that has already been checked.
@@ -659,6 +668,20 @@ impl Value {
         }
     }
 
+    pub fn as_component(&self) -> Option<&Tag> {
+        match self {
+            Self::Component(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_particle(&self) -> Option<&ParticleInput> {
+        match self {
+            Self::Particle(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub fn as_game_mode(&self) -> Option<GameMode> {
         match self {
             Self::GameMode(value) => Some(*value),
@@ -708,11 +731,8 @@ impl Value {
         }
     }
 
-    pub fn as_component_tag(&self) -> Option<&mc_bamboo_nbt::Tag> {
-        match self {
-            Self::Component(value) => Some(value),
-            _ => None,
-        }
+    pub fn as_component_tag(&self) -> Option<&Tag> {
+        self.as_component()
     }
 
     pub fn as_style_tag(&self) -> Option<&mc_bamboo_nbt::Tag> {
