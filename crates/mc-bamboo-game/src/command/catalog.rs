@@ -7,7 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, gamerule, items, players, scoreboard, team, teleport, time,
+    CommandFn, Commands, blocks, bossbar, gamerule, items, players, scoreboard, team, teleport,
+    time,
 };
 
 struct Builder {
@@ -65,6 +66,7 @@ impl Builder {
 pub(crate) fn build() -> Commands {
     let mut builder = Builder::new();
     let root = builder.graph.root();
+    register_bossbar(&mut builder, root);
     register_clear(&mut builder, root);
     register_me(&mut builder, root);
     register_fill(&mut builder, root);
@@ -128,6 +130,91 @@ fn argument_of(rule: &GameRuleDef) -> ArgumentType {
             max: rule.max,
         },
     }
+}
+
+fn register_bossbar(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "bossbar", permission::GAMEMASTERS);
+    let add = builder.literal(command, "add", 0);
+    let id = builder.argument(add, "id", ArgumentType::ResourceLocation, 0);
+    let name = builder.argument(id, "name", ArgumentType::Component, 0);
+    builder.run(name, bossbar::add);
+
+    let remove = builder.literal(command, "remove", 0);
+    let id = builder.argument(remove, "id", ArgumentType::ResourceLocation, 0);
+    builder.run(id, bossbar::remove);
+    builder.bind_literal(command, "list", bossbar::list);
+
+    let get = builder.literal(command, "get", 0);
+    let id = builder.argument(get, "id", ArgumentType::ResourceLocation, 0);
+    builder.bind_literal(id, "value", bossbar::get_value);
+    builder.bind_literal(id, "max", bossbar::get_max);
+    builder.bind_literal(id, "visible", bossbar::get_visible);
+    builder.bind_literal(id, "players", bossbar::get_players);
+
+    let set = builder.literal(command, "set", 0);
+    let id = builder.argument(set, "id", ArgumentType::ResourceLocation, 0);
+    let name = builder.literal(id, "name", 0);
+    let contents = builder.argument(name, "name", ArgumentType::Component, 0);
+    builder.run(contents, bossbar::set_name);
+    let color = builder.literal(id, "color", 0);
+    for (literal, action) in [
+        ("pink", bossbar::color_pink as CommandFn),
+        ("blue", bossbar::color_blue),
+        ("red", bossbar::color_red),
+        ("green", bossbar::color_green),
+        ("yellow", bossbar::color_yellow),
+        ("purple", bossbar::color_purple),
+        ("white", bossbar::color_white),
+    ] {
+        builder.bind_literal(color, literal, action);
+    }
+    let style = builder.literal(id, "style", 0);
+    for (literal, action) in [
+        ("progress", bossbar::style_progress as CommandFn),
+        ("notched_6", bossbar::style_notched_6),
+        ("notched_10", bossbar::style_notched_10),
+        ("notched_12", bossbar::style_notched_12),
+        ("notched_20", bossbar::style_notched_20),
+    ] {
+        builder.bind_literal(style, literal, action);
+    }
+    let value = builder.literal(id, "value", 0);
+    let number = builder.argument(
+        value,
+        "value",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(number, bossbar::set_value);
+    let max = builder.literal(id, "max", 0);
+    let number = builder.argument(
+        max,
+        "max",
+        ArgumentType::Integer {
+            min: 1,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(number, bossbar::set_max);
+    let visible = builder.literal(id, "visible", 0);
+    let flag = builder.argument(visible, "visible", ArgumentType::Bool, 0);
+    builder.run(flag, bossbar::set_visible);
+    let players = builder.literal(id, "players", 0);
+    builder.run(players, bossbar::set_players);
+    let targets = builder.argument(
+        players,
+        "targets",
+        ArgumentType::Entity {
+            single: false,
+            players_only: true,
+        },
+        0,
+    );
+    builder.run(targets, bossbar::set_players);
 }
 
 fn register_clear(builder: &mut Builder, root: usize) {

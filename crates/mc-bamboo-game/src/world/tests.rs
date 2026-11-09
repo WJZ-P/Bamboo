@@ -236,6 +236,27 @@ impl Harness {
         self.join_with(name, client_requesting(2))
     }
 
+    /// 用指定 UUID 进服，测试重连时用它。
+    ///
+    /// Join with a given UUID, used by reconnect tests.
+    pub(crate) fn join_uuid(&mut self, name: &str, uuid: Uuid) -> Client {
+        let id = PlayerId(self.next_id);
+        self.next_id += 1;
+        let sink = FakeSink::default();
+        let request = JoinRequest {
+            id,
+            uuid,
+            name: name.to_owned(),
+            properties: Vec::new(),
+            client: client_requesting(2),
+            permission_level: 0,
+            is_op: false,
+            sink: Box::new(sink.clone()),
+        };
+        self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
+        Client { id, uuid, sink }
+    }
+
     pub(crate) fn request(&self, client: &Client, request: PlayRequest) {
         let in_flight = InFlight::acquire(&self.in_flight, QUOTA).expect("测试不会用完配额");
         self.inbox

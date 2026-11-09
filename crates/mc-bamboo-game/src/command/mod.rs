@@ -11,6 +11,7 @@
 pub(crate) use players::change_own_mode;
 
 mod blocks;
+mod bossbar;
 mod catalog;
 mod feedback;
 mod gamerule;

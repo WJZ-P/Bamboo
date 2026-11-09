@@ -235,6 +235,44 @@ impl BossBars {
         self.bars.get(id)
     }
 
+    /// 官方 `CustomBossEvent.getDisplayName`，列表和消息里都用这个。
+    ///
+    /// Official `CustomBossEvent.getDisplayName`, used by lists and messages.
+    pub(crate) fn display_name(&self, id: &str) -> Option<Component> {
+        self.bars.get(id).map(BossBar::display_name)
+    }
+
+    /// 官方 `getEvents`：按 id 排序的显示名列表。
+    ///
+    /// Official `getEvents`: display names sorted by id.
+    pub(crate) fn entries(&self) -> Vec<Component> {
+        self.bars.values().map(BossBar::display_name).collect()
+    }
+
+    pub(crate) fn value(&self, id: &str) -> Option<i32> {
+        self.bars.get(id).map(|bar| bar.value)
+    }
+
+    pub(crate) fn max(&self, id: &str) -> Option<i32> {
+        self.bars.get(id).map(|bar| bar.max)
+    }
+
+    pub(crate) fn visible(&self, id: &str) -> Option<bool> {
+        self.bars.get(id).map(|bar| bar.visible)
+    }
+
+    pub(crate) fn color(&self, id: &str) -> Option<BossColor> {
+        self.bars.get(id).map(|bar| bar.color)
+    }
+
+    pub(crate) fn style(&self, id: &str) -> Option<BossStyle> {
+        self.bars.get(id).map(|bar| bar.style)
+    }
+
+    pub(crate) fn online_count(&self, id: &str) -> Option<usize> {
+        self.bars.get(id).map(|bar| bar.online.len())
+    }
+
     fn bar_mut(&mut self, id: &str) -> Option<&mut BossBar> {
         self.bars.get_mut(id)
     }
