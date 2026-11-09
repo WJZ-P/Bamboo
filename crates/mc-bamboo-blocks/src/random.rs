@@ -133,6 +133,17 @@ impl LegacyRandom {
         }
     }
 
+    /// `Mth.nextDouble(random, min, max)`：`min` 不小于 `max` 时直接返回 `min`，不取数。
+    ///
+    /// `Mth.nextDouble(random, min, max)`. Returns `min` without drawing when `min` is at least `max`.
+    pub fn mth_next_double(&self, min: f64, max: f64) -> f64 {
+        if min >= max {
+            min
+        } else {
+            self.next_double() * (max - min) + min
+        }
+    }
+
     /// `triangle(mean, spread)` 的 double 版本。
     pub fn triangle(&self, mean: f64, spread: f64) -> f64 {
         let first = self.next_double();
@@ -260,6 +271,15 @@ pub trait RandomSource {
             min
         } else {
             self.next_float() * (max - min) + min
+        }
+    }
+
+    /// `Mth.nextDouble(random, min, max)`。
+    fn mth_next_double(&self, min: f64, max: f64) -> f64 {
+        if min >= max {
+            min
+        } else {
+            self.next_double() * (max - min) + min
         }
     }
 

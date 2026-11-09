@@ -43,7 +43,7 @@ pub(super) fn execute(
     if equip(world, pos, facing, &mut stack) {
         Shot::plain(stack)
     } else {
-        Shot::plain(throw_one(world, facing, stack))
+        Shot::plain(throw_one(world, pos, facing, stack))
     }
 }
 

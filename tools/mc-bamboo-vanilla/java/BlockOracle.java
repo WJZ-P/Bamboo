@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -46,6 +47,7 @@ import net.minecraft.advancements.triggers.CriterionTrigger;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.FrontAndTop;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.HolderLookup;
@@ -96,9 +98,11 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
+import net.minecraft.util.debug.ServerDebugSubscribers;
 import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.Container;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.RandomSequences;
 import net.minecraft.world.DifficultyInstance;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -107,6 +111,7 @@ import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -361,6 +366,8 @@ import sun.misc.Unsafe;
  *     gained    [item id,...] 只有 item 题有内容：物品栏里新出现的物品。创造模式用空桶舀起东西时，装满的桶放进物品栏。
  *     spawned   [entity type id,...] 这次动作生成的实体，比如掉落物。只是记录，不用比较。
  *     rng       碰过随机数但是结果不依赖它，比如开门的音调。只是记录，不用比较。
+ *     randomSeed 结束时世界随机源（LegacyRandomSource）的内部种子。跑过发射器或合成器计划刻的题会逐位比较，
+ *               这样吐到空气时少取一个 triangle 也会被发现。其它题里官方还会为没移植的实体和声音取数，不比较。
  *
  * skip 行没有答案，表示这题只能排除。reason 的前缀：
  *
@@ -401,7 +408,8 @@ import sun.misc.Unsafe;
  *               点着的营火走 cookTick，灭了走 cooldownTick。别的方块实体都不 tick，所以阳光探测器不会随时间重算。
  *     界面      openMenu 什么也不做，所以打开木桶不会把 open 改成 true。
  *     掉落      Level.destroyBlock 的 dropResources 恒为假，不算掉落。Block.dropResources 直接调用时算，只进 spawned。
- *     实体      世界里只有场景的玩家。spawned 里的实体不进世界，不挡路。
+ *               容器拆掉时 `dropContents` 生成的物品实体会进世界，漏斗在 settle 里能吸到它们。
+ *     实体      世界里有场景的玩家，以及这次动作生成的物品实体。别的 spawned 实体不进世界，不挡路。
  *     计划刻    场景开始时没有排队的计划刻。队列是官方的 LevelTicks。除了 flow 题，这次动作排的不运行。tick 题只运行
  *               目标方块自己的 BlockState.tick 一次。flow 题第一下直接运行目标格的 FluidState.tick，之后每往后走一步都
  *               按 ServerLevel.tick 的顺序跑：先跑到期的方块计划刻（ServerLevel.tickBlock），再跑流体的
@@ -410,8 +418,11 @@ import sun.misc.Unsafe;
  *     方块事件  level.blockEvent 排进官方的顺序，settle 和 flow 每刻在计划刻之后、方块实体之前执行，同一项只排一次。
  *               动作期间排的也在第一刻执行，所以放下红石块活塞会在下一刻动。活塞的整个动画要走三刻：第一刻推方块并
  *               推进半格，第二刻再推进半格，第三刻把真正的方块放回去。
- *     活塞题    随机题之外另有几道固定的活塞题（推出、收回、粘性收回、粘液块分支、推不动、打掉火把），同样的场景和动作
- *               按 settle = 1..4 各出一遍，逐刻比较世界。它们排在随机题的号段后面，id 从 1000000 开始。 *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
+ *     固定题    随机题之外另有几道固定场景的题：活塞（推出、收回、粘性收回、粘液块分支、推不动、打掉火把）按
+ *               settle = 1..4 各出一遍，漏斗和投掷器按 settle = 1、9、40、100 各出一遍，合成器按 settle = 0、1、7
+ *               各出一遍（合成成功、吐进容器、吐到空气、剩余物、比较器读数这些路径随机题很难碰到）。
+ *               它们排在随机题的号段后面，id 分别从 1000000、2000000、3000000 开始。
+ *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
  *               updateNeighborsAt、updateNeighbourShapes，邻居队列是真正的 CollectingNeighborUpdater，
  *               链长限制是 header 里的 maxChainedUpdates。
  *
@@ -747,6 +758,11 @@ public final class BlockOracle {
         private ReloadableServerResources managers;
         private GameRules rules;
         private DedicatedPlayerList players;
+        private ServerDebugSubscribers debugSubscribers;
+        /** 生存挖掘题才打开真的战利品表。30 万道题保持空表。 */
+        private boolean mineDrops;
+        private RandomSequences mineSequences;
+        private long mineSeed;
 
         private FakeServer() {
             super(null, null, null, null, null, null, null, null, null, null);
@@ -757,7 +773,15 @@ public final class BlockOracle {
             server.managers = managers;
             server.rules = rules;
             server.players = allocate(FakePlayerList.class);
+            // 活塞推实体时 `checkInsideBlocks` 会问这个。空的就表示没人在听调试事件。
+            // A piston pushing an entity asks this from `checkInsideBlocks`. Empty means nobody is subscribed.
+            server.debugSubscribers = new ServerDebugSubscribers(server);
             return server;
+        }
+
+        @Override
+        public ServerDebugSubscribers debugSubscribers() {
+            return debugSubscribers;
         }
 
         @Override
@@ -767,6 +791,9 @@ public final class BlockOracle {
 
         @Override
         public ReloadableServerRegistries.Holder reloadableRegistries() {
+            if (mineDrops) {
+                return managers.fullRegistries();
+            }
             return new NoLoot(managers.fullRegistries().lookup());
         }
 
@@ -780,9 +807,12 @@ public final class BlockOracle {
             return false;
         }
 
-        /** 只有掉落物的战利品表用它，掉落物不进答案。 */
+        /** 平时每次都新建一条种子 0 的序列，掉落不进 30 万题的答案。生存挖掘题用真正的序列。 */
         @Override
         public RandomSource getRandomSequence(Identifier key) {
+            if (mineDrops && mineSequences != null) {
+                return mineSequences.get(key, mineSeed);
+            }
             return RandomSource.create(0L);
         }
 
@@ -1290,6 +1320,8 @@ public final class BlockOracle {
         private RecordingTicks<Block> recordedBlockTicks;
         private RecordingTicks<Fluid> recordedFluidTicks;
         private List<ServerPlayer> playersInWorld;
+        /** 容器掉落生成的物品。漏斗的 `getItemsAtAndAbove` 要找得到它们。 */
+        private List<Entity> groundItems;
         private List<Destroyed> destroyed;
         private List<LevelPlay> levelEvents;
         private List<SoundPlay> sounds;
@@ -1319,6 +1351,7 @@ public final class BlockOracle {
             level.recordedBlockTicks = new RecordingTicks<>();
             level.recordedFluidTicks = new RecordingTicks<>();
             level.playersInWorld = new ArrayList<>();
+            level.groundItems = new ArrayList<>();
             level.destroyed = new ArrayList<>();
             level.levelEvents = new ArrayList<>();
             level.sounds = new ArrayList<>();
@@ -1326,7 +1359,7 @@ public final class BlockOracle {
             level.ranBlocks = new LinkedHashSet<>();
             level.analogContent = false;
             level.data = new FixedLevelData();
-            level.entityGetter = new PlayerEntities(level.playersInWorld);
+            level.entityGetter = new PlayerEntities(level.playersInWorld, level.groundItems);
             level.unrandom = Set.of();
             set(Level.class, level, "neighborUpdater", new CollectingNeighborUpdater(level, MAX_CHAINED_UPDATES));
             set(Level.class, level, "random", random);
@@ -1970,6 +2003,13 @@ public final class BlockOracle {
         @Override
         public boolean addFreshEntity(Entity entity) {
             spawned.add(EntityType.getKey(entity.getType()).toString());
+            // 物品要留在世界上，settle 里的漏斗才吸得到。下落方块和 TNT 仍然只记账。
+            //
+            // Items stay in the world so a hopper can suck them during settle.
+            // Falling blocks and TNT are still only recorded.
+            if (entity.getType() == EntityTypes.ITEM) {
+                groundItems.add(entity);
+            }
             return true;
         }
 
@@ -2112,26 +2152,54 @@ public final class BlockOracle {
     }
 
     /** 世界里只有玩家这一种实体，查询直接遍历。 */
-    private record PlayerEntities(List<ServerPlayer> players) implements LevelEntityGetter<Entity> {
+    private record PlayerEntities(List<ServerPlayer> players, List<Entity> items) implements LevelEntityGetter<Entity> {
         @Override
         public Entity get(int id) {
-            return players.stream().filter(player -> player.getId() == id).findFirst().orElse(null);
+            for (ServerPlayer player : players) {
+                if (player.getId() == id) {
+                    return player;
+                }
+            }
+            for (Entity item : items) {
+                if (item.getId() == id) {
+                    return item;
+                }
+            }
+            return null;
         }
 
         @Override
         public Entity get(UUID id) {
-            return players.stream().filter(player -> player.getUUID().equals(id)).findFirst().orElse(null);
+            for (ServerPlayer player : players) {
+                if (player.getUUID().equals(id)) {
+                    return player;
+                }
+            }
+            for (Entity item : items) {
+                if (item.getUUID().equals(id)) {
+                    return item;
+                }
+            }
+            return null;
         }
 
         @Override
         public Iterable<Entity> getAll() {
-            return new ArrayList<>(players);
+            List<Entity> all = new ArrayList<>(players);
+            all.addAll(items);
+            return all;
         }
 
         @Override
         public <U extends Entity> void get(EntityTypeTest<Entity, U> type, AbortableIterationConsumer<U> consumer) {
             for (ServerPlayer player : players) {
                 U cast = type.tryCast(player);
+                if (cast != null && consumer.accept(cast).shouldAbort()) {
+                    return;
+                }
+            }
+            for (Entity item : items) {
+                U cast = type.tryCast(item);
                 if (cast != null && consumer.accept(cast).shouldAbort()) {
                     return;
                 }
@@ -2145,6 +2213,11 @@ public final class BlockOracle {
                     output.accept(player);
                 }
             }
+            for (Entity item : items) {
+                if (item.getBoundingBox().intersects(bb) && !item.isRemoved()) {
+                    output.accept(item);
+                }
+            }
         }
 
         @Override
@@ -2152,6 +2225,14 @@ public final class BlockOracle {
             for (ServerPlayer player : players) {
                 if (player.getBoundingBox().intersects(bb)) {
                     U cast = type.tryCast(player);
+                    if (cast != null && consumer.accept(cast).shouldAbort()) {
+                        return;
+                    }
+                }
+            }
+            for (Entity item : items) {
+                if (item.getBoundingBox().intersects(bb) && !item.isRemoved()) {
+                    U cast = type.tryCast(item);
                     if (cast != null && consumer.accept(cast).shouldAbort()) {
                         return;
                     }
@@ -3138,6 +3219,141 @@ public final class BlockOracle {
                 }
             }
             return cases;
+        }
+
+        /** 合成器固定题的格子和 settle 步数。官方假世界不登记合成器的 ticker，crafting 一直亮着。 */
+        private static final BlockPos CRAFTER_CELL = new BlockPos(0, 64, 0);
+        private static final int[] CRAFTER_SETTLE_STEPS = {0, 1, 7};
+
+        /**
+         * 合成器的固定题：随机题里九格凑不出配方的占大多数，成功合成、放进容器、剩余物和吐到空气
+         * 都很难碰到，所以在这里摆好场景逐项比较方块状态、容器内容、事件和随机源。
+         *
+         * <p>id 从 base 开始，{@code --case} 也能单独重现。
+         */
+        List<Case> crafterCases(int base) {
+            List<Scenario> scenarios = List.of(
+                    // 一根原木朝箱子合成四块木板：没有等级事件，crafting 亮着。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是空气：产物消失，随机数照取，1049 和 2010 都发。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是满箱子：产物同样变成掉落物。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        ItemStack[] full = new ItemStack[27];
+                        for (int slot = 0; slot < full.length; slot++) {
+                            full[slot] = new ItemStack(Items.STONE, 64);
+                        }
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), full);
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 两格原木只消耗一格，另一格留在九格里。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 2));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 蛋糕：三只奶桶留下三只空桶，和产物一起进箱子。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.MILK_BUCKET, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL,
+                                new ItemStack(Items.MILK_BUCKET, 1), new ItemStack(Items.MILK_BUCKET, 1),
+                                new ItemStack(Items.MILK_BUCKET, 1), new ItemStack(Items.SUGAR, 1),
+                                new ItemStack(Items.EGG, 1), new ItemStack(Items.SUGAR, 1),
+                                new ItemStack(Items.WHEAT, 1), new ItemStack(Items.WHEAT, 1),
+                                new ItemStack(Items.WHEAT, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 蜂蜜瓶留下玻璃瓶。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.HONEY_BOTTLE, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.HONEY_BOTTLE, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是另一个合成器：一次只放一个，四块木板分占四格。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), crafterFacingNorth());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyCrafter());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是漏斗：产物进去后漏斗的冷却被设成 8 刻。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), hopper(Direction.DOWN, true));
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), new ItemStack[0]);
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 旁边的比较器读数随九格清空而变，灯跟着灭。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.east(), comparator(Direction.WEST));
+                        c.put(CRAFTER_CELL.east(2), Blocks.REDSTONE_LAMP.defaultBlockState());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 没有配方：只发 1050，格子和 crafting 都不动。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.STONE, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.STONE, 1), new ItemStack(Items.DIRT, 1));
+                        c.target = CRAFTER_CELL;
+                    }));
+            List<Case> cases = new ArrayList<>();
+            for (Scenario scenario : scenarios) {
+                for (int settle : CRAFTER_SETTLE_STEPS) {
+                    Case c = new Case(base + cases.size(), scenario.kind(),
+                            new Subject(scenario.subject(), scenario.item()), height);
+                    scenario.setup().accept(c);
+                    // 假玩家要有个位置；合成器题里它不碰方块，站远一点。
+                    if (c.actor == null) {
+                        c.actor = new Vec3(4.5, 70.0, 4.5);
+                    }
+                    c.settle = settle;
+                    cases.add(c);
+                }
+            }
+            return cases;
+        }
+
+        private static BlockState crafterFacingNorth() {
+            return Blocks.CRAFTER.defaultBlockState()
+                    .setValue(BlockStateProperties.ORIENTATION, FrontAndTop.NORTH_UP);
+        }
+
+        private static void crafterFacingNorth(Case c) {
+            c.put(CRAFTER_CELL, crafterFacingNorth());
+        }
+
+        private static ItemStack[] emptyChest() {
+            ItemStack[] empty = new ItemStack[27];
+            java.util.Arrays.fill(empty, ItemStack.EMPTY);
+            return empty;
+        }
+
+        private static ItemStack[] emptyCrafter() {
+            ItemStack[] empty = new ItemStack[9];
+            java.util.Arrays.fill(empty, ItemStack.EMPTY);
+            return empty;
         }
 
         /** 上面一个装了石头 3 个的漏斗，往下面这一类容器里塞；容器旁边是比较器和灯。 */
@@ -4275,6 +4491,9 @@ public final class BlockOracle {
         int placed;
     }
 
+    /** 一道生存挖掘题。 */
+    private record MineSpec(Block block, Item tool, long seed) {}
+
     /** 跑题、写答案、做汇总。 */
     private static final class Oracle {
         private static final char[] HEX = "0123456789abcdef".toCharArray();
@@ -4328,19 +4547,26 @@ public final class BlockOracle {
         private static final int PISTON_CASE_BASE = 1_000_000;
         /** 显式漏斗题的 id 从这里开始。 */
         private static final int HOPPER_CASE_BASE = 2_000_000;
+        /** 显式合成器题的 id 从这里开始。 */
+        private static final int CRAFTER_CASE_BASE = 3_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
             List<Case> pistonCases = generator.pistonCases(PISTON_CASE_BASE);
             List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
+            List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
             boolean single = options.single >= 0;
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
-            boolean hoppers = single ? options.single >= HOPPER_CASE_BASE : includesHopperCases();
+            boolean hoppers = single ? options.single >= HOPPER_CASE_BASE && options.single < CRAFTER_CASE_BASE
+                    : includesHopperCases();
+            boolean crafters = single ? options.single >= CRAFTER_CASE_BASE : includesCrafterCases();
+            List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
-                    + (hoppers ? hopperCases.size() : 0));
-            int first = Math.max(options.single, 0);
+                    + (hoppers ? hopperCases.size() : 0)
+                    + (crafters ? crafterCases.size() : 0)
+                    + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
                 Kind kind = subjects.kind(id);
@@ -4363,6 +4589,15 @@ public final class BlockOracle {
                     }
                 }
             }
+            if (crafters) {
+                for (Case c : crafterCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
+            }
+            for (MineSpec spec : mines) {
+                writeMine(spec);            }
             writeEnd();
             out.flush();
             printSummary(System.nanoTime() - start);
@@ -4381,6 +4616,11 @@ public final class BlockOracle {
             return false;
         }
 
+        /** --only 点名的是合成器时，显式合成器题也要跑。 */
+        private boolean includesCrafterCases() {
+            return options.only == null || Subjects.matches(options.only, Blocks.CRAFTER);
+        }
+
         /** --only 点名的是漏斗、投掷器、发射器或那几种容器时，显式漏斗题也要跑。 */
         private boolean includesHopperCases() {
             if (options.only == null) {
@@ -4393,6 +4633,86 @@ public final class BlockOracle {
                 }
             }
             return false;
+        }
+
+        /** 生存挖掘。不进 30 万道创造模式题，单独比较掉落和 `level.random`。 */
+        private List<MineSpec> mineSpecs() {
+            MineSpec[] specs = {
+                    new MineSpec(Blocks.DIRT, Items.AIR, 11L),
+                    new MineSpec(Blocks.SAND, Items.AIR, 12L),
+                    new MineSpec(Blocks.GRAVEL, Items.AIR, 13L),
+                    new MineSpec(Blocks.OAK_LOG, Items.AIR, 14L),
+                    new MineSpec(Blocks.GLASS, Items.AIR, 15L),
+                    new MineSpec(Blocks.STONE, Items.AIR, 16L),
+                    new MineSpec(Blocks.STONE, Items.WOODEN_PICKAXE, 17L),
+                    new MineSpec(Blocks.COBBLESTONE, Items.AIR, 18L),
+            };
+            List<MineSpec> matched = new ArrayList<>();
+            for (MineSpec spec : specs) {
+                if (options.only == null || Subjects.matches(options.only, spec.block)) {
+                    matched.add(spec);
+                }
+            }
+            return matched;
+        }
+
+        private void writeMine(MineSpec spec) throws IOException {
+            FakeServer server = official.server;
+            server.mineDrops = true;
+            server.mineSequences = new RandomSequences();
+            server.mineSeed = spec.seed;
+            try {
+                BlockPos pos = new BlockPos(0, 64, 0);
+                FakeLevel level = FakeLevel.create(official, new OracleRandom(OracleRandom.Mode.SEEDED, spec.seed));
+                LegacyRandomSource random = new LegacyRandomSource(spec.seed);
+                set(Level.class, level, "random", random);
+                BlockState state = spec.block.defaultBlockState();
+                level.blocks.put(pos.asLong(), state);
+                ItemStack tool = spec.tool == Items.AIR ? ItemStack.EMPTY : new ItemStack(spec.tool);
+                level.groundItems.clear();
+                // `Player.hasCorrectToolForDrops`：不要求工具的方块，空手也掉。
+                if (!state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state)) {
+                    Block.dropResources(state, level, pos, null, null, tool);
+                }
+                List<String> rows = new ArrayList<>();
+                for (Entity entity : level.groundItems) {
+                    if (entity instanceof ItemEntity item && !item.getItem().isEmpty()) {
+                        rows.add("{\"item\":\"" + BuiltInRegistries.ITEM.getKey(item.getItem().getItem()) + "\",\"count\":"
+                                + item.getItem().getCount() + "}");
+                    }
+                }
+                Collections.sort(rows);
+                written++;
+                line.setLength(0);
+                line.append("{\"type\":\"mine\",\"block\":\"")
+                        .append(BuiltInRegistries.BLOCK.getKey(spec.block))
+                        .append('"');
+                line.append(",\"state\":").append(Block.getId(state));
+                line.append(",\"tool\":\"").append(BuiltInRegistries.ITEM.getKey(spec.tool)).append('"');
+                line.append(",\"seed\":").append(spec.seed);
+                line.append(",\"drops\":[");
+                for (int i = 0; i < rows.size(); i++) {
+                    if (i > 0) {
+                        line.append(',');
+                    }
+                    line.append(rows.get(i));
+                }
+                line.append("],\"randomSeed\":").append(legacySeed(random)).append("}\n");
+                out.append(line);
+            } finally {
+                server.mineDrops = false;
+                server.mineSequences = null;
+            }
+        }
+
+        private static long legacySeed(LegacyRandomSource random) {
+            try {
+                Field field = LegacyRandomSource.class.getDeclaredField("seed");
+                field.setAccessible(true);
+                return ((AtomicLong) field.get(random)).get();
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
         }
 
         private void runCase(int id, Kind kind, Subject subject) throws IOException {

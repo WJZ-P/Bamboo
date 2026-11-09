@@ -22,8 +22,9 @@ pub use graph::{CommandGraph, Node, NodeKind};
 pub use identifier::Identifier;
 pub use reader::StringReader;
 pub use value::{
-    BlockPredicateInput, BlockStateInput, Coordinates, EntityAnchor, EntitySelector, GameMode,
-    ItemInput, ItemPredicateInput, Message, MessagePart, NumberBounds, Rotation, SortOrder, Value,
+    BlockPredicateInput, BlockStateInput, Coordinates, DisplaySlot, EntityAnchor, EntitySelector,
+    GameMode, ItemInput, ItemPredicateInput, Message, MessagePart, NumberBounds, ObjectiveCriteria,
+    ParticleInput, Rotation, ScoreHolderSpec, ScoreOperation, SortOrder, TeamColorId, Value,
     WorldCoordinate, short_name, wrap_degrees,
 };
 

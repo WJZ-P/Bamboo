@@ -83,6 +83,7 @@ import net.minecraft.world.inventory.ContainerData;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.ContainerLevelAccess;
 import net.minecraft.world.inventory.ContainerSynchronizer;
+import net.minecraft.world.inventory.CrafterMenu;
 import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.DataSlot;
 import net.minecraft.world.inventory.DispenserMenu;
@@ -98,10 +99,12 @@ import net.minecraft.world.inventory.LecternMenu;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.RemoteSlot;
 import net.minecraft.world.inventory.ShulkerBoxMenu;
+import net.minecraft.world.inventory.SimpleContainerData;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.inventory.SmithingMenu;
 import net.minecraft.world.inventory.SmokerMenu;
 import net.minecraft.world.inventory.StonecutterMenu;
+import net.minecraft.world.inventory.TransientCraftingContainer;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -142,9 +145,12 @@ import sun.misc.Unsafe;
  * 容器菜单的 oracle：官方代码出题、给答案，tools/mc-bamboo-vanilla/src/menu.rs 用 mc-bamboo-game 的 Replay 跑同样的题来比较。
  *
  * <p>不启动服务端，也不打开真正的方块。箱子、漏斗、发射器和潜影盒配一个 SimpleContainer。
- * 工作台、玩家 2×2、切石机、锻造台、三种熔炉和酿造台用菜单自己的格子。讲台用一个只实现了书槽的 Container。
+ * 工作台、玩家 2×2、合成器、切石机、锻造台、三种熔炉和酿造台用菜单自己的格子。合成器配一个
+ * 3×3 的 CraftingContainer 和 10 个数据槽（九个禁用位加 triggered），结果格只读。
+ * 讲台用一个只实现了书槽的 Container。
  * 随机题按“从不预测”的模型点。最后另有一道带组件的题，客户端按官方预测回传哈希。
  * 每步写出槽位、光标、stateId、data 槽和组件补丁。讲台还写页码。
+ * 假玩家的掉落被 override 成空操作，菜单比较只看槽位，不看地上的物品实体。
  *
  * <p>运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
  *
@@ -374,6 +380,17 @@ public final class MenuOracle {
                     for (int i = 0; i < machineData.length; i++) {
                         machineData[i] = random.nextInt(400);
                         data.add(machineData[i]);
+                    }
+                } else if (shape == Shape.CRAFTER) {
+                    // 九个禁用位和 triggered。真实世界里只有空格能禁用，这里故意让禁用格也可能
+                    // 有东西，把 mayPlace 和结果格的行为一起比到。
+                    machineData = new int[10];
+                    for (int i = 0; i < 9; i++) {
+                        machineData[i] = random.nextInt(3) == 0 ? 1 : 0;
+                    }
+                    machineData[9] = random.nextInt(2);
+                    for (int value : machineData) {
+                        data.add(value);
                     }
                 }
             } else {
@@ -778,6 +795,7 @@ public final class MenuOracle {
         LECTERN(1, "lectern", false, false),
         INVENTORY(4, "inventory", true, false),
         CRAFTING(9, "crafting", true, false),
+        CRAFTER(9, "crafter", true, false),
         STONECUTTER(1, "stonecutter", true, false),
         SMITHING(3, "smithing", true, false),
         FURNACE(3, "furnace", true, true),
@@ -807,7 +825,7 @@ public final class MenuOracle {
         }
 
         int gridWidth() {
-            return this == INVENTORY ? 2 : this == CRAFTING ? 3 : 0;
+            return this == INVENTORY ? 2 : this == CRAFTING || this == CRAFTER ? 3 : 0;
         }
 
         AbstractContainerMenu create(Inventory inventory, Container container, FakePlayer player) {
@@ -820,6 +838,8 @@ public final class MenuOracle {
                 case LECTERN -> throw new IllegalStateException("lectern cases build their own menu");
                 case INVENTORY -> new InventoryMenu(inventory, true, player);
                 case CRAFTING -> new CraftingMenu(CONTAINER_ID, inventory, ContainerLevelAccess.create(player.level(), BlockPos.ZERO));
+                // 合成器的九格是 3x3 的 CraftingContainer，ContainerData 有 9 个禁用位和 1 个 triggered。
+                case CRAFTER -> crafterMenu(inventory);
                 case STONECUTTER -> new StonecutterMenu(CONTAINER_ID, inventory);
                 case SMITHING -> new SmithingMenu(CONTAINER_ID, inventory);
                 case FURNACE -> new FurnaceMenu(CONTAINER_ID, inventory);
@@ -832,6 +852,14 @@ public final class MenuOracle {
                 case CARTOGRAPHY -> new CartographyTableMenu(CONTAINER_ID, inventory);
                 case ENCHANTMENT -> new EnchantmentMenu(CONTAINER_ID, inventory);
             };
+        }
+
+        /** 把 TransientCraftingContainer 的 menu 指回真正的菜单，设置格子时不会空指针。 */
+        private static AbstractContainerMenu crafterMenu(Inventory inventory) {
+            CrafterMenu menu = new CrafterMenu(CONTAINER_ID, inventory,
+                    new TransientCraftingContainer(null, 3, 3), new SimpleContainerData(10));
+            set(TransientCraftingContainer.class, menu.getContainer(), "menu", menu);
+            return menu;
         }
     }
 
@@ -1176,6 +1204,14 @@ public final class MenuOracle {
     }
 
     private static void seedData(AbstractContainerMenu menu, int[] values) {
+        if (menu instanceof CrafterMenu) {
+            // CrafterMenu 的 ContainerData 是构造时传进去的 SimpleContainerData，
+            // 菜单自己的 setData 就能写到它。
+            for (int i = 0; i < values.length; i++) {
+                menu.setData(i, values[i]);
+            }
+            return;
+        }
         try {
             ContainerData data = menu instanceof BrewingStandMenu
                     ? (ContainerData) field(BrewingStandMenu.class, "brewingStandData").get(menu)
@@ -1337,7 +1373,7 @@ public final class MenuOracle {
 
     private static List<RecipeHolder<?>> recipesFor(Shape shape) {
         RecipeType<?> type = switch (shape) {
-            case INVENTORY, CRAFTING -> RecipeType.CRAFTING;
+            case INVENTORY, CRAFTING, CRAFTER -> RecipeType.CRAFTING;
             case STONECUTTER -> RecipeType.STONECUTTING;
             case SMITHING -> RecipeType.SMITHING;
             case FURNACE -> RecipeType.SMELTING;
@@ -1730,7 +1766,8 @@ public final class MenuOracle {
             return player;
         }
 
-        /** Bamboo 没有物品实体，丢掉的东西直接消失。 */
+        /** 菜单比较不看地上的物品，这里丢掉的东西不生成实体。 */
+
         @Override
         public ItemEntity drop(ItemStack itemStack, boolean thrownFromHand, Prediction prediction) {
             return null;

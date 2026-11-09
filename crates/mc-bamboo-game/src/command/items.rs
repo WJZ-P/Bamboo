@@ -62,10 +62,10 @@ pub(crate) fn give(
         while remaining > 0 {
             let size = remaining.min(stack_limit);
             remaining -= size;
-            // 创造模式装不下就消失。生存模式没有物品实体，装不下的也丢掉，不碰 `level.random`。
+            // 创造模式装不下就按官方清掉。`Inventory.add` 不生成物品实体，也不碰 `level.random`。
             //
-            // Creative leftovers vanish. Survival has no item entities, so leftovers are dropped
-            // without touching `level.random`.
+            // Creative leftovers are discarded as vanilla does. `Inventory.add` spawns no
+            // item entity and does not touch `level.random`.
             let _ = player
                 .inventory
                 .add(ItemStack::new(item_id, size), creative);

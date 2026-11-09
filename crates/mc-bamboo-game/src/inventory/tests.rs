@@ -1,5 +1,6 @@
 //! 物品栏的测试：驱动 `World::tick`，看客户端收到的帧。
 
+use mc_bamboo_blocks::Effect;
 use mc_bamboo_core::{BlockPos, Direction, Hand};
 use mc_bamboo_data::{blocks, items, packets::play::clientbound, registries::block_entity_type};
 use mc_bamboo_protocol::{
@@ -32,6 +33,18 @@ fn player_mut<'a>(server: &'a mut Harness, client: &Client) -> &'a mut Player {
 
 fn inventory<'a>(server: &'a Harness, client: &Client) -> &'a Inventory {
     &server.player(client).inventory
+}
+
+/// 丢出物品会生成地上的实体，但不会回一份物品栏修正。
+///
+/// Dropping spawns a ground item. It does not send an inventory correction.
+fn assert_no_inventory_correction(client: &Client) {
+    let frames = client.take_frames();
+    assert!(frames.iter().all(|frame| {
+        frame.id != clientbound::CONTAINER_SET_SLOT
+            && frame.id != clientbound::CONTAINER_SET_CONTENT
+            && frame.id != clientbound::SET_PLAYER_INVENTORY
+    }));
 }
 
 fn set_slot(server: &Harness, client: &Client, slot: i16, stack: ItemStack) {
@@ -318,7 +331,7 @@ fn throwing_an_item_out_of_the_screen_touches_no_slot() {
     }
     server.tick();
 
-    assert!(client.take_frames().is_empty());
+    assert_no_inventory_correction(&client);
     let inventory = inventory(&server, &client);
     assert_eq!(inventory.slots[36].item, items::DIRT);
     assert!(inventory.slots[37..].iter().all(ItemStack::is_empty));
@@ -350,7 +363,8 @@ fn q_takes_one_item_without_a_reply() {
     // 组件留在剩下的物品上。
     let expected = ItemStack { count: 1, ..stack };
     assert_eq!(inventory(&server, &client).slots[36], expected);
-    assert!(client.take_frames().is_empty());
+    // 物品栏不回包。地上的物品实体会另外发给客户端。
+    // The inventory is not corrected. The ground item entity is sent separately.
 }
 
 #[test]
@@ -367,7 +381,7 @@ fn q_on_the_last_item_empties_the_slot() {
     server.tick();
 
     assert_eq!(inventory(&server, &client).slots[36], ItemStack::empty());
-    assert!(client.take_frames().is_empty());
+    assert_no_inventory_correction(&client);
 }
 
 #[test]
@@ -389,7 +403,7 @@ fn ctrl_q_empties_only_the_selected_slot() {
     let inventory = inventory(&server, &client);
     assert_eq!(inventory.slots[38], ItemStack::empty());
     assert_eq!(inventory.slots[36].count, 3);
-    assert!(client.take_frames().is_empty());
+    assert_no_inventory_correction(&client);
 }
 
 #[test]
@@ -1185,4 +1199,169 @@ fn heights_outside_the_world_are_not_loaded() {
     server.tick();
 
     assert!(client.take_frames().is_empty());
+}
+
+/// 官方 `ItemUtils.createFilledResult(empty, player, filled, true)`：
+/// 生存模式 `empty.consume(1, player)`，手空了直接换上满桶，没空就 `Inventory.add`。
+/// 这里走桶舀水/倒水用的 `ItemExchange::Fill`，`limit_creative` 为真。
+#[test]
+fn survival_scooping_with_one_empty_bucket_replaces_the_hand() {
+    let mut inventory = Inventory::default();
+    inventory.slots[36] = ItemStack::new(items::BUCKET, 1);
+    let fill = ItemExchange::Fill {
+        replacement: ItemStack::new(items::WATER_BUCKET, 1),
+        limit_creative: true,
+    };
+    let (changed, leftover) = inventory.apply_exchange(Hand::Main, &fill, false);
+    assert_eq!(changed, [36]);
+    assert!(leftover.is_empty());
+    assert_eq!(inventory.slots[36], ItemStack::new(items::WATER_BUCKET, 1));
+}
+
+#[test]
+fn survival_scooping_with_sixteen_buckets_keeps_fifteen_and_adds_the_filled_one() {
+    let mut inventory = Inventory::default();
+    inventory.slots[36] = ItemStack::new(items::BUCKET, 16);
+    let fill = ItemExchange::Fill {
+        replacement: ItemStack::new(items::WATER_BUCKET, 1),
+        limit_creative: true,
+    };
+    let (changed, leftover) = inventory.apply_exchange(Hand::Main, &fill, false);
+    assert_eq!(changed, [36, 37]);
+    assert!(leftover.is_empty());
+    assert_eq!(inventory.slots[36], ItemStack::new(items::BUCKET, 15));
+    assert_eq!(inventory.slots[37], ItemStack::new(items::WATER_BUCKET, 1));
+}
+
+/// 创造模式 `hasInfiniteMaterials` 且 `preventDuplicates`：手里那堆不变，
+/// 背包里没有同样的满桶才 `Inventory.add` 一份，重复调用不再给。
+#[test]
+fn creative_scooping_keeps_the_hand_and_adds_the_filled_bucket_only_once() {
+    let mut inventory = Inventory::default();
+    inventory.slots[36] = ItemStack::new(items::BUCKET, 3);
+    let fill = ItemExchange::Fill {
+        replacement: ItemStack::new(items::WATER_BUCKET, 1),
+        limit_creative: true,
+    };
+    let (changed, leftover) = inventory.apply_exchange(Hand::Main, &fill, true);
+    assert_eq!(changed, [37]);
+    assert!(leftover.is_empty());
+    assert_eq!(inventory.slots[36], ItemStack::new(items::BUCKET, 3));
+    assert_eq!(inventory.slots[37], ItemStack::new(items::WATER_BUCKET, 1));
+
+    let (changed, leftover) = inventory.apply_exchange(Hand::Main, &fill, true);
+    assert!(changed.is_empty());
+    assert!(leftover.is_empty());
+    assert_eq!(inventory.slots[37], ItemStack::new(items::WATER_BUCKET, 1));
+}
+
+/// `BucketItem.use` 倒水成功后 `getEmptySuccessItem` 在生存模式给空桶；
+/// 手里那一堆消耗一个，空了换成空桶，没空就 `Inventory.add`。
+#[test]
+fn survival_pouring_hands_back_an_empty_bucket() {
+    let mut inventory = Inventory::default();
+    inventory.slots[36] = ItemStack::new(items::WATER_BUCKET, 1);
+    let fill = ItemExchange::Fill {
+        replacement: ItemStack::new(items::BUCKET, 1),
+        limit_creative: true,
+    };
+    let (changed, leftover) = inventory.apply_exchange(Hand::Main, &fill, false);
+    assert_eq!(changed, [36]);
+    assert!(leftover.is_empty());
+    assert_eq!(inventory.slots[36], ItemStack::new(items::BUCKET, 1));
+}
+
+/// 背包满时 `Inventory.add` 返回 false，官方 `player.drop(filled, false, PREDICTED)`
+/// 生成真的物品实体。这里走游戏层的 `give_filled_result` 验证 `leftover` 被丢出。
+#[test]
+fn a_full_inventory_drops_the_filled_bucket_as_an_item_entity() {
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    for slot in 9..=45 {
+        player_mut(&mut server, &client).inventory.slots[slot] = ItemStack::new(items::STONE, 1);
+    }
+    player_mut(&mut server, &client).inventory.slots[36] = ItemStack::new(items::BUCKET, 16);
+    let id = client.id;
+    give_filled_result(
+        server.region(),
+        id,
+        Hand::Main,
+        ItemStack::new(items::WATER_BUCKET, 1),
+        true,
+    );
+    assert_eq!(
+        inventory(&server, &client).slots[36],
+        ItemStack::new(items::BUCKET, 15)
+    );
+    // 只剩一个能够接住满桶的空格也没有：所有 9..=45 都被占了。
+    let dropped: Vec<_> = server
+        .region()
+        .entities
+        .iter()
+        .filter_map(|entity| entity.ground().map(|item| item.stack.clone()))
+        .collect();
+    assert_eq!(dropped, [ItemStack::new(items::WATER_BUCKET, 1)]);
+}
+
+/// `BucketItem.use` 舀水记下 `Effect::FilledBucket { item, hand }`；
+/// 游戏层用 `ItemUtils.createFilledResult(empty, player, filled, true)` 交还。
+#[test]
+fn scooping_water_through_the_effect_hands_back_a_water_bucket() {
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    player_mut(&mut server, &client).inventory.slots[36] = ItemStack::new(items::BUCKET, 1);
+    let id = client.id;
+    crate::interaction::send_effects(
+        server.region(),
+        Some(id),
+        &[Effect::FilledBucket {
+            item: items::WATER_BUCKET,
+            hand: Hand::Main,
+        }],
+    );
+    assert_eq!(
+        inventory(&server, &client).slots[36],
+        ItemStack::new(items::WATER_BUCKET, 1)
+    );
+}
+
+/// 倒水记下 `Effect::EmptiedBucket { hand }`，`getEmptySuccessItem` 在生存模式给空桶。
+#[test]
+fn pouring_water_through_the_effect_hands_back_an_empty_bucket() {
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).game_mode = GameMode::Survival;
+    player_mut(&mut server, &client).inventory.slots[36] = ItemStack::new(items::WATER_BUCKET, 1);
+    let id = client.id;
+    crate::interaction::send_effects(
+        server.region(),
+        Some(id),
+        &[Effect::EmptiedBucket { hand: Hand::Main }],
+    );
+    assert_eq!(
+        inventory(&server, &client).slots[36],
+        ItemStack::new(items::BUCKET, 1)
+    );
+}
+
+/// 创造模式倒水时 `getEmptySuccessItem` 交还手里原来的满桶：
+/// `contains` 为真，`createFilledResult` 不再往背包里加一份。
+#[test]
+fn creative_pouring_keeps_the_filled_bucket_in_hand() {
+    let (mut server, client) = settled();
+    player_mut(&mut server, &client).inventory.slots[36] = ItemStack::new(items::WATER_BUCKET, 1);
+    let id = client.id;
+    crate::interaction::send_effects(
+        server.region(),
+        Some(id),
+        &[Effect::EmptiedBucket { hand: Hand::Main }],
+    );
+    assert_eq!(
+        inventory(&server, &client).slots[36],
+        ItemStack::new(items::WATER_BUCKET, 1)
+    );
+    assert!(
+        inventory(&server, &client).slots[37..]
+            .iter()
+            .all(ItemStack::is_empty)
+    );
 }

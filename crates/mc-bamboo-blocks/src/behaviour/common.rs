@@ -198,7 +198,7 @@ pub fn drain_waterlogged(state: BlockState, world: &mut World, pos: BlockPos) ->
     world.set_block_and_update(pos, state.with(WATERLOGGED, false));
     // 官方用的是舀水之前的状态。
     if !state.can_survive(world, pos) {
-        world.destroy_block(pos, UPDATE_LIMIT);
+        world.destroy_block(pos, true, UPDATE_LIMIT);
     }
     items::WATER_BUCKET
 }

@@ -122,6 +122,12 @@ import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
+import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
+import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
+import net.minecraft.network.protocol.game.ClientboundSetDisplayObjectivePacket;
+import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
+import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
+import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
@@ -156,6 +162,7 @@ import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
 import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket;
@@ -429,6 +436,7 @@ public final class Probe {
             "handleSoundEvent",
             "handleSwingAnimation",
             "handleSystemChat",
+            "handleTakeItemEntity",
             "handleUpdateAttributes");
 
     private static final Map<String, Boolean> CHECKS = new LinkedHashMap<>();
@@ -776,6 +784,7 @@ public final class Probe {
                 section("pistons" + names, () -> pistons(actor, observer));
                 section("signs" + names, () -> signs(actor, observer));
                 section("inventory" + names, () -> inventory(actor, observer));
+                section("ground item" + names, () -> groundItem(actor, observer));
                 section("components" + names, () -> components(actor, observer));
                 section("chat" + names, () -> chat(actor, observer));
             }
@@ -1513,6 +1522,26 @@ public final class Probe {
             BlockPos stone = feet.offset(-2, 0, 0);
             BlockPos dirt = feet.below(2);
 
+            // 前面的 placement 段打掉支撑时火把会按战利品表掉在地上，玩家可能已经把它
+            // 捡进了快捷栏空格。这一段假设 0 格是石头、1 格是箱子、其余为空，所以先把
+            // 2..8 格清空，再摆回这一段的初始物品栏；不能靠前面几段碰巧留下的状态。
+            //
+            // Breaking the support in the placement section drops the torch as a real
+            // item now, and the player may have picked it into an empty hotbar slot.
+            // This section assumes slot 0 holds stone, slot 1 a chest and 2..8 are
+            // empty, so clear those slots and re-establish that state explicitly.
+            for (int menuSlot = HOTBAR_START + 2; menuSlot < HOTBAR_START + 9; menuSlot++) {
+                actor.send(new ServerboundSetCreativeModeSlotPacket(menuSlot, ItemStack.EMPTY));
+            }
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE, STACK)));
+            actor.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START + 1, new ItemStack(Items.CHEST)));
+            actor.send(new ServerboundSetCarriedItemPacket(0));
+            // 创造模式改槽没有回包，等服务端的世界线程把这几笔处理完再往下走。
+            //
+            // Creative slot edits get no reply; let the world thread process them.
+            pumpFor(SETTLE_MILLIS);
+
             // 石头在快捷栏第 0 格，选中第 2 格时中键把选中格切回去。
             actor.send(new ServerboundSetCarriedItemPacket(2));
             actor.send(new ServerboundPickItemFromBlockPacket(stone, false));
@@ -1548,6 +1577,81 @@ public final class Probe {
             actor.send(new ServerboundPlayerActionPacket(
                     ServerboundPlayerActionPacket.Action.DROP_ALL_ITEMS, BlockPos.ZERO, Direction.DOWN));
             await("inventory: ctrl+Q takes the stack", () -> isEmpty(remote, EquipmentSlot.MAINHAND));
+        }
+
+        /**
+         * 创造模式按 Q 丢出苹果。另一个客户端看得到地上的物品，走过去能捡起来。
+         *
+         * Creative mode drops an apple with Q. The other client sees it, and walking onto it
+         * picks it up.
+         */
+        private void groundItem(Join actor, Join observer) throws IOException {
+            int slot = HOTBAR_START + 7;
+            Vec3 origin = actor.position;
+            actor.takenItem = -1;
+            observer.takenItem = -1;
+            actor.send(new ServerboundSetCreativeModeSlotPacket(slot, new ItemStack(Items.APPLE)));
+            actor.send(new ServerboundSetCarriedItemPacket(7));
+            // 创造模式改槽、自己换选中格都不回包。观察者的装备同步能看见主手。
+            //
+            // Creative slot edits and the owner's carried-slot change are not echoed.
+            // The observer's equipment sync is what shows the apple.
+            Remote remote = observer.remote(actor);
+            await("items: the other client sees the apple in the main hand",
+                    () -> holds(remote, EquipmentSlot.MAINHAND, Items.APPLE, 1));
+            int before = observer.lastItemId;
+            actor.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.DROP_ITEM, BlockPos.ZERO, Direction.DOWN));
+            await("items: the other client sees the dropped apple", 8_000,
+                    () -> observer.lastItemId != before
+                            && observer.remotes.containsKey(observer.lastItemId)
+                            && observer.remotes.get(observer.lastItemId).type == EntityTypes.ITEM);
+            Remote dropped = observer.remotes.get(observer.lastItemId);
+            int droppedId = observer.lastItemId;
+            check("items: add_entity data for an item is zero", dropped.data == 0);
+            long deadline = System.currentTimeMillis() + 8_000;
+            boolean picked = false;
+            boolean observerSaw = false;
+            while (System.currentTimeMillis() < deadline) {
+                Remote item = observer.remotes.get(droppedId);
+                if (item != null) {
+                    actor.moveTo(new Vec3(item.position.x, actor.position.y, item.position.z), true);
+                }
+                pumpAll();
+                // 附近还有刚才 Q 丢出的石头，后一次捡起会盖掉 takenItem。苹果这次算过就留着。
+                //
+                // Stone dropped earlier can be picked up afterwards and overwrite takenItem.
+                // Remember that this apple's take packet arrived.
+                if (actor.takenItem == droppedId
+                        && actor.slots.values().stream().anyMatch(stack -> stack.is(Items.APPLE))) {
+                    picked = true;
+                }
+                if (observer.takenItem == droppedId && observer.takenAmount > 0) {
+                    observerSaw = true;
+                }
+                if (picked && observerSaw) {
+                    break;
+                }
+            }
+            check("items: walking onto the apple picks it up", picked);
+            check("items: the other client sees the pickup animation", observerSaw);
+            // 后面的放置用的是玩家脚下的坐标。捡完走回原地，避免站到刚放下的方块上。
+            //
+            // Later placements use the block under the player. Walk back so this
+            // pickup does not leave them standing on a block the next section edits.
+            actor.moveTo(origin, true);
+            // 走回去会把脚边的石头也捡起来。创造模式把物品栏清空，后面的段落按空物品栏算。
+            //
+            // Walking back also picks up the stone. Creative mode then clears the inventory.
+            // Later sections assume it is empty.
+            long clearDeadline = System.currentTimeMillis() + 2_000;
+            while (System.currentTimeMillis() < clearDeadline) {
+                for (int menuSlot = 1; menuSlot < 46; menuSlot++) {
+                    actor.send(new ServerboundSetCreativeModeSlotPacket(menuSlot, ItemStack.EMPTY));
+                }
+                actor.send(new ServerboundSetCarriedItemPacket(0));
+                pumpAll();
+            }
         }
 
         /**
@@ -2755,6 +2859,12 @@ public final class Probe {
         final List<String> narrations = new ArrayList<>();
         int entityDataPackets;
         int heldSlot = -1;
+        /** 最近一次捡起动画里的物品实体和玩家。 */
+        int takenItem = -1;
+        int takenPlayer = -1;
+        int takenAmount;
+        /** 最近一次出现的物品实体。 */
+        int lastItemId = -1;
         int lastAck = -1;
         /** 最近一次 `CHANGE_GAME_MODE` 的参数。还没收到时是 NaN。 */
         // The latest `CHANGE_GAME_MODE` parameter. NaN until one arrives.
@@ -3178,6 +3288,7 @@ public final class Probe {
             handlers.put("handleDisconnect", value -> onDisconnected((ClientboundDisconnectPacket) value));
             handlers.put("handleBundlePacket", value -> onBundle((ClientboundBundlePacket) value));
             handlers.put("handleAddEntity", value -> onAddEntity((ClientboundAddEntityPacket) value));
+            handlers.put("handleTakeItemEntity", value -> onTakeItem((ClientboundTakeItemEntityPacket) value));
             handlers.put("handleRemoveEntities", value -> onRemoveEntities((ClientboundRemoveEntitiesPacket) value));
             handlers.put("handleMoveEntity", value -> onMoveEntity((ClientboundMoveEntityPacket) value));
             handlers.put("handleEntityPositionSync",
@@ -3207,6 +3318,20 @@ public final class Probe {
             handlers.put("handleDisguisedChat", value -> onDisguisedChat((ClientboundDisguisedChatPacket) value));
             handlers.put("handlePlayerChat", value -> onPlayerChat((ClientboundPlayerChatPacket) value));
             handlers.put("handleAwardStats", value -> onAwardStats((ClientboundAwardStatsPacket) value));
+            // 官方解码器解不开这些包就不会走到这里，收到包本身就算通过。
+            // The official decoder never reaches these handlers if a packet fails to decode.
+            handlers.put("handleAddObjective",
+                    value -> check("scoreboard: set_objective decoded", value instanceof ClientboundSetObjectivePacket));
+            handlers.put("handleSetScore",
+                    value -> check("scoreboard: set_score decoded", value instanceof ClientboundSetScorePacket));
+            handlers.put("handleResetScore",
+                    value -> check("scoreboard: reset_score decoded", value instanceof ClientboundResetScorePacket));
+            handlers.put("handleSetDisplayObjective",
+                    value -> check("scoreboard: set_display_objective decoded", value instanceof ClientboundSetDisplayObjectivePacket));
+            handlers.put("handleSetPlayerTeamPacket",
+                    value -> check("team: set_player_team decoded", value instanceof ClientboundSetPlayerTeamPacket));
+            handlers.put("handleBossUpdate",
+                    value -> check("bossbar: boss_event decoded", value instanceof ClientboundBossEventPacket));
             return handlers;
         }
 
@@ -3579,6 +3704,17 @@ public final class Probe {
             if (added.getType() == EntityTypes.TNT) {
                 check("bundle: primed tnt data is zero", added.getData() == 0);
             }
+            if (added.getType() == EntityTypes.ITEM) {
+                check("bundle: an item carries no extra data", added.getData() == 0);
+                boolean hasData = inner.size() > 1 && inner.get(1) instanceof ClientboundSetEntityDataPacket;
+                check("bundle: item metadata follows add_entity", hasData);
+                if (hasData) {
+                    var data = (ClientboundSetEntityDataPacket) inner.get(1);
+                    check("bundle: item metadata names the entity", data.id() == added.getId());
+                    check("bundle: item metadata carries the stack",
+                            data.packedItems().stream().anyMatch(entry -> entry.id() == 8 && entry.value() instanceof ItemStack stack && !stack.isEmpty()));
+                }
+            }
         }
 
         private void onAddEntity(ClientboundAddEntityPacket packet) {
@@ -3587,7 +3723,11 @@ public final class Probe {
             boolean player = packet.getType() == EntityTypes.PLAYER;
             boolean falling = packet.getType() == EntityTypes.FALLING_BLOCK;
             boolean tnt = packet.getType() == EntityTypes.TNT;
-            check("entity: only players, falling blocks and primed tnt are added", player || falling || tnt);
+            boolean item = packet.getType() == EntityTypes.ITEM;
+            check("entity: only players, falling blocks, primed tnt and items are added", player || falling || tnt || item);
+            if (item) {
+                lastItemId = packet.getId();
+            }
             if (player) {
                 check("entity: add_entity comes after the tab entry", tab.containsKey(packet.getUUID()));
                 check("entity: no initial movement", packet.getMovement().equals(Vec3.ZERO));
@@ -3595,6 +3735,13 @@ public final class Probe {
             }
             remotes.put(packet.getId(), new Remote(packet));
             events.add("add " + packet.getId());
+        }
+
+        private void onTakeItem(ClientboundTakeItemEntityPacket packet) {
+            takenItem = packet.getItemId();
+            takenPlayer = packet.getPlayerId();
+            takenAmount = packet.getAmount();
+            check("items: the pickup names a known item", remotes.containsKey(packet.getItemId()));
         }
 
         private void onRemoveEntities(ClientboundRemoveEntitiesPacket packet) {

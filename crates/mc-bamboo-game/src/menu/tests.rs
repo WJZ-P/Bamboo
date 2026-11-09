@@ -360,7 +360,9 @@ fn middle_click_clones_a_full_stack() {
     );
 }
 
-/// Q 丢弃，光标空时丢一格里的东西。没有物品实体，东西直接消失。
+/// Q 丢弃，光标空时丢一格里的东西。丢出的物品生成物品实体。
+///
+/// Throwing with an empty cursor drops the slot. The thrown stack becomes an item entity.
 #[test]
 fn throwing_empties_the_slot() {
     let mut fixture = Fixture::new();
@@ -843,4 +845,167 @@ fn walking_away_closes_the_menu() {
 
     assert!(!fixture.region.menus.contains_key(&fixture.id));
     assert_eq!(fixture.take_ids(), [clientbound::CONTAINER_CLOSE]);
+}
+
+/// 合成器打开 `CrafterMenu`：46 格（九格材料、36 格物品栏、一个只读结果格）
+/// 和 10 个数据槽（九个禁用位加 `triggered`）。
+#[test]
+fn opening_a_crafter_sends_the_screen_content_and_ten_data_slots() {
+    use mc_bamboo_blocks::state::{FrontAndTop, ORIENTATION, TRIGGERED};
+
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    let state = BlockState(blocks::CRAFTER)
+        .with(ORIENTATION, FrontAndTop::NorthUp)
+        .with(TRIGGERED, true);
+    fixture.place(pos, state.0);
+    fixture
+        .region
+        .redstone
+        .set_crafter_disabled(pos, 1 << 3 | 1 << 7);
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Crafter).slots[0] =
+        ItemStack::new(items::OAK_LOG, 1);
+    assert!(open_block(&mut fixture.region, fixture.id, pos));
+
+    let frames = fixture.take_frames();
+    let ids: Vec<i32> = frames.iter().map(|frame| frame.id).collect();
+    assert_eq!(ids[0], clientbound::OPEN_SCREEN);
+    assert_eq!(ids[1], clientbound::CONTAINER_SET_CONTENT);
+    assert_eq!(ids.len(), 12, "open_screen、content 加 10 个 data");
+    assert!(
+        ids[2..]
+            .iter()
+            .all(|&id| id == clientbound::CONTAINER_SET_DATA)
+    );
+
+    let mut open = frames[0].reader();
+    assert_eq!(open.varint(), Ok(1));
+    assert_eq!(open.varint(), Ok(menu_types::CRAFTER_3X3));
+
+    let mut content = frames[1].reader();
+    assert_eq!(content.varint(), Ok(1));
+    assert_eq!(content.varint(), Ok(1), "打开的 state_id 是 1");
+    assert_eq!(content.varint(), Ok(46), "九格加 36 格加结果格");
+    assert_eq!(content.varint(), Ok(1), "第一格有一件物品");
+    assert_eq!(content.varint(), Ok(items::OAK_LOG), "第一格是原木");
+
+    // 数据槽按顺序发，禁用位是 1，triggered 是 1。id 和 value 是 short。
+    for (index, frame) in frames[2..].iter().enumerate() {
+        let mut reader = frame.reader();
+        assert_eq!(reader.varint(), Ok(1), "container_id");
+        assert_eq!(reader.i16(), Ok(index as i16), "数据槽下标");
+        let expected = i16::from(index == 3 || index == 7 || index == 9);
+        assert_eq!(reader.i16(), Ok(expected), "数据槽 {index} 的值");
+    }
+}
+
+/// `container_slot_state_changed` 只有打开着这个合成器菜单、非旁观者、container_id 对、
+/// 下标在 0..9 且这一格是空的才生效；`new_state=false` 是禁用。
+#[test]
+fn a_slot_state_packet_only_toggles_empty_slots_of_the_open_crafter() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CRAFTER);
+    assert!(open_block(&mut fixture.region, fixture.id, pos));
+    fixture.take_frames();
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Crafter).slots[0] =
+        ItemStack::new(items::STONE, 1);
+    let id = fixture.menu().container_id;
+
+    // 有东西的格子不能禁用。
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, 0, false);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 0);
+
+    // 越界下标和错误的 container_id 都不动。
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, 9, false);
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, -1, false);
+    on_slot_state_changed(&mut fixture.region, fixture.id, id + 1, 4, false);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 0);
+
+    // 空格可以禁用，再启用。
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, 4, false);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 1 << 4);
+    tick(&mut fixture.region);
+    let data: Vec<(i16, i16)> = fixture
+        .take_frames()
+        .iter()
+        .filter(|frame| frame.id == clientbound::CONTAINER_SET_DATA)
+        .map(|frame| {
+            let mut reader = frame.reader();
+            let _container = reader.varint().unwrap();
+            let slot = reader.i16().unwrap();
+            (slot, reader.i16().unwrap())
+        })
+        .collect();
+    assert_eq!(data, vec![(4, 1)]);
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, 4, true);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 0);
+}
+
+/// 结果格取不出东西；九格变化时它会跟着刷新。
+#[test]
+fn a_crafter_result_slot_is_display_only() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CRAFTER);
+    assert!(open_block(&mut fixture.region, fixture.id, pos));
+    fixture.take_frames();
+    container::entry_at(&mut fixture.region, pos, ContainerKind::Crafter).slots[0] =
+        ItemStack::new(items::OAK_LOG, 1);
+    tick(&mut fixture.region);
+
+    let frames = fixture.take_frames();
+    let slots: Vec<i16> = frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::CONTAINER_SET_SLOT)
+        .map(|frame| {
+            let mut reader = frame.reader();
+            let _container = reader.varint().unwrap();
+            let _state = reader.varint().unwrap();
+            reader.i16().unwrap()
+        })
+        .collect();
+    assert!(slots.contains(&0), "第一格同步给客户端");
+    assert!(slots.contains(&45), "结果格同步给客户端");
+
+    // 点结果格什么都拿不到。
+    fixture.click(45, 0, ContainerInput::Pickup);
+    assert!(fixture.menu().carried.is_empty());
+    assert_eq!(
+        fixture.entry(pos).slots[0],
+        ItemStack::new(items::OAK_LOG, 1)
+    );
+}
+
+/// 旁观者和没开着合成器菜单的玩家发的 `container_slot_state_changed` 一律丢掉。
+#[test]
+fn a_slot_state_packet_from_a_spectator_or_without_a_crafter_menu_is_ignored() {
+    let mut fixture = Fixture::new();
+    let pos = Fixture::chest_pos();
+    fixture.place(pos, blocks::CRAFTER);
+
+    // 菜单没开时不生效。
+    on_slot_state_changed(&mut fixture.region, fixture.id, 1, 4, false);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 0);
+
+    assert!(open_block(&mut fixture.region, fixture.id, pos));
+    fixture.take_frames();
+    let id = fixture.menu().container_id;
+    fixture
+        .region
+        .players
+        .get_mut(&fixture.id)
+        .unwrap()
+        .game_mode = GameMode::Spectator;
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, 4, false);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 0);
+
+    fixture
+        .region
+        .players
+        .get_mut(&fixture.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+    on_slot_state_changed(&mut fixture.region, fixture.id, id, 4, false);
+    assert_eq!(fixture.region.redstone.crafter_disabled(pos), 1 << 4);
 }

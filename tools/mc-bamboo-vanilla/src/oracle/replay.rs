@@ -69,9 +69,10 @@ pub struct Replayed {
     pub gained: Vec<String>,
     /// 读写过的方块的注册表 ID。结果不对时看它们里面有没有还没移植的类。
     pub touched: BTreeSet<usize>,
-    /// 跑完之后 `level.random` 的内部种子。
+    /// 跑完之后 `level.random` 的内部种子，发射器和合成器题与官方逐位比较。
     ///
-    /// The internal seed of `level.random` after the case.
+    /// The internal seed of `level.random` after the case, compared bit for bit with vanilla
+    /// on dispenser and crafter cases.
     pub random_seed: i64,
 }
 
@@ -415,7 +416,7 @@ impl Level for OracleLevel {
             return false;
         }
         self.touch(state);
-        // 换成别的方块时方块实体一起换掉，内容没有掉落物。同一格还是同一种容器时保留内容。
+        // 换成别的方块时方块实体一起换掉，假世界的掉落表是空的。同一格还是同一种容器时保留内容。
         let old = self.kind(pos);
         let new = ContainerKind::of(state);
         if old != new {
@@ -993,6 +994,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             Effect::TorchBurnout { .. } => None,
             Effect::BoneMealUsed { .. }
             | Effect::FilledBucket { .. }
+            | Effect::EmptiedBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
@@ -1111,6 +1113,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
                 ));
             }
             Effect::FilledBucket { .. }
+            | Effect::EmptiedBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::OpenSignEditor { .. }
             | Effect::BlockEvent { .. }
@@ -1134,7 +1137,7 @@ fn gained_of(outcome: &Outcome, actor: &Actor) -> Vec<String> {
     let mut held = vec![actor.main_hand, actor.off_hand];
     let mut gained = Vec::new();
     for effect in &outcome.effects {
-        if let Effect::FilledBucket { item } = *effect
+        if let Effect::FilledBucket { item, .. } = *effect
             && !held.contains(&item)
         {
             held.push(item);

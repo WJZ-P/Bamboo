@@ -1,12 +1,16 @@
 //! `BlockTransformer.transformBlock`：斧子、锄头、锹右键时按数据驱动的规则改方块。
 //!
-//! 规则是从官方注册表生成的，在 `mc_bamboo_data::block_transformers`。官方锄头翻生根泥土时还会掉出垂根，
-//! 掉落物不在范围里。
+//! 规则是从官方注册表生成的，在 `mc_bamboo_data::block_transformers`。锄头翻生根泥土时
+//! 在改方块之前按点击的面 `popResourceFromFace` 掉一根垂根。
+//!
+//! Hoeing rooted dirt calls `popResourceFromFace` for one hanging roots before the block changes.
 
 use mc_bamboo_core::{BlockPos, Hand};
 use mc_bamboo_data::{
     BlockAncestor, BlockPredicate, BlockTransform, BlockTransformer, StateProvider, StateRule,
+    blocks, items,
 };
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     behaviour::{common::item_of, machines::chest::connected_direction},
@@ -37,9 +41,18 @@ pub(super) fn transform_block(
     };
     let old = world.block_state(pos);
     let state = fitted_to_neighbours(transform, world, state, pos);
-    // 掉落物表在官方这里取随机数，还没做。耐久在写方块之前扣，和 `transformBlock` 一样。
+    // `BlockTransformer` 先掉落再 `setBlock`。只有锄头翻生根泥土这一项带掉落表，结果是常量 1。
+    // 耐久也在写方块之前扣，和官方 `transformBlock` 一样。
     //
-    // The loot table draws here in vanilla and is not implemented. Durability is spent before the block write, as in `transformBlock`.
+    // Loot runs before `setBlock`. Only hoeing rooted dirt has a table, and it is a constant 1.
+    // Durability is spent before the block write too, as in `transformBlock`.
+    if world.block_state(pos).is(blocks::ROOTED_DIRT) {
+        world.pop_resource_from_face(
+            pos,
+            ctx.clicked_face(),
+            ItemStack::new(items::HANGING_ROOTS, 1),
+        );
+    }
     crate::durability::pay_for_transform(
         world,
         ctx,

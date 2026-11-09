@@ -1,12 +1,19 @@
 //! TNT 的爆炸，官方 `ServerExplosion` 里和方块有关的那部分。
 //!
-//! 只走 TNT 这一条路：不伤实体、不掉落物、不点火。破坏哪些方块、按什么顺序破坏都要和
-//! 官方一样，因为顺序决定世界随机源怎么用，进而决定连锁点燃的 TNT 拿到什么引信。
+//! 只走 TNT 这一条路：不伤生物、不点火。被炸掉的方块按战利品表掉物品，不给经验。
+//! 破坏哪些方块、按什么顺序破坏都要和官方一样，因为顺序决定世界随机源怎么用，
+//! 进而决定连锁点燃的 TNT 拿到什么引信。
+//!
+//! The block half of `ServerExplosion`, TNT only. Mobs are not hurt and no fire is
+//! started. Broken blocks drop through their loot tables, without experience.
+//! Which blocks break, and in which order, matches vanilla because that order decides
+//! how `level.random` is consumed and therefore which fuse a chained TNT gets.
 
 use std::collections::HashSet;
 
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::BlockAncestor;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     state::{BlockState, FluidState},
@@ -27,33 +34,49 @@ impl World<'_> {
     /// `PrimedTnt.explode` 走到 `ServerLevel.explode` 和 `ServerExplosion.explode`，
     /// 这里只保留破坏方块和连锁点燃 TNT。
     ///
-    /// `center` 是爆炸中心，`radius` 是爆炸强度。实体伤害和掉落物不在范围里。
+    /// `center` 是爆炸中心，`radius` 是爆炸强度。不伤生物，也不给经验。
     ///
     /// 官方把 `entity.generic.explode` 和爆炸粒子放进 `ClientboundExplodePacket`，不是 `playSound`。
     /// 协议里还没有这个包，所以这里不另发一条声音，避免和 `playSeededSound` 对不上。
     ///
-    /// `center` is the explosion centre and `radius` is the power. Entity damage and drops are
-    /// out of scope.
+    /// `center` is the explosion centre and `radius` is its power. Mobs are not hurt and no
+    /// experience is dropped.
     ///
     /// Vanilla puts `entity.generic.explode` and the explosion particles on
-    /// `ClientboundExplodePacket`, not `playSound`. That packet is not in the protocol yet, so
-    /// this does not emit a sound that would disagree with `playSeededSound`.
+    /// `ClientboundExplodePacket`, not `playSound`. That packet is not in the protocol yet,
+    /// so this does not emit a sound that would disagree with `playSeededSound`.
     pub fn explode_tnt(&mut self, center: Vec3, radius: f32) {
         let mut broken = self.calculate_exploded_positions(center, radius);
+        // `hurtEntities` 在打乱方块之前，而且不取 `level.random`。
+        // `hurtEntities` runs before the block list is shuffled and does not draw `level.random`.
+        crate::entity::item::hurt_items_by_explosion(self, center, radius);
         // `Util.shuffle(toBlow, level.random)`。
         self.random().shuffle(&mut broken);
+        // `interactWithBlocks`：先收齐掉落，整圈方块处理完才 `popResource`。
+        // `interactWithBlocks` collects drops, then `popResource`s them after every block.
+        let mut drops = Vec::new();
         for pos in broken {
             let state = self.block_state(pos);
             if state.is_air() {
                 continue;
             }
-            // `BlockBehaviour.onExplosionHit`：换成空气，再问被炸掉的方块一声。
-            // 掉落和 `spawnAfterBreak` 不在范围里。
+            // `TntBlock.dropFromExplosion` 返回假，别的方块默认掉落。
+            // `TntBlock.dropFromExplosion` is false. Every other block drops by default.
             let was_tnt = state.is_a(BlockAncestor::TntBlock);
+            if !was_tnt {
+                for stack in self.explosion_block_drops(state, pos) {
+                    collect_drop(&mut drops, pos, stack);
+                }
+            }
+            // `setBlockAndUpdate` 在 `wasExploded` 之前。容器的 `dropContents` 就在这一步取数。
+            // `setBlockAndUpdate` runs before `wasExploded`. Container `dropContents` draws here.
             self.set_block_and_update(pos, BlockState::AIR);
             if was_tnt {
                 self.spawn_short_fuse_tnt(pos);
             }
+        }
+        for (pos, stack) in drops {
+            self.pop_resource(pos, stack);
         }
     }
 
@@ -110,6 +133,20 @@ impl World<'_> {
         }
         blown.into_java_order()
     }
+}
+
+/// `ServerExplosion.addOrAppendStack`：先按 16 的上限并进已有的堆，剩下的另起一堆。
+///
+/// `ServerExplosion.addOrAppendStack`: merge into an existing stack with a cap of 16, then keep
+/// whatever is left as a new stack.
+fn collect_drop(stacks: &mut Vec<(BlockPos, ItemStack)>, pos: BlockPos, mut stack: ItemStack) {
+    for (_, existing) in stacks.iter_mut() {
+        crate::entity::merge_explosion(existing, &mut stack);
+        if stack.is_empty() {
+            return;
+        }
+    }
+    stacks.push((pos, stack));
 }
 
 /// `FluidState.getExplosionResistance()`。数值来自生成的流体表。

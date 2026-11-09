@@ -2,13 +2,15 @@
 //!
 //! 每刻把朝向那一格的容器塞一个物品，再从上面一格的容器吸一个，冷却 8 刻。
 //! 堆肥桶没有物品栏，但是官方把它也当成容器，见 [`crate::composter`]。
-//! 这个世界没有物品实体，所以官方从地上和上方吸物品实体的那一段没写：方块位置上面没有容器时
-//! 什么也不做，和上面被完整方块压住时的官方行为一样。
+//! 上面不是容器、也没有被完整方块挡住时，吸吸取盒里的物品实体。
+//!
+//! When the block above is not a container and is not a full cube blocking the hopper,
+//! item entities in the suck box are pulled in.
 
 use std::any::Any;
 
-use mc_bamboo_core::{BlockPos, Direction};
-use mc_bamboo_data::BlockAncestor;
+use mc_bamboo_core::{BlockPos, Direction, mth};
+use mc_bamboo_data::{BlockAncestor, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -16,6 +18,8 @@ use crate::{
     container::{
         CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
     },
+    entity::Entity,
+    shape::Aabb,
     state::{ENABLED, FACING_HOPPER},
     world::World,
 };
@@ -231,9 +235,65 @@ pub(crate) fn apply_hopper_cooldown(
     });
 }
 
+/// 物品实体的盒子和漏斗方块重叠时，`HopperBlock.entityInside` 会试着吸它。
+///
+/// 吸取盒比方块高。只落在漏斗上方、没有碰到这一格的物品，要等漏斗自己的 tick
+/// 走 `suckInItems`，不在这里吸。
+///
+/// When the item overlaps the hopper block, `HopperBlock.entityInside` tries to pull it in.
+///
+/// The suck box is taller than the block. An item that only sits above the hopper, without
+/// touching this cell, waits for the hopper tick's `suckInItems`.
+pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
+    let Some(ground) = item.ground() else {
+        return;
+    };
+    if ground.stack.is_empty() || item.removed {
+        return;
+    }
+    let bounds = item.bounding_box();
+    let min = BlockPos::new(
+        mth::floor(bounds.min_x),
+        mth::floor(bounds.min_y) - 2,
+        mth::floor(bounds.min_z),
+    );
+    let max = BlockPos::new(
+        mth::floor(bounds.max_x),
+        mth::floor(bounds.max_y),
+        mth::floor(bounds.max_z),
+    );
+    let mut hoppers = Vec::new();
+    for y in min.y..=max.y {
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                let pos = BlockPos::new(x, y, z);
+                if world.block_state(pos).is_a(BlockAncestor::HopperBlock) {
+                    hoppers.push(pos);
+                }
+            }
+        }
+    }
+    for pos in hoppers {
+        if item.removed {
+            break;
+        }
+        // 官方先要求实体碰到这一格（`Shapes.block()`），再要求吸取盒。
+        // Vanilla requires the entity to touch this cell (`Shapes.block()`), then the suck box.
+        if !intersects_block(item, pos) || !intersects_suck_box(item, pos) {
+            continue;
+        }
+        world.with_block_entity::<HopperEntity, _>(pos, |hopper, world| {
+            try_move_touching(world, pos, hopper, item);
+        });
+    }
+}
+
 /// `suckInItems`：从上面一格的容器里拿一个物品。
 ///
-/// 官方在上方没有容器时会去吸落在漏斗里和上方的物品实体，这个世界没有物品实体，那一段不写。
+/// 上方没有容器时改去吸落在漏斗里和上方的物品实体，见 [`suck_touching_item`]。
+///
+/// When the block above is not a container, items sitting in and above the hopper are pulled in
+/// instead. See [`suck_touching_item`].
 fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> bool {
     let above = pos.above();
     let mut slots = None;
@@ -243,7 +303,7 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
             <[usize]>::to_vec,
         ));
     }) {
-        return false;
+        return suck_ground_items(world, pos, entity);
     }
     let Some(slots) = slots else {
         return false;
@@ -318,6 +378,179 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
         world.with_container(above, &mut |container| container.set(slot, item.clone()));
     }
     false
+}
+
+/// `Hopper.SUCK_AABB`：方块内 x/z 整格，y 从 11/16 到 2。
+///
+/// `Hopper.SUCK_AABB`: a full block on x/z, y from 11/16 to 2.
+fn suck_box(pos: BlockPos) -> Aabb {
+    Aabb::new(
+        f64::from(pos.x),
+        f64::from(pos.y) + 11.0 / 16.0,
+        f64::from(pos.z),
+        f64::from(pos.x + 1),
+        f64::from(pos.y) + 2.0,
+        f64::from(pos.z + 1),
+    )
+}
+
+fn intersects_suck_box(item: &Entity, pos: BlockPos) -> bool {
+    item.bounding_box().intersects(suck_box(pos))
+}
+
+/// 漏斗这一格的完整方块。`getEntityInsideCollisionShape` 默认是 `Shapes.block()`。
+///
+/// The hopper cell as a full cube. `getEntityInsideCollisionShape` defaults to `Shapes.block()`.
+fn intersects_block(item: &Entity, pos: BlockPos) -> bool {
+    item.bounding_box().intersects(Aabb::new(
+        f64::from(pos.x),
+        f64::from(pos.y),
+        f64::from(pos.z),
+        f64::from(pos.x + 1),
+        f64::from(pos.y + 1),
+        f64::from(pos.z + 1),
+    ))
+}
+
+/// 上面没有容器时，`getItemsAtAndAbove` 里还活着的物品逐个 `addItem`。
+///
+/// With no container above, each living item from `getItemsAtAndAbove` is offered to `addItem`.
+fn suck_ground_items(world: &mut World, pos: BlockPos, hopper: &mut HopperEntity) -> bool {
+    let above = pos.above();
+    let above_state = world.block_state(above);
+    // 漏斗方块实体总是对齐格子。完整碰撞并且不在 `DOES_NOT_BLOCK_HOPPERS` 里就吸不到。
+    // A block hopper is grid-aligned. A full collision outside `DOES_NOT_BLOCK_HOPPERS` blocks the suck.
+    if above_state.is_collision_shape_full_block()
+        && !above_state.is_tagged(block_tags::DOES_NOT_BLOCK_HOPPERS)
+    {
+        return false;
+    }
+    let area = suck_box(pos);
+    let ids = world.entity_ids();
+    for id in ids {
+        let stack = world.entity(id).and_then(|entity| {
+            if entity.removed || !entity.bounding_box().intersects(area) {
+                return None;
+            }
+            entity.ground().and_then(|item| {
+                if item.stack.is_empty() {
+                    None
+                } else {
+                    Some(item.stack.clone())
+                }
+            })
+        });
+        let Some(stack) = stack else {
+            continue;
+        };
+        if absorb_stack(world, pos, hopper, id, stack) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `entityInside` 走的 `tryMoveItems`：先往外送，再只吸正在碰漏斗的这一件。
+///
+/// `tryMoveItems` from `entityInside`: eject first, then pull in only the entity that is touching.
+fn try_move_touching(
+    world: &mut World,
+    pos: BlockPos,
+    hopper: &mut HopperEntity,
+    item: &mut Entity,
+) {
+    if hopper.is_on_cooldown() {
+        return;
+    }
+    if !world.block_state(pos).get(ENABLED) {
+        return;
+    }
+    let mut changed = false;
+    if !container_is_empty(world, pos) {
+        changed = eject_items(world, pos, hopper);
+    }
+    if !inventory_full(world, pos) && !item.removed && intersects_suck_box(item, pos) {
+        let stack = item
+            .ground()
+            .map(|ground| ground.stack.clone())
+            .unwrap_or_else(ItemStack::empty);
+        if !stack.is_empty() {
+            changed |= absorb_held(world, pos, hopper, item, stack);
+        }
+    }
+    if changed {
+        hopper.set_cooldown(MOVE_ITEM_SPEED);
+        set_changed(world, pos);
+    }
+}
+
+/// `addItem(hopper, itemEntity)`。整堆吸完才返回 true，并丢掉实体。
+///
+/// `addItem(hopper, itemEntity)`. Returns true only when the whole stack is taken, and then discards it.
+fn absorb_stack(
+    world: &mut World,
+    pos: BlockPos,
+    hopper: &mut HopperEntity,
+    id: i32,
+    stack: ItemStack,
+) -> bool {
+    let added = insert_into_hopper(world, pos, hopper, stack);
+    let Some(added) = added else {
+        return false;
+    };
+    let absorbed = added.remaining.is_empty();
+    if let Some(entity) = world.entity_mut(id) {
+        if let Some(item) = entity.ground_mut() {
+            item.stack = added.remaining;
+        }
+        if absorbed {
+            entity.discard();
+        }
+    }
+    if absorbed {
+        world.remove_entity(id);
+    }
+    absorbed
+}
+
+fn absorb_held(
+    world: &mut World,
+    pos: BlockPos,
+    hopper: &mut HopperEntity,
+    item: &mut Entity,
+    stack: ItemStack,
+) -> bool {
+    let added = insert_into_hopper(world, pos, hopper, stack);
+    let Some(added) = added else {
+        return false;
+    };
+    let absorbed = added.remaining.is_empty();
+    if let Some(ground) = item.ground_mut() {
+        ground.stack = added.remaining;
+    }
+    if absorbed {
+        item.discard();
+    }
+    absorbed
+}
+
+fn insert_into_hopper(
+    world: &mut World,
+    pos: BlockPos,
+    hopper: &mut HopperEntity,
+    stack: ItemStack,
+) -> Option<Added> {
+    let mut added = None;
+    world.with_container(pos, &mut |container| {
+        added = Some(add_item(container, stack.clone(), None));
+    });
+    let added = added?;
+    // 空漏斗吃进第一件时，`tryMoveInItem` 自己把冷却设成 8。来源不是漏斗，不减 1。
+    // An empty hopper sets its own cooldown to 8 on the first insert. The source is not a hopper.
+    if added.was_empty && !hopper.is_on_custom_cooldown() {
+        hopper.set_cooldown(MOVE_ITEM_SPEED);
+    }
+    Some(added)
 }
 
 /// `getSlots` 加 `isFullContainer`：这些槽都有东西并且都到了堆叠上限。

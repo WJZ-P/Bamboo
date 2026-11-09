@@ -153,6 +153,6 @@ fn can_spread(state: BlockState, world: &World, pos: BlockPos) -> bool {
 /// `tick` 里“放不住就破坏”这一段。
 fn break_if_unsupported(state: BlockState, world: &mut World, pos: BlockPos) {
     if !state.can_survive(world, pos) {
-        world.destroy_block(pos, UPDATE_LIMIT);
+        world.destroy_block(pos, true, UPDATE_LIMIT);
     }
 }

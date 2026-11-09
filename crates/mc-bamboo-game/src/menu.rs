@@ -228,6 +228,10 @@ struct Ctx<'a> {
     quickcraft_type: &'a mut i32,
     quickcraft_slots: &'a mut Vec<usize>,
     creative: bool,
+    /// 这次点击丢掉的物品，点击结束后再生成实体。
+    ///
+    /// Stacks thrown by this click. Entities are spawned after the click finishes.
+    thrown: &'a mut Vec<ItemStack>,
 }
 
 impl Ctx<'_> {
@@ -599,10 +603,17 @@ fn throw_slot(ctx: &mut Ctx, slot_index: i32, button: i32) {
     };
     let amount = if button == 0 { 1 } else { ctx.get(index).count };
     let mut item = ctx.safe_take(index, amount);
-    // 没有物品实体，丢掉的东西就没了。
+    // 每一堆单独丢出。空堆不生成实体，也不取玩家的随机数。
+    // Each taken stack is thrown on its own. An empty stack spawns nothing and draws no player random.
+    if !item.is_empty() {
+        ctx.thrown.push(item.clone());
+    }
     if button == 1 {
         while !item.is_empty() && is_same_item(&ctx.get(index), &item) {
             item = ctx.safe_take(index, amount);
+            if !item.is_empty() {
+                ctx.thrown.push(item.clone());
+            }
         }
     }
 }
@@ -781,7 +792,12 @@ fn place_count(size: usize, kind: i32, stack: &ItemStack) -> i32 {
 ///
 /// 打不开（不是容器、被挡住、潜影盒被挡住）时返回 `false`，调用方据此判断有没有菜单。
 pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
-    let Some(kind) = container::kind_at(region, pos) else {
+    // 合成器有 `CrafterMenu`（九格加只读结果格和 10 个数据槽），走工作台那套，不走箱子。
+    //
+    // A crafter has a `CrafterMenu` (nine slots, a read-only result slot and ten data slots),
+    // so it uses the workstation path rather than the chest one.
+    let Some(kind) = container::kind_at(region, pos).filter(|&kind| kind != ContainerKind::Crafter)
+    else {
         return station::try_open(region, id, pos);
     };
     if !region.players.contains_key(&id) {
@@ -939,10 +955,10 @@ fn menu_shape(
                 kind.title(),
             )
         }
-        // 雕纹书架、唱片机、陶罐和架子官方没有菜单。合成器的 `CrafterMenu` 这次不打开。
+        // 雕纹书架、唱片机、陶罐和架子官方没有菜单。合成器由 `open_block` 转到工作台那套。
         //
-        // Chiseled bookshelves, jukeboxes, pots and shelves have no vanilla menu. The crafter's
-        // `CrafterMenu` is not opened in this change.
+        // Chiseled bookshelves, jukeboxes, pots and shelves have no vanilla menu. `open_block`
+        // sends a crafter to the workstation path.
         ContainerKind::ChiseledBookshelf
         | ContainerKind::Jukebox
         | ContainerKind::DecoratedPot
@@ -999,6 +1015,17 @@ pub(crate) fn on_rename(region: &mut Region, id: PlayerId, name: &str) {
     station::on_rename(region, id, name);
 }
 
+/// 合成器菜单切换禁用槽。官方 `handleContainerSlotStateChanged`。
+pub(crate) fn on_slot_state_changed(
+    region: &mut Region,
+    id: PlayerId,
+    container_id: i32,
+    slot_id: i32,
+    new_state: bool,
+) {
+    station::on_slot_state_changed(region, id, container_id, slot_id, new_state);
+}
+
 /// 官方 `AbstractContainerMenu.removed` 加子类的 `stopOpen`。
 fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items: bool) {
     if menu.station.is_some() {
@@ -1022,45 +1049,53 @@ fn finish_menu(region: &mut Region, id: PlayerId, menu: &mut Menu, return_items:
     }
 }
 
-/// 官方 `Inventory.placeItemBackInInventory`。没有物品实体，放不下的就丢掉。
+/// 官方 `Inventory.placeItemBackInInventory`。放不下的生成物品实体。
+///
+/// Vanilla `Inventory.placeItemBackInInventory`. What does not fit becomes an item entity.
 fn place_item_back_in_inventory(region: &mut Region, id: PlayerId, mut stack: ItemStack) {
     if stack.is_empty() {
         return;
     }
-    let Some(player) = region.players.get_mut(&id) else {
-        return;
-    };
     let mut updates: Vec<(i32, ItemStack)> = Vec::new();
-    while !stack.is_empty() {
-        let slot = remaining_space_slot(&player.inventory, &stack)
-            .or_else(|| free_slot(&player.inventory));
-        let Some(slot) = slot else {
-            debug!(
-                player = id.0,
-                item = stack.item,
-                "dropping the carried stack: there is no inventory space"
-            );
-            break;
+    let leftover = {
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
         };
-        let existing = &mut player.inventory.slots[slot];
-        // 空格按进来的物品算上限，非空的格子按格子里物品的上限算。
-        let max = if existing.is_empty() {
-            item_max(&stack)
-        } else {
-            stack_limit(existing)
-        };
-        let to_add = (max - existing.count).min(stack.count);
-        if to_add <= 0 {
-            break;
+        while !stack.is_empty() {
+            let slot = remaining_space_slot(&player.inventory, &stack)
+                .or_else(|| free_slot(&player.inventory));
+            let Some(slot) = slot else {
+                debug!(
+                    player = id.0,
+                    item = stack.item,
+                    "dropping the carried stack: there is no inventory space"
+                );
+                break;
+            };
+            let existing = &mut player.inventory.slots[slot];
+            // 空格按进来的物品算上限，非空的格子按格子里物品的上限算。
+            let max = if existing.is_empty() {
+                item_max(&stack)
+            } else {
+                stack_limit(existing)
+            };
+            let to_add = (max - existing.count).min(stack.count);
+            if to_add <= 0 {
+                break;
+            }
+            if existing.is_empty() {
+                *existing = copy_with_count(&stack, 0);
+            }
+            existing.count += to_add;
+            stack.count -= to_add;
+            if let Some(index) = official_index(slot) {
+                updates.push((index, existing.clone()));
+            }
         }
-        if existing.is_empty() {
-            *existing = copy_with_count(&stack, 0);
-        }
-        existing.count += to_add;
-        stack.count -= to_add;
-        if let Some(index) = official_index(slot) {
-            updates.push((index, existing.clone()));
-        }
+        stack
+    };
+    if !leftover.is_empty() {
+        crate::drops::spawn_throw(region, id, leftover);
     }
     for (slot, stack) in updates {
         region.links.send(
@@ -1265,6 +1300,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
         .players
         .get(&id)
         .is_some_and(|player| player.game_mode == GameMode::Creative);
+    let mut thrown = Vec::new();
     if let Some(player) = region.players.get_mut(&id) {
         let mut ctx = Ctx {
             kind: menu.kind,
@@ -1276,6 +1312,7 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
             quickcraft_type: &mut menu.quickcraft_type,
             quickcraft_slots: &mut menu.quickcraft_slots,
             creative,
+            thrown: &mut thrown,
         };
         do_click(
             &mut ctx,
@@ -1283,6 +1320,9 @@ pub(crate) fn on_click(region: &mut Region, id: PlayerId, packet: ClickPacket) {
             i32::from(packet.button),
             packet.input,
         );
+    }
+    for stack in thrown {
+        crate::drops::spawn_throw(region, id, stack);
     }
     if ender {
         if let Some(player) = region.players.get_mut(&id) {

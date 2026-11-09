@@ -111,13 +111,23 @@ impl Behaviour for Composter {
         if state.get(LEVEL_COMPOSTER) != READY {
             return InteractionResult::Pass;
         }
-        // `extractProduce` 先给掉出来的骨粉算落点，`Vec3.offsetRandomXZ` 取两个 `nextFloat`。
-        // 世界里没有物品实体，这两个数照样要取。
-        world.random().next_float();
-        world.random().next_float();
+        // `extractProduce`：`Vec3.offsetRandomXZ` 两个 `nextFloat` 算出骨粉落点，
+        // 生成物品实体后把层数清零，最后 `empty` 的音效（传给 `except` 的是 null）。
+        //
+        // `extractProduce`: two `nextFloat`s pick the bone meal drop point, an item entity is
+        // spawned, the level is cleared, and the `empty` sound follows with a null `except`.
         let pos = ctx.clicked_pos();
+        let dx = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+        let dz = (world.random().next_float() - 0.5_f32) * 0.7_f32;
+        world.spawn_at_location(
+            mc_bamboo_core::Vec3::new(
+                f64::from(pos.x) + 0.5 + f64::from(dx),
+                f64::from(pos.y) + 1.01,
+                f64::from(pos.z) + 0.5 + f64::from(dz),
+            ),
+            mc_bamboo_protocol::item::ItemStack::new(mc_bamboo_data::items::BONE_MEAL, 1),
+        );
         world.set_block_and_update(pos, state.with(LEVEL_COMPOSTER, 0));
-        // `extractProduce` 在 `empty` 之后出声，`null` 作 `except`。
         world.play_block_sound(
             pos,
             sound_event("minecraft:block.composter.empty"),

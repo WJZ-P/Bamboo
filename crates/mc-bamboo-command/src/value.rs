@@ -3,6 +3,7 @@
 use mc_bamboo_blocks::BlockState;
 use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::Item;
+use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
 
 use crate::identifier::Identifier;
@@ -106,6 +107,10 @@ pub struct EntitySelector {
     pub game_mode_filters: Vec<(GameMode, bool)>,
     pub team_filters: Vec<(String, bool)>,
     pub tag_filters: Vec<(String, bool)>,
+    /// `scores={目标=范围}`。同一个目标写两次时，后面的覆盖前面的。
+    ///
+    /// `scores={objective=range}`. A later entry for the same objective replaces the earlier one.
+    pub score_filters: Vec<(String, NumberBounds<i32>)>,
     pub uses_selectors: bool,
 }
 
@@ -374,11 +379,143 @@ impl ItemPredicateInput {
     }
 }
 
+/// 官方 `ParticleArgument` 的结果：类型 ID、注册名，以及 `ParticleTypes.STREAM_CODEC` 的选项字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticleInput {
+    pub id: i32,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// 官方 `MessageArgument.Message`。`text` 是整段原文，`parts` 是选择器所在的位置。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub text: String,
     pub parts: Vec<MessagePart>,
+}
+
+/// 计分项准则。`hearts` 为真时默认渲染成心。
+///
+/// An objective criterion. `hearts` means the default render type is hearts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectiveCriteria {
+    pub name: String,
+    pub read_only: bool,
+    pub hearts: bool,
+}
+
+/// 官方 `OperationArgument` 的九种运算。
+///
+/// The nine operations of official `OperationArgument`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreOperation {
+    Assign,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Min,
+    Max,
+    Swap,
+}
+
+/// 计分板显示位置，id 跟官方 `DisplaySlot` 一致。
+///
+/// A scoreboard display slot. The id matches official `DisplaySlot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplaySlot(pub u8);
+
+impl DisplaySlot {
+    const NAMES: [&'static str; 19] = [
+        "list",
+        "sidebar",
+        "below_name",
+        "sidebar.team.black",
+        "sidebar.team.dark_blue",
+        "sidebar.team.dark_green",
+        "sidebar.team.dark_aqua",
+        "sidebar.team.dark_red",
+        "sidebar.team.dark_purple",
+        "sidebar.team.gold",
+        "sidebar.team.gray",
+        "sidebar.team.dark_gray",
+        "sidebar.team.blue",
+        "sidebar.team.green",
+        "sidebar.team.aqua",
+        "sidebar.team.red",
+        "sidebar.team.light_purple",
+        "sidebar.team.yellow",
+        "sidebar.team.white",
+    ];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .position(|slot| *slot == name)
+            .map(|id| Self(id as u8))
+    }
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES.get(self.0 as usize).copied().unwrap_or("list")
+    }
+
+    pub fn suggestions() -> &'static [&'static str] {
+        &Self::NAMES
+    }
+}
+
+/// 队伍颜色，id 跟官方 `TeamColor` 一致。
+///
+/// A team color. The id matches official `TeamColor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeamColorId(pub u8);
+
+impl TeamColorId {
+    const NAMES: [&'static str; 16] = [
+        "black",
+        "dark_blue",
+        "dark_green",
+        "dark_aqua",
+        "dark_red",
+        "dark_purple",
+        "gold",
+        "gray",
+        "dark_gray",
+        "blue",
+        "green",
+        "aqua",
+        "red",
+        "light_purple",
+        "yellow",
+        "white",
+    ];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .position(|color| *color == name)
+            .map(|id| Self(id as u8))
+    }
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES.get(self.0 as usize).copied().unwrap_or("white")
+    }
+
+    pub fn suggestions() -> &'static [&'static str] {
+        &Self::NAMES
+    }
+}
+
+/// 记分板名字。`*`、一段文字或一个选择器，执行时再决定是玩家还是纯名字。
+///
+/// A score holder. `*`, a piece of text, or a selector. Execution decides whether
+/// it is a player or a name-only holder.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScoreHolderSpec {
+    Wildcard,
+    Text(String),
+    Selector(Box<EntitySelector>),
 }
 
 /// 消息里的一段实体选择器。位置是字符下标，从消息开头算。
@@ -407,9 +544,22 @@ pub enum Value {
     Item(ItemInput),
     ItemPredicate(ItemPredicateInput),
     Message(Message),
+    /// 官方 `ComponentArgument` 解析出的 SNBT 标签，交给网络层的组件 `Codec` 校验。
+    Component(Tag),
+    /// 官方 `ParticleArgument` 的结果：注册表 ID、名字和选项的线上字节。
+    Particle(ParticleInput),
     GameMode(GameMode),
     EntityAnchor(EntityAnchor),
     Time(i32),
+    Criteria(ObjectiveCriteria),
+    Operation(ScoreOperation),
+    DisplaySlot(DisplaySlot),
+    ScoreHolder(ScoreHolderSpec),
+    /// 已经校验过的样式标签。
+    ///
+    /// A style tag that has already been checked.
+    Style(mc_bamboo_nbt::Tag),
+    TeamColor(TeamColorId),
 }
 
 impl Value {
@@ -518,6 +668,20 @@ impl Value {
         }
     }
 
+    pub fn as_component(&self) -> Option<&Tag> {
+        match self {
+            Self::Component(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_particle(&self) -> Option<&ParticleInput> {
+        match self {
+            Self::Particle(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub fn as_game_mode(&self) -> Option<GameMode> {
         match self {
             Self::GameMode(value) => Some(*value),
@@ -535,6 +699,52 @@ impl Value {
     pub fn as_time(&self) -> Option<i32> {
         match self {
             Self::Time(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_criteria(&self) -> Option<&ObjectiveCriteria> {
+        match self {
+            Self::Criteria(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_operation(&self) -> Option<ScoreOperation> {
+        match self {
+            Self::Operation(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_display_slot(&self) -> Option<DisplaySlot> {
+        match self {
+            Self::DisplaySlot(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_score_holder(&self) -> Option<&ScoreHolderSpec> {
+        match self {
+            Self::ScoreHolder(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_component_tag(&self) -> Option<&Tag> {
+        self.as_component()
+    }
+
+    pub fn as_style_tag(&self) -> Option<&mc_bamboo_nbt::Tag> {
+        match self {
+            Self::Style(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_team_color(&self) -> Option<TeamColorId> {
+        match self {
+            Self::TeamColor(value) => Some(*value),
             _ => None,
         }
     }
