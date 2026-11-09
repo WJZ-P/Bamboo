@@ -345,6 +345,15 @@ pub fn chat_command(command: &str) -> Vec<u8> {
     frame(&payload)
 }
 
+/// `command_suggestion`：世界线程一定回一个 ID 相同的 `command_suggestions`，
+/// 而且不改任何游戏状态，用来做同步屏障。
+pub fn command_suggestion(transaction: i32, text: &str) -> Vec<u8> {
+    let mut payload = packet(serverbound::COMMAND_SUGGESTION);
+    write_varint(&mut payload, transaction);
+    write_string(&mut payload, text);
+    frame(&payload)
+}
+
 pub fn client_command(action: i32) -> Vec<u8> {
     let mut payload = packet(serverbound::CLIENT_COMMAND);
     write_varint(&mut payload, action);
@@ -1060,6 +1069,23 @@ impl Packet for BlockChangedAck {
         Self {
             sequence: varint(reader),
         }
+    }
+}
+
+/// 同步屏障只关心回包里的 ID，剩下的补全内容跳过。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSuggestions {
+    pub transaction: i32,
+}
+
+impl Packet for CommandSuggestions {
+    const ID: i32 = clientbound::COMMAND_SUGGESTIONS;
+
+    fn read(reader: &mut Reader<'_>) -> Self {
+        let transaction = varint(reader);
+        // start、length、补全列表都不要，但解码器仍要检查包没有多余字节。
+        let _ = take_rest(reader);
+        Self { transaction }
     }
 }
 
@@ -1786,6 +1812,7 @@ pub fn packet_name(id: i32) -> String {
         clientbound::BUNDLE_DELIMITER => "bundle_delimiter",
         clientbound::CHUNK_BATCH_FINISHED => "chunk_batch_finished",
         clientbound::CHUNK_BATCH_START => "chunk_batch_start",
+        clientbound::COMMAND_SUGGESTIONS => "command_suggestions",
         clientbound::CONTAINER_SET_SLOT => "container_set_slot",
         clientbound::DISCONNECT => "disconnect",
         clientbound::DISGUISED_CHAT => "disguised_chat",

@@ -244,9 +244,11 @@ async fn breaking_air_is_only_acked() {
     let (mut alice, bob) = two_players(&server).await;
     let first = alice.break_block(SPOT).await;
     alice.expect_ack(first).await;
+    // 第一次破坏的包也会发给 bob，等两个人都稳定下来再打标记。
     alice.settle().await;
-    let (alice_mark, bob_mark) = (alice.mark(), bob.mark());
-    alice.skip_received();
+    bob.settle().await;
+    let alice_mark = alice.mark();
+    let bob_mark = bob.mark();
 
     let second = alice.break_block(SPOT).await;
 
@@ -758,8 +760,8 @@ async fn clicks_and_breaks_outside_the_world_only_get_an_ack() {
 #[tokio::test]
 async fn packets_with_hostile_values_do_not_stop_the_world() {
     let server = TestServer::start(small_world()).await;
-    let mut alice = holding(&server, "Alice", items::STONE).await;
-    let mut bob = server.enter("Bob").await;
+    let alice = holding(&server, "Alice", items::STONE).await;
+    let bob = server.enter("Bob").await;
 
     let far = 33_554_431;
     let hostile = [
@@ -793,7 +795,7 @@ async fn packets_with_hostile_values_do_not_stop_the_world() {
 async fn a_malformed_action_only_kicks_its_sender() {
     let server = TestServer::start(small_world()).await;
     let alice = server.enter("Alice").await;
-    let mut bob = server.enter("Bob").await;
+    let bob = server.enter("Bob").await;
 
     // `player_action` 的 action 超出枚举是畸形包。
     alice.send(&player_action(99, SPOT, UP, 1)).await;
