@@ -35,7 +35,7 @@ const MAX_Y: i32 = 319;
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Line {
     Header(Header),
-    Case(Case),
+    Case(Box<Case>),
     End(End),
 }
 
@@ -58,6 +58,26 @@ struct Case {
     entity_seed: i64,
     hurts: Option<[f32; 2]>,
     fuse: Option<i32>,
+    /// `entity_drops` 规则。旧的题不写这一项，按官方默认的真。
+    ///
+    /// The `entity_drops` rule. Older cases omit it and use the vanilla default of true.
+    #[serde(default = "enabled_rule")]
+    entity_drops: bool,
+    /// 新题才写这一项：要不要把下落方块掉出来的物品也纳入比较。
+    ///
+    /// Only newer cases set this: whether items dropped by falling blocks are compared.
+    #[serde(default)]
+    compare_drops: bool,
+    /// `FallingBlockEntity.time` 的初值，只有跑 600 刻超时的题才写。
+    ///
+    /// Initial `FallingBlockEntity.time`; only the timeout cases set it.
+    #[serde(default)]
+    start_time: i32,
+    /// 官方掉出物品时用的第一个实体 ID。旧题不写这一项，用默认的非玩家起点。
+    ///
+    /// First entity id vanilla used for the dropped item. Older cases use the default.
+    #[serde(default = "first_entity_id")]
+    first_entity_id: i32,
     blocks: Vec<[i32; 4]>,
     steps: Vec<Step>,
     /// 物品场景才有。下落方块和 TNT 的题不写这些字段。
@@ -159,6 +179,14 @@ fn unknown_item() -> i32 {
     -1
 }
 
+fn enabled_rule() -> bool {
+    true
+}
+
+fn first_entity_id() -> i32 {
+    1 << 24
+}
+
 #[derive(Debug, Deserialize)]
 struct End {
     cases: u32,
@@ -174,6 +202,7 @@ struct Report {
 struct PhysicsLevel {
     blocks: HashMap<BlockPos, BlockState>,
     random: LevelRandom,
+    rules: mc_bamboo_blocks::BlockGameRules,
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
@@ -186,6 +215,7 @@ impl PhysicsLevel {
         Self {
             blocks: HashMap::new(),
             random: LevelRandom::new(seed),
+            rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -236,6 +266,10 @@ impl Level for PhysicsLevel {
 
     fn random(&self) -> &LevelRandom {
         &self.random
+    }
+
+    fn block_game_rules(&self) -> mc_bamboo_blocks::BlockGameRules {
+        self.rules
     }
 
     fn is_randomly_ticking_section(&self, _chunk: ChunkPos, _section_y: i32) -> bool {
@@ -386,6 +420,8 @@ impl Report {
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
         let mut level = PhysicsLevel::new(case.level_seed);
+        level.rules.entity_drops = case.entity_drops;
+        level.entities = Entities::with_next_id(case.first_entity_id);
         level.place(&case.blocks);
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
@@ -439,6 +475,11 @@ impl Report {
                 entity.set_fuse(fuse);
             }
             entity.random = JavaRandom::new(case.entity_seed);
+            if case.start_time != 0
+                && let EntityKind::FallingBlock(data) = &mut entity.kind
+            {
+                data.time = case.start_time;
+            }
         }
         if case.steps.is_empty() {
             self.mismatch(format!("{}: no steps", case.name));
@@ -458,9 +499,10 @@ impl Report {
                 touch_player(&mut world, slots, player.creative);
             }
             let mut ticked = world.tick_entities_kept();
-            // 下落方块和 TNT 摔出来的物品不在这道题里。物品题才逐个比较。
-            // Items broken out of a falling block or TNT are not part of those cases.
-            if case.kind != "item" {
+            // 旧的下落方块和 TNT 题只比那两种实体；新的掉落物题带 `compareDrops`。
+            // Older falling-block and TNT cases compared only those two kinds; the new
+            // drop cases opt into comparing the spawned item entities.
+            if case.kind != "item" && !case.compare_drops {
                 ticked.retain(|entity| !matches!(entity.kind, EntityKind::Item(_)));
             }
             if case.hopper {

@@ -39,9 +39,13 @@ impl Entity {
         self.apply_gravity();
         let movement = self.delta;
         self.move_entity(world, movement);
-        // `move` 里的摔落伤害可能把铁砧摔裂，`blockState` 换成了裂开的那种。
+        // `move` 里的摔落伤害可能把铁砧摔裂或设上 `cancelDrop`。只取这两个字段：
+        // `data.time` 是这一拍刚加过的，整份拷回来会让 100/600 刻超时永远不触发。
+        // `move` may crack an anvil or set `cancelDrop`. Copy only those fields: `data.time`
+        // was just incremented, and a whole-struct copy would stop the timeout from ever firing.
         if let EntityKind::FallingBlock(updated) = &self.kind {
-            *data = *updated;
+            data.state = updated.state;
+            data.cancel_drop = updated.cancel_drop;
         }
         self.apply_effects_from_blocks(world);
         // `handlePortal` 不在范围里。
@@ -262,7 +266,8 @@ mod tests {
         let id = world.spawn_falling_block(start, BlockState(state));
         // 官方的 `time > 100 && out_of_world || time > 600`：这里要测的是 600 刻那一支，
         // 所以把 `time` 直接设到边界前，让方块在没有地面可落的世界里继续掉。
-        if let Some(entity) = world.entity_mut(id)
+        if start.y < 0
+            && let Some(entity) = world.entity_mut(id)
             && let EntityKind::FallingBlock(data) = &mut entity.kind
         {
             data.time = 590;

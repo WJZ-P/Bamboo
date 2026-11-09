@@ -409,6 +409,17 @@ impl Entities {
         Self::default()
     }
 
+    /// 从指定的实体 ID 开始分配。oracle 的假世界用这个对齐官方的 `getNextEntityId`。
+    ///
+    /// Starts allocating ids at `next_id`. The oracle's fake world uses this to match
+    /// vanilla's `getNextEntityId`.
+    pub fn with_next_id(next_id: i32) -> Self {
+        Self {
+            next_id,
+            ..Self::default()
+        }
+    }
+
     /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
     pub fn spawn(&mut self, mut entity: Entity) -> i32 {
         entity.id = self.next_id;
