@@ -599,8 +599,10 @@ mod state_tests {
         let listed = Uuid::from_u128(1);
         let op = Uuid::from_u128(2);
         let stranger = Uuid::from_u128(3);
-        let mut state = AdminState::default();
-        state.using_whitelist = true;
+        let mut state = AdminState {
+            using_whitelist: true,
+            ..Default::default()
+        };
         state.whitelist.insert(
             listed,
             NameAndId {
