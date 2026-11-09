@@ -136,6 +136,61 @@ pub fn parse_game_mode(reader: &mut StringReader) -> Result<Value, ParseError> {
         .ok_or_else(|| ParseError::text("argument.gamemode.invalid", name))
 }
 
+/// 官方 `MinMaxBounds.Ints.fromReader` 的文本形式：`5`、`5..`、`..5`、`5..10`。
+pub fn parse_int_range(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    if !reader.can_read() {
+        return Err(ParseError::new("argument.range.empty"));
+    }
+    let (min, separator) = if reader.peek() == '.' {
+        (None, true)
+    } else {
+        let value = reader.read_int()?;
+        let separator = reader.can_read() && reader.peek() == '.';
+        (Some(value), separator)
+    };
+    if !separator {
+        return Ok(Value::IntBounds { min, max: min });
+    }
+    // `read_int` 会把小数点也算进数字里，所以回到开头按范围语法重新读。
+    reader.set_cursor(start);
+    let rest = reader.remaining();
+    let end = rest
+        .find(|c: char| c != '.' && !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
+    let text = &rest[..end];
+    let Some((min, max)) = text.split_once("..") else {
+        return Err(ParseError::new("argument.range.empty"));
+    };
+    let parse = |part: &str| -> Result<Option<i32>, ParseError> {
+        if part.is_empty() {
+            return Ok(None);
+        }
+        part.parse::<i32>()
+            .map(Some)
+            .map_err(|_| ParseError::new("argument.range.ints"))
+    };
+    let min = parse(min)?;
+    let max = parse(max)?;
+    if let (Some(min), Some(max)) = (min, max)
+        && min > max
+    {
+        return Err(ParseError::new("argument.range.swapped"));
+    }
+    reader.set_cursor(start + end);
+    Ok(Value::IntBounds { min, max })
+}
+
+/// 官方 `SlotArgument`：物品栏槽位的名字，不在这里查表。
+pub fn parse_slot(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    let name = reader.read_unquoted_string();
+    if name.is_empty() {
+        reader.set_cursor(start);
+        return Err(ParseError::new("argument.slot.invalid"));
+    }
+    Ok(Value::String(name))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

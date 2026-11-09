@@ -12,6 +12,7 @@ pub(crate) use players::change_own_mode;
 
 mod blocks;
 mod catalog;
+mod clone;
 mod feedback;
 mod gamerule;
 mod items;
@@ -339,7 +340,11 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::Item
         | ArgumentType::ItemPredicate
         | ArgumentType::Message
-        | ArgumentType::ResourceLocation => ArgumentProperties::None,
+        | ArgumentType::ResourceLocation
+        | ArgumentType::Dimension
+        | ArgumentType::IntRange
+        | ArgumentType::LootTable
+        | ArgumentType::ItemSlot => ArgumentProperties::None,
     }
 }
 

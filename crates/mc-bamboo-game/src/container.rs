@@ -115,6 +115,7 @@ impl ContainerKind {
 /// 一个容器方块的内容和开合状态。没有内容的容器不留条目。
 ///
 /// 自定义名和锁不在这里，它们是方块实体从物品上带来的组件，见 [`crate::block_items`]。
+#[derive(Clone)]
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,

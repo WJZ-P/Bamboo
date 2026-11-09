@@ -410,6 +410,11 @@ pub enum Value {
     GameMode(GameMode),
     EntityAnchor(EntityAnchor),
     Time(i32),
+    /// 官方 `MinMaxBounds.Ints`，`/random` 的范围参数。
+    IntBounds {
+        min: Option<i32>,
+        max: Option<i32>,
+    },
 }
 
 impl Value {
@@ -535,6 +540,13 @@ impl Value {
     pub fn as_time(&self) -> Option<i32> {
         match self {
             Self::Time(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_int_bounds(&self) -> Option<(Option<i32>, Option<i32>)> {
+        match self {
+            Self::IntBounds { min, max } => Some((*min, *max)),
             _ => None,
         }
     }

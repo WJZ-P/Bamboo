@@ -7,7 +7,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, gamerule, items, players, teleport, time, world_settings,
+    CommandFn, Commands, blocks, clone, gamerule, items, players, teleport, time, world_settings,
 };
 
 struct Builder {
@@ -83,6 +83,7 @@ pub(crate) fn build() -> Commands {
     register_default_gamemode(&mut builder, root);
     register_seed(&mut builder, root);
     register_spawns(&mut builder, root);
+    register_clone(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -348,6 +349,98 @@ fn register_difficulty(builder: &mut Builder, root: usize) {
     for name in ["peaceful", "easy", "normal", "hard"] {
         builder.bind_literal(difficulty, name, world_settings::difficulty_literal);
     }
+}
+
+/// 官方 `CloneCommands.register`：`begin`/`end`，两层 `to <dimension>` 分支，
+/// 以及 `destination` 后面的 `strict` 和三种过滤方式。所有分支的子树形状相同。
+fn register_clone(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "clone", permission::GAMEMASTERS);
+    clone_begin_end(builder, command);
+    let from = builder.literal(command, "from", 0);
+    let source = builder.argument(from, "sourceDimension", ArgumentType::Dimension, 0);
+    clone_begin_end(builder, source);
+}
+
+fn clone_begin_end(builder: &mut Builder, parent: usize) {
+    let begin = builder.argument(parent, "begin", ArgumentType::BlockPos, 0);
+    let end = builder.argument(begin, "end", ArgumentType::BlockPos, 0);
+    clone_destination(builder, end);
+    let to = builder.literal(end, "to", 0);
+    let target = builder.argument(to, "targetDimension", ArgumentType::Dimension, 0);
+    clone_destination(builder, target);
+}
+
+fn clone_destination(builder: &mut Builder, parent: usize) {
+    let destination = builder.argument(parent, "destination", ArgumentType::BlockPos, 0);
+    clone_modes(builder, destination, false);
+    let strict = builder.literal(destination, "strict", 0);
+    builder.run(strict, clone::strict_replace_normal);
+    clone_filter_modes(builder, strict, true);
+}
+
+fn clone_modes(builder: &mut Builder, parent: usize, strict: bool) {
+    let normal = if strict {
+        clone::strict_replace_normal
+    } else {
+        clone::replace_normal
+    };
+    builder.run(parent, normal);
+    clone_filter_modes(builder, parent, strict);
+}
+
+fn clone_filter_modes(builder: &mut Builder, parent: usize, strict: bool) {
+    let replace = builder.literal(parent, "replace", 0);
+    bind_clone_modes(builder, replace, FilterKind::Replace, strict);
+    let masked = builder.literal(parent, "masked", 0);
+    bind_clone_modes(builder, masked, FilterKind::Masked, strict);
+    let filtered = builder.literal(parent, "filtered", 0);
+    let filter = builder.argument(filtered, "filter", ArgumentType::BlockPredicate, 0);
+    bind_clone_modes(builder, filter, FilterKind::Filtered, strict);
+}
+
+enum FilterKind {
+    Replace,
+    Masked,
+    Filtered,
+}
+
+fn bind_clone_modes(builder: &mut Builder, parent: usize, filter: FilterKind, strict: bool) {
+    let actions: [CommandFn; 3] = match (filter, strict) {
+        (FilterKind::Replace, false) => [
+            clone::replace_normal,
+            clone::replace_force,
+            clone::replace_move,
+        ],
+        (FilterKind::Masked, false) => [
+            clone::masked_normal,
+            clone::masked_force,
+            clone::masked_move,
+        ],
+        (FilterKind::Filtered, false) => [
+            clone::filtered_normal,
+            clone::filtered_force,
+            clone::filtered_move,
+        ],
+        (FilterKind::Replace, true) => [
+            clone::strict_replace_normal,
+            clone::strict_replace_force,
+            clone::strict_replace_move,
+        ],
+        (FilterKind::Masked, true) => [
+            clone::strict_masked_normal,
+            clone::strict_masked_force,
+            clone::strict_masked_move,
+        ],
+        (FilterKind::Filtered, true) => [
+            clone::strict_filtered_normal,
+            clone::strict_filtered_force,
+            clone::strict_filtered_move,
+        ],
+    };
+    builder.run(parent, actions[0]);
+    builder.bind_literal(parent, "force", actions[1]);
+    builder.bind_literal(parent, "move", actions[2]);
+    builder.bind_literal(parent, "normal", actions[0]);
 }
 
 fn register_seed(builder: &mut Builder, root: usize) {

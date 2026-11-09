@@ -62,6 +62,22 @@ pub enum ArgumentType {
     ///
     /// Official `IdentifierArgument`. Time markers use it and do not look up a registry.
     ResourceLocation,
+    /// 官方 `DimensionArgument`：任意合法标识符，执行时再查维度。
+    ///
+    /// Official `DimensionArgument`: any identifier, resolved to a dimension at execution.
+    Dimension,
+    /// 官方 `RangeArgument.Ints`：`5`、`5..`、`..5` 或 `5..10`。
+    ///
+    /// Official `RangeArgument.Ints`: `5`, `5..`, `..5` or `5..10`.
+    IntRange,
+    /// 官方 `LootTableArgument`：战利品表的标识符。
+    ///
+    /// Official `LootTableArgument`: a loot-table identifier.
+    LootTable,
+    /// 官方 `SlotArgument`：物品栏槽位名。
+    ///
+    /// Official `SlotArgument`: an inventory slot name.
+    ItemSlot,
     /// 官方 `ResourceArgument`。`registry` 是注册表键，比如 `minecraft:world_clock`。
     ///
     /// Official `ResourceArgument`. `registry` is the registry key, such as `minecraft:world_clock`.
@@ -94,6 +110,10 @@ impl ArgumentType {
             Self::Message => "minecraft:message",
             Self::ResourceLocation => "minecraft:resource_location",
             Self::Resource { .. } => "minecraft:resource",
+            Self::Dimension => "minecraft:dimension",
+            Self::IntRange => "minecraft:int_range",
+            Self::LootTable => "minecraft:loot_table",
+            Self::ItemSlot => "minecraft:item_slot",
         }
     }
 
@@ -121,6 +141,10 @@ impl ArgumentType {
             Self::Message => registry::MESSAGE,
             Self::ResourceLocation => registry::RESOURCE_LOCATION,
             Self::Resource { .. } => registry::RESOURCE,
+            Self::Dimension => registry::DIMENSION,
+            Self::IntRange => registry::INT_RANGE,
+            Self::LootTable => registry::LOOT_TABLE,
+            Self::ItemSlot => registry::ITEM_SLOT,
         }
     }
 
@@ -176,6 +200,10 @@ impl ArgumentType {
             Self::Message => message::parse_message(reader, allow_selectors),
             Self::ResourceLocation => parse_resource_location(reader),
             Self::Resource { registry } => parse_resource(reader, registry),
+            Self::Dimension => parse_resource_location(reader),
+            Self::IntRange => primitives::parse_int_range(reader),
+            Self::LootTable => parse_resource_location(reader),
+            Self::ItemSlot => primitives::parse_slot(reader),
         }
     }
 

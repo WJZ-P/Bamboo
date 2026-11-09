@@ -357,7 +357,7 @@ fn place(world: &mut World, pos: BlockPos, input: &BlockStateInput, flags: u32) 
 /// 官方 `ServerLevel.updateNeighboursOnBlockSet`。`setBlock` 的标志里没有 `UPDATE_NEIGHBORS`。
 ///
 /// Official `ServerLevel.updateNeighboursOnBlockSet`. The `setBlock` flags omit `UPDATE_NEIGHBORS`.
-fn update_neighbours(world: &mut World, pos: BlockPos, old: BlockState) {
+pub(crate) fn update_neighbours(world: &mut World, pos: BlockPos, old: BlockState) {
     let state = world.block_state(pos);
     if !old.is_same_block(state) {
         old.affect_neighbors_after_removal(world, pos);
@@ -377,7 +377,7 @@ fn place_flags(strict: bool) -> u32 {
         }
 }
 
-fn loaded(world: &World, pos: BlockPos) -> Result<(), CommandFail> {
+pub(crate) fn loaded(world: &World, pos: BlockPos) -> Result<(), CommandFail> {
     if !world.has_chunk_at(pos) {
         return Err(fail("argument.pos.unloaded"));
     }
@@ -394,7 +394,10 @@ fn source_player(region: &Region, id: PlayerId) -> Result<&crate::player::Player
         .ok_or_else(|| fail("permissions.requires.player"))
 }
 
-fn required_block_pos(parsed: &ParsedCommand, name: &str) -> Result<Coordinates, CommandFail> {
+pub(crate) fn required_block_pos(
+    parsed: &ParsedCommand,
+    name: &str,
+) -> Result<Coordinates, CommandFail> {
     parsed
         .get(name)
         .and_then(|value| value.as_block_pos())
@@ -411,6 +414,6 @@ fn required_state<'a>(
         .ok_or_else(|| fail("command.failed"))
 }
 
-fn block_position(coords: Coordinates, player: &crate::player::Player) -> BlockPos {
+pub(crate) fn block_position(coords: Coordinates, player: &crate::player::Player) -> BlockPos {
     BlockPos::containing(coords.position(player.position(), player.yaw, player.pitch))
 }
