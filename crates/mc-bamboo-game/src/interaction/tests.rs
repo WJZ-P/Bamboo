@@ -5,7 +5,7 @@
 
 use mc_bamboo_blocks::{
     BlockState, InteractionResult, TickPriority,
-    state::{AXIS, HORIZONTAL_FACING, LEVEL, SLAB_TYPE, SlabType},
+    state::{AXIS, HAS_BOOK, HORIZONTAL_FACING, LEVEL, SLAB_TYPE, SlabType},
 };
 use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{
@@ -2492,6 +2492,66 @@ fn spectator_opens_a_chest_instead_of_placing_while_sneaking() {
             .get(&ABOVE)
             .map_or(0, |entry| entry.open_count),
         0
+    );
+}
+
+#[test]
+fn spectator_opens_workstation_menus() {
+    let (mut server, client) = settled();
+    set_spectator(&mut server, &client);
+    let stations = [
+        blocks::CRAFTING_TABLE,
+        blocks::FURNACE,
+        blocks::BLAST_FURNACE,
+        blocks::SMOKER,
+        blocks::BREWING_STAND,
+        blocks::STONECUTTER,
+        blocks::SMITHING_TABLE,
+    ];
+    for state in stations {
+        set_block(&mut server, ABOVE, state);
+        client.take_frames();
+        click_top(&server, &client, ABOVE, 1);
+        server.tick();
+        let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+        assert!(
+            ids.contains(&clientbound::OPEN_SCREEN),
+            "state {state} frames: {ids:?}"
+        );
+    }
+
+    set_block(&mut server, ABOVE, blocks::LECTERN);
+    client.take_frames();
+    click_top(&server, &client, ABOVE, 1);
+    server.tick();
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(
+        !ids.contains(&clientbound::OPEN_SCREEN),
+        "an empty lectern frames: {ids:?}"
+    );
+
+    set_block(
+        &mut server,
+        ABOVE,
+        BlockState(blocks::LECTERN).with(HAS_BOOK, true).0,
+    );
+    client.take_frames();
+    click_top(&server, &client, ABOVE, 1);
+    server.tick();
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(
+        ids.contains(&clientbound::OPEN_SCREEN),
+        "a lectern with a book frames: {ids:?}"
+    );
+
+    set_block(&mut server, ABOVE, blocks::OAK_SHELF);
+    client.take_frames();
+    click_top(&server, &client, ABOVE, 1);
+    server.tick();
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(
+        !ids.contains(&clientbound::OPEN_SCREEN),
+        "a shelf frames: {ids:?}"
     );
 }
 

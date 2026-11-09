@@ -75,6 +75,18 @@ pub trait Level {
     /// 见 [`Level::block_entities`]。
     fn block_entities_mut(&mut self) -> &mut BlockEntities;
 
+    /// 这一格的方块实体这一刻要不要跑。默认要跑。
+    ///
+    /// 方块 oracle 的假世界只登记漏斗和移动中的活塞，熔炉和酿造台不跑。
+    ///
+    /// Whether this cell's block entity ticks. The default is yes.
+    ///
+    /// The block oracle's fake level only registers hoppers and moving pistons, so furnaces
+    /// and brewing stands do not tick.
+    fn runs_block_entity_tick(&self, _pos: BlockPos) -> bool {
+        true
+    }
+
     /// `Level.blockEvents`：`level.blockEvent` 排进来的事件。
     fn block_events(&mut self) -> &mut BlockEvents;
 
@@ -139,8 +151,10 @@ pub trait Level {
 
     /// 带着这一格的漏斗方块实体运行一段代码。这一格没有漏斗实体时不调用 `f`，返回 `false`。
     ///
-    /// 实体正在 tick 时它已经从方块实体表里拿出来了，这时也取不到，和官方
-    /// `getBlockEntity(pos)` 在 tick 期间找不到自己一样。
+    /// 实体正在 tick 时已经从表里拿出来了，这里取不到。漏斗的物品在槽位表，不在这个实体上。
+    ///
+    /// While the entity is ticking it is out of the map, so this cannot see it.
+    /// Hopper items live in the slot table, not on the entity.
     fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
         let _ = (pos, f);
         false

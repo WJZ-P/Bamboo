@@ -24,6 +24,7 @@ fn every_container_block_has_a_kind() {
         (blocks::JUKEBOX, ContainerKind::Jukebox),
         (blocks::DECORATED_POT, ContainerKind::DecoratedPot),
         (blocks::CRAFTER, ContainerKind::Crafter),
+        (blocks::OAK_SHELF, ContainerKind::Shelf),
     ];
     for (block, kind) in kinds {
         assert_eq!(kind_of(BlockState(block)), Some(kind));
@@ -57,6 +58,8 @@ fn kinds_carry_the_official_sizes_and_menu_types() {
     assert_eq!(ContainerKind::Crafter.slots(), 9);
     assert_eq!(ContainerKind::Crafter.menu_type(), menu::CRAFTER_3X3);
     assert_eq!(ContainerKind::Crafter.title(), "container.crafter");
+    assert_eq!(ContainerKind::Shelf.slots(), 3);
+    assert_eq!(ContainerKind::Shelf.title(), "container.shelf");
 }
 
 #[test]
