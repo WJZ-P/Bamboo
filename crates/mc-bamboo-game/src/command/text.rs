@@ -57,7 +57,7 @@ pub(crate) fn component(parsed: &ParsedCommand, name: &str) -> Result<Component,
 /// Official `ComponentUtils.resolve`. `withEntityOverride` only changes what `@s`
 /// inside a `score`/`selector` component resolves to; the source still owns the
 /// selector's position and permission checks.
-fn resolve(
+pub(crate) fn resolve(
     region: &Region,
     source: PlayerId,
     target: PlayerId,

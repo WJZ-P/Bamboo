@@ -6,7 +6,9 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
-use crate::command::{CommandFn, Commands, blocks, gamerule, items, players, teleport, text, time};
+use crate::command::{
+    CommandFn, Commands, blocks, gamerule, items, players, teleport, text, time, title,
+};
 
 struct Builder {
     graph: CommandGraph,
@@ -77,6 +79,7 @@ pub(crate) fn build() -> Commands {
     register_setblock(&mut builder, root);
     register_tellraw(&mut builder, root);
     register_teleport(&mut builder, root);
+    register_title(&mut builder, root);
     register_time(&mut builder, root);
     Commands {
         graph: builder.graph,
@@ -253,6 +256,44 @@ fn register_tellraw(builder: &mut Builder, root: usize) {
     let targets = builder.argument(tellraw, "targets", players_argument(), 0);
     let message = builder.argument(targets, "message", ArgumentType::Component, 0);
     builder.run(message, text::tellraw);
+}
+
+/// `TitleCommand.register`：权限 2，六种动作；`times` 用 `TimeArgument`（min 0）。
+fn register_title(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "title", permission::GAMEMASTERS);
+    let targets = builder.argument(command, "targets", players_argument(), 0);
+    for (name, action) in [
+        ("clear", title::Action::Clear),
+        ("reset", title::Action::Reset),
+    ] {
+        let node = builder.literal(targets, name, 0);
+        builder.run(node, action_fn(action));
+    }
+    for (name, action) in [
+        ("title", title::Action::Title),
+        ("subtitle", title::Action::Subtitle),
+        ("actionbar", title::Action::Actionbar),
+    ] {
+        let branch = builder.literal(targets, name, 0);
+        let text = builder.argument(branch, "title", ArgumentType::Component, 0);
+        builder.run(text, action_fn(action));
+    }
+    let times = builder.literal(targets, "times", 0);
+    let fade_in = builder.argument(times, "fadeIn", ArgumentType::Time { minimum: 0 }, 0);
+    let stay = builder.argument(fade_in, "stay", ArgumentType::Time { minimum: 0 }, 0);
+    let fade_out = builder.argument(stay, "fadeOut", ArgumentType::Time { minimum: 0 }, 0);
+    builder.run(fade_out, title::run_times);
+}
+
+fn action_fn(action: title::Action) -> CommandFn {
+    match action {
+        title::Action::Clear => title::clear,
+        title::Action::Reset => title::reset,
+        title::Action::Title => title::show_title,
+        title::Action::Subtitle => title::show_subtitle,
+        title::Action::Actionbar => title::show_actionbar,
+        title::Action::Times => title::run_times,
+    }
 }
 
 fn register_teleport(builder: &mut Builder, root: usize) {

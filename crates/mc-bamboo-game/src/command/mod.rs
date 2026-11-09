@@ -20,6 +20,7 @@ mod select;
 mod teleport;
 mod text;
 mod time;
+mod title;
 
 use std::sync::OnceLock;
 

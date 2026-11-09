@@ -13,6 +13,7 @@ mod player_info;
 mod request;
 mod secure;
 mod sound;
+mod title;
 
 pub use block::*;
 pub use chat::*;
@@ -25,6 +26,7 @@ pub use player_info::*;
 pub use request::*;
 pub use secure::*;
 pub use sound::*;
+pub use title::*;
 
 use mc_bamboo_data::packets::play::clientbound;
 

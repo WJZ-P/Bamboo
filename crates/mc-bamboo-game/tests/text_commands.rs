@@ -219,3 +219,48 @@ fn tellraw_level_one_cannot_use_the_command() {
             .any(|frame| contains_ascii(&frame.body, "command.unknown.command"))
     );
 }
+
+#[test]
+fn title_bursts_send_the_five_packets_and_report_success() {
+    use mc_bamboo_data::packets::play::clientbound;
+
+    let mut harness = Harness::new();
+    let source = harness.join("Kitten", 2);
+    harness.command(source, "title @s clear");
+    harness.command(source, "title @s reset");
+    harness.command(source, "title @s title \"hi\"");
+    harness.command(source, "title @s subtitle \"sub\"");
+    harness.command(source, "title @s actionbar \"bar\"");
+    harness.command(source, "title @s times 10t 70t 20t");
+    harness.tick();
+
+    let frames = harness.frames(source);
+    for (id, expected) in [
+        (clientbound::CLEAR_TITLES, 2),
+        (clientbound::SET_TITLE_TEXT, 1),
+        (clientbound::SET_SUBTITLE_TEXT, 1),
+        (clientbound::SET_ACTION_BAR_TEXT, 1),
+        (clientbound::SET_TITLES_ANIMATION, 1),
+    ] {
+        let count = frames.iter().filter(|frame| frame.id == id).count();
+        assert_eq!(count, expected, "packet {id}");
+    }
+    let clears: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::CLEAR_TITLES)
+        .map(|frame| frame.body[0])
+        .collect();
+    assert_eq!(clears, [0, 1]);
+    let animation = frames
+        .iter()
+        .find(|frame| frame.id == clientbound::SET_TITLES_ANIMATION)
+        .unwrap();
+    assert_eq!(animation.body, vec![0, 0, 0, 10, 0, 0, 0, 70, 0, 0, 0, 20]);
+    // 六条命令各一条成功消息（`.single`，因为 `@s` 只选到一个人）。
+    let successes = frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::SYSTEM_CHAT)
+        .filter(|frame| contains_ascii(&frame.body, "commands.title."))
+        .count();
+    assert_eq!(successes, 6);
+}
