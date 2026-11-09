@@ -25,3 +25,4 @@
 | 文件 | 内容 |
 |---|---|
 | `m3-storage.md` | M3 存档设计：Anvil 和 Linear 格式、区块 NBT、后台存档线程、崩溃安全、玩家数据和 `level.dat`、转换工具、分步实现计划 |
+| `world-model-discussion.md` | **探讨稿，未定稿**：原版 26.3 世界模型的关键细节、九项决策、多 region 的切分合并和同步设计、调研出处、region 内部并行的选项 |
