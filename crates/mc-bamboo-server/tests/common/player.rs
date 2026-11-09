@@ -136,7 +136,6 @@ impl Shared {
     fn close(&self) {
         self.log.lock().unwrap().closed = true;
         self.changed.notify_waiters();
-        self.changed.notify_one();
     }
 }
 
