@@ -9,6 +9,7 @@ pub mod entity;
 pub mod item;
 pub mod message;
 pub mod primitives;
+pub mod scoreboard;
 
 use crate::{
     ErrorArg, ParseError, Value,
@@ -84,6 +85,44 @@ pub enum ArgumentType {
     Resource {
         registry: &'static str,
     },
+    /// 官方 `ObjectiveArgument`。执行时才查这个目标在不在。
+    ///
+    /// Official `ObjectiveArgument`. Whether the objective exists is checked at execution.
+    Objective,
+    /// 官方 `TeamArgument`。
+    ///
+    /// Official `TeamArgument`.
+    Team,
+    /// 官方 `ObjectiveCriteriaArgument`。
+    ///
+    /// Official `ObjectiveCriteriaArgument`.
+    Criteria,
+    /// 官方 `OperationArgument`。
+    ///
+    /// Official `OperationArgument`.
+    Operation,
+    /// 官方 `ScoreboardSlotArgument`。
+    ///
+    /// Official `ScoreboardSlotArgument`.
+    DisplaySlot,
+    /// 官方 `ScoreHolderArgument`。`multiple` 为真时允许 `@a` 和默认的 `*`。
+    ///
+    /// Official `ScoreHolderArgument`. `multiple` allows `@a` and the default `*`.
+    ScoreHolder {
+        multiple: bool,
+    },
+    /// 官方 `ComponentArgument`。
+    ///
+    /// Official `ComponentArgument`.
+    Component,
+    /// 官方 `StyleArgument`。
+    ///
+    /// Official `StyleArgument`.
+    Style,
+    /// 官方 `TeamColorArgument`。
+    ///
+    /// Official `TeamColorArgument`.
+    TeamColor,
 }
 
 impl ArgumentType {
@@ -114,6 +153,15 @@ impl ArgumentType {
             Self::IntRange => "minecraft:int_range",
             Self::LootTable => "minecraft:loot_table",
             Self::ItemSlot => "minecraft:item_slot",
+            Self::Objective => "minecraft:objective",
+            Self::Team => "minecraft:team",
+            Self::Criteria => "minecraft:objective_criteria",
+            Self::Operation => "minecraft:operation",
+            Self::DisplaySlot => "minecraft:scoreboard_slot",
+            Self::ScoreHolder { .. } => "minecraft:score_holder",
+            Self::Component => "minecraft:component",
+            Self::Style => "minecraft:style",
+            Self::TeamColor => "minecraft:team_color",
         }
     }
 
@@ -145,6 +193,15 @@ impl ArgumentType {
             Self::IntRange => registry::INT_RANGE,
             Self::LootTable => registry::LOOT_TABLE,
             Self::ItemSlot => registry::ITEM_SLOT,
+            Self::Objective => registry::OBJECTIVE,
+            Self::Team => registry::TEAM,
+            Self::Criteria => registry::OBJECTIVE_CRITERIA,
+            Self::Operation => registry::OPERATION,
+            Self::DisplaySlot => registry::SCOREBOARD_SLOT,
+            Self::ScoreHolder { .. } => registry::SCORE_HOLDER,
+            Self::Component => registry::COMPONENT,
+            Self::Style => registry::STYLE,
+            Self::TeamColor => registry::TEAM_COLOR,
         }
     }
 
@@ -204,6 +261,17 @@ impl ArgumentType {
             Self::IntRange => primitives::parse_int_range(reader),
             Self::LootTable => parse_resource_location(reader),
             Self::ItemSlot => primitives::parse_slot(reader),
+            Self::Objective => scoreboard::parse_objective(reader),
+            Self::Team => scoreboard::parse_team(reader),
+            Self::Criteria => scoreboard::parse_criteria(reader),
+            Self::Operation => scoreboard::parse_operation(reader),
+            Self::DisplaySlot => scoreboard::parse_display_slot(reader),
+            Self::ScoreHolder { multiple } => {
+                scoreboard::parse_score_holder(reader, *multiple, allow_selectors)
+            }
+            Self::Component => scoreboard::parse_component(reader),
+            Self::Style => scoreboard::parse_style(reader),
+            Self::TeamColor => scoreboard::parse_team_color(reader),
         }
     }
 
@@ -234,6 +302,11 @@ impl ArgumentType {
                     suggest_identifier(entry, lower, out);
                 }
             }
+            Self::Criteria => scoreboard::suggest_criteria(lower, out),
+            Self::Operation => scoreboard::suggest_operations(lower, out),
+            Self::DisplaySlot => scoreboard::suggest_slots(lower, out),
+            Self::TeamColor => scoreboard::suggest_colors(lower, out),
+            Self::ScoreHolder { .. } => scoreboard::suggest_holders(lower, player_names, out),
             _ => {}
         }
     }

@@ -22,6 +22,7 @@ use crate::{
     block_container::set_bookshelf_slot,
     context::{PlaceContext, UseContext},
     interact::InteractionResult,
+    item_exchange::ItemExchange,
     state::{
         BlockState, HORIZONTAL_FACING, Property, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED, SLOT_2_OCCUPIED,
         SLOT_3_OCCUPIED, SLOT_4_OCCUPIED, SLOT_5_OCCUPIED, item_is_tagged,
@@ -108,10 +109,10 @@ impl Behaviour for ChiseledBookShelf {
             return InteractionResult::Consume;
         }
         let pos = ctx.clicked_pos();
-        // `removeBook` 先取出再出声。整本进背包；放不下就消失，没有物品实体。
+        // `removeBook` 先取出再出声。整本交给物品栏，放不下的由游戏层按 `Player.drop` 丢掉。
         //
         // `removeBook` removes the book first, then plays. The whole book goes into the
-        // inventory. If it does not fit it disappears; there is no item entity.
+        // inventory; the game layer `Player.drop`s whatever does not fit.
         let taken = world
             .slots_at(pos)
             .get(slot)
@@ -119,7 +120,7 @@ impl Behaviour for ChiseledBookShelf {
             .unwrap_or_else(ItemStack::empty);
         set_bookshelf_slot(world, pos, slot, ItemStack::empty());
         if !taken.is_empty() {
-            world.set_gained(taken.clone());
+            world.set_item_exchange(ItemExchange::AddOrDrop(taken.clone()));
         }
         let sound = if !taken.is_empty() && taken.item == items::ENCHANTED_BOOK {
             "minecraft:block.chiseled_bookshelf.pickup.enchanted"

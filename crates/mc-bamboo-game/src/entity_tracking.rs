@@ -12,9 +12,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use mc_bamboo_blocks::entity::{Entity, EntityKind, PrimedTnt};
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::entity_types;
-use mc_bamboo_protocol::packet::play::{
-    AddEntity, BundleDelimiter, EntityData, EntityPositionSync, MoveEntityPos, PositionDelta,
-    PositionPath, RemoveEntities, SetEntityData, SetEntityMotion, VecDelta,
+use mc_bamboo_protocol::{
+    item::ItemStack,
+    packet::play::{
+        AddEntity, BundleDelimiter, EntityData, EntityPositionSync, MoveEntityPos, PositionDelta,
+        PositionPath, RemoveEntities, SetEntityData, SetEntityMotion, TakeItemEntity, VecDelta,
+        pack_degrees,
+    },
 };
 use uuid::Uuid;
 
@@ -56,6 +60,10 @@ struct TrackedEntity {
     was_on_ground: bool,
     /// 上次发出去的引信，TNT 每 tick 都变。
     last_fuse: i32,
+    /// 上次发出去的物品堆。空堆是默认值，不单独发。
+    ///
+    /// The item stack last sent. An empty stack is the default and is not sent on its own.
+    last_stack: ItemStack,
     /// 看得见这个实体的玩家。它们的客户端里有这个实体。
     seen_by: BTreeSet<PlayerId>,
 }
@@ -70,6 +78,11 @@ impl TrackedEntity {
             tick_count: 0,
             was_on_ground: snapshot.on_ground,
             last_fuse: snapshot.data.fuse().unwrap_or(0),
+            last_stack: snapshot
+                .data
+                .stack()
+                .cloned()
+                .unwrap_or_else(ItemStack::empty),
             seen_by: BTreeSet::new(),
         }
     }
@@ -82,7 +95,7 @@ impl TrackedEntity {
 }
 
 /// 这一 tick 里实体的样子。借用检查器不允许一边读实体一边写链路，先抄出来。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Snapshot {
     id: i32,
     entity_type: i32,
@@ -90,15 +103,20 @@ struct Snapshot {
     delta: Vec3,
     on_ground: bool,
     precise: bool,
+    /// `yRot`。物品构造时取一次，下落方块和 TNT 一直是 0。
+    ///
+    /// `yRot`. An item draws it once. Falling blocks and TNT stay at 0.
+    yaw: f32,
     chunk: ChunkPos,
     data: KindData,
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum KindData {
     FallingBlock { state: u32, start: BlockPos },
     Tnt { fuse: i32 },
+    Item(ItemStack),
 }
 
 impl Snapshot {
@@ -110,62 +128,77 @@ impl Snapshot {
             delta: entity.delta,
             on_ground: entity.on_ground,
             precise: entity.requires_precise_position(),
+            yaw: entity.y_rot,
             chunk: ChunkPos::containing(entity.position.x, entity.position.z),
-            data: KindData::of(entity.kind),
+            data: KindData::of(&entity.kind),
         }
     }
 
-    /// `getAddEntityPacket` 的 `data`：下落的方块是它的方块状态，TNT 是 0。
-    fn add_data(self) -> i32 {
-        match self.data {
-            KindData::FallingBlock { state, .. } => state as i32,
-            KindData::Tnt { .. } => 0,
+    /// `getAddEntityPacket` 的 `data`：下落的方块是它的方块状态，TNT 和物品是 0。
+    fn add_data(&self) -> i32 {
+        match &self.data {
+            KindData::FallingBlock { state, .. } => *state as i32,
+            KindData::Tnt { .. } | KindData::Item(_) => 0,
         }
     }
 
-    fn track_deltas(self) -> bool {
+    fn track_deltas(&self) -> bool {
         entity_types::FACTS[self.entity_type as usize].track_deltas
     }
 }
 
 impl KindData {
-    fn of(kind: EntityKind) -> Self {
+    fn of(kind: &EntityKind) -> Self {
         match kind {
             EntityKind::FallingBlock(falling) => Self::FallingBlock {
                 state: falling.state.0,
                 start: falling.start_pos,
             },
             EntityKind::Tnt(tnt) => Self::Tnt { fuse: tnt.fuse },
+            EntityKind::Item(item) => Self::Item(item.stack.clone()),
         }
     }
 
-    /// 同步用到的那个数字。下落的方块没有。
-    fn fuse(self) -> Option<i32> {
+    /// 同步用到的那个数字。下落的方块和物品没有。
+    fn fuse(&self) -> Option<i32> {
         match self {
-            Self::FallingBlock { .. } => None,
-            Self::Tnt { fuse } => Some(fuse),
+            Self::FallingBlock { .. } | Self::Item(_) => None,
+            Self::Tnt { fuse } => Some(*fuse),
+        }
+    }
+
+    fn stack(&self) -> Option<&ItemStack> {
+        match self {
+            Self::Item(stack) => Some(stack),
+            Self::FallingBlock { .. } | Self::Tnt { .. } => None,
         }
     }
 
     /// 配对时发全部非默认值。下落的方块的起点永远不是默认值；TNT 的引信只在
-    /// 被缩短过时不是。
-    fn pairing_values(self) -> Vec<EntityData> {
+    /// 被缩短过时不是。物品堆不是空的就要发。
+    ///
+    /// Pairing sends every non-default value. A non-empty item stack is not the default.
+    fn pairing_values(&self) -> Vec<EntityData> {
         match self {
-            Self::FallingBlock { start, .. } => vec![EntityData::FallingBlockStart(start)],
-            Self::Tnt { fuse } if fuse != PrimedTnt::DEFAULT_FUSE => {
-                vec![EntityData::TntFuse(fuse)]
+            Self::FallingBlock { start, .. } => vec![EntityData::FallingBlockStart(*start)],
+            Self::Tnt { fuse } if *fuse != PrimedTnt::DEFAULT_FUSE => {
+                vec![EntityData::TntFuse(*fuse)]
             }
             Self::Tnt { .. } => Vec::new(),
+            Self::Item(stack) if !stack.is_empty() => vec![EntityData::Item(stack.clone())],
+            Self::Item(_) => Vec::new(),
         }
     }
 
     /// 这一周期要发的元数据；和上次发的一样时是空的。
-    fn changes_since(self, last_fuse: i32) -> Vec<EntityData> {
+    fn changes_since(&self, last_fuse: i32, last_stack: &ItemStack) -> Vec<EntityData> {
         match self {
             // 起点生成以后就不再变。
             Self::FallingBlock { .. } => Vec::new(),
-            Self::Tnt { fuse } if fuse != last_fuse => vec![EntityData::TntFuse(fuse)],
+            Self::Tnt { fuse } if *fuse != last_fuse => vec![EntityData::TntFuse(*fuse)],
             Self::Tnt { .. } => Vec::new(),
+            Self::Item(stack) if stack != last_stack => vec![EntityData::Item(stack.clone())],
+            Self::Item(_) => Vec::new(),
         }
     }
 }
@@ -287,9 +320,10 @@ fn pairing_frames(snapshot: &Snapshot, tracked: &TrackedEntity) -> Vec<u8> {
         entity_type: snapshot.entity_type,
         position: tracked.base,
         movement: tracked.last_movement,
-        // 这两种实体没有朝向，头上的角度也一直是 0。
+        // 物品的 `yRot` 在构造时取过。下落方块和 TNT 一直是 0。头上的角度不跟着走。
+        // An item's `yRot` was drawn in the constructor. Falling blocks and TNT stay at 0.
         pitch: 0,
-        yaw: 0,
+        yaw: pack_degrees(snapshot.yaw),
         head_yaw: 0,
         data: snapshot.add_data(),
     }));
@@ -313,7 +347,10 @@ fn entity_uuid(id: i32) -> Uuid {
 /// 每 tick 调用一次。对应 `ServerEntity.sendChanges`。
 fn send_changes(snapshot: &Snapshot, tracked: &mut TrackedEntity, links: &mut Links) {
     let interval = update_interval(snapshot.entity_type);
-    let data_dirty = !snapshot.data.changes_since(tracked.last_fuse).is_empty();
+    let data_dirty = !snapshot
+        .data
+        .changes_since(tracked.last_fuse, &tracked.last_stack)
+        .is_empty();
     let due = interval.is_some_and(|period| tracked.tick_count % period == 0);
     if !(due || data_dirty) {
         tracked.tick_count += 1;
@@ -342,10 +379,15 @@ fn send_changes(snapshot: &Snapshot, tracked: &mut TrackedEntity, links: &mut Li
     }
 
     // `sendDirtyEntityData` 排在移动包后面。
-    let items = snapshot.data.changes_since(tracked.last_fuse);
+    let items = snapshot
+        .data
+        .changes_since(tracked.last_fuse, &tracked.last_stack);
     if !items.is_empty() {
         if let Some(fuse) = snapshot.data.fuse() {
             tracked.last_fuse = fuse;
+        }
+        if let Some(stack) = snapshot.data.stack() {
+            tracked.last_stack = stack.clone();
         }
         let frames = encode_frames(&SetEntityData {
             entity_id: snapshot.id,
@@ -407,7 +449,7 @@ impl Movement {
                 entity_id,
                 // 这两种实体没有插值，官方的 `InterpolationTracker.NO_OP` 总是返回 Linear。
                 path: PositionPath::Linear(snapshot.position),
-                yaw: 0.0,
+                yaw: snapshot.yaw,
                 pitch: 0.0,
                 on_ground: snapshot.on_ground,
             }),
@@ -418,6 +460,27 @@ impl Movement {
                 on_ground: snapshot.on_ground,
             }),
         }
+    }
+}
+
+/// 捡起动画。看得见这件物品的玩家，以及捡起它的人，都收到。
+///
+/// The pickup animation goes to everyone who can see the item, and to the player who took it.
+pub(crate) fn broadcast_take(region: &mut Region, item_id: i32, player: PlayerId, amount: i32) {
+    let frames = encode_frames(&TakeItemEntity {
+        item_id,
+        player_id: player.0,
+        amount,
+    });
+    let mut viewers = region
+        .entity_tracking
+        .tracked
+        .get(&item_id)
+        .map(|tracked| tracked.seen_by.clone())
+        .unwrap_or_default();
+    viewers.insert(player);
+    for viewer in viewers {
+        region.links.send_frames(viewer, &frames);
     }
 }
 

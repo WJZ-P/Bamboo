@@ -22,7 +22,9 @@
 //! | `block_items` | 方块实体从物品上带来的组件和它的 `getUpdateTag` |
 //! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
+//! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
 
+mod block_drops;
 mod block_items;
 mod book;
 mod campfire;
@@ -34,6 +36,7 @@ pub mod command;
 mod command_block;
 mod container;
 mod debug_stick;
+mod drops;
 mod durability;
 mod entity_sync;
 mod entity_tracking;
@@ -52,6 +55,7 @@ mod player;
 mod player_grid;
 mod player_move;
 mod region;
+mod scoreboard;
 mod secure_chat;
 mod sign;
 mod world;
@@ -59,6 +63,7 @@ mod world_state;
 
 pub use command::test_commands;
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};

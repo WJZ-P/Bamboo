@@ -282,7 +282,7 @@ impl Behaviour for Speleothem {
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if is_stalagmite(state) && !state.can_survive(world, pos) {
-            world.destroy_block(pos, UPDATE_LIMIT);
+            world.destroy_block(pos, true, UPDATE_LIMIT);
         } else {
             drop_stalactite(state, world, pos);
         }

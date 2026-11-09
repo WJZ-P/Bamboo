@@ -1,20 +1,24 @@
 //! 新命令根节点和官方 `commands.json` 逐节点对比。
 //!
-//! 只比较本分支注册的根，别的命令由各自的分支负责。
+//! 只比较本分支和 main 的计分板分支注册的根；`command/mod.rs` 里的
+//! `official_tree` 另有一份手工整理的可执行节点/解析器清单。
 
 use std::{collections::BTreeMap, fs, path::Path};
 
 use mc_bamboo_command::{ArgumentType, CommandGraph, NodeKind, StringKind, permission};
 use serde_json::Value;
 
-/// 本分支新增的根节点，按名字排列。
+/// 两条命令分支新增的根节点，按名字排列。
 const ROOTS: &[&str] = &[
+    "bossbar",
     "clone",
     "defaultgamemode",
     "enchant",
     "loot",
     "random",
     "difficulty",
+    "scoreboard",
+    "team",
     "seed",
     "setworldspawn",
     "spawnpoint",
@@ -138,6 +142,9 @@ fn argument_properties(kind: &ArgumentType) -> Option<Value> {
         }),
         ArgumentType::Time { minimum } => serde_json::json!({"min": minimum}),
         ArgumentType::Resource { registry } => serde_json::json!({"registry": registry}),
+        ArgumentType::ScoreHolder { multiple } => {
+            serde_json::json!({"amount": if multiple { "multiple" } else { "single" }})
+        }
         _ => return None,
     })
 }

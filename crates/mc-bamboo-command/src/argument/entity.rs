@@ -1,7 +1,10 @@
 //! 实体选择器参数。官方语法是 `玩家名`、UUID、`@p`、`@a[...]` 这些。
 //!
 //! Bamboo 目前只有玩家，解析阶段仍然按官方的选择器结构保存，执行时再看服务端有哪些玩家。
-//! 官方选择器里依赖 NBT、记分板、进度和战利品表的选项在这里会明确报不支持。
+//! `scores` 和 `team` 会留下来，执行时再查计分板。NBT、进度和战利品表的选项仍报不支持。
+//!
+//! `scores` and `team` are kept and checked against the scoreboard at execution.
+//! NBT, advancement, and loot-predicate options still report that they are unsupported.
 
 use uuid::Uuid;
 
@@ -75,6 +78,8 @@ struct EntityParser<'a> {
     game_mode_filters: Vec<(GameMode, bool)>,
     team_filters: Vec<(String, bool)>,
     tag_filters: Vec<(String, bool)>,
+    score_filters: Vec<(String, NumberBounds<i32>)>,
+    scores_parsed: bool,
     name_limit: Limitation,
     game_mode_limit: Limitation,
     type_limit: Limitation,
@@ -113,6 +118,8 @@ impl<'a> EntityParser<'a> {
             game_mode_filters: Vec::new(),
             team_filters: Vec::new(),
             tag_filters: Vec::new(),
+            score_filters: Vec::new(),
+            scores_parsed: false,
             name_limit: Limitation::None,
             game_mode_limit: Limitation::None,
             type_limit: Limitation::None,
@@ -265,7 +272,8 @@ impl<'a> EntityParser<'a> {
             "type" => self.type_limit.can_parse_any(),
             "team" => true,
             "tag" => true,
-            "nbt" | "scores" | "advancements" | "predicate" => true,
+            "scores" => !self.scores_parsed,
+            "nbt" | "advancements" | "predicate" => true,
             _ => {
                 return Err(self.rollback(
                     start,
@@ -318,7 +326,8 @@ impl<'a> EntityParser<'a> {
             "type" => self.apply_type(start),
             "team" => self.apply_team(start),
             "tag" => self.apply_tag(),
-            "nbt" | "scores" | "advancements" | "predicate" => Err(self.rollback(
+            "scores" => self.apply_scores(),
+            "nbt" | "advancements" | "predicate" => Err(self.rollback(
                 start,
                 ParseError::text(
                     "command.exception",
@@ -491,6 +500,37 @@ impl<'a> EntityParser<'a> {
         Ok(())
     }
 
+    /// 官方 `EntitySelectorOptions` 的 `scores`。同一个目标写两次时，后面的覆盖前面的。
+    ///
+    /// Official `scores` in `EntitySelectorOptions`. A repeated objective replaces the earlier range.
+    fn apply_scores(&mut self) -> Result<(), ParseError> {
+        self.reader.skip_whitespace();
+        self.reader.expect('{')?;
+        self.reader.skip_whitespace();
+        let mut filters = Vec::new();
+        while self.reader.can_read() && self.reader.peek() != '}' {
+            self.reader.skip_whitespace();
+            let objective = self.reader.read_unquoted_string();
+            self.reader.skip_whitespace();
+            self.reader.expect('=')?;
+            self.reader.skip_whitespace();
+            let bounds = parse_bounds(self.reader, parse_int, "parsing.int.invalid", true)?;
+            if let Some(existing) = filters.iter_mut().find(|(name, _)| name == &objective) {
+                existing.1 = bounds;
+            } else {
+                filters.push((objective, bounds));
+            }
+            self.reader.skip_whitespace();
+            if self.reader.can_read() && self.reader.peek() == ',' {
+                self.reader.skip();
+            }
+        }
+        self.reader.expect('}')?;
+        self.score_filters = filters;
+        self.scores_parsed = true;
+        Ok(())
+    }
+
     fn should_invert_value(&mut self) -> bool {
         self.reader.skip_whitespace();
         if self.reader.can_read() && self.reader.peek() == INVERT {
@@ -551,6 +591,7 @@ impl<'a> EntityParser<'a> {
             game_mode_filters: self.game_mode_filters,
             team_filters: self.team_filters,
             tag_filters: self.tag_filters,
+            score_filters: self.score_filters,
             uses_selectors: self.uses_selectors,
         }
     }

@@ -109,8 +109,8 @@ fn hand(inventory: &Inventory) -> &ItemStack {
     &inventory.slots[36]
 }
 
-fn apply(inventory: &mut Inventory, exchange: &ItemExchange, creative: bool) {
-    inventory.apply_exchange(Hand::Main, exchange, creative);
+fn apply(inventory: &mut Inventory, exchange: &ItemExchange, creative: bool) -> ItemStack {
+    inventory.apply_exchange(Hand::Main, exchange, creative).1
 }
 
 #[test]
@@ -184,8 +184,9 @@ fn a_full_inventory_drops_the_survival_remainder_and_deletes_the_creative_one() 
     }
     survival.slots[45] = stone.clone();
     survival.slots[36] = water_potion(2);
-    apply(&mut survival, &fill(glass(1), true), false);
+    let dropped = apply(&mut survival, &fill(glass(1), true), false);
     assert!(hand(&survival).matches(&water_potion(1)));
+    assert!(dropped.matches(&glass(1)));
     assert!(
         survival
             .slots
@@ -195,7 +196,8 @@ fn a_full_inventory_drops_the_survival_remainder_and_deletes_the_creative_one() 
 
     let mut creative = survival;
     creative.slots[36] = water_potion(2);
-    apply(&mut creative, &fill(glass(1), true), true);
+    let vanished = apply(&mut creative, &fill(glass(1), true), true);
+    assert!(vanished.is_empty());
     assert!(hand(&creative).matches(&water_potion(2)));
     assert!(
         creative

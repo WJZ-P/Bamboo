@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use mc_bamboo_core::{
-    BlockPos, ChunkPos, LightLayer,
+    BlockPos, ChunkPos, Hand, LightLayer,
     sign::{SignContent, SignTextSlot},
 };
 use mc_bamboo_data::SoundSource;
@@ -211,6 +211,48 @@ pub trait Level {
         let _ = pos;
     }
 
+    /// `BlockBehaviour.onExplosionHit` 里的 `state.getDrops`。
+    ///
+    /// TNT 的 `tntExplosionDropDecay` 默认是假，所以没有 `EXPLOSION_RADIUS`，`explosion_decay`
+    /// 不取数。假世界没有战利品表时返回空，这样不会多取 `level.random`。
+    ///
+    /// `state.getDrops` inside `BlockBehaviour.onExplosionHit`.
+    ///
+    /// `tntExplosionDropDecay` defaults to false, so there is no `EXPLOSION_RADIUS` and
+    /// `explosion_decay` draws nothing. A world without loot tables returns nothing, and does
+    /// not draw extra `level.random` values.
+    fn explosion_block_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        let _ = (state, pos);
+        Vec::new()
+    }
+
+    /// `Block.getDrops`，`destroyBlock` 在移除方块之前按战利品表算出的每一组。
+    ///
+    /// 空堆也交给调用方 `popResource`：官方对每一组都取三次位置偏移。
+    /// 方块 oracle 把表换成空表，这里默认返回空，不额外取数。
+    ///
+    /// `Block.getDrops`, the stacks `destroyBlock` computes before removing the block.
+    /// Even an empty stack reaches `popResource` in vanilla, which draws three position
+    /// offsets. The block oracle empties those tables, so the default here draws nothing.
+    fn block_loot_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        let _ = (state, pos);
+        Vec::new()
+    }
+
+    /// `BlockState.spawnAfterBreak` 里 `tryDropExperience` 和虫蚀方块生成蠹虫
+    /// 可能要取的 `level.random` 数。没有经验球和生物时实体不生成，取数仍要照官方。
+    ///
+    /// `DropExperienceBlock` 的 `xpRange.sample(level.random)` 和 `ExperienceOrb.award`
+    /// 的拆分次数都在这里；虫蚀方块不取 `level.random`。默认没有方块需要取数。
+    ///
+    /// The `level.random` draws inside `BlockState.spawnAfterBreak`: ore experience and
+    /// infested-block spawns. Experience orbs and silverfish are not spawned, but the
+    /// draws still follow vanilla. `DropExperienceBlock` samples `xpRange` and splits
+    /// the amount in `ExperienceOrb.award`; infested blocks draw none. The default draws
+    /// nothing.
+    fn spawn_after_break_random(&mut self, state: BlockState, pos: BlockPos) {
+        let _ = (state, pos);
+    }
     /// `getEntitiesOfClass(LivingEntity, box)` 能看见的生物。默认没有。
     ///
     /// Living entities visible to `getEntitiesOfClass`. None by default.
@@ -259,6 +301,10 @@ pub struct RedstoneMemory {
     /// Disabled slots of a `CrafterBlockEntity`. Bit `n` set means slot `n` is disabled.
     /// Missing positions are all enabled.
     crafter_disabled: HashMap<BlockPos, u16>,
+    /// `CrafterBlockEntity.craftingTicksRemaining`。只在大于 0 时记。
+    ///
+    /// `CrafterBlockEntity.craftingTicksRemaining`. Only recorded while positive.
+    crafter_crafting: HashMap<BlockPos, i32>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
     /// `LecternBlockEntity` 的页码。比较器只读得了这三项，书本身在游戏层。
@@ -354,12 +400,44 @@ impl RedstoneMemory {
         }
     }
 
+    /// `CrafterBlockEntity.setCraftingTicksRemaining`：亮起 `crafting` 时记下还剩几刻。
+    ///
+    /// `CrafterBlockEntity.setCraftingTicksRemaining`: record the countdown when `crafting` turns on.
+    pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+        if remaining > 0 {
+            self.crafter_crafting.insert(pos, remaining);
+        } else {
+            self.crafter_crafting.remove(&pos);
+        }
+    }
+
+    /// 取走全部倒计时，供一刻末尾统一递减。
+    ///
+    /// Take every countdown so the end of a tick can decrement them together.
+    pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+        std::mem::take(&mut self.crafter_crafting)
+            .into_iter()
+            .collect()
+    }
+
+    /// 把还没到期的倒计时放回去。
+    ///
+    /// Put the countdowns that have not expired back.
+    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+        for (pos, remaining) in entries {
+            if remaining > 0 {
+                self.crafter_crafting.insert(pos, remaining);
+            }
+        }
+    }
+
     /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
     pub fn forget_block_entity(&mut self, pos: BlockPos) {
         self.comparator_outputs.remove(&pos);
         self.bookshelf_slots.remove(&pos);
         self.jukebox_playing.remove(&pos);
         self.crafter_disabled.remove(&pos);
+        self.crafter_crafting.remove(&pos);
         self.lecterns.remove(&pos);
     }
 
@@ -433,9 +511,16 @@ pub enum Effect {
     },
     /// `levelEvent(1502, pos, 0)`：红石火把开关得太频繁，烧坏时冒的那股烟。
     TorchBurnout { pos: BlockPos },
-    /// 发起者用空桶舀起了东西，`ItemUtils.createFilledResult` 的创造模式分支：手里还是空桶，
-    /// 物品栏里没有 `item` 时放一个进去。
-    FilledBucket { item: i32 },
+    /// 空桶舀起了东西。游戏层按 `ItemUtils.createFilledResult` 把 `item` 交还到 `hand`。
+    ///
+    /// An empty bucket picked something up. The game layer runs `ItemUtils.createFilledResult`
+    /// and puts `item` back into `hand`.
+    FilledBucket { item: i32, hand: Hand },
+    /// 满桶倒成功了。生存模式交还空桶，创造模式交还手里原来的那一堆。
+    ///
+    /// A full bucket emptied successfully. Survival hands back an empty bucket. Creative hands
+    /// back the stack that was already in the hand.
+    EmptiedBucket { hand: Hand },
     /// `levelEvent(1505, pos, 15)`：骨粉起作用的粒子，发给附近所有人。
     BoneMealUsed { pos: BlockPos },
     /// 告示牌的内容变了，`SignBlockEntity.markUpdated` 里的 `sendBlockUpdated`：

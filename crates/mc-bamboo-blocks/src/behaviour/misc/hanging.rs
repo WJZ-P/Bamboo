@@ -48,7 +48,7 @@ impl Behaviour for HangingMoss {
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         if !can_stay(state, world, pos) {
-            world.destroy_block(pos, UPDATE_LIMIT);
+            world.destroy_block(pos, true, UPDATE_LIMIT);
         }
     }
 

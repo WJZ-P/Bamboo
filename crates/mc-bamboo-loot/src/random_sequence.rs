@@ -156,6 +156,13 @@ impl RandomSequences {
     }
 }
 
+// SAFETY: `Rc` 只在一次求值期间被克隆。求值返回后，缓存里每个序列的引用计数都是 1，
+// 没有别的线程还拿着克隆。把整个缓存挪到另一条线程不会和悬空的 `Rc` 竞争。
+//
+// SAFETY: `Rc` clones exist only during one roll. After it returns, every cached sequence
+// has a refcount of 1 and no other thread holds a clone, so moving the cache is sound.
+unsafe impl Send for RandomSequences {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

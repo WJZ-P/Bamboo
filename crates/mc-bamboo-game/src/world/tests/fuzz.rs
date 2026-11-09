@@ -12,6 +12,7 @@ use mc_bamboo_data::{
     items::{self, ITEMS},
     packets::play::clientbound,
     registries::data_component_type,
+    registries::entity_type,
 };
 use mc_bamboo_protocol::{
     codec::{Reader, write_varint},
@@ -143,14 +144,17 @@ impl Remote {
             if index == 0xff {
                 return;
             }
-            reader.varint().unwrap();
+            let _serializer = reader.varint().unwrap();
             match index {
                 0 => self.flags = reader.u8().unwrap(),
                 6 => self.pose = reader.varint().unwrap(),
                 9 => self.health = f32::from_bits(reader.i32().unwrap() as u32),
                 15 => self.main_hand = reader.varint().unwrap(),
                 16 => self.model_parts = reader.u8().unwrap(),
-                other => panic!("metadata index {other}"),
+                // 地上物品的堆、下落方块的起点、TNT 的引信都不是玩家的字段。这一包剩下的字节不再读。
+                // An item stack, a falling block's start and a TNT fuse are not player fields.
+                // The rest of this packet is left unread.
+                _ => return,
             }
         }
     }
@@ -221,6 +225,10 @@ struct Model {
     /// 值是帽子显示没显示。
     tab: BTreeMap<Uuid, bool>,
     entities: BTreeMap<i32, Remote>,
+    /// 不是玩家的实体，比如地上的物品。
+    ///
+    /// Entities that are not players, such as ground items.
+    non_players: BTreeSet<i32>,
     /// 自己的实体。只有元数据有意义，物品栏是客户端自己的。
     own: Remote,
     /// 值是收到时的区块内容，`None` 表示是模板。再加上之后的方块更新。
@@ -243,6 +251,7 @@ impl Model {
             in_bundle: false,
             tab: BTreeMap::new(),
             entities: BTreeMap::new(),
+            non_players: BTreeSet::new(),
             own: Remote::default(),
             chunks: BTreeMap::new(),
             updates: BTreeMap::new(),
@@ -318,22 +327,31 @@ impl Model {
             clientbound::ADD_ENTITY => {
                 let id = reader.varint().unwrap();
                 let uuid = reader.uuid().unwrap();
+                let kind = reader.varint().unwrap();
                 assert_ne!(id, self_id, "{}: own entity", self.name);
-                assert!(self.tab.contains_key(&uuid), "{}: no tab entry", self.name);
                 assert!(self.in_bundle, "{}: entity outside a bundle", self.name);
+                if kind != entity_type::PLAYER {
+                    self.non_players.insert(id);
+                }
                 let previous = self.entities.insert(id, Remote::default());
                 assert!(previous.is_none(), "{}: entity twice", self.name);
-                let target = &world.region.players[&PlayerId(id)];
-                assert!(
-                    self.chunks.contains_key(&target.chunk_pos()),
-                    "{}: entity in a chunk it does not have",
-                    self.name
-                );
+                // 玩家必须先有标签页。地上的物品、下落方块和 TNT 没有玩家条目。
+                // A player needs a tab entry first. Ground items, falling blocks and primed TNT do not.
+                if kind == entity_type::PLAYER {
+                    assert!(self.tab.contains_key(&uuid), "{}: no tab entry", self.name);
+                    let target = &world.region.players[&PlayerId(id)];
+                    assert!(
+                        self.chunks.contains_key(&target.chunk_pos()),
+                        "{}: entity in a chunk it does not have",
+                        self.name
+                    );
+                }
             }
             clientbound::REMOVE_ENTITIES => {
                 for _ in 0..reader.varint().unwrap() {
                     let id = reader.varint().unwrap();
                     let entity = self.entities.remove(&id);
+                    self.non_players.remove(&id);
                     assert!(entity.is_some(), "{}: removed ghost", self.name);
                 }
             }
@@ -1021,7 +1039,11 @@ fn check_convergence(server: &Harness, actors: &[Actor], view_distance: i32) {
 
         let ids: BTreeSet<i32> = actors.iter().map(|actor| actor.client.id.0).collect();
         assert!(
-            actor.model.entities.keys().all(|id| ids.contains(id)),
+            actor
+                .model
+                .entities
+                .keys()
+                .all(|id| ids.contains(id) || actor.model.non_players.contains(id)),
             "{name}: entity of a player that left"
         );
 

@@ -47,6 +47,11 @@ pub(crate) struct TestLevel {
     ///
     /// Game rules block logic can see. Vanilla defaults, so `tnt_explodes` starts true.
     pub(crate) rules: crate::gamerules::BlockGameRules,
+    /// `block_loot_drops` 返回的掉落堆，测试 `destroyBlock` 的顺序时用。
+    pub(crate) loot: Vec<ItemStack>,
+    /// 每次调用 `block_loot_drops` / `spawn_after_break_random` / `write_block` 时记下的写入数，
+    /// 用来验证掉落在改方块之前。
+    pub(crate) drop_order: Vec<(&'static str, usize)>,
 }
 
 impl TestLevel {
@@ -66,6 +71,8 @@ impl TestLevel {
             entities: Entities::default(),
             living: Vec::new(),
             rules: crate::gamerules::BlockGameRules::vanilla(),
+            loot: Vec::new(),
+            drop_order: Vec::new(),
         }
     }
 
@@ -81,6 +88,11 @@ impl TestLevel {
     /// 给这一格放一张槽位表，模拟官方的容器方块实体。
     pub(crate) fn set_container(&mut self, pos: BlockPos, slots: Vec<ItemStack>) {
         self.containers.insert(pos, slots);
+    }
+
+    /// 世界里已经生成的实体。
+    pub(crate) fn entities(&self) -> &Entities {
+        &self.entities
     }
 
     pub(crate) fn redstone_mut(&mut self) -> &mut RedstoneMemory {
@@ -106,6 +118,7 @@ impl Level for TestLevel {
         }
         self.blocks.insert(pos, state);
         self.writes.push((pos, state));
+        self.drop_order.push(("write", self.writes.len()));
         true
     }
 
@@ -262,6 +275,15 @@ impl Level for TestLevel {
 
     fn block_game_rules(&self) -> crate::gamerules::BlockGameRules {
         self.rules
+    }
+
+    fn block_loot_drops(&mut self, _state: BlockState, _pos: BlockPos) -> Vec<ItemStack> {
+        self.drop_order.push(("drops", self.writes.len()));
+        self.loot.clone()
+    }
+
+    fn spawn_after_break_random(&mut self, _state: BlockState, _pos: BlockPos) {
+        self.drop_order.push(("after_break", self.writes.len()));
     }
 
     fn set_dispenser_equipment(
