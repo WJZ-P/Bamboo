@@ -20,7 +20,7 @@ use std::{
 };
 
 use mc_bamboo_data::version;
-use mc_bamboo_game::{LecternReplay, LecternSnapshot, Replay, ReplayShape, Snapshot};
+use mc_bamboo_game::{LecternReplay, LecternSnapshot, Replay, ReplayShape, ReplayWorld, Snapshot};
 use mc_bamboo_protocol::{
     components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
@@ -65,6 +65,22 @@ struct Case {
     inventory: Vec<[i32; 2]>,
     #[serde(default)]
     data: Vec<i32>,
+    /// 附魔台和铁砧题里的 `enchantmentSeed`，也用来固定铁砧的实体随机源。
+    #[serde(default)]
+    seed: i32,
+    /// 假世界里的地图比例、锁定状态和书架数。
+    /// 固定题的假世界会执行 `access.execute`；随机题仍是 NULL access。
+    #[serde(default)]
+    fixed_world: bool,
+    #[serde(default)]
+    map_scale: i32,
+    #[serde(default)]
+    map_locked: bool,
+    #[serde(default)]
+    bookshelves: i32,
+    /// 附魔成功后官方从玩家随机源换出的新种子。
+    #[serde(default)]
+    next_seed: Option<i32>,
     open: Outcome,
     steps: Vec<Step>,
     /// 这道题的客户端会按官方预测回传哈希。
@@ -95,6 +111,9 @@ struct Step {
     /// Stonecutter `container_button_click`. Other cases omit it.
     #[serde(default, rename = "menuButton")]
     menu_button: bool,
+    /// 铁砧改名包。别的题不写。
+    #[serde(default)]
+    rename: Option<String>,
     /// 讲台的 `container_button_click`。箱子题不写，默认 0。
     ///
     /// Lectern `container_button_click`. Chest cases omit it and it defaults to 0.
@@ -257,6 +276,14 @@ impl Report {
                 &pairs(&case.inventory),
                 &case.data,
                 case.creative,
+                ReplayWorld {
+                    seed: case.seed,
+                    fixed: case.fixed_world,
+                    map_scale: case.map_scale,
+                    map_locked: case.map_locked,
+                    bookshelves: case.bookshelves,
+                    next_seed: case.next_seed,
+                },
             );
             // 材料先按物品和数量放进去，再盖上组件。下标是格子序号，合成格要加一。
             // Ingredients land as item and count first, then the component patch. The index is the
@@ -298,7 +325,9 @@ impl Report {
 
         for (index, step) in case.steps.iter().enumerate() {
             let input = ContainerInput::from_id(i32::from(step.input));
-            let snapshot = if step.menu_button {
+            let snapshot = if let Some(name) = &step.rename {
+                replay.rename(name)
+            } else if step.menu_button {
                 replay.button(step.button)
             } else if case.predict {
                 let (snapshot, resent, carried_resent) =
@@ -470,6 +499,9 @@ fn shape_of(name: &str) -> Option<ReplayShape> {
         "brewing" => Some(ReplayShape::Brewing),
         "loom" => Some(ReplayShape::Loom),
         "grindstone" => Some(ReplayShape::Grindstone),
+        "anvil" => Some(ReplayShape::Anvil),
+        "cartography" => Some(ReplayShape::Cartography),
+        "enchantment" => Some(ReplayShape::Enchantment),
         _ => None,
     }
 }
@@ -514,6 +546,9 @@ fn work_slot(shape: ReplayShape, index: usize) -> Option<usize> {
         | ReplayShape::Brewing
         | ReplayShape::Loom
         | ReplayShape::Grindstone
+        | ReplayShape::Anvil
+        | ReplayShape::Cartography
+        | ReplayShape::Enchantment
         | ReplayShape::Crafter => Some(index),
         _ => None,
     }
@@ -582,9 +617,12 @@ mod tests {
             ("brewing", ReplayShape::Brewing),
             ("loom", ReplayShape::Loom),
             ("grindstone", ReplayShape::Grindstone),
+            ("anvil", ReplayShape::Anvil),
+            ("cartography", ReplayShape::Cartography),
+            ("enchantment", ReplayShape::Enchantment),
         ] {
             assert_eq!(shape_of(name), Some(shape));
         }
-        assert_eq!(shape_of("anvil"), None);
+        assert_eq!(shape_of("unknown_menu"), None);
     }
 }

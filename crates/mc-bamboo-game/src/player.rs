@@ -75,10 +75,14 @@ pub(crate) struct Player {
     /// 这名玩家自己的末影箱，每个玩家一份。
     pub(crate) ender_chest: EnderChest,
     pub(crate) spam: SpamThrottlers,
-    /// 丢出物品用的 `this.random`。种子由玩家 ID 决定。
+    /// 丢出物品、铁砧损坏和附魔换种子用的 `this.random`。种子由玩家 ID 决定。
     ///
-    /// `this.random` for thrown items. The seed comes from the player id.
+    /// `this.random` for thrown items, anvil damage and enchantment seeds.
     pub(crate) random: JavaRandom,
+    /// 官方 `Player.enchantmentSeed`，进服时从 `this.random` 取。
+    ///
+    /// Vanilla `Player.enchantmentSeed`, drawn from `this.random` on join.
+    pub(crate) enchantment_seed: i32,
     /// 创造模式把物品拖出界面的 `TickThrottler(20, 1480)`。
     ///
     /// Creative drags out of the screen use `TickThrottler(20, 1480)`.
@@ -102,6 +106,8 @@ impl Player {
         client: ClientInformation,
         position: Vec3,
     ) -> Self {
+        let mut random = crate::drops::player_random(id);
+        let enchantment_seed = random.next_int();
         Self {
             id,
             uuid,
@@ -126,7 +132,8 @@ impl Player {
             container_counter: 0,
             ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),
-            random: crate::drops::player_random(id),
+            random,
+            enchantment_seed,
             drop_spam: 0,
             chat: PlayerChat::default(),
             respawn: None,

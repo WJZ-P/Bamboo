@@ -6,6 +6,10 @@
 
 use std::collections::BTreeMap;
 
+mod anvil;
+mod cartography;
+mod enchantment;
+mod enchantments;
 mod grindstone;
 mod item_patch;
 mod loom;
@@ -1004,6 +1008,11 @@ pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
 /// 切石机选结果。官方 `handleContainerButtonClick`。
 pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, button: i32) {
     station::on_button(region, id, container_id, button);
+}
+
+/// 铁砧改名。官方 `handleRenameItem` 只认当前打开的 `AnvilMenu`。
+pub(crate) fn on_rename(region: &mut Region, id: PlayerId, name: &str) {
+    station::on_rename(region, id, name);
 }
 
 /// 合成器菜单切换禁用槽。官方 `handleContainerSlotStateChanged`。
