@@ -46,6 +46,7 @@ impl Harness {
                 max_players: 20,
                 online_mode: false,
                 enforce_secure_profile: false,
+                admin: Default::default(),
             },
             receiver,
         );
@@ -70,6 +71,7 @@ impl Harness {
             client: ClientInformation::default(),
             permission_level: level,
             is_op: level > 0,
+            peer_ip: "127.0.0.1".to_owned(),
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(join))).unwrap();
@@ -100,6 +102,7 @@ impl Harness {
                     max_players: 20,
                     online_mode: false,
                     enforce_secure_profile: false,
+                    admin: Default::default(),
                 },
                 std::sync::mpsc::channel().1,
             ),

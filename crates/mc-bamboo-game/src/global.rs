@@ -196,6 +196,10 @@ pub(crate) struct Global {
     ///
     /// The one set of custom boss bars for the whole server. Never saved.
     boss_bars: crate::scoreboard::BossBars,
+    /// OP、封禁和白名单的权威副本。世界线程是唯一写者。
+    pub(crate) admin: crate::admin::AdminState,
+    /// 名单变更后发布给连接层并写盘的通道。没有连接层时（单元测试）是 `None`。
+    pub(crate) admin_messages: Option<std::sync::mpsc::Sender<crate::admin::AdminMessage>>,
 }
 
 impl Default for Global {
@@ -210,6 +214,8 @@ impl Default for Global {
             state: WorldState::default(),
             scoreboard: crate::scoreboard::Scoreboard::default(),
             boss_bars: crate::scoreboard::BossBars::default(),
+            admin: crate::admin::AdminState::default(),
+            admin_messages: None,
         }
     }
 }

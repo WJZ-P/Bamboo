@@ -10,6 +10,7 @@
 
 pub(crate) use players::change_own_mode;
 
+pub(crate) mod admin;
 mod blocks;
 mod bossbar;
 mod catalog;
@@ -345,6 +346,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         ArgumentType::ScoreHolder { multiple } => ArgumentProperties::ScoreHolder { multiple },
         ArgumentType::Bool
         | ArgumentType::GameMode
+        | ArgumentType::GameProfile
         | ArgumentType::EntityAnchor
         | ArgumentType::BlockPos
         | ArgumentType::Vec3
@@ -666,11 +668,34 @@ mod official_tree {
         "particle/name/pos/delta/speed/count/force/viewers",
         "particle/name/pos/delta/speed/count/normal",
         "particle/name/pos/delta/speed/count/normal/viewers",
+        "op/targets",
+        "deop/targets",
+        "ban/targets",
+        "ban/targets/reason",
+        "ban-ip/target",
+        "ban-ip/target/reason",
+        "banlist",
+        "banlist/ips",
+        "banlist/players",
+        "pardon/targets",
+        "pardon-ip/target",
+        "whitelist/add/targets",
+        "whitelist/list",
+        "whitelist/off",
+        "whitelist/on",
+        "whitelist/reload",
+        "whitelist/remove/targets",
+        "stop",
+        "setidletimeout/minutes",
+        "transfer/hostname",
+        "transfer/hostname/port",
+        "transfer/hostname/port/players",
+        "version",
     ];
 
-    /// 深度优先枚举我们树里从七条新根命令出发的可执行节点路径。
+    /// 深度优先枚举我们树里从新增根命令出发的可执行节点路径。
     ///
-    /// Enumerate executable node paths below the seven new root commands.
+    /// Enumerate executable node paths below the newly added root commands.
     fn ours() -> Vec<String> {
         let graph = &commands().graph;
         let mut out = Vec::new();
@@ -689,6 +714,18 @@ mod official_tree {
                             | "title"
                             | "playsound"
                             | "particle"
+                            | "op"
+                            | "deop"
+                            | "ban"
+                            | "ban-ip"
+                            | "banlist"
+                            | "pardon"
+                            | "pardon-ip"
+                            | "whitelist"
+                            | "stop"
+                            | "setidletimeout"
+                            | "transfer"
+                            | "version"
                     ) =>
                 {
                     Some((child, name.clone()))
@@ -1084,6 +1121,20 @@ mod official_tree {
             "particle/name/pos/delta/speed/count/normal/viewers",
             "minecraft:entity",
         ),
+        ("/op/targets", "minecraft:game_profile"),
+        ("/deop/targets", "minecraft:game_profile"),
+        ("/ban/targets", "minecraft:game_profile"),
+        ("/ban/targets/reason", "minecraft:message"),
+        ("/ban-ip/target", "brigadier:string"),
+        ("/ban-ip/target/reason", "minecraft:message"),
+        ("/pardon/targets", "minecraft:game_profile"),
+        ("/pardon-ip/target", "brigadier:string"),
+        ("/whitelist/add/targets", "minecraft:game_profile"),
+        ("/whitelist/remove/targets", "minecraft:game_profile"),
+        ("/setidletimeout/minutes", "brigadier:integer"),
+        ("/transfer/hostname", "brigadier:string"),
+        ("/transfer/hostname/port", "brigadier:integer"),
+        ("/transfer/hostname/port/players", "minecraft:entity"),
     ];
 
     /// 枚举我们树里七条新命令下的参数节点。
@@ -1105,6 +1156,18 @@ mod official_tree {
                             | "title"
                             | "playsound"
                             | "particle"
+                            | "op"
+                            | "deop"
+                            | "ban"
+                            | "ban-ip"
+                            | "banlist"
+                            | "pardon"
+                            | "pardon-ip"
+                            | "whitelist"
+                            | "stop"
+                            | "setidletimeout"
+                            | "transfer"
+                            | "version"
                     ) =>
                 {
                     Some((child, name.clone()))
@@ -1151,5 +1214,52 @@ mod official_tree {
             .collect();
         assert!(missing.is_empty(), "缺或错: {missing:?}");
         assert!(extra.is_empty(), "多或错: {extra:?}");
+    }
+
+    /// 服务器管理类根命令，逐节点和官方报告对照（节点类型、解析器、属性、
+    /// `executable` 和权限）。另外七条展示/计分板根命令由上面两个测试按
+    /// 路径和解析器核对。
+    ///
+    /// The server administration roots, compared node by node with the official report
+    /// (node kind, parser, properties, executable and permissions). The seven other
+    /// roots are checked by the path/parser tests above.
+    const ADMIN_ROOTS: &[&str] = &[
+        "op",
+        "deop",
+        "ban",
+        "ban-ip",
+        "banlist",
+        "pardon",
+        "pardon-ip",
+        "whitelist",
+        "stop",
+        "setidletimeout",
+        "transfer",
+        "version",
+    ];
+
+    #[test]
+    fn new_roots_match_the_official_report_node_by_node() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/vanilla/generated/reports/commands.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("官方命令报告应该已经生成：{}：{error}", path.display())
+        });
+        let report: serde_json::Value =
+            serde_json::from_str(&text).expect("官方命令报告应该是合法 JSON");
+        let ours: serde_json::Value =
+            serde_json::from_str(&crate::admin::tests::command_tree_json(ADMIN_ROOTS))
+                .expect("命令树应该是合法 JSON");
+        let expected = report["children"]
+            .as_object()
+            .expect("报告的根节点应该是对象");
+        let actual = ours.as_object().expect("树的根节点应该是对象");
+        for root in ADMIN_ROOTS {
+            assert_eq!(
+                actual.get(*root),
+                expected.get(*root),
+                "/{root} 的命令树和官方不一致"
+            );
+        }
     }
 }

@@ -202,6 +202,12 @@ pub(crate) struct Region {
     ///
     /// Commands stored in command blocks. They are not executed and not saved.
     pub(crate) command_blocks: BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
+    /// 这一 tick 里改过的管理名单，tick 末尾统一发布并写盘。
+    pub(crate) admin_changes: crate::admin::AdminChanges,
+    /// 每名玩家最近一次动作的时刻，单位毫秒。官方 `ServerPlayer.lastActionTime`。
+    pub(crate) last_action_millis: BTreeMap<PlayerId, i64>,
+    /// 每名玩家的对端 IP 文本（不含端口），供 `ban-ip` 和登录复查用。
+    pub(crate) peer_ips: BTreeMap<PlayerId, String>,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -298,6 +304,9 @@ impl Region {
             log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
             command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
             command_blocks: BTreeMap::new(),
+            admin_changes: crate::admin::AdminChanges::default(),
+            last_action_millis: BTreeMap::new(),
+            peer_ips: BTreeMap::new(),
         }
     }
 
@@ -346,6 +355,8 @@ impl Region {
         difficulty_frames: &[u8],
         spawn: RespawnData,
         state_seed_hash: i64,
+        permission_level: u8,
+        is_op: bool,
     ) {
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
@@ -354,11 +365,13 @@ impl Region {
             name,
             properties: _,
             client,
-            permission_level,
-            is_op,
+            permission_level: _,
+            is_op: _,
+            peer_ip,
             sink,
         } = request;
         self.links.add(id, sink);
+        self.peer_ips.insert(id, peer_ip);
 
         let login = Login {
             entity_id: id.0,
@@ -507,6 +520,11 @@ impl Region {
 
     fn send_time(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
         self.links.send(id, &time_packet(time, clock));
+    }
+
+    /// 连接层报来的对端 IP。
+    pub(crate) fn peer_ip(&self, id: PlayerId) -> Option<&str> {
+        self.peer_ips.get(&id).map(String::as_str)
     }
 
     /// 登录包里的玩家上限。

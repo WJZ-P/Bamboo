@@ -24,6 +24,7 @@
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
 
+pub mod admin;
 mod block_drops;
 mod block_items;
 mod book;

@@ -7,8 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, bossbar, clone, enchant, gamerule, items, loot, particle, players,
-    playsound, random, scoreboard, stopsound, team, teleport, text, time, title, weather,
+    CommandFn, Commands, admin, blocks, bossbar, clone, enchant, gamerule, items, loot, particle,
+    players, playsound, random, scoreboard, stopsound, team, teleport, text, time, title, weather,
     world_settings,
 };
 
@@ -68,6 +68,18 @@ pub(crate) fn build() -> Commands {
     let mut builder = Builder::new();
     let root = builder.graph.root();
     register_bossbar(&mut builder, root);
+    register_ban(&mut builder, root);
+    register_ban_ip(&mut builder, root);
+    register_banlist(&mut builder, root);
+    register_deop(&mut builder, root);
+    register_op(&mut builder, root);
+    register_pardon(&mut builder, root);
+    register_pardon_ip(&mut builder, root);
+    register_set_idle_timeout(&mut builder, root);
+    register_stop(&mut builder, root);
+    register_transfer(&mut builder, root);
+    register_version(&mut builder, root);
+    register_whitelist(&mut builder, root);
     register_clear(&mut builder, root);
     register_me(&mut builder, root);
     register_fill(&mut builder, root);
@@ -1195,6 +1207,121 @@ fn register_default_gamemode(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "defaultgamemode", permission::GAMEMASTERS);
     let mode = builder.argument(command, "gamemode", ArgumentType::GameMode, 0);
     builder.run(mode, world_settings::default_gamemode);
+}
+
+fn register_op(builder: &mut Builder, root: usize) {
+    let op = builder.literal(root, "op", permission::ADMINS);
+    let targets = builder.argument(op, "targets", ArgumentType::GameProfile, 0);
+    builder.run(targets, admin::op);
+}
+
+fn register_deop(builder: &mut Builder, root: usize) {
+    let deop = builder.literal(root, "deop", permission::ADMINS);
+    let targets = builder.argument(deop, "targets", ArgumentType::GameProfile, 0);
+    builder.run(targets, admin::deop);
+}
+
+fn register_ban(builder: &mut Builder, root: usize) {
+    let ban = builder.literal(root, "ban", permission::ADMINS);
+    let targets = builder.argument(ban, "targets", ArgumentType::GameProfile, 0);
+    builder.run(targets, admin::ban);
+    let reason = builder.argument(targets, "reason", ArgumentType::Message, 0);
+    builder.run(reason, admin::ban);
+}
+
+fn register_ban_ip(builder: &mut Builder, root: usize) {
+    let ban = builder.literal(root, "ban-ip", permission::ADMINS);
+    let target = builder.argument(
+        ban,
+        "target",
+        ArgumentType::String(StringKind::SingleWord),
+        0,
+    );
+    builder.run(target, admin::ban_ip);
+    let reason = builder.argument(target, "reason", ArgumentType::Message, 0);
+    builder.run(reason, admin::ban_ip);
+}
+
+fn register_banlist(builder: &mut Builder, root: usize) {
+    let list = builder.literal(root, "banlist", permission::ADMINS);
+    builder.run(list, admin::banlist_all);
+    builder.bind_literal(list, "ips", admin::banlist_ips);
+    builder.bind_literal(list, "players", admin::banlist_players);
+}
+
+fn register_pardon(builder: &mut Builder, root: usize) {
+    let pardon = builder.literal(root, "pardon", permission::ADMINS);
+    let targets = builder.argument(pardon, "targets", ArgumentType::GameProfile, 0);
+    builder.run(targets, admin::pardon);
+}
+
+fn register_pardon_ip(builder: &mut Builder, root: usize) {
+    let pardon = builder.literal(root, "pardon-ip", permission::ADMINS);
+    let target = builder.argument(
+        pardon,
+        "target",
+        ArgumentType::String(StringKind::SingleWord),
+        0,
+    );
+    builder.run(target, admin::pardon_ip);
+}
+
+fn register_whitelist(builder: &mut Builder, root: usize) {
+    let list = builder.literal(root, "whitelist", permission::ADMINS);
+    builder.bind_literal(list, "on", admin::whitelist_enable);
+    builder.bind_literal(list, "off", admin::whitelist_disable);
+    builder.bind_literal(list, "list", admin::whitelist_list);
+    builder.bind_literal(list, "reload", admin::whitelist_reload);
+    let add = builder.literal(list, "add", 0);
+    let added = builder.argument(add, "targets", ArgumentType::GameProfile, 0);
+    builder.run(added, admin::whitelist_add);
+    let remove = builder.literal(list, "remove", 0);
+    let removed = builder.argument(remove, "targets", ArgumentType::GameProfile, 0);
+    builder.run(removed, admin::whitelist_remove);
+}
+
+fn register_stop(builder: &mut Builder, root: usize) {
+    let stop = builder.literal(root, "stop", permission::OWNERS);
+    builder.run(stop, admin::stop);
+}
+
+fn register_set_idle_timeout(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "setidletimeout", permission::ADMINS);
+    let minutes = builder.argument(
+        command,
+        "minutes",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(minutes, admin::set_idle_timeout);
+}
+
+fn register_transfer(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "transfer", permission::ADMINS);
+    let hostname = builder.argument(
+        command,
+        "hostname",
+        ArgumentType::String(StringKind::Quotable),
+        0,
+    );
+    builder.run(hostname, admin::transfer);
+    let port = builder.argument(
+        hostname,
+        "port",
+        ArgumentType::Integer { min: 1, max: 65535 },
+        0,
+    );
+    builder.run(port, admin::transfer);
+    let players = builder.argument(port, "players", players_argument(), 0);
+    builder.run(players, admin::transfer);
+}
+
+fn register_version(builder: &mut Builder, root: usize) {
+    let version = builder.literal(root, "version", permission::GAMEMASTERS);
+    builder.run(version, admin::version);
 }
 
 fn players_argument() -> ArgumentType {

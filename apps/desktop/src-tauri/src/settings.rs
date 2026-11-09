@@ -130,6 +130,8 @@ impl ServerSettings {
             auth_read_timeout: defaults.auth_read_timeout,
             forwarding: self.forwarding.into(),
             forwarding_secret: self.forwarding_secret.clone(),
+            // 名单文件始终在工作目录，和官方一样；界面不提供这个选项。
+            list_directory: defaults.list_directory,
         }
     }
 

@@ -199,6 +199,7 @@ impl Harness {
             max_players: 20,
             online_mode: false,
             enforce_secure_profile: false,
+            admin: Default::default(),
         };
         let mut world = World::new(config, receiver);
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
@@ -226,6 +227,7 @@ impl Harness {
             client,
             permission_level: 0,
             is_op: false,
+            peer_ip: "127.0.0.1".to_owned(),
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -251,6 +253,7 @@ impl Harness {
             client: client_requesting(2),
             permission_level: 0,
             is_op: false,
+            peer_ip: "127.0.0.1".to_owned(),
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -816,6 +819,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         client: client_requesting(2),
         permission_level: 0,
         is_op: false,
+        peer_ip: "127.0.0.1".to_owned(),
         sink: Box::new(sink),
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -1339,4 +1343,20 @@ fn schedule_skips_ahead_when_it_is_too_far_behind() {
 
     // 不再补那 10 秒，下一 tick 从现在算起。
     assert_eq!(schedule.after_tick(now), Duration::from_millis(50));
+}
+
+#[test]
+fn join_remembers_the_profile_for_admin_name_lookups() {
+    let mut server = Harness::new(2);
+    let client = server.join("Kitten");
+    server.tick();
+    assert_eq!(
+        server
+            .world
+            .global
+            .admin
+            .known_player("kItTeN")
+            .map(|player| player.uuid),
+        Some(client.uuid)
+    );
 }

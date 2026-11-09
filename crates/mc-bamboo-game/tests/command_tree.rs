@@ -28,6 +28,18 @@ const ROOTS: &[&str] = &[
     "title",
     "playsound",
     "particle",
+    "op",
+    "deop",
+    "ban",
+    "ban-ip",
+    "banlist",
+    "pardon",
+    "pardon-ip",
+    "whitelist",
+    "stop",
+    "setidletimeout",
+    "transfer",
+    "version",
 ];
 
 /// 从官方报告里取一个根节点。
@@ -145,7 +157,7 @@ fn argument_properties(kind: &ArgumentType) -> Option<Value> {
         ArgumentType::String(kind) => {
             let kind = match kind {
                 StringKind::SingleWord => "word",
-                StringKind::Quotable => "quotable",
+                StringKind::Quotable => "phrase",
                 StringKind::Greedy => "greedy",
             };
             serde_json::json!({"type": kind})

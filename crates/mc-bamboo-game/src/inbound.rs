@@ -41,9 +41,13 @@ pub struct JoinRequest {
     /// Permission level from `ops.json`, 0 through 4. Missing players are 0.
     pub permission_level: u8,
     /// 是否列在 `ops.json` 里。等级 0 的 OP 也算 OP，刷屏豁免按这个判断。
+    /// 进服时世界线程会按自己的权威副本重算这两个值。
     ///
-    /// Whether the player is listed in `ops.json`. A level-0 op still counts for the spam exemption.
+    /// Whether the player is listed in `ops.json`. A level-0 op still counts for the spam
+    /// exemption. The world thread recomputes both fields from its authoritative copy on join.
     pub is_op: bool,
+    /// 连接层的对端 IP 文本（不含端口），供世界线程复查 IP 封禁。
+    pub peer_ip: String,
     pub sink: Box<dyn PlayerSink>,
 }
 
@@ -68,6 +72,8 @@ pub enum Inbound {
     Leave {
         player: PlayerId,
     },
+    /// `/whitelist reload` 从连接层读回来的白名单。
+    WhitelistReload(crate::admin::WhitelistReload),
     /// 踢出所有玩家并结束世界线程。
     Shutdown,
 }

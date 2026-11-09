@@ -17,7 +17,7 @@ use crate::{
     ErrorArg, ParseError, Value,
     identifier::Identifier,
     reader::StringReader,
-    value::{EntityAnchor, GameMode},
+    value::{EntityAnchor, GameMode, GameProfileInput},
 };
 
 pub use primitives::StringKind;
@@ -48,6 +48,10 @@ pub enum ArgumentType {
         single: bool,
         players_only: bool,
     },
+    /// 官方 `GameProfileArgument`。选择器按玩家解析，普通名字在执行时查档案。
+    ///
+    /// Official `GameProfileArgument`. Selectors resolve to players, plain names look up profiles.
+    GameProfile,
     GameMode,
     EntityAnchor,
     Time {
@@ -140,6 +144,7 @@ impl ArgumentType {
             Self::Double { .. } => "brigadier:double",
             Self::String(_) => "brigadier:string",
             Self::Entity { .. } => "minecraft:entity",
+            Self::GameProfile => "minecraft:game_profile",
             Self::GameMode => "minecraft:gamemode",
             Self::EntityAnchor => "minecraft:entity_anchor",
             Self::Time { .. } => "minecraft:time",
@@ -200,6 +205,7 @@ impl ArgumentType {
             Self::IntRange => registry::INT_RANGE,
             Self::LootTable => registry::LOOT_TABLE,
             Self::ItemSlot => registry::ITEM_SLOT,
+            Self::GameProfile => registry::GAME_PROFILE,
             Self::Objective => registry::OBJECTIVE,
             Self::Team => registry::TEAM,
             Self::Criteria => registry::OBJECTIVE_CRITERIA,
@@ -236,6 +242,7 @@ impl ArgumentType {
             Self::Float { min, max } => primitives::parse_float(reader, *min, *max),
             Self::Double { min, max } => primitives::parse_double(reader, *min, *max),
             Self::String(kind) => primitives::parse_string(reader, *kind),
+            Self::GameProfile => parse_game_profile(reader, allow_selectors),
             Self::Entity {
                 single,
                 players_only,
@@ -297,7 +304,7 @@ impl ArgumentType {
                     suggest_word(anchor.name(), lower, out);
                 }
             }
-            Self::Entity { .. } => {
+            Self::Entity { .. } | Self::GameProfile => {
                 for name in player_names {
                     suggest_word(name, lower, out);
                 }
@@ -318,6 +325,34 @@ impl ArgumentType {
             _ => {}
         }
     }
+}
+
+/// 官方 `GameProfileArgument.parse`。`@` 开头的选择器只允许玩家，普通名字读一个单词，
+/// 名字到 UUID 的解析留到执行时（离线 UUID 或 Mojang 查询）。
+///
+/// Official `GameProfileArgument.parse`. A leading `@` starts a players-only selector;
+/// a plain name is one word, and resolving it to a UUID happens at execution time.
+fn parse_game_profile(
+    reader: &mut StringReader,
+    allow_selectors: bool,
+) -> Result<Value, ParseError> {
+    if reader.can_read() && reader.peek() == '@' {
+        if !allow_selectors {
+            return Err(ParseError::new("argument.entity.selector.not_allowed"));
+        }
+        let selector = entity::parse_entity(reader, false, true)?;
+        let Value::Entity(selector) = selector else {
+            unreachable!("实体参数只会返回 Value::Entity");
+        };
+        return Ok(Value::GameProfile(GameProfileInput::Selector(selector)));
+    }
+    let cursor = reader.cursor();
+    while reader.can_read() && reader.peek() != ' ' {
+        reader.skip();
+    }
+    Ok(Value::GameProfile(GameProfileInput::Name(
+        reader.slice(cursor, reader.cursor()),
+    )))
 }
 
 /// 官方 `ResourceArgument.parse`：读一个标识符，不在注册表里就报 `argument.resource.not_found`。
@@ -483,6 +518,39 @@ mod tests {
         assert_eq!(error.key, "argument.anchor.invalid");
         assert_eq!(error.args, [crate::ErrorArg::Text("head".into())]);
         assert_eq!(reader.cursor(), 0);
+    }
+
+    #[test]
+    fn game_profiles_parse_names_and_players_only_selectors() {
+        assert_eq!(
+            ArgumentType::GameProfile.parser_name(),
+            "minecraft:game_profile"
+        );
+        let mut reader = StringReader::new("Kitten some reason");
+        assert_eq!(
+            ArgumentType::GameProfile.parse(&mut reader).unwrap(),
+            Value::GameProfile(GameProfileInput::Name("Kitten".to_owned()))
+        );
+        assert_eq!(reader.remaining(), " some reason");
+
+        let mut reader = StringReader::new("@a rest");
+        let Value::GameProfile(GameProfileInput::Selector(selector)) =
+            ArgumentType::GameProfile.parse(&mut reader).unwrap()
+        else {
+            panic!("选择器应该解析成 GameProfileInput::Selector");
+        };
+        assert!(!selector.includes_entities);
+        assert!(selector.uses_selectors);
+        assert_eq!(reader.remaining(), " rest");
+
+        let mut reader = StringReader::new("@e");
+        assert_eq!(
+            ArgumentType::GameProfile
+                .parse(&mut reader)
+                .unwrap_err()
+                .key,
+            "argument.player.entities"
+        );
     }
 
     #[test]
