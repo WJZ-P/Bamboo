@@ -329,3 +329,262 @@ impl ClientboundPacket for BossEvent<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::test_util::{body, hex};
+
+    /// 纯文本组件就是一个 `TAG_String`。
+    ///
+    /// A plain text component is a single `TAG_String`.
+    const PLAIN: &str = "08 00 02 68 69";
+
+    #[test]
+    fn set_objective_add_writes_the_official_fields() {
+        let display = Component::text("hi");
+        let format = NumberFormat::Blank;
+        let packet = SetObjective {
+            name: "kills",
+            method: 0,
+            display: &display,
+            render_type: 1,
+            number_format: Some(&format),
+        };
+        // name, method, display, render type, optional format present, blank.
+        assert_eq!(
+            body(&packet),
+            hex(&format!("05 6b 69 6c 6c 73  00  {PLAIN}  01  01  00"))
+        );
+    }
+
+    #[test]
+    fn set_objective_remove_omits_everything_after_the_method() {
+        let display = Component::text("hi");
+        let packet = SetObjective {
+            name: "k",
+            method: 1,
+            display: &display,
+            render_type: 1,
+            number_format: None,
+        };
+        assert_eq!(body(&packet), hex("01 6b 01"));
+    }
+
+    #[test]
+    fn number_formats_use_the_registry_ids_and_nbt_bodies() {
+        let styled = NumberFormat::Styled(Tag::Compound(vec![(
+            "color".to_owned(),
+            Tag::String("red".to_owned()),
+        )]));
+        // 样式是复合标签：类型 10、字段名、TAG_String 的值、结束。
+        //
+        // A style is a compound tag: type 10, field name, TAG_String value, end.
+        let mut out = Vec::new();
+        styled.write(&mut out);
+        assert_eq!(out, hex("01 0a 08 00 05 63 6f 6c 6f 72 00 03 72 65 64 00"));
+
+        let fixed = NumberFormat::Fixed(Component::text("hi"));
+        let mut out = Vec::new();
+        fixed.write(&mut out);
+        assert_eq!(out, hex(&format!("02 {PLAIN}")));
+    }
+
+    #[test]
+    fn set_score_writes_optional_display_and_format() {
+        let display = Component::text("hi");
+        let format = NumberFormat::Blank;
+        let packet = SetScore {
+            owner: "Kitten",
+            objective: "kills",
+            score: 7,
+            display: Some(&display),
+            number_format: Some(&format),
+        };
+        assert_eq!(
+            body(&packet),
+            hex(&format!(
+                "06 4b 69 74 74 65 6e  05 6b 69 6c 6c 73  07  01  {PLAIN}  01 00"
+            ))
+        );
+        let absent = SetScore {
+            owner: "Kitten",
+            objective: "kills",
+            score: -1,
+            display: None,
+            number_format: None,
+        };
+        assert_eq!(
+            body(&absent),
+            hex("06 4b 69 74 74 65 6e 05 6b 69 6c 6c 73 ff ff ff ff 0f 00 00")
+        );
+    }
+
+    #[test]
+    fn reset_score_only_names_an_objective_when_present() {
+        assert_eq!(
+            body(&ResetScore {
+                owner: "Kitten",
+                objective: Some("kills"),
+            }),
+            hex("06 4b 69 74 74 65 6e 01 05 6b 69 6c 6c 73")
+        );
+        assert_eq!(
+            body(&ResetScore {
+                owner: "Kitten",
+                objective: None,
+            }),
+            hex("06 4b 69 74 74 65 6e 00")
+        );
+    }
+
+    #[test]
+    fn display_slots_are_varints() {
+        assert_eq!(
+            body(&SetDisplayObjective {
+                slot: 18,
+                objective: "kills",
+            }),
+            hex("12 05 6b 69 6c 6c 73")
+        );
+    }
+
+    #[test]
+    fn team_add_writes_parameters_and_the_member_list() {
+        let display = Component::text("hi");
+        let prefix = Component::text("[");
+        let suffix = Component::text("]");
+        let parameters = TeamParameters {
+            display: &display,
+            prefix: &prefix,
+            suffix: &suffix,
+            visibility: 2,
+            collision: 3,
+            color: Some(4),
+            options: 3,
+        };
+        let players = ["Kitten".to_owned(), "Alex".to_owned()];
+        let packet = SetPlayerTeam {
+            name: "red",
+            action: TeamAction::Add {
+                parameters,
+                players: &players,
+            },
+        };
+        // 名字、动作、三个组件、两个 VarInt、可选颜色、标志、成员数、两个名字。
+        assert_eq!(
+            body(&packet),
+            hex(&format!(
+                "03 72 65 64  00  {PLAIN}  08 00 01 5b  08 00 01 5d  \
+                 02 03 01 04 03  \
+                 02 06 4b 69 74 74 65 6e 04 41 6c 65 78"
+            ))
+        );
+    }
+
+    #[test]
+    fn team_remove_has_no_parameters_or_players() {
+        assert_eq!(
+            body(&SetPlayerTeam {
+                name: "red",
+                action: TeamAction::Remove,
+            }),
+            hex("03 72 65 64 01")
+        );
+    }
+
+    #[test]
+    fn team_change_omits_the_member_list() {
+        let display = Component::text("hi");
+        let parameters = TeamParameters {
+            display: &display,
+            prefix: &display,
+            suffix: &display,
+            visibility: 0,
+            collision: 0,
+            color: None,
+            options: 0,
+        };
+        assert_eq!(
+            body(&SetPlayerTeam {
+                name: "red",
+                action: TeamAction::Change { parameters },
+            }),
+            hex(&format!(
+                "03 72 65 64 02 {PLAIN} {PLAIN} {PLAIN} 00 00 00 00"
+            ))
+        );
+    }
+
+    #[test]
+    fn team_join_and_leave_only_carry_the_member_list() {
+        let players = ["Kitten".to_owned()];
+        for (action, method) in [
+            (TeamAction::Join { players: &players }, 3),
+            (TeamAction::Leave { players: &players }, 4),
+        ] {
+            assert_eq!(
+                body(&SetPlayerTeam {
+                    name: "red",
+                    action,
+                }),
+                hex(&format!("03 72 65 64 {method:02x} 01 06 4b 69 74 74 65 6e"))
+            );
+        }
+    }
+
+    #[test]
+    fn boss_event_add_writes_every_field_in_order() {
+        let name = Component::text("hi");
+        let uuid = Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        let packet = BossEvent {
+            id: uuid,
+            action: BossAction::Add {
+                name: &name,
+                progress: 0.5,
+                color: 3,
+                overlay: 2,
+                flags: 5,
+            },
+        };
+        assert_eq!(
+            body(&packet),
+            hex(&format!(
+                "01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10  \
+                 00 {PLAIN} 3f 00 00 00 03 02 05"
+            ))
+        );
+    }
+
+    #[test]
+    fn boss_event_updates_carry_only_their_own_field() {
+        let uuid = Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        let prefix = "01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10";
+        let name = Component::text("hi");
+        for (action, suffix) in [
+            (BossAction::Remove, "01".to_owned()),
+            (
+                BossAction::UpdateProgress(0.25),
+                "02 3e 80 00 00".to_owned(),
+            ),
+            (BossAction::UpdateName(&name), format!("03 {PLAIN}")),
+            (
+                BossAction::UpdateStyle {
+                    color: 6,
+                    overlay: 4,
+                },
+                "04 06 04".to_owned(),
+            ),
+            (BossAction::UpdateProperties(7), "05 07".to_owned()),
+        ] {
+            assert_eq!(
+                body(&BossEvent {
+                    id: uuid,
+                    action: action.clone(),
+                }),
+                hex(&format!("{prefix} {suffix}")),
+                "{action:?}"
+            );
+        }
+    }
+}
