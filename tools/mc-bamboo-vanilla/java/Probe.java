@@ -122,6 +122,12 @@ import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
+import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
+import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
+import net.minecraft.network.protocol.game.ClientboundSetDisplayObjectivePacket;
+import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
+import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
+import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundBundlePacket;
 import net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket;
@@ -3207,6 +3213,20 @@ public final class Probe {
             handlers.put("handleDisguisedChat", value -> onDisguisedChat((ClientboundDisguisedChatPacket) value));
             handlers.put("handlePlayerChat", value -> onPlayerChat((ClientboundPlayerChatPacket) value));
             handlers.put("handleAwardStats", value -> onAwardStats((ClientboundAwardStatsPacket) value));
+            // 官方解码器解不开这些包就不会走到这里，收到包本身就算通过。
+            // The official decoder never reaches these handlers if a packet fails to decode.
+            handlers.put("handleAddObjective",
+                    value -> check("scoreboard: set_objective decoded", value instanceof ClientboundSetObjectivePacket));
+            handlers.put("handleSetScore",
+                    value -> check("scoreboard: set_score decoded", value instanceof ClientboundSetScorePacket));
+            handlers.put("handleResetScore",
+                    value -> check("scoreboard: reset_score decoded", value instanceof ClientboundResetScorePacket));
+            handlers.put("handleSetDisplayObjective",
+                    value -> check("scoreboard: set_display_objective decoded", value instanceof ClientboundSetDisplayObjectivePacket));
+            handlers.put("handleSetPlayerTeamPacket",
+                    value -> check("team: set_player_team decoded", value instanceof ClientboundSetPlayerTeamPacket));
+            handlers.put("handleBossUpdate",
+                    value -> check("bossbar: boss_event decoded", value instanceof ClientboundBossEventPacket));
             return handlers;
         }
 

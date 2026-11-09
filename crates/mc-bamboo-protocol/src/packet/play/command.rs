@@ -98,6 +98,12 @@ pub enum ArgumentProperties {
     ///
     /// Registry key carried by `minecraft:resource`, such as `minecraft:world_clock`.
     Registry(&'static str),
+    /// `minecraft:score_holder` 的标志字节。第 0 位表示允许多个。
+    ///
+    /// The flag byte of `minecraft:score_holder`. Bit 0 means multiple holders are allowed.
+    ScoreHolder {
+        multiple: bool,
+    },
 }
 
 /// 官方 `StringArgumentType.StringType`。
@@ -234,6 +240,7 @@ fn write_argument_properties(out: &mut Vec<u8>, properties: &ArgumentProperties)
         //
         // Official `ResourceArgument.Info.serializeToNetwork` writes the registry key's identifier.
         ArgumentProperties::Registry(registry) => write_string(out, registry),
+        ArgumentProperties::ScoreHolder { multiple } => out.push(u8::from(*multiple)),
     }
 }
 
@@ -402,7 +409,7 @@ mod tests {
 
     #[test]
     fn argument_properties_use_the_official_encodings() {
-        let cases: [(ArgumentProperties, &str); 10] = [
+        let cases: [(ArgumentProperties, &str); 12] = [
             (
                 ArgumentProperties::String(StringProperty::GreedyPhrase),
                 "02",
@@ -441,6 +448,8 @@ mod tests {
                 },
                 "01 00 00 00 01",
             ),
+            (ArgumentProperties::ScoreHolder { multiple: false }, "00"),
+            (ArgumentProperties::ScoreHolder { multiple: true }, "01"),
             (ArgumentProperties::None, ""),
             (
                 ArgumentProperties::Registry("minecraft:world_clock"),

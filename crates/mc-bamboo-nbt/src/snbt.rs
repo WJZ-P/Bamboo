@@ -19,6 +19,17 @@ pub struct SnbtError {
     pub message: String,
 }
 
+/// 解析一个 SNBT 值，并返回它占了多少个字符。后面还可以有别的命令参数。
+///
+/// Parses one SNBT value and returns how many characters it consumed.
+/// More command arguments may follow.
+pub fn parse_snbt_prefix(input: &str) -> Result<(Tag, usize), SnbtError> {
+    let characters: Vec<char> = input.chars().collect();
+    let mut parser = Parser::new(&characters);
+    let tag = parser.parse_literal()?;
+    Ok((tag, parser.pos))
+}
+
 /// 按官方 `TagParser.parseFully` 解析一段 SNBT，必须正好消费完输入。
 pub fn parse_snbt(input: &str) -> Result<Tag, SnbtError> {
     let characters: Vec<char> = input.chars().collect();

@@ -114,15 +114,27 @@ pub(crate) fn reject_illegal_command(region: &mut Region, id: PlayerId, command:
 ///
 /// `handleChat`. The caller counts chat spam when this returns `true`. Official servers do that
 /// only after a message was actually broadcast.
-pub(crate) fn on_chat(
-    region: &mut Region,
-    id: PlayerId,
-    message: String,
-    signature: Option<[u8; 256]>,
-    time_millis: i64,
-    salt: i64,
-    last_seen: &LastSeenUpdate,
-) -> bool {
+/// 聊天消息的内容。`&Global` 单独传，避免把整个世界都借给聊天。
+///
+/// The chat message. `&Global` is separate so chat does not borrow the whole world.
+pub(crate) struct ChatMessage<'a> {
+    pub global: &'a crate::global::Global,
+    pub text: String,
+    pub signature: Option<[u8; 256]>,
+    pub time_millis: i64,
+    pub salt: i64,
+    pub last_seen: &'a LastSeenUpdate,
+}
+
+pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: ChatMessage<'_>) -> bool {
+    let ChatMessage {
+        global,
+        text: message,
+        signature,
+        time_millis,
+        salt,
+        last_seen,
+    } = message;
     // 已读窗口在非法字符和隐藏聊天之前套用，官方 `unpackAndApplyLastSeen` 也是这样。
     //
     // The seen window is applied before the illegal-character and hidden-chat checks.
@@ -151,7 +163,7 @@ pub(crate) fn on_chat(
         Ok(signed) => {
             let trusted = signed.is_trusted(region.now_millis());
             log_player_broadcast(trusted, chat_type::CHAT, &name, &message);
-            let display = Component::text(name);
+            let display = global.scoreboard().format_player_name(&name);
             secure_chat::broadcast_signed(region, &signed, chat_type::CHAT, &display, None, None);
             true
         }
