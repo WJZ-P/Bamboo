@@ -11,6 +11,7 @@ mod menu;
 mod movement;
 mod player_info;
 mod request;
+mod scoreboard;
 mod secure;
 mod sound;
 
@@ -23,6 +24,7 @@ pub use menu::*;
 pub use movement::*;
 pub use player_info::*;
 pub use request::*;
+pub use scoreboard::*;
 pub use secure::*;
 pub use sound::*;
 

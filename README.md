@@ -113,7 +113,7 @@ WebView2 的渲染进程不算在内。
   竹笋给竹子，蜡烛蛋糕给蛋糕。`light` 带上亮度，测试方块带上模式，蜂箱和蜂巢在 Ctrl+中键时带上
   蜂蜜等级，铜傀儡雕像带上姿势。旗帜和饰纹陶罐照旧带上自己的组件。Ctrl+中键另外带上方块实体的数据。
 - 容器：箱子、陷阱箱、铜箱子、木桶、潜影盒和末影箱都能打开、存取，陷阱箱和铜箱子算箱子的一种。
-  漏斗、发射器和投掷器也有内容，右键能打开菜单。箱子拼成大箱子时是 6 行菜单，末影箱的内容每个玩家一份。
+  漏斗、发射器、投掷器和合成器也有内容，右键能打开菜单。箱子拼成大箱子时是 6 行菜单，末影箱的内容每个玩家一份。
   漏斗每刻先往朝向那一格的容器送一件，再从上面一格的容器吸一件，送出去或吸进来之后冷却 8 刻，
   被红石充能（`enabled` 为假）时不搬东西；双箱按合并后的 54 格算，潜影盒按 `WorldlyContainer` 的面收发货。
   堆肥桶也是容器：等级不到 7 时只从上面收一个能堆肥的物品，放进去就按堆肥概率决定升不升级
@@ -129,6 +129,13 @@ WebView2 的渲染进程不算在内。
   速度取官方 `spawnItem` 的一个 `nextDouble` 和三个 `triangle`，这套随机数只取一次。
   TNT 生成点燃的实体并播放 `entity.tnt.primed`。箭、船、矿车、盔甲架和刷怪蛋仍见已知限制。
   目标正好是空漏斗时按官方规则给它排 8 刻冷却。
+  合成器被信号触发后隔 4 刻走官方 `CrafterBlock.dispenseFrom`：查 3×3 配方，没有配方或产物为空只发 1050；
+  成功时把 `crafting` 亮起六刻（方块实体滴答器到时关掉），产物和剩余物按 `HopperBlockEntity.addItem` 放进
+  朝向的容器，放不下的走 `DefaultDispenseItemBehavior.spawnItem` 并发 1049、2010，九格各减一个。
+  朝空气吐出的东西在取完官方要用的 7 个随机数后消失（世界里没有掉落物），成就
+  `CRAFTER_RECIPE_CRAFTED` 和地图的 `onCraftedBySystem` 后处理没做。
+  合成器右键打开 `CrafterMenu`：九格加玩家物品栏，结果格只显示不能取出，`ContainerData` 的
+  九个禁用位和 `triggered` 同步给客户端；`container_slot_state_changed` 按官方规则只切换空格。
   比较器读容器时按官方 `getRedstoneSignalFromContainer` 算：箱子（含双箱）、陷阱箱、铜箱子、木桶、潜影盒、
   漏斗、发射器、投掷器和饰纹陶罐都有信号，内容变化时会重新读。
   雕纹书架、唱片机和合成器也接进了漏斗和投掷器，比较器不走满度：书架读最近动过的那一格加一，
@@ -241,7 +248,7 @@ WebView2 的渲染进程不算在内。
 - 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
   含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
   按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
-- 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器不真的合成也不吐出成品（9 格物品栏和比较器已经接上，菜单和禁用槽的界面没有）。合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较；合成成功（1049、2010、`crafting` 被设上，或格子变了并且容器里的物品合计变了而且跑过合成器的计划刻）整题不比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
+- 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但活塞推它们、粘它们这两段没写。伸出和收回的音效按官方 `PistonBaseBlock.triggerEvent` 发出。
   `moveBlocks` 里的破坏事件 2001 官方包在 `level.isClientSide()` 里，服务端不发，客户端处理方块事件时自己放。
   移动中的方块不发方块实体数据，客户端靠方块事件播放动画。
@@ -285,8 +292,9 @@ WebView2 的渲染进程不算在内。
   熔炉、高炉、烟熏炉、酿造台和架子（`shelf`）。
   玩家从雕纹书架取出的书按 `Inventory.add` 进背包并同步槽位，同时播放取出的声音；生存模式放不下的按 `Player.drop` 丢掉，
   创造模式放不下的按官方清掉。官方掉落用物品实体自己的随机源，不碰 `level.random`。从唱片机弹出和破坏时都会生成唱片实体。
-  附魔台、铁砧和制图台只吃掉右键。工作台、切石机、锻造台、熔炉、高炉、
-  烟熏炉、酿造台、织布机和砂轮会打开菜单。营火右键能烧的食物会放上去，不打开菜单。
+  附魔台、铁砧和制图台只吃掉右键。工作台、合成器、切石机、锻造台、熔炉、高炉、
+  烟熏炉、酿造台、织布机和砂轮会打开菜单。合成器的结果格只显示产物，菜单 oracle 会随机出
+  禁用位和配方材料，把九格、结果格和 10 个数据槽一起比过。营火右键能烧的食物会放上去，不打开菜单。
   箱子、陷阱箱、铜箱子、木桶、末影箱和潜影盒的开合音效按官方 `ContainerOpenersCounter` 发出：
   左半个箱子不响也不取随机数，右半个偏到两箱中间，木桶先响再改 `open`，潜影盒在方块事件之后、人数跨过 0 或 1 时才响。
 - 物品组件接进玩法的地方是挖掘和放置：`tool` 组件决定挖掘速度和有没有掉落物；冒险模式靠主手的
@@ -369,12 +377,22 @@ WebView2 的渲染进程不算在内。
   取书只走按钮。旁观者可以打开讲台，按钮全部忽略。冒险模式能翻页，不能取书。
   没有权限系统，所以放置讲台时不读物品里的 `block_entity_data`。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
-- 第一批命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`。
+- 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`。
   语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。没有 `/op`。
   26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做，超平坦出生点仍是固定的那一格。世界永远是晴天，`tickPrecipitation` 不读 `max_snow_accumulation_height`。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸已经调用方块掉落；实体死亡和开箱还没有。序列缓存在世界里，种子是平坦世界的 0，不存档。
+- 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
+  `/scoreboard objectives` 支持 `list|add|remove|setdisplay|modify`（`displayname`、`rendertype`、`displayautoupdate`、`numberformat` 的 `blank`/`styled`/`fixed`）；
+  `players` 支持 `list|get|set|add|remove|reset|enable|operation|display`（`name` 和 `numberformat`）。
+  准则只实现 `dummy`、`trigger` 以及只读准则的只读语义；`health`、`food`、`air`、`armor`、`xp`、`level` 因为 Bamboo 没有对应的玩家状态，进服后第一刻各按默认值（20、20、300、0、0、0）写一次，之后不再更新，统计类准则能解析和创建但不会自动加分（没有统计系统）。玩家离线时分数保留，别人侧边栏上仍能看到。
+  目标只有被 `setdisplay` 显示出来时才给客户端发 `set_objective` / `set_display_objective` / `set_score`，进服时会补发正在显示的目标、全部分数和全部队伍。
+  `/team` 支持 `list|add|remove|empty|join|leave|modify`（`displayName`、`color`、`friendlyFire`、`seeFriendlyInvisibles`、`nametagVisibility`、`deathMessageVisibility`、`collisionRule`、`prefix`、`suffix`），
+  队伍颜色、前后缀会用在聊天显示名和命令反馈里；Tab 列表的 `display_name` 仍是空的，客户端按队伍自己画名字。
+  `/bossbar` 支持 `add|remove|list|set (name|color|style|value|max|visible|players)|get (value|max|visible|players)`，
+  玩家加入、离开和重连按官方 `ServerBossEvent` 发 add/remove 包。命令反馈用官方翻译键，`send_command_feedback` 照旧管自己的系统消息。
+  选择器的 `scores=` 和 `team=` 现在能查计分板；`trigger` 命令、统计加分、死亡消息可见性、友军伤害和碰撞规则还没接到对应的游戏逻辑。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
   没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。

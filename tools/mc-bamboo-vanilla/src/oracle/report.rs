@@ -36,9 +36,10 @@ pub struct Mismatch {
     pub compared_ticks: (Vec<Scheduled>, Vec<Scheduled>),
     /// 物品栏里新出现的物品不同。
     pub gained: bool,
-    /// 发射器题的世界随机源种子不同。
+    /// 发射器或合成器题的世界随机源种子不同，说明取数次数或顺序不一致。
     ///
-    /// The world random seed differs on a dispenser case.
+    /// The world random seed differs on a dispenser or crafter case: the number or order of
+    /// draws did not match.
     pub random: bool,
     pub panic: Option<String>,
 }
@@ -105,9 +106,6 @@ pub struct Report {
     broken: Vec<String>,
     /// `case` 和 `skip` 行的数量，和 `end` 行对账。
     lines: (u64, u64),
-    /// `dispensing` 里合成成功的题。1050 的失败声不在这里。
-    /// Successful crafter crafts inside `dispensing`. The fail event 1050 is not one of these.
-    crafter_crafted: u64,
     /// `dispensing` 里发射器真的射出东西的题。
     /// Dispenser cases inside `dispensing` where an item was actually fired.
     dispenser_fired: u64,
@@ -135,7 +133,6 @@ impl Report {
             details: Vec::new(),
             broken: Vec::new(),
             lines: (0, 0),
-            crafter_crafted: 0,
             dispenser_fired: 0,
             mob_sounds_dropped: 0,
             primed_compared: 0,
@@ -153,10 +150,9 @@ impl Report {
         }
     }
 
-    /// 记下一道 `dispensing` 排除是合成成功、发射器射出，还是两样都有。
-    /// Record whether a `dispensing` exclusion was a craft, a fired dispenser, or both.
-    pub fn note_dispensing(&mut self, crafted: bool, fired: bool) {
-        self.crafter_crafted += u64::from(crafted);
+    /// 记下一道 `dispensing` 排除是不是发射器真的射出东西。
+    /// Record whether a `dispensing` exclusion had an item actually fired.
+    pub fn note_dispensing(&mut self, fired: bool) {
         self.dispenser_fired += u64::from(fired);
     }
 
@@ -354,10 +350,6 @@ impl Report {
             let hits = self.rules.get(&rule).copied().unwrap_or(0);
             println!("  {hits:>7} {:<18} {}", rule.name(), rule.reason());
             if rule == Rule::Dispensing {
-                println!(
-                    "          {:<18} crafter crafted {} (1049/2010, crafting flag, or its slots; 1050 is compared)",
-                    "", self.crafter_crafted
-                );
                 println!(
                     "          {:<18} dispenser fired {}",
                     "", self.dispenser_fired

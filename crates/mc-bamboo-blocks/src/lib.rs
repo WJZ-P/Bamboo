@@ -17,6 +17,7 @@ pub mod block_entity;
 mod composter;
 pub mod container;
 pub mod context;
+pub mod crafter;
 pub mod dispense;
 pub mod dispenser;
 pub mod durability;

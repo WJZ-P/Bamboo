@@ -131,7 +131,7 @@ pub(super) fn throw_one(
 /// `DispenserBlock.getDispensePosition`：中心沿朝向出去 0.7 格。
 ///
 /// `DispenserBlock.getDispensePosition`: 0.7 blocks out from the block centre.
-fn dispense_position(pos: BlockPos, facing: Direction) -> Vec3 {
+pub(crate) fn dispense_position(pos: BlockPos, facing: Direction) -> Vec3 {
     let (step_x, step_y, step_z) = facing.normal();
     Vec3::new(
         f64::from(pos.x) + 0.5 + 0.7 * f64::from(step_x),

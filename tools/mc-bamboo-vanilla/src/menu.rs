@@ -461,6 +461,7 @@ fn shape_of(name: &str) -> Option<ReplayShape> {
         "shulker" => Some(ReplayShape::ShulkerBox),
         "inventory" => Some(ReplayShape::Inventory),
         "crafting" => Some(ReplayShape::Crafting),
+        "crafter" => Some(ReplayShape::Crafter),
         "stonecutter" => Some(ReplayShape::Stonecutter),
         "smithing" => Some(ReplayShape::Smithing),
         "furnace" => Some(ReplayShape::Furnace),
@@ -512,7 +513,8 @@ fn work_slot(shape: ReplayShape, index: usize) -> Option<usize> {
         | ReplayShape::Smoker
         | ReplayShape::Brewing
         | ReplayShape::Loom
-        | ReplayShape::Grindstone => Some(index),
+        | ReplayShape::Grindstone
+        | ReplayShape::Crafter => Some(index),
         _ => None,
     }
 }
@@ -571,6 +573,7 @@ mod tests {
             ("shulker", ReplayShape::ShulkerBox),
             ("inventory", ReplayShape::Inventory),
             ("crafting", ReplayShape::Crafting),
+            ("crafter", ReplayShape::Crafter),
             ("stonecutter", ReplayShape::Stonecutter),
             ("smithing", ReplayShape::Smithing),
             ("furnace", ReplayShape::Furnace),

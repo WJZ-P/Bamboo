@@ -47,6 +47,7 @@ import net.minecraft.advancements.triggers.CriterionTrigger;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.FrontAndTop;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.HolderLookup;
@@ -365,6 +366,8 @@ import sun.misc.Unsafe;
  *     gained    [item id,...] 只有 item 题有内容：物品栏里新出现的物品。创造模式用空桶舀起东西时，装满的桶放进物品栏。
  *     spawned   [entity type id,...] 这次动作生成的实体，比如掉落物。只是记录，不用比较。
  *     rng       碰过随机数但是结果不依赖它，比如开门的音调。只是记录，不用比较。
+ *     randomSeed 结束时世界随机源（LegacyRandomSource）的内部种子。跑过发射器或合成器计划刻的题会逐位比较，
+ *               这样吐到空气时少取一个 triangle 也会被发现。其它题里官方还会为没移植的实体和声音取数，不比较。
  *
  * skip 行没有答案，表示这题只能排除。reason 的前缀：
  *
@@ -415,8 +418,11 @@ import sun.misc.Unsafe;
  *     方块事件  level.blockEvent 排进官方的顺序，settle 和 flow 每刻在计划刻之后、方块实体之前执行，同一项只排一次。
  *               动作期间排的也在第一刻执行，所以放下红石块活塞会在下一刻动。活塞的整个动画要走三刻：第一刻推方块并
  *               推进半格，第二刻再推进半格，第三刻把真正的方块放回去。
- *     活塞题    随机题之外另有几道固定的活塞题（推出、收回、粘性收回、粘液块分支、推不动、打掉火把），同样的场景和动作
- *               按 settle = 1..4 各出一遍，逐刻比较世界。它们排在随机题的号段后面，id 从 1000000 开始。 *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
+ *     固定题    随机题之外另有几道固定场景的题：活塞（推出、收回、粘性收回、粘液块分支、推不动、打掉火把）按
+ *               settle = 1..4 各出一遍，漏斗和投掷器按 settle = 1、9、40、100 各出一遍，合成器按 settle = 0、1、7
+ *               各出一遍（合成成功、吐进容器、吐到空气、剩余物、比较器读数这些路径随机题很难碰到）。
+ *               它们排在随机题的号段后面，id 分别从 1000000、2000000、3000000 开始。
+ *     连锁      Level.setBlock 和 LevelChunk.setBlockState 按官方写的，包括 onPlace、affectNeighborsAfterRemoval、
  *               updateNeighborsAt、updateNeighbourShapes，邻居队列是真正的 CollectingNeighborUpdater，
  *               链长限制是 header 里的 maxChainedUpdates。
  *
@@ -3215,6 +3221,141 @@ public final class BlockOracle {
             return cases;
         }
 
+        /** 合成器固定题的格子和 settle 步数。官方假世界不登记合成器的 ticker，crafting 一直亮着。 */
+        private static final BlockPos CRAFTER_CELL = new BlockPos(0, 64, 0);
+        private static final int[] CRAFTER_SETTLE_STEPS = {0, 1, 7};
+
+        /**
+         * 合成器的固定题：随机题里九格凑不出配方的占大多数，成功合成、放进容器、剩余物和吐到空气
+         * 都很难碰到，所以在这里摆好场景逐项比较方块状态、容器内容、事件和随机源。
+         *
+         * <p>id 从 base 开始，{@code --case} 也能单独重现。
+         */
+        List<Case> crafterCases(int base) {
+            List<Scenario> scenarios = List.of(
+                    // 一根原木朝箱子合成四块木板：没有等级事件，crafting 亮着。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是空气：产物消失，随机数照取，1049 和 2010 都发。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是满箱子：产物同样变成掉落物。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        ItemStack[] full = new ItemStack[27];
+                        for (int slot = 0; slot < full.length; slot++) {
+                            full[slot] = new ItemStack(Items.STONE, 64);
+                        }
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), full);
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 两格原木只消耗一格，另一格留在九格里。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 2));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 蛋糕：三只奶桶留下三只空桶，和产物一起进箱子。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.MILK_BUCKET, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL,
+                                new ItemStack(Items.MILK_BUCKET, 1), new ItemStack(Items.MILK_BUCKET, 1),
+                                new ItemStack(Items.MILK_BUCKET, 1), new ItemStack(Items.SUGAR, 1),
+                                new ItemStack(Items.EGG, 1), new ItemStack(Items.SUGAR, 1),
+                                new ItemStack(Items.WHEAT, 1), new ItemStack(Items.WHEAT, 1),
+                                new ItemStack(Items.WHEAT, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 蜂蜜瓶留下玻璃瓶。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.HONEY_BOTTLE, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.HONEY_BOTTLE, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), Blocks.CHEST.defaultBlockState());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyChest());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是另一个合成器：一次只放一个，四块木板分占四格。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), crafterFacingNorth());
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), emptyCrafter());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 前方是漏斗：产物进去后漏斗的冷却被设成 8 刻。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.relative(Direction.NORTH), hopper(Direction.DOWN, true));
+                        c.putContents(CRAFTER_CELL.relative(Direction.NORTH), new ItemStack[0]);
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 旁边的比较器读数随九格清空而变，灯跟着灭。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.OAK_LOG, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.OAK_LOG, 1));
+                        c.put(CRAFTER_CELL.east(), comparator(Direction.WEST));
+                        c.put(CRAFTER_CELL.east(2), Blocks.REDSTONE_LAMP.defaultBlockState());
+                        c.target = CRAFTER_CELL;
+                    }),
+                    // 没有配方：只发 1050，格子和 crafting 都不动。
+                    new Scenario(Kind.TICK, Blocks.CRAFTER, Items.STONE, c -> {
+                        crafterFacingNorth(c);
+                        c.putContents(CRAFTER_CELL, new ItemStack(Items.STONE, 1), new ItemStack(Items.DIRT, 1));
+                        c.target = CRAFTER_CELL;
+                    }));
+            List<Case> cases = new ArrayList<>();
+            for (Scenario scenario : scenarios) {
+                for (int settle : CRAFTER_SETTLE_STEPS) {
+                    Case c = new Case(base + cases.size(), scenario.kind(),
+                            new Subject(scenario.subject(), scenario.item()), height);
+                    scenario.setup().accept(c);
+                    // 假玩家要有个位置；合成器题里它不碰方块，站远一点。
+                    if (c.actor == null) {
+                        c.actor = new Vec3(4.5, 70.0, 4.5);
+                    }
+                    c.settle = settle;
+                    cases.add(c);
+                }
+            }
+            return cases;
+        }
+
+        private static BlockState crafterFacingNorth() {
+            return Blocks.CRAFTER.defaultBlockState()
+                    .setValue(BlockStateProperties.ORIENTATION, FrontAndTop.NORTH_UP);
+        }
+
+        private static void crafterFacingNorth(Case c) {
+            c.put(CRAFTER_CELL, crafterFacingNorth());
+        }
+
+        private static ItemStack[] emptyChest() {
+            ItemStack[] empty = new ItemStack[27];
+            java.util.Arrays.fill(empty, ItemStack.EMPTY);
+            return empty;
+        }
+
+        private static ItemStack[] emptyCrafter() {
+            ItemStack[] empty = new ItemStack[9];
+            java.util.Arrays.fill(empty, ItemStack.EMPTY);
+            return empty;
+        }
+
         /** 上面一个装了石头 3 个的漏斗，往下面这一类容器里塞；容器旁边是比较器和灯。 */
         private static Scenario pushingInto(Block container) {
             return new Scenario(Kind.TICK, container, Items.STONE, c -> {
@@ -4406,21 +4547,26 @@ public final class BlockOracle {
         private static final int PISTON_CASE_BASE = 1_000_000;
         /** 显式漏斗题的 id 从这里开始。 */
         private static final int HOPPER_CASE_BASE = 2_000_000;
+        /** 显式合成器题的 id 从这里开始。 */
+        private static final int CRAFTER_CASE_BASE = 3_000_000;
 
         void run() throws IOException {
             long start = System.nanoTime();
             List<Case> pistonCases = generator.pistonCases(PISTON_CASE_BASE);
             List<Case> hopperCases = generator.hopperCases(HOPPER_CASE_BASE);
+            List<Case> crafterCases = generator.crafterCases(CRAFTER_CASE_BASE);
             boolean single = options.single >= 0;
             boolean pistons = single ? options.single >= PISTON_CASE_BASE && options.single < HOPPER_CASE_BASE
                     : includesPistonCases();
-            boolean hoppers = single ? options.single >= HOPPER_CASE_BASE : includesHopperCases();
+            boolean hoppers = single ? options.single >= HOPPER_CASE_BASE && options.single < CRAFTER_CASE_BASE
+                    : includesHopperCases();
+            boolean crafters = single ? options.single >= CRAFTER_CASE_BASE : includesCrafterCases();
             List<MineSpec> mines = single ? List.of() : mineSpecs();
             writeHeader(single ? 1 : options.cases
                     + (pistons ? pistonCases.size() : 0)
                     + (hoppers ? hopperCases.size() : 0)
-                    + mines.size());
-            int first = Math.max(options.single, 0);
+                    + (crafters ? crafterCases.size() : 0)
+                    + mines.size());            int first = Math.max(options.single, 0);
             int end = single && options.single < PISTON_CASE_BASE ? options.single + 1 : options.cases;
             for (int id = 0; id < end; id++) {
                 Kind kind = subjects.kind(id);
@@ -4443,9 +4589,15 @@ public final class BlockOracle {
                     }
                 }
             }
-            for (MineSpec spec : mines) {
-                writeMine(spec);
+            if (crafters) {
+                for (Case c : crafterCases) {
+                    if (!single || c.id == options.single) {
+                        runBuilt(c, statsOf(c.subject));
+                    }
+                }
             }
+            for (MineSpec spec : mines) {
+                writeMine(spec);            }
             writeEnd();
             out.flush();
             printSummary(System.nanoTime() - start);
@@ -4462,6 +4614,11 @@ public final class BlockOracle {
                 }
             }
             return false;
+        }
+
+        /** --only 点名的是合成器时，显式合成器题也要跑。 */
+        private boolean includesCrafterCases() {
+            return options.only == null || Subjects.matches(options.only, Blocks.CRAFTER);
         }
 
         /** --only 点名的是漏斗、投掷器、发射器或那几种容器时，显式漏斗题也要跑。 */

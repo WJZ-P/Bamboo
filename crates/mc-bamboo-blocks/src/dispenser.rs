@@ -41,7 +41,13 @@ pub(crate) fn random_slot(world: &World, occupied: &[bool]) -> i32 {
     replace_slot
 }
 
-/// `DefaultDispenseItemBehavior.spawnItem` 的速度随机数。`accuracy` 是 6。
+/// `DefaultDispenseItemBehavior.spawnItem` 的精度。发射器和合成器都传 6。
+///
+/// The accuracy passed to `DefaultDispenseItemBehavior.spawnItem`. Dispensers and
+/// crafters both use 6.
+pub(crate) const SPAWN_ACCURACY: f64 = 6.0;
+
+/// `DefaultDispenseItemBehavior.spawnItem` 的速度随机数。`accuracy` 是 [`SPAWN_ACCURACY`]。
 ///
 /// 一个 `nextDouble` 算 `pow`。X、Z 的均值是朝向步长乘 `pow`，Y 的均值是 0.2。
 /// 每个 `triangle` 再取两个 `nextDouble`。发射器的注册行为只取这几个数，
@@ -55,7 +61,7 @@ pub(crate) fn random_slot(world: &World, occupied: &[bool]) -> i32 {
 pub(crate) fn spawn_item_random(world: &mut World, facing: Direction) -> Vec3 {
     let random = world.random();
     let speed = random.next_double() * 0.1 + 0.2;
-    let spread = 0.017_227_5 * 6.0;
+    let spread = 0.017_227_5 * SPAWN_ACCURACY;
     let (step_x, _, step_z) = facing.normal();
     Vec3::new(
         random.triangle(f64::from(step_x) * speed, spread),

@@ -69,9 +69,10 @@ pub struct Replayed {
     pub gained: Vec<String>,
     /// 读写过的方块的注册表 ID。结果不对时看它们里面有没有还没移植的类。
     pub touched: BTreeSet<usize>,
-    /// 跑完之后 `level.random` 的内部种子。
+    /// 跑完之后 `level.random` 的内部种子，发射器和合成器题与官方逐位比较。
     ///
-    /// The internal seed of `level.random` after the case.
+    /// The internal seed of `level.random` after the case, compared bit for bit with vanilla
+    /// on dispenser and crafter cases.
     pub random_seed: i64,
 }
 
