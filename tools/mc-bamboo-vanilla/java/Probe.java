@@ -3244,11 +3244,12 @@ public final class Probe {
             permissionEventChecked = true;
             int entity = privateInt(packet, ClientboundEntityEventPacket.class, "entityId");
             check("commands: the permission event names this player", entity == entityId);
-            // 离线探针的工作目录里 ops.json 把这几名玩家写成 4。正版那台服务端没有这份名单。
+            // 离线探针的工作目录里 ops.json 把 Kitten、Mochi、Latecomer 写成 4。
+            // Visitor 和 Spectator 不在名单里。正版那台服务端没有这份名单。
             //
-            // The offline probe's ops.json lists these players at level 4. The online-mode
-            // server has no op list.
-            if (online() || player.equals(VISITOR)) {
+            // The offline probe's ops.json lists Kitten, Mochi and Latecomer at level 4.
+            // Visitor and Spectator are absent. The online-mode server has no op list.
+            if (online() || player.equals(VISITOR) || player.equals(SPECTATOR_PLAYER)) {
                 check("commands: a player absent from ops.json is level 0", packet.getEventId() == 24);
             } else {
                 check("commands: the permission event is owners", packet.getEventId() == 28);
