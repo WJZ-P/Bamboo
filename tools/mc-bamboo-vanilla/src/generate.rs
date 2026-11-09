@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::extract::{
-    Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
+    BiomeClimateFact, Block, BlockField, BlockPredicate, CompostLayers, ExtractedIngredient,
     ExtractedPotionIngredient, ExtractedRecipe, ExtractedRecipeKind, ExtractedShape,
     ExtractedStack, FieldValue, GameRuleFact, HeightmapType, Item, LevelValueJson,
     LootConditionJson, Property, PropertyKind, StateProvider, TagGroup, TypedLevelJson,
@@ -53,6 +53,7 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let gamerules = gamerules_file(&data.game_rules)?;
 
     write_file(output_dir, "mod.rs", &module_file())?;
+    write_file(output_dir, "biomes.rs", &biomes_file(&data.biomes))?;
     write_file(output_dir, "version.rs", &version_file(data))?;
     write_file(output_dir, "packets.rs", &packets_file(data))?;
     write_file(output_dir, "blocks.rs", &blocks)?;
@@ -649,7 +650,8 @@ fn const_name(name: &str) -> Result<String, String> {
 }
 
 fn module_file() -> String {
-    "pub mod block_classes;
+    "pub mod biomes;
+pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;
 pub mod blocks;
@@ -677,6 +679,47 @@ pub mod version;
 pub mod worldgen;
 "
     .to_owned()
+}
+
+/// 群系的气候设置，`Biome.ClimateSettings` 里天气要用的三项。
+fn biomes_file(biomes: &[BiomeClimateFact]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "/// 一个群系的气候。下标是 `minecraft:worldgen/biome` 的注册表 ID。"
+    );
+    let _ = writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq)]");
+    let _ = writeln!(out, "pub struct BiomeClimate {{");
+    let _ = writeln!(out, "    pub name: &'static str,");
+    let _ = writeln!(out, "    /// `Biome.hasPrecipitation()`。");
+    let _ = writeln!(out, "    pub has_precipitation: bool,");
+    let _ = writeln!(out, "    /// `Biome.getBaseTemperature()`。");
+    let _ = writeln!(out, "    pub temperature: f32,");
+    let _ = writeln!(
+        out,
+        "    /// `temperature_modifier` 是 `frozen`，温度还要按位置噪声修正。"
+    );
+    let _ = writeln!(out, "    pub frozen: bool,");
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// `Biome` 数据包的气候设置，按注册表 ID 排列。");
+    let _ = writeln!(out, "#[rustfmt::skip]");
+    let _ = writeln!(out, "pub static BIOME_CLIMATES: &[BiomeClimate] = &[");
+    for biome in biomes {
+        let frozen = if biome.frozen { "true" } else { "false" };
+        let precipitation = if biome.has_precipitation {
+            "true"
+        } else {
+            "false"
+        };
+        let _ = writeln!(
+            out,
+            "    BiomeClimate {{ name: {:?}, has_precipitation: {precipitation}, temperature: {:?}f32, frozen: {frozen} }},",
+            biome.name, biome.temperature
+        );
+    }
+    let _ = writeln!(out, "];");
+    out
 }
 
 fn version_file(data: &VersionData) -> String {

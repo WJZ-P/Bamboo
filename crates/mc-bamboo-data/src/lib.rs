@@ -18,6 +18,7 @@ pub use recipe::{
 };
 
 pub use generated::{
+    biomes::{BIOME_CLIMATES, BiomeClimate},
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, gamerules, heightmaps,
