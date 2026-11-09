@@ -39,6 +39,9 @@ pub enum ReplayShape {
     Brewing,
     Loom,
     Grindstone,
+    Anvil,
+    Cartography,
+    Enchantment,
 }
 
 impl ReplayShape {
@@ -57,7 +60,10 @@ impl ReplayShape {
             | Self::Smoker
             | Self::Brewing
             | Self::Loom
-            | Self::Grindstone => ContainerKind::Chest,
+            | Self::Grindstone
+            | Self::Anvil
+            | Self::Cartography
+            | Self::Enchantment => ContainerKind::Chest,
         }
     }
 
@@ -74,6 +80,9 @@ impl ReplayShape {
             Self::Brewing => Some(WorkKind::Brewing),
             Self::Loom => Some(WorkKind::Loom),
             Self::Grindstone => Some(WorkKind::Grindstone),
+            Self::Anvil => Some(WorkKind::Anvil),
+            Self::Cartography => Some(WorkKind::Cartography),
+            Self::Enchantment => Some(WorkKind::Enchantment),
             _ => None,
         }
     }
@@ -98,7 +107,10 @@ impl ReplayShape {
             | Self::Smoker
             | Self::Brewing
             | Self::Loom
-            | Self::Grindstone => Some(index),
+            | Self::Grindstone
+            | Self::Anvil
+            | Self::Cartography
+            | Self::Enchantment => Some(index),
             _ => None,
         }
     }
@@ -172,6 +184,10 @@ impl Replay {
         inventory: &[(i32, i32)],
         data: &[i32],
         creative: bool,
+        seed: i32,
+        map_scale: i32,
+        map_locked: bool,
+        bookshelves: i32,
     ) -> Self {
         let kind = shape.workstation().expect("workstation shape");
         let mut seeds = Vec::new();
@@ -185,14 +201,35 @@ impl Replay {
         }
         let mut replay = Self::new(ReplayShape::Chest(1), &[], &[]);
         replay.creative = creative;
-        replay.station = Some(super::station::prepare_replay(
+        let station = super::station::prepare_replay(
             kind,
             &bamboo_inventory(inventory),
             &seeds,
             data,
             creative,
-        ));
+            seed,
+            map_scale,
+            map_locked,
+            bookshelves,
+        );
+        replay.station = Some(station);
         replay
+    }
+
+    /// 重放假世界里的附魔种子、地图状态和书架数都由题目给定。
+    pub fn seed(&mut self, value: i32, map_scale: i32, map_locked: bool, bookshelves: i32) {
+        if let Some(station) = self.station.as_mut() {
+            station.replay_seed(value, map_scale, map_locked, bookshelves);
+        }
+    }
+
+    /// `ServerboundRenameItemPacket`。官方只认铁砧菜单。
+    pub fn rename(&mut self, name: &str) -> Snapshot {
+        if let Some(station) = self.station.as_mut() {
+            let view = station.replay_rename(name);
+            return Self::from_station(view);
+        }
+        self.snapshot()
     }
 
     /// 非创造模式时中键克隆什么也不做。
@@ -481,7 +518,17 @@ mod tests {
     #[test]
     fn a_crafting_table_opens_with_planks() {
         let grid = [(items::OAK_LOG, 1)];
-        let mut replay = Replay::workstation(ReplayShape::Crafting, &grid, &[], &[], false);
+        let mut replay = Replay::workstation(
+            ReplayShape::Crafting,
+            &grid,
+            &[],
+            &[],
+            false,
+            0,
+            0,
+            false,
+            0,
+        );
         let snapshot = replay.open();
         assert_eq!(snapshot.slots[0], ItemStack::new(items::OAK_PLANKS, 4));
         assert_eq!(snapshot.slots[1], ItemStack::new(items::OAK_LOG, 1));

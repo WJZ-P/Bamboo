@@ -450,6 +450,7 @@ impl World {
                 menu::on_close_request(region, player);
                 lectern::on_player_close(region, player);
             }
+            PlayRequest::RenameItem { name } => menu::on_rename(region, player, &name),
             PlayRequest::ContainerButtonClick {
                 container_id,
                 button_id,

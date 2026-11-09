@@ -34,6 +34,7 @@ mod command;
 mod command_block;
 mod container;
 mod debug_stick;
+mod drops;
 mod durability;
 mod entity_sync;
 mod entity_tracking;

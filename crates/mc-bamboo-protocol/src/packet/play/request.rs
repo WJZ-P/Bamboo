@@ -197,6 +197,12 @@ pub enum PlayRequest {
     ContainerClose {
         container_id: i32,
     },
+    /// 铁砧的名字输入框。`ServerboundRenameItemPacket` 只有一个 `readUtf()`。
+    ///
+    /// The anvil's name field. `ServerboundRenameItemPacket` contains one `readUtf()`.
+    RenameItem {
+        name: String,
+    },
     /// 菜单按钮。切石机用它选结果，讲台用它翻页。`button_id` 是 varint，讲台从 100 起是跳到的页码加 100。
     ///
     /// A menu button. The stonecutter selects a result; the lectern turns pages.
@@ -364,6 +370,9 @@ impl PlayRequest {
             serverbound::CONTAINER_CLICK => read_container_click(&mut reader)?,
             serverbound::CONTAINER_CLOSE => Self::ContainerClose {
                 container_id: reader.varint()?,
+            },
+            serverbound::RENAME_ITEM => Self::RenameItem {
+                name: reader.string(MAX_UTF)?.to_owned(),
             },
             serverbound::CONTAINER_BUTTON_CLICK => Self::ContainerButtonClick {
                 container_id: reader.varint()?,
@@ -1506,6 +1515,27 @@ mod tests {
                 container_id: 5,
                 button_id: 2,
             })
+        );
+    }
+
+    #[test]
+    fn decodes_rename_item() {
+        let mut body = Vec::new();
+        write_string(&mut body, "Sword");
+        let hex = hex_text(&body);
+        assert_eq!(
+            decode_body(serverbound::RENAME_ITEM, &hex),
+            Ok(PlayRequest::RenameItem {
+                name: "Sword".to_owned()
+            })
+        );
+        // 官方 `readUtf()` 的默认上限是 32767 个字符。
+        let long = "x".repeat(MAX_UTF + 1);
+        let mut oversized = Vec::new();
+        write_string(&mut oversized, &long);
+        assert_eq!(
+            decode_body(serverbound::RENAME_ITEM, &hex_text(&oversized)),
+            Err(DecodeError::StringTooLong { max_chars: MAX_UTF })
         );
     }
 
