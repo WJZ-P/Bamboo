@@ -360,6 +360,16 @@ fn enforces_secure_chat(config: &ServerConfig, keys: &ServiceProfileKeys) -> boo
     config.enforce_secure_profile && config.online_mode && keys.can_validate()
 }
 
+/// 记下第一次取钥已经结束。`watch::Sender::send` 在没有接收者时会丢掉这次写入，值还停在 `false`。
+/// 取钥通常在任何人登录之前就结束，后来的登录必须能直接读到 `true`，否则会一直等到 `slow_login`。
+///
+/// Records that the first key fetch has finished. `watch::Sender::send` drops the write when there
+/// is no receiver, so the value stays `false`. The fetch usually finishes before anyone logs in,
+/// and a later login has to read `true` directly. Otherwise it waits until `slow_login`.
+fn mark_keys_ready(shared: &Shared) {
+    shared.keys_ready.send_replace(true);
+}
+
 /// 等第一次取钥结束。取钥在后台按官方的间隔重试，这里不自己发请求。
 ///
 /// Waits until the first key fetch finishes. The background task retries on the official
@@ -383,7 +393,7 @@ async fn refresh_profile_keys(shared: Arc<Shared>, cancel: CancellationToken) {
     let mut schedule = ProfileKeySchedule::default();
     loop {
         if cancel.is_cancelled() {
-            let _ = shared.keys_ready.send(true);
+            mark_keys_ready(&shared);
             return;
         }
         let url = public_keys_url(&shared.config.session_server_url);
@@ -409,7 +419,7 @@ async fn refresh_profile_keys(shared: Arc<Shared>, cancel: CancellationToken) {
                 schedule.after_failure()
             }
         };
-        let _ = shared.keys_ready.send(true);
+        mark_keys_ready(&shared);
         let stop = tokio::select! {
             () = cancel.cancelled() => true,
             () = tokio::time::sleep(delay) => false,

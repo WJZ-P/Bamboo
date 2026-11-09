@@ -141,6 +141,12 @@ async fn prepare() -> Result<(Server, SocketAddr, String), String> {
         .local_addr()
         .map_err(|error| format!("拿不到服务端的端口：{error}"))?;
 
+    // 公钥在进入 accept 循环之前生成。调试构建里的 RSA 很慢，占着唯一的连接时 hasJoined 进不来。
+    // Generate the key before accept. Debug RSA is slow, and hasJoined cannot get in while it holds the only connection.
+    let service = tokio::task::spawn_blocking(ServiceMaterial::generate)
+        .await
+        .map_err(|error| format!("生成探针公钥的任务失败：{error}"))?;
+
     let config = ServerConfig {
         online_mode: true,
         session_server_url: format!("http://{session_address}/session/minecraft/hasJoined"),
@@ -149,7 +155,7 @@ async fn prepare() -> Result<(Server, SocketAddr, String), String> {
     let server = Server::new(listener, config)
         .map_err(|error| format!("无法创建开了正版验证的服务端：{error}"))?;
 
-    tokio::spawn(session_service(session));
+    tokio::spawn(session_service(session, service));
     Ok((server, address, format!("http://{session_address}")))
 }
 
@@ -173,8 +179,11 @@ struct ServiceMaterial {
 ///
 /// 请求一个一个处理：客户端先报哈希，服务端再来问，客户端最后取服务端问过的那个，
 /// 三步本来就是前后发生的，不需要并发。
-async fn session_service(listener: TcpListener) {
-    let mut exchange = Exchange::default();
+async fn session_service(listener: TcpListener, service: Option<ServiceMaterial>) {
+    let mut exchange = Exchange {
+        service,
+        ..Exchange::default()
+    };
     while let Ok((mut stream, _)) = listener.accept().await {
         let Ok(head) = read_head(&mut stream).await else {
             continue;
@@ -236,10 +245,7 @@ fn respond(target: &str, exchange: &mut Exchange) -> String {
     }
 }
 
-fn service_material(exchange: &mut Exchange) -> Option<&ServiceMaterial> {
-    if exchange.service.is_none() {
-        exchange.service = ServiceMaterial::generate();
-    }
+fn service_material(exchange: &Exchange) -> Option<&ServiceMaterial> {
     exchange.service.as_ref()
 }
 

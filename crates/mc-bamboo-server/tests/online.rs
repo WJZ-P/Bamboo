@@ -355,6 +355,47 @@ async fn a_wrong_challenge_ends_the_connection() {
     assert!(server.handle.online_players().is_empty());
 }
 
+/// 取钥在登录之前就结束，而且那时还没有人在等。登录仍然要马上拿到加密 hello，不能干等到下一次重试。
+///
+/// The key fetch finishes before login, while nobody is waiting. Login still has to get the
+/// encryption hello immediately instead of sitting until the next retry.
+#[tokio::test]
+async fn a_login_after_the_key_fetch_does_not_wait_for_the_next_retry() {
+    let session = FakeSession::start(Answer::Verified(Uuid::from_u128(1))).await;
+    let server = TestServer::start(online_server(&session)).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if session
+            .requests()
+            .iter()
+            .any(|line| line.contains("/publickeys"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the profile-key fetch never started"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    // 请求行已经记下，再留一点时间让回复写完、结果放进通道。通道里当时没有接收者。
+    //
+    // The request line is recorded. Leave a moment for the response to be written and the result
+    // to be stored. Nothing is subscribed to the channel yet.
+    sleep(Duration::from_millis(200)).await;
+
+    let mut client = server.connect().await;
+    let hello = tokio::time::timeout(Duration::from_secs(2), async {
+        client.send(&handshake(LOGIN_INTENT)).await;
+        client.send(&hello("Kitten")).await;
+        client.read_frame().await
+    })
+    .await
+    .expect("login waited on the key fetch even though it had already finished");
+    let _ = read_login_hello(&hello);
+}
+
 /// 关掉正版验证时服务端不发 hello，客户端照常进服，而且没有皮肤。
 #[tokio::test]
 async fn offline_mode_does_not_ask_for_a_key() {
