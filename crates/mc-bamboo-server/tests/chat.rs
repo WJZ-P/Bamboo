@@ -166,7 +166,7 @@ async fn the_longest_message_goes_through() {
 #[tokio::test]
 async fn a_message_above_the_limit_only_kicks_its_sender() {
     let server = TestServer::start(small_world()).await;
-    let (alice, mut bob) = two_players(&server).await;
+    let (alice, bob) = two_players(&server).await;
     let mark = bob.mark();
 
     alice.send(&chat(&"x".repeat(MAX_CHAT_CHARS + 1))).await;
@@ -194,7 +194,7 @@ async fn chat_keeps_the_order_of_each_sender() {
 #[tokio::test]
 async fn a_flood_disconnects_the_sender_after_the_message_that_reaches_the_limit() {
     let server = TestServer::start(small_world()).await;
-    let (mut alice, mut bob) = two_players(&server).await;
+    let (mut alice, bob) = two_players(&server).await;
     let mark = bob.mark();
 
     alice.send(&chat_burst(MOST_IN_A_BURST + 5)).await;
@@ -260,7 +260,7 @@ async fn illegal_characters_disconnect_the_sender_with_the_translated_reason() {
     ] {
         let server = TestServer::start(small_world()).await;
         let mut sender = server.enter(name).await;
-        let mut bob = server.enter("Bob").await;
+        let bob = server.enter("Bob").await;
         sender.skip_received();
         let mark = bob.mark();
 
@@ -384,7 +384,7 @@ async fn requesting_stats_gets_an_empty_answer_only_for_the_requester() {
 #[tokio::test]
 async fn the_other_client_commands_are_ignored() {
     let server = TestServer::start(small_world()).await;
-    let mut alice = server.enter("Alice").await;
+    let alice = server.enter("Alice").await;
     let mark = alice.mark();
 
     alice.send(&client_command(0)).await;
