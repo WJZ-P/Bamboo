@@ -134,6 +134,12 @@ impl World {
         menu::tick(&mut self.region);
         lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
+        // 官方 `ServerPlayer.tick` 里 health 准则跟着玩家生命值走。Bamboo 没有伤害，
+        // 生命值恒为 20，只在这一刻把初值写进只读目标。
+        //
+        // Official `ServerPlayer.tick` feeds the health criterion. Bamboo has no damage,
+        // so health stays 20 and only the initial value reaches the read-only objective.
+        self.global.scoreboard_mut().tick_health(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);

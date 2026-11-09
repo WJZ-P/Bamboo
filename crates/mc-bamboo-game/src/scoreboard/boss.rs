@@ -39,32 +39,6 @@ pub(crate) enum BossColor {
 }
 
 impl BossColor {
-    pub(crate) const ALL: [Self; 7] = [
-        Self::Pink,
-        Self::Blue,
-        Self::Red,
-        Self::Green,
-        Self::Yellow,
-        Self::Purple,
-        Self::White,
-    ];
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Pink => "pink",
-            Self::Blue => "blue",
-            Self::Red => "red",
-            Self::Green => "green",
-            Self::Yellow => "yellow",
-            Self::Purple => "purple",
-            Self::White => "white",
-        }
-    }
-
-    pub(crate) fn by_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|color| color.name() == name)
-    }
-
     const fn id(self) -> i32 {
         self as i32
     }
@@ -83,28 +57,6 @@ pub(crate) enum BossStyle {
 }
 
 impl BossStyle {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::Progress,
-        Self::Notched6,
-        Self::Notched10,
-        Self::Notched12,
-        Self::Notched20,
-    ];
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Progress => "progress",
-            Self::Notched6 => "notched_6",
-            Self::Notched10 => "notched_10",
-            Self::Notched12 => "notched_12",
-            Self::Notched20 => "notched_20",
-        }
-    }
-
-    pub(crate) fn by_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|style| style.name() == name)
-    }
-
     const fn id(self) -> i32 {
         self as i32
     }
@@ -259,18 +211,6 @@ impl BossBars {
 
     pub(crate) fn visible(&self, id: &str) -> Option<bool> {
         self.bars.get(id).map(|bar| bar.visible)
-    }
-
-    pub(crate) fn color(&self, id: &str) -> Option<BossColor> {
-        self.bars.get(id).map(|bar| bar.color)
-    }
-
-    pub(crate) fn style(&self, id: &str) -> Option<BossStyle> {
-        self.bars.get(id).map(|bar| bar.style)
-    }
-
-    pub(crate) fn online_count(&self, id: &str) -> Option<usize> {
-        self.bars.get(id).map(|bar| bar.online.len())
     }
 
     fn bar_mut(&mut self, id: &str) -> Option<&mut BossBar> {

@@ -24,11 +24,6 @@
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
 
-// 命令还在接入，计分板模块暂时只在测试里读写。
-//
-// The commands are still being wired up; the scoreboard module is only exercised by tests.
-#![allow(dead_code)]
-
 mod block_items;
 mod book;
 mod campfire;

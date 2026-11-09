@@ -184,11 +184,6 @@ impl Scoreboard {
             .is_some_and(|objective| objective.criteria == "trigger")
     }
 
-    pub(crate) fn criteria_name(&self, name: &str) -> Option<&str> {
-        self.objective(name)
-            .map(|objective| objective.criteria.as_str())
-    }
-
     pub(crate) fn objective_count(&self) -> usize {
         self.objectives.len()
     }
@@ -531,12 +526,6 @@ impl Scoreboard {
         true
     }
 
-    pub(crate) fn lock_score(&mut self, player: &str, objective: &str) {
-        if let Some(score) = self.score_mut(player, objective) {
-            score.locked = true;
-        }
-    }
-
     pub(crate) fn set_score_display(
         &mut self,
         holder: &Holder,
@@ -829,18 +818,25 @@ impl Scoreboard {
                 .copied()
                 .unwrap_or(f32::MIN_POSITIVE);
             let health = 20.0;
-            if last == health {
-                continue;
-            }
-            self.last_health.insert(name.clone(), health);
-            let value = health.ceil() as i32;
-            let display = self.format_player_name(&name);
             let objectives: Vec<String> = self
                 .objectives
                 .iter()
                 .filter(|objective| objective.criteria == "health")
                 .map(|objective| objective.name.clone())
                 .collect();
+            // Bamboo 没有伤害，生命值恒为 20；目标后来才创建时也要补写一次。
+            //
+            // Bamboo has no damage, so health stays 20; a later objective still needs
+            // the initial write.
+            let needs_write = objectives
+                .iter()
+                .any(|objective| self.score_value(&name, objective).is_none());
+            if last == health && !needs_write {
+                continue;
+            }
+            self.last_health.insert(name.clone(), health);
+            let value = health.ceil() as i32;
+            let display = self.format_player_name(&name);
             let holder = Holder {
                 name: name.clone(),
                 display: Some(display),

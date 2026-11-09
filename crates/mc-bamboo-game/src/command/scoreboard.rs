@@ -442,15 +442,6 @@ pub(crate) fn objectives_numberformat(
     Ok(())
 }
 
-pub(crate) fn objectives_format_clear(
-    global: &mut Global,
-    region: &mut Region,
-    id: PlayerId,
-    parsed: &ParsedCommand,
-) -> Result<(), CommandFail> {
-    objectives_numberformat(global, region, id, parsed, None)
-}
-
 pub(crate) fn objectives_format_blank(
     global: &mut Global,
     region: &mut Region,
@@ -1330,6 +1321,27 @@ mod tests {
             &system_text(&client),
             "commands.scoreboard.players.display.numberFormat.set.success.single"
         ));
+    }
+
+    #[test]
+    fn health_criterion_gets_its_fixed_value_on_tick() {
+        let (mut server, client) = operator("Op");
+        run(&mut server, &client, "scoreboard objectives add hp health");
+        server.tick();
+        assert_eq!(
+            server.global().scoreboard().score_value("Op", "hp"),
+            Some(20)
+        );
+        // 只读准则不能被命令改写。
+        run(&mut server, &client, "scoreboard players set Op hp 1");
+        assert!(has_key(
+            &system_text(&client),
+            "arguments.objective.readonly"
+        ));
+        assert_eq!(
+            server.global().scoreboard().score_value("Op", "hp"),
+            Some(20)
+        );
     }
 
     #[test]
