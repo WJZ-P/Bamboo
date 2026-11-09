@@ -1,11 +1,14 @@
 //! `/loot`：用战利品表产出物品并分发到目标。
 //!
-//! 目标 `give`、`insert`、`replace` 已接上；`spawn` 需要物品实体，来源 `kill` 和
-//! `fish` 需要别的实体，命令树照官方注册，执行时返回合理的失败。
+//! 目标 `give`、`insert`、`replace`、`spawn` 已接上；来源 `kill` 和 `fish` 要
+//! 别的实体系统，命令树照官方注册，执行时返回合理的失败。
 
-use mc_bamboo_blocks::BlockState;
+use mc_bamboo_blocks::{
+    BlockState, World,
+    entity::{Entity, EntityKind},
+};
 use mc_bamboo_command::{ParsedCommand, Value};
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::blocks;
 use mc_bamboo_loot::{LootParams, LootStack, LootTable, Position};
 use mc_bamboo_protocol::{item::ItemStack, text::Component};
@@ -86,12 +89,11 @@ variants! {
     replace_entity_fish: Fish, ReplaceEntity;
 }
 
-/// 官方 `LootCommand` 的四种来源里，Bamboo 现在只求 `loot` 和 `mine`。
-/// 其余两种要实体，没有实体系统时按 `command.failed` 返回失败。
+/// 官方 `LootCommand` 的四类来源里，Bamboo 现在只求 `loot` 和 `mine`。
+/// `kill` / `fish` 要实体掉落表和钓鱼参数，暂不支持。
 fn need_entity(request: &Request) -> Result<(), CommandFail> {
-    match (request.source, request.target) {
-        (Source::Kill | Source::Fish, _) => Err(fail("commands.drop.no_loot_table")),
-        (_, Target::Spawn) => Err(fail("command.failed")),
+    match request.source {
+        Source::Kill | Source::Fish => Err(fail("commands.drop.no_loot_table")),
         _ => Ok(()),
     }
 }
@@ -117,6 +119,11 @@ fn loot_command(
         .get("targetPos")
         .and_then(Value::as_block_pos)
         .map(|coords| block_position(coords, player));
+    let drop_position = parsed
+        .get("targetPos")
+        .and_then(Value::as_vec3)
+        .map(|coords| coords.position(player.position(), player.yaw, player.pitch))
+        .unwrap_or(player.position());
     let stacks = evaluate(global, region, parsed, &request, source_position)?;
     let count: i32 = stacks.iter().map(|stack| stack.count).sum();
     match request.target {
@@ -173,7 +180,7 @@ fn loot_command(
                 }
             }
         }
-        Target::Spawn => unreachable!("need_entity 已经挡住"),
+        Target::Spawn => spawn_items(region, drop_position, &stacks),
     }
     let name = parsed.get("loot_table").and_then(Value::as_str);
     let key = match name {
@@ -186,6 +193,21 @@ fn loot_command(
     }
     feedback::success(region, id, Component::translate(key, args), true);
     Ok(())
+}
+
+/// 官方 `LootCommand.dropInWorld`：每件物品一个 `ItemEntity`，位置就是
+/// `targetPos`，`setDefaultPickUpDelay` 之后 `addFreshEntity`。速度的两次
+/// `nextDouble` 由物品实体自己的随机源在生成时取（`Entity::ground_item`）。
+fn spawn_items(region: &mut Region, position: Vec3, stacks: &[LootStack]) {
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    for loot in stacks {
+        let mut entity = Entity::ground_item(position, to_stack(loot));
+        if let EntityKind::Item(item) = &mut entity.kind {
+            item.set_default_pickup_delay();
+        }
+        world.spawn_entity(entity);
+    }
 }
 
 fn slot_index(parsed: &ParsedCommand) -> Result<i32, CommandFail> {
@@ -365,10 +387,45 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sources_and_spawn_return_a_failure_without_changing_the_inventory() {
+    fn spawn_creates_ground_items_at_the_requested_position() {
+        let (mut global, mut region, id) = world();
+        let before = region.entities.iter().count();
+        command::on_command(
+            &mut global,
+            &mut region,
+            id,
+            "loot spawn 4 -59 6 loot minecraft:blocks/diamond_ore",
+            None,
+        );
+        let items: Vec<_> = region
+            .entities
+            .iter()
+            .filter(|entity| matches!(entity.kind, mc_bamboo_blocks::entity::EntityKind::Item(_)))
+            .collect();
+        assert_eq!(items.len(), before + 1, "spawn 应该生成一件物品实体");
+        let item = items[0];
+        // `Vec3Argument.vec3()` 把整数坐标居中到方块中心。
+        assert_eq!(item.position, mc_bamboo_core::Vec3::new(4.5, -59.0, 6.5));
+        match &item.kind {
+            mc_bamboo_blocks::entity::EntityKind::Item(ground) => {
+                assert_eq!(ground.pickup_delay, 10);
+                assert!(!ground.stack.is_empty());
+            }
+            _ => panic!("不是物品实体"),
+        }
+        assert!(
+            region.players[&id]
+                .inventory
+                .slots
+                .iter()
+                .all(|stack| stack.is_empty())
+        );
+    }
+
+    #[test]
+    fn unsupported_sources_return_a_failure_without_changing_the_inventory() {
         let (mut global, mut region, id) = world();
         for text in [
-            "loot spawn 8 -59 8 loot minecraft:blocks/diamond_ore",
             "loot give Kitten kill Kitten",
             "loot give Kitten fish minecraft:gameplay/fishing 8 -59 8",
         ] {
@@ -381,6 +438,7 @@ mod tests {
                 .iter()
                 .all(|stack| stack.is_empty())
         );
+        assert_eq!(region.entities.iter().count(), 0);
     }
 
     #[test]
