@@ -209,6 +209,7 @@ mod tests {
             &mut region,
             PlayerId(1),
             "gamerule random_tick_speed 7",
+            None,
         );
         assert_eq!(global.rules().int(gamerules::RANDOM_TICK_SPEED), 7);
         assert_eq!(region.block_rules.random_tick_speed, 7);
@@ -217,6 +218,7 @@ mod tests {
             &mut region,
             PlayerId(1),
             "gamerule random_tick_speed 7",
+            None,
         );
         assert_eq!(global.rules().int(gamerules::RANDOM_TICK_SPEED), 7);
         command::on_command(
@@ -224,6 +226,7 @@ mod tests {
             &mut region,
             PlayerId(1),
             "gamerule tnt_explodes false",
+            None,
         );
         assert!(!region.block_rules.tnt_explodes);
         command::on_command(
@@ -231,6 +234,7 @@ mod tests {
             &mut region,
             PlayerId(1),
             "gamerule send_command_feedback false",
+            None,
         );
         assert!(!region.send_command_feedback);
     }

@@ -5,9 +5,10 @@
 use mc_bamboo_data::packets::play::{clientbound, serverbound};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
-    codec::{DecodeError, write_string, write_varint},
+    codec::{DecodeError, Reader, write_string, write_varint},
     packet::play::{ClientInformation, PlayRequest},
 };
+use uuid::Uuid;
 
 use super::*;
 use crate::world::tests::{Client, Frame, Harness, client_requesting, frames_with_id};
@@ -31,13 +32,48 @@ fn network_bytes(tag: &Tag) -> Vec<u8> {
     out
 }
 
-/// `disguised_chat` 的包体：内容和名字都是纯文本，`minecraft:chat`，没有 `targetName`。
-fn chat_body(name: &str, message: &str) -> Vec<u8> {
-    let mut body = network_bytes(&text(message));
-    body.push(0x01);
-    body.extend(network_bytes(&text(name)));
-    body.push(0x00);
-    body
+/// 未签名的 `player_chat`：发送者是玩家，没有签名，盐是 0，已读列表是空的。
+fn assert_player_chat(body: &[u8], global_index: i32, sender: Uuid, name: &str, message: &str) {
+    let mut reader = Reader::new(body);
+    assert_eq!(reader.varint().unwrap(), global_index);
+    assert_eq!(reader.uuid().unwrap(), sender);
+    assert_eq!(reader.varint().unwrap(), 0);
+    assert_eq!(reader.u8().unwrap(), 0, "no signature");
+    assert_eq!(reader.string(256).unwrap(), message);
+    let time = reader.i64().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(
+        (time - now).abs() < 120_000,
+        "timestamp {time} is not the server clock {now}"
+    );
+    assert_eq!(reader.i64().unwrap(), 0, "salt");
+    assert_eq!(reader.varint().unwrap(), 0, "last seen");
+    assert_eq!(reader.u8().unwrap(), 0, "unsigned content");
+    assert_eq!(reader.varint().unwrap(), 0, "filter");
+    assert_eq!(reader.varint().unwrap(), 1, "chat type");
+    assert_eq!(read_text(&mut reader), name);
+    assert_eq!(reader.u8().unwrap(), 0, "target");
+    reader.finish().unwrap();
+}
+
+fn assert_player_chats(bodies: &[Vec<u8>], sender: Uuid, name: &str, messages: &[&str]) {
+    assert_eq!(bodies.len(), messages.len());
+    for (index, (body, message)) in bodies.iter().zip(messages).enumerate() {
+        assert_player_chat(body, index as i32, sender, name, message);
+    }
+}
+
+fn read_text(reader: &mut Reader<'_>) -> String {
+    assert_eq!(reader.u8().unwrap(), 8);
+    let len = reader.u16().unwrap() as usize;
+    let mut bytes = vec![0; len];
+    for byte in &mut bytes {
+        *byte = reader.u8().unwrap();
+    }
+    String::from_utf8(bytes).unwrap()
 }
 
 /// `system_chat` 的包体：内容，然后是 `overlay=false`。
@@ -93,15 +129,11 @@ fn context_line_echoing(command: &str) -> Tag {
 }
 
 fn chat(message: &str) -> PlayRequest {
-    PlayRequest::Chat {
-        message: message.to_owned(),
-    }
+    PlayRequest::unsigned_chat(message)
 }
 
 fn command(command: &str) -> PlayRequest {
-    PlayRequest::ChatCommand {
-        command: command.to_owned(),
-    }
+    PlayRequest::unsigned_command(command)
 }
 
 /// 离线客户端的 `chat` 包：没有签名，`lastSeen` 总是 `00 00 00 00 01`。
@@ -174,15 +206,45 @@ fn idle(server: &mut Harness, ticks: usize) {
 
 #[test]
 fn chat_frame_matches_the_official_bytes() {
+    // 未签名 `player_chat`：全局序号 0、发送者 UUID 1、链序号 0、没有签名、
+    // 时间 0、盐 0、已读列表空、`minecraft:chat`、名字 Kitten、没有目标。
+    //
+    // Unsigned `player_chat`: global index 0, sender UUID 1, chain index 0, no signature,
+    // time 0, salt 0, empty last-seen, `minecraft:chat`, name Kitten, no target.
     let expected = [
-        0x11, // 帧长
-        0x21, // 包 ID
-        0x08, 0x00, 0x02, 0x68, 0x69, // message "hi"
-        0x01, // chatType：minecraft:chat
-        0x08, 0x00, 0x06, 0x4b, 0x69, 0x74, 0x74, 0x65, 0x6e, // name "Kitten"
-        0x00, // 没有 targetName
+        0x35, // 帧长
+        0x42, // 包 ID
+        0x00, // global index
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, // sender
+        0x00, // index
+        0x00, // 没有签名
+        0x02, 0x68, 0x69, // "hi"
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // time
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // salt
+        0x00, // last seen
+        0x00, // 没有 unsigned content
+        0x00, // filter
+        0x01, // chat type
+        0x08, 0x00, 0x06, 0x4b, 0x69, 0x74, 0x74, 0x65, 0x6e, // name
+        0x00, // 没有 target
     ];
-    assert_eq!(chat_frames("Kitten", "hi".to_owned()), expected);
+    let name = mc_bamboo_protocol::text::Component::text("Kitten");
+    let frames = crate::links::encode_frames(&mc_bamboo_protocol::packet::play::PlayerChat {
+        global_index: 0,
+        sender: Uuid::from_u128(1),
+        index: 0,
+        signature: None,
+        content: "hi",
+        time_millis: 0,
+        salt: 0,
+        last_seen: &[],
+        unsigned_content: None,
+        chat_type: mc_bamboo_data::registries::chat_type::CHAT,
+        name: &name,
+        target_name: None,
+    });
+    assert_eq!(frames, expected);
 }
 
 #[test]
@@ -198,12 +260,9 @@ fn chat_reaches_everyone_in_the_world_including_the_sender() {
     server.request(&kitten, chat("hi"));
     server.tick();
 
-    let expected = [
-        0x08, 0x00, 0x02, 0x68, 0x69, 0x01, 0x08, 0x00, 0x06, 0x4b, 0x69, 0x74, 0x74, 0x65, 0x6e,
-        0x00,
-    ];
     for client in [&kitten, &bob, &carol] {
-        assert_eq!(take_bodies(client, clientbound::DISGUISED_CHAT), [expected]);
+        let bodies = take_bodies(client, clientbound::PLAYER_CHAT);
+        assert_player_chats(&bodies, kitten.uuid, "Kitten", &["hi"]);
         assert!(!client.is_closed());
     }
 }
@@ -224,9 +283,11 @@ fn the_official_chat_packet_goes_all_the_way_to_the_broadcast() {
     server.request(&alice, request);
     server.tick();
 
-    assert_eq!(
-        take_bodies(&bob, clientbound::DISGUISED_CHAT),
-        [chat_body("Alice", "hi")]
+    assert_player_chats(
+        &take_bodies(&bob, clientbound::PLAYER_CHAT),
+        alice.uuid,
+        "Alice",
+        &["hi"],
     );
 }
 
@@ -237,18 +298,18 @@ fn chinese_and_emoji_keep_their_bytes() {
     server.request(&alice, chat("竹子🎋"));
     server.tick();
 
-    // 竹和子各 3 个字节。🎋 是一个代理对，每半个 3 个字节。
-    let mut expected = vec![0x08, 0x00, 0x0c];
-    expected.extend([0xe7, 0xab, 0xb9, 0xe5, 0xad, 0x90]);
-    expected.extend([0xed, 0xa0, 0xbc, 0xed, 0xbe, 0x8b]);
-    expected.push(0x01);
-    expected.extend([0x08, 0x00, 0x05, 0x41, 0x6c, 0x69, 0x63, 0x65]);
-    expected.push(0x00);
-    assert_eq!(
-        take_bodies(&bob, clientbound::DISGUISED_CHAT),
-        std::slice::from_ref(&expected)
+    assert_player_chats(
+        &take_bodies(&bob, clientbound::PLAYER_CHAT),
+        alice.uuid,
+        "Alice",
+        &["竹子🎋"],
     );
-    assert_eq!(take_bodies(&alice, clientbound::DISGUISED_CHAT), [expected]);
+    assert_player_chats(
+        &take_bodies(&alice, clientbound::PLAYER_CHAT),
+        alice.uuid,
+        "Alice",
+        &["竹子🎋"],
+    );
     assert!(!alice.is_closed());
 }
 
@@ -262,7 +323,7 @@ fn illegal_characters_kick_the_sender_and_reach_nobody() {
 
         assert_kicked_for_illegal_characters(&alice);
         assert!(
-            take_bodies(&bob, clientbound::DISGUISED_CHAT).is_empty(),
+            take_bodies(&bob, clientbound::PLAYER_CHAT).is_empty(),
             "{message:?}"
         );
         assert!(!bob.is_closed());
@@ -277,9 +338,11 @@ fn characters_next_to_the_illegal_ones_are_allowed() {
     server.request(&alice, chat(message));
     server.tick();
 
-    assert_eq!(
-        take_bodies(&bob, clientbound::DISGUISED_CHAT),
-        [chat_body("Alice", message)]
+    assert_player_chats(
+        &take_bodies(&bob, clientbound::PLAYER_CHAT),
+        alice.uuid,
+        "Alice",
+        &[message],
     );
     assert!(!alice.is_closed());
 }
@@ -293,9 +356,11 @@ fn the_chat_limit_is_256_utf16_units_at_the_protocol_layer() {
         let request = PlayRequest::decode(&chat_payload(&message)).expect("刚好到上限");
         server.request(&alice, request);
         server.tick();
-        assert_eq!(
-            take_bodies(&bob, clientbound::DISGUISED_CHAT),
-            [chat_body("Alice", &message)]
+        assert_player_chats(
+            &take_bodies(&bob, clientbound::PLAYER_CHAT),
+            alice.uuid,
+            "Alice",
+            &[&message],
         );
 
         // 解码失败时连接任务断开连接，这个包到不了世界线程。
@@ -327,12 +392,14 @@ fn a_kicked_player_is_out_of_the_chat_until_it_leaves() {
         frames.last().map(|frame| frame.id),
         Some(clientbound::DISCONNECT)
     );
-    assert!(frames_with_id(&frames, clientbound::DISGUISED_CHAT).is_empty());
+    assert!(frames_with_id(&frames, clientbound::PLAYER_CHAT).is_empty());
     assert!(frames_with_id(&frames, clientbound::SYSTEM_CHAT).is_empty());
     assert!(frames_with_id(&frames, clientbound::AWARD_STATS).is_empty());
-    assert_eq!(
-        take_bodies(&bob, clientbound::DISGUISED_CHAT),
-        [chat_body("Bob", "hello")]
+    assert_player_chats(
+        &take_bodies(&bob, clientbound::PLAYER_CHAT),
+        bob.uuid,
+        "Bob",
+        &["hello"],
     );
 
     assert!(server.region().players.contains_key(&alice.id));
@@ -350,7 +417,7 @@ fn the_burst_limit_is_counted_for_each_player_on_its_own() {
     server.tick();
 
     assert_eq!(
-        take_bodies(&alice, clientbound::DISGUISED_CHAT).len(),
+        take_bodies(&alice, clientbound::PLAYER_CHAT).len(),
         2 * MOST_IN_A_BURST
     );
     assert!(!alice.is_closed());
@@ -367,13 +434,24 @@ fn the_message_that_reaches_the_limit_is_broadcast_before_the_kick() {
 
     let frames = alice.take_frames();
     assert_kicked_for_spam(&frames, &alice);
-    let last_chat = chat_body("Alice", "message 9");
-    let chats = frames_with_id(&frames, clientbound::DISGUISED_CHAT);
+    let chats = frames_with_id(&frames, clientbound::PLAYER_CHAT);
     assert_eq!(chats.len(), MOST_IN_A_BURST + 1);
-    assert_eq!(chats[MOST_IN_A_BURST].body, last_chat);
-    let seen_by_bob = take_bodies(&bob, clientbound::DISGUISED_CHAT);
+    assert_player_chat(
+        &chats[MOST_IN_A_BURST].body,
+        MOST_IN_A_BURST as i32,
+        alice.uuid,
+        "Alice",
+        "message 9",
+    );
+    let seen_by_bob = take_bodies(&bob, clientbound::PLAYER_CHAT);
     assert_eq!(seen_by_bob.len(), MOST_IN_A_BURST + 1);
-    assert_eq!(seen_by_bob[MOST_IN_A_BURST], last_chat);
+    assert_player_chat(
+        &seen_by_bob[MOST_IN_A_BURST],
+        MOST_IN_A_BURST as i32,
+        alice.uuid,
+        "Alice",
+        "message 9",
+    );
     assert!(!bob.is_closed());
 }
 
@@ -385,9 +463,15 @@ fn messages_after_the_kick_reach_nobody() {
     server.request(&bob, chat("hello"));
     server.tick();
 
-    let seen_by_bob = take_bodies(&bob, clientbound::DISGUISED_CHAT);
+    let seen_by_bob = take_bodies(&bob, clientbound::PLAYER_CHAT);
     assert_eq!(seen_by_bob.len(), MOST_IN_A_BURST + 2);
-    assert_eq!(seen_by_bob.last(), Some(&chat_body("Bob", "hello")));
+    assert_player_chat(
+        seen_by_bob.last().unwrap(),
+        (MOST_IN_A_BURST + 1) as i32,
+        bob.uuid,
+        "Bob",
+        "hello",
+    );
     assert!(server.region().players.contains_key(&alice.id));
 }
 
@@ -522,23 +606,28 @@ fn chat_only_reaches_players_already_in_the_world() {
 
     let frames = bob.take_frames();
     assert_eq!(frames[0].id, clientbound::LOGIN);
-    let chats: Vec<&[u8]> = frames_with_id(&frames, clientbound::DISGUISED_CHAT)
+    let chats: Vec<Vec<u8>> = frames_with_id(&frames, clientbound::PLAYER_CHAT)
         .into_iter()
-        .map(|frame| frame.body.as_slice())
+        .map(|frame| frame.body.clone())
         .collect();
-    assert_eq!(chats, [chat_body("Alice", "after")]);
-    assert_eq!(
-        take_bodies(&alice, clientbound::DISGUISED_CHAT),
-        [chat_body("Alice", "before"), chat_body("Alice", "after")]
+    assert_player_chats(&chats, alice.uuid, "Alice", &["after"]);
+    assert_player_chats(
+        &take_bodies(&alice, clientbound::PLAYER_CHAT),
+        alice.uuid,
+        "Alice",
+        &["before", "after"],
     );
 
     server.leave(&bob);
     server.request(&alice, chat("gone"));
     server.tick();
-    assert!(take_bodies(&bob, clientbound::DISGUISED_CHAT).is_empty());
-    assert_eq!(
-        take_bodies(&alice, clientbound::DISGUISED_CHAT),
-        [chat_body("Alice", "gone")]
+    assert!(take_bodies(&bob, clientbound::PLAYER_CHAT).is_empty());
+    assert_player_chat(
+        &take_bodies(&alice, clientbound::PLAYER_CHAT)[0],
+        2,
+        alice.uuid,
+        "Alice",
+        "gone",
     );
 }
 
@@ -563,12 +652,12 @@ fn hidden_chat_gets_a_red_notice_and_is_not_broadcast() {
         ("color", text("red")),
     ]);
     let frames = hidden.take_frames();
-    assert!(frames_with_id(&frames, clientbound::DISGUISED_CHAT).is_empty());
+    assert!(frames_with_id(&frames, clientbound::PLAYER_CHAT).is_empty());
     assert_eq!(
         frames_with_id(&frames, clientbound::SYSTEM_CHAT)[0].body,
         system_chat_body(&notice)
     );
-    assert!(take_bodies(&watcher, clientbound::DISGUISED_CHAT).is_empty());
+    assert!(take_bodies(&watcher, clientbound::PLAYER_CHAT).is_empty());
     assert!(!hidden.is_closed());
 
     // 官方的命令分支不看可见性。
@@ -743,4 +832,186 @@ fn join_sends_the_command_tree() {
     let frames = client.take_frames();
     assert_eq!(frames_with_id(&frames, clientbound::COMMANDS).len(), 1);
     assert_eq!(frames_with_id(&frames, clientbound::ENTITY_EVENT).len(), 1);
+}
+
+fn frames_have_key(frames: &[Frame], key: &str) -> bool {
+    frames_with_id(frames, clientbound::SYSTEM_CHAT)
+        .iter()
+        .any(|frame| {
+            frame
+                .body
+                .windows(key.len())
+                .any(|window| window == key.as_bytes())
+        })
+}
+
+fn service_key() -> (rsa::RsaPrivateKey, Vec<u8>) {
+    use rsa::pkcs8::EncodePublicKey;
+
+    let private_key = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).expect("rsa");
+    let der = rsa::RsaPublicKey::from(&private_key)
+        .to_public_key_der()
+        .expect("spki")
+        .as_bytes()
+        .to_vec();
+    (private_key, der)
+}
+
+fn sign_profile(
+    private_key: &rsa::RsaPrivateKey,
+    player: Uuid,
+    expires: i64,
+    der: &[u8],
+) -> Vec<u8> {
+    use rsa::pkcs1v15::Pkcs1v15Sign;
+    use sha1::Sha1;
+    use sha1::digest::Digest;
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(player.as_bytes());
+    payload.extend_from_slice(&expires.to_be_bytes());
+    payload.extend_from_slice(der);
+    let hashed = Sha1::digest(&payload);
+    private_key
+        .sign(Pkcs1v15Sign::new::<Sha1>(), &hashed)
+        .expect("sign profile")
+}
+
+/// 解析失败的签名命令仍要收集参数。名字对不上就打断链，下一句签名消息被拒。
+#[test]
+fn a_failed_signed_command_breaks_the_chain() {
+    use mc_bamboo_protocol::packet::play::{
+        ArgumentSignature, LastSeenUpdate, RemoteChatSession, SignedCommand,
+    };
+
+    let (private_key, der) = service_key();
+    let mut server = Harness::new(2);
+    assert!(
+        server
+            .region()
+            .service_keys
+            .replace(std::slice::from_ref(&der))
+    );
+    let alice = server.join_and_settle("Alice");
+    alice.take_frames();
+    let expires = 4_102_444_800_000;
+    server.request(
+        &alice,
+        PlayRequest::ChatSession(RemoteChatSession {
+            session_id: Uuid::from_u128(50),
+            expires_at_millis: expires,
+            public_key: der.clone(),
+            key_signature: sign_profile(&private_key, alice.uuid, expires, &der),
+        }),
+    );
+    server.tick();
+    alice.take_frames();
+
+    server.request(
+        &alice,
+        PlayRequest::ChatCommand {
+            command: "notacommand".to_owned(),
+            signed: Some(SignedCommand {
+                time_millis: 5_000,
+                salt: 1,
+                arguments: vec![ArgumentSignature {
+                    name: "message".to_owned(),
+                    signature: [9; 256],
+                }],
+                last_seen: LastSeenUpdate::EMPTY,
+            }),
+        },
+    );
+    server.tick();
+    let failed = alice.take_frames();
+    assert!(frames_have_key(
+        &failed,
+        "chat.disabled.invalid_command_signature"
+    ));
+    assert!(frames_with_id(&failed, clientbound::PLAYER_CHAT).is_empty());
+
+    server.request(
+        &alice,
+        PlayRequest::Chat {
+            message: "next".to_owned(),
+            signature: Some(Box::new([4; 256])),
+            time_millis: 6_000,
+            salt: 1,
+            last_seen: LastSeenUpdate::EMPTY,
+        },
+    );
+    server.tick();
+    let broken = alice.take_frames();
+    assert!(frames_have_key(&broken, "chat.disabled.chain_broken"));
+    assert!(frames_with_id(&broken, clientbound::PLAYER_CHAT).is_empty());
+
+    server.request(
+        &alice,
+        PlayRequest::ClientInformation(ClientInformation {
+            chat_visibility: ChatVisibility::Hidden,
+            ..client_requesting(2)
+        }),
+    );
+    server.tick();
+    alice.take_frames();
+    server.request(
+        &alice,
+        PlayRequest::ChatCommand {
+            command: "still-unknown".to_owned(),
+            signed: Some(SignedCommand {
+                time_millis: 7_000,
+                salt: 1,
+                arguments: vec![ArgumentSignature {
+                    name: "message".to_owned(),
+                    signature: [3; 256],
+                }],
+                last_seen: LastSeenUpdate::EMPTY,
+            }),
+        },
+    );
+    server.tick();
+    assert!(
+        take_bodies(&alice, clientbound::SYSTEM_CHAT).is_empty(),
+        "hidden chat does not receive the failure"
+    );
+}
+
+/// 钥匙还没到时未签名聊天照常转发。钥匙到了之后，同一名玩家的未签名聊天按强制处理。
+#[test]
+fn unsigned_chat_is_enforced_after_profile_keys_arrive() {
+    let mut server = Harness::new(2);
+    {
+        let region = server.region();
+        region.online_mode = true;
+        region.enforce_secure_profile = true;
+    }
+    let alice = server.join_and_settle("Alice");
+    alice.take_frames();
+
+    server.request(&alice, chat("before keys"));
+    server.tick();
+    assert_player_chats(
+        &take_bodies(&alice, clientbound::PLAYER_CHAT),
+        alice.uuid,
+        "Alice",
+        &["before keys"],
+    );
+
+    let (_private_key, der) = service_key();
+    assert!(
+        server
+            .region()
+            .service_keys
+            .replace(std::slice::from_ref(&der))
+    );
+    alice.take_frames();
+    server.request(&alice, chat("after keys"));
+    server.tick();
+    let rejected = alice.take_frames();
+    assert!(frames_with_id(&rejected, clientbound::PLAYER_CHAT).is_empty());
+    assert!(frames_have_key(
+        &rejected,
+        "chat.disabled.missingProfileKey"
+    ));
+    assert!(!alice.is_closed());
 }

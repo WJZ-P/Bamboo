@@ -23,7 +23,7 @@ use crate::{
     interact::InteractionResult,
     shape::{Aabb, Boxes, CollisionContext},
     state::{BlockState, ENABLED, FACING, FACING_HOPPER, TRIGGERED},
-    world::{UPDATE_ALL, UPDATE_CLIENTS, UPDATE_LIMIT, World},
+    world::{DeferredRead, UPDATE_ALL, UPDATE_CLIENTS, UPDATE_LIMIT, World},
 };
 
 /// `BarrelBlock`。
@@ -184,9 +184,34 @@ impl ShulkerBoxEntity {
 }
 
 /// `ShulkerBoxBlockEntity.doNeighborUpdates`：形状变了，告诉邻居重新算。
+///
+/// 实体正被拿着时先排进队列。邻居要问盖子开没开，表里没有实体时会被当成关上。
+///
+/// While the entity is out of the map this is queued. Neighbours ask whether the lid is open,
+/// and a missing entity is treated as closed.
 fn do_neighbor_updates(state: BlockState, world: &mut World, pos: BlockPos) {
+    if world.block_entity_is_taken(pos) {
+        world.defer_block_entity_read(DeferredRead::ShulkerNeighbors { pos });
+        return;
+    }
+    push_shulker_neighbor_updates(state, world, pos);
+}
+
+fn push_shulker_neighbor_updates(state: BlockState, world: &mut World, pos: BlockPos) {
     world.update_neighbour_shapes(state, pos, UPDATE_ALL, UPDATE_LIMIT);
     world.update_neighbors_at(pos, state.block());
+}
+
+/// 潜影盒放回表之后补跑 `doNeighborUpdates`。方块已经不是潜影盒时什么也不做。
+///
+/// Runs `doNeighborUpdates` after the shulker is put back. Does nothing if the cell is no
+/// longer a shulker box.
+pub(crate) fn apply_shulker_neighbor_updates(world: &mut World, pos: BlockPos) {
+    let state = world.block_state(pos);
+    if !state.is_a(BlockAncestor::ShulkerBoxBlock) {
+        return;
+    }
+    push_shulker_neighbor_updates(state, world, pos);
 }
 
 impl BlockEntity for ShulkerBoxEntity {
@@ -363,10 +388,12 @@ impl Behaviour for Furnace {
 
     /// `AbstractFurnaceBlock.getAnalogOutputSignal`：比较器读三格内容。
     ///
-    /// 实体正在 tick、不在表里时读到 0。空熔炉本来就是 0。
+    /// 实体被拿出去时这里读不到它，比较器会等它放回去再读。没有实体时用槽位表。
     ///
-    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots. While the entity
-    /// is ticking it is out of the map, so this returns 0. An empty furnace is 0 anyway.
+    /// `AbstractFurnaceBlock.getAnalogOutputSignal` reads the three slots.
+    ///
+    /// While the entity is out of the map this cannot see it; comparators read it after it is
+    /// put back. With no entity, the slot table is used.
     fn analog_output_signal(
         &self,
         _state: BlockState,
@@ -374,10 +401,7 @@ impl Behaviour for Furnace {
         pos: BlockPos,
         _direction: Direction,
     ) -> i32 {
-        world
-            .block_entity::<FurnaceEntity>(pos)
-            .map(|entity| crate::container::redstone_signal(entity.items().iter(), 3))
-            .unwrap_or(0)
+        crate::machine_container::furnace_signal(world, pos)
     }
 
     fn use_without_item(

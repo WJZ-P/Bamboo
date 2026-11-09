@@ -13,7 +13,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{BlockClass, CookingKind, Recipe, RecipeKind, RecipeType, items};
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{
-    RecipeManager, assemble, cooking_fuel, crafting_remainder, is_cooking_fuel, max_stack_size,
+    RecipeManager, assemble, cooking_fuel, crafting_remainder, max_stack_size,
     same_item_same_components,
 };
 
@@ -182,14 +182,7 @@ impl FurnaceEntity {
 
     /// 官方 `canPlaceItem`。
     pub fn can_place_item(&self, slot: usize, stack: &ItemStack) -> bool {
-        if slot == SLOT_RESULT {
-            return false;
-        }
-        if slot != SLOT_FUEL {
-            return true;
-        }
-        is_cooking_fuel(stack)
-            || stack.item == items::BUCKET && self.items[SLOT_FUEL].item != items::BUCKET
+        crate::machine_container::furnace_can_place(&self.items, slot, stack)
     }
 
     fn recipe_type(&self) -> RecipeType {
@@ -330,6 +323,10 @@ impl FurnaceEntity {
 
     /// 官方 `serverTick`。
     pub fn server_tick(&mut self, world: &mut World) {
+        // 官方 `serverTick` 的 `changed`：只有燃料、成品或 `lit` 变了才 `setChanged`。
+        //
+        // Vanilla `serverTick`'s `changed`: `setChanged` runs only when fuel, the result, or `lit` changes.
+        let mut changed = false;
         let was_lit;
         let mut is_lit;
         if self.lit_time_remaining > 0 {
@@ -372,6 +369,7 @@ impl FurnaceEntity {
                             if new_lit_time > 0 {
                                 self.consume_fuel(world);
                                 is_lit = true;
+                                changed = true;
                             }
                         }
 
@@ -382,6 +380,7 @@ impl FurnaceEntity {
                                 self.cooking_total_time = self.cook_time_of(recipe);
                                 self.burn(&burn_result);
                                 self.set_recipe_used(recipe);
+                                changed = true;
                             }
                         } else {
                             self.cooking_timer = 0;
@@ -401,13 +400,21 @@ impl FurnaceEntity {
         }
 
         if was_lit != is_lit {
+            changed = true;
             let state = world.block_state(self.pos);
             if state.get(LIT) != is_lit {
                 world.set_block_and_update(self.pos, state.with(LIT, is_lit));
             }
         }
 
-        // 官方的 `setChanged` 只把区块标成待存，不通知菜单；这里没有存档可写。
+        // 官方 `setChanged(level, pos, state)`：燃料烧起来、烧完一格或者 `lit` 变了才通知比较器。
+        // 只增加 `cookingTimer` 不算变化。
+        //
+        // Vanilla `setChanged(level, pos, state)` runs when fuel is consumed, a cook finishes,
+        // or `lit` changes. Incrementing `cookingTimer` alone does not.
+        if changed {
+            crate::machine_container::mark_container_changed(world, self.pos);
+        }
     }
 }
 

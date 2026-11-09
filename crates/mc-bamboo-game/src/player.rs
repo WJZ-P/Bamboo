@@ -18,6 +18,7 @@ use crate::{
     movement::Teleport,
     player_grid::PlayerGrid,
     player_move::Motion,
+    secure_chat::PlayerChat,
 };
 
 const STANDING_EYE_HEIGHT: f64 = 1.62;
@@ -72,6 +73,10 @@ pub(crate) struct Player {
     /// 这名玩家自己的末影箱，每个玩家一份。
     pub(crate) ender_chest: EnderChest,
     pub(crate) spam: SpamThrottlers,
+    /// 公钥、消息链和已读窗口。没有会话时按无签名处理。
+    ///
+    /// Public key, message chain, and the seen-message window. Without a session, chat stays unsigned.
+    pub(crate) chat: PlayerChat,
 }
 
 impl Player {
@@ -107,6 +112,7 @@ impl Player {
             container_counter: 0,
             ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),
+            chat: PlayerChat::default(),
         }
     }
 
