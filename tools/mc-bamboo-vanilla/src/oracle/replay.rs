@@ -416,7 +416,7 @@ impl Level for OracleLevel {
             return false;
         }
         self.touch(state);
-        // 换成别的方块时方块实体一起换掉，内容没有掉落物。同一格还是同一种容器时保留内容。
+        // 换成别的方块时方块实体一起换掉，假世界的掉落表是空的。同一格还是同一种容器时保留内容。
         let old = self.kind(pos);
         let new = ContainerKind::of(state);
         if old != new {
@@ -994,6 +994,7 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             Effect::TorchBurnout { .. } => None,
             Effect::BoneMealUsed { .. }
             | Effect::FilledBucket { .. }
+            | Effect::EmptiedBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::SignWaxed { .. }
             | Effect::OpenSignEditor { .. }
@@ -1112,6 +1113,7 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
                 ));
             }
             Effect::FilledBucket { .. }
+            | Effect::EmptiedBucket { .. }
             | Effect::SignChanged { .. }
             | Effect::OpenSignEditor { .. }
             | Effect::BlockEvent { .. }
@@ -1135,7 +1137,7 @@ fn gained_of(outcome: &Outcome, actor: &Actor) -> Vec<String> {
     let mut held = vec![actor.main_hand, actor.off_hand];
     let mut gained = Vec::new();
     for effect in &outcome.effects {
-        if let Effect::FilledBucket { item } = *effect
+        if let Effect::FilledBucket { item, .. } = *effect
             && !held.contains(&item)
         {
             held.push(item);

@@ -873,7 +873,7 @@ if !infinite_materials: return
 valid_slot = 1 <= slot <= 45
 valid_data = stack 为空 || count <= max_stack_size(stack)
 if valid_slot && valid_data: slots[slot] = stack         # 不回包
-elif slot < 0 && valid_data: 丢弃                        # M2 没有物品实体，物品消失
+elif slot < 0 && valid_data: 丢弃                        # 生成物品实体，创造模式有丢弃限流
 # 其余情况（slot 0、slot > 45、count 超限）静默忽略
 ```
 

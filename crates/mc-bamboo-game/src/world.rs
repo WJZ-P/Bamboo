@@ -134,6 +134,7 @@ impl World {
         menu::tick(&mut self.region);
         lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
+        crate::drops::tick_drop_throttle(&mut self.region);
         // 官方 `ServerPlayer.doTick` 的六个只读准则。Bamboo 用玩家初值，进服后第一刻各写一次。
         //
         // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the

@@ -3,10 +3,11 @@
 //! 一个玩家一份状态 [`Mining`]，`tick_mining` 每 tick 推进一次。开始挖、换方向、停下和放弃
 //! 这四种动作都走 [`handle_block_break_action`]，和官方同名。
 //!
-//! 掉落物、经验和统计都还没有：官方的 `destroyBlock` 在 `removeBlock` 之后调用
-//! `Block.playerDestroy`（`Block.dropResources`）和 `popExperience`。工具耐久在
-//! [`destroy_block`] 里扣。
-
+//! 生存和冒险模式挖掉方块后走 [`crate::block_drops`]（`Block.dropResources`）。
+//! 挖掘和工具右键的耐久在 [`durability`] 里扣，经验、统计还没有。
+//!
+//! Survival and adventure breaks call [`crate::block_drops`] (`Block.dropResources`).
+//! Mining and tool durability live in [`durability`]; experience and statistics are absent.
 use mc_bamboo_blocks::{
     Actor, BlockState, InteractionResult, Level,
     mining::{self as block_mining, Miner},
@@ -351,7 +352,8 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     }
     // 世界下面读到的是 `void_air`。破坏空气世界不变；官方还会发一个客户端不看的 2001，
     // 这里和原来的创造模式路径一样省掉。
-    if block_state(region, pos).is_air() {
+    let broken = block_state(region, pos);
+    if broken.is_air() {
         return true;
     }
     // `GameMasterBlock` 的权限检查在这里面。没有 `canUseGameMasterBlocks` 时挖不动。
@@ -363,11 +365,14 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     if outcome.result != InteractionResult::Success {
         return false;
     }
-    // 官方接下来调用 `Block.playerDestroy`（`Block.dropResources`）和 `popExperience`。
-    // 掉落物、经验和统计还没做。工具耐久在 `destroy_block` 里扣。
-    //
-    // Vanilla then calls `Block.playerDestroy` (`Block.dropResources`) and `popExperience`.
-    // Drops, experience and statistics are not implemented. Tool durability is spent inside `destroy_block`.
+    // `preventsBlockDrops` 只挡创造和旁观。工具不对时 `playerDestroy` 不调用，战利品也不取数。
+    // `preventsBlockDrops` covers creative and spectator. The wrong tool skips `playerDestroy`
+    // and does not draw loot.
+    if !matches!(snapshot.game_mode, GameMode::Creative | GameMode::Spectator)
+        && block_mining::is_correct_for_drops(broken.0, snapshot.actor.main_hand)
+    {
+        crate::block_drops::drop_broken_block(region, broken, pos, snapshot.id);
+    }
     true
 }
 
@@ -611,6 +616,27 @@ mod tests {
         }
     }
 
+    /// 方块变化在掉落物之前，确认包在最后。掉落物坐标含随机数，中间只要求有 `add_entity`。
+    ///
+    /// The block update comes before the drop and the ack stays last. The drop's position
+    /// is random, so the middle only has to include `add_entity`.
+    fn assert_break_frames(frames: &[Frame], leading: &[Frame], trailing: &[Frame]) {
+        assert!(
+            frames.starts_with(leading),
+            "expected {leading:?} at the start, got {frames:?}"
+        );
+        assert!(
+            frames.ends_with(trailing),
+            "expected {trailing:?} at the end, got {frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.id == clientbound::ADD_ENTITY),
+            "breaking the block should spawn an item entity: {frames:?}"
+        );
+    }
+
     fn crack(breaker: i32, pos: BlockPos, progress: i8) -> Frame {
         frame_of(&BlockDestruction {
             id: breaker,
@@ -710,13 +736,12 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        // 挖穿时镐子扣 1 点耐久，先把那一格同步给自己，再广播方块和 ack。
+        // 挖穿时镐子扣 1 点耐久，先同步那一格；中间的掉落物坐标含随机数，
+        // 只要求有 `add_entity`，确认包在最后。
         //
-        // Breaking the block spends one point, so the slot is sent before the block update and ack.
-        assert_eq!(
-            client.take_frames(),
-            [worn_pickaxe_slot(), update(GROUND, blocks::AIR), ack(2)]
-        );
+        // Breaking spends one durability point first. The drop position is random, so the
+        // middle only needs an `add_entity`, and the ack stays last.
+        assert_break_frames(&client.take_frames(), &[worn_pickaxe_slot()], &[ack(2)]);
     }
 
     #[test]
@@ -742,12 +767,14 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        // 延迟破坏没有 sequence，只广播方块变化，不发 ack。镐子同样扣 1 点。
+        // 延迟破坏没有 sequence，只广播方块变化，不发 ack。镐子同样扣 1 点，掉落物跟在后面。
         //
-        // A delayed break has no sequence, so there is no ack. The pickaxe still loses one point.
-        assert_eq!(
-            client.take_frames(),
-            [worn_pickaxe_slot(), update(GROUND, blocks::AIR)]
+        // A delayed break has no sequence, so there is no ack. The pickaxe still loses one
+        // point and the drop follows the update.
+        assert_break_frames(
+            &client.take_frames(),
+            &[worn_pickaxe_slot(), update(GROUND, blocks::AIR)],
+            &[],
         );
     }
 
@@ -798,17 +825,17 @@ mod tests {
         server.tick();
 
         assert_eq!(block_at(&mut server, GROUND), Some(blocks::AIR));
-        assert_eq!(
-            watcher.take_frames(),
-            [
+        assert_break_frames(
+            &watcher.take_frames(),
+            &[
                 crack(breaker, GROUND, -1),
                 level_event(2001, GROUND, blocks::STONE as i32),
                 update(GROUND, blocks::AIR),
-                // 主手物品变了，刻末的装备同步把扣过耐久的镐子发给旁边的人。
-                //
-                // The main hand changed, so the end-of-tick equipment sync shows the worn pickaxe.
-                worn_pickaxe_equipment(breaker),
-            ]
+            ],
+            // 主手物品变了，刻末的装备同步把扣过耐久的镐子发给旁边的人。
+            //
+            // The main hand changed, so the end-of-tick equipment sync shows the worn pickaxe.
+            &[worn_pickaxe_equipment(breaker)],
         );
     }
 

@@ -437,7 +437,7 @@ impl Behaviour for PistonHead {
     fn affect_neighbors_after_removal(&self, state: BlockState, world: &mut World, pos: BlockPos) {
         let base = base_pos(state, pos);
         if is_fitting_base(state, world.block_state(base)) {
-            world.destroy_block(base, UPDATE_LIMIT);
+            world.destroy_block(base, true, UPDATE_LIMIT);
         }
     }
 
@@ -465,7 +465,7 @@ impl Behaviour for PistonHead {
         if player.prevents_block_drops {
             let base = base_pos(state, pos);
             if is_fitting_base(state, world.block_state(base)) {
-                world.destroy_block(base, UPDATE_LIMIT);
+                world.destroy_block(base, false, UPDATE_LIMIT);
             }
         }
         Plain.player_will_destroy(state, world, pos, player)

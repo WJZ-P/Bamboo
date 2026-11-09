@@ -57,7 +57,7 @@ pub struct Outcome {
     ///
     /// The item this click hands back to the player, or `None` when the hand stays as it is.
     pub item_exchange: Option<ItemExchange>,
-    /// 要从方块拿进物品栏的一堆。没有物品实体，放不下的部分会消失。
+    /// 要从方块拿进物品栏的一堆。生存模式放不下的按 `Player.drop` 丢掉，创造模式清掉。
     ///
     /// A stack to add to the inventory. There is no item entity, so a remainder vanishes.
     pub gained: Option<mc_bamboo_protocol::item::ItemStack>,
@@ -191,7 +191,7 @@ pub fn use_item(
 ) -> Outcome {
     let mut world = World::new(level, ticks);
     let result = match Bucket::of(actor.item_in(hand)) {
-        Some(bucket) => bucket::use_bucket(&mut world, actor, bucket),
+        Some(bucket) => bucket::use_bucket(&mut world, actor, hand, bucket),
         None => placement::use_in_air(&mut world, actor, hand),
     };
     outcome_from(world, result, false)
@@ -249,10 +249,10 @@ pub fn destroy_block(
         state.destroy(&mut world, pos);
     }
     // `Block.dropResources` 先看 `GameRules.BLOCK_DROPS`，再看创造模式的 `preventsBlockDrops`。
-    // 物品实体还没接上。默认开着，这一步不取随机数。
+    // 掉落物由游戏层的 `block_drops` 按战利品表生成；这里只保留这个判断，不取随机数。
     //
     // `Block.dropResources` checks `GameRules.BLOCK_DROPS`, then creative `preventsBlockDrops`.
-    // Item entities are not wired yet. The default is on, and this step draws no random numbers.
+    // The game layer spawns the drops from loot tables; this step draws no random numbers.
     let _allow_drops =
         crate::block_drops_allowed(world.block_game_rules(), actor.prevents_block_drops);
     // `preventsBlockDrops`（创造模式）在 `mineBlock` 之前返回。剪刀和普通工具都在这里扣耐久。

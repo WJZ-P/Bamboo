@@ -143,6 +143,10 @@ pub(crate) struct Region {
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
+    ///
+    /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
+    pub(crate) loot_sequences: mc_bamboo_loot::RandomSequences,
     /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
     ///
     /// Seed for sound packets, vanilla `Level.soundSeedGenerator`. Separate from the world
@@ -273,6 +277,7 @@ impl Region {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
@@ -317,6 +322,7 @@ impl Region {
             block_events: &mut self.block_events,
             containers: &mut self.containers,
             entities: &mut self.entities,
+            loot_sequences: &self.loot_sequences,
             block_rules: self.block_rules,
             command_blocks: &mut self.command_blocks,
         };

@@ -185,7 +185,7 @@ fn set_block_in(
         return Err(fail("commands.setblock.failed"));
     }
     let place_needed = if destroy {
-        world.destroy_block(pos, UPDATE_LIMIT);
+        world.destroy_block(pos, true, UPDATE_LIMIT);
         // 官方在破坏之后才看还要不要放：目标不是空气，或者格子里还剩东西。
         //
         // Official decides after the destroy: place unless the target is air and the cell is air.
@@ -300,7 +300,8 @@ fn fill_in(
                     continue;
                 }
                 let old = current;
-                let affected = mode == FillMode::Destroy && world.destroy_block(pos, UPDATE_LIMIT);
+                let affected =
+                    mode == FillMode::Destroy && world.destroy_block(pos, true, UPDATE_LIMIT);
                 let interior = x != min_x
                     && x != max_x
                     && y != min_y

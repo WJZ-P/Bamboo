@@ -2,6 +2,7 @@
 //!
 //! 每个领域的状态放在各自模块的类型里，这里只把它们组合起来。
 
+use mc_bamboo_blocks::entity::JavaRandom;
 use mc_bamboo_core::{Aabb, ChunkPos, Vec3};
 use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode, MODEL_PART_HAT};
 use uuid::Uuid;
@@ -73,6 +74,14 @@ pub(crate) struct Player {
     /// 这名玩家自己的末影箱，每个玩家一份。
     pub(crate) ender_chest: EnderChest,
     pub(crate) spam: SpamThrottlers,
+    /// 丢出物品用的 `this.random`。种子由玩家 ID 决定。
+    ///
+    /// `this.random` for thrown items. The seed comes from the player id.
+    pub(crate) random: JavaRandom,
+    /// 创造模式把物品拖出界面的 `TickThrottler(20, 1480)`。
+    ///
+    /// Creative drags out of the screen use `TickThrottler(20, 1480)`.
+    pub(crate) drop_spam: i32,
     /// 公钥、消息链和已读窗口。没有会话时按无签名处理。
     ///
     /// Public key, message chain, and the seen-message window. Without a session, chat stays unsigned.
@@ -112,6 +121,8 @@ impl Player {
             container_counter: 0,
             ender_chest: EnderChest::default(),
             spam: SpamThrottlers::default(),
+            random: crate::drops::player_random(id),
+            drop_spam: 0,
             chat: PlayerChat::default(),
         }
     }

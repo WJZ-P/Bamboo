@@ -135,6 +135,7 @@ import sun.misc.Unsafe;
  * 讲台用一个只实现了书槽的 Container。
  * 随机题按“从不预测”的模型点。最后另有一道带组件的题，客户端按官方预测回传哈希。
  * 每步写出槽位、光标、stateId、data 槽和组件补丁。讲台还写页码。
+ * 假玩家的掉落被 override 成空操作，菜单比较只看槽位，不看地上的物品实体。
  *
  * <p>运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
  *
@@ -1446,7 +1447,7 @@ public final class MenuOracle {
             return player;
         }
 
-        /** Bamboo 没有物品实体，丢掉的东西直接消失。 */
+        /** 菜单比较不看地上的物品，这里丢掉的东西不生成实体。 */
         @Override
         public ItemEntity drop(ItemStack itemStack, boolean thrownFromHand, Prediction prediction) {
             return null;

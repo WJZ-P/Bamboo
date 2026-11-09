@@ -2,7 +2,10 @@
 //!
 //! 桶不覆盖 `useOn`，点方块时方块不接，官方的客户端接着发 `use_item`，服务端从眼睛看出去找目标，
 //! 所以这里只有 [`use_item`](crate::use_item) 一个入口。细雪桶是方块物品，放置在 `placement` 里。
-//! 全按创造模式写：倒完手里还是满桶，舀完手里还是空桶。
+//! 倒和舀都只记下 `Effect`，游戏层按 `ItemUtils.createFilledResult` 交还物品。
+//!
+//! Pouring and scooping only record an `Effect`. The game layer hands the item back with
+//! `ItemUtils.createFilledResult`.
 
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{BlockAncestor, BlockClass, items, sounds};
@@ -79,7 +82,12 @@ impl Bucket {
 }
 
 /// `BucketItem.use`。
-pub(crate) fn use_bucket(world: &mut World, actor: &Actor, bucket: Bucket) -> InteractionResult {
+pub(crate) fn use_bucket(
+    world: &mut World,
+    actor: &Actor,
+    hand: mc_bamboo_core::Hand,
+    bucket: Bucket,
+) -> InteractionResult {
     let (from, to) = actor.view_segment();
     let Some(hit) = world.clip(from, to, bucket.clip_fluid(), actor.main_hand) else {
         return InteractionResult::Pass;
@@ -106,16 +114,26 @@ pub(crate) fn use_bucket(world: &mut World, actor: &Actor, bucket: Bucket) -> In
         place_pos,
         Some(hit),
     ) {
+        // 装着流体的桶倒成功才交还空桶。只有生物、没有流体的桶不在这里消耗。
+        // A bucket that held fluid hands an empty one back. A mob-only bucket is not consumed here.
+        if bucket.content.is_some() {
+            world.push_effect(Effect::EmptiedBucket { hand });
+        }
         return InteractionResult::Success;
     }
     if bucket.content.is_none() {
-        return pick_up(world, actor, pos);
+        return pick_up(world, actor, pos, hand);
     }
     InteractionResult::Fail
 }
 
 /// 空桶舀起 `pos` 的东西。
-fn pick_up(world: &mut World, actor: &Actor, pos: BlockPos) -> InteractionResult {
+fn pick_up(
+    world: &mut World,
+    actor: &Actor,
+    pos: BlockPos,
+    hand: mc_bamboo_core::Hand,
+) -> InteractionResult {
     let state = world.block_state(pos);
     if !state.is_a(BlockAncestor::BucketPickup) {
         return InteractionResult::Fail;
@@ -127,7 +145,7 @@ fn pick_up(world: &mut World, actor: &Actor, pos: BlockPos) -> InteractionResult
     if taken == items::AIR {
         return InteractionResult::Fail;
     }
-    world.push_effect(Effect::FilledBucket { item: taken });
+    world.push_effect(Effect::FilledBucket { item: taken, hand });
     if let Some(sound) = pickup_sound {
         // 官方的 `player.playSound`：`PLAYERS` 来源，在玩家脚下，跳过这名玩家。
         // `Player.playSound`: source `PLAYERS`, at the player's feet, skipping that player.
@@ -225,7 +243,7 @@ fn empty_contents(
         return true;
     }
     if may_replace && !state.is_liquid() {
-        world.destroy_block(pos, UPDATE_LIMIT);
+        world.destroy_block(pos, true, UPDATE_LIMIT);
     }
     let placed = fluid.source_state().legacy_block();
     let placed_now =
@@ -334,17 +352,20 @@ mod tests {
         let outcome = use_in_air(&mut level, &looking_down(items::WATER_BUCKET));
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(FLOOR.above()), BlockState::WATER);
-        // 倒水的声音在方块中心，跳过倒水的玩家。
+        // 倒水的声音在方块中心，跳过倒水的玩家，然后才记下交还空桶。
         assert!(matches!(
             outcome.effects.as_slice(),
-            [Effect::Sound {
-                sound,
-                source,
-                volume,
-                pitch,
-                except_initiator: true,
-                ..
-            }] if *sound == i32::from(sound_event("minecraft:item.bucket.empty"))
+            [
+                Effect::Sound {
+                    sound,
+                    source,
+                    volume,
+                    pitch,
+                    except_initiator: true,
+                    ..
+                },
+                Effect::EmptiedBucket { hand: Hand::Main }
+            ] if *sound == i32::from(sound_event("minecraft:item.bucket.empty"))
                 && *source == sounds::BLOCKS
                 && *volume == 1.0
                 && *pitch == 1.0
@@ -363,7 +384,8 @@ mod tests {
         assert_eq!(
             outcome.effects[0],
             Effect::FilledBucket {
-                item: items::LAVA_BUCKET
+                item: items::LAVA_BUCKET,
+                hand: Hand::Main,
             }
         );
         // 舀岩浆的声音在玩家脚下，跳过这名玩家。
@@ -467,13 +489,17 @@ mod tests {
         let outcome = use_in_air(&mut level, &actor);
         assert_eq!(outcome.result, InteractionResult::Success);
         assert_eq!(level.get(plant), BlockState(blocks::LAVA));
-        assert!(outcome.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Destroyed {
-                except_initiator: false,
-                ..
-            }
-        )));
+        assert!(matches!(
+            outcome.effects.as_slice(),
+            [
+                Effect::Destroyed {
+                    except_initiator: false,
+                    ..
+                },
+                Effect::Sound { .. },
+                Effect::EmptiedBucket { hand: Hand::Main }
+            ]
+        ));
     }
 
     #[test]
@@ -497,21 +523,33 @@ mod tests {
     }
 
     fn poured(outcome: &Outcome, bucket: Bucket, name: &str) {
+        // 有流体的桶倒成功之后还要交还空桶；硫磺立方桶没有流体，只有那一声。
+        let sound = &outcome.effects[0];
         assert!(matches!(
-            outcome.effects.as_slice(),
-            [Effect::Sound {
+            sound,
+            Effect::Sound {
                 sound,
                 source,
                 volume,
                 pitch,
                 except_initiator: true,
                 ..
-            }] if *sound == i32::from(bucket.empty_sound)
+            } if *sound == i32::from(bucket.empty_sound)
                 && *sound == i32::from(sound_event(name))
                 && *source == sounds::SoundSource::from_id(bucket.empty_source)
                 && *volume == 1.0
                 && *pitch == 1.0
         ));
+        assert_eq!(
+            outcome.effects.len(),
+            if bucket.content.is_some() { 2 } else { 1 }
+        );
+        if bucket.content.is_some() {
+            assert_eq!(
+                outcome.effects[1],
+                Effect::EmptiedBucket { hand: Hand::Main }
+            );
+        }
     }
 
     #[test]

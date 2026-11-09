@@ -24,6 +24,7 @@
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
 
+mod block_drops;
 mod block_items;
 mod book;
 mod campfire;
@@ -35,6 +36,7 @@ mod command;
 mod command_block;
 mod container;
 mod debug_stick;
+mod drops;
 mod durability;
 mod entity_sync;
 mod entity_tracking;
@@ -59,6 +61,7 @@ mod sign;
 mod world;
 
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};

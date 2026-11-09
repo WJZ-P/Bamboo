@@ -42,7 +42,7 @@ use mc_bamboo_data::{
     Block, BlockAncestor, BlockClass, Item, block_id_of_state, blocks, items, version,
 };
 
-use lines::{Case, ContainerStack, Header, Kind, Line, SoundPlay, Tick};
+use lines::{Case, ContainerStack, Header, Kind, Line, Mine, SoundPlay, Tick};
 use replay::{FLUID_NAMES, Replayed, Scheduled, replay};
 use report::{Mismatch, Report};
 
@@ -549,6 +549,7 @@ impl Session {
         match line {
             Line::Header(header) => self.accept_header(header),
             Line::Case(case) => self.accept_case(&case),
+            Line::Mine(mine) => self.accept_mine(&mine),
             Line::Skip(skip) => {
                 let block = self.names.block(&skip.block)?;
                 // 本来就不比较的刻里官方代码抛了异常（比如传送门随机刻在假世界里生成僵尸猪灵），
@@ -589,6 +590,34 @@ impl Session {
         }
         self.report.start(&header);
         self.header = Some(header);
+        Ok(())
+    }
+
+    fn accept_mine(&mut self, mine: &Mine) -> Result<(), String> {
+        let block = self.names.block(&mine.block)?;
+        let (tool, _) = self.names.item(&mine.tool)?;
+        let mut official = mine
+            .drops
+            .iter()
+            .map(|drop| Ok((self.names.item(&drop.item)?.0, drop.count)))
+            .collect::<Result<Vec<_>, String>>()?;
+        official.sort();
+        match crate::entity_oracle::mined_outcome(mine.seed, mine.state, tool) {
+            Ok((ours, seed)) if ours == official && seed == mine.random_seed => {
+                self.report.mine_checked(block, true, "");
+            }
+            Ok((ours, seed)) => self.report.mine_checked(
+                block,
+                false,
+                &format!(
+                    "{}: drops official {official:?} bamboo {ours:?}, random official {} bamboo {seed}",
+                    mine.block, mine.random_seed
+                ),
+            ),
+            Err(error) => {
+                self.report.mine_checked(block, false, &format!("{}: {error}", mine.block));
+            }
+        }
         Ok(())
     }
 

@@ -487,13 +487,6 @@ impl<'a> World<'a> {
         self.item_exchange.as_ref()
     }
 
-    /// 记下这次要从方块拿进物品栏的物品。
-    ///
-    /// Record a stack this click should move from the block into the inventory.
-    pub(crate) fn set_gained(&mut self, stack: mc_bamboo_protocol::item::ItemStack) {
-        self.gained = Some(stack);
-    }
-
     /// 这次右键记下的、要放进物品栏的物品。
     ///
     /// The stack recorded for this click, to be added to the inventory.
@@ -759,6 +752,22 @@ impl<'a> World<'a> {
     /// 这一格有没有方块实体。
     pub fn has_block_entity(&self, pos: BlockPos) -> bool {
         self.level.block_entities().contains(pos)
+    }
+
+    /// 这一格容器里非空的物品。对照漏斗吸物品时用。
+    ///
+    /// Non-empty stacks in the container at this cell. Used when comparing a hopper pull.
+    pub fn container_contents(&mut self, pos: BlockPos) -> Vec<(i32, i32)> {
+        let mut found = Vec::new();
+        let _ = self.with_container(pos, &mut |container| {
+            for slot in 0..container.size() {
+                let stack = container.get(slot);
+                if !stack.is_empty() {
+                    found.push((stack.item, stack.count));
+                }
+            }
+        });
+        found
     }
 
     /// 这一格的物品栏，见 [`Level::with_container`]。
@@ -1037,6 +1046,31 @@ impl<'a> World<'a> {
     /// `getRandom()`，也就是 `Level.random`。
     pub fn random(&self) -> &LegacyRandom {
         self.level.random().source()
+    }
+
+    /// `BlockBehaviour.onExplosionHit` 里的 `getDrops`。假世界默认是空的。
+    ///
+    /// `getDrops` from `BlockBehaviour.onExplosionHit`. A world without loot returns nothing.
+    pub(crate) fn explosion_block_drops(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.explosion_block_drops(state, pos)
+    }
+
+    /// `Block.getDrops`，见 [`Level::block_loot_drops`]。
+    pub(crate) fn block_loot_drops(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.block_loot_drops(state, pos)
+    }
+
+    /// `BlockState.spawnAfterBreak` 的随机取数，见 [`Level::spawn_after_break_random`]。
+    pub(crate) fn spawn_after_break_random(&mut self, state: BlockState, pos: BlockPos) {
+        self.level.spawn_after_break_random(state, pos);
     }
 
     /// `getBlockRandomPos`。
@@ -1337,22 +1371,21 @@ impl<'a> World<'a> {
             && !block_entity::keeps_block_entity(state, old)
             && flags & UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS == 0;
         // 掉落要取随机数，取的个数取决于每格有几件物品。物品表在写入之后就被换了，
-        // 所以先抄一份数量；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
-        let dropped_counts = drops_own_contents.then(|| self.level.own_container_counts(pos));
-        // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`
-        // （`levelEvent(1011)` 然后通知邻居），再取两个 `nextFloat`，然后无条件再 `onSongChanged`。
-        // `setRemoved` 在这之后再无条件报一次 1011。物品在第一次通知之前已经是空的。
-        // `forget_block_entity` 会清掉正在放的歌，所以要在写入之前记下。
+        // 所以先抄一份槽位；双箱这里只算这一半，官方掉的是方块实体自己的槽位表。
+        //
+        // The draw count depends on how many items each slot holds. The list is replaced after
+        // the write, so copy the slots first. A double chest drops only this half.
+        let dropped_stacks = drops_own_contents.then(|| self.slots_at(pos));
+        // 破坏唱片机时 `popOutTheItem` → `setTheItem(EMPTY)`：正在放的歌先 `stop`（通知邻居），
+        // 再取两个 `nextFloat`，然后无条件再 `onSongChanged`。物品在第一次通知之前已经是空的。
         //
         // Breaking a jukebox runs `popOutTheItem` → `setTheItem(EMPTY)`: a playing song `stop`s
-        // (`levelEvent(1011)`, then neighbors) before the two `nextFloat`s, then `onSongChanged`
-        // runs again. `setRemoved` sends another unconditional 1011 after that. The item is
-        // already empty before the first notification. `forget_block_entity` clears the playing
-        // flag, so remember it before the write.
-        let jukebox_count = dropped_counts
+        // (neighbors are told) before the two `nextFloat`s, then `onSongChanged` runs again.
+        // The item is already empty before the first notification.
+        let jukebox_count = dropped_stacks
             .as_ref()
             .filter(|_| old.is_a(BlockAncestor::JukeboxBlock))
-            .map(|counts| counts.first().copied().unwrap_or(0))
+            .map(|stacks| stacks.first().map(|stack| stack.count).unwrap_or(0))
             .unwrap_or(0);
         let jukebox_playing = jukebox_count > 0 && self.level.redstone().is_jukebox_playing(pos);
         if !self.level.write_block(pos, state, flags) {
@@ -1393,12 +1426,11 @@ impl<'a> World<'a> {
         //
         // Vanilla drops before `affectNeighborsAfterRemoval`. A furnace or brewing stand
         // that still had an entity already dropped above; dropping again would double the draws.
-        // A jukebox is not in that group, so the two `nextFloat`s of popping the disc still run
-        // in `pre_remove_side_effects` below.
-        if let Some(counts) = dropped_counts
+        // A jukebox is not in that group, so popping the disc still runs below.
+        if let Some(stacks) = dropped_stacks
             && !entity_dropped_contents
         {
-            block_entity::pre_remove_side_effects(old, self, &counts);
+            block_entity::pre_remove_side_effects(old, self, pos, &stacks);
         }
         if jukebox_count > 0 {
             // `popOutTheItem` 末尾的 `onSongChanged`，在 `setRemoved` 的 1011 之前。
@@ -1446,13 +1478,30 @@ impl<'a> World<'a> {
         self.set_block(pos, fluid.legacy_block(), UPDATE_ALL)
     }
 
-    /// `destroyBlock(pos, drop, null, updateLimit)`。这个世界没有掉落物。
-    pub fn destroy_block(&mut self, pos: BlockPos, limit: u32) -> bool {
+    /// `Level.destroyBlock(pos, dropResources, null, updateLimit)`。
+    ///
+    /// 官方顺序是取状态、破碎粒子、`dropResources` 为真的 `Block.dropResources`
+    /// （先 `getDrops` 再一组一组 `popResource`，最后 `spawnAfterBreak`），
+    /// 然后才换成这一格的流体方块。掉落必须排在改方块之前，否则邻居更新
+    /// 和后续计划刻拿到的随机数会和官方错开。方块 oracle 把这些表换成空表。
+    ///
+    /// `Level.destroyBlock(pos, dropResources, null, updateLimit)`: state, break
+    /// particles, then `Block.dropResources` when requested (getDrops, popResource
+    /// for each stack, spawnAfterBreak), and only then the fluid's legacy block.
+    /// Drops precede the block write so neighbour updates consume the same random draws.
+    /// The block oracle empties those loot tables.
+    pub fn destroy_block(&mut self, pos: BlockPos, drop: bool, limit: u32) -> bool {
         let state = self.block_state(pos);
         if state.is_air() {
             return false;
         }
         state.spawn_destroy_particles(self, pos);
+        if drop {
+            for stack in self.block_loot_drops(state, pos) {
+                self.pop_resource(pos, stack);
+            }
+            self.spawn_after_break_random(state, pos);
+        }
         let fluid = self.fluid_state(pos);
         self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)
     }
@@ -1470,7 +1519,9 @@ impl<'a> World<'a> {
             return;
         }
         if new.is_air() {
-            self.destroy_block(pos, limit);
+            // 官方 `updateOrDestroy` 的 `flags & 32` 会关掉掉落。
+            // Official `updateOrDestroy` disables drops when `flags & 32` is set.
+            self.destroy_block(pos, flags & UPDATE_SUPPRESS_DROPS == 0, limit);
         } else {
             self.set_block_limited(pos, new, flags & !UPDATE_SUPPRESS_DROPS, limit);
         }
@@ -1766,6 +1817,27 @@ impl<'a> World<'a> {
         self.level.entities_mut().get_mut_including_pending(id)
     }
 
+    /// 已经在 tick 列表里的实体。正在 tick 的那一个不在里面。
+    ///
+    /// An entity already in the tick list. The one currently ticking is not in it.
+    pub fn entity(&self, id: i32) -> Option<&Entity> {
+        self.level.entities().get(id)
+    }
+
+    /// 这一拍会 tick 的实体 ID，按 ID 升序。
+    ///
+    /// Entity ids that tick this step, in ascending id order.
+    pub fn entity_ids(&self) -> Vec<i32> {
+        self.level.entities().ids()
+    }
+
+    /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
+    ///
+    /// Removes an entity from the tick list. The entity currently ticking is only marked `discard`.
+    pub fn remove_entity(&mut self, id: i32) {
+        self.level.entities_mut().remove(id);
+    }
+
     /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
@@ -1775,7 +1847,11 @@ impl<'a> World<'a> {
             let Some(mut entity) = self.level.entities_mut().take(id) else {
                 continue;
             };
-            entity.tick(self);
+            // 这一拍已经被别的实体丢掉的，官方不再 tick，名单里也不再留下。
+            // An entity another one discarded earlier this tick is not ticked. Vanilla drops it from the list.
+            if !entity.removed {
+                entity.tick(self);
+            }
             if !entity.removed {
                 self.level.entities_mut().put(entity);
             }
@@ -1797,7 +1873,11 @@ impl<'a> World<'a> {
             let Some(mut entity) = self.level.entities_mut().take(id) else {
                 continue;
             };
-            entity.tick(self);
+            // 合并把对方丢掉之后，对方这一拍还在快照里，但是不再 tick。
+            // After a merge discards the other item, it stays in this tick's snapshot and does not tick.
+            if !entity.removed {
+                entity.tick(self);
+            }
             after.push(entity.clone());
             if !entity.removed {
                 self.level.entities_mut().put(entity);
@@ -1911,6 +1991,22 @@ impl<'a> World<'a> {
             let state = self.block_state(pos);
             let outline = outline_seen_holding(state, pos, main_hand);
             self.clip_one_block(pos, from, to, &outline, state, fluid)
+        })
+    }
+
+    /// `ClipContext.Block.COLLIDER` 加 `Fluid.NONE`。爆炸的遮挡采样用它。
+    ///
+    /// `ClipContext.Block.COLLIDER` with `Fluid.NONE`. Explosion exposure samples use it.
+    pub(crate) fn clip_collider(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        context: CollisionContext,
+    ) -> Option<BlockHit> {
+        traverse_blocks(from, to, |pos| {
+            let state = self.block_state(pos);
+            let collider = shape::collision_boxes(state, pos, context);
+            self.clip_one_block(pos, from, to, &collider, state, ClipFluid::None)
         })
     }
 
@@ -2138,6 +2234,7 @@ mod tests {
                 Effect::BoneMealUsed { .. }
                 | Effect::TorchBurnout { .. }
                 | Effect::FilledBucket { .. }
+                | Effect::EmptiedBucket { .. }
                 | Effect::SignChanged { .. }
                 | Effect::SignWaxed { .. }
                 | Effect::OpenSignEditor { .. }
@@ -2314,11 +2411,72 @@ mod tests {
         );
     }
 
+    /// 官方 `Level.destroyBlock` 的掉落和 `spawnAfterBreak` 都在写方块之前。
+    #[test]
+    fn drops_precede_the_block_write() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::STONE));
+        level.loot = vec![ItemStack::new(items::STONE, 2)];
+        let dropped = with_world(&mut level, |world| {
+            world.destroy_block(CENTER, true, UPDATE_LIMIT)
+        });
+        assert!(dropped);
+        // 两次 "drops"/"after_break" 都看到 0 次写入，最后的 "write" 才看到 1 次。
+        assert_eq!(level.drop_order.len(), 3);
+        assert_eq!(level.drop_order[0].0, "drops");
+        assert_eq!(level.drop_order[1].0, "after_break");
+        assert_eq!(level.drop_order[2].0, "write");
+        assert!(level.drop_order[..2].iter().all(|(_, writes)| *writes == 0));
+        assert_eq!(level.drop_order[2].1, 1);
+        // 掉落堆变成一个物品实体，三个位置 double 照取。
+        assert_eq!(level.entities().len(), 1);
+        assert_eq!(
+            level
+                .entities()
+                .iter()
+                .next()
+                .and_then(|entity| entity.ground())
+                .map(|item| item.stack.clone()),
+            Some(ItemStack::new(items::STONE, 2))
+        );
+    }
+
+    /// `dropResources` 为假时既不算掉落也不调 `spawnAfterBreak`，但仍写方块。
+    #[test]
+    fn destroy_without_drops_skips_the_loot_hooks() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::STONE));
+        level.loot = vec![ItemStack::new(items::STONE, 2)];
+        assert!(with_world(&mut level, |world| {
+            world.destroy_block(CENTER, false, UPDATE_LIMIT)
+        }));
+        assert_eq!(level.drop_order, [("write", 1)]);
+        assert!(level.entities().is_empty());
+    }
+
+    /// `Block.updateOrDestroy` 的 `UPDATE_SUPPRESS_DROPS` 关掉掉落。
+    #[test]
+    fn suppress_drops_flag_skips_the_loot_hooks() {
+        let mut level = TestLevel::new();
+        level.set(CENTER, BlockState(blocks::STONE));
+        with_world(&mut level, |world| {
+            world.update_or_destroy(
+                BlockState(blocks::STONE),
+                BlockState::AIR,
+                CENTER,
+                UPDATE_ALL | UPDATE_SUPPRESS_DROPS,
+                UPDATE_LIMIT,
+            );
+        });
+        assert_eq!(level.drop_order, [("write", 1)]);
+        assert!(level.entities().is_empty());
+    }
+
     #[test]
     fn destroying_air_does_nothing() {
         let mut level = TestLevel::new();
         let destroyed = with_world(&mut level, |world| {
-            world.destroy_block(CENTER, UPDATE_LIMIT)
+            world.destroy_block(CENTER, true, UPDATE_LIMIT)
         });
         assert!(!destroyed);
     }
@@ -2472,7 +2630,9 @@ mod tests {
 
     /// 容器被换掉时，官方 `preRemoveSideEffects` 按每格的数量取随机数：每一格三个
     /// double 的掉落点，非空的堆再按 `split(nextInt(21) + 10)` 一块一块取六个 double。
-    /// 这个世界没有物品实体，但随机数一个都不能少，否则后面的随机刻会错开。
+    /// 同时生成物品实体。随机数一个都不能少，否则后面的随机刻会错开。
+    ///
+    /// Breaking a container draws those numbers and spawns the item entities.
     #[test]
     fn destroying_a_container_consumes_the_drop_random_numbers() {
         let mut level = TestLevel::new();
@@ -2484,6 +2644,9 @@ mod tests {
         level.set_container(CENTER, slots);
         with_world(&mut level, |world| {
             world.set_block(CENTER, BlockState::AIR, UPDATE_ALL);
+            // 一件和三件各成一堆，空槽不生成实体。
+            // One item and three items each become one entity. Empty slots do not.
+            assert_eq!(world.entity_ids().len(), 2);
         });
 
         let expected = LegacyRandom::new(0);

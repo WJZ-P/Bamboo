@@ -43,11 +43,6 @@ const SOUND_CRAFTER_CRAFT: i32 = 1049;
 ///
 /// The data is the facing's `get3DDataValue`.
 const PARTICLES_SHOOT: i32 = 2010;
-/// `DefaultDispenseItemBehavior.spawnItem` 的精度参数。合成器传的是 6。
-///
-/// Accuracy passed to `spawnItem`. The crafter passes 6.
-const SPAWN_ACCURACY: i32 = 6;
-
 /// 九格现在能做出的产物。空输入或没有配方时是空物品。
 ///
 /// The result the nine slots would craft. Empty when the input or the recipe is empty.
@@ -145,30 +140,29 @@ pub(crate) fn tick_crafting_clocks(world: &mut World) {
     world.redstone_memory_mut().restore_crafter_crafting(kept);
 }
 
-/// 官方 `DefaultDispenseItemBehavior.spawnItem` 里从 `level.random` 取的那 7 个数。
+/// `CrafterBlock.dispenseItem` 的 `DefaultDispenseItemBehavior.spawnItem`。
 ///
-/// 竖直朝向把生成点的 Y 减 0.125，其它朝向减 0.15625。`ItemEntity` 用自己的
-/// `RandomSource.create()` 取 `bobOffs`、朝向和初始速度，不碰世界随机源；
-/// `spawnItem` 随后用世界随机源把速度盖掉。物品实体还没接上，这 7 个数照取，物品消失。
-/// 物品实体接上以后在这里生成，不要再多取随机数。
+/// 落点是 `Vec3.atCenterOf(pos).relative(front, 0.7)`（和发射器/投掷器的
+/// `getDispensePosition` 一样），竖直朝向把 Y 减 0.125，其它朝向减 0.15625。
+/// 速度由 `spawn_item_random` 取一个 `nextDouble` 和三个 `triangle`（精度 6），
+/// 这套随机数只取一遍，物品实体用自己的随机源，不碰 `level.random`。
 ///
-/// The seven `level.random` draws inside `DefaultDispenseItemBehavior.spawnItem`.
-///
-/// Vertical facing lowers the spawn Y by 0.125, every other facing by 0.15625. The `ItemEntity`
-/// draws `bobOffs`, yaw, and its first velocity from its own `RandomSource.create()`, not from
-/// the level; `spawnItem` then overwrites the velocity from the level random. Item entities are
-/// not implemented, so these seven numbers are still drawn and the item vanishes. When item
-/// entities exist, spawn them here and do not draw any further randoms.
-pub fn spawn_dispensed_item(world: &mut World, stack: &ItemStack, front: Direction) {
+/// `DefaultDispenseItemBehavior.spawnItem` from `CrafterBlock.dispenseItem`.
+/// The position is `Vec3.atCenterOf(pos).relative(front, 0.7)`, the same as a dispenser's
+/// `getDispensePosition`; vertical facing lowers Y by 0.125, others by 0.15625.
+/// `spawn_item_random` takes one `nextDouble` and three `triangle` draws (accuracy 6)
+/// exactly once. The item entity uses its own random source, not `level.random`.
+pub fn spawn_dispensed_item(world: &mut World, pos: BlockPos, stack: &ItemStack, front: Direction) {
     if stack.is_empty() {
         return;
     }
-    let (step_x, _, step_z) = front.normal();
-    let pow = world.random().next_double() * 0.1 + 0.2;
-    let spread = 0.017_227_5 * f64::from(SPAWN_ACCURACY);
-    let _ = world.random().triangle(f64::from(step_x) * pow, spread);
-    let _ = world.random().triangle(0.2, spread);
-    let _ = world.random().triangle(f64::from(step_z) * pow, spread);
+    let velocity = crate::dispenser::spawn_item_random(world, front);
+    world.spawn_dispensed_item_with_velocity(
+        stack.clone(),
+        front,
+        crate::dispense::dispense_position(pos, front),
+        velocity,
+    );
 }
 
 fn find_recipe(input: &CraftingInput) -> Option<&'static Recipe> {
@@ -215,7 +209,7 @@ fn dispense_item(world: &mut World, pos: BlockPos, stack: ItemStack, front: Dire
     if left.is_empty() {
         return;
     }
-    spawn_dispensed_item(world, &left, front);
+    spawn_dispensed_item(world, pos, &left, front);
     world.level_event(SOUND_CRAFTER_CRAFT, pos, 0);
     world.level_event(PARTICLES_SHOOT, pos, front.id());
 }
@@ -398,7 +392,7 @@ mod tests {
     fn spawn_draws(front: Direction, random: &LegacyRandom) {
         let (step_x, _, step_z) = front.normal();
         let pow = random.next_double() * 0.1 + 0.2;
-        let spread = 0.017_227_5 * f64::from(SPAWN_ACCURACY);
+        let spread = 0.017_227_5 * crate::dispenser::SPAWN_ACCURACY;
         let _ = random.triangle(f64::from(step_x) * pow, spread);
         let _ = random.triangle(0.2, spread);
         let _ = random.triangle(f64::from(step_z) * pow, spread);
@@ -480,6 +474,31 @@ mod tests {
         assert_eq!(twin.seed(), seed);
         spawn_draws(Direction::North, &twin);
         assert_eq!(level.random.source().seed(), twin.seed());
+    }
+
+    /// 朝空气吐出的产物是位置、速度都按官方 `spawnItem` 算好的物品实体。
+    #[test]
+    fn an_ejected_result_becomes_a_ground_item() {
+        let mut level = TestLevel::new();
+        facing_north(&mut level, POS);
+        put(&mut level, POS, 0, ItemStack::new(items::OAK_LOG, 1));
+        let _ = tick(&mut level, POS);
+        // 朝北：落点是方块中心往北 0.7 格，再按非竖直朝向下移 0.15625。
+        let items: Vec<_> = level
+            .entities()
+            .iter()
+            .filter_map(|entity| {
+                entity
+                    .ground()
+                    .map(|item| (entity.position, entity.delta, item.stack.clone()))
+            })
+            .collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].2, ItemStack::new(items::OAK_PLANKS, 4));
+        assert!((items[0].0.x - 0.5).abs() < 1.0e-9);
+        assert!((items[0].0.y - 64.5 + 0.15625).abs() < 1.0e-9);
+        assert!((items[0].0.z + 0.2).abs() < 1.0e-9);
+        assert!(items[0].1.y > 0.0);
     }
 
     #[test]
