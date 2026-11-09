@@ -20,6 +20,27 @@ use crate::{
     state::{BlockState, NoteBlockInstrument},
 };
 
+/// 发射器前方一格里、可能被穿上装备的生物。
+///
+/// A living entity in front of a dispenser that might receive equipment.
+///
+/// `equipment` 的下标是组件里的 `equipment_slot`：0 主手、1 脚、2 腿、3 胸、4 头、5 副手、
+/// 6 身体、7 鞍。`None` 表示这个实体没有这一格，`Some` 空物品表示格子是空的。
+///
+/// `equipment` is indexed by the component `equipment_slot`: 0 mainhand, 1 feet, 2 legs,
+/// 3 chest, 4 head, 5 offhand, 6 body, 7 saddle. `None` means the entity has no such slot.
+/// `Some` empty stack means the slot exists and is empty.
+#[derive(Clone, Debug)]
+pub struct EquipTarget {
+    pub entity_id: i32,
+    pub bounds: Aabb,
+    /// `isSpectator`。
+    pub spectator: bool,
+    /// `minecraft:entity_type` 的注册表 ID。
+    pub entity_type: i32,
+    pub equipment: [Option<ItemStack>; 8],
+}
+
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
 pub trait Level {
     /// 世界外返回 `void_air`。
@@ -188,6 +209,31 @@ pub trait Level {
     /// before neighbors are told.
     fn clear_container(&mut self, pos: BlockPos) {
         let _ = pos;
+    }
+
+    /// `getEntitiesOfClass(LivingEntity, box)` 能看见的生物。默认没有。
+    ///
+    /// Living entities visible to `getEntitiesOfClass`. None by default.
+    fn dispenser_targets(&self) -> Vec<EquipTarget> {
+        Vec::new()
+    }
+
+    /// `LivingEntity.setItemSlot`。写不进这一格时返回 `None`。
+    ///
+    /// 返回值是玩家物品栏菜单槽，调用方用它发 `container_set_slot`。不是玩家时可以是任意非空值。
+    ///
+    /// `LivingEntity.setItemSlot`. `None` when the slot cannot be stored.
+    ///
+    /// The value is the player's inventory-menu slot, used to send `container_set_slot`.
+    /// A non-player may return any `Some`.
+    fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        let _ = (entity_id, component_slot, stack);
+        None
     }
 }
 
@@ -452,6 +498,11 @@ pub enum Effect {
     /// The client plays the page-turn sound. Nearby players, including the one
     /// who turned the page, all receive it.
     PageTurned { pos: BlockPos },
+    /// 发射器把一件装备写进了这名玩家的物品栏。菜单槽已经改过，调用方发 `container_set_slot`。
+    ///
+    /// A dispenser wrote equipment into this player's inventory. The menu slot is already
+    /// updated. The caller sends `container_set_slot`.
+    DispenserEquipped { entity_id: i32, menu_slot: u16 },
     /// 营火上的食物变了，`CampfireBlockEntity.getUpdateTag` 要重新发给客户端。
     ///
     /// Food on a campfire changed. `CampfireBlockEntity.getUpdateTag` has to be sent again.

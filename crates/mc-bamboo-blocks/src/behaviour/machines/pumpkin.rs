@@ -21,6 +21,10 @@ pub(super) struct CarvedPumpkin;
 /// 图案里的一格。
 #[derive(Clone, Copy)]
 enum Cell {
+    /// 图案里的空格，`BlockPatternBuilder` 里 `' '` 匹配任何方块。
+    ///
+    /// A space in the pattern. `' '` in `BlockPatternBuilder` matches any block.
+    Any,
     Pumpkin,
     Snow,
     Iron,
@@ -31,6 +35,7 @@ enum Cell {
 impl Cell {
     fn matches(self, state: BlockState) -> bool {
         match self {
+            Self::Any => true,
             Self::Pumpkin => state.is(blocks::CARVED_PUMPKIN) || state.is(blocks::JACK_O_LANTERN),
             Self::Snow => state.is(blocks::SNOW_BLOCK),
             Self::Iron => state.is(blocks::IRON_BLOCK),
@@ -50,6 +55,27 @@ const IRON_GOLEM: &[&[Cell]] = &[
 ];
 /// `getOrCreateCopperGolemFull`。
 const COPPER_GOLEM: &[&[Cell]] = &[&[Cell::Pumpkin], &[Cell::Copper]];
+/// `getOrCreateSnowGolemBase`。最上面一格是空格，空气也算。
+///
+/// `getOrCreateSnowGolemBase`. The top cell is a space, so air matches too.
+const SNOW_BASE: &[&[Cell]] = &[&[Cell::Any], &[Cell::Snow], &[Cell::Snow]];
+/// `getOrCreateIronGolemBase`。
+const IRON_BASE: &[&[Cell]] = &[
+    &[Cell::Air, Cell::Any, Cell::Air],
+    &[Cell::Iron, Cell::Iron, Cell::Iron],
+    &[Cell::Air, Cell::Iron, Cell::Air],
+];
+/// `getOrCreateCopperGolemBase`。
+const COPPER_BASE: &[&[Cell]] = &[&[Cell::Any], &[Cell::Copper]];
+
+/// `CarvedPumpkinBlock.canSpawnGolem`。
+///
+/// `CarvedPumpkinBlock.canSpawnGolem`.
+pub(crate) fn can_spawn_golem(world: &World, pos: BlockPos) -> bool {
+    find(world, SNOW_BASE, pos).is_some()
+        || find(world, IRON_BASE, pos).is_some()
+        || find(world, COPPER_BASE, pos).is_some()
+}
 
 /// `BlockPattern.translateAndRotate`，图案只有一层厚，`forwards` 方向不用走。
 fn translate(

@@ -1,14 +1,16 @@
 //! `ItemStack.hurtAndBreak` 和 `EnchantmentHelper.processDurabilityChange`。
 //!
 //! 玩家的两只手由调用方放进线程局部变量：方块逻辑在官方取随机数的那个位置扣耐久，
-//! 不把物品堆一路传进每个 `World`。没有手时当作 `player == null`，不扣、也不取耐久附魔的随机数。
+//! 不把物品堆一路传进每个 `World`。没有手时 [`hurt_hand`] 什么也不做。
+//! 发射器没有玩家，走 [`hurt_and_break`]：`player == null`，耐久附魔仍用 `level.random`。
 //!
 //! `ItemStack.hurtAndBreak` and `EnchantmentHelper.processDurabilityChange`.
 //!
 //! The caller installs the player's two hands in a thread local, so block logic spends durability
 //! at the same point vanilla draws its random numbers, without threading an item stack through
-//! every `World`. No hands means `player == null`: nothing is spent and the durability enchantment
-//! draws nothing.
+//! every `World`. [`hurt_hand`] does nothing when no hands are installed.
+//! A dispenser has no player and uses [`hurt_and_break`]: `player == null`, and durability
+//! enchantments still draw from `level.random`.
 
 use std::cell::RefCell;
 
@@ -131,6 +133,34 @@ pub(crate) fn hurt_hand(world: &World, hand: Hand, amount: i32) {
     });
 }
 
+/// `hurtAndBreak(amount, level, null, onBreak)`。`onBreak` 是空的。
+///
+/// `player == null` 时不看创造模式，耐久附魔仍走 `EnchantmentHelper.processDurabilityChange`，
+/// 随机数是 `level.random`。
+///
+/// `hurtAndBreak(amount, level, null, onBreak)`. `onBreak` is empty.
+///
+/// `player == null` skips the creative-mode check. Durability enchantments still run through
+/// `EnchantmentHelper.processDurabilityChange`, and the draws come from `level.random`.
+pub(crate) fn hurt_and_break(
+    mut stack: ItemStack,
+    amount: i32,
+    random: &LegacyRandom,
+) -> ItemStack {
+    let Ok(patch) = ComponentPatch::from_opaque(&stack) else {
+        return stack;
+    };
+    let spent = durability_change(stack.item, &patch, amount, random, false);
+    if spent == 0 {
+        return stack;
+    }
+    let new_damage = damage_value(stack.item, &patch).wrapping_add(spent);
+    if write_damage(&mut stack, new_damage) {
+        stack.count -= 1;
+    }
+    stack
+}
+
 /// `ItemStack.consume`：创造模式不减。
 ///
 /// `ItemStack.consume`: creative mode does not shrink the stack.
@@ -183,7 +213,10 @@ fn hurt_stack(
         return;
     }
     let new_damage = damage_value(stack.item, &patch).wrapping_add(spent);
-    apply_damage(stack, new_damage, hand, broken);
+    if write_damage(stack, new_damage) {
+        stack.count -= 1;
+        broken.push(hand);
+    }
 }
 
 /// `processDurabilityChange`。创造模式在附魔取数之前就返回。
@@ -361,12 +394,13 @@ fn java_round_i32(value: f64) -> i32 {
     (shifted.floor() as i64) as i32
 }
 
-/// `applyDamage`：写成夹好的耐久，坏了就减一并记下这只手。
+/// `applyDamage` 里写耐久的那一步。坏了返回真，数量由调用方减，`onBreak` 也由调用方决定。
 ///
-/// `applyDamage`: store the clamped damage, and on a break shrink by one and record the hand.
-fn apply_damage(stack: &mut ItemStack, new_damage: i32, hand: Hand, broken: &mut Vec<Hand>) {
+/// The damage write inside `applyDamage`. Returns true when the stack broke. The caller shrinks
+/// it and decides what `onBreak` does.
+fn write_damage(stack: &mut ItemStack, new_damage: i32) -> bool {
     let Ok(mut patch) = ComponentPatch::from_opaque(stack) else {
-        return;
+        return false;
     };
     let max = max_damage(stack.item, &patch);
     patch.put(
@@ -376,10 +410,7 @@ fn apply_damage(stack: &mut ItemStack, new_damage: i32, hand: Hand, broken: &mut
     let (added, removed) = patch.to_opaque();
     stack.added = added;
     stack.removed = removed;
-    if is_broken(stack) {
-        stack.count -= 1;
-        broken.push(hand);
-    }
+    is_broken(stack)
 }
 
 /// `isDamageableItem`。

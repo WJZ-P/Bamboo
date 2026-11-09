@@ -124,7 +124,10 @@ fn spend_held(world: &mut World, ctx: &UseContext, spend: Spend) {
 
 /// `CampfireBlock.canLight`、`CandleBlock.canLight`、`CandleCakeBlock.canLight`：
 /// 还没点着，营火和蜡烛还不能泡在水里。
-fn can_light(state: BlockState) -> bool {
+///
+/// `CampfireBlock.canLight`, `CandleBlock.canLight`, `CandleCakeBlock.canLight`: unlit, and a
+/// campfire or candle must not be waterlogged.
+pub(crate) fn can_light(state: BlockState) -> bool {
     let unlit = state.try_get(LIT) == Some(false);
     let dry = state.try_get(WATERLOGGED) == Some(false);
     let needs_dry = state.is_tagged(block_tags::CAMPFIRES) || state.is_tagged(block_tags::CANDLES);

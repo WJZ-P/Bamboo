@@ -452,6 +452,20 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 };
                 send_level_event(region, None, pos, &event);
             }
+            // 穿上的格子已经写进物品栏。本人收 `container_set_slot`，附近的人靠之后的装备同步。
+            //
+            // The slot is already written. This player gets `container_set_slot`. Nearby viewers
+            // see it on the later equipment sync.
+            Effect::DispenserEquipped {
+                entity_id,
+                menu_slot,
+            } => {
+                let players = &mut region.players;
+                let links = &mut region.links;
+                if let Some(player) = players.get_mut(&PlayerId(entity_id)) {
+                    inventory::send_slot(player, links, usize::from(menu_slot));
+                }
+            }
             Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
             // `ServerPlayer.sendOverlayMessage`。只发给发起动作的那名玩家。
             //
