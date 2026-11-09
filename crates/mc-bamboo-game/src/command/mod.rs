@@ -18,6 +18,7 @@ mod gamerule;
 mod items;
 mod players;
 mod select;
+mod stopsound;
 mod teleport;
 mod time;
 mod world_settings;

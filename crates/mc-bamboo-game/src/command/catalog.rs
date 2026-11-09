@@ -7,7 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, clone, gamerule, items, players, teleport, time, world_settings,
+    CommandFn, Commands, blocks, clone, gamerule, items, players, stopsound, teleport, time,
+    world_settings,
 };
 
 struct Builder {
@@ -84,6 +85,7 @@ pub(crate) fn build() -> Commands {
     register_seed(&mut builder, root);
     register_spawns(&mut builder, root);
     register_clone(&mut builder, root);
+    register_stopsound(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -441,6 +443,27 @@ fn bind_clone_modes(builder: &mut Builder, parent: usize, filter: FilterKind, st
     builder.bind_literal(parent, "force", actions[1]);
     builder.bind_literal(parent, "move", actions[2]);
     builder.bind_literal(parent, "normal", actions[0]);
+}
+
+fn register_stopsound(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "stopsound", permission::GAMEMASTERS);
+    let targets = builder.argument(command, "targets", players_argument(), 0);
+    builder.run(targets, stopsound::stop_sound);
+    let all = builder.literal(targets, "*", 0);
+    add_sound_name(builder, all);
+    for name in [
+        "master", "music", "record", "weather", "block", "hostile", "neutral", "player", "ambient",
+        "voice", "ui",
+    ] {
+        let source = builder.literal(targets, name, 0);
+        builder.run(source, stopsound::stop_sound);
+        add_sound_name(builder, source);
+    }
+}
+
+fn add_sound_name(builder: &mut Builder, parent: usize) {
+    let sound = builder.argument(parent, "sound", ArgumentType::ResourceLocation, 0);
+    builder.run(sound, stopsound::stop_sound);
 }
 
 fn register_seed(builder: &mut Builder, root: usize) {
