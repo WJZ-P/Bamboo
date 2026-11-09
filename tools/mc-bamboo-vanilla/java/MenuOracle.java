@@ -503,9 +503,16 @@ public final class MenuOracle {
             line.addProperty("shape", shape.id);
             line.addProperty("creative", creative);
             line.addProperty("seed", seed);
+            line.addProperty("fixedWorld", true);
             line.addProperty("mapScale", scale);
             line.addProperty("mapLocked", locked);
             line.addProperty("bookshelves", shape == Shape.ENCHANTMENT && variant % 2 == 0 ? 15 : 0);
+            if (shape == Shape.ENCHANTMENT) {
+                // `onEnchantmentPerformed` 从玩家自己的随机源换种子；这里提前算出来。
+                net.minecraft.util.RandomSource playerRandom =
+                        net.minecraft.util.RandomSource.create(seed);
+                line.addProperty("nextSeed", playerRandom.nextInt());
+            }
             line.add("container", stacks(grid));
             line.add("inventory", inventoryItems(inventory));
             line.add("data", dataSlots(menu));

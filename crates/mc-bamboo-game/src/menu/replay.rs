@@ -185,9 +185,11 @@ impl Replay {
         data: &[i32],
         creative: bool,
         seed: i32,
+        fixed_world: bool,
         map_scale: i32,
         map_locked: bool,
         bookshelves: i32,
+        next_seed: Option<i32>,
     ) -> Self {
         let kind = shape.workstation().expect("workstation shape");
         let mut seeds = Vec::new();
@@ -208,19 +210,14 @@ impl Replay {
             data,
             creative,
             seed,
+            fixed_world,
             map_scale,
             map_locked,
             bookshelves,
+            next_seed,
         );
         replay.station = Some(station);
         replay
-    }
-
-    /// 重放假世界里的附魔种子、地图状态和书架数都由题目给定。
-    pub fn seed(&mut self, value: i32, map_scale: i32, map_locked: bool, bookshelves: i32) {
-        if let Some(station) = self.station.as_mut() {
-            station.replay_seed(value, map_scale, map_locked, bookshelves);
-        }
     }
 
     /// `ServerboundRenameItemPacket`。官方只认铁砧菜单。
@@ -525,9 +522,11 @@ mod tests {
             &[],
             false,
             0,
+            false,
             0,
             false,
             0,
+            None,
         );
         let snapshot = replay.open();
         assert_eq!(snapshot.slots[0], ItemStack::new(items::OAK_PLANKS, 4));

@@ -69,12 +69,18 @@ struct Case {
     #[serde(default)]
     seed: i32,
     /// 假世界里的地图比例、锁定状态和书架数。
+    /// 固定题的假世界会执行 `access.execute`；随机题仍是 NULL access。
+    #[serde(default)]
+    fixed_world: bool,
     #[serde(default)]
     map_scale: i32,
     #[serde(default)]
     map_locked: bool,
     #[serde(default)]
     bookshelves: i32,
+    /// 附魔成功后官方从玩家随机源换出的新种子。
+    #[serde(default)]
+    next_seed: Option<i32>,
     open: Outcome,
     steps: Vec<Step>,
     /// 这道题的客户端会按官方预测回传哈希。
@@ -271,9 +277,11 @@ impl Report {
                 &case.data,
                 case.creative,
                 case.seed,
+                case.fixed_world,
                 case.map_scale,
                 case.map_locked,
                 case.bookshelves,
+                case.next_seed,
             );
             // 材料先按物品和数量放进去，再盖上组件。下标是格子序号，合成格要加一。
             // Ingredients land as item and count first, then the component patch. The index is the

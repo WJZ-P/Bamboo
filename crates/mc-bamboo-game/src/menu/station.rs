@@ -344,6 +344,10 @@ pub(crate) struct Station {
     ///
     /// The menu was opened on a real world. Replays do not draw grindstone experience.
     in_world: bool,
+    /// 重放题有可用的假世界（`access.execute` 会执行）。
+    replay_world: bool,
+    /// 重放题里附魔成功后官方换出的新种子。
+    replay_next_seed: Option<i32>,
     /// 铁砧改名框里当前的名字。`None` 是还没发过 `rename_item`。
     ///
     /// The anvil name field. `None` means no `rename_item` has arrived.
@@ -368,14 +372,6 @@ pub(crate) struct Station {
     /// World effects to settle when an anvil, cartography, or enchantment result is taken in a real world.
     effects: Vec<WorldEffect>,
     packets: Vec<Outgoing>,
-}
-
-/// 重放里固定玩家随机源的第一个 `nextInt()`（附魔成功后换种子用）。
-fn next_player_seed(seed: i32) -> i32 {
-    let mut random = mc_bamboo_blocks::entity::JavaRandom::new(
-        i64::from(seed) ^ mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED,
-    );
-    random.next_int()
 }
 
 /// 一次取出结果后世界线程要做的动作，顺序和官方 `onTake` 一致。
@@ -418,6 +414,8 @@ impl Station {
             patterns: Vec::new(),
             awards: Vec::new(),
             in_world: false,
+            replay_world: false,
+            replay_next_seed: None,
             item_name: None,
             anvil_outcome: anvil::Outcome::default(),
             menu_random: LegacyRandom::new(0),
@@ -1253,6 +1251,8 @@ impl Station {
     }
 
     /// `EnchantmentMenu.quickMoveStack`。
+    ///
+    /// 玩家格里的物品只可能进青金石格或第一格（一次一个），官方不做背包和快捷栏互换。
     fn route_enchantment(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
         if index == 0 || index == 1 {
             return Self::moved_or_stop(self.move_items(stack, 2, 38, true), false);
@@ -1270,13 +1270,7 @@ impl Station {
             }
             return MoveResult::Moved { crafted: false };
         }
-        if (2..29).contains(&index) {
-            return Self::moved_or_stop(self.move_items(stack, 29, 38, false), false);
-        }
-        if (29..38).contains(&index) {
-            return Self::moved_or_stop(self.move_items(stack, 2, 29, false), false);
-        }
-        MoveResult::Moved { crafted: false }
+        MoveResult::Stop { write_back: false }
     }
 
     fn route_inventory(
@@ -1641,10 +1635,12 @@ impl Station {
             return self.click_loom(button);
         }
         if self.kind == Kind::Enchantment {
-            if !self.in_world {
-                // 重放的假世界会执行官方附魔 lambda，连换种子也一起模拟。
-                let seed = self.data.get(enchantment::SEED_SLOT).copied().unwrap_or(0);
-                return self.click_enchantment(button, next_player_seed(seed), i32::MAX);
+            if self.replay_world {
+                // 重放的假世界执行官方附魔 lambda；新种子由题目给出。
+                let seed = self
+                    .replay_next_seed
+                    .unwrap_or_else(|| self.data.get(enchantment::SEED_SLOT).copied().unwrap_or(0));
+                return self.click_enchantment(button, seed);
             }
             return false;
         }
@@ -1916,7 +1912,7 @@ impl Station {
         if !old.is_empty() && (map.is_empty() || additional.is_empty()) {
             self.slots[2] = ItemStack::empty();
         }
-        if !map.is_empty() && !additional.is_empty() && !self.in_world {
+        if !map.is_empty() && !additional.is_empty() && self.replay_world {
             self.slots[2] =
                 cartography::result(&map, &additional, &old, self.map_scale, self.map_locked);
         }
@@ -1948,16 +1944,19 @@ impl Station {
             self.broadcast();
             return;
         }
+        if !self.replay_world {
+            return;
+        }
         enchantment::refresh(&self.menu_random, &mut self.data, &stack, self.bookshelves);
         self.broadcast();
     }
 
     /// `EnchantmentMenu.clickMenuButton` 的 `access.execute` 部分。
-    fn click_enchantment(&mut self, button: i32, seed: i32, level_cap: i32) -> bool {
+    fn click_enchantment(&mut self, button: i32, seed: i32) -> bool {
         let item = self.slots[0].clone();
         let lapis = self.slots[1].clone();
-        let ok =
-            enchantment::can_click(button, &self.data, &item, &lapis, self.creative, level_cap);
+        // 官方的假玩家 `experienceLevel` 固定为 0；Bamboo 真实世界也按 0 级。
+        let ok = enchantment::can_click(button, &self.data, &item, &lapis, self.creative, 0);
         if !ok {
             return false;
         }
@@ -2254,6 +2253,7 @@ impl Station {
     pub(crate) fn replay_seed(
         &mut self,
         seed: i32,
+        fixed_world: bool,
         map_scale: i32,
         map_locked: bool,
         bookshelves: i32,
@@ -2268,6 +2268,8 @@ impl Station {
             self.map_scale = map_scale;
             self.map_locked = map_locked;
         }
+        self.replay_world =
+            fixed_world && matches!(self.kind, Kind::Enchantment | Kind::Cartography);
     }
 
     /// 打开前换掉一格材料。同步压住，`slotsChanged` 会重算结果，state id 不动。
@@ -2355,13 +2357,16 @@ pub(crate) fn prepare_replay(
     data: &[i32],
     creative: bool,
     seed: i32,
+    fixed_world: bool,
     map_scale: i32,
     map_locked: bool,
     bookshelves: i32,
+    next_seed: Option<i32>,
 ) -> Station {
     let mut station = Station::create(kind.into(), 1, BlockPos::new(0, 0, 0));
     station.creative = creative;
-    station.replay_seed(seed, map_scale, map_locked, bookshelves);
+    station.replay_seed(seed, fixed_world, map_scale, map_locked, bookshelves);
+    station.replay_next_seed = next_seed;
     let mut slots = vec![ItemStack::empty(); 46];
     for (index, stack) in inventory.iter().enumerate().take(slots.len()) {
         slots[index] = stack.clone();
@@ -2964,13 +2969,12 @@ pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, bu
                 .get(enchantment::SEED_SLOT)
                 .copied()
                 .unwrap_or(0);
-            let level_cap = if station.creative { i32::MAX } else { 0 };
             if let Some(player) = region.players.get_mut(&id) {
                 // 官方 `onEnchantmentPerformed` 从玩家自己的随机源换新种子。
                 seed = player.random.next_int();
                 player.enchantment_seed = seed;
             }
-            if station.click_enchantment(button, seed, level_cap) {
+            if station.click_enchantment(button, seed) {
                 station.broadcast();
             }
             roll_world_effects(region, id, station);

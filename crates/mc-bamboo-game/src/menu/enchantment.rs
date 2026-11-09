@@ -6,10 +6,7 @@
 use mc_bamboo_blocks::LegacyRandom;
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{items, registries::data_component_type as kinds, tags};
-use mc_bamboo_protocol::{
-    components::{ComponentValue, PatchEntry},
-    item::ItemStack,
-};
+use mc_bamboo_protocol::{components::ComponentValue, item::ItemStack};
 
 use super::{
     enchantments,
@@ -156,25 +153,23 @@ pub(super) fn select(
     level = java_round(level as f32 * (1.0 + delta)).clamp(1, i32::MAX);
     let mut pool = available(level, stack);
     let mut selected = Vec::new();
-    while !pool.is_empty() {
-        let Some(pick) = weighted(random, &pool) else {
-            break;
-        };
-        selected.push(pick);
-        if random.next_int(50) > level {
-            break;
-        }
-        if let Some(last) = selected.last().copied() {
+    // 官方先在循环外抽一次，之后每轮 `nextInt(50)`、过滤、再抽一次。
+    if let Some(first) = weighted(random, &pool) {
+        selected.push(first);
+        while random.next_int(50) <= level {
+            let Some(last) = selected.last().copied() else {
+                break;
+            };
             pool.retain(|entry| enchantments::compatible(entry.id, last.id));
+            if pool.is_empty() {
+                break;
+            }
+            let Some(next) = weighted(random, &pool) else {
+                break;
+            };
+            selected.push(next);
+            level /= 2;
         }
-        if pool.is_empty() {
-            break;
-        }
-        let Some(next) = weighted(random, &pool) else {
-            break;
-        };
-        selected.push(next);
-        level /= 2;
     }
     if stack.item == items::BOOK && selected.len() > 1 {
         selected.remove(random.next_int(selected.len() as i32) as usize);
@@ -248,13 +243,26 @@ pub(super) fn can_click(
     (experience_level >= need && experience_level >= data[button as usize]) || creative
 }
 
-/// `ItemStack.enchant`：`enchantments` 组件缺省时官方直接返回，不写补丁。
+/// 书变成附魔书：`transmuteCopy` 只复制补丁，别的组件走新物品的默认表。
+pub(super) fn transmute_book(stack: &ItemStack) -> ItemStack {
+    let mut result = ItemStack::new(items::ENCHANTED_BOOK, stack.count);
+    let patch = patch_of(stack);
+    write_patch(&mut result, &patch);
+    result
+}
+
+/// `ItemStack.enchant`：`updateEnchantments` 读的是含默认组件的 `get`，
+/// 附魔书走 `stored_enchantments`，别的物品走 `enchantments`。
 pub(super) fn enchant(stack: &mut ItemStack, instances: &[Instance]) {
+    let kind = if stack.item == items::ENCHANTED_BOOK {
+        kinds::STORED_ENCHANTMENTS
+    } else {
+        kinds::ENCHANTMENTS
+    };
     for entry in instances {
-        let mut patch = patch_of(stack);
-        let Some(ComponentValue::Enchantments(levels)) = patch.get(kinds::ENCHANTMENTS).cloned()
+        let Some(ComponentValue::Enchantments(levels) | ComponentValue::StoredEnchantments(levels)) =
+            resolved(stack, kind)
         else {
-            // 官方 `updateEnchantments` 在组件不存在时什么都不写。
             continue;
         };
         let mut levels = levels;
@@ -263,29 +271,13 @@ pub(super) fn enchant(stack: &mut ItemStack, instances: &[Instance]) {
         } else {
             levels.push((entry.id, entry.level.min(255)));
         }
-        patch.put(
-            kinds::ENCHANTMENTS,
-            PatchEntry::Set(ComponentValue::Enchantments(levels)),
-        );
-        write_patch(stack, &patch);
+        let value = if kind == kinds::STORED_ENCHANTMENTS {
+            ComponentValue::StoredEnchantments(levels)
+        } else {
+            ComponentValue::Enchantments(levels)
+        };
+        assign(stack, kind, Some(value));
     }
-}
-
-/// 书变成附魔书时保留补丁（`ItemStack.transmuteCopy`）。
-pub(super) fn transmute_book(stack: &ItemStack) -> ItemStack {
-    let mut result = ItemStack::new(items::ENCHANTED_BOOK, stack.count);
-    let patch = patch_of(stack);
-    write_patch(&mut result, &patch);
-    // 官方 `transmuteCopy` 保留组件，但 `enchantments` 补上空的默认项时
-    // `ItemStack.enchant` 才会写入；Bamboo 的 `enchant` 已按此实现。
-    if resolved(&result, kinds::ENCHANTMENTS).is_none() {
-        assign(
-            &mut result,
-            kinds::ENCHANTMENTS,
-            Some(ComponentValue::Enchantments(Vec::new())),
-        );
-    }
-    result
 }
 
 #[cfg(test)]
@@ -303,7 +295,6 @@ mod tests {
 
     #[test]
     fn the_cost_formula_matches_three_slots() {
-        let random = LegacyRandom::new(7);
         let stack = ItemStack::new(items::DIAMOND_SWORD, 1);
         assert_eq!(cost(&LegacyRandom::new(7), 0, 15, &stack), 7);
         assert_eq!(cost(&LegacyRandom::new(7), 1, 15, &stack), 16);
