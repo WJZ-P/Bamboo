@@ -57,16 +57,20 @@ pub fn tick_chunk(
 
 /// `ServerLevel.tickThunder(chunk)`：打雷时每个实体 ticking 区块掷一次骰子。
 ///
-/// 官方命中后还要找闪电落点、看难度和刷怪规则取随机数，最后生成闪电实体或陷阱马。
-/// Bamboo 没有闪电实体，只取官方要取的随机数：落点候选里的 `nextInt(list.size())` 和
-/// 陷阱马的 `nextDouble()` 都不生成实体，这里按「没有实体」的分支走。
+/// 官方命中后取落点、看 `isRainingAt`，再按 `SPAWN_MOBS` 取一次 `nextDouble()` 决定
+/// 是不是骷髅陷阱，最后生成实体。Bamboo 不生成闪电实体和陷阱马，但随机数照取：
+/// 落点的 `getBlockRandomPos`、`getEntitiesOfClass` 列表里选实体时的
+/// `nextInt(list.size())`（没有生活实体时不取）、以及 `nextDouble()`。
 pub fn tick_thunder(level: &mut dyn Level, ticks: &mut BlockTicks, chunk: ChunkPos) -> Outcome {
     let world = World::new(level, ticks);
     if world.is_raining() && world.is_thundering() {
         let origin = BlockPos::new(chunk.x << 4, 0, chunk.z << 4);
         if world.random().next_int(LIGHTNING_CHANCE) == 0 {
-            // `findLightningTargetAround` 先取一格；没有实体候选时不额外取数。
-            let _target = world.block_random_pos(origin, SECTION_Y_MASK);
+            // `findLightningTargetAround`：Bamboo 没有 POI 和生活实体，落点就是这一格。
+            let target = world.block_random_pos(origin, SECTION_Y_MASK);
+            if world.is_raining_at(target) && world.block_game_rules().spawn_mobs {
+                let _trap_roll = world.random().next_double();
+            }
         }
     }
     finish(world, InteractionResult::Pass)
