@@ -246,6 +246,15 @@ pub trait Level {
     /// loot table is filled before its first read or write. Fake worlds leave this empty.
     fn unpack_loot_table(&mut self, _pos: BlockPos) {}
 
+    /// 官方 `ShulkerBoxBlock.playerWillDestroy` 的创造模式分支：非空潜影盒直接
+    /// 掉出带 `BlockEntity.collectComponents()` 的方块物品。默认没有这类物品。
+    ///
+    /// Vanilla `ShulkerBoxBlock.playerWillDestroy` in creative mode: a non-empty
+    /// shulker box drops the block item with `BlockEntity.collectComponents()`.
+    fn creative_container_drop(&mut self, _pos: BlockPos, _item: i32) -> Option<ItemStack> {
+        None
+    }
+
     /// `BlockState.spawnAfterBreak` 里 `tryDropExperience` 和虫蚀方块生成蠹虫
     /// 可能要取的 `level.random` 数。没有经验球和生物时实体不生成，取数仍要照官方。
     ///

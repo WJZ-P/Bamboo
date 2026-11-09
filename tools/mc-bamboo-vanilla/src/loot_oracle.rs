@@ -118,6 +118,11 @@ struct Line {
     cases: usize,
     #[serde(default)]
     excluded: usize,
+    /// 带 `BLOCK_ENTITY` 的方块掉落题：方块实体组件的 codec JSON。
+    ///
+    /// A block drop with a `BLOCK_ENTITY`: its components as codec JSON.
+    #[serde(default, rename = "blockEntity")]
+    block_entity: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,7 +263,12 @@ impl Report {
             match case.kind.as_str() {
                 "summary" => self.summary = Some((case.cases, case.excluded)),
                 "excluded" => self.note_excluded(&case),
-                "block" => {
+                "block" | "blockEntity" => {
+                    // 带方块实体的题必须真的传了组件，不然这道题就白出了。
+                    // A block-entity case must actually carry its components.
+                    if case.kind == "blockEntity" && case.block_entity.is_empty() {
+                        return Err("blockEntity case has no block entity components".to_owned());
+                    }
                     if !self.check_block(&case) {
                         self.block += 1;
                     }
@@ -325,7 +335,11 @@ impl Report {
             state: BlockState(case.state),
             pos: (case.x, case.y, case.z),
             level: &level,
-            block_entity: None,
+            block_entity: (!case.block_entity.is_empty()).then(|| {
+                mc_bamboo_loot::BlockEntityView {
+                    components: case.block_entity.clone(),
+                }
+            }),
             breaker: None,
             tool: Some(tool),
             explosion_radius: case.explosion,

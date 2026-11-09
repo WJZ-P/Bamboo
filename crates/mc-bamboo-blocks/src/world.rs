@@ -1781,6 +1781,17 @@ impl<'a> World<'a> {
         self.level.unpack_loot_table(pos);
     }
 
+    /// 官方 `ShulkerBoxBlock.playerWillDestroy` 的创造模式分支：生成带组件的内容。
+    ///
+    /// The creative branch of vanilla `ShulkerBoxBlock.playerWillDestroy`.
+    pub(crate) fn creative_container_drop(
+        &mut self,
+        pos: BlockPos,
+        item: i32,
+    ) -> Option<mc_bamboo_protocol::item::ItemStack> {
+        self.level.creative_container_drop(pos, item)
+    }
+
     /// `addFreshEntity`：放进世界，返回实体 ID。tick 的时候生成的实体下一 tick 才开始动。
     pub fn spawn_entity(&mut self, entity: Entity) -> i32 {
         self.level.entities_mut().spawn(entity)

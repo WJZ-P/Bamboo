@@ -1,15 +1,17 @@
-//! 战利品表产出的物品堆转成真正要发给客户端、要生成实体的 [`ItemStack`]。
+//! 战利品表和游戏之间来回转换物品堆与组件。
 //!
-//! `LootStack.components` 里的值是官方 `Codec` 的 JSON 表示。这里按官方
+//! `LootStack.components` 里的值是官方 `Codec` 的 JSON 表示。转成物品堆时按官方
 //! `JsonOps.convertTo(NbtOps, json)` 的规则先变成 NBT，再用组件存档编解码器
-//! 解成 `ComponentPatch`。单个组件解不开时只丢掉那一项，其余照留。
+//! 解成 `ComponentPatch`。方块实体身上的组件反过来按 `NbtOps` → `JsonOps` 变成
+//! 战利品表能读的 JSON。单个组件解不开时只丢掉那一项，其余照留。
 //!
-//! Turning loot-table stacks into the [`ItemStack`] sent to clients and spawned as
-//! entities. `LootStack.components` holds official codec JSON; convert each value
-//! with the `JsonOps` → `NbtOps` rules and decode it through the persistent component
-//! codec. A component that cannot be decoded is dropped with a warning.
+//! Converts item stacks and components between the loot table and the game. Official
+//! codec JSON becomes NBT and then a typed component patch; block-entity components
+//! go the other way. An entry that cannot be decoded is dropped with a warning.
 
-use mc_bamboo_loot::LootStack;
+use std::collections::BTreeMap;
+
+use mc_bamboo_loot::{Components, LootStack};
 use mc_bamboo_protocol::{
     components::{
         ComponentPatch, PatchEntry,
@@ -18,8 +20,72 @@ use mc_bamboo_protocol::{
     },
     item::ItemStack,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tracing::warn;
+
+/// 把方块实体收集出的组件转成 `BLOCK_ENTITY` 参数里的 JSON 组件表。
+///
+/// 官方 `CopyComponentsFunction.BlockEntitySource` 从 `BlockEntity.collectComponents()`
+/// 取组件；Bamboo 复用 `block_items::collect` 的那份 `ComponentPatch`，这里按存档
+/// `Codec` 编成 JSON 供战利品函数读取。转换失败的组件只丢掉那一项。
+///
+/// Turns the components collected from a block entity into the JSON component map of
+/// the `BLOCK_ENTITY` loot parameter. A value without a persistent codec is dropped.
+pub fn component_json(patch: &ComponentPatch) -> Components {
+    let mut out = BTreeMap::new();
+    for (kind, entry) in patch.entries() {
+        let PatchEntry::Set(value) = entry else {
+            continue;
+        };
+        let Ok(name) = read::id_name(Registry::DATA_COMPONENT_TYPE, *kind) else {
+            continue;
+        };
+        match components::encode_value(value, 0) {
+            Ok(encoded) => {
+                out.insert(name.to_owned(), dyn_to_json(&encoded));
+            }
+            Err(error) => warn!(
+                component = name,
+                %error,
+                "skipping a block entity component without an archive codec"
+            ),
+        }
+    }
+    out
+}
+
+/// 官方 `NbtOps.convertTo(JsonOps, tag)`：数值、布尔字节、列表和映射都按 JSON 表示。
+///
+/// Vanilla `NbtOps.convertTo(JsonOps, tag)`: numbers, boolean bytes, lists and maps
+/// in their JSON form.
+fn dyn_to_json(value: &Dyn) -> Value {
+    match value {
+        Dyn::Byte(value) => Value::from(*value),
+        Dyn::Short(value) => Value::from(*value),
+        Dyn::Int(value) => Value::from(*value),
+        Dyn::Long(value) => Value::from(*value),
+        Dyn::Float(value) => Value::from(*value),
+        Dyn::Double(value) => Value::from(*value),
+        Dyn::Bool(value) => Value::Bool(*value),
+        Dyn::String(value) => Value::String(value.clone()),
+        Dyn::List(values) => Value::Array(values.iter().map(dyn_to_json).collect()),
+        Dyn::Map(entries) => Value::Object(
+            entries
+                .iter()
+                .map(|(name, value)| (name.clone(), dyn_to_json(value)))
+                .collect::<Map<String, Value>>(),
+        ),
+        Dyn::ByteArray(values) => {
+            Value::Array(values.iter().map(|value| Value::from(*value)).collect())
+        }
+        Dyn::IntArray(values) => {
+            Value::Array(values.iter().map(|value| Value::from(*value)).collect())
+        }
+        Dyn::LongArray(values) => {
+            Value::Array(values.iter().map(|value| Value::from(*value)).collect())
+        }
+    }
+}
 
 /// 把战利品表的一堆变成游戏里的物品堆。
 ///

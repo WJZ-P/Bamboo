@@ -227,7 +227,7 @@ pub(crate) fn create_stack(template: &ItemStackTemplate) -> ItemStack {
 }
 
 /// 官方 `ItemContainerContents.fromItems`：末尾的空格子不写。
-fn container_contents(slots: &[ItemStack]) -> ComponentValue {
+pub(crate) fn container_contents_value(slots: &[ItemStack]) -> ComponentValue {
     let last = slots.iter().rposition(|stack| !stack.is_empty());
     let items = last.map_or_else(Vec::new, |last| {
         slots[..=last]
@@ -250,26 +250,29 @@ fn container_contents(slots: &[ItemStack]) -> ComponentValue {
 ///
 /// The block entity is shared. Components go back onto the item as `collectComponents` writes them.
 pub(crate) fn collect(region: &Region, pos: BlockPos) -> ComponentPatch {
-    let mut patch = region.block_items.get(&pos).cloned().unwrap_or_default();
-    let Some(kind) = block_entity_kind(region, pos) else {
-        return patch;
-    };
-    if stores_items(kind) {
-        let slots = region
-            .containers
-            .get(&pos)
-            .map_or(&[][..], |entry| entry.slots.as_slice());
-        patch.put(kinds::CONTAINER, PatchEntry::Set(container_contents(slots)));
-    }
-    // 官方 `collectImplicitComponents`：还没解包的表原样写回 `container_loot`。
-    // Vanilla `collectImplicitComponents`: an unpacked table goes back onto the item.
-    if let Some(entry) = region.containers.get(&pos)
-        && let Some(loot) = container_loot::pending(entry)
-    {
+    collect_components_at(&region.block_items, &region.containers, pos)
+}
+
+/// `BlockEntity.collectComponents`，只借容器表和方块实体组件表，供方块逻辑用。
+///
+/// `BlockEntity.collectComponents` with only the two tables block logic can borrow.
+pub(crate) fn collect_components_at(
+    block_items: &std::collections::BTreeMap<BlockPos, ComponentPatch>,
+    containers: &std::collections::BTreeMap<BlockPos, crate::container::ContainerEntry>,
+    pos: BlockPos,
+) -> ComponentPatch {
+    let mut patch = block_items.get(&pos).cloned().unwrap_or_default();
+    if let Some(entry) = containers.get(&pos) {
         patch.put(
-            kinds::CONTAINER_LOOT,
-            PatchEntry::Set(ComponentValue::ContainerLoot(loot.to_tag())),
+            kinds::CONTAINER,
+            PatchEntry::Set(container_contents_value(&entry.slots)),
         );
+        if let Some(loot) = container_loot::pending(entry) {
+            patch.put(
+                kinds::CONTAINER_LOOT,
+                PatchEntry::Set(ComponentValue::ContainerLoot(loot.to_tag())),
+            );
+        }
     }
     patch
 }

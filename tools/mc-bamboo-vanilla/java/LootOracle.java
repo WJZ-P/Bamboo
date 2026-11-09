@@ -44,6 +44,11 @@ import net.minecraft.world.Container;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.RandomSequences;
 import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.core.component.DataComponentPatch;
+import net.minecraft.world.item.component.ItemContainerContents;
+import com.mojang.serialization.JsonOps;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.AgeableMob;
@@ -179,9 +184,11 @@ public final class LootOracle {
             excluded += blockCases(world, random, blockCases);
             excluded += chestCases(world, random, chestCases);
             excluded += entityCases(world, random, entityCount);
+            int blockEntityCases = blockEntityCases(world, random);
+            excluded += blockEntityCases;
             JsonObject summary = new JsonObject();
             summary.addProperty("kind", "summary");
-            summary.addProperty("cases", blockCases + chestCases + entityCount);
+            summary.addProperty("cases", blockCases + chestCases + entityCount + 1);
             summary.addProperty("excluded", excluded);
             OUT.println(summary);
         }
@@ -233,6 +240,24 @@ public final class LootOracle {
             }
         }
         return excluded;
+    }
+
+    /**
+     * 一个带 `BLOCK_ENTITY` 的方块掉落题：装了钻石、改过名的潜影盒。
+     * 官方 `Block.dropResources` 把方块实体交给 `copy_components`。
+     *
+     * A block drop with a `BLOCK_ENTITY`: a named shulker box with diamonds.
+     * Vanilla `Block.dropResources` passes the block entity to `copy_components`.
+     */
+    private static int blockEntityCases(World world, Random random) {
+        try {
+            JsonObject line = world.blockEntityDrop(random.nextLong());
+            OUT.println(line);
+            return 0;
+        } catch (Throwable error) {
+            printExcluded("blockEntity", "minecraft:blocks/shulker_box", error);
+            return 1;
+        }
     }
 
     private static int chestCases(World world, Random random, int cases) {
@@ -503,6 +528,65 @@ public final class LootOracle {
                     enchantments.getOrThrow(Enchantments.FORTUNE),
                     server,
                     level);
+        }
+
+        /** 一个装了钻石、改过名的潜影盒，和 `Block.dropResources` 一样的 BLOCK 参数。 */
+        JsonObject blockEntityDrop(long worldSeed) throws Exception {
+            server.sequences = new RandomSequences();
+            server.worldSeed = worldSeed;
+            RandomSource levelRandom = RandomSource.create(worldSeed);
+            setField(Level.class, level, "random", levelRandom);
+            BlockState state = Blocks.SHULKER_BOX.defaultBlockState();
+            ShulkerBoxBlockEntity chest = new ShulkerBoxBlockEntity(BlockPos.ZERO, state);
+            chest.setItem(0, new ItemStack(Items.DIAMOND, 7));
+            // `collectImplicitComponents` 读的是方块实体的 `name` 字段，不是组件表。
+            // `collectImplicitComponents` reads the block entity's `name` field.
+            setField(net.minecraft.world.level.block.entity.BaseContainerBlockEntity.class,
+                    chest, "name", Component.literal("oracle box"));
+            int x = 3;
+            int y = 4;
+            int z = 5;
+            LootParams params = new LootParams.Builder(level)
+                    .withParameter(LootContextParams.BLOCK_STATE, state)
+                    .withParameter(LootContextParams.ORIGIN, new Vec3(x + 0.5, y + 0.5, z + 0.5))
+                    .withOptionalParameter(LootContextParams.BLOCK_ENTITY, chest)
+                    .withParameter(LootContextParams.TOOL, ItemStack.EMPTY)
+                    .create(LootContextParamSets.BLOCK);
+            LootTable table = lootRegistries.getLootTable(state.getBlock().getLootTable().orElseThrow());
+            List<ItemStack> drops = table.getRandomItems(params);
+            Optional<Identifier> sequence = sequenceOf(table);
+            long nextLong = sequence.isPresent()
+                    ? server.getRandomSequence(sequence.get()).nextLong()
+                    : levelRandom.nextLong();
+            JsonObject line = new JsonObject();
+            line.addProperty("kind", "blockEntity");
+            line.addProperty("block", "minecraft:shulker_box");
+            line.addProperty("state", Block.getId(state));
+            line.addProperty("x", x);
+            line.addProperty("y", y);
+            line.addProperty("z", z);
+            line.addProperty("toolItem", 0);
+            line.addProperty("toolCount", 0);
+            line.add("enchants", new JsonArray());
+            line.addProperty("worldSeed", Long.toString(worldSeed));
+            JsonArray items = new JsonArray();
+            for (ItemStack drop : drops) {
+                items.add(stackJson(drop));
+            }
+            line.add("items", items);
+            line.addProperty("nextLong", Long.toString(nextLong));
+            // 方块实体组件的 codec JSON，Bamboo 侧要转成同样的组件再求值。
+            JsonObject componentJson = new JsonObject();
+            ItemContainerContents contents = ItemContainerContents.fromItems(
+                    java.util.stream.IntStream.range(0, chest.getContainerSize())
+                            .mapToObj(chest::getItem)
+                            .toList());
+            componentJson.add("minecraft:container",
+                    ItemContainerContents.CODEC.encodeStart(JsonOps.INSTANCE, contents)
+                            .result().orElseThrow());
+            componentJson.addProperty("minecraft:custom_name", "oracle box");
+            line.add("blockEntity", componentJson);
+            return line;
         }
 
         List<ResourceKey<LootTable>> containerTables() {
@@ -924,6 +1008,12 @@ public final class LootOracle {
         InstrumentComponent instrument = stack.get(DataComponents.INSTRUMENT);
         if (instrument != null) {
             components.addProperty("minecraft:instrument", holderId(instrument.instrument()));
+        }
+        ItemContainerContents container = stack.get(DataComponents.CONTAINER);
+        if (container != null && container.nonEmptyItems().iterator().hasNext()) {
+            components.add("minecraft:container",
+                    ItemContainerContents.CODEC.encodeStart(JsonOps.INSTANCE, container)
+                            .result().orElseThrow());
         }
         Integer trade = stack.get(DataComponents.ADDITIONAL_TRADE_COST);
         if (trade != null) {

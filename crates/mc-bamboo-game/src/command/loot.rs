@@ -325,7 +325,8 @@ fn evaluate(
                 .map_err(|_| fail("command.failed"))
         }
         Source::Mine => {
-            // 方块掉落表按注册表查，用官方同样的一组参数求值（不带破坏者/工具）。
+            // 官方 `LootCommand.dropBlockLoot` 先取方块实体，再按方块掉落表求值。
+            // Vanilla `LootCommand.dropBlockLoot` takes the block entity before evaluating.
             let state = region
                 .chunks
                 .block(pos)
@@ -345,6 +346,7 @@ fn evaluate(
                 f64::from(pos.z) + 0.5,
             ));
             params.block_state = Some(state);
+            params.block_entity = crate::block_drops::collect_from_region(region, pos);
             table
                 .get_random_items_with_seed(&params, 0, Some(sequences), fallback)
                 .map_err(|_| fail("command.failed"))
