@@ -42,6 +42,21 @@ pub fn parse_snbt_compound(input: &str) -> Result<Vec<(String, Tag)>, SnbtError>
     }
 }
 
+/// 从命令读取器的当前位置解析一个 SNBT 字面量，返回它和消费掉的字符数。
+///
+/// 官方 `TagParser.parseAsArgument` / `ComponentArgument`：packrat 语法只吃一个字面量，
+/// 后面留给命令树的下一个参数。出错时调用方把命令游标退回参数开头。
+///
+/// Parses one SNBT literal at a command reader's cursor, returning it and the number of
+/// characters consumed. The official `TagParser.parseAsArgument` stops after one literal;
+/// the rest of the line belongs to the next argument.
+pub fn parse_snbt_argument(input: &str) -> Result<(Tag, usize), SnbtError> {
+    let characters: Vec<char> = input.chars().collect();
+    let mut parser = Parser::new(&characters);
+    let tag = parser.parse_literal()?;
+    Ok((tag, parser.pos))
+}
+
 fn tag_name(tag: &Tag) -> &'static str {
     match tag {
         Tag::Byte(_) => "TAG_Byte",
@@ -1537,6 +1552,23 @@ mod tests {
             Ok(tag) => tag,
             Err(error) => panic!("failed to parse {input:?}: {error}"),
         }
+    }
+
+    #[test]
+    fn arguments_stop_after_one_literal() {
+        let (tag, used) = parse_snbt_argument("{text:\"hi\"} rest").unwrap();
+        assert_eq!(tag, parse("{text:\"hi\"}"));
+        assert_eq!(used, "{text:\"hi\"}".chars().count());
+        let (tag, used) = parse_snbt_argument("[\"a\",\"b\"] trailing").unwrap();
+        assert_eq!(
+            tag,
+            Tag::List(vec![Tag::String("a".into()), Tag::String("b".into())])
+        );
+        assert_eq!(used, "[\"a\",\"b\"]".chars().count());
+        let (tag, used) = parse_snbt_argument("\"hello world\" tail").unwrap();
+        assert_eq!(tag, Tag::String("hello world".into()));
+        assert_eq!(used, "\"hello world\"".chars().count());
+        assert!(parse_snbt_argument("{text:\"hi\"").is_err());
     }
 
     #[test]

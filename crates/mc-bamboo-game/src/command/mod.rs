@@ -18,6 +18,7 @@ mod items;
 mod players;
 mod select;
 mod teleport;
+mod text;
 mod time;
 
 use std::sync::OnceLock;
@@ -325,6 +326,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::Item
         | ArgumentType::ItemPredicate
         | ArgumentType::Message
+        | ArgumentType::Component
         | ArgumentType::ResourceLocation => ArgumentProperties::None,
     }
 }
@@ -374,7 +376,7 @@ mod tests {
     use super::*;
     use crate::{global::Global, inbound::PlayerId, player::Player, region::Region};
 
-    fn world_with(name: &str, level: u8) -> (Global, Region, PlayerId) {
+    pub(super) fn world_with(name: &str, level: u8) -> (Global, Region, PlayerId) {
         let mut region = Region::new(2, 20, false);
         let id = PlayerId(1);
         let mut player = Player::new(

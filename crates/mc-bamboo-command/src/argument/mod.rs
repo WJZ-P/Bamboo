@@ -4,6 +4,7 @@
 //! [`ArgumentType::parser_name`] 返回的是官方注册名，网络层按它查 ID。
 
 pub mod block;
+pub mod component;
 pub mod coordinates;
 pub mod entity;
 pub mod item;
@@ -58,6 +59,8 @@ pub enum ArgumentType {
     Item,
     ItemPredicate,
     Message,
+    /// 官方 `ComponentArgument`：一个 SNBT 文本组件。
+    Component,
     /// 官方 `IdentifierArgument`。时间标记用它，不查注册表。
     ///
     /// Official `IdentifierArgument`. Time markers use it and do not look up a registry.
@@ -92,6 +95,7 @@ impl ArgumentType {
             Self::Item => "minecraft:item_stack",
             Self::ItemPredicate => "minecraft:item_predicate",
             Self::Message => "minecraft:message",
+            Self::Component => "minecraft:component",
             Self::ResourceLocation => "minecraft:resource_location",
             Self::Resource { .. } => "minecraft:resource",
         }
@@ -119,6 +123,7 @@ impl ArgumentType {
             Self::Item => registry::ITEM_STACK,
             Self::ItemPredicate => registry::ITEM_PREDICATE,
             Self::Message => registry::MESSAGE,
+            Self::Component => registry::COMPONENT,
             Self::ResourceLocation => registry::RESOURCE_LOCATION,
             Self::Resource { .. } => registry::RESOURCE,
         }
@@ -174,6 +179,7 @@ impl ArgumentType {
             Self::Item => item::parse_item(reader),
             Self::ItemPredicate => item::parse_item_predicate(reader),
             Self::Message => message::parse_message(reader, allow_selectors),
+            Self::Component => component::parse_component(reader),
             Self::ResourceLocation => parse_resource_location(reader),
             Self::Resource { registry } => parse_resource(reader, registry),
         }

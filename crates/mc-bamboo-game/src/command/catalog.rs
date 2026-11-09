@@ -6,7 +6,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
-use crate::command::{CommandFn, Commands, blocks, gamerule, items, players, teleport, time};
+use crate::command::{CommandFn, Commands, blocks, gamerule, items, players, teleport, text, time};
 
 struct Builder {
     graph: CommandGraph,
@@ -75,6 +75,7 @@ pub(crate) fn build() -> Commands {
     register_msg(&mut builder, root);
     register_say(&mut builder, root);
     register_setblock(&mut builder, root);
+    register_tellraw(&mut builder, root);
     register_teleport(&mut builder, root);
     register_time(&mut builder, root);
     Commands {
@@ -244,6 +245,14 @@ fn register_setblock(builder: &mut Builder, root: usize) {
     builder.bind_literal(block, "keep", blocks::setblock_keep);
     builder.bind_literal(block, "replace", blocks::setblock_replace);
     builder.bind_literal(block, "strict", blocks::setblock_strict);
+}
+
+/// `TellRawCommand.register`：权限 2，只给每个目标发系统消息，没有成功反馈。
+fn register_tellraw(builder: &mut Builder, root: usize) {
+    let tellraw = builder.literal(root, "tellraw", permission::GAMEMASTERS);
+    let targets = builder.argument(tellraw, "targets", players_argument(), 0);
+    let message = builder.argument(targets, "message", ArgumentType::Component, 0);
+    builder.run(message, text::tellraw);
 }
 
 fn register_teleport(builder: &mut Builder, root: usize) {

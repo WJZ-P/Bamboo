@@ -3,6 +3,7 @@
 use mc_bamboo_blocks::BlockState;
 use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::Item;
+use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
 
 use crate::identifier::Identifier;
@@ -407,6 +408,8 @@ pub enum Value {
     Item(ItemInput),
     ItemPredicate(ItemPredicateInput),
     Message(Message),
+    /// 官方 `ComponentArgument` 解析出的 SNBT 标签，交给网络层的组件 `Codec` 校验。
+    Component(Tag),
     GameMode(GameMode),
     EntityAnchor(EntityAnchor),
     Time(i32),
@@ -514,6 +517,13 @@ impl Value {
     pub fn as_message(&self) -> Option<&Message> {
         match self {
             Self::Message(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_component(&self) -> Option<&Tag> {
+        match self {
+            Self::Component(value) => Some(value),
             _ => None,
         }
     }
