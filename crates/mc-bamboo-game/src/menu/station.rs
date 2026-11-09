@@ -2590,9 +2590,9 @@ pub(crate) fn on_slot_state_changed(
     let mask = region.redstone.crafter_disabled(pos);
     let bit = 1u16 << slot;
     let updated = if new_state { mask & !bit } else { mask | bit };
-    if updated == mask {
-        return;
-    }
+    // 官方 `setSlotState` 即使值没变也照样 `setChanged()`，这里不做提前返回。
+    //
+    // `setSlotState` calls `setChanged()` even when the value did not change, so no early return here.
     region.redstone.set_crafter_disabled(pos, updated);
     if let Some(menu) = region.menus.get_mut(&id)
         && let Some(station) = menu.station.as_mut()
