@@ -17,6 +17,7 @@ mod enchant;
 mod feedback;
 mod gamerule;
 mod items;
+mod loot;
 mod players;
 mod random;
 mod select;

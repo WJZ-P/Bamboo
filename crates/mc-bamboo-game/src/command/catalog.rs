@@ -7,7 +7,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, clone, enchant, gamerule, items, players, random, stopsound,
+    CommandFn, Commands, blocks, clone, enchant, gamerule, items, loot, players, random, stopsound,
     teleport, time, world_settings,
 };
 
@@ -88,6 +88,7 @@ pub(crate) fn build() -> Commands {
     register_stopsound(&mut builder, root);
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
+    register_loot(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -531,6 +532,122 @@ fn register_enchant(builder: &mut Builder, root: usize) {
         0,
     );
     builder.run(level, enchant::enchant);
+}
+
+/// 官方 `LootCommand.addTargets`：四种目标，每个目标后面是同一组来源后缀。
+fn register_loot(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "loot", permission::GAMEMASTERS);
+
+    let give = builder.literal(command, "give", 0);
+    let players = builder.argument(give, "players", players_argument(), 0);
+    add_loot_sources(builder, players, LootTarget::Give);
+
+    let insert = builder.literal(command, "insert", 0);
+    let target = builder.argument(insert, "targetPos", ArgumentType::BlockPos, 0);
+    add_loot_sources(builder, target, LootTarget::Insert);
+
+    let spawn = builder.literal(command, "spawn", 0);
+    let target = builder.argument(spawn, "targetPos", ArgumentType::Vec3, 0);
+    add_loot_sources(builder, target, LootTarget::Spawn);
+
+    let replace = builder.literal(command, "replace", 0);
+    let entity = builder.literal(replace, "entity", 0);
+    let targets = builder.argument(entity, "entities", entities_argument(), 0);
+    add_replace_suffix(builder, targets, LootTarget::ReplaceEntity);
+    let block = builder.literal(replace, "block", 0);
+    let target = builder.argument(block, "targetPos", ArgumentType::BlockPos, 0);
+    add_replace_suffix(builder, target, LootTarget::ReplaceBlock);
+}
+
+fn add_replace_suffix(builder: &mut Builder, parent: usize, target: LootTarget) {
+    let slot = builder.argument(parent, "slot", ArgumentType::ItemSlot, 0);
+    add_loot_sources(builder, slot, target);
+    let count = builder.argument(
+        slot,
+        "count",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    add_loot_sources(builder, count, target);
+}
+
+#[derive(Clone, Copy)]
+enum LootTarget {
+    Give,
+    Insert,
+    ReplaceBlock,
+    ReplaceEntity,
+    Spawn,
+}
+
+/// `loot <table>`、`mine [pos [mainhand|offhand|tool]]`、`kill <target>`、
+/// `fish <table> <pos> [mainhand|offhand|tool]`。
+fn add_loot_sources(builder: &mut Builder, parent: usize, target: LootTarget) {
+    let table = builder.literal(parent, "loot", 0);
+    let name = builder.argument(table, "loot_table", ArgumentType::LootTable, 0);
+    bind_loot(builder, name, target, LootSource::Loot);
+
+    let mine = builder.literal(parent, "mine", 0);
+    let pos = builder.argument(mine, "pos", ArgumentType::BlockPos, 0);
+    bind_loot(builder, pos, target, LootSource::Mine);
+    add_tool_suffixes(builder, pos, target, LootSource::Mine);
+
+    let kill = builder.literal(parent, "kill", 0);
+    let victim = builder.argument(kill, "target", entity_argument(), 0);
+    bind_loot(builder, victim, target, LootSource::Kill);
+
+    let fish = builder.literal(parent, "fish", 0);
+    let name = builder.argument(fish, "loot_table", ArgumentType::LootTable, 0);
+    let pos = builder.argument(name, "pos", ArgumentType::BlockPos, 0);
+    bind_loot(builder, pos, target, LootSource::Fish);
+    add_tool_suffixes(builder, pos, target, LootSource::Fish);
+}
+
+fn add_tool_suffixes(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
+    builder.bind_literal(parent, "mainhand", loot_action(target, source));
+    builder.bind_literal(parent, "offhand", loot_action(target, source));
+    let tool = builder.argument(parent, "tool", ArgumentType::Item, 0);
+    builder.run(tool, loot_action(target, source));
+}
+
+#[derive(Clone, Copy)]
+enum LootSource {
+    Loot,
+    Mine,
+    Kill,
+    Fish,
+}
+
+fn loot_action(target: LootTarget, source: LootSource) -> CommandFn {
+    match (target, source) {
+        (LootTarget::Give, LootSource::Loot) => loot::give_loot,
+        (LootTarget::Give, LootSource::Mine) => loot::give_mine,
+        (LootTarget::Give, LootSource::Kill) => loot::give_kill,
+        (LootTarget::Give, LootSource::Fish) => loot::give_fish,
+        (LootTarget::Insert, LootSource::Loot) => loot::insert_loot,
+        (LootTarget::Insert, LootSource::Mine) => loot::insert_mine,
+        (LootTarget::Insert, LootSource::Kill) => loot::insert_kill,
+        (LootTarget::Insert, LootSource::Fish) => loot::insert_fish,
+        (LootTarget::Spawn, LootSource::Loot) => loot::spawn_loot,
+        (LootTarget::Spawn, LootSource::Mine) => loot::spawn_mine,
+        (LootTarget::Spawn, LootSource::Kill) => loot::spawn_kill,
+        (LootTarget::Spawn, LootSource::Fish) => loot::spawn_fish,
+        (LootTarget::ReplaceBlock, LootSource::Loot) => loot::replace_block_loot,
+        (LootTarget::ReplaceBlock, LootSource::Mine) => loot::replace_block_mine,
+        (LootTarget::ReplaceBlock, LootSource::Kill) => loot::replace_block_kill,
+        (LootTarget::ReplaceBlock, LootSource::Fish) => loot::replace_block_fish,
+        (LootTarget::ReplaceEntity, LootSource::Loot) => loot::replace_entity_loot,
+        (LootTarget::ReplaceEntity, LootSource::Mine) => loot::replace_entity_mine,
+        (LootTarget::ReplaceEntity, LootSource::Kill) => loot::replace_entity_kill,
+        (LootTarget::ReplaceEntity, LootSource::Fish) => loot::replace_entity_fish,
+    }
+}
+
+fn bind_loot(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
+    builder.run(parent, loot_action(target, source));
 }
 
 fn register_seed(builder: &mut Builder, root: usize) {

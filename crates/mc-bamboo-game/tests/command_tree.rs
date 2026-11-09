@@ -12,6 +12,7 @@ const ROOTS: &[&str] = &[
     "clone",
     "defaultgamemode",
     "enchant",
+    "loot",
     "random",
     "difficulty",
     "seed",
