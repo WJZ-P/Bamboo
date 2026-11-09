@@ -145,6 +145,20 @@ fn clone_in(
     let flags = if style.strict { 816 | 2 } else { 2 };
     let barrier = BlockState(mc_bamboo_data::blocks::BARRIER);
     let air = BlockState(mc_bamboo_data::blocks::AIR);
+    // 官方 `Mode.MOVE` 的清空在放目标区之前：先把源格子换成屏障（避免旧方块
+    // 掉落），再写成空气。这样源区和目标区重叠时，重叠格子上放好的新方块
+    // 不会被之后的清空抹掉。
+    if style.mode == CloneMode::Move {
+        for pos in &sources {
+            world.set_block(*pos, barrier, flags | 816);
+        }
+        let clear_flags = if style.strict { flags } else { 3 };
+        for pos in &sources {
+            world.set_block(*pos, air, clear_flags);
+            remove_entity(entities, *pos);
+        }
+    }
+
     let mut blocks = solid;
     blocks.extend(with_entity.iter().cloned());
     blocks.extend(other);
@@ -157,15 +171,6 @@ fn clone_in(
     for info in &blocks {
         if world.set_block(info.pos, info.state, flags) {
             count += 1;
-        }
-    }
-    // 官方 `move` 在收集之前先把源格子换成屏障（避免掉落），再清空；
-    // Bamboo 的区块存储对空段跳过写空气，所以这里也走一次屏障再写空气。
-    if style.mode == CloneMode::Move {
-        for pos in &sources {
-            world.set_block(*pos, barrier, flags | 816);
-            world.set_block(*pos, air, if style.strict { flags } else { 3 });
-            remove_entity(entities, *pos);
         }
     }
     for info in &with_entity {
@@ -492,6 +497,51 @@ mod tests {
             "source={source_state} target={target_state}"
         );
         assert_eq!(target_state, blocks::STONE);
+    }
+
+    /// 官方 `CloneCommands.clone` 的 `Mode.MOVE` 允许源区和目标区重叠。
+    ///
+    /// 手算：源区 x=2,3,4（z=2 固定），方块依次是 stone、dirt、stone；
+    /// 目标起点 x=3，所以三格的映射是 2→3、3→4、4→5。
+    /// 官方顺序是「先收集三格的旧状态（此时 x=3 仍是 dirt），再把源区
+    /// 2,3,4 全部屏障→空气，最后把收集到的状态写到 3,4,5」。
+    /// 因此结果应为 x=2 空气、x=3 stone、x=4 dirt、x=5 stone。
+    /// 如果清空源区放在放完目标区之后，x=3、x=4 会被错误地抹成空气。
+    #[test]
+    fn overlapping_move_keeps_the_blocks_placed_after_clearing() {
+        let (mut global, mut region, id) = world();
+        let y = mc_bamboo_world::flat::surface_y() + 1;
+        run(
+            &mut global,
+            &mut region,
+            id,
+            &format!("setblock 2 {y} 2 stone"),
+        );
+        run(
+            &mut global,
+            &mut region,
+            id,
+            &format!("setblock 3 {y} 2 dirt"),
+        );
+        run(
+            &mut global,
+            &mut region,
+            id,
+            &format!("setblock 4 {y} 2 stone"),
+        );
+        run(
+            &mut global,
+            &mut region,
+            id,
+            &format!("clone 2 {y} 2 4 {y} 2 3 {y} 2 replace move"),
+        );
+        let states: Vec<u32> = (2..=5)
+            .map(|x| at(&region, BlockPos::new(x, y, 2)))
+            .collect();
+        assert_eq!(
+            states,
+            vec![blocks::AIR, blocks::STONE, blocks::DIRT, blocks::STONE]
+        );
     }
 
     #[test]
