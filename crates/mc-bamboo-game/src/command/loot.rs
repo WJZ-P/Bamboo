@@ -89,11 +89,26 @@ variants! {
     replace_entity_fish: Fish, ReplaceEntity;
 }
 
+/// `kill` / `fish` 的反馈里要带上目标名；没有目标名时用空字符串。
+fn parsed_target_name(parsed: &ParsedCommand) -> String {
+    parsed
+        .get("target")
+        .and_then(Value::as_entity)
+        .and_then(|selector| selector.player_name.clone())
+        .unwrap_or_default()
+}
+
 /// 官方 `LootCommand` 的四类来源里，Bamboo 现在只求 `loot` 和 `mine`。
 /// `kill` / `fish` 要实体掉落表和钓鱼参数，暂不支持。
-fn need_entity(request: &Request) -> Result<(), CommandFail> {
+fn need_entity(request: &Request, parsed: &ParsedCommand) -> Result<(), CommandFail> {
     match request.source {
-        Source::Kill | Source::Fish => Err(fail("commands.drop.no_loot_table")),
+        Source::Kill | Source::Fish => {
+            let target = parsed_target_name(parsed);
+            Err(fail_with(
+                "commands.drop.no_loot_table.entity",
+                [target.into()],
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -105,7 +120,7 @@ fn loot_command(
     parsed: &ParsedCommand,
     request: Request,
 ) -> Result<(), CommandFail> {
-    need_entity(&request)?;
+    need_entity(&request, parsed)?;
     let player = region
         .players
         .get(&id)
@@ -182,17 +197,34 @@ fn loot_command(
         }
         Target::Spawn => spawn_items(region, drop_position, &stacks),
     }
+    // 官方 `CommandResponseTracker`：产物只有一堆时用 single（数量 + 物品名），
+    // 其余用 multiple（总数量）；有表名时两个变体再带上表名。
     let name = parsed.get("loot_table").and_then(Value::as_str);
-    let key = match name {
-        Some(_) => "commands.drop.success.multiple_with_table",
-        None => "commands.drop.success.multiple",
+    let single = stacks.len() == 1;
+    let key = match (name, single) {
+        (Some(_), true) => "commands.drop.success.single_with_table",
+        (Some(_), false) => "commands.drop.success.multiple_with_table",
+        (None, true) => "commands.drop.success.single",
+        (None, false) => "commands.drop.success.multiple",
     };
     let mut args = vec![count.into()];
+    if single {
+        let only = &stacks[0];
+        args.push(Component::text(item_name(only.item)).into());
+    }
     if let Some(name) = name {
         args.push(Component::text(name).into());
     }
-    feedback::success(region, id, Component::translate(key, args), true);
+    feedback::success(region, id, Component::translate(key, args), false);
     Ok(())
+}
+
+/// `ItemStack.getHoverName` 的文本。物品组件的译名还没接，用注册表短名。
+fn item_name(item: i32) -> &'static str {
+    mc_bamboo_data::items::ITEMS
+        .get(item as usize)
+        .map(|item| item.name)
+        .unwrap_or("item")
 }
 
 /// 官方 `LootCommand.dropInWorld`：每件物品一个 `ItemEntity`，位置就是
@@ -210,19 +242,59 @@ fn spawn_items(region: &mut Region, position: Vec3, stacks: &[LootStack]) {
     }
 }
 
+/// 官方 `SlotRanges.lambda$static$0` 的名字 → 槽位数字表。
+/// `weapon`/`weapon.mainhand` = 98，`weapon.offhand` = 99，
+/// `armor.head/chest/legs/feet` = 103..100，body = 105，saddle = 106，
+/// `horse.chest`/`player.cursor` = 499。范围名（以 `*` 结尾或没有下标的
+/// `container` 等）代表多个槽位，这里取第一个。
 fn slot_index(parsed: &ParsedCommand) -> Result<i32, CommandFail> {
     let name = parsed
         .get("slot")
         .and_then(Value::as_str)
         .ok_or_else(|| fail("argument.slot.invalid"))?;
-    // 官方 `SlotArgument` 把 `container.N`、`hotbar.N`、`inventory.N` 等映射到
-    // `Inventory` 的下标；这里用简化的数字解析，不支持的名字直接失败。
-    let suffix = name.rsplit_once('.').map_or(name, |(_, suffix)| suffix);
-    suffix
-        .parse::<i32>()
-        .ok()
-        .filter(|index| (0..41).contains(index))
-        .ok_or_else(|| fail("argument.slot.invalid"))
+    let named = match name {
+        "contents" => Some(0),
+        "weapon" | "weapon.mainhand" | "weapon.*" => Some(98),
+        "weapon.offhand" => Some(99),
+        "armor.feet" => Some(100),
+        "armor.legs" => Some(101),
+        "armor.chest" => Some(102),
+        "armor.head" => Some(103),
+        "armor.*" => Some(103),
+        "armor.body" => Some(105),
+        "saddle" => Some(106),
+        "horse.chest" | "player.cursor" => Some(499),
+        _ => None,
+    };
+    if let Some(index) = named {
+        return Ok(index);
+    }
+    // `addSlotRange(name, first, count)` 生成 `<name>N` 和 `<name>`（整段）。
+    // 数字槽位直接映射到官方的 `SlotRange` 下标。
+    // 范围名的顺序要和 `SlotRanges` 的静态初始化一致；长前缀先匹配。
+    let ranges: &[(&str, i32)] = &[
+        ("player.crafting.", 500),
+        ("mob.inventory.", 300),
+        ("enderchest.", 200),
+        ("container.", 0),
+        ("inventory.", 9),
+        ("hotbar.", 0),
+        ("horse.", 500),
+    ];
+    for (prefix, offset) in ranges {
+        let Some(index) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        let index = if index.is_empty() || index == "*" {
+            0
+        } else {
+            index
+                .parse::<i32>()
+                .map_err(|_| fail("argument.slot.invalid"))?
+        };
+        return Ok(offset + index);
+    }
+    Err(fail("argument.slot.invalid"))
 }
 
 fn evaluate(
@@ -280,7 +352,8 @@ fn evaluate(
 }
 
 fn to_stack(loot: &LootStack) -> ItemStack {
-    // 战利品函数写下的组件还是 JSON；物品组件编码器接上之前先只带物品和数量。
+    // TODO: 和 `block_drops::plain_stack` 一样，战利品函数的组件还是 JSON，
+    // 等主仓库统一的转换函数合进来后两处一起接上。
     let _ = &loot.components;
     ItemStack::new(loot.item, loot.count)
 }
@@ -439,6 +512,49 @@ mod tests {
                 .all(|stack| stack.is_empty())
         );
         assert_eq!(region.entities.iter().count(), 0);
+    }
+
+    #[test]
+    fn slot_names_follow_the_official_slot_ranges() {
+        let (graph, _) = crate::command::test_commands();
+        for text in [
+            "loot replace entity Kitten weapon.mainhand loot minecraft:blocks/stone",
+            "loot replace entity Kitten armor.head loot minecraft:blocks/stone",
+            "loot replace entity Kitten container.5 loot minecraft:blocks/stone",
+            "loot replace entity Kitten hotbar.3 loot minecraft:blocks/stone",
+            "loot replace entity Kitten inventory.2 loot minecraft:blocks/stone",
+            "loot replace block 8 -59 8 enderchest.1 loot minecraft:blocks/stone",
+            "loot replace block 8 -59 8 horse.5 loot minecraft:blocks/stone",
+            "loot replace block 8 -59 8 player.crafting.2 loot minecraft:blocks/stone",
+            "loot replace block 8 -59 8 contents loot minecraft:blocks/stone",
+        ] {
+            assert!(graph.parse(text, 2).is_ok(), "{text}");
+        }
+        // 直接用槽位解析函数核对几个官方数字。
+        let cases = [
+            ("weapon.mainhand", 98),
+            ("weapon.offhand", 99),
+            ("armor.head", 103),
+            ("armor.feet", 100),
+            ("container.5", 5),
+            ("inventory.2", 11),
+            ("enderchest.1", 201),
+            ("player.crafting.2", 502),
+            ("saddle", 106),
+        ];
+        for (name, expected) in cases {
+            let mut parsed = graph
+                .parse(
+                    &format!("loot replace entity Kitten {name} loot minecraft:blocks/stone"),
+                    2,
+                )
+                .unwrap();
+            let _ = parsed.arguments.iter_mut();
+            assert!(
+                matches!(super::slot_index(&parsed), Ok(index) if index == expected),
+                "slot {name}"
+            );
+        }
     }
 
     #[test]
