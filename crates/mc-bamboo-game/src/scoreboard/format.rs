@@ -135,3 +135,16 @@ pub(crate) fn format_green_names(names: &[String]) -> Component {
         .collect();
     format_list(&entries)
 }
+
+/// 官方 `ComponentUtils.formatList(Collection<ServerPlayer>, Player::getDisplayName)`：
+/// 不排序、不涂绿，每个名字按队伍加上颜色和前后缀。
+///
+/// Official `ComponentUtils.formatList(Collection<ServerPlayer>, Player::getDisplayName)`:
+/// no sorting and no green color; each name is formatted with its team.
+pub(crate) fn format_player_names(names: &[String], board: &super::Scoreboard) -> Component {
+    let entries: Vec<Component> = names
+        .iter()
+        .map(|name| board.format_player_name(name))
+        .collect();
+    format_list(&entries)
+}

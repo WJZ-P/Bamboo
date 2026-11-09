@@ -868,6 +868,32 @@ mod tests {
         ));
     }
 
+    /// 官方 `CommandResponseTracker` 没有 onZero：0 个变化时也发 multiple 成功消息。
+    ///
+    /// Official `CommandResponseTracker` has no onZero: zero changes still produce
+    /// the multiple success message.
+    #[test]
+    fn leaving_an_unassigned_holder_reports_zero_changes() {
+        let (mut server, client) = operator("Op");
+        run(&mut server, &client, "team leave Ghost");
+        assert!(has_key(
+            &system_text(&client),
+            "commands.team.leave.success.multiple"
+        ));
+        // 官方 `addPlayerToTeam` 对已经在队伍里的名字会先移除再加入，所以仍算一次变化。
+        //
+        // Official `addPlayerToTeam` removes and re-adds a name already on the team,
+        // so that still counts as one change.
+        run(&mut server, &client, "team add red");
+        run(&mut server, &client, "team join red Kitten");
+        client.take_frames();
+        run(&mut server, &client, "team join red Kitten");
+        assert!(has_key(
+            &system_text(&client),
+            "commands.team.join.success.single"
+        ));
+    }
+
     #[test]
     fn unknown_team_reports_the_official_key() {
         let (mut server, client) = operator("Op");

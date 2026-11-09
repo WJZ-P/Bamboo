@@ -26,7 +26,9 @@ use crate::{links::encode_frames, region::Region};
 #[allow(unused_imports)]
 pub(crate) use boss::{BossBars, BossColor, BossStyle};
 #[allow(unused_imports)]
-pub(crate) use format::{boss_name, format_green_names, format_list, objective_name, team_name};
+pub(crate) use format::{
+    boss_name, format_green_names, format_list, format_player_names, objective_name, team_name,
+};
 
 /// 一次改分数时的记分板名字。`display` 只有在线玩家才有。
 ///
@@ -210,13 +212,6 @@ impl Scoreboard {
             .get(player)
             .and_then(|scores| scores.get(objective))
             .map(|score| score.value)
-    }
-
-    pub(crate) fn score_locked(&self, player: &str, objective: &str) -> Option<bool> {
-        self.scores
-            .get(player)
-            .and_then(|scores| scores.get(objective))
-            .map(|score| score.locked)
     }
 
     pub(crate) fn tracked_players(&self) -> Vec<String> {

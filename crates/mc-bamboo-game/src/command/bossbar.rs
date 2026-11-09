@@ -230,7 +230,7 @@ pub(crate) fn get_players(
             true,
         );
     } else {
-        let list = crate::scoreboard::format_green_names(&names);
+        let list = crate::scoreboard::format_player_names(&names, global.scoreboard());
         ok(
             region,
             id,
@@ -429,11 +429,19 @@ pub(crate) fn set_players(
     if global.boss_bars_mut().set_players(&name, &targets, region) == Some(false) {
         return Err(fail("commands.bossbar.set.players.unchanged"));
     }
-    let names = global
+    // 官方 `setPlayers.success.some` 用的是这次传入的目标集合，不是栏里在线的玩家。
+    //
+    // Official `setPlayers.success.some` uses the newly supplied target collection,
+    // not the bar's online players.
+    let names: Vec<String> = targets
+        .iter()
+        .filter_map(|(player, _)| region.players.get(player).map(|entry| entry.name.clone()))
+        .collect();
+    let online = global
         .boss_bars()
         .online_names(&name, region)
         .ok_or_else(|| fail("command.failed"))?;
-    if names.is_empty() {
+    if online.is_empty() {
         ok(
             region,
             id,
@@ -662,6 +670,34 @@ mod tests {
             &system_text(&client),
             "commands.bossbar.set.visibility.unchanged.hidden"
         ));
+    }
+
+    /// 官方 `BossBarCommands` 的 players 列表用 `Player::getDisplayName`，不带绿色但带队伍前后缀。
+    ///
+    /// Official `BossBarCommands` player lists use `Player::getDisplayName`: no green,
+    /// but team prefix and suffix are applied.
+    #[test]
+    fn bossbar_player_lists_use_team_formatted_names() {
+        let (mut server, client) = operator("Op");
+        run(&mut server, &client, "team add red");
+        run(
+            &mut server,
+            &client,
+            r#"team modify red prefix {text:"[R]"}"#,
+        );
+        run(&mut server, &client, "team join red Op");
+        run(&mut server, &client, r#"bossbar add test:one {text:"One"}"#);
+        run(&mut server, &client, "bossbar set test:one players @a");
+        client.take_frames();
+        run(&mut server, &client, "bossbar get test:one players");
+        let bodies = system_text(&client);
+        assert!(has_key(&bodies, "commands.bossbar.get.players.some"));
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.windows(3).any(|w| w == b"[R]")),
+            "列表里应带队伍前缀"
+        );
     }
 
     #[test]

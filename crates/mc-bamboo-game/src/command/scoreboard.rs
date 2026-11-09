@@ -814,27 +814,25 @@ pub(crate) fn players_enable(
     }
     let formatted = objective_name(global, &objective)?;
     let holders = holders(global, region, id, parsed, "targets")?;
-    let mut response = Response::new();
+    // 官方 `CommandResponseTracker.track` 只为本次真正解锁的名字计数。
+    //
+    // Official `CommandResponseTracker.track` only counts names unlocked by this command.
+    let mut unlocked: Vec<String> = Vec::new();
     for name in &holders.names {
         let holder = holder_of(global, name);
-        let changed = global.scoreboard_mut().unlock(&holder, &objective, region);
-        response.track(i32::from(changed));
+        if global.scoreboard_mut().unlock(&holder, &objective, region) {
+            unlocked.push(name.clone());
+        }
     }
-    if response.nonzero == 0 {
+    if unlocked.is_empty() {
         return Err(fail("commands.scoreboard.players.enable.failed"));
     }
-    if response.nonzero == 1 {
-        let name = holders
-            .names
-            .iter()
-            .find(|name| global.scoreboard().score_locked(name, &objective) == Some(false))
-            .cloned()
-            .unwrap_or_else(|| holders.first_name().to_owned());
+    if unlocked.len() == 1 {
         ok(
             region,
             id,
             "commands.scoreboard.players.enable.success.single",
-            args([formatted.into(), display_for(global, &name).into()]),
+            args([formatted.into(), display_for(global, &unlocked[0]).into()]),
             true,
         );
     } else {
@@ -842,7 +840,7 @@ pub(crate) fn players_enable(
             region,
             id,
             "commands.scoreboard.players.enable.success.multiple",
-            args([formatted.into(), (response.nonzero as i32).into()]),
+            args([formatted.into(), (unlocked.len() as i32).into()]),
             true,
         );
     }
