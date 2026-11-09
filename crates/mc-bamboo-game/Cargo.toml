@@ -14,6 +14,7 @@ mc-bamboo-blocks.workspace = true
 mc-bamboo-command.workspace = true
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+mc-bamboo-loot.workspace = true
 mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
 mc-bamboo-recipes.workspace = true
@@ -26,3 +27,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 rand_core.workspace = true
+serde_json.workspace = true

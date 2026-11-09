@@ -36,7 +36,6 @@ const TICK: Duration = Duration::from_millis(50);
 /// 落后超过这个时长就不追了，直接跳过去。短暂的卡顿靠连续跑 tick 追上。
 const MAX_CATCH_UP: Duration = Duration::from_secs(2);
 
-const GAME_MODE: GameMode = GameMode::Creative;
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
 
 /// 世界的启动参数。
@@ -192,7 +191,7 @@ impl World {
             warn!(player = id.0, "ignoring a second join with the same id");
             return;
         }
-        let game_mode = GAME_MODE;
+        let game_mode = self.global.state().default_game_mode;
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
@@ -204,7 +203,13 @@ impl World {
             chat_session: None,
         };
 
-        self.region.add_player(request, game_mode);
+        self.region.add_player(
+            request,
+            game_mode,
+            &self.global.difficulty_frames(),
+            self.global.state().spawn,
+            self.global.state().hashed_seed(),
+        );
 
         if let Some(frames) = self.global.tab_list() {
             self.region.links.send_frames(id, &frames);
@@ -218,8 +223,13 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
-        self.region
-            .start_loading_chunks(id, self.global.time(), self.global.clock());
+        self.region.start_loading_chunks(
+            id,
+            self.global.time(),
+            self.global.clock(),
+            self.global.state().spawn,
+            self.global.state().weather,
+        );
     }
 
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，

@@ -380,6 +380,7 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
 
     let mut expected = vec![
         clientbound::LOGIN,
+        clientbound::CHANGE_DIFFICULTY,
         clientbound::PLAYER_ABILITIES,
         clientbound::ENTITY_EVENT,
         clientbound::COMMANDS,
@@ -388,6 +389,7 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
         clientbound::SET_ENTITY_DATA,
         clientbound::UPDATE_ATTRIBUTES,
         clientbound::SET_TIME,
+        clientbound::SET_DEFAULT_SPAWN_POSITION,
         clientbound::GAME_EVENT,
         clientbound::SET_CHUNK_CACHE_CENTER,
         clientbound::CHUNK_BATCH_START,
@@ -407,11 +409,12 @@ fn second_player_gets_the_roster_first_and_the_others_get_the_new_player() {
     server.tick();
 
     let frames = second.take_frames();
-    let ids: Vec<i32> = frames.iter().take(8).map(|frame| frame.id).collect();
+    let ids: Vec<i32> = frames.iter().take(9).map(|frame| frame.id).collect();
     assert_eq!(
         ids,
         [
             clientbound::LOGIN,
+            clientbound::CHANGE_DIFFICULTY,
             clientbound::PLAYER_ABILITIES,
             clientbound::ENTITY_EVENT,
             clientbound::COMMANDS,
@@ -422,11 +425,11 @@ fn second_player_gets_the_roster_first_and_the_others_get_the_new_player() {
         ]
     );
     // 已有的玩家先发给新玩家，然后才是它自己，两次都是全部 8 个动作。
-    // 权限事件和命令树插在能力包和传送之间，所以名单从第 6 个包开始。
+    // 难度包和权限事件/命令树插在能力包和传送前后，所以名单从第 7 个包开始。
     //
-    // The permission event and command tree sit between abilities and the teleport,
-    // so the roster starts at the sixth packet.
-    for (frame, uuid) in [(&frames[5], first.uuid), (&frames[6], second.uuid)] {
+    // The difficulty packet, permission event and command tree come before the roster,
+    // so it starts at the seventh packet.
+    for (frame, uuid) in [(&frames[6], first.uuid), (&frames[7], second.uuid)] {
         assert_eq!(frame.body[..2], [0xff, 0x01]);
         assert_eq!(frame.body[2..18], *uuid.as_bytes());
     }

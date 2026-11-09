@@ -6,7 +6,9 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
-use crate::command::{CommandFn, Commands, blocks, gamerule, items, players, teleport, time};
+use crate::command::{
+    CommandFn, Commands, blocks, gamerule, items, players, teleport, time, world_settings,
+};
 
 struct Builder {
     graph: CommandGraph,
@@ -77,6 +79,8 @@ pub(crate) fn build() -> Commands {
     register_setblock(&mut builder, root);
     register_teleport(&mut builder, root);
     register_time(&mut builder, root);
+    register_difficulty(&mut builder, root);
+    register_default_gamemode(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -333,6 +337,21 @@ fn add_clock_nodes(builder: &mut Builder, parent: usize, gametime: bool) {
     if gametime {
         builder.bind_literal(query, "gametime", time::query_gametime);
     }
+}
+
+fn register_difficulty(builder: &mut Builder, root: usize) {
+    let difficulty = builder.literal(root, "difficulty", permission::GAMEMASTERS);
+    builder.run(difficulty, world_settings::query_difficulty);
+    // 官方按 `Difficulty.values()` 的顺序枚举，报告里的顺序是字母序，比较用名字查。
+    for name in ["peaceful", "easy", "normal", "hard"] {
+        builder.bind_literal(difficulty, name, world_settings::difficulty_literal);
+    }
+}
+
+fn register_default_gamemode(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "defaultgamemode", permission::GAMEMASTERS);
+    let mode = builder.argument(command, "gamemode", ArgumentType::GameMode, 0);
+    builder.run(mode, world_settings::default_gamemode);
 }
 
 fn players_argument() -> ArgumentType {
