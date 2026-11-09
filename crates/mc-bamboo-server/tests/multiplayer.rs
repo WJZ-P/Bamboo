@@ -998,7 +998,7 @@ async fn punch_swings_the_main_hand_for_observers_only() {
 #[tokio::test]
 async fn punch_is_silent_when_nobody_is_watching() {
     let server = TestServer::start(small_world()).await;
-    let mut alice = server.enter("Alice").await;
+    let alice = server.enter("Alice").await;
 
     alice.send(&punch()).await;
 
@@ -1451,7 +1451,7 @@ async fn a_silent_client_is_timed_out_and_the_other_is_not() {
 async fn a_flood_of_packets_does_not_stop_the_other_player() {
     let server = TestServer::start(small_world()).await;
     let flooder = server.enter("Flooder").await;
-    let mut bob = server.enter("Bob").await;
+    let bob = server.enter("Bob").await;
 
     // 比入站配额多得多。超了就断开这名玩家，配额够用时世界线程也要处理完。
     let one = punch();
@@ -1465,7 +1465,7 @@ async fn a_flood_of_packets_does_not_stop_the_other_player() {
 #[tokio::test]
 async fn packets_the_server_does_not_decode_are_dropped_quietly() {
     let server = TestServer::start(small_world()).await;
-    let mut alice = server.enter("Alice").await;
+    let alice = server.enter("Alice").await;
     let mark = alice.mark();
 
     // `coverage.md` 1.3：真实客户端会发、服务端可以丢弃的包，内容是什么都不算错。

@@ -5,12 +5,16 @@
 //!
 //! 所有等待都有时限。检查顺序靠 [`Player::expect`] 的游标：它只看游标之后的包，找到后把游标移到
 //! 这个包后面，所以连续两次 `expect` 就是在断言先后。
+//!
+//! 「稳定下来」用 [`Player::settle`]：发一个由世界线程处理、一定回包的无副作用请求，
+//! 等它的回包到了才继续。固定睡眠不保证服务端已经处理完，也不保证发给别的玩家
+//! 的包已经送到。
 
 use std::{
     collections::BTreeSet,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
     },
     time::Duration,
 };
@@ -34,21 +38,22 @@ use uuid::{Builder, Uuid};
 use super::{
     Client, chunk_batch_received, encode_outgoing,
     wire::{
-        AddEntity, AwardStats, BlockChangedAck, BlockUpdate, BundleDelimiter, ContainerSetSlot,
-        Disconnect, DisguisedChat, EntityPositionSync, ForgetLevelChunk, Frame, LevelChunk,
-        LevelEvent, Login, MAIN_HAND, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, Packet,
-        PlayerChat, PlayerInfoRemove, PlayerInfoUpdate, PlayerPosition, Pos, RemoveEntities,
-        RotateHead, START_DESTROY_BLOCK, SectionBlocksUpdate, SetChunkCacheCenter, SetEntityData,
-        SetEquipment, SetHeldSlot, SwingAnimation, SystemChat, Tracked, UP,
-        accept_teleportation_with_id, assert_bundles_paired, client_tick_end, face_center,
-        move_position, move_rotation, packet_name, player_action, player_loaded, replay_block,
-        replay_entity, set_creative_mode_slot, tracked_chunks, use_item_on,
+        AddEntity, AwardStats, BlockChangedAck, BlockUpdate, BundleDelimiter, CommandSuggestions,
+        ContainerSetSlot, Disconnect, DisguisedChat, EntityPositionSync, ForgetLevelChunk, Frame,
+        LevelChunk, LevelEvent, Login, MAIN_HAND, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
+        Packet, PlayerChat, PlayerInfoRemove, PlayerInfoUpdate, PlayerPosition, Pos,
+        RemoveEntities, RotateHead, START_DESTROY_BLOCK, SectionBlocksUpdate, SetChunkCacheCenter,
+        SetEntityData, SetEquipment, SetHeldSlot, SwingAnimation, SystemChat, Tracked, UP,
+        accept_teleportation_with_id, assert_bundles_paired, client_tick_end, command_suggestion,
+        face_center, move_position, move_rotation, packet_name, player_action, player_loaded,
+        replay_block, replay_entity, set_creative_mode_slot, tracked_chunks, use_item_on,
     },
 };
 
 /// 等一个包的时限。比 [`TEST_DEADLINE`](super::TEST_DEADLINE) 长：几组测试同时跑时机器很忙。
 pub const DEADLINE: Duration = Duration::from_secs(10);
-/// 断言“没有收到”之前等的时间，够世界线程跑 6 tick。
+/// 直接读 socket 的测试断言“一段时间没有包”时等的时间，够世界线程跑 6 tick。
+/// 假玩家的 [`Player::expect_none`] 不用固定睡眠，而是用一次世界线程往返做屏障。
 pub const QUIET: Duration = Duration::from_millis(300);
 /// 真实客户端一 tick 发一个移动包。
 const CLIENT_TICK: Duration = Duration::from_millis(50);
@@ -88,6 +93,8 @@ struct Log {
 struct Shared {
     log: Mutex<Log>,
     changed: Notify,
+    /// 同步屏障用过的 transaction，每名玩家从 1 开始递增。
+    next_barrier: AtomicI32,
     answer_keep_alive: AtomicBool,
     answer_chunk_batches: AtomicBool,
     answer_teleports: AtomicBool,
@@ -98,6 +105,7 @@ impl Shared {
         Self {
             log: Mutex::default(),
             changed: Notify::new(),
+            next_barrier: AtomicI32::new(1),
             answer_keep_alive: AtomicBool::new(answers.keep_alive),
             answer_chunk_batches: AtomicBool::new(answers.chunk_batches),
             answer_teleports: AtomicBool::new(answers.teleports),
@@ -121,12 +129,14 @@ impl Shared {
         }
         log.frames.push(frame);
         drop(log);
-        self.changed.notify_waiters();
+        // `notify_one` 带一个 permit：包在等待者注册之前到达时也不会丢掉这次唤醒。
+        self.changed.notify_one();
     }
 
     fn close(&self) {
         self.log.lock().unwrap().closed = true;
         self.changed.notify_waiters();
+        self.changed.notify_one();
     }
 }
 
@@ -316,9 +326,28 @@ impl Player {
         log.frames[mark..].iter().map(|frame| frame.id).collect()
     }
 
-    /// 等服务端的状态稳定下来。
+    /// 等服务端把之前的所有入站请求处理完、把它们的回包都送给这名玩家。
+    ///
+    /// `command_suggestion` 由世界线程按入站顺序处理，而且一定回一个 ID 相同的包；它不改
+    /// 游戏状态。回包和之前发给这名玩家的所有包走同一条出站队列，所以收到它时，之前
+    /// 世界线程发出的包一定已经被读循环记下来了。心跳和 ping 由连接任务就地处理，
+    /// 不经过世界线程，不能用来当屏障。
     pub async fn settle(&self) {
-        sleep(QUIET).await;
+        let transaction = self.shared.next_barrier.fetch_add(1, Ordering::Relaxed);
+        // 先记下位置：负载高时回包可能在 send 返回之前就已经被读循环记下来了。
+        let from = self.mark();
+        self.send(&command_suggestion(transaction, "")).await;
+        let what = format!("the barrier reply {transaction}");
+        self.poll(&what, from, |log| {
+            log.frames[from..]
+                .iter()
+                .any(|frame| {
+                    frame.is::<CommandSuggestions>()
+                        && Frame::decode::<CommandSuggestions>(frame).transaction == transaction
+                })
+                .then_some(())
+        })
+        .await;
     }
 
     fn describe_since(&self, mark: usize) -> String {
@@ -326,6 +355,7 @@ impl Player {
     }
 
     /// 反复调用 `check`，有新包或连接结束时才再查一次，超过时限或连接结束时让测试失败。
+    /// 先注册通知再检查日志，所以新包夹在两者之间到达时也不会白等一轮。
     async fn poll<R>(
         &self,
         what: &str,
@@ -335,6 +365,7 @@ impl Player {
         let deadline = Instant::now() + DEADLINE;
         loop {
             let changed = self.shared.changed.notified();
+            tokio::pin!(changed);
             let closed = {
                 let log = self.shared.log.lock().unwrap();
                 if let Some(result) = check(&log) {
@@ -379,9 +410,9 @@ impl Player {
         packet
     }
 
-    /// 等 `QUIET`，然后断言 `mark` 之后没有符合条件的 `P`。
+    /// 等世界线程处理完之前的请求、把它们的回包都送到，再断言 `mark` 之后没有 `P`。
     pub async fn expect_none<P: Packet>(&self, mark: usize, matches: impl Fn(&P) -> bool) {
-        sleep(QUIET).await;
+        self.settle().await;
         let found = self.since::<P>(mark).iter().any(matches);
         assert!(
             !found,
@@ -478,6 +509,9 @@ impl Player {
     }
 
     /// 一步最多 10 格，正好是速度检查放行的距离。
+    ///
+    /// 每一步都做一次经过世界线程的往返：这样服务端一定已经处理完这一步的移动包，
+    /// 下一步的速度检查不会把几步挤进同一个 tick（高负载时固定 50ms 的睡眠做不到）。
     async fn travel(&mut self, x: f64, y: f64, z: f64, on_ground: bool) {
         if !self.reported_load {
             self.reported_load = true;
@@ -502,12 +536,12 @@ impl Player {
             cz += dz * scale;
             self.send(&move_position(cx, cy, cz, false)).await;
             self.send(&client_tick_end()).await;
-            sleep(CLIENT_TICK).await;
+            self.settle().await;
         }
         self.position = (x, y, z);
         self.send(&move_position(x, y, z, on_ground)).await;
         self.send(&client_tick_end()).await;
-        sleep(CLIENT_TICK).await;
+        self.settle().await;
     }
 
     /// 走到 (x, z)，一 tick 走 `step` 格，和真实客户端一样每 tick 一个包。
@@ -528,15 +562,12 @@ impl Player {
         self.send(&move_rotation(yaw, pitch, true)).await;
     }
 
-    /// 世界线程还在转。走到隔壁区块看 `set_chunk_cache_center`，这条路不经过被测的功能。
-    pub async fn assert_world_ticks(&mut self) {
-        let (x, y, z) = self.position;
-        let target = x + 16.0;
-        let center = ((target.floor() as i32) >> 4, (z.floor() as i32) >> 4);
-        self.skip_received();
-        self.move_to(target, y, z).await;
-        self.expect::<SetChunkCacheCenter>(|packet| (packet.x, packet.z) == center)
-            .await;
+    /// 世界线程还在转：一次经过世界线程的往返能回来就说明它既没卡住也没掉包。
+    ///
+    /// 以前这里靠走到隔壁区块等 `set_chunk_cache_center`，但移动包在负载下可能被速度检查
+    /// 拒绝、也可能在 `skip_received` 之前就到了，那个包就会永远等不到。
+    pub async fn assert_world_ticks(&self) {
+        self.settle().await;
     }
 
     /// 下一个 sequence，真实客户端开始预测时才加一。
@@ -573,10 +604,12 @@ impl Player {
         sequence
     }
 
-    /// 等到确认了 `sequence` 的 `block_changed_ack`。
+    /// 等到确认了 `sequence` 的 `block_changed_ack`，并等世界线程把这一 tick 的
+    /// 其它回包（方块更新、世界事件等）都送到，之后断言才不会漏掉在途的包。
     pub async fn expect_ack(&mut self, sequence: i32) {
         self.expect::<BlockChangedAck>(|ack| ack.sequence >= sequence)
             .await;
+        self.settle().await;
     }
 
     /// 收到的全部包都能解码、没有多余字节，bundle 分隔符成对。
