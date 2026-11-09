@@ -301,7 +301,7 @@ WebView2 的渲染进程不算在内。
   官方 `ItemStack.CODEC` 会写出空的 `components`，再解一次瞬态就没了、这个字段也会被省掉，
   官方自己也往返不了。算哈希时瞬态组件没有存档 `Codec`，`HashedStack` 对不上，多发一次槽位同步。
   存档编解码不做 DataFixer 的版本升级，读到别的 `DataVersion` 直接失败，也不写 JSON 形式。
-  SNBT 能解析和打印，命令还没用它。
+  SNBT 能解析和打印，`/tellraw`、`/title` 的文本组件和 `/particle` 的选项已经用上了它。
 - 物品上的 `block_entity_data` 按 `BlockItem.updateCustomBlockEntityTag` 写进方块实体，但只保留我们认识的字段：
   唱片机的 `RecordItem`、自定义名和锁。不认识的键丢掉。命令方块、讲台、告示牌、悬挂告示牌、刷怪笼和试炼刷怪笼
   按非管理员跳过。容器、雕纹书架和饰纹陶罐的物品格跟官方一样被 `container` 组件覆盖（没有这个组件就是空的）。
@@ -356,11 +356,23 @@ WebView2 的渲染进程不算在内。
   取书只走按钮。旁观者可以打开讲台，按钮全部忽略。冒险模式能翻页，不能取书。
   没有权限系统，所以放置讲台时不读物品里的 `block_entity_data`。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
-- 第一批命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`。
+- 第一批命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`，以及第二批的 `/tellraw`、`/title`、`/playsound`、`/particle`（这四个都要等级 2）。
   语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。没有 `/op`。
   26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会参与破坏判定，但掉落物还没生成。`respawn_radius` 存着，死亡重生还没做，超平坦出生点仍是固定的那一格。世界永远是晴天，`tickPrecipitation` 不读 `max_snow_accumulation_height`。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿，破坏也不掉落。`/give` 多出来的物品会消失（没有物品实体，也没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
+  `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
+  不是 JSON 文本组件。组件过一遍官方 `Codec`，`selector` 会展开成玩家名列表；Bamboo 还没有计分板和实体 NBT，
+  所以 `score`、`nbt` 和 `object` 按「查不到值」处理（空文本），`keybind` 暂按字面文本发。
+  `ComponentArgument` 校验失败时的详细 DFU 文案固定写成 `invalid component`。
+  `/title` 六种动作都有，成功消息按目标数用 `.single` / `.multiple`；`times` 的 `t`/`s`/`d` 照官方换算成刻。
+  `/playsound` 的 `sound` 带 `minecraft:available_sounds` 补全，11 种来源、位置、音量、音高和 `minVolume` 都在；
+  声音按官方走内联定义（网络 ID 0 + 资源名），距离超过 16 或 16×音量时，`minVolume` > 0 会把音源挪到玩家附近两格。
+  `/particle` 能解析注册表里全部 128 种粒子名；带选项的 19 种按官方 `ParticleTypes.STREAM_CODEC` 编码
+  （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
+  `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源。
+  `/particle` 的 `delta` 用居中的 `Vec3Argument`（官方是不居中的 `vec3(false)`），写整数时差 0.5 格。
+  两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐，但还没接进破坏、死亡和开箱。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
