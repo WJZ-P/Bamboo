@@ -43,6 +43,10 @@ pub(crate) struct TestLevel {
     entities: Entities,
     /// 发射器能穿装备的生物。
     pub(crate) living: Vec<EquipTarget>,
+    /// 方块能看见的游戏规则。默认和官方一样，`tnt_explodes` 为真。
+    ///
+    /// Game rules block logic can see. Vanilla defaults, so `tnt_explodes` starts true.
+    pub(crate) rules: crate::gamerules::BlockGameRules,
 }
 
 impl TestLevel {
@@ -61,6 +65,7 @@ impl TestLevel {
             block_events: BlockEvents::default(),
             entities: Entities::default(),
             living: Vec::new(),
+            rules: crate::gamerules::BlockGameRules::vanilla(),
         }
     }
 
@@ -253,6 +258,10 @@ impl Level for TestLevel {
 
     fn dispenser_targets(&self) -> Vec<EquipTarget> {
         self.living.clone()
+    }
+
+    fn block_game_rules(&self) -> crate::gamerules::BlockGameRules {
+        self.rules
     }
 
     fn set_dispenser_equipment(

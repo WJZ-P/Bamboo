@@ -2,19 +2,19 @@
 //!
 //! 生成实体的行为不建实体。船和矿车在放得下的时候只扣物品、放一次 1000 和 2000；
 //! 放不下时走官方的失败分支，也就是再套一层 `DefaultDispenseItemBehavior.dispense`。
-//! 箭、刷怪蛋、盔甲架、TNT 这些走官方在生成失败或规则关掉时的分支，见各文件。
+//! 箭、刷怪蛋、盔甲架走官方在生成失败时的分支。TNT 在 `tnt_explodes` 为真时生成点燃的实体，见各文件。
 //!
 //! `DispenserBlock.dispenseFrom` and `DispenseItemBehavior.bootStrap`.
 //!
-//! Behaviours that spawn an entity do not create one. A boat or minecart that can be placed
-//! only consumes the item and plays 1000 then 2000 once. When it cannot, the official failure
-//! branch runs, which nests another `DefaultDispenseItemBehavior.dispense`. Arrows, spawn eggs,
-//! armour stands and TNT follow the branch official uses when the spawn fails or the rule is off.
+//! Behaviours that spawn an entity do not create one, except primed TNT. A boat or minecart that
+//! can be placed only consumes the item and plays 1000 then 2000 once. When it cannot, the
+//! official failure branch runs, which nests another `DefaultDispenseItemBehavior.dispense`.
+//! Arrows, spawn eggs and armour stands follow the branch official uses when the spawn fails.
+//! TNT spawns a primed entity when `tnt_explodes` is true.
 
 mod bone;
 mod bottle;
 mod bucket;
-mod durability;
 mod entity;
 mod equipment;
 mod ignite;
@@ -104,16 +104,16 @@ fn finish(world: &mut World, pos: BlockPos, facing: Direction, shot: Shot) -> It
     shot.stack
 }
 
-/// `DefaultDispenseItemBehavior.execute`：抛出一件。物品实体还没接上，随机数照取，物品从槽里消失。
+/// `DefaultDispenseItemBehavior.execute`：抛出一件。物品实体还没接上，速度已经按官方算好。
 ///
 /// `DefaultDispenseItemBehavior.execute`: throw one. Item entities are not wired up yet.
-/// The random draws still happen, and the item leaves the slot.
-pub(super) fn throw_one(world: &mut World, stack: ItemStack) -> ItemStack {
-    // 物品实体合并后在这里 `addFreshEntity`。随机数必须在那之前取，顺序和 `spawnItem` 一样。
+/// The velocity is the official one, and the item leaves the slot.
+pub(super) fn throw_one(world: &mut World, facing: Direction, stack: ItemStack) -> ItemStack {
+    // 物品实体合并后用这个速度 `addFreshEntity`，不要再取一遍 `spawnItem` 的随机数。
     //
-    // When item entities land, `addFreshEntity` goes here. The random draws stay before that,
-    // in the same order as `spawnItem`.
-    spawn_item_random(world);
+    // When item entities land, `addFreshEntity` uses this velocity. Do not draw `spawnItem`
+    // again.
+    let _velocity = spawn_item_random(world, facing);
     without_one(&stack)
 }
 
@@ -127,7 +127,7 @@ pub(super) fn nested_default(
     facing: Direction,
     stack: ItemStack,
 ) -> ItemStack {
-    let stack = throw_one(world, stack);
+    let stack = throw_one(world, facing, stack);
     world.level_event(1000, pos, 0);
     world.level_event(2000, pos, facing.id());
     stack
@@ -150,7 +150,7 @@ pub(super) fn consume_with_remainder(
     }
     let leftover = insert_item(world, pos, remainder);
     if !leftover.is_empty() {
-        spawn_item_random(world);
+        let _velocity = spawn_item_random(world, facing);
         world.level_event(1000, pos, 0);
         world.level_event(2000, pos, facing.id());
     }
@@ -244,11 +244,11 @@ fn dispatch(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStac
         return equipment::execute(world, pos, facing, stack);
     }
     if entity::is_spawn_egg(item) {
-        return entity::spawn_egg(world, stack);
+        return entity::spawn_egg(world, facing, stack);
     }
     // `SulfurCubeBlockDispenseItemBehavior`：没有硫磺立方时就是 `super.execute`，一次默认抛出。
     //
     // `SulfurCubeBlockDispenseItemBehavior`: with no sulfur cube this is `super.execute`,
     // one default throw.
-    Shot::plain(throw_one(world, stack))
+    Shot::plain(throw_one(world, facing, stack))
 }

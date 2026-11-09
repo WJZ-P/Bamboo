@@ -21,7 +21,7 @@ use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{BlockAncestor, blocks, items, sounds::sound_event, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
-use super::{Shot, durability::hurt_and_break, throw_one};
+use super::{Shot, throw_one};
 use crate::{
     dispenser::without_one,
     item_use::waxed,
@@ -56,7 +56,7 @@ pub(super) fn execute(
 fn honeycomb(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
     let target = pos.relative(facing);
     let Some(waxed) = waxed(world.block_state(target)) else {
-        return Shot::optional(throw_one(world, stack), true);
+        return Shot::optional(throw_one(world, facing, stack), true);
     };
     world.set_block_and_update(target, waxed);
     world.level_event(3003, target, 0);
@@ -84,7 +84,7 @@ fn glowstone(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemSta
             Shot::optional(stack, false)
         }
     } else {
-        Shot::optional(throw_one(world, stack), true)
+        Shot::optional(throw_one(world, facing, stack), true)
     }
 }
 
@@ -107,7 +107,10 @@ fn shears(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack)
     if !shear_hive(world, target) {
         return Shot::optional(stack, false);
     }
-    Shot::optional(hurt_and_break(stack, 1), true)
+    Shot::optional(
+        crate::durability::hurt_and_break(stack, 1, world.random()),
+        true,
+    )
 }
 
 /// `tryShearBeehive`。声音在掉落之前，坐标是蜂巢。

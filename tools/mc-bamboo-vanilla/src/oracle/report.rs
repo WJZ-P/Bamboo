@@ -114,6 +114,12 @@ pub struct Report {
     /// 比较生物桶时从官方列表去掉的、生物自己的声音条数。题本身仍然比较。
     /// Spawned-mob sounds dropped from the official list. The case is still compared.
     mob_sounds_dropped: u64,
+    /// 官方放了 `entity.tnt.primed` 而且这题拿去比较了。
+    /// Official played `entity.tnt.primed` and the case was compared.
+    primed_compared: u64,
+    /// 官方放了 `entity.tnt.primed` 但整题仍被排除，按排除原因分开。
+    /// Official played `entity.tnt.primed` and the whole case stayed excluded, by rule.
+    primed_excluded: BTreeMap<Rule, u64>,
 }
 
 impl Report {
@@ -132,6 +138,18 @@ impl Report {
             crafter_crafted: 0,
             dispenser_fired: 0,
             mob_sounds_dropped: 0,
+            primed_compared: 0,
+            primed_excluded: BTreeMap::new(),
+        }
+    }
+
+    /// 官方放了 `entity.tnt.primed`。`None` 表示这题拿去比较了。
+    ///
+    /// Official played `entity.tnt.primed`. `None` means the case was compared.
+    pub fn note_primed(&mut self, excluded: Option<Rule>) {
+        match excluded {
+            Some(rule) => *self.primed_excluded.entry(rule).or_default() += 1,
+            None => self.primed_compared += 1,
         }
     }
 
@@ -250,6 +268,7 @@ impl Report {
         self.print_rows();
         self.print_blockers();
         self.print_rules();
+        self.print_primed();
         self.print_families();
         self.print_total();
     }
@@ -287,6 +306,16 @@ impl Report {
                 tally.excluded,
                 tally.changed,
             );
+        }
+    }
+
+    fn print_primed(&self) {
+        let excluded: u64 = self.primed_excluded.values().sum();
+        println!("\nprimed TNT (entity.tnt.primed):");
+        println!("  {:>7} compared", self.primed_compared);
+        println!("  {:>7} excluded", excluded);
+        for (rule, count) in &self.primed_excluded {
+            println!("          {count:>7} {} ({})", rule.name(), rule.reason());
         }
     }
 

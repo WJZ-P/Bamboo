@@ -6,6 +6,7 @@ use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{
     blocks, items,
     registries::{data_component_type as kinds, entity_type},
+    tags::item_tags,
 };
 use mc_bamboo_protocol::{
     components::{ComponentValue, defaults},
@@ -14,13 +15,14 @@ use mc_bamboo_protocol::{
 
 use super::dispense_from;
 use crate::{
-    Aabb, BlockTicks, Effect, LegacyRandom,
+    Aabb, BlockTicks, Effect, LegacyRandom, Level,
+    entity::EntityKind,
     item_exchange::{set_component, water_potion_stack},
     item_use::{grow_crop, grow_water_plant},
     level::EquipTarget,
     state::{
         BlockState, FACING, LEVEL_HONEY, LIT, RESPAWN_ANCHOR_CHARGES, ROTATION_16, SLAB_TYPE,
-        SlabType, WATERLOGGED,
+        SlabType, WATERLOGGED, item_is_tagged,
     },
     testing::TestLevel,
     world::{UPDATE_ALL, World},
@@ -72,6 +74,7 @@ struct Shot {
     seed: i64,
     left: ItemStack,
     front: BlockState,
+    primed: usize,
 }
 
 fn fire_one(level: &mut TestLevel, facing: Direction, item: ItemStack) -> Shot {
@@ -84,11 +87,21 @@ fn fire_one(level: &mut TestLevel, facing: Direction, item: ItemStack) -> Shot {
     let state = world.block_state(POS);
     dispense_from(&mut world, POS, state);
     let front = world.block_state(POS.relative(facing));
+    let left = slot(&mut world, POS, 0);
+    let seed = world.random().seed();
+    let effects = world.drain_effects();
+    drop(world);
+    let primed = level
+        .entities()
+        .iter()
+        .filter(|entity| matches!(entity.kind, EntityKind::Tnt(_)))
+        .count();
     Shot {
-        left: slot(&mut world, POS, 0),
-        seed: world.random().seed(),
-        effects: world.drain_effects(),
+        left,
+        seed,
+        effects,
         front,
+        primed,
     }
 }
 
@@ -106,11 +119,18 @@ fn slot_roll(random: &LegacyRandom) {
     let _ = random.next_int(1);
 }
 
-fn throw_draws(random: &LegacyRandom) {
-    let _ = random.next_double() * 0.1 + 0.2;
-    for _ in 0..3 {
-        let _ = random.triangle(0.2, 0.017_227_5 * 6.0);
-    }
+fn throw_draws(random: &LegacyRandom, facing: Direction) {
+    let speed = random.next_double() * 0.1 + 0.2;
+    let spread = 0.017_227_5 * 6.0;
+    let (step_x, _, step_z) = facing.normal();
+    let _ = random.triangle(f64::from(step_x) * speed, spread);
+    let _ = random.triangle(0.2, spread);
+    let _ = random.triangle(f64::from(step_z) * speed, spread);
+}
+
+/// `PrimedTnt` 构造函数里的朝向。
+fn tnt_yaw(random: &LegacyRandom) {
+    let _ = random.next_double();
 }
 
 /// `EntityType.create` 的朝向，加上 `Mob.finalizeSpawn` 的 `triangle` 和左手。
@@ -137,10 +157,25 @@ fn assert_pair(events: &[(i32, BlockPos, i32)], sound: i32, facing: Direction) {
     );
 }
 
+fn has_primed_sound(effects: &[Effect]) -> bool {
+    let id = i32::from(mc_bamboo_data::sounds::sound_event(
+        "minecraft:entity.tnt.primed",
+    ));
+    sound_ids(effects).contains(&id)
+}
+
 fn damage_of(stack: &ItemStack) -> i32 {
     match defaults::resolve(stack.item, &stack.patch(), kinds::DAMAGE) {
         Some(ComponentValue::Damage(value)) => *value,
         other => panic!("没有耐久组件 {other:?}"),
+    }
+}
+
+/// 没写上耐久组件时是 0。耐久附魔把伤害减成 0 时官方不调用 `setDamageValue`。
+fn damage_or_zero(stack: &ItemStack) -> i32 {
+    match defaults::resolve(stack.item, &stack.patch(), kinds::DAMAGE) {
+        Some(ComponentValue::Damage(value)) => *value,
+        _ => 0,
     }
 }
 
@@ -197,7 +232,7 @@ fn a_plain_item_is_thrown_with_spawn_item_random() {
         shot.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 }
@@ -255,7 +290,7 @@ fn a_blocked_filled_bucket_nests_a_default_throw() {
         shot.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 }
@@ -349,7 +384,7 @@ fn an_empty_bucket_picks_up_water_powder_snow_and_a_waterlogged_slab() {
         miss.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 }
@@ -406,7 +441,7 @@ fn a_second_bucket_is_inserted_and_a_full_dispenser_throws_the_leftover() {
             for odds in 1..=9 {
                 let _ = random.next_int(odds);
             }
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 }
@@ -503,9 +538,18 @@ fn flint_lights_fire_and_a_campfire_and_still_spends_durability_on_stone() {
     let mut level = TestLevel::new();
     level.set(target, BlockState(blocks::TNT));
     let tnt = fire_id(&mut level, Direction::East, items::FLINT_AND_STEEL);
-    assert!(tnt.front.is(blocks::TNT));
-    assert_eq!(damage_of(&tnt.left), 0);
-    assert_pair(&level_events(&tnt.effects), 1001, Direction::East);
+    assert!(tnt.front.is_air());
+    assert_eq!(tnt.primed, 1);
+    assert_eq!(damage_of(&tnt.left), 1);
+    assert!(has_primed_sound(&tnt.effects));
+    assert_pair(&level_events(&tnt.effects), 1000, Direction::East);
+    assert_eq!(
+        tnt.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            tnt_yaw(random);
+        })
+    );
 
     let mut level = TestLevel::new();
     level.set(target, BlockState(blocks::STONE));
@@ -513,6 +557,57 @@ fn flint_lights_fire_and_a_campfire_and_still_spends_durability_on_stone() {
     assert!(stone.front.is(blocks::STONE));
     assert_eq!(damage_of(&stone.left), 1);
     assert_pair(&level_events(&stone.effects), 1000, Direction::East);
+}
+
+#[test]
+fn unbreaking_flint_draws_one_float_after_the_slot_roll() {
+    let &[entry] = mc_bamboo_data::item_damage::ITEM_DAMAGE else {
+        panic!("vanilla 26.3 has one item_damage enchantment");
+    };
+    assert!(!item_is_tagged(
+        items::FLINT_AND_STEEL,
+        item_tags::ENCHANTABLE_ARMOR
+    ));
+    let mut stack = ItemStack::new(items::FLINT_AND_STEEL, 1);
+    set_component(
+        &mut stack,
+        kinds::ENCHANTMENTS,
+        ComponentValue::Enchantments(vec![(entry.enchantment, 1)]),
+    );
+    let mut level = TestLevel::new();
+    level.set(POS.relative(Direction::East), BlockState(blocks::STONE));
+    let shot = fire_one(&mut level, Direction::East, stack);
+    let random = LegacyRandom::new(0);
+    slot_roll(&random);
+    let saved = random.next_float() < 0.5;
+    assert_eq!(shot.seed, random.seed());
+    assert_eq!(damage_or_zero(&shot.left), i32::from(!saved));
+    assert_eq!(shot.left.count, 1);
+    assert_pair(&level_events(&shot.effects), 1000, Direction::East);
+}
+
+#[test]
+fn tnt_stays_when_the_rule_is_off() {
+    let mut level = TestLevel::new();
+    level.rules.tnt_explodes = false;
+    let item = fire_id(&mut level, Direction::East, items::TNT);
+    assert_eq!(item.left, ItemStack::new(items::TNT, 1));
+    assert_eq!(item.primed, 0);
+    assert!(!has_primed_sound(&item.effects));
+    assert_pair(&level_events(&item.effects), 1001, Direction::East);
+    assert_eq!(item.seed, seed_after(slot_roll));
+
+    let mut level = TestLevel::new();
+    level.rules.tnt_explodes = false;
+    level.set(POS.relative(Direction::East), BlockState(blocks::TNT));
+    let flint = fire_id(&mut level, Direction::East, items::FLINT_AND_STEEL);
+    assert!(flint.front.is(blocks::TNT));
+    assert_eq!(flint.primed, 0);
+    assert_eq!(flint.left.count, 1);
+    assert_eq!(damage_or_zero(&flint.left), 0);
+    assert!(!has_primed_sound(&flint.effects));
+    assert_pair(&level_events(&flint.effects), 1001, Direction::East);
+    assert_eq!(flint.seed, seed_after(slot_roll));
 }
 
 #[test]
@@ -603,7 +698,7 @@ fn a_glass_bottle_fills_from_water_and_a_hive_and_throws_at_stone() {
         miss.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 }
@@ -691,7 +786,7 @@ fn honeycomb_waxes_copper_and_throws_at_stone_with_success_still_true() {
         miss.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 }
@@ -775,7 +870,7 @@ fn projectiles_armour_stands_spawn_eggs_and_tnt_take_the_fallback() {
         arrow.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 
@@ -799,9 +894,18 @@ fn projectiles_armour_stands_spawn_eggs_and_tnt_take_the_fallback() {
     }
 
     let tnt = fire_id(&mut TestLevel::new(), Direction::East, items::TNT);
-    assert_eq!(tnt.left, ItemStack::new(items::TNT, 1));
-    assert_pair(&level_events(&tnt.effects), 1001, Direction::East);
-    assert_eq!(tnt.seed, seed_after(slot_roll));
+    assert!(tnt.left.is_empty());
+    assert!(tnt.front.is_air());
+    assert_eq!(tnt.primed, 1);
+    assert!(has_primed_sound(&tnt.effects));
+    assert_pair(&level_events(&tnt.effects), 1000, Direction::East);
+    assert_eq!(
+        tnt.seed,
+        seed_after(|random| {
+            slot_roll(random);
+            tnt_yaw(random);
+        })
+    );
 }
 
 #[test]
@@ -897,7 +1001,7 @@ fn armour_equips_the_first_living_target_in_the_front_cell() {
         spectator.seed,
         seed_after(|random| {
             slot_roll(random);
-            throw_draws(random);
+            throw_draws(random, Direction::East);
         })
     );
 

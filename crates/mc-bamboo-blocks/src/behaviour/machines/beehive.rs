@@ -42,16 +42,26 @@ impl Behaviour for Beehive {
         let harvests = ctx.item == items::SHEARS || ctx.item == items::GLASS_BOTTLE;
         if state.get(LEVEL_HONEY) >= MAX_HONEY_LEVELS && harvests {
             let pos = ctx.clicked_pos();
-            // 采蜜的声音在写方块之前，坐标是玩家所在的位置。剪刀用 `null` 作 `except`，
-            // 玻璃瓶跳过动手的玩家。剪刀在掉蜜脾之后、清零之前 `hurtAndBreak(1)`。
-            // 掉落表的随机数还没做。玻璃瓶官方会 `shrink(1)` 并给出蜂蜜瓶，这里还不消耗瓶子。
+            // 剪刀先 `dropHoneycomb`。战利品表走自己的 `random_sequence`，不碰 `level.random`。
+            // `Block.popResource` 在物品实体之前取三次 `nextDouble`。物品实体不生成，这三次照取。
+            // 然后是剪刀声、`hurtAndBreak(1)`，再 `releaseBeesAndResetHoneyLevel`。
+            // 蜂巢是空的：没有烟时也不放蜜蜂，`emptyAllLivingFromHive` 不取随机数，只把蜜清零。
+            // 玻璃瓶不掉蜜脾，所以不取那三次。`releaseBeesAndResetHoneyLevel` 同样只清零。
+            // 瓶子的 `shrink(1)` 和蜂蜜瓶还没做。
             //
-            // The harvest sound plays before the block write, at the player's position.
-            // Shears pass `null` as `except`; a bottle skips the player who used it.
-            // Shears call `hurtAndBreak(1)` after the honeycomb drop and before the reset.
-            // The loot random draws are not implemented. A glass bottle `shrink(1)`s and yields a
-            // honey bottle in vanilla; the bottle is not consumed here yet.
+            // Shears call `dropHoneycomb` first. The loot table uses its own `random_sequence`
+            // and does not touch `level.random`. `Block.popResource` draws three `nextDouble`s
+            // before the item entity. The entity is not spawned; the three draws still happen.
+            // Then the shear sound, `hurtAndBreak(1)`, then `releaseBeesAndResetHoneyLevel`.
+            // The hive is empty: even without smoke no bees are released, and
+            // `emptyAllLivingFromHive` draws nothing. Only the honey is cleared.
+            // A glass bottle does not drop honeycomb, so it does not draw those three.
+            // `releaseBeesAndResetHoneyLevel` only clears the honey. The bottle's `shrink(1)`
+            // and the honey bottle are not done yet.
             if ctx.item == items::SHEARS {
+                let _ = world.random().next_double();
+                let _ = world.random().next_double();
+                let _ = world.random().next_double();
                 world.play_sound(
                     ctx.actor.position,
                     sound_event("minecraft:block.beehive.shear"),

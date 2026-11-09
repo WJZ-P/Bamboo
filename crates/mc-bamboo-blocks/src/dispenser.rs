@@ -2,11 +2,11 @@
 //!
 //! 方块被信号触发后隔 4 刻排一个计划刻，到期时从 9 个槽里随机挑一个物品：
 //! 朝着的方向有容器就塞一个进去，没有就把物品抛出去。这个世界没有物品实体，
-//! 抛出去的那一个直接消失，但官方抛出去时要取的随机数照取，见 [`spawn_item_random`]。
+//! 抛出去的那一个直接消失，速度按官方 `spawnItem` 算好，见 [`spawn_item_random`]。
 //!
 //! 发射器走 [`crate::dispense`]，不走这个函数。空槽的 `levelEvent(1001)` 两边相同。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -37,15 +37,26 @@ pub(crate) fn random_slot(world: &World, occupied: &[bool]) -> i32 {
     replace_slot
 }
 
-/// `DefaultDispenseItemBehavior.spawnItem` 取的那几个随机数。
+/// `DefaultDispenseItemBehavior.spawnItem` 的速度。`accuracy` 是 6。
 ///
-/// 一个 `nextDouble` 算 `pow`，再加三个 `triangle`，每个 `triangle` 取两个 `nextDouble`。
-/// 物品实体不建，随机数不能少取。
-pub(crate) fn spawn_item_random(world: &mut World) {
-    let _pow = world.random().next_double() * 0.1 + 0.2;
-    for _ in 0..3 {
-        let _ = world.random().triangle(0.2, 0.017_227_5 * 6.0);
-    }
+/// 一个 `nextDouble` 算 `pow`。X、Z 的均值是朝向步长乘 `pow`，Y 的均值是 0.2。
+/// 每个 `triangle` 再取两个 `nextDouble`。物品实体还没接上，调用方用这个速度生成，不要再取一遍。
+///
+/// The velocity from `DefaultDispenseItemBehavior.spawnItem`. `accuracy` is 6.
+///
+/// One `nextDouble` computes `pow`. The X and Z means are the facing step times `pow`, and the
+/// Y mean is 0.2. Each `triangle` draws two more `nextDouble`s. Item entities are not spawned
+/// yet. The caller uses this velocity and does not draw again.
+pub(crate) fn spawn_item_random(world: &mut World, facing: Direction) -> Vec3 {
+    let random = world.random();
+    let speed = random.next_double() * 0.1 + 0.2;
+    let spread = 0.017_227_5 * 6.0;
+    let (step_x, _, step_z) = facing.normal();
+    Vec3::new(
+        random.triangle(f64::from(step_x) * speed, spread),
+        random.triangle(0.2, spread),
+        random.triangle(f64::from(step_z) * speed, spread),
+    )
 }
 
 /// 从 `stack` 里拿走一个。官方 `split(1)` 之后剩下的那一堆。
@@ -151,7 +162,7 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
     } else {
         // 官方在这里生成物品实体。没有实体，东西凭空消失，随机数照取。
         // `DefaultDispenseItemBehavior.dispense`：先 `execute`（随机数），再 1000，再 2000。
-        spawn_item_random(world);
+        let _velocity = spawn_item_random(world, direction);
         world.level_event(1000, pos, 0);
         world.level_event(2000, pos, direction.id());
         without_one(&item)

@@ -2835,21 +2835,22 @@ public final class BlockOracle {
         private static final double STANDING_EYE_HEIGHT = 1.62;
         private static final double CROUCHING_EYE_HEIGHT = 1.27;
         private static final float[] LOOK_PITCHES = {-90.0F, -89.9F, -60.0F, -45.0F, -30.0F, 0.0F, 30.0F, 45.0F, 60.0F, 89.9F, 90.0F};
-        /** 随机填进场景容器的物品。剑用来试堆叠上限 1。后面那些是发射器不生成实体的行为，
-         * 放进发射器才会被红石触发并和官方比较。箭、船、矿车、刷怪蛋、盔甲架和 TNT 不放进来，
-         * 那些题会整题排除。
+        /** 随机填进场景容器的物品。剑用来试堆叠上限 1。后面那些放进发射器才会被红石触发并和官方比较。
+         * TNT 会生成点燃的实体，方块、声音、容器和 `level.random` 照常比较。
+         * 箭、船、矿车、刷怪蛋和盔甲架不放进来，那些题会整题排除。
          *
          * Items placed into scene containers at random. The sword checks a stack limit of 1.
-         * The rest are dispenser behaviours that do not spawn an entity, so a powered dispenser
-         * actually fires them and the oracle compares the shot. Arrows, boats, minecarts, spawn
-         * eggs, armour stands and TNT are left out. Those cases are excluded wholesale.
+         * The rest are placed in a dispenser so a powered dispenser fires them and the oracle
+         * compares the shot. TNT spawns a primed entity; blocks, sounds, contents and
+         * `level.random` are still compared. Arrows, boats, minecarts, spawn eggs and armour
+         * stands are left out. Those cases are excluded wholesale.
          */
         private static final List<Item> CONTAINER_ITEMS = List.of(Items.STONE, Items.DIRT, Items.OAK_LOG, Items.BREAD,
                 Items.COBBLESTONE, Items.IRON_INGOT, Items.IRON_SWORD, Items.WATER_BUCKET, Items.LAVA_BUCKET,
                 Items.POWDER_SNOW_BUCKET, Items.BUCKET, Items.BONE_MEAL, Items.FLINT_AND_STEEL, Items.SHULKER_BOX,
                 Items.CARVED_PUMPKIN, Items.WITHER_SKELETON_SKULL, Items.GLASS_BOTTLE, Items.POTION, Items.HONEYCOMB,
                 Items.GLOWSTONE, Items.SHEARS, Items.BRUSH, Items.LEATHER_HELMET, Items.ELYTRA, Items.SKELETON_SKULL,
-                Items.COD_BUCKET);
+                Items.COD_BUCKET, Items.TNT);
 
         private final Catalog catalog;
         private final Supports supports;

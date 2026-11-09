@@ -81,7 +81,7 @@ pub(super) fn empty(world: &mut World, pos: BlockPos, facing: Direction, stack: 
             return Shot::plain(left);
         }
     }
-    Shot::plain(throw_one(world, stack))
+    Shot::plain(throw_one(world, facing, stack))
 }
 
 /// `DispensibleContainerItem.emptyContents`。细雪桶是 `SolidBucketItem`，不走 `BucketItem`。

@@ -173,10 +173,10 @@ impl Rule {
                  and primed TNT need entities, projectiles, vibrations or lightning"
             }
             Self::Dispensing => {
-                "scope: a dispenser fired an entity (projectile events 1002/1004/1018/1051, \
-                 primed TNT, or an armour stand or spawn egg left the dispenser), or a crafter \
-                 crafted (level event 1049/2010, the crafting flag turned on, or its slots \
-                 changed while the combined container items changed). Other dispenser shots are \
+                "scope: a dispenser fired a projectile (events 1002/1004/1018/1051) or an armour \
+                 stand or spawn egg left the dispenser, or a crafter crafted (level event \
+                 1049/2010, the crafting flag turned on, or its slots changed while the combined \
+                 container items changed). Primed TNT is compared. Other dispenser shots are \
                  compared. A crafter that only plays fail event 1050 is still compared"
             }
             Self::DaylightTimer => {
@@ -606,7 +606,11 @@ impl Session {
         let header = self.header.as_ref().ok_or("case before the header")?;
         let kind = case.action.kind;
 
-        if let Some(rule) = case_exclusion(case, block, &self.names)? {
+        let exclusion = case_exclusion(case, block, &self.names)?;
+        if plays_primed_tnt(case) {
+            self.report.note_primed(exclusion);
+        }
+        if let Some(rule) = exclusion {
             if rule == Rule::Dispensing {
                 self.report
                     .note_dispensing(crafter_crafts(case), dispenser_dispenses(case));
@@ -1150,29 +1154,28 @@ fn dispenser_positions(case: &Case) -> Vec<BlockPos> {
     positions
 }
 
-/// 官方在发射器上放了弹射物事件，或者 TNT 被点燃，或者盔甲架、刷怪蛋从发射器里少了。
-/// 这些都会生成实体。别的发射照常比较。
+/// 官方放了 `entity.tnt.primed`。
 ///
-/// Official played a projectile event on a dispenser, primed TNT, or an armour stand or spawn
-/// egg left a dispenser. Those spawn an entity. Every other shot is compared.
+/// Official played `entity.tnt.primed`.
+fn plays_primed_tnt(case: &Case) -> bool {
+    case.outcome
+        .sounds
+        .iter()
+        .any(|sound| sound_name(sound.0) == Some("minecraft:entity.tnt.primed"))
+}
+
+/// 官方在发射器上放了弹射物事件，或者盔甲架、刷怪蛋从发射器里少了。
+/// 点燃的 TNT 现在生成，整题比较。同一题里如果还有弹射物、盔甲架或刷怪蛋，仍按那些原因排除。
+///
+/// Official played a projectile event on a dispenser, or an armour stand or spawn egg left a
+/// dispenser. Primed TNT is spawned and the case is compared. A case that also has a projectile,
+/// armour stand or spawn egg is still excluded for that reason.
 fn dispenser_dispenses(case: &Case) -> bool {
     let projectile = case.outcome.level_events.iter().any(|event| {
         PROJECTILE_EVENTS.contains(&event.0)
             && is_dispenser_at(case, BlockPos::new(event.1, event.2, event.3))
     });
     if projectile {
-        return true;
-    }
-    let primed = case
-        .outcome
-        .sounds
-        .iter()
-        .any(|sound| sound_name(sound.0) == Some("minecraft:entity.tnt.primed"));
-    if primed
-        && dispenser_positions(case)
-            .iter()
-            .any(|&pos| dispenser_shot_at(case, pos))
-    {
         return true;
     }
     dispenser_positions(case).iter().any(|&pos| {

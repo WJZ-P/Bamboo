@@ -1,18 +1,19 @@
-//! 会生成实体的注册表行为。实体不生成，控制流走官方在生成失败或条件不够时的分支。
+//! 会生成实体的注册表行为。船、矿车、盔甲架、刷怪蛋和弹射物仍不生成实体。
+//! TNT 物品在规则为真时生成点燃的 TNT。
 //!
 //! 船和矿车放得下时只扣物品，不取 `level.random`，外层一次 1000 和 2000。放不下时套一层默认抛出。
 //! 盔甲架和带实体数据的刷怪蛋走 `spawn` 返回 null：物品留着，一次 1000。
-//! 没有实体数据的刷怪蛋是默认抛出。TNT 物品走 `tntExplodes` 为假：物品留着，1001。
+//! 没有实体数据的刷怪蛋是默认抛出。TNT 物品在 `tntExplodes` 为真时生成 `PrimedTnt`。
 //! 箭、蛋、雪球、药水、烟花、火焰弹和风弹走默认抛出。官方那些用的是弹射物事件，不是这套随机数。
 //!
-//! Registry behaviours that spawn an entity. The entity is not created. Control follows the
-//! branch official uses when the spawn fails or the condition is not met.
+//! Registry behaviours that spawn an entity. Boats, minecarts, armour stands, spawn eggs and
+//! projectiles still do not create one. A TNT item spawns primed TNT when the rule is true.
 //!
 //! A boat or minecart that can be placed only consumes the item. It does not draw from
 //! `level.random`, and the outer dispense plays 1000 and 2000 once. Otherwise it nests a
 //! default throw. An armour stand, and a spawn egg that carries entity data, follow `spawn`
 //! returning null: the item stays and 1000 plays once. A spawn egg without entity data is a
-//! default throw. A TNT item follows `tntExplodes == false`: the item stays and 1001 plays.
+//! default throw. A TNT item spawns a `PrimedTnt` when `tntExplodes` is true.
 //! Arrows, eggs, snowballs, potions, fireworks, fire charges and wind charges take the default
 //! throw. Official uses a projectile event for those, not these random draws.
 
@@ -41,7 +42,7 @@ pub(super) fn execute(
 ) -> Shot {
     let item = stack.item;
     if is_projectile(item) {
-        return Shot::plain(throw_one(world, stack));
+        return Shot::plain(throw_one(world, facing, stack));
     }
     if item == items::ARMOR_STAND {
         // `EntityType.spawn` 返回 null：不减数量。外层仍放 1000 和 2000。
@@ -51,11 +52,7 @@ pub(super) fn execute(
         return Shot::plain(stack);
     }
     if item == items::TNT {
-        // `GameRules.TNT_EXPLODES` 为假时成功是假，物品留着。这里没有这条规则，引爆会生成实体。
-        //
-        // When `GameRules.TNT_EXPLODES` is false, success is false and the item stays.
-        // There is no game-rule store here, and priming would spawn an entity.
-        return Shot::optional(stack, false);
+        return dispense_tnt(world, pos, facing, stack);
     }
     if is_boat(item) {
         return boat(world, pos, facing, stack);
@@ -72,16 +69,39 @@ pub(super) fn is_spawn_egg(item: i32) -> bool {
 ///
 /// With `ENTITY_DATA`, follow `spawn` returning null: the item stays and `nextFloat` is not drawn.
 /// Without that component this is a default throw.
-pub(super) fn spawn_egg(world: &mut World, stack: ItemStack) -> Shot {
+pub(super) fn spawn_egg(world: &mut World, facing: Direction, stack: ItemStack) -> Shot {
     let has_data = defaults::resolve(stack.item, &stack.patch(), kinds::ENTITY_DATA).is_some();
     if !has_data {
-        return Shot::plain(throw_one(world, stack));
+        return Shot::plain(throw_one(world, facing, stack));
     }
     // `type.spawn` 返回 null，或者 `getType` 是 null：物品原样返回，不取 `nextFloat`。
     //
     // `type.spawn` returned null, or `getType` is null: the stack is returned unchanged.
     // The `nextFloat` is not drawn.
     Shot::plain(stack)
+}
+
+/// 注册表里的 TNT 物品。规则为假时物品留着，不取随机数。
+///
+/// 否则先试 `SulfurCubeBlockDispenseItemBehavior.dispenseBlock`。这个世界没有硫磺立方，
+/// 搜索是空的，返回假，不取随机数，也不减数量。然后 `new PrimedTnt`：朝向是一次 `nextDouble`，
+/// 声音是 `entity.tnt.primed`，数量减一。这不是 `TntBlock.prime`，不拆方块。
+///
+/// The TNT item in the registry. A false rule keeps the item and draws nothing.
+///
+/// Otherwise `SulfurCubeBlockDispenseItemBehavior.dispenseBlock` runs first. This world has no
+/// sulfur cubes, so the search is empty, returns false, draws nothing and does not shrink.
+/// Then `new PrimedTnt`: the yaw is one `nextDouble`, the sound is `entity.tnt.primed`, and the
+/// count drops by one. This is not `TntBlock.prime` and does not remove a block.
+fn dispense_tnt(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
+    if !world.block_game_rules().tnt_explodes {
+        return Shot::optional(stack, false);
+    }
+    let target = pos.relative(facing);
+    if world.spawn_tnt(target) < 0 {
+        return Shot::optional(stack, false);
+    }
+    Shot::optional(without_one(&stack), true)
 }
 
 /// `BoatDispenseItemBehavior`。前方的流体是水，或者前方是空气且下面是水，才算放得下。
