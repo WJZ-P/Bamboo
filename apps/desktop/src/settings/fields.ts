@@ -169,6 +169,14 @@ export const FIELDS: readonly SettingField[] = [
     hint: "对应官方的 prevent-proxy-connections。打开后向 Mojang 提问时带上客户端的 IP，Mojang 会比对玩家登录时报备的那个，对不上就不认这次登录。玩家经过 VPN 或者代理进来时两边的 IP 不一样，会被挡住。",
   },
   {
+    key: "enforceSecureProfile",
+    group: "auth",
+    label: "强制签名聊天",
+    control: "toggle",
+    wide: true,
+    hint: "对应官方的 enforce-secure-profile，默认打开。正版验证也打开、并且取到了 Mojang 的公钥之后，没有签名的聊天和需要签名的命令会被拒绝。没开正版验证时这一项不起作用。",
+  },
+  {
     key: "forwarding",
     group: "forwarding",
     label: "转发模式",

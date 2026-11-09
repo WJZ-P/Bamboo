@@ -2,7 +2,10 @@
 
 use std::{
     ops::ControlFlow,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::{
+        Arc,
+        mpsc::{Receiver, TryRecvError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -25,6 +28,7 @@ use crate::{
     inventory, lectern, light_updates, menu, movement,
     player::shows_hat,
     region::Region,
+    secure_chat::{self, ServiceProfileKeys},
     sign,
 };
 
@@ -44,6 +48,11 @@ pub struct WorldConfig {
     pub max_players: i32,
     /// 服务端有没有开正版验证。只写进 `login` 包，验证本身在连接层做。
     pub online_mode: bool,
+    /// 官方 `enforce-secure-profile`，默认打开。没开正版验证、或者公钥还没取到时不生效。
+    ///
+    /// Official `enforce-secure-profile`, on by default. It does nothing until online mode is on
+    /// and the profile keys have been fetched.
+    pub enforce_secure_profile: bool,
 }
 
 /// 所有游戏状态的唯一所有者。
@@ -56,12 +65,29 @@ pub struct World {
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+        Self::with_service_keys(config, inbox, secure_chat::empty_keys())
+    }
+
+    /// `keys` 和连接任务共用。世界线程只读，不去取。
+    ///
+    /// `keys` is shared with the connection tasks. The world thread only reads them.
+    pub fn with_service_keys(
+        config: WorldConfig,
+        inbox: Receiver<Inbound>,
+        keys: Arc<ServiceProfileKeys>,
+    ) -> Self {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
         Self {
             global: Global::default(),
-            region: Region::new(view_distance, config.max_players, config.online_mode),
+            region: Region::with_keys(
+                view_distance,
+                config.max_players,
+                config.online_mode,
+                config.enforce_secure_profile,
+                keys,
+            ),
             inbox,
         }
     }
@@ -166,14 +192,7 @@ impl World {
             warn!(player = id.0, "ignoring a second join with the same id");
             return;
         }
-        // 探针用这个名字进旁观模式。别的名字仍是创造模式。
-        //
-        // The probe joins under this name as a spectator. Every other name stays creative.
-        let game_mode = if request.name == "Spectator" {
-            GameMode::Spectator
-        } else {
-            GAME_MODE
-        };
+        let game_mode = GAME_MODE;
         let entry = RosterEntry {
             uuid: request.uuid,
             name: request.name.clone(),
@@ -182,6 +201,7 @@ impl World {
             game_mode,
             latency: 0,
             show_hat: shows_hat(&request.client),
+            chat_session: None,
         };
 
         self.region.add_player(request, game_mode);
@@ -232,14 +252,30 @@ impl World {
             return;
         }
         match &request {
-            PlayRequest::ChatCommand { command } => {
+            PlayRequest::ChatCommand { command, signed } => {
                 let command = command.clone();
-                command::on_command(&mut self.global, &mut self.region, player, &command);
+                let signed = signed.clone();
+                command::on_command(
+                    &mut self.global,
+                    &mut self.region,
+                    player,
+                    &command,
+                    signed.as_ref(),
+                );
                 return;
             }
             PlayRequest::CommandSuggestion { id, command } => {
                 let (transaction, command) = (*id, command.clone());
                 command::on_suggestion(&mut self.region, player, transaction, &command);
+                return;
+            }
+            PlayRequest::ChatSession(session) => {
+                let session = session.clone();
+                if let Some(update) = secure_chat::on_session(&mut self.region, player, session)
+                    && let Some(frames) = self.global.initialize_chat(player, &update)
+                {
+                    self.region.links.broadcast(&frames);
+                }
                 return;
             }
             _ => {}
@@ -276,16 +312,32 @@ impl World {
             PlayRequest::ClientInformation(information) => {
                 self.on_client_information(player, information);
             }
-            PlayRequest::Chat { message } => {
-                if let Some(frames) = chat::on_chat(region, player, message) {
-                    region.links.broadcast(&frames);
+            PlayRequest::Chat {
+                message,
+                signature,
+                time_millis,
+                salt,
+                last_seen,
+            } => {
+                if chat::on_chat(
+                    region,
+                    player,
+                    message,
+                    signature.map(|bytes| *bytes),
+                    time_millis,
+                    salt,
+                    &last_seen,
+                ) {
                     chat::detect_chat_rate_spam(region, player);
                 }
             }
-            // 聊天命令和建议在上面处理过了，这里只是让匹配穷尽。
+            PlayRequest::ChatAck { offset } => secure_chat::on_ack(region, player, offset),
+            // 聊天命令、建议和会话更新在上面处理过了，这里只是让匹配穷尽。
             //
-            // Chat commands and suggestions are handled above. This arm only makes the match exhaustive.
-            PlayRequest::ChatCommand { .. } | PlayRequest::CommandSuggestion { .. } => {}
+            // Chat commands, suggestions, and session updates are handled above. This arm only makes the match exhaustive.
+            PlayRequest::ChatSession(_)
+            | PlayRequest::ChatCommand { .. }
+            | PlayRequest::CommandSuggestion { .. } => {}
             PlayRequest::ClientCommand { action } => {
                 if action
                     == mc_bamboo_protocol::packet::play::ClientCommandKind::RequestGameRuleValues

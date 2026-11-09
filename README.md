@@ -144,6 +144,22 @@ WebView2 的渲染进程不算在内。
   配置是 `ServerConfig` 里的 `forwarding`（`Off`、`Legacy`、`Modern`）和 `forwarding_secret`；
   `Modern` 没有密钥时启动会退回 `Off`，桌面端的设置页里也能改。
 - 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。阈值是 `server.properties` 里的 `chat-spam-threshold-seconds`，不是游戏规则。
+  发送者不是全零 UUID 的聊天发 `player_chat`。没签名时签名位是空的，正文按 `PlayerChatMessage.unsigned`
+  （时间是现在、盐是 0、已读列表是空的）。全零 UUID 的系统消息（不带签名的 `chat_command`）仍是 `disguised_chat`。
+  不可信的广播日志带 `[Not Secure]`，格式和官方 `PlayerList.logChatMessage` 一样。
+  `enforce-secure-profile` 默认 true，但只在 `online_mode` 打开、并且服务公钥已经能验玩家钥匙时才生效
+  （官方是发现文档里的 `getPublicKeys`，正式环境是 `https://api.minecraftservices.com/publickeys`；
+  session host 不是 `sessionserver.mojang.com` 时改问同一个源，这样探针不访问外网）。
+  生效时 `login` 和状态 JSON 的 `enforcesSecureChat` 为 true，钥匙后来才到也会立刻按这个判断。
+  `chat_session_update` 用 `SHA1withRSA` 验玩家公钥（过期时间、公钥 DER、Mojang 的签名必须属于这名玩家），
+  失败按官方翻译键断开。验过之后广播只有 `INITIALIZE_CHAT` 的 `player_info_update`。
+  签名聊天和带 `message` 参数的签名命令（`/say`、`/me`、`/msg`）走消息链和 `LastSeenMessages`：
+  链断了、签名错了、时间倒退只给发送者发红色系统消息；已读窗口不合法则断开。
+  合法的签名消息按接收者打包成 `player_chat`，对方客户端能验过。
+  取公钥在连接任务里按 authlib `RetryableFetch` 重试：失败后 5、10、20、40、80、160 分钟，之后一直是 320 分钟，没有次数上限；
+  成功后 24 小时再刷新。第一次不论成败都放行登录。失败时保留上一份钥匙，安全聊天保持关闭、服务器照常开。
+  没有发现文档。离线模式不去取公钥。
+  没有聊天过滤和举报。`delete_chat` 的编码在，原版专用服务器不会发，这里也不发。
 - 网络压缩：登录末尾告诉客户端阈值（默认 256，负值关闭），之后两个方向都按官方格式收发压缩帧，
   小于阈值的包原样发。压缩只在连接任务里做，世界线程交出的帧本身不变。
 - 正版验证和加密（`online_mode`，默认关闭）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
@@ -321,8 +337,7 @@ WebView2 的渲染进程不算在内。
   `ItemStack.useOn` 的检查，`can_place_on` 能匹配点到的方块才放得下。旁观模式挖不动。传送门没有别的维度，
   折跃门也不存出口，所以旁观者右键只会看到 `spectator.cannot_teleport`，不会真的传送。
   工作台、切石机、锻造台、熔炉、高炉、烟熏炉、酿造台、织布机和砂轮旁观者也能打开，有书的讲台也能打开，没有书的讲台和架子放过。
-  旁观者的菜单按钮全部忽略，包括织布机选图案。旁观者不计入箱子的开合人数。探针里名字是 `Spectator` 的玩家以旁观模式加入，并右键工作台打开菜单。
-  旁观者仍收到创造模式的能力包和创造模式的属性修饰（服务端触及距离按旁观者算，是 4.5）。
+  旁观者的菜单按钮全部忽略，包括织布机选图案。旁观者不计入箱子的开合人数。探针里管理员用 `/gamemode` 把 `Spectator` 切成旁观模式，再让它右键工作台打开菜单。
   没有 `container.spectatorCantOpen`。
   附魔台、铁砧和制图台还没做，旁观者右键它们是放过。
   矿石点亮、龙蛋传送和音符盒发声这些方块 `attack` 已经按官方逻辑执行。音符盒的声音在方块事件里算好后发成音效包，
@@ -383,7 +398,7 @@ WebView2 的渲染进程不算在内。
   不记统计、不发配方音效、不触发进度。有限合成（`limited_crafting`）没做，默认和官方一样是关的。
 - 正版验证的限制：`online_mode` 默认关闭，命令行版用的是默认配置，桌面端的设置页里可以打开。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
-  没有玩家公钥和聊天签名，开了正版验证的聊天也是不签名的。
+  正版验证打开且公钥取到了之后，聊天按上面一节签名。取钥失败会按 authlib 的间隔在后台重试，钥匙到达后安全聊天立刻生效。
   RSA 解密用的 `rsa` crate 有 RUSTSEC-2023-0071（Marvin 计时侧信道），上游还没有修好的版本，
   Bamboo 用 `decrypt_blinded` 做盲化缓解，详见 `crates/mc-bamboo-auth/src/keypair.rs` 的注释。
 

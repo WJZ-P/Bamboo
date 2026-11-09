@@ -704,12 +704,8 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
                 pitch,
             }
         }
-        9 => PlayRequest::Chat {
-            message: random_text(rng, 12, hostile),
-        },
-        10 => PlayRequest::ChatCommand {
-            command: random_text(rng, 300, hostile),
-        },
+        9 => PlayRequest::unsigned_chat(random_text(rng, 12, hostile)),
+        10 => PlayRequest::unsigned_command(random_text(rng, 300, hostile)),
         11 => PlayRequest::ClientInformation(random_information(rng)),
         12 => PlayRequest::ClientCommand {
             action: rng.pick(&[
@@ -797,6 +793,10 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
 fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
     let mut rng = Rng::new(seed);
     let mut server = Harness::new(view_distance);
+    // 未签名 `player_chat` 带系统时间。钉死以后同一颗种子的字节才一样。
+    //
+    // Unsigned `player_chat` carries the system time. Pin it so one seed has one byte stream.
+    server.region().clock_millis = Some(1_700_000_000_000);
     let mut actors: Vec<Actor> = Vec::new();
     let mut digests = Vec::new();
     let mut joined = 0;

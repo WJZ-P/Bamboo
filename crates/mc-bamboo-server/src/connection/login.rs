@@ -94,10 +94,17 @@ pub(super) async fn admit(
 /// 这个请求跑在连接任务里，世界线程碰不到它，所以一个玩家等 Mojang 回话不会卡住别人。
 async fn authenticate(
     connection: &mut Connection,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     keypair: &ServerKeyPair,
     name: String,
 ) -> Result<Option<Profile>, ConnectionError> {
+    // 公钥和这次登录无关，但要在玩家进入世界之前取到，`login` 包才能写对
+    // `enforcesSecureChat`。世界线程不去访问网络。
+    //
+    // The profile keys are not part of this login, but they have to be ready before the player
+    // enters the world so the `login` packet can set `enforcesSecureChat`. The world thread does
+    // not touch the network.
+    crate::server::ensure_profile_keys(shared).await;
     let challenge = random_challenge();
     let mut frame = Vec::new();
     append_frame(

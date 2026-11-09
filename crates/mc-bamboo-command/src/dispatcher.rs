@@ -65,6 +65,17 @@ struct Context {
     child: Option<Box<Self>>,
 }
 
+fn collect_signable(context: &Context, out: &mut Vec<(String, String)>) {
+    for (name, value) in &context.arguments {
+        if let Some(message) = value.as_message() {
+            out.push((name.clone(), message.text.clone()));
+        }
+    }
+    if let Some(child) = &context.child {
+        collect_signable(child, out);
+    }
+}
+
 impl Context {
     fn new(start: usize) -> Self {
         Self {
@@ -171,6 +182,22 @@ impl CommandGraph {
     pub fn parse_last_node(&self, input: &str, permission_level: u8) -> Option<usize> {
         let raw = self.parse_raw(input, permission_level);
         raw.context.nodes.last().map(|node| node.node)
+    }
+
+    /// 这次解析里已经吃进去的 `message` 参数，命令整体失败时也算。
+    ///
+    /// 官方 `SignableCommand.of` 看的是 `ParseResults` 里解析成功的参数，不要求整条命令能执行。
+    /// 返回 `(参数名, 参数原文)`。
+    ///
+    /// Message arguments consumed by this parse, including when the command as a whole fails.
+    ///
+    /// Official `SignableCommand.of` reads arguments that parsed inside `ParseResults`.
+    /// It does not require the command to be executable. Each entry is `(name, raw text)`.
+    pub fn signable_messages(&self, input: &str, permission_level: u8) -> Vec<(String, String)> {
+        let raw = self.parse_raw(input, permission_level);
+        let mut messages = Vec::new();
+        collect_signable(&raw.context, &mut messages);
+        messages
     }
 
     fn parse_raw(&self, input: &str, permission_level: u8) -> ParseResults {
@@ -654,6 +681,37 @@ mod tests {
         assert_eq!(
             graph.parse("tp", 2).unwrap_err().error.key,
             "command.unknown.command"
+        );
+    }
+
+    #[test]
+    fn a_failed_parse_keeps_message_arguments_that_were_consumed() {
+        let mut graph = CommandGraph::new();
+        let root = graph.root();
+        let say = graph.literal(root, "say", 0);
+        let message = graph.argument(say, "message", ArgumentType::Message, 0);
+        graph.executable(message);
+        let echo = graph.literal(root, "echo", 0);
+        let text = graph.argument(echo, "message", ArgumentType::Message, 0);
+        let extra = graph.argument(text, "count", ArgumentType::Integer { min: 0, max: 1 }, 0);
+        graph.executable(extra);
+
+        assert_eq!(
+            graph.signable_messages("say hello", 0),
+            [("message".to_owned(), "hello".to_owned())]
+        );
+        assert!(graph.parse("say", 0).is_err());
+        assert!(graph.signable_messages("say", 0).is_empty());
+        assert!(graph.parse("nope", 0).is_err());
+        assert!(graph.signable_messages("nope", 0).is_empty());
+        // `message` 把剩下的字都吃掉了，后面的参数对不上，整条命令失败，但原文还在。
+        //
+        // `message` consumes the rest, so the following argument fails and the command
+        // does not run, but the consumed text is still available.
+        assert!(graph.parse("echo hello", 0).is_err());
+        assert_eq!(
+            graph.signable_messages("echo hello", 0),
+            [("message".to_owned(), "hello".to_owned())]
         );
     }
 
