@@ -35,8 +35,12 @@ pub use title::*;
 use mc_bamboo_data::packets::play::clientbound;
 
 use super::ClientboundPacket;
+use mc_bamboo_core::BlockPos;
+
 use crate::{
-    codec::{write_bool, write_i32, write_i64, write_string, write_varint, write_varlong},
+    codec::{
+        write_bool, write_f32, write_i32, write_i64, write_string, write_varint, write_varlong,
+    },
     text::Component,
 };
 
@@ -109,6 +113,46 @@ impl ClientboundPacket for Login<'_> {
         //
         // Enforced secure chat. Official `enforcesSecureChat`: online mode, the config flag, and keys already fetched.
         write_bool(out, self.enforces_secure_chat);
+    }
+}
+
+/// 同步世界难度，官方 `ClientboundChangeDifficultyPacket`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeDifficulty {
+    /// `Difficulty.getId()`。
+    pub difficulty: u8,
+    pub locked: bool,
+}
+
+impl ClientboundPacket for ChangeDifficulty {
+    const ID: i32 = clientbound::CHANGE_DIFFICULTY;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        out.push(self.difficulty);
+        write_bool(out, self.locked);
+    }
+}
+
+/// 同步世界出生点，官方 `ClientboundSetDefaultSpawnPositionPacket`。
+///
+/// 包体是 `LevelData.RespawnData`：`GlobalPos`（维度标识符 + 打包的方块坐标）
+/// 加上水平角、俯仰角两个 Float。Bamboo 只有一个维度。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetDefaultSpawnPosition {
+    pub dimension: &'static str,
+    pub pos: BlockPos,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl ClientboundPacket for SetDefaultSpawnPosition {
+    const ID: i32 = clientbound::SET_DEFAULT_SPAWN_POSITION;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_string(out, self.dimension);
+        out.extend_from_slice(&self.pos.pack().to_be_bytes());
+        write_f32(out, self.yaw);
+        write_f32(out, self.pitch);
     }
 }
 
@@ -241,10 +285,20 @@ pub struct GameEvent {
 }
 
 impl GameEvent {
+    /// 开始下雨，参数固定是 0。
+    pub const START_RAINING: u8 = 1;
+    /// 停止下雨，参数固定是 0。
+    pub const STOP_RAINING: u8 = 2;
     /// 玩家自己的游戏模式变了，参数是新模式。
     ///
     /// The player's own game mode changed. The parameter is the new mode.
     pub const CHANGE_GAME_MODE: u8 = 3;
+    /// 雨强度变化，参数是 0 到 1。
+    pub const RAIN_LEVEL_CHANGE: u8 = 7;
+    /// 雷暴强度变化，参数是 0 到 1。
+    pub const THUNDER_LEVEL_CHANGE: u8 = 8;
+    /// 客户端收到后才结束加载画面。
+    pub const LEVEL_CHUNKS_LOAD_START: u8 = 13;
 }
 
 impl ClientboundPacket for GameEvent {
@@ -505,6 +559,31 @@ mod tests {
     #[test]
     fn level_chunks_load_start_matches_official_bytes() {
         assert_eq!(frame(&LevelChunksLoadStart), hex("06 27 0d 00 00 00 00"));
+    }
+
+    #[test]
+    fn difficulty_and_spawn_packets_match_official_layout() {
+        assert_eq!(
+            body(&ChangeDifficulty {
+                difficulty: 2,
+                locked: true,
+            }),
+            hex("02 01")
+        );
+        let spawn = SetDefaultSpawnPosition {
+            dimension: "minecraft:overworld",
+            pos: BlockPos::new(8, -60, 8),
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        // `docs/chat-join.md` 8.3 里官方 codec 写出的 body。
+        assert_eq!(
+            body(&spawn),
+            hex("13 6d 69 6e 65 63 72 61 66 74 3a 6f 76 65 72 77 6f 72 6c 64
+                 00 00 02 00 00 00 8f c4
+                 00 00 00 00
+                 00 00 00 00")
+        );
     }
 
     #[test]

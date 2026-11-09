@@ -13,20 +13,27 @@ pub(crate) use players::change_own_mode;
 mod blocks;
 mod bossbar;
 mod catalog;
+mod clone;
 mod effects;
+mod enchant;
 mod feedback;
 mod gamerule;
 mod items;
+mod loot;
 mod particle;
 mod players;
 mod playsound;
+mod random;
 mod scoreboard;
 mod select;
+mod stopsound;
 mod team;
 mod teleport;
 mod text;
 mod time;
 mod title;
+mod weather;
+mod world_settings;
 
 use std::sync::OnceLock;
 
@@ -77,6 +84,19 @@ fn reject_unsigned_signable(region: &mut Region, id: PlayerId) {
 pub(crate) fn commands() -> &'static Commands {
     static COMMANDS: OnceLock<Commands> = OnceLock::new();
     COMMANDS.get_or_init(catalog::build)
+}
+
+/// 集成测试用：另建一棵树，不经过 `OnceLock`，方便对比官方的命令树报告。
+///
+/// Returns the graph and the executable action of every node.
+pub fn test_commands() -> (CommandGraph, Vec<bool>) {
+    let commands = catalog::build();
+    let actions = commands
+        .actions
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    (commands.graph, actions)
 }
 
 /// 进服时告诉客户端权限等级，并发送这名玩家用得了的命令树。
@@ -338,6 +358,10 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::Component
         | ArgumentType::Particle
         | ArgumentType::ResourceLocation
+        | ArgumentType::Dimension
+        | ArgumentType::IntRange
+        | ArgumentType::LootTable
+        | ArgumentType::ItemSlot
         | ArgumentType::Objective
         | ArgumentType::Team
         | ArgumentType::Criteria

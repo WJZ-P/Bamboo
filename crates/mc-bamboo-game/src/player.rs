@@ -20,6 +20,7 @@ use crate::{
     player_grid::PlayerGrid,
     player_move::Motion,
     secure_chat::PlayerChat,
+    world_state::RespawnData,
 };
 
 const STANDING_EYE_HEIGHT: f64 = 1.62;
@@ -86,6 +87,10 @@ pub(crate) struct Player {
     ///
     /// Public key, message chain, and the seen-message window. Without a session, chat stays unsigned.
     pub(crate) chat: PlayerChat,
+    /// 官方 `ServerPlayer.respawnConfig`。没有死亡重生，只存着。
+    ///
+    /// Official `ServerPlayer.respawnConfig`. Stored only; there is no death respawn.
+    pub(crate) respawn: Option<RespawnData>,
 }
 
 impl Player {
@@ -124,6 +129,7 @@ impl Player {
             random: crate::drops::player_random(id),
             drop_spam: 0,
             chat: PlayerChat::default(),
+            respawn: None,
         }
     }
 

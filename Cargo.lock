@@ -1962,6 +1962,7 @@ dependencies = [
  "mc-bamboo-world",
  "rand_core",
  "rsa",
+ "serde_json",
  "sha1",
  "sha2",
  "tracing",

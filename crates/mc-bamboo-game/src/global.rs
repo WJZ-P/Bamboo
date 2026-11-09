@@ -6,14 +6,21 @@ use std::collections::BTreeMap;
 
 use mc_bamboo_protocol::{
     packet::{
-        play::{GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, SystemChat},
+        play::{
+            ChangeDifficulty, GameMode, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
+            SetDefaultSpawnPosition, SystemChat,
+        },
         profile::ProfileProperty,
     },
     text::{Color, Component},
 };
 use uuid::Uuid;
 
-use crate::{inbound::PlayerId, links::encode_frames};
+use crate::{
+    inbound::PlayerId,
+    links::encode_frames,
+    world_state::{Difficulty, RespawnData, WorldState},
+};
 
 /// 官方的条件是 `++counter > 600`，所以实际周期是 601 tick。
 const LATENCY_BROADCAST_THRESHOLD: u32 = 600;
@@ -160,8 +167,7 @@ impl RosterEntry {
     }
 }
 
-/// 不属于任何区块的状态。
-#[derive(Debug)]
+/// 不属于任何区块的状态。`WorldState` 里的随机序列没有 `Debug`。
 pub(crate) struct Global {
     time: GameTime,
     /// 主世界时钟。开服时停在正午，和现有的 `set_time` 包一致。
@@ -178,6 +184,10 @@ pub(crate) struct Global {
     ///
     /// Game rules. They are not saved, so a restart restores the official defaults.
     rules: crate::gamerules::GameRuleSet,
+    /// 难度、出生点、天气等世界设置。不写存档。
+    ///
+    /// Difficulty, spawn, weather and other world settings. Nothing is saved.
+    state: WorldState,
     /// 全服一份的计分板和队伍。不写存档。
     ///
     /// The one scoreboard and team set for the whole server. Never saved.
@@ -197,6 +207,7 @@ impl Default for Global {
             roster: BTreeMap::new(),
             ticks_since_latency_broadcast: 0,
             rules: crate::gamerules::GameRuleSet::vanilla(),
+            state: WorldState::default(),
             scoreboard: crate::scoreboard::Scoreboard::default(),
             boss_bars: crate::scoreboard::BossBars::default(),
         }
@@ -252,6 +263,54 @@ impl Global {
 
     pub(crate) fn clock(&self) -> Clock {
         self.clock
+    }
+
+    /// 权威的世界设置。
+    ///
+    /// The authoritative world settings.
+    pub(crate) fn state(&self) -> &WorldState {
+        &self.state
+    }
+
+    /// 权威的世界设置，可写。
+    ///
+    /// The authoritative world settings, writable.
+    pub(crate) fn state_mut(&mut self) -> &mut WorldState {
+        &mut self.state
+    }
+
+    /// 官方 `MinecraftServer.sendDifficultyUpdate`：给所有人发当前难度和锁定标志。
+    ///
+    /// Official `MinecraftServer.sendDifficultyUpdate`: broadcast the current difficulty
+    /// and lock flag to everyone.
+    pub(crate) fn difficulty_frames(&self) -> Vec<u8> {
+        encode_frames(&ChangeDifficulty {
+            difficulty: self.state.difficulty as u8,
+            locked: self.state.difficulty_locked,
+        })
+    }
+
+    /// 当前难度的显示名，官方 `Difficulty.getDisplayName()` 的翻译键。
+    pub(crate) fn difficulty_name(&self) -> String {
+        self.state.difficulty.display_name()
+    }
+
+    pub(crate) fn set_difficulty(&mut self, difficulty: Difficulty) {
+        self.state.difficulty = difficulty;
+    }
+
+    /// 官方 `MinecraftServer.setRespawnData`：只在真的变化时广播出生点包。
+    pub(crate) fn set_spawn(&mut self, spawn: RespawnData) -> Vec<u8> {
+        if self.state.spawn == spawn {
+            return Vec::new();
+        }
+        self.state.spawn = spawn;
+        encode_frames(&SetDefaultSpawnPosition {
+            dimension: crate::region::DIMENSION,
+            pos: spawn.pos,
+            yaw: spawn.yaw,
+            pitch: spawn.pitch,
+        })
     }
 
     /// 按注册名取时钟。只有主世界和末地，别的名字返回 `None`。

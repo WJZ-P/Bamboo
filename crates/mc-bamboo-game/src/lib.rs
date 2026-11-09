@@ -32,7 +32,7 @@ mod chat;
 mod chunk_broadcast;
 mod chunk_encoding;
 mod chunk_tracking;
-mod command;
+pub mod command;
 mod command_block;
 mod container;
 mod debug_stick;
@@ -59,7 +59,9 @@ mod scoreboard;
 mod secure_chat;
 mod sign;
 mod world;
+mod world_state;
 
+pub use command::test_commands;
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
 pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};

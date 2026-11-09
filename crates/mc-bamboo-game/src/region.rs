@@ -18,8 +18,8 @@ use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
-    AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameMode,
-    LevelChunksLoadStart, Login, PlayerAbilities, SetEntityData, SetTime, UpdateAttributes,
+    AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameEvent, GameMode,
+    Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime, UpdateAttributes,
 };
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
@@ -37,19 +37,23 @@ use crate::{
     player::Player,
     player_grid::PlayerGrid,
     secure_chat::ServiceProfileKeys,
+    world_state::{RespawnData, Weather},
 };
 
-const DIMENSION: &str = "minecraft:overworld";
-/// 出生点在 (0, 0) 区块的中心。
+pub(crate) const DIMENSION: &str = "minecraft:overworld";
+/// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：
+/// 官方还会在 `respawn_radius` 里随机找落脚点，这里没有死亡重生也不做随机。
 ///
-/// `respawn_radius`（旧名 `spawnRadius`）是 `PlayerSpawnFinder` 在死亡重生时用的。
-/// 这里没有死亡重生，超平坦出生点仍然是这一格，不读那条规则。
-///
-/// `respawn_radius` (formerly `spawnRadius`) is what `PlayerSpawnFinder` uses on death.
-/// There is no death respawn here, so the superflat spawn stays on this cell and does
-/// not read that rule.
-const SPAWN_X: f64 = 8.5;
-const SPAWN_Z: f64 = 8.5;
+/// The default world spawn lives in [`WorldState`]. Join uses its horizontal position and
+/// keeps the superflat surface as y; official also searches for a spot within
+/// `respawn_radius`, which this server does not implement.
+fn spawn_position(spawn: RespawnData) -> Vec3 {
+    Vec3::new(
+        f64::from(spawn.pos.x) + 0.5,
+        f64::from(flat::surface_y()),
+        f64::from(spawn.pos.z) + 0.5,
+    )
+}
 
 const ABILITIES: PlayerAbilities = PlayerAbilities {
     invulnerable: true,
@@ -329,11 +333,20 @@ impl Region {
         (level, &mut self.block_ticks)
     }
 
-    /// 进服开头：`login`、`player_abilities`、权限事件、命令树、`player_position`。
+    /// 进服开头：`login`、`change_difficulty`、`player_abilities`、权限事件、命令树、
+    /// `player_position`。官方 `PlayerList.placeNewPlayer` 把难度包放在 login 后面。
     ///
-    /// The start of join: `login`, `player_abilities`, the permission event, the command tree,
-    /// then `player_position`.
-    pub(crate) fn add_player(&mut self, request: JoinRequest, game_mode: GameMode) {
+    /// The start of join: `login`, `change_difficulty`, `player_abilities`, the permission
+    /// event, the command tree, then `player_position`. Official `placeNewPlayer` puts
+    /// the difficulty packet right after `login`.
+    pub(crate) fn add_player(
+        &mut self,
+        request: JoinRequest,
+        game_mode: GameMode,
+        difficulty_frames: &[u8],
+        spawn: RespawnData,
+        state_seed_hash: i64,
+    ) {
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
             id,
@@ -355,7 +368,7 @@ impl Region {
             simulation_distance: self.view_distance,
             dimension_type: dimension_type::OVERWORLD,
             dimension: DIMENSION,
-            hashed_seed: 0,
+            hashed_seed: state_seed_hash,
             game_mode,
             is_flat: true,
             sea_level: flat::SEA_LEVEL,
@@ -363,22 +376,26 @@ impl Region {
             enforces_secure_chat: crate::secure_chat::enforces(self),
         };
         self.links.send(id, &login);
+        // 官方在 login 后立刻同步难度；帧已经由 `Global` 编码好，广播时也用它。
+        self.links.send_frames(id, difficulty_frames);
         self.links.send(id, &ABILITIES);
         // 官方在能力包之后、传送之前发权限事件和命令树。
         //
         // Official sends the permission event and the command tree after abilities and before the teleport.
         crate::command::send_session(&mut self.links, id, permission_level, id.0);
 
-        let spawn = Vec3::new(SPAWN_X, f64::from(flat::surface_y()), SPAWN_Z);
-        let mut player = Player::new(id, uuid, name, game_mode, client, spawn);
+        let position = spawn_position(spawn);
+        let mut player = Player::new(id, uuid, name, game_mode, client, position);
         player.permission_level = permission_level;
         player.is_op = is_op;
+        player.yaw = spawn.yaw;
+        player.pitch = spawn.pitch;
         movement::teleport(
             &mut player,
             &mut self.links,
             &mut self.player_grid,
             self.tick,
-            spawn,
+            position,
         );
         self.insert_player(player);
     }
@@ -408,12 +425,59 @@ impl Region {
         );
     }
 
-    /// 进服第 8 到 10 步：`set_time`、`game_event` 13、`set_chunk_cache_center`。
-    /// 跟踪范围里的区块都进 `pending`，这一 tick 末尾发第一批。
-    pub(crate) fn start_loading_chunks(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
+    /// 官方 `PlayerList.sendLevelInfo`：`set_time`、`set_default_spawn_position`，
+    /// 下雨时的三个 `game_event`，然后 `game_event` 13 和 `set_chunk_cache_center`。
+    /// 世界边界不在范围内，跳过。
+    pub(crate) fn start_loading_chunks(
+        &mut self,
+        id: PlayerId,
+        time: GameTime,
+        clock: Clock,
+        spawn: RespawnData,
+        weather: Weather,
+    ) {
         self.send_time(id, time, clock);
+        self.links.send(
+            id,
+            &SetDefaultSpawnPosition {
+                dimension: DIMENSION,
+                pos: spawn.pos,
+                yaw: spawn.yaw,
+                pitch: spawn.pitch,
+            },
+        );
+        // 官方只在下雨时发这三个包；不下雨时客户端自己的强度已经是 0。
+        if weather.raining {
+            self.links.send(
+                id,
+                &GameEvent {
+                    event: GameEvent::START_RAINING,
+                    param: 0.0,
+                },
+            );
+            self.links.send(
+                id,
+                &GameEvent {
+                    event: GameEvent::RAIN_LEVEL_CHANGE,
+                    param: 1.0,
+                },
+            );
+            self.links.send(
+                id,
+                &GameEvent {
+                    event: GameEvent::THUNDER_LEVEL_CHANGE,
+                    param: f32::from(u8::from(weather.thundering)),
+                },
+            );
+        }
         // 客户端收不到它就永远停在加载画面。
-        self.links.send(id, &LevelChunksLoadStart);
+        self.links.send(
+            id,
+            &GameEvent {
+                event: GameEvent::LEVEL_CHUNKS_LOAD_START,
+                param: 0.0,
+            },
+        );
         if let Some(player) = self.players.get_mut(&id) {
             chunk_tracking::update_player_view(player, &mut self.links, self.view_distance);
         }

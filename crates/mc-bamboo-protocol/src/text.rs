@@ -93,6 +93,34 @@ impl Component {
         self.with_entry("click_event", event)
     }
 
+    /// 官方 `ComponentUtils.copyOnClickText(text)`：绿色的文本，点击复制到剪贴板，
+    /// 悬停显示 `chat.copy.click`，Shift 点击插入原文，最后套上方括号。
+    ///
+    /// Official `ComponentUtils.copyOnClickText`: green text with a copy-to-clipboard
+    /// click event, `chat.copy.click` hover text, insertion and square brackets.
+    pub fn copy_on_click(text: &str) -> Self {
+        let click = Tag::Compound(vec![
+            (
+                "action".to_owned(),
+                Tag::String("copy_to_clipboard".to_owned()),
+            ),
+            ("value".to_owned(), Tag::String(text.to_owned())),
+        ]);
+        let hover = Tag::Compound(vec![
+            ("action".to_owned(), Tag::String("show_text".to_owned())),
+            (
+                "value".to_owned(),
+                Component::translate("chat.copy.click", []).into_tag(),
+            ),
+        ]);
+        let wrapped = Self::text(text)
+            .color(Color::Green)
+            .with_entry("click_event", click)
+            .with_entry("hover_event", hover)
+            .with_entry("insertion", Tag::String(text.to_owned()));
+        Component::translate("chat.square_brackets", [wrapped.into()])
+    }
+
     /// 在末尾追加一个子组件。
     pub fn extra(self, child: Self) -> Self {
         let mut entries = self.into_entries();
@@ -491,6 +519,40 @@ mod tests {
             ("underlined".to_owned(), Tag::Byte(1)),
         ]));
         assert_eq!(component, expected);
+    }
+
+    #[test]
+    fn copy_on_click_text_has_the_official_style() {
+        let component = Component::copy_on_click("42");
+        let Tag::Compound(entries) = component.tag() else {
+            panic!("方括号翻译是复合标签");
+        };
+        assert_eq!(entries[0].0, "translate");
+        assert_eq!(entries[0].1, Tag::String("chat.square_brackets".to_owned()));
+        let Tag::List(with) = &entries[1].1 else {
+            panic!("with 是列表");
+        };
+        let Tag::Compound(inner) = &with[0] else {
+            panic!("绿色文本是复合标签");
+        };
+        let keys: Vec<&str> = inner.iter().map(|(key, _)| key.as_str()).collect();
+        assert!(keys.contains(&"color"));
+        assert!(keys.contains(&"click_event"));
+        assert!(keys.contains(&"hover_event"));
+        assert!(keys.contains(&"insertion"));
+        let click = inner.iter().find(|(key, _)| key == "click_event").unwrap();
+        assert_eq!(
+            click.1,
+            Tag::Compound(vec![
+                (
+                    "action".to_owned(),
+                    Tag::String("copy_to_clipboard".to_owned())
+                ),
+                ("value".to_owned(), Tag::String("42".to_owned())),
+            ])
+        );
+        // 客户端必须能用自己的 Codec 再解码一次这个组件。
+        assert!(crate::components::text::is_fully_checked(&component));
     }
 
     #[test]
