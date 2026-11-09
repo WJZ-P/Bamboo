@@ -27,7 +27,7 @@ pub(crate) fn players(
     level: u8,
     selector: &EntitySelector,
 ) -> Result<Vec<PlayerId>, CommandFail> {
-    let found = find(region, source, level, selector)?;
+    let found = find(region, None, source, level, selector)?;
     if found.is_empty() {
         Err(fail("argument.entity.notfound.player"))
     } else {
@@ -44,7 +44,7 @@ pub(crate) fn entities(
     level: u8,
     selector: &EntitySelector,
 ) -> Result<Vec<PlayerId>, CommandFail> {
-    let found = find(region, source, level, selector)?;
+    let found = find(region, None, source, level, selector)?;
     if found.is_empty() {
         Err(fail("argument.entity.notfound.entity"))
     } else {
@@ -61,7 +61,7 @@ pub(crate) fn one_entity(
     level: u8,
     selector: &EntitySelector,
 ) -> Result<PlayerId, CommandFail> {
-    let found = find(region, source, level, selector)?;
+    let found = find(region, None, source, level, selector)?;
     match found.as_slice() {
         [only] => Ok(*only),
         [] => Err(fail("argument.entity.notfound.entity")),
@@ -78,11 +78,25 @@ pub(crate) fn mention(
     level: u8,
     selector: &EntitySelector,
 ) -> Result<Vec<PlayerId>, CommandFail> {
-    find(region, source, level, selector)
+    find(region, None, source, level, selector)
+}
+
+/// 带计分板的选择器。`scores=`、`team=` 的判定要查全服状态。
+///
+/// A selector that sees the scoreboard. `scores=` and `team=` need the server-wide state.
+pub(crate) fn with_scoreboard(
+    region: &Region,
+    board: &crate::scoreboard::Scoreboard,
+    source: PlayerId,
+    level: u8,
+    selector: &EntitySelector,
+) -> Result<Vec<PlayerId>, CommandFail> {
+    find(region, Some(board), source, level, selector)
 }
 
 fn find(
     region: &Region,
+    board: Option<&crate::scoreboard::Scoreboard>,
     source: PlayerId,
     level: u8,
     selector: &EntitySelector,
@@ -115,10 +129,13 @@ fn find(
     let origin = selector.position(origin_player.position());
     let volume = volume_box(origin, selector);
     if selector.current_entity {
-        return Ok(matches_player(origin_player, selector, origin, volume)
+        return Ok(
+            (matches_player(origin_player, selector, origin, volume, board)
+                && matches_scoreboard(board, origin_player, selector))
             .then_some(source)
             .into_iter()
-            .collect());
+            .collect(),
+        );
     }
     if selector.includes_entities
         && selector
@@ -132,7 +149,9 @@ fn find(
     let mut ids = Vec::new();
     let cap = selector.result_limit().max(0) as usize;
     for (id, player) in &region.players {
-        if matches_player(player, selector, origin, volume) {
+        if matches_player(player, selector, origin, volume, board)
+            && matches_scoreboard(board, player, selector)
+        {
             ids.push(*id);
             if ids.len() >= cap {
                 break;
@@ -148,6 +167,7 @@ fn matches_player(
     selector: &EntitySelector,
     origin: Vec3,
     volume: Option<Aabb>,
+    board: Option<&crate::scoreboard::Scoreboard>,
 ) -> bool {
     for (name, inverted) in &selector.name_filters {
         if (player.name == *name) == *inverted {
@@ -169,10 +189,19 @@ fn matches_player(
             return false;
         }
     }
-    // 玩家没有队伍和标签。正向过滤落空，反向过滤通过。
+    // 没有计分板时，队伍过滤按旧的「玩家没有队伍」处理；标签还没有实现。
     //
-    // Players have no team and no tags. A positive filter fails and an inverted one passes.
-    for (_, inverted) in selector.team_filters.iter().chain(&selector.tag_filters) {
+    // Without a scoreboard, team filters use the old "players have no team" rule;
+    // tags are not implemented yet.
+    for (team, inverted) in &selector.team_filters {
+        let in_team = board
+            .and_then(|board| board.team_of(&player.name))
+            .is_some_and(|name| name == team);
+        if in_team == *inverted {
+            return false;
+        }
+    }
+    for (_, inverted) in &selector.tag_filters {
         if !inverted {
             return false;
         }
@@ -207,6 +236,26 @@ fn matches_player(
         .is_some_and(|bounds| !matches_sqr(*bounds, player.position().distance_to_sqr(origin)))
     {
         return false;
+    }
+    true
+}
+
+/// `scores={目标=范围}` 和 `team=` 的过滤。没有计分板时只有分数过滤落空。
+///
+/// `scores={objective=range}` and `team=` filters. Without a scoreboard only
+/// score filters fail.
+fn matches_scoreboard(
+    board: Option<&crate::scoreboard::Scoreboard>,
+    player: &Player,
+    selector: &EntitySelector,
+) -> bool {
+    for (objective, bounds) in &selector.score_filters {
+        let Some(board) = board else {
+            return false;
+        };
+        if !board.score_in(&player.name, objective, |value| bounds.contains(value)) {
+            return false;
+        }
     }
     true
 }

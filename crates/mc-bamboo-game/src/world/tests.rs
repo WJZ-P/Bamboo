@@ -357,6 +357,11 @@ impl Harness {
         client
     }
 
+    /// 给其他模块的测试直接看全服状态。
+    pub(crate) fn global(&self) -> &crate::global::Global {
+        &self.world.global
+    }
+
     /// 给其他模块的测试直接看世界的状态。
     pub(crate) fn region(&mut self) -> &mut Region {
         &mut self.world.region

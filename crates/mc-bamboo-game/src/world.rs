@@ -193,8 +193,9 @@ impl World {
             return;
         }
         let game_mode = GAME_MODE;
+        let uuid = request.uuid;
         let entry = RosterEntry {
-            uuid: request.uuid,
+            uuid,
             name: request.name.clone(),
             // 皮肤只有名单要用，直接搬过来。
             properties: std::mem::take(&mut request.properties),
@@ -218,6 +219,17 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
+        // 官方 `ServerScoreboard.getStartTrackingPackets` 和 `CustomBossEvents.onPlayerConnect`
+        // 都在进服时只发给这名玩家。
+        //
+        // Official `ServerScoreboard.getStartTrackingPackets` and
+        // `CustomBossEvents.onPlayerConnect` both go only to the joining player.
+        let frames = self.global.scoreboard().join_frames();
+        self.region.links.send_frames(id, &frames);
+        self.global
+            .boss_bars_mut()
+            .on_join(&mut self.region, id, uuid);
+
         self.region
             .start_loading_chunks(id, self.global.time(), self.global.clock());
     }
@@ -239,6 +251,22 @@ impl World {
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         lectern::on_leave(&mut self.region, id);
+        // 官方 `ServerScoreboard.onPlayerRemoved` 只发一个 reset_score，分数本身留着；
+        // Boss 栏的 UUID 集合也留着，下次进服还会补发 add 包。
+        //
+        // Official `ServerScoreboard.onPlayerRemoved` only broadcasts reset_score and keeps
+        // the scores; boss-bar UUID sets also stay so rejoining gets the add packet again.
+        if let Some(name) = self
+            .region
+            .players
+            .get(&id)
+            .map(|player| player.name.clone())
+        {
+            self.global
+                .scoreboard_mut()
+                .on_leave(&name, &mut self.region);
+            self.global.boss_bars_mut().on_leave(id);
+        }
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {

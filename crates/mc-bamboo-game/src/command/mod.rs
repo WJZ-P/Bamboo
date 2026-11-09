@@ -16,6 +16,7 @@ mod feedback;
 mod gamerule;
 mod items;
 mod players;
+mod scoreboard;
 mod select;
 mod teleport;
 mod time;

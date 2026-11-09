@@ -169,6 +169,16 @@ impl Scoreboard {
             .is_some_and(|objective| objective.read_only)
     }
 
+    /// 有没有启用「显示自动更新」的目标。分数写入时用它决定要不要带显示名。
+    ///
+    /// Whether any objective has display auto-update enabled. Score writes use it
+    /// to decide whether a display component should be attached.
+    pub(crate) fn auto_updates(&self, _player: &str) -> bool {
+        self.objectives
+            .iter()
+            .any(|objective| objective.auto_update)
+    }
+
     pub(crate) fn is_trigger(&self, name: &str) -> bool {
         self.objective(name)
             .is_some_and(|objective| objective.criteria == "trigger")
@@ -789,6 +799,18 @@ impl Scoreboard {
             }
         }
         frames
+    }
+
+    /// 官方 `ServerScoreboard.onPlayerRemoved`：有跟踪中的目标时清掉客户端缓存的分数。
+    /// 服务端的分数保留，玩家重连还能看到。
+    ///
+    /// Official `ServerScoreboard.onPlayerRemoved`: clear the client-side score cache
+    /// when any objective is tracked. Server-side scores stay for a reconnect.
+    pub(crate) fn on_leave(&mut self, name: &str, region: &mut Region) {
+        self.forget_health(name);
+        if !self.tracked.is_empty() {
+            send_reset(region, name, None);
+        }
     }
 
     /// 官方 `ServerPlayer` 更新 `health`。生命值没变就连目标都不查。
