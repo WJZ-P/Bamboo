@@ -11,6 +11,7 @@ use serde_json::Value;
 const ROOTS: &[&str] = &[
     "clone",
     "defaultgamemode",
+    "enchant",
     "random",
     "difficulty",
     "seed",
@@ -109,6 +110,7 @@ fn argument_properties(kind: &ArgumentType) -> Option<Value> {
             min: i32::MIN,
             max: i32::MAX,
         } => return None,
+        ArgumentType::Integer { min, max: i32::MAX } => serde_json::json!({"min": min}),
         ArgumentType::Integer { min, max } => serde_json::json!({"min": min, "max": max}),
         ArgumentType::Long {
             min: i64::MIN,

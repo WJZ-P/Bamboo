@@ -7,8 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, clone, gamerule, items, players, random, stopsound, teleport,
-    time, world_settings,
+    CommandFn, Commands, blocks, clone, enchant, gamerule, items, players, random, stopsound,
+    teleport, time, world_settings,
 };
 
 struct Builder {
@@ -87,6 +87,7 @@ pub(crate) fn build() -> Commands {
     register_clone(&mut builder, root);
     register_stopsound(&mut builder, root);
     register_random(&mut builder, root);
+    register_enchant(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -506,6 +507,30 @@ fn add_reset_seed(builder: &mut Builder, parent: usize) {
     builder.run(world, random::reset);
     let sequence_id = builder.argument(world, "includeSequenceId", ArgumentType::Bool, 0);
     builder.run(sequence_id, random::reset);
+}
+
+fn register_enchant(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "enchant", permission::GAMEMASTERS);
+    let targets = builder.argument(command, "targets", entities_argument(), 0);
+    let enchantment = builder.argument(
+        targets,
+        "enchantment",
+        ArgumentType::Resource {
+            registry: "minecraft:enchantment",
+        },
+        0,
+    );
+    builder.run(enchantment, enchant::enchant);
+    let level = builder.argument(
+        enchantment,
+        "level",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(level, enchant::enchant);
 }
 
 fn register_seed(builder: &mut Builder, root: usize) {

@@ -13,6 +13,7 @@ pub(crate) use players::change_own_mode;
 mod blocks;
 mod catalog;
 mod clone;
+mod enchant;
 mod feedback;
 mod gamerule;
 mod items;
