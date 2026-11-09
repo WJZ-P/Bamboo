@@ -35,6 +35,20 @@ pub(crate) fn players(
     }
 }
 
+/// 官方 `EntityArgument.getOptionalPlayers`：空结果不报错，但 `scores=`/`team=` 照常过滤。
+///
+/// Official `EntityArgument.getOptionalPlayers`: an empty result is not an error,
+/// while `scores=` / `team=` still filter.
+pub(crate) fn optional_players(
+    region: &Region,
+    board: &crate::scoreboard::Scoreboard,
+    source: PlayerId,
+    level: u8,
+    selector: &EntitySelector,
+) -> Result<Vec<PlayerId>, CommandFail> {
+    find(region, Some(board), source, level, selector)
+}
+
 /// 官方 `EntityArgument.getEntities`。没有其他实体时，`@e` 的候选就是玩家。
 ///
 /// Official `EntityArgument.getEntities`. With no other entities, `@e` candidates are the players.

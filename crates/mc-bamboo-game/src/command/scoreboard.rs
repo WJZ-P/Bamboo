@@ -1049,11 +1049,12 @@ pub(crate) fn players_format_fixed(
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_data::packets::play::clientbound;
+
     use crate::{
         command::commands,
         world::tests::{Harness, frames_with_id},
     };
-    use mc_bamboo_data::packets::play::clientbound;
 
     /// 没有 `message` 参数，签名检查不会拦下命令。
     ///
@@ -1323,25 +1324,129 @@ mod tests {
         ));
     }
 
+    /// 官方 `ServerPlayer.doTick`：六个只读准则只在进服后第一刻写一次。
+    ///
+    /// Official `ServerPlayer.doTick`: the six read-only criteria are written once after join.
     #[test]
-    fn health_criterion_gets_its_fixed_value_on_tick() {
+    fn read_only_criteria_are_written_once_on_the_first_tick() {
         let (mut server, client) = operator("Op");
-        run(&mut server, &client, "scoreboard objectives add hp health");
+        for (name, criteria, expected) in [
+            ("hp", "health", 20),
+            ("food", "food", 20),
+            ("air", "air", 300),
+            ("armor", "armor", 0),
+            ("xp", "xp", 0),
+            ("level", "level", 0),
+        ] {
+            run(
+                &mut server,
+                &client,
+                &format!("scoreboard objectives add {name} {criteria}"),
+            );
+            // 玩家已经进服，第一刻早已过去，后来创建的目标不会补写。
+            //
+            // The player has already joined, so a later objective gets no write.
+            assert_eq!(
+                server.global().scoreboard().score_value("Op", name),
+                None,
+                "{criteria}"
+            );
+            let rejoin_name = format!("Join{criteria}");
+            let newcomer = server.join(&rejoin_name);
+            server.tick();
+            assert_eq!(
+                server.global().scoreboard().score_value(&rejoin_name, name),
+                Some(expected),
+                "{criteria}"
+            );
+            newcomer.take_frames();
+        }
+    }
+
+    #[test]
+    fn read_only_criteria_do_not_reappear_after_reset_or_a_new_objective() {
+        let (mut server, client) = operator("Op");
+        run(
+            &mut server,
+            &client,
+            "scoreboard objectives add level level",
+        );
+        // 新建目标不补写。
+        assert_eq!(
+            server.global().scoreboard().score_value("Op", "level"),
+            None
+        );
+        let newcomer = server.join("Newcomer");
         server.tick();
         assert_eq!(
-            server.global().scoreboard().score_value("Op", "hp"),
-            Some(20)
+            server
+                .global()
+                .scoreboard()
+                .score_value("Newcomer", "level"),
+            Some(0)
+        );
+        newcomer.take_frames();
+        run(
+            &mut server,
+            &client,
+            "scoreboard players reset Newcomer level",
+        );
+        server.tick();
+        assert_eq!(
+            server
+                .global()
+                .scoreboard()
+                .score_value("Newcomer", "level"),
+            None,
+            "reset 之后不会写回来"
         );
         // 只读准则不能被命令改写。
-        run(&mut server, &client, "scoreboard players set Op hp 1");
+        run(
+            &mut server,
+            &client,
+            "scoreboard players set Newcomer level 1",
+        );
         assert!(has_key(
             &system_text(&client),
             "arguments.objective.readonly"
         ));
-        assert_eq!(
-            server.global().scoreboard().score_value("Op", "hp"),
-            Some(20)
+    }
+
+    /// 官方 `Scoreboard.entityRemoved` 对 `Player` 直接返回：离线不广播 reset_score。
+    ///
+    /// Official `Scoreboard.entityRemoved` returns for players: no reset_score on disconnect.
+    #[test]
+    fn leaving_does_not_clear_scores_or_broadcast_reset_score() {
+        let (mut server, client) = operator("Op");
+        run(
+            &mut server,
+            &client,
+            "scoreboard objectives add kills dummy",
         );
+        run(
+            &mut server,
+            &client,
+            "scoreboard players set Kitten kills 7",
+        );
+        run(
+            &mut server,
+            &client,
+            "scoreboard objectives setdisplay sidebar kills",
+        );
+        client.take_frames();
+        server.leave(&client);
+        server.tick();
+        assert_eq!(
+            server.global().scoreboard().score_value("Kitten", "kills"),
+            Some(7)
+        );
+        // `client` 的链路已移除，用一个旁观者确认没有任何广播包。
+        let watcher = server.join("Watcher");
+        server.tick();
+        watcher.take_frames();
+        server.leave(&watcher);
+        server.tick();
+        assert!(frames_with_id(&client.take_frames(), clientbound::RESET_SCORE).is_empty());
     }
 
     #[test]

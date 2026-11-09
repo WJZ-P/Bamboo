@@ -385,6 +385,7 @@ pub(crate) fn set_visible(
 ///
 /// Official `setPlayers`: entity selectors resolve to online players, compared by UUID.
 fn targets(
+    global: &Global,
     region: &Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -398,7 +399,10 @@ fn targets(
         .get(&id)
         .map(|player| player.permission_level)
         .unwrap_or(mc_bamboo_command::permission::ALL);
-    let ids = select::players(region, id, level, selector)?;
+    // 官方 `EntityArgument.getOptionalPlayers`：空结果不报错。
+    //
+    // Official `EntityArgument.getOptionalPlayers`: an empty result is not an error.
+    let ids = select::optional_players(region, global.scoreboard(), id, level, selector)?;
     Ok(ids
         .iter()
         .filter_map(|player| {
@@ -419,7 +423,7 @@ pub(crate) fn set_players(
     let name = bar(global, parsed)?;
     let shown = shown(global, &name)?;
     let targets = match parsed.get("targets") {
-        Some(_) => targets(region, id, parsed)?,
+        Some(_) => targets(global, region, id, parsed)?,
         None => Vec::new(),
     };
     if global.boss_bars_mut().set_players(&name, &targets, region) == Some(false) {

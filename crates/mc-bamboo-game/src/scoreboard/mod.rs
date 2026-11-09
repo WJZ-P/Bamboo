@@ -152,11 +152,10 @@ pub(crate) struct Scoreboard {
     display: [Option<String>; 19],
     teams: Vec<Team>,
     membership: BTreeMap<String, String>,
-    /// 每个玩家上一次写进 `health` 准则的生命值。官方的初值是 `Float.MIN_VALUE`。
+    /// 官方 `ServerPlayer` 的六个 `lastRecorded*` 字段。缺省就是构造函数的初值。
     ///
-    /// The last health written into the `health` criterion for each player.
-    /// The official initial value is `Float.MIN_VALUE`.
-    last_health: BTreeMap<String, f32>,
+    /// The six official `ServerPlayer.lastRecorded*` fields. Absence means the constructor default.
+    recorded: BTreeMap<String, [i32; 6]>,
 }
 
 impl Scoreboard {
@@ -790,65 +789,86 @@ impl Scoreboard {
         frames
     }
 
-    /// 官方 `ServerScoreboard.onPlayerRemoved`：有跟踪中的目标时清掉客户端缓存的分数。
-    /// 服务端的分数保留，玩家重连还能看到。
+    /// 玩家断开时什么都不广播。
     ///
-    /// Official `ServerScoreboard.onPlayerRemoved`: clear the client-side score cache
-    /// when any objective is tracked. Server-side scores stay for a reconnect.
-    pub(crate) fn on_leave(&mut self, name: &str, region: &mut Region) {
-        self.forget_health(name);
-        if !self.tracked.is_empty() {
-            send_reset(region, name, None);
-        }
+    /// 官方 `ServerLevel$EntityCallbacks.onDestroyed` 调的是 `Scoreboard.entityRemoved`，
+    /// 它第一句就是「是 `Player` 就 return」；`ServerScoreboard.onPlayerRemoved` 只由
+    /// `resetAllPlayerScores` / `resetSinglePlayerScore` 触发，也就是 `/scoreboard players reset`。
+    /// 所以别人侧边栏上这名离线玩家的分数还留着。分数本身当然也不删。
+    ///
+    /// Nothing is broadcast when a player disconnects.
+    ///
+    /// Official `ServerLevel$EntityCallbacks.onDestroyed` calls `Scoreboard.entityRemoved`,
+    /// which returns immediately for a `Player`; `ServerScoreboard.onPlayerRemoved` is only
+    /// reached from `resetAllPlayerScores` / `resetSinglePlayerScore`, i.e.
+    /// `/scoreboard players reset`. Other clients keep the offline player's scores.
+    pub(crate) fn on_leave(&mut self, name: &str) {
+        self.forget_criteria(name);
     }
 
-    /// 官方 `ServerPlayer` 更新 `health`。生命值没变就连目标都不查。
+    /// 官方 `ServerPlayer.doTick` 里的六个只读准则。Bamboo 没有生命、饥饿、氧气、盔甲和
+    /// 经验系统，值就取玩家的初值；顺序和官方一样是 health、food、air、armor、xp、level。
     ///
-    /// The official `ServerPlayer` `health` update. An unchanged value does not touch objectives.
-    pub(crate) fn tick_health(&mut self, region: &mut Region) {
+    /// The six read-only criteria from official `ServerPlayer.doTick`. Bamboo has no health,
+    /// hunger, air, armor or experience system, so each uses the player's default value;
+    /// the order matches official: health, food, air, armor, xp, level.
+    pub(crate) fn tick_criteria(&mut self, region: &mut Region) {
+        const VALUES: [(&str, i32); 6] = [
+            ("health", 20),
+            ("food", 20),
+            ("air", 300),
+            ("armor", 0),
+            ("xp", 0),
+            ("level", 0),
+        ];
         let names: Vec<String> = region
             .players
             .values()
             .map(|player| player.name.clone())
             .collect();
         for name in names {
-            let last = self
-                .last_health
-                .get(&name)
-                .copied()
-                .unwrap_or(f32::MIN_POSITIVE);
-            let health = 20.0;
-            let objectives: Vec<String> = self
-                .objectives
-                .iter()
-                .filter(|objective| objective.criteria == "health")
-                .map(|objective| objective.name.clone())
-                .collect();
-            // Bamboo 没有伤害，生命值恒为 20；目标后来才创建时也要补写一次。
+            // 官方每个字段的初值都不是这些默认值（`Float.MIN_VALUE` 和 `Integer.MIN_VALUE`），
+            // 所以进服后的第一刻每个准则都会写一次，之后值没变就不写。
             //
-            // Bamboo has no damage, so health stays 20; a later objective still needs
-            // the initial write.
-            let needs_write = objectives
+            // Official fields start at `Float.MIN_VALUE` / `Integer.MIN_VALUE`, so every
+            // criterion is written once on the first tick and never again while unchanged.
+            let recorded = self.recorded.entry(name.clone()).or_insert([i32::MIN; 6]);
+            let changed: Vec<(usize, i32)> = VALUES
                 .iter()
-                .any(|objective| self.score_value(&name, objective).is_none());
-            if last == health && !needs_write {
+                .enumerate()
+                .filter(|(index, (_, value))| recorded[*index] != *value)
+                .map(|(index, (_, value))| (index, *value))
+                .collect();
+            if changed.is_empty() {
                 continue;
             }
-            self.last_health.insert(name.clone(), health);
-            let value = health.ceil() as i32;
-            let display = self.format_player_name(&name);
+            for (index, value) in &changed {
+                recorded[*index] = *value;
+            }
             let holder = Holder {
                 name: name.clone(),
-                display: Some(display),
+                display: Some(self.format_player_name(&name)),
             };
-            for objective in objectives {
-                self.write_forced(&holder, &objective, value, region);
+            for (index, value) in changed {
+                let criteria = VALUES[index].0;
+                let objectives: Vec<String> = self
+                    .objectives
+                    .iter()
+                    .filter(|objective| objective.criteria == criteria)
+                    .map(|objective| objective.name.clone())
+                    .collect();
+                for objective in objectives {
+                    self.write_forced(&holder, &objective, value, region);
+                }
             }
         }
     }
 
-    pub(crate) fn forget_health(&mut self, name: &str) {
-        self.last_health.remove(name);
+    fn forget_criteria(&mut self, name: &str) {
+        // 官方新 `ServerPlayer` 实例的六个 `lastRecorded*` 字段都回到构造函数初值。
+        //
+        // A new official `ServerPlayer` resets all six `lastRecorded*` fields.
+        self.recorded.remove(name);
     }
 
     fn update_team(&mut self, name: &str, region: &mut Region, change: impl FnOnce(&mut Team)) {

@@ -134,12 +134,11 @@ impl World {
         menu::tick(&mut self.region);
         lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
-        // 官方 `ServerPlayer.tick` 里 health 准则跟着玩家生命值走。Bamboo 没有伤害，
-        // 生命值恒为 20，只在这一刻把初值写进只读目标。
+        // 官方 `ServerPlayer.doTick` 的六个只读准则。Bamboo 用玩家初值，进服后第一刻各写一次。
         //
-        // Official `ServerPlayer.tick` feeds the health criterion. Bamboo has no damage,
-        // so health stays 20 and only the initial value reaches the read-only objective.
-        self.global.scoreboard_mut().tick_health(&mut self.region);
+        // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the
+        // player defaults and writes each once after join.
+        self.global.scoreboard_mut().tick_criteria(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
@@ -257,20 +256,18 @@ impl World {
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         lectern::on_leave(&mut self.region, id);
-        // 官方 `ServerScoreboard.onPlayerRemoved` 只发一个 reset_score，分数本身留着；
-        // Boss 栏的 UUID 集合也留着，下次进服还会补发 add 包。
+        // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；
+        // 分数和 Boss 栏的 UUID 集合都留着，下次进服还会补发 add 包。
         //
-        // Official `ServerScoreboard.onPlayerRemoved` only broadcasts reset_score and keeps
-        // the scores; boss-bar UUID sets also stay so rejoining gets the add packet again.
+        // Official `entityRemoved` returns for players without broadcasting reset_score;
+        // scores and boss-bar UUID sets stay so rejoining gets the add packet again.
         if let Some(name) = self
             .region
             .players
             .get(&id)
             .map(|player| player.name.clone())
         {
-            self.global
-                .scoreboard_mut()
-                .on_leave(&name, &mut self.region);
+            self.global.scoreboard_mut().on_leave(&name);
             self.global.boss_bars_mut().on_leave(id);
         }
         self.region.players.remove(&id);
