@@ -34,6 +34,15 @@ pub trait BlockEntity: Any + Send {
     /// 每刻运行一次。要删掉自己时调用 [`World::remove_block_entity`]，和官方一样。
     fn tick(&mut self, world: &mut World);
 
+    /// 这次 `tick` 通知比较器之后还会改物品时返回真。
+    /// 驱动把实体放回表、跑完排队的读取，再调用一次 `tick`。
+    ///
+    /// Returns true when this tick notifies a comparator and then still changes items.
+    /// The driver puts the entity back, runs the queued reads, and calls `tick` again.
+    fn resume_tick(&self) -> bool {
+        false
+    }
+
     /// `preRemoveSideEffects`：这一格换成别的方块之前的副作用。
     ///
     /// 官方的顺序是先把新状态写进区块，再调用它，所以这时读到的已经是新状态。
@@ -116,6 +125,14 @@ impl BlockEntities {
     }
 
     /// `getBlockEntity(pos)` 之后按类型取，类型不对时是 `None`。
+    ///
+    /// 正在 tick 或被 [`World::with_block_entity`](crate::World::with_block_entity) 拿出来的那一个
+    /// 不在表里，这里返回 `None`。比较器要读它时先排进队列，放回去再读。
+    ///
+    /// `getBlockEntity(pos)`, then downcast. The wrong type is `None`.
+    ///
+    /// An entity that is ticking, or held by [`World::with_block_entity`](crate::World::with_block_entity),
+    /// is not in the map, so this returns `None`. Comparator reads are queued and run after it is put back.
     pub fn get<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
     }
@@ -132,15 +149,25 @@ impl BlockEntities {
             .downcast_mut()
     }
 
-    /// 这一格有没有方块实体。
+    /// 这一格有没有方块实体。被拿出去、还没被删掉的那一个也算。
+    ///
+    /// Whether this cell has a block entity. One that was taken out and has not been removed counts.
     pub fn contains(&self, pos: BlockPos) -> bool {
-        self.entities.contains_key(&pos)
+        self.entities.contains_key(&pos) || self.taken.contains_key(&pos)
+    }
+
+    /// 这一格的方块实体是不是正被 tick 或 [`World::with_block_entity`](crate::World::with_block_entity) 拿在外面。
+    ///
+    /// Whether this cell's block entity is out of the map for a tick or
+    /// [`World::with_block_entity`](crate::World::with_block_entity).
+    pub fn is_taken(&self, pos: BlockPos) -> bool {
+        self.taken.contains_key(&pos)
     }
 
     /// `removeBlockEntity(pos)` 加上 `setRemoved`。ticker 槽位在下一次 tick 开头回收。
     ///
     /// 实体正在 tick 时（已经从表里拿出来）调用它表示把自己删掉：返回值是 `None`，
-    /// 放回去的时候会扔掉。
+    /// 放回去的时候会扔掉。删掉之后 [`BlockEntities::contains`] 也不再算这一格。
     pub fn remove(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
         if let Some(stored) = self.entities.remove(&pos) {
             return Some(stored.entity);
@@ -173,6 +200,15 @@ impl BlockEntities {
             return;
         }
         self.entities.insert(pos, Stored { id, entity });
+    }
+
+    /// 表里每个还在的方块实体。正在 tick、被拿出来的那一个不在这里。
+    ///
+    /// Every block entity still in the map. The one taken out for its tick is not included.
+    pub fn visit(&self, mut visit: impl FnMut(BlockPos, &dyn BlockEntity)) {
+        for (&pos, stored) in &self.entities {
+            visit(pos, stored.entity.as_ref());
+        }
     }
 
     /// `Level.tickBlockEntities` 的开头：并进上一刻新登记的，回收已经删掉的槽位。

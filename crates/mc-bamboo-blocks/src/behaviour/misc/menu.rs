@@ -11,7 +11,6 @@ use mc_bamboo_core::{BlockPos, Direction};
 use super::super::machines::BrewingStandEntity;
 use crate::{
     behaviour::{Behaviour, common::update_neighbours_after_destroy},
-    container::redstone_signal,
     context::UseContext,
     interact::InteractionResult,
     state::BlockState,
@@ -51,7 +50,12 @@ impl Behaviour for BrewingStand {
 
     /// `BrewingStandBlock.getAnalogOutputSignal`。
     ///
+    /// 实体被拿出去时这里读不到它，比较器会等它放回去再读。没有实体时用槽位表。
+    ///
     /// `BrewingStandBlock.getAnalogOutputSignal`.
+    ///
+    /// While the entity is out of the map this cannot see it; comparators read it after it is
+    /// put back. With no entity, the slot table is used.
     fn analog_output_signal(
         &self,
         _state: BlockState,
@@ -59,10 +63,7 @@ impl Behaviour for BrewingStand {
         pos: BlockPos,
         _direction: Direction,
     ) -> i32 {
-        world
-            .block_entity::<BrewingStandEntity>(pos)
-            .map(|entity| redstone_signal(entity.items().iter(), 5))
-            .unwrap_or(0)
+        crate::machine_container::brewing_signal(world, pos)
     }
 
     fn use_without_item(

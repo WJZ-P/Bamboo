@@ -11,8 +11,8 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{Recipe, RecipeType};
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{
-    BrewingInput, RecipeManager, assemble, brewing_fuel, crafting_remainder, is_brewing_fuel,
-    is_brewing_potion_input, is_brewing_reagent, potion_id,
+    BrewingInput, RecipeManager, assemble, brewing_fuel, crafting_remainder, is_brewing_reagent,
+    potion_id,
 };
 
 use crate::{
@@ -57,6 +57,14 @@ pub struct BrewingStandEntity {
     speed_multiplier: f32,
     /// 官方 `quickCheck` 缓存的上一份酿造配方。
     last_recipe: Option<&'static Recipe>,
+    /// 燃料的 `setChanged` 已经发出，后面的酿造还没跑。
+    ///
+    /// Fuel's `setChanged` has run; the brew after it has not.
+    yield_tick: bool,
+    /// `0` 从燃料开始，`1` 燃料已经通知过。
+    ///
+    /// `0` starts at fuel. `1` means the fuel notification already ran.
+    tick_phase: u8,
 }
 
 impl BrewingStandEntity {
@@ -73,6 +81,8 @@ impl BrewingStandEntity {
             total_fuel: 0,
             speed_multiplier: DEFAULT_SPEED_MULTIPLIER,
             last_recipe: None,
+            yield_tick: false,
+            tick_phase: 0,
         }
     }
 
@@ -121,8 +131,13 @@ impl BrewingStandEntity {
         }
     }
 
-    /// 官方 `setItem`，也就是 `BaseContainerBlockEntity.setItem`：
-    /// 写一格，数量按 `getMaxStackSize(stack)` 截断，然后通知。
+    /// 官方 `BaseContainerBlockEntity.setItem` 的写入：数量按 `getMaxStackSize` 截断。
+    ///
+    /// `setChanged` 不在这里。漏斗那条路在容器包装结束时通知，菜单在写回之后通知。
+    ///
+    /// The write half of vanilla `BaseContainerBlockEntity.setItem`: the count is limited by
+    /// `getMaxStackSize`. `setChanged` is not here. The hopper path notifies at the end of the
+    /// container wrapper, and a menu notifies after it writes the slots back.
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
         let mut stack = stack;
         let limit = mc_bamboo_recipes::max_stack_size(&stack).min(CONTAINER_STACK_LIMIT);
@@ -151,14 +166,7 @@ impl BrewingStandEntity {
     /// 官方 `canPlaceItem`。`level` 一定有；材料格查 `BREWING_REAGENTS`，
     /// 药水格要求是药水输入并且这一格现在是空的。
     pub fn can_place_item(&self, slot: usize, stack: &ItemStack) -> bool {
-        if slot == SLOT_FUEL {
-            return is_brewing_fuel(stack);
-        }
-        if slot == SLOT_INGREDIENT {
-            is_brewing_reagent(stack.item)
-        } else {
-            is_brewing_potion_input(stack.item) && self.items[slot].is_empty()
-        }
+        crate::machine_container::brewing_can_place(&self.items, slot, stack)
     }
 
     /// 官方 `RecipeManager.CachedCheck.getRecipeFor`。
@@ -233,28 +241,60 @@ impl BrewingStandEntity {
         let _ = world;
     }
 
-    /// 官方 `serverTick`。
-    pub fn server_tick(&mut self, world: &mut World) {
-        if self.fuel <= 0
-            && let Some((uses, speed)) = brewing_fuel(&self.items[SLOT_FUEL])
-        {
-            self.fuel = uses;
-            self.total_fuel = uses;
-            self.speed_multiplier = speed;
-            let remainder = crafting_remainder(&self.items[SLOT_FUEL]);
-            self.items[SLOT_FUEL].count -= 1;
-            if self.items[SLOT_FUEL].count <= 0 {
-                self.items[SLOT_FUEL] = ItemStack::empty();
-            }
-            if let Some(remainder) = remainder {
-                if self.items[SLOT_FUEL].is_empty() {
-                    self.items[SLOT_FUEL] = remainder;
-                } else {
-                    drop_item_stack(world, self.pos, &remainder);
-                }
+    /// 燃料用完时补一格，并按官方立刻 `setChanged`。真的消耗了才返回真。
+    ///
+    /// Refills fuel when it is empty and calls `setChanged` immediately, as vanilla does.
+    /// Returns true only when a fuel item was consumed.
+    fn consume_fuel(&mut self, world: &mut World) -> bool {
+        if self.fuel > 0 {
+            return false;
+        }
+        let Some((uses, speed)) = brewing_fuel(&self.items[SLOT_FUEL]) else {
+            return false;
+        };
+        self.fuel = uses;
+        self.total_fuel = uses;
+        self.speed_multiplier = speed;
+        let remainder = crafting_remainder(&self.items[SLOT_FUEL]);
+        self.items[SLOT_FUEL].count -= 1;
+        if self.items[SLOT_FUEL].count <= 0 {
+            self.items[SLOT_FUEL] = ItemStack::empty();
+        }
+        if let Some(remainder) = remainder {
+            if self.items[SLOT_FUEL].is_empty() {
+                self.items[SLOT_FUEL] = remainder;
+            } else {
+                drop_item_stack(world, self.pos, &remainder);
             }
         }
+        crate::machine_container::mark_container_changed(world, self.pos);
+        true
+    }
 
+    /// 官方 `serverTick`。
+    ///
+    /// 消耗燃料会 `setChanged`，同一刻后面的 `doBrew` 还可能改药水。实体正被拿着时这两次
+    /// 比较器读到的物品不一样，所以燃料通知之后先停，等实体放回表、比较器读完再继续。
+    /// 实体不在表里被拿着时（机器对照直接调用）一次跑完，随机数顺序不变。
+    ///
+    /// Vanilla `serverTick`. Consuming fuel calls `setChanged`, and `doBrew` later in the same
+    /// tick can still change the potions. While the entity is out of the map those two
+    /// comparator reads see different items, so the tick pauses after the fuel notification
+    /// until the entity is put back and the queued reads have run. A direct call that does not
+    /// hold the entity runs the whole tick at once, so the random draws stay in order.
+    pub fn server_tick(&mut self, world: &mut World) {
+        self.yield_tick = false;
+        if self.tick_phase == 0 && self.consume_fuel(world) && world.block_entity_is_taken(self.pos)
+        {
+            self.tick_phase = 1;
+            self.yield_tick = true;
+            return;
+        }
+        self.tick_phase = 0;
+        self.brew_and_update_bottles(world);
+    }
+
+    fn brew_and_update_bottles(&mut self, world: &mut World) {
         let brewable = self.is_brewable();
         let is_brewing = self.brew_time > 0;
         if is_brewing {
@@ -265,6 +305,9 @@ impl BrewingStandEntity {
             } else if !brewable || self.ingredient != Some(self.items[SLOT_INGREDIENT].item) {
                 self.brew_time = 0;
             }
+            // 官方酿造倒计时的每一刻都 `setChanged`。
+            // Vanilla calls `setChanged` on every brewing tick.
+            crate::machine_container::mark_container_changed(world, self.pos);
         } else if brewable && self.fuel > 0 {
             let speed = if self.speed_multiplier > 0.0 {
                 self.speed_multiplier
@@ -275,6 +318,9 @@ impl BrewingStandEntity {
             self.brew_time = (BREWING_TIME_TICKS / speed).ceil() as i32;
             self.total_brew_time = self.brew_time;
             self.ingredient = Some(self.items[SLOT_INGREDIENT].item);
+            // 官方开始酿造时 `setChanged`。
+            // Vanilla calls `setChanged` when a brew starts.
+            crate::machine_container::mark_container_changed(world, self.pos);
         }
 
         let bits = self.potion_bits();
@@ -300,6 +346,10 @@ impl BlockEntity for BrewingStandEntity {
 
     fn tick(&mut self, world: &mut World) {
         self.server_tick(world);
+    }
+
+    fn resume_tick(&self) -> bool {
+        self.yield_tick
     }
 
     /// 官方没有覆盖 `preRemoveSideEffects`，基类只把五格内容掉出来。

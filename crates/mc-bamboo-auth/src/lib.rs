@@ -11,6 +11,7 @@ mod cipher;
 mod digest;
 mod http;
 mod keypair;
+mod services_keys;
 mod session;
 
 use std::time::Duration;
@@ -25,5 +26,8 @@ pub use digest::{minecraft_hex_digest, server_id_hash};
 pub use http::Timeouts;
 pub use keypair::{
     CHALLENGE_LEN, Challenge, CryptError, ServerKeyPair, encrypt_to_server, random_challenge,
+};
+pub use services_keys::{
+    ProfileKeySchedule, ServicesKeyError, fetch_profile_keys, public_keys_url,
 };
 pub use session::{AuthError, Profile, SESSION_SERVER_URL, has_joined};

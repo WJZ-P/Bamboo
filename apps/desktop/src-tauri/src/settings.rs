@@ -39,6 +39,10 @@ impl From<Forwarding> for ForwardingMode {
     }
 }
 
+fn default_enforce_secure_profile() -> bool {
+    true
+}
+
 /// 界面里可以修改的服务端设置。
 ///
 /// 缺失的字段用默认值补齐，这样旧版本的设置文件升级后还能继续用。
@@ -64,6 +68,18 @@ pub struct ServerSettings {
     pub online_mode: bool,
     /// 问 session server 时带上客户端的 IP，和官方的 `prevent-proxy-connections` 相同。
     pub prevent_proxy_connections: bool,
+    /// 正版聊天必须签名，和官方的 `enforce-secure-profile` 相同。没开正版验证时不生效。
+    ///
+    /// 缺省必须是 `true`。结构体上的 `serde(default)` 会用字段类型的 `Default`，
+    /// `bool` 的默认是 `false`，所以这里单独指定。
+    ///
+    /// Signed online chat, matching official `enforce-secure-profile`. It does nothing while
+    /// online mode is off.
+    ///
+    /// The default has to be `true`. `serde(default)` on the struct uses the field type's
+    /// `Default`, and `bool` defaults to `false`, so this field sets its own.
+    #[serde(default = "default_enforce_secure_profile")]
+    pub enforce_secure_profile: bool,
     pub forwarding: Forwarding,
     /// Velocity 现代转发用的签名密钥。
     pub forwarding_secret: String,
@@ -86,6 +102,7 @@ impl Default for ServerSettings {
             compression_threshold: defaults.compression_threshold,
             online_mode: defaults.online_mode,
             prevent_proxy_connections: defaults.prevent_proxy_connections,
+            enforce_secure_profile: defaults.enforce_secure_profile,
             forwarding: Forwarding::Off,
             forwarding_secret: defaults.forwarding_secret,
         }
@@ -105,6 +122,7 @@ impl ServerSettings {
             compression_threshold: self.compression_threshold,
             online_mode: self.online_mode,
             prevent_proxy_connections: self.prevent_proxy_connections,
+            enforce_secure_profile: self.enforce_secure_profile,
             // 下面三项不是 server.properties 里的选项，界面上不给：session server 的地址只有
             // 测试会改，两个时限照 authlib 的常量来。
             session_server_url: defaults.session_server_url,
@@ -235,6 +253,7 @@ mod tests {
             // 转发开着时正版验证不能开，所以这一项在下一个测试里单独试。
             online_mode: false,
             prevent_proxy_connections: true,
+            enforce_secure_profile: false,
             forwarding: Forwarding::Modern,
             forwarding_secret: "secret".to_owned(),
         };
@@ -249,6 +268,7 @@ mod tests {
         assert_eq!(config.compression_threshold, -1);
         assert!(!config.online_mode);
         assert!(config.prevent_proxy_connections);
+        assert!(!config.enforce_secure_profile);
         assert_eq!(config.forwarding, ForwardingMode::Modern);
         assert_eq!(config.forwarding_secret, "secret");
     }
@@ -324,6 +344,7 @@ mod tests {
             "新字段要取默认值"
         );
         assert_eq!(parsed.forwarding, Forwarding::Off);
+        assert!(parsed.enforce_secure_profile);
         assert!(parsed.validate().is_ok());
     }
 

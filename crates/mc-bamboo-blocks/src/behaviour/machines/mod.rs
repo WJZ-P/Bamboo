@@ -33,9 +33,12 @@ mod workstations;
 
 pub use self::brewing::BrewingStandEntity;
 pub use self::campfire_entity::CampfireEntity;
-pub(crate) use self::containers::open_support_shape;
 pub use self::containers::{ShulkerBoxEntity, ShulkerStatus, open_lid_box};
+pub(crate) use self::containers::{apply_shulker_neighbor_updates, open_support_shape};
 pub use self::cooking::FurnaceEntity;
+pub(crate) use self::diode::{
+    comparator_reads_taken_entity, resume_comparator_placed, resume_comparator_refresh,
+};
 pub use self::lectern::{reset_lectern, signal_lectern_page};
 
 use mc_bamboo_data::{Block, BlockClass};

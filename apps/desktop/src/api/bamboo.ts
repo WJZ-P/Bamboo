@@ -33,6 +33,7 @@ export interface ServerSettings {
   compressionThreshold: number;
   onlineMode: boolean;
   preventProxyConnections: boolean;
+  enforceSecureProfile: boolean;
   forwarding: Forwarding;
   forwardingSecret: string;
 }

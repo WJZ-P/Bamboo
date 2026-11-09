@@ -52,6 +52,7 @@ mod player;
 mod player_grid;
 mod player_move;
 mod region;
+mod secure_chat;
 mod sign;
 mod world;
 
@@ -59,4 +60,5 @@ pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use menu::replay::{Replay, ReplayShape, Snapshot};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
+pub use secure_chat::ServiceProfileKeys;
 pub use world::{World, WorldConfig};

@@ -8,7 +8,7 @@ use crate::{
     text::Component,
 };
 
-/// 系统消息：加入和离开提示、错误提示。玩家聊天用 [`DisguisedChat`]。
+/// 系统消息：加入和离开提示、错误提示。全零 UUID 的匿名聊天用 [`DisguisedChat`]。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SystemChat<'a> {
     pub content: &'a Component,
