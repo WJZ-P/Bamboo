@@ -81,6 +81,11 @@ struct Case {
     /// 附魔成功后官方从玩家随机源换出的新种子。
     #[serde(default)]
     next_seed: Option<i32>,
+    /// 打开带战利品表的箱子：容器里的东西已经是官方 `LootTable.fill` 填好的。
+    ///
+    /// A chest with a loot table: its contents were already filled by vanilla.
+    #[serde(default)]
+    loot_chest: bool,
     open: Outcome,
     steps: Vec<Step>,
     /// 这道题的客户端会按官方预测回传哈希。
@@ -269,6 +274,18 @@ impl Report {
         let shape = shape_of(&case.shape)
             .ok_or_else(|| format!("case {}: unknown menu shape {:?}", case.id, case.shape))?;
         self.cases += 1;
+        // 官方 `createMenu` 先 `unpackLootTable` 再建菜单；Rust 侧收到的容器内容
+        // 已经是填好的，这里只检查这道题确实带战利品表，并且至少填了一格。
+        // Vanilla `createMenu` unpacks before building the menu. The Rust side receives
+        // the filled container; check that the case is marked and is not empty.
+        if case.loot_chest
+            && case
+                .container
+                .iter()
+                .all(|&[item, count]| item == 0 || count <= 0)
+        {
+            return Err(format!("case {}: loot chest was left empty", case.id));
+        }
         let mut replay = if shape.is_workstation() {
             let mut replay = Replay::workstation(
                 shape,
