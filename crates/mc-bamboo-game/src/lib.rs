@@ -24,6 +24,7 @@
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
 
+pub mod admin;
 mod block_drops;
 mod block_items;
 mod book;
@@ -32,7 +33,7 @@ mod chat;
 mod chunk_broadcast;
 mod chunk_encoding;
 mod chunk_tracking;
-mod command;
+pub mod command;
 mod command_block;
 mod container;
 mod debug_stick;
@@ -60,7 +61,9 @@ mod scoreboard;
 mod secure_chat;
 mod sign;
 mod world;
+mod world_state;
 
+pub use command::test_commands;
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
 pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};

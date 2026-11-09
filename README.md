@@ -317,7 +317,7 @@ WebView2 的渲染进程不算在内。
   官方 `ItemStack.CODEC` 会写出空的 `components`，再解一次瞬态就没了、这个字段也会被省掉，
   官方自己也往返不了。算哈希时瞬态组件没有存档 `Codec`，`HashedStack` 对不上，多发一次槽位同步。
   存档编解码不做 DataFixer 的版本升级，读到别的 `DataVersion` 直接失败，也不写 JSON 形式。
-  SNBT 能解析和打印，命令还没用它。
+  SNBT 能解析和打印，`/tellraw`、`/title` 的文本组件和 `/particle` 的选项已经用上了它。
 - 物品上的 `block_entity_data` 按 `BlockItem.updateCustomBlockEntityTag` 写进方块实体，但只保留我们认识的字段：
   唱片机的 `RecordItem`、自定义名和锁。不认识的键丢掉。命令方块、讲台、告示牌、悬挂告示牌、刷怪笼和试炼刷怪笼
   按非管理员跳过。容器、雕纹书架和饰纹陶罐的物品格跟官方一样被 `container` 组件覆盖（没有这个组件就是空的）。
@@ -367,7 +367,7 @@ WebView2 的渲染进程不算在内。
   附魔台、铁砧和制图台还没做，旁观者右键它们是放过。
   矿石点亮、龙蛋传送和音符盒发声这些方块 `attack` 已经按官方逻辑执行。音符盒的声音在方块事件里算好后发成音效包，
   音符粒子由方块事件交给客户端。头颅的自定义音效按 `createVariableRangeEvent` 内联发送。
-- 命令方块、结构方块、拼图方块和测试方块只有 `canUseGameMasterBlocks`（创造模式的瞬间破坏，并且权限等级至少 2）才能放。命令方块能打开编辑界面并保存命令、模式和条件，不执行，重启后记录消失。调试棒同样要这个权限：左键切换属性，右键改值。权限只来自启动时读的 `ops.json`，没有 `/op`。
+- 命令方块、结构方块、拼图方块和测试方块只有 `canUseGameMasterBlocks`（创造模式的瞬间破坏，并且权限等级至少 2）才能放。命令方块能打开编辑界面并保存命令、模式和条件，不执行，重启后记录消失。调试棒同样要这个权限：左键切换属性，右键改值。权限来自 `ops.json`，`/op` 和 `/deop` 能在运行中改名单。
 - 书与笔可以写字和署名，成书写回物品栏，并经当前打开的菜单同步。右键成书会发 `open_book`。
   没有聊天过滤，成书不带 `filtered` 文本。选择器、计分板和 NBT 解析不了，页面留原文，仍然标成 `resolved`。
   页面解析后 JSON 超过 32767 时官方会解析失败、不广播格子；这里一律当成解析成功并广播。
@@ -377,11 +377,28 @@ WebView2 的渲染进程不算在内。
   取书只走按钮。旁观者可以打开讲台，按钮全部忽略。冒险模式能翻页，不能取书。
   没有权限系统，所以放置讲台时不读物品里的 `block_entity_data`。
 - 不存档：关服后世界重置，重连回到出生点，物品栏清空。
-- 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`。
-  语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。没有 `/op`。
-  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做，超平坦出生点仍是固定的那一格。世界永远是晴天，`tickPrecipitation` 不读 `max_snow_accumulation_height`。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
+- 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
+  语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
+  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只改天气状态和客户端显示：按官方广播开始/停止下雨以及雨、雷暴强度的 `game_event`，进服时同步当前天气。天气不会随时间自动结束，也没有天气循环；世界侧（随机刻取数、降水、积雪、结冰、炼药锅接雨、雨熄火等）仍按晴天算，`tickPrecipitation` 不读 `max_snow_accumulation_height`。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
+  `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
+  不是 JSON 文本组件。组件过一遍官方 `Codec`；执行时按 `ComponentUtils.resolve` 展开：
+  `selector` 变成玩家名列表，`score` 查 `/scoreboard` 的分数并套用数字格式（`*` 指接收者，名字当选择器编译），
+  `keybind` 和合法的 `object`（图集精灵、玩家头像）原样保留并解析 `fallback`。
+  `nbt` 组件和 `block` 数据源还没做：Bamboo 的方块实体是类型化结构，没有统一的 NBT 树和 NbtPath 求值器，
+  所以按「没有数据源」返回空文本。`ComponentArgument` 校验失败时的详细 DFU 文案固定写成 `invalid component`。
+  `/title` 六种动作都有，成功消息按目标数用 `.single` / `.multiple`；`times` 的 `t`/`s`/`d` 照官方换算成刻。
+  `/playsound` 的 `sound` 带 `minecraft:available_sounds` 补全（官方命令树的快照里没有写 suggestion_id，
+  这里让客户端来问服务端），11 种来源、位置、音量、音高和 `minVolume` 都在；
+  声音按官方走内联定义（网络 ID 0 + 资源名），种子取一次 `Level.random`，距离超过 16 或 16×音量时，
+  `minVolume` > 0 会把音源挪到玩家附近两格。
+  `/particle` 能解析注册表里全部 128 种粒子名；带选项的 19 种按官方 `ParticleTypes.STREAM_CODEC` 编码
+  （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
+  `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源（官方也拒绝 entity 来源）。
+  两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
+  难度默认 `easy`（和官方专用服务器一致，没有 `server.properties` 配置），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存，Bamboo 没有 `gamemode` 配置项）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。没有 `level-seed` 配置，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
+  `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（还没有实体死亡和钓鱼系统）。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸已经调用方块掉落；实体死亡和开箱还没有。序列缓存在世界里，种子是平坦世界的 0，不存档。
 - 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
   `/scoreboard objectives` 支持 `list|add|remove|setdisplay|modify`（`displayname`、`rendertype`、`displayautoupdate`、`numberformat` 的 `blank`/`styled`/`fixed`）；
@@ -393,6 +410,15 @@ WebView2 的渲染进程不算在内。
   `/bossbar` 支持 `add|remove|list|set (name|color|style|value|max|visible|players)|get (value|max|visible|players)`，
   玩家加入、离开和重连按官方 `ServerBossEvent` 发 add/remove 包。命令反馈用官方翻译键，`send_command_feedback` 照旧管自己的系统消息。
   选择器的 `scores=` 和 `team=` 现在能查计分板；`trigger` 命令、统计加分、死亡消息可见性、友军伤害和碰撞规则还没接到对应的游戏逻辑。
+- 服务器管理命令：`/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`。
+  命令树（节点名、参数解析器和属性、`executable`、权限）和官方数据生成器的 `commands.json` 逐节点一致，`/version` 要等级 2、`/stop` 要等级 4，其余要等级 3。
+  四份名单文件在工作目录：`ops.json`、`banned-players.json`、`banned-ips.json`、`whitelist.json`。启动时读一次，命令改完按官方 `StoredUserList.save` 的字段顺序写回（pretty-printed JSON 数组）；Bamboo 先写临时文件再改名，比官方直接覆盖安全。世界线程只持有内存里的权威副本，写盘和 `/whitelist reload` 的读盘在连接层的专门线程上，世界线程不做 IO。
+  `/op`、`/deop` 改完立刻给在线的当事人重发权限等级（`entity_event` 24–28）和他用得了的整棵命令树；`/op` 新加的等级按官方 `op-permission-level` 默认 4。`/ban` 和 `/ban-ip` 当场踢人，登录时按官方 `PlayerList.canPlayerLogin` 的顺序（玩家封禁 → 白名单 → IP 封禁）拒绝并给出带原因和到期时间的翻译文本；连接层检查完、世界线程处理 `Join` 时再按权威副本复查一次。封禁项里的 `created` 按官方 `yyyy-MM-dd HH:mm:ss Z` 写入，Bamboo 用 UTC；过期时间只按读入时解析出的毫秒值判断。
+  `/whitelist` 有 `on`、`off`、`add`、`remove`、`list`、`reload`。`reload` 的读盘在连接层线程上，结果下一 tick 才被世界线程采用（官方同步读盘后立刻生效，这是世界线程不做 IO 的代价）；成功消息在发出读盘请求时立刻回给命令来源。两个开关都按官方默认值：`white-list` 运行时由 `on|off` 改、重启恢复 false（官方会写回 `server.properties`，Bamboo 没有这个文件也不存档）；`enforce-whitelist` 官方默认 false，Bamboo 没有这个配置项，所以 `on` / `remove` / `reload` 默认不会踢在线玩家，踢人路径只在单元测试里注入开关覆盖。OP 不受白名单限制。
+  `/stop` 发 `commands.stop.stopping` 之后走现有关服流程，世界线程给所有玩家发 `multiplayer.disconnect.server_shutdown` 再退出，服务端随世界线程结束。`/setidletimeout` 的单位是分钟，0 关闭；空闲判断照官方 `ServerGamePacketListenerImpl.tick`，Bamboo 已解码且能对应的动作（聊天、命令、按键输入、玩家指令、挥手、换快捷栏、破坏、右键、容器点击和按钮、告示牌、客户端指令、位移）会重置 `lastActionTime`，官方另外那些 handler（攻击实体、交互、旁观者动作、放配方、书与笔等）还没接。
+  `/transfer` 发 `ClientboundTransferPacket`（主机名、端口，默认 25565），`/version` 按官方 `VersionCommand.dumpVersion` 的行序打印；版本信息用 `mc-bamboo-data` 的常量，`series`、`build_time`、两个 `pack_version` 按 26.3 官方 `version.json` 固定，测试会读官方 jar 逐个对照。
+  名字参数用官方 `GameProfileArgument`：`@` 开头按玩家选择器解析，在线玩家按名字解析；离线模式不在线的名字用官方 `UUIDUtil.createOfflinePlayerUUID`（`OfflinePlayer:<name>` 的 MD5）。正版模式按官方 `CachedUserNameToIdResolver` 维护一份「本次启动以来进过服的玩家 名字→UUID」缓存（`Join` 时记下，不写盘；官方会持久化到 `usercache.json`），在线玩家查不到时先查这份缓存，再查不到就按官方「查不到」报 `argument.player.unknown`（Bamboo 没有 Mojang 档案查询，也不从白名单猜 UUID）。`ban-ip` / `pardon-ip` 的 target 是 IP 或在线玩家名（用连接层报来的对端 IP）。
+  没做 `save-all`、`save-on`、`save-off`（没有存档，等 M3）。`/ban-ip` 的 `commands.banip.info` 用逗号连接玩家名，和官方 `EntitySelector.joinNames` 的格式不同；`/version` 的 `build_time` 是纯文本而不是官方的 `Date` 翻译参数。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
   没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。

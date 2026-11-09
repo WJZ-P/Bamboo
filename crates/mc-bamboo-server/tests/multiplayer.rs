@@ -189,6 +189,7 @@ async fn second_player_gets_the_merged_join_sequence() {
         ids[..=center],
         [
             clientbound::LOGIN,
+            clientbound::CHANGE_DIFFICULTY,
             clientbound::PLAYER_ABILITIES,
             clientbound::ENTITY_EVENT,
             clientbound::COMMANDS,
@@ -198,6 +199,7 @@ async fn second_player_gets_the_merged_join_sequence() {
             clientbound::SET_ENTITY_DATA,
             clientbound::UPDATE_ATTRIBUTES,
             clientbound::SET_TIME,
+            clientbound::SET_DEFAULT_SPAWN_POSITION,
             clientbound::GAME_EVENT,
             clientbound::SET_CHUNK_CACHE_CENTER,
         ]

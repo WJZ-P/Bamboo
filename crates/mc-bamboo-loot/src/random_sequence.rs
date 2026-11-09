@@ -59,6 +59,10 @@ impl RandomSequence {
 pub struct RandomSequences {
     world_seed: i64,
     cache: RefCell<HashMap<String, Rc<XoroshiroRandom>>>,
+    /// 官方 `salt`：和世界种子、序列名一起决定新序列的起点。
+    salt: i32,
+    include_world_seed: bool,
+    include_sequence_id: bool,
 }
 
 impl RandomSequences {
@@ -66,6 +70,9 @@ impl RandomSequences {
         Self {
             world_seed,
             cache: RefCell::new(HashMap::new()),
+            salt: 0,
+            include_world_seed: true,
+            include_sequence_id: true,
         }
     }
 
@@ -73,16 +80,70 @@ impl RandomSequences {
         self.world_seed
     }
 
-    /// `RandomSequences.get(key)`：没有就按默认参数（含世界种子和序列名）创建。
+    /// `RandomSequences.get(key)`：没有就按当前默认参数创建。
     pub fn get(&self, key: &str) -> Rc<XoroshiroRandom> {
         if let Some(source) = self.cache.borrow().get(key) {
             return Rc::clone(source);
         }
-        let source = Rc::new(RandomSequence::create(self.world_seed, Some(key)).source);
+        let source = Rc::new(self.create(key).source);
         self.cache
             .borrow_mut()
             .insert(key.to_owned(), Rc::clone(&source));
         source
+    }
+
+    fn create(&self, key: &str) -> RandomSequence {
+        let seed = if self.include_world_seed {
+            self.world_seed
+        } else {
+            0
+        } ^ i64::from(self.salt);
+        let sequence = self.include_sequence_id.then_some(key);
+        RandomSequence::create(seed, sequence)
+    }
+
+    /// 官方 `reset(key, worldSeed)`：用当前默认参数替换这一条序列。
+    pub fn reset(&mut self, key: &str) {
+        let source = Rc::new(self.create(key).source);
+        self.cache.borrow_mut().insert(key.to_owned(), source);
+    }
+
+    /// 官方 `reset(key, worldSeed, salt, includeWorldSeed, includeSequenceId)`。
+    pub fn reset_with(
+        &mut self,
+        key: &str,
+        salt: i32,
+        include_world_seed: bool,
+        include_sequence_id: bool,
+    ) {
+        let seed = if include_world_seed {
+            self.world_seed
+        } else {
+            0
+        } ^ i64::from(salt);
+        let sequence = include_sequence_id.then_some(key);
+        let source = Rc::new(RandomSequence::create(seed, sequence).source);
+        self.cache.borrow_mut().insert(key.to_owned(), source);
+    }
+
+    /// 官方 `clear()`：丢掉所有序列，返回被丢掉的个数。
+    pub fn clear(&mut self) -> usize {
+        let mut cache = self.cache.borrow_mut();
+        let count = cache.len();
+        cache.clear();
+        count
+    }
+
+    /// 官方 `setSeedDefaults(salt, includeWorldSeed, includeSequenceId)`。
+    pub fn set_seed_defaults(
+        &mut self,
+        salt: i32,
+        include_world_seed: bool,
+        include_sequence_id: bool,
+    ) {
+        self.salt = salt;
+        self.include_world_seed = include_world_seed;
+        self.include_sequence_id = include_sequence_id;
     }
 
     /// 已经创建过的序列数量，测试用。

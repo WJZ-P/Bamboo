@@ -7,29 +7,28 @@
 //! 文件不存在时当作没有 OP 的服务器，和官方一样不报警。整个文件读不出来或者不是
 //! JSON 数组时警告一次，然后当作空表：权限判断宁可按最低等级走，也不能让服务端起不来。
 
-use std::{collections::HashMap, fs, io, path::Path};
+use std::collections::HashMap;
 
 use serde_json::Value;
-use tracing::warn;
 use uuid::Uuid;
+
+#[cfg(test)]
+use std::{fs, io, path::Path};
+#[cfg(test)]
+use tracing::warn;
 
 /// 官方 `PlayerList.OPLIST_FILE`。
 pub(crate) const OPS_FILE: &str = "ops.json";
 
-/// `ops.json` 里的一项。被列出来的玩家都是 OP，`level` 只决定权限等级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OpEntry {
-    /// 官方 `PermissionLevel` 的 ID，0 到 4。
-    pub(crate) level: u8,
-    pub(crate) bypasses_player_limit: bool,
-}
+pub(crate) use mc_bamboo_game::admin::OpEntry;
 
-/// 按 UUID 查的 OP 表。
+/// 按 UUID 查的 OP 表。`lists.rs` 复用它的 Gson 兼容解析来读 `ops.json`。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Ops(HashMap<Uuid, OpEntry>);
 
 impl Ops {
     /// 从 `path` 读。文件不存在时不报警，其他读取错误警告一次。
+    #[cfg(test)]
     pub(crate) fn load(path: &Path) -> Self {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,

@@ -4,10 +4,12 @@
 //! [`ArgumentType::parser_name`] 返回的是官方注册名，网络层按它查 ID。
 
 pub mod block;
+pub mod component;
 pub mod coordinates;
 pub mod entity;
 pub mod item;
 pub mod message;
+pub mod particle;
 pub mod primitives;
 pub mod scoreboard;
 
@@ -15,7 +17,7 @@ use crate::{
     ErrorArg, ParseError, Value,
     identifier::Identifier,
     reader::StringReader,
-    value::{EntityAnchor, GameMode},
+    value::{EntityAnchor, GameMode, GameProfileInput},
 };
 
 pub use primitives::StringKind;
@@ -46,6 +48,10 @@ pub enum ArgumentType {
         single: bool,
         players_only: bool,
     },
+    /// 官方 `GameProfileArgument`。选择器按玩家解析，普通名字在执行时查档案。
+    ///
+    /// Official `GameProfileArgument`. Selectors resolve to players, plain names look up profiles.
+    GameProfile,
     GameMode,
     EntityAnchor,
     Time {
@@ -53,16 +59,38 @@ pub enum ArgumentType {
     },
     BlockPos,
     Vec3,
+    /// `Vec3Argument.vec3(false)`：不把绝对整数居中。`/particle` 的 delta 用它。
+    Vec3Uncentered,
     Rotation,
     BlockState,
     BlockPredicate,
     Item,
     ItemPredicate,
     Message,
+    /// 官方 `ComponentArgument`：一个 SNBT 文本组件。
+    Component,
+    /// 官方 `ParticleArgument`：粒子类型名，后面可以跟一段 SNBT 选项。
+    Particle,
     /// 官方 `IdentifierArgument`。时间标记用它，不查注册表。
     ///
     /// Official `IdentifierArgument`. Time markers use it and do not look up a registry.
     ResourceLocation,
+    /// 官方 `DimensionArgument`：任意合法标识符，执行时再查维度。
+    ///
+    /// Official `DimensionArgument`: any identifier, resolved to a dimension at execution.
+    Dimension,
+    /// 官方 `RangeArgument.Ints`：`5`、`5..`、`..5` 或 `5..10`。
+    ///
+    /// Official `RangeArgument.Ints`: `5`, `5..`, `..5` or `5..10`.
+    IntRange,
+    /// 官方 `LootTableArgument`：战利品表的标识符。
+    ///
+    /// Official `LootTableArgument`: a loot-table identifier.
+    LootTable,
+    /// 官方 `SlotArgument`：物品栏槽位名。
+    ///
+    /// Official `SlotArgument`: an inventory slot name.
+    ItemSlot,
     /// 官方 `ResourceArgument`。`registry` 是注册表键，比如 `minecraft:world_clock`。
     ///
     /// Official `ResourceArgument`. `registry` is the registry key, such as `minecraft:world_clock`.
@@ -95,10 +123,6 @@ pub enum ArgumentType {
     ScoreHolder {
         multiple: bool,
     },
-    /// 官方 `ComponentArgument`。
-    ///
-    /// Official `ComponentArgument`.
-    Component,
     /// 官方 `StyleArgument`。
     ///
     /// Official `StyleArgument`.
@@ -120,26 +144,32 @@ impl ArgumentType {
             Self::Double { .. } => "brigadier:double",
             Self::String(_) => "brigadier:string",
             Self::Entity { .. } => "minecraft:entity",
+            Self::GameProfile => "minecraft:game_profile",
             Self::GameMode => "minecraft:gamemode",
             Self::EntityAnchor => "minecraft:entity_anchor",
             Self::Time { .. } => "minecraft:time",
             Self::BlockPos => "minecraft:block_pos",
-            Self::Vec3 => "minecraft:vec3",
+            Self::Vec3 | Self::Vec3Uncentered => "minecraft:vec3",
             Self::Rotation => "minecraft:rotation",
             Self::BlockState => "minecraft:block_state",
             Self::BlockPredicate => "minecraft:block_predicate",
             Self::Item => "minecraft:item_stack",
             Self::ItemPredicate => "minecraft:item_predicate",
             Self::Message => "minecraft:message",
+            Self::Component => "minecraft:component",
+            Self::Particle => "minecraft:particle",
             Self::ResourceLocation => "minecraft:resource_location",
             Self::Resource { .. } => "minecraft:resource",
+            Self::Dimension => "minecraft:dimension",
+            Self::IntRange => "minecraft:int_range",
+            Self::LootTable => "minecraft:loot_table",
+            Self::ItemSlot => "minecraft:item_slot",
             Self::Objective => "minecraft:objective",
             Self::Team => "minecraft:team",
             Self::Criteria => "minecraft:objective_criteria",
             Self::Operation => "minecraft:operation",
             Self::DisplaySlot => "minecraft:scoreboard_slot",
             Self::ScoreHolder { .. } => "minecraft:score_holder",
-            Self::Component => "minecraft:component",
             Self::Style => "minecraft:style",
             Self::TeamColor => "minecraft:team_color",
         }
@@ -160,22 +190,28 @@ impl ArgumentType {
             Self::EntityAnchor => registry::ENTITY_ANCHOR,
             Self::Time { .. } => registry::TIME,
             Self::BlockPos => registry::BLOCK_POS,
-            Self::Vec3 => registry::VEC3,
+            Self::Vec3 | Self::Vec3Uncentered => registry::VEC3,
             Self::Rotation => registry::ROTATION,
             Self::BlockState => registry::BLOCK_STATE,
             Self::BlockPredicate => registry::BLOCK_PREDICATE,
             Self::Item => registry::ITEM_STACK,
             Self::ItemPredicate => registry::ITEM_PREDICATE,
             Self::Message => registry::MESSAGE,
+            Self::Component => registry::COMPONENT,
+            Self::Particle => registry::PARTICLE,
             Self::ResourceLocation => registry::RESOURCE_LOCATION,
             Self::Resource { .. } => registry::RESOURCE,
+            Self::Dimension => registry::DIMENSION,
+            Self::IntRange => registry::INT_RANGE,
+            Self::LootTable => registry::LOOT_TABLE,
+            Self::ItemSlot => registry::ITEM_SLOT,
+            Self::GameProfile => registry::GAME_PROFILE,
             Self::Objective => registry::OBJECTIVE,
             Self::Team => registry::TEAM,
             Self::Criteria => registry::OBJECTIVE_CRITERIA,
             Self::Operation => registry::OPERATION,
             Self::DisplaySlot => registry::SCOREBOARD_SLOT,
             Self::ScoreHolder { .. } => registry::SCORE_HOLDER,
-            Self::Component => registry::COMPONENT,
             Self::Style => registry::STYLE,
             Self::TeamColor => registry::TEAM_COLOR,
         }
@@ -206,6 +242,7 @@ impl ArgumentType {
             Self::Float { min, max } => primitives::parse_float(reader, *min, *max),
             Self::Double { min, max } => primitives::parse_double(reader, *min, *max),
             Self::String(kind) => primitives::parse_string(reader, *kind),
+            Self::GameProfile => parse_game_profile(reader, allow_selectors),
             Self::Entity {
                 single,
                 players_only,
@@ -225,14 +262,21 @@ impl ArgumentType {
             Self::Time { minimum } => primitives::parse_time(reader, *minimum),
             Self::BlockPos => coordinates::parse_block_pos(reader),
             Self::Vec3 => coordinates::parse_vec3(reader),
+            Self::Vec3Uncentered => coordinates::parse_vec3_without_centering(reader),
             Self::Rotation => coordinates::parse_rotation(reader),
             Self::BlockState => block::parse_block_state(reader),
             Self::BlockPredicate => block::parse_block_predicate(reader),
             Self::Item => item::parse_item(reader),
             Self::ItemPredicate => item::parse_item_predicate(reader),
             Self::Message => message::parse_message(reader, allow_selectors),
+            Self::Component => component::parse_component(reader),
+            Self::Particle => particle::parse_particle(reader),
             Self::ResourceLocation => parse_resource_location(reader),
             Self::Resource { registry } => parse_resource(reader, registry),
+            Self::Dimension => parse_resource_location(reader),
+            Self::IntRange => primitives::parse_int_range(reader),
+            Self::LootTable => parse_resource_location(reader),
+            Self::ItemSlot => primitives::parse_slot(reader),
             Self::Objective => scoreboard::parse_objective(reader),
             Self::Team => scoreboard::parse_team(reader),
             Self::Criteria => scoreboard::parse_criteria(reader),
@@ -241,7 +285,6 @@ impl ArgumentType {
             Self::ScoreHolder { multiple } => {
                 scoreboard::parse_score_holder(reader, *multiple, allow_selectors)
             }
-            Self::Component => scoreboard::parse_component(reader),
             Self::Style => scoreboard::parse_style(reader),
             Self::TeamColor => scoreboard::parse_team_color(reader),
         }
@@ -261,7 +304,7 @@ impl ArgumentType {
                     suggest_word(anchor.name(), lower, out);
                 }
             }
-            Self::Entity { .. } => {
+            Self::Entity { .. } | Self::GameProfile => {
                 for name in player_names {
                     suggest_word(name, lower, out);
                 }
@@ -282,6 +325,34 @@ impl ArgumentType {
             _ => {}
         }
     }
+}
+
+/// 官方 `GameProfileArgument.parse`。`@` 开头的选择器只允许玩家，普通名字读一个单词，
+/// 名字到 UUID 的解析留到执行时（离线 UUID 或 Mojang 查询）。
+///
+/// Official `GameProfileArgument.parse`. A leading `@` starts a players-only selector;
+/// a plain name is one word, and resolving it to a UUID happens at execution time.
+fn parse_game_profile(
+    reader: &mut StringReader,
+    allow_selectors: bool,
+) -> Result<Value, ParseError> {
+    if reader.can_read() && reader.peek() == '@' {
+        if !allow_selectors {
+            return Err(ParseError::new("argument.entity.selector.not_allowed"));
+        }
+        let selector = entity::parse_entity(reader, false, true)?;
+        let Value::Entity(selector) = selector else {
+            unreachable!("实体参数只会返回 Value::Entity");
+        };
+        return Ok(Value::GameProfile(GameProfileInput::Selector(selector)));
+    }
+    let cursor = reader.cursor();
+    while reader.can_read() && reader.peek() != ' ' {
+        reader.skip();
+    }
+    Ok(Value::GameProfile(GameProfileInput::Name(
+        reader.slice(cursor, reader.cursor()),
+    )))
 }
 
 /// 官方 `ResourceArgument.parse`：读一个标识符，不在注册表里就报 `argument.resource.not_found`。
@@ -447,6 +518,39 @@ mod tests {
         assert_eq!(error.key, "argument.anchor.invalid");
         assert_eq!(error.args, [crate::ErrorArg::Text("head".into())]);
         assert_eq!(reader.cursor(), 0);
+    }
+
+    #[test]
+    fn game_profiles_parse_names_and_players_only_selectors() {
+        assert_eq!(
+            ArgumentType::GameProfile.parser_name(),
+            "minecraft:game_profile"
+        );
+        let mut reader = StringReader::new("Kitten some reason");
+        assert_eq!(
+            ArgumentType::GameProfile.parse(&mut reader).unwrap(),
+            Value::GameProfile(GameProfileInput::Name("Kitten".to_owned()))
+        );
+        assert_eq!(reader.remaining(), " some reason");
+
+        let mut reader = StringReader::new("@a rest");
+        let Value::GameProfile(GameProfileInput::Selector(selector)) =
+            ArgumentType::GameProfile.parse(&mut reader).unwrap()
+        else {
+            panic!("选择器应该解析成 GameProfileInput::Selector");
+        };
+        assert!(!selector.includes_entities);
+        assert!(selector.uses_selectors);
+        assert_eq!(reader.remaining(), " rest");
+
+        let mut reader = StringReader::new("@e");
+        assert_eq!(
+            ArgumentType::GameProfile
+                .parse(&mut reader)
+                .unwrap_err()
+                .key,
+            "argument.player.entities"
+        );
     }
 
     #[test]

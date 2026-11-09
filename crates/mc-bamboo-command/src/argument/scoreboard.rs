@@ -218,16 +218,6 @@ pub fn parse_score_holder(
     Ok(Value::ScoreHolder(spec))
 }
 
-/// 官方 `ComponentArgument`：一段 SNBT，再过文本 `Codec`。
-///
-/// Official `ComponentArgument`: one SNBT value, then the text `Codec`.
-pub fn parse_component(reader: &mut StringReader) -> Result<Value, ParseError> {
-    let tag = read_snbt(reader, "argument.component.invalid")?;
-    let checked = checked_component(&tag)
-        .ok_or_else(|| ParseError::text("argument.component.invalid", "invalid component"))?;
-    Ok(Value::Component(checked.tag().clone()))
-}
-
 /// 官方 `StyleArgument`：一段复合 SNBT，按样式字段校验。
 ///
 /// Official `StyleArgument`: one compound of SNBT, checked as style fields.

@@ -136,6 +136,57 @@ pub fn parse_game_mode(reader: &mut StringReader) -> Result<Value, ParseError> {
         .ok_or_else(|| ParseError::text("argument.gamemode.invalid", name))
 }
 
+/// 官方 `MinMaxBounds.Ints.fromReader` 的文本形式：`5`、`5..`、`..5`、`5..10`。
+pub fn parse_int_range(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    if !reader.can_read() {
+        return Err(ParseError::new("argument.range.empty"));
+    }
+    let rest = reader.remaining();
+    let end = rest
+        .find(|c: char| c != '.' && !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
+    let text = &rest[..end];
+    if text.is_empty() {
+        return Err(ParseError::new("argument.range.empty"));
+    }
+    let parse = |part: &str| -> Result<Option<i32>, ParseError> {
+        if part.is_empty() {
+            return Ok(None);
+        }
+        part.parse::<i32>()
+            .map(Some)
+            .map_err(|_| ParseError::new("argument.range.ints"))
+    };
+    let (min, max) = match text.split_once("..") {
+        Some((min, max)) => (parse(min)?, parse(max)?),
+        None => {
+            let value = parse(text)?;
+            (value, value)
+        }
+    };
+    if let (Some(min), Some(max)) = (min, max)
+        && min > max
+    {
+        return Err(ParseError::new("argument.range.swapped"));
+    }
+    if min.is_none() && max.is_none() {
+        return Err(ParseError::new("argument.range.empty"));
+    }
+    reader.set_cursor(start + end);
+    Ok(Value::IntBounds { min, max })
+}
+
+/// 官方 `SlotArgument`：物品栏槽位的名字，不在这里查表。
+pub fn parse_slot(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    let name = reader.read_unquoted_string();
+    if name.is_empty() {
+        reader.set_cursor(start);
+        return Err(ParseError::new("argument.slot.invalid"));
+    }
+    Ok(Value::String(name))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

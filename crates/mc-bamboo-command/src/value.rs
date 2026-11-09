@@ -3,6 +3,7 @@
 use mc_bamboo_blocks::BlockState;
 use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::Item;
+use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
 
 use crate::identifier::Identifier;
@@ -378,6 +379,14 @@ impl ItemPredicateInput {
     }
 }
 
+/// 官方 `ParticleArgument` 的结果：类型 ID、注册名，以及 `ParticleTypes.STREAM_CODEC` 的选项字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticleInput {
+    pub id: i32,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// 官方 `MessageArgument.Message`。`text` 是整段原文，`parts` 是选择器所在的位置。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
@@ -517,6 +526,15 @@ pub struct MessagePart {
     pub selector: EntitySelector,
 }
 
+/// 官方 `GameProfileArgument.Result`：一个玩家名，或者一个只选玩家的选择器。
+///
+/// Official `GameProfileArgument.Result`: a player name, or a players-only selector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GameProfileInput {
+    Name(String),
+    Selector(Box<EntitySelector>),
+}
+
 /// 所有参数类型的解析结果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -527,6 +545,7 @@ pub enum Value {
     Double(f64),
     String(String),
     Entity(Box<EntitySelector>),
+    GameProfile(GameProfileInput),
     BlockPos(Coordinates),
     Vec3(Coordinates),
     Rotation(Rotation),
@@ -535,17 +554,22 @@ pub enum Value {
     Item(ItemInput),
     ItemPredicate(ItemPredicateInput),
     Message(Message),
+    /// 官方 `ComponentArgument` 解析出的 SNBT 标签，交给网络层的组件 `Codec` 校验。
+    Component(Tag),
+    /// 官方 `ParticleArgument` 的结果：注册表 ID、名字和选项的线上字节。
+    Particle(ParticleInput),
     GameMode(GameMode),
     EntityAnchor(EntityAnchor),
     Time(i32),
+    /// 官方 `MinMaxBounds.Ints`，`/random` 的范围参数。
+    IntBounds {
+        min: Option<i32>,
+        max: Option<i32>,
+    },
     Criteria(ObjectiveCriteria),
     Operation(ScoreOperation),
     DisplaySlot(DisplaySlot),
     ScoreHolder(ScoreHolderSpec),
-    /// 已经按官方文本编解码重写过的组件标签。
-    ///
-    /// A component tag already rewritten by the official text codec.
-    Component(mc_bamboo_nbt::Tag),
     /// 已经校验过的样式标签。
     ///
     /// A style tag that has already been checked.
@@ -599,6 +623,13 @@ impl Value {
     pub fn as_entity(&self) -> Option<&EntitySelector> {
         match self {
             Self::Entity(value) => Some(value.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub fn as_game_profile(&self) -> Option<&GameProfileInput> {
+        match self {
+            Self::GameProfile(value) => Some(value),
             _ => None,
         }
     }
@@ -659,6 +690,20 @@ impl Value {
         }
     }
 
+    pub fn as_component(&self) -> Option<&Tag> {
+        match self {
+            Self::Component(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_particle(&self) -> Option<&ParticleInput> {
+        match self {
+            Self::Particle(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub fn as_game_mode(&self) -> Option<GameMode> {
         match self {
             Self::GameMode(value) => Some(*value),
@@ -676,6 +721,13 @@ impl Value {
     pub fn as_time(&self) -> Option<i32> {
         match self {
             Self::Time(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_int_bounds(&self) -> Option<(Option<i32>, Option<i32>)> {
+        match self {
+            Self::IntBounds { min, max } => Some((*min, *max)),
             _ => None,
         }
     }
@@ -708,11 +760,8 @@ impl Value {
         }
     }
 
-    pub fn as_component_tag(&self) -> Option<&mc_bamboo_nbt::Tag> {
-        match self {
-            Self::Component(value) => Some(value),
-            _ => None,
-        }
+    pub fn as_component_tag(&self) -> Option<&Tag> {
+        self.as_component()
     }
 
     pub fn as_style_tag(&self) -> Option<&mc_bamboo_nbt::Tag> {

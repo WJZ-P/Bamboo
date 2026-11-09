@@ -9,6 +9,7 @@
 mod config;
 mod connection;
 mod event;
+mod lists;
 mod ops;
 mod players;
 mod server;

@@ -335,6 +335,8 @@ struct Connection {
     stream: TcpStream,
     read_buffer: BytesMut,
     max_frame_len: usize,
+    /// 对端 IP 文本（不含端口），进 Play 时交给世界线程。
+    peer_ip: String,
     /// 压缩启用后是服务端声明的阈值，两个方向都换成压缩帧。
     compression: Option<i32>,
     /// 正版验证交换出密钥之后两个方向的 AES 流。
@@ -345,10 +347,15 @@ struct Connection {
 
 impl Connection {
     fn new(stream: TcpStream, max_frame_len: usize) -> Self {
+        let peer_ip = stream
+            .peer_addr()
+            .map(|peer| peer.ip().to_string())
+            .unwrap_or_default();
         Self {
             stream,
             read_buffer: BytesMut::with_capacity(max_frame_len),
             max_frame_len,
+            peer_ip,
             compression: None,
             encryption: None,
             phase: Phase::Handshake,
@@ -415,6 +422,27 @@ impl Connection {
     async fn refuse_login_translated(&mut self, key: &str) -> Result<(), ConnectionError> {
         self.send_login_disconnect(&json!({ "translate": key }).to_string())
             .await
+    }
+
+    /// 封禁或白名单的断开原因。Login 阶段用 JSON 文本组件表达翻译参数和 `extra`。
+    async fn refuse_login_component(
+        &mut self,
+        text: &mc_bamboo_game::admin::RefusalText,
+    ) -> Result<(), ConnectionError> {
+        use mc_bamboo_game::admin::RefusalArg;
+        let args: Vec<serde_json::Value> = text
+            .args
+            .iter()
+            .map(|arg| match arg {
+                RefusalArg::Text(value) => json!({ "text": value }),
+                RefusalArg::Translate(key) => json!({ "translate": key }),
+            })
+            .collect();
+        let mut reason = json!({ "translate": text.key, "with": args });
+        if let Some((key, expires)) = &text.expiration {
+            reason["extra"] = json!([{ "translate": key, "with": [expires] }]);
+        }
+        self.send_login_disconnect(&reason.to_string()).await
     }
 
     async fn send_login_disconnect(&mut self, reason_json: &str) -> Result<(), ConnectionError> {

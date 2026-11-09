@@ -76,6 +76,7 @@ fn chat_is_logged_with_the_not_secure_tag() {
         max_players: 20,
         online_mode: false,
         enforce_secure_profile: false,
+        admin: Default::default(),
     };
     let world = World::new(config, receiver);
     let player = PlayerId(1);
@@ -87,6 +88,7 @@ fn chat_is_logged_with_the_not_secure_tag() {
         client: ClientInformation::default(),
         permission_level: 0,
         is_op: false,
+        peer_ip: "127.0.0.1".to_owned(),
         sink: Box::new(DiscardingSink),
     };
     let quota = Arc::new(AtomicUsize::new(0));

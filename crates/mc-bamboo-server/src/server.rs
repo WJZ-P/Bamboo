@@ -7,7 +7,6 @@ use std::{
     io,
     net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::Path,
     sync::{
         Arc, Mutex, RwLock,
         mpsc::{self, Receiver, Sender},
@@ -20,7 +19,10 @@ use mc_bamboo_auth::{
     ProfileKeySchedule, ServerKeyPair, Timeouts, fetch_profile_keys, public_keys_url,
 };
 use mc_bamboo_data::{registries, tags};
-use mc_bamboo_game::{Inbound, ServiceProfileKeys, World, WorldConfig};
+use mc_bamboo_game::{
+    Inbound, ServiceProfileKeys, World, WorldConfig,
+    admin::{AdminInit, AdminMessage, AdminSnapshot, WhitelistReload},
+};
 use mc_bamboo_protocol::{
     GAME_VERSION, PROTOCOL_VERSION,
     frame::{FrameError, append_frame},
@@ -46,7 +48,7 @@ use crate::{
     config::ServerConfig,
     connection,
     event::{PlayerInfo, ServerEvent},
-    ops::{OPS_FILE, Ops},
+    lists::ListDirectory,
     players::{AddPlayerError, OnlinePlayer},
 };
 
@@ -62,6 +64,7 @@ const WORLD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const WORLD_STOP_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// 对所有客户端都一样的响应，启动时编码一次，之后直接发送。
+#[derive(Clone)]
 pub(crate) struct PreEncodedResponses {
     /// 配置阶段开头的几个包。
     pub(crate) configuration_start: Vec<u8>,
@@ -128,10 +131,10 @@ fn encode_status(
 pub(crate) struct Shared {
     pub(crate) config: ServerConfig,
     pub(crate) responses: PreEncodedResponses,
-    /// 启动时从工作目录读到的 OP 表。之后不再读盘。
-    ///
-    /// The op list read from the working directory at startup. It is not read again.
-    pub(crate) ops: Ops,
+    /// 世界线程发布出来的管理名单快照，登录准入只读这一份。
+    pub(crate) admin: RwLock<Arc<AdminSnapshot>>,
+    /// 四份名单文件所在的目录。
+    pub(crate) lists: ListDirectory,
     /// 每次服务端启动时生成的会话 ID。
     pub(crate) session_id: Uuid,
     /// 这次启动的 RSA 密钥对，只有开了正版验证才有。官方不管开不开都生成，
@@ -225,6 +228,10 @@ pub struct Server {
     listener: TcpListener,
     shared: Arc<Shared>,
     inbox: Receiver<Inbound>,
+    admin: AdminInit,
+    /// 世界线程发布名单变更的接收端，由 `run` 里的写盘任务消费。
+    message_receiver: Receiver<AdminMessage>,
+    inbox_sender: Sender<Inbound>,
 }
 
 impl Server {
@@ -238,25 +245,34 @@ impl Server {
         let (events, _) = broadcast::channel(EVENT_BUFFER_LEN);
         let (inbox_sender, inbox) = mpsc::channel();
         let keypair = config.online_mode.then(ServerKeyPair::generate);
+        // 官方也是在世界线程启动之前读一次这些名单。
+        let lists = ListDirectory::at(config.list_directory.clone());
+        let snapshot = lists.load();
+        let (messages, message_receiver) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            config,
+            responses,
+            admin: RwLock::new(Arc::new(snapshot.clone())),
+            lists: lists.clone(),
+            session_id: Uuid::new_v4(),
+            keypair,
+            profile_keys,
+            keys_ready,
+            inbox: inbox_sender.clone(),
+            status: RwLock::new(status),
+            players: Mutex::new(HashMap::new()),
+            events,
+        });
         Ok(Self {
             listener,
-            shared: Arc::new(Shared {
-                config,
-                responses,
-                // 官方也是在世界线程启动之前读一次 `ops.json`。
-                //
-                // Official also reads `ops.json` once before the world thread starts.
-                ops: Ops::load(Path::new(OPS_FILE)),
-                session_id: Uuid::new_v4(),
-                keypair,
-                profile_keys,
-                keys_ready,
-                inbox: inbox_sender,
-                status: RwLock::new(status),
-                players: Mutex::new(HashMap::new()),
-                events,
-            }),
+            shared,
             inbox,
+            admin: AdminInit {
+                snapshot,
+                messages: Some(messages),
+            },
+            message_receiver,
+            inbox_sender,
         })
     }
 
@@ -272,11 +288,12 @@ impl Server {
     }
 
     /// 持续接受连接，直到 `shutdown` 完成，然后关闭所有连接再返回。
-    pub async fn run(self, shutdown: impl Future<Output = ()>) {
+    pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
         let config = world_config(&self.shared.config);
         let keys = Arc::clone(&self.shared.profile_keys);
+        let admin = self.admin.split();
         self.run_with_world(
-            move |inbox| World::with_service_keys(config, inbox, keys).run(),
+            move |inbox| World::with_admin(config, inbox, keys, admin).run(),
             shutdown,
         )
         .await;
@@ -292,7 +309,11 @@ impl Server {
             listener,
             shared,
             inbox,
+            admin: _,
+            message_receiver,
+            inbox_sender,
         } = self;
+        spawn_admin_writer(Arc::clone(&shared), message_receiver, inbox_sender);
         let slots = Arc::new(Semaphore::new(shared.config.max_pre_play_connections));
         let cancel = CancellationToken::new();
         let tasks = TaskTracker::new();
@@ -436,7 +457,35 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
         online_mode: config.online_mode,
         enforce_secure_profile: config.enforce_secure_profile,
+        admin: AdminSnapshot::default(),
     }
+}
+
+/// 消费世界线程发布的名单变更：先在专门的线程上写盘，再更新登录用的快照。
+/// `/whitelist reload` 在这里读盘，结果用 `Inbound` 送回世界线程。
+fn spawn_admin_writer(
+    shared: Arc<Shared>,
+    receiver: Receiver<AdminMessage>,
+    inbox: Sender<Inbound>,
+) {
+    thread::Builder::new()
+        .name("bamboo-admin-lists".to_owned())
+        .spawn(move || {
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    AdminMessage::Update(update) => {
+                        *shared.admin.write().expect("管理名单的锁不应该中毒") =
+                            Arc::new(update.snapshot.clone());
+                        shared.lists.save(&update.snapshot, update.changes);
+                    }
+                    AdminMessage::ReloadWhitelist => {
+                        let entries = shared.lists.load_whitelist();
+                        let _ = inbox.send(Inbound::WhitelistReload(WhitelistReload { entries }));
+                    }
+                }
+            }
+        })
+        .expect("写盘线程应该能启动");
 }
 
 /// 在专门的线程上运行世界。线程因为任何原因结束时 `stopped` 都会被取消。

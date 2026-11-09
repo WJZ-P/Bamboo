@@ -34,6 +34,7 @@ const ITEM_REGISTRY: &str = "minecraft:item";
 const JUKEBOX_SONG_REGISTRY: &str = "minecraft:jukebox_song";
 const MENU_REGISTRY: &str = "minecraft:menu";
 const WORLD_CLOCK_REGISTRY: &str = "minecraft:world_clock";
+const PARTICLE_TYPE_REGISTRY: &str = "minecraft:particle_type";
 
 pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     // 这几个文件带校验。先生成好，校验失败时不留下写了一半的目录。
@@ -2897,6 +2898,7 @@ fn registries_file(data: &VersionData) -> String {
     write_registry_ids(&mut out, data, "chat_type", CHAT_TYPE_REGISTRY);
     write_registry_ids(&mut out, data, "dimension_type", DIMENSION_TYPE_REGISTRY);
     write_registry_ids(&mut out, data, "world_clock", WORLD_CLOCK_REGISTRY);
+    write_registry_ids(&mut out, data, "particle_type", PARTICLE_TYPE_REGISTRY);
     write_registry_ids(&mut out, data, "attribute", ATTRIBUTE_REGISTRY);
     write_registry_ids(
         &mut out,

@@ -85,6 +85,9 @@ pub struct ServerConfig {
     /// 只有 [`ForwardingMode::Modern`] 会用到。留空时启动会退回 [`ForwardingMode::Off`]，
     /// 因为没有密钥就无法验证代理的回应。
     pub forwarding_secret: String,
+    /// 四份管理名单文件所在的目录。空路径表示工作目录，和官方一样。
+    /// 测试把这个字段指到临时目录，不在仓库里留文件。
+    pub list_directory: std::path::PathBuf,
 }
 
 impl Default for ServerConfig {
@@ -105,6 +108,7 @@ impl Default for ServerConfig {
             enforce_secure_profile: true,
             forwarding: ForwardingMode::Off,
             forwarding_secret: String::new(),
+            list_directory: std::path::PathBuf::new(),
         }
     }
 }

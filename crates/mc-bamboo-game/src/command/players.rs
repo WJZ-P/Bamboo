@@ -275,7 +275,7 @@ pub(crate) fn change_own_mode(
     apply_mode(global, region, id, id, mode, protocol);
 }
 
-fn apply_mode(
+pub(crate) fn apply_mode(
     global: &mut Global,
     region: &mut Region,
     source: PlayerId,
@@ -549,7 +549,7 @@ fn format_list(entries: &[Component]) -> Component {
     list
 }
 
-fn protocol_mode(mode: CommandMode) -> GameMode {
+pub(crate) fn protocol_mode(mode: CommandMode) -> GameMode {
     match mode {
         CommandMode::Survival => GameMode::Survival,
         CommandMode::Creative => GameMode::Creative,
@@ -575,7 +575,7 @@ fn required_players<'a>(
         .ok_or_else(|| fail("command.failed"))
 }
 
-fn level_of(region: &Region, id: PlayerId) -> u8 {
+pub(crate) fn level_of(region: &Region, id: PlayerId) -> u8 {
     region
         .players
         .get(&id)

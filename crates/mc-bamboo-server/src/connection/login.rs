@@ -80,6 +80,18 @@ pub(super) async fn admit(
         }
     };
 
+    // 官方 `ServerLoginPacketListenerImpl.verifyLoginAndFinishConnectionSetup`
+    // 在身份确认之后、进服之前查封禁和白名单。
+    let ip = connection.peer_ip.clone();
+    let refusal = {
+        let snapshot = shared.admin.read().expect("管理名单的锁不应该中毒");
+        snapshot.login_refusal(profile.uuid, &ip, mc_bamboo_game::admin::now_millis())
+    };
+    if let Some(refusal) = refusal {
+        connection.refuse_login_component(&refusal.text()).await?;
+        return Ok(None);
+    }
+
     match PlayerSession::join(shared, profile).await {
         Ok(session) => Ok(Some(session)),
         Err(refusal) => {
