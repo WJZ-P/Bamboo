@@ -9,6 +9,7 @@ use serde_json::Value;
 
 /// 本分支新增的根节点，按名字排列。
 const ROOTS: &[&str] = &[
+    "clone",
     "defaultgamemode",
     "difficulty",
     "seed",
