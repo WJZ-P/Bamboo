@@ -550,3 +550,100 @@ pub mod tests {
         })
     }
 }
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn ban(expires: Option<&str>) -> BanEntry {
+        BanEntry {
+            created: "2026-09-15 11:20:48 +0000".to_owned(),
+            source: "Server".to_owned(),
+            expires: expires.map(str::to_owned),
+            expires_millis: expires.and_then(parse_ban_date),
+            reason: Some("testing".to_owned()),
+        }
+    }
+
+    #[test]
+    fn login_refusal_follows_the_official_order() {
+        let uuid = Uuid::from_u128(1);
+        let mut state = AdminState::default();
+        state.player_bans.insert(
+            uuid,
+            BanListEntry {
+                name: "Kitten".to_owned(),
+                entry: ban(None),
+            },
+        );
+        state.ip_bans.insert(
+            "127.0.0.1".to_owned(),
+            BanListEntry {
+                name: "127.0.0.1".to_owned(),
+                entry: ban(None),
+            },
+        );
+        assert!(matches!(
+            state.login_refusal(uuid, "127.0.0.1", 0),
+            Some(LoginRefusal::PlayerBanned(_))
+        ));
+        state.player_bans.clear();
+        assert!(matches!(
+            state.login_refusal(uuid, "127.0.0.1", 0),
+            Some(LoginRefusal::IpBanned(_))
+        ));
+    }
+
+    #[test]
+    fn whitelist_lets_ops_and_listed_players_through() {
+        let listed = Uuid::from_u128(1);
+        let op = Uuid::from_u128(2);
+        let stranger = Uuid::from_u128(3);
+        let mut state = AdminState::default();
+        state.using_whitelist = true;
+        state.whitelist.insert(
+            listed,
+            NameAndId {
+                uuid: listed,
+                name: "Listed".to_owned(),
+            },
+        );
+        state.ops.insert(
+            op,
+            OpListEntry {
+                name: "Op".to_owned(),
+                entry: OpEntry {
+                    level: 4,
+                    bypasses_player_limit: false,
+                },
+            },
+        );
+        assert_eq!(state.login_refusal(listed, "127.0.0.1", 0), None);
+        assert_eq!(state.login_refusal(op, "127.0.0.1", 0), None);
+        assert_eq!(
+            state.login_refusal(stranger, "127.0.0.1", 0),
+            Some(LoginRefusal::NotWhitelisted)
+        );
+        assert!(!state.kicks_unlisted());
+        state.enforce_whitelist = true;
+        assert!(state.kicks_unlisted());
+    }
+
+    #[test]
+    fn expired_bans_do_not_block_login() {
+        let uuid = Uuid::from_u128(1);
+        let mut state = AdminState::default();
+        let past = "2020-01-01 00:00:00 +0000";
+        state.player_bans.insert(
+            uuid,
+            BanListEntry {
+                name: "Kitten".to_owned(),
+                entry: ban(Some(past)),
+            },
+        );
+        assert_eq!(
+            state.login_refusal(uuid, "127.0.0.1", 1_800_000_000_000),
+            None
+        );
+    }
+}

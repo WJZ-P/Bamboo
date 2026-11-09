@@ -86,7 +86,7 @@ pub struct ServerConfig {
     /// 因为没有密钥就无法验证代理的回应。
     pub forwarding_secret: String,
     /// 四份管理名单文件所在的目录。空路径表示工作目录，和官方一样。
-    /// `Server::with_list_directory` 改它，测试用它把文件放到临时目录。
+    /// 测试把这个字段指到临时目录，不在仓库里留文件。
     pub list_directory: std::path::PathBuf,
 }
 
