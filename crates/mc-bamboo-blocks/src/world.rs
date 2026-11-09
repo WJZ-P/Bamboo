@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
+use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
 use crate::{
@@ -584,6 +585,22 @@ impl<'a> World<'a> {
             except_initiator: false,
             seed: Some(seed),
         });
+    }
+
+    /// 见 [`Level::dispenser_targets`]。
+    pub fn dispenser_targets(&self) -> Vec<crate::level::EquipTarget> {
+        self.level.dispenser_targets()
+    }
+
+    /// 见 [`Level::set_dispenser_equipment`]。
+    pub fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        self.level
+            .set_dispenser_equipment(entity_id, component_slot, stack)
     }
 
     /// `levelEvent(null, type, pos, data)`。
@@ -2130,6 +2147,7 @@ mod tests {
                 | Effect::BlockEvent { .. }
                 | Effect::ComposterFill { .. }
                 | Effect::PageTurned { .. }
+                | Effect::DispenserEquipped { .. }
                 | Effect::CampfireChanged { .. }
                 | Effect::Overlay { .. }
                 | Effect::OpenCommandBlock { .. } => None,

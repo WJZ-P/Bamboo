@@ -21,10 +21,13 @@
 //! Sounds, drops and game events are still omitted. Bone meal particles are sent to the player.
 
 mod bone_meal;
+pub(crate) use bone_meal::{grow_crop, grow_water_plant};
 mod debug_stick;
 mod ender_eye;
 mod honeycomb;
+pub(crate) use honeycomb::waxed;
 mod ignite;
+pub(crate) use ignite::can_light;
 mod shears;
 mod transformer;
 

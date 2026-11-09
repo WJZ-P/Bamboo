@@ -11,12 +11,15 @@
 pub(crate) use players::change_own_mode;
 
 mod blocks;
+mod bossbar;
 mod catalog;
 mod feedback;
 mod gamerule;
 mod items;
 mod players;
+mod scoreboard;
 mod select;
+mod team;
 mod teleport;
 mod time;
 
@@ -314,6 +317,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         },
         ArgumentType::Time { minimum } => ArgumentProperties::Time { minimum },
         ArgumentType::Resource { registry } => ArgumentProperties::Registry(registry),
+        ArgumentType::ScoreHolder { multiple } => ArgumentProperties::ScoreHolder { multiple },
         ArgumentType::Bool
         | ArgumentType::GameMode
         | ArgumentType::EntityAnchor
@@ -325,7 +329,15 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::Item
         | ArgumentType::ItemPredicate
         | ArgumentType::Message
-        | ArgumentType::ResourceLocation => ArgumentProperties::None,
+        | ArgumentType::ResourceLocation
+        | ArgumentType::Objective
+        | ArgumentType::Team
+        | ArgumentType::Criteria
+        | ArgumentType::Operation
+        | ArgumentType::DisplaySlot
+        | ArgumentType::Component
+        | ArgumentType::Style
+        | ArgumentType::TeamColor => ArgumentProperties::None,
     }
 }
 
@@ -446,5 +458,394 @@ mod tests {
             .map(|stack| stack.count)
             .sum();
         assert_eq!(count, 3);
+    }
+}
+
+#[cfg(test)]
+mod official_tree {
+    use mc_bamboo_command::NodeKind;
+
+    use crate::command::commands;
+
+    /// 官方 `commands.json` 里所有可执行节点的路径（去掉根命令名之前的斜杠）。
+    ///
+    /// Every executable node path in the official `commands.json`.
+    const OFFICIAL: &[&str] = &[
+        "/scoreboard/objectives/add/objective/criteria",
+        "/scoreboard/objectives/add/objective/criteria/displayName",
+        "/scoreboard/objectives/list",
+        "/scoreboard/objectives/modify/objective/displayautoupdate/value",
+        "/scoreboard/objectives/modify/objective/displayname/displayName",
+        "/scoreboard/objectives/modify/objective/numberformat",
+        "/scoreboard/objectives/modify/objective/numberformat/blank",
+        "/scoreboard/objectives/modify/objective/numberformat/fixed/contents",
+        "/scoreboard/objectives/modify/objective/numberformat/styled/style",
+        "/scoreboard/objectives/modify/objective/rendertype/hearts",
+        "/scoreboard/objectives/modify/objective/rendertype/integer",
+        "/scoreboard/objectives/remove/objective",
+        "/scoreboard/objectives/setdisplay/slot",
+        "/scoreboard/objectives/setdisplay/slot/objective",
+        "/scoreboard/players/add/targets/objective/score",
+        "/scoreboard/players/display/name/targets/objective",
+        "/scoreboard/players/display/name/targets/objective/name",
+        "/scoreboard/players/display/numberformat/targets/objective",
+        "/scoreboard/players/display/numberformat/targets/objective/blank",
+        "/scoreboard/players/display/numberformat/targets/objective/fixed/contents",
+        "/scoreboard/players/display/numberformat/targets/objective/styled/style",
+        "/scoreboard/players/enable/targets/objective",
+        "/scoreboard/players/get/target/objective",
+        "/scoreboard/players/list",
+        "/scoreboard/players/list/target",
+        "/scoreboard/players/operation/targets/targetObjective/operation/source/sourceObjective",
+        "/scoreboard/players/remove/targets/objective/score",
+        "/scoreboard/players/reset/targets",
+        "/scoreboard/players/reset/targets/objective",
+        "/scoreboard/players/set/targets/objective/score",
+        "/team/add/team",
+        "/team/add/team/displayName",
+        "/team/empty/team",
+        "/team/join/team",
+        "/team/join/team/members",
+        "/team/leave/members",
+        "/team/list",
+        "/team/list/team",
+        "/team/modify/team/collisionRule/always",
+        "/team/modify/team/collisionRule/never",
+        "/team/modify/team/collisionRule/pushOtherTeams",
+        "/team/modify/team/collisionRule/pushOwnTeam",
+        "/team/modify/team/color/reset",
+        "/team/modify/team/color/value",
+        "/team/modify/team/deathMessageVisibility/always",
+        "/team/modify/team/deathMessageVisibility/hideForOtherTeams",
+        "/team/modify/team/deathMessageVisibility/hideForOwnTeam",
+        "/team/modify/team/deathMessageVisibility/never",
+        "/team/modify/team/displayName/displayName",
+        "/team/modify/team/friendlyFire/allowed",
+        "/team/modify/team/nametagVisibility/always",
+        "/team/modify/team/nametagVisibility/hideForOtherTeams",
+        "/team/modify/team/nametagVisibility/hideForOwnTeam",
+        "/team/modify/team/nametagVisibility/never",
+        "/team/modify/team/prefix/prefix",
+        "/team/modify/team/seeFriendlyInvisibles/allowed",
+        "/team/modify/team/suffix/suffix",
+        "/team/remove/team",
+        "/bossbar/add/id/name",
+        "/bossbar/get/id/max",
+        "/bossbar/get/id/players",
+        "/bossbar/get/id/value",
+        "/bossbar/get/id/visible",
+        "/bossbar/list",
+        "/bossbar/remove/id",
+        "/bossbar/set/id/color/blue",
+        "/bossbar/set/id/color/green",
+        "/bossbar/set/id/color/pink",
+        "/bossbar/set/id/color/purple",
+        "/bossbar/set/id/color/red",
+        "/bossbar/set/id/color/white",
+        "/bossbar/set/id/color/yellow",
+        "/bossbar/set/id/max/max",
+        "/bossbar/set/id/name/name",
+        "/bossbar/set/id/players",
+        "/bossbar/set/id/players/targets",
+        "/bossbar/set/id/style/notched_10",
+        "/bossbar/set/id/style/notched_12",
+        "/bossbar/set/id/style/notched_20",
+        "/bossbar/set/id/style/notched_6",
+        "/bossbar/set/id/style/progress",
+        "/bossbar/set/id/value/value",
+        "/bossbar/set/id/visible/visible",
+    ];
+
+    /// 深度优先枚举我们树里从三条新根命令出发的可执行节点路径。
+    ///
+    /// Enumerate executable node paths below the three new root commands.
+    fn ours() -> Vec<String> {
+        let graph = &commands().graph;
+        let mut out = Vec::new();
+        let mut stack: Vec<(usize, String)> = graph
+            .node(graph.root())
+            .children
+            .iter()
+            .filter_map(|&child| match &graph.node(child).kind {
+                NodeKind::Literal(name)
+                    if matches!(name.as_str(), "scoreboard" | "team" | "bossbar") =>
+                {
+                    Some((child, name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        while let Some((id, path)) = stack.pop() {
+            let node = graph.node(id);
+            if node.executable {
+                out.push(path.clone());
+            }
+            for &child in &node.children {
+                let name = match &graph.node(child).kind {
+                    NodeKind::Literal(name) => name.clone(),
+                    NodeKind::Argument { name, .. } => name.clone(),
+                    NodeKind::Root => continue,
+                };
+                stack.push((child, format!("{path}/{name}")));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn executable_nodes_match_the_official_tree() {
+        let mut expected: Vec<String> = OFFICIAL
+            .iter()
+            .map(|path| path.trim_start_matches('/').to_owned())
+            .collect();
+        expected.sort();
+        let actual = ours();
+        let missing: Vec<&String> = expected
+            .iter()
+            .filter(|path| !actual.contains(path))
+            .collect();
+        let extra: Vec<&String> = actual
+            .iter()
+            .filter(|path| !expected.contains(path))
+            .collect();
+        assert!(missing.is_empty(), "缺节点: {missing:?}");
+        assert!(extra.is_empty(), "多节点: {extra:?}");
+    }
+    /// 官方 `commands.json` 里所有参数节点的解析器名。
+    ///
+    /// Every argument node's parser name in the official `commands.json`.
+    const OFFICIAL_PARSERS: &[(&str, &str)] = &[
+        ("/scoreboard/objectives/add/objective", "brigadier:string"),
+        (
+            "/scoreboard/objectives/add/objective/criteria",
+            "minecraft:objective_criteria",
+        ),
+        (
+            "/scoreboard/objectives/add/objective/criteria/displayName",
+            "minecraft:component",
+        ),
+        (
+            "/scoreboard/objectives/modify/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/objectives/modify/objective/displayautoupdate/value",
+            "brigadier:bool",
+        ),
+        (
+            "/scoreboard/objectives/modify/objective/displayname/displayName",
+            "minecraft:component",
+        ),
+        (
+            "/scoreboard/objectives/modify/objective/numberformat/fixed/contents",
+            "minecraft:component",
+        ),
+        (
+            "/scoreboard/objectives/modify/objective/numberformat/styled/style",
+            "minecraft:style",
+        ),
+        (
+            "/scoreboard/objectives/remove/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/objectives/setdisplay/slot",
+            "minecraft:scoreboard_slot",
+        ),
+        (
+            "/scoreboard/objectives/setdisplay/slot/objective",
+            "minecraft:objective",
+        ),
+        ("/scoreboard/players/add/targets", "minecraft:score_holder"),
+        (
+            "/scoreboard/players/add/targets/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/add/targets/objective/score",
+            "brigadier:integer",
+        ),
+        (
+            "/scoreboard/players/display/name/targets",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/display/name/targets/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/display/name/targets/objective/name",
+            "minecraft:component",
+        ),
+        (
+            "/scoreboard/players/display/numberformat/targets",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/display/numberformat/targets/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/display/numberformat/targets/objective/fixed/contents",
+            "minecraft:component",
+        ),
+        (
+            "/scoreboard/players/display/numberformat/targets/objective/styled/style",
+            "minecraft:style",
+        ),
+        (
+            "/scoreboard/players/enable/targets",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/enable/targets/objective",
+            "minecraft:objective",
+        ),
+        ("/scoreboard/players/get/target", "minecraft:score_holder"),
+        (
+            "/scoreboard/players/get/target/objective",
+            "minecraft:objective",
+        ),
+        ("/scoreboard/players/list/target", "minecraft:score_holder"),
+        (
+            "/scoreboard/players/operation/targets",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/operation/targets/targetObjective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/operation/targets/targetObjective/operation",
+            "minecraft:operation",
+        ),
+        (
+            "/scoreboard/players/operation/targets/targetObjective/operation/source",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/operation/targets/targetObjective/operation/source/sourceObjective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/remove/targets",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/remove/targets/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/remove/targets/objective/score",
+            "brigadier:integer",
+        ),
+        (
+            "/scoreboard/players/reset/targets",
+            "minecraft:score_holder",
+        ),
+        (
+            "/scoreboard/players/reset/targets/objective",
+            "minecraft:objective",
+        ),
+        ("/scoreboard/players/set/targets", "minecraft:score_holder"),
+        (
+            "/scoreboard/players/set/targets/objective",
+            "minecraft:objective",
+        ),
+        (
+            "/scoreboard/players/set/targets/objective/score",
+            "brigadier:integer",
+        ),
+        ("/team/add/team", "brigadier:string"),
+        ("/team/add/team/displayName", "minecraft:component"),
+        ("/team/empty/team", "minecraft:team"),
+        ("/team/join/team", "minecraft:team"),
+        ("/team/join/team/members", "minecraft:score_holder"),
+        ("/team/leave/members", "minecraft:score_holder"),
+        ("/team/list/team", "minecraft:team"),
+        ("/team/modify/team", "minecraft:team"),
+        ("/team/modify/team/color/value", "minecraft:team_color"),
+        (
+            "/team/modify/team/displayName/displayName",
+            "minecraft:component",
+        ),
+        ("/team/modify/team/friendlyFire/allowed", "brigadier:bool"),
+        ("/team/modify/team/prefix/prefix", "minecraft:component"),
+        (
+            "/team/modify/team/seeFriendlyInvisibles/allowed",
+            "brigadier:bool",
+        ),
+        ("/team/modify/team/suffix/suffix", "minecraft:component"),
+        ("/team/remove/team", "minecraft:team"),
+        ("/bossbar/add/id", "minecraft:resource_location"),
+        ("/bossbar/add/id/name", "minecraft:component"),
+        ("/bossbar/get/id", "minecraft:resource_location"),
+        ("/bossbar/remove/id", "minecraft:resource_location"),
+        ("/bossbar/set/id", "minecraft:resource_location"),
+        ("/bossbar/set/id/max/max", "brigadier:integer"),
+        ("/bossbar/set/id/name/name", "minecraft:component"),
+        ("/bossbar/set/id/players/targets", "minecraft:entity"),
+        ("/bossbar/set/id/value/value", "brigadier:integer"),
+        ("/bossbar/set/id/visible/visible", "brigadier:bool"),
+    ];
+
+    /// 枚举我们树里三条新命令下的参数节点。
+    fn argument_nodes() -> Vec<(String, String)> {
+        let graph = &commands().graph;
+        let mut out = Vec::new();
+        let mut stack: Vec<(usize, String)> = graph
+            .node(graph.root())
+            .children
+            .iter()
+            .filter_map(|&child| match &graph.node(child).kind {
+                NodeKind::Literal(name)
+                    if matches!(name.as_str(), "scoreboard" | "team" | "bossbar") =>
+                {
+                    Some((child, name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        while let Some((id, path)) = stack.pop() {
+            let node = graph.node(id);
+            for &child in &node.children {
+                let kind = &graph.node(child).kind;
+                let name = match kind {
+                    NodeKind::Literal(name) => name.clone(),
+                    NodeKind::Argument { name, .. } => name.clone(),
+                    NodeKind::Root => continue,
+                };
+                let child_path = format!("{path}/{name}");
+                if let NodeKind::Argument { kind, .. } = kind {
+                    out.push((child_path.clone(), kind.parser_name().to_owned()));
+                }
+                stack.push((child, child_path));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn argument_parsers_match_the_official_tree() {
+        let mut expected: Vec<(String, String)> = OFFICIAL_PARSERS
+            .iter()
+            .map(|(path, parser)| (path.trim_start_matches('/').to_owned(), parser.to_string()))
+            .collect();
+        expected.sort();
+        let actual = argument_nodes();
+        let missing: Vec<&(String, String)> = expected
+            .iter()
+            .filter(|entry| !actual.contains(entry))
+            .collect();
+        let extra: Vec<&(String, String)> = actual
+            .iter()
+            .filter(|entry| !expected.contains(entry))
+            .collect();
+        assert!(missing.is_empty(), "缺或错: {missing:?}");
+        assert!(extra.is_empty(), "多或错: {extra:?}");
     }
 }

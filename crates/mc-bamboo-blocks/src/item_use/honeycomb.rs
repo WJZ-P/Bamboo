@@ -43,7 +43,9 @@ pub(super) fn use_on(world: &mut World, ctx: &UseContext) -> InteractionResult {
 }
 
 /// `getWaxed`：涂蜡后的方块，属性照抄。
-fn waxed(state: BlockState) -> Option<BlockState> {
+///
+/// `getWaxed`: the waxed block, copying the current properties.
+pub(crate) fn waxed(state: BlockState) -> Option<BlockState> {
     let block = state.block_id() as i32;
     WAXABLES
         .iter()

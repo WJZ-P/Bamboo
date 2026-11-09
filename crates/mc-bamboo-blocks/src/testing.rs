@@ -10,8 +10,12 @@ use crate::block_entity::{BlockEntities, BlockEvents};
 
 use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Container, Level, LevelRandom, Outcome, Slots,
-    container::redstone_signal, destroy_block, entity::Entities, hopper::HopperEntity,
-    level::RedstoneMemory, shape::Aabb,
+    container::redstone_signal,
+    destroy_block,
+    entity::Entities,
+    hopper::HopperEntity,
+    level::{EquipTarget, RedstoneMemory},
+    shape::Aabb,
 };
 
 const MIN_Y: i32 = -64;
@@ -37,6 +41,12 @@ pub(crate) struct TestLevel {
     block_entities: BlockEntities,
     block_events: BlockEvents,
     entities: Entities,
+    /// 发射器能穿装备的生物。
+    pub(crate) living: Vec<EquipTarget>,
+    /// 方块能看见的游戏规则。默认和官方一样，`tnt_explodes` 为真。
+    ///
+    /// Game rules block logic can see. Vanilla defaults, so `tnt_explodes` starts true.
+    pub(crate) rules: crate::gamerules::BlockGameRules,
 }
 
 impl TestLevel {
@@ -54,6 +64,8 @@ impl TestLevel {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             entities: Entities::default(),
+            living: Vec::new(),
+            rules: crate::gamerules::BlockGameRules::vanilla(),
         }
     }
 
@@ -242,6 +254,30 @@ impl Level for TestLevel {
         };
         f(hopper);
         true
+    }
+
+    fn dispenser_targets(&self) -> Vec<EquipTarget> {
+        self.living.clone()
+    }
+
+    fn block_game_rules(&self) -> crate::gamerules::BlockGameRules {
+        self.rules
+    }
+
+    fn set_dispenser_equipment(
+        &mut self,
+        entity_id: i32,
+        component_slot: i32,
+        stack: ItemStack,
+    ) -> Option<u16> {
+        let target = self
+            .living
+            .iter_mut()
+            .find(|target| target.entity_id == entity_id)?;
+        let index = usize::try_from(component_slot).ok()?;
+        let stored = target.equipment.get_mut(index)?.as_mut()?;
+        *stored = stack;
+        u16::try_from(component_slot).ok()
     }
 }
 

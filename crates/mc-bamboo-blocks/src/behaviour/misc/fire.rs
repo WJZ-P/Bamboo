@@ -107,14 +107,31 @@ pub(crate) fn can_be_placed_at(world: &World, pos: BlockPos, forward: Direction)
         && (state_at(world, pos).can_survive(world, pos) || is_portal(world, pos, forward))
 }
 
-/// `BaseFireBlock.isPortal`：旁边有框架方块时，按玩家朝向的左手轴优先找空框架。
-/// 官方只在朝向是竖直的时候取随机的轴，玩家的水平朝向永远是水平的。
+/// `BaseFireBlock.isPortal`：旁边有框架方块时，按朝向的左手轴优先找空框架。
+///
+/// `BaseFireBlock.isPortal`: when a frame block is beside the cell, look for an empty portal
+/// along the facing's left-hand axis.
 fn is_portal(world: &World, pos: BlockPos, forward: Direction) -> bool {
-    let beside_frame = Direction::ALL
-        .into_iter()
-        .any(|side| is_frame(world.block_state(pos.relative(side))));
-    beside_frame
-        && PortalShape::find_empty(world, pos, forward.counter_clockwise().axis()).is_some()
+    // 官方在 `Direction.values()` 里碰到第一块框架才取轴。水平朝向用左手轴，竖直朝向
+    // `Direction.Plane.HORIZONTAL.getRandomAxis`：`nextInt(2)`，0 是 X，1 是 Z。
+    //
+    // Official picks the axis at the first frame in `Direction.values()`. Horizontal facing uses
+    // the left-hand axis. Vertical facing uses `Direction.Plane.HORIZONTAL.getRandomAxis`:
+    // `nextInt(2)`, 0 is X and 1 is Z.
+    let mut axis = None;
+    for side in Direction::ALL {
+        if is_frame(world.block_state(pos.relative(side))) {
+            axis = Some(if forward.axis().is_horizontal() {
+                forward.counter_clockwise().axis()
+            } else if world.random().next_int(2) == 0 {
+                Axis::X
+            } else {
+                Axis::Z
+            });
+            break;
+        }
+    }
+    axis.is_some_and(|axis| PortalShape::find_empty(world, pos, axis).is_some())
 }
 
 /// `getStateWithAge`。

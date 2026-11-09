@@ -134,6 +134,11 @@ impl World {
         menu::tick(&mut self.region);
         lectern::tick(&mut self.region);
         chat::tick_spam_throttlers(&mut self.region);
+        // 官方 `ServerPlayer.doTick` 的六个只读准则。Bamboo 用玩家初值，进服后第一刻各写一次。
+        //
+        // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the
+        // player defaults and writes each once after join.
+        self.global.scoreboard_mut().tick_criteria(&mut self.region);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
@@ -193,8 +198,9 @@ impl World {
             return;
         }
         let game_mode = GAME_MODE;
+        let uuid = request.uuid;
         let entry = RosterEntry {
-            uuid: request.uuid,
+            uuid,
             name: request.name.clone(),
             // 皮肤只有名单要用，直接搬过来。
             properties: std::mem::take(&mut request.properties),
@@ -218,6 +224,17 @@ impl World {
             self.region.links.broadcast_except(id, &frames);
         }
 
+        // 官方 `ServerScoreboard.getStartTrackingPackets` 和 `CustomBossEvents.onPlayerConnect`
+        // 都在进服时只发给这名玩家。
+        //
+        // Official `ServerScoreboard.getStartTrackingPackets` and
+        // `CustomBossEvents.onPlayerConnect` both go only to the joining player.
+        let frames = self.global.scoreboard().join_frames();
+        self.region.links.send_frames(id, &frames);
+        self.global
+            .boss_bars_mut()
+            .on_join(&mut self.region, id, uuid);
+
         self.region
             .start_loading_chunks(id, self.global.time(), self.global.clock());
     }
@@ -239,6 +256,20 @@ impl World {
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.region, id);
         lectern::on_leave(&mut self.region, id);
+        // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；
+        // 分数和 Boss 栏的 UUID 集合都留着，下次进服还会补发 add 包。
+        //
+        // Official `entityRemoved` returns for players without broadcasting reset_score;
+        // scores and boss-bar UUID sets stay so rejoining gets the add packet again.
+        if let Some(name) = self
+            .region
+            .players
+            .get(&id)
+            .map(|player| player.name.clone())
+        {
+            self.global.scoreboard_mut().on_leave(&name);
+            self.global.boss_bars_mut().on_leave(id);
+        }
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         if let Some(frames) = self.global.remove_player(id) {
@@ -322,11 +353,14 @@ impl World {
                 if chat::on_chat(
                     region,
                     player,
-                    message,
-                    signature.map(|bytes| *bytes),
-                    time_millis,
-                    salt,
-                    &last_seen,
+                    chat::ChatMessage {
+                        global: &self.global,
+                        text: message,
+                        signature: signature.map(|bytes| *bytes),
+                        time_millis,
+                        salt,
+                        last_seen: &last_seen,
+                    },
                 ) {
                     chat::detect_chat_rate_spam(region, player);
                 }

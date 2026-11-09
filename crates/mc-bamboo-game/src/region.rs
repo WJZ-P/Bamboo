@@ -310,7 +310,7 @@ impl Region {
             chunks: &mut self.chunks,
             changes: &mut self.block_changes,
             block_items: &mut self.block_items,
-            players: &self.players,
+            players: &mut self.players,
             random: &self.random,
             redstone: &mut self.redstone,
             block_entities: &mut self.block_entities,

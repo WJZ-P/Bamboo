@@ -4,7 +4,7 @@
 //! 所以这里只有 [`use_item`](crate::use_item) 一个入口。细雪桶是方块物品，放置在 `placement` 里。
 //! 全按创造模式写：倒完手里还是满桶，舀完手里还是空桶。
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{BlockAncestor, BlockClass, items, sounds};
 
 use super::Fluid;
@@ -97,7 +97,15 @@ pub(crate) fn use_bucket(world: &mut World, actor: &Actor, bucket: Bucket) -> In
     } else {
         pos.relative(hit.face)
     };
-    if empty_contents(world, actor, bucket, place_pos, Some(hit)) {
+    if empty_contents(
+        world,
+        true,
+        actor.secondary_use,
+        true,
+        bucket,
+        place_pos,
+        Some(hit),
+    ) {
         return InteractionResult::Success;
     }
     if bucket.content.is_none() {
@@ -136,24 +144,53 @@ fn pick_up(world: &mut World, actor: &Actor, pos: BlockPos) -> InteractionResult
 }
 
 /// `playEmptySound`：音效和来源都在物品上，生物桶是 `NEUTRAL`，其余是 `BLOCKS`。
-/// 坐标是方块中心，跳过倒桶的玩家。
+/// 坐标是方块中心。玩家倒的时候跳过这名玩家，发射器的 `user` 是 null，谁都不跳过。
+///
 /// The event and the source come from the item. A mob bucket uses `NEUTRAL`, the rest `BLOCKS`.
-/// The position is the block centre, and the player who poured is skipped.
-fn play_empty_sound(world: &mut World, pos: BlockPos, bucket: Bucket) {
-    world.play_sound_except(
-        pos,
-        bucket.empty_sound,
-        sounds::SoundSource::from_id(bucket.empty_source),
-        1.0,
-        1.0,
-    );
+/// The position is the block centre. A player pour skips that player. A dispenser's `user` is
+/// null, so nobody is skipped.
+fn play_empty_sound(world: &mut World, pos: BlockPos, bucket: Bucket, except_player: bool) {
+    let source = sounds::SoundSource::from_id(bucket.empty_source);
+    if except_player {
+        world.play_sound_except(pos, bucket.empty_sound, source, 1.0, 1.0);
+    } else {
+        world.play_sound(
+            Vec3::new(
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ),
+            bucket.empty_sound,
+            source,
+            1.0,
+            1.0,
+            false,
+        );
+    }
+}
+
+/// `DispenserBlock` 里满桶的 `emptyContents(null, level, target, null)`。
+///
+/// `emptyContents(null, level, target, null)` from a dispenser's filled-bucket behaviour.
+pub(crate) fn empty_from_dispenser(world: &mut World, item_id: i32, pos: BlockPos) -> bool {
+    let Some(bucket) = Bucket::of(item_id) else {
+        return false;
+    };
+    empty_contents(world, false, false, false, bucket, pos, None)
 }
 
 /// `emptyContents`：把桶里的东西倒在 `pos`。`hit` 是视线的结果，倒不进去时改倒在它的面外面一格，
 /// 那次调用 `hit` 是空的。
+///
+/// `by_player` 传给 `canPlaceLiquid`。`shift` 是玩家的潜行。发射器两样都是假，`hit` 是空的。
+///
+/// `by_player` is passed to `canPlaceLiquid`. `shift` is the player's sneak. A dispenser passes
+/// false for both and a null `hit`.
 fn empty_contents(
     world: &mut World,
-    actor: &Actor,
+    by_player: bool,
+    shift: bool,
+    except_player: bool,
     bucket: Bucket,
     pos: BlockPos,
     hit: Option<BlockHit>,
@@ -164,7 +201,7 @@ fn empty_contents(
     // `MobBucketItem.emptyContents` plays `emptySound` and returns true, without placing a block.
     let Some(fluid) = bucket.content else {
         if bucket.mob {
-            play_empty_sound(world, pos, bucket);
+            play_empty_sound(world, pos, bucket, except_player);
             return true;
         }
         return false;
@@ -172,19 +209,19 @@ fn empty_contents(
     let state = world.block_state(pos);
     let may_replace = can_be_replaced_by_fluid(state);
     let into_container = state.is_a(BlockAncestor::LiquidBlockContainer)
-        && state.can_place_liquid(world, pos, fluid.source(), true);
+        && state.can_place_liquid(world, pos, fluid.source(), by_player);
     let place_liquid = may_replace || into_container;
-    let place_inside = state.is_air() || place_liquid && (!actor.secondary_use || hit.is_none());
+    let place_inside = state.is_air() || place_liquid && (!shift || hit.is_none());
     if !place_inside {
         return hit.is_some_and(|hit| {
             let beside = hit.pos.relative(hit.face);
-            empty_contents(world, actor, bucket, beside, None)
+            empty_contents(world, by_player, shift, except_player, bucket, beside, None)
         });
     }
     // 主世界的水不会蒸发。
     if state.is_a(BlockAncestor::LiquidBlockContainer) && fluid == Fluid::Water {
         state.place_liquid(world, pos, fluid.source_state());
-        play_empty_sound(world, pos, bucket);
+        play_empty_sound(world, pos, bucket, except_player);
         return true;
     }
     if may_replace && !state.is_liquid() {
@@ -194,7 +231,7 @@ fn empty_contents(
     let placed_now =
         world.set_block(pos, placed, UPDATE_ALL_IMMEDIATE) || state.fluid().is_source();
     if placed_now {
-        play_empty_sound(world, pos, bucket);
+        play_empty_sound(world, pos, bucket, except_player);
     }
     placed_now
 }

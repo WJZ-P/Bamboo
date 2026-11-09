@@ -64,6 +64,19 @@ pub fn checked_component(tag: &Tag) -> Option<crate::text::Component> {
     Some(crate::text::Component::from_tag(rewritten))
 }
 
+/// 命令参数里已经按官方 `Codec` 校验过的文本标签。
+///
+/// 官方 `ComponentArgument` 先把 SNBT 过一遍 `ComponentSerialization.CODEC`，
+/// 这里收下编解码后的标签，命令执行时不再重复解码。
+///
+/// A text tag that a command argument already checked with the official codec.
+///
+/// Official `ComponentArgument` first runs the SNBT through
+/// `ComponentSerialization.CODEC`; this accepts that result without decoding twice.
+pub fn component_from_checked_tag(tag: Tag) -> crate::text::Component {
+    crate::text::Component::from_tag(tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
