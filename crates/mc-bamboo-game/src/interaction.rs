@@ -138,9 +138,19 @@ pub(crate) fn run_entity_ticks(region: &mut Region) {
     send_effects(region, None, &outcome.effects);
 }
 
-/// 计划刻之后：玩家周围的区块各跑一次随机刻，官方 `ServerChunkCache.tickChunks` 也排在计划刻后面。
+/// 计划刻之后：先对全部区块跑官方的 `tickThunder`，再对全部区块跑 `tickChunk`。
+///
+/// 官方 `ServerChunkCache.tickChunks` 的 `tickSpawningChunk`（里面是 `ServerLevel.tickThunder`）
+/// 和 `forEachBlockTickingChunk`（里面是 `tickChunk`）是两个独立的循环。Bamboo 按坐标顺序
+/// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
-    for chunk in random_ticking_chunks(region) {
+    let chunks: Vec<ChunkPos> = random_ticking_chunks(region).into_iter().collect();
+    for chunk in &chunks {
+        let (mut level, ticks) = region.block_level();
+        let outcome = mc_bamboo_blocks::tick_thunder(&mut level, ticks, *chunk);
+        send_effects(region, None, &outcome.effects);
+    }
+    for chunk in chunks {
         let speed = region.block_rules.random_tick_speed;
         let (mut level, ticks) = region.block_level();
         // `ServerChunkCache.tickChunks` 把 `GameRules.RANDOM_TICK_SPEED` 传给 `tickChunk`。

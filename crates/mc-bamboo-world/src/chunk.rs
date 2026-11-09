@@ -412,6 +412,25 @@ impl Chunk {
             HEIGHTMAP_BITS,
         )
     }
+
+    /// `getHeightmapPos(kind, pos).getY()`：这一列在高度图里的世界高度。
+    pub fn heightmap_y(&self, kind: HeightmapKind, x: usize, z: usize) -> i32 {
+        let position = HeightmapKind::ALL
+            .iter()
+            .position(|&candidate| candidate == kind)
+            .expect("HeightmapKind::ALL 里有每一种高度图");
+        MIN_Y + self.heightmaps[position].columns[Heightmap::index(x, z)] as i32
+    }
+
+    /// 这一格所在 quart 位置的群系注册表 ID，读区块段的群系调色板。
+    pub fn biome_at(&self, x: usize, y: i32, z: usize) -> u32 {
+        let (section, _) = Self::locate(y);
+        let quart_x = (x / 4) & 3;
+        let quart_y = ((y - MIN_Y) / 4) as usize & 3;
+        let quart_z = (z / 4) & 3;
+        let index = quart_y * 16 + quart_z * 4 + quart_x;
+        self.sections[section].biomes().get(index)
+    }
 }
 
 #[cfg(test)]

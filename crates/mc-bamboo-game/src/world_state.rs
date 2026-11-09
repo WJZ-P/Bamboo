@@ -84,7 +84,7 @@ impl Default for RespawnData {
     }
 }
 
-/// 官方 `ServerLevel` 的天气状态。四个时间都是 tick 数，强度是 0 到 1。
+/// 官方 `WeatherData` 加 `ServerLevel` 的四个渐变强度。时间都是 tick 数，强度是 0 到 1。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct Weather {
     pub(crate) raining: bool,
@@ -92,6 +92,25 @@ pub(crate) struct Weather {
     pub(crate) thundering: bool,
     pub(crate) thunder_time: i32,
     pub(crate) clear_time: i32,
+    pub(crate) rain_level: f32,
+    pub(crate) o_rain_level: f32,
+    pub(crate) thunder_level: f32,
+    pub(crate) o_thunder_level: f32,
+}
+
+impl Weather {
+    /// `Level.isRaining()`：主世界能降雨，雨强大于 0.2 才算下雨。
+    pub(crate) fn is_raining(self) -> bool {
+        f64::from(self.rain_level) > 0.2
+    }
+
+    /// 方块逻辑读的天气快照。
+    pub(crate) fn snapshot(self) -> mc_bamboo_blocks::BlockWeather {
+        mc_bamboo_blocks::BlockWeather {
+            rain_level: self.rain_level,
+            thunder_level: self.thunder_level,
+        }
+    }
 }
 
 /// 一局游戏的世界设置。不存档，重启全部回到默认值。

@@ -19,6 +19,7 @@ mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
 mc-bamboo-recipes.workspace = true
 mc-bamboo-world.workspace = true
+mc-bamboo-worldgen.workspace = true
 rsa.workspace = true
 sha1 = { workspace = true, features = ["oid"] }
 sha2 = { workspace = true, features = ["oid"] }

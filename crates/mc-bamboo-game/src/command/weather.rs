@@ -1,17 +1,16 @@
-//! `/weather`：世界天气状态与 `game_event` 包。
+//! `/weather`：只写世界天气状态和回成功提示。
 //!
-//! 只做状态和包，不做方块侧的 `tickPrecipitation`（积雪、结冰、炼药锅接雨）。
-//! 时间到点后的自动切换也不在世界循环里跑。
+//! 官方 `MinecraftServer.setWeatherParameters` 不发 `game_event`：客户端看到的开始/停止下雨
+//! 和强度变化全部由下一 tick 的 `ServerLevel.advanceWeatherCycle` 按渐变强度广播。
 
 use mc_bamboo_blocks::random::RandomSource;
 use mc_bamboo_command::{NodeKind, ParsedCommand, Value};
-use mc_bamboo_protocol::{packet::play::GameEvent, text::Component};
+use mc_bamboo_protocol::text::Component;
 
 use crate::{
     command::feedback::{self, CommandFail, fail},
     global::Global,
     inbound::PlayerId,
-    links::encode_frames,
     region::Region,
 };
 
@@ -63,7 +62,6 @@ pub(crate) fn weather(
         duration
     };
     let mut state = global.state().weather;
-    let was_raining = state.raining;
     match kind {
         Kind::Clear => {
             state.clear_time = duration;
@@ -88,7 +86,9 @@ pub(crate) fn weather(
         }
     }
     global.state_mut().weather = state;
-    broadcast(region, was_raining, state);
+    // 官方命令本身不广播，但方块逻辑这一刻就要看到新的强度吗？不：强度由循环渐变，
+    // 这里只需把还没变的快照保持一致。
+    crate::weather::sync(global, region);
     let key = match kind {
         Kind::Clear => "commands.weather.set.clear",
         Kind::Rain => "commands.weather.set.rain",
@@ -96,39 +96,6 @@ pub(crate) fn weather(
     };
     feedback::success(region, id, Component::translate(key, []), true);
     Ok(())
-}
-
-/// 官方 `ServerLevel.updateWeather` 在状态变化时广播的四个包。
-fn broadcast(region: &mut Region, was_raining: bool, state: crate::world_state::Weather) {
-    let mut events = Vec::new();
-    if was_raining != state.raining {
-        events.push(GameEvent {
-            event: if was_raining {
-                GameEvent::STOP_RAINING
-            } else {
-                GameEvent::START_RAINING
-            },
-            param: 0.0,
-        });
-        events.push(GameEvent {
-            event: GameEvent::RAIN_LEVEL_CHANGE,
-            param: f32::from(u8::from(state.raining)),
-        });
-        events.push(GameEvent {
-            event: GameEvent::THUNDER_LEVEL_CHANGE,
-            param: f32::from(u8::from(state.thundering)),
-        });
-    } else if state.raining {
-        events.push(GameEvent {
-            event: GameEvent::THUNDER_LEVEL_CHANGE,
-            param: f32::from(u8::from(state.thundering)),
-        });
-    }
-    let mut frames = Vec::new();
-    for event in &events {
-        frames.extend(encode_frames(event));
-    }
-    region.links.broadcast(&frames);
 }
 
 #[cfg(test)]
@@ -198,26 +165,24 @@ mod tests {
     }
 
     #[test]
-    fn rain_then_clear_sends_the_official_game_events() {
+    fn rain_then_clear_only_changes_the_state() {
         let (mut global, mut region, id, sink) = world();
         command::on_command(&mut global, &mut region, id, "weather rain 100", None);
         assert!(global.state().weather.raining);
         assert_eq!(global.state().weather.rain_time, 100);
         region.links.flush();
-        assert!(
-            events(&sink.0.lock().unwrap())
-                .into_iter()
-                .filter(|&event| event != 0)
-                .count()
-                >= 3
-        );
+        // 官方命令不发 game_event；0 是别的命令成功消息里可能碰巧出现的字节，这里只确认
+        // 没有 START_RAINING / RAIN_LEVEL_CHANGE / THUNDER_LEVEL_CHANGE。
+        let sent = events(&sink.0.lock().unwrap());
+        assert!(!sent.contains(&mc_bamboo_protocol::packet::play::GameEvent::START_RAINING));
+        assert!(!sent.contains(&mc_bamboo_protocol::packet::play::GameEvent::RAIN_LEVEL_CHANGE));
         sink.0.lock().unwrap().clear();
         command::on_command(&mut global, &mut region, id, "weather clear 50", None);
         assert!(!global.state().weather.raining);
         assert_eq!(global.state().weather.clear_time, 50);
         region.links.flush();
-        let events = events(&sink.0.lock().unwrap());
-        assert!(events.contains(&mc_bamboo_protocol::packet::play::GameEvent::STOP_RAINING));
+        let sent = events(&sink.0.lock().unwrap());
+        assert!(!sent.contains(&mc_bamboo_protocol::packet::play::GameEvent::STOP_RAINING));
     }
 
     #[test]

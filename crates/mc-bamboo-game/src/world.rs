@@ -29,7 +29,7 @@ use crate::{
     player::shows_hat,
     region::Region,
     secure_chat::{self, ServiceProfileKeys},
-    sign,
+    sign, weather,
 };
 
 const TICK: Duration = Duration::from_millis(50);
@@ -56,8 +56,8 @@ pub struct WorldConfig {
 
 /// 所有游戏状态的唯一所有者。
 pub struct World {
-    global: Global,
-    region: Region,
+    pub(crate) global: Global,
+    pub(crate) region: Region,
     inbox: Receiver<Inbound>,
 }
 
@@ -110,6 +110,12 @@ impl World {
         self.process_inbox()?;
         light_updates::run_light_updates(&mut self.region);
 
+        // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
+        let weather = weather::advance(&mut self.global, &self.region);
+        if !weather.is_empty() {
+            self.region.links.broadcast(&weather);
+        }
+        weather::sync(&self.global, &mut self.region);
         self.global.advance_time();
         self.region.advance_tick();
         // 官方 `ServerLevel.tick` 的顺序：方块和流体的计划刻、`chunkSource.tick` 里的随机刻、

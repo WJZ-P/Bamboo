@@ -192,6 +192,11 @@ pub(crate) struct Region {
     /// The game-rule snapshot block logic reads. The authoritative copy is on `Global`
     /// and is copied here as soon as a rule changes.
     pub(crate) block_rules: BlockGameRules,
+    /// 方块逻辑读的天气快照。权威副本在 `Global`，每 tick 推进后写过来。
+    ///
+    /// The weather snapshot block logic reads. The authoritative copy is on `Global`
+    /// and is copied here after each tick's weather advance.
+    pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
     /// `GameRules.SEND_COMMAND_FEEDBACK`。
     pub(crate) send_command_feedback: bool,
     /// `GameRules.LOG_ADMIN_COMMANDS`。
@@ -294,6 +299,7 @@ impl Region {
             service_keys,
             clock_millis: None,
             block_rules: rules.block_snapshot(),
+            block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
             send_command_feedback: rules.bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
             log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
             command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
@@ -328,6 +334,7 @@ impl Region {
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
             block_rules: self.block_rules,
+            block_weather: self.block_weather,
             command_blocks: &mut self.command_blocks,
         };
         (level, &mut self.block_ticks)
@@ -446,8 +453,9 @@ impl Region {
                 pitch: spawn.pitch,
             },
         );
-        // 官方只在下雨时发这三个包；不下雨时客户端自己的强度已经是 0。
-        if weather.raining {
+        // 官方 `PlayerList.sendLevelInfo` 按 `Level.isRaining()`（渐变雨强 > 0.2）判断，
+        // 两个强度包带的是当前强度，不是固定的 0 或 1。
+        if weather.is_raining() {
             self.links.send(
                 id,
                 &GameEvent {
@@ -459,14 +467,14 @@ impl Region {
                 id,
                 &GameEvent {
                     event: GameEvent::RAIN_LEVEL_CHANGE,
-                    param: 1.0,
+                    param: weather.rain_level,
                 },
             );
             self.links.send(
                 id,
                 &GameEvent {
                     event: GameEvent::THUNDER_LEVEL_CHANGE,
-                    param: f32::from(u8::from(weather.thundering)),
+                    param: weather.rain_level * weather.thunder_level,
                 },
             );
         }
