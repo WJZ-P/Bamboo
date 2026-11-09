@@ -1,32 +1,47 @@
 //! 文本组件参数。官方 `ComponentArgument` 用 SNBT 语法读一个 NBT 字面量，
 //! 再交给 `ComponentSerialization.CODEC` 校验。
 //!
-//! 这里只把字面量解析成标签；校验和重编码在 `mc-bamboo-protocol` 里做，
-//! 因为这个 crate 不依赖网络层。出错时游标退回参数开头，和官方
-//! `CommandArgumentParser.withCodec` 一致。
+//! 校验和重编码在 `mc-bamboo-protocol` 里做，结果存成标签给所有命令共用。
+//! 出错时游标退回参数开头，和官方 `CommandArgumentParser.withCodec` 一致。
 //!
 //! The component argument. Official `ComponentArgument` reads one SNBT literal and
-//! validates it with `ComponentSerialization.CODEC`. This crate only parses the
-//! literal; the protocol crate validates and re-encodes it. On failure the cursor
-//! returns to the start of the argument.
+//! validates it with `ComponentSerialization.CODEC`. The protocol crate does the
+//! validation; all commands share the resulting tag.
 
-use mc_bamboo_nbt::parse_snbt_argument;
+use mc_bamboo_nbt::{Tag, parse_snbt_prefix};
+use mc_bamboo_protocol::components::text::checked_component;
 
 use crate::{ParseError, Value, reader::StringReader};
 
-/// `ComponentArgument.parse`：读一个 SNBT 字面量。
+/// `ComponentArgument.parse`：读一个 SNBT 字面量，再过官方文本 `Codec`。
+///
+/// 校验和重编码在这里一次做完，计分板、队伍、Boss 栏的命令直接拿结果用。
+/// 失败时按官方 `CommandArgumentParser.withCodec` 把游标退回参数开头。
+///
+/// Parses one SNBT literal and validates it with the official text codec, so
+/// scoreboard, team and boss bar commands can use the result directly.
 pub fn parse_component(reader: &mut StringReader) -> Result<Value, ParseError> {
     let start = reader.cursor();
-    match parse_snbt_argument(&reader.remaining()) {
-        Ok((tag, used)) => {
-            reader.set_cursor(start + used);
-            Ok(Value::Component(tag))
+    let rest = reader.remaining();
+    let (tag, used) = match parse_snbt_prefix(&rest) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Err(ParseError::text("argument.component.invalid", error.message));
         }
-        Err(error) => Err(ParseError::text(
+    };
+    let Some(checked) = checked_component(&tag) else {
+        return Err(ParseError::text(
             "argument.component.invalid",
-            error.message,
-        )),
-    }
+            "invalid component",
+        ));
+    };
+    reader.set_cursor(start + used);
+    Ok(Value::Component(checked.tag().clone()))
+}
+
+/// 从已经校验过的标签构造组件，供命令执行时用。
+pub fn component_tag(tag: Tag) -> mc_bamboo_protocol::text::Component {
+    mc_bamboo_protocol::components::text::component_from_checked_tag(tag)
 }
 
 #[cfg(test)]
@@ -41,10 +56,7 @@ mod tests {
         let value = parse_component(&mut reader).unwrap();
         assert_eq!(
             value.as_component(),
-            Some(&Tag::Compound(vec![(
-                "text".to_owned(),
-                Tag::String("hi".into())
-            )]))
+            Some(&Tag::String("hi".into()))
         );
         assert_eq!(reader.remaining(), " 3");
     }

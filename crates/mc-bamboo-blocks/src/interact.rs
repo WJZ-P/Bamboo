@@ -325,6 +325,13 @@ pub fn run_block_event_phase(level: &mut dyn Level, ticks: &mut BlockTicks) -> O
 pub fn run_block_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome {
     let mut world = World::new(level, ticks);
     world.tick_block_entities();
+    // `CrafterBlockEntity.serverTick` 也排在方块实体这一段。方块 oracle 的假世界不登记
+    // 合成器的 ticker，settle 走的是 `run_scheduled_ticks`，所以只有这里会减倒计时。
+    //
+    // `CrafterBlockEntity.serverTick` runs in this phase too. The block oracle's fake level does
+    // not register a crafter ticker, and its settle uses `run_scheduled_ticks`, so only this
+    // phase decrements the countdown.
+    crate::crafter::tick_crafting_clocks(&mut world);
     outcome_from(world, InteractionResult::Pass, false)
 }
 

@@ -50,6 +50,31 @@ impl Component {
         self.with_entry("underlined", Tag::Byte(1))
     }
 
+    /// 悬停时显示另一段文本。
+    ///
+    /// Shows another component while the pointer rests on this one.
+    pub fn hover_show_text(self, text: Self) -> Self {
+        let event = Tag::Compound(vec![
+            ("action".to_owned(), Tag::String("show_text".to_owned())),
+            ("value".to_owned(), text.0),
+        ]);
+        self.with_entry("hover_event", event)
+    }
+
+    /// Shift 点击时插入聊天框的文字。
+    ///
+    /// Text inserted into the chat box on shift-click.
+    pub fn insertion(self, text: impl Into<String>) -> Self {
+        self.with_entry("insertion", Tag::String(text.into()))
+    }
+
+    /// 用已经按官方文本编解码校验过的标签构造。
+    ///
+    /// Builds a component from a tag the official text codec already accepted.
+    pub fn trusted(tag: Tag) -> Self {
+        Self(tag)
+    }
+
     /// 点击时把 `command` 填进聊天框。
     ///
     /// 客户端解码这个字段时检查 [`is_allowed_chat_character`]，所以不合法的字符不写。

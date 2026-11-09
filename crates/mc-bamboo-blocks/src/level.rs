@@ -259,6 +259,10 @@ pub struct RedstoneMemory {
     /// Disabled slots of a `CrafterBlockEntity`. Bit `n` set means slot `n` is disabled.
     /// Missing positions are all enabled.
     crafter_disabled: HashMap<BlockPos, u16>,
+    /// `CrafterBlockEntity.craftingTicksRemaining`。只在大于 0 时记。
+    ///
+    /// `CrafterBlockEntity.craftingTicksRemaining`. Only recorded while positive.
+    crafter_crafting: HashMap<BlockPos, i32>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
     /// `LecternBlockEntity` 的页码。比较器只读得了这三项，书本身在游戏层。
@@ -354,12 +358,44 @@ impl RedstoneMemory {
         }
     }
 
+    /// `CrafterBlockEntity.setCraftingTicksRemaining`：亮起 `crafting` 时记下还剩几刻。
+    ///
+    /// `CrafterBlockEntity.setCraftingTicksRemaining`: record the countdown when `crafting` turns on.
+    pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+        if remaining > 0 {
+            self.crafter_crafting.insert(pos, remaining);
+        } else {
+            self.crafter_crafting.remove(&pos);
+        }
+    }
+
+    /// 取走全部倒计时，供一刻末尾统一递减。
+    ///
+    /// Take every countdown so the end of a tick can decrement them together.
+    pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+        std::mem::take(&mut self.crafter_crafting)
+            .into_iter()
+            .collect()
+    }
+
+    /// 把还没到期的倒计时放回去。
+    ///
+    /// Put the countdowns that have not expired back.
+    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+        for (pos, remaining) in entries {
+            if remaining > 0 {
+                self.crafter_crafting.insert(pos, remaining);
+            }
+        }
+    }
+
     /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
     pub fn forget_block_entity(&mut self, pos: BlockPos) {
         self.comparator_outputs.remove(&pos);
         self.bookshelf_slots.remove(&pos);
         self.jukebox_playing.remove(&pos);
         self.crafter_disabled.remove(&pos);
+        self.crafter_crafting.remove(&pos);
         self.lecterns.remove(&pos);
     }
 

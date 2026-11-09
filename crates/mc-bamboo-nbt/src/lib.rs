@@ -8,7 +8,7 @@ pub mod snbt;
 pub use decode::{Accounter, DEFAULT_QUOTA, DecodeError, MAX_DEPTH, Reader};
 pub use snbt::{
     SnbtError, java_double_to_string, java_float_to_string, parse_snbt, parse_snbt_argument,
-    parse_snbt_compound, quote_and_escape,
+    parse_snbt_compound, parse_snbt_prefix, quote_and_escape,
 };
 
 /// 一个 NBT 值。
