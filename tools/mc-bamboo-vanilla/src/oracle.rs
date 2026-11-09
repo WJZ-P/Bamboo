@@ -28,6 +28,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::{BufRead, BufReader, Read},
     panic::{self, AssertUnwindSafe},
+    path::Path,
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
@@ -51,7 +52,7 @@ const LOG_TAIL: usize = 60;
 /// `--show` 的默认值。
 const DEFAULT_SHOW: usize = 3;
 
-const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value]";
+const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value] [--weather clear|rain|thunder]";
 
 /// 不比较的内容。每一条都有原因，第 4 章要求排除的内容进最后的报告。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -302,7 +303,7 @@ fn class_exclusion(table: &[(BlockAncestor, Rule)], block: &Block) -> Option<Rul
 }
 
 /// 命令行参数。`--cases`、`--seed`、`--only`、`--case` 原样交给 `BlockOracle.java`。
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
     forwarded: Vec<String>,
     pure: bool,
@@ -321,7 +322,7 @@ impl Options {
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--cases" | "--seed" | "--only" | "--case" => {
+                "--cases" | "--seed" | "--only" | "--case" | "--weather" => {
                     let value = args.next().ok_or(USAGE)?;
                     options
                         .forwarded
@@ -367,7 +368,7 @@ impl Options {
     fn rerun_args(&self) -> String {
         let mut args = Vec::new();
         for pair in self.forwarded.chunks(2) {
-            if pair[0] == "--only" {
+            if pair[0] == "--only" || pair[0] == "--weather" {
                 args.extend_from_slice(pair);
             }
         }
@@ -456,13 +457,37 @@ fn capture_replay_panics() {
 }
 
 /// 启动官方进程，一边读题一边比较。`command` 已经是能运行 `BlockOracle.java` 的命令。
-pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
+pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
     let options = Options::parse(args)?;
     if options.pure {
         println!("--pure: scenes only hold ported classes and water");
     }
+    // 没有 --weather 时依次跑晴天、下雨、打雷三批，晴天题和以前完全一样。
+    // 显式给了 --weather 就只跑那一批。
+    let weather_batches: Vec<Vec<String>> = if options
+        .forwarded
+        .chunks(2)
+        .any(|pair| pair[0] == "--weather")
+    {
+        Vec::new()
+    } else {
+        ["rain", "thunder"]
+            .iter()
+            .map(|&weather| vec!["--weather".to_owned(), weather.to_owned()])
+            .collect()
+    };
+    run_batch(&command, &options, Vec::new())?;
+    for batch in weather_batches {
+        run_batch(&command, &options, batch)?;
+    }
+    Ok(())
+}
+
+fn run_batch(command: &Command, options: &Options, extra: Vec<String>) -> Result<(), String> {
+    let mut java_args = options.java_args();
+    java_args.extend(extra);
     let mut child = command
-        .args(options.java_args())
+        .program_and_args(&java_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -470,7 +495,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     let log = collect_log(&mut child)?;
     let stdout = child.stdout.take().ok_or("java has no stdout")?;
 
-    let mut session = Session::new(options);
+    let mut session = Session::new(options.clone());
     capture_replay_panics();
     let read = session.read_lines(BufReader::new(stdout));
     if read.is_err() {
@@ -487,6 +512,22 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         return Err(format!("BlockOracle.java failed: {status}\n{log}"));
     }
     session.finish()
+}
+
+/// 用同一条命令再起一个进程，换成这批题的参数。
+trait CommandArgs {
+    fn program_and_args(&self, args: &[String]) -> Command;
+}
+
+impl CommandArgs for Command {
+    fn program_and_args(&self, args: &[String]) -> Command {
+        let mut command = Command::new(self.get_program());
+        command
+            .current_dir(self.get_current_dir().unwrap_or_else(|| Path::new(".")))
+            .args(self.get_args())
+            .args(args);
+        command
+    }
 }
 
 /// 官方日志在另一个线程里读，不然管道写满时 JVM 会停住。只留最后几行，JVM 失败时才看。
@@ -587,6 +628,9 @@ impl Session {
                 "the fake world allows {} chained updates, mc-bamboo-blocks {MAX_CHAINED_NEIGHBOR_UPDATES}",
                 header.max_chained_updates
             ));
+        }
+        if !matches!(header.weather.as_str(), "clear" | "rain" | "thunder") {
+            return Err(format!("unknown oracle weather {}", header.weather));
         }
         self.report.start(&header);
         self.header = Some(header);

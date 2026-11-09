@@ -88,15 +88,17 @@ fn roll_precipitation(world: &mut World, origin: BlockPos, speed: i32) {
 fn tick_precipitation(world: &mut World, pos: BlockPos) {
     let top = BlockPos::new(pos.x, world.level().heightmap_y(pos), pos.z);
     let below = top.below();
-    let facts = world.level().precipitation_facts(top);
-    if should_freeze(world, below, facts) {
+    // 官方 `shouldFreeze` 和 `handlePrecipitation` 的温度看 below，`shouldSnow` 看 top。
+    let below_facts = world.level().precipitation_facts(below);
+    let top_facts = world.level().precipitation_facts(top);
+    if should_freeze(world, below, below_facts) {
         world.set_block_and_update(below, BlockState(blocks::ICE));
     }
     if !world.is_raining() {
         return;
     }
     let max_snow = world.block_game_rules().max_snow_accumulation_height;
-    if max_snow > 0 && should_snow(world, top, facts) {
+    if max_snow > 0 && should_snow(world, top, top_facts) {
         let state = world.block_state(top);
         if state.is(blocks::SNOW) {
             let layers = state.get(LAYERS);
@@ -108,8 +110,8 @@ fn tick_precipitation(world: &mut World, pos: BlockPos) {
             world.set_block_and_update(top, BlockState(blocks::SNOW));
         }
     }
-    if facts.precipitation != Precipitation::None {
-        handle_precipitation(world, below, facts.precipitation);
+    if below_facts.precipitation != Precipitation::None {
+        handle_precipitation(world, below, below_facts.precipitation);
     }
 }
 

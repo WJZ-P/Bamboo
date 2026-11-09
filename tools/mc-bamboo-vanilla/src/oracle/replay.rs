@@ -40,6 +40,8 @@ const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 const CREATIVE_INTERACTION_RANGE: f64 = 5.0;
 /// `BlockOracle.java` 假世界的亮度，两种光都是这个值。
 const FULL_BRIGHTNESS: i32 = 15;
+/// `BlockOracle.java` 假世界的海平面，官方 `Biome.getTemperature` 用它。
+const SEA_LEVEL: i32 = 63;
 /// 流体的注册表名，下标是 [`mc_bamboo_data::registries::fluid`] 里的 ID。
 pub const FLUID_NAMES: [&str; 5] = [
     "minecraft:empty",
@@ -117,6 +119,10 @@ struct OracleLevel {
     ///
     /// Game rules for this case. Defaults match `new GameRules(DEFAULT_FLAGS)`.
     block_rules: BlockGameRules,
+    /// 题面里的天气快照。
+    block_weather: mc_bamboo_blocks::BlockWeather,
+    /// 假世界的降水条件：平原、海平面 63、按位置算真实官方温度。
+    precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate,
 }
 
 /// 已建模的容器，槽位数和官方一致。
@@ -217,6 +223,18 @@ fn block_rules_of(header: &Header) -> Result<BlockGameRules, String> {
     Ok(rules)
 }
 
+/// 题面里的稳定天气：`rain`/`thunder` 的雨强是 1，`thunder` 的雷暴强度是 1。
+fn weather_of(header: &Header) -> Result<mc_bamboo_blocks::BlockWeather, String> {
+    Ok(match header.weather.as_str() {
+        "clear" => mc_bamboo_blocks::BlockWeather::CLEAR,
+        "rain" | "thunder" => mc_bamboo_blocks::BlockWeather {
+            rain_level: 1.0,
+            thunder_level: f32::from(u8::from(header.weather == "thunder")),
+        },
+        other => return Err(format!("unknown oracle weather {other}")),
+    })
+}
+
 impl OracleLevel {
     /// 按场景建世界，再填容器内容。容器和漏斗方块实体的建立顺序和官方一样：
     /// 场景按 `BlockPos.asLong` 排（x、z、y），先建全部方块实体，再填内容。
@@ -276,6 +294,10 @@ impl OracleLevel {
             block_events: BlockEvents::default(),
             living: equip_targets(&case.action, names)?,
             block_rules: block_rules_of(header)?,
+            block_weather: weather_of(header)?,
+            precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate::of(
+                mc_bamboo_data::registries::biome::PLAINS,
+            ),
         })
     }
 
@@ -498,6 +520,42 @@ impl Level for OracleLevel {
 
     fn block_game_rules(&self) -> BlockGameRules {
         self.block_rules
+    }
+
+    fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
+        self.block_weather
+    }
+
+    /// `FakeChunk.getHeight(MOTION_BLOCKING, x, z)`：从最高层往下扫到第一个
+    /// `BLOCKS_MOTION_IN_HEIGHTMAP` 方块或流体，`Level.getHeightmapPos` 再 +1。
+    /// 整列没有时是 `minY`。
+    fn heightmap_y(&self, pos: BlockPos) -> i32 {
+        let found = (self.min_y..=self.max_y).rev().find(|&y| {
+            let state = self
+                .blocks
+                .get(&BlockPos::new(pos.x, y, pos.z))
+                .copied()
+                .unwrap_or(BlockState::AIR);
+            state.is_tagged(block_tags::BLOCKS_MOTION_IN_HEIGHTMAP) || !state.fluid().is_empty()
+        });
+        found.map_or(self.min_y, |y| y + 1)
+    }
+
+    /// 假世界永远是平原，海平面 63。温度按官方 `Biome.getTemperature` 算。
+    fn precipitation_facts(&self, pos: BlockPos) -> mc_bamboo_blocks::PrecipitationFacts {
+        use mc_bamboo_worldgen::biome_temperature as biome;
+        let precipitation =
+            biome::precipitation_at(self.precipitation, pos.x, pos.y, pos.z, SEA_LEVEL);
+        mc_bamboo_blocks::PrecipitationFacts {
+            precipitation: match precipitation {
+                biome::Precipitation::None => mc_bamboo_blocks::Precipitation::None,
+                biome::Precipitation::Rain => mc_bamboo_blocks::Precipitation::Rain,
+                biome::Precipitation::Snow => mc_bamboo_blocks::Precipitation::Snow,
+            },
+            warm_enough_to_rain: self
+                .precipitation
+                .warm_enough_to_rain(pos.x, pos.y, pos.z, SEA_LEVEL),
+        }
     }
 
     fn entities_mut(&mut self) -> &mut Entities {
@@ -1188,6 +1246,10 @@ mod tests {
             block_events: BlockEvents::default(),
             living: Vec::new(),
             block_rules: BlockGameRules::vanilla(),
+            block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
+            precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate::of(
+                mc_bamboo_data::registries::biome::PLAINS,
+            ),
         }
     }
 
