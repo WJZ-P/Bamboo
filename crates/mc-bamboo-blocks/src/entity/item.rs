@@ -1094,8 +1094,8 @@ impl World<'_> {
     /// `DefaultDispenseItemBehavior.spawnItem`，速度随机数由调用方提前取好。
     ///
     /// 官方先算好落点，再取一个 `nextDouble` 和三个 `triangle` 的六个 double，
-    /// 然后才 `addFreshEntity`。分两步是为了让"只取数不生成实体"的注册行为
-    /// 保持原来的取数顺序，物品实体仍按这个速度生成。
+    /// 然后才 `addFreshEntity`。分两步是为了让注册行为保持原来的取数顺序，
+    /// 物品实体仍按这个速度生成。
     ///
     /// `DefaultDispenseItemBehavior.spawnItem` with velocity draws already taken by the caller.
     ///

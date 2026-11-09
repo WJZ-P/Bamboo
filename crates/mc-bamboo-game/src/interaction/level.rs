@@ -305,6 +305,17 @@ impl Level for RegionLevel<'_> {
         )
     }
 
+    /// `destroyBlock` 的 `getDrops`。和爆炸一样没有半径，工具是空手。
+    fn block_loot_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        crate::block_drops::explosion_loot(
+            self.chunks,
+            self.loot_sequences,
+            self.random.source(),
+            state,
+            pos,
+        )
+    }
+
     /// `getEntitiesOfClass(LivingEntity)`。玩家按 `PlayerId` 排序，和实体列表的顺序不一定相同。
     ///
     /// `getEntitiesOfClass(LivingEntity)`. Players are ordered by `PlayerId`, which is not

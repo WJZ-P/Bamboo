@@ -71,7 +71,7 @@ fn glass_bottle(world: &mut World, pos: BlockPos, facing: Direction, stack: Item
         let left = take_liquid(world, pos, facing, stack, water_potion_stack());
         return Shot::optional(left, true);
     }
-    Shot::optional(throw_one(world, facing, stack), false)
+    Shot::optional(throw_one(world, pos, facing, stack), false)
 }
 
 fn full_hive(state: BlockState) -> bool {

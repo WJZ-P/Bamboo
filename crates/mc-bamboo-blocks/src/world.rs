@@ -1059,6 +1059,15 @@ impl<'a> World<'a> {
         self.level.explosion_block_drops(state, pos)
     }
 
+    /// `Block.getDrops`，见 [`Level::block_loot_drops`]。
+    pub(crate) fn block_loot_drops(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.block_loot_drops(state, pos)
+    }
+
     /// `getBlockRandomPos`。
     pub(crate) fn block_random_pos(&self, origin: BlockPos, y_mask: i32) -> BlockPos {
         self.level.random().block_random_pos(origin, y_mask)
@@ -1464,7 +1473,14 @@ impl<'a> World<'a> {
         self.set_block(pos, fluid.legacy_block(), UPDATE_ALL)
     }
 
-    /// `destroyBlock(pos, drop, null, updateLimit)`。这个世界没有掉落物。
+    /// `destroyBlock(pos, drop, null, updateLimit)`。
+    ///
+    /// 官方在 `removeBlock` 之后按 `getDrops` 一组一组地 `popResource`。方块 oracle 把
+    /// 这些表换成空表，所以假世界没有额外取数；真实世界由 `Level` 提供掉落表。
+    ///
+    /// `destroyBlock(pos, drop, null, updateLimit)`. After `removeBlock`, vanilla
+    /// `popResource`s each stack from `getDrops`. The block oracle empties those tables,
+    /// so the fake world draws nothing; the real `Level` supplies loot tables.
     pub fn destroy_block(&mut self, pos: BlockPos, limit: u32) -> bool {
         let state = self.block_state(pos);
         if state.is_air() {
@@ -1472,7 +1488,13 @@ impl<'a> World<'a> {
         }
         state.spawn_destroy_particles(self, pos);
         let fluid = self.fluid_state(pos);
-        self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit)
+        if !self.set_block_limited(pos, fluid.legacy_block(), UPDATE_ALL, limit) {
+            return false;
+        }
+        for stack in self.block_loot_drops(state, pos) {
+            self.pop_resource(pos, stack);
+        }
+        true
     }
 
     /// `Block.updateOrDestroy`。

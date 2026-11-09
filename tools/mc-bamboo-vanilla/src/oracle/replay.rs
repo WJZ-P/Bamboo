@@ -415,7 +415,7 @@ impl Level for OracleLevel {
             return false;
         }
         self.touch(state);
-        // 换成别的方块时方块实体一起换掉，内容没有掉落物。同一格还是同一种容器时保留内容。
+        // 换成别的方块时方块实体一起换掉，假世界的掉落表是空的。同一格还是同一种容器时保留内容。
         let old = self.kind(pos);
         let new = ContainerKind::of(state);
         if old != new {

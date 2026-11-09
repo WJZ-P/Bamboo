@@ -237,6 +237,64 @@ fn a_plain_item_is_thrown_with_spawn_item_random() {
     );
 }
 
+/// 默认抛出真的生成物品实体：位置在方块中心沿朝向外 0.7 格，再按方向下移。
+#[test]
+fn a_default_throw_spawns_a_ground_item() {
+    let mut level = TestLevel::new();
+    let mut slots = empty(9);
+    slots[0] = ItemStack::new(items::STONE, 2);
+    level.set_container(POS, slots);
+    let mut ticks = BlockTicks::new();
+    let mut world = World::new(&mut level, &mut ticks);
+    place_dispenser(&mut world, Direction::East);
+    let state = world.block_state(POS);
+    dispense_from(&mut world, POS, state);
+    let items: Vec<_> = world
+        .entity_ids()
+        .into_iter()
+        .filter_map(|id| world.entity(id))
+        .filter_map(|entity| {
+            entity
+                .ground()
+                .map(|item| (entity.position, entity.delta, item))
+        })
+        .collect();
+    assert_eq!(items.len(), 1);
+    let (position, delta, item) = &items[0];
+    assert_eq!(item.stack, ItemStack::new(items_const(), 1));
+    assert!((position.x - 1.2).abs() < 1.0e-9);
+    assert!((position.y - 64.5 + 0.15625).abs() < 1.0e-9);
+    assert!((position.z - 0.5).abs() < 1.0e-9);
+    assert!(delta.x > 0.0 && (delta.y - 0.2).abs() < 0.2 && delta.z.abs() < 0.2);
+    assert_eq!(slot(&mut world, POS, 0), ItemStack::new(items_const(), 1));
+}
+
+/// 塞不回发射器的余料也抛出真的物品实体，随机数只取一次。
+#[test]
+fn an_unplaceable_remainder_spawns_a_ground_item() {
+    let mut level = TestLevel::new();
+    level.set_container(POS, vec![ItemStack::new(items::WATER_BUCKET, 2); 9]);
+    let mut ticks = BlockTicks::new();
+    let mut world = World::new(&mut level, &mut ticks);
+    place_dispenser(&mut world, Direction::Up);
+    let state = world.block_state(POS);
+    dispense_from(&mut world, POS, state);
+    let items: Vec<_> = world
+        .entity_ids()
+        .into_iter()
+        .filter_map(|id| world.entity(id))
+        .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+        .collect();
+    assert_eq!(items.len(), 1);
+    assert_eq!(*items[0].1, ItemStack::new(items::BUCKET, 1));
+    assert!((items[0].0.y - 65.2 + 0.125).abs() < 1.0e-9);
+}
+
+/// 这个测试里抛出的物品 ID，避免和 `mc_bamboo_data::items` 的模块名冲突。
+fn items_const() -> i32 {
+    items::STONE
+}
+
 #[test]
 fn the_scheduled_tick_uses_the_same_dispense() {
     let mut level = TestLevel::new();
@@ -840,6 +898,34 @@ fn shears_harvest_a_full_hive_and_draw_the_drop_offset() {
             pop_resource_offset(random);
         })
     );
+
+    // 蜜脾是一组真的物品实体，位置在蜂巢中心附近，三个位置偏移只取一次。
+    let mut level = TestLevel::new();
+    level.set(
+        POS.relative(Direction::East),
+        BlockState(blocks::BEEHIVE).with(LEVEL_HONEY, 5),
+    );
+    let hive_pos = POS.relative(Direction::East);
+    level.set_container(POS, {
+        let mut slots = empty(9);
+        slots[0] = ItemStack::new(items::SHEARS, 1);
+        slots
+    });
+    let mut ticks = BlockTicks::new();
+    let mut world = World::new(&mut level, &mut ticks);
+    place_dispenser(&mut world, Direction::East);
+    let state = world.block_state(POS);
+    dispense_from(&mut world, POS, state);
+    let honeycomb: Vec<_> = world
+        .entity_ids()
+        .into_iter()
+        .filter_map(|id| world.entity(id))
+        .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+        .collect();
+    assert_eq!(honeycomb.len(), 1);
+    assert_eq!(*honeycomb[0].1, ItemStack::new(items::HONEYCOMB, 3));
+    assert!((honeycomb[0].0.x - f64::from(hive_pos.x) - 0.5).abs() <= 0.25);
+    assert!((honeycomb[0].0.z - f64::from(hive_pos.z) - 0.5).abs() <= 0.25);
 
     let mut level = TestLevel::new();
     level.set(POS.relative(Direction::East), BlockState(blocks::STONE));

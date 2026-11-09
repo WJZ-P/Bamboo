@@ -225,6 +225,19 @@ pub trait Level {
         let _ = (state, pos);
         Vec::new()
     }
+
+    /// `Block.getDrops`，也就是 `destroyBlock` 在成功移除方块后生成的东西。
+    ///
+    /// 空堆也交给调用方 `popResource`：官方对每一组都取三次位置偏移。
+    /// 方块 oracle 把表换成空表，这里默认返回空，不额外取数。
+    ///
+    /// `Block.getDrops`, the stacks `destroyBlock` spawns after removing the block.
+    /// Even an empty stack reaches `popResource` in vanilla, which draws three position
+    /// offsets. The block oracle empties those tables, so the default here draws nothing.
+    fn block_loot_drops(&mut self, state: BlockState, pos: BlockPos) -> Vec<ItemStack> {
+        let _ = (state, pos);
+        Vec::new()
+    }
     /// `getEntitiesOfClass(LivingEntity, box)` 能看见的生物。默认没有。
     ///
     /// Living entities visible to `getEntitiesOfClass`. None by default.

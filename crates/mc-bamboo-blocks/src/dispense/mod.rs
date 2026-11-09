@@ -24,7 +24,7 @@ mod wax;
 #[cfg(test)]
 mod tests;
 
-use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -104,17 +104,40 @@ fn finish(world: &mut World, pos: BlockPos, facing: Direction, shot: Shot) -> It
     shot.stack
 }
 
-/// `DefaultDispenseItemBehavior.execute`：抛出一件。物品实体还没接上，速度已经按官方算好。
+/// `DefaultDispenseItemBehavior.execute`：按 `spawnItem` 的速度生成一件物品实体。
 ///
-/// `DefaultDispenseItemBehavior.execute`: throw one. Item entities are not wired up yet.
-/// The velocity is the official one, and the item leaves the slot.
-pub(super) fn throw_one(world: &mut World, facing: Direction, stack: ItemStack) -> ItemStack {
-    // 物品实体合并后用这个速度 `addFreshEntity`，不要再取一遍 `spawnItem` 的随机数。
-    //
-    // When item entities land, `addFreshEntity` uses this velocity. Do not draw `spawnItem`
-    // again.
-    let _velocity = spawn_item_random(world, facing);
+/// 位置是 `DispenserBlock.getDispensePosition`，也就是发射器方块的中心沿朝向外 0.7 格。
+/// 速度随机数只取一遍，生成实体用的是物品自己的随机源，不碰 `level.random`。
+///
+/// `DefaultDispenseItemBehavior.execute`: spawn one item at the `spawnItem` velocity.
+/// The position is `DispenserBlock.getDispensePosition`, 0.7 blocks out from the block centre.
+/// The velocity draws happen once; the entity's own random source is separate from `level.random`.
+pub(super) fn throw_one(
+    world: &mut World,
+    pos: BlockPos,
+    facing: Direction,
+    stack: ItemStack,
+) -> ItemStack {
+    let velocity = spawn_item_random(world, facing);
+    world.spawn_dispensed_item_with_velocity(
+        copy_with_count(&stack, 1),
+        facing,
+        dispense_position(pos, facing),
+        velocity,
+    );
     without_one(&stack)
+}
+
+/// `DispenserBlock.getDispensePosition`：中心沿朝向出去 0.7 格。
+///
+/// `DispenserBlock.getDispensePosition`: 0.7 blocks out from the block centre.
+fn dispense_position(pos: BlockPos, facing: Direction) -> Vec3 {
+    let (step_x, step_y, step_z) = facing.normal();
+    Vec3::new(
+        f64::from(pos.x) + 0.5 + 0.7 * f64::from(step_x),
+        f64::from(pos.y) + 0.5 + 0.7 * f64::from(step_y),
+        f64::from(pos.z) + 0.5 + 0.7 * f64::from(step_z),
+    )
 }
 
 /// 内层的 `defaultDispenseItemBehavior.dispense`：先抛，再 1000，再 2000。外层还会再放一遍。
@@ -127,7 +150,7 @@ pub(super) fn nested_default(
     facing: Direction,
     stack: ItemStack,
 ) -> ItemStack {
-    let stack = throw_one(world, facing, stack);
+    let stack = throw_one(world, pos, facing, stack);
     world.level_event(1000, pos, 0);
     world.level_event(2000, pos, facing.id());
     stack
@@ -150,7 +173,13 @@ pub(super) fn consume_with_remainder(
     }
     let leftover = insert_item(world, pos, remainder);
     if !leftover.is_empty() {
-        let _velocity = spawn_item_random(world, facing);
+        let velocity = spawn_item_random(world, facing);
+        world.spawn_dispensed_item_with_velocity(
+            leftover,
+            facing,
+            dispense_position(pos, facing),
+            velocity,
+        );
         world.level_event(1000, pos, 0);
         world.level_event(2000, pos, facing.id());
     }
@@ -244,11 +273,11 @@ fn dispatch(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStac
         return equipment::execute(world, pos, facing, stack);
     }
     if entity::is_spawn_egg(item) {
-        return entity::spawn_egg(world, facing, stack);
+        return entity::spawn_egg(world, pos, facing, stack);
     }
     // `SulfurCubeBlockDispenseItemBehavior`：没有硫磺立方时就是 `super.execute`，一次默认抛出。
     //
     // `SulfurCubeBlockDispenseItemBehavior`: with no sulfur cube this is `super.execute`,
     // one default throw.
-    Shot::plain(throw_one(world, facing, stack))
+    Shot::plain(throw_one(world, pos, facing, stack))
 }

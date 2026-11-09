@@ -235,13 +235,12 @@ pub(crate) fn set_jukebox_item(world: &mut World, pos: BlockPos, stack: ItemStac
 
 /// `JukeboxBlockEntity.popOutTheItem`：物品非空才拿走、取两个 `nextFloat`，然后再 `onSongChanged`。
 ///
-/// 物品实体不生成。`setTheItem(EMPTY)` 的停歌通知发生在取数之前。
+/// `setTheItem(EMPTY)` 的停歌通知发生在取数之前。
 ///
 /// `JukeboxBlockEntity.popOutTheItem`: only a non-empty item is removed, then two `nextFloat`s,
 /// then another `onSongChanged`.
 ///
-/// No item entity is spawned. The stop notification inside `setTheItem(EMPTY)` happens before
-/// the random calls.
+/// The stop notification inside `setTheItem(EMPTY)` happens before the random calls.
 pub(crate) fn pop_jukebox_record(world: &mut World, pos: BlockPos) {
     let stack = world
         .slots_at(pos)

@@ -3,7 +3,7 @@
 //! 蜜脾涂得上蜡时发 3003 和涂蜡的声音，不处理玩家路径里双箱子的第二声。涂不上就抛一次，成功仍是真。
 //! 荧石对着充能不满的重生锚才充能。满了成功是假。不是锚就抛一次，成功仍是真。
 //! 剪刀只收满蜜的蜂巢。蜜脾掉落的表走自己的 `random_sequence`，不碰 `level.random`；
-//! `popResource` 仍从 `level.random` 取三次位置偏移，蜜脾实体不生成。没有羊可剪，
+//! `popResource` 从 `level.random` 取三次位置偏移并生成蜜脾实体。没有羊可剪，
 //! 所以蜂巢失败就是失败。刷子前面没有犰狳，成功是假，物品留着。
 //!
 //! Honeycomb, glowstone, shears and the brush.
@@ -13,8 +13,8 @@
 //! Glowstone charges a respawn anchor that is not full. A full anchor fails. Anything else
 //! throws once and success stays true.
 //! Shears only harvest a full hive. The honeycomb loot table uses its own `random_sequence`
-//! and does not touch `level.random`. `popResource` still draws three position offsets from
-//! `level.random`. The honeycomb entity is not spawned. There is no sheep to shear, so a hive
+//! and does not touch `level.random`. `popResource` draws three position offsets from
+//! `level.random` and spawns the honeycomb item. There is no sheep to shear, so a hive
 //! miss is a failure. A brush with no armadillo fails and keeps the item.
 
 use mc_bamboo_core::{BlockPos, Direction};
@@ -56,7 +56,7 @@ pub(super) fn execute(
 fn honeycomb(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
     let target = pos.relative(facing);
     let Some(waxed) = waxed(world.block_state(target)) else {
-        return Shot::optional(throw_one(world, facing, stack), true);
+        return Shot::optional(throw_one(world, pos, facing, stack), true);
     };
     world.set_block_and_update(target, waxed);
     world.level_event(3003, target, 0);
@@ -84,7 +84,7 @@ fn glowstone(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemSta
             Shot::optional(stack, false)
         }
     } else {
-        Shot::optional(throw_one(world, facing, stack), true)
+        Shot::optional(throw_one(world, pos, facing, stack), true)
     }
 }
 
@@ -126,26 +126,12 @@ fn shear_hive(world: &mut World, pos: BlockPos) -> bool {
     }
     world.play_block_sound(pos, sound_event("minecraft:block.beehive.shear"), 1.0, 1.0);
     // `dropHoneycomb`：表是 `minecraft:harvest/beehive`，固定一组 3 个蜜脾，随机序列不碰
-    // `level.random`。接着 `popResource` 为这一组取三次位置偏移。物品实体不生成。
+    // `level.random`。`Block.popResource` 取三次位置偏移，然后生成蜜脾实体。
     //
     // `dropHoneycomb`: table `minecraft:harvest/beehive` is one stack of 3. Its random
-    // sequence does not touch `level.random`. `popResource` then draws three position
-    // offsets for that stack. The item entity is not spawned.
-    pop_resource_offset(world);
+    // sequence does not touch `level.random`. `Block.popResource` draws three position
+    // offsets and spawns the honeycomb item.
+    world.pop_resource(pos, ItemStack::new(items::HONEYCOMB, 3));
     world.set_block_and_update(pos, state.with(crate::state::LEVEL_HONEY, 0));
     true
-}
-
-/// `Block.popResource` 里的三次 `Mth.nextDouble(random, -0.25, 0.25)`。
-///
-/// 三次都在 `min < max` 时各调用一次 `nextDouble`，发生在物品实体构造之前。
-///
-/// The three `Mth.nextDouble(random, -0.25, 0.25)` calls in `Block.popResource`.
-///
-/// Each one calls `nextDouble` once because `min < max`, and that happens before the
-/// item entity is constructed.
-fn pop_resource_offset(world: &mut World) {
-    let _x = world.random().next_double();
-    let _y = world.random().next_double();
-    let _z = world.random().next_double();
 }

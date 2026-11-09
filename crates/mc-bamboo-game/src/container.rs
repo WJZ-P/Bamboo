@@ -747,7 +747,7 @@ fn forget_unused(region: &mut Region) {
     });
 }
 
-/// 方块被破坏。内容没有掉落物，等打开着的菜单关掉后一起丢弃。
+/// 方块被破坏。方块实体已经按 `dropContents` 掉过物品，这里清掉打开着的菜单留下的记录。
 pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
     crate::block_items::forget(region, pos);
     let targeted = region.menus.values().any(|menu| menu.target.contains(pos));

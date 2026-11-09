@@ -289,6 +289,30 @@ mod tests {
         assert_eq!(world.random().seed(), twin.seed());
     }
 
+    /// 投掷器朝空气抛出真的物品实体，位置按 `getDispensePosition` 再下移。
+    #[test]
+    fn a_dropper_without_a_container_spawns_a_ground_item() {
+        let mut level = TestLevel::new();
+        let mut dropper = empty(9);
+        dropper[4] = ItemStack::new(items::STONE, 3);
+        level.set_container(POS, dropper);
+        let mut ticks = BlockTicks::new();
+        let mut world = placed_dropper(&mut level, &mut ticks, Direction::Up);
+        let state = world.block_state(POS);
+        dispense_from(&mut world, POS, state);
+        let items: Vec<_> = world
+            .entity_ids()
+            .into_iter()
+            .filter_map(|id| world.entity(id))
+            .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+            .collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(*items[0].1, ItemStack::new(items::STONE, 1));
+        assert!((items[0].0.x - 0.5).abs() < 1.0e-9);
+        assert!((items[0].0.y - 65.2 + 0.125).abs() < 1.0e-9);
+        assert!((items[0].0.z - 0.5).abs() < 1.0e-9);
+    }
+
     #[test]
     fn the_random_slot_only_considers_non_empty_slots() {
         let below = POS.below();

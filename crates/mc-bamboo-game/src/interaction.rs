@@ -313,7 +313,7 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 state,
                 except_initiator,
             } => {
-                // 容器里的东西没有掉落物，等打开着的菜单关掉后一起丢掉。
+                // 方块实体已经按 `dropContents` 掉过物品，这里只收掉打开着的菜单留下的记录。
                 container::on_block_destroyed(region, pos);
                 let except = initiator.filter(|_| except_initiator);
                 let event = LevelEvent::destroy_block(pos, state.0 as i32);
