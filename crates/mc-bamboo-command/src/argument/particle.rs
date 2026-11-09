@@ -82,12 +82,17 @@ fn encode_options(id: i32, entries: &[(String, Tag)]) -> Result<Vec<u8>, String>
         }
         "minecraft:effect" | "minecraft:instant_effect" => {
             // `SpellParticleOption`：颜色和缩放都有默认值。
-            let color = color(entries, "color").unwrap_or(-1);
-            write_i32(&mut out, color);
+            match field(entries, "color") {
+                Some(_) => write_i32(
+                    &mut out,
+                    rgb_color(entries, "color").ok_or("invalid color")?,
+                ),
+                None => write_i32(&mut out, -1),
+            }
             write_f32(&mut out, float(entries, "power").unwrap_or(1.0));
         }
         "minecraft:entity_effect" | "minecraft:flash" | "minecraft:tinted_leaves" => {
-            let color = color(entries, "color").ok_or("No key color")?;
+            let color = argb_color(entries, "color").ok_or("No key color")?;
             write_i32(&mut out, color);
         }
         "minecraft:sculk_charge" => {
@@ -181,11 +186,14 @@ fn write_dust(name: &str, entries: &[(String, Tag)], out: &mut Vec<u8>) -> Resul
     if name == "minecraft:dust_color_transition" {
         write_i32(
             out,
-            color(entries, "from_color").ok_or("No key from_color")?,
+            rgb_color(entries, "from_color").ok_or("No key from_color")?,
         );
-        write_i32(out, color(entries, "to_color").ok_or("No key to_color")?);
+        write_i32(
+            out,
+            rgb_color(entries, "to_color").ok_or("No key to_color")?,
+        );
     } else {
-        write_i32(out, color(entries, "color").ok_or("No key color")?);
+        write_i32(out, rgb_color(entries, "color").ok_or("No key color")?);
     }
     let scale = float(entries, "scale").ok_or("No key scale")?;
     if !(0.01..=4.0).contains(&scale) {
@@ -206,7 +214,7 @@ fn write_trail(entries: &[(String, Tag)], out: &mut Vec<u8>) -> Result<(), Strin
     for value in values {
         write_f64(out, number(value).ok_or("target is not a number")?);
     }
-    let color = color(entries, "color").ok_or("No key color")?;
+    let color = rgb_color(entries, "color").ok_or("No key color")?;
     write_i32(out, color);
     let duration = int(entries, "duration").ok_or("No key duration")?;
     write_varint(out, duration.max(0));
@@ -248,7 +256,8 @@ fn write_vibration(entries: &[(String, Tag)], out: &mut Vec<u8>) -> Result<(), S
     Ok(())
 }
 
-fn color(entries: &[(String, Tag)], name: &str) -> Option<i32> {
+/// `ExtraCodecs.RGB_COLOR_CODEC`：整数原样，或者三个 float 组成 alpha=255 的颜色。
+fn rgb_color(entries: &[(String, Tag)], name: &str) -> Option<i32> {
     let tag = field(entries, name)?;
     if let Some(value) = int_in(tag) {
         return Some(value);
@@ -256,17 +265,37 @@ fn color(entries: &[(String, Tag)], name: &str) -> Option<i32> {
     let Tag::List(values) = tag else {
         return None;
     };
-    // `RGB_COLOR_CODEC` 的列表形式严格是三个 float；`ARGB_COLOR_CODEC` 才是四个。
     if values.len() != 3 {
         return None;
     }
     let mut rgb = 0;
     for (index, value) in values.iter().enumerate() {
-        // `ARGB.colorFromFloat(1, r, g, b)`：每种通道 floor(x*255)，alpha 固定 255。
         let channel = ((number(value)? as f32) * 255.0).floor() as i32;
         rgb |= (channel & 0xff) << (16 - index * 8);
     }
     Some(0xff00_0000u32 as i32 | rgb)
+}
+
+/// `ExtraCodecs.ARGB_COLOR_CODEC`：整数原样，或者四个 float（alpha, r, g, b）。
+fn argb_color(entries: &[(String, Tag)], name: &str) -> Option<i32> {
+    let tag = field(entries, name)?;
+    if let Some(value) = int_in(tag) {
+        return Some(value);
+    }
+    let Tag::List(values) = tag else {
+        return None;
+    };
+    if values.len() != 4 {
+        return None;
+    }
+    // `Vector4f` 的第 4 个分量 w 是 alpha，前三个是 r/g/b。
+    let mut argb = 0;
+    let shifts = [16, 8, 0, 24];
+    for (value, shift) in values.iter().zip(shifts) {
+        let channel = ((number(value)? as f32) * 255.0).floor() as i32;
+        argb |= (channel & 0xff) << shift;
+    }
+    Some(argb)
 }
 
 fn float(entries: &[(String, Tag)], name: &str) -> Option<f32> {
@@ -404,6 +433,15 @@ mod tests {
     }
 
     #[test]
+    fn color_lists_follow_their_official_arity() {
+        // `entity_effect`/`flash`/`tinted_leaves` 用 ARGB（四个 float），dust/effect/trail 用 RGB（三个）。
+        assert!(parse_particle(&mut StringReader::new("entity_effect{color:[1,0,0]}")).is_err());
+        assert!(parse_particle(&mut StringReader::new("flash{color:[1,0,0,1]}")).is_ok());
+        assert!(parse_particle(&mut StringReader::new("dust{color:[1,0,0,1],scale:1}")).is_err());
+        assert!(parse_particle(&mut StringReader::new("effect{color:[1,0,0,1]}")).is_err());
+    }
+
+    #[test]
     fn unknown_particles_and_missing_options_report_the_official_keys() {
         let error = parse_particle(&mut StringReader::new("not_a_particle")).unwrap_err();
         assert_eq!(error.key, "particle.notFound");
@@ -450,6 +488,13 @@ mod oracle_tests {
             &[0x38, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x80, 0, 0],
         ),
         ("flash{color:0}", &[0x34, 0, 0, 0, 0]),
+        ("entity_effect{color:[1,0,0,1]}", &[0x1c, 0xff, 0xff, 0, 0]),
+        (
+            "entity_effect{color:[0.5,1,0,1]}",
+            &[0x1c, 0xff, 0x7f, 0xff, 0],
+        ),
+        ("flash{color:[1,0,0,0.5]}", &[0x34, 0x7f, 0xff, 0, 0]),
+        ("tinted_leaves{color:[1,0,0,1]}", &[0x2e, 0xff, 0xff, 0, 0]),
         ("tinted_leaves{color:16711680}", &[0x2e, 0, 0xff, 0, 0]),
         ("sculk_charge{roll:0.25}", &[0x30, 0x3e, 0x80, 0, 0]),
         ("shriek{delay:255}", &[0x73, 0xff, 0x01]),
