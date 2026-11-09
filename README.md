@@ -120,11 +120,13 @@ WebView2 的渲染进程不算在内。
   （升不升级都消耗这一个），等级 7 不收也不给，等级 8 时从下面给出一个骨粉，取走后清空。
   比较器读堆肥桶仍按方块状态里的等级，不看这张临时容器。
   投掷器被红石触发时从 9 格里按官方 `getRandomSlot` 挑一格，往朝向的容器里塞一件；
-  朝空气抛出时先取官方 `spawnItem` 的随机数，再发 1000 和 2000；九格都空时发 1001。
+  朝空气时按官方 `DefaultDispenseItemBehavior.spawnItem` 取速度随机数、生成物品实体，再发 1000 和 2000；九格都空时发 1001。
   发射器被红石触发时按官方 `DispenseItemBehavior` 发射
   （桶、骨粉、打火石、潜影盒、雕刻南瓜、凋灵骷髅头、玻璃瓶、水瓶、蜜脾、荧石、剪刀、装备，
   以及 `tnt_explodes` 为真时的 TNT），
   成功发 1000，失败发 1001，两种都再发朝向的 2000。空的发射器只发 1001。
+  默认抛出和塞不回发射器的余料都会在 `getDispensePosition` 生成真的物品实体：位置是方块中心沿朝向外 0.7 格，
+  速度取官方 `spawnItem` 的一个 `nextDouble` 和三个 `triangle`，这套随机数只取一次。
   TNT 生成点燃的实体并播放 `entity.tnt.primed`。箭、船、矿车、盔甲架和刷怪蛋仍见已知限制。
   目标正好是空漏斗时按官方规则给它排 8 刻冷却。
   比较器读容器时按官方 `getRedstoneSignalFromContainer` 算：箱子（含双箱）、陷阱箱、铜箱子、木桶、潜影盒、
@@ -427,7 +429,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
-| `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘，实体死亡和箱子填充还没接进游戏 |
+| `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸和可替换方块的破坏，实体死亡和箱子填充还没接进游戏 |
 | `crates/mc-bamboo-core` | 共用的基础类型：方块坐标、区块坐标、方向、玩家档案 |
 | `crates/mc-bamboo-auth` | 正版验证和协议加密：RSA 密钥对、AES/CFB8、serverId 哈希、问 session server |
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
@@ -454,8 +456,8 @@ protocol blocks world
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
 `worldgen` 还没接进游戏，只有开发工具依赖它；它依赖 `data`（官方导出的世界生成数据）和
 `blocks`（里面有官方的 `LegacyRandomSource`）。
-`loot` 也还没接进游戏，只有开发工具依赖它；它依赖 `data`（嵌入的战利品表 JSON）和
-`blocks`（随机源、方块状态）。
+`loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸和 `destroyBlock` 时调用；
+它依赖 `data`（嵌入的战利品表 JSON）和 `blocks`（随机源、方块状态）。
 
 ## 线程模型
 
