@@ -295,8 +295,7 @@ pub fn ban_date(millis: i64) -> String {
 /// 官方日期文本到毫秒。解析不了时返回 `None`，和官方 `SimpleDateFormat.parse`
 /// 失败后回到 `new Date()` / `null` 的宽松处理不同，见 README。
 pub fn parse_ban_date(text: &str) -> Option<i64> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 20 {
+    if !text.is_char_boundary(20) || text.len() < 20 {
         return None;
     }
     let number = |start: usize, end: usize| -> Option<i64> { text.get(start..end)?.parse().ok() };

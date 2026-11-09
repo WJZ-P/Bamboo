@@ -258,6 +258,7 @@ fn player_name(region: &Region, id: PlayerId) -> String {
 }
 
 /// 官方 `BanPlayerCommands` / `PardonCommand` 的 reason 组件。
+/// 有签名消息时和 `/say` 一样用客户端签过的文本。
 fn reason_message(entry: &BanEntry) -> Component {
     match &entry.reason {
         Some(reason) => Component::text(reason.clone()),
