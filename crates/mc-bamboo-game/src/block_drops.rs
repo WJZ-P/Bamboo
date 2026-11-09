@@ -40,6 +40,7 @@ pub(crate) fn drop_broken_block(
     });
     let view = ChunkLevel {
         chunks: &region.chunks,
+        weather: region.block_weather,
     };
     let params = BlockDropParams {
         state,
@@ -118,11 +119,12 @@ pub(crate) fn explosion_loot(
     chunks: &ChunkStore,
     sequences: &mc_bamboo_loot::RandomSequences,
     fallback: &dyn mc_bamboo_blocks::random::RandomSource,
+    weather: mc_bamboo_blocks::BlockWeather,
     state: BlockState,
     pos: BlockPos,
     block_entity: Option<BlockEntityView>,
 ) -> Vec<ItemStack> {
-    let view = ChunkLevel { chunks };
+    let view = ChunkLevel { chunks, weather };
     let params = BlockDropParams {
         state,
         pos: (pos.x, pos.y, pos.z),
@@ -148,12 +150,13 @@ fn pop_loot_stack(world: &mut World, pos: BlockPos, stack: LootStack) {
     world.pop_resource(pos, loot_stacks::loot_stack(&stack));
 }
 
-/// 战利品条件要问的世界。群系、天气和亮度没有，问到就让求值报不支持。
+/// 战利品条件要问的世界。天气接上了，群系和亮度还没有，问到就让求值报不支持。
 ///
-/// The world loot conditions can ask. Biome, weather, and light are absent, so a
-/// condition that needs them fails as unsupported.
+/// The world loot conditions can ask. Weather is wired up; biome and light still
+/// fail as unsupported.
 pub(crate) struct ChunkLevel<'a> {
     pub(crate) chunks: &'a ChunkStore,
+    pub(crate) weather: mc_bamboo_blocks::BlockWeather,
 }
 
 impl LevelView for ChunkLevel<'_> {
@@ -174,11 +177,11 @@ impl LevelView for ChunkLevel<'_> {
     }
 
     fn is_raining(&self) -> Option<bool> {
-        None
+        Some(self.weather.is_raining())
     }
 
     fn is_thundering(&self) -> Option<bool> {
-        None
+        Some(self.weather.is_thundering())
     }
 
     fn day_time(&self) -> Option<i64> {

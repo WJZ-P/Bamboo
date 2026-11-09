@@ -20,7 +20,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::GameMode,
 };
-use mc_bamboo_world::{MIN_Y, store::ChunkStore};
+use mc_bamboo_world::{MIN_Y, flat, store::ChunkStore};
 
 use super::{BlockChanges, MAX_Y};
 use crate::{
@@ -44,6 +44,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) entities: &'a mut Entities,
     pub(crate) loot_sequences: &'a mc_bamboo_loot::RandomSequences,
     pub(crate) block_rules: BlockGameRules,
+    /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
+    pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
     pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
 }
 
@@ -167,6 +169,39 @@ impl Level for RegionLevel<'_> {
 
     fn block_game_rules(&self) -> BlockGameRules {
         self.block_rules
+    }
+
+    fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
+        self.block_weather
+    }
+
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：读区块里算好的真实高度图。
+    fn heightmap_y(&self, pos: BlockPos) -> i32 {
+        self.chunks
+            .heightmap_y(pos)
+            .unwrap_or(mc_bamboo_world::MIN_Y - 1)
+    }
+
+    /// 群系注册表 ID 来自区块的调色板，温度按官方 `Biome.getTemperature` 算。
+    fn precipitation_facts(&self, pos: BlockPos) -> mc_bamboo_blocks::PrecipitationFacts {
+        use mc_bamboo_worldgen::biome_temperature as biome;
+        let id = self.chunks.biome_at(pos).unwrap_or(0) as i32;
+        let climate = biome::BiomeClimate::of(id);
+        let warm = climate.warm_enough_to_rain(pos.x, pos.y, pos.z, flat::SEA_LEVEL);
+        mc_bamboo_blocks::PrecipitationFacts {
+            precipitation: match biome::precipitation_at(
+                climate,
+                pos.x,
+                pos.y,
+                pos.z,
+                flat::SEA_LEVEL,
+            ) {
+                biome::Precipitation::None => mc_bamboo_blocks::Precipitation::None,
+                biome::Precipitation::Rain => mc_bamboo_blocks::Precipitation::Rain,
+                biome::Precipitation::Snow => mc_bamboo_blocks::Precipitation::Snow,
+            },
+            warm_enough_to_rain: warm,
+        }
     }
 
     /// `getBlockContainer`：方块是容器时给它建一张槽位表。双箱按 `CompoundContainer`
@@ -310,6 +345,7 @@ impl Level for RegionLevel<'_> {
                 containers: self.containers,
                 sequences: self.loot_sequences,
                 random: self.random,
+                weather: self.block_weather,
             },
             pos,
         );
@@ -342,6 +378,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
+            self.block_weather,
             state,
             pos,
             block_entity,
@@ -355,6 +392,7 @@ impl Level for RegionLevel<'_> {
             self.chunks,
             self.loot_sequences,
             self.random.source(),
+            self.block_weather,
             state,
             pos,
             block_entity,

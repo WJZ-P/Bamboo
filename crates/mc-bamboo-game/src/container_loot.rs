@@ -83,6 +83,10 @@ pub(crate) struct Unpack<'a> {
     pub containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
     pub sequences: &'a RandomSequences,
     pub random: &'a LevelRandom,
+    /// 战利品条件 `weather_check` 读的天气。
+    ///
+    /// The weather the `weather_check` loot condition reads.
+    pub weather: mc_bamboo_blocks::BlockWeather,
 }
 
 /// 把一张表的产出写进容器槽位。
@@ -121,6 +125,7 @@ pub(crate) fn unpack(state: Unpack<'_>, pos: BlockPos) -> bool {
     let seed = std::mem::replace(&mut entry.loot_table_seed, 0);
     let view = ChunkLevel {
         chunks: state.chunks,
+        weather: state.weather,
     };
     let params = ChestParams {
         pos: (pos.x, pos.y, pos.z),
@@ -158,6 +163,7 @@ pub(crate) fn unpack_at(region: &mut Region, pos: BlockPos) {
         containers: &mut region.containers,
         sequences: &region.loot_sequences,
         random: &region.random,
+        weather: region.block_weather,
     };
     unpack(state, pos);
 }

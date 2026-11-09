@@ -19,6 +19,7 @@ mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
 mc-bamboo-recipes.workspace = true
 mc-bamboo-world.workspace = true
+mc-bamboo-worldgen.workspace = true
 md-5.workspace = true
 rsa.workspace = true
 serde_json.workspace = true

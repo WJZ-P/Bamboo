@@ -29,6 +29,7 @@
 //! 见 [`density::Function::axes`]）。
 
 pub mod biome;
+pub mod biome_temperature;
 pub mod climate;
 pub mod density;
 pub mod interval;

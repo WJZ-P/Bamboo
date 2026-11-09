@@ -38,6 +38,7 @@ pub mod random_tick;
 pub mod shape;
 pub mod state;
 pub mod ticks;
+pub mod weather;
 pub mod world;
 
 #[cfg(test)]
@@ -67,8 +68,9 @@ pub use level::{
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
-pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk};
+pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk, tick_thunder};
 pub use shape::{Aabb, Boxes, CollisionContext, EntityContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
 pub use ticks::{BlockTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
+pub use weather::{BlockWeather, Precipitation, PrecipitationFacts};
 pub use world::World;

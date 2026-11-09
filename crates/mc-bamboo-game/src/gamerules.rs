@@ -104,6 +104,7 @@ impl GameRuleSet {
             spread_vines: self.bool(gamerules::SPREAD_VINES),
             max_block_modifications: self.int(gamerules::MAX_BLOCK_MODIFICATIONS),
             max_snow_accumulation_height: self.int(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
+            spawn_mobs: self.bool(gamerules::SPAWN_MOBS),
         }
     }
 

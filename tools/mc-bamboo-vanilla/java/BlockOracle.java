@@ -257,7 +257,7 @@ import sun.misc.Unsafe;
  * 运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
  *
  *     java -cp <target/vanilla 下全部 jar> BlockOracle.java [--seed S] [--cases N] [--only X] [--avoid A,B] [--untick A,B] [--case I]
- *                 [--explain]
+ *                 [--explain] [--weather clear|rain|thunder]
  *
  *     --seed S    默认 1。参数相同时两次运行的输出逐字节相同。
  *     --cases N   题目总数，默认 10000。题目在 place、use、destroy、tick、flow、item 之间按 3:3:1:1:1:1 轮转，方块和物品也是
@@ -277,6 +277,8 @@ import sun.misc.Unsafe;
  *     --case I    只跑第 I 题，用来重现一个失败的场景。--seed、--only、--avoid 和 --untick 要和原来相同。
  *                 显式活塞题的 id 从 1000000 开始，也能这样单独跑。
  *     --explain   每个 case 行多一个 text 字段，把场景和变化写成人能读的文字。它不属于格式，读取时忽略。
+ *     --weather   假世界的天气，默认 clear。rain 把 rainLevel 设成 1，thunder 再把 thunderLevel 设成 1。
+ *                 header 多一个 weather 字段，Rust 那边用同样的强度重放；晴天题目不变。
  *
  * JDK 26 启动时会警告修改了 final 字段，这是给假世界补字段造成的，没有影响。加 --enable-final-field-mutation=ALL-UNNAMED 能消除，
  * 这个选项 Java 25 不认识，所以启动命令里没有加。
@@ -396,8 +398,10 @@ import sun.misc.Unsafe;
  *
  *     玩家      创造模式，没有任何权限，canUseGameMasterBlocks 是假，所以 GameMaster 方块放不了也破坏不了。没有在飞。
  *               交互距离是创造模式的 5 格。物品栏里只有两只手上的物品。
- *     世界      主世界，平原，白天，晴天，普通难度，默认游戏规则，世界边界是默认值。游戏时间从 header 的 gameTime 开始，
+ *     世界      主世界，平原，白天，普通难度，默认游戏规则，世界边界是默认值。天气由 --weather 决定，
+ *               强度是稳定值（不跑 advanceWeatherCycle）。游戏时间从 header 的 gameTime 开始，
  *               settle 每走一刻加一，flow 题每往后跑一步也加一。
+ *               MOTION_BLOCKING 高度图由 FakeChunk 从最高层往下扫场景里的方块得出，群系恒为平原。
  *     流体形状  FlowingFluid.getShape 按流体状态缓存，第一次调用时的位置决定高度。启动时在上面没有同种流体的位置调用过，
  *               所以水源和岩浆源的形状是它们自己的高度 8/9。
  *     亮度      getRawBrightness、getBrightness 恒为 15。
@@ -491,6 +495,7 @@ public final class BlockOracle {
                         new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
                 Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8), OUTPUT_BUFFER)) {
             Official official = Official.load(resources);
+            official.weather = options.weather;
             official.applyRules(options.rules);
             new Oracle(official, options, out, log).run();
         }
@@ -612,9 +617,10 @@ public final class BlockOracle {
     }
 
     private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, Set<String> unrandom, int single,
-            boolean explain, Map<String, String> rules) {
+            boolean explain, Map<String, String> rules, String weather) {
         private static final String USAGE = "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>]"
-                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain] [--rule name=value]";
+                + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain] [--rule name=value]"
+                + " [--weather clear|rain|thunder]";
 
         static Options parse(String[] args) {
             long seed = 1;
@@ -626,6 +632,7 @@ public final class BlockOracle {
             int single = -1;
             boolean explain = false;
             Map<String, String> rules = new LinkedHashMap<>();
+            String weather = "clear";
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seed" -> seed = Long.parseLong(value(args, ++i));
@@ -636,6 +643,7 @@ public final class BlockOracle {
                     case "--unrandom" -> unrandom = Set.of(value(args, ++i).split(","));
                     case "--case" -> single = Integer.parseInt(value(args, ++i));
                     case "--explain" -> explain = true;
+                    case "--weather" -> weather = value(args, ++i);
                     case "--rule" -> {
                         String pair = value(args, ++i);
                         int split = pair.indexOf('=');
@@ -647,7 +655,10 @@ public final class BlockOracle {
                     default -> throw new IllegalArgumentException(USAGE);
                 }
             }
-            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain, rules);
+            if (!List.of("clear", "rain", "thunder").contains(weather)) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain, rules, weather);
         }
 
         private static String value(String[] args, int index) {
@@ -679,6 +690,8 @@ public final class BlockOracle {
         final GameRules gameRules = new GameRules(FeatureFlags.DEFAULT_FLAGS);
         /** 题面写了 `random_tick_speed` 时，chunk 题用这个速度，不再从 `CHUNK_SPEEDS` 里抽。 */
         Integer fixedChunkSpeed;
+        /** 假世界的天气：clear、rain、thunder。 */
+        String weather = "clear";
         final WorldBorder border = new WorldBorder();
         final RandomSource soundSeeds = RandomSource.create(0);
         final GameProfile profile = new GameProfile(new UUID(0, 1), "Oracle");
@@ -1371,6 +1384,14 @@ public final class BlockOracle {
             set(ServerLevel.class, level, "players", new ArrayList<ServerPlayer>());
             // BucketItem 经过 mayInteract，它直接读这个字段问出生点保护。
             set(ServerLevel.class, level, "server", official.server);
+            // 官方 `Level.isRaining()` 看 rainLevel，`isThundering()` 看两个强度的乘积。
+            // 题目里的天气是稳定状态，四个渐变字段全设成同一个固定值。
+            float rain = official.weather.equals("clear") ? 0.0F : 1.0F;
+            float thunder = official.weather.equals("thunder") ? 1.0F : 0.0F;
+            set(Level.class, level, "rainLevel", rain);
+            set(Level.class, level, "oRainLevel", rain);
+            set(Level.class, level, "thunderLevel", thunder);
+            set(Level.class, level, "oThunderLevel", thunder);
             return level;
         }
 
@@ -4960,6 +4981,7 @@ public final class BlockOracle {
             line.append(",\"maxChainedUpdates\":").append(MAX_CHAINED_UPDATES);
             line.append(",\"gameTime\":").append(GAME_TIME);
             line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max);
+            line.append(",\"weather\":\"").append(options.weather).append('"');
             if (!options.rules.isEmpty()) {
                 line.append(",\"rules\":{");
                 boolean firstRule = true;

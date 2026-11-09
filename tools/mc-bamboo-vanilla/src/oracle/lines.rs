@@ -54,6 +54,15 @@ pub struct Header {
     /// Game rules overridden for this batch. Empty means the official defaults.
     #[serde(default)]
     pub rules: BTreeMap<String, String>,
+    /// 假世界的天气：`clear`、`rain` 或 `thunder`。旧的题面没有这一项时是晴天。
+    ///
+    /// The fake level's weather. A batch without this field is clear weather.
+    #[serde(default = "default_weather")]
+    pub weather: String,
+}
+
+fn default_weather() -> String {
+    "clear".to_owned()
 }
 
 #[derive(Debug, Deserialize)]

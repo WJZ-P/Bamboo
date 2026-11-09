@@ -16,7 +16,7 @@ use mc_bamboo_data::{block_of_state, facts, registries::block_entity_type, state
 
 use crate::{
     MIN_Y, WORLD_HEIGHT,
-    chunk::{Chunk, Section},
+    chunk::{Chunk, HeightmapKind, Section},
     flat,
     light::{Chunks, LevelLight, LightChanges, SectionPos, write_block},
 };
@@ -127,6 +127,30 @@ impl ChunkStore {
         Some(
             self.chunk(pos.chunk())
                 .block(local(pos.x), pos.y, local(pos.z)),
+        )
+    }
+
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`，读区块里一直维护着的高度图。
+    /// 高度超出世界时返回 `None`。
+    pub fn heightmap_y(&self, pos: BlockPos) -> Option<i32> {
+        if !is_inside_world(pos.y) {
+            return None;
+        }
+        Some(self.chunk(pos.chunk()).heightmap_y(
+            HeightmapKind::MotionBlocking,
+            local(pos.x),
+            local(pos.z),
+        ))
+    }
+
+    /// 这一格所在 quart 位置的群系注册表 ID。高度超出世界时返回 `None`。
+    pub fn biome_at(&self, pos: BlockPos) -> Option<u32> {
+        if !is_inside_world(pos.y) {
+            return None;
+        }
+        Some(
+            self.chunk(pos.chunk())
+                .biome_at(local(pos.x), pos.y, local(pos.z)),
         )
     }
 

@@ -44,6 +44,8 @@ pub struct BlockGameRules {
     ///
     /// `ServerLevel.tickPrecipitation` reads this while it is raining.
     pub max_snow_accumulation_height: i32,
+    /// `GameRules.SPAWN_MOBS`。`ServerLevel.tickThunder` 在雷击命中时读它。
+    pub spawn_mobs: bool,
 }
 
 impl BlockGameRules {
@@ -64,6 +66,7 @@ impl BlockGameRules {
             spread_vines: bool_default(gamerules::SPREAD_VINES),
             max_block_modifications: int_default(gamerules::MAX_BLOCK_MODIFICATIONS),
             max_snow_accumulation_height: int_default(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
+            spawn_mobs: bool_default(gamerules::SPAWN_MOBS),
         }
     }
 }
@@ -146,6 +149,7 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "water_source_conversion" => rules.water_source_conversion = value,
         "lava_source_conversion" => rules.lava_source_conversion = value,
         "spread_vines" => rules.spread_vines = value,
+        "spawn_mobs" => rules.spawn_mobs = value,
         _ => {}
     }
 }
@@ -211,6 +215,7 @@ mod tests {
             rules.max_snow_accumulation_height,
             RULES[gamerules::MAX_SNOW_ACCUMULATION_HEIGHT].default_int
         );
+        assert_eq!(rules.spawn_mobs, RULES[gamerules::SPAWN_MOBS].default_bool);
     }
 
     #[test]

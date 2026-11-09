@@ -1,5 +1,6 @@
 // 这个文件由 mc-bamboo-vanilla 生成，不要手动修改。
 
+pub mod biomes;
 pub mod block_classes;
 pub mod block_maps;
 pub mod block_transformers;

@@ -89,6 +89,20 @@ pub struct Extracted {
     /// `BuiltInRegistries.GAME_RULE`，按注册表 ID。旧的提取结果没有这一项。
     #[serde(default)]
     pub game_rules: Vec<GameRuleFact>,
+    /// 群系的气候设置，按注册表 ID。由单独的提取器写进 `biomes.json`。
+    #[serde(default)]
+    pub biomes: Vec<BiomeClimateFact>,
+}
+
+/// 一个群系的气候设置。字段和 `BiomeClimateExtractor.java` 的 JSON 对应。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiomeClimateFact {
+    pub id: usize,
+    pub name: String,
+    pub has_precipitation: bool,
+    pub temperature: f32,
+    pub frozen: bool,
 }
 
 /// 一条游戏规则。字段和 `Extractor.gameRules` 的 JSON 对应。
@@ -1062,6 +1076,8 @@ pub struct VersionData {
     pub crafting_remainders: Vec<Option<(i32, i32, String)>>,
     /// `BuiltInRegistries.GAME_RULE`，按注册表 ID。
     pub game_rules: Vec<GameRuleFact>,
+    /// 群系的气候设置，按 `minecraft:worldgen/biome` 注册表 ID。
+    pub biomes: Vec<BiomeClimateFact>,
 }
 
 pub fn run(
@@ -1097,10 +1113,19 @@ fn read_version_data(
     let extracted_path = work_dir.join("extracted.json");
     run_extractor(java, work_dir, workspace_root, &extracted_path)?;
 
-    let extracted: Extracted = read_json(&extracted_path)?;
+    let mut extracted: Extracted = read_json(&extracted_path)?;
+    let biomes_path = work_dir.join("biomes.json");
+    run_biome_climate_extractor(java, work_dir, workspace_root, &biomes_path)?;
+    extracted.biomes = read_json(&biomes_path)?;
     let reports = work_dir.join(GENERATED_DIR).join("reports");
     let packets = read_packet_report(&reports.join("packets.json"))?;
     let builtin_registries = read_registry_report(&reports.join("registries.json"))?;
+    let biome_names = extracted
+        .synced_registries
+        .iter()
+        .find(|registry| registry.name == "minecraft:worldgen/biome")
+        .ok_or("同步注册表里没有 minecraft:worldgen/biome")?;
+    check_biome_climates(&extracted.biomes, &biome_names.entries)?;
     check_registry_order(
         &builtin_registries,
         BLOCK_REGISTRY,
@@ -1159,7 +1184,50 @@ fn read_version_data(
         jukebox_songs: extracted.jukebox_songs,
         worldgen: extracted.worldgen,
         game_rules: extracted.game_rules,
+        biomes: extracted.biomes,
     })
+}
+
+/// 群系气候表必须和注册表 ID、名字逐项对齐，否则降水类型会查错群系。
+fn check_biome_climates(climates: &[BiomeClimateFact], names: &[String]) -> Result<(), String> {
+    if climates.len() != names.len() {
+        return Err(format!(
+            "群系气候表有 {} 项，注册表有 {} 项",
+            climates.len(),
+            names.len()
+        ));
+    }
+    for (index, (climate, name)) in climates.iter().zip(names).enumerate() {
+        if climate.id != index || climate.name != *name {
+            return Err(format!(
+                "群系气候表第 {index} 项是 {} (id {})，注册表是 {name}",
+                climate.name, climate.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_biome_climate_extractor(
+    java: &str,
+    work_dir: &Path,
+    workspace_root: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let source = workspace_root.join("tools/mc-bamboo-vanilla/java/BiomeClimateExtractor.java");
+    let status = Command::new(java)
+        .current_dir(work_dir)
+        .arg("-cp")
+        .arg(classpath(work_dir)?)
+        .arg(source)
+        .arg(output)
+        .status()
+        .map_err(|error| format!("无法运行 {java}：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("BiomeClimateExtractor.java 退出失败：{status}"))
+    }
 }
 
 /// 运行官方的数据生成器。它同时会把依赖库解压到工作目录里。

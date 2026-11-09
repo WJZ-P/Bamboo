@@ -636,6 +636,11 @@ impl<'a> World<'a> {
         self.fluid_state(pos).is_water()
     }
 
+    /// 这次操作背后的存储。天气查询要问高度图和群系，只有这些只读查询用得到。
+    pub fn level(&self) -> &dyn Level {
+        self.level
+    }
+
     /// `getMinY`。
     pub fn min_y(&self) -> i32 {
         self.level.min_y()
@@ -1044,14 +1049,33 @@ impl<'a> World<'a> {
         self.brightness(LightLayer::Block, pos)
     }
 
-    /// `isRaining`。这个世界永远是晴天。
-    pub const fn is_raining(&self) -> bool {
-        false
+    /// `Level.isRaining()`：雨强超过 0.2 才算下雨。
+    pub fn is_raining(&self) -> bool {
+        self.level.block_weather().is_raining()
     }
 
-    /// `isRainingAt`。这个世界永远是晴天。
-    pub const fn is_raining_at(&self, _pos: BlockPos) -> bool {
-        false
+    /// `Level.isThundering()`：雷暴强度和雨强的乘积超过 0.9 才算打雷。
+    pub fn is_thundering(&self) -> bool {
+        self.level.block_weather().is_thundering()
+    }
+
+    /// `Level.isRainingAt(pos)`：下雨、看得见天、这一格不低于 MOTION_BLOCKING 高度图，
+    /// 而且群系在这一格的降水类型是雨（雪不算）。
+    pub fn is_raining_at(&self, pos: BlockPos) -> bool {
+        if !self.is_raining() || !self.level.can_see_sky(pos) {
+            return false;
+        }
+        if self.level.heightmap_y(pos) > pos.y {
+            return false;
+        }
+        self.level.precipitation_facts(pos).precipitation == crate::weather::Precipitation::Rain
+    }
+
+    /// `FireBlock.isNearRain(pos)`：这一格和四个水平邻居里有一格在下 RAIN。
+    pub fn is_near_rain(&self, pos: BlockPos) -> bool {
+        [pos, pos.west(), pos.east(), pos.north(), pos.south()]
+            .into_iter()
+            .any(|at| self.is_raining_at(at))
     }
 
     /// `getDifficulty().getId()`。这个世界没有难度设置，客户端收不到难度时显示普通，这里也按普通算。

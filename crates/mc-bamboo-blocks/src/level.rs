@@ -134,6 +134,44 @@ pub trait Level {
         BlockGameRules::vanilla()
     }
 
+    /// 方块逻辑读到的天气快照。默认是晴天，权威副本在世界线程的 `Global` 上。
+    ///
+    /// The weather snapshot block logic reads. The default is clear weather; the
+    /// authoritative copy lives on the world thread's `Global`.
+    fn block_weather(&self) -> crate::weather::BlockWeather {
+        crate::weather::BlockWeather::CLEAR
+    }
+
+    /// `BlockAndLightGetter.canSeeSky(pos)`：天空光是 15 就看得见天。
+    ///
+    /// `isRainingAt` 用得到。默认实现读上一轮算好的天空光，和官方一致。
+    fn can_see_sky(&self, pos: BlockPos) -> bool {
+        self.brightness(LightLayer::Sky, pos) >= 15
+    }
+
+    /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：这一列挡运动的最高方块上面一格。
+    /// 整列都是空气时是世界底部下面一格。
+    ///
+    /// `isRainingAt` 和 `tickPrecipitation` 用得到。有真实高度图的实现应该覆盖它。
+    fn heightmap_y(&self, pos: BlockPos) -> i32 {
+        for y in (self.min_y()..=self.max_y()).rev() {
+            let state = self.block_state(BlockPos::new(pos.x, y, pos.z));
+            if state.is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+                || !state.fluid().is_empty()
+            {
+                return y + 1;
+            }
+        }
+        self.min_y() - 1
+    }
+
+    /// 这一格所在群系的降水条件，`Biome.getPrecipitationAt(pos, seaLevel)` 加上
+    /// `Biome.warmEnoughToRain(pos, seaLevel)`。默认平原（测试用），真实实现读区块的
+    /// 群系调色板再按 `mc-bamboo-worldgen` 算温度。
+    fn precipitation_facts(&self, _pos: BlockPos) -> crate::weather::PrecipitationFacts {
+        crate::weather::PrecipitationFacts::PLAINS
+    }
+
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。
     ///
     /// 双箱已经按官方 `CompoundContainer` 的顺序合并成一张表。这一格不是容器方块时
