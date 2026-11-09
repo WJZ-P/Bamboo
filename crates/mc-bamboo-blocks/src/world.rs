@@ -779,10 +779,17 @@ impl<'a> World<'a> {
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
     ) -> bool {
         // 官方 `RandomizableContainerBlockEntity.getItem/removeItem/setItem/isEmpty`
-        // 都先 `unpackLootTable(null)`；漏斗、投掷器和发射器走这条路。
+        // 都先 `unpackLootTable(null)`；漏斗、投掷器和发射器走这条路。双箱两半
+        // 合成一张 `CompoundContainer`，两半都要解包。
         // Vanilla's `getItem/removeItem/setItem/isEmpty` all unpack the loot table first;
-        // hoppers, droppers and dispensers use this path.
+        // hoppers, droppers and dispensers use this path. A double chest combines both
+        // halves, so both are unpacked.
         self.level.unpack_loot_table(pos);
+        for other in self.level.container_positions(pos) {
+            if other != pos {
+                self.level.unpack_loot_table(other);
+            }
+        }
         if self
             .block_state(pos)
             .is_a(mc_bamboo_data::BlockAncestor::ComposterBlock)
