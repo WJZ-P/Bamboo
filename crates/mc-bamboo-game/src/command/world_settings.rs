@@ -70,6 +70,28 @@ pub(crate) fn set_difficulty(
     Ok(())
 }
 
+/// 反馈世界种子。官方 `SeedCommand` 把 `String.valueOf(seed)` 做成可点击复制的
+/// 组件，不广播给其他 OP。
+pub(crate) fn seed(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    parsed: &ParsedCommand,
+) -> Result<(), CommandFail> {
+    let _ = parsed;
+    let text = global.state().seed.to_string();
+    feedback::success(
+        region,
+        id,
+        Component::translate(
+            "commands.seed.success",
+            [Component::copy_on_click(&text).into()],
+        ),
+        false,
+    );
+    Ok(())
+}
+
 /// 修改默认游戏模式。官方 `setMode` 先写默认值，再在 `force-gamemode` 为真时
 /// 把在线玩家切成新模式；专用服务器默认不强制，所以这里只在那个常量为真时改人。
 pub(crate) fn default_gamemode(
@@ -255,6 +277,27 @@ mod tests {
                 .is_err()
         );
         assert!(commands().graph.parse("defaultgamemode nope", 2).is_err());
+    }
+
+    #[test]
+    fn seed_prints_a_copyable_zero_and_needs_level_two() {
+        let (mut global, mut region, id, sink) = world();
+        command::on_command(&mut global, &mut region, id, "seed", None);
+        region.links.flush();
+        let sent = packets(&sink.0.lock().unwrap());
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, SystemChat::ID);
+        let content = mc_bamboo_protocol::components::text::read(
+            &mut mc_bamboo_protocol::components::cursor::Cursor::new(&sent[0].1),
+        )
+        .unwrap();
+        let text = format!("{:?}", content.tag());
+        assert!(text.contains("commands.seed.success"), "{text}");
+        assert!(text.contains("copy_to_clipboard"), "{text}");
+        assert!(text.contains("chat.square_brackets"), "{text}");
+        assert!(text.contains("String(\"0\")"), "{text}");
+        assert!(commands().graph.parse("seed", 0).is_err());
+        assert!(commands().graph.parse("seed", 2).is_ok());
     }
 
     #[test]

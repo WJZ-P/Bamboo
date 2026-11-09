@@ -8,7 +8,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, NodeKind, StringKind, permis
 use serde_json::Value;
 
 /// 本分支新增的根节点，按名字排列。
-const ROOTS: &[&str] = &["difficulty", "defaultgamemode"];
+const ROOTS: &[&str] = &["defaultgamemode", "difficulty", "seed"];
 
 /// 从官方报告里取一个根节点。
 fn official(name: &str) -> Value {

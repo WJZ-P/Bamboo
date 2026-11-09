@@ -81,6 +81,7 @@ pub(crate) fn build() -> Commands {
     register_time(&mut builder, root);
     register_difficulty(&mut builder, root);
     register_default_gamemode(&mut builder, root);
+    register_seed(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -346,6 +347,11 @@ fn register_difficulty(builder: &mut Builder, root: usize) {
     for name in ["peaceful", "easy", "normal", "hard"] {
         builder.bind_literal(difficulty, name, world_settings::difficulty_literal);
     }
+}
+
+fn register_seed(builder: &mut Builder, root: usize) {
+    let seed = builder.literal(root, "seed", permission::GAMEMASTERS);
+    builder.run(seed, world_settings::seed);
 }
 
 fn register_default_gamemode(builder: &mut Builder, root: usize) {
