@@ -7,7 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, gamerule, items, players, playsound, teleport, text, time, title,
+    CommandFn, Commands, blocks, gamerule, items, particle, players, playsound, teleport, text,
+    time, title,
 };
 
 struct Builder {
@@ -76,6 +77,7 @@ pub(crate) fn build() -> Commands {
     register_list(&mut builder, root);
     register_playsound(&mut builder, root);
     register_msg(&mut builder, root);
+    register_particle(&mut builder, root);
     register_say(&mut builder, root);
     register_setblock(&mut builder, root);
     register_tellraw(&mut builder, root);
@@ -236,6 +238,43 @@ fn register_msg(builder: &mut Builder, root: usize) {
 
 /// `PlaySoundCommand.register`：`sound` 用 `ResourceLocationArgument` 加
 /// `minecraft:available_sounds` 自定义补全；11 个来源各挂同一条参数链。
+/// `ParticleCommand.register`：`name` 后面 pos/delta/speed/count/force|normal/viewers。
+fn register_particle(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "particle", permission::GAMEMASTERS);
+    let name = builder.argument(command, "name", ArgumentType::Particle, 0);
+    builder.run(name, particle::normal);
+    let pos = builder.argument(name, "pos", ArgumentType::Vec3, 0);
+    builder.run(pos, particle::normal);
+    let spread = builder.argument(pos, "delta", ArgumentType::Vec3, 0);
+    let speed = builder.argument(
+        spread,
+        "speed",
+        ArgumentType::Float {
+            min: 0.0,
+            max: f32::MAX,
+        },
+        0,
+    );
+    let count = builder.argument(
+        speed,
+        "count",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(count, particle::normal);
+    let force_action: CommandFn = particle::force;
+    let normal_action: CommandFn = particle::normal;
+    for (mode, action) in [("force", force_action), ("normal", normal_action)] {
+        let branch = builder.literal(count, mode, 0);
+        builder.run(branch, action);
+        let viewers = builder.argument(branch, "viewers", players_argument(), 0);
+        builder.run(viewers, action);
+    }
+}
+
 fn register_playsound(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "playsound", permission::GAMEMASTERS);
     let sound = builder.argument(command, "sound", ArgumentType::ResourceLocation, 0);

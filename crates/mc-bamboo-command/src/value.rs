@@ -375,6 +375,14 @@ impl ItemPredicateInput {
     }
 }
 
+/// 官方 `ParticleArgument` 的结果：类型 ID、注册名，以及 `ParticleTypes.STREAM_CODEC` 的选项字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticleInput {
+    pub id: i32,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 /// 官方 `MessageArgument.Message`。`text` 是整段原文，`parts` 是选择器所在的位置。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
@@ -410,6 +418,8 @@ pub enum Value {
     Message(Message),
     /// 官方 `ComponentArgument` 解析出的 SNBT 标签，交给网络层的组件 `Codec` 校验。
     Component(Tag),
+    /// 官方 `ParticleArgument` 的结果：注册表 ID、名字和选项的线上字节。
+    Particle(ParticleInput),
     GameMode(GameMode),
     EntityAnchor(EntityAnchor),
     Time(i32),
@@ -524,6 +534,13 @@ impl Value {
     pub fn as_component(&self) -> Option<&Tag> {
         match self {
             Self::Component(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_particle(&self) -> Option<&ParticleInput> {
+        match self {
+            Self::Particle(value) => Some(value),
             _ => None,
         }
     }

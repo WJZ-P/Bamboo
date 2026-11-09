@@ -23,8 +23,8 @@ pub use identifier::Identifier;
 pub use reader::StringReader;
 pub use value::{
     BlockPredicateInput, BlockStateInput, Coordinates, EntityAnchor, EntitySelector, GameMode,
-    ItemInput, ItemPredicateInput, Message, MessagePart, NumberBounds, Rotation, SortOrder, Value,
-    WorldCoordinate, short_name, wrap_degrees,
+    ItemInput, ItemPredicateInput, Message, MessagePart, NumberBounds, ParticleInput, Rotation,
+    SortOrder, Value, WorldCoordinate, short_name, wrap_degrees,
 };
 
 /// 官方权限等级：所有玩家、管理员、游戏管理员、管理员、服主。

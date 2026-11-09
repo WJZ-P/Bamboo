@@ -9,6 +9,7 @@ pub mod coordinates;
 pub mod entity;
 pub mod item;
 pub mod message;
+pub mod particle;
 pub mod primitives;
 
 use crate::{
@@ -61,6 +62,8 @@ pub enum ArgumentType {
     Message,
     /// 官方 `ComponentArgument`：一个 SNBT 文本组件。
     Component,
+    /// 官方 `ParticleArgument`：粒子类型名，后面可以跟一段 SNBT 选项。
+    Particle,
     /// 官方 `IdentifierArgument`。时间标记用它，不查注册表。
     ///
     /// Official `IdentifierArgument`. Time markers use it and do not look up a registry.
@@ -96,6 +99,7 @@ impl ArgumentType {
             Self::ItemPredicate => "minecraft:item_predicate",
             Self::Message => "minecraft:message",
             Self::Component => "minecraft:component",
+            Self::Particle => "minecraft:particle",
             Self::ResourceLocation => "minecraft:resource_location",
             Self::Resource { .. } => "minecraft:resource",
         }
@@ -124,6 +128,7 @@ impl ArgumentType {
             Self::ItemPredicate => registry::ITEM_PREDICATE,
             Self::Message => registry::MESSAGE,
             Self::Component => registry::COMPONENT,
+            Self::Particle => registry::PARTICLE,
             Self::ResourceLocation => registry::RESOURCE_LOCATION,
             Self::Resource { .. } => registry::RESOURCE,
         }
@@ -180,6 +185,7 @@ impl ArgumentType {
             Self::ItemPredicate => item::parse_item_predicate(reader),
             Self::Message => message::parse_message(reader, allow_selectors),
             Self::Component => component::parse_component(reader),
+            Self::Particle => particle::parse_particle(reader),
             Self::ResourceLocation => parse_resource_location(reader),
             Self::Resource { registry } => parse_resource(reader, registry),
         }

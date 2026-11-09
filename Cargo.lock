@@ -1917,6 +1917,7 @@ dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",
+ "mc-bamboo-protocol",
  "uuid",
 ]
 

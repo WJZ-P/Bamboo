@@ -16,6 +16,7 @@ mod effects;
 mod feedback;
 mod gamerule;
 mod items;
+mod particle;
 mod players;
 mod playsound;
 mod select;
@@ -330,6 +331,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::ItemPredicate
         | ArgumentType::Message
         | ArgumentType::Component
+        | ArgumentType::Particle
         | ArgumentType::ResourceLocation => ArgumentProperties::None,
     }
 }

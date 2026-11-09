@@ -329,3 +329,53 @@ fn playsound_reports_failure_when_nobody_can_hear_it() {
                 && contains_ascii(&frame.body, "commands.playsound.failed"))
     );
 }
+
+#[test]
+fn particle_sends_a_level_particles_packet_to_nearby_players() {
+    use mc_bamboo_data::packets::play::clientbound;
+
+    let mut harness = Harness::new();
+    let source = harness.join("Kitten", 2);
+    harness.command(source, "particle flame");
+    harness.command(
+        source,
+        "particle dust{color:[1.0,0.0,0.0],scale:1.0} ~ ~1 ~ 0 0 0 1.0 1 force",
+    );
+    harness.tick();
+
+    let packets: Vec<_> = harness
+        .frames(source)
+        .into_iter()
+        .filter(|frame| frame.id == clientbound::LEVEL_PARTICLES)
+        .collect();
+    assert_eq!(packets.len(), 2);
+    assert_eq!(packets[0].body[0], 0x27, "flame 的注册表 ID");
+    assert_eq!(packets[1].body[0], 0x15, "dust 的注册表 ID");
+    assert_eq!(packets[1].body[9], 1, "force 写进 overrideLimiter");
+    assert!(harness.frames(source).is_empty());
+}
+
+#[test]
+fn particle_reports_failure_when_nobody_is_close_enough() {
+    use mc_bamboo_data::packets::play::clientbound;
+
+    let mut harness = Harness::new();
+    let source = harness.join("Kitten", 2);
+    harness.command(source, "particle flame 1000 100 1000");
+    harness.tick();
+
+    let frames = harness.frames(source);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.id == clientbound::LEVEL_PARTICLES)
+            .count(),
+        0
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.id == clientbound::SYSTEM_CHAT
+                && contains_ascii(&frame.body, "commands.particle.failed"))
+    );
+}

@@ -14,4 +14,5 @@ mc-bamboo-blocks.workspace = true
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 mc-bamboo-nbt.workspace = true
+mc-bamboo-protocol.workspace = true
 uuid.workspace = true
