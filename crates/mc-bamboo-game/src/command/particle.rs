@@ -22,13 +22,8 @@ use crate::{
     region::Region,
 };
 
-/// `Vec3Argument.vec3(false)` 用于 `delta`；`mc-bamboo-command` 的 `parse_vec3`
-/// 会居中整数，所以 delta 为零时直接用零向量，写了坐标时单独按无居中规则解析。
+/// 官方 `/particle` 的 `delta` 是 `vec3(false)`；空参数用零向量。
 fn delta(region: &Region, id: PlayerId, parsed: &ParsedCommand) -> Result<Vec3, CommandFail> {
-    if parsed.get("delta").is_none() {
-        return Ok(Vec3::new(0.0, 0.0, 0.0));
-    }
-    // 命令树里 delta 用的是 `ArgumentType::Vec3`（居中），这里的差异记在 README。
     effects::coordinates(region, id, parsed, "delta", Vec3::new(0.0, 0.0, 0.0))
 }
 

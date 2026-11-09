@@ -363,7 +363,7 @@ WebView2 的渲染进程不算在内。
   没有物品实体，丢出的物品会消失。鞘翅不能用，攻击其他玩家没有效果。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
   不是 JSON 文本组件。组件过一遍官方 `Codec`，`selector` 会展开成玩家名列表；Bamboo 还没有计分板和实体 NBT，
-  所以 `score`、`nbt` 和 `object` 按「查不到值」处理（空文本），`keybind` 暂按字面文本发。
+  所以 `score`、`nbt` 和 `object` 按「查不到值」处理（空文本），`keybind` 原样保留，`object` 没有数据源。
   `ComponentArgument` 校验失败时的详细 DFU 文案固定写成 `invalid component`。
   `/title` 六种动作都有，成功消息按目标数用 `.single` / `.multiple`；`times` 的 `t`/`s`/`d` 照官方换算成刻。
   `/playsound` 的 `sound` 带 `minecraft:available_sounds` 补全，11 种来源、位置、音量、音高和 `minVolume` 都在；
@@ -371,7 +371,6 @@ WebView2 的渲染进程不算在内。
   `/particle` 能解析注册表里全部 128 种粒子名；带选项的 19 种按官方 `ParticleTypes.STREAM_CODEC` 编码
   （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
   `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源。
-  `/particle` 的 `delta` 用居中的 `Vec3Argument`（官方是不居中的 `vec3(false)`），写整数时差 0.5 格。
   两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐，但还没接进破坏、死亡和开箱。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。

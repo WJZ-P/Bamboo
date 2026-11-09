@@ -245,7 +245,7 @@ fn register_particle(builder: &mut Builder, root: usize) {
     builder.run(name, particle::normal);
     let pos = builder.argument(name, "pos", ArgumentType::Vec3, 0);
     builder.run(pos, particle::normal);
-    let spread = builder.argument(pos, "delta", ArgumentType::Vec3, 0);
+    let spread = builder.argument(pos, "delta", ArgumentType::Vec3Uncentered, 0);
     let speed = builder.argument(
         spread,
         "speed",

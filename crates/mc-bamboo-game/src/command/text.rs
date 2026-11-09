@@ -149,12 +149,16 @@ fn resolve_content(
             }
             Component::translate(key, args)
         }
-        "keybind" => Component::text(string_field(entries, "keybind").unwrap_or_default()),
+        "keybind" => Component::text("").with_entry(
+            "keybind",
+            Tag::String(string_field(entries, "keybind").unwrap_or_default()),
+        ),
         "selector" => selector_text(region, source, target, target_uuid, entries, depth),
         // 没有计分板和实体 NBT，官方这两类在查不到值时都是空文本。
         //
         // No scoreboard or entity NBT here; both officially resolve to empty text when
         // there is no value.
+        // `object` 客户端按图集或玩家档案解析，这里没有对应的数据源。
         "score" | "nbt" | "object" => Component::text(""),
         _ => Component::text(""),
     }

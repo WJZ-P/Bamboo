@@ -324,6 +324,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::EntityAnchor
         | ArgumentType::BlockPos
         | ArgumentType::Vec3
+        | ArgumentType::Vec3Uncentered
         | ArgumentType::Rotation
         | ArgumentType::BlockState
         | ArgumentType::BlockPredicate

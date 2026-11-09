@@ -110,8 +110,10 @@ impl Component {
         }
     }
 
-    /// 设置一个键，已经有这个键时替换。
-    fn with_entry(self, key: &str, value: Tag) -> Self {
+    /// 设置一个键，已经有这个键时替换。供 `keybind`/`object` 这类动态组件内容用。
+    ///
+    /// Sets one entry, replacing an existing one. For dynamic content such as `keybind`.
+    pub fn with_entry(self, key: &str, value: Tag) -> Self {
         let mut entries = self.into_entries();
         match entries.iter_mut().find(|(existing, _)| existing == key) {
             Some(entry) => entry.1 = value,
