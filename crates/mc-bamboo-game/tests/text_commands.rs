@@ -264,3 +264,68 @@ fn title_bursts_send_the_five_packets_and_report_success() {
         .count();
     assert_eq!(successes, 6);
 }
+
+#[test]
+fn playsound_sends_an_inline_sound_and_uses_min_volume_far_away() {
+    use mc_bamboo_data::packets::play::clientbound;
+
+    let mut harness = Harness::new();
+    let source = harness.join("Kitten", 2);
+    // 原点在很远处，玩家自己听不到；minVolume>0 时把音源挪到玩家附近。
+    harness.command(
+        source,
+        "playsound minecraft:entity.player.levelup master @s 1000 100 1000 1.0 1.0 0.5",
+    );
+    // 同一来源、默认参数：只写 sound。
+    harness.command(source, "playsound minecraft:ui.button.click");
+    harness.tick();
+
+    let sounds: Vec<_> = harness
+        .frames(source)
+        .into_iter()
+        .filter(|frame| frame.id == clientbound::SOUND)
+        .collect();
+    assert_eq!(sounds.len(), 2);
+    // 内联 Holder：VarInt 0、名字、没有固定范围、来源 VarInt 0。
+    assert_eq!(sounds[0].body[0], 0);
+    assert!(contains_ascii(
+        &sounds[0].body,
+        "minecraft:entity.player.levelup"
+    ));
+    assert!(contains_ascii(&sounds[1].body, "minecraft:ui.button.click"));
+    // 远处那条音量是 minVolume=0.5，位置被拉到玩家附近两格。
+    let body = &sounds[0].body;
+    assert!(contains_f32(body, 0.5), "minVolume 应该进音量字段");
+}
+
+fn contains_f32(body: &[u8], value: f32) -> bool {
+    body.windows(4).any(|w| w == value.to_be_bytes())
+}
+
+#[test]
+fn playsound_reports_failure_when_nobody_can_hear_it() {
+    use mc_bamboo_data::packets::play::clientbound;
+
+    let mut harness = Harness::new();
+    let source = harness.join("Kitten", 2);
+    harness.command(
+        source,
+        "playsound minecraft:entity.player.levelup master @s 1000 100 1000 1.0 1.0 0.0",
+    );
+    harness.tick();
+
+    let frames = harness.frames(source);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.id == clientbound::SOUND)
+            .count(),
+        0
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.id == clientbound::SYSTEM_CHAT
+                && contains_ascii(&frame.body, "commands.playsound.failed"))
+    );
+}

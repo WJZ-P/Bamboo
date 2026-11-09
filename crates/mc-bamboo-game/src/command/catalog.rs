@@ -7,7 +7,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, blocks, gamerule, items, players, teleport, text, time, title,
+    CommandFn, Commands, blocks, gamerule, items, players, playsound, teleport, text, time, title,
 };
 
 struct Builder {
@@ -74,6 +74,7 @@ pub(crate) fn build() -> Commands {
     register_help(&mut builder, root);
     register_kick(&mut builder, root);
     register_list(&mut builder, root);
+    register_playsound(&mut builder, root);
     register_msg(&mut builder, root);
     register_say(&mut builder, root);
     register_setblock(&mut builder, root);
@@ -231,6 +232,53 @@ fn register_msg(builder: &mut Builder, root: usize) {
     builder.graph.redirect(tell, msg);
     let whisper = builder.literal(root, "w", permission::ALL);
     builder.graph.redirect(whisper, msg);
+}
+
+/// `PlaySoundCommand.register`：`sound` 用 `ResourceLocationArgument` 加
+/// `minecraft:available_sounds` 自定义补全；11 个来源各挂同一条参数链。
+fn register_playsound(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "playsound", permission::GAMEMASTERS);
+    let sound = builder.argument(command, "sound", ArgumentType::ResourceLocation, 0);
+    builder
+        .graph
+        .suggest_with(sound, playsound::SUGGESTION, playsound::suggest_sounds);
+    builder.run(sound, playsound::sound_only);
+    for (name, action) in playsound::SOURCES
+        .iter()
+        .map(|(name, _)| *name)
+        .zip(playsound::ACTIONS)
+    {
+        let branch = builder.literal(sound, name, 0);
+        builder.run(branch, action);
+        let targets = builder.argument(branch, "targets", players_argument(), 0);
+        builder.run(targets, action);
+        let pos = builder.argument(targets, "pos", ArgumentType::Vec3, 0);
+        builder.run(pos, action);
+        let volume = builder.argument(
+            pos,
+            "volume",
+            ArgumentType::Float {
+                min: 0.0,
+                max: f32::MAX,
+            },
+            0,
+        );
+        builder.run(volume, action);
+        let pitch = builder.argument(
+            volume,
+            "pitch",
+            ArgumentType::Float { min: 0.0, max: 2.0 },
+            0,
+        );
+        builder.run(pitch, action);
+        let min_volume = builder.argument(
+            pitch,
+            "minVolume",
+            ArgumentType::Float { min: 0.0, max: 1.0 },
+            0,
+        );
+        builder.run(min_volume, action);
+    }
 }
 
 fn register_say(builder: &mut Builder, root: usize) {

@@ -12,10 +12,12 @@ pub(crate) use players::change_own_mode;
 
 mod blocks;
 mod catalog;
+mod effects;
 mod feedback;
 mod gamerule;
 mod items;
 mod players;
+mod playsound;
 mod select;
 mod teleport;
 mod text;
