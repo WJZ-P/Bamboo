@@ -246,9 +246,10 @@ pub(crate) fn join(
             only = member.clone();
         }
     }
-    if changed == 0 {
-        return Err(fail("command.failed"));
-    }
+    // 官方 `CommandResponseTracker` 没有 onZero，0 个变化时也发 multiple 消息。
+    //
+    // Official `CommandResponseTracker` has no onZero handler, so zero changes
+    // still produce the multiple message.
     if changed == 1 {
         ok(
             region,
@@ -284,9 +285,9 @@ pub(crate) fn leave(
             only = member.clone();
         }
     }
-    if changed == 0 {
-        return Err(fail("command.failed"));
-    }
+    // 同上：0 个变化时也发 multiple 消息。
+    //
+    // Same as above: zero changes still produce the multiple message.
     if changed == 1 {
         ok(
             region,

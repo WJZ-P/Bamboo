@@ -588,22 +588,26 @@ fn amount(parsed: &ParsedCommand, name: &str) -> Result<i32, CommandFail> {
         .ok_or_else(|| fail("command.failed"))
 }
 
-/// 一次 set/add/remove 的动作参数。
+/// 一次 set/add/remove 的动作参数。`shown` 是反馈里的数字（remove 也是正数），
+/// `delta` 是真正加到分数上的值。
 ///
-/// The parameters for one set/add/remove action.
+/// Parameters for one set/add/remove action. `shown` is the number in the feedback
+/// (positive even for remove), `delta` is what is added to the score.
 struct ScoreAction {
     single: &'static str,
     multiple: &'static str,
-    amount: i32,
+    shown: i32,
+    delta: i32,
     add: bool,
 }
 
 impl ScoreAction {
-    fn set(amount: i32) -> Self {
+    fn set(value: i32) -> Self {
         Self {
             single: "commands.scoreboard.players.set.success.single",
             multiple: "commands.scoreboard.players.set.success.multiple",
-            amount,
+            shown: value,
+            delta: value,
             add: false,
         }
     }
@@ -612,7 +616,8 @@ impl ScoreAction {
         Self {
             single: "commands.scoreboard.players.add.success.single",
             multiple: "commands.scoreboard.players.add.success.multiple",
-            amount,
+            shown: amount,
+            delta: amount,
             add: true,
         }
     }
@@ -621,8 +626,41 @@ impl ScoreAction {
         Self {
             single: "commands.scoreboard.players.remove.success.single",
             multiple: "commands.scoreboard.players.remove.success.multiple",
-            amount: amount.wrapping_neg(),
+            shown: amount,
+            delta: amount.wrapping_neg(),
             add: true,
+        }
+    }
+
+    /// 官方 `ScoreboardCommand` 的 single/multiple 反馈参数顺序：
+    /// set 是 (目标, [名字], 值)，add/remove 是 (值, 目标, [名字], 新分数) / (值, 目标, 数量)。
+    ///
+    /// Official `ScoreboardCommand` feedback argument order: set is
+    /// (objective, [holder], value), add/remove is
+    /// (amount, objective, [holder], new score) / (amount, objective, count).
+    fn feedback(
+        &self,
+        formatted: Component,
+        holder: Component,
+        new_value: i32,
+        count: i32,
+        one: bool,
+    ) -> Vec<TranslateArg> {
+        if self.add {
+            if one {
+                vec![
+                    self.shown.into(),
+                    formatted.into(),
+                    holder.into(),
+                    new_value.into(),
+                ]
+            } else {
+                vec![self.shown.into(), formatted.into(), count.into()]
+            }
+        } else if one {
+            vec![formatted.into(), holder.into(), self.shown.into()]
+        } else {
+            vec![formatted.into(), count.into(), self.shown.into()]
         }
     }
 }
@@ -634,55 +672,44 @@ fn write_score(
     parsed: &ParsedCommand,
     action: ScoreAction,
 ) -> Result<(), CommandFail> {
-    let ScoreAction {
-        single,
-        multiple,
-        amount,
-        add,
-    } = action;
     let objective = writable(global, parsed, "objective")?;
     let holders = holders(global, region, id, parsed, "targets")?;
     let formatted = objective_name(global, &objective)?;
-    let mut first_value = 0;
+    let count = holders.len() as i32;
+    let mut total_value: i32 = 0;
     for name in &holders.names {
         let holder = holder_of(global, name);
-        let value = if add {
+        let value = if action.add {
             global
                 .scoreboard_mut()
-                .add_score(&holder, &objective, amount, region)
+                .add_score(&holder, &objective, action.delta, region)
         } else {
             global
                 .scoreboard_mut()
-                .set_score(&holder, &objective, amount, region);
-            amount
+                .set_score(&holder, &objective, action.delta, region);
+            action.delta
         };
-        first_value = value;
+        total_value = total_value.wrapping_add(value);
     }
-    if holders.len() == 1 {
-        ok(
-            region,
-            id,
-            single,
-            args([
-                formatted.into(),
-                display_for(global, holders.first_name()).into(),
-                first_value.into(),
-            ]),
-            true,
-        );
-    } else {
-        ok(
-            region,
-            id,
-            multiple,
-            args([
-                formatted.into(),
-                (holders.len() as i32).into(),
-                amount.into(),
-            ]),
-            true,
-        );
-    }
+    // 单目标时官方用 `totalValue`（这里就是那一个新分数），多目标时用数量。
+    //
+    // Official single-target feedback uses `totalValue` (here just the one new score),
+    // while multiple-target feedback uses the count.
+    let one = holders.len() == 1;
+    let values = action.feedback(
+        formatted,
+        display_for(global, holders.first_name()),
+        total_value,
+        count,
+        one,
+    );
+    ok(
+        region,
+        id,
+        if one { action.single } else { action.multiple },
+        values,
+        true,
+    );
     Ok(())
 }
 
@@ -1447,6 +1474,88 @@ mod tests {
         server.leave(&watcher);
         server.tick();
         assert!(frames_with_id(&client.take_frames(), clientbound::RESET_SCORE).is_empty());
+    }
+
+    /// 官方 `ScoreboardCommand` 的反馈参数顺序：add/remove 先写数量，set 先写目标。
+    ///
+    /// Official `ScoreboardCommand` feedback argument order: add/remove puts the
+    /// amount first, set puts the objective first.
+    #[test]
+    fn score_feedback_arguments_follow_the_official_order() {
+        use mc_bamboo_nbt::Tag;
+        use mc_bamboo_protocol::components::cursor::Cursor;
+
+        fn with_values(body: &[u8]) -> Vec<Tag> {
+            let tag = Cursor::new(body).nbt_tag().expect("系统消息是合法组件");
+            let Tag::Compound(entries) = tag else {
+                panic!("系统消息是复合标签");
+            };
+            let Some((_, Tag::List(values))) = entries.iter().find(|(key, _)| key == "with") else {
+                panic!("翻译组件没有 with");
+            };
+            values.clone()
+        }
+
+        fn number_text(tag: &Tag, expected: i32) -> bool {
+            match tag {
+                Tag::Int(value) => *value == expected,
+                Tag::Compound(entries) => entries.iter().any(|(key, value)| {
+                    key == "text"
+                        && matches!(value, Tag::String(text) if text == &expected.to_string())
+                }),
+                _ => false,
+            }
+        }
+
+        let (mut server, client) = operator("Op");
+        run(
+            &mut server,
+            &client,
+            "scoreboard objectives add kills dummy",
+        );
+        client.take_frames();
+        run(
+            &mut server,
+            &client,
+            "scoreboard players set Kitten kills 5",
+        );
+        let bodies = system_text(&client);
+        let values = with_values(&bodies[0]);
+        // set.single = (目标, 名字, 值)；目标是方括号组件，值是整数或文本组件。
+        assert_eq!(values.len(), 3);
+        assert!(matches!(values[2], Tag::Int(5) | Tag::Compound(_)));
+        assert!(matches!(values[0], Tag::Compound(_)), "目标在最前");
+
+        client.take_frames();
+        run(
+            &mut server,
+            &client,
+            "scoreboard players add Kitten kills 3",
+        );
+        let bodies = system_text(&client);
+        let values = with_values(&bodies[0]);
+        // add.single = (数量, 目标, 名字, 新分数)。
+        assert_eq!(values.len(), 4);
+        // 混类型时 `unify_elements` 把整数包成 {text:"3"}。
+        assert!(number_text(&values[0], 3), "数量在最先");
+        assert!(matches!(values[1], Tag::Compound(_)), "目标第二");
+        assert!(number_text(&values[3], 8), "新分数在最后");
+
+        client.take_frames();
+        run(
+            &mut server,
+            &client,
+            "scoreboard players remove Kitten kills 2",
+        );
+        let bodies = system_text(&client);
+        let values = with_values(&bodies[0]);
+        assert_eq!(values.len(), 4);
+        assert!(number_text(&values[0], 2), "remove 的数量是正数");
+        assert!(number_text(&values[3], 6));
+        assert_eq!(
+            server.global().scoreboard().score_value("Kitten", "kills"),
+            Some(6)
+        );
     }
 
     #[test]
