@@ -457,6 +457,11 @@ impl World {
                 menu::on_button(region, player, container_id, button_id);
                 lectern::on_button(region, player, container_id, button_id);
             }
+            PlayRequest::ContainerSlotStateChanged {
+                container_id,
+                slot_id,
+                new_state,
+            } => menu::on_slot_state_changed(region, player, container_id, slot_id, new_state),
             PlayRequest::SignUpdate { pos, lines, slot } => {
                 sign::on_sign_update(region, player, pos, lines, slot);
             }

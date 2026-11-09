@@ -777,7 +777,12 @@ fn place_count(size: usize, kind: i32, stack: &ItemStack) -> i32 {
 ///
 /// 打不开（不是容器、被挡住、潜影盒被挡住）时返回 `false`，调用方据此判断有没有菜单。
 pub(crate) fn open_block(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
-    let Some(kind) = container::kind_at(region, pos) else {
+    // 合成器有 `CrafterMenu`（九格加只读结果格和 10 个数据槽），走工作台那套，不走箱子。
+    //
+    // A crafter has a `CrafterMenu` (nine slots, a read-only result slot and ten data slots),
+    // so it uses the workstation path rather than the chest one.
+    let Some(kind) = container::kind_at(region, pos).filter(|&kind| kind != ContainerKind::Crafter)
+    else {
         return station::try_open(region, id, pos);
     };
     if !region.players.contains_key(&id) {
@@ -935,10 +940,10 @@ fn menu_shape(
                 kind.title(),
             )
         }
-        // 雕纹书架、唱片机、陶罐和架子官方没有菜单。合成器的 `CrafterMenu` 这次不打开。
+        // 雕纹书架、唱片机、陶罐和架子官方没有菜单。合成器由 `open_block` 转到工作台那套。
         //
-        // Chiseled bookshelves, jukeboxes, pots and shelves have no vanilla menu. The crafter's
-        // `CrafterMenu` is not opened in this change.
+        // Chiseled bookshelves, jukeboxes, pots and shelves have no vanilla menu. `open_block`
+        // sends a crafter to the workstation path.
         ContainerKind::ChiseledBookshelf
         | ContainerKind::Jukebox
         | ContainerKind::DecoratedPot
@@ -988,6 +993,17 @@ pub(crate) fn on_leave(region: &mut Region, id: PlayerId) {
 /// 切石机选结果。官方 `handleContainerButtonClick`。
 pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, button: i32) {
     station::on_button(region, id, container_id, button);
+}
+
+/// 合成器菜单切换禁用槽。官方 `handleContainerSlotStateChanged`。
+pub(crate) fn on_slot_state_changed(
+    region: &mut Region,
+    id: PlayerId,
+    container_id: i32,
+    slot_id: i32,
+    new_state: bool,
+) {
+    station::on_slot_state_changed(region, id, container_id, slot_id, new_state);
 }
 
 /// 官方 `AbstractContainerMenu.removed` 加子类的 `stopOpen`。

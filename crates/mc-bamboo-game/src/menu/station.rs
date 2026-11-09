@@ -1,10 +1,10 @@
-//! 工作台菜单：玩家 2×2、工作台、切石机、锻造台、熔炉系列、酿造台、织布机、砂轮。
+//! 工作台菜单：玩家 2×2、工作台、合成器、切石机、锻造台、熔炉系列、酿造台、织布机、砂轮。
 //!
 //! 点击顺序照官方 `AbstractContainerMenu.doClick`。每种菜单的 `quickMoveStack`
 //! 各自翻译，不共用。`slotsChanged` 查配方时不带提示：官方 `CraftingMenu.slotsChanged`
 //! 传的就是 `null`，提示只给 `place_recipe` 用，而那条不在这次的范围里。
 //!
-//! Workstation menus: the player 2×2, crafting table, stonecutter, smithing table,
+//! Workstation menus: the player 2×2, crafting table, crafter, stonecutter, smithing table,
 //! furnaces, brewing stand, loom, and grindstone.
 //!
 //! Clicks follow `AbstractContainerMenu.doClick`. Each menu has its own `quickMoveStack`.
@@ -14,6 +14,8 @@
 use mc_bamboo_blocks::{
     BlockState, World,
     behaviour::machines::{BrewingStandEntity, FurnaceEntity},
+    hopper::set_changed,
+    state::TRIGGERED,
 };
 use mc_bamboo_core::{Aabb, BlockPos, Vec3};
 use mc_bamboo_data::{CookingKind, Recipe, RecipeType, blocks, items, registries::menu};
@@ -35,8 +37,12 @@ use tracing::debug;
 
 use super::{ClickPacket, ContainerKind, Menu, RemoteSlot, Target, grindstone, loom};
 use crate::{
-    container::CONTAINER_BUFFER, inbound::PlayerId, interaction::BLOCK_INTERACTION_RANGE,
-    inventory::Inventory, player::Player, region::Region,
+    container::{self, CONTAINER_BUFFER},
+    inbound::PlayerId,
+    interaction::BLOCK_INTERACTION_RANGE,
+    inventory::Inventory,
+    player::Player,
+    region::Region,
 };
 
 const STATE_ID_MASK: i32 = 32767;
@@ -93,6 +99,7 @@ pub(crate) fn note_inventory_slot(player: &mut Player, slot: usize) {
 enum Kind {
     Inventory,
     Crafting,
+    Crafter,
     Stonecutter,
     Smithing,
     Furnace,
@@ -109,6 +116,8 @@ impl Kind {
         let is = |block: u32| BlockState(block).block_id() == id;
         if is(blocks::CRAFTING_TABLE) {
             Some(Self::Crafting)
+        } else if is(blocks::CRAFTER) {
+            Some(Self::Crafter)
         } else if is(blocks::STONECUTTER) {
             Some(Self::Stonecutter)
         } else if is(blocks::SMITHING_TABLE) {
@@ -132,7 +141,7 @@ impl Kind {
 
     fn slot_count(self) -> usize {
         match self {
-            Self::Inventory | Self::Crafting => 46,
+            Self::Inventory | Self::Crafting | Self::Crafter => 46,
             Self::Stonecutter => 38,
             Self::Smithing => 40,
             Self::Furnace | Self::BlastFurnace | Self::Smoker => 39,
@@ -146,6 +155,8 @@ impl Kind {
         match self {
             Self::Stonecutter | Self::Smithing | Self::Loom => 1,
             Self::Furnace | Self::BlastFurnace | Self::Smoker | Self::Brewing => 4,
+            // 九个禁用位加一个 `triggered`，官方 `CrafterBlockEntity.NUM_DATA`。
+            Self::Crafter => 10,
             _ => 0,
         }
     }
@@ -155,6 +166,7 @@ impl Kind {
         match self {
             Self::Inventory => 9,
             Self::Crafting => 10,
+            Self::Crafter => 9,
             Self::Stonecutter => 2,
             Self::Smithing => 4,
             Self::Furnace | Self::BlastFurnace | Self::Smoker => 3,
@@ -188,6 +200,7 @@ impl Kind {
     fn menu_type(self) -> i32 {
         match self {
             Self::Crafting | Self::Inventory => menu::CRAFTING,
+            Self::Crafter => menu::CRAFTER_3X3,
             Self::Furnace => menu::FURNACE,
             Self::BlastFurnace => menu::BLAST_FURNACE,
             Self::Smoker => menu::SMOKER,
@@ -202,6 +215,7 @@ impl Kind {
     fn title(self) -> &'static str {
         match self {
             Self::Crafting | Self::Inventory => "container.crafting",
+            Self::Crafter => "container.crafter",
             Self::Furnace => "container.furnace",
             Self::BlastFurnace => "container.blast_furnace",
             Self::Smoker => "container.smoker",
@@ -235,6 +249,14 @@ enum Outgoing {
 enum Role {
     Craft,
     CraftResult,
+    /// 合成器的九格。禁用位在 `Station::data[0..9]` 里。
+    ///
+    /// A crafter's nine grid slots. The disabled bits live in `Station::data[0..9]`.
+    CrafterGrid,
+    /// 只显示产物的结果格，官方 `NonInteractiveResultSlot`。
+    ///
+    /// The read-only result preview, vanilla `NonInteractiveResultSlot`.
+    CrafterResult,
     StoneInput,
     StoneResult,
     SmithInput,
@@ -457,6 +479,11 @@ impl Station {
                 1..=9 => Role::Craft,
                 _ => Role::Player,
             },
+            Kind::Crafter => match index {
+                0..=8 => Role::CrafterGrid,
+                9..=44 => Role::Player,
+                _ => Role::CrafterResult,
+            },
             Kind::Stonecutter => match index {
                 0 => Role::StoneInput,
                 1 => Role::StoneResult,
@@ -496,10 +523,13 @@ impl Station {
         )
     }
 
-    fn may_pickup(&self, _index: usize) -> bool {
+    fn may_pickup(&self, index: usize) -> bool {
         // 绑定诅咒（`PREVENT_ARMOR_CHANGE`）还没做，盔甲一律能拿下来。
+        // 合成器的结果格是 `NonInteractiveResultSlot`，根本取不出来。
+        //
         // Binding curse (`PREVENT_ARMOR_CHANGE`) is not implemented, so armor can always be taken.
-        true
+        // The crafter's result slot is a `NonInteractiveResultSlot` and cannot be picked up.
+        !matches!(self.role(index), Role::CrafterResult)
     }
 
     fn may_place(&self, index: usize, stack: &ItemStack) -> bool {
@@ -508,7 +538,9 @@ impl Station {
             | Role::StoneResult
             | Role::SmithResult
             | Role::LoomResult
-            | Role::GrindResult => false,
+            | Role::GrindResult
+            | Role::CrafterResult => false,
+            Role::CrafterGrid => self.data.get(index).copied().unwrap_or(0) != 1,
             Role::LoomBanner => loom::is_banner(stack),
             Role::LoomDye => loom::is_dye(stack),
             Role::LoomPattern => loom::is_pattern_item(stack),
@@ -594,6 +626,7 @@ impl Station {
     fn on_set_item(&mut self, index: usize) {
         match self.role(index) {
             Role::Craft => self.refresh_craft(),
+            Role::CrafterGrid => self.refresh_crafter_result(),
             Role::StoneInput => self.stone_changed(),
             Role::SmithInput => self.refresh_smithing(),
             Role::LoomBanner | Role::LoomDye | Role::LoomPattern => self.refresh_loom(),
@@ -605,6 +638,7 @@ impl Station {
 
     fn on_set_changed(&mut self, index: usize) {
         match self.role(index) {
+            Role::CrafterGrid => self.refresh_crafter_result(),
             Role::StoneInput => self.stone_changed(),
             Role::SmithInput => self.refresh_smithing(),
             Role::LoomBanner | Role::LoomDye | Role::LoomPattern => self.refresh_loom(),
@@ -1066,6 +1100,7 @@ impl Station {
         match self.kind {
             Kind::Inventory => self.route_inventory(index, stack, clicked),
             Kind::Crafting => self.route_crafting(index, stack),
+            Kind::Crafter => self.route_crafter(index, stack),
             Kind::Stonecutter => self.route_stone(index, stack),
             Kind::Smithing => self.route_smithing(index, stack),
             Kind::Furnace | Kind::BlastFurnace | Kind::Smoker => self.route_furnace(index, stack),
@@ -1118,6 +1153,19 @@ impl Station {
             return Self::moved_or_stop(self.move_items(stack, 10, 37, false), false);
         }
         Self::moved_or_stop(self.move_items(stack, 10, 46, false), false)
+    }
+
+    /// 官方 `CrafterMenu.quickMoveStack`：九格往玩家 36 格送，其余往九格送。
+    /// 结果格（45）`mayPickup` 为假，`doClick` 根本不会走到这里。
+    ///
+    /// `CrafterMenu.quickMoveStack`: the nine grid slots move into the player's 36 slots and
+    /// everything else moves into the grid. The result slot (45) has `mayPickup` false, so
+    /// `doClick` never reaches this path for it.
+    fn route_crafter(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
+        if index < 9 {
+            return Self::moved_or_stop(self.move_items(stack, 9, 45, true), false);
+        }
+        Self::moved_or_stop(self.move_items(stack, 0, 9, false), false)
     }
 
     fn route_stone(&mut self, index: usize, stack: &mut ItemStack) -> MoveResult {
@@ -1324,6 +1372,18 @@ impl Station {
             Kind::Crafting => 3,
             _ => 0,
         }
+    }
+
+    /// 官方 `CrafterMenu.refreshRecipeResult`：结果格只是显示，不推 state id，
+    /// 等下一次 `broadcastChanges` 才发给客户端（`ResultContainer` 没有 listener）。
+    ///
+    /// `CrafterMenu.refreshRecipeResult`: the result slot is display only. It does not bump the
+    /// state id; `ResultContainer` has no listener, so the next `broadcastChanges` sends it.
+    fn refresh_crafter_result(&mut self) {
+        if self.kind != Kind::Crafter {
+            return;
+        }
+        self.slots[45] = mc_bamboo_blocks::crafter::potential_result(&self.slots[..9]);
     }
 
     fn refresh_craft(&mut self) {
@@ -1907,6 +1967,7 @@ impl Station {
 pub(crate) enum WorkKind {
     Inventory,
     Crafting,
+    Crafter,
     Stonecutter,
     Smithing,
     Furnace,
@@ -1922,6 +1983,7 @@ impl From<WorkKind> for Kind {
         match kind {
             WorkKind::Inventory => Self::Inventory,
             WorkKind::Crafting => Self::Crafting,
+            WorkKind::Crafter => Self::Crafter,
             WorkKind::Stonecutter => Self::Stonecutter,
             WorkKind::Smithing => Self::Smithing,
             WorkKind::Furnace => Self::Furnace,
@@ -1977,6 +2039,9 @@ pub(crate) fn prepare_replay(
         }
     }
     station.suppress = false;
+    if station.kind == Kind::Crafter {
+        station.refresh_crafter_result();
+    }
     station
 }
 
@@ -2123,8 +2188,61 @@ fn notify_machine(world: &mut World, pos: BlockPos) {
     world.update_neighbour_for_output_signal(pos, state.block());
 }
 
+/// 这个菜单是不是合成器。`container_slot_state_changed` 只认它。
+///
+/// Whether this menu is a crafter. `container_slot_state_changed` only concerns it.
+pub(crate) fn is_crafter_menu(station: &Station) -> bool {
+    station.kind == Kind::Crafter
+}
+
+/// 从世界读回合成器的九格、禁用位和 `triggered`，再刷新结果格。
+///
+/// Read a crafter's nine slots, disabled bits and `triggered` from the world, then refresh
+/// the result preview.
+fn pull_crafter(region: &mut Region, station: &mut Station) {
+    let pos = station.pos;
+    let disabled = region.redstone.crafter_disabled(pos);
+    let triggered = region
+        .chunks
+        .block(pos)
+        .is_some_and(|state| BlockState(state).get(TRIGGERED));
+    let slots = container::entry_at(region, pos, ContainerKind::Crafter)
+        .slots
+        .clone();
+    for index in 0..9 {
+        station.slots[index] = slots.get(index).cloned().unwrap_or_else(ItemStack::empty);
+        station.data[index] = i32::from(disabled & (1 << index) != 0);
+    }
+    station.data[9] = i32::from(triggered);
+    station.refresh_crafter_result();
+}
+
+/// 把九格写回世界。内容变了才通知旁边的比较器，官方 `CrafterBlockEntity.setItem`。
+///
+/// Write the nine slots back. Only changed contents notify neighbouring comparators, like
+/// `CrafterBlockEntity.setItem`.
+fn flush_crafter(region: &mut Region, station: &mut Station) {
+    let wanted = station.slots[..9].to_vec();
+    let changed = {
+        let entry = container::entry_at(region, station.pos, ContainerKind::Crafter);
+        if entry.slots.len() != wanted.len() || entry.slots == wanted {
+            false
+        } else {
+            entry.slots.clone_from_slice(&wanted);
+            true
+        }
+    };
+    if !changed {
+        return;
+    }
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    set_changed(&mut world, station.pos);
+}
+
 fn pull_machine(region: &mut Region, station: &mut Station) {
     match station.kind {
+        Kind::Crafter => pull_crafter(region, station),
         Kind::Furnace | Kind::BlastFurnace | Kind::Smoker => {
             let (level, _) = region.block_level();
             let Some(entity) = level.block_entities.get::<FurnaceEntity>(station.pos) else {
@@ -2150,6 +2268,10 @@ fn pull_machine(region: &mut Region, station: &mut Station) {
 }
 
 fn flush_machine(region: &mut Region, station: &mut Station) {
+    if station.kind == Kind::Crafter {
+        flush_crafter(region, station);
+        return;
+    }
     let set = station.machine_set;
     let content = station.machine_content;
     let awards = station.furnace_awards;
@@ -2271,10 +2393,10 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
     }
 }
 
-/// 右键工作台、切石机、锻造台、熔炉、酿造台、织布机或砂轮。不是这些方块就返回 `false`。
+/// 右键工作台、合成器、切石机、锻造台、熔炉、酿造台、织布机或砂轮。不是这些方块就返回 `false`。
 ///
-/// Right-click a crafting table, stonecutter, smithing table, furnace, brewing stand, loom, or
-/// grindstone. Returns `false` for every other block.
+/// Right-click a crafting table, crafter, stonecutter, smithing table, furnace, brewing stand,
+/// loom, or grindstone. Returns `false` for every other block.
 pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool {
     let Some(state) = region.chunks.block(pos) else {
         return false;
@@ -2416,6 +2538,71 @@ pub(crate) fn click_inventory(region: &mut Region, id: PlayerId, packet: ClickPa
         std::mem::take(&mut station.packets)
     };
     send_outgoing(region, id, 0, packets);
+}
+
+/// `ServerboundContainerSlotStateChangedPacket`：切换合成器菜单里一格的禁用状态。
+///
+/// 官方只看非旁观者、`containerId` 对得上、菜单是 `CrafterMenu`、容器是 `CrafterBlockEntity`，
+/// 然后 `CrafterBlockEntity.setSlotState(slotId, newState)`：下标越界或者这一格有东西就不改。
+/// `newState` 为真表示启用（禁用位清零）。数据槽在下一次 `broadcastChanges` 发给客户端。
+///
+/// `ServerboundContainerSlotStateChangedPacket`: toggle a crafter slot. Vanilla checks for a
+/// non-spectator, a matching `containerId`, a `CrafterMenu` and a `CrafterBlockEntity`, then calls
+/// `setSlotState`: out-of-range indices and filled slots are ignored. `newState` true enables.
+/// The data slot goes to the client on the next `broadcastChanges`.
+pub(crate) fn on_slot_state_changed(
+    region: &mut Region,
+    id: PlayerId,
+    container_id: i32,
+    slot_id: i32,
+    new_state: bool,
+) {
+    if spectator(region, id) {
+        return;
+    }
+    let matches = region.menus.get(&id).is_some_and(|menu| {
+        menu.container_id == container_id && menu.station.as_ref().is_some_and(is_crafter_menu)
+    });
+    if !matches {
+        return;
+    }
+    let Some(pos) = region
+        .menus
+        .get(&id)
+        .and_then(|menu| menu.target.positions().into_iter().next())
+    else {
+        return;
+    };
+    if container::kind_at(region, pos) != Some(ContainerKind::Crafter) {
+        return;
+    }
+    let Ok(slot) = usize::try_from(slot_id) else {
+        return;
+    };
+    if slot >= 9
+        || !container::entry_at(region, pos, ContainerKind::Crafter)
+            .slots
+            .get(slot)
+            .is_some_and(ItemStack::is_empty)
+    {
+        return;
+    }
+    let mask = region.redstone.crafter_disabled(pos);
+    let bit = 1u16 << slot;
+    let updated = if new_state { mask & !bit } else { mask | bit };
+    if updated == mask {
+        return;
+    }
+    region.redstone.set_crafter_disabled(pos, updated);
+    if let Some(menu) = region.menus.get_mut(&id)
+        && let Some(station) = menu.station.as_mut()
+        && let Some(data) = station.data.get_mut(slot)
+    {
+        *data = i32::from(!new_state);
+    }
+    let (mut level, ticks) = region.block_level();
+    let mut world = World::new(&mut level, ticks);
+    set_changed(&mut world, pos);
 }
 
 pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, button: i32) {
