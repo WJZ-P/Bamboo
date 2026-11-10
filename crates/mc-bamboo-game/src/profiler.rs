@@ -381,20 +381,24 @@ impl Profiler {
         self.histogram_mut(Series::Metric(Metric::TickJitter))
             .record_duration(actual.saturating_duration_since(expected));
         if skipped {
-            self.skipped_catch_ups += 1;
+            self.skipped_catch_ups = self.skipped_catch_ups.saturating_add(1);
         }
     }
 
-    /// 记一个数量指标。
+    /// 记一个数量指标。`SkippedCatchUps` 只有累计值，不进直方图。
     pub(crate) fn record(&mut self, metric: Metric, value: u64) {
-        self.histogram_mut(Series::Metric(metric)).record(value);
+        if metric == Metric::SkippedCatchUps {
+            self.skipped_catch_ups = self.skipped_catch_ups.saturating_add(value);
+        } else {
+            self.histogram_mut(Series::Metric(metric)).record(value);
+        }
     }
 
     /// 记一个区块从进入待发送集合到写进出站缓冲的延迟，单位 tick。
     pub(crate) fn record_chunk_latency(&mut self, latency: u64) {
         self.histogram_mut(Series::Metric(Metric::ChunkLatencyTicks))
             .record(latency);
-        self.chunks_this_tick += 1;
+        self.chunks_this_tick = self.chunks_this_tick.saturating_add(1);
     }
 
     /// 一笔「每刻发出的区块数」样本。即使这一刻一个区块都没发也要记 0。
@@ -411,7 +415,7 @@ impl Profiler {
         let elapsed = now.saturating_duration_since(self.tick_start);
         self.histogram_mut(Series::Metric(Metric::TickTotal))
             .record_duration(elapsed);
-        self.ticks += 1;
+        self.ticks = self.ticks.saturating_add(1);
         if let Some(interval) = self.report_interval
             && now.duration_since(self.last_report) >= interval
         {
@@ -507,8 +511,10 @@ impl Profiler {
         for (histogram, source) in self.metrics.iter_mut().zip(&other.metrics) {
             histogram.merge(source);
         }
-        self.skipped_catch_ups += other.skipped_catch_ups;
-        self.ticks += other.ticks;
+        self.skipped_catch_ups = self
+            .skipped_catch_ups
+            .saturating_add(other.skipped_catch_ups);
+        self.ticks = self.ticks.saturating_add(other.ticks);
     }
 
     /// 打印之后清零，只清样本，不动环境变量和报告时刻。
