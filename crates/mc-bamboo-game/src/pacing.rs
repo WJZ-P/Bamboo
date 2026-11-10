@@ -5,9 +5,8 @@
 //!
 //! 各平台线程优先级的现状：macOS 可以在世界线程里调
 //! `pthread_set_qos_class_self_np` 把自己设成用户交互级 QoS；Linux 和 Windows
-//! 这次没有实现，行为没有验证。这些平台上的 `set_thread_priority` 是空操作。
-//! Linux 上 `thread::sleep` 的精度本来就在百微秒量级（本次没有验证），
-//! Windows 留给以后。
+//! 这次没有实现、也没有验证，`set_thread_priority` 在这些平台上是空操作。
+//! 睡眠精度在各平台上的具体表现同样没有验证。
 
 use std::{
     env,
@@ -284,12 +283,9 @@ impl Pacer {
 
 /// 把当前线程设成 macOS 的用户交互级 QoS。
 ///
-/// # Safety
-///
-/// 这个函数自己没有 unsafe 前置条件；内部唯一的 `unsafe` 是调用 libc 的
-/// `pthread_set_qos_class_self_np`：两个参数都是按值传入的常量，不涉及指针、
-/// 生命周期或跨线程共享状态，函数只改调用它的这条线程的 QoS；返回非 0 时
-/// 只记一条警告，不影响世界运行。
+/// 内部唯一的 `unsafe` 是调用 libc 的 `pthread_set_qos_class_self_np`：两个参数都是
+/// 按值传入的常量，不涉及指针、生命周期或跨线程共享状态，函数只改调用它的这条
+/// 线程的 QoS；返回非 0 时只记一条警告，不影响世界运行。
 #[cfg(target_os = "macos")]
 fn set_interactive_qos() {
     let result = unsafe {
