@@ -24,7 +24,12 @@ use mc_bamboo_protocol::{
 use uuid::Uuid;
 
 use super::*;
-use crate::{InFlight, PlayerSink, chunk_encoding::encode_chunk, links::encode_frames};
+use crate::{
+    InFlight, PlayerSink,
+    chunk_encoding::encode_chunk,
+    links::encode_frames,
+    profiler::{Metric, Phase, Series},
+};
 
 mod fuzz;
 
@@ -1182,6 +1187,155 @@ fn run_returns_after_shutdown() {
     server.world.run();
 
     assert_eq!(client.take_ids().last(), Some(&clientbound::DISCONNECT));
+}
+
+#[test]
+fn profiler_charges_every_phase_once_per_tick() {
+    let mut server = Harness::new(2);
+    server.tick();
+
+    for phase in [
+        Phase::Inbox,
+        Phase::LightUpdates,
+        Phase::WeatherAndTime,
+        Phase::ScheduledTicks,
+        Phase::RandomTicks,
+        Phase::BlockEvents,
+        Phase::Entities,
+        Phase::BlockEntities,
+        Phase::PlayerMisc,
+        Phase::Views,
+        Phase::BlockChangeBroadcast,
+        Phase::EntitySyncAndTracking,
+        Phase::ChunkSending,
+        Phase::Flush,
+        Phase::TickTail,
+    ] {
+        assert_eq!(
+            server
+                .world
+                .region
+                .profiler
+                .histogram(Series::Phase(phase))
+                .count(),
+            1,
+            "{phase:?}"
+        );
+    }
+    assert_eq!(
+        server
+            .world
+            .region
+            .profiler
+            .histogram(Series::Metric(Metric::TickTotal))
+            .count(),
+        1
+    );
+    for metric in [
+        Metric::InboundMessages,
+        Metric::OnlinePlayers,
+        Metric::DueScheduledTicks,
+        Metric::Entities,
+        Metric::ChunksSent,
+    ] {
+        assert_eq!(
+            server
+                .world
+                .region
+                .profiler
+                .histogram(Series::Metric(metric))
+                .count(),
+            1,
+            "{metric:?}"
+        );
+    }
+    let report = server.world.region.profiler.report();
+    assert!(report.contains("phases (by mean):"));
+    for phase in [
+        "inbox",
+        "light_updates",
+        "weather_and_time",
+        "scheduled_ticks",
+        "random_ticks",
+        "block_events",
+        "entities",
+        "block_entities",
+        "player_misc",
+        "views",
+        "block_change_broadcast",
+        "entity_sync_and_tracking",
+        "chunk_sending",
+        "flush",
+        "tick_tail",
+    ] {
+        assert!(report.contains(phase), "{phase}");
+    }
+}
+
+#[test]
+fn early_return_from_inbox_still_finishes_the_tick_timing() {
+    let mut server = Harness::new(2);
+    server.tick();
+    server.world.region.profiler.reset_samples();
+
+    server.inbox.send(Inbound::Shutdown).unwrap();
+    assert!(server.world.tick().is_break());
+
+    assert_eq!(
+        server
+            .world
+            .region
+            .profiler
+            .histogram(Series::Phase(Phase::Inbox))
+            .count(),
+        0
+    );
+    assert_eq!(
+        server
+            .world
+            .region
+            .profiler
+            .histogram(Series::Metric(Metric::TickTotal))
+            .count(),
+        1
+    );
+    assert_eq!(
+        server
+            .world
+            .region
+            .profiler
+            .histogram(Series::Metric(Metric::InboundMessages))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn chunk_latency_counts_ticks_between_entering_pending_and_sending() {
+    let mut server = Harness::new(8);
+    let client = server.join_with("Kitten", client_requesting(8));
+    // 第一刻：区块进入 pending，并发出最近的 9 个。
+    server.tick();
+    client.take_frames();
+    server.world.region.profiler.reset_samples();
+
+    // 确认上一批，下一刻继续发，延迟按「进入 pending 到写出」的刻数记。
+    server.acknowledge_batch(&client, 10.0);
+    server.tick();
+
+    let latency = server
+        .world
+        .region
+        .profiler
+        .histogram(Series::Metric(Metric::ChunkLatencyTicks));
+    assert!(latency.count() > 0);
+    let chunks_sent = server
+        .world
+        .region
+        .profiler
+        .histogram(Series::Metric(Metric::ChunksSent));
+    assert_eq!(chunks_sent.count(), 1);
+    assert_eq!(chunks_sent.sum(), latency.count() as u128);
 }
 
 #[test]

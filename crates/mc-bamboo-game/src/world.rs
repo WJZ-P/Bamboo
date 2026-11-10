@@ -27,6 +27,7 @@ use crate::{
     interaction::{self, UseItemOn},
     inventory, lectern, light_updates, menu, movement,
     player::shows_hat,
+    profiler::{Metric, Phase},
     region::{JoinSettings, Region},
     secure_chat::{self, ServiceProfileKeys},
     sign, weather,
@@ -109,7 +110,7 @@ impl World {
             global.admin = init.snapshot.into_state();
             global.admin_messages = init.messages;
         }
-        Self {
+        let mut world = Self {
             authoritative_admin,
             global,
             region: Region::with_keys(
@@ -120,13 +121,24 @@ impl World {
                 keys,
             ),
             inbox,
-        }
+        };
+        world.region.profiler.on_world_start();
+        world
     }
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
         let mut schedule = Schedule::starting_at(Instant::now());
-        while self.tick().is_continue() {
+        loop {
+            let expected = schedule.expected_start();
+            let actual = Instant::now();
+            let skipped = schedule.skipped_catch_up();
+            self.region
+                .profiler
+                .begin_scheduled_tick(expected, actual, skipped);
+            if self.tick().is_break() {
+                break;
+            }
             let wait = schedule.after_tick(Instant::now());
             if !wait.is_zero() {
                 thread::sleep(wait);
@@ -139,8 +151,41 @@ impl World {
     /// forget 后面，每个区块的光照变化紧挨在它的方块变化前面，方块变化排在 ack 前面，
     /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
+        self.region.profiler.begin_tick();
+        self.record_tick_counts();
+        let flow = self.tick_phases();
+        self.region.profiler.end_tick();
+        flow
+    }
+
+    /// 每刻开始时的数量指标，趁状态还没变先记下来。到期的计划刻数是
+    /// 队列里 `trigger_tick <= now + 1` 的那些（`Global::advance_time` 在计划刻之前加一）。
+    fn record_tick_counts(&mut self) {
+        let next_time = self.global.time().0 + 1;
+        let due = self
+            .region
+            .block_ticks
+            .pending()
+            .filter(move |tick| tick.trigger_tick <= next_time)
+            .count()
+            + self
+                .region
+                .block_ticks
+                .pending_fluids()
+                .filter(move |tick| tick.trigger_tick <= next_time)
+                .count();
+        let profiler = &mut self.region.profiler;
+        profiler.record(Metric::OnlinePlayers, self.region.players.len() as u64);
+        profiler.record(Metric::Entities, self.region.entities.len() as u64);
+        profiler.record(Metric::DueScheduledTicks, due as u64);
+    }
+
+    /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
+    fn tick_phases(&mut self) -> ControlFlow<()> {
         self.process_inbox()?;
+        self.region.profiler.lap(Phase::Inbox);
         light_updates::run_light_updates(&mut self.region);
+        self.region.profiler.lap(Phase::LightUpdates);
 
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
         let weather = weather::advance(&mut self.global, &self.region);
@@ -150,6 +195,7 @@ impl World {
         weather::sync(&self.global, &mut self.region);
         self.global.advance_time();
         self.region.advance_tick();
+        self.region.profiler.lap(Phase::WeatherAndTime);
         // 官方 `ServerLevel.tick` 的顺序：方块和流体的计划刻、`chunkSource.tick` 里的随机刻、
         // 方块事件、实体、方块实体。计划刻和随机刻里生成的下落方块和 TNT 同一 tick 就动。
         //
@@ -157,10 +203,15 @@ impl World {
         // `chunkSource.tick`, block events, entities, then block entities. Falling blocks and
         // primed TNT spawned by block or random ticks move in the same game tick.
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        self.region.profiler.lap(Phase::ScheduledTicks);
         interaction::run_random_ticks(&mut self.region);
+        self.region.profiler.lap(Phase::RandomTicks);
         interaction::run_block_events(&mut self.region);
+        self.region.profiler.lap(Phase::BlockEvents);
         interaction::run_entity_ticks(&mut self.region);
+        self.region.profiler.lap(Phase::Entities);
         interaction::run_block_entity_ticks(&mut self.region);
+        self.region.profiler.lap(Phase::BlockEntities);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
         // 这里跟着玩家 tick 放在随机刻之后。
         interaction::tick_mining(&mut self.region);
@@ -178,10 +229,13 @@ impl World {
         // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the
         // player defaults and writes each once after join.
         self.global.scoreboard_mut().tick_criteria(&mut self.region);
+        self.region.profiler.lap(Phase::PlayerMisc);
 
         entity_sync::update_derived_state(&mut self.region);
         chunk_tracking::update_views(&mut self.region);
+        self.region.profiler.lap(Phase::Views);
         chunk_broadcast::broadcast_changes(&mut self.region);
+        self.region.profiler.lap(Phase::BlockChangeBroadcast);
         entity_sync::sync_entities(&mut self.region);
         entity_tracking::sync(&mut self.region);
         entity_sync::send_equipment_changes(&mut self.region);
@@ -189,17 +243,23 @@ impl World {
         if let Some(frames) = self.global.tick_latency_broadcast() {
             self.region.links.broadcast(&frames);
         }
+        self.region.profiler.lap(Phase::EntitySyncAndTracking);
         chunk_tracking::send_chunks(&mut self.region);
         movement::finish_tick(&mut self.region);
+        self.region.profiler.lap(Phase::ChunkSending);
         self.region.links.flush();
+        self.region.profiler.lap(Phase::Flush);
         if self.global.admin.stop_requested {
-            return self.shut_down();
+            let flow = self.shut_down();
+            self.region.profiler.lap(Phase::TickTail);
+            return flow;
         }
         // 名单变更在这一 tick 末尾统一发布：一条命令改多个目标只写一次盘。
         let changes = crate::command::admin::take_changes(&mut self.region);
         if changes.any() {
             self.publish_admin(changes);
         }
+        self.region.profiler.lap(Phase::TickTail);
         ControlFlow::Continue(())
     }
 
@@ -232,6 +292,9 @@ impl World {
             }
         };
 
+        self.region
+            .profiler
+            .record(Metric::InboundMessages, messages.len() as u64);
         for message in messages {
             match message {
                 Inbound::Join(request) => self.on_join(*request),
@@ -681,22 +744,39 @@ impl World {
 }
 
 /// 按绝对时间排下一 tick，sleep 的误差和 tick 本身的耗时都不会累积。
+/// 第一刻立刻跑，`next_tick` 是第二刻的起点，之后每刻按 50ms 网格推进。
 struct Schedule {
     next_tick: Instant,
+    /// 本刻按计划应该几点开始；追赶时它落后于实际开始时刻。
+    expected_start: Instant,
+    /// 上一次 `after_tick` 有没有因为落后太多而放弃追赶。
+    skipped_catch_up: bool,
 }
 
 impl Schedule {
-    /// 第一 tick 在 `now` 开始。
+    /// 第一 tick 在 `now` 立刻开始，第二刻不早于 `now + TICK`。
     fn starting_at(now: Instant) -> Self {
         Self {
             next_tick: now + TICK,
+            expected_start: now,
+            skipped_catch_up: false,
         }
+    }
+
+    /// 这一刻应该几点开始。
+    fn expected_start(&self) -> Instant {
+        self.expected_start
+    }
+
+    fn skipped_catch_up(&self) -> bool {
+        self.skipped_catch_up
     }
 
     /// 一 tick 结束时调用，返回到下一 tick 开始还要等多久。已经落后时返回 0，连续跑 tick 追上。
     fn after_tick(&mut self, now: Instant) -> Duration {
         let behind = now.saturating_duration_since(self.next_tick);
-        if behind > MAX_CATCH_UP {
+        self.skipped_catch_up = behind > MAX_CATCH_UP;
+        if self.skipped_catch_up {
             warn!(
                 "Can't keep up! Running {}ms behind, skipping {} ticks",
                 behind.as_millis(),
@@ -705,6 +785,7 @@ impl Schedule {
             self.next_tick = now;
         }
         let wait = self.next_tick.saturating_duration_since(now);
+        self.expected_start = self.next_tick;
         self.next_tick += TICK;
         wait
     }

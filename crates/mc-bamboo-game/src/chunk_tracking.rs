@@ -3,7 +3,7 @@
 //! 跟踪范围不是方形，也不是视距圈：沿坐标轴的半径是 `vd + 1`，四角是圆的。
 //! 这样客户端渲染范围里的每个区块，8 个邻居都能到齐，否则它不编译这个区块。
 
-use std::{collections::BTreeSet, ops::RangeInclusive};
+use std::{collections::BTreeMap, ops::RangeInclusive};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_protocol::packet::play::{
@@ -11,7 +11,12 @@ use mc_bamboo_protocol::packet::play::{
 };
 
 use crate::{
-    chunk_encoding::chunk_body, inbound::PlayerId, links::Links, player::Player, region::Region,
+    chunk_encoding::chunk_body,
+    inbound::PlayerId,
+    links::Links,
+    player::Player,
+    profiler::Profiler,
+    region::{Region, RegionTick},
 };
 
 /// 视距的下限。客户端请求的值和服务端的配置都不能比它小。
@@ -116,7 +121,9 @@ fn view_difference(previous: Option<ChunkView>, next: ChunkView) -> (Vec<ChunkPo
 /// 这是背压：接收方反过来限制发送方。收不到确认时只是停发，区块留在 `pending` 里。
 #[derive(Debug)]
 pub(crate) struct PlayerChunkSender {
-    pending: BTreeSet<ChunkPos>,
+    /// 值为进入待发送集合的那一刻，用来算区块延迟。
+    pending: BTreeMap<ChunkPos, RegionTick>,
+    tick: RegionTick,
     desired_chunks_per_tick: f32,
     batch_quota: f32,
     unacknowledged_batches: i32,
@@ -126,7 +133,8 @@ pub(crate) struct PlayerChunkSender {
 impl Default for PlayerChunkSender {
     fn default() -> Self {
         Self {
-            pending: BTreeSet::new(),
+            pending: BTreeMap::new(),
+            tick: RegionTick::default(),
             desired_chunks_per_tick: START_CHUNKS_PER_TICK,
             batch_quota: 0.0,
             unacknowledged_batches: 0,
@@ -136,17 +144,31 @@ impl Default for PlayerChunkSender {
 }
 
 impl PlayerChunkSender {
+    /// 世界线程在视图变化之前把当前刻写进来。
+    pub(crate) fn set_tick(&mut self, tick: RegionTick) {
+        self.tick = tick;
+    }
+
     fn mark_pending(&mut self, pos: ChunkPos) {
-        self.pending.insert(pos);
+        self.pending.entry(pos).or_insert(self.tick);
     }
 
     /// 这个区块离开了视图，返回客户端是否已经有它，有的话要发 `forget_level_chunk`。
     fn drop_chunk(&mut self, pos: ChunkPos) -> bool {
-        !self.pending.remove(&pos)
+        self.pending.remove(&pos).is_none()
     }
 
     fn is_pending(&self, pos: ChunkPos) -> bool {
-        self.pending.contains(&pos)
+        self.pending.contains_key(&pos)
+    }
+
+    /// 在区块离开 `pending` 之前，把这一刻写进出站缓冲的区块延迟记进剖析器。
+    fn record_batch(&self, batch: &[ChunkPos], profiler: &mut Profiler) {
+        for pos in batch {
+            if let Some(&entered) = self.pending.get(pos) {
+                profiler.record_chunk_latency(self.tick.since(entered));
+            }
+        }
     }
 
     /// 处理客户端的 `chunk_batch_received`。
@@ -164,7 +186,7 @@ impl PlayerChunkSender {
     }
 
     /// 取出这一 tick 要发的区块，近的在前。`center` 是玩家此刻所在的区块。
-    fn next_batch(&mut self, center: ChunkPos) -> Vec<ChunkPos> {
+    fn next_batch(&mut self, center: ChunkPos, profiler: &mut Profiler) -> Vec<ChunkPos> {
         if self.unacknowledged_batches >= self.max_unacknowledged_batches {
             return Vec::new();
         }
@@ -174,17 +196,23 @@ impl PlayerChunkSender {
             return Vec::new();
         }
 
-        let chunks = self.take_nearest(center, self.batch_quota.floor() as usize);
+        let chunks = self.take_nearest(center, self.batch_quota.floor() as usize, profiler);
         self.unacknowledged_batches += 1;
         self.batch_quota -= chunks.len() as f32;
         chunks
     }
 
-    fn take_nearest(&mut self, center: ChunkPos, count: usize) -> Vec<ChunkPos> {
-        let mut nearest: Vec<ChunkPos> = self.pending.iter().copied().collect();
+    fn take_nearest(
+        &mut self,
+        center: ChunkPos,
+        count: usize,
+        profiler: &mut Profiler,
+    ) -> Vec<ChunkPos> {
+        let mut nearest: Vec<ChunkPos> = self.pending.keys().copied().collect();
         // 排序是稳定的，距离相同的区块保持 `pending` 里的顺序，结果是确定的。
         nearest.sort_by_key(|&pos| distance_squared(center, pos));
         nearest.truncate(count);
+        self.record_batch(&nearest, profiler);
         for pos in &nearest {
             self.pending.remove(pos);
         }
@@ -202,7 +230,7 @@ fn distance_squared(a: ChunkPos, b: ChunkPos) -> i64 {
 #[derive(Debug, Default)]
 pub(crate) struct ChunkTracker {
     view: Option<ChunkView>,
-    sender: PlayerChunkSender,
+    pub(crate) sender: PlayerChunkSender,
 }
 
 impl ChunkTracker {
@@ -267,18 +295,25 @@ pub(crate) fn update_player_view(
 
 /// tick 第 4 阶段：每名玩家比较一次 `(center, vd)`。
 pub(crate) fn update_views(region: &mut Region) {
+    let tick = region.tick;
     for player in region.players.values_mut() {
+        player.chunks.sender.set_tick(tick);
         update_player_view(player, &mut region.links, region.view_distance);
     }
 }
 
 /// tick 第 10 阶段：每名玩家最多发一批，发完把没人跟踪的区块从编码缓存里丢掉。
 pub(crate) fn send_chunks(region: &mut Region) {
+    let tick = region.tick;
     for (&id, player) in &mut region.players {
         if !region.links.is_open(id) {
             continue;
         }
-        let batch = player.chunks.sender.next_batch(player.chunk_pos());
+        player.chunks.sender.set_tick(tick);
+        let batch = player
+            .chunks
+            .sender
+            .next_batch(player.chunk_pos(), &mut region.profiler);
         if batch.is_empty() {
             continue;
         }
@@ -301,6 +336,7 @@ pub(crate) fn send_chunks(region: &mut Region) {
         let batch_size = batch.len() as i32;
         region.links.send(id, &ChunkBatchFinished { batch_size });
     }
+    region.profiler.finish_chunk_sending();
     drop_untracked_bodies(region);
 }
 
@@ -325,6 +361,8 @@ pub(crate) fn on_chunk_batch_received(region: &mut Region, id: PlayerId, desired
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use mc_bamboo_data::packets::play::clientbound;
     use mc_bamboo_protocol::{
         codec::Reader,
@@ -333,7 +371,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::inbound::PlayerSink;
+    use crate::{
+        inbound::PlayerSink,
+        profiler::{Metric, Series},
+    };
 
     const ORIGIN: ChunkPos = ChunkPos::new(0, 0);
     const PLAYER: PlayerId = PlayerId(1);
@@ -550,23 +591,31 @@ mod tests {
         let state =
             |sender: &PlayerChunkSender| (sender.batch_quota, sender.unacknowledged_batches);
 
-        assert_eq!(sender.next_batch(ORIGIN).len(), 9);
+        assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 9);
         assert_eq!(state(&sender), (0.0, 1));
 
-        assert!(sender.next_batch(ORIGIN).is_empty());
+        assert!(
+            sender
+                .next_batch(ORIGIN, &mut Profiler::default())
+                .is_empty()
+        );
         assert_eq!(state(&sender), (0.0, 1));
 
         sender.on_batch_received(3.5);
         assert_eq!(state(&sender), (1.0, 0));
-        assert_eq!(sender.next_batch(ORIGIN).len(), 3);
+        assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 3);
         assert_eq!(state(&sender), (0.5, 1));
 
         for unacknowledged in 2..=10 {
-            assert_eq!(sender.next_batch(ORIGIN).len(), 3);
+            assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 3);
             assert_eq!(state(&sender), (0.5, unacknowledged));
         }
 
-        assert!(sender.next_batch(ORIGIN).is_empty());
+        assert!(
+            sender
+                .next_batch(ORIGIN, &mut Profiler::default())
+                .is_empty()
+        );
         assert_eq!(state(&sender), (0.5, 10));
     }
 
@@ -574,7 +623,7 @@ mod tests {
     fn first_batch_is_the_three_by_three_nearest_first() {
         let mut sender = sender_with_many_chunks();
 
-        let batch = sender.next_batch(ORIGIN);
+        let batch = sender.next_batch(ORIGIN, &mut Profiler::default());
 
         let distances: Vec<i64> = batch
             .iter()
@@ -587,7 +636,7 @@ mod tests {
     fn distance_uses_the_position_at_send_time() {
         let mut sender = sender_with_many_chunks();
 
-        let batch = sender.next_batch(chunk(30, 30));
+        let batch = sender.next_batch(chunk(30, 30), &mut Profiler::default());
 
         assert_eq!(batch[0], chunk(30, 30));
     }
@@ -595,24 +644,28 @@ mod tests {
     #[test]
     fn slow_clients_get_a_chunk_every_few_ticks() {
         let mut sender = sender_with_many_chunks();
-        sender.next_batch(ORIGIN);
+        sender.next_batch(ORIGIN, &mut Profiler::default());
         sender.on_batch_received(0.5);
         sender.batch_quota = 0.0;
 
-        assert!(sender.next_batch(ORIGIN).is_empty());
+        assert!(
+            sender
+                .next_batch(ORIGIN, &mut Profiler::default())
+                .is_empty()
+        );
         assert_eq!(sender.batch_quota, 0.5);
-        assert_eq!(sender.next_batch(ORIGIN).len(), 1);
+        assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 1);
         assert_eq!(sender.batch_quota, 0.0);
     }
 
     #[test]
     fn fractions_of_the_desired_rate_do_not_accumulate() {
         let mut sender = sender_with_many_chunks();
-        sender.next_batch(ORIGIN);
+        sender.next_batch(ORIGIN, &mut Profiler::default());
         sender.on_batch_received(3.5);
 
         for _ in 0..5 {
-            assert_eq!(sender.next_batch(ORIGIN).len(), 3);
+            assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 3);
         }
     }
 
@@ -643,7 +696,11 @@ mod tests {
     fn quota_grows_even_when_nothing_is_pending() {
         let mut sender = PlayerChunkSender::default();
 
-        assert!(sender.next_batch(ORIGIN).is_empty());
+        assert!(
+            sender
+                .next_batch(ORIGIN, &mut Profiler::default())
+                .is_empty()
+        );
 
         assert_eq!(sender.batch_quota, 9.0);
         assert_eq!(sender.unacknowledged_batches, 0);
@@ -752,10 +809,30 @@ mod tests {
         tracker.apply_view(PLAYER, view(0, 0, 2), &mut links);
         assert!(!tracker.is_chunk_tracked(ORIGIN));
 
-        tracker.sender.next_batch(ORIGIN);
+        tracker.sender.next_batch(ORIGIN, &mut Profiler::default());
         assert!(tracker.is_chunk_tracked(ORIGIN));
         assert!(!tracker.is_chunk_tracked(chunk(3, 0)));
         assert!(!tracker.is_chunk_tracked(chunk(4, 0)));
+    }
+
+    #[test]
+    fn pending_chunks_record_how_many_ticks_they_waited() {
+        let mut sender = PlayerChunkSender::default();
+        let mut profiler = Profiler::default();
+        sender.set_tick(RegionTick::at(10));
+        sender.mark_pending(chunk(0, 0));
+        sender.set_tick(RegionTick::at(13));
+        let batch = sender.next_batch(ORIGIN, &mut profiler);
+        assert_eq!(batch, [chunk(0, 0)]);
+
+        let latencies = profiler.histogram(Series::Metric(Metric::ChunkLatencyTicks));
+        assert_eq!(latencies.count(), 1);
+        assert_eq!(latencies.sum(), 3);
+        profiler.finish_chunk_sending();
+        assert_eq!(
+            profiler.histogram(Series::Metric(Metric::ChunksSent)).sum(),
+            1
+        );
     }
 
     #[test]
