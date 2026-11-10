@@ -240,20 +240,21 @@ async fn play(
         stats,
         ..
     } = config;
-    let mut turn = 0_u64;
     let mut second = Second::default();
     let mut second_index = 0_u64;
     // 客户端主动发的 ping 用负数 id，不会和服务端心跳的 id 撞上。
     let mut ping_id = -1_i64;
     let mut pending: HashMap<i64, Instant> = HashMap::new();
     let mut flying = false;
-    let close_reason = "duration elapsed".to_owned();
 
     // 真实客户端画出世界之后才发 player_loaded；这里进服就发，服务端才会接受移动。
     connection.write(&wire::player_loaded_frame()).await?;
     // stand 也要每 tick 发位置包，服务端才持续看到在线活动。
     let mut second_ends = Instant::now() + SECOND;
-    let mut tick_at = Instant::now() + CLIENT_TICK;
+    // 服务端跑得慢时一次 select 可能跨过好几个 20 Hz 时刻；只补一个移动包，
+    // 否则一口气塞进去的位置会被速度检查拉回。
+    let mut ticks_sent = 0_u64;
+    let started = Instant::now();
 
     loop {
         let now = Instant::now();
@@ -261,7 +262,13 @@ async fn play(
         if remaining.is_zero() {
             break;
         }
-        let next_tick = tick_at.saturating_duration_since(now).min(remaining);
+        let next_tick = started
+            .checked_add(
+                CLIENT_TICK * u32::try_from(ticks_sent.saturating_add(1)).unwrap_or(u32::MAX),
+            )
+            .map_or(remaining, |due| {
+                due.saturating_duration_since(now).min(remaining)
+            });
         let next_second = second_ends.saturating_duration_since(now).min(remaining);
         let sleep = next_tick.min(next_second);
         tokio::select! {
@@ -289,8 +296,10 @@ async fn play(
             second.packets_out += 1;
             ping_id -= 1;
         }
-        if now >= tick_at {
-            tick_at += CLIENT_TICK;
+        let target_ticks = u64::try_from((now - started).as_millis() / CLIENT_TICK.as_millis())
+            .unwrap_or(u64::MAX);
+        if target_ticks > ticks_sent {
+            ticks_sent = target_ticks.max(ticks_sent + 1);
             // 被服务端拉回之后从服务端给的位置继续走。
             let position = motion.step(CLIENT_TICK.as_secs_f64());
             let on_ground = !pattern.needs_flying();
@@ -302,8 +311,7 @@ async fn play(
             let bytes = connection.write(&batch).await?;
             second.bytes_out += bytes;
             second.packets_out += 2;
-            turn += 1;
-            if !flying && pattern.needs_flying() && turn >= 2 {
+            if !flying && pattern.needs_flying() && ticks_sent >= 2 {
                 // 服务端按创造模式允许飞行；先上报正在飞，避免飞行踢。
                 let bytes = connection
                     .write(&wire::player_abilities_frame(ABILITY_FLYING))
@@ -317,7 +325,6 @@ async fn play(
 
     // 结束前把最后一秒的零头记进去。
     stats.second(second_index, second);
-    let _ = close_reason;
     Ok(())
 }
 

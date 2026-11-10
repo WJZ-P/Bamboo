@@ -26,10 +26,6 @@ METRIC = re.compile(
 HEADER = re.compile(r"tick profile: (\d+) ticks")
 
 
-def numbers(match):
-    return [float(value) for value in match.groups()]
-
-
 def parse_reports(path):
     reports = []
     current = None
