@@ -1,47 +1,45 @@
-//! 场景诊断：检查时钟输入到底有没有让机器动起来。
+//! 诊断：活塞门乐观口径下键同效果不同的原因。
 
-use mc_bamboo_blocks::{Level, state::POWERED};
-use mc_bamboo_data::blocks;
-use mc_bamboo_hit_rate::{machines, world::Input};
+use mc_bamboo_blocks::recording::Record;
+use mc_bamboo_hit_rate::{machines, world::Machine};
 
 fn main() {
-    let mut m = machines::repeater_clock();
-    println!("input={:?}", m.input);
-    let Input::Clock { pos, .. } = m.input.clone() else {
-        panic!()
-    };
-    for now in 1..=16 {
-        m.step(now, false);
-        if now % 4 == 0 || now == 9 {
-            let mut row = Vec::new();
-            for x in -1..=8 {
-                let p = mc_bamboo_core::BlockPos::new(x, 64, 0);
-                let s = m.level.block_state(p);
-                let tag = if s.is(blocks::REDSTONE_BLOCK) {
-                    "R"
-                } else if s.is(blocks::REDSTONE_WIRE) {
-                    if s.get(mc_bamboo_blocks::state::POWER) > 0 {
-                        "W"
-                    } else {
-                        "w"
-                    }
-                } else if s.is(blocks::REPEATER) {
-                    if s.get(POWERED) { "P" } else { "p" }
-                } else if s.is(blocks::REDSTONE_LAMP) {
-                    "L"
-                } else if s.is(blocks::AIR) {
-                    "."
-                } else {
-                    "?"
-                };
-                row.push(tag);
-            }
-            let pending: Vec<_> = m.ticks.pending().collect();
-            println!(
-                "tick {now}: source={:?} row={} pending={pending:?}",
-                m.level.block_state(pos).0,
-                row.concat()
-            );
+    let (records, _) = Machine::compare(machines::piston_door, 1000);
+    let mut seen: std::collections::HashMap<u128, &Record> = Default::default();
+    let mut causes: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in &records {
+        if !r.cacheable(false) {
+            continue;
         }
+        let key = r.exact_key(false);
+        if let Some(previous) = seen.get(&key) {
+            if previous.effect_key() != r.effect_key() {
+                let cause = if previous.writes.len() != r.writes.len() {
+                    format!(
+                        "write count {} vs {}",
+                        previous.writes.len(),
+                        r.writes.len()
+                    )
+                } else {
+                    let index = previous
+                        .writes
+                        .iter()
+                        .zip(&r.writes)
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(usize::MAX);
+                    format!(
+                        "write[{index}] {:?} vs {:?}",
+                        previous.writes.get(index),
+                        r.writes.get(index)
+                    )
+                };
+                *causes.entry(cause).or_default() += 1;
+            }
+        } else {
+            seen.insert(key, r);
+        }
+    }
+    for (cause, count) in causes.iter().take(10) {
+        println!("{count}: {cause}");
     }
 }

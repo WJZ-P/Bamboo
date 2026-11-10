@@ -273,6 +273,8 @@ pub enum Input {
     /// 周期性翻转一个红石块（满信号源）：写成红石块或空气，走 `set_block_and_update`
     /// 通知邻居。这等价于一个由实验程序驱动的开关，方块行为和 Bamboo 的信号查询一致。
     Clock { pos: BlockPos, period: i64 },
+    /// 几个周期不同的独立时钟：`(位置, 周期)`，各自按 `now % period == 0` 翻转。
+    Clocks(Vec<(BlockPos, i64)>),
     /// 往源头箱子补物品，驱动漏斗机器。
     Refill {
         pos: BlockPos,
@@ -287,6 +289,19 @@ pub struct Machine {
     pub level: BenchLevel,
     pub ticks: BlockTicks,
     pub input: Input,
+}
+
+/// 翻转一格周期输入：红石块（满信号）<-> 空气，并通知邻居。
+fn toggle_source(level: &mut BenchLevel, ticks: &mut mc_bamboo_blocks::BlockTicks, pos: BlockPos) {
+    use mc_bamboo_blocks::World;
+    let on = level.block_state(pos).is(blocks::REDSTONE_BLOCK);
+    let next = if on {
+        BlockState::AIR
+    } else {
+        BlockState(blocks::REDSTONE_BLOCK)
+    };
+    let mut world = World::new(level, ticks);
+    world.set_block_and_update(pos, next);
 }
 
 impl Machine {
@@ -305,15 +320,17 @@ impl Machine {
         use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
         match self.input.clone() {
             Input::None => {}
-            Input::Clock { pos, period } if now % period == 0 => {
-                let on = self.level.block_state(pos).is(blocks::REDSTONE_BLOCK);
-                let next = if on {
-                    BlockState::AIR
-                } else {
-                    BlockState(blocks::REDSTONE_BLOCK)
-                };
-                let mut world = World::new(&mut self.level, &mut self.ticks);
-                world.set_block_and_update(pos, next);
+            Input::Clock { pos, period } => {
+                if now % period == 0 {
+                    toggle_source(&mut self.level, &mut self.ticks, pos);
+                }
+            }
+            Input::Clocks(clocks) => {
+                for (pos, period) in clocks {
+                    if now % period == 0 {
+                        toggle_source(&mut self.level, &mut self.ticks, pos);
+                    }
+                }
             }
             Input::Refill { pos, stack, period } if now % period == 0 => {
                 let mut changed = false;

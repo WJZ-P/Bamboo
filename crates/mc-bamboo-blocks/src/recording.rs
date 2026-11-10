@@ -31,7 +31,9 @@ use crate::{
     block_entity::{BlockEntity, BlockEvent},
     entity::{Entity, EntityPublic, EntitySnapshot, EntityUid},
     gamerules::BlockGameRules,
-    level::{Effect, EquipTarget, LecternFacts, LevelEntities, LevelSideState, Observation, Trigger},
+    level::{
+        Effect, EquipTarget, LecternFacts, LevelEntities, LevelSideState, Observation, Trigger,
+    },
     shape::Aabb,
     ticks::TickPriority,
     weather::{BlockWeather, PrecipitationFacts},
@@ -157,23 +159,53 @@ impl Record {
         let mut hasher = StableHasher::new();
         self.trigger.hash(&mut hasher);
         for read in &self.reads {
-            if strict_time || read.kind != K_TIME {
+            if strict_time || (read.kind != K_TIME && read.kind != K_ENTITY_TIME) {
                 read.hash(&mut hasher);
             }
         }
         hasher.finish128()
     }
 
-    /// 段哈希键：触发本身 + 精确读集合 + 读集合涉及各段的整段方块状态哈希。
+    /// 纯段哈希键（设计稿 9.3 第一版）：触发本身 + 读集合涉及的各段的整段方块状态哈希，
+    /// 再加那些「不在方块状态里」的读项的精确（位置，类别，值）。
     ///
-    /// 键里带着精确读集合，是为了保证它不比精确键粗：整段哈希里只有方块状态，
-    /// 容器、红石记忆、计划刻查询这些非方块状态只能由精确读项补上。因此同一段里
-    /// 无关的方块变了会失配，命中率不高于精确键。
+    /// 方块状态类读项（`K_BLOCK`）只进段哈希；红石记忆、方块实体内容、容器内容、
+    /// 计划刻查询、亮度、告示牌等仍按精确值进键。段内容全相同则读到的方块状态一定
+    /// 相同，所以它天然不粗于精确键，不必把整份精确读集合塞进去。
+    pub fn pure_section_key(&self, strict_time: bool) -> u128 {
+        let mut hasher = StableHasher::new();
+        self.trigger.hash(&mut hasher);
+        for (section, hash) in &self.sections {
+            section.hash(&mut hasher);
+            hash.hash(&mut hasher);
+        }
+        for read in &self.reads {
+            if (strict_time || read.kind != K_TIME && read.kind != K_ENTITY_TIME)
+                && read.kind != K_BLOCK
+            {
+                read.hash(&mut hasher);
+            }
+        }
+        hasher.finish128()
+    }
+
+    /// 纯段哈希键里要存的键部分：每段的 (段坐标, 128 位哈希) 加非方块状态读项。
+    pub fn pure_section_key_bytes(&self) -> usize {
+        let extra = self
+            .reads
+            .iter()
+            .filter(|read| read.kind != K_BLOCK)
+            .count()
+            * std::mem::size_of::<Read>();
+        self.sections.len() * std::mem::size_of::<(ChunkSection, u128)>() + extra
+    }
+
+    /// 混合段哈希键：精确读集合 + 各段的整段状态哈希。留作对照。
     pub fn section_key(&self, strict_time: bool) -> u128 {
         let mut hasher = StableHasher::new();
         self.trigger.hash(&mut hasher);
         for read in &self.reads {
-            if strict_time || read.kind != K_TIME {
+            if strict_time || (read.kind != K_TIME && read.kind != K_ENTITY_TIME) {
                 read.hash(&mut hasher);
             }
         }
@@ -318,6 +350,16 @@ impl<'a> Recording<'a> {
         }
     }
 
+    /// 一次方块实体读：内容哈希 + 时间派生部分各记一笔。
+    fn read_entity(&self, pos: BlockPos, entity: Option<&dyn BlockEntity>, tag: impl Hash) {
+        let now = self.inner.borrow().tick;
+        self.read(Some(pos), K_BLOCK_ENTITY, (tag, entity.map(entity_facts)));
+        let time = entity
+            .map(|entity| entity_time_facts(entity, now))
+            .unwrap_or(0);
+        self.read(Some(pos), K_ENTITY_TIME, time);
+    }
+
     /// 一次写进效果。
     fn write(&self, entry: Write) {
         let mut inner = self.inner.borrow_mut();
@@ -394,6 +436,7 @@ const K_BRIGHTNESS: u8 = 2;
 const K_SIGN: u8 = 3;
 const K_NOTE_SOUND: u8 = 4;
 const K_BLOCK_ENTITY: u8 = 5;
+const K_BLOCK_EVENT: u8 = 7;
 const K_REDSTONE: u8 = 6;
 const K_UNOBSTRUCTED: u8 = 8;
 const K_MIN_Y: u8 = 9;
@@ -420,6 +463,9 @@ const K_TICK_QUERY: u8 = 29;
 const K_ENTITIES: u8 = 30;
 /// 读世界时间这一项。乐观口径把它从键里去掉。
 pub const K_TIME: u8 = 31;
+/// 方块实体内容里由绝对游戏时刻换算出来的那部分（漏斗 `tickedGameTime`、
+/// 移动活塞 `lastTicked`）。乐观口径也把它从键里去掉。
+pub const K_ENTITY_TIME: u8 = 33;
 const K_TICKER: u8 = 32;
 
 /// 精确键和效果键用的 128 位哈希，算法固定，跨进程可比。
@@ -609,6 +655,20 @@ fn hash_slots(slots: &[ItemStack]) -> u64 {
     hasher.finish()
 }
 
+/// 方块实体里由绝对游戏时刻决定的字段，单独记一笔读。
+///
+/// 严格口径把它留在键里；乐观口径（「把时间比较改成相对量」）把它去掉，
+/// 否则活塞动画里 `lastTicked - now` 每刻都变，门明明周期性开合却永远不命中。
+fn entity_time_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
+    if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
+        return stable_hash(&hopper.ticked_game_time().saturating_sub(now));
+    }
+    if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
+        return stable_hash(&piston.observed_facts(now).6);
+    }
+    0
+}
+
 fn hash_sign(content: &SignContent) -> u64 {
     let mut hasher = StableHasher::new();
     content.front.messages.hash(&mut hasher);
@@ -624,7 +684,7 @@ fn hash_sign(content: &SignContent) -> u64 {
 
 /// 方块实体里能观察到的状态。私有字段通过各类自己的公开取值函数拿，
 /// 带绝对时刻的字段换成相对值，见 [`Recording::relative_time`]。
-fn entity_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
+fn entity_facts(entity: &dyn BlockEntity) -> u64 {
     let mut hasher = StableHasher::new();
     std::any::type_name_of_val(entity).hash(&mut hasher);
     if let Some(furnace) = entity.as_any().downcast_ref::<FurnaceEntity>() {
@@ -641,17 +701,16 @@ fn entity_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
         campfire.recipe_facts().hash(&mut hasher);
     } else if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
         hopper.cooldown_time().hash(&mut hasher);
-        hopper
-            .ticked_game_time()
-            .saturating_sub(now)
-            .hash(&mut hasher);
     } else if let Some(shulker) = entity.as_any().downcast_ref::<ShulkerBoxEntity>() {
         shulker.open_count().hash(&mut hasher);
         (shulker.status() as u8).hash(&mut hasher);
         shulker.progress(1.0).to_bits().hash(&mut hasher);
         shulker.progress(0.0).to_bits().hash(&mut hasher);
     } else if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
-        piston.observed_facts(now).hash(&mut hasher);
+        // 时刻字段单独记，见 `entity_time_facts` 和乐观口径的键。
+        let (state, direction, extending, source, progress, progress_o, _) =
+            piston.observed_facts(0);
+        (state, direction, extending, source, progress, progress_o).hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -784,27 +843,15 @@ impl LevelSideState for Recording<'_> {
     }
 
     fn pop_block_event(&mut self) -> Option<BlockEvent> {
+        // 驱动循环取事件是实现细节；取到的内容进读集合，不进效果。
         let value = self.level.pop_block_event();
-        self.write(Write::BlockEvent {
-            event: value.unwrap_or(BlockEvent {
-                pos: BlockPos::new(0, 0, 0),
-                block: usize::MAX,
-                param_a: 0,
-                param_b: 0,
-            }),
-            popped: value,
-        });
+        self.read(None, K_BLOCK_EVENT, value);
         value
     }
 
     fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
         let value = self.level.block_entity_dyn(pos);
-        let now = self.inner.borrow().tick;
-        self.read(
-            Some(pos),
-            K_BLOCK_ENTITY,
-            value.map(|entity| entity_facts(entity, now)),
-        );
+        self.read_entity(pos, value, 2_u8);
         value
     }
 
@@ -816,8 +863,8 @@ impl LevelSideState for Recording<'_> {
 
     fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
         let pos = entity.pos();
-        let now = self.inner.borrow().tick;
-        let facts = entity_facts(entity.as_ref(), now);
+        let facts = entity_facts(entity.as_ref());
+        self.read_entity(pos, Some(entity.as_ref()), 6_u8);
         self.write(Write::BlockEntity {
             pos,
             kind: 0,
@@ -828,15 +875,11 @@ impl LevelSideState for Recording<'_> {
 
     fn remove_block_entity(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
         let value = self.level.remove_block_entity(pos);
-        let now = self.inner.borrow().tick;
+        self.read_entity(pos, value.as_deref(), 7_u8);
         self.write(Write::BlockEntity {
             pos,
             kind: 1,
-            value: stable_hash(
-                &value
-                    .as_ref()
-                    .map(|entity| entity_facts(entity.as_ref(), now)),
-            ),
+            value: stable_hash(&value.as_ref().map(|entity| entity_facts(entity.as_ref()))),
         });
         value
     }
@@ -844,41 +887,22 @@ impl LevelSideState for Recording<'_> {
     fn take_block_entity_at(&mut self, pos: BlockPos) -> Option<(u64, Box<dyn BlockEntity>)> {
         // 驱动把实体临时拿出去不是「效果」，只是实现细节；记一笔读就够了。
         let value = self.level.take_block_entity_at(pos);
-        let now = self.inner.borrow().tick;
-        self.read(
-            Some(pos),
-            K_BLOCK_ENTITY,
-            value
-                .as_ref()
-                .map(|(id, entity)| (*id, entity_facts(entity.as_ref(), now))),
-        );
+        // ticker 的内部 id 是递增的实现细节，不进读集合。
+        let entity = value.as_ref().map(|(_, entity)| entity.as_ref());
+        self.read_entity(pos, entity, 3_u8);
         value
     }
 
     fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>> {
         let value = self.level.take_block_entity(pos, id);
-        let now = self.inner.borrow().tick;
-        self.read(
-            Some(pos),
-            K_BLOCK_ENTITY,
-            (
-                id,
-                value
-                    .as_ref()
-                    .map(|entity| entity_facts(entity.as_ref(), now)),
-            ),
-        );
+        let _ = id;
+        self.read_entity(pos, value.as_deref(), 4_u8);
         value
     }
 
     fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>) {
         // 放回去也不是「效果」：实体改了什么由这次触发里别的读写记录。
-        let now = self.inner.borrow().tick;
-        self.read(
-            Some(pos),
-            K_BLOCK_ENTITY,
-            (id, entity_facts(entity.as_ref(), now)),
-        );
+        self.read_entity(pos, Some(entity.as_ref()), 5_u8);
         self.level.put_block_entity(pos, id, entity);
     }
 
@@ -889,18 +913,17 @@ impl LevelSideState for Recording<'_> {
     }
 
     fn begin_block_entity_tick(&mut self) {
-        self.write(Write::Ticker(0));
         self.level.begin_block_entity_tick();
     }
 
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
+        // 只记位置：ticker 的内部 id 递增，是实现细节，不进读集合。
         let value = self.level.next_block_entity_ticker();
-        self.read(None, K_TICKER, value);
+        self.read(None, K_TICKER, value.map(|(pos, _)| pos));
         value
     }
 
     fn end_block_entity_tick(&mut self) {
-        self.write(Write::Ticker(1));
         self.level.end_block_entity_tick();
     }
 }
@@ -938,7 +961,11 @@ impl LevelEntities for Recording<'_> {
 
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.note_entities(4);
-        self.read(None, K_ENTITIES, (4_u8, area.min_x.to_bits(), area.max_z.to_bits()));
+        self.read(
+            None,
+            K_ENTITIES,
+            (4_u8, area.min_x.to_bits(), area.max_z.to_bits()),
+        );
         self.level.for_each_entity_in(area, visit);
     }
 
@@ -1196,16 +1223,9 @@ impl Level for Recording<'_> {
     }
 
     fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
-        let now = self.inner.borrow().tick;
-        let before = self
-            .level
-            .block_entity_dyn(pos)
-            .map(|entity| entity_facts(entity, now));
+        let before = self.level.block_entity_dyn(pos).map(entity_facts);
         let applied = self.level.with_hopper(pos, f);
-        let after = self
-            .level
-            .block_entity_dyn(pos)
-            .map(|entity| entity_facts(entity, now));
+        let after = self.level.block_entity_dyn(pos).map(entity_facts);
         self.read(Some(pos), K_HOPPER, (before, applied));
         self.write(Write::BlockEntity {
             pos,
@@ -1376,7 +1396,33 @@ impl Level for Recording<'_> {
                 self.read(None, K_TIME, 0_u8);
             }
             Observation::Effect(effect) => {
-                self.write(Write::Effect(hash_effect(effect)));
+                // 活塞伸出/收回的音高和音符盒的 seed 由世界随机源决定，
+                // 不是「状态」；效果里只留音效的种类和位置，避免同一键因
+                // 随机数不同而被算成「效果不同」。触发本身已标为不可缓存。
+                let value = match effect {
+                    Effect::Sound {
+                        sound,
+                        source,
+                        x,
+                        y,
+                        z,
+                        volume,
+                        except_initiator,
+                        ..
+                    } => stable_hash(&(
+                        9_u8,
+                        *sound,
+                        source.id(),
+                        x.to_bits(),
+                        y.to_bits(),
+                        z.to_bits(),
+                        volume.to_bits(),
+                        *except_initiator,
+                    )),
+                    Effect::NoteBlockPlayed { .. } => stable_hash(&11_u8),
+                    _ => hash_effect(effect),
+                };
+                self.write(Write::Effect(value));
             }
             Observation::TickQuery {
                 pos,
@@ -1449,8 +1495,12 @@ pub struct HitRates {
     pub total_nanos: u128,
     pub exact_strict: Hits,
     pub exact_optimistic: Hits,
+    /// 混合段哈希键（精确读集合 + 段哈希），严格 / 乐观。
     pub section_strict: Hits,
     pub section_optimistic: Hits,
+    /// 纯段哈希键（9.3 第一版口径），严格 / 乐观。
+    pub pure_strict: Hits,
+    pub pure_optimistic: Hits,
 }
 
 impl HitRates {
@@ -1469,6 +1519,8 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
     let mut exact_optimistic: HashMap<u128, u128> = HashMap::new();
     let mut section_strict: HashMap<u128, u128> = HashMap::new();
     let mut section_optimistic: HashMap<u128, u128> = HashMap::new();
+    let mut pure_strict: HashMap<u128, u128> = HashMap::new();
+    let mut pure_optimistic: HashMap<u128, u128> = HashMap::new();
     for (index, record) in records.iter().enumerate() {
         let effect = record.effect_key();
         let nanos = u128::from(record.nanos);
@@ -1505,6 +1557,12 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
                 &mut out.section_strict,
                 nanos,
             );
+            count_hit(
+                &mut pure_strict,
+                record.pure_section_key(true),
+                &mut out.pure_strict,
+                nanos,
+            );
         }
         if optimistic {
             count_hit(
@@ -1519,11 +1577,19 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
                 &mut out.section_optimistic,
                 nanos,
             );
+            count_hit(
+                &mut pure_optimistic,
+                record.pure_section_key(false),
+                &mut out.pure_optimistic,
+                nanos,
+            );
         }
         out.exact_strict.records = exact_strict.len();
         out.exact_optimistic.records = exact_optimistic.len();
         out.section_strict.records = section_strict.len();
         out.section_optimistic.records = section_optimistic.len();
+        out.pure_strict.records = pure_strict.len();
+        out.pure_optimistic.records = pure_optimistic.len();
         if (index + 1) % growth_step == 0 || index + 1 == records.len() {
             let count = index + 1;
             out.exact_strict
@@ -1542,6 +1608,12 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
                 exact_optimistic.len(),
                 section_optimistic.len(),
             ));
+            out.pure_strict
+                .growth
+                .push((count, exact_strict.len(), pure_strict.len()));
+            out.pure_optimistic
+                .growth
+                .push((count, exact_optimistic.len(), pure_optimistic.len()));
         }
     }
     out

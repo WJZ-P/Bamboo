@@ -234,12 +234,12 @@ pub fn item_sorter() -> Machine {
     m
 }
 
-/// 几位二进制计数器：四组比较器+中继器，由周期输入驱动，输出接红石灯。
+/// 比较器阵列：四组比较器 + 中继器，由一个周期输入驱动，输出接红石灯。
 ///
-/// 比较器的输出强度存在红石记忆里，每位的侧面用减法比较器做反馈。
-/// 状态组合多、很少重复，用来量「状态不重复」那一类机器。
-pub fn counter() -> Machine {
-    let mut m = machine("计数器", Input::None);
+/// 这台机器其实是又一个时钟（输入每 10 刻翻转，状态跟着回到同一组值），
+/// 不是状态很少重复的计数器，名字按实测行为改。
+pub fn comparator_array() -> Machine {
+    let mut m = machine("比较器阵列", Input::None);
     floor(&mut m.level, -2, 14, -2, 4);
     clock_input(&mut m, at(-1, 0), 10);
     for x in 0..2 {
@@ -308,6 +308,53 @@ pub fn furnace_array() -> Machine {
 }
 
 /// 全部机器，按报告表格的顺序。
+/// 三个周期互质的时钟（6 / 10 / 14 刻）汇到同一小片红石线和两个比较器上。
+///
+/// 每个时钟是一串中继器，输入端各按自己的周期翻转。全局状态的周期是
+/// 6 / 10 / 14 的最小公倍数 210 刻，汇合处的局部读集合组合数也多，
+/// 用来检验设计稿 9.4「计数器状态很少重复、命中率低」那一行。
+pub fn coprime_clocks() -> Machine {
+    let mut m = machine("互质时钟汇合", Input::None);
+    floor(&mut m.level, -1, 14, -1, 8);
+    // 三行各一串 3 个中继器，z=0/2/4，输出在 x=4 汇到一条竖线。
+    let mut clocks = Vec::new();
+    for (z, period) in [(0_i32, 6_i64), (2, 10), (4, 14)] {
+        let source = at(0, z);
+        clocks.push((source, period));
+        for x in 1..=3 {
+            m.level.set(
+                at(x, z),
+                BlockState(blocks::REPEATER)
+                    .with(HORIZONTAL_FACING, Direction::West)
+                    .with(DELAY, 1),
+            );
+        }
+        for x in 4..=5 {
+            m.level.set(at(x, z), BlockState(blocks::REDSTONE_WIRE));
+        }
+    }
+    m.input = Input::Clocks(clocks);
+    // 汇合竖线 z=0..4 在 x=6，再接两个比较器和一盏灯。
+    for z in 0..=4 {
+        m.level.set(at(6, z), BlockState(blocks::REDSTONE_WIRE));
+    }
+    m.level.set(
+        at(7, 2),
+        BlockState(blocks::COMPARATOR)
+            .with(HORIZONTAL_FACING, Direction::West)
+            .with(MODE_COMPARATOR, ComparatorMode::Compare),
+    );
+    m.level.set(
+        at(8, 2),
+        BlockState(blocks::COMPARATOR)
+            .with(HORIZONTAL_FACING, Direction::West)
+            .with(MODE_COMPARATOR, ComparatorMode::Subtract),
+    );
+    m.level.set(at(9, 2), BlockState(blocks::REDSTONE_LAMP));
+    connect_wires(&mut m);
+    m
+}
+
 pub fn all() -> Vec<fn() -> Machine> {
     vec![
         repeater_clock,
@@ -316,7 +363,8 @@ pub fn all() -> Vec<fn() -> Machine> {
         redstone_wire_array,
         hopper_chain,
         item_sorter,
-        counter,
+        comparator_array,
+        coprime_clocks,
         furnace_array,
     ]
 }

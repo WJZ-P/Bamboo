@@ -124,7 +124,13 @@ fn summarize(name: &str, ticks: i64, records: &[Record], rates: &HitRates) -> St
     out.push_str(&row("严格", "精确", &rates.exact_strict, cacheable_strict));
     out.push_str(&row(
         "严格",
-        "段哈希",
+        "纯段哈希",
+        &rates.pure_strict,
+        cacheable_strict,
+    ));
+    out.push_str(&row(
+        "严格",
+        "混合段哈希",
         &rates.section_strict,
         cacheable_strict,
     ));
@@ -136,7 +142,13 @@ fn summarize(name: &str, ticks: i64, records: &[Record], rates: &HitRates) -> St
     ));
     out.push_str(&row(
         "乐观",
-        "段哈希",
+        "纯段哈希",
+        &rates.pure_optimistic,
+        cacheable_optimistic,
+    ));
+    out.push_str(&row(
+        "乐观",
+        "混合段哈希",
         &rates.section_optimistic,
         cacheable_optimistic,
     ));
@@ -247,6 +259,17 @@ fn summarize(name: &str, ticks: i64, records: &[Record], rates: &HitRates) -> St
         unique,
         (unique * per_record) as f64 / 1024.0,
     ));
+    if !records.is_empty() {
+        let pure_total: usize = records.iter().map(|r| r.pure_section_key_bytes()).sum();
+        let avg_pure = pure_total / records.len();
+        out.push_str(&format!(
+            "- 纯段哈希键的键部分平均 {} 字节/条（段 {} 个 + 非方块状态读项），
+  对比精确键的读集合 {} 字节/条。\n",
+            avg_pure,
+            avg_sections,
+            avg_reads * std::mem::size_of::<Read>(),
+        ));
+    }
     out
 }
 
@@ -258,8 +281,8 @@ fn main() {
         .unwrap_or(DEFAULT_TICKS);
     let only = args.get(1).map(String::as_str);
     let mut table = String::from(
-        "| 机器 | 触发数 | 不能缓存 | 精确命中率 | 段哈希命中率 | 可省耗时（精确） | 记录数 | 漏洞数 |\n\
-         | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| 机器 | 触发数 | 不能缓存 | 精确命中率 | 纯段哈希命中率 | 混合段哈希命中率 | 可省耗时（精确） | 记录数 | 漏洞数 |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for build in machines::all() {
         let probe = build();
@@ -277,14 +300,17 @@ fn main() {
         println!("{}", summarize(name, ticks, &records, &rates));
         println!("开/关录制逐刻比较：{mismatches} 刻不一致（应为 0）。\n");
         table.push_str(&format!(
-            "| {name} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             records.len(),
             pct(strict_uncacheable, records.len()),
             pct(rates.exact_strict.hits, cacheable),
+            pct(rates.pure_strict.hits, cacheable),
             pct(rates.section_strict.hits, cacheable),
             nanos_pct(rates.exact_strict.saved_nanos, rates.total_nanos),
             rates.exact_strict.records,
-            rates.exact_strict.mismatched_effects + rates.section_strict.mismatched_effects,
+            rates.exact_strict.mismatched_effects
+                + rates.pure_strict.mismatched_effects
+                + rates.section_strict.mismatched_effects,
         ));
     }
     println!("## 汇总\n\n{table}");
