@@ -641,6 +641,11 @@ impl<'a> World<'a> {
         self.level
     }
 
+    /// 实体驱动的入口：写一个 `World` 入口函数给并行/精确两种驱动用。
+    pub(crate) fn entities_mut(&mut self) -> &mut dyn crate::level::LevelEntities {
+        self.level
+    }
+
     /// `getMinY`。
     pub fn min_y(&self) -> i32 {
         self.level.min_y()

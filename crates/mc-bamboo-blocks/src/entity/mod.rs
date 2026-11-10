@@ -10,6 +10,7 @@
 //! block entities; those already ran inside the scheduled-tick step.
 
 pub mod ctx;
+pub mod parallel;
 pub mod random;
 pub mod store;
 

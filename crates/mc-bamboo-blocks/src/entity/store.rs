@@ -305,6 +305,8 @@ pub struct EntitySnapshot {
     pub public: Vec<EntityPublic>,
     pub next_public: Vec<EntityPublic>,
     pub state: Vec<EntityState>,
+    /// `next_public.clone_from(&public)` 那一步的耗时，给基准用。
+    pub clone_time: std::time::Duration,
 }
 
 /// 一个 region 的实体表。
@@ -582,22 +584,25 @@ impl EntityStore {
 
     /// 并行阶段开始：摊出三个平行数组，按 uid 升序。
     pub fn snapshot(&self) -> EntitySnapshot {
+        use std::time::Instant;
         let mut uids = Vec::with_capacity(self.index.len());
         let mut public = Vec::with_capacity(self.index.len());
-        let mut next_public = Vec::with_capacity(self.index.len());
         let mut state = Vec::with_capacity(self.index.len());
         for &row in self.index.values() {
             let entry = self.slots[row].as_ref().expect("indexed row is live");
             uids.push(entry.public.uid);
             public.push(entry.public.clone());
-            next_public.push(entry.public.clone());
             state.push(entry.state.clone());
         }
+        let clone_start = Instant::now();
+        let mut next_public = Vec::with_capacity(public.len());
+        next_public.clone_from(&public);
         EntitySnapshot {
             uids,
             public,
             next_public,
             state,
+            clone_time: clone_start.elapsed(),
         }
     }
 
@@ -623,7 +628,7 @@ impl EntityStore {
 
     /// 把 `chunk` 里的实体装进盒子搬走。只在 tick 边界调用，tick 中途返回 [`Busy`]。
     pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkEntities, Busy> {
-        if self.ticking {
+        if self.ticking || !self.taken.is_empty() {
             return Err(Busy);
         }
         let taken: Vec<EntityUid> = self
@@ -811,6 +816,52 @@ mod tests {
         store.begin_tick();
         assert!(store.take_chunk(ChunkPos::new(0, 0)).is_err());
         store.end_tick();
+    }
+
+    /// 参照 `BlockEntities::take_chunk`：盒子能跨线程搬，实体按 uid 排序，
+    /// tick 中途一律 Busy，别的区块的实体不受影响。
+    #[test]
+    fn chunk_boxes_move_whole_chunks_at_tick_boundaries() {
+        fn assert_send<T: Send>() {}
+        assert_send::<ChunkEntities>();
+
+        let mut store = EntityStore::new();
+        let first = store.spawn(Entity::ground_item(
+            Vec3::new(0.5, 64.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        let second = store.spawn(Entity::falling_block(
+            BlockPos::new(1, 70, 1),
+            BlockState(blocks::SAND),
+        ));
+        let third = store.spawn(Entity::ground_item(
+            Vec3::new(40.5, 64.0, 0.5),
+            ItemStack::new(2, 1),
+        ));
+        let fourth = store.spawn(Entity::ground_item(
+            Vec3::new(-0.5, 64.0, 0.5),
+            ItemStack::new(3, 1),
+        ));
+
+        // 同一区块的两件按 uid 升序装盒，别的区块原地不动。
+        let boxed = store.take_chunk(ChunkPos::new(0, 0)).unwrap();
+        assert_eq!(store.ids(), [third, fourth]);
+        let moved = std::thread::spawn(move || boxed).join().unwrap();
+        store.insert_chunk(moved);
+        assert_eq!(store.ids(), [first, second, third, fourth]);
+        assert_eq!(
+            store.public_at(second).map(|public| public.position.y),
+            Some(70.0)
+        );
+
+        // tick 中途和有行被拿出去时都拒绝搬。
+        store.begin_tick();
+        assert!(store.take_chunk(ChunkPos::new(0, 0)).is_err());
+        store.end_tick();
+        let taken = store.take(first).unwrap();
+        assert!(store.take_chunk(ChunkPos::new(0, 0)).is_err());
+        store.put(taken);
+        assert!(store.take_chunk(ChunkPos::new(0, 0)).is_ok());
     }
 
     use mc_bamboo_data::blocks;
