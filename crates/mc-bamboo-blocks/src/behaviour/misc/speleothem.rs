@@ -139,9 +139,9 @@ fn drop_stalactite(state: BlockState, world: &mut World, pos: BlockPos) {
             // The tip calls `setHurtsEntities`. Entity damage is skipped, but the flag
             // is what an anvil reads before it rolls to crack, and dripstone sets it too.
             let size = (1 + pos.y - fall_pos.y).max(6);
-            if let Some(entity) = world.entity_mut(id) {
+            world.with_entity_mut(id, &mut |entity| {
                 entity.set_hurts_entities(size as f32, 40);
-            }
+            });
             break;
         }
         fall_pos = fall_pos.below();

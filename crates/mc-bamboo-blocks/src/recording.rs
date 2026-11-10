@@ -29,9 +29,9 @@ use crate::{
         BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
     },
     block_entity::{BlockEntity, BlockEvent},
-    entity::Entities,
+    entity::{Entity, EntityPublic, EntitySnapshot, EntityUid},
     gamerules::BlockGameRules,
-    level::{Effect, EquipTarget, LecternFacts, LevelSideState, Observation, Trigger},
+    level::{Effect, EquipTarget, LecternFacts, LevelEntities, LevelSideState, Observation, Trigger},
     shape::Aabb,
     ticks::TickPriority,
     weather::{BlockWeather, PrecipitationFacts},
@@ -330,6 +330,12 @@ impl<'a> Recording<'a> {
     fn redstone_write(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
         let value = stable_hash(&value);
         self.write(Write::Redstone { pos, kind, value });
+    }
+
+    /// 实体窄接口上的任意一次调用都算「碰了实体」。
+    fn note_entities(&self, which: u8) {
+        let _ = which;
+        self.uncacheable(Uncacheable::Entities);
     }
 
     /// 标一个不能缓存的原因，同一次触发里只记一次。
@@ -899,6 +905,108 @@ impl LevelSideState for Recording<'_> {
     }
 }
 
+/// 录制包装直接实现实体窄接口（不经过 `EntityTables`）：碰到实体就标记不可缓存，
+/// 每个方法都原样转发，返回值和副作用不变。
+impl LevelEntities for Recording<'_> {
+    fn entity_count(&self) -> usize {
+        self.note_entities(0);
+        let value = self.level.entity_count();
+        self.read(None, K_ENTITIES, (0_u8, value));
+        value
+    }
+
+    fn entity_uids(&self) -> Vec<EntityUid> {
+        self.note_entities(1);
+        let value = self.level.entity_uids();
+        self.read(None, K_ENTITIES, (1_u8, &value));
+        value
+    }
+
+    fn entity(&self, uid: EntityUid) -> Option<Entity> {
+        self.note_entities(2);
+        let value = self.level.entity(uid);
+        self.read(None, K_ENTITIES, (2_u8, uid, value.is_some()));
+        value
+    }
+
+    fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic> {
+        self.note_entities(3);
+        let value = self.level.entity_public(uid);
+        self.read(None, K_ENTITIES, (3_u8, uid, value.is_some()));
+        value
+    }
+
+    fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        self.note_entities(4);
+        self.read(None, K_ENTITIES, (4_u8, area.min_x.to_bits(), area.max_z.to_bits()));
+        self.level.for_each_entity_in(area, visit);
+    }
+
+    fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
+        self.note_entities(5);
+        let uid = self.level.spawn_entity(entity);
+        self.read(None, K_ENTITIES, (5_u8, uid));
+        uid
+    }
+
+    fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool {
+        self.note_entities(6);
+        let value = self.level.with_just_spawned(uid, f);
+        self.read(None, K_ENTITIES, (6_u8, uid, value));
+        value
+    }
+
+    fn discard_entity(&mut self, uid: EntityUid) -> bool {
+        self.note_entities(7);
+        let value = self.level.discard_entity(uid);
+        self.write(Write::Effect(stable_hash(&(7_u8, uid, value))));
+        value
+    }
+
+    fn remove_entity(&mut self, uid: EntityUid) {
+        self.note_entities(8);
+        self.write(Write::Effect(stable_hash(&(8_u8, uid))));
+        self.level.remove_entity(uid);
+    }
+
+    fn begin_entity_tick(&mut self) {
+        self.level.begin_entity_tick();
+    }
+
+    fn end_entity_tick(&mut self) {
+        self.level.end_entity_tick();
+    }
+
+    fn take_entity(&mut self, uid: EntityUid) -> Option<Entity> {
+        self.note_entities(9);
+        let value = self.level.take_entity(uid);
+        self.read(None, K_ENTITIES, (9_u8, uid, value.is_some()));
+        value
+    }
+
+    fn put_entity(&mut self, entity: Entity) {
+        self.note_entities(10);
+        self.level.put_entity(entity);
+    }
+
+    fn live_entities(&self) -> Vec<Entity> {
+        self.note_entities(11);
+        let value = self.level.live_entities();
+        self.read(None, K_ENTITIES, (11_u8, value.len()));
+        value
+    }
+
+    fn entity_snapshot(&self) -> EntitySnapshot {
+        self.note_entities(12);
+        self.level.entity_snapshot()
+    }
+
+    fn entity_publish(&mut self, snapshot: EntitySnapshot) {
+        self.note_entities(13);
+        self.level.entity_publish(snapshot);
+    }
+}
+
 impl Level for Recording<'_> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         let value = self.level.block_state(pos);
@@ -996,18 +1104,6 @@ impl Level for Recording<'_> {
         let value = self.level.runs_block_entity_tick(pos);
         self.read(Some(pos), K_TICKER, (2_u8, value));
         value
-    }
-
-    fn entities(&self) -> &Entities {
-        self.uncacheable(Uncacheable::Entities);
-        self.read(None, K_ENTITIES, 0_u8);
-        self.level.entities()
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        self.uncacheable(Uncacheable::Entities);
-        self.read(None, K_ENTITIES, 1_u8);
-        self.level.entities_mut()
     }
 
     fn block_game_rules(&self) -> BlockGameRules {
@@ -1328,7 +1424,7 @@ fn finish_record(mut frame: Frame) -> Record {
 }
 
 const _: fn() = || {
-    fn assert_level<T: Level + LevelSideState>() {}
+    fn assert_level<T: Level + LevelSideState + LevelEntities>() {}
     assert_level::<Recording<'static>>();
 };
 

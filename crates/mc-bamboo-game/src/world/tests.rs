@@ -233,6 +233,7 @@ impl Harness {
             permission_level: 0,
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
+            online_at_login: 0,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -259,6 +260,7 @@ impl Harness {
             permission_level: 0,
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
+            online_at_login: 0,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -402,6 +404,11 @@ impl Harness {
     /// 缓存里的区块帧条目数。
     pub(crate) fn cached_frame_count(&self) -> usize {
         self.world.region.chunk_cache.frame_count()
+    }
+
+    /// 缓存里有没有空帧。
+    pub(crate) fn has_empty_cached_frame(&self) -> bool {
+        self.world.region.chunk_cache.has_empty_frame()
     }
 
     /// 给其他模块的测试直接看世界的状态。
@@ -838,6 +845,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         permission_level: 0,
         is_op: false,
         peer_ip: "127.0.0.1".to_owned(),
+        online_at_login: 0,
         sink: Box::new(sink),
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -1324,7 +1332,7 @@ fn early_return_from_inbox_still_finishes_the_tick_timing() {
 }
 
 #[test]
-fn chunk_latency_counts_ticks_between_entering_pending_and_sending() {
+fn chunk_latency_counts_wall_time_between_entering_pending_and_sending() {
     let mut server = Harness::new(8);
     let client = server.join_with("Kitten", client_requesting(8));
     // 第一刻：区块进入 pending，并发出最近的 9 个。
@@ -1340,7 +1348,7 @@ fn chunk_latency_counts_ticks_between_entering_pending_and_sending() {
         .world
         .region
         .profiler
-        .histogram(Series::Metric(Metric::ChunkLatencyTicks));
+        .histogram(Series::Metric(Metric::ChunkLatencyUs));
     assert!(latency.count() > 0);
     let chunks_sent = server
         .world
@@ -1495,9 +1503,11 @@ fn schedule_catches_up_after_a_small_delay() {
     let mut now = start + Duration::from_millis(200);
     for _ in 0..4 {
         assert_eq!(schedule.after_tick(now), Duration::ZERO);
+        assert!(schedule.catching_up(), "连续跑的刻标成追赶");
         now += Duration::from_millis(1);
     }
     assert!(!schedule.after_tick(now).is_zero());
+    assert!(!schedule.catching_up(), "重新睡上之后不再是追赶");
 }
 
 #[test]
@@ -1507,9 +1517,11 @@ fn schedule_skips_ahead_when_it_is_too_far_behind() {
 
     let now = start + Duration::from_secs(10);
     assert_eq!(schedule.after_tick(now), Duration::ZERO);
+    assert!(schedule.skipped_catch_up());
 
     // 不再补那 10 秒，下一 tick 从现在算起。
     assert_eq!(schedule.after_tick(now), Duration::from_millis(50));
+    assert!(!schedule.skipped_catch_up());
 }
 
 #[test]

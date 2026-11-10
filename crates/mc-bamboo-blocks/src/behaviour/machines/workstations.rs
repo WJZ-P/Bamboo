@@ -50,11 +50,9 @@ impl Behaviour for Anvil {
     }
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        if let Some(id) = fall_if_free(state, world, pos)
-            && let Some(entity) = world.entity_mut(id)
-        {
+        if let Some(id) = fall_if_free(state, world, pos) {
             // `AnvilBlock.falling`：`setHurtsEntities(2.0F, 40)`。
-            entity.set_hurts_entities(2.0, 40);
+            world.with_entity_mut(id, &mut |entity| entity.set_hurts_entities(2.0, 40));
         }
     }
 

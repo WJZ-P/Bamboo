@@ -52,10 +52,10 @@ impl Behaviour for Pumpkin {
         );
         let delta_x = 0.05 * f64::from(step_x) + world.random().next_double() * 0.02;
         let delta_z = 0.05 * f64::from(step_z) + world.random().next_double() * 0.02;
-        if let Some(id) = id
-            && let Some(entity) = world.entity_mut(id)
-        {
-            entity.delta = Vec3::new(delta_x, 0.05, delta_z);
+        if let Some(id) = id {
+            world.with_entity_mut(id, &mut |entity| {
+                entity.delta = Vec3::new(delta_x, 0.05, delta_z);
+            });
         }
         world.play_block_sound(pos, sound_event("minecraft:block.pumpkin.carve"), 1.0, 1.0);
         world.set_block(pos, carved, UPDATE_ALL_IMMEDIATE);

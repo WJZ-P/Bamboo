@@ -186,7 +186,8 @@ async fn exchange(
 /// 按顺序写出队列里的帧，直到队列结束。压缩启用时每个包在写之前压缩，加密启用时再加密。
 ///
 /// 顺序和官方管线一致：压缩在长度前缀里面，加密在最外面，连长度前缀一起加密。
-/// 一批里的各段按原顺序拼成一次写：加密是一条连接上的字节流，中间不能插入别的写。
+/// 压缩或加密开着时，一批里的各段按原顺序拼成一次写：加密是一条连接上的字节流，
+/// 中间不能插入别的写；两者都关着时逐段写，少一次整批拼接。
 async fn write_queue<W: AsyncWrite + Unpin>(
     stream: &mut W,
     mut queue: OutboundQueue,
@@ -196,26 +197,43 @@ async fn write_queue<W: AsyncWrite + Unpin>(
 ) -> Result<(), ConnectionError> {
     while let Some(batch) = queue.next().await {
         let uncompressed_len = batch.len_bytes();
-        let mut payload = Vec::with_capacity(uncompressed_len);
-        for segment in batch.segments() {
-            match (segment, compression) {
-                (Segment::Shared(frames), Some(threshold)) => {
-                    payload.extend_from_slice(&frames.compressed(threshold)?);
+        if compression.is_none() && encrypt.is_none() {
+            // 各段本来就是完整的帧：逐段写，省掉一次整批拼接。一批仍共用一个写时限。
+            let writing = async {
+                for segment in batch.segments() {
+                    let bytes = match segment {
+                        Segment::Shared(frames) => frames.raw(),
+                        Segment::Raw(frames) => frames.as_slice(),
+                    };
+                    stream.write_all(bytes).await?;
                 }
-                (Segment::Raw(frames), Some(threshold)) => {
-                    let compressed = compression::encode_frames(frames, threshold)?;
-                    payload.extend_from_slice(&compressed);
+                Ok::<(), std::io::Error>(())
+            };
+            timeout(time_limit, writing)
+                .await
+                .map_err(|_| ConnectionError::WriteTimeout)??;
+        } else {
+            let mut payload = Vec::with_capacity(uncompressed_len);
+            for segment in batch.segments() {
+                match (segment, compression) {
+                    (Segment::Shared(frames), Some(threshold)) => {
+                        payload.extend_from_slice(&frames.compressed(threshold)?);
+                    }
+                    (Segment::Raw(frames), Some(threshold)) => {
+                        let compressed = compression::encode_frames(frames, threshold)?;
+                        payload.extend_from_slice(&compressed);
+                    }
+                    (Segment::Shared(frames), None) => payload.extend_from_slice(frames.raw()),
+                    (Segment::Raw(frames), None) => payload.extend_from_slice(frames),
                 }
-                (Segment::Shared(frames), None) => payload.extend_from_slice(frames.raw()),
-                (Segment::Raw(frames), None) => payload.extend_from_slice(frames),
             }
+            if let Some(encrypt) = &mut encrypt {
+                encrypt.encrypt(&mut payload);
+            }
+            timeout(time_limit, stream.write_all(&payload))
+                .await
+                .map_err(|_| ConnectionError::WriteTimeout)??;
         }
-        if let Some(encrypt) = &mut encrypt {
-            encrypt.encrypt(&mut payload);
-        }
-        timeout(time_limit, stream.write_all(&payload))
-            .await
-            .map_err(|_| ConnectionError::WriteTimeout)??;
         queue.mark_written(uncompressed_len);
     }
     Ok(())
@@ -261,6 +279,7 @@ impl RequestReader<'_> {
             permission_level: op.map_or(0, |entry| entry.level),
             is_op: op.is_some(),
             peer_ip: self.peer_ip.clone(),
+            online_at_login: session.online_at_login,
             sink: Box::new(outbound.clone()),
         };
         self.send_to_world(Inbound::Join(Box::new(request)))

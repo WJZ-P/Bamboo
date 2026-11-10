@@ -6,9 +6,9 @@
 use std::collections::BTreeMap;
 
 use mc_bamboo_blocks::{
-    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, HopperEntity, Level,
-    LevelRandom, LevelTables, RedstoneMemory, Slots,
-    entity::Entities,
+    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityTables,
+    HopperEntity, Level, LevelRandom, LevelTables, RedstoneMemory, Slots,
+    entity::EntityStore,
     level::EquipTarget,
     recording::{Record, Recording},
 };
@@ -27,7 +27,7 @@ pub struct BenchLevel {
     pub block_entities: BlockEntities,
     pub block_events: BlockEvents,
     pub redstone: RedstoneMemory,
-    pub entities: Entities,
+    pub entities: EntityStore,
 }
 
 impl Default for BenchLevel {
@@ -45,7 +45,7 @@ impl BenchLevel {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             redstone: RedstoneMemory::default(),
-            entities: Entities::default(),
+            entities: EntityStore::default(),
         }
     }
 
@@ -98,6 +98,16 @@ impl BenchLevel {
         }
         out.push(format!("seed:{}", self.random.source().seed()));
         out
+    }
+}
+
+impl EntityTables for BenchLevel {
+    fn entities_table(&self) -> &EntityStore {
+        &self.entities
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        &mut self.entities
     }
 }
 
@@ -183,14 +193,6 @@ impl Level for BenchLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
-    }
-
-    fn entities(&self) -> &Entities {
-        &self.entities
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        &mut self.entities
     }
 
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {

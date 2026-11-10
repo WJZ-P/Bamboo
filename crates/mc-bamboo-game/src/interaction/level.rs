@@ -3,8 +3,9 @@
 use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
-    Aabb, BlockEntities, BlockEvents, BlockGameRules, BlockState, Combined, Container,
-    HopperEntity, Level, LevelRandom, LevelTables, RedstoneMemory, ShulkerSlots, Slots,
+    Aabb, BlockEntities, BlockEvents, BlockGameRules, BlockState, Combined, Container, EntityStore,
+    EntityTables, HopperEntity, Level, LevelRandom, LevelTables, RedstoneMemory, ShulkerSlots,
+    Slots,
     container::redstone_signal,
     entity::Entities,
     level::EquipTarget,
@@ -68,6 +69,16 @@ impl LevelTables for RegionLevel<'_> {
 
     fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
         self.redstone
+    }
+}
+
+impl EntityTables for RegionLevel<'_> {
+    fn entities_table(&self) -> &EntityStore {
+        self.entities
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        self.entities
     }
 }
 
@@ -159,14 +170,6 @@ impl Level for RegionLevel<'_> {
             ComponentValue::NoteBlockSound(sound) => Some(sound.clone()),
             _ => None,
         }
-    }
-
-    fn entities(&self) -> &Entities {
-        self.entities
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        self.entities
     }
 
     fn block_game_rules(&self) -> BlockGameRules {

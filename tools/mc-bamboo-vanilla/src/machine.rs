@@ -17,8 +17,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockState, BlockTicks, Level, LevelRandom, LevelTables,
-    RedstoneMemory, World,
+    BlockEntities, BlockEvents, BlockState, BlockTicks, EntityStore, EntityTables, Level,
+    LevelRandom, LevelTables, RedstoneMemory, World,
     behaviour::machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
     entity::Entities,
 };
@@ -115,6 +115,16 @@ impl LevelTables for MachineLevel {
     }
 }
 
+impl EntityTables for MachineLevel {
+    fn entities_table(&self) -> &EntityStore {
+        &self.entities
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        &mut self.entities
+    }
+}
+
 impl Level for MachineLevel {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         self.blocks
@@ -166,14 +176,6 @@ impl Level for MachineLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
-    }
-
-    fn entities(&self) -> &Entities {
-        &self.entities
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        &mut self.entities
     }
 }
 

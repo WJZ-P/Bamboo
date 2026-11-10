@@ -1355,7 +1355,7 @@ fn creative_breaks_only_drop_non_empty_shulker_boxes() {
             .region
             .entities
             .iter()
-            .filter_map(|entity| entity.ground())
+            .filter_map(|entity| entity.ground().cloned())
             .collect();
         assert_eq!(!items.is_empty(), filled, "filled={filled}");
         if filled {

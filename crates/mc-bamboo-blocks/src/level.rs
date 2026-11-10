@@ -15,7 +15,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use crate::{
     block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents},
     container::Container,
-    entity::Entities,
+    entity::{Entity, EntityPublic, EntityStore, EntityUid},
     gamerules::BlockGameRules,
     hopper::HopperEntity,
     random::LevelRandom,
@@ -309,8 +309,118 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 }
 
+/// 方块逻辑能碰到的实体表：一次调用一个具体读或写，位置、范围或 ID 当参数。
+///
+/// 和 [`LevelSideState`] 一样，用整张表存实体的世界实现 [`EntityTables`] 就自动得到它；
+/// 按区块存或者要录制读写的实现者可以直接实现这个 trait，不必交出整张表。
+/// 漏斗吸物品这类方块实体阶段的写入是串行的，直接走这里，不经过实体命令。
+pub trait LevelEntities {
+    fn entity_count(&self) -> usize;
+    /// 按 uid 升序，也就是生成的先后。
+    fn entity_uids(&self) -> Vec<EntityUid>;
+    /// 已经在 tick 列表里的实体。正在 tick 的那一个看不到。
+    fn entity(&self, uid: EntityUid) -> Option<Entity>;
+    fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic>;
+    /// 空间索引范围查询，按 uid 升序访问。
+    fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// `addFreshEntity`：tick 期间生成的实体下一 tick 才动。
+    fn spawn_entity(&mut self, entity: Entity) -> EntityUid;
+    /// 刚生成、还没并进 tick 列表的实体也找得到。
+    fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool;
+    /// 只打上 `removed` 标记，实体还留在这一拍的名单里。
+    fn discard_entity(&mut self, uid: EntityUid) -> bool;
+    /// 从 tick 列表里立刻拿掉。
+    fn remove_entity(&mut self, uid: EntityUid);
+    fn begin_entity_tick(&mut self);
+    fn end_entity_tick(&mut self);
+    fn take_entity(&mut self, uid: EntityUid) -> Option<Entity>;
+    fn put_entity(&mut self, entity: Entity);
+    fn live_entities(&self) -> Vec<Entity>;
+    /// 并行驱动用：摊出三个平行数组，和把算完的数据发布回表。
+    fn entity_snapshot(&self) -> crate::entity::EntitySnapshot;
+    fn entity_publish(&mut self, snapshot: crate::entity::EntitySnapshot);
+}
+
+/// 用一整张 [`EntityStore`] 存实体的世界。实现它就自动得到 [`LevelEntities`]。
+///
+/// [`Level`] 不把它当父 trait，方块逻辑拿到的 `&mut dyn Level` 够不着整张表。
+pub trait EntityTables {
+    fn entities_table(&self) -> &EntityStore;
+    fn entities_table_mut(&mut self) -> &mut EntityStore;
+}
+
+impl<T: EntityTables + ?Sized> LevelEntities for T {
+    fn entity_count(&self) -> usize {
+        self.entities_table().len()
+    }
+
+    fn entity_uids(&self) -> Vec<EntityUid> {
+        self.entities_table().ids()
+    }
+
+    fn entity(&self, uid: EntityUid) -> Option<Entity> {
+        self.entities_table().get(uid)
+    }
+
+    fn entity_public(&self, uid: EntityUid) -> Option<EntityPublic> {
+        self.entities_table().public_at(uid).cloned()
+    }
+
+    fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        self.entities_table().for_each_in(area, visit);
+    }
+
+    fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
+        self.entities_table_mut().spawn(entity)
+    }
+
+    fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool {
+        self.entities_table_mut()
+            .with_mut_including_pending(uid, f)
+            .is_some()
+    }
+
+    fn discard_entity(&mut self, uid: EntityUid) -> bool {
+        self.entities_table_mut()
+            .with_mut(uid, |entity| entity.discard())
+            .is_some()
+    }
+
+    fn remove_entity(&mut self, uid: EntityUid) {
+        self.entities_table_mut().remove(uid);
+    }
+
+    fn begin_entity_tick(&mut self) {
+        self.entities_table_mut().begin_tick();
+    }
+
+    fn end_entity_tick(&mut self) {
+        self.entities_table_mut().end_tick();
+    }
+
+    fn take_entity(&mut self, uid: EntityUid) -> Option<Entity> {
+        self.entities_table_mut().take(uid)
+    }
+
+    fn put_entity(&mut self, entity: Entity) {
+        self.entities_table_mut().put(entity);
+    }
+
+    fn live_entities(&self) -> Vec<Entity> {
+        self.entities_table().iter().collect()
+    }
+
+    fn entity_snapshot(&self) -> crate::entity::EntitySnapshot {
+        self.entities_table().snapshot()
+    }
+
+    fn entity_publish(&mut self, snapshot: crate::entity::EntitySnapshot) {
+        self.entities_table_mut().publish(snapshot);
+    }
+}
+
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
-pub trait Level: LevelSideState {
+pub trait Level: LevelSideState + LevelEntities {
     /// 世界外返回 `void_air`。
     fn block_state(&self, pos: BlockPos) -> BlockState;
 
@@ -369,16 +479,6 @@ pub trait Level: LevelSideState {
     fn runs_block_entity_tick(&self, _pos: BlockPos) -> bool {
         true
     }
-
-    /// 这个世界里的实体。实体由世界线程拥有，见 `docs/folia.md`。
-    ///
-    /// Entities in this world. The world thread owns them; see `docs/folia.md`.
-    fn entities(&self) -> &Entities;
-
-    /// 见 [`Level::entities`]。
-    ///
-    /// See [`Level::entities`].
-    fn entities_mut(&mut self) -> &mut Entities;
 
     /// 方块逻辑读到的游戏规则快照。默认是官方默认值。
     ///

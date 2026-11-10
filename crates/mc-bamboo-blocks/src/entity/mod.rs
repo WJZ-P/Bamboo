@@ -9,7 +9,10 @@
 //! They tick after scheduled ticks and random ticks. Vanilla ticks entities before
 //! block entities; those already ran inside the scheduled-tick step.
 
+pub mod ctx;
+pub mod parallel;
 pub mod random;
+pub mod store;
 
 mod explosion;
 mod falling;
@@ -17,13 +20,11 @@ mod item;
 mod physics;
 mod tnt;
 
-use std::collections::BTreeMap;
-
 use mc_bamboo_core::{Axis, BlockPos, Vec3};
 use mc_bamboo_data::entity_types;
 use mc_bamboo_protocol::item::ItemStack;
 
-use crate::{shape::Aabb, state::BlockState, world::World};
+use crate::{shape::Aabb, state::BlockState};
 
 pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
@@ -32,6 +33,10 @@ pub use physics::{
     sweep_movement,
 };
 pub use random::JavaRandom;
+pub use store::{
+    ChunkEntities, EntityPublic, EntityRow, EntitySnapshot, EntityState, EntityStore, EntityUid,
+    FallingBlockState, ItemState, KindPublic, KindState,
+};
 
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。
 pub const FIRST_ENTITY_ID: i32 = 1 << 24;
@@ -177,11 +182,11 @@ impl EntityKind {
 
 /// 一次移动，官方的 `Entity.Movement`。
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Movement {
-    pub(crate) from: Vec3,
-    pub(crate) to: Vec3,
+pub struct Movement {
+    pub from: Vec3,
+    pub to: Vec3,
     /// `axisDependentOriginalMovement`：`move` 记下的原始位移，按轴拆开检查时用。
-    pub(crate) original: Option<Vec3>,
+    pub original: Option<Vec3>,
 }
 
 /// 一个实体。
@@ -319,19 +324,13 @@ impl Entity {
         self.tick_count += 1;
     }
 
-    /// 这个 tick 的 `tick()`。
-    pub(crate) fn tick(&mut self, world: &mut World) {
+    /// 这个 tick 的 `tick()`。逻辑只看得到上下文接口，见 [`ctx`]。
+    pub(crate) fn tick(&mut self, ctx: &mut dyn ctx::EntityCtx) {
         self.common_tick();
-        match &self.kind {
-            EntityKind::FallingBlock(data) => {
-                let data = *data;
-                self.tick_falling_block(data, world);
-            }
-            EntityKind::Tnt(data) => {
-                let data = *data;
-                self.tick_tnt(data, world);
-            }
-            EntityKind::Item(_) => self.tick_item(world),
+        match self.kind.clone() {
+            EntityKind::FallingBlock(_) => falling::tick_falling_block(self, ctx),
+            EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
+            EntityKind::Item(_) => Entity::tick_item(self, ctx),
         }
     }
 
@@ -382,118 +381,10 @@ impl Entity {
     }
 }
 
-/// 一个世界里的全部实体。
+/// 一个世界里的全部实体。公开和私有数据分开存，见 [`store`]。
 ///
 /// 和官方的 `EntityTickList` 一样：tick 期间新生成的实体进 `pending`，下一 tick 才开始 tick。
-#[derive(Debug)]
-pub struct Entities {
-    next_id: i32,
-    active: BTreeMap<i32, Entity>,
-    pending: Vec<Entity>,
-    ticking: bool,
-}
-
-impl Default for Entities {
-    fn default() -> Self {
-        Self {
-            next_id: FIRST_ENTITY_ID,
-            active: BTreeMap::new(),
-            pending: Vec::new(),
-            ticking: false,
-        }
-    }
-}
-
-impl Entities {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 从指定的实体 ID 开始分配。oracle 的假世界用这个对齐官方的 `getNextEntityId`。
-    ///
-    /// Starts allocating ids at `next_id`. The oracle's fake world uses this to match
-    /// vanilla's `getNextEntityId`.
-    pub fn with_next_id(next_id: i32) -> Self {
-        Self {
-            next_id,
-            ..Self::default()
-        }
-    }
-
-    /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
-    pub fn spawn(&mut self, mut entity: Entity) -> i32 {
-        entity.id = self.next_id;
-        self.next_id += 1;
-        entity.random = JavaRandom::new(i64::from(entity.id) ^ ENTITY_RANDOM_SEED);
-        // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
-        // An item's facing and initial velocity use the entity random source just seeded, not `level.random`.
-        entity.finish_item_random();
-        let id = entity.id;
-        if self.ticking {
-            self.pending.push(entity);
-        } else {
-            self.active.insert(id, entity);
-        }
-        id
-    }
-
-    /// `discard()`。不在世界里的 ID 什么也不做。
-    pub fn remove(&mut self, id: i32) {
-        self.active.remove(&id);
-    }
-
-    pub fn get(&self, id: i32) -> Option<&Entity> {
-        self.active.get(&id)
-    }
-
-    pub fn get_mut(&mut self, id: i32) -> Option<&mut Entity> {
-        self.active.get_mut(&id)
-    }
-
-    /// 找一个刚生成的实体，还没并进 `active` 的也算。
-    pub(crate) fn get_mut_including_pending(&mut self, id: i32) -> Option<&mut Entity> {
-        self.active
-            .get_mut(&id)
-            .or_else(|| self.pending.iter_mut().find(|entity| entity.id == id))
-    }
-
-    /// 按 ID 顺序遍历，也就是生成的先后。
-    pub fn iter(&self) -> impl Iterator<Item = &Entity> {
-        self.active.values()
-    }
-
-    pub fn len(&self) -> usize {
-        self.active.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.active.is_empty()
-    }
-
-    pub(crate) fn ids(&self) -> Vec<i32> {
-        self.active.keys().copied().collect()
-    }
-
-    pub(crate) fn take(&mut self, id: i32) -> Option<Entity> {
-        self.active.remove(&id)
-    }
-
-    pub(crate) fn put(&mut self, entity: Entity) {
-        self.active.insert(entity.id, entity);
-    }
-
-    pub(crate) fn begin_tick(&mut self) {
-        self.ticking = true;
-    }
-
-    /// tick 结束时把这次生成的实体并进来，它们下一 tick 才 tick。
-    pub(crate) fn end_tick(&mut self) {
-        self.ticking = false;
-        for entity in self.pending.drain(..) {
-            self.active.insert(entity.id, entity);
-        }
-    }
-}
+pub type Entities = EntityStore;
 
 /// `Mth.floor` 的轴向分量。碰撞计算里到处都是。
 pub(crate) fn axis_component(vector: Vec3, axis: Axis) -> f64 {

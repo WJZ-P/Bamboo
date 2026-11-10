@@ -6,7 +6,6 @@ use std::{
         Arc,
         mpsc::{Receiver, TryRecvError},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -26,6 +25,7 @@ use crate::{
     inbound::{Inbound, JoinRequest, PlayerId},
     interaction::{self, UseItemOn},
     inventory, lectern, light_updates, menu, movement,
+    pacing::{Pacer, WallTiming},
     player::shows_hat,
     profiler::{Metric, Phase},
     region::{JoinSettings, Region},
@@ -62,6 +62,8 @@ pub struct World {
     pub(crate) global: Global,
     pub(crate) region: Region,
     inbox: Receiver<Inbound>,
+    /// 睡到下一刻的策略和世界线程的优先级，创建时读一次环境变量。
+    pacer: Pacer,
     /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
     /// 直接嵌 `World::new` 的测试/工具按 `JoinRequest` 传入的等级走。
     authoritative_admin: bool,
@@ -121,6 +123,7 @@ impl World {
                 keys,
             ),
             inbox,
+            pacer: Pacer::from_env(),
         };
         world.region.profiler.on_world_start();
         world
@@ -128,21 +131,26 @@ impl World {
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
-        let mut schedule = Schedule::starting_at(Instant::now());
+        self.pacer.set_thread_priority();
+        let mut timing = WallTiming;
+        let mut schedule = Schedule::starting_at(self.region.profiler.now());
         loop {
             let expected = schedule.expected_start();
-            let actual = Instant::now();
+            let actual = self.region.profiler.now();
             let skipped = schedule.skipped_catch_up();
+            let catch_up = schedule.catching_up();
             self.region
                 .profiler
-                .begin_scheduled_tick(expected, actual, skipped);
+                .begin_scheduled_tick(expected, actual, skipped, catch_up);
             if self.tick().is_break() {
                 break;
             }
-            let wait = schedule.after_tick(Instant::now());
-            if !wait.is_zero() {
-                thread::sleep(wait);
-            }
+            schedule.after_tick(self.region.profiler.now());
+            let spun = self.pacer.wait_until(schedule.deadline(), &mut timing);
+            self.region.profiler.record(
+                Metric::TickSpinUs,
+                spun.as_micros().min(u128::from(u64::MAX)) as u64,
+            );
         }
     }
 
@@ -248,7 +256,8 @@ impl World {
         chunk_tracking::send_chunks(&mut self.region);
         movement::finish_tick(&mut self.region);
         self.region.profiler.lap(Phase::ChunkSending);
-        self.region.links.flush();
+        let flush_bytes = self.region.links.flush();
+        self.region.profiler.record(Metric::FlushBytes, flush_bytes);
         self.region.profiler.lap(Phase::Flush);
         if self.global.admin.stop_requested {
             let flow = self.shut_down();
@@ -331,16 +340,17 @@ impl World {
         }
         // 连接层检查过一次，但封禁命令可能在两次检查之间改了名单。
         // 世界线程按自己的权威副本复查，理由和登录阶段完全一样。
-        let refusal = self
-            .authoritative_admin
-            .then(|| {
-                self.global.admin.login_refusal(
-                    request.uuid,
-                    &request.peer_ip,
-                    self.region.now_millis(),
-                )
-            })
-            .flatten();
+        let refusal = if self.authoritative_admin {
+            self.global.admin.login_refusal(
+                request.uuid,
+                &request.peer_ip,
+                self.region.now_millis(),
+                request.online_at_login,
+                self.region.max_players() as u32,
+            )
+        } else {
+            None
+        };
         if let Some(refusal) = refusal {
             let reason = crate::command::admin::refusal_message(&refusal);
             self.region.links.add(id, request.sink);
@@ -752,6 +762,8 @@ struct Schedule {
     expected_start: Instant,
     /// 上一次 `after_tick` 有没有因为落后太多而放弃追赶。
     skipped_catch_up: bool,
+    /// 上一次 `after_tick` 要不要连续跑（没睡）。
+    catching_up: bool,
 }
 
 impl Schedule {
@@ -761,6 +773,7 @@ impl Schedule {
             next_tick: now + TICK,
             expected_start: now,
             skipped_catch_up: false,
+            catching_up: false,
         }
     }
 
@@ -769,8 +782,17 @@ impl Schedule {
         self.expected_start
     }
 
+    /// `after_tick` 算出的下一刻截止时刻。
+    fn deadline(&self) -> Instant {
+        self.expected_start
+    }
+
     fn skipped_catch_up(&self) -> bool {
         self.skipped_catch_up
+    }
+
+    fn catching_up(&self) -> bool {
+        self.catching_up
     }
 
     /// 一 tick 结束时调用，返回到下一 tick 开始还要等多久。已经落后时返回 0，连续跑 tick 追上。
@@ -786,6 +808,7 @@ impl Schedule {
             self.next_tick = now;
         }
         let wait = self.next_tick.saturating_duration_since(now);
+        self.catching_up = wait.is_zero();
         self.expected_start = self.next_tick;
         self.next_tick += TICK;
         wait

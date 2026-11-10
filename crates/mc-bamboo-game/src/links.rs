@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// 包太大编码不出来时踢人用的原因。客户端可以靠超长的物品组件走到这里。
-const PACKET_ERROR: &str = "disconnect.packetError";
+pub(crate) const PACKET_ERROR: &str = "disconnect.packetError";
 
 /// 把一个要发给多人的包编码成帧。这种包的内容都不是客户端能撑大的，
 /// 真的放不下时只丢掉这个包，不影响任何人的连接。
@@ -38,13 +38,17 @@ struct Link {
 }
 
 impl Link {
-    fn flush(&mut self) {
+    /// 返回交给连接层的未压缩字节数；拒收时不算进去。
+    fn flush(&mut self) -> u64 {
         if self.buffer.is_empty() {
-            return;
+            return 0;
         }
+        let bytes = self.buffer.len_bytes() as u64;
         if !self.sink.send(mem::take(&mut self.buffer)) {
             self.close();
+            return 0;
         }
+        bytes
     }
 
     fn close(&mut self) {
@@ -137,7 +141,7 @@ impl Links {
         if let Err(error) = append_frame(link.buffer.raw_buffer(), &Disconnect { reason }) {
             warn!(%error, player = to.0, "cannot encode the disconnect reason");
         }
-        link.flush();
+        let _ = link.flush();
         if link.open {
             link.close();
         }
@@ -152,10 +156,13 @@ impl Links {
     }
 
     /// 把攒下的包交给连接层。连接层拒收时关闭这条链路。
-    pub(crate) fn flush(&mut self) {
-        for link in self.links.values_mut().filter(|link| link.open) {
-            link.flush();
-        }
+    /// 返回这一刻所有玩家实际交出去的未压缩字节数，给剖析器记账。
+    pub(crate) fn flush(&mut self) -> u64 {
+        self.links
+            .values_mut()
+            .filter(|link| link.open)
+            .map(|link| link.flush())
+            .sum()
     }
 }
 
@@ -280,6 +287,36 @@ mod tests {
             [frame(&first), shared_bytes, frame(&last)].concat()
         );
         assert_eq!(sinks[0].batches(), 1);
+    }
+
+    #[test]
+    fn flush_reports_the_uncompressed_bytes_it_handed_over() {
+        let (mut links, sinks) = links_with(&[ALICE, BOB]);
+        let first = KeepAlive { id: 1 };
+        let second = ChunkBatchFinished { batch_size: 9 };
+        let shared = Arc::new(SharedFrames::new(vec![1, 2, 3, 4, 5]));
+
+        links.send(ALICE, &first);
+        links.send_shared(ALICE, Arc::clone(&shared));
+        links.send(BOB, &second);
+        let expected = (frame(&first).len() + shared.raw().len() + frame(&second).len()) as u64;
+
+        assert_eq!(links.flush(), expected);
+        assert_eq!(links.flush(), 0, "空缓冲不再记账");
+        assert_eq!(
+            sinks[0].bytes().len() + sinks[1].bytes().len(),
+            expected as usize
+        );
+    }
+
+    #[test]
+    fn refused_bytes_are_not_counted_as_flushed() {
+        let (mut links, sinks) = links_with(&[ALICE, BOB]);
+        sinks[0].refuse();
+
+        links.broadcast(&[1, 2, 3]);
+        assert_eq!(links.flush(), 3, "拒收的那名玩家不算");
+        assert_eq!(sinks[1].bytes(), [1, 2, 3]);
     }
 
     #[test]

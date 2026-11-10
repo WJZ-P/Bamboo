@@ -74,6 +74,7 @@ impl Harness {
             permission_level: level,
             is_op: level > 0,
             peer_ip: "127.0.0.1".to_owned(),
+            online_at_login: 0,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(join))).unwrap();

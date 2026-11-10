@@ -123,6 +123,13 @@ for scene in "${SCENES[@]}"; do
 done
 
 echo "=== summary ==="
+# 标题行前面打生效的节拍开关，免得事后分不清哪份结果是哪种配置。
+# 服务端继承这个脚本的环境变量，所以这里读到的就是实际生效的值。
+{
+    echo "BAMBOO_TICK_SLEEP=${BAMBOO_TICK_SLEEP:-plain (default)}"
+    echo "BAMBOO_TICK_SPIN_MAX_US=${BAMBOO_TICK_SPIN_MAX_US:-6000 (default)}"
+    echo "BAMBOO_TICK_QOS=${BAMBOO_TICK_QOS:-default (default)}"
+} | tee "$OUT/pacing.env"
 python3 "$TREE/tools/mc-bamboo-loadtest/summarize.py" "$OUT" "${SCENES[@]}"
 echo "raw results: $OUT"
 exit "$failed"

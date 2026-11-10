@@ -7,7 +7,7 @@ mod common;
 use std::{fs, path::PathBuf};
 
 use common::{
-    TEST_DEADLINE, TestServer, handshake, hello, packet_id,
+    LOGIN_INTENT, TEST_DEADLINE, TestServer, handshake, hello, packet_id,
     player::{Player, offline_uuid},
     wire::{Disconnect, SystemChat, chat_command},
 };
@@ -199,6 +199,68 @@ async fn op_writes_the_file_and_the_new_level_reaches_a_later_join() {
     let text = lists.read("ops.json");
     assert!(text.contains("\"level\": 4"), "{text}");
     assert!(text.contains(&offline_uuid("Mochi").to_string()), "{text}");
+}
+
+/// `/op`、`/deop` 改的是世界线程的权威名单，发布出去的新快照马上被
+/// 连接层的满员判断读到：被 /deop 的玩家不再能越过人数上限。
+#[tokio::test]
+async fn deop_takes_away_the_full_server_bypass() {
+    let lists = Lists::new();
+    let admin = offline_uuid("Admin");
+    let latecomer = offline_uuid("Latecomer");
+    lists.write(
+        "ops.json",
+        &format!(
+            r#"[{{"uuid":"{admin}","name":"Admin","level":4}},{{"uuid":"{latecomer}","name":"Latecomer","level":4,"bypassesPlayerLimit":true}}]"#
+        ),
+    );
+    let config = ServerConfig {
+        max_players: 1,
+        ..lists.config()
+    };
+    let server = TestServer::start(config).await;
+    let mut player: Player = server.enter("Admin").await;
+
+    // 一开始这名 OP 能越过人数上限。
+    let mut bypassing = server.connect().await;
+    bypassing.send(&handshake(LOGIN_INTENT)).await;
+    bypassing.send(&hello("Latecomer")).await;
+    assert!(login::clientbound::LOGIN_FINISHED == packet_id(&bypassing.read_frame().await));
+    drop(bypassing);
+
+    player.send(&chat_command("deop Latecomer")).await;
+    player
+        .expect::<SystemChat>(|packet| {
+            packet
+                .content
+                .translate_keys()
+                .contains(&"commands.deop.success")
+        })
+        .await;
+    timeout(TEST_DEADLINE, async {
+        loop {
+            if lists
+                .read("ops.json")
+                .contains("\"bypassesPlayerLimit\": false")
+                || !lists.read("ops.json").contains("Latecomer")
+            {
+                break;
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("/deop 应该写回 ops.json");
+
+    let mut refused = server.connect().await;
+    refused.send(&handshake(LOGIN_INTENT)).await;
+    refused.send(&hello("Latecomer")).await;
+    let payload = refused.read_frame().await;
+    let reason = login_disconnect_reason(&payload);
+    assert!(
+        reason.contains("multiplayer.disconnect.server_full"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]

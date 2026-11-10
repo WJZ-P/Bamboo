@@ -78,12 +78,20 @@ def summarize(root, name):
     if not steady:
         steady = reports[1:] or reports
     total = [report["metrics"]["tick_total"] for report in steady if "tick_total" in report["metrics"]]
-    jitter = [report["metrics"]["tick_jitter"] for report in steady if "tick_jitter" in report["metrics"]]
+    lateness = [report["metrics"]["tick_start_lateness"] for report in steady
+                if "tick_start_lateness" in report["metrics"]]
+    deviation = [report["metrics"]["tick_interval_deviation"] for report in steady
+                 if "tick_interval_deviation" in report["metrics"]]
+    spin = [report["metrics"]["tick_spin_us"] for report in steady
+            if "tick_spin_us" in report["metrics"]]
     weights = [row[0] for row in total]
-    jweights = [row[0] for row in jitter]
-    latency = [report["metrics"]["chunk_latency_ticks"] for report in steady
-               if "chunk_latency_ticks" in report["metrics"]]
+    lweights = [row[0] for row in lateness]
+    dweights = [row[0] for row in deviation]
+    latency = [report["metrics"]["chunk_latency_us"] for report in steady
+               if "chunk_latency_us" in report["metrics"]]
     latency_samples = [row[0] for row in latency]
+    flush = [report["metrics"]["flush_bytes"] for report in steady
+             if "flush_bytes" in report["metrics"]]
 
     phase_names = set().union(*(report["phases"].keys() for report in steady)) if steady else set()
     phases = []
@@ -106,12 +114,16 @@ def summarize(root, name):
         "p95": pct(total, 3, weights) if total else 0.0,
         "p99": pct(total, 4, weights) if total else 0.0,
         "max": max((row[5] for row in total), default=0.0),
-        "jitter_p50": pct(jitter, 2, jweights) if jitter else 0.0,
-        "jitter_p99": pct(jitter, 4, jweights) if jitter else 0.0,
+        "lateness_p50": pct(lateness, 2, lweights) if lateness else 0.0,
+        "lateness_p99": pct(lateness, 4, lweights) if lateness else 0.0,
+        "deviation_p50": pct(deviation, 2, dweights) if deviation else 0.0,
+        "deviation_p99": pct(deviation, 4, dweights) if deviation else 0.0,
+        "spin_us_per_tick": metric_wmean(steady, "tick_spin_us", 1),
         "top": top,
         "chunks_per_tick": metric_wmean(steady, "chunks_sent", 1),
-        "chunk_latency_p95": weighted([row[3] for row in latency], latency_samples)
+        "chunk_latency_p95_us": weighted([row[3] for row in latency], latency_samples)
         if sum(latency_samples) else None,
+        "flush_bytes_per_tick": metric_wmean(steady, "flush_bytes", 1),
         "bytes_in": client["mean_bytes_in"],
         "drops": len(client["drops"]),
         "login_fails": sum(item["count"] for item in client["login_failures"]),
@@ -127,11 +139,15 @@ COLUMNS = [
     ("tick p95", "p95"),
     ("tick p99", "p99"),
     ("tick max", "max"),
-    ("jitter p50", "jitter_p50"),
-    ("jitter p99", "jitter_p99"),
+    ("lateness p50", "lateness_p50"),
+    ("lateness p99", "lateness_p99"),
+    ("interval dev p50", "deviation_p50"),
+    ("interval dev p99", "deviation_p99"),
+    ("spin us/tick", "spin_us_per_tick"),
     ("top-3 phases (mean ms)", "top"),
     ("chunks/tick", "chunks_per_tick"),
-    ("chunk p95", "chunk_latency_p95"),
+    ("chunk p95 (us)", "chunk_latency_p95_us"),
+    ("flush bytes/tick", "flush_bytes_per_tick"),
     ("client B/s", "bytes_in"),
     ("drops", "drops"),
     ("login fails", "login_fails"),
@@ -142,7 +158,7 @@ def format_cell(key, value):
     if value is None:
         return "n/a"
     if isinstance(value, float):
-        if key in ("bytes_in", "chunks_per_tick"):
+        if key in ("bytes_in", "chunks_per_tick", "flush_bytes_per_tick", "spin_us_per_tick"):
             return f"{value:.1f}"
         return f"{value:.3f}"
     return str(value)

@@ -310,10 +310,14 @@ mod tests {
             .entity_ids()
             .into_iter()
             .filter_map(|id| world.entity(id))
-            .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+            .filter_map(|entity| {
+                entity
+                    .ground()
+                    .map(|item| (entity.position, item.stack.clone()))
+            })
             .collect();
         assert_eq!(items.len(), 1);
-        assert_eq!(*items[0].1, ItemStack::new(items::STONE, 1));
+        assert_eq!(items[0].1, ItemStack::new(items::STONE, 1));
         assert!((items[0].0.x - 0.5).abs() < 1.0e-9);
         assert!((items[0].0.y - 65.2 + 0.125).abs() < 1.0e-9);
         assert!((items[0].0.z - 0.5).abs() < 1.0e-9);
