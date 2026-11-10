@@ -50,14 +50,14 @@ const STORAGE_SLOTS: usize = 36;
 /// 这一区域里每座讲台的书，以及谁正在看。
 #[derive(Debug, Default)]
 pub(crate) struct Tables {
-    books: BTreeMap<BlockPos, Book>,
+    pub(super) books: BTreeMap<BlockPos, Book>,
     views: BTreeMap<PlayerId, View>,
     pending: BTreeMap<PlayerId, PendingSlots>,
 }
 
 /// 放在讲台上的那一本。`page` 为 -1 只出现在总页数是 0 的夹取之后。
-#[derive(Debug, Clone)]
-struct Book {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Book {
     stack: ItemStack,
     page: i32,
     page_count: i32,
@@ -67,6 +67,25 @@ struct Book {
     /// Facing when the book was placed. The block state is gone after a break, and
     /// `preRemoveSideEffects` still needs it for the drop position.
     facing: Direction,
+}
+
+impl Book {
+    /// 测试里直接摆一本有内容的书，不用走玩家右键的路径。
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        stack: ItemStack,
+        page: i32,
+        page_count: i32,
+        has_content: bool,
+    ) -> Self {
+        Self {
+            stack,
+            page,
+            page_count,
+            has_content,
+            facing: Direction::North,
+        }
+    }
 }
 
 /// 一名玩家打开的讲台菜单。

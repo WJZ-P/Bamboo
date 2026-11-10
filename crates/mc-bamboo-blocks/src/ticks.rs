@@ -154,6 +154,14 @@ impl BlockTicks {
         Self::default()
     }
 
+    /// 现在能不能按区块搬计划刻：两条队列里都没有取出、还没跑完的刻。
+    ///
+    /// [`Self::take_chunks`] 和 [`Self::take_chunk`] 的前提，可以在动手之前只读地问一声，
+    /// 好让一次要搬几张表的调用方先检查全部前提。
+    pub fn ready_to_move_chunks(&self) -> bool {
+        self.blocks.running.is_empty() && self.fluids.running.is_empty()
+    }
+
     /// 现在的 `gameTime`。
     pub const fn now(&self) -> i64 {
         self.now
@@ -270,7 +278,7 @@ impl BlockTicks {
         &mut self,
         chunks: &BTreeSet<ChunkPos>,
     ) -> Result<BTreeMap<ChunkPos, ChunkTicks>, Busy> {
-        if !self.blocks.running.is_empty() || !self.fluids.running.is_empty() {
+        if !self.ready_to_move_chunks() {
             return Err(Busy);
         }
         let blocks = self.blocks.take_chunks(chunks, self.now);
@@ -674,6 +682,30 @@ mod tests {
 
         // 空集合一次扫描都不做。
         assert!(ticks.take_chunks(&BTreeSet::new()).unwrap().is_empty());
+    }
+
+    /// 只读查询和 `take_chunks` 用的是同一个前提，tick 中途问一次就能整批不动。
+    #[test]
+    fn the_ready_query_tracks_due_ticks_running() {
+        let mut ticks = BlockTicks::new();
+        ticks.schedule(POS, 1, 1, TickPriority::Normal);
+        ticks.schedule_fluid(POS, 1, 1, TickPriority::Normal);
+        assert!(ticks.ready_to_move_chunks());
+
+        ticks.collect_due(1);
+        assert!(!ticks.ready_to_move_chunks());
+        assert!(ticks.next_due().is_some());
+        assert!(ticks.ready_to_move_chunks());
+
+        ticks.collect_due(1);
+        ticks.collect_due_fluids();
+        assert!(!ticks.ready_to_move_chunks());
+        assert!(ticks.next_fluid_due().is_some());
+        assert!(ticks.ready_to_move_chunks());
+
+        let boxed = ticks.take_chunk(CHUNK_A).unwrap();
+        ticks.insert_chunk(boxed);
+        assert!(ticks.ready_to_move_chunks());
     }
 
     #[test]

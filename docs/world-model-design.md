@@ -156,7 +156,36 @@ ChunkColumn
 - 快照就是复制：存盘时在 tick 边界 `clone` 这个区块。一个区块约 50–100 KB，复制约 10 微秒 `[推导：按内存拷贝速度]`。先不做写时复制。
 - 读方块的热路径加“上次访问的区块”缓存。并行阶段里区块表是只读共享的；区块内部的惰性缓存（碰撞形状、导航类型）用原子类型或 `OnceLock`，可以在并行阶段里填。
 
-要改的现有代码：光照从 `ChunkStore.light` 进区块；`Region.containers`、`block_ticks`、`block_items`、`command_blocks`、红石记忆按区块切开。`Level` trait 对外不变，方块逻辑和 oracle 不受影响。
+已经做到的（第 1 步在这一层）：`mc-bamboo-world` 的 `ChunkStore` 用 `take_column` / `insert_column`
+把方块、高度图、方块实体类型表、告示牌文字（含 `editor`）、`update tag` 和两层光照整柱搬走；
+`mc-bamboo-blocks` 的 `BlockTicks` / `BlockEntities` / `RedstoneMemory` 各有按区块的取放接口，
+计划刻按相对延迟、红石火把开关记录按相对年龄装盒；`mc-bamboo-game` 的 `RegionColumn` 把这些盒子
+和 `containers`、`block_items`、`command_blocks`、讲台上的书按区块切成一份装在一起，
+由 `Region::ready_to_move_columns` / `take_columns` / `insert_column` 整批取放，
+`RegionColumn: Send`。`Level` trait 对外不变，方块逻辑和 oracle 不受影响。
+
+**存储内部仍然是整张表**：region 里 `containers` 等四张表还是 `BTreeMap<BlockPos, _>`，
+`BlockTicks` / `BlockEntities` / `RedstoneMemory` 也还是全 region 一张表，只是都加了按区块的
+取放接口；按位置查容器、遍历容器重查开合人数这些路径一处没改，遍历和发包顺序也不变。
+按区块取时只扫 `BlockPos` 的 x 带（16 格宽），和计划刻的批量取出一样要求调用方把一批攒齐。
+以后真要多 region 并行，这些表再按区块分存，那时才需要改访问代码。
+
+还不能跟着区块走的：
+
+- **实体**：`Region.entities`（下落方块、点燃的 TNT、掉落物）以及 `entity_tracking` 里的配对
+  还没有按区块的取放接口，实体存储重做那一步自己加。
+- **`mc-bamboo-world` 里邻居段计数的限制**：柱里的 `sectionStates` 记着相邻段有没有方块，
+  邻居柱里为它记下的计数留在原 store。所以 `take_column` / `insert_column` 目前只对
+  「原地取放」和「一整片互相相邻的区块一起搬」保证正确；单独把一柱放到一圈不同的邻居中间
+  还需要登记和注销各段的状态，那是区块平面那一步的事。
+- **方块实体里带绝对时刻的字段**：`HopperEntity.tickedGameTime` 和
+  `PistonMoving.lastTicked` 装在不公开的 `Box<dyn BlockEntity>` 盒子里，没法在这一层换算成相对值。
+  同一 region 内原地取放不受影响；跨到模拟时间不同的 region 时这两处会沿用旧时刻，
+  等模拟时间和世界时间分开（6.3）时随 `time_offset` 一起处理。容器条目的 `recheck_at`
+  已按相对剩余刻数装盒，计划刻和红石火把记录同理。
+- 菜单、`lecterns.views` / `pending`、链路、玩家表和其它与位置无关的字段按 4.4 留在 region，
+  前者跟着玩家走，后者以后搬去 `Global`。跨区块双箱要两半一起搬（也就是「整片相邻区块一起搬」），
+  玩家开着的菜单要求「玩家和他附近的区块一起搬」；`dead` 容器条目和告示牌编辑者原样装盒。
 
 ### 4.3 实体存储 `EntityStore`
 
