@@ -419,11 +419,6 @@ impl EntityStore {
         self.with_mut_including_pending(uid, f).is_some()
     }
 
-    /// `discard()`：只打标记，实体还留在这一拍的名单里。
-    pub fn discard(&mut self, uid: EntityUid) -> bool {
-        self.with_mut(uid, |entity| entity.discard()).is_some()
-    }
-
     /// 完整快照的只读遍历，按 uid 升序。
     pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
         self.index.values().filter_map(|&row| {

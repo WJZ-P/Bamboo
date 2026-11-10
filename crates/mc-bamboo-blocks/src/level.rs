@@ -278,7 +278,6 @@ pub trait LevelEntities {
     /// 并行驱动用：摊出三个平行数组，和把算完的数据发布回表。
     fn entity_snapshot(&self) -> crate::entity::EntitySnapshot;
     fn entity_publish(&mut self, snapshot: crate::entity::EntitySnapshot);
-    fn entity_discard(&mut self, uid: EntityUid) -> bool;
 }
 
 /// 用一整张 [`EntityStore`] 存实体的世界。实现它就自动得到 [`LevelEntities`]。
@@ -356,10 +355,6 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn entity_publish(&mut self, snapshot: crate::entity::EntitySnapshot) {
         self.entities_table_mut().publish(snapshot);
-    }
-
-    fn entity_discard(&mut self, uid: EntityUid) -> bool {
-        self.entities_table_mut().discard(uid)
     }
 }
 
