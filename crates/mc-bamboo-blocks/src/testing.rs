@@ -95,6 +95,11 @@ impl TestLevel {
         &self.entities
     }
 
+    /// 给两段式并行驱动的算阶段用。
+    pub(crate) fn entities_mut_for_test(&mut self) -> &mut Entities {
+        &mut self.entities
+    }
+
     /// 测试断言里按具体类型读方块实体。实现者一侧可以直接碰自己的表。
     pub(crate) fn block_entity<T: crate::BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.block_entities.get(pos)

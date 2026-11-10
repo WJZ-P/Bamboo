@@ -277,6 +277,7 @@ pub trait LevelEntities {
     fn live_entities(&self) -> Vec<Entity>;
     /// 并行驱动用：算阶段读整张实体表，落地时只发布变了的那几行。
     fn entities_table(&self) -> &EntityStore;
+    fn entities_table_mut(&mut self) -> &mut EntityStore;
     fn publish_entity_rows(
         &mut self,
         rows: &[usize],
@@ -356,6 +357,10 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
 
     fn entities_table(&self) -> &EntityStore {
         <T as EntityTables>::entities_table(self)
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        <T as EntityTables>::entities_table_mut(self)
     }
 
     fn publish_entity_rows(

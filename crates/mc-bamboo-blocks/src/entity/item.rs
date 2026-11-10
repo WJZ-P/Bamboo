@@ -523,9 +523,19 @@ impl Entity {
         }
         // 漏斗不存在时整段 `entityInside` 什么也不会做。精确和并行两种模式用同一个
         // 只读判定，所以两种模式都不发这条命令，落地阶段省掉一次全格扫描。
-        // 吸取盒比方块高，查询的 y 下界要照 `HopperBlock.entityInside` 再低两格。
-        let hopper_min = BlockPos::new(min.x, min.y - 2, min.z);
-        if !me.removed && ctx.blocks().any_hopper_in(hopper_min, max) {
+        // 这里用和 `suck_touching_item` 完全相同的未缩进包围盒与 y 下界。
+        let bounds = me.bounding_box();
+        let hopper_min = BlockPos::new(
+            mth::floor(bounds.min_x),
+            mth::floor(bounds.min_y) - 2,
+            mth::floor(bounds.min_z),
+        );
+        let hopper_max = BlockPos::new(
+            mth::floor(bounds.max_x),
+            mth::floor(bounds.max_y),
+            mth::floor(bounds.max_z),
+        );
+        if !me.removed && ctx.blocks().any_hopper_in(hopper_min, hopper_max) {
             ctx.emit(Command::SuckIntoHopper, me);
         }
     }

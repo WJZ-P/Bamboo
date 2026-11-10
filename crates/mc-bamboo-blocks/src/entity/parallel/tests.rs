@@ -47,7 +47,7 @@ fn run_split(level: &mut TestLevel, executor: &dyn Executor) -> Vec<Entity> {
             world.begin_entity_tick();
         }
         // 算阶段拿不到 `World`，只读实体表和只读方块视图。
-        let computed = compute(&blocks, level.entities(), executor);
+        let computed = compute(&blocks, level.entities_mut_for_test(), executor);
         let mut world = World::new(level, &mut ticks);
         commit(computed, &mut world);
     }
@@ -142,7 +142,7 @@ fn compute_and_commit_match_the_one_step_wrapper() {
         let mut world = World::new(&mut level, &mut ticks);
         world.begin_entity_tick();
     }
-    let computed: Computed = compute(&blocks, level.entities(), &executor);
+    let computed: Computed = compute(&blocks, level.entities_mut_for_test(), &executor);
     assert_eq!(computed.uids().len(), 6);
     assert_eq!(computed.command_counts().len(), 6);
     assert_eq!(computed.removed_count(), 0);

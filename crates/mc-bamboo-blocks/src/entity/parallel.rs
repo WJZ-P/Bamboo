@@ -213,12 +213,11 @@ struct Task<'a> {
 
 /// 算：只读方块、可写实体表。不需要 `World`。
 ///
-/// 实体表在算阶段是只读的：公开数据、空间索引都直接引用表里那一份，任务只往
-/// 自己的产出缓冲里写。`state` 从行里克隆一份进任务，算完只写回新的那一份，
-/// 不复制别的实体看到的数据。
+/// 公开数据和空间索引只读表里的那一份，各行的私有状态移进任务再移回，不克隆
+/// （`ItemStack` 在 `KindPublic` 里，`public` 仍然必须克隆一次给 tick 拼完整实体）。
 pub fn compute(
     blocks: &(dyn BlockView + Sync),
-    entities: &EntityStore,
+    entities: &mut EntityStore,
     executor: &dyn Executor,
 ) -> Computed {
     compute_timed(blocks, entities, executor).0
@@ -226,12 +225,12 @@ pub fn compute(
 
 fn compute_timed(
     blocks: &(dyn BlockView + Sync),
-    entities: &EntityStore,
+    entities: &mut EntityStore,
     executor: &dyn Executor,
 ) -> (Computed, Duration) {
     let mut times = PhaseTimes::default();
     let clone_start = Instant::now();
-    let (uids, rows) = entities.tick_rows();
+    let (uids, rows, starting_state) = entities.take_states_for_tick();
     // 每个实体一份起点的公开数据：tick 要拿它拼成完整 `Entity`。这是唯一必需的
     // 克隆；别的实体看到的值直接引用表里那一份不变的快照。
     let starting_public: Vec<EntityPublic> = rows
@@ -241,18 +240,6 @@ fn compute_timed(
                 .row_at(row)
                 .expect("indexed row is live")
                 .public
-                .clone()
-        })
-        .collect();
-    // 私有状态只被自己读：移进任务，算完再移回。旧驱动对每行 `state.clone()`
-    // 两次（快照一次、算里又一次），这里只剩一次。
-    let starting_state: Vec<EntityState> = rows
-        .iter()
-        .map(|&row| {
-            entities
-                .row_at(row)
-                .expect("indexed row is live")
-                .state
                 .clone()
         })
         .collect();
@@ -435,7 +422,8 @@ pub fn tick_entities_parallel_timed(
 ) -> PhaseTimes {
     let snapshot_start = Instant::now();
     world.begin_entity_tick();
-    let (computed, _) = compute_timed(blocks, world.level().entities_table(), executor);
+    // 一体包装里同时有 `&mut World`，可以直接把实体表可变借给算阶段。
+    let (computed, _) = compute_timed(blocks, world.entities_mut().entities_table_mut(), executor);
     let mut times = commit_timed(computed, world);
     // `begin_entity_tick` 和构造只读名单的开销算进发布这一段。
     times.publish += snapshot_start

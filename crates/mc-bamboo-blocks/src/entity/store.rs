@@ -448,6 +448,23 @@ impl EntityStore {
         self.slots.get(row)?.as_ref()
     }
 
+    /// 把这一行的私有状态移出来，算阶段独占它；别的实体只读 `public`。
+    pub fn take_state(&mut self, row: usize) -> Option<EntityState> {
+        Some(std::mem::take(
+            &mut self.slots.get_mut(row)?.as_mut()?.state,
+        ))
+    }
+
+    /// 算阶段开始时按 uid 升序列出 (uid, 行号)，同时把各行的私有状态移出来。
+    pub fn take_states_for_tick(&mut self) -> (Vec<EntityUid>, Vec<usize>, Vec<EntityState>) {
+        let (uids, rows) = self.tick_rows();
+        let states = rows
+            .iter()
+            .map(|&row| self.take_state(row).expect("indexed row is live"))
+            .collect();
+        (uids, rows, states)
+    }
+
     /// 空间索引：和 `area` 相交的实体公开数据，按 uid 升序。
     pub fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         let mut found: Vec<(EntityUid, &EntityPublic)> = self
