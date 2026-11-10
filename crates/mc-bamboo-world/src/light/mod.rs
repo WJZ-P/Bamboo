@@ -26,7 +26,8 @@ use level::{Engines, Visible};
 pub use properties::has_different_light_properties;
 use queue::{Task, TaskQueue};
 pub use sources::{NEGATIVE_INFINITY, SkyLightSources};
-use storage::{LightColumn, LightStorage};
+pub(crate) use storage::LightColumn;
+use storage::LightStorage;
 
 use crate::{MIN_Y, SECTION_COUNT, chunk::Chunk};
 
@@ -243,6 +244,33 @@ impl LevelLight {
     /// 还有没算完的光照。
     pub(crate) fn has_pending_updates(&self) -> bool {
         self.queue.has_work()
+    }
+
+    /// 可以搬区块柱了：没有排着队的任务，也没有算到一半的轮次和引擎里剩下的工作。
+    /// 这时引擎和给别人读的那两份光照内容相同，盒子只装一份就够。
+    pub(crate) fn ready_to_move_columns(&self) -> bool {
+        !self.queue.has_work()
+            && !self.engines.in_round()
+            && !self.engines.sky.has_light_work()
+            && !self.engines.block.has_light_work()
+    }
+
+    /// 把 `pos` 这一列的天空光和方块光整个拿走，这个位置回到模板柱。
+    pub(crate) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
+        debug_assert!(self.ready_to_move_columns(), "只在光照全部算完时搬区块柱");
+        let engines = self.engines.take_column(pos);
+        let visible = self.visible.take_column(pos);
+        debug_assert!(
+            engines[0].has_same_data(&visible[0]) && engines[1].has_same_data(&visible[1]),
+            "算完以后引擎和别人读到的光照数据相同"
+        );
+        engines
+    }
+
+    /// 把一个区块柱的天空光和方块光同时放进引擎和给别人读的那份。
+    pub(crate) fn insert_column(&mut self, pos: ChunkPos, [sky, block]: [LightColumn; 2]) {
+        self.engines
+            .insert_column(pos, [sky, block], &mut self.visible);
     }
 
     /// 上次取走以后光照变了的区块和段。

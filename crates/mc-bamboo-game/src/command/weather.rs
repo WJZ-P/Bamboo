@@ -113,6 +113,7 @@ mod tests {
         command::{self, commands},
         global::Global,
         inbound::{PlayerId, PlayerSink},
+        outgoing::Outgoing,
         player::Player,
         region::Region,
     };
@@ -121,8 +122,8 @@ mod tests {
     struct Sink(Arc<Mutex<Vec<u8>>>);
 
     impl PlayerSink for Sink {
-        fn send(&mut self, frames: Vec<u8>) -> bool {
-            self.0.lock().unwrap().extend(frames);
+        fn send(&mut self, frames: Outgoing) -> bool {
+            self.0.lock().unwrap().extend(frames.to_raw_bytes());
             true
         }
 

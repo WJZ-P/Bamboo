@@ -8,7 +8,9 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize, mpsc},
 };
 
-use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink, World, WorldConfig};
+use mc_bamboo_game::{
+    InFlight, Inbound, JoinRequest, Outgoing, PlayerId, PlayerSink, World, WorldConfig,
+};
 use mc_bamboo_protocol::packet::play::{ClientInformation, PlayRequest};
 use tracing::{
     Event, Level, Metadata, Subscriber,
@@ -61,7 +63,7 @@ impl Visit for Line {
 struct DiscardingSink;
 
 impl PlayerSink for DiscardingSink {
-    fn send(&mut self, _frames: Vec<u8>) -> bool {
+    fn send(&mut self, _frames: Outgoing) -> bool {
         true
     }
 

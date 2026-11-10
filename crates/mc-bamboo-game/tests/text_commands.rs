@@ -3,7 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use mc_bamboo_data::packets::play::clientbound;
-use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink, World, WorldConfig};
+use mc_bamboo_game::{
+    InFlight, Inbound, JoinRequest, Outgoing, PlayerId, PlayerSink, World, WorldConfig,
+};
 use mc_bamboo_protocol::{
     codec::Reader,
     frame::{MAX_FRAME_LEN, find_frame},
@@ -15,8 +17,8 @@ use uuid::Uuid;
 struct Sink(Arc<Mutex<Vec<u8>>>);
 
 impl PlayerSink for Sink {
-    fn send(&mut self, frames: Vec<u8>) -> bool {
-        self.0.lock().unwrap().extend(frames);
+    fn send(&mut self, frames: Outgoing) -> bool {
+        self.0.lock().unwrap().extend(frames.to_raw_bytes());
         true
     }
 

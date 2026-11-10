@@ -1,17 +1,24 @@
 //! 把世界层的区块转换成网络格式。
 //!
 //! `mc-bamboo-world` 不知道网络，`mc-bamboo-protocol` 不知道世界，两者在这里对接。
-//! 没改过的区块共用模板的编码，改过的区块按版本号缓存，见 [`ChunkCache`]。
+//! 没改过的区块共用模板的包体，改过的区块按版本号缓存包体，见 [`ChunkCache`]。
+//! 发给客户端的是按（区块坐标，版本号）缓存的完整帧：包头里有坐标，所以每个位置的帧都不同。
 
 mod cache;
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::heightmaps;
-use mc_bamboo_protocol::packet::chunk::{
-    BlockEntityInfo, Heightmap, LightData, Palette, encode_chunk_body, write_paletted_container,
-    write_section_header,
+use mc_bamboo_protocol::{
+    frame::append_frame,
+    packet::{
+        chunk::{
+            BlockEntityInfo, Heightmap, LightData, Palette, encode_chunk_body,
+            write_paletted_container, write_section_header,
+        },
+        play::LevelChunkWithLight,
+    },
 };
 use mc_bamboo_world::{
     chunk::{Chunk, HeightmapKind, Section},
@@ -19,10 +26,11 @@ use mc_bamboo_world::{
     palette::{PaletteView, PalettedContainer},
     store::ChunkStore,
 };
+use tracing::warn;
 
 pub(crate) use cache::ChunkCache;
 
-use crate::sign;
+use crate::{outgoing::SharedFrames, sign};
 
 /// 方块和光照都没改过的区块共用模板的编码，随便取一个还没改过的位置编出来就行。
 const TEMPLATE_POS: ChunkPos = ChunkPos::new(0, 0);
@@ -41,6 +49,34 @@ pub(crate) fn chunk_body<'a>(
     } else {
         cache.body(store, pos)
     }
+}
+
+/// 这个区块此刻要发出的完整帧。同一个（坐标，版本号）只做一次，多个玩家共用同一份。
+///
+/// 包体按老的缓存规则取：没改过的区块共用模板的包体，改过的按版本号缓存。
+/// 帧本身按坐标缓存，包头里的坐标不同就另做一份；没人看的区块由
+/// tick 末尾的清理连同包体一起丢掉没人跟踪的区块。
+pub(crate) fn chunk_frame(
+    cache: &mut ChunkCache,
+    store: &ChunkStore,
+    template_body: &[u8],
+    pos: ChunkPos,
+) -> Arc<SharedFrames> {
+    if let Some(frames) = cache.frame(store, pos) {
+        return frames;
+    }
+    let body = chunk_body(cache, store, template_body, pos);
+    let packet = LevelChunkWithLight {
+        x: pos.x,
+        z: pos.z,
+        body: &body,
+    };
+    let mut raw = Vec::new();
+    if let Err(error) = append_frame(&mut raw, &packet) {
+        // 区块包编码不出来时不该走到这里：包体来自世界，客户端撑不大。
+        warn!(%error, ?pos, "dropping a chunk frame that cannot be encoded");
+    }
+    cache.insert_frame(store, pos, raw)
 }
 
 /// 模板区块的编码，世界刚建好时调用。
@@ -314,5 +350,44 @@ mod tests {
         assert!(contains(&body, &SIGN_ENTRY));
         // `messages` 列表里的第一行，字符串标签的长度前缀是两字节。
         assert!(contains(&body, b"\x00\x05hello"));
+    }
+
+    #[test]
+    fn two_players_get_the_same_frame_and_an_edit_makes_a_new_one() {
+        use mc_bamboo_protocol::{codec::Reader, frame::find_frame, packet::ClientboundPacket};
+
+        let mut store = ChunkStore::flat();
+        let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
+        let pos = ChunkPos::new(3, -9);
+
+        let first = chunk_frame(&mut cache, &store, &template_body, pos);
+        // 第二名玩家看同一个区块，拿到的是同一份 Arc，不重新编帧。
+        let second = chunk_frame(&mut cache, &store, &template_body, pos);
+        assert!(Arc::ptr_eq(&first, &second));
+        // 另一个坐标的帧包头里坐标不同。
+        let other_pos = ChunkPos::new(4, -9);
+        let other = chunk_frame(&mut cache, &store, &template_body, other_pos);
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert_ne!(first.raw(), other.raw());
+
+        let bounds = find_frame(first.raw(), mc_bamboo_protocol::frame::MAX_FRAME_LEN)
+            .unwrap()
+            .expect("共享帧是完整的一帧");
+        let mut reader = Reader::new(&first.raw()[bounds.header_len..]);
+        assert_eq!(reader.varint().unwrap(), LevelChunkWithLight::ID);
+        assert_eq!(reader.i32().unwrap(), pos.x);
+        assert_eq!(reader.i32().unwrap(), pos.z);
+        assert_eq!(reader.rest(), template_body);
+
+        store.set_block(BlockPos::new(3 * 16 + 1, -60, -9 * 16 + 1), blocks::STONE);
+        let edited = chunk_frame(&mut cache, &store, &template_body, pos);
+        assert!(!Arc::ptr_eq(&first, &edited));
+        assert_ne!(first.raw(), edited.raw());
+        // 没改的邻居还是原来那份。
+        assert!(Arc::ptr_eq(
+            &other,
+            &chunk_frame(&mut cache, &store, &template_body, other_pos)
+        ));
     }
 }

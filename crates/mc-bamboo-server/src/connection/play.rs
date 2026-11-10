@@ -11,7 +11,7 @@ use std::{
 use bytes::BytesMut;
 use mc_bamboo_auth::{DecryptHalf, EncryptHalf, Encryption};
 use mc_bamboo_data::packets::play::serverbound;
-use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId};
+use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId, Segment};
 use mc_bamboo_protocol::{
     compression,
     frame::append_frame,
@@ -186,6 +186,7 @@ async fn exchange(
 /// 按顺序写出队列里的帧，直到队列结束。压缩启用时每个包在写之前压缩，加密启用时再加密。
 ///
 /// 顺序和官方管线一致：压缩在长度前缀里面，加密在最外面，连长度前缀一起加密。
+/// 一批里的各段按原顺序拼成一次写：加密是一条连接上的字节流，中间不能插入别的写。
 async fn write_queue<W: AsyncWrite + Unpin>(
     stream: &mut W,
     mut queue: OutboundQueue,
@@ -193,27 +194,29 @@ async fn write_queue<W: AsyncWrite + Unpin>(
     compression: Option<i32>,
     mut encrypt: Option<EncryptHalf>,
 ) -> Result<(), ConnectionError> {
-    while let Some(frames) = queue.next().await {
-        let compressed = match compression {
-            Some(threshold) => Some(compression::encode_frames(&frames, threshold)?),
-            None => None,
-        };
-        let payload = compressed.as_deref().unwrap_or(&frames);
-        let encrypted = match &mut encrypt {
-            Some(encrypt) => {
-                let mut buffer = payload.to_vec();
-                encrypt.encrypt(&mut buffer);
-                Some(buffer)
+    while let Some(batch) = queue.next().await {
+        let uncompressed_len = batch.len_bytes();
+        let mut payload = Vec::with_capacity(uncompressed_len);
+        for segment in batch.segments() {
+            match (segment, compression) {
+                (Segment::Shared(frames), Some(threshold)) => {
+                    payload.extend_from_slice(&frames.compressed(threshold)?);
+                }
+                (Segment::Raw(frames), Some(threshold)) => {
+                    let compressed = compression::encode_frames(frames, threshold)?;
+                    payload.extend_from_slice(&compressed);
+                }
+                (Segment::Shared(frames), None) => payload.extend_from_slice(frames.raw()),
+                (Segment::Raw(frames), None) => payload.extend_from_slice(frames),
             }
-            None => None,
-        };
-        timeout(
-            time_limit,
-            stream.write_all(encrypted.as_deref().unwrap_or(payload)),
-        )
-        .await
-        .map_err(|_| ConnectionError::WriteTimeout)??;
-        queue.mark_written(frames.len());
+        }
+        if let Some(encrypt) = &mut encrypt {
+            encrypt.encrypt(&mut payload);
+        }
+        timeout(time_limit, stream.write_all(&payload))
+            .await
+            .map_err(|_| ConnectionError::WriteTimeout)??;
+        queue.mark_written(uncompressed_len);
     }
     Ok(())
 }
@@ -401,7 +404,10 @@ impl KeepAliveState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use mc_bamboo_auth::SHARED_SECRET_LEN;
+    use mc_bamboo_game::{Outgoing, SharedFrames};
     use mc_bamboo_protocol::frame::{MAX_FRAME_LEN, find_frame};
     use tokio::io::{AsyncReadExt, duplex};
 
@@ -533,5 +539,125 @@ mod tests {
         let original = find_frame(&batch, MAX_FRAME_LEN).unwrap().unwrap();
         let payload = &batch[original.header_len..original.header_len + original.payload_len];
         assert_eq!(decoded, payload);
+    }
+
+    /// 一批里交替放普通帧和共享帧：共享帧自己也带几个包，压缩要按包进行。
+    fn mixed_batch() -> (Outgoing, Vec<u8>) {
+        let mut raw = Vec::new();
+        let mut append = |byte: u8, len: usize| {
+            let mut frames = Vec::new();
+            append_frame(&mut frames, &Filler(byte, len)).unwrap();
+            raw.extend_from_slice(&frames);
+            frames
+        };
+        let first = append(1, 300);
+        let shared = append(2, 700);
+        let second = append(3, 10);
+        let shared_two = [append(4, 400), append(6, 9)].concat();
+        let third = append(5, 20);
+
+        let mut outgoing = Outgoing::default();
+        outgoing.push_raw(&first);
+        outgoing.push_shared(Arc::new(SharedFrames::new(shared)));
+        outgoing.push_raw(&second);
+        outgoing.push_shared(Arc::new(SharedFrames::new(shared_two)));
+        outgoing.push_raw(&third);
+        (outgoing, raw)
+    }
+
+    /// 内容是 `len` 个 `byte` 的测试包。
+    struct Filler(u8, usize);
+
+    impl ClientboundPacket for Filler {
+        const ID: i32 = 0x2a;
+
+        fn write_body(&self, out: &mut Vec<u8>) {
+            out.resize(out.len() + self.1, self.0);
+        }
+    }
+
+    /// 旧办法：整批未压缩帧一次压缩、一次加密。
+    fn old_pipeline(
+        raw: &[u8],
+        threshold: Option<i32>,
+        encrypt: Option<&[u8; SHARED_SECRET_LEN]>,
+    ) -> Vec<u8> {
+        let compressed = threshold.map(|value| compression::encode_frames(raw, value).unwrap());
+        let mut payload = compressed.unwrap_or_else(|| raw.to_vec());
+        if let Some(secret) = encrypt {
+            Encryption::new(secret).encrypt(&mut payload);
+        }
+        payload
+    }
+
+    #[tokio::test]
+    async fn mixed_segments_match_the_old_flat_pipeline() {
+        let secret = [9; SHARED_SECRET_LEN];
+        for (compression_threshold, encrypted) in [
+            (None, false),
+            (Some(0), false),
+            (Some(256), false),
+            (None, true),
+            (Some(0), true),
+            (Some(256), true),
+        ] {
+            let (outgoing, raw) = mixed_batch();
+            assert_eq!(outgoing.to_raw_bytes(), raw);
+            let (outbound, queue) = outbound::channel(1024 * 1024);
+            assert!(outbound.push_outgoing(outgoing));
+            outbound.finish();
+            let (mut near, mut far) = duplex(64 * 1024);
+            let encrypt = encrypted.then(|| Encryption::new(&secret).split().0);
+
+            write_queue(
+                &mut near,
+                queue,
+                Duration::from_secs(1),
+                compression_threshold,
+                encrypt,
+            )
+            .await
+            .unwrap();
+            drop(near);
+
+            let mut written = Vec::new();
+            far.read_to_end(&mut written).await.unwrap();
+            let expected = old_pipeline(&raw, compression_threshold, encrypted.then_some(&secret));
+            assert_eq!(
+                written, expected,
+                "压缩 {compression_threshold:?}，加密 {encrypted}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shared_segment_is_compressed_only_once_across_batches() {
+        let (outbound, queue) = outbound::channel(1024 * 1024);
+        let shared = Arc::new(SharedFrames::new({
+            let mut frames = Vec::new();
+            append_frame(&mut frames, &Filler(7, 300)).unwrap();
+            frames
+        }));
+        for _ in 0..3 {
+            let mut outgoing = Outgoing::default();
+            outgoing.push_shared(Arc::clone(&shared));
+            assert!(outbound.push_outgoing(outgoing));
+        }
+        outbound.finish();
+        let (mut near, mut far) = duplex(64 * 1024);
+        write_queue(&mut near, queue, Duration::from_secs(1), Some(0), None)
+            .await
+            .unwrap();
+        drop(near);
+
+        let mut written = Vec::new();
+        far.read_to_end(&mut written).await.unwrap();
+        let once = old_pipeline(shared.raw(), Some(0), None);
+        assert_eq!(written, [once.clone(), once.clone(), once].concat());
+        // 三批借出的都是缓存里的同一份压缩字节。
+        assert!(std::ptr::eq(
+            shared.compressed(0).unwrap().as_ptr(),
+            shared.compressed(0).unwrap().as_ptr()
+        ));
     }
 }

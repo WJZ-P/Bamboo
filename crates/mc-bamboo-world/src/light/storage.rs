@@ -32,9 +32,7 @@ pub(crate) struct LightColumn {
     states: [u8; LIGHT_SECTION_COUNT],
     /// `columnsWithSources`：这一列打开了光照。
     light_on: bool,
-    /// 最后一次写这一柱时拿到的版本号，见 [`LightStorage::revision`]。
-    revision: u64,
-    /// 哪几段已经记进 [`LightStorage::changed`]，第 n 位是第 n 段。
+    /// 哪几段已经记进 [`LightStorage::changed`]，第 n 位是第 n 段。搬走时要清掉。
     changed: u32,
 }
 
@@ -45,7 +43,6 @@ impl LightColumn {
             layers: [const { None }; LIGHT_SECTION_COUNT],
             states: [0; LIGHT_SECTION_COUNT],
             light_on: false,
-            revision: 0,
             changed: 0,
         }
     }
@@ -54,6 +51,69 @@ impl LightColumn {
     pub(crate) fn lit(mut self) -> Self {
         self.light_on = true;
         self
+    }
+
+    /// 发布出去的光照数据一样：`states` 只在引擎里有，别人读的那一份不记。
+    pub(crate) fn has_same_data(&self, other: &Self) -> bool {
+        self.layers == other.layers
+    }
+
+    /// 这一柱最低的存着光照的段；一段都没有时是 `i32::MAX`。
+    pub(crate) fn lowest_stored_section(&self) -> i32 {
+        self.layers
+            .iter()
+            .position(Option::is_some)
+            .map_or(i32::MAX, |slot| slot as i32 + MIN_LIGHT_SECTION)
+    }
+
+    /// `getDataLayer`：这一段存的光照，没存时是 `None`。
+    pub(crate) fn layer(&self, section_y: i32) -> Option<&DataLayer> {
+        self.layers[slot(section_y)?].as_ref()
+    }
+
+    /// `getTopSectionY`：这一列最高的存光照的段再往上一段。一段都没有时是 `lowest_section`。
+    pub(crate) fn top_section_y(&self, lowest_section: i32) -> i32 {
+        self.layers
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(lowest_section, |slot| slot as i32 + MIN_LIGHT_SECTION + 1)
+    }
+
+    /// `getLightValue`：读这一柱里的一格。
+    /// 天空光在没存光照的段里读上面最近一段的最底一层。
+    pub(crate) fn light_value(
+        &self,
+        layer: LightLayer,
+        section_y: i32,
+        x: usize,
+        y: usize,
+        z: usize,
+    ) -> u8 {
+        match layer {
+            LightLayer::Block => self.layer(section_y).map_or(0, |data| data.get(x, y, z)),
+            LightLayer::Sky => self.sky_light_value(section_y, x, y, z),
+        }
+    }
+
+    fn sky_light_value(&self, section_y: i32, x: usize, y: usize, z: usize) -> u8 {
+        let lowest = self.lowest_stored_section();
+        if lowest == i32::MAX {
+            return FULL_LIGHT;
+        }
+        let top = self.top_section_y(lowest);
+        if section_y >= top {
+            return FULL_LIGHT;
+        }
+        if let Some(data) = self.layer(section_y) {
+            return data.get(x, y, z);
+        }
+        // 从世界最低的光照段起往上找，段以下的坐标直接跳过，免得走到很远的负数高度。
+        for above in (section_y + 1).max(MIN_LIGHT_SECTION)..top {
+            if let Some(data) = self.layer(above) {
+                return data.get(x, 0, z);
+            }
+        }
+        FULL_LIGHT
     }
 }
 
@@ -64,6 +124,8 @@ pub(crate) struct LightStorage {
     /// 没有自己一份的区块柱都是这个样子。
     template: LightColumn,
     columns: HashMap<ChunkPos, LightColumn>,
+    /// 每个区块柱最后一次被写时拿到的版本号，见 [`revision`](Self::revision)。
+    revisions: HashMap<ChunkPos, u64>,
     /// `currentLowestY`：存过光照的最低区块段，只降不升。
     lowest_section: i32,
     /// `toRemove`：这一轮结束时要丢掉的段。
@@ -98,12 +160,9 @@ impl LightStorage {
     pub(crate) fn new(layer: LightLayer, template: LightColumn, lowest_section: i32) -> Self {
         Self {
             layer,
-            // 模板柱的版本号是 0，写过的柱从 1 往上数，两者不会撞上。
-            template: LightColumn {
-                revision: 0,
-                ..template
-            },
+            template,
             columns: HashMap::new(),
+            revisions: HashMap::new(),
             lowest_section,
             to_remove: BTreeSet::new(),
             affected: BTreeSet::new(),
@@ -123,12 +182,9 @@ impl LightStorage {
 
     /// 要写这个区块柱了，没有自己一份的话先从模板复制。所有写都经过这里，每次换一个新的版本号。
     fn column_mut(&mut self, pos: ChunkPos) -> &mut LightColumn {
-        self.last_revision += 1;
-        let revision = self.last_revision;
+        self.assign_revision(pos);
         let template = &self.template;
-        let column = self.columns.entry(pos).or_insert_with(|| template.clone());
-        column.revision = revision;
-        column
+        self.columns.entry(pos).or_insert_with(|| template.clone())
     }
 
     /// 这个区块柱写过，内容可能和模板不同。
@@ -142,7 +198,7 @@ impl LightStorage {
     /// 不看受影响的段：一轮结束时丢掉的段不算受影响，区块包里却少了它们。
     /// 别人读的那一份只在 [`publish`](Self::publish) 时被写，所以它的版本号跟着发布走。
     pub(crate) fn revision(&self, pos: ChunkPos) -> u64 {
-        self.column(pos).revision
+        self.revisions.get(&pos).copied().unwrap_or_default()
     }
 
     /// 复制一个区块柱的光照，算模板的时候用。复制出来的不带“变过”的记号。
@@ -160,7 +216,7 @@ impl LightStorage {
 
     /// `getDataLayer`：这一段存的光照，没存时是 `None`。
     pub(crate) fn layer(&self, section: SectionPos) -> Option<&DataLayer> {
-        self.column(section.chunk()).layers[slot(section.y)?].as_ref()
+        self.column(section.chunk()).layer(section.y)
     }
 
     /// `storingLightForSection`。
@@ -197,13 +253,12 @@ impl LightStorage {
     /// 和 [`column_mut`](Self::column_mut) 一样换一个新的版本号；这里要同时改 `changed`，所以没法直接调它。
     fn slot_to_write(&mut self, section: SectionPos) -> Option<&mut Option<DataLayer>> {
         let slot = slot(section.y)?;
-        self.last_revision += 1;
+        self.assign_revision(section.chunk());
         let template = &self.template;
         let column = self
             .columns
             .entry(section.chunk())
             .or_insert_with(|| template.clone());
-        column.revision = self.last_revision;
         if column.changed & (1 << slot) == 0 {
             column.changed |= 1 << slot;
             self.changed.push(section);
@@ -374,13 +429,46 @@ impl LightStorage {
 
     /// `getTopSectionY`：这一列最高的存光照的段再往上一段。一段都没有时是 [`lowest_section`](Self::lowest_section)。
     pub(crate) fn top_section_y(&self, pos: ChunkPos) -> i32 {
-        self.column(pos)
-            .layers
-            .iter()
-            .rposition(Option::is_some)
-            .map_or(self.lowest_section, |slot| {
-                slot as i32 + MIN_LIGHT_SECTION + 1
-            })
+        self.column(pos).top_section_y(self.lowest_section)
+    }
+
+    /// 把整个区块柱搬走，这个位置回到模板柱，并换上这个存储里从没用过的版本号。
+    /// 只在光照全部算完时调用：这时一轮一清的登记簿都是空的，柱里也没有没发布的段。
+    pub(crate) fn take_column(&mut self, pos: ChunkPos) -> LightColumn {
+        debug_assert!(self.is_settled(pos), "只在光照全部算完时搬走区块柱");
+        let mut column = self
+            .columns
+            .remove(&pos)
+            .unwrap_or_else(|| self.template.clone());
+        column.changed = 0;
+        self.assign_revision(pos);
+        column
+    }
+
+    /// 放进一个区块柱，换上这个存储里从没用过的版本号。引擎和给别人读的那份各放一份。
+    pub(crate) fn insert_column(&mut self, pos: ChunkPos, column: &LightColumn) {
+        debug_assert!(column.changed == 0, "放进来的柱没有没发布的段");
+        self.columns.insert(pos, column.clone());
+        self.lowest_section = self.lowest_section.min(column.lowest_stored_section());
+        self.assign_revision(pos);
+    }
+
+    /// 这个位置和它那一轮有关的登记簿都清干净了。
+    fn is_settled(&self, pos: ChunkPos) -> bool {
+        let none_here = |sections: &BTreeSet<SectionPos>| {
+            !sections.iter().any(|section| section.chunk() == pos)
+        };
+        none_here(&self.to_remove)
+            && none_here(&self.affected)
+            && !self.changed.iter().any(|section| section.chunk() == pos)
+            && self.column(pos).changed == 0
+            && !self.has_inconsistencies
+    }
+
+    /// 给这个区块柱记下一个从没用过的版本号。
+    fn assign_revision(&mut self, pos: ChunkPos) {
+        self.last_revision += 1;
+        self.revisions.insert(pos, self.last_revision);
     }
 
     /// `hasLightDataAtOrBelow`。
@@ -398,29 +486,8 @@ impl LightStorage {
     pub(crate) fn light_value(&self, pos: BlockPos) -> u8 {
         let section = SectionPos::of(pos);
         let (x, y, z) = local(pos);
-        match self.layer {
-            LightLayer::Block => self.layer(section).map_or(0, |layer| layer.get(x, y, z)),
-            LightLayer::Sky => self.sky_light_value(section, x, y, z),
-        }
-    }
-
-    /// 天空光：所有存光照的段上面是 15。没存光照的段读上面最近一段的最底一层。
-    fn sky_light_value(&self, section: SectionPos, x: usize, y: usize, z: usize) -> u8 {
-        let top = self.top_section_y(section.chunk());
-        if top == self.lowest_section || section.y >= top {
-            return FULL_LIGHT;
-        }
-        if let Some(layer) = self.layer(section) {
-            return layer.get(x, y, z);
-        }
-        let mut above = section.above();
-        while above.y < top {
-            if let Some(layer) = self.layer(above) {
-                return layer.get(x, 0, z);
-            }
-            above = above.above();
-        }
-        FULL_LIGHT
+        self.column(section.chunk())
+            .light_value(self.layer, section.y, x, y, z)
     }
 }
 

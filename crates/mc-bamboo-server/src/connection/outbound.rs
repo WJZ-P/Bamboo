@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use mc_bamboo_game::PlayerSink;
+use mc_bamboo_game::{Outgoing, PlayerSink};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
@@ -16,7 +16,7 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 pub(crate) const MAX_QUEUED_BYTES: usize = 64 * 1024 * 1024;
 
 enum Item {
-    Frames(Vec<u8>),
+    Frames(Outgoing),
     /// 写完之前的帧就结束，排在它后面的帧不再写。
     Close,
 }
@@ -56,13 +56,18 @@ pub(super) fn channel(limit: usize) -> (Outbound, OutboundQueue) {
 impl Outbound {
     /// 放进一批完整的帧。积压太多或者连接任务已经结束时返回 `false`。
     pub(super) fn push(&self, frames: Vec<u8>) -> bool {
-        let len = frames.len();
+        self.push_outgoing(Outgoing::from_raw(frames))
+    }
+
+    /// 放进世界线程分段组好的一批帧，按未压缩字节数记账。
+    pub(super) fn push_outgoing(&self, outgoing: Outgoing) -> bool {
+        let len = outgoing.len_bytes();
         let queued = self.queued_bytes.fetch_add(len, Ordering::Relaxed) + len;
         if queued > self.limit {
             self.overflow.cancel();
             return false;
         }
-        self.items.send(Item::Frames(frames)).is_ok()
+        self.items.send(Item::Frames(outgoing)).is_ok()
     }
 
     /// 让连接任务写完已有的帧之后结束。
@@ -78,8 +83,8 @@ impl Outbound {
 }
 
 impl PlayerSink for Outbound {
-    fn send(&mut self, frames: Vec<u8>) -> bool {
-        self.push(frames)
+    fn send(&mut self, frames: Outgoing) -> bool {
+        self.push_outgoing(frames)
     }
 
     fn close(&mut self) {
@@ -89,7 +94,7 @@ impl PlayerSink for Outbound {
 
 impl OutboundQueue {
     /// 下一批要写的帧。队列结束时返回 `None`。
-    pub(super) async fn next(&mut self) -> Option<Vec<u8>> {
+    pub(super) async fn next(&mut self) -> Option<Outgoing> {
         match self.items.recv().await? {
             Item::Frames(frames) => Some(frames),
             Item::Close => None,
@@ -122,9 +127,9 @@ mod tests {
         // 关闭之后写入的帧不会出现在队列里。
         outbound.push(vec![3]);
 
-        assert_eq!(queue.next().await, Some(vec![1]));
-        assert_eq!(queue.next().await, Some(vec![2]));
-        assert_eq!(queue.next().await, None);
+        assert_eq!(queue.next().await.unwrap().to_raw_bytes(), [1]);
+        assert_eq!(queue.next().await.unwrap().to_raw_bytes(), [2]);
+        assert!(queue.next().await.is_none());
     }
 
     #[tokio::test]
@@ -133,7 +138,7 @@ mod tests {
 
         drop(outbound);
 
-        assert_eq!(queue.next().await, None);
+        assert!(queue.next().await.is_none());
     }
 
     #[tokio::test]
@@ -156,7 +161,7 @@ mod tests {
         assert!(outbound.push(vec![0; 10]));
 
         let frames = queue.next().await.expect("队列里有一批帧");
-        queue.mark_written(frames.len());
+        queue.mark_written(frames.len_bytes());
 
         assert!(outbound.push(vec![0; 10]));
     }
@@ -167,22 +172,41 @@ mod tests {
 
         drop(queue);
 
-        assert!(!sink.send(vec![0]));
+        assert!(!sink.send(Outgoing::from_raw(vec![0])));
         // 连接任务已经结束时关闭也不算错误。
         sink.close();
+    }
+
+    #[tokio::test]
+    async fn shared_segments_are_counted_as_uncompressed_bytes() {
+        let (outbound, mut queue) = channel(100);
+        let shared = Arc::new(mc_bamboo_game::SharedFrames::new(vec![0; 40]));
+        let mut outgoing = Outgoing::default();
+        outgoing.push_raw(&[1; 10]);
+        outgoing.push_shared(Arc::clone(&shared));
+        outgoing.push_raw(&[2; 20]);
+        assert_eq!(outgoing.len_bytes(), 70);
+
+        assert!(outbound.push_outgoing(outgoing));
+        // 溢出会取消连接，之后的写入都被拒绝，所以先只检查记账再单独测回收。
+        let batch = queue.next().await.expect("队列里有一批帧");
+        assert_eq!(batch.len_bytes(), 70);
+        queue.mark_written(batch.len_bytes());
+        assert!(outbound.push(vec![0; 100]));
     }
 
     #[test]
     fn world_thread_can_write_without_a_runtime() {
         let (mut sink, mut queue) = channel(10);
 
-        assert!(sink.send(vec![7]));
+        assert!(sink.send(Outgoing::from_raw(vec![7])));
         sink.close();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        assert_eq!(runtime.block_on(queue.next()), Some(vec![7]));
-        assert_eq!(runtime.block_on(queue.next()), None);
+        let batch = runtime.block_on(queue.next()).expect("一批帧");
+        assert_eq!(batch.to_raw_bytes(), [7]);
+        assert!(runtime.block_on(queue.next()).is_none());
     }
 }
