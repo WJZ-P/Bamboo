@@ -56,8 +56,8 @@ impl LightColumn {
     /// 按磁盘上 26 段的光照数据和方块段重建一柱。
     ///
     /// 跨到相邻区块柱的邻居计数这里看不到：`sectionStates` 只按「哪些段存了
-    /// 光照」记，存了光照的段标 `HAS_DATA`。放进 `ChunkStore` 后跨柱的登记由
-    /// 区块平面那一步负责，和 `take_column` / `insert_column` 的约定一致。
+    /// 光照」记，存了光照的段标 `HAS_DATA`。放进 `ChunkStore` 时由
+    /// `insert_column` 调用 [`rebind_area`](Self::rebind_area) 按目标世界重新登记。
     pub(crate) fn from_layers(
         layers: [Option<DataLayer>; LIGHT_SECTION_COUNT],
         has_blocks: &[bool; LIGHT_SECTION_COUNT],
@@ -249,6 +249,12 @@ impl LightStorage {
         self.lowest_section
     }
 
+    /// 这一柱的 26 个段状态，给测试核对登记/注销用。
+    #[cfg(test)]
+    pub(crate) fn states_at(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
+        self.column(pos).states
+    }
+
     /// `getDataLayer`：这一段存的光照，没存时是 `None`。
     pub(crate) fn layer(&self, section: SectionPos) -> Option<&DataLayer> {
         self.column(section.chunk()).layer(section.y)
@@ -329,6 +335,68 @@ impl LightStorage {
 
     fn state(&self, section: SectionPos) -> u8 {
         slot(section.y).map_or(0, |slot| self.column(section.chunk()).states[slot])
+    }
+
+    /// 区块束搬进或搬出一个世界之后，按**目标世界此刻的方块**重算 `pos` 和 8 个邻居柱
+    /// 的 `sectionStates`，照官方 `ThreadedLevelLightEngine.initializeLight`（登记）和
+    /// `updateChunkStatus`（注销）的定义：HAS_DATA 位是这一段自己有没有方块，
+    /// 低 5 位是 26 个邻居段里有方块的个数。
+    ///
+    /// 盒子自带的 `sectionStates` 是来源世界的，单独插进一圈不同的邻居中间就不对了，
+    /// 所以这里不用它，而是从 `chunks` 重新算整片 3×3 邻域。平坦世界里每个位置都有
+    /// 同样的方块，算出来的值和模板相同，一整片相邻区块一起搬时一次都不写。
+    ///
+    /// 只动段状态，不新建或删除光照段、不排任务、不换版本号：盒子里装的是
+    /// 已经算好的光照数据，`putSectionState` 的 `initializeSection` 会用默认值覆盖它。
+    pub(crate) fn rebind_area(&mut self, pos: ChunkPos, chunks: super::Chunks<'_>) {
+        let occupied = |column: ChunkPos, slot: usize| -> bool {
+            // 光照段比方块段多上下各一段，那两段没有方块段。
+            (1..LIGHT_SECTION_COUNT - 1).contains(&slot)
+                && !chunks.chunk(column).sections()[slot - 1].is_empty()
+        };
+        let states_of = |column: ChunkPos| -> [u8; LIGHT_SECTION_COUNT] {
+            std::array::from_fn(|slot| {
+                let mut neighbors = 0u8;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            if (dx, dy, dz) == (0, 0, 0) {
+                                continue;
+                            }
+                            let neighbor = ChunkPos::new(
+                                column.x.saturating_add(dx),
+                                column.z.saturating_add(dz),
+                            );
+                            let neighbor_slot = (slot as i32 + dy) as usize;
+                            if (0..LIGHT_SECTION_COUNT).contains(&neighbor_slot)
+                                && occupied(neighbor, neighbor_slot)
+                            {
+                                neighbors += 1;
+                            }
+                        }
+                    }
+                }
+                (if occupied(column, slot) { HAS_DATA } else { 0 }) | neighbors
+            })
+        };
+
+        let mut area = Vec::with_capacity(9);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let column = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
+                let states = states_of(column);
+                if self.column(column).states != states {
+                    area.push((column, states));
+                }
+            }
+        }
+        for (column, states) in area {
+            let template = &self.template;
+            self.columns
+                .entry(column)
+                .or_insert_with(|| template.clone())
+                .states = states;
+        }
     }
 
     /// `updateSectionStatus`：这一段变空了或者有了方块，它和 26 个邻居存不存光照可能跟着变。

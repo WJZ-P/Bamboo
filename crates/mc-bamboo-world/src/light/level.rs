@@ -195,6 +195,12 @@ impl Visible {
         Self { sky, block }
     }
 
+    /// 区块束搬进/搬出之后重算别人读的那份里的 `sectionStates`。
+    pub(super) fn rebind_area(&mut self, pos: ChunkPos, chunks: super::Chunks<'_>) {
+        self.sky.rebind_area(pos, chunks);
+        self.block.rebind_area(pos, chunks);
+    }
+
     /// 取出一个区块柱在给别人读的那份里的天空光和方块光。
     pub(super) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
         [self.sky.take_column(pos), self.block.take_column(pos)]

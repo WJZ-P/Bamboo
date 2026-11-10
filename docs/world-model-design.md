@@ -174,10 +174,11 @@ ChunkColumn
 
 - **实体**：`Region.entities`（下落方块、点燃的 TNT、掉落物）以及 `entity_tracking` 里的配对
   还没有按区块的取放接口，实体存储重做那一步自己加。
-- **`mc-bamboo-world` 里邻居段计数的限制**：柱里的 `sectionStates` 记着相邻段有没有方块，
-  邻居柱里为它记下的计数留在原 store。所以 `take_column` / `insert_column` 目前只对
-  「原地取放」和「一整片互相相邻的区块一起搬」保证正确；单独把一柱放到一圈不同的邻居中间
-  还需要登记和注销各段的状态，那是区块平面那一步的事。
+- **`mc-bamboo-world` 里邻居段计数的限制已解决**（第 3 步的提交 1）：柱里的 `sectionStates`
+  记着相邻段有没有方块，邻居柱里为它记下的计数留在原 store。现在 `take_column` /
+  `insert_column` 会按目标世界此刻的方块重算这一柱和 8 个邻居柱的 26 个段状态
+  （官方 `ThreadedLevelLightEngine.initializeLight` 的登记和 `updateChunkStatus` 的注销），
+  所以单独把一柱放到一圈不同的邻居中间也正确；盒子自带的来源世界计数不跨世界沿用。
 - **方块实体里带绝对时刻的字段**：`HopperEntity.tickedGameTime` 和
   `PistonMoving.lastTicked` 装在不公开的 `Box<dyn BlockEntity>` 盒子里，没法在这一层换算成相对值。
   同一 region 内原地取放不受影响；跨到模拟时间不同的 region 时这两处会沿用旧时刻，

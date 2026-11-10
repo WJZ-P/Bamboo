@@ -177,8 +177,7 @@ impl ChunkColumn {
     /// `initialize_light_sources` 在这里跑完，光照引擎之后能接着算。
     ///
     /// 光照的 `sectionStates` 只按「这一柱」重建：跨到相邻区块柱的邻居计数这里
-    /// 看不到，放进 `ChunkStore` 后跨柱的登记由区块平面那一步负责（和
-    /// `take_column` / `insert_column` 的约定一致）。
+    /// 看不到，放进 `ChunkStore` 时由 `insert_column` 按目标世界的方块重新登记。
     pub fn from_parts(parts: ChunkColumnParts) -> Result<Self, ColumnPartsError> {
         if parts.sections.len() != SECTION_COUNT {
             return Err(ColumnPartsError::WrongSectionCount {
@@ -481,6 +480,75 @@ mod tests {
         assert_same(&readings(&store), &before);
         assert_same(&shapes(&store), &shape);
         assert_same(&data_layers(&store), &data);
+    }
+
+    /// 单独把一柱插进一圈**不同的邻居**中间，之后跨区块边界的光照传播要和
+    /// 「从没搬过」的世界逐格一致。这是区块平面（卸载/重新加载）的前提：
+    /// 盒子自带的邻居计数是来源世界的，`insert_column` 必须按目标世界重新登记。
+    #[test]
+    fn one_column_among_different_neighbors_keeps_border_light() {
+        // 来源：中心柱里放一个跨边界的发光方块，光会溢到邻居柱。
+        let mut source = ChunkStore::flat();
+        source.set_block(LAMP, blocks::GLOWSTONE);
+        source.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+        source.finish_light_updates();
+        let column = take(&mut source, CENTER);
+
+        // 目标：邻居柱里事先有别的内容（高处的屋顶会挡天空光、方块会挡光）。
+        // 这些内容和来源世界完全不同，来源的段计数不能照搬。
+        let mut target = ChunkStore::flat();
+        for x in 16..32 {
+            target.set_block(BlockPos::new(x, 100, 3), blocks::STONE);
+        }
+        target.set_block(BlockPos::new(20, -60, 4), blocks::OAK_SIGN);
+        target.finish_light_updates();
+        insert(&mut target, CENTER, column);
+
+        // 对照：同样的世界，从头直接把中心柱的内容放进去。
+        let mut direct = ChunkStore::flat();
+        for x in 16..32 {
+            direct.set_block(BlockPos::new(x, 100, 3), blocks::STONE);
+        }
+        direct.set_block(BlockPos::new(20, -60, 4), blocks::OAK_SIGN);
+        direct.set_block(LAMP, blocks::GLOWSTONE);
+        direct.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+        direct.finish_light_updates();
+
+        // 段状态按目标世界重算过：中心与 8 邻居逐项和「从没搬过」一致。
+        // 盒子自带的来源世界计数不能整柱照搬，否则边界段的存废会错。
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let pos = ChunkPos::new(CENTER.x + dx, CENTER.z + dz);
+                assert_eq!(
+                    target.light().section_states(pos),
+                    direct.light().section_states(pos),
+                    "段状态不同：{pos:?}"
+                );
+            }
+        }
+
+        // 之后在边界上做一轮「拆掉再放回」，让光照重新跨区块边界传播。
+        // 段状态登记对了，两边就收敛到同一个结果，且之后继续加遮挡也一样。
+        for (lamp, roof) in [
+            (blocks::AIR, false),
+            (blocks::GLOWSTONE, false),
+            (blocks::GLOWSTONE, true),
+            (blocks::AIR, true),
+        ] {
+            target.set_block(LAMP, lamp);
+            direct.set_block(LAMP, lamp);
+            if roof {
+                target.set_block(BlockPos::new(3, -59, 3), blocks::STONE);
+                direct.set_block(BlockPos::new(3, -59, 3), blocks::STONE);
+            }
+            target.finish_light_updates();
+            direct.finish_light_updates();
+            if lamp == blocks::GLOWSTONE && !roof {
+                // 从这一轮起，跨边界的光已经重新传播过。
+                assert_stores_match(&target, &direct);
+            }
+        }
+        assert_stores_match(&target, &direct);
     }
 
     #[test]

@@ -273,6 +273,18 @@ impl LevelLight {
             .insert_column(pos, [sky, block], &mut self.visible);
     }
 
+    /// 区块束搬进或搬出这个位置之后调用：按 `chunks` 此刻的方块重算这一柱和
+    /// 8 个邻居柱的 `sectionStates`，照官方 `initializeLight` / `updateChunkStatus`
+    /// 登记和注销段状态。盒子里带的来源世界计数不跨世界沿用。
+    ///
+    /// 只在光照全部算完时调用；两层和「正在算 / 给别人读」两份都要更新。
+    pub(crate) fn rebind_area(&mut self, pos: ChunkPos, chunks: Chunks<'_>) {
+        debug_assert!(self.ready_to_move_columns(), "搬区块束之前要先把光照跑完");
+        self.engines.sky.storage.rebind_area(pos, chunks);
+        self.engines.block.storage.rebind_area(pos, chunks);
+        self.visible.rebind_area(pos, chunks);
+    }
+
     /// 上次取走以后光照变了的区块和段。
     pub fn take_changes(&mut self) -> BTreeMap<ChunkPos, LightChanges> {
         self.engines.take_changes()
@@ -293,6 +305,12 @@ impl LevelLight {
         let visible = &self.visible;
         visible.storage(LightLayer::Sky).is_materialized(pos)
             || visible.storage(LightLayer::Block).is_materialized(pos)
+    }
+
+    /// 这一柱的 26 个段状态，给测试核对段状态的登记和注销用。
+    #[cfg(test)]
+    pub(crate) fn section_states(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
+        self.engines.sky.storage.states_at(pos)
     }
 
     /// 这个区块柱两层光照给别人读的那一份的版本号，天空光在前。每发布一次都换成没用过的新值，没写过的柱是 0。

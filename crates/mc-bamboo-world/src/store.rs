@@ -322,10 +322,9 @@ impl ChunkStore {
     /// 也可以先用 [`ready_to_move_columns`](Self::ready_to_move_columns) 问一声；这里不会偷偷跑。
     /// 还没发给客户端的光照变化里属于这个区块的条目一并丢掉，发区块包是调用方的事。
     ///
-    /// 柱里的 `sectionStates` 记着相邻段有没有方块，邻居柱里为它记下的计数留在原地，
-    /// 所以这对接口目前只对两种情况保证结果正确：原地取出再放回，或者一整片互相相邻的
-    /// 区块一起搬（region 合并、拆分时相邻的已加载区块一定在同一个 region 里）。
-    /// 单独把一柱放到一圈不同的邻居中间还需要登记和注销各段的状态，那是区块平面那一步的事。
+    /// 柱里的 `sectionStates` 记着相邻段有没有方块。[`rebind_area`](crate::light::LevelLight::rebind_area)
+    /// 会在取走和放入后按目标世界此刻的方块重算这一柱和 8 个邻居柱的状态，
+    /// 所以单独把一柱放到一圈不同的邻居中间也正确。
     pub fn take_column(&mut self, pos: ChunkPos) -> Result<Box<ChunkColumn>, LightPending> {
         if !self.light.ready_to_move_columns() {
             return Err(LightPending);
@@ -335,7 +334,11 @@ impl ChunkStore {
             .chunks
             .remove(&pos)
             .unwrap_or_else(|| self.template.clone());
+        // 注销这一柱的段状态：拿走之后这个位置回到模板（无限平坦世界里方块不变，
+        // 这一步是恒等写入；以后按区块加载时这里才是真的注销）。
         let light = self.light.take_column(pos);
+        self.light
+            .rebind_area(pos, Chunks::new(&self.template, &self.edited));
         self.edited.bump_revision(pos);
         Ok(Box::new(ChunkColumn::new(chunk, light)))
     }
@@ -351,8 +354,7 @@ impl ChunkStore {
     /// [`ready_to_move_columns`](Self::ready_to_move_columns) 问一声。不满足时 store 不变，
     /// 盒子原样还给调用方，不会丢。
     ///
-    /// 邻居段计数的适用范围也和 [`take_column`](Self::take_column) 一样：只保证原地放回，
-    /// 或者一整片互相相邻的区块一起搬；单独放进一圈不同的邻居中间留给区块平面那一步。
+    /// 邻居段计数按目标世界重算，适用范围和 [`take_column`](Self::take_column) 一样。
     pub fn insert_column(
         &mut self,
         pos: ChunkPos,
@@ -365,6 +367,10 @@ impl ChunkStore {
         self.edited.chunks.insert(pos, chunk);
         self.edited.bump_revision(pos);
         self.light.insert_column(pos, light);
+        // 登记这一柱的段状态：按目标世界此刻的方块重算 3×3 邻域的邻居计数，
+        // 单独把一柱插进一圈不同的邻居中间也成立。
+        self.light
+            .rebind_area(pos, Chunks::new(&self.template, &self.edited));
         Ok(())
     }
 }
