@@ -72,7 +72,7 @@ def summarize(root, name):
     client = json.loads((directory / "client.json").read_text())
     reports = parse_reports(directory / "server.log")
     bots = client["bots"]
-    # 只取在线人数峰值达到目标 90% 以上的稳态报告。
+    # 只取在线人数峰值达到目标 90% 以上的报告，把空服和 ramp 排除掉。
     steady = [
         report
         for report in reports
