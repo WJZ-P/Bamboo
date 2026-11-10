@@ -309,13 +309,25 @@ impl ChunkStore {
         self.light.light_value(layer, pos)
     }
 
+    /// 现在能不能搬区块束，见 [`take_column`](Self::take_column) 和 [`insert_column`](Self::insert_column)。
+    /// 调用方可以先问，再决定要不要把光照跑完。
+    pub fn ready_to_move_columns(&self) -> bool {
+        self.light.ready_to_move_columns()
+    }
+
     /// 把 `pos` 这个区块整个拿走。之后这个位置读起来和没改过的区块一样（模板）。
     ///
     /// 区块束里只有一份光照，所以只允许在光照全部算完、没有算到一半的轮次时取。
-    /// 调用方先跑完光照（[`finish_light_updates`](Self::finish_light_updates)）再取；这里不会偷偷跑。
+    /// 搬区块束之前调用方要先用 [`finish_light_updates`](Self::finish_light_updates) 把光照跑完，
+    /// 也可以先用 [`ready_to_move_columns`](Self::ready_to_move_columns) 问一声；这里不会偷偷跑。
     /// 还没发给客户端的光照变化里属于这个区块的条目一并丢掉，发区块包是调用方的事。
+    ///
+    /// 柱里的 `sectionStates` 记着相邻段有没有方块，邻居柱里为它记下的计数留在原地，
+    /// 所以这对接口目前只对两种情况保证结果正确：原地取出再放回，或者一整片互相相邻的
+    /// 区块一起搬（region 合并、拆分时相邻的已加载区块一定在同一个 region 里）。
+    /// 单独把一柱放到一圈不同的邻居中间还需要登记和注销各段的状态，那是区块平面那一步的事。
     pub fn take_column(&mut self, pos: ChunkPos) -> Result<Box<ChunkColumn>, LightPending> {
-        if !self.light.ready_to_take_column() {
+        if !self.light.ready_to_move_columns() {
             return Err(LightPending);
         }
         let chunk = self
@@ -333,11 +345,27 @@ impl ChunkStore {
     /// 两层光照同时放进引擎和给别人读的那份，之后引擎能接着正常工作。
     /// 版本号从本 store 自己的计数器取，不沿用盒子里带来的值，区块包的缓存因此会失效。
     /// 放入不产生发给客户端的光照变化。
-    pub fn insert_column(&mut self, pos: ChunkPos, column: Box<ChunkColumn>) {
+    ///
+    /// 前提和 [`take_column`](Self::take_column) 一样：搬区块束之前调用方要先把光照跑完
+    /// （[`finish_light_updates`](Self::finish_light_updates)），也可以先用
+    /// [`ready_to_move_columns`](Self::ready_to_move_columns) 问一声。不满足时 store 不变，
+    /// 盒子原样还给调用方，不会丢。
+    ///
+    /// 邻居段计数的适用范围也和 [`take_column`](Self::take_column) 一样：只保证原地放回，
+    /// 或者一整片互相相邻的区块一起搬；单独放进一圈不同的邻居中间留给区块平面那一步。
+    pub fn insert_column(
+        &mut self,
+        pos: ChunkPos,
+        column: Box<ChunkColumn>,
+    ) -> Result<(), (LightPending, Box<ChunkColumn>)> {
+        if !self.light.ready_to_move_columns() {
+            return Err((LightPending, column));
+        }
         let (chunk, light) = column.into_parts();
         self.edited.chunks.insert(pos, chunk);
         self.edited.bump_revision(pos);
         self.light.insert_column(pos, light);
+        Ok(())
     }
 }
 
@@ -549,7 +577,7 @@ mod tests {
         assert_ne!(taken.light[0], before.light[0]);
         assert_ne!(taken.light[1], before.light[1]);
 
-        store.insert_column(pos, column);
+        store.insert_column(pos, column).expect("光照算完了");
         let inserted = store.revision(pos);
         assert_ne!(inserted.chunk, taken.chunk);
         assert_ne!(inserted.light[0], taken.light[0]);

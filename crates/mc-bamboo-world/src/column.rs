@@ -3,6 +3,10 @@
 //! 区块束是唯一的搬运单位。方块和两层光照装在一个盒子里，加载、卸载、存盘、
 //! region 合并拆分都是搬盒子，见 `docs/world-model-design.md` 第 4.2 节。
 //! 方块实体的内容、计划刻这些在上层，以后由上层装进它自己的盒子。
+//!
+//! 搬区块束之前调用方要先用 [`ChunkStore::finish_light_updates`](super::store::ChunkStore::finish_light_updates)
+//! 把光照跑完，也可以用 [`ChunkStore::ready_to_move_columns`](super::store::ChunkStore::ready_to_move_columns)
+//! 先问一声；盒子里只装一份已经算稳的光照。
 
 use mc_bamboo_core::{BlockPos, LightLayer};
 
@@ -194,6 +198,12 @@ mod tests {
         store.take_column(pos).expect("光照已经算完了")
     }
 
+    fn insert(store: &mut ChunkStore, pos: ChunkPos, column: Box<ChunkColumn>) {
+        store
+            .insert_column(pos, column)
+            .unwrap_or_else(|_| panic!("光照已经算完了"));
+    }
+
     /// 逐字节比较，失败时报出第一处不同的下标，不打印整个大数组。
     fn assert_same(left: &[u8], right: &[u8]) {
         assert_eq!(left.len(), right.len(), "快照长度不同");
@@ -214,6 +224,17 @@ mod tests {
         assert_is_send::<ChunkColumn>();
         assert_is_send::<Box<ChunkColumn>>();
         assert_is_send::<LightPending>();
+    }
+
+    /// 公开的查询让调用方可以先问再决定要不要跑光照。
+    #[test]
+    fn the_public_query_tracks_when_columns_can_move() {
+        let mut store = ChunkStore::flat();
+        assert!(store.ready_to_move_columns());
+        store.set_block(LAMP, blocks::GLOWSTONE);
+        assert!(!store.ready_to_move_columns());
+        store.finish_light_updates();
+        assert!(store.ready_to_move_columns());
     }
 
     #[test]
@@ -259,7 +280,7 @@ mod tests {
         let data = data_layers(&store);
 
         let column = take(&mut store, CENTER);
-        store.insert_column(CENTER, column);
+        insert(&mut store, CENTER, column);
 
         assert_same(&readings(&store), &before);
         assert_same(&shapes(&store), &shape);
@@ -273,7 +294,7 @@ mod tests {
         let without_lamp = readings(&edited(false));
 
         let column = take(&mut store, CENTER);
-        store.insert_column(CENTER, column);
+        insert(&mut store, CENTER, column);
 
         // 拆掉发光方块，光照回到没有它时的值；再放回去，回到第一步的值。
         store.set_block(LAMP, blocks::AIR);
@@ -296,7 +317,7 @@ mod tests {
 
         // 发光方块所在的区块和所有被光溢到的邻居一起搬。
         for &pos in &AREA {
-            b.insert_column(pos, take(&mut a, pos));
+            insert(&mut b, pos, take(&mut a, pos));
         }
         assert_same(&readings(&b), &before);
         assert_same(&shapes(&b), &shape);
@@ -333,7 +354,7 @@ mod tests {
         let mut b = ChunkStore::flat();
 
         for &pos in &AREA {
-            b.insert_column(pos, take(&mut a, pos));
+            insert(&mut b, pos, take(&mut a, pos));
         }
         // 和 A 里取出前的读数逐个相同；B 里接着拆、接着放也一样。
         let mut direct = ChunkStore::flat();
@@ -354,7 +375,8 @@ mod tests {
         assert_stores_match(&b, &direct);
     }
 
-    /// 区块四个角都放光源，光会溢到八个邻居；整片（3×3）一起搬。
+    /// 一整片互相相邻的区块（3×3）一起搬：钉住 `sectionStates` 里邻居段计数的适用范围。
+    /// 四个角都放光源，光会溢到八个邻居，所有互相记了计数的柱都在这一片里。
     #[test]
     fn a_three_by_three_area_moves_between_stores() {
         let mut a = ChunkStore::flat();
@@ -368,7 +390,7 @@ mod tests {
         let readings_before = readings(&a);
         let mut b = ChunkStore::flat();
         for &pos in &area {
-            b.insert_column(pos, take(&mut a, pos));
+            insert(&mut b, pos, take(&mut a, pos));
         }
         // 中间两列的读数和搬之前一样。
         assert_same(&readings(&b), &readings_before);
@@ -406,6 +428,41 @@ mod tests {
         assert!(store.take_column(CENTER).is_ok());
     }
 
+    /// 光照没算完时放入返回 `Err`，盒子原样还回来，store 一点没变；跑完再放入成功。
+    #[test]
+    fn pending_light_blocks_inserting_and_returns_the_box() {
+        let mut source = edited(true);
+        let expected = readings(&source);
+        let column = take(&mut source, CENTER);
+
+        let mut target = ChunkStore::flat();
+        target.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+        assert!(target.has_pending_light_updates());
+        assert!(!target.ready_to_move_columns());
+        let before = target.revision(CENTER);
+        let initial = readings(&target);
+
+        let Err((LightPending, returned)) = target.insert_column(CENTER, column) else {
+            panic!("光照没算完时应该拒绝放入");
+        };
+        assert_eq!(target.revision(CENTER), before);
+        assert_same(&readings(&target), &initial);
+
+        // 拿回来的盒子和传进去的是同一份内容：放回已经算完的 source 里逐格比。
+        insert(&mut source, CENTER, returned);
+        assert_same(&readings(&source), &expected);
+        assert_stores_match(&source, &edited(true));
+
+        // 目标自己跑完光照以后，同一个盒子就能放进去了。
+        target.finish_light_updates();
+        assert!(target.ready_to_move_columns());
+        assert!(
+            target
+                .insert_column(CENTER, take(&mut source, CENTER))
+                .is_ok()
+        );
+    }
+
     #[test]
     fn a_taken_chunk_reads_the_template_and_revisions_are_fresh() {
         let mut store = edited(true);
@@ -437,7 +494,7 @@ mod tests {
             }
         }
 
-        store.insert_column(CENTER, column);
+        insert(&mut store, CENTER, column);
         seen.push(store.revision(CENTER));
         // 取出和放入各换一次版本号，三个值互不相同；方块和两层光照都换了。
         for (index, revision) in seen.iter().enumerate() {
@@ -454,7 +511,7 @@ mod tests {
         let before = a.revision(CENTER);
         let mut b = ChunkStore::flat();
         let fresh = b.revision(CENTER);
-        b.insert_column(CENTER, take(&mut a, CENTER));
+        insert(&mut b, CENTER, take(&mut a, CENTER));
 
         let inserted = b.revision(CENTER);
         assert_ne!(inserted, fresh);
@@ -471,7 +528,7 @@ mod tests {
         assert_eq!(column.chunk().block(0, -61, 0), blocks::GRASS_BLOCK);
         assert!(store.is_template(NEIGHBOR));
 
-        store.insert_column(NEIGHBOR, column);
+        insert(&mut store, NEIGHBOR, column);
         assert_same(&readings(&store), &before);
     }
 
@@ -523,7 +580,7 @@ mod tests {
 
         let column = take(&mut store, CENTER);
         assert!(!store.take_light_changes().contains_key(&CENTER));
-        store.insert_column(CENTER, column);
+        insert(&mut store, CENTER, column);
         assert!(store.take_light_changes().is_empty());
 
         // 插入以后再改方块，照旧能报出变化。

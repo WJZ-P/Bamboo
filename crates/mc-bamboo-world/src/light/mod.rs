@@ -248,7 +248,7 @@ impl LevelLight {
 
     /// 可以搬区块柱了：没有排着队的任务，也没有算到一半的轮次和引擎里剩下的工作。
     /// 这时引擎和给别人读的那两份光照内容相同，盒子只装一份就够。
-    pub(crate) fn ready_to_take_column(&self) -> bool {
+    pub(crate) fn ready_to_move_columns(&self) -> bool {
         !self.queue.has_work()
             && !self.engines.in_round()
             && !self.engines.sky.has_light_work()
@@ -257,7 +257,7 @@ impl LevelLight {
 
     /// 把 `pos` 这一列的天空光和方块光整个拿走，这个位置回到模板柱。
     pub(crate) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
-        debug_assert!(self.ready_to_take_column(), "只在光照全部算完时搬区块柱");
+        debug_assert!(self.ready_to_move_columns(), "只在光照全部算完时搬区块柱");
         let engines = self.engines.take_column(pos);
         let visible = self.visible.take_column(pos);
         debug_assert!(
