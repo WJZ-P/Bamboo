@@ -23,6 +23,7 @@
 //! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
+//! | `profiler` | 每刻各阶段的耗时直方图和报告 |
 
 pub mod admin;
 mod block_drops;
@@ -54,9 +55,11 @@ mod lock;
 mod loot_stacks;
 mod menu;
 mod movement;
+mod outgoing;
 mod player;
 mod player_grid;
 mod player_move;
+mod profiler;
 mod region;
 mod scoreboard;
 mod secure_chat;
@@ -71,6 +74,7 @@ pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use loot_stacks::loot_stack;
 pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
+pub use outgoing::{Outgoing, Segment, SharedFrames};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{World, WorldConfig};

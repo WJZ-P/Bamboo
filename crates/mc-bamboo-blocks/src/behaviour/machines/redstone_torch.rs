@@ -53,18 +53,16 @@ fn has_neighbor_signal(state: BlockState, world: &World, pos: BlockPos) -> bool 
 fn toggled_too_frequently(world: &mut World, pos: BlockPos, add: bool) -> bool {
     if add {
         let now = world.game_time();
-        world.redstone_memory_mut().record_torch_toggle(pos, now);
+        world.record_torch_toggle(pos, now);
     }
-    world.redstone_memory().torch_toggle_count(pos) >= MAX_RECENT_TOGGLES
+    world.torch_toggle_count(pos) >= MAX_RECENT_TOGGLES
 }
 
 /// `tick`。
 fn tick(state: BlockState, world: &mut World, pos: BlockPos) {
     let neighbor_signal = has_neighbor_signal(state, world, pos);
     let cutoff = world.game_time() - RECENT_TOGGLE_TIMER;
-    world
-        .redstone_memory_mut()
-        .forget_torch_toggles_before(cutoff);
+    world.forget_torch_toggles_before(cutoff);
     if !state.get(LIT) {
         if !neighbor_signal && !toggled_too_frequently(world, pos, false) {
             world.set_block_and_update(pos, state.with(LIT, true));

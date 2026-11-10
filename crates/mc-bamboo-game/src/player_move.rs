@@ -30,6 +30,7 @@ use uuid::Uuid;
 use crate::{
     inbound::{PlayerId, PlayerSink},
     movement::{self, set_rotation},
+    outgoing::Outgoing,
     player::Player,
     region::Region,
 };
@@ -999,8 +1000,12 @@ struct ReplayBytes {
 struct ReplaySink(std::sync::Arc<std::sync::Mutex<ReplayBytes>>);
 
 impl PlayerSink for ReplaySink {
-    fn send(&mut self, frames: Vec<u8>) -> bool {
-        self.0.lock().expect("replay sink").bytes.extend(frames);
+    fn send(&mut self, frames: Outgoing) -> bool {
+        self.0
+            .lock()
+            .expect("replay sink")
+            .bytes
+            .extend(frames.to_raw_bytes());
         true
     }
 

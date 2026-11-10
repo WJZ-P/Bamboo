@@ -251,7 +251,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::{inbound::PlayerSink, links::encode_frames};
+    use crate::{inbound::PlayerSink, links::encode_frames, outgoing::Outgoing};
 
     const PLAYER: PlayerId = PlayerId(1);
     const SPAWN: Vec3 = Vec3::new(8.5, -60.0, 8.5);
@@ -266,8 +266,8 @@ mod tests {
     struct Recorder(std::sync::Arc<std::sync::Mutex<SinkState>>);
 
     impl PlayerSink for Recorder {
-        fn send(&mut self, frames: Vec<u8>) -> bool {
-            self.0.lock().unwrap().bytes.extend(frames);
+        fn send(&mut self, frames: Outgoing) -> bool {
+            self.0.lock().unwrap().bytes.extend(frames.to_raw_bytes());
             true
         }
 

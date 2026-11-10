@@ -240,7 +240,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockTicks, InteractionResult, ItemExchange, LegacyRandom, Level, LevelRandom, World,
+        BlockTicks, InteractionResult, ItemExchange, LegacyRandom, LevelRandom, World,
         interact::use_item_on_with_stack,
         state::{BlockState, LIT},
         testing::{TestLevel, actor_holding, top_hit},
@@ -268,7 +268,7 @@ mod tests {
             .expect("the placed campfire has an entity");
         assert!(placed);
         drop(world);
-        let entity = level.block_entities().get::<CampfireEntity>(POS).unwrap();
+        let entity = level.block_entity::<CampfireEntity>(POS).unwrap();
         assert_eq!(entity.items[0].item, items::POTATO);
         assert_eq!(entity.items[0].count, 1);
         assert!(entity.items[1].is_empty());
@@ -291,7 +291,7 @@ mod tests {
         });
         world.tick_block_entities();
         drop(world);
-        let entity = level.block_entities().get::<CampfireEntity>(POS).unwrap();
+        let entity = level.block_entity::<CampfireEntity>(POS).unwrap();
         assert!(entity.items[0].is_empty());
         assert_eq!(entity.progress[0], 600);
         let expected = LegacyRandom::new(9);
@@ -326,7 +326,7 @@ mod tests {
         });
         world.tick_block_entities();
         drop(world);
-        let entity = level.block_entities().get::<CampfireEntity>(POS).unwrap();
+        let entity = level.block_entity::<CampfireEntity>(POS).unwrap();
         assert_eq!(entity.progress[0], 1);
         assert_eq!(entity.items[0].item, items::POTATO);
         assert_eq!(level.random.source().seed(), before);
@@ -352,7 +352,7 @@ mod tests {
         );
         assert_eq!(outcome.result, InteractionResult::SuccessServer);
         assert_eq!(outcome.item_exchange, Some(ItemExchange::Shrink));
-        let entity = level.block_entities().get::<CampfireEntity>(POS).unwrap();
+        let entity = level.block_entity::<CampfireEntity>(POS).unwrap();
         assert_eq!(entity.items[0].count, 1);
         assert_eq!(entity.cooking_time[0], 600);
     }

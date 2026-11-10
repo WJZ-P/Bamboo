@@ -36,6 +36,7 @@ use crate::{
     movement,
     player::Player,
     player_grid::PlayerGrid,
+    profiler::Profiler,
     secure_chat::ServiceProfileKeys,
     world_state::{RespawnData, Weather},
 };
@@ -101,6 +102,12 @@ impl RegionTick {
     /// `later` 个 tick 之后。
     pub(crate) fn plus(self, later: u64) -> Self {
         Self(self.0.saturating_add(later))
+    }
+
+    /// 从默认起点过了 `later` 刻，测试里钉死剖析器的时刻用。
+    #[cfg(test)]
+    pub(crate) fn at(later: u64) -> Self {
+        Self(later)
     }
 
     /// 是否已经到了 `at` 这一刻。这一 tick 开始时增长，所以到期的刻在自己这一 tick 跑。
@@ -213,6 +220,8 @@ pub(crate) struct Region {
     pub(crate) last_action_millis: BTreeMap<PlayerId, i64>,
     /// 每名玩家的对端 IP 文本（不含端口），供 `ban-ip` 和登录复查用。
     pub(crate) peer_ips: BTreeMap<PlayerId, String>,
+    /// 这个 region 每刻的耗时和数量指标。世界线程独占，一直开着。
+    pub(crate) profiler: Profiler,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -327,6 +336,7 @@ impl Region {
             admin_changes: crate::admin::AdminChanges::default(),
             last_action_millis: BTreeMap::new(),
             peer_ips: BTreeMap::new(),
+            profiler: Profiler::default(),
         }
     }
 
@@ -512,7 +522,9 @@ impl Region {
                 param: 0.0,
             },
         );
+        let tick = self.tick;
         if let Some(player) = self.players.get_mut(&id) {
+            player.chunks.sender.set_tick(tick);
             chunk_tracking::update_player_view(player, &mut self.links, self.view_distance);
         }
     }

@@ -20,7 +20,7 @@ use mc_bamboo_world::flat;
 use uuid::Uuid;
 
 use super::*;
-use crate::{PlayerSink, container::ContainerEntry, player::Player};
+use crate::{Outgoing, PlayerSink, container::ContainerEntry, player::Player};
 
 #[derive(Default)]
 struct SinkState {
@@ -32,8 +32,8 @@ struct SinkState {
 struct TestSink(Arc<Mutex<SinkState>>);
 
 impl PlayerSink for TestSink {
-    fn send(&mut self, frames: Vec<u8>) -> bool {
-        self.0.lock().unwrap().bytes.extend(frames);
+    fn send(&mut self, frames: Outgoing) -> bool {
+        self.0.lock().unwrap().bytes.extend(frames.to_raw_bytes());
         true
     }
 
