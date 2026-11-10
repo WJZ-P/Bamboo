@@ -66,13 +66,15 @@
 |---|---|---|
 | `player_spawn` | 20 | 加载 |
 | `spawn_search` | 1 | 加载 |
-| `dragon` | 0 | 模拟、保持维度活跃 |
+| `dragon` | 0 | 加载、模拟 |
 | `player_loading` | 0 | 加载 |
-| `player_simulation` | 0 | 模拟 |
+| `player_simulation` | 0 | 模拟、保持维度活跃 |
 | `forced` | 0 | 存盘、加载、模拟、保持维度活跃 |
 | `portal` | 300 | 存盘、加载、模拟、保持维度活跃 |
 | `ender_pearl` | 40 | 加载、模拟、保持维度活跃 |
 | `unknown` | 1 | 加载、卸载时可过期 |
+
+按 26.3 字节码（`TicketType` 的静态初始化和 flag 常量）更正了四格：`dragon` 不带“保持维度活跃”，`player_simulation` 带，`ender_pearl` 和 `unknown` 都带“加载”。详见 `chunk-tickets.md`。
 
 带“存盘”标志的 ticket 写进 saved data `chunk_tickets`（`TicketStorage`）。
 

@@ -9,6 +9,7 @@ pub mod flat;
 pub mod light;
 pub mod palette;
 pub mod store;
+pub mod ticket;
 
 /// 主世界的最低方块高度。
 pub const MIN_Y: i32 = -64;
