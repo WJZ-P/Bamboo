@@ -12,9 +12,9 @@ use crate::{
     Actor, BlockHit, BlockState, BlockTicks, Container, Level, LevelRandom, Outcome, Slots,
     container::redstone_signal,
     destroy_block,
-    entity::Entities,
+    entity::{Entities, EntityStore},
     hopper::HopperEntity,
-    level::{EquipTarget, LevelTables, RedstoneMemory},
+    level::{EntityTables, EquipTarget, LevelTables, RedstoneMemory},
     shape::Aabb,
 };
 
@@ -123,6 +123,16 @@ impl LevelTables for TestLevel {
     }
 }
 
+impl EntityTables for TestLevel {
+    fn entities_table(&self) -> &EntityStore {
+        &self.entities
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        &mut self.entities
+    }
+}
+
 impl Level for TestLevel {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
@@ -206,14 +216,6 @@ impl Level for TestLevel {
             return None;
         }
         self.note_block_sounds.get(&pos).cloned()
-    }
-
-    fn entities(&self) -> &Entities {
-        &self.entities
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        &mut self.entities
     }
 
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {

@@ -411,11 +411,13 @@ impl Entity {
             merge_stacks(&mut to_stack, &mut from_stack);
             let delay = to_delay.max(from_delay);
             let age = to_age.min(from_age);
-            if let Some(other) = world.entity_mut(other_id).and_then(Entity::ground_mut) {
-                other.stack = to_stack;
-                other.pickup_delay = delay;
-                other.age = age;
-            }
+            world.with_entity_mut(other_id, &mut |other| {
+                if let Some(other) = other.ground_mut() {
+                    other.stack = to_stack.clone();
+                    other.pickup_delay = delay;
+                    other.age = age;
+                }
+            });
             if let Some(mine) = self.ground_mut() {
                 mine.stack = from_stack.clone();
                 if from_stack.is_empty() {
@@ -434,14 +436,14 @@ impl Entity {
                 mine.age = age;
             }
             let empty = from_stack.is_empty();
-            if let Some(other) = world.entity_mut(other_id) {
+            world.with_entity_mut(other_id, &mut |other| {
                 if let Some(item) = other.ground_mut() {
-                    item.stack = from_stack;
+                    item.stack = from_stack.clone();
                 }
                 if empty {
                     other.discard();
                 }
-            }
+            });
         }
     }
 
@@ -1072,9 +1074,9 @@ impl World<'_> {
             + random_z.unwrap_or(f64::from(step_z) * (0.5 + HALF_ITEM_HEIGHT));
         if self.block_game_rules().block_drops {
             let id = self.spawn_dropped_item(Vec3::new(x, y, z), stack, false, 10);
-            if let Some(entity) = self.entity_mut(id) {
+            self.with_entity_mut(id, &mut |entity| {
                 entity.delta = Vec3::new(delta_x, delta_y, delta_z);
-            }
+            });
         }
     }
 
@@ -1097,9 +1099,7 @@ impl World<'_> {
                 self.random().triangle(0.2, DROP_SPREAD),
                 self.random().triangle(0.0, DROP_SPREAD),
             );
-            if let Some(entity) = self.entity_mut(id) {
-                entity.delta = delta;
-            }
+            self.with_entity_mut(id, &mut |entity| entity.delta = delta);
         }
     }
 
@@ -1131,9 +1131,7 @@ impl World<'_> {
             0.15625
         };
         let id = self.spawn_dropped_item(spawn, stack, true, 0);
-        if let Some(entity) = self.entity_mut(id) {
-            entity.delta = velocity;
-        }
+        self.with_entity_mut(id, &mut |entity| entity.delta = velocity);
     }
 
     /// `Entity.spawnAtLocation`：用物品自己的随机速度，拾取延迟 10。
@@ -1162,10 +1160,12 @@ impl World<'_> {
             Entity::ground_item_with_delta(position, stack, Vec3::default())
         };
         let id = self.spawn_entity(entity);
-        if pickup_delay != 0
-            && let Some(item) = self.entity_mut(id).and_then(Entity::ground_mut)
-        {
-            item.set_pickup_delay(pickup_delay);
+        if pickup_delay != 0 {
+            self.with_entity_mut(id, &mut |entity| {
+                if let Some(item) = entity.ground_mut() {
+                    item.set_pickup_delay(pickup_delay);
+                }
+            });
         }
         id
     }
@@ -1206,7 +1206,7 @@ pub(crate) fn hurt_items_by_explosion(world: &mut World, center: Vec3, radius: f
             if dist > 1.0 {
                 continue;
             }
-            let exposure = seen_percent(world, center, entity);
+            let exposure = seen_percent(world, center, &entity);
             let power = (1.0 - dist) * f64::from(exposure);
             let amount = ((power * power + power) / 2.0 * 7.0 * double_radius + 1.0) as f32;
             let eye_y = entity.position.y + EYE_HEIGHT;
@@ -1221,12 +1221,12 @@ pub(crate) fn hurt_items_by_explosion(world: &mut World, center: Vec3, radius: f
         let Some((amount, knock)) = prepared else {
             continue;
         };
-        if let Some(entity) = world.entity_mut(id) {
+        world.with_entity_mut(id, &mut |entity| {
             // 免疫的物品 `hurtServer` 返回 false，击退仍然加上。
             // An immune stack makes `hurtServer` return false. The knockback is still applied.
             entity.hurt_item(DamageKind::Explosion, amount);
             entity.delta = entity.delta.add(knock);
-        }
+        });
     }
 }
 

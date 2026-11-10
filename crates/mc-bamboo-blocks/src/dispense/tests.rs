@@ -283,10 +283,14 @@ fn an_unplaceable_remainder_spawns_a_ground_item() {
         .entity_ids()
         .into_iter()
         .filter_map(|id| world.entity(id))
-        .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+        .filter_map(|entity| {
+            entity
+                .ground()
+                .map(|item| (entity.position, item.stack.clone()))
+        })
         .collect();
     assert_eq!(items.len(), 1);
-    assert_eq!(*items[0].1, ItemStack::new(items::BUCKET, 1));
+    assert_eq!(items[0].1, ItemStack::new(items::BUCKET, 1));
     assert!((items[0].0.y - 65.2 + 0.125).abs() < 1.0e-9);
 }
 
@@ -915,10 +919,14 @@ fn shears_harvest_a_full_hive_and_draw_the_drop_offset() {
         .entity_ids()
         .into_iter()
         .filter_map(|id| world.entity(id))
-        .filter_map(|entity| entity.ground().map(|item| (entity.position, &item.stack)))
+        .filter_map(|entity| {
+            entity
+                .ground()
+                .map(|item| (entity.position, item.stack.clone()))
+        })
         .collect();
     assert_eq!(honeycomb.len(), 1);
-    assert_eq!(*honeycomb[0].1, ItemStack::new(items::HONEYCOMB, 3));
+    assert_eq!(honeycomb[0].1, ItemStack::new(items::HONEYCOMB, 3));
     assert!((honeycomb[0].0.x - f64::from(hive_pos.x) - 0.5).abs() <= 0.25);
     assert!((honeycomb[0].0.z - f64::from(hive_pos.z) - 0.5).abs() <= 0.25);
 

@@ -472,9 +472,9 @@ mod tests {
             .entities
             .iter()
             .filter(|entity| matches!(entity.kind, mc_bamboo_blocks::entity::EntityKind::Item(_)))
-            .collect();
+            .collect::<Vec<_>>();
         assert_eq!(items.len(), before + 1, "spawn 应该生成一件物品实体");
-        let item = items[0];
+        let item = &items[0];
         // `Vec3Argument.vec3()` 把整数坐标居中到方块中心。
         assert_eq!(item.position, mc_bamboo_core::Vec3::new(4.5, -59.0, 6.5));
         match &item.kind {

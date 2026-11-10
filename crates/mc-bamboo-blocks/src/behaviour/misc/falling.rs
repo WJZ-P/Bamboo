@@ -83,10 +83,8 @@ impl Behaviour for Brushable {
     }
 
     fn tick(&self, state: BlockState, world: &mut World, pos: BlockPos) {
-        if let Some(id) = fall_if_free(state, world, pos)
-            && let Some(entity) = world.entity_mut(id)
-        {
-            entity.disable_drop();
+        if let Some(id) = fall_if_free(state, world, pos) {
+            world.with_entity_mut(id, &mut |entity| entity.disable_drop());
         }
     }
 }

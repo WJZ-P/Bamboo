@@ -266,11 +266,12 @@ mod tests {
         let id = world.spawn_falling_block(start, BlockState(state));
         // 官方的 `time > 100 && out_of_world || time > 600`：这里要测的是 600 刻那一支，
         // 所以把 `time` 直接设到边界前，让方块在没有地面可落的世界里继续掉。
-        if start.y < 0
-            && let Some(entity) = world.entity_mut(id)
-            && let EntityKind::FallingBlock(data) = &mut entity.kind
-        {
-            data.time = 590;
+        if start.y < 0 {
+            world.with_entity_mut(id, &mut |entity| {
+                if let EntityKind::FallingBlock(data) = &mut entity.kind {
+                    data.time = 590;
+                }
+            });
         }
         for _ in 0..limit {
             world.tick_entities();
