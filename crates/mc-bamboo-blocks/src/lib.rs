@@ -72,6 +72,6 @@ pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRand
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk, tick_thunder};
 pub use shape::{Aabb, Boxes, CollisionContext, EntityContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
-pub use ticks::{BlockTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
+pub use ticks::{BlockTicks, Busy, ChunkTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
 pub use weather::{BlockWeather, Precipitation, PrecipitationFacts};
 pub use world::World;
