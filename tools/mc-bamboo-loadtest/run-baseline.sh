@@ -113,7 +113,11 @@ run_scene() {
 
 failed=0
 for scene in "${SCENES[@]}"; do
-    run_scene "$scene" || failed=1
+    if ! run_scene "$scene"; then
+        failed=1
+        stop_server
+        break
+    fi
 done
 
 echo "=== summary ==="
