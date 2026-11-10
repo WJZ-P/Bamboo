@@ -195,7 +195,7 @@ impl RandomRun {
     fn check(&mut self, pos: ChunkPos) {
         if self.cache.is_fresh(pos, self.store.revision(pos)) {
             self.counts.hits += 1;
-        } else if self.cache.entries.contains_key(&pos) {
+        } else if self.cache.bodies.contains_key(&pos) {
             self.counts.refreshed += 1;
         }
         let body = chunk_body(&mut self.cache, &self.store, &self.template_body, pos);
@@ -224,7 +224,7 @@ fn unchanged_chunks_are_served_from_the_cache() {
     cache.body(&store, chunk);
 
     // 改掉缓存里的一个字节：取到改过的字节，说明没有重新编码。
-    cache.entries.get_mut(&chunk).expect("刚存进去").body[0] ^= 0xff;
+    cache.bodies.get_mut(&chunk).expect("刚存进去").body[0] ^= 0xff;
     assert_ne!(*cache.body(&store, chunk), *encode_chunk(&store, chunk));
 
     store.set_block(pos, blocks::GLASS);
@@ -288,14 +288,14 @@ fn a_full_cache_still_returns_the_current_bytes() {
     let overflow = cache.body(&store, second.chunk());
     assert!(matches!(overflow, Cow::Owned(_)));
     assert_eq!(*overflow, *encode_chunk(&store, second.chunk()));
-    assert_eq!((cache.entries.len(), cache.bytes), (1, size));
+    assert_eq!((cache.bodies.len(), cache.bytes), (1, size));
 
     // 变大以后放不下了，旧的条目也不能留着。
     store.set_block(first, blocks::OAK_SIGN);
     store.set_sign(first, random_content(&mut Rng::new(7)));
     let grown = cache.body(&store, first.chunk());
     assert_eq!(*grown, *encode_chunk(&store, first.chunk()));
-    assert_eq!((cache.entries.len(), cache.bytes), (0, 0));
+    assert_eq!((cache.bodies.len(), cache.bytes), (0, 0));
 }
 
 #[test]
@@ -311,7 +311,7 @@ fn retain_frees_the_bytes_of_dropped_entries() {
 
     cache.retain(|pos| pos == kept.chunk());
 
-    assert_eq!(cache.entries.len(), 1);
+    assert_eq!(cache.bodies.len(), 1);
     assert_eq!(cache.bytes, encode_chunk(&store, kept.chunk()).len());
 }
 
@@ -325,12 +325,26 @@ fn the_cache_forgets_chunks_nobody_tracks() {
         server
             .region()
             .chunk_cache
-            .entries
+            .bodies
+            .contains_key(&edited.chunk())
+    );
+    assert!(
+        server
+            .region()
+            .chunk_cache
+            .frames
             .contains_key(&edited.chunk())
     );
 
     server.move_to(&client, 1000.0, 1000.0);
     server.tick();
 
-    assert!(server.region().chunk_cache.entries.is_empty());
+    assert_eq!(server.region().chunk_cache.bodies.len(), 0);
+    assert!(
+        !server
+            .region()
+            .chunk_cache
+            .frames
+            .contains_key(&edited.chunk())
+    );
 }

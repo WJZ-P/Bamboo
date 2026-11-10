@@ -3,7 +3,7 @@
 //! 一 tick 里写给同一名玩家的包都攒在它的缓冲区里，tick 末尾交给连接层一次。
 //! 世界线程只和缓冲区打交道，不会等 socket。
 
-use std::{collections::BTreeMap, mem};
+use std::{collections::BTreeMap, mem, sync::Arc};
 
 use mc_bamboo_protocol::{
     frame::append_frame,
@@ -12,7 +12,10 @@ use mc_bamboo_protocol::{
 };
 use tracing::warn;
 
-use crate::inbound::{PlayerId, PlayerSink};
+use crate::{
+    inbound::{PlayerId, PlayerSink},
+    outgoing::{Outgoing, SharedFrames},
+};
 
 /// 包太大编码不出来时踢人用的原因。客户端可以靠超长的物品组件走到这里。
 const PACKET_ERROR: &str = "disconnect.packetError";
@@ -29,7 +32,7 @@ pub(crate) fn encode_frames<P: ClientboundPacket>(packet: &P) -> Vec<u8> {
 
 struct Link {
     sink: Box<dyn PlayerSink>,
-    buffer: Vec<u8>,
+    buffer: Outgoing,
     /// 关闭之后所有写入都丢弃。
     open: bool,
 }
@@ -46,7 +49,7 @@ impl Link {
 
     fn close(&mut self) {
         self.open = false;
-        self.buffer = Vec::new();
+        self.buffer = Outgoing::default();
         self.sink.close();
     }
 }
@@ -61,7 +64,7 @@ impl Links {
     pub(crate) fn add(&mut self, id: PlayerId, sink: Box<dyn PlayerSink>) {
         let link = Link {
             sink,
-            buffer: Vec::new(),
+            buffer: Outgoing::default(),
             open: true,
         };
         self.links.insert(id, link);
@@ -86,7 +89,7 @@ impl Links {
         let Some(link) = self.open_link(to) else {
             return;
         };
-        if let Err(error) = append_frame(&mut link.buffer, packet) {
+        if let Err(error) = append_frame(link.buffer.raw_buffer(), packet) {
             warn!(%error, player = to.0, "kicking a player whose packet cannot be encoded");
             self.kick(to, &Component::translate(PACKET_ERROR, []));
         }
@@ -95,14 +98,21 @@ impl Links {
     /// 发已经编码好的帧。
     pub(crate) fn send_frames(&mut self, to: PlayerId, frames: &[u8]) {
         if let Some(link) = self.open_link(to) {
-            link.buffer.extend_from_slice(frames);
+            link.buffer.push_raw(frames);
+        }
+    }
+
+    /// 发多共用的、已经编码好的帧（区块包）。
+    pub(crate) fn send_shared(&mut self, to: PlayerId, frames: Arc<SharedFrames>) {
+        if let Some(link) = self.open_link(to) {
+            link.buffer.push_shared(frames);
         }
     }
 
     /// 发给所有人，帧只编码一次。
     pub(crate) fn broadcast(&mut self, frames: &[u8]) {
         for link in self.links.values_mut().filter(|link| link.open) {
-            link.buffer.extend_from_slice(frames);
+            link.buffer.push_raw(frames);
         }
     }
 
@@ -113,7 +123,7 @@ impl Links {
             .iter_mut()
             .filter(|(id, link)| **id != except && link.open)
         {
-            link.buffer.extend_from_slice(frames);
+            link.buffer.push_raw(frames);
         }
     }
 
@@ -124,7 +134,7 @@ impl Links {
         let Some(link) = self.open_link(to) else {
             return;
         };
-        if let Err(error) = append_frame(&mut link.buffer, &Disconnect { reason }) {
+        if let Err(error) = append_frame(link.buffer.raw_buffer(), &Disconnect { reason }) {
             warn!(%error, player = to.0, "cannot encode the disconnect reason");
         }
         link.flush();
@@ -155,7 +165,7 @@ mod tests {
 
     use mc_bamboo_protocol::{
         frame::MAX_FRAME_LEN,
-        packet::play::{ChunkBatchFinished, KeepAlive},
+        packet::play::{ChunkBatchFinished, KeepAlive, LevelChunkWithLight},
     };
 
     use super::*;
@@ -192,12 +202,12 @@ mod tests {
     }
 
     impl PlayerSink for TestSink {
-        fn send(&mut self, frames: Vec<u8>) -> bool {
+        fn send(&mut self, frames: Outgoing) -> bool {
             let mut state = self.0.lock().unwrap();
             if state.refuses {
                 return false;
             }
-            state.batches.push(frames);
+            state.batches.push(frames.to_raw_bytes());
             true
         }
 
@@ -244,6 +254,45 @@ mod tests {
 
         assert_eq!(sinks[0].batches(), 1);
         assert_eq!(sinks[0].bytes(), [frame(&first), frame(&second)].concat());
+    }
+
+    #[test]
+    fn shared_frames_keep_their_place_between_raw_frames() {
+        let (mut links, sinks) = links_with(&[ALICE]);
+        let packet = LevelChunkWithLight {
+            x: 3,
+            z: -2,
+            body: &[1; 300],
+        };
+        let mut shared_bytes = Vec::new();
+        append_frame(&mut shared_bytes, &packet).unwrap();
+        let shared = Arc::new(SharedFrames::new(shared_bytes.clone()));
+        let first = KeepAlive { id: 1 };
+        let last = ChunkBatchFinished { batch_size: 1 };
+
+        links.send(ALICE, &first);
+        links.send_shared(ALICE, Arc::clone(&shared));
+        links.send(ALICE, &last);
+        links.flush();
+
+        assert_eq!(
+            sinks[0].bytes(),
+            [frame(&first), shared_bytes, frame(&last)].concat()
+        );
+        assert_eq!(sinks[0].batches(), 1);
+    }
+
+    #[test]
+    fn one_shared_frame_can_be_handed_to_many_players() {
+        let (mut links, sinks) = links_with(&[ALICE, BOB]);
+        let shared = Arc::new(SharedFrames::new(vec![1, 2, 3]));
+
+        links.send_shared(ALICE, Arc::clone(&shared));
+        links.send_shared(BOB, Arc::clone(&shared));
+        links.flush();
+
+        assert_eq!(sinks[0].bytes(), [1, 2, 3]);
+        assert_eq!(sinks[1].bytes(), [1, 2, 3]);
     }
 
     #[test]

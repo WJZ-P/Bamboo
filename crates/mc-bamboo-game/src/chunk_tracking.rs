@@ -7,11 +7,11 @@ use std::{collections::BTreeSet, ops::RangeInclusive};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_protocol::packet::play::{
-    ChunkBatchFinished, ChunkBatchStart, ForgetLevelChunk, LevelChunkWithLight, SetChunkCacheCenter,
+    ChunkBatchFinished, ChunkBatchStart, ForgetLevelChunk, SetChunkCacheCenter,
 };
 
 use crate::{
-    chunk_encoding::chunk_body, inbound::PlayerId, links::Links, player::Player, region::Region,
+    chunk_encoding::chunk_frame, inbound::PlayerId, links::Links, player::Player, region::Region,
 };
 
 /// 视距的下限。客户端请求的值和服务端的配置都不能比它小。
@@ -285,18 +285,13 @@ pub(crate) fn send_chunks(region: &mut Region) {
 
         region.links.send(id, &ChunkBatchStart);
         for &pos in &batch {
-            let body = chunk_body(
+            let frames = chunk_frame(
                 &mut region.chunk_cache,
                 &region.chunks,
                 &region.template_body,
                 pos,
             );
-            let packet = LevelChunkWithLight {
-                x: pos.x,
-                z: pos.z,
-                body: &body,
-            };
-            region.links.send(id, &packet);
+            region.links.send_shared(id, frames);
         }
         let batch_size = batch.len() as i32;
         region.links.send(id, &ChunkBatchFinished { batch_size });
@@ -333,7 +328,18 @@ mod tests {
     };
 
     use super::*;
-    use crate::inbound::PlayerSink;
+    use crate::{
+        chunk_encoding::{ChunkCache, encode_template},
+        inbound::PlayerSink,
+        outgoing::Outgoing,
+        world::tests::{Harness, SPAWN_X, SPAWN_Z},
+    };
+    use std::sync::Arc;
+
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::{frame::append_frame, packet::play::LevelChunkWithLight};
+    use mc_bamboo_world::store::ChunkStore;
 
     const ORIGIN: ChunkPos = ChunkPos::new(0, 0);
     const PLAYER: PlayerId = PlayerId(1);
@@ -653,8 +659,8 @@ mod tests {
     struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl PlayerSink for Recorder {
-        fn send(&mut self, frames: Vec<u8>) -> bool {
-            self.0.lock().unwrap().extend(frames);
+        fn send(&mut self, frames: Outgoing) -> bool {
+            self.0.lock().unwrap().extend(frames.to_raw_bytes());
             true
         }
 
@@ -756,6 +762,95 @@ mod tests {
         assert!(tracker.is_chunk_tracked(ORIGIN));
         assert!(!tracker.is_chunk_tracked(chunk(3, 0)));
         assert!(!tracker.is_chunk_tracked(chunk(4, 0)));
+    }
+
+    #[test]
+    fn two_players_watching_one_chunk_get_the_same_shared_frame() {
+        let mut server = Harness::new(2);
+        let edited = ChunkPos::new(0, 0);
+        let pos = BlockPos::new(1, -60, 1);
+        server.region().chunks.set_block(pos, blocks::CHEST);
+        let alice = server.join("Kitten");
+        let bob = server.join("Mochi");
+        server.tick();
+
+        let first = server.shared_chunk_frame(edited).expect("区块帧已经做好");
+        let other = server
+            .shared_chunk_frame(ChunkPos::new(1, 0))
+            .expect("邻居的帧也做好了");
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(server.cached_frame_count() > 1, "模板区块按坐标各自缓存");
+
+        // 两名玩家收到的线上字节包含同一个区块的同一份帧。
+        let a = alice.take_frames();
+        let b = bob.take_frames();
+        let body_of = |frames: &[crate::world::tests::Frame]| {
+            frames
+                .iter()
+                .find(|frame| frame.id == clientbound::LEVEL_CHUNK_WITH_LIGHT)
+                .map(|frame| frame.body.clone())
+        };
+        assert!(body_of(&a).is_some());
+        assert_eq!(body_of(&a), body_of(&b));
+
+        server.move_to(&alice, SPAWN_X, SPAWN_Z);
+        server.move_to(&bob, SPAWN_X, SPAWN_Z);
+        server.acknowledge_batch(&alice, 64.0);
+        server.acknowledge_batch(&bob, 64.0);
+        server.tick();
+        let same = server
+            .shared_chunk_frame(edited)
+            .expect("版本号没变，帧还在");
+        assert!(Arc::ptr_eq(&first, &same), "两名玩家共用同一份 Arc");
+
+        server.region().chunks.set_block(pos, blocks::STONE);
+        // 区块改了，但玩家没有重新请求它，缓存里还是旧帧；把坐标重新排进 pending 再发一批。
+        server
+            .region()
+            .players
+            .get_mut(&alice.id)
+            .expect("玩家在")
+            .chunks
+            .sender
+            .mark_pending(edited);
+        server.acknowledge_batch(&alice, 64.0);
+        server.tick();
+        let changed = server
+            .shared_chunk_frame(edited)
+            .expect("区块改过以后重做了帧");
+        assert!(!Arc::ptr_eq(&first, &changed), "内容变了就换新的帧");
+    }
+
+    #[test]
+    fn chunk_frames_keep_the_official_packet_layout() {
+        let store = ChunkStore::flat();
+        let template_body = encode_template(&store);
+        let mut cache = ChunkCache::default();
+        let pos = ChunkPos::new(5, -3);
+        let frames = chunk_frame(&mut cache, &store, &template_body, pos);
+
+        let mut expected = Vec::new();
+        append_frame(
+            &mut expected,
+            &LevelChunkWithLight {
+                x: pos.x,
+                z: pos.z,
+                body: &template_body,
+            },
+        )
+        .unwrap();
+        assert_eq!(frames.raw(), expected);
+
+        // 没改过的区块在不同坐标各有一份帧，包头里的坐标跟着变。
+        let neighbour = chunk_frame(&mut cache, &store, &template_body, ChunkPos::new(6, -3));
+        assert_ne!(frames.raw(), neighbour.raw());
+        assert_eq!(cache.frame_count(), 2);
+        cache.retain(|p| p == pos);
+        assert_eq!(cache.frame_count(), 1);
+        assert!(Arc::ptr_eq(
+            &frames,
+            &cache.frame(&store, pos).expect("保留下来的帧")
+        ));
     }
 
     #[test]

@@ -540,6 +540,7 @@ mod tests {
 
     use super::*;
     use crate::{connection::MAX_QUEUED_BYTES, players::PlayerSession};
+    use mc_bamboo_game::Outgoing;
 
     const DEADLINE: Duration = Duration::from_secs(5);
 
@@ -811,7 +812,11 @@ mod tests {
             for message in inbox {
                 match message {
                     Inbound::Join(mut request) => {
-                        assert!(!request.sink.send(vec![0; MAX_QUEUED_BYTES + 1]));
+                        assert!(
+                            !request
+                                .sink
+                                .send(Outgoing::from_raw(vec![0; MAX_QUEUED_BYTES + 1]))
+                        );
                         sinks.push(request.sink);
                     }
                     Inbound::Shutdown => return,
