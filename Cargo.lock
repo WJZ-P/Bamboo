@@ -2002,6 +2002,7 @@ dependencies = [
 name = "mc-bamboo-nbt"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "thiserror 2.0.21",
 ]
 
