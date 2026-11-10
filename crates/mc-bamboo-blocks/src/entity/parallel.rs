@@ -5,96 +5,169 @@
 //!
 //! 和精确模式的差异只有「看到的别的实体是这一阶段开始时的样子」这一类，见
 //! 设计稿第 13 节第 5 条。
+//!
+//! 接口分两段：[`compute`] 要只读方块视图和实体表，不需要完整的 `World`；
+//! [`commit`] 把算好的命令按序落地，需要完整的 `World`。游戏层在两段之间
+//! 可以重新构造 `World`（区块表被 `RegionLevel` 独占借着，没法同时借出只读视图）。
 
-use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use crate::{
     entity::{
-        Entity, EntityPublic, EntityRow, EntityState, EntityUid,
-        ctx::{self, Command, CommandBuffer, EntityCtx},
+        Entity, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
+        ctx::{self, BlockView, Command, CommandBuffer, EntityCtx},
+        store::section_range,
     },
     shape::Aabb,
     world::World,
 };
 
-/// 一个把「对每个下标区间跑一个闭包」分发出去的执行器。
+/// 一批不相交的任务。执行器跑完这一批才返回；任务之间没有先后要求。
 ///
-/// 内联实现和 [`ScopedThreads`] 各一份；真正的任务系统以后在上层实现这个 trait。
-pub trait Executor {
-    fn run_chunks(&self, len: usize, work: &(dyn Fn(usize, usize) + Sync));
+/// 任务闭包带 `'a` 生命周期，调用方可以把 `&'a mut [..]` 的不相交切片直接搬进去，
+/// 不需要锁、不需要 `unsafe`。实现必须是对象安全的，游戏层以后可以换成常驻线程池。
+pub trait Executor: Sync {
+    /// 希望分成几份。驱动自己按这个数切任务；分几份不影响结果。
+    fn parallelism(&self) -> usize;
+    /// 把这批任务跑完才返回。任务之间没有先后要求。
+    fn run<'a>(&self, jobs: Vec<Box<dyn FnOnce() + Send + 'a>>);
 }
 
-/// 一个线程也不开，按区间顺序跑。
+/// 一个线程也不开，按数组顺序跑。
 pub struct InlineExecutor;
 
 impl Executor for InlineExecutor {
-    fn run_chunks(&self, len: usize, work: &(dyn Fn(usize, usize) + Sync)) {
-        work(0, len);
+    fn parallelism(&self) -> usize {
+        1
+    }
+
+    fn run<'a>(&self, jobs: Vec<Box<dyn FnOnce() + Send + 'a>>) {
+        for job in jobs {
+            job();
+        }
     }
 }
 
-/// `std::thread::scope` 起 `threads` 个线程，把下标均分给它们。
+/// `std::thread::scope` 每刻起 `threads - 1` 个线程，主线程也跑一份。
+///
+/// 每刻起线程的开销大，只用于实验；常驻线程池留给任务系统（设计稿第 12 节）。
 pub struct ScopedThreads {
     pub threads: usize,
 }
 
 impl Executor for ScopedThreads {
-    fn run_chunks(&self, len: usize, work: &(dyn Fn(usize, usize) + Sync)) {
-        let threads = self.threads.max(1).min(len.max(1));
-        if threads == 1 {
-            work(0, len);
+    fn parallelism(&self) -> usize {
+        self.threads.max(1)
+    }
+
+    fn run<'a>(&self, jobs: Vec<Box<dyn FnOnce() + Send + 'a>>) {
+        let count = jobs.len();
+        if count <= 1 {
+            for job in jobs {
+                job();
+            }
             return;
         }
+        let mut jobs = jobs;
         std::thread::scope(|scope| {
-            for index in 0..threads {
-                let start = len * index / threads;
-                let end = len * (index + 1) / threads;
-                scope.spawn(move || work(start, end));
+            // 最后一份留给当前线程，少起一个线程。
+            for job in jobs.drain(..count - 1) {
+                scope.spawn(job);
+            }
+            for job in jobs {
+                job();
             }
         });
     }
 }
 
-/// 按 16³ 段分格的行号索引；算阶段只读，由阶段开始时的 public 建好。
-struct EntityGrid {
-    cells: BTreeMap<(i32, i32, i32), Vec<usize>>,
+/// 一个实体的算阶段产出：新的公开和私有数据、命令、是否在 tick 里被丢弃。
+#[derive(Debug, Default)]
+struct RowResult {
+    public: Option<EntityPublic>,
+    state: Option<EntityState>,
+    commands: CommandBuffer,
+    removed: bool,
 }
 
-impl EntityGrid {
-    fn build(public: &[EntityPublic]) -> Self {
-        let mut cells: BTreeMap<(i32, i32, i32), Vec<usize>> = BTreeMap::new();
-        for (row, entity) in public.iter().enumerate() {
-            for key in sections_of(entity.bounding_box()) {
-                cells.entry(key).or_default().push(row);
-            }
-        }
-        Self { cells }
+/// 算阶段的结果。`commit` 消费它；算阶段的只读借用不放在里面，所以两段之间
+/// 调用方可以重新构造完整的 `World`。
+#[derive(Debug)]
+pub struct Computed {
+    uids: Vec<EntityUid>,
+    rows: Vec<usize>,
+    results: Vec<RowResult>,
+    times: PhaseTimes,
+}
+
+impl Computed {
+    /// 这一刻参与算的实体 ID，按 uid 升序。给测试断言用。
+    pub fn uids(&self) -> &[EntityUid] {
+        &self.uids
     }
 
-    fn rows_in(&self, area: Aabb) -> Vec<usize> {
+    /// 每个实体的命令条数，按 uid 升序。
+    pub fn command_counts(&self) -> Vec<usize> {
+        self.results
+            .iter()
+            .map(|result| result.commands.commands.len())
+            .collect()
+    }
+
+    /// 这一刻被自己的 tick 丢弃的实体数。
+    pub fn removed_count(&self) -> usize {
+        self.results.iter().filter(|result| result.removed).count()
+    }
+}
+
+/// 只读公开快照：算阶段共享实体表本身的 `public` 和空间索引，不复制一份。
+struct Shared<'a> {
+    uids: &'a [EntityUid],
+    rows: &'a [usize],
+    entities: &'a EntityStore,
+    blocks: &'a (dyn BlockView + Sync),
+}
+
+impl Shared<'_> {
+    /// uid 是升序的，二分查找行号；查到后直接引用表里的那一行。
+    fn public_of(&self, uid: EntityUid) -> Option<&EntityPublic> {
+        let index = self.uids.binary_search(&uid).ok()?;
+        Some(&self.entities.row_at(self.rows[index])?.public)
+    }
+
+    /// 只访问范围覆盖到的那几个格子，不再遍历整张索引。
+    fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         let (first, last) = section_range(&area);
-        let mut rows = Vec::new();
-        for ((x, y, z), set) in &self.cells {
-            if (first.0..=last.0).contains(x)
-                && (first.1..=last.1).contains(y)
-                && (first.2..=last.2).contains(z)
-            {
-                rows.extend(set.iter().copied());
+        let mut found = Vec::new();
+        for x in first.0..=last.0 {
+            for y in first.1..=last.1 {
+                for z in first.2..=last.2 {
+                    if let Some(rows) = self.entities.grid_section((x, y, z)) {
+                        found.extend(rows.iter().copied());
+                    }
+                }
             }
         }
-        rows.sort_unstable();
-        rows.dedup();
-        rows
+        found.sort_unstable();
+        found.dedup();
+        // 行号不等于 uid 顺序（槽位会被回收复用），按 uid 排序再访问。
+        let mut ordered: Vec<_> = found
+            .into_iter()
+            .filter_map(|row| self.entities.row_at(row))
+            .filter(|entry| entry.public.bounding_box().intersects(area))
+            .map(|entry| (entry.public.uid, &entry.public))
+            .collect();
+        ordered.sort_unstable_by_key(|(uid, _)| *uid);
+        for (_, public) in ordered {
+            visit(public);
+        }
     }
 }
 
 /// 并行阶段的一个任务：只读公开快照、只写自己的公开和私有行、命令进自己的缓冲。
 struct ParallelCtx<'a> {
     uid: EntityUid,
-    blocks: &'a (dyn ctx::BlockView + Sync),
-    public: &'a [EntityPublic],
-    uids: &'a [EntityUid],
-    grid: &'a EntityGrid,
+    shared: &'a Shared<'a>,
     commands: &'a mut CommandBuffer,
 }
 
@@ -103,30 +176,25 @@ impl EntityCtx for ParallelCtx<'_> {
         self.uid
     }
 
-    fn blocks(&self) -> &dyn ctx::BlockView {
-        self.blocks
+    fn blocks(&self) -> &dyn BlockView {
+        self.shared.blocks
     }
 
     fn other(&self, uid: EntityUid) -> Option<EntityPublic> {
-        self.uids
-            .iter()
-            .position(|&candidate| candidate == uid)
-            .and_then(|row| self.public.get(row).cloned())
+        self.shared.public_of(uid).cloned()
     }
 
     fn entity_uids(&self) -> Vec<EntityUid> {
-        self.uids.to_vec()
+        self.shared.uids.to_vec()
     }
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
-        for row in self.grid.rows_in(area) {
-            let Some(public) = self.public.get(row) else {
-                continue;
-            };
-            if public.uid != self.uid && public.bounding_box().intersects(area) {
-                visit(public);
-            }
-        }
+        self.shared.for_each_in(area, visit);
+    }
+
+    fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {
+        self.shared
+            .for_each_in(area, &mut |public| visit(public.uid));
     }
 
     fn emit(&mut self, command: Command, _me: &mut Entity) {
@@ -134,181 +202,188 @@ impl EntityCtx for ParallelCtx<'_> {
     }
 }
 
-/// 并行地跑一刻。精确驱动在 [`World::tick_entities`](crate::World::tick_entities)。
-///
-/// 步骤：取快照 → 并行算 → 发布新的公开状态 → 按（uid 升序，实体内序号）落地命令
-/// → 写回被命令改过的实体 → 并进这一刻新生成的实体。
-pub fn tick_entities_parallel(
-    blocks: &(dyn ctx::BlockView + Sync),
-    world: &mut World<'_>,
-    executor: &dyn Executor,
-) {
-    let _ = tick_entities_parallel_timed(blocks, world, executor);
+/// 一块连续的行：算阶段只写自己的这几行，别的都是只读共享。
+struct Task<'a> {
+    first: usize,
+    public: &'a [EntityPublic],
+    state: Vec<EntityState>,
+    results: &'a mut [RowResult],
 }
 
-/// 同 [`tick_entities_parallel`]，另外报出「算」「发布」「落地」各段的耗时。
-pub fn tick_entities_parallel_timed(
-    blocks: &(dyn ctx::BlockView + Sync),
-    world: &mut World<'_>,
+/// 算：只读方块、可写实体表。不需要 `World`。
+///
+/// 实体表在算阶段是只读的：公开数据、空间索引都直接引用表里那一份，任务只往
+/// 自己的产出缓冲里写。`state` 从行里克隆一份进任务，算完只写回新的那一份，
+/// 不复制别的实体看到的数据。
+pub fn compute(
+    blocks: &(dyn BlockView + Sync),
+    entities: &EntityStore,
     executor: &dyn Executor,
-) -> PhaseTimes {
-    use std::time::Instant;
+) -> Computed {
+    compute_timed(blocks, entities, executor).0
+}
+
+fn compute_timed(
+    blocks: &(dyn BlockView + Sync),
+    entities: &EntityStore,
+    executor: &dyn Executor,
+) -> (Computed, Duration) {
     let mut times = PhaseTimes::default();
-    let snapshot_start = Instant::now();
-    world.entities_mut().begin_entity_tick();
-    let mut snapshot = world.level().entity_snapshot();
-    times.clone = snapshot.clone_time;
-    times.publish += snapshot_start.elapsed();
-    let grid = EntityGrid::build(&snapshot.public);
-    let uids: Vec<EntityUid> = snapshot.uids.clone();
-    let public: Vec<EntityPublic> = snapshot.public.clone();
-    let len = uids.len();
-
-    // 每行的命令缓冲预分配好，任务只碰自己那一个。
-    let mut commands: Vec<CommandBuffer> = (0..len).map(|_| CommandBuffer::default()).collect();
-    // 执行器按自己的线程数把下标分成若干连续区间；每个区间拿到三份不相交的可变切片。
-    // 先按顺序收集边界，再用 split_at_mut 逐段切出来，不需要 unsafe。
-    let ranges = std::sync::Mutex::new(Vec::new());
-    executor.run_chunks(len, &|start, end| {
-        ranges.lock().expect("ranges mutex").push((start, end))
-    });
-    let mut ranges = ranges.into_inner().expect("ranges mutex");
-    ranges.sort_by_key(|(start, _)| *start);
-
-    struct Task<'a> {
-        start: usize,
-        end: usize,
-        next: &'a mut [EntityPublic],
-        state: &'a mut [EntityState],
-        commands: &'a mut [CommandBuffer],
-    }
-    let mut tasks: Vec<Task<'_>> = Vec::with_capacity(ranges.len());
-    let mut remaining_next: &mut [EntityPublic] = &mut snapshot.next_public;
-    let mut remaining_state: &mut [EntityState] = &mut snapshot.state;
-    let mut remaining_commands: &mut [CommandBuffer] = &mut commands;
-    let mut consumed = 0;
-    for (start, end) in &ranges {
-        let skip = *start - consumed;
-        let size = end - start;
-        let (head, tail) = remaining_next.split_at_mut(skip);
-        let (mine, rest) = tail.split_at_mut(size);
-        remaining_next = rest;
-        let _ = head;
-        let (head, tail) = remaining_state.split_at_mut(skip);
-        let (mine_state, rest) = tail.split_at_mut(size);
-        remaining_state = rest;
-        let _ = head;
-        let (head, tail) = remaining_commands.split_at_mut(skip);
-        let (mine_commands, rest) = tail.split_at_mut(size);
-        remaining_commands = rest;
-        let _ = head;
-        tasks.push(Task {
-            start: *start,
-            end: *end,
-            next: mine,
-            state: mine_state,
-            commands: mine_commands,
-        });
-        consumed = *end;
-    }
-
-    // 每个任务独占自己那几行；public/uids/blocks/grid 只读共享。
-    // 用 split_at_mut 把 tasks 按执行器的区间切成不相交的可变切片，线程里不再上锁。
-    let compute_start = Instant::now();
-    let uids_ref: &[EntityUid] = &uids;
-    let public_ref: &[EntityPublic] = &public;
-    let grid_ref = &grid;
-    let blocks_ref: &(dyn ctx::BlockView + Sync) = blocks;
-    let task_ranges: Vec<(usize, usize)> = {
-        let collected = std::sync::Mutex::new(Vec::new());
-        executor.run_chunks(tasks.len(), &|start, end| {
-            collected.lock().expect("ranges mutex").push((start, end));
-        });
-        let mut ranges = collected.into_inner().expect("ranges mutex");
-        ranges.sort_by_key(|(start, _)| *start);
-        ranges
-    };
-    let mut remaining: &mut [Task<'_>] = &mut tasks;
-    let mut consumed_task = 0;
-    let mut slices: Vec<Option<&mut [Task<'_>]>> = Vec::with_capacity(task_ranges.len());
-    for (start, end) in &task_ranges {
-        let skip = start - consumed_task;
-        let (_head, tail) = remaining.split_at_mut(skip);
-        let (mine, rest) = tail.split_at_mut(end - start);
-        remaining = rest;
-        slices.push(Some(mine));
-        consumed_task = *end;
-    }
-    let slices = std::sync::Mutex::new(slices);
-    executor.run_chunks(task_ranges.len(), &|start, end| {
-        // 每个区间只取自己那一份，锁在取出的瞬间释放。
-        let mut all = slices.lock().expect("slices mutex");
-        let mut mine: Vec<Option<&mut [Task<'_>]>> =
-            (start..end).map(|index| all[index].take()).collect();
-        drop(all);
-        for slice in mine.iter_mut().flatten() {
-            for task in slice.iter_mut() {
-                for (offset, row) in (task.start..task.end).enumerate() {
-                    let uid = uids_ref[row];
-                    let mut me = EntityRow {
-                        public: public_ref[row].clone(),
-                        state: task.state[offset].clone(),
-                    }
-                    .into_entity();
-                    // `Entity::tick` 内部会跑 `common_tick`，这里不能重复。
-                    let mut ctx = ParallelCtx {
-                        uid,
-                        blocks: blocks_ref,
-                        public: public_ref,
-                        uids: uids_ref,
-                        grid: grid_ref,
-                        commands: &mut task.commands[offset],
-                    };
-                    me.tick(&mut ctx);
-                    let split = me.split();
-                    task.next[offset] = split.public;
-                    task.state[offset] = split.state;
-                }
-            }
-        }
-        // 放回去，保证 `tasks` 仍然完整。
-        let mut all = slices.lock().expect("slices mutex");
-        for (offset, slot) in mine.drain(..).enumerate() {
-            all[start + offset] = slot;
-        }
-    });
-    times.compute = compute_start.elapsed();
-
-    // 发布新的公开和私有数据，再按（uid 升序，实体内序号）串行落地命令。
-    // 命令处理函数改的是表里的实体，所以先发布再落地；落地后把改动写回 snapshot。
-    let publish_start = Instant::now();
-    world.entities_mut().entity_publish(snapshot);
-    // 算阶段就 `discard` 的实体不留在表里，和精确模式「tick 过就不 put 回去」一致。
-    let removed: Vec<EntityUid> = world
-        .level()
-        .entity_uids()
-        .into_iter()
-        .filter(|&uid| {
-            world
-                .level()
-                .entity_public(uid)
-                .is_some_and(|public| public.removed)
+    let clone_start = Instant::now();
+    let (uids, rows) = entities.tick_rows();
+    // 每个实体一份起点的公开数据：tick 要拿它拼成完整 `Entity`。这是唯一必需的
+    // 克隆；别的实体看到的值直接引用表里那一份不变的快照。
+    let starting_public: Vec<EntityPublic> = rows
+        .iter()
+        .map(|&row| {
+            entities
+                .row_at(row)
+                .expect("indexed row is live")
+                .public
+                .clone()
         })
         .collect();
-    for uid in removed {
-        world.entities_mut().remove_entity(uid);
+    // 私有状态只被自己读：移进任务，算完再移回。旧驱动对每行 `state.clone()`
+    // 两次（快照一次、算里又一次），这里只剩一次。
+    let starting_state: Vec<EntityState> = rows
+        .iter()
+        .map(|&row| {
+            entities
+                .row_at(row)
+                .expect("indexed row is live")
+                .state
+                .clone()
+        })
+        .collect();
+    times.clone = clone_start.elapsed();
+
+    let shared = Shared {
+        uids: &uids,
+        rows: &rows,
+        entities,
+        blocks,
+    };
+    let count = uids.len();
+    let parts = executor.parallelism().max(1).min(count.max(1));
+    let chunk_size = count.div_ceil(parts);
+    let compute_start = Instant::now();
+
+    // 用 split_at_mut 把三份平行数组切成不相交的可变切片，任务里不再上锁。
+    let mut results: Vec<RowResult> = (0..count).map(|_| RowResult::default()).collect();
+    let mut tasks: Vec<Task<'_>> = Vec::with_capacity(parts);
+    let mut public_left: &[EntityPublic] = &starting_public;
+    let mut state_left: Vec<EntityState> = starting_state;
+    let mut results_left: &mut [RowResult] = &mut results;
+    let mut first = 0;
+    while !public_left.is_empty() {
+        let size = chunk_size.min(public_left.len());
+        let (public, public_rest) = public_left.split_at(size);
+        public_left = public_rest;
+        let state = state_left.drain(..size).collect();
+        let (result, result_rest) = std::mem::take(&mut results_left).split_at_mut(size);
+        results_left = result_rest;
+        tasks.push(Task {
+            first,
+            public,
+            state,
+            results: result,
+        });
+        first += size;
     }
-    times.publish += publish_start.elapsed();
+
+    let mut jobs: Vec<Box<dyn FnOnce() + Send + '_>> = Vec::with_capacity(tasks.len());
+    for slice in tasks.chunks_mut(1) {
+        let shared_ref: &Shared<'_> = &shared;
+        jobs.push(Box::new(move || run_task(&mut slice[0], shared_ref)));
+    }
+    executor.run(jobs);
+    drop(tasks);
+    times.compute = compute_start.elapsed();
+
+    (
+        Computed {
+            uids,
+            rows,
+            results,
+            times,
+        },
+        clone_start.elapsed(),
+    )
+}
+
+/// 一个任务里的所有实体按顺序算完；任务之间互不相交。
+fn run_task(task: &mut Task<'_>, shared: &Shared<'_>) {
+    let mut state = std::mem::take(&mut task.state);
+    for (within, state) in state.drain(..).enumerate() {
+        let row = task.first + within;
+        let uid = shared.uids[row];
+        let mut me = EntityRow {
+            public: task.public[within].clone(),
+            state,
+        }
+        .into_entity();
+        let result = &mut task.results[within];
+        let mut ctx = ParallelCtx {
+            uid,
+            shared,
+            commands: &mut result.commands,
+        };
+        // `Entity::tick` 内部会跑 `common_tick`，这里不能重复。
+        me.tick(&mut ctx);
+        let split = me.split();
+        result.removed = split.public.removed;
+        result.public = Some(split.public);
+        result.state = Some(split.state);
+    }
+}
+
+/// 落地：发布新的公开和私有数据，按（uid 升序，实体内序号）串行应用命令。
+///
+/// 需要一个完整的 `World`：命令处理函数会写方块、生成实体、发效果。
+pub fn commit(computed: Computed, world: &mut World<'_>) {
+    commit_timed(computed, world);
+}
+
+fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
+    let Computed {
+        uids,
+        rows,
+        mut results,
+        mut times,
+    } = computed;
+    let publish_start = Instant::now();
+    // 先发布，命令处理函数再改表里的实体；发布只更新位置变了的那几个格子。
+    let (public, state): (Vec<_>, Vec<_>) = results
+        .iter_mut()
+        .map(|result| {
+            (
+                result.public.take().expect("compute wrote every row"),
+                result.state.take().expect("compute wrote every row"),
+            )
+        })
+        .unzip();
+    world
+        .entities_mut()
+        .publish_entity_rows(&rows, public, state);
+    // 算阶段就 `discard` 的实体不留在表里，和精确模式「tick 过就不 put 回去」一致。
+    // 这个标记是算阶段顺手记下的，不用再对所有 uid 逐个查表。
+    for (index, result) in results.iter().enumerate() {
+        if result.removed {
+            world.entities_mut().remove_entity(uids[index]);
+        }
+    }
+    times.publish = publish_start.elapsed();
+
     let apply_start = Instant::now();
-    for (row, buffer) in commands.iter_mut().enumerate() {
-        let uid = uids[row];
-        if world.level().entity_public(uid).is_none() {
+    for (index, result) in results.iter_mut().enumerate() {
+        if result.commands.commands.is_empty() {
             continue;
         }
+        let uid = uids[index];
         let Some(mut me) = world.entities_mut().take_entity(uid) else {
             continue;
         };
-        for command in buffer.commands.drain(..) {
+        for command in result.commands.commands.drain(..) {
             ctx::apply(command, &mut me, world);
         }
         if !me.removed {
@@ -323,39 +398,40 @@ pub fn tick_entities_parallel_timed(
 /// 把「算」和「落地」的耗时分开报，给压力基准用。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PhaseTimes {
-    pub clone: std::time::Duration,
-    pub compute: std::time::Duration,
-    pub publish: std::time::Duration,
-    pub apply: std::time::Duration,
+    pub clone: Duration,
+    pub compute: Duration,
+    pub publish: Duration,
+    pub apply: Duration,
 }
 
-fn sections_of(bounds: Aabb) -> Vec<(i32, i32, i32)> {
-    let (first, last) = section_range(&bounds);
-    let mut keys = Vec::new();
-    for x in first.0..=last.0 {
-        for y in first.1..=last.1 {
-            for z in first.2..=last.2 {
-                keys.push((x, y, z));
-            }
-        }
-    }
-    keys
+/// 「先 compute 再 commit」的便捷包装，给测试和基准用。
+///
+/// 调用方同时拿得出只读方块视图和 `&mut World` 时才用得上；游戏层要走两段式，
+/// 因为 `RegionLevel` 独占借着区块表，没法同时再借一个只读视图。
+pub fn tick_entities_parallel(
+    blocks: &(dyn BlockView + Sync),
+    world: &mut World<'_>,
+    executor: &dyn Executor,
+) {
+    let _ = tick_entities_parallel_timed(blocks, world, executor);
 }
 
-fn section_range(area: &Aabb) -> ((i32, i32, i32), (i32, i32, i32)) {
-    const SIZE: i32 = 16;
-    (
-        (
-            (area.min_x.floor() as i32).div_euclid(SIZE),
-            (area.min_y.floor() as i32).div_euclid(SIZE),
-            (area.min_z.floor() as i32).div_euclid(SIZE),
-        ),
-        (
-            (area.max_x.floor() as i32).div_euclid(SIZE),
-            (area.max_y.floor() as i32).div_euclid(SIZE),
-            (area.max_z.floor() as i32).div_euclid(SIZE),
-        ),
-    )
+/// 同 [`tick_entities_parallel`]，另外报出「复制」「算」「发布」「落地」各段的耗时。
+pub fn tick_entities_parallel_timed(
+    blocks: &(dyn BlockView + Sync),
+    world: &mut World<'_>,
+    executor: &dyn Executor,
+) -> PhaseTimes {
+    let snapshot_start = Instant::now();
+    world.begin_entity_tick();
+    let (computed, _) = compute_timed(blocks, world.level().entities_table(), executor);
+    let mut times = commit_timed(computed, world);
+    // `begin_entity_tick` 和构造只读名单的开销算进发布这一段。
+    times.publish += snapshot_start
+        .elapsed()
+        .saturating_sub(times.publish + times.clone + times.compute + times.apply);
+    times
 }
+
 #[cfg(test)]
 mod tests;

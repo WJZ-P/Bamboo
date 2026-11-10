@@ -275,9 +275,14 @@ pub trait LevelEntities {
     fn take_entity(&mut self, uid: EntityUid) -> Option<Entity>;
     fn put_entity(&mut self, entity: Entity);
     fn live_entities(&self) -> Vec<Entity>;
-    /// 并行驱动用：摊出三个平行数组，和把算完的数据发布回表。
-    fn entity_snapshot(&self) -> crate::entity::EntitySnapshot;
-    fn entity_publish(&mut self, snapshot: crate::entity::EntitySnapshot);
+    /// 并行驱动用：算阶段读整张实体表，落地时只发布变了的那几行。
+    fn entities_table(&self) -> &EntityStore;
+    fn publish_entity_rows(
+        &mut self,
+        rows: &[usize],
+        public: Vec<crate::entity::EntityPublic>,
+        state: Vec<crate::entity::EntityState>,
+    );
 }
 
 /// 用一整张 [`EntityStore`] 存实体的世界。实现它就自动得到 [`LevelEntities`]。
@@ -349,12 +354,17 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
         self.entities_table().iter().collect()
     }
 
-    fn entity_snapshot(&self) -> crate::entity::EntitySnapshot {
-        self.entities_table().snapshot()
+    fn entities_table(&self) -> &EntityStore {
+        <T as EntityTables>::entities_table(self)
     }
 
-    fn entity_publish(&mut self, snapshot: crate::entity::EntitySnapshot) {
-        self.entities_table_mut().publish(snapshot);
+    fn publish_entity_rows(
+        &mut self,
+        rows: &[usize],
+        public: Vec<crate::entity::EntityPublic>,
+        state: Vec<crate::entity::EntityState>,
+    ) {
+        self.entities_table_mut().publish_rows(rows, public, state);
     }
 }
 

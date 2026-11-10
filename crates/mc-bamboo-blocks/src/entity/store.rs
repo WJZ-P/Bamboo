@@ -81,9 +81,10 @@ impl KindPublic {
 }
 
 /// 只有自己读写、种类特有的部分。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum KindState {
     FallingBlock(FallingBlockState),
+    #[default]
     Tnt,
     Item(ItemState),
 }
@@ -107,7 +108,7 @@ pub struct ItemState {
 }
 
 /// 只有自己读写的部分。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntityState {
     pub kind: KindState,
     pub old_position: Vec3,
@@ -298,17 +299,6 @@ pub struct ChunkEntities {
     rows: Vec<EntityRow>,
 }
 
-/// 并行阶段摊开的三个平行数组：`public` 只读，`next_public` / `state` 每个任务写自己那行。
-#[derive(Debug)]
-pub struct EntitySnapshot {
-    pub uids: Vec<EntityUid>,
-    pub public: Vec<EntityPublic>,
-    pub next_public: Vec<EntityPublic>,
-    pub state: Vec<EntityState>,
-    /// `next_public.clone_from(&public)` 那一步的耗时，给基准用。
-    pub clone_time: std::time::Duration,
-}
-
 /// 一个 region 的实体表。
 ///
 /// 行槽的下标稳定，`take` / `put` O(1)；`index` 是 uid 到行号的映射，`grid` 是 16³ 段的行号索引。
@@ -435,22 +425,59 @@ impl EntityStore {
             .filter_map(|&row| self.slots[row].as_ref().map(|entry| &entry.public))
     }
 
-    /// 空间索引：和 `area` 相交的实体公开数据，按 uid 升序。
-    pub fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
-        let mut rows = Vec::new();
+    /// uid 到行号。`ids()` 已经按 uid 升序，所以这个映射也是升序。
+    pub fn row_of(&self, uid: EntityUid) -> Option<usize> {
+        self.index.get(&uid).copied()
+    }
+
+    /// 空间索引里覆盖 `area` 的行号，按行号升序（行号来自 uid 升序的槽位分配，
+    /// 但回收槽位后不一定等价于 uid 升序，调用方要按 uid 排序）。
+    pub fn grid_rows_in(&self, area: Aabb) -> Vec<usize> {
         let (first, last) = section_range(&area);
+        let mut rows = Vec::new();
         for (_, set) in self.grid.range(first..=last) {
             rows.extend(set.iter().copied());
         }
         rows.sort_unstable();
         rows.dedup();
-        for row in rows {
-            let Some(entry) = &self.slots[row] else {
-                continue;
-            };
-            if entry.public.bounding_box().intersects(area) {
-                visit(&entry.public);
-            }
+        rows
+    }
+
+    /// 只读一行。给并行算阶段的引用快照用：这里不克隆，也不搬走行。
+    pub fn row_at(&self, row: usize) -> Option<&EntityRow> {
+        self.slots.get(row)?.as_ref()
+    }
+
+    /// 空间索引：和 `area` 相交的实体公开数据，按 uid 升序。
+    pub fn for_each_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
+        let mut found: Vec<(EntityUid, &EntityPublic)> = self
+            .grid_rows_in(area)
+            .into_iter()
+            .filter_map(|row| self.slots.get(row)?.as_ref())
+            .filter(|entry| entry.public.bounding_box().intersects(area))
+            .map(|entry| (entry.public.uid, &entry.public))
+            .collect();
+        // BTreeMap 的键有序，但槽位会被回收复用，行号顺序不等于 uid 顺序。
+        found.sort_unstable_by_key(|(uid, _)| *uid);
+        for (_, public) in found {
+            visit(public);
+        }
+    }
+
+    /// 发布算阶段得到的公开和私有数据：只动位置变了的行，不重建整张表。
+    ///
+    /// `rows` 是算阶段那一份 uid 升序名单对应的行号；`commands` 之外的移除由调用方用
+    /// `remove` 处理，因为算阶段就 `discard` 的实体不该留在表里。
+    pub fn publish_rows(
+        &mut self,
+        rows: &[usize],
+        public: Vec<EntityPublic>,
+        state: Vec<EntityState>,
+    ) {
+        debug_assert_eq!(rows.len(), public.len());
+        debug_assert_eq!(rows.len(), state.len());
+        for ((row, public), state) in rows.iter().copied().zip(public).zip(state) {
+            self.replace_row(row, EntityRow { public, state });
         }
     }
 
@@ -553,7 +580,7 @@ impl EntityStore {
     fn replace_row(&mut self, row: usize, new: EntityRow) {
         let old = self.slots[row].take();
         let changed = old.as_ref().is_none_or(|old| {
-            sections_of(old.public.bounding_box()) != sections_of(new.public.bounding_box())
+            section_range(&old.public.bounding_box()) != section_range(&new.public.bounding_box())
         });
         if changed {
             if let Some(old) = &old {
@@ -577,48 +604,23 @@ impl EntityStore {
         }
     }
 
-    /// 并行阶段开始：摊出三个平行数组，按 uid 升序。
-    pub fn snapshot(&self) -> EntitySnapshot {
-        use std::time::Instant;
-        let mut uids = Vec::with_capacity(self.index.len());
-        let mut public = Vec::with_capacity(self.index.len());
-        let mut state = Vec::with_capacity(self.index.len());
-        for &row in self.index.values() {
-            let entry = self.slots[row].as_ref().expect("indexed row is live");
-            uids.push(entry.public.uid);
-            public.push(entry.public.clone());
-            state.push(entry.state.clone());
+    /// 并行算阶段的只读名单：uid 升序的 ID 和对应的槽位行号。
+    /// 公开数据和空间索引直接引用表本身，不再复制一份。
+    pub fn tick_rows(&self) -> (Vec<EntityUid>, Vec<usize>) {
+        let (mut uids, mut rows) = (
+            Vec::with_capacity(self.index.len()),
+            Vec::with_capacity(self.index.len()),
+        );
+        for (&uid, &row) in &self.index {
+            uids.push(uid);
+            rows.push(row);
         }
-        let clone_start = Instant::now();
-        let mut next_public = Vec::with_capacity(public.len());
-        next_public.clone_from(&public);
-        EntitySnapshot {
-            uids,
-            public,
-            next_public,
-            state,
-            clone_time: clone_start.elapsed(),
-        }
+        (uids, rows)
     }
 
-    /// 并行阶段结束：把新的公开和私有数据写回表，按 uid 升序重建索引。
-    pub fn publish(&mut self, snapshot: EntitySnapshot) {
-        let EntitySnapshot {
-            uids,
-            next_public: public,
-            state,
-            ..
-        } = snapshot;
-        self.slots.clear();
-        self.index.clear();
-        self.taken.clear();
-        self.free.clear();
-        self.grid.clear();
-        for (row, ((uid, public), state)) in uids.into_iter().zip(public).zip(state).enumerate() {
-            self.grid_insert(row, &public);
-            self.slots.push(Some(EntityRow { public, state }));
-            self.index.insert(uid, row);
-        }
+    /// 只读的一个空间索引格子。算阶段的范围查询只访问覆盖到的那几个格子。
+    pub fn grid_section(&self, key: (i32, i32, i32)) -> Option<&BTreeSet<usize>> {
+        self.grid.get(&key)
     }
 
     /// 把 `chunk` 里的实体装进盒子搬走。只在 tick 边界调用，tick 中途返回 [`Busy`]。
@@ -671,7 +673,7 @@ fn sections_of(bounds: Aabb) -> Vec<(i32, i32, i32)> {
     keys
 }
 
-fn section_range(area: &Aabb) -> ((i32, i32, i32), (i32, i32, i32)) {
+pub(crate) fn section_range(area: &Aabb) -> ((i32, i32, i32), (i32, i32, i32)) {
     (
         (
             (area.min_x.floor() as i32).div_euclid(SECTION_SIZE),
@@ -784,9 +786,18 @@ mod tests {
             BlockState(blocks::SAND),
         ));
         let before: Vec<_> = store.iter().collect();
-        let mut snapshot = store.snapshot();
-        snapshot.next_public[0].position.x += 1.0;
-        store.publish(snapshot);
+        let (uids, rows) = store.tick_rows();
+        assert_eq!(uids, [first, second]);
+        let mut public: Vec<_> = rows
+            .iter()
+            .map(|&row| store.row_at(row).unwrap().public.clone())
+            .collect();
+        let state: Vec<_> = rows
+            .iter()
+            .map(|&row| store.row_at(row).unwrap().state.clone())
+            .collect();
+        public[0].position.x += 1.0;
+        store.publish_rows(&rows, public, state);
         let after: Vec<_> = store.iter().collect();
         assert_eq!(store.ids(), [first, second]);
         assert_ne!(before, after);

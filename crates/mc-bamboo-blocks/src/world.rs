@@ -642,8 +642,13 @@ impl<'a> World<'a> {
     }
 
     /// 实体驱动的入口：写一个 `World` 入口函数给并行/精确两种驱动用。
-    pub(crate) fn entities_mut(&mut self) -> &mut dyn crate::level::LevelEntities {
+    pub fn entities_mut(&mut self) -> &mut dyn crate::level::LevelEntities {
         self.level
+    }
+
+    /// 两段式并行驱动的算阶段之前调用：把实体表切进「这一刻正在 tick」的状态。
+    pub fn begin_entity_tick(&mut self) {
+        self.level.begin_entity_tick();
     }
 
     /// `getMinY`。
@@ -2278,7 +2283,7 @@ pub(crate) fn miss(from: Vec3, to: Vec3) -> BlockHit {
 }
 
 /// `BlockGetter.traverseBlocks`：沿着线段依次访问经过的方块，`visit` 返回结果时停下。
-fn traverse_blocks<T>(
+pub(crate) fn traverse_blocks<T>(
     from: Vec3,
     to: Vec3,
     mut visit: impl FnMut(BlockPos) -> Option<T>,

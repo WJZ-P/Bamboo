@@ -54,8 +54,8 @@ pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::{click_if_empty, dispense_from};
 pub use entity::{
-    ChunkEntities, EntityPublic, EntityRow, EntitySnapshot, EntityState, EntityStore, EntityUid,
-    KindPublic, KindState,
+    ChunkEntities, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid, KindPublic,
+    KindState,
 };
 pub use gamerules::{BlockGameRules, apply_text, block_drops_allowed};
 pub use hopper::HopperEntity;
