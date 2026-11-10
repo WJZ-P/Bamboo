@@ -11,6 +11,8 @@ use mc_bamboo_protocol::packet::{
 };
 use uuid::Uuid;
 
+use crate::outgoing::Outgoing;
+
 /// 一次登录对应的玩家 ID，同时也是这名玩家的实体 ID。
 ///
 /// 每次登录都分配新值，不用 UUID：同一账号快速重连时，
@@ -21,7 +23,7 @@ pub struct PlayerId(pub i32);
 /// 世界线程发包的出口，连接层负责实现。两个方法都不能阻塞。
 pub trait PlayerSink: Send {
     /// 交出一批完整的帧。积压太多或者连接已经结束时返回 `false`。
-    fn send(&mut self, frames: Vec<u8>) -> bool;
+    fn send(&mut self, frames: Outgoing) -> bool;
 
     /// 已经交出的帧都写完之后关闭连接。
     fn close(&mut self);

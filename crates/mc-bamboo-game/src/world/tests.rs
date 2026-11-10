@@ -24,7 +24,7 @@ use mc_bamboo_protocol::{
 use uuid::Uuid;
 
 use super::*;
-use crate::{InFlight, PlayerSink, chunk_encoding::encode_chunk, links::encode_frames};
+use crate::{InFlight, Outgoing, PlayerSink, chunk_encoding::encode_chunk, links::encode_frames};
 
 mod fuzz;
 
@@ -44,12 +44,12 @@ pub(crate) struct SinkState {
 pub(crate) struct FakeSink(Arc<Mutex<SinkState>>);
 
 impl PlayerSink for FakeSink {
-    fn send(&mut self, frames: Vec<u8>) -> bool {
+    fn send(&mut self, frames: Outgoing) -> bool {
         let mut state = self.0.lock().unwrap();
         if state.refusing {
             return false;
         }
-        state.bytes.extend(frames);
+        state.bytes.extend(frames.to_raw_bytes());
         true
     }
 
@@ -384,6 +384,19 @@ impl Harness {
     /// 给其他模块的测试直接看全服状态。
     pub(crate) fn global(&self) -> &crate::global::Global {
         &self.world.global
+    }
+
+    /// 区块帧缓存里的共享帧，按坐标取。版本号变了就返回 `None`。
+    pub(crate) fn shared_chunk_frame(&self, pos: ChunkPos) -> Option<Arc<crate::SharedFrames>> {
+        self.world
+            .region
+            .chunk_cache
+            .frame(&self.world.region.chunks, pos)
+    }
+
+    /// 缓存里的区块帧条目数。
+    pub(crate) fn cached_frame_count(&self) -> usize {
+        self.world.region.chunk_cache.frame_count()
     }
 
     /// 给其他模块的测试直接看世界的状态。

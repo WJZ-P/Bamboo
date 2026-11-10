@@ -9,13 +9,14 @@
 use std::{
     hint::black_box,
     mem::size_of,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use mc_bamboo_protocol::{frame::append_frame, packet::play::LevelChunkWithLight};
 
 use super::*;
-use crate::chunk_tracking::ChunkView;
+use crate::{chunk_tracking::ChunkView, outgoing::SharedFrames};
 
 /// 每项量这么多次，取中位数。
 const RUNS: usize = 15;
@@ -219,8 +220,8 @@ fn report_memory(store: &ChunkStore, template_body: &[u8], chunks: &[ChunkPos]) 
         "memory: {} bytes of bodies for {} chunks, {} bytes per house chunk \
          ({} for a chunk with one block changed, template {}), plus {} bytes per table slot",
         cache.bytes,
-        cache.entries.len(),
-        cache.bytes / cache.entries.len(),
+        cache.bodies.len(),
+        cache.bytes / cache.bodies.len(),
         encode_chunk(&one_block, ChunkPos::new(0, 0)).len(),
         template_body.len(),
         size_of::<(ChunkPos, CachedBody)>(),
@@ -234,11 +235,11 @@ fn report_sweep(store: &ChunkStore) {
     let mut cache = ChunkCache::default();
     for x in 0..40 {
         for z in 0..25 {
-            let entry = CachedBody {
+            let entry = CachedFrame {
                 revision,
-                body: body.clone(),
+                frames: Arc::new(SharedFrames::new(body.to_vec())),
             };
-            cache.entries.insert(ChunkPos::new(x, z), entry);
+            cache.frames.insert(ChunkPos::new(x, z), entry);
         }
     }
     let far = ChunkView {
@@ -255,11 +256,11 @@ fn report_sweep(store: &ChunkStore) {
         cache.retain(|pos| views.iter().any(|view| view.contains(pos)));
         start.elapsed()
     });
-    assert_eq!(cache.entries.len(), 1000);
+    assert_eq!(cache.frames.len(), 1000);
     println!(
         "sweep: {:.3} ms for {} entries against {} views",
         sweep.as_secs_f64() * 1000.0,
-        cache.entries.len(),
+        cache.frames.len(),
         views.len()
     );
 }

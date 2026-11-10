@@ -17,6 +17,7 @@ use uuid::Uuid;
 use super::*;
 use crate::{
     inbound::PlayerSink,
+    outgoing::Outgoing,
     world::tests::{
         Client, Frame, Harness, SPAWN_X, SPAWN_Y, SPAWN_Z, client_requesting, frames_with_id,
         received_chunks,
@@ -86,8 +87,8 @@ fn parse_frames(bytes: &[u8]) -> Vec<Frame> {
 struct Recorder(Arc<Mutex<Vec<u8>>>);
 
 impl PlayerSink for Recorder {
-    fn send(&mut self, frames: Vec<u8>) -> bool {
-        self.0.lock().unwrap().extend(frames);
+    fn send(&mut self, frames: Outgoing) -> bool {
+        self.0.lock().unwrap().extend(frames.to_raw_bytes());
         true
     }
 
