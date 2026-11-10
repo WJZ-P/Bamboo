@@ -121,6 +121,11 @@ impl FurnaceEntity {
         std::array::from_fn(|id| self.data(id))
     }
 
+    /// 录制层要看到的、数据槽之外的内部状态：配方缓存和配方统计。
+    pub fn recipe_facts(&self) -> (Option<&'static str>, Vec<(&'static str, i32)>) {
+        (self.last_recipe.map(|recipe| recipe.id), self.recipes_used.clone())
+    }
+
     /// 官方 `ContainerData.set`。存档回读和菜单写数据槽都走这里，不经过 `setItem`。
     ///
     /// Vanilla `ContainerData.set`. Loading and menu data writes use this and do not go through `setItem`.

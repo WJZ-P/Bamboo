@@ -74,6 +74,11 @@ impl CampfireEntity {
         values
     }
 
+    /// 录制层要看到的、数据槽之外的内部状态：配方缓存和上一刻的方块状态。
+    pub fn recipe_facts(&self) -> (Option<&'static str>, u32) {
+        (self.last_recipe.map(|recipe| recipe.id), self.last_state.0)
+    }
+
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
         if let Some(stored) = self.items.get_mut(slot) {
             *stored = if stack.is_empty() {

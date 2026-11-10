@@ -21,6 +21,7 @@ use crate::{
     random::LevelRandom,
     shape::Aabb,
     state::{BlockState, NoteBlockInstrument},
+    ticks::TickPriority,
 };
 
 /// 发射器前方一格里、可能被穿上装备的生物。
@@ -42,6 +43,66 @@ pub struct EquipTarget {
     /// `minecraft:entity_type` 的注册表 ID。
     pub entity_type: i32,
     pub equipment: [Option<ItemStack>; 8],
+}
+
+/// 一次触发的种类。
+///
+/// 计划刻和方块事件是设计稿 9.1 定义的两种触发；流体刻和方块实体的 ticker
+/// 也按一次触发计，因为漏斗、熔炉这些机器只在这些循环里工作。
+///
+/// The kind of a trigger. Scheduled block ticks and block events are the two kinds
+/// in §9.1; fluid ticks and block-entity tickers count as triggers too, because
+/// hopper and furnace machines only run in those loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Trigger {
+    /// 一条到期的方块计划刻。`kind` 是方块的注册表 ID。
+    ScheduledTick { pos: BlockPos, kind: usize },
+    /// 一条到期的流体计划刻。`kind` 是流体的注册表 ID。
+    ScheduledFluidTick { pos: BlockPos, kind: i32 },
+    /// 一个方块事件。`kind` 是方块的注册表 ID，参数照 `BlockEventData`。
+    BlockEvent {
+        pos: BlockPos,
+        kind: usize,
+        param_a: i32,
+        param_b: i32,
+    },
+    /// 方块实体 ticker 的一次 tick。`kind` 是这一格方块的注册表 ID。
+    BlockEntityTick { pos: BlockPos, kind: usize },
+}
+
+/// 方块逻辑里不经过 [`Level`] 读写方法的那些事件，默认谁也不看。
+///
+/// `World` 在每次触发的开头结尾、读世界时间、收集对外效果、查/排计划刻时各报一次。
+/// 录制实现靠它把「读集合」和「效果」补全；默认实现什么都不做，正常执行时只有一次
+/// 虚调用的开销。
+///
+/// Events in block logic that bypass [`Level`] read/write methods. `World` reports
+/// each trigger boundary, world-time read, outgoing effect and scheduled-tick
+/// query/scheduling. A recording implementation uses them to complete its read set
+/// and effect list; the default implementation does nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Observation<'a> {
+    TriggerBegin(Trigger),
+    TriggerEnd,
+    /// `World::game_time()` 被读了。
+    TimeRead,
+    /// `World::push_effect` 收进去的音效、世界事件等。
+    Effect(&'a Effect),
+    /// `has_scheduled_tick` 或 `will_tick_this_tick` 的查询结果。
+    TickQuery {
+        pos: BlockPos,
+        kind: usize,
+        will_tick_this_tick: bool,
+        result: bool,
+    },
+    /// 新排的一个方块或流体计划刻，延迟是触发时刻起的相对刻数。
+    TickScheduled {
+        pos: BlockPos,
+        kind: i64,
+        fluid: bool,
+        delay: i32,
+        priority: TickPriority,
+    },
 }
 
 /// 方块状态装不下、跟着位置走的世界数据：方块实体、方块事件、红石记忆。
@@ -523,6 +584,17 @@ pub trait Level: LevelSideState {
         let _ = (entity_id, component_slot, stack);
         None
     }
+
+    /// 观察一次不经过本 trait 读写方法的事件，见 [`Observation`]。
+    ///
+    /// 默认是空的。接收者是 `&self`：读方法也要能报事件，录制实现用内部可变性记账。
+    /// 实现者不能因为观察到事件而改变方块逻辑的结果。
+    ///
+    /// Observe an event that bypasses this trait's read/write methods; see
+    /// [`Observation`]. The default does nothing. The receiver is `&self` because
+    /// read-only paths report events too; a recording implementation uses
+    /// interior mutability. An implementation must not change block behaviour.
+    fn observe(&self, _event: Observation<'_>) {}
 }
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。

@@ -35,6 +35,7 @@ pub mod placement;
 pub mod predicate;
 pub mod random;
 pub mod random_tick;
+pub mod recording;
 pub mod shape;
 pub mod state;
 pub mod ticks;

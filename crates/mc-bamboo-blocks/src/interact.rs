@@ -301,7 +301,9 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
     run_block_ticks(&mut world);
     world.ticks_mut().collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        world.begin_fluid_trigger(pos, fluid);
         fluid::tick(&mut world, pos, fluid);
+        world.end_trigger();
     }
     world.run_block_events();
     world.end_handling_tick();
@@ -326,7 +328,9 @@ pub fn run_due_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) ->
     run_block_ticks(&mut world);
     world.ticks_mut().collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        world.begin_fluid_trigger(pos, fluid);
         fluid::tick(&mut world, pos, fluid);
+        world.end_trigger();
     }
     outcome_from(world, InteractionResult::Pass, false)
 }
@@ -381,10 +385,12 @@ pub fn run_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> Outcome
 /// 到期的方块计划刻，`ServerLevel.tick` 和 tick 题的动作都用这一段。
 fn run_block_ticks(world: &mut World) {
     while let Some((pos, block)) = world.ticks_mut().next_due() {
+        world.begin_scheduled_trigger(pos, block);
         let state = world.block_state(pos);
         if state.block_id() == block {
             state.tick(world, pos);
         }
+        world.end_trigger();
     }
 }
 

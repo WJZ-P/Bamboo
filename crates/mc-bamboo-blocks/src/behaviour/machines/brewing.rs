@@ -118,6 +118,25 @@ impl BrewingStandEntity {
         std::array::from_fn(|id| self.data(id))
     }
 
+    /// 录制层要看到的、数据槽之外的内部状态。
+    pub fn observed_facts(&self) -> (
+        Option<[bool; 3]>,
+        Option<i32>,
+        u32,
+        Option<&'static str>,
+        bool,
+        u8,
+    ) {
+        (
+            self.last_potion_count,
+            self.ingredient,
+            self.speed_multiplier.to_bits(),
+            self.last_recipe.map(|recipe| recipe.id),
+            self.yield_tick,
+            self.tick_phase,
+        )
+    }
+
     /// 官方 `ContainerData.set`。存档回读和菜单写数据槽都走这里。
     ///
     /// Vanilla `ContainerData.set`. Loading and menu data writes use this.
