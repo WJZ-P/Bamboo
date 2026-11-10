@@ -6,7 +6,7 @@
 
 use std::{
     borrow::Cow,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use mc_bamboo_protocol::compression::{self, CompressionError};
@@ -19,6 +19,8 @@ pub struct SharedFrames {
     raw: Vec<u8>,
     /// 第一次压缩时记下阈值和结果。所有连接用同一个配置，阈值不同的那次现场压，不覆盖缓存。
     compressed: OnceLock<(i32, Vec<u8>)>,
+    /// 只有第一次压缩要拿锁：多条连接同时第一次用到同一个区块时只压一次。
+    first: Mutex<()>,
 }
 
 impl SharedFrames {
@@ -26,6 +28,7 @@ impl SharedFrames {
         Self {
             raw,
             compressed: OnceLock::new(),
+            first: Mutex::new(()),
         }
     }
 
@@ -36,32 +39,36 @@ impl SharedFrames {
 
     /// 按 `threshold` 压缩后的完整帧。缓存命中时直接借出，不复制。
     pub fn compressed(&self, threshold: i32) -> Result<Cow<'_, [u8]>, CompressionError> {
-        if let Some((cached_threshold, bytes)) = self.compressed.get() {
-            if *cached_threshold == threshold {
-                return Ok(Cow::Borrowed(bytes));
-            }
+        if let Some((cached_threshold, bytes)) = self.compressed.get()
+            && *cached_threshold == threshold
+        {
+            return Ok(Cow::Borrowed(bytes));
+        }
+        // 阈值本来就不同的调用不走第一次压缩的锁，各压各的。
+        if self.compressed.get().is_some() {
             return Ok(Cow::Owned(compression::encode_frames(
                 &self.raw, threshold,
             )?));
         }
 
-        // 压缩失败不写缓存，下一次可以重试。
-        let bytes = compression::encode_frames(&self.raw, threshold)?;
-        match self.compressed.set((threshold, bytes)) {
-            Ok(()) => {
-                let (_, cached) = self.compressed.get().expect("刚写进去");
-                Ok(Cow::Borrowed(cached))
+        // 只有一个线程压第一次，其余线程等锁拿到缓存。压缩失败不写缓存，下一次可以重试。
+        let _guard = self.first.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((cached_threshold, bytes)) = self.compressed.get() {
+            if *cached_threshold == threshold {
+                return Ok(Cow::Borrowed(bytes));
             }
-            // 别人抢先写进去了。阈值不同时自己手里的字节正是这个阈值要的，不必再压一次。
-            Err((_, bytes)) => {
-                let (cached_threshold, cached) = self.compressed.get().expect("已被占用");
-                if *cached_threshold == threshold {
-                    Ok(Cow::Borrowed(cached))
-                } else {
-                    Ok(Cow::Owned(bytes))
-                }
-            }
+            // 缓存里是别的阈值：现场压一次，不覆盖别人的缓存。
+            return Ok(Cow::Owned(compression::encode_frames(
+                &self.raw, threshold,
+            )?));
         }
+        let bytes = compression::encode_frames(&self.raw, threshold)?;
+        // 只有这一个线程在写，而且刚确认过缓存还是空的。
+        self.compressed
+            .set((threshold, bytes))
+            .expect("第一次压缩的锁保证了只有这里写");
+        let (_, cached) = self.compressed.get().expect("刚写进去");
+        Ok(Cow::Borrowed(cached))
     }
 }
 
@@ -231,14 +238,18 @@ mod tests {
 
     #[test]
     fn concurrent_calls_end_up_borrowing_one_shared_buffer() {
-        let frames = SharedFrames::new(batch());
+        // 第一次压缩要够慢，让别的线程确实排队等着，而不是各自压完才发现缓存已有。
+        let raw: Vec<u8> = (0..200)
+            .flat_map(|index| frame((index % 251) as u8, 4096))
+            .collect();
+        let frames = SharedFrames::new(raw.clone());
         let start = Barrier::new(8);
         thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(|| {
                         start.wait();
-                        let compressed = frames.compressed(256).unwrap();
+                        let compressed = frames.compressed(0).unwrap();
                         assert!(matches!(compressed, Cow::Borrowed(_)));
                         compressed.as_ptr() as usize
                     })
@@ -251,8 +262,8 @@ mod tests {
             assert!(pointers.iter().all(|&pointer| pointer == pointers[0]));
         });
         assert_eq!(
-            *frames.compressed(256).unwrap(),
-            *encode_frames(frames.raw(), 256).unwrap()
+            *frames.compressed(0).unwrap(),
+            *encode_frames(&raw, 0).unwrap()
         );
     }
 
