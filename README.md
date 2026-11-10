@@ -643,6 +643,23 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
     [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
 ```
 
+存档的编解码层也一样：官方 `SerializableChunkData.parse` 读 Bamboo 写出的区块 NBT 再
+`write()` 回来，官方写出的 NBT Bamboo 读成 `ChunkColumn` 再写出来，两边都按 NBT 的键
+比较（`CompoundTag` 用 `HashMap`，键序是哈希序）；官方 `RegionFile` 和 Bamboo 的区域文件
+三个压缩 ID 双向对读，外加官方 `NbtIo.writeCompressed` 的 gzip 文件。
+`StorageOracle.java` 只在 JVM 里调官方类，不启动服务端、不接受 EULA：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- storage <java 路径> [--show N]
+```
+
+编解码的耗时和压缩前后字节数（超平坦和内容丰富的合成区块各一份，解码拆成解压、
+NBT 解析、组装三段）：
+
+```bash
+cargo test --release -p mc-bamboo-storage chunk_nbt_cost -- --ignored --nocapture
+```
+
 这些命令需要 Java 25 或更新版本。
 
 ## License

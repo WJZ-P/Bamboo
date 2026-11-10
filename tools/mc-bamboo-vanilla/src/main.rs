@@ -33,6 +33,8 @@
 //! mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
 //!     让官方 `handleMovePlayer` 对一组移动包出题，用 Bamboo 重放，
 //!     比较接受、拉回还是断开，以及最终位置和摔落距离
+//! mc-bamboo-vanilla storage <java 路径> [--show N]
+//!     用官方 SerializableChunkData / RegionFile / NbtIo 检查存档编解码层
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
