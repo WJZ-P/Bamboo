@@ -6,9 +6,6 @@
 //!
 //! 区块平面和多 region 是后面的步骤，现在还没有调用方，只有测试会用到这些接口。
 
-// 没有调用方时 `pub(crate)` 的接口会被当成死代码，等区块平面接上后去掉。
-#![allow(dead_code)]
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -161,6 +158,7 @@ impl Region {
     ///
     /// 只是只读地问一声，不会偷偷把光照跑完。一次要搬几张表的调用方可以先问，
     /// 好让任何一个前提不满足时整批都不动。
+    #[allow(dead_code)] // 区块平面接上之前没有调用方
     pub(crate) fn ready_to_move_columns(&self) -> bool {
         self.chunks.ready_to_move_columns()
             && self.block_ticks.ready_to_move_chunks()
@@ -184,6 +182,7 @@ impl Region {
     /// 所以放进一个模拟时间不同的 region 也能保持剩余寿命。
     /// 只在 tick 边界调用：红石记忆里「这次右键要放上的书」是一次交互内部的瞬时量，
     /// 边界上一定是 `None`，它不跟着区块走。
+    #[allow(dead_code)] // 区块平面接上之前没有调用方
     pub(crate) fn take_columns(
         &mut self,
         chunks: &BTreeSet<ChunkPos>,
@@ -285,6 +284,7 @@ impl Region {
     /// 按 region 自己的 `tick` 算回绝对时刻，所以两边模拟时间不同也能对上。
     /// 放入不产生发给客户端的方块/光照变化，也不发区块包；区块包缓存里这个坐标的条目
     /// 一并丢掉，下层会用目标 store 自己的版本号重新编码。
+    #[allow(dead_code)] // 区块平面接上之前没有调用方
     pub(crate) fn insert_column(
         &mut self,
         pos: ChunkPos,
@@ -334,7 +334,7 @@ impl Region {
 ///
 /// `BlockPos` 的 `Ord` 以 x 为第一关键字，每个区块只扫自己那条 16 格宽的 x 带；
 /// 删除用 `retain`（表本身和剩下条目的遍历顺序都不变）。
-fn take_positions<T: Clone>(
+fn take_positions<T>(
     table: &mut BTreeMap<BlockPos, T>,
     chunks: &BTreeSet<ChunkPos>,
     mut emit: impl FnMut(BlockPos, &T),
