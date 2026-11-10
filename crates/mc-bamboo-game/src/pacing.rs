@@ -223,21 +223,12 @@ impl Pacer {
         }
 
         let spin_start = woke;
-        // 余量已按上限夹过，睡眠超时只会让实际自旋变短，不会再超出预算。
-        let spin_budget = self.config.spin_max;
+        // 余量已按上限夹过，而睡眠醒来不会早于 wake_at，所以这段自旋窗口
+        // 一定不超过自旋上限；循环里每次都重新读时钟，到点立刻返回。
         loop {
             let now = timing.now();
-            let spun = now.saturating_duration_since(spin_start);
             if now >= deadline {
-                return (deadline - spin_start).min(spin_budget);
-            }
-            if spun >= spin_budget {
-                // 预算用完就退回短睡，仍然保证返回时不早于截止时刻。
-                self.sleep_until(deadline, timing);
-                return timing
-                    .now()
-                    .saturating_duration_since(spin_start)
-                    .min(spin_budget);
+                return deadline.saturating_duration_since(spin_start);
             }
             timing.spin_once();
         }
@@ -548,6 +539,19 @@ mod tests {
         assert!(timing.now() >= deadline);
         // 睡过头量进了历史，下一次余量被上限夹住。
         assert_eq!(pacer.margin(), Duration::from_micros(6000));
+    }
+
+    #[test]
+    fn spin_window_never_exceeds_the_configured_limit() {
+        // 上限比这一刻还要等的时间短：余量被夹到 100us，只自旋这一段。
+        let mut pacer = Pacer::new(hybrid(100));
+        let mut timing = FakeTiming::new(Duration::ZERO);
+        let deadline = timing.now() + Duration::from_millis(2);
+        let spun = pacer.wait_until(deadline, &mut timing);
+        assert_eq!(spun, Duration::from_micros(100));
+        assert_eq!(timing.spins, 2, "100us 窗口对应两次 50us 自旋");
+        assert_eq!(timing.sleep_requests.len(), 1, "自旋前只睡一次");
+        assert_eq!(timing.now(), deadline);
     }
 
     #[test]
