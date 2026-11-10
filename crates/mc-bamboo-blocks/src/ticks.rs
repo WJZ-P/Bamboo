@@ -23,7 +23,7 @@ pub struct Busy;
 
 impl fmt::Display for Busy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("这张表正在 tick 中途，不能按区块取出")
+        f.write_str("the table is in the middle of a tick and cannot move a chunk")
     }
 }
 
