@@ -40,7 +40,15 @@ stop_server() {
         SERVER=""
     fi
 }
-trap 'stop_server; if [ -z "$KEEP" ]; then rm -rf "$OUT"; fi' EXIT INT TERM
+cleanup() {
+    stop_server
+    if [ -z "$KEEP" ]; then
+        rm -rf "$OUT"
+    fi
+}
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap cleanup EXIT
 
 scene_spec() {
     case "$1" in
