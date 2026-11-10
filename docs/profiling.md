@@ -196,8 +196,9 @@ walk-50 12 426.0 / 585.6，fly-20 2 378.9 / 1 047.2。
 
 测量环境和第一份相同（Apple M4 Pro、release 构建、五个场景、`BAMBOO_PROFILE=10`、
 `--max-players 500 --view-distance 8`、压缩阈值 256、离线模式、`--ramp 5`），
-日期 2026-11-10（PST），基线二进制对应提交 `88f6de3` 加上本任务剖析器的改动
-（第一份基线之后服务端逻辑没变，只改了指标的口径）。汇总表的列换成新指标：
+日期 2026-11-10（PST），基线跑的是提交 `557b7e9` 的工作树（父提交 `88f6de3`），
+即第一份基线 `ac746c9` 之后的改动只涉及剖析器指标和报告口径，游戏逻辑没变。
+汇总表的列换成新指标：
 `lateness` 是 `tick_start_lateness`，`interval dev` 是 `tick_interval_deviation`，
 `chunk p95` 现在是微秒，`flush bytes/tick` 是压缩前的每刻出站字节数。
 
