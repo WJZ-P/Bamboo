@@ -117,6 +117,10 @@ pub mod biome {
     pub const WINDSWEPT_HILLS: i32 = 64;
     pub const WINDSWEPT_SAVANNA: i32 = 65;
     pub const WOODED_BADLANDS: i32 = 66;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod chat_type {
@@ -130,6 +134,10 @@ pub mod chat_type {
     pub const SAY_COMMAND: i32 = 4;
     pub const TEAM_MSG_COMMAND_INCOMING: i32 = 5;
     pub const TEAM_MSG_COMMAND_OUTGOING: i32 = 6;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod dimension_type {
@@ -140,6 +148,10 @@ pub mod dimension_type {
     pub const OVERWORLD_CAVES: i32 = 1;
     pub const THE_END: i32 = 2;
     pub const THE_NETHER: i32 = 3;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod world_clock {
@@ -148,6 +160,10 @@ pub mod world_clock {
     pub static NAMES: &[&str] = &["minecraft:overworld", "minecraft:the_end"];
     pub const OVERWORLD: i32 = 0;
     pub const THE_END: i32 = 1;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod particle_type {
@@ -282,6 +298,10 @@ pub mod particle_type {
     pub const BLOCK_CRUMBLE: i32 = 125;
     pub const FIREFLY: i32 = 126;
     pub const SULFUR_CUBE_GOO: i32 = 127;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod attribute {
@@ -328,6 +348,10 @@ pub mod attribute {
     pub const WATER_MOVEMENT_EFFICIENCY: i32 = 37;
     pub const WAYPOINT_TRANSMIT_RANGE: i32 = 38;
     pub const WAYPOINT_RECEIVE_RANGE: i32 = 39;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod block_entity_type {
@@ -383,6 +407,10 @@ pub mod block_entity_type {
     pub const TEST_INSTANCE_BLOCK: i32 = 46;
     pub const COPPER_GOLEM_STATUE: i32 = 47;
     pub const POTENT_SULFUR: i32 = 48;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod entity_type {
@@ -550,6 +578,10 @@ pub mod entity_type {
     pub const ZOMBIFIED_PIGLIN: i32 = 158;
     pub const PLAYER: i32 = 159;
     pub const FISHING_BOBBER: i32 = 160;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod data_component_type {
@@ -678,6 +710,10 @@ pub mod data_component_type {
     pub const SIGN_TEXT_BACK: i32 = 119;
     pub const WAXED: i32 = 120;
     pub const CUSHION_COLOR: i32 = 121;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod fluid {
@@ -689,6 +725,10 @@ pub mod fluid {
     pub const WATER: i32 = 2;
     pub const FLOWING_LAVA: i32 = 3;
     pub const LAVA: i32 = 4;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod potion {
@@ -741,6 +781,10 @@ pub mod potion {
     pub const WEAVING: i32 = 43;
     pub const OOZING: i32 = 44;
     pub const INFESTED: i32 = 45;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod mob_effect {
@@ -787,6 +831,10 @@ pub mod mob_effect {
     pub const OOZING: i32 = 37;
     pub const INFESTED: i32 = 38;
     pub const BREATH_OF_THE_NAUTILUS: i32 = 39;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod banner_pattern {
@@ -836,6 +884,10 @@ pub mod banner_pattern {
     pub const TRIANGLE_TOP: i32 = 40;
     pub const TRIANGLES_BOTTOM: i32 = 41;
     pub const TRIANGLES_TOP: i32 = 42;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 pub mod menu {
@@ -867,6 +919,10 @@ pub mod menu {
     pub const SMOKER: i32 = 22;
     pub const CARTOGRAPHY_TABLE: i32 = 23;
     pub const STONECUTTER: i32 = 24;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 
 /// 属性的默认值，没有任何状态效果和附魔时的起点。

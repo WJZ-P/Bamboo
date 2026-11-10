@@ -1399,6 +1399,37 @@ mod tests {
     }
 
     #[test]
+    fn registry_names_resolve_both_ways_for_saved_data() {
+        use registries::{block_entity_type as entities, fluid};
+
+        assert_eq!(entities::by_name("minecraft:chest"), Some(entities::CHEST));
+        assert_eq!(entities::by_name("minecraft:sign"), Some(entities::SIGN));
+        assert_eq!(entities::by_name("minecraft:not_a_thing"), None);
+        assert_eq!(entities::name_of(entities::SIGN), Some("minecraft:sign"));
+        assert_eq!(entities::name_of(-1), None);
+        assert_eq!(entities::name_of(1000), None);
+
+        assert_eq!(fluid::by_name("minecraft:water"), Some(fluid::WATER));
+        assert_eq!(
+            fluid::by_name("minecraft:flowing_lava"),
+            Some(fluid::FLOWING_LAVA)
+        );
+        assert_eq!(fluid::by_name("minecraft:not_a_thing"), None);
+        assert_eq!(fluid::name_of(fluid::EMPTY), Some("minecraft:empty"));
+        assert_eq!(fluid::name_of(-1), None);
+        assert_eq!(fluid::name_of(1000), None);
+
+        for (id, name) in entities::NAMES.iter().enumerate() {
+            assert_eq!(entities::name_of(id as i32), Some(*name));
+            assert_eq!(entities::by_name(name), Some(id as i32));
+        }
+        for (id, name) in fluid::NAMES.iter().enumerate() {
+            assert_eq!(fluid::name_of(id as i32), Some(*name));
+            assert_eq!(fluid::by_name(name), Some(id as i32));
+        }
+    }
+
+    #[test]
     fn chat_types_follow_the_synced_registry() {
         let synced = registries::SYNCED_REGISTRIES
             .iter()

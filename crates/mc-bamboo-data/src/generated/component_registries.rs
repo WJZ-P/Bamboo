@@ -5978,5 +5978,9 @@ pub mod consume_effect_type {
     pub const CLEAR_ALL_EFFECTS: i32 = 2;
     pub const TELEPORT_RANDOMLY: i32 = 3;
     pub const PLAY_SOUND: i32 = 4;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 

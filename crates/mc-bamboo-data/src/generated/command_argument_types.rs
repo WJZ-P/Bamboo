@@ -66,5 +66,9 @@ pub mod argument_type {
     pub const FEATURE: i32 = 59;
     pub const SWING_ANIMATION: i32 = 60;
     pub const UUID: i32 = 61;
+    /// 注册名对应的 ID。
+    pub fn by_name(name: &str) -> Option<i32> { NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }
+    /// ID 对应的注册名，ID 越界时返回 `None`。
+    pub fn name_of(id: i32) -> Option<&'static str> { usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }
 }
 

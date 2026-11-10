@@ -3049,6 +3049,17 @@ fn write_registry_ids(out: &mut String, data: &VersionData, module: &str, regist
     for (id, name) in entries.iter().enumerate() {
         let _ = writeln!(out, "    pub const {}: i32 = {id};", constant_name(name));
     }
+    // 存档里按注册名读写方块实体、流体和计划刻，两个方向都要查表。
+    let _ = writeln!(out, "    /// 注册名对应的 ID。");
+    let _ = writeln!(
+        out,
+        "    pub fn by_name(name: &str) -> Option<i32> {{ NAMES.iter().position(|entry| *entry == name).and_then(|id| i32::try_from(id).ok()) }}"
+    );
+    let _ = writeln!(out, "    /// ID 对应的注册名，ID 越界时返回 `None`。");
+    let _ = writeln!(
+        out,
+        "    pub fn name_of(id: i32) -> Option<&'static str> {{ usize::try_from(id).ok().and_then(|id| NAMES.get(id)).copied() }}"
+    );
     let _ = writeln!(out, "}}\n");
 }
 
