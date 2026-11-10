@@ -8,8 +8,8 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockEntities, BlockEvents, BlockGameRules, BlockHit, BlockState, BlockTicks,
-    Combined, Container, Effect, HopperEntity, InteractionResult, Level, LevelRandom, Outcome,
-    RedstoneMemory, ShulkerSlots, Slots, TickPriority, apply_text, destroy_block,
+    Combined, Container, Effect, HopperEntity, InteractionResult, Level, LevelRandom, LevelTables,
+    Outcome, RedstoneMemory, ShulkerSlots, Slots, TickPriority, apply_text, destroy_block,
     entity::Entities,
     level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
@@ -413,6 +413,28 @@ impl OracleLevel {
     }
 }
 
+impl LevelTables for OracleLevel {
+    fn block_entities_table(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_table_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events_table_mut(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
+    }
+
+    fn redstone_table(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
+    }
+}
+
 impl Level for OracleLevel {
     fn runs_block_entity_tick(&self, pos: BlockPos) -> bool {
         // 方块 oracle 不跑熔炉和酿造台。漏斗、移动活塞和潜影盒仍按原来的 ticker 跑。
@@ -492,26 +514,6 @@ impl Level for OracleLevel {
     /// 音符盒的 `getCustomSoundId` 拿不到音效，`triggerEvent` 直接返回 `false`。
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
-    }
-
-    fn block_entities(&self) -> &BlockEntities {
-        &self.block_entities
-    }
-
-    fn block_entities_mut(&mut self) -> &mut BlockEntities {
-        &mut self.block_entities
-    }
-
-    fn block_events(&mut self) -> &mut BlockEvents {
-        &mut self.block_events
-    }
-
-    fn redstone(&self) -> &RedstoneMemory {
-        &self.redstone
-    }
-
-    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
-        &mut self.redstone
     }
 
     fn entities(&self) -> &Entities {

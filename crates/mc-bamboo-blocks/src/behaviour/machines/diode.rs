@@ -133,7 +133,7 @@ fn should_turn_on(state: BlockState, world: &World, pos: BlockPos) -> bool {
 /// `getOutputSignal`：中继器永远是满的，比较器输出算好的那个数。
 fn output_signal(state: BlockState, world: &World, pos: BlockPos) -> i32 {
     if state.is_a(BlockAncestor::ComparatorBlock) {
-        world.redstone_memory().comparator_output(pos)
+        world.comparator_output(pos)
     } else {
         15
     }
@@ -233,10 +233,8 @@ fn refresh_output_state(state: BlockState, world: &mut World, pos: BlockPos) {
         return;
     }
     let output = calculate_output_signal(state, world, pos);
-    let old = world.redstone_memory().comparator_output(pos);
-    world
-        .redstone_memory_mut()
-        .set_comparator_output(pos, output);
+    let old = world.comparator_output(pos);
+    world.set_comparator_output(pos, output);
     if old == output && state.get(MODE_COMPARATOR) != ComparatorMode::Compare {
         return;
     }
@@ -253,7 +251,7 @@ fn comparator_check_tick_on_neighbor(state: BlockState, world: &mut World, pos: 
         return;
     }
     let output = calculate_output_signal(state, world, pos);
-    let old = world.redstone_memory().comparator_output(pos);
+    let old = world.comparator_output(pos);
     if output == old && state.get(POWERED) == should_turn_on(state, world, pos) {
         return;
     }

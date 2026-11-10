@@ -50,7 +50,7 @@ fn facts_at(world: &World, pos: BlockPos, state: BlockState) -> Option<LecternFa
     if !state.get(HAS_BOOK) {
         return None;
     }
-    Some(world.redstone_memory().lectern(pos).unwrap_or(DEFAULT_BOOK))
+    Some(world.lectern(pos).unwrap_or(DEFAULT_BOOK))
 }
 
 /// 只有物品 ID、没有组件时的书。可写书默认有空的 `writable_book_content`，成书没有内容。
@@ -71,13 +71,12 @@ fn facts_for_item(item: i32) -> LecternFacts {
 /// `resetBookState(true)` flips the state.
 fn place_book(state: BlockState, world: &mut World, pos: BlockPos, item: i32) {
     let mut facts = world
-        .redstone_memory_mut()
         .take_pending_lectern()
         .unwrap_or_else(|| facts_for_item(item));
     // `setBook` 把页码写成 0，不经过 `setPage`，所以不会夹到 -1。
     // `setBook` assigns page 0 directly, not through `setPage`, so it is not clamped to -1.
     facts.page = 0;
-    world.redstone_memory_mut().set_lectern(pos, facts);
+    world.set_lectern(pos, facts);
     world.update_neighbour_for_output_signal(pos, state.block());
     let with_book = state.with(POWERED, false).with(HAS_BOOK, true);
     world.set_block_and_update(pos, with_book);
@@ -95,7 +94,7 @@ pub fn reset_lectern(world: &mut World, pos: BlockPos, has_book: bool) {
         return;
     }
     if !has_book {
-        world.redstone_memory_mut().clear_lectern(pos);
+        world.clear_lectern(pos);
     }
     let next = state.with(POWERED, false).with(HAS_BOOK, has_book);
     world.set_block_and_update(pos, next);
@@ -220,7 +219,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockTicks, Level, destroy_block,
+        BlockTicks, LevelSideState, destroy_block,
         testing::{TestLevel, actor_holding, top_hit},
         use_item_on,
         world::World,
@@ -265,11 +264,11 @@ mod tests {
         assert_eq!(signal(&mut level), 15);
 
         level.set(POS, lectern());
-        level.redstone_mut().clear_lectern(POS);
+        level.clear_lectern(POS);
         place(&mut level, &mut ticks, items::WRITTEN_BOOK);
         assert_eq!(signal(&mut level), 14);
         assert_eq!(
-            level.redstone().lectern(POS),
+            level.lectern(POS),
             Some(LecternFacts {
                 page: 0,
                 page_count: 0,
@@ -283,14 +282,14 @@ mod tests {
         let mut level = TestLevel::new();
         let mut ticks = BlockTicks::new();
         level.set(POS, lectern());
-        level.redstone_mut().set_pending_lectern(LecternFacts {
+        level.set_pending_lectern(LecternFacts {
             page: 5,
             page_count: 3,
             has_content: true,
         });
         place(&mut level, &mut ticks, items::WRITTEN_BOOK);
         assert_eq!(
-            level.redstone().lectern(POS),
+            level.lectern(POS),
             Some(LecternFacts {
                 page: 0,
                 page_count: 3,
@@ -305,7 +304,7 @@ mod tests {
         let mut level = TestLevel::new();
         let mut ticks = BlockTicks::new();
         level.set(POS, lectern().with(HAS_BOOK, true));
-        level.redstone_mut().set_lectern(
+        level.set_lectern(
             POS,
             LecternFacts {
                 page: 0,
@@ -316,7 +315,7 @@ mod tests {
 
         let effects = {
             let mut world = World::new(&mut level, &mut ticks);
-            world.redstone_memory_mut().set_lectern(
+            world.set_lectern(
                 POS,
                 LecternFacts {
                     page: 1,
@@ -375,7 +374,7 @@ mod tests {
         let mut level = TestLevel::new();
         let mut ticks = BlockTicks::new();
         level.set(POS, lectern().with(HAS_BOOK, true).with(POWERED, true));
-        level.redstone_mut().set_lectern(
+        level.set_lectern(
             POS,
             LecternFacts {
                 page: 2,
@@ -391,7 +390,7 @@ mod tests {
         let state = level.get(POS);
         assert!(!state.get(HAS_BOOK));
         assert!(!state.get(POWERED));
-        assert_eq!(level.redstone().lectern(POS), None);
+        assert_eq!(level.lectern(POS), None);
         assert_eq!(signal(&mut level), 0);
     }
 
@@ -401,7 +400,7 @@ mod tests {
         empty.set(POS, lectern());
         let mut with_book = TestLevel::new();
         with_book.set(POS, lectern().with(HAS_BOOK, true));
-        with_book.redstone_mut().set_lectern(POS, DEFAULT_BOOK);
+        with_book.set_lectern(POS, DEFAULT_BOOK);
         with_book.set_container(POS, vec![ItemStack::new(items::WRITABLE_BOOK, 1)]);
 
         destroy_block(
@@ -422,6 +421,6 @@ mod tests {
             empty.random.source().seed(),
             with_book.random.source().seed()
         );
-        assert_eq!(with_book.redstone().lectern(POS), None);
+        assert_eq!(with_book.lectern(POS), None);
     }
 }

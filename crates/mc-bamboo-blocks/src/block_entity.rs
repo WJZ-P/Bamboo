@@ -130,7 +130,7 @@ impl BlockEntities {
     /// `getBlockEntity(pos)` 之后按类型取，类型不对时是 `None`。
     ///
     /// 正在 tick 或被 [`World::with_block_entity`](crate::World::with_block_entity) 拿出来的那一个
-    /// 不在表里，这里返回 `None`。比较器要读它时先排进队列，放回去再读。
+    /// 不在表里，这里和 [`BlockEntities::get_dyn`] 都返回 `None`。比较器要读它时先排进队列，放回去再读。
     ///
     /// `getBlockEntity(pos)`, then downcast. The wrong type is `None`.
     ///
@@ -138,6 +138,15 @@ impl BlockEntities {
     /// is not in the map, so this returns `None`. Comparator reads are queued and run after it is put back.
     pub fn get<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
+    }
+
+    /// 见 [`BlockEntities::get`]，不按具体类型取。给 dyn 安全的 [`crate::LevelSideState`] 用，
+    /// 向下转型放在调用方。
+    ///
+    /// See [`BlockEntities::get`] without a concrete type. For the object-safe
+    /// [`crate::LevelSideState`]; the caller downcasts.
+    pub fn get_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
+        Some(self.entities.get(&pos)?.entity.as_ref())
     }
 
     /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。

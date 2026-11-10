@@ -17,7 +17,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockState, BlockTicks, Level, LevelRandom, RedstoneMemory, World,
+    BlockEntities, BlockEvents, BlockState, BlockTicks, Level, LevelRandom, LevelTables,
+    RedstoneMemory, World,
     behaviour::machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
     entity::Entities,
 };
@@ -92,6 +93,28 @@ impl MachineLevel {
     }
 }
 
+impl LevelTables for MachineLevel {
+    fn block_entities_table(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_table_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events_table_mut(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
+    }
+
+    fn redstone_table(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
+        &mut self.redstone
+    }
+}
+
 impl Level for MachineLevel {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         self.blocks
@@ -143,26 +166,6 @@ impl Level for MachineLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
-    }
-
-    fn block_entities(&self) -> &BlockEntities {
-        &self.block_entities
-    }
-
-    fn block_entities_mut(&mut self) -> &mut BlockEntities {
-        &mut self.block_entities
-    }
-
-    fn block_events(&mut self) -> &mut BlockEvents {
-        &mut self.block_events
-    }
-
-    fn redstone(&self) -> &RedstoneMemory {
-        &self.redstone
-    }
-
-    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
-        &mut self.redstone
     }
 
     fn entities(&self) -> &Entities {

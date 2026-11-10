@@ -23,11 +23,7 @@ impl Behaviour for Jukebox {
     ///
     /// `JukeboxBlock.ownSignal`: 15 while a song is playing.
     fn own_signal(&self, _state: BlockState, world: &World, pos: BlockPos) -> i32 {
-        if world.redstone_memory().is_jukebox_playing(pos) {
-            15
-        } else {
-            0
-        }
+        if world.is_jukebox_playing(pos) { 15 } else { 0 }
     }
 
     /// `JukeboxBlock.getAnalogOutputSignal`：读唱片的 `comparator_output`，没在放也一样。
