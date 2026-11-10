@@ -199,7 +199,7 @@ impl Pacer {
         }
     }
 
-    /// 睡（必要时自旋）到 `deadline`，返回这一刻自旋了多久。
+    /// 睡（必要时自旋）到 `deadline`，返回这一刻实际自旋了多久。
     /// 返回时一定不早于截止时刻；追赶中的刻（等待时间为 0）不睡也不自旋。
     pub(crate) fn wait_until<T: Timing>(&mut self, deadline: Instant, timing: &mut T) -> Duration {
         let start = timing.now();
@@ -213,27 +213,32 @@ impl Pacer {
             return Duration::ZERO;
         }
 
-        let margin = self.margin().min(wait).min(self.config.spin_max);
+        let margin = self.margin().min(wait);
         let wake_at = deadline - margin;
         // 请求睡到 wake_at；如果提前醒了，继续补睡，直到到点或超时。
         self.sleep_until(wake_at, timing);
-        if timing.now() >= deadline {
-            // 这次睡过头太多，整段余量都算作自旋占核的时间。
-            return margin;
+        let woke = timing.now();
+        if woke >= deadline {
+            // 睡眠超时太多，这一刻根本没机会自旋。
+            return Duration::ZERO;
         }
 
+        let spin_start = woke;
         // 余量已按上限夹过，睡眠超时只会让实际自旋变短，不会再超出预算。
         let spin_budget = self.config.spin_max;
         loop {
             let now = timing.now();
-            let spun = now.saturating_duration_since(wake_at);
+            let spun = now.saturating_duration_since(spin_start);
             if now >= deadline {
-                return margin;
+                return (deadline - spin_start).min(spin_budget);
             }
             if spun >= spin_budget {
                 // 预算用完就退回短睡，仍然保证返回时不早于截止时刻。
                 self.sleep_until(deadline, timing);
-                return margin;
+                return timing
+                    .now()
+                    .saturating_duration_since(spin_start)
+                    .min(spin_budget);
             }
             timing.spin_once();
         }
@@ -542,7 +547,7 @@ mod tests {
         let mut timing = FakeTiming::new(Duration::from_millis(20));
         let deadline = timing.now() + Duration::from_millis(50);
         let spun = pacer.wait_until(deadline, &mut timing);
-        assert_eq!(spun, MIN_MARGIN, "睡过头后整段余量都算自旋占核时间");
+        assert_eq!(spun, Duration::ZERO, "睡过头后没机会自旋");
         assert_eq!(timing.spins, 0, "没机会自旋");
         assert!(timing.now() >= deadline);
         // 睡过头量进了历史，下一次余量被上限夹住。
