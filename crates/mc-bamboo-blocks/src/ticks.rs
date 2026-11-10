@@ -331,4 +331,121 @@ mod tests {
         assert_eq!(drain_fluids(&mut ticks, 1).len(), MAX_TICKS_PER_TICK);
         assert_eq!(drain_fluids(&mut ticks, 2).len(), 3);
     }
+
+    /// 粗基准，用 `cargo test --release -p mc-bamboo-blocks ticks_bench -- --ignored --nocapture` 跑。
+    /// 排满再跑完，以及每刻排一批跑一批；输入固定，改动前后对比耗时。
+    #[test]
+    #[ignore]
+    fn ticks_bench() {
+        use std::{
+            hint::black_box,
+            time::{Duration, Instant},
+        };
+
+        const TOTAL: usize = 1_000_000;
+        const PER_TICK: usize = 1000;
+        const TICKS: i64 = 1000;
+
+        /// 固定种子的 xorshift，避免给这个 crate 加依赖。
+        struct Rng(u64);
+
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+        }
+
+        fn priority(value: u64) -> TickPriority {
+            match value % 7 {
+                0 => TickPriority::ExtremelyHigh,
+                1 => TickPriority::VeryHigh,
+                2 => TickPriority::High,
+                3 => TickPriority::Normal,
+                4 => TickPriority::Low,
+                5 => TickPriority::VeryLow,
+                _ => TickPriority::ExtremelyLow,
+            }
+        }
+
+        fn schedule(ticks: &mut BlockTicks, rng: &mut Rng, first: usize, count: usize) {
+            for index in first..first + count {
+                let value = rng.next();
+                let pos = BlockPos::new(
+                    (value & 0xffff) as i32 - 32768,
+                    (value >> 16 & 0xff) as i32,
+                    (value >> 24 & 0xffff) as i32 - 32768,
+                );
+                ticks.schedule(
+                    pos,
+                    (value >> 40 & 0xff) as usize,
+                    (index % 17) as i32,
+                    priority(value >> 48),
+                );
+            }
+        }
+
+        fn run_due(ticks: &mut BlockTicks, now: i64) -> usize {
+            ticks.collect_due(now);
+            let mut ran = 0;
+            while let Some((pos, block)) = ticks.next_due() {
+                black_box((pos, block));
+                ran += 1;
+            }
+            ran
+        }
+
+        fn measure(mut run: impl FnMut() -> usize) -> (Duration, usize) {
+            let warmup = run();
+            let mut best = Duration::MAX;
+            let mut count = 0;
+            for _ in 0..5 {
+                let started = Instant::now();
+                count = run();
+                best = best.min(started.elapsed());
+            }
+            assert_eq!(warmup, count);
+            (best, count)
+        }
+
+        let (batch_time, batch_count) = measure(|| {
+            let mut ticks = BlockTicks::new();
+            let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+            schedule(&mut ticks, &mut rng, 0, TOTAL);
+            let mut ran = 0;
+            for now in 0..17 {
+                ran += run_due(&mut ticks, now);
+            }
+            assert_eq!(ran, TOTAL, "每条刻都应该恰好跑一次");
+            ran
+        });
+
+        let (rolling_time, rolling_count) = measure(|| {
+            let mut ticks = BlockTicks::new();
+            let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+            let mut ran = 0;
+            for now in 0..TICKS {
+                schedule(&mut ticks, &mut rng, (now as usize) * PER_TICK, PER_TICK);
+                ran += run_due(&mut ticks, now);
+            }
+            for now in TICKS..TICKS + 17 {
+                ran += run_due(&mut ticks, now);
+            }
+            assert_eq!(ran, TOTAL, "每条刻都应该恰好跑一次");
+            ran
+        });
+
+        println!(
+            "batch:   {batch_count} ticks, best of 5: {:.3} ms ({:.0} ns/tick)",
+            batch_time.as_secs_f64() * 1000.0,
+            batch_time.as_nanos() as f64 / batch_count as f64
+        );
+        println!(
+            "rolling: {rolling_count} ticks, best of 5: {:.3} ms ({:.0} ns/tick)",
+            rolling_time.as_secs_f64() * 1000.0,
+            rolling_time.as_nanos() as f64 / rolling_count as f64
+        );
+    }
 }
