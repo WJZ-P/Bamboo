@@ -50,16 +50,20 @@ impl BlockSource for ReadOnlyWorld<'_> {
 }
 
 impl ReadOnlyWorld<'_> {
-    /// 这片格子里有没有漏斗。位置集合是算阶段开头从区块表拷出来的，只读且 `Sync`。
-    /// `BlockPos` 的 Ord 先比 x，所以范围查询只能先缩小到 x 段，再逐项核 y/z。
+    /// 这片格子里有没有漏斗。和精确模式一致地按方块表逐格判定，位置集合只作为
+    /// 「这一刻开始时漏斗在哪」的短路；模板共用一份内容，也按 (0,0) 登记了。
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
-        // Ord 先比 x，所以先按 x 段扫一段有序集合，再逐项核 y/z 和 x。
-        let first = BlockPos::new(min.x, i32::MIN, i32::MIN);
-        let last = BlockPos::new(max.x, i32::MAX, i32::MAX);
-        self.hopper_positions.range(first..=last).any(|pos| {
-            (min.x..=max.x).contains(&pos.x)
-                && (min.y..=max.y).contains(&pos.y)
-                && (min.z..=max.z).contains(&pos.z)
+        let is_hopper = |pos: BlockPos| {
+            let cached = self.hopper_positions.contains(&pos)
+                || self.hopper_positions.contains(&BlockPos::new(
+                    pos.x.rem_euclid(SECTION_SIZE),
+                    pos.y,
+                    pos.z.rem_euclid(SECTION_SIZE),
+                ));
+            cached || self.block_state(pos).is_a(BlockAncestor::HopperBlock)
+        };
+        (min.y..=max.y).any(|y| {
+            (min.z..=max.z).any(|z| (min.x..=max.x).any(|x| is_hopper(BlockPos::new(x, y, z))))
         })
     }
 }
@@ -74,8 +78,9 @@ const _: () = {
     assert_sync::<ChunkStore>();
 };
 
-/// 算阶段开头从区块表拷出所有漏斗方块的位置。只扫改过的区块段调色板，
-/// 没有漏斗时物品不会发 `SuckIntoHopper` 命令；精确模式仍然逐格扫。
+/// 算阶段开头从改过的区块里拷出漏斗方块的位置：先看段调色板，段里根本没有
+/// 漏斗状态就跳过整段。没有漏斗时物品不会发 `SuckIntoHopper` 命令；精确模式
+/// 仍然逐格扫，但判定结果和这里一致。
 pub(crate) fn hopper_positions(chunks: &ChunkStore) -> BTreeSet<BlockPos> {
     let mut found = BTreeSet::new();
     let mut scan = |chunk_pos: mc_bamboo_core::ChunkPos, chunk: &mc_bamboo_world::chunk::Chunk| {
@@ -107,6 +112,8 @@ pub(crate) fn hopper_positions(chunks: &ChunkStore) -> BTreeSet<BlockPos> {
             }
         }
     };
+    // 模板是所有没改过的区块共用的内容，也要查一遍：按 (0,0) 登记，其余
+    // 未改区块由 `any_hopper_in` 的逐格兜底覆盖。
     scan(mc_bamboo_core::ChunkPos::new(0, 0), chunks.template());
     for (pos, chunk) in chunks.edited_chunks() {
         scan(pos, chunk);

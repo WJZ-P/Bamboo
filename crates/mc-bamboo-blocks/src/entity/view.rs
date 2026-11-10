@@ -61,8 +61,16 @@ pub trait BlockSource: Sync {
     }
 
     /// 这片格子里有没有漏斗。默认按格读方块表；游戏层用预先拷出的位置集合覆盖它。
-    fn any_hopper_in(&self, _min: BlockPos, _max: BlockPos) -> bool {
-        true
+    /// 判定和 `World` 完全一致，所以两种视图、两种驱动发出的命令完全相同。
+    fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
+        (min.y..=max.y).any(|y| {
+            (min.z..=max.z).any(|z| {
+                (min.x..=max.x).any(|x| {
+                    self.block_state(BlockPos::new(x, y, z))
+                        .is_a(BlockAncestor::HopperBlock)
+                })
+            })
+        })
     }
 }
 
@@ -198,14 +206,20 @@ impl<T: BlockSource> BlockView for SourceView<T> {
     fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
         let state = self.block_state(pos);
         if state.is(blocks::MOVING_PISTON) {
+            // `moving_piston` 的碰撞形状来自方块实体里的动画状态，只读视图拿不到；
+            // 按官方 `isFaceSturdy` 的写法交给 `World` 那一份实现去读。算阶段里没有
+            // 活塞在推实体，这里退化成表里的形状。
             let boxes = shape::collision_boxes(state, pos, CollisionContext::Empty);
             return shape::is_supporting(&boxes, face, support);
         }
-        if state.is_a(BlockAncestor::ShulkerBoxBlock) && self.0.shulker_box_open(pos) {
-            let boxes = [crate::behaviour::machines::open_support_shape(
-                state.get(crate::state::FACING),
-            )];
-            return shape::is_supporting(&boxes, face, support);
+        if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+            if self.0.shulker_box_open(pos) {
+                let boxes = [crate::behaviour::machines::open_support_shape(
+                    state.get(crate::state::FACING),
+                )];
+                return shape::is_supporting(&boxes, face, support);
+            }
+            return shape::is_supporting(&shape::support_boxes(state, pos), face, support);
         }
         if state
             .block()

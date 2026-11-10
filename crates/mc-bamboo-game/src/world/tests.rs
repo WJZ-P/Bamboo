@@ -1630,7 +1630,7 @@ fn isolated_entities_emit_identical_bytes_in_both_drivers() {
         // 相距很远的几个孤立物品，物理、随机源、发包顺序都不涉及别的实体。
         for index in 0..3 {
             server.spawn_entity(Entity::ground_item(
-                Vec3::new(8.5 + f64::from(index) * 40.0, -59.5, 8.5),
+                Vec3::new(8.5 + f64::from(index) * 120.0, -59.5, 8.5),
                 ItemStack::new(1, 1),
             ));
         }

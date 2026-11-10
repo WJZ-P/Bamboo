@@ -205,7 +205,8 @@ impl EntityCtx for ParallelCtx<'_> {
 /// 一块连续的行：算阶段只写自己的这几行，别的都是只读共享。
 struct Task<'a> {
     first: usize,
-    public: &'a [EntityPublic],
+    /// 只属于本任务的起点公开数据，逐行移进 `Entity`，不再克隆第二遍。
+    public: Vec<EntityPublic>,
     state: Vec<EntityState>,
     results: &'a mut [RowResult],
 }
@@ -271,15 +272,14 @@ fn compute_timed(
     // 用 split_at_mut 把三份平行数组切成不相交的可变切片，任务里不再上锁。
     let mut results: Vec<RowResult> = (0..count).map(|_| RowResult::default()).collect();
     let mut tasks: Vec<Task<'_>> = Vec::with_capacity(parts);
-    let mut public_left: &[EntityPublic] = &starting_public;
+    let mut public_left: Vec<EntityPublic> = starting_public;
     let mut state_left: Vec<EntityState> = starting_state;
     let mut results_left: &mut [RowResult] = &mut results;
     let mut first = 0;
     while !public_left.is_empty() {
         let size = chunk_size.min(public_left.len());
-        let (public, public_rest) = public_left.split_at(size);
-        public_left = public_rest;
-        let state = state_left.drain(..size).collect();
+        let public: Vec<_> = public_left.drain(..size).collect();
+        let state: Vec<_> = state_left.drain(..size).collect();
         let (result, result_rest) = std::mem::take(&mut results_left).split_at_mut(size);
         results_left = result_rest;
         tasks.push(Task {
@@ -313,15 +313,12 @@ fn compute_timed(
 
 /// 一个任务里的所有实体按顺序算完；任务之间互不相交。
 fn run_task(task: &mut Task<'_>, shared: &Shared<'_>) {
+    let mut public = std::mem::take(&mut task.public);
     let mut state = std::mem::take(&mut task.state);
-    for (within, state) in state.drain(..).enumerate() {
+    for (within, (public, state)) in public.drain(..).zip(state.drain(..)).enumerate() {
         let row = task.first + within;
         let uid = shared.uids[row];
-        let mut me = EntityRow {
-            public: task.public[within].clone(),
-            state,
-        }
-        .into_entity();
+        let mut me = EntityRow { public, state }.into_entity();
         let result = &mut task.results[within];
         let mut ctx = ParallelCtx {
             uid,
@@ -362,11 +359,24 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
             )
         })
         .unzip();
+    // 算阶段就 `discard` 的实体不发布进表里，和精确模式「tick 过就不 put 回去」一致。
+    // 这个标记是算阶段顺手记下的，不用再对所有 uid 逐个查表。
+    let mut publish_rows = Vec::with_capacity(rows.len());
+    let mut publish_public = Vec::with_capacity(public.len());
+    let mut publish_state = Vec::with_capacity(state.len());
+    for (index, ((row, public), state)) in rows.iter().copied().zip(public).zip(state).enumerate() {
+        if results[index].removed {
+            continue;
+        }
+        publish_rows.push(row);
+        publish_public.push(public);
+        publish_state.push(state);
+    }
     world
         .entities_mut()
-        .publish_entity_rows(&rows, public, state);
-    // 算阶段就 `discard` 的实体不留在表里，和精确模式「tick 过就不 put 回去」一致。
-    // 这个标记是算阶段顺手记下的，不用再对所有 uid 逐个查表。
+        .publish_entity_rows(&publish_rows, publish_public, publish_state);
+    // 上面是「发布」，还差算阶段自己 `discard` 的那几行：它们仍在表里（精确模式
+    // 里从来没 put 回去），按标记逐个拿掉，不用对所有 uid 查表。
     for (index, result) in results.iter().enumerate() {
         if result.removed {
             world.entities_mut().remove_entity(uids[index]);
@@ -376,10 +386,11 @@ fn commit_timed(computed: Computed, world: &mut World<'_>) -> PhaseTimes {
 
     let apply_start = Instant::now();
     for (index, result) in results.iter_mut().enumerate() {
-        if result.commands.commands.is_empty() {
+        if result.commands.commands.is_empty() || result.removed {
             continue;
         }
         let uid = uids[index];
+        // 前面的命令可能已经把这个实体拿掉；`take_entity` 返回 None 就整批跳过。
         let Some(mut me) = world.entities_mut().take_entity(uid) else {
             continue;
         };
