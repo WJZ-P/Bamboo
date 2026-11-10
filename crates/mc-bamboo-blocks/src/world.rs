@@ -15,7 +15,7 @@ use crate::{
     context::BlockHit,
     entity::{Entity, PrimedTnt},
     fluid::Fluid,
-    level::{Effect, Level, RedstoneMemory},
+    level::{Effect, LecternFacts, Level},
     random::LegacyRandom,
     shape::{self, CollisionContext},
     state::{BlockState, FACING, FluidState, POWER, SupportType, WATERLOGGED},
@@ -751,12 +751,12 @@ impl<'a> World<'a> {
 
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
-        self.level.block_entities().get(pos)
+        self.level.block_entity_dyn(pos)?.as_any().downcast_ref()
     }
 
     /// 这一格有没有方块实体。
     pub fn has_block_entity(&self, pos: BlockPos) -> bool {
-        self.level.block_entities().contains(pos)
+        self.level.has_block_entity(pos)
     }
 
     /// 这一格容器里非空的物品。对照漏斗吸物品时用。
@@ -867,12 +867,12 @@ impl<'a> World<'a> {
             );
             return;
         }
-        self.level.block_entities_mut().insert(entity);
+        self.level.insert_block_entity(entity);
     }
 
     /// `Level.removeBlockEntity`。
     pub fn remove_block_entity(&mut self, pos: BlockPos) {
-        self.level.block_entities_mut().remove(pos);
+        let _ = self.level.remove_block_entity(pos);
     }
 
     /// 带着这一格的方块实体运行一段代码。这段时间它不在表里，[`BlockEntities::get`] 是 `None`，
@@ -888,13 +888,13 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
-        let (id, mut entity) = self.level.block_entities_mut().take_at(pos)?;
+        let (id, mut entity) = self.level.take_block_entity_at(pos)?;
         self.begin_held_reads();
         let result = entity
             .as_any_mut()
             .downcast_mut::<T>()
             .map(|typed| f(typed, self));
-        self.level.block_entities_mut().put(pos, id, entity);
+        self.level.put_block_entity(pos, id, entity);
         self.end_held_reads();
         result
     }
@@ -908,7 +908,7 @@ impl<'a> World<'a> {
         param_b: i32,
     ) {
         let block = BlockState(block.default_state).block_id();
-        self.level.block_events().push(BlockEvent {
+        self.level.push_block_event(BlockEvent {
             pos,
             block,
             param_a,
@@ -920,7 +920,7 @@ impl<'a> World<'a> {
     ///
     /// 处理成功的事件记成 [`Effect::BlockEvent`]，由调用方发给附近的玩家。
     pub fn run_block_events(&mut self) {
-        while let Some(event) = self.level.block_events().pop() {
+        while let Some(event) = self.level.pop_block_event() {
             let state = self.block_state(event.pos);
             if state.block_id() != event.block {
                 continue;
@@ -948,17 +948,17 @@ impl<'a> World<'a> {
     /// is put back and before the next ticker. The order does not change. The block oracle skips
     /// furnaces and brewing stands.
     pub fn tick_block_entities(&mut self) {
-        self.level.block_entities_mut().begin_tick();
-        while let Some((pos, id)) = self.level.block_entities_mut().next_ticker() {
+        self.level.begin_block_entity_tick();
+        while let Some((pos, id)) = self.level.next_block_entity_ticker() {
             if !self.level.runs_block_entity_tick(pos) {
                 continue;
             }
-            let Some(entity) = self.level.block_entities_mut().take(pos, id) else {
+            let Some(entity) = self.level.take_block_entity(pos, id) else {
                 continue;
             };
             self.run_taken_block_entity(pos, id, entity);
         }
-        self.level.block_entities_mut().end_tick();
+        self.level.end_block_entity_tick();
     }
 
     /// 拿出的实体跑完 `tick` 再放回去，然后按请求顺序做排队的读取。
@@ -975,24 +975,24 @@ impl<'a> World<'a> {
             self.begin_held_reads();
             entity.tick(self);
             let again = entity.resume_tick();
-            self.level.block_entities_mut().put(pos, id, entity);
+            self.level.put_block_entity(pos, id, entity);
             self.end_held_reads();
             if !again {
                 return;
             }
-            let Some(next) = self.level.block_entities_mut().take(pos, id) else {
+            let Some(next) = self.level.take_block_entity(pos, id) else {
                 return;
             };
             entity = next;
         }
-        self.level.block_entities_mut().put(pos, id, entity);
+        self.level.put_block_entity(pos, id, entity);
     }
 
     /// 这一格的方块实体是不是正被拿在外面。
     ///
     /// Whether this cell's block entity is currently out of the map.
     pub(crate) fn block_entity_is_taken(&self, pos: BlockPos) -> bool {
-        self.level.block_entities().is_taken(pos)
+        self.level.is_block_entity_taken(pos)
     }
 
     fn begin_held_reads(&mut self) {
@@ -1265,14 +1265,88 @@ impl<'a> World<'a> {
         self.wire_should_signal
     }
 
-    /// 比较器的输出和火把最近的开关，见 [`RedstoneMemory`]。
-    pub fn redstone_memory(&self) -> &RedstoneMemory {
-        self.level.redstone()
+    /// 红石记忆的每个读写入口，见 [`crate::LevelSideState`] 和 [`crate::RedstoneMemory`]。
+    ///
+    /// `World` 不把整张表交出去：这样录制实现能看见每次读了哪一格、写了哪一格。
+    /// Every redstone-memory read/write goes through here; see [`crate::LevelSideState`].
+    pub fn comparator_output(&self, pos: BlockPos) -> i32 {
+        self.level.comparator_output(pos)
     }
 
-    /// 见 [`World::redstone_memory`]。
-    pub fn redstone_memory_mut(&mut self) -> &mut RedstoneMemory {
-        self.level.redstone_mut()
+    pub fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
+        self.level.set_comparator_output(pos, signal);
+    }
+
+    pub fn last_bookshelf_slot(&self, pos: BlockPos) -> Option<usize> {
+        self.level.last_bookshelf_slot(pos)
+    }
+
+    pub fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize) {
+        self.level.set_last_bookshelf_slot(pos, slot);
+    }
+
+    pub fn is_jukebox_playing(&self, pos: BlockPos) -> bool {
+        self.level.is_jukebox_playing(pos)
+    }
+
+    pub fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
+        self.level.set_jukebox_playing(pos, playing);
+    }
+
+    pub fn crafter_disabled(&self, pos: BlockPos) -> u16 {
+        self.level.crafter_disabled(pos)
+    }
+
+    pub fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
+        self.level.set_crafter_disabled(pos, mask);
+    }
+
+    pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+        self.level.set_crafter_crafting(pos, remaining);
+    }
+
+    pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+        self.level.take_crafter_crafting()
+    }
+
+    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+        self.level.restore_crafter_crafting(entries);
+    }
+
+    pub fn forget_block_entity_memory(&mut self, pos: BlockPos) {
+        self.level.forget_block_entity_memory(pos);
+    }
+
+    pub fn set_pending_lectern(&mut self, facts: LecternFacts) {
+        self.level.set_pending_lectern(facts);
+    }
+
+    pub fn take_pending_lectern(&mut self) -> Option<LecternFacts> {
+        self.level.take_pending_lectern()
+    }
+
+    pub fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.level.set_lectern(pos, facts);
+    }
+
+    pub fn lectern(&self, pos: BlockPos) -> Option<LecternFacts> {
+        self.level.lectern(pos)
+    }
+
+    pub fn clear_lectern(&mut self, pos: BlockPos) {
+        self.level.clear_lectern(pos);
+    }
+
+    pub fn forget_torch_toggles_before(&mut self, when: i64) {
+        self.level.forget_torch_toggles_before(when);
+    }
+
+    pub fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
+        self.level.record_torch_toggle(pos, when);
+    }
+
+    pub fn torch_toggle_count(&self, pos: BlockPos) -> usize {
+        self.level.torch_toggle_count(pos)
     }
 
     /// `getGameTime`。
@@ -1434,7 +1508,7 @@ impl<'a> World<'a> {
             .filter(|_| old.is_a(BlockAncestor::JukeboxBlock))
             .map(|stacks| stacks.first().map(|stack| stack.count).unwrap_or(0))
             .unwrap_or(0);
-        let jukebox_playing = jukebox_count > 0 && self.level.redstone().is_jukebox_playing(pos);
+        let jukebox_playing = jukebox_count > 0 && self.level.is_jukebox_playing(pos);
         if !self.level.write_block(pos, state, flags) {
             return None;
         }
@@ -1454,7 +1528,7 @@ impl<'a> World<'a> {
         }
         // 比较器存的输出这些也跟着没了。
         if block_changed {
-            self.level.redstone_mut().forget_block_entity(pos);
+            self.level.forget_block_entity_memory(pos);
         }
         if jukebox_count > 0 {
             self.level.clear_container(pos);
@@ -1510,12 +1584,12 @@ impl<'a> World<'a> {
     /// The entity is out of the map for the callback. Comparator checks that need it stay queued
     /// and run after it is put back, before the caller's `remove`.
     fn pre_remove_block_entity(&mut self, pos: BlockPos, state: BlockState) {
-        let Some((id, mut entity)) = self.level.block_entities_mut().take_at(pos) else {
+        let Some((id, mut entity)) = self.level.take_block_entity_at(pos) else {
             return;
         };
         self.begin_held_reads();
         entity.pre_remove_side_effects(self, pos, state);
-        self.level.block_entities_mut().put(pos, id, entity);
+        self.level.put_block_entity(pos, id, entity);
         self.end_held_reads();
     }
 

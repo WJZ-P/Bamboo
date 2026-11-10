@@ -85,9 +85,7 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
     //
     // Record the countdown first. Turning `crafting` on only changes a property and does not
     // remove the block entity.
-    world
-        .redstone_memory_mut()
-        .set_crafter_crafting(pos, MAX_CRAFTING_TICKS);
+    world.set_crafter_crafting(pos, MAX_CRAFTING_TICKS);
     world.set_block(pos, state.with(CRAFTING, true), UPDATE_CLIENTS);
     // `ItemStack.onCraftedBySystem` 只有地图会改物品（`MapItem.onCraftedPostProcess`）。
     // 这里没有地图数据存储，那一步先不做。
@@ -122,7 +120,7 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
 /// it reaches zero. The block oracle does not register a crafter ticker, so `crafting` stays on
 /// while a case is compared; only the game loop and test world ticks call this.
 pub(crate) fn tick_crafting_clocks(world: &mut World) {
-    let due = world.redstone_memory_mut().take_crafter_crafting();
+    let due = world.take_crafter_crafting();
     let mut kept = Vec::new();
     for (pos, remaining) in due {
         let next = remaining - 1;
@@ -137,7 +135,7 @@ pub(crate) fn tick_crafting_clocks(world: &mut World) {
         }
     }
     kept.retain(|(pos, _)| is_crafter(world, *pos));
-    world.redstone_memory_mut().restore_crafter_crafting(kept);
+    world.restore_crafter_crafting(kept);
 }
 
 /// `CrafterBlock.dispenseItem` 的 `DefaultDispenseItemBehavior.spawnItem`。
@@ -344,7 +342,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockState, BlockTicks, HopperEntity, LegacyRandom, Level,
+        BlockState, BlockTicks, HopperEntity, LegacyRandom, LevelSideState,
         level::Effect,
         state::{ORIENTATION, TRIGGERED},
         testing::TestLevel,
@@ -589,12 +587,12 @@ mod tests {
         let mut level = TestLevel::new();
         facing_north(&mut level, POS);
         put(&mut level, POS, 1, ItemStack::new(items::OAK_LOG, 1));
-        level.redstone_mut().set_crafter_disabled(POS, 1);
+        level.set_crafter_disabled(POS, 1);
 
         tick(&mut level, POS);
 
         assert!(contents(&level, POS)[1].is_empty());
-        assert_eq!(level.redstone().crafter_disabled(POS), 1);
+        assert_eq!(level.crafter_disabled(POS), 1);
         assert!(level.get(POS).get(CRAFTING));
     }
 
@@ -651,7 +649,7 @@ mod tests {
         facing_north(&mut level, POS);
         let powered = level.get(POS).with(TRIGGERED, true).with(CRAFTING, true);
         level.set(POS, powered);
-        level.redstone_mut().set_crafter_crafting(POS, 2);
+        level.set_crafter_crafting(POS, 2);
         let mut ticks = BlockTicks::new();
         {
             let mut world = World::new(&mut level, &mut ticks);

@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, slice};
 
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockGameRules, BlockState, Combined, Container,
-    HopperEntity, Level, LevelRandom, RedstoneMemory, ShulkerSlots, Slots,
+    HopperEntity, Level, LevelRandom, LevelTables, RedstoneMemory, ShulkerSlots, Slots,
     container::redstone_signal,
     entity::Entities,
     level::EquipTarget,
@@ -47,6 +47,28 @@ pub(crate) struct RegionLevel<'a> {
     /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
     pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
+}
+
+impl LevelTables for RegionLevel<'_> {
+    fn block_entities_table(&self) -> &BlockEntities {
+        self.block_entities
+    }
+
+    fn block_entities_table_mut(&mut self) -> &mut BlockEntities {
+        self.block_entities
+    }
+
+    fn block_events_table_mut(&mut self) -> &mut BlockEvents {
+        self.block_events
+    }
+
+    fn redstone_table(&self) -> &RedstoneMemory {
+        self.redstone
+    }
+
+    fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
+        self.redstone
+    }
 }
 
 impl Level for RegionLevel<'_> {
@@ -137,26 +159,6 @@ impl Level for RegionLevel<'_> {
             ComponentValue::NoteBlockSound(sound) => Some(sound.clone()),
             _ => None,
         }
-    }
-
-    fn block_entities(&self) -> &BlockEntities {
-        self.block_entities
-    }
-
-    fn block_entities_mut(&mut self) -> &mut BlockEntities {
-        self.block_entities
-    }
-
-    fn block_events(&mut self) -> &mut BlockEvents {
-        self.block_events
-    }
-
-    fn redstone(&self) -> &RedstoneMemory {
-        self.redstone
-    }
-
-    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
-        self.redstone
     }
 
     fn entities(&self) -> &Entities {

@@ -123,7 +123,7 @@ pub(crate) fn with_container(
         return false;
     };
     let disabled = if kind == Kind::Crafter {
-        world.redstone_memory().crafter_disabled(pos)
+        world.crafter_disabled(pos)
     } else {
         0
     };
@@ -152,7 +152,7 @@ fn apply(world: &mut World, pos: BlockPos, pending: &Pending) {
         apply_jukebox(world, pos);
     }
     if let Some(mask) = pending.crafter_disabled {
-        world.redstone_memory_mut().set_crafter_disabled(pos, mask);
+        world.set_crafter_disabled(pos, mask);
     }
 }
 
@@ -164,9 +164,7 @@ fn apply_bookshelf(world: &mut World, pos: BlockPos, slot: usize) {
     if slot >= SLOT_OCCUPIED.len() {
         return;
     }
-    world
-        .redstone_memory_mut()
-        .set_last_bookshelf_slot(pos, slot);
+    world.set_last_bookshelf_slot(pos, slot);
     let slots = world.slots_at(pos);
     let state = world.block_state(pos);
     if !state.is_a(BlockAncestor::ChiseledBookShelfBlock) {
@@ -199,9 +197,9 @@ fn apply_jukebox(world: &mut World, pos: BlockPos) {
         world.set_block(pos, state.with(HAS_RECORD, has_item), UPDATE_CLIENTS);
     }
     let playable = has_item && has_jukebox_playable(&stack);
-    let was_playing = world.redstone_memory().is_jukebox_playing(pos);
+    let was_playing = world.is_jukebox_playing(pos);
     if playable {
-        world.redstone_memory_mut().set_jukebox_playing(pos, true);
+        world.set_jukebox_playing(pos, true);
         // `JukeboxSongPlayer.play`：1010 的 data 是歌典注册表 ID，然后 `onSongChanged`。
         // `JukeboxSongPlayer.play`: 1010's data is the song's registry id, then `onSongChanged`.
         if let Some(song) = jukebox_song_id(&stack) {
@@ -209,7 +207,7 @@ fn apply_jukebox(world: &mut World, pos: BlockPos) {
         }
         on_jukebox_song_changed(world.block_state(pos), world, pos);
     } else if was_playing {
-        world.redstone_memory_mut().set_jukebox_playing(pos, false);
+        world.set_jukebox_playing(pos, false);
         // `JukeboxSongPlayer.stop`：正在放才报 1011，然后 `onSongChanged`。
         // `JukeboxSongPlayer.stop`: 1011 only while a song is playing, then `onSongChanged`.
         world.level_event(1011, pos, 0);
@@ -335,7 +333,7 @@ pub(crate) fn pot_signal(world: &World, pos: BlockPos) -> i32 {
 /// `CrafterBlockEntity.getRedstoneSignal`: how many slots are non-empty or disabled, already 0 to 9.
 pub(crate) fn crafter_signal(world: &World, pos: BlockPos) -> i32 {
     let slots = world.slots_at(pos);
-    let disabled = world.redstone_memory().crafter_disabled(pos);
+    let disabled = world.crafter_disabled(pos);
     let mut count = 0;
     for slot in 0..Kind::Crafter.len() {
         let filled = slots.get(slot).is_some_and(|stack| !stack.is_empty());
@@ -560,7 +558,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockTicks, Effect, HopperEntity, InteractionResult, LegacyRandom,
+        BlockTicks, Effect, HopperEntity, InteractionResult, LegacyRandom, LevelSideState,
         dispenser::dispense_from,
         hopper::query,
         state::FACING,
@@ -748,7 +746,7 @@ mod tests {
         assert!(slot(&mut world, POS, 0).is_empty());
         let jukebox = world.block_state(below);
         assert!(jukebox.get(HAS_RECORD));
-        assert!(world.redstone_memory().is_jukebox_playing(below));
+        assert!(world.is_jukebox_playing(below));
         assert_eq!(jukebox.own_signal(&world, below), 15);
         assert_eq!(
             jukebox.analog_output_signal(&world, below, Direction::Up),
@@ -764,7 +762,7 @@ mod tests {
         let mut ticks = BlockTicks::new();
         let world = World::new(&mut level, &mut ticks);
         let state = world.block_state(POS);
-        assert!(!world.redstone_memory().is_jukebox_playing(POS));
+        assert!(!world.is_jukebox_playing(POS));
         assert_eq!(state.own_signal(&world, POS), 0);
         assert_eq!(state.analog_output_signal(&world, POS, Direction::North), 1);
     }
@@ -827,7 +825,7 @@ mod tests {
         level.set_container(POS, empty(5));
         level.set(above, BlockState(blocks::JUKEBOX).with(HAS_RECORD, true));
         level.set_container(above, vec![ItemStack::new(items::MUSIC_DISC_13, 1)]);
-        level.redstone_mut().set_jukebox_playing(above, true);
+        level.set_jukebox_playing(above, true);
         tick_into(&mut level, POS);
 
         let mut ticks = BlockTicks::new();
@@ -838,7 +836,7 @@ mod tests {
         );
         assert!(slot(&mut world, above, 0).is_empty());
         assert!(!world.block_state(above).get(HAS_RECORD));
-        assert!(!world.redstone_memory().is_jukebox_playing(above));
+        assert!(!world.is_jukebox_playing(above));
         assert_eq!(
             world
                 .block_state(above)
@@ -963,7 +961,7 @@ mod tests {
         let mut level = TestLevel::new();
         place_hopper(&mut level, POS);
         level.set(below, BlockState(blocks::CRAFTER));
-        level.redstone_mut().set_crafter_disabled(below, 1);
+        level.set_crafter_disabled(below, 1);
         let mut hopper = empty(5);
         hopper[0] = ItemStack::new(items::DIRT, 1);
         level.set_container(POS, hopper);
@@ -986,7 +984,7 @@ mod tests {
         let mut level = TestLevel::new();
         level.set(POS, BlockState(blocks::JUKEBOX).with(HAS_RECORD, true));
         level.set_container(POS, vec![ItemStack::new(items::MUSIC_DISC_13, 1)]);
-        level.redstone_mut().set_jukebox_playing(POS, true);
+        level.set_jukebox_playing(POS, true);
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
         let expected = world.random().clone();

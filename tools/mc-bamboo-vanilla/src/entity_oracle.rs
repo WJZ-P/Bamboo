@@ -16,7 +16,7 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, HopperEntity, Level,
-    LevelRandom, Slots, World,
+    LevelRandom, LevelTables, Slots, World,
     entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
@@ -232,6 +232,28 @@ impl PhysicsLevel {
     }
 }
 
+impl LevelTables for PhysicsLevel {
+    fn block_entities_table(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_table_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events_table_mut(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
+    }
+
+    fn redstone_table(&self) -> &mc_bamboo_blocks::RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_table_mut(&mut self) -> &mut mc_bamboo_blocks::RedstoneMemory {
+        &mut self.redstone
+    }
+}
+
 impl Level for PhysicsLevel {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
@@ -297,26 +319,6 @@ impl Level for PhysicsLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
-    }
-
-    fn block_entities(&self) -> &BlockEntities {
-        &self.block_entities
-    }
-
-    fn block_entities_mut(&mut self) -> &mut BlockEntities {
-        &mut self.block_entities
-    }
-
-    fn block_events(&mut self) -> &mut BlockEvents {
-        &mut self.block_events
-    }
-
-    fn redstone(&self) -> &mc_bamboo_blocks::RedstoneMemory {
-        &self.redstone
-    }
-
-    fn redstone_mut(&mut self) -> &mut mc_bamboo_blocks::RedstoneMemory {
-        &mut self.redstone
     }
 
     fn entities(&self) -> &Entities {

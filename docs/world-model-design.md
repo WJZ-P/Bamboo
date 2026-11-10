@@ -112,7 +112,9 @@
 | 录制 | 透传，同时记下读了什么 | 透传，同时记下写了什么 | 红石机器缓存（第 9 节）、调试 |
 | 假世界 | oracle 给的场景 | 记录下来和官方比 | `mc-bamboo-vanilla` 的各种 oracle |
 
-方块逻辑这边要做的准备只有一件：`Level` 上返回 `&mut` 的访问器（`redstone_mut`、`block_entities_mut`、`block_events` 等）要收窄成“一次调用一个具体修改”的方法，这样录制实现才能看见每一次写。
+方块逻辑这边已经完成的一件准备：方块状态装不下的世界数据（方块实体、方块事件、红石记忆）原先在 `Level` 上以整张表的引用交出去，现在收窄成 `LevelSideState` 里“一次调用一个具体读或写、位置当参数”的方法。`Level` 是 `LevelSideState` 的子 trait，方块逻辑拿到的 `&mut dyn Level` 只能走这些窄方法；用整张表存数据的实现者另实现 `LevelTables`，由 blanket impl 自动得到 `LevelSideState`。按区块存放、或者要录制读写的实现者可以直接实现 `LevelSideState`，不必交出整张表。
+
+还没收窄的两处：`entities` / `entities_mut` 仍把整张实体表交出去（留到第 7 步的实体系统整体重做），计划刻 `BlockTicks` 现在是单独传给 `World::new` 的，不经过 `Level`。
 
 实体逻辑从第一行起就按这个约定写。**这是对将来生物系统的硬约束：AI 和物理代码里不能出现直接改世界、直接改别的实体的调用。**
 

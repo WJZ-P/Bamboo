@@ -14,7 +14,7 @@ use crate::{
     destroy_block,
     entity::Entities,
     hopper::HopperEntity,
-    level::{EquipTarget, RedstoneMemory},
+    level::{EquipTarget, LevelTables, RedstoneMemory},
     shape::Aabb,
 };
 
@@ -95,7 +95,30 @@ impl TestLevel {
         &self.entities
     }
 
-    pub(crate) fn redstone_mut(&mut self) -> &mut RedstoneMemory {
+    /// 测试断言里按具体类型读方块实体。实现者一侧可以直接碰自己的表。
+    pub(crate) fn block_entity<T: crate::BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
+        self.block_entities.get(pos)
+    }
+}
+
+impl LevelTables for TestLevel {
+    fn block_entities_table(&self) -> &BlockEntities {
+        &self.block_entities
+    }
+
+    fn block_entities_table_mut(&mut self) -> &mut BlockEntities {
+        &mut self.block_entities
+    }
+
+    fn block_events_table_mut(&mut self) -> &mut BlockEvents {
+        &mut self.block_events
+    }
+
+    fn redstone_table(&self) -> &RedstoneMemory {
+        &self.redstone
+    }
+
+    fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
         &mut self.redstone
     }
 }
@@ -183,26 +206,6 @@ impl Level for TestLevel {
             return None;
         }
         self.note_block_sounds.get(&pos).cloned()
-    }
-
-    fn block_entities(&self) -> &BlockEntities {
-        &self.block_entities
-    }
-
-    fn block_entities_mut(&mut self) -> &mut BlockEntities {
-        &mut self.block_entities
-    }
-
-    fn block_events(&mut self) -> &mut BlockEvents {
-        &mut self.block_events
-    }
-
-    fn redstone(&self) -> &RedstoneMemory {
-        &self.redstone
-    }
-
-    fn redstone_mut(&mut self) -> &mut RedstoneMemory {
-        &mut self.redstone
     }
 
     fn entities(&self) -> &Entities {

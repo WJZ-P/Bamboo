@@ -10,7 +10,7 @@ use mc_bamboo_data::SoundSource;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    block_entity::{BlockEntities, BlockEvents},
+    block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents},
     container::Container,
     entity::Entities,
     gamerules::BlockGameRules,
@@ -41,8 +41,212 @@ pub struct EquipTarget {
     pub equipment: [Option<ItemStack>; 8],
 }
 
+/// 方块状态装不下、跟着位置走的世界数据：方块实体、方块事件、红石记忆。
+///
+/// 每个方法是一次具体的读或写，位置当参数传进来。方块逻辑只能通过这些方法碰这三样东西：
+/// 以后它们按区块存放，或者外面套一层记录读写的实现时，这里的签名都不用改。
+///
+/// 用整张表存这三样东西的世界实现 [`LevelTables`] 就自动得到这个 trait；按区块存、
+/// 或者要录制读写的实现者直接实现这个 trait，不必交出一整张表的引用。
+///
+/// World data that block states cannot hold: block entities, block events and redstone
+/// memory. Every method is one concrete read or write, with the position passed in.
+/// A world backed by whole tables implements [`LevelTables`]; an implementation that
+/// splits state by chunk, or records reads and writes, implements this trait directly.
+pub trait LevelSideState {
+    // 红石记忆：每个方法对应 `RedstoneMemory` 上的一个操作。
+    fn comparator_output(&self, pos: BlockPos) -> i32;
+    fn set_comparator_output(&mut self, pos: BlockPos, signal: i32);
+    fn last_bookshelf_slot(&self, pos: BlockPos) -> Option<usize>;
+    fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize);
+    fn is_jukebox_playing(&self, pos: BlockPos) -> bool;
+    fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool);
+    fn crafter_disabled(&self, pos: BlockPos) -> u16;
+    fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16);
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32);
+    fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)>;
+    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>);
+    fn forget_block_entity_memory(&mut self, pos: BlockPos);
+    fn set_pending_lectern(&mut self, facts: LecternFacts);
+    fn take_pending_lectern(&mut self) -> Option<LecternFacts>;
+    fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts);
+    fn lectern(&self, pos: BlockPos) -> Option<LecternFacts>;
+    fn clear_lectern(&mut self, pos: BlockPos);
+    fn forget_torch_toggles_before(&mut self, when: i64);
+    fn record_torch_toggle(&mut self, pos: BlockPos, when: i64);
+    fn torch_toggle_count(&self, pos: BlockPos) -> usize;
+
+    // 方块事件。
+    fn push_block_event(&mut self, event: BlockEvent);
+    fn pop_block_event(&mut self) -> Option<BlockEvent>;
+
+    // 方块实体和它们的 ticker。
+    fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity>;
+    fn has_block_entity(&self, pos: BlockPos) -> bool;
+    fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>);
+    fn remove_block_entity(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>>;
+    fn take_block_entity_at(&mut self, pos: BlockPos) -> Option<(u64, Box<dyn BlockEntity>)>;
+    fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>>;
+    fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>);
+    fn is_block_entity_taken(&self, pos: BlockPos) -> bool;
+    fn begin_block_entity_tick(&mut self);
+    fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)>;
+    fn end_block_entity_tick(&mut self);
+}
+
+/// 用一整张表存方块实体、方块事件和红石记忆的世界。
+///
+/// 实现它就自动得到 [`LevelSideState`]。这五个方法只有存储实现者能碰到：
+/// [`Level`] 不把它当父 trait，方块逻辑拿到的 `&mut dyn Level` 够不着整张表。
+///
+/// A world that stores these three kinds of state in whole tables. Implementing this
+/// trait provides [`LevelSideState`]. [`Level`] does not require it, so block logic
+/// holding a `&mut dyn Level` cannot reach the tables.
+pub trait LevelTables {
+    fn block_entities_table(&self) -> &BlockEntities;
+    fn block_entities_table_mut(&mut self) -> &mut BlockEntities;
+    fn block_events_table_mut(&mut self) -> &mut BlockEvents;
+    fn redstone_table(&self) -> &RedstoneMemory;
+    fn redstone_table_mut(&mut self) -> &mut RedstoneMemory;
+}
+
+impl<T: LevelTables + ?Sized> LevelSideState for T {
+    fn comparator_output(&self, pos: BlockPos) -> i32 {
+        self.redstone_table().comparator_output(pos)
+    }
+
+    fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
+        self.redstone_table_mut().set_comparator_output(pos, signal);
+    }
+
+    fn last_bookshelf_slot(&self, pos: BlockPos) -> Option<usize> {
+        self.redstone_table().last_bookshelf_slot(pos)
+    }
+
+    fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize) {
+        self.redstone_table_mut().set_last_bookshelf_slot(pos, slot);
+    }
+
+    fn is_jukebox_playing(&self, pos: BlockPos) -> bool {
+        self.redstone_table().is_jukebox_playing(pos)
+    }
+
+    fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
+        self.redstone_table_mut().set_jukebox_playing(pos, playing);
+    }
+
+    fn crafter_disabled(&self, pos: BlockPos) -> u16 {
+        self.redstone_table().crafter_disabled(pos)
+    }
+
+    fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
+        self.redstone_table_mut().set_crafter_disabled(pos, mask);
+    }
+
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+        self.redstone_table_mut()
+            .set_crafter_crafting(pos, remaining);
+    }
+
+    fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+        self.redstone_table_mut().take_crafter_crafting()
+    }
+
+    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+        self.redstone_table_mut().restore_crafter_crafting(entries);
+    }
+
+    fn forget_block_entity_memory(&mut self, pos: BlockPos) {
+        self.redstone_table_mut().forget_block_entity(pos);
+    }
+
+    fn set_pending_lectern(&mut self, facts: LecternFacts) {
+        self.redstone_table_mut().set_pending_lectern(facts);
+    }
+
+    fn take_pending_lectern(&mut self) -> Option<LecternFacts> {
+        self.redstone_table_mut().take_pending_lectern()
+    }
+
+    fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.redstone_table_mut().set_lectern(pos, facts);
+    }
+
+    fn lectern(&self, pos: BlockPos) -> Option<LecternFacts> {
+        self.redstone_table().lectern(pos)
+    }
+
+    fn clear_lectern(&mut self, pos: BlockPos) {
+        self.redstone_table_mut().clear_lectern(pos);
+    }
+
+    fn forget_torch_toggles_before(&mut self, when: i64) {
+        self.redstone_table_mut().forget_torch_toggles_before(when);
+    }
+
+    fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
+        self.redstone_table_mut().record_torch_toggle(pos, when);
+    }
+
+    fn torch_toggle_count(&self, pos: BlockPos) -> usize {
+        self.redstone_table().torch_toggle_count(pos)
+    }
+
+    fn push_block_event(&mut self, event: BlockEvent) {
+        self.block_events_table_mut().push(event);
+    }
+
+    fn pop_block_event(&mut self) -> Option<BlockEvent> {
+        self.block_events_table_mut().pop()
+    }
+
+    fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
+        self.block_entities_table().get_dyn(pos)
+    }
+
+    fn has_block_entity(&self, pos: BlockPos) -> bool {
+        self.block_entities_table().contains(pos)
+    }
+
+    fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
+        self.block_entities_table_mut().insert(entity);
+    }
+
+    fn remove_block_entity(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
+        self.block_entities_table_mut().remove(pos)
+    }
+
+    fn take_block_entity_at(&mut self, pos: BlockPos) -> Option<(u64, Box<dyn BlockEntity>)> {
+        self.block_entities_table_mut().take_at(pos)
+    }
+
+    fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>> {
+        self.block_entities_table_mut().take(pos, id)
+    }
+
+    fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>) {
+        self.block_entities_table_mut().put(pos, id, entity);
+    }
+
+    fn is_block_entity_taken(&self, pos: BlockPos) -> bool {
+        self.block_entities_table().is_taken(pos)
+    }
+
+    fn begin_block_entity_tick(&mut self) {
+        self.block_entities_table_mut().begin_tick();
+    }
+
+    fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
+        self.block_entities_table_mut().next_ticker()
+    }
+
+    fn end_block_entity_tick(&mut self) {
+        self.block_entities_table_mut().end_tick();
+    }
+}
+
 /// 世界的存储和世界外的一切。`mc-bamboo-game` 和 oracle 各有一个实现。
-pub trait Level {
+pub trait Level: LevelSideState {
     /// 世界外返回 `void_air`。
     fn block_state(&self, pos: BlockPos) -> BlockState;
 
@@ -90,12 +294,6 @@ pub trait Level {
     /// `None`，官方对应 `null`。
     fn note_block_sound(&self, pos: BlockPos) -> Option<String>;
 
-    /// 这一格的方块实体和它们的 ticker。
-    fn block_entities(&self) -> &BlockEntities;
-
-    /// 见 [`Level::block_entities`]。
-    fn block_entities_mut(&mut self) -> &mut BlockEntities;
-
     /// 这一格的方块实体这一刻要不要跑。默认要跑。
     ///
     /// 方块 oracle 的假世界只登记漏斗和移动中的活塞，熔炉和酿造台不跑。
@@ -107,15 +305,6 @@ pub trait Level {
     fn runs_block_entity_tick(&self, _pos: BlockPos) -> bool {
         true
     }
-
-    /// `Level.blockEvents`：`level.blockEvent` 排进来的事件。
-    fn block_events(&mut self) -> &mut BlockEvents;
-
-    /// 红石用到的、方块状态装不下的世界数据。
-    fn redstone(&self) -> &RedstoneMemory;
-
-    /// 见 [`Level::redstone`]。
-    fn redstone_mut(&mut self) -> &mut RedstoneMemory;
 
     /// 这个世界里的实体。实体由世界线程拥有，见 `docs/folia.md`。
     ///
@@ -685,4 +874,121 @@ pub fn custom_sound_name(index: u32) -> String {
         .get(index as usize)
         .cloned()
         .expect("custom sound index")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 不实现 `LevelTables`、直接实现 `LevelSideState` 也能当 trait 对象用：
+    /// 按区块存或者录制读写的实现者走的就是这条路。
+    struct NoTables;
+
+    impl LevelSideState for NoTables {
+        fn comparator_output(&self, _pos: BlockPos) -> i32 {
+            unimplemented!()
+        }
+        fn set_comparator_output(&mut self, _pos: BlockPos, _signal: i32) {
+            unimplemented!()
+        }
+        fn last_bookshelf_slot(&self, _pos: BlockPos) -> Option<usize> {
+            unimplemented!()
+        }
+        fn set_last_bookshelf_slot(&mut self, _pos: BlockPos, _slot: usize) {
+            unimplemented!()
+        }
+        fn is_jukebox_playing(&self, _pos: BlockPos) -> bool {
+            unimplemented!()
+        }
+        fn set_jukebox_playing(&mut self, _pos: BlockPos, _playing: bool) {
+            unimplemented!()
+        }
+        fn crafter_disabled(&self, _pos: BlockPos) -> u16 {
+            unimplemented!()
+        }
+        fn set_crafter_disabled(&mut self, _pos: BlockPos, _mask: u16) {
+            unimplemented!()
+        }
+        fn set_crafter_crafting(&mut self, _pos: BlockPos, _remaining: i32) {
+            unimplemented!()
+        }
+        fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+            unimplemented!()
+        }
+        fn restore_crafter_crafting(&mut self, _entries: Vec<(BlockPos, i32)>) {
+            unimplemented!()
+        }
+        fn forget_block_entity_memory(&mut self, _pos: BlockPos) {
+            unimplemented!()
+        }
+        fn set_pending_lectern(&mut self, _facts: LecternFacts) {
+            unimplemented!()
+        }
+        fn take_pending_lectern(&mut self) -> Option<LecternFacts> {
+            unimplemented!()
+        }
+        fn set_lectern(&mut self, _pos: BlockPos, _facts: LecternFacts) {
+            unimplemented!()
+        }
+        fn lectern(&self, _pos: BlockPos) -> Option<LecternFacts> {
+            unimplemented!()
+        }
+        fn clear_lectern(&mut self, _pos: BlockPos) {
+            unimplemented!()
+        }
+        fn forget_torch_toggles_before(&mut self, _when: i64) {
+            unimplemented!()
+        }
+        fn record_torch_toggle(&mut self, _pos: BlockPos, _when: i64) {
+            unimplemented!()
+        }
+        fn torch_toggle_count(&self, _pos: BlockPos) -> usize {
+            unimplemented!()
+        }
+        fn push_block_event(&mut self, _event: BlockEvent) {
+            unimplemented!()
+        }
+        fn pop_block_event(&mut self) -> Option<BlockEvent> {
+            unimplemented!()
+        }
+        fn block_entity_dyn(&self, _pos: BlockPos) -> Option<&dyn BlockEntity> {
+            unimplemented!()
+        }
+        fn has_block_entity(&self, _pos: BlockPos) -> bool {
+            unimplemented!()
+        }
+        fn insert_block_entity(&mut self, _entity: Box<dyn BlockEntity>) {
+            unimplemented!()
+        }
+        fn remove_block_entity(&mut self, _pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
+            unimplemented!()
+        }
+        fn take_block_entity_at(&mut self, _pos: BlockPos) -> Option<(u64, Box<dyn BlockEntity>)> {
+            unimplemented!()
+        }
+        fn take_block_entity(&mut self, _pos: BlockPos, _id: u64) -> Option<Box<dyn BlockEntity>> {
+            unimplemented!()
+        }
+        fn put_block_entity(&mut self, _pos: BlockPos, _id: u64, _entity: Box<dyn BlockEntity>) {
+            unimplemented!()
+        }
+        fn is_block_entity_taken(&self, _pos: BlockPos) -> bool {
+            unimplemented!()
+        }
+        fn begin_block_entity_tick(&mut self) {
+            unimplemented!()
+        }
+        fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
+            unimplemented!()
+        }
+        fn end_block_entity_tick(&mut self) {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn side_state_without_tables_is_object_safe() {
+        let state: &dyn LevelSideState = &NoTables;
+        let _ = state as *const dyn LevelSideState;
+    }
 }

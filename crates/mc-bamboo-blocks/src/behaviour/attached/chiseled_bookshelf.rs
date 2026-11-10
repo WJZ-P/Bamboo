@@ -140,7 +140,6 @@ impl Behaviour for ChiseledBookShelf {
         _direction: Direction,
     ) -> i32 {
         world
-            .redstone_memory()
             .last_bookshelf_slot(pos)
             .map_or(0, |slot| slot as i32 + 1)
     }

@@ -631,7 +631,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockState, BlockTicks, Level,
+        BlockState, BlockTicks, LevelSideState, LevelTables,
         dispenser::dispense_from,
         hopper::HopperEntity,
         state::{FACING, FACING_HOPPER, HORIZONTAL_FACING, LIT},
@@ -951,12 +951,8 @@ mod tests {
                 BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
             );
         }
-        level
-            .block_entities_mut()
-            .insert(Box::new(HopperEntity::new(side)));
-        level
-            .block_entities_mut()
-            .insert(Box::new(HopperEntity::new(above)));
+        level.insert_block_entity(Box::new(HopperEntity::new(side)));
+        level.insert_block_entity(Box::new(HopperEntity::new(above)));
         let mut side_slots = vec![ItemStack::empty(); 5];
         side_slots[0] = ItemStack::new(items::COAL, 1);
         level.set_container(side, side_slots);
@@ -1004,11 +1000,9 @@ mod tests {
             let mut world = world_of(&mut level, &mut ticks);
             place(&mut world, furnace, BlockState(blocks::FURNACE));
         }
+        level.insert_block_entity(Box::new(HopperEntity::new(POS)));
         level
-            .block_entities_mut()
-            .insert(Box::new(HopperEntity::new(POS)));
-        level
-            .block_entities_mut()
+            .block_entities_table_mut()
             .get_mut::<FurnaceEntity>(furnace)
             .unwrap()
             .write_item(2, ItemStack::new(items::IRON_INGOT, 1));
@@ -1078,12 +1072,12 @@ mod tests {
             place(&mut world, furnace, BlockState(blocks::FURNACE));
         }
         level
-            .block_entities_mut()
+            .block_entities_table_mut()
             .get_mut::<FurnaceEntity>(furnace)
             .unwrap()
             .write_item(0, ItemStack::new(items::RAW_IRON, 1));
         level
-            .block_entities_mut()
+            .block_entities_table_mut()
             .get_mut::<FurnaceEntity>(furnace)
             .unwrap()
             .write_item(1, ItemStack::new(items::COAL, 1));
