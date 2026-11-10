@@ -82,8 +82,12 @@ pub struct ScheduledFluidTick {
 #[derive(Debug)]
 struct TickQueue<T> {
     queue: BTreeMap<TickOrder, (BlockPos, T)>,
-    /// 每个区块排着哪些排序键。按区块取出时只走这一个区块的键，不扫整个队列。
-    by_chunk: HashMap<ChunkPos, HashSet<TickOrder>>,
+    /// 每个区块排过哪些排序键，按区块取出时只走这一个区块的键，不扫整个队列。
+    ///
+    /// 只追加：出队的键留成过期项，由 [`Self::compact_index`] 均摊重建，
+    /// 取出时再按主队列过滤。这样热的出队路径完全不碰索引。
+    by_chunk: HashMap<ChunkPos, Vec<TickOrder>>,
+    appended: usize,
     /// 同一格同一种排队时只留第一个，`LevelChunkTicks.ticksPerPosition`。
     scheduled: HashSet<(BlockPos, T)>,
     /// 这一刻已经取出、还没有执行的计划刻，`willTickThisTick` 看的就是它们。
@@ -95,6 +99,7 @@ impl<T> Default for TickQueue<T> {
         Self {
             queue: BTreeMap::new(),
             by_chunk: HashMap::new(),
+            appended: 0,
             scheduled: HashSet::new(),
             running: VecDeque::new(),
         }
@@ -107,19 +112,21 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
             return false;
         }
         self.queue.insert(order, (pos, kind));
-        self.by_chunk.entry(pos.chunk()).or_default().insert(order);
+        self.by_chunk.entry(pos.chunk()).or_default().push(order);
+        self.appended += 1;
+        if self.appended > self.queue.len() * 2 {
+            self.compact_index();
+        }
         true
     }
 
-    fn forget_order(&mut self, pos: BlockPos, order: TickOrder) {
-        let chunk = pos.chunk();
-        let Some(orders) = self.by_chunk.get_mut(&chunk) else {
-            return;
-        };
-        orders.remove(&order);
-        if orders.is_empty() {
-            self.by_chunk.remove(&chunk);
+    /// 按主队列重建索引，扔掉已经出队的键。均摊到每个新排的刻是常数时间。
+    fn compact_index(&mut self) {
+        self.by_chunk.clear();
+        for (&order, &(pos, _)) in &self.queue {
+            self.by_chunk.entry(pos.chunk()).or_default().push(order);
         }
+        self.appended = self.queue.len();
     }
 
     fn has_scheduled(&self, pos: BlockPos, kind: T) -> bool {
@@ -142,9 +149,7 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
             && let Some(entry) = self.queue.first_entry()
             && entry.key().trigger_tick <= now
         {
-            let order = *entry.key();
             let (pos, kind) = entry.remove();
-            self.forget_order(pos, order);
             self.scheduled.remove(&(pos, kind));
             self.running.push_back((pos, kind));
         }
@@ -319,8 +324,9 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
         let Some(orders) = self.by_chunk.remove(&chunk) else {
             return Vec::new();
         };
-        let mut orders: Vec<TickOrder> = orders.into_iter().collect();
+        let mut orders = orders;
         orders.sort_unstable();
+        orders.dedup();
         let mut saved = Vec::with_capacity(orders.len());
         for order in orders {
             let Some((pos, kind)) = self.queue.remove(&order) else {
@@ -356,7 +362,8 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
             self.by_chunk
                 .entry(entry.pos.chunk())
                 .or_default()
-                .insert(order);
+                .push(order);
+            self.appended += 1;
         }
     }
 }
