@@ -4,13 +4,15 @@
 //! 中间没有别人改引擎的数据，方块也读这一轮排好那一刻的样子，所以和一口气做完的结果相同。
 //! 一轮做完才把变过的段抄进给别人读的那一份，算到一半时读到的还是上一轮的结果。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_core::{ChunkPos, LightLayer};
 
 use super::{
-    Chunks, LightChanges, MIN_LIGHT_SECTION, SectionPos, engine::LightEngine, queue::Task,
-    storage::LightStorage,
+    Chunks, LightChanges, MIN_LIGHT_SECTION, SectionPos,
+    engine::LightEngine,
+    queue::Task,
+    storage::{LightColumn, LightStorage},
 };
 use crate::chunk::Chunk;
 
@@ -20,7 +22,7 @@ pub(super) struct Engines {
     pub(super) sky: LightEngine,
     pub(super) block: LightEngine,
     /// 上次取走以后光照变了的区块和段。
-    changes: BTreeMap<ChunkPos, LightChanges>,
+    changes: Changes,
     /// 正在算的一轮算到了哪一层。`None` 表示没有算到一半的轮次。
     round: Option<LightLayer>,
 }
@@ -30,7 +32,7 @@ impl Engines {
         Self {
             sky: LightEngine::new(sky),
             block: LightEngine::new(block),
-            changes: BTreeMap::new(),
+            changes: Changes(BTreeMap::new()),
             round: None,
         }
     }
@@ -113,7 +115,38 @@ impl Engines {
 
     /// 上次取走以后光照变了的区块和段。
     pub(super) fn take_changes(&mut self) -> BTreeMap<ChunkPos, LightChanges> {
-        std::mem::take(&mut self.changes)
+        self.changes.take()
+    }
+
+    /// 取出一个区块柱在引擎里的天空光和方块光。
+    /// 只在光照全部算完时调用，这时引擎和 [`Visible`] 里的两份内容相同。
+    pub(super) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
+        debug_assert!(!self.in_round(), "一轮算到一半不能搬区块柱");
+        debug_assert!(
+            !self.block.has_light_work() && !self.sky.has_light_work(),
+            "引擎里不该剩下工作"
+        );
+        let columns = [
+            self.sky.storage.take_column(pos),
+            self.block.storage.take_column(pos),
+        ];
+        self.changes.clear(pos);
+        columns
+    }
+
+    /// 把一个区块柱的天空光和方块光放进引擎。
+    pub(super) fn insert_column(
+        &mut self,
+        pos: ChunkPos,
+        [sky, block]: [LightColumn; 2],
+        visible: &mut Visible,
+    ) {
+        self.sky.storage.insert_column(pos, &sky);
+        self.block.storage.insert_column(pos, &block);
+        visible.sky.insert_column(pos, &sky);
+        visible.block.insert_column(pos, &block);
+        // 放进来的内容是已经算好的，不产生发给客户端的变化。
+        self.changes.clear(pos);
     }
 
     /// `onLightUpdate`。
@@ -122,12 +155,31 @@ impl Engines {
             LightLayer::Sky => &mut self.sky,
             LightLayer::Block => &mut self.block,
         };
-        for section in engine.storage.take_affected() {
-            self.changes
+        self.changes.mark(layer, engine.storage.take_affected());
+    }
+}
+
+/// 还没发给客户端的光照变化，按区块记下变过的段。
+#[derive(Debug, Clone)]
+struct Changes(BTreeMap<ChunkPos, LightChanges>);
+
+impl Changes {
+    fn mark(&mut self, layer: LightLayer, sections: BTreeSet<SectionPos>) {
+        for section in sections {
+            self.0
                 .entry(section.chunk())
                 .or_default()
                 .mark(layer, section.y);
         }
+    }
+
+    /// 搬走或者整个换掉一个区块时，它还没发出去的变化不用再发了。
+    fn clear(&mut self, pos: ChunkPos) {
+        self.0.remove(&pos);
+    }
+
+    fn take(&mut self) -> BTreeMap<ChunkPos, LightChanges> {
+        std::mem::take(&mut self.0)
     }
 }
 
@@ -141,6 +193,11 @@ pub(super) struct Visible {
 impl Visible {
     pub(super) fn new(sky: LightStorage, block: LightStorage) -> Self {
         Self { sky, block }
+    }
+
+    /// 取出一个区块柱在给别人读的那份里的天空光和方块光。
+    pub(super) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
+        [self.sky.take_column(pos), self.block.take_column(pos)]
     }
 
     pub(super) fn storage(&self, layer: LightLayer) -> &LightStorage {
