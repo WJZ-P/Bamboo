@@ -197,6 +197,36 @@ impl<'a> Reader<'a> {
         self.any_tag()?.ok_or(DecodeError::EndTag)
     }
 
+    /// `NbtIo.readUnnamedTag`：跳过根节点的名字，只读回标签本身。
+    /// 类型 0 时没有名字，返回 `None`。
+    pub fn named_root(&mut self) -> Result<Option<Tag>, DecodeError> {
+        let kind = self.u8()?;
+        if kind == 0 {
+            return Ok(None);
+        }
+        self.modified_utf8()?;
+        Ok(Some(self.payload(kind)?))
+    }
+
+    /// 看一眼根节点的类型字节，不移动游标。
+    pub fn peek_root_type(&self) -> Result<u8, DecodeError> {
+        self.input
+            .first()
+            .copied()
+            .ok_or(DecodeError::UnexpectedEnd)
+    }
+
+    /// 读根节点的类型字节和名字，把类型交给 [`named_root_payload`](Self::named_root_payload)。
+    pub fn read_root_name(&mut self) -> Result<String, DecodeError> {
+        self.u8()?;
+        self.modified_utf8()
+    }
+
+    /// 读根节点的内容，类型字节和名字已经由 [`read_root_name`](Self::read_root_name) 读过。
+    pub fn named_root_payload(&mut self, kind: u8) -> Result<Tag, DecodeError> {
+        self.payload(kind)
+    }
+
     /// 读一个标签的内容。列表和复合标签的嵌套记在 `stack` 上，调用栈不跟着变深。
     ///
     /// Read one payload. Nested lists and compounds live on `stack`, so the call

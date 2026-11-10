@@ -10,4 +10,5 @@ keywords = ["minecraft", "nbt"]
 categories = ["encoding"]
 
 [dependencies]
+flate2.workspace = true
 thiserror.workspace = true

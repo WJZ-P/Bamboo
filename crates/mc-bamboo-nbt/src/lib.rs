@@ -1,11 +1,17 @@
 //! NBT：Minecraft 用来存储结构化数据的二进制格式。
 //!
-//! 目前只实现网络上用到的编码和解码。读存档还要认文件格式的根节点名字，等做到存档再加。
+//! 网络形式（`write_network` / `Reader::any_tag`）是「类型字节 + 内容」，根节点没有名字；
+//! 文件形式（`write_named` / `read_named`）在类型字节和内容之间多一个根节点名字。
 
 mod decode;
+mod file;
 pub mod snbt;
 
 pub use decode::{Accounter, DEFAULT_QUOTA, DecodeError, MAX_DEPTH, Reader};
+pub use file::{
+    Compression, FileError, MAX_DECOMPRESSED_BYTES, UNCOMPRESSED_QUOTA, read_compressed,
+    read_named, write_compressed, write_named,
+};
 pub use snbt::{
     SnbtError, java_double_to_string, java_float_to_string, parse_snbt, parse_snbt_argument,
     parse_snbt_compound, parse_snbt_prefix, quote_and_escape,
@@ -65,6 +71,13 @@ impl Tag {
     /// 按网络格式写入：先写类型，再写内容。和文件格式不同，根节点没有名字。
     pub fn write_network(&self, out: &mut Vec<u8>) {
         out.push(self.id());
+        write_payload(self, out);
+    }
+
+    /// 官方 `NbtIo.write` 的文件形式：类型字节、根节点名字、内容。
+    pub fn write_named(&self, name: &str, out: &mut Vec<u8>) {
+        out.push(self.id());
+        write_modified_utf8(out, name);
         write_payload(self, out);
     }
 }
