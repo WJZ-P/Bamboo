@@ -2053,6 +2053,7 @@ dependencies = [
 name = "mc-bamboo-storage"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",
