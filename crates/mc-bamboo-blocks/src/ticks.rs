@@ -4,7 +4,7 @@
 //! 先比到期时间，再比优先级，最后比加入的先后。
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fmt,
     hash::Hash,
 };
@@ -82,12 +82,6 @@ pub struct ScheduledFluidTick {
 #[derive(Debug)]
 struct TickQueue<T> {
     queue: BTreeMap<TickOrder, (BlockPos, T)>,
-    /// 每个区块排过哪些排序键，按区块取出时只走这一个区块的键，不扫整个队列。
-    ///
-    /// 只追加：出队的键留成过期项，由 [`Self::compact_index`] 均摊重建，
-    /// 取出时再按主队列过滤。这样热的出队路径完全不碰索引。
-    by_chunk: HashMap<ChunkPos, Vec<TickOrder>>,
-    appended: usize,
     /// 同一格同一种排队时只留第一个，`LevelChunkTicks.ticksPerPosition`。
     scheduled: HashSet<(BlockPos, T)>,
     /// 这一刻已经取出、还没有执行的计划刻，`willTickThisTick` 看的就是它们。
@@ -98,8 +92,6 @@ impl<T> Default for TickQueue<T> {
     fn default() -> Self {
         Self {
             queue: BTreeMap::new(),
-            by_chunk: HashMap::new(),
-            appended: 0,
             scheduled: HashSet::new(),
             running: VecDeque::new(),
         }
@@ -112,21 +104,7 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
             return false;
         }
         self.queue.insert(order, (pos, kind));
-        self.by_chunk.entry(pos.chunk()).or_default().push(order);
-        self.appended += 1;
-        if self.appended > self.queue.len() * 2 {
-            self.compact_index();
-        }
         true
-    }
-
-    /// 按主队列重建索引，扔掉已经出队的键。均摊到每个新排的刻是常数时间。
-    fn compact_index(&mut self) {
-        self.by_chunk.clear();
-        for (&order, &(pos, _)) in &self.queue {
-            self.by_chunk.entry(pos.chunk()).or_default().push(order);
-        }
-        self.appended = self.queue.len();
     }
 
     fn has_scheduled(&self, pos: BlockPos, kind: T) -> bool {
@@ -276,17 +254,61 @@ impl BlockTicks {
         self.fluids.next_due()
     }
 
-    /// 把 `chunk` 里所有排着的计划刻装进盒子搬走。只在 tick 边界调用。
+    /// 把一批区块里所有排着的计划刻装进盒子搬走。只在 tick 边界调用。
     ///
+    /// 每条队列只扫一遍：开销和队列长度成正比，和要取多少个区块无关。
+    /// **这里刻意不维护按区块的索引**：微基准里，每排一条刻多一次哈希和一次
+    /// Vec push 会让「排完再跑完一百万条刻」从 350 ms 变 440 ms、滚动场景从
+    /// 164 ms 变 226 ms，而排刻是红石和流体每刻都在做的热路径，取出区块只在
+    /// 卸载和 region 拆合时发生。调用方要把一整刻要卸载的区块攒成一批，
+    /// 每刻最多调一次 [`Self::take_chunks`]。
+    ///
+    /// 返回的 map 只含有排着刻的区块；`chunks` 里没有刻的区块不给键，也不给空盒子。
     /// 这一刻已经取出、还没跑完的清单不为空时返回 [`Err`]，因为那些刻已经不在队列里，
     /// 没法跟着区块走。别的区块的刻原地不动。
-    pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkTicks, Busy> {
+    pub fn take_chunks(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+    ) -> Result<BTreeMap<ChunkPos, ChunkTicks>, Busy> {
         if !self.blocks.running.is_empty() || !self.fluids.running.is_empty() {
             return Err(Busy);
         }
-        let blocks = self.blocks.take_chunk(chunk, self.now);
-        let fluids = self.fluids.take_chunk(chunk, self.now);
-        Ok(ChunkTicks { blocks, fluids })
+        let blocks = self.blocks.take_chunks(chunks, self.now);
+        let fluids = self.fluids.take_chunks(chunks, self.now);
+        let mut boxes: BTreeMap<ChunkPos, ChunkTicks> = blocks
+            .into_iter()
+            .map(|(chunk, blocks)| {
+                (
+                    chunk,
+                    ChunkTicks {
+                        blocks,
+                        fluids: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        for (chunk, fluids) in fluids {
+            boxes
+                .entry(chunk)
+                .or_insert_with(|| ChunkTicks {
+                    blocks: Vec::new(),
+                    fluids: Vec::new(),
+                })
+                .fluids = fluids;
+        }
+        Ok(boxes)
+    }
+
+    /// 把 `chunk` 里所有排着的计划刻装进盒子搬走。只在 tick 边界调用。
+    ///
+    /// 见 [`Self::take_chunks`]：这也是一次全队列扫描，一次要搬多个区块时用批量接口。
+    pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkTicks, Busy> {
+        let chunks = [chunk].into_iter().collect();
+        let mut boxes = self.take_chunks(&chunks)?;
+        Ok(boxes.remove(&chunk).unwrap_or_else(|| ChunkTicks {
+            blocks: Vec::new(),
+            fluids: Vec::new(),
+        }))
     }
 
     /// 把盒子里的计划刻放回表里。只在 tick 边界调用。
@@ -330,30 +352,36 @@ struct SavedTick<T> {
 }
 
 impl<T: Copy + Eq + Hash> TickQueue<T> {
-    /// 只碰 `chunk` 的排序键，开销和这个区块的条目数成正比。
-    fn take_chunk(&mut self, chunk: ChunkPos, now: i64) -> Vec<SavedTick<T>> {
-        let Some(orders) = self.by_chunk.remove(&chunk) else {
-            return Vec::new();
-        };
-        let mut orders = orders;
-        orders.sort_unstable();
-        orders.dedup();
-        // 移走这一区块的条目后，索引里其余的追加项仍可能过期；超量时重建一次。
-        self.appended = self.appended.saturating_sub(orders.len());
-        let mut saved = Vec::with_capacity(orders.len());
-        for order in orders {
-            let Some((pos, kind)) = self.queue.remove(&order) else {
-                continue;
-            };
+    /// 扫一遍队列，按区块把要搬走的刻分组。每个盒子里的条目天然是执行顺序。
+    fn take_chunks(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+        now: i64,
+    ) -> BTreeMap<ChunkPos, Vec<SavedTick<T>>> {
+        if chunks.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut taken: Vec<(ChunkPos, TickOrder, BlockPos, T)> = Vec::new();
+        // `extract_if` 在 Rust 1.96 之前不稳定，用 retain 一次扫描完成删除和分组。
+        self.queue.retain(|&order, &mut (pos, kind)| {
+            let chunk = pos.chunk();
+            if !chunks.contains(&chunk) {
+                return true;
+            }
+            taken.push((chunk, order, pos, kind));
+            false
+        });
+        let mut boxes: BTreeMap<ChunkPos, Vec<SavedTick<T>>> = BTreeMap::new();
+        for (chunk, order, pos, kind) in taken {
             self.scheduled.remove(&(pos, kind));
-            saved.push(SavedTick {
+            boxes.entry(chunk).or_default().push(SavedTick {
                 pos,
                 kind,
                 priority: order.priority,
                 delay: order.trigger_tick.saturating_sub(now),
             });
         }
-        saved
+        boxes
     }
 
     /// `LevelChunkTicks.unpack`：子序号从 `-条目数` 开始递增的负数。
@@ -382,6 +410,8 @@ const _: fn() = || {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     const POS: BlockPos = BlockPos::new(1, 2, 3);
@@ -611,6 +641,50 @@ mod tests {
         assert_eq!(fluids[0].trigger_tick, 1006);
         assert_eq!(all_due(&mut target, 1004), []);
         assert_eq!(all_due(&mut target, 1006), [(POS, 7), (OTHER, 2)]);
+    }
+
+    #[test]
+    fn take_chunks_boxes_several_chunks_in_one_scan() {
+        let mut ticks = BlockTicks::new();
+        ticks.schedule(POS, 1, 2, TickPriority::High);
+        ticks.schedule(OTHER, 2, 2, TickPriority::Normal);
+        ticks.schedule(AWAY, 3, 2, TickPriority::Low);
+        ticks.schedule(AWAY_2, 4, 2, TickPriority::Low);
+        ticks.schedule_fluid(POS, 5, 2, TickPriority::Normal);
+        ticks.schedule_fluid(AWAY, 6, 2, TickPriority::Normal);
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A, ChunkPos::new(1, 0), ChunkPos::new(9, 9)]
+            .into_iter()
+            .collect();
+
+        let mut boxes = ticks.take_chunks(&wanted).unwrap();
+        // 没有刻的区块不给键，也不给空盒子。
+        assert_eq!(boxes.len(), 2);
+        assert!(boxes.contains_key(&CHUNK_A));
+        assert!(boxes.contains_key(&ChunkPos::new(1, 0)));
+        assert_eq!(boxes.remove(&CHUNK_A).unwrap().blocks.len(), 2);
+        let away = boxes.remove(&ChunkPos::new(1, 0)).unwrap();
+        assert_eq!(away.blocks.len(), 2);
+        assert_eq!(away.fluids.len(), 1);
+
+        // 队列里什么都没剩下，别的区块的条目也一起被搬走了。
+        assert_eq!(ticks.pending().count(), 0);
+        assert_eq!(ticks.pending_fluids().count(), 0);
+        assert!(!ticks.has_scheduled_tick(POS, 1));
+        assert!(!ticks.has_scheduled_tick(AWAY, 3));
+
+        // 空集合一次扫描都不做。
+        assert!(ticks.take_chunks(&BTreeSet::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn take_chunks_is_busy_while_due_ticks_are_running() {
+        let mut ticks = BlockTicks::new();
+        ticks.schedule(POS, 1, 1, TickPriority::Normal);
+        ticks.collect_due(1);
+        assert!(matches!(
+            ticks.take_chunks(&[CHUNK_A].into_iter().collect()),
+            Err(Busy)
+        ));
     }
 
     #[test]
@@ -911,6 +985,46 @@ mod tests {
             "rolling: {rolling_count} ticks, best of 5: {:.3} ms ({:.0} ns/tick)",
             rolling_time.as_secs_f64() * 1000.0,
             rolling_time.as_nanos() as f64 / rolling_count as f64
+        );
+
+        /// 队列里有 `count` 条刻时，一次取出 16 个区块的耗时。
+        fn take_16(count: usize) -> Duration {
+            let chunks: BTreeSet<ChunkPos> = (0..16)
+                .map(|index| ChunkPos::new(index % 4, index / 4))
+                .collect();
+            let mut best = Duration::MAX;
+            for _ in 0..5 {
+                let mut ticks = BlockTicks::new();
+                let mut rng = Rng(0x6a09_e667_f3bc_c909);
+                // 位置由下标唯一确定，均匀落在 4×4 个区块里，避免同格查重吞掉条目。
+                for index in 0..count {
+                    let value = rng.next();
+                    let index = index as i32;
+                    let pos = BlockPos::new(index & 63, (index >> 12) & 255, (index >> 6) & 63);
+                    ticks.schedule(
+                        pos,
+                        (value >> 40 & 0xff) as usize,
+                        20,
+                        priority(value >> 48),
+                    );
+                }
+                let started = Instant::now();
+                let boxes = black_box(ticks.take_chunks(&chunks).unwrap());
+                best = best.min(started.elapsed());
+                assert_eq!(boxes.len(), 16);
+            }
+            best
+        }
+
+        let take_100k = take_16(100_000);
+        let take_1m = take_16(1_000_000);
+        println!(
+            "take_chunks 16 chunks, queue 100k: {:.3} ms",
+            take_100k.as_secs_f64() * 1000.0
+        );
+        println!(
+            "take_chunks 16 chunks, queue   1M: {:.3} ms",
+            take_1m.as_secs_f64() * 1000.0
         );
     }
 }
