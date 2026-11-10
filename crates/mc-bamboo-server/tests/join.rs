@@ -304,6 +304,20 @@ async fn full_server_case(ops: &str, name: &str, bypasses: bool) {
     let payload = second.read_frame().await;
     if bypasses {
         assert_eq!(packet_id(&payload), login::clientbound::LOGIN_FINISHED);
+        // 连接层放行还不够，权威名单复查也得放行：走完配置进到 Play 才算真的进服。
+        second
+            .send(&frame(&[login::serverbound::LOGIN_ACKNOWLEDGED as u8]))
+            .await;
+        second
+            .read_until(configuration::clientbound::SELECT_KNOWN_PACKS)
+            .await;
+        second.send(&common::official_known_packs()).await;
+        second
+            .read_until(configuration::clientbound::FINISH_CONFIGURATION)
+            .await;
+        second.finish_configuration().await;
+        let login = second.read_until(play::clientbound::LOGIN).await;
+        assert_eq!(packet_id(&login), play::clientbound::LOGIN);
     } else {
         let (id, reason) = json_packet(&payload);
         assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
