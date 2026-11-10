@@ -1,0 +1,16 @@
+[package]
+name = "mc-bamboo-hit-rate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Measure how often redstone trigger replays would hit a cache, without implementing one."
+publish = false
+
+[dependencies]
+mc-bamboo-blocks.workspace = true
+mc-bamboo-core.workspace = true
+mc-bamboo-data.workspace = true
+mc-bamboo-protocol.workspace = true
+mc-bamboo-recipes.workspace = true

@@ -159,13 +159,18 @@ impl Record {
         hasher.finish128()
     }
 
-    /// 段哈希键：触发本身 + 读集合涉及各段的整段内容哈希。
+    /// 段哈希键：触发本身 + 精确读集合 + 读集合涉及各段的整段方块状态哈希。
+    ///
+    /// 键里带着精确读集合，是为了保证它不比精确键粗：整段哈希里只有方块状态，
+    /// 容器、红石记忆、计划刻查询这些非方块状态只能由精确读项补上。因此同一段里
+    /// 无关的方块变了会失配，命中率不高于精确键。
     pub fn section_key(&self, strict_time: bool) -> u128 {
         let mut hasher = StableHasher::new();
         self.trigger.hash(&mut hasher);
-        if !strict_time {
-            // 乐观口径也去掉「读世界时间」这一项；它本来就不属于段内容。
-            0_u8.hash(&mut hasher);
+        for read in &self.reads {
+            if strict_time || read.kind != K_TIME {
+                read.hash(&mut hasher);
+            }
         }
         for (section, hash) in &self.sections {
             section.hash(&mut hasher);
@@ -227,6 +232,7 @@ struct Inner {
     /// 驱动循环在两次触发边界之间做的读写，归到下一次触发。
     pending_reads: Vec<Read>,
     pending_writes: Vec<Write>,
+    pending_uncacheable: Vec<Uncacheable>,
     /// 每段现在的内容哈希，写方块时增量更新（设计稿 9.3 的做法）。
     section_hashes: HashMap<ChunkSection, u128>,
     tick: i64,
@@ -249,6 +255,7 @@ impl<'a> Recording<'a> {
                 current: None,
                 pending_reads: Vec::new(),
                 pending_writes: Vec::new(),
+                pending_uncacheable: Vec::new(),
                 section_hashes: HashMap::new(),
                 tick: 0,
             }),
@@ -261,6 +268,7 @@ impl<'a> Recording<'a> {
         inner.tick = tick;
         inner.pending_reads.clear();
         inner.pending_writes.clear();
+        inner.pending_uncacheable.clear();
     }
 
     /// 取走目前为止的全部记录，清空。
@@ -313,10 +321,17 @@ impl<'a> Recording<'a> {
     /// 标一个不能缓存的原因，同一次触发里只记一次。
     fn uncacheable(&self, reason: Uncacheable) {
         let mut inner = self.inner.borrow_mut();
-        if let Some(frame) = inner.current.as_mut()
-            && !frame.record.uncacheable.contains(&reason)
-        {
-            frame.record.uncacheable.push(reason);
+        match inner.current.as_mut() {
+            Some(frame) => {
+                if !frame.record.uncacheable.contains(&reason) {
+                    frame.record.uncacheable.push(reason);
+                }
+            }
+            None => {
+                if !inner.pending_uncacheable.contains(&reason) {
+                    inner.pending_uncacheable.push(reason);
+                }
+            }
         }
     }
 
@@ -793,35 +808,32 @@ impl LevelSideState for Recording<'_> {
     }
 
     fn take_block_entity_at(&mut self, pos: BlockPos) -> Option<(u64, Box<dyn BlockEntity>)> {
+        // 驱动把实体临时拿出去不是「效果」，只是实现细节；记一笔读就够了。
         let value = self.level.take_block_entity_at(pos);
         let now = self.inner.borrow().tick;
-        self.write(Write::BlockEntity {
-            pos,
-            kind: 2,
-            value: stable_hash(&value.as_ref().map(|(id, entity)| (*id, entity_facts(entity.as_ref(), now)))),
-        });
+        self.read(
+            Some(pos),
+            K_BLOCK_ENTITY,
+            value.as_ref().map(|(id, entity)| (*id, entity_facts(entity.as_ref(), now))),
+        );
         value
     }
 
     fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>> {
         let value = self.level.take_block_entity(pos, id);
         let now = self.inner.borrow().tick;
-        self.write(Write::BlockEntity {
-            pos,
-            kind: 3,
-            value: stable_hash(&(id, value.as_ref().map(|entity| entity_facts(entity.as_ref(), now)))),
-        });
+        self.read(
+            Some(pos),
+            K_BLOCK_ENTITY,
+            (id, value.as_ref().map(|entity| entity_facts(entity.as_ref(), now))),
+        );
         value
     }
 
     fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>) {
+        // 放回去也不是「效果」：实体改了什么由这次触发里别的读写记录。
         let now = self.inner.borrow().tick;
-        let facts = entity_facts(entity.as_ref(), now);
-        self.write(Write::BlockEntity {
-            pos,
-            kind: 4,
-            value: stable_hash(&(id, facts)),
-        });
+        self.read(Some(pos), K_BLOCK_ENTITY, (id, entity_facts(entity.as_ref(), now)));
         self.level.put_block_entity(pos, id, entity);
     }
 
@@ -1156,7 +1168,7 @@ impl Level for Recording<'_> {
                     trigger,
                     reads: std::mem::take(&mut inner.pending_reads),
                     writes: std::mem::take(&mut inner.pending_writes),
-                    uncacheable: Vec::new(),
+                    uncacheable: std::mem::take(&mut inner.pending_uncacheable),
                     sections: Vec::new(),
                     nanos: 0,
                 };

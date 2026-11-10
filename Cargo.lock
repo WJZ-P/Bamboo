@@ -1972,6 +1972,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-hit-rate"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-blocks",
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "mc-bamboo-protocol",
+ "mc-bamboo-recipes",
+]
+
+[[package]]
 name = "mc-bamboo-loadtest"
 version = "0.0.0"
 dependencies = [
