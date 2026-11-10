@@ -21,9 +21,9 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SleepStrategy {
     /// 一直 `thread::sleep` 到截止时刻。
-    #[default]
     Plain,
     /// 先睡到「截止时刻 − 自适应余量」，剩下的时间自旋到截止时刻。
+    #[default]
     Hybrid,
 }
 
@@ -77,7 +77,7 @@ pub(crate) struct PacingConfig {
 impl Default for PacingConfig {
     fn default() -> Self {
         Self {
-            sleep: SleepStrategy::Plain,
+            sleep: SleepStrategy::Hybrid,
             spin_max: Duration::from_micros(DEFAULT_SPIN_MAX_US),
             priority: ThreadPriority::Default,
         }
@@ -336,6 +336,13 @@ mod tests {
         }
     }
 
+    fn plain() -> PacingConfig {
+        PacingConfig {
+            sleep: SleepStrategy::Plain,
+            ..PacingConfig::default()
+        }
+    }
+
     fn hybrid(spin_max_us: u64) -> PacingConfig {
         PacingConfig {
             sleep: SleepStrategy::Hybrid,
@@ -345,15 +352,17 @@ mod tests {
     }
 
     #[test]
-    fn env_defaults_match_the_old_behaviour() {
+    fn env_defaults_are_hybrid_with_the_default_spin_cap() {
         assert_eq!(
             PacingConfig::parse(None, None, None),
             PacingConfig::default()
         );
         assert_eq!(
-            PacingConfig::parse(Some("plain"), Some("6000"), Some("default")),
+            PacingConfig::parse(Some("hybrid"), Some("6000"), Some("default")),
             PacingConfig::default()
         );
+        assert_eq!(PacingConfig::default().sleep, SleepStrategy::Hybrid);
+        assert_eq!(PacingConfig::parse(Some("plain"), None, None), plain());
     }
 
     #[test]
@@ -382,7 +391,7 @@ mod tests {
 
     #[test]
     fn plain_sleeps_the_whole_wait_and_never_spins() {
-        let mut pacer = Pacer::new(PacingConfig::default());
+        let mut pacer = Pacer::new(plain());
         let mut timing = FakeTiming::new(Duration::from_millis(4));
         let deadline = timing.now() + Duration::from_millis(50);
         assert_eq!(pacer.wait_until(deadline, &mut timing), Duration::ZERO);
@@ -433,7 +442,7 @@ mod tests {
 
     #[test]
     fn catching_up_does_not_wait_at_all() {
-        for config in [PacingConfig::default(), hybrid(6000)] {
+        for config in [plain(), hybrid(6000)] {
             let mut pacer = Pacer::new(config);
             let mut timing = FakeTiming::new(Duration::from_millis(1));
             let now = timing.now();
@@ -486,7 +495,7 @@ mod tests {
 
     #[test]
     fn early_wakeups_are_followed_by_another_sleep() {
-        let mut pacer = Pacer::new(PacingConfig::default());
+        let mut pacer = Pacer::new(plain());
         let mut timing = EarlyTiming::new();
         let deadline = timing.now + Duration::from_millis(50);
         assert_eq!(pacer.wait_until(deadline, &mut timing), Duration::ZERO);
@@ -556,7 +565,7 @@ mod tests {
 
     #[test]
     fn real_clock_never_returns_early() {
-        for config in [PacingConfig::default(), hybrid(1000)] {
+        for config in [plain(), hybrid(1000)] {
             let mut pacer = Pacer::new(config);
             let mut timing = WallTiming;
             let deadline = Instant::now() + Duration::from_millis(2);
