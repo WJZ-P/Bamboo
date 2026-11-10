@@ -15,7 +15,7 @@ use crate::{
     context::BlockHit,
     entity::{Entity, PrimedTnt},
     fluid::Fluid,
-    level::{Effect, LecternFacts, Level},
+    level::{Effect, LecternFacts, Level, Observation, Trigger},
     random::LegacyRandom,
     shape::{self, CollisionContext},
     state::{BlockState, FACING, FluidState, POWER, SupportType, WATERLOGGED},
@@ -500,6 +500,7 @@ impl<'a> World<'a> {
 
     /// 记下一个发给玩家的结果，官方的 `levelEvent`。
     pub fn push_effect(&mut self, effect: Effect) {
+        self.level.observe(Observation::Effect(&effect));
         self.effects.push(effect);
     }
 
@@ -930,6 +931,12 @@ impl<'a> World<'a> {
             if state.block_id() != event.block {
                 continue;
             }
+            self.begin_trigger(Trigger::BlockEvent {
+                pos: event.pos,
+                kind: event.block,
+                param_a: event.param_a,
+                param_b: event.param_b,
+            });
             if state.trigger_event(self, event.pos, event.param_a, event.param_b) {
                 self.push_effect(Effect::BlockEvent {
                     pos: event.pos,
@@ -938,7 +945,28 @@ impl<'a> World<'a> {
                     param_b: event.param_b,
                 });
             }
+            self.level.observe(Observation::TriggerEnd);
         }
+    }
+
+    /// 驱动循环在每次触发开始前报一次边界。
+    pub fn begin_trigger(&self, trigger: Trigger) {
+        self.level.observe(Observation::TriggerBegin(trigger));
+    }
+
+    /// 一条到期的方块计划刻的边界。
+    pub fn begin_scheduled_trigger(&self, pos: BlockPos, kind: usize) {
+        self.begin_trigger(Trigger::ScheduledTick { pos, kind });
+    }
+
+    /// 一条到期的流体计划刻的边界。
+    pub fn begin_fluid_trigger(&self, pos: BlockPos, kind: i32) {
+        self.begin_trigger(Trigger::ScheduledFluidTick { pos, kind });
+    }
+
+    /// 一次触发结束。
+    pub fn end_trigger(&self) {
+        self.level.observe(Observation::TriggerEnd);
     }
 
     /// `Level.tickBlockEntities`：按 ticker 列表的顺序运行每刻的方块实体。
@@ -961,7 +989,12 @@ impl<'a> World<'a> {
             let Some(entity) = self.level.take_block_entity(pos, id) else {
                 continue;
             };
+            self.begin_trigger(Trigger::BlockEntityTick {
+                pos,
+                kind: self.block_state(pos).block_id(),
+            });
             self.run_taken_block_entity(pos, id, entity);
+            self.level.observe(Observation::TriggerEnd);
         }
         self.level.end_block_entity_tick();
     }
@@ -1355,7 +1388,8 @@ impl<'a> World<'a> {
     }
 
     /// `getGameTime`。
-    pub const fn game_time(&self) -> i64 {
+    pub fn game_time(&self) -> i64 {
+        self.level.observe(Observation::TimeRead);
         self.ticks.now()
     }
 
@@ -1388,19 +1422,40 @@ impl<'a> World<'a> {
         priority: TickPriority,
     ) {
         let id = BlockState(block.default_state).block_id();
+        self.level.observe(Observation::TickScheduled {
+            pos,
+            kind: i64::try_from(id).unwrap_or(i64::MAX),
+            fluid: false,
+            delay,
+            priority,
+        });
         self.ticks.schedule(pos, id, delay, priority);
     }
 
     /// `getBlockTicks().hasScheduledTick`。
     pub fn has_scheduled_tick(&self, pos: BlockPos, block: &Block) -> bool {
         let id = BlockState(block.default_state).block_id();
-        self.ticks.has_scheduled_tick(pos, id)
+        let result = self.ticks.has_scheduled_tick(pos, id);
+        self.level.observe(Observation::TickQuery {
+            pos,
+            kind: id,
+            will_tick_this_tick: false,
+            result,
+        });
+        result
     }
 
     /// `getBlockTicks().willTickThisTick`。
     pub fn will_tick_this_tick(&self, pos: BlockPos, block: &Block) -> bool {
         let id = BlockState(block.default_state).block_id();
-        self.ticks.will_tick_this_tick(pos, id)
+        let result = self.ticks.will_tick_this_tick(pos, id);
+        self.level.observe(Observation::TickQuery {
+            pos,
+            kind: id,
+            will_tick_this_tick: true,
+            result,
+        });
+        result
     }
 
     /// `scheduleTick(pos, fluid, fluid.getTickDelay(level))`，`fluid` 是流体的注册表 ID。
@@ -1412,6 +1467,13 @@ impl<'a> World<'a> {
 
     /// `scheduleTick(pos, fluid, delay)`。
     pub fn schedule_fluid_tick_with_delay(&mut self, pos: BlockPos, fluid: i32, delay: i32) {
+        self.level.observe(Observation::TickScheduled {
+            pos,
+            kind: i64::from(fluid),
+            fluid: true,
+            delay,
+            priority: TickPriority::Normal,
+        });
         self.ticks
             .schedule_fluid(pos, fluid, delay, TickPriority::Normal);
     }

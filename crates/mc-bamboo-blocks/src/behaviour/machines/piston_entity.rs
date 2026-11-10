@@ -24,7 +24,7 @@ const PROGRESS_PER_TICK: f32 = 0.5;
 const SHORT_THRESHOLD: f32 = 0.25;
 
 /// 一次移动。
-pub(super) struct PistonMoving {
+pub(crate) struct PistonMoving {
     pos: BlockPos,
     moved_state: BlockState,
     direction: Direction,
@@ -77,6 +77,19 @@ impl PistonMoving {
     /// `getLastTicked`。
     pub(super) const fn last_ticked(&self) -> i64 {
         self.last_ticked
+    }
+
+    /// 录制层要看到的全部内部状态，带时刻的字段换成相对量。
+    pub fn observed_facts(&self, now: i64) -> (u32, u8, bool, bool, u32, u32, i64) {
+        (
+            self.moved_state.0,
+            self.direction.id() as u8,
+            self.extending,
+            self.is_source_piston,
+            self.progress.to_bits(),
+            self.progress_o.to_bits(),
+            self.last_ticked.saturating_sub(now),
+        )
     }
 
     /// `getExtendedProgress`：伸长时从 -1 走到 0，缩回时从 1 走到 0。
