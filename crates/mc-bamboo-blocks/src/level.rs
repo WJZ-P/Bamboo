@@ -986,9 +986,13 @@ mod tests {
         }
     }
 
+    /// 两个 trait 都要 dyn 安全：`Level` 的调用方拿的是 trait 对象，
+    /// 按区块存或录制读写的实现者可以只实现 `LevelSideState`。
     #[test]
-    fn side_state_without_tables_is_object_safe() {
+    fn side_state_traits_are_object_safe() {
+        fn assert_object_safe(_: &dyn LevelSideState, _: &dyn LevelTables) {}
         let state: &dyn LevelSideState = &NoTables;
         let _ = state as *const dyn LevelSideState;
+        let _ = assert_object_safe;
     }
 }
