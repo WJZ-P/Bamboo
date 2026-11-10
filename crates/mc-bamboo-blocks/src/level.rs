@@ -1,6 +1,9 @@
 //! 这个 crate 和世界存储的边界。
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use mc_bamboo_core::{
     BlockPos, ChunkPos, Hand, LightLayer,
@@ -560,6 +563,28 @@ pub struct RedstoneMemory {
     /// The book about to be placed. Block logic cannot see item components,
     /// so the caller deposits the facts before the use.
     pending_lectern: Option<LecternFacts>,
+    /// 每个区块里**可能**有红石记忆的位置，是超集：一张表里删掉的格子可不去掉。
+    /// 只在某张表新增键时登记，按区块取出时只走这个集合。
+    by_chunk: HashMap<ChunkPos, HashSet<BlockPos>>,
+}
+
+impl RedstoneMemory {
+    /// 某张表第一次记下这一格时登记位置。
+    fn note_pos(&mut self, pos: BlockPos) {
+        self.by_chunk.entry(pos.chunk()).or_default().insert(pos);
+    }
+
+    /// `forget_block_entity` 把这一格的所有记忆都清掉，索引也一起删。
+    fn forget_pos(&mut self, pos: BlockPos) {
+        let chunk = pos.chunk();
+        let Some(positions) = self.by_chunk.get_mut(&chunk) else {
+            return;
+        };
+        positions.remove(&pos);
+        if positions.is_empty() {
+            self.by_chunk.remove(&chunk);
+        }
+    }
 }
 
 /// 讲台比较器要的三项，对应 `LecternBlockEntity` 的 `page`、`pageCount` 和 `hasBook()`。
@@ -598,7 +623,9 @@ impl RedstoneMemory {
 
     /// `ComparatorBlockEntity.setOutputSignal`。
     pub fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
-        self.comparator_outputs.insert(pos, signal);
+        if self.comparator_outputs.insert(pos, signal).is_none() {
+            self.note_pos(pos);
+        }
     }
 
     /// `ChiseledBookShelfBlockEntity.getLastInteractedSlot`，没动过时是 `None`。
@@ -608,7 +635,9 @@ impl RedstoneMemory {
 
     /// 放进或者拿出一本书时记下是哪一格。
     pub fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize) {
-        self.bookshelf_slots.insert(pos, slot);
+        if self.bookshelf_slots.insert(pos, slot).is_none() {
+            self.note_pos(pos);
+        }
     }
 
     /// `JukeboxSongPlayer.isPlaying`。
@@ -619,7 +648,9 @@ impl RedstoneMemory {
     /// `JukeboxSongPlayer.play`、`stop` 之后记下这一格在不在放。
     pub fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
         if playing {
-            self.jukebox_playing.insert(pos);
+            if self.jukebox_playing.insert(pos) {
+                self.note_pos(pos);
+            }
         } else {
             self.jukebox_playing.remove(&pos);
         }
@@ -638,8 +669,8 @@ impl RedstoneMemory {
     pub fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
         if mask == 0 {
             self.crafter_disabled.remove(&pos);
-        } else {
-            self.crafter_disabled.insert(pos, mask);
+        } else if self.crafter_disabled.insert(pos, mask).is_none() {
+            self.note_pos(pos);
         }
     }
 
@@ -648,7 +679,9 @@ impl RedstoneMemory {
     /// `CrafterBlockEntity.setCraftingTicksRemaining`: record the countdown when `crafting` turns on.
     pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
         if remaining > 0 {
-            self.crafter_crafting.insert(pos, remaining);
+            if self.crafter_crafting.insert(pos, remaining).is_none() {
+                self.note_pos(pos);
+            }
         } else {
             self.crafter_crafting.remove(&pos);
         }
@@ -668,8 +701,8 @@ impl RedstoneMemory {
     /// Put the countdowns that have not expired back.
     pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
         for (pos, remaining) in entries {
-            if remaining > 0 {
-                self.crafter_crafting.insert(pos, remaining);
+            if remaining > 0 && self.crafter_crafting.insert(pos, remaining).is_none() {
+                self.note_pos(pos);
             }
         }
     }
@@ -682,6 +715,7 @@ impl RedstoneMemory {
         self.crafter_disabled.remove(&pos);
         self.crafter_crafting.remove(&pos);
         self.lecterns.remove(&pos);
+        self.forget_pos(pos);
     }
 
     /// 这次交互要放上的书。方块行为在 `placeBook` 里取走。
@@ -702,7 +736,9 @@ impl RedstoneMemory {
     ///
     /// Stores the lectern facts at `pos`.
     pub fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
-        self.lecterns.insert(pos, facts);
+        if self.lecterns.insert(pos, facts).is_none() {
+            self.note_pos(pos);
+        }
     }
 
     /// 这一格讲台的页码。没有记录时是 `None`。
@@ -741,7 +777,101 @@ impl RedstoneMemory {
             .filter(|&&(toggled, _)| toggled == pos)
             .count()
     }
+
+    /// 把 `chunk` 里的红石记忆装进盒子搬走。只在 tick 边界调用。
+    ///
+    /// 火把开关记录带世界时间，盒子里改成相对年龄（`now` - 记录时刻），
+    /// 这样目标表的时钟不同也能保持剩余寿命。`pending_lectern` 是一次交互内部的
+    /// 瞬时量，tick 边界上一定是 `None`，不搬。
+    pub fn take_chunk(&mut self, chunk: ChunkPos, now: i64) -> ChunkRedstone {
+        debug_assert!(self.pending_lectern.is_none());
+        let Some(positions) = self.by_chunk.remove(&chunk) else {
+            return ChunkRedstone::default();
+        };
+        let mut positions: Vec<BlockPos> = positions.into_iter().collect();
+        positions.sort_unstable();
+        let mut memory = ChunkRedstone::default();
+        for pos in positions {
+            // 索引是超集，已经删掉的格子查出来就是空。
+            if let Some(signal) = self.comparator_outputs.remove(&pos) {
+                memory.comparator_outputs.push((pos, signal));
+            }
+            if let Some(slot) = self.bookshelf_slots.remove(&pos) {
+                memory.bookshelf_slots.push((pos, slot));
+            }
+            if self.jukebox_playing.remove(&pos) {
+                memory.jukebox_playing.push(pos);
+            }
+            if let Some(mask) = self.crafter_disabled.remove(&pos) {
+                memory.crafter_disabled.push((pos, mask));
+            }
+            if let Some(remaining) = self.crafter_crafting.remove(&pos) {
+                memory.crafter_crafting.push((pos, remaining));
+            }
+            if let Some(facts) = self.lecterns.remove(&pos) {
+                memory.lecterns.push((pos, facts));
+            }
+        }
+        // `torch_toggles` 只保留最近 60 刻，很短，允许整表扫。
+        memory.torch_toggles = self
+            .torch_toggles
+            .iter()
+            .filter(|&&(pos, _)| pos.chunk() == chunk)
+            .map(|&(pos, toggled_at)| (pos, now.saturating_sub(toggled_at)))
+            .collect();
+        self.torch_toggles.retain(|&(pos, _)| pos.chunk() != chunk);
+        memory
+    }
+
+    /// 把盒子里的红石记忆放回表里。只在 tick 边界调用。
+    ///
+    /// 火把记录按目标表的 `now` 从相对年龄换算回世界时间，再用稳定排序接回
+    /// 表里已有记录的后面；同一时刻内的先后不影响任何查询。
+    /// 调用方保证表里已经没有 `chunk` 的条目。
+    pub fn insert_chunk(&mut self, memory: ChunkRedstone, now: i64) {
+        for (pos, signal) in memory.comparator_outputs {
+            self.set_comparator_output(pos, signal);
+        }
+        for (pos, slot) in memory.bookshelf_slots {
+            self.set_last_bookshelf_slot(pos, slot);
+        }
+        for pos in memory.jukebox_playing {
+            self.set_jukebox_playing(pos, true);
+        }
+        for (pos, mask) in memory.crafter_disabled {
+            self.set_crafter_disabled(pos, mask);
+        }
+        for (pos, remaining) in memory.crafter_crafting {
+            self.set_crafter_crafting(pos, remaining);
+        }
+        for (pos, facts) in memory.lecterns {
+            self.set_lectern(pos, facts);
+        }
+        for (pos, age) in memory.torch_toggles {
+            self.torch_toggles.push((pos, now.saturating_sub(age)));
+        }
+        // 稳定排序：原有条目在前，放入的在后，整体仍按时刻升序。
+        self.torch_toggles
+            .sort_by_key(|&(_, toggled_at)| toggled_at);
+    }
 }
+
+/// 一个区块的全部红石记忆，按位置排序。火把开关记录存的是相对年龄。
+#[derive(Debug, Default)]
+pub struct ChunkRedstone {
+    comparator_outputs: Vec<(BlockPos, i32)>,
+    bookshelf_slots: Vec<(BlockPos, usize)>,
+    jukebox_playing: Vec<BlockPos>,
+    crafter_disabled: Vec<(BlockPos, u16)>,
+    crafter_crafting: Vec<(BlockPos, i32)>,
+    lecterns: Vec<(BlockPos, LecternFacts)>,
+    torch_toggles: Vec<(BlockPos, i64)>,
+}
+
+const _: fn() = || {
+    fn assert_send_debug<T: Send + fmt::Debug>() {}
+    assert_send_debug::<ChunkRedstone>();
+};
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -994,5 +1124,138 @@ mod tests {
         let state: &dyn LevelSideState = &NoTables;
         let _ = state as *const dyn LevelSideState;
         let _ = assert_object_safe;
+    }
+
+    const CHUNK_A: ChunkPos = ChunkPos::new(0, 0);
+    const A1: BlockPos = BlockPos::new(1, 64, 1);
+    const A2: BlockPos = BlockPos::new(2, 64, 2);
+    const B1: BlockPos = BlockPos::new(20, 64, 1);
+
+    const FACTS: LecternFacts = LecternFacts {
+        page: 2,
+        page_count: 5,
+        has_content: true,
+    };
+
+    /// 填满六张表里属于 A1 / B1 的条目，火把记录落在 100 / 101 / 102 刻。
+    fn fill(memory: &mut RedstoneMemory) {
+        memory.set_comparator_output(A1, 7);
+        memory.set_last_bookshelf_slot(A1, 3);
+        memory.set_jukebox_playing(A1, true);
+        memory.set_crafter_disabled(A1, 0b101);
+        memory.set_crafter_crafting(A1, 4);
+        memory.set_lectern(A1, FACTS);
+        memory.set_comparator_output(B1, 9);
+        memory.set_crafter_disabled(B1, 0b11);
+        memory.record_torch_toggle(A1, 100);
+        memory.record_torch_toggle(B1, 101);
+        memory.record_torch_toggle(A1, 102);
+    }
+
+    /// 所有能观察到的读，用来比较搬前搬后。倒计时取走后原样放回。
+    fn observed(memory: &mut RedstoneMemory, now: i64) -> Vec<String> {
+        let countdowns = memory.take_crafter_crafting();
+        let mut out = Vec::new();
+        for pos in [A1, A2, B1] {
+            out.push(format!(
+                "{pos:?}:{}:{}:{}:{}:{}:{}:{}",
+                memory.comparator_output(pos),
+                memory.last_bookshelf_slot(pos).unwrap_or(usize::MAX),
+                memory.is_jukebox_playing(pos),
+                memory.crafter_disabled(pos),
+                memory.lectern(pos).is_some(),
+                memory.torch_toggle_count(pos),
+                countdowns.iter().filter(|&&(at, _)| at == pos).count()
+            ));
+        }
+        memory.restore_crafter_crafting(countdowns);
+        // `forget_torch_toggles_before` 也依赖时间顺序，搬完以后它仍要按时刻工作。
+        memory.forget_torch_toggles_before(now);
+        out.push(format!("toggles:{}", memory.torch_toggles.len()));
+        out
+    }
+
+    #[test]
+    fn taking_a_chunk_leaves_no_trace_and_keeps_other_chunks() {
+        let mut memory = RedstoneMemory::default();
+        fill(&mut memory);
+        let boxed = memory.take_chunk(CHUNK_A, 102);
+        assert!(format!("{boxed:?}").contains("ChunkRedstone"));
+        assert_eq!(memory.comparator_output(A1), 0);
+        assert_eq!(memory.last_bookshelf_slot(A1), None);
+        assert!(!memory.is_jukebox_playing(A1));
+        assert_eq!(memory.crafter_disabled(A1), 0);
+        assert_eq!(memory.lectern(A1), None);
+        assert_eq!(memory.torch_toggle_count(A1), 0);
+        // 别的区块一点没动。
+        assert_eq!(memory.comparator_output(B1), 9);
+        assert_eq!(memory.crafter_disabled(B1), 0b11);
+        assert_eq!(memory.torch_toggle_count(B1), 1);
+        assert_eq!(memory.take_crafter_crafting().len(), 0);
+
+        memory.insert_chunk(boxed, 102);
+        assert_eq!(memory.comparator_output(A1), 7);
+        assert_eq!(memory.last_bookshelf_slot(A1), Some(3));
+        assert!(memory.is_jukebox_playing(A1));
+        assert_eq!(memory.crafter_disabled(A1), 0b101);
+        assert_eq!(memory.lectern(A1), Some(FACTS));
+        assert_eq!(memory.torch_toggle_count(A1), 2);
+        assert_eq!(memory.take_crafter_crafting(), [(A1, 4)]);
+    }
+
+    #[test]
+    fn taking_and_putting_back_keeps_the_same_observations() {
+        let mut untouched = RedstoneMemory::default();
+        let mut moved = RedstoneMemory::default();
+        fill(&mut untouched);
+        fill(&mut moved);
+        let boxed = moved.take_chunk(CHUNK_A, 102);
+        moved.insert_chunk(boxed, 102);
+        assert_eq!(observed(&mut untouched, 0), observed(&mut moved, 0));
+        assert_eq!(observed(&mut untouched, 101), observed(&mut moved, 101));
+        assert_eq!(observed(&mut untouched, 103), observed(&mut moved, 103));
+    }
+
+    #[test]
+    fn a_box_moves_into_a_new_table_with_a_different_clock() {
+        let mut source = RedstoneMemory::default();
+        fill(&mut source);
+        let boxed = source.take_chunk(CHUNK_A, 102);
+        // 火把记录存的是相对年龄：100 -> 2，102 -> 0。
+        assert_eq!(boxed.torch_toggles, [(A1, 2), (A1, 0)]);
+
+        // 目标表的时钟晚 900 刻，换算回来的时刻是 995 / 997（加上原有的一条）。
+        let mut target = RedstoneMemory::default();
+        target.set_comparator_output(A2, 5);
+        target.record_torch_toggle(A2, 996);
+        target.insert_chunk(boxed, 997);
+        assert_eq!(target.comparator_output(A1), 7);
+        assert_eq!(target.comparator_output(A2), 5);
+        assert_eq!(target.torch_toggle_count(A1), 2);
+        assert_eq!(target.torch_toggle_count(A2), 1);
+        // `forget_torch_toggles_before` 仍按时刻工作：995 被丢掉，996/997 留着。
+        target.forget_torch_toggles_before(996);
+        assert_eq!(target.torch_toggle_count(A1), 1);
+        assert_eq!(target.torch_toggle_count(A2), 1);
+        target.forget_torch_toggles_before(998);
+        assert_eq!(target.torch_toggle_count(A1), 0);
+        assert_eq!(target.torch_toggle_count(A2), 0);
+    }
+
+    #[test]
+    fn taking_again_finds_nothing_and_index_stays_clean() {
+        let mut memory = RedstoneMemory::default();
+        fill(&mut memory);
+        memory.forget_block_entity(A1);
+        assert_eq!(memory.comparator_output(A1), 0);
+        assert!(memory.by_chunk.get(&CHUNK_A).is_none_or(HashSet::is_empty));
+        let boxed = memory.take_chunk(CHUNK_A, 102);
+        assert!(boxed.comparator_outputs.is_empty());
+        assert!(
+            memory
+                .take_chunk(CHUNK_A, 102)
+                .comparator_outputs
+                .is_empty()
+        );
     }
 }
