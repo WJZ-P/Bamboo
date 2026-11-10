@@ -24,7 +24,7 @@ use tokio::{
 use crate::{
     motion::{Layout, Motion, Pattern},
     stats::{Second, SharedStats},
-    wire::{self, ABILITY_FLYING, CLIENT_TICKS_PER_SECOND, SPAWN, ServerPacket, State},
+    wire::{self, ABILITY_FLYING, CLIENT_TICKS_PER_SECOND, ServerPacket, State},
 };
 
 /// 进服和读包的时限。200 名玩家同时连上时服务端可能忙，留足余量。
@@ -192,7 +192,6 @@ impl Connection {
             let bounds = find_frame(&self.read_buffer, MAX_FRAME_LEN)
                 .map_err(|error| format!("invalid frame: {error}"))?;
             let Some(bounds) = bounds else {
-                let before = self.read_buffer.len();
                 let read = self
                     .stream
                     .read_buf(&mut self.read_buffer)
@@ -206,7 +205,6 @@ impl Connection {
                     };
                     return Err(reason);
                 }
-                self.on_bytes_read(before + read);
                 continue;
             };
             let end = bounds.header_len + bounds.payload_len;
@@ -228,9 +226,6 @@ impl Connection {
             return Ok(payload);
         }
     }
-
-    /// 供 [`Play`] 统计每秒收到的字节；进服阶段不统计。
-    fn on_bytes_read(&mut self, _len: usize) {}
 }
 
 /// Play 状态的主循环：读包、自动回应、按 20 Hz 移动、按秒汇总计数。
@@ -252,7 +247,6 @@ async fn play(
     let mut ping_id = -1_i64;
     let mut pending: HashMap<i64, Instant> = HashMap::new();
     let mut flying = false;
-    let mut last_position = SPAWN;
     let close_reason = "duration elapsed".to_owned();
 
     // 真实客户端画出世界之后才发 player_loaded；这里进服就发，服务端才会接受移动。
@@ -275,7 +269,7 @@ async fn play(
             readable = connection.stream.readable(), if sleep > Duration::ZERO => {
                 let _ = readable;
                 // 读满一帧或者读到一个完整包后退出这次 select 分支。
-                drain_available(connection, &mut second, stats, &mut pending, motion, &mut last_position).await?;
+                drain_available(connection, &mut second, stats, &mut pending, motion).await?;
             }
             _ = tokio::time::sleep(sleep) => {}
         }
@@ -318,13 +312,11 @@ async fn play(
                 second.packets_out += 1;
                 flying = true;
             }
-            last_position = position;
         }
     }
 
     // 结束前把最后一秒的零头记进去。
     stats.second(second_index, second);
-    let _ = last_position;
     let _ = close_reason;
     Ok(())
 }
@@ -338,7 +330,6 @@ async fn drain_available(
     stats: &SharedStats,
     pending: &mut HashMap<i64, Instant>,
     motion: &mut Motion,
-    last_position: &mut (f64, f64, f64),
 ) -> Result<(), String> {
     loop {
         // 只在缓冲区里已有完整帧时解析；没有就读一次 socket。
@@ -363,16 +354,7 @@ async fn drain_available(
         };
         second.packets_in += 1;
         // 一帧的长度前缀不进统计里：read_buf 记的是 socket 上真实收到的字节。
-        handle(
-            connection,
-            second,
-            stats,
-            pending,
-            motion,
-            last_position,
-            &payload,
-        )
-        .await?;
+        handle(connection, second, stats, pending, motion, &payload).await?;
     }
 }
 
@@ -383,7 +365,6 @@ async fn handle(
     stats: &SharedStats,
     pending: &mut HashMap<i64, Instant>,
     motion: &mut Motion,
-    last_position: &mut (f64, f64, f64),
     payload: &[u8],
 ) -> Result<(), String> {
     match wire::classify(State::Play, payload) {
@@ -406,7 +387,6 @@ async fn handle(
         }
         ServerPacket::PlayerPosition(position) => {
             motion.snap_to((position.x, position.y, position.z));
-            *last_position = motion.position();
             let bytes = connection
                 .write(&wire::accept_teleportation_frame(
                     position.id,

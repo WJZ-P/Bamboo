@@ -109,7 +109,8 @@ impl Motion {
         }
     }
 
-    /// 当前位置。
+    /// 当前位置。测试用。
+    #[cfg(test)]
     pub const fn position(&self) -> (f64, f64, f64) {
         self.position
     }
