@@ -643,6 +643,15 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
     [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
 ```
 
+区块的加载/模拟等级也一样：官方 `DistanceManager` 在 JVM 里直接跑（不用 `ServerLevel`），
+随机加票、撤票、玩家移动、改视距和模拟距离、推进若干刻，`TicketTable` 重放，逐步比较
+49×49 窗口里全部区块的两套等级。事实、用法和结果见 `docs/chunk-tickets.md`：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- ticket-oracle <java 路径> \
+    [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
+```
+
 这些命令需要 Java 25 或更新版本。
 
 ## License
