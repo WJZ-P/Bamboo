@@ -830,7 +830,7 @@ pub fn encode_bytes(
 
 /// 从未压缩的 NBT 字节读成一个区块束和透传片段。
 pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedChunk, ChunkNbtError> {
-    let (name, entries) = read_named(bytes, Accounter::unlimited())?;
+    let (name, entries) = read_named(bytes, Accounter::uncompressed_quota())?;
     if !name.is_empty() {
         return Err(ChunkNbtError::Malformed(format!(
             "chunk NBT root name is {name:?}, expected an empty string"

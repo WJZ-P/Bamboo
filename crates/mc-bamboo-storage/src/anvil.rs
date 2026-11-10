@@ -349,8 +349,8 @@ impl RegionFile {
         if payload.len() < CHUNK_HEADER {
             return Err(AnvilError::Truncated);
         }
-        let length = i32::from_be_bytes(payload[..4].try_into().expect("四个字节"));
-        if length < 1 {
+        let raw_length = i32::from_be_bytes(payload[..4].try_into().expect("四个字节"));
+        if raw_length <= 0 {
             return Ok(None);
         }
         let id = payload[4];
@@ -365,7 +365,7 @@ impl RegionFile {
             return compression.decompress(body, limit).map(Some);
         }
         let compression = RegionCompression::from_id(id)?;
-        let length = length as usize - 1;
+        let length = usize::try_from(raw_length - 1).map_err(|_| AnvilError::Truncated)?;
         if length > payload.len() - CHUNK_HEADER {
             return Err(AnvilError::Truncated);
         }
@@ -393,61 +393,79 @@ impl RegionFile {
             }
             return Ok(());
         };
-        let mut body = vec![0u8; CHUNK_HEADER];
         let compressed = self.compression.compress(data)?;
-        let external = compressed.len() + CHUNK_HEADER > EXTERNAL_SECTORS * SECTOR_BYTES;
-        body.extend_from_slice(&compressed);
+        let payload_len = compressed
+            .len()
+            .checked_add(1)
+            .ok_or(AnvilError::TooLarge(compressed.len()))?;
+        let record_len = payload_len
+            .checked_add(4)
+            .ok_or(AnvilError::TooLarge(compressed.len()))?;
+        let external = record_len > EXTERNAL_SECTORS * SECTOR_BYTES;
+        let length = if external {
+            1i32
+        } else {
+            i32::try_from(payload_len).map_err(|_| AnvilError::TooLarge(compressed.len()))?
+        };
         let id = if external {
             self.compression.id() | EXTERNAL_FLAG
         } else {
             self.compression.id()
         };
-        let length = if external {
-            1i32
+        let mut body = Vec::with_capacity(CHUNK_HEADER + compressed.len());
+        body.extend_from_slice(&length.to_be_bytes());
+        body.push(id);
+        body.extend_from_slice(&compressed);
+        let count = if external {
+            1
         } else {
-            i32::try_from(compressed.len() + 1)
-                .map_err(|_| AnvilError::TooLarge(compressed.len()))?
+            record_len.div_ceil(SECTOR_BYTES)
         };
-        body[..4].copy_from_slice(&length.to_be_bytes());
-        body[4] = id;
-        let count = body.len().div_ceil(SECTOR_BYTES);
-        let count = if external { 1 } else { count };
+        // offset 的低 8 位只能放 255 个扇区；超出的都走外置文件。
+        if count > u8::MAX as usize {
+            return Err(AnvilError::TooLarge(record_len));
+        }
         let sector = self.sectors.allocate(count);
 
-        // 官方顺序：先写载荷，再改头，最后释放旧扇区。
-        if external {
-            let mut out = vec![0u8; CHUNK_HEADER];
-            out[..4].copy_from_slice(&1i32.to_be_bytes());
-            out[4] = id;
-            write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &out)?;
-            let path = self.external_path(pos);
-            let tmp = self.external_dir.join(format!(
-                ".{}.{}.{}.tmp",
-                self.path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                pos.x,
-                pos.z
-            ));
+        // 官方顺序：先写载荷，再改头，最后跑提交动作（`.mcc` 的 rename）并释放旧扇区。
+        let tmp_path = self.external_dir.join(format!(
+            ".{}.{}.{}.tmp",
+            self.path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            pos.x,
+            pos.z
+        ));
+        let commit = if external {
+            let mut stub = vec![0u8; CHUNK_HEADER];
+            stub[..4].copy_from_slice(&1i32.to_be_bytes());
+            stub[4] = id;
+            write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &stub)?;
             {
-                let mut file = File::create(&tmp)?;
+                let mut file = File::create(&tmp_path)?;
                 file.write_all(&body)?;
                 file.sync_all()?;
             }
-            fs::rename(&tmp, &path)?;
+            // 先不改名：等头写完再提交，头写到一半断电时旧的 `.mcc` 还在。
+            Some(&tmp_path)
         } else {
             write_at(&mut self.file, sector as u64 * SECTOR_BYTES as u64, &body)?;
-        }
+            None
+        };
         let old = self.offsets[index];
         self.offsets[index] = pack_offset(
             u32::try_from(sector).map_err(|_| AnvilError::TooLarge(sector))?,
-            u32::try_from(count).map_err(|_| AnvilError::TooLarge(count))?,
+            count as u32,
         );
         self.timestamps[index] = timestamp;
         self.write_header()?;
-        if old != 0 {
+        if let Some(tmp) = commit {
+            fs::rename(tmp, self.external_path(pos))?;
+        } else if old != 0 {
             let _ = fs::remove_file(self.external_path(pos));
+        }
+        if old != 0 {
             self.sectors
                 .set(sector_number(old), sector_count(old), false);
         }
@@ -688,6 +706,35 @@ mod tests {
         assert_eq!(region.read(pos, 1 << 24), Ok(Some(data)));
         region.write(pos, None, 8).expect("删除");
         assert!(!external.exists(), "删除时 .mcc 也删掉");
+    }
+
+    /// 外置文件的提交动作在头写完之后才跑：旧 `.mcc` 在头写坏时还在。
+    #[test]
+    fn external_files_keep_the_old_version_until_the_header_is_written() {
+        let dir = TempDir::new("external-staging");
+        let pos = ChunkPos::new(2, 3);
+        let mut big = Vec::new();
+        for _ in 0..300 {
+            big.extend(sample(big.len() as u64));
+        }
+        let mut region = open_region(&dir.0, RegionPos { x: 0, z: 0 }, RegionCompression::None)
+            .expect("打开成功");
+        region.write(pos, Some(&big), 1).expect("第一次写");
+        let external = dir.0.join("c.2.3.mcc");
+        let first = fs::read(&external).expect("读到 .mcc");
+        let mut second = big.clone();
+        second.extend_from_slice(&[0xab; 64]);
+        region.write(pos, Some(&second), 2).expect("第二次写");
+        let written = fs::read(&external).expect("读到 .mcc");
+        assert_ne!(first, written, "内容确实更新了");
+        assert_eq!(region.read(pos, 1 << 24), Ok(Some(second)));
+        // 暂存文件提交后不该留下。
+        let leftovers: Vec<_> = fs::read_dir(&dir.0)
+            .expect("读目录")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "暂存文件没有清理");
     }
 
     #[test]

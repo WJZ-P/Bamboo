@@ -69,6 +69,11 @@ impl Accounter {
         Self::new(DEFAULT_QUOTA)
     }
 
+    /// 官方 `NbtAccounter.uncompressedQuota`，读未压缩的存档文件时用它。
+    pub const fn uncompressed_quota() -> Self {
+        Self::new(crate::UNCOMPRESSED_QUOTA)
+    }
+
     /// 官方 `NbtAccounter.unlimitedHeap`，可信数据用它。
     pub const fn unlimited() -> Self {
         Self::new(u64::MAX)
