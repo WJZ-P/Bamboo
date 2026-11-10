@@ -16,7 +16,7 @@ const MAX_TICKS_PER_TICK: usize = 65_536;
 
 /// 一张表正在 tick 中途，或者有待放回的方块实体，现在不能整块搬走。
 ///
-/// 只有 [`BlockTicks::take_chunk`] 和 [`BlockEntities::take_chunk`] 会返回它；
+/// 只有 [`BlockTicks::take_chunk`] 和 `BlockEntities::take_chunk` 会返回它；
 /// 调用方等到 tick 边界再试。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Busy;
