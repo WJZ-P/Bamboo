@@ -23,6 +23,7 @@
 //! | `book` | 书与笔的编辑和署名 |
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
+//! | `profiler` | 每刻各阶段的耗时直方图和报告 |
 
 pub mod admin;
 mod block_drops;
@@ -58,6 +59,7 @@ mod outgoing;
 mod player;
 mod player_grid;
 mod player_move;
+mod profiler;
 mod region;
 mod scoreboard;
 mod secure_chat;
