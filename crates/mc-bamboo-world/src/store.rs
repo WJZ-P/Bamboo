@@ -17,6 +17,7 @@ use mc_bamboo_data::{block_of_state, facts, registries::block_entity_type, state
 use crate::{
     MIN_Y, WORLD_HEIGHT,
     chunk::{Chunk, HeightmapKind, Section},
+    column::{ChunkColumn, LightPending},
     flat,
     light::{Chunks, LevelLight, LightChanges, SectionPos, write_block},
 };
@@ -46,9 +47,14 @@ struct EditedChunks {
 impl EditedChunks {
     /// 要改这个区块了，第一次改时从模板复制一份。
     fn chunk_mut(&mut self, pos: ChunkPos, template: &Chunk) -> &mut Chunk {
+        self.bump_revision(pos);
+        self.chunks.entry(pos).or_insert_with(|| template.clone())
+    }
+
+    /// 给这个区块换一个从没用过的版本号。
+    fn bump_revision(&mut self, pos: ChunkPos) {
         self.last_revision += 1;
         self.revisions.insert(pos, self.last_revision);
-        self.chunks.entry(pos).or_insert_with(|| template.clone())
     }
 
     /// 没改过的区块是 0。
@@ -302,6 +308,37 @@ impl ChunkStore {
     pub fn light_value(&self, layer: LightLayer, pos: BlockPos) -> u8 {
         self.light.light_value(layer, pos)
     }
+
+    /// 把 `pos` 这个区块整个拿走。之后这个位置读起来和没改过的区块一样（模板）。
+    ///
+    /// 区块束里只有一份光照，所以只允许在光照全部算完、没有算到一半的轮次时取。
+    /// 调用方先跑完光照（[`finish_light_updates`](Self::finish_light_updates)）再取；这里不会偷偷跑。
+    /// 还没发给客户端的光照变化里属于这个区块的条目一并丢掉，发区块包是调用方的事。
+    pub fn take_column(&mut self, pos: ChunkPos) -> Result<Box<ChunkColumn>, LightPending> {
+        if !self.light.ready_to_take_column() {
+            return Err(LightPending);
+        }
+        let chunk = self
+            .edited
+            .chunks
+            .remove(&pos)
+            .unwrap_or_else(|| self.template.clone());
+        let light = self.light.take_column(pos);
+        self.edited.bump_revision(pos);
+        Ok(Box::new(ChunkColumn::new(chunk, light)))
+    }
+
+    /// 把一个区块束放到 `pos`。这个位置原来的内容被整个换掉。
+    ///
+    /// 两层光照同时放进引擎和给别人读的那份，之后引擎能接着正常工作。
+    /// 版本号从本 store 自己的计数器取，不沿用盒子里带来的值，区块包的缓存因此会失效。
+    /// 放入不产生发给客户端的光照变化。
+    pub fn insert_column(&mut self, pos: ChunkPos, column: Box<ChunkColumn>) {
+        let (chunk, light) = column.into_parts();
+        self.edited.chunks.insert(pos, chunk);
+        self.edited.bump_revision(pos);
+        self.light.insert_column(pos, light);
+    }
 }
 
 const fn is_inside_world(y: i32) -> bool {
@@ -496,6 +533,27 @@ mod tests {
 
         assert_ne!(store.revision(neighbor), before.0);
         assert_eq!(store.revision(far), before.1);
+    }
+
+    #[test]
+    fn moving_a_column_changes_all_three_revision_components() {
+        let mut store = ChunkStore::flat();
+        store.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+        store.finish_light_updates();
+        let pos = ChunkPos::new(0, 0);
+        let before = store.revision(pos);
+
+        let column = store.take_column(pos).expect("光照算完了");
+        let taken = store.revision(pos);
+        assert_ne!(taken.chunk, before.chunk);
+        assert_ne!(taken.light[0], before.light[0]);
+        assert_ne!(taken.light[1], before.light[1]);
+
+        store.insert_column(pos, column);
+        let inserted = store.revision(pos);
+        assert_ne!(inserted.chunk, taken.chunk);
+        assert_ne!(inserted.light[0], taken.light[0]);
+        assert_ne!(inserted.light[1], taken.light[1]);
     }
 
     #[test]

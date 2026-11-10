@@ -4,6 +4,7 @@
 //! 把区块编码成数据包的工作在 `mc-bamboo-game` 里完成。
 
 pub mod chunk;
+pub mod column;
 pub mod flat;
 pub mod light;
 pub mod palette;
