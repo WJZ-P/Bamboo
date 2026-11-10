@@ -131,6 +131,28 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     report.finish()
 }
 
+/// 测试用的区域目录，结束时删掉，不留大文件在磁盘上。
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!(
+            "bamboo-storage-oracle-{name}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("main")
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn parse_show(args: &[&str]) -> Result<usize, String> {
     match args {
         [] => Ok(DEFAULT_SHOW),
@@ -316,11 +338,11 @@ fn run_cases(
         let case = format!("compression {id}");
 
         // Bamboo 写、官方读。
-        let dir = temp_dir(&format!("bamboo-write-{id}"))?;
+        let dir = TempDir::new(&format!("bamboo-write-{id}"))?;
         let payload_a = sample_bytes(1);
         let payload_b = sample_bytes(2);
         {
-            let mut region = open_region(&dir, RegionPos { x: 0, z: 0 }, compression)
+            let mut region = open_region(&dir.0, RegionPos { x: 0, z: 0 }, compression)
                 .map_err(|error| error.to_string())?;
             region
                 .write(ChunkPos::new(1, 2), Some(&payload_a), 100)
@@ -345,7 +367,7 @@ fn run_cases(
                 lines,
                 json!({
                     "command": "region-read",
-                    "dir": dir.to_string_lossy(),
+                    "dir": dir.0.to_string_lossy(),
                     "x": 0, "z": 0,
                     "positions": [
                         {"x": 1, "z": 2}, {"x": 3, "z": 4}, {"x": 9, "z": 9}
@@ -379,14 +401,14 @@ fn run_cases(
         }
 
         // 官方写、Bamboo 读。
-        let dir = temp_dir(&format!("official-write-{id}"))?;
+        let dir = TempDir::new(&format!("official-write-{id}"))?;
         let payload = sample_bytes(4);
         ask(
             stdin,
             lines,
             json!({
                 "command": "region-write",
-                "dir": dir.to_string_lossy(),
+                "dir": dir.0.to_string_lossy(),
                 "x": 5, "z": -33,
                 "compression": id,
                 "chunks": [
@@ -396,7 +418,7 @@ fn run_cases(
             }),
         )?;
         {
-            let mut region = open_region(&dir, RegionPos::of(ChunkPos::new(5, -33)), compression)
+            let mut region = open_region(&dir.0, RegionPos::of(ChunkPos::new(5, -33)), compression)
                 .map_err(|error| error.to_string())?;
             report.check(
                 region
@@ -467,17 +489,6 @@ fn sample_bytes(seed: u64) -> Vec<u8> {
             (state >> 24) as u8
         })
         .collect()
-}
-
-fn temp_dir(name: &str) -> Result<std::path::PathBuf, String> {
-    let path = std::env::temp_dir().join(format!(
-        "bamboo-storage-oracle-{name}-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("main")
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    Ok(path)
 }
 
 fn encode_b64(bytes: &[u8]) -> String {
