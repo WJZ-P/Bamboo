@@ -30,6 +30,12 @@ pub struct BenchLevel {
     pub entities: Entities,
 }
 
+impl Default for BenchLevel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BenchLevel {
     pub fn new() -> Self {
         Self {
@@ -62,15 +68,22 @@ impl BenchLevel {
         for (pos, slots) in &self.containers {
             let mut text = String::new();
             for stack in slots {
-                text.push_str(&format!("{}:{}:{}:", stack.item, stack.count, stack.added.len()));
+                text.push_str(&format!(
+                    "{}:{}:{}:",
+                    stack.item,
+                    stack.count,
+                    stack.added.len()
+                ));
             }
             out.push(format!("c{pos:?}:{text}"));
         }
-        for (pos, _) in &self.blocks {
+        for pos in self.blocks.keys() {
             out.push(format!(
                 "r{pos:?}:{}:{}:{}:{}:{}:{}",
                 self.redstone.comparator_output(*pos),
-                self.redstone.last_bookshelf_slot(*pos).unwrap_or(usize::MAX),
+                self.redstone
+                    .last_bookshelf_slot(*pos)
+                    .unwrap_or(usize::MAX),
                 self.redstone.is_jukebox_playing(*pos),
                 self.redstone.crafter_disabled(*pos),
                 self.redstone.lectern(*pos).is_some(),
@@ -300,11 +313,7 @@ impl Machine {
                 let mut world = World::new(&mut self.level, &mut self.ticks);
                 world.set_block_and_update(pos, next);
             }
-            Input::Refill {
-                pos,
-                stack,
-                period,
-            } if now % period == 0 => {
+            Input::Refill { pos, stack, period } if now % period == 0 => {
                 let mut changed = false;
                 let ok = self.level.with_container(pos, &mut |container| {
                     for slot in 0..container.size() {
@@ -324,6 +333,12 @@ impl Machine {
             }
             _ => {}
         }
+    }
+
+    /// 不套录制包装地跑一个世界刻，供钩子开销基准使用。
+    pub fn plain_step(&mut self, now: i64) {
+        self.apply_input(now);
+        mc_bamboo_blocks::run_scheduled_ticks(&mut self.level, &mut self.ticks, now);
     }
 
     /// 跑一个世界刻，返回这一刻收集到的录制记录。`recording` 为假时不套包装。

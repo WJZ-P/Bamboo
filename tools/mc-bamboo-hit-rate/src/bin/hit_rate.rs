@@ -15,7 +15,6 @@ use mc_bamboo_blocks::recording::{
     ChunkSection, HitRates, Hits, Read, Record, Uncacheable, Write, hit_rates,
 };
 
-
 const DEFAULT_TICKS: i64 = 4000;
 
 fn percentile(mut values: Vec<u64>, p: usize) -> u64 {
@@ -123,10 +122,96 @@ fn summarize(name: &str, ticks: i64, records: &[Record], rates: &HitRates) -> St
         )
     };
     out.push_str(&row("严格", "精确", &rates.exact_strict, cacheable_strict));
-    out.push_str(&row("严格", "段哈希", &rates.section_strict, cacheable_strict));
-    out.push_str(&row("乐观", "精确", &rates.exact_optimistic, cacheable_optimistic));
-    out.push_str(&row("乐观", "段哈希", &rates.section_optimistic, cacheable_optimistic));
-    out.push_str("\n记录数随触发数的增长（严格口径，精确 / 段哈希）：\n\n```\n");
+    out.push_str(&row(
+        "严格",
+        "段哈希",
+        &rates.section_strict,
+        cacheable_strict,
+    ));
+    out.push_str(&row(
+        "乐观",
+        "精确",
+        &rates.exact_optimistic,
+        cacheable_optimistic,
+    ));
+    out.push_str(&row(
+        "乐观",
+        "段哈希",
+        &rates.section_optimistic,
+        cacheable_optimistic,
+    ));
+    // 按触发种类分开统计。
+    let mut kinds: BTreeMap<&str, (usize, u128, u128)> = BTreeMap::new();
+    for record in records {
+        let key = match record.trigger {
+            mc_bamboo_blocks::level::Trigger::ScheduledTick { .. } => "计划刻",
+            mc_bamboo_blocks::level::Trigger::ScheduledFluidTick { .. } => "流体刻",
+            mc_bamboo_blocks::level::Trigger::BlockEvent { .. } => "方块事件",
+            mc_bamboo_blocks::level::Trigger::BlockEntityTick { .. } => "方块实体 tick",
+        };
+        let entry = kinds.entry(key).or_default();
+        entry.0 += 1;
+        entry.1 += u128::from(record.nanos);
+        entry.2 += u128::from(record.reads.len() as u64);
+    }
+    out.push_str("\n按触发种类（次数 / 耗时占比 / 平均读项数）：\n\n");
+    for (kind, (count, nanos, reads)) in &kinds {
+        out.push_str(&format!(
+            "- {kind}：{count} / {} / {:.1}\n",
+            nanos_pct(*nanos, rates.total_nanos),
+            *reads as f64 / *count as f64,
+        ));
+    }
+    // 读世界时间的触发按方块归类，点出是哪些行为在读时间。
+    let mut time_readers: BTreeMap<String, usize> = BTreeMap::new();
+    for record in records {
+        if !record.uncacheable.contains(&Uncacheable::Time) {
+            continue;
+        }
+        let kind = match record.trigger {
+            mc_bamboo_blocks::level::Trigger::ScheduledTick { kind, .. }
+            | mc_bamboo_blocks::level::Trigger::BlockEvent { kind, .. }
+            | mc_bamboo_blocks::level::Trigger::BlockEntityTick { kind, .. } => Some(kind),
+            mc_bamboo_blocks::level::Trigger::ScheduledFluidTick { .. } => None,
+        };
+        let name = kind
+            .and_then(|id| mc_bamboo_data::blocks::BLOCKS.get(id))
+            .map_or("流体".to_owned(), |block| block.name.to_owned());
+        *time_readers.entry(name).or_default() += 1;
+    }
+    if !time_readers.is_empty() {
+        out.push_str("\n读世界时间的触发按方块分：\n\n");
+        for (name, count) in &time_readers {
+            out.push_str(&format!("- `{name}`：{count}\n"));
+        }
+    }
+    // 记录数随刻数的增长：每 500 刻看一次不同精确键的数量。
+    let mut seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
+    let mut growth = Vec::new();
+    let mut cursor = 0_usize;
+    for record in records {
+        while record.tick > cursor as i64 {
+            if cursor.is_multiple_of(500) {
+                growth.push((cursor, seen.len()));
+            }
+            cursor += 1;
+        }
+        if record.cacheable(true) {
+            seen.insert(record.exact_key(true));
+        }
+    }
+    while cursor <= ticks as usize {
+        if cursor.is_multiple_of(500) {
+            growth.push((cursor, seen.len()));
+        }
+        cursor += 1;
+    }
+    out.push_str("\n不同精确键数随刻数增长（每 500 刻）：\n\n```\n");
+    for (tick, distinct) in growth {
+        out.push_str(&format!("{tick}: {distinct}\n"));
+    }
+    out.push_str("```\n\n");
+    out.push_str("不同精确键数随触发数增长（严格口径，精确 / 段哈希）：\n\n```\n");
     for (count, exact, section) in &rates.exact_strict.growth {
         out.push_str(&format!("{count}: {exact} / {section}\n"));
     }

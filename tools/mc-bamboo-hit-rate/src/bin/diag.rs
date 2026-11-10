@@ -7,7 +7,9 @@ use mc_bamboo_hit_rate::{machines, world::Input};
 fn main() {
     let mut m = machines::repeater_clock();
     println!("input={:?}", m.input);
-    let Input::Clock { pos, .. } = m.input.clone() else { panic!() };
+    let Input::Clock { pos, .. } = m.input.clone() else {
+        panic!()
+    };
     for now in 1..=16 {
         m.step(now, false);
         if now % 4 == 0 || now == 9 {
@@ -18,7 +20,11 @@ fn main() {
                 let tag = if s.is(blocks::REDSTONE_BLOCK) {
                     "R"
                 } else if s.is(blocks::REDSTONE_WIRE) {
-                    if s.get(mc_bamboo_blocks::state::POWER) > 0 { "W" } else { "w" }
+                    if s.get(mc_bamboo_blocks::state::POWER) > 0 {
+                        "W"
+                    } else {
+                        "w"
+                    }
                 } else if s.is(blocks::REPEATER) {
                     if s.get(POWERED) { "P" } else { "p" }
                 } else if s.is(blocks::REDSTONE_LAMP) {
@@ -31,7 +37,11 @@ fn main() {
                 row.push(tag);
             }
             let pending: Vec<_> = m.ticks.pending().collect();
-            println!("tick {now}: source={:?} row={} pending={pending:?}", m.level.block_state(pos).0, row.concat());
+            println!(
+                "tick {now}: source={:?} row={} pending={pending:?}",
+                m.level.block_state(pos).0,
+                row.concat()
+            );
         }
     }
 }

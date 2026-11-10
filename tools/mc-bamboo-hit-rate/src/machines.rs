@@ -7,9 +7,7 @@
 use mc_bamboo_blocks::{
     BlockState, BlockTicks,
     behaviour::machines::FurnaceEntity,
-    state::{
-        ComparatorMode, DELAY, FACING, HORIZONTAL_FACING, LIT, MODE_COMPARATOR,
-    },
+    state::{ComparatorMode, DELAY, FACING, HORIZONTAL_FACING, LIT, MODE_COMPARATOR},
 };
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{CookingKind, blocks, items};
@@ -41,7 +39,12 @@ fn machine(name: &'static str, input: Input) -> Machine {
 
 /// 给一个方块排一条 `delay` 刻后到期的计划刻。
 fn kick(ticks: &mut BlockTicks, pos: BlockPos, state: BlockState, delay: i32) {
-    ticks.schedule(pos, state.block_id(), delay, mc_bamboo_blocks::TickPriority::Normal);
+    ticks.schedule(
+        pos,
+        state.block_id(),
+        delay,
+        mc_bamboo_blocks::TickPriority::Normal,
+    );
 }
 
 /// 一个周期开关：这一格在红石块（满信号）和空气之间翻转，每 `period` 刻一次。
@@ -103,8 +106,14 @@ pub fn observer_clock() -> Machine {
     // A 朝东看 B，B 朝西看 A；A 的背面接一盏灯。
     let a = at(1, 0);
     let b = at(2, 0);
-    m.level.set(a, BlockState(blocks::OBSERVER).with(FACING, Direction::East));
-    m.level.set(b, BlockState(blocks::OBSERVER).with(FACING, Direction::West));
+    m.level.set(
+        a,
+        BlockState(blocks::OBSERVER).with(FACING, Direction::East),
+    );
+    m.level.set(
+        b,
+        BlockState(blocks::OBSERVER).with(FACING, Direction::West),
+    );
     m.level.set(at(0, 0), BlockState(blocks::REDSTONE_LAMP));
     // 起振：A 到点翻转 POWERED，B 看到形状变化再排自己的脉冲，往复成时钟。
     kick(&mut m.ticks, a, BlockState(blocks::OBSERVER), 2);
@@ -153,9 +162,12 @@ pub fn redstone_wire_array() -> Machine {
     m.level.set(at(15, 7), BlockState(blocks::REDSTONE_LAMP));
     clock_input(&mut m, at(-1, 7), 12);
     // 中继器把输入放大成阵列里的方波，避免整片线只靠一格电源衰减。
-    m.level.set(at(0, 7), BlockState(blocks::REPEATER)
-        .with(HORIZONTAL_FACING, Direction::West)
-        .with(DELAY, 1));
+    m.level.set(
+        at(0, 7),
+        BlockState(blocks::REPEATER)
+            .with(HORIZONTAL_FACING, Direction::West)
+            .with(DELAY, 1),
+    );
     connect_wires(&mut m);
     m
 }
@@ -167,7 +179,8 @@ pub fn hopper_chain() -> Machine {
         m.place_hopper(at(x, 0), Direction::East);
     }
     m.level.set(at(12, 0), BlockState(blocks::CHEST));
-    m.level.set_container(at(12, 0), vec![ItemStack::empty(); 27]);
+    m.level
+        .set_container(at(12, 0), vec![ItemStack::empty(); 27]);
     let source = at(0, 0).above();
     m.level.set(source, BlockState(blocks::CHEST));
     let mut slots = vec![ItemStack::empty(); 27];
@@ -194,7 +207,8 @@ pub fn item_sorter() -> Machine {
         slots[0] = ItemStack::new(items::DIRT, 1);
         m.level.set_container(hopper, slots);
         m.level.set(hopper.below(), BlockState(blocks::CHEST));
-        m.level.set_container(hopper.below(), vec![ItemStack::empty(); 27]);
+        m.level
+            .set_container(hopper.below(), vec![ItemStack::empty(); 27]);
         m.level.set(
             at(x, 1),
             BlockState(blocks::COMPARATOR)
@@ -264,10 +278,12 @@ pub fn furnace_array() -> Machine {
     for i in 0..4 {
         let x = i * 3;
         let furnace = at(x, 0);
-        m.level.set(furnace, BlockState(blocks::FURNACE).with(LIT, true));
+        m.level
+            .set(furnace, BlockState(blocks::FURNACE).with(LIT, true));
         m.place_hopper(furnace.above(), Direction::Down);
         m.place_hopper(furnace.below(), Direction::Down);
-        m.level.set(furnace.below().below(), BlockState(blocks::CHEST));
+        m.level
+            .set(furnace.below().below(), BlockState(blocks::CHEST));
         m.level
             .set_container(furnace.below().below(), vec![ItemStack::empty(); 27]);
         let mut entity = FurnaceEntity::new(furnace, CookingKind::Smelting);

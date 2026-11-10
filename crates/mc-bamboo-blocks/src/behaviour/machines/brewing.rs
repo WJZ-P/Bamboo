@@ -67,6 +67,17 @@ pub struct BrewingStandEntity {
     tick_phase: u8,
 }
 
+/// 酿造台里录制层要看的状态（数据槽之外）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BrewingFacts {
+    pub last_potion_count: Option<[bool; 3]>,
+    pub ingredient: Option<i32>,
+    pub speed_multiplier: u32,
+    pub last_recipe: Option<&'static str>,
+    pub yield_tick: bool,
+    pub tick_phase: u8,
+}
+
 impl BrewingStandEntity {
     /// 新建一个空酿造台。
     pub fn new(pos: BlockPos) -> Self {
@@ -119,22 +130,15 @@ impl BrewingStandEntity {
     }
 
     /// 录制层要看到的、数据槽之外的内部状态。
-    pub fn observed_facts(&self) -> (
-        Option<[bool; 3]>,
-        Option<i32>,
-        u32,
-        Option<&'static str>,
-        bool,
-        u8,
-    ) {
-        (
-            self.last_potion_count,
-            self.ingredient,
-            self.speed_multiplier.to_bits(),
-            self.last_recipe.map(|recipe| recipe.id),
-            self.yield_tick,
-            self.tick_phase,
-        )
+    pub fn observed_facts(&self) -> BrewingFacts {
+        BrewingFacts {
+            last_potion_count: self.last_potion_count,
+            ingredient: self.ingredient,
+            speed_multiplier: self.speed_multiplier.to_bits(),
+            last_recipe: self.last_recipe.map(|recipe| recipe.id),
+            yield_tick: self.yield_tick,
+            tick_phase: self.tick_phase,
+        }
     }
 
     /// 官方 `ContainerData.set`。存档回读和菜单写数据槽都走这里。

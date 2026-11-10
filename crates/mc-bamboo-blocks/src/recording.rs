@@ -25,7 +25,9 @@ use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     BlockState, Container, HopperEntity, Level, LevelRandom,
-    behaviour::machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity},
+    behaviour::machines::{
+        BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
+    },
     block_entity::{BlockEntity, BlockEvent},
     entity::Entities,
     gamerules::BlockGameRules,
@@ -95,7 +97,10 @@ impl Write {
         match self {
             Self::Block { pos, .. }
             | Self::Redstone { pos: Some(pos), .. }
-            | Self::BlockEvent { event: BlockEvent { pos, .. }, .. }
+            | Self::BlockEvent {
+                event: BlockEvent { pos, .. },
+                ..
+            }
             | Self::BlockEntity { pos, .. }
             | Self::Container { pos, .. }
             | Self::Sign { pos, .. }
@@ -189,12 +194,20 @@ impl Record {
 
     /// 读集合里去重后的位置数。
     pub fn read_positions(&self) -> usize {
-        self.reads.iter().filter_map(|read| read.pos).collect::<HashSet<_>>().len()
+        self.reads
+            .iter()
+            .filter_map(|read| read.pos)
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// 写集合里去重后的位置数。
     pub fn write_positions(&self) -> usize {
-        self.writes.iter().filter_map(|write| write.pos()).collect::<HashSet<_>>().len()
+        self.writes
+            .iter()
+            .filter_map(|write| write.pos())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// 这条记录自身占的内存估算（字节）。
@@ -289,7 +302,8 @@ impl<'a> Recording<'a> {
             self.ensure_section(section);
         }
         let entry = Read { pos, kind, value };
-        let hash = section.and_then(|section| self.inner.borrow().section_hashes.get(&section).copied());
+        let hash =
+            section.and_then(|section| self.inner.borrow().section_hashes.get(&section).copied());
         let mut inner = self.inner.borrow_mut();
         match inner.current.as_mut() {
             Some(frame) => {
@@ -558,7 +572,10 @@ fn hash_effect(effect: &Effect) -> u64 {
             pos.hash(&mut hasher);
             success.hash(&mut hasher);
         }
-        Effect::DispenserEquipped { entity_id, menu_slot } => {
+        Effect::DispenserEquipped {
+            entity_id,
+            menu_slot,
+        } => {
             entity_id.hash(&mut hasher);
             menu_slot.hash(&mut hasher);
         }
@@ -618,7 +635,10 @@ fn entity_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
         campfire.recipe_facts().hash(&mut hasher);
     } else if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
         hopper.cooldown_time().hash(&mut hasher);
-        hopper.ticked_game_time().saturating_sub(now).hash(&mut hasher);
+        hopper
+            .ticked_game_time()
+            .saturating_sub(now)
+            .hash(&mut hasher);
     } else if let Some(shulker) = entity.as_any().downcast_ref::<ShulkerBoxEntity>() {
         shulker.open_count().hash(&mut hasher);
         (shulker.status() as u8).hash(&mut hasher);
@@ -774,7 +794,11 @@ impl LevelSideState for Recording<'_> {
     fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
         let value = self.level.block_entity_dyn(pos);
         let now = self.inner.borrow().tick;
-        self.read(Some(pos), K_BLOCK_ENTITY, value.map(|entity| entity_facts(entity, now)));
+        self.read(
+            Some(pos),
+            K_BLOCK_ENTITY,
+            value.map(|entity| entity_facts(entity, now)),
+        );
         value
     }
 
@@ -802,7 +826,11 @@ impl LevelSideState for Recording<'_> {
         self.write(Write::BlockEntity {
             pos,
             kind: 1,
-            value: stable_hash(&value.as_ref().map(|entity| entity_facts(entity.as_ref(), now))),
+            value: stable_hash(
+                &value
+                    .as_ref()
+                    .map(|entity| entity_facts(entity.as_ref(), now)),
+            ),
         });
         value
     }
@@ -814,7 +842,9 @@ impl LevelSideState for Recording<'_> {
         self.read(
             Some(pos),
             K_BLOCK_ENTITY,
-            value.as_ref().map(|(id, entity)| (*id, entity_facts(entity.as_ref(), now))),
+            value
+                .as_ref()
+                .map(|(id, entity)| (*id, entity_facts(entity.as_ref(), now))),
         );
         value
     }
@@ -825,7 +855,12 @@ impl LevelSideState for Recording<'_> {
         self.read(
             Some(pos),
             K_BLOCK_ENTITY,
-            (id, value.as_ref().map(|entity| entity_facts(entity.as_ref(), now))),
+            (
+                id,
+                value
+                    .as_ref()
+                    .map(|entity| entity_facts(entity.as_ref(), now)),
+            ),
         );
         value
     }
@@ -833,7 +868,11 @@ impl LevelSideState for Recording<'_> {
     fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>) {
         // 放回去也不是「效果」：实体改了什么由这次触发里别的读写记录。
         let now = self.inner.borrow().tick;
-        self.read(Some(pos), K_BLOCK_ENTITY, (id, entity_facts(entity.as_ref(), now)));
+        self.read(
+            Some(pos),
+            K_BLOCK_ENTITY,
+            (id, entity_facts(entity.as_ref(), now)),
+        );
         self.level.put_block_entity(pos, id, entity);
     }
 
@@ -939,7 +978,11 @@ impl Level for Recording<'_> {
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
         let value = hash_sign(&content);
         let applied = self.level.set_sign(pos, content);
-        self.write(Write::Sign { pos, value, applied });
+        self.write(Write::Sign {
+            pos,
+            value,
+            applied,
+        });
         applied
     }
 
@@ -991,7 +1034,11 @@ impl Level for Recording<'_> {
 
     fn block_weather(&self) -> BlockWeather {
         let value = self.level.block_weather();
-        self.read(None, K_WEATHER, (value.rain_level.to_bits(), value.thunder_level.to_bits()));
+        self.read(
+            None,
+            K_WEATHER,
+            (value.rain_level.to_bits(), value.thunder_level.to_bits()),
+        );
         value
     }
 
@@ -1054,9 +1101,15 @@ impl Level for Recording<'_> {
 
     fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
         let now = self.inner.borrow().tick;
-        let before = self.level.block_entity_dyn(pos).map(|entity| entity_facts(entity, now));
+        let before = self
+            .level
+            .block_entity_dyn(pos)
+            .map(|entity| entity_facts(entity, now));
         let applied = self.level.with_hopper(pos, f);
-        let after = self.level.block_entity_dyn(pos).map(|entity| entity_facts(entity, now));
+        let after = self
+            .level
+            .block_entity_dyn(pos)
+            .map(|entity| entity_facts(entity, now));
         self.read(Some(pos), K_HOPPER, (before, applied));
         self.write(Write::BlockEntity {
             pos,
@@ -1123,7 +1176,13 @@ impl Level for Recording<'_> {
         self.read(
             Some(pos),
             K_DROPS,
-            (2_u8, item, value.as_ref().map(|stack| hash_slots(std::slice::from_ref(stack)))),
+            (
+                2_u8,
+                item,
+                value
+                    .as_ref()
+                    .map(|stack| hash_slots(std::slice::from_ref(stack))),
+            ),
         );
         value
     }
@@ -1203,8 +1262,12 @@ impl Level for Recording<'_> {
                     .map(ChunkSection::of)
                     .collect();
                 section_start.retain(|section, _| used.contains(section));
-                self.inner.borrow_mut().current.as_mut().expect("刚放进来的触发").section_start =
-                    section_start;
+                self.inner
+                    .borrow_mut()
+                    .current
+                    .as_mut()
+                    .expect("刚放进来的触发")
+                    .section_start = section_start;
             }
             Observation::TriggerEnd => {
                 let mut inner = self.inner.borrow_mut();
@@ -1316,8 +1379,10 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
         out.total_nanos += nanos;
         let strict = record.cacheable(true);
         let optimistic = record.cacheable(false);
-        let count_hit = |map: &mut HashMap<u128, u128>, key: u128, hits: &mut Hits, nanos: u128| {
-            match map.get(&key) {
+        let count_hit =
+            |map: &mut HashMap<u128, u128>, key: u128, hits: &mut Hits, nanos: u128| match map
+                .get(&key)
+            {
                 Some(&previous) => {
                     if previous != effect {
                         hits.mismatched_effects += 1;
@@ -1330,8 +1395,7 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
                     map.insert(key, effect);
                     hits.first_seen += 1;
                 }
-            }
-        };
+            };
         if strict {
             count_hit(
                 &mut exact_strict,
@@ -1366,17 +1430,83 @@ pub fn hit_rates(records: &[Record], growth_step: usize) -> HitRates {
         out.section_optimistic.records = section_optimistic.len();
         if (index + 1) % growth_step == 0 || index + 1 == records.len() {
             let count = index + 1;
-            out.exact_strict.growth.push((count, exact_strict.len(), section_strict.len()));
-            out.exact_optimistic
+            out.exact_strict
                 .growth
-                .push((count, exact_optimistic.len(), section_optimistic.len()));
+                .push((count, exact_strict.len(), section_strict.len()));
+            out.exact_optimistic.growth.push((
+                count,
+                exact_optimistic.len(),
+                section_optimistic.len(),
+            ));
             out.section_strict
                 .growth
                 .push((count, exact_strict.len(), section_strict.len()));
-            out.section_optimistic
-                .growth
-                .push((count, exact_optimistic.len(), section_optimistic.len()));
+            out.section_optimistic.growth.push((
+                count,
+                exact_optimistic.len(),
+                section_optimistic.len(),
+            ));
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        level::{LevelTables, Trigger},
+        testing::TestLevel,
+    };
+
+    /// 录制包装转发全部读写：同一个场景开/关录制，方块和红石记忆的最终状态相同。
+    #[test]
+    fn recording_does_not_change_the_world() {
+        let mut plain = TestLevel::new();
+        let mut recorded = TestLevel::new();
+        let pos = BlockPos::new(1, 64, 1);
+        for level in [&mut plain, &mut recorded] {
+            level.set(pos, BlockState(mc_bamboo_data::blocks::REPEATER));
+            level.set(pos.below(), BlockState(mc_bamboo_data::blocks::STONE));
+        }
+        let mut plain_ticks = crate::BlockTicks::new();
+        let mut recorded_ticks = crate::BlockTicks::new();
+        let mut recorder = Recording::new(&mut recorded);
+        let mut world = crate::World::new(&mut recorder, &mut recorded_ticks);
+        world.block_state(pos);
+        world.set_comparator_output(pos, 7);
+        world.push_effect(Effect::TorchBurnout { pos });
+        world.begin_trigger(Trigger::ScheduledTick { pos, kind: 0 });
+        world.block_state(pos);
+        world.end_trigger();
+        let records = recorder.take_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].reads.len(), 2);
+        let mut world = crate::World::new(&mut plain, &mut plain_ticks);
+        world.block_state(pos);
+        world.set_comparator_output(pos, 7);
+        world.push_effect(Effect::TorchBurnout { pos });
+        assert_eq!(plain.get(pos), recorded.get(pos));
+        assert_eq!(plain.redstone_table().comparator_output(pos), 7);
+        assert_eq!(recorded.redstone_table().comparator_output(pos), 7);
+    }
+
+    /// 段哈希键包含精确读集合，所以它撞上的键不会比精确键多。
+    #[test]
+    fn section_key_is_no_coarser_than_exact_key() {
+        let mut level = TestLevel::new();
+        let mut recorder = Recording::new(&mut level);
+        let mut ticks = crate::BlockTicks::new();
+        let pos = BlockPos::new(0, 64, 0);
+        let world = crate::World::new(&mut recorder, &mut ticks);
+        world.begin_trigger(Trigger::ScheduledTick { pos, kind: 0 });
+        world.block_state(pos);
+        world.block_state(pos);
+        world.end_trigger();
+        let records = recorder.take_records();
+        let rates = hit_rates(&records, 1);
+        assert_eq!(rates.exact_strict.mismatched_effects, 0);
+        assert_eq!(rates.section_strict.mismatched_effects, 0);
+        assert_eq!(records[0].sections.len(), 1);
+    }
 }
