@@ -161,6 +161,10 @@ tools/mc-bamboo-loadtest/run-baseline.sh [结果目录] [场景名...]
 
 ## 5. 第一份基线数据
 
+> 这一节和下一节是**历史记录**，里面的指标名（`jitter` / `chunk_latency_ticks`）
+> 是当时的旧名，对应现在的 `tick_start_lateness` / `chunk_latency_us`（口径已改，
+> 数值不能直接比较）。第 5a 节是改名之后重新跑的基线。
+
 测量环境：
 
 - Apple M4 Pro，10 个性能核 + 4 个能效核（共 14 核），48 GiB 内存，macOS，arm64。
@@ -216,7 +220,7 @@ walk-50 12 426.0 / 585.6，fly-20 2 378.9 / 1 047.2。
 对数直方图的分位数落在桶下界），`flush_bytes` 随人数和移动量从 4 KB/tick 涨到
 795 KB/tick，和客户端每秒收到的字节数同向。
 
-## 6. 从数据里看到的
+## 6. 从数据里看到的（第一份基线，历史记录）
 
 - **哪一阶段最贵**：1 人空服时 `random_ticks` 占主导（0.217 ms，tick 总耗时 p50
   0.257 ms）。200 人聚集时 `inbox`（1.343 ms）和 `entity_sync_and_tracking`
