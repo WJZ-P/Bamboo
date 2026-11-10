@@ -214,8 +214,7 @@ impl Region {
             .collect();
 
         // 四张按位置的表：按 x 带扫，抽出的条目按区块分给各自的盒子。
-        take_positions(&mut self.containers, chunks, |pos, entry| {
-            let mut entry = entry.clone();
+        take_positions(&mut self.containers, chunks, |pos, mut entry| {
             let recheck_in = entry.recheck_at.take().map(|at| self.tick.remaining(at));
             let packed = PackedContainer { recheck_in, entry };
             parts
@@ -229,21 +228,17 @@ impl Region {
                 .get_mut(&pos.chunk())
                 .unwrap()
                 .block_items
-                .insert(pos, patch.clone());
+                .insert(pos, patch);
         });
         take_positions(&mut self.command_blocks, chunks, |pos, data| {
             parts
                 .get_mut(&pos.chunk())
                 .unwrap()
                 .command_blocks
-                .insert(pos, data.clone());
+                .insert(pos, data);
         });
         take_positions(&mut self.lecterns.books, chunks, |pos, book| {
-            parts
-                .get_mut(&pos.chunk())
-                .unwrap()
-                .books
-                .insert(pos, book.clone());
+            parts.get_mut(&pos.chunk()).unwrap().books.insert(pos, book);
         });
 
         // 计划刻、方块实体和红石记忆各自用下层的按区块接口。
@@ -330,29 +325,32 @@ impl Region {
     }
 }
 
-/// 扫 `BTreeMap<BlockPos, _>` 里属于 `chunks` 的条目，交给 `emit` 分盒，然后从表里删掉。
+/// 把 `table` 里位置落在 `chunks` 里的条目移出来，逐个交给 `emit`。
 ///
-/// `BlockPos` 的 `Ord` 以 x 为第一关键字，每个区块只扫自己那条 16 格宽的 x 带；
-/// 删除用 `retain`（表本身和剩下条目的遍历顺序都不变）。
+/// 只看每个区块所在的那条 16 格宽的 x 带，再逐个移出，不扫整张表，条目也不复制。
 fn take_positions<T>(
     table: &mut BTreeMap<BlockPos, T>,
     chunks: &BTreeSet<ChunkPos>,
-    mut emit: impl FnMut(BlockPos, &T),
+    mut emit: impl FnMut(BlockPos, T),
 ) {
     // `BlockPos` 的 `Ord` 是 (x, y, z)：同一个 x 带里 z 不是连续的一段，所以先按 x 圈出
     // 16 格宽的带，再按 `pos.chunk() == chunk` 过滤 z。
-    let mut taken: BTreeSet<BlockPos> = BTreeSet::new();
+    let mut taken: Vec<BlockPos> = Vec::new();
     for &chunk in chunks {
         // 区块坐标可能来自客户端，乘 16 会溢出时用饱和算术，不让它触发 panic。
         let first_x = chunk.x.saturating_mul(16);
         let from = BlockPos::new(first_x, i32::MIN, i32::MIN);
         let to = BlockPos::new(first_x.saturating_add(16), i32::MIN, i32::MIN);
-        for (pos, value) in table.range((Bound::Included(from), Bound::Excluded(to))) {
-            if pos.chunk() == chunk {
-                emit(*pos, value);
-                taken.insert(*pos);
-            }
+        taken.extend(
+            table
+                .range((Bound::Included(from), Bound::Excluded(to)))
+                .map(|(&pos, _)| pos)
+                .filter(|pos| pos.chunk() == chunk),
+        );
+    }
+    for pos in taken {
+        if let Some(value) = table.remove(&pos) {
+            emit(pos, value);
         }
     }
-    table.retain(|pos, _| !taken.contains(pos));
 }
