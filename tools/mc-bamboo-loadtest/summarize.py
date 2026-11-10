@@ -82,6 +82,8 @@ def summarize(root, name):
                 if "tick_start_lateness" in report["metrics"]]
     deviation = [report["metrics"]["tick_interval_deviation"] for report in steady
                  if "tick_interval_deviation" in report["metrics"]]
+    spin = [report["metrics"]["tick_spin_us"] for report in steady
+            if "tick_spin_us" in report["metrics"]]
     weights = [row[0] for row in total]
     lweights = [row[0] for row in lateness]
     dweights = [row[0] for row in deviation]
@@ -116,6 +118,7 @@ def summarize(root, name):
         "lateness_p99": pct(lateness, 4, lweights) if lateness else 0.0,
         "deviation_p50": pct(deviation, 2, dweights) if deviation else 0.0,
         "deviation_p99": pct(deviation, 4, dweights) if deviation else 0.0,
+        "spin_us_per_tick": metric_wmean(steady, "tick_spin_us", 1),
         "top": top,
         "chunks_per_tick": metric_wmean(steady, "chunks_sent", 1),
         "chunk_latency_p95_us": weighted([row[3] for row in latency], latency_samples)
@@ -140,6 +143,7 @@ COLUMNS = [
     ("lateness p99", "lateness_p99"),
     ("interval dev p50", "deviation_p50"),
     ("interval dev p99", "deviation_p99"),
+    ("spin us/tick", "spin_us_per_tick"),
     ("top-3 phases (mean ms)", "top"),
     ("chunks/tick", "chunks_per_tick"),
     ("chunk p95 (us)", "chunk_latency_p95_us"),
@@ -154,7 +158,7 @@ def format_cell(key, value):
     if value is None:
         return "n/a"
     if isinstance(value, float):
-        if key in ("bytes_in", "chunks_per_tick", "flush_bytes_per_tick"):
+        if key in ("bytes_in", "chunks_per_tick", "flush_bytes_per_tick", "spin_us_per_tick"):
             return f"{value:.1f}"
         return f"{value:.3f}"
     return str(value)
