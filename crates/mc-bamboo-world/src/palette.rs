@@ -45,14 +45,18 @@ const fn bits_for_count(count: u32) -> u8 {
 /// 和网络形式不同，超过局部调色板上限时官方用 `Configuration.Global`，但它的
 /// `bitsInStorage` 仍是 `ceil(log2(n))`，不是内存里全局 ID 的位数。
 pub fn disk_bits(palette_len: usize, biomes: bool) -> u8 {
-    if palette_len <= 1 {
-        return 0;
-    }
-    let bits = bits_for_count(palette_len as u32);
+    let count = palette_len.max(1) as u32;
+    // 官方 `ceillog2(n)` 对 2 的幂也返回幂次本身。
+    let requested = (u32::BITS - (count - 1).leading_zeros()) as u8;
     if biomes {
-        bits
+        // 生物群系：1..3 位各自的简单配置，更多走 `Global`，位数不变。
+        requested
+    } else if requested <= 4 {
+        // 方块的 1..4 位全部落到 `FOUR_BITS_LINEAR`。
+        if requested == 0 { 0 } else { 4 }
     } else {
-        bits.max(BLOCK_RULES.min_indirect_bits)
+        // 5..8 位各用各的；超过 8 走 `Global`，`bitsInStorage` 仍是请求的位数。
+        requested
     }
 }
 

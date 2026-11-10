@@ -2050,6 +2050,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-storage"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "mc-bamboo-nbt",
+ "mc-bamboo-world",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mc-bamboo-vanilla"
 version = "0.0.0"
 dependencies = [

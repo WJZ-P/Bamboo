@@ -23,6 +23,7 @@ mc-bamboo-nbt = { path = "crates/mc-bamboo-nbt", version = "0.0.0" }
 mc-bamboo-protocol = { path = "crates/mc-bamboo-protocol", version = "0.0.0" }
 mc-bamboo-recipes = { path = "crates/mc-bamboo-recipes", version = "0.0.0" }
 mc-bamboo-server = { path = "crates/mc-bamboo-server", version = "0.0.0" }
+mc-bamboo-storage = { path = "crates/mc-bamboo-storage", version = "0.0.0" }
 mc-bamboo-world = { path = "crates/mc-bamboo-world", version = "0.0.0" }
 mc-bamboo-worldgen = { path = "crates/mc-bamboo-worldgen", version = "0.0.0" }
 
