@@ -49,7 +49,7 @@ pub use behaviour::machines::{
     CampfireEntity, ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern,
     signal_lectern_page,
 };
-pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
+pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents, ChunkBlockEntities};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::{click_if_empty, dispense_from};

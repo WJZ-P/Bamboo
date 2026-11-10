@@ -13,9 +13,10 @@
 use std::{
     any::Any,
     collections::{HashMap, HashSet, VecDeque},
+    fmt,
 };
 
-use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{BlockClass, items, registries, sounds::sound_event, tags::block_tags};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -24,6 +25,7 @@ use crate::{
         BlockState, Property, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED, SLOT_2_OCCUPIED, SLOT_3_OCCUPIED,
         SLOT_4_OCCUPIED, SLOT_5_OCCUPIED,
     },
+    ticks::Busy,
     world::World,
 };
 
@@ -80,6 +82,9 @@ pub struct BlockEntities {
     free: Vec<usize>,
     /// 每一格现在的槽位，官方 `tickersInLevel`。
     positions: HashMap<BlockPos, usize>,
+    /// 每个区块里可能有方块实体的位置，语义是超集：删掉的格子可以不从里面去掉。
+    /// 按区块取出时只走这个集合，不扫整张表。
+    by_chunk: HashMap<ChunkPos, HashSet<BlockPos>>,
     ticking: bool,
     next: usize,
     next_id: u64,
@@ -104,7 +109,9 @@ impl BlockEntities {
         let pos = entity.pos();
         let id = self.next_id;
         self.next_id += 1;
-        self.entities.insert(pos, Stored { id, entity });
+        if self.entities.insert(pos, Stored { id, entity }).is_none() {
+            self.by_chunk.entry(pos.chunk()).or_default().insert(pos);
+        }
 
         if let Some(&index) = self.positions.get(&pos) {
             // 同一个位置换了一个实体，包装还在列表里，位置不变。
@@ -280,7 +287,72 @@ impl BlockEntities {
             .get(&ticker.pos)
             .is_some_and(|stored| stored.id == ticker.id)
     }
+
+    /// 把 `chunk` 里的方块实体装进盒子搬走。只在 tick 边界调用。
+    ///
+    /// 走的是和 [`Self::remove`] 完全相同的删除路径：ticker 槽位留到下一次
+    /// [`Self::begin_tick`] 统一回收，`order` / `pending` 不动，所以别的区块的
+    /// 运行顺序不受影响。正在 tick 或有实体被拿出去还没放回时返回 [`Err`]。
+    pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkBlockEntities, Busy> {
+        if self.ticking || !self.taken.is_empty() || !self.removed_while_taken.is_empty() {
+            return Err(Busy);
+        }
+        let Some(positions) = self.by_chunk.remove(&chunk) else {
+            return Ok(ChunkBlockEntities {
+                entities: Vec::new(),
+            });
+        };
+        let mut positions: Vec<BlockPos> = positions.into_iter().collect();
+        positions.sort_unstable();
+        let mut entities = Vec::with_capacity(positions.len());
+        for pos in positions {
+            // 索引是超集，已经删掉的位置 `remove` 会落空，跳过即可。
+            if let Some(entity) = self.remove(pos) {
+                entities.push(entity);
+            }
+        }
+        Ok(ChunkBlockEntities { entities })
+    }
+
+    /// 把盒子里的方块实体放回表里。只在 tick 边界调用。
+    ///
+    /// 等价于按盒子里的顺序逐个 [`Self::insert`]。重新登记的 ticker 追加到运行顺序
+    /// 末尾，和官方区块重新加载时把 ticker 加进列表末尾一致。
+    /// 调用方保证表里已经没有 `chunk` 的方块实体。
+    pub fn insert_chunk(&mut self, entities: ChunkBlockEntities) {
+        for entity in entities.entities {
+            self.insert(entity);
+        }
+    }
 }
+
+/// 一个区块的全部方块实体，按位置排序。
+///
+/// 字段不公开：区块束只把它整体搬走，不逐个读内容。
+pub struct ChunkBlockEntities {
+    entities: Vec<Box<dyn BlockEntity>>,
+}
+
+impl fmt::Debug for ChunkBlockEntities {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChunkBlockEntities")
+            .field("count", &self.entities.len())
+            .field(
+                "positions",
+                &self
+                    .entities
+                    .iter()
+                    .map(|entity| entity.pos())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+const _: fn() = || {
+    fn assert_send_debug<T: Send + fmt::Debug>() {}
+    assert_send_debug::<ChunkBlockEntities>();
+};
 
 /// `BlockEventData`：`level.blockEvent` 排进队列的一项。方块是注册表 ID。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -496,6 +568,53 @@ pub(crate) fn keeps_block_entity(state: BlockState, old: BlockState) -> bool {
 mod tests {
     use super::*;
 
+    /// 只带位置和编号的测试用方块实体。
+    #[derive(Debug)]
+    struct Dummy {
+        pos: BlockPos,
+        value: i32,
+    }
+
+    impl Dummy {
+        fn boxed(pos: BlockPos, value: i32) -> Box<dyn BlockEntity> {
+            Box::new(Self { pos, value })
+        }
+    }
+
+    impl BlockEntity for Dummy {
+        fn pos(&self) -> BlockPos {
+            self.pos
+        }
+
+        fn tick(&mut self, _world: &mut World) {}
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    const CHUNK_A: ChunkPos = ChunkPos::new(0, 0);
+    const A1: BlockPos = BlockPos::new(1, 64, 1);
+    const A2: BlockPos = BlockPos::new(2, 64, 2);
+    const B1: BlockPos = BlockPos::new(20, 64, 1);
+    const B2: BlockPos = BlockPos::new(21, 64, 2);
+
+    fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {
+        entities.begin_tick();
+        let mut order = Vec::new();
+        while let Some((pos, id)) = entities.next_ticker() {
+            let entity = entities.take(pos, id).unwrap();
+            order.push((pos, entity.as_any().downcast_ref::<Dummy>().unwrap().value));
+            entities.put(pos, id, entity);
+        }
+        entities.end_tick();
+        order
+    }
+
     fn event(x: i32, param_b: i32) -> BlockEvent {
         BlockEvent {
             pos: BlockPos::new(x, 64, 0),
@@ -523,5 +642,96 @@ mod tests {
         assert_eq!(events.pop(), Some(event(1, 3)));
         assert_eq!(events.pop(), Some(event(1, 0)));
         assert_eq!(events.pop(), None);
+    }
+
+    #[test]
+    fn taking_a_chunk_leaves_no_trace_and_keeps_other_chunks() {
+        let mut entities = BlockEntities::default();
+        entities.insert(Dummy::boxed(A1, 1));
+        entities.insert(Dummy::boxed(B1, 2));
+        entities.insert(Dummy::boxed(A2, 3));
+        entities.insert(Dummy::boxed(B2, 4));
+
+        let boxed = entities.take_chunk(CHUNK_A).unwrap();
+        assert!(format!("{boxed:?}").contains("ChunkBlockEntities"));
+        assert!(!entities.contains(A1));
+        assert!(!entities.contains(A2));
+        assert!(entities.get::<Dummy>(A1).is_none());
+        assert!(entities.get::<Dummy>(A2).is_none());
+        assert_eq!(entities.get::<Dummy>(B1).unwrap().value, 2);
+        assert_eq!(entities.get::<Dummy>(B2).unwrap().value, 4);
+        // 别的区块的运行顺序一点没变。槽位按官方留到下一次 begin_tick 回收。
+        assert_eq!(ticker_order(&mut entities), [(B1, 2), (B2, 4)]);
+
+        // 取出再放回：内容和查询都回来了。
+        entities.insert_chunk(boxed);
+        assert_eq!(entities.get::<Dummy>(A1).unwrap().value, 1);
+        assert_eq!(entities.get::<Dummy>(A2).unwrap().value, 3);
+        assert!(entities.contains(A1));
+    }
+
+    #[test]
+    fn taking_and_putting_back_keeps_other_chunks_ticking_order() {
+        let mut untouched = BlockEntities::default();
+        let mut moved = BlockEntities::default();
+        for &(pos, value) in &[(A1, 1), (B1, 2), (A2, 3), (B2, 4)] {
+            untouched.insert(Dummy::boxed(pos, value));
+            moved.insert(Dummy::boxed(pos, value));
+        }
+        let boxed = moved.take_chunk(CHUNK_A).unwrap();
+        moved.insert_chunk(boxed);
+
+        // 取出走的是现有 remove：槽位留着，insert 复用它，运行顺序也和没搬过完全一样。
+        assert_eq!(
+            ticker_order(&mut untouched),
+            [(A1, 1), (B1, 2), (A2, 3), (B2, 4)]
+        );
+        assert_eq!(
+            ticker_order(&mut moved),
+            [(A1, 1), (B1, 2), (A2, 3), (B2, 4)]
+        );
+    }
+
+    #[test]
+    fn a_box_moves_into_a_new_table() {
+        let mut source = BlockEntities::default();
+        source.insert(Dummy::boxed(A1, 7));
+        source.insert(Dummy::boxed(B1, 8));
+        let boxed = source.take_chunk(CHUNK_A).unwrap();
+
+        let mut target = BlockEntities::default();
+        target.insert(Dummy::boxed(A2, 9));
+        target.insert_chunk(boxed);
+        assert_eq!(target.get::<Dummy>(A1).unwrap().value, 7);
+        assert_eq!(target.get::<Dummy>(A2).unwrap().value, 9);
+        assert_eq!(ticker_order(&mut target), [(A2, 9), (A1, 7)]);
+        // 源表里只剩别的区块。
+        assert_eq!(ticker_order(&mut source), [(B1, 8)]);
+    }
+
+    #[test]
+    fn taking_a_chunk_is_busy_mid_tick() {
+        let mut entities = BlockEntities::default();
+        entities.insert(Dummy::boxed(A1, 1));
+        entities.begin_tick();
+        assert!(matches!(entities.take_chunk(CHUNK_A), Err(Busy)));
+        entities.end_tick();
+        assert!(entities.take_chunk(CHUNK_A).is_ok());
+
+        // 拿出去还没放回也算 tick 中途。
+        entities.insert(Dummy::boxed(A2, 2));
+        let (pos, id, entity) = {
+            let (id, entity) = entities.take_at(A2).unwrap();
+            (A2, id, entity)
+        };
+        assert!(matches!(entities.take_chunk(CHUNK_A), Err(Busy)));
+        entities.put(pos, id, entity);
+        assert!(entities.take_chunk(CHUNK_A).is_ok());
+
+        // 拿出去时被删掉，残留的登记也要挡住（这时 taken 和 removed_while_taken 都有条目）。
+        entities.insert(Dummy::boxed(A2, 3));
+        let (_id, _entity) = entities.take_at(A2).unwrap();
+        assert!(entities.remove(A2).is_none());
+        assert!(matches!(entities.take_chunk(CHUNK_A), Err(Busy)));
     }
 }
