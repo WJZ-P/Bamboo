@@ -590,31 +590,3 @@ fn out_of_range_inputs_do_not_panic() {
         table.run_updates();
     }
 }
-
-#[test]
-fn debug_remove_all() {
-    let mut table = TicketTable::new();
-    table.set_player(1, Some(p(0, 0)));
-    table.run_updates();
-    eprintln!(
-        "after add: count={} tickets={}",
-        table.level_count(),
-        table.ticket_positions().len()
-    );
-    table.set_player(1, None);
-    let changes = table.run_updates().to_vec();
-    eprintln!(
-        "after remove: count={} tickets={} changes={}",
-        table.level_count(),
-        table.ticket_positions().len(),
-        changes.len()
-    );
-    eprintln!(
-        "sample: {:?} {:?} {:?} {:?} {:?}",
-        table.loading_level(p(0, 0)),
-        table.loading_level(p(5, 0)),
-        table.loading_level(p(11, 0)),
-        table.loading_level(p(12, 0)),
-        table.loading_level(p(14, 0))
-    );
-}

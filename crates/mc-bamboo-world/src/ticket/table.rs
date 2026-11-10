@@ -297,20 +297,34 @@ impl TicketTable {
         }
     }
 
-    /// `DistanceManager.updateSimulationDistance`：把全部 `player_simulation` 票换成新等级。
+    /// `DistanceManager.updateSimulationDistance` → `TicketStorage.replaceTicketLevelOfType`：
+    /// 把**全部** `player_simulation` 票换成新等级，不只是玩家所在区块的那些。
     pub fn set_simulation_distance(&mut self, distance: i32) {
         // 官方没夹这个值，这里夹到 [0, 31] 以免负数等级或溢出。
         let distance = distance.clamp(0, PLAYER_TICKET_LEVEL);
         if distance == self.simulation_distance {
             return;
         }
-        let old_level = PLAYER_TICKET_LEVEL - self.simulation_distance;
         let level = PLAYER_TICKET_LEVEL - distance;
         self.simulation_distance = distance;
-        let mut positions: Vec<_> = self.simulation_count.keys().copied().collect();
-        positions.sort_unstable();
-        for pos in positions {
-            self.remove(TicketType::PlayerSimulation, pos, old_level);
+        let positions: Vec<(ChunkPos, Vec<i32>)> = self
+            .ticket_positions()
+            .into_iter()
+            .map(|pos| {
+                let levels: Vec<i32> = self
+                    .tickets_at(pos)
+                    .into_iter()
+                    .filter(|ticket| ticket.ty == TicketType::PlayerSimulation)
+                    .map(|ticket| ticket.level)
+                    .collect();
+                (pos, levels)
+            })
+            .filter(|(_, levels)| !levels.is_empty())
+            .collect();
+        for (pos, levels) in positions {
+            for old in levels {
+                self.remove(TicketType::PlayerSimulation, pos, old);
+            }
             self.add(TicketType::PlayerSimulation, pos, level);
         }
     }
@@ -424,9 +438,6 @@ impl TicketTable {
                 .simulation = (old, new);
         }
         self.changes = merged.into_values().collect();
-        if std::env::var_os("TICKET_PROFILE").is_some() {
-            eprintln!("merge_total n={}", self.changes.len());
-        }
         &self.changes
     }
 
@@ -549,13 +560,20 @@ impl TicketTable {
         }
     }
 
-    /// 加/撤半径 `inner+1..=outer` 的方环（视距变化）。
+    /// 加/撤半径 `inner..=outer` 的方环（视距变化）。四个角只算一次。
     fn adjust_ring(&mut self, center: ChunkPos, inner: i32, outer: i32, add: bool) {
         for radius in inner..=outer {
             for d in -radius..=radius {
                 for &pos in &[
                     ChunkPos::new(center.x.saturating_add(d), center.z.saturating_sub(radius)),
                     ChunkPos::new(center.x.saturating_add(d), center.z.saturating_add(radius)),
+                ] {
+                    self.adjust_one(pos, add);
+                }
+            }
+            // 竖边跳过两个端点，它们已经算在横边里了。
+            for d in (-radius + 1)..radius {
+                for &pos in &[
                     ChunkPos::new(center.x.saturating_sub(radius), center.z.saturating_add(d)),
                     ChunkPos::new(center.x.saturating_add(radius), center.z.saturating_add(d)),
                 ] {
