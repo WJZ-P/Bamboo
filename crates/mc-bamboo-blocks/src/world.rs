@@ -1995,7 +1995,8 @@ impl<'a> World<'a> {
             // 这一拍已经被别的实体丢掉的，官方不再 tick，名单里也不再留下。
             // An entity another one discarded earlier this tick is not ticked. Vanilla drops it from the list.
             if !entity.removed {
-                entity.tick(self);
+                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                entity.tick(&mut ctx);
             }
             if !entity.removed {
                 self.level.put_entity(entity);
@@ -2021,7 +2022,8 @@ impl<'a> World<'a> {
             // 合并把对方丢掉之后，对方这一拍还在快照里，但是不再 tick。
             // After a merge discards the other item, it stays in this tick's snapshot and does not tick.
             if !entity.removed {
-                entity.tick(self);
+                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                entity.tick(&mut ctx);
             }
             after.push(entity.clone());
             if !entity.removed {

@@ -23,7 +23,10 @@ use mc_bamboo_protocol::{
 };
 
 use crate::{
-    entity::{Entity, EntityKind, GroundItem},
+    entity::{
+        Entity, EntityKind, EntityPublic, EntityUid, GroundItem,
+        ctx::{BlockView, Command, EntityCtx},
+    },
     fluid::Fluid,
     shape::Aabb,
     state::{BlockState, FluidState, SupportType},
@@ -165,117 +168,108 @@ impl Entity {
 
     /// `ItemEntity.tick`。调用方已经跑过 `commonTick`（记下旧位置、`tickCount++`）。
     ///
-    /// `ItemEntity.tick`. The caller has already run `commonTick` (old position and `tickCount++`).
-    pub(crate) fn tick_item(&mut self, world: &mut World) {
-        let empty = self.ground().is_some_and(|item| item.stack.is_empty());
+    /// 只读的方块判定走 `blocks`；合并和漏斗吸取走 `ctx.emit`，处理函数直接改自己。
+    pub(crate) fn tick_item(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+        let empty = me.ground().is_some_and(|item| item.stack.is_empty());
         if empty {
-            self.discard();
+            me.discard();
             return;
         }
-        let scan = self.item_base_tick(world);
+        let scan = Self::item_base_tick(me, ctx.blocks());
         // 这一拍里被岩浆或火丢掉之后，官方仍会把摩擦、年龄和第二次流体扫描做完。
-        // After lava or fire discards the item, vanilla still applies drag, age and the second fluid scan.
-        if let Some(item) = self.ground_mut()
+        if let Some(item) = me.ground_mut()
             && item.pickup_delay > 0
             && item.pickup_delay != INFINITE_PICKUP_DELAY
         {
             item.pickup_delay -= 1;
         }
         // 官方在移动前把 `xo/yo/zo` 改成当前位置，盖掉 `commonTick` 记下的旧位置。
-        // Vanilla overwrites `xo/yo/zo` with the current position before moving.
-        self.old_position = self.position;
-        // `0.1F` 先是 float，比较时扩成 double。
-        // `0.1F` is a float and widens to double in the comparison.
-        let in_water = self.in_water && scan.water > f64::from(0.1_f32);
-        // `isInLava()` 在 `baseTick` 末尾把 `firstTick` 清掉之后才为真。
-        // `isInLava()` becomes true only after `baseTick` clears `firstTick`.
+        me.old_position = me.position;
+        let in_water = me.in_water && scan.water > f64::from(0.1_f32);
         let in_lava = scan.lava > f64::from(0.1_f32);
         if in_water {
-            // `setFluidMovement(0.99F)`：先是 float，再扩成 double，不是 double 字面量 0.99。
-            // `setFluidMovement(0.99F)` widens a float. It is not the double literal 0.99.
-            self.set_fluid_movement(f64::from(0.99_f32));
+            me.set_fluid_movement(f64::from(0.99_f32));
         } else if in_lava {
-            self.set_fluid_movement(f64::from(0.95_f32));
+            me.set_fluid_movement(f64::from(0.95_f32));
         } else {
-            self.delta.y -= GRAVITY;
+            me.delta.y -= GRAVITY;
         }
 
-        let no_physics = !block_space_free(world, self, self.bounding_box().deflated(1.0e-7));
+        let no_physics = !block_space_free(ctx.blocks(), me, me.bounding_box().deflated(1.0e-7));
         if no_physics {
-            self.move_towards_closest_space(world);
+            me.move_towards_closest_space(ctx.blocks());
         }
-        let horizontal = self.delta.x * self.delta.x + self.delta.z * self.delta.z;
-        let resting = self.on_ground
+        let horizontal = me.delta.x * me.delta.x + me.delta.z * me.delta.z;
+        let resting = me.on_ground
             && horizontal <= REST_SPEED
-            && (self.tick_count + self.id).rem_euclid(REST_TICKS) != 0;
+            && (me.tick_count + me.id).rem_euclid(REST_TICKS) != 0;
         if resting {
             if !no_physics {
-                self.apply_effects_from_blocks(world);
-                self.item_hazards(world);
+                me.apply_effects_from_blocks(ctx.blocks());
+                Self::item_hazards(me, ctx);
             }
         } else {
-            let movement = self.delta;
-            self.move_entity(world, movement);
+            let movement = me.delta;
+            me.move_entity(ctx.blocks(), movement);
             if !no_physics {
-                self.apply_effects_from_blocks(world);
-                self.item_hazards(world);
+                me.apply_effects_from_blocks(ctx.blocks());
+                Self::item_hazards(me, ctx);
             }
             let mut ground = AIR_DRAG;
-            if self.on_ground {
-                let below = world.block_state(self.on_pos(world, 0.999999));
+            if me.on_ground {
+                let below = ctx.blocks().block_state(me.on_pos(ctx.blocks(), 0.999999));
                 ground *= friction(below);
             }
-            self.delta =
-                self.delta
-                    .multiply(f64::from(ground), f64::from(AIR_DRAG), f64::from(ground));
-            if self.on_ground && self.delta.y < 0.0 {
-                self.delta.y *= -0.5;
+            me.delta = me
+                .delta
+                .multiply(f64::from(ground), f64::from(AIR_DRAG), f64::from(ground));
+            if me.on_ground && me.delta.y < 0.0 {
+                me.delta.y *= -0.5;
             }
         }
-        self.merge_with_neighbours(world);
-        if let Some(item) = self.ground_mut()
+        Self::merge_with_neighbours(me, ctx);
+        if let Some(item) = me.ground_mut()
             && item.age != INFINITE_LIFETIME
         {
             item.age += 1;
         }
         // 移动之后再扫一次流体：溅水的随机数和水流推力都在这里。
-        // A second fluid scan after the move: splash rolls and the current live here.
-        let _ = self.update_item_fluid(world);
-        let expired = self.ground().is_some_and(|item| item.age >= LIFETIME);
+        let _ = me.update_item_fluid(ctx.blocks());
+        let expired = me.ground().is_some_and(|item| item.age >= LIFETIME);
         if expired {
-            self.discard();
+            me.discard();
         }
     }
 
     /// `baseTick` 里物品会碰到的那一段：流体、着火、掉出世界。
     ///
     /// The part of `baseTick` an item actually reaches: fluid, fire, and falling out of the world.
-    fn item_base_tick(&mut self, world: &mut World) -> FluidScan {
-        let first = self.first_tick;
-        let scan = self.update_item_fluid(world);
-        if self.remaining_fire_ticks > 0 {
-            if self.item_fire_immune() {
-                self.remaining_fire_ticks = 0;
+    fn item_base_tick(me: &mut Entity, world: &dyn BlockView) -> FluidScan {
+        let first = me.first_tick;
+        let scan = me.update_item_fluid(world);
+        if me.remaining_fire_ticks > 0 {
+            if me.item_fire_immune() {
+                me.remaining_fire_ticks = 0;
             } else {
                 let in_lava = !first && scan.lava > 0.0;
-                if self.remaining_fire_ticks % 20 == 0 && !in_lava {
-                    self.hurt_item(DamageKind::OnFire, 1.0);
+                if me.remaining_fire_ticks % 20 == 0 && !in_lava {
+                    me.hurt_item(DamageKind::OnFire, 1.0);
                 }
-                if !self.removed {
-                    self.remaining_fire_ticks -= 1;
+                if !me.removed {
+                    me.remaining_fire_ticks -= 1;
                 }
             }
         }
-        if self.removed {
+        if me.removed {
             return scan;
         }
         if !first && scan.lava > 0.0 {
-            self.fall_distance *= 0.5;
+            me.fall_distance *= 0.5;
         }
-        if self.position.y < f64::from(world.min_y() - 64) {
-            self.discard();
+        if me.position.y < f64::from(world.min_y() - 64) {
+            me.discard();
         }
-        self.first_tick = false;
+        me.first_tick = false;
         scan
     }
 
@@ -301,7 +295,7 @@ impl Entity {
     /// `moveTowardsClosestSpace`。卡在实心方块里时朝最近的空面推一把，并取一次 `nextFloat`。
     ///
     /// `moveTowardsClosestSpace`. A nudge toward the nearest open face, plus one `nextFloat`.
-    fn move_towards_closest_space(&mut self, world: &World) {
+    fn move_towards_closest_space(&mut self, world: &dyn BlockView) {
         let y = (self.bounding_box().min_y + self.bounding_box().max_y) / 2.0;
         let pos = BlockPos::containing(Vec3::new(self.position.x, y, self.position.z));
         let delta = Vec3::new(
@@ -349,27 +343,32 @@ impl Entity {
         };
     }
 
-    /// `isMergable` 为真、并且到了合并周期时，把周围同类物品并进来。
+    /// 到了合并周期时收集周围候选，发一条 `MergeWithNeighbours`。
     ///
-    /// When `isMergable` and the merge period has elapsed, pull in matching neighbours.
-    fn merge_with_neighbours(&mut self, world: &mut World) {
-        if !self.is_mergable() {
+    /// 候选按 uid 升序，处理函数落地时重新读双方的当前状态再判定。
+    fn merge_with_neighbours(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+        if !me.is_mergable() {
             return;
         }
-        let moved = mth::floor(self.old_position.x) != mth::floor(self.position.x)
-            || mth::floor(self.old_position.y) != mth::floor(self.position.y)
-            || mth::floor(self.old_position.z) != mth::floor(self.position.z);
+        let moved = mth::floor(me.old_position.x) != mth::floor(me.position.x)
+            || mth::floor(me.old_position.y) != mth::floor(me.position.y)
+            || mth::floor(me.old_position.z) != mth::floor(me.position.z);
         let rate = if moved { 2 } else { 40 };
-        if self.tick_count % rate != 0 {
+        if me.tick_count % rate != 0 {
             return;
         }
-        let area = self.bounding_box().inflate(0.5, 0.0, 0.5);
-        let others = item_ids_in(world, area, self.id);
-        for other_id in others {
-            if self.removed || !self.is_mergable() {
-                break;
+        let area = me.bounding_box().inflate(0.5, 0.0, 0.5);
+        let mut others = Vec::new();
+        ctx.for_each_other_in(area, &mut |other: &EntityPublic| {
+            if other.uid != me.id
+                && !other.removed
+                && matches!(other.kind, crate::entity::KindPublic::Item { .. })
+            {
+                others.push(other.uid);
             }
-            self.try_merge(world, other_id);
+        });
+        if !others.is_empty() {
+            ctx.emit(Command::MergeWithNeighbours { others }, me);
         }
     }
 
@@ -384,17 +383,29 @@ impl Entity {
             && item.stack.count < item.stack.max_stack_size()
     }
 
+    /// `MergeWithNeighbours` 的处理函数：逐个跑 `tryToMerge`，落地时重新读双方当前状态。
+    pub(crate) fn apply_merge_with_neighbours(
+        me: &mut Entity,
+        others: &[EntityUid],
+        world: &mut World,
+    ) {
+        for &other_id in others {
+            if me.removed || !me.is_mergable() {
+                break;
+            }
+            Self::try_merge(me, other_id, world);
+        }
+    }
+
     /// `tryToMerge`。数量少的并进数量多的；一样多时并进对方。
-    ///
-    /// `tryToMerge`. The smaller stack merges into the larger one; equal counts merge into the other.
-    fn try_merge(&mut self, world: &mut World, other_id: i32) {
+    fn try_merge(me: &mut Entity, other_id: EntityUid, world: &mut World) {
         let Some(other) = world.entity(other_id) else {
             return;
         };
         if other.removed || !other.is_mergable() {
             return;
         }
-        let (Some(mine), Some(theirs)) = (self.ground(), other.ground()) else {
+        let (Some(mine), Some(theirs)) = (me.ground(), other.ground()) else {
             return;
         };
         if mine.target != theirs.target || !stacks_can_merge(&mine.stack, &theirs.stack) {
@@ -418,10 +429,10 @@ impl Entity {
                     other.age = age;
                 }
             });
-            if let Some(mine) = self.ground_mut() {
+            if let Some(mine) = me.ground_mut() {
                 mine.stack = from_stack.clone();
                 if from_stack.is_empty() {
-                    self.discard();
+                    me.discard();
                 }
             }
         } else {
@@ -430,7 +441,7 @@ impl Entity {
             let delay = mine.pickup_delay.max(theirs.pickup_delay);
             let age = mine.age.min(theirs.age);
             merge_stacks(&mut to_stack, &mut from_stack);
-            if let Some(mine) = self.ground_mut() {
+            if let Some(mine) = me.ground_mut() {
                 mine.stack = to_stack;
                 mine.pickup_delay = delay;
                 mine.age = age;
@@ -450,11 +461,11 @@ impl Entity {
     /// 仙人掌、火和岩浆。`noPhysics` 时官方的 `isAffectedByBlocks` 为假，这里也不做。
     ///
     /// Cactus, fire, and lava. Vanilla skips these while `noPhysics` is set.
-    fn item_hazards(&mut self, world: &mut World) {
-        if self.removed {
+    fn item_hazards(me: &mut Entity, ctx: &mut dyn EntityCtx) {
+        if me.removed {
             return;
         }
-        let bounds = self.bounding_box().deflated(1.0e-5);
+        let bounds = me.bounding_box().deflated(1.0e-5);
         let min = BlockPos::new(
             mth::floor(bounds.min_x),
             mth::floor(bounds.min_y),
@@ -472,7 +483,7 @@ impl Entity {
             for z in min.z..=max.z {
                 for x in min.x..=max.x {
                     let pos = BlockPos::new(x, y, z);
-                    let state = world.block_state(pos);
+                    let state = ctx.blocks().block_state(pos);
                     if state.is(blocks::CACTUS) {
                         cactus = true;
                     } else if state.is(blocks::SOUL_FIRE) {
@@ -482,7 +493,7 @@ impl Entity {
                     }
                     let fluid_state = state.fluid();
                     if fluid_state.is_tagged(mc_bamboo_data::tags::fluid_tags::LAVA)
-                        && fluid_box(world, pos, fluid_state)
+                        && fluid_box(ctx.blocks(), pos, fluid_state)
                             .is_some_and(|fluid| bounds.intersects(fluid))
                     {
                         lava = true;
@@ -491,26 +502,26 @@ impl Entity {
             }
         }
         if lava {
-            self.lava_hurt(world);
+            me.lava_hurt();
         }
-        if self.removed {
+        if me.removed {
             return;
         }
         for (_, damage) in fires {
-            self.fire_ignite();
-            if self.removed {
+            me.fire_ignite();
+            if me.removed {
                 return;
             }
-            self.hurt_item(DamageKind::InFire, damage);
-            if self.removed {
+            me.hurt_item(DamageKind::InFire, damage);
+            if me.removed {
                 return;
             }
         }
         if cactus {
-            self.hurt_item(DamageKind::Cactus, CACTUS_DAMAGE);
+            me.hurt_item(DamageKind::Cactus, CACTUS_DAMAGE);
         }
-        if !self.removed {
-            crate::hopper::suck_touching_item(world, self);
+        if !me.removed {
+            ctx.emit(Command::SuckIntoHopper, me);
         }
     }
 
@@ -532,7 +543,7 @@ impl Entity {
     /// `Entity.lavaIgnite` 然后 `lavaHurt`。
     ///
     /// `Entity.lavaIgnite` followed by `lavaHurt`.
-    fn lava_hurt(&mut self, _world: &mut World) {
+    fn lava_hurt(&mut self) {
         if self.item_fire_immune() {
             return;
         }
@@ -587,7 +598,7 @@ impl Entity {
     /// `EntityFluidInteraction.update` 加上进水时的溅水随机数。
     ///
     /// `EntityFluidInteraction.update`, plus the splash rolls when the item enters water.
-    fn update_item_fluid(&mut self, world: &World) -> FluidScan {
+    fn update_item_fluid(&mut self, world: &dyn BlockView) -> FluidScan {
         let was_touching = self.in_water;
         let scan = scan_fluid(world, self);
         if scan.heights.water > 0.0 {
@@ -695,7 +706,7 @@ fn friction(state: BlockState) -> f32 {
     }
 }
 
-fn block_space_free(world: &World, entity: &Entity, bounds: Aabb) -> bool {
+fn block_space_free(world: &dyn BlockView, entity: &Entity, bounds: Aabb) -> bool {
     world
         .block_collisions(bounds, entity.collision_context())
         .is_empty()
@@ -742,21 +753,6 @@ fn move_into(to_stack: &mut ItemStack, from_stack: &mut ItemStack, limit: i32) {
     }
 }
 
-fn item_ids_in(world: &World, area: Aabb, except: i32) -> Vec<i32> {
-    world
-        .entity_ids()
-        .into_iter()
-        .filter(|id| *id != except)
-        .filter(|id| {
-            world.entity(*id).is_some_and(|entity| {
-                entity.ground().is_some()
-                    && !entity.removed
-                    && entity.bounding_box().intersects(area)
-            })
-        })
-        .collect()
-}
-
 fn splash(entity: &mut Entity) {
     // 音高两个 `nextFloat`，然后两组粒子循环。宽 0.25 时每组 6 次。
     // Two `nextFloat`s for the pitch, then the two particle loops. Width 0.25 means six each.
@@ -779,7 +775,7 @@ fn splash(entity: &mut Entity) {
     }
 }
 
-fn scan_fluid(world: &World, entity: &Entity) -> FluidDetail {
+fn scan_fluid(world: &dyn BlockView, entity: &Entity) -> FluidDetail {
     let empty = FluidDetail {
         heights: FluidScan {
             water: 0.0,
@@ -816,7 +812,7 @@ fn scan_fluid(world: &World, entity: &Entity) -> FluidDetail {
                 if fluid.is_empty() {
                     continue;
                 }
-                let top = f64::from(pos.y) + f64::from(crate::fluid::height(fluid, world, pos));
+                let top = f64::from(pos.y) + f64::from(world.fluid_height(fluid, pos));
                 if top < bounds.min_y {
                     continue;
                 }
@@ -896,7 +892,15 @@ fn fluid_interaction_box(entity: &Entity) -> Option<Aabb> {
     Some(entity.bounding_box().deflated(0.001))
 }
 
-fn fluid_area_loaded(world: &World, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) -> bool {
+fn fluid_area_loaded(
+    world: &dyn BlockView,
+    x0: i32,
+    y0: i32,
+    z0: i32,
+    x1: i32,
+    y1: i32,
+    z1: i32,
+) -> bool {
     let mut x = x0;
     while x <= x1 {
         let mut z = z0;
@@ -916,7 +920,7 @@ fn fluid_area_loaded(world: &World, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32,
 /// `FlowingFluid.getFlow`。
 ///
 /// `FlowingFluid.getFlow`.
-fn flow_vector(world: &World, pos: BlockPos, fluid: FluidState) -> Vec3 {
+fn flow_vector(world: &dyn BlockView, pos: BlockPos, fluid: FluidState) -> Vec3 {
     let Some(kind) = Fluid::of(fluid) else {
         return Vec3::default();
     };
@@ -973,7 +977,7 @@ fn affects_flow(kind: Fluid, neighbour: FluidState) -> bool {
     neighbour.is_empty() || Fluid::of(neighbour) == Some(kind)
 }
 
-fn solid_face(world: &World, kind: Fluid, pos: BlockPos, direction: Direction) -> bool {
+fn solid_face(world: &dyn BlockView, kind: Fluid, pos: BlockPos, direction: Direction) -> bool {
     if Fluid::of(world.fluid_state(pos)) == Some(kind) {
         return false;
     }
@@ -987,11 +991,11 @@ fn solid_face(world: &World, kind: Fluid, pos: BlockPos, direction: Direction) -
     world.is_face_sturdy(pos, direction, SupportType::Full)
 }
 
-fn fluid_box(world: &World, pos: BlockPos, fluid: FluidState) -> Option<Aabb> {
+fn fluid_box(world: &dyn BlockView, pos: BlockPos, fluid: FluidState) -> Option<Aabb> {
     if fluid.is_empty() {
         return None;
     }
-    let height = f64::from(crate::fluid::height(fluid, world, pos));
+    let height = f64::from(world.fluid_height(fluid, pos));
     if height <= 0.0 {
         return None;
     }
@@ -1233,7 +1237,7 @@ pub(crate) fn hurt_items_by_explosion(world: &mut World, center: Vec3, radius: f
 /// `ServerExplosion.getSeenPercent`：从物品盒子里取样，看有几条线没被方块挡住。
 ///
 /// `ServerExplosion.getSeenPercent`: sample the item's box and count rays that miss blocks.
-fn seen_percent(world: &World, center: Vec3, entity: &Entity) -> f32 {
+fn seen_percent(world: &dyn BlockView, center: Vec3, entity: &Entity) -> f32 {
     let bounds = entity.bounding_box();
     let span_x = bounds.max_x - bounds.min_x;
     let span_y = bounds.max_y - bounds.min_y;

@@ -9,6 +9,7 @@
 //! They tick after scheduled ticks and random ticks. Vanilla ticks entities before
 //! block entities; those already ran inside the scheduled-tick step.
 
+pub mod ctx;
 pub mod random;
 pub mod store;
 
@@ -22,7 +23,7 @@ use mc_bamboo_core::{Axis, BlockPos, Vec3};
 use mc_bamboo_data::entity_types;
 use mc_bamboo_protocol::item::ItemStack;
 
-use crate::{shape::Aabb, state::BlockState, world::World};
+use crate::{shape::Aabb, state::BlockState};
 
 pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
@@ -322,19 +323,13 @@ impl Entity {
         self.tick_count += 1;
     }
 
-    /// 这个 tick 的 `tick()`。
-    pub(crate) fn tick(&mut self, world: &mut World) {
+    /// 这个 tick 的 `tick()`。逻辑只看得到上下文接口，见 [`ctx`]。
+    pub(crate) fn tick(&mut self, ctx: &mut dyn ctx::EntityCtx) {
         self.common_tick();
-        match &self.kind {
-            EntityKind::FallingBlock(data) => {
-                let data = *data;
-                self.tick_falling_block(data, world);
-            }
-            EntityKind::Tnt(data) => {
-                let data = *data;
-                self.tick_tnt(data, world);
-            }
-            EntityKind::Item(_) => self.tick_item(world),
+        match self.kind.clone() {
+            EntityKind::FallingBlock(_) => falling::tick_falling_block(self, ctx),
+            EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
+            EntityKind::Item(_) => Entity::tick_item(self, ctx),
         }
     }
 

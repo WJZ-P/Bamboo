@@ -17,10 +17,10 @@ use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
 use crate::{
-    entity::{Entity, Movement, axis_component, with_axis},
+    entity::{Entity, Movement, axis_component, ctx::BlockView, with_axis},
     shape::{self, Aabb, BooleanOp, CollisionContext, EntityContext},
     state::BlockState,
-    world::{self, World},
+    world,
 };
 
 /// `getDefaultGravity()`：下落方块和 TNT 都用默认重力。
@@ -118,7 +118,7 @@ impl Entity {
     }
 
     /// `Entity.move`：先按轴解算碰撞，再落地判定、摔落伤害、反弹，最后按方块速度系数收尾。
-    pub(crate) fn move_entity(&mut self, world: &mut World, movement: Vec3) {
+    pub(crate) fn move_entity(&mut self, world: &dyn BlockView, movement: Vec3) {
         let mut delta = movement;
         if self.stuck_speed_multiplier.length_sqr() > 1.0e-7 {
             delta = delta.multiply(
@@ -187,7 +187,7 @@ impl Entity {
     ///
     /// `Entity.collide`. These entities have `maxUpStep` 0, so they do not step up.
     /// Players use [`sweep_movement`].
-    fn collide(&self, world: &World, movement: Vec3) -> Vec3 {
+    fn collide(&self, world: &dyn BlockView, movement: Vec3) -> Vec3 {
         sweep_movement(
             movement,
             self.bounding_box(),
@@ -201,7 +201,7 @@ impl Entity {
     /// `setOnGroundWithMovement`。
     fn set_on_ground_with_movement(
         &mut self,
-        world: &World,
+        world: &dyn BlockView,
         on_ground: bool,
         horizontal_collision: bool,
         movement: Vec3,
@@ -214,7 +214,12 @@ impl Entity {
     /// `Entity.checkSupportingBlock`：脚下这一小片里哪个方块撑着实体。
     ///
     /// 站着不动时用整块实体盒子，被推着走时把这片区域往回挪，看挪之前的位置。
-    fn check_supporting_block(&mut self, world: &World, on_ground: bool, movement: Option<Vec3>) {
+    fn check_supporting_block(
+        &mut self,
+        world: &dyn BlockView,
+        on_ground: bool,
+        movement: Option<Vec3>,
+    ) {
         if on_ground {
             let bounds = self.bounding_box();
             let test_area = Aabb::new(
@@ -244,7 +249,7 @@ impl Entity {
     /// `getOnPos(offset)`：脚下往下找 `offset` 格落在哪一块。
     ///
     /// 有撑着的方块时优先用它；篱笆、墙、栅栏门在低的偏移下也算自己的位置。
-    pub(crate) fn on_pos(&self, world: &World, offset: f32) -> BlockPos {
+    pub(crate) fn on_pos(&self, world: &dyn BlockView, offset: f32) -> BlockPos {
         if let Some(main) = self.main_supporting_block {
             if java_not_gt(offset, 1.0e-5_f32) {
                 return main;
@@ -271,7 +276,7 @@ impl Entity {
     }
 
     /// `getBlockSpeedFactor`：当前方块的速度系数，是 1 时看脚下那一格。
-    fn block_speed_factor(&self, world: &World) -> f32 {
+    fn block_speed_factor(&self, world: &dyn BlockView) -> f32 {
         let state = world.block_state(self.block_position());
         let here = state.block().speed_factor;
         if !state.is(blocks::WATER) && !state.is(blocks::BUBBLE_COLUMN) && here == 1.0 {
@@ -360,7 +365,7 @@ impl Entity {
     }
 
     /// `applyEffectsFromBlocks()`：把这一 tick 的移动整理成段，再看穿过了哪些方块。
-    pub(crate) fn apply_effects_from_blocks(&mut self, world: &World) {
+    pub(crate) fn apply_effects_from_blocks(&mut self, world: &dyn BlockView) {
         if self.removed {
             return;
         }
@@ -391,7 +396,7 @@ impl Entity {
     }
 
     /// `checkInsideBlocks`：按轴把每段移动拆开，逐个方块看实体有没有穿过去。
-    fn check_inside_blocks(&mut self, world: &World, movements: &[Movement]) {
+    fn check_inside_blocks(&mut self, world: &dyn BlockView, movements: &[Movement]) {
         if self.removed {
             return;
         }
@@ -436,7 +441,7 @@ impl Entity {
     /// `checkInsideBlocks(from, to, ...)`：一段直线移动，返回访问道的最后一个迭代号。
     fn check_inside_between(
         &mut self,
-        world: &World,
+        world: &dyn BlockView,
         from: Vec3,
         to: Vec3,
         visited: &mut Vec<BlockPos>,

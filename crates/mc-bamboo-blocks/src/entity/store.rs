@@ -446,6 +446,7 @@ impl EntityStore {
             rows.extend(set.iter().copied());
         }
         rows.sort_unstable();
+        rows.dedup();
         for row in rows {
             let Some(entry) = &self.slots[row] else {
                 continue;
@@ -504,18 +505,18 @@ impl EntityStore {
     }
 
     fn grid_insert(&mut self, row: usize, public: &EntityPublic) {
-        self.grid
-            .entry(section_of(public.position))
-            .or_default()
-            .insert(row);
+        for key in sections_of(public.bounding_box()) {
+            self.grid.entry(key).or_default().insert(row);
+        }
     }
 
-    fn grid_remove(&mut self, row: usize, position: Vec3) {
-        let key = section_of(position);
-        if let Some(rows) = self.grid.get_mut(&key) {
-            rows.remove(&row);
-            if rows.is_empty() {
-                self.grid.remove(&key);
+    fn grid_remove(&mut self, row: usize, public: &EntityPublic) {
+        for key in sections_of(public.bounding_box()) {
+            if let Some(rows) = self.grid.get_mut(&key) {
+                rows.remove(&row);
+                if rows.is_empty() {
+                    self.grid.remove(&key);
+                }
             }
         }
     }
@@ -527,7 +528,7 @@ impl EntityStore {
         };
         self.taken.remove(&uid);
         if let Some(entry) = self.slots[row].take() {
-            self.grid_remove(row, entry.public.position);
+            self.grid_remove(row, &entry.public);
         }
         self.free.push(row);
     }
@@ -536,7 +537,7 @@ impl EntityStore {
     pub fn take(&mut self, uid: EntityUid) -> Option<Entity> {
         let row = self.index.remove(&uid)?;
         let entry = self.slots[row].take()?;
-        self.grid_remove(row, entry.public.position);
+        self.grid_remove(row, &entry.public);
         self.taken.insert(uid, row);
         Some(entry.into_entity())
     }
@@ -553,14 +554,14 @@ impl EntityStore {
     }
 
     fn replace_row(&mut self, row: usize, new: EntityRow) {
-        if let Some(old) = &self.slots[row] {
-            let old_section = section_of(old.public.position);
-            let new_section = section_of(new.public.position);
-            if old_section != new_section {
-                self.grid_remove(row, old.public.position);
-                self.grid_insert(row, &new.public);
+        let old = self.slots[row].take();
+        let changed = old.as_ref().is_none_or(|old| {
+            sections_of(old.public.bounding_box()) != sections_of(new.public.bounding_box())
+        });
+        if changed {
+            if let Some(old) = &old {
+                self.grid_remove(row, &old.public);
             }
-        } else {
             self.grid_insert(row, &new.public);
         }
         self.slots[row] = Some(new);
@@ -640,7 +641,7 @@ impl EntityStore {
             let row = self.index.remove(&uid).expect("just indexed");
             self.taken.remove(&uid);
             let entry = self.slots[row].take().expect("indexed row is live");
-            self.grid_remove(row, entry.public.position);
+            self.grid_remove(row, &entry.public);
             self.free.push(row);
             rows.push(entry);
         }
@@ -656,12 +657,18 @@ impl EntityStore {
     }
 }
 
-fn section_of(position: Vec3) -> (i32, i32, i32) {
-    (
-        (position.x.floor() as i32).div_euclid(SECTION_SIZE),
-        (position.y.floor() as i32).div_euclid(SECTION_SIZE),
-        (position.z.floor() as i32).div_euclid(SECTION_SIZE),
-    )
+/// 一个盒子可能跨多个 16³ 段，每一段都要登记，范围查询才不会漏。
+fn sections_of(bounds: Aabb) -> Vec<(i32, i32, i32)> {
+    let (first, last) = section_range(&bounds);
+    let mut keys = Vec::new();
+    for x in first.0..=last.0 {
+        for y in first.1..=last.1 {
+            for z in first.2..=last.2 {
+                keys.push((x, y, z));
+            }
+        }
+    }
+    keys
 }
 
 fn section_range(area: &Aabb) -> ((i32, i32, i32), (i32, i32, i32)) {
@@ -720,6 +727,22 @@ mod tests {
             seen.push(public.uid)
         });
         assert_eq!(seen, [first, second]);
+    }
+
+    #[test]
+    fn a_query_finds_an_entity_whose_box_spans_a_section_boundary() {
+        let mut store = EntityStore::new();
+        // 原点在 (15.9, 64, 0.5)，物品盒子跨 x=16 的段界。
+        let uid = store.spawn(Entity::ground_item(
+            Vec3::new(15.9, 64.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        store.with_mut(uid, |entity| entity.position.x = 16.1);
+        let mut seen = Vec::new();
+        store.for_each_in(Aabb::new(15.5, 63.0, 0.0, 16.5, 66.0, 2.0), &mut |public| {
+            seen.push(public.uid)
+        });
+        assert_eq!(seen, [uid]);
     }
 
     #[test]
