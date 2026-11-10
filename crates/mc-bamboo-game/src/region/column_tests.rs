@@ -688,7 +688,8 @@ fn a_taken_chunk_reads_the_template_and_caches_are_dropped() {
             &region.chunks,
             template,
             CHUNK,
-        );
+        )
+        .expect("超平坦区块的帧编得出来");
         assert_eq!(region.chunk_cache.frame_count(), 1);
     }
 

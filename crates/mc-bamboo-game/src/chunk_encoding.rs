@@ -10,15 +10,13 @@ use std::{borrow::Cow, sync::Arc};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::heightmaps;
-use mc_bamboo_protocol::{
-    frame::append_frame,
-    packet::{
-        chunk::{
-            BlockEntityInfo, Heightmap, LightData, Palette, encode_chunk_body,
-            write_paletted_container, write_section_header,
-        },
-        play::LevelChunkWithLight,
+use mc_bamboo_protocol::frame::{FrameError, append_frame};
+use mc_bamboo_protocol::packet::{
+    chunk::{
+        BlockEntityInfo, Heightmap, LightData, Palette, encode_chunk_body,
+        write_paletted_container, write_section_header,
     },
+    play::LevelChunkWithLight,
 };
 use mc_bamboo_world::{
     chunk::{Chunk, HeightmapKind, Section},
@@ -26,7 +24,6 @@ use mc_bamboo_world::{
     palette::{PaletteView, PalettedContainer},
     store::ChunkStore,
 };
-use tracing::warn;
 
 pub(crate) use cache::ChunkCache;
 
@@ -61,9 +58,9 @@ pub(crate) fn chunk_frame(
     store: &ChunkStore,
     template_body: &[u8],
     pos: ChunkPos,
-) -> Arc<SharedFrames> {
+) -> Result<Arc<SharedFrames>, FrameError> {
     if let Some(frames) = cache.frame(store, pos) {
-        return frames;
+        return Ok(frames);
     }
     let body = chunk_body(cache, store, template_body, pos);
     let packet = LevelChunkWithLight {
@@ -72,11 +69,9 @@ pub(crate) fn chunk_frame(
         body: &body,
     };
     let mut raw = Vec::new();
-    if let Err(error) = append_frame(&mut raw, &packet) {
-        // 区块包编码不出来时不该走到这里：包体来自世界，客户端撑不大。
-        warn!(%error, ?pos, "dropping a chunk frame that cannot be encoded");
-    }
-    cache.insert_frame(store, pos, raw)
+    // 失败时既不缓存空帧也不返回它：调用方按和 `Links::send` 一样的理由踢掉请求者。
+    append_frame(&mut raw, &packet)?;
+    Ok(cache.insert_frame(store, pos, raw))
 }
 
 /// 模板区块的编码，世界刚建好时调用。
@@ -361,13 +356,13 @@ mod tests {
         let mut cache = ChunkCache::default();
         let pos = ChunkPos::new(3, -9);
 
-        let first = chunk_frame(&mut cache, &store, &template_body, pos);
+        let first = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
         // 第二名玩家看同一个区块，拿到的是同一份 Arc，不重新编帧。
-        let second = chunk_frame(&mut cache, &store, &template_body, pos);
+        let second = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         // 另一个坐标的帧包头里坐标不同。
         let other_pos = ChunkPos::new(4, -9);
-        let other = chunk_frame(&mut cache, &store, &template_body, other_pos);
+        let other = chunk_frame(&mut cache, &store, &template_body, other_pos).unwrap();
         assert!(!Arc::ptr_eq(&first, &other));
         assert_ne!(first.raw(), other.raw());
 
@@ -381,13 +376,13 @@ mod tests {
         assert_eq!(reader.rest(), template_body);
 
         store.set_block(BlockPos::new(3 * 16 + 1, -60, -9 * 16 + 1), blocks::STONE);
-        let edited = chunk_frame(&mut cache, &store, &template_body, pos);
+        let edited = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
         assert!(!Arc::ptr_eq(&first, &edited));
         assert_ne!(first.raw(), edited.raw());
         // 没改的邻居还是原来那份。
         assert!(Arc::ptr_eq(
             &other,
-            &chunk_frame(&mut cache, &store, &template_body, other_pos)
+            &chunk_frame(&mut cache, &store, &template_body, other_pos).unwrap()
         ));
     }
 }

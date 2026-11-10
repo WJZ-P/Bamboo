@@ -3,20 +3,22 @@
 //! 跟踪范围不是方形，也不是视距圈：沿坐标轴的半径是 `vd + 1`，四角是圆的。
 //! 这样客户端渲染范围里的每个区块，8 个邻居都能到齐，否则它不编译这个区块。
 
-use std::{collections::BTreeMap, ops::RangeInclusive};
+use std::{collections::BTreeMap, ops::RangeInclusive, time::Instant};
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_protocol::packet::play::{
-    ChunkBatchFinished, ChunkBatchStart, ForgetLevelChunk, SetChunkCacheCenter,
+use mc_bamboo_protocol::{
+    packet::play::{ChunkBatchFinished, ChunkBatchStart, ForgetLevelChunk, SetChunkCacheCenter},
+    text::Component,
 };
+use tracing::warn;
 
 use crate::{
     chunk_encoding::chunk_frame,
     inbound::PlayerId,
-    links::Links,
+    links::{Links, PACKET_ERROR},
     player::Player,
     profiler::Profiler,
-    region::{Region, RegionTick},
+    region::Region,
 };
 
 /// 视距的下限。客户端请求的值和服务端的配置都不能比它小。
@@ -121,9 +123,9 @@ fn view_difference(previous: Option<ChunkView>, next: ChunkView) -> (Vec<ChunkPo
 /// 这是背压：接收方反过来限制发送方。收不到确认时只是停发，区块留在 `pending` 里。
 #[derive(Debug)]
 pub(crate) struct PlayerChunkSender {
-    /// 值为进入待发送集合的那一刻，用来算区块延迟。
-    pending: BTreeMap<ChunkPos, RegionTick>,
-    tick: RegionTick,
+    /// 值为进入待发送集合的墙上时刻，用来算区块延迟。
+    pending: BTreeMap<ChunkPos, Instant>,
+    now: Instant,
     desired_chunks_per_tick: f32,
     batch_quota: f32,
     unacknowledged_batches: i32,
@@ -134,7 +136,7 @@ impl Default for PlayerChunkSender {
     fn default() -> Self {
         Self {
             pending: BTreeMap::new(),
-            tick: RegionTick::default(),
+            now: Instant::now(),
             desired_chunks_per_tick: START_CHUNKS_PER_TICK,
             batch_quota: 0.0,
             unacknowledged_batches: 0,
@@ -144,13 +146,13 @@ impl Default for PlayerChunkSender {
 }
 
 impl PlayerChunkSender {
-    /// 世界线程在视图变化之前把当前刻写进来。
-    pub(crate) fn set_tick(&mut self, tick: RegionTick) {
-        self.tick = tick;
+    /// 世界线程在视图变化之前把当前时刻写进来，入队和发出都用墙上时间。
+    pub(crate) fn set_now(&mut self, now: Instant) {
+        self.now = now;
     }
 
     fn mark_pending(&mut self, pos: ChunkPos) {
-        self.pending.entry(pos).or_insert(self.tick);
+        self.pending.entry(pos).or_insert(self.now);
     }
 
     /// 这个区块离开了视图，返回客户端是否已经有它，有的话要发 `forget_level_chunk`。
@@ -162,11 +164,12 @@ impl PlayerChunkSender {
         self.pending.contains_key(&pos)
     }
 
-    /// 在区块离开 `pending` 之前，把这一刻写进出站缓冲的区块延迟记进剖析器。
+    /// 在区块离开 `pending` 之前，把这一刻写进出站缓冲的墙上延迟记进剖析器。
     fn record_batch(&self, batch: &[ChunkPos], profiler: &mut Profiler) {
+        let sent = profiler.now();
         for pos in batch {
             if let Some(&entered) = self.pending.get(pos) {
-                profiler.record_chunk_latency(self.tick.since(entered));
+                profiler.record_chunk_latency(entered, sent);
             }
         }
     }
@@ -295,21 +298,21 @@ pub(crate) fn update_player_view(
 
 /// tick 第 4 阶段：每名玩家比较一次 `(center, vd)`。
 pub(crate) fn update_views(region: &mut Region) {
-    let tick = region.tick;
+    let now = region.profiler.now();
     for player in region.players.values_mut() {
-        player.chunks.sender.set_tick(tick);
+        player.chunks.sender.set_now(now);
         update_player_view(player, &mut region.links, region.view_distance);
     }
 }
 
 /// tick 第 10 阶段：每名玩家最多发一批，发完把没人跟踪的区块从编码缓存里丢掉。
 pub(crate) fn send_chunks(region: &mut Region) {
-    let tick = region.tick;
+    let now = region.profiler.now();
     for (&id, player) in &mut region.players {
         if !region.links.is_open(id) {
             continue;
         }
-        player.chunks.sender.set_tick(tick);
+        player.chunks.sender.set_now(now);
         let batch = player
             .chunks
             .sender
@@ -320,16 +323,29 @@ pub(crate) fn send_chunks(region: &mut Region) {
 
         region.links.send(id, &ChunkBatchStart);
         for &pos in &batch {
-            let frames = chunk_frame(
+            let frames = match chunk_frame(
                 &mut region.chunk_cache,
                 &region.chunks,
                 &region.template_body,
                 pos,
-            );
+            ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    // 包体超过帧长上限：和 `Links::send` 一样踢掉正在请求它的玩家，
+                    // 空帧不缓存也不发，别的玩家照样收自己的批次。
+                    warn!(%error, player = id.0, ?pos, "kicking a player whose chunk cannot be encoded");
+                    region
+                        .links
+                        .kick(id, &Component::translate(PACKET_ERROR, []));
+                    break;
+                }
+            };
             region.links.send_shared(id, frames);
         }
-        let batch_size = batch.len() as i32;
-        region.links.send(id, &ChunkBatchFinished { batch_size });
+        if region.links.is_open(id) {
+            let batch_size = batch.len() as i32;
+            region.links.send(id, &ChunkBatchFinished { batch_size });
+        }
     }
     region.profiler.finish_chunk_sending();
     drop_untracked_bodies(region);
@@ -876,13 +892,82 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &changed), "内容变了就换新的帧");
     }
 
+    /// 让一个区块的包体超过帧长上限，走真实 `chunk_frame` 的失败分支。
+    /// 区块里一个方块实体的 `update_tag` 就能带任意长度的字节，不需要改世界层。
+    fn oversized_chunk(store: &mut ChunkStore, pos: ChunkPos) {
+        let block = BlockPos::new(pos.x * 16 + 1, -60, pos.z * 16 + 1);
+        store.set_block(block, blocks::CHEST);
+        assert!(store.set_update_tag(block, Some(vec![0; MAX_FRAME_LEN + 1])));
+    }
+
+    #[test]
+    fn an_oversized_chunk_kicks_its_requester_without_caching_an_empty_frame() {
+        let mut server = Harness::new(2);
+        // 两名玩家都在出生点，但坏区块只排进 Alice 的 pending；Bob 的视图
+        // 故意落在别处，这一刻只发自己范围内的正常区块。
+        let alice = server.join("Kitten");
+        let bob = server.join("Mochi");
+        server.tick();
+        alice.take_frames();
+        bob.take_frames();
+
+        let bad = ChunkPos::new(0, 0);
+        oversized_chunk(&mut server.region().chunks, bad);
+        server
+            .region()
+            .players
+            .get_mut(&bob.id)
+            .expect("玩家在")
+            .chunks
+            .sender
+            .pending
+            .clear();
+        server
+            .region()
+            .players
+            .get_mut(&alice.id)
+            .expect("玩家在")
+            .chunks
+            .sender
+            .mark_pending(bad);
+        server.acknowledge_batch(&alice, 64.0);
+        server.tick();
+
+        let reason = Component::translate(crate::links::PACKET_ERROR, []);
+        let mut expected = Vec::new();
+        append_frame(
+            &mut expected,
+            &mc_bamboo_protocol::packet::play::Disconnect { reason: &reason },
+        )
+        .unwrap();
+        let alice_frames = alice.take_frames();
+        assert_eq!(
+            alice_frames.last().map(|frame| frame.id),
+            Some(clientbound::DISCONNECT),
+            "请求者收到 packetError 断开包"
+        );
+        assert!(alice.is_closed());
+        assert!(!server.region().links.is_open(alice.id));
+        assert!(server.shared_chunk_frame(bad).is_none(), "失败的帧不进缓存");
+        assert!(!server.has_empty_cached_frame(), "缓存里没有空帧");
+
+        let bob_frames = bob.take_frames();
+        assert!(!bob.is_closed(), "别的玩家不受影响");
+        assert!(
+            !bob_frames
+                .iter()
+                .any(|frame| frame.id == clientbound::DISCONNECT)
+        );
+        assert!(server.region().links.is_open(bob.id));
+    }
+
     #[test]
     fn chunk_frames_keep_the_official_packet_layout() {
         let store = ChunkStore::flat();
         let template_body = encode_template(&store);
         let mut cache = ChunkCache::default();
         let pos = ChunkPos::new(5, -3);
-        let frames = chunk_frame(&mut cache, &store, &template_body, pos);
+        let frames = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
 
         let mut expected = Vec::new();
         append_frame(
@@ -897,7 +982,8 @@ mod tests {
         assert_eq!(frames.raw(), expected);
 
         // 没改过的区块在不同坐标各有一份帧，包头里的坐标跟着变。
-        let neighbour = chunk_frame(&mut cache, &store, &template_body, ChunkPos::new(6, -3));
+        let neighbour =
+            chunk_frame(&mut cache, &store, &template_body, ChunkPos::new(6, -3)).unwrap();
         assert_ne!(frames.raw(), neighbour.raw());
         assert_eq!(cache.frame_count(), 2);
         cache.retain(|p| p == pos);
@@ -909,18 +995,20 @@ mod tests {
     }
 
     #[test]
-    fn pending_chunks_record_how_many_ticks_they_waited() {
+    fn pending_chunks_record_the_wall_time_they_waited() {
+        let mut profiler = Profiler::with_manual_clock();
         let mut sender = PlayerChunkSender::default();
-        let mut profiler = Profiler::default();
-        sender.set_tick(RegionTick::at(10));
+        sender.set_now(profiler.now());
         sender.mark_pending(chunk(0, 0));
-        sender.set_tick(RegionTick::at(13));
+        // 三刻之后才发，钉死的时钟只走了 150ms，和真实时钟跑多快无关。
+        profiler.advance_clock(std::time::Duration::from_millis(150));
+        sender.set_now(profiler.now());
         let batch = sender.next_batch(ORIGIN, &mut profiler);
         assert_eq!(batch, [chunk(0, 0)]);
 
-        let latencies = profiler.histogram(Series::Metric(Metric::ChunkLatencyTicks));
+        let latencies = profiler.histogram(Series::Metric(Metric::ChunkLatencyUs));
         assert_eq!(latencies.count(), 1);
-        assert_eq!(latencies.sum(), 3);
+        assert_eq!(latencies.sum(), 150_000);
         profiler.finish_chunk_sending();
         assert_eq!(
             profiler.histogram(Series::Metric(Metric::ChunksSent)).sum(),

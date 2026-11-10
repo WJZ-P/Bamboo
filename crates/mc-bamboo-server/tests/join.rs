@@ -12,6 +12,7 @@ use mc_bamboo_data::packets::{configuration, login, play};
 use mc_bamboo_protocol::codec::{Reader, write_varint};
 use mc_bamboo_server::{PlayerInfo, ServerConfig, ServerEvent};
 use tokio::time::{sleep, timeout};
+use uuid::Uuid;
 
 /// 配置写 1 会被修正成官方的下限 2，所以实际是 `T(2)` 的 49 个区块，测试跑得快。
 const VIEW_DISTANCE: u8 = 1;
@@ -283,22 +284,67 @@ async fn unknown_play_packets_are_ignored() {
     assert_eq!(packet_id(&keep_alive), play::clientbound::KEEP_ALIVE);
 }
 
-#[tokio::test]
-async fn full_server_refuses_with_a_message() {
+/// 满员时普通玩家被拒、`bypassesPlayerLimit` 为真的 OP 能进、为假的 OP 不能进。
+async fn full_server_case(ops: &str, name: &str, bypasses: bool) {
+    let lists = std::env::temp_dir().join(format!("bamboo-full-ops-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&lists).unwrap();
+    std::fs::write(lists.join("ops.json"), ops).unwrap();
     let config = ServerConfig {
         max_players: 1,
-        ..small_world()
+        view_distance: VIEW_DISTANCE,
+        list_directory: lists.clone(),
+        ..ServerConfig::default()
     };
     let server = TestServer::start(config).await;
     let _first = server.join("Kitten").await;
 
     let mut second = server.connect().await;
     second.send(&handshake(LOGIN_INTENT)).await;
-    second.send(&hello("Bamboo")).await;
+    second.send(&hello(name)).await;
+    let payload = second.read_frame().await;
+    if bypasses {
+        assert_eq!(packet_id(&payload), login::clientbound::LOGIN_FINISHED);
+        // 连接层放行还不够，权威名单复查也得放行：走完配置进到 Play 才算真的进服。
+        second
+            .send(&frame(&[login::serverbound::LOGIN_ACKNOWLEDGED as u8]))
+            .await;
+        second
+            .read_until(configuration::clientbound::SELECT_KNOWN_PACKS)
+            .await;
+        second.send(&common::official_known_packs()).await;
+        second
+            .read_until(configuration::clientbound::FINISH_CONFIGURATION)
+            .await;
+        second.finish_configuration().await;
+        let login = second.read_until(play::clientbound::LOGIN).await;
+        assert_eq!(packet_id(&login), play::clientbound::LOGIN);
+    } else {
+        let (id, reason) = json_packet(&payload);
+        assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
+        assert_eq!(reason["translate"], "multiplayer.disconnect.server_full");
+    }
+    let _ = std::fs::remove_dir_all(&lists);
+}
 
-    let (id, reason) = json_packet(&second.read_frame().await);
-    assert_eq!(id, login::clientbound::LOGIN_DISCONNECT);
-    assert_eq!(reason["text"], "服务器已满");
+#[tokio::test]
+async fn full_server_refuses_with_a_message() {
+    full_server_case("[]", "Bamboo", false).await;
+}
+
+#[tokio::test]
+async fn an_op_with_bypasses_player_limit_gets_into_a_full_server() {
+    let uuid = common::player::offline_uuid("Bypass");
+    let ops =
+        format!(r#"[{{"uuid":"{uuid}","name":"Bypass","level":4,"bypassesPlayerLimit":true}}]"#);
+    full_server_case(&ops, "Bypass", true).await;
+}
+
+#[tokio::test]
+async fn an_op_without_bypasses_player_limit_is_refused_by_a_full_server() {
+    let uuid = common::player::offline_uuid("Plain");
+    let ops =
+        format!(r#"[{{"uuid":"{uuid}","name":"Plain","level":4,"bypassesPlayerLimit":false}}]"#);
+    full_server_case(&ops, "Plain", false).await;
 }
 
 /// 官方 `ServerLoginPacketListenerImpl.tick` 在 600 刻（30 秒）时说 `slow_login`，

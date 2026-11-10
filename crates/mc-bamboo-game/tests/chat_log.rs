@@ -91,6 +91,7 @@ fn chat_is_logged_with_the_not_secure_tag() {
         permission_level: 0,
         is_op: false,
         peer_ip: "127.0.0.1".to_owned(),
+        online_at_login: 0,
         sink: Box::new(DiscardingSink),
     };
     let quota = Arc::new(AtomicUsize::new(0));
