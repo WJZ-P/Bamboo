@@ -4,8 +4,6 @@
 //! 流体查询，保证两种世界实现在算阶段读到同样的结果。除了方块状态，视图还要带
 //! 高度范围和游戏规则这些不写在区块表里的只读事实。
 
-use std::cell::Cell;
-
 use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks};
 
@@ -27,8 +25,6 @@ pub struct ViewFacts {
     /// 天空光和方块光的常量值。有逐格光照的视图覆盖 [`BlockSource::brightness`]。
     pub sky_brightness: i32,
     pub block_brightness: i32,
-    /// 算阶段里有没有漏斗方块；没有时物品不发 `SuckIntoHopper` 命令。
-    pub any_hopper: bool,
 }
 
 impl Default for ViewFacts {
@@ -39,7 +35,6 @@ impl Default for ViewFacts {
             rules: BlockGameRules::vanilla(),
             sky_brightness: 15,
             block_brightness: 0,
-            any_hopper: false,
         }
     }
 }
@@ -63,6 +58,11 @@ pub trait BlockSource: Sync {
     /// 默认没有方块实体；带方块实体表的视图要覆盖它，`isFaceSturdy` 才准。
     fn shulker_box_open(&self, _pos: BlockPos) -> bool {
         false
+    }
+
+    /// 这片格子里有没有漏斗。默认按格读方块表；游戏层用预先拷出的位置集合覆盖它。
+    fn any_hopper_in(&self, _min: BlockPos, _max: BlockPos) -> bool {
+        true
     }
 }
 
@@ -107,25 +107,6 @@ impl<T: BlockSource> SourceView<T> {
                 fluid_hit
             }
         })
-    }
-}
-
-/// 算阶段的一格范围里有没有漏斗。只由算阶段读，落地阶段不用。
-///
-/// 每次查询都扫到的格子很少；用 `Cell` 是因为实体逻辑只拿 `&dyn BlockView`，
-/// 整个视图在线程之间共享，而这里只是去重的统计，不是世界的真实状态。
-#[derive(Default)]
-pub struct HopperProbe(Cell<bool>);
-
-impl HopperProbe {
-    pub fn any(&self) -> bool {
-        self.0.get()
-    }
-
-    pub fn note(&self, state: BlockState) {
-        if state.is_a(mc_bamboo_data::BlockAncestor::HopperBlock) {
-            self.0.set(true);
-        }
     }
 }
 
@@ -277,15 +258,7 @@ impl<T: BlockSource> BlockView for SourceView<T> {
     }
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
-        self.0.facts().any_hopper
-            && (min.y..=max.y).any(|y| {
-                (min.z..=max.z).any(|z| {
-                    (min.x..=max.x).any(|x| {
-                        self.block_state(BlockPos::new(x, y, z))
-                            .is_a(BlockAncestor::HopperBlock)
-                    })
-                })
-            })
+        self.0.any_hopper_in(min, max)
     }
 }
 

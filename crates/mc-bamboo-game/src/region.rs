@@ -155,8 +155,8 @@ pub(crate) struct Region {
     ///
     /// Books on lecterns, and the lectern menus currently open.
     pub(crate) lecterns: crate::lectern::Tables,
-    /// 活塞这类会动的方块实体。
-    block_entities: BlockEntities,
+    /// 活塞这类会动的方块实体。实体算阶段要按位置读盖子开着的潜影盒。
+    pub(crate) block_entities: BlockEntities,
     /// 等这一刻末尾处理的方块事件，官方的 `Level.blockEvents`。
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
