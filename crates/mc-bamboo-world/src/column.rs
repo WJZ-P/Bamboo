@@ -8,11 +8,14 @@
 //! 把光照跑完，也可以用 [`ChunkStore::ready_to_move_columns`](super::store::ChunkStore::ready_to_move_columns)
 //! 先问一声；盒子里只装一份已经算稳的光照。
 
-use mc_bamboo_core::{BlockPos, LightLayer};
+use mc_bamboo_core::{BlockPos, LightLayer, sign::SignContent};
+use mc_bamboo_data::{blocks, registries::biome};
 
 use crate::{
-    chunk::{Chunk, HeightmapKind},
-    light::{DataLayer, LightColumn, SectionPos},
+    SECTION_COUNT,
+    chunk::{Chunk, HeightmapKind, Section},
+    light::{DataLayer, LIGHT_SECTION_COUNT, LightColumn, MIN_LIGHT_SECTION, SectionPos},
+    palette::{PackedError, PalettedContainer},
 };
 
 /// 还有没算完的光照，不能搬区块束。
@@ -29,6 +32,129 @@ impl std::fmt::Display for LightPending {
 
 impl std::error::Error for LightPending {}
 
+/// 磁盘上一段的方块和生物群系调色板形式。
+///
+/// `palette` 的下标就是 `data` 里存的下标；`data` 的位数由调色板长度按官方
+/// `Strategy.getConfigurationForPaletteSize` 算出，单值段为空。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionParts {
+    pub block_palette: Vec<u32>,
+    pub block_data: Vec<u64>,
+    pub biome_palette: Vec<u32>,
+    pub biome_data: Vec<u64>,
+}
+
+/// 从磁盘数据构造一个区块束所需的全部内容。
+///
+/// 方块和群系都是调色板形式，见 [`SectionParts`]。所有值都当成不可信输入：
+/// 段数、调色板长度、打包数组长度、状态 ID、坐标越界都会返回 [`ColumnPartsError`]。
+#[derive(Debug, Clone)]
+pub struct ChunkColumnParts {
+    /// 24 个方块段，从世界最低段往上。
+    pub sections: Vec<SectionParts>,
+    /// 四种高度图，和 [`HeightmapKind::ALL`] 一一对应；`None` 时从方块重算。
+    pub heightmaps: [Option<Vec<u64>>; HeightmapKind::ALL.len()],
+    /// 26 个光照段，从 [`MIN_LIGHT_SECTION`] 往上，天空光在前、方块光在后。
+    /// `None` 表示官方没存这一段的光照，和 `DataLayer::Filled(0)` 不同。
+    pub light: [Vec<Option<DataLayer>>; 2],
+    /// `isLightOn`。
+    pub light_on: bool,
+    /// 有内容的告示牌：区块内 x、世界 y、区块内 z 和内容。
+    pub signs: Vec<(usize, i32, usize, SignContent)>,
+    /// 方块实体要发给客户端的 NBT：区块内 x、世界 y、区块内 z 和网络字节。
+    pub update_tags: Vec<(usize, i32, usize, Vec<u8>)>,
+}
+
+/// 磁盘数据不能组装成一个区块束。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ColumnPartsError {
+    #[error("packed section data is invalid: {0}")]
+    Packed(#[from] PackedError),
+    #[error("expected {expected} sections, got {actual}")]
+    WrongSectionCount { expected: usize, actual: usize },
+    #[error("expected {expected} light sections, got {actual}")]
+    WrongLightSectionCount { expected: usize, actual: usize },
+    #[error("unknown block state id {0}")]
+    UnknownState(u32),
+    #[error("unknown biome id {0}")]
+    UnknownBiome(u32),
+    #[error("heightmap words cannot describe 256 columns")]
+    BadHeightmap,
+    #[error("position ({x}, {y}, {z}) is outside the chunk")]
+    BadPosition { x: usize, y: i32, z: usize },
+}
+
+impl Default for ChunkColumnParts {
+    fn default() -> Self {
+        Self {
+            sections: Vec::new(),
+            heightmaps: std::array::from_fn(|_| None),
+            light: std::array::from_fn(|_| vec![None; LIGHT_SECTION_COUNT]),
+            light_on: false,
+            signs: Vec::new(),
+            update_tags: Vec::new(),
+        }
+    }
+}
+
+impl ChunkColumnParts {
+    /// 从现有的区块束读出全部内容，字段和 [`ChunkColumn::from_parts`] 的输入一一对应。
+    pub fn read_from(column: &ChunkColumn) -> Self {
+        let sections = column
+            .chunk
+            .sections()
+            .iter()
+            .map(|section| {
+                let (block_palette, block_data) = section.blocks().packed_for_disk();
+                let (biome_palette, biome_data) = section.biomes().packed_for_disk();
+                SectionParts {
+                    block_palette,
+                    block_data,
+                    biome_palette,
+                    biome_data,
+                }
+            })
+            .collect();
+        let heightmaps =
+            std::array::from_fn(|index| Some(column.chunk.heightmap(HeightmapKind::ALL[index])));
+        let light = std::array::from_fn(|layer_index| {
+            let layer = if layer_index == 0 {
+                LightLayer::Sky
+            } else {
+                LightLayer::Block
+            };
+            (0..LIGHT_SECTION_COUNT)
+                .map(|slot| {
+                    column
+                        .section(
+                            layer,
+                            SectionPos::new(0, MIN_LIGHT_SECTION + slot as i32, 0),
+                        )
+                        .cloned()
+                })
+                .collect()
+        });
+        let signs = column
+            .chunk
+            .signs()
+            .map(|(x, y, z, content)| (x, y, z, content.clone()))
+            .collect();
+        let update_tags = column
+            .chunk
+            .update_tags()
+            .map(|(x, y, z, tag)| (x, y, z, tag.to_vec()))
+            .collect();
+        Self {
+            sections,
+            heightmaps,
+            light,
+            light_on: column.sky.light_on(),
+            signs,
+            update_tags,
+        }
+    }
+}
+
 /// 一个区块位置上这一层知道的全部内容。
 ///
 /// 盒子里只有一份光照：取出只允许在光照没有算到一半的时候做，那时引擎正在算的那份和
@@ -43,6 +169,70 @@ pub struct ChunkColumn {
 }
 
 impl ChunkColumn {
+    /// 从磁盘数据构造一个能被 [`ChunkStore::insert_column`](super::store::ChunkStore::insert_column)
+    /// 接受的区块束。
+    ///
+    /// 段和光照按调色板 / 26 段数组直接建好，不逐格重放 `set_block`；段计数按官方
+    /// `recalcBlockCounts` 的办法统计。高度图给了就校验后用，缺了就从方块重算。
+    /// `initialize_light_sources` 在这里跑完，光照引擎之后能接着算。
+    ///
+    /// 光照的 `sectionStates` 只按「这一柱」重建：跨到相邻区块柱的邻居计数这里
+    /// 看不到，放进 `ChunkStore` 后跨柱的登记由区块平面那一步负责（和
+    /// `take_column` / `insert_column` 的约定一致）。
+    pub fn from_parts(parts: ChunkColumnParts) -> Result<Self, ColumnPartsError> {
+        if parts.sections.len() != SECTION_COUNT {
+            return Err(ColumnPartsError::WrongSectionCount {
+                expected: SECTION_COUNT,
+                actual: parts.sections.len(),
+            });
+        }
+        for layer in &parts.light {
+            if layer.len() != LIGHT_SECTION_COUNT {
+                return Err(ColumnPartsError::WrongLightSectionCount {
+                    expected: LIGHT_SECTION_COUNT,
+                    actual: layer.len(),
+                });
+            }
+        }
+        let mut sections = Vec::with_capacity(SECTION_COUNT);
+        for section in parts.sections {
+            for &state in &section.block_palette {
+                if state >= blocks::TOTAL_STATES {
+                    return Err(ColumnPartsError::UnknownState(state));
+                }
+            }
+            for &id in &section.biome_palette {
+                if id >= biome::TOTAL {
+                    return Err(ColumnPartsError::UnknownBiome(id));
+                }
+            }
+            let blocks =
+                PalettedContainer::from_blocks_disk(section.block_palette, section.block_data)?;
+            let biomes =
+                PalettedContainer::from_biomes_disk(section.biome_palette, section.biome_data)?;
+            sections.push(Section::from_disk(blocks, biomes));
+        }
+        let mut chunk = Chunk::from_sections(sections, &parts.heightmaps)?;
+        for (x, y, z, content) in parts.signs {
+            chunk.put_sign(x, y, z, content)?;
+        }
+        for (x, y, z, tag) in parts.update_tags {
+            chunk.put_update_tag(x, y, z, tag)?;
+        }
+        let mut has_blocks = [false; LIGHT_SECTION_COUNT];
+        for (index, section) in chunk.sections().iter().enumerate() {
+            has_blocks[index + 1] = !section.is_empty();
+        }
+        let columns = parts.light.map(|layers| {
+            let array: [Option<DataLayer>; LIGHT_SECTION_COUNT] = layers
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("上面已经校验过光照段数"));
+            LightColumn::from_layers(array, &has_blocks, parts.light_on)
+        });
+        let [sky, block] = columns;
+        Ok(Self { chunk, sky, block })
+    }
+
     pub(super) fn new(chunk: Chunk, [sky, block]: [LightColumn; 2]) -> Self {
         Self { chunk, sky, block }
     }
@@ -81,6 +271,11 @@ impl ChunkColumn {
         self.chunk.heightmap(kind)
     }
 
+    /// `isLightOn`：这一柱的光照算完了没有，对应区块 NBT 里的 `isLightOn`。
+    pub fn light_on(&self) -> bool {
+        self.sky.light_on()
+    }
+
     fn column(&self, layer: LightLayer) -> &LightColumn {
         match layer {
             LightLayer::Sky => &self.sky,
@@ -91,16 +286,17 @@ impl ChunkColumn {
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
+    use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
     use mc_bamboo_data::blocks;
 
     use crate::{
+        SECTION_COUNT,
         chunk::HeightmapKind,
         light::{DataLayer, LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos},
         store::ChunkStore,
     };
 
-    use super::{ChunkColumn, LightPending};
+    use super::{ChunkColumn, ChunkColumnParts, ColumnPartsError, LightPending, SectionParts};
 
     /// 萤石放在 (0, 0) 的东边界，光溢到 (1, 0)。
     const LAMP: BlockPos = BlockPos::new(15, -60, 3);
@@ -587,5 +783,159 @@ mod tests {
         store.set_block(LAMP, blocks::AIR);
         store.finish_light_updates();
         assert!(store.take_light_changes().contains_key(&CENTER));
+    }
+
+    /// 读盘路径：调色板形式的内容组装成区块束，方块、高度图、方块实体、告示牌、
+    /// 两层光照和光照开关逐项相同；放进新的 `ChunkStore` 后读数也相同。
+    #[test]
+    fn parts_round_trip_into_a_fresh_store() {
+        let mut source = edited(true);
+        let column = take(&mut source, CENTER);
+        let parts = ChunkColumnParts::read_from(&column);
+        assert_eq!(parts.sections.len(), SECTION_COUNT);
+        assert_eq!(parts.light[0].len(), LIGHT_SECTION_COUNT);
+        assert_eq!(parts.light_on, column.light_on());
+
+        let rebuilt = ChunkColumn::from_parts(parts).expect("组装成功");
+        assert_eq!(rebuilt.light_on(), column.light_on());
+        for kind in HeightmapKind::ALL {
+            assert_eq!(rebuilt.heightmap(kind), column.heightmap(kind));
+        }
+        for &(x, y, z) in &[(3, -60, 3), (15, -60, 3), (20, -60, 4)] {
+            assert_eq!(
+                rebuilt.chunk().block(x, y, z),
+                column.chunk().block(x, y, z)
+            );
+        }
+        assert_eq!(
+            rebuilt.chunk().block_entities().collect::<Vec<_>>(),
+            column.chunk().block_entities().collect::<Vec<_>>()
+        );
+        for x in 0..16 {
+            for y in [-64, -61, -60, -59, 0, 319] {
+                for z in 0..16 {
+                    let pos = BlockPos::new(x, y, z);
+                    for layer in [LightLayer::Sky, LightLayer::Block] {
+                        assert_eq!(
+                            rebuilt.light_value(layer, pos),
+                            column.light_value(layer, pos),
+                            "{layer:?} at {pos:?}"
+                        );
+                    }
+                }
+            }
+        }
+        for y in MIN_LIGHT_SECTION..MIN_LIGHT_SECTION + LIGHT_SECTION_COUNT as i32 {
+            let section = SectionPos::new(0, y, 0);
+            for layer in [LightLayer::Sky, LightLayer::Block] {
+                assert_eq!(
+                    rebuilt.section(layer, section),
+                    column.section(layer, section)
+                );
+            }
+        }
+
+        // 放进新建的 ChunkStore 后，方块和高度图能按世界坐标读到。
+        let mut target = ChunkStore::flat();
+        insert(&mut target, CENTER, Box::new(rebuilt));
+        let source2 = edited(true);
+        for x in 0..16 {
+            for y in -64..=-59 {
+                for z in 0..16 {
+                    let pos = BlockPos::new(x, y, z);
+                    assert_eq!(target.block(pos), source2.block(pos));
+                    assert_eq!(target.heightmap_y(pos), source2.heightmap_y(pos));
+                }
+            }
+        }
+        assert_eq!(target.block(LAMP), Some(blocks::GLOWSTONE));
+    }
+
+    /// 磁盘数据一律不可信：段数、调色板、long 数组、状态 ID、坐标错了都要报错。
+    #[test]
+    fn from_parts_rejects_bad_disk_data() {
+        let mut store = ChunkStore::flat();
+        let source = take(&mut store, CENTER);
+        let good = ChunkColumnParts::read_from(&source);
+        assert!(ChunkColumn::from_parts(good.clone()).is_ok());
+
+        let mut wrong = good.clone();
+        wrong.sections.pop();
+        assert!(matches!(
+            ChunkColumn::from_parts(wrong),
+            Err(ColumnPartsError::WrongSectionCount { .. })
+        ));
+
+        let mut wrong = good.clone();
+        wrong.light[0].pop();
+        assert!(matches!(
+            ChunkColumn::from_parts(wrong),
+            Err(ColumnPartsError::WrongLightSectionCount { .. })
+        ));
+
+        let mut wrong = good.clone();
+        wrong.sections[0].block_palette.clear();
+        assert!(ChunkColumn::from_parts(wrong).is_err());
+
+        let mut wrong = good.clone();
+        wrong.sections[0].block_data.clear();
+        assert!(ChunkColumn::from_parts(wrong).is_err());
+
+        let mut wrong = good.clone();
+        wrong.sections[0].block_palette[0] = u32::MAX;
+        assert!(matches!(
+            ChunkColumn::from_parts(wrong),
+            Err(ColumnPartsError::UnknownState(u32::MAX))
+        ));
+
+        let mut wrong = good.clone();
+        wrong.sections[0].biome_palette[0] = u32::MAX;
+        assert!(matches!(
+            ChunkColumn::from_parts(wrong),
+            Err(ColumnPartsError::UnknownBiome(u32::MAX))
+        ));
+
+        let mut wrong = good.clone();
+        wrong.heightmaps[0] = Some(Vec::new());
+        assert!(matches!(
+            ChunkColumn::from_parts(wrong),
+            Err(ColumnPartsError::BadHeightmap)
+        ));
+
+        let mut wrong = good.clone();
+        wrong.signs.push((99, -60, 0, SignContent::BLANK));
+        assert!(ChunkColumn::from_parts(wrong).is_err());
+    }
+
+    /// 模糊：随机的调色板和 long 数组不能让构造过程 panic。
+    #[test]
+    fn fuzzed_parts_never_panic() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200 {
+            let sections = (0..SECTION_COUNT)
+                .map(|_| {
+                    let palette_len = (next() % 6) as usize + 1;
+                    let palette: Vec<u32> =
+                        (0..palette_len).map(|_| (next() % 200) as u32).collect();
+                    let words: Vec<u64> = (0..(next() % 40) as usize).map(|_| next()).collect();
+                    SectionParts {
+                        block_palette: palette.clone(),
+                        block_data: words.clone(),
+                        biome_palette: palette,
+                        biome_data: words,
+                    }
+                })
+                .collect();
+            let _ = ChunkColumn::from_parts(ChunkColumnParts {
+                sections,
+                ..Default::default()
+            });
+        }
     }
 }

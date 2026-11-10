@@ -13,6 +13,8 @@ use crate::{
     palette::{PaletteView, PalettedContainer, pack_values},
 };
 
+use super::column::ColumnPartsError;
+
 /// `isAir`：空气、洞穴空气和虚空空气。
 fn is_air(state: u32) -> bool {
     state_facts(state) & facts::AIR != 0
@@ -85,6 +87,24 @@ impl Heightmap {
     /// 还没有方块的高度图，每列都在世界底部。
     const EMPTY: Self = Self { columns: [0; 256] };
 
+    /// 从磁盘上的 9 位一项、按字对齐的 long 数组还原。坏数据一律报错。
+    fn from_words(words: &[u64]) -> Result<Self, ColumnPartsError> {
+        let mut columns = [0u32; 256];
+        for (index, column) in columns.iter_mut().enumerate() {
+            let per_word = 64 / HEIGHTMAP_BITS as usize;
+            let shift = (index % per_word) * HEIGHTMAP_BITS as usize;
+            let Some(&word) = words.get(index / per_word) else {
+                return Err(ColumnPartsError::BadHeightmap);
+            };
+            let value = (word >> shift) & ((1 << HEIGHTMAP_BITS) - 1);
+            if value > WORLD_HEIGHT as u64 {
+                return Err(ColumnPartsError::BadHeightmap);
+            }
+            *column = value as u32;
+        }
+        Ok(Self { columns })
+    }
+
     const fn index(x: usize, z: usize) -> usize {
         x + z * 16
     }
@@ -143,6 +163,52 @@ const fn heightmap_bits() -> u8 {
 
 const HEIGHTMAP_BITS: u8 = heightmap_bits();
 
+/// 区块段里哪些位置有方块实体。只有调色板里可能有带方块实体的状态时才扫那一段。
+fn find_block_entities(sections: &[Section]) -> BTreeMap<(i32, usize, usize), i32> {
+    let mut found = BTreeMap::new();
+    for (index, section) in sections.iter().enumerate() {
+        let candidates: Vec<u32> = match section.blocks().palette() {
+            PaletteView::Single(state) => vec![state],
+            PaletteView::Indirect(states) => states.to_vec(),
+            PaletteView::Global => Vec::new(),
+        };
+        let indexed: Vec<(u32, i32)> = candidates
+            .iter()
+            .copied()
+            .filter_map(|state| {
+                block_of_state(state)
+                    .and_then(|block| block.block_entity_type)
+                    .map(|kind| (state, kind))
+            })
+            .collect();
+        let needs_scan =
+            matches!(section.blocks().palette(), PaletteView::Global) || !indexed.is_empty();
+        if !needs_scan {
+            continue;
+        }
+        let section_y = MIN_Y + index as i32 * SECTION_SIZE;
+        for y in 0..SECTION_SIZE as usize {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = section.block(x, y, z);
+                    let kind = if indexed.is_empty() {
+                        block_of_state(state).and_then(|block| block.block_entity_type)
+                    } else {
+                        indexed
+                            .iter()
+                            .find(|(candidate, _)| *candidate == state)
+                            .map(|(_, kind)| *kind)
+                    };
+                    if let Some(kind) = kind {
+                        found.insert((section_y + y as i32, z, x), kind);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 /// 16×16×16 的区块段。
 #[derive(Debug, Clone)]
 pub struct Section {
@@ -167,6 +233,49 @@ impl Section {
             non_air_blocks: 0,
             random_tickers: 0,
             fluids: 0,
+        }
+    }
+
+    /// 从磁盘调色板组装区块段，按官方 `LevelChunkSection.recalcBlockCounts` 统计计数。
+    pub(crate) fn from_disk(blocks: PalettedContainer, biomes: PalettedContainer) -> Self {
+        let mut section = Self {
+            blocks,
+            biomes,
+            non_air_blocks: 0,
+            random_tickers: 0,
+            fluids: 0,
+        };
+        section.recount();
+        section
+    }
+
+    /// 统计每个调色板下标出现的次数，再按调色板汇总三种计数。
+    fn recount(&mut self) {
+        let counts = self.blocks.index_counts();
+        match self.blocks.palette() {
+            PaletteView::Single(state) => {
+                self.non_air_blocks = if is_air(state) { 0 } else { 4096 };
+                self.random_tickers = if ticks_randomly(state) { 4096 } else { 0 };
+                self.fluids = if fluid_is_empty(state) { 0 } else { 4096 };
+            }
+            PaletteView::Indirect(states) => {
+                for (index, &count) in counts.iter().enumerate() {
+                    if let Some(&state) = states.get(index) {
+                        self.non_air_blocks += u16::from(!is_air(state)) * count;
+                        self.random_tickers += u16::from(ticks_randomly(state)) * count;
+                        self.fluids += u16::from(!fluid_is_empty(state)) * count;
+                    }
+                }
+            }
+            PaletteView::Global => {
+                // 全局形式没有调色板，退回按格查状态属性；磁盘上的段很少走到这里。
+                for index in 0..4096 {
+                    let state = self.blocks.get(index);
+                    self.non_air_blocks += u16::from(!is_air(state));
+                    self.random_tickers += u16::from(ticks_randomly(state));
+                    self.fluids += u16::from(!fluid_is_empty(state));
+                }
+            }
         }
     }
 
@@ -278,6 +387,97 @@ impl Chunk {
         }
     }
 
+    /// 从磁盘上重新建好的区块段组装区块。
+    ///
+    /// 计数和方块实体表在段的构造里按官方 `recalcBlockCounts` 的方式算好了；
+    /// 这里只在有高度图缺失时按方块重算（官方读盘对缺失的高度图也是重算）。
+    /// 方块实体表由段里的调色板决定，只有可能有方块实体时才扫那一段。
+    pub(crate) fn from_sections(
+        sections: Vec<Section>,
+        heightmaps: &[Option<Vec<u64>>; HeightmapKind::ALL.len()],
+    ) -> Result<Self, ColumnPartsError> {
+        if sections.len() != SECTION_COUNT {
+            return Err(ColumnPartsError::WrongSectionCount {
+                expected: SECTION_COUNT,
+                actual: sections.len(),
+            });
+        }
+        let all_given = heightmaps.iter().all(Option::is_some);
+        let mut maps = [Heightmap::EMPTY; HeightmapKind::ALL.len()];
+        if !all_given {
+            for (index, section) in sections.iter().enumerate() {
+                let section_y = MIN_Y + index as i32 * SECTION_SIZE;
+                for y in 0..SECTION_SIZE as usize {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let state = section.block(x, y, z);
+                            for (kind, heightmap) in HeightmapKind::ALL.into_iter().zip(&mut maps) {
+                                heightmap.update(
+                                    kind,
+                                    &sections,
+                                    x,
+                                    section_y + y as i32,
+                                    z,
+                                    state,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (kind, given) in HeightmapKind::ALL.into_iter().zip(heightmaps) {
+            if let Some(words) = given {
+                let position = HeightmapKind::ALL
+                    .iter()
+                    .position(|&candidate| candidate == kind)
+                    .expect("HeightmapKind::ALL 里有每一种高度图");
+                maps[position] = Heightmap::from_words(words)?;
+            }
+        }
+        let block_entities = find_block_entities(&sections);
+        let mut chunk = Self {
+            sections,
+            heightmaps: maps,
+            block_entities,
+            signs: BTreeMap::new(),
+            update_tags: BTreeMap::new(),
+            sky_light_sources: SkyLightSources::default(),
+        };
+        chunk.initialize_light_sources();
+        Ok(chunk)
+    }
+
+    /// 写入一个告示牌，坐标由调用方校验过。
+    pub(crate) fn put_sign(
+        &mut self,
+        x: usize,
+        y: i32,
+        z: usize,
+        content: SignContent,
+    ) -> Result<(), ColumnPartsError> {
+        if x >= 16 || z >= 16 || !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            return Err(ColumnPartsError::BadPosition { x, y, z });
+        }
+        self.signs.insert((y, z, x), content);
+        Ok(())
+    }
+
+    /// 写入方块实体要发给客户端的 NBT，坐标由调用方校验过。
+    pub(crate) fn put_update_tag(
+        &mut self,
+        x: usize,
+        y: i32,
+        z: usize,
+        tag: Vec<u8>,
+    ) -> Result<(), ColumnPartsError> {
+        if x >= 16 || z >= 16 || !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            return Err(ColumnPartsError::BadPosition { x, y, z });
+        }
+        self.update_tags.insert((y, z, x), tag);
+        Ok(())
+    }
+
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }
@@ -328,6 +528,13 @@ impl Chunk {
     /// 写入告示牌内容。
     pub fn set_sign(&mut self, x: usize, y: i32, z: usize, content: SignContent) {
         self.signs.insert((y, z, x), content);
+    }
+
+    /// 方块实体发给客户端的 NBT，键和 [`block_entities`](Self::block_entities) 的顺序相同。
+    pub(crate) fn update_tags(&self) -> impl Iterator<Item = (usize, i32, usize, &[u8])> + '_ {
+        self.update_tags
+            .iter()
+            .map(|(&(y, z, x), tag)| (x, y, z, tag.as_slice()))
     }
 
     /// 有内容的告示牌，键和 [`block_entities`](Self::block_entities) 的顺序相同。

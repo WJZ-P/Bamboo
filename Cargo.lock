@@ -2077,6 +2077,7 @@ version = "0.0.0"
 dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
