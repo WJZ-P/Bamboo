@@ -49,7 +49,7 @@ pub use behaviour::machines::{
     CampfireEntity, ShulkerBoxEntity, ShulkerStatus, open_lid_box, reset_lectern,
     signal_lectern_page,
 };
-pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents};
+pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents, ChunkBlockEntities};
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::{click_if_empty, dispense_from};
@@ -64,14 +64,14 @@ pub use interact::{
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
-    Effect, LecternFacts, Level, LevelSideState, LevelTables, RedstoneMemory, custom_sound_name,
-    intern_custom_sound,
+    ChunkRedstone, Effect, LecternFacts, Level, LevelSideState, LevelTables, RedstoneMemory,
+    custom_sound_name, intern_custom_sound,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
 pub use random_tick::{DEFAULT_RANDOM_TICK_SPEED, random_tick, tick_chunk, tick_thunder};
 pub use shape::{Aabb, Boxes, CollisionContext, EntityContext};
 pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
-pub use ticks::{BlockTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
+pub use ticks::{BlockTicks, Busy, ChunkTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
 pub use weather::{BlockWeather, Precipitation, PrecipitationFacts};
 pub use world::World;
