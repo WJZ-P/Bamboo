@@ -6,7 +6,7 @@
 服务端每 10 秒打一份报告、打完就清零样本，所以一行汇总值没法从直方图里精确合并：
 百分比取各份报告按样本数加权的平均，最大值取各份报告的最大值；阶段和数量指标
 按样本数加权平均。只统计报告里在线人数峰值达到目标 90% 以上的报告，
-用来排除刚起服那一段；其余报告的值在文档里注明是「多份 10 秒报告按样本数加权的平均」。
+其余报告的值在文档里注明是「多份 10 秒报告按样本数加权的平均」。
 """
 
 import json
@@ -72,8 +72,7 @@ def summarize(root, name):
     client = json.loads((directory / "client.json").read_text())
     reports = parse_reports(directory / "server.log")
     bots = client["bots"]
-    # 第一份报告覆盖起服、进服和 ramp，和后面的稳态混在一起不公平；丢掉它。
-    # 再只取在线人数达到目标 80% 的报告。
+    # 只取在线人数峰值达到目标 90% 以上的稳态报告。
     steady = [
         report
         for report in reports
@@ -161,7 +160,12 @@ def main():
     names = sys.argv[2:] or sorted(
         path.name for path in root.iterdir() if (path / "client.json").exists()
     )
-    rows = [summarize(root, name) for name in names]
+    rows = []
+    for name in names:
+        if not (root / name / "client.json").exists():
+            print(f"missing client report for {name}", file=sys.stderr)
+            continue
+        rows.append(summarize(root, name))
     table = [[format_cell(key, row[key]) for _, key in COLUMNS] for row in rows]
     header = [title for title, _ in COLUMNS]
     widths = [max(len(header[i]), *(len(row[i]) for row in table)) for i in range(len(header))]

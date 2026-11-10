@@ -62,7 +62,8 @@ run_scene() {
 
     echo "=== $name: $bots bots, $pattern/$layout, ${seconds}s ==="
     # 服务端在临时目录里跑：四份管理名单和日志都落在那里，不在仓库里留文件。
-    (cd "$dir" && BAMBOO_PROFILE="$PROFILE_SECS" \
+    # 不用子 shell 包一层，否则 $! 是子 shell 的 pid，kill 不到真正的服务端。
+    (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" \
         "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 \
         > server.log 2>&1) &
     SERVER=$!
