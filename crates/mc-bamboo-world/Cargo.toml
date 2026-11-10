@@ -12,3 +12,4 @@ categories = ["games"]
 [dependencies]
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+thiserror.workspace = true

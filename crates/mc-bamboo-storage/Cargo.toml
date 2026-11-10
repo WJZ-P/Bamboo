@@ -1,0 +1,18 @@
+[package]
+name = "mc-bamboo-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chunk NBT and Anvil region files of the Bamboo Minecraft server."
+keywords = ["minecraft", "nbt", "anvil"]
+categories = ["encoding"]
+
+[dependencies]
+flate2.workspace = true
+mc-bamboo-core.workspace = true
+mc-bamboo-data.workspace = true
+mc-bamboo-nbt.workspace = true
+mc-bamboo-world.workspace = true
+thiserror.workspace = true

@@ -2003,6 +2003,7 @@ dependencies = [
 name = "mc-bamboo-nbt"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "thiserror 2.0.21",
 ]
 
@@ -2050,6 +2051,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-storage"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "mc-bamboo-nbt",
+ "mc-bamboo-world",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mc-bamboo-vanilla"
 version = "0.0.0"
 dependencies = [
@@ -2062,6 +2075,7 @@ dependencies = [
  "mc-bamboo-protocol",
  "mc-bamboo-recipes",
  "mc-bamboo-server",
+ "mc-bamboo-storage",
  "mc-bamboo-world",
  "mc-bamboo-worldgen",
  "rand_core",
@@ -2077,6 +2091,7 @@ version = "0.0.0"
 dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

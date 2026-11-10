@@ -53,6 +53,41 @@ impl LightColumn {
         self
     }
 
+    /// 按磁盘上 26 段的光照数据和方块段重建一柱。
+    ///
+    /// 跨到相邻区块柱的邻居计数这里看不到：`sectionStates` 只按「哪些段存了
+    /// 光照」记，存了光照的段标 `HAS_DATA`。放进 `ChunkStore` 后跨柱的登记由
+    /// 区块平面那一步负责，和 `take_column` / `insert_column` 的约定一致。
+    pub(crate) fn from_layers(
+        layers: [Option<DataLayer>; LIGHT_SECTION_COUNT],
+        has_blocks: &[bool; LIGHT_SECTION_COUNT],
+        light_on: bool,
+    ) -> Self {
+        let states = std::array::from_fn(|slot| {
+            let mut state = 0;
+            if has_blocks[slot] {
+                state |= HAS_DATA;
+            }
+            if layers[slot].is_some() && !has_blocks[slot] {
+                // 这一段只因为邻居而存着光照：记一个邻居，保证状态非 0，
+                // 否则光照引擎会以为这一段不该存在。
+                state |= 1;
+            }
+            state
+        });
+        Self {
+            layers,
+            states,
+            light_on,
+            changed: 0,
+        }
+    }
+
+    /// 这一柱的光照是不是已经打开。
+    pub(crate) const fn light_on(&self) -> bool {
+        self.light_on
+    }
+
     /// 发布出去的光照数据一样：`states` 只在引擎里有，别人读的那一份不记。
     pub(crate) fn has_same_data(&self, other: &Self) -> bool {
         self.layers == other.layers

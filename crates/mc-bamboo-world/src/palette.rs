@@ -10,6 +10,19 @@ pub const BLOCKS_PER_SECTION: usize = 4096;
 /// 一个区块段的生物群系数量，每 4×4×4 个方块共用一个。
 pub const BIOMES_PER_SECTION: usize = 64;
 
+/// 磁盘上的调色板和打包数据不能转成内存里的容器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PackedError {
+    #[error("palette must not be empty")]
+    EmptyPalette,
+    #[error("palette has too many entries for the container")]
+    TooManyEntries,
+    #[error("packed data has {actual} words, expected {expected}")]
+    WrongDataLength { actual: usize, expected: usize },
+    #[error("packed index {index} is outside a palette of {size} entries")]
+    IndexOutOfRange { index: u32, size: usize },
+}
+
 /// 不同内容使用不同的位数规则，这些数字和官方的 `Strategy` 一致。
 #[derive(Debug)]
 struct Rules {
@@ -24,6 +37,57 @@ const fn bits_for_count(count: u32) -> u8 {
         0
     } else {
         (u32::BITS - (count - 1).leading_zeros()) as u8
+    }
+}
+
+/// 磁盘上的位数：官方 `Strategy.getConfigurationForPaletteSize(n).bitsInStorage()`。
+///
+/// 和网络形式不同，超过局部调色板上限时官方用 `Configuration.Global`，但它的
+/// `bitsInStorage` 仍是 `ceil(log2(n))`，不是内存里全局 ID 的位数。
+pub fn disk_bits(palette_len: usize, biomes: bool) -> u8 {
+    let count = palette_len.max(1) as u32;
+    // 官方 `ceillog2(n)` 对 2 的幂也返回幂次本身。
+    let requested = (u32::BITS - (count - 1).leading_zeros()) as u8;
+    if biomes {
+        // 生物群系：1..3 位各自的简单配置，更多走 `Global`，位数不变。
+        requested
+    } else if requested <= 4 {
+        // 方块的 1..4 位全部落到 `FOUR_BITS_LINEAR`。
+        if requested == 0 { 0 } else { 4 }
+    } else {
+        // 5..8 位各用各的；超过 8 走 `Global`，`bitsInStorage` 仍是请求的位数。
+        requested
+    }
+}
+
+/// 磁盘上的 long 数组长度。位数为 0（单值调色板）时是 0。
+pub fn disk_data_len(entries: usize, bits: u8) -> usize {
+    if bits == 0 {
+        0
+    } else {
+        entries.div_ceil(64 / bits as usize)
+    }
+}
+
+/// 从磁盘位数里读出一个下标。调用方保证 `bits > 0`、`data` 长度和 `index` 范围都合法。
+pub fn read_disk_index(data: &[u64], bits: u8, index: usize) -> u32 {
+    let per_word = 64 / bits as usize;
+    let shift = (index % per_word) * bits as usize;
+    let mask = (1u64 << bits) - 1;
+    ((data[index / per_word] >> shift) & mask) as u32
+}
+
+/// 把下标按磁盘位数写进 long 数组。调用方保证长度和范围合法。
+pub fn write_disk_index(data: &mut [u64], bits: u8, index: usize, value: u32) {
+    write_packed(data, bits, index, value);
+}
+
+/// 磁盘上的 long 数组里最多能存多少个下标，供解码器检查越界。
+pub fn packed_capacity(data_len: usize, bits: u8) -> usize {
+    if bits == 0 {
+        1
+    } else {
+        data_len.saturating_mul(64 / bits as usize)
     }
 }
 
@@ -132,6 +196,135 @@ impl PalettedContainer {
             palette: vec![value],
             data: Vec::new(),
         }
+    }
+
+    /// 从磁盘上的「调色板 + 下标数组」构造容器，输入一律当成不可信数据检查。
+    ///
+    /// `entries` 是方块 4096 / 生物群系 64，`bits` 由 [`disk_bits`] 按调色板长度算出。
+    /// 磁盘位数不超过内存局部上限时，long 数组原样用；超过时容器切换成全局 ID 形式，
+    /// 内存表示重新打包，读出来的值和磁盘一致。
+    fn from_disk(
+        rules: &'static Rules,
+        palette: Vec<u32>,
+        data: Vec<u64>,
+    ) -> Result<Self, PackedError> {
+        if palette.is_empty() {
+            return Err(PackedError::EmptyPalette);
+        }
+        if palette.len() > rules.entries {
+            return Err(PackedError::TooManyEntries);
+        }
+        let disk_bits = disk_bits(palette.len(), rules.entries == BIOMES_PER_SECTION);
+        let expected = packed_len(rules.entries, disk_bits);
+        if data.len() != expected {
+            return Err(PackedError::WrongDataLength {
+                actual: data.len(),
+                expected,
+            });
+        }
+        if disk_bits == 0 {
+            return Ok(Self {
+                rules,
+                bits: 0,
+                palette,
+                data,
+            });
+        }
+        // 高位多余的值会让下标数组读出来落到调色板之外，先查一遍再决定怎么存。
+        let entries = rules.entries;
+        for index in 0..entries {
+            let stored = read_disk_index(&data, disk_bits, index);
+            // 官方磁盘形式里存的永远是调色板下标，即使配置是 `Configuration.Global`
+            // （它的 `bitsInStorage` 是请求的位数，打包内容仍是 HashMapPalette 的下标）。
+            if stored as usize >= palette.len() {
+                return Err(PackedError::IndexOutOfRange {
+                    index: stored,
+                    size: palette.len(),
+                });
+            }
+        }
+
+        let memory_bits = rules.bits_for_palette(palette.len());
+        if memory_bits == disk_bits {
+            return Ok(Self {
+                rules,
+                bits: disk_bits,
+                palette,
+                data,
+            });
+        }
+        // 只可能发生在磁盘位数超过内存里的局部上限时：内存改用全局 ID。
+        debug_assert!(rules.is_global(memory_bits));
+        let mut repacked = vec![0; packed_len(entries, memory_bits)];
+        for index in 0..entries {
+            let stored = read_disk_index(&data, disk_bits, index);
+            let value = palette[stored as usize];
+            write_packed(&mut repacked, memory_bits, index, value);
+        }
+        Ok(Self {
+            rules,
+            bits: memory_bits,
+            palette: Vec::new(),
+            data: repacked,
+        })
+    }
+
+    /// 方块容器的磁盘形式。
+    pub(crate) fn from_blocks_disk(palette: Vec<u32>, data: Vec<u64>) -> Result<Self, PackedError> {
+        Self::from_disk(&BLOCK_RULES, palette, data)
+    }
+
+    /// 生物群系容器的磁盘形式。
+    pub(crate) fn from_biomes_disk(palette: Vec<u32>, data: Vec<u64>) -> Result<Self, PackedError> {
+        Self::from_disk(&BIOME_RULES, palette, data)
+    }
+
+    /// 磁盘形式的调色板：丢掉没用到的项，按第一次出现的顺序重排，并给出重新打包的 long 数组。
+    /// 对应官方 `PalettedContainer.pack`。
+    pub fn packed_for_disk(&self) -> (Vec<u32>, Vec<u64>) {
+        let mut palette = Vec::new();
+        let mut stored = Vec::with_capacity(self.rules.entries);
+        for index in 0..self.rules.entries {
+            let value = self.get(index);
+            let position = palette
+                .iter()
+                .position(|&entry| entry == value)
+                .unwrap_or_else(|| {
+                    palette.push(value);
+                    palette.len() - 1
+                });
+            stored.push(position as u32);
+        }
+        let bits = disk_bits(palette.len(), self.rules.entries == BIOMES_PER_SECTION);
+        let data = if bits == 0 {
+            Vec::new()
+        } else {
+            pack_values(stored.into_iter(), bits)
+        };
+        (palette, data)
+    }
+
+    /// 每个调色板下标在整段里出现的次数，供 `recalcBlockCounts` 用。
+    pub(crate) fn index_counts(&self) -> Vec<u16> {
+        let size = match self.palette() {
+            PaletteView::Single(_) => 1,
+            PaletteView::Indirect(states) => states.len(),
+            PaletteView::Global => 0,
+        };
+        let mut counts = vec![0u16; size];
+        if self.bits == 0 || size == 0 {
+            return counts;
+        }
+        let per_word = values_per_word(self.bits);
+        let mask = (1u64 << self.bits) - 1;
+        for index in 0..self.rules.entries {
+            let stored = ((self.data[index / per_word] >> (index % per_word * self.bits as usize))
+                & mask) as usize;
+            if let Some(count) = counts.get_mut(stored) {
+                *count += 1;
+            }
+        }
+        counts
     }
 
     pub fn bits(&self) -> u8 {
