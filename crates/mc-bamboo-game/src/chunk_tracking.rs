@@ -3,7 +3,7 @@
 //! 跟踪范围不是方形，也不是视距圈：沿坐标轴的半径是 `vd + 1`，四角是圆的。
 //! 这样客户端渲染范围里的每个区块，8 个邻居都能到齐，否则它不编译这个区块。
 
-use std::{collections::BTreeMap, ops::RangeInclusive};
+use std::{collections::BTreeMap, ops::RangeInclusive, time::Instant};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_protocol::packet::play::{
@@ -11,12 +11,8 @@ use mc_bamboo_protocol::packet::play::{
 };
 
 use crate::{
-    chunk_encoding::chunk_frame,
-    inbound::PlayerId,
-    links::Links,
-    player::Player,
-    profiler::Profiler,
-    region::{Region, RegionTick},
+    chunk_encoding::chunk_frame, inbound::PlayerId, links::Links, player::Player,
+    profiler::Profiler, region::Region,
 };
 
 /// 视距的下限。客户端请求的值和服务端的配置都不能比它小。
@@ -121,9 +117,9 @@ fn view_difference(previous: Option<ChunkView>, next: ChunkView) -> (Vec<ChunkPo
 /// 这是背压：接收方反过来限制发送方。收不到确认时只是停发，区块留在 `pending` 里。
 #[derive(Debug)]
 pub(crate) struct PlayerChunkSender {
-    /// 值为进入待发送集合的那一刻，用来算区块延迟。
-    pending: BTreeMap<ChunkPos, RegionTick>,
-    tick: RegionTick,
+    /// 值为进入待发送集合的墙上时刻，用来算区块延迟。
+    pending: BTreeMap<ChunkPos, Instant>,
+    now: Instant,
     desired_chunks_per_tick: f32,
     batch_quota: f32,
     unacknowledged_batches: i32,
@@ -134,7 +130,7 @@ impl Default for PlayerChunkSender {
     fn default() -> Self {
         Self {
             pending: BTreeMap::new(),
-            tick: RegionTick::default(),
+            now: Instant::now(),
             desired_chunks_per_tick: START_CHUNKS_PER_TICK,
             batch_quota: 0.0,
             unacknowledged_batches: 0,
@@ -144,13 +140,13 @@ impl Default for PlayerChunkSender {
 }
 
 impl PlayerChunkSender {
-    /// 世界线程在视图变化之前把当前刻写进来。
-    pub(crate) fn set_tick(&mut self, tick: RegionTick) {
-        self.tick = tick;
+    /// 世界线程在视图变化之前把当前时刻写进来，入队和发出都用墙上时间。
+    pub(crate) fn set_now(&mut self, now: Instant) {
+        self.now = now;
     }
 
     fn mark_pending(&mut self, pos: ChunkPos) {
-        self.pending.entry(pos).or_insert(self.tick);
+        self.pending.entry(pos).or_insert(self.now);
     }
 
     /// 这个区块离开了视图，返回客户端是否已经有它，有的话要发 `forget_level_chunk`。
@@ -162,11 +158,12 @@ impl PlayerChunkSender {
         self.pending.contains_key(&pos)
     }
 
-    /// 在区块离开 `pending` 之前，把这一刻写进出站缓冲的区块延迟记进剖析器。
+    /// 在区块离开 `pending` 之前，把这一刻写进出站缓冲的墙上延迟记进剖析器。
     fn record_batch(&self, batch: &[ChunkPos], profiler: &mut Profiler) {
+        let sent = profiler.now();
         for pos in batch {
             if let Some(&entered) = self.pending.get(pos) {
-                profiler.record_chunk_latency(self.tick.since(entered));
+                profiler.record_chunk_latency(entered, sent);
             }
         }
     }
@@ -295,21 +292,21 @@ pub(crate) fn update_player_view(
 
 /// tick 第 4 阶段：每名玩家比较一次 `(center, vd)`。
 pub(crate) fn update_views(region: &mut Region) {
-    let tick = region.tick;
+    let now = region.profiler.now();
     for player in region.players.values_mut() {
-        player.chunks.sender.set_tick(tick);
+        player.chunks.sender.set_now(now);
         update_player_view(player, &mut region.links, region.view_distance);
     }
 }
 
 /// tick 第 10 阶段：每名玩家最多发一批，发完把没人跟踪的区块从编码缓存里丢掉。
 pub(crate) fn send_chunks(region: &mut Region) {
-    let tick = region.tick;
+    let now = region.profiler.now();
     for (&id, player) in &mut region.players {
         if !region.links.is_open(id) {
             continue;
         }
-        player.chunks.sender.set_tick(tick);
+        player.chunks.sender.set_now(now);
         let batch = player
             .chunks
             .sender
@@ -909,18 +906,20 @@ mod tests {
     }
 
     #[test]
-    fn pending_chunks_record_how_many_ticks_they_waited() {
+    fn pending_chunks_record_the_wall_time_they_waited() {
+        let mut profiler = Profiler::with_manual_clock();
         let mut sender = PlayerChunkSender::default();
-        let mut profiler = Profiler::default();
-        sender.set_tick(RegionTick::at(10));
+        sender.set_now(profiler.now());
         sender.mark_pending(chunk(0, 0));
-        sender.set_tick(RegionTick::at(13));
+        // 三刻之后才发，钉死的时钟只走了 150ms，和真实时钟跑多快无关。
+        profiler.advance_clock(std::time::Duration::from_millis(150));
+        sender.set_now(profiler.now());
         let batch = sender.next_batch(ORIGIN, &mut profiler);
         assert_eq!(batch, [chunk(0, 0)]);
 
-        let latencies = profiler.histogram(Series::Metric(Metric::ChunkLatencyTicks));
+        let latencies = profiler.histogram(Series::Metric(Metric::ChunkLatencyUs));
         assert_eq!(latencies.count(), 1);
-        assert_eq!(latencies.sum(), 3);
+        assert_eq!(latencies.sum(), 150_000);
         profiler.finish_chunk_sending();
         assert_eq!(
             profiler.histogram(Series::Metric(Metric::ChunksSent)).sum(),

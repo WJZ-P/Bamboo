@@ -11,6 +11,8 @@ use std::{
 
 /// 环境变量给的是报告间隔的秒数；没设、`0`、负数或解析不了都当成没设置。
 const PROFILE_ENV: &str = "BAMBOO_PROFILE";
+/// 相邻两刻的起点理想上相隔 50 ms，和 `world.rs` 里的一刻等长。
+const TICK: Duration = Duration::from_millis(50);
 /// 0..15 ns 逐纳秒记，小到一次 lap 的耗时也能分辨。
 const LINEAR_BUCKETS: usize = 16;
 /// 每个 2 的幂内再分 8 份，相对误差不超过 12.5%。
@@ -209,39 +211,47 @@ impl Phase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Metric {
     TickTotal,
-    TickJitter,
+    /// 实际开始 − 应该开始。
+    TickStartLateness,
+    /// 相邻两刻实际起点的间隔和 50ms 网格差多少，只看正常按网格调度的一对。
+    TickIntervalDeviation,
     InboundMessages,
     OnlinePlayers,
     DueScheduledTicks,
     Entities,
     ChunksSent,
-    ChunkLatencyTicks,
+    ChunkLatencyUs,
+    FlushBytes,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
     SkippedCatchUps,
 }
 
 impl Metric {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::TickTotal,
-        Self::TickJitter,
+        Self::TickStartLateness,
+        Self::TickIntervalDeviation,
         Self::InboundMessages,
         Self::OnlinePlayers,
         Self::DueScheduledTicks,
         Self::Entities,
         Self::ChunksSent,
-        Self::ChunkLatencyTicks,
+        Self::ChunkLatencyUs,
+        Self::FlushBytes,
     ];
 
     fn name(self) -> &'static str {
         match self {
             Self::TickTotal => "tick_total",
-            Self::TickJitter => "tick_jitter",
+            Self::TickStartLateness => "tick_start_lateness",
+            Self::TickIntervalDeviation => "tick_interval_deviation",
             Self::InboundMessages => "inbound_messages",
             Self::OnlinePlayers => "online_players",
             Self::DueScheduledTicks => "due_scheduled_ticks",
             Self::Entities => "entities",
             Self::ChunksSent => "chunks_sent",
-            Self::ChunkLatencyTicks => "chunk_latency_ticks",
+            Self::ChunkLatencyUs => "chunk_latency_us",
+            Self::FlushBytes => "flush_bytes",
             Self::SkippedCatchUps => "skipped_catch_ups",
         }
     }
@@ -254,14 +264,49 @@ impl Metric {
             Self::InboundMessages => "messages",
             Self::DueScheduledTicks => "ticks",
             Self::ChunksSent => "chunks",
-            Self::ChunkLatencyTicks => "ticks",
+            Self::ChunkLatencyUs => "us",
+            Self::FlushBytes => "bytes",
             Self::SkippedCatchUps => "times",
-            Self::TickTotal | Self::TickJitter => "ms",
+            Self::TickTotal | Self::TickStartLateness | Self::TickIntervalDeviation => "ms",
         }
     }
 
     fn is_duration(self) -> bool {
-        matches!(self, Self::TickTotal | Self::TickJitter)
+        matches!(
+            self,
+            Self::TickTotal | Self::TickStartLateness | Self::TickIntervalDeviation
+        )
+    }
+}
+
+/// 世界线程取「现在」的地方。生产环境读单调时钟，测试可以钉死再手动推进，
+/// 区块延迟这类墙上时间的指标因此不依赖真实时钟跑多快。
+#[derive(Debug, Clone)]
+pub(crate) enum Clock {
+    Wall,
+    /// 固定起点加上可推进的偏移，只给测试用。
+    #[cfg(test)]
+    Manual {
+        origin: Instant,
+        offset: Duration,
+    },
+}
+
+impl Clock {
+    pub(crate) fn now(&self) -> Instant {
+        match self {
+            Self::Wall => Instant::now(),
+            #[cfg(test)]
+            Self::Manual { origin, offset } => *origin + *offset,
+        }
+    }
+
+    /// 测试里推进钉死的时钟，生产时钟不受影响。
+    #[cfg(test)]
+    pub(crate) fn advance(&mut self, by: Duration) {
+        if let Self::Manual { offset, .. } = self {
+            *offset += by;
+        }
     }
 }
 
@@ -275,7 +320,11 @@ pub(crate) struct Profiler {
     /// 上一次 `lap` 或 `begin_tick` 的时刻。
     last_lap: Instant,
     tick_start: Instant,
+    /// 上一刻的实际起点。报告和 `begin_tick` 之间不分家，所以也在这里。
+    previous_tick_start: Option<Instant>,
     ticks: u64,
+    /// 世界线程取「现在」的地方；测试可以钉死并推进。
+    clock: Clock,
     /// 没设环境变量时是 `None`：只累计、不打印。
     report_interval: Option<Duration>,
     last_report: Instant,
@@ -290,7 +339,11 @@ impl Profiler {
     }
 
     fn with_report_interval(interval: Option<Duration>) -> Self {
-        let now = Instant::now();
+        Self::with_clock(interval, Clock::Wall)
+    }
+
+    fn with_clock(interval: Option<Duration>, clock: Clock) -> Self {
+        let now = clock.now();
         Self {
             phases: std::array::from_fn(|_| Histogram::default()),
             metrics: std::array::from_fn(|_| Histogram::default()),
@@ -298,7 +351,9 @@ impl Profiler {
             chunks_this_tick: 0,
             last_lap: now,
             tick_start: now,
+            previous_tick_start: None,
             ticks: 0,
+            clock,
             report_interval: interval,
             last_report: now,
         }
@@ -332,7 +387,30 @@ impl Profiler {
     /// 世界创建时读一次 `BAMBOO_PROFILE`。`World::new` 及其几个入口都会走到这里。
     pub(crate) fn on_world_start(&mut self) {
         self.report_interval = report_interval_from_env();
-        self.last_report = Instant::now();
+        self.last_report = self.clock.now();
+    }
+
+    /// 世界线程统一的「现在」。区块入队等事件用这个值打时间戳。
+    pub(crate) fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    /// 钉死时钟的剖析器，让墙上时间的测试不依赖真实时钟跑多快。
+    #[cfg(test)]
+    pub(crate) fn with_manual_clock() -> Self {
+        Self::with_clock(
+            None,
+            Clock::Manual {
+                origin: Instant::now(),
+                offset: Duration::ZERO,
+            },
+        )
+    }
+
+    /// 只推进钉死的时钟。
+    #[cfg(test)]
+    pub(crate) fn advance_clock(&mut self, by: Duration) {
+        self.clock.advance(by);
     }
 
     fn histogram_mut(&mut self, series: Series) -> &mut Histogram {
@@ -357,32 +435,49 @@ impl Profiler {
     /// 这一刻开始。提前返回也不会留下脏状态：下一刻会重新设 `last_lap`，
     /// 也不会把被跳过阶段的耗时算到下一刻。
     pub(crate) fn begin_tick(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.now();
         self.tick_start = now;
         self.last_lap = now;
     }
 
     /// 记下「从上一次 lap 到现在」的耗时，归到 `phase`。hot path 上只做一次
-    /// `Instant::now()`、一次时长换算和一次直方图记录。
+    /// 取时钟、一次时长换算和一次直方图记录。
     pub(crate) fn lap(&mut self, phase: Phase) {
-        let now = Instant::now();
+        let now = self.clock.now();
         self.phases[phase as usize].record_duration(now.saturating_duration_since(self.last_lap));
         self.last_lap = now;
     }
 
     /// 实际开始 − 应该开始。`schedule` 提供的 `expected` 可能晚于 `actual`（提前醒了），
     /// 此时记 0；`skipped` 表示上一刻结束时放弃过追赶。
+    ///
+    /// `catch_up` 是这一刻有没有在追赶（上一刻没睡、连续跑）。刻间隔偏差只统计
+    /// 「上一刻和这一刻都按 50ms 网格正常调度」的相邻对：追赶中的刻之间不睡，
+    /// 间隔由 tick 耗时而不是调度精度决定，混进来会把指标撑成几十毫秒。
+    /// 追赶结束后的第一对也不记，因为它的前一刻没有按网格睡。
     pub(crate) fn begin_scheduled_tick(
         &mut self,
         expected: Instant,
         actual: Instant,
         skipped: bool,
+        catch_up: bool,
     ) {
-        self.histogram_mut(Series::Metric(Metric::TickJitter))
+        self.histogram_mut(Series::Metric(Metric::TickStartLateness))
             .record_duration(actual.saturating_duration_since(expected));
         if skipped {
             self.skipped_catch_ups = self.skipped_catch_ups.saturating_add(1);
         }
+        if !catch_up
+            && !skipped
+            && let Some(previous) = self.previous_tick_start
+        {
+            let interval = actual.saturating_duration_since(previous);
+            let deviation = interval.abs_diff(TICK);
+            self.histogram_mut(Series::Metric(Metric::TickIntervalDeviation))
+                .record_duration(deviation);
+        }
+        // 追赶中的刻不能当下一对的基准；放弃追赶后重新按网格起步，也不接着上一次比。
+        self.previous_tick_start = (!catch_up && !skipped).then_some(actual);
     }
 
     /// 记一个数量指标。`SkippedCatchUps` 只有累计值，不进直方图。
@@ -394,10 +489,14 @@ impl Profiler {
         }
     }
 
-    /// 记一个区块从进入待发送集合到写进出站缓冲的延迟，单位 tick。
-    pub(crate) fn record_chunk_latency(&mut self, latency: u64) {
-        self.histogram_mut(Series::Metric(Metric::ChunkLatencyTicks))
-            .record(latency);
+    /// 记一个区块从进入待发送集合到写进出站缓冲的墙上延迟，单位微秒。
+    pub(crate) fn record_chunk_latency(&mut self, entered: Instant, sent: Instant) {
+        let micros = sent
+            .saturating_duration_since(entered)
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        self.histogram_mut(Series::Metric(Metric::ChunkLatencyUs))
+            .record(micros);
         self.chunks_this_tick = self.chunks_this_tick.saturating_add(1);
     }
 
@@ -411,7 +510,7 @@ impl Profiler {
 
     /// tick 结束：记总耗时，到点就打一份报告并清零。
     pub(crate) fn end_tick(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.now();
         let elapsed = now.saturating_duration_since(self.tick_start);
         self.histogram_mut(Series::Metric(Metric::TickTotal))
             .record_duration(elapsed);
@@ -468,7 +567,7 @@ impl Profiler {
         );
     }
 
-    /// 一份多行报告：阶段按平均耗时降序，之后是总耗时、抖动和各计数指标。
+    /// 一份多行报告：阶段按平均耗时降序，之后是总耗时、调度偏差和各计数指标。
     pub(crate) fn report(&self) -> String {
         let mut out = format!(
             "tick profile: {} ticks, phase times in ms\nphases (by mean):\n",
@@ -528,6 +627,8 @@ impl Profiler {
         self.skipped_catch_ups = 0;
         self.chunks_this_tick = 0;
         self.ticks = 0;
+        // 清零后不再有「上一刻」可比，第一刻和报告之间的间隔不算样本。
+        self.previous_tick_start = None;
     }
 }
 
@@ -699,7 +800,7 @@ mod tests {
         let mut profiler = Profiler::with_report_interval(None);
         profiler.begin_tick();
         profiler.record(Metric::OnlinePlayers, 2);
-        profiler.begin_scheduled_tick(Instant::now(), Instant::now(), true);
+        profiler.begin_scheduled_tick(Instant::now(), Instant::now(), true, false);
         profiler.lap(Phase::Inbox);
         profiler.end_tick();
         let report = profiler.report();
@@ -721,16 +822,95 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_tick_records_jitter_and_skipped_catch_ups() {
+    fn scheduled_tick_records_lateness_and_skipped_catch_ups() {
         let start = Instant::now();
         let mut profiler = Profiler::with_report_interval(None);
-        profiler.begin_scheduled_tick(start, start + Duration::from_millis(3), true);
-        profiler.begin_scheduled_tick(start + TICK_FOR_TEST, start, false);
-        let jitter = profiler.histogram(Series::Metric(Metric::TickJitter));
-        assert_eq!(jitter.count(), 2);
-        assert_eq!(jitter.sum(), 3_000_000);
-        assert_eq!(jitter.max(), 3_000_000);
+        profiler.begin_scheduled_tick(start, start + Duration::from_millis(3), true, false);
+        profiler.begin_scheduled_tick(start + TICK_FOR_TEST, start, false, false);
+        let lateness = profiler.histogram(Series::Metric(Metric::TickStartLateness));
+        assert_eq!(lateness.count(), 2);
+        assert_eq!(lateness.sum(), 3_000_000);
+        assert_eq!(lateness.max(), 3_000_000);
         assert!(profiler.report().contains("total=1"));
+    }
+
+    #[test]
+    fn interval_deviation_uses_only_regular_grid_pairs() {
+        let start = Instant::now();
+        let mut profiler = Profiler::with_report_interval(None);
+        let deviation = |profiler: &Profiler| {
+            profiler
+                .histogram(Series::Metric(Metric::TickIntervalDeviation))
+                .clone()
+        };
+
+        // 第一刻没有「上一刻」可比；第二刻和第三刻都稳定晚 4ms，间隔正好 50ms。
+        profiler.begin_scheduled_tick(start, start + Duration::from_millis(4), false, false);
+        assert_eq!(deviation(&profiler).count(), 0);
+        profiler.begin_scheduled_tick(
+            start + TICK_FOR_TEST,
+            start + TICK_FOR_TEST + Duration::from_millis(4),
+            false,
+            false,
+        );
+        let first = deviation(&profiler);
+        assert_eq!(first.count(), 1);
+        assert_eq!(first.sum(), 0, "稳定的 4ms 起点偏差不是刻间隔抖动");
+
+        // 第四刻醒来早了 1ms，和上一刻相隔 45ms，偏差 5ms。
+        profiler.begin_scheduled_tick(
+            start + 2 * TICK_FOR_TEST,
+            start + 2 * TICK_FOR_TEST - Duration::from_millis(1),
+            false,
+            false,
+        );
+        let second = deviation(&profiler);
+        assert_eq!(second.count(), 2);
+        assert_eq!(second.sum(), 5_000_000);
+        assert_eq!(second.max(), 5_000_000);
+
+        // 追赶中的刻不记样本，也不能当下一对的基准。
+        profiler.begin_scheduled_tick(
+            start + 3 * TICK_FOR_TEST,
+            start + 3 * TICK_FOR_TEST + Duration::from_millis(20),
+            false,
+            true,
+        );
+        assert_eq!(deviation(&profiler).count(), 2);
+        profiler.begin_scheduled_tick(
+            start + 4 * TICK_FOR_TEST,
+            start + 4 * TICK_FOR_TEST - Duration::from_millis(1),
+            false,
+            false,
+        );
+        assert_eq!(deviation(&profiler).count(), 2, "追赶后的第一对也不记");
+        // 恢复网格后再记一对：这一刻比上一刻正好晚 50ms。
+        profiler.begin_scheduled_tick(
+            start + 5 * TICK_FOR_TEST,
+            start + 5 * TICK_FOR_TEST - Duration::from_millis(1),
+            false,
+            false,
+        );
+        let resumed = deviation(&profiler);
+        assert_eq!(resumed.count(), 3);
+        assert_eq!(resumed.sum(), 5_000_000);
+    }
+
+    #[test]
+    fn chunk_latency_uses_the_injected_clock() {
+        let mut profiler = Profiler::with_manual_clock();
+        let entered = profiler.now();
+        profiler.advance_clock(Duration::from_millis(3));
+        profiler.record_chunk_latency(entered, profiler.now());
+        let latency = profiler.histogram(Series::Metric(Metric::ChunkLatencyUs));
+        assert_eq!(latency.count(), 1);
+        assert_eq!(latency.sum(), 3_000);
+        assert_eq!(latency.max(), 3_000);
+        profiler.finish_chunk_sending();
+        assert_eq!(
+            profiler.histogram(Series::Metric(Metric::ChunksSent)).sum(),
+            1
+        );
     }
 
     #[test]

@@ -128,18 +128,19 @@ impl World {
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
-        let mut schedule = Schedule::starting_at(Instant::now());
+        let mut schedule = Schedule::starting_at(self.region.profiler.now());
         loop {
             let expected = schedule.expected_start();
-            let actual = Instant::now();
+            let actual = self.region.profiler.now();
             let skipped = schedule.skipped_catch_up();
+            let catch_up = schedule.catching_up();
             self.region
                 .profiler
-                .begin_scheduled_tick(expected, actual, skipped);
+                .begin_scheduled_tick(expected, actual, skipped, catch_up);
             if self.tick().is_break() {
                 break;
             }
-            let wait = schedule.after_tick(Instant::now());
+            let wait = schedule.after_tick(self.region.profiler.now());
             if !wait.is_zero() {
                 thread::sleep(wait);
             }
@@ -248,7 +249,8 @@ impl World {
         chunk_tracking::send_chunks(&mut self.region);
         movement::finish_tick(&mut self.region);
         self.region.profiler.lap(Phase::ChunkSending);
-        self.region.links.flush();
+        let flush_bytes = self.region.links.flush();
+        self.region.profiler.record(Metric::FlushBytes, flush_bytes);
         self.region.profiler.lap(Phase::Flush);
         if self.global.admin.stop_requested {
             let flow = self.shut_down();
@@ -752,6 +754,8 @@ struct Schedule {
     expected_start: Instant,
     /// 上一次 `after_tick` 有没有因为落后太多而放弃追赶。
     skipped_catch_up: bool,
+    /// 上一次 `after_tick` 要不要连续跑（没睡）。
+    catching_up: bool,
 }
 
 impl Schedule {
@@ -761,6 +765,7 @@ impl Schedule {
             next_tick: now + TICK,
             expected_start: now,
             skipped_catch_up: false,
+            catching_up: false,
         }
     }
 
@@ -771,6 +776,10 @@ impl Schedule {
 
     fn skipped_catch_up(&self) -> bool {
         self.skipped_catch_up
+    }
+
+    fn catching_up(&self) -> bool {
+        self.catching_up
     }
 
     /// 一 tick 结束时调用，返回到下一 tick 开始还要等多久。已经落后时返回 0，连续跑 tick 追上。
@@ -786,6 +795,7 @@ impl Schedule {
             self.next_tick = now;
         }
         let wait = self.next_tick.saturating_duration_since(now);
+        self.catching_up = wait.is_zero();
         self.expected_start = self.next_tick;
         self.next_tick += TICK;
         wait

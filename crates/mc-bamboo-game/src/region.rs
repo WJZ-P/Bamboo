@@ -104,12 +104,6 @@ impl RegionTick {
         Self(self.0.saturating_add(later))
     }
 
-    /// 从默认起点过了 `later` 刻，测试里钉死剖析器的时刻用。
-    #[cfg(test)]
-    pub(crate) fn at(later: u64) -> Self {
-        Self(later)
-    }
-
     /// 是否已经到了 `at` 这一刻。这一 tick 开始时增长，所以到期的刻在自己这一 tick 跑。
     pub(crate) fn reached(self, at: Self) -> bool {
         self.0 >= at.0
@@ -522,9 +516,9 @@ impl Region {
                 param: 0.0,
             },
         );
-        let tick = self.tick;
+        let now = self.profiler.now();
         if let Some(player) = self.players.get_mut(&id) {
-            player.chunks.sender.set_tick(tick);
+            player.chunks.sender.set_now(now);
             chunk_tracking::update_player_view(player, &mut self.links, self.view_distance);
         }
     }

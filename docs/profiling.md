@@ -26,24 +26,44 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 分位数落在对数直方图的桶下界上，是偏保守的估计；桶在 0..15 ns 是逐纳秒，
 之上每个 2 的幂再分 8 份，相对误差不超过 12.5%。
 
-第二段 `metrics` 里，`tick_total` 和 `tick_jitter` 也是时间（ms）：
+第二段 `metrics` 里，`tick_total`、`tick_start_lateness` 和
+`tick_interval_deviation` 是时间（ms）：
 
 | 名称 | 含义 |
 |---|---|
 | `tick_total` | `end_tick − begin_tick`，一刻的实际总耗时 |
-| `tick_jitter` | 实际开始时刻减去调度器给出的应开始时刻；提前醒了记 0 |
+| `tick_start_lateness` | 实际开始时刻减去调度器给出的应开始时刻；提前醒了记 0 |
+| `tick_interval_deviation` | \|相邻两刻**实际起点**的间隔 − 50 ms\|，设计稿 1.2「抖动 < 2 ms」看这一项 |
 | `inbound_messages` | 每刻从信箱取出并处理的入站消息数 |
 | `online_players` | 每刻开始时的在线玩家数 |
 | `due_scheduled_ticks` | 每刻开始时到期的方块/流体计划刻数 |
 | `entities` | 每刻开始时的实体数 |
 | `chunks_sent` | 每刻写进出站缓冲的区块数；这一刻一个都没发也要记 0 |
-| `chunk_latency_ticks` | 一个区块从进入待发送集合到写进出站缓冲，过了多少 tick |
+| `chunk_latency_us` | 一个区块从进入待发送集合到写进出站缓冲，过了多少微秒（墙上时间） |
+| `flush_bytes` | 这一刻 `Links::flush` 交给连接层的全部 `Outgoing` 的未压缩字节数；一个都没有也记 0 |
 | `skipped_catch_ups` | 这段时间内放弃追赶的次数（只有累计值，没有直方图） |
 
-数量指标的直方图记的是「每刻多少个」（区块延迟是「每个区块多少 tick」），
+`tick_start_lateness` 量的是「每刻都比计划晚多少」，`tick_interval_deviation` 量的是
+「刻与刻之间均不均匀」：睡眠精度带来的固定 4 ms 偏差只会出现在前一项里。
+刻间隔偏差的口径是**只统计相邻两刻都按 50 ms 网格正常调度**的那一对
+（上一刻睡过、这一刻没在追赶、也没放弃过追赶）：落后时连续跑的刻之间没有睡眠，
+间隔由上一刻的耗时决定，量的是完全不同的东西，会把偏差撑成几十毫秒，
+所以追赶中的刻既不记样本、也不作为下一对的基准；放弃追赶后重新起步的
+第一对同理不记。每份报告打印清零样本时也会丢掉「上一刻」的基准，
+所以跨报告的第一对不算样本。
+
+`chunk_latency_us` 是墙上时间：区块进入 `pending` 时记 `Instant`，写进出站
+缓冲时取经过的微秒数，不再是「过了几 tick」。稳态下同一刻入队、同一刻
+发出的区块读数很小但不是恒为 0；它只覆盖排队到写出这一段，不含读盘，
+不能直接和设计稿的「读盘 p95 < 100 ms」比较。`flush_bytes` 是压缩前的字节数
+（共享区块帧按引用展开计数），用来看每刻出站量，不含连接层自己的心跳等包。
+
+数量指标的直方图记的是「每刻多少个」（区块延迟是「每个区块多少微秒」），
 所以这些行的 `mean`、`p50`、`p95`、`p99`、`max` 单位不是 ms，而是每行末尾的 `unit`。
-`count` / `samples` 是这段报告的样本数：`phases` 和 `tick_total` 每刻一次，
-`chunk_latency_ticks` 每发出一个区块一次。报告头部 `N ticks` 是这段时间内跑了多少刻。
+`count` / `samples` 是这段报告的样本数：`phases`、`tick_total`、
+`tick_start_lateness`、`tick_interval_deviation` 和 `flush_bytes` 每刻一次
+（追赶和放弃追赶的刻少掉一条间隔偏差样本），`chunk_latency_us` 每发出一个区块一次。
+报告头部 `N ticks` 是这段时间内跑了多少刻。
 
 ## 3. 假玩家压测工具
 
@@ -166,6 +186,34 @@ idle 12.9 / 11.0，crowd-50 23 938.5 / 400.8，crowd-200 381 497.3 / 1 586.2，
 walk-50 12 426.0 / 585.6，fly-20 2 378.9 / 1 047.2。
 
 汇总用的报告数：idle 3 份（602 tick），其余各 6 份（约 1 204 tick）。
+
+## 5a. 第二份基线数据（新指标）
+
+测量环境和第一份相同（Apple M4 Pro、release 构建、五个场景、`BAMBOO_PROFILE=10`、
+`--max-players 500 --view-distance 8`、压缩阈值 256、离线模式、`--ramp 5`），
+日期 2026-11-10（PST），基线二进制对应提交 `88f6de3` 加上本任务剖析器的改动
+（第一份基线之后服务端逻辑没变，只改了指标的口径）。汇总表的列换成新指标：
+`lateness` 是 `tick_start_lateness`，`interval dev` 是 `tick_interval_deviation`，
+`chunk p95` 现在是微秒，`flush bytes/tick` 是压缩前的每刻出站字节数。
+
+| 场景 | tick p50 / p95 / p99 / max (ms) | lateness p50 / p99 (ms) | interval dev p50 / p99 (ms) | 耗时最多的三阶段（平均 ms） | 每刻区块数 | chunk p95 (us) | flush bytes/tick | 客户端 B/s | 掉线 |
+|---|---|---|---|---|---|---|---|---|---|
+| idle | 0.311 / 0.612 / 1.027 / 28.118 | 3.670 / 5.942 | 1.354 / 6.281 | random_ticks 0.285, inbox 0.034, chunk_sending 0.018 | 0.5 | 229 376 | 3 963.2 | 1 259.3 | 0 |
+| crowd-50 | 1.604 / 3.670 / 4.498 / 19.777 | 3.583 / 5.503 | 1.398 / 5.066 | inbox 0.660, random_ticks 0.656, chunk_sending 0.272 | 20.0 | 179 035 | 158 135.4 | 333 724.9 | 0 |
+| crowd-200 | 3.277 / 7.602 / 8.738 / 12.961 | 5.680 / 9.437 | 2.840 / 9.088 | inbox 1.309, entity_sync_and_tracking 1.227, random_ticks 1.066 | 79.2 | 178 451 | 794 918.7 | 4 975 744.7 | 0 |
+| walk-50 | 1.747 / 3.931 / 5.328 / 9.679 | 4.632 / 9.437 | 2.753 / 11.265 | random_ticks 1.039, inbox 0.586, chunk_sending 0.283 | 29.2 | 131 256 | 218 656.5 | 212 803.8 | 0 |
+| fly-20 | 1.790 / 4.432 / 5.414 / 10.648 | 4.195 / 6.469 | 1.310 / 6.383 | random_ticks 1.687, chunk_sending 0.353, inbox 0.237 | 52.2 | 53 240 | 379 534.6 | 133 827.0 | 0 |
+
+五个场景的 `connected` 都等于目标人数，`login_failures` 和 `drops` 都是 0。
+汇总用的报告数：idle 3 份（603 tick），其余各 6 份（约 1 205 tick）。
+
+新指标的读数：`tick_start_lateness` 仍稳定在 3.6..5.7 ms（p50），和第一份基线
+4 ms 左右的固定晚起一致；`tick_interval_deviation` 的 p50 只有 1.3..2.8 ms，
+说明刻与刻之间确实比「每一刻都晚约 4 ms」均匀得多，但 p99 在 5.1..11.3 ms，
+设计稿 1.2「抖动 < 2 ms」在尾部分位数上还没达到。`chunk_latency_us` 稳态不再是
+恒为 0：p95 在 53..229 ms（首批区块排队和被背压压住的那几个批次占主导，
+对数直方图的分位数落在桶下界），`flush_bytes` 随人数和移动量从 4 KB/tick 涨到
+795 KB/tick，和客户端每秒收到的字节数同向。
 
 ## 6. 从数据里看到的
 
