@@ -46,9 +46,7 @@ cleanup() {
         rm -rf "$OUT"
     fi
 }
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 scene_spec() {
     case "$1" in
