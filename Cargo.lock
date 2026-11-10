@@ -1972,6 +1972,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-bamboo-loadtest"
+version = "0.0.0"
+dependencies = [
+ "mc-bamboo-core",
+ "mc-bamboo-data",
+ "mc-bamboo-nbt",
+ "mc-bamboo-protocol",
+ "mc-bamboo-server",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "mc-bamboo-loot"
 version = "0.0.0"
 dependencies = [
