@@ -24,7 +24,7 @@ use mc_bamboo_protocol::{
 
 use crate::{
     entity::{
-        Entity, EntityKind, EntityPublic, EntityUid, GroundItem,
+        Entity, EntityKind, EntityUid, GroundItem,
         ctx::{BlockView, Command, EntityCtx},
     },
     fluid::Fluid,
@@ -359,12 +359,13 @@ impl Entity {
         }
         let area = me.bounding_box().inflate(0.5, 0.0, 0.5);
         let mut others = Vec::new();
-        ctx.for_each_other_in(area, &mut |other: &EntityPublic| {
-            if other.uid != me.id
-                && !other.removed
-                && matches!(other.kind, crate::entity::KindPublic::Item { .. })
+        ctx.for_each_other_uid_in(area, &mut |uid| {
+            if uid != me.id
+                && ctx.other(uid).is_some_and(|other| {
+                    !other.removed && matches!(other.kind, crate::entity::KindPublic::Item { .. })
+                })
             {
-                others.push(other.uid);
+                others.push(uid);
             }
         });
         if !others.is_empty() {
@@ -520,7 +521,21 @@ impl Entity {
         if cactus {
             me.hurt_item(DamageKind::Cactus, CACTUS_DAMAGE);
         }
-        if !me.removed {
+        // 漏斗不存在时整段 `entityInside` 什么也不会做。精确和并行两种模式用同一个
+        // 只读判定，所以两种模式都不发这条命令，落地阶段省掉一次全格扫描。
+        // 这里用和 `suck_touching_item` 完全相同的未缩进包围盒与 y 下界。
+        let bounds = me.bounding_box();
+        let hopper_min = BlockPos::new(
+            mth::floor(bounds.min_x),
+            mth::floor(bounds.min_y) - 2,
+            mth::floor(bounds.min_z),
+        );
+        let hopper_max = BlockPos::new(
+            mth::floor(bounds.max_x),
+            mth::floor(bounds.max_y),
+            mth::floor(bounds.max_z),
+        );
+        if !me.removed && ctx.blocks().any_hopper_in(hopper_min, hopper_max) {
             ctx.emit(Command::SuckIntoHopper, me);
         }
     }

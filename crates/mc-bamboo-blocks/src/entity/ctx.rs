@@ -70,6 +70,10 @@ pub trait BlockView {
             }
         }
     }
+
+    /// 这片格子里有没有漏斗方块。物品只在这时发 `SuckIntoHopper`：漏斗不存在时
+    /// 那条命令的整个处理函数什么也不会做，省掉落地阶段的虚调用和扫描。
+    fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool;
 }
 
 impl BlockView for World<'_> {
@@ -146,6 +150,17 @@ impl BlockView for World<'_> {
     fn fluid_height(&self, fluid: FluidState, pos: BlockPos) -> f32 {
         crate::fluid::height(fluid, self, pos)
     }
+
+    fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
+        (min.y..=max.y).any(|y| {
+            (min.z..=max.z).any(|z| {
+                (min.x..=max.x).any(|x| {
+                    self.block_state(BlockPos::new(x, y, z))
+                        .is_a(mc_bamboo_data::BlockAncestor::HopperBlock)
+                })
+            })
+        })
+    }
 }
 
 /// 实体一刻能用到的全部上下文。精确和并行各有一个实现。
@@ -164,6 +179,8 @@ pub trait EntityCtx {
     fn entity_uids(&self) -> Vec<EntityUid>;
     /// 范围查询，按 uid 升序访问。空间索引查出来之后要排序。
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
+    /// 范围查询里只需要 ID 时用这个：不复制公开数据，共享表里那一份。
+    fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid));
     /// 提交一条对外影响。精确模式当场落地，并行模式进缓冲。
     ///
     /// `me` 是发出者的完整视图；落地函数可以直接改它，tick 函数在 `emit` 之后
@@ -269,6 +286,12 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn for_each_other_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic)) {
         self.world.level().for_each_entity_in(area, visit);
+    }
+
+    fn for_each_other_uid_in(&self, area: Aabb, visit: &mut dyn FnMut(EntityUid)) {
+        self.world
+            .level()
+            .for_each_entity_in(area, &mut |public| visit(public.uid));
     }
 
     fn emit(&mut self, command: Command, me: &mut Entity) {

@@ -127,15 +127,74 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
 
 /// `EntityTickList.forEach`。计划刻里生成的实体这一步才第一次 tick。
 ///
+/// 精确驱动（默认）整个阶段算完立刻落地，剖析器记为一段；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）
+/// 拆成只读算阶段和落地阶段，剖析器分别记两段。开关存在 `World` 上，创建时读一次。
+///
 /// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
-pub(crate) fn run_entity_ticks(region: &mut Region) {
+pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
     // 玩家不在实体列表里。官方玩家通常先于后生成的物品 tick，捡起看到的是移动前的位置。
     // Players are not in the entity list. Vanilla players usually tick before later items,
     // so pickup sees the item where it was before this tick's movement.
     crate::drops::pickup_before_entities(region);
-    let (mut level, ticks) = region.block_level();
-    let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
-    send_effects(region, None, &outcome.effects);
+    if entity_threads == 0 {
+        let (mut level, ticks) = region.block_level();
+        let outcome = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
+        send_effects(region, None, &outcome.effects);
+    } else {
+        parallel_entity_ticks(entity_threads, region);
+    }
+}
+
+/// 并行驱动的两段：算阶段只读区块表和实体表，落地阶段重新构造 `RegionLevel` 和 `World`。
+///
+/// 每刻起线程的 [`ScopedThreads`] 开销大，只用于实验；常驻线程池留给任务系统
+/// （设计稿第 12 节）。
+fn parallel_entity_ticks(threads: usize, region: &mut Region) {
+    use mc_bamboo_blocks::entity::{
+        parallel::{ScopedThreads, commit, compute},
+        view::ViewFacts,
+    };
+
+    let computed = {
+        let Region {
+            chunks,
+            entities,
+            block_entities,
+            block_rules,
+            profiler,
+            ..
+        } = &mut *region;
+        let open_shulker_boxes = crate::entity_view::open_shulker_boxes(block_entities);
+        // `pickup_before_entities` 已经跑过；把实体表切进「这一刻正在 tick」的状态。
+        // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
+        entities.begin_tick();
+        let hopper_positions = crate::entity_view::hopper_positions(chunks);
+        let facts = ViewFacts {
+            min_y: mc_bamboo_world::MIN_Y,
+            max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
+            rules: *block_rules,
+            ..ViewFacts::default()
+        };
+        let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
+            chunks,
+            facts,
+            open_shulker_boxes,
+            hopper_positions,
+        });
+        let executor = ScopedThreads { threads };
+        let computed = compute(&view, entities, &executor);
+        profiler.lap(crate::profiler::Phase::EntityCompute);
+        computed
+    };
+
+    let effects = {
+        let (mut level, ticks) = region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        commit(computed, &mut world);
+        world.drain_effects()
+    };
+    send_effects(region, None, &effects);
+    region.profiler.lap(crate::profiler::Phase::EntityCommit);
 }
 
 /// 计划刻之后：先对全部区块跑官方的 `tickThunder`，再对全部区块跑 `tickChunk`。

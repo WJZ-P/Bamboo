@@ -13,6 +13,7 @@ pub mod ctx;
 pub mod parallel;
 pub mod random;
 pub mod store;
+pub mod view;
 
 mod explosion;
 mod falling;
@@ -34,8 +35,8 @@ pub use physics::{
 };
 pub use random::JavaRandom;
 pub use store::{
-    ChunkEntities, EntityPublic, EntityRow, EntitySnapshot, EntityState, EntityStore, EntityUid,
-    FallingBlockState, ItemState, KindPublic, KindState,
+    ChunkEntities, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid, FallingBlockState,
+    ItemState, KindPublic, KindState,
 };
 
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。

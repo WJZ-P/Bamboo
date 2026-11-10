@@ -21,6 +21,12 @@ pub struct JavaRandom {
     seed: u64,
 }
 
+impl Default for JavaRandom {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 impl JavaRandom {
     /// `new Random(seed)`。
     pub fn new(seed: i64) -> Self {

@@ -155,7 +155,12 @@ pub(crate) enum Phase {
     ScheduledTicks,
     RandomTicks,
     BlockEvents,
+    /// 精确驱动时整个实体阶段；并行驱动时不用。
     Entities,
+    /// 并行驱动的算阶段：`compute`，只读方块和实体表。
+    EntityCompute,
+    /// 并行驱动的落地阶段：`commit`，发布状态并按 uid 升序应用命令。
+    EntityCommit,
     BlockEntities,
     PlayerMisc,
     Views,
@@ -168,7 +173,7 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 17] = [
         Self::Inbox,
         Self::LightUpdates,
         Self::WeatherAndTime,
@@ -176,6 +181,8 @@ impl Phase {
         Self::RandomTicks,
         Self::BlockEvents,
         Self::Entities,
+        Self::EntityCompute,
+        Self::EntityCommit,
         Self::BlockEntities,
         Self::PlayerMisc,
         Self::Views,
@@ -195,6 +202,8 @@ impl Phase {
             Self::RandomTicks => "random_ticks",
             Self::BlockEvents => "block_events",
             Self::Entities => "entities",
+            Self::EntityCompute => "entity_compute",
+            Self::EntityCommit => "entity_commit",
             Self::BlockEntities => "block_entities",
             Self::PlayerMisc => "player_misc",
             Self::Views => "views",
