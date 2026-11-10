@@ -53,6 +53,10 @@ pub use block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents, Chun
 pub use container::{Combined, Container, ShulkerSlots, Slots, redstone_signal};
 pub use context::{Actor, BlockHit, PlaceContext, UseContext};
 pub use dispenser::{click_if_empty, dispense_from};
+pub use entity::{
+    ChunkEntities, EntityPublic, EntityRow, EntitySnapshot, EntityState, EntityStore, EntityUid,
+    KindPublic, KindState,
+};
 pub use gamerules::{BlockGameRules, apply_text, block_drops_allowed};
 pub use hopper::HopperEntity;
 pub use interact::{
@@ -64,8 +68,8 @@ pub use interact::{
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
-    ChunkRedstone, Effect, LecternFacts, Level, LevelSideState, LevelTables, RedstoneMemory,
-    custom_sound_name, intern_custom_sound,
+    ChunkRedstone, Effect, EntityTables, LecternFacts, Level, LevelEntities, LevelSideState,
+    LevelTables, RedstoneMemory, custom_sound_name, intern_custom_sound,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};

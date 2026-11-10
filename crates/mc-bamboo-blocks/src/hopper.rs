@@ -499,14 +499,14 @@ fn absorb_stack(
         return false;
     };
     let absorbed = added.remaining.is_empty();
-    if let Some(entity) = world.entity_mut(id) {
+    world.with_entity_mut(id, &mut |entity| {
         if let Some(item) = entity.ground_mut() {
-            item.stack = added.remaining;
+            item.stack = added.remaining.clone();
         }
         if absorbed {
             entity.discard();
         }
-    }
+    });
     if absorbed {
         world.remove_entity(id);
     }

@@ -641,6 +641,11 @@ impl<'a> World<'a> {
         self.level
     }
 
+    /// 实体驱动的入口：写一个 `World` 入口函数给并行/精确两种驱动用。
+    pub(crate) fn entities_mut(&mut self) -> &mut dyn crate::level::LevelEntities {
+        self.level
+    }
+
     /// `getMinY`。
     pub fn min_y(&self) -> i32 {
         self.level.min_y()
@@ -1892,7 +1897,7 @@ impl<'a> World<'a> {
 
     /// `addFreshEntity`：放进世界，返回实体 ID。tick 的时候生成的实体下一 tick 才开始动。
     pub fn spawn_entity(&mut self, entity: Entity) -> i32 {
-        self.level.entities_mut().spawn(entity)
+        self.level.spawn_entity(entity)
     }
 
     /// `FallingBlockEntity.fall`：这一格只剩流体，方块本身变成实体从这一格的中心开始掉。
@@ -1958,50 +1963,51 @@ impl<'a> World<'a> {
     }
 
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
-    pub fn entity_mut(&mut self, id: i32) -> Option<&mut Entity> {
-        self.level.entities_mut().get_mut_including_pending(id)
+    pub fn with_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
+        self.level.with_just_spawned(id, f)
     }
 
     /// 已经在 tick 列表里的实体。正在 tick 的那一个不在里面。
     ///
     /// An entity already in the tick list. The one currently ticking is not in it.
-    pub fn entity(&self, id: i32) -> Option<&Entity> {
-        self.level.entities().get(id)
+    pub fn entity(&self, id: i32) -> Option<Entity> {
+        self.level.entity(id)
     }
 
     /// 这一拍会 tick 的实体 ID，按 ID 升序。
     ///
     /// Entity ids that tick this step, in ascending id order.
     pub fn entity_ids(&self) -> Vec<i32> {
-        self.level.entities().ids()
+        self.level.entity_uids()
     }
 
     /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
     ///
     /// Removes an entity from the tick list. The entity currently ticking is only marked `discard`.
     pub fn remove_entity(&mut self, id: i32) {
-        self.level.entities_mut().remove(id);
+        self.level.remove_entity(id);
     }
 
     /// `EntityTickList.forEach`：一个 tick 里所有实体按 ID 顺序各 tick 一次。
     ///
     /// 实体 tick 期间新生成的实体进 `pending`，下一 tick 才动。
     pub fn tick_entities(&mut self) {
-        self.level.entities_mut().begin_tick();
-        for id in self.level.entities().ids() {
-            let Some(mut entity) = self.level.entities_mut().take(id) else {
+        self.level.begin_entity_tick();
+        for id in self.level.entity_uids() {
+            let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
             // 这一拍已经被别的实体丢掉的，官方不再 tick，名单里也不再留下。
             // An entity another one discarded earlier this tick is not ticked. Vanilla drops it from the list.
             if !entity.removed {
-                entity.tick(self);
+                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                entity.tick(&mut ctx);
             }
             if !entity.removed {
-                self.level.entities_mut().put(entity);
+                self.level.put_entity(entity);
             }
         }
-        self.level.entities_mut().end_tick();
+        self.level.end_entity_tick();
     }
 
     /// 和 [`World::tick_entities`] 同一套顺序，但把这一拍 tick 过的实体留下。
@@ -2012,29 +2018,29 @@ impl<'a> World<'a> {
     /// Discarded ones stay in the list; entities spawned this step and not yet ticked follow them.
     /// The physics comparison needs the position after landing.
     pub fn tick_entities_kept(&mut self) -> Vec<crate::entity::Entity> {
-        self.level.entities_mut().begin_tick();
+        self.level.begin_entity_tick();
         let mut after = Vec::new();
-        for id in self.level.entities().ids() {
-            let Some(mut entity) = self.level.entities_mut().take(id) else {
+        for id in self.level.entity_uids() {
+            let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
             // 合并把对方丢掉之后，对方这一拍还在快照里，但是不再 tick。
             // After a merge discards the other item, it stays in this tick's snapshot and does not tick.
             if !entity.removed {
-                entity.tick(self);
+                let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+                entity.tick(&mut ctx);
             }
             after.push(entity.clone());
             if !entity.removed {
-                self.level.entities_mut().put(entity);
+                self.level.put_entity(entity);
             }
         }
-        self.level.entities_mut().end_tick();
+        self.level.end_entity_tick();
         let spawned: Vec<_> = self
             .level
-            .entities()
-            .iter()
+            .live_entities()
+            .into_iter()
             .filter(|entity| after.iter().all(|ticked| ticked.id != entity.id))
-            .cloned()
             .collect();
         after.extend(spawned);
         after
@@ -2044,7 +2050,7 @@ impl<'a> World<'a> {
     ///
     /// Entities still in the world. Discarded ones are absent.
     pub fn live_entities(&self) -> Vec<crate::entity::Entity> {
-        self.level.entities().iter().cloned().collect()
+        self.level.live_entities()
     }
 
     /// `CollisionGetter.getBlockCollisions`：和 `box_` 碰上的方块的碰撞形状，按 `Cursor3D` 的顺序。
@@ -2580,8 +2586,8 @@ mod tests {
                 .entities()
                 .iter()
                 .next()
-                .and_then(|entity| entity.ground())
-                .map(|item| item.stack.clone()),
+                .and_then(|entity| entity.ground().cloned())
+                .map(|item| item.stack),
             Some(ItemStack::new(items::STONE, 2))
         );
     }

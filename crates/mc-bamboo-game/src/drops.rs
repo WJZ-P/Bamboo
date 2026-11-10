@@ -100,9 +100,9 @@ pub(crate) fn spawn_throw(region: &mut Region, id: PlayerId, stack: ItemStack) {
     let mut world = World::new(&mut level, ticks);
     let thrown = Entity::ground_item(position, stack);
     let entity_id = world.spawn_entity(thrown);
-    if let Some(entity) = world.entity_mut(entity_id) {
+    world.with_entity_mut(entity_id, &mut |entity| {
         mc_bamboo_blocks::entity::set_throw_velocity(entity, delta);
-    }
+    });
 }
 
 /// 实体 tick 之前，玩家碰得到的物品先捡起来。
@@ -135,7 +135,7 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
         };
-        if !mc_bamboo_blocks::entity::can_pick_up(entity, &owner) {
+        if !mc_bamboo_blocks::entity::can_pick_up(&entity, &owner) {
             continue;
         }
         let stack = entity
@@ -161,12 +161,12 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
                 inventory::send_slot(player, &mut region.links, slot);
             }
         }
-        let shown = {
-            let Some(entity) = region.entities.get_mut(entity_id) else {
-                continue;
-            };
-            mc_bamboo_blocks::entity::take_stack(entity, left)
-        };
+        let shown = region
+            .entities
+            .with_mut(entity_id, |entity| {
+                mc_bamboo_blocks::entity::take_stack(entity, left)
+            })
+            .unwrap_or(0);
         entity_tracking::broadcast_take(region, entity_id, id, shown);
         // `discard` 只打上标记。实体还留在这一拍的名单里，轮到它时不再 tick，然后才删掉。
         // `discard` only marks the entity. It stays on this tick's list, skips its tick, then goes.

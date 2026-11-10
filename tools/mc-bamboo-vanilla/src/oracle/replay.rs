@@ -8,8 +8,9 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, Actor, BlockEntities, BlockEvents, BlockGameRules, BlockHit, BlockState, BlockTicks,
-    Combined, Container, Effect, HopperEntity, InteractionResult, Level, LevelRandom, LevelTables,
-    Outcome, RedstoneMemory, ShulkerSlots, Slots, TickPriority, apply_text, destroy_block,
+    Combined, Container, Effect, EntityStore, EntityTables, HopperEntity, InteractionResult, Level,
+    LevelRandom, LevelTables, Outcome, RedstoneMemory, ShulkerSlots, Slots, TickPriority,
+    apply_text, destroy_block,
     entity::Entities,
     level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
@@ -435,6 +436,16 @@ impl LevelTables for OracleLevel {
     }
 }
 
+impl EntityTables for OracleLevel {
+    fn entities_table(&self) -> &EntityStore {
+        &self.world_entities
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        &mut self.world_entities
+    }
+}
+
 impl Level for OracleLevel {
     fn runs_block_entity_tick(&self, pos: BlockPos) -> bool {
         // 方块 oracle 不跑熔炉和酿造台。漏斗、移动活塞和潜影盒仍按原来的 ticker 跑。
@@ -516,10 +527,6 @@ impl Level for OracleLevel {
         None
     }
 
-    fn entities(&self) -> &Entities {
-        &self.world_entities
-    }
-
     fn block_game_rules(&self) -> BlockGameRules {
         self.block_rules
     }
@@ -558,10 +565,6 @@ impl Level for OracleLevel {
                 .precipitation
                 .warm_enough_to_rain(pos.x, pos.y, pos.z, SEA_LEVEL),
         }
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        &mut self.world_entities
     }
 
     fn random(&self) -> &LevelRandom {

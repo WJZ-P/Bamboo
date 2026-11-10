@@ -205,7 +205,11 @@ impl KindData {
 
 /// tick 第 6 阶段：世界实体的配对、同步和移除。对应 `ChunkMap.tick`。
 pub(crate) fn sync(region: &mut Region) {
-    let snapshots: Vec<Snapshot> = region.entities.iter().map(Snapshot::of).collect();
+    let snapshots: Vec<Snapshot> = region
+        .entities
+        .iter()
+        .map(|entity| Snapshot::of(&entity))
+        .collect();
     let live: BTreeSet<i32> = snapshots.iter().map(|snapshot| snapshot.id).collect();
     remove_missing(region, &live);
 

@@ -15,8 +15,8 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, HopperEntity, Level,
-    LevelRandom, LevelTables, Slots, World,
+    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
+    HopperEntity, Level, LevelRandom, LevelTables, Slots, World,
     entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
@@ -254,6 +254,16 @@ impl LevelTables for PhysicsLevel {
     }
 }
 
+impl EntityTables for PhysicsLevel {
+    fn entities_table(&self) -> &EntityStore {
+        &self.entities
+    }
+
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
+        &mut self.entities
+    }
+}
+
 impl Level for PhysicsLevel {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
@@ -319,14 +329,6 @@ impl Level for PhysicsLevel {
 
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
-    }
-
-    fn entities(&self) -> &Entities {
-        &self.entities
-    }
-
-    fn entities_mut(&mut self) -> &mut Entities {
-        &mut self.entities
     }
 
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
@@ -467,21 +469,21 @@ impl Report {
                 return;
             }
         };
-        if case.kind != "item"
-            && let Some(entity) = world.entity_mut(id)
-        {
-            if let Some([per_distance, max]) = case.hurts {
-                entity.set_hurts_entities(per_distance, max as i32);
-            }
-            if let Some(fuse) = case.fuse {
-                entity.set_fuse(fuse);
-            }
-            entity.random = JavaRandom::new(case.entity_seed);
-            if case.start_time != 0
-                && let EntityKind::FallingBlock(data) = &mut entity.kind
-            {
-                data.time = case.start_time;
-            }
+        if case.kind != "item" {
+            world.with_entity_mut(id, &mut |entity| {
+                if let Some([per_distance, max]) = case.hurts {
+                    entity.set_hurts_entities(per_distance, max as i32);
+                }
+                if let Some(fuse) = case.fuse {
+                    entity.set_fuse(fuse);
+                }
+                entity.random = JavaRandom::new(case.entity_seed);
+                if case.start_time != 0
+                    && let EntityKind::FallingBlock(data) = &mut entity.kind
+                {
+                    data.time = case.start_time;
+                }
+            });
         }
         if case.steps.is_empty() {
             self.mismatch(format!("{}: no steps", case.name));
@@ -809,11 +811,12 @@ fn spawn_ground_item(world: &mut World, x: f64, y: f64, z: f64, item: i32, count
     let Some(id) = world.spawn_at_location(Vec3::new(x, y, z), ItemStack::new(item, count)) else {
         return;
     };
-    if delay != 10
-        && let Some(entity) = world.entity_mut(id)
-        && let Some(ground) = entity.ground_mut()
-    {
-        ground.set_pickup_delay(delay);
+    if delay != 10 {
+        world.with_entity_mut(id, &mut |entity| {
+            if let Some(ground) = entity.ground_mut() {
+                ground.set_pickup_delay(delay);
+            }
+        });
     }
 }
 
@@ -869,7 +872,7 @@ fn touch_player(world: &mut World, slots: &mut [ItemStack], creative: bool) {
         let Some(entity) = world.entity(id) else {
             continue;
         };
-        if !entity.bounding_box().intersects(reach) || !can_pick_up(entity, &owner) {
+        if !entity.bounding_box().intersects(reach) || !can_pick_up(&entity, &owner) {
             continue;
         }
         let stack = entity
@@ -882,9 +885,9 @@ fn touch_player(world: &mut World, slots: &mut [ItemStack], creative: bool) {
         if !picked {
             continue;
         }
-        if let Some(entity) = world.entity_mut(id) {
-            take_stack(entity, left);
-        }
+        world.with_entity_mut(id, &mut |entity| {
+            take_stack(entity, left.clone());
+        });
     }
 }
 
@@ -939,7 +942,8 @@ pub(crate) fn mined_outcome(
         }
         let mut drops = Vec::new();
         for id in world.entity_ids() {
-            if let Some(ground) = world.entity(id).and_then(|entity| entity.ground())
+            if let Some(entity) = world.entity(id)
+                && let Some(ground) = entity.ground()
                 && !ground.stack.is_empty()
             {
                 drops.push((ground.stack.item, ground.stack.count));
@@ -1015,7 +1019,7 @@ fn hopper_cells(case: &Case) -> Vec<BlockPos> {
 /// removed, with an empty stack.
 fn refresh_after_hopper(world: &mut World, ticked: &mut [Entity]) {
     for entity in ticked {
-        if let Some(current) = world.entity(entity.id).cloned() {
+        if let Some(current) = world.entity(entity.id) {
             *entity = current;
         } else {
             entity.removed = true;
