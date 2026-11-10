@@ -65,8 +65,8 @@ pub use interact::{
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
-    ChunkRedstone, Effect, LecternFacts, Level, LevelSideState, LevelTables, RedstoneMemory,
-    custom_sound_name, intern_custom_sound,
+    ChunkRedstone, Effect, LecternFacts, Level, LevelSideState, LevelTables, Observation,
+    RedstoneMemory, Trigger, custom_sound_name, intern_custom_sound,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};
