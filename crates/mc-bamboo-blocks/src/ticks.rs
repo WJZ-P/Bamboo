@@ -294,6 +294,17 @@ impl BlockTicks {
     /// 调用方保证表里已经没有 `chunk` 的条目。到期时刻按这张表的 `now` 加上盒子里存的
     /// 相对延迟算出，所以从另一张时钟不同的表搬过来也能保持原来的剩余时间。
     pub fn insert_chunk(&mut self, ticks: ChunkTicks) {
+        // 调用方保证表里已经没有这个区块的条目；盒子本身只装一个区块。
+        debug_assert!(
+            ticks
+                .blocks
+                .first()
+                .map(|first| first.pos.chunk())
+                .is_none_or(|chunk| {
+                    ticks.blocks.iter().all(|tick| tick.pos.chunk() == chunk)
+                        && ticks.fluids.iter().all(|tick| tick.pos.chunk() == chunk)
+                })
+        );
         self.blocks.insert_chunk(ticks.blocks, self.now);
         self.fluids.insert_chunk(ticks.fluids, self.now);
     }
@@ -327,6 +338,8 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
         let mut orders = orders;
         orders.sort_unstable();
         orders.dedup();
+        // 移走这一区块的条目后，索引里其余的追加项仍可能过期；超量时重建一次。
+        self.appended = self.appended.saturating_sub(orders.len());
         let mut saved = Vec::with_capacity(orders.len());
         for order in orders {
             let Some((pos, kind)) = self.queue.remove(&order) else {
@@ -355,15 +368,8 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
                 sub_tick_order,
                 pos: entry.pos,
             };
-            if !self.scheduled.insert((entry.pos, entry.kind)) {
-                continue;
-            }
-            self.queue.insert(order, (entry.pos, entry.kind));
-            self.by_chunk
-                .entry(entry.pos.chunk())
-                .or_default()
-                .push(order);
-            self.appended += 1;
+            debug_assert!(order.sub_tick_order < 0);
+            self.schedule(entry.pos, entry.kind, order);
         }
     }
 }
@@ -605,6 +611,16 @@ mod tests {
         assert_eq!(fluids[0].trigger_tick, 1006);
         assert_eq!(all_due(&mut target, 1004), []);
         assert_eq!(all_due(&mut target, 1006), [(POS, 7), (OTHER, 2)]);
+    }
+
+    #[test]
+    fn an_empty_box_round_trips() {
+        let mut ticks = BlockTicks::new();
+        let empty = ticks.take_chunk(CHUNK_A).unwrap();
+        ticks.insert_chunk(empty);
+        assert_eq!(ticks.pending().count(), 0);
+        assert_eq!(ticks.pending_fluids().count(), 0);
+        assert_eq!(drain(&mut ticks, 1), []);
     }
 
     #[test]

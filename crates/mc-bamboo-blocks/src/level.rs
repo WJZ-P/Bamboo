@@ -785,34 +785,33 @@ impl RedstoneMemory {
     /// 瞬时量，tick 边界上一定是 `None`，不搬。
     pub fn take_chunk(&mut self, chunk: ChunkPos, now: i64) -> ChunkRedstone {
         debug_assert!(self.pending_lectern.is_none());
-        let Some(positions) = self.by_chunk.remove(&chunk) else {
-            return ChunkRedstone::default();
-        };
-        let mut positions: Vec<BlockPos> = positions.into_iter().collect();
-        positions.sort_unstable();
         let mut memory = ChunkRedstone::default();
-        for pos in positions {
-            // 索引是超集，已经删掉的格子查出来就是空。
-            if let Some(signal) = self.comparator_outputs.remove(&pos) {
-                memory.comparator_outputs.push((pos, signal));
-            }
-            if let Some(slot) = self.bookshelf_slots.remove(&pos) {
-                memory.bookshelf_slots.push((pos, slot));
-            }
-            if self.jukebox_playing.remove(&pos) {
-                memory.jukebox_playing.push(pos);
-            }
-            if let Some(mask) = self.crafter_disabled.remove(&pos) {
-                memory.crafter_disabled.push((pos, mask));
-            }
-            if let Some(remaining) = self.crafter_crafting.remove(&pos) {
-                memory.crafter_crafting.push((pos, remaining));
-            }
-            if let Some(facts) = self.lecterns.remove(&pos) {
-                memory.lecterns.push((pos, facts));
+        if let Some(positions) = self.by_chunk.remove(&chunk) {
+            let mut positions: Vec<BlockPos> = positions.into_iter().collect();
+            positions.sort_unstable();
+            for pos in positions {
+                // 索引是超集，已经删掉的格子查出来就是空。
+                if let Some(signal) = self.comparator_outputs.remove(&pos) {
+                    memory.comparator_outputs.push((pos, signal));
+                }
+                if let Some(slot) = self.bookshelf_slots.remove(&pos) {
+                    memory.bookshelf_slots.push((pos, slot));
+                }
+                if self.jukebox_playing.remove(&pos) {
+                    memory.jukebox_playing.push(pos);
+                }
+                if let Some(mask) = self.crafter_disabled.remove(&pos) {
+                    memory.crafter_disabled.push((pos, mask));
+                }
+                if let Some(remaining) = self.crafter_crafting.remove(&pos) {
+                    memory.crafter_crafting.push((pos, remaining));
+                }
+                if let Some(facts) = self.lecterns.remove(&pos) {
+                    memory.lecterns.push((pos, facts));
+                }
             }
         }
-        // `torch_toggles` 只保留最近 60 刻，很短，允许整表扫。
+        // 火把记录不进位置索引，得单独取；它只保留最近 60 刻，很短，允许整表扫。
         memory.torch_toggles = self
             .torch_toggles
             .iter()
@@ -1240,6 +1239,25 @@ mod tests {
         target.forget_torch_toggles_before(998);
         assert_eq!(target.torch_toggle_count(A1), 0);
         assert_eq!(target.torch_toggle_count(A2), 0);
+    }
+
+    #[test]
+    fn torch_toggles_move_even_without_any_position_memory() {
+        let mut source = RedstoneMemory::default();
+        source.record_torch_toggle(A1, 100);
+        source.record_torch_toggle(B1, 101);
+        let boxed = source.take_chunk(CHUNK_A, 102);
+        assert_eq!(boxed.torch_toggles, [(A1, 2)]);
+        assert_eq!(source.torch_toggle_count(B1), 1);
+
+        let mut target = RedstoneMemory::default();
+        target.insert_chunk(boxed, 200);
+        assert_eq!(target.torch_toggle_count(A1), 1);
+        // 相对年龄 2 换算到目标时刻就是 198：更早的门限留着它。
+        target.forget_torch_toggles_before(198);
+        assert_eq!(target.torch_toggle_count(A1), 1);
+        target.forget_torch_toggles_before(199);
+        assert_eq!(target.torch_toggle_count(A1), 0);
     }
 
     #[test]
