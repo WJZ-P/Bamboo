@@ -145,7 +145,7 @@ tools/mc-bamboo-loadtest/run-baseline.sh [结果目录] [场景名...]
 - Apple M4 Pro，10 个性能核 + 4 个能效核（共 14 核），48 GiB 内存，macOS，arm64。
 - Rust 1.99.1，`cargo build --release -p mc-bamboo-loadtest`（release，默认优化档）。
 - 提交 `ac746c9`（2026-11-09，PST）。基线跑的是这一版的 release 二进制；之后
-  的提交只改了文档和 tick 节奏的小整理，没有改测量路径。
+  的提交只有文档，以及一次不改变基线结果的 tick 节奏整理。
 - 服务端 `BAMBOO_PROFILE=10`，`--max-players 500 --view-distance 8`，
   压缩阈值 256，离线模式，超平坦世界；压测工具 `--ramp 5`。
 - 五个场景都在同一台机器上跑，服务端进程和假玩家进程会互相抢 CPU；
