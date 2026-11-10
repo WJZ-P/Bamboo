@@ -41,6 +41,14 @@ use crate::{
     world_state::{RespawnData, Weather},
 };
 
+mod column;
+#[cfg(test)]
+mod column_tests;
+
+// 区块平面和多 region 是后面的步骤，现在还没有调用方。
+#[allow(unused_imports)]
+pub(crate) use column::{NotReady, RegionColumn};
+
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
 /// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：
 /// 官方还会在 `respawn_radius` 里随机找落脚点，这里没有死亡重生也不做随机。
@@ -113,6 +121,11 @@ impl RegionTick {
     /// 是否已经到了 `at` 这一刻。这一 tick 开始时增长，所以到期的刻在自己这一 tick 跑。
     pub(crate) fn reached(self, at: Self) -> bool {
         self.0 >= at.0
+    }
+
+    /// `at` 距现在还有多少刻，已经到期的算 0。搬区块时把绝对时刻换算成相对值用。
+    pub(crate) fn remaining(self, at: Self) -> u64 {
+        at.0.saturating_sub(self.0)
     }
 }
 

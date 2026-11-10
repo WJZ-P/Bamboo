@@ -117,7 +117,7 @@ impl ContainerKind {
 /// 自定义名和锁不在这里，它们是方块实体从物品上带来的组件，见 [`crate::block_items`]。
 /// `loot_table` / `loot_table_seed` 是官方 `RandomizableContainerBlockEntity` 的字段，
 /// 解包之前和容器内容一起走。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,

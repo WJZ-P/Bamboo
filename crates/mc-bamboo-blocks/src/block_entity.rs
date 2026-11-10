@@ -102,6 +102,14 @@ struct Ticker {
 }
 
 impl BlockEntities {
+    /// 现在能不能按区块搬方块实体：不在 tick 中途，也没有实体被拿出去还没放回。
+    ///
+    /// [`Self::take_chunk`] 的前提，可以在动手之前只读地问一声，好让一次要搬几张表的
+    /// 调用方先检查全部前提。
+    pub fn ready_to_move_chunks(&self) -> bool {
+        !self.ticking && self.taken.is_empty() && self.removed_while_taken.is_empty()
+    }
+
     /// `Level.setBlockEntity`：放进这一格并登记 ticker。
     ///
     /// 调用方要保证这一格的状态有方块实体，官方也只在这种情况下才放。
@@ -294,7 +302,7 @@ impl BlockEntities {
     /// [`Self::begin_tick`] 统一回收，`order` / `pending` 不动，所以别的区块的
     /// 运行顺序不受影响。正在 tick 或有实体被拿出去还没放回时返回 [`Err`]。
     pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkBlockEntities, Busy> {
-        if self.ticking || !self.taken.is_empty() || !self.removed_while_taken.is_empty() {
+        if !self.ready_to_move_chunks() {
             return Err(Busy);
         }
         let Some(positions) = self.by_chunk.remove(&chunk) else {
@@ -707,6 +715,31 @@ mod tests {
         assert_eq!(ticker_order(&mut target), [(A2, 9), (A1, 7)]);
         // 源表里只剩别的区块。
         assert_eq!(ticker_order(&mut source), [(B1, 8)]);
+    }
+
+    /// 只读查询和 `take_chunk` 用的是同一个前提，tick 中途问一次就能整批不动。
+    #[test]
+    fn the_ready_query_tracks_a_mid_tick_table() {
+        let mut entities = BlockEntities::default();
+        entities.insert(Dummy::boxed(A1, 1));
+        assert!(entities.ready_to_move_chunks());
+
+        entities.begin_tick();
+        assert!(!entities.ready_to_move_chunks());
+        assert!(entities.next_ticker().is_some());
+        assert!(!entities.ready_to_move_chunks());
+        entities.end_tick();
+        assert!(entities.ready_to_move_chunks());
+
+        let (id, entity) = entities.take_at(A1).unwrap();
+        assert!(!entities.ready_to_move_chunks());
+        entities.put(A1, id, entity);
+        assert!(entities.ready_to_move_chunks());
+
+        let (_id, _entity) = entities.take_at(A1).unwrap();
+        assert!(entities.remove(A1).is_none());
+        assert!(!entities.ready_to_move_chunks());
+        assert!(entities.take_chunk(CHUNK_A).is_err());
     }
 
     #[test]
