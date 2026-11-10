@@ -261,6 +261,7 @@ impl RequestReader<'_> {
             permission_level: op.map_or(0, |entry| entry.level),
             is_op: op.is_some(),
             peer_ip: self.peer_ip.clone(),
+            online_at_login: session.online_at_login,
             sink: Box::new(outbound.clone()),
         };
         self.send_to_world(Inbound::Join(Box::new(request)))

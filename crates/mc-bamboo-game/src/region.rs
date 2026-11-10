@@ -392,6 +392,7 @@ impl Region {
             permission_level: _,
             is_op: _,
             peer_ip,
+            online_at_login: _,
             sink,
         } = request;
         self.links.add(id, sink);

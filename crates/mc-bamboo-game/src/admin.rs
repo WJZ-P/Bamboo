@@ -99,12 +99,27 @@ impl AdminState {
         self.ops.get(&uuid).map(|entry| entry.entry)
     }
 
-    /// 官方 `PlayerList.canPlayerLogin` 的顺序：玩家封禁、白名单、IP 封禁。
-    /// 满员由连接层判断，世界线程只检查这三项。
+    /// 官方 `DedicatedPlayerList.canBypassPlayerLimit` → `ServerOpList.canBypassPlayerLimit`。
+    /// 只有列在 OP 表里且 `bypassesPlayerLimit` 为真的玩家能越过人数上限。
+    pub fn bypasses_player_limit(&self, uuid: Uuid) -> bool {
+        self.ops
+            .get(&uuid)
+            .is_some_and(|entry| entry.entry.bypasses_player_limit)
+    }
+
+    /// 官方 `PlayerList.canPlayerLogin` 的顺序：玩家封禁、白名单、IP 封禁、满员。
+    /// `online` 是当前玩家表的人数，由调用方给；满员那一步还要看
+    /// `bypassesPlayerLimit`。
     ///
-    /// Official `PlayerList.canPlayerLogin` order: player ban, whitelist, IP ban.
-    /// The connection layer checks the player limit; the world thread checks these three.
-    pub fn login_refusal(&self, uuid: Uuid, ip: &str, now_millis: i64) -> Option<LoginRefusal> {
+    /// Official `PlayerList.canPlayerLogin` order: player ban, whitelist, IP ban, full.
+    pub fn login_refusal(
+        &self,
+        uuid: Uuid,
+        ip: &str,
+        now_millis: i64,
+        online: usize,
+        max_players: u32,
+    ) -> Option<LoginRefusal> {
         if let Some(ban) = self.player_bans.get(&uuid)
             && !ban.entry.expired(now_millis)
         {
@@ -121,6 +136,9 @@ impl AdminState {
         {
             return Some(LoginRefusal::IpBanned(ban.entry.clone()));
         }
+        if online >= max_players as usize && !self.bypasses_player_limit(uuid) {
+            return Some(LoginRefusal::ServerFull);
+        }
         None
     }
 
@@ -129,18 +147,22 @@ impl AdminState {
         self.enforce_whitelist && self.using_whitelist
     }
 
-    /// `/op` 新建的条目。命令只在玩家还不是 OP 时走到这里。
+    /// `/op` 新建或改写条目。命令只在玩家还不是 OP 时走到新建这条路；
+    /// 官方 `PlayerList.op` 改已有条目时会保留它的 `bypassesPlayerLimit`。
     pub fn op_player(&mut self, player: NameAndId) {
-        self.ops.insert(
-            player.uuid,
-            OpListEntry {
+        self.ops
+            .entry(player.uuid)
+            .and_modify(|entry| {
+                entry.entry.level = Self::OP_LEVEL;
+                entry.name = player.name.clone();
+            })
+            .or_insert_with(|| OpListEntry {
                 name: player.name,
                 entry: OpEntry {
                     level: Self::OP_LEVEL,
                     bypasses_player_limit: false,
                 },
-            },
-        );
+            });
     }
 
     pub fn deop_player(&mut self, uuid: Uuid) -> bool {
@@ -154,7 +176,7 @@ pub enum LoginRefusal {
     PlayerBanned(BanEntry),
     IpBanned(BanEntry),
     NotWhitelisted,
-    /// 满员（或绕过人数上限检查）。
+    /// 满员且不能绕过人数上限。
     ServerFull,
 }
 
@@ -245,8 +267,18 @@ impl AdminSnapshot {
 }
 
 impl AdminSnapshot {
-    /// 官方 `PlayerList.canPlayerLogin` 的顺序：玩家封禁、白名单、IP 封禁。
-    /// 连接层只用这一份只读快照，满员由连接层自己判断。
+    /// 官方 `DedicatedPlayerList.canBypassPlayerLimit` → `ServerOpList.canBypassPlayerLimit`。
+    /// 连接层的只读快照和世界线程的权威副本按同一条规则判断。
+    pub fn bypasses_player_limit(&self, uuid: Uuid) -> bool {
+        self.ops
+            .get(&uuid)
+            .is_some_and(|entry| entry.entry.bypasses_player_limit)
+    }
+
+    /// 官方 `PlayerList.canPlayerLogin` 的前三项：玩家封禁、白名单、IP 封禁。
+    /// 连接层先查这三项，再由带锁的玩家表查人数和能不能绕过上限；
+    /// 世界线程的权威副本把人数一起传进 [`AdminState::login_refusal`]，
+    /// 两处用的是同一份 `bypasses_player_limit` 规则。
     pub fn login_refusal(&self, uuid: Uuid, ip: &str, now_millis: i64) -> Option<LoginRefusal> {
         if let Some(ban) = self.player_bans.get(&uuid)
             && !ban.entry.expired(now_millis)
@@ -583,15 +615,92 @@ mod state_tests {
                 entry: ban(None),
             },
         );
-        assert!(matches!(
-            state.login_refusal(uuid, "127.0.0.1", 0),
-            Some(LoginRefusal::PlayerBanned(_))
-        ));
+        assert!(
+            matches!(
+                state.login_refusal(uuid, "127.0.0.1", 0, 1, 1),
+                Some(LoginRefusal::PlayerBanned(_))
+            ),
+            "玩家封禁排在白名单、IP 封禁和满员之前"
+        );
         state.player_bans.clear();
-        assert!(matches!(
-            state.login_refusal(uuid, "127.0.0.1", 0),
-            Some(LoginRefusal::IpBanned(_))
-        ));
+        assert!(
+            matches!(
+                state.login_refusal(uuid, "127.0.0.1", 0, 1, 1),
+                Some(LoginRefusal::IpBanned(_))
+            ),
+            "IP 封禁排在满员之前"
+        );
+        state.ip_bans.clear();
+        assert_eq!(
+            state.login_refusal(uuid, "127.0.0.1", 0, 1, 1),
+            Some(LoginRefusal::ServerFull),
+            "满员是最后一项"
+        );
+        assert_eq!(state.login_refusal(uuid, "127.0.0.1", 0, 0, 1), None);
+    }
+
+    #[test]
+    fn only_an_op_with_bypasses_player_limit_gets_into_a_full_server() {
+        let allowed = Uuid::from_u128(1);
+        let plain_op = Uuid::from_u128(2);
+        let stranger = Uuid::from_u128(3);
+        let mut state = AdminState::default();
+        state.ops.insert(
+            allowed,
+            OpListEntry {
+                name: "Allowed".to_owned(),
+                entry: OpEntry {
+                    level: 4,
+                    bypasses_player_limit: true,
+                },
+            },
+        );
+        state.ops.insert(
+            plain_op,
+            OpListEntry {
+                name: "Plain".to_owned(),
+                entry: OpEntry {
+                    level: 4,
+                    bypasses_player_limit: false,
+                },
+            },
+        );
+
+        assert_eq!(state.login_refusal(allowed, "127.0.0.1", 0, 1, 1), None);
+        assert_eq!(
+            state.login_refusal(plain_op, "127.0.0.1", 0, 1, 1),
+            Some(LoginRefusal::ServerFull)
+        );
+        assert_eq!(
+            state.login_refusal(stranger, "127.0.0.1", 0, 1, 1),
+            Some(LoginRefusal::ServerFull)
+        );
+
+        // `/op`、`/deop` 改的是同一份权威副本，世界线程的复查即时生效。
+        state.op_player(NameAndId {
+            uuid: stranger,
+            name: "NewOp".to_owned(),
+        });
+        assert_eq!(
+            state.login_refusal(stranger, "127.0.0.1", 0, 1, 1),
+            Some(LoginRefusal::ServerFull),
+            "新 OP 默认不绕过人数上限"
+        );
+        assert!(state.deop_player(allowed));
+        assert_eq!(
+            state.login_refusal(allowed, "127.0.0.1", 0, 1, 1),
+            Some(LoginRefusal::ServerFull)
+        );
+        // 连接层的只读快照按同一条规则判断。
+        let snapshot = state.snapshot();
+        assert!(!snapshot.bypasses_player_limit(plain_op));
+        state
+            .ops
+            .get_mut(&plain_op)
+            .unwrap()
+            .entry
+            .bypasses_player_limit = true;
+        assert!(state.snapshot().bypasses_player_limit(plain_op));
     }
 
     #[test]
@@ -620,11 +729,12 @@ mod state_tests {
                 },
             },
         );
-        assert_eq!(state.login_refusal(listed, "127.0.0.1", 0), None);
-        assert_eq!(state.login_refusal(op, "127.0.0.1", 0), None);
+        assert_eq!(state.login_refusal(listed, "127.0.0.1", 0, 0, 1), None);
+        assert_eq!(state.login_refusal(op, "127.0.0.1", 0, 0, 1), None);
         assert_eq!(
-            state.login_refusal(stranger, "127.0.0.1", 0),
-            Some(LoginRefusal::NotWhitelisted)
+            state.login_refusal(stranger, "127.0.0.1", 0, 0, 1),
+            Some(LoginRefusal::NotWhitelisted),
+            "白名单排在满员之前"
         );
         assert!(!state.kicks_unlisted());
         state.enforce_whitelist = true;
@@ -644,7 +754,7 @@ mod state_tests {
             },
         );
         assert_eq!(
-            state.login_refusal(uuid, "127.0.0.1", 1_800_000_000_000),
+            state.login_refusal(uuid, "127.0.0.1", 1_800_000_000_000, 0, 1),
             None
         );
     }

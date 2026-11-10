@@ -21,7 +21,7 @@ use mc_bamboo_auth::{
 use mc_bamboo_data::{registries, tags};
 use mc_bamboo_game::{
     Inbound, ServiceProfileKeys, World, WorldConfig,
-    admin::{AdminInit, AdminMessage, AdminSnapshot, WhitelistReload},
+    admin::{AdminInit, AdminMessage, AdminSnapshot, LoginRefusal, WhitelistReload},
 };
 use mc_bamboo_protocol::{
     GAME_VERSION, PROTOCOL_VERSION,
@@ -174,6 +174,8 @@ impl Shared {
         }
     }
 
+    /// 满员判断要和官方 `PlayerList.canPlayerLogin` 一样放在封禁、白名单、IP 封禁之后，
+    /// 所以先由 [`Self::login_refusal`] 检查前三项，这里只做带锁的原子人数判断。
     pub(crate) fn add_player(
         &self,
         uuid: Uuid,
@@ -183,12 +185,23 @@ impl Shared {
         if let Some(existing) = players.get(&uuid) {
             return Err(AddPlayerError::Duplicate(existing.signals()));
         }
-        if players.len() >= self.config.max_players as usize {
+        if players.len() >= self.config.max_players as usize && !player.bypasses_player_limit {
             return Err(AddPlayerError::Full);
         }
         players.insert(uuid, player.clone());
         self.refresh_status(players.len());
         Ok(())
+    }
+
+    /// 登录准入前三项：玩家封禁、白名单、IP 封禁。读世界线程发布的只读快照。
+    pub(crate) fn login_refusal(&self, uuid: Uuid, ip: &str) -> Option<LoginRefusal> {
+        let snapshot = self.admin.read().expect("管理名单的锁不应该中毒");
+        snapshot.login_refusal(uuid, ip, mc_bamboo_game::admin::now_millis())
+    }
+
+    /// 当前玩家表的人数，供世界线程按权威名单复查满员。
+    pub(crate) fn online_count(&self) -> usize {
+        self.players.lock().expect("玩家表的锁不应该中毒").len()
     }
 
     pub(crate) fn remove_player(&self, uuid: Uuid) -> Option<OnlinePlayer> {

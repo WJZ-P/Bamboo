@@ -333,16 +333,17 @@ impl World {
         }
         // 连接层检查过一次，但封禁命令可能在两次检查之间改了名单。
         // 世界线程按自己的权威副本复查，理由和登录阶段完全一样。
-        let refusal = self
-            .authoritative_admin
-            .then(|| {
-                self.global.admin.login_refusal(
-                    request.uuid,
-                    &request.peer_ip,
-                    self.region.now_millis(),
-                )
-            })
-            .flatten();
+        let refusal = if self.authoritative_admin {
+            self.global.admin.login_refusal(
+                request.uuid,
+                &request.peer_ip,
+                self.region.now_millis(),
+                request.online_at_login,
+                self.region.max_players() as u32,
+            )
+        } else {
+            None
+        };
         if let Some(refusal) = refusal {
             let reason = crate::command::admin::refusal_message(&refusal);
             self.region.links.add(id, request.sink);

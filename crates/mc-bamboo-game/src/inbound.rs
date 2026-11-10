@@ -50,6 +50,8 @@ pub struct JoinRequest {
     pub is_op: bool,
     /// 连接层的对端 IP 文本（不含端口），供世界线程复查 IP 封禁。
     pub peer_ip: String,
+    /// 连接层判断满员时那一刻的在线人数，供世界线程按权威名单复查。
+    pub online_at_login: usize,
     pub sink: Box<dyn PlayerSink>,
 }
 

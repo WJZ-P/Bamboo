@@ -129,8 +129,9 @@ BAMBOO_PROFILE=10 ./target/release/bamboo-loadtest serve \
 人数上限、可选的视距、日志里第一行写的是 "loadtest server is listening"、
 玩家名前缀是 `Bot`。游戏逻辑、tick 顺序和网络参数都没改；没有改 `crates/` 下任何代码。
 
-另外 `ops.json` 的 `bypassesPlayerLimit` 在 Bamboo 里只被解析和写回，
-没有参与登录准入判断，也不能用来绕过人数上限；本任务不改服务端行为。
+`ops.json` 的 `bypassesPlayerLimit` 现在参与登录准入：满员时只有这个位为真的 OP
+能进来（官方 `DedicatedPlayerList.canBypassPlayerLimit`）。基线里的假玩家都不是 OP，
+所以这一项不影响上面任何一组数据。
 
 ## 4. 一键跑基线
 

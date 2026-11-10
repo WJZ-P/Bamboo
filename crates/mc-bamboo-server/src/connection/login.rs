@@ -81,13 +81,10 @@ pub(super) async fn admit(
     };
 
     // 官方 `ServerLoginPacketListenerImpl.verifyLoginAndFinishConnectionSetup`
-    // 在身份确认之后、进服之前查封禁和白名单。
+    // 在身份确认之后、进服之前按顺序查封禁、白名单、IP 封禁和满员。
+    // 前三项用世界线程发布的只读快照；满员要带锁读玩家表，顺带查能不能绕过上限。
     let ip = connection.peer_ip.clone();
-    let refusal = {
-        let snapshot = shared.admin.read().expect("管理名单的锁不应该中毒");
-        snapshot.login_refusal(profile.uuid, &ip, mc_bamboo_game::admin::now_millis())
-    };
-    if let Some(refusal) = refusal {
+    if let Some(refusal) = shared.login_refusal(profile.uuid, &ip) {
         connection.refuse_login_component(&refusal.text()).await?;
         return Ok(None);
     }
@@ -95,7 +92,7 @@ pub(super) async fn admit(
     match PlayerSession::join(shared, profile).await {
         Ok(session) => Ok(Some(session)),
         Err(refusal) => {
-            connection.refuse_login(refusal.message()).await?;
+            connection.refuse_login_translated(refusal.key()).await?;
             Ok(None)
         }
     }

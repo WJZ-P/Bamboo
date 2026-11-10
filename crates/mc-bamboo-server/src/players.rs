@@ -16,16 +16,17 @@ use crate::{
     server::Shared,
 };
 
-/// 玩家进不了服务器的原因。
+/// 玩家进不了服务器的原因。Login 阶段的断开原因是 JSON 文本组件，
+/// 这里和官方一样用翻译键，让客户端按自己的语言显示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JoinRefusal {
     ServerFull,
 }
 
 impl JoinRefusal {
-    pub(crate) fn message(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
-            Self::ServerFull => "服务器已满",
+            Self::ServerFull => mc_bamboo_game::admin::LoginRefusal::ServerFull.text().key,
         }
     }
 }
@@ -47,6 +48,8 @@ pub(crate) struct SessionSignals {
 pub(crate) struct OnlinePlayer {
     pub(crate) info: PlayerInfo,
     signals: SessionSignals,
+    /// 官方 `ServerOpList.canBypassPlayerLimit`：满员时只有这个位为真的 OP 能进。
+    pub(crate) bypasses_player_limit: bool,
 }
 
 /// 玩家加不进玩家表的原因。
@@ -71,6 +74,8 @@ pub(crate) struct PlayerSession {
     /// session server 或者代理给出的皮肤等属性。离线模式没有属性。
     pub(crate) properties: Vec<ProfileProperty>,
     pub(crate) entity_id: i32,
+    /// 登录时玩家表里的人数，世界线程按权威名单复查满员用。
+    pub(crate) online_at_login: usize,
 }
 
 impl PlayerSession {
@@ -84,12 +89,19 @@ impl PlayerSession {
             name,
             properties,
         } = profile;
+        // 名单每次变更都会发布新快照，`/op`、`/deop` 和文件重载都即时生效。
+        let bypasses_player_limit = shared
+            .admin
+            .read()
+            .expect("管理名单的锁不应该中毒")
+            .bypasses_player_limit(uuid);
         let player = OnlinePlayer {
             info: PlayerInfo {
                 name: name.clone(),
                 uuid: uuid.to_string(),
             },
             signals: SessionSignals::default(),
+            bypasses_player_limit,
         };
         loop {
             match shared.add_player(uuid, &player) {
@@ -111,6 +123,7 @@ impl PlayerSession {
             uuid,
             properties,
             entity_id: NEXT_ENTITY_ID.fetch_add(1, Ordering::Relaxed),
+            online_at_login: shared.online_count() - 1,
         })
     }
 
