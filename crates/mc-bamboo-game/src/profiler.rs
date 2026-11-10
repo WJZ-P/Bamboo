@@ -215,6 +215,8 @@ pub(crate) enum Metric {
     TickStartLateness,
     /// 相邻两刻实际起点的间隔和 50ms 网格差多少，只看正常按网格调度的一对。
     TickIntervalDeviation,
+    /// 为等下一刻自旋了多久，单位微秒；plain 和追赶中的刻记 0。
+    TickSpinUs,
     InboundMessages,
     OnlinePlayers,
     DueScheduledTicks,
@@ -227,10 +229,11 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
+        Self::TickSpinUs,
         Self::InboundMessages,
         Self::OnlinePlayers,
         Self::DueScheduledTicks,
@@ -245,6 +248,7 @@ impl Metric {
             Self::TickTotal => "tick_total",
             Self::TickStartLateness => "tick_start_lateness",
             Self::TickIntervalDeviation => "tick_interval_deviation",
+            Self::TickSpinUs => "tick_spin_us",
             Self::InboundMessages => "inbound_messages",
             Self::OnlinePlayers => "online_players",
             Self::DueScheduledTicks => "due_scheduled_ticks",
@@ -264,7 +268,7 @@ impl Metric {
             Self::InboundMessages => "messages",
             Self::DueScheduledTicks => "ticks",
             Self::ChunksSent => "chunks",
-            Self::ChunkLatencyUs => "us",
+            Self::ChunkLatencyUs | Self::TickSpinUs => "us",
             Self::FlushBytes => "bytes",
             Self::SkippedCatchUps => "times",
             Self::TickTotal | Self::TickStartLateness | Self::TickIntervalDeviation => "ms",

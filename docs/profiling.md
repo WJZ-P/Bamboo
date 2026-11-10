@@ -34,6 +34,7 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 | `tick_total` | `end_tick − begin_tick`，一刻的实际总耗时 |
 | `tick_start_lateness` | 实际开始时刻减去调度器给出的应开始时刻；提前醒了记 0 |
 | `tick_interval_deviation` | \|相邻两刻**实际起点**的间隔 − 50 ms\|，设计稿 1.2「抖动 < 2 ms」看这一项 |
+| `tick_spin_us` | 这一刻为等下一刻自旋了多久（微秒）；`plain` 和追赶中的刻记 0 |
 | `inbound_messages` | 每刻从信箱取出并处理的入站消息数 |
 | `online_players` | 每刻开始时的在线玩家数 |
 | `due_scheduled_ticks` | 每刻开始时到期的方块/流体计划刻数 |
@@ -61,7 +62,7 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 数量指标的直方图记的是「每刻多少个」（区块延迟是「每个区块多少微秒」），
 所以这些行的 `mean`、`p50`、`p95`、`p99`、`max` 单位不是 ms，而是每行末尾的 `unit`。
 `count` / `samples` 是这段报告的样本数：`phases`、`tick_total`、
-`tick_start_lateness`、`tick_interval_deviation` 和 `flush_bytes` 每刻一次
+`tick_start_lateness`、`tick_interval_deviation`、`tick_spin_us` 和 `flush_bytes` 每刻一次
 （追赶和放弃追赶的刻少掉一条间隔偏差样本），`chunk_latency_us` 每发出一个区块一次。
 报告头部 `N ticks` 是这段时间内跑了多少刻。
 
@@ -273,3 +274,43 @@ walk-50 12 426.0 / 585.6，fly-20 2 378.9 / 1 047.2。
   只由有样本的报告决定：`idle` 是 6.000，`crowd-50` / `crowd-200` 约 4.36，
   `walk-50` / `fly-20` 更低是因为稳态报告里 0 的样本数更多。
   不能把它当成稳态的区块延迟读。这个疑点已记给主代理审查，本任务没有改服务端。
+
+## 7. tick 节拍的可切换策略
+
+世界创建时读一次下面三个环境变量，启动时用一条 `tick pacing` 日志打出实际生效的值
+（`sleep`、`spin_max_us`、`qos`）。读到不认识的值记一条警告并回落到缺省值。
+和 `BAMBOO_PROFILE` 一样，`run-baseline.sh` 起服务端时会继承这些变量；
+脚本在汇总表标题行前打印它们，`summarize.py` 也加了一列 `spin us/tick`。
+本节只说明开关做了什么，不含测量结论；默认行为是原来的 `thread::sleep`。
+
+| 变量 | 取值 | 缺省 | 含义 |
+|---|---|---|---|
+| `BAMBOO_TICK_SLEEP` | `plain` / `hybrid` | `plain` | 怎么睡到下一刻 |
+| `BAMBOO_TICK_SPIN_MAX_US` | 微秒数 | `6000` | `hybrid` 时每刻最多愿意自旋多久；0 等价于 `plain` |
+| `BAMBOO_TICK_QOS` | `default` / `interactive` | `default` | 世界线程的优先级设置 |
+
+- **plain**：`thread::sleep` 一直睡到下一刻的截止时刻；系统提前唤醒时补睡，
+  返回时一定不早于截止时刻。追赶中的刻（已经落后）不睡也不自旋。
+- **hybrid**：先睡到「截止时刻 − 余量」，剩下的时间用 `spin_loop` 自旋到截止时刻。
+  余量取最近 64 次睡眠「睡过头了多久」的最大值再加一点，夹在 250 us 和
+  `BAMBOO_TICK_SPIN_MAX_US` 之间（余量还不会超过这一刻本来要等的时间）；
+  自旋期间这条线程占满一个核。上限是每刻愿意付的占核代价，设为 0 就完全退回
+  `plain`。睡眠超时太多、导致醒来时已经过了截止时刻，这一刻直接返回，不多自旋。
+
+`tick_spin_us` 每刻记一条：`hybrid` 记这一刻实际自旋的墙上时长（从睡眠醒来
+到截止时刻，最多不超过自旋上限；睡眠超时直接过了截止时刻就记 0），`plain`、
+上限为 0 以及追赶中的刻记 0。它量的是为了准时付出的 CPU 占用，不是 tick 本身的
+耗时，也不算在 `tick_total` 里。
+
+线程优先级的平台现状：
+
+- macOS：`BAMBOO_TICK_QOS=interactive` 时，世界线程开始跑主循环前调
+  `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` 把自己设成用户
+  交互级 QoS。这是仓库里少数用 `unsafe` 的地方，只在这一小段函数里；调用失败
+  只记一条警告，不影响运行。`default` 不改动线程优先级。
+- Linux：这次没有实现优先级设置，开关 `interactive` 是空操作并记一条警告。
+  睡眠精度在这些平台上的具体表现没有验证。
+- Windows：这次没有实现优先级设置，开关 `interactive` 是空操作并记一条警告，
+  留给以后；睡眠精度也没有验证。
+
+设计稿第 12 节还要求 tick 线程绑到性能核，这次没有做。
