@@ -9,8 +9,8 @@ pub mod snbt;
 
 pub use decode::{Accounter, DEFAULT_QUOTA, DecodeError, MAX_DEPTH, Reader};
 pub use file::{
-    Compression, FileError, MAX_DECOMPRESSED_BYTES, UNCOMPRESSED_QUOTA, read_compressed,
-    read_named, write_compressed, write_named,
+    Compression, FileError, MAX_DECOMPRESSED_BYTES, UNCOMPRESSED_QUOTA, decompress,
+    read_compressed, read_named, write_compressed, write_named,
 };
 pub use snbt::{
     SnbtError, java_double_to_string, java_float_to_string, parse_snbt, parse_snbt_argument,

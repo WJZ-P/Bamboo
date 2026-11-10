@@ -68,6 +68,11 @@ fn io_error(error: io::Error) -> FileError {
     FileError::Compression(error.to_string())
 }
 
+/// 只解一层压缩外壳，不解析标签。返回值不会超过 [`MAX_DECOMPRESSED_BYTES`]。
+pub fn decompress(input: &[u8], compression: Compression) -> Result<Vec<u8>, FileError> {
+    inflate(input, compression)
+}
+
 /// 解一层压缩外壳。返回值不会超过 [`MAX_DECOMPRESSED_BYTES`]。
 fn inflate(input: &[u8], compression: Compression) -> Result<Vec<u8>, FileError> {
     if compression == Compression::None {

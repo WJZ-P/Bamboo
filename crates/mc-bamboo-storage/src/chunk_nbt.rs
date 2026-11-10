@@ -77,7 +77,11 @@ pub struct ChunkEncodeExtra<'a> {
     pub post_processing: Option<Tag>,
     /// 方块实体条目的原始顺序里，本层不认识的那些键（按位置索引）。
     pub block_entity_raw: Vec<Vec<(String, Tag)>>,
-    _marker: std::marker::PhantomData<&'a ()>,
+    /// 原样写回的 `block_entities` 列表（读盘再写回时用），`None` 时从 `ChunkColumn` 生成。
+    pub raw_block_entities: Option<Vec<Tag>>,
+    /// 原样写回的 `Heightmaps` 条目（官方只写它有的那几张），`None` 时写四张计算值。
+    pub raw_heightmaps: Option<Vec<(String, Tag)>>,
+    pub _marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl Default for ChunkEncodeExtra<'_> {
@@ -93,6 +97,8 @@ impl Default for ChunkEncodeExtra<'_> {
             structures: None,
             post_processing: None,
             block_entity_raw: Vec::new(),
+            raw_block_entities: None,
+            raw_heightmaps: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -115,6 +121,8 @@ pub struct DecodedChunk {
     pub unknown: Vec<(String, Tag)>,
     pub structures: Tag,
     pub post_processing: Tag,
+    /// 原样的 `Heightmaps` 条目，重新编码时按键写回。
+    pub heightmaps: Vec<(String, Tag)>,
     /// 重新编码时要原样写回的顶层键（包括官方的可选字段）。
     pub preserved: Vec<(String, Tag)>,
     /// 编码时给 `block_entity_extra` 的原始方块实体条目（按位置）。
@@ -142,6 +150,8 @@ impl DecodedChunk {
             structures: Some(self.structures.clone()),
             post_processing: Some(self.post_processing.clone()),
             block_entity_raw: self.block_entity_raw.clone(),
+            raw_block_entities: Some(self.block_entities.clone()),
+            raw_heightmaps: Some(self.heightmaps.clone()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -180,7 +190,7 @@ const KNOWN_KEYS: &[&str] = &[
 ];
 
 /// 把一个 `Tag` 按名字查字段。复合标签用 `Vec` 保序，同名键取最后一个（官方 HashMap 的行为）。
-fn field<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
+pub fn field<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
     let Tag::Compound(entries) = tag else {
         return None;
     };
@@ -265,6 +275,11 @@ fn state_palette_entry(state: u32) -> Result<Tag, ChunkNbtError> {
             Tag::String((*value).to_owned()),
         );
     }
+    // 官方 `BlockState.CODEC` 对「默认状态」写成裸字符串，非默认状态写成
+    // `{ Name: "...", Properties: { ... } }`，属性一律是字符串。
+    if state == block.default_state {
+        return Ok(Tag::String(block.name.to_owned()));
+    }
     let mut entries = Vec::with_capacity(2);
     put(&mut entries, "Name", Tag::String(block.name.to_owned()));
     if !properties.is_empty() {
@@ -275,20 +290,35 @@ fn state_palette_entry(state: u32) -> Result<Tag, ChunkNbtError> {
 
 /// 把磁盘调色板里的 `{ Name, Properties }` 还原成状态 ID。
 fn parse_state_palette_entry(tag: &Tag) -> Result<u32, ChunkNbtError> {
-    let name = as_string(field(tag, "Name"), "palette entry Name")?;
+    // 官方 `BlockState.CODEC` 对没有属性的方块写成裸字符串。
+    let (name, properties_tag) = match tag {
+        Tag::String(value) => (value.as_str(), None),
+        Tag::Compound(_) => (
+            as_string(field(tag, "Name"), "palette entry Name")?,
+            field(tag, "Properties"),
+        ),
+        _ => {
+            return Err(ChunkNbtError::Malformed(
+                "palette entry must be a string or a compound tag".to_owned(),
+            ));
+        }
+    };
     let block = block_by_name(name)
         .ok_or_else(|| ChunkNbtError::Malformed(format!("unknown block {name}")))?;
     let id = block_id_of_state(block.first_state)
         .ok_or_else(|| ChunkNbtError::Malformed(format!("block {name} has no states")))?;
+    if properties_tag.is_none() {
+        return Ok(block.default_state);
+    }
     let count = state_count(id);
-    let properties = match field(tag, "Properties") {
+    let properties: &[(String, Tag)] = match properties_tag {
         Some(Tag::Compound(entries)) => entries,
         Some(_) => {
             return Err(ChunkNbtError::Malformed(
                 "palette entry Properties must be a compound".to_owned(),
             ));
         }
-        None => &Vec::new(),
+        None => &[],
     };
     let mut offset = 0u32;
     let mut remaining = count;
@@ -539,6 +569,33 @@ fn block_entity_id(tag: &Tag) -> Option<&str> {
     }
 }
 
+/// 原样写回一条方块实体，把上层附加的、本层不写的键补进去。
+fn merge_block_entity_extra(tag: &Tag, extra: &ChunkEncodeExtra<'_>) -> Result<Tag, ChunkNbtError> {
+    let Tag::Compound(values) = tag else {
+        return Ok(tag.clone());
+    };
+    let Some((x, y, z)) = tag_position(tag) else {
+        return Ok(tag.clone());
+    };
+    let mut entries = values.clone();
+    for (ex, ey, ez, extra_tag) in &extra.block_entity_extra {
+        if (*ex, *ey, *ez) != (x, y, z) {
+            continue;
+        }
+        let Tag::Compound(extra_values) = extra_tag else {
+            return Err(ChunkNbtError::Malformed(
+                "block entity extra must be a compound tag".to_owned(),
+            ));
+        };
+        for (key, value) in extra_values {
+            if !entries.iter().any(|(existing, _)| existing == key) {
+                entries.push((key.clone(), value.clone()));
+            }
+        }
+    }
+    Ok(compound(entries))
+}
+
 /// 一个方块实体条目的骨架：注册名、绝对坐标、告示牌文字。
 fn write_block_entity(
     entity: &mc_bamboo_world::chunk::BlockEntity,
@@ -675,17 +732,26 @@ pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag,
         put(&mut root, "isLightOn", Tag::Byte(1));
     }
 
-    let entities: Vec<_> = column.chunk().block_entities().collect();
-    let mut block_entities = Vec::with_capacity(entities.len());
-    for (index, entity) in entities.iter().enumerate() {
-        block_entities.push(write_block_entity(
-            entity,
-            extra.chunk_pos,
-            column,
-            extra,
-            extra.block_entity_raw.get(index).map(Vec::as_slice),
-        )?);
-    }
+    let block_entities = match &extra.raw_block_entities {
+        Some(raw) => raw
+            .iter()
+            .map(|tag| merge_block_entity_extra(tag, extra))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => {
+            let entities: Vec<_> = column.chunk().block_entities().collect();
+            let mut written = Vec::with_capacity(entities.len());
+            for (index, entity) in entities.iter().enumerate() {
+                written.push(write_block_entity(
+                    entity,
+                    extra.chunk_pos,
+                    column,
+                    extra,
+                    extra.block_entity_raw.get(index).map(Vec::as_slice),
+                )?);
+            }
+            written
+        }
+    };
     put(&mut root, "block_entities", Tag::List(block_entities));
     put(
         &mut root,
@@ -703,20 +769,26 @@ pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag,
         .unwrap_or_else(|| Tag::List((0..SECTION_COUNT).map(|_| Tag::List(Vec::new())).collect()));
     put(&mut root, "PostProcessing", post_processing);
 
-    let mut heightmaps = Vec::new();
-    for (kind, name) in HeightmapKind::ALL.into_iter().zip(HEIGHTMAP_KEYS) {
-        put(
-            &mut heightmaps,
-            name,
-            Tag::LongArray(
-                column
-                    .heightmap(kind)
-                    .iter()
-                    .map(|&word| word as i64)
-                    .collect(),
-            ),
-        );
-    }
+    let heightmaps = match &extra.raw_heightmaps {
+        Some(raw) => raw.clone(),
+        None => {
+            let mut maps = Vec::new();
+            for (kind, name) in HeightmapKind::ALL.into_iter().zip(HEIGHTMAP_KEYS) {
+                put(
+                    &mut maps,
+                    name,
+                    Tag::LongArray(
+                        column
+                            .heightmap(kind)
+                            .iter()
+                            .map(|&word| word as i64)
+                            .collect(),
+                    ),
+                );
+            }
+            maps
+        }
+    };
     put(&mut root, "Heightmaps", compound(heightmaps));
     let structures = extra.structures.clone().unwrap_or_else(|| {
         compound(
@@ -844,6 +916,10 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         }
     }
 
+    let heightmaps_raw = match field(root, "Heightmaps") {
+        Some(Tag::Compound(entries)) => entries.clone(),
+        _ => Vec::new(),
+    };
     let heightmaps = field(root, "Heightmaps");
     for (index, key) in HEIGHTMAP_KEYS.iter().enumerate() {
         if let Some(tag) = heightmaps.and_then(|maps| field(maps, key)) {
@@ -953,6 +1029,7 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         unknown,
         structures,
         post_processing,
+        heightmaps: heightmaps_raw,
         preserved,
         block_entity_raw,
     })
@@ -1121,6 +1198,24 @@ mod tests {
         for (x, y, z, content) in column.chunk().signs() {
             assert_eq!(decoded.column.chunk().sign(x, y, z), Some(content));
         }
+    }
+
+    /// 官方 `SerializableChunkData.write()` 生成的 NBT 能被读回来。
+    /// 这个文件由 `tools/mc-bamboo-vanilla` 的 storage oracle 生成，不启动服务端。
+    #[test]
+    fn official_chunk_is_readable_when_present() {
+        let Ok(bytes) = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/mc-bamboo-vanilla/tests/official-chunk.nbt"
+        )) else {
+            return;
+        };
+        let decoded = decode_bytes(&bytes).expect("官方 NBT 能读");
+        assert_eq!(decoded.status, "minecraft:full");
+        assert_eq!(decoded.data_version, version::DATA_VERSION);
+        assert_eq!(decoded.chunk_pos, ChunkPos::new(3, -9));
+        assert!(decoded.light_on);
+        assert_eq!(decoded.block_entities.len(), 1);
     }
 
     #[test]

@@ -4,4 +4,6 @@
 //! 磁盘上也不会因为引入它多出文件。见 `docs/m3-storage.md`。
 
 pub mod anvil;
+#[cfg(test)]
+mod bench;
 pub mod chunk_nbt;

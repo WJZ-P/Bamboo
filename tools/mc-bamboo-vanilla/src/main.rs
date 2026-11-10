@@ -73,6 +73,8 @@ mod predicate_oracle;
 #[cfg(feature = "oracle")]
 mod recipe_oracle;
 #[cfg(feature = "oracle")]
+mod storage_oracle;
+#[cfg(feature = "oracle")]
 mod worldgen;
 
 use std::{
@@ -106,6 +108,8 @@ const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
 #[cfg(feature = "oracle")]
 const MOVE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MovementOracle.java";
+#[cfg(feature = "oracle")]
+const STORAGE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StorageOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值] [--weather clear|rain|thunder]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -117,7 +121,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
-      mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]";
+      mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
+      mc-bamboo-vanilla storage <java 路径> [--show N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -151,6 +156,7 @@ fn run() -> Result<(), String> {
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
+        ["storage", java, ref options @ ..] => storage_oracle(java, options),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -317,6 +323,16 @@ fn entity_oracle(java: &str) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn move_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     move_oracle::run(official_program(java, MOVE_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn storage_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    storage_oracle::run(official_program(java, STORAGE_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn storage_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 /// 用官方解压出来的 jar 当 classpath，运行一个单文件 Java 程序。
