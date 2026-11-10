@@ -85,12 +85,14 @@ run_scene() {
         if ! kill -0 "$SERVER" 2>/dev/null; then
             echo "server exited before it was ready:" >&2
             tail -20 "$dir/server.log" >&2
+            stop_server
             return 1
         fi
         sleep 0.2
     done
     if [ "$ready" -ne 1 ]; then
         echo "server did not become ready" >&2
+        stop_server
         return 1
     fi
 
