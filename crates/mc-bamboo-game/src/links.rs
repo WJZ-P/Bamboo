@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// 包太大编码不出来时踢人用的原因。客户端可以靠超长的物品组件走到这里。
-const PACKET_ERROR: &str = "disconnect.packetError";
+pub(crate) const PACKET_ERROR: &str = "disconnect.packetError";
 
 /// 把一个要发给多人的包编码成帧。这种包的内容都不是客户端能撑大的，
 /// 真的放不下时只丢掉这个包，不影响任何人的连接。

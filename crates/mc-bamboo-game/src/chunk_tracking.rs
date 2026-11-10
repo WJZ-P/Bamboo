@@ -6,13 +6,19 @@
 use std::{collections::BTreeMap, ops::RangeInclusive, time::Instant};
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_protocol::packet::play::{
-    ChunkBatchFinished, ChunkBatchStart, ForgetLevelChunk, SetChunkCacheCenter,
+use mc_bamboo_protocol::{
+    packet::play::{ChunkBatchFinished, ChunkBatchStart, ForgetLevelChunk, SetChunkCacheCenter},
+    text::Component,
 };
+use tracing::warn;
 
 use crate::{
-    chunk_encoding::chunk_frame, inbound::PlayerId, links::Links, player::Player,
-    profiler::Profiler, region::Region,
+    chunk_encoding::chunk_frame,
+    inbound::PlayerId,
+    links::{Links, PACKET_ERROR},
+    player::Player,
+    profiler::Profiler,
+    region::Region,
 };
 
 /// 视距的下限。客户端请求的值和服务端的配置都不能比它小。
@@ -317,16 +323,29 @@ pub(crate) fn send_chunks(region: &mut Region) {
 
         region.links.send(id, &ChunkBatchStart);
         for &pos in &batch {
-            let frames = chunk_frame(
+            let frames = match chunk_frame(
                 &mut region.chunk_cache,
                 &region.chunks,
                 &region.template_body,
                 pos,
-            );
+            ) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    // 包体超过帧长上限：和 `Links::send` 一样踢掉正在请求它的玩家，
+                    // 空帧不缓存也不发，别的玩家照样收自己的批次。
+                    warn!(%error, player = id.0, ?pos, "kicking a player whose chunk cannot be encoded");
+                    region
+                        .links
+                        .kick(id, &Component::translate(PACKET_ERROR, []));
+                    break;
+                }
+            };
             region.links.send_shared(id, frames);
         }
-        let batch_size = batch.len() as i32;
-        region.links.send(id, &ChunkBatchFinished { batch_size });
+        if region.links.is_open(id) {
+            let batch_size = batch.len() as i32;
+            region.links.send(id, &ChunkBatchFinished { batch_size });
+        }
     }
     region.profiler.finish_chunk_sending();
     drop_untracked_bodies(region);
@@ -873,13 +892,82 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &changed), "内容变了就换新的帧");
     }
 
+    /// 让一个区块的包体超过帧长上限，走真实 `chunk_frame` 的失败分支。
+    /// 区块里一个方块实体的 `update_tag` 就能带任意长度的字节，不需要改世界层。
+    fn oversized_chunk(store: &mut ChunkStore, pos: ChunkPos) {
+        let block = BlockPos::new(pos.x * 16 + 1, -60, pos.z * 16 + 1);
+        store.set_block(block, blocks::CHEST);
+        assert!(store.set_update_tag(block, Some(vec![0; MAX_FRAME_LEN + 1])));
+    }
+
+    #[test]
+    fn an_oversized_chunk_kicks_its_requester_without_caching_an_empty_frame() {
+        let mut server = Harness::new(2);
+        // 两名玩家都在出生点，但坏区块只排进 Alice 的 pending；Bob 的视图
+        // 故意落在别处，这一刻只发自己范围内的正常区块。
+        let alice = server.join("Kitten");
+        let bob = server.join("Mochi");
+        server.tick();
+        alice.take_frames();
+        bob.take_frames();
+
+        let bad = ChunkPos::new(0, 0);
+        oversized_chunk(&mut server.region().chunks, bad);
+        server
+            .region()
+            .players
+            .get_mut(&bob.id)
+            .expect("玩家在")
+            .chunks
+            .sender
+            .pending
+            .clear();
+        server
+            .region()
+            .players
+            .get_mut(&alice.id)
+            .expect("玩家在")
+            .chunks
+            .sender
+            .mark_pending(bad);
+        server.acknowledge_batch(&alice, 64.0);
+        server.tick();
+
+        let reason = Component::translate(crate::links::PACKET_ERROR, []);
+        let mut expected = Vec::new();
+        append_frame(
+            &mut expected,
+            &mc_bamboo_protocol::packet::play::Disconnect { reason: &reason },
+        )
+        .unwrap();
+        let alice_frames = alice.take_frames();
+        assert_eq!(
+            alice_frames.last().map(|frame| frame.id),
+            Some(clientbound::DISCONNECT),
+            "请求者收到 packetError 断开包"
+        );
+        assert!(alice.is_closed());
+        assert!(!server.region().links.is_open(alice.id));
+        assert!(server.shared_chunk_frame(bad).is_none(), "失败的帧不进缓存");
+        assert!(!server.has_empty_cached_frame(), "缓存里没有空帧");
+
+        let bob_frames = bob.take_frames();
+        assert!(!bob.is_closed(), "别的玩家不受影响");
+        assert!(
+            !bob_frames
+                .iter()
+                .any(|frame| frame.id == clientbound::DISCONNECT)
+        );
+        assert!(server.region().links.is_open(bob.id));
+    }
+
     #[test]
     fn chunk_frames_keep_the_official_packet_layout() {
         let store = ChunkStore::flat();
         let template_body = encode_template(&store);
         let mut cache = ChunkCache::default();
         let pos = ChunkPos::new(5, -3);
-        let frames = chunk_frame(&mut cache, &store, &template_body, pos);
+        let frames = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
 
         let mut expected = Vec::new();
         append_frame(
@@ -894,7 +982,8 @@ mod tests {
         assert_eq!(frames.raw(), expected);
 
         // 没改过的区块在不同坐标各有一份帧，包头里的坐标跟着变。
-        let neighbour = chunk_frame(&mut cache, &store, &template_body, ChunkPos::new(6, -3));
+        let neighbour =
+            chunk_frame(&mut cache, &store, &template_body, ChunkPos::new(6, -3)).unwrap();
         assert_ne!(frames.raw(), neighbour.raw());
         assert_eq!(cache.frame_count(), 2);
         cache.retain(|p| p == pos);

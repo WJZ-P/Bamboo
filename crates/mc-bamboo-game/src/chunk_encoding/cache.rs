@@ -83,6 +83,14 @@ impl ChunkCache {
         self.frames.len()
     }
 
+    /// 有没有缓存着空帧，测试用。
+    #[cfg(test)]
+    pub(crate) fn has_empty_frame(&self) -> bool {
+        self.frames
+            .values()
+            .any(|entry| entry.frames.raw().is_empty())
+    }
+
     /// 这个区块此刻的完整帧。版本号没变时直接借出缓存里的那份。
     pub(crate) fn frame(&self, store: &ChunkStore, pos: ChunkPos) -> Option<Arc<SharedFrames>> {
         let revision = store.revision(pos);

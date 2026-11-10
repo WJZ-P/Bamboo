@@ -404,6 +404,11 @@ impl Harness {
         self.world.region.chunk_cache.frame_count()
     }
 
+    /// 缓存里有没有空帧。
+    pub(crate) fn has_empty_cached_frame(&self) -> bool {
+        self.world.region.chunk_cache.has_empty_frame()
+    }
+
     /// 给其他模块的测试直接看世界的状态。
     pub(crate) fn region(&mut self) -> &mut Region {
         &mut self.world.region
