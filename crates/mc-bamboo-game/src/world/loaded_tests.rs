@@ -209,11 +209,12 @@ impl Rng {
 }
 
 /// 从票表和已加载集合从头按定义算两个集合；测试拿它和 region 的增量集合比。
-fn expected_sets(server: &Harness) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>) {
+fn expected_sets(server: &Harness) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>, BTreeSet<ChunkPos>) {
     let region = server.world_region();
     let tickets = server.tickets();
     let mut blocks = BTreeSet::new();
     let mut entities = BTreeSet::new();
+    let mut random = BTreeSet::new();
     // 视野级别的范围足够覆盖所有可能进集合的位置；票表之外的等级都是「没票」。
     for player in region.players.values() {
         let center = player.chunk_pos();
@@ -237,6 +238,9 @@ fn expected_sets(server: &Harness) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>) {
                     continue;
                 }
                 blocks.insert(pos);
+                if tickets.simulation_level(pos) <= 31 {
+                    random.insert(pos);
+                }
                 if tickets.loading_level(pos) <= 31
                     && tickets.simulation_level(pos) <= 31
                     && ring(2)
@@ -246,7 +250,7 @@ fn expected_sets(server: &Harness) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>) {
             }
         }
     }
-    (blocks, entities)
+    (blocks, entities, random)
 }
 
 /// 每刻断言：集合里的区块周围一圈/两圈都已交付，且两个集合和从头算的一致。
@@ -276,9 +280,14 @@ fn assert_tick_sets(server: &Harness) {
             );
         }
     }
-    let (blocks, entities) = expected_sets(server);
+    let (blocks, entities, random) = expected_sets(server);
     assert_eq!(levels.block_chunks(), &blocks, "方块集合与定义不一致");
     assert_eq!(levels.entity_chunks(), &entities, "实体集合与定义不一致");
+    assert_eq!(
+        levels.random_chunks(),
+        &random,
+        "逐区块 tick 集合与定义不一致"
+    );
 }
 
 /// 玩家随机走动、传送、改视距/模拟距离、进出，每刻检查两个集合的不变量。
@@ -590,4 +599,40 @@ fn precise_and_parallel_drivers_skip_the_same_entities() {
     assert_eq!(precise[1], parallel[1], "被跳过的物品两种驱动结果一样");
     assert_ne!(precise[0].0.y, precise[1].0.y, "一个动了、一个没动");
     assert_ne!(precise[0].1, precise[1].1, "一个年龄增长、一个没增长");
+}
+
+/// 撤票之后、100 刻收回延迟之内，区块还在 region 里但等级已经跌到 34 以上：
+/// 它必须立刻停止 tick（Director 的 `LevelChanged` 要覆盖 Unload/Demote 这类跨档）。
+#[test]
+fn a_chunk_waiting_for_reclaim_stops_ticking_as_soon_as_its_ticket_goes() {
+    let mut server = Harness::new_loaded(2);
+    let client = server.join_and_settle("Kitten");
+    let center = ChunkPos::new(0, 0);
+    assert!(
+        server
+            .world_region()
+            .tick_levels
+            .chunk_ticks_entities(center)
+    );
+
+    server.leave(&client);
+    server.tick();
+    let region = server.world_region();
+    assert!(
+        region.chunks.is_loaded(center),
+        "收回延迟内区块还在 region 里"
+    );
+    assert!(
+        !region.tick_levels.chunk_ticks_blocks(center),
+        "没票的逗留区块不该跑方块逻辑"
+    );
+    assert!(
+        !region.tick_levels.chunk_ticks_entities(center),
+        "没票的逗留区块不该 tick 实体"
+    );
+    assert!(
+        region.tick_levels.random_chunks().is_empty(),
+        "没票之后没有逐区块 tick"
+    );
+    assert_tick_sets(&server);
 }
