@@ -536,7 +536,7 @@ mod tests {
     }
 
     /// 三个音符盒：两个在冻结的区块，一个能 tick。方块事件按官方顺序推迟到下一刻，
-    /// 被推迟的彼此保持原顺序，并排在这一轮新产生的事件后面。
+    /// 被推迟的彼此保持原顺序，并排在队列里已有事件的后面。
     #[test]
     fn frozen_block_events_are_rescheduled_in_order_after_the_round() {
         let mut level = TestLevel::new();
