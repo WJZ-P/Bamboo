@@ -80,17 +80,20 @@
 编解码层已经落地（第 12 节第 1–4 步）。它不接进游戏，磁盘上不会因为它多出任何东西：
 
 ```text
- mc-bamboo-storage   ← 新增：chunk_nbt、anvil（Linear / 玩家数据 / level.dat 还没做）
-   │        │
-   │        └────── mc-bamboo-world（读盘后组装 ChunkColumn，卸载时读它）
-   └─────────────── mc-bamboo-nbt（网络形式 + 文件形式）
- mc-bamboo-core  mc-bamboo-data
+ mc-bamboo-storage        ← 新增：chunk_nbt、anvil、player、level_dat
+   ├── mc-bamboo-world    读盘后组装 ChunkColumn，卸载时读它
+   ├── mc-bamboo-protocol 物品类型和物品的存档 codec
+   ├── mc-bamboo-nbt      网络形式 + 文件形式
+   └── mc-bamboo-core  mc-bamboo-data
 ```
 
 - **`mc-bamboo-storage`**：依赖 `mc-bamboo-core`、`mc-bamboo-world`、`mc-bamboo-nbt`、
-  `mc-bamboo-data`、`flate2`、`thiserror`。不依赖 `mc-bamboo-game`、`mc-bamboo-protocol`、
-  `tokio`。已有模块：`chunk_nbt`（写和读）、`anvil`（区域文件、扇区分配、`.mcc`）。
-  `linear`、`player`、`level_dat`、`paths` 还没做。
+  `mc-bamboo-data`、`mc-bamboo-protocol`、`flate2`、`thiserror`。依赖 `mc-bamboo-protocol`
+  只为了物品类型和 `components::archive::slots` 的带槽位物品编解码（玩家物品栏、
+  末影箱和箱子等容器的 `Items` 都要用）；公开接口只露物品相关的类型，不露网络包和
+  编解码缓冲。**以后物品模型搬出 protocol 时这条依赖跟着换。**不依赖 `mc-bamboo-game`、
+  `tokio`。已有模块：`chunk_nbt`（写和读）、`anvil`（区域文件、扇区分配、`.mcc`）、
+  `player`、`level_dat`（编解码，不接进游戏）。`linear`、`paths` 还没做。
 - **`mc-bamboo-nbt`**：网络形式（`write_network` 写无名根）之外，加了文件形式：
   带名字的根（`write_named` / `read_named`）、gzip / zlib / 不压缩外壳、解压后的
   字节数上限，标签本身沿用原来的配额（`Accounter`）和 512 层深度上限。
@@ -405,20 +408,36 @@ gzip 的 NBT，根复合标签有名字（空字符串）。字段名全部核�
 `foodData` 的几项、`warden_spawn_tracker`、`recipeBook`、`respawn`、`seenCredits`、
 `ShoulderEntity*`。创造模式里这些都不影响玩法。
 
-`Inventory` 的每一项是 `ItemStackWithSlot.CODEC`，它把 `ItemStack.MAP_CODEC` 平铺在同一层：
+`Inventory` 和 `EnderItems` 的每一项是 `ItemStackWithSlot.CODEC`，它把
+`ItemStack.MAP_CODEC` 平铺在同一层；箱子等容器的 `Items` 也是这个格式：
 
 ```text
 { Slot: 0b, id: "minecraft:stone", count: 1 }
 ```
 
-- `Slot`：**byte 标签**（`ExtraCodecs.UNSIGNED_BYTE` 是 `Codec.BYTE` 加无符号映射），
-  用 `optionalAlwaysPresentFieldOf` 包着 —— 读的时候可省（默认 0），**写的时候一定写**。
+- `Slot`：**byte 标签**（`ExtraCodecs.UNSIGNED_BYTE` 是 `Codec.BYTE` 加无符号映射，
+  `UnsignedBytes.toInt`），用 `optionalAlwaysPresentFieldOf` 包着 —— 读的时候可省
+  （默认 0），**写的时候一定写**。Bamboo 的 [`SlottedItem::slot`](`mc-bamboo-protocol`
+  的 `components::archive::slots`) 是 0..=255 的 `i32`。
 - `id`：物品注册名字符串（`Item.CODEC_WITH_BOUND_COMPONENTS`）。
 - `count`：**int 标签**，`ExtraCodecs.intRange(1, 99)`，同样是“读可省、写必写”。
-  超出 1..=99 官方直接报错，所以 Bamboo 写之前要 clamp（或者拒绝保存并记日志）。
-- `components`：用的是普通的 `optionalFieldOf(..., DataComponentPatch.EMPTY)`，
-  **为空时不写这个键**。Bamboo 的 `ItemStack` 没有组件，所以永远不写。
+  超出 1..=99 官方直接报错，Bamboo 的编码器返回 `Err`。
+- `components`：`optionalFieldOf(..., DataComponentPatch.EMPTY)`，**补丁为空时不写**；
+  只含瞬态组件的补丁会写成空复合标签。Bamboo 的 `ItemStack` 现在有组件，
+  `mc-bamboo-protocol` 的 `components::archive` 已经把 122 种组件类型的存档 `Codec`
+  全部覆盖（`components java` 对拍 2602 个物品堆）。
 - 空槽位不写条目（整个列表只放非空物品）。
+- 这一层的编解码在 `mc-bamboo-protocol::components::archive::slots`：一个物品 ⇄ 一个
+  复合标签（`encode_item` / `decode_item`）、一个带槽位列表 ⇄ 一个 NBT 列表
+  （`encode_list` / `decode_list`）。`ItemStack.CODEC` 是 `MapCodec`，物品条目里
+  `id` / `count` / `components` 之外的键会被忽略，写回时不再出现。
+- 列表里解不开的条目按官方 `TagValueInput$TypedListWrapper` 处理：报告问题并跳过这一条，
+  其余条目照常解出来；列表本身不是 `ListTag` 时按 `listOrEmpty` 当成空列表并报告。
+  容器装载时槽位越界的条目也跳过（`ItemStackWithSlot.isValidInContainer`），槽位重复时
+  后一条覆盖前一条（`Inventory.load`、`ContainerHelper.loadAllItems`）。官方在
+  `DataResult` 带 `partialValue` 时会用部分结果，Bamboo 一律跳过整条并报告，
+  这是已知的差别：组件补丁里某一项解不开时官方 DFU 有时能给出「不带这个组件的物品」。
+  物品这一层不做 D9 的原样保留；D9 只用在玩家文件和 `level.dat` 的复合标签上。
 
 ### 9.2 `level.dat`
 

@@ -20,6 +20,7 @@ pub mod components;
 pub mod dynamic;
 pub mod read;
 mod records;
+pub mod slots;
 pub mod stack;
 pub mod text;
 pub mod write;
