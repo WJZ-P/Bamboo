@@ -23,6 +23,10 @@ use crate::{
     region::Region,
 };
 
+/// 剖析器用的全局计时开关：连接层没有 `Profiler`，`is_pristine` 在世界线程里
+/// 逐段比模板，用一对原子计数器把耗时报进 `pristine_check` 子段。
+static PRISTINE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 现在不能搬区块束：光照没算完，或者某张表正在 tick 中途。
 ///
 /// 调用方要等到 tick 边界再来，见 [`Region::ready_to_move_columns`]。
@@ -159,8 +163,17 @@ fn template_column() -> &'static ChunkColumn {
 
 impl ChunkBundle for Box<RegionColumn> {
     fn is_pristine(&self) -> bool {
-        (**self).is_pristine()
+        let started = std::time::Instant::now();
+        let result = (**self).is_pristine();
+        let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        PRISTINE_NANOS.fetch_add(elapsed, std::sync::atomic::Ordering::Relaxed);
+        result
     }
+}
+
+/// 取走并清零 `is_pristine` 累计的纳秒，给世界线程的剖析器用。
+pub(crate) fn take_pristine_cost() -> u64 {
+    PRISTINE_NANOS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ChunkBundle for RegionColumn {

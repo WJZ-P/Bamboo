@@ -259,10 +259,12 @@ pub(crate) enum SubPhase {
     ReturnBoxes,
     /// Director 确认交付/收回、把盒子放进停放表等事件回执。
     DirectorAck,
+    /// 收回的盒子判「原不原样」（逐段比模板）和丢弃。
+    PristineCheck,
 }
 
 impl SubPhase {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::TicketUpdate,
         Self::DirectorEvents,
         Self::DeliveryLightFinish,
@@ -280,6 +282,7 @@ impl SubPhase {
         Self::LevelsUpdate,
         Self::ReturnBoxes,
         Self::DirectorAck,
+        Self::PristineCheck,
     ];
 
     fn name(self) -> &'static str {
@@ -301,6 +304,7 @@ impl SubPhase {
             Self::LevelsUpdate => "levels_update",
             Self::ReturnBoxes => "return_boxes",
             Self::DirectorAck => "director_ack",
+            Self::PristineCheck => "pristine_check",
         }
     }
 }
@@ -691,6 +695,7 @@ impl Profiler {
         // 先写进 `sub_totals`，和下面的其它子段一起只记一条样本。
         let (_calls, nanos) = crate::outgoing::take_compression_cost();
         self.sub_totals[SubPhase::CompressFrame as usize] = nanos;
+        self.sub_totals[SubPhase::PristineCheck as usize] = crate::region::take_pristine_cost();
         // 这一刻调用过的每个子段记一条「合计」样本；没调用的记 0，
         // 这样所有子段的样本数都和 tick 数相同，均值可以直接和父阶段比。
         for (index, total) in self.sub_totals.iter().enumerate() {
