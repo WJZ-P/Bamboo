@@ -401,6 +401,21 @@ impl Harness {
         client
     }
 
+    /// 测试专用：只读票表。
+    pub(crate) fn tickets(&self) -> &mc_bamboo_world::ticket::TicketTable {
+        self.world.tickets()
+    }
+
+    /// 测试专用：直接改票表（视距、模拟距离、超时票等）。
+    pub(crate) fn tickets_mut(&mut self) -> &mut mc_bamboo_world::ticket::TicketTable {
+        self.world.tickets_mut()
+    }
+
+    /// 测试专用：走一批 `TicketOp`。
+    pub(crate) fn apply_ticket_for_test(&mut self, op: mc_bamboo_world::director::TicketOp) {
+        self.world.apply_ticket(op);
+    }
+
     /// 给其他模块的测试直接看全服状态。
     pub(crate) fn global(&self) -> &crate::global::Global {
         &self.world.global

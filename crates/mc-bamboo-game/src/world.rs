@@ -9,12 +9,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mc_bamboo_core::Vec3;
+use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
 };
+use mc_bamboo_world::{director::TicketOp, ticket::TicketTable};
 use tracing::warn;
 
 use crate::{
@@ -73,6 +74,11 @@ pub struct World {
     authoritative_admin: bool,
     /// 实体阶段的线程数。0 = 精确驱动；≥ 1 = 并行驱动。
     pub(crate) entity_threads: usize,
+    /// 区块平面的票表。提交 5 接 Director 时由它接管；现在只记录票的增减，
+    /// 不改变任何可观察行为（区块仍由无限超平坦模板隐式提供）。
+    tickets: TicketTable,
+    /// 上一刻每名玩家所在的区块，用来只在跨区块时发 `PlayerMoved`。
+    ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
 }
 
 /// 世界创建时读一次环境变量。读不到、0、负数或解析不了都是精确驱动。
@@ -139,9 +145,114 @@ impl World {
             ),
             inbox,
             pacer: Pacer::from_env(),
+            tickets: TicketTable::new(),
+            ticket_centers: std::collections::BTreeMap::new(),
         };
+        world.tickets.set_view_distance(view_distance);
+        world
+            .tickets
+            .set_simulation_distance(crate::interaction::SIMULATION_DISTANCE);
         world.region.profiler.on_world_start();
         world
+    }
+
+    /// 票表的只读视图，给测试核对玩家票和等级用。
+    #[cfg(test)]
+    pub(crate) fn tickets(&self) -> &TicketTable {
+        &self.tickets
+    }
+
+    /// 测试专用：直接改票表，跳过 `TicketOp` 的事件路径。
+    #[cfg(test)]
+    pub(crate) fn tickets_mut(&mut self) -> &mut TicketTable {
+        &mut self.tickets
+    }
+
+    /// 测试专用：走一批 `TicketOp`。
+    #[cfg(test)]
+    pub(crate) fn apply_ticket(&mut self, op: TicketOp) {
+        self.apply_ticket_ops([op]);
+    }
+
+    /// 一批票的操作。提交 5 之前只驱动票表，不派区块任务、不改 region。
+    fn apply_ticket_ops(&mut self, ops: impl IntoIterator<Item = TicketOp>) {
+        let mut changed = false;
+        for op in ops {
+            changed = true;
+            match op {
+                TicketOp::PlayerMoved { id, to } => {
+                    let player = PlayerId(id as i32);
+                    match to {
+                        Some(pos) => {
+                            self.ticket_centers.insert(player, pos);
+                        }
+                        None => {
+                            self.ticket_centers.remove(&player);
+                        }
+                    }
+                    self.tickets.set_player(id, to);
+                }
+                TicketOp::ViewDistance(v) => self.tickets.set_view_distance(v),
+                TicketOp::SimulationDistance(d) => self.tickets.set_simulation_distance(d),
+                TicketOp::Add { ty, pos, level } => self.tickets.add(ty, pos, level),
+                TicketOp::Remove { ty, pos, level } => self.tickets.remove(ty, pos, level),
+                TicketOp::Forced { pos, forced } => self.tickets.set_forced(pos, forced),
+                TicketOp::WithRadius {
+                    ty,
+                    pos,
+                    radius,
+                    add,
+                } => {
+                    if add {
+                        self.tickets.add_with_radius(ty, pos, radius);
+                    } else {
+                        self.tickets.remove_with_radius(ty, pos, radius);
+                    }
+                }
+            }
+        }
+        if changed {
+            let _ = self.tickets.run_updates();
+        }
+    }
+
+    /// 每刻在玩家跟踪阶段之前调用：只在玩家跨区块时发 `PlayerMoved`。
+    fn sync_player_tickets(&mut self) {
+        let mut moves = Vec::new();
+        for (&id, player) in &self.region.players {
+            let at = player.chunk_pos();
+            if self.ticket_centers.get(&id) == Some(&at) {
+                continue;
+            }
+            self.ticket_centers.insert(id, at);
+            moves.push(TicketOp::PlayerMoved {
+                id: u64::from(id.0 as u32),
+                to: Some(at),
+            });
+        }
+        let mut left = Vec::new();
+        for &id in self.ticket_centers.keys() {
+            if !self.region.players.contains_key(&id) {
+                left.push(id);
+            }
+        }
+        for id in left {
+            self.ticket_centers.remove(&id);
+            moves.push(TicketOp::PlayerMoved {
+                id: u64::from(id.0 as u32),
+                to: None,
+            });
+        }
+        if !moves.is_empty() {
+            self.apply_ticket_ops(moves);
+        }
+    }
+
+    /// 超时票每刻递减。`is_busy` 现在恒为假（区块都隐式存在），
+    /// 提交 5 接 Director 后按「有在途任务/未交付」填。
+    fn tick_ticket_timeouts(&mut self) {
+        self.tickets.tick(&mut |_| false);
+        let _ = self.tickets.run_updates();
     }
 
     /// 测试专用：构造一个走已加载模式的世界（起点没有加载任何区块）。
@@ -219,6 +330,8 @@ impl World {
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
         self.process_inbox()?;
+        self.sync_player_tickets();
+        self.tick_ticket_timeouts();
         self.region.profiler.lap(Phase::Inbox);
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
@@ -412,6 +525,12 @@ impl World {
         };
 
         let difficulty_frames = self.global.difficulty_frames();
+        let spawn = self.global.state().spawn.pos;
+        let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
+        self.apply_ticket_ops([TicketOp::PlayerMoved {
+            id: u64::from(id.0 as u32),
+            to: Some(spawn_chunk),
+        }]);
         self.region.add_player(
             request,
             JoinSettings {
@@ -494,6 +613,10 @@ impl World {
         }
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
+        self.apply_ticket_ops([TicketOp::PlayerMoved {
+            id: u64::from(id.0 as u32),
+            to: None,
+        }]);
         if let Some(frames) = self.global.remove_player(id) {
             self.region.links.broadcast(&frames);
         }
@@ -848,3 +971,5 @@ impl Schedule {
 mod loaded_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod ticket_tests;
