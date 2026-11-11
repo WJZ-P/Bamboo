@@ -27,7 +27,7 @@ use mc_bamboo_world::{
 
 pub(crate) use cache::ChunkCache;
 
-use crate::{outgoing::SharedFrames, sign};
+use crate::{outgoing::SharedFrames, profiler::Profiler, sign};
 
 /// 方块和光照都没改过的区块共用模板的编码，随便取一个还没改过的位置编出来就行。
 const TEMPLATE_POS: ChunkPos = ChunkPos::new(0, 0);
@@ -88,6 +88,7 @@ pub(crate) fn chunk_frame(
     store: &ChunkStore,
     template_body: &[u8],
     pos: ChunkPos,
+    profiler: &mut Profiler,
 ) -> Result<Arc<SharedFrames>, ChunkFrameError> {
     if !store.is_loaded(pos) {
         return Err(ChunkFrameError::NotLoaded { x: pos.x, z: pos.z });
@@ -95,16 +96,21 @@ pub(crate) fn chunk_frame(
     if let Some(frames) = cache.frame(store, pos) {
         return Ok(frames);
     }
+    profiler.start_sub(crate::profiler::SubPhase::EncodeBody);
     let body = chunk_body(cache, store, template_body, pos);
+    profiler.end_sub();
     let packet = LevelChunkWithLight {
         x: pos.x,
         z: pos.z,
         body: &body,
     };
     let mut raw = Vec::new();
+    profiler.start_sub(crate::profiler::SubPhase::MakeFrame);
     // 失败时既不缓存空帧也不返回它：调用方按和 `Links::send` 一样的理由踢掉请求者。
-    append_frame(&mut raw, &packet)?;
-    Ok(cache.insert_frame(store, pos, raw))
+    let framed = append_frame(&mut raw, &packet);
+    let result = framed.map(|()| cache.insert_frame(store, pos, raw));
+    profiler.end_sub();
+    Ok(result?)
 }
 
 /// 模板区块的编码，世界刚建好时调用。
@@ -387,15 +393,17 @@ mod tests {
         let mut store = ChunkStore::flat();
         let template_body = encode_template(&store);
         let mut cache = ChunkCache::default();
+        let mut profiler = Profiler::default();
         let pos = ChunkPos::new(3, -9);
 
-        let first = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
+        let first = chunk_frame(&mut cache, &store, &template_body, pos, &mut profiler).unwrap();
         // 第二名玩家看同一个区块，拿到的是同一份 Arc，不重新编帧。
-        let second = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
+        let second = chunk_frame(&mut cache, &store, &template_body, pos, &mut profiler).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         // 另一个坐标的帧包头里坐标不同。
         let other_pos = ChunkPos::new(4, -9);
-        let other = chunk_frame(&mut cache, &store, &template_body, other_pos).unwrap();
+        let other =
+            chunk_frame(&mut cache, &store, &template_body, other_pos, &mut profiler).unwrap();
         assert!(!Arc::ptr_eq(&first, &other));
         assert_ne!(first.raw(), other.raw());
 
@@ -409,13 +417,13 @@ mod tests {
         assert_eq!(reader.rest(), template_body);
 
         store.set_block(BlockPos::new(3 * 16 + 1, -60, -9 * 16 + 1), blocks::STONE);
-        let edited = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
+        let edited = chunk_frame(&mut cache, &store, &template_body, pos, &mut profiler).unwrap();
         assert!(!Arc::ptr_eq(&first, &edited));
         assert_ne!(first.raw(), edited.raw());
         // 没改的邻居还是原来那份。
         assert!(Arc::ptr_eq(
             &other,
-            &chunk_frame(&mut cache, &store, &template_body, other_pos).unwrap()
+            &chunk_frame(&mut cache, &store, &template_body, other_pos, &mut profiler).unwrap()
         ));
     }
 }

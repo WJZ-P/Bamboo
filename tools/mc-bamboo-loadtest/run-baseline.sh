@@ -28,8 +28,11 @@ if [ "${#SCENES[@]}" -eq 0 ]; then
     SCENES=(idle crowd-50 crowd-200 walk-50 fly-20)
 fi
 
-echo "building bamboo-loadtest --release in $TREE"
-(cd "$TREE" && cargo build --release -p mc-bamboo-loadtest) || exit 1
+# SKIP_BUILD=1 时直接用已编好的二进制：交替对比两棵树时不能在测量期间编译。
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    echo "building bamboo-loadtest --release in $TREE"
+    (cd "$TREE" && cargo build --release -p mc-bamboo-loadtest) || exit 1
+fi
 
 SERVER=""
 
@@ -96,6 +99,8 @@ run_scene() {
         return 1
     fi
 
+    # 服务端稳态 RSS：客户端连入之后量一次（单位 KiB）。
+    (sleep "$((seconds / 2))" && ps -o rss= -p "$SERVER" > "$dir/server.rss") &
     "$BIN" --addr "127.0.0.1:$PORT" --bots "$bots" --pattern "$pattern" \
         --layout "$layout" --duration "$seconds" --ramp "$RAMP" \
         --json "$dir/client.json" > "$dir/client.log" 2>&1

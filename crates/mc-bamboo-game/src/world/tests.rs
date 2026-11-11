@@ -198,8 +198,11 @@ pub(crate) struct Harness {
 
 impl Harness {
     /// 默认走「无限超平坦」测试世界：现有单元测试/oracle 都假设哪里都有地。
+    /// `BAMBOO_TEST_LOADED=1` 让原本走无限模式的整套测试改走已加载模式，
+    /// 只用于「有多少测试依赖隐式存在」的报告，不改变默认行为。
     pub(crate) fn new(view_distance: i32) -> Self {
-        Self::build(view_distance, false)
+        let loaded = std::env::var("BAMBOO_TEST_LOADED").is_ok_and(|value| value == "1");
+        Self::build(view_distance, loaded)
     }
 
     /// 正式入口（已加载模式）：起点没有加载任何区块，测试自己交付。
@@ -484,6 +487,11 @@ impl Harness {
     pub(crate) fn director_mail(&self) -> (usize, usize, (usize, usize)) {
         let (delivered, reclaimed) = self.world.host.counters_this_tick();
         (delivered, reclaimed, self.world.host.mail_backlog())
+    }
+
+    /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
+    pub(crate) fn region_reclaims_this_tick(&self) -> usize {
+        self.world.host.region_reclaims_this_tick()
     }
 
     /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。

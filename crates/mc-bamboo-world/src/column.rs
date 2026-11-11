@@ -180,6 +180,9 @@ pub struct ChunkColumn {
     sky: LightColumn,
     /// 这一柱的方块光。
     block: LightColumn,
+    /// 从生成器出来之后有没有被写过。放进 [`ChunkStore`](super::store::ChunkStore)
+    /// 时按版本号维护，取出来时直接读这个标记，不必再逐项比较内容。
+    untouched: bool,
 }
 
 impl ChunkColumn {
@@ -247,11 +250,22 @@ impl ChunkColumn {
             LightColumn::from_layers(array, &has_blocks, parts.light_on)
         });
         let [sky, block] = columns;
-        Ok(Self { chunk, sky, block })
+        Ok(Self {
+            chunk,
+            sky,
+            block,
+            // 读盘/解码得到的盒子不知道它是不是生成器原样，宁可当改过。
+            untouched: false,
+        })
     }
 
-    pub(super) fn new(chunk: Chunk, [sky, block]: [LightColumn; 2]) -> Self {
-        Self { chunk, sky, block }
+    pub(super) fn new(chunk: Chunk, [sky, block]: [LightColumn; 2], untouched: bool) -> Self {
+        Self {
+            chunk,
+            sky,
+            block,
+            untouched,
+        }
     }
 
     /// 生成器（现在只有超平坦模板）产出的原始盒子，含算好的模板光照。
@@ -269,6 +283,11 @@ impl ChunkColumn {
             .clone()
     }
 
+    /// 从生成器出来之后有没有被写过；放进 `ChunkStore` 时用它接上版本号。
+    pub fn untouched(&self) -> bool {
+        self.untouched
+    }
+
     pub(super) fn into_parts(self) -> (Chunk, [LightColumn; 2]) {
         (self.chunk, [self.sky, self.block])
     }
@@ -281,6 +300,7 @@ impl ChunkColumn {
     /// 只在组装读盘内容或测试改方块时用：改完的方块状态会同步维护方块实体类型表
     /// 和挂在它旁边的原样保留条目。
     pub fn chunk_mut(&mut self) -> &mut Chunk {
+        self.untouched = false;
         &mut self.chunk
     }
 

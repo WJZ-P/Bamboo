@@ -318,6 +318,10 @@ impl World {
         profiler.record(Metric::OnlinePlayers, self.region.players.len() as u64);
         profiler.record(Metric::Entities, self.region.entities.len() as u64);
         profiler.record(Metric::DueScheduledTicks, due as u64);
+        profiler.record(
+            Metric::LoadedChunks,
+            self.region.chunks.loaded_count().unwrap_or(0) as u64,
+        );
     }
 
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
@@ -328,13 +332,11 @@ impl World {
         self.region.profiler.lap(Phase::Inbox);
         self.tick_ticket_timeouts();
         let (delivered, reclaimed) = self.host.counters_this_tick();
-        self.region
-            .profiler
-            .record(Metric::ChunksDelivered, delivered as u64);
-        self.region
-            .profiler
-            .record(Metric::ChunksReclaimed, reclaimed as u64);
-        self.region.profiler.lap(Phase::Delivery);
+        let profiler = &mut self.region.profiler;
+        profiler.record(Metric::ChunksDelivered, delivered as u64);
+        profiler.record(Metric::ChunksReclaimed, reclaimed as u64);
+        profiler.record(Metric::ParkedChunks, self.host.parked_count() as u64);
+        profiler.lap(Phase::Delivery);
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
 

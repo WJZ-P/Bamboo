@@ -12,7 +12,10 @@ use mc_bamboo_world::director::{
     TicketOp,
 };
 
-use crate::region::{Region, RegionColumn, parking::Parking};
+use crate::{
+    profiler::SubPhase,
+    region::{Region, RegionColumn, parking::Parking},
+};
 
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
@@ -22,6 +25,12 @@ pub(crate) const DELIVERIES_ENV: &str = "BAMBOO_DELIVERIES_PER_TICK";
 pub(crate) const RECLAIMS_ENV: &str = "BAMBOO_RECLAIMS_PER_TICK";
 /// 上限的合法范围上限，防住误设的巨值把信箱当成没有限速。
 const MAX_MAIL_BUDGET: usize = 1 << 16;
+/// 收回的积压大了之后，每刻收掉其中的这么多分之一。
+///
+/// 交付的上限是为了削进服的尖峰；收回要是也卡死在固定的个数上，很多人同时
+/// 高速移动时每刻新排进来的比收走的多，已加载的区块数和内存就没有上界。
+/// 按积压的比例收，积压会稳定在「每刻新排进来的个数 × 这个数」附近。
+pub(crate) const RECLAIM_DRAIN_TICKS: usize = 20;
 
 /// 信箱的每刻预算。`0` 表示不限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +84,9 @@ pub(crate) struct DirectorHost {
     /// 本刻还没花掉的预算。整刻内所有 `pump` 共用，进服/离开/移动各发一批票
     /// 也不会把上限乘上好几倍；每刻开头由 `begin_tick` 重置。
     budget_left: MailBudget,
+    /// 这一刻已经从 region 取回了多少个区块。收回的上限会随积压放宽，
+    /// 所以不能用「剩余额度」记，要记花掉的个数。
+    reclaims_spent: usize,
     /// 统计：本刻交付/收回/停放的区块数，给剖析器用。
     delivered: usize,
     reclaimed: usize,
@@ -91,6 +103,7 @@ impl DirectorHost {
             parking: Parking::default(),
             budget,
             budget_left: budget,
+            reclaims_spent: 0,
             deliveries: BTreeMap::new(),
             reclaims: Vec::new(),
             delivered: 0,
@@ -133,6 +146,7 @@ impl DirectorHost {
     /// 每刻开头重置预算和计数。进服/离开/移动发来的票操作都算在这一刻里。
     pub(crate) fn begin_tick(&mut self) {
         self.budget_left = self.budget;
+        self.reclaims_spent = 0;
         self.delivered = 0;
         self.reclaimed = 0;
         self.parked = 0;
@@ -143,6 +157,13 @@ impl DirectorHost {
     pub(crate) fn set_budget(&mut self, budget: MailBudget) {
         self.budget = budget;
         self.budget_left = budget;
+        self.reclaims_spent = 0;
+    }
+
+    /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
+    #[cfg(test)]
+    pub(crate) fn region_reclaims_this_tick(&self) -> usize {
+        self.reclaims_spent
     }
 
     #[cfg(test)]
@@ -160,10 +181,12 @@ impl DirectorHost {
     pub(crate) fn tickets(&mut self, region: &mut Region, ops: Vec<TicketOp>) {
         if self.infinite_flat {
             // 只把票喂给票表，不产生效果。
+            region.profiler.start_sub(SubPhase::TicketUpdate);
             for op in ops {
                 self.apply_infinite_ticket(op);
             }
             let _ = self.director.tickets_mut().run_updates();
+            region.profiler.end_sub();
             return;
         }
         self.pump(region, Event::Tickets { ops });
@@ -196,8 +219,10 @@ impl DirectorHost {
     /// 每刻推进。预算和计数由 [`Self::begin_tick`] 在刻开头重置。
     pub(crate) fn tick(&mut self, region: &mut Region, now_tick: u64) {
         if self.infinite_flat {
+            region.profiler.start_sub(SubPhase::TicketUpdate);
             self.director.tickets_mut().tick(&mut |_| false);
             let _ = self.director.tickets_mut().run_updates();
+            region.profiler.end_sub();
             return;
         }
         self.pump(region, Event::Tick { now_tick });
@@ -254,9 +279,40 @@ impl DirectorHost {
             while let Some(event) = events.pop() {
                 rounds += 1;
                 assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
-                for effect in self.director.handle(event) {
-                    if let Some(next) = self.apply(region, effect) {
-                        events.push(next);
+                // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
+                // 单独记在 `ticket_update`；其余事件是纯状态机推进。
+                let sub = match event {
+                    Event::Tickets { .. } | Event::Tick { .. } => SubPhase::TicketUpdate,
+                    Event::Delivered { .. } | Event::Returned { .. } => SubPhase::DirectorAck,
+                    _ => SubPhase::DirectorEvents,
+                };
+                region.profiler.start_sub(sub);
+                let effects = self.director.handle(event);
+                region.profiler.end_sub();
+                for effect in effects {
+                    match effect {
+                        Effect::Submit {
+                            id,
+                            generation,
+                            task,
+                        } => {
+                            rounds += 1;
+                            assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
+                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            let next = self.run_task(id, generation, task);
+                            region.profiler.end_sub();
+                            events.push(next);
+                        }
+                        Effect::Cancel { .. } => {}
+                        Effect::ToRegion(message) => self.region_message(region, message),
+                        Effect::Park { pos, column } => {
+                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            self.parking.park(pos, column);
+                            self.parked += 1;
+                            region.profiler.end_sub();
+                        }
+                        Effect::DropSnapshot { .. } => {}
+                        Effect::Warn { message } => tracing::warn!(%message, "chunk director"),
                     }
                 }
             }
@@ -265,36 +321,6 @@ impl DirectorHost {
             events = self.flush_region_mail(region);
             if events.is_empty() {
                 return;
-            }
-        }
-    }
-
-    /// 执行一个效果。返回需要立刻回给 Director 的事件（内联任务的结果）。
-    fn apply(
-        &mut self,
-        region: &mut Region,
-        effect: Effect<Box<RegionColumn>>,
-    ) -> Option<Event<Box<RegionColumn>>> {
-        match effect {
-            Effect::Submit {
-                id,
-                generation,
-                task,
-            } => Some(self.run_task(id, generation, task)),
-            Effect::Cancel { .. } => None,
-            Effect::ToRegion(message) => {
-                self.region_message(region, message);
-                None
-            }
-            Effect::Park { pos, column } => {
-                self.parking.park(pos, column);
-                self.parked += 1;
-                None
-            }
-            Effect::DropSnapshot { .. } => None,
-            Effect::Warn { message } => {
-                tracing::warn!(%message, "chunk director");
-                None
             }
         }
     }
@@ -344,19 +370,29 @@ impl DirectorHost {
                 column,
                 desired,
             } => {
-                self.deliveries.insert(pos, (generation, desired, column));
+                region.profiler.time_sub(SubPhase::DirectorEvents, || {
+                    self.deliveries.insert(pos, (generation, desired, column));
+                });
             }
-            RegionMessage::Reclaim { positions } => self.reclaims.extend(positions),
+            RegionMessage::Reclaim { positions } => {
+                region.profiler.time_sub(SubPhase::DirectorEvents, || {
+                    self.reclaims.extend(positions);
+                });
+            }
             RegionMessage::LevelChanged { changes } => {
                 // 同一个 pump 里可能先收到档位变化、后 flush 交付：信箱里那份档位
                 // 也要跟着变，否则新交付的区块会带着旧档位进 region。尚未交付的
                 // 位置在 region 里没有记录，`level_changed` 只更新已交付的那些。
-                for change in &changes {
-                    if let Some(entry) = self.deliveries.get_mut(&change.pos) {
-                        entry.1 = Desired::new(change.loading.1, change.simulation.1);
+                region.profiler.time_sub(SubPhase::DirectorEvents, || {
+                    for change in &changes {
+                        if let Some(entry) = self.deliveries.get_mut(&change.pos) {
+                            entry.1 = Desired::new(change.loading.1, change.simulation.1);
+                        }
                     }
-                }
-                region.tick_levels.level_changed(&changes);
+                });
+                region.profiler.time_sub(SubPhase::LevelsUpdate, || {
+                    region.tick_levels.level_changed(&changes);
+                });
             }
             // `Ready` 不用另存一份集合：`ChunkStore::is_loaded` 就是已交付集合，
             // 发区块时直接问它；多存一份只会多一处要保持一致的状态。
@@ -424,39 +460,42 @@ impl DirectorHost {
 
     /// region 在 tick 边界收信箱：先交付、后收回，返回要回给 Director 的事件。
     ///
-    /// 整刻最多交付 `budget.deliveries` 个非豁免区块、收回
-    /// `budget.reclaims` 个区块（`0` 表示不限），剩下的留到下一刻。
-    /// 同一刻内 `pump` 会多次调用它，共用 `budget_left` 里的剩余额度。
+    /// 整刻最多交付 `budget.deliveries` 个非豁免区块（`0` 表示不限），
+    /// 收回的上限见 [`Self::reclaim_cap`]，剩下的留到下一刻。
+    /// 同一刻内 `pump` 会多次调用它，交付共用 `budget_left` 里的剩余额度，
+    /// 收回共用 `reclaims_spent`。
     fn flush_region_mail(&mut self, region: &mut Region) -> Vec<Event<Box<RegionColumn>>> {
-        let MailBudget {
-            deliveries: delivery_left,
-            reclaims: reclaim_left,
-        } = self.budget_left;
+        let delivery_left = self.budget_left.deliveries;
         let limited_deliveries = self.budget.deliveries > 0;
-        let limited_reclaims = self.budget.reclaims > 0;
         let mut events = Vec::new();
         // 收回优先：盒子可能还在 `deliveries` 里排队（交付有了每刻上限之后，
         // 一个盒子可以在信箱里等好几刻）。这时 Director 已经把它记成
         // `Reclaiming`，盒子必须原封不动地作为 `Returned` 回去，绝不能先进
         // region 再被取出来，更不能晚几刻变成一个没人管的孤儿。
         // 这一步不碰 region，不占交付/收回上限，也不需要等光照。
-        self.return_pending_deliveries(&mut events);
+        region.profiler.time_sub(SubPhase::ReturnBoxes, || {
+            self.return_pending_deliveries(&mut events);
+        });
         if self.deliveries.is_empty() && self.reclaims.is_empty() {
             return events;
         }
         // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
         // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
         // 交付/收回要求「没有算到一半的轮次」。
-        region.chunks.finish_light_updates();
+        region.profiler.time_sub(SubPhase::DeliveryLightFinish, || {
+            region.chunks.finish_light_updates();
+        });
         let centers = Self::guaranteed_centers(region);
 
         // 近的先交付。玩家脚下 3×3 全部交付且不算进上限；同等距离按坐标排。
+        region.profiler.start_sub(SubPhase::MailSort);
         let mut ordered: Vec<ChunkPos> = self.deliveries.keys().copied().collect();
         // BTreeMap 的键已经按 (x, z) 升序，稳定排序让同等距离保持坐标顺序。
         ordered.sort_by_key(|&pos| {
             let guaranteed = Self::is_under_a_player(pos, &centers);
             (!guaranteed, Self::distance_to_players(pos, &centers))
         });
+        region.profiler.end_sub();
         let mut used = 0usize;
         // 一批交付只重算一次受影响的邻域，不逐块重算；每次成功都要把
         // 信箱里记着的最新等级交给 region（脚下 3×3 和下一刻才轮到的都算）。
@@ -487,7 +526,9 @@ impl DirectorHost {
             }
         }
         // 一批交付只重算一次受影响的邻域，不逐块重算。
-        region.tick_levels.deliver(delivered_levels);
+        region.profiler.time_sub(SubPhase::LevelsUpdate, || {
+            region.tick_levels.deliver(delivered_levels);
+        });
         if limited_deliveries {
             self.budget_left.deliveries = delivery_left.saturating_sub(used);
         }
@@ -497,6 +538,7 @@ impl DirectorHost {
         }
         let reclaimed_before = self.reclaimed;
         // 远的先收回：这些区块不急，玩家脚下的票也没了时先留着更保险。
+        region.profiler.start_sub(SubPhase::MailSort);
         let mut by_generation = BTreeMap::new();
         for (pos, generation) in std::mem::take(&mut self.reclaims) {
             by_generation.insert(pos, generation);
@@ -504,15 +546,22 @@ impl DirectorHost {
         let mut ordered: Vec<ChunkPos> = by_generation.keys().copied().collect();
         let distance = |pos: &ChunkPos| Self::distance_to_players(*pos, &centers);
         // 距离取相反数，远的在前；同距离按坐标升序。
-        ordered.sort_by_key(|pos| {
+        // 积压可以有几千个，到玩家的距离每个位置只算一次。
+        ordered.sort_by_cached_key(|pos| {
             let (far, x, z) = distance(pos);
             (std::cmp::Reverse(far), x, z)
         });
-        let count = if limited_reclaims {
-            ordered.len().min(reclaim_left)
-        } else {
-            ordered.len()
-        };
+        region.profiler.end_sub();
+        // 这一刻要收回的总数 = 已经收的 + 还在信箱里的。收一个，前一项加一、
+        // 后一项减一，总数不变；所以同一刻里不管 `pump` 调用几次，
+        // 上限只会因为新排进来的请求变大，不会因为多调用几次而重新发一份额度。
+        let cap = Self::reclaim_cap(self.budget.reclaims, self.reclaims_spent + ordered.len());
+        let count = ordered.len().min(cap.saturating_sub(self.reclaims_spent));
+        if count == 0 {
+            // 这一刻的额度用完了，全部留到下一刻。
+            self.reclaims.extend(by_generation);
+            return events;
+        }
         let batch: Vec<(ChunkPos, u64)> = ordered
             .into_iter()
             .take(count)
@@ -526,7 +575,10 @@ impl DirectorHost {
         let positions = batch.iter().map(|&(pos, _)| pos).collect();
         match region.reclaim_columns(&positions) {
             Ok(mut boxes) => {
-                region.tick_levels.reclaim(positions.iter());
+                region.profiler.time_sub(SubPhase::LevelsUpdate, || {
+                    region.tick_levels.reclaim(positions.iter());
+                });
+                region.profiler.start_sub(SubPhase::ReturnBoxes);
                 for (pos, generation) in batch {
                     self.reclaimed += 1;
                     events.push(Event::Returned {
@@ -535,6 +587,7 @@ impl DirectorHost {
                         column: boxes.remove(&pos),
                     });
                 }
+                region.profiler.end_sub();
             }
             Err(_) => {
                 // 失败时整批放回信箱，下次 tick 边界再试：Director 还以为这些
@@ -543,11 +596,19 @@ impl DirectorHost {
                 self.reclaims.extend(batch);
             }
         }
-        if limited_reclaims {
-            self.budget_left.reclaims =
-                reclaim_left.saturating_sub(self.reclaimed.saturating_sub(reclaimed_before));
-        }
+        self.reclaims_spent += self.reclaimed.saturating_sub(reclaimed_before);
         events
+    }
+
+    /// 一刻里最多从 region 取回多少个区块。`demand` 是这一刻要收回的总数。
+    ///
+    /// 积压小的时候就是配置的上限；积压大了每刻收掉它的
+    /// 1/[`RECLAIM_DRAIN_TICKS`]。配置成 0 表示不限。
+    fn reclaim_cap(configured: usize, demand: usize) -> usize {
+        if configured == 0 {
+            return usize::MAX;
+        }
+        configured.max(demand.div_ceil(RECLAIM_DRAIN_TICKS))
     }
 }
 

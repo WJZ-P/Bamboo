@@ -19,8 +19,13 @@ use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
 
 use crate::{
-    command_block::CommandBlockData, container::ContainerEntry, lectern::Book, region::Region,
+    command_block::CommandBlockData, container::ContainerEntry, lectern::Book, profiler::SubPhase,
+    region::Region,
 };
+
+/// 剖析器用的全局计时开关：连接层没有 `Profiler`，`is_pristine` 在世界线程里
+/// 逐段比模板，用一对原子计数器把耗时报进 `pristine_check` 子段。
+static PRISTINE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 现在不能搬区块束：光照没算完，或者某张表正在 tick 中途。
 ///
@@ -158,28 +163,42 @@ fn template_column() -> &'static ChunkColumn {
 
 impl ChunkBundle for Box<RegionColumn> {
     fn is_pristine(&self) -> bool {
-        (**self).is_pristine()
+        let started = std::time::Instant::now();
+        let result = (**self).is_pristine();
+        let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        PRISTINE_NANOS.fetch_add(elapsed, std::sync::atomic::Ordering::Relaxed);
+        result
     }
+}
+
+/// 取走并清零 `is_pristine` 累计的纳秒，给世界线程的剖析器用。
+pub(crate) fn take_pristine_cost() -> u64 {
+    PRISTINE_NANOS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ChunkBundle for RegionColumn {
     /// 盒子还能不能丢掉、下次用模板重新生成。
     ///
-    /// 方块、告示牌、`update tag` 和两层光照要和生成器输出逐项相同，
-    /// 并且这一层知道的所有上层内容都得是空的（计划刻、方块实体、红石记忆、
-    /// 容器、物品组件、命令方块、讲台上的书、实体）。
-    /// 邻居的光会照进这一柱，只比方块不够；`ChunkColumn::is_pristine` 把光照一起比了。
-    /// 拿不准时返回 `false`，让 Director 把盒子整份停放。
+    /// 下层盒子按「从生成器出来之后有没有被写过」判断（放进 `ChunkStore` 时
+    /// 记下版本号，取出来时看版本号变没变），方块和光照的任何一次写都会换版本号：
+    /// 邻居的光照进来、补建数据层、方块改了又改回去，都算写过。
+    /// 上层这一层的内容本来就都是些空表，直接问空不空。
     fn is_pristine(&self) -> bool {
-        self.ticks.is_none()
+        let upper_empty = self.ticks.is_none()
             && self.block_entities.is_empty()
             && self.redstone.is_empty()
             && self.containers.is_empty()
             && self.block_items.is_empty()
             && self.command_blocks.is_empty()
             && self.books.is_empty()
-            && self.entities.is_empty()
-            && self.column.is_pristine(template_column())
+            && self.entities.is_empty();
+        let result = upper_empty && self.column.untouched();
+        // 调试构建里用逐项比较复核：哪条写路径没换版本号，测试会立刻炸出来。
+        debug_assert!(
+            !result || self.column.is_pristine(template_column()),
+            "版本号说是原样，逐项比较却不认为原样：有写路径没换版本号"
+        );
+        result
     }
 }
 
@@ -324,6 +343,7 @@ impl Region {
 
         // 前提全部检查完，从这里开始每一步都不会失败。
         let now = self.block_ticks.now();
+        self.profiler.start_sub(SubPhase::ReclaimStorage);
         let mut parts: BTreeMap<ChunkPos, Parts> = chunks
             .iter()
             .map(|&pos| {
@@ -340,8 +360,10 @@ impl Region {
                 )
             })
             .collect();
+        self.profiler.end_sub();
 
         // 四张按位置的表：按 x 带扫，抽出的条目按区块分给各自的盒子。
+        self.profiler.start_sub(SubPhase::ReclaimTables);
         take_positions(&mut self.containers, chunks, |pos, mut entry| {
             let recheck_in = entry.recheck_at.take().map(|at| self.tick.remaining(at));
             let packed = PackedContainer { recheck_in, entry };
@@ -369,27 +391,45 @@ impl Region {
             parts.get_mut(&pos.chunk()).unwrap().books.insert(pos, book);
         });
 
-        // 计划刻、方块实体和红石记忆各自用下层的按区块接口。
+        self.profiler.end_sub();
+
+        // 计划刻、方块实体和红石记忆各自用下层的按区块接口。各张表互不依赖，
+        // 分几次按坐标有序地走同样的位置集合，测量时才能把各表的耗时分开。
+        self.profiler.start_sub(SubPhase::ReclaimTicks);
         let mut tick_boxes = self
             .block_ticks
             .take_chunks(chunks)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
         for (&pos, part) in &mut parts {
             part.ticks = tick_boxes.remove(&pos);
+        }
+        self.profiler.end_sub();
+        self.profiler.start_sub(SubPhase::ReclaimBlockEntities);
+        for (&pos, part) in &mut parts {
             part.block_entities = Some(
                 self.block_entities
                     .take_chunk(pos)
                     .unwrap_or_else(|_| unreachable!("前提已经检查过")),
             );
+        }
+        self.profiler.end_sub();
+        self.profiler.start_sub(SubPhase::ReclaimTables);
+        for (&pos, part) in &mut parts {
             part.redstone = Some(self.redstone.take_chunk(pos, now));
+        }
+        self.profiler.end_sub();
+        self.profiler.start_sub(SubPhase::ReclaimEntities);
+        for (&pos, part) in &mut parts {
             part.entities = Some(
                 self.entities
                     .take_chunk(pos)
                     .unwrap_or_else(|_| unreachable!("前提已经检查过")),
             );
         }
+        self.profiler.end_sub();
 
         // 丢掉属于这些区块的、还没发出去的变化和区块包的缓存。
+        self.profiler.start_sub(SubPhase::ReclaimTables);
         for &pos in chunks {
             self.light_changes.remove(&pos);
         }
@@ -397,6 +437,7 @@ impl Region {
             .changed
             .retain(|pos| !chunks.contains(&pos.chunk()));
         self.chunk_cache.retain(|pos| !chunks.contains(&pos));
+        self.profiler.end_sub();
 
         Ok(parts
             .into_iter()
@@ -439,10 +480,13 @@ impl Region {
             books,
             entities,
         } = *column;
+        self.profiler.start_sub(SubPhase::DeliverStorage);
         self.chunks
             .insert_column(pos, world)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
+        self.profiler.end_sub();
 
+        self.profiler.start_sub(SubPhase::DeliverTables);
         for (block_pos, mut packed) in containers {
             packed.entry.recheck_at = packed.recheck_in.map(|remaining| self.tick.plus(remaining));
             self.containers.insert(block_pos, packed.entry);
@@ -462,6 +506,7 @@ impl Region {
             .changed
             .retain(|changed| changed.chunk() != pos);
         self.chunk_cache.retain(|cached| cached != pos);
+        self.profiler.end_sub();
     }
 
     /// Director 交付一个完整的区块束到 `pos`（已加载模式）。
@@ -495,9 +540,11 @@ impl Region {
         chunks: &BTreeSet<ChunkPos>,
     ) -> Result<BTreeMap<ChunkPos, Box<RegionColumn>>, NotReady> {
         let boxes = self.take_columns(chunks)?;
+        self.profiler.start_sub(SubPhase::ReclaimStorage);
         for &pos in chunks {
             let _ = self.chunks.unload(pos);
         }
+        self.profiler.end_sub();
         Ok(boxes)
     }
 }

@@ -44,6 +44,7 @@ use crate::{
 
 pub mod chunk_content;
 mod column;
+pub(crate) use column::take_pristine_cost;
 #[cfg(test)]
 mod column_tests;
 pub(crate) mod parking;

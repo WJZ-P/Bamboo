@@ -11,13 +11,22 @@
 //!
 //! 逐区块 tick 还要模拟等级 ≤31，单独存一个集合。
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_world::{
     director::Desired,
-    ticket::{BLOCK_TICKING_LEVEL, ENTITY_TICKING_LEVEL, LevelChange},
+    ticket::{BLOCK_TICKING_LEVEL, ChunkHasherBuilder, ENTITY_TICKING_LEVEL, LevelChange},
 };
+
+/// 成员查询用的快速哈希集合。「这个区块能不能 tick」每条到期的刻、每个方块
+/// 实体、每个实体每刻都要问一次；有序集合留给测试和逐区块遍历。
+type ChunkSet = HashSet<ChunkPos, ChunkHasherBuilder>;
+/// 档位表：换档、邻居查询都按坐标单点查，用便宜哈希；`random_chunks` 需要
+/// 有序遍历，单独维护一份有序集合。
+type TierMap = HashMap<ChunkPos, ChunkTiers, ChunkHasherBuilder>;
 
 /// 一套等级里和 tick 有关的三档。跨档才会收到通知，所以记档位就够了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,11 +84,14 @@ const ENTITY_RADIUS: i32 = 2;
 #[derive(Debug, Default)]
 pub(crate) struct TickLevels {
     /// 已交付区块的档位。`tiers` 里的键就是「已交付」这一事实。
-    tiers: BTreeMap<ChunkPos, ChunkTiers>,
-    /// 能跑方块逻辑的区块。
-    blocks: BTreeSet<ChunkPos>,
-    /// 能跑实体的区块。
-    entities: BTreeSet<ChunkPos>,
+    tiers: TierMap,
+    /// 能跑方块逻辑的区块。哈希集合供成员查询，有序集合供遍历/测试，
+    /// 两份一起增量维护，内容始终相同。
+    blocks: ChunkSet,
+    blocks_ordered: BTreeSet<ChunkPos>,
+    /// 能跑实体的区块，同上两份。
+    entities: ChunkSet,
+    entities_ordered: BTreeSet<ChunkPos>,
     /// 逐区块 tick 的区块：属于 `blocks`，且模拟等级 ≤31。
     random: BTreeSet<ChunkPos>,
     /// 已加载模式才启用；无限超平坦模式的查询恒为真。
@@ -104,7 +116,9 @@ impl TickLevels {
         self.enabled = false;
         self.tiers.clear();
         self.blocks.clear();
+        self.blocks_ordered.clear();
         self.entities.clear();
+        self.entities_ordered.clear();
         self.random.clear();
     }
 
@@ -121,15 +135,15 @@ impl TickLevels {
         &self.random
     }
 
-    /// 测试用的只读视图。
+    /// 测试用的只读视图（按坐标有序，口径不变）。
     #[cfg(test)]
     pub(crate) fn block_chunks(&self) -> &BTreeSet<ChunkPos> {
-        &self.blocks
+        &self.blocks_ordered
     }
 
     #[cfg(test)]
     pub(crate) fn entity_chunks(&self) -> &BTreeSet<ChunkPos> {
-        &self.entities
+        &self.entities_ordered
     }
 
     #[cfg(test)]
@@ -183,8 +197,9 @@ impl TickLevels {
     /// 只重算受影响的中心：一个位置换档或改了「已交付」状态，只会影响它自己
     /// 和把它当邻居的那些位置，方块集合半径 1、实体集合半径 2。
     fn recompute_around(&mut self, positions: Vec<ChunkPos>) {
-        let mut block_centers = BTreeSet::new();
-        let mut entity_centers = BTreeSet::new();
+        // 受影响的中心按坐标去重、有序输出；集合本身也用快速哈希。
+        let mut block_centers = ChunkSet::default();
+        let mut entity_centers = ChunkSet::default();
         for pos in positions {
             for center in neighborhood(pos, BLOCK_RADIUS) {
                 block_centers.insert(center);
@@ -193,15 +208,24 @@ impl TickLevels {
                 entity_centers.insert(center);
             }
         }
+        let mut block_centers: Vec<ChunkPos> = block_centers.into_iter().collect();
+        block_centers.sort_unstable();
+        let mut entity_centers: Vec<ChunkPos> = entity_centers.into_iter().collect();
+        entity_centers.sort_unstable();
         for center in block_centers {
             let eligible = self.blocks_eligible(center);
             let random = eligible && self.ticks_randomly(center);
-            set_member(&mut self.blocks, center, eligible);
-            set_member(&mut self.random, center, random);
+            set_member(&mut self.blocks, &mut self.blocks_ordered, center, eligible);
+            set_member_ordered(&mut self.random, center, random);
         }
         for center in entity_centers {
             let eligible = self.entities_eligible(center);
-            set_member(&mut self.entities, center, eligible);
+            set_member(
+                &mut self.entities,
+                &mut self.entities_ordered,
+                center,
+                eligible,
+            );
         }
     }
 
@@ -243,7 +267,9 @@ impl TickLevels {
         let mut blocks = BTreeSet::new();
         let mut entities = BTreeSet::new();
         let mut random = BTreeSet::new();
-        for &pos in self.tiers.keys() {
+        let mut positions: Vec<ChunkPos> = self.tiers.keys().copied().collect();
+        positions.sort_unstable();
+        for pos in positions {
             if self.blocks_eligible(pos) {
                 blocks.insert(pos);
                 if self.ticks_randomly(pos) {
@@ -261,13 +287,25 @@ impl TickLevels {
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
         let (blocks, entities, random) = self.recompute_all();
-        assert_eq!(self.blocks, blocks, "方块集合和定义不一致");
-        assert_eq!(self.entities, entities, "实体集合和定义不一致");
+        assert_eq!(self.blocks_ordered, blocks, "方块集合和定义不一致");
+        assert_eq!(self.entities_ordered, entities, "实体集合和定义不一致");
         assert_eq!(self.random, random, "逐区块 tick 集合和定义不一致");
+        assert_eq!(self.blocks.len(), blocks.len(), "哈希成员集合漏了方块");
+        assert_eq!(self.entities.len(), entities.len(), "哈希成员集合漏了实体");
     }
 }
 
-fn set_member(set: &mut BTreeSet<ChunkPos>, pos: ChunkPos, member: bool) {
+fn set_member(set: &mut ChunkSet, ordered: &mut BTreeSet<ChunkPos>, pos: ChunkPos, member: bool) {
+    if member {
+        set.insert(pos);
+        ordered.insert(pos);
+    } else {
+        set.remove(&pos);
+        ordered.remove(&pos);
+    }
+}
+
+fn set_member_ordered(set: &mut BTreeSet<ChunkPos>, pos: ChunkPos, member: bool) {
     if member {
         set.insert(pos);
     } else {

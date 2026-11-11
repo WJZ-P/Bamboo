@@ -220,6 +220,95 @@ impl Phase {
     }
 }
 
+/// 一个阶段里更细的一段。和 `Phase` 分开记，父阶段的 `lap` 不受影响：
+/// `SubPhase` 的样本是「这一刻里这个子段一共花了多久」，同一刻里可以
+/// 多次调用（例如每交付一个区块就记一次），`end_tick` 时合成一条样本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubPhase {
+    /// `TicketOp` 应用到票表 + `TicketTable::run_updates()`，以及 Director 消费变化列表。
+    TicketUpdate,
+    /// Director 处理事件、派任务、停放表和信箱泵里不涉及 region 的部分。
+    DirectorEvents,
+    /// 交付前把光照强行算完。
+    DeliveryLightFinish,
+    /// 交付：把区块束的世界层（方块、光照、段状态）插进存储层。
+    DeliverStorage,
+    /// 交付：把区块束里的其它各张表插进 region。
+    DeliverTables,
+    /// 收回：从存储层取出区块柱（含 3×3 段状态重算）。
+    ReclaimStorage,
+    /// 收回：从计划刻队列里取出属于这批区块的刻。
+    ReclaimTicks,
+    /// 收回：从方块实体表取出。
+    ReclaimBlockEntities,
+    /// 收回：从容器等按方块位置索引的表和红石记忆里取出。
+    ReclaimTables,
+    /// 收回：从实体表取出。
+    ReclaimEntities,
+    /// 发区块：编包体（`encode_chunk_body` 及其输入）。
+    EncodeBody,
+    /// 发区块：拼包头、做完整帧，并放进共享帧。
+    MakeFrame,
+    /// 发区块：压缩共享帧（在连接任务里，用全局计数器跨线程累计）。
+    CompressFrame,
+    /// 信箱里剩下的交付/收回按到玩家的距离全量重排。
+    MailSort,
+    /// 一批交付/收回之后重算 `TickLevels` 的档位集合。
+    LevelsUpdate,
+    /// 一批收回之后把盒子从信箱交还 Director、按代数整理。
+    ReturnBoxes,
+    /// Director 确认交付/收回、把盒子放进停放表等事件回执。
+    DirectorAck,
+    /// 收回的盒子判「原不原样」（逐段比模板）和丢弃。
+    PristineCheck,
+}
+
+impl SubPhase {
+    const ALL: [Self; 18] = [
+        Self::TicketUpdate,
+        Self::DirectorEvents,
+        Self::DeliveryLightFinish,
+        Self::DeliverStorage,
+        Self::DeliverTables,
+        Self::ReclaimStorage,
+        Self::ReclaimTicks,
+        Self::ReclaimBlockEntities,
+        Self::ReclaimTables,
+        Self::ReclaimEntities,
+        Self::EncodeBody,
+        Self::MakeFrame,
+        Self::CompressFrame,
+        Self::MailSort,
+        Self::LevelsUpdate,
+        Self::ReturnBoxes,
+        Self::DirectorAck,
+        Self::PristineCheck,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::TicketUpdate => "ticket_update",
+            Self::DirectorEvents => "director_events",
+            Self::DeliveryLightFinish => "delivery_light_finish",
+            Self::DeliverStorage => "deliver_storage",
+            Self::DeliverTables => "deliver_tables",
+            Self::ReclaimStorage => "reclaim_storage",
+            Self::ReclaimTicks => "reclaim_ticks",
+            Self::ReclaimBlockEntities => "reclaim_block_entities",
+            Self::ReclaimTables => "reclaim_tables",
+            Self::ReclaimEntities => "reclaim_entities",
+            Self::EncodeBody => "encode_body",
+            Self::MakeFrame => "make_frame",
+            Self::CompressFrame => "compress_frame",
+            Self::MailSort => "mail_sort",
+            Self::LevelsUpdate => "levels_update",
+            Self::ReturnBoxes => "return_boxes",
+            Self::DirectorAck => "director_ack",
+            Self::PristineCheck => "pristine_check",
+        }
+    }
+}
+
 /// 不是阶段耗时的那些指标。计数的直方图记的是「每刻多少个」，不是时间。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Metric {
@@ -239,6 +328,10 @@ pub(crate) enum Metric {
     ChunksDelivered,
     /// 这一刻 region 交还的区块数；一个都没交还也要记 0。
     ChunksReclaimed,
+    /// 这一刻开始时已经加载的区块数；无限模式记 0。
+    LoadedChunks,
+    /// 这一刻结束时停放表里的区块数。
+    ParkedChunks,
     ChunkLatencyUs,
     FlushBytes,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
@@ -246,7 +339,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 15] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -258,6 +351,8 @@ impl Metric {
         Self::ChunksSent,
         Self::ChunksDelivered,
         Self::ChunksReclaimed,
+        Self::LoadedChunks,
+        Self::ParkedChunks,
         Self::ChunkLatencyUs,
         Self::FlushBytes,
     ];
@@ -275,6 +370,8 @@ impl Metric {
             Self::ChunksSent => "chunks_sent",
             Self::ChunksDelivered => "chunks_delivered",
             Self::ChunksReclaimed => "chunks_reclaimed",
+            Self::LoadedChunks => "loaded_chunks",
+            Self::ParkedChunks => "parked_chunks",
             Self::ChunkLatencyUs => "chunk_latency_us",
             Self::FlushBytes => "flush_bytes",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -288,7 +385,11 @@ impl Metric {
             Self::Entities => "entities",
             Self::InboundMessages => "messages",
             Self::DueScheduledTicks => "ticks",
-            Self::ChunksSent | Self::ChunksDelivered | Self::ChunksReclaimed => "chunks",
+            Self::ChunksSent
+            | Self::ChunksDelivered
+            | Self::ChunksReclaimed
+            | Self::LoadedChunks
+            | Self::ParkedChunks => "chunks",
             Self::ChunkLatencyUs | Self::TickSpinUs => "us",
             Self::FlushBytes => "bytes",
             Self::SkippedCatchUps => "times",
@@ -335,15 +436,34 @@ impl Clock {
     }
 }
 
+/// 一组清零的直方图，直接建在堆上。
+///
+/// 一个直方图有四千来字节，几十个加起来两百多 KB。放在结构体里的话，
+/// 调试构建每按值搬一次 `Region` 就在栈上多占一份，测试线程的栈会被撑爆。
+fn histograms<const N: usize>() -> Box<[Histogram; N]> {
+    vec![Histogram::default(); N]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("长度就是 N"))
+}
+
 /// 一个 region 的剖析器。所有记录接口都只碰自己的数组，世界线程独占。
 pub(crate) struct Profiler {
-    phases: [Histogram; Phase::ALL.len()],
-    metrics: [Histogram; Metric::ALL.len()],
+    phases: Box<[Histogram; Phase::ALL.len()]>,
+    metrics: Box<[Histogram; Metric::ALL.len()]>,
+    /// 子段的原始耗时样本，tick 结束时归并成「每刻合计」的直方图。
+    sub_phases: Box<[Histogram; SubPhase::ALL.len()]>,
+    /// 这一刻每个子段累计了多少纳秒；`end_tick` 里每个子段记一条「合计」样本。
+    sub_totals: [u64; SubPhase::ALL.len()],
     skipped_catch_ups: u64,
     /// `send_chunks` 这一刻发出的区块数，阶段末尾记一条样本。
     chunks_this_tick: u64,
     /// 上一次 `lap` 或 `begin_tick` 的时刻。
     last_lap: Instant,
+    /// 上一次 `lap_sub` 或 `end_sub` 的时刻；只在子段计时期间有效。
+    sub_start: Instant,
+    /// 正在计时的子段。`None` 表示没有未闭合的子段。
+    open_sub: Option<SubPhase>,
     tick_start: Instant,
     /// 上一刻的实际起点。报告和 `begin_tick` 之间不分家，所以也在这里。
     previous_tick_start: Option<Instant>,
@@ -370,11 +490,15 @@ impl Profiler {
     fn with_clock(interval: Option<Duration>, clock: Clock) -> Self {
         let now = clock.now();
         Self {
-            phases: std::array::from_fn(|_| Histogram::default()),
-            metrics: std::array::from_fn(|_| Histogram::default()),
+            phases: histograms(),
+            metrics: histograms(),
+            sub_phases: histograms(),
+            sub_totals: [0; SubPhase::ALL.len()],
             skipped_catch_ups: 0,
             chunks_this_tick: 0,
             last_lap: now,
+            sub_start: now,
+            open_sub: None,
             tick_start: now,
             previous_tick_start: None,
             ticks: 0,
@@ -457,6 +581,12 @@ impl Profiler {
         }
     }
 
+    /// 取一个子段的「每刻合计」直方图。
+    #[cfg(test)]
+    pub(crate) fn sub_histogram(&self, sub: SubPhase) -> &Histogram {
+        &self.sub_phases[sub as usize]
+    }
+
     /// 这一刻开始。提前返回也不会留下脏状态：下一刻会重新设 `last_lap`，
     /// 也不会把被跳过阶段的耗时算到下一刻。
     pub(crate) fn begin_tick(&mut self) {
@@ -471,6 +601,38 @@ impl Profiler {
         let now = self.clock.now();
         self.phases[phase as usize].record_duration(now.saturating_duration_since(self.last_lap));
         self.last_lap = now;
+    }
+
+    /// 开始给一个子段计时。子段不能嵌套；调用方保证 `lap_sub` 和 `end_sub` 成对。
+    /// 这段耗时只会记到子段里，父阶段的 `lap` 照常用它自己的 `last_lap`，两者互不影响。
+    pub(crate) fn start_sub(&mut self, sub: SubPhase) {
+        debug_assert!(self.open_sub.is_none(), "子段不能嵌套");
+        self.sub_start = self.clock.now();
+        self.open_sub = Some(sub);
+    }
+
+    /// 结束当前子段，把耗时累加到这一刻的子段合计里。故意吞掉未配对的调用：
+    /// 剖析器是观测设施，客户端输入不该让它把世界线程搞崩。
+    pub(crate) fn end_sub(&mut self) {
+        let Some(sub) = self.open_sub.take() else {
+            return;
+        };
+        let index = sub as usize;
+        let elapsed = self
+            .clock
+            .now()
+            .saturating_duration_since(self.sub_start)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        self.sub_totals[index] = self.sub_totals[index].saturating_add(elapsed);
+    }
+
+    /// 量一个闭区间：`start_sub` + `end_sub` 的简写。
+    pub(crate) fn time_sub<T>(&mut self, sub: SubPhase, work: impl FnOnce() -> T) -> T {
+        self.start_sub(sub);
+        let result = work();
+        self.end_sub();
+        result
     }
 
     /// 实际开始 − 应该开始。`schedule` 提供的 `expected` 可能晚于 `actual`（提前醒了），
@@ -539,6 +701,19 @@ impl Profiler {
         let elapsed = now.saturating_duration_since(self.tick_start);
         self.histogram_mut(Series::Metric(Metric::TickTotal))
             .record_duration(elapsed);
+        // 连接在别的任务里压缩共享帧，取走这段时间的累计增量记进 `compress_frame`。
+        // 统计口径按世界线程的 tick 边界切分，和连接任务的唤醒时刻可能差一刻。
+        // 先写进 `sub_totals`，和下面的其它子段一起只记一条样本。
+        let (_calls, nanos) = crate::outgoing::take_compression_cost();
+        self.sub_totals[SubPhase::CompressFrame as usize] = nanos;
+        self.sub_totals[SubPhase::PristineCheck as usize] = crate::region::take_pristine_cost();
+        // 这一刻调用过的每个子段记一条「合计」样本；没调用的记 0，
+        // 这样所有子段的样本数都和 tick 数相同，均值可以直接和父阶段比。
+        for (index, total) in self.sub_totals.iter().enumerate() {
+            self.sub_phases[index].record(*total);
+        }
+        self.sub_totals = [0; SubPhase::ALL.len()];
+        self.open_sub = None;
         self.ticks = self.ticks.saturating_add(1);
         if let Some(interval) = self.report_interval
             && now.duration_since(self.last_report) >= interval
@@ -549,11 +724,11 @@ impl Profiler {
         }
     }
 
-    fn phase_line(out: &mut String, phase: Phase, histogram: &Histogram) {
+    fn phase_line(out: &mut String, name: &str, histogram: &Histogram) {
         let _ = writeln!(
             out,
             "  {:<24} count={:<8} mean={:>9.3} p50={:>9.3} p95={:>9.3} p99={:>9.3} max={:>9.3}",
-            phase.name(),
+            name,
             histogram.count(),
             millis(histogram.sum(), histogram.count()),
             nanos_to_millis(histogram.p50()),
@@ -608,11 +783,15 @@ impl Profiler {
                 .then_with(|| a.0.cmp(&b.0))
         });
         for (phase, histogram) in phases {
-            Self::phase_line(&mut out, phase, histogram);
+            Self::phase_line(&mut out, phase.name(), histogram);
         }
         out.push_str("metrics (times in ms; count histograms are per tick, otherwise per item):\n");
         for metric in Metric::ALL {
             Self::metric_line(&mut out, metric, self.histogram(Series::Metric(metric)));
+        }
+        out.push_str("sub-phases (per tick total, ms; same histogram format as phases):\n");
+        for sub in SubPhase::ALL {
+            Self::phase_line(&mut out, sub.name(), &self.sub_phases[sub as usize]);
         }
         let _ = writeln!(
             out,
@@ -635,6 +814,9 @@ impl Profiler {
         for (histogram, source) in self.metrics.iter_mut().zip(&other.metrics) {
             histogram.merge(source);
         }
+        for (histogram, source) in self.sub_phases.iter_mut().zip(&other.sub_phases) {
+            histogram.merge(source);
+        }
         self.skipped_catch_ups = self
             .skipped_catch_ups
             .saturating_add(other.skipped_catch_ups);
@@ -649,6 +831,11 @@ impl Profiler {
         for histogram in &mut self.metrics {
             histogram.reset();
         }
+        for histogram in &mut self.sub_phases {
+            histogram.reset();
+        }
+        self.sub_totals = [0; SubPhase::ALL.len()];
+        self.open_sub = None;
         self.skipped_catch_ups = 0;
         self.chunks_this_tick = 0;
         self.ticks = 0;
@@ -797,6 +984,49 @@ mod tests {
     }
 
     #[test]
+    fn sub_phase_totals_are_per_tick_and_do_not_move_the_parent_lap() {
+        let mut profiler = Profiler::with_report_interval(None);
+        profiler.begin_tick();
+        for sub in [SubPhase::DeliverStorage, SubPhase::DeliverStorage] {
+            profiler.start_sub(sub);
+            std::thread::sleep(Duration::from_micros(50));
+            profiler.end_sub();
+        }
+        profiler.lap(Phase::Delivery);
+        profiler.end_tick();
+        assert_eq!(
+            profiler.sub_histogram(SubPhase::DeliverStorage).count(),
+            1,
+            "一刻一条合计样本"
+        );
+        let first_total = profiler.sub_histogram(SubPhase::DeliverStorage).sum();
+        assert!(first_total >= 80_000, "两次调用都算进去了");
+        assert_eq!(
+            profiler.sub_histogram(SubPhase::EncodeBody).count(),
+            1,
+            "没调用的子段也记 0"
+        );
+        assert_eq!(profiler.sub_histogram(SubPhase::EncodeBody).sum(), 0);
+        assert_eq!(
+            profiler.histogram(Series::Phase(Phase::Delivery)).count(),
+            1
+        );
+        profiler.end_tick();
+        assert_eq!(
+            profiler.sub_histogram(SubPhase::DeliverStorage).count(),
+            2,
+            "下一刻没调用的合计是 0，但样本还在"
+        );
+        assert_eq!(
+            profiler.sub_histogram(SubPhase::DeliverStorage).sum(),
+            first_total,
+            "第二刻没调用，合计样本是 0"
+        );
+        profiler.reset_samples();
+        assert_eq!(profiler.sub_histogram(SubPhase::DeliverStorage).count(), 0);
+    }
+
+    #[test]
     fn an_abandoned_tick_does_not_poison_the_next_one() {
         let mut profiler = Profiler::with_report_interval(None);
         profiler.begin_tick();
@@ -842,7 +1072,7 @@ mod tests {
         assert!(phases_at < first);
         assert_eq!(
             report.lines().count(),
-            2 + Phase::ALL.len() + 1 + Metric::ALL.len() + 1
+            2 + Phase::ALL.len() + 1 + Metric::ALL.len() + 1 + SubPhase::ALL.len() + 1
         );
     }
 

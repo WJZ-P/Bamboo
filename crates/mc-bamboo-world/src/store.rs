@@ -33,6 +33,8 @@ pub struct ChunkStore {
     light: LevelLight,
     /// `None` = 无限超平坦（测试/oracle 专用退化实现）；`Some` = 已加载模式。
     loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>,
+    /// 每个插过盒子的位置的原样起点。没记过的位置按模板算。
+    pristine: ChunkMap<PristineMark>,
 }
 
 /// 按区块坐标索引的表，用和票表一样的便宜哈希。读方块的热路径每次都查它。
@@ -78,11 +80,33 @@ impl Deref for EditedChunks {
 }
 
 /// 一个区块的版本号，见 [`ChunkStore::revision`]。只用来比较是否相等。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChunkRevision {
     chunk: u64,
     /// 天空光和方块光。
     light: [u64; 2],
+}
+
+/// 放进这个位置的盒子「还是不是生成器的原样输出」的起点：盒子的来源标记，
+/// 加上放进全部动作做完之后这个位置的版本号。取出时只要版本号没变，
+/// 就说明这段时间里没有任何写路径碰过它，不需要逐项比较内容。
+#[derive(Debug, Clone, Copy, Default)]
+struct PristineMark {
+    /// 盒子是不是生成器输出（`from_parts` 读盘/解码来的是 `false`）。
+    /// 没插入过盒子的位置按「模板，原样」算：无限超平坦世界就是这个情况。
+    from_generator: bool,
+    revision: ChunkRevision,
+}
+
+impl PristineMark {
+    /// 从没插入过盒子的位置：内容就是模板，版本号从 0 起。
+    const TEMPLATE: Self = Self {
+        from_generator: true,
+        revision: ChunkRevision {
+            chunk: 0,
+            light: [0, 0],
+        },
+    };
 }
 
 impl ChunkStore {
@@ -95,6 +119,7 @@ impl ChunkStore {
             edited: EditedChunks::default(),
             light,
             loaded: None,
+            pristine: ChunkMap::default(),
         }
     }
 
@@ -112,6 +137,7 @@ impl ChunkStore {
         let mut store = Self::new(flat::generate_chunk());
         store.loaded = Some(HashSet::default());
         store.light.set_loaded(Some(HashSet::default()));
+        store.pristine.clear();
         store
     }
 
@@ -178,6 +204,8 @@ impl ChunkStore {
         }
         // `take_column` 已经把这一柱从 `edited` 表里取走了。
         self.light.remove_loaded(pos);
+        // 这一柱整个离开了世界，别留着一个指向旧版本号的原样起点。
+        self.pristine.remove(&pos);
         // 注销之后再重算一遍 3×3：这时 `pos` 已经不算已加载，
         // 邻居段的计数按「那个位置没有方块」修正。
         let Self {
@@ -473,6 +501,14 @@ impl ChunkStore {
         if !self.light.ready_to_move_columns() {
             return Err(LightPending);
         }
+        // 在取出动作（下面的 rebind_area、bump_revision）之前问版本号：
+        // 放置时记下的版本号和现在的相同，就说明这段时间没有任何写路径碰过它。
+        let mark = self
+            .pristine
+            .get(&pos)
+            .copied()
+            .unwrap_or(PristineMark::TEMPLATE);
+        let pristine = mark.from_generator && mark.revision == self.revision(pos);
         let chunk = self
             .edited
             .chunks
@@ -490,7 +526,7 @@ impl ChunkStore {
         } = self;
         engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
         self.edited.bump_revision(pos);
-        Ok(Box::new(ChunkColumn::new(chunk, column_light)))
+        Ok(Box::new(ChunkColumn::new(chunk, column_light, pristine)))
     }
 
     /// 把一个区块束放到 `pos`。这个位置原来的内容被整个换掉。
@@ -513,6 +549,7 @@ impl ChunkStore {
         if !self.light.ready_to_move_columns() {
             return Err((LightPending, column));
         }
+        let from_generator = column.untouched();
         let (chunk, column_light) = column.into_parts();
         self.edited.chunks.insert(pos, chunk);
         self.edited.bump_revision(pos);
@@ -527,6 +564,16 @@ impl ChunkStore {
             ..
         } = self;
         engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
+        // 放进来的全部动作（含 rebind_area 补建的数据层）都做完之后才记起点，
+        // 否则一柱原样盒子刚放进来就会被自己的段状态重算判成「改过」。
+        let revision = self.revision(pos);
+        self.pristine.insert(
+            pos,
+            PristineMark {
+                from_generator,
+                revision,
+            },
+        );
         Ok(())
     }
 }
