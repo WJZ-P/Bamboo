@@ -19,7 +19,8 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 ## 2. 报告里每一项
 
 报告分两段。第一段 `phases (by mean)` 按平均耗时降序列出 `World::tick` 的阶段：
-`inbox`（处理入站消息）、`light_updates`、`weather_and_time`、`scheduled_ticks`、
+`inbox`（处理入站消息）、`delivery`（Director 信箱泵和区块交付/收回）、
+`light_updates`、`weather_and_time`、`scheduled_ticks`、
 `random_ticks`、`block_events`、`entities`、`entity_compute`、`entity_commit`、
 `block_entities`、`player_misc`、`views`、`block_change_broadcast`、
 `entity_sync_and_tracking`、`chunk_sending`、`flush`、`tick_tail`。
@@ -30,8 +31,8 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 实体阶段按驱动分：精确驱动（默认，`BAMBOO_ENTITY_THREADS` 没设或为 0）只记
 `entities` 一段，算完立刻落地；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）记
 `entity_compute`（只读算阶段）和 `entity_commit`（发布状态、按 uid 升序应用命令、
-发效果）两段，`entities` 没有样本。所以报告里有 17 个阶段，但任何一次运行只会有
-16 个阶段有样本。常驻线程池还没做，并行驱动现在每刻起线程，剖析数字包含这项开销。
+发效果）两段，`entities` 没有样本。所以报告里有 18 个阶段，但任何一次运行只会有
+17 个阶段有样本。常驻线程池还没做，并行驱动现在每刻起线程，剖析数字包含这项开销。
 
 第二段 `metrics` 里，`tick_total`、`tick_start_lateness` 和
 `tick_interval_deviation` 是时间（ms）：
@@ -47,6 +48,8 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 | `due_scheduled_ticks` | 每刻开始时到期的方块/流体计划刻数 |
 | `entities` | 每刻开始时的实体数 |
 | `chunks_sent` | 每刻写进出站缓冲的区块数；这一刻一个都没发也要记 0 |
+| `chunks_delivered` | 这一刻 region 收下的区块数；一个都没收也要记 0 |
+| `chunks_reclaimed` | 这一刻 region 交还的区块数；一个都没交还也要记 0 |
 | `chunk_latency_us` | 一个区块从进入待发送集合到写进出站缓冲，过了多少微秒（墙上时间） |
 | `flush_bytes` | 这一刻 `Links::flush` 交给连接层的全部 `Outgoing` 的未压缩字节数；一个都没有也记 0 |
 | `skipped_catch_ups` | 这段时间内放弃追赶的次数（只有累计值，没有直方图） |
