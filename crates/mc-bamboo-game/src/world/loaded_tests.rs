@@ -11,7 +11,7 @@ use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
 
 use crate::{
     region::{Region, parking::Parking},
-    world::tests::Harness,
+    world::tests::{Harness, SPAWN_X, SPAWN_Z},
 };
 
 const ORIGIN: ChunkPos = ChunkPos::new(0, 0);
@@ -234,6 +234,7 @@ fn run_ticks(
         server.acknowledge_batch(client, 64.0);
         server.tick();
         assert_footprints_loaded(server);
+        assert_every_loaded_chunk_has_an_owner(server);
         let (delivered, reclaimed, mail) = server.director_mail();
         assert!(
             delivered <= budget + 9 * server.world_region().players.len(),
@@ -472,6 +473,7 @@ fn random_players_keep_the_footprint_loaded_and_converge() {
         reclaims: 16,
     });
     let mut clients: Vec<(super::tests::Client, BTreeSet<ChunkPos>)> = Vec::new();
+    let mut previous_mail = (0usize, 0usize);
     for step in 0..90 {
         // 进出。
         if clients.len() < 3 && rng.below(8) == 0 {
@@ -510,12 +512,20 @@ fn random_players_keep_the_footprint_loaded_and_converge() {
         }
         server.tick();
         assert_footprints_loaded(&server);
+        assert_every_loaded_chunk_has_an_owner(&server);
         let (delivered, reclaimed, mail) = server.director_mail();
         assert!(
             delivered <= 16 + 9 * server.world_region().players.len(),
             "第 {step} 刻交付 {delivered} 个超上限"
         );
-        assert!(reclaimed <= 16, "第 {step} 刻收回 {reclaimed} 个超上限");
+        // 16 是从 region 取回的上限；信箱里排队、还没进过 region 的盒子
+        // 直接还给 Director，不碰 region 也不占这个额度。命中数不超过
+        // 本刻或上一刻交付信箱的长度之和（这一刻腾空的也可能来自上一刻）。
+        assert!(
+            reclaimed <= 16 + mail.0 + previous_mail.0,
+            "第 {step} 刻收回 {reclaimed} 个超上限 + 信箱命中：{mail:?} / {previous_mail:?}"
+        );
+        previous_mail = mail;
         // 最多 3 名玩家、视距 4，单刻票变化的常数上界乘玩家数；和走过的
         // 总距离无关（见 fast_movement 测试里的推导）。
         let players = server.world_region().players.len().max(1);
@@ -542,6 +552,7 @@ fn random_players_keep_the_footprint_loaded_and_converge() {
         }
         server.tick();
         assert_footprints_loaded(&server);
+        assert_every_loaded_chunk_has_an_owner(&server);
         for (client, held) in &mut clients {
             let frames = client.take_frames();
             for frame in &frames {
@@ -687,4 +698,125 @@ fn measure_light_finish_cost() {
             costs[3]
         );
     }
+}
+
+/// 玩家进服后马上离开、且每刻只交付 1 个：留在信箱里的盒子必须在
+/// 收回请求到来时原样还给 Director，不能晚几刻被插进 region 变成孤儿。
+/// 中途每刻都检查「region 里已加载的区块，Director 都有记录且归它管」。
+#[test]
+fn a_reclaim_takes_a_queued_box_out_of_the_mailbox() {
+    let mut server = Harness::new_loaded(2);
+    server.set_mail_budget(crate::director_host::MailBudget {
+        deliveries: 1,
+        reclaims: 1,
+    });
+    server.set_reclaim_delay(0);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    assert!(
+        server.director_mail().2.0 > 0,
+        "上限 1 时确实有盒子在信箱里排队"
+    );
+
+    server.leave(&client);
+    for _ in 0..40 {
+        server.tick();
+        client.take_frames();
+        assert_every_loaded_chunk_has_an_owner(&server);
+    }
+    assert_eq!(
+        server.world_region().chunks.loaded_count(),
+        Some(0),
+        "region 里没有留下没人管的孤儿"
+    );
+    assert_eq!(
+        server.director_loaded_count(),
+        0,
+        "Director 的已加载计数回 0"
+    );
+    assert_eq!(server.director_mail().2, (0, 0), "信箱清空");
+    assert_eq!(server.parked_count(), 0, "原样盒子不停放");
+}
+
+/// region 里每个已加载的区块，Director 那边都要有一条归它管的记录。
+/// 归属可以是「已交付」「交付中」或「收回中」：收回请求先到、盒子还在
+/// 信箱里时，Director 已经是 Reclaiming，而 region 里这片还要按上限
+/// 逐刻收回，两种状态在这一刻同时存在是正常的。
+fn assert_every_loaded_chunk_has_an_owner(server: &Harness) {
+    let records = server.director_records();
+    for pos in server.loaded_positions() {
+        let (owner, _) = records
+            .get(&pos)
+            .unwrap_or_else(|| panic!("region 里的 {pos:?} 在 Director 那边没有记录"));
+        assert!(
+            owner.starts_with("Region(") || owner == "Delivering" || owner == "Reclaiming",
+            "region 里的 {pos:?} 归属是 {owner}，没人管"
+        );
+    }
+}
+
+/// 改过的盒子在信箱里排队时被收回：它必须原样回到停放表，
+/// 再回来时玩家改的方块还在，不能被新生成的模板盒子盖掉。
+#[test]
+fn a_reclaim_of_a_queued_edited_box_parks_it_and_keeps_its_content() {
+    let mut server = Harness::new_loaded(2);
+    server.set_mail_budget(crate::director_host::MailBudget {
+        deliveries: 1,
+        reclaims: 1,
+    });
+    server.set_reclaim_delay(0);
+    let client = server.join("Kitten");
+    let mut held = BTreeSet::new();
+    run_ticks(&mut server, &client, 80, 1, &mut held);
+    assert!(server.world_region().chunks.is_loaded(ORIGIN));
+    server.set_block(EDIT, blocks::STONE);
+    assert_eq!(
+        server.world_region().chunks.block(EDIT),
+        Some(blocks::STONE)
+    );
+
+    // 走远：出生点的票撤了，盒子被收回、非原样所以进停放表。
+    server.move_to_position(&client, Vec3::new(400.5, -60.0, 8.5));
+    let mut away = 0;
+    while server.parked_count() == 0 && away < 200 {
+        server.acknowledge_batch(&client, 64.0);
+        server.tick();
+        client.take_frames();
+        away += 1;
+    }
+    assert!(server.parked_count() > 0, "改过的盒子被停放了");
+    assert!(!server.world_region().chunks.is_loaded(ORIGIN));
+    assert_eq!(server.world_region().chunks.block(EDIT), None);
+
+    // 回到离出生点 2 个区块的位置：出生点在视野里（票回来 → 从停放表
+    // 重新交付），但不在脚下 3×3 里，所以上限 1 时它还留在信箱里。
+    server.move_to_position(&client, Vec3::new(SPAWN_X + 32.0, -60.0, SPAWN_Z));
+    server.acknowledge_batch(&client, 64.0);
+    server.tick();
+    client.take_frames();
+    assert!(server.director_mail().2.0 > 0, "还有盒子在交付信箱里排队");
+
+    // 这时离开：收回请求要瞄准信箱里那个非原样的盒子，把它还回去。
+    server.leave(&client);
+    for _ in 0..200 {
+        server.tick();
+        client.take_frames();
+        assert_every_loaded_chunk_has_an_owner(&server);
+    }
+    assert_eq!(server.world_region().chunks.loaded_count(), Some(0));
+    assert_eq!(server.director_loaded_count(), 0);
+    assert_eq!(server.director_mail().2, (0, 0), "信箱清空");
+    assert!(server.parked_count() > 0, "改过的盒子最后在停放表里");
+
+    // 再回来：内容还在，不是新生成的模板。
+    let back = server.join("Mochi");
+    let mut held_back = BTreeSet::new();
+    run_ticks(&mut server, &back, 60, 1, &mut held_back);
+    assert!(server.world_region().chunks.is_loaded(ORIGIN));
+    assert_eq!(
+        server.world_region().chunks.block(EDIT),
+        Some(blocks::STONE),
+        "玩家改的方块跟着盒子回来"
+    );
 }

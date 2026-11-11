@@ -491,6 +491,45 @@ impl Harness {
         self.world.host.set_budget(budget);
     }
 
+    /// 测试专用：Director 里已交付/在途的区块数。
+    #[cfg(test)]
+    pub(crate) fn director_loaded_count(&self) -> usize {
+        self.world.host.director().loaded_count()
+    }
+
+    /// 测试专用：停放表里的盒子数。
+    #[cfg(test)]
+    pub(crate) fn parked_count(&self) -> usize {
+        self.world.host.parked_count()
+    }
+
+    /// 测试专用：region 里已加载的区块坐标（按坐标排序）。
+    #[cfg(test)]
+    pub(crate) fn loaded_positions(&self) -> Vec<mc_bamboo_core::ChunkPos> {
+        self.world
+            .region
+            .chunks
+            .edited_chunks()
+            .map(|(pos, _)| pos)
+            .filter(|&pos| self.world.region.chunks.is_loaded(pos))
+            .collect()
+    }
+
+    /// 测试专用：Director 里每条记录的归属名和代数。
+    #[cfg(test)]
+    pub(crate) fn director_records(
+        &self,
+    ) -> std::collections::BTreeMap<mc_bamboo_core::ChunkPos, (String, u64)> {
+        self.world
+            .host
+            .director()
+            .debug_state()
+            .records()
+            .iter()
+            .map(|(&pos, record)| (pos, (format!("{:?}", record.owner), record.generation)))
+            .collect()
+    }
+
     /// 测试专用：把失去票之后的逗留改成 `delay` 刻，用来在短测试里看收回。
     pub(crate) fn set_reclaim_delay(&mut self, delay: u64) {
         self.world.host.set_reclaim_delay(delay);

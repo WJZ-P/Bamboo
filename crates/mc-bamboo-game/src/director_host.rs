@@ -388,6 +388,29 @@ impl DirectorHost {
             .collect()
     }
 
+    /// 收回请求瞄着还在信箱里排队的盒子时，直接把盒子还回去。
+    ///
+    /// 代数用 `Reclaim` 带来的那个：它和 `Deliver` 时的代数相同，
+    /// `Director::on_returned` 核对的就是它。盒子没进过 region，所以
+    /// 不需要碰 region、不算「交付」、也不占每刻的收回额度。
+    fn return_pending_deliveries(&mut self, events: &mut Vec<Event<Box<RegionColumn>>>) {
+        if self.reclaims.is_empty() || self.deliveries.is_empty() {
+            return;
+        }
+        self.reclaims.retain(|(pos, generation)| {
+            let Some((_, column)) = self.deliveries.remove(pos) else {
+                return true;
+            };
+            self.reclaimed += 1;
+            events.push(Event::Returned {
+                pos: *pos,
+                generation: *generation,
+                column: Some(column),
+            });
+            false
+        });
+    }
+
     /// region 在 tick 边界收信箱：先交付、后收回，返回要回给 Director 的事件。
     ///
     /// 整刻最多交付 `budget.deliveries` 个非豁免区块、收回
@@ -401,11 +424,17 @@ impl DirectorHost {
         let limited_deliveries = self.budget.deliveries > 0;
         let limited_reclaims = self.budget.reclaims > 0;
         let mut events = Vec::new();
-        // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
-        // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
+        // 收回优先：盒子可能还在 `deliveries` 里排队（交付有了每刻上限之后，
+        // 一个盒子可以在信箱里等好几刻）。这时 Director 已经把它记成
+        // `Reclaiming`，盒子必须原封不动地作为 `Returned` 回去，绝不能先进
+        // region 再被取出来，更不能晚几刻变成一个没人管的孤儿。
+        // 这一步不碰 region，不占交付/收回上限，也不需要等光照。
+        self.return_pending_deliveries(&mut events);
         if self.deliveries.is_empty() && self.reclaims.is_empty() {
             return events;
         }
+        // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
+        // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
         // 交付/收回要求「没有算到一半的轮次」。
         region.chunks.finish_light_updates();
         let centers = Self::guaranteed_centers(region);
@@ -549,6 +578,66 @@ mod tests {
         assert!(host.reclaims.is_empty(), "重试成功之后信箱清空");
         assert_eq!(second.len(), 1, "这一刻要给 Director 回 Returned");
         assert!(matches!(second[0], Event::Returned { pos, .. } if pos == ORIGIN));
+    }
+
+    /// 同一个位置在同一刻既在 `deliveries` 里又在 `reclaims` 里：收回优先，
+    /// 盒子原样还回去，绝不先进 region 再被取出来。
+    #[test]
+    fn a_reclaim_and_a_delivery_for_one_position_take_the_box_once() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut server = Harness::new_loaded(2);
+        let pos = ChunkPos::new(20, 20);
+        host.deliveries
+            .insert(pos, (7, Box::new(RegionColumn::from_template())));
+        host.reclaims.push((pos, 7));
+        let events = host.flush_region_mail(server.region());
+        assert_eq!(events.len(), 1, "只回一条 Returned");
+        assert!(matches!(
+            events[0],
+            Event::Returned {
+                pos: at,
+                generation: 7,
+                column: Some(_)
+            } if at == pos
+        ));
+        assert_eq!(host.mail_backlog(), (0, 0), "两个信箱都清空");
+        assert!(!server.region().chunks.is_loaded(pos), "盒子没进 region");
+        assert_eq!(host.delivered, 0, "不占交付额度");
+    }
+
+    /// 交付因为前提不满足失败时，盒子一定原样回到信箱，且 region 里
+    /// 没有留下半插入的状态；前提恢复后下一次 flush 能成功交付。
+    #[test]
+    fn a_failed_delivery_puts_the_box_back_without_a_half_insert() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut server = Harness::new_loaded(2);
+        let region = server.region();
+        host.deliveries
+            .insert(ORIGIN, (3, Box::new(RegionColumn::from_template())));
+        // 方块实体正在 tick 中途：`deliver_column` 的只读前提不满足。
+        region.block_entities.begin_tick();
+        assert!(!region.ready_to_move_columns(), "前提确实不满足");
+
+        let first = host.flush_region_mail(region);
+        assert!(first.is_empty(), "失败时不产生 Delivered");
+        assert_eq!(host.mail_backlog(), (1, 0), "盒子回到信箱");
+        assert!(
+            !region.chunks.is_loaded(ORIGIN),
+            "region 里没有半插入的区块"
+        );
+        assert_eq!(host.delivered, 0, "失败不占额度");
+
+        // 同一个 pump 轮次里再调一次也还是失败，盒子不会丢、不会重复插入。
+        let again = host.flush_region_mail(region);
+        assert!(again.is_empty(), "前提没恢复前一直失败");
+        assert_eq!(host.mail_backlog(), (1, 0), "重试没有把盒子弄丢");
+
+        region.block_entities.end_tick();
+        let third = host.flush_region_mail(region);
+        assert_eq!(third.len(), 1, "前提恢复后交付成功");
+        assert!(matches!(third[0], Event::Delivered { pos, generation: 3 } if pos == ORIGIN));
+        assert!(region.chunks.is_loaded(ORIGIN), "只插入了一次");
+        assert_eq!(host.mail_backlog(), (0, 0), "信箱清空");
     }
 
     #[test]
