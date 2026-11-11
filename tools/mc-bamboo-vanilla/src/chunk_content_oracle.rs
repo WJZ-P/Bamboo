@@ -226,6 +226,62 @@ fn run_cases(
         }
     }
 
+    // 2b. 边界状态：官方 loadStatic 读带边界值的 NBT，再写回来；Bamboo 的
+    //     create_block_entity 读同一份 NBT 能造出具体类型，写出的键在官方那一份里都出现。
+    let load_cases = block_entity_load_cases()?;
+    let answer = ask(
+        stdin,
+        lines,
+        json!({"command": "block-entities-load", "entities": load_cases.iter().map(|case| {
+            json!({"name": case.0, "state": case.1, "tag": canonical_tag(&case.2)})
+        }).collect::<Vec<_>>()}),
+    )?;
+    report.check(
+        answer.cases.len() == load_cases.len(),
+        "official sent the wrong number of load cases",
+    );
+    for (index, case) in answer.cases.iter().enumerate() {
+        let name = &load_cases[index].0;
+        report.check(
+            case.error.is_none(),
+            format!("{name}: {}", case.error.as_deref().unwrap_or("")),
+        );
+        // 容器/战利品表由游戏层第二段负责；方块层这一段的工厂只认会动的六种。
+        if name.starts_with("chest-") {
+            continue;
+        }
+        let rebuilt = mc_bamboo_blocks::archive::create_block_entity(
+            match name.as_str() {
+                "hopper-negative" | "hopper-large" => "minecraft:hopper",
+                _ if name.starts_with("chest-") => "minecraft:chest",
+                "furnace-mid" => "minecraft:furnace",
+                "brewing-mid" => "minecraft:brewing_stand",
+                "campfire-mid" => "minecraft:campfire",
+                "piston-mid" => "minecraft:piston",
+                _ => "minecraft:chest",
+            },
+            BlockPos::new(3, 64, 5),
+            BlockState(blocks::AIR),
+            &load_cases[index].2,
+        )
+        .map_err(|error| error.to_string())?;
+        report.check(
+            rebuilt.is_some(),
+            format!("{name}: Bamboo has no factory branch"),
+        );
+        if let (Some(entity), Some(written)) = (rebuilt, &case.written) {
+            let keys = mc_bamboo_blocks::archive::write_block_entity_additional(entity.as_ref())
+                .map_err(|error| error.to_string())?;
+            let official_keys = &written["values"];
+            for (key, _) in &keys {
+                report.check(
+                    official_keys.get(key).is_some(),
+                    format!("{name}: official did not write {key}"),
+                );
+            }
+        }
+    }
+
     // 3. SavedTick：官方 codec 写出的 NBT，Bamboo 能解回同样的键，再编回去按键一致；
     //    官方 LevelChunkTicks.unpack -> pack 后仍是同一批刻。
     let answer = ask(stdin, lines, json!({"command": "ticks"}))?;
@@ -360,6 +416,115 @@ fn run_cases(
         );
     }
     Ok(())
+}
+
+fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String> {
+    use mc_bamboo_protocol::components::archive::slots::{SlottedItem, encode_list};
+
+    let item = ItemStack::new(STONE, 7);
+    let items = encode_list(&[SlottedItem {
+        slot: 0,
+        stack: item.clone(),
+    }])
+    .map_err(|error| error.to_string())?;
+    let empty_items = Tag::List(Vec::new());
+    let meta = |id: &str| {
+        vec![
+            ("id".to_owned(), Tag::String(id.to_owned())),
+            ("x".to_owned(), Tag::Int(3)),
+            ("y".to_owned(), Tag::Int(64)),
+            ("z".to_owned(), Tag::Int(5)),
+            ("components".to_owned(), Tag::Compound(Vec::new())),
+            ("keepPacked".to_owned(), Tag::Byte(0)),
+        ]
+    };
+    let mut out = Vec::new();
+    // 空容器、满容器、带战利品表、冷却为负或很大的漏斗。
+    for (name, items_tag, table) in [
+        ("chest-empty", empty_items.clone(), None),
+        ("chest-full", items.clone(), None),
+        (
+            "chest-loot",
+            empty_items.clone(),
+            Some("minecraft:chests/simple_dungeon"),
+        ),
+    ] {
+        let mut fields = meta("minecraft:chest");
+        fields.push(("Items".to_owned(), items_tag));
+        if let Some(table) = table {
+            fields.push(("LootTable".to_owned(), Tag::String(table.to_owned())));
+            fields.push(("LootTableSeed".to_owned(), Tag::Long(12345)));
+        }
+        out.push((name.to_owned(), "minecraft:chest", Tag::Compound(fields)));
+    }
+    for (name, cooldown) in [("hopper-negative", -1), ("hopper-large", i32::MAX)] {
+        let mut fields = meta("minecraft:hopper");
+        fields.push(("Items".to_owned(), items.clone()));
+        fields.push(("TransferCooldown".to_owned(), Tag::Int(cooldown)));
+        out.push((name.to_owned(), "minecraft:hopper", Tag::Compound(fields)));
+    }
+    // 机器工作中途、一半的活塞。
+    let mut furnace = meta("minecraft:furnace");
+    for (key, value) in [
+        ("cooking_time_spent", Tag::Int(77)),
+        ("cooking_total_time", Tag::Int(200)),
+        ("lit_time_remaining", Tag::Int(120)),
+        ("lit_total_time", Tag::Int(200)),
+        ("speed_multiplier", Tag::Float(1.5)),
+        ("Items", items.clone()),
+        ("RecipesUsed", Tag::Compound(Vec::new())),
+    ] {
+        furnace.push((key.to_owned(), value));
+    }
+    out.push((
+        "furnace-mid".to_owned(),
+        "minecraft:furnace",
+        Tag::Compound(furnace),
+    ));
+    let mut brewing = meta("minecraft:brewing_stand");
+    for (key, value) in [
+        ("BrewTime", Tag::Int(123)),
+        ("total_brew_time", Tag::Int(400)),
+        ("Fuel", Tag::Int(7)),
+        ("total_fuel", Tag::Int(20)),
+        ("speed_multiplier", Tag::Float(1.25)),
+        ("Items", items.clone()),
+    ] {
+        brewing.push((key.to_owned(), value));
+    }
+    out.push((
+        "brewing-mid".to_owned(),
+        "minecraft:brewing_stand",
+        Tag::Compound(brewing),
+    ));
+    let mut campfire = meta("minecraft:campfire");
+    campfire.push(("Items".to_owned(), items.clone()));
+    campfire.push(("CookingTimes".to_owned(), Tag::IntArray(vec![1, 2, 3, 4])));
+    campfire.push((
+        "CookingTotalTimes".to_owned(),
+        Tag::IntArray(vec![100, 200, 300, 400]),
+    ));
+    out.push((
+        "campfire-mid".to_owned(),
+        "minecraft:campfire",
+        Tag::Compound(campfire),
+    ));
+    let mut piston = meta("minecraft:piston");
+    for (key, value) in [
+        ("blockState", Tag::String("minecraft:stone".to_owned())),
+        ("facing", Tag::Byte(2)),
+        ("progress", Tag::Float(0.5)),
+        ("extending", Tag::Byte(1)),
+        ("source", Tag::Byte(0)),
+    ] {
+        piston.push((key.to_owned(), value));
+    }
+    out.push((
+        "piston-mid".to_owned(),
+        "minecraft:moving_piston",
+        Tag::Compound(piston),
+    ));
+    Ok(out)
 }
 
 fn entity_cases() -> Vec<Tag> {

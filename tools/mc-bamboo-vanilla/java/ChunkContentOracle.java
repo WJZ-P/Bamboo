@@ -395,6 +395,7 @@ public final class ChunkContentOracle {
                         response.addProperty("dataVersion", SharedConstants.getCurrentVersion().dataVersion().version());
                     }
                     case "block-entities" -> response.add("cases", blockEntities());
+                    case "block-entities-load" -> response.add("cases", blockEntitiesLoad(request));
                     case "ticks" -> response.add("cases", ticks());
                     case "entities" -> response.add("cases", entities(request));
                     case "chunk-read" -> {
@@ -461,6 +462,38 @@ public final class ChunkContentOracle {
                         secondTag.putBoolean("keepPacked", false);
                         one.add("original", canonical(firstTag));
                         one.add("written", canonical(secondTag));
+                    }
+                } catch (Exception error) {
+                    one.addProperty("error", String.valueOf(error));
+                }
+                cases.add(one);
+            }
+            return cases;
+        }
+
+        /** 官方 loadStatic 读边界状态的 NBT，再 saveWithFullMetadata 写回来。 */
+        private JsonArray blockEntitiesLoad(JsonObject request) {
+            JsonArray cases = new JsonArray();
+            BlockPos pos = new BlockPos(3, 64, 5);
+            for (var element : request.getAsJsonArray("entities")) {
+                JsonObject entry = element.getAsJsonObject();
+                JsonObject one = new JsonObject();
+                one.addProperty("name", entry.get("name").getAsString());
+                try {
+                    CompoundTag tag = (CompoundTag) tagFrom(entry.getAsJsonObject("tag"));
+                    BlockState state = BlockState.CODEC
+                            .parse(NbtOps.INSTANCE, StringTag.valueOf(entry.get("state").getAsString()))
+                            .getOrThrow();
+                    BlockEntity loaded = BlockEntity.loadStatic(pos, state, tag, official.registries);
+                    if (loaded == null) {
+                        one.addProperty("error", "loadStatic returned null");
+                    } else {
+                        TagValueOutput out = TagValueOutput.createWithContext(
+                                ProblemReporter.DISCARDING, official.registries);
+                        loaded.saveWithFullMetadata(out);
+                        CompoundTag written = out.buildResult();
+                        written.putBoolean("keepPacked", false);
+                        one.add("written", canonical(written));
                     }
                 } catch (Exception error) {
                     one.addProperty("error", String.valueOf(error));
