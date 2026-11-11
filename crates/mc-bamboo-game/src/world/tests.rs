@@ -416,6 +416,23 @@ impl Harness {
         &mut self.world.region
     }
 
+    /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
+    pub(crate) fn set_entity_threads(&mut self, threads: usize) {
+        self.world.entity_threads = threads;
+    }
+
+    /// 给世界里直接塞一个实体，绕过玩家动作。
+    pub(crate) fn spawn_entity(&mut self, entity: mc_bamboo_blocks::entity::Entity) -> i32 {
+        let (mut level, ticks) = self.world.region.block_level();
+        let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+        world.spawn_entity(entity)
+    }
+
+    /// 给世界里直接写一个方块状态，绕过玩家动作。
+    pub(crate) fn set_block(&mut self, pos: BlockPos, state: u32) {
+        self.world.region.chunks.set_block(pos, state);
+    }
+
     pub(crate) fn player(&self, client: &Client) -> &crate::player::Player {
         self.world
             .region
@@ -1538,4 +1555,97 @@ fn join_remembers_the_profile_for_admin_name_lookups() {
             .map(|player| player.uuid),
         Some(client.uuid)
     );
+}
+
+/// 并行驱动的场景：掉落物、下落方块、TNT 和漏斗各来一点，跑若干刻并收集世界线程
+/// 发出的全部字节。线程数只影响怎么算，不影响结果，所以 1 和 4 必须逐位相同。
+fn entity_bytes(threads: usize) -> Vec<u8> {
+    use mc_bamboo_blocks::{BlockState, entity::Entity};
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("Kitten");
+    client.take_frames();
+    server.set_entity_threads(threads);
+
+    // 一小片石头地面上的相邻物品（会互相合并）、孤立物品、下落沙块和点燃的 TNT。
+    let floor = BlockPos::new(8, -61, 8);
+    for dx in 0..4 {
+        server.set_block(floor.offset(dx, 0, 0), blocks::STONE);
+    }
+    for dx in 0..3 {
+        server.spawn_entity(Entity::ground_item(
+            Vec3::new(8.5 + f64::from(dx) * 0.2, -59.5, 8.5),
+            ItemStack::new(1, 1),
+        ));
+    }
+    server.spawn_entity(Entity::ground_item(
+        Vec3::new(24.5, -59.5, 8.5),
+        ItemStack::new(2, 1),
+    ));
+    server.spawn_entity(Entity::falling_block(
+        BlockPos::new(10, -55, 8),
+        BlockState(blocks::SAND),
+    ));
+    server.spawn_entity(Entity::primed_tnt(Vec3::new(12.5, -58.5, 8.5), 0.25));
+    // 漏斗：物品落在它里面时会走 `SuckIntoHopper` 命令，落地阶段写容器。
+    server.set_block(BlockPos::new(9, -60, 8), blocks::HOPPER);
+    server.spawn_entity(Entity::ground_item(
+        Vec3::new(9.5, -59.7, 8.5),
+        ItemStack::new(3, 1),
+    ));
+
+    let mut bytes = Vec::new();
+    for _ in 0..12 {
+        server.tick();
+        for frame in client.take_frames() {
+            mc_bamboo_protocol::codec::write_varint(&mut bytes, frame.id);
+            bytes.extend_from_slice(&frame.body);
+        }
+    }
+    bytes
+}
+
+#[test]
+fn one_and_four_entity_threads_emit_identical_bytes() {
+    let one = entity_bytes(1);
+    let four = entity_bytes(4);
+    assert!(!one.is_empty(), "场景要真的产生实体同步包");
+    assert_eq!(one, four);
+}
+
+/// 没有实体互相作用时，并行驱动和精确驱动发出的字节也逐位相同。
+/// 设计稿第 13 节第 5 条：差别只来自「看到的别的实体是这一刻开始时的样子」。
+#[test]
+fn isolated_entities_emit_identical_bytes_in_both_drivers() {
+    fn isolated(threads: usize) -> Vec<u8> {
+        use mc_bamboo_blocks::entity::Entity;
+        use mc_bamboo_protocol::item::ItemStack;
+
+        let mut server = Harness::new(2);
+        let client = server.join_and_settle("Kitten");
+        client.take_frames();
+        server.set_entity_threads(threads);
+        // 相距很远的几个孤立物品，物理、随机源、发包顺序都不涉及别的实体。
+        for index in 0..3 {
+            server.spawn_entity(Entity::ground_item(
+                Vec3::new(8.5 + f64::from(index) * 120.0, -59.5, 8.5),
+                ItemStack::new(1, 1),
+            ));
+        }
+        let mut bytes = Vec::new();
+        for _ in 0..8 {
+            server.tick();
+            for frame in client.take_frames() {
+                bytes.extend_from_slice(&(frame.id as u64).to_le_bytes());
+                bytes.extend_from_slice(&frame.body);
+            }
+        }
+        bytes
+    }
+    let precise = isolated(0);
+    let parallel = isolated(4);
+    assert!(!precise.is_empty());
+    assert_eq!(precise, parallel);
 }

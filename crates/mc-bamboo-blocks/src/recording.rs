@@ -29,7 +29,7 @@ use crate::{
         BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
     },
     block_entity::{BlockEntity, BlockEvent},
-    entity::{Entity, EntityPublic, EntitySnapshot, EntityUid},
+    entity::{Entity, EntityPublic, EntityState, EntityStore, EntityUid},
     gamerules::BlockGameRules,
     level::{
         Effect, EquipTarget, LecternFacts, LevelEntities, LevelSideState, Observation, Trigger,
@@ -1023,14 +1023,25 @@ impl LevelEntities for Recording<'_> {
         value
     }
 
-    fn entity_snapshot(&self) -> EntitySnapshot {
+    // 下面三个是给并行驱动用的整表入口。录制层不细分，碰了就算“碰了实体”。
+    fn entities_table(&self) -> &EntityStore {
         self.note_entities(12);
-        self.level.entity_snapshot()
+        self.level.entities_table()
     }
 
-    fn entity_publish(&mut self, snapshot: EntitySnapshot) {
+    fn entities_table_mut(&mut self) -> &mut EntityStore {
         self.note_entities(13);
-        self.level.entity_publish(snapshot);
+        self.level.entities_table_mut()
+    }
+
+    fn publish_entity_rows(
+        &mut self,
+        rows: &[usize],
+        public: Vec<EntityPublic>,
+        state: Vec<EntityState>,
+    ) {
+        self.note_entities(14);
+        self.level.publish_entity_rows(rows, public, state);
     }
 }
 

@@ -18,13 +18,20 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 
 ## 2. 报告里每一项
 
-报告分两段。第一段 `phases (by mean)` 按平均耗时降序列出 `World::tick` 的 15 个阶段：
+报告分两段。第一段 `phases (by mean)` 按平均耗时降序列出 `World::tick` 的阶段：
 `inbox`（处理入站消息）、`light_updates`、`weather_and_time`、`scheduled_ticks`、
-`random_ticks`、`block_events`、`entities`、`block_entities`、`player_misc`、`views`、
-`block_change_broadcast`、`entity_sync_and_tracking`、`chunk_sending`、`flush`、`tick_tail`。
+`random_ticks`、`block_events`、`entities`、`entity_compute`、`entity_commit`、
+`block_entities`、`player_misc`、`views`、`block_change_broadcast`、
+`entity_sync_and_tracking`、`chunk_sending`、`flush`、`tick_tail`。
 每行是 `count`（样本数）、`mean`、`p50`、`p95`、`p99`、`max`，单位 ms。
 分位数落在对数直方图的桶下界上，是偏保守的估计；桶在 0..15 ns 是逐纳秒，
 之上每个 2 的幂再分 8 份，相对误差不超过 12.5%。
+
+实体阶段按驱动分：精确驱动（默认，`BAMBOO_ENTITY_THREADS` 没设或为 0）只记
+`entities` 一段，算完立刻落地；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）记
+`entity_compute`（只读算阶段）和 `entity_commit`（发布状态、按 uid 升序应用命令、
+发效果）两段，`entities` 没有样本。所以报告里有 17 个阶段，但任何一次运行只会有
+16 个阶段有样本。常驻线程池还没做，并行驱动现在每刻起线程，剖析数字包含这项开销。
 
 第二段 `metrics` 里，`tick_total`、`tick_start_lateness` 和
 `tick_interval_deviation` 是时间（ms）：

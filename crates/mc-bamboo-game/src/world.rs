@@ -39,6 +39,10 @@ const MAX_CATCH_UP: Duration = Duration::from_secs(2);
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
 
+/// 实体阶段的并行线程数。缺省或 0 = 精确驱动；≥ 1 = 并行驱动（1 也是单线程，用来对比）。
+/// 世界创建时读一次，之后不再看环境变量。
+const ENTITY_THREADS_ENV: &str = "BAMBOO_ENTITY_THREADS";
+
 /// 世界的启动参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldConfig {
@@ -67,6 +71,16 @@ pub struct World {
     /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
     /// 直接嵌 `World::new` 的测试/工具按 `JoinRequest` 传入的等级走。
     authoritative_admin: bool,
+    /// 实体阶段的线程数。0 = 精确驱动；≥ 1 = 并行驱动。
+    pub(crate) entity_threads: usize,
+}
+
+/// 世界创建时读一次环境变量。读不到、0、负数或解析不了都是精确驱动。
+fn entity_threads_from_env() -> usize {
+    std::env::var(ENTITY_THREADS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 impl World {
@@ -114,6 +128,7 @@ impl World {
         }
         let mut world = Self {
             authoritative_admin,
+            entity_threads: entity_threads_from_env(),
             global,
             region: Region::with_keys(
                 view_distance,
@@ -217,8 +232,10 @@ impl World {
         self.region.profiler.lap(Phase::RandomTicks);
         interaction::run_block_events(&mut self.region);
         self.region.profiler.lap(Phase::BlockEvents);
-        interaction::run_entity_ticks(&mut self.region);
-        self.region.profiler.lap(Phase::Entities);
+        interaction::run_entity_ticks(self.entity_threads, &mut self.region);
+        if self.entity_threads == 0 {
+            self.region.profiler.lap(Phase::Entities);
+        }
         interaction::run_block_entity_ticks(&mut self.region);
         self.region.profiler.lap(Phase::BlockEntities);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，

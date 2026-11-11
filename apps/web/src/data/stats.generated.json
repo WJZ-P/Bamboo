@@ -1,0 +1,159 @@
+{
+  "commit": "afe5bc0",
+  "commits": 427,
+  "firstCommitDate": "2026-11-06",
+  "lastCommitDate": "2026-11-10",
+  "rustLines": 222814,
+  "generatedRustLines": 40158,
+  "rustFiles": 534,
+  "tests": 2559,
+  "oracleJavaLines": 22848,
+  "crates": [
+    {
+      "name": "mc-bamboo",
+      "path": "crates/mc-bamboo",
+      "lines": 44,
+      "generatedLines": 0,
+      "files": 1,
+      "tests": 0
+    },
+    {
+      "name": "mc-bamboo-auth",
+      "path": "crates/mc-bamboo-auth",
+      "lines": 1620,
+      "generatedLines": 0,
+      "files": 7,
+      "tests": 43
+    },
+    {
+      "name": "mc-bamboo-blocks",
+      "path": "crates/mc-bamboo-blocks",
+      "lines": 58312,
+      "generatedLines": 0,
+      "files": 178,
+      "tests": 486
+    },
+    {
+      "name": "mc-bamboo-command",
+      "path": "crates/mc-bamboo-command",
+      "lines": 6340,
+      "generatedLines": 0,
+      "files": 17,
+      "tests": 81
+    },
+    {
+      "name": "mc-bamboo-core",
+      "path": "crates/mc-bamboo-core",
+      "lines": 1543,
+      "generatedLines": 0,
+      "files": 5,
+      "tests": 32
+    },
+    {
+      "name": "mc-bamboo-data",
+      "path": "crates/mc-bamboo-data",
+      "lines": 1822,
+      "generatedLines": 40158,
+      "files": 30,
+      "tests": 47
+    },
+    {
+      "name": "mc-bamboo-game",
+      "path": "crates/mc-bamboo-game",
+      "lines": 61017,
+      "generatedLines": 0,
+      "files": 112,
+      "tests": 782
+    },
+    {
+      "name": "mc-bamboo-loot",
+      "path": "crates/mc-bamboo-loot",
+      "lines": 8092,
+      "generatedLines": 0,
+      "files": 16,
+      "tests": 36
+    },
+    {
+      "name": "mc-bamboo-nbt",
+      "path": "crates/mc-bamboo-nbt",
+      "lines": 3379,
+      "generatedLines": 0,
+      "files": 4,
+      "tests": 51
+    },
+    {
+      "name": "mc-bamboo-protocol",
+      "path": "crates/mc-bamboo-protocol",
+      "lines": 24942,
+      "generatedLines": 0,
+      "files": 57,
+      "tests": 376
+    },
+    {
+      "name": "mc-bamboo-recipes",
+      "path": "crates/mc-bamboo-recipes",
+      "lines": 3028,
+      "generatedLines": 0,
+      "files": 7,
+      "tests": 15
+    },
+    {
+      "name": "mc-bamboo-server",
+      "path": "crates/mc-bamboo-server",
+      "lines": 14012,
+      "generatedLines": 0,
+      "files": 28,
+      "tests": 312
+    },
+    {
+      "name": "mc-bamboo-storage",
+      "path": "crates/mc-bamboo-storage",
+      "lines": 2610,
+      "generatedLines": 0,
+      "files": 4,
+      "tests": 23
+    },
+    {
+      "name": "mc-bamboo-world",
+      "path": "crates/mc-bamboo-world",
+      "lines": 8296,
+      "generatedLines": 0,
+      "files": 24,
+      "tests": 113
+    },
+    {
+      "name": "mc-bamboo-worldgen",
+      "path": "crates/mc-bamboo-worldgen",
+      "lines": 7509,
+      "generatedLines": 0,
+      "files": 12,
+      "tests": 74
+    }
+  ],
+  "tools": [
+    {
+      "name": "mc-bamboo-hit-rate",
+      "path": "tools/mc-bamboo-hit-rate",
+      "lines": 1164,
+      "generatedLines": 0,
+      "files": 6,
+      "tests": 0
+    },
+    {
+      "name": "mc-bamboo-loadtest",
+      "path": "tools/mc-bamboo-loadtest",
+      "lines": 1935,
+      "generatedLines": 0,
+      "files": 5,
+      "tests": 28
+    },
+    {
+      "name": "mc-bamboo-vanilla",
+      "path": "tools/mc-bamboo-vanilla",
+      "lines": 17149,
+      "generatedLines": 0,
+      "files": 21,
+      "tests": 60
+    }
+  ]
+}

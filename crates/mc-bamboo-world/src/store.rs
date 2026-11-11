@@ -106,6 +106,11 @@ impl ChunkStore {
         self.edited.get(&pos)
     }
 
+    /// 所有改过的区块，按坐标顺序。给算阶段一次性扫「有没有漏斗」这类只读事实用。
+    pub fn edited_chunks(&self) -> impl Iterator<Item = (ChunkPos, &Chunk)> + '_ {
+        self.edited.iter().map(|(&pos, chunk)| (pos, chunk))
+    }
+
     /// 一个区块现在的内容。
     pub fn chunk(&self, pos: ChunkPos) -> &Chunk {
         self.edited.get(&pos).unwrap_or(&self.template)
