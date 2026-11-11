@@ -391,7 +391,9 @@ impl LevelData {
         level.last_played = long_or(entries, "LastPlayed", 0)?;
         level.level_name = string_or(entries, "LevelName", "")?;
         level.format_version = int_or(entries, "version", 0)?;
-        level.allow_commands = bool_or(entries, "allowCommands", false)?;
+        // `LevelSettings.parse`：缺 allowCommands 时默认「创造模式为 true」。
+        let allow_commands_default = level.game_type == 1;
+        level.allow_commands = bool_or(entries, "allowCommands", allow_commands_default)?;
         level.initialized = bool_or(entries, "initialized", true)?;
         level.difficulty = match field_of(entries, "difficulty_settings") {
             Some(tag) => decode_difficulty(tag)?,
