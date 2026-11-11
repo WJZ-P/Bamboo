@@ -149,7 +149,7 @@ pub enum TicketOp {
 pub enum Event<C> {
     /// 一批票的操作，Director 处理完后自己 `run_updates()`。
     Tickets { ops: Vec<TicketOp> },
-    /// 后台任务完成。`generation` 不匹配时整包丢弃。
+    /// 后台任务完成。`generation` 不匹配时状态不变，结果里的盒子回停放表。
     TaskDone {
         id: TaskId,
         pos: ChunkPos,
@@ -559,6 +559,33 @@ impl<C: ChunkBundle> Director<C> {
         self.pending_forgot.insert(pos);
     }
 
+    /// 一个没人要的盒子：不是原样就回停放表，原样的才可以丢。
+    ///
+    /// 从停放表/磁盘读出来的盒子一旦被判为过期、被取消或者票已经撤了，
+    /// 宿主那边已经没有它了，丢掉就等于丢玩家改动。
+    fn park_orphan(out: &mut Vec<Effect<C>>, pos: ChunkPos, column: C) {
+        if !column.is_pristine() {
+            out.push(Effect::Park { pos, column });
+        }
+    }
+
+    /// 把结果里带着的盒子取出来，交给 `park_orphan`。
+    fn park_orphan_result(out: &mut Vec<Effect<C>>, pos: ChunkPos, result: TaskResult<C>) {
+        let column = match result {
+            TaskResult::Decoded { column }
+            | TaskResult::Generated { column, .. }
+            | TaskResult::Assembled { column }
+            | TaskResult::Saved { column, .. } => Some(column),
+            TaskResult::Read { .. }
+            | TaskResult::BadChunk { .. }
+            | TaskResult::SaveFailed { .. }
+            | TaskResult::Cancelled => None,
+        };
+        if let Some(column) = column {
+            Self::park_orphan(out, pos, column);
+        }
+    }
+
     /// 处理一个事件，返回要派出去的任务和要发给 region 的消息。
     pub fn handle(&mut self, event: Event<C>) -> Vec<Effect<C>> {
         let mut out = Vec::new();
@@ -716,7 +743,8 @@ impl<C: ChunkBundle> Director<C> {
                 if !self.chunks.contains_key(&pos) {
                     return;
                 }
-                // 在途的读盘/生成任务直接取消；结果按代数判为过期丢弃。
+                // 在途的读盘/生成任务直接取消；回来的结果靠
+                // `on_task_done` 把非原样的盒子送回停放表。
                 let pipeline = self.chunks[&pos].owner == Owner::Pipeline;
                 if pipeline {
                     self.cancel_task(out, pos);
@@ -887,15 +915,19 @@ impl<C: ChunkBundle> Director<C> {
         result: TaskResult<C>,
     ) {
         let Some(in_flight) = self.in_flight.remove(&id) else {
+            Self::park_orphan_result(out, pos, result);
             return;
         };
         if in_flight.pos != pos || in_flight.generation != generation {
+            Self::park_orphan_result(out, pos, result);
             return;
         }
         let Some(record) = self.chunks.get_mut(&pos) else {
+            Self::park_orphan_result(out, pos, result);
             return;
         };
         if record.generation != generation || record.task != Some(id) {
+            Self::park_orphan_result(out, pos, result);
             return;
         }
         record.task = None;
@@ -1034,10 +1066,12 @@ impl<C: ChunkBundle> Director<C> {
 
     fn deliver(&mut self, out: &mut Vec<Effect<C>>, pos: ChunkPos, generation: u64, column: C) {
         let Some(record) = self.chunks.get(&pos) else {
+            Self::park_orphan(out, pos, column);
             return;
         };
         if record.desired.target.is_none() {
-            // 交付途中票撤了：盒子直接丢掉，不进 region。
+            // 交付途中票撤了：不进 region，非原样的盒子回停放表。
+            Self::park_orphan(out, pos, column);
             return;
         }
         let desired = record.desired;

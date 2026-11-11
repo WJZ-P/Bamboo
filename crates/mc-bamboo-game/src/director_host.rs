@@ -295,7 +295,12 @@ impl DirectorHost {
                     });
                 }
             }
-            Err(_) => tracing::warn!("chunk reclaim was not ready"),
+            Err(_) => {
+                // 失败时整批放回信箱，下次 tick 边界再试：Director 还以为这些
+                // 区块「正在收回」，丢了这条列表它就永远等不到回执。
+                tracing::warn!("chunk reclaim was not ready, will retry");
+                self.reclaims.extend(by_generation);
+            }
         }
         events
     }
@@ -311,5 +316,53 @@ pub(crate) fn assert_view_is_loaded(store: &mc_bamboo_world::store::ChunkStore, 
             pos.x,
             pos.z
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, PrimedTnt};
+    use mc_bamboo_core::{ChunkPos, Vec3};
+
+    use super::*;
+    use crate::world::tests::Harness;
+
+    const ORIGIN: ChunkPos = ChunkPos::new(0, 0);
+
+    /// 造一个「收回失败」的前提：实体表里有一行被借出去还没放回，
+    /// `EntityStore::take_chunk` 会因此整批拒绝。
+    fn borrowed_entity(region: &mut crate::region::Region) -> Entity {
+        let entity = Entity::new(
+            EntityKind::Tnt(PrimedTnt::new()),
+            Vec3::new(2.0, -59.0, 2.0),
+        );
+        let uid = region.entities.spawn(entity);
+        let entity = region.entities.take(uid).expect("刚放进去的实体");
+        assert!(
+            !region.ready_to_move_columns(),
+            "有借出去的实体时不该能收回"
+        );
+        entity
+    }
+
+    #[test]
+    fn a_failed_reclaim_is_put_back_and_retried() {
+        let mut host = DirectorHost::new(DirectorConfig::default());
+        let mut server = Harness::new(2);
+        let region = server.region();
+        host.reclaims.push((ORIGIN, 1));
+        let entity = borrowed_entity(region);
+        let first = host.flush_region_mail(region);
+        assert!(
+            first.is_empty(),
+            "前提不满足时不产生 Returned，Director 还在等"
+        );
+        assert_eq!(host.reclaims, vec![(ORIGIN, 1)], "失败的收回要放回信箱");
+
+        region.entities.put(entity);
+        let second = host.flush_region_mail(region);
+        assert!(host.reclaims.is_empty(), "重试成功之后信箱清空");
+        assert_eq!(second.len(), 1, "这一刻要给 Director 回 Returned");
+        assert!(matches!(second[0], Event::Returned { pos, .. } if pos == ORIGIN));
     }
 }

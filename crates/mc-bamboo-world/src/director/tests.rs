@@ -771,3 +771,212 @@ fn the_same_event_stream_produces_byte_identical_effects() {
     };
     assert_eq!(trace(17), trace(17));
 }
+
+/// 「任务不当场完成」的假执行器：把 `Submit` 攒着，测试自己决定什么时候回结果。
+/// 这样可以造出「结果回来之前票已经撤了」这类内联执行器走不到的情形。
+struct Deferred {
+    director: Director<Fake>,
+    /// 在途任务：`id → (pos, generation)`。任务形状由测试自己决定。
+    tasks: BTreeMap<TaskId, (ChunkPos, u64)>,
+    parked: BTreeMap<ChunkPos, Fake>,
+    /// 发出但还没确认的交付。
+    in_mail: BTreeMap<ChunkPos, u64>,
+}
+
+impl Deferred {
+    fn new(delay: u64) -> Self {
+        let mut director = Director::new(config(PipelineKind::Flat, delay));
+        director.set_template(|| Fake(0));
+        Self {
+            director,
+            tasks: BTreeMap::new(),
+            parked: BTreeMap::new(),
+            in_mail: BTreeMap::new(),
+        }
+    }
+
+    fn handle(&mut self, event: Event<Fake>) -> Vec<Effect<Fake>> {
+        let effects = self.director.handle(event);
+        for effect in &effects {
+            match effect {
+                Effect::Submit { id, task } => {
+                    let pos = task.pos();
+                    let generation = self
+                        .director
+                        .debug_state()
+                        .records()
+                        .get(&pos)
+                        .map_or(0, |record| record.generation);
+                    self.tasks.insert(*id, (pos, generation));
+                }
+                Effect::Cancel { id } => {
+                    self.tasks.remove(id);
+                }
+                Effect::ToRegion(RegionMessage::Deliver {
+                    pos, generation, ..
+                }) => {
+                    self.in_mail.insert(*pos, *generation);
+                }
+                Effect::Park { pos, column } => {
+                    self.parked.insert(*pos, *column);
+                }
+                _ => {}
+            }
+        }
+        effects
+    }
+
+    /// 指定坐标的在途任务。
+    fn task_at(&self, pos: ChunkPos) -> (TaskId, u64) {
+        let (&id, &(_, generation)) = self
+            .tasks
+            .iter()
+            .find(|&(_, &(p, _))| p == pos)
+            .expect("这个坐标有在途任务");
+        (id, generation)
+    }
+
+    /// 最后一个在途任务（`Save` 排在后面）。
+    fn last_task(&self) -> (TaskId, ChunkPos, u64) {
+        let (&id, &(pos, generation)) = self.tasks.iter().next_back().expect("有在途任务");
+        (id, pos, generation)
+    }
+
+    fn join(&mut self, id: u64, pos: ChunkPos) {
+        self.handle(Event::Tickets {
+            ops: vec![TicketOp::PlayerMoved { id, to: Some(pos) }],
+        });
+    }
+
+    fn leave(&mut self, id: u64) {
+        self.handle(Event::Tickets {
+            ops: vec![TicketOp::PlayerMoved { id, to: None }],
+        });
+    }
+}
+
+/// 从停放表拿到一个「玩家改过」的盒子，结果回来之前撤票：
+/// 盒子必须回到停放表，不能消失。
+#[test]
+fn a_read_result_whose_ticket_was_removed_returns_to_the_parking_table() {
+    let mut d = Deferred::new(0);
+    let pos = ChunkPos::new(0, 0);
+    d.parked.insert(pos, Fake(42));
+    d.join(1, pos);
+    let (id, generation) = d.task_at(pos);
+
+    // 执行器已经把盒子从停放表取走，之后票撤了。
+    let column = d.parked.remove(&pos).expect("停放表里有盒子");
+    d.leave(1);
+    let effects = d.handle(Event::TaskDone {
+        id,
+        pos,
+        generation,
+        result: TaskResult::Decoded { column },
+    });
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Park { pos: p, column } if *p == pos && column.0 == 42
+        )),
+        "非原样的盒子要回停放表：{effects:?}"
+    );
+    assert_eq!(d.parked.get(&pos), Some(&Fake(42)));
+}
+
+/// 过期的 `Assembled` 结果（票撤了又回来、代数已变）也把盒子送回停放表。
+#[test]
+fn a_stale_assembled_result_parks_its_box() {
+    let mut d = Deferred::new(0);
+    let pos = ChunkPos::new(0, 0);
+    d.join(1, pos);
+    let (id, generation) = d.task_at(pos);
+    d.leave(1);
+    d.join(1, pos);
+    let stale = generation.wrapping_add(1);
+    let effects = d.handle(Event::TaskDone {
+        id,
+        pos,
+        generation: stale,
+        result: TaskResult::Assembled { column: Fake(9) },
+    });
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Park { column, .. } if column.0 == 9)),
+        "过期结果里的盒子不能丢：{effects:?}"
+    );
+    assert_eq!(d.parked.get(&pos), Some(&Fake(9)));
+}
+
+/// `Save` 在途时撤票、票又回来：结果里带着的盒子不能凭空消失。
+#[test]
+fn a_save_result_whose_ticket_returned_is_not_dropped() {
+    let mut d = Deferred::new(0);
+    let pos = ChunkPos::new(0, 0);
+    let box_ = Fake(17);
+    d.join(1, pos);
+    let (id, generation) = d.task_at(pos);
+    // 交付到 region，再撤票收回：`Returned` 会派出一个 `Save`。
+    d.handle(Event::TaskDone {
+        id,
+        pos,
+        generation,
+        result: TaskResult::Decoded { column: box_ },
+    });
+    d.handle(Event::Delivered { pos, generation });
+    d.leave(1);
+    // 收回延迟到点才发 `Reclaim`；region 在 tick 边界交回盒子。
+    let reclaims = d.handle(Event::Tick { now_tick: 1 });
+    assert!(
+        reclaims.iter().any(|effect| matches!(
+            effect,
+            Effect::ToRegion(RegionMessage::Reclaim { positions })
+                if positions.iter().any(|(p, _)| *p == pos)
+        )),
+        "该发包含这个坐标的收回消息"
+    );
+    let returned = d.handle(Event::Returned {
+        pos,
+        generation,
+        column: Some(box_),
+    });
+    let (save_id, _, save_generation) = d.last_task();
+    let seq = returned.iter().find_map(|effect| match effect {
+        Effect::Submit {
+            id,
+            task: Task::Save { seq, .. },
+            ..
+        } if *id == save_id => Some(*seq),
+        _ => None,
+    });
+    let seq = seq.expect("收回之后派出 Save 任务");
+    // 票在 Save 完成之前回来：盒子应该直接重新交付，不经过读盘。
+    d.join(1, pos);
+    let effects = d.handle(Event::TaskDone {
+        id: save_id,
+        pos,
+        generation: save_generation,
+        result: TaskResult::Saved { seq, column: box_ },
+    });
+    let delivered = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::ToRegion(RegionMessage::Deliver { column, .. }) if column.0 == 17
+        )
+    });
+    let parked = effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Park { column, .. } if column.0 == 17));
+    assert!(delivered || parked, "Save 的盒子要有去处：{effects:?}");
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Submit {
+                task: Task::Read { .. },
+                ..
+            }
+        )),
+        "盒子不该被重新读一遍"
+    );
+}
