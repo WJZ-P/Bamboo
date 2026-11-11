@@ -150,6 +150,8 @@ impl Histogram {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Phase {
     Inbox,
+    /// Director 的信箱泵和区块交付/收回。和 Inbox 分开以前它算在 Inbox 里。
+    Delivery,
     LightUpdates,
     WeatherAndTime,
     ScheduledTicks,
@@ -173,8 +175,9 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::Inbox,
+        Self::Delivery,
         Self::LightUpdates,
         Self::WeatherAndTime,
         Self::ScheduledTicks,
@@ -196,6 +199,7 @@ impl Phase {
     fn name(self) -> &'static str {
         match self {
             Self::Inbox => "inbox",
+            Self::Delivery => "delivery",
             Self::LightUpdates => "light_updates",
             Self::WeatherAndTime => "weather_and_time",
             Self::ScheduledTicks => "scheduled_ticks",
@@ -231,6 +235,10 @@ pub(crate) enum Metric {
     DueScheduledTicks,
     Entities,
     ChunksSent,
+    /// 这一刻 region 收下的区块数；一个都没收也要记 0。
+    ChunksDelivered,
+    /// 这一刻 region 交还的区块数；一个都没交还也要记 0。
+    ChunksReclaimed,
     ChunkLatencyUs,
     FlushBytes,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
@@ -238,7 +246,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -248,6 +256,8 @@ impl Metric {
         Self::DueScheduledTicks,
         Self::Entities,
         Self::ChunksSent,
+        Self::ChunksDelivered,
+        Self::ChunksReclaimed,
         Self::ChunkLatencyUs,
         Self::FlushBytes,
     ];
@@ -263,6 +273,8 @@ impl Metric {
             Self::DueScheduledTicks => "due_scheduled_ticks",
             Self::Entities => "entities",
             Self::ChunksSent => "chunks_sent",
+            Self::ChunksDelivered => "chunks_delivered",
+            Self::ChunksReclaimed => "chunks_reclaimed",
             Self::ChunkLatencyUs => "chunk_latency_us",
             Self::FlushBytes => "flush_bytes",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -276,7 +288,7 @@ impl Metric {
             Self::Entities => "entities",
             Self::InboundMessages => "messages",
             Self::DueScheduledTicks => "ticks",
-            Self::ChunksSent => "chunks",
+            Self::ChunksSent | Self::ChunksDelivered | Self::ChunksReclaimed => "chunks",
             Self::ChunkLatencyUs | Self::TickSpinUs => "us",
             Self::FlushBytes => "bytes",
             Self::SkippedCatchUps => "times",

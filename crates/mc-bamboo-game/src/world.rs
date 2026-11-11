@@ -17,7 +17,7 @@ use mc_bamboo_protocol::{
 };
 use mc_bamboo_world::director::TicketOp;
 
-use crate::director_host::DirectorHost;
+use crate::director_host::{DirectorHost, MailBudget};
 use tracing::warn;
 
 use crate::{
@@ -152,7 +152,8 @@ impl World {
             host: if infinite_flat {
                 DirectorHost::new_infinite_flat(Default::default())
             } else {
-                DirectorHost::new(Default::default())
+                // 信箱预算在世界创建时读一次环境变量，之后不再看它。
+                DirectorHost::new(Default::default(), MailBudget::from_env())
             },
             ticket_centers: std::collections::BTreeMap::new(),
             director_tick: 0,
@@ -321,10 +322,19 @@ impl World {
 
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
+        self.host.begin_tick();
         self.process_inbox()?;
         self.sync_player_tickets();
-        self.tick_ticket_timeouts();
         self.region.profiler.lap(Phase::Inbox);
+        self.tick_ticket_timeouts();
+        let (delivered, reclaimed) = self.host.counters_this_tick();
+        self.region
+            .profiler
+            .record(Metric::ChunksDelivered, delivered as u64);
+        self.region
+            .profiler
+            .record(Metric::ChunksReclaimed, reclaimed as u64);
+        self.region.profiler.lap(Phase::Delivery);
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
 

@@ -77,7 +77,9 @@ impl Rng {
 
 const WORLD_TOP: i32 = MIN_Y + WORLD_HEIGHT;
 /// 最后让世界安静下来的 tick 数。确认到了之后一 tick 能发 64 个区块，够发完 `T(8)`。
+/// 已加载模式还要等信箱按每刻上限把剩下的区块交付完，所以下面再多跑若干刻。
 const SETTLE_TICKS: u32 = 40;
+const LOADED_SETTLE_TICKS: u32 = 100;
 const HORIZONTAL_EXTREMES: [f64; 7] = [
     3.0e7,
     -3.0e7,
@@ -808,9 +810,13 @@ fn random_request(rng: &mut Rng, actor: &mut Actor) -> PlayRequest {
 }
 
 /// 一次运行的结果：每个客户端收到的字节的摘要。
-fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
+fn run(seed: u64, ticks: u32, view_distance: i32, loaded: bool) -> Vec<u64> {
     let mut rng = Rng::new(seed);
-    let mut server = Harness::new(view_distance);
+    let mut server = if loaded {
+        Harness::new_loaded(view_distance)
+    } else {
+        Harness::new(view_distance)
+    };
     // 未签名 `player_chat` 带系统时间。钉死以后同一颗种子的字节才一样。
     //
     // Unsigned `player_chat` carries the system time. Pin it so one seed has one byte stream.
@@ -885,6 +891,9 @@ fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
         }
 
         server.tick();
+        if loaded {
+            check_footprints(&server);
+        }
         observe_all(&mut server, &mut actors, &mut rng, 80);
         for actor in &mut actors {
             check_tick(&server, actor);
@@ -904,7 +913,19 @@ fn run(seed: u64, ticks: u32, view_distance: i32) -> Vec<u64> {
         });
     }
 
-    settle(&mut server, &mut actors, &mut rng);
+    settle(
+        &mut server,
+        &mut actors,
+        &mut rng,
+        if loaded {
+            LOADED_SETTLE_TICKS
+        } else {
+            SETTLE_TICKS
+        },
+    );
+    if loaded {
+        check_footprints(&server);
+    }
     check_convergence(&server, &actors, view_distance);
     shut_down(&mut server, &mut actors);
     digests.extend(actors.iter().map(|actor| actor.model.digest));
@@ -963,7 +984,7 @@ fn observe_all(server: &mut Harness, actors: &mut [Actor], rng: &mut Rng, ack_pe
 }
 
 /// 不再乱动，把排队的区块和该走的人都处理完。
-fn settle(server: &mut Harness, actors: &mut Vec<Actor>, rng: &mut Rng) {
+fn settle(server: &mut Harness, actors: &mut Vec<Actor>, rng: &mut Rng, ticks: u32) {
     actors.retain(|actor| {
         let alive = actor.is_alive();
         if !alive {
@@ -975,11 +996,42 @@ fn settle(server: &mut Harness, actors: &mut Vec<Actor>, rng: &mut Rng) {
         // 第一批的确认没到之前，后面的批次一直停着。
         server.acknowledge_batch(&actor.client, 64.0);
     }
-    for _ in 0..SETTLE_TICKS {
+    for tick in 0..ticks {
         server.tick();
+        // 交付还在按每刻上限推进，脚下 3×3 在此期间也必须一直成立。
+        if server.world_region().chunks.is_loaded_mode() {
+            check_footprints(server);
+        }
+        let (delivered, reclaimed, _) = server.director_mail();
+        assert!(
+            delivered <= 64 + 9 * server.world_region().players.len(),
+            "第 {tick} 刻交付 {delivered} 个超上限"
+        );
+        assert!(reclaimed <= 64, "第 {tick} 刻收回 {reclaimed} 个超上限");
         observe_all(server, actors, rng, 100);
         for actor in actors.iter() {
             server.acknowledge_batch(&actor.client, 64.0);
+        }
+    }
+}
+
+/// 已加载模式：每刻每名玩家脚下 3×3 都必须已交付。
+/// 这是交付限速之后唯一还「当刻成立」的加载不变量；整个视野改成
+/// 「若干刻后收齐」，由 `check_convergence` 在静置之后检查。
+fn check_footprints(server: &Harness) {
+    let region = server.world_region();
+    assert!(region.chunks.is_loaded_mode(), "这个检查只在已加载模式跑");
+    for player in region.players.values() {
+        let center = player.chunk_pos();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                assert!(
+                    region
+                        .chunks
+                        .is_loaded(ChunkPos::new(center.x + dx, center.z + dz)),
+                    "脚下 {center:?} 的 3×3 没交付"
+                );
+            }
         }
     }
 }
@@ -1072,13 +1124,13 @@ fn should_see(viewer: &Player, target: &Player, view_distance: i32) -> bool {
 #[test]
 fn random_requests_never_panic_or_confuse_a_client() {
     for seed in 1..=4 {
-        run(seed, 150, 2 + (seed % 3) as i32);
+        run(seed, 150, 2 + (seed % 3) as i32, false);
     }
 }
 
 #[test]
 fn same_seed_gives_the_same_bytes() {
-    assert_eq!(run(7, 100, 2), run(7, 100, 2));
+    assert_eq!(run(7, 100, 2, false), run(7, 100, 2, false));
 }
 
 /// 手动跑更多种子：`FUZZ_SEEDS=2000 cargo test -p mc-bamboo-game long_random_run -- --ignored`。
@@ -1090,6 +1142,16 @@ fn long_random_run() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(100u64);
     for seed in 1000..1000 + seeds {
-        run(seed, 400, 2 + (seed % 7) as i32);
+        run(seed, 400, 2 + (seed % 7) as i32, false);
+    }
+}
+
+/// 已加载模式的随机请求：和上面的 fuzz 用同一串种子与请求，但区块由
+/// Director 按每刻上限交付。每刻都断言玩家脚下 3×3 已加载，静置之后
+/// 客户端持有的集合等于整个跟踪范围。
+#[test]
+fn loaded_mode_random_requests_converge_after_settling() {
+    for seed in 1..=4 {
+        run(seed, 150, 2 + (seed % 3) as i32, true);
     }
 }

@@ -476,6 +476,11 @@ impl<C: ChunkBundle> Director<C> {
         &self.config
     }
 
+    /// 测试里改流水线配置（例如把收回逗留调短，好在几十刻内看收回）。
+    pub fn config_mut(&mut self) -> &mut DirectorConfig {
+        &mut self.config
+    }
+
     /// 统计用的计数：(过滤掉的等级变化, 真正动作的区块)。
     pub fn counters(&self) -> (u64, u64) {
         (self.filtered, self.acted)

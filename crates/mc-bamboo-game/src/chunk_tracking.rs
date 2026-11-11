@@ -189,17 +189,35 @@ impl PlayerChunkSender {
     }
 
     /// 取出这一 tick 要发的区块，近的在前。`center` 是玩家此刻所在的区块。
-    fn next_batch(&mut self, center: ChunkPos, profiler: &mut Profiler) -> Vec<ChunkPos> {
+    ///
+    /// 只在 `is_ready` 的候选中排序：已加载模式下视野里有些区块还没交付，
+    /// 近处没加载不能把远处已加载的卡住；近处一旦交付又会排在远处前面。
+    fn next_batch(
+        &mut self,
+        center: ChunkPos,
+        is_ready: impl Fn(ChunkPos) -> bool,
+        profiler: &mut Profiler,
+    ) -> Vec<ChunkPos> {
         if self.unacknowledged_batches >= self.max_unacknowledged_batches {
             return Vec::new();
         }
         let max_batch_size = self.desired_chunks_per_tick.max(1.0);
         self.batch_quota = (self.batch_quota + self.desired_chunks_per_tick).min(max_batch_size);
-        if self.batch_quota < 1.0 || self.pending.is_empty() {
+        if self.pending.is_empty() {
             return Vec::new();
         }
 
-        let chunks = self.take_nearest(center, self.batch_quota.floor() as usize, profiler);
+        let chunks = self.take_nearest(
+            center,
+            self.batch_quota.floor() as usize,
+            is_ready,
+            profiler,
+        );
+        if chunks.is_empty() {
+            // 只跳过了还没交付的区块：配额留着，交付了下一刻立刻补发，
+            // 也不占一个「未确认批次」的名额。
+            return Vec::new();
+        }
         self.unacknowledged_batches += 1;
         self.batch_quota -= chunks.len() as f32;
         chunks
@@ -209,9 +227,15 @@ impl PlayerChunkSender {
         &mut self,
         center: ChunkPos,
         count: usize,
+        is_ready: impl Fn(ChunkPos) -> bool,
         profiler: &mut Profiler,
     ) -> Vec<ChunkPos> {
-        let mut nearest: Vec<ChunkPos> = self.pending.keys().copied().collect();
+        let mut nearest: Vec<ChunkPos> = self
+            .pending
+            .keys()
+            .copied()
+            .filter(|&pos| is_ready(pos))
+            .collect();
         // 排序是稳定的，距离相同的区块保持 `pending` 里的顺序，结果是确定的。
         nearest.sort_by_key(|&pos| distance_squared(center, pos));
         nearest.truncate(count);
@@ -313,10 +337,12 @@ pub(crate) fn send_chunks(region: &mut Region) {
             continue;
         }
         player.chunks.sender.set_now(now);
-        let batch = player
-            .chunks
-            .sender
-            .next_batch(player.chunk_pos(), &mut region.profiler);
+        let chunks = &region.chunks;
+        let batch = player.chunks.sender.next_batch(
+            player.chunk_pos(),
+            |pos| chunks.is_loaded(pos),
+            &mut region.profiler,
+        );
         if batch.is_empty() {
             continue;
         }
@@ -330,7 +356,6 @@ pub(crate) fn send_chunks(region: &mut Region) {
                 skipped += 1;
                 continue;
             }
-            crate::director_host::assert_view_is_loaded(&region.chunks, pos);
             let frames = match chunk_frame(
                 &mut region.chunk_cache,
                 &region.chunks,
@@ -625,29 +650,44 @@ mod tests {
         let state =
             |sender: &PlayerChunkSender| (sender.batch_quota, sender.unacknowledged_batches);
 
-        assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 9);
+        assert_eq!(
+            sender
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
+                .len(),
+            9
+        );
         assert_eq!(state(&sender), (0.0, 1));
 
         assert!(
             sender
-                .next_batch(ORIGIN, &mut Profiler::default())
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
                 .is_empty()
         );
         assert_eq!(state(&sender), (0.0, 1));
 
         sender.on_batch_received(3.5);
         assert_eq!(state(&sender), (1.0, 0));
-        assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 3);
+        assert_eq!(
+            sender
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
+                .len(),
+            3
+        );
         assert_eq!(state(&sender), (0.5, 1));
 
         for unacknowledged in 2..=10 {
-            assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 3);
+            assert_eq!(
+                sender
+                    .next_batch(ORIGIN, |_| true, &mut Profiler::default())
+                    .len(),
+                3
+            );
             assert_eq!(state(&sender), (0.5, unacknowledged));
         }
 
         assert!(
             sender
-                .next_batch(ORIGIN, &mut Profiler::default())
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
                 .is_empty()
         );
         assert_eq!(state(&sender), (0.5, 10));
@@ -657,7 +697,7 @@ mod tests {
     fn first_batch_is_the_three_by_three_nearest_first() {
         let mut sender = sender_with_many_chunks();
 
-        let batch = sender.next_batch(ORIGIN, &mut Profiler::default());
+        let batch = sender.next_batch(ORIGIN, |_| true, &mut Profiler::default());
 
         let distances: Vec<i64> = batch
             .iter()
@@ -666,11 +706,47 @@ mod tests {
         assert_eq!(distances, [0, 1, 1, 1, 1, 2, 2, 2, 2]);
     }
 
+    /// 已加载模式下近处的区块还没交付：“排序是在整个视野上做的”会让远处
+    /// 已交付的区块也卡住不发。这里要求只在已加载的候选里排序。
+    #[test]
+    fn a_near_chunk_thats_not_ready_does_not_block_ready_far_chunks() {
+        let mut sender = PlayerChunkSender::default();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                sender.mark_pending(chunk(x, z));
+            }
+        }
+        sender.on_batch_received(64.0);
+        let ready = |pos: ChunkPos| distance_squared(ORIGIN, pos) > 2;
+        let batch = sender.next_batch(ORIGIN, ready, &mut Profiler::default());
+        assert!(!batch.is_empty(), "远处已加载的区块照发");
+        assert!(
+            batch.iter().all(|&pos| ready(pos)),
+            "批次里没有没交付的近处区块: {batch:?}"
+        );
+        assert!(
+            batch.iter().all(|&pos| !sender.is_pending(pos)),
+            "发出去的从 pending 里摘掉"
+        );
+        assert!(sender.is_pending(ORIGIN), "没交付的脚下区块还在 pending");
+        assert!(
+            sender.is_pending(chunk(1, 0)),
+            "没交付的近处区块还在 pending"
+        );
+        assert_eq!(sender.unacknowledged_batches, 1, "只占一批在途");
+
+        // 近处一旦交付，下一批里它排在更远的区块前面。
+        sender.on_batch_received(64.0);
+        let next = sender.next_batch(ORIGIN, |_| true, &mut Profiler::default());
+        assert!(next.contains(&ORIGIN), "近处补发: {next:?}");
+        assert_eq!(next[0], ORIGIN, "最近的排在最前");
+    }
+
     #[test]
     fn distance_uses_the_position_at_send_time() {
         let mut sender = sender_with_many_chunks();
 
-        let batch = sender.next_batch(chunk(30, 30), &mut Profiler::default());
+        let batch = sender.next_batch(chunk(30, 30), |_| true, &mut Profiler::default());
 
         assert_eq!(batch[0], chunk(30, 30));
     }
@@ -678,28 +754,38 @@ mod tests {
     #[test]
     fn slow_clients_get_a_chunk_every_few_ticks() {
         let mut sender = sender_with_many_chunks();
-        sender.next_batch(ORIGIN, &mut Profiler::default());
+        sender.next_batch(ORIGIN, |_| true, &mut Profiler::default());
         sender.on_batch_received(0.5);
         sender.batch_quota = 0.0;
 
         assert!(
             sender
-                .next_batch(ORIGIN, &mut Profiler::default())
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
                 .is_empty()
         );
         assert_eq!(sender.batch_quota, 0.5);
-        assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 1);
+        assert_eq!(
+            sender
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
+                .len(),
+            1
+        );
         assert_eq!(sender.batch_quota, 0.0);
     }
 
     #[test]
     fn fractions_of_the_desired_rate_do_not_accumulate() {
         let mut sender = sender_with_many_chunks();
-        sender.next_batch(ORIGIN, &mut Profiler::default());
+        sender.next_batch(ORIGIN, |_| true, &mut Profiler::default());
         sender.on_batch_received(3.5);
 
         for _ in 0..5 {
-            assert_eq!(sender.next_batch(ORIGIN, &mut Profiler::default()).len(), 3);
+            assert_eq!(
+                sender
+                    .next_batch(ORIGIN, |_| true, &mut Profiler::default())
+                    .len(),
+                3
+            );
         }
     }
 
@@ -732,7 +818,7 @@ mod tests {
 
         assert!(
             sender
-                .next_batch(ORIGIN, &mut Profiler::default())
+                .next_batch(ORIGIN, |_| true, &mut Profiler::default())
                 .is_empty()
         );
 
@@ -843,7 +929,9 @@ mod tests {
         tracker.apply_view(PLAYER, view(0, 0, 2), &mut links);
         assert!(!tracker.is_chunk_tracked(ORIGIN));
 
-        tracker.sender.next_batch(ORIGIN, &mut Profiler::default());
+        tracker
+            .sender
+            .next_batch(ORIGIN, |_| true, &mut Profiler::default());
         assert!(tracker.is_chunk_tracked(ORIGIN));
         assert!(!tracker.is_chunk_tracked(chunk(3, 0)));
         assert!(!tracker.is_chunk_tracked(chunk(4, 0)));
@@ -1061,7 +1149,7 @@ mod tests {
         // 三刻之后才发，钉死的时钟只走了 150ms，和真实时钟跑多快无关。
         profiler.advance_clock(std::time::Duration::from_millis(150));
         sender.set_now(profiler.now());
-        let batch = sender.next_batch(ORIGIN, &mut profiler);
+        let batch = sender.next_batch(ORIGIN, |_| true, &mut profiler);
         assert_eq!(batch, [chunk(0, 0)]);
 
         let latencies = profiler.histogram(Series::Metric(Metric::ChunkLatencyUs));

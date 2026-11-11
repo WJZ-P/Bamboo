@@ -455,6 +455,22 @@ impl Harness {
         self.world.entity_threads = threads;
     }
 
+    /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数。
+    pub(crate) fn director_mail(&self) -> (usize, usize, (usize, usize)) {
+        let (delivered, reclaimed) = self.world.host.counters_this_tick();
+        (delivered, reclaimed, self.world.host.mail_len())
+    }
+
+    /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
+    pub(crate) fn set_mail_budget(&mut self, budget: crate::director_host::MailBudget) {
+        self.world.host.set_budget(budget);
+    }
+
+    /// 测试专用：把失去票之后的逗留改成 `delay` 刻，用来在短测试里看收回。
+    pub(crate) fn set_reclaim_delay(&mut self, delay: u64) {
+        self.world.host.set_reclaim_delay(delay);
+    }
+
     /// 给世界里直接塞一个实体，绕过玩家动作。
     pub(crate) fn spawn_entity(&mut self, entity: mc_bamboo_blocks::entity::Entity) -> i32 {
         let (mut level, ticks) = self.world.region.block_level();
