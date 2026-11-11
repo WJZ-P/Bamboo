@@ -24,7 +24,7 @@
 | 不做 | 理由 |
 |---|---|
 | 世界生成 | 还是平坦模板。存档只负责持久化改动过的区块，生成是 M4 的事 |
-| 实体存档（`entities/`） | 世界里有下落方块、点燃的 TNT 和地上的物品，但没有存档，也没有 mob |
+| 实体存档（`entities/`） | 只编解码下落方块、点燃的 TNT 和地上的物品三种；没有 mob，也还没接进加载/卸载 |
 | POI（`poi/`） | 没有村民 |
 | 结构、`chunk_tickets.dat`、游戏规则和世界生成设置的 saved data | 没有对应的游戏功能，写空壳没有意义 |
 | DataFixerUpper | 只支持一个版本。读到 `DataVersion` 不等于 5023 的区块就报错拒绝，不猜 |
@@ -93,7 +93,8 @@
   末影箱和箱子等容器的 `Items` 都要用）；公开接口只露物品相关的类型，不露网络包和
   编解码缓冲。**以后物品模型搬出 protocol 时这条依赖跟着换。**不依赖 `mc-bamboo-game`、
   `tokio`。已有模块：`chunk_nbt`（写和读）、`anvil`（区域文件、扇区分配、`.mcc`）、
-  `player`、`level_dat`（编解码，不接进游戏）。`linear`、`paths` 还没做。
+  `player`、`level_dat`（编解码，不接进游戏）、`chunk_content`（跨类型的 NBT 合并与实体
+  文件根，纯函数）。`linear`、`paths` 还没做。
 - **`mc-bamboo-nbt`**：网络形式（`write_network` 写无名根）之外，加了文件形式：
   带名字的根（`write_named` / `read_named`）、gzip / zlib / 不压缩外壳、解压后的
   字节数上限，标签本身沿用原来的配额（`Accounter`）和 512 层深度上限。
@@ -116,6 +117,11 @@
   `chunk_nbt` 的编码接口留了位置（`ChunkEncodeExtra`）：调用方可以给每个方块实体位置
   提供一段额外的 NBT 复合标签，以及 `block_ticks` / `fluid_ticks` 列表；解码时把
   不认识的顶层键、整条方块实体条目、计划刻和 `Heightmaps` 原样交还（`DecodedChunk`）。
+  每条新写的方块实体条目都按官方 `LevelChunk.getBlockEntityNbtForSaving` 补
+  `components: {}` 和 `keepPacked: 0b`。谁拥有状态，谁负责写它的键：
+  `mc-bamboo-blocks::archive` 写方块实体自己的键、计划刻、红石记忆和三种实体；
+  游戏层写容器、`block_items`、命令方块和讲台；`chunk_content` 只做按位置的合并。
+  `BlockEntity` trait 的 `write_additional` 没有默认实现，新加一种方块实体漏了存盘会编译失败。
 - 第 5 步以后（存档线程、加载线程、ticket 和卸载）按 `world-model-design.md` 的
   区块平面来做：`(区块位置 → 未压缩 NBT 字节)` 的 IO 线程接在流水线的两头，
   解析和序列化在流水线里做；不照这一节原来写的 `Saver` / `Loader` 线程方案。
@@ -254,7 +260,9 @@ Bamboo 的 `BlockTicks` 是**一条全局队列**，不是官方的每区块 `Le
 原本在同一 tick 同一优先级、分属两个区块的两个刻，保存再读回之后谁先谁后由区块加载顺序决定。
 官方有同样的问题（它也是每区块独立 pack），但顺序来源不同。这是第 13 节 Q6。
 
-`i` 是方块或流体的注册名。生成器已经导出方块名，流体名要补。
+`i` 是方块或流体的注册名（生成器两张表都有）。`SavedTick.codec` 的 `t` 是 int，
+Bamboo 的 `ChunkTicks.delay` 是 i64：写之前饱和到 i32 范围并报告，不照官方的强转回绕。
+`p` 是 int 优先级，`TickPriority.byValue` 把越界值折到两端。
 
 ## 6. Anvil
 
@@ -540,9 +548,34 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    验证：第 11 节第 1、5 条。
 8. **转换工具**。验证：第 11 节第 5 条。
 9. **README**：删掉“不存档”这条已知限制，补上存档格式、保存节奏、还有哪些东西不存
-    （箱子内容、实体、火把抖动表）。
+    （火把抖动表、容器的开合状态等）。箱子内容和三种实体已经有编解码器，见第 5.4 节之后。
 
 第 5 步之前磁盘上什么都不会变，所以前四步可以安全地合进 main。
+
+上层内容的编解码按 `world-model-design.md` 5.5 的 D9 处理：
+
+- 方块实体条目里不认识的键、不认识的 `id` 整条原样保留；同一位置换了类型、或者方块
+  被拆掉时，旧条目的键跟着丢掉，不会挂到新方块上。`RecordItem` 变了之后
+  `ticks_since_song_started` 回到 0（`chunk_content::BoundKeys`）。
+- 计划刻里不认识的 `i` 原样保留在列表最前面（`LevelChunkTicks.pack` 先放 pending）；
+  实体文件里不认识的 `id` 和根键原样保留。空实体区块不写文件（`IOWorker.STORE_EMPTY`）。
+- 物品条目按 `player-data` 的约定不做 D9（`ItemStack.CODEC` 是 MapCodec，多余的键忽略）；
+  已建模的三种实体里官方有而 Bamboo 不建模的键，这次也不保留，读回按官方默认值补齐。
+  **这是一条已知限制**：实体还没有持久 UUID 和随身携带的未建模 NBT，做生物之前要补；
+  现在 `UUID` 由实体 ID 确定性派生（和网络层同一个推导），读回时 uid 由生成流程重分配。
+- 官方不存的 Bamboo 状态一律不写、也不加私有键：火把抖动表（S9）、容器开合人数和
+  `recheck_at` / `dead`、潜影盒开盖动画、`HopperEntity.tickedGameTime`、
+  `PistonMoving.lastTicked`、各种配方/方块状态缓存、实体的随机源 / `tickCount` /
+  上一刻位置 / 碰撞标志 / `start_pos` / `bob_offs`。读回后分别回到构造器默认值。
+- 第一段的 `chunk-content` 对拍（`ChunkContentOracle.java`）逐类型调官方
+  `BlockEntity.loadStatic` + `saveWithFullMetadata`、`SavedTick.codec` +
+  `LevelChunkTicks.pack/unpack`、`EntityType.loadEntityRecursive` + `Entity.save`。
+  实体读取用 JVM 里的假世界（`EntityOracle.java` 的 `FakeLevel` 形状），不启动服务端、
+  不接受 EULA；`SerializableChunkData.parse -> write` 另外检查 `components` / `keepPacked`
+  能从区块 NBT 原样带回。
+- 第二段（等 `chunk-director` 落地）再把原样保留的复合标签挂进 `ChunkColumn` 的
+  方块实体类型表旁边、给 `ChunkEntities` 加访问器、把游戏层四张表接进条目，并做
+  `RegionColumn` ⇄ 「区块 NBT + 实体 NBT」的整块组装。
 
 ## 13. 风险和待用户决定的问题
 

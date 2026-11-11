@@ -391,7 +391,9 @@ WebView2 的渲染进程不算在内。
   活塞推动不带走台上的书。讲台菜单不能用光标把书从槽里拿出来，
   取书只走按钮。旁观者可以打开讲台，按钮全部忽略。冒险模式能翻页，不能取书。
   没有权限系统，所以放置讲台时不读物品里的 `block_entity_data`。
-- 不存档：关服后世界重置，重连回到出生点，物品栏清空。
+- 存档目前只有编解码层，还没接进区块的加载和卸载：关服后世界仍会重置。方块实体、
+  计划刻和三种实体的官方 NBT 已经有编解码器并与官方对拍（见 `docs/m3-storage.md`），
+  但还不会写进世界目录。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
   语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
   26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。还没接的差异：天气变暗的天空光（下雨/打雷时官方会改 `getSkyDarken`，进而影响阳光探测器、雪和霜冰的亮度判定）、雷击生成的实体、闪电对避雷针/实体/方块的作用和苦力怕充能，以及天空、雾和云的颜色变化。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
@@ -651,6 +653,17 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- storage <java 路径> [--show N]
+```
+
+区块上层内容的存档 NBT（方块实体、计划刻、三种实体）另有一道对拍：
+`ChunkContentOracle.java` 在 JVM 里逐类型调官方 `BlockEntity.loadStatic` /
+`saveWithFullMetadata`、`SavedTick.codec` / `LevelChunkTicks.pack` 和
+`EntityType.loadEntityRecursive` / `Entity.save`，Bamboo 用 `mc-bamboo-blocks::archive`
+与 `mc-bamboo-storage::chunk_content` 重放，按键比较规范 JSON。实体读取用进程内的假
+世界，不启动服务端、不接受 EULA：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- chunk-content <java 路径> [--show N]
 ```
 
 编解码的耗时和压缩前后字节数（超平坦和内容丰富的合成区块各一份，解码拆成解压、
