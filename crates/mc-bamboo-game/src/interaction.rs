@@ -231,9 +231,10 @@ pub(crate) fn run_random_ticks(region: &mut Region) {
 ///
 /// 官方按 `Long2ByteOpenHashMap` 的哈希顺序遍历，这里按坐标排序。所有区块共用一个随机源，
 /// 所以和官方逐位相同的只有单个区块，几个区块一起跑时每个区块拿到的随机数不一样，概率相同。
-fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
+fn random_ticking_chunks(region: &Region) -> Vec<ChunkPos> {
     if region.tick_levels.enabled() {
-        return region.tick_levels.random_chunks().clone();
+        // 拷一份坐标：`block_level()` 后面要可变借用整个 region。
+        return region.tick_levels.random_chunks().iter().copied().collect();
     }
     let radius = SIMULATION_DISTANCE.min(region.view_distance + 1);
     let mut chunks = BTreeSet::new();
@@ -245,7 +246,7 @@ fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
             }
         }
     }
-    chunks
+    chunks.into_iter().collect()
 }
 
 /// tick 第 8 阶段：每名玩家发 `block_changed_ack`。必须晚于第 5 阶段，`blocks-inventory.md` 4.3。
