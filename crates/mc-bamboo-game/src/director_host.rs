@@ -368,7 +368,9 @@ impl DirectorHost {
                         entry.1 = Desired::new(change.loading.1, change.simulation.1);
                     }
                 }
-                region.tick_levels.level_changed(&changes);
+                region.profiler.time_sub(SubPhase::LevelsUpdate, || {
+                    region.tick_levels.level_changed(&changes);
+                });
             }
             // `Ready` 不用另存一份集合：`ChunkStore::is_loaded` 就是已交付集合，
             // 发区块时直接问它；多存一份只会多一处要保持一致的状态。
