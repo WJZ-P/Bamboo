@@ -1275,11 +1275,16 @@ impl<C: ChunkBundle> Director<C> {
         // 只从「上一轮被挡住」和「这一轮新排的」里挑，不收集整张 `pending`。
         let ids: Vec<TaskId> = std::mem::take(&mut self.submittable)
             .into_iter()
-            .chain(self.pending.keys().copied().filter(|id| {
-                // 新排的任务（刚从 `pending` 之外加进来的）总在末尾，
-                // 用上一轮的最大 id 把它们认出来。
-                *id > self.last_seen_task
-            }))
+            .chain(
+                // 新排的任务编号总在末尾，用范围查询只走这一批的键，
+                // 不把之前积压的整个 `pending` 过滤一遍。
+                self.pending
+                    .range((
+                        std::ops::Bound::Excluded(self.last_seen_task),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .map(|(&id, _)| id),
+            )
             .collect();
         let mut blocked = Vec::new();
         for id in ids {
