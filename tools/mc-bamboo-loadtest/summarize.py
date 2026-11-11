@@ -33,15 +33,25 @@ def parse_reports(path):
         line = ANSI.sub("", raw)
         header = HEADER.search(line)
         if header:
-            current = {"ticks": int(header.group(1)), "phases": {}, "metrics": {}}
+            current = {"ticks": int(header.group(1)), "phases": {}, "metrics": {}, "subs": {}}
             reports.append(current)
             continue
         if current is None:
             continue
+        if line.startswith("phases (by mean)"):
+            current["section"] = "phases"
+            continue
+        if line.startswith("metrics ("):
+            current["section"] = "metrics"
+            continue
+        if line.startswith("sub-phases"):
+            current["section"] = "subs"
+            continue
         phase = PHASE.match(line)
         if phase:
             name = phase.group(1)
-            current["phases"][name] = [float(value) for value in phase.groups()[1:]]
+            section = current.get("section", "phases")
+            current[section][name] = [float(value) for value in phase.groups()[1:]]
             continue
         metric = METRIC.match(line)
         if metric:
@@ -100,6 +110,14 @@ def summarize(root, name):
         mean = weighted([row[1] for row in rows], [row[0] for row in rows])
         phases.append((phase, mean))
     phases.sort(key=lambda item: (-item[1], item[0]))
+    sub_names = set().union(*(report["subs"].keys() for report in steady)) if steady else set()
+    subs = []
+    for sub in sub_names:
+        rows = [report["subs"][sub] for report in steady if sub in report["subs"]]
+        mean = weighted([row[1] for row in rows], [row[0] for row in rows])
+        p99 = weighted([row[4] for row in rows], [row[0] for row in rows])
+        subs.append((sub, mean, p99))
+    subs.sort(key=lambda item: item[0])
 
     def pct(rows, column, w):
         return weighted([row[column] for row in rows], w)
@@ -120,6 +138,7 @@ def summarize(root, name):
         "deviation_p99": pct(deviation, 4, dweights) if deviation else 0.0,
         "spin_us_per_tick": metric_wmean(steady, "tick_spin_us", 1),
         "top": top,
+        "subs": {name: (round(mean, 3), round(p99, 3)) for name, mean, p99 in subs},
         "chunks_per_tick": metric_wmean(steady, "chunks_sent", 1),
         "chunk_latency_p95_us": weighted([row[3] for row in latency], latency_samples)
         if sum(latency_samples) else None,
