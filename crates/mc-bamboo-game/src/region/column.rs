@@ -410,8 +410,10 @@ impl Region {
         if !ready {
             return Err((NotReady, column));
         }
-        self.insert_column_unchecked(pos, column);
+        // 先登记已加载，再插盒子：`insert_column` 里的 `rebind_area`
+        // 按「这一柱已经在了」把 3×3 段状态一次算对，`mark_loaded` 不再重算第二遍。
         self.chunks.mark_loaded(pos);
+        self.insert_column_unchecked(pos, column);
         Ok(())
     }
 

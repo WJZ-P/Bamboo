@@ -13,7 +13,7 @@ use mc_bamboo_protocol::{
 use tracing::warn;
 
 use crate::{
-    chunk_encoding::chunk_frame,
+    chunk_encoding::{ChunkFrameError, chunk_frame},
     inbound::PlayerId,
     links::{Links, PACKET_ERROR},
     player::Player,
@@ -322,7 +322,14 @@ pub(crate) fn send_chunks(region: &mut Region) {
         }
 
         region.links.send(id, &ChunkBatchStart);
+        let mut skipped = 0usize;
         for &pos in &batch {
+            if !region.chunks.is_loaded(pos) {
+                // 区块还没交付是暂时的：这一块跳过，留在待发送集合里下一刻再发。
+                player.chunks.sender.mark_pending(pos);
+                skipped += 1;
+                continue;
+            }
             crate::director_host::assert_view_is_loaded(&region.chunks, pos);
             let frames = match chunk_frame(
                 &mut region.chunk_cache,
@@ -331,6 +338,12 @@ pub(crate) fn send_chunks(region: &mut Region) {
                 pos,
             ) {
                 Ok(frames) => frames,
+                Err(ChunkFrameError::NotLoaded { .. }) => {
+                    // 编码期间刚好注销了：同样跳过、下一刻再发。
+                    player.chunks.sender.mark_pending(pos);
+                    skipped += 1;
+                    continue;
+                }
                 Err(error) => {
                     // 包体超过帧长上限：和 `Links::send` 一样踢掉正在请求它的玩家，
                     // 空帧不缓存也不发，别的玩家照样收自己的批次。
@@ -344,7 +357,7 @@ pub(crate) fn send_chunks(region: &mut Region) {
             region.links.send_shared(id, frames);
         }
         if region.links.is_open(id) {
-            let batch_size = batch.len() as i32;
+            let batch_size = (batch.len() - skipped) as i32;
             region.links.send(id, &ChunkBatchFinished { batch_size });
         }
     }
@@ -960,6 +973,50 @@ mod tests {
                 .any(|frame| frame.id == clientbound::DISCONNECT)
         );
         assert!(server.region().links.is_open(bob.id));
+    }
+
+    /// 区块还没交付时这一个跳过、留在待发送集合里，下一刻再发；不踢玩家。
+    /// 包体超长仍然踢人（另一个测试覆盖）。
+    #[test]
+    fn a_not_loaded_chunk_is_skipped_and_stays_pending() {
+        use mc_bamboo_world::column::ChunkColumn;
+
+        let mut server = Harness::new(2);
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        // 把世界切成已加载模式：先让 Director 交付一批，再手工注销其中一个位置。
+        // 这里用无限模式的 Harness，直接把 store 换成已加载的，避免整局重放。
+        let region = server.region();
+        let mut loaded = ChunkStore::loaded();
+        loaded.load(ORIGIN, Box::new(ChunkColumn::from_template()));
+        loaded.load(chunk(1, 0), Box::new(ChunkColumn::from_template()));
+        region.chunks = loaded;
+        region.template_body = encode_template(&region.chunks);
+        let player = region.players.get_mut(&client.id).expect("玩家在");
+        player.chunks.sender.pending.clear();
+        player.chunks.sender.batch_quota = 64.0;
+        player.chunks.sender.unacknowledged_batches = 0;
+        player.chunks.sender.mark_pending(ORIGIN);
+        player.chunks.sender.mark_pending(chunk(1, 0));
+        // 注销 (1, 0)，只留 ORIGIN 可发。
+        region.chunks.unload(chunk(1, 0)).expect("光照已经算完");
+        send_chunks(region);
+
+        assert!(region.links.is_open(client.id), "区块没加载不该踢人");
+        let sender = &region.players[&client.id].chunks.sender;
+        assert!(
+            sender.is_pending(chunk(1, 0)),
+            "没加载的区块要留在待发送集合里"
+        );
+        assert!(!sender.is_pending(ORIGIN), "已加载的区块照常发出");
+        let frames = client.take_frames();
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame.id == clientbound::DISCONNECT),
+            "不该发断开包"
+        );
     }
 
     #[test]

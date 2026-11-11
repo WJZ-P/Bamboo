@@ -77,7 +77,11 @@ impl Inline {
 
     fn apply(&mut self, effect: Effect<Fake>) -> Option<Event<Fake>> {
         match effect {
-            Effect::Submit { id, task } => Some(self.run_task(id, task)),
+            Effect::Submit {
+                id,
+                generation,
+                task,
+            } => Some(self.run_task(id, generation, task)),
             Effect::ToRegion(message) => {
                 match message {
                     RegionMessage::Deliver {
@@ -103,14 +107,8 @@ impl Inline {
         }
     }
 
-    fn run_task(&mut self, id: TaskId, task: Task<Fake>) -> Event<Fake> {
+    fn run_task(&mut self, id: TaskId, generation: u64, task: Task<Fake>) -> Event<Fake> {
         let pos = task.pos();
-        let generation = self
-            .director
-            .debug_state()
-            .in_flight()
-            .get(&id)
-            .map_or(0, |(_, generation, _)| *generation);
         let result = match task {
             Task::Read { pos } => match self.parked.remove(&pos) {
                 Some(column) => TaskResult::Decoded { column },

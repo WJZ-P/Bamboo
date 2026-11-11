@@ -137,8 +137,13 @@ impl DirectorHost {
             rounds += 1;
             assert!(rounds < 100_000, "Director 的关服循环没有收敛");
             for effect in self.director.handle(event) {
-                if let Effect::Submit { id, task } = effect {
-                    events.push(self.run_task(id, task));
+                if let Effect::Submit {
+                    id,
+                    generation,
+                    task,
+                } = effect
+                {
+                    events.push(self.run_task(id, generation, task));
                 }
             }
         }
@@ -179,7 +184,11 @@ impl DirectorHost {
         effect: Effect<Box<RegionColumn>>,
     ) -> Option<Event<Box<RegionColumn>>> {
         match effect {
-            Effect::Submit { id, task } => Some(self.run_task(id, task)),
+            Effect::Submit {
+                id,
+                generation,
+                task,
+            } => Some(self.run_task(id, generation, task)),
             Effect::Cancel { .. } => None,
             Effect::ToRegion(message) => {
                 self.region_message(message);
@@ -199,15 +208,13 @@ impl DirectorHost {
     }
 
     /// 内联执行器。任务全部是纯函数或内存表操作，不碰文件、不起线程。
-    fn run_task(&mut self, id: TaskId, task: Task<Box<RegionColumn>>) -> Event<Box<RegionColumn>> {
+    fn run_task(
+        &mut self,
+        id: TaskId,
+        generation: u64,
+        task: Task<Box<RegionColumn>>,
+    ) -> Event<Box<RegionColumn>> {
         let pos = task.pos();
-        // 任务里的 generation 由 Director 派发时记下；从在途表里取回。
-        let generation = self
-            .director
-            .debug_state()
-            .in_flight()
-            .get(&id)
-            .map_or(0, |(_, generation, _)| *generation);
         let result = match task {
             // 停放表里是整个盒子（不经过 NBT）。命中就直接当成解码结果交还，
             // 没命中才让 Director 走生成流水线。
@@ -257,7 +264,12 @@ impl DirectorHost {
     /// region 在 tick 边界收信箱：先交付、后收回，返回要回给 Director 的事件。
     fn flush_region_mail(&mut self, region: &mut Region) -> Vec<Event<Box<RegionColumn>>> {
         let mut events = Vec::new();
-        // 交付前把光照跑完：`insert_column` 要求「没有算到一半的轮次」。
+        // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
+        // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
+        if self.deliveries.is_empty() && self.reclaims.is_empty() {
+            return events;
+        }
+        // 交付/收回要求「没有算到一半的轮次」。
         region.chunks.finish_light_updates();
         let deliveries = std::mem::take(&mut self.deliveries);
         for (pos, (generation, column)) in deliveries {
@@ -273,7 +285,6 @@ impl DirectorHost {
                     self.deliveries.insert(pos, (generation, column));
                 }
             }
-            region.chunks.finish_light_updates();
         }
         let reclaims = std::mem::take(&mut self.reclaims);
         if reclaims.is_empty() {
@@ -307,10 +318,11 @@ impl DirectorHost {
 }
 
 /// 已加载模式下，每名玩家视野里的区块必须都已经交付。
-/// 发区块的那一步调用它；调试构建下不满足就 panic。
+/// 发区块的那一步调用它；调试构建下不满足就 panic，
+/// 发布构建由 `chunk_frame` 返回的 `NotLoaded` 错误兜住。
 pub(crate) fn assert_view_is_loaded(store: &mc_bamboo_world::store::ChunkStore, pos: ChunkPos) {
     if store.is_loaded_mode() {
-        assert!(
+        debug_assert!(
             store.is_loaded(pos),
             "区块 ({}, {}) 还没交付就要发给客户端",
             pos.x,

@@ -295,6 +295,8 @@ pub enum RegionMessage<C> {
 pub enum Effect<C> {
     Submit {
         id: TaskId,
+        /// 派发时这条记录的代数，宿主回 `TaskDone` 时原样带回来。
+        generation: u64,
         task: Task<C>,
     },
     Cancel {
@@ -1311,6 +1313,7 @@ impl<C: ChunkBundle> Director<C> {
             self.submitted_this_tick += 1;
             out.push(Effect::Submit {
                 id,
+                generation: pending.generation,
                 task: pending.task,
             });
             let _ = pending.seq;

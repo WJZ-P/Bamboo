@@ -86,14 +86,12 @@ impl Harness {
 
     fn apply(&mut self, effect: Effect<Fake>) {
         match effect {
-            Effect::Submit { id, task } => {
+            Effect::Submit {
+                id,
+                generation,
+                task,
+            } => {
                 let pos = task.pos();
-                let generation = self
-                    .director
-                    .debug_state()
-                    .records()
-                    .get(&pos)
-                    .map_or(0, |record| record.generation);
                 assert!(self.tasks.insert(id, (pos, generation, task)).is_none());
             }
             Effect::Cancel { id } => {
@@ -822,15 +820,12 @@ impl Deferred {
         let effects = self.director.handle(event);
         for effect in &effects {
             match effect {
-                Effect::Submit { id, task } => {
-                    let pos = task.pos();
-                    let generation = self
-                        .director
-                        .debug_state()
-                        .records()
-                        .get(&pos)
-                        .map_or(0, |record| record.generation);
-                    self.tasks.insert(*id, (pos, generation));
+                Effect::Submit {
+                    id,
+                    generation,
+                    task,
+                } => {
+                    self.tasks.insert(*id, (task.pos(), *generation));
                 }
                 Effect::Cancel { id } => {
                     self.tasks.remove(id);

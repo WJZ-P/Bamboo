@@ -131,27 +131,11 @@ impl ChunkStore {
         self.loaded.as_ref().map(HashSet::len)
     }
 
-    /// 只把 `pos` 加进已加载集合，不搬盒子。
-    ///
-    /// 给「先 `insert_column` 装好内容、再登记已加载」的交付路径用；
-    /// 调用方保证盒子已经放好、光照已经算完。
-    pub fn mark_loaded(&mut self, pos: ChunkPos) {
-        if let Some(set) = self.loaded.as_mut() {
-            set.insert(pos);
-        }
-        self.light.add_loaded(pos);
-        let Self {
-            template,
-            edited,
-            loaded,
-            light: engine,
-            ..
-        } = self;
-        engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
-    }
-
     /// 把一个区块束装进已加载集合。调用方保证位置原本没有内容。
     /// 只有已加载模式能调用；无限模式忽略。
+    ///
+    /// 先登记已加载再 `insert_column`：后者重算 3×3 段状态时就能按
+    /// 「这一柱已经在了」算，不需要 `mark_loaded` 再重算第二遍。
     pub fn load(&mut self, pos: ChunkPos, column: Box<crate::column::ChunkColumn>) {
         if self.loaded.is_none() {
             return;
@@ -160,6 +144,17 @@ impl ChunkStore {
         self.light.add_loaded(pos);
         self.insert_column(pos, column)
             .unwrap_or_else(|_| unreachable!("交付前光照已经算完"));
+    }
+
+    /// 只把 `pos` 登记为已加载，不搬盒子。
+    ///
+    /// 给「先 `insert_column` 装好内容、再登记已加载」的交付路径用；
+    /// 交付只此一处，且它只调一次 `rebind_area`（在 `insert_column` 里）。
+    pub fn mark_loaded(&mut self, pos: ChunkPos) {
+        if let Some(set) = self.loaded.as_mut() {
+            set.insert(pos);
+        }
+        self.light.add_loaded(pos);
     }
 
     /// 把区块从已加载集合里整个取走，返回盒子。只有已加载模式能调用。
