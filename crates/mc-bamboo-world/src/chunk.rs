@@ -589,8 +589,12 @@ impl Chunk {
             .map(|(_, tag)| tag)
     }
 
-    /// 读盘时挂上一条原样保留的方块实体条目。坐标和类型都校验过才收。
-    pub(crate) fn put_preserved_block_entity(
+    /// 读盘时挂上一条原样保留的方块实体条目。
+    ///
+    /// 坐标合法才收；类型要和当前类型表一致。坐标在别的区块、或者方块状态已经
+    /// 不是这种方块实体时，官方 `SerializableChunkData.parse` 会把它放进
+    /// `pendingBlockEntities` 并在写盘时原样列出，所以这里也保留，只把类型记成 -1。
+    pub fn put_preserved_block_entity(
         &mut self,
         x: usize,
         y: i32,
@@ -602,9 +606,9 @@ impl Chunk {
             return Err(ColumnPartsError::BadPosition { x, y, z });
         }
         let key = (y, z, x);
-        if self.block_entities.get(&key) == Some(&kind) {
-            self.preserved_block_entities.insert(key, (kind, tag));
-        }
+        let live = self.block_entities.get(&key) == Some(&kind);
+        self.preserved_block_entities
+            .insert(key, (if live { kind } else { -1 }, tag));
         Ok(())
     }
 

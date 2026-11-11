@@ -1642,6 +1642,8 @@ mod tests {
         let section = (world_pos.1 - MIN_Y) as usize / 16;
         parts.sections[section].block_palette = vec![blocks::FURNACE];
         parts.sections[section].block_data.clear();
+        // 手动换掉类型时把保留条目一起丢掉，模拟运行时 set_block 的效果。
+        parts.preserved_block_entities.clear();
         let mut replaced = ChunkColumn::from_parts(parts).expect("组装成功");
         let chunk = replaced.chunk_mut();
         chunk.set_block(3, -60, 5, blocks::FURNACE);

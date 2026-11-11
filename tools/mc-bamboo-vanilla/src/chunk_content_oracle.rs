@@ -57,6 +57,9 @@ struct Response {
     #[serde(default)]
     #[serde(rename = "blockEntities")]
     block_entities: Vec<Vec<String>>,
+    #[serde(default)]
+    #[serde(rename = "writtenNbt")]
+    written_nbt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,6 +396,46 @@ fn run_cases(
         "entity split lost modeled entities",
     );
 
+    // 6. 整块对拍：官方生成（parse -> write）一份区块 NBT，Bamboo 用组装函数
+    //    读成 RegionColumn 再写出，和官方对同一份内容读进去再写出来的结果按键比较。
+    let whole = sample_chunk_nbt();
+    let answer = ask(
+        stdin,
+        lines,
+        json!({"command": "official-chunk", "nbt": encode_b64(&whole)}),
+    )?;
+    report.check(
+        answer.original.is_some() && answer.original == answer.written,
+        "official whole-chunk parse -> write changed the NBT",
+    );
+    let official_bytes = decode_b64(answer.written_nbt.as_deref().unwrap_or_default())?;
+    let (_, official_root) =
+        read_named(&official_bytes, Accounter::unlimited()).map_err(|error| error.to_string())?;
+    let official_tag = Tag::Compound(official_root);
+    let decoded =
+        mc_bamboo_game::region::chunk_content::decode(ChunkPos::new(3, -9), &official_tag, None)
+            .map_err(|error| error.to_string())?;
+    report.check(
+        decoded.problems.is_empty(),
+        format!("whole-chunk decode reported {:?}", decoded.problems),
+    );
+    let reencoded =
+        mc_bamboo_game::region::chunk_content::encode(&decoded.column, ChunkPos::new(3, -9))
+            .map_err(|error| error.to_string())?;
+    let canonical_official = canonical_tag(&official_tag);
+    let canonical_bamboo = canonical_tag(&reencoded.chunk);
+    report.check(
+        canonical_official == canonical_bamboo,
+        format!(
+            "Bamboo whole-chunk decode -> encode differs from the official result: {}",
+            first_difference(&canonical_official, &canonical_bamboo)
+        ),
+    );
+    report.check(
+        reencoded.entities.is_none(),
+        "empty entity file should not be written",
+    );
+
     // 6. 官方区块 NBT：Bamboo 写的 `components`/`keepPacked` 能被
     //    `SerializableChunkData.parse -> write` 原样带回。
     let chunk = sample_chunk_nbt();
@@ -616,6 +659,31 @@ fn sample_chunk_nbt() -> Vec<u8> {
 }
 
 /// 按 NBT 类型还原官方 canonical JSON，复合标签按键排序（serde_json::Map 默认 BTreeMap）。
+fn first_difference(left: &Value, right: &Value) -> String {
+    if left == right {
+        return "equal".to_owned();
+    }
+    match (left, right) {
+        (Value::Object(a), Value::Object(b)) => {
+            for key in a.keys().chain(b.keys()) {
+                match (a.get(key), b.get(key)) {
+                    (Some(a), Some(b)) if a != b => {
+                        return format!("{key}: {}", first_difference(a, b));
+                    }
+                    (None, _) => return format!("{key} missing on the official side"),
+                    (_, None) => return format!("{key} missing on the Bamboo side"),
+                    _ => {}
+                }
+            }
+            "objects differ".to_owned()
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            format!("lists of {} vs {}", a.len(), b.len())
+        }
+        _ => format!("{left} vs {right}"),
+    }
+}
+
 fn canonical_tag(tag: &Tag) -> Value {
     match tag {
         Tag::Byte(value) => json!({"type": 1, "value": value.to_string()}),
@@ -699,6 +767,10 @@ fn canonical_from_json(value: &Value) -> Option<Tag> {
 
 fn encode_b64(bytes: &[u8]) -> String {
     crate::storage_oracle::encode_b64(bytes)
+}
+
+fn decode_b64(text: &str) -> Result<Vec<u8>, String> {
+    crate::storage_oracle::decode_b64(text)
 }
 
 #[allow(dead_code, reason = "展示时统计用")]

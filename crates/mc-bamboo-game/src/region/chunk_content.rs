@@ -81,7 +81,7 @@ pub struct DecodedChunk {
 pub fn encode(column: &RegionColumn, pos: ChunkPos) -> Result<EncodedChunk, Error> {
     let view = column.parts();
     let mut problems = Vec::new();
-    let mut modeled_ids = Vec::new();
+    let mut modeled_ids: Vec<&str> = Vec::new();
 
     // 1. 按位置把每种方块实体建模的键攒起来。
     let mut modeled = Vec::new();
@@ -122,7 +122,21 @@ pub fn encode(column: &RegionColumn, pos: ChunkPos) -> Result<EncodedChunk, Erro
         }
         modeled.push(entry);
     }
-    let raw = decode_raw_block_entities(column, pos);
+    // 原始条目挂在 ChunkColumn 里，按位置跟类型表走。
+    // 官方读盘时把坐标和方块状态不符的条目留在 pendingBlockEntities，
+    // 写盘时仍整条列出；下面的合并规则会原样带回这些条目。
+    // 不认识的 id、以及官方 pending 的孤立条目要整条原样写回；
+    // 只有当前确实建模的 id 才参与「方块没了就丢」的规则。
+    let raw: Vec<Tag> = decode_raw_block_entities(column, pos)
+        .into_iter()
+        .filter(|tag| {
+            view.column.chunk().block_entities().any(|entity| {
+                let x = pos.x * 16 + entity.x as i32;
+                let z = pos.z * 16 + entity.z as i32;
+                Some((x, entity.y, z)) == tag_position_of(tag)
+            }) || !modeled_ids.contains(&id_of_raw(tag).unwrap_or(""))
+        })
+        .collect();
     let merged = merge_block_entities(modeled, &raw, &modeled_ids)?;
 
     // 2. 计划刻：两条列表混进 ChunkEncodeExtra。
@@ -210,12 +224,22 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
             });
             continue;
         };
-        let state =
-            parts
-                .column
-                .chunk()
-                .block((x - pos.x * 16) as usize, y, (z - pos.z * 16) as usize);
-        let state = BlockState(state);
+        let local_x = x - pos.x * 16;
+        let local_z = z - pos.z * 16;
+        let state = if (0..16).contains(&local_x)
+            && (0..16).contains(&local_z)
+            && (mc_bamboo_world::MIN_Y..mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT)
+                .contains(&y)
+        {
+            BlockState(
+                parts
+                    .column
+                    .chunk()
+                    .block(local_x as usize, y, local_z as usize),
+            )
+        } else {
+            BlockState::AIR
+        };
         match create_block_entity(id, world_pos, state, tag) {
             Ok(Some(entity)) => live.push(entity),
             Ok(None) => {}
@@ -269,6 +293,29 @@ pub fn decode(pos: ChunkPos, chunk: &Tag, entities: Option<&Tag>) -> Result<Deco
 
 /// 读盘时给实体重新分配的第一号 ID，和 `EntityStore` 的默认一致。
 const FIRST_UID: i32 = 1 << 24;
+
+fn id_of_raw(tag: &Tag) -> Option<&str> {
+    match field(tag, "id") {
+        Some(Tag::String(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn tag_position_of(tag: &Tag) -> Option<(i32, i32, i32)> {
+    let x = match field(tag, "x")? {
+        Tag::Int(v) => *v,
+        _ => return None,
+    };
+    let y = match field(tag, "y")? {
+        Tag::Int(v) => *v,
+        _ => return None,
+    };
+    let z = match field(tag, "z")? {
+        Tag::Int(v) => *v,
+        _ => return None,
+    };
+    Some((x, y, z))
+}
 
 fn decode_raw_block_entities(column: &RegionColumn, pos: ChunkPos) -> Vec<Tag> {
     let mut out = Vec::new();
