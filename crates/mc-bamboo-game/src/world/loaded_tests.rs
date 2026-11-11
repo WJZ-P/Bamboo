@@ -498,7 +498,7 @@ fn an_item_freezes_outside_the_entity_ticking_range_and_resumes() {
 /// 模拟距离小于视距：视野里、模拟距离外的区块确实发给了客户端，但不 tick。
 #[test]
 fn chunks_beyond_the_simulation_distance_are_sent_but_do_not_tick() {
-    use crate::world::tests::{chunk_position, frames_with_id, received_chunks};
+    use crate::world::tests::{frames_with_id, received_chunks};
     use mc_bamboo_data::packets::play::clientbound;
 
     let mut server = Harness::new_loaded(5);
@@ -520,7 +520,6 @@ fn chunks_beyond_the_simulation_distance_are_sent_but_do_not_tick() {
             break;
         }
     }
-    let _ = chunk_position;
     let region = server.world_region();
     // 模拟距离 2：方块逻辑只到半径 3、实体只到半径 2；视野半径 5 里
     // 更外面的那些区块全都发给了客户端，但一套 tick 都不跑。

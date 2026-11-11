@@ -82,9 +82,7 @@ pub enum LevelClassification {
     LevelOnly,
 }
 
-/// 一个等级有没有跨过 31 / 32 / 33 的 tick 边界。
-/// 交付中的区块也可能从 31 一步跳到 34 以上（撤票、传送），这时同样得通知 region
-/// 换档，否则它会把已经没票、正在等收回的区块继续当能 tick 的区块。
+/// 一个等级属于 31 / 32 / 33 划分的哪一档。34 以上（含无票）统一算第四档。
 fn tick_tier(level: i32) -> u8 {
     // 33 是完工但不 tick，32 是方块 tick，31 及以内是实体 tick。
     if level > 33 {
@@ -99,7 +97,7 @@ fn tick_tier(level: i32) -> u8 {
 }
 
 /// 任一套等级有没有跨过 31 / 32 / 33 的 tick 边界。
-pub fn tick_changed(change: LevelChange) -> bool {
+fn tick_changed(change: LevelChange) -> bool {
     let (old_level, new_level) = change.loading;
     let (old_sim, new_sim) = change.simulation;
     tick_tier(old_level) != tick_tier(new_level) || tick_tier(old_sim) != tick_tier(new_sim)
