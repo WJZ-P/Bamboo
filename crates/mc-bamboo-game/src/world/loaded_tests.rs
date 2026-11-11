@@ -573,8 +573,9 @@ fn random_players_keep_the_footprint_loaded_and_converge() {
 #[ignore = "手动测量：--ignored --nocapture"]
 fn measure_join_tick_and_view_latency() {
     const BUDGETS: [usize; 4] = [0, 16, 64, 256];
-    let mut results: Vec<Vec<(u64, f64, f64, usize, usize)>> =
-        BUDGETS.iter().map(|_| Vec::new()).collect();
+    /// 一次测量：(总耗时 us, 交付阶段 us, 发区块阶段 us, 交付个数, 收齐刻数)。
+    type Sample = (u64, f64, f64, usize, usize);
+    let mut results: Vec<Vec<Sample>> = BUDGETS.iter().map(|_| Vec::new()).collect();
     // 前两轮预热，后五轮取中位数；每轮按正序/逆序交替，抵消一次性开销的方向。
     for round in 0..7 {
         let order: Vec<usize> = if round % 2 == 0 {
@@ -632,7 +633,7 @@ fn measure_join_tick_and_view_latency() {
         }
     }
     for (&budget, samples) in BUDGETS.iter().zip(&mut results) {
-        samples.sort_by(|a, b| a.0.cmp(&b.0));
+        samples.sort_by_key(|sample| sample.0);
         let (join_us, _, _, delivered, _) = samples[2];
         let mut delivery: Vec<f64> = samples.iter().map(|&(_, d, _, _, _)| d).collect();
         delivery.sort_by(|a, b| a.total_cmp(b));
