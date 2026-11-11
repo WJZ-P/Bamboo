@@ -149,6 +149,29 @@ impl Engines {
         self.changes.clear(pos);
     }
 
+    /// 搬区块柱之后重算引擎这份的 `sectionStates`。邻居柱里补建了数据层的段记成
+    /// 要发给客户端的变化：正在看那些区块的玩家手里少这一段。被搬的那一柱自己不记，
+    /// 它整个随区块包发出去。返回天空光和方块光各自补建了数据层的段。
+    pub(super) fn rebind_area(
+        &mut self,
+        pos: ChunkPos,
+        chunks: super::Chunks<'_>,
+    ) -> [Vec<SectionPos>; 2] {
+        let sky = self.sky.storage.rebind_area(pos, chunks);
+        let block = self.block.storage.rebind_area(pos, chunks);
+        for (layer, sections) in [(LightLayer::Sky, &sky), (LightLayer::Block, &block)] {
+            self.changes.mark(
+                layer,
+                sections
+                    .iter()
+                    .copied()
+                    .filter(|section| section.chunk() != pos)
+                    .collect(),
+            );
+        }
+        [sky, block]
+    }
+
     /// `onLightUpdate`。
     fn collect_changes(&mut self, layer: LightLayer) {
         let engine = match layer {
@@ -195,10 +218,17 @@ impl Visible {
         Self { sky, block }
     }
 
-    /// 区块束搬进/搬出之后重算别人读的那份里的 `sectionStates`。
-    pub(super) fn rebind_area(&mut self, pos: ChunkPos, chunks: super::Chunks<'_>) {
-        self.sky.rebind_area(pos, chunks);
-        self.block.rebind_area(pos, chunks);
+    /// 区块束搬进/搬出之后重算别人读的那份里的 `sectionStates`，补建的数据层和引擎那份相同。
+    /// 返回天空光和方块光各自补建了数据层的段。
+    pub(super) fn rebind_area(
+        &mut self,
+        pos: ChunkPos,
+        chunks: super::Chunks<'_>,
+    ) -> [Vec<SectionPos>; 2] {
+        [
+            self.sky.rebind_area(pos, chunks),
+            self.block.rebind_area(pos, chunks),
+        ]
     }
 
     /// 取出一个区块柱在给别人读的那份里的天空光和方块光。

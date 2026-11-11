@@ -277,12 +277,18 @@ impl LevelLight {
     /// 8 个邻居柱的 `sectionStates`，照官方 `initializeLight` / `updateChunkStatus`
     /// 登记和注销段状态。盒子里带的来源世界计数不跨世界沿用。
     ///
-    /// 只在光照全部算完时调用；两层和「正在算 / 给别人读」两份都要更新。
+    /// 状态非 0 却没有光照数据层的段会补建一层（见 `LightStorage::rebind_area`），
+    /// 邻居柱里补建的段记进 [`take_changes`](Self::take_changes)。
+    ///
+    /// 只在光照全部算完时调用；两层和「正在算 / 给别人读」两份都要更新，补建的内容相同。
     pub(crate) fn rebind_area(&mut self, pos: ChunkPos, chunks: Chunks<'_>) {
         debug_assert!(self.ready_to_move_columns(), "搬区块束之前要先把光照跑完");
-        self.engines.sky.storage.rebind_area(pos, chunks);
-        self.engines.block.storage.rebind_area(pos, chunks);
-        self.visible.rebind_area(pos, chunks);
+        let engines = self.engines.rebind_area(pos, chunks);
+        let visible = self.visible.rebind_area(pos, chunks);
+        debug_assert!(
+            engines == visible,
+            "算完以后引擎和别人读到的光照存着同样的段，补建的也该相同"
+        );
     }
 
     /// 上次取走以后光照变了的区块和段。
