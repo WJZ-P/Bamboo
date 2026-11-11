@@ -931,7 +931,7 @@ mod tests {
         assert!(!store.is_empty());
 
         let boxed = store.take_chunk(ChunkPos::new(0, 0)).unwrap();
-        assert_eq!(boxed.preserved(), &[cow.clone()]);
+        assert_eq!(boxed.preserved(), std::slice::from_ref(&cow));
         let moved = std::thread::spawn(move || boxed).join().unwrap();
         assert!(!moved.is_empty());
         store.insert_chunk(moved);
