@@ -68,6 +68,7 @@ mod region;
 mod scoreboard;
 mod secure_chat;
 mod sign;
+mod tick_levels;
 mod weather;
 mod world;
 mod world_state;

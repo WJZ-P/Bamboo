@@ -83,6 +83,8 @@ pub enum LevelClassification {
 }
 
 /// 一个等级有没有跨过 31 / 32 / 33 的 tick 边界。
+/// 交付中的区块也可能从 31 一步跳到 34 以上（撤票、传送），这时同样得通知 region
+/// 换档，否则它会把已经没票、正在等收回的区块继续当能 tick 的区块。
 fn tick_tier(level: i32) -> u8 {
     // 33 是完工但不 tick，32 是方块 tick，31 及以内是实体 tick。
     if level > 33 {
@@ -96,6 +98,13 @@ fn tick_tier(level: i32) -> u8 {
     }
 }
 
+/// 任一套等级有没有跨过 31 / 32 / 33 的 tick 边界。
+pub fn tick_changed(change: LevelChange) -> bool {
+    let (old_level, new_level) = change.loading;
+    let (old_sim, new_sim) = change.simulation;
+    tick_tier(old_level) != tick_tier(new_level) || tick_tier(old_sim) != tick_tier(new_sim)
+}
+
 /// `LevelChange` 的过滤：把 34..44 的等级量化到四个生成阶段档，0..=33 是第五档。
 ///
 /// 加载和模拟两套等级都要看：任一套跨过 31/32/33 边界就要通知 region，
@@ -104,18 +113,15 @@ fn tick_tier(level: i32) -> u8 {
 /// 区块数成正比。
 pub fn classify(change: LevelChange) -> LevelClassification {
     let (old_level, new_level) = change.loading;
-    let (old_sim, new_sim) = change.simulation;
     let old = generation_status(old_level);
     let new = generation_status(new_level);
-    let tick_changed =
-        tick_tier(old_level) != tick_tier(new_level) || tick_tier(old_sim) != tick_tier(new_sim);
     if new.is_none() {
         LevelClassification::Unload
     } else if old.is_none() {
         LevelClassification::Load
     } else if old_level <= 33 && new_level <= 33 {
         // 两边都是完工区块：只可能换 tick 级别，不重跑流水线。
-        if tick_changed {
+        if tick_changed(change) {
             LevelClassification::LevelOnly
         } else {
             LevelClassification::Noop
@@ -671,27 +677,31 @@ impl<C: ChunkBundle> Director<C> {
     fn consume_level_changes(&mut self, out: &mut Vec<Effect<C>>) {
         let mut changes: Vec<LevelChange> = self.tickets.run_updates().to_vec();
         changes.sort_unstable_by_key(|change| (change.pos.x, change.pos.z));
-        let mut level_only = Vec::new();
+        let mut level_changed = Vec::new();
         for change in changes {
             let class = classify(change);
+            // 任一套等级跨了 tick 档，都要告诉 region：交付中的区块撤票时会从 31
+            // 一步跳到 34 以上，归到 Unload/Demote 而不是 LevelOnly，但 region 里
+            // 那份档位照样要降下来（它还会等 100 刻才被收回）。没交付的位置也报，
+            // region 只记下档位，等 Deliver 时用最新值。
+            if tick_changed(change) {
+                level_changed.push(change);
+            }
             // 只碰报出来的位置：半成生成记录的等级变化时同样在 `run_updates()`
             // 的列表里，用变化里的两个新分量直接更新，不必再查两次票表。
             self.refresh_desired(change);
             match class {
                 LevelClassification::Noop => self.filtered += 1,
-                LevelClassification::LevelOnly => {
-                    self.acted += 1;
-                    level_only.push(change);
-                }
+                LevelClassification::LevelOnly => self.acted += 1,
                 class => {
                     self.acted += 1;
                     self.apply_level_change(out, change, class);
                 }
             }
         }
-        if !level_only.is_empty() {
+        if !level_changed.is_empty() {
             out.push(Effect::ToRegion(RegionMessage::LevelChanged {
-                changes: level_only,
+                changes: level_changed,
             }));
         }
     }
