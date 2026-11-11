@@ -4,7 +4,10 @@
 //! 放回的方块实体排到运行顺序末尾。所以计划刻按（时刻，优先级，位置）排序后比较，
 //! 方块实体按位置排序后比较，再看继续跑若干刻以后的方块和容器内容。
 
-use std::{any::TypeId, collections::BTreeSet};
+use std::{
+    any::TypeId,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::{
     command_block::CommandBlockData,
@@ -339,6 +342,145 @@ fn run(server: &mut Harness, ticks: usize) {
     for _ in 0..ticks {
         server.tick();
     }
+}
+
+/// 存档组装：用游戏逻辑造内容，取出盒子 → 编码 → 解码 → 放回另一个 region，
+/// 再和没经过编码的对照 region 跑若干刻，逐刻比较行为。
+///
+/// 官方不存的状态（火把抖动表、`dead` / `recheck_at`）按文档回到初值，
+/// 所以对照 region 在编码前也把它们清掉；`update tag` 读回后用放置方块时的
+/// 同一条路径重新生成。
+#[test]
+fn archive_round_trip_keeps_machines_ticks_and_items_running() {
+    use crate::region::chunk_content::{decode, encode};
+
+    let (mut source, mut direct) = pair();
+    run(&mut source, 2);
+    run(&mut direct, 2);
+    settle_light(source.region());
+    settle_light(direct.region());
+
+    // 清掉官方不存的状态，让对照 region 与存档往返后一样。
+    for region in [source.region(), direct.region()] {
+        region.redstone.clear_torch_toggles();
+        for entry in region.containers.values_mut() {
+            entry.dead = false;
+            entry.recheck_at = None;
+        }
+    }
+
+    let boxes = source
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let original = boxes.get(&CHUNK).expect("盒子存在");
+    let encoded = encode(original, CHUNK).expect("编码成功");
+    let decoded = decode(CHUNK, &encoded.chunk, encoded.entities.as_ref()).expect("解码成功");
+    assert!(
+        decoded.problems.is_empty(),
+        "解码报告了问题：{:?}",
+        decoded.problems
+    );
+
+    let mut target = Harness::new(2);
+    {
+        let region = target.region();
+        region.chunks.finish_light_updates();
+        assert!(region.ready_to_move_columns());
+    }
+    target
+        .region()
+        .insert_column(CHUNK, decoded.column)
+        .expect("放回成功");
+    // 读盘后按组件重新生成客户端用的 update tag；对照 region 也走同一条路径。
+    for region in [target.region(), direct.region()] {
+        crate::block_items::refresh_update_tag(region, CHEST);
+    }
+    settle_light(target.region());
+    settle_light(direct.region());
+    run(&mut target, 6);
+    run(&mut direct, 6);
+    settle_light(target.region());
+    settle_light(direct.region());
+    // 逐项比行为，定位差别；官方不存的状态已在上面清掉。
+    let target_readings = readings(target.region());
+    let direct_readings = readings(direct.region());
+    // 光照在 32×8 范围里跨区块传播；存档往返只装回 (0,0)，
+    // 相邻区块不在盒子里，所以只比这个区块自己的 16×8 窗口。
+    let first_diff = target_readings
+        .iter()
+        .zip(&direct_readings)
+        .enumerate()
+        .filter(|(index, (a, b))| {
+            let point = index / 10;
+            let x = point / 24;
+            x < 16 && a != b
+        })
+        .map(|(index, _)| index)
+        .next()
+        .unwrap_or(usize::MAX);
+    assert_eq!(
+        first_diff,
+        usize::MAX,
+        "方块/光照不同，第一处差别在字节 {first_diff}: {:?} vs {:?}",
+        &target_readings
+            [first_diff.saturating_sub(12)..(first_diff + 12).min(target_readings.len())],
+        &direct_readings
+            [first_diff.saturating_sub(12)..(first_diff + 12).min(direct_readings.len())]
+    );
+
+    assert_eq!(
+        block_items(target.region()),
+        block_items(direct.region()),
+        "组件不同"
+    );
+    // 目标 region 的时钟从 0 开始，源/对照跑了 2 刻；相对延迟要按目标时钟换算。
+    let target_ticks = scheduled(target.region());
+    let direct_ticks = scheduled(direct.region());
+    let shift = (direct.region().tick.0 - target.region().tick.0) as i64;
+    let shifted: (Vec<Tick>, Vec<FluidTick>) = (
+        target_ticks
+            .0
+            .iter()
+            .map(|&(at, priority, pos, block)| (at + shift, priority, pos, block))
+            .collect(),
+        target_ticks
+            .1
+            .iter()
+            .map(|&(at, priority, pos, fluid)| (at + shift, priority, pos, fluid))
+            .collect(),
+    );
+    assert_eq!(shifted, direct_ticks, "计划刻不同");
+    assert_eq!(
+        containers(
+            target
+                .region()
+                .containers
+                .iter()
+                .map(|(&p, e)| (p, e.clone()))
+        ),
+        containers(
+            direct
+                .region()
+                .containers
+                .iter()
+                .map(|(&p, e)| (p, e.clone()))
+        ),
+        "容器不同"
+    );
+    assert_eq!(
+        entities(target.region()),
+        entities(direct.region()),
+        "机器状态不同"
+    );
+}
+
+fn block_items(region: &Region) -> BTreeMap<BlockPos, String> {
+    region
+        .block_items
+        .iter()
+        .map(|(&pos, patch)| (pos, format!("{patch:?}")))
+        .collect()
 }
 
 #[test]

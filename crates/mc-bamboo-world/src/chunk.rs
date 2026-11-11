@@ -358,6 +358,30 @@ pub struct BlockEntity {
     pub kind: i32,
 }
 
+/// 读盘时原样保留的区块顶层信息（D9）。这些不是运行时的方块状态，
+/// 但下一次写盘要按键原样带回；跟着 `Chunk` 一起在 store 和盒子之间搬。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChunkArchiveMeta {
+    pub last_update: i64,
+    pub inhabited_time: i64,
+    pub preserved: Vec<(String, Tag)>,
+    pub structures: Option<Tag>,
+    pub post_processing: Option<Tag>,
+    pub raw_heightmaps: Option<Vec<(String, Tag)>>,
+}
+
+impl ChunkArchiveMeta {
+    /// 模板区块没有任何读盘带来的附加信息。
+    pub fn is_default(&self) -> bool {
+        self.last_update == 0
+            && self.inhabited_time == 0
+            && self.preserved.is_empty()
+            && self.structures.is_none()
+            && self.post_processing.is_none()
+            && self.raw_heightmaps.is_none()
+    }
+}
+
 /// 一个区块。
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -375,6 +399,7 @@ pub struct Chunk {
     /// 读盘时原样保留的方块实体条目（D9），按位置挂在类型表旁边。
     /// 值是当时的类型 ID 和整条复合标签；换类型或删掉方块时一起丢。
     preserved_block_entities: BTreeMap<(i32, usize, usize), (i32, Tag)>,
+    archive: ChunkArchiveMeta,
     sky_light_sources: SkyLightSources,
 }
 
@@ -388,6 +413,7 @@ impl Chunk {
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
             preserved_block_entities: BTreeMap::new(),
+            archive: ChunkArchiveMeta::default(),
             sky_light_sources: SkyLightSources::default(),
         }
     }
@@ -448,6 +474,7 @@ impl Chunk {
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
             preserved_block_entities: BTreeMap::new(),
+            archive: ChunkArchiveMeta::default(),
             sky_light_sources: SkyLightSources::default(),
         };
         chunk.initialize_light_sources();
@@ -588,6 +615,16 @@ impl Chunk {
         self.preserved_block_entities
             .iter()
             .map(|(&(y, z, x), &(kind, ref tag))| (x, y, z, kind, tag))
+    }
+
+    /// 读盘带来的顶层附加信息。
+    pub fn archive(&self) -> &ChunkArchiveMeta {
+        &self.archive
+    }
+
+    /// 读盘组装时写入顶层附加信息。
+    pub fn set_archive(&mut self, archive: ChunkArchiveMeta) {
+        self.archive = archive;
     }
 
     /// 写入方块实体要发给客户端的 NBT。`None` 表示这一格没有要发的内容。

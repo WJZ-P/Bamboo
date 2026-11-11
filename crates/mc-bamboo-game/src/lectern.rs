@@ -57,7 +57,7 @@ pub(crate) struct Tables {
 
 /// 放在讲台上的那一本。`page` 为 -1 只出现在总页数是 0 的夹取之后。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Book {
+pub struct Book {
     stack: ItemStack,
     page: i32,
     page_count: i32,
@@ -70,6 +70,23 @@ pub(crate) struct Book {
 }
 
 impl Book {
+    /// 存档解码用；`page_count` / `has_content` 由书重新算，`facing` 从方块状态推。
+    pub fn from_archive(stack: ItemStack, page: i32, facing: Direction) -> Self {
+        let facts = crate::book::placed_book(&stack);
+        Self {
+            stack,
+            page: page.clamp(0, facts.page_count.saturating_sub(1).max(0)),
+            page_count: facts.page_count,
+            has_content: facts.has_content,
+            facing,
+        }
+    }
+
+    /// 存档编码用：书和当前页的只读快照。
+    pub fn archive(&self) -> (&ItemStack, i32) {
+        (&self.stack, self.page)
+    }
+
     /// 测试里直接摆一本有内容的书，不用走玩家右键的路径。
     #[cfg(test)]
     pub(crate) fn for_tests(

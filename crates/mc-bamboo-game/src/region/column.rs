@@ -26,7 +26,7 @@ use crate::{
 ///
 /// 调用方要等到 tick 边界再来，见 [`Region::ready_to_move_columns`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NotReady;
+pub struct NotReady;
 
 impl fmt::Display for NotReady {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -47,7 +47,7 @@ impl std::error::Error for NotReady {}
 /// 跨区块双箱的两半各按自己的 `pos.chunk()` 装进不同盒子，所以一批要搬的区块还得是
 /// 一整片互相相邻的区块，和下层 `sectionStates` 邻居段计数的要求一致。
 #[derive(Debug)]
-pub(crate) struct RegionColumn {
+pub struct RegionColumn {
     /// 方块、高度图、方块实体类型、告示牌、`update tag` 和两层光照。
     column: Box<ChunkColumn>,
     /// 方块和流体的计划刻。`None` 表示这个区块没排着刻。
@@ -102,9 +102,51 @@ impl Parts {
 /// 容器条目里 `recheck_at` 换成相对剩余刻数（绝对时刻在盒子里清掉），
 /// 跨到时钟不同的 region 时保持剩余寿命。其余字段原样带走。
 #[derive(Debug, Clone)]
-pub(crate) struct PackedContainer {
-    entry: ContainerEntry,
-    recheck_in: Option<u64>,
+pub struct PackedContainer {
+    pub(crate) entry: ContainerEntry,
+    pub(crate) recheck_in: Option<u64>,
+}
+
+impl PackedContainer {
+    /// 存档解码用：官方不存开合计数和 `recheck_at`，按新建条目填默认值。
+    pub fn new(entry: ContainerEntry) -> Self {
+        Self {
+            entry,
+            recheck_in: None,
+        }
+    }
+
+    /// 这一格的容器内容。
+    pub fn entry(&self) -> &ContainerEntry {
+        &self.entry
+    }
+}
+
+/// 从存档组装一个区块束所需的部件。
+#[derive(Debug)]
+pub struct RegionColumnParts {
+    pub column: Box<ChunkColumn>,
+    pub ticks: Option<ChunkTicks>,
+    pub block_entities: ChunkBlockEntities,
+    pub redstone: ChunkRedstone,
+    pub containers: BTreeMap<BlockPos, PackedContainer>,
+    pub block_items: BTreeMap<BlockPos, ComponentPatch>,
+    pub command_blocks: BTreeMap<BlockPos, CommandBlockData>,
+    pub books: BTreeMap<BlockPos, Book>,
+    pub entities: ChunkEntities,
+}
+
+/// [`RegionColumn::parts`] 的只读视图。
+pub struct RegionColumnView<'a> {
+    pub column: &'a ChunkColumn,
+    pub ticks: Option<&'a ChunkTicks>,
+    pub block_entities: &'a ChunkBlockEntities,
+    pub redstone: &'a ChunkRedstone,
+    pub containers: &'a BTreeMap<BlockPos, PackedContainer>,
+    pub block_items: &'a BTreeMap<BlockPos, ComponentPatch>,
+    pub command_blocks: &'a BTreeMap<BlockPos, CommandBlockData>,
+    pub books: &'a BTreeMap<BlockPos, Book>,
+    pub entities: &'a ChunkEntities,
 }
 
 /// 判断「原样」用的生成器输出盒子。全局缓存一份，构造时算一次模板光照。
@@ -163,6 +205,36 @@ impl RegionColumn {
             command_blocks: BTreeMap::new(),
             books: BTreeMap::new(),
             entities: ChunkEntities::default(),
+        }
+    }
+
+    /// 从部件造一个区块束。存档解码和 Director 的加载流水线用；字段仍保持私有。
+    pub fn from_parts(parts: RegionColumnParts) -> Box<Self> {
+        Box::new(Self {
+            column: parts.column,
+            ticks: parts.ticks,
+            block_entities: parts.block_entities,
+            redstone: parts.redstone,
+            containers: parts.containers,
+            block_items: parts.block_items,
+            command_blocks: parts.command_blocks,
+            books: parts.books,
+            entities: parts.entities,
+        })
+    }
+
+    /// 存档编码用的只读部件视图。
+    pub fn parts(&self) -> RegionColumnView<'_> {
+        RegionColumnView {
+            column: &self.column,
+            ticks: self.ticks.as_ref(),
+            block_entities: &self.block_entities,
+            redstone: &self.redstone,
+            containers: &self.containers,
+            block_items: &self.block_items,
+            command_blocks: &self.command_blocks,
+            books: &self.books,
+            entities: &self.entities,
         }
     }
 

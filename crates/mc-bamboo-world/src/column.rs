@@ -14,7 +14,7 @@ use mc_bamboo_nbt::Tag;
 
 use crate::{
     SECTION_COUNT,
-    chunk::{Chunk, HeightmapKind, Section},
+    chunk::{Chunk, ChunkArchiveMeta, HeightmapKind, Section},
     light::{DataLayer, LIGHT_SECTION_COUNT, LightColumn, MIN_LIGHT_SECTION, SectionPos},
     palette::{PackedError, PalettedContainer},
 };
@@ -66,6 +66,8 @@ pub struct ChunkColumnParts {
     pub update_tags: Vec<(usize, i32, usize, Vec<u8>)>,
     /// 原样保留的方块实体条目：区块内 x、世界 y、区块内 z、类型 ID 和整条复合标签。
     pub preserved_block_entities: Vec<(usize, i32, usize, i32, Tag)>,
+    /// 读盘带来的顶层附加信息。
+    pub archive: ChunkArchiveMeta,
 }
 
 /// 磁盘数据不能组装成一个区块束。
@@ -97,6 +99,7 @@ impl Default for ChunkColumnParts {
             signs: Vec::new(),
             update_tags: Vec::new(),
             preserved_block_entities: Vec::new(),
+            archive: ChunkArchiveMeta::default(),
         }
     }
 }
@@ -161,6 +164,7 @@ impl ChunkColumnParts {
             signs,
             update_tags,
             preserved_block_entities,
+            archive: column.chunk.archive().clone(),
         }
     }
 }
@@ -231,6 +235,7 @@ impl ChunkColumn {
         for (x, y, z, kind, tag) in parts.preserved_block_entities {
             chunk.put_preserved_block_entity(x, y, z, kind, tag)?;
         }
+        chunk.set_archive(parts.archive);
         let mut has_blocks = [false; LIGHT_SECTION_COUNT];
         for (index, section) in chunk.sections().iter().enumerate() {
             has_blocks[index + 1] = !section.is_empty();
@@ -295,6 +300,7 @@ impl ChunkColumn {
             && mine.signs == theirs.signs
             && mine.update_tags == theirs.update_tags
             && mine.preserved_block_entities == theirs.preserved_block_entities
+            && mine.archive == theirs.archive
     }
 
     /// `getDataLayerData`：一个光照段存的数据，没存时是 `None`。

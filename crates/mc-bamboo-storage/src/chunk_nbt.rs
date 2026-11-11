@@ -676,6 +676,7 @@ fn write_block_entity(
 /// 把一个区块束编码成带名字的根标签。
 pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag, ChunkNbtError> {
     let parts = ChunkColumnParts::read_from(column);
+    let archive = column.chunk().archive();
     let light_on = column.light_on();
     let mut root = Vec::new();
     put(&mut root, "DataVersion", Tag::Int(version::DATA_VERSION));
@@ -791,10 +792,15 @@ pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag,
     let post_processing = extra
         .post_processing
         .clone()
+        .or_else(|| archive.post_processing.clone())
         .unwrap_or_else(|| Tag::List((0..SECTION_COUNT).map(|_| Tag::List(Vec::new())).collect()));
     put(&mut root, "PostProcessing", post_processing);
 
-    let heightmaps = match &extra.raw_heightmaps {
+    let heightmaps = match extra
+        .raw_heightmaps
+        .as_ref()
+        .or(archive.raw_heightmaps.as_ref())
+    {
         Some(raw) => raw.clone(),
         None => {
             let mut maps = Vec::new();
@@ -815,14 +821,18 @@ pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag,
         }
     };
     put(&mut root, "Heightmaps", compound(heightmaps));
-    let structures = extra.structures.clone().unwrap_or_else(|| {
-        compound(
-            EMPTY_STRUCTURES
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), value.clone()))
-                .collect(),
-        )
-    });
+    let structures = extra
+        .structures
+        .clone()
+        .or_else(|| archive.structures.clone())
+        .unwrap_or_else(|| {
+            compound(
+                EMPTY_STRUCTURES
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                    .collect(),
+            )
+        });
     put(&mut root, "structures", structures);
 
     // 顶层要保留的键：同名时不覆盖本层写出来的字段。
@@ -1004,10 +1014,6 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
     }
     parts.signs = seen_signs;
     parts.preserved_block_entities = preserved_entities;
-
-    let column =
-        ChunkColumn::from_parts(parts).map_err(|error| ChunkNbtError::Column(error.to_string()))?;
-
     let block_ticks = as_list(field(root, "block_ticks"), "block_ticks")?;
     let fluid_ticks = as_list(field(root, "fluid_ticks"), "fluid_ticks")?;
     let structures = field(root, "structures").cloned().unwrap_or_else(|| {
@@ -1047,11 +1053,27 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         })
         .cloned()
         .collect();
-    let unknown: Vec<(String, Tag)> = entries
+    let mut unknown: Vec<(String, Tag)> = entries
         .iter()
         .filter(|(key, _)| !KNOWN_KEYS.contains(&key.as_str()))
         .cloned()
         .collect();
+
+    unknown.extend(preserved.iter().cloned());
+    parts.archive.preserved = unknown.clone();
+    parts.archive.structures = Some(structures.clone());
+    parts.archive.post_processing = Some(post_processing.clone());
+    parts.archive.raw_heightmaps = Some(heightmaps_raw.clone());
+    let mut column =
+        ChunkColumn::from_parts(parts).map_err(|error| ChunkNbtError::Column(error.to_string()))?;
+    column.chunk_mut().set_archive(parts_archive_meta(
+        last_update,
+        inhabited_time,
+        &unknown,
+        &structures,
+        &post_processing,
+        &heightmaps_raw,
+    ));
 
     Ok(DecodedChunk {
         column: Box::new(column),
@@ -1071,6 +1093,24 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         preserved,
         block_entity_raw,
     })
+}
+
+fn parts_archive_meta(
+    last_update: i64,
+    inhabited_time: i64,
+    preserved: &[(String, Tag)],
+    structures: &Tag,
+    post_processing: &Tag,
+    heightmaps: &[(String, Tag)],
+) -> mc_bamboo_world::chunk::ChunkArchiveMeta {
+    mc_bamboo_world::chunk::ChunkArchiveMeta {
+        last_update,
+        inhabited_time,
+        preserved: preserved.to_vec(),
+        structures: Some(structures.clone()),
+        post_processing: Some(post_processing.clone()),
+        raw_heightmaps: Some(heightmaps.to_vec()),
+    }
 }
 
 /// 把方块实体原始条目按位置整理成编码接口的附加片段，供上层使用。
