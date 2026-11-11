@@ -198,6 +198,15 @@ pub(crate) struct Harness {
 
 impl Harness {
     pub(crate) fn new(view_distance: i32) -> Self {
+        Self::build(view_distance, false)
+    }
+
+    /// 已加载模式：起点没有加载任何区块，测试自己调用 `load_chunks`。
+    pub(crate) fn new_loaded(view_distance: i32) -> Self {
+        Self::build(view_distance, true)
+    }
+
+    fn build(view_distance: i32, loaded: bool) -> Self {
         let (inbox, receiver) = mpsc::channel();
         let config = WorldConfig {
             view_distance,
@@ -206,7 +215,11 @@ impl Harness {
             enforce_secure_profile: false,
             admin: Default::default(),
         };
-        let mut world = World::new(config, receiver);
+        let mut world = if loaded {
+            World::new_loaded(config, receiver)
+        } else {
+            World::new(config, receiver)
+        };
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.region.random = LevelRandom::new(0);
         world.region.sound_seed_generator = LevelRandom::new(0);

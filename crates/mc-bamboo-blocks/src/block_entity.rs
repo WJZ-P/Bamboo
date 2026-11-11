@@ -341,6 +341,13 @@ pub struct ChunkBlockEntities {
     entities: Vec<Box<dyn BlockEntity>>,
 }
 
+impl ChunkBlockEntities {
+    /// 盒子里有没有方块实体。`is_pristine` 用它判断盒子能不能丢掉。
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+}
+
 impl fmt::Debug for ChunkBlockEntities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChunkBlockEntities")

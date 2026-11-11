@@ -144,6 +144,18 @@ impl World {
         world
     }
 
+    /// 测试专用：构造一个走已加载模式的世界（起点没有加载任何区块）。
+    ///
+    /// `WorldConfig` 不能加字段（`mc-bamboo/src/main.rs` 用字面量构造它），
+    /// 正式入口和无限模式的切换放在接 Director 那一步；这里只给
+    /// `Harness` 的已加载模式测试用。
+    #[cfg(test)]
+    pub(crate) fn new_loaded(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+        let mut world = Self::new(config, inbox);
+        world.region.use_loaded_chunks();
+        world
+    }
+
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
         self.pacer.set_thread_priority();
@@ -832,5 +844,7 @@ impl Schedule {
     }
 }
 
+#[cfg(test)]
+mod loaded_tests;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -7,7 +7,7 @@
 //! 每个区块有一个版本号 [`ChunkRevision`]，区块和它那一列光照每被写一次就换一个新值，区块包的缓存靠它判断内容变没变。
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Deref,
 };
 
@@ -30,6 +30,8 @@ pub struct ChunkStore {
     template: Chunk,
     edited: EditedChunks,
     light: LevelLight,
+    /// `None` = 无限超平坦（测试/oracle 专用退化实现）；`Some` = 已加载模式。
+    loaded: Option<BTreeSet<ChunkPos>>,
 }
 
 /// 改过的区块和它们的版本号。
@@ -88,12 +90,73 @@ impl ChunkStore {
             template,
             edited: EditedChunks::default(),
             light,
+            loaded: None,
         }
     }
 
-    /// 超平坦世界。
+    /// 超平坦世界。**无限模式**：每个区块位置都隐式存在，读成模板。
+    /// 这是测试和 oracle 用的退化实现，正式运行的 `World` 用 [`loaded`](Self::loaded)。
     pub fn flat() -> Self {
         Self::new(flat::generate_chunk())
+    }
+
+    /// 已加载模式：只有 [`load`](Self::load) 过的区块存在，别的位置读到「未加载」。
+    ///
+    /// 和无限模式的区别在光照存储：没加载的位置没有光照柱，方块变化引起的邻居计数
+    /// 更新不会给它建柱；加载进来时由 `rebind_area` 按当时的方块重算。
+    pub fn loaded() -> Self {
+        let mut store = Self::new(flat::generate_chunk());
+        store.loaded = Some(BTreeSet::new());
+        store.light.set_loaded(Some(BTreeSet::new()));
+        store
+    }
+
+    /// 是不是已加载模式。
+    pub fn is_loaded_mode(&self) -> bool {
+        self.loaded.is_some()
+    }
+
+    /// 这个区块位置有没有加载。无限模式恒为真。
+    pub fn is_loaded(&self, pos: ChunkPos) -> bool {
+        self.loaded.as_ref().is_none_or(|set| set.contains(&pos))
+    }
+
+    /// 已加载的区块数；无限模式返回 `None`。
+    pub fn loaded_count(&self) -> Option<usize> {
+        self.loaded.as_ref().map(BTreeSet::len)
+    }
+
+    /// 把一个区块束装进已加载集合。调用方保证位置原本没有内容。
+    /// 只有已加载模式能调用；无限模式忽略。
+    pub fn load(&mut self, pos: ChunkPos, column: Box<crate::column::ChunkColumn>) {
+        if self.loaded.is_none() {
+            return;
+        }
+        self.loaded.as_mut().expect("已加载模式").insert(pos);
+        self.light
+            .set_loaded(Some(self.loaded.clone().expect("已加载模式")));
+        self.insert_column(pos, column)
+            .unwrap_or_else(|_| unreachable!("交付前光照已经算完"));
+    }
+
+    /// 把区块从已加载集合里整个取走，返回盒子。只有已加载模式能调用。
+    pub fn unload(
+        &mut self,
+        pos: ChunkPos,
+    ) -> Result<Box<crate::column::ChunkColumn>, crate::column::LightPending> {
+        if !self.is_loaded(pos) {
+            return Err(crate::column::LightPending);
+        }
+        if !self.ready_to_move_columns() {
+            return Err(crate::column::LightPending);
+        }
+        // 先从已加载集合里拿掉：`take_column` 里的 `rebind_area` 要按
+        // 「这个位置已经没有方块」重算邻居段的计数，取走之后才真的没有柱。
+        if let Some(set) = self.loaded.as_mut() {
+            set.remove(&pos);
+        }
+        self.light.set_loaded(self.loaded.clone());
+        self.take_column(pos)
     }
 
     /// 所有没改过的区块共用的内容。
@@ -130,9 +193,10 @@ impl ChunkStore {
         }
     }
 
-    /// 读取方块状态。高度超出世界时返回 `None`，坐标可以直接来自客户端。
+    /// 读取方块状态。高度超出世界、或者已加载模式下这个区块没加载时返回 `None`。
+    /// 坐标可以直接来自客户端。
     pub fn block(&self, pos: BlockPos) -> Option<u32> {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return None;
         }
         Some(
@@ -144,7 +208,7 @@ impl ChunkStore {
     /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`，读区块里一直维护着的高度图。
     /// 高度超出世界时返回 `None`。
     pub fn heightmap_y(&self, pos: BlockPos) -> Option<i32> {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return None;
         }
         Some(self.chunk(pos.chunk()).heightmap_y(
@@ -156,7 +220,7 @@ impl ChunkStore {
 
     /// 这一格所在 quart 位置的群系注册表 ID。高度超出世界时返回 `None`。
     pub fn biome_at(&self, pos: BlockPos) -> Option<u32> {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return None;
         }
         Some(
@@ -168,6 +232,9 @@ impl ChunkStore {
     /// 区块 `pos` 里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段有会随机刻的方块。
     /// 超出世界高度的区块段没有方块。
     pub fn is_randomly_ticking_section(&self, pos: ChunkPos, section_y: i32) -> bool {
+        if !self.is_loaded(pos) {
+            return false;
+        }
         let chunk = self.edited.get(&pos).unwrap_or(&self.template);
         usize::try_from(section_y - (MIN_Y >> 4))
             .ok()
@@ -208,7 +275,7 @@ impl ChunkStore {
     /// 告示牌方块还没写过字时返回空白内容：官方也是按状态临时建一个空的方块实体。
     /// 不是告示牌方块时返回 `None`。
     pub fn sign(&self, pos: BlockPos) -> Option<SignContent> {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return None;
         }
         let (x, z) = (local(pos.x), local(pos.z));
@@ -221,7 +288,7 @@ impl ChunkStore {
 
     /// 改写告示牌内容。这一格不是告示牌方块时什么也不做，返回 `false`。
     pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return false;
         }
         let (x, z) = (local(pos.x), local(pos.z));
@@ -238,7 +305,7 @@ impl ChunkStore {
     /// 内容由 `mc-bamboo-game` 算好写进来：这一层不认识物品组件，只负责跟着方块存和丢。
     /// 告示牌不走这里，它的内容在 [`sign`](Self::sign)。
     pub fn update_tag(&self, pos: BlockPos) -> Option<&[u8]> {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return None;
         }
         self.chunk(pos.chunk())
@@ -249,7 +316,7 @@ impl ChunkStore {
     ///
     /// 这一格没有方块实体时什么也不做，返回 `false`。
     pub fn set_update_tag(&mut self, pos: BlockPos, tag: Option<Vec<u8>>) -> bool {
-        if !is_inside_world(pos.y) {
+        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
             return false;
         }
         let (x, z) = (local(pos.x), local(pos.z));
@@ -285,8 +352,29 @@ impl ChunkStore {
     /// 工作量（任务数加上传播的步数）到了 `budget` 就停，哪怕一轮算到一半，下次接着算。
     /// 一轮算完才换上新的光照，[`light_value`](Self::light_value) 读到的总是上一轮算完的结果。返回这次的工作量。
     pub fn run_light_updates(&mut self, budget: usize) -> usize {
-        self.light
-            .run_updates(Chunks::new(&self.template, &self.edited), budget)
+        let Self {
+            template,
+            edited,
+            loaded,
+            light: engine,
+            ..
+        } = self;
+        engine.run_updates(Self::chunks_view(template, edited, loaded.as_ref()), budget)
+    }
+
+    /// 光照引擎读方块时的视图，带已加载集合。
+    ///
+    /// 借用拆开成三个字段，调用方可以同时可变借 `self.light`。
+    fn chunks_view<'a>(
+        template: &'a Chunk,
+        edited: &'a HashMap<ChunkPos, Chunk>,
+        loaded: Option<&'a BTreeSet<ChunkPos>>,
+    ) -> Chunks<'a> {
+        let mut chunks = Chunks::new(template, edited);
+        if let Some(set) = loaded {
+            chunks = chunks.with_loaded(set);
+        }
+        chunks
     }
 
     /// 把攒着的光照全部算完。
@@ -311,6 +399,13 @@ impl ChunkStore {
 
     /// `getBrightness`：一格的天空光或者方块光。
     pub fn light_value(&self, layer: LightLayer, pos: BlockPos) -> u8 {
+        if !self.is_loaded(pos.chunk()) {
+            // 没加载的位置读成超平坦稳态的值：天空光 15、方块光 0。
+            return match layer {
+                LightLayer::Sky => 15,
+                LightLayer::Block => 0,
+            };
+        }
         self.light.light_value(layer, pos)
     }
 
@@ -341,11 +436,17 @@ impl ChunkStore {
             .unwrap_or_else(|| self.template.clone());
         // 注销这一柱的段状态：拿走之后这个位置回到模板（无限平坦世界里方块不变，
         // 这一步是恒等写入；以后按区块加载时这里才是真的注销）。
-        let light = self.light.take_column(pos);
-        self.light
-            .rebind_area(pos, Chunks::new(&self.template, &self.edited));
+        let column_light = self.light.take_column(pos);
+        let Self {
+            template,
+            edited,
+            loaded,
+            light: engine,
+            ..
+        } = self;
+        engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
         self.edited.bump_revision(pos);
-        Ok(Box::new(ChunkColumn::new(chunk, light)))
+        Ok(Box::new(ChunkColumn::new(chunk, column_light)))
     }
 
     /// 把一个区块束放到 `pos`。这个位置原来的内容被整个换掉。
@@ -368,14 +469,20 @@ impl ChunkStore {
         if !self.light.ready_to_move_columns() {
             return Err((LightPending, column));
         }
-        let (chunk, light) = column.into_parts();
+        let (chunk, column_light) = column.into_parts();
         self.edited.chunks.insert(pos, chunk);
         self.edited.bump_revision(pos);
-        self.light.insert_column(pos, light);
+        self.light.insert_column(pos, column_light);
         // 登记这一柱的段状态：按目标世界此刻的方块重算 3×3 邻域的邻居计数，
         // 单独把一柱插进一圈不同的邻居中间也成立。
-        self.light
-            .rebind_area(pos, Chunks::new(&self.template, &self.edited));
+        let Self {
+            template,
+            edited,
+            loaded,
+            light: engine,
+            ..
+        } = self;
+        engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
         Ok(())
     }
 }
@@ -402,6 +509,8 @@ const fn local(coordinate: i32) -> usize {
     (coordinate & 15) as usize
 }
 
+#[cfg(test)]
+mod loaded_tests;
 #[cfg(test)]
 mod tests {
     use mc_bamboo_data::blocks;

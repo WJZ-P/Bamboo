@@ -16,7 +16,10 @@ mod sky;
 pub(crate) mod sources;
 mod storage;
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::OnceLock,
+};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 
@@ -77,6 +80,8 @@ impl SectionPos {
 pub(crate) struct Chunks<'a> {
     template: &'a Chunk,
     edited: &'a HashMap<ChunkPos, Chunk>,
+    /// `None` 是无限超平坦：每个位置都存在。已加载模式下 `Some` 只含已加载的坐标。
+    loaded: Option<&'a BTreeSet<ChunkPos>>,
     /// 光照落后时，正在算的这一轮排好之后又改过的区块在那一刻的样子，先读它们。
     past: Option<&'a HashMap<ChunkPos, Chunk>>,
 }
@@ -86,8 +91,20 @@ impl<'a> Chunks<'a> {
         Self {
             template,
             edited,
+            loaded: None,
             past: None,
         }
+    }
+
+    /// 已加载模式：只有 `loaded` 里的坐标有方块，别的位置读成空。
+    pub(crate) fn with_loaded(mut self, loaded: &'a BTreeSet<ChunkPos>) -> Self {
+        self.loaded = Some(loaded);
+        self
+    }
+
+    /// 这个位置的区块有没有加载。无限模式恒为真。
+    pub(crate) fn is_loaded(self, pos: ChunkPos) -> bool {
+        self.loaded.is_none_or(|set| set.contains(&pos))
     }
 
     /// 同一个世界，但 `past` 里有的区块读 `past` 里的。
@@ -98,11 +115,18 @@ impl<'a> Chunks<'a> {
         Chunks {
             template: self.template,
             edited: self.edited,
+            loaded: self.loaded,
             past: (!past.is_empty()).then_some(past),
         }
     }
 
     pub(crate) fn chunk(self, pos: ChunkPos) -> &'a Chunk {
+        if !self.is_loaded(pos) {
+            // 没加载的位置没有方块。给光照引擎一个全空气区块，
+            // 它的 24 个段都是空的，段状态和邻居计数按「没有方块」算。
+            static EMPTY: OnceLock<Chunk> = OnceLock::new();
+            return EMPTY.get_or_init(|| Chunk::empty(self.template.biome_at(0, 0, 0)));
+        }
         if let Some(chunk) = self.past.and_then(|past| past.get(&pos)) {
             return chunk;
         }
@@ -289,6 +313,28 @@ impl LevelLight {
             engines == visible,
             "算完以后引擎和别人读到的光照存着同样的段，补建的也该相同"
         );
+    }
+
+    /// 切换已加载集合。`None` 是无限超平坦；`Some` 时集合外没有光照柱，
+    /// 读那里的光照由 `ChunkStore` 按「天空光 15 / 方块光 0」返回。
+    pub(crate) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
+        self.engines.set_loaded(loaded.clone());
+        self.visible.set_loaded(loaded);
+    }
+
+    /// 这个位置在两层光照里有没有柱（测试用）。
+    #[cfg(test)]
+    pub(crate) fn has_column(&self, pos: ChunkPos) -> bool {
+        self.visible.storage(LightLayer::Sky).has_column(pos)
+            && self.visible.storage(LightLayer::Block).has_column(pos)
+    }
+
+    /// 每个柱里状态非 0 的段是否都有数据层（测试用）。
+    #[cfg(test)]
+    pub(crate) fn states_have_layers(&self) -> bool {
+        let sky = self.visible.storage(LightLayer::Sky);
+        let block = self.visible.storage(LightLayer::Block);
+        sky.debug_states_have_layers() && block.debug_states_have_layers()
     }
 
     /// 上次取走以后光照变了的区块和段。

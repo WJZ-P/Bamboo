@@ -44,6 +44,7 @@ use crate::{
 mod column;
 #[cfg(test)]
 mod column_tests;
+pub(crate) mod parking;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
 #[allow(unused_imports)]
@@ -280,6 +281,13 @@ impl Region {
     pub(crate) fn insert_player(&mut self, player: Player) {
         self.player_grid.place(player.id, player.position());
         self.players.insert(player.id, player);
+    }
+
+    /// 测试专用：把区块表换成已加载模式（起点没有加载任何区块）。
+    /// 正式入口在提交 5 接 Director 时统一切换。
+    #[cfg(test)]
+    pub(crate) fn use_loaded_chunks(&mut self) {
+        self.chunks = mc_bamboo_world::store::ChunkStore::loaded();
     }
 
     pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {

@@ -236,6 +236,16 @@ impl ChunkColumn {
         Self { chunk, sky, block }
     }
 
+    /// 生成器（现在只有超平坦模板）产出的原始盒子，含算好的模板光照。
+    ///
+    /// 已加载模式用它加载一个从没来过的位置；[`is_pristine`](Self::is_pristine)
+    /// 也拿它当基准。每次调用都会重新算模板光照，调用方应缓存结果。
+    pub fn from_template() -> Self {
+        let mut store = super::store::ChunkStore::flat();
+        let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+        *store.take_column(pos).expect("新建的世界没有待算的光照")
+    }
+
     pub(super) fn into_parts(self) -> (Chunk, [LightColumn; 2]) {
         (self.chunk, [self.sky, self.block])
     }
@@ -243,6 +253,23 @@ impl ChunkColumn {
     /// 这个区块的方块、高度图、方块实体类型、告示牌、update tag 和天空光源。
     pub fn chunk(&self) -> &Chunk {
         &self.chunk
+    }
+
+    /// 这一柱的内容是不是还和生成器输出（超平坦模板）完全一样。
+    ///
+    /// 方块、群系、四张高度图、告示牌、`update tag` 和**两层光照的数据与存着的段**
+    /// 逐项比较。邻居柱的光源会照进这一柱，方块没变但光照已经不是模板的了；
+    /// 把它丢掉、下次用模板重新生成，边界上就少一截光。所以光照必须一起比。
+    /// 拿不准时返回 `false`（调用方会当成「不是原样」停放盒子）。
+    pub fn is_pristine(&self, template: &ChunkColumn) -> bool {
+        let mine = ChunkColumnParts::read_from(self);
+        let theirs = ChunkColumnParts::read_from(template);
+        mine.sections == theirs.sections
+            && mine.heightmaps == theirs.heightmaps
+            && mine.light == theirs.light
+            && mine.light_on == theirs.light_on
+            && mine.signs == theirs.signs
+            && mine.update_tags == theirs.update_tags
     }
 
     /// `getDataLayerData`：一个光照段存的数据，没存时是 `None`。

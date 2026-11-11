@@ -172,6 +172,9 @@ pub(crate) struct LightStorage {
     has_inconsistencies: bool,
     /// 发出去的最后一个版本号。
     last_revision: u64,
+    /// `None` = 无限超平坦（每个位置都存在）。`Some` = 已加载模式，
+    /// 集合外的位置没有柱：26 个段状态全 0、没有数据层、也不接受任何写入。
+    loaded: Option<BTreeSet<ChunkPos>>,
 }
 
 /// 光照段在区块柱里的下标。超出 26 段时没有。
@@ -204,6 +207,22 @@ impl LightStorage {
             changed: Vec::new(),
             has_inconsistencies: false,
             last_revision: 0,
+            loaded: None,
+        }
+    }
+
+    /// 切到已加载模式：只有 `loaded` 里的坐标有柱。
+    /// 无限模式传 `None`。已加载模式之外的位置读成 `EMPTY_COLUMN`。
+    pub(crate) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
+        self.loaded = loaded;
+    }
+
+    /// 这个位置在这层光照里有没有柱。无限模式恒为真（没写过的柱读模板）。
+    /// 已加载模式下集合外恒为假，集合内按有没有存过自己的一份算。
+    pub(crate) fn has_column(&self, pos: ChunkPos) -> bool {
+        match &self.loaded {
+            None => true,
+            Some(set) => set.contains(&pos),
         }
     }
 
@@ -211,12 +230,22 @@ impl LightStorage {
         self.layer
     }
 
+    fn is_loaded(&self, pos: ChunkPos) -> bool {
+        self.loaded.as_ref().is_none_or(|set| set.contains(&pos))
+    }
+
     fn column(&self, pos: ChunkPos) -> &LightColumn {
+        if !self.is_loaded(pos) {
+            static EMPTY: std::sync::OnceLock<LightColumn> = std::sync::OnceLock::new();
+            return EMPTY.get_or_init(LightColumn::empty);
+        }
         self.columns.get(&pos).unwrap_or(&self.template)
     }
 
     /// 要写这个区块柱了，没有自己一份的话先从模板复制。所有写都经过这里，每次换一个新的版本号。
+    /// 已加载模式下没加载的位置不能通过这里建柱（调用方先问 `is_loaded`）。
     fn column_mut(&mut self, pos: ChunkPos) -> &mut LightColumn {
+        debug_assert!(self.is_loaded(pos), "没加载的位置不该写入光照柱");
         self.assign_revision(pos);
         let template = &self.template;
         self.columns.entry(pos).or_insert_with(|| template.clone())
@@ -253,6 +282,15 @@ impl LightStorage {
     #[cfg(test)]
     pub(crate) fn states_at(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
         self.column(pos).states
+    }
+
+    /// 每个有柱的位置，状态非 0 的段都存着数据层（测试用）。
+    #[cfg(test)]
+    pub(crate) fn debug_states_have_layers(&self) -> bool {
+        self.columns.iter().all(|(_, column)| {
+            (0..LIGHT_SECTION_COUNT)
+                .all(|slot| column.states[slot] == 0 || column.layers[slot].is_some())
+        })
     }
 
     /// `getDataLayer`：这一段存的光照，没存时是 `None`。
@@ -399,7 +437,11 @@ impl LightStorage {
         for dx in -1..=1 {
             for dz in -1..=1 {
                 let column = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
-                area.push((column, states_of(column)));
+                // 已加载模式只重算有柱的邻居；没加载的柱通过 `chunks.chunk`
+                // 按「没有方块」计入邻居计数，但不能给它建柱。
+                if self.has_column(column) {
+                    area.push((column, states_of(column)));
+                }
             }
         }
         let mut created = Vec::new();
@@ -470,6 +512,11 @@ impl LightStorage {
     }
 
     fn add_neighbor_count(&mut self, section: SectionPos, increment: i32) {
+        // 方块变化引起的邻居计数落到没加载的位置时直接丢掉：不能因此给
+        // 没加载的位置造出一柱。它加载进来时 `rebind_area` 会按当时的方块重算。
+        if !self.is_loaded(section.chunk()) {
+            return;
+        }
         let state = self.state(section);
         let count = i32::from(state & NEIGHBOR_COUNT) + increment;
         assert!(
