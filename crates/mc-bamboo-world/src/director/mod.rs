@@ -15,6 +15,8 @@ mod pyramid;
 mod state;
 
 #[cfg(test)]
+mod bench_tests;
+#[cfg(test)]
 mod tests;
 
 pub use pyramid::{GENERATION, LOADING, PipelineKind, Step, loading_step, stage_index};

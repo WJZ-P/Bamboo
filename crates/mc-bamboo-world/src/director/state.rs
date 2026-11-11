@@ -3,7 +3,7 @@
 //! 一次 [`Director::handle`] 是纯的：只读自己的状态和事件，只往返回的 [`Effect`]
 //! 列表里写。宿主负责真正跑任务、搬盒子、发消息。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use mc_bamboo_core::ChunkPos;
 
@@ -365,6 +365,15 @@ struct InFlight {
     write_radius: i32,
 }
 
+/// 逗留到期的队列项。`BinaryHeap` 按 `at` 大顶堆，用 `Reverse` 变成小顶堆：
+/// 最早失去票的位置先出来。同刻的按坐标排，输出的效果序列仍然确定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReclaimDue {
+    /// `Reverse` 让最早到期的最先弹出。
+    at: std::cmp::Reverse<u64>,
+    pos: ChunkPos,
+}
+
 /// 区块平面的 Director。见模块文档。
 #[derive(Debug)]
 pub struct Director<C> {
@@ -380,8 +389,22 @@ pub struct Director<C> {
     /// 待排队的 `Ready` / `Forgot`，按坐标去重。
     pending_ready: BTreeSet<ChunkPos>,
     pending_forgot: BTreeSet<ChunkPos>,
+    /// 等着排 `Read` 的记录。只有刚进 `Full` 档、还没派任务的记录才在里面，
+    /// 每次 `drive` 只取这一批，不扫整张记录表。
+    queued_reads: BTreeSet<ChunkPos>,
+    /// 上一轮被写范围/配额挡住、这一轮还要再试的任务 id。
+    submittable: Vec<TaskId>,
+    /// 上一轮 `drive` 见过的最大任务 id，用来认出这一轮新排的任务。
+    last_seen_task: TaskId,
+    /// 逗留到期的队列：按 `unloaded_at` 排，队头不到期就不用再往后看。
+    /// 同一个位置可能有旧条目（`unloaded_at` 改过），取出时和记录里的值对一下。
+    reclaim_due: BinaryHeap<ReclaimDue>,
     /// 本刻已经派出去的任务数。
     submitted_this_tick: usize,
+    /// 超时票的 `is_busy` 直接查这张表，不每刻重建。
+    busy: BTreeSet<ChunkPos>,
+    /// 已交付或正在交付的记录数，随 `Owner` 变化增量维护。
+    loaded: usize,
     /// 统计：过滤掉的等级变化 / 真正动作的区块。
     filtered: u64,
     acted: u64,
@@ -409,7 +432,13 @@ impl<C: ChunkBundle> Director<C> {
             now_tick: 0,
             pending_ready: BTreeSet::new(),
             pending_forgot: BTreeSet::new(),
+            queued_reads: BTreeSet::new(),
+            submittable: Vec::new(),
+            last_seen_task: 0,
+            reclaim_due: BinaryHeap::new(),
             submitted_this_tick: 0,
+            busy: BTreeSet::new(),
+            loaded: 0,
             filtered: 0,
             acted: 0,
             shutting_down: false,
@@ -442,25 +471,92 @@ impl<C: ChunkBundle> Director<C> {
     pub fn is_settled(&self) -> bool {
         self.in_flight.is_empty()
             && self.pending.is_empty()
-            && self.chunks.values().all(|record| record.snapshot.is_none())
+            && self.loaded == 0
+            && self.busy.is_empty()
     }
 
     /// 已交付或正在交付的区块数。
     pub fn loaded_count(&self) -> usize {
-        self.chunks
-            .values()
-            .filter(|record| {
-                matches!(
-                    record.owner,
-                    Owner::Delivering | Owner::Region(_) | Owner::Reclaiming
-                )
-            })
-            .count()
+        self.loaded
     }
 
     /// 供随机测试逐步断言不变量。
     pub fn debug_state(&self) -> DebugState<'_, C> {
         DebugState { director: self }
+    }
+
+    /// 改一条记录的归属，顺便维护 `loaded` 计数和超时票用的忙集合。
+    /// 所有写 `owner` 的地方都走这里。
+    fn set_owner(&mut self, pos: ChunkPos, owner: Owner) {
+        let Some(record) = self.chunks.get_mut(&pos) else {
+            return;
+        };
+        let was_loaded = matches!(
+            record.owner,
+            Owner::Delivering | Owner::Region(_) | Owner::Reclaiming
+        );
+        let is_loaded = matches!(
+            owner,
+            Owner::Delivering | Owner::Region(_) | Owner::Reclaiming
+        );
+        record.owner = owner;
+        if was_loaded && !is_loaded {
+            self.loaded -= 1;
+        } else if !was_loaded && is_loaded {
+            self.loaded += 1;
+        }
+        self.refresh_busy(pos);
+    }
+
+    /// 一条记录此刻是否「还没准备好存盘」。`TicketTable::tick` 每刻只问有超时票的位置。
+    fn is_busy_record(record: &ChunkRecord) -> bool {
+        record.task.is_some()
+            || matches!(
+                record.owner,
+                Owner::Pipeline
+                    | Owner::Delivering
+                    | Owner::Saving
+                    | Owner::Reclaiming
+                    | Owner::Draining
+            )
+    }
+
+    /// 记录状态变了之后重算这条记录的忙标记。
+    fn refresh_busy(&mut self, pos: ChunkPos) {
+        let busy = self.chunks.get(&pos).is_some_and(Self::is_busy_record);
+        if busy {
+            self.busy.insert(pos);
+        } else {
+            self.busy.remove(&pos);
+        }
+    }
+
+    /// 改失去最后一张票的时刻，同时按到期时刻排进队列；票回来时把它撤掉。
+    fn set_unloaded_at(&mut self, pos: ChunkPos, at: Option<u64>) {
+        if let Some(record) = self.chunks.get_mut(&pos) {
+            record.unloaded_at = at;
+        }
+        if let Some(at) = at {
+            self.reclaim_due.push(ReclaimDue {
+                at: std::cmp::Reverse(at),
+                pos,
+            });
+        }
+    }
+
+    /// 删一条记录，把它的增量索引一起清掉。
+    fn remove_record(&mut self, pos: ChunkPos) {
+        if let Some(record) = self.chunks.remove(&pos)
+            && matches!(
+                record.owner,
+                Owner::Delivering | Owner::Region(_) | Owner::Reclaiming
+            )
+        {
+            self.loaded -= 1;
+        }
+        self.busy.remove(&pos);
+        self.queued_reads.remove(&pos);
+        self.pending_forgot.insert(pos);
     }
 
     /// 处理一个事件，返回要派出去的任务和要发给 region 的消息。
@@ -532,7 +628,11 @@ impl<C: ChunkBundle> Director<C> {
         changes.sort_unstable_by_key(|change| (change.pos.x, change.pos.z));
         let mut level_only = Vec::new();
         for change in changes {
-            match classify(change) {
+            let class = classify(change);
+            // 只碰报出来的位置：半成生成记录的等级变化时同样在 `run_updates()`
+            // 的列表里，用变化里的两个新分量直接更新，不必再查两次票表。
+            self.refresh_desired(change);
+            match class {
                 LevelClassification::Noop => self.filtered += 1,
                 LevelClassification::LevelOnly => {
                     self.acted += 1;
@@ -549,25 +649,28 @@ impl<C: ChunkBundle> Director<C> {
                 changes: level_only,
             }));
         }
-        // `run_updates` 只报等级变了的区块，但半成生成记录是 Director 自己建的，
-        // 它们的等级也随票传播而变：统一按票表刷一遍，保证不变量 2 成立。
-        // 依赖记录（不进 region）不参与收回：它们随流水线的依赖存在，
-        // 由 `expire_reclaim_delay` 在没票且没有在途任务时删掉。
-        let positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
-        for pos in positions {
-            let level = self.tickets.loading_level(pos);
-            let simulation = self.tickets.simulation_level(pos);
-            if let Some(record) = self.chunks.get_mut(&pos) {
-                record.desired = Desired::new(level, simulation);
-                if record.dependency {
-                    continue;
-                }
-                if record.desired.target.is_none() && record.unloaded_at.is_none() {
-                    record.unloaded_at = Some(self.now_tick);
-                } else if record.desired.target.is_some() {
-                    record.unloaded_at = None;
-                }
-            }
+    }
+
+    /// 一条报出来的等级变化：把记录里的两个等级数字同步到票表的新值，
+    /// 并维护失去票的时刻。依赖记录也在这里更新，但它们不因没票而排队收回。
+    fn refresh_desired(&mut self, change: LevelChange) {
+        let pos = change.pos;
+        let desired = Desired::new(change.loading.1, change.simulation.1);
+        let Some(record) = self.chunks.get_mut(&pos) else {
+            return;
+        };
+        record.desired = desired;
+        let dependency = record.dependency;
+        let unloaded = record.unloaded_at.is_some();
+        if !dependency && desired.target.is_none() && !unloaded {
+            self.set_unloaded_at(pos, Some(self.now_tick));
+        } else if !dependency && desired.target.is_some() && unloaded {
+            self.set_unloaded_at(pos, None);
+        }
+        if dependency && desired.target.is_none() && !unloaded {
+            // 依赖记录随流水线的依赖存在，由 `expire_reclaim_delay`
+            // 在没票且没有在途任务时删掉，不进 region 的收回路径。
+            self.set_unloaded_at(pos, Some(self.now_tick));
         }
     }
 
@@ -594,46 +697,60 @@ impl<C: ChunkBundle> Director<C> {
                     dependency,
                 });
                 record.desired = desired;
-                record.unloaded_at = None;
                 // 已经存在的依赖记录（由 `ensure_dependencies` 按所需阶段建的）
                 // 不能退化回 `Empty`，否则生成阶段会以为邻居还没到那个阶段。
                 if !(dependency && record.dependency) {
                     record.dependency = dependency;
                 }
-                if record.owner == Owner::Draining {
-                    record.owner = Owner::Pipeline;
+                let was_draining = record.owner == Owner::Draining;
+                let had_unloaded_at = record.unloaded_at.is_some();
+                if had_unloaded_at {
+                    self.set_unloaded_at(pos, None);
                 }
+                if was_draining {
+                    self.set_owner(pos, Owner::Pipeline);
+                }
+                self.queue_read_if_needed(pos);
             }
             LevelClassification::Unload => {
-                if let Some(record) = self.chunks.get_mut(&pos) {
-                    record.desired = desired;
-                    if record.unloaded_at.is_none() {
-                        record.unloaded_at = Some(self.now_tick);
-                    }
-                    // 在途的读盘/生成任务直接取消；结果按代数判为过期丢弃。
-                    let pipeline = record.owner == Owner::Pipeline;
-                    if pipeline {
-                        self.cancel_task(out, pos);
-                        if let Some(record) = self.chunks.get_mut(&pos) {
-                            record.owner = Owner::Draining;
-                        }
-                    }
+                if !self.chunks.contains_key(&pos) {
+                    return;
+                }
+                // 在途的读盘/生成任务直接取消；结果按代数判为过期丢弃。
+                let pipeline = self.chunks[&pos].owner == Owner::Pipeline;
+                if pipeline {
+                    self.cancel_task(out, pos);
+                    self.set_owner(pos, Owner::Draining);
                 }
             }
             LevelClassification::Promote | LevelClassification::Demote => {
-                if let Some(record) = self.chunks.get_mut(&pos) {
-                    record.desired = desired;
-                    record.unloaded_at = None;
-                    if desired.target == Some(ChunkStatus::Full) {
-                        // 进了 `Full` 档：这条记录现在要真正加载和交付。
-                        record.dependency = false;
-                    } else if matches!(record.owner, Owner::Pipeline) {
-                        // 退回半成品档：不应继续读盘/生成。
-                        record.dependency = true;
-                    }
+                let Some(record) = self.chunks.get_mut(&pos) else {
+                    return;
+                };
+                if desired.target == Some(ChunkStatus::Full) {
+                    // 进了 `Full` 档：这条记录现在要真正加载和交付。
+                    record.dependency = false;
+                } else if matches!(record.owner, Owner::Pipeline) {
+                    // 退回半成品档：不应继续读盘/生成。
+                    record.dependency = true;
                 }
+                self.queue_read_if_needed(pos);
             }
             LevelClassification::LevelOnly | LevelClassification::Noop => {}
+        }
+    }
+
+    /// 一条记录刚刚可以开始加载流水线时排进 `Read` 队列。
+    fn queue_read_if_needed(&mut self, pos: ChunkPos) {
+        let Some(record) = self.chunks.get(&pos) else {
+            return;
+        };
+        if record.owner == Owner::Pipeline
+            && record.task.is_none()
+            && !record.dependency
+            && record.desired.target == Some(ChunkStatus::Full)
+        {
+            self.queued_reads.insert(pos);
         }
     }
 
@@ -647,29 +764,18 @@ impl<C: ChunkBundle> Director<C> {
             }
             self.pending.remove(&id);
         }
+        self.refresh_busy(pos);
+        self.queued_reads.remove(&pos);
     }
 
     fn tick_timeouts(&mut self) {
-        let busy: BTreeSet<ChunkPos> = self
-            .chunks
-            .iter()
-            .filter(|(_, record)| {
-                record.task.is_some()
-                    || matches!(
-                        record.owner,
-                        Owner::Pipeline
-                            | Owner::Delivering
-                            | Owner::Saving
-                            | Owner::Reclaiming
-                            | Owner::Draining
-                    )
-            })
-            .map(|(&pos, _)| pos)
-            .collect();
-        self.tickets.tick(&mut |pos| busy.contains(&pos));
+        self.tickets.tick(&mut |pos| self.busy.contains(&pos));
     }
 
     /// 逗留到期才发 `Reclaim`。票在延迟内回来了就什么都不做。
+    ///
+    /// 到期队列按 `unloaded_at` 排好，每刻只弹到期的那些；旧条目（票回来过、
+    /// 又撤了）和记录里的时刻对不上就丢掉，没到期的留在堆里下次再看。
     fn expire_reclaim_delay(&mut self, out: &mut Vec<Effect<C>>) {
         let delay = if self.shutting_down {
             0
@@ -678,28 +784,46 @@ impl<C: ChunkBundle> Director<C> {
         };
         let mut reclaim = Vec::new();
         let mut drop = Vec::new();
-        for (&pos, record) in &mut self.chunks {
-            let Some(at) = record.unloaded_at else {
+        let mut requeue = Vec::new();
+        while let Some(ReclaimDue { at, pos }) = self.reclaim_due.peek().copied() {
+            let at = at.0;
+            if self.now_tick.saturating_sub(at) < delay {
+                break;
+            }
+            self.reclaim_due.pop();
+            let Some(record) = self.chunks.get(&pos) else {
                 continue;
             };
-            if self.now_tick.saturating_sub(at) < delay {
+            let at_matches = record.unloaded_at == Some(at);
+            let owner = record.owner;
+            let generation = record.generation;
+            let no_task = record.task.is_none();
+            if !at_matches {
+                // 票回来过：这个时刻作废；若又撤了票，新条目已经在队列里。
                 continue;
             }
-            match record.owner {
+            match owner {
                 Owner::Region(_) | Owner::Delivering => {
-                    record.owner = Owner::Reclaiming;
-                    reclaim.push((pos, record.generation));
+                    self.set_owner(pos, Owner::Reclaiming);
+                    reclaim.push((pos, generation));
                 }
-                Owner::Draining | Owner::Pipeline if record.task.is_none() => {
+                Owner::Draining | Owner::Pipeline if no_task => {
                     // 没进过 region 的区块：没有盒子要收回，直接删记录。
                     drop.push(pos);
                 }
-                _ => {}
+                _ => {
+                    // 盒子还在流水线或存盘里：这次不能收回，等状态变了再看。
+                    requeue.push(ReclaimDue {
+                        at: std::cmp::Reverse(at),
+                        pos,
+                    });
+                }
             }
         }
+        // 重新按原时刻排回去，下一刻还会检查，不会永远卡住。
+        self.reclaim_due.extend(requeue);
         for pos in drop {
-            self.chunks.remove(&pos);
-            self.pending_forgot.insert(pos);
+            self.remove_record(pos);
         }
         if !reclaim.is_empty() {
             out.push(Effect::ToRegion(RegionMessage::Reclaim {
@@ -717,15 +841,18 @@ impl<C: ChunkBundle> Director<C> {
             let Some(record) = self.chunks.get_mut(&pos) else {
                 continue;
             };
+            let owner = record.owner;
+            let generation = record.generation;
+            let id = record.task.take();
             record.desired = Desired::UNLOADED;
-            record.unloaded_at = Some(self.now_tick);
-            match record.owner {
+            self.set_unloaded_at(pos, Some(self.now_tick));
+            match owner {
                 Owner::Region(_) | Owner::Delivering => {
-                    record.owner = Owner::Reclaiming;
-                    reclaim.push((pos, record.generation));
+                    self.set_owner(pos, Owner::Reclaiming);
+                    reclaim.push((pos, generation));
                 }
                 Owner::Pipeline | Owner::Draining => {
-                    if let Some(id) = record.task.take() {
+                    if let Some(id) = id {
                         cancels.push(id);
                     }
                     drop.push(pos);
@@ -740,8 +867,7 @@ impl<C: ChunkBundle> Director<C> {
             self.pending.remove(&id);
         }
         for pos in drop {
-            self.chunks.remove(&pos);
-            self.pending_forgot.insert(pos);
+            self.remove_record(pos);
         }
         if !reclaim.is_empty() {
             out.push(Effect::ToRegion(RegionMessage::Reclaim {
@@ -773,6 +899,7 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         record.task = None;
+        self.refresh_busy(pos);
         match result {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
@@ -895,7 +1022,10 @@ impl<C: ChunkBundle> Director<C> {
                 }
                 entry.dependency = true;
                 entry.desired = desired;
-                entry.unloaded_at = None;
+                let had_unloaded_at = entry.unloaded_at.is_some();
+                if had_unloaded_at {
+                    self.set_unloaded_at(neighbor, None);
+                }
                 // 依赖记录随票走：等级退到「无票」时由 `consume_level_changes`
                 // 设 `unloaded_at`，到期在 `expire_reclaim_delay` 里直接删掉。
             }
@@ -903,20 +1033,21 @@ impl<C: ChunkBundle> Director<C> {
     }
 
     fn deliver(&mut self, out: &mut Vec<Effect<C>>, pos: ChunkPos, generation: u64, column: C) {
-        let Some(record) = self.chunks.get_mut(&pos) else {
+        let Some(record) = self.chunks.get(&pos) else {
             return;
         };
         if record.desired.target.is_none() {
             // 交付途中票撤了：盒子直接丢掉，不进 region。
             return;
         }
-        record.owner = Owner::Delivering;
-        record.unloaded_at = None;
+        let desired = record.desired;
+        self.set_owner(pos, Owner::Delivering);
+        self.set_unloaded_at(pos, None);
         out.push(Effect::ToRegion(RegionMessage::Deliver {
             pos,
             generation,
             column,
-            desired: record.desired,
+            desired,
         }));
     }
 
@@ -925,7 +1056,7 @@ impl<C: ChunkBundle> Director<C> {
             && record.generation == generation
             && record.owner == Owner::Delivering
         {
-            record.owner = Owner::Region(0);
+            self.set_owner(pos, Owner::Region(0));
             self.pending_ready.insert(pos);
         }
     }
@@ -945,17 +1076,17 @@ impl<C: ChunkBundle> Director<C> {
         if record.generation != generation || record.owner != Owner::Reclaiming {
             return;
         }
+        self.set_owner(pos, Owner::Saving);
+        let record = self.chunks.get_mut(&pos).expect("记录还在");
         record.generation = record.generation.wrapping_add(1);
         let next = record.generation;
         let Some(column) = column else {
-            self.chunks.remove(&pos);
-            self.pending_forgot.insert(pos);
+            self.remove_record(pos);
             return;
         };
         if column.is_pristine() && record.desired.target.is_none() {
             // 没改过的盒子不用停放，直接丢掉，下次重新生成。
-            self.chunks.remove(&pos);
-            self.pending_forgot.insert(pos);
+            self.remove_record(pos);
             return;
         }
         let seq = self.next_seq;
@@ -963,7 +1094,6 @@ impl<C: ChunkBundle> Director<C> {
         if let Some(old) = record.snapshot.replace(seq) {
             out.push(Effect::DropSnapshot { pos, seq: old });
         }
-        record.owner = Owner::Saving;
         self.enqueue(out, pos, next, Some(seq), Task::Save { pos, seq, column });
     }
 
@@ -977,13 +1107,14 @@ impl<C: ChunkBundle> Director<C> {
         }
         record.snapshot = None;
         if record.desired.target.is_some() {
-            record.owner = Owner::Delivering;
-            record.unloaded_at = None;
+            let (generation, desired) = (record.generation, record.desired);
+            self.set_owner(pos, Owner::Delivering);
+            self.set_unloaded_at(pos, None);
             out.push(Effect::ToRegion(RegionMessage::Deliver {
                 pos,
-                generation: record.generation,
+                generation,
                 column,
-                desired: record.desired,
+                desired,
             }));
         } else {
             self.finish_save(out, pos, seq, Some(column));
@@ -1009,8 +1140,7 @@ impl<C: ChunkBundle> Director<C> {
         if let Some(column) = column.filter(|column| !column.is_pristine()) {
             out.push(Effect::Park { pos, column });
         }
-        self.chunks.remove(&pos);
-        self.pending_forgot.insert(pos);
+        self.remove_record(pos);
     }
 
     // ---- 派任务 ----
@@ -1026,8 +1156,12 @@ impl<C: ChunkBundle> Director<C> {
         let _ = out;
         let id = self.next_task;
         self.next_task += 1;
-        if let Some(record) = self.chunks.get_mut(&pos) {
-            record.task = Some(id);
+        if self.chunks.contains_key(&pos) {
+            if let Some(record) = self.chunks.get_mut(&pos) {
+                record.task = Some(id);
+            }
+            self.refresh_busy(pos);
+            self.queued_reads.remove(&pos);
         }
         self.pending.insert(
             id,
@@ -1047,31 +1181,52 @@ impl<C: ChunkBundle> Director<C> {
         // 只有目标阶段是 `Full`（等级 ≤ 33）的区块才要读盘/生成并交付；
         // 等级 34..44 的区块是依赖圈里的半成品，由 `ensure_dependencies`
         // 建记录，不进 region、不发区块包。
-        let reads: Vec<(ChunkPos, u64)> = self
-            .chunks
-            .iter()
-            .filter(|(_, record)| {
-                record.owner == Owner::Pipeline
-                    && record.task.is_none()
-                    && !record.dependency
-                    && record.desired.target == Some(ChunkStatus::Full)
+        // 只排这一批新记录，不扫整张表。`enqueue` 会把它从队列里摘掉。
+        let reads: Vec<(ChunkPos, u64)> = std::mem::take(&mut self.queued_reads)
+            .into_iter()
+            .filter_map(|pos| {
+                self.chunks.get(&pos).and_then(|record| {
+                    (record.owner == Owner::Pipeline
+                        && record.task.is_none()
+                        && !record.dependency
+                        && record.desired.target == Some(ChunkStatus::Full))
+                    .then_some((pos, record.generation))
+                })
             })
-            .map(|(&pos, record)| (pos, record.generation))
             .collect();
         for (pos, generation) in reads {
             self.enqueue(out, pos, generation, None, Task::Read { pos });
         }
 
         // 按 TaskId 顺序尝试派出；写范围相交的任务留到下次。
-        let ids: Vec<TaskId> = self.pending.keys().copied().collect();
+        // 看一眼配额：没有可派的余量时连 `pending` 的键都不收集。
+        let can_submit = (self.config.max_submits_per_tick == 0
+            || self.submitted_this_tick < self.config.max_submits_per_tick)
+            && self.in_flight.len() < self.config.max_in_flight;
+        if !can_submit {
+            self.flush_notifications(out);
+            return;
+        }
+        // 只从「上一轮被挡住」和「这一轮新排的」里挑，不收集整张 `pending`。
+        let ids: Vec<TaskId> = std::mem::take(&mut self.submittable)
+            .into_iter()
+            .chain(self.pending.keys().copied().filter(|id| {
+                // 新排的任务（刚从 `pending` 之外加进来的）总在末尾，
+                // 用上一轮的最大 id 把它们认出来。
+                *id > self.last_seen_task
+            }))
+            .collect();
+        let mut blocked = Vec::new();
         for id in ids {
             if self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick
             {
-                break;
+                blocked.push(id);
+                continue;
             }
             if self.in_flight.len() >= self.config.max_in_flight {
-                break;
+                blocked.push(id);
+                continue;
             }
             let Some(pending) = self.pending.get(&id) else {
                 continue;
@@ -1086,11 +1241,12 @@ impl<C: ChunkBundle> Director<C> {
             }
             let radius = pending.task.write_radius();
             let pos = pending.pos;
-            let blocked = self
+            let overlaps = self
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            if blocked {
+            if overlaps {
+                blocked.push(id);
                 continue;
             }
             let pending = self.pending.remove(&id).expect("上面已经确认存在");
@@ -1109,7 +1265,12 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
+        self.submittable = blocked;
+        self.last_seen_task = self.next_task.wrapping_sub(1);
+        self.flush_notifications(out);
+    }
 
+    fn flush_notifications(&mut self, out: &mut Vec<Effect<C>>) {
         if !self.pending_ready.is_empty() {
             let positions = std::mem::take(&mut self.pending_ready)
                 .into_iter()
