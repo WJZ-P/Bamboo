@@ -465,12 +465,14 @@ impl DirectorHost {
         let centers = Self::guaranteed_centers(region);
 
         // 近的先交付。玩家脚下 3×3 全部交付且不算进上限；同等距离按坐标排。
+        region.profiler.start_sub(SubPhase::MailSort);
         let mut ordered: Vec<ChunkPos> = self.deliveries.keys().copied().collect();
         // BTreeMap 的键已经按 (x, z) 升序，稳定排序让同等距离保持坐标顺序。
         ordered.sort_by_key(|&pos| {
             let guaranteed = Self::is_under_a_player(pos, &centers);
             (!guaranteed, Self::distance_to_players(pos, &centers))
         });
+        region.profiler.end_sub();
         let mut used = 0usize;
         // 一批交付只重算一次受影响的邻域，不逐块重算；每次成功都要把
         // 信箱里记着的最新等级交给 region（脚下 3×3 和下一刻才轮到的都算）。
@@ -501,7 +503,9 @@ impl DirectorHost {
             }
         }
         // 一批交付只重算一次受影响的邻域，不逐块重算。
-        region.tick_levels.deliver(delivered_levels);
+        region.profiler.time_sub(SubPhase::LevelsUpdate, || {
+            region.tick_levels.deliver(delivered_levels);
+        });
         if limited_deliveries {
             self.budget_left.deliveries = delivery_left.saturating_sub(used);
         }
@@ -511,6 +515,7 @@ impl DirectorHost {
         }
         let reclaimed_before = self.reclaimed;
         // 远的先收回：这些区块不急，玩家脚下的票也没了时先留着更保险。
+        region.profiler.start_sub(SubPhase::MailSort);
         let mut by_generation = BTreeMap::new();
         for (pos, generation) in std::mem::take(&mut self.reclaims) {
             by_generation.insert(pos, generation);
@@ -522,6 +527,7 @@ impl DirectorHost {
             let (far, x, z) = distance(pos);
             (std::cmp::Reverse(far), x, z)
         });
+        region.profiler.end_sub();
         let count = if limited_reclaims {
             ordered.len().min(reclaim_left)
         } else {
@@ -540,7 +546,10 @@ impl DirectorHost {
         let positions = batch.iter().map(|&(pos, _)| pos).collect();
         match region.reclaim_columns(&positions) {
             Ok(mut boxes) => {
-                region.tick_levels.reclaim(positions.iter());
+                region.profiler.time_sub(SubPhase::LevelsUpdate, || {
+                    region.tick_levels.reclaim(positions.iter());
+                });
+                region.profiler.start_sub(SubPhase::ReturnBoxes);
                 for (pos, generation) in batch {
                     self.reclaimed += 1;
                     events.push(Event::Returned {
@@ -549,6 +558,7 @@ impl DirectorHost {
                         column: boxes.remove(&pos),
                     });
                 }
+                region.profiler.end_sub();
             }
             Err(_) => {
                 // 失败时整批放回信箱，下次 tick 边界再试：Director 还以为这些

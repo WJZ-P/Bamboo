@@ -251,10 +251,16 @@ pub(crate) enum SubPhase {
     MakeFrame,
     /// 发区块：压缩共享帧（在连接任务里，用全局计数器跨线程累计）。
     CompressFrame,
+    /// 信箱里剩下的交付/收回按到玩家的距离全量重排。
+    MailSort,
+    /// 一批交付/收回之后重算 `TickLevels` 的档位集合。
+    LevelsUpdate,
+    /// 一批收回之后把盒子从信箱交还 Director、按代数整理。
+    ReturnBoxes,
 }
 
 impl SubPhase {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 16] = [
         Self::TicketUpdate,
         Self::DirectorEvents,
         Self::DeliveryLightFinish,
@@ -268,6 +274,9 @@ impl SubPhase {
         Self::EncodeBody,
         Self::MakeFrame,
         Self::CompressFrame,
+        Self::MailSort,
+        Self::LevelsUpdate,
+        Self::ReturnBoxes,
     ];
 
     fn name(self) -> &'static str {
@@ -285,6 +294,9 @@ impl SubPhase {
             Self::EncodeBody => "encode_body",
             Self::MakeFrame => "make_frame",
             Self::CompressFrame => "compress_frame",
+            Self::MailSort => "mail_sort",
+            Self::LevelsUpdate => "levels_update",
+            Self::ReturnBoxes => "return_boxes",
         }
     }
 }
@@ -677,12 +689,8 @@ impl Profiler {
         }
         // 连接在别的任务里压缩共享帧，取走这段时间的累计增量记进 `compress_frame`。
         // 统计口径按世界线程的 tick 边界切分，和连接任务的唤醒时刻可能差一刻。
-        let (calls, nanos) = crate::outgoing::take_compression_cost();
-        if calls > 0 {
-            self.sub_phases[SubPhase::CompressFrame as usize].record(nanos);
-        } else {
-            self.sub_phases[SubPhase::CompressFrame as usize].record(0);
-        }
+        let (_calls, nanos) = crate::outgoing::take_compression_cost();
+        self.sub_phases[SubPhase::CompressFrame as usize].record(nanos);
         self.sub_totals = [0; SubPhase::ALL.len()];
         self.open_sub = None;
         self.ticks = self.ticks.saturating_add(1);
