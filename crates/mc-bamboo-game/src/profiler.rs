@@ -257,10 +257,12 @@ pub(crate) enum SubPhase {
     LevelsUpdate,
     /// 一批收回之后把盒子从信箱交还 Director、按代数整理。
     ReturnBoxes,
+    /// Director 确认交付/收回、把盒子放进停放表等事件回执。
+    DirectorAck,
 }
 
 impl SubPhase {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::TicketUpdate,
         Self::DirectorEvents,
         Self::DeliveryLightFinish,
@@ -277,6 +279,7 @@ impl SubPhase {
         Self::MailSort,
         Self::LevelsUpdate,
         Self::ReturnBoxes,
+        Self::DirectorAck,
     ];
 
     fn name(self) -> &'static str {
@@ -297,6 +300,7 @@ impl SubPhase {
             Self::MailSort => "mail_sort",
             Self::LevelsUpdate => "levels_update",
             Self::ReturnBoxes => "return_boxes",
+            Self::DirectorAck => "director_ack",
         }
     }
 }

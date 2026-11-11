@@ -263,10 +263,10 @@ impl DirectorHost {
                 assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
                 // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
                 // 单独记在 `ticket_update`；其余事件是纯状态机推进。
-                let sub = if matches!(event, Event::Tickets { .. } | Event::Tick { .. }) {
-                    SubPhase::TicketUpdate
-                } else {
-                    SubPhase::DirectorEvents
+                let sub = match event {
+                    Event::Tickets { .. } | Event::Tick { .. } => SubPhase::TicketUpdate,
+                    Event::Delivered { .. } | Event::Returned { .. } => SubPhase::DirectorAck,
+                    _ => SubPhase::DirectorEvents,
                 };
                 region.profiler.start_sub(sub);
                 let effects = self.director.handle(event);
@@ -454,7 +454,9 @@ impl DirectorHost {
         // `Reclaiming`，盒子必须原封不动地作为 `Returned` 回去，绝不能先进
         // region 再被取出来，更不能晚几刻变成一个没人管的孤儿。
         // 这一步不碰 region，不占交付/收回上限，也不需要等光照。
-        self.return_pending_deliveries(&mut events);
+        region.profiler.time_sub(SubPhase::ReturnBoxes, || {
+            self.return_pending_deliveries(&mut events);
+        });
         if self.deliveries.is_empty() && self.reclaims.is_empty() {
             return events;
         }
