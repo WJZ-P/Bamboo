@@ -215,3 +215,42 @@ fn random_load_unload_never_materializes_unloaded_columns() {
         );
     }
 }
+
+/// 手工基准：把一片模板区块装进已加载的世界再卸掉，报每个区块的耗时。
+/// `cargo test --release -p mc-bamboo-world --lib loading_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "手工基准，不进常规测试"]
+fn loading_cost() {
+    use std::time::Instant;
+    const RADIUS: i32 = 11; // 视距 10 时一名玩家周围要交付的范围：23×23 = 529 个区块
+    let mut store = ChunkStore::loaded();
+    let mut positions = Vec::new();
+    for x in -RADIUS..=RADIUS {
+        for z in -RADIUS..=RADIUS {
+            positions.push(ChunkPos::new(x, z));
+        }
+    }
+    let boxes: Vec<_> = positions
+        .iter()
+        .map(|_| Box::new(ChunkColumn::from_template()))
+        .collect();
+    let started = Instant::now();
+    for (&pos, column) in positions.iter().zip(boxes) {
+        store.load(pos, column);
+    }
+    let load = started.elapsed();
+    let started = Instant::now();
+    for &pos in &positions {
+        store.unload(pos).expect("光照已经算完");
+    }
+    let unload = started.elapsed();
+    let count = positions.len() as u32;
+    eprintln!(
+        "{} 个区块：装入共 {:?}（每个 {:?}），卸掉共 {:?}（每个 {:?}）",
+        count,
+        load,
+        load / count,
+        unload,
+        unload / count
+    );
+}

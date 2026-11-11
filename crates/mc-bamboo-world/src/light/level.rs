@@ -12,7 +12,7 @@ use super::{
     Chunks, LightChanges, MIN_LIGHT_SECTION, SectionPos,
     engine::LightEngine,
     queue::Task,
-    storage::{LightColumn, LightStorage},
+    storage::{LightColumn, LightStorage, SectionStatesAround},
 };
 use crate::chunk::Chunk;
 
@@ -172,10 +172,10 @@ impl Engines {
     pub(super) fn rebind_area(
         &mut self,
         pos: ChunkPos,
-        chunks: super::Chunks<'_>,
+        area: &SectionStatesAround,
     ) -> [Vec<SectionPos>; 2] {
-        let sky = self.sky.storage.rebind_area(pos, chunks);
-        let block = self.block.storage.rebind_area(pos, chunks);
+        let sky = self.sky.storage.rebind_area(area);
+        let block = self.block.storage.rebind_area(area);
         for (layer, sections) in [(LightLayer::Sky, &sky), (LightLayer::Block, &block)] {
             self.changes.mark(
                 layer,
@@ -252,15 +252,8 @@ impl Visible {
 
     /// 区块束搬进/搬出之后重算别人读的那份里的 `sectionStates`，补建的数据层和引擎那份相同。
     /// 返回天空光和方块光各自补建了数据层的段。
-    pub(super) fn rebind_area(
-        &mut self,
-        pos: ChunkPos,
-        chunks: super::Chunks<'_>,
-    ) -> [Vec<SectionPos>; 2] {
-        [
-            self.sky.rebind_area(pos, chunks),
-            self.block.rebind_area(pos, chunks),
-        ]
+    pub(super) fn rebind_area(&mut self, area: &SectionStatesAround) -> [Vec<SectionPos>; 2] {
+        [self.sky.rebind_area(area), self.block.rebind_area(area)]
     }
 
     /// 取出一个区块柱在给别人读的那份里的天空光和方块光。

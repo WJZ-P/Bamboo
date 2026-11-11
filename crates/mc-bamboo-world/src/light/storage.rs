@@ -24,6 +24,77 @@ const NEIGHBOR_COUNT: u8 = 31;
 const MAX_NEIGHBORS: i32 = 26;
 const FULL_LIGHT: u8 = 15;
 
+/// 一个位置和它 8 个邻居柱各自的 26 个段状态，只由方块决定。
+///
+/// 搬一个区块柱时四份光照存储（天空光、方块光，各有「正在算」和「给别人读」两份）
+/// 要写进同样的段状态，所以只算一次，再分别交给 [`LightStorage::rebind_area`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SectionStatesAround {
+    columns: [(ChunkPos, [u8; LIGHT_SECTION_COUNT]); 9],
+}
+
+impl SectionStatesAround {
+    /// 按 `chunks` 此刻的方块算。HAS_DATA 位是这一段自己有没有方块，低 5 位是
+    /// 26 个邻居段里有方块的个数（官方 `updateSectionStatus` 累加出来的结果）。
+    ///
+    /// 每个区块柱先压成一个掩码（第 n 位 = 第 n 个光照段有方块），邻居计数就是
+    /// 在 3×3 个掩码上数上下各一段的窗口里有几位。区块只查 25 次。
+    pub(crate) fn compute(pos: ChunkPos, chunks: super::Chunks<'_>) -> Self {
+        // 坐标用饱和加法，贴着坐标上限时几个偏移会落到同一个位置；掩码按实际坐标缓存。
+        let mut masks: Vec<(ChunkPos, u32)> = Vec::with_capacity(25);
+        let mut mask_of = |column: ChunkPos| -> u32 {
+            if let Some(&(_, mask)) = masks.iter().find(|(known, _)| *known == column) {
+                return mask;
+            }
+            let mut mask = 0u32;
+            // 光照段比方块段多上下各一段，那两段没有方块段。
+            for (index, section) in chunks.chunk(column).sections().iter().enumerate() {
+                if !section.is_empty() {
+                    mask |= 1 << (index + 1);
+                }
+            }
+            masks.push((column, mask));
+            mask
+        };
+        let offset = |column: ChunkPos, dx: i32, dz: i32| {
+            ChunkPos::new(column.x.saturating_add(dx), column.z.saturating_add(dz))
+        };
+        let mut columns = [(pos, [0u8; LIGHT_SECTION_COUNT]); 9];
+        let mut next = 0;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let column = offset(pos, dx, dz);
+                let own = mask_of(column);
+                let mut states = [0u8; LIGHT_SECTION_COUNT];
+                for ndx in -1..=1 {
+                    for ndz in -1..=1 {
+                        let mask = mask_of(offset(column, ndx, ndz));
+                        for (slot, state) in states.iter_mut().enumerate() {
+                            let low = slot.saturating_sub(1);
+                            let high = (slot + 1).min(LIGHT_SECTION_COUNT - 1);
+                            let window = (u32::MAX >> (31 - high)) & (u32::MAX << low);
+                            let mut count = (mask & window).count_ones() as u8;
+                            if (ndx, ndz) == (0, 0) {
+                                // 自己不算自己的邻居。
+                                count -= ((mask >> slot) & 1) as u8;
+                            }
+                            *state += count;
+                        }
+                    }
+                }
+                for (slot, state) in states.iter_mut().enumerate() {
+                    if (own >> slot) & 1 == 1 {
+                        *state |= HAS_DATA;
+                    }
+                }
+                columns[next] = (column, states);
+                next += 1;
+            }
+        }
+        Self { columns }
+    }
+}
+
 /// 一个区块柱 26 个光照段的存储。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LightColumn {
@@ -413,56 +484,14 @@ impl LightStorage {
     /// `putSectionState` 照常重新初始化它。
     ///
     /// 返回这次补建了数据层的段。补建会换掉那一柱的版本号（区块包里多了一段）。
-    pub(crate) fn rebind_area(
-        &mut self,
-        pos: ChunkPos,
-        chunks: super::Chunks<'_>,
-    ) -> Vec<SectionPos> {
-        let occupied = |column: ChunkPos, slot: usize| -> bool {
-            // 光照段比方块段多上下各一段，那两段没有方块段。
-            (1..LIGHT_SECTION_COUNT - 1).contains(&slot)
-                && !chunks.chunk(column).sections()[slot - 1].is_empty()
-        };
-        let states_of = |column: ChunkPos| -> [u8; LIGHT_SECTION_COUNT] {
-            std::array::from_fn(|slot| {
-                let mut neighbors = 0u8;
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        for dz in -1..=1 {
-                            if (dx, dy, dz) == (0, 0, 0) {
-                                continue;
-                            }
-                            let neighbor = ChunkPos::new(
-                                column.x.saturating_add(dx),
-                                column.z.saturating_add(dz),
-                            );
-                            let neighbor_slot = (slot as i32 + dy) as usize;
-                            if (0..LIGHT_SECTION_COUNT).contains(&neighbor_slot)
-                                && occupied(neighbor, neighbor_slot)
-                            {
-                                neighbors += 1;
-                            }
-                        }
-                    }
-                }
-                (if occupied(column, slot) { HAS_DATA } else { 0 }) | neighbors
-            })
-        };
-
-        let mut area = Vec::with_capacity(9);
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let column = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
-                // 已加载模式只重算有柱的邻居；没加载的柱通过 `chunks.chunk`
-                // 按「没有方块」计入邻居计数，但不能给它建柱。
-                if self.has_column(column) {
-                    area.push((column, states_of(column)));
-                }
-            }
-        }
+    pub(crate) fn rebind_area(&mut self, area: &SectionStatesAround) -> Vec<SectionPos> {
         let mut created = Vec::new();
-        for (column, states) in area {
-            self.rebind_column(column, states, &mut created);
+        for &(column, states) in &area.columns {
+            // 已加载模式只重算有柱的邻居；没加载的柱在算邻居计数时按
+            // 「没有方块」计入，但不能给它建柱。
+            if self.has_column(column) {
+                self.rebind_column(column, states, &mut created);
+            }
         }
         created
     }

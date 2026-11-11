@@ -30,7 +30,7 @@ pub use properties::has_different_light_properties;
 use queue::{Task, TaskQueue};
 pub use sources::{NEGATIVE_INFINITY, SkyLightSources};
 pub(crate) use storage::LightColumn;
-use storage::LightStorage;
+use storage::{LightStorage, SectionStatesAround};
 
 use crate::{MIN_Y, SECTION_COUNT, chunk::Chunk};
 
@@ -307,8 +307,10 @@ impl LevelLight {
     /// 只在光照全部算完时调用；两层和「正在算 / 给别人读」两份都要更新，补建的内容相同。
     pub(crate) fn rebind_area(&mut self, pos: ChunkPos, chunks: Chunks<'_>) {
         debug_assert!(self.ready_to_move_columns(), "搬区块束之前要先把光照跑完");
-        let engines = self.engines.rebind_area(pos, chunks);
-        let visible = self.visible.rebind_area(pos, chunks);
+        // 段状态只由方块决定，四份存储写进去的是同一份，只算一次。
+        let area = SectionStatesAround::compute(pos, chunks);
+        let engines = self.engines.rebind_area(pos, &area);
+        let visible = self.visible.rebind_area(&area);
         debug_assert!(
             engines == visible,
             "算完以后引擎和别人读到的光照存着同样的段，补建的也该相同"

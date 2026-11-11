@@ -710,6 +710,51 @@ mod tests {
         assert_same(&data_layers(&store), &before.1);
     }
 
+    /// 搬区块时一次算出来的段状态，要和引擎随着一格格放方块累加出来的完全一样。
+    /// 随机往 5×5 个区块的各个高度放方块，中心柱取出再放回（这会重算 3×3 的段状态），
+    /// 再和从没搬过的同一个世界逐柱比较。
+    #[test]
+    fn recomputed_section_states_match_the_incremental_ones_on_random_worlds() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: i32| -> i32 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) % bound as u64) as i32
+        };
+        for _ in 0..12 {
+            let mut blocks_to_place = Vec::new();
+            for _ in 0..40 {
+                // x、z 落在以中心柱为中心的 5×5 个区块里，y 覆盖整个世界高度。
+                let pos = BlockPos::new(next(80) - 32, next(380) - 62, next(80) - 32);
+                blocks_to_place.push(pos);
+            }
+            let build = |store: &mut ChunkStore| {
+                for &pos in &blocks_to_place {
+                    store.set_block(pos, blocks::STONE);
+                }
+                store.finish_light_updates();
+            };
+            let mut moved = ChunkStore::flat();
+            build(&mut moved);
+            let column = take(&mut moved, CENTER);
+            insert(&mut moved, CENTER, column);
+
+            let mut direct = ChunkStore::flat();
+            build(&mut direct);
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let pos = ChunkPos::new(CENTER.x + dx, CENTER.z + dz);
+                    assert_eq!(
+                        moved.light().section_states(pos),
+                        direct.light().section_states(pos),
+                        "段状态不同：{pos:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_light_engine_still_works_after_a_round_trip() {
         let mut store = edited(true);
