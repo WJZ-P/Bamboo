@@ -361,6 +361,7 @@ pub(crate) fn send_chunks(region: &mut Region) {
                 &region.chunks,
                 &region.template_body,
                 pos,
+                &mut region.profiler,
             ) {
                 Ok(frames) => frames,
                 Err(ChunkFrameError::NotLoaded { .. }) => {
@@ -1112,8 +1113,9 @@ mod tests {
         let store = ChunkStore::flat();
         let template_body = encode_template(&store);
         let mut cache = ChunkCache::default();
+        let mut profiler = crate::profiler::Profiler::default();
         let pos = ChunkPos::new(5, -3);
-        let frames = chunk_frame(&mut cache, &store, &template_body, pos).unwrap();
+        let frames = chunk_frame(&mut cache, &store, &template_body, pos, &mut profiler).unwrap();
 
         let mut expected = Vec::new();
         append_frame(
@@ -1128,8 +1130,14 @@ mod tests {
         assert_eq!(frames.raw(), expected);
 
         // 没改过的区块在不同坐标各有一份帧，包头里的坐标跟着变。
-        let neighbour =
-            chunk_frame(&mut cache, &store, &template_body, ChunkPos::new(6, -3)).unwrap();
+        let neighbour = chunk_frame(
+            &mut cache,
+            &store,
+            &template_body,
+            ChunkPos::new(6, -3),
+            &mut profiler,
+        )
+        .unwrap();
         assert_ne!(frames.raw(), neighbour.raw());
         assert_eq!(cache.frame_count(), 2);
         cache.retain(|p| p == pos);

@@ -6,10 +6,27 @@
 
 use std::{
     borrow::Cow,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use mc_bamboo_protocol::compression::{self, CompressionError};
+
+/// 压缩发生在连接任务里，世界线程的剖析器拿不到它。这里用两个原子计数器累计
+/// 「这一轮报告里压缩过的帧数和总纳秒」，剖析器每刻取走增量记一条样本。
+/// 只有 `BAMBOO_PROFILE` 打开时才有意义，平时只是两次原子加法。
+static COMPRESS_NANOS: AtomicU64 = AtomicU64::new(0);
+static COMPRESS_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// 取走并清零连接任务累计的压缩耗时；返回（次数，总纳秒）。
+pub fn take_compression_cost() -> (u64, u64) {
+    (
+        COMPRESS_CALLS.swap(0, Ordering::Relaxed),
+        COMPRESS_NANOS.swap(0, Ordering::Relaxed),
+    )
+}
 
 /// 一个或多个完整的未压缩帧，供多条连接共用。
 ///
@@ -62,7 +79,11 @@ impl SharedFrames {
                 &self.raw, threshold,
             )?));
         }
+        let started = std::time::Instant::now();
         let bytes = compression::encode_frames(&self.raw, threshold)?;
+        let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        COMPRESS_NANOS.fetch_add(elapsed, Ordering::Relaxed);
+        COMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
         // 只有这一个线程在写，而且刚确认过缓存还是空的。
         self.compressed
             .set((threshold, bytes))

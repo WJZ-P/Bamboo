@@ -12,7 +12,10 @@ use mc_bamboo_world::director::{
     TicketOp,
 };
 
-use crate::region::{Region, RegionColumn, parking::Parking};
+use crate::{
+    profiler::SubPhase,
+    region::{Region, RegionColumn, parking::Parking},
+};
 
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
@@ -160,10 +163,12 @@ impl DirectorHost {
     pub(crate) fn tickets(&mut self, region: &mut Region, ops: Vec<TicketOp>) {
         if self.infinite_flat {
             // 只把票喂给票表，不产生效果。
+            region.profiler.start_sub(SubPhase::TicketUpdate);
             for op in ops {
                 self.apply_infinite_ticket(op);
             }
             let _ = self.director.tickets_mut().run_updates();
+            region.profiler.end_sub();
             return;
         }
         self.pump(region, Event::Tickets { ops });
@@ -196,8 +201,10 @@ impl DirectorHost {
     /// 每刻推进。预算和计数由 [`Self::begin_tick`] 在刻开头重置。
     pub(crate) fn tick(&mut self, region: &mut Region, now_tick: u64) {
         if self.infinite_flat {
+            region.profiler.start_sub(SubPhase::TicketUpdate);
             self.director.tickets_mut().tick(&mut |_| false);
             let _ = self.director.tickets_mut().run_updates();
+            region.profiler.end_sub();
             return;
         }
         self.pump(region, Event::Tick { now_tick });
@@ -254,9 +261,44 @@ impl DirectorHost {
             while let Some(event) = events.pop() {
                 rounds += 1;
                 assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
-                for effect in self.director.handle(event) {
-                    if let Some(next) = self.apply(region, effect) {
-                        events.push(next);
+                // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
+                // 单独记在 `ticket_update`；其余事件是纯状态机推进。
+                let sub = if matches!(event, Event::Tickets { .. } | Event::Tick { .. }) {
+                    SubPhase::TicketUpdate
+                } else {
+                    SubPhase::DirectorEvents
+                };
+                region.profiler.start_sub(sub);
+                let effects = self.director.handle(event);
+                region.profiler.end_sub();
+                for effect in effects {
+                    match effect {
+                        Effect::Submit {
+                            id,
+                            generation,
+                            task,
+                        } => {
+                            rounds += 1;
+                            assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
+                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            let next = self.run_task(id, generation, task);
+                            region.profiler.end_sub();
+                            events.push(next);
+                        }
+                        Effect::Cancel { .. } => {}
+                        Effect::ToRegion(message) => {
+                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            self.region_message(region, message);
+                            region.profiler.end_sub();
+                        }
+                        Effect::Park { pos, column } => {
+                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            self.parking.park(pos, column);
+                            self.parked += 1;
+                            region.profiler.end_sub();
+                        }
+                        Effect::DropSnapshot { .. } => {}
+                        Effect::Warn { message } => tracing::warn!(%message, "chunk director"),
                     }
                 }
             }
@@ -265,36 +307,6 @@ impl DirectorHost {
             events = self.flush_region_mail(region);
             if events.is_empty() {
                 return;
-            }
-        }
-    }
-
-    /// 执行一个效果。返回需要立刻回给 Director 的事件（内联任务的结果）。
-    fn apply(
-        &mut self,
-        region: &mut Region,
-        effect: Effect<Box<RegionColumn>>,
-    ) -> Option<Event<Box<RegionColumn>>> {
-        match effect {
-            Effect::Submit {
-                id,
-                generation,
-                task,
-            } => Some(self.run_task(id, generation, task)),
-            Effect::Cancel { .. } => None,
-            Effect::ToRegion(message) => {
-                self.region_message(region, message);
-                None
-            }
-            Effect::Park { pos, column } => {
-                self.parking.park(pos, column);
-                self.parked += 1;
-                None
-            }
-            Effect::DropSnapshot { .. } => None,
-            Effect::Warn { message } => {
-                tracing::warn!(%message, "chunk director");
-                None
             }
         }
     }
@@ -447,7 +459,9 @@ impl DirectorHost {
         // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
         // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
         // 交付/收回要求「没有算到一半的轮次」。
-        region.chunks.finish_light_updates();
+        region.profiler.time_sub(SubPhase::DeliveryLightFinish, || {
+            region.chunks.finish_light_updates();
+        });
         let centers = Self::guaranteed_centers(region);
 
         // 近的先交付。玩家脚下 3×3 全部交付且不算进上限；同等距离按坐标排。
