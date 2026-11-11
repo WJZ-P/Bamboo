@@ -1108,6 +1108,13 @@ impl Level for Recording<'_> {
         value
     }
 
+    fn randomly_ticking_sections(&self, chunk: ChunkPos) -> u32 {
+        // 整个区块的答案记成一条读取，不要退回默认实现逐段各记一条。
+        let value = self.level.randomly_ticking_sections(chunk);
+        self.read(None, K_SECTION_TICKING, (chunk, value));
+        value
+    }
+
     fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool {
         let value = self.level.any_player_close_enough_to(pos, max_distance);
         self.read(Some(pos), K_PLAYER_NEAR, (max_distance, value));

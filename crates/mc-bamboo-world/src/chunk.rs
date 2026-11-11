@@ -221,6 +221,15 @@ pub struct Section {
     fluids: u16,
 }
 
+/// 逐段数出来的位图：第 i 位表示 `sections[i]` 里有会随机刻的方块。
+fn random_ticking_mask(sections: &[Section]) -> u32 {
+    sections
+        .iter()
+        .enumerate()
+        .filter(|(_, section)| section.is_randomly_ticking())
+        .fold(0, |mask, (index, _)| mask | 1 << index)
+}
+
 /// 这个状态的方块或者它的流体有随机刻。
 fn ticks_randomly(state: u32) -> bool {
     state_facts(state) & (facts::RANDOMLY_TICKING | facts::FLUID_RANDOMLY_TICKING) != 0
@@ -386,6 +395,11 @@ impl ChunkArchiveMeta {
 #[derive(Debug, Clone)]
 pub struct Chunk {
     sections: Vec<Section>,
+    /// 哪些区块段里有会随机刻的方块：第 i 位对应 `sections[i]`。
+    ///
+    /// 它完全由 `sections` 决定，单独存一份是为了随机刻每刻问「这个区块要 tick 哪几段」时
+    /// 只读这一个字，不必把 24 个区块段各读一遍（它们各在各的缓存行上）。
+    random_ticking_sections: u32,
     /// 和 [`HeightmapKind::ALL`] 一一对应。
     heightmaps: [Heightmap; HeightmapKind::ALL.len()],
     /// 有方块实体的位置和类型。键是 `(y, z, x)`，所以遍历顺序和放置的先后无关。
@@ -408,6 +422,7 @@ impl Chunk {
     pub fn empty(biome: u32) -> Self {
         Self {
             sections: vec![Section::empty(biome); SECTION_COUNT],
+            random_ticking_sections: 0,
             heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
             block_entities: BTreeMap::new(),
             signs: BTreeMap::new(),
@@ -467,7 +482,9 @@ impl Chunk {
             }
         }
         let block_entities = find_block_entities(&sections);
+        let random_ticking_sections = random_ticking_mask(&sections);
         let mut chunk = Self {
+            random_ticking_sections,
             sections,
             heightmaps: maps,
             block_entities,
@@ -652,6 +669,19 @@ impl Chunk {
         )
     }
 
+    /// 哪些区块段里有会随机刻的方块或流体（官方 `LevelChunkSection.isRandomlyTicking`）：
+    /// 第 i 位对应从世界底部数起的第 i 段。
+    pub fn randomly_ticking_sections(&self) -> u32 {
+        // 调试构建里每次都和逐段数出来的对一遍：哪条改区块段的路径忘了维护位图，
+        // 跑到随机刻的测试都会在这里停下。
+        debug_assert_eq!(
+            self.random_ticking_sections,
+            random_ticking_mask(&self.sections),
+            "随机刻的区块段位图和区块段对不上"
+        );
+        self.random_ticking_sections
+    }
+
     /// 读取方块状态。`x` 和 `z` 是区块内坐标，`y` 是世界高度。
     pub fn block(&self, x: usize, y: i32, z: usize) -> u32 {
         let (section, local_y) = Self::locate(y);
@@ -666,6 +696,12 @@ impl Chunk {
         let previous = self.block(x, y, z);
         let (section, local_y) = Self::locate(y);
         self.sections[section].set_block(x, local_y, z, state);
+        let bit = 1 << section;
+        if self.sections[section].is_randomly_ticking() {
+            self.random_ticking_sections |= bit;
+        } else {
+            self.random_ticking_sections &= !bit;
+        }
         // 官方 `LevelChunk.setBlockState`：区块段先写，再用新状态更新每一张高度图。
         for (kind, heightmap) in HeightmapKind::ALL.into_iter().zip(&mut self.heightmaps) {
             heightmap.update(kind, &self.sections, x, y, z, state);

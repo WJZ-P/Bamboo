@@ -148,6 +148,10 @@ impl Level for RegionLevel<'_> {
         self.chunks.is_randomly_ticking_section(chunk, section_y)
     }
 
+    fn randomly_ticking_sections(&self, chunk: ChunkPos) -> u32 {
+        self.chunks.randomly_ticking_sections(chunk)
+    }
+
     /// 这个世界只有创造模式，没有旁观者。
     fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool {
         let corner = pos.corner();

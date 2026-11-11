@@ -473,6 +473,20 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 有会随机刻的方块或者流体，也就是有状态的 `is_randomly_ticking` 或者 `is_fluid_randomly_ticking` 为真。
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool;
 
+    /// 这个区块里哪些区块段 [`is_randomly_ticking_section`](Self::is_randomly_ticking_section)：
+    /// 第 i 位对应从世界底部数起的第 i 段。
+    ///
+    /// 随机刻每刻对每个区块问一次。默认实现逐段去问；手里有整个区块的实现应该覆盖它，
+    /// 一次答完，答案必须和逐段问的相同。
+    fn randomly_ticking_sections(&self, chunk: ChunkPos) -> u32 {
+        let first = self.min_y() >> 4;
+        let last = self.max_y() >> 4;
+        (first..=last)
+            .enumerate()
+            .filter(|&(_, section_y)| self.is_randomly_ticking_section(chunk, section_y))
+            .fold(0, |mask, (index, _)| mask | 1 << index)
+    }
+
     /// `ChunkMap.anyPlayerCloseEnoughTo`：有不是旁观者的玩家，脚到这一格最小的角不到 `max_distance` 格。
     fn any_player_close_enough_to(&self, pos: BlockPos, max_distance: i32) -> bool;
 
