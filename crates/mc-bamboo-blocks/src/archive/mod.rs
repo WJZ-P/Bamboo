@@ -9,12 +9,16 @@
 //! 输入当成不可信数据：所有解析返回 [`Error`] 或者用官方缺省值，不 panic。
 
 pub mod block_entity;
+pub mod entity;
 pub mod redstone;
 pub mod tag;
+pub mod ticks;
 
 #[cfg(test)]
 mod tests;
 
 pub use block_entity::{BlockEntityKind, create_block_entity, write_block_entity_additional};
+pub use entity::{ENTITY_UUID_PREFIX, entity_uuid, entity_uuid_tag, read_entity, write_entity};
 pub use redstone::{read_redstone, write_redstone};
 pub use tag::{Error, Result, field, put, remove_known, with_defaults};
+pub use ticks::{decode_chunk_ticks, encode_chunk_ticks};
