@@ -13,7 +13,7 @@ use mc_bamboo_blocks::{
     BlockState, ShulkerBoxEntity,
     entity::view::{BlockSource, SourceView, ViewFacts},
 };
-use mc_bamboo_core::{BlockPos, LightLayer};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::{BlockAncestor, blocks};
 use mc_bamboo_world::{MIN_Y, SECTION_SIZE, palette::PaletteView, store::ChunkStore};
 
@@ -52,7 +52,7 @@ impl BlockSource for ReadOnlyWorld<'_> {
         ReadOnlyWorld::any_hopper_in(self, min, max)
     }
 
-    fn chunk_ticks_entities(&self, chunk: mc_bamboo_core::ChunkPos) -> bool {
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.tick_levels.chunk_ticks_entities(chunk)
     }
 }
