@@ -179,21 +179,26 @@ pub(crate) fn take_pristine_cost() -> u64 {
 impl ChunkBundle for RegionColumn {
     /// 盒子还能不能丢掉、下次用模板重新生成。
     ///
-    /// 方块、告示牌、`update tag` 和两层光照要和生成器输出逐项相同，
-    /// 并且这一层知道的所有上层内容都得是空的（计划刻、方块实体、红石记忆、
-    /// 容器、物品组件、命令方块、讲台上的书、实体）。
-    /// 邻居的光会照进这一柱，只比方块不够；`ChunkColumn::is_pristine` 把光照一起比了。
-    /// 拿不准时返回 `false`，让 Director 把盒子整份停放。
+    /// 下层盒子按「从生成器出来之后有没有被写过」判断（放进 `ChunkStore` 时
+    /// 记下版本号，取出来时看版本号变没变），方块和光照的任何一次写都会换版本号：
+    /// 邻居的光照进来、补建数据层、方块改了又改回去，都算写过。
+    /// 上层这一层的内容本来就都是些空表，直接问空不空。
     fn is_pristine(&self) -> bool {
-        self.ticks.is_none()
+        let upper_empty = self.ticks.is_none()
             && self.block_entities.is_empty()
             && self.redstone.is_empty()
             && self.containers.is_empty()
             && self.block_items.is_empty()
             && self.command_blocks.is_empty()
             && self.books.is_empty()
-            && self.entities.is_empty()
-            && self.column.is_pristine(template_column())
+            && self.entities.is_empty();
+        let result = upper_empty && self.column.untouched();
+        // 调试构建里用逐项比较复核：哪条写路径没换版本号，测试会立刻炸出来。
+        debug_assert!(
+            !result || self.column.is_pristine(template_column()),
+            "版本号说是原样，逐项比较却不认为原样：有写路径没换版本号"
+        );
+        result
     }
 }
 

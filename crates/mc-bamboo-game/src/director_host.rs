@@ -286,11 +286,7 @@ impl DirectorHost {
                             events.push(next);
                         }
                         Effect::Cancel { .. } => {}
-                        Effect::ToRegion(message) => {
-                            region.profiler.start_sub(SubPhase::DirectorEvents);
-                            self.region_message(region, message);
-                            region.profiler.end_sub();
-                        }
+                        Effect::ToRegion(message) => self.region_message(region, message),
                         Effect::Park { pos, column } => {
                             region.profiler.start_sub(SubPhase::DirectorEvents);
                             self.parking.park(pos, column);
@@ -356,18 +352,26 @@ impl DirectorHost {
                 column,
                 desired,
             } => {
-                self.deliveries.insert(pos, (generation, desired, column));
+                region.profiler.time_sub(SubPhase::DirectorEvents, || {
+                    self.deliveries.insert(pos, (generation, desired, column));
+                });
             }
-            RegionMessage::Reclaim { positions } => self.reclaims.extend(positions),
+            RegionMessage::Reclaim { positions } => {
+                region.profiler.time_sub(SubPhase::DirectorEvents, || {
+                    self.reclaims.extend(positions);
+                });
+            }
             RegionMessage::LevelChanged { changes } => {
                 // 同一个 pump 里可能先收到档位变化、后 flush 交付：信箱里那份档位
                 // 也要跟着变，否则新交付的区块会带着旧档位进 region。尚未交付的
                 // 位置在 region 里没有记录，`level_changed` 只更新已交付的那些。
-                for change in &changes {
-                    if let Some(entry) = self.deliveries.get_mut(&change.pos) {
-                        entry.1 = Desired::new(change.loading.1, change.simulation.1);
+                region.profiler.time_sub(SubPhase::DirectorEvents, || {
+                    for change in &changes {
+                        if let Some(entry) = self.deliveries.get_mut(&change.pos) {
+                            entry.1 = Desired::new(change.loading.1, change.simulation.1);
+                        }
                     }
-                }
+                });
                 region.profiler.time_sub(SubPhase::LevelsUpdate, || {
                     region.tick_levels.level_changed(&changes);
                 });
