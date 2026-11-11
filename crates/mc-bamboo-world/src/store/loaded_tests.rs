@@ -78,6 +78,7 @@ fn unloaded_positions_read_as_missing_and_ignore_writes() {
     assert_eq!(store.heightmap_y(pos), None);
     assert_eq!(store.biome_at(pos), None);
     assert!(!store.is_randomly_ticking_section(ORIGIN, -4));
+    assert_eq!(store.randomly_ticking_sections(ORIGIN), 0);
     assert_eq!(store.light_value(LightLayer::Sky, pos), 15);
     assert_eq!(store.light_value(LightLayer::Block, pos), 0);
     assert!(!store.set_sign(pos, Default::default()));

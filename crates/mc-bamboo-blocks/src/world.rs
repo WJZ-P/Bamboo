@@ -1181,9 +1181,9 @@ impl<'a> World<'a> {
         self.level.random().block_random_pos(origin, y_mask)
     }
 
-    /// `LevelChunkSection.isRandomlyTicking`。
-    pub(crate) fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
-        self.level.is_randomly_ticking_section(chunk, section_y)
+    /// 这个区块里哪些区块段 `LevelChunkSection.isRandomlyTicking`，第 i 位是从底部数起的第 i 段。
+    pub(crate) fn randomly_ticking_sections(&self, chunk: ChunkPos) -> u32 {
+        self.level.randomly_ticking_sections(chunk)
     }
 
     /// `isLoaded`：所有区块都在内存里，只看高度和坐标的范围。

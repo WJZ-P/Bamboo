@@ -301,6 +301,19 @@ impl ChunkStore {
         )
     }
 
+    /// 区块 `pos` 里哪些区块段有会随机刻的方块：第 i 位对应从世界底部数起的第 i 段。
+    /// 没加载的区块一段也没有。和逐段问 [`Self::is_randomly_ticking_section`] 的答案相同，
+    /// 只查一次区块表、只读区块里的一个字。
+    pub fn randomly_ticking_sections(&self, pos: ChunkPos) -> u32 {
+        if !self.is_loaded(pos) {
+            return 0;
+        }
+        self.edited
+            .get(&pos)
+            .unwrap_or(&self.template)
+            .randomly_ticking_sections()
+    }
+
     /// 区块 `pos` 里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段有会随机刻的方块。
     /// 超出世界高度的区块段没有方块。
     pub fn is_randomly_ticking_section(&self, pos: ChunkPos, section_y: i32) -> bool {
@@ -630,8 +643,51 @@ mod tests {
         assert!(!store.is_randomly_ticking_section(chunk, -5));
         assert!(!store.is_randomly_ticking_section(chunk, 20));
 
+        // 整个区块一次问出来的位图：第 i 位是从世界底部数起的第 i 段。
+        assert_eq!(store.randomly_ticking_sections(chunk), 1);
+
         store.set_block(BlockPos::new(48, 0, -32), blocks::WHEAT);
         assert!(store.is_randomly_ticking_section(chunk, 0));
+        assert_eq!(store.randomly_ticking_sections(chunk), 1 | 1 << 4);
+        // 别的区块不受影响。
+        assert_eq!(store.randomly_ticking_sections(ChunkPos::new(4, -2)), 1);
+
+        // 最后一个会随机刻的方块拿走，那一位跟着清掉。
+        store.set_block(BlockPos::new(48, 0, -32), blocks::AIR);
+        assert_eq!(store.randomly_ticking_sections(chunk), 1);
+    }
+
+    #[test]
+    fn the_ticking_section_mask_agrees_with_asking_each_section() {
+        let mut store = ChunkStore::flat();
+        let chunk = ChunkPos::new(-1, 5);
+        let ticking = [blocks::WHEAT, blocks::GRASS_BLOCK, blocks::WATER];
+        let plain = [blocks::AIR, blocks::STONE, blocks::DIRT];
+        // 固定的线性同余序列，够把各段各种组合都走到。
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        for _ in 0..2000 {
+            let pos = BlockPos::new(
+                chunk.x * 16 + next(2) as i32,
+                MIN_Y + next(384) as i32,
+                chunk.z * 16 + next(2) as i32,
+            );
+            let state = if next(3) == 0 {
+                ticking[next(3) as usize]
+            } else {
+                plain[next(3) as usize]
+            };
+            store.set_block(pos, state);
+            let asked = (0..24)
+                .filter(|&index| store.is_randomly_ticking_section(chunk, (MIN_Y >> 4) + index))
+                .fold(0_u32, |mask, index| mask | 1 << index);
+            assert_eq!(store.randomly_ticking_sections(chunk), asked);
+        }
     }
 
     #[test]

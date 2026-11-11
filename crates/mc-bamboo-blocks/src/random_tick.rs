@@ -45,10 +45,16 @@ pub fn tick_chunk(
     if speed > 0 {
         let first = world.min_y() >> 4;
         let last = world.max_y() >> 4;
-        for section_y in first..=last {
-            if world.is_randomly_ticking_section(chunk, section_y) {
+        // 官方逐段问 `isRandomlyTicking`。这里一次问出整个区块的答案：绝大多数区块段
+        // 没有会随机刻的方块，逐段问就是每个区块每刻白查二十来次。
+        let mut ticking = world.randomly_ticking_sections(chunk);
+        for (index, section_y) in (first..=last).enumerate() {
+            if ticking & (1 << index) != 0 {
                 let section_origin = BlockPos::new(origin.x, section_y << 4, origin.z);
                 tick_section(&mut world, section_origin, speed);
+                // 刚跑的随机刻可能改了后面区块段里的方块（往上长、往上烧），
+                // 官方轮到那一段时看到的是改过之后的样子，所以重新问一次。
+                ticking = world.randomly_ticking_sections(chunk);
             }
         }
     }
