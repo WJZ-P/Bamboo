@@ -871,7 +871,7 @@ fn level_cases() -> Vec<(String, LevelData)> {
 }
 
 fn level_spec(level: &LevelData) -> Value {
-    let mut spec = json!({
+    json!({
         "level_name": level.level_name,
         "game_type": level.game_type,
         "difficulty": level.difficulty.difficulty,
@@ -885,11 +885,7 @@ fn level_spec(level: &LevelData) -> Value {
             "x": level.spawn.x, "y": level.spawn.y, "z": level.spawn.z,
             "yaw": level.spawn.yaw, "pitch": level.spawn.pitch,
         },
-    });
-    if !level.preserved.is_empty() {
-        spec["unknown_tag"] = json!("keep");
-    }
-    spec
+    })
 }
 
 fn uuid_high(uuid: [i32; 4]) -> i64 {

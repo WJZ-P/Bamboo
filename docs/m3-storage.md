@@ -404,9 +404,9 @@ gzip 的 NBT，根复合标签有名字（空字符串）。字段名和类型�
 | `DataVersion` | int | 生成器导出的 5023 | `NbtUtils.addCurrentDataVersion`（`Player.addAdditionalSaveData` 开头） |
 | `UUID` | int array（4 项） | `Player::uuid` | `Entity.saveWithoutId` 的 `store("UUID", UUIDUtil.CODEC, ...)` |
 | `Pos` | 3 个 double | `Player::position` | 同上 `store("Pos", Vec3.CODEC, ...)` |
-| `Motion` | 3 个 double | 运行时无速度状态，写 0 | 同上 `store("Motion", Vec3.CODEC, ...)` |
+| `Motion` | 3 个 double | `Player::motion.delta`（速度校验用）；`RuntimeParts` 暂未接 | 同上 `store("Motion", Vec3.CODEC, ...)` |
 | `Rotation` | 2 个 float（yaw、pitch） | `Player::yaw`、`pitch` | 同上 `store("Rotation", Vec2.CODEC, ...)` |
-| `fall_distance` | double | 运行时无摔落距离，写 0 | 同上 `putDouble` |
+| `fall_distance` | double | `Player::motion.fall_distance`；`RuntimeParts` 暂未接 | 同上 `putDouble` |
 | `Fire` | short | 无着火状态，写 0 | 同上 `putShort` |
 | `Air` | short | 无氧气状态，写 300 | 同上 `putShort` |
 | `OnGround` | bool（byte） | `Player::on_ground` | 同上 `putBoolean` |
@@ -431,13 +431,15 @@ gzip 的 NBT，根复合标签有名字（空字符串）。字段名和类型�
 | `seenCredits` | bool（byte） | 无终末之诗，写 false | `ServerPlayer.addAdditionalSaveData` |
 | `spawn_extra_particles_on_fall` | bool（byte） | 无对应状态，写 false | 同上 |
 
-盘点到的其它跨重启状态：`Player` 还有 `head_yaw`（由 `yaw` 派生）、`motion`（移动校验用）、
+盘点到的其它跨重启状态：`Player` 还有 `head_yaw`（由 `yaw` 派生）、
 `client`（皮肤外层、主手、视距）、`teleport`、`chunks`、`sync`（`shared_flags`、`flying`、
 `pose`）、`prediction`、`mining`、`inventory_cursor`、`container_counter`、`spam`、`random`、
 `drop_spam`、`chat`、`respawn`（`Option<RespawnData>`，官方的 `respawn` 键）。其中
 `client` / 视距 / 菜单计数器 / 同步缓存是会话状态，官方也不存；`permission_level`、
 `is_op` 来自 `ops.json`，不在玩家文件里。`respawn` 运行时有，但本层没有建模，按 D9
-原样保留。全局的 `WorldState`（默认游戏模式、难度、出生点、天气、时间）和全套
+原样保留。`player_move::Motion` 里还记着 `fall_distance` 和 `delta`（速度校验用）：这两个字段
+官方也存，但 `RuntimeParts` 的转换函数暂未接（调用方可以在拿到 `PlayerData` 后自己
+填）。全局的 `WorldState`（默认游戏模式、难度、出生点、天气、时间）和全套
 `GameRuleSet` 属于 `level.dat` / `data/`，不是每玩家状态。
 
 **省略规则**：上表这些键官方都是无条件写出（`storeNullable` 的两个可选字段除外），所以
@@ -641,7 +643,7 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    - ✅ **编解码这一半已完成**：带槽位物品（`mc-bamboo-protocol::components::archive::slots`）、
      `PlayerData`、`LevelData` 的 gzip NBT 写读，D9 原样保留，模糊测试，以及
      `cargo run -p mc-bamboo-vanilla -- player-data <java 路径>` 的官方双向对拍
-     （41 个用例 / 298 项检查，0 不一致）。**不读写真实世界目录，不接进游戏，
+     （41 个用例 / 297 项检查，0 不一致）。**不读写真实世界目录，不接进游戏，
      磁盘上不会多出任何东西**。字段名和省略规则见第 9 节。
    - ⬜ **接进游戏这一半还没做**：进服时读、离开和关服时写、`level.dat_old` 轮换、
      `session.lock`、`data/` 下的独立 saved data。重启后位置和物品栏真正恢复要等这一半。

@@ -512,6 +512,8 @@ fn decode_items(tag: &Tag, size: usize, problems: &mut Vec<slots::ItemProblem>) 
 }
 
 /// 一个复合标签里的字段（`CompoundTag` 键序无关，重名按最后一次出现）。
+///
+/// Looks up a field in a compound tag. Duplicate keys use the last one.
 pub fn field<'a>(tag: &'a Tag, key: &str) -> Option<&'a Tag> {
     match tag {
         Tag::Compound(entries) => entries
@@ -693,7 +695,8 @@ fn numeric_list(entries: &[(String, Tag)], key: &'static str) -> Result<Vec<f64>
 /// 从游戏层的公开值造一份玩家存档（只是转换函数，不接进进服 / 离服流程）。
 ///
 /// 这里只接受必要的字段，避免存档层依赖游戏层的私有类型。没有对应运行时状态的字段
-/// 用官方默认值：血量恒 20、饥饿 / 经验 / 能力从游戏模式推。
+/// 用官方默认值：血量恒 20、饥饿 / 经验 / 能力从游戏模式推。速度（`Motion`）和摔落
+/// 距离（`fall_distance`）游戏层也有，但要保存它们的调用方在拿到结果后自己填。
 impl PlayerData {
     pub fn from_runtime_parts(parts: &RuntimeParts<'_>) -> Self {
         let mut data = Self {

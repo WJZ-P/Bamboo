@@ -135,6 +135,9 @@ impl Default for DataPacks {
 /// `LastPlayed` 是毫秒时间戳，官方 `createTag` 每次写都刷新成现在；这里只是数据，
 /// 由调用方决定值。`server_brands` 对应 `ServerBrands`，
 /// `removed_features` 为空时官方不写这个键。
+///
+/// The `Data` compound of `level.dat`. `LastPlayed` is a plain field here; the
+/// caller decides its value. Unknown keys are preserved verbatim (D9).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LevelData {
     pub server_brands: Vec<String>,
@@ -771,24 +774,20 @@ mod tests {
         let decoded = LevelData::from_named(&plain).unwrap();
         assert_eq!(decoded.preserved.len(), 1);
         assert_eq!(decoded.nested_preserved.len(), 1);
-        let mut again = Vec::new();
-        mc_bamboo_nbt::write_named("", &decoded.encode(), &mut again);
-        // `Data` 里的未知键（根级别的未知键由调用方负责，见 docs）。
-        let data = Tag::Compound(match decoded.encode() {
-            Tag::Compound(entries) => entries,
-            _ => unreachable!(),
-        });
-        assert_eq!(
-            field_of(
-                match &data {
-                    Tag::Compound(entries) => entries,
-                    _ => unreachable!(),
-                },
-                "bamboo:data"
-            ),
-            Some(&Tag::Long(-7))
-        );
-        let _ = again;
+        assert_eq!(decoded.root_preserved.len(), 1);
+        let encoded = decoded.encode_root();
+        let Tag::Compound(entries) = &encoded else {
+            panic!("root is a compound");
+        };
+        assert_eq!(field_of(entries, "bamboo:root"), Some(&Tag::Int(1)));
+        let Some(Tag::Compound(data)) = field_of(entries, "Data") else {
+            panic!("Data is a compound");
+        };
+        assert_eq!(field_of(data, "bamboo:data"), Some(&Tag::Long(-7)));
+        let Some(Tag::Compound(version)) = field_of(data, "Version") else {
+            panic!("Version is a compound");
+        };
+        assert_eq!(field_of(version, "bamboo:version"), Some(&Tag::Byte(3)));
     }
 
     #[test]
