@@ -661,3 +661,29 @@ Director 信箱改成每刻最多交付 N 个区块（默认 N=64，脚下 3×3 
   时间花在逐区块的随机刻逻辑和缓存不命中上，不在集合查找。
 - `ticket_update` 0.9 ms / p99 2.2 ms（`fly-20` 子项里修完后的第三大项），
   见 `docs/performance-optimizations.md` 第 9 节。
+
+### 9.5 实验：让原本走无限模式的 game 测试改走已加载模式
+
+`Harness::new` 现在读一次环境变量 `BAMBOO_TEST_LOADED=1`，把原本走
+「无限超平坦」的测试改走已加载模式（默认不变）。这只是**报告用的实验开关**，
+不修测试、不改变正式行为。复现：
+
+```bash
+BAMBOO_TEST_LOADED=1 RUST_MIN_STACK=16777216 \
+    cargo test -p mc-bamboo-game --lib -- --skip command::official_tree
+```
+
+结果：**813 个执行、22 个失败、791 通过**（另有 4 个 ignore）。
+按原因分三类：
+
+| 类别 | 个数 | 典型症状 |
+|---|---|---|
+| 假定任意坐标都隐式存在、直接写方块/方块实体 | 13 | `block_items` 的 11 个（「旗帜要发方块实体数据」等：`set_block` 在没加载的位置是空操作）、`chunk_broadcast::changes_nobody_tracks_are_dropped`（远处坐标的改动压根没记下）、`world::tests::new_player_receives_chunks_edited_before_it_joined`（进服前改的方块不存在，玩家收到模板帧） |
+| 直接对 store 做 `take_columns` / `insert_column`、光照传播或区块帧编码，位置没登记为已加载 | 8 | `region::column_tests` 的 6 个（取放后读数不一致、光没照进未加载的邻居、`chunk_frame` 返回 `NotLoaded`）、`region::parking::parked_boxes_keep_all_upper_layer_content` |
+| 缓存/跟踪集合依赖「任何位置都算已加载」的默认 | 1 | `chunk_encoding::cache::tests::the_cache_forgets_chunks_nobody_tracks`（49 个条目没被清掉） |
+
+三类都是「测试自己没交付区块」，不是已加载模式的行为错误；正式运行里区块由
+Director 按 ticket 交付，`world/loaded_tests.rs` 里 30 多个已加载模式的测试
+（含随机玩家走动、脚下 3×3、收回积压有界）都通过。要让这套老测试也在已加载
+模式下跑，需要的是在 `Harness` 里补一层「按测试坐标自动交付/保持票」的夹具，
+不是改服务端；本轮按「只报告、不要求修」没有做。

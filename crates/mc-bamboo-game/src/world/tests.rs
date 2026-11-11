@@ -198,8 +198,11 @@ pub(crate) struct Harness {
 
 impl Harness {
     /// 默认走「无限超平坦」测试世界：现有单元测试/oracle 都假设哪里都有地。
+    /// `BAMBOO_TEST_LOADED=1` 让原本走无限模式的整套测试改走已加载模式，
+    /// 只用于「有多少测试依赖隐式存在」的报告，不改变默认行为。
     pub(crate) fn new(view_distance: i32) -> Self {
-        Self::build(view_distance, false)
+        let loaded = std::env::var("BAMBOO_TEST_LOADED").is_ok_and(|value| value == "1");
+        Self::build(view_distance, loaded)
     }
 
     /// 正式入口（已加载模式）：起点没有加载任何区块，测试自己交付。
