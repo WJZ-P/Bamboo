@@ -686,15 +686,16 @@ impl Profiler {
         let elapsed = now.saturating_duration_since(self.tick_start);
         self.histogram_mut(Series::Metric(Metric::TickTotal))
             .record_duration(elapsed);
+        // 连接在别的任务里压缩共享帧，取走这段时间的累计增量记进 `compress_frame`。
+        // 统计口径按世界线程的 tick 边界切分，和连接任务的唤醒时刻可能差一刻。
+        // 先写进 `sub_totals`，和下面的其它子段一起只记一条样本。
+        let (_calls, nanos) = crate::outgoing::take_compression_cost();
+        self.sub_totals[SubPhase::CompressFrame as usize] = nanos;
         // 这一刻调用过的每个子段记一条「合计」样本；没调用的记 0，
         // 这样所有子段的样本数都和 tick 数相同，均值可以直接和父阶段比。
         for (index, total) in self.sub_totals.iter().enumerate() {
             self.sub_phases[index].record(*total);
         }
-        // 连接在别的任务里压缩共享帧，取走这段时间的累计增量记进 `compress_frame`。
-        // 统计口径按世界线程的 tick 边界切分，和连接任务的唤醒时刻可能差一刻。
-        let (_calls, nanos) = crate::outgoing::take_compression_cost();
-        self.sub_phases[SubPhase::CompressFrame as usize].record(nanos);
         self.sub_totals = [0; SubPhase::ALL.len()];
         self.open_sub = None;
         self.ticks = self.ticks.saturating_add(1);
