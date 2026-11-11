@@ -25,6 +25,9 @@ pub(crate) const DELIVERIES_ENV: &str = "BAMBOO_DELIVERIES_PER_TICK";
 pub(crate) const RECLAIMS_ENV: &str = "BAMBOO_RECLAIMS_PER_TICK";
 /// 上限的合法范围上限，防住误设的巨值把信箱当成没有限速。
 const MAX_MAIL_BUDGET: usize = 1 << 16;
+/// 收回积压在这个刻数内收完。收回没有「削尖峰」的理由，卡死在固定上限
+/// 会让高速移动时已加载的区块数、进而内存没有上界（人数一多就超过 64）。
+const RECLAIM_DRAIN_TICKS: usize = 20;
 
 /// 信箱的每刻预算。`0` 表示不限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,10 +451,22 @@ impl DirectorHost {
     fn flush_region_mail(&mut self, region: &mut Region) -> Vec<Event<Box<RegionColumn>>> {
         let MailBudget {
             deliveries: delivery_left,
-            reclaims: reclaim_left,
+            reclaims: reclaim_allowance,
         } = self.budget_left;
         let limited_deliveries = self.budget.deliveries > 0;
         let limited_reclaims = self.budget.reclaims > 0;
+        // 交付上限是削进服尖峰，收回没有这个理由：按积压放宽到
+        // max(配置上限, 积压 / 20)，积压再多也能在一秒左右收完。
+        // 额度本身也放宽，否则 `pump` 一轮里多次 flush 仍会被旧额度卡住。
+        let reclaim_left = if limited_reclaims {
+            reclaim_allowance.max(
+                self.budget
+                    .reclaims
+                    .max(self.reclaims.len().div_ceil(RECLAIM_DRAIN_TICKS)),
+            )
+        } else {
+            usize::MAX
+        };
         let mut events = Vec::new();
         // 收回优先：盒子可能还在 `deliveries` 里排队（交付有了每刻上限之后，
         // 一个盒子可以在信箱里等好几刻）。这时 Director 已经把它记成
@@ -536,11 +551,7 @@ impl DirectorHost {
             (std::cmp::Reverse(far), x, z)
         });
         region.profiler.end_sub();
-        let count = if limited_reclaims {
-            ordered.len().min(reclaim_left)
-        } else {
-            ordered.len()
-        };
+        let count = ordered.len().min(reclaim_left);
         let batch: Vec<(ChunkPos, u64)> = ordered
             .into_iter()
             .take(count)
@@ -576,8 +587,14 @@ impl DirectorHost {
             }
         }
         if limited_reclaims {
-            self.budget_left.reclaims =
-                reclaim_left.saturating_sub(self.reclaimed.saturating_sub(reclaimed_before));
+            let spent = self.reclaimed.saturating_sub(reclaimed_before);
+            // 放宽后的额度只在这一刻有效，剩余额度回落到配置的基准，
+            // 免得下一刻 flush 时把放宽值一路带下去。
+            self.budget_left.reclaims = self
+                .budget
+                .reclaims
+                .min(reclaim_allowance)
+                .saturating_sub(spent);
         }
         events
     }

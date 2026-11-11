@@ -449,6 +449,83 @@ fn fast_movement_keeps_the_footprint_loaded_and_the_mailbox_bounded() {
     assert_eq!(mail, (0, 0), "停下来之后信箱清空");
 }
 
+/// 很多名玩家同时高速移动时，收回的积压不能把已加载的区块数顶得没有上界：
+/// 固定的每刻收回上限会被持续产生的新收回请求压垮，自适应上限按积压放宽。
+#[test]
+fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
+    const PLAYERS: usize = 8;
+    const STEPS: usize = 60;
+    const RECLAIM_BUDGET: usize = 8;
+    // 8 名玩家、视距 2：票表在半径 13 的方形里传播，单刻变化的常数上界乘人数。
+    let bound = PLAYERS * (2 * 13 + 1) * (2 * 13 + 1);
+    let mut server = Harness::new_loaded(2);
+    server.set_reclaim_delay(1);
+    server.set_mail_budget(crate::director_host::MailBudget {
+        deliveries: 256,
+        reclaims: RECLAIM_BUDGET,
+    });
+    let mut clients = Vec::new();
+    for index in 0..PLAYERS {
+        let client = server.join_with(
+            &format!("Runner{index}"),
+            super::tests::client_requesting(2),
+        );
+        server.confirm_teleport(&client);
+        server.load_player(&client);
+        clients.push(client);
+    }
+    for step in 1..=STEPS {
+        for (index, client) in clients.iter().enumerate() {
+            // 每人一个不同的方向，每刻跨一整个区块，比 33 格/秒飞行还快。
+            let (dx, dz) = match index % 4 {
+                0 => (1, 0),
+                1 => (-1, 0),
+                2 => (0, 1),
+                _ => (0, -1),
+            };
+            let circle = i32::try_from(step).expect("步数很小") * if index < 4 { 1 } else { -1 };
+            let x = f64::from(circle * dx * 16 + (index as i32 % 4) * 64) + 8.5;
+            let z = f64::from(circle * dz * 16 + (index as i32 % 4) * 64) + 8.5;
+            server.move_to_position(client, Vec3::new(x, -60.0, z));
+            server.acknowledge_batch(client, 64.0);
+        }
+        server.tick();
+        assert_footprints_loaded(&server);
+        assert_every_loaded_chunk_has_an_owner(&server);
+        let (_, _, mail) = server.director_mail();
+        assert!(mail.0 < bound, "第 {step} 刻交付信箱有界：{mail:?}");
+        assert!(mail.1 < bound, "第 {step} 刻收回收信箱有界：{mail:?}");
+        let loaded = server
+            .world_region()
+            .chunks
+            .loaded_count()
+            .expect("已加载模式");
+        assert!(
+            loaded < bound,
+            "第 {step} 刻已加载 {loaded} 个区块，超过单刻票变化的上界 {bound}"
+        );
+        for client in &clients {
+            client.take_frames();
+            server.acknowledge_batch(client, 64.0);
+        }
+    }
+    // 停下来之后积压要能排空。
+    for _ in 0..RECLAIM_DRAIN_TICKS_FOR_TEST {
+        for client in &clients {
+            server.acknowledge_batch(client, 64.0);
+        }
+        server.tick();
+        for client in &clients {
+            client.take_frames();
+        }
+    }
+    let (_, _, mail) = server.director_mail();
+    assert_eq!(mail.1, 0, "静置之后收回收信箱排空：{mail:?}");
+}
+
+/// 和 [`crate::director_host::RECLAIM_DRAIN_TICKS`] 对齐的等待刻数。
+const RECLAIM_DRAIN_TICKS_FOR_TEST: usize = 40;
+
 /// 确定性随机走动：多名玩家随机走动、传送、进出、改视距，每刻断言脚下 3×3
 /// 和每刻的上限，最后停下来若干刻，每名玩家都收齐了自己的视野。
 #[test]
