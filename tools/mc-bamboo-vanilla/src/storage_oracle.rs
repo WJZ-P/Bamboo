@@ -294,8 +294,12 @@ fn run_cases(
         let mut extra = decoded.extra();
         extra.preserved.extend(decoded.unknown.clone());
         let again = encode_bytes(&decoded.column, &extra).map_err(|error| error.to_string())?;
+        // 官方的样例区块只写 `{ id, x/y/z, Items }`；Bamboo 按
+        // `LevelChunk.getBlockEntityNbtForSaving` 补 `components` 和 `keepPacked`，
+        // 所以比之前把这两个键规范化到官方那一份里，其它键一个都不能变。
+        let expected = with_required_block_entity_metadata(&decode_nbt(&bytes)?);
         report.check(
-            canonical_tag(&decode_nbt(&bytes)?) == canonical_tag(&decode_nbt(&again)?),
+            canonical_tag(&expected) == canonical_tag(&decode_nbt(&again)?),
             format!("{label}: official chunk -> Bamboo -> bytes changed the content"),
         );
         report.check(
@@ -578,6 +582,43 @@ fn canonical_tag(tag: &Tag) -> Value {
             json!({"type": 10, "values": Value::Object(map)})
         }
     }
+}
+
+/// 在官方样例的每条 `block_entities` 上补 Bamboo 必写的两个键（Q9）。
+fn with_required_block_entity_metadata(root: &Tag) -> Tag {
+    let Tag::Compound(entries) = root else {
+        return root.clone();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if key != "block_entities" {
+            out.push((key.clone(), value.clone()));
+            continue;
+        }
+        let Tag::List(entities) = value else {
+            out.push((key.clone(), value.clone()));
+            continue;
+        };
+        let mut patched = Vec::with_capacity(entities.len());
+        for entity in entities {
+            let Tag::Compound(fields) = entity else {
+                patched.push(entity.clone());
+                continue;
+            };
+            let mut fields = fields.clone();
+            for (name, tag) in [
+                ("components", Tag::Compound(Vec::new())),
+                ("keepPacked", Tag::Byte(0)),
+            ] {
+                if !fields.iter().any(|(existing, _)| existing == name) {
+                    fields.push((name.to_owned(), tag));
+                }
+            }
+            patched.push(Tag::Compound(fields));
+        }
+        out.push((key.clone(), Tag::List(patched)));
+    }
+    Tag::Compound(out)
 }
 
 fn decode_nbt(bytes: &[u8]) -> Result<Tag, String> {
