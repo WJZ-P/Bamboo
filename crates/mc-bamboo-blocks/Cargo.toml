@@ -17,6 +17,7 @@ mc-bamboo-nbt.workspace = true
 # 物品的 `tool` 组件：挖掘速度和掉落规则都从默认组件里读。
 mc-bamboo-protocol.workspace = true
 mc-bamboo-recipes.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

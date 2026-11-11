@@ -359,6 +359,66 @@ struct SavedTick<T> {
     delay: i64,
 }
 
+impl ChunkTicks {
+    /// 空盒子，供存档解码时逐条填入。
+    pub fn empty() -> Self {
+        Self {
+            blocks: Vec::new(),
+            fluids: Vec::new(),
+        }
+    }
+
+    /// 盒子里的方块刻，按执行顺序。存档编码和读回后用。
+    pub fn block_ticks(&self) -> impl Iterator<Item = (BlockPos, usize, TickPriority, i64)> + '_ {
+        self.blocks
+            .iter()
+            .map(|tick| (tick.pos, tick.kind, tick.priority, tick.delay))
+    }
+
+    /// 盒子里的流体刻，按执行顺序。
+    pub fn fluid_ticks(&self) -> impl Iterator<Item = (BlockPos, i32, TickPriority, i64)> + '_ {
+        self.fluids
+            .iter()
+            .map(|tick| (tick.pos, tick.kind, tick.priority, tick.delay))
+    }
+
+    /// 按官方 `LevelChunkTicks.unpack` 的顺序追加一条方块刻。
+    pub fn push_block(&mut self, entry: crate::archive::ticks::SavedEntry) {
+        if let crate::archive::ticks::SavedEntry::Block {
+            pos,
+            block,
+            priority,
+            delay,
+        } = entry
+        {
+            self.blocks.push(SavedTick {
+                pos,
+                kind: block,
+                priority,
+                delay,
+            });
+        }
+    }
+
+    /// 按官方 `LevelChunkTicks.unpack` 的顺序追加一条流体刻。
+    pub fn push_fluid(&mut self, entry: crate::archive::ticks::SavedEntry) {
+        if let crate::archive::ticks::SavedEntry::Fluid {
+            pos,
+            fluid,
+            priority,
+            delay,
+        } = entry
+        {
+            self.fluids.push(SavedTick {
+                pos,
+                kind: fluid,
+                priority,
+                delay,
+            });
+        }
+    }
+}
+
 impl<T: Copy + Eq + Hash> TickQueue<T> {
     /// 扫一遍队列，按区块把要搬走的刻分组。每个盒子里的条目天然是执行顺序。
     fn take_chunks(

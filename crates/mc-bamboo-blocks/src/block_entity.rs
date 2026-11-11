@@ -18,6 +18,7 @@ use std::{
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{BlockClass, items, registries, sounds::sound_event, tags::block_tags};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -56,6 +57,12 @@ pub trait BlockEntity: Any + Send {
     fn as_any(&self) -> &dyn Any;
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// 官方 `saveAdditional`：写这个方块实体自己的键（不含 `id`、`x/y/z` 和 `components`）。
+    ///
+    /// 没有默认实现：新加一种方块实体时编译器会要求补上，内容不会悄悄漏存。
+    /// 读盘时按 `id` 造回具体类型，见 [`crate::archive::block_entity`]。
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error>;
 }
 
 /// 方块实体和它们的运行顺序。
@@ -341,6 +348,18 @@ pub struct ChunkBlockEntities {
     entities: Vec<Box<dyn BlockEntity>>,
 }
 
+impl ChunkBlockEntities {
+    /// 盒子里的方块实体，按位置排序。存档编码和读回后用。
+    pub fn entities(&self) -> &[Box<dyn BlockEntity>] {
+        &self.entities
+    }
+
+    /// 从按位置排序的实体建盒子，存档解码时用。
+    pub fn from_entities(entities: Vec<Box<dyn BlockEntity>>) -> Self {
+        Self { entities }
+    }
+}
+
 impl fmt::Debug for ChunkBlockEntities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChunkBlockEntities")
@@ -602,6 +621,10 @@ mod tests {
 
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
+        }
+
+        fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+            Ok(Vec::new())
         }
     }
 

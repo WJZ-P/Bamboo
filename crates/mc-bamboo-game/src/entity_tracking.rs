@@ -343,9 +343,9 @@ fn pairing_frames(snapshot: &Snapshot, tracked: &TrackedEntity) -> Vec<u8> {
 }
 
 /// 官方实体的 UUID 是随机的；这里由实体 ID 推出来，同一个实体每次重启都一样，
-/// 测试才比得了。客户端只要求它唯一。
+/// 测试才比得了。客户端只要求它唯一。存档里的 `UUID` 用同一份推导。
 fn entity_uuid(id: i32) -> Uuid {
-    Uuid::from_u128(0x0000_BAAB_0000_0000_0000_0000_0000_0000_u128 | u128::from(id as u32))
+    Uuid::from_u128(mc_bamboo_blocks::archive::entity_uuid(id))
 }
 
 /// 每 tick 调用一次。对应 `ServerEntity.sendChanges`。

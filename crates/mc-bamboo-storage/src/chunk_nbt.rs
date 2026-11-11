@@ -578,6 +578,15 @@ fn merge_block_entity_extra(tag: &Tag, extra: &ChunkEncodeExtra<'_>) -> Result<T
         return Ok(tag.clone());
     };
     let mut entries = values.clone();
+    // 官方从活区块存盘时每条都有这两个键；读到的旧文件没有也补齐。
+    for (key, value) in [
+        ("components", compound(Vec::new())),
+        ("keepPacked", Tag::Byte(0)),
+    ] {
+        if !entries.iter().any(|(existing, _)| existing == key) {
+            entries.push((key.to_owned(), value));
+        }
+    }
     for (ex, ey, ez, extra_tag) in &extra.block_entity_extra {
         if (*ex, *ey, *ez) != (x, y, z) {
             continue;
@@ -614,6 +623,10 @@ fn write_block_entity(
     put(&mut entries, "x", Tag::Int(x));
     put(&mut entries, "y", Tag::Int(entity.y));
     put(&mut entries, "z", Tag::Int(z));
+    // 官方 `BlockEntity.saveWithoutMetadata` 无条件写组件表；
+    // `LevelChunk.getBlockEntityNbtForSaving` 再补 `keepPacked: false`。
+    put(&mut entries, "components", compound(Vec::new()));
+    put(&mut entries, "keepPacked", Tag::Byte(0));
     let is_sign = entity.kind == registries::block_entity_type::SIGN
         || entity.kind == registries::block_entity_type::HANGING_SIGN;
     if is_sign {
@@ -1063,8 +1076,8 @@ mod tests {
     };
 
     use super::{
-        ChunkEncodeExtra, ChunkNbtError, DecodedChunk, decode, decode_bytes, encode, encode_bytes,
-        field,
+        ChunkEncodeExtra, ChunkNbtError, DecodedChunk, compound, decode, decode_bytes, encode,
+        encode_bytes, field,
     };
 
     /// 用超平坦模板造一个经过光照引擎算稳的区块束。
@@ -1484,6 +1497,39 @@ mod tests {
         assert_eq!(decoded.block_entity_raw.len(), decoded.block_entities.len());
         let again = encode_bytes(&decoded.column, &decoded.extra()).expect("再编码成功");
         assert_eq!(bytes, again);
+    }
+
+    /// 官方 `BlockEntity.saveWithoutMetadata` 与 `getBlockEntityNbtForSaving` 必写的两个键。
+    #[test]
+    fn block_entities_always_write_components_and_keep_packed() {
+        let column = rich_column(1);
+        let tag = encode(&column, &extra(ChunkPos::new(3, -9))).expect("编码成功");
+        let Tag::List(entities) = field(&tag, "block_entities").expect("block_entities") else {
+            panic!("block_entities 是列表");
+        };
+        assert!(!entities.is_empty());
+        for entity in entities {
+            assert_eq!(field(entity, "components"), Some(&compound(Vec::new())));
+            assert_eq!(field(entity, "keepPacked"), Some(&Tag::Byte(0)));
+        }
+        // 原样写回一条旧条目时也补齐，不改它已有的值。
+        let mut options = extra(ChunkPos::new(3, -9));
+        options.raw_block_entities = Some(vec![Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:chest".to_owned())),
+            ("x".to_owned(), Tag::Int(0)),
+            ("y".to_owned(), Tag::Int(0)),
+            ("z".to_owned(), Tag::Int(0)),
+            ("keepPacked".to_owned(), Tag::Byte(1)),
+        ])]);
+        let tag = encode(&column, &options).expect("编码成功");
+        let Tag::List(entities) = field(&tag, "block_entities").expect("block_entities") else {
+            panic!("block_entities 是列表");
+        };
+        assert_eq!(
+            field(&entities[0], "components"),
+            Some(&compound(Vec::new()))
+        );
+        assert_eq!(field(&entities[0], "keepPacked"), Some(&Tag::Byte(1)));
     }
 
     #[test]
