@@ -156,7 +156,9 @@ pub struct LevelData {
     pub initialized: bool,
     pub difficulty: DifficultySettings,
     pub singleplayer_uuid: Option<[i32; 4]>,
-    /// `None` 表示官方的默认配置，`lenientOptionalFieldOf` 编码时不写 `DataPacks`。
+    /// `None` 表示官方的默认配置（`DataPackConfig.DEFAULT`，
+    /// `Enabled=["vanilla"]`、`Disabled=[]`）：`lenientOptionalFieldOf` 编码时
+    /// 值等于默认对象，`DataPacks` 整个键不写。
     pub data_packs: Option<DataPacks>,
     pub enabled_features: Vec<String>,
     /// `Data` 里本层不认识的键，重新编码时原样写回。
@@ -186,7 +188,9 @@ impl Default for LevelData {
             initialized: true,
             difficulty: DifficultySettings::default(),
             singleplayer_uuid: None,
-            data_packs: Some(DataPacks::default()),
+            // `WorldDataConfiguration.MAP_CODEC` 用 `lenientOptionalFieldOf(name, DEFAULT)`：
+            // 等于默认对象时官方不写 `DataPacks` / `enabled_features`。
+            data_packs: None,
             enabled_features: vec!["minecraft:vanilla".to_owned()],
             preserved: Vec::new(),
             nested_preserved: Vec::new(),
