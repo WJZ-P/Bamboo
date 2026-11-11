@@ -13,13 +13,17 @@ use mc_bamboo_blocks::{
     BlockState, ShulkerBoxEntity,
     entity::view::{BlockSource, SourceView, ViewFacts},
 };
-use mc_bamboo_core::{BlockPos, LightLayer};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::{BlockAncestor, blocks};
 use mc_bamboo_world::{MIN_Y, SECTION_SIZE, palette::PaletteView, store::ChunkStore};
+
+use crate::tick_levels::TickLevels;
 
 /// 算阶段只读的世界事实。字段都在 tick 开始时按值拷进来，不借用 `Region` 的可变部分。
 pub(crate) struct ReadOnlyWorld<'a> {
     pub(crate) chunks: &'a ChunkStore,
+    /// 和精确驱动共用的实体 tick 集合，两种驱动跳过的实体必须一样。
+    pub(crate) tick_levels: &'a TickLevels,
     pub(crate) facts: ViewFacts,
     /// 盖子开着的潜影盒位置。`isFaceSturdy` 要读，别的方块实体数据算阶段用不到。
     pub(crate) open_shulker_boxes: BTreeSet<BlockPos>,
@@ -46,6 +50,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
         ReadOnlyWorld::any_hopper_in(self, min, max)
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        self.tick_levels.chunk_ticks_entities(chunk)
     }
 }
 

@@ -28,6 +28,7 @@ use crate::{
     container::{ContainerEntry, ContainerKind},
     inbound::PlayerId,
     player::Player,
+    tick_levels::TickLevels,
 };
 
 /// 一次方块操作借用的 [`Region`](crate::region::Region) 字段。
@@ -48,6 +49,8 @@ pub(crate) struct RegionLevel<'a> {
     /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
     pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
+    /// 这一刻哪些区块参与各阶段。无限超平坦模式下恒为真。
+    pub(crate) tick_levels: &'a TickLevels,
 }
 
 impl LevelTables for RegionLevel<'_> {
@@ -83,6 +86,14 @@ impl EntityTables for RegionLevel<'_> {
 }
 
 impl Level for RegionLevel<'_> {
+    fn chunk_ticks_blocks(&self, chunk: ChunkPos) -> bool {
+        self.tick_levels.chunk_ticks_blocks(chunk)
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        self.tick_levels.chunk_ticks_entities(chunk)
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         BlockState(self.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
     }

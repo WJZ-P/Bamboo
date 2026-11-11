@@ -161,6 +161,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             entities,
             block_entities,
             block_rules,
+            tick_levels,
             profiler,
             ..
         } = &mut *region;
@@ -177,6 +178,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
             chunks,
+            tick_levels,
             facts,
             open_shulker_boxes,
             hopper_positions,
@@ -203,7 +205,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
 /// 和 `forEachBlockTickingChunk`（里面是 `tickChunk`）是两个独立的循环。Bamboo 按坐标顺序
 /// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
-    let chunks: Vec<ChunkPos> = random_ticking_chunks(region).into_iter().collect();
+    let chunks = random_ticking_chunks(region);
     // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
     // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。
     if region.block_weather.is_raining() && region.block_weather.is_thundering() {
@@ -224,12 +226,16 @@ pub(crate) fn run_random_ticks(region: &mut Region) {
     }
 }
 
-/// 官方跑随机刻的区块：离某名玩家所在的区块（切比雪夫距离）不超过模拟距离，而且加载到了能跑方块刻的程度，
-/// 也就是不超过视距加一：视距以内有 `PLAYER_LOADING` 票，再往外一圈是 `BLOCK_TICKING`。
+/// 已加载模式跑逐区块 tick 的区块：能跑方块逻辑、且模拟等级 ≤31（`random` 集合）。
+/// 无限超平坦模式仍按每名玩家视距内的方形（每个位置都隐式存在，没有等级可用）。
 ///
 /// 官方按 `Long2ByteOpenHashMap` 的哈希顺序遍历，这里按坐标排序。所有区块共用一个随机源，
 /// 所以和官方逐位相同的只有单个区块，几个区块一起跑时每个区块拿到的随机数不一样，概率相同。
-fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
+fn random_ticking_chunks(region: &Region) -> Vec<ChunkPos> {
+    if region.tick_levels.enabled() {
+        // 拷一份坐标：`block_level()` 后面要可变借用整个 region。
+        return region.tick_levels.random_chunks().iter().copied().collect();
+    }
     let radius = SIMULATION_DISTANCE.min(region.view_distance + 1);
     let mut chunks = BTreeSet::new();
     for player in region.players.values() {
@@ -240,7 +246,7 @@ fn random_ticking_chunks(region: &Region) -> BTreeSet<ChunkPos> {
             }
         }
     }
-    chunks
+    chunks.into_iter().collect()
 }
 
 /// tick 第 8 阶段：每名玩家发 `block_changed_ack`。必须晚于第 5 阶段，`blocks-inventory.md` 4.3。
