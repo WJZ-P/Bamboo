@@ -8,13 +8,14 @@
 //! 超平坦世界无穷大，所以每个区块柱默认是模板柱的样子，第一次写的时候才复制一份自己的。
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     mem,
 };
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 
 use super::{DataLayer, LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos};
+use crate::ticket::ChunkHasherBuilder;
 
 /// `SectionState` 里“这一段自己有方块”的位。
 const HAS_DATA: u8 = 32;
@@ -245,7 +246,7 @@ pub(crate) struct LightStorage {
     last_revision: u64,
     /// `None` = 无限超平坦（每个位置都存在）。`Some` = 已加载模式，
     /// 集合外的位置没有柱：26 个段状态全 0、没有数据层、也不接受任何写入。
-    loaded: Option<BTreeSet<ChunkPos>>,
+    loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>,
 }
 
 /// 光照段在区块柱里的下标。超出 26 段时没有。
@@ -284,7 +285,7 @@ impl LightStorage {
 
     /// 切到已加载模式：只有 `loaded` 里的坐标有柱。
     /// 无限模式传 `None`。已加载模式之外的位置读成 `EMPTY_COLUMN`。
-    pub(crate) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
+    pub(crate) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
         self.loaded = loaded;
     }
 

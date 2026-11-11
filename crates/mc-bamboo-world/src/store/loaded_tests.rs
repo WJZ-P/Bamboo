@@ -7,7 +7,10 @@ use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::blocks;
 
 use super::ChunkStore;
-use crate::{column::ChunkColumn, light::LIGHT_SECTION_COUNT};
+use crate::{
+    column::{ChunkColumn, ChunkColumnParts},
+    light::LIGHT_SECTION_COUNT,
+};
 
 const ORIGIN: ChunkPos = ChunkPos::new(0, 0);
 const NEIGHBOR: ChunkPos = ChunkPos::new(1, 0);
@@ -253,4 +256,123 @@ fn loading_cost() {
         unload,
         unload / count
     );
+}
+
+/// 手工基准：连续读一片方块，已加载模式和无限模式各多少纳秒一次。
+/// `cargo test --release -p mc-bamboo-world --lib block_read_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "手工基准，不进常规测试"]
+fn block_read_cost() {
+    use std::time::Instant;
+
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_data::blocks;
+
+    const SIDE: i32 = 23; // 视距 10 覆盖的 23×23 区块
+    const ROUNDS: u32 = 200;
+    let mut positions = Vec::new();
+    for x in -SIDE..=SIDE {
+        for z in -SIDE..=SIDE {
+            for y in [-60, -59, -58] {
+                positions.push(BlockPos::new(x * 16 + (x & 15), y, z * 16 + (z & 15)));
+            }
+        }
+    }
+    // 让一部分区块带上非默认的方块，读数不是常量，编译器不能把循环折叠掉。
+    let make_column = |x: i32| {
+        let column = ChunkColumn::from_template();
+        if x % 2 == 0 {
+            let mut parts = ChunkColumnParts::read_from(&column);
+            parts.sections[0].block_palette = vec![blocks::STONE];
+            parts.sections[0].block_data.clear();
+            Box::new(ChunkColumn::from_parts(parts).expect("改过的段合法"))
+        } else {
+            Box::new(column)
+        }
+    };
+    let reads = positions.len() as u32 * ROUNDS;
+
+    // 两种模式都把同一片区块装进 `edited` 表，这样读数除了 `is_loaded`
+    // 之外走完全相同的路径；差异只来自「有没有加载」这一问。
+    // 逐块 `insert_column` 会重算 3×3 段状态，只做一次，不计入计时。
+    let mut infinite = ChunkStore::flat();
+    for x in -SIDE..=SIDE {
+        for z in -SIDE..=SIDE {
+            infinite
+                .insert_column(ChunkPos::new(x, z), make_column(x))
+                .unwrap_or_else(|_| unreachable!("光照已算完"));
+        }
+    }
+    // 先跑几轮把缓存和页预热了，再开始计时；两种模式同样处理。
+    let mut sum = 0u64;
+    for _ in 0..20 {
+        for &pos in &positions {
+            sum = sum.wrapping_add(u64::from(infinite.block(pos).unwrap_or(0)));
+        }
+    }
+    let started = Instant::now();
+    for _ in 0..ROUNDS {
+        for &pos in &positions {
+            sum = sum.wrapping_add(u64::from(infinite.block(pos).unwrap_or(0)));
+        }
+    }
+    let flat_time = started.elapsed();
+
+    // 已加载模式：先把这些区块装进去，再连续读同一批位置。
+    let mut loaded = ChunkStore::loaded();
+    for x in -SIDE..=SIDE {
+        for z in -SIDE..=SIDE {
+            let pos = ChunkPos::new(x, z);
+            loaded.load(pos, make_column(x));
+        }
+    }
+    for _ in 0..20 {
+        for &pos in &positions {
+            sum = sum.wrapping_add(u64::from(loaded.block(pos).unwrap_or(0)));
+        }
+    }
+    let started = Instant::now();
+    for _ in 0..ROUNDS {
+        for &pos in &positions {
+            sum = sum.wrapping_add(u64::from(loaded.block(pos).unwrap_or(0)));
+        }
+    }
+    let loaded_time = started.elapsed();
+    // 把校验和用出去，免得编译器把整段读优化掉；也能顺便确认两种模式读到一样的内容。
+    std::hint::black_box(sum);
+
+    let flat_ns = flat_time.as_nanos() / u128::from(reads);
+    let loaded_ns = loaded_time.as_nanos() / u128::from(reads);
+    eprintln!(
+        "{} 次读方块：无限模式 {flat_time:?}（{flat_ns} ns/次），已加载模式 {loaded_time:?}（{loaded_ns} ns/次）",
+        reads
+    );
+}
+
+/// 已加载模式下，已加载集合和 `edited` 表必须同进同退：
+/// 读方块的热路径靠一次 `edited` 查表同时判断「有没有加载」。
+#[test]
+fn loaded_positions_always_have_a_chunk_in_the_edited_table() {
+    let mut store = ChunkStore::loaded();
+    let area: Vec<ChunkPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    for &pos in &area {
+        store.load(pos, Box::new(ChunkColumn::from_template()));
+        assert!(store.is_loaded(pos));
+        assert!(store.edited(pos).is_some(), "{pos:?} 装在 edited 表里");
+        assert_eq!(
+            store.block(BlockPos::new(pos.x * 16 + 2, -60, pos.z * 16 + 2)),
+            Some(blocks::AIR)
+        );
+    }
+    for &pos in &area {
+        store.unload(pos).expect("光照已算完");
+        assert!(!store.is_loaded(pos));
+        assert!(store.edited(pos).is_none(), "{pos:?} 从 edited 表里取走了");
+        assert_eq!(
+            store.block(BlockPos::new(pos.x * 16 + 2, -60, pos.z * 16 + 2)),
+            None
+        );
+    }
 }

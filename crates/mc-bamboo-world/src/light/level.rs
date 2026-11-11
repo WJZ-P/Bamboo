@@ -4,7 +4,7 @@
 //! 中间没有别人改引擎的数据，方块也读这一轮排好那一刻的样子，所以和一口气做完的结果相同。
 //! 一轮做完才把变过的段抄进给别人读的那一份，算到一半时读到的还是上一轮的结果。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use mc_bamboo_core::{ChunkPos, LightLayer};
 
@@ -14,7 +14,7 @@ use super::{
     queue::Task,
     storage::{LightColumn, LightStorage, SectionStatesAround},
 };
-use crate::chunk::Chunk;
+use crate::{chunk::Chunk, ticket::ChunkHasherBuilder};
 
 /// 天空光和方块光两个引擎。
 #[derive(Debug, Clone)]
@@ -164,7 +164,7 @@ impl Engines {
     }
 
     /// 切换已加载集合。两层和两份都要同步，见 `LightStorage::set_loaded`。
-    pub(super) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
+    pub(super) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
         self.sky.storage.set_loaded(loaded.clone());
         self.block.storage.set_loaded(loaded);
     }
@@ -235,7 +235,7 @@ impl Visible {
         Self { sky, block }
     }
 
-    pub(super) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
+    pub(super) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
         self.sky.set_loaded(loaded.clone());
         self.block.set_loaded(loaded);
     }

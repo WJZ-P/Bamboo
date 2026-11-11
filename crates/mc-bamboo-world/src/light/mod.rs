@@ -17,7 +17,7 @@ pub(crate) mod sources;
 mod storage;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashSet},
     sync::OnceLock,
 };
 
@@ -32,7 +32,7 @@ pub use sources::{NEGATIVE_INFINITY, SkyLightSources};
 pub(crate) use storage::LightColumn;
 use storage::{LightStorage, SectionStatesAround};
 
-use crate::{MIN_Y, SECTION_COUNT, chunk::Chunk};
+use crate::{MIN_Y, SECTION_COUNT, chunk::Chunk, store::ChunkMap, ticket::ChunkHasherBuilder};
 
 /// 光照比区块段多两段：世界底部下面和顶部上面各一段。
 pub const LIGHT_SECTION_COUNT: usize = SECTION_COUNT + 2;
@@ -79,15 +79,15 @@ impl SectionPos {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Chunks<'a> {
     template: &'a Chunk,
-    edited: &'a HashMap<ChunkPos, Chunk>,
+    edited: &'a ChunkMap<Chunk>,
     /// `None` 是无限超平坦：每个位置都存在。已加载模式下 `Some` 只含已加载的坐标。
-    loaded: Option<&'a BTreeSet<ChunkPos>>,
+    loaded: Option<&'a HashSet<ChunkPos, ChunkHasherBuilder>>,
     /// 光照落后时，正在算的这一轮排好之后又改过的区块在那一刻的样子，先读它们。
-    past: Option<&'a HashMap<ChunkPos, Chunk>>,
+    past: Option<&'a ChunkMap<Chunk>>,
 }
 
 impl<'a> Chunks<'a> {
-    pub(crate) fn new(template: &'a Chunk, edited: &'a HashMap<ChunkPos, Chunk>) -> Self {
+    pub(crate) fn new(template: &'a Chunk, edited: &'a ChunkMap<Chunk>) -> Self {
         Self {
             template,
             edited,
@@ -97,7 +97,7 @@ impl<'a> Chunks<'a> {
     }
 
     /// 已加载模式：只有 `loaded` 里的坐标有方块，别的位置读成空。
-    pub(crate) fn with_loaded(mut self, loaded: &'a BTreeSet<ChunkPos>) -> Self {
+    pub(crate) fn with_loaded(mut self, loaded: &'a HashSet<ChunkPos, ChunkHasherBuilder>) -> Self {
         self.loaded = Some(loaded);
         self
     }
@@ -108,7 +108,7 @@ impl<'a> Chunks<'a> {
     }
 
     /// 同一个世界，但 `past` 里有的区块读 `past` 里的。
-    fn with_past<'b>(self, past: &'b HashMap<ChunkPos, Chunk>) -> Chunks<'b>
+    fn with_past<'b>(self, past: &'b ChunkMap<Chunk>) -> Chunks<'b>
     where
         'a: 'b,
     {
@@ -195,7 +195,7 @@ impl LevelLight {
     /// 模板的光照照官方生成区块的流程算：先给一片区块登记有方块的段（`initializeLight`），
     /// 再逐个打开光照、点亮光源（`lightChunk`），取中间那个区块柱的结果。
     pub(crate) fn for_template(template: &Chunk) -> Self {
-        let edited = HashMap::new();
+        let edited = ChunkMap::default();
         let chunks = Chunks::new(template, &edited);
         let empty = |layer| LightStorage::new(layer, LightColumn::empty(), i32::MAX);
         let mut engines = Engines::new(empty(LightLayer::Sky), empty(LightLayer::Block));
@@ -319,7 +319,7 @@ impl LevelLight {
 
     /// 切换已加载集合。`None` 是无限超平坦；`Some` 时集合外没有光照柱，
     /// 读那里的光照由 `ChunkStore` 按「天空光 15 / 方块光 0」返回。
-    pub(crate) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
+    pub(crate) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
         self.engines.set_loaded(loaded.clone());
         self.visible.set_loaded(loaded);
     }

@@ -7,7 +7,7 @@
 //! 每个区块有一个版本号 [`ChunkRevision`]，区块和它那一列光照每被写一次就换一个新值，区块包的缓存靠它判断内容变没变。
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Deref,
 };
 
@@ -20,6 +20,7 @@ use crate::{
     column::{ChunkColumn, LightPending},
     flat,
     light::{Chunks, LevelLight, LightChanges, SectionPos, write_block},
+    ticket::ChunkHasherBuilder,
 };
 
 /// 世界里的全部区块。
@@ -31,8 +32,11 @@ pub struct ChunkStore {
     edited: EditedChunks,
     light: LevelLight,
     /// `None` = 无限超平坦（测试/oracle 专用退化实现）；`Some` = 已加载模式。
-    loaded: Option<BTreeSet<ChunkPos>>,
+    loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>,
 }
+
+/// 按区块坐标索引的表，用和票表一样的便宜哈希。读方块的热路径每次都查它。
+pub type ChunkMap<V> = HashMap<ChunkPos, V, ChunkHasherBuilder>;
 
 /// 改过的区块和它们的版本号。
 ///
@@ -40,8 +44,8 @@ pub struct ChunkStore {
 /// 这里故意不实现 `DerefMut`，以后加新的写法时绕不过去，区块包的缓存也就不会漏掉修改。
 #[derive(Debug, Clone, Default)]
 struct EditedChunks {
-    chunks: HashMap<ChunkPos, Chunk>,
-    revisions: HashMap<ChunkPos, u64>,
+    chunks: ChunkMap<Chunk>,
+    revisions: ChunkMap<u64>,
     /// 发出去的最后一个版本号。
     last_revision: u64,
 }
@@ -66,7 +70,7 @@ impl EditedChunks {
 }
 
 impl Deref for EditedChunks {
-    type Target = HashMap<ChunkPos, Chunk>;
+    type Target = ChunkMap<Chunk>;
 
     fn deref(&self) -> &Self::Target {
         &self.chunks
@@ -106,8 +110,8 @@ impl ChunkStore {
     /// 更新不会给它建柱；加载进来时由 `rebind_area` 按当时的方块重算。
     pub fn loaded() -> Self {
         let mut store = Self::new(flat::generate_chunk());
-        store.loaded = Some(BTreeSet::new());
-        store.light.set_loaded(Some(BTreeSet::new()));
+        store.loaded = Some(HashSet::default());
+        store.light.set_loaded(Some(HashSet::default()));
         store
     }
 
@@ -117,13 +121,14 @@ impl ChunkStore {
     }
 
     /// 这个区块位置有没有加载。无限模式恒为真。
+    /// `loaded` 用便宜哈希：读方块、写方块、读光照每次都问它。
     pub fn is_loaded(&self, pos: ChunkPos) -> bool {
         self.loaded.as_ref().is_none_or(|set| set.contains(&pos))
     }
 
     /// 已加载的区块数；无限模式返回 `None`。
     pub fn loaded_count(&self) -> Option<usize> {
-        self.loaded.as_ref().map(BTreeSet::len)
+        self.loaded.as_ref().map(HashSet::len)
     }
 
     /// 只把 `pos` 加进已加载集合，不搬盒子。
@@ -176,6 +181,7 @@ impl ChunkStore {
         if let Some(set) = self.loaded.as_mut() {
             set.remove(&pos);
         }
+        // `take_column` 已经把这一柱从 `edited` 表里取走了。
         self.light.remove_loaded(pos);
         // 注销之后再重算一遍 3×3：这时 `pos` 已经不算已加载，
         // 邻居段的计数按「那个位置没有方块」修正。
@@ -205,6 +211,18 @@ impl ChunkStore {
         self.edited.iter().map(|(&pos, chunk)| (pos, chunk))
     }
 
+    /// 读方块的热路径用的一次查表：已加载模式下每个装进来的区块都在
+    /// `edited` 表里（`insert_column` 会放进，模板柱子也在），没加载的位置没有键。
+    /// 无限模式下没有键的位置读共享模板。
+    #[inline]
+    fn loaded_chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
+        if self.loaded.is_none() {
+            Some(self.edited.get(&pos).unwrap_or(&self.template))
+        } else {
+            self.edited.get(&pos)
+        }
+    }
+
     /// 一个区块现在的内容。
     pub fn chunk(&self, pos: ChunkPos) -> &Chunk {
         self.edited.get(&pos).unwrap_or(&self.template)
@@ -227,11 +245,11 @@ impl ChunkStore {
     /// 读取方块状态。高度超出世界、或者已加载模式下这个区块没加载时返回 `None`。
     /// 坐标可以直接来自客户端。
     pub fn block(&self, pos: BlockPos) -> Option<u32> {
-        if !is_inside_world(pos.y) || !self.is_loaded(pos.chunk()) {
+        if !is_inside_world(pos.y) {
             return None;
         }
         Some(
-            self.chunk(pos.chunk())
+            self.loaded_chunk(pos.chunk())?
                 .block(local(pos.x), pos.y, local(pos.z)),
         )
     }
@@ -398,8 +416,8 @@ impl ChunkStore {
     /// 借用拆开成三个字段，调用方可以同时可变借 `self.light`。
     fn chunks_view<'a>(
         template: &'a Chunk,
-        edited: &'a HashMap<ChunkPos, Chunk>,
-        loaded: Option<&'a BTreeSet<ChunkPos>>,
+        edited: &'a ChunkMap<Chunk>,
+        loaded: Option<&'a HashSet<ChunkPos, ChunkHasherBuilder>>,
     ) -> Chunks<'a> {
         let mut chunks = Chunks::new(template, edited);
         if let Some(set) = loaded {
