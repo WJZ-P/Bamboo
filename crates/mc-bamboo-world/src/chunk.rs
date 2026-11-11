@@ -6,6 +6,7 @@ use mc_bamboo_core::sign::SignContent;
 use mc_bamboo_data::{
     block_of_state, blocks, facts, heightmaps, registries, state_facts, state_fluid,
 };
+use mc_bamboo_nbt::Tag;
 
 use crate::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
@@ -371,6 +372,9 @@ pub struct Chunk {
     ///
     /// 内容由上层算（旗帜的图案、头颅的档案这些来自物品的组件），这里只跟着方块一起存和丢。
     update_tags: BTreeMap<(i32, usize, usize), Vec<u8>>,
+    /// 读盘时原样保留的方块实体条目（D9），按位置挂在类型表旁边。
+    /// 值是当时的类型 ID 和整条复合标签；换类型或删掉方块时一起丢。
+    preserved_block_entities: BTreeMap<(i32, usize, usize), (i32, Tag)>,
     sky_light_sources: SkyLightSources,
 }
 
@@ -383,6 +387,7 @@ impl Chunk {
             block_entities: BTreeMap::new(),
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
+            preserved_block_entities: BTreeMap::new(),
             sky_light_sources: SkyLightSources::default(),
         }
     }
@@ -442,6 +447,7 @@ impl Chunk {
             block_entities,
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
+            preserved_block_entities: BTreeMap::new(),
             sky_light_sources: SkyLightSources::default(),
         };
         chunk.initialize_light_sources();
@@ -549,6 +555,41 @@ impl Chunk {
         self.update_tags.get(&(y, z, x)).map(Vec::as_slice)
     }
 
+    /// 这一格读盘时原样保留的方块实体条目，按位置挂在类型表旁边。
+    pub fn preserved_block_entity(&self, x: usize, y: i32, z: usize) -> Option<&Tag> {
+        self.preserved_block_entities
+            .get(&(y, z, x))
+            .map(|(_, tag)| tag)
+    }
+
+    /// 读盘时挂上一条原样保留的方块实体条目。坐标和类型都校验过才收。
+    pub(crate) fn put_preserved_block_entity(
+        &mut self,
+        x: usize,
+        y: i32,
+        z: usize,
+        kind: i32,
+        tag: Tag,
+    ) -> Result<(), ColumnPartsError> {
+        if x >= 16 || z >= 16 || !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            return Err(ColumnPartsError::BadPosition { x, y, z });
+        }
+        let key = (y, z, x);
+        if self.block_entities.get(&key) == Some(&kind) {
+            self.preserved_block_entities.insert(key, (kind, tag));
+        }
+        Ok(())
+    }
+
+    /// 所有原样保留的方块实体条目，键和 [`block_entities`](Self::block_entities) 的顺序相同。
+    pub fn preserved_block_entities(
+        &self,
+    ) -> impl Iterator<Item = (usize, i32, usize, i32, &Tag)> + '_ {
+        self.preserved_block_entities
+            .iter()
+            .map(|(&(y, z, x), &(kind, ref tag))| (x, y, z, kind, tag))
+    }
+
     /// 写入方块实体要发给客户端的 NBT。`None` 表示这一格没有要发的内容。
     pub fn set_update_tag(&mut self, x: usize, y: i32, z: usize, tag: Option<Vec<u8>>) {
         match tag {
@@ -590,14 +631,24 @@ impl Chunk {
         }
 
         let key = (y, z, x);
+        let old_kind = self.block_entities.get(&key).copied();
         if !is_same_block(previous, state) {
             self.signs.remove(&key);
             self.update_tags.remove(&key);
         }
-        match block_of_state(state).and_then(|block| block.block_entity_type) {
-            Some(kind) => self.block_entities.insert(key, kind),
-            None => self.block_entities.remove(&key),
-        };
+        let kind = block_of_state(state).and_then(|block| block.block_entity_type);
+        match kind {
+            Some(kind) => {
+                self.block_entities.insert(key, kind);
+            }
+            None => {
+                self.block_entities.remove(&key);
+            }
+        }
+        // 保留的条目属于「这个位置的这一个方块实体」：类型换了或方块没了就丢掉。
+        if old_kind.is_none_or(|old| Some(old) != kind) {
+            self.preserved_block_entities.remove(&key);
+        }
     }
 
     /// 这一列最高方块上方第一格的高度。整列都是空气时返回 [`MIN_Y`]。
@@ -877,6 +928,33 @@ mod tests {
 
         chunk.set_block(0, 0, 0, blocks::AIR);
         assert_eq!(chunk.block_entities().count(), 0);
+    }
+
+    /// 保留条目跟着类型表：换个状态（不改方块）还在，换类型或拆掉方块就丢。
+    #[test]
+    fn preserved_block_entities_follow_the_type_table() {
+        use mc_bamboo_data::registries::block_entity_type as kinds;
+        use mc_bamboo_nbt::Tag;
+
+        let tag = Tag::Compound(vec![("Unknown".to_owned(), Tag::Byte(3))]);
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(3, -60, 5, blocks::CHEST);
+        chunk
+            .put_preserved_block_entity(3, -60, 5, kinds::CHEST, tag.clone())
+            .expect("位置合法");
+        assert_eq!(chunk.preserved_block_entity(3, -60, 5), Some(&tag));
+        // 同一方块的另一种状态（旋转等）不丢。
+        chunk.set_block(3, -60, 5, blocks::CHEST + 1);
+        assert_eq!(chunk.preserved_block_entity(3, -60, 5), Some(&tag));
+        // 换成另一种方块实体：旧内容不能挂到熔炉上。
+        chunk.set_block(3, -60, 5, blocks::FURNACE);
+        assert!(chunk.preserved_block_entity(3, -60, 5).is_none());
+        chunk
+            .put_preserved_block_entity(3, -60, 5, kinds::FURNACE, tag.clone())
+            .expect("位置合法");
+        assert_eq!(chunk.preserved_block_entity(3, -60, 5), Some(&tag));
+        chunk.set_block(3, -60, 5, blocks::AIR);
+        assert!(chunk.preserved_block_entity(3, -60, 5).is_none());
     }
 
     #[test]

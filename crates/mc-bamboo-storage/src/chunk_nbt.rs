@@ -754,12 +754,24 @@ pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag,
             let entities: Vec<_> = column.chunk().block_entities().collect();
             let mut written = Vec::with_capacity(entities.len());
             for (index, entity) in entities.iter().enumerate() {
+                let raw = column
+                    .chunk()
+                    .preserved_block_entity(entity.x, entity.y, entity.z)
+                    .filter(|tag| {
+                        block_entity_id(tag)
+                            == Some(
+                                registries::block_entity_type::name_of(entity.kind).unwrap_or(""),
+                            )
+                    });
                 written.push(write_block_entity(
                     entity,
                     extra.chunk_pos,
                     column,
                     extra,
-                    extra.block_entity_raw.get(index).map(Vec::as_slice),
+                    match raw {
+                        Some(Tag::Compound(values)) => Some(values.as_slice()),
+                        _ => extra.block_entity_raw.get(index).map(Vec::as_slice),
+                    },
                 )?);
             }
             written
@@ -943,6 +955,7 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
     let block_entities = as_list(field(root, "block_entities"), "block_entities")?;
     let mut block_entity_raw = Vec::with_capacity(block_entities.len());
     let mut seen_signs = Vec::new();
+    let mut preserved_entities = Vec::new();
     for tag in &block_entities {
         let Tag::Compound(values) = tag else {
             return Err(ChunkNbtError::Malformed(
@@ -956,6 +969,17 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         let Some(id) = block_entity_id(tag) else {
             continue;
         };
+        // D9：整条挂进 ChunkColumn，按位置跟方块实体类型表一起走。
+        // 类型或坐标对不上时 from_parts 会丢掉，不会挂到新方块上。
+        if let Some(kind) = registries::block_entity_type::by_name(id) {
+            preserved_entities.push((
+                x.rem_euclid(16) as usize,
+                y,
+                z.rem_euclid(16) as usize,
+                kind,
+                tag.clone(),
+            ));
+        }
         let is_sign = id == "minecraft:sign" || id == "minecraft:hanging_sign";
         if !is_sign {
             continue;
@@ -979,6 +1003,7 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         seen_signs.push((local_x, y, local_z, content));
     }
     parts.signs = seen_signs;
+    parts.preserved_block_entities = preserved_entities;
 
     let column =
         ChunkColumn::from_parts(parts).map_err(|error| ChunkNbtError::Column(error.to_string()))?;
@@ -1068,6 +1093,7 @@ mod tests {
     use mc_bamboo_data::{blocks, version};
     use mc_bamboo_nbt::Tag;
     use mc_bamboo_world::{
+        MIN_Y,
         chunk::HeightmapKind,
         column::{ChunkColumn, ChunkColumnParts, SectionParts},
         light::{DataLayer, LAYER_BYTES, LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION},
@@ -1530,6 +1556,66 @@ mod tests {
             Some(&compound(Vec::new()))
         );
         assert_eq!(field(&entities[0], "keepPacked"), Some(&Tag::Byte(1)));
+    }
+
+    /// 读进带不认识键的箱子 → 不动 → 键还在；拆掉箱子原地放熔炉 → 旧键不挂过去。
+    #[test]
+    fn preserved_block_entity_keys_follow_the_block_type() {
+        let pos = ChunkPos::new(3, -9);
+        let world_pos = (3 * 16 + 3, -60, -9 * 16 + 5);
+        let mut options = extra(pos);
+        options.raw_block_entities = Some(vec![Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:chest".to_owned())),
+            ("x".to_owned(), Tag::Int(world_pos.0)),
+            ("y".to_owned(), Tag::Int(world_pos.1)),
+            ("z".to_owned(), Tag::Int(world_pos.2)),
+            ("Items".to_owned(), Tag::List(Vec::new())),
+            ("UnknownKey".to_owned(), Tag::String("keep".to_owned())),
+        ])]);
+        let column = rich_column(1);
+        // rich_column 的箱子就在 (3, -60, 5)。
+        let bytes = encode_bytes(&column, &options).expect("编码成功");
+        let decoded = decode_bytes(&bytes).expect("解码成功");
+        let preserved = decoded
+            .column
+            .chunk()
+            .preserved_block_entity(3, -60, 5)
+            .expect("保留条目挂在方块实体类型表旁边");
+        assert_eq!(
+            field(preserved, "UnknownKey"),
+            Some(&Tag::String("keep".to_owned()))
+        );
+        let again = encode_bytes(&decoded.column, &decoded.extra()).expect("再编码成功");
+        let reread = decode_bytes(&again).expect("再解码成功");
+        let chest = reread
+            .block_entities
+            .iter()
+            .find(|tag| super::tag_position(tag) == Some(world_pos))
+            .expect("箱子条目还在");
+        assert_eq!(
+            field(chest, "UnknownKey"),
+            Some(&Tag::String("keep".to_owned()))
+        );
+
+        // 换成另一种方块实体：旧的整条复合标签不能挂到熔炉上。
+        let mut parts = ChunkColumnParts::read_from(&decoded.column);
+        let section = (world_pos.1 - MIN_Y) as usize / 16;
+        parts.sections[section].block_palette = vec![blocks::FURNACE];
+        parts.sections[section].block_data.clear();
+        let mut replaced = ChunkColumn::from_parts(parts).expect("组装成功");
+        let chunk = replaced.chunk_mut();
+        chunk.set_block(3, -60, 5, blocks::FURNACE);
+        assert!(chunk.preserved_block_entity(3, -60, 5).is_none());
+        let tag = encode(&replaced, &extra(pos)).expect("编码成功");
+        let Tag::List(entities) = field(&tag, "block_entities").expect("block_entities") else {
+            panic!("block_entities 是列表");
+        };
+        let furnace = entities
+            .iter()
+            .find(|tag| super::tag_position(tag) == Some(world_pos))
+            .expect("熔炉条目存在");
+        assert_eq!(super::block_entity_id(furnace), Some("minecraft:furnace"));
+        assert!(field(furnace, "UnknownKey").is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@
 
 use mc_bamboo_core::{BlockPos, LightLayer, sign::SignContent};
 use mc_bamboo_data::{blocks, registries::biome};
+use mc_bamboo_nbt::Tag;
 
 use crate::{
     SECTION_COUNT,
@@ -63,6 +64,8 @@ pub struct ChunkColumnParts {
     pub signs: Vec<(usize, i32, usize, SignContent)>,
     /// 方块实体要发给客户端的 NBT：区块内 x、世界 y、区块内 z 和网络字节。
     pub update_tags: Vec<(usize, i32, usize, Vec<u8>)>,
+    /// 原样保留的方块实体条目：区块内 x、世界 y、区块内 z、类型 ID 和整条复合标签。
+    pub preserved_block_entities: Vec<(usize, i32, usize, i32, Tag)>,
 }
 
 /// 磁盘数据不能组装成一个区块束。
@@ -93,6 +96,7 @@ impl Default for ChunkColumnParts {
             light_on: false,
             signs: Vec::new(),
             update_tags: Vec::new(),
+            preserved_block_entities: Vec::new(),
         }
     }
 }
@@ -144,6 +148,11 @@ impl ChunkColumnParts {
             .update_tags()
             .map(|(x, y, z, tag)| (x, y, z, tag.to_vec()))
             .collect();
+        let preserved_block_entities = column
+            .chunk
+            .preserved_block_entities()
+            .map(|(x, y, z, kind, tag)| (x, y, z, kind, tag.clone()))
+            .collect();
         Self {
             sections,
             heightmaps,
@@ -151,6 +160,7 @@ impl ChunkColumnParts {
             light_on: column.sky.light_on(),
             signs,
             update_tags,
+            preserved_block_entities,
         }
     }
 }
@@ -218,6 +228,9 @@ impl ChunkColumn {
         for (x, y, z, tag) in parts.update_tags {
             chunk.put_update_tag(x, y, z, tag)?;
         }
+        for (x, y, z, kind, tag) in parts.preserved_block_entities {
+            chunk.put_preserved_block_entity(x, y, z, kind, tag)?;
+        }
         let mut has_blocks = [false; LIGHT_SECTION_COUNT];
         for (index, section) in chunk.sections().iter().enumerate() {
             has_blocks[index + 1] = !section.is_empty();
@@ -260,6 +273,12 @@ impl ChunkColumn {
         &self.chunk
     }
 
+    /// 只在组装读盘内容或测试改方块时用：改完的方块状态会同步维护方块实体类型表
+    /// 和挂在它旁边的原样保留条目。
+    pub fn chunk_mut(&mut self) -> &mut Chunk {
+        &mut self.chunk
+    }
+
     /// 这一柱的内容是不是还和生成器输出（超平坦模板）完全一样。
     ///
     /// 方块、群系、四张高度图、告示牌、`update tag` 和**两层光照的数据与存着的段**
@@ -275,6 +294,7 @@ impl ChunkColumn {
             && mine.light_on == theirs.light_on
             && mine.signs == theirs.signs
             && mine.update_tags == theirs.update_tags
+            && mine.preserved_block_entities == theirs.preserved_block_entities
     }
 
     /// `getDataLayerData`：一个光照段存的数据，没存时是 `None`。
