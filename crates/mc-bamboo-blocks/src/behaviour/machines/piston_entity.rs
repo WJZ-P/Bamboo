@@ -7,6 +7,7 @@ use std::any::Any;
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{BlockClass, blocks};
+use mc_bamboo_nbt::Tag;
 
 use crate::{
     block_entity::BlockEntity,
@@ -39,7 +40,7 @@ impl PistonMoving {
     /// `PistonMovingBlockEntity(worldPosition, blockState, movedState, direction, extending, isSourcePiston)`。
     ///
     /// 官方还会存 `blockState`（`moving_piston` 自己的状态），这里不读它，不存。
-    pub(super) fn new(
+    pub(crate) fn new(
         pos: BlockPos,
         moved_state: BlockState,
         direction: Direction,
@@ -90,6 +91,12 @@ impl PistonMoving {
             self.progress_o.to_bits(),
             self.last_ticked.saturating_sub(now),
         )
+    }
+
+    /// 存档读入：官方写的是 `progressO`，读回时 `progress` 和 `progressO` 相等。
+    pub fn set_archive_progress(&mut self, progress: f32) {
+        self.progress = progress;
+        self.progress_o = progress;
     }
 
     /// `getExtendedProgress`：伸长时从 -1 走到 0，缩回时从 1 走到 0。
@@ -227,5 +234,21 @@ impl BlockEntity for PistonMoving {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        use crate::archive::tag::{encode_block_state, put};
+        let mut out = Vec::new();
+        put(&mut out, "blockState", encode_block_state(self.moved_state));
+        put(&mut out, "facing", Tag::Byte(self.direction.id() as i8));
+        // 官方 saveAdditional 写的是 progressO，不是这一刻的 progress。
+        put(&mut out, "progress", Tag::Float(self.progress_o));
+        put(&mut out, "extending", Tag::Byte(i8::from(self.extending)));
+        put(
+            &mut out,
+            "source",
+            Tag::Byte(i8::from(self.is_source_piston)),
+        );
+        Ok(out)
     }
 }

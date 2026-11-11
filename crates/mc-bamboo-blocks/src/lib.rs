@@ -11,6 +11,7 @@
 //! 流体流动和光照引擎在别处算好，这里只读，见 [`World::schedule_fluid_tick`] 和
 //! [`World::raw_brightness`]。
 
+pub mod archive;
 pub mod behaviour;
 mod block_container;
 pub mod block_entity;
@@ -69,8 +70,9 @@ pub use interact::{
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
-    ChunkRedstone, Effect, EntityTables, LecternFacts, Level, LevelEntities, LevelSideState,
-    LevelTables, Observation, RedstoneMemory, Trigger, custom_sound_name, intern_custom_sound,
+    ArchiveRedstone, ChunkRedstone, Effect, EntityTables, LecternFacts, Level, LevelEntities,
+    LevelSideState, LevelTables, Observation, RedstoneEntry, RedstoneMemory, Trigger,
+    custom_sound_name, intern_custom_sound,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};

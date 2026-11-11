@@ -14,6 +14,7 @@ use std::any::Any;
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{RecipeKind, RecipeType, registries};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{RecipeManager, assemble};
 
@@ -234,6 +235,27 @@ impl BlockEntity for CampfireEntity {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        use crate::archive::tag::put;
+        let mut out = Vec::new();
+        put(
+            &mut out,
+            "Items",
+            crate::archive::block_entity::items_tag(self.items())?,
+        );
+        put(
+            &mut out,
+            "CookingTimes",
+            Tag::IntArray(self.progress.to_vec()),
+        );
+        put(
+            &mut out,
+            "CookingTotalTimes",
+            Tag::IntArray(self.cooking_time.to_vec()),
+        );
+        Ok(out)
     }
 }
 

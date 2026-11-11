@@ -1054,6 +1054,61 @@ pub struct ChunkRedstone {
     torch_toggles: Vec<(BlockPos, i64)>,
 }
 
+impl ChunkRedstone {
+    /// 存档编码用：逐项只读遍历建模的红石记忆。
+    pub fn archive_entries(&self) -> ArchiveRedstone<'_> {
+        ArchiveRedstone {
+            comparator_outputs: &self.comparator_outputs,
+            bookshelf_slots: &self.bookshelf_slots,
+            jukebox_playing: &self.jukebox_playing,
+            crafter_disabled: &self.crafter_disabled,
+            crafter_crafting: &self.crafter_crafting,
+            lecterns: &self.lecterns,
+        }
+    }
+
+    /// 存档解码用：把一项红石记忆放回盒子。火把抖动表官方不存，不写进盒子。
+    pub fn push_archive_entry(&mut self, entry: RedstoneEntry) {
+        match entry {
+            RedstoneEntry::Comparator { pos, signal } => {
+                self.comparator_outputs.push((pos, signal));
+            }
+            RedstoneEntry::Bookshelf { pos, slot } => {
+                self.bookshelf_slots.push((pos, slot));
+            }
+            RedstoneEntry::Jukebox { pos } => self.jukebox_playing.push(pos),
+            RedstoneEntry::CrafterDisabled { pos, mask } => {
+                self.crafter_disabled.push((pos, mask));
+            }
+            RedstoneEntry::CrafterCrafting { pos, remaining } => {
+                self.crafter_crafting.push((pos, remaining));
+            }
+            RedstoneEntry::Lectern { pos, facts } => self.lecterns.push((pos, facts)),
+        }
+    }
+}
+
+/// [`ChunkRedstone::archive_entries`] 的只读视图。
+pub struct ArchiveRedstone<'a> {
+    pub comparator_outputs: &'a [(BlockPos, i32)],
+    pub bookshelf_slots: &'a [(BlockPos, usize)],
+    pub jukebox_playing: &'a [BlockPos],
+    pub crafter_disabled: &'a [(BlockPos, u16)],
+    pub crafter_crafting: &'a [(BlockPos, i32)],
+    pub lecterns: &'a [(BlockPos, LecternFacts)],
+}
+
+/// 一条能从方块实体 NBT 还原的红石记忆。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedstoneEntry {
+    Comparator { pos: BlockPos, signal: i32 },
+    Bookshelf { pos: BlockPos, slot: usize },
+    Jukebox { pos: BlockPos },
+    CrafterDisabled { pos: BlockPos, mask: u16 },
+    CrafterCrafting { pos: BlockPos, remaining: i32 },
+    Lectern { pos: BlockPos, facts: LecternFacts },
+}
+
 const _: fn() = || {
     fn assert_send_debug<T: Send + fmt::Debug>() {}
     assert_send_debug::<ChunkRedstone>();

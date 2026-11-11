@@ -11,6 +11,7 @@ use std::any::Any;
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{BlockClass, CookingKind, Recipe, RecipeKind, RecipeType, items};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{
     RecipeManager, assemble, cooking_fuel, crafting_remainder, max_stack_size,
@@ -127,6 +128,18 @@ impl FurnaceEntity {
             self.last_recipe.map(|recipe| recipe.id),
             self.recipes_used.clone(),
         )
+    }
+
+    /// 存档读回时直接写官方的五个数值槽，不重算配方缓存。
+    pub fn set_archive_values(&mut self, speed: f32, recipes_used: Vec<(&'static str, i32)>) {
+        self.speed_multiplier = speed;
+        self.recipes_used = recipes_used;
+        self.last_recipe = None;
+    }
+
+    /// 存档 `RecipesUsed` 的配方名和次数。
+    pub fn speed_multiplier(&self) -> f32 {
+        self.speed_multiplier
     }
 
     /// 官方 `ContainerData.set`。存档回读和菜单写数据槽都走这里，不经过 `setItem`。
@@ -479,5 +492,40 @@ impl BlockEntity for FurnaceEntity {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        use crate::archive::tag::put;
+        let mut out = Vec::new();
+        put(&mut out, "cooking_time_spent", Tag::Int(self.cooking_timer));
+        put(
+            &mut out,
+            "cooking_total_time",
+            Tag::Int(self.cooking_total_time),
+        );
+        put(
+            &mut out,
+            "lit_time_remaining",
+            Tag::Int(self.lit_time_remaining),
+        );
+        put(&mut out, "lit_total_time", Tag::Int(self.lit_total_time));
+        put(
+            &mut out,
+            "speed_multiplier",
+            Tag::Float(self.speed_multiplier),
+        );
+        put(
+            &mut out,
+            "Items",
+            crate::archive::block_entity::items_tag(self.items())?,
+        );
+        // 官方 RECIPES_USED_CODEC 是 unboundedMap(Recipe.KEY_CODEC, Codec.INT)，
+        // 空映射也写 `{}`。
+        let mut used = Vec::new();
+        for (id, count) in &self.recipes_used {
+            put(&mut used, id, Tag::Int(*count));
+        }
+        put(&mut out, "RecipesUsed", Tag::Compound(used));
+        Ok(out)
     }
 }

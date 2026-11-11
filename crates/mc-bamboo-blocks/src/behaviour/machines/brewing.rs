@@ -9,6 +9,7 @@ use std::any::Any;
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{Recipe, RecipeType};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{
     BrewingInput, RecipeManager, assemble, brewing_fuel, crafting_remainder, is_brewing_reagent,
@@ -138,6 +139,15 @@ impl BrewingStandEntity {
             last_recipe: self.last_recipe.map(|recipe| recipe.id),
             yield_tick: self.yield_tick,
             tick_phase: self.tick_phase,
+        }
+    }
+
+    /// 存档读回 `speed_multiplier`；`ingredient` 由官方 `loadAdditional` 在
+    /// `BrewTime > 0` 时从材料格物品重算，这里保持一致。
+    pub fn set_speed_multiplier(&mut self, speed: f32) {
+        self.speed_multiplier = speed;
+        if self.brew_time > 0 {
+            self.ingredient = Some(self.items[SLOT_INGREDIENT].item);
         }
     }
 
@@ -388,5 +398,25 @@ impl BlockEntity for BrewingStandEntity {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        use crate::archive::tag::put;
+        let mut out = Vec::new();
+        put(&mut out, "BrewTime", Tag::Int(self.brew_time));
+        put(&mut out, "total_brew_time", Tag::Int(self.total_brew_time));
+        put(
+            &mut out,
+            "Items",
+            crate::archive::block_entity::items_tag(self.items())?,
+        );
+        put(&mut out, "Fuel", Tag::Int(self.fuel));
+        put(&mut out, "total_fuel", Tag::Int(self.total_fuel));
+        put(
+            &mut out,
+            "speed_multiplier",
+            Tag::Float(self.speed_multiplier),
+        );
+        Ok(out)
     }
 }

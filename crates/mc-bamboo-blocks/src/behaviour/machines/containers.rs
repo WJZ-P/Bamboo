@@ -8,6 +8,7 @@ use std::any::Any;
 
 use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{Block, BlockAncestor};
+use mc_bamboo_nbt::Tag;
 
 use super::{cooking::FurnaceEntity, facing_the_view};
 use crate::{
@@ -230,6 +231,12 @@ impl BlockEntity for ShulkerBoxEntity {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        // 官方 ShulkerBoxBlockEntity.saveAdditional 只写容器内容和战利品表；
+        // 盖子动画和开合人数是运行时的状态，不存盘。
+        Ok(Vec::new())
     }
 }
 

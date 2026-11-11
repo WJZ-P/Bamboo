@@ -11,6 +11,7 @@ use std::any::Any;
 
 use mc_bamboo_core::{BlockPos, Direction, mth};
 use mc_bamboo_data::{BlockAncestor, tags::block_tags};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -74,6 +75,11 @@ impl HopperEntity {
     pub fn ticked_game_time(&self) -> i64 {
         self.ticked_game_time
     }
+
+    /// 存档读入冷却；`tickedGameTime` 官方不存，读回是构造时的 0。
+    pub fn set_cooldown_from_archive(&mut self, cooldown: i32) {
+        self.cooldown_time = cooldown;
+    }
 }
 
 impl BlockEntity for HopperEntity {
@@ -91,6 +97,15 @@ impl BlockEntity for HopperEntity {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+        // 官方 HopperBlockEntity.saveAdditional 在公共容器键之外只写冷却；
+        // tickedGameTime 是绝对时刻，官方不存。
+        Ok(vec![(
+            "TransferCooldown".to_owned(),
+            Tag::Int(self.cooldown_time),
+        )])
     }
 }
 
