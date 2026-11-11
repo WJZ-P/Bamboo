@@ -8,13 +8,14 @@
 //! 超平坦世界无穷大，所以每个区块柱默认是模板柱的样子，第一次写的时候才复制一份自己的。
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     mem,
 };
 
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 
 use super::{DataLayer, LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos};
+use crate::ticket::ChunkHasherBuilder;
 
 /// `SectionState` 里“这一段自己有方块”的位。
 const HAS_DATA: u8 = 32;
@@ -23,6 +24,77 @@ const NEIGHBOR_COUNT: u8 = 31;
 /// 一个段最多有这么多个邻居。
 const MAX_NEIGHBORS: i32 = 26;
 const FULL_LIGHT: u8 = 15;
+
+/// 一个位置和它 8 个邻居柱各自的 26 个段状态，只由方块决定。
+///
+/// 搬一个区块柱时四份光照存储（天空光、方块光，各有「正在算」和「给别人读」两份）
+/// 要写进同样的段状态，所以只算一次，再分别交给 [`LightStorage::rebind_area`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SectionStatesAround {
+    columns: [(ChunkPos, [u8; LIGHT_SECTION_COUNT]); 9],
+}
+
+impl SectionStatesAround {
+    /// 按 `chunks` 此刻的方块算。HAS_DATA 位是这一段自己有没有方块，低 5 位是
+    /// 26 个邻居段里有方块的个数（官方 `updateSectionStatus` 累加出来的结果）。
+    ///
+    /// 每个区块柱先压成一个掩码（第 n 位 = 第 n 个光照段有方块），邻居计数就是
+    /// 在 3×3 个掩码上数上下各一段的窗口里有几位。区块只查 25 次。
+    pub(crate) fn compute(pos: ChunkPos, chunks: super::Chunks<'_>) -> Self {
+        // 坐标用饱和加法，贴着坐标上限时几个偏移会落到同一个位置；掩码按实际坐标缓存。
+        let mut masks: Vec<(ChunkPos, u32)> = Vec::with_capacity(25);
+        let mut mask_of = |column: ChunkPos| -> u32 {
+            if let Some(&(_, mask)) = masks.iter().find(|(known, _)| *known == column) {
+                return mask;
+            }
+            let mut mask = 0u32;
+            // 光照段比方块段多上下各一段，那两段没有方块段。
+            for (index, section) in chunks.chunk(column).sections().iter().enumerate() {
+                if !section.is_empty() {
+                    mask |= 1 << (index + 1);
+                }
+            }
+            masks.push((column, mask));
+            mask
+        };
+        let offset = |column: ChunkPos, dx: i32, dz: i32| {
+            ChunkPos::new(column.x.saturating_add(dx), column.z.saturating_add(dz))
+        };
+        let mut columns = [(pos, [0u8; LIGHT_SECTION_COUNT]); 9];
+        let mut next = 0;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let column = offset(pos, dx, dz);
+                let own = mask_of(column);
+                let mut states = [0u8; LIGHT_SECTION_COUNT];
+                for ndx in -1..=1 {
+                    for ndz in -1..=1 {
+                        let mask = mask_of(offset(column, ndx, ndz));
+                        for (slot, state) in states.iter_mut().enumerate() {
+                            let low = slot.saturating_sub(1);
+                            let high = (slot + 1).min(LIGHT_SECTION_COUNT - 1);
+                            let window = (u32::MAX >> (31 - high)) & (u32::MAX << low);
+                            let mut count = (mask & window).count_ones() as u8;
+                            if (ndx, ndz) == (0, 0) {
+                                // 自己不算自己的邻居。
+                                count -= ((mask >> slot) & 1) as u8;
+                            }
+                            *state += count;
+                        }
+                    }
+                }
+                for (slot, state) in states.iter_mut().enumerate() {
+                    if (own >> slot) & 1 == 1 {
+                        *state |= HAS_DATA;
+                    }
+                }
+                columns[next] = (column, states);
+                next += 1;
+            }
+        }
+        Self { columns }
+    }
+}
 
 /// 一个区块柱 26 个光照段的存储。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,8 +128,8 @@ impl LightColumn {
     /// 按磁盘上 26 段的光照数据和方块段重建一柱。
     ///
     /// 跨到相邻区块柱的邻居计数这里看不到：`sectionStates` 只按「哪些段存了
-    /// 光照」记，存了光照的段标 `HAS_DATA`。放进 `ChunkStore` 后跨柱的登记由
-    /// 区块平面那一步负责，和 `take_column` / `insert_column` 的约定一致。
+    /// 光照」记，存了光照的段标 `HAS_DATA`。放进 `ChunkStore` 时由
+    /// `insert_column` 调用 [`rebind_area`](Self::rebind_area) 按目标世界重新登记。
     pub(crate) fn from_layers(
         layers: [Option<DataLayer>; LIGHT_SECTION_COUNT],
         has_blocks: &[bool; LIGHT_SECTION_COUNT],
@@ -172,6 +244,9 @@ pub(crate) struct LightStorage {
     has_inconsistencies: bool,
     /// 发出去的最后一个版本号。
     last_revision: u64,
+    /// `None` = 无限超平坦（每个位置都存在）。`Some` = 已加载模式，
+    /// 集合外的位置没有柱：26 个段状态全 0、没有数据层、也不接受任何写入。
+    loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>,
 }
 
 /// 光照段在区块柱里的下标。超出 26 段时没有。
@@ -204,6 +279,38 @@ impl LightStorage {
             changed: Vec::new(),
             has_inconsistencies: false,
             last_revision: 0,
+            loaded: None,
+        }
+    }
+
+    /// 切到已加载模式：只有 `loaded` 里的坐标有柱。
+    /// 无限模式传 `None`。已加载模式之外的位置读成 `EMPTY_COLUMN`。
+    pub(crate) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
+        self.loaded = loaded;
+    }
+
+    /// 增量登记一个已加载位置，避免每次加载都克隆整张集合。
+    pub(crate) fn add_loaded(&mut self, pos: ChunkPos) {
+        if let Some(set) = self.loaded.as_mut() {
+            set.insert(pos);
+        }
+    }
+
+    /// 增量注销一个已加载位置，并把它的光照柱真的删掉。
+    pub(crate) fn remove_loaded(&mut self, pos: ChunkPos) {
+        if let Some(set) = self.loaded.as_mut() {
+            set.remove(&pos);
+        }
+        self.columns.remove(&pos);
+        self.revisions.remove(&pos);
+    }
+
+    /// 这个位置在这层光照里有没有柱。无限模式恒为真（没写过的柱读模板）。
+    /// 已加载模式下集合外恒为假，集合内按有没有存过自己的一份算。
+    pub(crate) fn has_column(&self, pos: ChunkPos) -> bool {
+        match &self.loaded {
+            None => true,
+            Some(set) => set.contains(&pos),
         }
     }
 
@@ -211,12 +318,22 @@ impl LightStorage {
         self.layer
     }
 
+    fn is_loaded(&self, pos: ChunkPos) -> bool {
+        self.loaded.as_ref().is_none_or(|set| set.contains(&pos))
+    }
+
     fn column(&self, pos: ChunkPos) -> &LightColumn {
+        if !self.is_loaded(pos) {
+            static EMPTY: std::sync::OnceLock<LightColumn> = std::sync::OnceLock::new();
+            return EMPTY.get_or_init(LightColumn::empty);
+        }
         self.columns.get(&pos).unwrap_or(&self.template)
     }
 
     /// 要写这个区块柱了，没有自己一份的话先从模板复制。所有写都经过这里，每次换一个新的版本号。
+    /// 已加载模式下没加载的位置不能通过这里建柱（调用方先问 `is_loaded`）。
     fn column_mut(&mut self, pos: ChunkPos) -> &mut LightColumn {
+        debug_assert!(self.is_loaded(pos), "没加载的位置不该写入光照柱");
         self.assign_revision(pos);
         let template = &self.template;
         self.columns.entry(pos).or_insert_with(|| template.clone())
@@ -247,6 +364,21 @@ impl LightStorage {
     /// `getBottomSectionY`。
     pub(crate) fn lowest_section(&self) -> i32 {
         self.lowest_section
+    }
+
+    /// 这一柱的 26 个段状态，给测试核对登记/注销用。
+    #[cfg(test)]
+    pub(crate) fn states_at(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
+        self.column(pos).states
+    }
+
+    /// 每个有柱的位置，状态非 0 的段都存着数据层（测试用）。
+    #[cfg(test)]
+    pub(crate) fn debug_states_have_layers(&self) -> bool {
+        self.columns.iter().all(|(_, column)| {
+            (0..LIGHT_SECTION_COUNT)
+                .all(|slot| column.states[slot] == 0 || column.layers[slot].is_some())
+        })
     }
 
     /// `getDataLayer`：这一段存的光照，没存时是 `None`。
@@ -331,6 +463,76 @@ impl LightStorage {
         slot(section.y).map_or(0, |slot| self.column(section.chunk()).states[slot])
     }
 
+    /// 区块束搬进或搬出一个世界之后，按**目标世界此刻的方块**重算 `pos` 和 8 个邻居柱
+    /// 的 `sectionStates`，照官方 `ThreadedLevelLightEngine.initializeLight`（登记）和
+    /// `updateChunkStatus`（注销）的定义：HAS_DATA 位是这一段自己有没有方块，
+    /// 低 5 位是 26 个邻居段里有方块的个数。
+    ///
+    /// 盒子自带的 `sectionStates` 是来源世界的，单独插进一圈不同的邻居中间就不对了，
+    /// 所以这里不用它，而是从 `chunks` 重新算整片 3×3 邻域。平坦世界里每个位置都有
+    /// 同样的方块，算出来的值和模板相同，一整片相邻区块一起搬时一次都不写。
+    ///
+    /// 不经过 `putSectionState`：盒子里装的是已经算好的光照数据，它的
+    /// `initializeSection` 会用默认值覆盖掉。这里对光照数据只做一件事——
+    /// **状态非 0 而还没有数据层的段，补建一层**（内容照 `createDataLayer`）。
+    /// 引擎只往存着数据层的段里传光（[`storing_light_for_section`](Self::storing_light_for_section)），
+    /// 不补的话，因为新邻居才需要存光的段永远是黑的。
+    ///
+    /// 反过来，状态变成 0 的段**不丢数据层**。官方是在很远的地方才真正卸载区块
+    /// （加载等级 45 以外），那里的邻居早就不发给客户端了；这里在紧挨着可见范围的
+    /// 地方就把区块收走，邻居段里从它那边照过来的光要原样留着，等它回来时两边才对得上。
+    /// 多留的数据层不影响读数；以后那一段的状态再从 0 变成非 0 时，
+    /// `putSectionState` 照常重新初始化它。
+    ///
+    /// 返回这次补建了数据层的段。补建会换掉那一柱的版本号（区块包里多了一段）。
+    pub(crate) fn rebind_area(&mut self, area: &SectionStatesAround) -> Vec<SectionPos> {
+        let mut created = Vec::new();
+        for &(column, states) in &area.columns {
+            // 已加载模式只重算有柱的邻居；没加载的柱在算邻居计数时按
+            // 「没有方块」计入，但不能给它建柱。
+            if self.has_column(column) {
+                self.rebind_column(column, states, &mut created);
+            }
+        }
+        created
+    }
+
+    /// 把一柱的段状态换成 `states`，并给状态非 0 却没有数据层的段补建一层。
+    fn rebind_column(
+        &mut self,
+        pos: ChunkPos,
+        states: [u8; LIGHT_SECTION_COUNT],
+        created: &mut Vec<SectionPos>,
+    ) {
+        let current = self.column(pos);
+        let missing =
+            |column: &LightColumn, slot: usize| states[slot] != 0 && column.layers[slot].is_none();
+        if !(0..LIGHT_SECTION_COUNT).any(|slot| missing(current, slot)) {
+            if current.states != states {
+                // 只有计数变了：存着的光照数据一段没动，区块包不变，不换版本号。
+                let template = &self.template;
+                self.columns
+                    .entry(pos)
+                    .or_insert_with(|| template.clone())
+                    .states = states;
+            }
+            return;
+        }
+        // 自下而上，和官方 `initializeLight` 逐段登记的顺序一致：天空光新建的一层
+        // 照抄它上面最近一层的最底一片，上面没有就是全亮（或者这一列还没开光照时全暗）。
+        self.column_mut(pos).states = states;
+        for slot in 0..LIGHT_SECTION_COUNT {
+            if !missing(self.column(pos), slot) {
+                continue;
+            }
+            let section = SectionPos::new(pos.x, slot as i32 + MIN_LIGHT_SECTION, pos.z);
+            let layer = self.create_data_layer(section);
+            self.column_mut(pos).layers[slot] = Some(layer);
+            self.lowest_section = self.lowest_section.min(section.y);
+            created.push(section);
+        }
+    }
+
     /// `updateSectionStatus`：这一段变空了或者有了方块，它和 26 个邻居存不存光照可能跟着变。
     pub(crate) fn update_section_status(&mut self, section: SectionPos, empty: bool) {
         let state = self.state(section);
@@ -356,6 +558,11 @@ impl LightStorage {
     }
 
     fn add_neighbor_count(&mut self, section: SectionPos, increment: i32) {
+        // 方块变化引起的邻居计数落到没加载的位置时直接丢掉：不能因此给
+        // 没加载的位置造出一柱。它加载进来时 `rebind_area` 会按当时的方块重算。
+        if !self.is_loaded(section.chunk()) {
+            return;
+        }
         let state = self.state(section);
         let count = i32::from(state & NEIGHBOR_COUNT) + increment;
         assert!(

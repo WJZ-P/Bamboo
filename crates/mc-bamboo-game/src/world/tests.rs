@@ -197,7 +197,17 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    /// 默认走「无限超平坦」测试世界：现有单元测试/oracle 都假设哪里都有地。
     pub(crate) fn new(view_distance: i32) -> Self {
+        Self::build(view_distance, false)
+    }
+
+    /// 正式入口（已加载模式）：起点没有加载任何区块，测试自己交付。
+    pub(crate) fn new_loaded(view_distance: i32) -> Self {
+        Self::build(view_distance, true)
+    }
+
+    fn build(view_distance: i32, loaded: bool) -> Self {
         let (inbox, receiver) = mpsc::channel();
         let config = WorldConfig {
             view_distance,
@@ -206,7 +216,11 @@ impl Harness {
             enforce_secure_profile: false,
             admin: Default::default(),
         };
-        let mut world = World::new(config, receiver);
+        let mut world = if loaded {
+            World::new(config, receiver)
+        } else {
+            World::new_infinite_flat_for_tests(config, receiver)
+        };
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.region.random = LevelRandom::new(0);
         world.region.sound_seed_generator = LevelRandom::new(0);
@@ -388,6 +402,21 @@ impl Harness {
         client
     }
 
+    /// 测试专用：只读票表。
+    pub(crate) fn tickets(&self) -> &mc_bamboo_world::ticket::TicketTable {
+        self.world.tickets()
+    }
+
+    /// 测试专用：直接改票表（视距、模拟距离、超时票等）。
+    pub(crate) fn tickets_mut(&mut self) -> &mut mc_bamboo_world::ticket::TicketTable {
+        self.world.tickets_mut()
+    }
+
+    /// 测试专用：走一批 `TicketOp`。
+    pub(crate) fn apply_ticket_for_test(&mut self, op: mc_bamboo_world::director::TicketOp) {
+        self.world.apply_ticket(op);
+    }
+
     /// 给其他模块的测试直接看全服状态。
     pub(crate) fn global(&self) -> &crate::global::Global {
         &self.world.global
@@ -412,6 +441,11 @@ impl Harness {
     }
 
     /// 给其他模块的测试直接看世界的状态。
+    /// 只读 region（测试断言用）。
+    pub(crate) fn world_region(&self) -> &Region {
+        &self.world.region
+    }
+
     pub(crate) fn region(&mut self) -> &mut Region {
         &mut self.world.region
     }

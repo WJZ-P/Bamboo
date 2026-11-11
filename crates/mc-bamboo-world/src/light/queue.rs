@@ -11,12 +11,9 @@
 //! 以后要搬到单独的光照线程上，形状不用变：世界线程按顺序发出任务、方块改动和排轮次这三种消息，
 //! 光照线程用自己的区块副本补上改动再算，算完把变过的段发回来，世界线程抄进给别人读的那一份。
 
-use std::{
-    collections::{HashMap, VecDeque},
-    mem,
-};
+use std::{collections::VecDeque, mem};
 
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_core::BlockPos;
 
 use super::{Chunks, SectionPos, TASKS_PER_BATCH, write_block};
 use crate::chunk::Chunk;
@@ -48,7 +45,7 @@ pub(super) struct TaskQueue {
     /// 正在攒的下一轮。
     forming: Round,
     /// 前面还有没算完的轮次时改过的区块，内容是正在算的那一轮排好那一刻的样子。光照追上以后清空。
-    past: HashMap<ChunkPos, Chunk>,
+    past: crate::store::ChunkMap<Chunk>,
 }
 
 impl TaskQueue {
@@ -182,11 +179,12 @@ mod tests {
         queue.push(check(1));
         queue.schedule();
 
-        let edited = HashMap::from([(POS.chunk(), {
+        let mut edited = crate::store::ChunkMap::default();
+        edited.insert(POS.chunk(), {
             let mut chunk = template.clone();
             write_block(&mut chunk, POS, blocks::STONE);
             chunk
-        })]);
+        });
         let mut seen = Vec::new();
         while queue.start_round().is_some() {
             seen.push(queue.view(Chunks::new(&template, &edited)).state(POS));

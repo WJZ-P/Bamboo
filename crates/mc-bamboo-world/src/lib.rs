@@ -5,6 +5,7 @@
 
 pub mod chunk;
 pub mod column;
+pub mod director;
 pub mod flat;
 pub mod light;
 pub mod palette;

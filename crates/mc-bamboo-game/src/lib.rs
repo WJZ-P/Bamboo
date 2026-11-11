@@ -40,6 +40,7 @@ mod command_block;
 mod container;
 mod container_loot;
 mod debug_stick;
+mod director_host;
 mod drops;
 mod durability;
 mod entity_sync;

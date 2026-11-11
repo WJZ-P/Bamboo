@@ -705,3 +705,96 @@ fn a_taken_chunk_reads_the_template_and_caches_are_dropped() {
     // 别的区块的方块还在。
     assert_eq!(region.chunks.block(AWAY_CHEST), Some(blocks::CHEST));
 }
+
+/// 区块里的下落方块、TNT 和掉落物要跟着盒子一起搬：不能留在一个已经没有方块的地方。
+#[test]
+fn world_entities_move_with_the_column() {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt};
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new(2);
+    settle_light(server.region());
+    let region = server.region();
+    for (x, kind) in [
+        (
+            1,
+            EntityKind::FallingBlock(FallingBlock::new(
+                mc_bamboo_blocks::BlockState(blocks::SAND),
+                p(1, 2),
+            )),
+        ),
+        (2, EntityKind::Tnt(PrimedTnt::new())),
+        (
+            3,
+            EntityKind::Item(GroundItem::new(ItemStack::new(items::DIAMOND, 3), false)),
+        ),
+    ] {
+        region
+            .entities
+            .spawn(Entity::new(kind, Vec3::new(f64::from(x), -59.0, 2.0)));
+    }
+    // 另一个区块里留一个物品，不该跟着搬。
+    region.entities.spawn(Entity::new(
+        EntityKind::Item(GroundItem::new(ItemStack::new(items::IRON_INGOT, 1), false)),
+        Vec3::new(20.0, -59.0, 2.0),
+    ));
+    let before: Vec<i32> = region.entities.iter().map(|entity| entity.id).collect();
+    assert_eq!(before.len(), 4);
+
+    let box_ = region
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足")
+        .remove(&CHUNK)
+        .expect("区块盒子在");
+    assert_eq!(region.entities.len(), 1, "只该留下别的区块里的物品");
+
+    region.insert_column(CHUNK, box_).expect("前提满足");
+    let after: Vec<i32> = region.entities.iter().map(|entity| entity.id).collect();
+    assert_eq!(after.len(), 4, "四个实体都回来了");
+    assert!(before.iter().all(|id| after.contains(id)));
+}
+
+/// `is_pristine` 要比光照：邻居边界旁的光源照进这一柱后，方块没变但盒子不能丢。
+#[test]
+fn neighbour_light_makes_a_column_not_pristine() {
+    use mc_bamboo_world::director::ChunkBundle;
+
+    let mut server = Harness::new(2);
+    settle_light(server.region());
+    // 出生点区块的盒子此时是原样。
+    let pristine = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足")
+        .remove(&CHUNK)
+        .expect("区块盒子在");
+    assert!(pristine.is_pristine(), "模板盒子应该是原样");
+    server
+        .region()
+        .insert_column(CHUNK, pristine)
+        .expect("前提满足");
+
+    // 在边界另一侧放萤石；光会照进 CHUNK。
+    let lamp = BlockPos::new(16, Y, 3);
+    server.region().chunks.set_block(lamp, blocks::GLOWSTONE);
+    settle_light(server.region());
+    assert!(
+        server
+            .region()
+            .chunks
+            .light_value(LightLayer::Block, p(15, 3))
+            > 0,
+        "光要照进这一柱"
+    );
+
+    let lit = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足")
+        .remove(&CHUNK)
+        .expect("区块盒子在");
+    assert!(
+        !lit.is_pristine(),
+        "方块没变但光照变了，盒子必须停放，不能用模板重新生成"
+    );
+}

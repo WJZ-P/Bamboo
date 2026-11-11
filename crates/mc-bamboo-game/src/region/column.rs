@@ -10,12 +10,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     ops::Bound,
+    sync::OnceLock,
 };
 
-use mc_bamboo_blocks::{ChunkBlockEntities, ChunkRedstone, ChunkTicks};
+use mc_bamboo_blocks::{ChunkBlockEntities, ChunkRedstone, ChunkTicks, entity::ChunkEntities};
 use mc_bamboo_core::{BlockPos, ChunkPos};
 use mc_bamboo_protocol::components::ComponentPatch;
-use mc_bamboo_world::column::ChunkColumn;
+use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
 
 use crate::{
     command_block::CommandBlockData, container::ContainerEntry, lectern::Book, region::Region,
@@ -63,6 +64,8 @@ pub(crate) struct RegionColumn {
     command_blocks: BTreeMap<BlockPos, CommandBlockData>,
     /// 讲台上的书。
     books: BTreeMap<BlockPos, Book>,
+    /// 这个区块里的下落方块、点燃的 TNT 和掉落物。
+    entities: ChunkEntities,
 }
 
 /// 组装盒子之前攒齐的几张表。`ChunkBlockEntities` / `ChunkRedstone` 没有 `Default`，
@@ -77,6 +80,7 @@ struct Parts {
     block_items: BTreeMap<BlockPos, ComponentPatch>,
     command_blocks: BTreeMap<BlockPos, CommandBlockData>,
     books: BTreeMap<BlockPos, Book>,
+    entities: Option<ChunkEntities>,
 }
 
 impl Parts {
@@ -90,6 +94,7 @@ impl Parts {
             block_items: self.block_items,
             command_blocks: self.command_blocks,
             books: self.books,
+            entities: self.entities.expect("实体盒子已经取出"),
         })
     }
 }
@@ -102,6 +107,40 @@ pub(crate) struct PackedContainer {
     recheck_in: Option<u64>,
 }
 
+/// 判断「原样」用的生成器输出盒子。全局缓存一份，构造时算一次模板光照。
+static TEMPLATE_COLUMN: OnceLock<ChunkColumn> = OnceLock::new();
+
+fn template_column() -> &'static ChunkColumn {
+    TEMPLATE_COLUMN.get_or_init(ChunkColumn::from_template)
+}
+
+impl ChunkBundle for Box<RegionColumn> {
+    fn is_pristine(&self) -> bool {
+        (**self).is_pristine()
+    }
+}
+
+impl ChunkBundle for RegionColumn {
+    /// 盒子还能不能丢掉、下次用模板重新生成。
+    ///
+    /// 方块、告示牌、`update tag` 和两层光照要和生成器输出逐项相同，
+    /// 并且这一层知道的所有上层内容都得是空的（计划刻、方块实体、红石记忆、
+    /// 容器、物品组件、命令方块、讲台上的书、实体）。
+    /// 邻居的光会照进这一柱，只比方块不够；`ChunkColumn::is_pristine` 把光照一起比了。
+    /// 拿不准时返回 `false`，让 Director 把盒子整份停放。
+    fn is_pristine(&self) -> bool {
+        self.ticks.is_none()
+            && self.block_entities.is_empty()
+            && self.redstone.is_empty()
+            && self.containers.is_empty()
+            && self.block_items.is_empty()
+            && self.command_blocks.is_empty()
+            && self.books.is_empty()
+            && self.entities.is_empty()
+            && self.column.is_pristine(template_column())
+    }
+}
+
 // 区块束要被 move 到别的线程（设计稿 4.4）。
 const _: fn() = || {
     fn assert_send<T: Send>() {}
@@ -111,6 +150,22 @@ const _: fn() = || {
 };
 
 impl RegionColumn {
+    /// 从生成器模板造一个空的区块束：上层的所有盒子都是空的。
+    /// 已加载模式用它加载一个从没来过的位置。
+    pub(crate) fn from_template() -> Self {
+        Self {
+            column: Box::new(ChunkColumn::from_template()),
+            ticks: None,
+            block_entities: ChunkBlockEntities::default(),
+            redstone: ChunkRedstone::default(),
+            containers: BTreeMap::new(),
+            block_items: BTreeMap::new(),
+            command_blocks: BTreeMap::new(),
+            books: BTreeMap::new(),
+            entities: ChunkEntities::default(),
+        }
+    }
+
     /// 这个区块里的方块和光照，给测试和以后组装区块包用。
     #[cfg(test)]
     pub(crate) fn column(&self) -> &ChunkColumn {
@@ -163,6 +218,7 @@ impl Region {
         self.chunks.ready_to_move_columns()
             && self.block_ticks.ready_to_move_chunks()
             && self.block_entities.ready_to_move_chunks()
+            && self.entities.ready_to_move_chunks()
     }
 
     /// 一次取出一批区块。任何一个前提不满足时整批都不动。
@@ -254,6 +310,11 @@ impl Region {
                     .unwrap_or_else(|_| unreachable!("前提已经检查过")),
             );
             part.redstone = Some(self.redstone.take_chunk(pos, now));
+            part.entities = Some(
+                self.entities
+                    .take_chunk(pos)
+                    .unwrap_or_else(|_| unreachable!("前提已经检查过")),
+            );
         }
 
         // 丢掉属于这些区块的、还没发出去的变化和区块包的缓存。
@@ -288,6 +349,12 @@ impl Region {
         if !self.ready_to_move_columns() {
             return Err((NotReady, column));
         }
+        self.insert_column_unchecked(pos, column);
+        Ok(())
+    }
+
+    /// 不检查前提地放入一个区块束，前提由调用方保证。
+    fn insert_column_unchecked(&mut self, pos: ChunkPos, column: Box<RegionColumn>) {
         let now = self.block_ticks.now();
         let RegionColumn {
             column: world,
@@ -298,6 +365,7 @@ impl Region {
             block_items,
             command_blocks,
             books,
+            entities,
         } = *column;
         self.chunks
             .insert_column(pos, world)
@@ -315,13 +383,50 @@ impl Region {
         }
         self.block_entities.insert_chunk(block_entities);
         self.redstone.insert_chunk(redstone, now);
+        self.entities.insert_chunk(entities);
 
         self.light_changes.remove(&pos);
         self.block_changes
             .changed
             .retain(|changed| changed.chunk() != pos);
         self.chunk_cache.retain(|cached| cached != pos);
+    }
+
+    /// Director 交付一个完整的区块束到 `pos`（已加载模式）。
+    ///
+    /// 把世界层和上层内容装进 region（按目标世界的方块重算段状态），
+    /// 再把这个位置登记为已加载。
+    ///
+    /// 交付只往各张表里**插入**，不需要「没有实体被借出去」这个取出才有的前提；
+    /// [`Self::take_columns`] 仍用完整的 `ready_to_move_columns`。
+    pub(crate) fn deliver_column(
+        &mut self,
+        pos: ChunkPos,
+        column: Box<RegionColumn>,
+    ) -> Result<(), (NotReady, Box<RegionColumn>)> {
+        let ready = self.chunks.ready_to_move_columns()
+            && self.block_ticks.ready_to_move_chunks()
+            && self.block_entities.ready_to_move_chunks();
+        if !ready {
+            return Err((NotReady, column));
+        }
+        // 先登记已加载，再插盒子：`insert_column` 里的 `rebind_area`
+        // 按「这一柱已经在了」把 3×3 段状态一次算对，`mark_loaded` 不再重算第二遍。
+        self.chunks.mark_loaded(pos);
+        self.insert_column_unchecked(pos, column);
         Ok(())
+    }
+
+    /// Director 收回一批区块（已加载模式）。返回盒子与各自的代数。
+    pub(crate) fn reclaim_columns(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+    ) -> Result<BTreeMap<ChunkPos, Box<RegionColumn>>, NotReady> {
+        let boxes = self.take_columns(chunks)?;
+        for &pos in chunks {
+            let _ = self.chunks.unload(pos);
+        }
+        Ok(boxes)
     }
 }
 

@@ -294,9 +294,16 @@ impl Entity {
 }
 
 /// 一个区块里的全部实体，按 uid 排序。字段不公开，只能整体搬走和放回。
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChunkEntities {
     rows: Vec<EntityRow>,
+}
+
+impl ChunkEntities {
+    /// 盒子里有没有实体。`is_pristine` 用它判断盒子能不能丢掉。
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
 }
 
 /// 一个 region 的实体表。
@@ -640,9 +647,17 @@ impl EntityStore {
         self.grid.get(&key)
     }
 
+    /// 现在能不能按区块搬实体：不在 tick 中途，也没有被 `take` 借走的实体。
+    ///
+    /// 和 [`BlockTicks::ready_to_move_chunks`](crate::BlockTicks::ready_to_move_chunks)
+    /// 一样，调用方在 `take_chunk` 之前先问，好让整批区块要么都搬、要么都不搬。
+    pub fn ready_to_move_chunks(&self) -> bool {
+        !self.ticking && self.taken.is_empty()
+    }
+
     /// 把 `chunk` 里的实体装进盒子搬走。只在 tick 边界调用，tick 中途返回 [`Busy`]。
     pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkEntities, Busy> {
-        if self.ticking || !self.taken.is_empty() {
+        if !self.ready_to_move_chunks() {
             return Err(Busy);
         }
         let taken: Vec<EntityUid> = self

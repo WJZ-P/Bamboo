@@ -344,6 +344,7 @@ impl BlockEntities {
 /// 一个区块的全部方块实体，按位置排序。
 ///
 /// 字段不公开：区块束只把它整体搬走，不逐个读内容。
+#[derive(Default)]
 pub struct ChunkBlockEntities {
     entities: Vec<Box<dyn BlockEntity>>,
 }
@@ -357,6 +358,11 @@ impl ChunkBlockEntities {
     /// 从按位置排序的实体建盒子，存档解码时用。
     pub fn from_entities(entities: Vec<Box<dyn BlockEntity>>) -> Self {
         Self { entities }
+    }
+
+    /// 盒子里有没有方块实体。`is_pristine` 用它判断盒子能不能丢掉。
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
     }
 }
 

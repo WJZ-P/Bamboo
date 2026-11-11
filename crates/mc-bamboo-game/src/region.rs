@@ -44,6 +44,7 @@ use crate::{
 mod column;
 #[cfg(test)]
 mod column_tests;
+pub(crate) mod parking;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
 #[allow(unused_imports)]
@@ -282,14 +283,24 @@ impl Region {
         self.players.insert(player.id, player);
     }
 
+    /// 测试和 oracle 专用：把区块表切回「无限超平坦」（每个位置都隐式存在）。
+    /// 正式构造出来的 region 一律用 [`ChunkStore::loaded`](mc_bamboo_world::store::ChunkStore::loaded)。
+    pub(crate) fn use_infinite_flat_chunks(&mut self) {
+        self.chunks = mc_bamboo_world::store::ChunkStore::flat();
+    }
+
+    /// 测试专用：直接构造一个 region，用「无限超平坦」的退化实现。
+    /// 正式世界的 region 由 `World::build` 走 [`Self::with_keys`]（已加载模式）。
     pub(crate) fn new(view_distance: i32, max_players: i32, online_mode: bool) -> Self {
-        Self::with_keys(
+        let mut region = Self::with_keys(
             view_distance,
             max_players,
             online_mode,
             false,
             crate::secure_chat::empty_keys(),
-        )
+        );
+        region.use_infinite_flat_chunks();
+        region
     }
 
     /// 正版验证和公钥从 `World::with_service_keys` 进来。测试走 [`Self::new`]。
@@ -302,8 +313,8 @@ impl Region {
         enforce_secure_profile: bool,
         service_keys: Arc<ServiceProfileKeys>,
     ) -> Self {
-        let chunks = ChunkStore::flat();
-        let template_body = encode_template(&chunks);
+        let chunks = ChunkStore::loaded();
+        let template_body = encode_template(&ChunkStore::flat());
         let rules = crate::gamerules::GameRuleSet::vanilla();
         Self {
             players: BTreeMap::new(),

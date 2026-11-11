@@ -4,7 +4,7 @@
 //! 中间没有别人改引擎的数据，方块也读这一轮排好那一刻的样子，所以和一口气做完的结果相同。
 //! 一轮做完才把变过的段抄进给别人读的那一份，算到一半时读到的还是上一轮的结果。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use mc_bamboo_core::{ChunkPos, LightLayer};
 
@@ -12,9 +12,9 @@ use super::{
     Chunks, LightChanges, MIN_LIGHT_SECTION, SectionPos,
     engine::LightEngine,
     queue::Task,
-    storage::{LightColumn, LightStorage},
+    storage::{LightColumn, LightStorage, SectionStatesAround},
 };
-use crate::chunk::Chunk;
+use crate::{chunk::Chunk, ticket::ChunkHasherBuilder};
 
 /// 天空光和方块光两个引擎。
 #[derive(Debug, Clone)]
@@ -149,6 +149,46 @@ impl Engines {
         self.changes.clear(pos);
     }
 
+    /// 搬区块柱之后重算引擎这份的 `sectionStates`。邻居柱里补建了数据层的段记成
+    /// 要发给客户端的变化：正在看那些区块的玩家手里少这一段。被搬的那一柱自己不记，
+    /// 它整个随区块包发出去。返回天空光和方块光各自补建了数据层的段。
+    /// 增量登记/注销（两层和两份都要同步）。
+    pub(super) fn add_loaded(&mut self, pos: ChunkPos) {
+        self.sky.storage.add_loaded(pos);
+        self.block.storage.add_loaded(pos);
+    }
+
+    pub(super) fn remove_loaded(&mut self, pos: ChunkPos) {
+        self.sky.storage.remove_loaded(pos);
+        self.block.storage.remove_loaded(pos);
+    }
+
+    /// 切换已加载集合。两层和两份都要同步，见 `LightStorage::set_loaded`。
+    pub(super) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
+        self.sky.storage.set_loaded(loaded.clone());
+        self.block.storage.set_loaded(loaded);
+    }
+
+    pub(super) fn rebind_area(
+        &mut self,
+        pos: ChunkPos,
+        area: &SectionStatesAround,
+    ) -> [Vec<SectionPos>; 2] {
+        let sky = self.sky.storage.rebind_area(area);
+        let block = self.block.storage.rebind_area(area);
+        for (layer, sections) in [(LightLayer::Sky, &sky), (LightLayer::Block, &block)] {
+            self.changes.mark(
+                layer,
+                sections
+                    .iter()
+                    .copied()
+                    .filter(|section| section.chunk() != pos)
+                    .collect(),
+            );
+        }
+        [sky, block]
+    }
+
     /// `onLightUpdate`。
     fn collect_changes(&mut self, layer: LightLayer) {
         let engine = match layer {
@@ -193,6 +233,27 @@ pub(super) struct Visible {
 impl Visible {
     pub(super) fn new(sky: LightStorage, block: LightStorage) -> Self {
         Self { sky, block }
+    }
+
+    pub(super) fn set_loaded(&mut self, loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>) {
+        self.sky.set_loaded(loaded.clone());
+        self.block.set_loaded(loaded);
+    }
+
+    pub(super) fn add_loaded(&mut self, pos: ChunkPos) {
+        self.sky.add_loaded(pos);
+        self.block.add_loaded(pos);
+    }
+
+    pub(super) fn remove_loaded(&mut self, pos: ChunkPos) {
+        self.sky.remove_loaded(pos);
+        self.block.remove_loaded(pos);
+    }
+
+    /// 区块束搬进/搬出之后重算别人读的那份里的 `sectionStates`，补建的数据层和引擎那份相同。
+    /// 返回天空光和方块光各自补建了数据层的段。
+    pub(super) fn rebind_area(&mut self, area: &SectionStatesAround) -> [Vec<SectionPos>; 2] {
+        [self.sky.rebind_area(area), self.block.rebind_area(area)]
     }
 
     /// 取出一个区块柱在给别人读的那份里的天空光和方块光。

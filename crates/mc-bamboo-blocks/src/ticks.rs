@@ -458,7 +458,7 @@ impl BlockTicks {
 ///
 /// 每条都存相对延迟而不是绝对到期时刻：region 合并拆分、区块存盘和加载时
 /// 两边的模拟时间不一定相同（见 `docs/world-model-design.md` 6.3 节）。
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChunkTicks {
     blocks: Vec<SavedTick<usize>>,
     fluids: Vec<SavedTick<i32>>,

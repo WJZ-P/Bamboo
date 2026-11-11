@@ -1123,6 +1123,17 @@ impl ChunkRedstone {
             RedstoneEntry::Lectern { pos, facts } => self.lecterns.push((pos, facts)),
         }
     }
+
+    /// 盒子里有没有红石记忆。`is_pristine` 用它判断盒子能不能丢掉。
+    pub fn is_empty(&self) -> bool {
+        self.comparator_outputs.is_empty()
+            && self.bookshelf_slots.is_empty()
+            && self.jukebox_playing.is_empty()
+            && self.crafter_disabled.is_empty()
+            && self.crafter_crafting.is_empty()
+            && self.lecterns.is_empty()
+            && self.torch_toggles.is_empty()
+    }
 }
 
 /// [`ChunkRedstone::archive_entries`] 的只读视图。

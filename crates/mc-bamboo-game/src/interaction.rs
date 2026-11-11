@@ -41,7 +41,7 @@ use crate::{
 
 const MAX_Y: i32 = MIN_Y + WORLD_HEIGHT - 1;
 /// `server.properties` 的 `simulation-distance` 默认值，单位是区块。
-const SIMULATION_DISTANCE: i32 = 10;
+pub(crate) const SIMULATION_DISTANCE: i32 = 10;
 /// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`：骨粉的粒子。
 const BONE_MEAL_EVENT: i32 = 1505;
 /// 讲台翻页，`LecternBlock.signalPageChange` 的 `levelEvent(1043, pos, 0)`。

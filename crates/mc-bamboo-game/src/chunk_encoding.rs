@@ -48,17 +48,50 @@ pub(crate) fn chunk_body<'a>(
     }
 }
 
+/// 区块帧编不出来的原因。
+#[derive(Debug)]
+pub(crate) enum ChunkFrameError {
+    /// 已加载模式下这个位置没有区块：绝不静默编出一个全是虚空空气的区块包。
+    NotLoaded {
+        x: i32,
+        z: i32,
+    },
+    Frame(FrameError),
+}
+
+impl std::fmt::Display for ChunkFrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotLoaded { x, z } => write!(f, "chunk ({x}, {z}) is not loaded"),
+            Self::Frame(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ChunkFrameError {}
+
+impl From<FrameError> for ChunkFrameError {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
+    }
+}
+
 /// 这个区块此刻要发出的完整帧。同一个（坐标，版本号）只做一次，多个玩家共用同一份。
 ///
 /// 包体按老的缓存规则取：没改过的区块共用模板的包体，改过的按版本号缓存。
 /// 帧本身按坐标缓存，包头里的坐标不同就另做一份；没人看的区块由
 /// tick 末尾的清理连同包体一起丢掉没人跟踪的区块。
+///
+/// 已加载模式下没加载的位置直接报错，调用方不会把一个空世界发给客户端。
 pub(crate) fn chunk_frame(
     cache: &mut ChunkCache,
     store: &ChunkStore,
     template_body: &[u8],
     pos: ChunkPos,
-) -> Result<Arc<SharedFrames>, FrameError> {
+) -> Result<Arc<SharedFrames>, ChunkFrameError> {
+    if !store.is_loaded(pos) {
+        return Err(ChunkFrameError::NotLoaded { x: pos.x, z: pos.z });
+    }
     if let Some(frames) = cache.frame(store, pos) {
         return Ok(frames);
     }
