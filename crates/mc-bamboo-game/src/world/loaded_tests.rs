@@ -419,8 +419,13 @@ fn fast_movement_keeps_the_footprint_loaded_and_the_mailbox_bounded() {
         let (_, _, mail) = server.director_mail();
         // 一个半径 2 的方形加上传播两圈，任何一个玩家位置涉及的记录是常数个；
         // 每刻最多产生一条带的交付/收回，所以信箱长度不随走过的距离增长。
-        assert!(mail.0 < 1000, "交付信箱不会无限增长：{mail:?}");
-        assert!(mail.1 < 1000, "收回收信箱不会无限增长：{mail:?}");
+        // 上界：票表每刻只报「这一次移动前后等级变了的位置」，视距 2 的
+        // 玩家方形半径 2、传播 11 圈，最多 (2*13+1)^2 = 729 个位置受影响；
+        // 每个位置在信箱里至多一条 Deliver / 一条 Reclaim。信箱长度因此
+        // 由「单刻能变化的票数」决定，和玩家已经走过的总距离无关。
+        const MAX_BACKLOG: usize = 2 * (2 * 13 + 1) * (2 * 13 + 1);
+        assert!(mail.0 < MAX_BACKLOG, "交付信箱有界：{mail:?}");
+        assert!(mail.1 < MAX_BACKLOG, "收回收信箱有界：{mail:?}");
     }
 
     // 停下来之后身后的区块要被收回：票撤了，逗留 1 刻，收回上限 12 个/刻。
@@ -516,7 +521,15 @@ fn random_players_keep_the_footprint_loaded_and_converge() {
             "第 {step} 刻交付 {delivered} 个超上限"
         );
         assert!(reclaimed <= 16, "第 {step} 刻收回 {reclaimed} 个超上限");
-        assert!(mail.0 < 10_000 && mail.1 < 10_000, "信箱有界：{mail:?}");
+        // 最多 3 名玩家、视距 4，单刻票变化的常数上界乘玩家数；和走过的
+        // 总距离无关（见 fast_movement 测试里的推导）。
+        let players = server.world_region().players.len().max(1);
+        const MAX_BACKLOG_PER_PLAYER: usize = (2 * 17 + 1) * (2 * 17 + 1);
+        let bound = players * MAX_BACKLOG_PER_PLAYER;
+        assert!(
+            mail.0 < bound && mail.1 < bound,
+            "信箱有界：{mail:?}，上界 {bound}"
+        );
         for (client, held) in &mut clients {
             let frames = client.take_frames();
             for frame in &frames {
@@ -553,4 +566,129 @@ fn random_players_keep_the_footprint_loaded_and_converge() {
         );
     }
     assert!(!clients.is_empty(), "停下来时还有人在");
+}
+
+/// 测量用（不是正确性测试）：进服那一刻的总耗时、交付阶段的耗时、交付个数，
+/// 以及玩家从进服到收齐整个视野用了多少刻。`--ignored` 是避免它拖慢常规测试。
+///
+/// 同一轮里把四个预算按 A、B、B、A 的次序各跑一次、取中位数：这台机器
+/// 不同时间段的 tick 耗时能差出几倍，交错跑才不会把负载漂移算进差异。
+/// 每次清零剖析器样本，让 `delivery` 阶段只包含进服这一刻。
+#[test]
+#[ignore = "手动测量：--ignored --nocapture"]
+fn measure_join_tick_and_view_latency() {
+    const BUDGETS: [usize; 4] = [0, 16, 64, 256];
+    let mut results: Vec<Vec<(u64, f64, f64, usize, usize)>> =
+        BUDGETS.iter().map(|_| Vec::new()).collect();
+    // 前两轮预热，后五轮取中位数；每轮按正序/逆序交替，抵消一次性开销的方向。
+    for round in 0..7 {
+        let order: Vec<usize> = if round % 2 == 0 {
+            (0..BUDGETS.len()).collect()
+        } else {
+            (0..BUDGETS.len()).rev().collect()
+        };
+        for index in order {
+            let budget = BUDGETS[index];
+            let mut server = Harness::new_loaded(8);
+            server.set_mail_budget(crate::director_host::MailBudget {
+                deliveries: budget,
+                reclaims: budget,
+            });
+            // 视距 8（压测工具也请求 8）：整个视野是 T(8) = 329 个区块。
+            let client = server.join_with("Kitten", super::tests::client_requesting(8));
+            client.take_frames();
+            server.clear_profile_samples();
+            server.tick();
+            let samples = server.profile_samples();
+            let (_, total_ns, _, _, _) = samples["tick_total"];
+            let (_, phase_ns, _, _, _) = samples["delivery"];
+            let (_, send_ns, _, _, _) = samples["chunk_sending"];
+            let (delivered_count, _, _) = server.director_mail();
+            let mut held = BTreeSet::new();
+            let frames = client.take_frames();
+            for frame in &frames {
+                track_client_chunks(&mut held, frame);
+            }
+            for _ in super::tests::frames_with_id(&frames, clientbound::CHUNK_BATCH_FINISHED) {
+                server.acknowledge_batch(&client, 64.0);
+            }
+            let mut ticks = 1;
+            while held != tracking_set(&server, &client) && ticks < 200 {
+                server.acknowledge_batch(&client, 64.0);
+                server.tick();
+                let later = client.take_frames();
+                for frame in &later {
+                    track_client_chunks(&mut held, frame);
+                }
+                for _ in super::tests::frames_with_id(&later, clientbound::CHUNK_BATCH_FINISHED) {
+                    server.acknowledge_batch(&client, 64.0);
+                }
+                ticks += 1;
+            }
+            if round >= 2 {
+                results[index].push((
+                    (total_ns / 1000) as u64,
+                    phase_ns as f64 / 1000.0,
+                    send_ns as f64 / 1000.0,
+                    delivered_count,
+                    ticks,
+                ));
+            }
+        }
+    }
+    for (&budget, samples) in BUDGETS.iter().zip(&mut results) {
+        samples.sort_by(|a, b| a.0.cmp(&b.0));
+        let (join_us, _, _, delivered, _) = samples[2];
+        let mut delivery: Vec<f64> = samples.iter().map(|&(_, d, _, _, _)| d).collect();
+        delivery.sort_by(|a, b| a.total_cmp(b));
+        let mut sending: Vec<f64> = samples.iter().map(|&(_, _, s, _, _)| s).collect();
+        sending.sort_by(|a, b| a.total_cmp(b));
+        let mut ticks: Vec<usize> = samples.iter().map(|&(_, _, _, _, t)| t).collect();
+        ticks.sort_unstable();
+        println!(
+            "MEASURE budget={budget} join_tick_us={join_us} delivery_us={:.1} chunk_sending_us={:.1} delivered={delivered} ticks_to_full_view={}",
+            delivery[2], sending[2], ticks[2]
+        );
+    }
+}
+
+/// 量「信箱里有东西时 `finish_light_updates()` 强行算完」的独占耗时：
+/// 在已交付的世界里改不同数量的方块，再直接调这个函数。
+#[test]
+#[ignore = "手动测量：--ignored --nocapture"]
+fn measure_light_finish_cost() {
+    use std::time::Instant;
+    for pending_blocks in [0usize, 1, 32, 256] {
+        let mut costs = Vec::new();
+        for _ in 0..7 {
+            let mut server = Harness::new_loaded(8);
+            let client = server.join("Kitten");
+            for _ in 0..12 {
+                server.acknowledge_batch(&client, 64.0);
+                server.tick();
+                client.take_frames();
+            }
+            let center = server.player(&client).chunk_pos();
+            for i in 0..pending_blocks {
+                let x = center.x * 16 + (i % 16) as i32;
+                let z = center.z * 16 + (i / 16) as i32;
+                server.set_block(
+                    BlockPos::new(x, -60, z),
+                    if i % 2 == 0 {
+                        blocks::STONE
+                    } else {
+                        blocks::AIR
+                    },
+                );
+            }
+            let start = Instant::now();
+            server.region().chunks.finish_light_updates();
+            costs.push(start.elapsed().as_micros());
+        }
+        costs.sort_unstable();
+        println!(
+            "MEASURE light_finish_us={} pending_blocks={pending_blocks}",
+            costs[3]
+        );
+    }
 }

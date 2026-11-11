@@ -149,8 +149,9 @@ impl DirectorHost {
         self.director.config_mut().reclaim_delay_ticks = delay;
     }
 
+    /// 本刻还欠着多少交付/收回。测试用它给信箱长度一个上界。
     #[cfg(test)]
-    pub(crate) fn mail_len(&self) -> (usize, usize) {
+    pub(crate) fn mail_backlog(&self) -> (usize, usize) {
         (self.deliveries.len(), self.reclaims.len())
     }
 

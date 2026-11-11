@@ -417,6 +417,31 @@ impl Harness {
         self.world.apply_ticket(op);
     }
 
+    /// 测量用：清零剖析器样本（只重置样本，不动报告间隔）。
+    #[cfg(test)]
+    pub(crate) fn clear_profile_samples(&mut self) {
+        self.world.region.profiler.reset_samples();
+    }
+
+    /// 测量用：取剖析器某个阶段/指标的样本。
+    #[cfg(test)]
+    pub(crate) fn profile_samples(
+        &self,
+    ) -> std::collections::BTreeMap<&'static str, (u64, u128, u64, u64, u64)> {
+        use crate::profiler::{Phase, Series};
+        let mut out = std::collections::BTreeMap::new();
+        for (name, series) in [
+            ("tick_total", Series::Metric(Metric::TickTotal)),
+            ("delivery", Series::Phase(Phase::Delivery)),
+            ("chunk_sending", Series::Phase(Phase::ChunkSending)),
+            ("chunks_delivered", Series::Metric(Metric::ChunksDelivered)),
+        ] {
+            let h = self.world.region.profiler.histogram(series);
+            out.insert(name, (h.count(), h.sum(), h.p50(), h.p99(), h.max()));
+        }
+        out
+    }
+
     /// 给其他模块的测试直接看全服状态。
     pub(crate) fn global(&self) -> &crate::global::Global {
         &self.world.global
@@ -458,7 +483,7 @@ impl Harness {
     /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数。
     pub(crate) fn director_mail(&self) -> (usize, usize, (usize, usize)) {
         let (delivered, reclaimed) = self.world.host.counters_this_tick();
-        (delivered, reclaimed, self.world.host.mail_len())
+        (delivered, reclaimed, self.world.host.mail_backlog())
     }
 
     /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
