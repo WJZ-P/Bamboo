@@ -398,6 +398,19 @@ public final class ChunkContentOracle {
                     case "block-entities-load" -> response.add("cases", blockEntitiesLoad(request));
                     case "ticks" -> response.add("cases", ticks());
                     case "entities" -> response.add("cases", entities(request));
+                    case "official-chunk" -> {
+                        // 官方 parse -> write 一份区块 NBT，输出规范 JSON。
+                        byte[] bytes = Base64.getDecoder().decode(request.get("nbt").getAsString());
+                        CompoundTag root = NbtIo.read(new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes)));
+                        SerializableChunkData parsed = SerializableChunkData.parse(
+                                LevelHeightAccessor.create(-64, 384),
+                                PalettedContainerFactory.create(official.registries),
+                                root);
+                        CompoundTag written = parsed.write();
+                        response.add("original", canonical(root));
+                        response.add("written", canonical(written));
+                        response.addProperty("writtenNbt", encodeNbt(written));
+                    }
                     case "chunk-read" -> {
                         byte[] bytes = Base64.getDecoder().decode(request.get("nbt").getAsString());
                         CompoundTag root = NbtIo.read(new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes)));
@@ -600,6 +613,16 @@ public final class ChunkContentOracle {
                 cases.add(one);
             }
             return cases;
+        }
+
+        private static String encodeNbt(CompoundTag tag) {
+            try {
+                java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                NbtIo.write(tag, new java.io.DataOutputStream(bytes));
+                return Base64.getEncoder().encodeToString(bytes.toByteArray());
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
         }
 
         private JsonArray blockEntityKeys(CompoundTag root) {

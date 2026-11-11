@@ -24,7 +24,7 @@ use crate::{inbound::PlayerId, region::Region};
 ///
 /// The `BaseCommandBlock` fields plus the `CommandBlockEntity` fields we store.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CommandBlockData {
+pub struct CommandBlockData {
     pub(crate) command: String,
     pub(crate) track_output: bool,
     pub(crate) automatic: bool,
@@ -35,6 +35,32 @@ pub(crate) struct CommandBlockData {
 }
 
 impl CommandBlockData {
+    /// 存档解码用：按官方缺省值新建一条命令方块记录。
+    pub fn from_archive(data: ArchiveCommandBlock) -> Self {
+        Self {
+            command: data.command,
+            track_output: data.track_output,
+            automatic: data.automatic,
+            success_count: data.success_count,
+            powered: data.powered,
+            condition_met: data.condition_met,
+            update_last_execution: data.update_last_execution,
+        }
+    }
+
+    /// 存档编码用：全部字段的只读快照。
+    pub fn archive(&self) -> ArchiveCommandBlock {
+        ArchiveCommandBlock {
+            command: self.command.clone(),
+            track_output: self.track_output,
+            automatic: self.automatic,
+            success_count: self.success_count,
+            powered: self.powered,
+            condition_met: self.condition_met,
+            update_last_execution: self.update_last_execution,
+        }
+    }
+
     /// 方块实体刚创建时的字段。`trackOutput` 默认真，重复型的 `automatic` 是真。
     ///
     /// Fields of a freshly created block entity. `trackOutput` defaults to true, and a
@@ -75,6 +101,18 @@ impl CommandBlockData {
         tag.write_network(&mut bytes);
         bytes
     }
+}
+
+/// `CommandBlockData` 的存档快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveCommandBlock {
+    pub command: String,
+    pub track_output: bool,
+    pub automatic: bool,
+    pub success_count: i32,
+    pub powered: bool,
+    pub condition_met: bool,
+    pub update_last_execution: bool,
 }
 
 fn byte(value: bool) -> i8 {

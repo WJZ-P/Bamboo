@@ -38,9 +38,11 @@ use crate::{
     player_grid::PlayerGrid,
     profiler::Profiler,
     secure_chat::ServiceProfileKeys,
+    tick_levels::TickLevels,
     world_state::{RespawnData, Weather},
 };
 
+pub mod chunk_content;
 mod column;
 #[cfg(test)]
 mod column_tests;
@@ -48,7 +50,7 @@ pub(crate) mod parking;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
 #[allow(unused_imports)]
-pub(crate) use column::{NotReady, RegionColumn};
+pub use column::{NotReady, RegionColumn, RegionColumnParts, RegionColumnView};
 
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
 /// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：
@@ -135,6 +137,8 @@ pub(crate) struct Region {
     pub(crate) player_grid: PlayerGrid,
     pub(crate) links: Links,
     pub(crate) chunks: ChunkStore,
+    /// 每个已交付区块的等级档位和由此算出的 tick 集合。只从 Director 的消息更新。
+    pub(crate) tick_levels: TickLevels,
     /// 没改过的区块共用的编码结果。
     pub(crate) template_body: Vec<u8>,
     /// 改过的区块的编码结果，区块变了就重新编码。
@@ -287,6 +291,7 @@ impl Region {
     /// 正式构造出来的 region 一律用 [`ChunkStore::loaded`](mc_bamboo_world::store::ChunkStore::loaded)。
     pub(crate) fn use_infinite_flat_chunks(&mut self) {
         self.chunks = mc_bamboo_world::store::ChunkStore::flat();
+        self.tick_levels.disable();
     }
 
     /// 测试专用：直接构造一个 region，用「无限超平坦」的退化实现。
@@ -320,6 +325,7 @@ impl Region {
             players: BTreeMap::new(),
             player_grid: PlayerGrid::default(),
             links: Links::default(),
+            tick_levels: TickLevels::new(chunks.is_loaded_mode()),
             chunks,
             template_body,
             chunk_cache: ChunkCache::default(),
@@ -387,6 +393,7 @@ impl Region {
             block_rules: self.block_rules,
             block_weather: self.block_weather,
             command_blocks: &mut self.command_blocks,
+            tick_levels: &self.tick_levels,
         };
         (level, &mut self.block_ticks)
     }

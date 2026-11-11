@@ -37,7 +37,7 @@ pub(crate) const CONTAINER_BUFFER: f64 = 4.0;
 
 /// 有物品栏的方块。种类决定槽位数、菜单类型和标题。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContainerKind {
+pub enum ContainerKind {
     Chest,
     Barrel,
     EnderChest,
@@ -118,7 +118,7 @@ impl ContainerKind {
 /// `loot_table` / `loot_table_seed` 是官方 `RandomizableContainerBlockEntity` 的字段，
 /// 解包之前和容器内容一起走。
 #[derive(Debug, Clone)]
-pub(crate) struct ContainerEntry {
+pub struct ContainerEntry {
     pub(crate) kind: ContainerKind,
     pub(crate) slots: Vec<ItemStack>,
     /// 官方 `lootTable`。`None` 表示这张表已经解包过了。
@@ -135,7 +135,8 @@ pub(crate) struct ContainerEntry {
 }
 
 impl ContainerEntry {
-    fn new(kind: ContainerKind) -> Self {
+    /// 从容器种类建一个空条目。存档解码用；运行时路径仍走 `entry_in`。
+    pub fn new(kind: ContainerKind) -> Self {
         let slots = kind.slots();
         Self {
             kind,

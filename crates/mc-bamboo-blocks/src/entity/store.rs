@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::entity_types;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{shape::Aabb, state::BlockState, ticks::Busy};
@@ -297,12 +298,30 @@ impl Entity {
 #[derive(Debug, Default)]
 pub struct ChunkEntities {
     rows: Vec<EntityRow>,
+    /// 读盘时不认识的实体类型（官方世界里的生物等），整条原样保留、写回。
+    /// 它们不进 `EntityStore`，不参与逻辑，也不发给客户端。
+    preserved: Vec<Tag>,
 }
 
 impl ChunkEntities {
     /// 盒子里有没有实体。`is_pristine` 用它判断盒子能不能丢掉。
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.rows.is_empty() && self.preserved.is_empty()
+    }
+
+    /// 建模的三种实体，按 uid 排序。
+    pub fn rows(&self) -> &[EntityRow] {
+        &self.rows
+    }
+
+    /// 原样保留的实体条目。
+    pub fn preserved(&self) -> &[Tag] {
+        &self.preserved
+    }
+
+    /// 从实体行和保留条目建盒子，存档解码时用。
+    pub fn from_parts(rows: Vec<EntityRow>, preserved: Vec<Tag>) -> Self {
+        Self { rows, preserved }
     }
 }
 
@@ -321,6 +340,8 @@ pub struct EntityStore {
     next_id: EntityUid,
     pending: Vec<EntityRow>,
     ticking: bool,
+    /// 读盘时不认识的实体类型，按区块原样保留。
+    preserved: Vec<Tag>,
 }
 
 impl Default for EntityStore {
@@ -334,6 +355,7 @@ impl Default for EntityStore {
             next_id: FIRST_ENTITY_ID,
             pending: Vec::new(),
             ticking: false,
+            preserved: Vec::new(),
         }
     }
 }
@@ -680,14 +702,33 @@ impl EntityStore {
             rows.push(entry);
         }
         rows.sort_by_key(|entry| entry.public.uid);
-        Ok(ChunkEntities { rows })
+        Ok(ChunkEntities {
+            rows,
+            preserved: self.take_preserved(chunk),
+        })
     }
 
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。
+    /// 不认识的实体类型不进表，只在 `take_chunk` 时原样带回盒子。
     pub fn insert_chunk(&mut self, entities: ChunkEntities) {
         for row in entities.rows {
             self.insert_row(row);
         }
+        self.preserved.extend(entities.preserved);
+    }
+
+    /// 按区块把保留条目分给盒子。`Pos` 不合法或缺失的条目留在原表，
+    /// 下一次仍会写回，不会丢数据。
+    fn take_preserved(&mut self, chunk: ChunkPos) -> Vec<Tag> {
+        let (taken, kept) = std::mem::take(&mut self.preserved)
+            .into_iter()
+            .partition(|tag| {
+                let x = crate::archive::tag::vec3(tag, "Pos", [0.0; 3])[0];
+                let z = crate::archive::tag::vec3(tag, "Pos", [0.0; 3])[2];
+                chunk == ChunkPos::new(x.floor() as i32 >> 4, z.floor() as i32 >> 4)
+            });
+        self.preserved = kept;
+        taken
     }
 }
 
@@ -857,6 +898,47 @@ mod tests {
     }
 
     /// 参照 `BlockEntities::take_chunk`：盒子能跨线程搬，实体按 uid 排序，
+    /// 不认识的实体类型按区块原样保留，随盒子取出放入，不进实体表。
+    #[test]
+    fn unknown_entity_entries_follow_the_chunk_box() {
+        use mc_bamboo_nbt::Tag;
+
+        let mut store = EntityStore::new();
+        let known = store.spawn(Entity::ground_item(
+            Vec3::new(0.5, 64.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        let cow = Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:cow".to_owned())),
+            (
+                "Pos".to_owned(),
+                Tag::List(vec![Tag::Double(2.5), Tag::Double(64.0), Tag::Double(3.5)]),
+            ),
+            ("Health".to_owned(), Tag::Float(10.0)),
+        ]);
+        let alien = Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:alien".to_owned())),
+            (
+                "Pos".to_owned(),
+                Tag::List(vec![Tag::Double(40.5), Tag::Double(64.0), Tag::Double(3.5)]),
+            ),
+        ]);
+        store.insert_chunk(ChunkEntities::from_parts(
+            Vec::new(),
+            vec![cow.clone(), alien.clone()],
+        ));
+        assert_eq!(store.ids(), [known]);
+        assert!(!store.is_empty());
+
+        let boxed = store.take_chunk(ChunkPos::new(0, 0)).unwrap();
+        assert_eq!(boxed.preserved(), std::slice::from_ref(&cow));
+        let moved = std::thread::spawn(move || boxed).join().unwrap();
+        assert!(!moved.is_empty());
+        store.insert_chunk(moved);
+        let other = store.take_chunk(ChunkPos::new(2, 0)).unwrap();
+        assert_eq!(other.preserved(), &[alien]);
+    }
+
     /// tick 中途一律 Busy，别的区块的实体不受影响。
     #[test]
     fn chunk_boxes_move_whole_chunks_at_tick_boundaries() {

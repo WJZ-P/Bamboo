@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_world::director::{
-    Director, DirectorConfig, Effect, Event, RegionMessage, Task, TaskId, TaskResult, TicketOp,
+    Desired, Director, DirectorConfig, Effect, Event, RegionMessage, Task, TaskId, TaskResult,
+    TicketOp,
 };
 
 use crate::region::{Region, RegionColumn, parking::Parking};
@@ -68,8 +69,8 @@ pub(crate) struct DirectorHost {
     infinite_flat: bool,
     parking: Parking,
     budget: MailBudget,
-    /// 发给 region 的信箱：待交付的盒子、待收回的位置。
-    deliveries: BTreeMap<ChunkPos, (u64, Box<RegionColumn>)>,
+    /// 发给 region 的信箱：待交付的盒子（带交付时的等级）、待收回的位置。
+    deliveries: BTreeMap<ChunkPos, (u64, Desired, Box<RegionColumn>)>,
     reclaims: Vec<(ChunkPos, u64)>,
     /// 本刻还没花掉的预算。整刻内所有 `pump` 共用，进服/离开/移动各发一批票
     /// 也不会把上限乘上好几倍；每刻开头由 `begin_tick` 重置。
@@ -271,7 +272,7 @@ impl DirectorHost {
     /// 执行一个效果。返回需要立刻回给 Director 的事件（内联任务的结果）。
     fn apply(
         &mut self,
-        _region: &mut Region,
+        region: &mut Region,
         effect: Effect<Box<RegionColumn>>,
     ) -> Option<Event<Box<RegionColumn>>> {
         match effect {
@@ -282,7 +283,7 @@ impl DirectorHost {
             } => Some(self.run_task(id, generation, task)),
             Effect::Cancel { .. } => None,
             Effect::ToRegion(message) => {
-                self.region_message(message);
+                self.region_message(region, message);
                 None
             }
             Effect::Park { pos, column } => {
@@ -335,22 +336,31 @@ impl DirectorHost {
         }
     }
 
-    fn region_message(&mut self, message: RegionMessage<Box<RegionColumn>>) {
+    fn region_message(&mut self, region: &mut Region, message: RegionMessage<Box<RegionColumn>>) {
         match message {
             RegionMessage::Deliver {
                 pos,
                 generation,
                 column,
-                ..
+                desired,
             } => {
-                self.deliveries.insert(pos, (generation, column));
+                self.deliveries.insert(pos, (generation, desired, column));
             }
             RegionMessage::Reclaim { positions } => self.reclaims.extend(positions),
+            RegionMessage::LevelChanged { changes } => {
+                // 同一个 pump 里可能先收到档位变化、后 flush 交付：信箱里那份档位
+                // 也要跟着变，否则新交付的区块会带着旧档位进 region。尚未交付的
+                // 位置在 region 里没有记录，`level_changed` 只更新已交付的那些。
+                for change in &changes {
+                    if let Some(entry) = self.deliveries.get_mut(&change.pos) {
+                        entry.1 = Desired::new(change.loading.1, change.simulation.1);
+                    }
+                }
+                region.tick_levels.level_changed(&changes);
+            }
             // `Ready` 不用另存一份集合：`ChunkStore::is_loaded` 就是已交付集合，
             // 发区块时直接问它；多存一份只会多一处要保持一致的状态。
-            RegionMessage::LevelChanged { .. }
-            | RegionMessage::Ready { .. }
-            | RegionMessage::Forgot { .. } => {}
+            RegionMessage::Ready { .. } | RegionMessage::Forgot { .. } => {}
         }
     }
 
@@ -392,13 +402,14 @@ impl DirectorHost {
     ///
     /// 代数用 `Reclaim` 带来的那个：它和 `Deliver` 时的代数相同，
     /// `Director::on_returned` 核对的就是它。盒子没进过 region，所以
-    /// 不需要碰 region、不算「交付」、也不占每刻的收回额度。
+    /// 不需要碰 region、档位表里也没有它要清的条目、不算「交付」、
+    /// 也不占每刻的收回额度；信箱里为它记的等级随整条记录一起删掉。
     fn return_pending_deliveries(&mut self, events: &mut Vec<Event<Box<RegionColumn>>>) {
         if self.reclaims.is_empty() || self.deliveries.is_empty() {
             return;
         }
         self.reclaims.retain(|(pos, generation)| {
-            let Some((_, column)) = self.deliveries.remove(pos) else {
+            let Some((_, _, column)) = self.deliveries.remove(pos) else {
                 return true;
             };
             self.reclaimed += 1;
@@ -447,12 +458,15 @@ impl DirectorHost {
             (!guaranteed, Self::distance_to_players(pos, &centers))
         });
         let mut used = 0usize;
+        // 一批交付只重算一次受影响的邻域，不逐块重算；每次成功都要把
+        // 信箱里记着的最新等级交给 region（脚下 3×3 和下一刻才轮到的都算）。
+        let mut delivered_levels = Vec::new();
         for pos in ordered {
             let guaranteed = Self::is_under_a_player(pos, &centers);
             if !guaranteed && limited_deliveries && used >= delivery_left {
                 continue;
             }
-            let Some((generation, column)) = self.deliveries.remove(&pos) else {
+            let Some((generation, desired, column)) = self.deliveries.remove(&pos) else {
                 continue;
             };
             match region.deliver_column(pos, column) {
@@ -461,16 +475,19 @@ impl DirectorHost {
                     if !guaranteed {
                         used += 1;
                     }
+                    delivered_levels.push((pos, desired));
                     events.push(Event::Delivered { pos, generation });
                 }
                 Err((_, column)) => {
                     // 前提不满足（例如某张表正在 tick 中途）：留在信箱里，
                     // 下一次 pump 再试，绝不把盒子丢掉。
                     tracing::warn!(?pos, "chunk delivery was not ready, will retry");
-                    self.deliveries.insert(pos, (generation, column));
+                    self.deliveries.insert(pos, (generation, desired, column));
                 }
             }
         }
+        // 一批交付只重算一次受影响的邻域，不逐块重算。
+        region.tick_levels.deliver(delivered_levels);
         if limited_deliveries {
             self.budget_left.deliveries = delivery_left.saturating_sub(used);
         }
@@ -509,6 +526,7 @@ impl DirectorHost {
         let positions = batch.iter().map(|&(pos, _)| pos).collect();
         match region.reclaim_columns(&positions) {
             Ok(mut boxes) => {
+                region.tick_levels.reclaim(positions.iter());
                 for (pos, generation) in batch {
                     self.reclaimed += 1;
                     events.push(Event::Returned {
@@ -587,8 +605,14 @@ mod tests {
         let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
         let mut server = Harness::new_loaded(2);
         let pos = ChunkPos::new(20, 20);
-        host.deliveries
-            .insert(pos, (7, Box::new(RegionColumn::from_template())));
+        host.deliveries.insert(
+            pos,
+            (
+                7,
+                Desired::UNLOADED,
+                Box::new(RegionColumn::from_template()),
+            ),
+        );
         host.reclaims.push((pos, 7));
         let events = host.flush_region_mail(server.region());
         assert_eq!(events.len(), 1, "只回一条 Returned");
@@ -612,8 +636,14 @@ mod tests {
         let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
         let mut server = Harness::new_loaded(2);
         let region = server.region();
-        host.deliveries
-            .insert(ORIGIN, (3, Box::new(RegionColumn::from_template())));
+        host.deliveries.insert(
+            ORIGIN,
+            (
+                3,
+                Desired::UNLOADED,
+                Box::new(RegionColumn::from_template()),
+            ),
+        );
         // 方块实体正在 tick 中途：`deliver_column` 的只读前提不满足。
         region.block_entities.begin_tick();
         assert!(!region.ready_to_move_columns(), "前提确实不满足");

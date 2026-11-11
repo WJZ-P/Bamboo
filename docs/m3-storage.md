@@ -26,7 +26,7 @@
 | 不做 | 理由 |
 |---|---|
 | 世界生成 | 还是平坦模板。存档只负责持久化改动过的区块，生成是 M4 的事 |
-| 实体存档（`entities/`） | 只编解码下落方块、点燃的 TNT 和地上的物品三种；没有 mob，也还没接进加载/卸载 |
+| 实体存档（`entities/`） | 下落方块、点燃的 TNT 和地上的物品三种已经能编解码；没有 mob，也还没接进加载/卸载 |
 | POI（`poi/`） | 没有村民 |
 | 结构、`chunk_tickets.dat`、游戏规则和世界生成设置的 saved data | 没有对应的游戏功能，写空壳没有意义 |
 | DataFixerUpper | 只支持一个版本。读到 `DataVersion` 不等于 5023 的区块就报错拒绝，不猜 |
@@ -659,7 +659,8 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    验证：第 11 节第 1、5 条。
 8. **转换工具**。验证：第 11 节第 5 条。
 9. **README**：删掉“不存档”这条已知限制，补上存档格式、保存节奏、还有哪些东西不存
-    （火把抖动表、容器的开合状态等）。箱子内容和三种实体已经有编解码器，见第 5.4 节之后。
+    （火把抖动表、容器的开合状态等）。箱子内容、机器、计划刻和三种实体已经有
+    编解码器与整块组装函数，见第 5.4 节之后。
 
 第 5 步和第 6 步接进游戏那一半之前磁盘上什么都不会变，所以编解码这几步可以安全地合进 main。
 
@@ -669,6 +670,7 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   被拆掉时，旧条目的键跟着丢掉，不会挂到新方块上。`RecordItem` 变了之后
   `ticks_since_song_started` 回到 0（`chunk_content::BoundKeys`）。
 - 计划刻里不认识的 `i` 原样保留在列表最前面（`LevelChunkTicks.pack` 先放 pending）；
+  每刻门控的搁置表会把到期但没跑上的刻装进盒子，延迟可以是负数或 0，编码照常写出；
   实体文件里不认识的 `id` 和根键原样保留。空实体区块不写文件（`IOWorker.STORE_EMPTY`）。
 - 物品条目按 `player-data` 的约定不做 D9（`ItemStack.CODEC` 是 MapCodec，多余的键忽略）；
   已建模的三种实体里官方有而 Bamboo 不建模的键，这次也不保留，读回按官方默认值补齐。
@@ -684,9 +686,12 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   实体读取用 JVM 里的假世界（`EntityOracle.java` 的 `FakeLevel` 形状），不启动服务端、
   不接受 EULA；`SerializableChunkData.parse -> write` 另外检查 `components` / `keepPacked`
   能从区块 NBT 原样带回。
-- 第二段（等 `chunk-director` 落地）再把原样保留的复合标签挂进 `ChunkColumn` 的
-  方块实体类型表旁边、给 `ChunkEntities` 加访问器、把游戏层四张表接进条目，并做
-  `RegionColumn` ⇄ 「区块 NBT + 实体 NBT」的整块组装。
+- 第二段已经把原样保留的复合标签挂进 `ChunkColumn` 的方块实体类型表旁边
+  （换类型或拆掉方块时一起丢），给 `ChunkEntities` 加了行 / 保留条目访问器，
+  把游戏层四张表接进条目，并做了 `RegionColumn` ⇄ 「区块 NBT + 实体 NBT」的
+  公开组装函数（`mc-bamboo-game::region::chunk_content::encode/decode`）。
+  读进来的顶层附加信息也挂在 `ChunkColumn` 里随盒子走，写盘时原样带回。
+  组装函数不接进加载 / 卸载流程：卸载的区块仍整盒停放在内存里，不落盘。
 
 ## 13. 风险和待用户决定的问题
 

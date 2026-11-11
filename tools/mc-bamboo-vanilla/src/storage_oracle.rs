@@ -500,7 +500,7 @@ pub(crate) fn encode_b64(bytes: &[u8]) -> String {
     encode(bytes)
 }
 
-fn decode_b64(text: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn decode_b64(text: &str) -> Result<Vec<u8>, String> {
     base64_stub::decode(text)
 }
 
