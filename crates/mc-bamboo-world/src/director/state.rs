@@ -82,24 +82,40 @@ pub enum LevelClassification {
     LevelOnly,
 }
 
+/// 一个等级有没有跨过 31 / 32 / 33 的 tick 边界。
+fn tick_tier(level: i32) -> u8 {
+    // 33 是完工但不 tick，32 是方块 tick，31 及以内是实体 tick。
+    if level > 33 {
+        3
+    } else if is_entity_ticking(level) {
+        0
+    } else if is_block_ticking(level) {
+        1
+    } else {
+        2
+    }
+}
+
 /// `LevelChange` 的过滤：把 34..44 的等级量化到四个生成阶段档，0..=33 是第五档。
 ///
-/// 同一档且 tick 级别没跨 31/32/33 边界就是 `Noop`。视距 10 时玩家跨一格有约
-/// 一千条变化，绝大多数落在这里；Director 对 `Noop` 不查区块表、不产生任务或消息，
-/// 处理量只和真正要动作的区块数成正比。
+/// 加载和模拟两套等级都要看：任一套跨过 31/32/33 边界就要通知 region，
+/// 否则「按等级决定谁 tick」收不到模拟等级自己的变化。视距 10 时玩家跨一格有约
+/// 一千条变化，绝大多数不跨边界；`Noop` 不产生任务或消息，处理量只和真正要动作的
+/// 区块数成正比。
 pub fn classify(change: LevelChange) -> LevelClassification {
     let (old_level, new_level) = change.loading;
+    let (old_sim, new_sim) = change.simulation;
     let old = generation_status(old_level);
     let new = generation_status(new_level);
-    let sim = is_entity_ticking(old_level) != is_entity_ticking(new_level)
-        || is_block_ticking(old_level) != is_block_ticking(new_level);
+    let tick_changed =
+        tick_tier(old_level) != tick_tier(new_level) || tick_tier(old_sim) != tick_tier(new_sim);
     if new.is_none() {
         LevelClassification::Unload
     } else if old.is_none() {
         LevelClassification::Load
     } else if old_level <= 33 && new_level <= 33 {
         // 两边都是完工区块：只可能换 tick 级别，不重跑流水线。
-        if sim {
+        if tick_changed {
             LevelClassification::LevelOnly
         } else {
             LevelClassification::Noop

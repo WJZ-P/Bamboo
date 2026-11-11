@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use mc_bamboo_core::ChunkPos;
 
-use crate::ticket::ChunkStatus;
+use crate::ticket::{ChunkStatus, TicketTable};
 
 use super::{
     ChunkBundle, Director, DirectorConfig, Effect, Event, LevelClassification, Owner, PipelineKind,
@@ -355,6 +355,29 @@ fn level_change_filter_only_acts_on_stage_boundaries() {
     assert_eq!(classify(change(33, 31)), LevelClassification::LevelOnly);
     assert_eq!(classify(change(34, 33)), LevelClassification::Promote);
     assert_eq!(classify(change(33, 34)), LevelClassification::Demote);
+    // 加载等级没变、只有模拟等级跨过 31/32/33 时也要通知 region。
+    let simulation_only = |old, new| LevelChange {
+        pos: ChunkPos::new(0, 0),
+        loading: (33, 33),
+        simulation: (old, new),
+    };
+    assert_eq!(
+        classify(simulation_only(33, 31)),
+        LevelClassification::LevelOnly
+    );
+    assert_eq!(
+        classify(simulation_only(32, 31)),
+        LevelClassification::LevelOnly
+    );
+    assert_eq!(
+        classify(simulation_only(30, 29)),
+        LevelClassification::Noop,
+        "实体 tick 档内部不通知"
+    );
+    assert_eq!(
+        classify(simulation_only(33, 32)),
+        LevelClassification::LevelOnly
+    );
     assert_eq!(
         classify(change(UNLOADED_LEVEL, 40)),
         LevelClassification::Load
@@ -979,4 +1002,91 @@ fn a_save_result_whose_ticket_returned_is_not_dropped() {
         )),
         "盒子不该被重新读一遍"
     );
+}
+
+/// 模拟距离比视距小时，玩家走动会让某些区块只有模拟等级变化。
+/// 这些变化也要作为 `LevelChanged` 发给 region。
+#[test]
+fn simulation_only_changes_reach_the_region() {
+    let mut director = Director::<Fake>::new(config(PipelineKind::Flat, 0));
+    director.set_template(|| Fake(0));
+    // 模拟距离小于视距：模拟等级的圈比加载等级的圈小。
+    director.handle(Event::Tickets {
+        ops: vec![
+            TicketOp::SimulationDistance(4),
+            TicketOp::PlayerMoved {
+                id: 1,
+                to: Some(ChunkPos::new(0, 0)),
+            },
+        ],
+    });
+
+    // 玩家跨一格，找出「加载等级没变、模拟等级变了」的那些位置。
+    let mut table = TicketTable::new();
+    table.set_simulation_distance(4);
+    table.set_player(1, Some(ChunkPos::new(0, 0)));
+    let _ = table.run_updates();
+    table.set_player(1, Some(ChunkPos::new(1, 0)));
+    let changes = table.run_updates().to_vec();
+    let simulation_only: Vec<_> = changes
+        .iter()
+        .copied()
+        .filter(|change| {
+            change.loading.0 == change.loading.1 && change.simulation.0 != change.simulation.1
+        })
+        .collect();
+    assert!(
+        !simulation_only.is_empty(),
+        "这个场景里应该有只有模拟等级变化的位置"
+    );
+    // 其中至少有一条跨过 31/32/33，之前会被归成 Noop 而丢掉。
+    let crossing: Vec<_> = simulation_only
+        .iter()
+        .copied()
+        .filter(|change| classify(*change) == LevelClassification::LevelOnly)
+        .collect();
+    assert!(!crossing.is_empty(), "模拟等级跨 31/32/33 的变化要报出来");
+
+    // 把这些变化当作一批票更新喂给 Director（先让票表产生同样的变化列表），
+    // 断言 `LevelChanged` 里带着它们。
+    director.handle(Event::Tickets {
+        ops: vec![TicketOp::PlayerMoved {
+            id: 1,
+            to: Some(ChunkPos::new(1, 0)),
+        }],
+    });
+    // 上面这次 handle 已经消费掉变化；再用一张干净的 Director 单独验证
+    // `consume_level_changes` 的输出（用同一个玩家移动序列）。
+    let mut probe = Director::<Fake>::new(config(PipelineKind::Flat, 0));
+    probe.set_template(|| Fake(0));
+    probe.handle(Event::Tickets {
+        ops: vec![
+            TicketOp::SimulationDistance(4),
+            TicketOp::PlayerMoved {
+                id: 1,
+                to: Some(ChunkPos::new(0, 0)),
+            },
+        ],
+    });
+    let effects = probe.handle(Event::Tickets {
+        ops: vec![TicketOp::PlayerMoved {
+            id: 1,
+            to: Some(ChunkPos::new(1, 0)),
+        }],
+    });
+    let notified: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::ToRegion(RegionMessage::LevelChanged { changes }) => Some(changes),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    for change in &crossing {
+        assert!(
+            notified.contains(change),
+            "只有模拟等级变化的 {change:?} 要出现在 LevelChanged 里"
+        );
+    }
 }
