@@ -4,7 +4,7 @@
 //! 流体查询，保证两种世界实现在算阶段读到同样的结果。除了方块状态，视图还要带
 //! 高度范围和游戏规则这些不写在区块表里的只读事实。
 
-use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks};
 
 use crate::{
@@ -58,6 +58,15 @@ pub trait BlockSource: Sync {
     /// 默认没有方块实体；带方块实体表的视图要覆盖它，`isFaceSturdy` 才准。
     fn shulker_box_open(&self, _pos: BlockPos) -> bool {
         false
+    }
+
+    /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
+    ///
+    /// 和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：精确驱动的
+    /// `World` 转发到 `Level`，并行驱动的 `SourceView` 转发到这里，游戏层以后把
+    /// 同一份判断拷进只读视图。
+    fn chunk_ticks_entities(&self, _chunk: ChunkPos) -> bool {
+        true
     }
 
     /// 这片格子里有没有漏斗。默认按格读方块表；游戏层用预先拷出的位置集合覆盖它。
@@ -273,6 +282,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
         self.0.any_hopper_in(min, max)
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        self.0.chunk_ticks_entities(chunk)
     }
 }
 

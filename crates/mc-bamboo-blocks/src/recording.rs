@@ -849,6 +849,11 @@ impl LevelSideState for Recording<'_> {
         value
     }
 
+    fn reschedule_block_events(&mut self, events: Vec<BlockEvent>) {
+        // 一轮结束后被推迟的事件按原顺序放回；录制器只转发，和 push 分开记。
+        self.level.reschedule_block_events(events);
+    }
+
     fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
         let value = self.level.block_entity_dyn(pos);
         self.read_entity(pos, value, 2_u8);
@@ -1136,6 +1141,14 @@ impl Level for Recording<'_> {
         let value = self.level.note_block_sound(pos);
         self.read(Some(pos), K_NOTE_SOUND, &value);
         value
+    }
+
+    fn chunk_ticks_blocks(&self, chunk: ChunkPos) -> bool {
+        self.level.chunk_ticks_blocks(chunk)
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        self.level.chunk_ticks_entities(chunk)
     }
 
     fn runs_block_entity_tick(&self, pos: BlockPos) -> bool {

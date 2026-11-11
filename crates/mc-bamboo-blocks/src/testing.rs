@@ -1,6 +1,6 @@
 //! 单元测试用的假世界。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, blocks, items};
@@ -24,6 +24,8 @@ const MAX_Y: i32 = 319;
 /// 方块存在表里，没写过的格子是空气，世界外是 `void_air`。随机数的种子固定是 0，玩家总在附近。
 pub(crate) struct TestLevel {
     blocks: HashMap<BlockPos, BlockState>,
+    /// 测试「区块能不能 tick」时手动冻结的区块，两种判断共用这一份。
+    pub(crate) frozen_chunks: HashSet<ChunkPos>,
     /// 告示牌的内容。和区块存储一样，换成别的方块时丢掉。
     pub(crate) signs: HashMap<BlockPos, SignContent>,
     /// 头颅方块实体的 `note_block_sound`，只有那一格还是头颅时才读得到。
@@ -58,6 +60,7 @@ impl TestLevel {
     pub(crate) fn new() -> Self {
         Self {
             blocks: HashMap::new(),
+            frozen_chunks: HashSet::new(),
             signs: HashMap::new(),
             note_block_sounds: HashMap::new(),
             writes: Vec::new(),
@@ -88,6 +91,15 @@ impl TestLevel {
     /// 给这一格放一张槽位表，模拟官方的容器方块实体。
     pub(crate) fn set_container(&mut self, pos: BlockPos, slots: Vec<ItemStack>) {
         self.containers.insert(pos, slots);
+    }
+
+    /// 冻结或恢复一个区块，方块逻辑和实体 tick 都按这份集合判断。
+    pub(crate) fn set_frozen(&mut self, chunk: ChunkPos, frozen: bool) {
+        if frozen {
+            self.frozen_chunks.insert(chunk);
+        } else {
+            self.frozen_chunks.remove(&chunk);
+        }
     }
 
     /// 世界里已经生成的实体。
@@ -139,6 +151,14 @@ impl EntityTables for TestLevel {
 }
 
 impl Level for TestLevel {
+    fn chunk_ticks_blocks(&self, chunk: ChunkPos) -> bool {
+        !self.frozen_chunks.contains(&chunk)
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        !self.frozen_chunks.contains(&chunk)
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return BlockState(blocks::VOID_AIR);

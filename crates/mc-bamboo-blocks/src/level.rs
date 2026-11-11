@@ -143,6 +143,11 @@ pub trait LevelSideState {
     // 方块事件。
     fn push_block_event(&mut self, event: BlockEvent);
     fn pop_block_event(&mut self) -> Option<BlockEvent>;
+    /// 一轮方块事件结束后，按原顺序放回那些所在区块不能 tick 的事件。
+    /// 默认实现是空操作：直接实现这个 trait 的世界自己负责这一轮的重排。
+    fn reschedule_block_events(&mut self, events: Vec<BlockEvent>) {
+        let _ = events;
+    }
 
     // 方块实体和它们的 ticker。
     fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity>;
@@ -262,6 +267,10 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
 
     fn pop_block_event(&mut self) -> Option<BlockEvent> {
         self.block_events_table_mut().pop()
+    }
+
+    fn reschedule_block_events(&mut self, events: Vec<BlockEvent>) {
+        self.block_events_table_mut().reschedule(events);
     }
 
     fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
@@ -482,6 +491,31 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 音效，见 [`Effect::NoteBlockPlayed`]。不是头颅方块实体、或者头颅没带音效时返回
     /// `None`，官方对应 `null`。
     fn note_block_sound(&self, pos: BlockPos) -> Option<String>;
+
+    /// 这个区块现在跑不跑方块逻辑（计划刻、流体刻、方块事件、方块实体）。默认都跑。
+    ///
+    /// 到期的计划刻在不能跑的区块里留在队列里，等这个区块重新能跑时按原来的排序键执行。
+    /// 和 [`crate::entity::ctx::BlockView::chunk_ticks_entities`] 是两件不同的事；
+    /// [`crate::World`] 实现后者时转发到 [`Level::chunk_ticks_entities`]，两者必须给出同样的答案。
+    ///
+    /// Whether this chunk runs block logic now: scheduled block/fluid ticks, block events and
+    /// block entities. All chunks do by default. Due ticks in a chunk that cannot run stay in
+    /// the queue and keep their original sort key until it can run again.
+    fn chunk_ticks_blocks(&self, _chunk: ChunkPos) -> bool {
+        true
+    }
+
+    /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
+    ///
+    /// 不 tick 的实体仍在世界里：别的实体照样查得到它，只是自己这一刻不动。
+    /// 和 [`crate::entity::ctx::BlockView::chunk_ticks_entities`] 必须给出同样的答案；
+    /// [`crate::World`] 实现后者时转发到这里，并行驱动从只读方块视图读同一个判断。
+    ///
+    /// Whether entities in this chunk tick now. All do by default. An entity that does not tick
+    /// stays in the world and remains visible to other entities; only its own tick is skipped.
+    fn chunk_ticks_entities(&self, _chunk: ChunkPos) -> bool {
+        true
+    }
 
     /// 这一格的方块实体这一刻要不要跑。默认要跑。
     ///

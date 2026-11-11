@@ -12,6 +12,8 @@
 
 use std::time::{Duration, Instant};
 
+use mc_bamboo_core::ChunkPos;
+
 use crate::{
     entity::{
         Entity, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
@@ -312,8 +314,15 @@ fn run_task(task: &mut Task<'_>, shared: &Shared<'_>) {
             shared,
             commands: &mut result.commands,
         };
-        // `Entity::tick` 内部会跑 `common_tick`，这里不能重复。
-        me.tick(&mut ctx);
+        // 所在区块不在实体 tick 范围时跳过这一刻：实体仍留在快照里，位置和年龄不动，
+        // 不发命令，别的实体照样查得到它。判断从只读方块视图来，和精确驱动一致。
+        if shared
+            .blocks
+            .chunk_ticks_entities(ChunkPos::containing(me.position.x, me.position.z))
+        {
+            // `Entity::tick` 内部会跑 `common_tick`，这里不能重复。
+            me.tick(&mut ctx);
+        }
         let split = me.split();
         result.removed = split.public.removed;
         result.public = Some(split.public);

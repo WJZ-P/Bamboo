@@ -376,14 +376,16 @@ pub struct BlockEvent {
 /// 队列管顺序，集合管查重，两边始终是同一批事件。出队以后集合里也删掉，
 /// 所以和官方一样，处理过的事件同一轮里还能再排进来。
 ///
-/// 官方在方块所在区块没有加载时把事件往后挪。这个世界里队列只碰得到的方块，
-/// 不需要重排，见 `ServerLevel.runBlockEvents`。
+/// 官方在方块所在区块不能 tick 时把事件收进 `blockEventsToReschedule`，这一轮
+/// 全部处理完之后才 `addAll` 放回队列，下一刻再看；见 `ServerLevel.runBlockEvents`。
+/// [`BlockEvents::reschedule`] 实现这一步，和官方的 `LinkedHashSet.addAll` 一样，
+/// 这一轮里又排进来的同一项不会被覆盖也不会重复。
 ///
 /// Vanilla's `LinkedHashSet`: an event is queued only once. The deque keeps the order and the
 /// set answers the duplicate check; both always hold the same events. Popping removes the event
 /// from the set too, so, as in vanilla, a processed event can be queued again in the same round.
-/// Vanilla postpones events in unloaded chunks; this queue only touches reachable blocks, so
-/// nothing is postponed.
+/// Events in chunks that cannot tick are collected and added back only after the whole round,
+/// preserving their order and not duplicating an event queued again during the round.
 #[derive(Debug, Default)]
 pub struct BlockEvents {
     queue: VecDeque<BlockEvent>,
@@ -403,6 +405,13 @@ impl BlockEvents {
         let event = self.queue.pop_front()?;
         self.queued.remove(&event);
         Some(event)
+    }
+
+    /// `ServerLevel.runBlockEvents` 末尾的 `blockEvents.addAll(blockEventsToReschedule)`。
+    pub fn reschedule(&mut self, events: Vec<BlockEvent>) {
+        for event in events {
+            self.push(event);
+        }
     }
 }
 
