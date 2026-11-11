@@ -491,7 +491,7 @@ fn sample_bytes(seed: u64) -> Vec<u8> {
         .collect()
 }
 
-fn encode_b64(bytes: &[u8]) -> String {
+pub(crate) fn encode_b64(bytes: &[u8]) -> String {
     use base64_stub::encode;
     encode(bytes)
 }

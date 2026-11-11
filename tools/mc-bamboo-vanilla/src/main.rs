@@ -35,6 +35,8 @@
 //!     比较接受、拉回还是断开，以及最终位置和摔落距离
 //! mc-bamboo-vanilla storage <java 路径> [--show N]
 //!     用官方 SerializableChunkData / RegionFile / NbtIo 检查存档编解码层
+//! mc-bamboo-vanilla chunk-content <java 路径> [--show N]
+//!     用官方 BlockEntity / SavedTick / Entity 检查区块上层内容的存档 NBT
 //! mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
 //!     让官方 `DistanceManager` 在随机票操作里算区块等级，用 `TicketTable` 重放，逐步比较两套等级
 //! ```
@@ -52,6 +54,8 @@
 //! `oracle` 和 `probe-online` 依赖生成的数据。生成文件坏了、这个工具编译不过时，
 //! 用 `--no-default-features` 编译，`generate` 不需要它们。
 
+#[cfg(feature = "oracle")]
+mod chunk_content_oracle;
 #[cfg(feature = "oracle")]
 mod components;
 #[cfg(feature = "oracle")]
@@ -117,6 +121,8 @@ const MOVE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MovementOracle.ja
 #[cfg(feature = "oracle")]
 const STORAGE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StorageOracle.java";
 #[cfg(feature = "oracle")]
+const CHUNK_CONTENT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkContentOracle.java";
+#[cfg(feature = "oracle")]
 const TICKET_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TicketOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值] [--weather clear|rain|thunder]
@@ -131,6 +137,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla storage <java 路径> [--show N]
+      mc-bamboo-vanilla chunk-content <java 路径> [--show N]
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]";
 
 fn main() -> ExitCode {
@@ -166,6 +173,7 @@ fn run() -> Result<(), String> {
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
+        ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
         _ => Err(USAGE.to_owned()),
     }
@@ -340,8 +348,21 @@ fn storage_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     storage_oracle::run(official_program(java, STORAGE_ORACLE_SOURCE)?, options)
 }
 
+#[cfg(feature = "oracle")]
+fn chunk_content_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    chunk_content_oracle::run(
+        official_program(java, CHUNK_CONTENT_ORACLE_SOURCE)?,
+        options,
+    )
+}
+
 #[cfg(not(feature = "oracle"))]
 fn storage_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn chunk_content_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
