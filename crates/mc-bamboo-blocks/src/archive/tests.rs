@@ -203,6 +203,34 @@ fn saved_ticks_round_trip_and_clamp_large_delays() {
     assert_eq!(fluids[0].3, -3);
 }
 
+/// 每刻门控的搁置表会把到期但没跑上的刻装进盒子，延迟是负数或 0；
+/// 官方 SavedTick.t 本来就允许负值，编码不能把它们丢掉或夹成 0。
+#[test]
+fn parked_negative_delays_round_trip() {
+    let mut ticks = ChunkTicks::empty();
+    for delay in [i64::MIN, -100, -1, 0, 1] {
+        ticks.push_block(super::ticks::SavedEntry::Block {
+            pos: POS,
+            block: 1,
+            priority: TickPriority::Normal,
+            delay,
+        });
+    }
+    let lists = encode_chunk_ticks(&ticks).unwrap();
+    assert_eq!(lists.blocks.len(), 5);
+    let clamped = lists
+        .blocks
+        .iter()
+        .filter(|tag| matches!(field(tag, "t"), Some(Tag::Int(i32::MIN))))
+        .count();
+    assert_eq!(clamped, 1);
+    let (decoded, problems) =
+        decode_chunk_ticks(&Tag::List(lists.blocks), &Tag::List(Vec::new())).unwrap();
+    assert!(problems.is_empty());
+    let delays: Vec<i64> = decoded.block_ticks().map(|entry| entry.3).collect();
+    assert_eq!(delays, [i32::MIN as i64, -100, -1, 0, 1]);
+}
+
 #[test]
 fn saved_ticks_with_unknown_ids_are_skipped() {
     let mut value = Vec::new();
