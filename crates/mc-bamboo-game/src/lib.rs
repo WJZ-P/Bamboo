@@ -64,7 +64,7 @@ mod player;
 mod player_grid;
 mod player_move;
 mod profiler;
-mod region;
+pub mod region;
 mod scoreboard;
 mod secure_chat;
 mod sign;

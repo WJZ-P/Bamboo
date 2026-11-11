@@ -41,6 +41,7 @@ use crate::{
     world_state::{RespawnData, Weather},
 };
 
+pub mod chunk_content;
 mod column;
 #[cfg(test)]
 mod column_tests;
@@ -48,7 +49,7 @@ pub(crate) mod parking;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
 #[allow(unused_imports)]
-pub(crate) use column::{NotReady, RegionColumn};
+pub use column::{NotReady, RegionColumn, RegionColumnParts, RegionColumnView};
 
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
 /// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：

@@ -979,6 +979,11 @@ impl RedstoneMemory {
         self.lecterns.remove(&pos);
     }
 
+    /// 清空开关记录。存档往返用：官方不存 `RECENT_TOGGLES`，读回后是空的。
+    pub fn clear_torch_toggles(&mut self) {
+        self.torch_toggles.clear();
+    }
+
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
     pub fn forget_torch_toggles_before(&mut self, when: i64) {
         let keep = self
