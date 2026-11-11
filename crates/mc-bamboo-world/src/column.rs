@@ -551,6 +551,133 @@ mod tests {
         assert_stores_match(&target, &direct);
     }
 
+    /// 每个光照段存没存数据层，两层都看。逐格读数看不出「没存」和「存了一层默认值」的区别，
+    /// 但引擎只往存着数据层的段里传光，所以要单独比。
+    fn stored_sections(store: &ChunkStore) -> Vec<(ChunkPos, i32, bool, bool)> {
+        let mut stored = Vec::new();
+        for &pos in &AREA {
+            for y in MIN_LIGHT_SECTION..MIN_LIGHT_SECTION + LIGHT_SECTION_COUNT as i32 {
+                let section = SectionPos::new(pos.x, y, pos.z);
+                stored.push((
+                    pos,
+                    y,
+                    store.light().section(LightLayer::Sky, section).is_some(),
+                    store.light().section(LightLayer::Block, section).is_some(),
+                ));
+            }
+        }
+        stored
+    }
+
+    /// 邻居柱在高处有方块，搬进来的柱在那个高度原本什么都没存：放进去之后那几段要能存光，
+    /// 之后边界上的光源才照得过来。
+    #[test]
+    fn a_column_moved_next_to_taller_neighbors_can_be_lit_up_there() {
+        let mut source = ChunkStore::flat();
+        source.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+        source.finish_light_updates();
+        let column = take(&mut source, CENTER);
+
+        let roof = |store: &mut ChunkStore| {
+            for x in 16..32 {
+                store.set_block(BlockPos::new(x, 100, 3), blocks::STONE);
+            }
+        };
+        let mut target = ChunkStore::flat();
+        roof(&mut target);
+        target.finish_light_updates();
+        insert(&mut target, CENTER, column);
+
+        let mut direct = ChunkStore::flat();
+        roof(&mut direct);
+        direct.set_block(BlockPos::new(3, -60, 3), blocks::STONE);
+        direct.finish_light_updates();
+
+        assert_eq!(stored_sections(&target), stored_sections(&direct));
+        assert_same(&data_layers(&target), &data_layers(&direct));
+
+        // 屋顶上方、紧贴边界放一个光源：光要照进搬来的那一柱。
+        let lamp = BlockPos::new(16, 101, 3);
+        let across = BlockPos::new(15, 101, 3);
+        for store in [&mut target, &mut direct] {
+            store.set_block(lamp, blocks::GLOWSTONE);
+            store.finish_light_updates();
+        }
+        assert_eq!(target.light_value(LightLayer::Block, across), 14);
+        assert_eq!(direct.light_value(LightLayer::Block, across), 14);
+        assert_same(&data_layers(&target), &data_layers(&direct));
+    }
+
+    /// 搬进来的柱自己在高处有方块，原地的邻居在那个高度原本什么都没存：邻居的那几段
+    /// 也要补上，补上的段要报给正在看邻居的客户端，被搬的那一柱自己不报。
+    #[test]
+    fn neighbors_of_a_tall_column_that_moved_in_can_be_lit_and_are_reported() {
+        let tower = |store: &mut ChunkStore| {
+            for y in -60..=100 {
+                store.set_block(BlockPos::new(15, y, 3), blocks::STONE);
+            }
+        };
+        let mut source = ChunkStore::flat();
+        tower(&mut source);
+        source.finish_light_updates();
+        let column = take(&mut source, CENTER);
+
+        let mut target = ChunkStore::flat();
+        target.finish_light_updates();
+        target.take_light_changes();
+        insert(&mut target, CENTER, column);
+        let changes = target.take_light_changes();
+        assert!(
+            changes.contains_key(&NEIGHBOR),
+            "邻居柱补建的段要发给客户端：{changes:?}"
+        );
+        assert!(
+            !changes.contains_key(&CENTER),
+            "被搬的那一柱随区块包发，不另外报：{changes:?}"
+        );
+
+        let mut direct = ChunkStore::flat();
+        tower(&mut direct);
+        direct.finish_light_updates();
+        assert_eq!(stored_sections(&target), stored_sections(&direct));
+
+        let lamp = BlockPos::new(15, 101, 3);
+        let across = BlockPos::new(16, 101, 3);
+        for store in [&mut target, &mut direct] {
+            store.set_block(lamp, blocks::GLOWSTONE);
+            store.finish_light_updates();
+        }
+        assert_eq!(target.light_value(LightLayer::Block, across), 14);
+        assert_eq!(direct.light_value(LightLayer::Block, across), 14);
+        assert_same(&data_layers(&target), &data_layers(&direct));
+    }
+
+    /// 一柱走了又回来，邻居柱一直在：邻居那边只因为这一柱才存着的段不能丢，
+    /// 从这一柱照过去的光要原样留着，回来以后两边和没搬过一样。
+    #[test]
+    fn neighbors_keep_the_light_of_a_column_that_left_and_came_back() {
+        let mut store = ChunkStore::flat();
+        for y in -60..=100 {
+            store.set_block(BlockPos::new(15, y, 3), blocks::STONE);
+        }
+        store.set_block(BlockPos::new(15, 101, 3), blocks::GLOWSTONE);
+        store.finish_light_updates();
+        let across = BlockPos::new(16, 101, 3);
+        assert_eq!(store.light_value(LightLayer::Block, across), 14);
+        let before = (stored_sections(&store), data_layers(&store));
+
+        let column = take(&mut store, CENTER);
+        assert_eq!(
+            store.light_value(LightLayer::Block, across),
+            14,
+            "这一柱不在的时候，照到邻居那边的光还在"
+        );
+        insert(&mut store, CENTER, column);
+
+        assert_eq!(stored_sections(&store), before.0);
+        assert_same(&data_layers(&store), &before.1);
+    }
+
     #[test]
     fn the_light_engine_still_works_after_a_round_trip() {
         let mut store = edited(true);

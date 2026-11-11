@@ -346,9 +346,24 @@ impl LightStorage {
     /// 所以这里不用它，而是从 `chunks` 重新算整片 3×3 邻域。平坦世界里每个位置都有
     /// 同样的方块，算出来的值和模板相同，一整片相邻区块一起搬时一次都不写。
     ///
-    /// 只动段状态，不新建或删除光照段、不排任务、不换版本号：盒子里装的是
-    /// 已经算好的光照数据，`putSectionState` 的 `initializeSection` 会用默认值覆盖它。
-    pub(crate) fn rebind_area(&mut self, pos: ChunkPos, chunks: super::Chunks<'_>) {
+    /// 不经过 `putSectionState`：盒子里装的是已经算好的光照数据，它的
+    /// `initializeSection` 会用默认值覆盖掉。这里对光照数据只做一件事——
+    /// **状态非 0 而还没有数据层的段，补建一层**（内容照 `createDataLayer`）。
+    /// 引擎只往存着数据层的段里传光（[`storing_light_for_section`](Self::storing_light_for_section)），
+    /// 不补的话，因为新邻居才需要存光的段永远是黑的。
+    ///
+    /// 反过来，状态变成 0 的段**不丢数据层**。官方是在很远的地方才真正卸载区块
+    /// （加载等级 45 以外），那里的邻居早就不发给客户端了；这里在紧挨着可见范围的
+    /// 地方就把区块收走，邻居段里从它那边照过来的光要原样留着，等它回来时两边才对得上。
+    /// 多留的数据层不影响读数；以后那一段的状态再从 0 变成非 0 时，
+    /// `putSectionState` 照常重新初始化它。
+    ///
+    /// 返回这次补建了数据层的段。补建会换掉那一柱的版本号（区块包里多了一段）。
+    pub(crate) fn rebind_area(
+        &mut self,
+        pos: ChunkPos,
+        chunks: super::Chunks<'_>,
+    ) -> Vec<SectionPos> {
         let occupied = |column: ChunkPos, slot: usize| -> bool {
             // 光照段比方块段多上下各一段，那两段没有方块段。
             (1..LIGHT_SECTION_COUNT - 1).contains(&slot)
@@ -384,18 +399,49 @@ impl LightStorage {
         for dx in -1..=1 {
             for dz in -1..=1 {
                 let column = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
-                let states = states_of(column);
-                if self.column(column).states != states {
-                    area.push((column, states));
-                }
+                area.push((column, states_of(column)));
             }
         }
+        let mut created = Vec::new();
         for (column, states) in area {
-            let template = &self.template;
-            self.columns
-                .entry(column)
-                .or_insert_with(|| template.clone())
-                .states = states;
+            self.rebind_column(column, states, &mut created);
+        }
+        created
+    }
+
+    /// 把一柱的段状态换成 `states`，并给状态非 0 却没有数据层的段补建一层。
+    fn rebind_column(
+        &mut self,
+        pos: ChunkPos,
+        states: [u8; LIGHT_SECTION_COUNT],
+        created: &mut Vec<SectionPos>,
+    ) {
+        let current = self.column(pos);
+        let missing =
+            |column: &LightColumn, slot: usize| states[slot] != 0 && column.layers[slot].is_none();
+        if !(0..LIGHT_SECTION_COUNT).any(|slot| missing(current, slot)) {
+            if current.states != states {
+                // 只有计数变了：存着的光照数据一段没动，区块包不变，不换版本号。
+                let template = &self.template;
+                self.columns
+                    .entry(pos)
+                    .or_insert_with(|| template.clone())
+                    .states = states;
+            }
+            return;
+        }
+        // 自下而上，和官方 `initializeLight` 逐段登记的顺序一致：天空光新建的一层
+        // 照抄它上面最近一层的最底一片，上面没有就是全亮（或者这一列还没开光照时全暗）。
+        self.column_mut(pos).states = states;
+        for slot in 0..LIGHT_SECTION_COUNT {
+            if !missing(self.column(pos), slot) {
+                continue;
+            }
+            let section = SectionPos::new(pos.x, slot as i32 + MIN_LIGHT_SECTION, pos.z);
+            let layer = self.create_data_layer(section);
+            self.column_mut(pos).layers[slot] = Some(layer);
+            self.lowest_section = self.lowest_section.min(section.y);
+            created.push(section);
         }
     }
 
