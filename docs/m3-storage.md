@@ -1,8 +1,10 @@
 # M3 存档设计
 
 这份文档是 M3（存档）的设计约定。**第 12 节第 1–4 步（NBT、生成器数据、
-区块 NBT 写读、Anvil）已经实现并和官方代码对拍过，都是编解码，不接进游戏**；
-再往后的存档线程、加载线程、ticket 和卸载按 `world-model-design.md` 的区块平面做。
+区块 NBT 写读、Anvil）已经实现并和官方代码对拍过；第 6 步里不依赖区块平面的
+那一半（带槽位物品、玩家数据、`level.dat` 的编解码）也已完成并对拍过，
+都是编解码，不接进游戏**；再往后的存档线程、加载线程、ticket 和卸载按
+`world-model-design.md` 的区块平面做。
 线程规则沿用 `folia.md` 的 R1–R12，crate 和 tick 顺序沿用 `design.md`。
 官方类名和方法名都写出来，方便逐行核对。
 
@@ -71,7 +73,7 @@
 | S7 | 调色板上盘形式 | 磁盘上永远是“调色板 + 下标”，位数按调色板大小重算，和网络格式分开写 | 官方 `PalettedContainer.pack` 就是这样，见第 5.2 节 |
 | S8 | 坏区块 | 当成“这个区块不存在”，日志 `warn`，继续跑。不 panic，不删文件 | 对应 `ChunkMap` 读失败后重新生成的行为 |
 | S9 | 红石记忆 | `RedstoneMemory` 按位置切片存进区块 NBT 的 `block_entities`，火把抖动表不存 | 官方把它们放在方块实体里；火把表是 `RedstoneTorchBlock.RECENT_TOGGLES` 这个 static `WeakHashMap`，官方也不存 |
-| S10 | 玩家数据 | `players/data/<uuid>.dat`，字段名照官方，只写 Bamboo 真的有的那几个 | 官方读的时候缺字段都有默认值 |
+| S10 | 玩家数据 | `players/data/<uuid>.dat`，字段名照官方；Bamboo 真的有的状态照官方写，没有的用官方默认值补上（表见 9.1），不认识的键原样保留（D9） | 官方读的时候缺字段都有默认值；两种写法读出来的结果等价 |
 | S11 | 保存节奏 | 关服一次全量，运行中每 300 秒（6000 tick）扫一遍脏区块；单区块 10 秒内不重复写 | 10 秒冷却是官方 `ChunkMap` 的 `nextChunkSaveTime = now + 10000` |
 | S12 | `sync-chunk-writes` | 不实现，不开 `DSYNC` | 官方默认 `true`，Bamboo 先按 `false` 的行为做，见第 13 节 Q4 |
 
@@ -80,17 +82,20 @@
 编解码层已经落地（第 12 节第 1–4 步）。它不接进游戏，磁盘上不会因为它多出任何东西：
 
 ```text
- mc-bamboo-storage   ← 新增：chunk_nbt、anvil（Linear / 玩家数据 / level.dat 还没做）
-   │        │
-   │        └────── mc-bamboo-world（读盘后组装 ChunkColumn，卸载时读它）
-   └─────────────── mc-bamboo-nbt（网络形式 + 文件形式）
- mc-bamboo-core  mc-bamboo-data
+ mc-bamboo-storage        ← 新增：chunk_nbt、anvil、player、level_dat
+   ├── mc-bamboo-world    读盘后组装 ChunkColumn，卸载时读它
+   ├── mc-bamboo-protocol 物品类型和物品的存档 codec
+   ├── mc-bamboo-nbt      网络形式 + 文件形式
+   └── mc-bamboo-core  mc-bamboo-data
 ```
 
 - **`mc-bamboo-storage`**：依赖 `mc-bamboo-core`、`mc-bamboo-world`、`mc-bamboo-nbt`、
-  `mc-bamboo-data`、`flate2`、`thiserror`。不依赖 `mc-bamboo-game`、`mc-bamboo-protocol`、
-  `tokio`。已有模块：`chunk_nbt`（写和读）、`anvil`（区域文件、扇区分配、`.mcc`）。
-  `linear`、`player`、`level_dat`、`paths` 还没做。
+  `mc-bamboo-data`、`mc-bamboo-protocol`、`flate2`、`thiserror`。依赖 `mc-bamboo-protocol`
+  只为了物品类型和 `components::archive::slots` 的带槽位物品编解码（玩家物品栏、
+  末影箱和箱子等容器的 `Items` 都要用）；公开接口只露物品相关的类型，不露网络包和
+  编解码缓冲。**以后物品模型搬出 protocol 时这条依赖跟着换。**不依赖 `mc-bamboo-game`、
+  `tokio`。已有模块：`chunk_nbt`（写和读）、`anvil`（区域文件、扇区分配、`.mcc`）、
+  `player`、`level_dat`（编解码，不接进游戏）。`linear`、`paths` 还没做。
 - **`mc-bamboo-nbt`**：网络形式（`write_network` 写无名根）之外，加了文件形式：
   带名字的根（`write_named` / `read_named`）、gzip / zlib / 不压缩外壳、解压后的
   字节数上限，标签本身沿用原来的配额（`Accounter`）和 512 层深度上限。
@@ -382,65 +387,175 @@ flush 频率把改动攒在内存里批量写。Bamboo 的 Linear 实现同样�
 
 ## 9. 玩家数据和 level.dat
 
+第 12 节第 6 步的**编解码已完成，还没接进游戏**：`mc-bamboo-storage` 的 `player_data`
+和 `level_dat` 是纯数据结构加 NBT 编解码，不读写世界目录、不启动线程、不改游戏的进服 /
+离服流程。`players/advancements/`、`players/stats/` 不做。
+
 ### 9.1 `players/data/<uuid>.dat`
 
-gzip 的 NBT，根复合标签有名字（空字符串）。字段名全部核对过官方
-（`Entity.saveWithoutId`、`Player.addAdditionalSaveData`、`ServerPlayer.addAdditionalSaveData`）：
+gzip 的 NBT，根复合标签有名字（空字符串）。字段名和类型全部核对过 26.3 的
+`Entity.saveWithoutId`、`LivingEntity.addAdditionalSaveData`、`Player.addAdditionalSaveData`、
+`ServerPlayer.addAdditionalSaveData` 里的 `ValueOutput` 写法（`TagValueOutput` 的
+`putBoolean` / `putShort` / `putInt` / `putFloat` / `putDouble` / `putString` / `store` /
+`storeNullable` / `list` 都按字段类型选过）。`PlayerData` 建模的字段：
 
-| 键 | 类型 | Bamboo 来源 | 官方出处 |
+| 键 | 类型 | Bamboo 运行时的来源 | 官方出处 |
 |---|---|---|---|
-| `DataVersion` | int | 生成器导出的 5023 | `NbtUtils.addCurrentDataVersion` |
-| `UUID` | int array（4 项） | `Player::uuid` | `Entity.TAG_UUID` |
-| `Pos` | 3 个 double | `Player::position` | `Entity.TAG_POS` |
-| `Motion` | 3 个 double | 全 0 | `Entity.TAG_MOTION` |
-| `Rotation` | 2 个 float（yaw、pitch） | `Player::yaw`、`pitch` | `Entity.TAG_ROTATION` |
-| `OnGround` | bool | `Player::on_ground` | `Entity.TAG_ON_GROUND` |
-| `Dimension` | string | `"minecraft:overworld"` | `ServerPlayer.java:428` 的 `putString("Dimension", ...)` |
-| `playerGameType` | int（legacy id） | `Player::game_mode` | `ServerPlayer.storeGameTypes` |
-| `Inventory` | list，每项带 `Slot` | `Inventory::slots` | `Player.addAdditionalSaveData` |
-| `SelectedItemSlot` | int | `Inventory::selected` | 同上 |
+| `DataVersion` | int | 生成器导出的 5023 | `NbtUtils.addCurrentDataVersion`（`Player.addAdditionalSaveData` 开头） |
+| `UUID` | int array（4 项） | `Player::uuid` | `Entity.saveWithoutId` 的 `store("UUID", UUIDUtil.CODEC, ...)` |
+| `Pos` | 3 个 double | `Player::position` | 同上 `store("Pos", Vec3.CODEC, ...)` |
+| `Motion` | 3 个 double | `Player::motion.delta`（速度校验用）；`RuntimeParts` 暂未接 | 同上 `store("Motion", Vec3.CODEC, ...)` |
+| `Rotation` | 2 个 float（yaw、pitch） | `Player::yaw`、`pitch` | 同上 `store("Rotation", Vec2.CODEC, ...)` |
+| `fall_distance` | double | `Player::motion.fall_distance`；`RuntimeParts` 暂未接 | 同上 `putDouble` |
+| `Fire` | short | 无着火状态，写 0 | 同上 `putShort` |
+| `Air` | short | 无氧气状态，写 300 | 同上 `putShort` |
+| `OnGround` | bool（byte） | `Player::on_ground` | 同上 `putBoolean` |
+| `Invulnerable` | bool（byte） | 无独立状态，写 false | 同上 `putBoolean` |
+| `PortalCooldown` | int | 无下界传送门，写 0 | 同上 `putInt` |
+| `Health` | float | 血量恒 20（`EntitySync::PLAYER_HEALTH`） | `LivingEntity.addAdditionalSaveData` |
+| `HurtTime` / `DeathTime` | short | 无受伤 / 死亡状态，写 0 | 同上 |
+| `AbsorptionAmount` | float | 无伤害吸收，写 0 | 同上 |
+| `FallFlying` | bool（byte） | 鞘翅飞行被拒绝，写 false | 同上 |
+| `Inventory` | list，每项带 `Slot` | `Inventory::slots`（46 个菜单槽换算成官方 41 格） | `Player.addAdditionalSaveData` 的 `list("Inventory", ItemStackWithSlot.CODEC)` + `Inventory.save` |
+| `SelectedItemSlot` | int | `Inventory::selected` | `Player.addAdditionalSaveData` |
+| `SleepTimer` | short | 无睡觉，写 0 | 同上 |
+| `XpP` | float | 无经验，写 0 | 同上 |
+| `XpLevel` / `XpTotal` / `XpSeed` | int | 经验 0；`XpSeed` 从 `Player::enchantment_seed` 来 | 同上 |
+| `Score` | int | 无死亡分数，写 0 | 同上 |
+| `foodLevel` / `foodTickTimer` / `foodSaturationLevel` / `foodExhaustionLevel` | int / int / float / float | 无饥饿系统，写官方默认值 20 / 0 / 5 / 0 | `FoodData.addAdditionalSaveData` |
+| `abilities` | compound（7 个键） | 从 `Player::game_mode` 推（见 `Abilities::for_game_type`） | `Player.addAdditionalSaveData` 的 `store("abilities", Abilities$Packed.CODEC, ...)` |
+| `EnderItems` | list，每项带 `Slot` | `EnderChest::slots` 的 27 格 | `Player.addAdditionalSaveData` 的 `list("EnderItems", ...)` + `PlayerEnderChestContainer.storeAsSlots` |
+| `Dimension` | string | `"minecraft:overworld"` | `ServerPlayer.addAdditionalSaveData` 的 `putString` |
+| `playerGameType` | int（legacy id） | `Player::game_mode` | `ServerPlayer.storeGameTypes` 的 `store("playerGameType", GameType.LEGACY_ID_CODEC, ...)` |
+| `previousPlayerGameType` | int，可选 | 运行时不保留，缺省 | `ServerPlayer.storeGameTypes` 的 `storeNullable` |
+| `seenCredits` | bool（byte） | 无终末之诗，写 false | `ServerPlayer.addAdditionalSaveData` |
+| `spawn_extra_particles_on_fall` | bool（byte） | 无对应状态，写 false | 同上 |
 
-不写的字段（官方读的时候都有默认值）：`fall_distance`、`Fire`、`Air`、`Invulnerable`、
-`XpP`/`XpLevel`/`XpTotal`/`XpSeed`、`Score`、`SleepTimer`、`abilities`、`EnderItems`、
-`foodData` 的几项、`warden_spawn_tracker`、`recipeBook`、`respawn`、`seenCredits`、
-`ShoulderEntity*`。创造模式里这些都不影响玩法。
+盘点到的其它跨重启状态：`Player` 还有 `head_yaw`（由 `yaw` 派生）、
+`client`（皮肤外层、主手、视距）、`teleport`、`chunks`、`sync`（`shared_flags`、`flying`、
+`pose`）、`prediction`、`mining`、`inventory_cursor`、`container_counter`、`spam`、`random`、
+`drop_spam`、`chat`、`respawn`（`Option<RespawnData>`，官方的 `respawn` 键）。其中
+`client` / 视距 / 菜单计数器 / 同步缓存是会话状态，官方也不存；`permission_level`、
+`is_op` 来自 `ops.json`，不在玩家文件里。`respawn` 运行时有，但本层没有建模，按 D9
+原样保留。`player_move::Motion` 里还记着 `fall_distance` 和 `delta`（速度校验用）：这两个字段
+官方也存，但 `RuntimeParts` 的转换函数暂未接（调用方可以在拿到 `PlayerData` 后自己
+填）。全局的 `WorldState`（默认游戏模式、难度、出生点、天气、时间）和全套
+`GameRuleSet` 属于 `level.dat` / `data/`，不是每玩家状态。
 
-`Inventory` 的每一项是 `ItemStackWithSlot.CODEC`，它把 `ItemStack.MAP_CODEC` 平铺在同一层：
+**省略规则**：上表这些键官方都是无条件写出（`storeNullable` 的两个可选字段除外），所以
+Bamboo 编码时也总是写；`removed_features` 之类在 `level.dat` 里是空则省的键见 9.2。
+官方读时缺字段走 `ValueInput.getIntOr` / `getFloatOr` / `getShortOr` / `getDoubleOr` /
+`getBooleanOr` / `getStringOr` / `read` 的默认值，Bamboo 解码照这些默认值填。
+`Abilities$Packed.CODEC` 的七个键全是 `optionalAlwaysPresentFieldOf`：读可省、写必写。
+
+**D9 原样保留**：官方有而本层没建模的键（`CustomName`、`Tags`、`data`、`attributes`、
+`active_effects`、`equipment`、`Brain`、`SleepingPos`、`warden_spawn_tracker`、`recipeBook`、
+`respawn`、`ShoulderEntity*`、`ender_pearls`、`post_effects`、`LastDeathLocation`、
+`invulnerable_time`、`Passengers` 等），以及 `abilities` 这类子复合标签里的多余键，
+解码时原样收进 `PlayerData::preserved` / `nested_preserved`，再编码时写回去（键名冲突
+以本层写出的为准）。读文件时返回 `Result`，坏字段、坏 gzip、截断、翻位都不 panic。
+
+`Inventory` 和 `EnderItems` 的每一项是 `ItemStackWithSlot.CODEC`，它把
+`ItemStack.MAP_CODEC` 平铺在同一层；箱子等容器的 `Items` 也是这个格式：
 
 ```text
 { Slot: 0b, id: "minecraft:stone", count: 1 }
 ```
 
-- `Slot`：**byte 标签**（`ExtraCodecs.UNSIGNED_BYTE` 是 `Codec.BYTE` 加无符号映射），
-  用 `optionalAlwaysPresentFieldOf` 包着 —— 读的时候可省（默认 0），**写的时候一定写**。
+- `Slot`：**byte 标签**（`ExtraCodecs.UNSIGNED_BYTE` 是 `Codec.BYTE` 加无符号映射，
+  `UnsignedBytes.toInt`），用 `optionalAlwaysPresentFieldOf` 包着 —— 读的时候可省
+  （默认 0），**写的时候一定写**。Bamboo 的 [`SlottedItem::slot`](`mc-bamboo-protocol`
+  的 `components::archive::slots`) 是 0..=255 的 `i32`。
 - `id`：物品注册名字符串（`Item.CODEC_WITH_BOUND_COMPONENTS`）。
 - `count`：**int 标签**，`ExtraCodecs.intRange(1, 99)`，同样是“读可省、写必写”。
-  超出 1..=99 官方直接报错，所以 Bamboo 写之前要 clamp（或者拒绝保存并记日志）。
-- `components`：用的是普通的 `optionalFieldOf(..., DataComponentPatch.EMPTY)`，
-  **为空时不写这个键**。Bamboo 的 `ItemStack` 没有组件，所以永远不写。
+  超出 1..=99 官方直接报错，Bamboo 的编码器返回 `Err`。
+- `components`：`optionalFieldOf(..., DataComponentPatch.EMPTY)`，**补丁为空时不写**；
+  只含瞬态组件的补丁会写成空复合标签。Bamboo 的 `ItemStack` 现在有组件，
+  `mc-bamboo-protocol` 的 `components::archive` 已经把 122 种组件类型的存档 `Codec`
+  全部覆盖（`components java` 对拍 2602 个物品堆）。
 - 空槽位不写条目（整个列表只放非空物品）。
+- 这一层的编解码在 `mc-bamboo-protocol::components::archive::slots`：一个物品 ⇄ 一个
+  复合标签（`encode_item` / `decode_item`）、一个带槽位列表 ⇄ 一个 NBT 列表
+  （`encode_list` / `decode_list`）。`ItemStack.CODEC` 是 `MapCodec`，物品条目里
+  `id` / `count` / `components` 之外的键会被忽略，写回时不再出现。
+- 列表里解不开的条目按官方 `TagValueInput$TypedListWrapper` 处理：报告问题并跳过这一条，
+  其余条目照常解出来；列表本身不是 `ListTag` 时按 `listOrEmpty` 当成空列表并报告。
+  容器装载时槽位越界的条目也跳过（`ItemStackWithSlot.isValidInContainer`），槽位重复时
+  后一条覆盖前一条（`Inventory.load`、`ContainerHelper.loadAllItems`）。官方在
+  `DataResult` 带 `partialValue` 时会用部分结果，Bamboo 一律跳过整条并报告，
+  这是已知的差别：组件补丁里某一项解不开时官方 DFU 有时能给出「不带这个组件的物品」。
+  物品这一层不做 D9 的原样保留；D9 只用在玩家文件和 `level.dat` 的复合标签上。
 
 ### 9.2 `level.dat`
 
-gzip 的 NBT，根是 `{ Data: { ... } }`。来自 `PrimaryLevelData.setTagData`：
+gzip 的 NBT，根是 `{ Data: { ... } }`。`LevelStorageAccess.saveDataTag` 把
+`WorldData.createTag` 的结果放进 `Data` 再 `NbtIo.writeCompressed`。字段照
+`PrimaryLevelData.setTagData` 实际写出的内容：
 
-| 键 | 值 |
+| 键 | 类型 | 官方出处 |
+|---|---|---|
+| `ServerBrands` | string list | `stringCollectionToTag(knownServerBrands)`，总是写（可以是空列表） |
+| `WasModded` | bool（byte） | `putBoolean` |
+| `removed_features` | string list | 集合非空才写（`setTagData` 的 `isEmpty` 分支） |
+| `Version` | `{ Name: string, Id: int, Snapshot: bool, Series: string }` | `writeVersionTag` |
+| `version_history` | int list | `writeVersionHistory`（空或不等于当前版本时追加 `DataVersion.version()`） |
+| `DataVersion` | int | `NbtUtils.addCurrentDataVersion` |
+| `GameType` | int | `LevelSettings.gameType().getId()` |
+| `spawn` | `LevelData$RespawnData.CODEC`：`{ dimension: string, pos: int array(3), yaw: float, pitch: float }` | `CompoundTag.store("spawn", ...)`；`GlobalPos.MAP_CODEC` 的 `dimension` / `pos` |
+| `Time` | long | `gameTime` |
+| `LastPlayed` | long | `writeLastPlayed`，每次 `createTag` 刷成 `Util.getEpochMillis()` |
+| `LevelName` | string | `LevelSettings.levelName()` |
+| `version` | int = 19133 | `putInt`，NBT 存档版本，不是游戏版本 |
+| `allowCommands` | bool（byte） | `LevelSettings.allowCommands()` |
+| `initialized` | bool（byte） | `PrimaryLevelData.initialized` |
+| `difficulty_settings` | `{ difficulty: string, hardcore: bool, locked: bool }` | `LevelSettings$DifficultySettings.CODEC` |
+| `singleplayer_uuid` | int array(4)，可选 | `CompoundTag.storeNullable(..., UUIDUtil.CODEC, ...)` |
+| `DataPacks` | `{ Enabled, Disabled }` | `WorldDataConfiguration.MAP_CODEC` 的 `lenientOptionalFieldOf("DataPacks", DEFAULT)`，默认对象不写 |
+| `enabled_features` | string list | 同一 `MapCodec` 的 `lenientOptionalFieldOf("enabled_features", DEFAULT_FLAGS)`，默认集合不写 |
+
+读方向对应静态的 `PrimaryLevelData.parse` + `LevelSettings.parse` + `LevelVersion.parse`：
+缺字段用 `OptionalDynamic.as*Or` 的默认值（`initialized` 默认 `true`，`allowCommands`
+默认「创造模式为 true、其余 false」，`Version` 缺时是空名 / Id 0 / Series `main`）。
+Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键，其它顶层键、`Version` /
+`difficulty_settings` / `spawn` 里的多余键按 D9 原样写回。
+
+**文件系统层面的事这次不做，以后接进游戏时照官方**：
+
+- `LevelStorageAccess.saveLevelData` 先在 `<world>/` 里 `Files.createTempFile("level", ".dat")`
+  写一份完整的 gzip 文件，再 `Util.safeReplaceFile(dataFile, temp, oldDataFile)` 把它换成
+  `level.dat`、把原来的 `level.dat` 挪成 `level.dat_old`。`PlayerDataStorage.save` 对
+  `<uuid>.dat` / `<uuid>.dat_old` 是同样的三步。失败只记日志，不删原文件。
+- `session.lock`：`DirectoryLock.create` 在 `session.lock` 里写雪人字符 `☃`，用
+  `FileChannel.tryLock()` 拿独占锁；拿不到就拒绝启动，`checkLock()` 每次访问前检查锁还在。
+
+### 9.3 `data/` 下的独立 saved data（26.3 新增，这次不写）
+
+26.3 把世界生成设置和游戏规则从 `level.dat` 搬到 `data/` 下的独立文件。
+`LevelDatToSavedDataFileFix` 列出了文件名（`level.dat` 在读写时由 file fixer 迁移）：
+
+| 文件（`data/` 下） | 内容 |
 |---|---|
-| `version` | 19133（NBT 存档版本，不是游戏版本） |
-| `Version` | `{ Name, Id, Snapshot, Series }` |
-| `DataVersion` | 5023 |
-| `version_history` | 版本历史列表 |
-| `LevelName` | 世界名 |
-| `Time` | `GameTime` |
-| `LastPlayed` | 毫秒时间戳 |
-| `GameType` | 默认游戏模式 |
-| `spawn` | `RespawnData`：`GlobalPos` 加 `yaw`、`pitch` |
-| `difficulty_settings` | `{ difficulty, hardcore, locked }` |
-| `allowCommands`、`initialized` | bool |
+| `minecraft/game_rules.dat` | `game_rules`，游戏规则名 → 值 |
+| `minecraft/world_gen_settings.dat` | `world_gen_settings`（旧的 `WorldGenSettings`） |
+| `minecraft/world_clocks.dat` | `world_clocks` |
+| `minecraft/weather.dat` | `weather_data`（`clear_weather_time` / `rain_time` / `thunder_time` / `raining` / `thundering`） |
+| `minecraft/scheduled_events.dat` | `scheduled_events`（旧的 `ScheduledEvents`） |
+| `minecraft/wandering_trader.dat` | `wandering_trader_migration_data` |
+| `minecraft/custom_boss_events.dat` | `CustomBossEvents` |
+| `minecraft/ender_dragon_fight.dat` | `dragon_fight`（末地） |
+| `minecraft/world_border.dat` | `world_border`（`LevelDatToSavedDataFileFix` 按维度 `overworld` / `the_nether` / `the_end` 各写一份） |
 
-26.3 把世界生成设置和游戏规则搬出了 `level.dat`，变成 `data/` 下独立的 saved data 文件。
-Bamboo 不写它们；官方读不到就用默认值，但**官方服务端打开这个世界时会按默认设置生成**，
-和 Bamboo 的平坦模板不一样。验证的时候只用官方的类读文件，不开真实服务端（见第 11 节）。
+其它 `SavedDataType`（地图 idcount、袭击、结构等）按各自的 id 落在 `data/` 下，
+文件名是 `<命名空间>/<路径>.dat`。这次一个都不写。
+
+格式：`SavedDataStorage` 用 `NbtIo.readCompressed`（gzip 或未压缩，按文件头判断）读，
+根是 `{ data: <SavedDataType.codec() 编出的值>, DataVersion: int }`；写时
+`encodeUnchecked` 把 codec 的值放进 `data` 字段，再 `NbtIo.writeCompressed`。读不到
+或解析失败时 `computeIfAbsent` 调 `SavedDataType.constructor()` 造一个全默认值的对象
+（例如 `new GameRules(FeatureFlags.DEFAULT_FLAGS)`），不把错误抛给调用方；文件不存在
+也不是错误。因此 Bamboo 不写这些文件时，官方服务端仍能打开这个世界，但会按默认
+游戏规则、默认世界生成设置生成地形，和 Bamboo 的平坦模板不一样。验证只用官方的类
+读 / 写单个文件，不开真实服务端、不接受 EULA。
 
 ## 10. 转换工具
 
@@ -463,6 +578,8 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 
 1. **单元测试（`mc-bamboo-storage`）**
    - NBT 读写往返，包含空列表、空字符串、嵌套、非法输入。
+   - `player_data` / `level_dat` 的 gzip 往返、未知键原样保留、坏字段、截断 / 翻位 /
+     随机字节 / 超大物品列表的模糊测试，不 panic。
    - Anvil 头的字节例子（手算的 offset 和 timestamp）。
    - 扇区分配器：写、改大、改小、删，不重叠不漏。
    - Linear 超级块的 32 字节、尾 8 字节、空区块表。
@@ -475,6 +592,12 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
      NBT **按键比较规范化的 JSON**：`CompoundTag` 用 `HashMap`，官方写出的键顺序是
      哈希序，逐字节比会假报警。这一步同时抓住调色板位数、光照段范围、heightmap 长度。
    - 官方 `NbtIo.writeCompressed` 写出的 gzip 文件，Bamboo 能读。
+   - `cargo run -p mc-bamboo-vanilla -- player-data <java 路径>`：`PlayerDataOracle.java`
+     在 JVM 里直接调 `ItemStack.CODEC` / `ItemStackWithSlot.CODEC`、`TagValueInput` 和
+     `PrimaryLevelData.parse` / `createTag`，双向按键比较 Bamboo 和官方写出的物品、
+     玩家文件、`level.dat`；用例覆盖空 / 满物品栏、带组件的物品、数量 1 和 99、
+     四种游戏模式、极端坐标、官方有而 Bamboo 不认识的键、解不开的物品条目。
+     **不启动服务端、不接受 EULA**。
 3. **Bamboo 读原版存档**
    - 用官方的类在临时目录里造一个存档（只调 `RegionFile` 和 `SerializableChunkData`，
      **不启动服务端、不接受 EULA**），Bamboo 读进来，比较方块、光照、heightmap、方块实体。
@@ -493,7 +616,8 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 
 每一步都能单独验证，每一步结束时 `cargo fmt --check`、
 `cargo clippy --workspace --all-targets -- -D warnings`、`cargo test` 都干净。
-**第 1–4 步已完成**（都是编解码，不接进游戏，磁盘上不会因为它们多出东西）。
+**第 1–4 步已完成，第 6 步的编解码那一半也已完成**（都是编解码，不接进游戏，
+磁盘上不会因为它们多出东西）。
 
 1. ✅ **NBT 解码**（`mc-bamboo-nbt`）。读取本来就有（网络形式），补了带名字的根、
    gzip / zlib / 不压缩外壳、解压字节数上限；深度和长度上限沿用 `Accounter`。
@@ -515,15 +639,21 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    `Saver` / `Loader` 线程方案）。IO 线程读写「未压缩 NBT 字节」，解析和序列化在
    流水线里，Director 管 ticket 和区块状态机，region 只收完工的区块束。
    验证：`world-model-design.md` 第 5.3、5.5 的交付和卸载路径；放方块、关服、重启、重连。
-6. **玩家数据和 level.dat**。
-   验证：第 11 节第 2 条用官方 `NbtIo` 读；重启后位置和物品栏在。
+6. 🔶 **玩家数据和 level.dat**（分两半）。
+   - ✅ **编解码这一半已完成**：带槽位物品（`mc-bamboo-protocol::components::archive::slots`）、
+     `PlayerData`、`LevelData` 的 gzip NBT 写读，D9 原样保留，模糊测试，以及
+     `cargo run -p mc-bamboo-vanilla -- player-data <java 路径>` 的官方双向对拍
+     （41 个用例 / 297 项检查，0 不一致）。**不读写真实世界目录，不接进游戏，
+     磁盘上不会多出任何东西**。字段名和省略规则见第 9 节。
+   - ⬜ **接进游戏这一半还没做**：进服时读、离开和关服时写、`level.dat_old` 轮换、
+     `session.lock`、`data/` 下的独立 saved data。重启后位置和物品栏真正恢复要等这一半。
 7. **Linear**（可选，看 Q1 的答复）。
    验证：第 11 节第 1、5 条。
 8. **转换工具**。验证：第 11 节第 5 条。
 9. **README**：删掉“不存档”这条已知限制，补上存档格式、保存节奏、还有哪些东西不存
     （箱子内容、实体、火把抖动表）。
 
-第 5 步之前磁盘上什么都不会变，所以前四步可以安全地合进 main。
+第 5 步和第 6 步接进游戏那一半之前磁盘上什么都不会变，所以编解码这几步可以安全地合进 main。
 
 ## 13. 风险和待用户决定的问题
 
@@ -549,4 +679,4 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 | Q6 | 待执行刻跨区块的相对顺序会在存盘后丢（见 5.5）。官方也有这个问题，但顺序来源不同 | 接受。真要一致就得把 `BlockTicks` 改成每区块一条队列，那是另一个任务 |
 | Q7 | 转换工具放哪：`tools/mc-bamboo-vanilla` 的新子命令，还是一个独立的小 bin？ | 独立 bin（比如 `tools/mc-bamboo-convert`）。`mc-bamboo-vanilla` 要调 Java，转换工具不该依赖 JDK |
 | Q8 | 主世界写在 `dimensions/minecraft/overworld/` 下（26.3 的新布局，见第 2 节），老存档不迁移 | 按新布局。读到老布局就当空世界，不自动迁移（迁移要 DataFixerUpper） |
-| Q9 | `level.dat` 不写世界生成设置和游戏规则（26.3 已经搬到 `data/`）。官方服务端打开这个世界会按默认设置生成，和 Bamboo 的平坦模板不一样 | 接受。目标是“官方代码能读”，不是“原版服务端能接着玩” |
+| Q9 | `level.dat` 不写世界生成设置和游戏规则（26.3 已经搬到 `data/`）。官方服务端打开这个世界会按默认设置生成，和 Bamboo 的平坦模板不一样 | 接受。目标是“官方代码能读”，不是“原版服务端能接着玩”。文件名、gzip NBT 的 `{ data: ... }` 格式、以及读不到时 `SavedDataStorage.computeIfAbsent` 用 `SavedDataType.constructor()` 造默认值的完整清单见第 9.3 节 |

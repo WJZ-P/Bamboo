@@ -14,5 +14,6 @@ flate2.workspace = true
 mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 mc-bamboo-nbt.workspace = true
+mc-bamboo-protocol.workspace = true
 mc-bamboo-world.workspace = true
 thiserror.workspace = true

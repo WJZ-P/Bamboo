@@ -653,6 +653,14 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
 cargo run -p mc-bamboo-vanilla -- storage <java 路径> [--show N]
 ```
 
+带槽位物品、玩家数据和 `level.dat` 的编解码也一样：官方 `ItemStack.CODEC` /
+`ItemStackWithSlot.CODEC`、`TagValueInput` 和 `PrimaryLevelData.parse` / `createTag`
+双向按键比较，不认识的键原样保留；只在 JVM 里调官方类：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- player-data <java 路径> [--show N]
+```
+
 编解码的耗时和压缩前后字节数（超平坦和内容丰富的合成区块各一份，解码拆成解压、
 NBT 解析、组装三段）：
 

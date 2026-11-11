@@ -2069,6 +2069,7 @@ dependencies = [
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",
+ "mc-bamboo-protocol",
  "mc-bamboo-world",
  "thiserror 2.0.21",
 ]
