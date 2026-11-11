@@ -436,12 +436,23 @@ impl Clock {
     }
 }
 
+/// 一组清零的直方图，直接建在堆上。
+///
+/// 一个直方图有四千来字节，几十个加起来两百多 KB。放在结构体里的话，
+/// 调试构建每按值搬一次 `Region` 就在栈上多占一份，测试线程的栈会被撑爆。
+fn histograms<const N: usize>() -> Box<[Histogram; N]> {
+    vec![Histogram::default(); N]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("长度就是 N"))
+}
+
 /// 一个 region 的剖析器。所有记录接口都只碰自己的数组，世界线程独占。
 pub(crate) struct Profiler {
-    phases: [Histogram; Phase::ALL.len()],
-    metrics: [Histogram; Metric::ALL.len()],
+    phases: Box<[Histogram; Phase::ALL.len()]>,
+    metrics: Box<[Histogram; Metric::ALL.len()]>,
     /// 子段的原始耗时样本，tick 结束时归并成「每刻合计」的直方图。
-    sub_phases: [Histogram; SubPhase::ALL.len()],
+    sub_phases: Box<[Histogram; SubPhase::ALL.len()]>,
     /// 这一刻每个子段累计了多少纳秒；`end_tick` 里每个子段记一条「合计」样本。
     sub_totals: [u64; SubPhase::ALL.len()],
     skipped_catch_ups: u64,
@@ -479,9 +490,9 @@ impl Profiler {
     fn with_clock(interval: Option<Duration>, clock: Clock) -> Self {
         let now = clock.now();
         Self {
-            phases: std::array::from_fn(|_| Histogram::default()),
-            metrics: std::array::from_fn(|_| Histogram::default()),
-            sub_phases: std::array::from_fn(|_| Histogram::default()),
+            phases: histograms(),
+            metrics: histograms(),
+            sub_phases: histograms(),
             sub_totals: [0; SubPhase::ALL.len()],
             skipped_catch_ups: 0,
             chunks_this_tick: 0,
