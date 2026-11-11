@@ -417,6 +417,31 @@ impl Harness {
         self.world.apply_ticket(op);
     }
 
+    /// 测量用：清零剖析器样本（只重置样本，不动报告间隔）。
+    #[cfg(test)]
+    pub(crate) fn clear_profile_samples(&mut self) {
+        self.world.region.profiler.reset_samples();
+    }
+
+    /// 测量用：取剖析器某个阶段/指标的样本。
+    #[cfg(test)]
+    pub(crate) fn profile_samples(
+        &self,
+    ) -> std::collections::BTreeMap<&'static str, (u64, u128, u64, u64, u64)> {
+        use crate::profiler::{Phase, Series};
+        let mut out = std::collections::BTreeMap::new();
+        for (name, series) in [
+            ("tick_total", Series::Metric(Metric::TickTotal)),
+            ("delivery", Series::Phase(Phase::Delivery)),
+            ("chunk_sending", Series::Phase(Phase::ChunkSending)),
+            ("chunks_delivered", Series::Metric(Metric::ChunksDelivered)),
+        ] {
+            let h = self.world.region.profiler.histogram(series);
+            out.insert(name, (h.count(), h.sum(), h.p50(), h.p99(), h.max()));
+        }
+        out
+    }
+
     /// 给其他模块的测试直接看全服状态。
     pub(crate) fn global(&self) -> &crate::global::Global {
         &self.world.global
@@ -453,6 +478,61 @@ impl Harness {
     /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
     pub(crate) fn set_entity_threads(&mut self, threads: usize) {
         self.world.entity_threads = threads;
+    }
+
+    /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数。
+    pub(crate) fn director_mail(&self) -> (usize, usize, (usize, usize)) {
+        let (delivered, reclaimed) = self.world.host.counters_this_tick();
+        (delivered, reclaimed, self.world.host.mail_backlog())
+    }
+
+    /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
+    pub(crate) fn set_mail_budget(&mut self, budget: crate::director_host::MailBudget) {
+        self.world.host.set_budget(budget);
+    }
+
+    /// 测试专用：Director 里已交付/在途的区块数。
+    #[cfg(test)]
+    pub(crate) fn director_loaded_count(&self) -> usize {
+        self.world.host.director().loaded_count()
+    }
+
+    /// 测试专用：停放表里的盒子数。
+    #[cfg(test)]
+    pub(crate) fn parked_count(&self) -> usize {
+        self.world.host.parked_count()
+    }
+
+    /// 测试专用：region 里已加载的区块坐标（按坐标排序）。
+    #[cfg(test)]
+    pub(crate) fn loaded_positions(&self) -> Vec<mc_bamboo_core::ChunkPos> {
+        self.world
+            .region
+            .chunks
+            .edited_chunks()
+            .map(|(pos, _)| pos)
+            .filter(|&pos| self.world.region.chunks.is_loaded(pos))
+            .collect()
+    }
+
+    /// 测试专用：Director 里每条记录的归属名和代数。
+    #[cfg(test)]
+    pub(crate) fn director_records(
+        &self,
+    ) -> std::collections::BTreeMap<mc_bamboo_core::ChunkPos, (String, u64)> {
+        self.world
+            .host
+            .director()
+            .debug_state()
+            .records()
+            .iter()
+            .map(|(&pos, record)| (pos, (format!("{:?}", record.owner), record.generation)))
+            .collect()
+    }
+
+    /// 测试专用：把失去票之后的逗留改成 `delay` 刻，用来在短测试里看收回。
+    pub(crate) fn set_reclaim_delay(&mut self, delay: u64) {
+        self.world.host.set_reclaim_delay(delay);
     }
 
     /// 给世界里直接塞一个实体，绕过玩家动作。
