@@ -144,9 +144,12 @@ pub trait LevelSideState {
     fn push_block_event(&mut self, event: BlockEvent);
     fn pop_block_event(&mut self) -> Option<BlockEvent>;
     /// 一轮方块事件结束后，按原顺序放回那些所在区块不能 tick 的事件。
-    /// 默认实现是空操作：直接实现这个 trait 的世界自己负责这一轮的重排。
+    /// 默认逐个走 [`LevelSideState::push_block_event`]，和官方 `LinkedHashSet.addAll` 一样
+    /// 由实现者负责查重；用整张表的实现转发到 [`BlockEvents::reschedule`]。
     fn reschedule_block_events(&mut self, events: Vec<BlockEvent>) {
-        let _ = events;
+        for event in events {
+            self.push_block_event(event);
+        }
     }
 
     // 方块实体和它们的 ticker。
