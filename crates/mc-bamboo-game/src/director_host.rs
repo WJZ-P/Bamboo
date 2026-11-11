@@ -25,9 +25,12 @@ pub(crate) const DELIVERIES_ENV: &str = "BAMBOO_DELIVERIES_PER_TICK";
 pub(crate) const RECLAIMS_ENV: &str = "BAMBOO_RECLAIMS_PER_TICK";
 /// 上限的合法范围上限，防住误设的巨值把信箱当成没有限速。
 const MAX_MAIL_BUDGET: usize = 1 << 16;
-/// 收回积压在这个刻数内收完。收回没有「削尖峰」的理由，卡死在固定上限
-/// 会让高速移动时已加载的区块数、进而内存没有上界（人数一多就超过 64）。
-const RECLAIM_DRAIN_TICKS: usize = 20;
+/// 收回的积压大了之后，每刻收掉其中的这么多分之一。
+///
+/// 交付的上限是为了削进服的尖峰；收回要是也卡死在固定的个数上，很多人同时
+/// 高速移动时每刻新排进来的比收走的多，已加载的区块数和内存就没有上界。
+/// 按积压的比例收，积压会稳定在「每刻新排进来的个数 × 这个数」附近。
+pub(crate) const RECLAIM_DRAIN_TICKS: usize = 20;
 
 /// 信箱的每刻预算。`0` 表示不限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +84,9 @@ pub(crate) struct DirectorHost {
     /// 本刻还没花掉的预算。整刻内所有 `pump` 共用，进服/离开/移动各发一批票
     /// 也不会把上限乘上好几倍；每刻开头由 `begin_tick` 重置。
     budget_left: MailBudget,
+    /// 这一刻已经从 region 取回了多少个区块。收回的上限会随积压放宽，
+    /// 所以不能用「剩余额度」记，要记花掉的个数。
+    reclaims_spent: usize,
     /// 统计：本刻交付/收回/停放的区块数，给剖析器用。
     delivered: usize,
     reclaimed: usize,
@@ -97,6 +103,7 @@ impl DirectorHost {
             parking: Parking::default(),
             budget,
             budget_left: budget,
+            reclaims_spent: 0,
             deliveries: BTreeMap::new(),
             reclaims: Vec::new(),
             delivered: 0,
@@ -139,6 +146,7 @@ impl DirectorHost {
     /// 每刻开头重置预算和计数。进服/离开/移动发来的票操作都算在这一刻里。
     pub(crate) fn begin_tick(&mut self) {
         self.budget_left = self.budget;
+        self.reclaims_spent = 0;
         self.delivered = 0;
         self.reclaimed = 0;
         self.parked = 0;
@@ -149,6 +157,13 @@ impl DirectorHost {
     pub(crate) fn set_budget(&mut self, budget: MailBudget) {
         self.budget = budget;
         self.budget_left = budget;
+        self.reclaims_spent = 0;
+    }
+
+    /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
+    #[cfg(test)]
+    pub(crate) fn region_reclaims_this_tick(&self) -> usize {
+        self.reclaims_spent
     }
 
     #[cfg(test)]
@@ -445,28 +460,13 @@ impl DirectorHost {
 
     /// region 在 tick 边界收信箱：先交付、后收回，返回要回给 Director 的事件。
     ///
-    /// 整刻最多交付 `budget.deliveries` 个非豁免区块、收回
-    /// `budget.reclaims` 个区块（`0` 表示不限），剩下的留到下一刻。
-    /// 同一刻内 `pump` 会多次调用它，共用 `budget_left` 里的剩余额度。
+    /// 整刻最多交付 `budget.deliveries` 个非豁免区块（`0` 表示不限），
+    /// 收回的上限见 [`Self::reclaim_cap`]，剩下的留到下一刻。
+    /// 同一刻内 `pump` 会多次调用它，交付共用 `budget_left` 里的剩余额度，
+    /// 收回共用 `reclaims_spent`。
     fn flush_region_mail(&mut self, region: &mut Region) -> Vec<Event<Box<RegionColumn>>> {
-        let MailBudget {
-            deliveries: delivery_left,
-            reclaims: reclaim_allowance,
-        } = self.budget_left;
+        let delivery_left = self.budget_left.deliveries;
         let limited_deliveries = self.budget.deliveries > 0;
-        let limited_reclaims = self.budget.reclaims > 0;
-        // 交付上限是削进服尖峰，收回没有这个理由：按积压放宽到
-        // max(配置上限, 积压 / 20)，积压再多也能在一秒左右收完。
-        // 额度本身也放宽，否则 `pump` 一轮里多次 flush 仍会被旧额度卡住。
-        let reclaim_left = if limited_reclaims {
-            reclaim_allowance.max(
-                self.budget
-                    .reclaims
-                    .max(self.reclaims.len().div_ceil(RECLAIM_DRAIN_TICKS)),
-            )
-        } else {
-            usize::MAX
-        };
         let mut events = Vec::new();
         // 收回优先：盒子可能还在 `deliveries` 里排队（交付有了每刻上限之后，
         // 一个盒子可以在信箱里等好几刻）。这时 Director 已经把它记成
@@ -546,12 +546,22 @@ impl DirectorHost {
         let mut ordered: Vec<ChunkPos> = by_generation.keys().copied().collect();
         let distance = |pos: &ChunkPos| Self::distance_to_players(*pos, &centers);
         // 距离取相反数，远的在前；同距离按坐标升序。
-        ordered.sort_by_key(|pos| {
+        // 积压可以有几千个，到玩家的距离每个位置只算一次。
+        ordered.sort_by_cached_key(|pos| {
             let (far, x, z) = distance(pos);
             (std::cmp::Reverse(far), x, z)
         });
         region.profiler.end_sub();
-        let count = ordered.len().min(reclaim_left);
+        // 这一刻要收回的总数 = 已经收的 + 还在信箱里的。收一个，前一项加一、
+        // 后一项减一，总数不变；所以同一刻里不管 `pump` 调用几次，
+        // 上限只会因为新排进来的请求变大，不会因为多调用几次而重新发一份额度。
+        let cap = Self::reclaim_cap(self.budget.reclaims, self.reclaims_spent + ordered.len());
+        let count = ordered.len().min(cap.saturating_sub(self.reclaims_spent));
+        if count == 0 {
+            // 这一刻的额度用完了，全部留到下一刻。
+            self.reclaims.extend(by_generation);
+            return events;
+        }
         let batch: Vec<(ChunkPos, u64)> = ordered
             .into_iter()
             .take(count)
@@ -586,17 +596,19 @@ impl DirectorHost {
                 self.reclaims.extend(batch);
             }
         }
-        if limited_reclaims {
-            let spent = self.reclaimed.saturating_sub(reclaimed_before);
-            // 放宽后的额度只在这一刻有效，剩余额度回落到配置的基准，
-            // 免得下一刻 flush 时把放宽值一路带下去。
-            self.budget_left.reclaims = self
-                .budget
-                .reclaims
-                .min(reclaim_allowance)
-                .saturating_sub(spent);
-        }
+        self.reclaims_spent += self.reclaimed.saturating_sub(reclaimed_before);
         events
+    }
+
+    /// 一刻里最多从 region 取回多少个区块。`demand` 是这一刻要收回的总数。
+    ///
+    /// 积压小的时候就是配置的上限；积压大了每刻收掉它的
+    /// 1/[`RECLAIM_DRAIN_TICKS`]。配置成 0 表示不限。
+    fn reclaim_cap(configured: usize, demand: usize) -> usize {
+        if configured == 0 {
+            return usize::MAX;
+        }
+        configured.max(demand.div_ceil(RECLAIM_DRAIN_TICKS))
     }
 }
 

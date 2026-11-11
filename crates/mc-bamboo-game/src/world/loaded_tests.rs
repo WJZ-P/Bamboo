@@ -451,6 +451,7 @@ fn fast_movement_keeps_the_footprint_loaded_and_the_mailbox_bounded() {
 
 /// 很多名玩家同时高速移动时，收回的积压不能把已加载的区块数顶得没有上界：
 /// 固定的每刻收回上限会被持续产生的新收回请求压垮，自适应上限按积压放宽。
+/// 放宽之后它仍然是整刻的上限：一刻里不管信箱被处理几次，都不能把积压一次收光。
 #[test]
 fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
     const PLAYERS: usize = 8;
@@ -474,6 +475,7 @@ fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
         server.load_player(&client);
         clients.push(client);
     }
+    let mut peak_backlog = 0;
     for step in 1..=STEPS {
         for (index, client) in clients.iter().enumerate() {
             // 每人一个不同的方向，每刻跨一整个区块，比 33 格/秒飞行还快。
@@ -495,6 +497,16 @@ fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
         let (_, _, mail) = server.director_mail();
         assert!(mail.0 < bound, "第 {step} 刻交付信箱有界：{mail:?}");
         assert!(mail.1 < bound, "第 {step} 刻收回收信箱有界：{mail:?}");
+        // 这一刻要收回的总数是「收了的 + 还欠着的」，上限按它算。
+        let spent = server.region_reclaims_this_tick();
+        let cap = RECLAIM_BUDGET
+            .max((spent + mail.1).div_ceil(crate::director_host::RECLAIM_DRAIN_TICKS));
+        assert!(
+            spent <= cap,
+            "第 {step} 刻从 region 收回 {spent} 个，超过这一刻的上限 {cap}（还欠 {}）",
+            mail.1
+        );
+        peak_backlog = peak_backlog.max(mail.1);
         let loaded = server
             .world_region()
             .chunks
@@ -509,8 +521,13 @@ fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
             server.acknowledge_batch(client, 64.0);
         }
     }
-    // 停下来之后积压要能排空。
-    for _ in 0..RECLAIM_DRAIN_TICKS_FOR_TEST {
+    assert!(
+        peak_backlog > RECLAIM_BUDGET,
+        "这个场景每刻新排进来的收回请求比配置的上限多，信箱里应该有过积压：{peak_backlog}"
+    );
+    // 停下来之后积压要能排空：先按比例收，剩得少了按配置的上限收。
+    let mut drained_after = None;
+    for tick in 1..=DRAIN_TICKS {
         for client in &clients {
             server.acknowledge_batch(client, 64.0);
         }
@@ -518,13 +535,20 @@ fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
         for client in &clients {
             client.take_frames();
         }
+        if server.director_mail().2.1 == 0 {
+            drained_after = Some(tick);
+            break;
+        }
     }
     let (_, _, mail) = server.director_mail();
-    assert_eq!(mail.1, 0, "静置之后收回收信箱排空：{mail:?}");
+    assert!(
+        drained_after.is_some(),
+        "静置 {DRAIN_TICKS} 刻之后收回收信箱还没排空：{mail:?}"
+    );
 }
 
-/// 和 [`crate::director_host::RECLAIM_DRAIN_TICKS`] 对齐的等待刻数。
-const RECLAIM_DRAIN_TICKS_FOR_TEST: usize = 40;
+/// 停下来之后最多等这么多刻让积压排空。
+const DRAIN_TICKS: usize = 400;
 
 /// 确定性随机走动：多名玩家随机走动、传送、进出、改视距，每刻断言脚下 3×3
 /// 和每刻的上限，最后停下来若干刻，每名玩家都收齐了自己的视野。

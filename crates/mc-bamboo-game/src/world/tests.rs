@@ -489,6 +489,11 @@ impl Harness {
         (delivered, reclaimed, self.world.host.mail_backlog())
     }
 
+    /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
+    pub(crate) fn region_reclaims_this_tick(&self) -> usize {
+        self.world.host.region_reclaims_this_tick()
+    }
+
     /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
     pub(crate) fn set_mail_budget(&mut self, budget: crate::director_host::MailBudget) {
         self.world.host.set_budget(budget);
