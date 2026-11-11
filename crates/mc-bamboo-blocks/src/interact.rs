@@ -296,10 +296,11 @@ pub fn destroy_block(
 /// that part of `ServerLevel.tick`. Entity ticks are separate: the block oracle does
 /// not tick entities, and the game loop calls [`run_entity_tick`] on its own.
 pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
-    ticks.collect_due(now);
+    let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+    ticks.collect_due(now, &can_tick);
     let mut world = World::in_world_tick(level, ticks);
     run_block_ticks(&mut world);
-    world.ticks_mut().collect_due_fluids();
+    world.collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
         world.begin_fluid_trigger(pos, fluid);
         fluid::tick(&mut world, pos, fluid);
@@ -323,10 +324,11 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
 /// [`run_block_entity_tick`]. [`run_scheduled_ticks`] runs the whole thing without random ticks
 /// and entities, for tests that only care about blocks.
 pub fn run_due_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
-    ticks.collect_due(now);
+    let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+    ticks.collect_due(now, &can_tick);
     let mut world = World::in_world_tick(level, ticks);
     run_block_ticks(&mut world);
-    world.ticks_mut().collect_due_fluids();
+    world.collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
         world.begin_fluid_trigger(pos, fluid);
         fluid::tick(&mut world, pos, fluid);
@@ -365,7 +367,8 @@ pub fn run_block_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> O
 /// oracle 的 tick 题：官方的题在动作里直接调用这一格的 `state.tick`，还没进 `ServerLevel.tick`，
 /// 所以只跑到期的方块刻，流体刻、方块事件和方块实体都留到后面的刻。
 pub fn run_action_block_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i64) -> Outcome {
-    ticks.collect_due(now);
+    let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+    ticks.collect_due(now, &can_tick);
     let mut world = World::new(level, ticks);
     run_block_ticks(&mut world);
     outcome_from(world, InteractionResult::Pass, false)
@@ -417,12 +420,14 @@ fn outcome_from(world: World, result: InteractionResult, used_without_item: bool
 
 #[cfg(test)]
 mod tests {
-    use mc_bamboo_core::Direction;
+    use mc_bamboo_core::{ChunkPos, Direction};
     use mc_bamboo_data::{blocks, items};
 
     use super::*;
     use crate::{
         Behaviour,
+        block_entity::BlockEvent,
+        level::LevelSideState,
         testing::{TestLevel, actor_holding, break_block, top_hit, use_item as click},
     };
 
@@ -528,6 +533,111 @@ mod tests {
         let outcome = run_scheduled_ticks(&mut level, &mut ticks, 1);
         assert_eq!(outcome.result, InteractionResult::Pass);
         assert_eq!(ticks.pending().count(), 0);
+    }
+
+    /// 三个音符盒：两个在冻结的区块，一个能 tick。方块事件按官方顺序推迟到下一刻，
+    /// 被推迟的彼此保持原顺序，并排在队列里已有事件的后面。
+    #[test]
+    fn frozen_block_events_are_rescheduled_in_order_after_the_round() {
+        let mut level = TestLevel::new();
+        let a = BlockPos::new(1, 64, 0);
+        let b = BlockPos::new(2, 64, 0);
+        let c = BlockPos::new(20, 64, 0);
+        for pos in [a, b, c] {
+            level.set(pos, BlockState(blocks::NOTE_BLOCK).default_state());
+        }
+        level.set_frozen(ChunkPos::new(0, 0), true);
+
+        // 冻结区块里排两个事件，能 tick 的区块里排一个；一轮结束后推迟的两个按原顺序加回。
+        {
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            for &(pos, param) in &[(a, 1), (c, 2), (b, 3)] {
+                world.block_event(pos, BlockState(blocks::NOTE_BLOCK).block(), param, 0);
+            }
+            world.run_block_events();
+            let effects = world.drain_effects();
+            assert_eq!(
+                effects.len(),
+                2,
+                "只有能 tick 的那一格发了声音和 BlockEvent 广播"
+            );
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::BlockEvent { pos, .. } if *pos == c))
+            );
+        }
+
+        // 下一轮之前再排一个新事件（模拟本轮新产生的事件排在被推迟的后面）。
+        {
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            world.block_event(c, BlockState(blocks::NOTE_BLOCK).block(), 4, 0);
+        }
+        level.set_frozen(ChunkPos::new(0, 0), false);
+        {
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            world.run_block_events();
+            let effects = world.drain_effects();
+            let seen: Vec<_> = effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::BlockEvent { pos, param_a, .. } => Some((*pos, *param_a)),
+                    _ => None,
+                })
+                .collect();
+            // 官方：推迟的事件在这一轮末尾才 addAll 回队列，排在队列里已有事件的后面，
+            // 彼此保持原顺序；下一刻三个事件按这个顺序执行。
+            assert_eq!(seen, [(a, 1), (b, 3), (c, 4)]);
+        }
+    }
+
+    /// 冻结区块的方块事件没被丢：下一刻解冻，全部事件按原顺序执行。
+    #[test]
+    fn frozen_block_events_run_on_the_next_tick_after_thaw() {
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(1, 64, 0);
+        level.set(pos, BlockState(blocks::NOTE_BLOCK).default_state());
+        level.set_frozen(ChunkPos::new(0, 0), true);
+        {
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            world.block_event(pos, BlockState(blocks::NOTE_BLOCK).block(), 7, 0);
+            world.run_block_events();
+            assert!(world.drain_effects().is_empty());
+            // 事件还在表里，下一刻再看。
+        }
+        level.set_frozen(ChunkPos::new(0, 0), false);
+        {
+            let mut ticks = BlockTicks::new();
+            let mut world = World::new(&mut level, &mut ticks);
+            world.run_block_events();
+            assert!(
+                world
+                    .drain_effects()
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::BlockEvent { param_a: 7, .. }))
+            );
+        }
+    }
+
+    /// `BlockEvents::reschedule` 和官方的 `LinkedHashSet.addAll` 一样：
+    /// 这一轮里又排进来的同一项不会被重复，也不会丢。
+    #[test]
+    fn rescheduling_does_not_duplicate_an_event_queued_again_this_round() {
+        let mut level = TestLevel::new();
+        let event = BlockEvent {
+            pos: BlockPos::new(1, 64, 0),
+            block: 0,
+            param_a: 1,
+            param_b: 0,
+        };
+        level.reschedule_block_events(vec![event]);
+        level.push_block_event(event);
+        assert_eq!(level.pop_block_event(), Some(event));
+        assert_eq!(level.pop_block_event(), None);
     }
 
     #[test]

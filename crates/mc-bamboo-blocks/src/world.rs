@@ -498,6 +498,14 @@ impl<'a> World<'a> {
         self.ticks
     }
 
+    /// 取出这一刻到期的流体计划刻，判断从这一层背后的 `Level` 读。
+    /// 单独开个入口是为了让 `Level` 的只读借用和计划刻表的可变借用不相交。
+    pub(crate) fn collect_due_fluids(&mut self) {
+        let level: &dyn Level = self.level;
+        let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+        self.ticks.collect_due_fluids(&can_tick);
+    }
+
     /// 记下一个发给玩家的结果，官方的 `levelEvent`。
     pub fn push_effect(&mut self, effect: Effect) {
         self.level.observe(Observation::Effect(&effect));
@@ -929,9 +937,16 @@ impl<'a> World<'a> {
 
     /// `ServerLevel.runBlockEvents`：按排队的顺序一直处理到队列空，处理中新排进来的同一轮执行。
     ///
-    /// 处理成功的事件记成 [`Effect::BlockEvent`]，由调用方发给附近的玩家。
+    /// 所在区块不能 tick 的事件收进 `blockEventsToReschedule`，这一轮全部处理完之后
+    /// 才按原顺序加回队列，下一刻再看。处理成功的事件记成 [`Effect::BlockEvent`]，
+    /// 由调用方发给附近的玩家。
     pub fn run_block_events(&mut self) {
+        let mut reschedule = Vec::new();
         while let Some(event) = self.level.pop_block_event() {
+            if !self.level.chunk_ticks_blocks(event.pos.chunk()) {
+                reschedule.push(event);
+                continue;
+            }
             let state = self.block_state(event.pos);
             if state.block_id() != event.block {
                 continue;
@@ -952,6 +967,7 @@ impl<'a> World<'a> {
             }
             self.level.observe(Observation::TriggerEnd);
         }
+        self.level.reschedule_block_events(reschedule);
     }
 
     /// 驱动循环在每次触发开始前报一次边界。
@@ -988,7 +1004,11 @@ impl<'a> World<'a> {
     pub fn tick_block_entities(&mut self) {
         self.level.begin_block_entity_tick();
         while let Some((pos, id)) = self.level.next_block_entity_ticker() {
-            if !self.level.runs_block_entity_tick(pos) {
+            // 官方先判 `shouldTickBlocksAt(pos)`，再判 `LevelChunk.isTicking(pos)`；
+            // 跳过的 ticker 留在列表里，运行顺序不变。
+            if !self.level.chunk_ticks_blocks(pos.chunk())
+                || !self.level.runs_block_entity_tick(pos)
+            {
                 continue;
             }
             let Some(entity) = self.level.take_block_entity(pos, id) else {
@@ -2064,9 +2084,16 @@ impl<'a> World<'a> {
             let Some(mut entity) = self.level.take_entity(id) else {
                 continue;
             };
+            // 所在区块不在实体 tick 范围时，官方跳过这一刻；实体仍留在世界里，
+            // 别的实体照常查得到它，位置和年龄都不动。
+            let ticks = !entity.removed
+                && self.level.chunk_ticks_entities(ChunkPos::containing(
+                    entity.position.x,
+                    entity.position.z,
+                ));
             // 这一拍已经被别的实体丢掉的，官方不再 tick，名单里也不再留下。
             // An entity another one discarded earlier this tick is not ticked. Vanilla drops it from the list.
-            if !entity.removed {
+            if ticks {
                 let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
                 entity.tick(&mut ctx);
             }
@@ -2093,7 +2120,13 @@ impl<'a> World<'a> {
             };
             // 合并把对方丢掉之后，对方这一拍还在快照里，但是不再 tick。
             // After a merge discards the other item, it stays in this tick's snapshot and does not tick.
-            if !entity.removed {
+            // 和 `tick_entities` 一样跳过不在实体 tick 范围的区块。
+            let ticks = !entity.removed
+                && self.level.chunk_ticks_entities(ChunkPos::containing(
+                    entity.position.x,
+                    entity.position.z,
+                ));
+            if ticks {
                 let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
                 entity.tick(&mut ctx);
             }
@@ -2423,14 +2456,54 @@ pub(crate) fn traverse_blocks<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+
     use mc_bamboo_data::items;
     use mc_bamboo_protocol::item::ItemStack;
 
     use super::*;
     use crate::{
+        block_entity::BlockEntity,
         state::HORIZONTAL_FACING,
         testing::{TestLevel, break_block},
     };
+
+    /// 数自己被 tick 了几次的测试方块实体，用来验证冻结时留在表里、顺序不变。
+    struct Counter {
+        pos: BlockPos,
+        ticks: i32,
+    }
+
+    impl Counter {
+        fn boxed(pos: BlockPos) -> Box<dyn BlockEntity> {
+            Box::new(Self { pos, ticks: 0 })
+        }
+    }
+
+    impl BlockEntity for Counter {
+        fn pos(&self) -> BlockPos {
+            self.pos
+        }
+
+        fn tick(&mut self, _world: &mut World) {
+            self.ticks += 1;
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        // 测试用的计数器没有要存盘的内容。
+        fn write_additional(
+            &self,
+        ) -> Result<Vec<(String, mc_bamboo_nbt::Tag)>, crate::archive::Error> {
+            Ok(Vec::new())
+        }
+    }
 
     const CENTER: BlockPos = BlockPos::new(0, 64, 0);
 
@@ -2442,6 +2515,41 @@ mod tests {
         let mut ticks = BlockTicks::new();
         let mut world = World::new(level, &mut ticks);
         run(&mut world)
+    }
+
+    /// 冻结区块里的方块实体不 tick，留在表里、运行顺序不变；解冻后照常接着跑。
+    #[test]
+    fn frozen_chunks_skip_block_entity_tickers_without_changing_order() {
+        let mut level = TestLevel::new();
+        let a = BlockPos::new(1, 64, 0);
+        let b = BlockPos::new(2, 64, 0);
+        let c = BlockPos::new(20, 64, 0);
+        for pos in [a, b, c] {
+            level.set(pos, BlockState(blocks::CHEST).default_state());
+            with_world(&mut level, |world| {
+                world.set_block_entity(Counter::boxed(pos));
+            });
+        }
+        level.set_frozen(ChunkPos::new(0, 0), true);
+
+        // 冻结时只有 c 跑；冻结的两个一次都没动，状态不变。
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_block_entities();
+        assert_eq!(world.block_entity::<Counter>(a).unwrap().ticks, 0);
+        assert_eq!(world.block_entity::<Counter>(b).unwrap().ticks, 0);
+        assert_eq!(world.block_entity::<Counter>(c).unwrap().ticks, 1);
+        assert!(world.has_block_entity(a) && world.has_block_entity(b));
+        drop(world);
+
+        level.set_frozen(ChunkPos::new(0, 0), false);
+        let mut ticks = BlockTicks::new();
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_block_entities();
+        // 三个 ticker 都还在原来的表里，按原顺序各跑一次。
+        assert_eq!(world.block_entity::<Counter>(a).unwrap().ticks, 1);
+        assert_eq!(world.block_entity::<Counter>(b).unwrap().ticks, 1);
+        assert_eq!(world.block_entity::<Counter>(c).unwrap().ticks, 2);
     }
 
     fn destroyed_positions(effects: &[Effect]) -> Vec<BlockPos> {

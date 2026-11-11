@@ -1,10 +1,10 @@
 //! 并行驱动的确定性和与精确模式的差异清单。
 
-use mc_bamboo_core::Vec3;
+use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    BlockTicks, World,
+    Aabb, BlockState, BlockTicks, World,
     entity::{
         Entity,
         ctx::Command,
@@ -23,6 +23,30 @@ fn flat_blocks() -> SourceView<FlatSource> {
         floor_y: 64,
         facts: ViewFacts::default(),
     })
+}
+
+/// 和 `TestLevel::frozen_chunks` 同一份判断的只读视图，给并行算阶段用。
+struct GatedSource {
+    floor_y: i32,
+    frozen: ChunkPos,
+}
+
+impl crate::entity::view::BlockSource for GatedSource {
+    fn block_state(&self, pos: mc_bamboo_core::BlockPos) -> BlockState {
+        if pos.y == self.floor_y {
+            BlockState(mc_bamboo_data::blocks::STONE)
+        } else {
+            BlockState::AIR
+        }
+    }
+
+    fn facts(&self) -> ViewFacts {
+        ViewFacts::default()
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        chunk != self.frozen
+    }
 }
 
 /// 跑若干刻，返回按 uid 升序的世界状态（位置、速度、类型、元数据）。
@@ -319,4 +343,133 @@ fn commands_are_applied_in_uid_order_within_one_entity() {
     let ids = world.entity_ids();
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[1], ids[0] + 1);
+}
+
+/// 精确驱动和并行驱动用同一份「区块 0 冻结」的判断：跳过的是同一批实体；
+/// 被跳过的实体仍在世界里，位置和年龄不动，别的实体照样查得到它。
+#[test]
+fn frozen_chunks_skip_the_same_entities_in_both_drivers() {
+    let frozen = ChunkPos::new(0, 0);
+    let gated = SourceView::new(GatedSource {
+        floor_y: 64,
+        frozen,
+    });
+
+    let spawn = |level: &mut TestLevel, ticks: &mut BlockTicks| {
+        let mut world = World::new(level, ticks);
+        // 0 号区块两个相邻物品，1 号区块一个；后者的物理会真的往下掉。
+        world.spawn_entity(Entity::ground_item(
+            Vec3::new(0.5, 70.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        world.spawn_entity(Entity::ground_item(
+            Vec3::new(1.5, 70.0, 0.5),
+            ItemStack::new(2, 1),
+        ));
+        world.spawn_entity(Entity::ground_item(
+            Vec3::new(16.5, 70.0, 0.5),
+            ItemStack::new(3, 1),
+        ));
+    };
+
+    let precise = {
+        let mut level = TestLevel::new();
+        level.set_frozen(frozen, true);
+        let mut ticks = BlockTicks::new();
+        spawn(&mut level, &mut ticks);
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_entities();
+        world.live_entities()
+    };
+    let parallel = {
+        let mut level = TestLevel::new();
+        level.set_frozen(frozen, true);
+        let mut ticks = BlockTicks::new();
+        spawn(&mut level, &mut ticks);
+        let mut world = World::new(&mut level, &mut ticks);
+        tick_entities_parallel(&gated, &mut world, &ScopedThreads { threads: 2 });
+        world.live_entities()
+    };
+
+    assert_eq!(precise.len(), 3, "跳过的实体仍留在世界里");
+    assert_eq!(parallel.len(), 3);
+    // 两个驱动跳过的是同一批：0 号区块的两件物品位置、tick 计数都没动。
+    for (index, item) in precise.iter().take(2).enumerate() {
+        assert_eq!(
+            item.position,
+            Vec3::new(0.5 + f64::from(index as i32), 70.0, 0.5)
+        );
+        assert_eq!(item.tick_count, 0, "冻结的实体年龄不前进");
+        assert_eq!(parallel[index].position, item.position);
+        assert_eq!(parallel[index].tick_count, item.tick_count);
+        assert_eq!(parallel[index].id, item.id);
+    }
+    assert_ne!(precise[2].position.y, 70.0, "能 tick 的实体照常跑物理");
+    assert_eq!(precise[2].position, parallel[2].position);
+    assert_eq!(precise[2].tick_count, parallel[2].tick_count);
+}
+
+/// 冻结的实体仍在别的实体的视野里：一个能 tick 的物品靠过来时，
+/// `entity_uids` 和范围查询都还能看到冻结的那一件。
+#[test]
+fn frozen_entities_stay_visible_to_other_entities() {
+    let frozen = ChunkPos::new(0, 0);
+    let gated = SourceView::new(GatedSource {
+        floor_y: 64,
+        frozen,
+    });
+    let mut level = TestLevel::new();
+    level.set_frozen(frozen, true);
+    let mut ticks = BlockTicks::new();
+    let mut world = World::new(&mut level, &mut ticks);
+    world.spawn_entity(Entity::ground_item(
+        Vec3::new(0.5, 70.0, 0.5),
+        ItemStack::new(1, 1),
+    ));
+    world.spawn_entity(Entity::ground_item(
+        Vec3::new(0.6, 70.0, 0.5),
+        ItemStack::new(1, 2),
+    ));
+    tick_entities_parallel(&gated, &mut world, &ScopedThreads { threads: 1 });
+    assert_eq!(world.entity_ids().len(), 2, "冻结的实体仍在实体名单里");
+    assert_eq!(world.live_entities().len(), 2);
+}
+
+/// 并行算阶段跳过冻结的实体时，仍把它列进 `entity_uids` 和范围查询，
+/// 让别的实体可以照常和它交互；两种驱动在这点上一致。
+#[test]
+fn skipped_entities_remain_in_the_compute_phase_snapshot() {
+    let frozen = ChunkPos::new(0, 0);
+    let gated = SourceView::new(GatedSource {
+        floor_y: 64,
+        frozen,
+    });
+    let mut level = TestLevel::new();
+    level.set_frozen(frozen, true);
+    let mut ticks = BlockTicks::new();
+    {
+        let mut world = World::new(&mut level, &mut ticks);
+        world.spawn_entity(Entity::ground_item(
+            Vec3::new(0.5, 70.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        world.spawn_entity(Entity::ground_item(
+            Vec3::new(16.5, 70.0, 0.5),
+            ItemStack::new(2, 1),
+        ));
+        world.begin_entity_tick();
+    }
+    let computed = compute(&gated, level.entities_mut_for_test(), &InlineExecutor);
+    assert_eq!(computed.uids().len(), 2, "冻结的实体仍在这一刻的名单里");
+    assert_eq!(computed.command_counts(), [0, 0], "跳过的实体不发命令");
+    let mut world = World::new(&mut level, &mut ticks);
+    // 范围查询看得见冻结的那一格。
+    let area = Aabb::new(-1.0, 69.0, -1.0, 2.0, 72.0, 2.0);
+    let mut seen = Vec::new();
+    world.level().for_each_entity_in(area, &mut |public| {
+        seen.push(public.uid);
+    });
+    assert_eq!(seen.len(), 1);
+    commit(computed, &mut world);
+    assert_eq!(world.entity_ids().len(), 2);
 }

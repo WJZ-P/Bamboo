@@ -14,7 +14,7 @@
 //! 缓冲起来，落地阶段按顺序调用。**tick 函数不能根据 `emit` 之后自己的状态分支**；
 //! 「看结果再决定」的逻辑全在 [`apply`] 里，那里能直接改发出者。
 
-use mc_bamboo_core::{BlockPos, Direction, LightLayer, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
@@ -74,6 +74,20 @@ pub trait BlockView {
     /// 这片格子里有没有漏斗方块。物品只在这时发 `SuckIntoHopper`：漏斗不存在时
     /// 那条命令的整个处理函数什么也不会做，省掉落地阶段的虚调用和扫描。
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool;
+
+    /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
+    ///
+    /// 算阶段靠这一份只读事实跳过不在实体 tick 范围的实体；它们仍在世界里，
+    /// 别的实体照常查得到。和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：
+    /// [`World`] 实现本方法时转发到后者，游戏层的只读视图以后也从同一个判断取值。
+    ///
+    /// Whether entities in this chunk tick now. All do by default. The compute phase uses this
+    /// read-only fact to skip entities outside the entity-ticking range; they stay in the world
+    /// and are still visible to others. This must agree with
+    /// [`crate::Level::chunk_ticks_entities`], which [`World`] forwards to.
+    fn chunk_ticks_entities(&self, _chunk: ChunkPos) -> bool {
+        true
+    }
 }
 
 impl BlockView for World<'_> {
@@ -160,6 +174,10 @@ impl BlockView for World<'_> {
                 })
             })
         })
+    }
+
+    fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
+        self.level().chunk_ticks_entities(chunk)
     }
 }
 
