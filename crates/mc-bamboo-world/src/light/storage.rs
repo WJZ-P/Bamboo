@@ -217,6 +217,22 @@ impl LightStorage {
         self.loaded = loaded;
     }
 
+    /// 增量登记一个已加载位置，避免每次加载都克隆整张集合。
+    pub(crate) fn add_loaded(&mut self, pos: ChunkPos) {
+        if let Some(set) = self.loaded.as_mut() {
+            set.insert(pos);
+        }
+    }
+
+    /// 增量注销一个已加载位置，并把它的光照柱真的删掉。
+    pub(crate) fn remove_loaded(&mut self, pos: ChunkPos) {
+        if let Some(set) = self.loaded.as_mut() {
+            set.remove(&pos);
+        }
+        self.columns.remove(&pos);
+        self.revisions.remove(&pos);
+    }
+
     /// 这个位置在这层光照里有没有柱。无限模式恒为真（没写过的柱读模板）。
     /// 已加载模式下集合外恒为假，集合内按有没有存过自己的一份算。
     pub(crate) fn has_column(&self, pos: ChunkPos) -> bool {

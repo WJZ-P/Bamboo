@@ -239,11 +239,16 @@ impl ChunkColumn {
     /// 生成器（现在只有超平坦模板）产出的原始盒子，含算好的模板光照。
     ///
     /// 已加载模式用它加载一个从没来过的位置；[`is_pristine`](Self::is_pristine)
-    /// 也拿它当基准。每次调用都会重新算模板光照，调用方应缓存结果。
+    /// 也拿它当基准。模板光照只算一次，之后克隆缓存的那份。
     pub fn from_template() -> Self {
-        let mut store = super::store::ChunkStore::flat();
-        let pos = mc_bamboo_core::ChunkPos::new(0, 0);
-        *store.take_column(pos).expect("新建的世界没有待算的光照")
+        static TEMPLATE: std::sync::OnceLock<ChunkColumn> = std::sync::OnceLock::new();
+        TEMPLATE
+            .get_or_init(|| {
+                let mut store = super::store::ChunkStore::flat();
+                let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+                *store.take_column(pos).expect("新建的世界没有待算的光照")
+            })
+            .clone()
     }
 
     pub(super) fn into_parts(self) -> (Chunk, [LightColumn; 2]) {

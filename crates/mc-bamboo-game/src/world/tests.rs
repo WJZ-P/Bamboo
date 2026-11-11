@@ -197,11 +197,12 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    /// 默认走「无限超平坦」测试世界：现有单元测试/oracle 都假设哪里都有地。
     pub(crate) fn new(view_distance: i32) -> Self {
         Self::build(view_distance, false)
     }
 
-    /// 已加载模式：起点没有加载任何区块，测试自己调用 `load_chunks`。
+    /// 正式入口（已加载模式）：起点没有加载任何区块，测试自己交付。
     pub(crate) fn new_loaded(view_distance: i32) -> Self {
         Self::build(view_distance, true)
     }
@@ -216,9 +217,9 @@ impl Harness {
             admin: Default::default(),
         };
         let mut world = if loaded {
-            World::new_loaded(config, receiver)
-        } else {
             World::new(config, receiver)
+        } else {
+            World::new_infinite_flat_for_tests(config, receiver)
         };
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.region.random = LevelRandom::new(0);
@@ -440,6 +441,11 @@ impl Harness {
     }
 
     /// 给其他模块的测试直接看世界的状态。
+    /// 只读 region（测试断言用）。
+    pub(crate) fn world_region(&self) -> &Region {
+        &self.world.region
+    }
+
     pub(crate) fn region(&mut self) -> &mut Region {
         &mut self.world.region
     }

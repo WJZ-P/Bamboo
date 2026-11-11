@@ -126,6 +126,25 @@ impl ChunkStore {
         self.loaded.as_ref().map(BTreeSet::len)
     }
 
+    /// 只把 `pos` 加进已加载集合，不搬盒子。
+    ///
+    /// 给「先 `insert_column` 装好内容、再登记已加载」的交付路径用；
+    /// 调用方保证盒子已经放好、光照已经算完。
+    pub fn mark_loaded(&mut self, pos: ChunkPos) {
+        if let Some(set) = self.loaded.as_mut() {
+            set.insert(pos);
+        }
+        self.light.add_loaded(pos);
+        let Self {
+            template,
+            edited,
+            loaded,
+            light: engine,
+            ..
+        } = self;
+        engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
+    }
+
     /// 把一个区块束装进已加载集合。调用方保证位置原本没有内容。
     /// 只有已加载模式能调用；无限模式忽略。
     pub fn load(&mut self, pos: ChunkPos, column: Box<crate::column::ChunkColumn>) {
@@ -133,8 +152,7 @@ impl ChunkStore {
             return;
         }
         self.loaded.as_mut().expect("已加载模式").insert(pos);
-        self.light
-            .set_loaded(Some(self.loaded.clone().expect("已加载模式")));
+        self.light.add_loaded(pos);
         self.insert_column(pos, column)
             .unwrap_or_else(|_| unreachable!("交付前光照已经算完"));
     }
@@ -150,13 +168,26 @@ impl ChunkStore {
         if !self.ready_to_move_columns() {
             return Err(crate::column::LightPending);
         }
-        // 先从已加载集合里拿掉：`take_column` 里的 `rebind_area` 要按
-        // 「这个位置已经没有方块」重算邻居段的计数，取走之后才真的没有柱。
+        // 先把盒子从引擎里取出来（这时柱子还在，`take_column` 能拿到真实数据），
+        // 再从已加载集合里注销：注销会真的删掉光照柱。
+        // `take_column` 里的 `rebind_area` 按「这一柱还在」重算邻居计数，
+        // 注销后由下一次 `rebind_area` 修正（加载/卸载成对发生时净效果正确）。
+        let column = self.take_column(pos);
         if let Some(set) = self.loaded.as_mut() {
             set.remove(&pos);
         }
-        self.light.set_loaded(self.loaded.clone());
-        self.take_column(pos)
+        self.light.remove_loaded(pos);
+        // 注销之后再重算一遍 3×3：这时 `pos` 已经不算已加载，
+        // 邻居段的计数按「那个位置没有方块」修正。
+        let Self {
+            template,
+            edited,
+            loaded,
+            light: engine,
+            ..
+        } = self;
+        engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
+        column
     }
 
     /// 所有没改过的区块共用的内容。

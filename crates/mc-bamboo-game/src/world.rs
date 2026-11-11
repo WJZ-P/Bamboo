@@ -15,7 +15,9 @@ use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
 };
-use mc_bamboo_world::{director::TicketOp, ticket::TicketTable};
+use mc_bamboo_world::director::TicketOp;
+
+use crate::director_host::DirectorHost;
 use tracing::warn;
 
 use crate::{
@@ -74,11 +76,12 @@ pub struct World {
     authoritative_admin: bool,
     /// 实体阶段的线程数。0 = 精确驱动；≥ 1 = 并行驱动。
     pub(crate) entity_threads: usize,
-    /// 区块平面的票表。提交 5 接 Director 时由它接管；现在只记录票的增减，
-    /// 不改变任何可观察行为（区块仍由无限超平坦模板隐式提供）。
-    tickets: TicketTable,
+    /// 区块平面的 Director 和它的宿主（内联执行器、停放表、region 消息）。
+    host: DirectorHost,
     /// 上一刻每名玩家所在的区块，用来只在跨区块时发 `PlayerMoved`。
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
+    /// Director 的逻辑刻数，每次 `tick_ticket_timeouts` 加一。
+    director_tick: u64,
 }
 
 /// 世界创建时读一次环境变量。读不到、0、负数或解析不了都是精确驱动。
@@ -103,7 +106,7 @@ impl World {
         inbox: Receiver<Inbound>,
         keys: Arc<ServiceProfileKeys>,
     ) -> Self {
-        Self::build(config, inbox, keys, None)
+        Self::build(config, inbox, keys, None, false)
     }
 
     /// 连接层把启动时读到的名单和发布变更的通道交给世界线程。
@@ -114,7 +117,7 @@ impl World {
         keys: Arc<ServiceProfileKeys>,
         admin: crate::admin::AdminInit,
     ) -> Self {
-        Self::build(config, inbox, keys, Some(admin))
+        Self::build(config, inbox, keys, Some(admin), false)
     }
 
     fn build(
@@ -122,6 +125,7 @@ impl World {
         inbox: Receiver<Inbound>,
         keys: Arc<ServiceProfileKeys>,
         admin: Option<crate::admin::AdminInit>,
+        infinite_flat: bool,
     ) -> Self {
         let view_distance = config
             .view_distance
@@ -145,27 +149,50 @@ impl World {
             ),
             inbox,
             pacer: Pacer::from_env(),
-            tickets: TicketTable::new(),
+            host: if infinite_flat {
+                DirectorHost::new_infinite_flat(Default::default())
+            } else {
+                DirectorHost::new(Default::default())
+            },
             ticket_centers: std::collections::BTreeMap::new(),
+            director_tick: 0,
         };
-        world.tickets.set_view_distance(view_distance);
         world
-            .tickets
+            .host
+            .director_mut()
+            .tickets_mut()
+            .set_view_distance(view_distance);
+        world
+            .host
+            .director_mut()
+            .tickets_mut()
             .set_simulation_distance(crate::interaction::SIMULATION_DISTANCE);
+        if infinite_flat {
+            world.region.use_infinite_flat_chunks();
+        }
         world.region.profiler.on_world_start();
         world
     }
 
+    /// **测试和 oracle 专用**：创建一个「无限超平坦」世界，每个区块位置都隐式存在。
+    ///
+    /// 正式入口（[`new`](Self::new)、[`with_admin`](Self::with_admin)）一律用已加载模式，
+    /// 区块由 Director 按 ticket 交付。这个退化实现只给不需要加载语义的单元测试、
+    /// 集成测试和 oracle 用；不要在生产代码里调用。
+    pub fn new_infinite_flat_for_tests(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+        Self::build(config, inbox, secure_chat::empty_keys(), None, true)
+    }
+
     /// 票表的只读视图，给测试核对玩家票和等级用。
     #[cfg(test)]
-    pub(crate) fn tickets(&self) -> &TicketTable {
-        &self.tickets
+    pub(crate) fn tickets(&self) -> &mc_bamboo_world::ticket::TicketTable {
+        self.host.director().tickets()
     }
 
     /// 测试专用：直接改票表，跳过 `TicketOp` 的事件路径。
     #[cfg(test)]
-    pub(crate) fn tickets_mut(&mut self) -> &mut TicketTable {
-        &mut self.tickets
+    pub(crate) fn tickets_mut(&mut self) -> &mut mc_bamboo_world::ticket::TicketTable {
+        self.host.director_mut().tickets_mut()
     }
 
     /// 测试专用：走一批 `TicketOp`。
@@ -174,46 +201,23 @@ impl World {
         self.apply_ticket_ops([op]);
     }
 
-    /// 一批票的操作。提交 5 之前只驱动票表，不派区块任务、不改 region。
+    /// 一批票的操作。已加载模式交给 Director（会派加载/卸载任务），
+    /// 无限超平坦模式只记票、不派任务。
     fn apply_ticket_ops(&mut self, ops: impl IntoIterator<Item = TicketOp>) {
-        let mut changed = false;
-        for op in ops {
-            changed = true;
-            match op {
-                TicketOp::PlayerMoved { id, to } => {
-                    let player = PlayerId(id as i32);
-                    match to {
-                        Some(pos) => {
-                            self.ticket_centers.insert(player, pos);
-                        }
-                        None => {
-                            self.ticket_centers.remove(&player);
-                        }
-                    }
-                    self.tickets.set_player(id, to);
-                }
-                TicketOp::ViewDistance(v) => self.tickets.set_view_distance(v),
-                TicketOp::SimulationDistance(d) => self.tickets.set_simulation_distance(d),
-                TicketOp::Add { ty, pos, level } => self.tickets.add(ty, pos, level),
-                TicketOp::Remove { ty, pos, level } => self.tickets.remove(ty, pos, level),
-                TicketOp::Forced { pos, forced } => self.tickets.set_forced(pos, forced),
-                TicketOp::WithRadius {
-                    ty,
-                    pos,
-                    radius,
-                    add,
-                } => {
-                    if add {
-                        self.tickets.add_with_radius(ty, pos, radius);
-                    } else {
-                        self.tickets.remove_with_radius(ty, pos, radius);
-                    }
-                }
+        let ops: Vec<TicketOp> = ops.into_iter().collect();
+        if ops.is_empty() {
+            return;
+        }
+        for op in &ops {
+            if let TicketOp::PlayerMoved { id, to } = op {
+                let player = PlayerId(*id as i32);
+                match to {
+                    Some(pos) => self.ticket_centers.insert(player, *pos),
+                    None => self.ticket_centers.remove(&player),
+                };
             }
         }
-        if changed {
-            let _ = self.tickets.run_updates();
-        }
+        self.host.tickets(&mut self.region, ops);
     }
 
     /// 每刻在玩家跟踪阶段之前调用：只在玩家跨区块时发 `PlayerMoved`。
@@ -251,20 +255,8 @@ impl World {
     /// 超时票每刻递减。`is_busy` 现在恒为假（区块都隐式存在），
     /// 提交 5 接 Director 后按「有在途任务/未交付」填。
     fn tick_ticket_timeouts(&mut self) {
-        self.tickets.tick(&mut |_| false);
-        let _ = self.tickets.run_updates();
-    }
-
-    /// 测试专用：构造一个走已加载模式的世界（起点没有加载任何区块）。
-    ///
-    /// `WorldConfig` 不能加字段（`mc-bamboo/src/main.rs` 用字面量构造它），
-    /// 正式入口和无限模式的切换放在接 Director 那一步；这里只给
-    /// `Harness` 的已加载模式测试用。
-    #[cfg(test)]
-    pub(crate) fn new_loaded(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
-        let mut world = Self::new(config, inbox);
-        world.region.use_loaded_chunks();
-        world
+        self.director_tick += 1;
+        self.host.tick(&mut self.region, self.director_tick);
     }
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
@@ -900,6 +892,9 @@ impl World {
 
     /// 给所有人发关闭的原因，然后结束世界线程。
     fn shut_down(&mut self) -> ControlFlow<()> {
+        // 任务 A 没有真实磁盘：`DirectorHost::shutdown` 只走状态机、不落盘，
+        // 关服时跑它没有可观察收益，还会拖住世界线程。
+        // 任务 B 接真实 IO 时在这里换回 `self.host.shutdown(...)`。
         let reason = Component::translate(SERVER_SHUTDOWN, []);
         self.region.links.kick_all(&reason);
         ControlFlow::Break(())

@@ -114,6 +114,12 @@ fn template_column() -> &'static ChunkColumn {
     TEMPLATE_COLUMN.get_or_init(ChunkColumn::from_template)
 }
 
+impl ChunkBundle for Box<RegionColumn> {
+    fn is_pristine(&self) -> bool {
+        (**self).is_pristine()
+    }
+}
+
 impl ChunkBundle for RegionColumn {
     /// 盒子还能不能丢掉、下次用模板重新生成。
     ///
@@ -144,6 +150,22 @@ const _: fn() = || {
 };
 
 impl RegionColumn {
+    /// 从生成器模板造一个空的区块束：上层的所有盒子都是空的。
+    /// 已加载模式用它加载一个从没来过的位置。
+    pub(crate) fn from_template() -> Self {
+        Self {
+            column: Box::new(ChunkColumn::from_template()),
+            ticks: None,
+            block_entities: ChunkBlockEntities::default(),
+            redstone: ChunkRedstone::default(),
+            containers: BTreeMap::new(),
+            block_items: BTreeMap::new(),
+            command_blocks: BTreeMap::new(),
+            books: BTreeMap::new(),
+            entities: ChunkEntities::default(),
+        }
+    }
+
     /// 这个区块里的方块和光照，给测试和以后组装区块包用。
     #[cfg(test)]
     pub(crate) fn column(&self) -> &ChunkColumn {
@@ -327,6 +349,12 @@ impl Region {
         if !self.ready_to_move_columns() {
             return Err((NotReady, column));
         }
+        self.insert_column_unchecked(pos, column);
+        Ok(())
+    }
+
+    /// 不检查前提地放入一个区块束，前提由调用方保证。
+    fn insert_column_unchecked(&mut self, pos: ChunkPos, column: Box<RegionColumn>) {
         let now = self.block_ticks.now();
         let RegionColumn {
             column: world,
@@ -362,7 +390,41 @@ impl Region {
             .changed
             .retain(|changed| changed.chunk() != pos);
         self.chunk_cache.retain(|cached| cached != pos);
+    }
+
+    /// Director 交付一个完整的区块束到 `pos`（已加载模式）。
+    ///
+    /// 把世界层和上层内容装进 region（按目标世界的方块重算段状态），
+    /// 再把这个位置登记为已加载。
+    ///
+    /// 交付只往各张表里**插入**，不需要「没有实体被借出去」这个取出才有的前提；
+    /// [`Self::take_columns`] 仍用完整的 `ready_to_move_columns`。
+    pub(crate) fn deliver_column(
+        &mut self,
+        pos: ChunkPos,
+        column: Box<RegionColumn>,
+    ) -> Result<(), (NotReady, Box<RegionColumn>)> {
+        let ready = self.chunks.ready_to_move_columns()
+            && self.block_ticks.ready_to_move_chunks()
+            && self.block_entities.ready_to_move_chunks();
+        if !ready {
+            return Err((NotReady, column));
+        }
+        self.insert_column_unchecked(pos, column);
+        self.chunks.mark_loaded(pos);
         Ok(())
+    }
+
+    /// Director 收回一批区块（已加载模式）。返回盒子与各自的代数。
+    pub(crate) fn reclaim_columns(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+    ) -> Result<BTreeMap<ChunkPos, Box<RegionColumn>>, NotReady> {
+        let boxes = self.take_columns(chunks)?;
+        for &pos in chunks {
+            let _ = self.chunks.unload(pos);
+        }
+        Ok(boxes)
     }
 }
 

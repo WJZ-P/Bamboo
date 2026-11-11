@@ -144,3 +144,48 @@ fn view_distance_change_and_leave_keep_the_loaded_set_bounded() {
     assert!(parking.is_empty(), "没改过的区块都不该占用停放表");
     assert_eq!(parking.take_all().len(), 0);
 }
+
+/// 已加载模式下，每名玩家视野里的区块必须都已经交付（主代理条件 1）。
+/// 走动、传送、改视距之后各检查一次。
+#[test]
+fn the_loaded_set_covers_every_players_view() {
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new_loaded(2);
+    let client = server.join_and_settle("Kitten");
+
+    let check = |server: &Harness| {
+        let region = &server.world_region();
+        for player in region.players.values() {
+            let center = player.chunk_pos();
+            let view = player.view_distance(region.view_distance);
+            let radius = view + 1;
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    let pos = ChunkPos::new(center.x + dx, center.z + dz);
+                    // `ChunkView::contains` 是圆角的：沿轴半径 vd+1，四角收圆。
+                    let ax = (dx.abs() - 2).max(0) as i64;
+                    let az = (dz.abs() - 2).max(0) as i64;
+                    if ax * ax + az * az >= (view as i64) * (view as i64) {
+                        continue;
+                    }
+                    assert!(
+                        region.chunks.is_loaded(pos),
+                        "视野里的 {pos:?} 还没交付（中心 {center:?}）"
+                    );
+                }
+            }
+        }
+    };
+    check(&server);
+
+    // 走动（长距离直接放置，模拟传送）。
+    server.move_to_position(&client, Vec3::new(100.5, -60.0, 100.5));
+    server.tick();
+    check(&server);
+
+    // 改视距。
+    server.apply_ticket_for_test(mc_bamboo_world::director::TicketOp::ViewDistance(4));
+    server.tick();
+    check(&server);
+}

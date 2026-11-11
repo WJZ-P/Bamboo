@@ -152,6 +152,17 @@ impl Engines {
     /// 搬区块柱之后重算引擎这份的 `sectionStates`。邻居柱里补建了数据层的段记成
     /// 要发给客户端的变化：正在看那些区块的玩家手里少这一段。被搬的那一柱自己不记，
     /// 它整个随区块包发出去。返回天空光和方块光各自补建了数据层的段。
+    /// 增量登记/注销（两层和两份都要同步）。
+    pub(super) fn add_loaded(&mut self, pos: ChunkPos) {
+        self.sky.storage.add_loaded(pos);
+        self.block.storage.add_loaded(pos);
+    }
+
+    pub(super) fn remove_loaded(&mut self, pos: ChunkPos) {
+        self.sky.storage.remove_loaded(pos);
+        self.block.storage.remove_loaded(pos);
+    }
+
     /// 切换已加载集合。两层和两份都要同步，见 `LightStorage::set_loaded`。
     pub(super) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
         self.sky.storage.set_loaded(loaded.clone());
@@ -227,6 +238,16 @@ impl Visible {
     pub(super) fn set_loaded(&mut self, loaded: Option<BTreeSet<ChunkPos>>) {
         self.sky.set_loaded(loaded.clone());
         self.block.set_loaded(loaded);
+    }
+
+    pub(super) fn add_loaded(&mut self, pos: ChunkPos) {
+        self.sky.add_loaded(pos);
+        self.block.add_loaded(pos);
+    }
+
+    pub(super) fn remove_loaded(&mut self, pos: ChunkPos) {
+        self.sky.remove_loaded(pos);
+        self.block.remove_loaded(pos);
     }
 
     /// 区块束搬进/搬出之后重算别人读的那份里的 `sectionStates`，补建的数据层和引擎那份相同。

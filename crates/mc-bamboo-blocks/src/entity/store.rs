@@ -294,7 +294,7 @@ impl Entity {
 }
 
 /// 一个区块里的全部实体，按 uid 排序。字段不公开，只能整体搬走和放回。
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChunkEntities {
     rows: Vec<EntityRow>,
 }

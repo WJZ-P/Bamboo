@@ -322,6 +322,17 @@ impl LevelLight {
         self.visible.set_loaded(loaded);
     }
 
+    /// 增量登记/注销，见 `ChunkStore::load` / `unload`。
+    pub(crate) fn add_loaded(&mut self, pos: ChunkPos) {
+        self.engines.add_loaded(pos);
+        self.visible.add_loaded(pos);
+    }
+
+    pub(crate) fn remove_loaded(&mut self, pos: ChunkPos) {
+        self.engines.remove_loaded(pos);
+        self.visible.remove_loaded(pos);
+    }
+
     /// 这个位置在两层光照里有没有柱（测试用）。
     #[cfg(test)]
     pub(crate) fn has_column(&self, pos: ChunkPos) -> bool {

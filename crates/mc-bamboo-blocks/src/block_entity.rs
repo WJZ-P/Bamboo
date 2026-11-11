@@ -337,6 +337,7 @@ impl BlockEntities {
 /// 一个区块的全部方块实体，按位置排序。
 ///
 /// 字段不公开：区块束只把它整体搬走，不逐个读内容。
+#[derive(Default)]
 pub struct ChunkBlockEntities {
     entities: Vec<Box<dyn BlockEntity>>,
 }

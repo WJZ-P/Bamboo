@@ -323,6 +323,7 @@ pub(crate) fn send_chunks(region: &mut Region) {
 
         region.links.send(id, &ChunkBatchStart);
         for &pos in &batch {
+            crate::director_host::assert_view_is_loaded(&region.chunks, pos);
             let frames = match chunk_frame(
                 &mut region.chunk_cache,
                 &region.chunks,
