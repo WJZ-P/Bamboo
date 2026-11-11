@@ -5,8 +5,10 @@
 //! `Deliver` 的 `desired`、`LevelChanged` 的新值、收回。region 不查票表。
 //!
 //! 两个集合按下面的定义增量维护，查询是常数时间：
+//!
 //! - 方块逻辑：两套等级都 ≤32，且自己和周围 8 个区块都已交付；
 //! - 实体：两套等级都 ≤31，且自己和周围两圈（5×5）都已交付。
+//!
 //! 逐区块 tick 还要模拟等级 ≤31，单独存一个集合。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -120,14 +122,17 @@ impl TickLevels {
     }
 
     /// 测试用的只读视图。
+    #[cfg(test)]
     pub(crate) fn block_chunks(&self) -> &BTreeSet<ChunkPos> {
         &self.blocks
     }
 
+    #[cfg(test)]
     pub(crate) fn entity_chunks(&self) -> &BTreeSet<ChunkPos> {
         &self.entities
     }
 
+    #[cfg(test)]
     pub(crate) fn tiers(&self, pos: ChunkPos) -> Option<ChunkTiers> {
         self.tiers.get(&pos).copied()
     }
