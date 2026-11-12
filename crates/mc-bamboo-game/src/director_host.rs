@@ -48,6 +48,11 @@ pub(crate) const SAVE_INTERVAL_TICKS: usize = 6000;
 /// 单区块 10 秒（200 刻）冷却，照原版 `nextChunkSaveTime`。
 /// Per-chunk 10 second (200 tick) cooldown, like vanilla `nextChunkSaveTime`.
 pub(crate) const SAVE_COOLDOWN_TICKS: u64 = 200;
+/// §8：连续写盘失败这么多次就暂停接收新的保存请求（内存里的数据还在，
+/// 关服或 `/save-all` 再试）。一次成功回执清零。
+/// §8: after this many consecutive write failures, stop accepting new save
+/// requests (data stays in memory; shutdown / `save-all` retries).
+pub(crate) const MAX_CONSECUTIVE_IO_FAILURES: u32 = 3;
 
 /// 一次待落盘的区块快照。
 struct PendingWrite {
@@ -136,6 +141,14 @@ pub(crate) struct DirectorHost {
     /// 累计的写盘失败次数（每次都在 `poll_io` 记 `error!`）。关服时汇报。
     /// Count of write failures (each logged with `error!` in `poll_io`).
     io_failures: u64,
+    /// 连续失败次数；到阈值就暂停匀速写盘，一次成功清零。
+    /// Consecutive failures; paces saves off at the threshold, reset on success.
+    consecutive_io_failures: u32,
+    /// §8 暂停标志：为真时不再把新快照交给 IO 线程，数据留在 `save_queue` /
+    /// `parking` 里，关服或 `/save-all` 再试。
+    /// §8 pause: no new snapshots are handed to IO; data stays in `save_queue` /
+    /// `parking` and is retried at shutdown or by `/save-all`.
+    saving_paused: bool,
 }
 
 impl DirectorHost {
@@ -164,6 +177,8 @@ impl DirectorHost {
             loaded_save_tick: HashMap::new(),
             flushed_barriers: Vec::new(),
             io_failures: 0,
+            consecutive_io_failures: 0,
+            saving_paused: false,
         }
     }
 
@@ -360,7 +375,7 @@ impl DirectorHost {
     /// per-chunk cooldown only skips a stale snapshot when a newer one for the
     /// same chunk is still queued, so an isolated snapshot is never dropped.
     fn pace_saves(&mut self, now_tick: u64) {
-        if self.io.is_none() || self.save_queue.is_empty() {
+        if self.io.is_none() || self.save_queue.is_empty() || self.saving_paused {
             return;
         }
         let count = save_batch_size(self.save_queue.len());
@@ -443,6 +458,11 @@ impl DirectorHost {
         if self.io.is_none() {
             return;
         }
+        // `/save-all` 是显式的强制重试：即使 §8 暂停了也再试一次，内存里
+        // 还在的快照不会丢。下一次失败会重新暂停。
+        // `save-all` is an explicit forced retry: clear the §8 pause so the
+        // in-memory snapshots are attempted again. A later failure re-pauses.
+        self.saving_paused = false;
         let dirty = self.dirty_loaded_chunks(region);
         for pos in dirty {
             self.snapshot_loaded(region, pos, now_tick);
@@ -455,6 +475,10 @@ impl DirectorHost {
     /// revision and tick. On failure (or when the tables are busy) record nothing
     /// so it is retried on a later tick.
     fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
+        if self.saving_paused {
+            // §8 暂停期间不接新的保存请求；盒子留在 region / parking 里。
+            return;
+        }
         let Some(result) = region.encode_loaded_column(pos, &self.codec) else {
             return;
         };
@@ -489,6 +513,10 @@ impl DirectorHost {
         if self.infinite_flat {
             return;
         }
+        // 关服照官方最后全量保存：解除 §8 暂停，把内存里还在的快照再试一次。
+        // Shutdown is the final full save: lift the §8 pause and retry everything
+        // still in memory.
+        self.saving_paused = false;
         self.budget = MailBudget {
             deliveries: 0,
             reclaims: 0,
@@ -687,6 +715,8 @@ impl DirectorHost {
             }
         }
         let mut done = Vec::new();
+        let mut known_updates = Vec::new();
+        let mut dropped_inflight = Vec::new();
         for reply in replies {
             match reply {
                 Reply::Read {
@@ -712,12 +742,20 @@ impl DirectorHost {
                         result: TaskResult::Read { bytes },
                     });
                 }
-                Reply::Written { pos, seq } => {
+                Reply::Written { pos, seq, present } => {
+                    // 写成功之后才把 `known` 置成盘上真实状态（F1）。
+                    // Only after a successful write does `known` reflect the disk.
+                    known_updates.push((pos, present));
                     if self.pending_writes.get(&pos) == Some(&seq) {
                         self.pending_writes.remove(&pos);
                         // 写盘完成，盒子已经在磁盘上，丢掉内存缓冲。
                         let _ = self.parking.take(pos);
                     }
+                    // 一次成功清零连续失败，恢复匀速保存（§8）。
+                    self.consecutive_io_failures = 0;
+                    self.saving_paused = false;
+                    // F6：写完清掉冷却记账，避免长局无界增长。
+                    self.save_cooldown.remove(&pos);
                 }
                 Reply::PlayerWritten {
                     uuid,
@@ -752,12 +790,41 @@ impl DirectorHost {
                     // the `save-all flush` success message waiting on it.
                     self.flushed_barriers.push(seq);
                 }
-                Reply::WriteFailed { path, error } => {
+                Reply::WriteFailed {
+                    pos,
+                    seq,
+                    path,
+                    error,
+                } => {
                     // 每次写/刷盘失败都带路径和原因记 error!，绝不静默丢数据。
                     // Log every write/sync failure with its path and reason.
-                    tracing::error!(%path, %error, "chunk IO write failed");
+                    tracing::error!(%path, %error, ?pos, ?seq, "chunk IO write failed");
                     self.io_failures += 1;
+                    self.consecutive_io_failures += 1;
+                    // 失败区块的盒子留在 parking 里（没有 Written 就不会被取走），
+                    // 清掉「在途」标记，让 has_chunk 不再假装盘上有。
+                    if let Some(pos) = pos {
+                        dropped_inflight.push(pos);
+                        self.save_cooldown.remove(&pos);
+                    }
+                    if self.consecutive_io_failures >= MAX_CONSECUTIVE_IO_FAILURES
+                        && !self.saving_paused
+                    {
+                        self.saving_paused = true;
+                        tracing::error!(
+                            failures = self.consecutive_io_failures,
+                            "consecutive chunk IO failures; pausing new save requests (§8), data stays in memory"
+                        );
+                    }
                 }
+            }
+        }
+        if let Some(io) = &self.io {
+            for (pos, present) in known_updates {
+                io.set_known(pos, present);
+            }
+            for pos in dropped_inflight {
+                io.drop_inflight(pos);
             }
         }
         // 所有读盘结果一次性喂给 Director，只交付一次，保住 3×3 和距离顺序。
@@ -1188,6 +1255,107 @@ mod tests {
         assert_eq!(host.save_queue.len(), 1);
         host.pace_saves(3);
         assert!(host.save_queue.is_empty());
+    }
+
+    /// F1：写盘失败不回 `Written`，世界线程保留 parking 盒子、记 error、
+    /// 清掉在途标记；连续失败到阈值后暂停接收新保存请求（§8），
+    /// `/save-all` 作为强制重试解除暂停。
+    /// F1: a failed write keeps the parked box, logs the error, clears inflight,
+    /// and after consecutive failures pauses new saves (§8); `save-all` forces
+    /// a retry.
+    #[test]
+    fn a_failed_write_keeps_the_parked_box_and_pauses_saves() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-f1-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let io = ChunkIo::open(&dir).unwrap();
+        // 先起 IO 线程再把 region/entities/ 换成普通文件，令写必然失败。
+        // Replace the region dirs with files only after the thread is up.
+        for directory in [dir.region_dir(), dir.entities_dir()] {
+            std::fs::remove_dir(&directory).unwrap();
+            std::fs::write(&directory, b"not a directory").unwrap();
+        }
+        let pos = ChunkPos::new(4, -2);
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(io);
+        host.parking
+            .park(pos, Box::new(RegionColumn::from_template()));
+        host.pending_writes.insert(pos, 5);
+        host.save_queue.push_back(PendingWrite {
+            pos,
+            seq: 5,
+            chunk: Some(vec![1]),
+            entities: None,
+        });
+
+        host.pace_saves(1);
+        host.io().unwrap().flush().unwrap();
+        let mut region = Region::new(2, 20, false);
+        host.poll_io(&mut region);
+
+        assert!(
+            host.parking.contains(pos),
+            "a failed write must keep the parked box, not ack Written"
+        );
+        // region/ 和 entities/ 两份各自报一条失败，所以至少一条。
+        assert!(
+            host.io_failures() >= 1,
+            "the failure must be counted and logged"
+        );
+        assert!(
+            !host.io().unwrap().has_chunk(pos),
+            "has_chunk must not lie after a failed write"
+        );
+
+        // 连续失败到阈值：暂停匀速写盘，队列不再出队。
+        for i in 0..MAX_CONSECUTIVE_IO_FAILURES {
+            host.pending_writes.insert(pos, 100 + u64::from(i));
+            host.save_queue.push_back(PendingWrite {
+                pos,
+                seq: 100 + u64::from(i),
+                chunk: Some(vec![2]),
+                entities: None,
+            });
+            host.pace_saves(2 + u64::from(i));
+            host.io().unwrap().flush().unwrap();
+            host.poll_io(&mut region);
+        }
+        assert!(host.saving_paused, "consecutive failures must pause saving");
+        let before = host.save_queue.len();
+        host.pace_saves(50);
+        assert_eq!(
+            host.save_queue.len(),
+            before,
+            "paused saves must not dequeue"
+        );
+        assert!(host.parking.contains(pos), "the box is still in memory");
+
+        // `/save-all` 强制重试：解除暂停。
+        host.snapshot_all_dirty(&mut region, 60);
+        assert!(!host.saving_paused, "save-all must force a retry");
     }
 
     /// 写盘途中又被要回来：快照还排在 D6 队列里没落盘、盘上是旧数据，

@@ -104,8 +104,15 @@ pub enum Reply {
         entities: Option<Vec<u8>>,
         error: Option<String>,
     },
-    /// 一次写已经落盘，世界线程可以丢掉对应的写盘途中缓冲。
-    Written { pos: ChunkPos, seq: u64 },
+    /// 一次写已经落盘，世界线程可以丢掉对应的写盘途中缓冲，并按 `present`
+    /// 把 `known` 置成盘上真实状态（写成功之前不许当成盘上有）。
+    /// A write landed: the world thread drops the in-progress buffer and updates
+    /// `known` to the true on-disk state. `known` must not be set before success.
+    Written {
+        pos: ChunkPos,
+        seq: u64,
+        present: bool,
+    },
     /// 一份玩家存档已经落盘（成功或失败），世界线程据此结束这次"待写"。
     /// A player save finished (ok or not); the world thread ends that pending write.
     PlayerWritten {
@@ -114,11 +121,18 @@ pub enum Reply {
         ok: bool,
         error: Option<String>,
     },
-    /// 一次写盘或刷盘失败。带路径和原因，世界线程据此 `error!` 记录、计数，
-    /// 绝不静默丢掉。`path` 是失败的文件（区域文件或独立文件）的路径文本。
-    /// A write or sync failed, with its path and reason. The world thread logs it
-    /// with `error!` and counts it; nothing is silently dropped.
-    WriteFailed { path: String, error: String },
+    /// 一次写盘或刷盘失败。带路径和原因，世界线程据此 `error!` 记录、计数、
+    /// 保留 `parking` 盒子，连续失败就停止接收新保存请求。区块写带上 `pos/seq`，
+    /// 独立文件写为 `None`。`path` 是失败的文件路径文本。
+    /// A write or sync failed: the world thread logs it, keeps the parked box and
+    /// stops accepting new saves after consecutive failures. Chunk writes carry
+    /// `pos/seq`; standalone file writes use `None`.
+    WriteFailed {
+        pos: Option<ChunkPos>,
+        seq: Option<u64>,
+        path: String,
+        error: String,
+    },
     /// 一道异步栅栏之前的所有写都已落盘并 `sync_all`。`seq` 对应提交时的序号，
     /// 世界线程据此把等在这道栅栏上的 `save-all flush` 成功消息发出去。
     /// All writes before an async barrier have landed and been synced; `seq`
@@ -137,6 +151,13 @@ pub struct ChunkIo {
     /// headers at startup and updated on writes, so the world thread can ask
     /// "is this on disk?" without doing synchronous IO.
     known: Arc<Mutex<HashSet<ChunkPos>>>,
+    /// 已提交、还没收到写完回执的区块。读请求要把它当成「盘上会有」，
+    /// 因为写请求和之后的读请求在同一 FIFO 信箱里、写先处理；但 `known`
+    /// 里绝不提前登记，写失败时这条也清掉，避免 `has_chunk` 撒谎。
+    /// Chunks submitted but not yet acked. A read queued behind a write in the
+    /// same FIFO mailbox must see them, but `known` (on-disk truth) is not set
+    /// until the write succeeds.
+    inflight: Mutex<HashSet<ChunkPos>>,
     requests: Sender<Request>,
     results: Receiver<Reply>,
     worker: Option<JoinHandle<()>>,
@@ -164,6 +185,7 @@ impl ChunkIo {
         Ok(Self {
             dir: dir.clone(),
             known,
+            inflight: Mutex::new(HashSet::new()),
             requests,
             results,
             worker: Some(worker),
@@ -172,12 +194,45 @@ impl ChunkIo {
         })
     }
 
-    /// 盘上是否已经有这个区块的数据。只查内存集合，不碰磁盘。
+    /// 盘上是否已经有这个区块的数据（或有一份已经入队、还没回执的写）。
+    /// 只查内存集合，不碰磁盘。`known` 只在写成功后更新。
     pub fn has_chunk(&self, pos: ChunkPos) -> bool {
         self.known
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(&pos)
+            || self
+                .inflight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&pos)
+    }
+
+    /// 写回执到达：更新盘上真实状态，清掉在途标记。世界线程调用。
+    /// A write ack arrived: update the true on-disk state and clear inflight.
+    /// Called by the world thread.
+    pub fn set_known(&self, pos: ChunkPos, present: bool) {
+        {
+            let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+            if present {
+                known.insert(pos);
+            } else {
+                known.remove(&pos);
+            }
+        }
+        self.inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pos);
+    }
+
+    /// 写失败：清掉在途标记，盘上状态不变。世界线程调用。
+    /// A write failed: clear inflight but leave the on-disk truth unchanged.
+    pub fn drop_inflight(&self, pos: ChunkPos) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pos);
     }
 
     /// 提交一个异步读请求，世界线程不等待。
@@ -190,6 +245,11 @@ impl ChunkIo {
     }
 
     /// 提交一个写请求。`chunk` / `entities` 为 `None` 表示删掉对应文件里的这一格。
+    /// 这里**不**更新 `known`（盘上真实状态），只登记在途；世界线程收到
+    /// `Written` 回执才 `set_known`。写失败时 `has_chunk` 不会撒谎。
+    /// This does NOT update `known` (on-disk truth); only registers the in-flight
+    /// write. The world thread calls `set_known` on the `Written` ack, so a failed
+    /// write never makes `has_chunk` lie.
     pub fn submit_write(
         &self,
         pos: ChunkPos,
@@ -197,17 +257,10 @@ impl ChunkIo {
         chunk: Option<Vec<u8>>,
         entities: Option<Vec<u8>>,
     ) {
-        // 写盘后盘上就有（或删掉）这个区块，先更新内存集合，让同一刻之后的
-        // 读请求立刻看到最新状态，不必等 IO 线程回执。
-        let present = chunk.is_some();
-        {
-            let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
-            if present {
-                known.insert(pos);
-            } else {
-                known.remove(&pos);
-            }
-        }
+        self.inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pos);
         let _ = self.requests.send(Request::Write {
             pos,
             seq,
@@ -412,11 +465,21 @@ impl Cache {
     }
 }
 
-/// 把一批写/刷盘失败送回世界线程信箱。
-/// Send a batch of write/sync failures back to the world-thread mailbox.
-fn report_failures(tx: &Sender<Reply>, failures: Vec<(String, String)>) {
+/// 把一批写/刷盘失败送回世界线程信箱，`pos/seq` 只对区块写非空。
+/// Send write/sync failures back to the world thread; `pos/seq` are set for chunks.
+fn report_failures(
+    tx: &Sender<Reply>,
+    failures: Vec<(String, String)>,
+    pos: Option<ChunkPos>,
+    seq: Option<u64>,
+) {
     for (path, error) in failures {
-        let _ = tx.send(Reply::WriteFailed { path, error });
+        let _ = tx.send(Reply::WriteFailed {
+            pos,
+            seq,
+            path,
+            error,
+        });
     }
 }
 
@@ -467,15 +530,19 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     timestamp,
                 } => {
                     if latest.get(&pos) == Some(&seq) {
+                        let present = chunk.is_some();
                         let failures = write_one(&mut cache, &dir, pos, chunk, entities, timestamp);
-                        // 只有两份都写成功才回 Written；失败留着写盘途中缓冲，
-                        // 关服时还会再试一次，绝不静默丢。
-                        // Only ack when both files landed; on failure keep the
-                        // in-progress buffer so shutdown can retry.
+                        // 只有两份都写成功才回 Written；失败绝不谎报成功，
+                        // 回带 pos/seq 的 WriteFailed，世界线程据此留着 parking 盒子。
+                        // Only ack on total success; never report a failed write
+                        // as Written. The failure carries pos/seq so the world
+                        // thread keeps the parked box and stops accepting saves.
                         if failures.is_empty() {
-                            let _ = tx.send(Reply::Written { pos, seq });
+                            let _ = tx.send(Reply::Written { pos, seq, present });
+                            latest.remove(&pos);
+                        } else {
+                            report_failures(&tx, failures, Some(pos), Some(seq));
                         }
-                        report_failures(&tx, failures);
                     }
                 }
                 Request::DropSnapshot { .. } => {}
@@ -487,7 +554,12 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                 } => {
                     let result = safe_replace(&path, &bytes, backup.as_deref());
                     if let Err(error) = result.as_ref() {
-                        report_failures(&tx, vec![(path.display().to_string(), error.to_string())]);
+                        report_failures(
+                            &tx,
+                            vec![(path.display().to_string(), error.to_string())],
+                            None,
+                            None,
+                        );
                     }
                     if let Some((uuid, seq)) = player {
                         let error = result.as_ref().err().map(|e| e.to_string());
@@ -502,7 +574,7 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                 }
                 Request::Flush { done } => {
                     let failures = cache.sync_all(&dir);
-                    report_failures(&tx, failures.clone());
+                    report_failures(&tx, failures.clone(), None, None);
                     let result = if failures.is_empty() {
                         Ok(())
                     } else {
@@ -517,18 +589,18 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     // FIFO 保证：排在这道栅栏之前的写都在本批里先处理过了。
                     // FIFO guarantees every write queued before this barrier has
                     // already been processed in this batch.
-                    report_failures(&tx, cache.sync_all(&dir));
+                    report_failures(&tx, cache.sync_all(&dir), None, None);
                     let _ = tx.send(Reply::Flushed { seq });
                 }
                 Request::Crash => panic!("injected chunk IO panic (test seam)"),
                 Request::Shutdown => {
-                    report_failures(&tx, cache.sync_all(&dir));
+                    report_failures(&tx, cache.sync_all(&dir), None, None);
                     return;
                 }
             }
         }
     }
-    report_failures(&tx, cache.sync_all(&dir));
+    report_failures(&tx, cache.sync_all(&dir), None, None);
 }
 
 fn read_one(
@@ -842,13 +914,79 @@ mod tests {
         let failures: Vec<(String, String)> = collect(&io)
             .into_iter()
             .filter_map(|r| match r {
-                Reply::WriteFailed { path, error } => Some((path, error)),
+                Reply::WriteFailed { path, error, .. } => Some((path, error)),
                 _ => None,
             })
             .collect();
         assert_eq!(failures.len(), 1, "exactly one failure should be reported");
         assert!(failures[0].0.contains("blocker"), "path should be reported");
         assert!(!failures[0].1.is_empty(), "reason should be reported");
+        io.close();
+    }
+
+    /// 复查 F1 的用例反过来断言：区块写失败时**不**发 `Written`，改发带
+    /// `pos/seq` 的 `WriteFailed`；世界线程处理失败后 `has_chunk` 为假，
+    /// 之后读盘得到 `chunk: None`（照官方走模板，不会假装盘上有旧数据）。
+    /// The inverse of review finding F1: a failed chunk write sends NO `Written`,
+    /// but a `WriteFailed` carrying pos/seq. After the world thread handles it,
+    /// `has_chunk` is false and a read honestly reports no chunk on disk.
+    #[test]
+    fn a_failed_chunk_write_sends_no_written_ack_and_never_marks_known() {
+        let tmp = TempDir::new("chunk-write-fail");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let pos = ChunkPos::new(5, -3);
+        // 把 region/ 和 entities/ 换成普通文件，open_region 必然失败。
+        // Replace the region directories with files so open_region must fail.
+        for directory in [dir.region_dir(), dir.entities_dir()] {
+            fs::remove_dir(&directory).unwrap();
+            fs::write(&directory, b"not a directory").unwrap();
+        }
+
+        io.submit_write(pos, 7, Some(b"chunk-nbt".to_vec()), None);
+        io.flush().unwrap();
+        let replies = collect(&io);
+
+        // ① 没有假的成功回执。
+        assert!(
+            !replies.iter().any(|r| matches!(r, Reply::Written { .. })),
+            "a failed write must never report Written"
+        );
+        // ② 失败回执带 pos/seq 和原因，世界线程据此保留 parking 盒子。
+        let failures: Vec<_> = replies
+            .iter()
+            .filter_map(|r| match r {
+                Reply::WriteFailed {
+                    pos: Some(p),
+                    seq: Some(s),
+                    path,
+                    error,
+                } => Some((*p, *s, path.as_str(), error.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(!failures.is_empty(), "the failure must be reported");
+        assert_eq!(failures[0].0, pos);
+        assert_eq!(failures[0].1, 7);
+        assert!(!failures[0].3.is_empty(), "the reason must be included");
+
+        // 世界线程收到失败回执后清掉在途标记：盘上状态绝不能被提前登记。
+        io.drop_inflight(pos);
+        assert!(
+            !io.has_chunk(pos),
+            "a failed write must not make has_chunk lie"
+        );
+
+        io.submit_read(pos, 1, 0);
+        io.flush().unwrap();
+        let reads = collect(&io);
+        assert!(
+            reads
+                .iter()
+                .any(|r| matches!(r, Reply::Read { chunk: None, .. })),
+            "the read honestly reports no chunk on disk"
+        );
         io.close();
     }
 
