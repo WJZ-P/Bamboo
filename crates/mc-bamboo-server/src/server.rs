@@ -35,10 +35,11 @@ use mc_bamboo_protocol::{
     },
 };
 use serde_json::json;
+#[cfg(test)]
+use tokio::time::timeout;
 use tokio::{
     net::TcpListener,
     sync::{Semaphore, broadcast, watch},
-    time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, warn};
@@ -56,10 +57,14 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const EVENT_BUFFER_LEN: usize = 256;
 const SERVER_BRAND: &str = "Bamboo";
 const WORLD_THREAD_NAME: &str = "bamboo-world";
-/// 关闭时等世界线程结束的时限。它正常时一个 tick 就结束了，到时限说明卡死了，
-/// 这时不能让 Ctrl+C 和桌面端的停止按钮跟着卡住，连接任务也还要给玩家发断开原因。
+/// 关服等待期间每隔这么久打一条「还在保存」的日志，照官方 `stopServer` 的进度提示。
+/// How often to log "still saving" while waiting for the world thread.
 #[cfg(not(test))]
-const WORLD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const WORLD_SAVE_LOG_INTERVAL: Duration = Duration::from_secs(5);
+/// 测试构建的关服等待上限：正常时一个 tick 就结束，卡死时不能让测试挂住。
+/// 带存档的集成测试用 [`Server::set_world_stop_timeout`] 放宽，等存完。
+/// Test-build cap so a stuck world thread cannot hang a test; save integration
+/// tests widen it with `Server::set_world_stop_timeout` to wait for the save.
 #[cfg(test)]
 const WORLD_STOP_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -155,6 +160,9 @@ pub(crate) struct Shared {
     status: RwLock<Arc<[u8]>>,
     players: Mutex<HashMap<Uuid, OnlinePlayer>>,
     events: broadcast::Sender<ServerEvent>,
+    /// 第二次 Ctrl+C / 桌面端再按一次停止时取消：强制退出，不等存盘。
+    /// Cancelled by a second Ctrl+C / a second desktop stop press: force quit.
+    pub(crate) force_stop: CancellationToken,
 }
 
 impl Shared {
@@ -234,6 +242,14 @@ impl ServerHandle {
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
         self.shared.events.subscribe()
     }
+
+    /// 第二次按停止 / 再按一次 Ctrl+C：强制退出，不再等世界线程存盘。
+    /// 第一次停止是优雅关服，会一直等到存档写完。
+    /// A second stop request: force quit instead of waiting for the save.
+    /// The first stop is graceful and waits for the save to finish.
+    pub fn force_stop(&self) {
+        self.shared.force_stop.cancel();
+    }
 }
 
 /// 绑定好端口、等待运行的服务端。
@@ -245,6 +261,10 @@ pub struct Server {
     /// 世界线程发布名单变更的接收端，由 `run` 里的写盘任务消费。
     message_receiver: Receiver<AdminMessage>,
     inbox_sender: Sender<Inbound>,
+    /// 测试构建里等世界线程结束的上限，可由集成测试放宽。
+    /// Test-build wait cap; integration tests widen it to wait for a real save.
+    #[cfg(test)]
+    world_stop_timeout: Duration,
 }
 
 impl Server {
@@ -275,6 +295,7 @@ impl Server {
             status: RwLock::new(status),
             players: Mutex::new(HashMap::new()),
             events,
+            force_stop: CancellationToken::new(),
         });
         Ok(Self {
             listener,
@@ -286,7 +307,18 @@ impl Server {
             },
             message_receiver,
             inbox_sender,
+            #[cfg(test)]
+            world_stop_timeout: WORLD_STOP_TIMEOUT,
         })
+    }
+
+    /// 放宽测试构建里等世界线程结束的上限，让带存档的集成测试能等到存完
+    /// （默认 200ms 是给「世界线程卡死」的测试兜底用的）。
+    /// Widen the test-build wait cap so a save integration test can wait for the
+    /// world thread to finish saving (the 200ms default catches stuck threads).
+    #[cfg(test)]
+    pub(crate) fn set_world_stop_timeout(&mut self, timeout: Duration) {
+        self.world_stop_timeout = timeout;
     }
 
     /// 实际监听的地址。绑定 0 号端口时可以用它拿到系统分配的端口。
@@ -325,6 +357,8 @@ impl Server {
             admin: _,
             message_receiver,
             inbox_sender,
+            #[cfg(test)]
+            world_stop_timeout,
         } = self;
         spawn_admin_writer(Arc::clone(&shared), message_receiver, inbox_sender);
         let slots = Arc::new(Semaphore::new(shared.config.max_pre_play_connections));
@@ -375,18 +409,75 @@ impl Server {
         drop(listener);
         // 世界线程已经结束时发送会失败，下面的等待也会马上结束。
         let _ = shared.inbox.send(Inbound::Shutdown);
-        if timeout(WORLD_STOP_TIMEOUT, world_stopped.cancelled())
+        // 照官方 `stopServer`：正常构建一直等世界线程把存档写完，不能被一个
+        // 固定超时砍掉；每 5 秒打一条「还在保存」，第二次 Ctrl+C / 桌面端
+        // 再按一次停止才强制退出。测试构建保留短上限，卡死的测试不会挂住，
+        // 带存档的集成测试用 set_world_stop_timeout 放宽。
+        // Like official stopServer: wait as long as the world thread needs to
+        // save. Log "still saving" every 5s; only a second Ctrl+C / desktop
+        // stop forces quit. Test builds keep a short cap (widenable for save
+        // integration tests) so a stuck-thread test cannot hang.
+        #[cfg(test)]
+        if timeout(world_stop_timeout, world_stopped.cancelled())
             .await
             .is_err()
         {
             error!("the world thread did not stop in time, leaving it behind");
         }
+        #[cfg(not(test))]
+        wait_for_world_to_finish_saving(&shared, &world_stopped).await;
 
         // 世界线程已经把关闭的原因写进了每个连接的出站队列，这里只是让连接任务不再等客户端。
         // 它写不了的时候，连接任务发现取消之后自己补发。
         cancel.cancel();
         tasks.close();
         tasks.wait().await;
+    }
+}
+
+/// 第二次 Ctrl+C：注册一个新的监听者（第一次关服信号已经消费掉了）。
+/// 注册失败就永不就绪，不会因为一次注册错误误判成「用户按了第二次」。
+/// A second Ctrl+C: register a fresh listener (the first signal was consumed).
+/// If registration fails this future never resolves, so an error is not mistaken
+/// for a real second press.
+#[cfg(not(test))]
+async fn second_ctrl_c() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        warn!("cannot listen for a second Ctrl+C; the desktop stop button can still force quit");
+        std::future::pending::<()>().await;
+    }
+}
+
+/// 正常构建：一直等世界线程存完（官方 `stopServer` 没有外部超时把它砍断），
+/// 每 5 秒打一条进度日志；第二次 Ctrl+C 或桌面端再次停止才强制退出。
+/// Release build: wait as long as saving needs (official `stopServer` has no
+/// external timeout), log progress every 5s, and force quit only on a second
+/// Ctrl+C or a second desktop stop press.
+#[cfg(not(test))]
+async fn wait_for_world_to_finish_saving(shared: &Arc<Shared>, world_stopped: &CancellationToken) {
+    if world_stopped.is_cancelled() {
+        return;
+    }
+    let second = second_ctrl_c();
+    tokio::pin!(second);
+    let mut log_interval = tokio::time::interval(WORLD_SAVE_LOG_INTERVAL);
+    log_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    log_interval.tick().await; // 第一次 tick 立刻完成，先丢掉它。
+    loop {
+        tokio::select! {
+            () = world_stopped.cancelled() => return,
+            () = shared.force_stop.cancelled() => {
+                error!("a second stop request forced quit before the world finished saving");
+                return;
+            }
+            _ = &mut second => {
+                error!("a second Ctrl+C forced quit before the world finished saving");
+                return;
+            }
+            _ = log_interval.tick() => {
+                warn!("the world is still saving; press Ctrl+C again (or stop again) to force quit");
+            }
+        }
     }
 }
 
@@ -893,6 +984,52 @@ mod tests {
             .expect("世界线程卡死时关闭流程也要结束")
             .unwrap();
         drop(release);
+    }
+
+    /// F5：放宽测试上限之后，关服会一直等世界线程「存完」再返回，
+    /// 不会被 200ms 的兜底超时砍掉。
+    /// F5: with a widened test cap, shutdown waits for the world's slow save
+    /// instead of cutting it off at the 200ms fallback.
+    #[tokio::test]
+    async fn widened_stop_timeout_waits_for_a_slow_save() {
+        let (mut server, _address) = test_server().await;
+        server.set_world_stop_timeout(Duration::from_secs(5));
+        let (stop, stopped) = oneshot::channel::<()>();
+        let started = std::time::Instant::now();
+        let running = tokio::spawn(server.run_with_world(
+            |inbox: Receiver<Inbound>| {
+                for message in inbox {
+                    if matches!(message, Inbound::Shutdown) {
+                        // 模拟一次慢存盘（编码 + flush），比 200ms 兜底长。
+                        std::thread::sleep(Duration::from_millis(400));
+                        return;
+                    }
+                }
+            },
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        drop(stop);
+        timeout(DEADLINE, running)
+            .await
+            .expect("the server must stop")
+            .unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(350),
+            "shutdown must wait for the world to finish saving, not cut it off"
+        );
+    }
+
+    /// F5：第二次停止（桌面端再按一次）能取消等待，强制退出。
+    /// F5: a second stop request cancels the wait to force quit.
+    #[tokio::test]
+    async fn force_stop_cancels_the_wait() {
+        let (server, _address) = test_server().await;
+        let handle = server.handle();
+        assert!(!server.shared.force_stop.is_cancelled());
+        handle.force_stop();
+        assert!(server.shared.force_stop.is_cancelled());
     }
 
     /// 服务器列表响应里的在线人数。
