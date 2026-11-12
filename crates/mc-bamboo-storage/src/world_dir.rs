@@ -29,7 +29,7 @@ use std::{
 use mc_bamboo_data::version;
 use mc_bamboo_nbt::{Accounter, Compression, Tag, read_compressed, write_compressed};
 
-use crate::level_dat::LevelData;
+use crate::{level_dat::LevelData, player_data::PlayerData};
 
 /// `DirectoryLock` 写进 `session.lock` 的内容，官方是 UTF-8 的 "☃"。
 const SNOWMAN: &[u8] = &[0xe2, 0x98, 0x83];
@@ -301,6 +301,54 @@ pub fn save_level_data(dir: &WorldDir, data: &LevelData) -> io::Result<()> {
     safe_replace(&dir.level_dat(), &bytes, Some(&dir.level_dat_old()))
 }
 
+/// 编出官方 `players/data/<uuid>.dat` 的 gzip 字节。写盘交给 IO 线程。
+pub fn encode_player_data(data: &PlayerData) -> io::Result<Vec<u8>> {
+    data.to_gzip()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// 玩家存档的主文件和备份文件路径，交给 IO 线程做 `_old` 轮换。
+pub fn player_paths(dir: &WorldDir, uuid: &str) -> (PathBuf, PathBuf) {
+    (dir.player_dat(uuid), dir.player_dat_old(uuid))
+}
+
+/// 读玩家存档的原始 gzip 字节（连接层做 IO，世界线程再解析）。
+/// 主文件坏了就另存 `<uuid>_corrupted_<毫秒>.dat` 并退回 `<uuid>.dat_old`（官方 §8）。
+/// 文件不存在或都坏了返回 `None`，按新玩家进服。
+pub fn read_player_bytes(dir: &WorldDir, uuid: &str) -> Option<Vec<u8>> {
+    let primary = dir.player_dat(uuid);
+    match fs::read(&primary) {
+        Ok(bytes) => {
+            if PlayerData::from_gzip(&bytes).is_ok() {
+                return Some(bytes);
+            }
+            backup_corrupted_player(dir, uuid, &primary);
+            read_valid_player_old(dir, uuid)
+        }
+        Err(_) => read_valid_player_old(dir, uuid),
+    }
+}
+
+fn read_valid_player_old(dir: &WorldDir, uuid: &str) -> Option<Vec<u8>> {
+    let bytes = fs::read(dir.player_dat_old(uuid)).ok()?;
+    if PlayerData::from_gzip(&bytes).is_ok() {
+        Some(bytes)
+    } else {
+        None
+    }
+}
+
+fn backup_corrupted_player(dir: &WorldDir, uuid: &str, primary: &Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let backup = dir
+        .players_data_dir()
+        .join(format!("{uuid}_corrupted_{stamp}.dat"));
+    let _ = fs::copy(primary, backup);
+}
+
 /// 写一份 `data/` saved data。官方 `SavedDataStorage` 的根是
 /// `{ data: <codec 值>, DataVersion: <int> }`，gzip 压缩。
 pub fn write_saved_data(dir: &WorldDir, id: &str, data: &Tag) -> io::Result<()> {
@@ -471,6 +519,63 @@ mod tests {
             )]))
         );
         assert!(read_saved_data(&dir, "minecraft:weather").is_some());
+    }
+
+    #[test]
+    fn player_data_round_trips_with_old_rotation() {
+        let tmp = TempDir::new("player");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let (main, old) = player_paths(&dir, uuid);
+
+        let first = PlayerData {
+            position: [1.0, 2.0, 3.0],
+            ..PlayerData::default()
+        };
+        let first_bytes = encode_player_data(&first).unwrap();
+        safe_replace(&main, &first_bytes, Some(&old)).unwrap();
+        assert_eq!(read_player_bytes(&dir, uuid), Some(first_bytes));
+
+        let second = PlayerData {
+            position: [9.0, 9.0, 9.0],
+            ..PlayerData::default()
+        };
+        let second_bytes = encode_player_data(&second).unwrap();
+        safe_replace(&main, &second_bytes, Some(&old)).unwrap();
+        assert_eq!(read_player_bytes(&dir, uuid), Some(second_bytes));
+        assert_eq!(
+            PlayerData::from_gzip(&fs::read(&old).unwrap())
+                .unwrap()
+                .position,
+            [1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn a_corrupt_player_file_is_backed_up_and_falls_back_to_old() {
+        let tmp = TempDir::new("player-corrupt");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let uuid = "aaaa";
+        let (main, old) = player_paths(&dir, uuid);
+        let good = PlayerData {
+            position: [7.0, 7.0, 7.0],
+            ..PlayerData::default()
+        };
+        let good_bytes = encode_player_data(&good).unwrap();
+        safe_replace(&main, &good_bytes, Some(&old)).unwrap();
+        // 再写一次把 good 挪到 _old，然后打坏主文件。
+        safe_replace(&main, &good_bytes, Some(&old)).unwrap();
+        fs::write(&main, b"broken").unwrap();
+
+        assert_eq!(read_player_bytes(&dir, uuid), Some(good_bytes));
+        let backups: Vec<_> = fs::read_dir(dir.players_data_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupted"))
+            .collect();
+        assert_eq!(backups.len(), 1, "坏文件要另存一份");
     }
 
     #[test]

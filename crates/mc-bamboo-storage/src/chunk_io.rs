@@ -17,6 +17,7 @@
 use std::{
     collections::HashMap,
     fs, io,
+    path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
@@ -26,7 +27,7 @@ use mc_bamboo_core::ChunkPos;
 
 use crate::{
     anvil::{RegionCompression, RegionFile, RegionPos, open_region},
-    world_dir::WorldDir,
+    world_dir::{WorldDir, safe_replace},
 };
 
 /// 一次区域文件读的配额上限，和 NBT 解压上限一致。
@@ -52,6 +53,12 @@ enum Request {
     DropSnapshot {
         pos: ChunkPos,
         seq: u64,
+    },
+    /// 写一个独立文件（玩家数据等），`backup` 非空时照官方做 `_old` 轮换。
+    WriteFile {
+        path: PathBuf,
+        backup: Option<PathBuf>,
+        bytes: Vec<u8>,
     },
     /// 栅栏：确认此前所有请求都处理完，并对所有打开的区域文件 `sync_all`。
     Flush {
@@ -131,6 +138,16 @@ impl ChunkIo {
     /// 有了更新的快照，通知 IO 线程可以跳过旧 seq 的写。
     pub fn drop_snapshot(&self, pos: ChunkPos, seq: u64) {
         let _ = self.requests.send(Request::DropSnapshot { pos, seq });
+    }
+
+    /// 提交一个独立文件写（玩家数据等）。`backup` 非空时轮换旧文件到它。
+    /// 和区域文件共用一条 IO 线程、共用 `flush` 栅栏。
+    pub fn submit_file_write(&self, path: PathBuf, backup: Option<PathBuf>, bytes: Vec<u8>) {
+        let _ = self.requests.send(Request::WriteFile {
+            path,
+            backup,
+            bytes,
+        });
     }
 
     /// 非阻塞地收一条结果；世界线程在 tick 开头循环调用到 `None`。
@@ -264,6 +281,13 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     }
                 }
                 Request::DropSnapshot { .. } => {}
+                Request::WriteFile {
+                    path,
+                    backup,
+                    bytes,
+                } => {
+                    let _ = safe_replace(&path, &bytes, backup.as_deref());
+                }
                 Request::Flush { done } => {
                     cache.sync_all();
                     let _ = done.send(());
@@ -446,6 +470,19 @@ mod tests {
                 .exists()
         );
         reopened.close();
+    }
+
+    #[test]
+    fn a_standalone_file_write_goes_through_the_io_thread() {
+        let tmp = TempDir::new("filewrite");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let path = dir.players_data_dir().join("some-player.dat");
+        io.submit_file_write(path.clone(), None, b"player bytes".to_vec());
+        io.flush().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"player bytes");
+        io.close();
     }
 
     #[test]
