@@ -535,8 +535,7 @@ impl Plane {
             }
             count(super::profile::C_RELAX_UPDATE, 1);
             self.scratch.record(pos, current);
-            // 游标是借用，写入前先结束它；下一轮再建（不分配，只是清掉缓存）。
-            drop(cursor);
+            // 写入后游标里的旧块内容失效，下一轮重建（不分配，只是清掉缓存）。
             self.set_level(pos, candidate);
             let next = candidate + 1;
             if next < limit {
