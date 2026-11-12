@@ -457,3 +457,70 @@ fn crafter_clock_sleeps_until_it_expires() {
     let _ = run_block_entity_tick(&mut level, &mut ticks);
     assert!(!level.get(FURNACE).get(CRAFTING));
 }
+
+/// 测量用的手工基准：几百台正在烧东西的熔炉，方块实体阶段每刻的耗时。
+///
+/// 用法（release、安静窗口）：
+/// `cargo test --release -p mc-bamboo-blocks block_entity_sleep::furnace_phase_bench -- --ignored --nocapture`
+/// 同一轮里先跑关掉休眠的对照，再跑开着的，取多次里最快的一次，避免跨时间段比较。
+#[test]
+#[ignore]
+fn furnace_phase_bench() {
+    const COUNT: i32 = 400;
+    const TICKS: i64 = 3000;
+    const ROUNDS: usize = 5;
+
+    fn build(sleep: bool) -> Scene {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for i in 0..COUNT {
+                let pos = BlockPos::new(i, 64, 0);
+                world.set_block(pos, BlockState(blocks::FURNACE), UPDATE_ALL);
+                world.with_block_entity::<FurnaceEntity, _>(pos, |entity, _| {
+                    entity.write_item(0, ItemStack::new(items::RAW_IRON, 64));
+                    entity.write_item(1, ItemStack::new(items::COAL, 64));
+                });
+            }
+        }
+        level.sleep_enabled(sleep);
+        Scene {
+            level,
+            ticks,
+            script: Script { actions: Vec::new() },
+            cursor: 0,
+            layout: Layout::Plain,
+            menu: Vec::new(),
+        }
+    }
+
+    fn measure(sleep: bool) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..ROUNDS {
+            let mut scene = build(sleep);
+            let started = std::time::Instant::now();
+            for now in 1..=TICKS {
+                scene.ticks.set_time(now);
+                set_block_entity_clock(now);
+                let _ = run_block_entity_tick(&mut scene.level, &mut scene.ticks);
+            }
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64 / TICKS as f64 / 1000.0
+    }
+
+    // 新旧交替，同一时间段里连续跑，取各自最快的一次。
+    let mut off = Vec::new();
+    let mut on = Vec::new();
+    for _ in 0..3 {
+        off.push(measure(false));
+        on.push(measure(true));
+    }
+    let off = off.into_iter().fold(f64::INFINITY, f64::min);
+    let on = on.into_iter().fold(f64::INFINITY, f64::min);
+    println!(
+        "{COUNT} 台熔炉，方块实体阶段每刻：休眠关 {off:.1} µs，休眠开 {on:.1} µs，{:.1}×",
+        off / on
+    );
+}

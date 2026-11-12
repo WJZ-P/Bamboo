@@ -32,12 +32,15 @@
 | 11 | 票表等级传播：玩家跨一次区块，200 名玩家（微观基准） | 301 µs | 141 µs | 2.1× |
 | 11 | 同上：1 名玩家 | 289 µs | 126 µs | 2.3× |
 | 11 | 同上：每次 `run_updates` 的堆分配 | 37.7 次 + 28 MiB 搬移 | 4.3 次 + 5.5 MiB 搬移 | 8.8× |
+| 12 | 400 台正在烧的熔炉，方块实体阶段每刻 | 74.8–77.1 µs | 4.8–4.9 µs | 15.3–15.7× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
 第 7、8 项是区块平面接进来之后测出来的，数字和口径见 `profiling.md` 第 9 节。
 第 9 项见 7d 节，它只补回了区块平面带来的那部分开销的一半左右。
 第 11 项见 7f 节，数字是单项微观基准，不是整机 tick 耗时；整机效果还没在安静窗口里量过。
+第 12 项见 7g 节，是微观基准里方块实体阶段单独的耗时，不是整机 tick 耗时；
+400 台熔炉之外的世界是空的，所以倍数不能直接套到真实服上。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -913,6 +916,117 @@ cargo run --release -q -p mc-bamboo-vanilla -- ticket-oracle java
 
 ---
 
+## 7g. 会动的方块实体按事件休眠：400 台熔炉 74.8–77.1 µs → 4.8–4.9 µs / 刻
+
+代码：`crates/mc-bamboo-blocks/src/block_entity.rs` 的 `BlockEntities` 日程、
+`behaviour/machines/cooking.rs` 的 `FurnaceEntity`、`crafter.rs` 的
+`tick_crafting_clocks`、`crates/mc-bamboo-game/src/tick_levels.rs` 的档位变化记录。
+
+### 7g.1 原来慢在哪
+
+官方 `Level.tickBlockEntities` 按 `blockEntityTickers` 的列表顺序**每刻**跑每个 ticker。
+熔炉的 `AbstractFurnaceBlockEntity.serverTick` 在绝大多数刻里只做两件事：
+
+```text
+litTimeRemaining -= 1
+cookingTimer += 1
+```
+
+它们既不发方块变化、不发包、不通知比较器、不取随机数，也不改物品。真正需要做事的
+只有「这一个物品烧完」（挪物品、记 `recipesUsed`、`setChanged`）、「燃料烧完」
+（点火消耗燃料，岩浆桶的空桶余料要掉落并取随机数；或者熄火改 `LIT` 状态，带光照
+变化和邻居更新）和「外部改了内容」。一个物品烧 200 刻、燃料烧 1600 刻，中间 199 刻
+全是白跑。`docs/redstone-cache-experiment.md` 也量到熔炉的进度单调增长、缓存命中率是 0，
+所以熔炉这一类只能靠休眠，不能靠重放缓存。
+
+合成器的 `CrafterBlockEntity.serverTick` 同样每刻只把 `craftingTicksRemaining` 减 1，
+六刻之后才关掉 `crafting` 方块状态。
+
+### 7g.2 换成了什么
+
+**按事件排日程。** 一次真 `tick` 跑完后，实体自己算出下一次**必须真跑**的绝对
+`gameTime`（熔炉取 `min(物品烧完, 燃料烧完)`；熄火后进度每刻退 2 直到 0，之后睡到
+外部叫醒）。`BlockEntities` 把睡着的条目按到期时刻放进 `BTreeMap<i64, BTreeSet<u64>>`
+的桶里，一直醒着的条目放在另一个有序集合。每刻 `begin_tick` 弹出 `<= now` 的桶，
+和醒着的集合合并成这一刻要跑的序号列表，**按 `order` 里的单调序号升序**——这是官方
+的运行顺序，和 `slots` 下标不是一回事（空槽会复用）。睡着的条目不进列表，连
+「扫到它再跳过」的开销都没有。
+
+**睡着时被读的值按公式现算。** 熔炉记下安静刻的线性增量和一个基准时刻；
+`data()` / `data_values()`（菜单的 `ContainerData`）、`write_additional()`（存档组装、
+`/data get`）都从线程局部的 `gameTime` 现算数值。比较器只读三格物品，安静刻物品不变。
+存档组装 `chunk_content::encode` 调 `write_block_entity_additional`，拿到的就是现算值。
+
+**到点照官方发效果。** 日程绝不跨过燃料归零那一刻：那一秒点火 / 熄火、光照、邻居更新、
+余料掉落的世界随机数、`setChanged` 和比较器通知都在原刻原顺序发生。安静刻不发任何
+效果、不取任何随机数，所以随机数序列逐位不变。
+
+**外部变化立刻叫醒。** `World` 的统一入口（写方块、容器读写、`with_block_entity`、
+`with_slots`、`with_hopper`、增删方块实体）都调 `wake(pos)`。实体正被拿着时跳过，
+这样 tick 自己写 `LIT` 不会把自己叫醒；别的方块实体这一刻写它会叫醒。方块实体阶段
+中途叫醒还要看游标：排在后面就插进这一刻还没跑到的部分（官方这一刻会跑它并看到
+新物品），排在前面说明官方已经跑过它了，只按公式补上这一刻、新内容下一刻才处理。
+
+**冻结是暂停，不是补跑。** 官方区块不能 tick 的刻根本不跑，恢复后从原进度接着烧，
+总时长被拉长。`TickLevels` 记下「能跑方块逻辑」集合的成员变化，方块实体阶段开头
+把该区块睡着的实体按公式推进到冻结前最后一次真正跑过的那一刻、结束睡眠，
+恢复后重新算日程。装盒走同一套：`ChunkBlockEntities` 带相对剩余刻数，放回时按目标
+表的时钟换算（和计划刻的 `SavedTick.delay` 一样）。
+
+**合成器倒计时**改成记绝对到期时刻并放到期桶，`tick_crafting_clocks` 每刻只碰
+到期的那几台；盒子里仍存剩余刻数，存档键 `crafting_ticks_remaining` 不变。
+
+### 7g.3 为什么结果不变
+
+逐位一致靠三件事，都用差分测试守住：
+
+1. **准时、同位**：到期桶按时刻弹出，和醒着的集合按 `ordinal` 归并；`order` 从不动，
+   所以和旁边漏斗的交互顺序不变。中途叫醒按游标前后分情况（见上）。
+2. **读值现算**：安静刻只有两个线性增量，按公式算到当前刻；到点那一刻一定先真跑
+   `server_tick` 再重新登记，所以读路径不会看到过期的睡眠。存档组装、菜单数据槽、
+   比较器、录制层都走同一批读入口。
+3. **效果不增不减**：安静刻不发 `setChanged`、不写方块、不发包、不取随机数；
+   所有事件仍在原刻原位置发生。
+
+差分测试在 `crates/mc-bamboo-blocks/src/block_entity_sleep.rs`：一个只给测试的开关
+关掉休眠退回每刻都跑，同一个随机场景跑两份世界，**每一刻**比较方块状态、容器、
+方块实体全部字段（含四个数据槽、配方缓存、`recipesUsed`、速度）、按公式现算的存档
+NBT 字节、写方块序列、随机数种子、计划刻和菜单读到的全部数据槽。5 个种子 ×
+3 种布局（纯熔炉、漏斗排在熔炉前面、漏斗排在熔炉后面）× 2000 刻，场景里有随机加
+燃料/原料（含岩浆桶的余料）、中途取走、漏斗链送和抽、开着界面、破坏重放、烧到一半
+装盒再放回、区块能 tick / 不能 tick 来回切换。另有一台无人打扰的熔炉跑 3000 刻、
+只该在事件刻真跑（实测 < 20 次）。
+
+对拍全过：`oracle java --weather clear` 10114 / 0 fail、`machine` 1070 刻 0 不一致，
+以及 `menu` / `entity-oracle` / `light` / `ticket-oracle` / `storage` /
+`chunk-content` / `player-data` / `components`。
+
+### 7g.4 数字和复现
+
+同一轮里开 / 关休眠交替跑，各取多次里最快的一次（第 8 节的口径）。400 台熔炉各自
+有 64 个原料和 64 个燃料，跑 3000 刻，世界其余部分是空的：
+
+| | 休眠关 | 休眠开 | 倍数 |
+|---|---:|---:|---:|
+| 方块实体阶段每刻（第 1 轮） | 77.1 µs | 4.9 µs | 15.7× |
+| 第 2 轮 | 74.8 µs | 4.8 µs | 15.6× |
+| 第 3 轮 | 75.6 µs | 4.9 µs | 15.5× |
+| 第 4 轮 | 74.9 µs | 4.9 µs | 15.3× |
+
+```text
+cargo test --release -p mc-bamboo-blocks block_entity_sleep::furnace_phase_bench -- --ignored --nocapture
+cargo test -p mc-bamboo-blocks block_entity_sleep
+cargo test --workspace
+cargo run --release -q -p mc-bamboo-vanilla -- machine java
+cargo run --release -q -p mc-bamboo-vanilla -- oracle java --weather clear
+```
+
+**口径**：这是 `run_block_entity_tick` 一个阶段的耗时，不是整机 tick；`休眠开` 剩下的
+4.8–4.9 µs 是每刻 `begin_tick` 的桶检查、`due` 归并和少数事件刻的真跑。倍数会随
+熔炉数量、燃料/原料比例和外部动作频率变化，不能直接套到真实服上。
+
+---
+
 ## 8. 方法：怎么量才不骗自己
 
 这些优化里有几次是靠基准拦下来的，也有一次是因为读错了数字得出过错误结论。记下几条：
@@ -945,6 +1059,8 @@ cargo run --release -q -p mc-bamboo-vanilla -- ticket-oracle java
 
 | 项目 | 现状 | 备注 |
 |---|---|---|
+| 营火、酿造台也按事件休眠 | 没有做，见 7g 节 | 两者在倒计时期间**每刻**都调 `BlockEntity.setChanged`（官方字节码：`CampfireBlockEntity.cookTick` 只要有物品就调、`cooldownTick` 只要有 progress>0 就调；`BrewingStandBlockEntity.serverTick` 倒计时每刻无条件调）。这条通知走 `updateNeighbourForOutputSignal` → 旁边/隔一格的比较器 `neighbor_changed` → `comparator_check_tick_on_neighbor`；营火和酿造台在物品不变时 `output == old && powered == should_turn_on`，直接返回，不排计划刻、不写方块、不发包，所以理论上没有可见效果。但 `setChanged` 还会把区块标成「改过没存」，存档任务正在照官方做这个标记；睡着之后不再每刻标记有什么影响，等那个任务合进来一起看。**下一轮把两者一起做，证明只写一次**：旁边摆比较器、录制层逐刻比较效果和包，再把这套判据写进归档。官方 `CampfireBlockEntity.cookTick` 的 `Effect::CampfireChanged` 只在烤好时发，安静刻不发 |
+| 漏斗休眠 + 不读世界时间 | 没有做 | 漏斗是生存服里最常见的开销来源，但 `HopperBlockEntity.pushItemsTick` 每刻无条件写 `tickedGameTime = level.getGameTime()`，而 `apply_hopper_cooldown` 用它比较相邻漏斗谁先 tick（决定目标漏斗少等一刻）。官方 `saveAdditional` 不存这个字段，读盘回来是 0。方向：把它改成相对量 `delta = now - 上次 tick`，被读时现算 `now - delta`，读盘后 `None` 表示官方的初值 0；这样既不用每刻读世界时间（红石缓存 9.3 也卡在这里），又能按冷却期休眠。外部唤醒入口也最多：上方物品实体进入、目标容器被抽空/变满、邻居容器变化、`ENABLED` 变化、漏斗自己物品栏变化。和接下来的红石缓存是同一件事，要一起定 |
 | 票表的等级传播（`TicketTable::run_updates`）剩下的单价 | 7f 节之后微观基准 141 µs/移动（200 名玩家）、126 µs（1 名玩家），每次 `run_updates` 还有 4.3 次分配和约 6000 次松弛出队（其中只 1780 次真更新） | 7f 节已经把合并（70–80 → 3 µs）、BFS（60–78 → 19 µs）和分配（38 → 4 次/更新）压下去，整体 2.1–2.3×，但离目标 80 µs 还差约 1.8 倍。整机 `fly-20` 的数字仍是 `profiling.md` 第 9 节的旧值（0.90 ms / p99 2.23 ms），**改后没有在安静窗口里重测**。下一步要么让升高锥和降低松弛共用一次遍历、要么换 64×64 块的表示；两者都改两阶段算法的结构，要重新对拍。外圈等级继续落表（Director 的生成依赖图要用），不按"外圈不落表"的方向改。见 `chunk-tickets.md` 第 5 节 |
 | `random_ticks` 剩下的差距 | 安静窗口（`profiling.md` 10.5）：`fly-20` 旧 2.26–2.30 → 新 3.82–4.30 ms，空服 0.17–0.21 → 0.63–0.84 ms | **已经拆开量过，见 7e 节**：两版 tick 的区块/段/方块数完全相同，按 ticket 模拟等级选区块符合官方；effects 全空、视图构造零分配。7d 省下的 2.65 ms 被逐段 tick 多出的 2.45 ms 吃掉：每次读方块要查区块表、读各区块自己的数据（以前共用模板）。这是区块各自一份数据的随机访问/缓存代价，不是可删的白跑，本轮没改热路径 |
 | `ChunkStore` 里给「刚查过的区块」做单槽缓存 | 没有做 | 想法：一个 `tick_chunk` 里 3 次选格 + 草逻辑读 5–10 格方块/光照，都会重复查同一区块；缓存一次哈希查找的 `&Chunk`，也许能省一点。**现在不做的理由**：`ChunkStore` 是公开、可克隆、有多条 `&mut` 写路径的结构，内部可变地存裸指针时漏一处失效就是悬垂指针，风险和收益不成比例；而且没拆开「哈希查找」和「读区块数据时的缓存不命中」各占多少，若主要是后者则省掉查找也没用。另外官方是「取位置 → 读 → tick（tick 里会取随机数）→ 再取下一个位置」，3 个位置不能预先批量算。**要做的话先量**：临时把查找换成直接拿区块引用，量 `random_sections` 子项的每区块单价降多少，再决定值不值得做安全的版本 |
