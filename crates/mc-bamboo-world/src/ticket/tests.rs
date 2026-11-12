@@ -726,3 +726,31 @@ fn out_of_range_inputs_do_not_panic() {
         table.run_updates();
     }
 }
+
+#[test]
+fn scratch_blocks_stay_bounded_while_moving_away() {
+    let mut table = TicketTable::new();
+    table.set_player(1, Some(p(0, 0)));
+    table.run_updates();
+    let first = table.scratch_blocks();
+    assert!(first > 0, "更新之后辅助结构应该用到过块");
+    // 先走过一段有代表性的距离，让池子达到稳态，再往后走几千格。
+    for tick in 1..=256 {
+        table.set_player(1, Some(p(tick, 0)));
+        table.run_updates();
+    }
+    let steady = table.scratch_blocks();
+    let mut peak = steady;
+    for tick in 257..=4000 {
+        table.set_player(1, Some(p(tick, 0)));
+        table.run_updates();
+        peak = peak.max(table.scratch_blocks());
+    }
+    // 上界和视距有关：两张平面各不超过 (2 * (视距 + 传播半径) / 64 + 2)^2 * 4 个块。
+    let bound = 2 * 4 * ((2 * (table.view_distance() + 12) / 64) + 2).pow(2) as usize;
+    assert!(
+        peak <= bound,
+        "辅助块数没有上界：起始 {first}，稳态 {steady}，峰值 {peak}，上界 {bound}"
+    );
+    assert_eq!(table.scratch_blocks(), steady, "稳态之后块数应该不再变化");
+}

@@ -170,6 +170,12 @@ impl TicketTable {
         self.loading.len() + self.simulation.len()
     }
 
+    /// 传播用的辅助结构占了多少个块；公开给测试检查长期移动不会让内存一直涨。
+    #[doc(hidden)]
+    pub fn scratch_blocks(&self) -> usize {
+        self.loading.scratch_blocks() + self.simulation.scratch_blocks()
+    }
+
     /// 全部有票的区块，按坐标排序。
     pub fn ticket_positions(&self) -> Vec<ChunkPos> {
         let mut out: Vec<_> = self.tickets.keys().copied().collect();
