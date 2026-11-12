@@ -319,6 +319,7 @@ fn retain_frees_the_bytes_of_dropped_entries() {
 fn the_cache_forgets_chunks_nobody_tracks() {
     let mut server = Harness::new(2);
     let edited = BlockPos::new(1, -60, 1);
+    server.ensure_loaded(&[edited.chunk()]);
     server.region().chunks.set_block(edited, blocks::STONE);
     let client = server.join_and_settle("Kitten");
     assert!(
@@ -337,9 +338,40 @@ fn the_cache_forgets_chunks_nobody_tracks() {
     );
 
     server.move_to(&client, 1000.0, 1000.0);
+    // 新视图里的区块也要真的加载：已加载模式下没交付的位置编不出包体，
+    // 缓存就到不了「没人跟踪的都清掉」这一步。
+    let center = ChunkPos::containing(1000.0, 1000.0);
+    let view: Vec<ChunkPos> = (center.x - 3..=center.x + 3)
+        .flat_map(|x| (center.z - 3..=center.z + 3).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    server.ensure_loaded(&view);
     server.tick();
 
-    assert_eq!(server.region().chunk_cache.bodies.len(), 0);
+    // 无限模式里新视图共用模板帧，缓存全空；已加载模式里新视图每个区块
+    // 各编一份包体，所以条数正好是这片视图的区块数。
+    let expected_bodies = if server.world_region().chunks.is_loaded_mode() {
+        view.len()
+    } else {
+        0
+    };
+    assert_eq!(server.region().chunk_cache.bodies.len(), expected_bodies);
+    // 旧视图的坐标一个都不留。
+    assert!(
+        !server
+            .region()
+            .chunk_cache
+            .bodies
+            .contains_key(&edited.chunk())
+    );
+    assert!(
+        server
+            .region()
+            .chunk_cache
+            .bodies
+            .keys()
+            .all(|pos| view.contains(pos)),
+        "留下的都是当前视图里的包体"
+    );
     assert!(
         !server
             .region()

@@ -326,10 +326,17 @@ fn snapshot(region: &Region) -> String {
     out
 }
 
+/// 场景里的两个区块先走正式的加票/交付路径，两种区块模式都能取放。
+fn harness() -> Harness {
+    let mut server = Harness::new(2);
+    server.ensure_loaded(&[CHUNK, OTHER_CHUNK]);
+    server
+}
+
 /// 两个世界用同一套摆法，然后一起跑若干刻。
 fn pair() -> (Harness, Harness) {
-    let mut a = Harness::new(2);
-    let mut b = Harness::new(2);
+    let mut a = harness();
+    let mut b = harness();
     furnish(a.region());
     furnish(b.region());
     settle_light(a.region());
@@ -382,7 +389,7 @@ fn archive_round_trip_keeps_machines_ticks_and_items_running() {
         decoded.problems
     );
 
-    let mut target = Harness::new(2);
+    let mut target = harness();
     {
         let region = target.region();
         region.chunks.finish_light_updates();
@@ -522,7 +529,7 @@ fn taking_and_inserting_leaves_the_world_as_it_was() {
 
 #[test]
 fn taking_removes_every_positional_table_but_leaves_other_chunks_alone() {
-    let mut server = Harness::new(2);
+    let mut server = harness();
     furnish(server.region());
     settle_light(server.region());
 
@@ -577,7 +584,7 @@ fn a_column_moves_between_regions_with_different_clocks() {
     settle_light(direct.region());
 
     // 目标是个全新的 region，模拟时间和世界时间都往前拨过。
-    let mut target = Harness::new(2);
+    let mut target = harness();
     {
         let region = target.region();
         region.tick = RegionTick(37);
@@ -661,7 +668,7 @@ fn container_recheck_times_are_relative_to_the_target_clock() {
         region.containers.get_mut(&HOPPER).unwrap().recheck_at = Some(region.tick);
         region.containers.get_mut(&AWAY_CHEST).unwrap().recheck_at = Some(RegionTick(41));
     }
-    let mut target = Harness::new(2);
+    let mut target = harness();
     target.region().tick = RegionTick(97);
     target.region().block_ticks.set_time(200);
     target.region().chunks.finish_light_updates();
@@ -736,7 +743,7 @@ fn pending_light_blocks_taking_and_returns_the_box_on_insert() {
 
 #[test]
 fn a_busy_table_blocks_the_whole_batch() {
-    let mut server = Harness::new(2);
+    let mut server = harness();
     furnish(server.region());
     settle_light(server.region());
 
@@ -755,7 +762,7 @@ fn a_busy_table_blocks_the_whole_batch() {
 
 #[test]
 fn taking_several_chunks_keeps_each_box_separate() {
-    let mut server = Harness::new(2);
+    let mut server = harness();
     furnish(server.region());
     // 第二个区块里也放一点内容，验证按 x 带扫能分对盒子。
     let region = server.region();
@@ -784,7 +791,7 @@ fn taking_several_chunks_keeps_each_box_separate() {
     assert!(boxes[&OTHER_CHUNK].command_blocks().is_empty());
 
     // 两个盒子都放回去，和没搬过一样。
-    let mut other = Harness::new(2);
+    let mut other = harness();
     furnish(other.region());
     other.region().chunks.set_block(p(17, 4), blocks::FURNACE);
     crate::container::entry_in(
@@ -818,7 +825,7 @@ fn taking_several_chunks_keeps_each_box_separate() {
 
 #[test]
 fn a_taken_chunk_reads_the_template_and_caches_are_dropped() {
-    let mut server = Harness::new(2);
+    let mut server = harness();
     furnish(server.region());
     settle_light(server.region());
     // 让区块包缓存里有这个坐标的条目。
@@ -855,7 +862,7 @@ fn world_entities_move_with_the_column() {
     use mc_bamboo_blocks::entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt};
     use mc_bamboo_core::Vec3;
 
-    let mut server = Harness::new(2);
+    let mut server = harness();
     settle_light(server.region());
     let region = server.region();
     for (x, kind) in [
@@ -902,7 +909,7 @@ fn world_entities_move_with_the_column() {
 fn neighbour_light_makes_a_column_not_pristine() {
     use mc_bamboo_world::director::ChunkBundle;
 
-    let mut server = Harness::new(2);
+    let mut server = harness();
     settle_light(server.region());
     // 出生点区块的盒子此时是原样。
     let pristine = server
