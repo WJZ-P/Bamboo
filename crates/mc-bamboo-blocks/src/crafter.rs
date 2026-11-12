@@ -120,22 +120,16 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
 /// it reaches zero. The block oracle does not register a crafter ticker, so `crafting` stays on
 /// while a case is compared; only the game loop and test world ticks call this.
 pub(crate) fn tick_crafting_clocks(world: &mut World) {
-    let due = world.take_crafter_crafting();
-    let mut kept = Vec::new();
-    for (pos, remaining) in due {
-        let next = remaining - 1;
-        if next < 0 || !is_crafter(world, pos) {
-            continue;
-        }
-        if next == 0 {
+    // 官方每刻减一次倒计时，归零时关掉 `crafting`。倒计时亮起时就按绝对到期时刻
+    // 排进桶里，这里只碰这一刻到期的那几台；没到期的每刻完全不用扫。
+    let now = crate::block_entity::block_entity_clock();
+    let due = world.take_due_crafter_crafting(now);
+    for pos in due {
+        if is_crafter(world, pos) {
             let state = world.block_state(pos);
             world.set_block_and_update(pos, state.with(CRAFTING, false));
-        } else {
-            kept.push((pos, next));
         }
     }
-    kept.retain(|(pos, _)| is_crafter(world, *pos));
-    world.restore_crafter_crafting(kept);
 }
 
 /// `CrafterBlock.dispenseItem` 的 `DefaultDispenseItemBehavior.spawnItem`。
@@ -632,13 +626,18 @@ mod tests {
         assert!(level.get(POS).get(CRAFTING));
 
         let mut ticks = BlockTicks::new();
-        crate::interact::run_scheduled_ticks(&mut level, &mut ticks, 0);
+        // 官方每刻 `gameTime` 加一；合成器倒计时按绝对到期时刻排。
+        // 亮起时是第 0 刻，六刻之后（第 6 刻）关掉 `crafting`。
+        ticks.set_time(1);
+        crate::interact::run_scheduled_ticks(&mut level, &mut ticks, 1);
         assert!(level.get(POS).get(CRAFTING));
 
-        for _ in 0..5 {
+        for now in 2..=5 {
+            ticks.set_time(now);
             crate::interact::run_block_entity_tick(&mut level, &mut ticks);
         }
         assert!(level.get(POS).get(CRAFTING));
+        ticks.set_time(6);
         crate::interact::run_block_entity_tick(&mut level, &mut ticks);
         assert!(!level.get(POS).get(CRAFTING));
     }
@@ -649,7 +648,7 @@ mod tests {
         facing_north(&mut level, POS);
         let powered = level.get(POS).with(TRIGGERED, true).with(CRAFTING, true);
         level.set(POS, powered);
-        level.set_crafter_crafting(POS, 2);
+        level.set_crafter_crafting(POS, 2, 0);
         let mut ticks = BlockTicks::new();
         {
             let mut world = World::new(&mut level, &mut ticks);
@@ -659,7 +658,9 @@ mod tests {
             assert!(!world.block_state(POS).get(CRAFTING));
             assert!(!world.block_state(POS).get(TRIGGERED));
         }
+        ticks.set_time(1);
         crate::interact::run_block_entity_tick(&mut level, &mut ticks);
+        ticks.set_time(2);
         crate::interact::run_block_entity_tick(&mut level, &mut ticks);
         assert!(!level.get(POS).get(CRAFTING));
     }

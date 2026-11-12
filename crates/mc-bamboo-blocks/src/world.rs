@@ -1029,11 +1029,7 @@ impl<'a> World<'a> {
             });
             self.run_taken_block_entity(pos, id, entity);
             // 一次 tick 跑完后按实体自己的公式算下一次真正需要跑的时刻。
-            let wake = self.level.block_entity_dyn(pos).and_then(|entity| {
-                // 借用规则：这里只读实体，不碰 `self` 的可变字段。
-                let world: &World = self;
-                entity.sleep_from(now, world)
-            });
+            let wake = self.level.block_entity_sleep_from(pos, now);
             self.level.schedule_block_entity_wake(pos, wake);
             self.level.observe(Observation::TriggerEnd);
         }
@@ -1381,15 +1377,22 @@ impl<'a> World<'a> {
     }
 
     pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
-        self.level.set_crafter_crafting(pos, remaining);
+        self.level
+            .set_crafter_crafting(pos, remaining, self.ticks.now());
     }
 
     pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        self.level.take_crafter_crafting()
+        self.level.take_crafter_crafting(self.ticks.now())
+    }
+
+    /// 这一刻到期的合成器倒计时，见 `LevelSideState::take_due_crafter_crafting`。
+    pub fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
+        self.level.take_due_crafter_crafting(now)
     }
 
     pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
-        self.level.restore_crafter_crafting(entries);
+        self.level
+            .restore_crafter_crafting(entries, self.ticks.now());
     }
 
     pub fn forget_block_entity_memory(&mut self, pos: BlockPos) {

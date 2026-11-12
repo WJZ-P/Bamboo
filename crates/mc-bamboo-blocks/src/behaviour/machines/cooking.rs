@@ -143,7 +143,10 @@ impl FurnaceEntity {
                 self.cooking_total_time,
             );
         };
-        let steps = now.min(sleep.wake_at.saturating_sub(1)) - sleep.since;
+        // 读发生在方块实体阶段之后，官方在 `now` 这一刻也跑过一次，所以要把
+        // `now` 的线性增量算进去。到点那一刻会先真跑 `server_tick` 再重新登记，
+        // 因此读路径不会看到 `now >= wake_at` 的旧睡眠。
+        let steps = now - sleep.since;
         if steps <= 0 {
             return (
                 self.lit_time_remaining,
@@ -502,7 +505,7 @@ impl FurnaceEntity {
         if changed {
             crate::machine_container::mark_container_changed(world, self.pos);
         }
-        self.arm_sleep(now);
+        let _ = now;
     }
 
     /// 一次 `server_tick` 之后，把安静刻的线性公式记下来。
@@ -630,7 +633,8 @@ impl BlockEntity for FurnaceEntity {
         self
     }
 
-    fn sleep_from(&self, _now: i64, _world: &World) -> Option<i64> {
+    fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        self.arm_sleep(now);
         self.sleep.map(|sleep| sleep.wake_at)
     }
 

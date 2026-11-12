@@ -75,7 +75,7 @@ pub trait BlockEntity: Any + Send {
     ///
     /// The next `gameTime` that needs a real tick. `None` means every tick;
     /// `Some(i64::MAX)` means sleeping until an external change wakes it.
-    fn sleep_from(&self, _now: i64, _world: &World) -> Option<i64> {
+    fn sleep_from(&mut self, _now: i64) -> Option<i64> {
         None
     }
 
@@ -542,12 +542,24 @@ impl BlockEntities {
             wake_at: None,
             ..ticker
         });
-        // 官方在 `now` 这一刻还要真跑一次（或已经跑过），所以只推进到 `now - 1`。
+        // 这一刻还会不会真跑一次 `tick`？不在 tick 阶段（动作发生在方块实体阶段
+        // 之前）或排在游标后面都会跑，这时只推进到上一刻，让 `tick` 自己加这一刻。
+        // 只有排在游标前面（官方这一刻已经跑过它了）才把这一刻的增量按公式补上。
+        let runs_later = !self.ticking || ticker.ordinal > self.cursor;
+        let in_suffix = self.sleep_enabled && self.ticking && runs_later;
         if let Some(stored) = self.entities.get_mut(&pos) {
-            stored.entity.materialize(self.now.saturating_sub(1));
+            // `World::new` 已经把时钟拨到这一刻；`self.now` 还是上一次
+            // `begin_tick` 记下的值，不能用它推进数值。
+            let now = block_entity_clock();
+            let target = if runs_later {
+                now.saturating_sub(1)
+            } else {
+                now
+            };
+            stored.entity.materialize(target);
         }
         self.mark_awake(ticker.ordinal);
-        if self.sleep_enabled && self.ticking && ticker.ordinal > self.cursor {
+        if in_suffix {
             self.push_due(ticker.ordinal);
         }
     }
@@ -575,7 +587,9 @@ impl BlockEntities {
                 ..ticker
             });
             if let Some(stored) = self.entities.get_mut(&pos) {
-                stored.entity.materialize(self.now.saturating_sub(1));
+                stored
+                    .entity
+                    .materialize(block_entity_clock().saturating_sub(1));
             }
             self.mark_awake(ticker.ordinal);
             if self.sleep_enabled && self.ticking {
@@ -588,6 +602,17 @@ impl BlockEntities {
     #[doc(hidden)]
     pub fn due_count(&self) -> usize {
         self.last_ran
+    }
+
+    /// 休眠是否启用（差分测试会关掉）。
+    #[doc(hidden)]
+    pub fn sleep_enabled(&self) -> bool {
+        self.sleep_enabled
+    }
+
+    /// 让这一格的实体自己算下一次到点时刻；只在休眠启用时调用。
+    pub(crate) fn sleep_from(&mut self, pos: BlockPos, now: i64) -> Option<i64> {
+        self.entities.get_mut(&pos)?.entity.sleep_from(now)
     }
 
     /// 只给差分测试用的开关：关掉休眠，退回「每个 ticker 每刻都跑」。

@@ -128,6 +128,22 @@ impl TestLevel {
     pub(crate) fn due_count(&self) -> usize {
         self.block_entities.due_count()
     }
+
+    /// 把整个区块的方块实体装盒再放回，模拟搬区块。
+    #[cfg(test)]
+    pub(crate) fn box_chunk(&mut self, chunk: ChunkPos) {
+        let boxed = self
+            .block_entities
+            .take_chunk(chunk)
+            .expect("tick 边界可以搬");
+        self.block_entities.insert_chunk(boxed);
+    }
+
+    /// 冻结或恢复区块时通知方块实体日程。
+    #[cfg(test)]
+    pub(crate) fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool) {
+        self.block_entities.set_chunk_ticking(chunk, ticks);
+    }
 }
 
 impl LevelTables for TestLevel {

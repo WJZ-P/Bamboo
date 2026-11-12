@@ -760,20 +760,26 @@ impl LevelSideState for Recording<'_> {
         self.level.set_crafter_disabled(pos, mask);
     }
 
-    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64) {
         self.redstone_write(Some(pos), 4, (4_u8, remaining));
-        self.level.set_crafter_crafting(pos, remaining);
+        self.level.set_crafter_crafting(pos, remaining, now);
     }
 
-    fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        let value = self.level.take_crafter_crafting();
+    fn take_crafter_crafting(&mut self, now: i64) -> Vec<(BlockPos, i32)> {
+        let value = self.level.take_crafter_crafting(now);
         self.read(None, K_REDSTONE, (5_u8, &value));
         value
     }
 
-    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>, now: i64) {
         self.redstone_write(None, 5, (5_u8, &entries));
-        self.level.restore_crafter_crafting(entries);
+        self.level.restore_crafter_crafting(entries, now);
+    }
+
+    fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
+        let value = self.level.take_due_crafter_crafting(now);
+        self.read(None, K_REDSTONE, (7_u8, &value));
+        value
     }
 
     fn forget_block_entity_memory(&mut self, pos: BlockPos) {
@@ -858,6 +864,14 @@ impl LevelSideState for Recording<'_> {
         let value = self.level.block_entity_dyn(pos);
         self.read_entity(pos, value, 2_u8);
         value
+    }
+
+    fn block_entity_sleep_enabled(&self) -> bool {
+        self.level.block_entity_sleep_enabled()
+    }
+
+    fn block_entity_sleep_from(&mut self, pos: BlockPos, now: i64) -> Option<i64> {
+        self.level.block_entity_sleep_from(pos, now)
     }
 
     fn has_block_entity(&self, pos: BlockPos) -> bool {
