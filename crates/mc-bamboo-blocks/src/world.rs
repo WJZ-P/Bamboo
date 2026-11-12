@@ -81,8 +81,6 @@ pub const MAX_CHAINED_NEIGHBOR_UPDATES: u32 = 1_000_000;
 const WORLD_BOUND: i32 = 30_000_000;
 /// `ChunkPos.isValid` 的边界，单位是区块。
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
-/// 默认世界边界的半径。这个世界不能改边界。
-const WORLD_BORDER_RADIUS: f64 = 29_999_984.0;
 /// `Difficulty.NORMAL.getId()`。
 const NORMAL_DIFFICULTY: i32 = 2;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
@@ -95,15 +93,6 @@ fn block_center(pos: BlockPos) -> Vec3 {
         f64::from(pos.y) + 0.5,
         f64::from(pos.z) + 0.5,
     )
-}
-
-/// `level.getWorldBorder().isWithinBounds(pos)`：这个世界不能改边界，半径是默认的 29999984。
-///
-/// 方块坐标转成 `double` 再比，左边含、右边不含。
-pub fn is_within_world_border(pos: BlockPos) -> bool {
-    let inside =
-        |value: i32| (-WORLD_BORDER_RADIUS..WORLD_BORDER_RADIUS).contains(&f64::from(value));
-    inside(pos.x) && inside(pos.z)
 }
 
 /// `ClipContext.Fluid` 里用得到的两种：射线穿过所有流体，或者停在源头上。
@@ -697,9 +686,18 @@ impl<'a> World<'a> {
             && (pos.z >> 4).abs() <= VALID_CHUNK_BOUND
     }
 
-    /// `getWorldBorder().isWithinBounds(pos)`。
+    /// `getWorldBorder().isWithinBounds(pos)`：读 `Level` 给的边界快照。
+    ///
+    /// `getWorldBorder().isWithinBounds(pos)`: read the border snapshot from `Level`.
     pub fn is_within_world_border(&self, pos: BlockPos) -> bool {
-        is_within_world_border(pos)
+        self.world_border().is_within_bounds_pos(pos)
+    }
+
+    /// `Level.getWorldBorder()`，方块逻辑和实体逻辑读到的同一份快照。
+    ///
+    /// `Level.getWorldBorder()`: the same snapshot block and entity logic read.
+    pub fn world_border(&self) -> crate::WorldBorder {
+        self.level.world_border()
     }
 
     /// `isFaceSturdy`：世界里这一格的这个面能不能支撑东西。

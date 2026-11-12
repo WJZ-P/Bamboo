@@ -467,6 +467,11 @@ pub const K_TIME: u8 = 31;
 /// 移动活塞 `lastTicked`）。乐观口径也把它从键里去掉。
 pub const K_ENTITY_TIME: u8 = 33;
 const K_TICKER: u8 = 32;
+/// 方块逻辑读世界边界（床、活塞、桶、龙蛋）时的那一次读。
+///
+/// The read made when block logic consults the world border (beds, pistons, buckets,
+/// dragon eggs).
+const K_WORLD_BORDER: u8 = 34;
 
 /// 精确键和效果键用的 128 位哈希，算法固定，跨进程可比。
 struct StableHasher {
@@ -1192,6 +1197,29 @@ impl Level for Recording<'_> {
             None,
             K_WEATHER,
             (value.rain_level.to_bits(), value.thunder_level.to_bits()),
+        );
+        value
+    }
+
+    fn world_border(&self) -> crate::WorldBorder {
+        let value = self.level.world_border();
+        self.read(
+            None,
+            K_WORLD_BORDER,
+            (
+                value.min_x().to_bits(),
+                value.max_x().to_bits(),
+                value.min_z().to_bits(),
+                value.max_z().to_bits(),
+                value.size().to_bits(),
+                value.lerp_time(),
+                value.lerp_target().to_bits(),
+                value.safe_zone().to_bits(),
+                value.damage_per_block().to_bits(),
+                value.warning_time(),
+                value.warning_blocks(),
+                value.absolute_max_size(),
+            ),
         );
         value
     }

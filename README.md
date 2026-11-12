@@ -51,6 +51,15 @@ WebView2 的渲染进程不算在内。
 - 玩家位置不再照单全收。一个 tick 里离本 tick 起点太远会拉回（`moved too quickly`），
   位移和方块碰撞对不上、或者新位置穿进实心方块也会拉回。生存和冒险模式悬空超过 80 tick
   会按 `multiplayer.disconnect.flying` 断开。创造和旁观可以飞。`allow-flight` 没有配置项，按官方默认关闭。
+- 世界边界按官方 26.3 做全了：中心、大小、渐变（lerp）、伤害量、安全区、警告时间、警告距离和
+  绝对最大值都可调，`/worldborder` 的全部子命令、等级 2 权限、成功和失败消息照官方
+  `WorldBorderCommand`。进服序列在官方 `PlayerList.sendLevelInfo` 的位置发 `initialize_border`，
+  改动按 `BorderChangeListener` 广播五个包（伤害两项官方就不发包）。数学（距离、`isWithinBounds`
+  的几种重载、`clampToBounds`、碰撞形状、`isInsideCloseToBorder`）和逐刻渐变、六个包的编码都用官方
+  `WorldBorder` 类在 JVM 里对拍。方块交互、放置、破坏、活塞、下落方块、桶、床的
+  `getWorldBorder().isWithinBounds` 调用点、三种实体和玩家移动的边界碰撞都读真正的状态。
+  状态按维度归 `Global`（设计稿 6.6 的全局状态），region 每刻取一份只读快照；渐变在
+  `ServerLevel.tick` 的 "world border" 阶段、天气和时间之前推进。
 - 区块跟着玩家走，Tab 列表、玩家互相可见、潜行、冲刺、挥手、手持物同步。
   Tab 列表的延迟每 601 tick 广播一次，数值是心跳往返时间的加权平均，公式和官方一样。
   心跳 id 和正在等的那次对不上，或者当前没在等心跳，都按官方 `disconnect.timeout` 断开。
@@ -246,11 +255,22 @@ WebView2 的渲染进程不算在内。
 
 - 移动校验比官方严，也有几处更松。没有鞘翅的 300 格上限、漂浮、激流、睡觉、骑乘、击退宽限、
   切维度、单人房主豁免，游戏规则 `player_movement_check` 也关不掉，速度上限始终是 100。
-  不跑 `LivingEntity.travel`，所以预期位移只有跳跃和卡在方块里的减速。碰撞只算方块，
-  玩家互相穿身，世界边界也不挡人（只做 ±3.0E7 的坐标夹取）。没加载的区块仍用超平坦模板，
-  官方那里没有碰撞。摔落距离只记录，不结算伤害，也不调用方块的 `fallOn`。
+  不跑 `LivingEntity.travel`，所以预期位移只有跳跃和卡在方块里的减速。碰撞算方块和世界边界，
+  边界按官方 `Entity.collectCollidersIgnoringWorldBorder` 的条件（离边界够近）才把碰撞形状加进来；
+  玩家互相穿身，±3.0E7 的坐标夹取仍在（`Level.isInWorldBoundsHorizontal`，和世界边界是两件事）。
+  没加载的区块仍用超平坦模板，官方那里没有碰撞。摔落距离只记录，不结算伤害，也不调用方块的 `fallOn`；
+  世界边界的伤害也不结算，见下一条。
   蜘蛛网和细雪会在 tick 结束时套上卡住的速度并清掉摔落距离；压力板、绊线和甜浆果丛被踩到的效果没接。
   终末之诗、每 200 tick 补发脚下方块、载具移动都没做。
+- 世界边界还有几处没接：Bamboo 没有玩家生命值和伤害系统，官方 `LivingEntity.baseTick` 里的
+  边界伤害（`damageSources().outOfBorder()`）不结算，`damage amount` / `damage buffer` 只存起来、
+  跟着 `initialize_border` 发给客户端；`max-world-size` 没读，绝对最大值固定 29999984。
+  重生点和传送不按官方 `getWorldBorderAdjustedRespawnData`、`PortalForcer`、
+  `LivingEntity.randomTeleport` 夹进边界（没有死亡重生、下界传送门和随机传送）；
+  `canSpawnEntitiesInChunk`、刷怪和生物 AI 里的边界判断用不上（没有生物）。
+  边界状态不写存档，重启回到官方默认值：`mc-bamboo-blocks::world_border::WorldBorder` 已提供
+  和官方 `Settings` 编解码字段一一对应的 `export_settings` / `restore`，等 M3 接
+  `data/minecraft/world_border.dat`。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
 - 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
   含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
   按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
@@ -513,7 +533,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表和世界生成 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表、世界边界和世界生成 |
 
 依赖方向是单向的：
 
@@ -691,6 +711,15 @@ cargo test --release -p mc-bamboo-storage chunk_nbt_cost -- --ignored --nocaptur
 ```bash
 cargo run -p mc-bamboo-vanilla -- ticket-oracle <java 路径> \
     [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
+```
+
+世界边界也一样：官方 `WorldBorder` 在 JVM 里对随机的中心、大小、绝对最大值和渐变出题，
+比对距离、`isWithinBounds` 的几种重载、`clampToBounds`、`isInsideCloseToBorder` 与
+`Shapes.collide` 的碰撞结果、逐刻渐变后的尺寸和状态，以及六个 clientbound 包的官方编码；
+不启动服务端，用官方类直接算：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- border-oracle <java 路径> [--cases N] [--seed S] [--show N]
 ```
 
 这些命令需要 Java 25 或更新版本。

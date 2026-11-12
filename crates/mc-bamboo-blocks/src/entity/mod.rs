@@ -30,8 +30,8 @@ use crate::{shape::Aabb, state::BlockState};
 pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
 pub use physics::{
-    TravelSegment, enclosed_in_air, no_block_collision, overlaps_new_blocks, stuck_speed,
-    sweep_movement,
+    TravelSegment, collide_border_only, enclosed_in_air, no_block_collision, overlaps_new_blocks,
+    stuck_speed, sweep_movement,
 };
 pub use random::JavaRandom;
 pub use store::{

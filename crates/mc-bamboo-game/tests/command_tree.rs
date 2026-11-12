@@ -40,6 +40,7 @@ const ROOTS: &[&str] = &[
     "setidletimeout",
     "transfer",
     "version",
+    "worldborder",
 ];
 
 /// 从官方报告里取一个根节点。

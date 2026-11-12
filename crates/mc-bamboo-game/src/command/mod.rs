@@ -34,6 +34,7 @@ mod text;
 mod time;
 mod title;
 mod weather;
+mod world_border;
 mod world_settings;
 
 use std::sync::OnceLock;
@@ -351,6 +352,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::BlockPos
         | ArgumentType::Vec3
         | ArgumentType::Vec3Uncentered
+        | ArgumentType::Vec2
         | ArgumentType::Rotation
         | ArgumentType::BlockState
         | ArgumentType::BlockPredicate

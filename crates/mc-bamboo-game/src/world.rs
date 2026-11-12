@@ -349,6 +349,14 @@ impl World {
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
 
+        // 官方 `ServerLevel.tick` 开头的 "world border" 阶段在天气和时间之前。
+        // 渐变推进后把新快照发布给 region，这一刻的方块逻辑和实体碰撞都读它。
+        //
+        // Vanilla `ServerLevel.tick`'s "world border" phase comes before weather and time.
+        // After the lerp step, publish the new snapshot; this tick's block logic and
+        // entity collisions read it.
+        self.global.tick_world_border();
+        self.global.publish_border(&mut self.region);
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
         let weather = weather::advance(&mut self.global, &self.region);
         if !weather.is_empty() {
@@ -588,6 +596,7 @@ impl World {
             self.global.clock(),
             self.global.state().spawn,
             self.global.state().weather,
+            self.global.world_border(),
         );
     }
 

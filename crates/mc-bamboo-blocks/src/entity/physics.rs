@@ -1,11 +1,13 @@
 //! 实体运动和碰撞，官方 `Entity` 里和移动、落地、方块效果有关的那部分。
 //!
 //! 下落的方块和点燃的 TNT 走 `maxUpStep == 0` 的那条路。上台阶在 `sweep_movement` 里，
-//! 只有玩家把台阶高度传进来时才发生。实体之间和世界边界仍然不挡路。
+//! 只有玩家把台阶高度传进来时才发生。实体之间仍然不挡路；世界边界按官方
+//! `Entity.collectCollidersIgnoringWorldBorder` 在实体离边界够近时加进碰撞体。
 //!
 //! Falling blocks and primed TNT take the `maxUpStep == 0` path. Step-up lives in
-//! `sweep_movement` and runs only when a caller passes a step height. Entities and the
-//! world border still do not collide.
+//! `sweep_movement` and runs only when a caller passes a step height. Entities still
+//! do not block each other; the world border joins the colliders, as in vanilla
+//! `Entity.collectCollidersIgnoringWorldBorder`, when the source is close enough.
 //!
 //! 方块碰撞按官方的 `VoxelShape.collide` 扫掠。官方的形状是体素网格，每个格子是一个
 //! 体素；形状表里一个盒子就是一个格子，所以那条沿体素走的循环退化成逐盒子的判定，
@@ -17,6 +19,7 @@ use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
 
 use crate::{
+    WorldBorder,
     entity::{Entity, Movement, axis_component, ctx::BlockView, with_axis},
     shape::{self, Aabb, BooleanOp, CollisionContext, EntityContext},
     state::BlockState,
@@ -195,6 +198,7 @@ impl Entity {
             self.on_ground,
             self.collision_context(),
             |pos| world.block_state(pos),
+            &world.world_border(),
         )
     }
 
@@ -517,11 +521,14 @@ pub struct TravelSegment {
 
 /// `Entity.collide`，带 `maxUpStep`。`max_up_step` 为 0 时和下落方块用的那条路相同。
 ///
-/// 没有实体碰撞，也没有世界边界的形状。玩家之间互不阻挡。
+/// 没有实体碰撞，玩家之间互不阻挡。世界边界按 `collectCollidersIgnoringWorldBorder`
+/// 的条件加进碰撞体：`source` 取碰撞盒的水平中心。
 ///
 /// `Entity.collide` with `maxUpStep`. A zero step height matches the falling-block path.
 ///
-/// There are no entity collisions and no world-border shape. Players do not block each other.
+/// There are no entity collisions and players do not block each other. The world border
+/// joins the colliders under `collectCollidersIgnoringWorldBorder`'s condition; the
+/// source is the horizontal centre of the bounding box.
 pub fn sweep_movement(
     movement: Vec3,
     bounds: Aabb,
@@ -529,8 +536,18 @@ pub fn sweep_movement(
     on_ground: bool,
     context: CollisionContext,
     mut block_at: impl FnMut(BlockPos) -> BlockState,
+    border: &WorldBorder,
 ) -> Vec3 {
-    let movement_step = collide_bounding_box(movement, bounds, context, &mut block_at);
+    let (source_x, source_z) = centre(bounds);
+    let movement_step = collide_bounding_box(
+        movement,
+        bounds,
+        context,
+        &mut block_at,
+        border,
+        source_x,
+        source_z,
+    );
     let x_collision = movement.x != movement_step.x;
     let y_collision = movement.y != movement_step.y;
     let z_collision = movement.z != movement_step.z;
@@ -546,11 +563,12 @@ pub fn sweep_movement(
         if !landed {
             step_box = step_box.expanded_towards(0.0, -f64::from(1.0e-5_f32), 0.0);
         }
-        let colliders = flatten(&world::collect_block_collisions(
+        let mut colliders = flatten(&world::collect_block_collisions(
             step_box,
             context,
             &mut block_at,
         ));
+        colliders.extend(border.collision_colliders(source_x, source_z, step_box));
         let skip = movement_step.y as f32;
         for height in step_heights(grounded.min_y, &colliders, max_up_step, skip) {
             let stepped = collide_with_shapes(
@@ -565,6 +583,18 @@ pub fn sweep_movement(
         }
     }
     movement_step
+}
+
+/// 官方 `Entity.collideWithShapes` 只带世界边界形状时的结果。
+/// `world-border-oracle` 用它和 `Shapes.collide` 对拍四堵墙的表示；游戏逻辑走
+/// [`sweep_movement`]，那里还带上方块碰撞。
+///
+/// Vanilla `Entity.collideWithShapes` with only the world-border shape.
+/// `world-border-oracle` compares it with `Shapes.collide` to validate the four-wall
+/// representation; gameplay uses [`sweep_movement`], which also adds block collisions.
+pub fn collide_border_only(movement: Vec3, bounds: Aabb, border: &WorldBorder) -> Vec3 {
+    let boxes = border.collision_shape();
+    collide_with_shapes(movement, bounds, &boxes)
 }
 
 /// `CollisionGetter.noBlockCollision`。不算实体和世界边界。
@@ -761,13 +791,27 @@ fn collide_bounding_box(
     bounds: Aabb,
     context: CollisionContext,
     block_at: &mut impl FnMut(BlockPos) -> BlockState,
+    border: &WorldBorder,
+    source_x: f64,
+    source_z: f64,
 ) -> Vec3 {
     if movement.length_sqr() == 0.0 {
         return movement;
     }
     let target = bounds.expanded_towards(movement.x, movement.y, movement.z);
-    let collisions = world::collect_block_collisions(target, context, block_at);
-    collide_with_shapes(movement, bounds, &flatten(&collisions))
+    let mut boxes = flatten(&world::collect_block_collisions(target, context, block_at));
+    boxes.extend(border.collision_colliders(source_x, source_z, target));
+    collide_with_shapes(movement, bounds, &boxes)
+}
+
+/// 实体碰撞盒的水平中心，也就是 `Entity.getX()` / `getZ()`。
+///
+/// The horizontal centre of an entity box, i.e. `Entity.getX()` / `getZ()`.
+fn centre(bounds: Aabb) -> (f64, f64) {
+    (
+        (bounds.min_x + bounds.max_x) / 2.0,
+        (bounds.min_z + bounds.max_z) / 2.0,
+    )
 }
 
 fn collide_with_shapes(movement: Vec3, bounds: Aabb, boxes: &[Aabb]) -> Vec3 {
@@ -1249,9 +1293,34 @@ mod step_tests {
                 }
             }
         };
-        let climbed = sweep_movement(movement, bounds, 0.6, true, context(), at(slab));
-        let blocked = sweep_movement(movement, bounds, 0.6, true, context(), at(stone));
-        let no_step = sweep_movement(movement, bounds, 0.0, true, context(), at(slab));
+        let default_border = WorldBorder::default();
+        let climbed = sweep_movement(
+            movement,
+            bounds,
+            0.6,
+            true,
+            context(),
+            at(slab),
+            &default_border,
+        );
+        let blocked = sweep_movement(
+            movement,
+            bounds,
+            0.6,
+            true,
+            context(),
+            at(stone),
+            &default_border,
+        );
+        let no_step = sweep_movement(
+            movement,
+            bounds,
+            0.0,
+            true,
+            context(),
+            at(slab),
+            &default_border,
+        );
         assert!(climbed.y > 0.4, "{climbed:?}");
         assert!(climbed.x > blocked.x, "slab {climbed:?} block {blocked:?}");
         assert_eq!(blocked.y, 0.0);

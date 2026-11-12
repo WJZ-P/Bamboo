@@ -348,6 +348,16 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
 - 命令：目标都在本 region 的当场执行。涉及别的 region 的由主控分发，各 region 下一刻执行并回报，汇总后给反馈，最多晚两刻。
 - 入站包：每名玩家一条队列，跟着玩家走；每条带全局递增的到达序号，region 在 tick 开头按序号归并。同一个 region 里两人抢同一个方块，仍然是先到的赢。
 
+（2026-11-12 按实现更新）世界边界也按这套全局状态落了地。官方 `ServerLevel.getWorldBorder()`
+按维度各有一份（存在世界的数据存储里），不是全服一份。Bamboo 现在只有主世界、只有一个 region，
+权威副本放在 `Global`：它和游戏规则、天气一样是「和位置无关、整维度共用」的状态，
+以后一个维度拆成多个 region 时它们必须看到同一份；`Region` 只留一份每刻发布的只读快照，
+`RegionLevel` 和实体算阶段的只读视图各带一份，方块逻辑经 `Level` trait、实体碰撞经
+`BlockView` 读它。渐变在 `ServerLevel.tick` 开头的 "world border" 阶段推进（天气和时间之前），
+权威副本每刻推进后、以及 `/worldborder` 命令改完后重新发布快照。边界不写存档，
+`mc-bamboo-blocks::world_border` 提供和官方 `Settings` codec 一一对应的导出 / 恢复函数，
+等 M3 的 `data/` 接线。
+
 ---
 
 ## 7. 一刻的结构
