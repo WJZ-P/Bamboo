@@ -27,7 +27,7 @@ use mc_bamboo_core::ChunkPos;
 
 use crate::{
     anvil::{RegionCompression, RegionFile, RegionPos, open_region},
-    world_dir::{WorldDir, safe_replace},
+    world_dir::{WorldDir, player_paths, safe_replace},
 };
 
 /// 一次区域文件读的配额上限，和 NBT 解压上限一致。
@@ -86,6 +86,7 @@ pub enum Reply {
 /// 一条 IO 线程的句柄。世界线程持有，非阻塞提交、tick 开头收信箱。
 #[derive(Debug)]
 pub struct ChunkIo {
+    dir: WorldDir,
     requests: Sender<Request>,
     results: Receiver<Reply>,
     worker: Option<JoinHandle<()>>,
@@ -103,6 +104,7 @@ impl ChunkIo {
             .name("bamboo-chunk-io".to_owned())
             .spawn(move || worker_loop(layout, rx, tx))?;
         Ok(Self {
+            dir: dir.clone(),
             requests,
             results,
             worker: Some(worker),
@@ -148,6 +150,12 @@ impl ChunkIo {
             backup,
             bytes,
         });
+    }
+
+    /// 写 `players/data/<uuid>.dat`，照官方 `PlayerDataStorage.save` 轮换 `.dat_old`。
+    pub fn submit_player_write(&self, uuid: &str, bytes: Vec<u8>) {
+        let (path, backup) = player_paths(&self.dir, uuid);
+        self.submit_file_write(path, Some(backup), bytes);
     }
 
     /// 非阻塞地收一条结果；世界线程在 tick 开头循环调用到 `None`。

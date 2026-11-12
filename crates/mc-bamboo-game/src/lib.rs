@@ -64,6 +64,7 @@ mod pacing;
 mod player;
 mod player_grid;
 mod player_move;
+mod player_save;
 mod profiler;
 pub mod region;
 pub mod save_session;

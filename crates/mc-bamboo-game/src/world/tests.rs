@@ -252,6 +252,7 @@ impl Harness {
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
+            player_data: None,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -279,6 +280,7 @@ impl Harness {
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
+            player_data: None,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -1012,6 +1014,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         is_op: false,
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
+        player_data: None,
         sink: Box::new(sink),
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();

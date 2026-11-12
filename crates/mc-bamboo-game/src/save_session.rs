@@ -127,6 +127,15 @@ impl Drop for SaveSession {
     }
 }
 
+/// 连接层进服时调用：读玩家存档的原始 gzip 字节（连接任务负责做这一次 IO）。
+/// 没有存档 / 没启用存档时返回 `None`，按新玩家进服。
+///
+/// Called by the connection layer on join: read the raw player-save bytes (the
+/// connection task does this IO). `None` means a new player.
+pub fn load_player_bytes(root: &std::path::Path, uuid: &str) -> Option<Vec<u8>> {
+    mc_bamboo_storage::world_dir::read_player_bytes(&WorldDir::new(root), uuid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -425,6 +425,7 @@ impl Region {
             is_op: _,
             peer_ip,
             online_at_login: _,
+            player_data: _,
             sink,
         } = request;
         self.links.add(id, sink);

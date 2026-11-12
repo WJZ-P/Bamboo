@@ -10,13 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mc_bamboo_core::{ChunkPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
 };
-use mc_bamboo_storage::chunk_io::ChunkIo;
+use mc_bamboo_storage::{
+    chunk_io::ChunkIo, player_data::PlayerData, world_dir::encode_player_data,
+};
 use mc_bamboo_world::director::TicketOp;
 
 use crate::director_host::{DirectorHost, MailBudget};
@@ -32,11 +34,13 @@ use crate::{
     inventory, lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
     player::shows_hat,
+    player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
     profiler::{Metric, Phase},
     region::{JoinSettings, Region},
     save_session::SaveSession,
     secure_chat::{self, ServiceProfileKeys},
     sign, weather,
+    world_state::RespawnData,
 };
 
 const TICK: Duration = Duration::from_millis(50);
@@ -462,6 +466,22 @@ impl World {
         let flush_bytes = self.region.links.flush();
         self.region.profiler.record(Metric::FlushBytes, flush_bytes);
         self.region.profiler.lap(Phase::Flush);
+        // 运行中每 6000 tick 自动保存一次（官方 `autoSave`，`save-on` 控制开关）。
+        // Run-time autosave every 6000 ticks (official `autoSave`, gated by save-on).
+        if self.director_tick > 0
+            && self.director_tick.is_multiple_of(6_000)
+            && self.save.as_ref().is_some_and(|save| save.auto_save())
+        {
+            self.save_all_players();
+            if let Some(save) = &mut self.save {
+                save.level_mut().time = self.global.time().0;
+                save.level_mut().last_played = crate::admin::now_millis();
+                if let Err(error) = save.save_all() {
+                    warn!(%error, "could not auto-save level data");
+                }
+            }
+            self.host.flush_io();
+        }
         if self.global.admin.stop_requested {
             let flow = self.shut_down();
             self.region.profiler.lap(Phase::TickTail);
@@ -572,7 +592,38 @@ impl World {
             name: request.name.clone(),
         });
 
-        let game_mode = self.global.state().default_game_mode;
+        // 恢复玩家存档：位置取整到方块、朝向、游戏模式、物品栏。
+        // 位置的小数部分丢掉（不额外补发位置包），见 README 已知限制。
+        // Restore from the player save: block-rounded position, rotation, game
+        // mode and inventory. The sub-block fraction is dropped (no extra
+        // position packet); see README known limitations.
+        let restored =
+            request
+                .player_data
+                .take()
+                .and_then(|bytes| match PlayerData::from_gzip(&bytes) {
+                    Ok(data) => Some(data),
+                    Err(error) => {
+                        warn!(%error, "could not decode player data; treating as a new player");
+                        None
+                    }
+                });
+        let game_mode = restored
+            .as_ref()
+            .map(|data| game_mode_from_id(data.game_type))
+            .unwrap_or(self.global.state().default_game_mode);
+        let join_spawn = match &restored {
+            Some(data) => RespawnData::of(
+                BlockPos::new(
+                    data.position[0] as i32,
+                    data.position[1] as i32,
+                    data.position[2] as i32,
+                ),
+                data.rotation[0],
+                data.rotation[1],
+            ),
+            None => self.global.state().spawn,
+        };
         let uuid = request.uuid;
         let entry = RosterEntry {
             uuid,
@@ -586,7 +637,7 @@ impl World {
         };
 
         let difficulty_frames = self.global.difficulty_frames();
-        let spawn = self.global.state().spawn.pos;
+        let spawn = join_spawn.pos;
         let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
             id: u64::from(id.0 as u32),
@@ -597,7 +648,7 @@ impl World {
             JoinSettings {
                 game_mode,
                 difficulty_frames: &difficulty_frames,
-                spawn: self.global.state().spawn,
+                spawn: join_spawn,
                 hashed_seed: self.global.state().hashed_seed(),
                 permission_level,
                 is_op,
@@ -634,9 +685,40 @@ impl World {
             id,
             self.global.time(),
             self.global.clock(),
-            self.global.state().spawn,
+            join_spawn,
             self.global.state().weather,
         );
+
+        // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
+        if let Some(data) = &restored
+            && let Some(player) = self.region.players.get_mut(&id)
+        {
+            restore_inventory(player, data);
+        }
+    }
+
+    /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
+    fn save_one_player(&self, id: PlayerId) {
+        if let Some(player) = self.region.players.get(&id) {
+            self.write_player_save(player);
+        }
+    }
+
+    /// 存档所有在线玩家（自动保存、关服、`save-all`）。
+    fn save_all_players(&self) {
+        for player in self.region.players.values() {
+            self.write_player_save(player);
+        }
+    }
+
+    fn write_player_save(&self, player: &crate::player::Player) {
+        let data = runtime_player_data(player);
+        match encode_player_data(&data) {
+            Ok(bytes) => self
+                .host
+                .submit_player_write(&player.uuid.simple().to_string(), bytes),
+            Err(error) => warn!(%error, "could not encode player data"),
+        }
     }
 
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
@@ -672,6 +754,9 @@ impl World {
             self.global.scoreboard_mut().on_leave(&name);
             self.global.boss_bars_mut().on_leave(id);
         }
+        // 官方 `PlayerList.remove` 在移除玩家前先存盘。
+        // Official `PlayerList.remove` saves the player before removing them.
+        self.save_one_player(id);
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
@@ -968,7 +1053,10 @@ impl World {
     /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
     /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
-        // 先存所有区块：Director 收回全部已加载区块、写盘、排空 IO 线程并 sync_all。
+        // 官方顺序：先存所有在线玩家，再存区块。
+        // Official order: save all online players first, then chunks.
+        self.save_all_players();
+        // 再存所有区块：Director 收回全部已加载区块、写盘、排空 IO 线程并 sync_all。
         // Save all chunks first: reclaim every loaded chunk, write, drain and sync_all.
         self.host.shutdown(&mut self.region);
         if let Some(save) = &mut self.save {
