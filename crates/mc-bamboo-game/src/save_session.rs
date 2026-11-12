@@ -28,12 +28,18 @@ use mc_bamboo_storage::{
 };
 use tracing::{info, warn};
 
+use crate::inbound::PlayerId;
+
 /// 命令发给世界线程的存档请求。命令动作不能直接碰 IO，压进 `Global`，由 `World` 消费。
+/// `SaveAll.source` 记下发起命令的玩家：成功消息要等保存完成（flush 还要等 IO 回执）
+/// 才发，所以世界线程得知道发给谁。
 /// A save request from a command. Command actions cannot touch IO, so they push
-/// one of these into `Global` for the world thread to consume.
+/// one of these into `Global` for the world thread to consume. `SaveAll.source`
+/// is the requesting player: the success message is sent only after the save
+/// completes (and after the IO ack for `flush`), so the world thread needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveCommand {
-    SaveAll { flush: bool },
+    SaveAll { flush: bool, source: PlayerId },
     SaveOn,
     SaveOff,
 }

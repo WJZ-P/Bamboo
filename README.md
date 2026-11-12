@@ -57,12 +57,17 @@ WebView2 的渲染进程不算在内。
 一条 IO 线程负责区域文件的压缩和读写；世界线程只做 NBT 解析/序列化，绝不等待 IO：
 启动时扫一遍区域文件头，得到「盘上有哪些区块」的内存集合（写盘时更新）。盘上已有
 数据的区块发异步读、结果下一刻开头经信箱收回；盘上没有的区块直接在世界线程走超平坦
-模板，不引入一 tick 的读盘延迟，保住进服首批次区块的顺序。改过的区块在卸载时排队、按 D6
-匀速写盘（每刻 `脏区块数 / 6000` 个、至少 1 个、单区块 10 秒冷却）；没改过的区块
-不写盘，下次按超平坦模板重建。关服按官方 `stopServer` 顺序：先存所有在线玩家，
+模板，不引入一 tick 的读盘延迟，保住进服首批次区块的顺序。改过的区块无论卸载与否
+都按 D6 匀速写盘：每刻给 `已加载脏区块数 / 6000` 个（至少 1 个、单区块 10 秒冷却）
+仍加载的脏区块拍快照，卸载的区块也进队列；没改过的区块不写盘，下次按超平坦模板重建。
+快照复用卸载存盘同一条编码路径（`take_columns` → 编码 → `insert_column` 原地放回），
+写出的 NBT 和卸载一致、区块保持加载。关服按官方 `stopServer` 顺序：先存所有在线玩家，
 再收回并存所有区块，写 `level.dat` / `data/` / `chunk_tickets.dat`，等 IO 落盘、
 `sync_all`，最后释放 `session.lock`。`/save-all [flush]`、`/save-on`、`/save-off`
-按官方消息和权限等级 4 实现；`/save-off` 关掉运行中的自动保存（每 6000 刻一次）。
+按官方消息和权限等级 4 实现；`/save-all` 立刻给所有已加载脏区块拍快照交给 IO 线程、
+再存玩家 / `level.dat` / `data/`，不带 `flush` 时快照都入队后就发成功消息，带 `flush`
+时排一道不阻塞的 IO 栅栏、等它回执再发（世界线程从不等待）；`/save-off` 关掉运行中的
+匀速保存和每 6000 刻的自动保存，`/save-on` 恢复。
 
 探针和每个测试都从空世界开始：单元测试 / oracle 用 `world_dir = None` 或临时目录，
 不碰世界目录；跑官方探针前删掉 `probe-run/world` 再启动 `bamboo.exe`
@@ -73,8 +78,9 @@ WebView2 的渲染进程不算在内。
 - 只做 Anvil。Linear、lz4（压缩 ID 4）、自定义压缩（ID 127）、老布局转换都不做；
   读到老布局（世界根有 `region/`）当空世界并写日志（Q1/Q2/Q8）。
 - 不逐次强制刷盘：写盘在 IO 线程异步做，关服才 `sync_all`（Q4）。`kill` 崩溃最多丢
-  最近没写完的快照；运行中仍加载、还没卸载的脏区块不主动拍快照，`/save-all` 也只存
-  玩家、`level.dat`、`data/` 和已排队的卸载快照。D6 匀速只作用于卸载快照队列。
+  最近还没匀速轮到的脏改动和没落完的快照；已加载脏区块平时由 D6 匀速拍快照，但
+  `/save-off` 期间暂停。脏的判定用 `ChunkStore` 的版本号（方块 / 光照 / 告示牌等变更），
+  只有容器内容、实体、计划刻等改动而方块版本号没变的区块要等卸载或 `/save-all` 才存。
 - 只持久化改动过的（脏）区块。没改过的按超平坦模板重建；官方服务端打开这个世界时
   `data/` 下世界生成设置是空默认，会按官方默认世界生成，和 Bamboo 的平坦模板不同（Q9）。
 - 玩家数据只恢复已建模字段：位置取整到方块（小数部分丢掉、不补发位置包）、朝向、
@@ -87,8 +93,9 @@ WebView2 的渲染进程不算在内。
   模板，不走官方的重新生成流水线，也不另存区块备份。
 - 玩家文件名照官方 `getStringUUID()` 用带连字符 UUID；坏玩家文件另存
   `<uuid>_corrupted_<yyyy-MM-dd_HH-mm-ss>.dat`（官方 `FileNameDateFormatter`，Bamboo
-  按 UTC 算，官方按本地时区）。`/save-all` 成功消息在请求入队时
-  就发（异步保存，消息早于落盘），`flush` 分支多排一道 IO 栅栏。
+  按 UTC 算，官方按本地时区）。`/save-all` 的成功消息不带 `flush` 时在快照都交给 IO
+  线程后发、带 `flush` 时等 IO 栅栏回执再发，都不在请求入队那一刻发（比官方同步保存晚，
+  但世界线程不等待 IO）；拍快照时临时取出盒子再放回，期间会把光照算完、区块包缓存重新编码。
 - 火把抖动表、容器开合状态与计数、方块实体的 `dead` / `recheck_at` 等瞬时状态不存；
   世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏也不存档（沿用原有限制）。
 
@@ -510,7 +517,7 @@ WebView2 的渲染进程不算在内。
   `/transfer` 发 `ClientboundTransferPacket`（主机名、端口，默认 25565），`/version` 按官方 `VersionCommand.dumpVersion` 的行序打印；版本信息用 `mc-bamboo-data` 的常量，`series`、`build_time`、两个 `pack_version` 按 26.3 官方 `version.json` 固定，测试会读官方 jar 逐个对照。
   名字参数用官方 `GameProfileArgument`：`@` 开头按玩家选择器解析，在线玩家按名字解析；离线模式不在线的名字用官方 `UUIDUtil.createOfflinePlayerUUID`（`OfflinePlayer:<name>` 的 MD5）。正版模式按官方 `CachedUserNameToIdResolver` 维护一份「本次启动以来进过服的玩家 名字→UUID」缓存（`Join` 时记下，不写盘；官方会持久化到 `usercache.json`），在线玩家查不到时先查这份缓存，再查不到就按官方「查不到」报 `argument.player.unknown`（Bamboo 没有 Mojang 档案查询，也不从白名单猜 UUID）。`ban-ip` / `pardon-ip` 的 target 是 IP 或在线玩家名（用连接层报来的对端 IP）。
   `/save-all [flush]`、`/save-on`、`/save-off` 按官方消息和权限等级 4 实现，见「存档」一节
-  （成功消息在异步保存入队时就发等差异记在已知限制里）。`/ban-ip` 的 `commands.banip.info` 用逗号连接玩家名，和官方 `EntitySelector.joinNames` 的格式不同；`/version` 的 `build_time` 是纯文本而不是官方的 `Date` 翻译参数。
+  （成功消息在快照交给 IO 线程后、或 `flush` 的 IO 栅栏回执后才发，差异记在已知限制里）。`/ban-ip` 的 `commands.banip.info` 用逗号连接玩家名，和官方 `EntitySelector.joinNames` 的格式不同；`/version` 的 `build_time` 是纯文本而不是官方的 `Date` 翻译参数。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
   没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。

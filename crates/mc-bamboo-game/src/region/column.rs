@@ -19,7 +19,11 @@ use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
 
 use crate::{
-    command_block::CommandBlockData, container::ContainerEntry, lectern::Book, profiler::SubPhase,
+    chunk_codec::{ChunkCodec, PackedChunk},
+    command_block::CommandBlockData,
+    container::ContainerEntry,
+    lectern::Book,
+    profiler::SubPhase,
     region::Region,
 };
 
@@ -546,6 +550,54 @@ impl Region {
         }
         self.profiler.end_sub();
         Ok(boxes)
+    }
+
+    /// 给一个仍加载的区块拍存档快照，不卸载它：临时把盒子取出、编码、放回。
+    /// 复用验证过的 `take_columns` / `insert_column`，写出的 NBT 和卸载存盘逐字节一致；
+    /// 搬盒子期间会清掉的三张瞬时缓存（方块/光照变化、区块包缓存）原样存回，
+    /// 对运行没有可见影响，区块仍是已加载状态。
+    /// 返回 `None` 表示这个区块原样（照官方不存）或这一刻不适合搬盒子，稍后再试。
+    ///
+    /// Snapshot a still-loaded chunk without unloading: take its box, encode,
+    /// put it back. Reuses the verified take/insert path so the NBT is
+    /// byte-identical to an unload save. The transient caches cleared along the
+    /// way are restored, so the chunk stays loaded with no visible side effect.
+    /// `None` means the chunk is pristine (vanilla does not save it) or the
+    /// tables are busy; retry on a later tick.
+    pub(crate) fn encode_loaded_column(
+        &mut self,
+        pos: ChunkPos,
+        codec: &impl ChunkCodec,
+    ) -> Option<Result<PackedChunk, String>> {
+        let block_changes = std::mem::take(&mut self.block_changes.changed);
+        let light_changes = std::mem::take(&mut self.light_changes);
+        let chunk_cache = std::mem::take(&mut self.chunk_cache);
+        // 搬盒子要求光照算完，和交付/收回前的做法一样先把待算的光照跑完。
+        // Moving a box needs light settled; finish pending light like delivery does.
+        self.chunks.finish_light_updates();
+        let set: BTreeSet<ChunkPos> = [pos].into_iter().collect();
+        let result = match self.take_columns(&set) {
+            Ok(boxes) => {
+                let mut encoded = None;
+                for (at, column) in boxes {
+                    let one = if column.is_pristine() {
+                        None
+                    } else {
+                        Some(codec.encode(at, &column))
+                    };
+                    // 不管编码成功与否都把盒子原样放回，绝不丢区块。
+                    // Put the box back unchanged whether encoding worked or not.
+                    self.insert_column_unchecked(at, column);
+                    encoded = one;
+                }
+                encoded
+            }
+            Err(_) => None,
+        };
+        self.block_changes.changed = block_changes;
+        self.light_changes = light_changes;
+        self.chunk_cache = chunk_cache;
+        result
     }
 }
 

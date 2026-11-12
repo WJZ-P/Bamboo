@@ -2,11 +2,14 @@
 //! `SaveOffCommand`。三个命令都要求 `LEVEL_OWNERS`（4）。
 //!
 //! 命令动作不碰存档：把 [`SaveCommand`] 压进 `Global`，由世界线程在 tick 里消费。
-//! 消息和权限等级照官方；保存是异步的，所以成功消息在入队时就发（磁盘写入稍后完成）。
+//! 权限等级和 `commands.save.saving` 照官方；`commands.save.success` 由世界线程
+//! 在保存真正完成后发（保存是异步的），`flush` 还要等 IO 回执。
 //!
 //! `save-all` / `save-on` / `save-off`, mirroring the official commands. All need
 //! `LEVEL_OWNERS` (4). Actions push a [`SaveCommand`] into `Global` for the world
-//! thread; they never touch the disk. Messages and permission follow vanilla.
+//! thread; they never touch the disk. Permissions and `commands.save.saving`
+//! follow vanilla; `commands.save.success` is sent by the world thread only after
+//! the save really completes (it is async), and after the IO ack for `flush`.
 
 use mc_bamboo_command::ParsedCommand;
 use mc_bamboo_protocol::text::Component;
@@ -19,7 +22,8 @@ use crate::{
     save_session::SaveCommand,
 };
 
-/// `save-all`：照官方先发 `commands.save.saving`，成功后发 `commands.save.success`。
+/// `save-all`：照官方先发 `commands.save.saving`；`commands.save.success` 由世界线程
+/// 在快照都交给 IO 之后再发，所以这里只压请求，不提前报成功。
 pub(crate) fn save_all(
     global: &mut Global,
     region: &mut Region,
@@ -53,13 +57,9 @@ fn do_save_all(
         Component::translate("commands.save.saving", []),
         false,
     );
-    global.save_requests.push(SaveCommand::SaveAll { flush });
-    feedback::success(
-        region,
-        id,
-        Component::translate("commands.save.success", []),
-        true,
-    );
+    global
+        .save_requests
+        .push(SaveCommand::SaveAll { flush, source: id });
     Ok(())
 }
 
@@ -189,8 +189,14 @@ mod tests {
         assert_eq!(
             global.save_requests,
             vec![
-                SaveCommand::SaveAll { flush: false },
-                SaveCommand::SaveAll { flush: true }
+                SaveCommand::SaveAll {
+                    flush: false,
+                    source: id
+                },
+                SaveCommand::SaveAll {
+                    flush: true,
+                    source: id
+                }
             ]
         );
     }

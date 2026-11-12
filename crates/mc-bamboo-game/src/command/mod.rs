@@ -17,7 +17,7 @@ mod catalog;
 mod clone;
 mod effects;
 mod enchant;
-mod feedback;
+pub(crate) mod feedback;
 mod gamerule;
 mod items;
 mod loot;

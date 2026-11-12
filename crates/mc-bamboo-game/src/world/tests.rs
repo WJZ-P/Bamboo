@@ -1193,6 +1193,227 @@ fn rejoin_uses_in_flight_player_save_over_stale_disk() {
     );
 }
 
+/// 临时世界目录，测试结束自动删。IO 线程要在删目录前关掉，所以 tmp 先声明、
+/// server 后声明（drop 时 server 先关）。
+struct D6TempDir(std::path::PathBuf);
+
+impl D6TempDir {
+    fn new(tag: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "bamboo-d6-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        Self(path)
+    }
+}
+
+impl Drop for D6TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 收回 IO 信箱里所有 `Written`，返回写过的区块坐标。
+fn written_chunks(host: &crate::director_host::DirectorHost) -> Vec<mc_bamboo_core::ChunkPos> {
+    use mc_bamboo_storage::chunk_io::Reply;
+    let io = host.io().expect("测试接了 IO 线程");
+    std::iter::from_fn(|| io.try_recv())
+        .filter_map(|r| match r {
+            Reply::Written { pos, .. } => Some(pos),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 帧里有没有 `commands.save.success` 这段翻译键（系统消息的 NBT 里是明文）。
+fn has_save_success(client: &Client) -> bool {
+    const KEY: &[u8] = b"commands.save.success";
+    client
+        .take_frames()
+        .iter()
+        .any(|f| f.body.windows(KEY.len()).any(|w| w == KEY))
+}
+
+/// D6：匀速保存把仍加载的脏区块拍快照交给 IO 线程，区块不卸载；
+/// 已经存过且没再改的区块下一刻不会重复存。
+#[test]
+fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("paced");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+
+    server
+        .world
+        .host
+        .save_loaded_dirty(&mut server.world.region, 1, true);
+    server.world.host.flush_io();
+
+    assert!(
+        server.world.region.chunks.is_loaded(pos),
+        "snapshot must not unload the chunk"
+    );
+    assert!(
+        written_chunks(&server.world.host).contains(&pos),
+        "a dirty loaded chunk should be written"
+    );
+
+    // 版本号已经记为「已存」，且 10 秒冷却没到，pos 不该被重复写。
+    // 发光方块的光照会顺带弄脏邻居，D6 之后几刻把那些摊平写盘，属于正常匀速行为，
+    // 所以这里只针对 pos 本身，不断言整批为空。
+    // Its revision is now recorded as saved and the cooldown has not elapsed, so
+    // pos must not be written again. A light-emitting block also dirties nearby
+    // chunks, which D6 paces over the following ticks; only assert about pos.
+    for t in 2..12 {
+        server
+            .world
+            .host
+            .save_loaded_dirty(&mut server.world.region, t, true);
+        server.world.host.flush_io();
+        assert!(
+            !written_chunks(&server.world.host).contains(&pos),
+            "a clean chunk must not be re-saved inside the cooldown"
+        );
+    }
+}
+
+/// `save-off` 期间匀速保存整个停掉。
+#[test]
+fn d6_stops_when_auto_save_is_off() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("off");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+
+    server
+        .world
+        .host
+        .save_loaded_dirty(&mut server.world.region, 1, false);
+    server.world.host.flush_io();
+    assert!(
+        written_chunks(&server.world.host).is_empty(),
+        "save-off must stop the paced snapshots"
+    );
+}
+
+/// `/save-all` 立刻给所有已加载脏区块拍快照，不受匀速和冷却限制。
+#[test]
+fn save_all_snapshots_every_dirty_loaded_chunk() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("all");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let a = mc_bamboo_core::ChunkPos::new(0, 0);
+    let b = mc_bamboo_core::ChunkPos::new(1, 0);
+    server.ensure_loaded(&[a, b]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.set_block(mc_bamboo_core::BlockPos::new(19, -60, 3), blocks::GLOWSTONE);
+
+    server
+        .world
+        .host
+        .snapshot_all_dirty(&mut server.world.region, 1);
+    server.world.host.flush_io();
+    let written = written_chunks(&server.world.host);
+    assert!(
+        written.contains(&a),
+        "first dirty loaded chunk should be written"
+    );
+    assert!(
+        written.contains(&b),
+        "second dirty loaded chunk should be written"
+    );
+}
+
+/// 没 `flush`：`save-all` 成功消息在快照都交给 IO 之后这一刻就发。
+#[test]
+fn save_all_sends_success_after_handoff() {
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: client.id,
+        });
+    server.tick();
+    assert!(
+        has_save_success(&client),
+        "non-flush success is sent once snapshots are handed off"
+    );
+    assert!(server.world.pending_save_success.is_empty());
+}
+
+/// 有 `flush`：成功消息要等 IO 栅栏回执（信箱），世界线程不等待；
+/// 回执到达前不发，到达后补发。
+#[test]
+fn save_all_flush_success_waits_for_the_io_barrier() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("flush-success");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: true,
+            source: client.id,
+        });
+    server.tick();
+    assert!(
+        !has_save_success(&client),
+        "flush must defer success until the IO barrier acked"
+    );
+    assert_eq!(server.world.pending_save_success.len(), 1);
+
+    // 让 IO 线程处理栅栏，再跑一刻让 poll_io 收回执、补发成功消息。
+    server.world.host.flush_io();
+    server.tick();
+    assert!(
+        has_save_success(&client),
+        "success is sent after the IO barrier acked"
+    );
+    assert!(server.world.pending_save_success.is_empty());
+}
+
 #[test]
 fn refused_sink_is_closed_and_the_player_waits_for_its_leave() {
     let mut server = Harness::new(8);

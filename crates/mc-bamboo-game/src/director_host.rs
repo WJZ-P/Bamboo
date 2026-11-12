@@ -12,9 +12,12 @@ use std::{
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_storage::chunk_io::{ChunkIo, Reply};
-use mc_bamboo_world::director::{
-    Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
-    TaskResult, TicketOp,
+use mc_bamboo_world::{
+    director::{
+        Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
+        TaskResult, TicketOp,
+    },
+    store::ChunkRevision,
 };
 
 use crate::{
@@ -118,6 +121,18 @@ pub(crate) struct DirectorHost {
     /// Vanilla saves synchronously, so there is no stale-on-disk window; here the
     /// write is async, and a rejoin prefers this in-memory copy to avoid losing progress.
     pending_players: HashMap<String, (u64, Vec<u8>)>,
+    /// 每个已加载区块上次拍快照（存/卸载写）落定后的版本号，用来认出
+    /// 「改过但还没存」的脏区块。版本号由 `ChunkStore` 在每次写方块/光照时更换。
+    /// Revision at each loaded chunk's last snapshot, to find dirty loaded chunks.
+    saved_revisions: HashMap<ChunkPos, ChunkRevision>,
+    /// 每个已加载区块上次被 D6 匀速快照的刻数，用于单区块 10 秒冷却。
+    /// Last tick each loaded chunk was snapshotted by D6, for the cooldown.
+    loaded_save_tick: HashMap<ChunkPos, u64>,
+    /// 已经收到 IO 回执的异步栅栏序号；`World` 每刻取走，发等在上面的
+    /// `save-all flush` 成功消息。
+    /// Seqs of async barriers whose acks arrived; `World` drains them each tick
+    /// to release the `save-all flush` success messages waiting on them.
+    flushed_barriers: Vec<u64>,
 }
 
 impl DirectorHost {
@@ -142,6 +157,9 @@ impl DirectorHost {
             save_queue: VecDeque::new(),
             save_cooldown: HashMap::new(),
             pending_players: HashMap::new(),
+            saved_revisions: HashMap::new(),
+            loaded_save_tick: HashMap::new(),
+            flushed_barriers: Vec::new(),
         }
     }
 
@@ -155,6 +173,20 @@ impl DirectorHost {
         if let Some(io) = &self.io {
             let _ = io.flush();
         }
+    }
+
+    /// 排一道不阻塞的 IO 栅栏，返回序号；`None` 表示这一局没接磁盘（无需等待）。
+    /// `save-all flush` 用它等「此前所有写落盘」的回执，世界线程不等待。
+    /// Enqueue a non-blocking IO barrier; `None` means no disk is attached.
+    /// `save-all flush` waits for its ack instead of blocking the world thread.
+    pub(crate) fn submit_flush_barrier(&mut self) -> Option<u64> {
+        self.io.as_ref().map(|io| io.submit_barrier())
+    }
+
+    /// 取走这一刻收到的栅栏回执序号，由 `World` 发等在上面的成功消息。
+    /// Drain the barrier seqs acked this tick; `World` releases the messages.
+    pub(crate) fn take_flushed_barriers(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.flushed_barriers)
     }
 
     /// 提交一名玩家的存档写，并在内存里记下"已交给 IO、还没落盘"的副本。
@@ -187,6 +219,13 @@ impl DirectorHost {
     #[allow(dead_code)]
     pub(crate) fn director(&self) -> &Director<Box<RegionColumn>> {
         &self.director
+    }
+
+    /// 测试专用：直接看 IO 线程句柄（收写回执、读回磁盘）。
+    /// Test-only: direct access to the IO handle (write acks, read-back).
+    #[cfg(test)]
+    pub(crate) fn io(&self) -> Option<&ChunkIo> {
+        self.io.as_ref()
     }
 
     pub(crate) fn director_mut(&mut self) -> &mut Director<Box<RegionColumn>> {
@@ -325,6 +364,97 @@ impl DirectorHost {
         if let Some(io) = &self.io {
             for pending in to_write {
                 io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
+    }
+
+    /// 列出「已加载、非原样、版本号和上次快照不同」的脏区块，按坐标排序。
+    /// `pristine` 的区块照官方不存；版本号一变就说明自上次落盘后又改过。
+    /// List loaded, non-pristine chunks whose revision differs from their last
+    /// save, sorted. Pristine chunks are not saved (vanilla); a changed revision
+    /// means the chunk was edited since its last snapshot.
+    fn dirty_loaded_chunks(&self, region: &Region) -> Vec<ChunkPos> {
+        let mut dirty = Vec::new();
+        for (pos, revision, pristine) in region.chunks.loaded_states() {
+            if !pristine && self.saved_revisions.get(&pos).copied() != Some(revision) {
+                dirty.push(pos);
+            }
+        }
+        dirty.sort_unstable();
+        dirty
+    }
+
+    /// D6：每刻给 `ceil(已加载脏区块数 / 6000)`（至少 1）个仍加载的脏区块拍快照
+    /// 交给 IO 线程，单区块 10 秒冷却；`enabled=false`（`save-off`）时整个停掉。
+    /// 快照用 `encode_loaded_column` 走和卸载存盘同一条验证过的编码路径，不卸载区块。
+    ///
+    /// D6: each tick snapshot `ceil(dirty/6000)` (at least 1) still-loaded dirty
+    /// chunks to the IO thread with a per-chunk 10s cooldown; fully disabled
+    /// during save-off. Snapshots go through the verified unload-save encoder.
+    pub(crate) fn save_loaded_dirty(&mut self, region: &mut Region, now_tick: u64, enabled: bool) {
+        if !enabled || self.io.is_none() {
+            return;
+        }
+        // 卸载后不必留着记账，避免长局里无界增长。
+        // Drop bookkeeping for unloaded chunks so it cannot grow without bound.
+        self.saved_revisions
+            .retain(|pos, _| region.chunks.is_loaded(*pos));
+        self.loaded_save_tick
+            .retain(|pos, _| region.chunks.is_loaded(*pos));
+
+        let dirty = self.dirty_loaded_chunks(region);
+        let count = save_batch_size(dirty.len());
+        let eligible: Vec<ChunkPos> = dirty
+            .into_iter()
+            .filter(|pos| match self.loaded_save_tick.get(pos) {
+                None => true,
+                Some(&last) => now_tick.saturating_sub(last) >= SAVE_COOLDOWN_TICKS,
+            })
+            .take(count)
+            .collect();
+        for pos in eligible {
+            self.snapshot_loaded(region, pos, now_tick);
+        }
+    }
+
+    /// `/save-all`：立刻给所有已加载脏区块拍快照交给 IO 线程，不受匀速和冷却限制。
+    /// `/save-all`: snapshot every loaded dirty chunk to the IO thread at once,
+    /// ignoring the pacing and cooldown.
+    pub(crate) fn snapshot_all_dirty(&mut self, region: &mut Region, now_tick: u64) {
+        if self.io.is_none() {
+            return;
+        }
+        let dirty = self.dirty_loaded_chunks(region);
+        for pos in dirty {
+            self.snapshot_loaded(region, pos, now_tick);
+        }
+    }
+
+    /// 给一个已加载脏区块拍快照交给 IO 线程，并记下落定后的版本号和这一刻。
+    /// 编码失败或这一刻不适合搬盒子就什么也不记，下一刻重试。
+    /// Snapshot one loaded dirty chunk to the IO thread and record the settled
+    /// revision and tick. On failure (or when the tables are busy) record nothing
+    /// so it is retried on a later tick.
+    fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
+        let Some(result) = region.encode_loaded_column(pos, &self.codec) else {
+            return;
+        };
+        match result {
+            Ok(packed) => {
+                // 和卸载写共用同一个单调递增的 seq，IO 线程据此丢旧快照。
+                // Share one monotonic seq source with unload saves.
+                let seq = self.director.allocate_save_seq();
+                if let Some(io) = &self.io {
+                    io.submit_write(pos, seq, packed.chunk, packed.entities);
+                }
+                // 搬盒子会换版本号，落定之后再记，下一刻才不会被误判成又脏了。
+                // The round-trip bumps the revision; record it afterwards.
+                self.saved_revisions
+                    .insert(pos, region.chunks.revision(pos));
+                self.loaded_save_tick.insert(pos, now_tick);
+            }
+            Err(error) => {
+                tracing::warn!(%error, ?pos, "could not encode a loaded chunk for saving");
             }
         }
     }
@@ -595,6 +725,13 @@ impl DirectorHost {
                     {
                         self.pending_players.remove(&uuid);
                     }
+                }
+                Reply::Flushed { seq } => {
+                    // 异步栅栏的回执：World 会在本刻取走它，发等在上面的
+                    // `save-all flush` 成功消息。
+                    // An async barrier ack; World drains it this tick to release
+                    // the `save-all flush` success message waiting on it.
+                    self.flushed_barriers.push(seq);
                 }
             }
         }

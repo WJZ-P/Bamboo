@@ -74,6 +74,13 @@ enum Request {
     Flush {
         done: Sender<()>,
     },
+    /// 异步栅栏：处理到它时把回执送进 `results` 信箱，不阻塞世界线程。
+    /// `save-all flush` 用它等 IO 线程「此前所有写都落盘」再发成功消息。
+    /// An async barrier: when reached, reply through the results mailbox instead
+    /// of blocking the world thread. `save-all flush` waits for this ack.
+    Barrier {
+        seq: u64,
+    },
     Shutdown,
 }
 
@@ -99,6 +106,12 @@ pub enum Reply {
         ok: bool,
         error: Option<String>,
     },
+    /// 一道异步栅栏之前的所有写都已落盘并 `sync_all`。`seq` 对应提交时的序号，
+    /// 世界线程据此把等在这道栅栏上的 `save-all flush` 成功消息发出去。
+    /// All writes before an async barrier have landed and been synced; `seq`
+    /// matches the submitted barrier so the world thread can release the
+    /// success messages waiting on it.
+    Flushed { seq: u64 },
 }
 
 /// 一条 IO 线程的句柄。世界线程持有，非阻塞提交、tick 开头收信箱。
@@ -118,6 +131,9 @@ pub struct ChunkIo {
     /// Sequence number for player saves; echoed by the IO thread so the world
     /// thread only drops the newest in-flight copy.
     next_player_seq: AtomicU64,
+    /// 异步栅栏的序号，和玩家写分开计数；回执原样带回用来配对等待的消息。
+    /// Sequence number for async barriers; echoed to pair with waiting messages.
+    next_barrier_seq: AtomicU64,
 }
 
 impl ChunkIo {
@@ -139,6 +155,7 @@ impl ChunkIo {
             results,
             worker: Some(worker),
             next_player_seq: AtomicU64::new(1),
+            next_barrier_seq: AtomicU64::new(1),
         })
     }
 
@@ -239,6 +256,20 @@ impl ChunkIo {
                 "chunk IO thread stopped during flush",
             )
         })
+    }
+
+    /// 排一道不阻塞的栅栏并返回它的序号。IO 线程按 FIFO 处理到它时，此前提交的所有
+    /// 写都已落盘且区域文件已 `sync_all`，随后往 `results` 信箱回一条 `Flushed { seq }`。
+    /// 世界线程不等待，在 tick 开头收信箱时据此发 `save-all flush` 的成功消息。
+    ///
+    /// Enqueue a non-blocking barrier and return its seq. When the IO thread
+    /// reaches it (FIFO), every earlier write has landed and been synced; it then
+    /// replies `Flushed { seq }` to the results mailbox. The world thread never
+    /// waits: it collects the ack at the start of a tick.
+    pub fn submit_barrier(&self) -> u64 {
+        let seq = self.next_barrier_seq.fetch_add(1, Ordering::Relaxed);
+        let _ = self.requests.send(Request::Barrier { seq });
+        seq
     }
 
     /// 关掉 IO 线程。先排一道栅栏，保证写都落盘。
@@ -407,6 +438,13 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                 Request::Flush { done } => {
                     cache.sync_all();
                     let _ = done.send(());
+                }
+                Request::Barrier { seq } => {
+                    // FIFO 保证：排在这道栅栏之前的写都在本批里先处理过了。
+                    // FIFO guarantees every write queued before this barrier has
+                    // already been processed in this batch.
+                    cache.sync_all();
+                    let _ = tx.send(Reply::Flushed { seq });
                 }
                 Request::Shutdown => {
                     cache.sync_all();
@@ -640,6 +678,35 @@ mod tests {
         // 两份存档都真的落盘了。
         assert_eq!(fs::read(dir.player_dat("aaaa-bbbb")).unwrap(), b"save one");
         assert_eq!(fs::read(dir.player_dat("cccc-dddd")).unwrap(), b"save two");
+        io.close();
+    }
+
+    /// 异步栅栏的回执排在它之前的写全部处理完之后才到，且带提交时的序号。
+    /// The async barrier ack arrives after all earlier writes and carries its seq.
+    #[test]
+    fn an_async_barrier_replies_after_prior_writes() {
+        let tmp = TempDir::new("barrier");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let pos = ChunkPos::new(2, -3);
+        io.submit_write(pos, 1, Some(b"chunk".to_vec()), None);
+        let path = dir.players_data_dir().join("p.dat");
+        io.submit_file_write(path.clone(), None, b"player".to_vec());
+        let seq = io.submit_barrier();
+        // 用阻塞 flush 作测试的同步点：它排在栅栏之后，返回时栅栏回执已经进信箱。
+        // Use a blocking flush as the test's sync point: queued after the barrier,
+        // so when it returns the barrier ack is already in the mailbox.
+        io.flush().unwrap();
+        let replies = collect(&io);
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, Reply::Flushed { seq: got } if *got == seq)),
+            "the barrier should reply through the results mailbox with its seq"
+        );
+        // 排在栅栏之前的独立文件写确实落了盘。
+        assert_eq!(fs::read(&path).unwrap(), b"player");
         io.close();
     }
 

@@ -157,6 +157,33 @@ impl ChunkStore {
         self.loaded.as_ref().map(HashSet::len)
     }
 
+    /// 每个已加载区块的坐标、当前版本号，以及「是不是还保持生成器原样」。
+    /// 运行中的匀速存档用它判断哪些已加载区块脏了（改过且版本号和上次落盘不同）；
+    /// 原样区块照官方不存。无限模式没有已加载集合，返回空。
+    ///
+    /// For each loaded chunk: its position, current revision, and whether it is
+    /// still the untouched generator output. Paced run-time saving uses this to
+    /// find dirty loaded chunks (edited and revision differs from the last save);
+    /// pristine chunks are not saved, like vanilla. Empty in infinite-flat mode.
+    pub fn loaded_states(&self) -> Vec<(ChunkPos, ChunkRevision, bool)> {
+        let Some(loaded) = &self.loaded else {
+            return Vec::new();
+        };
+        loaded
+            .iter()
+            .map(|&pos| {
+                let revision = self.revision(pos);
+                let mark = self
+                    .pristine
+                    .get(&pos)
+                    .copied()
+                    .unwrap_or(PristineMark::TEMPLATE);
+                let pristine = mark.from_generator && mark.revision == revision;
+                (pos, revision, pristine)
+            })
+            .collect()
+    }
+
     /// 把一个区块束装进已加载集合。调用方保证位置原本没有内容。
     /// 只有已加载模式能调用；无限模式忽略。
     ///

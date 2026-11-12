@@ -117,6 +117,9 @@ pub struct World {
     save: Option<SaveSession>,
     /// 启动阶段打开存档失败的原因；非空时 `run` 直接拒绝启动。
     startup_error: Option<String>,
+    /// 等着某道 IO 栅栏回执再发成功消息的 `save-all flush`：`(栅栏序号, 玩家)`。
+    /// `save-all flush` success messages waiting on an IO barrier: `(seq, player)`.
+    pending_save_success: Vec<(u64, PlayerId)>,
 }
 
 impl World {
@@ -206,6 +209,7 @@ impl World {
             director_tick: 0,
             save,
             startup_error,
+            pending_save_success: Vec::new(),
         };
         world
             .host
@@ -390,6 +394,10 @@ impl World {
         // 上一刻发出去的读盘请求，结果在这一刻开头经信箱收回。
         // Read requests dispatched last tick are collected at the start of this tick.
         self.host.poll_io(&mut self.region);
+        // 收回已经到达的 IO 栅栏回执，发等在上面的 `save-all flush` 成功消息。
+        // Release `save-all flush` success messages whose IO barrier acked.
+        let flushed = self.host.take_flushed_barriers();
+        self.release_flushed_save_success(flushed);
         self.process_inbox()?;
         self.consume_save_commands();
         self.sync_player_tickets();
@@ -491,8 +499,15 @@ impl World {
                     warn!(%error, "could not auto-save level data");
                 }
             }
-            self.host.flush_io();
         }
+        // 运行中匀速给仍加载的脏区块拍快照写盘（D6），`save-off` 时停。
+        // 区块平时由这条平摊的 IO 保存，不再等 6000 刻集中刷，世界线程也不等待。
+        // Paced run-time snapshots of still-loaded dirty chunks (D6), off during
+        // save-off. Chunks are saved by this flat IO stream rather than a
+        // 6000-tick burst; the world thread never waits.
+        let save_enabled = self.save.as_ref().is_some_and(|save| save.auto_save());
+        self.host
+            .save_loaded_dirty(&mut self.region, self.director_tick, save_enabled);
         if self.global.admin.stop_requested {
             let flow = self.shut_down();
             self.region.profiler.lap(Phase::TickTail);
@@ -729,7 +744,13 @@ impl World {
         let requests = std::mem::take(&mut self.global.save_requests);
         for request in requests {
             match request {
-                SaveCommand::SaveAll { flush } => {
+                SaveCommand::SaveAll { flush, source } => {
+                    // 照官方 saveEverything：先给所有脏的已加载区块拍快照交给 IO 线程，
+                    // 再存玩家、level.dat、data/。到这一步所有快照都已入队。
+                    // Like official saveEverything: snapshot every loaded dirty
+                    // chunk to the IO thread, then save players, level.dat, data/.
+                    self.host
+                        .snapshot_all_dirty(&mut self.region, self.director_tick);
                     self.save_all_players();
                     if let Some(save) = &mut self.save {
                         save.level_mut().time = self.global.time().0;
@@ -738,11 +759,19 @@ impl World {
                             warn!(%error, "save-all could not write level data");
                         }
                     }
-                    self.host.flush_io();
                     if flush {
-                        // 官方 flush 会等 saved data 落盘；这里再排一道栅栏，
-                        // 确保玩家和区块的写也都落盘。
-                        self.host.flush_io();
+                        // 有 flush：排一道不阻塞的 IO 栅栏，成功消息等它回执再发。
+                        // With flush: enqueue a non-blocking barrier; send success
+                        // only after its ack, so the world thread never waits.
+                        if let Some(seq) = self.host.submit_flush_barrier() {
+                            self.pending_save_success.push((seq, source));
+                        } else {
+                            self.send_save_success(source);
+                        }
+                    } else {
+                        // 没 flush：快照都交出去了，此刻发成功消息。
+                        // Without flush: every snapshot is handed off, send now.
+                        self.send_save_success(source);
                     }
                 }
                 SaveCommand::SaveOn => {
@@ -757,6 +786,34 @@ impl World {
                 }
             }
         }
+    }
+
+    /// 发 `commands.save.success`（广播给 OP），和命令侧原来的一致。
+    /// Send `commands.save.success` (broadcast to ops), as the command did.
+    fn send_save_success(&mut self, source: PlayerId) {
+        crate::command::feedback::success(
+            &mut self.region,
+            source,
+            Component::translate("commands.save.success", []),
+            true,
+        );
+    }
+
+    /// 收回已到达的 IO 栅栏回执，发等在上面的 `save-all flush` 成功消息。
+    /// Release `save-all flush` success messages whose IO barrier has acked.
+    fn release_flushed_save_success(&mut self, flushed: Vec<u64>) {
+        if flushed.is_empty() {
+            return;
+        }
+        let mut remaining = Vec::new();
+        for (seq, source) in std::mem::take(&mut self.pending_save_success) {
+            if flushed.contains(&seq) {
+                self.send_save_success(source);
+            } else {
+                remaining.push((seq, source));
+            }
+        }
+        self.pending_save_success = remaining;
     }
 
     /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
