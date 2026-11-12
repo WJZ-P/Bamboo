@@ -149,6 +149,13 @@ impl DirectorHost {
         }
     }
 
+    /// 提交一名玩家的存档写（进服/离开/自动保存/关服都用它）。
+    pub(crate) fn submit_player_write(&self, uuid: &str, bytes: Vec<u8>) {
+        if let Some(io) = &self.io {
+            io.submit_player_write(uuid, bytes);
+        }
+    }
+
     /// 测试/无限超平坦专用：只记账，不派任务也不碰 region。
     pub(crate) fn new_infinite_flat(config: DirectorConfig) -> Self {
         let mut host = Self::new(config, MailBudget::default());
@@ -226,7 +233,7 @@ impl DirectorHost {
             region.profiler.end_sub();
             return;
         }
-        self.pump(region, Event::Tickets { ops });
+        self.pump(region, vec![Event::Tickets { ops }]);
     }
 
     fn apply_infinite_ticket(&mut self, op: TicketOp) {
@@ -263,7 +270,7 @@ impl DirectorHost {
             return;
         }
         self.pace_saves(now_tick);
-        self.pump(region, Event::Tick { now_tick });
+        self.pump(region, vec![Event::Tick { now_tick }]);
     }
 
     /// D6：每刻把 `ceil(待写数 / 6000)`（至少 1）个快照提交给 IO 线程。
@@ -319,7 +326,7 @@ impl DirectorHost {
         self.budget_left = self.budget;
         // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
         region.chunks.finish_light_updates();
-        self.pump(region, Event::Shutdown);
+        self.pump(region, vec![Event::Shutdown]);
         // 关服不等 D6 匀速：把还没提交的快照一次性全部交给 IO 线程。
         // Shutdown does not pace: hand every remaining snapshot to the IO thread.
         if let Some(io) = &self.io {
@@ -339,8 +346,13 @@ impl DirectorHost {
     /// 同一刻里 Director 可能因为 `Delivered` / `Returned` 又派出新任务，
     /// 所以主循环要跑到没有新消息为止；`flush_region_mail` 每轮都只花掉
     /// 这一刻剩下的预算，预算用完之后它返回空事件，循环就停。
-    fn pump(&mut self, region: &mut Region, event: Event<Box<RegionColumn>>) {
-        let mut events = vec![event];
+    fn pump(&mut self, region: &mut Region, initial: Vec<Event<Box<RegionColumn>>>) {
+        // 一批初始事件（例如同一刻收回的所有读盘结果）一起处理，循环末尾只
+        // 交付一次，保证按距离排序、出生点 3×3 在同一批里。
+        // A batch of initial events (e.g. all reads collected this tick) is driven
+        // together and delivered once, keeping distance order and the 3x3 spawn
+        // footprint in a single batch.
+        let mut events = initial;
         let mut rounds = 0;
         loop {
             // 先把队列里的事件和它们引发的任务结果全部跑完。
@@ -421,10 +433,14 @@ impl DirectorHost {
                 if let Some(column) = self.parking.take(pos) {
                     TaskResult::Decoded { column }
                 } else if let Some(io) = &self.io {
-                    let started = Instant::now();
-                    io.submit_read(pos, id, generation);
-                    record_codec(started);
-                    return None;
+                    if io.has_chunk(pos) {
+                        // 盘上有这个区块：发异步读，结果下一刻从信箱收回。
+                        io.submit_read(pos, id, generation);
+                        return None;
+                    }
+                    // 盘上没有：和接存档前一样同步走超平坦模板，不引入一 tick
+                    // 的读盘延迟，进服首批次区块的顺序保持不变。
+                    TaskResult::Read { bytes: None }
                 } else {
                     TaskResult::Read { bytes: None }
                 }
@@ -500,6 +516,7 @@ impl DirectorHost {
                 replies.push(reply);
             }
         }
+        let mut done = Vec::new();
         for reply in replies {
             match reply {
                 Reply::Read {
@@ -518,13 +535,12 @@ impl DirectorHost {
                         None if chunk.is_none() => None,
                         None => Some(PackedChunk { chunk, entities }.pack()),
                     };
-                    let event = Event::TaskDone {
+                    done.push(Event::TaskDone {
                         id: task_id,
                         pos,
                         generation,
                         result: TaskResult::Read { bytes },
-                    };
-                    self.pump(region, event);
+                    });
                 }
                 Reply::Written { pos, seq } => {
                     if self.pending_writes.get(&pos) == Some(&seq) {
@@ -534,6 +550,10 @@ impl DirectorHost {
                     }
                 }
             }
+        }
+        // 所有读盘结果一次性喂给 Director，只交付一次，保住 3×3 和距离顺序。
+        if !done.is_empty() {
+            self.pump(region, done);
         }
     }
 

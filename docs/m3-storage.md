@@ -648,7 +648,10 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    验证：第 11 节第 1、2、3、4 条；官方 `RegionFile` 双向、扇区重用、坏表项、模糊。
 5. ✅ **区块平面的加载和保存**（按 `world-model-design.md` 第 5 节）。
    `mc-bamboo-storage::chunk_io` 起一条 IO 线程读写区域 / 实体文件（压缩解压都在 IO 线程），
-   世界线程绝不等待 IO：读请求发出、结果下一刻开头经信箱收回。`mc-bamboo-game::chunk_codec`
+   世界线程绝不等待 IO：启动时扫区域文件头得到「盘上有哪些区块」的内存集合（写盘时更新），
+   盘上已有数据的区块发异步读、结果下一刻开头经信箱收回；盘上没有的区块直接在世界线程
+   走超平坦模板，不引入一 tick 延迟，保住进服首批次区块顺序（官方探针 690/690 覆盖这一点）。
+   `mc-bamboo-game::chunk_codec`
    把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器累计耗时）。
    Director 的 `Task::Read` 现在是真正的读盘阶段：`Status = full` 解码交付、盘上没有走
    超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐才交付（D8）。卸载时脏区块

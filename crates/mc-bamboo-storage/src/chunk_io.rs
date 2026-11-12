@@ -15,10 +15,13 @@
 //! forget; `flush` is a barrier used at shutdown and by `save-all flush`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs, io,
-    path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -87,6 +90,12 @@ pub enum Reply {
 #[derive(Debug)]
 pub struct ChunkIo {
     dir: WorldDir,
+    /// 盘上已经有区块数据的坐标。启动扫一次区域文件头，写盘时更新。
+    /// 世界线程只读这个内存集合来判断「盘上有没有」，不做同步磁盘 IO。
+    /// Chunk positions that already have data on disk. Scanned from region
+    /// headers at startup and updated on writes, so the world thread can ask
+    /// "is this on disk?" without doing synchronous IO.
+    known: Arc<Mutex<HashSet<ChunkPos>>>,
     requests: Sender<Request>,
     results: Receiver<Reply>,
     worker: Option<JoinHandle<()>>,
@@ -98,6 +107,7 @@ impl ChunkIo {
         fs::create_dir_all(dir.region_dir())?;
         fs::create_dir_all(dir.entities_dir())?;
         let layout = dir.clone();
+        let known = Arc::new(Mutex::new(scan_existing_chunks(&dir.region_dir())));
         let (requests, rx) = mpsc::channel::<Request>();
         let (tx, results) = mpsc::channel::<Reply>();
         let worker = thread::Builder::new()
@@ -105,10 +115,19 @@ impl ChunkIo {
             .spawn(move || worker_loop(layout, rx, tx))?;
         Ok(Self {
             dir: dir.clone(),
+            known,
             requests,
             results,
             worker: Some(worker),
         })
+    }
+
+    /// 盘上是否已经有这个区块的数据。只查内存集合，不碰磁盘。
+    pub fn has_chunk(&self, pos: ChunkPos) -> bool {
+        self.known
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&pos)
     }
 
     /// 提交一个异步读请求，世界线程不等待。
@@ -128,6 +147,17 @@ impl ChunkIo {
         chunk: Option<Vec<u8>>,
         entities: Option<Vec<u8>>,
     ) {
+        // 写盘后盘上就有（或删掉）这个区块，先更新内存集合，让同一刻之后的
+        // 读请求立刻看到最新状态，不必等 IO 线程回执。
+        let present = chunk.is_some();
+        {
+            let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+            if present {
+                known.insert(pos);
+            } else {
+                known.remove(&pos);
+            }
+        }
         let _ = self.requests.send(Request::Write {
             pos,
             seq,
@@ -199,6 +229,40 @@ fn unix_seconds() -> i32 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i32)
         .unwrap_or(0)
+}
+
+/// 启动扫一遍 `region/` 里已有 `.mca` 的头，得到盘上已经有数据的区块。
+/// 只读 offset 表，不解压任何区块；这一步在启动时做一次。
+/// Scan existing `.mca` headers at startup to learn which chunks already have
+/// data on disk; reads only offset tables, no decompression.
+fn scan_existing_chunks(region_dir: &Path) -> HashSet<ChunkPos> {
+    let mut out = HashSet::new();
+    let Ok(entries) = fs::read_dir(region_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(inner) = name.strip_prefix("r.").and_then(|s| s.strip_suffix(".mca")) else {
+            continue;
+        };
+        let mut parts = inner.split('.');
+        let (Some(x), Some(z)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(rx), Ok(rz)) = (x.parse::<i32>(), z.parse::<i32>()) else {
+            continue;
+        };
+        let Ok(region) = RegionFile::open(entry.path(), region_dir, RegionCompression::Zlib) else {
+            continue;
+        };
+        for index in 0..1024_i32 {
+            let pos = ChunkPos::new(rx * 32 + index % 32, rz * 32 + index / 32);
+            if region.has_chunk(pos) {
+                out.insert(pos);
+            }
+        }
+    }
+    out
 }
 
 /// 区域文件缓存。`kind` 0 = `region/`，1 = `entities/`。
