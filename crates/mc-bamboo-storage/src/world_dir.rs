@@ -126,10 +126,14 @@ impl WorldDir {
         Ok(())
     }
 
-    /// 老布局（1.x 把 `region/` 放在世界根、没有 `dimensions/`）当成空世界（Q3）。
+    /// 老布局（1.x 把 `region/` / `DIM-1` 放在世界根）当成空世界（Q3）。
+    /// 判据只看根目录：26.3 的 `create_layout` 从不在世界根建这些目录。
+    /// Legacy layout (1.x kept `region/` / `DIM-1` at the world root) is treated
+    /// as empty (Q3). The 26.3 layout never creates these under the root.
     pub fn has_legacy_layout(&self) -> bool {
-        let legacy = self.root.join("region").is_dir() || self.root.join("DIM-1").is_dir();
-        legacy && !self.dimension_dir().exists()
+        self.root.join("region").is_dir()
+            || self.root.join("DIM-1").is_dir()
+            || self.root.join("DIM1").is_dir()
     }
 }
 

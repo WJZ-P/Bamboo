@@ -4,18 +4,38 @@
 //! 按离玩家的距离交付/收回，每刻有个数上限；玩家脚下 3×3 不受上限约束。
 //! 视野里没交付的区块留在 `PlayerChunkSender` 的待发送集合里，交付了才发。
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 use mc_bamboo_core::ChunkPos;
+use mc_bamboo_storage::chunk_io::{ChunkIo, Reply};
 use mc_bamboo_world::director::{
-    Desired, Director, DirectorConfig, Effect, Event, RegionMessage, Task, TaskId, TaskResult,
-    TicketOp,
+    Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
+    TaskResult, TicketOp,
 };
 
 use crate::{
+    chunk_codec::{ChunkCodec, InlineCodec, PackedChunk},
     profiler::SubPhase,
     region::{Region, RegionColumn, parking::Parking},
 };
+
+/// 编解码累计耗时（纳秒）。解析/序列化内联在世界线程上做，这里量出总耗时，
+/// 关服时记进日志，写进汇报；以后挪进计算池时可以直接对比。
+/// Accumulated codec time (ns), used in the shutdown log / report.
+static CODEC_NANOS: AtomicU64 = AtomicU64::new(0);
+
+pub fn codec_nanos() -> u64 {
+    CODEC_NANOS.load(Ordering::Relaxed)
+}
+
+fn record_codec(started: Instant) {
+    let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    CODEC_NANOS.fetch_add(elapsed, Ordering::Relaxed);
+}
 
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
@@ -62,6 +82,11 @@ pub(crate) struct DirectorHost {
     delivered: usize,
     reclaimed: usize,
     parked: usize,
+    /// 区块 IO 线程。`None` 表示这一局不接磁盘（测试 / 无限超平坦）。
+    io: Option<ChunkIo>,
+    codec: InlineCodec,
+    /// 每个区块最新一次写的 seq。收到 `Written` 回执时据此丢掉写盘途中缓冲。
+    pending_writes: HashMap<ChunkPos, SaveSeq>,
 }
 
 impl DirectorHost {
@@ -80,6 +105,21 @@ impl DirectorHost {
             delivered: 0,
             reclaimed: 0,
             parked: 0,
+            io: None,
+            codec: InlineCodec,
+            pending_writes: HashMap::new(),
+        }
+    }
+
+    /// 接上真实磁盘 IO。只在启用存档的一局里调用一次。
+    pub(crate) fn set_io(&mut self, io: ChunkIo) {
+        self.io = Some(io);
+    }
+
+    /// 关服排空：等此前所有写落盘并 `sync_all`。
+    pub(crate) fn flush_io(&self) {
+        if let Some(io) = &self.io {
+            let _ = io.flush();
         }
     }
 
@@ -199,40 +239,28 @@ impl DirectorHost {
         self.pump(region, Event::Tick { now_tick });
     }
 
-    /// 关服：收回全部区块、停放完所有快照。
-    // 任务 B 接真实 IO 后由 `World::shut_down` 调用：关服要等全部写入落盘。
-    #[allow(dead_code)]
-    pub(crate) fn shutdown(&mut self, _region: &mut Region) {
+    /// 关服：收回全部已加载区块、把脏快照交给 IO 线程写盘，再排空 IO 线程。
+    /// 关服不设每刻预算，一次收完全部区块；`flush_io` 等所有写落盘并 `sync_all`。
+    /// 每一步都不 panic，任何前提不满足只会导致对应区块没存上，不让进程挂死。
+    ///
+    /// Shutdown: reclaim every loaded chunk, hand dirty snapshots to the IO thread,
+    /// then drain it. No per-tick budget at shutdown; `flush_io` waits for all writes
+    /// and calls `sync_all`.
+    pub(crate) fn shutdown(&mut self, region: &mut Region) {
         if self.infinite_flat {
             return;
         }
-        // 任务 A 没有真实磁盘：停放的盒子只活在内存表里，关服后进程就结束了。
-        // 逐柱收回几千个区块只会拖住关服，没有可观察的收益，所以这里只让
-        // Director 的状态机走完 Shutdown，不执行它派出的 Reclaim/Save。
-        // 任务 B 接真实 IO 时要把这里换成「等全部写入落盘」。
-        let mut events = vec![Event::Shutdown];
-        let mut rounds = 0;
-        while let Some(event) = events.pop() {
-            rounds += 1;
-            assert!(rounds < 100_000, "Director 的关服循环没有收敛");
-            for effect in self.director.handle(event) {
-                if let Effect::Submit {
-                    id,
-                    generation,
-                    task,
-                } = effect
-                {
-                    events.push(self.run_task(id, generation, task));
-                }
-            }
-        }
-        self.deliveries.clear();
-        self.reclaims.clear();
-        self.budget_left = MailBudget {
+        self.budget = MailBudget {
             deliveries: 0,
             reclaims: 0,
         };
-        self.flush_region_mail(_region);
+        self.budget_left = self.budget;
+        // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
+        region.chunks.finish_light_updates();
+        self.pump(region, Event::Shutdown);
+        self.deliveries.clear();
+        self.reclaims.clear();
+        self.flush_io();
     }
 
     /// 处理一个事件和它引发的全部任务，直到没有新效果。
@@ -272,7 +300,12 @@ impl DirectorHost {
                             region.profiler.start_sub(SubPhase::DirectorEvents);
                             let next = self.run_task(id, generation, task);
                             region.profiler.end_sub();
-                            events.push(next);
+                            // 异步读盘任务这一刻不产生回执，结果在下一刻开头从信箱收回。
+                            // An async disk read produces no ack this tick; its result
+                            // is collected from the mailbox at the start of the next tick.
+                            if let Some(next) = next {
+                                events.push(next);
+                            }
                         }
                         Effect::Cancel { .. } => {}
                         Effect::ToRegion(message) => self.region_message(region, message),
@@ -282,7 +315,11 @@ impl DirectorHost {
                             self.parked += 1;
                             region.profiler.end_sub();
                         }
-                        Effect::DropSnapshot { .. } => {}
+                        Effect::DropSnapshot { pos, seq } => {
+                            if let Some(io) = &self.io {
+                                io.drop_snapshot(pos, seq);
+                            }
+                        }
                         Effect::Warn { message } => tracing::warn!(%message, "chunk director"),
                     }
                 }
@@ -296,40 +333,132 @@ impl DirectorHost {
         }
     }
 
-    /// 内联执行器。任务全部是纯函数或内存表操作，不碰文件、不起线程。
+    /// 执行器。解析/序列化内联在世界线程上做（在 `ChunkCodec` 接口后，可挪进计算池），
+    /// 磁盘读写交给 IO 线程。`None` 表示这是一个异步读任务，结果下一刻从信箱收回。
+    ///
+    /// The executor: parse/serialize inline on the world thread (behind `ChunkCodec`),
+    /// disk IO on the IO thread. `None` means an async read whose result arrives next tick.
     fn run_task(
         &mut self,
         id: TaskId,
         generation: u64,
         task: Task<Box<RegionColumn>>,
-    ) -> Event<Box<RegionColumn>> {
+    ) -> Option<Event<Box<RegionColumn>>> {
         let pos = task.pos();
         let result = match task {
-            // 停放表里是整个盒子（不经过 NBT）。命中就直接当成解码结果交还，
-            // 没命中才让 Director 走生成流水线。
-            Task::Read { pos } => match self.parking.take(pos) {
-                Some(column) => TaskResult::Decoded { column },
-                None => TaskResult::Read { bytes: None },
-            },
-            Task::Decode { .. } => TaskResult::Decoded {
-                column: Box::new(RegionColumn::from_template()),
-            },
+            // 写盘途中缓冲（Parking）里是整个盒子的最新快照。命中就直接交还，
+            // 保证「写盘途中又被请求回来」拿到最新内容而不是从盘上读旧的。
+            Task::Read { pos } => {
+                if let Some(column) = self.parking.take(pos) {
+                    TaskResult::Decoded { column }
+                } else if let Some(io) = &self.io {
+                    let started = Instant::now();
+                    io.submit_read(pos, id, generation);
+                    record_codec(started);
+                    return None;
+                } else {
+                    TaskResult::Read { bytes: None }
+                }
+            }
+            Task::Decode { bytes, .. } => {
+                if self.io.is_some() {
+                    let started = Instant::now();
+                    let outcome = match PackedChunk::unpack(&bytes) {
+                        Err(error) => TaskResult::BadChunk { error },
+                        Ok(packed) => match self.codec.decode(pos, &packed) {
+                            Ok(column) => TaskResult::Decoded { column },
+                            Err(error) => TaskResult::BadChunk { error },
+                        },
+                    };
+                    record_codec(started);
+                    outcome
+                } else {
+                    TaskResult::Decoded {
+                        column: Box::new(RegionColumn::from_template()),
+                    }
+                }
+            }
             Task::Generate { stage, column, .. } => TaskResult::Generated {
                 stage,
                 column: column.unwrap_or_else(|| Box::new(RegionColumn::from_template())),
             },
             Task::Assemble { column, .. } => TaskResult::Assembled { column },
             Task::Save { seq, column, .. } => {
-                // 盒子随完成事件交还 Director；有票就直接重新交付，
-                // 没票才由 `Effect::Park` 放进停放表。
-                TaskResult::Saved { seq, column }
+                if let Some(io) = &self.io {
+                    let started = Instant::now();
+                    let encoded = self.codec.encode(pos, &column);
+                    record_codec(started);
+                    match encoded {
+                        Ok(packed) => {
+                            io.submit_write(pos, seq, packed.chunk, packed.entities);
+                            self.pending_writes.insert(pos, seq);
+                            TaskResult::Saved { seq, column }
+                        }
+                        Err(error) => {
+                            // 编码失败不能把盒子弄丢：留在停放表里，下次卸载再试。
+                            self.parking.park(pos, column);
+                            TaskResult::SaveFailed { seq, error }
+                        }
+                    }
+                } else {
+                    TaskResult::Saved { seq, column }
+                }
             }
         };
-        Event::TaskDone {
+        Some(Event::TaskDone {
             id,
             pos,
             generation,
             result,
+        })
+    }
+
+    /// 每刻开头收回 IO 信箱：读结果变成 `TaskDone` 喂给 Director，
+    /// 写完成回执用来丢掉写盘途中缓冲。
+    ///
+    /// Drain the IO mailbox at the start of each tick: read results become
+    /// `TaskDone` events; write acks release the write-in-progress buffer.
+    pub(crate) fn poll_io(&mut self, region: &mut Region) {
+        let mut replies = Vec::new();
+        if let Some(io) = &self.io {
+            while let Some(reply) = io.try_recv() {
+                replies.push(reply);
+            }
+        }
+        for reply in replies {
+            match reply {
+                Reply::Read {
+                    pos,
+                    task_id,
+                    generation,
+                    chunk,
+                    entities,
+                    error,
+                } => {
+                    let bytes = match error {
+                        Some(message) => {
+                            tracing::warn!(%message, ?pos, "chunk read failed; using flat template");
+                            None
+                        }
+                        None if chunk.is_none() => None,
+                        None => Some(PackedChunk { chunk, entities }.pack()),
+                    };
+                    let event = Event::TaskDone {
+                        id: task_id,
+                        pos,
+                        generation,
+                        result: TaskResult::Read { bytes },
+                    };
+                    self.pump(region, event);
+                }
+                Reply::Written { pos, seq } => {
+                    if self.pending_writes.get(&pos) == Some(&seq) {
+                        self.pending_writes.remove(&pos);
+                        // 写盘完成，盒子已经在磁盘上，丢掉内存缓冲。
+                        let _ = self.parking.take(pos);
+                    }
+                }
+            }
         }
     }
 

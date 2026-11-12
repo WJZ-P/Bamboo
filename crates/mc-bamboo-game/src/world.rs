@@ -16,10 +16,11 @@ use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
 };
+use mc_bamboo_storage::chunk_io::ChunkIo;
 use mc_bamboo_world::director::TicketOp;
 
 use crate::director_host::{DirectorHost, MailBudget};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     book, chat, chunk_broadcast,
@@ -213,6 +214,18 @@ impl World {
         if infinite_flat {
             world.region.use_infinite_flat_chunks();
         }
+        // 启用存档时起一条 IO 线程并接进 Director 宿主；起不来也拒绝启动。
+        // With saving enabled, start one IO thread and attach it to the host.
+        if let Some(save) = &world.save {
+            match ChunkIo::open(save.dir()) {
+                Ok(io) => world.host.set_io(io),
+                Err(error) => {
+                    let message = format!("could not start the chunk IO thread: {error}");
+                    error!(%message, "refusing to start");
+                    world.startup_error = Some(message);
+                }
+            }
+        }
         world.region.profiler.on_world_start();
         world
     }
@@ -368,6 +381,9 @@ impl World {
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
         self.host.begin_tick();
+        // 上一刻发出去的读盘请求，结果在这一刻开头经信箱收回。
+        // Read requests dispatched last tick are collected at the start of this tick.
+        self.host.poll_io(&mut self.region);
         self.process_inbox()?;
         self.sync_player_tickets();
         self.region.profiler.lap(Phase::Inbox);
@@ -952,14 +968,19 @@ impl World {
     /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
     /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
+        // 先存所有区块：Director 收回全部已加载区块、写盘、排空 IO 线程并 sync_all。
+        // Save all chunks first: reclaim every loaded chunk, write, drain and sync_all.
+        self.host.shutdown(&mut self.region);
         if let Some(save) = &mut self.save {
             save.level_mut().time = self.global.time().0;
             save.level_mut().last_played = crate::admin::now_millis();
             if let Err(error) = save.save_all() {
                 warn!(%error, "could not save level data on shutdown");
             }
-            // 等 IO 线程写完 / sync_all：第二步接入后补。现在先释放锁。
-            // Waiting for IO / sync_all is added with the IO thread in step two.
+            info!(
+                codec_nanos = crate::director_host::codec_nanos(),
+                "chunk codec time on this run"
+            );
             save.close();
         }
         let reason = Component::translate(SERVER_SHUTDOWN, []);

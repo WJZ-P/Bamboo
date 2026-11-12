@@ -284,35 +284,46 @@ fn read_one(
     pos: ChunkPos,
 ) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<String>) {
     let mut error = None;
-    let chunk = match cache.file(dir, 0, pos) {
-        Ok(region) => match region.read(pos, READ_LIMIT) {
-            Ok(bytes) => bytes,
+    let name = RegionPos::of(pos).file_name();
+    // 只读已经存在的区域文件：官方读盘不会凭空创建空的 .mca。
+    // Only read files that exist: official reads never create empty .mca files.
+    let chunk = if dir.region_dir().join(&name).exists() {
+        match cache.file(dir, 0, pos) {
+            Ok(region) => match region.read(pos, READ_LIMIT) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error = Some(format!("region chunk {pos:?}: {e}"));
+                    None
+                }
+            },
             Err(e) => {
-                error = Some(format!("region chunk {pos:?}: {e}"));
+                error = Some(format!("open region {pos:?}: {e}"));
                 None
             }
-        },
-        Err(e) => {
-            error = Some(format!("open region {pos:?}: {e}"));
-            None
         }
+    } else {
+        None
     };
-    let entities = match cache.file(dir, 1, pos) {
-        Ok(region) => match region.read(pos, READ_LIMIT) {
-            Ok(bytes) => bytes,
+    let entities = if dir.entities_dir().join(&name).exists() {
+        match cache.file(dir, 1, pos) {
+            Ok(region) => match region.read(pos, READ_LIMIT) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    if error.is_none() {
+                        error = Some(format!("entities {pos:?}: {e}"));
+                    }
+                    None
+                }
+            },
             Err(e) => {
                 if error.is_none() {
-                    error = Some(format!("entities {pos:?}: {e}"));
+                    error = Some(format!("open entities {pos:?}: {e}"));
                 }
                 None
             }
-        },
-        Err(e) => {
-            if error.is_none() {
-                error = Some(format!("open entities {pos:?}: {e}"));
-            }
-            None
         }
+    } else {
+        None
     };
     (chunk, entities, error)
 }
@@ -402,6 +413,39 @@ mod tests {
             [Reply::Read { chunk: None, .. }]
         ));
         io.close();
+    }
+
+    #[test]
+    fn chunks_survive_reopening_the_io_thread() {
+        let tmp = TempDir::new("reopen");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let pos = ChunkPos::new(1, 1);
+        {
+            let mut io = ChunkIo::open(&dir).unwrap();
+            io.submit_write(pos, 1, Some(b"persisted".to_vec()), None);
+            io.flush().unwrap();
+            io.close();
+        }
+        let mut reopened = ChunkIo::open(&dir).unwrap();
+        reopened.submit_read(pos, 9, 2);
+        reopened.flush().unwrap();
+        let replies = collect(&reopened);
+        assert!(matches!(
+            replies.as_slice(),
+            [Reply::Read { chunk: Some(bytes), .. }] if bytes == b"persisted"
+        ));
+        // 读取一个从没写过的区域不该凭空创建空的 .mca 文件。
+        let untouched = ChunkPos::new(40, 40);
+        reopened.submit_read(untouched, 10, 3);
+        reopened.flush().unwrap();
+        let _ = collect(&reopened);
+        assert!(
+            !dir.region_dir()
+                .join(RegionPos::of(untouched).file_name())
+                .exists()
+        );
+        reopened.close();
     }
 
     #[test]
