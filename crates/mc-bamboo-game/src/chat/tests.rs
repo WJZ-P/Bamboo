@@ -660,10 +660,13 @@ fn hidden_chat_gets_a_red_notice_and_is_not_broadcast() {
     assert!(take_bodies(&watcher, clientbound::PLAYER_CHAT).is_empty());
     assert!(!hidden.is_closed());
 
-    // 官方的命令分支不看可见性。
+    // 官方 `sendFailure` 走 `sendSystemMessage`，隐藏聊天时不发失败消息。
+    //
+    // Official `sendFailure` goes through `sendSystemMessage`, which suppresses the
+    // failure text for hidden chat.
     server.request(&hidden, command("foo"));
     server.tick();
-    assert_eq!(take_bodies(&hidden, clientbound::SYSTEM_CHAT).len(), 2);
+    assert!(take_bodies(&hidden, clientbound::SYSTEM_CHAT).is_empty());
 
     // 非法字符排在可见性前面检查。
     server.request(&hidden, chat("§"));
@@ -1014,4 +1017,148 @@ fn unsigned_chat_is_enforced_after_profile_keys_arrive() {
         "chat.disabled.missingProfileKey"
     ));
     assert!(!alice.is_closed());
+}
+
+/// 隐藏聊天的玩家发带可签参数的无签名命令：官方 `sendSystemMessage` 抑制那条红色提示，
+/// 但全可见性的玩家仍收到，证明命令确实被拒了。
+///
+/// A hidden-chat player sends an unsigned command with signable arguments: official
+/// `sendSystemMessage` suppresses the red notice, while a full-visibility player still
+/// receives it, proving the command was rejected.
+#[test]
+fn hidden_player_does_not_get_the_invalid_command_signature_notice() {
+    let (_private_key, der) = service_key();
+    let mut server = Harness::new(2);
+    {
+        let region = server.region();
+        region.online_mode = true;
+        region.enforce_secure_profile = true;
+    }
+    let hidden = server.join_with(
+        "Hidden",
+        ClientInformation {
+            chat_visibility: ChatVisibility::Hidden,
+            ..client_requesting(2)
+        },
+    );
+    let watcher = server.join("Watcher");
+    server.tick();
+    hidden.take_frames();
+    watcher.take_frames();
+    assert!(
+        server
+            .region()
+            .service_keys
+            .replace(std::slice::from_ref(&der))
+    );
+    hidden.take_frames();
+    watcher.take_frames();
+
+    server.request(&hidden, command("me hi"));
+    server.request(&watcher, command("me hi"));
+    server.tick();
+
+    let hidden_frames = hidden.take_frames();
+    assert!(!frames_have_key(
+        &hidden_frames,
+        "chat.disabled.invalid_command_signature"
+    ));
+    assert!(frames_with_id(&hidden_frames, clientbound::PLAYER_CHAT).is_empty());
+    assert!(frames_have_key(
+        &watcher.take_frames(),
+        "chat.disabled.invalid_command_signature"
+    ));
+}
+
+/// 官方 `sendSystemMessage(message, true)` 的 overlay 消息连隐藏聊天也发；
+/// 同一个函数用 `overlay=false` 时抑制。
+///
+/// Official `sendSystemMessage(message, true)` delivers overlay messages even for hidden
+/// chat; the same function with `overlay=false` suppresses them.
+#[test]
+fn overlay_system_messages_reach_hidden_players() {
+    let mut server = Harness::new(2);
+    let hidden = server.join_with(
+        "Hidden",
+        ClientInformation {
+            chat_visibility: ChatVisibility::Hidden,
+            ..client_requesting(2)
+        },
+    );
+    server.tick();
+    hidden.take_frames();
+
+    let content = mc_bamboo_protocol::text::Component::text("hello");
+    crate::chat::send_system_message(server.region(), hidden.id, &content, false);
+    server.tick();
+    assert!(take_bodies(&hidden, clientbound::SYSTEM_CHAT).is_empty());
+
+    crate::chat::send_system_message(server.region(), hidden.id, &content, true);
+    server.tick();
+    let bodies = take_bodies(&hidden, clientbound::SYSTEM_CHAT);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0].last(), Some(&1), "overlay flag is set");
+}
+
+/// 被踢但还没 `Leave` 的玩家不在签名聊天的接收名单里，`next_index` 和 `seen` 不被推进。
+///
+/// A kicked player who has not left yet is left out of the signed-chat recipient list;
+/// its `next_index` and `seen` are not advanced.
+#[test]
+fn kicked_players_are_left_out_of_the_signed_chat_list() {
+    let mut server = Harness::new(2);
+    let alice = server.join_and_settle("Alice");
+    let bob = server.join_and_settle("Bob");
+    alice.take_frames();
+    bob.take_frames();
+
+    server
+        .region()
+        .links
+        .kick(bob.id, &mc_bamboo_protocol::text::Component::text("bye"));
+    bob.take_frames();
+    assert!(!server.region().links.is_open(bob.id));
+    assert!(server.region().players.contains_key(&bob.id));
+
+    let before_next = server.region().players[&bob.id].chat.next_index;
+    let before_seen = server.region().players[&bob.id].chat.seen.len();
+
+    let signed = crate::secure_chat::SignedMessage {
+        sender: alice.uuid,
+        index: 0,
+        signature: Some([7u8; 256]),
+        content: "hello".to_owned(),
+        time_millis: 1_000,
+        salt: 1,
+        last_seen: vec![],
+    };
+    let name = mc_bamboo_protocol::text::Component::text("Alice");
+    crate::secure_chat::broadcast_signed(
+        server.region(),
+        &signed,
+        mc_bamboo_data::registries::chat_type::CHAT,
+        &name,
+        None,
+        None,
+    );
+    server.tick();
+
+    assert_eq!(
+        server.region().players[&bob.id].chat.next_index,
+        before_next
+    );
+    assert_eq!(
+        server.region().players[&bob.id].chat.seen.len(),
+        before_seen
+    );
+    assert_eq!(
+        server.region().players[&alice.id].chat.next_index,
+        before_next + 1
+    );
+    assert_eq!(
+        server.region().players[&alice.id].chat.seen.len(),
+        before_seen + 1
+    );
+    assert!(take_bodies(&bob, clientbound::PLAYER_CHAT).is_empty());
+    assert_eq!(take_bodies(&alice, clientbound::PLAYER_CHAT).len(), 1);
 }

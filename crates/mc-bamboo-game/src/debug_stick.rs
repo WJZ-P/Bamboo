@@ -16,7 +16,6 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
     components::{ComponentValue, defaults},
     item::ItemStack,
-    packet::play::SystemChat,
     text::Component,
 };
 
@@ -131,11 +130,10 @@ fn overlay(region: &mut Region, id: PlayerId, key: &str, first: &str, second: Op
         args.push(second.into());
     }
     let content = Component::translate(key, args);
-    region.links.send(
-        id,
-        &SystemChat {
-            content: &content,
-            overlay: true,
-        },
-    );
+    // 官方 `DebugStickItem` 走 `sendOverlayMessage` → `sendSystemMessage(message, true)`，
+    // overlay 恒发（隐藏聊天也收）。
+    //
+    // Official `DebugStickItem` uses `sendOverlayMessage` → `sendSystemMessage(message, true)`;
+    // overlay messages always arrive, even for hidden chat.
+    crate::chat::send_system_message(region, id, &content, true);
 }

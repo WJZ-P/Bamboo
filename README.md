@@ -179,6 +179,10 @@ WebView2 的渲染进程不算在内。
   成功后 24 小时再刷新。第一次不论成败都放行登录。失败时保留上一份钥匙，安全聊天保持关闭、服务器照常开。
   没有发现文档。离线模式不去取公钥。
   没有聊天过滤和举报。`delete_chat` 的编码在，原版专用服务器不会发，这里也不发。
+  所有非 overlay 的系统消息（命令成功/失败与错误位置、给其他 OP 的 `chat.type.admin`、加入/离开提示、
+  `/gamerule`、`/random`、签名命令被拒等）都照官方 `ServerPlayer.sendSystemMessage` 看可见性：
+  聊天设成 `HIDDEN` 时不发，`overlay=true` 的动作栏消息照常发；「聊天已关闭」的提示照官方
+  `tryHandleChat` 直接发、不看可见性。被踢但还没 `Leave` 的玩家不再进聊天广播名单。
 - 网络压缩：登录末尾告诉客户端阈值（默认 256，负值关闭），之后两个方向都按官方格式收发压缩帧，
   小于阈值的包原样发。压缩只在连接任务里做，世界线程交出的帧本身不变。
 - 正版验证和加密（`online_mode`，默认关闭）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
@@ -493,6 +497,9 @@ WebView2 的渲染进程不算在内。
   正版验证打开且公钥取到了之后，聊天按上面一节签名。取钥失败会按 authlib 的间隔在后台重试，钥匙到达后安全聊天立刻生效。
   RSA 解密用的 `rsa` crate 有 RUSTSEC-2023-0071（Marvin 计时侧信道），上游还没有修好的版本，
   Bamboo 用 `decrypt_blinded` 做盲化缓解，详见 `crates/mc-bamboo-auth/src/keypair.rs` 的注释。
+- 系统消息的可见性按官方做，但官方 `ServerPlayer.sendSystemMessage` 还用
+  `PacketSendListener.exceptionallySend` 在发包失败时补一条 `multiplayer.message_not_delivered`；
+  Bamboo 的链路写失败时直接关连接，没有这个回调，所以不发这条补发消息。
 
 ## 项目结构
 
