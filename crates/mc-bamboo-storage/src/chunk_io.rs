@@ -20,6 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -58,10 +59,16 @@ enum Request {
         seq: u64,
     },
     /// 写一个独立文件（玩家数据等），`backup` 非空时照官方做 `_old` 轮换。
+    /// `player` 非空时这是一份玩家存档（带连字符 uuid 和一次写的序号）：写完后回一条
+    /// `PlayerWritten`，世界线程据此丢掉内存里"已交给 IO 但还没落盘"的副本。
+    /// When `player` is set this is a player save (hyphenated uuid + write seq):
+    /// after the write the worker replies `PlayerWritten`, so the world thread
+    /// can drop its in-memory "handed to IO but not yet on disk" copy.
     WriteFile {
         path: PathBuf,
         backup: Option<PathBuf>,
         bytes: Vec<u8>,
+        player: Option<(String, u64)>,
     },
     /// 栅栏：确认此前所有请求都处理完，并对所有打开的区域文件 `sync_all`。
     Flush {
@@ -84,6 +91,14 @@ pub enum Reply {
     },
     /// 一次写已经落盘，世界线程可以丢掉对应的写盘途中缓冲。
     Written { pos: ChunkPos, seq: u64 },
+    /// 一份玩家存档已经落盘（成功或失败），世界线程据此结束这次"待写"。
+    /// A player save finished (ok or not); the world thread ends that pending write.
+    PlayerWritten {
+        uuid: String,
+        seq: u64,
+        ok: bool,
+        error: Option<String>,
+    },
 }
 
 /// 一条 IO 线程的句柄。世界线程持有，非阻塞提交、tick 开头收信箱。
@@ -99,6 +114,10 @@ pub struct ChunkIo {
     requests: Sender<Request>,
     results: Receiver<Reply>,
     worker: Option<JoinHandle<()>>,
+    /// 玩家存档写的序号，交给 IO 线程回执时原样带回，用来只丢弃「最新一次」的待写副本。
+    /// Sequence number for player saves; echoed by the IO thread so the world
+    /// thread only drops the newest in-flight copy.
+    next_player_seq: AtomicU64,
 }
 
 impl ChunkIo {
@@ -119,6 +138,7 @@ impl ChunkIo {
             requests,
             results,
             worker: Some(worker),
+            next_player_seq: AtomicU64::new(1),
         })
     }
 
@@ -179,13 +199,26 @@ impl ChunkIo {
             path,
             backup,
             bytes,
+            player: None,
         });
     }
 
     /// 写 `players/data/<uuid>.dat`，照官方 `PlayerDataStorage.save` 轮换 `.dat_old`。
-    pub fn submit_player_write(&self, uuid: &str, bytes: Vec<u8>) {
+    /// 返回这次写的序号；IO 线程写完会回一条 `PlayerWritten`，世界线程据此丢掉
+    /// 内存里"已交给 IO、还没落盘"的副本，避免离开后立刻重进读到旧档。
+    /// Returns this write's seq. The IO thread replies `PlayerWritten` on
+    /// completion; the world thread uses it to drop the in-flight in-memory
+    /// copy so an immediate rejoin never reads stale disk bytes.
+    pub fn submit_player_write(&self, uuid: &str, bytes: Vec<u8>) -> u64 {
+        let seq = self.next_player_seq.fetch_add(1, Ordering::Relaxed);
         let (path, backup) = player_paths(&self.dir, uuid);
-        self.submit_file_write(path, Some(backup), bytes);
+        let _ = self.requests.send(Request::WriteFile {
+            path,
+            backup: Some(backup),
+            bytes,
+            player: Some((uuid.to_owned(), seq)),
+        });
+        seq
     }
 
     /// 非阻塞地收一条结果；世界线程在 tick 开头循环调用到 `None`。
@@ -357,8 +390,19 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     path,
                     backup,
                     bytes,
+                    player,
                 } => {
-                    let _ = safe_replace(&path, &bytes, backup.as_deref());
+                    let result = safe_replace(&path, &bytes, backup.as_deref());
+                    if let Some((uuid, seq)) = player {
+                        let error = result.as_ref().err().map(|e| e.to_string());
+                        let ok = result.is_ok();
+                        let _ = tx.send(Reply::PlayerWritten {
+                            uuid,
+                            seq,
+                            ok,
+                            error,
+                        });
+                    }
                 }
                 Request::Flush { done } => {
                     cache.sync_all();
@@ -554,6 +598,48 @@ mod tests {
         io.submit_file_write(path.clone(), None, b"player bytes".to_vec());
         io.flush().unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"player bytes");
+        io.close();
+    }
+
+    /// 玩家写会回一条带 uuid/seq 的 `PlayerWritten`，世界线程据此结束待写。
+    /// A player write replies `PlayerWritten` with its uuid/seq so the world
+    /// thread can end the pending write.
+    #[test]
+    fn player_write_emits_a_completion_receipt() {
+        let tmp = TempDir::new("player-receipt");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+
+        let first = io.submit_player_write("aaaa-bbbb", b"save one".to_vec());
+        let second = io.submit_player_write("cccc-dddd", b"save two".to_vec());
+        io.flush().unwrap();
+
+        let mut receipts = Vec::new();
+        while let Some(reply) = io.try_recv() {
+            if let Reply::PlayerWritten {
+                uuid,
+                seq,
+                ok,
+                error,
+            } = reply
+            {
+                receipts.push((uuid, seq, ok, error));
+            }
+        }
+        receipts.sort_by_key(|(_, seq, _, _)| *seq);
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            receipts,
+            vec![
+                ("aaaa-bbbb".to_owned(), first, true, None),
+                ("cccc-dddd".to_owned(), second, true, None),
+            ]
+        );
+        // 两份存档都真的落盘了。
+        assert_eq!(fs::read(dir.player_dat("aaaa-bbbb")).unwrap(), b"save one");
+        assert_eq!(fs::read(dir.player_dat("cccc-dddd")).unwrap(), b"save two");
         io.close();
     }
 

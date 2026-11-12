@@ -111,6 +111,13 @@ pub(crate) struct DirectorHost {
     save_queue: VecDeque<PendingWrite>,
     /// 每个区块上次提交写的刻数，用于 10 秒冷却。
     save_cooldown: HashMap<ChunkPos, u64>,
+    /// 已交给 IO 线程、还没收到写完回执的玩家存档：`uuid -> (seq, bytes)`。
+    /// 官方 `PlayerDataStorage.save` 是同步写，没有「写了但盘上还是旧的」窗口；
+    /// 这里写是异步的，重进时优先用这份内存副本，避免丢进度。
+    /// Player saves handed to the IO thread but not yet confirmed written.
+    /// Vanilla saves synchronously, so there is no stale-on-disk window; here the
+    /// write is async, and a rejoin prefers this in-memory copy to avoid losing progress.
+    pending_players: HashMap<String, (u64, Vec<u8>)>,
 }
 
 impl DirectorHost {
@@ -134,6 +141,7 @@ impl DirectorHost {
             pending_writes: HashMap::new(),
             save_queue: VecDeque::new(),
             save_cooldown: HashMap::new(),
+            pending_players: HashMap::new(),
         }
     }
 
@@ -149,11 +157,24 @@ impl DirectorHost {
         }
     }
 
-    /// 提交一名玩家的存档写（进服/离开/自动保存/关服都用它）。
-    pub(crate) fn submit_player_write(&self, uuid: &str, bytes: Vec<u8>) {
+    /// 提交一名玩家的存档写，并在内存里记下"已交给 IO、还没落盘"的副本。
+    /// 收到 IO 线程的 `PlayerWritten` 回执（`poll_io`）再删掉。
+    /// Submit a player save and remember the in-flight copy in memory. The IO
+    /// thread's `PlayerWritten` receipt (`poll_io`) removes it.
+    pub(crate) fn submit_player_write(&mut self, uuid: &str, bytes: Vec<u8>) {
         if let Some(io) = &self.io {
-            io.submit_player_write(uuid, bytes);
+            let seq = io.submit_player_write(uuid, bytes.clone());
+            self.pending_players.insert(uuid.to_owned(), (seq, bytes));
         }
+    }
+
+    /// 重进时优先用这份内存副本，而不是连接层读到的盘上旧字节。
+    /// On rejoin prefer this in-memory copy over the (possibly stale) disk bytes
+    /// read by the connection layer.
+    pub(crate) fn pending_player(&self, uuid: &str) -> Option<&[u8]> {
+        self.pending_players
+            .get(uuid)
+            .map(|(_, bytes)| bytes.as_slice())
     }
 
     /// 测试/无限超平坦专用：只记账，不派任务也不碰 region。
@@ -547,6 +568,32 @@ impl DirectorHost {
                         self.pending_writes.remove(&pos);
                         // 写盘完成，盒子已经在磁盘上，丢掉内存缓冲。
                         let _ = self.parking.take(pos);
+                    }
+                }
+                Reply::PlayerWritten {
+                    uuid,
+                    seq,
+                    ok,
+                    error,
+                } => {
+                    // 只有最新一次写成功落盘才丢掉内存副本；失败的写留着，
+                    // 重进仍能拿到离开时的数据。只有回执的 seq 和记录一致才删，
+                    // 免得旧写完成把新写的副本删掉。
+                    // Drop the in-memory copy only when the newest write landed.
+                    // A failed write keeps it so a rejoin still sees the leaving
+                    // data; matching seq avoids an older receipt removing a newer copy.
+                    if !ok {
+                        if let Some(error) = error {
+                            tracing::error!(%uuid, %error, "player save write failed");
+                        }
+                        continue;
+                    }
+                    if self
+                        .pending_players
+                        .get(&uuid)
+                        .is_some_and(|(s, _)| *s == seq)
+                    {
+                        self.pending_players.remove(&uuid);
                     }
                 }
             }

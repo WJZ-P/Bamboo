@@ -1025,6 +1025,93 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
     assert_eq!(ids, [new_id]);
 }
 
+/// 离开 → 存档写还在 IO 线程排队 → 同 uuid 立刻重进：应拿到离开时的数据，
+/// 而不是连接层从盘上读到的旧字节（官方 `PlayerDataStorage.save` 同步写，没有这个窗口）。
+/// Leave -> the save write is still queued on the IO thread -> immediate rejoin
+/// with the same uuid: the rejoining player must get the leaving data, not the
+/// stale disk bytes read by the connection layer.
+#[test]
+fn rejoin_uses_in_flight_player_save_over_stale_disk() {
+    use mc_bamboo_protocol::packet::play::GameMode;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, player_data::PlayerData, world_dir::WorldDir};
+
+    // 一个只活到测试结束的临时世界目录。声明顺序：tmp 先、server 后，
+    // drop 时 server 先关掉 IO 线程，tmp 再删目录。
+    // A temp world dir that lives until the test ends. Declared before `server`
+    // so the IO thread is closed before the directory is removed.
+    struct TempWorldDir(std::path::PathBuf);
+    impl TempWorldDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-rejoin-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempWorldDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let tmp = TempWorldDir::new();
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new(8);
+    // 给无限超平坦测试世界接上真实 IO 线程，让 `submit_player_write` 记录待写副本。
+    // Attach a real IO thread so `submit_player_write` records the in-flight copy.
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    let uuid = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+    let old = server.join_uuid("Kitten", uuid);
+    server.tick();
+    // 把要离开的玩家改成旁观模式，作为"离开时的数据"的可区分标记。
+    server.region().players.get_mut(&old.id).unwrap().game_mode = GameMode::Spectator;
+
+    // 连接层读到的旧档：生存模式（和离开时的旁观模式不同）。
+    let stale = PlayerData {
+        game_type: 0,
+        ..PlayerData::default()
+    }
+    .to_gzip()
+    .unwrap();
+
+    let new_id = PlayerId(50);
+    let sink = FakeSink::default();
+    // 同一个 tick 里先处理 Leave 再处理 Join：poll_io 在 tick 开头已经跑过，
+    // 这次写的 PlayerWritten 回执要到下一刻才收，所以待写副本此刻一定还在。
+    server.leave(&old);
+    let request = JoinRequest {
+        id: new_id,
+        uuid,
+        name: "Kitten".to_owned(),
+        properties: Vec::new(),
+        client: client_requesting(2),
+        permission_level: 0,
+        is_op: false,
+        peer_ip: "127.0.0.1".to_owned(),
+        online_at_login: 0,
+        player_data: Some(stale),
+        sink: Box::new(sink),
+    };
+    server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
+    server.tick();
+
+    // 重进拿到的是离开时的旁观模式（待写内存副本），不是盘上的生存模式旧档。
+    let rejoined = server.world.region.players.get(&new_id).unwrap();
+    assert_eq!(
+        rejoined.game_mode,
+        GameMode::Spectator,
+        "rejoin must use the in-flight leaving save, not the stale disk bytes"
+    );
+}
+
 #[test]
 fn refused_sink_is_closed_and_the_player_waits_for_its_leave() {
     let mut server = Harness::new(8);

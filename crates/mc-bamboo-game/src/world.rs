@@ -605,20 +605,26 @@ impl World {
 
         // 恢复玩家存档：位置取整到方块、朝向、游戏模式、物品栏。
         // 位置的小数部分丢掉（不额外补发位置包），见 README 已知限制。
+        // 离开时的写交给 IO 线程异步做，重进可能早于落盘：优先用世界线程
+        // 记下的那份"已交给 IO、还没写完"的内存副本，而不是连接层读到的盘上旧字节。
         // Restore from the player save: block-rounded position, rotation, game
         // mode and inventory. The sub-block fraction is dropped (no extra
-        // position packet); see README known limitations.
-        let restored =
-            request
-                .player_data
-                .take()
-                .and_then(|bytes| match PlayerData::from_gzip(&bytes) {
-                    Ok(data) => Some(data),
-                    Err(error) => {
-                        warn!(%error, "could not decode player data; treating as a new player");
-                        None
-                    }
-                });
+        // position packet); see README known limitations. A leave is written
+        // asynchronously, so a rejoin can beat the disk: prefer the world
+        // thread's in-flight in-memory copy over the connection-layer disk bytes.
+        let uuid_string = player_uuid_string(request.uuid.as_bytes());
+        let player_bytes = self
+            .host
+            .pending_player(&uuid_string)
+            .map(<[u8]>::to_vec)
+            .or_else(|| request.player_data.take());
+        let restored = player_bytes.and_then(|bytes| match PlayerData::from_gzip(&bytes) {
+            Ok(data) => Some(data),
+            Err(error) => {
+                warn!(%error, "could not decode player data; treating as a new player");
+                None
+            }
+        });
         let game_mode = restored
             .as_ref()
             .map(|data| game_mode_from_id(data.game_type))
@@ -749,26 +755,26 @@ impl World {
     }
 
     /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
-    fn save_one_player(&self, id: PlayerId) {
-        if let Some(player) = self.region.players.get(&id) {
-            self.write_player_save(player);
+    fn save_one_player(&mut self, id: PlayerId) {
+        let encoded = self.region.players.get(&id).and_then(encode_player_save);
+        if let Some((uuid, bytes)) = encoded {
+            self.host.submit_player_write(&uuid, bytes);
         }
     }
 
     /// 存档所有在线玩家（自动保存、关服、`save-all`）。
-    fn save_all_players(&self) {
-        for player in self.region.players.values() {
-            self.write_player_save(player);
-        }
-    }
-
-    fn write_player_save(&self, player: &crate::player::Player) {
-        let data = runtime_player_data(player);
-        match encode_player_data(&data) {
-            Ok(bytes) => self
-                .host
-                .submit_player_write(&player_uuid_string(player.uuid.as_bytes()), bytes),
-            Err(error) => warn!(%error, "could not encode player data"),
+    fn save_all_players(&mut self) {
+        // 先把所有存档编出来，避免遍历 `region.players` 时又可变借 `host`。
+        // Encode every save first so we don't hold a borrow of `region.players`
+        // while mutably borrowing `host`.
+        let encoded: Vec<(String, Vec<u8>)> = self
+            .region
+            .players
+            .values()
+            .filter_map(encode_player_save)
+            .collect();
+        for (uuid, bytes) in encoded {
+            self.host.submit_player_write(&uuid, bytes);
         }
     }
 
@@ -1128,6 +1134,21 @@ impl World {
         let reason = Component::translate(SERVER_SHUTDOWN, []);
         self.region.links.kick_all(&reason);
         ControlFlow::Break(())
+    }
+}
+
+/// 编出一名在线玩家的存档字节（纯函数，不碰 `self`，避免和 `host` 的可变借用冲突）。
+/// 返回带连字符的 uuid 和 gzip 字节，交给 [`World::save_all_players`] 提交给 IO 线程。
+/// Encode one live player's save (pure, so it does not conflict with the mutable
+/// borrow of `host`). Returns the hyphenated uuid and gzip bytes for submission.
+fn encode_player_save(player: &crate::player::Player) -> Option<(String, Vec<u8>)> {
+    let data = runtime_player_data(player);
+    match encode_player_data(&data) {
+        Ok(bytes) => Some((player_uuid_string(player.uuid.as_bytes()), bytes)),
+        Err(error) => {
+            warn!(%error, "could not encode player data");
+            None
+        }
     }
 }
 
