@@ -213,6 +213,9 @@ impl ServerSettings {
             forwarding_secret: self.forwarding_secret.clone(),
             // 四份管理名单固定放在服务器目录里，由 load 时的路径决定。
             list_directory: PathBuf::from(&self.server_directory),
+            // 世界目录 = 服务器目录 + level-name，和命令行版一致。
+            // World dir = server dir + level-name, matching the CLI.
+            world_dir: Some(PathBuf::from(&self.server_directory).join(self.level_name.trim())),
             entity_threads: self.entity_threads as usize,
             mail_budget: mc_bamboo_game::MailBudget {
                 deliveries: self.deliveries_per_tick as usize,

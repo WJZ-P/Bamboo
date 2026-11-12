@@ -2,6 +2,7 @@
 
 use std::{
     ops::ControlFlow,
+    path::PathBuf,
     sync::{
         Arc,
         mpsc::{Receiver, TryRecvError},
@@ -18,7 +19,7 @@ use mc_bamboo_protocol::{
 use mc_bamboo_world::director::TicketOp;
 
 use crate::director_host::{DirectorHost, MailBudget};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{
     book, chat, chunk_broadcast,
@@ -32,6 +33,7 @@ use crate::{
     player::shows_hat,
     profiler::{Metric, Phase},
     region::{JoinSettings, Region},
+    save_session::SaveSession,
     secure_chat::{self, ServiceProfileKeys},
     sign, weather,
 };
@@ -65,6 +67,10 @@ pub struct WorldConfig {
     pub entity_threads: usize,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
+    /// 世界目录。`None` 表示不存档（测试、oracle、压测都走这条路）。
+    ///
+    /// The world directory. `None` disables saving (tests, oracle, load tests).
+    pub world_dir: Option<PathBuf>,
 }
 
 impl Default for WorldConfig {
@@ -77,6 +83,7 @@ impl Default for WorldConfig {
             admin: crate::admin::AdminSnapshot::default(),
             entity_threads: 0,
             mail_budget: MailBudget::default(),
+            world_dir: None,
         }
     }
 }
@@ -99,6 +106,10 @@ pub struct World {
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
     /// Director 的逻辑刻数，每次 `tick_ticket_timeouts` 加一。
     director_tick: u64,
+    /// 存档会话。`None` 表示这一局不存档。
+    save: Option<SaveSession>,
+    /// 启动阶段打开存档失败的原因；非空时 `run` 直接拒绝启动。
+    startup_error: Option<String>,
 }
 
 impl World {
@@ -139,6 +150,21 @@ impl World {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
+        // 启动阶段同步打开存档：建目录、拿锁、读 level.dat。失败就拒绝启动，
+        // 不让世界线程带着一个没锁住的世界目录继续跑。
+        // Open the save synchronously at startup: create the layout, take the lock,
+        // read level.dat. On failure, refuse to start instead of running unlocked.
+        let (save, startup_error) = match (&config.world_dir, infinite_flat) {
+            (Some(root), false) => match SaveSession::open(root) {
+                Ok((session, _source)) => (Some(session), None),
+                Err(error) => {
+                    let message = format!("could not open the world directory: {error}");
+                    error!(%message, "refusing to start");
+                    (None, Some(message))
+                }
+            },
+            _ => (None, None),
+        };
         let mut global = Global::default();
         let authoritative_admin = admin.is_some();
         if let Some(init) = admin {
@@ -171,6 +197,8 @@ impl World {
             },
             ticket_centers: std::collections::BTreeMap::new(),
             director_tick: 0,
+            save,
+            startup_error,
         };
         world
             .host
@@ -276,6 +304,10 @@ impl World {
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
+        if let Some(message) = &self.startup_error {
+            error!(%message, "world startup failed; not running");
+            return;
+        }
         let mut timing = WallTiming;
         let mut schedule = Schedule::starting_at(self.region.profiler.now());
         loop {
@@ -911,11 +943,25 @@ impl World {
         }
     }
 
-    /// 给所有人发关闭的原因，然后结束世界线程。
+    /// 按官方 `stopServer` 顺序关服：先存玩家、再存区块（后续步骤接入 IO 线程后补），
+    /// 然后写 `level.dat` / `data/` / `chunk_tickets.dat`，最后释放锁、踢人。
+    /// 任何一步出错都只记日志，不让关服挂死。
+    ///
+    /// Shut down in the official `stopServer` order: save players, then chunks
+    /// (added with the IO thread in a later step), then write `level.dat`, `data/`
+    /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
+    /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
-        // 任务 A 没有真实磁盘：`DirectorHost::shutdown` 只走状态机、不落盘，
-        // 关服时跑它没有可观察收益，还会拖住世界线程。
-        // 任务 B 接真实 IO 时在这里换回 `self.host.shutdown(...)`。
+        if let Some(save) = &mut self.save {
+            save.level_mut().time = self.global.time().0;
+            save.level_mut().last_played = crate::admin::now_millis();
+            if let Err(error) = save.save_all() {
+                warn!(%error, "could not save level data on shutdown");
+            }
+            // 等 IO 线程写完 / sync_all：第二步接入后补。现在先释放锁。
+            // Waiting for IO / sync_all is added with the IO thread in step two.
+            save.close();
+        }
         let reason = Component::translate(SERVER_SHUTDOWN, []);
         self.region.links.kick_all(&reason);
         ControlFlow::Break(())
