@@ -37,7 +37,7 @@ use crate::{
     player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
     profiler::{Metric, Phase},
     region::{JoinSettings, Region},
-    save_session::SaveSession,
+    save_session::{SaveCommand, SaveSession},
     secure_chat::{self, ServiceProfileKeys},
     sign, weather,
     world_state::RespawnData,
@@ -389,6 +389,7 @@ impl World {
         // Read requests dispatched last tick are collected at the start of this tick.
         self.host.poll_io(&mut self.region);
         self.process_inbox()?;
+        self.consume_save_commands();
         self.sync_player_tickets();
         self.region.profiler.lap(Phase::Inbox);
         self.tick_ticket_timeouts();
@@ -694,6 +695,41 @@ impl World {
             && let Some(player) = self.region.players.get_mut(&id)
         {
             restore_inventory(player, data);
+        }
+    }
+
+    /// 消费 `save-all` / `save-on` / `save-off` 压进来的请求（命令动作不碰 IO）。
+    fn consume_save_commands(&mut self) {
+        let requests = std::mem::take(&mut self.global.save_requests);
+        for request in requests {
+            match request {
+                SaveCommand::SaveAll { flush } => {
+                    self.save_all_players();
+                    if let Some(save) = &mut self.save {
+                        save.level_mut().time = self.global.time().0;
+                        save.level_mut().last_played = crate::admin::now_millis();
+                        if let Err(error) = save.save_all() {
+                            warn!(%error, "save-all could not write level data");
+                        }
+                    }
+                    self.host.flush_io();
+                    if flush {
+                        // 官方 flush 会等 saved data 落盘；这里再排一道栅栏，
+                        // 确保玩家和区块的写也都落盘。
+                        self.host.flush_io();
+                    }
+                }
+                SaveCommand::SaveOn => {
+                    if let Some(save) = &mut self.save {
+                        save.set_auto_save(true);
+                    }
+                }
+                SaveCommand::SaveOff => {
+                    if let Some(save) = &mut self.save {
+                        save.set_auto_save(false);
+                    }
+                }
+            }
         }
     }
 

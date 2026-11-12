@@ -200,6 +200,10 @@ pub(crate) struct Global {
     pub(crate) admin: crate::admin::AdminState,
     /// 名单变更后发布给连接层并写盘的通道。没有连接层时（单元测试）是 `None`。
     pub(crate) admin_messages: Option<std::sync::mpsc::Sender<crate::admin::AdminMessage>>,
+    /// 命令压进来的存档请求，由 `World` 在 tick 里消费（命令动作不碰 IO）。
+    pub(crate) save_requests: Vec<crate::save_session::SaveCommand>,
+    /// 自动保存开关的权威镜像（命令改它，`World` 同步到存档会话）。
+    pub(crate) save_auto: bool,
 }
 
 impl Default for Global {
@@ -216,6 +220,8 @@ impl Default for Global {
             boss_bars: crate::scoreboard::BossBars::default(),
             admin: crate::admin::AdminState::default(),
             admin_messages: None,
+            save_requests: Vec::new(),
+            save_auto: true,
         }
     }
 }

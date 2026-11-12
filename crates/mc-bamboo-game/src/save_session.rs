@@ -28,6 +28,16 @@ use mc_bamboo_storage::{
 };
 use tracing::{info, warn};
 
+/// 命令发给世界线程的存档请求。命令动作不能直接碰 IO，压进 `Global`，由 `World` 消费。
+/// A save request from a command. Command actions cannot touch IO, so they push
+/// one of these into `Global` for the world thread to consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveCommand {
+    SaveAll { flush: bool },
+    SaveOn,
+    SaveOff,
+}
+
 /// 一次运行期间的存档状态。`None` 的 `world_dir` 表示不存档（测试、oracle）。
 #[derive(Debug)]
 pub struct SaveSession {

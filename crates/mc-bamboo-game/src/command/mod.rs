@@ -25,6 +25,7 @@ mod particle;
 mod players;
 mod playsound;
 mod random;
+mod save;
 mod scoreboard;
 mod select;
 mod stopsound;
