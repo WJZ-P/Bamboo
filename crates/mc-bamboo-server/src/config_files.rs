@@ -57,7 +57,7 @@ const OFFICIAL_DEFAULTS: &[(&str, &str)] = &[
     ("initial-enabled-packs", r#"vanilla"#),
     ("level-name", r#"world"#),
     ("level-seed", r#""#),
-    ("level-type", r#"minecraft\:normal"#),
+    ("level-type", "minecraft:normal"),
     ("log-ips", r#"true"#),
     ("management-server-allowed-origins", r#""#),
     ("management-server-enabled", r#"false"#),
@@ -441,7 +441,8 @@ impl OfficialConfig {
             }
             seen.insert(key.clone());
             if !IMPLEMENTED.contains(&key.as_str()) {
-                passthrough.push((key, value));
+                // 存的是解码后的原值：写回时统一转义一次，避免反复写回把反斜杠越堆越多。
+                passthrough.push((key, unescape(&value)));
                 continue;
             }
             match key.as_str() {
@@ -554,19 +555,21 @@ fn unescape(value: &str) -> String {
     out
 }
 
-/// 写回时值里的 `=`、`:`、空格和反斜杠要转义，和 `Properties.store` 一致。
+/// 写回时值里的 `=`、`:`、`#`、`!` 和反斜杠要转义，和 `Properties.store` 一致；
+/// 空白只有开头那一段要转义，中间的空格原样写（官方的 `motd` 默认值就是这样）。
 fn escape_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
+    let mut leading = true;
     for ch in value.chars() {
+        leading &= ch == ' ';
         match ch {
             '\\' => out.push_str("\\\\"),
-            '=' => out.push_str("\\="),
-            ':' => out.push_str("\\:"),
-            ' ' => out.push_str("\\ "),
+            '\t' => out.push_str("\\t"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '#' | '!' => {
+            '\u{000c}' => out.push_str("\\f"),
+            ' ' if leading => out.push_str("\\ "),
+            '=' | ':' | '#' | '!' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -1086,6 +1089,21 @@ mod tests {
                 .any(|line| line == "forwarding_secret=已设置")
         );
         assert!(!changed.iter().any(|line| line.contains("supersecret")));
+    }
+
+    /// 反复写回不能把未实现键里的转义一层层堆起来。
+    #[test]
+    fn repeated_start_does_not_pile_up_escapes() {
+        let dir = Temp::new();
+        load_or_create(dir.path(), true).unwrap();
+        let first = fs::read_to_string(dir.path().join(PROPERTIES_FILE)).unwrap();
+        for _ in 0..3 {
+            load_or_create(dir.path(), true).unwrap();
+        }
+        let last = fs::read_to_string(dir.path().join(PROPERTIES_FILE)).unwrap();
+        assert_eq!(last, first);
+        assert!(last.contains("level-type=minecraft\\:normal\n"));
+        assert!(last.contains("motd=A Minecraft Server\n"));
     }
 
     #[test]

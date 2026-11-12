@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(loaded.keep_alive_seconds, 20);
         let properties = fs::read_to_string(directory.join(PROPERTIES_FILE)).unwrap();
         assert!(properties.contains("server-port=25600\n"));
-        assert!(properties.contains("motd=my\\ server\n"));
+        assert!(properties.contains("motd=my server\n"));
         assert!(properties.contains("white-list=true\n"));
         let bamboo = fs::read_to_string(directory.join(BAMBOO_FILE)).unwrap();
         assert!(bamboo.contains("entity_threads = 2\n"));
