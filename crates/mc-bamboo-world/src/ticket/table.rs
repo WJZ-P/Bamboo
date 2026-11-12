@@ -439,30 +439,50 @@ impl TicketTable {
         );
         let _merge_guard = Guard::new(MERGE);
         // 两个分量里没变的那一个也要写 (新, 新)，调用方直接拿 (旧, 新) 用。
-        let mut merged: BTreeMap<ChunkPos, LevelChange> = BTreeMap::new();
-        for (pos, old, new) in loading {
-            let sim = self.simulation.level(pos);
-            merged
-                .entry(pos)
-                .or_insert(LevelChange {
-                    pos,
-                    loading: (old, new),
-                    simulation: (sim, sim),
-                })
-                .loading = (old, new);
+        // 两张平面的变化列表都已按 (x, z) 排好，线性归并即可，不用有序映射。
+        let mut a = loading.into_iter().peekable();
+        let mut b = simulation.into_iter().peekable();
+        loop {
+            let (pos, loading_change, simulation_change) = match (a.peek(), b.peek()) {
+                (Some(&(left, _, _)), Some(&(right, _, _))) => match left.cmp(&right) {
+                    std::cmp::Ordering::Less => {
+                        let (pos, old, new) = a.next().unwrap();
+                        (pos, Some((old, new)), None)
+                    }
+                    std::cmp::Ordering::Greater => {
+                        let (pos, old, new) = b.next().unwrap();
+                        (pos, None, Some((old, new)))
+                    }
+                    std::cmp::Ordering::Equal => {
+                        let (pos, lo, ln) = a.next().unwrap();
+                        let (_, so, sn) = b.next().unwrap();
+                        (pos, Some((lo, ln)), Some((so, sn)))
+                    }
+                },
+                (Some(_), None) => {
+                    let (pos, old, new) = a.next().unwrap();
+                    (pos, Some((old, new)), None)
+                }
+                (None, Some(_)) => {
+                    let (pos, old, new) = b.next().unwrap();
+                    (pos, None, Some((old, new)))
+                }
+                (None, None) => break,
+            };
+            let loading = loading_change.unwrap_or_else(|| {
+                let level = self.loading.level(pos);
+                (level, level)
+            });
+            let simulation = simulation_change.unwrap_or_else(|| {
+                let level = self.simulation.level(pos);
+                (level, level)
+            });
+            self.changes.push(LevelChange {
+                pos,
+                loading,
+                simulation,
+            });
         }
-        for (pos, old, new) in simulation {
-            let load = self.loading.level(pos);
-            merged
-                .entry(pos)
-                .or_insert(LevelChange {
-                    pos,
-                    loading: (load, load),
-                    simulation: (old, new),
-                })
-                .simulation = (old, new);
-        }
-        self.changes = merged.into_values().collect();
         drop(_merge_guard);
         &self.changes
     }
