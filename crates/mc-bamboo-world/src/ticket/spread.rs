@@ -312,6 +312,8 @@ pub struct Plane {
     levels: LevelGrid,
     /// 跨轮复用的辅助结构。
     scratch: Scratch,
+    /// 跨轮复用的分桶队列；每轮清空但不释放桶的容量。
+    queue: LevelQueue,
 }
 
 impl Plane {
@@ -321,6 +323,7 @@ impl Plane {
             limit,
             levels: LevelGrid::new(limit),
             scratch: Scratch::new(),
+            queue: LevelQueue::new(limit),
         }
     }
 
@@ -410,7 +413,8 @@ impl Plane {
 
         // 阶段二：按等级从小到大松弛，用和官方 LeveledPriorityQueue 一样的桶队列。
         let _seed_guard = Guard::new(stages[1]);
-        let mut queue = LevelQueue::new(limit);
+        let mut queue = std::mem::replace(&mut self.queue, LevelQueue::empty());
+        queue.clear();
         for &(pos, old, new) in &effective {
             if new < old && new < limit {
                 queue.push(new, pos);
@@ -452,6 +456,7 @@ impl Plane {
             }
         }
 
+        self.queue = queue;
         drop(_relax_guard);
         let _collect_guard = Guard::new(stages[3]);
         let result = self.scratch.collect(&self.levels, limit);
@@ -502,6 +507,7 @@ impl Plane {
 
 /// 按等级分桶的 FIFO 队列，等价于官方 `LeveledPriorityQueue`：等级小的先出队，
 /// 同等级按入队顺序。入队出队都是 O(1)。
+#[derive(Debug)]
 struct LevelQueue {
     buckets: Vec<VecDeque<ChunkPos>>,
     first: usize,
@@ -514,6 +520,21 @@ impl LevelQueue {
             buckets: (0..count).map(|_| VecDeque::new()).collect(),
             first: count,
         }
+    }
+
+    /// 占位值，只在把队列从 `Plane` 里取出来时用，不分配桶。
+    fn empty() -> Self {
+        Self {
+            buckets: Vec::new(),
+            first: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        for bucket in &mut self.buckets {
+            bucket.clear();
+        }
+        self.first = self.buckets.len();
     }
 
     fn push(&mut self, level: i32, pos: ChunkPos) {
