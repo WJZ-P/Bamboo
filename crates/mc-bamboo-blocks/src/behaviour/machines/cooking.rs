@@ -423,6 +423,13 @@ impl FurnaceEntity {
         if was_lit != is_lit {
             changed = true;
             let state = world.block_state(self.pos);
+            // 官方无条件 `setBlockAndUpdate(pos, state.setValue(LIT, isLit))`。
+            // `LevelChunk.setBlockState` 在新旧状态相同时直接返回 null，`Level.setBlock`
+            // 随后也直接返回，不发任何更新；这里提前判一次和它等价。
+            //
+            // Vanilla calls `setBlockAndUpdate` unconditionally. `LevelChunk.setBlockState`
+            // returns null when the state is unchanged, and `Level.setBlock` then returns
+            // without any update, so this guard is equivalent.
             if state.get(LIT) != is_lit {
                 world.set_block_and_update(self.pos, state.with(LIT, is_lit));
             }
