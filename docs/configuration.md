@@ -179,8 +179,11 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
   互斥组合按服务端的行为修正（关掉正版验证）。
 - 两个入口都只在启动时读一次，改完文件要重启服务端才生效。
 
-## 存档接进来之后
+## 存档目录
 
 `level-name` 默认 `world`，`config_files::world_dir(服务器目录, 配置)` 给出
-`服务器目录.join(level_name)`。存档接进游戏时把这个值放进 `ServerConfig.world_dir`
-（`None` = 不落盘）即可，不需要再加新的配置项。
+`服务器目录.join(level_name)`。`ConfigFiles::to_server_config` 已经把这个值放进
+`ServerConfig.world_dir`，命令行版和桌面版都会据此存档；`None` = 不落盘
+（`ServerConfig::default()` 就是这个值，单元测试 / oracle / 压测用它，不会碰世界目录）。
+世界线程启动时建 26.3 目录布局、拿 `session.lock` 独占锁、读 `level.dat`，
+关服按官方顺序写回并释放锁。格式和已知限制见 `docs/m3-storage.md` 与 README「存档」一节。

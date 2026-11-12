@@ -10,7 +10,7 @@ A Minecraft server written from scratch in Rust
 
 </div>
 
-> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个超平坦世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。没有存档。
+> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个超平坦世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。
 
 ## 运行
 
@@ -44,6 +44,50 @@ pnpm start
 控制台顶部有 CPU 和内存监控，每秒更新一次，曲线显示最近 60 秒，参照任务管理器。
 服务端跑在应用进程里，所以显示的是这个进程占整机的 CPU 和它的工作集，旁边附整机的 CPU 和内存；
 WebView2 的渲染进程不算在内。
+
+## 存档
+
+命令行版和桌面版默认把世界存在 `服务器目录/<level-name>/`（`level-name` 默认 `world`），
+用官方 26.3 的 Anvil 布局：`level.dat` / `level.dat_old` / `session.lock`、
+`data/minecraft/*.dat`、`players/data/<uuid>.dat`（含 `.dat_old`）、
+`dimensions/minecraft/overworld/{region,entities,poi}/` 和
+`dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat`。
+`ServerConfig.world_dir` 为 `None` 时不落盘（单元测试、oracle、压测都走这条路）。
+
+一条 IO 线程负责区域文件的压缩和读写；世界线程只做 NBT 解析/序列化，绝不等待 IO：
+读盘请求发出后，结果在下一刻开头经信箱收回。改过的区块在卸载时排队、按 D6
+匀速写盘（每刻 `脏区块数 / 6000` 个、至少 1 个、单区块 10 秒冷却）；没改过的区块
+不写盘，下次按超平坦模板重建。关服按官方 `stopServer` 顺序：先存所有在线玩家，
+再收回并存所有区块，写 `level.dat` / `data/` / `chunk_tickets.dat`，等 IO 落盘、
+`sync_all`，最后释放 `session.lock`。`/save-all [flush]`、`/save-on`、`/save-off`
+按官方消息和权限等级 4 实现；`/save-off` 关掉运行中的自动保存（每 6000 刻一次）。
+
+探针和每个测试都从空世界开始：单元测试 / oracle 用 `world_dir = None` 或临时目录，
+不碰世界目录；跑官方探针前删掉 `probe-run/world` 再启动 `bamboo.exe`
+（`probe-run/ops.json` 不要提交）。仓库里不留世界目录。
+
+### 存档已知限制
+
+- 只做 Anvil。Linear、lz4（压缩 ID 4）、自定义压缩（ID 127）、老布局转换都不做；
+  读到老布局（世界根有 `region/`）当空世界并写日志（Q1/Q2/Q8）。
+- 不逐次强制刷盘：写盘在 IO 线程异步做，关服才 `sync_all`（Q4）。`kill` 崩溃最多丢
+  最近没写完的快照；运行中仍加载、还没卸载的脏区块不主动拍快照，`/save-all` 也只存
+  玩家、`level.dat`、`data/` 和已排队的卸载快照。D6 匀速只作用于卸载快照队列。
+- 只持久化改动过的（脏）区块。没改过的按超平坦模板重建；官方服务端打开这个世界时
+  `data/` 下世界生成设置是空默认，会按官方默认世界生成，和 Bamboo 的平坦模板不同（Q9）。
+- 玩家数据只恢复已建模字段：位置取整到方块（小数部分丢掉、不补发位置包）、朝向、
+  游戏模式、物品栏、末影箱、选中槽。血量、经验、能力、饥饿、食物等运行时没建模，
+  保存用官方默认值。
+- `data/` 下游戏规则、天气、世界生成设置、世界边界等独立文件写空默认 `{}`（codec 没建模）；
+  `/gamerule`、`/weather`、`/setworldspawn` 仍不写存档，重启回默认。`world_border`
+  文件是给世界边界队友留的接口。`chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
+- 盘上 `Status` 不是 `minecraft:full` 的区块、或读坏的区域文件，都当坏块 warn + 用超平坦
+  模板，不走官方的重新生成流水线，也不另存区块备份。
+- 玩家文件名用无连字符 UUID（官方 `getStringUUID()`）；坏玩家文件另存
+  `<uuid>_corrupted_<毫秒>.dat`（官方用日期格式）。`/save-all` 成功消息在请求入队时
+  就发（异步保存，消息早于落盘），`flush` 分支多排一道 IO 栅栏。
+- 火把抖动表、容器开合状态与计数、方块实体的 `dead` / `recheck_at` 等瞬时状态不存；
+  世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏也不存档（沿用原有限制）。
 
 ## 现在能玩什么
 
@@ -393,9 +437,10 @@ WebView2 的渲染进程不算在内。
   活塞推动不带走台上的书。讲台菜单不能用光标把书从槽里拿出来，
   取书只走按钮。旁观者可以打开讲台，按钮全部忽略。冒险模式能翻页，不能取书。
   没有权限系统，所以放置讲台时不读物品里的 `block_entity_data`。
-- 存档目前只有编解码层，还没接进区块的加载和卸载：关服后世界仍会重置。方块实体内容、
-  计划刻、红石记忆、机器状态、方块实体带来的物品组件、命令方块、讲台上的书和三种实体的
-  官方 NBT 已经能整块组装并与官方对拍（见 `docs/m3-storage.md`），但还不会写进世界目录。
+- 存档已经接进区块的加载和卸载，但只做 Anvil、只支持 26.3 新布局，且有一批内容不存，
+  见上面「存档已知限制」和 `docs/m3-storage.md`。方块实体内容、计划刻、红石记忆、机器状态、
+  方块实体带来的物品组件、命令方块、讲台上的书和三种实体的官方 NBT 都能整块组装并与官方
+  对拍，也会随改过的区块一起写进世界目录。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
   语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
   26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。还没接的差异：天气变暗的天空光（下雨/打雷时官方会改 `getSkyDarken`，进而影响阳光探测器、雪和霜冰的亮度判定）、雷击生成的实体、闪电对避雷针/实体/方块的作用和苦力怕充能，以及天空、雾和云的颜色变化。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
@@ -437,7 +482,8 @@ WebView2 的渲染进程不算在内。
   `/stop` 发 `commands.stop.stopping` 之后走现有关服流程，世界线程给所有玩家发 `multiplayer.disconnect.server_shutdown` 再退出，服务端随世界线程结束。`/setidletimeout` 的单位是分钟，0 关闭；空闲判断照官方 `ServerGamePacketListenerImpl.tick`，Bamboo 已解码且能对应的动作（聊天、命令、按键输入、玩家指令、挥手、换快捷栏、破坏、右键、容器点击和按钮、告示牌、客户端指令、位移）会重置 `lastActionTime`，官方另外那些 handler（攻击实体、交互、旁观者动作、放配方、书与笔等）还没接。
   `/transfer` 发 `ClientboundTransferPacket`（主机名、端口，默认 25565），`/version` 按官方 `VersionCommand.dumpVersion` 的行序打印；版本信息用 `mc-bamboo-data` 的常量，`series`、`build_time`、两个 `pack_version` 按 26.3 官方 `version.json` 固定，测试会读官方 jar 逐个对照。
   名字参数用官方 `GameProfileArgument`：`@` 开头按玩家选择器解析，在线玩家按名字解析；离线模式不在线的名字用官方 `UUIDUtil.createOfflinePlayerUUID`（`OfflinePlayer:<name>` 的 MD5）。正版模式按官方 `CachedUserNameToIdResolver` 维护一份「本次启动以来进过服的玩家 名字→UUID」缓存（`Join` 时记下，不写盘；官方会持久化到 `usercache.json`），在线玩家查不到时先查这份缓存，再查不到就按官方「查不到」报 `argument.player.unknown`（Bamboo 没有 Mojang 档案查询，也不从白名单猜 UUID）。`ban-ip` / `pardon-ip` 的 target 是 IP 或在线玩家名（用连接层报来的对端 IP）。
-  没做 `save-all`、`save-on`、`save-off`（没有存档，等 M3）。`/ban-ip` 的 `commands.banip.info` 用逗号连接玩家名，和官方 `EntitySelector.joinNames` 的格式不同；`/version` 的 `build_time` 是纯文本而不是官方的 `Date` 翻译参数。
+  `/save-all [flush]`、`/save-on`、`/save-off` 按官方消息和权限等级 4 实现，见「存档」一节
+  （成功消息在异步保存入队时就发等差异记在已知限制里）。`/ban-ip` 的 `commands.banip.info` 用逗号连接玩家名，和官方 `EntitySelector.joinNames` 的格式不同；`/version` 的 `build_time` 是纯文本而不是官方的 `Date` 翻译参数。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
   没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。
