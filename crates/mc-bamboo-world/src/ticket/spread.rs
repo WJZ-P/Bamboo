@@ -21,7 +21,10 @@ use std::{
 
 use mc_bamboo_core::ChunkPos;
 
-use super::{profile::Guard, table::ChunkHasherBuilder};
+use super::{
+    profile::{Guard, count},
+    table::ChunkHasherBuilder,
+};
 
 /// 每个块 64×64 个区块。邻居绝大多数落在同一块里，块内直接数组下标。
 const BLOCK_SHIFT: i32 = 6;
@@ -277,6 +280,7 @@ impl Scratch {
         for &key in &self.used_blocks {
             let block = &self.blocks[&key];
             let level_block = levels.block(key);
+            count(super::profile::C_COLLECT_SCAN, BLOCK_CELLS as u64);
             for index in 0..BLOCK_CELLS {
                 if block.stamp[index] != epoch || block.flags[index] & ScratchBlock::RECORDED == 0 {
                     continue;
@@ -300,6 +304,7 @@ impl Scratch {
                 .all(|w| (w[0].0.x, w[0].0.z) < (w[1].0.x, w[1].0.z))
         );
         debug_assert!(result.iter().all(|&(_, _, new)| new <= limit));
+        count(super::profile::C_CHANGES, result.len() as u64);
     }
 }
 
@@ -450,6 +455,7 @@ impl Plane {
             let mut boundary = self.source(pos);
             // 清空区外一圈的区块没被清空，仍保留旧等级。取最小的边界值当候选，
             // 每个清空区块只排一次，而不是给每个邻居排一次。
+            count(super::profile::C_SEED_NEIGHBOR, 8);
             for neighbor in neighbors(pos) {
                 if !self.scratch.is_reset(neighbor) {
                     boundary = boundary.min(cursor.get(neighbor).saturating_add(1));
@@ -463,10 +469,12 @@ impl Plane {
         drop(_seed_guard);
         let _relax_guard = Guard::new(stages[2]);
         while let Some((candidate, pos)) = queue.pop() {
+            count(super::profile::C_RELAX_POP, 1);
             let current = self.level(pos);
             if candidate >= current {
                 continue;
             }
+            count(super::profile::C_RELAX_UPDATE, 1);
             self.scratch.record(pos, current);
             self.set_level(pos, candidate);
             let next = candidate + 1;
@@ -474,6 +482,7 @@ impl Plane {
                 let mut cursor = self.levels.cursor();
                 for neighbor in neighbors(pos) {
                     if next < cursor.get(neighbor) {
+                        count(super::profile::C_RELAX_PUSH, 1);
                         queue.push(next, neighbor);
                     }
                 }
@@ -513,6 +522,7 @@ impl Plane {
             while index < frontier[value as usize].len() {
                 let pos = frontier[value as usize][index];
                 index += 1;
+                count(super::profile::C_BFS_VISIT, 1);
                 if !self.scratch.visit(pos) {
                     continue;
                 }
@@ -520,13 +530,18 @@ impl Plane {
                 if cursor.get(pos) != value {
                     continue;
                 }
+                count(super::profile::C_BFS_RESET, 1);
                 self.scratch.record(pos, value);
                 self.scratch.mark_reset(pos);
                 let next = value + 1;
                 if next < limit {
+                    // 等级低于候选值的邻居必然由别的源撑着，入队前就剪掉；
+                    // 也避免同一个位置被多个已清空的邻居反复推入下一层。
                     let bucket = &mut frontier[next as usize];
                     for neighbor in neighbors(pos) {
-                        bucket.push(neighbor);
+                        if cursor.get(neighbor) == next {
+                            bucket.push(neighbor);
+                        }
                     }
                 }
             }
