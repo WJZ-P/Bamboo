@@ -11,7 +11,7 @@
 use std::{env, hint::black_box, time::Instant};
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_world::ticket::TicketTable;
+use mc_bamboo_world::ticket::{TicketTable, profile};
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -32,6 +32,7 @@ fn main() {
         table.set_player(id as u64, Some(ChunkPos::new(id * 47, 0)));
     }
     table.run_updates();
+    profile::reset();
     println!(
         "初始：{players} 名玩家，视距 {}，等级表项数 {}",
         table.view_distance(),
@@ -60,6 +61,7 @@ fn main() {
         black_box(changes.first());
     }
     let elapsed = start.elapsed();
+    profile::report(moves);
 
     println!("每次移动：{:?}", elapsed / moves as u32);
     println!(

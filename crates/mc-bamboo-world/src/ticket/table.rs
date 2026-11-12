@@ -12,6 +12,10 @@ use super::{
         DEFAULT_SIMULATION_DISTANCE, FULL_CHUNK_LEVEL, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE,
         PLAYER_TICKET_LEVEL, SIMULATION_MAX_LEVEL, TicketType, UNLOADED_LEVEL,
     },
+    profile::{
+        FOLD, Guard, LOADING_BFS, LOADING_COLLECT, LOADING_RELAX, LOADING_SEEDS, MERGE, PENDING,
+        SIMULATION_BFS, SIMULATION_COLLECT, SIMULATION_RELAX, SIMULATION_SEEDS,
+    },
     spread::Plane,
 };
 
@@ -401,6 +405,7 @@ impl TicketTable {
         if self.pending.is_empty() {
             return &self.changes;
         }
+        let _pending_guard = Guard::new(PENDING);
         let mut loading_changes = Vec::new();
         let mut simulation_changes = Vec::new();
         for &(pos, old, new, simulation) in &self.pending {
@@ -411,8 +416,28 @@ impl TicketTable {
             }
         }
         self.pending.clear();
-        let loading = self.loading.update(&loading_changes);
-        let simulation = self.simulation.update(&simulation_changes);
+        drop(_pending_guard);
+        let loading = self.loading.update(
+            &loading_changes,
+            [
+                LOADING_BFS,
+                LOADING_SEEDS,
+                LOADING_RELAX,
+                LOADING_COLLECT,
+                FOLD,
+            ],
+        );
+        let simulation = self.simulation.update(
+            &simulation_changes,
+            [
+                SIMULATION_BFS,
+                SIMULATION_SEEDS,
+                SIMULATION_RELAX,
+                SIMULATION_COLLECT,
+                FOLD,
+            ],
+        );
+        let _merge_guard = Guard::new(MERGE);
         // 两个分量里没变的那一个也要写 (新, 新)，调用方直接拿 (旧, 新) 用。
         let mut merged: BTreeMap<ChunkPos, LevelChange> = BTreeMap::new();
         for (pos, old, new) in loading {
@@ -438,6 +463,7 @@ impl TicketTable {
                 .simulation = (old, new);
         }
         self.changes = merged.into_values().collect();
+        drop(_merge_guard);
         &self.changes
     }
 

@@ -13,6 +13,8 @@
 //! 同样的操作序列一定得到逐字节相同的输出。
 
 mod level;
+#[doc(hidden)]
+pub mod profile;
 mod spread;
 mod table;
 

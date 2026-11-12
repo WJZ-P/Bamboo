@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use mc_bamboo_core::ChunkPos;
 
-use super::table::ChunkHasherBuilder;
+use super::{profile::Guard, table::ChunkHasherBuilder};
 
 /// 每个块 64×64 个区块。邻居绝大多数落在同一块里，块内直接数组下标。
 const BLOCK_SHIFT: i32 = 6;
@@ -123,8 +123,13 @@ impl Plane {
     }
 
     /// 应用一批源变化（旧等级、新等级都用 limit 表示"没有源"），返回这一平面变了的位置。
-    pub fn update(&mut self, changes: &[(ChunkPos, i32, i32)]) -> Vec<(ChunkPos, i32, i32)> {
+    pub fn update(
+        &mut self,
+        changes: &[(ChunkPos, i32, i32)],
+        stages: [usize; 5],
+    ) -> Vec<(ChunkPos, i32, i32)> {
         let limit = self.limit;
+        let _fold_guard = Guard::new(stages[4]);
         // 同一个位置可能在一步里被改了多次（玩家移动时增删交错），折叠成"最初旧值 → 最终新值"。
         let mut folded: BTreeMap<ChunkPos, (i32, i32)> = BTreeMap::new();
         for &(pos, old, new) in changes {
@@ -143,11 +148,14 @@ impl Plane {
         if effective.is_empty() {
             return Vec::new();
         }
+        drop(_fold_guard);
 
         // 每个被碰过的区块在本次更新开始前的等级，用于最后判定"真的变了"。
         let mut original = LevelGrid::new(i32::MIN);
         // 阶段一：多源 BFS 找升高锥，只看旧的等级表，不改表。
+        let _bfs_guard = Guard::new(stages[0]);
         let reset = self.collect_increases(&effective, &mut original);
+        drop(_bfs_guard);
 
         // 改源表，把升高锥里的等级清空。
         for &(pos, _old, new) in &effective {
@@ -164,6 +172,7 @@ impl Plane {
         }
 
         // 阶段二：按等级从小到大松弛，用和官方 LeveledPriorityQueue 一样的桶队列。
+        let _seed_guard = Guard::new(stages[1]);
         let mut queue = LevelQueue::new(limit);
         for &(pos, old, new) in &effective {
             if new < old && new < limit {
@@ -184,6 +193,8 @@ impl Plane {
             }
         }
 
+        drop(_seed_guard);
+        let _relax_guard = Guard::new(stages[2]);
         while let Some((candidate, pos)) = queue.pop() {
             let current = self.level(pos);
             if candidate >= current {
@@ -201,6 +212,8 @@ impl Plane {
             }
         }
 
+        drop(_relax_guard);
+        let _collect_guard = Guard::new(stages[3]);
         // 按块号、块内下标遍历，天然按 (x, z) 排序，不用再排序。
         let mut keys: Vec<_> = original.blocks.keys().copied().collect();
         keys.sort_unstable();
@@ -222,6 +235,7 @@ impl Plane {
                 }
             }
         }
+        drop(_collect_guard);
         result
     }
 
