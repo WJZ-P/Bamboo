@@ -526,24 +526,29 @@ impl Plane {
 
         drop(_seed_guard);
         let _relax_guard = Guard::new(stages[2]);
+        let mut cursor = self.levels.cursor();
         while let Some((candidate, pos)) = queue.pop() {
             count(super::profile::C_RELAX_POP, 1);
-            let current = self.level(pos);
+            let current = cursor.get(pos);
             if candidate >= current {
                 continue;
             }
             count(super::profile::C_RELAX_UPDATE, 1);
             self.scratch.record(pos, current);
+            // 游标是借用，写入前先结束它；下一轮再建（不分配，只是清掉缓存）。
+            drop(cursor);
             self.set_level(pos, candidate);
             let next = candidate + 1;
             if next < limit {
-                let mut cursor = self.levels.cursor();
+                cursor = self.levels.cursor();
                 for neighbor in neighbors(pos) {
                     if next < cursor.get(neighbor) {
                         count(super::profile::C_RELAX_PUSH, 1);
                         queue.push(next, neighbor);
                     }
                 }
+            } else {
+                cursor = self.levels.cursor();
             }
         }
 
