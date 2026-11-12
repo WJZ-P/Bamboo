@@ -24,7 +24,7 @@
 //! | `entity_sync`、`interaction`、`inventory`、`chat` | 各领域的游戏逻辑 |
 //! | `scoreboard` | 计分板、队伍和自定义 Boss 栏 |
 //! | `profiler` | 每刻各阶段的耗时直方图和报告 |
-//! | `pacing` | 睡到下一刻的策略和世界线程的优先级 |
+//! | `pacing` | 用 `thread::sleep` 睡到下一刻 |
 
 pub mod admin;
 mod block_drops;

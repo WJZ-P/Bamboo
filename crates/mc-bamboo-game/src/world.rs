@@ -69,7 +69,7 @@ pub struct World {
     pub(crate) global: Global,
     pub(crate) region: Region,
     inbox: Receiver<Inbound>,
-    /// 睡到下一刻的策略和世界线程的优先级，创建时读一次环境变量。
+    /// 睡到下一刻用的节拍器。
     pacer: Pacer,
     /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
     /// 直接嵌 `World::new` 的测试/工具按 `JoinRequest` 传入的等级走。
@@ -148,7 +148,7 @@ impl World {
                 keys,
             ),
             inbox,
-            pacer: Pacer::from_env(),
+            pacer: Pacer,
             host: if infinite_flat {
                 DirectorHost::new_infinite_flat(Default::default())
             } else {
@@ -262,7 +262,6 @@ impl World {
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
-        self.pacer.set_thread_priority();
         let mut timing = WallTiming;
         let mut schedule = Schedule::starting_at(self.region.profiler.now());
         loop {
@@ -277,11 +276,7 @@ impl World {
                 break;
             }
             schedule.after_tick(self.region.profiler.now());
-            let spun = self.pacer.wait_until(schedule.deadline(), &mut timing);
-            self.region.profiler.record(
-                Metric::TickSpinUs,
-                spun.as_micros().min(u128::from(u64::MAX)) as u64,
-            );
+            self.pacer.wait_until(schedule.deadline(), &mut timing);
         }
     }
 
