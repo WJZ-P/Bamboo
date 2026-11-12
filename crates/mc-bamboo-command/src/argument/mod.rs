@@ -61,6 +61,11 @@ pub enum ArgumentType {
     Vec3,
     /// `Vec3Argument.vec3(false)`：不把绝对整数居中。`/particle` 的 delta 用它。
     Vec3Uncentered,
+    /// 官方 `Vec2Argument.vec2()`：两个水平坐标，绝对整数居中。`/worldborder center` 用它。
+    ///
+    /// Vanilla `Vec2Argument.vec2()`: two horizontal coordinates, centring absolute
+    /// integers. `/worldborder center` uses it.
+    Vec2,
     Rotation,
     BlockState,
     BlockPredicate,
@@ -150,6 +155,7 @@ impl ArgumentType {
             Self::Time { .. } => "minecraft:time",
             Self::BlockPos => "minecraft:block_pos",
             Self::Vec3 | Self::Vec3Uncentered => "minecraft:vec3",
+            Self::Vec2 => "minecraft:vec2",
             Self::Rotation => "minecraft:rotation",
             Self::BlockState => "minecraft:block_state",
             Self::BlockPredicate => "minecraft:block_predicate",
@@ -191,6 +197,7 @@ impl ArgumentType {
             Self::Time { .. } => registry::TIME,
             Self::BlockPos => registry::BLOCK_POS,
             Self::Vec3 | Self::Vec3Uncentered => registry::VEC3,
+            Self::Vec2 => registry::VEC2,
             Self::Rotation => registry::ROTATION,
             Self::BlockState => registry::BLOCK_STATE,
             Self::BlockPredicate => registry::BLOCK_PREDICATE,
@@ -263,6 +270,7 @@ impl ArgumentType {
             Self::BlockPos => coordinates::parse_block_pos(reader),
             Self::Vec3 => coordinates::parse_vec3(reader),
             Self::Vec3Uncentered => coordinates::parse_vec3_without_centering(reader),
+            Self::Vec2 => coordinates::parse_vec2(reader),
             Self::Rotation => coordinates::parse_rotation(reader),
             Self::BlockState => block::parse_block_state(reader),
             Self::BlockPredicate => block::parse_block_predicate(reader),

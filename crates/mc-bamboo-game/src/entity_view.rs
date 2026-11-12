@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use mc_bamboo_blocks::{
-    BlockState, ShulkerBoxEntity,
+    BlockState, ShulkerBoxEntity, WorldBorder,
     entity::view::{BlockSource, SourceView, ViewFacts},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
@@ -29,6 +29,10 @@ pub(crate) struct ReadOnlyWorld<'a> {
     pub(crate) open_shulker_boxes: BTreeSet<BlockPos>,
     /// 世界里漏斗方块的位置。没有漏斗时物品不发 `SuckIntoHopper` 命令。
     pub(crate) hopper_positions: BTreeSet<BlockPos>,
+    /// 这一维度的世界边界快照，实体的碰撞要读它。
+    ///
+    /// This dimension's world-border snapshot; entity collisions read it.
+    pub(crate) world_border: WorldBorder,
 }
 
 impl BlockSource for ReadOnlyWorld<'_> {
@@ -54,6 +58,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.tick_levels.chunk_ticks_entities(chunk)
+    }
+
+    fn world_border(&self) -> WorldBorder {
+        self.world_border.clone()
     }
 }
 

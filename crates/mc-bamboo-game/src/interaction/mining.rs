@@ -11,7 +11,6 @@
 use mc_bamboo_blocks::{
     Actor, BlockState, InteractionResult, Level,
     mining::{self as block_mining, Miner},
-    world::is_within_world_border,
 };
 use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
 use mc_bamboo_data::blocks;
@@ -206,8 +205,12 @@ fn start_destroy_block(
     pos: BlockPos,
     face: Direction,
 ) {
-    // 没有出生点保护，官方的 `isUnderSpawnProtection` 恒假。
-    if !is_within_world_border(pos) {
+    // 官方 `ServerPlayerGameMode` 的 `level.mayInteract(player, pos)`：没有出生点保护，
+    // 只看 `getWorldBorder().isWithinBounds(pos)`。
+    //
+    // Official `ServerPlayerGameMode`'s `level.mayInteract(player, pos)`: spawn
+    // protection is always false, so only `getWorldBorder().isWithinBounds(pos)` matters.
+    if !region.world_border.is_within_bounds_pos(pos) {
         send_current_block(region, snapshot.id, pos);
         debug!(player = snapshot.id.0, ?pos, "outside the world border");
         return;

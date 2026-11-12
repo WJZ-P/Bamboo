@@ -9,7 +9,7 @@ use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 use crate::command::{
     CommandFn, Commands, admin, blocks, bossbar, clone, enchant, gamerule, items, loot, particle,
     players, playsound, random, scoreboard, stopsound, team, teleport, text, time, title, weather,
-    world_settings,
+    world_border, world_settings,
 };
 
 struct Builder {
@@ -110,6 +110,7 @@ pub(crate) fn build() -> Commands {
     register_enchant(&mut builder, root);
     register_loot(&mut builder, root);
     register_weather(&mut builder, root);
+    register_worldborder(&mut builder, root);
     Commands {
         graph: builder.graph,
         actions: builder.actions,
@@ -1168,6 +1169,67 @@ fn loot_action(target: LootTarget, source: LootSource) -> CommandFn {
 
 fn bind_loot(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
     builder.run(parent, loot_action(target, source));
+}
+
+/// `WorldBorderCommand.register`：整棵树要等级 2。距离是 `doubleArg(-MAX, MAX)`，
+/// 时间是 `TimeArgument.time(0)`，警告距离是 `integer(0)`，伤害两项是 `floatArg(0)`。
+///
+/// `WorldBorderCommand.register`: level 2 for the whole tree. Distances use
+/// `doubleArg(-MAX, MAX)`, times `TimeArgument.time(0)`, the warning distance
+/// `integer(0)`, and the two damage values `floatArg(0)`.
+fn register_worldborder(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "worldborder", permission::GAMEMASTERS);
+    let distance = || ArgumentType::Double {
+        min: -mc_bamboo_blocks::MAX_SIZE,
+        max: mc_bamboo_blocks::MAX_SIZE,
+    };
+    let time = || ArgumentType::Time { minimum: 0 };
+    let float = || ArgumentType::Float {
+        min: 0.0,
+        max: f32::MAX,
+    };
+
+    let add = builder.literal(command, "add", 0);
+    let add_distance = builder.argument(add, "distance", distance(), 0);
+    builder.run(add_distance, world_border::add);
+    let add_time = builder.argument(add_distance, "time", time(), 0);
+    builder.run(add_time, world_border::add_time);
+
+    let set = builder.literal(command, "set", 0);
+    let set_distance = builder.argument(set, "distance", distance(), 0);
+    builder.run(set_distance, world_border::set);
+    let set_time = builder.argument(set_distance, "time", time(), 0);
+    builder.run(set_time, world_border::set_time);
+
+    let center = builder.literal(command, "center", 0);
+    let pos = builder.argument(center, "pos", ArgumentType::Vec2, 0);
+    builder.run(pos, world_border::center);
+
+    let damage = builder.literal(command, "damage", 0);
+    let amount = builder.literal(damage, "amount", 0);
+    let per_block = builder.argument(amount, "damagePerBlock", float(), 0);
+    builder.run(per_block, world_border::damage_amount);
+    let buffer = builder.literal(damage, "buffer", 0);
+    let buffer_distance = builder.argument(buffer, "distance", float(), 0);
+    builder.run(buffer_distance, world_border::damage_buffer);
+
+    builder.bind_literal(command, "get", world_border::get);
+
+    let warning = builder.literal(command, "warning", 0);
+    let warning_distance = builder.literal(warning, "distance", 0);
+    let blocks = builder.argument(
+        warning_distance,
+        "distance",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run(blocks, world_border::warning_distance);
+    let warning_time = builder.literal(warning, "time", 0);
+    let ticks = builder.argument(warning_time, "time", time(), 0);
+    builder.run(ticks, world_border::warning_time);
 }
 
 fn register_weather(builder: &mut Builder, root: usize) {

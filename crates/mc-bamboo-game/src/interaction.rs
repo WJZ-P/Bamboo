@@ -161,6 +161,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             entities,
             block_entities,
             block_rules,
+            world_border,
             tick_levels,
             profiler,
             ..
@@ -182,6 +183,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             facts,
             open_shulker_boxes,
             hopper_positions,
+            world_border: world_border.clone(),
         });
         let executor = ScopedThreads { threads };
         let computed = compute(&view, entities, &executor);
@@ -716,6 +718,19 @@ pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemO
     }
     if pos.y < MIN_Y {
         send_build_limit(&mut region.links, id, TOO_LOW, MIN_Y);
+        return;
+    }
+
+    // 官方 `handleUseItemOn` 的 `level.mayInteract(player, pos)`：边界外不能交互，
+    // 走 `sendBuildLimitMessage(true, maxY)` 那条路，但仍把两格方块发回去。
+    //
+    // Official `handleUseItemOn`'s `level.mayInteract(player, pos)`: outside the
+    // border the click is refused with `sendBuildLimitMessage(true, maxY)`, yet both
+    // block updates are still sent.
+    if !region.world_border.is_within_bounds_pos(pos) {
+        send_build_limit(&mut region.links, id, TOO_HIGH, MAX_Y);
+        send_current_block(region, id, pos);
+        send_current_block(region, id, pos.relative(face));
         return;
     }
 

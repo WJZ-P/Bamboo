@@ -198,6 +198,7 @@ async fn second_player_gets_the_merged_join_sequence() {
             clientbound::PLAYER_INFO_UPDATE,
             clientbound::SET_ENTITY_DATA,
             clientbound::UPDATE_ATTRIBUTES,
+            clientbound::INITIALIZE_BORDER,
             clientbound::SET_TIME,
             clientbound::SET_DEFAULT_SPAWN_POSITION,
             clientbound::GAME_EVENT,

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use mc_bamboo_blocks::WorldBorder;
 use mc_bamboo_protocol::{
     packet::{
         play::{
@@ -196,6 +197,15 @@ pub(crate) struct Global {
     ///
     /// The one set of custom boss bars for the whole server. Never saved.
     boss_bars: crate::scoreboard::BossBars,
+    /// 主世界的边界。官方按维度各有一份，这里按设计稿 6.6 放在 `Global`（全局状态）：
+    /// 同一个维度以后拆成多个 region 时它们要看到同一份，region 每刻只读一份快照。
+    /// 权威副本不写存档，M3 那边把 `data/world_border` 接进来。
+    ///
+    /// The overworld's world border. Vanilla keeps one per dimension; here it lives on
+    /// `Global` (§6.6 global state) so future regions of the same dimension share it,
+    /// each reading a snapshot every tick. This copy is not saved; M3 will wire the
+    /// `data/world_border` file to [`WorldBorder::restore`].
+    world_border: WorldBorder,
     /// OP、封禁和白名单的权威副本。世界线程是唯一写者。
     pub(crate) admin: crate::admin::AdminState,
     /// 名单变更后发布给连接层并写盘的通道。没有连接层时（单元测试）是 `None`。
@@ -214,6 +224,7 @@ impl Default for Global {
             state: WorldState::default(),
             scoreboard: crate::scoreboard::Scoreboard::default(),
             boss_bars: crate::scoreboard::BossBars::default(),
+            world_border: WorldBorder::default(),
             admin: crate::admin::AdminState::default(),
             admin_messages: None,
         }
@@ -265,6 +276,36 @@ impl Global {
     /// Mutable [`boss_bars`](Self::boss_bars).
     pub(crate) fn boss_bars_mut(&mut self) -> &mut crate::scoreboard::BossBars {
         &mut self.boss_bars
+    }
+
+    /// 权威的世界边界。
+    ///
+    /// The authoritative world border.
+    pub(crate) fn world_border(&self) -> &WorldBorder {
+        &self.world_border
+    }
+
+    /// 权威的世界边界，可写。命令改完要调用 [`publish_border`](Self::publish_border)。
+    ///
+    /// The authoritative world border, writable. Call
+    /// [`publish_border`](Self::publish_border) after a command changes it.
+    pub(crate) fn world_border_mut(&mut self) -> &mut WorldBorder {
+        &mut self.world_border
+    }
+
+    /// 官方 `ServerLevel.tick` 开头的 `getWorldBorder().tick()`。
+    ///
+    /// Vanilla `getWorldBorder().tick()` at the start of `ServerLevel.tick`.
+    pub(crate) fn tick_world_border(&mut self) {
+        self.world_border.tick();
+    }
+
+    /// 把权威副本发布给 region：每刻推进渐变后、以及命令改完边界后都要调一次。
+    ///
+    /// Publish the authoritative copy to the region: after each tick's lerp step and
+    /// after a command changes the border.
+    pub(crate) fn publish_border(&self, region: &mut crate::region::Region) {
+        region.world_border = self.world_border.clone();
     }
 
     pub(crate) fn clock(&self) -> Clock {
