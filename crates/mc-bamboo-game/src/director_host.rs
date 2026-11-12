@@ -1189,4 +1189,149 @@ mod tests {
         host.pace_saves(3);
         assert!(host.save_queue.is_empty());
     }
+
+    /// 写盘途中又被要回来：快照还排在 D6 队列里没落盘、盘上是旧数据，
+    /// 这时 `Task::Read` 必须直接拿 Parking 里的最新盒子，绝不能去读旧盘或用模板。
+    /// A read while a write is in flight: the snapshot is still queued (not on
+    /// disk) and disk holds stale bytes; `Task::Read` must return the parked
+    /// edited box, never a stale disk read or a template.
+    #[test]
+    fn a_read_during_an_in_flight_write_returns_the_parked_edited_box() {
+        use mc_bamboo_core::BlockPos;
+        use mc_bamboo_data::blocks;
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+        use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-inflight-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+
+        // 造一个改过的盒子。
+        let mut server = Harness::new_loaded(2);
+        let pos = ChunkPos::new(0, 0);
+        let edit = BlockPos::new(2, -60, 2);
+        server
+            .region()
+            .chunks
+            .load(pos, Box::new(ChunkColumn::from_template()));
+        server.region().chunks.set_block(edit, blocks::STONE);
+        server.region().chunks.finish_light_updates();
+        let column = server
+            .region()
+            .take_columns(&[pos].into_iter().collect())
+            .expect("preconditions met")
+            .remove(&pos)
+            .expect("box present");
+        assert!(!column.is_pristine(), "the edited box is dirty");
+
+        // 盘上有一份旧数据（这样不命中 Parking 就会发异步读，读到旧的）。
+        host.io
+            .as_ref()
+            .unwrap()
+            .submit_write(pos, 99, Some(b"stale".to_vec()), None);
+        assert!(host.io.as_ref().unwrap().has_chunk(pos));
+        // 新快照还在 D6 队列里没交给 IO，盒子停在写盘途中缓冲。
+        host.save_queue.push_back(PendingWrite {
+            pos,
+            seq: 100,
+            chunk: Some(vec![7]),
+            entities: None,
+        });
+        host.parking.park(pos, column);
+
+        let event = host
+            .run_task(0, 0, Task::Read { pos })
+            .expect("a parked box answers synchronously, no async disk read");
+        let Event::TaskDone { result, .. } = event else {
+            panic!("expected a TaskDone event");
+        };
+        let TaskResult::Decoded { column } = result else {
+            panic!("in-flight write must return the parked box, not a disk read/template");
+        };
+        assert_eq!(
+            column.column().chunk().block(2, -60, 2),
+            blocks::STONE,
+            "the rejoining chunk must carry the latest edit"
+        );
+        assert!(host.parking.is_empty(), "the read consumes the parked box");
+    }
+
+    /// 剖析：跑一批真实的 `Task::Save` 编码，量出 `codec_nanos` 的实际增量。
+    /// Profiling: run a batch of real `Task::Save` encodes and measure the
+    /// `codec_nanos` delta (printed with --nocapture for the report).
+    #[test]
+    fn codec_profiler_records_real_encode_work() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-codec-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        const SAVES: usize = 200;
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        let before = codec_nanos();
+        for i in 0..SAVES {
+            let column = Box::new(RegionColumn::from_template());
+            let _ = host.run_task(
+                i as u64,
+                0,
+                Task::Save {
+                    pos: ORIGIN,
+                    seq: i as u64 + 1,
+                    column,
+                },
+            );
+        }
+        let after = codec_nanos();
+        let delta = after - before;
+        println!(
+            "CODEC_NANOS {SAVES} template encodes: total={delta} ns, per_chunk={} ns",
+            delta / SAVES as u64
+        );
+        assert!(delta > 0, "encoding should record nonzero codec time");
+    }
 }

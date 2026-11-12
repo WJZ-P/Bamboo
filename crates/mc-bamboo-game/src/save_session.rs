@@ -55,6 +55,10 @@ pub struct SaveSession {
     /// 启动时从 `data/` 读到的游戏规则 / 世界边界，供 `World::build` 采用。
     /// Game rules / world border loaded from `data/` at startup for `World::build`.
     startup: StartupData,
+    /// `level.dat` 是不是真的从盘上读到（全新世界没有，运行时默认值才是权威）。
+    /// Whether `level.dat` was actually read from disk (a fresh world has none,
+    /// so the runtime defaults are authoritative).
+    loaded_level: bool,
 }
 
 impl SaveSession {
@@ -88,6 +92,7 @@ impl SaveSession {
             game_rules: read_saved_data(&dir, "minecraft:game_rules"),
             world_border: read_saved_data_at(&dir.world_border_dat()),
         };
+        let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
         Ok((
             Self {
                 dir,
@@ -95,6 +100,7 @@ impl SaveSession {
                 level: loaded.data,
                 auto_save: true,
                 startup,
+                loaded_level,
             },
             loaded.source,
         ))
@@ -116,6 +122,13 @@ impl SaveSession {
     /// Game rules / world border loaded at startup.
     pub(crate) fn startup(&self) -> &StartupData {
         &self.startup
+    }
+
+    /// 盘上是不是真的有 `level.dat`（全新世界为假，运行时默认值才是权威）。
+    /// Whether a `level.dat` was read from disk (false for a fresh world, where
+    /// the runtime defaults are authoritative).
+    pub(crate) fn has_loaded_level(&self) -> bool {
+        self.loaded_level
     }
 
     pub fn auto_save(&self) -> bool {

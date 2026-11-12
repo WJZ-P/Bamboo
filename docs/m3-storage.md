@@ -786,4 +786,18 @@ README「存档已知限制」，供逐条核实）：
 
 验证：进程内「放方块、存盘、重启、读回」往返测试
 （`region::column_tests::disk_restart_keeps_chunks_players_and_level`）、
+写盘途中重新加载的专门测试（`director_host::tests::a_read_during_an_in_flight_write_returns_the_parked_edited_box`）、
 `cargo test -p mc-bamboo-vanilla`、官方探针与全量检查在最后一个提交上跑，结果见任务汇报。
+
+`mc-bamboo-vanilla world-dir <目录> <java>` 用官方 `RegionFile` /
+`SerializableChunkData.parse` / `NbtIo.readCompressed` 逐项检查真实世界目录，
+失败返回非 0；内置「故意写坏 `level.dat`」自检确认它会报错。
+`mc-bamboo-vanilla saved-data <java>` 用官方 `GameRuleMap.CODEC` /
+`WorldBorder.Settings.CODEC` 解码第 5 项写出的两份文件并故意写坏一个键验证。
+`tools/crash-test.sh` 可重复跑：起服务端 → 探针改方块 → 等 D6 匀速保存 →
+`kill -9` → 官方 `world-dir` 检查留下的目录 → 重启 → 再跑探针。
+
+剖析（`director_host::tests::codec_profiler_records_real_encode_work`，
+`--nocapture`）：debug 构建下 200 次 `Task::Save` 模板区块编码累计
+`codec_nanos = 400447400` ns，约 `2002237` ns / 区块（≈2.0 ms）；这是单线程内联
+编码的耗时，不含压缩与落盘（在 IO 线程）。数值随机器和负载波动，只作量级参考。

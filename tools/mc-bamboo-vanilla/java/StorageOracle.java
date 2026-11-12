@@ -232,8 +232,133 @@ public final class StorageOracle {
                     response.addProperty("gzip", Base64.getEncoder().encodeToString(buffer.toByteArray()));
                     response.add("canonical", canonical(tag));
                 }
+                case "world-dir" -> {
+                    response = worldDir(Path.of(request.get("dir").getAsString()));
+                    response.addProperty("command", command);
+                }
                 default -> response.addProperty("error", "unknown command " + command);
             }
+            return response;
+        }
+
+        /** 用官方 RegionFile / SerializableChunkData / NbtIo 逐项检查一个真实世界目录。 */
+        private JsonObject worldDir(Path root) throws IOException {
+            JsonObject response = new JsonObject();
+            JsonArray errors = new JsonArray();
+            int chunks = 0;
+            int entityChunks = 0;
+            int players = 0;
+            int savedData = 0;
+
+            // region/ 与 entities/ 的 .mca：官方 RegionFile 打开，区块 NBT 交给
+            // SerializableChunkData.parse 解析（实体文件只验证 NbtIo 能读）。
+            Path dimension = root.resolve("dimensions/minecraft/overworld");
+            for (String kind : new String[] {"region", "entities"}) {
+                Path dir = dimension.resolve(kind);
+                if (!Files.isDirectory(dir)) {
+                    errors.add("missing directory " + dir);
+                    continue;
+                }
+                List<Path> files;
+                try (var stream = Files.list(dir)) {
+                    files = stream.filter(p -> p.getFileName().toString().endsWith(".mca")).toList();
+                }
+                for (Path path : files) {
+                    String stem = path.getFileName().toString();
+                    String inner = stem.substring(2, stem.length() - 4); // strip r. and .mca
+                    String[] parts = inner.split("\\.");
+                    int rx = Integer.parseInt(parts[0]);
+                    int rz = Integer.parseInt(parts[1]);
+                    RegionStorageInfo info = new RegionStorageInfo("oracle", Level.OVERWORLD, kind);
+                    try (RegionFile region = new RegionFile(info, path, dir, false)) {
+                        for (int i = 0; i < 1024; i++) {
+                            ChunkPos pos = new ChunkPos(rx * 32 + i % 32, rz * 32 + i / 32);
+                            if (!region.hasChunk(pos)) {
+                                continue;
+                            }
+                            try (DataInputStream stream = region.getChunkDataInputStream(pos)) {
+                                if (stream == null) {
+                                    errors.add(kind + " " + pos + ": null stream");
+                                    continue;
+                                }
+                                CompoundTag tag = NbtIo.read(stream);
+                                if (kind.equals("region")) {
+                                    SerializableChunkData parsed = SerializableChunkData.parse(height, containers, tag);
+                                    if (parsed == null) {
+                                        errors.add("SerializableChunkData.parse returned null for " + pos);
+                                    } else {
+                                        chunks++;
+                                    }
+                                } else {
+                                    entityChunks++;
+                                }
+                            } catch (Exception error) {
+                                errors.add(kind + " " + pos + ": " + error);
+                            }
+                        }
+                    } catch (Exception error) {
+                        errors.add(kind + " " + path + ": " + error);
+                    }
+                }
+            }
+
+            // level.dat：全新世界或崩溃后还没到保存点的世界没有这个文件，
+            // 官方 LevelStorageSource 也当全新世界处理，不算错误。
+            // level.dat: a fresh world, or one killed before its first save,
+            // has no level.dat; official treats it as a fresh world, not an error.
+            Path levelDat = root.resolve("level.dat");
+            if (Files.exists(levelDat)) {
+                try {
+                    NbtIo.readCompressed(levelDat, NbtAccounter.unlimitedHeap());
+                    response.addProperty("level", 1);
+                } catch (Exception error) {
+                    errors.add("level.dat: " + error);
+                }
+            } else {
+                response.addProperty("level", 0);
+            }
+
+            // players/data/*.dat
+            Path playersDir = root.resolve("players/data");
+            if (Files.isDirectory(playersDir)) {
+                try (var stream = Files.list(playersDir)) {
+                    for (Path path : stream.filter(p -> p.toString().endsWith(".dat")).toList()) {
+                        try {
+                            NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+                            players++;
+                        } catch (Exception error) {
+                            errors.add(path + ": " + error);
+                        }
+                    }
+                }
+            }
+
+            // 全局与维度 data/ 下的 saved data（含 game_rules.dat / world_border.dat）
+            for (Path base : new Path[] {root.resolve("data"), dimension.resolve("data")}) {
+                if (!Files.isDirectory(base)) {
+                    continue;
+                }
+                try (var stream = Files.walk(base)) {
+                    for (Path path : stream.filter(p -> p.toString().endsWith(".dat")).toList()) {
+                        try {
+                            CompoundTag tag = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+                            if (!tag.contains("data")) {
+                                errors.add(path + ": no data tag");
+                            } else {
+                                savedData++;
+                            }
+                        } catch (Exception error) {
+                            errors.add(path + ": " + error);
+                        }
+                    }
+                }
+            }
+
+            response.addProperty("chunks", chunks);
+            response.addProperty("entityChunks", entityChunks);
+            response.addProperty("players", players);
+            response.addProperty("savedData", savedData);
+            response.add("errors", errors);
             return response;
         }
 

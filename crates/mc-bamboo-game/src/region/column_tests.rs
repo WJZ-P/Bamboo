@@ -1111,3 +1111,92 @@ fn disk_restart_keeps_chunks_players_and_level() {
     assert_eq!(got.entities.rows().len(), want.entities.rows().len());
     io.close();
 }
+
+/// 给 `mc-bamboo-vanilla world-dir` 造一个持久的真实世界目录（放 `target/`，gitignored）：
+/// 用游戏逻辑造一个改过的区块，走正式的编码 / 写盘路径，再补齐 `level.dat`、玩家和
+/// `data/` 的游戏规则 / 世界边界。这就是「进程内往返测试写出的目录」。
+/// Build a persistent real world dir for `mc-bamboo-vanilla world-dir`, using the
+/// game's own encoder and the official layout. This is the "in-process roundtrip
+/// test directory" the tool is meant to verify.
+#[test]
+fn writes_a_world_dir_fixture_for_official_verification() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec};
+    use mc_bamboo_blocks::{
+        BlockState,
+        entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt},
+    };
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{blocks, items};
+    use mc_bamboo_protocol::item::ItemStack;
+    use mc_bamboo_storage::{
+        chunk_io::ChunkIo,
+        level_dat::LevelData,
+        player_data::PlayerData,
+        world_dir::{
+            WorldDir, encode_player_data, save_level_data, write_default_saved_data,
+            write_saved_data, write_saved_data_at,
+        },
+    };
+
+    let mut server = harness();
+    furnish(server.region());
+    settle_light(server.region());
+    for (x, kind) in [
+        (
+            1,
+            EntityKind::FallingBlock(FallingBlock::new(BlockState(blocks::SAND), p(1, 2))),
+        ),
+        (2, EntityKind::Tnt(PrimedTnt::new())),
+        (
+            3,
+            EntityKind::Item(GroundItem::new(ItemStack::new(items::DIAMOND, 3), false)),
+        ),
+    ] {
+        server
+            .region()
+            .entities
+            .spawn(Entity::new(kind, Vec3::new(f64::from(x), -59.0, 2.0)));
+    }
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let original = boxes.get(&CHUNK).expect("盒子存在");
+    let encoded = InlineCodec.encode(CHUNK, original).expect("编码");
+    assert!(encoded.chunk.is_some());
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .join("target/bamboo-world-dir-fixture");
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = WorldDir::new(&root);
+    dir.create_layout().unwrap();
+
+    {
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+        let player = PlayerData {
+            position: [1.5, -60.0, 2.5],
+            ..PlayerData::default()
+        };
+        io.submit_player_write("probe-player-uuid", encode_player_data(&player).unwrap());
+        io.flush().unwrap();
+        io.close();
+    }
+    save_level_data(
+        &dir,
+        &LevelData {
+            time: 4242,
+            ..LevelData::default()
+        },
+    )
+    .unwrap();
+    write_default_saved_data(&dir).unwrap();
+    let (game_rules, world_border) = crate::saved_data_samples();
+    write_saved_data(&dir, "minecraft:game_rules", &game_rules).unwrap();
+    write_saved_data_at(&dir.world_border_dat(), &world_border).unwrap();
+
+    println!("WORLD_DIR_FIXTURE={}", root.display());
+}

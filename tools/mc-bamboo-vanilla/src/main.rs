@@ -95,6 +95,8 @@ mod ticket_oracle;
 #[cfg(feature = "oracle")]
 mod world_border_oracle;
 #[cfg(feature = "oracle")]
+mod world_dir;
+#[cfg(feature = "oracle")]
 mod worldgen;
 
 use std::{
@@ -155,7 +157,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
-      mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]";
+      mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]
+      mc-bamboo-vanilla world-dir <目录> <java 路径>";
 
 fn main() -> ExitCode {
     match run() {
@@ -195,6 +198,7 @@ fn run() -> Result<(), String> {
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
         ["border-oracle", java, ref options @ ..] => world_border_oracle(java, options),
+        ["world-dir", dir, java] => world_dir_cli(dir, java),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -434,6 +438,16 @@ fn saved_data_cli(java: &str) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn saved_data_cli(_java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn world_dir_cli(dir: &str, java: &str) -> Result<(), String> {
+    world_dir::run(dir, java)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn world_dir_cli(_dir: &str, _java: &str) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

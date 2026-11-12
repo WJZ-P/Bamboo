@@ -189,11 +189,16 @@ impl World {
             keys,
         );
         // 启动时把读到的 `level.dat` 世界设置和 `data/` 的游戏规则 / 世界边界
-        // 套回运行时；边界的 `restore` 用存档里的游戏时间。
-        // Apply the loaded `level.dat` world settings and the `data/` game rules /
-        // world border back onto runtime; `restore` uses the saved game time.
+        // 套回运行时；边界的 `restore` 用存档里的游戏时间。全新世界没有 `level.dat`，
+        // 运行时默认值才是权威（不能拿 `LevelData::default()` 的出生点覆盖它）。
+        // Apply loaded `level.dat` world settings and `data/` game rules / border
+        // back onto runtime; `restore` uses the saved game time. A fresh world has
+        // no `level.dat`, so runtime defaults are authoritative (do not overwrite
+        // them with `LevelData::default()`'s spawn).
         if let Some(save) = &save {
-            crate::save_data::apply_level_data(global.state_mut(), save.level());
+            if save.has_loaded_level() {
+                crate::save_data::apply_level_data(global.state_mut(), save.level());
+            }
             save.startup()
                 .apply(&mut global, &mut region, save.level().time);
         }
