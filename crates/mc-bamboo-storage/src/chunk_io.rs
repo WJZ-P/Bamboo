@@ -18,10 +18,11 @@
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -85,11 +86,19 @@ enum Request {
     Barrier {
         seq: u64,
     },
-    /// 测试接缝：让 IO 线程 panic，供世界线程验证「发现 → 关服」路径。
-    /// 正常运行时没有任何调用方。
-    /// Test seam: panic the IO thread so the world thread's detect-and-shutdown
-    /// path can be tested. Nothing sends this during normal operation.
+    /// 测试接缝：让 IO 线程真的退出（`return`），供世界线程验证「发现 → 关服」。
+    /// 单个任务 panic 由 `catch_unwind` 兜住，不会走这里。
+    /// Test seam: genuinely exit the IO thread so the world thread's
+    /// detect-and-shutdown path can be tested. A single task panic is caught.
     Crash,
+    /// 测试接缝：让一个任务 panic，验证 `catch_unwind` 不杀线程、回执仍送达。
+    /// Test seam: panic inside a task to verify `catch_unwind` keeps the thread
+    /// alive and still delivers a reply.
+    PanicTask {
+        pos: ChunkPos,
+        task_id: u64,
+        generation: u64,
+    },
     Shutdown,
 }
 
@@ -169,6 +178,10 @@ pub struct ChunkIo {
     /// 异步栅栏的序号，和玩家写分开计数；回执原样带回用来配对等待的消息。
     /// Sequence number for async barriers; echoed to pair with waiting messages.
     next_barrier_seq: AtomicU64,
+    /// IO 线程退出 / `send` 失败的标志。世界线程每刻据此按 R12 走关服流程。
+    /// Set when the IO thread exits or a `send` fails; the world thread uses it
+    /// each tick to trigger the R12 shutdown flow.
+    dead: Arc<AtomicBool>,
 }
 
 impl ChunkIo {
@@ -180,9 +193,11 @@ impl ChunkIo {
         let known = Arc::new(Mutex::new(scan_existing_chunks(&dir.region_dir())));
         let (requests, rx) = mpsc::channel::<Request>();
         let (tx, results) = mpsc::channel::<Reply>();
+        let dead = Arc::new(AtomicBool::new(false));
+        let worker_dead = Arc::clone(&dead);
         let worker = thread::Builder::new()
             .name("bamboo-chunk-io".to_owned())
-            .spawn(move || worker_loop(layout, rx, tx))?;
+            .spawn(move || worker_loop(layout, rx, tx, worker_dead))?;
         Ok(Self {
             dir: dir.clone(),
             known,
@@ -192,7 +207,21 @@ impl ChunkIo {
             worker: Some(worker),
             next_player_seq: AtomicU64::new(1),
             next_barrier_seq: AtomicU64::new(1),
+            dead,
         })
+    }
+
+    /// 发一个请求；通道断了就把 `dead` 置位，让世界线程下一刻发现（R12）。
+    /// Send a request; if the channel is gone, flag `dead` so the world thread
+    /// notices on its next tick (R12).
+    fn send_request(&self, request: Request) -> bool {
+        match self.requests.send(request) {
+            Ok(()) => true,
+            Err(_) => {
+                self.dead.store(true, Ordering::SeqCst);
+                false
+            }
+        }
     }
 
     /// 盘上是否已经有这个区块的数据（或有一份已经入队、还没回执的写）。
@@ -238,7 +267,7 @@ impl ChunkIo {
 
     /// 提交一个异步读请求，世界线程不等待。
     pub fn submit_read(&self, pos: ChunkPos, task_id: u64, generation: u64) {
-        let _ = self.requests.send(Request::Read {
+        self.send_request(Request::Read {
             pos,
             task_id,
             generation,
@@ -262,7 +291,7 @@ impl ChunkIo {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(pos);
-        let _ = self.requests.send(Request::Write {
+        self.send_request(Request::Write {
             pos,
             seq,
             chunk,
@@ -273,13 +302,13 @@ impl ChunkIo {
 
     /// 有了更新的快照，通知 IO 线程可以跳过旧 seq 的写。
     pub fn drop_snapshot(&self, pos: ChunkPos, seq: u64) {
-        let _ = self.requests.send(Request::DropSnapshot { pos, seq });
+        self.send_request(Request::DropSnapshot { pos, seq });
     }
 
     /// 提交一个独立文件写（玩家数据等）。`backup` 非空时轮换旧文件到它。
     /// 和区域文件共用一条 IO 线程、共用 `flush` 栅栏。
     pub fn submit_file_write(&self, path: PathBuf, backup: Option<PathBuf>, bytes: Vec<u8>) {
-        let _ = self.requests.send(Request::WriteFile {
+        self.send_request(Request::WriteFile {
             path,
             backup,
             bytes,
@@ -296,7 +325,7 @@ impl ChunkIo {
     pub fn submit_player_write(&self, uuid: &str, bytes: Vec<u8>) -> u64 {
         let seq = self.next_player_seq.fetch_add(1, Ordering::Relaxed);
         let (path, backup) = player_paths(&self.dir, uuid);
-        let _ = self.requests.send(Request::WriteFile {
+        self.send_request(Request::WriteFile {
             path,
             backup: Some(backup),
             bytes,
@@ -310,13 +339,16 @@ impl ChunkIo {
         self.results.try_recv().ok()
     }
 
-    /// IO 线程是不是已经退出（panic 或通道断开）。世界线程据此当成致命错误走关服。
-    /// Whether the IO thread has quit (panic or a disconnected channel); the
-    /// world thread treats this as a fatal error and shuts down.
+    /// IO 线程是不是已经退出（panic / 通道断开 / `send` 失败）。
+    /// 世界线程据此当成致命错误走关服（R12）。
+    /// Whether the IO thread has quit (panic / disconnected channel / failed
+    /// send); the world thread treats this as a fatal R12 error.
     pub fn worker_stopped(&self) -> bool {
-        self.worker
-            .as_ref()
-            .is_some_and(|worker| worker.is_finished())
+        self.dead.load(Ordering::SeqCst)
+            || self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
     }
 
     /// 阻塞栅栏：等此前所有请求处理完并 `sync_all`。**只允许关服使用**（设计稿
@@ -328,9 +360,12 @@ impl ChunkIo {
     /// returned as `Err`, never silently treated as success.
     pub fn flush(&self) -> io::Result<()> {
         let (done, wait) = mpsc::channel();
-        self.requests
-            .send(Request::Flush { done })
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "chunk IO thread stopped"))?;
+        if !self.send_request(Request::Flush { done }) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "chunk IO thread stopped",
+            ));
+        }
         wait.recv().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -339,11 +374,24 @@ impl ChunkIo {
         })?
     }
 
-    /// 测试接缝：让 IO 线程 panic。正常代码不要调用。
-    /// Test seam: panic the IO thread. Do not call from production code.
+    /// 测试接缝：让 IO 线程真的退出。正常代码不要调用。
+    /// Test seam: genuinely stop the IO thread. Do not call from production code.
     #[doc(hidden)]
     pub fn crash_for_test(&self) {
-        let _ = self.requests.send(Request::Crash);
+        self.send_request(Request::Crash);
+    }
+
+    /// 测试接缝：让**一个任务** panic，验证 `catch_unwind` 兜住后线程还活着、
+    /// 读请求仍能收到回执（不会永远等）。
+    /// Test seam: panic inside one task to verify `catch_unwind` keeps the thread
+    /// alive and the read still gets a reply (never waits forever).
+    #[doc(hidden)]
+    pub fn panic_task_for_test(&self, pos: ChunkPos, task_id: u64, generation: u64) {
+        self.send_request(Request::PanicTask {
+            pos,
+            task_id,
+            generation,
+        });
     }
 
     /// 排一道不阻塞的栅栏并返回它的序号。IO 线程按 FIFO 处理到它时，此前提交的所有
@@ -356,14 +404,14 @@ impl ChunkIo {
     /// waits: it collects the ack at the start of a tick.
     pub fn submit_barrier(&self) -> u64 {
         let seq = self.next_barrier_seq.fetch_add(1, Ordering::Relaxed);
-        let _ = self.requests.send(Request::Barrier { seq });
+        self.send_request(Request::Barrier { seq });
         seq
     }
 
     /// 关掉 IO 线程。先排一道栅栏，保证写都落盘。
     pub fn close(&mut self) {
         let _ = self.flush();
-        let _ = self.requests.send(Request::Shutdown);
+        self.send_request(Request::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -489,18 +537,90 @@ fn report_failures(
     any
 }
 
-fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
+/// 线程退出时把 `dead` 置位，让世界线程立刻能发现（R12）。
+/// Set `dead` when the thread exits so the world thread notices at once (R12).
+struct DeathGuard(Arc<AtomicBool>);
+
+impl Drop for DeathGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 某个任务 panic 时要补发的回执：读请求给一个带 error 的 `Read`（走模板，
+/// 绝不让 Director 永远等结果），写请求给 `WriteFailed`，栅栏给 `ok=false`。
+/// Replies to send when a task panics: reads get a `Read` with an error (so the
+/// Director falls back to the template instead of waiting forever), writes get
+/// `WriteFailed`, barriers get `ok=false`.
+fn panic_replies(request: &Request) -> Vec<Reply> {
+    let message = "IO task panicked".to_owned();
+    match request {
+        Request::Read {
+            pos,
+            task_id,
+            generation,
+        } => vec![Reply::Read {
+            pos: *pos,
+            task_id: *task_id,
+            generation: *generation,
+            chunk: None,
+            entities: None,
+            error: Some(message),
+        }],
+        Request::Write { pos, seq, .. } => vec![Reply::WriteFailed {
+            pos: Some(*pos),
+            seq: Some(*seq),
+            path: "<io task>".to_owned(),
+            error: message,
+        }],
+        Request::WriteFile { path, player, .. } => {
+            let mut out = vec![Reply::WriteFailed {
+                pos: None,
+                seq: None,
+                path: path.display().to_string(),
+                error: message.clone(),
+            }];
+            if let Some((uuid, seq)) = player {
+                out.push(Reply::PlayerWritten {
+                    uuid: uuid.clone(),
+                    seq: *seq,
+                    ok: false,
+                    error: Some(message),
+                });
+            }
+            out
+        }
+        Request::PanicTask {
+            pos,
+            task_id,
+            generation,
+        } => vec![Reply::Read {
+            pos: *pos,
+            task_id: *task_id,
+            generation: *generation,
+            chunk: None,
+            entities: None,
+            error: Some(message),
+        }],
+        Request::Barrier { seq } => vec![Reply::Flushed {
+            seq: *seq,
+            ok: false,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>, dead: Arc<AtomicBool>) {
+    let _guard = DeathGuard(dead);
     let mut cache = Cache::default();
     // 每个区块最新快照的 seq，用于丢掉还没落盘的旧快照。
     let mut latest: HashMap<ChunkPos, u64> = HashMap::new();
     // 上一道栅栏之后有没有写/刷盘失败：栅栏回执据此带 ok=false（F9）。
-    // Whether any write/sync failed since the last barrier; the ack carries it.
     let mut failed_since_barrier = false;
+    let mut should_stop = false;
     while let Ok(first) = rx.recv() {
         // 一次收齐当前排队的所有请求：先登记本批里每个区块最新的 seq，
         // 再逐个处理，这样同一批里同区块的旧快照会被跳过。
-        // Drain all queued requests first, register the newest seq per chunk for
-        // this batch, then process: stale snapshots in the same batch are skipped.
         let mut batch = vec![first];
         batch.extend(rx.try_iter());
         for request in &batch {
@@ -515,7 +635,16 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
             }
         }
         for request in batch {
-            match request {
+            // 测试接缝：让线程真的退出，供世界线程验证 R12（不走 catch_unwind）。
+            if matches!(request, Request::Crash) {
+                return;
+            }
+            let replies = panic_replies(&request);
+            // 单个任务 panic 用 catch_unwind 兜住：IO 线程继续跑，并补发回执，
+            // 免得读请求永远等不到结果（官方 IOWorker.submitThrowingTask 同款）。
+            // Catch a single task panic: the IO thread lives on and still replies,
+            // so no read waits forever (like official IOWorker.submitThrowingTask).
+            let outcome = catch_unwind(AssertUnwindSafe(|| match request {
                 Request::Read {
                     pos,
                     task_id,
@@ -541,11 +670,7 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     if latest.get(&pos) == Some(&seq) {
                         let present = chunk.is_some();
                         let failures = write_one(&mut cache, &dir, pos, chunk, entities, timestamp);
-                        // 只有两份都写成功才回 Written；失败绝不谎报成功，
-                        // 回带 pos/seq 的 WriteFailed，世界线程据此留着 parking 盒子。
-                        // Only ack on total success; never report a failed write
-                        // as Written. The failure carries pos/seq so the world
-                        // thread keeps the parked box and stops accepting saves.
+                        // 只有两份都写成功才回 Written；失败绝不谎报成功。
                         if failures.is_empty() {
                             let _ = tx.send(Reply::Written { pos, seq, present });
                             latest.remove(&pos);
@@ -599,19 +724,27 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     failed_since_barrier = false;
                 }
                 Request::Barrier { seq } => {
-                    // FIFO 保证：排在这道栅栏之前的写都在本批里先处理过了。
-                    // FIFO guarantees every write queued before this barrier has
-                    // already been processed in this batch.
                     let sync_failed = report_failures(&tx, cache.sync_all(&dir), None, None);
                     let ok = !failed_since_barrier && !sync_failed;
                     let _ = tx.send(Reply::Flushed { seq, ok });
                     failed_since_barrier = false;
                 }
-                Request::Crash => panic!("injected chunk IO panic (test seam)"),
-                Request::Shutdown => {
-                    let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
-                    return;
+                Request::PanicTask { .. } => {
+                    panic!("injected single-task panic (test seam)");
                 }
+                Request::Crash | Request::Shutdown => {
+                    should_stop = true;
+                }
+            }));
+            if outcome.is_err() {
+                for reply in replies {
+                    let _ = tx.send(reply);
+                }
+                failed_since_barrier = true;
+            }
+            if should_stop {
+                let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
+                return;
             }
         }
     }
@@ -1007,9 +1140,60 @@ mod tests {
         io.close();
     }
 
-    /// IO 线程 panic 后 `worker_stopped` 为真，`flush` 立刻返回 Err 而不是挂死。
-    /// After an IO-thread panic, `worker_stopped` is true and `flush` returns
-    /// Err immediately instead of hanging.
+    /// F4：单个任务 panic 被 `catch_unwind` 兜住，IO 线程继续活着，
+    /// 读请求照样收到带 error 的回执（Director 不会永远等），之后正常读写仍可用。
+    /// F4: a single task panic is caught; the IO thread stays alive, the read
+    /// still gets a reply with an error (Director never waits forever), and
+    /// later reads/writes still work.
+    #[test]
+    fn a_single_task_panic_does_not_kill_the_io_thread() {
+        let tmp = TempDir::new("task-panic");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let pos = ChunkPos::new(2, 2);
+
+        io.panic_task_for_test(pos, 42, 1);
+        // 用阻塞 flush 当同步点：panic 的回执已经进了信箱。
+        let _ = io.flush();
+        let replies = collect(&io);
+        assert!(
+            replies.iter().any(|r| matches!(
+                r,
+                Reply::Read {
+                    task_id: 42,
+                    error: Some(_),
+                    ..
+                }
+            )),
+            "the panicking read must still get a reply, never hang the Director"
+        );
+        assert!(
+            !io.worker_stopped(),
+            "one task panic must not kill the IO thread"
+        );
+
+        // 线程还活着：之后的正常写/读照常工作。
+        io.submit_write(pos, 1, Some(b"after-panic".to_vec()), None);
+        io.flush().unwrap();
+        let _ = collect(&io);
+        io.submit_read(pos, 43, 2);
+        io.flush().unwrap();
+        let reads = collect(&io);
+        assert!(
+            reads.iter().any(|r| matches!(
+                r,
+                Reply::Read { chunk: Some(bytes), .. } if bytes == b"after-panic"
+            )),
+            "the IO thread still serves requests after a caught panic"
+        );
+        io.close();
+    }
+
+    /// IO 线程真的退出后 `dead` 置位、`worker_stopped` 为真，`flush` 立刻返回 Err
+    /// 而不是挂死；世界线程据此按 R12 走关服。
+    /// A genuine IO-thread exit sets `dead`; `worker_stopped` is true and `flush`
+    /// returns Err immediately, so the world thread runs the R12 shutdown.
     #[test]
     fn a_dead_io_thread_is_detected_and_flush_reports_failure() {
         let tmp = TempDir::new("panic");
@@ -1025,6 +1209,12 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(io.worker_stopped(), "worker death must be visible");
+        // 之后的 submit 也会 send 失败，`dead` 保持置位，世界线程照样能发现。
+        io.submit_write(ChunkPos::new(0, 0), 1, Some(vec![1]), None);
+        assert!(
+            io.worker_stopped(),
+            "a failed send must also be visible as IO death"
+        );
         assert!(
             io.flush().is_err(),
             "flush on a dead worker must fail, not hang"

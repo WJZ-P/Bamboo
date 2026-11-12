@@ -1468,6 +1468,14 @@ fn a_dead_io_thread_shuts_the_world_down_without_hanging() {
     let mut server = Harness::new_loaded(2);
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
 
+    // 故意留一个在途读请求：IO 线程死了也不能让 Director 永远等结果。
+    // Leave a read in flight: a dead IO thread must not leave the Director waiting.
+    server
+        .world
+        .host
+        .io()
+        .unwrap()
+        .submit_read(mc_bamboo_core::ChunkPos::new(3, 3), 99, 0);
     server.world.host.io().unwrap().crash_for_test();
     for _ in 0..2000 {
         if server.world.host.io().unwrap().worker_stopped() {
