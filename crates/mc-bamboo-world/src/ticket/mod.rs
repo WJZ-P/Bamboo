@@ -8,11 +8,13 @@
 //! 换算、两套 8 邻 +1 取最小的传播、超时票的清理、玩家票、强制加载和存盘标志。事实的出处、
 //! 与官方有意不同的地方、oracle 和基准见 `docs/chunk-tickets.md`。
 //!
-//! 内部用哈希表存票和等级。**任何时候都不遍历哈希表来产生输出**：`run_updates` 的变化列表
-//! 经 `BTreeMap` 按 (x, z) 排序，`persistent_tickets` / `forced_chunks` / `tickets_at` 都排序。
+//! 内部用哈希表存票和等级。**任何时候都不遍历哈希表来产生输出**：两平面的变化列表各自
+//! 按 (x, z) 排序后线性归并，`persistent_tickets` / `forced_chunks` / `tickets_at` 都排序。
 //! 同样的操作序列一定得到逐字节相同的输出。
 
 mod level;
+#[doc(hidden)]
+pub mod profile;
 mod spread;
 mod table;
 

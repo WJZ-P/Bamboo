@@ -560,6 +560,142 @@ fn incremental_propagation_matches_brute_force() {
     check_against_brute_force(0x0123_4567_89ab_cdef, 60, true);
 }
 
+/// 更长的随机序列：每步把两张平面的全部等级和 `run_updates` 的输出一起对一遍。
+///
+/// 传播改法只要让某一步的某个区块差一级、或者变化列表多/少一项，这里就会停在那一步。
+/// 视距和模拟距离也随机变，覆盖方环、`replaceTicketLevelOfType` 和多玩家引用计数。
+#[test]
+fn long_random_sequence_matches_full_fixed_point() {
+    for seed in [
+        0x5150_0a5a_1234_5678,
+        0xfeed_face_dead_beef,
+        0x9e37_79b9_7f4a_7c15,
+        0x0bad_c0de_0000_0026u64,
+    ] {
+        let mut state: u64 = seed;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut table = TicketTable::new();
+        let mut players: [Option<ChunkPos>; 4] = [None; 4];
+
+        for step in 0..200 {
+            match rand() % 12 {
+                0..=3 => {
+                    let ty = TicketType::ALL[(rand() % 9) as usize];
+                    let pos = p((rand() % 25) as i32 - 12, (rand() % 25) as i32 - 12);
+                    let level = (rand() % 46) as i32;
+                    if rand() % 3 == 0 {
+                        table.remove(ty, pos, level);
+                    } else {
+                        table.add(ty, pos, level);
+                    }
+                }
+                4 => {
+                    let pos = p((rand() % 13) as i32 - 6, (rand() % 13) as i32 - 6);
+                    table.set_forced(pos, rand() % 2 == 0);
+                }
+                5..=8 => {
+                    let id = (rand() % 4) as usize;
+                    let next = if rand() % 7 == 0 {
+                        None
+                    } else {
+                        let previous = players[id].unwrap_or(p(0, 0));
+                        // 每步只跨 0 或 1 格，让玩家票集中在一小片区域。
+                        let step = |rand: &mut dyn FnMut() -> u64| (rand() % 3) as i32 - 1;
+                        Some(p(
+                            previous.x.saturating_add(step(&mut rand)),
+                            previous.z.saturating_add(step(&mut rand)),
+                        ))
+                    };
+                    players[id] = next;
+                    table.set_player(id as u64, next);
+                }
+                9 => table.set_view_distance((rand() % 12) as i32 - 1),
+                10 => table.set_simulation_distance((rand() % 35) as i32 - 1),
+                _ => table.tick_idle(),
+            }
+
+            let changes = table.run_updates().to_vec();
+            assert!(
+                changes.windows(2).all(|w| w[0].pos < w[1].pos),
+                "seed {seed:#x} 第 {step} 步输出没排序"
+            );
+            // 变化列表必须恰好是等级变了的区块：先按表里的旧值反推，再逐格核对。
+            let before: BTreeMap<ChunkPos, (i32, i32)> = changes
+                .iter()
+                .map(|change| (change.pos, (change.loading.0, change.simulation.0)))
+                .collect();
+            let (loading_sources, simulation_sources) = table_sources(&table);
+            let mut expected = BTreeMap::new();
+            for x in -70..=70 {
+                for z in -70..=70 {
+                    let pos = p(x, z);
+                    let loading = min_distance_level(&loading_sources, pos, UNLOADED_LEVEL);
+                    let simulation =
+                        min_distance_level(&simulation_sources, pos, SIMULATION_MAX_LEVEL);
+                    assert_eq!(
+                        table.loading_level(pos),
+                        loading,
+                        "seed {seed:#x} 第 {step} 步 {pos:?} 加载等级"
+                    );
+                    assert_eq!(
+                        table.simulation_level(pos),
+                        simulation,
+                        "seed {seed:#x} 第 {step} 步 {pos:?} 模拟等级"
+                    );
+                    let old = before.get(&pos).copied().unwrap_or((loading, simulation));
+                    if old.0 != loading || old.1 != simulation {
+                        expected.insert(pos, (old, (loading, simulation)));
+                    }
+                }
+            }
+            assert_eq!(
+                changes.len(),
+                expected.len(),
+                "seed {seed:#x} 第 {step} 步变化列表长度"
+            );
+            for change in &changes {
+                assert_eq!(
+                    change.loading.1,
+                    table.loading_level(change.pos),
+                    "seed {seed:#x} 第 {step} 步 {change:?} 加载新值"
+                );
+                assert_eq!(
+                    change.simulation.1,
+                    table.simulation_level(change.pos),
+                    "seed {seed:#x} 第 {step} 步 {change:?} 模拟新值"
+                );
+                assert_eq!(
+                    expected.get(&change.pos),
+                    Some(&(
+                        (change.loading.0, change.simulation.0),
+                        (change.loading.1, change.simulation.1),
+                    )),
+                    "seed {seed:#x} 第 {step} 步多报了 {change:?}"
+                );
+            }
+        }
+    }
+}
+
+fn min_distance_level(sources: &Sources, pos: ChunkPos, limit: i32) -> i32 {
+    sources
+        .iter()
+        .map(|&(source, level)| {
+            level
+                + (source.x as i64 - pos.x as i64)
+                    .abs()
+                    .max((source.z as i64 - pos.z as i64).abs()) as i32
+        })
+        .min()
+        .unwrap_or(limit)
+        .min(limit)
+}
+
 #[test]
 fn all_public_types_are_send() {
     fn assert_send<T: Send>() {}
@@ -589,4 +725,32 @@ fn out_of_range_inputs_do_not_panic() {
         table.tick_idle();
         table.run_updates();
     }
+}
+
+#[test]
+fn scratch_blocks_stay_bounded_while_moving_away() {
+    let mut table = TicketTable::new();
+    table.set_player(1, Some(p(0, 0)));
+    table.run_updates();
+    let first = table.scratch_blocks();
+    assert!(first > 0, "更新之后辅助结构应该用到过块");
+    // 先走过一段有代表性的距离，让池子达到稳态，再往后走几千格。
+    for tick in 1..=256 {
+        table.set_player(1, Some(p(tick, 0)));
+        table.run_updates();
+    }
+    let steady = table.scratch_blocks();
+    let mut peak = steady;
+    for tick in 257..=4000 {
+        table.set_player(1, Some(p(tick, 0)));
+        table.run_updates();
+        peak = peak.max(table.scratch_blocks());
+    }
+    // 上界和视距有关：两张平面各不超过 (2 * (视距 + 传播半径) / 64 + 2)^2 * 4 个块。
+    let bound = 2 * 4 * ((2 * (table.view_distance() + 12) / 64) + 2).pow(2) as usize;
+    assert!(
+        peak <= bound,
+        "辅助块数没有上界：起始 {first}，稳态 {steady}，峰值 {peak}，上界 {bound}"
+    );
+    assert_eq!(table.scratch_blocks(), steady, "稳态之后块数应该不再变化");
 }
