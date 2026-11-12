@@ -28,8 +28,8 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 分位数落在对数直方图的桶下界上，是偏保守的估计；桶在 0..15 ns 是逐纳秒，
 之上每个 2 的幂再分 8 份，相对误差不超过 12.5%。
 
-实体阶段按驱动分：精确驱动（默认，`BAMBOO_ENTITY_THREADS` 没设或为 0）只记
-`entities` 一段，算完立刻落地；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）记
+实体阶段按驱动分：精确驱动（默认，`bamboo.toml` 里 `entity_threads = 0`）只记
+`entities` 一段，算完立刻落地；并行驱动（`entity_threads ≥ 1`）记
 `entity_compute`（只读算阶段）和 `entity_commit`（发布状态、按 uid 升序应用命令、
 发效果）两段，`entities` 没有样本。所以报告里有 18 个阶段，但任何一次运行只会有
 17 个阶段有样本。常驻线程池还没做，并行驱动现在每刻起线程，剖析数字包含这项开销。
@@ -152,25 +152,23 @@ cargo build --release -p mc-bamboo-loadtest
 
 ### 内置服务端 `serve`
 
-命令行版 `bamboo` 的 `ServerConfig::default()` 把 `max_players` 固定为 20，
-`crates/mc-bamboo/src/main.rs` 又没有任何配置入口（环境变量、配置文件都没有），
-50 人和 200 人场景会被「服务器已满」拒绝。桌面端有 `server-settings.json`，
-命令行版没有。**这是服务端以后要补的一条**：命令行版没有配置项可改，
-人数上限、视距、压缩阈值等都改不了。
-
-基线因此用压测工具自己的子命令起服，两个进程分开，不共用 tokio 运行时：
+命令行版 `bamboo` 和桌面端现在都从服务器目录的 `server.properties` /
+`bamboo.toml` 读配置（见 `configuration.md`），人数上限、视距、压缩阈值都能改。
+基线仍用压测工具自己的子命令起服：它直接用 `ServerConfig::default()`、
+不读配置文件，这样 50 人和 200 人场景不必先准备一份配置文件，两个进程也分开，
+不共用 tokio 运行时：
 
 ```bash
 BAMBOO_PROFILE=10 ./target/release/bamboo-loadtest serve \
     --addr 127.0.0.1:25977 --max-players 500 --view-distance 8
 ```
 
-`serve` 照 `crates/mc-bamboo/src/main.rs` 的结构用现有的公开接口
-（`Server::new`、`Server::run`）起服，日志初始化方式相同；配置是
-`ServerConfig::default()`，只覆盖 `max_players`（默认 500）和 `view_distance`
-（默认沿用 `ServerConfig::default()` 的 8）。和命令行版 `bamboo` 的差别只有：
-人数上限、可选的视距、日志里第一行写的是 "loadtest server is listening"、
-玩家名前缀是 `Bot`。游戏逻辑、tick 顺序和网络参数都没改；没有改 `crates/` 下任何代码。
+`serve` 用现有的公开接口（`Server::new`、`Server::run`）起服，日志初始化方式相同；
+配置是 `ServerConfig::default()`，只覆盖 `max_players`（默认 500）和 `view_distance`
+（默认沿用 `ServerConfig::default()` 的 8）。和命令行版 `bamboo` 的差别是：它不读
+配置文件、人数上限和可选的视距由命令行给、日志里第一行写的是
+"loadtest server is listening"、玩家名前缀是 `Bot`。游戏逻辑、tick 顺序和网络参数
+都没改。
 
 `ops.json` 的 `bypassesPlayerLimit` 现在参与登录准入：满员时只有这个位为真的 OP
 能进来（官方 `DedicatedPlayerList.canBypassPlayerLimit`）。基线里的假玩家都不是 OP，
@@ -392,9 +390,9 @@ Director 信箱改成每刻最多交付 N 个区块（默认 N=64，脚下 3×3 
 | `chunks_delivered` | 这一刻 region 收下的区块数；一个都没收也记 0 |
 | `chunks_reclaimed` | 这一刻 region 交还的区块数；一个都没交还也记 0 |
 
-环境变量 `BAMBOO_DELIVERIES_PER_TICK` / `BAMBOO_RECLAIMS_PER_TICK` 在世界创建时
-各读一次，缺省 64，`0` 表示不限（这一节用它复现改动之前的行为）。非法值记警告
-并回落缺省值。
+这两个预算现在在 `bamboo.toml` 里：`deliveries_per_tick` / `reclaims_per_tick`，
+缺省 64，`0` 表示不限（这一节用它复现改动之前的行为）；非法值记警告并回落缺省值。
+`serve` 不读配置文件，用的是 `ServerConfig::default()` 里的同一组缺省值。
 
 ### 怎么测
 

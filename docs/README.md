@@ -9,6 +9,7 @@
 | `design.md` | M2 实现的总约定：决定表、crate 结构、线程和队列、tick 顺序、代码规范、验证阶梯。规格和它冲突时以它的“决定”一节为准 |
 | `folia.md` | Folia 调研和 Bamboo 的多线程设计。线程规则 R1–R12 的出处 |
 | `coverage.md` | M2 完整性审查：69 个 serverbound 包的分类、合并后的进服和离开序列、tick 顺序、超时规则、验收用例。规格之间冲突时以它为准 |
+| `configuration.md` | 两份配置文件（`server.properties` 官方项、`bamboo.toml` 自己的项）、命令行参数、非法值处理、APP 和命令行怎么共用 |
 
 ## 协议和行为规格
 

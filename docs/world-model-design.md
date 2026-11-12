@@ -484,8 +484,9 @@ fn tick(state: &mut EntityState, ctx: &mut impl EntityCtx)
 `commit(Computed, &mut World)` 发布状态并按（uid 升序，实体内序号）串行应用命令。游戏层在
 两段之间重新构造 `World`，因为 `RegionLevel` 独占借着区块表，没法同时借出只读视图。
 
-环境变量 `BAMBOO_ENTITY_THREADS=<n>` 在 `World` 创建时读一次：缺省或 0 是精确驱动（原行为），
-≥ 1 用并行驱动，n 是线程数（1 表示走并行代码路径但单线程，用来对比）。算阶段用一份只读的
+`bamboo.toml` 里的 `entity_threads=<n>`（见 `configuration.md`）经 `ServerConfig` 和
+`WorldConfig` 传给 `World`：0 是精确驱动（原行为），≥ 1 用并行驱动，n 是线程数
+（1 表示走并行代码路径但单线程，用来对比）。算阶段用一份只读的
 `ChunkStore` 视图，落地阶段照现在的办法构造 `RegionLevel`。执行器现在用 `ScopedThreads`，
 **每刻起线程，开销大，只用于实验**；常驻线程池是任务系统（第 12 节）的事，这次不做。
 
