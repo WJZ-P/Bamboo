@@ -74,6 +74,7 @@ mod world;
 mod world_state;
 
 pub use command::test_commands;
+pub use director_host::MailBudget;
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
 pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
@@ -82,4 +83,4 @@ pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
 pub use outgoing::{Outgoing, Segment, SharedFrames};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;
-pub use world::{World, WorldConfig};
+pub use world::{MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig};

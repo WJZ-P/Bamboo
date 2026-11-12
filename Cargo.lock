@@ -2059,6 +2059,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
  "uuid",
 ]

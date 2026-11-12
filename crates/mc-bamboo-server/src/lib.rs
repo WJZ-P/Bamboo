@@ -7,6 +7,7 @@
 //! 游戏逻辑在世界线程上，见 `mc-bamboo-game`。
 
 mod config;
+pub mod config_files;
 mod connection;
 mod event;
 mod lists;

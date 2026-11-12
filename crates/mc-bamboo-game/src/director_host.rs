@@ -19,12 +19,6 @@ use crate::{
 
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
-/// 世界创建时读一次这两个环境变量，和 `pacing.rs` 一样：读不到、解析不了、
-/// 或者超出范围都回落缺省值，之后不再看环境变量。
-pub(crate) const DELIVERIES_ENV: &str = "BAMBOO_DELIVERIES_PER_TICK";
-pub(crate) const RECLAIMS_ENV: &str = "BAMBOO_RECLAIMS_PER_TICK";
-/// 上限的合法范围上限，防住误设的巨值把信箱当成没有限速。
-const MAX_MAIL_BUDGET: usize = 1 << 16;
 /// 收回的积压大了之后，每刻收掉其中的这么多分之一。
 ///
 /// 交付的上限是为了削进服的尖峰；收回要是也卡死在固定的个数上，很多人同时
@@ -34,9 +28,9 @@ pub(crate) const RECLAIM_DRAIN_TICKS: usize = 20;
 
 /// 信箱的每刻预算。`0` 表示不限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MailBudget {
-    pub(crate) deliveries: usize,
-    pub(crate) reclaims: usize,
+pub struct MailBudget {
+    pub deliveries: usize,
+    pub reclaims: usize,
 }
 
 impl Default for MailBudget {
@@ -45,29 +39,6 @@ impl Default for MailBudget {
             deliveries: DEFAULT_MAIL_BUDGET,
             reclaims: DEFAULT_MAIL_BUDGET,
         }
-    }
-}
-
-impl MailBudget {
-    /// 从环境变量读一次。收不回不设上限，只按缺省值处理。
-    pub(crate) fn from_env() -> Self {
-        Self {
-            deliveries: read_budget(DELIVERIES_ENV),
-            reclaims: read_budget(RECLAIMS_ENV),
-        }
-    }
-}
-
-fn read_budget(name: &str) -> usize {
-    match std::env::var(name) {
-        Ok(value) => match value.trim().parse::<usize>() {
-            Ok(budget) if budget <= MAX_MAIL_BUDGET => budget,
-            _ => {
-                tracing::warn!(env = name, value = %value, "invalid chunk mail budget, using default");
-                DEFAULT_MAIL_BUDGET
-            }
-        },
-        Err(_) => DEFAULT_MAIL_BUDGET,
     }
 }
 
