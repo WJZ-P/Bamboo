@@ -22,8 +22,11 @@ export type Forwarding = "off" | "legacy" | "modern";
 
 /** 服务端的全部可调选项。字段和 `src-tauri` 的 `ServerSettings` 一一对应。 */
 export interface ServerSettings {
+  /** 服务器目录，只读展示；APP 和命令行版共用这里的两个配置文件。 */
+  serverDirectory: string;
   host: string;
   port: number;
+  levelName: string;
   motd: string;
   maxPlayers: number;
   viewDistance: number;
@@ -36,6 +39,9 @@ export interface ServerSettings {
   enforceSecureProfile: boolean;
   forwarding: Forwarding;
   forwardingSecret: string;
+  entityThreads: number;
+  deliveriesPerTick: number;
+  reclaimsPerTick: number;
 }
 
 export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";

@@ -582,21 +582,12 @@ fn escape_key(key: &str) -> String {
 }
 
 /// 两份配置文件合起来的可编辑内容。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigFiles {
     /// 官方 `server.properties` 的内容。
     pub official: OfficialConfig,
     /// Bamboo 自己的项。
     pub bamboo: BambooConfig,
-}
-
-impl Default for ConfigFiles {
-    fn default() -> Self {
-        Self {
-            official: OfficialConfig::default(),
-            bamboo: BambooConfig::default(),
-        }
-    }
 }
 
 impl ConfigFiles {
@@ -809,7 +800,7 @@ pub fn load_or_create(directory: &Path, write_back: bool) -> io::Result<ConfigFi
     let bamboo_path = directory.join(BAMBOO_FILE);
     files.bamboo = read_bamboo(&bamboo_path)?;
     if write_back {
-        write(&directory, &files)?;
+        write(directory, &files)?;
     }
     Ok(files)
 }
@@ -884,17 +875,19 @@ pub fn log_startup(directory: &Path, files: &ConfigFiles) {
     }
     let known: BTreeSet<&str> = BAMBOO_KEYS.iter().copied().collect();
     // TOML 里的额外表/键在解析阶段就被忽略，这里补一条提示，免得用户以为生效了。
-    if let Ok(text) = fs::read_to_string(canonical.join(BAMBOO_FILE)) {
-        if let Ok(table) = text.parse::<Table>() {
-            let extra: Vec<&str> = table
+    let extra: Vec<String> = fs::read_to_string(canonical.join(BAMBOO_FILE))
+        .ok()
+        .and_then(|text| text.parse::<Table>().ok())
+        .map(|table| {
+            table
                 .keys()
-                .map(String::as_str)
-                .filter(|key| !known.contains(key))
-                .collect();
-            if !extra.is_empty() {
-                info!(keys = %extra.join(", "), "unknown bamboo.toml keys are ignored");
-            }
-        }
+                .filter(|key| !known.contains(key.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if !extra.is_empty() {
+        info!(keys = %extra.join(", "), "unknown bamboo.toml keys are ignored");
     }
 }
 

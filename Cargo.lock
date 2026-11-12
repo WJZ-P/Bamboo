@@ -1937,6 +1937,7 @@ dependencies = [
 name = "mc-bamboo-desktop"
 version = "0.0.0"
 dependencies = [
+ "mc-bamboo-game",
  "mc-bamboo-server",
  "serde",
  "serde_json",

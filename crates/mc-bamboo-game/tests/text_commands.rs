@@ -107,6 +107,7 @@ impl Harness {
                     online_mode: false,
                     enforce_secure_profile: false,
                     admin: Default::default(),
+                    ..Default::default()
                 },
                 std::sync::mpsc::channel().1,
             ),
