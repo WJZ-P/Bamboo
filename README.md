@@ -85,8 +85,9 @@ WebView2 的渲染进程不算在内。
   文件是给世界边界队友留的接口。`chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
 - 盘上 `Status` 不是 `minecraft:full` 的区块、或读坏的区域文件，都当坏块 warn + 用超平坦
   模板，不走官方的重新生成流水线，也不另存区块备份。
-- 玩家文件名用无连字符 UUID（官方 `getStringUUID()`）；坏玩家文件另存
-  `<uuid>_corrupted_<毫秒>.dat`（官方用日期格式）。`/save-all` 成功消息在请求入队时
+- 玩家文件名照官方 `getStringUUID()` 用带连字符 UUID；坏玩家文件另存
+  `<uuid>_corrupted_<yyyy-MM-dd_HH-mm-ss>.dat`（官方 `FileNameDateFormatter`，Bamboo
+  按 UTC 算，官方按本地时区）。`/save-all` 成功消息在请求入队时
   就发（异步保存，消息早于落盘），`flush` 分支多排一道 IO 栅栏。
 - 火把抖动表、容器开合状态与计数、方块实体的 `dead` / `recheck_at` 等瞬时状态不存；
   世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏也不存档（沿用原有限制）。

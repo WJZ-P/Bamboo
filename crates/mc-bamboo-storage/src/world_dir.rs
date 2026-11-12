@@ -36,6 +36,74 @@ const SNOWMAN: &[u8] = &[0xe2, 0x98, 0x83];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// 官方 `Player.getStringUUID()`（`UUID.toString()`）：带连字符的小写 UUID
+/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`。进服读档和离服写档都用它做文件名，
+/// 免得两处格式不一致。
+///
+/// Official `Player.getStringUUID()` (`UUID.toString()`): the hyphenated lowercase
+/// UUID. Both the join read and the leave write use this as the file stem so the
+/// two paths cannot disagree.
+pub fn player_uuid_string(bytes: &[u8; 16]) -> String {
+    let h = |b: u8| format!("{b:02x}");
+    format!(
+        "{}{}{}{}-{}{}-{}{}-{}{}-{}{}{}{}{}{}",
+        h(bytes[0]),
+        h(bytes[1]),
+        h(bytes[2]),
+        h(bytes[3]),
+        h(bytes[4]),
+        h(bytes[5]),
+        h(bytes[6]),
+        h(bytes[7]),
+        h(bytes[8]),
+        h(bytes[9]),
+        h(bytes[10]),
+        h(bytes[11]),
+        h(bytes[12]),
+        h(bytes[13]),
+        h(bytes[14]),
+        h(bytes[15]),
+    )
+}
+
+/// 官方 `FileNameDateFormatter`：`yyyy-MM-dd_HH-mm-ss`，给坏掉的玩家文件做备份名。
+/// 官方用 `ZonedDateTime.now()`（本地时区）；这里按 UTC 的 epoch 秒算，只有备份文件名
+/// 里的时刻会因时区不同，格式和归档行为一致（见 README 已知限制）。
+///
+/// Official `FileNameDateFormatter`: `yyyy-MM-dd_HH-mm-ss`, used for the corrupted
+/// player-file backup name. Vanilla uses local time (`ZonedDateTime.now()`); here we
+/// derive it from UTC epoch seconds, so only the clock in the backup name differs by
+/// timezone. The format and archival behaviour match (see README known limitations).
+fn file_name_stamp(secs_since_epoch: i64) -> String {
+    let days = secs_since_epoch.div_euclid(86_400);
+    let rem = secs_since_epoch.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}_{:02}-{:02}-{:02}",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60,
+    )
+}
+
+/// 天数（相对 1970-01-01）→ 公历年月日，Howard Hinnant 的 civil_from_days。
+/// Days since 1970-01-01 -> civil (year, month, day), Howard Hinnant's algorithm.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month, day)
+}
+
 /// 一个世界目录。所有路径都从根派生，不在这里创建任何文件。
 #[derive(Debug, Clone)]
 pub struct WorldDir {
@@ -339,13 +407,15 @@ fn read_valid_player_old(dir: &WorldDir, uuid: &str) -> Option<Vec<u8>> {
 }
 
 fn backup_corrupted_player(dir: &WorldDir, uuid: &str, primary: &Path) {
-    let stamp = std::time::SystemTime::now()
+    // 官方 `PlayerDataStorage.backup`：`<uuid>_corrupted_<FileNameDateFormatter 日期>.dat`。
+    // Official `PlayerDataStorage.backup`: `<uuid>_corrupted_<date>.dat`.
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0);
     let backup = dir
         .players_data_dir()
-        .join(format!("{uuid}_corrupted_{stamp}.dat"));
+        .join(format!("{uuid}_corrupted_{}.dat", file_name_stamp(secs)));
     let _ = fs::copy(primary, backup);
 }
 
@@ -519,6 +589,73 @@ mod tests {
             )]))
         );
         assert!(read_saved_data(&dir, "minecraft:weather").is_some());
+    }
+
+    /// 官方 `Player.getStringUUID()` 带连字符，玩家文件名必须是这个形式。
+    /// Official `Player.getStringUUID()` is hyphenated; the file stem must be too.
+    #[test]
+    fn player_file_uses_the_hyphenated_uuid() {
+        let bytes = [
+            0x06, 0x9a, 0x79, 0xf4, 0x44, 0xe9, 0x47, 0x26, 0xa5, 0xbe, 0xfc, 0xa9, 0x0e, 0x38,
+            0xaa, 0xf5,
+        ];
+        let uuid = player_uuid_string(&bytes);
+        assert_eq!(uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        let dir = WorldDir::new("world");
+        assert_eq!(
+            dir.player_dat(&uuid),
+            PathBuf::from("world/players/data/069a79f4-44e9-4726-a5be-fca90e38aaf5.dat")
+        );
+        assert_eq!(
+            dir.player_dat_old(&uuid),
+            PathBuf::from("world/players/data/069a79f4-44e9-4726-a5be-fca90e38aaf5.dat_old")
+        );
+    }
+
+    /// 坏文件的备份名照 `FileNameDateFormatter`：`yyyy-MM-dd_HH-mm-ss`，不是毫秒。
+    /// The corrupted-backup name follows `FileNameDateFormatter` (a date, not millis).
+    #[test]
+    fn corrupted_backup_name_uses_the_official_date_format() {
+        // 1970-01-01 00:00:00 UTC 和 2026-11-12 各一个时刻，钉住格式。
+        // Two instants pin the format: epoch and a known date.
+        assert_eq!(file_name_stamp(0), "1970-01-01_00-00-00");
+        let secs = 1_763_000_000;
+        let stamp = file_name_stamp(secs);
+        assert_eq!(stamp.len(), 19, "yyyy-MM-dd_HH-mm-ss");
+        assert_eq!(&stamp[4..5], "-");
+        assert_eq!(&stamp[7..8], "-");
+        assert_eq!(&stamp[10..11], "_");
+        assert_eq!(&stamp[13..14], "-");
+        assert_eq!(&stamp[16..17], "-");
+
+        let tmp = TempDir::new("corrupt-name");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let uuid = player_uuid_string(&[0xab; 16]);
+        let (main, old) = player_paths(&dir, &uuid);
+        let good = PlayerData::default();
+        let good_bytes = encode_player_data(&good).unwrap();
+        safe_replace(&main, &good_bytes, Some(&old)).unwrap();
+        fs::write(&main, b"broken").unwrap();
+
+        assert_eq!(read_player_bytes(&dir, &uuid), None);
+        let backups: Vec<String> = fs::read_dir(dir.players_data_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("_corrupted_"))
+            .collect();
+        assert_eq!(backups.len(), 1, "坏文件要另存一份");
+        assert!(
+            backups[0].starts_with(&format!("{uuid}_corrupted_")),
+            "备份名以带连字符的 uuid 开头：{}",
+            backups[0]
+        );
+        assert!(backups[0].ends_with(".dat"), "备份名以 .dat 结尾");
+        // 中间是 yyyy-MM-dd_HH-mm-ss，不含毫秒那种纯数字串。
+        let middle = &backups[0][format!("{uuid}_corrupted_").len()..backups[0].len() - 4];
+        assert_eq!(middle.len(), 19, "日期段是 19 个字符：{middle}");
+        assert_eq!(&middle[10..11], "_", "日期和时间之间是下划线");
     }
 
     #[test]

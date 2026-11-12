@@ -17,7 +17,9 @@ use mc_bamboo_protocol::{
     text::Component,
 };
 use mc_bamboo_storage::{
-    chunk_io::ChunkIo, player_data::PlayerData, world_dir::encode_player_data,
+    chunk_io::ChunkIo,
+    player_data::PlayerData,
+    world_dir::{encode_player_data, player_uuid_string},
 };
 use mc_bamboo_world::director::TicketOp;
 
@@ -765,7 +767,7 @@ impl World {
         match encode_player_data(&data) {
             Ok(bytes) => self
                 .host
-                .submit_player_write(&player.uuid.simple().to_string(), bytes),
+                .submit_player_write(&player_uuid_string(player.uuid.as_bytes()), bytes),
             Err(error) => warn!(%error, "could not encode player data"),
         }
     }

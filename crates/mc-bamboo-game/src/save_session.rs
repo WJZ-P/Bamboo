@@ -142,8 +142,9 @@ impl Drop for SaveSession {
 ///
 /// Called by the connection layer on join: read the raw player-save bytes (the
 /// connection task does this IO). `None` means a new player.
-pub fn load_player_bytes(root: &std::path::Path, uuid: &str) -> Option<Vec<u8>> {
-    mc_bamboo_storage::world_dir::read_player_bytes(&WorldDir::new(root), uuid)
+pub fn load_player_bytes(root: &std::path::Path, uuid_bytes: &[u8; 16]) -> Option<Vec<u8>> {
+    let uuid = mc_bamboo_storage::world_dir::player_uuid_string(uuid_bytes);
+    mc_bamboo_storage::world_dir::read_player_bytes(&WorldDir::new(root), &uuid)
 }
 
 #[cfg(test)]
