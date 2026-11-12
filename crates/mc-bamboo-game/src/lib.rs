@@ -33,6 +33,7 @@ mod book;
 mod campfire;
 mod chat;
 mod chunk_broadcast;
+pub mod chunk_codec;
 mod chunk_encoding;
 mod chunk_tracking;
 pub mod command;
