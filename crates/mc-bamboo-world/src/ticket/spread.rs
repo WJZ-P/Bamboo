@@ -144,6 +144,10 @@ struct ScratchBlock {
     stamp: [u64; BLOCK_CELLS],
     flags: [u8; BLOCK_CELLS],
     old: [i32; BLOCK_CELLS],
+    /// 位图属于哪一轮；换新轮时整块清掉。
+    bitmap_epoch: u64,
+    /// 每格一位记"本轮记过旧等级"；收变化列表时按字跳过大片没记过的格子。
+    recorded: [u64; BLOCK_CELLS / 64],
 }
 
 impl ScratchBlock {
@@ -156,6 +160,8 @@ impl ScratchBlock {
             stamp: [0; BLOCK_CELLS],
             flags: [0; BLOCK_CELLS],
             old: [0; BLOCK_CELLS],
+            bitmap_epoch: 0,
+            recorded: [0; BLOCK_CELLS / 64],
         })
     }
 }
@@ -240,10 +246,30 @@ impl Scratch {
 
     /// 记下一个区块在本次更新开始前的等级；同一轮里只记第一次。
     fn record(&mut self, pos: ChunkPos, old: i32) {
-        let (flags, saved) = self.cell(pos);
-        if *flags & ScratchBlock::RECORDED == 0 {
-            *flags |= ScratchBlock::RECORDED;
-            *saved = old;
+        let key = block_key(pos);
+        let index = cell_index(pos);
+        let epoch = self.epoch;
+        let block = match self.blocks.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let block = self.pool.pop().unwrap_or_else(ScratchBlock::new);
+                self.used_blocks.push(key);
+                entry.insert(block)
+            }
+        };
+        if block.stamp[index] != epoch {
+            block.stamp[index] = epoch;
+            block.flags[index] = 0;
+            block.old[index] = 0;
+        }
+        if block.bitmap_epoch != epoch {
+            block.bitmap_epoch = epoch;
+            block.recorded.fill(0);
+        }
+        if block.flags[index] & ScratchBlock::RECORDED == 0 {
+            block.flags[index] |= ScratchBlock::RECORDED;
+            block.old[index] = old;
+            block.recorded[index / 64] |= 1 << (index % 64);
         }
     }
 
@@ -302,23 +328,28 @@ impl Scratch {
         result.clear();
         self.used_blocks
             .sort_unstable_by_key(|&(bx, bz)| (bx << BLOCK_SHIFT, bz << BLOCK_SHIFT));
-        let epoch = self.epoch;
         for &key in &self.used_blocks {
             let block = &self.blocks[&key];
             let level_block = levels.block(key);
             count(super::profile::C_COLLECT_SCAN, BLOCK_CELLS as u64);
-            for index in 0..BLOCK_CELLS {
-                if block.stamp[index] != epoch || block.flags[index] & ScratchBlock::RECORDED == 0 {
+            for (word_index, &word) in block.recorded.iter().enumerate() {
+                if word == 0 {
                     continue;
                 }
-                let old = block.old[index];
-                let new = level_block.map_or(levels.default, |levels| levels[index]);
-                if old != new {
-                    let pos = ChunkPos::new(
-                        (key.0 << BLOCK_SHIFT) + (index as i32 / BLOCK_SIZE),
-                        (key.1 << BLOCK_SHIFT) + (index as i32 % BLOCK_SIZE),
-                    );
-                    result.push((pos, old, new));
+                for bit in 0..64 {
+                    if word & (1 << bit) == 0 {
+                        continue;
+                    }
+                    let index = word_index * 64 + bit;
+                    let old = block.old[index];
+                    let new = level_block.map_or(levels.default, |levels| levels[index]);
+                    if old != new {
+                        let pos = ChunkPos::new(
+                            (key.0 << BLOCK_SHIFT) + (index as i32 / BLOCK_SIZE),
+                            (key.1 << BLOCK_SHIFT) + (index as i32 % BLOCK_SIZE),
+                        );
+                        result.push((pos, old, new));
+                    }
                 }
             }
         }
