@@ -673,8 +673,10 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
      D9 原样保留，模糊测试，官方双向对拍。字段名和省略规则见第 9 节。
    - ✅ **接进游戏那一半**：进服时由连接层读 `players/data/<uuid>.dat`（世界线程解析）、
      离开 / 自动保存 / 关服 / `save-all` 时写；`level.dat` 启动时读、关服 / 自动保存时写，
-     `level.dat_old` 轮换、坏文件退回备份；`session.lock` 独占锁；`data/` 下的独立
-     saved data 写空默认文件；`chunk_tickets.dat` 写空 tickets 列表。
+     `level.dat_old` 轮换、坏文件退回备份；`session.lock` 独占锁；`level.dat` 写回运行时
+     出生点/默认游戏模式/难度，`data/` 的游戏规则和按维度的 `world_border.dat` 写真实值
+     并用官方 codec 对拍，其余没建模的 saved data 写空默认文件；`chunk_tickets.dat` 写空
+     tickets 列表。
      `/save-all [flush]`、`/save-on`、`/save-off` 按官方消息和权限等级 4 实现。
 7. ⬜ **Linear**（Q1 决定：先不做）。
 8. ⬜ **转换工具**（Q7 决定：独立小程序，暂不做）。
@@ -762,9 +764,14 @@ README「存档已知限制」，供逐条核实）：
   期间三张瞬时缓存（方块/光照变化、区块包缓存）原样存回。脏的判定用 `ChunkStore` 版本号，
   所以只有容器内容/实体/计划刻变化而方块版本号没变的区块仍要等卸载或 `/save-all` 才存，
   这一条与官方 `ServerChunkCache.save` 的「任何改动都 setUnsaved」不完全一致。
-- `data/` 下各 saved data 的 codec（游戏规则、世界生成设置、天气、世界边界、世界时钟等）
-  没建模，写空默认 `{}`；官方 `SavedDataStorage.computeIfAbsent` 读到后按默认构造。
-  `world_border` 文件是留给世界边界队友的接口。
+- `level.dat` 现在写回运行时的出生点、默认游戏模式、难度（和 `time` / `last_played`），
+  启动时读回；游戏规则用官方 `GameRuleMap.CODEC`（键带命名空间、布尔 Byte / 整数 Int）
+  写进 `data/minecraft/game_rules.dat`；世界边界用 `WorldBorder::export_settings` /
+  `restore`（`restore` 传存档里的游戏时间）写进按维度存放的
+  `dimensions/minecraft/overworld/data/minecraft/world_border.dat`，二者启动时都读回。
+  这三处的编码由 `mc-bamboo-vanilla saved-data` 用官方 codec 解码对拍，并故意写坏一个键
+  确认会报错。天气、世界生成设置、世界时钟、计划事件、流浪商人、自定义 Boss 栏、
+  末影龙战斗这些没建模的 saved data 仍写空默认 `{}`（官方 codec 读到补默认值）。
 - 玩家位置取整到方块（小数部分丢、不补发位置包）；运行时没建模的玩家字段用官方默认值。
 - 盘上 `Status` 不是 full 的区块当坏块（warn + 模板），不走官方重新生成流水线；
   读坏的区域文件不另存 corrupted 备份（玩家文件有）。

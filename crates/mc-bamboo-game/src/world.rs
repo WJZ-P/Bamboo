@@ -181,17 +181,27 @@ impl World {
             global.admin = init.snapshot.into_state();
             global.admin_messages = init.messages;
         }
+        let mut region = Region::with_keys(
+            view_distance,
+            config.max_players,
+            config.online_mode,
+            config.enforce_secure_profile,
+            keys,
+        );
+        // 启动时把读到的 `level.dat` 世界设置和 `data/` 的游戏规则 / 世界边界
+        // 套回运行时；边界的 `restore` 用存档里的游戏时间。
+        // Apply the loaded `level.dat` world settings and the `data/` game rules /
+        // world border back onto runtime; `restore` uses the saved game time.
+        if let Some(save) = &save {
+            crate::save_data::apply_level_data(global.state_mut(), save.level());
+            save.startup()
+                .apply(&mut global, &mut region, save.level().time);
+        }
         let mut world = Self {
             authoritative_admin,
             entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
             global,
-            region: Region::with_keys(
-                view_distance,
-                config.max_players,
-                config.online_mode,
-                config.enforce_secure_profile,
-                keys,
-            ),
+            region,
             inbox,
             pacer: Pacer,
             host: if infinite_flat {
@@ -492,12 +502,12 @@ impl World {
             && self.save.as_ref().is_some_and(|save| save.auto_save())
         {
             self.save_all_players();
-            if let Some(save) = &mut self.save {
-                save.level_mut().time = self.global.time().0;
-                save.level_mut().last_played = crate::admin::now_millis();
-                if let Err(error) = save.save_all() {
-                    warn!(%error, "could not auto-save level data");
-                }
+            let saved = self
+                .save
+                .as_mut()
+                .map(|save| save.save_all(&self.global, crate::admin::now_millis()));
+            if let Some(Err(error)) = saved {
+                warn!(%error, "could not auto-save level data");
             }
         }
         // 运行中匀速给仍加载的脏区块拍快照写盘（D6），`save-off` 时停。
@@ -752,12 +762,12 @@ impl World {
                     self.host
                         .snapshot_all_dirty(&mut self.region, self.director_tick);
                     self.save_all_players();
-                    if let Some(save) = &mut self.save {
-                        save.level_mut().time = self.global.time().0;
-                        save.level_mut().last_played = crate::admin::now_millis();
-                        if let Err(error) = save.save_all() {
-                            warn!(%error, "save-all could not write level data");
-                        }
+                    let saved = self
+                        .save
+                        .as_mut()
+                        .map(|save| save.save_all(&self.global, crate::admin::now_millis()));
+                    if let Some(Err(error)) = saved {
+                        warn!(%error, "save-all could not write level data");
                     }
                     if flush {
                         // 有 flush：排一道不阻塞的 IO 栅栏，成功消息等它回执再发。
@@ -1182,9 +1192,7 @@ impl World {
         // Save all chunks first: reclaim every loaded chunk, write, drain and sync_all.
         self.host.shutdown(&mut self.region);
         if let Some(save) = &mut self.save {
-            save.level_mut().time = self.global.time().0;
-            save.level_mut().last_played = crate::admin::now_millis();
-            if let Err(error) = save.save_all() {
+            if let Err(error) = save.save_all(&self.global, crate::admin::now_millis()) {
                 warn!(%error, "could not save level data on shutdown");
             }
             info!(

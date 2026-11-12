@@ -86,9 +86,15 @@ WebView2 的渲染进程不算在内。
 - 玩家数据只恢复已建模字段：位置取整到方块（小数部分丢掉、不补发位置包）、朝向、
   游戏模式、物品栏、末影箱、选中槽。血量、经验、能力、饥饿、食物等运行时没建模，
   保存用官方默认值。
-- `data/` 下游戏规则、天气、世界生成设置、世界边界等独立文件写空默认 `{}`（codec 没建模）；
-  `/gamerule`、`/weather`、`/setworldspawn` 仍不写存档，重启回默认。`world_border`
-  文件是给世界边界队友留的接口。`chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
+- `level.dat` 写回运行时的出生点、默认游戏模式、难度（和 `time` / `last_played`），
+  启动时读回；`data/minecraft/game_rules.dat` 用官方 `GameRuleMap.CODEC` 的键
+  （带命名空间、布尔 Byte / 整数 Int）写 `/gamerule` 的真实值，启动时读回；
+  世界边界用 `WorldBorder::export_settings` / `restore`（`restore` 传存档里的游戏时间）
+  写到官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`，
+  启动时读回。这三处的编码都用官方 codec 对拍（`saved-data` 子命令）。天气、世界生成设置、
+  世界时钟、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些 Bamboo 没建模的
+  saved data 仍写空默认 `{}`（官方 codec 读到会补默认值）；`/weather` 不写存档。
+  `chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
 - 盘上 `Status` 不是 `minecraft:full` 的区块、或读坏的区域文件，都当坏块 warn + 用超平坦
   模板，不走官方的重新生成流水线，也不另存区块备份。
 - 玩家文件名照官方 `getStringUUID()` 用带连字符 UUID；坏玩家文件另存
@@ -326,9 +332,9 @@ WebView2 的渲染进程不算在内。
   重生点和传送不按官方 `getWorldBorderAdjustedRespawnData`、`PortalForcer`、
   `LivingEntity.randomTeleport` 夹进边界（没有死亡重生、下界传送门和随机传送）；
   `canSpawnEntitiesInChunk`、刷怪和生物 AI 里的边界判断用不上（没有生物）。
-  边界状态不写存档，重启回到官方默认值：`mc-bamboo-blocks::world_border::WorldBorder` 已提供
-  和官方 `Settings` 编解码字段一一对应的 `export_settings` / `restore`，等 M3 接
-  `data/minecraft/world_border.dat`。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
+  边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
+  （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
+  `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
 - 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
   含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
   按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
@@ -477,7 +483,7 @@ WebView2 的渲染进程不算在内。
   对拍，也会随改过的区块一起写进世界目录。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
   语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
-  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照。不写入存档，重启恢复默认值。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。还没接的差异：天气变暗的天空光（下雨/打雷时官方会改 `getSkyDarken`，进而影响阳光探测器、雪和霜冰的亮度判定）、雷击生成的实体、闪电对避雷针/实体/方块的作用和苦力怕充能，以及天空、雾和云的颜色变化。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
+  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。还没接的差异：天气变暗的天空光（下雨/打雷时官方会改 `getSkyDarken`，进而影响阳光探测器、雪和霜冰的亮度判定）、雷击生成的实体、闪电对避雷针/实体/方块的作用和苦力怕充能，以及天空、雾和云的颜色变化。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），

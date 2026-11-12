@@ -168,9 +168,19 @@ impl WorldDir {
         self.dimension_dir().join("poi")
     }
 
-    /// 维度自己的 `data/minecraft/`，`chunk_tickets.dat` 放这里。
+    /// 维度自己的 `data/minecraft/`，`chunk_tickets.dat` 和 `world_border.dat` 放这里。
+    /// 官方 `ServerChunkCache` 的 `dataFolder` 是维度目录下的 `data/`，
+    /// `WorldBorder.TYPE` 的 id 是 `minecraft:world_border`。
     pub fn dimension_data_dir(&self) -> PathBuf {
         self.dimension_dir().join("data/minecraft")
+    }
+
+    /// 主世界的 `world_border.dat`，和官方 `forDataFileInDimension("overworld", ...)`
+    /// 一致；全局 `data/` 下的游戏规则也在同一个 `data/` 树，但边界是按维度存的。
+    /// The overworld `world_border.dat`, matching official
+    /// `forDataFileInDimension("overworld", "minecraft/world_border.dat")`.
+    pub fn world_border_dat(&self) -> PathBuf {
+        self.dimension_data_dir().join("world_border.dat")
     }
 
     pub fn chunk_tickets(&self) -> PathBuf {
@@ -422,26 +432,49 @@ fn backup_corrupted_player(dir: &WorldDir, uuid: &str, primary: &Path) {
 /// 写一份 `data/` saved data。官方 `SavedDataStorage` 的根是
 /// `{ data: <codec 值>, DataVersion: <int> }`，gzip 压缩。
 pub fn write_saved_data(dir: &WorldDir, id: &str, data: &Tag) -> io::Result<()> {
+    write_saved_data_at(&dir.saved_data(id), data)
+}
+
+/// 官方 `SavedDataStorage.encodeUnchecked` 的封装：根是 `{ data, DataVersion }`，
+/// gzip 压缩。按绝对路径写，边界（维度目录）和全局 `data/` 共用这一层。
+/// Official `SavedDataStorage.encodeUnchecked` envelope `{ data, DataVersion }`,
+/// gzip-compressed, written at an absolute path (shared by dimension and global files).
+pub fn write_saved_data_at(path: &Path, data: &Tag) -> io::Result<()> {
     let root = Tag::Compound(vec![
         ("data".to_owned(), data.clone()),
         ("DataVersion".to_owned(), Tag::Int(version::DATA_VERSION)),
     ]);
     let bytes = write_compressed("", &root, Compression::Gzip)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    safe_replace(&dir.saved_data(id), &bytes, None)
+    safe_replace(path, &bytes, None)
 }
 
 /// 读一份 `data/` saved data 的 `data` 内容；不存在或坏了返回 `None`。
 pub fn read_saved_data(dir: &WorldDir, id: &str) -> Option<Tag> {
-    let bytes = fs::read(dir.saved_data(id)).ok()?;
+    read_saved_data_at(&dir.saved_data(id))
+}
+
+/// 按绝对路径读一份 saved data 的 `data` 内容；不存在或坏了返回 `None`。
+/// Read a saved-data `data` compound from an absolute path; `None` on missing/bad.
+pub fn read_saved_data_at(path: &Path) -> Option<Tag> {
+    let bytes = fs::read(path).ok()?;
     let (_name, entries) =
         read_compressed(&bytes, Compression::Gzip, Accounter::uncompressed_quota()).ok()?;
     field(&Tag::Compound(entries), "data").cloned()
 }
 
 /// 全局 `data/` 下要写的独立文件（`docs/m3-storage.md` 9.3、Q9）。
-/// `chunk_tickets.dat` 在维度的 `data/minecraft/` 下，不在这里。
+/// `world_border.dat` 和 `chunk_tickets.dat` 是按维度存的，在维度的
+/// `data/minecraft/` 下，不在这里。游戏规则先写空默认（官方解码时补默认值），
+/// 再由 `SaveSession::save_all` 覆盖成真实值。
+/// Global `data/` saved-data files. `world_border.dat` and `chunk_tickets.dat`
+/// are per-dimension (under the dimension's `data/minecraft/`), not here. Game
+/// rules get an empty default first (official fills defaults on decode), then
+/// `SaveSession::save_all` overwrites them with the real values.
 pub const SAVED_DATA_IDS: &[&str] = &[
+    // 新世界先写空默认（官方解码时把没写的规则重置为默认值），之后 `save_all` 覆盖成真实值。
+    // A fresh world gets an empty default (official resets missing rules to their
+    // defaults); `save_all` overwrites it with the real values.
     "minecraft:game_rules",
     "minecraft:world_gen_settings",
     "minecraft:world_clocks",
@@ -450,7 +483,6 @@ pub const SAVED_DATA_IDS: &[&str] = &[
     "minecraft:wandering_trader",
     "minecraft:custom_boss_events",
     "minecraft:ender_dragon_fight",
-    "minecraft:world_border",
 ];
 
 /// 给一份新世界写出全部 `data/` 独立文件，内容为空复合（各 codec 用默认值）。

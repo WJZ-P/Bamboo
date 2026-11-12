@@ -67,6 +67,7 @@ mod player_move;
 mod player_save;
 mod profiler;
 pub mod region;
+mod save_data;
 pub mod save_session;
 mod scoreboard;
 mod secure_chat;
@@ -87,3 +88,32 @@ pub use outgoing::{Outgoing, Segment, SharedFrames};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;
 pub use world::{MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig};
+
+/// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
+/// 两份示例 `data` 复合标签（游戏规则、世界边界）。只暴露公开的 [`Tag`]，
+/// 不把运行时类型泄漏到 crate 外。值固定，方便对拍期望值。
+/// Samples of Bamboo's saved-data encoders for the `mc-bamboo-vanilla
+/// saved-data` official-codec comparison. Exposes only public [`Tag`]s with
+/// fixed values so the tool can assert the expected decoded values.
+pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
+    let mut rules = gamerules::GameRuleSet::vanilla();
+    let index = mc_bamboo_data::gamerules::find("minecraft:random_tick_speed").unwrap();
+    let _ = rules.assign(index, "7");
+    let fire = mc_bamboo_data::gamerules::find("minecraft:fire_damage").unwrap();
+    let _ = rules.assign(fire, "false");
+    let border = mc_bamboo_blocks::world_border::BorderSettings {
+        center_x: 12.5,
+        center_z: -8.0,
+        damage_per_block: 0.3,
+        safe_zone: 4.0,
+        warning_blocks: 7,
+        warning_time: 42,
+        size: 123.0,
+        lerp_time: 99,
+        lerp_target: 200.0,
+    };
+    (
+        save_data::game_rules_tag(&rules),
+        save_data::world_border_tag(&border),
+    )
+}

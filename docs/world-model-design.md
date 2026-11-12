@@ -354,9 +354,10 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
 以后一个维度拆成多个 region 时它们必须看到同一份；`Region` 只留一份每刻发布的只读快照，
 `RegionLevel` 和实体算阶段的只读视图各带一份，方块逻辑经 `Level` trait、实体碰撞经
 `BlockView` 读它。渐变在 `ServerLevel.tick` 开头的 "world border" 阶段推进（天气和时间之前），
-权威副本每刻推进后、以及 `/worldborder` 命令改完后重新发布快照。边界不写存档，
-`mc-bamboo-blocks::world_border` 提供和官方 `Settings` codec 一一对应的导出 / 恢复函数，
-等 M3 的 `data/` 接线。
+权威副本每刻推进后、以及 `/worldborder` 命令改完后重新发布快照。M3 已把边界接进存档：
+`WorldBorder::export_settings` / `restore`（`restore` 传存档里的游戏时间）写进按维度存放的
+`dimensions/minecraft/overworld/data/minecraft/world_border.dat`，启动时读回，字段和官方
+`WorldBorder.Settings.CODEC` 一一对应、由 `saved-data` 子命令对拍。
 
 ---
 

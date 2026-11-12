@@ -87,6 +87,8 @@ mod predicate_oracle;
 #[cfg(feature = "oracle")]
 mod recipe_oracle;
 #[cfg(feature = "oracle")]
+mod saved_data;
+#[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
@@ -149,6 +151,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla storage <java 路径> [--show N]
+      mc-bamboo-vanilla saved-data <java 路径>
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -187,6 +190,7 @@ fn run() -> Result<(), String> {
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
+        ["saved-data", java] => saved_data_cli(java),
         ["player-data", java, ref options @ ..] => player_data_oracle(java, options),
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
@@ -421,6 +425,16 @@ fn official_program(java: &str, source: &str) -> Result<Command, String> {
         .arg(classpath)
         .arg(root.join(source));
     Ok(command)
+}
+
+#[cfg(feature = "oracle")]
+fn saved_data_cli(java: &str) -> Result<(), String> {
+    saved_data::run(java)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn saved_data_cli(_java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 #[cfg(not(feature = "oracle"))]
