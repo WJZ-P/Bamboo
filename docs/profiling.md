@@ -672,28 +672,54 @@ Director 信箱改成每刻最多交付 N 个区块（默认 N=64，脚下 3×3 
 - `ticket_update` 0.9 ms / p99 2.2 ms（`fly-20` 子项里修完后的第三大项），
   见 `docs/performance-optimizations.md` 第 9 节。
 
-### 9.5 实验：让原本走无限模式的 game 测试改走已加载模式
+### 9.5 让原本走无限模式的 game 测试在已加载模式下也全过
 
-`Harness::new` 现在读一次环境变量 `BAMBOO_TEST_LOADED=1`，把原本走
-「无限超平坦」的测试改走已加载模式（默认不变）。这只是**报告用的实验开关**，
-不修测试、不改变正式行为。复现：
+`Harness::new` 读一次环境变量 `BAMBOO_TEST_LOADED=1`，把原本走「无限超平坦」
+的整套测试改走已加载模式；默认仍是无限超平坦，正式代码和默认行为都没动。
+两种模式现在都能全过：
 
 ```bash
-BAMBOO_TEST_LOADED=1 RUST_MIN_STACK=16777216 \
-    cargo test -p mc-bamboo-game --lib -- --skip command::official_tree
+RUST_MIN_STACK=16777216 cargo test -p mc-bamboo-game
+RUST_MIN_STACK=16777216 BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game
 ```
 
-结果：**813 个执行、22 个失败、791 通过**（另有 4 个 ignore）。
-按原因分三类：
+两种模式都是 **816 passed / 0 failed / 4 ignored**（含 `command::official_tree`，
+它需要 `target/vanilla/generated/reports/commands.json`；新工作树要从主仓库
+`cp -R target/vanilla`）。调试构建、各跑两次取后一次的墙钟耗时：
+无限模式 **34.1 s**，已加载模式 **33.7 s**（`lib` 单测内部 32.24 s / 32.46 s）。
+两者在同一量级；机器上有别的编译任务时波动能到 10 s 以上，这组数不是基准测试。
 
-| 类别 | 个数 | 典型症状 |
+#### 通用夹具：`Harness::ensure_loaded`
+
+`Harness::ensure_loaded(&[ChunkPos])` 让测试用到的位置真的被加载：无限模式下直接
+返回；已加载模式下对每个坐标走正式的 `TicketOp::Forced` 加票（不过期，区块会一直
+在），由 Director 生成流水线交付，再按需要推进 tick 等交付预算把盒子发到 region。
+它不绕过 Director、不往 `ChunkStore` 里塞柱子。用法是「先 ensure，再写/读方块、编帧、
+取放区块」：
+
+```rust
+let mut server = Harness::new(8);
+server.ensure_loaded(&[POS.chunk()]);
+server.region().chunks.set_block(POS, block);
+```
+
+#### 修之前的 22 个失败
+
+复现的是报告里的 **813 个执行、22 个失败、791 通过**（另有 4 个 ignore）。三类原因
+和修法：
+
+| 类别 | 个数 | 修法 |
 |---|---|---|
-| 假定任意坐标都隐式存在、直接写方块/方块实体 | 13 | `block_items` 的 11 个（「旗帜要发方块实体数据」等：`set_block` 在没加载的位置是空操作）、`chunk_broadcast::changes_nobody_tracks_are_dropped`（远处坐标的改动压根没记下）、`world::tests::new_player_receives_chunks_edited_before_it_joined`（进服前改的方块不存在，玩家收到模板帧） |
-| 直接对 store 做 `take_columns` / `insert_column`、光照传播或区块帧编码，位置没登记为已加载 | 8 | `region::column_tests` 的 6 个（取放后读数不一致、光没照进未加载的邻居、`chunk_frame` 返回 `NotLoaded`）、`region::parking::parked_boxes_keep_all_upper_layer_content` |
-| 缓存/跟踪集合依赖「任何位置都算已加载」的默认 | 1 | `chunk_encoding::cache::tests::the_cache_forgets_chunks_nobody_tracks`（49 个条目没被清掉） |
+| 假定任意坐标都隐式存在、直接写方块/方块实体 | 13 | `block_items` 的 11 个在公共的 `region_with()` 里 ensure `POS.chunk()`；`chunk_broadcast::changes_nobody_tracks_are_dropped` 在进服前 ensure 远处 (1000,-60,1000) 所在区块（玩家仍不在那儿，「没人跟踪」的前提不变）；`world::tests::new_player_receives_chunks_edited_before_it_joined` 在进服前 ensure 被改的 (1,1)，玩家才收得到非模板帧 |
+| 直接对 store 做 `take_columns` / `insert_column`、光照传播或区块帧编码，位置没登记为已加载 | 8 | `region::column_tests` 的 7 个统一走新的 `harness()` 工厂（ensure 场景里的 `CHUNK` / `OTHER_CHUNK` 两个区块，12 个测试都用它，包括原先碰巧通过的 5 个）；`region::parking` 的那个在 `box_with_content` 之前 ensure 同一坐标 |
+| 缓存/跟踪集合依赖「任何位置都算已加载」 | 1 | `chunk_encoding::cache::tests::the_cache_forgets_chunks_nobody_tracks`：旧视图和新视图的坐标都 ensure；旧断言 `bodies.len() == 0` 换成按模式算的精确条数（无限模式 0，已加载模式是新视图的 49 个区块各一份包体），并断言旧坐标一个不留、留下的都在新视图里 |
+
+最后一类值得单独说：已加载模式下新视图的 49 个区块**每个都编一份自己的包体**
+（无限模式下它们共用模板帧、不进 `bodies`），所以按总条数断言 0 只在无限模式成立。
+按坐标检查「没人跟踪的都清掉」才是两种模式共同的语义；没有删断言，也没有放宽
+到「随便剩几条都算过」。
 
 三类都是「测试自己没交付区块」，不是已加载模式的行为错误；正式运行里区块由
 Director 按 ticket 交付，`world/loaded_tests.rs` 里 30 多个已加载模式的测试
-（含随机玩家走动、脚下 3×3、收回积压有界）都通过。要让这套老测试也在已加载
-模式下跑，需要的是在 `Harness` 里补一层「按测试坐标自动交付/保持票」的夹具，
-不是改服务端；本轮按「只报告、不要求修」没有做。
+（含随机玩家走动、脚下 3×3、收回积压有界）本来就都通过。要不要把 `Harness::new`
+的默认切到已加载模式，留给以后按这份耗时和覆盖情况决定。

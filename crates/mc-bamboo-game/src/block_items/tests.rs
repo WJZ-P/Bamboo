@@ -15,6 +15,7 @@ const TEST_PLAYER: PlayerId = PlayerId(0);
 /// 一个只有方块的世界，方块已经放好。
 fn region_with(block: u32) -> Harness {
     let mut server = Harness::new(8);
+    server.ensure_loaded(&[POS.chunk()]);
     server.region().chunks.set_block(POS, block);
     server
 }

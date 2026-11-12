@@ -170,6 +170,9 @@ impl Links {
 
 1. 单元测试：协议字节、`T(vd)`、`PlayerChunkSender`、`send_changes`、放置、物品栏。
 2. `mc-bamboo-game` 的测试用假的 `PlayerSink` 直接驱动 `World::tick`，不开 socket。
+   测试要用到的区块位置必须先加载：用 `Harness::ensure_loaded(&[ChunkPos])` 走正式的
+   加票/交付路径把这片区域交付好，再写方块、读光照、取放区块或编帧；
+   `BAMBOO_TEST_LOADED=1` 可以把整套测试改走服务端实际用的已加载模式。
 3. `mc-bamboo-server/tests`：真实 TCP，两个客户端。
 4. `tools/mc-bamboo-vanilla` 的 `probe`：官方网络代码解码 Bamboo 发出的每个包。
 5. 用户的真实客户端：`coverage.md` 第 8 节、`blocks-inventory.md` 第 13 章。这一步只有用户能做。

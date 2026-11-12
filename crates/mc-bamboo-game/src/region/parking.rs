@@ -81,6 +81,7 @@ mod tests {
     fn parked_boxes_keep_all_upper_layer_content() {
         let mut server = Harness::new(2);
         let pos = ChunkPos::new(0, 0);
+        server.ensure_loaded(&[pos]);
         let column = box_with_content(server.region(), pos);
         let mut parking = Parking::default();
         assert!(parking.is_empty());

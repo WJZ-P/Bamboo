@@ -249,8 +249,14 @@ fn light_goes_right_before_the_blocks_of_its_own_chunk() {
 
 #[test]
 fn changes_nobody_tracks_are_dropped() {
-    let (mut server, client) = settled(8);
-    change(&mut server, BlockPos::new(1000, -60, 1000), blocks::STONE);
+    let mut server = Harness::new(8);
+    let far = BlockPos::new(1000, -60, 1000);
+    // 远处的区块也要真的交付，改动才记进 `block_changes`；玩家不在那里，
+    // 所以「没人跟踪」这条前提不变。
+    server.ensure_loaded(&[far.chunk()]);
+    let client = server.join_and_settle("Kitten");
+    client.take_frames();
+    change(&mut server, far, blocks::STONE);
     server.tick();
     assert!(client.take_frames().is_empty());
 

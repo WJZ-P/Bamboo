@@ -405,6 +405,32 @@ impl Harness {
         client
     }
 
+    /// 让 `positions` 里的区块真的加载：走正式的加票 → 生成流水线 → 交付路径。
+    /// 无限超平坦模式下每个位置本来就存在，直接返回；已加载模式下用 `Forced`
+    /// 票（不过期）保持区块，再按需要推进几刻等交付预算把它们发到 region。
+    pub(crate) fn ensure_loaded(&mut self, positions: &[ChunkPos]) {
+        if !self.world.region.chunks.is_loaded_mode() {
+            return;
+        }
+        for &pos in positions {
+            self.apply_ticket_for_test(mc_bamboo_world::director::TicketOp::Forced {
+                pos,
+                forced: true,
+            });
+        }
+        // 交付每刻有个数上限，脚下 3×3 豁免；这里循环到全部到位为止。
+        for _ in 0..64 {
+            if positions
+                .iter()
+                .all(|&pos| self.world.region.chunks.is_loaded(pos))
+            {
+                return;
+            }
+            self.tick();
+        }
+        panic!("测试要求交付的区块没能加载：{positions:?}");
+    }
+
     /// 测试专用：只读票表。
     pub(crate) fn tickets(&self) -> &mc_bamboo_world::ticket::TicketTable {
         self.world.tickets()
@@ -1148,6 +1174,7 @@ fn new_player_receives_chunks_edited_before_it_joined() {
     let mut server = Harness::new(8);
     let edited = ChunkPos::new(1, 1);
     let pos = BlockPos::new(17, -60, 17);
+    server.ensure_loaded(&[edited]);
     server.world.region.chunks.set_block(pos, blocks::STONE);
 
     let client = server.join("Kitten");
