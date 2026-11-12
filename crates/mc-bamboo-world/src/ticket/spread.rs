@@ -323,7 +323,7 @@ impl ResetCursor<'_> {
 }
 
 impl Scratch {
-    /// 按块号、块内下标遍历，天然按 (x, z) 排序（负块号单独处理）。
+    /// 按块号、块内下标遍历；负块号下块号字典序和 (x, z) 字典序不一致，最后再排一次。
     fn collect(&mut self, levels: &LevelGrid, limit: i32, result: &mut Vec<(ChunkPos, i32, i32)>) {
         result.clear();
         self.used_blocks
