@@ -718,3 +718,15 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 | Q7 | 转换工具放哪：`tools/mc-bamboo-vanilla` 的新子命令，还是一个独立的小 bin？ | 独立 bin（比如 `tools/mc-bamboo-convert`）。`mc-bamboo-vanilla` 要调 Java，转换工具不该依赖 JDK |
 | Q8 | 主世界写在 `dimensions/minecraft/overworld/` 下（26.3 的新布局，见第 2 节），老存档不迁移 | 按新布局。读到老布局就当空世界，不自动迁移（迁移要 DataFixerUpper） |
 | Q9 | `level.dat` 不写世界生成设置和游戏规则（26.3 已经搬到 `data/`）。官方服务端打开这个世界会按默认设置生成，和 Bamboo 的平坦模板不一样 | 接受。目标是“官方代码能读”，不是“原版服务端能接着玩”。文件名、gzip NBT 的 `{ data: ... }` 格式、以及读不到时 `SavedDataStorage.computeIfAbsent` 用 `SavedDataType.constructor()` 造默认值的完整清单见第 9.3 节 |
+
+**用户的决定（2026-11-12）**：
+
+| # | 决定 |
+|---|---|
+| Q1 | 先只做 Anvil。Linear 和 `zstd` 依赖先不做，用户之后再看有没有更好的设计 |
+| Q2 | 按建议：不支持 lz4，读到就报错 |
+| Q4 | 不强制刷盘：区块写盘放在 IO 线程上异步做，不用 `DSYNC` 逐次落盘，也不加这个设置项 |
+| Q5 | 照官方：比较器、合成器等的状态存进区块里各自的方块实体条目（已经这样实现）；红石火把的切换记录官方不存，也不存 |
+| Q7 | 做成独立的小程序，不依赖 JDK |
+| Q8 | 只支持 26.3 的新布局，不兼容老存档 |
+| Q9 | 照官方写 `data/` 下的独立文件（游戏规则、世界生成设置等），让官方服务端能接着用这个世界 |
