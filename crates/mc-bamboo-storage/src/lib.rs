@@ -7,6 +7,7 @@ pub mod anvil;
 #[cfg(test)]
 mod bench;
 pub mod chunk_content;
+pub mod chunk_io;
 pub mod chunk_nbt;
 pub mod level_dat;
 pub mod player_data;
