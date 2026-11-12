@@ -948,3 +948,166 @@ fn neighbour_light_makes_a_column_not_pristine() {
         "方块没变但光照变了，盒子必须停放，不能用模板重新生成"
     );
 }
+
+/// 进程内「放方块、存盘、重启、读回」：走真实的区域文件、玩家文件和 level.dat，
+/// 验证方块、方块实体、计划刻、三种实体、玩家位置和物品栏都读回一致。
+/// In-process place / save / restart / read-back through real region, player and
+/// level files: blocks, block entities, scheduled ticks, all three entity kinds,
+/// player position and inventory must all survive.
+#[test]
+fn disk_restart_keeps_chunks_players_and_level() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec, PackedChunk};
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt};
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::components::archive::slots::SlottedItem;
+    use mc_bamboo_storage::{
+        chunk_io::{ChunkIo, Reply},
+        level_dat::LevelData,
+        player_data::PlayerData,
+        world_dir::{
+            WorldDir, encode_player_data, load_level_data, read_player_bytes, save_level_data,
+        },
+    };
+
+    // 造一个带方块、方块实体、计划刻和三种实体的盒子。
+    let mut server = harness();
+    furnish(server.region());
+    settle_light(server.region());
+    run(&mut server, 2);
+    settle_light(server.region());
+    let region = server.region();
+    region.redstone.clear_torch_toggles();
+    for entry in region.containers.values_mut() {
+        entry.dead = false;
+        entry.recheck_at = None;
+    }
+    for (x, kind) in [
+        (
+            1,
+            EntityKind::FallingBlock(FallingBlock::new(
+                mc_bamboo_blocks::BlockState(blocks::SAND),
+                p(1, 2),
+            )),
+        ),
+        (2, EntityKind::Tnt(PrimedTnt::new())),
+        (
+            3,
+            EntityKind::Item(GroundItem::new(ItemStack::new(items::DIAMOND, 3), false)),
+        ),
+    ] {
+        region
+            .entities
+            .spawn(Entity::new(kind, Vec3::new(f64::from(x), -59.0, 2.0)));
+    }
+    let boxes = region
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let original = boxes.get(&CHUNK).expect("盒子存在");
+    let encoded = InlineCodec.encode(CHUNK, original).expect("编码");
+    assert!(encoded.chunk.is_some(), "区块 NBT 在");
+    assert!(encoded.entities.is_some(), "实体 NBT 在");
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-disk-restart-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let tmp = TempDir::new();
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let uuid = "test-player-uuid";
+    let player_data = PlayerData {
+        position: [1.5, -60.0, 2.5],
+        inventory: vec![SlottedItem {
+            slot: 0,
+            stack: ItemStack::new(items::DIAMOND, 3),
+        }],
+        ..PlayerData::default()
+    };
+    let player_bytes = encode_player_data(&player_data).unwrap();
+    let level = LevelData {
+        time: 4242,
+        ..LevelData::default()
+    };
+
+    // 第一局写盘，然后关掉 IO 线程（模拟关服）。
+    {
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+        io.submit_player_write(uuid, player_bytes.clone());
+        io.flush().unwrap();
+        io.close();
+    }
+    save_level_data(&dir, &level).unwrap();
+
+    // 第二局（重启）：读回并逐项核对。
+    assert_eq!(load_level_data(&dir).data.time, 4242);
+    assert_eq!(read_player_bytes(&dir, uuid), Some(player_bytes.clone()));
+    let back = PlayerData::from_gzip(&read_player_bytes(&dir, uuid).unwrap()).unwrap();
+    assert_eq!(back.position, [1.5, -60.0, 2.5]);
+    assert_eq!(back.inventory.len(), 1);
+
+    let mut io = ChunkIo::open(&dir).unwrap();
+    io.submit_read(CHUNK, 7, 1);
+    io.flush().unwrap();
+    let mut found = None;
+    while let Some(reply) = io.try_recv() {
+        if matches!(reply, Reply::Read { .. }) {
+            found = Some(reply);
+        }
+    }
+    let Reply::Read {
+        chunk,
+        entities,
+        error,
+        ..
+    } = found.expect("读到区块")
+    else {
+        unreachable!()
+    };
+    assert!(error.is_none(), "读盘没有报错：{error:?}");
+    let decoded = InlineCodec
+        .decode(CHUNK, &PackedChunk { chunk, entities })
+        .expect("解码");
+    // 逐项比内容。`from_parts` 重建时部分字段的默认值/顺序会变，重编码的字节
+    // 不一定逐字节相同，所以和 `archive_round_trip` 一样比读回的内容。
+    let got = decoded.parts();
+    let want = original.parts();
+    for y in -64..0 {
+        for x in 0_usize..16 {
+            for z in 0_usize..16 {
+                assert_eq!(
+                    got.column.chunk().block(x, y, z),
+                    want.column.chunk().block(x, y, z),
+                    "方块 ({x},{y},{z}) 读回不一致"
+                );
+            }
+        }
+    }
+    assert!(!got.containers.is_empty(), "方块实体读回");
+    assert_eq!(got.containers.len(), want.containers.len());
+    assert!(got.ticks.is_some(), "计划刻读回");
+    assert_eq!(
+        got.block_entities.entities().len(),
+        want.block_entities.entities().len()
+    );
+    assert!(got.entities.rows().len() >= 3, "三种实体读回");
+    assert_eq!(got.entities.rows().len(), want.entities.rows().len());
+    io.close();
+}
