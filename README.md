@@ -162,7 +162,7 @@ WebView2 的渲染进程不算在内。
   关闭时和离线模式完全一样，握手地址里的 NUL 只是普通文本。
   配置是 `ServerConfig` 里的 `forwarding`（`Off`、`Legacy`、`Modern`）和 `forwarding_secret`；
   `Modern` 没有密钥时启动会退回 `Off`，桌面端的设置页里也能改。
-- 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。阈值是 `server.properties` 里的 `chat-spam-threshold-seconds`，不是游戏规则。
+- 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。代码里按官方 `server.properties` 的 `chat-spam-threshold-seconds` 默认值（10）计算，不是游戏规则；这个键本身还没实现，改它暂时不起作用。
   发送者不是全零 UUID 的聊天发 `player_chat`。没签名时签名位是空的，正文按 `PlayerChatMessage.unsigned`
   （时间是现在、盐是 0、已读列表是空的）。全零 UUID 的系统消息（不带签名的 `chat_command`）仍是 `disguised_chat`。
   不可信的广播日志带 `[Not Secure]`，格式和官方 `PlayerList.logChatMessage` 一样。

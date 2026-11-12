@@ -57,7 +57,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 ### 官方有、Bamboo 还没实现的键
 
 读进来原样保留、写回时原样写出去，不报错。启动时用一条日志列出这些键
-「现在不起作用」。共 59 个：
+「现在不起作用」（个别逻辑按官方默认值硬编码，例如聊天刷屏阈值按 10 秒算）。共 59 个：
 
 `allow-flight`、`enable-code-of-conduct`、`bug-report-link`、`force-gamemode`、
 `enforce-whitelist`、`difficulty`、`gamemode`、`management-server-enabled`、
