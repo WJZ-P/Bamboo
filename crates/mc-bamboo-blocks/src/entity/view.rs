@@ -8,7 +8,7 @@ use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
 use mc_bamboo_data::{BlockAncestor, blocks};
 
 use crate::{
-    Aabb, BlockGameRules, BlockHit,
+    Aabb, BlockGameRules, BlockHit, WorldBorder,
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, SupportType},
     world::{collect_block_collisions, traverse_blocks},
@@ -80,6 +80,16 @@ pub trait BlockSource: Sync {
                 })
             })
         })
+    }
+
+    /// `Level.getWorldBorder()`。算阶段的只读视图默认给官方默认边界；游戏层覆盖它，
+    /// 让三种实体在 shrink 过的边界里也被挡住。
+    ///
+    /// `Level.getWorldBorder()`. The compute-phase read-only view defaults to the
+    /// vanilla default border; the game layer overrides it so the three entity
+    /// kinds also collide with a shrunken border.
+    fn world_border(&self) -> WorldBorder {
+        WorldBorder::default()
     }
 }
 
@@ -286,6 +296,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.0.chunk_ticks_entities(chunk)
+    }
+
+    fn world_border(&self) -> WorldBorder {
+        self.0.world_border()
     }
 }
 

@@ -120,7 +120,11 @@ impl Links {
         }
     }
 
-    /// 发给除 `except` 以外的所有人。
+    /// 发给除 `except` 以外的所有人。进服消息改用 `broadcast_system_message` 后只剩测试用。
+    ///
+    /// Send to everyone except `except`. Test-only since the join message moved to
+    /// `broadcast_system_message`.
+    #[cfg(test)]
     pub(crate) fn broadcast_except(&mut self, except: PlayerId, frames: &[u8]) {
         for (_, link) in self
             .links

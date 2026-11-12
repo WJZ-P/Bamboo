@@ -13,9 +13,12 @@ use super::chain::{MAX_TRACKED, SignedMessage};
 
 const TOO_MANY: &str = "multiplayer.disconnect.too_many_pending_chats";
 
-/// 发给所有聊天设成“全部”的玩家，包括发送者自己。
+/// 发给所有聊天设成“全部”、链路还开着的玩家，包括发送者自己。
+/// 官方断开时立刻把玩家移出名单，Bamboo 要等 `Leave`，所以这里还要查 `is_open`。
 ///
-/// Sends to every player whose chat visibility is full, including the sender.
+/// Sends to every player whose chat visibility is full and whose link is still open,
+/// including the sender. Official servers remove a player from the list as soon as it
+/// disconnects; Bamboo waits for `Leave`, so `is_open` is checked here too.
 pub(crate) fn broadcast_signed(
     region: &mut Region,
     message: &SignedMessage,
@@ -24,10 +27,13 @@ pub(crate) fn broadcast_signed(
     target_name: Option<&Component>,
     unsigned: Option<&Component>,
 ) {
+    let links = &region.links;
     let ids: Vec<PlayerId> = region
         .players
         .iter()
-        .filter(|(_, player)| player.client.chat_visibility == ChatVisibility::Full)
+        .filter(|(id, player)| {
+            player.client.chat_visibility == ChatVisibility::Full && links.is_open(**id)
+        })
         .map(|(id, _)| *id)
         .collect();
     for id in ids {
@@ -35,9 +41,9 @@ pub(crate) fn broadcast_signed(
     }
 }
 
-/// 只发给一个人。对方把聊天关成“仅系统”或“隐藏”时官方也不发。
+/// 只发给一个人。对方把聊天关成“仅系统”或“隐藏”、或者链路已关时都不发。
 ///
-/// Sends to one player. Official servers also skip players whose chat is system-only or hidden.
+/// Sends to one player. Skipped when their chat is system-only or hidden, or their link is closed.
 pub(crate) fn send_signed_to(
     region: &mut Region,
     to: PlayerId,
@@ -47,10 +53,11 @@ pub(crate) fn send_signed_to(
     target_name: Option<&Component>,
     unsigned: Option<&Component>,
 ) {
-    let visible = region
-        .players
-        .get(&to)
-        .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Full);
+    let visible = region.links.is_open(to)
+        && region
+            .players
+            .get(&to)
+            .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Full);
     if visible {
         send_one(region, to, message, chat_type, name, target_name, unsigned);
     }

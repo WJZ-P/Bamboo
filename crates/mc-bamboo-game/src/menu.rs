@@ -22,7 +22,7 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
         ContainerClose, ContainerInput, ContainerSetContent, ContainerSetSlot, GameMode,
-        HashedStack, OpenScreen, SetCursorItem, SetPlayerInventory, SystemChat,
+        HashedStack, OpenScreen, SetCursorItem, SetPlayerInventory,
     },
     text::Component,
 };
@@ -891,13 +891,10 @@ fn locked_message(region: &mut Region, id: PlayerId, target: &Target, title: &st
     }
     let name = menu_title(region, target, title);
     let content = Component::translate("container.isLocked", [name.into()]);
-    region.links.send(
-        id,
-        &SystemChat {
-            content: &content,
-            overlay: true,
-        },
-    );
+    // 官方 `sendOverlayMessage` → `sendSystemMessage(message, true)`，overlay 恒发。
+    //
+    // Official `sendOverlayMessage` → `sendSystemMessage(message, true)`; overlay always arrives.
+    crate::chat::send_system_message(region, id, &content, true);
     true
 }
 

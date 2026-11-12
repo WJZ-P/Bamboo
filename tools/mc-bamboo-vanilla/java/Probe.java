@@ -160,6 +160,12 @@ import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
 import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderCenterPacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderLerpSizePacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderSizePacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDelayPacket;
+import net.minecraft.network.protocol.game.ClientboundSetBorderWarningDistancePacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundTakeItemEntityPacket;
@@ -319,6 +325,8 @@ public final class Probe {
     private static final String PLAYER = "Kitten";
     private static final String SECOND_PLAYER = "Mochi";
     private static final String LATE_PLAYER = "Latecomer";
+    /** 边界改过之后才进服，检查它的 `initialize_border`。 */
+    private static final String BORDER_PLAYER = "BorderLate";
     /** 不在 `ops.json` 里，用来确认没有权限的客户端改不了规则、也切不了模式。 */
     private static final String VISITOR = "Visitor";
     /** 以旁观模式进服，右键工作台。能力包仍是创造模式那一份。 */
@@ -408,7 +416,13 @@ public final class Probe {
             "handleForgetLevelChunk",
             "handleGameEvent",
             "handleGameRuleValues",
+            "handleInitializeBorder",
             "handleKeepAlive",
+            "handleSetBorderCenter",
+            "handleSetBorderLerpSize",
+            "handleSetBorderSize",
+            "handleSetBorderWarningDelay",
+            "handleSetBorderWarningDistance",
             "handleLevelChunkWithLight",
             "handleLevelEvent",
             "handleLightUpdatePacket",
@@ -807,6 +821,7 @@ public final class Probe {
             section("commands", () -> commands(kitten, mochi, late));
             section("gamerules", () -> gamerules(kitten));
             section("leaving", () -> leaving(kitten, mochi, late));
+            section("world border", () -> worldBorder(kitten, late));
 
             section("long running", () -> {
                 await("play: keep-alives and the latency broadcast arrived", JOIN_TIMEOUT_MILLIS, kitten::longRunningDone);
@@ -2705,6 +2720,112 @@ public final class Probe {
             return client.suggestions.suggestions().stream().map(ClientboundCommandSuggestionsPacket.Entry::text).toList();
         }
 
+        /**
+         * 世界边界：管理员用 {@code /worldborder} 改边界，检查广播的六个包用官方编解码读得开、
+         * 字段正确；后进服的玩家拿到当前的 {@code initialize_border}；界外放方块被拒。
+         *
+         * World border: an operator changes it with {@code /worldborder}, the six broadcast
+         * packets must decode with vanilla codecs and carry the right fields, a late joiner
+         * gets the current {@code initialize_border}, and placing outside the border is refused.
+         */
+        private void worldBorder(Join admin, Join observer) throws IOException {
+            int sizes = admin.borderSizes.size();
+            admin.send(new ServerboundChatCommandPacket("worldborder set 100"));
+            await("worldborder: set broadcasts set_border_size to both players",
+                    () -> admin.borderSizes.size() > sizes && observer.borderSizes.size() > sizes);
+            check("worldborder: set_border_size carries the new size",
+                    admin.borderSizes.get(sizes).getSize() == 100.0
+                            && observer.borderSizes.get(sizes).getSize() == 100.0);
+
+            int centers = admin.borderCenters.size();
+            admin.send(new ServerboundChatCommandPacket("worldborder center 20.5 -30.5"));
+            await("worldborder: center broadcasts set_border_center",
+                    () -> admin.borderCenters.size() > centers && observer.borderCenters.size() > centers);
+            check("worldborder: set_border_center carries the new centre",
+                    admin.borderCenters.get(centers).getNewCenterX() == 20.5
+                            && admin.borderCenters.get(centers).getNewCenterZ() == -30.5);
+
+            int delays = admin.borderWarningDelays.size();
+            admin.send(new ServerboundChatCommandPacket("worldborder warning time 10s"));
+            await("worldborder: warning time broadcasts set_border_warning_delay",
+                    () -> admin.borderWarningDelays.size() > delays
+                            && observer.borderWarningDelays.size() > delays);
+            check("worldborder: set_border_warning_delay carries 200 ticks",
+                    admin.borderWarningDelays.get(delays).getWarningDelay() == 200);
+
+            int distances = admin.borderWarningDistances.size();
+            admin.send(new ServerboundChatCommandPacket("worldborder warning distance 7"));
+            await("worldborder: warning distance broadcasts set_border_warning_distance",
+                    () -> admin.borderWarningDistances.size() > distances
+                            && observer.borderWarningDistances.size() > distances);
+            check("worldborder: set_border_warning_distance carries 7 blocks",
+                    admin.borderWarningDistances.get(distances).getWarningBlocks() == 7);
+
+            // 官方 `onSetDamagePerBlock` / `onSetSafeZone` 的监听器什么都不做。
+            //
+            // Vanilla's `onSetDamagePerBlock` / `onSetSafeZone` listeners send nothing.
+            int beforeDamage = borderPacketCount(admin);
+            admin.send(new ServerboundChatCommandPacket("worldborder damage amount 2"));
+            pumpFor(SETTLE_MILLIS);
+            check("worldborder: damage amount broadcasts no border packet",
+                    borderPacketCount(admin) == beforeDamage);
+
+            Join newcomer = connect(BORDER_PLAYER, HumanoidArm.RIGHT, false);
+            await("worldborder: a later player got the spawn chunks", JOIN_TIMEOUT_MILLIS,
+                    newcomer::spawnChunksDone);
+            await("worldborder: a later player got initialize_border",
+                    () -> newcomer.initializeBorder != null);
+            ClientboundInitializeBorderPacket init = newcomer.initializeBorder;
+            check("worldborder: initialize_border carries the current border",
+                    init.getNewCenterX() == 20.5
+                            && init.getNewCenterZ() == -30.5
+                            && init.getOldSize() == 100.0
+                            && init.getNewSize() == 100.0
+                            && init.getLerpTime() == 0L
+                            && init.getNewAbsoluteMaxSize() == 29_999_984
+                            && init.getWarningBlocks() == 7
+                            && init.getWarningTime() == 200);
+
+            int lerps = admin.borderLerpSizes.size();
+            admin.send(new ServerboundChatCommandPacket("worldborder add 50 5s"));
+            await("worldborder: add with time broadcasts set_border_lerp_size",
+                    () -> admin.borderLerpSizes.size() > lerps);
+            check("worldborder: set_border_lerp_size carries old size, target and ticks",
+                    admin.borderLerpSizes.get(lerps).getOldSize() == 100.0
+                            && admin.borderLerpSizes.get(lerps).getNewSize() == 150.0
+                            && admin.borderLerpSizes.get(lerps).getLerpTime() == 100L);
+
+            // 把边界挪到离出生点很远的地方，管理员自己就落在界外；在脚下放石头应当被拒。
+            //
+            // Move the border far away so the operator is outside it; placing a stone at
+            // their feet must be refused.
+            admin.send(new ServerboundChatCommandPacket("worldborder set 10"));
+            admin.send(new ServerboundChatCommandPacket("worldborder center 1000000.0 1000000.0"));
+            await("worldborder: the far-away centre arrived",
+                    () -> admin.borderCenters.stream()
+                            .anyMatch(packet -> packet.getNewCenterX() == 1_000_000.0));
+            BlockPos ground = BlockPos.containing(admin.position).below();
+            BlockPos at = ground.above();
+            admin.blocks.remove(at);
+            admin.send(new ServerboundSetCreativeModeSlotPacket(HOTBAR_START, new ItemStack(Items.STONE)));
+            admin.send(new ServerboundSetCarriedItemPacket(0));
+            admin.send(new ServerboundUseItemOnPacket(
+                    InteractionHand.MAIN_HAND,
+                    new BlockHitResult(Vec3.upFromBottomCenterOf(ground, 1.0), Direction.UP, ground, false),
+                    admin.nextSequence()));
+            pumpFor(SETTLE_MILLIS);
+            check("worldborder: placing a block outside the border is rejected",
+                    admin.blocks.get(at) == null || !admin.blocks.get(at).is(Blocks.STONE));
+        }
+
+        private static int borderPacketCount(Join client) {
+            return client.borderSizes.size()
+                    + client.borderCenters.size()
+                    + client.borderLerpSizes.size()
+                    + client.borderWarningDelays.size()
+                    + client.borderWarningDistances.size();
+        }
+
         private void leaving(Join stays, Join leaves, Join late) throws IOException {
             String expected = leaves.player + " left the game";
             int leaverId = leaves.entityId;
@@ -2874,6 +2995,16 @@ public final class Probe {
         /** `game_rule_values` 里的短名和序列化后的值。 */
         final Map<String, String> gameRuleValues = new HashMap<>();
         boolean gameRuleValuesArrived;
+        /** 世界边界的六个包。官方解码器解不开就不会走到对应的 handler。 */
+        //
+        // The six world-border packets. The official decoder never reaches a handler
+        // if a packet fails to decode.
+        ClientboundInitializeBorderPacket initializeBorder;
+        final List<ClientboundSetBorderCenterPacket> borderCenters = new ArrayList<>();
+        final List<ClientboundSetBorderSizePacket> borderSizes = new ArrayList<>();
+        final List<ClientboundSetBorderLerpSizePacket> borderLerpSizes = new ArrayList<>();
+        final List<ClientboundSetBorderWarningDelayPacket> borderWarningDelays = new ArrayList<>();
+        final List<ClientboundSetBorderWarningDistancePacket> borderWarningDistances = new ArrayList<>();
         /** 收到的实体事件字节。物品损坏是 47 或 48。 */
         // Entity-event bytes. An item break is 47 or 48.
         final List<Byte> entityEvents = new ArrayList<>();
@@ -3273,6 +3404,18 @@ public final class Probe {
             handlers.put("handleSetTime", value -> onSetTime((ClientboundSetTimePacket) value));
             handlers.put("handleGameEvent", value -> onGameEvent((ClientboundGameEventPacket) value));
             handlers.put("handleGameRuleValues", value -> onGameRuleValues((ClientboundGameRuleValuesPacket) value));
+            handlers.put("handleInitializeBorder",
+                    value -> initializeBorder = (ClientboundInitializeBorderPacket) value);
+            handlers.put("handleSetBorderCenter",
+                    value -> borderCenters.add((ClientboundSetBorderCenterPacket) value));
+            handlers.put("handleSetBorderSize",
+                    value -> borderSizes.add((ClientboundSetBorderSizePacket) value));
+            handlers.put("handleSetBorderLerpSize",
+                    value -> borderLerpSizes.add((ClientboundSetBorderLerpSizePacket) value));
+            handlers.put("handleSetBorderWarningDelay",
+                    value -> borderWarningDelays.add((ClientboundSetBorderWarningDelayPacket) value));
+            handlers.put("handleSetBorderWarningDistance",
+                    value -> borderWarningDistances.add((ClientboundSetBorderWarningDistancePacket) value));
             handlers.put("handleSetChunkCacheCenter",
                     value -> onChunkCenter((ClientboundSetChunkCacheCenterPacket) value));
             handlers.put("handleForgetLevelChunk",
@@ -3381,7 +3524,8 @@ public final class Probe {
             //
             // The offline probe's ops.json lists Kitten, Mochi and Latecomer at level 4.
             // Visitor and Spectator are absent. The online-mode server has no op list.
-            if (online() || player.equals(VISITOR) || player.equals(SPECTATOR_PLAYER)) {
+            if (online() || player.equals(VISITOR) || player.equals(SPECTATOR_PLAYER)
+                    || player.equals(BORDER_PLAYER)) {
                 check("commands: a player absent from ops.json is level 0", packet.getEventId() == 24);
             } else {
                 check("commands: the permission event is owners", packet.getEventId() == 28);

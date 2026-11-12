@@ -548,6 +548,10 @@ pub enum Value {
     GameProfile(GameProfileInput),
     BlockPos(Coordinates),
     Vec3(Coordinates),
+    /// 官方 `Vec2Argument.vec2()` 的两个水平坐标。`y` 是 `z`。
+    ///
+    /// The two horizontal coordinates of vanilla `Vec2Argument.vec2()`. `y` is `z`.
+    Vec2([WorldCoordinate; 2]),
     Rotation(Rotation),
     BlockState(BlockStateInput),
     BlockPredicate(BlockPredicateInput),
@@ -644,6 +648,13 @@ impl Value {
     pub fn as_vec3(&self) -> Option<Coordinates> {
         match self {
             Self::Vec3(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_vec2(&self) -> Option<[WorldCoordinate; 2]> {
+        match self {
+            Self::Vec2(value) => Some(*value),
             _ => None,
         }
     }

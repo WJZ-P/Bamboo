@@ -549,17 +549,18 @@ mod tests {
 
     impl TempDir {
         fn new(name: &str) -> Self {
-            // 线程名形如 `anvil::tests::foo`，Windows 路径里 `:` 非法；
-            // 换成 `_` 只是让临时目录名合法，不改测试逻辑。
-            // Thread names contain `::`, which is illegal in Windows paths;
-            // replacing it with `_` only makes the temp dir name legal.
+            // Windows 路径里不能有 `:`：libtest 的线程名是 `模块::测试名`，直接拼进
+            // 目录名会让 `create_dir_all` 报 ERROR_INVALID_NAME。
+            //
+            // Windows paths cannot contain `:`: the libtest thread name is
+            // `module::test`, which makes `create_dir_all` fail with ERROR_INVALID_NAME.
             let thread = std::thread::current()
                 .name()
                 .unwrap_or("test")
                 .replace(':', "_");
             let path = std::env::temp_dir().join(format!(
                 "bamboo-anvil-{name}-{}-{thread}",
-                std::process::id()
+                std::process::id(),
             ));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).expect("创建临时目录");

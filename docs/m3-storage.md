@@ -567,6 +567,15 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 游戏规则、默认世界生成设置生成地形，和 Bamboo 的平坦模板不一样。验证只用官方的类
 读 / 写单个文件，不开真实服务端、不接受 EULA。
 
+（2026-11-12 按实现更新）`minecraft/world_border.dat` 的内容已经就绪、但还没接线：
+`mc-bamboo-blocks::world_border::WorldBorder` 存着官方 `WorldBorder.Settings` 的九个字段
+（`center_x` / `center_z` / `damage_per_block` / `safe_zone` / `warning_blocks` /
+`warning_time` / `size` / `lerp_time` / `lerp_target`），`export_settings()` 对应
+`Settings(WorldBorder)`，`restore(settings, game_time)` 对应 `CODEC.xmap` 加上
+`getWorldBorder()` 里的 `applyInitialSettings(gameTime)`。权威副本在 `Global`，
+不写盘、重启回到官方默认边界；接进第 6 步「接进游戏那一半」时把这两个函数挂到
+`data/` 的读写上即可（渐变中的 `lerp_time` 是剩余刻数，恢复时用当前世界时间重新起算）。
+
 ## 10. 转换工具
 
 放在已有的 `tools/` 下面，作为 `mc-bamboo-vanilla` 的新子命令还是独立 bin，见第 13 节 Q8。

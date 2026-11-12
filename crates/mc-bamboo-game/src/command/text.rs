@@ -13,11 +13,7 @@
 
 use mc_bamboo_command::{ParsedCommand, Value, argument::entity::parse_entity, permission};
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_protocol::{
-    components::text::checked_component,
-    packet::play::{ChatVisibility, SystemChat},
-    text::Component,
-};
+use mc_bamboo_protocol::{components::text::checked_component, text::Component};
 
 use crate::{
     command::{
@@ -373,27 +369,17 @@ pub(crate) fn tellraw(
     let targets = select::players(region, id, level_of(region, id), selector)?;
     let raw = component(parsed, "message")?;
     for target in targets {
-        // 官方 `ServerPlayer.sendSystemMessage` 在聊天设为「隐藏」时不发系统消息。
-        let hidden = region
-            .players
-            .get(&target)
-            .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Hidden);
-        if hidden {
-            continue;
-        }
         let target_uuid = region
             .players
             .get(&target)
             .map(|player| player.uuid)
             .unwrap_or_default();
         let resolved = resolve(global, region, id, target, target_uuid, raw.tag(), 0);
-        region.links.send(
-            target,
-            &SystemChat {
-                content: &resolved,
-                overlay: false,
-            },
-        );
+        // 官方 `TellRawCommand` 对每个目标调 `player.sendSystemMessage`，隐藏聊天的不发。
+        //
+        // Official `TellRawCommand` calls `player.sendSystemMessage` for each target;
+        // hidden chat is skipped.
+        crate::chat::send_system_message(region, target, &resolved, false);
     }
     Ok(())
 }

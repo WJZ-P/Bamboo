@@ -402,6 +402,14 @@ impl World {
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
 
+        // 官方 `ServerLevel.tick` 开头的 "world border" 阶段在天气和时间之前。
+        // 渐变推进后把新快照发布给 region，这一刻的方块逻辑和实体碰撞都读它。
+        //
+        // Vanilla `ServerLevel.tick`'s "world border" phase comes before weather and time.
+        // After the lerp step, publish the new snapshot; this tick's block logic and
+        // entity collisions read it.
+        self.global.tick_world_border();
+        self.global.publish_border(&mut self.region);
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
         let weather = weather::advance(&mut self.global, &self.region);
         if !weather.is_empty() {
@@ -668,7 +676,11 @@ impl World {
         self.region.send_own_entity_data(id);
 
         if let Some(frames) = self.global.joined_message(id) {
-            self.region.links.broadcast_except(id, &frames);
+            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性；进服消息跳过本人。
+            //
+            // Official `PlayerList.broadcastSystemMessage` checks visibility per player;
+            // the join message skips the joining player.
+            crate::chat::broadcast_system_message(&mut self.region, &frames, Some(id));
         }
 
         // 官方 `ServerScoreboard.getStartTrackingPackets` 和 `CustomBossEvents.onPlayerConnect`
@@ -688,6 +700,7 @@ impl World {
             self.global.clock(),
             join_spawn,
             self.global.state().weather,
+            self.global.world_border(),
         );
 
         // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
@@ -769,7 +782,10 @@ impl World {
         self.region.peer_ips.remove(&id);
 
         if let Some(frames) = self.global.left_message(id) {
-            self.region.links.broadcast(&frames);
+            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性。
+            //
+            // Official `PlayerList.broadcastSystemMessage` checks visibility per player.
+            crate::chat::broadcast_system_message(&mut self.region, &frames, None);
         }
         entity_sync::on_leave(&mut self.region, id);
         entity_tracking::on_leave(&mut self.region, id);

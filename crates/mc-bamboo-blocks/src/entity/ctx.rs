@@ -18,7 +18,7 @@ use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    BlockGameRules, BlockHit,
+    BlockGameRules, BlockHit, WorldBorder,
     shape::{Aabb, CollisionContext},
     state::{BlockState, FluidState, SupportType},
     world::World,
@@ -57,6 +57,13 @@ pub trait BlockView {
     fn block_game_rules(&self) -> BlockGameRules;
     /// `FlowingFluid` 的流体顶面高度。
     fn fluid_height(&self, fluid: FluidState, pos: BlockPos) -> f32;
+    /// `Level.getWorldBorder()`：实体碰撞要读的边界快照。默认是官方默认边界。
+    ///
+    /// `Level.getWorldBorder()`: the border snapshot entity collisions read.
+    /// The default is the vanilla default border.
+    fn world_border(&self) -> WorldBorder {
+        WorldBorder::default()
+    }
 
     /// 一次读一片方块状态，默认逐格调 [`BlockView::block_state`]。
     ///
@@ -163,6 +170,10 @@ impl BlockView for World<'_> {
 
     fn fluid_height(&self, fluid: FluidState, pos: BlockPos) -> f32 {
         crate::fluid::height(fluid, self, pos)
+    }
+
+    fn world_border(&self) -> WorldBorder {
+        World::world_border(self)
     }
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {

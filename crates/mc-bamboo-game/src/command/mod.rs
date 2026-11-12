@@ -35,6 +35,7 @@ mod text;
 mod time;
 mod title;
 mod weather;
+mod world_border;
 mod world_settings;
 
 use std::sync::OnceLock;
@@ -45,8 +46,8 @@ use mc_bamboo_command::{
 use mc_bamboo_protocol::packet::play::{
     ArgumentNode, ArgumentProperties, CommandNode, CommandNodeKind, CommandSuggestions,
     CommandTree, EntityEvent, PERMISSION_LEVEL_ALL, SignedCommand, StringProperty, Suggestion,
-    SystemChat,
 };
+use tracing::error;
 
 use crate::{
     chat, command::feedback::CommandFail, global::Global, inbound::PlayerId, links::Links,
@@ -68,19 +69,28 @@ pub(crate) struct Commands {
     pub(crate) rules: Vec<Option<u16>>,
 }
 
-fn reject_unsigned_signable(region: &mut Region, id: PlayerId) {
+fn reject_unsigned_signable(region: &mut Region, id: PlayerId, command: &str) {
+    let name = region
+        .players
+        .get(&id)
+        .map(|player| player.name.as_str())
+        .unwrap_or_default();
+    // 官方 `performUnsignedChatCommand` 先记一条错误日志，再 `player.sendSystemMessage`，
+    // 后者对隐藏聊天抑制这条红色消息。
+    //
+    // Official `performUnsignedChatCommand` logs an error, then calls `player.sendSystemMessage`,
+    // which suppresses this red message for hidden chat.
+    error!(
+        player = %name,
+        %command,
+        "received unsigned command packet, but the command requires signable arguments"
+    );
     let content = mc_bamboo_protocol::text::Component::translate(
         "chat.disabled.invalid_command_signature",
         [],
     )
     .color(mc_bamboo_protocol::text::Color::Red);
-    region.links.send(
-        id,
-        &SystemChat {
-            content: &content,
-            overlay: false,
-        },
-    );
+    crate::chat::send_system_message(region, id, &content, false);
 }
 
 pub(crate) fn commands() -> &'static Commands {
@@ -153,7 +163,7 @@ pub(crate) fn on_command(
                 && secure_chat::enforces(region)
                 && secure_chat::has_signable_argument(&parsed.arguments)
             {
-                reject_unsigned_signable(region, id);
+                reject_unsigned_signable(region, id, command);
             } else if signed
                 .is_some_and(|signed| !secure_chat::collect_command(region, id, &parsed, signed))
             {
@@ -192,7 +202,7 @@ pub(crate) fn on_command(
                     );
                 }
             } else if secure_chat::enforces(region) && !expected.is_empty() {
-                reject_unsigned_signable(region, id);
+                reject_unsigned_signable(region, id, command);
             } else {
                 feedback::report(
                     region,
@@ -352,6 +362,7 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::BlockPos
         | ArgumentType::Vec3
         | ArgumentType::Vec3Uncentered
+        | ArgumentType::Vec2
         | ArgumentType::Rotation
         | ArgumentType::BlockState
         | ArgumentType::BlockPredicate

@@ -4,13 +4,10 @@
 //! colour and recipients follow the official rules.
 
 use mc_bamboo_command::{ErrorArg, ParseError};
-use mc_bamboo_protocol::{
-    packet::play::SystemChat,
-    text::{Color, Component, TranslateArg},
-};
+use mc_bamboo_protocol::text::{Color, Component, TranslateArg};
 use tracing::info;
 
-use crate::{inbound::PlayerId, links::encode_frames, region::Region};
+use crate::{inbound::PlayerId, region::Region};
 
 /// 执行期的失败。解析错误另带游标，用来画第二行 `command.context.here`。
 ///
@@ -101,13 +98,12 @@ fn context_line(input: &str, cursor: usize) -> Component {
 }
 
 pub(crate) fn send_system(region: &mut Region, id: PlayerId, content: &Component) {
-    region.links.send(
-        id,
-        &SystemChat {
-            content,
-            overlay: false,
-        },
-    );
+    // 官方 `CommandSourceStack.sendSuccess` / `sendFailure` 最后都走
+    // `ServerPlayer.sendSystemMessage`，隐藏聊天时不发非 overlay 系统消息。
+    //
+    // Official `CommandSourceStack.sendSuccess` / `sendFailure` both end at
+    // `ServerPlayer.sendSystemMessage`, which suppresses non-overlay messages for hidden chat.
+    crate::chat::send_system_message(region, id, content, false);
 }
 
 /// 官方 `sendSuccess`。`broadcast` 为真时，其他 OP 收到灰色斜体的 `chat.type.admin`。
@@ -150,10 +146,9 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     )
     .color(Color::Gray)
     .italic();
-    let frames = encode_frames(&SystemChat {
-        content: &admin,
-        overlay: false,
-    });
+    // `broadcastToAdmins` 逐个 OP 调 `ServerPlayer.sendSystemMessage`，隐藏聊天的 OP 不发。
+    //
+    // `broadcastToAdmins` calls `ServerPlayer.sendSystemMessage` for each op; a hidden-chat op is skipped.
     let ops: Vec<PlayerId> = region
         .players
         .iter()
@@ -161,6 +156,6 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
         .map(|(id, _)| *id)
         .collect();
     for id in ops {
-        region.links.send_frames(id, &frames);
+        crate::chat::send_system_message(region, id, &admin, false);
     }
 }
