@@ -222,7 +222,11 @@ pub(crate) fn run_random_ticks(region: &mut Region) {
         //
         // `ServerChunkCache.tickChunks` passes `GameRules.RANDOM_TICK_SPEED` to `tickChunk`.
         let outcome = mc_bamboo_blocks::tick_chunk(&mut level, ticks, chunk, speed);
-        send_effects(region, None, &outcome.effects);
+        // 超平坦的随机刻一个效果也不发；空切片时 `send_effects` 的函数体什么也不做，
+        // 这里连调用和逐区块的可变借都省掉。
+        if !outcome.effects.is_empty() {
+            send_effects(region, None, &outcome.effects);
+        }
     }
 }
 
