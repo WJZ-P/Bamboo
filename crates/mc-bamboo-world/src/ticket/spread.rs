@@ -223,27 +223,6 @@ impl Scratch {
         self.blocks.len() + self.pool.len()
     }
 
-    /// 取一个块的格子；本轮第一次碰到这个格子时先重置标记。
-    fn cell(&mut self, pos: ChunkPos) -> (&mut u8, &mut i32) {
-        let key = block_key(pos);
-        let index = cell_index(pos);
-        let epoch = self.epoch;
-        let block = match self.blocks.entry(key) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let block = self.pool.pop().unwrap_or_else(ScratchBlock::new);
-                self.used_blocks.push(key);
-                entry.insert(block)
-            }
-        };
-        if block.stamp[index] != epoch {
-            block.stamp[index] = epoch;
-            block.flags[index] = 0;
-            block.old[index] = 0;
-        }
-        (&mut block.flags[index], &mut block.old[index])
-    }
-
     /// 记下一个区块在本次更新开始前的等级；同一轮里只记第一次。
     fn record(&mut self, pos: ChunkPos, old: i32) {
         let key = block_key(pos);
@@ -273,21 +252,42 @@ impl Scratch {
         }
     }
 
-    /// BFS 里"这个位置见过没有"，第一次调用时标记。
-    fn visit(&mut self, pos: ChunkPos) -> bool {
-        let (flags, _) = self.cell(pos);
-        if *flags & ScratchBlock::SEEN != 0 {
-            false
-        } else {
-            *flags |= ScratchBlock::SEEN;
-            true
+    /// BFS 里一次完成"见过没有 / 记旧等级 / 标清空"，只查一次块。
+    fn visit_and_reset(&mut self, pos: ChunkPos, old: i32) -> bool {
+        let key = block_key(pos);
+        let index = cell_index(pos);
+        let epoch = self.epoch;
+        let block = match self.blocks.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let block = self.pool.pop().unwrap_or_else(ScratchBlock::new);
+                self.used_blocks.push(key);
+                entry.insert(block)
+            }
+        };
+        if block.stamp[index] != epoch {
+            block.stamp[index] = epoch;
+            block.flags[index] = 0;
+            block.old[index] = 0;
         }
+        if block.flags[index] & ScratchBlock::SEEN != 0 {
+            return false;
+        }
+        block.flags[index] |= ScratchBlock::SEEN | ScratchBlock::RESET;
+        if block.bitmap_epoch != epoch {
+            block.bitmap_epoch = epoch;
+            block.recorded.fill(0);
+        }
+        if block.flags[index] & ScratchBlock::RECORDED == 0 {
+            block.flags[index] |= ScratchBlock::RECORDED;
+            block.old[index] = old;
+            block.recorded[index / 64] |= 1 << (index % 64);
+        }
+        true
     }
 
     /// 把一个位置记进清空区（调用前已经 visit 过）。
-    fn mark_reset(&mut self, pos: ChunkPos) {
-        let (flags, _) = self.cell(pos);
-        *flags |= ScratchBlock::RESET;
+    fn push_reset_order(&mut self, pos: ChunkPos) {
         self.reset_order.push(pos);
     }
 
@@ -586,16 +586,12 @@ impl Plane {
                 let pos = frontier[value as usize][index];
                 index += 1;
                 count(super::profile::C_BFS_VISIT, 1);
-                if !self.scratch.visit(pos) {
-                    continue;
-                }
                 // 等级低于候选值：这个区块由别的源撑着，不受升高影响，整支剪掉。
-                if cursor.get(pos) != value {
+                if cursor.get(pos) != value || !self.scratch.visit_and_reset(pos, value) {
                     continue;
                 }
                 count(super::profile::C_BFS_RESET, 1);
-                self.scratch.record(pos, value);
-                self.scratch.mark_reset(pos);
+                self.scratch.push_reset_order(pos);
                 let next = value + 1;
                 if next < limit {
                     // 等级低于候选值的邻居必然由别的源撑着，入队前就剪掉；
