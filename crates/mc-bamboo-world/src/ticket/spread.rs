@@ -222,12 +222,14 @@ impl Scratch {
         let key = block_key(pos);
         let index = cell_index(pos);
         let epoch = self.epoch;
-        if !self.blocks.contains_key(&key) {
-            let block = self.pool.pop().unwrap_or_else(ScratchBlock::new);
-            self.blocks.insert(key, block);
-            self.used_blocks.push(key);
-        }
-        let block = self.blocks.get_mut(&key).unwrap();
+        let block = match self.blocks.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let block = self.pool.pop().unwrap_or_else(ScratchBlock::new);
+                self.used_blocks.push(key);
+                entry.insert(block)
+            }
+        };
         if block.stamp[index] != epoch {
             block.stamp[index] = epoch;
             block.flags[index] = 0;
