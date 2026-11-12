@@ -13,7 +13,7 @@
 //!
 //! 哈希图只用来查找，不用来产生输出：变化列表按 (x, z) 排序，只包含等级真的变了的位置。
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use mc_bamboo_core::ChunkPos;
 
@@ -131,20 +131,30 @@ impl Plane {
         let limit = self.limit;
         let _fold_guard = Guard::new(stages[4]);
         // 同一个位置可能在一步里被改了多次（玩家移动时增删交错），折叠成"最初旧值 → 最终新值"。
-        let mut folded: BTreeMap<ChunkPos, (i32, i32)> = BTreeMap::new();
-        for &(pos, old, new) in changes {
-            let old = old.clamp(0, limit);
-            let new = new.clamp(0, limit);
-            folded
-                .entry(pos)
-                .and_modify(|entry| entry.1 = new)
-                .or_insert((old, new));
-        }
-        let effective: Vec<(ChunkPos, i32, i32)> = folded
-            .into_iter()
-            .filter(|(_, (old, new))| old != new)
-            .map(|(pos, (old, new))| (pos, old, new))
+        // 先按 (坐标, 到达顺序) 排：同一位置的若干条变化挨在一起且保持先后，
+        // 第一条的旧值配最后一条的新值。排序是稳定的口径，不依赖哈希图。
+        let mut folded: Vec<((i32, i32), usize, i32, i32)> = changes
+            .iter()
+            .enumerate()
+            .map(|(order, &(pos, old, new))| {
+                (
+                    (pos.x, pos.z),
+                    order,
+                    old.clamp(0, limit),
+                    new.clamp(0, limit),
+                )
+            })
             .collect();
+        folded.sort_unstable_by_key(|&(key, order, _, _)| (key, order));
+        let mut effective: Vec<(ChunkPos, i32, i32)> = Vec::with_capacity(folded.len());
+        for ((x, z), _, old, new) in folded {
+            let pos = ChunkPos::new(x, z);
+            match effective.last_mut() {
+                Some(last) if last.0 == pos => last.2 = new,
+                _ => effective.push((pos, old, new)),
+            }
+        }
+        effective.retain(|&(_, old, new)| old != new);
         if effective.is_empty() {
             return Vec::new();
         }
@@ -214,9 +224,7 @@ impl Plane {
 
         drop(_relax_guard);
         let _collect_guard = Guard::new(stages[3]);
-        // 按块号、块内下标遍历，天然按 (x, z) 排序，不用再排序。
-        // 块号按 (x, z) 排；负坐标下 (x,z) 的字典序和块号字典序不一致，
-        // 显式按块内第一个坐标排。最终输出仍按每个区块的 (x, z) 排序。
+        // 变化列表最终按 (x, z) 排序。
         let mut keys: Vec<_> = original.blocks.keys().copied().collect();
         keys.sort_unstable_by_key(|&(bx, bz)| (bx << BLOCK_SHIFT, bz << BLOCK_SHIFT));
         let mut result = Vec::new();
