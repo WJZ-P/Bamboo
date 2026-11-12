@@ -14,7 +14,10 @@
 //! 清空区、访问标记和变化列表都按发现顺序或坐标顺序遍历，辅助结构的块每轮回收到一个
 //! 有上限的池子，数量只和一次更新覆盖的区域有关，和历史上走过多少区块无关。
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    mem,
+};
 
 use mc_bamboo_core::ChunkPos;
 
@@ -266,10 +269,10 @@ impl Scratch {
     }
 
     /// 按块号、块内下标遍历，天然按 (x, z) 排序（负块号单独处理）。
-    fn collect(&mut self, levels: &LevelGrid, limit: i32) -> Vec<(ChunkPos, i32, i32)> {
+    fn collect(&mut self, levels: &LevelGrid, limit: i32, result: &mut Vec<(ChunkPos, i32, i32)>) {
+        result.clear();
         self.used_blocks
             .sort_unstable_by_key(|&(bx, bz)| (bx << BLOCK_SHIFT, bz << BLOCK_SHIFT));
-        let mut result = Vec::new();
         let epoch = self.epoch;
         for &key in &self.used_blocks {
             let block = &self.blocks[&key];
@@ -297,7 +300,6 @@ impl Scratch {
                 .all(|w| (w[0].0.x, w[0].0.z) < (w[1].0.x, w[1].0.z))
         );
         debug_assert!(result.iter().all(|&(_, _, new)| new <= limit));
-        result
     }
 }
 
@@ -314,6 +316,26 @@ pub struct Plane {
     scratch: Scratch,
     /// 跨轮复用的分桶队列；每轮清空但不释放桶的容量。
     queue: LevelQueue,
+    /// 跨轮复用的源变化列表。
+    buffers: Buffers,
+}
+
+/// `update` 里每轮都要用、但跨轮可以复用容量的几个 `Vec`。
+#[derive(Debug, Default)]
+struct Buffers {
+    folded: Vec<((i32, i32), usize, i32, i32)>,
+    effective: Vec<(ChunkPos, i32, i32)>,
+    frontier: Vec<Vec<ChunkPos>>,
+}
+
+impl Buffers {
+    fn new(limit: i32) -> Self {
+        Self {
+            folded: Vec::new(),
+            effective: Vec::new(),
+            frontier: (0..=limit.max(0)).map(|_| Vec::new()).collect(),
+        }
+    }
 }
 
 impl Plane {
@@ -324,6 +346,7 @@ impl Plane {
             levels: LevelGrid::new(limit),
             scratch: Scratch::new(),
             queue: LevelQueue::new(limit),
+            buffers: Buffers::new(limit),
         }
     }
 
@@ -362,21 +385,20 @@ impl Plane {
         // 同一个位置可能在一步里被改了多次（玩家移动时增删交错），折叠成"最初旧值 → 最终新值"。
         // 先按 (坐标, 到达顺序) 排：同一位置的若干条变化挨在一起且保持先后，
         // 第一条的旧值配最后一条的新值。排序是稳定的口径，不依赖哈希图。
-        let mut folded: Vec<((i32, i32), usize, i32, i32)> = changes
-            .iter()
-            .enumerate()
-            .map(|(order, &(pos, old, new))| {
-                (
-                    (pos.x, pos.z),
-                    order,
-                    old.clamp(0, limit),
-                    new.clamp(0, limit),
-                )
-            })
-            .collect();
+        let mut folded = mem::take(&mut self.buffers.folded);
+        folded.clear();
+        folded.extend(changes.iter().enumerate().map(|(order, &(pos, old, new))| {
+            (
+                (pos.x, pos.z),
+                order,
+                old.clamp(0, limit),
+                new.clamp(0, limit),
+            )
+        }));
         folded.sort_unstable_by_key(|&(key, order, _, _)| (key, order));
-        let mut effective: Vec<(ChunkPos, i32, i32)> = Vec::with_capacity(folded.len());
-        for ((x, z), _, old, new) in folded {
+        let mut effective = mem::take(&mut self.buffers.effective);
+        effective.clear();
+        for &((x, z), _, old, new) in &folded {
             let pos = ChunkPos::new(x, z);
             match effective.last_mut() {
                 Some(last) if last.0 == pos => last.2 = new,
@@ -384,7 +406,9 @@ impl Plane {
             }
         }
         effective.retain(|&(_, old, new)| old != new);
+        self.buffers.folded = folded;
         if effective.is_empty() {
+            self.buffers.effective = effective;
             return Vec::new();
         }
         self.scratch.begin();
@@ -422,7 +446,7 @@ impl Plane {
         }
         self.scratch.reset_order = reset_order;
         let mut cursor = self.levels.cursor();
-        for &pos in &self.scratch.reset_order.clone() {
+        for &pos in &self.scratch.reset_order {
             let mut boundary = self.source(pos);
             // 清空区外一圈的区块没被清空，仍保留旧等级。取最小的边界值当候选，
             // 每个清空区块只排一次，而不是给每个邻居排一次。
@@ -458,8 +482,10 @@ impl Plane {
 
         self.queue = queue;
         drop(_relax_guard);
+        self.buffers.effective = effective;
         let _collect_guard = Guard::new(stages[3]);
-        let result = self.scratch.collect(&self.levels, limit);
+        let mut result = Vec::new();
+        self.scratch.collect(&self.levels, limit, &mut result);
         self.scratch.recycle();
         drop(_collect_guard);
         result
@@ -471,8 +497,11 @@ impl Plane {
     /// 这些源取得等级。等级更低的地方由没变的源撑着，剪掉整个分支。每个区块只访问一次。
     fn collect_increases(&mut self, effective: &[(ChunkPos, i32, i32)]) {
         let limit = self.limit;
-        // 第 value 层里装"候选值 == value"的待访问区块。
-        let mut frontier: Vec<Vec<ChunkPos>> = vec![Vec::new(); limit as usize + 1];
+        // 第 value 层里装"候选值 == value"的待访问区块；层向量跨轮复用。
+        let mut frontier = mem::take(&mut self.buffers.frontier);
+        for bucket in &mut frontier {
+            bucket.clear();
+        }
         for &(pos, old, new) in effective {
             if new > old && old < limit {
                 frontier[old as usize].push(pos);
@@ -502,6 +531,7 @@ impl Plane {
                 }
             }
         }
+        self.buffers.frontier = frontier;
     }
 }
 
