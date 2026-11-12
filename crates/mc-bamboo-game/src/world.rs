@@ -568,7 +568,11 @@ impl World {
         self.region.send_own_entity_data(id);
 
         if let Some(frames) = self.global.joined_message(id) {
-            self.region.links.broadcast_except(id, &frames);
+            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性；进服消息跳过本人。
+            //
+            // Official `PlayerList.broadcastSystemMessage` checks visibility per player;
+            // the join message skips the joining player.
+            crate::chat::broadcast_system_message(&mut self.region, &frames, Some(id));
         }
 
         // 官方 `ServerScoreboard.getStartTrackingPackets` 和 `CustomBossEvents.onPlayerConnect`
@@ -603,7 +607,10 @@ impl World {
         self.region.peer_ips.remove(&id);
 
         if let Some(frames) = self.global.left_message(id) {
-            self.region.links.broadcast(&frames);
+            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性。
+            //
+            // Official `PlayerList.broadcastSystemMessage` checks visibility per player.
+            crate::chat::broadcast_system_message(&mut self.region, &frames, None);
         }
         entity_sync::on_leave(&mut self.region, id);
         entity_tracking::on_leave(&mut self.region, id);

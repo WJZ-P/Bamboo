@@ -4,7 +4,7 @@
 
 use mc_bamboo_command::ParsedCommand;
 use mc_bamboo_protocol::{
-    packet::play::{ChatVisibility, LastSeenUpdate, RemoteChatSession, SignedCommand, SystemChat},
+    packet::play::{LastSeenUpdate, RemoteChatSession, SignedCommand},
     text::{Color, Component},
 };
 use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
@@ -389,24 +389,12 @@ fn tell_failure(region: &mut Region, id: PlayerId, failure: ChainFailure) {
         key = failure.key,
         "failed to update the secure chat state"
     );
-    // 官方 `sendSystemMessage`：可见性是隐藏、又不是 overlay 时不发。
+    // 官方 `handleMessageDecodeFailure` 走 `player.sendSystemMessage`，隐藏聊天时不发。
     //
-    // Official `sendSystemMessage` skips a non-overlay message when chat is hidden.
-    let hidden = region
-        .players
-        .get(&id)
-        .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Hidden);
-    if hidden {
-        return;
-    }
+    // Official `handleMessageDecodeFailure` goes through `player.sendSystemMessage`,
+    // which suppresses the message for hidden chat.
     let content = Component::translate(failure.key, []).color(Color::Red);
-    region.links.send(
-        id,
-        &SystemChat {
-            content: &content,
-            overlay: false,
-        },
-    );
+    crate::chat::send_system_message(region, id, &content, false);
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{blocks, registries::block_entity_type};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::{
-    packet::play::{BlockEntityData, CommandBlockMode, SystemChat},
+    packet::play::{BlockEntityData, CommandBlockMode},
     text::Component,
 };
 
@@ -212,13 +212,10 @@ pub(crate) fn on_set(region: &mut Region, id: PlayerId, edit: CommandBlockEdit) 
     // `canUseGameMasterBlocks`, not the permission level on its own.
     if !allowed {
         let content = Component::translate("advMode.notAllowed", []);
-        region.links.send(
-            id,
-            &SystemChat {
-                content: &content,
-                overlay: false,
-            },
-        );
+        // 官方 `handleSetCommandBlock` 走 `player.sendSystemMessage`。
+        //
+        // Official `handleSetCommandBlock` goes through `player.sendSystemMessage`.
+        crate::chat::send_system_message(region, id, &content, false);
         return;
     }
     let Some(current) = state_at(region, pos) else {
@@ -259,13 +256,10 @@ pub(crate) fn on_set(region: &mut Region, id: PlayerId, edit: CommandBlockEdit) 
         "advMode.setCommand.disabled"
     };
     let content = Component::translate(key, [command.into()]);
-    region.links.send(
-        id,
-        &SystemChat {
-            content: &content,
-            overlay: false,
-        },
-    );
+    // 官方 `handleSetCommandBlock` 走 `player.sendSystemMessage`。
+    //
+    // Official `handleSetCommandBlock` goes through `player.sendSystemMessage`.
+    crate::chat::send_system_message(region, id, &content, false);
 }
 
 fn state_for(mode: CommandBlockMode, facing: &str, conditional: bool) -> BlockState {

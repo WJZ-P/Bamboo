@@ -60,10 +60,15 @@ pub(crate) fn sample(
         )
         .color(Color::Gray)
         .italic();
-        region.links.broadcast(&encode_frames(&SystemChat {
+        // 官方 `RandomCommand` 走 `PlayerList.broadcastSystemMessage`，逐玩家看可见性。
+        //
+        // Official `RandomCommand` uses `PlayerList.broadcastSystemMessage`, which checks
+        // visibility per player.
+        let frames = encode_frames(&SystemChat {
             content: &content,
             overlay: false,
-        }));
+        });
+        crate::chat::broadcast_system_message(region, &frames, None);
     } else {
         feedback::success(
             region,
