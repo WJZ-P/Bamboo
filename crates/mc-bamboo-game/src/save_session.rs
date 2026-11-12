@@ -15,21 +15,29 @@
 //! and player IO is done by other modules via `dir()` and `level`; this struct only
 //! owns the lifecycle order.
 
-use std::io;
+use std::{io, path::PathBuf};
 
-use mc_bamboo_data::version;
-use mc_bamboo_nbt::{Compression, Tag, write_compressed};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::{
     level_dat::LevelData,
     world_dir::{
-        LevelSource, SessionLock, WorldDir, load_level_data, read_saved_data, read_saved_data_at,
-        safe_replace, save_level_data, write_default_saved_data, write_saved_data,
-        write_saved_data_at,
+        LevelSource, SAVED_DATA_IDS, SessionLock, WorldDir, encode_level_data, encode_saved_data,
+        load_level_data, read_saved_data, read_saved_data_at, write_default_saved_data,
     },
 };
 use tracing::{info, warn};
 
 use crate::{global::Global, inbound::PlayerId, save_data::StartupData};
+
+/// 一份交给 IO 线程写的独立文件：世界线程只编出字节，不碰磁盘（R5）。
+/// A standalone file handed to the IO thread: the world thread only encodes
+/// bytes and never touches the disk (R5).
+#[derive(Debug, Clone)]
+pub(crate) struct EncodedFile {
+    pub path: PathBuf,
+    pub backup: Option<PathBuf>,
+    pub bytes: Vec<u8>,
+}
 
 /// 命令发给世界线程的存档请求。命令动作不能直接碰 IO，压进 `Global`，由 `World` 消费。
 /// `SaveAll.source` 记下发起命令的玩家：成功消息要等保存完成（flush 还要等 IO 回执）
@@ -139,48 +147,82 @@ impl SaveSession {
         self.auto_save = enabled;
     }
 
-    /// 按官方 `saveAllChunks` 顺序写 `level.dat` → `data/` → `chunk_tickets.dat`。
-    /// 先把运行时的世界设置（出生点、默认游戏模式、难度）同步进 `level.dat`，
-    /// 再把游戏规则、世界边界写成官方 codec 的独立文件；Bamboo 没建模的 saved data
-    /// 写空默认。玩家和区块由调用方在此之前存好；本方法不等待 IO 线程。
-    /// Write `level.dat` → `data/` → `chunk_tickets.dat` in the official order,
-    /// syncing runtime world settings into `level.dat` and writing game rules /
-    /// world border as their official saved-data files. Unmodelled saved data gets
-    /// empty defaults. Players and chunks are saved by the caller, not here.
-    pub(crate) fn save_all(&mut self, global: &Global, last_played: i64) -> io::Result<()> {
+    /// 按官方 `saveAllChunks` 顺序**编出** `level.dat` → `data/` →
+    /// `chunk_tickets.dat` 的字节，交给 IO 线程写。世界线程不碰磁盘（R5 / F3）。
+    /// 先把运行时的世界设置（出生点、默认游戏模式、难度）同步进 `LevelData`。
+    /// 玩家和区块由调用方在此之前存好。
+    /// Encode, in the official `saveAllChunks` order, the bytes for `level.dat`,
+    /// `data/` and `chunk_tickets.dat` for the IO thread to write. The world
+    /// thread never touches the disk (R5 / F3). Runtime world settings are first
+    /// synced into `LevelData`. Players and chunks are handled by the caller.
+    pub(crate) fn encode_saves(
+        &mut self,
+        global: &Global,
+        last_played: i64,
+    ) -> io::Result<Vec<EncodedFile>> {
         crate::save_data::sync_level_data(
             &mut self.level,
             global.state(),
             global.time().0,
             last_played,
         );
-        save_level_data(&self.dir, &self.level)?;
-        write_saved_data(
-            &self.dir,
-            "minecraft:game_rules",
-            &crate::save_data::game_rules_tag(global.rules()),
-        )?;
-        write_saved_data_at(
-            &self.dir.world_border_dat(),
-            &crate::save_data::world_border_tag(&global.world_border().export_settings()),
-        )?;
-        write_default_saved_data(&self.dir)?;
-        self.write_chunk_tickets()
+        let mut files = vec![EncodedFile {
+            path: self.dir.level_dat(),
+            backup: Some(self.dir.level_dat_old()),
+            bytes: encode_level_data(&self.level)?,
+        }];
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:game_rules"),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::game_rules_tag(global.rules()))?,
+        });
+        files.push(EncodedFile {
+            path: self.dir.world_border_dat(),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::world_border_tag(
+                &global.world_border().export_settings(),
+            ))?,
+        });
+        files.push(EncodedFile {
+            path: self.dir.chunk_tickets(),
+            backup: None,
+            bytes: Self::chunk_tickets_bytes()?,
+        });
+        // 全新世界的空默认文件也在 IO 线程写，世界线程只编字节。
+        for &id in SAVED_DATA_IDS {
+            let path = self.dir.saved_data(id);
+            if !path.exists() {
+                files.push(EncodedFile {
+                    path,
+                    backup: None,
+                    bytes: encode_saved_data(&Tag::Compound(Vec::new()))?,
+                });
+            }
+        }
+        Ok(files)
+    }
+
+    /// 测试专用：把 `encode_saves` 的字节同步落盘（模拟 IO 线程），便于断言文件内容。
+    /// Test-only: write `encode_saves` bytes synchronously, standing in for the IO thread.
+    #[cfg(test)]
+    pub(crate) fn save_all(&mut self, global: &Global, last_played: i64) -> io::Result<()> {
+        for file in self.encode_saves(global, last_played)? {
+            mc_bamboo_storage::world_dir::safe_replace(
+                &file.path,
+                &file.bytes,
+                file.backup.as_deref(),
+            )?;
+        }
+        Ok(())
     }
 
     /// 官方 `TicketStorage.TYPE` 的空内容：目前没有带存盘标志的票，
     /// 写一个合法的空列表，让官方服务端能直接读。
-    fn write_chunk_tickets(&self) -> io::Result<()> {
-        let root = Tag::Compound(vec![
-            (
-                "data".to_owned(),
-                Tag::Compound(vec![("tickets".to_owned(), Tag::List(Vec::new()))]),
-            ),
-            ("DataVersion".to_owned(), Tag::Int(version::DATA_VERSION)),
-        ]);
-        let bytes = write_compressed("", &root, Compression::Gzip)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        safe_replace(&self.dir.chunk_tickets(), &bytes, None)
+    fn chunk_tickets_bytes() -> io::Result<Vec<u8>> {
+        encode_saved_data(&Tag::Compound(vec![(
+            "tickets".to_owned(),
+            Tag::List(Vec::new()),
+        )]))
     }
 
     /// 释放 `session.lock`。关服路径最后一步调用；出错也只记日志，不让进程挂死。
@@ -243,6 +285,57 @@ mod tests {
         session.close();
         // 释放锁之后可以再打开。
         assert!(SaveSession::open(&tmp.0).is_ok());
+    }
+
+    /// F3：世界线程只把 `level.dat` / `data/` 编成字节，绝不碰磁盘；
+    /// 写盘是 IO 线程的事。
+    /// F3: the world thread only encodes `level.dat`/`data/` bytes; the IO
+    /// thread does the writing.
+    #[test]
+    fn encode_saves_only_encodes_bytes_and_never_writes() {
+        let tmp = TempDir::new("encode-only");
+        let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
+        assert!(!session.dir().level_dat().exists());
+        let global = Global::default();
+        let files = session.encode_saves(&global, 777).unwrap();
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path == session.dir().level_dat() && f.backup.is_some()),
+            "level.dat bytes must be handed over with its _old backup"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path == session.dir().saved_data("minecraft:game_rules")),
+            "game rules bytes must be handed over"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path == session.dir().world_border_dat()),
+            "world border bytes must be handed over"
+        );
+        // 编码之后磁盘上仍然没有 level.dat：写是 IO 线程稍后做的。
+        assert!(
+            !session.dir().level_dat().exists(),
+            "the world thread must not write the file"
+        );
+        // 模拟 IO 线程落盘，字节能被官方格式读回。
+        for file in &files {
+            mc_bamboo_storage::world_dir::safe_replace(
+                &file.path,
+                &file.bytes,
+                file.backup.as_deref(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            mc_bamboo_storage::world_dir::load_level_data(session.dir())
+                .data
+                .last_played,
+            777
+        );
     }
 
     #[test]

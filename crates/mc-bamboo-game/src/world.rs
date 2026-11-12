@@ -24,7 +24,7 @@ use mc_bamboo_storage::{
 use mc_bamboo_world::director::TicketOp;
 
 use crate::director_host::{DirectorHost, MailBudget};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     book, chat, chunk_broadcast,
@@ -517,13 +517,17 @@ impl World {
             && self.director_tick.is_multiple_of(6_000)
             && self.save.as_ref().is_some_and(|save| save.auto_save())
         {
+            // 自动保存照官方 autoSave：只入队，不 join、不排阻塞栅栏（R5 / F3）。
+            // Autosave like official autoSave: enqueue only, never join or block.
             self.save_all_players();
-            let saved = self
+            let files = self
                 .save
                 .as_mut()
-                .map(|save| save.save_all(&self.global, crate::admin::now_millis()));
-            if let Some(Err(error)) = saved {
-                warn!(%error, "could not auto-save level data");
+                .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
+            match files {
+                Some(Ok(files)) => self.host.submit_file_writes(files),
+                Some(Err(error)) => warn!(%error, "could not encode level data for autosave"),
+                None => {}
             }
         }
         // 运行中匀速给仍加载的脏区块拍快照写盘（D6），`save-off` 时停。
@@ -772,31 +776,34 @@ impl World {
             match request {
                 SaveCommand::SaveAll { flush, source } => {
                     // 照官方 saveEverything：先给所有脏的已加载区块拍快照交给 IO 线程，
-                    // 再存玩家、level.dat、data/。到这一步所有快照都已入队。
-                    // Like official saveEverything: snapshot every loaded dirty
-                    // chunk to the IO thread, then save players, level.dat, data/.
+                    // 再存玩家，最后把 level.dat / data/ 的字节交给 IO 线程。
+                    // 世界线程只编码、不碰磁盘，也不阻塞等 IO（R5 / F3）。
+                    // Like official saveEverything: snapshot dirty loaded chunks,
+                    // save players, then hand level.dat/data bytes to the IO
+                    // thread. The world thread only encodes, never blocks on IO.
                     self.host
                         .snapshot_all_dirty(&mut self.region, self.director_tick);
                     self.save_all_players();
-                    let saved = self
+                    let files = self
                         .save
                         .as_mut()
-                        .map(|save| save.save_all(&self.global, crate::admin::now_millis()));
-                    if let Some(Err(error)) = saved {
-                        warn!(%error, "save-all could not write level data");
-                    }
-                    if flush {
-                        // 有 flush：排一道不阻塞的 IO 栅栏，成功消息等它回执再发。
-                        // With flush: enqueue a non-blocking barrier; send success
-                        // only after its ack, so the world thread never waits.
-                        if let Some(seq) = self.host.submit_flush_barrier() {
-                            self.pending_save_success.push((seq, source));
-                        } else {
-                            self.send_save_success(source);
+                        .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
+                    match files {
+                        Some(Ok(files)) => self.host.submit_file_writes(files),
+                        Some(Err(error)) => {
+                            warn!(%error, "save-all could not encode level data")
                         }
+                        None => {}
+                    }
+                    // 一律排不阻塞的 IO 栅栏，成功消息等「保存真正完成」的回执再发；
+                    // 阻塞的 flush() 只允许出现在关服。flush 标志仍按官方解析保留。
+                    // Always enqueue a non-blocking barrier; success waits for the
+                    // real-completion ack. The blocking flush() is shutdown-only.
+                    debug!(flush, "save-all handed its writes to the IO thread");
+                    if let Some(seq) = self.host.submit_flush_barrier() {
+                        self.pending_save_success.push((seq, source));
                     } else {
-                        // 没 flush：快照都交出去了，此刻发成功消息。
-                        // Without flush: every snapshot is handed off, send now.
+                        // 这一局没接磁盘：没有 IO 要等，直接发。
                         self.send_save_success(source);
                     }
                 }
@@ -825,16 +832,26 @@ impl World {
         );
     }
 
-    /// 收回已到达的 IO 栅栏回执，发等在上面的 `save-all flush` 成功消息。
-    /// Release `save-all flush` success messages whose IO barrier has acked.
-    fn release_flushed_save_success(&mut self, flushed: Vec<u64>) {
+    /// 收回已到达的 IO 栅栏回执，按回执的 `ok` 发等在上面的 `save-all` 消息。
+    /// `ok=false`（窗口里有写盘失败）绝不报成功；F9 会把它变成 `commands.save.failed`。
+    /// Release waiting `save-all` messages from the IO barrier acks. A failed
+    /// window never reports success; F9 turns it into `commands.save.failed`.
+    fn release_flushed_save_success(&mut self, flushed: Vec<(u64, bool)>) {
         if flushed.is_empty() {
             return;
         }
         let mut remaining = Vec::new();
         for (seq, source) in std::mem::take(&mut self.pending_save_success) {
-            if flushed.contains(&seq) {
-                self.send_save_success(source);
+            if let Some(&(_, ok)) = flushed.iter().find(|(got, _)| *got == seq) {
+                if ok {
+                    self.send_save_success(source);
+                } else {
+                    error!(
+                        ?source,
+                        "save-all reported a write failure to the IO barrier"
+                    );
+                    // F9 在这里补 commands.save.failed。
+                }
             } else {
                 remaining.push((seq, source));
             }
@@ -1201,16 +1218,28 @@ impl World {
     /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
     /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
-        // 官方顺序：先存所有在线玩家，再存区块。
-        // Official order: save all online players first, then chunks.
+        // 官方顺序：玩家 → 区块 → level.dat / data/ → 解锁。
+        // level.dat/data 的字节也在关服的阻塞栅栏之前交给 IO 线程，
+        // 世界线程只编码，不逐文件同步写（F3 / R5）。
+        // Official order: players → chunks → level.dat/data → unlock. The
+        // level.dat/data bytes are queued before the shutdown's blocking barrier;
+        // the world thread only encodes, never writes file-by-file (F3 / R5).
         self.save_all_players();
-        // 再存所有区块：Director 收回全部已加载区块、写盘、排空 IO 线程并 sync_all。
-        // Save all chunks first: reclaim every loaded chunk, write, drain and sync_all.
+        let files = self
+            .save
+            .as_mut()
+            .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
+        match files {
+            Some(Ok(files)) => self.host.submit_file_writes(files),
+            Some(Err(error)) => warn!(%error, "could not encode level data on shutdown"),
+            None => {}
+        }
+        // 收回全部已加载区块、提交全部积压写，然后排空 IO 线程并 sync_all：
+        // 这是唯一允许世界线程阻塞等 IO 的地方。
+        // Reclaim every loaded chunk, hand over every queued write, then drain
+        // and sync_all: the only place the world thread may block on IO.
         self.host.shutdown(&mut self.region);
         if let Some(save) = &mut self.save {
-            if let Err(error) = save.save_all(&self.global, crate::admin::now_millis()) {
-                warn!(%error, "could not save level data on shutdown");
-            }
             save.close();
         }
         info!(

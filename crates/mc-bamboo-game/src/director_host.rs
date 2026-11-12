@@ -133,11 +133,11 @@ pub(crate) struct DirectorHost {
     /// 每个已加载区块上次被 D6 匀速快照的刻数，用于单区块 10 秒冷却。
     /// Last tick each loaded chunk was snapshotted by D6, for the cooldown.
     loaded_save_tick: HashMap<ChunkPos, u64>,
-    /// 已经收到 IO 回执的异步栅栏序号；`World` 每刻取走，发等在上面的
-    /// `save-all flush` 成功消息。
-    /// Seqs of async barriers whose acks arrived; `World` drains them each tick
-    /// to release the `save-all flush` success messages waiting on them.
-    flushed_barriers: Vec<u64>,
+    /// 已经收到 IO 回执的异步栅栏序号和成功标志；`World` 每刻取走，发等在上面的
+    /// `save-all` 成功 / 失败消息。
+    /// Async barrier acks (seq + ok); `World` drains them each tick to release
+    /// the waiting `save-all` success/failure messages.
+    flushed_barriers: Vec<(u64, bool)>,
     /// 累计的写盘失败次数（每次都在 `poll_io` 记 `error!`）。关服时汇报。
     /// Count of write failures (each logged with `error!` in `poll_io`).
     io_failures: u64,
@@ -217,10 +217,22 @@ impl DirectorHost {
         self.io.as_ref().map(|io| io.submit_barrier())
     }
 
-    /// 取走这一刻收到的栅栏回执序号，由 `World` 发等在上面的成功消息。
-    /// Drain the barrier seqs acked this tick; `World` releases the messages.
-    pub(crate) fn take_flushed_barriers(&mut self) -> Vec<u64> {
+    /// 取走这一刻收到的栅栏回执（序号 + 成功标志），由 `World` 发等在上面的消息。
+    /// Drain the barrier acks (seq + ok) this tick; `World` releases the messages.
+    pub(crate) fn take_flushed_barriers(&mut self) -> Vec<(u64, bool)> {
         std::mem::take(&mut self.flushed_barriers)
+    }
+
+    /// 把 `SaveSession` 编出的 `level.dat` / `data/` 字节交给 IO 线程写，
+    /// 世界线程只编码、不碰磁盘（F3 / R5）。
+    /// Hand the encoded `level.dat`/`data/` bytes to the IO thread; the world
+    /// thread only encodes and never writes to disk (F3 / R5).
+    pub(crate) fn submit_file_writes(&mut self, files: Vec<crate::save_session::EncodedFile>) {
+        if let Some(io) = &self.io {
+            for file in files {
+                io.submit_file_write(file.path, file.backup, file.bytes);
+            }
+        }
     }
 
     /// 提交一名玩家的存档写，并在内存里记下"已交给 IO、还没落盘"的副本。
@@ -783,12 +795,12 @@ impl DirectorHost {
                         self.pending_players.remove(&uuid);
                     }
                 }
-                Reply::Flushed { seq } => {
-                    // 异步栅栏的回执：World 会在本刻取走它，发等在上面的
-                    // `save-all flush` 成功消息。
-                    // An async barrier ack; World drains it this tick to release
-                    // the `save-all flush` success message waiting on it.
-                    self.flushed_barriers.push(seq);
+                Reply::Flushed { seq, ok } => {
+                    // 异步栅栏的回执：World 会在本刻取走它，按 ok 发等在上面的
+                    // `save-all` 成功或失败消息。
+                    // An async barrier ack; World drains it this tick and sends
+                    // the waiting `save-all` success/failure message.
+                    self.flushed_barriers.push((seq, ok));
                 }
                 Reply::WriteFailed {
                     pos,
@@ -1312,7 +1324,7 @@ mod tests {
         });
 
         host.pace_saves(1);
-        host.io().unwrap().flush().unwrap();
+        let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
         let mut region = Region::new(2, 20, false);
         host.poll_io(&mut region);
 
@@ -1340,7 +1352,7 @@ mod tests {
                 entities: None,
             });
             host.pace_saves(2 + u64::from(i));
-            host.io().unwrap().flush().unwrap();
+            let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
             host.poll_io(&mut region);
         }
         assert!(host.saving_paused, "consecutive failures must pause saving");

@@ -371,12 +371,22 @@ pub fn load_level_data(dir: &WorldDir) -> LoadedLevel {
     }
 }
 
+/// 编出 `level.dat` 的 gzip 字节。世界线程只编码，写盘交给 IO 线程。
+/// Encode `level.dat` to gzip bytes; the world thread only encodes.
+pub fn encode_level_data(data: &LevelData) -> io::Result<Vec<u8>> {
+    data.to_gzip()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
 /// 写 `level.dat`，照官方 `saveDataTag`：写临时文件 → 轮换 `level.dat_old`。
+/// 测试用；运行中的保存走 [`encode_level_data`] + IO 线程。
+/// Write `level.dat` (startup/tests); run-time saves use `encode_level_data` + IO.
 pub fn save_level_data(dir: &WorldDir, data: &LevelData) -> io::Result<()> {
-    let bytes = data
-        .to_gzip()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    safe_replace(&dir.level_dat(), &bytes, Some(&dir.level_dat_old()))
+    safe_replace(
+        &dir.level_dat(),
+        &encode_level_data(data)?,
+        Some(&dir.level_dat_old()),
+    )
 }
 
 /// 编出官方 `players/data/<uuid>.dat` 的 gzip 字节。写盘交给 IO 线程。
@@ -435,18 +445,25 @@ pub fn write_saved_data(dir: &WorldDir, id: &str, data: &Tag) -> io::Result<()> 
     write_saved_data_at(&dir.saved_data(id), data)
 }
 
-/// 官方 `SavedDataStorage.encodeUnchecked` 的封装：根是 `{ data, DataVersion }`，
-/// gzip 压缩。按绝对路径写，边界（维度目录）和全局 `data/` 共用这一层。
-/// Official `SavedDataStorage.encodeUnchecked` envelope `{ data, DataVersion }`,
-/// gzip-compressed, written at an absolute path (shared by dimension and global files).
-pub fn write_saved_data_at(path: &Path, data: &Tag) -> io::Result<()> {
+/// 编出官方 `SavedDataStorage.encodeUnchecked` 的 gzip 字节：根是
+/// `{ data: <codec 值>, DataVersion: <int> }`。世界线程只编码，写盘交给 IO 线程。
+/// Encode the official `SavedDataStorage.encodeUnchecked` envelope to gzip bytes.
+/// The world thread only encodes; the IO thread writes.
+pub fn encode_saved_data(data: &Tag) -> io::Result<Vec<u8>> {
     let root = Tag::Compound(vec![
         ("data".to_owned(), data.clone()),
         ("DataVersion".to_owned(), Tag::Int(version::DATA_VERSION)),
     ]);
-    let bytes = write_compressed("", &root, Compression::Gzip)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    safe_replace(path, &bytes, None)
+    write_compressed("", &root, Compression::Gzip)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// 按绝对路径写一份 saved data。边界（维度目录）和全局 `data/` 共用这一层。
+/// 测试/启动用；运行中的保存走 [`encode_saved_data`] + IO 线程。
+/// Write a saved-data file at an absolute path. Used at startup and in tests;
+/// run-time saves go through `encode_saved_data` + the IO thread.
+pub fn write_saved_data_at(path: &Path, data: &Tag) -> io::Result<()> {
+    safe_replace(path, &encode_saved_data(data)?, None)
 }
 
 /// 读一份 `data/` saved data 的 `data` 内容；不存在或坏了返回 `None`。

@@ -1414,10 +1414,50 @@ fn save_all_flush_success_waits_for_the_io_barrier() {
     assert!(server.world.pending_save_success.is_empty());
 }
 
+/// F3：接了真实 IO 的 `save-all`（不带 flush）也不许世界线程阻塞等 IO；
+/// 成功消息一律等信箱栅栏回执，回执到达后补发。
+/// F3: with a real IO thread, even non-flush `save-all` must not block the world
+/// thread on IO; success always waits for the mailbox barrier ack.
+#[test]
+fn non_flush_save_all_with_io_waits_for_the_mailbox_barrier() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("nonflush-barrier");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: client.id,
+        });
+    server.tick();
+    assert!(
+        !has_save_success(&client),
+        "success must wait for the IO ack, not be sent inline"
+    );
+    assert_eq!(server.world.pending_save_success.len(), 1);
+
+    server.world.host.flush_io();
+    server.tick();
+    assert!(has_save_success(&client), "success follows the barrier ack");
+    assert!(server.world.pending_save_success.is_empty());
+    let _ = dir; // 这一局没有 SaveSession，level.dat 的字节另由 save_session 测试覆盖
+}
+
 /// IO 线程 panic 是致命错误：世界线程要发现、记日志、走关服流程（tick 返回 Break），
-/// 且同步的 level.dat/data 写入仍尝试执行，不挂死。
+/// 且 level.dat / data/ 的字节仍会尝试交给 IO，不挂死。
 /// A dead IO thread is fatal: the world loop detects it and breaks into shutdown
-/// without hanging (synchronous level/data saves are still attempted).
+/// without hanging (level/data bytes are still attempted).
 #[test]
 fn a_dead_io_thread_shuts_the_world_down_without_hanging() {
     use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};

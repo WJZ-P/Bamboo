@@ -1,8 +1,8 @@
 //! 区块区域文件的 IO 线程：读写 `region/` 和 `entities/`，压缩/解压都在这条线程。
 //!
 //! 世界线程绝不等待 IO：读请求只是塞进 `requests` 通道，结果在下一刻开头由
-//! `try_recv` 从 `results` 信箱收回。写请求是即发即忘，关服或 `save-all flush`
-//! 用 `flush` 排一道栅栏，确保所有写落盘并 `sync_all`。
+//! `try_recv` 从 `results` 信箱收回。写请求是即发即忘；`flush` 的**阻塞**栅栏
+//! 只在关服使用，`save-all` 用不阻塞的 `Barrier` 回执确认写都落盘（F3）。
 //!
 //! 磁盘上是官方格式：`region/r.x.z.mca` 存区块 NBT，`entities/r.x.z.mca` 存实体 NBT，
 //! 都是 `RegionFile`（zlib 压缩）。世界线程交给这里的是**未压缩的 NBT 字节**，
@@ -12,7 +12,8 @@
 //! with compression/decompression on this thread. The world thread never waits for
 //! IO: a read request is only pushed into `requests`, and the result is collected
 //! from the `results` mailbox at the start of the next tick. Writes are fire-and-
-//! forget; `flush` is a barrier used at shutdown and by `save-all flush`.
+//! forget; the blocking `flush` barrier is shutdown-only, while `save-all` uses
+//! the non-blocking `Barrier` ack to confirm its writes landed (F3).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -133,12 +134,12 @@ pub enum Reply {
         path: String,
         error: String,
     },
-    /// 一道异步栅栏之前的所有写都已落盘并 `sync_all`。`seq` 对应提交时的序号，
-    /// 世界线程据此把等在这道栅栏上的 `save-all flush` 成功消息发出去。
-    /// All writes before an async barrier have landed and been synced; `seq`
-    /// matches the submitted barrier so the world thread can release the
-    /// success messages waiting on it.
-    Flushed { seq: u64 },
+    /// 一道异步栅栏之前的所有写都已处理完并 `sync_all`。`seq` 对应提交时的序号；
+    /// `ok` 是这段窗口里有没有写/刷盘失败（`save-all` 据此报成功或失败）。
+    /// All writes before an async barrier have been processed and synced; `seq`
+    /// pairs with the submitted barrier and `ok` says whether any write in that
+    /// window failed (`save-all` reports success or failure from it).
+    Flushed { seq: u64, ok: bool },
 }
 
 /// 一条 IO 线程的句柄。世界线程持有，非阻塞提交、tick 开头收信箱。
@@ -318,11 +319,13 @@ impl ChunkIo {
             .is_some_and(|worker| worker.is_finished())
     }
 
-    /// 栅栏：等此前所有请求处理完并 `sync_all`。只在关服 / `save-all flush` 用，
-    /// 这是设计稿明确允许世界线程等待 IO 的两处。刷盘失败会作为 `Err` 返回，不当成功。
-    /// Barrier: wait for all earlier requests and `sync_all`. Used only at
-    /// shutdown / `save-all flush`, the two design-approved wait points. A sync
-    /// failure is returned as `Err`, never silently treated as success.
+    /// 阻塞栅栏：等此前所有请求处理完并 `sync_all`。**只允许关服使用**（设计稿
+    /// 明确允许世界线程等待 IO 的唯一一处）；`save-all` 一律走不阻塞的 `Barrier`
+    /// 回执。刷盘或写盘失败会作为 `Err` 返回，不当成功。
+    /// Blocking barrier: wait for all earlier requests and `sync_all`.
+    /// **Shutdown only** (the single design-approved wait point); `save-all`
+    /// always uses the non-blocking `Barrier` ack. A sync or write failure is
+    /// returned as `Err`, never silently treated as success.
     pub fn flush(&self) -> io::Result<()> {
         let (done, wait) = mpsc::channel();
         self.requests
@@ -472,8 +475,10 @@ fn report_failures(
     failures: Vec<(String, String)>,
     pos: Option<ChunkPos>,
     seq: Option<u64>,
-) {
+) -> bool {
+    let mut any = false;
     for (path, error) in failures {
+        any = true;
         let _ = tx.send(Reply::WriteFailed {
             pos,
             seq,
@@ -481,12 +486,16 @@ fn report_failures(
             error,
         });
     }
+    any
 }
 
 fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
     let mut cache = Cache::default();
     // 每个区块最新快照的 seq，用于丢掉还没落盘的旧快照。
     let mut latest: HashMap<ChunkPos, u64> = HashMap::new();
+    // 上一道栅栏之后有没有写/刷盘失败：栅栏回执据此带 ok=false（F9）。
+    // Whether any write/sync failed since the last barrier; the ack carries it.
+    let mut failed_since_barrier = false;
     while let Ok(first) = rx.recv() {
         // 一次收齐当前排队的所有请求：先登记本批里每个区块最新的 seq，
         // 再逐个处理，这样同一批里同区块的旧快照会被跳过。
@@ -540,8 +549,8 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                         if failures.is_empty() {
                             let _ = tx.send(Reply::Written { pos, seq, present });
                             latest.remove(&pos);
-                        } else {
-                            report_failures(&tx, failures, Some(pos), Some(seq));
+                        } else if report_failures(&tx, failures, Some(pos), Some(seq)) {
+                            failed_since_barrier = true;
                         }
                     }
                 }
@@ -553,13 +562,15 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     player,
                 } => {
                     let result = safe_replace(&path, &bytes, backup.as_deref());
-                    if let Err(error) = result.as_ref() {
-                        report_failures(
+                    if let Err(error) = result.as_ref()
+                        && report_failures(
                             &tx,
                             vec![(path.display().to_string(), error.to_string())],
                             None,
                             None,
-                        );
+                        )
+                    {
+                        failed_since_barrier = true;
                     }
                     if let Some((uuid, seq)) = player {
                         let error = result.as_ref().err().map(|e| e.to_string());
@@ -574,33 +585,37 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                 }
                 Request::Flush { done } => {
                     let failures = cache.sync_all(&dir);
-                    report_failures(&tx, failures.clone(), None, None);
-                    let result = if failures.is_empty() {
-                        Ok(())
-                    } else {
+                    let sync_failed = report_failures(&tx, failures.clone(), None, None);
+                    let failed = failed_since_barrier || sync_failed || !failures.is_empty();
+                    let result = if failed {
                         Err(io::Error::other(format!(
-                            "{} region file(s) failed to sync",
+                            "{} region file(s) failed to sync / earlier writes failed",
                             failures.len()
                         )))
+                    } else {
+                        Ok(())
                     };
                     let _ = done.send(result);
+                    failed_since_barrier = false;
                 }
                 Request::Barrier { seq } => {
                     // FIFO 保证：排在这道栅栏之前的写都在本批里先处理过了。
                     // FIFO guarantees every write queued before this barrier has
                     // already been processed in this batch.
-                    report_failures(&tx, cache.sync_all(&dir), None, None);
-                    let _ = tx.send(Reply::Flushed { seq });
+                    let sync_failed = report_failures(&tx, cache.sync_all(&dir), None, None);
+                    let ok = !failed_since_barrier && !sync_failed;
+                    let _ = tx.send(Reply::Flushed { seq, ok });
+                    failed_since_barrier = false;
                 }
                 Request::Crash => panic!("injected chunk IO panic (test seam)"),
                 Request::Shutdown => {
-                    report_failures(&tx, cache.sync_all(&dir), None, None);
+                    let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
                     return;
                 }
             }
         }
     }
-    report_failures(&tx, cache.sync_all(&dir), None, None);
+    let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
 }
 
 fn read_one(
@@ -865,7 +880,7 @@ mod tests {
         assert!(
             replies
                 .iter()
-                .any(|r| matches!(r, Reply::Flushed { seq: got } if *got == seq)),
+                .any(|r| matches!(r, Reply::Flushed { seq: got, ok: true } if *got == seq)),
             "the barrier should reply through the results mailbox with its seq"
         );
         // 排在栅栏之前的独立文件写确实落了盘。
@@ -910,7 +925,8 @@ mod tests {
         fs::write(&blocker, b"not a directory").unwrap();
         let doomed = blocker.join("player.dat");
         io.submit_file_write(doomed, None, b"data".to_vec());
-        io.flush().unwrap();
+        // 这里故意写失败，flush 会如实报 Err，只用它当同步点。
+        let _ = io.flush();
         let failures: Vec<(String, String)> = collect(&io)
             .into_iter()
             .filter_map(|r| match r {
@@ -945,7 +961,8 @@ mod tests {
         }
 
         io.submit_write(pos, 7, Some(b"chunk-nbt".to_vec()), None);
-        io.flush().unwrap();
+        // 写必然失败，flush 会如实返回 Err，这里只拿它当同步点。
+        let _ = io.flush();
         let replies = collect(&io);
 
         // ① 没有假的成功回执。
@@ -979,7 +996,7 @@ mod tests {
         );
 
         io.submit_read(pos, 1, 0);
-        io.flush().unwrap();
+        let _ = io.flush();
         let reads = collect(&io);
         assert!(
             reads

@@ -3,13 +3,14 @@
 //!
 //! 命令动作不碰存档：把 [`SaveCommand`] 压进 `Global`，由世界线程在 tick 里消费。
 //! 权限等级和 `commands.save.saving` 照官方；`commands.save.success` 由世界线程
-//! 在保存真正完成后发（保存是异步的），`flush` 还要等 IO 回执。
+//! 在保存真正完成后发（世界线程只入队，不等 IO，等信箱栅栏回执）。
 //!
 //! `save-all` / `save-on` / `save-off`, mirroring the official commands. All need
 //! `LEVEL_OWNERS` (4). Actions push a [`SaveCommand`] into `Global` for the world
 //! thread; they never touch the disk. Permissions and `commands.save.saving`
 //! follow vanilla; `commands.save.success` is sent by the world thread only after
-//! the save really completes (it is async), and after the IO ack for `flush`.
+//! the save really completes (it enqueues writes and waits for the mailbox
+//! barrier ack, never blocking on IO).
 
 use mc_bamboo_command::ParsedCommand;
 use mc_bamboo_protocol::text::Component;
