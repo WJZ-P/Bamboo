@@ -608,6 +608,7 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
         clientbound::PLAYER_INFO_UPDATE,
         clientbound::SET_ENTITY_DATA,
         clientbound::UPDATE_ATTRIBUTES,
+        clientbound::INITIALIZE_BORDER,
         clientbound::SET_TIME,
         clientbound::SET_DEFAULT_SPAWN_POSITION,
         clientbound::GAME_EVENT,

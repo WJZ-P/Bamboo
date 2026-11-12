@@ -120,6 +120,7 @@ async fn join_order_matches_the_official_server() {
             play::clientbound::PLAYER_INFO_UPDATE,
             play::clientbound::SET_ENTITY_DATA,
             play::clientbound::UPDATE_ATTRIBUTES,
+            play::clientbound::INITIALIZE_BORDER,
             play::clientbound::SET_TIME,
             play::clientbound::SET_DEFAULT_SPAWN_POSITION,
             play::clientbound::GAME_EVENT,
