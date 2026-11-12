@@ -444,21 +444,23 @@ impl TicketTable {
         let mut b = simulation.into_iter().peekable();
         loop {
             let (pos, loading_change, simulation_change) = match (a.peek(), b.peek()) {
-                (Some(&(left, _, _)), Some(&(right, _, _))) => match left.cmp(&right) {
-                    std::cmp::Ordering::Less => {
-                        let (pos, old, new) = a.next().unwrap();
-                        (pos, Some((old, new)), None)
+                (Some(&(left, _, _)), Some(&(right, _, _))) => {
+                    match (left.x, left.z).cmp(&(right.x, right.z)) {
+                        std::cmp::Ordering::Less => {
+                            let (pos, old, new) = a.next().unwrap();
+                            (pos, Some((old, new)), None)
+                        }
+                        std::cmp::Ordering::Greater => {
+                            let (pos, old, new) = b.next().unwrap();
+                            (pos, None, Some((old, new)))
+                        }
+                        std::cmp::Ordering::Equal => {
+                            let (pos, lo, ln) = a.next().unwrap();
+                            let (_, so, sn) = b.next().unwrap();
+                            (pos, Some((lo, ln)), Some((so, sn)))
+                        }
                     }
-                    std::cmp::Ordering::Greater => {
-                        let (pos, old, new) = b.next().unwrap();
-                        (pos, None, Some((old, new)))
-                    }
-                    std::cmp::Ordering::Equal => {
-                        let (pos, lo, ln) = a.next().unwrap();
-                        let (_, so, sn) = b.next().unwrap();
-                        (pos, Some((lo, ln)), Some((so, sn)))
-                    }
-                },
+                }
                 (Some(_), None) => {
                     let (pos, old, new) = a.next().unwrap();
                     (pos, Some((old, new)), None)

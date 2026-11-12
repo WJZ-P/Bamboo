@@ -215,8 +215,10 @@ impl Plane {
         drop(_relax_guard);
         let _collect_guard = Guard::new(stages[3]);
         // 按块号、块内下标遍历，天然按 (x, z) 排序，不用再排序。
+        // 块号按 (x, z) 排；负坐标下 (x,z) 的字典序和块号字典序不一致，
+        // 显式按块内第一个坐标排。最终输出仍按每个区块的 (x, z) 排序。
         let mut keys: Vec<_> = original.blocks.keys().copied().collect();
-        keys.sort_unstable();
+        keys.sort_unstable_by_key(|&(bx, bz)| (bx << BLOCK_SHIFT, bz << BLOCK_SHIFT));
         let mut result = Vec::new();
         for (bx, bz) in keys {
             let block = &original.blocks[&(bx, bz)];
@@ -235,6 +237,7 @@ impl Plane {
                 }
             }
         }
+        result.sort_unstable_by_key(|&(pos, _, _)| (pos.x, pos.z));
         drop(_collect_guard);
         result
     }
