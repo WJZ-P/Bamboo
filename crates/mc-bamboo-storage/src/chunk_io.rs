@@ -71,8 +71,11 @@ enum Request {
         player: Option<(String, u64)>,
     },
     /// 栅栏：确认此前所有请求都处理完，并对所有打开的区域文件 `sync_all`。
+    /// 回执带上刷盘结果，写失败不当成功。
+    /// Barrier: wait for all earlier requests and `sync_all` open region files;
+    /// the reply carries the sync result so a failure is not treated as success.
     Flush {
-        done: Sender<()>,
+        done: Sender<io::Result<()>>,
     },
     /// 异步栅栏：处理到它时把回执送进 `results` 信箱，不阻塞世界线程。
     /// `save-all flush` 用它等 IO 线程「此前所有写都落盘」再发成功消息。
@@ -81,6 +84,11 @@ enum Request {
     Barrier {
         seq: u64,
     },
+    /// 测试接缝：让 IO 线程 panic，供世界线程验证「发现 → 关服」路径。
+    /// 正常运行时没有任何调用方。
+    /// Test seam: panic the IO thread so the world thread's detect-and-shutdown
+    /// path can be tested. Nothing sends this during normal operation.
+    Crash,
     Shutdown,
 }
 
@@ -106,6 +114,11 @@ pub enum Reply {
         ok: bool,
         error: Option<String>,
     },
+    /// 一次写盘或刷盘失败。带路径和原因，世界线程据此 `error!` 记录、计数，
+    /// 绝不静默丢掉。`path` 是失败的文件（区域文件或独立文件）的路径文本。
+    /// A write or sync failed, with its path and reason. The world thread logs it
+    /// with `error!` and counts it; nothing is silently dropped.
+    WriteFailed { path: String, error: String },
     /// 一道异步栅栏之前的所有写都已落盘并 `sync_all`。`seq` 对应提交时的序号，
     /// 世界线程据此把等在这道栅栏上的 `save-all flush` 成功消息发出去。
     /// All writes before an async barrier have landed and been synced; `seq`
@@ -243,8 +256,20 @@ impl ChunkIo {
         self.results.try_recv().ok()
     }
 
+    /// IO 线程是不是已经退出（panic 或通道断开）。世界线程据此当成致命错误走关服。
+    /// Whether the IO thread has quit (panic or a disconnected channel); the
+    /// world thread treats this as a fatal error and shuts down.
+    pub fn worker_stopped(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+    }
+
     /// 栅栏：等此前所有请求处理完并 `sync_all`。只在关服 / `save-all flush` 用，
-    /// 这是设计稿明确允许世界线程等待 IO 的两处。
+    /// 这是设计稿明确允许世界线程等待 IO 的两处。刷盘失败会作为 `Err` 返回，不当成功。
+    /// Barrier: wait for all earlier requests and `sync_all`. Used only at
+    /// shutdown / `save-all flush`, the two design-approved wait points. A sync
+    /// failure is returned as `Err`, never silently treated as success.
     pub fn flush(&self) -> io::Result<()> {
         let (done, wait) = mpsc::channel();
         self.requests
@@ -255,7 +280,14 @@ impl ChunkIo {
                 io::ErrorKind::BrokenPipe,
                 "chunk IO thread stopped during flush",
             )
-        })
+        })?
+    }
+
+    /// 测试接缝：让 IO 线程 panic。正常代码不要调用。
+    /// Test seam: panic the IO thread. Do not call from production code.
+    #[doc(hidden)]
+    pub fn crash_for_test(&self) {
+        let _ = self.requests.send(Request::Crash);
     }
 
     /// 排一道不阻塞的栅栏并返回它的序号。IO 线程按 FIFO 处理到它时，此前提交的所有
@@ -358,10 +390,33 @@ impl Cache {
         Ok(self.files.get_mut(&key).expect("刚插入"))
     }
 
-    fn sync_all(&mut self) {
-        for region in self.files.values_mut() {
-            let _ = region.sync();
+    /// 刷盘并返回失败的 `(路径, 原因)`；由 worker 送回世界线程记 `error!`。
+    /// Sync every open region file; return `(path, reason)` for each failure so
+    /// the worker can report it to the world thread.
+    fn sync_all(&mut self, dir: &WorldDir) -> Vec<(String, String)> {
+        let mut failures = Vec::new();
+        for ((kind, region_pos), region) in &mut self.files {
+            if let Err(error) = region.sync() {
+                let directory = if *kind == 0 {
+                    dir.region_dir()
+                } else {
+                    dir.entities_dir()
+                };
+                failures.push((
+                    directory.join(region_pos.file_name()).display().to_string(),
+                    error.to_string(),
+                ));
+            }
         }
+        failures
+    }
+}
+
+/// 把一批写/刷盘失败送回世界线程信箱。
+/// Send a batch of write/sync failures back to the world-thread mailbox.
+fn report_failures(tx: &Sender<Reply>, failures: Vec<(String, String)>) {
+    for (path, error) in failures {
+        let _ = tx.send(Reply::WriteFailed { path, error });
     }
 }
 
@@ -412,8 +467,15 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     timestamp,
                 } => {
                     if latest.get(&pos) == Some(&seq) {
-                        write_one(&mut cache, &dir, pos, chunk, entities, timestamp);
-                        let _ = tx.send(Reply::Written { pos, seq });
+                        let failures = write_one(&mut cache, &dir, pos, chunk, entities, timestamp);
+                        // 只有两份都写成功才回 Written；失败留着写盘途中缓冲，
+                        // 关服时还会再试一次，绝不静默丢。
+                        // Only ack when both files landed; on failure keep the
+                        // in-progress buffer so shutdown can retry.
+                        if failures.is_empty() {
+                            let _ = tx.send(Reply::Written { pos, seq });
+                        }
+                        report_failures(&tx, failures);
                     }
                 }
                 Request::DropSnapshot { .. } => {}
@@ -424,6 +486,9 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     player,
                 } => {
                     let result = safe_replace(&path, &bytes, backup.as_deref());
+                    if let Err(error) = result.as_ref() {
+                        report_failures(&tx, vec![(path.display().to_string(), error.to_string())]);
+                    }
                     if let Some((uuid, seq)) = player {
                         let error = result.as_ref().err().map(|e| e.to_string());
                         let ok = result.is_ok();
@@ -436,24 +501,34 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>) {
                     }
                 }
                 Request::Flush { done } => {
-                    cache.sync_all();
-                    let _ = done.send(());
+                    let failures = cache.sync_all(&dir);
+                    report_failures(&tx, failures.clone());
+                    let result = if failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other(format!(
+                            "{} region file(s) failed to sync",
+                            failures.len()
+                        )))
+                    };
+                    let _ = done.send(result);
                 }
                 Request::Barrier { seq } => {
                     // FIFO 保证：排在这道栅栏之前的写都在本批里先处理过了。
                     // FIFO guarantees every write queued before this barrier has
                     // already been processed in this batch.
-                    cache.sync_all();
+                    report_failures(&tx, cache.sync_all(&dir));
                     let _ = tx.send(Reply::Flushed { seq });
                 }
+                Request::Crash => panic!("injected chunk IO panic (test seam)"),
                 Request::Shutdown => {
-                    cache.sync_all();
+                    report_failures(&tx, cache.sync_all(&dir));
                     return;
                 }
             }
         }
     }
-    cache.sync_all();
+    report_failures(&tx, cache.sync_all(&dir));
 }
 
 fn read_one(
@@ -506,6 +581,8 @@ fn read_one(
     (chunk, entities, error)
 }
 
+/// 写 `region/` 和 `entities/` 两份，返回失败的 `(路径, 原因)`。
+/// Write the `region/` and `entities/` files; return `(path, reason)` failures.
 fn write_one(
     cache: &mut Cache,
     dir: &WorldDir,
@@ -513,13 +590,27 @@ fn write_one(
     chunk: Option<Vec<u8>>,
     entities: Option<Vec<u8>>,
     timestamp: i32,
-) {
-    if let Ok(region) = cache.file(dir, 0, pos) {
-        let _ = region.write(pos, chunk.as_deref(), timestamp);
+) -> Vec<(String, String)> {
+    let mut failures = Vec::new();
+    for (kind, data) in [(0u8, chunk.as_deref()), (1u8, entities.as_deref())] {
+        let directory = if kind == 0 {
+            dir.region_dir()
+        } else {
+            dir.entities_dir()
+        };
+        let path = directory.join(RegionPos::of(pos).file_name());
+        match cache.file(dir, kind, pos) {
+            Ok(region) => {
+                if let Err(error) = region.write(pos, data, timestamp) {
+                    failures.push((path.display().to_string(), error.to_string()));
+                }
+            }
+            Err(error) => {
+                failures.push((path.display().to_string(), error.to_string()));
+            }
+        }
     }
-    if let Ok(region) = cache.file(dir, 1, pos) {
-        let _ = region.write(pos, entities.as_deref(), timestamp);
-    }
+    failures
 }
 
 #[cfg(test)]
@@ -729,6 +820,60 @@ mod tests {
             })
             .collect();
         assert_eq!(written, vec![6]);
+        io.close();
+    }
+
+    /// 注入一个必然失败的独立文件写：世界线程必须收到带路径和原因的 `WriteFailed`。
+    /// Inject a doomed standalone write: the world thread must get a
+    /// `WriteFailed` reply carrying the path and the reason.
+    #[test]
+    fn a_failing_write_is_reported_with_path_and_reason() {
+        let tmp = TempDir::new("writefail");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        // 把父目录变成一个文件，safe_replace 的 create_dir_all 必然失败。
+        // Make the parent a file so safe_replace's create_dir_all must fail.
+        let blocker = dir.players_data_dir().join("blocker");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let doomed = blocker.join("player.dat");
+        io.submit_file_write(doomed, None, b"data".to_vec());
+        io.flush().unwrap();
+        let failures: Vec<(String, String)> = collect(&io)
+            .into_iter()
+            .filter_map(|r| match r {
+                Reply::WriteFailed { path, error } => Some((path, error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1, "exactly one failure should be reported");
+        assert!(failures[0].0.contains("blocker"), "path should be reported");
+        assert!(!failures[0].1.is_empty(), "reason should be reported");
+        io.close();
+    }
+
+    /// IO 线程 panic 后 `worker_stopped` 为真，`flush` 立刻返回 Err 而不是挂死。
+    /// After an IO-thread panic, `worker_stopped` is true and `flush` returns
+    /// Err immediately instead of hanging.
+    #[test]
+    fn a_dead_io_thread_is_detected_and_flush_reports_failure() {
+        let tmp = TempDir::new("panic");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        assert!(!io.worker_stopped());
+        io.crash_for_test();
+        for _ in 0..2000 {
+            if io.worker_stopped() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(io.worker_stopped(), "worker death must be visible");
+        assert!(
+            io.flush().is_err(),
+            "flush on a dead worker must fail, not hang"
+        );
         io.close();
     }
 }

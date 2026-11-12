@@ -133,6 +133,9 @@ pub(crate) struct DirectorHost {
     /// Seqs of async barriers whose acks arrived; `World` drains them each tick
     /// to release the `save-all flush` success messages waiting on them.
     flushed_barriers: Vec<u64>,
+    /// 累计的写盘失败次数（每次都在 `poll_io` 记 `error!`）。关服时汇报。
+    /// Count of write failures (each logged with `error!` in `poll_io`).
+    io_failures: u64,
 }
 
 impl DirectorHost {
@@ -160,6 +163,7 @@ impl DirectorHost {
             saved_revisions: HashMap::new(),
             loaded_save_tick: HashMap::new(),
             flushed_barriers: Vec::new(),
+            io_failures: 0,
         }
     }
 
@@ -168,11 +172,26 @@ impl DirectorHost {
         self.io = Some(io);
     }
 
-    /// 关服排空：等此前所有写落盘并 `sync_all`。
+    /// 关服排空：等此前所有写落盘并 `sync_all`。失败要报出来，不能当成功。
+    /// Drain at shutdown: wait for all writes to land and `sync_all`. A failure
+    /// is logged, never silently treated as success.
     pub(crate) fn flush_io(&self) {
-        if let Some(io) = &self.io {
-            let _ = io.flush();
+        if let Some(Err(error)) = self.io.as_ref().map(|io| io.flush()) {
+            tracing::error!(%error, "chunk IO flush failed");
         }
+    }
+
+    /// IO 线程是不是已经退出（panic / 通道断开）。世界线程据此当成致命错误走关服。
+    /// Whether the IO thread has quit (panic / disconnected channel); the world
+    /// thread treats this as a fatal error and shuts down.
+    pub(crate) fn io_failed(&self) -> bool {
+        self.io.as_ref().is_some_and(|io| io.worker_stopped())
+    }
+
+    /// 本次运行累计的写盘失败次数，关服时记进日志。
+    /// Write failures seen this run, logged at shutdown.
+    pub(crate) fn io_failures(&self) -> u64 {
+        self.io_failures
     }
 
     /// 排一道不阻塞的 IO 栅栏，返回序号；`None` 表示这一局没接磁盘（无需等待）。
@@ -732,6 +751,12 @@ impl DirectorHost {
                     // An async barrier ack; World drains it this tick to release
                     // the `save-all flush` success message waiting on it.
                     self.flushed_barriers.push(seq);
+                }
+                Reply::WriteFailed { path, error } => {
+                    // 每次写/刷盘失败都带路径和原因记 error!，绝不静默丢数据。
+                    // Log every write/sync failure with its path and reason.
+                    tracing::error!(%path, %error, "chunk IO write failed");
+                    self.io_failures += 1;
                 }
             }
         }

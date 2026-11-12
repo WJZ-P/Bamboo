@@ -408,6 +408,17 @@ impl World {
         // Release `save-all flush` success messages whose IO barrier acked.
         let flushed = self.host.take_flushed_barriers();
         self.release_flushed_save_success(flushed);
+        // IO 线程 panic 或通道断开是致命错误（设计稿 §14 / R12）：记日志，走关服流程，
+        // 尽量把还能存的存下来，不挂死。`shut_down` 里的同步写（level.dat / data/）不依赖
+        // IO 线程，失败的写也不会让 flush 无限等待（通道已断立刻返回）。
+        // A dead IO thread is fatal (design §14 / R12): log, shut down, save what
+        // can still be saved, never hang. `shut_down`'s synchronous writes do not
+        // depend on the IO thread, and a disconnected channel makes flush return
+        // immediately instead of blocking.
+        if self.host.io_failed() {
+            error!("chunk IO thread stopped unexpectedly; shutting down to avoid silent data loss");
+            return self.shut_down();
+        }
         self.process_inbox()?;
         self.consume_save_commands();
         self.sync_player_tickets();
@@ -1195,12 +1206,13 @@ impl World {
             if let Err(error) = save.save_all(&self.global, crate::admin::now_millis()) {
                 warn!(%error, "could not save level data on shutdown");
             }
-            info!(
-                codec_nanos = crate::director_host::codec_nanos(),
-                "chunk codec time on this run"
-            );
             save.close();
         }
+        info!(
+            codec_nanos = crate::director_host::codec_nanos(),
+            io_failures = self.host.io_failures(),
+            "chunk codec time and IO failures on this run"
+        );
         let reason = Component::translate(SERVER_SHUTDOWN, []);
         self.region.links.kick_all(&reason);
         ControlFlow::Break(())

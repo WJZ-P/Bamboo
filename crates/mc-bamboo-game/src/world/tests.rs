@@ -1414,6 +1414,38 @@ fn save_all_flush_success_waits_for_the_io_barrier() {
     assert!(server.world.pending_save_success.is_empty());
 }
 
+/// IO 线程 panic 是致命错误：世界线程要发现、记日志、走关服流程（tick 返回 Break），
+/// 且同步的 level.dat/data 写入仍尝试执行，不挂死。
+/// A dead IO thread is fatal: the world loop detects it and breaks into shutdown
+/// without hanging (synchronous level/data saves are still attempted).
+#[test]
+fn a_dead_io_thread_shuts_the_world_down_without_hanging() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("io-fatal");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    server.world.host.io().unwrap().crash_for_test();
+    for _ in 0..2000 {
+        if server.world.host.io().unwrap().worker_stopped() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        server.world.host.io_failed(),
+        "world must notice the dead IO thread"
+    );
+    // 关服路径不能挂死：这一 tick 直接走完 shut_down 并返回 Break。
+    assert!(
+        server.world.tick().is_break(),
+        "a fatal IO error must end the world loop"
+    );
+}
+
 #[test]
 fn refused_sink_is_closed_and_the_player_waits_for_its_leave() {
     let mut server = Harness::new(8);
