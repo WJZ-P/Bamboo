@@ -750,7 +750,7 @@ fn a_busy_table_blocks_the_whole_batch() {
     // 计划刻队列正在跑这一刻到期的刻（`collect_due` 是 pub(crate)，
     // 这里用下层的公开查询把它摆成「忙」的状态做不了，改用方块实体表）。
     let region = server.region();
-    region.block_entities.begin_tick();
+    region.block_entities.begin_tick(0);
     assert!(!region.ready_to_move_columns());
     let before = snapshot(region);
     let wanted: BTreeSet<ChunkPos> = [CHUNK, OTHER_CHUNK].into_iter().collect();

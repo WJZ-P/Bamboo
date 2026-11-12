@@ -161,7 +161,10 @@ pub trait LevelSideState {
     fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>>;
     fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>);
     fn is_block_entity_taken(&self, pos: BlockPos) -> bool;
-    fn begin_block_entity_tick(&mut self);
+    fn wake_block_entity(&mut self, pos: BlockPos);
+    fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>);
+    fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool);
+    fn begin_block_entity_tick(&mut self, now: i64);
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)>;
     fn end_block_entity_tick(&mut self);
 }
@@ -308,8 +311,21 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         self.block_entities_table().is_taken(pos)
     }
 
-    fn begin_block_entity_tick(&mut self) {
-        self.block_entities_table_mut().begin_tick();
+    fn wake_block_entity(&mut self, pos: BlockPos) {
+        self.block_entities_table_mut().wake(pos);
+    }
+
+    fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {
+        self.block_entities_table_mut().schedule_wake(pos, wake_at);
+    }
+
+    fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, _ticks: bool) {
+        self.block_entities_table_mut()
+            .set_chunk_ticking(chunk, _ticks);
+    }
+
+    fn begin_block_entity_tick(&mut self, now: i64) {
+        self.block_entities_table_mut().begin_tick(now);
     }
 
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
@@ -1413,7 +1429,16 @@ mod tests {
         fn is_block_entity_taken(&self, _pos: BlockPos) -> bool {
             unimplemented!()
         }
-        fn begin_block_entity_tick(&mut self) {
+        fn wake_block_entity(&mut self, _pos: BlockPos) {
+            unimplemented!()
+        }
+        fn schedule_block_entity_wake(&mut self, _pos: BlockPos, _wake_at: Option<i64>) {
+            unimplemented!()
+        }
+        fn set_chunk_block_entity_ticking(&mut self, _chunk: ChunkPos, _ticks: bool) {
+            unimplemented!()
+        }
+        fn begin_block_entity_tick(&mut self, _now: i64) {
             unimplemented!()
         }
         fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {

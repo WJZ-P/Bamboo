@@ -96,6 +96,9 @@ pub(crate) struct TickLevels {
     random: BTreeSet<ChunkPos>,
     /// 已加载模式才启用；无限超平坦模式的查询恒为真。
     enabled: bool,
+    /// 「能跑方块逻辑」集合的成员变化，等方块实体阶段开头一次性交给
+    /// `BlockEntities::set_chunk_ticking`（冻结时把睡着的日程暂停）。
+    block_tick_changes: Vec<(ChunkPos, bool)>,
 }
 
 impl TickLevels {
@@ -124,6 +127,11 @@ impl TickLevels {
 
     pub(crate) fn chunk_ticks_blocks(&self, pos: ChunkPos) -> bool {
         !self.enabled || self.blocks.contains(&pos)
+    }
+
+    /// 取走这一刻之前积累的「能跑方块逻辑」成员变化。
+    pub(crate) fn take_block_tick_changes(&mut self) -> Vec<(ChunkPos, bool)> {
+        std::mem::take(&mut self.block_tick_changes)
     }
 
     pub(crate) fn chunk_ticks_entities(&self, pos: ChunkPos) -> bool {
@@ -215,6 +223,10 @@ impl TickLevels {
         for center in block_centers {
             let eligible = self.blocks_eligible(center);
             let random = eligible && self.ticks_randomly(center);
+            let was = self.blocks.contains(&center);
+            if was != eligible {
+                self.block_tick_changes.push((center, eligible));
+            }
             set_member(&mut self.blocks, &mut self.blocks_ordered, center, eligible);
             set_member_ordered(&mut self.random, center, random);
         }

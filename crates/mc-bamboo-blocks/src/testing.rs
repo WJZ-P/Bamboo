@@ -116,6 +116,18 @@ impl TestLevel {
     pub(crate) fn block_entity<T: crate::BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
         self.block_entities.get(pos)
     }
+
+    /// 差分测试用的休眠开关。
+    #[cfg(test)]
+    pub(crate) fn sleep_enabled(&mut self, enabled: bool) {
+        self.block_entities.set_sleep_enabled(enabled);
+    }
+
+    /// 上一刻有多少个 ticker 真跑过。
+    #[cfg(test)]
+    pub(crate) fn due_count(&self) -> usize {
+        self.block_entities.due_count()
+    }
 }
 
 impl LevelTables for TestLevel {

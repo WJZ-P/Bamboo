@@ -12,7 +12,8 @@
 
 use std::{
     any::Any,
-    collections::{HashMap, HashSet, VecDeque},
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt,
 };
 
@@ -63,6 +64,52 @@ pub trait BlockEntity: Any + Send {
     /// 没有默认实现：新加一种方块实体时编译器会要求补上，内容不会悄悄漏存。
     /// 读盘时按 `id` 造回具体类型，见 [`crate::archive::block_entity`]。
     fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error>;
+
+    /// 这一刻的 `tick` 跑完之后，下一次**必须真跑**的绝对 `gameTime`。
+    ///
+    /// `None` = 每刻都跑（默认）；`Some(i64::MAX)` = 睡到外部叫醒。返回 `Some` 的实现
+    /// 要保证中间每一刻都只是没有可见效果的线性推进，并且只读访问（菜单数据槽、
+    /// 比较器、存档组装）能通过 [`block_entity_clock`] 按公式现算数值。
+    /// 到点那一刻仍按官方顺序跑一次 `tick`，点火 / 熄火、物品挪动、`setChanged`
+    /// 和随机数都在原刻原位置发生。
+    ///
+    /// The next `gameTime` that needs a real tick. `None` means every tick;
+    /// `Some(i64::MAX)` means sleeping until an external change wakes it.
+    fn sleep_from(&self, _now: i64, _world: &World) -> Option<i64> {
+        None
+    }
+
+    /// 结束这段睡眠，把内部数值按公式推进到 `now`，回到每刻都跑的状态。
+    ///
+    /// 区块冻结、装盒、外部叫醒前调用。不许发效果、不许取随机数；默认实现从不睡。
+    ///
+    /// End this sleep and materialize the numeric fields at `now`. No effects or random draws.
+    fn materialize(&mut self, _now: i64) {}
+
+    /// 装盒放回时按目标表的时钟重新登记睡眠。`wake_at` 是绝对 `gameTime`。
+    /// 默认实现从不睡，什么都不做。
+    ///
+    /// Re-arm a sleep after a chunk box is put into a table with a different clock.
+    fn resleep(&mut self, _wake_at: i64) {}
+}
+
+// 方块实体读路径看到的当前 `gameTime`。睡着的实体按公式现算数值，菜单数据槽、
+// 比较器、命令读值和存档组装都靠它。`World::new` 和每次方块实体阶段开头设成
+// `BlockTicks::now()`（官方的 `getGameTime()`）；`BlockEntities` 的每次读访问也会
+// 先把时钟拨回这张表自己的 `now`，免得同一个线程上多个世界互相串扰。
+// 线程局部：世界线程串行地跑这些阶段，多个测试可以同时各跑一个世界。
+thread_local! {
+    static SLEEP_CLOCK: Cell<i64> = const { Cell::new(0) };
+}
+
+/// 把方块逻辑看到的 `gameTime` 交给读路径。
+pub fn set_block_entity_clock(now: i64) {
+    SLEEP_CLOCK.with(|clock| clock.set(now));
+}
+
+/// 睡着的实体按公式现算数值时用的当前刻。
+pub fn block_entity_clock() -> i64 {
+    SLEEP_CLOCK.with(|clock| clock.get())
 }
 
 /// 方块实体和它们的运行顺序。
@@ -73,7 +120,6 @@ pub trait BlockEntity: Any + Send {
 /// - 同一格重新登记时复用列表里的位置，官方 `RebindableTickingBlockEntityWrapper.rebind`。
 /// - tick 阶段里新登记的排到下一刻，官方放进 `pendingBlockEntityTickers`。
 /// - 被删掉的槽位不再运行，下一刻开头回收。
-#[derive(Default)]
 pub struct BlockEntities {
     entities: HashMap<BlockPos, Stored>,
     /// 正在 tick、已经从表里拿出来的实体，值是它的编号。
@@ -92,9 +138,57 @@ pub struct BlockEntities {
     /// 每个区块里可能有方块实体的位置，语义是超集：删掉的格子可以不从里面去掉。
     /// 按区块取出时只走这个集合，不扫整张表。
     by_chunk: HashMap<ChunkPos, HashSet<BlockPos>>,
+    /// 一直醒着的条目，按运行顺序的序号排列。
+    awake: BTreeSet<u64>,
+    /// 睡着的条目按绝对 `gameTime` 分桶。`i64::MAX` 表示等外部叫醒，永不到期。
+    sleeping: BTreeMap<i64, BTreeSet<u64>>,
+    /// 序号到 `slots` 下标的反查。
+    ordinals: HashMap<u64, usize>,
+    /// 这一刻要真跑的序号，升序。外部叫醒和到点都进这里。
+    due: Vec<u64>,
+    /// 这一刻的 `gameTime`。
+    now: i64,
+    /// 这一刻已经跑过的最大序号，判断中途叫醒在游标前还是后。
+    cursor: u64,
+    /// 只给测试用的对照开关：关掉时所有条目每刻都跑。
+    sleep_enabled: bool,
+    /// 上一刻真跑过的 ticker 数，差分测试和测量用。
+    last_ran: usize,
+    /// 这一刻真跑过的 ticker 数。
+    ran: usize,
     ticking: bool,
     next: usize,
     next_id: u64,
+    next_ordinal: u64,
+}
+
+impl Default for BlockEntities {
+    fn default() -> Self {
+        Self {
+            entities: HashMap::new(),
+            taken: HashMap::new(),
+            removed_while_taken: HashSet::new(),
+            slots: Vec::new(),
+            order: Vec::new(),
+            pending: Vec::new(),
+            free: Vec::new(),
+            positions: HashMap::new(),
+            by_chunk: HashMap::new(),
+            awake: BTreeSet::new(),
+            sleeping: BTreeMap::new(),
+            ordinals: HashMap::new(),
+            due: Vec::new(),
+            now: 0,
+            cursor: 0,
+            sleep_enabled: true,
+            last_ran: 0,
+            ran: 0,
+            ticking: false,
+            next: 0,
+            next_id: 0,
+            next_ordinal: 0,
+        }
+    }
 }
 
 struct Stored {
@@ -106,6 +200,21 @@ struct Stored {
 struct Ticker {
     pos: BlockPos,
     id: u64,
+    /// 进入运行顺序时的单调序号；叫醒后按它归位，不按 `slots` 下标（空槽会复用）。
+    ordinal: u64,
+    /// 睡到第几刻。`None` 是醒着。
+    wake_at: Option<i64>,
+}
+
+impl Ticker {
+    const fn new(pos: BlockPos, id: u64, ordinal: u64) -> Self {
+        Self {
+            pos,
+            id,
+            ordinal,
+            wake_at: None,
+        }
+    }
 }
 
 impl BlockEntities {
@@ -130,7 +239,11 @@ impl BlockEntities {
 
         if let Some(&index) = self.positions.get(&pos) {
             // 同一个位置换了一个实体，包装还在列表里，位置不变。
-            self.slots[index] = Some(Ticker { pos, id });
+            if let Some(old) = self.slots[index] {
+                self.unschedule(old.ordinal, old.wake_at);
+                self.slots[index] = Some(Ticker::new(pos, id, old.ordinal));
+                self.mark_awake(old.ordinal);
+            }
             return;
         }
         let index = match self.free.pop() {
@@ -140,12 +253,17 @@ impl BlockEntities {
                 self.slots.len() - 1
             }
         };
-        self.slots[index] = Some(Ticker { pos, id });
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        self.slots[index] = Some(Ticker::new(pos, id, ordinal));
+        self.ordinals.insert(ordinal, index);
         self.positions.insert(pos, index);
         if self.ticking {
+            // 官方把 tick 阶段里新登记的排到下一刻。
             self.pending.push(index);
         } else {
             self.order.push(index);
+            self.mark_awake(ordinal);
         }
     }
 
@@ -159,6 +277,7 @@ impl BlockEntities {
     /// An entity that is ticking, or held by [`World::with_block_entity`](crate::World::with_block_entity),
     /// is not in the map, so this returns `None`. Comparator reads are queued and run after it is put back.
     pub fn get<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
+        set_block_entity_clock(self.now);
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
     }
 
@@ -168,6 +287,7 @@ impl BlockEntities {
     /// See [`BlockEntities::get`] without a concrete type. For the object-safe
     /// [`crate::LevelSideState`]; the caller downcasts.
     pub fn get_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
+        set_block_entity_clock(self.now);
         Some(self.entities.get(&pos)?.entity.as_ref())
     }
 
@@ -176,6 +296,7 @@ impl BlockEntities {
     /// See [`BlockEntities::get`], but mutable. Returns `None` while that entity is ticking,
     /// because it is not in the map.
     pub fn get_mut<T: BlockEntity>(&mut self, pos: BlockPos) -> Option<&mut T> {
+        set_block_entity_clock(self.now);
         self.entities
             .get_mut(&pos)?
             .entity
@@ -203,6 +324,12 @@ impl BlockEntities {
     /// 实体正在 tick 时（已经从表里拿出来）调用它表示把自己删掉：返回值是 `None`，
     /// 放回去的时候会扔掉。删掉之后 [`BlockEntities::contains`] 也不再算这一格。
     pub fn remove(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
+        if let Some(&index) = self.positions.get(&pos)
+            && let Some(old) = self.slots[index]
+        {
+            self.unschedule(old.ordinal, old.wake_at);
+            self.awake.remove(&old.ordinal);
+        }
         if let Some(stored) = self.entities.remove(&pos) {
             return Some(stored.entity);
         }
@@ -240,16 +367,25 @@ impl BlockEntities {
     ///
     /// Every block entity still in the map. The one taken out for its tick is not included.
     pub fn visit(&self, mut visit: impl FnMut(BlockPos, &dyn BlockEntity)) {
+        set_block_entity_clock(self.now);
         for (&pos, stored) in &self.entities {
             visit(pos, stored.entity.as_ref());
         }
     }
 
-    /// `Level.tickBlockEntities` 的开头：并进上一刻新登记的，回收已经删掉的槽位。
-    pub fn begin_tick(&mut self) {
+    /// `Level.tickBlockEntities` 的开头：并进上一刻新登记的，回收已经删掉的槽位，
+    /// 再取出这一刻到期的条目。`now` 是官方的 `getGameTime()`。
+    ///
+    /// 睡着的条目不进 `due`，每刻的开销只和这一刻真跑的条目数成正比。
+    pub fn begin_tick(&mut self, now: i64) {
         debug_assert!(!self.ticking);
         self.ticking = true;
         self.next = 0;
+        self.now = now;
+        self.cursor = 0;
+        self.last_ran = self.ran;
+        self.ran = 0;
+        set_block_entity_clock(now);
 
         let previous = std::mem::take(&mut self.order);
         let pending = std::mem::take(&mut self.pending);
@@ -259,30 +395,88 @@ impl BlockEntities {
                 order.push(index);
                 continue;
             }
-            if let Some(ticker) = self.slots[index]
-                && self.positions.get(&ticker.pos) == Some(&index)
-            {
-                self.positions.remove(&ticker.pos);
+            if let Some(ticker) = self.slots[index] {
+                self.unschedule(ticker.ordinal, ticker.wake_at);
+                self.awake.remove(&ticker.ordinal);
+                self.ordinals.remove(&ticker.ordinal);
+                if self.positions.get(&ticker.pos) == Some(&index) {
+                    self.positions.remove(&ticker.pos);
+                }
             }
             self.slots[index] = None;
             self.free.push(index);
         }
         self.order = order;
+
+        let mut due: Vec<u64> = self.awake.iter().copied().collect();
+        while let Some(entry) = self.sleeping.first_entry()
+            && *entry.key() <= now
+        {
+            for ordinal in entry.remove() {
+                let Some(&index) = self.ordinals.get(&ordinal) else {
+                    continue;
+                };
+                let Some(ticker) = self.slots[index] else {
+                    continue;
+                };
+                if ticker.wake_at.is_none() {
+                    continue;
+                }
+                self.slots[index] = Some(Ticker {
+                    wake_at: None,
+                    ..ticker
+                });
+                self.awake.insert(ordinal);
+                due.push(ordinal);
+            }
+        }
+        due.sort_unstable();
+        due.dedup();
+        self.due = due;
     }
 
-    /// 下一个要运行的 ticker。遍历期间删除的槽位只是跳过，下一次 [`BlockEntities::begin_tick`] 回收。
+    /// 下一个要运行的 ticker。按运行顺序里的序号升序返回这一刻该跑的条目；
+    /// 睡着的条目不在 `due` 里，连被跳过的开销都没有。
     pub fn next_ticker(&mut self) -> Option<(BlockPos, u64)> {
-        while self.next < self.order.len() {
-            let index = self.order[self.next];
+        if !self.sleep_enabled {
+            // 测试对照：所有条目每刻都跑，仍按官方顺序。
+            while self.next < self.order.len() {
+                let index = self.order[self.next];
+                self.next += 1;
+                let Some(Some(ticker)) = self.slots.get(index).copied() else {
+                    continue;
+                };
+                if self
+                    .entities
+                    .get(&ticker.pos)
+                    .is_some_and(|stored| stored.id == ticker.id)
+                {
+                    self.cursor = ticker.ordinal;
+                    self.ran += 1;
+                    return Some((ticker.pos, ticker.id));
+                }
+            }
+            return None;
+        }
+        while self.next < self.due.len() {
+            let ordinal = self.due[self.next];
             self.next += 1;
+            let Some(&index) = self.ordinals.get(&ordinal) else {
+                continue;
+            };
             let Some(Some(ticker)) = self.slots.get(index).copied() else {
                 continue;
             };
+            if ticker.wake_at.is_some() {
+                continue;
+            }
             if self
                 .entities
                 .get(&ticker.pos)
                 .is_some_and(|stored| stored.id == ticker.id)
             {
+                self.cursor = ticker.ordinal;
+                self.ran += 1;
                 return Some((ticker.pos, ticker.id));
             }
         }
@@ -292,6 +486,151 @@ impl BlockEntities {
     /// `Level.tickBlockEntities` 的结尾。
     pub fn end_tick(&mut self) {
         self.ticking = false;
+        self.due.clear();
+    }
+
+    /// 一次 `tick` 跑完后登记下一次到点时刻。`None` 表示每刻都跑。
+    pub fn schedule_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {
+        if !self.sleep_enabled {
+            return;
+        }
+        let Some(&index) = self.positions.get(&pos) else {
+            return;
+        };
+        let Some(ticker) = self.slots[index] else {
+            return;
+        };
+        self.unschedule(ticker.ordinal, ticker.wake_at);
+        self.awake.remove(&ticker.ordinal);
+        if let Some(at) = wake_at {
+            let at = at.max(self.now + 1);
+            self.slots[index] = Some(Ticker {
+                wake_at: Some(at),
+                ..ticker
+            });
+            self.sleeping.entry(at).or_default().insert(ticker.ordinal);
+        } else {
+            self.slots[index] = Some(Ticker {
+                wake_at: None,
+                ..ticker
+            });
+            self.mark_awake(ticker.ordinal);
+        }
+    }
+
+    /// 外部变化叫醒这一格。实体正在被拿着时（它自己的 tick 里写方块）跳过，
+    /// 免得 tick 自己的写入把自己叫醒；别的实体这一刻写它时会叫醒。
+    ///
+    /// 方块实体阶段中途叫醒分两种：排在游标后面就插进这一刻还没跑到的部分
+    /// （官方这一刻会跑它并看到新物品）；排在前面说明官方这一刻已经跑过它了，
+    /// 新物品下一刻才处理，只把数值按公式推进到这一刻。
+    pub fn wake(&mut self, pos: BlockPos) {
+        if self.taken.contains_key(&pos) {
+            return;
+        }
+        let Some(&index) = self.positions.get(&pos) else {
+            return;
+        };
+        let Some(ticker) = self.slots[index] else {
+            return;
+        };
+        if ticker.wake_at.is_none() {
+            return;
+        }
+        self.unschedule(ticker.ordinal, ticker.wake_at);
+        self.slots[index] = Some(Ticker {
+            wake_at: None,
+            ..ticker
+        });
+        // 官方在 `now` 这一刻还要真跑一次（或已经跑过），所以只推进到 `now - 1`。
+        if let Some(stored) = self.entities.get_mut(&pos) {
+            stored.entity.materialize(self.now.saturating_sub(1));
+        }
+        self.mark_awake(ticker.ordinal);
+        if self.sleep_enabled && self.ticking && ticker.ordinal > self.cursor {
+            self.push_due(ticker.ordinal);
+        }
+    }
+
+    /// 区块冻结或恢复：把这一区块睡着的实体按公式推进到当前刻并结束睡眠，
+    /// 下一刻重新算日程。官方在不能 tick 的刻根本不跑，恢复后从原进度接着烧。
+    pub fn set_chunk_ticking(&mut self, chunk: ChunkPos, _ticks: bool) {
+        let Some(positions) = self.by_chunk.get(&chunk) else {
+            return;
+        };
+        let positions: Vec<BlockPos> = positions.iter().copied().collect();
+        for pos in positions {
+            let Some(&index) = self.positions.get(&pos) else {
+                continue;
+            };
+            let Some(ticker) = self.slots[index] else {
+                continue;
+            };
+            if ticker.wake_at.is_none() {
+                continue;
+            }
+            self.unschedule(ticker.ordinal, ticker.wake_at);
+            self.slots[index] = Some(Ticker {
+                wake_at: None,
+                ..ticker
+            });
+            if let Some(stored) = self.entities.get_mut(&pos) {
+                stored.entity.materialize(self.now.saturating_sub(1));
+            }
+            self.mark_awake(ticker.ordinal);
+            if self.sleep_enabled && self.ticking {
+                self.push_due(ticker.ordinal);
+            }
+        }
+    }
+
+    /// 这一刻有多少个 ticker 真跑过，差分测试和测量用。
+    #[doc(hidden)]
+    pub fn due_count(&self) -> usize {
+        self.last_ran
+    }
+
+    /// 只给差分测试用的开关：关掉休眠，退回「每个 ticker 每刻都跑」。
+    #[doc(hidden)]
+    pub fn set_sleep_enabled(&mut self, enabled: bool) {
+        if enabled == self.sleep_enabled {
+            return;
+        }
+        self.sleep_enabled = enabled;
+        if !enabled {
+            // 全部实体按公式推进到当前刻，日程清空。
+            for stored in self.entities.values_mut() {
+                stored.entity.materialize(self.now);
+            }
+            self.sleeping.clear();
+            for ticker in self.slots.iter_mut().flatten() {
+                ticker.wake_at = None;
+            }
+        }
+    }
+
+    fn push_due(&mut self, ordinal: u64) {
+        if let Err(at) = self.due.binary_search(&ordinal) {
+            self.due.insert(at, ordinal);
+        }
+    }
+
+    fn mark_awake(&mut self, ordinal: u64) {
+        self.awake.insert(ordinal);
+        // 在 tick 阶段里新登记的按官方排到下一刻，不进这一刻的 due。
+        if !self.ticking {
+            self.push_due(ordinal);
+        }
+    }
+
+    fn unschedule(&mut self, ordinal: u64, wake_at: Option<i64>) {
+        let Some(at) = wake_at else { return };
+        if let std::collections::btree_map::Entry::Occupied(mut entry) = self.sleeping.entry(at) {
+            entry.get_mut().remove(&ordinal);
+            if entry.get().is_empty() {
+                entry.remove();
+            }
+        }
     }
 
     fn is_live(&self, index: usize) -> bool {
@@ -315,18 +654,34 @@ impl BlockEntities {
         let Some(positions) = self.by_chunk.remove(&chunk) else {
             return Ok(ChunkBlockEntities {
                 entities: Vec::new(),
+                sleep_in: Vec::new(),
             });
         };
         let mut positions: Vec<BlockPos> = positions.into_iter().collect();
         positions.sort_unstable();
         let mut entities = Vec::with_capacity(positions.len());
+        let mut sleep_in = Vec::with_capacity(positions.len());
         for pos in positions {
             // 索引是超集，已经删掉的位置 `remove` 会落空，跳过即可。
-            if let Some(entity) = self.remove(pos) {
+            let remaining = self.positions.get(&pos).and_then(|&index| {
+                let ticker = self.slots[index]?;
+                let at = ticker.wake_at?;
+                // 绝对时刻换成相对延迟；`i64::MAX` 是「等外部叫醒」，原样带上。
+                Some(if at == i64::MAX {
+                    i64::MAX
+                } else {
+                    at.saturating_sub(self.now)
+                })
+            });
+            if let Some(mut entity) = self.remove(pos) {
+                if remaining.is_some() {
+                    entity.materialize(self.now);
+                }
                 entities.push(entity);
+                sleep_in.push(remaining);
             }
         }
-        Ok(ChunkBlockEntities { entities })
+        Ok(ChunkBlockEntities { entities, sleep_in })
     }
 
     /// 把盒子里的方块实体放回表里。只在 tick 边界调用。
@@ -335,7 +690,15 @@ impl BlockEntities {
     /// 末尾，和官方区块重新加载时把 ticker 加进列表末尾一致。
     /// 调用方保证表里已经没有 `chunk` 的方块实体。
     pub fn insert_chunk(&mut self, entities: ChunkBlockEntities) {
-        for entity in entities.entities {
+        let ChunkBlockEntities { entities, sleep_in } = entities;
+        for (mut entity, remaining) in entities
+            .into_iter()
+            .zip(sleep_in.into_iter().chain(std::iter::repeat(None)))
+        {
+            if let Some(remaining) = remaining {
+                // 相对延迟换算到目标时钟；下一次 tick 会重新算出真实日程。
+                entity.resleep(self.now.saturating_add(remaining));
+            }
             self.insert(entity);
         }
     }
@@ -347,6 +710,9 @@ impl BlockEntities {
 #[derive(Default)]
 pub struct ChunkBlockEntities {
     entities: Vec<Box<dyn BlockEntity>>,
+    /// 每个睡着的实体还剩几刻；`None` 表示醒着。装盒时存相对量，
+    /// 放回时按目标表的时钟换算（计划刻的 `SavedTick.delay` 是同一套做法）。
+    sleep_in: Vec<Option<i64>>,
 }
 
 impl ChunkBlockEntities {
@@ -357,7 +723,11 @@ impl ChunkBlockEntities {
 
     /// 从按位置排序的实体建盒子，存档解码时用。
     pub fn from_entities(entities: Vec<Box<dyn BlockEntity>>) -> Self {
-        Self { entities }
+        // 读盘回来的实体没有当时的日程，下一次 tick 重新算，等价于立刻醒。
+        Self {
+            sleep_in: vec![None; entities.len()],
+            entities,
+        }
     }
 
     /// 盒子里有没有方块实体。`is_pristine` 用它判断盒子能不能丢掉。
@@ -650,7 +1020,7 @@ mod tests {
     const B2: BlockPos = BlockPos::new(21, 64, 2);
 
     fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {
-        entities.begin_tick();
+        entities.begin_tick(0);
         let mut order = Vec::new();
         while let Some((pos, id)) = entities.next_ticker() {
             let entity = entities.take(pos, id).unwrap();
@@ -762,7 +1132,7 @@ mod tests {
         entities.insert(Dummy::boxed(A1, 1));
         assert!(entities.ready_to_move_chunks());
 
-        entities.begin_tick();
+        entities.begin_tick(0);
         assert!(!entities.ready_to_move_chunks());
         assert!(entities.next_ticker().is_some());
         assert!(!entities.ready_to_move_chunks());
@@ -784,7 +1154,7 @@ mod tests {
     fn taking_a_chunk_is_busy_mid_tick() {
         let mut entities = BlockEntities::default();
         entities.insert(Dummy::boxed(A1, 1));
-        entities.begin_tick();
+        entities.begin_tick(0);
         assert!(matches!(entities.take_chunk(CHUNK_A), Err(Busy)));
         entities.end_tick();
         assert!(entities.take_chunk(CHUNK_A).is_ok());

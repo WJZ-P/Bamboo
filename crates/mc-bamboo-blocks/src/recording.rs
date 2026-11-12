@@ -917,8 +917,20 @@ impl LevelSideState for Recording<'_> {
         value
     }
 
-    fn begin_block_entity_tick(&mut self) {
-        self.level.begin_block_entity_tick();
+    fn wake_block_entity(&mut self, pos: BlockPos) {
+        self.level.wake_block_entity(pos);
+    }
+
+    fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {
+        self.level.schedule_block_entity_wake(pos, wake_at);
+    }
+
+    fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool) {
+        self.level.set_chunk_block_entity_ticking(chunk, ticks);
+    }
+
+    fn begin_block_entity_tick(&mut self, now: i64) {
+        self.level.begin_block_entity_tick(now);
     }
 
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
