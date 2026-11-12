@@ -5,7 +5,7 @@
 //! 视野里没交付的区块留在 `PlayerChunkSender` 的待发送集合里，交付了才发。
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
@@ -39,6 +39,26 @@ fn record_codec(started: Instant) {
 
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
+/// D6：运行中把待写快照摊到 6000 刻里，每刻至少存 1 个。
+/// D6: spread pending chunk snapshots over 6000 ticks, at least one per tick.
+pub(crate) const SAVE_INTERVAL_TICKS: usize = 6000;
+/// 单区块 10 秒（200 刻）冷却，照原版 `nextChunkSaveTime`。
+/// Per-chunk 10 second (200 tick) cooldown, like vanilla `nextChunkSaveTime`.
+pub(crate) const SAVE_COOLDOWN_TICKS: u64 = 200;
+
+/// 一次待落盘的区块快照。
+struct PendingWrite {
+    pos: ChunkPos,
+    seq: SaveSeq,
+    chunk: Option<Vec<u8>>,
+    entities: Option<Vec<u8>>,
+}
+
+/// 每刻要提交几个写：`ceil(待写数 / 6000)`，至少 1 个。
+fn save_batch_size(queue_len: usize) -> usize {
+    queue_len.div_ceil(SAVE_INTERVAL_TICKS).max(1)
+}
+
 /// 收回的积压大了之后，每刻收掉其中的这么多分之一。
 ///
 /// 交付的上限是为了削进服的尖峰；收回要是也卡死在固定的个数上，很多人同时
@@ -87,6 +107,10 @@ pub(crate) struct DirectorHost {
     codec: InlineCodec,
     /// 每个区块最新一次写的 seq。收到 `Written` 回执时据此丢掉写盘途中缓冲。
     pending_writes: HashMap<ChunkPos, SaveSeq>,
+    /// D6：还没提交给 IO 线程的快照，每刻匀速出队。
+    save_queue: VecDeque<PendingWrite>,
+    /// 每个区块上次提交写的刻数，用于 10 秒冷却。
+    save_cooldown: HashMap<ChunkPos, u64>,
 }
 
 impl DirectorHost {
@@ -108,6 +132,8 @@ impl DirectorHost {
             io: None,
             codec: InlineCodec,
             pending_writes: HashMap::new(),
+            save_queue: VecDeque::new(),
+            save_cooldown: HashMap::new(),
         }
     }
 
@@ -236,7 +262,43 @@ impl DirectorHost {
             region.profiler.end_sub();
             return;
         }
+        self.pace_saves(now_tick);
         self.pump(region, Event::Tick { now_tick });
+    }
+
+    /// D6：每刻把 `ceil(待写数 / 6000)`（至少 1）个快照提交给 IO 线程。
+    /// 单区块 10 秒冷却只在「队列里还有同区块更新的快照」时跳过旧快照，
+    /// 保证冷却不会丢掉一个孤立的快照。
+    ///
+    /// D6: submit `ceil(pending / 6000)` (at least 1) snapshots per tick. The
+    /// per-chunk cooldown only skips a stale snapshot when a newer one for the
+    /// same chunk is still queued, so an isolated snapshot is never dropped.
+    fn pace_saves(&mut self, now_tick: u64) {
+        if self.io.is_none() || self.save_queue.is_empty() {
+            return;
+        }
+        let count = save_batch_size(self.save_queue.len());
+        let mut to_write = Vec::new();
+        for _ in 0..count {
+            let Some(pending) = self.save_queue.pop_front() else {
+                break;
+            };
+            let last = self.save_cooldown.get(&pending.pos).copied().unwrap_or(0);
+            let has_newer = self
+                .save_queue
+                .iter()
+                .any(|other| other.pos == pending.pos && other.seq > pending.seq);
+            if now_tick.saturating_sub(last) < SAVE_COOLDOWN_TICKS && has_newer {
+                continue;
+            }
+            self.save_cooldown.insert(pending.pos, now_tick);
+            to_write.push(pending);
+        }
+        if let Some(io) = &self.io {
+            for pending in to_write {
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
     }
 
     /// 关服：收回全部已加载区块、把脏快照交给 IO 线程写盘，再排空 IO 线程。
@@ -258,6 +320,13 @@ impl DirectorHost {
         // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
         region.chunks.finish_light_updates();
         self.pump(region, Event::Shutdown);
+        // 关服不等 D6 匀速：把还没提交的快照一次性全部交给 IO 线程。
+        // Shutdown does not pace: hand every remaining snapshot to the IO thread.
+        if let Some(io) = &self.io {
+            for pending in self.save_queue.drain(..) {
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
         self.deliveries.clear();
         self.reclaims.clear();
         self.flush_io();
@@ -384,13 +453,19 @@ impl DirectorHost {
             },
             Task::Assemble { column, .. } => TaskResult::Assembled { column },
             Task::Save { seq, column, .. } => {
-                if let Some(io) = &self.io {
+                if self.io.is_some() {
                     let started = Instant::now();
                     let encoded = self.codec.encode(pos, &column);
                     record_codec(started);
                     match encoded {
                         Ok(packed) => {
-                            io.submit_write(pos, seq, packed.chunk, packed.entities);
+                            // 不直接写盘：进 D6 匀速队列，每刻出队一小批。
+                            self.save_queue.push_back(PendingWrite {
+                                pos,
+                                seq,
+                                chunk: packed.chunk,
+                                entities: packed.entities,
+                            });
                             self.pending_writes.insert(pos, seq);
                             TaskResult::Saved { seq, column }
                         }
@@ -836,5 +911,53 @@ mod tests {
         // 其它测试可能并发改环境变量，这里只验证解析函数本身不会 panic。
         assert_eq!(MailBudget::default().deliveries, DEFAULT_MAIL_BUDGET);
         assert_eq!(MailBudget::default().reclaims, DEFAULT_MAIL_BUDGET);
+    }
+
+    #[test]
+    fn d6_batch_size_is_at_least_one() {
+        assert_eq!(save_batch_size(0), 1);
+        assert_eq!(save_batch_size(1), 1);
+        assert_eq!(save_batch_size(6000), 1);
+        assert_eq!(save_batch_size(6001), 2);
+        assert_eq!(save_batch_size(12000), 2);
+    }
+
+    #[test]
+    fn d6_drains_the_queue_one_snapshot_per_tick() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct TempDir(std::path::PathBuf);
+        impl TempDir {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!("bamboo-d6-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = TempDir::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        for i in 0..3 {
+            host.save_queue.push_back(PendingWrite {
+                pos: ChunkPos::new(i, 0),
+                seq: i as u64,
+                chunk: Some(vec![1]),
+                entities: None,
+            });
+        }
+        host.pace_saves(1);
+        assert_eq!(host.save_queue.len(), 2);
+        host.pace_saves(2);
+        assert_eq!(host.save_queue.len(), 1);
+        host.pace_saves(3);
+        assert!(host.save_queue.is_empty());
     }
 }
