@@ -25,6 +25,11 @@ const BLOCK_SIZE: i32 = 1 << BLOCK_SHIFT;
 const BLOCK_MASK: i32 = BLOCK_SIZE - 1;
 const BLOCK_CELLS: usize = (BLOCK_SIZE * BLOCK_SIZE) as usize;
 type Block = [i32; BLOCK_CELLS];
+type BlockKey = (i32, i32);
+
+fn block_key(pos: ChunkPos) -> BlockKey {
+    (pos.x >> BLOCK_SHIFT, pos.z >> BLOCK_SHIFT)
+}
 
 /// 按坐标分块的稠密等级表。缺省值（limit）也照常写在数组里，只是不计入 `count`。
 /// 已分配的块不回收：全世界玩家活动过的范围是有界的，回收反而让热路径多一次判断。
@@ -45,15 +50,25 @@ impl LevelGrid {
     }
 
     fn get(&self, pos: ChunkPos) -> i32 {
-        let key = (pos.x >> BLOCK_SHIFT, pos.z >> BLOCK_SHIFT);
-        let Some(block) = self.blocks.get(&key) else {
-            return self.default;
-        };
-        block[cell_index(pos)]
+        self.block(block_key(pos))
+            .map_or(self.default, |block| block[cell_index(pos)])
+    }
+
+    /// 按块号取块；热循环里相邻的区块绝大多数落在同一块，用游标或块级访问省掉重复哈希查找。
+    fn block(&self, key: BlockKey) -> Option<&Block> {
+        self.blocks.get(&key).map(|block| &**block)
+    }
+
+    fn cursor(&self) -> BlockCursor<'_> {
+        BlockCursor {
+            grid: self,
+            key: None,
+            block: None,
+        }
     }
 
     fn set(&mut self, pos: ChunkPos, level: i32) {
-        let key = (pos.x >> BLOCK_SHIFT, pos.z >> BLOCK_SHIFT);
+        let key = block_key(pos);
         let index = cell_index(pos);
         let block = self
             .blocks
@@ -69,6 +84,25 @@ impl LevelGrid {
             }
             block[index] = level;
         }
+    }
+}
+
+/// 连续读等级时的块缓存：同一个 64×64 块内直接数组下标，只有跨块才查一次哈希图。
+struct BlockCursor<'a> {
+    grid: &'a LevelGrid,
+    key: Option<BlockKey>,
+    block: Option<&'a Block>,
+}
+
+impl BlockCursor<'_> {
+    fn get(&mut self, pos: ChunkPos) -> i32 {
+        let key = block_key(pos);
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.block = self.grid.block(key);
+        }
+        self.block
+            .map_or(self.grid.default, |block| block[cell_index(pos)])
     }
 }
 
@@ -189,13 +223,14 @@ impl Plane {
                 queue.push(new, pos);
             }
         }
+        let mut cursor = self.levels.cursor();
         for &pos in &reset {
             let mut boundary = self.source(pos);
             // 清空区外一圈的区块没被清空，仍保留旧等级。取最小的边界值当候选，
             // 每个清空区块只排一次，而不是给每个邻居排一次。
             for neighbor in neighbors(pos) {
                 if !reset.contains(&neighbor) {
-                    boundary = boundary.min(self.level(neighbor).saturating_add(1));
+                    boundary = boundary.min(cursor.get(neighbor).saturating_add(1));
                 }
             }
             if boundary < limit {
@@ -214,8 +249,9 @@ impl Plane {
             self.set_level(pos, candidate);
             let next = candidate + 1;
             if next < limit {
+                let mut cursor = self.levels.cursor();
                 for neighbor in neighbors(pos) {
-                    if next < self.level(neighbor) {
+                    if next < cursor.get(neighbor) {
                         queue.push(next, neighbor);
                     }
                 }
@@ -230,6 +266,8 @@ impl Plane {
         let mut result = Vec::new();
         for (bx, bz) in keys {
             let block = &original.blocks[&(bx, bz)];
+            // 变化列表对应的等级块只取一次，之后按块内下标直接读。
+            let levels = self.levels.block((bx, bz));
             for index in 0..BLOCK_CELLS {
                 let old = block[index];
                 if old == original.default {
@@ -239,7 +277,7 @@ impl Plane {
                     (bx << BLOCK_SHIFT) + (index as i32 / BLOCK_SIZE),
                     (bz << BLOCK_SHIFT) + (index as i32 % BLOCK_SIZE),
                 );
-                let new = self.level(pos);
+                let new = levels.map_or(limit, |levels| levels[index]);
                 if old != new {
                     result.push((pos, old, new));
                 }
@@ -264,6 +302,7 @@ impl Plane {
         let mut reset: HashSet<ChunkPos, ChunkHasherBuilder> = HashSet::default();
         // 第 value 层里装"候选值 == value"的待访问区块。
         let mut frontier: Vec<Vec<ChunkPos>> = vec![Vec::new(); limit as usize + 1];
+        let mut cursor = self.levels.cursor();
         for &(pos, old, new) in effective {
             if new > old && old < limit {
                 frontier[old as usize].push(pos);
@@ -278,7 +317,7 @@ impl Plane {
                     continue;
                 }
                 // 等级低于候选值：这个区块由别的源撑着，不受升高影响，整支剪掉。
-                if self.level(pos) != value {
+                if cursor.get(pos) != value {
                     continue;
                 }
                 if reset.insert(pos) {
