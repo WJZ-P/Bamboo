@@ -86,11 +86,11 @@ pub trait BlockEntity: Any + Send {
     /// End this sleep and materialize the numeric fields at `now`. No effects or random draws.
     fn materialize(&mut self, _now: i64) {}
 
-    /// 装盒放回时按目标表的时钟重新登记睡眠。`wake_at` 是绝对 `gameTime`。
-    /// 默认实现从不睡，什么都不做。
+    /// 装盒放回时按目标表的时钟重新登记睡眠。`since` 是目标表的当前刻，
+    /// `wake_at` 是绝对 `gameTime`。默认实现从不睡，什么都不做。
     ///
     /// Re-arm a sleep after a chunk box is put into a table with a different clock.
-    fn resleep(&mut self, _wake_at: i64) {}
+    fn resleep(&mut self, _since: i64, _wake_at: i64) {}
 }
 
 // 方块实体读路径看到的当前 `gameTime`。睡着的实体按公式现算数值，菜单数据槽、
@@ -722,7 +722,7 @@ impl BlockEntities {
         {
             if let Some(remaining) = remaining {
                 // 相对延迟换算到目标时钟；下一次 tick 会重新算出真实日程。
-                entity.resleep(self.now.saturating_add(remaining));
+                entity.resleep(self.now, self.now.saturating_add(remaining));
             }
             self.insert(entity);
         }
@@ -742,6 +742,8 @@ pub struct ChunkBlockEntities {
 
 impl ChunkBlockEntities {
     /// 盒子里的方块实体，按位置排序。存档编码和读回后用。
+    ///
+    /// 装盒时已经把睡着的数值按公式算到当时那一刻，所以存档组装读到的就是现算值。
     pub fn entities(&self) -> &[Box<dyn BlockEntity>] {
         &self.entities
     }

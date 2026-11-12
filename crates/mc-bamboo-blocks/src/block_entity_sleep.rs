@@ -4,7 +4,7 @@
 //! **每一刻**比较方块状态、容器、方块实体的全部字段（睡着的按公式现算）、
 //! 写方块序列、随机数种子和计划刻，任何一位不同都算失败。
 
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction};
 use mc_bamboo_data::{blocks, items};
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -136,21 +136,19 @@ impl Scene {
         }
         {
             let mut world = World::new(&mut level, &mut ticks);
+            // `HopperAfterFurnace` 让漏斗先登记（在熔炉前面的顺序位置），
+            // 这样漏斗这一刻写完熔炉之后熔炉还会跑；另一种布局反过来。
+            let hopper_first = matches!(layout, Layout::HopperAfterFurnace);
+            if hoppers && hopper_first {
+                place_hoppers(&mut world);
+            }
             world.set_block(FURNACE, BlockState(blocks::FURNACE), UPDATE_ALL);
             world.with_block_entity::<FurnaceEntity, _>(FURNACE, |entity, _| {
                 entity.write_item(0, ItemStack::new(items::RAW_IRON, 16));
                 entity.write_item(1, ItemStack::new(items::COAL, 8));
             });
-            if layout.has_hoppers() {
-                // 上方漏斗朝下，往熔炉原料格送；下方漏斗朝上，抽结果格。
-                world.set_block(ABOVE, BlockState(blocks::HOPPER), UPDATE_ALL);
-                world.set_block_entity(Box::new(HopperEntity::new(ABOVE)));
-                world.set_block(BELOW, BlockState(blocks::HOPPER), UPDATE_ALL);
-                world.set_block_entity(Box::new(HopperEntity::new(BELOW)));
-                world.set_block(HOPPER_BEFORE, BlockState(blocks::HOPPER), UPDATE_ALL);
-                world.set_block_entity(Box::new(HopperEntity::new(HOPPER_BEFORE)));
-                world.set_block(HOPPER_AFTER, BlockState(blocks::HOPPER), UPDATE_ALL);
-                world.set_block_entity(Box::new(HopperEntity::new(HOPPER_AFTER)));
+            if hoppers && !hopper_first {
+                place_hoppers(&mut world);
             }
         }
         level.sleep_enabled(sleep);
@@ -320,6 +318,25 @@ fn level_container(level: &mut TestLevel, pos: BlockPos) {
     level.set_container(pos, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
 }
 
+/// 上方漏斗朝下送进熔炉原料格，下方漏斗接结果格；两个侧向漏斗用来做
+/// 「漏斗链往里送和往外抽」的源和汇。
+fn place_hoppers(world: &mut World<'_>) {
+    use crate::state::FACING_HOPPER;
+    for (pos, facing) in [
+        (ABOVE, Direction::Down),
+        (BELOW, Direction::Down),
+        (HOPPER_BEFORE, Direction::East),
+        (HOPPER_AFTER, Direction::West),
+    ] {
+        world.set_block(
+            pos,
+            BlockState(blocks::HOPPER).with(FACING_HOPPER, facing),
+            UPDATE_ALL,
+        );
+        world.set_block_entity(Box::new(HopperEntity::new(pos)));
+    }
+}
+
 /// 一份场景开 / 关休眠各跑一遍，逐刻比较。
 fn compare(seed: u64, ticks: i64, layout: Layout) -> usize {
     let script = Script::random(seed, ticks, layout);
@@ -353,6 +370,13 @@ fn compare(seed: u64, ticks: i64, layout: Layout) -> usize {
             slept += 1;
         }
     }
+    assert!(
+        sleeping
+            .snapshot()
+            .iter()
+            .any(|row| row.starts_with("slotsBlockPos { x: 0, y: 63, z: 0 }")),
+        "snapshot covers the hoppers"
+    );
     slept
 }
 

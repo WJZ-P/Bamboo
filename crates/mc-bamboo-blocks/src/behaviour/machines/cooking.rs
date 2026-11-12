@@ -667,10 +667,10 @@ impl BlockEntity for FurnaceEntity {
         }
     }
 
-    fn resleep(&mut self, wake_at: i64) {
+    fn resleep(&mut self, since: i64, wake_at: i64) {
         // 数值已经在装盒时按公式算到源表的最后一刻；目标表的时钟从这一刻起算。
         self.sleep = Some(Sleep {
-            since: block_entity_clock(),
+            since,
             wake_at,
             lit_step: if self.lit_time_remaining > 0 { -1 } else { 0 },
             cook_step: if self.lit_time_remaining > 0 && !self.items[SLOT_INPUT].is_empty() {
