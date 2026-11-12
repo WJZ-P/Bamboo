@@ -508,17 +508,20 @@ impl Region {
 
     /// 官方 `PlayerList.sendLevelInfo`：`initialize_border` 开头，然后 `set_time`、
     /// `set_default_spawn_position`、下雨时的三个 `game_event`，最后 `game_event` 13
-    /// 和 `set_chunk_cache_center`。
+    /// 和 `set_chunk_cache_center`。`world_spawn` 是 `LevelData` 里的世界出生点，
+    /// 只用于 `set_default_spawn_position`；区块中心取 `player.chunk_pos()`（玩家位置）。
     ///
     /// Official `PlayerList.sendLevelInfo`: `initialize_border` first, then `set_time`,
     /// `set_default_spawn_position`, the three rain `game_event`s, and finally
-    /// `game_event` 13 and `set_chunk_cache_center`.
+    /// `game_event` 13 and `set_chunk_cache_center`. `world_spawn` is the world spawn
+    /// from `LevelData`, used only for `set_default_spawn_position`; the chunk cache
+    /// center comes from `player.chunk_pos()` (the player position).
     pub(crate) fn start_loading_chunks(
         &mut self,
         id: PlayerId,
         time: GameTime,
         clock: Clock,
-        spawn: RespawnData,
+        world_spawn: RespawnData,
         weather: Weather,
         border: &WorldBorder,
     ) {
@@ -540,9 +543,9 @@ impl Region {
             id,
             &SetDefaultSpawnPosition {
                 dimension: DIMENSION,
-                pos: spawn.pos,
-                yaw: spawn.yaw,
-                pitch: spawn.pitch,
+                pos: world_spawn.pos,
+                yaw: world_spawn.yaw,
+                pitch: world_spawn.pitch,
             },
         );
         // 官方 `PlayerList.sendLevelInfo` 按 `Level.isRaining()`（渐变雨强 > 0.2）判断，

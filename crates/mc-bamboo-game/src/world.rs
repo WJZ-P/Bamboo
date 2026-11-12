@@ -702,11 +702,16 @@ impl World {
             .boss_bars_mut()
             .on_join(&mut self.region, id, uuid);
 
+        // `set_default_spawn_position` 发的是世界出生点（`LevelData`），不是玩家存档里的位置。
+        // 玩家位置走上面的 `JoinSettings.spawn`（存档），区块中心走 `player.chunk_pos()`。
+        // `set_default_spawn_position` carries the world spawn from `LevelData`, not
+        // the saved player position. The player's position comes from
+        // `JoinSettings.spawn` above (the save), and the chunk center from `player.chunk_pos()`.
         self.region.start_loading_chunks(
             id,
             self.global.time(),
             self.global.clock(),
-            join_spawn,
+            self.global.state().spawn,
             self.global.state().weather,
             self.global.world_border(),
         );

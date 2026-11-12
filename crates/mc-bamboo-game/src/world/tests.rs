@@ -267,6 +267,17 @@ impl Harness {
     ///
     /// Join with a given UUID, used by reconnect tests.
     pub(crate) fn join_uuid(&mut self, name: &str, uuid: Uuid) -> Client {
+        self.join_uuid_with_data(name, uuid, None)
+    }
+
+    /// 用指定 UUID 和存档字节进服，测试老玩家恢复位置时用。
+    /// Join with a given UUID and save bytes, for restoring an old player's position.
+    pub(crate) fn join_uuid_with_data(
+        &mut self,
+        name: &str,
+        uuid: Uuid,
+        player_data: Option<Vec<u8>>,
+    ) -> Client {
         let id = PlayerId(self.next_id);
         self.next_id += 1;
         let sink = FakeSink::default();
@@ -280,11 +291,17 @@ impl Harness {
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
-            player_data: None,
+            player_data,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
         Client { id, uuid, sink }
+    }
+
+    /// 直接改世界出生点（`LevelData` 里的那份），测试出生点包用。
+    /// Set the world spawn (the one in `LevelData`), for spawn-packet tests.
+    pub(crate) fn set_spawn(&mut self, spawn: crate::world_state::RespawnData) {
+        let _ = self.world.global.set_spawn(spawn);
     }
 
     pub(crate) fn request(&self, client: &Client, request: PlayRequest) {
@@ -620,6 +637,70 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
     expected.extend([clientbound::LEVEL_CHUNK_WITH_LIGHT; 9]);
     expected.push(clientbound::CHUNK_BATCH_FINISHED);
     assert_eq!(client.take_ids(), expected);
+}
+
+/// 老玩家存档里的位置和世界出生点不同：官方 `set_default_spawn_position` 发
+/// `LevelData` 里的世界出生点，玩家位置包（`teleport` / `player_position`）照存档，
+/// 区块中心照玩家位置。三个包分别核对。
+/// An old player's saved position differs from the world spawn: vanilla's
+/// `set_default_spawn_position` sends the world spawn from `LevelData`, the
+/// player-position packet follows the save, and the chunk center follows the
+/// player position. Check each of the three packets.
+#[test]
+fn old_player_spawn_packet_uses_world_spawn_and_position_uses_save() {
+    use mc_bamboo_storage::player_data::PlayerData;
+
+    let mut server = Harness::new(8);
+    // 世界出生点：一个和存档位置、朝向都不同的值。
+    let world_spawn =
+        crate::world_state::RespawnData::of(BlockPos::new(1000, 70, -1000), 90.0, 30.0);
+    server.set_spawn(world_spawn);
+
+    // 老玩家存档：位置、朝向都和世界出生点不同。
+    let saved = PlayerData {
+        position: [101.0, -60.0, 202.0],
+        rotation: [45.0, 20.0],
+        ..PlayerData::default()
+    };
+    let bytes = saved.to_gzip().unwrap();
+    let client = server.join_uuid_with_data("OldTimer", Uuid::from_u128(0xabcd), Some(bytes));
+    server.tick();
+    let frames = client.take_frames();
+
+    // 1) set_default_spawn_position = 世界出生点，不是玩家存档位置。
+    let spawn = frames_with_id(&frames, clientbound::SET_DEFAULT_SPAWN_POSITION);
+    assert_eq!(spawn.len(), 1);
+    let mut r = Reader::new(&spawn[0].body);
+    assert_eq!(r.string(32767).unwrap(), "minecraft:overworld");
+    assert_eq!(r.i64().unwrap(), world_spawn.pos.pack());
+    assert_eq!(r.f32().unwrap(), world_spawn.yaw);
+    assert_eq!(r.f32().unwrap(), world_spawn.pitch);
+    // 和存档位置确实不同，证明这里发的不是玩家自己的坐标。
+    assert_ne!(world_spawn.pos.pack(), BlockPos::new(101, -60, 202).pack());
+
+    // 2) player_position（teleport）= 存档位置（方块中心 +0.5）和存档朝向。
+    let positions = frames_with_id(&frames, clientbound::PLAYER_POSITION);
+    assert_eq!(positions.len(), 1);
+    let mut r = Reader::new(&positions[0].body);
+    let _teleport_id = r.varint().unwrap();
+    let x = r.f64().unwrap();
+    let _y = r.f64().unwrap();
+    let z = r.f64().unwrap();
+    let _velocity = r.bytes(24).unwrap();
+    let yaw = r.f32().unwrap();
+    let pitch = r.f32().unwrap();
+    assert_eq!(x, 101.5);
+    assert_eq!(z, 202.5);
+    assert_eq!(yaw, 45.0);
+    assert_eq!(pitch, 20.0);
+
+    // 3) set_chunk_cache_center = 玩家所在区块（存档位置），不是世界出生点区块。
+    let centers = frames_with_id(&frames, clientbound::SET_CHUNK_CACHE_CENTER);
+    assert_eq!(centers.len(), 1);
+    let mut r = Reader::new(&centers[0].body);
+    let center = ChunkPos::new(r.varint().unwrap(), r.varint().unwrap());
+    assert_eq!(center, ChunkPos::containing(101.5, 202.5));
+    assert_ne!(center, ChunkPos::containing(1000.0, -1000.0));
 }
 
 #[test]
