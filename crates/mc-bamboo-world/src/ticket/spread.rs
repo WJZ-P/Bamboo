@@ -263,14 +263,38 @@ impl Scratch {
         self.reset_order.push(pos);
     }
 
-    fn is_reset(&self, pos: ChunkPos) -> bool {
+    /// 连续问"这个邻居在不在清空区"时的块缓存，等价于 `BlockCursor` 但读的是标记块。
+    fn reset_cursor(&self) -> ResetCursor<'_> {
+        ResetCursor {
+            scratch: self,
+            key: None,
+            block: None,
+        }
+    }
+}
+
+struct ResetCursor<'a> {
+    scratch: &'a Scratch,
+    key: Option<BlockKey>,
+    block: Option<&'a ScratchBlock>,
+}
+
+impl ResetCursor<'_> {
+    fn is_reset(&mut self, pos: ChunkPos) -> bool {
         let key = block_key(pos);
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.block = self.scratch.blocks.get(&key).map(|block| &**block);
+        }
         let index = cell_index(pos);
-        self.blocks.get(&key).is_some_and(|block| {
-            block.stamp[index] == self.epoch && block.flags[index] & ScratchBlock::RESET != 0
+        self.block.is_some_and(|block| {
+            block.stamp[index] == self.scratch.epoch
+                && block.flags[index] & ScratchBlock::RESET != 0
         })
     }
+}
 
+impl Scratch {
     /// 按块号、块内下标遍历，天然按 (x, z) 排序（负块号单独处理）。
     fn collect(&mut self, levels: &LevelGrid, limit: i32, result: &mut Vec<(ChunkPos, i32, i32)>) {
         result.clear();
@@ -451,13 +475,14 @@ impl Plane {
         }
         self.scratch.reset_order = reset_order;
         let mut cursor = self.levels.cursor();
+        let mut reset_cursor = self.scratch.reset_cursor();
         for &pos in &self.scratch.reset_order {
             let mut boundary = self.source(pos);
             // 清空区外一圈的区块没被清空，仍保留旧等级。取最小的边界值当候选，
             // 每个清空区块只排一次，而不是给每个邻居排一次。
             count(super::profile::C_SEED_NEIGHBOR, 8);
             for neighbor in neighbors(pos) {
-                if !self.scratch.is_reset(neighbor) {
+                if !reset_cursor.is_reset(neighbor) {
                     boundary = boundary.min(cursor.get(neighbor).saturating_add(1));
                 }
             }
