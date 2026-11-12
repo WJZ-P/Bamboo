@@ -127,7 +127,7 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
 
 /// `EntityTickList.forEach`。计划刻里生成的实体这一步才第一次 tick。
 ///
-/// 精确驱动（默认）整个阶段算完立刻落地，剖析器记为一段；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）
+/// 精确驱动（默认）整个阶段算完立刻落地，剖析器记为一段；并行驱动（`bamboo.toml` 里 `entity_threads ≥ 1`）
 /// 拆成只读算阶段和落地阶段，剖析器分别记两段。开关存在 `World` 上，创建时读一次。
 ///
 /// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.

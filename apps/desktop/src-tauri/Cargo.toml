@@ -16,6 +16,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+mc-bamboo-game.workspace = true
 mc-bamboo-server.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

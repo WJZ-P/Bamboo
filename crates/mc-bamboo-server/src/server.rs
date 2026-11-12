@@ -471,6 +471,8 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         online_mode: config.online_mode,
         enforce_secure_profile: config.enforce_secure_profile,
         admin: AdminSnapshot::default(),
+        entity_threads: config.entity_threads,
+        mail_budget: config.mail_budget,
     }
 }
 

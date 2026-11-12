@@ -5,26 +5,56 @@
  * 页面本身不用改。数值范围要和 `settings.rs` 里 `validate` 的边界对上：
  * 这边只负责提示，真正拦住非法值的是 Rust 那一侧。
  *
- * 所有选项都是服务端启动时读一次，现在没有改完立刻生效的选项。以后要是有了，
- * 在这里加一个标记，再把页面顶部那句「要重启才生效」收窄到对应的项。
+ * 官方设置写进 `server.properties`，Bamboo 优化设置写进 `bamboo.toml`；
+ * 两个文件在「服务器目录」里，命令行版用同一套文件。所有选项都是服务端启动时
+ * 读一次，现在没有改完立刻生效的选项。
  */
 
 import type { ServerSettings } from "../api/bamboo";
 
+/** 两个分区。每个分区下面再按用途分小组，页面把分区标题单独渲染。 */
+export const SECTIONS = [
+  {
+    id: "official",
+    title: "官方设置",
+    hint: "写进 server.properties。键名、写法和默认值都照官方 26.3，从官方服务端迁过来的人可以直接沿用原来的文件。Bamboo 还没实现的官方键会原样保留，但现在不起作用。",
+  },
+  {
+    id: "bamboo",
+    title: "Bamboo 优化设置",
+    hint: "写进 bamboo.toml。这些是 Bamboo 自己的项，官方服务端没有。精确模式不设实体线程数，和官方逐位一致；性能模式才用并行驱动。",
+  },
+] as const;
+
+export type SectionId = (typeof SECTIONS)[number]["id"];
+
 export const GROUPS = [
-  { id: "basic", title: "基本", hint: "玩家怎么找到这台服务器。" },
-  { id: "network", title: "网络", hint: "连接本身怎么传数据。" },
+  { id: "basic", section: "official", title: "基本", hint: "玩家怎么找到这台服务器。" },
+  { id: "network", section: "official", title: "网络", hint: "连接本身怎么传数据。" },
   {
     id: "auth",
+    section: "official",
     title: "正版验证",
-    hint: "要不要让 Mojang 确认每名玩家的账号。关掉时谁都能随便填一个名字进服。和代理转发互斥：代理已经替服务端验过了，两个只能开一个。",
+    hint: "要不要让 Mojang 确认每名玩家的账号。和代理转发互斥：代理已经替服务端验过了，两个只能开一个。",
   },
   {
     id: "forwarding",
+    section: "bamboo",
     title: "代理转发",
     hint: "服务端藏在 BungeeCord 或 Velocity 后面时才需要改。开启后一定要用防火墙挡住外部直连，否则任何人都能冒充任意玩家进服。",
   },
-  { id: "advanced", title: "高级", hint: "挡住赖着不走的连接，一般不用改。" },
+  {
+    id: "advanced",
+    section: "bamboo",
+    title: "连接护栏",
+    hint: "挡住赖着不走的连接，一般不用改。",
+  },
+  {
+    id: "performance",
+    section: "bamboo",
+    title: "性能",
+    hint: "实体阶段和区块信箱的执行方式。精确模式是默认值，所有对拍和测试都在这个模式下跑。",
+  },
 ] as const;
 
 export type GroupId = (typeof GROUPS)[number]["id"];
@@ -40,6 +70,8 @@ interface Common<K extends keyof ServerSettings> {
   group: GroupId;
   /** 这一项是什么，显示在控件下面。 */
   hint: string;
+  /** 对应的配置文件里的键名。 */
+  fileKey: string;
   /** 额外的校验，返回错误文字或者 null。整份草稿都给进来，可以跨项检查。 */
   validate?: (draft: ServerSettings) => string | null;
   /** 当前用不上这一项，灰掉但仍然显示。 */
@@ -78,19 +110,24 @@ export type SettingField =
 const MAX_KEEP_ALIVE_SECONDS = 29;
 /** 帧长度上限是 2 MiB 差一字节，阈值到了这里就等于永远不压缩。 */
 const MAX_COMPRESSION_THRESHOLD = 2_097_151;
+/** 服务端能接受的实体线程数上限。 */
+const MAX_ENTITY_THREADS = 256;
+const MAX_MAIL_BUDGET = 65_536;
 
 export const FIELDS: readonly SettingField[] = [
   {
     key: "host",
     group: "basic",
+    fileKey: "server-ip",
     label: "监听地址",
     control: "text",
-    hint: "127.0.0.1 只有本机能连，0.0.0.0 对局域网和外网开放。",
+    hint: "0.0.0.0 对应官方默认的空 server-ip（监听所有网卡），127.0.0.1 只有本机能连。",
     validate: (draft) => (draft.host.trim().length > 0 ? null : "监听地址不能为空"),
   },
   {
     key: "port",
     group: "basic",
+    fileKey: "server-port",
     label: "端口",
     control: "number",
     min: 1,
@@ -98,8 +135,24 @@ export const FIELDS: readonly SettingField[] = [
     hint: "客户端添加服务器时填的端口。",
   },
   {
+    key: "levelName",
+    group: "basic",
+    fileKey: "level-name",
+    label: "世界名字",
+    control: "text",
+    maxLength: 80,
+    hint: "服务器目录里的世界目录名。改了之后服务端会去读写另一个世界目录，原来的存档不会自动搬过去。",
+    validate: (draft) => {
+      const name = draft.levelName.trim();
+      if (name.length === 0) return "世界名字不能为空";
+      if (name.includes("/") || name.includes("\\")) return "世界名字不能带路径分隔符";
+      return null;
+    },
+  },
+  {
     key: "motd",
     group: "basic",
+    fileKey: "motd",
     label: "服务器介绍",
     control: "text",
     maxLength: 120,
@@ -109,6 +162,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "maxPlayers",
     group: "basic",
+    fileKey: "max-players",
     label: "最大玩家数",
     control: "slider",
     min: 1,
@@ -119,6 +173,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "viewDistance",
     group: "basic",
+    fileKey: "view-distance",
     label: "视距",
     control: "slider",
     min: 2,
@@ -130,6 +185,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "compressionThreshold",
     group: "network",
+    fileKey: "network-compression-threshold",
     label: "压缩阈值",
     control: "number",
     min: -1,
@@ -138,22 +194,13 @@ export const FIELDS: readonly SettingField[] = [
     hint: "负载超过这么多字节的包才压缩，对应官方的 network-compression-threshold。-1 关闭压缩，0 压缩每一个包。",
   },
   {
-    key: "keepAliveSeconds",
-    group: "network",
-    label: "心跳间隔",
-    control: "number",
-    min: 1,
-    max: MAX_KEEP_ALIVE_SECONDS,
-    unit: "秒",
-    hint: "服务端每隔这么久发一次心跳，上一次还没有回应就断开。客户端 30 秒收不到任何数据就会自己断开，所以这里必须小于 30 秒。",
-  },
-  {
     key: "onlineMode",
     group: "auth",
+    fileKey: "online-mode",
     label: "正版验证",
     control: "toggle",
     wide: true,
-    hint: "对应官方的 online-mode。打开后登录过程会加密，每名玩家都要经过 Mojang 的 session server 确认，皮肤也由 Mojang 提供；服务端因此需要能访问外网。关掉时既不加密也不验证，UUID 由玩家名算出来。打开了代理转发就不能再打开这一项。",
+    hint: "对应官方的 online-mode，默认打开。打开后登录过程会加密，每名玩家都要经过 Mojang 的 session server 确认，皮肤也由 Mojang 提供；服务端因此需要能访问外网。关掉才能用离线账号直连：既不加密也不验证，UUID 由玩家名算出来。打开了代理转发就不能再打开这一项。",
     validate: (draft) =>
       draft.onlineMode && draft.forwarding !== "off"
         ? "正版验证和代理转发不能同时打开：代理已经替服务端验过身份了"
@@ -162,6 +209,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "preventProxyConnections",
     group: "auth",
+    fileKey: "prevent-proxy-connections",
     label: "禁止代理连接",
     control: "toggle",
     wide: true,
@@ -171,6 +219,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "enforceSecureProfile",
     group: "auth",
+    fileKey: "enforce-secure-profile",
     label: "强制签名聊天",
     control: "toggle",
     wide: true,
@@ -179,6 +228,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "forwarding",
     group: "forwarding",
+    fileKey: "forwarding",
     label: "转发模式",
     control: "choice",
     wide: true,
@@ -196,6 +246,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "forwardingSecret",
     group: "forwarding",
+    fileKey: "forwarding_secret",
     label: "转发密钥",
     control: "password",
     wide: true,
@@ -209,6 +260,7 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "prePlayTimeoutSeconds",
     group: "advanced",
+    fileKey: "pre_play_timeout_seconds",
     label: "进服时限",
     control: "number",
     min: 1,
@@ -219,11 +271,54 @@ export const FIELDS: readonly SettingField[] = [
   {
     key: "maxPrePlayConnections",
     group: "advanced",
+    fileKey: "max_pre_play_connections",
     label: "进服连接数上限",
     control: "number",
     min: 1,
     max: 1_000_000,
     hint: "同时处于握手、登录、配置阶段的连接上限，超出的连接直接丢弃。已经进入游戏的玩家不占名额。",
+  },
+  {
+    key: "keepAliveSeconds",
+    group: "advanced",
+    fileKey: "keep_alive_seconds",
+    label: "心跳间隔",
+    control: "number",
+    min: 1,
+    max: MAX_KEEP_ALIVE_SECONDS,
+    unit: "秒",
+    hint: "服务端每隔这么久发一次心跳，上一次还没有回应就断开。客户端 30 秒收不到任何数据就会自己断开，所以这里必须小于 30 秒。",
+  },
+  {
+    key: "entityThreads",
+    group: "performance",
+    fileKey: "entity_threads",
+    label: "实体并行线程数（实验）",
+    control: "number",
+    min: 0,
+    max: MAX_ENTITY_THREADS,
+    wide: true,
+    hint: "0 = 精确模式（默认）：实体逐个算完立刻落地，和官方逐位一致，所有 oracle、probe、单元测试都在这个模式下跑。≥ 1 = 性能模式：实体阶段改成「并行算、按 uid 升序串行落地」，3000 个掉落物加 300 个下落方块的场景里 8 线程整刻快 4.0 倍。性能模式相对官方有已知差异：物品合并少看一拍（最多晚一刻合并）、TNT 爆炸的击退晚一刻体现在物理上、漏斗吸走物品后物品自己这一刻的 age 和位置仍按未被吸走算；别的实体看到的也是这一刻开始时的样子。目前每刻新起线程，只用于实验，不建议在正式服开。",
+  },
+  {
+    key: "deliveriesPerTick",
+    group: "performance",
+    fileKey: "deliveries_per_tick",
+    label: "每刻交付区块上限",
+    control: "number",
+    min: 0,
+    max: MAX_MAIL_BUDGET,
+    hint: "Director 信箱每刻最多把多少个区块交给世界线程。上限是为了削进服时的尖峰；脚下 3×3 不受限制。0 表示不限（只用于对比测量），默认 64。",
+  },
+  {
+    key: "reclaimsPerTick",
+    group: "performance",
+    fileKey: "reclaims_per_tick",
+    label: "每刻收回区块上限",
+    control: "number",
+    min: 0,
+    max: MAX_MAIL_BUDGET,
+    hint: "Director 信箱每刻最多从世界线程收回多少个区块，默认 64。积压变大时按积压比例放宽，避免很多人同时高速移动时内存没有上界。0 表示不限（只用于对比测量）。",
   },
 ];
 

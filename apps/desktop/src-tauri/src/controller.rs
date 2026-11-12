@@ -107,8 +107,12 @@ impl ServerController {
         let address = listener
             .local_addr()
             .map_err(|error| format!("读取监听地址失败：{error}"))?;
-        let server = Server::new(listener, settings.to_server_config())
-            .map_err(|error| format!("服务器配置无效：{error}"))?;
+        // 名单目录用 APP 自己的数据目录，不用前端传来的展示字符串。
+        let directory = crate::settings::server_directory(app)?;
+        let mut config = settings.to_server_config();
+        config.list_directory = directory;
+        let server =
+            Server::new(listener, config).map_err(|error| format!("服务器配置无效：{error}"))?;
         let handle = server.handle();
 
         let (stop, stopped) = oneshot::channel::<()>();

@@ -38,7 +38,7 @@
 - 实体只有下落方块、点燃的 TNT 和掉落物，没有生物。实体存成 `EntityStore`（公开 / 私有分开、uid 索引、16³ 段的空间索引），逻辑走 `EntityCtx`，有精确和并行两个驱动，并行由 `BAMBOO_ENTITY_THREADS` 切换（缺省精确）；每个实体自带随机源（`mc-bamboo-blocks/src/entity/`）。
 - 区块包体在世界线程编码，按（位置，版本号）缓存；区块帧做成 `Arc<SharedFrames>`，压缩结果用 `OnceLock` 惰性缓存，第一条需要它的连接任务压一次，其余复用（`crates/mc-bamboo-game/src/outgoing.rs`）。
 - 出站是每名玩家一串片段：`PlayerSink::send(frames: Outgoing) -> bool`，`Outgoing` 区分普通帧和共享帧（`crates/mc-bamboo-game/src/inbound.rs`）。
-- 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。默认节拍是 `hybrid`（先睡再自旋；**2026-11-12 用户决定废弃**，改回只睡眠，世界线程 QoS 开关一起删，正在做），实体线程数、交付 / 收回上限都走环境变量（`docs/profiling.md` 第 7 节）。没有自定义全局分配器。
+- 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。节拍只用 `thread::sleep`（原来默认的 `hybrid` 先睡再自旋和世界线程 QoS 开关，2026-11-12 按用户决定删掉了）。实体线程数、交付 / 收回上限在 `bamboo.toml` 里配（`docs/configuration.md`），剖析器仍是环境变量 `BAMBOO_PROFILE`。没有自定义全局分配器。
 - 存档先做**官方的 Anvil 格式**，不兼容 26.3 之前的老存档布局（读到当空世界）。`mc-bamboo-storage` 的区块 NBT、Anvil 区域文件、方块实体 / 计划刻 / 三种实体 / 整块组装的编解码已完成并与官方对拍，但还没接进加载和卸载（`docs/m3-storage.md` 第 2、12 节）。
 
 （2026-11-12 按实现更新：`docs/profiling.md` 第 2、7、9.4 节、`docs/performance-optimizations.md` 第 0、9 节、`docs/chunk-tickets.md`、`docs/m3-storage.md` 第 2、12 节；合并提交 `a1fd1a0`、`0442bc4`、`32b1a8b`、`f918171`、`fabb9ba`、`4d55b93`、`209e3ae`、`865bd3f`、`2452510`）
@@ -495,8 +495,9 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 `commit(Computed, &mut World)` 发布状态并按（uid 升序，实体内序号）串行应用命令。游戏层在
 两段之间重新构造 `World`，因为 `RegionLevel` 独占借着区块表，没法同时借出只读视图。
 
-环境变量 `BAMBOO_ENTITY_THREADS=<n>` 在 `World` 创建时读一次：缺省或 0 是精确驱动（原行为），
-≥ 1 用并行驱动，n 是线程数（1 表示走并行代码路径但单线程，用来对比）。算阶段用一份只读的
+`bamboo.toml` 里的 `entity_threads=<n>`（见 `configuration.md`）经 `ServerConfig` 和
+`WorldConfig` 传给 `World`：0 是精确驱动（原行为），≥ 1 用并行驱动，n 是线程数
+（1 表示走并行代码路径但单线程，用来对比）。算阶段用一份只读的
 `ChunkStore` 视图，落地阶段照现在的办法构造 `RegionLevel`。执行器现在用 `ScopedThreads`，
 **每刻起线程，开销大，只用于实验**；常驻线程池是任务系统（第 12 节）的事，这次不做。
 

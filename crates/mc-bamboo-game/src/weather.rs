@@ -137,6 +137,7 @@ mod tests {
                 online_mode: false,
                 enforce_secure_profile: false,
                 admin: Default::default(),
+                ..Default::default()
             },
             receiver,
         );

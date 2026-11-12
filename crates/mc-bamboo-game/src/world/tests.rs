@@ -218,6 +218,7 @@ impl Harness {
             online_mode: false,
             enforce_secure_profile: false,
             admin: Default::default(),
+            ..Default::default()
         };
         let mut world = if loaded {
             World::new(config, receiver)
