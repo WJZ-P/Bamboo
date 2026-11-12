@@ -36,7 +36,6 @@ const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
     (1, 1),
 ];
 type Block = [i32; BLOCK_CELLS];
-type MarkBlock = [u64; BLOCK_CELLS];
 type BlockKey = (i32, i32);
 type BlockMap<T> = HashMap<BlockKey, Box<T>, ChunkHasherBuilder>;
 
@@ -130,45 +129,57 @@ fn neighbors(pos: ChunkPos) -> [ChunkPos; 8] {
         .map(|(dx, dz)| ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz)))
 }
 
+/// 一次更新里某个 64×64 块的全部辅助数据，合成一个结构以便一次哈希查找拿全。
+///
+/// `stamp` 是本轮的 epoch；不等于当前 epoch 的格子当作"本轮没碰过"，所以块复用时
+/// 不必逐格清零。`flags` 的三位分别记"被 BFS 见过 / 被清空 / 旧等级已记下"。
+#[derive(Debug)]
+struct ScratchBlock {
+    stamp: [u64; BLOCK_CELLS],
+    flags: [u8; BLOCK_CELLS],
+    old: [i32; BLOCK_CELLS],
+}
+
+impl ScratchBlock {
+    const SEEN: u8 = 1;
+    const RESET: u8 = 2;
+    const RECORDED: u8 = 4;
+
+    fn new() -> Box<Self> {
+        Box::new(Self {
+            stamp: [0; BLOCK_CELLS],
+            flags: [0; BLOCK_CELLS],
+            old: [0; BLOCK_CELLS],
+        })
+    }
+}
+
 /// 每轮更新的辅助状态：旧等级、清空标记和清空位置。
 ///
-/// 每格用 epoch 判"这一轮有没有用过"，块内容不必清零。四张块表只在一次 `update` 期间存在，
-/// 结束时把块回收到有上限的池子，下轮从池子里取：既不每轮分配/释放 16 KiB 的块，也不让
-/// 块数随玩家走过的总距离一直涨。清空区按 BFS 发现顺序记在 Vec 里，遍历不依赖哈希图顺序。
+/// 块只在一次 `update` 期间存在，结束时回收到有上限的池子；既不每轮分配/释放几十 KiB
+/// 的块，也不让块数随玩家走过的总距离一直涨。清空区按 BFS 发现顺序记在 Vec 里，
+/// 遍历不依赖哈希图顺序；变化列表按块号和块内下标排序产生。
 #[derive(Debug)]
 struct Scratch {
-    /// 每格记本轮的 epoch；不等于当前 epoch 的格子视为"还没记"。
-    epochs: BlockMap<MarkBlock>,
-    /// 每格记这个区块在本次更新开始前的等级（只有 epoch 匹配时有效）。
-    old: BlockMap<Block>,
-    /// 每格记"本轮被访问过"的 epoch，兼作 BFS 的 seen。
-    seen: BlockMap<MarkBlock>,
-    /// 每格记"本轮被清空"的 epoch。
-    reset: BlockMap<MarkBlock>,
-    /// 回收的块；`MarkBlock` 和 `Block` 元素类型不同，分开存免得转型。
-    mark_pool: Vec<Box<MarkBlock>>,
-    level_pool: Vec<Box<Block>>,
+    blocks: HashMap<BlockKey, Box<ScratchBlock>, ChunkHasherBuilder>,
+    pool: Vec<Box<ScratchBlock>>,
     /// 池子最多留多少个块；按一次更新同时用到的块数定，不随世界范围增长。
     pool_cap: usize,
     /// 清空位置按 BFS 发现顺序记，遍历它不依赖任何哈希图的顺序。
     reset_order: Vec<ChunkPos>,
-    /// 记过旧等级的 (块号, 块内下标)，收变化列表时按坐标排。
-    touched: Vec<(BlockKey, usize)>,
+    /// 本轮用到过的块号，收变化列表时按坐标排。
+    used_blocks: Vec<BlockKey>,
     epoch: u64,
 }
 
 impl Scratch {
     fn new() -> Self {
         Self {
-            epochs: HashMap::default(),
-            old: HashMap::default(),
-            seen: HashMap::default(),
-            reset: HashMap::default(),
-            mark_pool: Vec::new(),
-            level_pool: Vec::new(),
+            blocks: HashMap::default(),
+            pool: Vec::new(),
             pool_cap: 64,
             reset_order: Vec::new(),
-            touched: Vec::new(),
+            used_blocks: Vec::new(),
             epoch: 0,
         }
     }
@@ -178,143 +189,108 @@ impl Scratch {
         self.epoch = self.epoch.wrapping_add(1);
         if self.epoch == 0 {
             // u64 回绕（实际不可达）：把池子也清掉，免得旧 epoch 的标记被误认。
-            self.mark_pool.clear();
-            self.level_pool.clear();
+            self.pool.clear();
             self.epoch = 1;
         }
         self.reset_order.clear();
-        self.touched.clear();
+        self.used_blocks.clear();
     }
 
     /// 一轮结束：块回收，只保留有限个供下轮复用。
     fn recycle(&mut self) {
-        self.pool_cap = self.pool_cap.max(self.epochs.len());
-        let mark_cap = 3 * self.pool_cap;
-        for (_, block) in self.epochs.drain() {
-            if self.mark_pool.len() < mark_cap {
-                self.mark_pool.push(block);
+        self.pool_cap = self.pool_cap.max(self.blocks.len());
+        for (_, block) in self.blocks.drain() {
+            if self.pool.len() < self.pool_cap {
+                self.pool.push(block);
             }
         }
-        for (_, block) in self.seen.drain() {
-            if self.mark_pool.len() < mark_cap {
-                self.mark_pool.push(block);
-            }
-        }
-        for (_, block) in self.reset.drain() {
-            if self.mark_pool.len() < mark_cap {
-                self.mark_pool.push(block);
-            }
-        }
-        for (_, block) in self.old.drain() {
-            if self.level_pool.len() < self.pool_cap {
-                self.level_pool.push(block);
-            }
-        }
-    }
-
-    fn take_mark(&mut self) -> Box<MarkBlock> {
-        self.mark_pool
-            .pop()
-            .unwrap_or_else(|| Box::new([0; BLOCK_CELLS]))
-    }
-
-    fn take_level(&mut self) -> Box<Block> {
-        self.level_pool
-            .pop()
-            .unwrap_or_else(|| Box::new([0; BLOCK_CELLS]))
     }
 
     /// 辅助结构当前占着多少个块（含池子）；公开给上层测试检查内存不随历史距离增长。
     fn block_count(&self) -> usize {
-        self.old.len() + self.mark_pool.len() + self.level_pool.len()
+        self.blocks.len() + self.pool.len()
+    }
+
+    /// 取一个块的格子；本轮第一次碰到这个格子时先重置标记。
+    fn cell(&mut self, pos: ChunkPos) -> (&mut u8, &mut i32) {
+        let key = block_key(pos);
+        let index = cell_index(pos);
+        let epoch = self.epoch;
+        if !self.blocks.contains_key(&key) {
+            let block = self.pool.pop().unwrap_or_else(ScratchBlock::new);
+            self.blocks.insert(key, block);
+            self.used_blocks.push(key);
+        }
+        let block = self.blocks.get_mut(&key).unwrap();
+        if block.stamp[index] != epoch {
+            block.stamp[index] = epoch;
+            block.flags[index] = 0;
+            block.old[index] = 0;
+        }
+        (&mut block.flags[index], &mut block.old[index])
     }
 
     /// 记下一个区块在本次更新开始前的等级；同一轮里只记第一次。
     fn record(&mut self, pos: ChunkPos, old: i32) {
-        let key = block_key(pos);
-        let index = cell_index(pos);
-        let epoch = self.epoch;
-        if !self.epochs.contains_key(&key) {
-            let block = self.take_mark();
-            self.epochs.insert(key, block);
+        let (flags, saved) = self.cell(pos);
+        if *flags & ScratchBlock::RECORDED == 0 {
+            *flags |= ScratchBlock::RECORDED;
+            *saved = old;
         }
-        let epochs = self.epochs.get_mut(&key).unwrap();
-        if epochs[index] == epoch {
-            return;
-        }
-        epochs[index] = epoch;
-        self.touched.push((key, index));
-        if !self.old.contains_key(&key) {
-            let block = self.take_level();
-            self.old.insert(key, block);
-        }
-        self.old.get_mut(&key).unwrap()[index] = old;
     }
 
     /// BFS 里"这个位置见过没有"，第一次调用时标记。
     fn visit(&mut self, pos: ChunkPos) -> bool {
-        let key = block_key(pos);
-        let index = cell_index(pos);
-        let epoch = self.epoch;
-        if !self.seen.contains_key(&key) {
-            let block = self.take_mark();
-            self.seen.insert(key, block);
-        }
-        let seen = self.seen.get_mut(&key).unwrap();
-        if seen[index] == epoch {
+        let (flags, _) = self.cell(pos);
+        if *flags & ScratchBlock::SEEN != 0 {
             false
         } else {
-            seen[index] = epoch;
+            *flags |= ScratchBlock::SEEN;
             true
         }
     }
 
     /// 把一个位置记进清空区（调用前已经 visit 过）。
     fn mark_reset(&mut self, pos: ChunkPos) {
-        let key = block_key(pos);
-        let index = cell_index(pos);
-        let epoch = self.epoch;
-        if !self.reset.contains_key(&key) {
-            let block = self.take_mark();
-            self.reset.insert(key, block);
-        }
-        self.reset.get_mut(&key).unwrap()[index] = epoch;
+        let (flags, _) = self.cell(pos);
+        *flags |= ScratchBlock::RESET;
         self.reset_order.push(pos);
     }
 
     fn is_reset(&self, pos: ChunkPos) -> bool {
         let key = block_key(pos);
-        self.reset
-            .get(&key)
-            .is_some_and(|block| block[cell_index(pos)] == self.epoch)
+        let index = cell_index(pos);
+        self.blocks.get(&key).is_some_and(|block| {
+            block.stamp[index] == self.epoch && block.flags[index] & ScratchBlock::RESET != 0
+        })
     }
 
-    /// 按 (x, z) 输出旧等级真的变了的区块。
+    /// 按块号、块内下标遍历，天然按 (x, z) 排序（负块号单独处理）。
     fn collect(&mut self, levels: &LevelGrid, limit: i32) -> Vec<(ChunkPos, i32, i32)> {
-        // 负块号下块号的字典序和 (x, z) 的字典序不一致，按块内第一个坐标排。
-        self.touched.sort_unstable_by_key(|&((bx, bz), index)| {
-            (
-                (bx << BLOCK_SHIFT) + (index as i32 / BLOCK_SIZE),
-                (bz << BLOCK_SHIFT) + (index as i32 % BLOCK_SIZE),
-            )
-        });
+        self.used_blocks
+            .sort_unstable_by_key(|&(bx, bz)| (bx << BLOCK_SHIFT, bz << BLOCK_SHIFT));
         let mut result = Vec::new();
-        let mut last_key: Option<(BlockKey, &Block)> = None;
-        for &(key, index) in &self.touched {
-            let old = self.old[&key][index];
-            let pos = ChunkPos::new(
-                (key.0 << BLOCK_SHIFT) + (index as i32 / BLOCK_SIZE),
-                (key.1 << BLOCK_SHIFT) + (index as i32 % BLOCK_SIZE),
-            );
-            // 记过的格子按坐标排，绝大多数连续落在同一块里：块引用只换一次。
-            if last_key.is_none_or(|(cached, _)| cached != key) {
-                last_key = levels.block(key).map(|block| (key, block));
-            }
-            let new = last_key.map_or(levels.default, |(_, block)| block[index]);
-            if old != new {
-                result.push((pos, old, new));
+        let epoch = self.epoch;
+        for &key in &self.used_blocks {
+            let block = &self.blocks[&key];
+            let level_block = levels.block(key);
+            for index in 0..BLOCK_CELLS {
+                if block.stamp[index] != epoch || block.flags[index] & ScratchBlock::RECORDED == 0 {
+                    continue;
+                }
+                let old = block.old[index];
+                let new = level_block.map_or(levels.default, |levels| levels[index]);
+                if old != new {
+                    let pos = ChunkPos::new(
+                        (key.0 << BLOCK_SHIFT) + (index as i32 / BLOCK_SIZE),
+                        (key.1 << BLOCK_SHIFT) + (index as i32 % BLOCK_SIZE),
+                    );
+                    result.push((pos, old, new));
+                }
             }
         }
+        // 负块号下块号的字典序和 (x, z) 的字典序不一致，最后按区块坐标排一次。
+        result.sort_unstable_by_key(|&(pos, _, _)| (pos.x, pos.z));
         debug_assert!(
             result
                 .windows(2)
@@ -361,11 +337,7 @@ impl Plane {
     /// 辅助结构占的块数，测试用来检查长期移动不会让内存一直涨。
     #[doc(hidden)]
     pub fn scratch_blocks(&self) -> usize {
-        self.scratch
-            .block_count()
-            .max(self.scratch.epochs.len())
-            .max(self.scratch.seen.len())
-            .max(self.scratch.reset.len())
+        self.scratch.block_count()
     }
 
     fn source(&self, pos: ChunkPos) -> i32 {
@@ -429,6 +401,7 @@ impl Plane {
             }
             self.scratch.record(pos, self.level(pos));
         }
+
         let reset_order = std::mem::take(&mut self.scratch.reset_order);
         for &pos in &reset_order {
             self.scratch.record(pos, self.level(pos));
