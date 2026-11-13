@@ -297,14 +297,14 @@ impl LevelLight {
         engines
     }
 
-    /// 只读快照：克隆这一柱的光照数据，各表分毫不动（补 11）。
-    /// 存档编码只用数据层和 `light_on`，不需要段状态，所以从引擎那份取即可。
-    /// Read-only clone of this column's light data (item 11). Save encoding only
-    /// needs the data layers and `light_on`, so the engines' copy is enough.
+    /// 只读快照：克隆这一柱「已发布」的光照数据，各表分毫不动（补 11）。
+    /// 卸载存盘也是从这一份取，所以有待算光照时两者仍然逐字节一致。
+    /// Read-only clone of this column's *published* light (item 11). Unload
+    /// saves read the same copy, so bytes match even with pending light.
     pub(crate) fn column_clone(&self, pos: ChunkPos) -> [LightColumn; 2] {
         [
-            self.engines.sky.storage.column_at(pos),
-            self.engines.block.storage.column_at(pos),
+            self.visible.storage(LightLayer::Sky).column_at(pos),
+            self.visible.storage(LightLayer::Block).column_at(pos),
         ]
     }
 

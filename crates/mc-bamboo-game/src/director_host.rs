@@ -43,9 +43,12 @@ fn record_codec(started: Instant) {
 
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
-/// D6：运行中把待写快照摊到 6000 刻里，每刻至少存 1 个。
-/// D6: spread pending chunk snapshots over 6000 ticks, at least one per tick.
-pub(crate) const SAVE_INTERVAL_TICKS: usize = 6000;
+/// 官方 `MinecraftServer.autoSave`：每 6000 刻一次全量（只写改过的）。
+/// Official `MinecraftServer.autoSave`: one full pass every 6000 ticks.
+pub(crate) const SAVE_INTERVAL_TICKS: u64 = 6000;
+/// 官方 `ChunkMap.saveChunksEagerly`：每刻最多 20 个，单区块 10 秒冷却。
+/// Official `ChunkMap.saveChunksEagerly`: at most 20 per tick.
+pub(crate) const EAGER_SAVES_PER_TICK: usize = 20;
 /// 单区块 10 秒（200 刻）冷却，照原版 `nextChunkSaveTime`。
 /// Per-chunk 10 second (200 tick) cooldown, like vanilla `nextChunkSaveTime`.
 pub(crate) const SAVE_COOLDOWN_TICKS: u64 = 200;
@@ -83,9 +86,9 @@ struct PendingWrite {
     entities: Option<Vec<u8>>,
 }
 
-/// 每刻要提交几个写：`ceil(待写数 / 6000)`，至少 1 个。
+/// 卸载快照的匀速提交：`ceil(待写数 / 6000)`，至少 1 个。
 fn save_batch_size(queue_len: usize) -> usize {
-    queue_len.div_ceil(SAVE_INTERVAL_TICKS).max(1)
+    (queue_len as u64).div_ceil(SAVE_INTERVAL_TICKS).max(1) as usize
 }
 
 /// 收回的积压大了之后，每刻收掉其中的这么多分之一。
@@ -661,9 +664,14 @@ impl DirectorHost {
         }
         dirty.sort_unstable();
         dirty.dedup();
-        // 每刻最多 20 个（官方 `saveChunksEagerly`），单区块 10 秒冷却；
-        // 失败重试和待算光照推迟的区块不受冷却限制。
-        let count = 20;
+        // 6000 刻那一次全量：把改动集合里的全部都拍下来，其余每刻最多 20 个。
+        // 单区块 10 秒冷却；失败重试和待算光照推迟的区块不受冷却限制。
+        let full = now_tick.is_multiple_of(SAVE_INTERVAL_TICKS);
+        let count = if full {
+            usize::MAX
+        } else {
+            EAGER_SAVES_PER_TICK
+        };
         let mut remaining = Vec::new();
         let mut eligible = Vec::new();
         for pos in dirty {
