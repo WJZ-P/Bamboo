@@ -101,13 +101,17 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
     }
     write_file(output_dir, "tags.rs", &tags)?;
-    write_saved_world(data, output_dir)?;
+    write_file(
+        output_dir,
+        "saved_world.rs",
+        &saved_world_file(&data.saved_world.world_gen_settings),
+    )?;
     write_worldgen(data, output_dir)
 }
 
 /// 官方 codec 编出的 `world_gen_settings.dat` 默认值，写成 SNBT 常量。
-fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String> {
-    let mut out = String::from(HEADER);
+fn saved_world_file(snbt: &str) -> String {
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "//! 官方 `WorldGenSettings.CODEC` 编出的超平坦默认值。主世界生成器是"
@@ -122,12 +126,8 @@ fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String
         out,
         "/// `world_gen_settings.dat` 的 `data` 复合标签（SNBT）。"
     );
-    let _ = writeln!(
-        out,
-        "pub const WORLD_GEN_SETTINGS: &str = r#\"{}\"#;",
-        data.saved_world.world_gen_settings
-    );
-    write_file(output_dir, "saved_world.rs", &out)
+    let _ = writeln!(out, "pub const WORLD_GEN_SETTINGS: &str = r#\"{snbt}\"#;");
+    out
 }
 
 /// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。
@@ -143,9 +143,14 @@ fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String
 /// `float_roundtrip`）。默认的快路径用 `significand as f64 * 10^exp`，少数 17 位有效数字的
 /// 串会差一个最低位；下面的单元测试把官方运行时的位模式钉死，防止读报告那一步悄悄出错。
 fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(&data.worldgen)
+    // `probe-online` 会把 `mc-bamboo-server` 的 serde_json `preserve_order` 特性统一进来，
+    // 那时 `Value` 的键保持 Java 报告的插入顺序，而 `--no-default-features` 下是 BTreeMap
+    // 的字母序。统一排序，两种特性配置写出的文件才逐字符一致。
+    let mut canonical = data.worldgen.clone();
+    canonical.sort_all_objects();
+    let json = serde_json::to_string_pretty(&canonical)
         .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
-    check_worldgen_floats(&data.worldgen, &json)?;
+    check_worldgen_floats(&canonical, &json)?;
     let path = output_dir.join("worldgen.json");
     fs::write(&path, format!("{json}\n"))
         .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
@@ -770,6 +775,7 @@ pub mod loot;
 pub mod packets;
 pub mod recipes;
 pub mod registries;
+pub mod saved_world;
 pub mod shapes;
 pub mod sounds;
 pub mod states;
@@ -3441,6 +3447,75 @@ mod tests {
             0x3fed_4558_d7b1_d486,
         ),
     ];
+
+    /// `preserve_order` 打开时 `Value` 的键是插入顺序，关闭时是字母序。写出前
+    /// 必须递归排序，否则默认特性的 `generate` 会把 `worldgen.json` 整个重排。
+    #[test]
+    fn worldgen_keys_are_sorted_before_writing() {
+        let text = include_str!("../../../crates/mc-bamboo-data/src/generated/worldgen.json");
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        fn check(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let keys: Vec<&String> = map.keys().collect();
+                    let mut sorted = keys.clone();
+                    sorted.sort_unstable();
+                    assert_eq!(keys, sorted, "{path} 的键没有按字母序");
+                    for (key, child) in map {
+                        check(child, &format!("{path}/{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        check(child, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        check(&value, "worldgen");
+    }
+
+    /// 重跑 `generate` / `extract` 后生成文件必须逐字符不变，文件头也只出现一次。
+    /// 把提交的文件里的 SNBT 喂回排版函数，再连 HEADER 一起和文件本身比较。
+    #[test]
+    fn the_saved_world_file_round_trips_through_the_generator() {
+        let committed = include_str!("../../../crates/mc-bamboo-data/src/generated/saved_world.rs");
+        let prefix = "pub const WORLD_GEN_SETTINGS: &str = r#\"";
+        let (_, rest) = committed.split_once(prefix).unwrap();
+        let (snbt, _) = rest.split_once("\"#;").unwrap();
+        assert_eq!(format!("{HEADER}{}", saved_world_file(snbt)), committed);
+        assert_eq!(committed.matches(HEADER.trim()).count(), 1);
+    }
+
+    /// `mod.rs` 由生成流程重写，漏一个模块就会让引用这个文件的 crate 编译不过。
+    /// 直接对照 `generated/` 里的 .rs 文件，防止下一个手工加的文件又被删掉。
+    #[test]
+    fn the_module_list_contains_every_generated_file() {
+        let modules = module_file();
+        let lines: Vec<&str> = modules.lines().collect();
+        let mut sorted = lines.clone();
+        sorted.sort_unstable();
+        assert_eq!(lines, sorted, "模块列表要按字母序");
+
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/mc-bamboo-data/src/generated");
+        for entry in fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            let Some(stem) = name.strip_suffix(".rs") else {
+                continue;
+            };
+            if stem == "mod" {
+                continue;
+            }
+            assert!(
+                lines.contains(&format!("pub mod {stem};").as_str()),
+                "mod.rs 漏了 {name}"
+            );
+        }
+        assert!(lines.contains(&"pub mod saved_world;"), "{modules}");
+    }
 
     #[test]
     fn official_decimals_round_trip_to_the_runtime_bits() {
