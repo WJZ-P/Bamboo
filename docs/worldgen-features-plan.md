@@ -641,15 +641,19 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 | `cargo test -p mc-bamboo-worldgen` | 93 个测试全过 |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
-**剩余差异**：`--ore-only --steps 6` 在 chunk `(100,100)`（群系含
-`minecraft:lush_caves`）时，`minecraft:ore_clay` 的一个矿团在 y≈-21..-16、
-x≈8..11、z≈14..15 处 Bamboo 多写了 `minecraft:clay`（官方是 `deepslate`）。
+**剩余差异**：`--ore-only --steps 6` 在第三个种子的 chunk `(100,100)` 时，
+`minecraft:ore_clay` 的一个矿团在 y≈-21..-16、x≈8..11、z≈14..15（跨中心与
+`(0,-1)` 邻居的边界）Bamboo 多写了约 200 格 `minecraft:clay`（官方是
+`deepslate`）。`ore_clay` 只属于 `minecraft:lush_caves`，只有该群系出现在 3×3
+群系并集里才会被收集，所以 `--seeds 1/2` 全绿、`--seeds 3` 才复现；
+输入 terrain 里 clay 数为 0，确认是 features 阶段写的。
 已排除：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`WorldgenRandom` 全部
 取数方法（用 `RandProbe.java` 对比过 `nextInt(384)` 序列和 `nextFloat` 位模式）、
-`Context` 缓存（已换成 `Context::uncached()`）、栈 DFS 的交错顺序。最可能是
-`OreFeature.doPlace` 里 `Mth.sin` 查表或椭球边界某处 1 ulp 的浮点差，需要用
-`--trace` 把该团的中心/半径逐值对拍后定位。**这一处差异不影响其它 23/24 区块，
-也不影响已确认的 0 不一致结论，但不能算「step 6 全绿」。**
+`Context` 缓存（已换成 `Context::uncached()`）、栈 DFS 的交错顺序、
+`getHeight` 序列（用 trace 对过前 40 行）。最可能是 `OreFeature.doPlace` 里
+`Mth.sin` 查表或椭球边界某处 1 ulp 的浮点差，需要把该团的中心/半径逐值对拍后定位。
+**这一处差异不影响其它 23/24 区块，也不影响已确认的 0 不一致结论，
+但不能算「step 6 全绿」。**
 
 ### 还没做
 
