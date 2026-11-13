@@ -901,27 +901,56 @@ impl<'a> World<'a> {
         self.content_writes
     }
 
-    /// 有没有活着的物品实体会触发这个漏斗的 `entityInside`，或者落在它的吸取盒里。
-    /// 判定和两条原路径共用同一组函数；只要可能，漏斗就保持醒着。
+    /// 吸取盒里、或者 `entityInside` 会扫到的格子里有没有活着的物品实体。
+    /// 判定和两条原路径共用同一份格子范围 / 相交函数；空间索引只查附近的实体。
     ///
-    /// Whether a living item can trigger `entityInside` or sits in the suck box.
-    /// Both checks reuse the original predicates; if either can happen, the hopper stays awake.
+    /// Whether a living item sits in the suck box or can trigger `entityInside`.
+    /// Uses the exact shared predicates and the entity spatial index.
     pub(crate) fn hopper_has_items(&self, pos: BlockPos) -> bool {
         let suck = crate::hopper::suck_box(pos);
-        for entity in self.level.live_entities() {
-            if entity.removed || entity.ground().is_none() {
-                continue;
+        let mut found = false;
+        self.level.for_each_entity_in(suck, &mut |public| {
+            if found || public.removed {
+                return;
             }
-            let bounds = entity.bounding_box();
-            if bounds.intersects(suck)
-                || crate::hopper::entity_inside_cells(self, bounds)
-                    .iter()
-                    .any(|&at| at == pos && crate::hopper::item_touches_hopper(&entity, at))
+            if matches!(public.kind, crate::entity::KindPublic::Item { .. })
+                && public.bounding_box().intersects(suck)
             {
-                return true;
+                found = true;
             }
+        });
+        if found {
+            return true;
         }
-        false
+        // `entityInside` 扫的格子比吸取盒低两格；这段范围也查一次。
+        let (min, max) = crate::hopper::hopper_cells_touched(suck);
+        let lower = crate::shape::Aabb::new(
+            f64::from(min.x),
+            f64::from(min.y),
+            f64::from(min.z),
+            f64::from(max.x + 1),
+            f64::from(max.y + 1),
+            f64::from(max.z + 1),
+        );
+        self.level.for_each_entity_in(lower, &mut |public| {
+            if found || public.removed {
+                return;
+            }
+            if matches!(public.kind, crate::entity::KindPublic::Item { .. }) {
+                let (cells_min, cells_max) =
+                    crate::hopper::hopper_cells_touched(public.bounding_box());
+                if cells_min.x <= pos.x
+                    && cells_max.x >= pos.x
+                    && cells_min.y <= pos.y
+                    && cells_max.y >= pos.y
+                    && cells_min.z <= pos.z
+                    && cells_max.z >= pos.z
+                {
+                    found = true;
+                }
+            }
+        });
+        found
     }
 
     /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。

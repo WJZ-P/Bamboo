@@ -1826,10 +1826,12 @@ mod idle_hopper {
         cursor: usize,
         slept: usize,
         ran: usize,
+        /// 这一份用并行实体驱动，验证发布阶段也能按空间范围叫醒漏斗。
+        parallel: bool,
     }
 
     impl Scene {
-        fn new(script: Vec<(i64, Act)>, layout: Layout, sleep: bool) -> Self {
+        fn new(script: Vec<(i64, Act)>, layout: Layout, sleep: bool, parallel: bool) -> Self {
             let mut level = TestLevel::new();
             let mut ticks = BlockTicks::new();
             level.set_container(HOPPER, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
@@ -1866,6 +1868,7 @@ mod idle_hopper {
                 cursor: 0,
                 slept: 0,
                 ran: 0,
+                parallel,
             }
         }
 
@@ -1882,7 +1885,18 @@ mod idle_hopper {
                 self.apply(act, now);
             }
             // 实体阶段：物品飞近 / 合并 / 消失，然后方块实体阶段。
-            {
+            if self.parallel {
+                use crate::entity::{
+                    parallel::{InlineExecutor, tick_entities_parallel},
+                    view::{FlatSource, SourceView, ViewFacts},
+                };
+                let blocks = SourceView::new(FlatSource {
+                    floor_y: 63,
+                    facts: ViewFacts::default(),
+                });
+                let mut world = World::new(&mut self.level, &mut self.ticks);
+                tick_entities_parallel(&blocks, &mut world, &InlineExecutor);
+            } else {
                 let mut world = World::new(&mut self.level, &mut self.ticks);
                 world.tick_entities();
             }
@@ -2027,40 +2041,42 @@ mod idle_hopper {
         let mut slept_total = 0;
         let mut ran_sleep = 0;
         let mut ran_always = 0;
-        for seed in [1, 7, 42, 1337, 90210] {
-            for layout in [Layout::Single, Layout::Chain, Layout::Chests] {
-                let actions = script(seed, TICKS, layout);
-                let mut sleeping = Scene::new(actions.clone(), layout, true);
-                let mut always = Scene::new(actions, layout, false);
-                for now in 1..=TICKS {
-                    sleeping.step(now);
-                    always.step(now);
-                    assert_eq!(
-                        sleeping.snapshot(),
-                        always.snapshot(),
-                        "seed {seed} layout {layout:?} tick {now}"
+        for parallel in [false, true] {
+            for seed in [1, 7, 42, 1337, 90210] {
+                for layout in [Layout::Single, Layout::Chain, Layout::Chests] {
+                    let actions = script(seed, TICKS, layout);
+                    let mut sleeping = Scene::new(actions.clone(), layout, true, parallel);
+                    let mut always = Scene::new(actions, layout, false, parallel);
+                    for now in 1..=TICKS {
+                        sleeping.step(now);
+                        always.step(now);
+                        assert_eq!(
+                            sleeping.snapshot(),
+                            always.snapshot(),
+                            "parallel {parallel} seed {seed} layout {layout:?} tick {now}"
+                        );
+                    }
+                    slept_total += sleeping.slept;
+                    ran_sleep += sleeping.ran;
+                    ran_always += always.ran;
+                    assert!(
+                        sleeping.slept > 0,
+                        "seed {seed} layout {layout:?} 的闲置漏斗应该真的睡过"
                     );
                 }
-                slept_total += sleeping.slept;
-                ran_sleep += sleeping.ran;
-                ran_always += always.ran;
-                assert!(
-                    sleeping.slept > 0,
-                    "seed {seed} layout {layout:?} 的闲置漏斗应该真的睡过"
-                );
             }
+            assert!(
+                ran_sleep < ran_always,
+                "休眠确实少跑了 ticker：{ran_sleep} vs {ran_always}"
+            );
+            assert!(slept_total > 0);
         }
-        assert!(
-            ran_sleep < ran_always,
-            "休眠确实少跑了 ticker：{ran_sleep} vs {ran_always}"
-        );
-        assert!(slept_total > 0);
     }
 
     /// 没有物品实体、上方和下方都是空容器的漏斗：2000 刻里只该在第一刻真跑。
     #[test]
     fn an_undisturbed_idle_hopper_sleeps_almost_every_tick() {
-        let mut scene = Scene::new(Vec::new(), Layout::Single, true);
+        let mut scene = Scene::new(Vec::new(), Layout::Single, true, false);
         for now in 1..=2000 {
             scene.step(now);
         }
