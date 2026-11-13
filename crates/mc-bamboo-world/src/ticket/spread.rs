@@ -731,7 +731,10 @@ impl Plane {
     /// 算出的 min-plus 不动点就是全局新不动点。
     ///
     /// 切比雪夫最短路可以按 x 单调取，所以一遍 x↑z↑（看上/左上/右上/左 +1）
-    /// 加一遍 x↓z↓（看下/左下/右下/右 +1）就收敛，不需要优先队列。窗口外一格不变，
+    /// 加一遍 x↓z↓（看下/左下/右下/右 +1）就收敛，不需要优先队列。**这里依赖 halo 本身
+    /// 是有效不动点上的值**：相邻 halo 格满足 `L(a) <= L(b) + 1`，钉住它们不会截断沿
+    /// halo 的最短路径；若 halo 是任意值，两遍就不一定够（需要额外一遍或 Dijkstra）。
+    /// 持久等级表在每次 `update` 后都维护着这个不动点，所以前提成立。窗口外一格不变，
     /// 按 x 主序扫一遍旧/新值即可产出恰好全部变化、且天然按 `(x, z)` 有序。
     ///
     /// 返回 `None` 表示这轮不满足判据，调用方原样走两阶段回退路径。
@@ -842,6 +845,29 @@ impl Plane {
                 }
             }
         }
+        // 两遍光栅扫描的前提：halo 自己满足 8 邻 +1 的 Lipschitz 条件。调试构建里
+        // 抽查相邻 halo 格，防止将来改动持久等级表时悄悄破坏这个前提。
+        debug_assert!({
+            let ring_ok = |a: usize, b: usize| {
+                let (left, right) = (i32::from(cells[a]), i32::from(cells[b]));
+                (left - right).abs() <= 1
+            };
+            (1..width).all(|ix| {
+                // 相邻两列的上边界、相邻两列的下边界。
+                let top_a = (ix - 1) * height;
+                let top_b = ix * height;
+                let bottom_a = top_a + height - 1;
+                let bottom_b = top_b + height - 1;
+                ring_ok(top_a, top_b) && ring_ok(bottom_a, bottom_b)
+            }) && (1..height).all(|iz| {
+                // 相邻两行的左边界、相邻两行的右边界。
+                let left_a = iz - 1;
+                let left_b = iz;
+                let right_a = (width - 1) * height + iz - 1;
+                let right_b = right_a + 1;
+                ring_ok(left_a, left_b) && ring_ok(right_a, right_b)
+            })
+        });
         drop(_setup_guard);
         // 两遍光栅扫描：3×3 邻域的切比雪夫距离变换，对按 x 单调的最短路是精确的。
         let _sweep_guard = Guard::new(super::profile::DENSE_SWEEP);
