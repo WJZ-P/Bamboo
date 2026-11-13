@@ -7,7 +7,14 @@
 //! 数据来自 `mc-bamboo-data::worldgen::WORLDGEN` 里的 `feature`、`placed_feature`、
 //! `biome_features` 和 `features_per_step` 四个键，见 `docs/worldgen-features-plan.md`。
 
+pub mod ores;
+pub mod placement;
+pub mod provider;
 pub mod registry;
+pub mod rule_test;
+pub mod run;
+pub mod state;
+pub mod world;
 
 /// `GenerationStep.Decoration` 的枚举项个数（26.3 是 11 个）。
 ///
@@ -35,23 +42,20 @@ pub struct FeatureChunks {
     pub blocks: [ChunkBlocks; 9],
     /// 9 个区块的 quart 群系格（BIOMES 阶段的结果），每段 64 个群系注册表 ID。
     pub biomes: [Vec<Vec<u32>>; 9],
-    /// 9 个区块的 4 张 primed heightmap，每张 256 个高度（`ChunkAccess.getHeight` 的值）。
+    /// 9 个区块的 6 张 primed heightmap，每张 256 个高度（`ChunkAccess.getHeight` 的值）。
     pub heights: [Heightmaps; 9],
 }
 
-/// `ChunkStatus.FINAL_HEIGHTMAPS` 的四种，顺序和 `heightmaps::TYPES` 的后四项一致。
+/// `heightmaps::TYPES` 的六种，按官方声明顺序。
 ///
-/// 初值是 `minY - 1`：官方 `Heightmap` 的 `getFirstAvailable` 在空柱上返回
-/// `minY - 1`（存的是 `height - minY`，再减一）。
+/// 初值是 `minY - 1`：官方 `Heightmap` 的空柱从这个值开始。
 #[derive(Debug, Clone, Copy)]
 pub struct Heightmaps {
-    /// `WORLD_SURFACE`。
+    pub world_surface_wg: [i32; 256],
     pub world_surface: [i32; 256],
-    /// `OCEAN_FLOOR`。
+    pub ocean_floor_wg: [i32; 256],
     pub ocean_floor: [i32; 256],
-    /// `MOTION_BLOCKING`。
     pub motion_blocking: [i32; 256],
-    /// `MOTION_BLOCKING_NO_LEAVES`。
     pub motion_blocking_no_leaves: [i32; 256],
 }
 
@@ -59,7 +63,9 @@ impl Heightmaps {
     pub fn new(min_y: i32) -> Self {
         let empty = [min_y - 1; 256];
         Self {
+            world_surface_wg: empty,
             world_surface: empty,
+            ocean_floor_wg: empty,
             ocean_floor: empty,
             motion_blocking: empty,
             motion_blocking_no_leaves: empty,

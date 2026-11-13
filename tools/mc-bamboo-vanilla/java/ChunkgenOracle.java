@@ -91,6 +91,7 @@ final class FeatureLevelHandler implements InvocationHandler {
     private Supplier<String> currentlyGenerating;
     private long nextSubTick;
 
+
     FeatureLevelHandler(ChunkPos center, long seed, NoiseGeneratorSettings settings,
             TerrainChunkView[] chunks, RegistryAccess registries, BiomeManager biomeManager,
             RandomState randomState) {
@@ -454,7 +455,8 @@ public final class ChunkgenOracle {
      * 其它 step 不调 `placeWithBiomeCheck`。随机数按 `(index, step)` 重新播种，
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
-    private record Options(int seeds, int chunks, long salt, int through, int stepsMask) {
+    private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
+            String featureAllowList) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -463,6 +465,7 @@ public final class ChunkgenOracle {
             long salt = 1;
             int through = 3;
             int stepsMask = ALL_STEPS;
+            String featureAllowList = null;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -489,11 +492,12 @@ public final class ChunkgenOracle {
                             stepsMask |= 1 << step;
                         }
                     }
+                    case "--ore-only" -> featureAllowList = "minecraft:ore";
                     case "--biomes-only" -> through = 0;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList);
         }
     }
 
@@ -565,6 +569,7 @@ public final class ChunkgenOracle {
                                             .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
                             this.settings.wrapAsHolder(generatorSettings));
             applyStepsMask(generator);
+            applyFeatureAllowList(generator);
             MaterialRule materialRule = generatorSettings.materialRule().value();
             for (long seed : seeds()) {
                 RandomState state = RandomState.create(this.noiseLookup, seed, generatorSettings);
@@ -746,6 +751,74 @@ public final class ChunkgenOracle {
                                 .map(net.minecraft.core.Holder::value)
                                 .collect(java.util.stream.Collectors.toSet())));
             }
+        }
+
+        /**
+         * 过渡开关：只保留配置类型在白名单里的 placed feature。做法和 `--steps` 一样，
+         * 把不保留的 HolderSet 换成空集合，全局 index 和 `setFeatureSeed` 参数不变。
+         */
+        private void applyFeatureAllowList(NoiseBasedChunkGenerator generator) throws Exception {
+            String allowed = this.options.featureAllowList();
+            if (allowed == null) {
+                return;
+            }
+            Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
+                    this.registries.lookupOrThrow(Registries.PLACED_FEATURE);
+            Set<String> keep = new HashSet<>();
+            for (java.util.Map.Entry<net.minecraft.resources.ResourceKey<
+                    net.minecraft.world.level.levelgen.placement.PlacedFeature>,
+                    net.minecraft.world.level.levelgen.placement.PlacedFeature> entry
+                    : placed.entrySet()) {
+                net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
+                // 用 codec 的类型 ID 比，不用注册名前缀猜。
+                if (allowed.equals(featureTypeId(value.feature().value()))) {
+                    keep.add(entry.getKey().identifier().toString());
+                }
+            }
+            if (keep.isEmpty()) {
+                throw new IllegalStateException("feature allow list kept nothing: " + allowed);
+            }
+            Field features = net.minecraft.world.level.biome.BiomeGenerationSettings.class
+                    .getDeclaredField("features");
+            features.setAccessible(true);
+            Registry<Biome> biomes = this.registries.lookupOrThrow(Registries.BIOME);
+            for (Biome biome : biomes) {
+                net.minecraft.world.level.biome.BiomeGenerationSettings settings =
+                        biome.getGenerationSettings();
+                List<net.minecraft.core.HolderSet<
+                        net.minecraft.world.level.levelgen.placement.PlacedFeature>> steps =
+                        new ArrayList<>(settings.features());
+                for (int step = 0; step < steps.size(); step++) {
+                    List<net.minecraft.core.Holder<
+                            net.minecraft.world.level.levelgen.placement.PlacedFeature>> kept =
+                            new ArrayList<>();
+                    for (net.minecraft.core.Holder<
+                            net.minecraft.world.level.levelgen.placement.PlacedFeature> holder
+                            : steps.get(step)) {
+                        String name = holder.unwrapKey().map(k -> k.identifier().toString()).orElse("");
+                        if (keep.contains(name)) {
+                            kept.add(holder);
+                        }
+                    }
+                    steps.set(step, net.minecraft.core.HolderSet.direct(kept));
+                }
+                features.set(settings, List.copyOf(steps));
+                Field featureSet = net.minecraft.world.level.biome.BiomeGenerationSettings.class
+                        .getDeclaredField("featureSet");
+                featureSet.setAccessible(true);
+                featureSet.set(settings, com.google.common.base.Suppliers.memoize(
+                        () -> List.copyOf(steps).stream()
+                                .flatMap(net.minecraft.core.HolderSet::stream)
+                                .map(net.minecraft.core.Holder::value)
+                                .collect(java.util.stream.Collectors.toSet())));
+            }
+            System.err.println("feature allow list kept " + keep.size() + " placed features");
+        }
+
+        /** 官方 `Feature.DIRECT_CODEC` 的 dispatch 类型 ID。 */
+        private String featureTypeId(net.minecraft.world.level.levelgen.feature.Feature feature) {
+            return net.minecraft.core.registries.BuiltInRegistries.FEATURE_TYPE
+                    .getKey(feature.codec()).toString();
         }
 
         /** globalFluidPicker 是实例字段；buildTerrain 用的就是当前 generator 的那个。 */

@@ -439,6 +439,51 @@ impl WorldgenRandom {
         (upper << 32).wrapping_add(lower)
     }
 
+    /// `nextInt()`：`BitRandomSource.nextInt()` = `next(32)`。
+    pub fn next_int_unbounded(&self) -> i32 {
+        self.next(32)
+    }
+
+    /// `nextInt(bound)`：`BitRandomSource` 的默认实现。
+    ///
+    /// `WorldgenRandom` 继承 `LegacyRandomSource`，不管内层包的是 Legacy 还是 Xoroshiro，
+    /// 这里都走 `next(bits)` 的默认 31 位无偏取模，不是内层源自己的 Lemire 实现。
+    pub fn next_int(&self, bound: i32) -> i32 {
+        assert!(bound > 0, "Bound must be positive");
+        if bound & (bound - 1) == 0 {
+            return ((i64::from(bound) * i64::from(self.next(31))) >> 31) as i32;
+        }
+        loop {
+            let sample = self.next(31);
+            let modulo = sample % bound;
+            if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
+                return modulo;
+            }
+        }
+    }
+
+    /// `Mth.randomBetweenInclusive(random, min, max)`。
+    pub fn next_int_between_inclusive(&self, min: i32, max: i32) -> i32 {
+        self.next_int(max - min + 1) + min
+    }
+
+    /// `nextFloat()`：`BitRandomSource` 的默认实现，`next(24) * 2^-24`。
+    pub fn next_float(&self) -> f32 {
+        self.next(24) as f32 * 5.960_464_5e-8_f32
+    }
+
+    /// `nextDouble()`：`BitRandomSource` 的默认实现，两次 `next` 拼 53 位。
+    pub fn next_double(&self) -> f64 {
+        let upper = i64::from(self.next(26));
+        let lower = i64::from(self.next(27));
+        ((upper << 27) + lower) as f64 * 1.110_223_024_625_156_5e-16_f64
+    }
+
+    /// `nextBoolean()`：`next(1)`。
+    pub fn next_boolean(&self) -> bool {
+        self.next(1) != 0
+    }
+
     /// `setDecorationSeed(seed, chunkX, chunkZ)`，返回官方那个 population seed。
     pub fn set_decoration_seed(&self, seed: i64, chunk_x: i32, chunk_z: i32) -> i64 {
         self.set_seed(seed);

@@ -19,6 +19,8 @@ use mc_bamboo_data::{block_by_name, registries, version};
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::{Generator, Stage},
+    feature::state::state_from_official_name,
+    feature::{FeatureChunks, Heightmaps, world::prime_heightmaps},
 };
 use serde::Deserialize;
 
@@ -109,6 +111,8 @@ struct Options {
     features: bool,
     /// 转发给 Java 侧的 `--steps` 掩码。
     steps: i32,
+    /// `--ore-only`：Java 侧只留 `minecraft:ore`，Rust 侧同样过滤。
+    ore_only: bool,
 }
 
 impl Options {
@@ -121,6 +125,7 @@ impl Options {
             through: Stage::Noise,
             features: false,
             steps: ALL_STEPS,
+            ore_only: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -141,6 +146,10 @@ impl Options {
                     options
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
+                }
+                "--ore-only" => {
+                    options.ore_only = true;
+                    options.forwarded.push("--ore-only".to_owned());
                 }
                 "--biomes-only" => {
                     options.biomes_only = true;
@@ -197,6 +206,7 @@ struct Report<'a> {
     biomes_only: bool,
     features: bool,
     steps: i32,
+    ore_only: bool,
     mismatches: Vec<String>,
     show: usize,
     ended: bool,
@@ -230,6 +240,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         biomes_only: options.biomes_only,
         features: options.features,
         steps: options.steps,
+        ore_only: options.ore_only,
         mismatches: Vec::new(),
         show: options.show.unwrap_or(DEFAULT_SHOW),
         ended: false,
@@ -484,11 +495,8 @@ impl Report<'_> {
         }
     }
 
-    /// `features` 阶段：Java 侧跑完 11（或 `--steps` 指定的）步之后输出 9 宫格。
-    ///
-    /// 目前 Rust 侧还没有地物放置实现，只核对 Java 侧的输出形状、步骤掩码和
-    /// 9 个区块的方块数；逐方块比较要等 `mc-bamboo-worldgen::feature` 的
-    /// `Generator::features()` 落地后接入。
+    /// `features` 阶段：Java 侧跑完 11（或 `--steps` 指定的）步之后输出 9 宫格，
+    /// Bamboo 用同样 9 个 CARVERS 区块跑 `Generator::features()` 再逐方块比较。
     fn compare_features(
         &mut self,
         seed: i64,
@@ -512,6 +520,9 @@ impl Report<'_> {
             return;
         }
         self.chunks += 1;
+
+        // 先核对形状和调色板，并算出 9 个区块的期望方块。
+        let mut expected: Vec<Vec<u32>> = Vec::with_capacity(9);
         for (index, chunk) in chunks.iter().enumerate() {
             let dz = index as i32 / 3 - 1;
             let dx = index as i32 % 3 - 1;
@@ -530,15 +541,116 @@ impl Report<'_> {
                 ));
                 return;
             }
-            for (id, &index) in chunk.blocks.iter().enumerate() {
-                if index as usize >= chunk.palette.len() {
-                    self.mismatch(format!(
-                        "features seed {seed} chunk ({x},{z}) ({dx},{dz}) at {id}: palette index {index} out of range"
-                    ));
-                    return;
+            let mut palette = Vec::with_capacity(chunk.palette.len());
+            for name in &chunk.palette {
+                match state_from_official_name(name) {
+                    Ok(state) => palette.push(state),
+                    Err(error) => {
+                        self.mismatch(format!(
+                            "features seed {seed} chunk ({x},{z}) ({dx},{dz}): {error}"
+                        ));
+                        return;
+                    }
                 }
             }
-            self.features_blocks += chunk.blocks.len() as u64;
+            let mut states = Vec::with_capacity(chunk.blocks.len());
+            for &id in &chunk.blocks {
+                let Some(&state) = palette.get(id as usize) else {
+                    self.mismatch(format!(
+                        "features seed {seed} chunk ({x},{z}) ({dx},{dz}): palette index {id} out of range"
+                    ));
+                    return;
+                };
+                states.push(state);
+            }
+            expected.push(states);
+        }
+
+        // 造 9 个区块的 CARVERS 结果 + BIOMES 群系格 + primed 高度图。
+        let ore_only = self.ore_only;
+        let generator = match self.generator(seed) {
+            Ok(generator) => generator,
+            Err(error) => {
+                self.mismatch(format!("features seed {seed} chunk ({x},{z}): {error}"));
+                return;
+            }
+        };
+        let mut blocks: Vec<Vec<Vec<u32>>> = Vec::with_capacity(9);
+        let mut biomes: Vec<Vec<Vec<u32>>> = Vec::with_capacity(9);
+        let mut heights: Vec<Heightmaps> = Vec::with_capacity(9);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let cx = x + dx;
+                let cz = z + dz;
+                let layers = match generator.terrain(cx, cz, Stage::Carvers) {
+                    Ok(layers) => layers,
+                    Err(error) => {
+                        self.mismatch(format!(
+                            "features seed {seed} chunk ({x},{z}) ({dx},{dz}) terrain: {error}"
+                        ));
+                        return;
+                    }
+                };
+                heights.push(prime_heightmaps(&layers, -64, 384));
+                blocks.push(layers);
+                match generator.biomes(cx, cz) {
+                    Ok(sections) => biomes.push(sections),
+                    Err(error) => {
+                        self.mismatch(format!(
+                            "features seed {seed} chunk ({x},{z}) ({dx},{dz}) biomes: {error}"
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+        let input = FeatureChunks {
+            center_x: x,
+            center_z: z,
+            min_y: -64,
+            height: 384,
+            blocks: blocks.try_into().expect("9 chunks"),
+            biomes: biomes.try_into().expect("9 chunks"),
+            heights: heights.try_into().expect("9 chunks"),
+        };
+        let allowed = if ore_only {
+            Some(&["minecraft:ore"][..])
+        } else {
+            None
+        };
+        let result = match generator.features(&input, steps, allowed) {
+            Ok(result) => result,
+            Err(error) => {
+                self.mismatch(format!(
+                    "features seed {seed} chunk ({x},{z}): features: {error}"
+                ));
+                return;
+            }
+        };
+        if result.unsupported {
+            self.skipped_chunks += 1;
+            return;
+        }
+
+        for (index, (official, layers)) in expected.iter().zip(result.blocks.iter()).enumerate() {
+            let dz = index as i32 / 3 - 1;
+            let dx = index as i32 % 3 - 1;
+            self.features_blocks += official.len() as u64;
+            for (position, (&want, &have)) in
+                official.iter().zip(layers.iter().flatten()).enumerate()
+            {
+                if want != have {
+                    self.mismatch(format!(
+                        "features seed {seed} chunk ({x},{z}) ({dx},{dz}) y {} x {} z {}: official {want}, bamboo {have}",
+                        position as i32 / 256 - 64,
+                        (position % 256) / 16,
+                        position % 16
+                    ));
+                    if self.mismatches.len() >= self.show * 20 {
+                        break;
+                    }
+                }
+            }
         }
         self.features_chunks += 1;
     }
