@@ -253,6 +253,18 @@ impl ChunkStore {
         // `take_column` 里的 `rebind_area` 按「这一柱还在」重算邻居计数，
         // 注销后由下一次 `rebind_area` 修正（加载/卸载成对发生时净效果正确）。
         let column = self.take_column(pos);
+        let _ = self.finish_unload(pos);
+        column
+    }
+
+    /// 盒子已由 [`Self::take_column`] 取走之后，注销这个位置的已加载状态和光照柱。
+    ///
+    /// 一次收回只需要取一次盒子；`unload` 是「取盒子 + 注销」的便捷入口，
+    /// region 批量收回时用这条路径，避免再克隆一份模板柱做丢弃。
+    pub fn finish_unload(&mut self, pos: ChunkPos) -> Result<(), crate::column::LightPending> {
+        if !self.is_loaded(pos) || !self.ready_to_move_columns() {
+            return Err(crate::column::LightPending);
+        }
         if let Some(set) = self.loaded.as_mut() {
             set.remove(&pos);
         }
@@ -270,7 +282,7 @@ impl ChunkStore {
             ..
         } = self;
         engine.rebind_area(pos, Self::chunks_view(template, edited, loaded.as_ref()));
-        column
+        Ok(())
     }
 
     /// 所有没改过的区块共用的内容。

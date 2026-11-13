@@ -599,7 +599,7 @@ impl Region {
         let boxes = self.take_columns(chunks)?;
         self.profiler.start_sub(SubPhase::ReclaimStorage);
         for &pos in chunks {
-            let _ = self.chunks.unload(pos);
+            let _ = self.chunks.finish_unload(pos);
         }
         self.profiler.end_sub();
         Ok(boxes)
