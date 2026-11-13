@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! 区块生成到 `terrain` 步里 `doFill` 跑完为止的那一部分。
 //!
 //! 官方 26.3 把噪声、地表规则和雕刻器合在同一个 `terrain` 状态里；这里把噪声那一段单独
@@ -23,6 +22,7 @@ use serde_json::Value;
 
 use crate::{
     Worldgen,
+    aquifer::Aquifer,
     biome::MultiNoiseBiomeSource,
     climate::TargetPoint,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
@@ -61,13 +61,13 @@ pub struct Generator<'a> {
 
 /// 含水层用的六条密度函数，编译顺序和 `NoiseBasedAquifer` 的构造器一样。
 #[derive(Debug)]
-struct AquiferFunctions {
-    barrier: Sampler,
-    fluid_level_floodedness: Sampler,
-    fluid_level_spread: Sampler,
-    lava: Sampler,
-    exclusion: Sampler,
-    surface_level: Sampler,
+pub struct AquiferFunctions {
+    pub barrier: Sampler,
+    pub fluid_level_floodedness: Sampler,
+    pub fluid_level_spread: Sampler,
+    pub lava: Sampler,
+    pub exclusion: Sampler,
+    pub surface_level: Sampler,
 }
 
 impl<'a> Generator<'a> {
@@ -191,6 +191,60 @@ impl<'a> Generator<'a> {
         }
         Ok(result)
     }
+
+    /// `NoiseBasedChunkGenerator.doFill`：生成到 NOISE 阶段的方块。
+    ///
+    /// 返回 `height` 个方块层，每层的 256 个默认状态 ID，下标 `x*16 + z`。
+    /// 官方 `doFill` 是一次 `finalDensity.sampleVolume` 之后自顶向下问含水层；这里照做。
+    /// `biomes` 和 `noise` 用各自的 `Context`，和官方两个阶段的 `SamplerContext` 一样。
+    pub fn noise(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
+        // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
+        let aquifer = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
+        let mut aquifer = Aquifer::new(
+            aquifer,
+            &mut context,
+            self.aquifer_random,
+            &volume,
+            self.settings.sea_level,
+            self.default_fluid,
+            lava_state()?,
+            self.empty,
+        );
+        self.router[7].sample_volume(&mut context, &mut density, &volume);
+
+        let mut layers = vec![vec![self.empty; 256]; height as usize];
+        for z in 0..16 {
+            let block_z = chunk_z * 16 + z;
+            for x in 0..16 {
+                let block_x = chunk_x * 16 + x;
+                for local_y in (0..height).rev() {
+                    let block_y = min_y + local_y;
+                    let value = f64::from(density[volume.index(x, local_y, z)]);
+                    let state = aquifer
+                        .compute_substance(&mut context, block_x, block_y, block_z, value)
+                        .unwrap_or(self.default_block);
+                    if state != self.empty {
+                        layers[local_y as usize][x as usize * 16 + z as usize] = state;
+                    }
+                }
+            }
+        }
+        context.release(density);
+        Ok(layers)
+    }
+}
+
+/// `Blocks.LAVA.defaultBlockState()`。
+fn lava_state() -> Result<u32, String> {
+    Ok(block_by_name("minecraft:lava")
+        .ok_or("missing minecraft:lava")?
+        .default_state)
 }
 
 /// `NoiseGeneratorSettings` 的原始 JSON 里，含水层配置、默认方块和默认流体都还没进

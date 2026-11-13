@@ -15,7 +15,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use mc_bamboo_data::{registries, version};
+use mc_bamboo_data::{block_by_name, registries, version};
 use mc_bamboo_worldgen::{Worldgen, chunk::Generator};
 use serde::Deserialize;
 
@@ -256,13 +256,71 @@ impl Report<'_> {
     }
 
     fn compare_noise(&mut self, seed: i64, x: i32, z: i32, palette: &[String], expected: &[u16]) {
-        let _ = (seed, x, z, palette, expected);
-        self.noise += expected.len() as u64;
         self.chunks += 1;
-        // NOISE 阶段的实现和对拍在下一步接上。
-        self.mismatch(format!(
-            "noise seed {seed} chunk ({x},{z}): not implemented yet"
-        ));
+        // 官方的调色板是 `BlockState.toString()`，目前只有四个默认状态。
+        let state_of = |name: &str| -> Option<u32> {
+            // `Block{minecraft:stone}` 或 `Block{minecraft:water}[level=0]`。
+            // doFill 只放默认状态，属性全是默认值，忽略属性即可。
+            let body = name.strip_prefix("Block{")?;
+            let (id, _) = body.split_once('}')?;
+            Some(block_by_name(id)?.default_state)
+        };
+        let mut states = Vec::with_capacity(palette.len());
+        for name in palette {
+            match state_of(name) {
+                Some(state) => states.push(state),
+                None => {
+                    self.mismatch(format!(
+                        "noise seed {seed} chunk ({x},{z}): unknown state {name}"
+                    ));
+                    return;
+                }
+            }
+        }
+        let ours = match self
+            .generator(seed)
+            .and_then(|generator| generator.noise(x, z))
+        {
+            Ok(layers) => layers,
+            Err(error) => {
+                self.mismatch(format!("noise seed {seed} chunk ({x},{z}): {error}"));
+                return;
+            }
+        };
+        let height = ours.len();
+        if expected.len() != height * 256 {
+            self.mismatch(format!(
+                "noise seed {seed} chunk ({x},{z}): {} blocks vs official {}",
+                height * 256,
+                expected.len()
+            ));
+            return;
+        }
+        for (index, (official_index, layer)) in
+            expected.iter().zip(ours.iter().flatten()).enumerate()
+        {
+            let id = usize::from(*official_index);
+            if id >= states.len() {
+                self.mismatch(format!(
+                    "noise seed {seed} chunk ({x},{z}) at {index}: official palette index {id} out of range"
+                ));
+                return;
+            }
+            let official = states[id];
+            let bamboo = *layer;
+            self.noise += 1;
+            if official != bamboo {
+                self.mismatch(format!(
+                    "noise seed {seed} chunk ({x},{z}) y {} x {} z {}: official {} ({}), bamboo {}",
+                    index as i32 / 256 - 64,
+                    (index % 256) / 16,
+                    index % 16,
+                    palette[id],
+                    official,
+                    bamboo
+                ));
+            }
+        }
     }
 
     fn mismatch(&mut self, text: String) {

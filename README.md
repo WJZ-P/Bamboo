@@ -749,6 +749,15 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
     [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
 ```
 
+区块级对拍另有一道：官方在 JVM 里用 `ChunkGenerator`、`RandomState` 和 `ProtoChunk` 生成同一个
+主世界区块到 `biomes` 和噪声填充（26.3 的 `terrain` 步只跑 `doFill`），逐方块、逐群系比较；
+不启动服务端、不接受 EULA。细节和耗时见 `docs/worldgen.md`：
+
+```bash
+cargo run --release -p mc-bamboo-vanilla -- chunkgen <java 路径> \
+    [--seeds N] [--chunks N] [--salt S] [--biomes-only] [--show N]
+```
+
 存档的编解码层也一样：官方 `SerializableChunkData.parse` 读 Bamboo 写出的区块 NBT 再
 `write()` 回来，官方写出的 NBT Bamboo 读成 `ChunkColumn` 再写出来，两边都按 NBT 的键
 比较（`CompoundTag` 用 `HashMap`，键序是哈希序）；官方 `RegionFile` 和 Bamboo 的区域文件
