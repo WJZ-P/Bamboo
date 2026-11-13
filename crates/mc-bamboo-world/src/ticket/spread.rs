@@ -26,7 +26,6 @@ use std::cell::Cell;
 use mc_bamboo_core::ChunkPos;
 
 use super::{
-    level::SIMULATION_MAX_LEVEL,
     profile::{Guard, count},
     table::ChunkHasherBuilder,
 };
@@ -626,12 +625,7 @@ impl Plane {
 
         // 影响球并集落在一个有界窗口里时，用一次稠密光栅扫描替代两阶段算法的四遍遍历。
         // 不满足判据就原样走回退路径；两条路径算的是同一个不动点，见下文注释。
-        let dense_stage = if limit == SIMULATION_MAX_LEVEL {
-            super::profile::SIMULATION_DENSE
-        } else {
-            super::profile::LOADING_DENSE
-        };
-        if let Some(result) = self.try_dense_update(&effective, dense_stage) {
+        if let Some(result) = self.try_dense_update(&effective) {
             self.buffers.effective = effective;
             return result;
         }
@@ -744,7 +738,6 @@ impl Plane {
     fn try_dense_update(
         &mut self,
         effective: &[(ChunkPos, i32, i32)],
-        dense_stage: usize,
     ) -> Option<Vec<(ChunkPos, i32, i32)>> {
         if !dense_allowed() {
             return None;
@@ -809,7 +802,7 @@ impl Plane {
         );
         let width = width as usize;
         let height = height as usize;
-        let _dense_guard = Guard::new(dense_stage);
+        let _setup_guard = Guard::new(super::profile::DENSE_SETUP);
         count(super::profile::C_DENSE_HIT, 1);
         count(super::profile::C_DENSE_CELLS, area as u64);
         #[cfg(test)]
@@ -849,7 +842,9 @@ impl Plane {
                 }
             }
         }
+        drop(_setup_guard);
         // 两遍光栅扫描：3×3 邻域的切比雪夫距离变换，对按 x 单调的最短路是精确的。
+        let _sweep_guard = Guard::new(super::profile::DENSE_SWEEP);
         for ix in 1..width - 1 {
             for iz in 1..height - 1 {
                 let index = ix * height + iz;
@@ -872,6 +867,8 @@ impl Plane {
                 cells[index] = best.min(limit_u8);
             }
         }
+        drop(_sweep_guard);
+        let _commit_guard = Guard::new(super::profile::DENSE_COMMIT);
 
         // 应用新源表（和回退路径的顺序一致），再按 x↑z↑ 扫一遍收变化并写回持久表。
         for &(pos, _old, new) in effective {
@@ -909,6 +906,7 @@ impl Plane {
         let used = cells.len();
         self.dense.cells = cells;
         self.dense.note_round(used);
+        drop(_commit_guard);
         // 快路径没用到两阶段辅助块；峰值窗口照样推进，旧峰值过期后回收。
         self.scratch.note_idle_round();
         Some(result)
