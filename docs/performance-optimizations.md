@@ -32,7 +32,7 @@
 | 11 | 票表等级传播：玩家跨一次区块，200 名玩家（微观基准） | 301 µs | 141 µs | 2.1× |
 | 11 | 同上：1 名玩家 | 289 µs | 126 µs | 2.3× |
 | 11 | 同上：每次 `run_updates` 的堆分配 | 37.7 次 + 28 MiB 搬移 | 4.3 次 + 5.5 MiB 搬移 | 8.8× |
-| 12 | 400 台正在烧的熔炉，方块实体阶段每刻 | 74.8–77.1 µs | 4.8–4.9 µs | 15.3–15.7× |
+| 12 | 400 台正在烧的熔炉，方块实体阶段每刻 | 74.8–81.9 µs | 4.8–5.0 µs | 15.2–16.6× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -919,7 +919,7 @@ cargo run --release -q -p mc-bamboo-vanilla -- ticket-oracle java
 
 ---
 
-## 7g. 会动的方块实体按事件休眠：400 台熔炉 74.8–77.1 µs → 4.8–4.9 µs / 刻
+## 7g. 会动的方块实体按事件休眠：400 台熔炉 74.8–81.9 µs → 4.8–5.0 µs / 刻
 
 代码：`crates/mc-bamboo-blocks/src/block_entity.rs` 的 `BlockEntities` 日程、
 `behaviour/machines/cooking.rs` 的 `FurnaceEntity`、`crafter.rs` 的
@@ -1002,7 +1002,13 @@ NBT 字节、写方块序列、随机数种子、计划刻和菜单读到的全�
 
 对拍全过：`oracle java --weather clear` 10114 / 0 fail、`machine` 1070 刻 0 不一致，
 以及 `menu` / `entity-oracle` / `light` / `ticket-oracle` / `storage` /
-`chunk-content` / `player-data` / `components`。
+`chunk-content` / `player-data` / `components` / `border-oracle`（400 场景 77510 项）。
+`probe.sh` 718/718；`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game` 全过。
+
+**存盘字节**：除了差分快照里逐刻比较 `write_block_entity_additional`（就是
+`chunk_content::encode` 调的组装函数），`mc-bamboo-game` 里还有一个端到端测试
+`a_sleeping_furnace_encodes_the_same_archive_bytes`：一台真在烧、且断言过确实睡着
+的熔炉走正式的 `chunk_content::encode`，开 / 关休眠各编一次，NBT 逐位相同。
 
 ### 7g.4 数字和复现
 
@@ -1015,6 +1021,13 @@ NBT 字节、写方块序列、随机数种子、计划刻和菜单读到的全�
 | 第 2 轮 | 74.8 µs | 4.8 µs | 15.6× |
 | 第 3 轮 | 75.6 µs | 4.9 µs | 15.5× |
 | 第 4 轮 | 74.9 µs | 4.9 µs | 15.3× |
+| 合入 main 之后重测（第 1 轮） | 81.9 µs | 4.9 µs | 16.6× |
+| 合入 main 之后重测（第 2 轮） | 76.0 µs | 4.8 µs | 15.7× |
+| 合入 main 之后重测（第 3 轮） | 77.3 µs | 4.8 µs | 16.1× |
+| 合入 main 之后重测（第 4 轮） | 75.4 µs | 5.0 µs | 15.2× |
+
+前后两批数字是不同时间段量的（第 8 节），只在本批内部交替比较；
+`休眠开` 一直在 4.8–5.0 µs，`休眠关` 的波动来自机器当时的负载，**跨批不能直接相减**。
 
 ```text
 cargo test --release -p mc-bamboo-blocks block_entity_sleep::furnace_phase_bench -- --ignored --nocapture
