@@ -40,6 +40,7 @@ pub mod random;
 pub mod random_tick;
 pub mod recording;
 pub mod shape;
+pub(crate) mod sleep_clock;
 pub mod state;
 pub mod ticks;
 pub mod weather;

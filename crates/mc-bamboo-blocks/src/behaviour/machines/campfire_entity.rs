@@ -19,9 +19,10 @@ use mc_bamboo_protocol::item::ItemStack;
 use mc_bamboo_recipes::{RecipeManager, assemble};
 
 use crate::{
-    block_entity::{BlockEntity, drop_item_stack},
+    block_entity::{BlockEntity, block_entity_clock, drop_item_stack},
     hopper::{quiet_set_changed, set_changed},
     level::Effect,
+    sleep_clock::{Sleep, materialize as materialize_sleep, values_at},
     state::{BlockState, LIT},
     world::World,
 };
@@ -47,6 +48,8 @@ pub struct CampfireEntity {
     ///
     /// The block state seen last tick. Vanilla replaces the `CachedCheck` whenever the state changes.
     last_state: BlockState,
+    /// 一段没有可见事件的安静刻：四格进度各自按 `cook_step` 线性推进。
+    sleep: Option<Sleep>,
 }
 
 impl CampfireEntity {
@@ -58,6 +61,7 @@ impl CampfireEntity {
             cooking_time: [0; SLOTS],
             last_recipe: None,
             last_state: BlockState(0),
+            sleep: None,
         }
     }
 
@@ -70,9 +74,70 @@ impl CampfireEntity {
     /// Machine-oracle data: four progress values, then four total times.
     pub fn data_values(&self) -> [i32; SLOTS * 2] {
         let mut values = [0; SLOTS * 2];
-        values[..SLOTS].copy_from_slice(&self.progress);
+        values[..SLOTS].copy_from_slice(&self.progress_at(block_entity_clock()));
         values[SLOTS..].copy_from_slice(&self.cooking_time);
         values
+    }
+
+    /// 按安静刻的公式算到 `now` 的四格进度，不改实体本身。
+    fn progress_at(&self, now: i64) -> [i32; SLOTS] {
+        values_at(
+            self.sleep,
+            self.progress,
+            self.sleep_step(),
+            self.sleep_total(),
+            now,
+        )
+    }
+
+    /// 当前安静刻每格每刻的增量：点燃 +1、熄灭 -2，空槽不动。
+    /// `lit` 由睡眠期间不变的那份方块状态给出，不读世界。
+    fn quiet_step(&self, lit: bool) -> [i32; SLOTS] {
+        std::array::from_fn(|slot| {
+            if self.items[slot].is_empty() {
+                0
+            } else if lit {
+                1
+            } else {
+                -BURN_COOL_SPEED
+            }
+        })
+    }
+
+    /// 睡眠期间点着还是熄灭。装盒 / 读盘后没有日程，`last_state` 自己就是权威。
+    fn sleep_step(&self) -> [i32; SLOTS] {
+        self.quiet_step(self.last_state.try_get(LIT) == Some(true))
+    }
+
+    /// 睡眠期间每格的冷却上限；熄灭回落按官方 clamp 到 `[0, cooking_time]`。
+    fn sleep_total(&self) -> [i32; SLOTS] {
+        self.cooking_time
+    }
+
+    /// 四格进度各自离事件还有几刻。点燃时是「到总时间」，熄灭时是「退到 0」。
+    fn wake_in(&self) -> i64 {
+        let lit = self.last_state.try_get(LIT) == Some(true);
+        let mut soonest = i64::MAX;
+        for slot in 0..SLOTS {
+            let left = if self.items[slot].is_empty() {
+                continue;
+            } else if lit {
+                i64::from((self.cooking_time[slot] - self.progress[slot]).max(1))
+            } else if self.progress[slot] > 0 {
+                i64::from((self.progress[slot] + BURN_COOL_SPEED - 1) / BURN_COOL_SPEED)
+            } else {
+                continue;
+            };
+            soonest = soonest.min(left);
+        }
+        soonest
+    }
+
+    /// 外部写入、存档回读、装盒之前结束睡眠，数值按公式算到「第 `tick` 刻结束时」。
+    fn materialize(&mut self, tick: i64) {
+        let step = self.sleep_step();
+        let total = self.sleep_total();
+        materialize_sleep(&mut self.sleep, &mut self.progress, step, total, tick);
     }
 
     /// 录制层要看到的、数据槽之外的内部状态：配方缓存和上一刻的方块状态。
@@ -81,6 +146,7 @@ impl CampfireEntity {
     }
 
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         if let Some(stored) = self.items.get_mut(slot) {
             *stored = if stack.is_empty() {
                 ItemStack::empty()
@@ -91,6 +157,7 @@ impl CampfireEntity {
     }
 
     pub fn set_data(&mut self, id: usize, value: i32) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         if id < SLOTS {
             self.progress[id] = value;
         } else if id < SLOTS * 2 {
@@ -106,6 +173,7 @@ impl CampfireEntity {
     ///
     /// The caller consumes the held stack. This keeps a count-1 copy.
     pub fn place_food(&mut self, world: &mut World, stack: &ItemStack) -> bool {
+        self.materialize(block_entity_clock().saturating_sub(1));
         if stack.is_empty() {
             return false;
         }
@@ -131,6 +199,7 @@ impl CampfireEntity {
     }
 
     pub fn server_tick(&mut self, world: &mut World) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         let state = world.block_state(self.pos);
         // 官方的 ticker 包装先看 `BlockEntityType.isValid`。不是营火就不跑。
         // Vanilla's ticker wrapper checks `BlockEntityType.isValid` first and skips anything else.
@@ -241,23 +310,41 @@ impl BlockEntity for CampfireEntity {
 
     fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
         use crate::archive::tag::put;
+        let progress = self.progress_at(block_entity_clock());
         let mut out = Vec::new();
         put(
             &mut out,
             "Items",
             crate::archive::block_entity::items_tag(self.items())?,
         );
-        put(
-            &mut out,
-            "CookingTimes",
-            Tag::IntArray(self.progress.to_vec()),
-        );
+        put(&mut out, "CookingTimes", Tag::IntArray(progress.to_vec()));
         put(
             &mut out,
             "CookingTotalTimes",
             Tag::IntArray(self.cooking_time.to_vec()),
         );
         Ok(out)
+    }
+
+    fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        // 熄灭/点燃由方块状态变化叫醒；进度全到 0 之后睡到外部叫醒。
+        let left = self.wake_in();
+        let wake_at = if left == i64::MAX {
+            i64::MAX
+        } else {
+            now.saturating_add(left)
+        };
+        self.sleep = Some(Sleep::new(now, wake_at));
+        Some(wake_at)
+    }
+
+    fn materialize(&mut self, tick: i64) {
+        CampfireEntity::materialize(self, tick);
+    }
+
+    fn resleep(&mut self, since: i64, wake_at: i64) {
+        // 装盒时数值已按公式算到源表的最后一刻；目标表从这一刻起算。
+        self.sleep = Some(Sleep::new(since, wake_at));
     }
 }
 

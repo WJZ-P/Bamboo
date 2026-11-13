@@ -724,6 +724,422 @@ fn crafter_clock_sleeps_until_it_expires() {
     assert!(!level.get(FURNACE).get(CRAFTING));
 }
 
+/// 营火 / 酿造台休眠的差分测试：多种子 × 多布局，逐刻比较全部字段。
+#[derive(Clone, Copy, Debug)]
+enum SleepMachine {
+    Campfire,
+    Brewing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SleepLayout {
+    Plain,
+    HopperBefore,
+    HopperAfter,
+}
+
+struct SleepScript {
+    actions: Vec<(i64, SleepAction)>,
+}
+
+#[derive(Clone, Debug)]
+enum SleepAction {
+    /// 放一份食物 / 补一份酿造材料或燃料。
+    Feed(ItemStack),
+    /// 从机器或漏斗里拿走物品。
+    Take(usize, i32),
+    /// 切换营火的 `LIT`；酿造台没有这个状态时换成破坏重放。
+    Toggle,
+    /// 把整个区块装盒再放回。
+    BoxChunk,
+    /// 冻结 / 恢复方块实体所在的区块。
+    Freeze(bool),
+    /// 换掉漏斗的 `ENABLED`，考验漏斗自己的唤醒入口。
+    ToggleHopper,
+    /// 开着的界面每刻读一次全部数据槽。
+    MenuRead,
+}
+
+impl SleepScript {
+    fn random(seed: u64, ticks: i64, machine: SleepMachine, layout: SleepLayout) -> Self {
+        let mut random = LegacyRandom::new(seed as i64);
+        let mut actions = Vec::new();
+        for now in 1..=ticks {
+            let roll = random.next_int(100);
+            let action = match roll {
+                0..=22 => Some(SleepAction::Feed(feed_stack(machine, &mut random))),
+                23..=30 => Some(SleepAction::Take(
+                    random.next_int(3) as usize,
+                    1 + random.next_int(2),
+                )),
+                31..=36 => Some(SleepAction::Toggle),
+                37..=40 if now > 300 && now % 7 == 0 => Some(SleepAction::BoxChunk),
+                41..=45 => Some(SleepAction::Freeze(random.next_int(2) == 0)),
+                46..=50 if layout != SleepLayout::Plain => Some(SleepAction::ToggleHopper),
+                51..=65 => Some(SleepAction::MenuRead),
+                _ => None,
+            };
+            if let Some(action) = action {
+                actions.push((now, action));
+            }
+        }
+        Self { actions }
+    }
+}
+
+fn feed_stack(machine: SleepMachine, random: &mut LegacyRandom) -> ItemStack {
+    match machine {
+        SleepMachine::Campfire => ItemStack::new(items::POTATO, 1 + random.next_int(2)),
+        SleepMachine::Brewing => {
+            if random.next_int(3) == 0 {
+                ItemStack::new(items::BLAZE_POWDER, 1 + random.next_int(2))
+            } else {
+                ItemStack::new(items::NETHER_WART, 1 + random.next_int(2))
+            }
+        }
+    }
+}
+
+struct SleepScene {
+    level: TestLevel,
+    ticks: BlockTicks,
+    script: SleepScript,
+    cursor: usize,
+    machine: SleepMachine,
+    layout: SleepLayout,
+    menu: Vec<i32>,
+    /// 是否有过真的安静刻（至少一刻一个 ticker 都没跑）。
+    slept: usize,
+}
+
+impl SleepScene {
+    fn new(script: SleepScript, machine: SleepMachine, layout: SleepLayout, sleep: bool) -> Self {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let pos = BlockPos::new(0, 64, 0);
+        let above = BlockPos::new(0, 65, 0);
+        let below = BlockPos::new(0, 63, 0);
+        let before = BlockPos::new(-1, 65, 0);
+        let after = BlockPos::new(0, 64, -1);
+        if layout != SleepLayout::Plain {
+            for p in [above, below, before, after] {
+                level_container(&mut level, p);
+            }
+        }
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            let hopper_first = layout == SleepLayout::HopperAfter;
+            if hopper_first {
+                place_sleep_hoppers(&mut world, pos, above, below, before, after);
+            }
+            let block = match machine {
+                SleepMachine::Campfire => blocks::CAMPFIRE,
+                SleepMachine::Brewing => blocks::BREWING_STAND,
+            };
+            world.set_block(pos, BlockState(block), UPDATE_ALL);
+            seed_sleep_machine(&mut world, pos, machine);
+            if layout != SleepLayout::Plain && !hopper_first {
+                place_sleep_hoppers(&mut world, pos, above, below, before, after);
+            }
+            // 旁边一个比较器、隔一格一个，读数和计划刻都进快照。
+            for p in [BlockPos::new(1, 64, 0), BlockPos::new(3, 64, 0)] {
+                world.set_block(p.below(), BlockState(blocks::STONE), UPDATE_ALL);
+            }
+            world.set_block(
+                BlockPos::new(2, 64, 0),
+                BlockState(blocks::STONE),
+                UPDATE_ALL,
+            );
+            for (p, facing) in [
+                (BlockPos::new(1, 64, 0), Direction::West),
+                (BlockPos::new(3, 64, 0), Direction::East),
+            ] {
+                world.set_block(
+                    p,
+                    BlockState(blocks::COMPARATOR)
+                        .with(HORIZONTAL_FACING, facing)
+                        .with(MODE_COMPARATOR, ComparatorMode::Compare),
+                    UPDATE_ALL,
+                );
+            }
+        }
+        level.sleep_enabled(sleep);
+        Self {
+            level,
+            ticks,
+            script,
+            cursor: 0,
+            machine,
+            layout,
+            menu: Vec::new(),
+            slept: 0,
+        }
+    }
+
+    fn step(&mut self, now: i64) {
+        self.ticks.set_time(now);
+        set_block_entity_clock(now);
+        while self
+            .script
+            .actions
+            .get(self.cursor)
+            .is_some_and(|(at, _)| *at == now)
+        {
+            let action = self.script.actions[self.cursor].1.clone();
+            self.cursor += 1;
+            self.apply(action);
+        }
+        // 到期的比较器计划刻也按官方顺序跑，再跑方块实体阶段。
+        let _ = crate::interact::run_due_ticks(&mut self.level, &mut self.ticks, now);
+        let _ = run_block_entity_tick(&mut self.level, &mut self.ticks);
+        set_block_entity_clock(now);
+        self.menu.extend(sleep_menu_values(&self.level));
+        if self.level.due_count() == 0 {
+            self.slept += 1;
+        }
+    }
+
+    fn apply(&mut self, action: SleepAction) {
+        let pos = BlockPos::new(0, 64, 0);
+        let mut world = World::new(&mut self.level, &mut self.ticks);
+        match action {
+            SleepAction::Feed(stack) => {
+                let machine = self.machine;
+                world.with_container(pos, &mut |container| {
+                    let slot = match machine {
+                        SleepMachine::Campfire => 0,
+                        SleepMachine::Brewing => 3,
+                    };
+                    let mut current = container.get(slot);
+                    if current.is_empty() {
+                        container.set(slot, stack.clone());
+                    } else if current.item == stack.item {
+                        current.count += stack.count;
+                        container.set(slot, current);
+                    }
+                });
+                if matches!(machine, SleepMachine::Campfire) {
+                    world.with_block_entity::<CampfireEntity, _>(pos, |entity, world| {
+                        let _ = entity.place_food(world, &stack);
+                    });
+                }
+            }
+            SleepAction::Take(slot, count) => {
+                world.with_container(pos, &mut |container| {
+                    let _ = container.remove_item(slot.min(container.size() - 1), count);
+                });
+            }
+            SleepAction::Toggle => {
+                let state = world.block_state(pos);
+                if let Some(lit) = state.try_get(LIT) {
+                    world.set_block_and_update(pos, state.with(LIT, !lit));
+                } else {
+                    world.set_block(pos, BlockState(blocks::AIR), UPDATE_ALL);
+                    world.set_block(pos, BlockState(blocks::BREWING_STAND), UPDATE_ALL);
+                }
+            }
+            SleepAction::BoxChunk => {
+                let _ = world;
+                self.level.box_chunk(ChunkPos::new(0, 0));
+            }
+            SleepAction::Freeze(frozen) => {
+                let _ = world;
+                self.level
+                    .set_chunk_block_entity_ticking(ChunkPos::new(0, 0), !frozen);
+                self.level.set_frozen(ChunkPos::new(0, 0), frozen);
+            }
+            SleepAction::ToggleHopper => {
+                let hopper = BlockPos::new(0, 65, 0);
+                let state = world.block_state(hopper);
+                if state.is(blocks::HOPPER) {
+                    use crate::state::ENABLED;
+                    world.set_block_and_update(hopper, state.with(ENABLED, !state.get(ENABLED)));
+                }
+            }
+            SleepAction::MenuRead => self.menu.extend(sleep_menu_values(&self.level)),
+        }
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        let pos = BlockPos::new(0, 64, 0);
+        let mut out = Vec::new();
+        out.push(format!("layout:{:?}", self.layout));
+        for p in [
+            pos,
+            BlockPos::new(0, 65, 0),
+            BlockPos::new(0, 63, 0),
+            BlockPos::new(-1, 65, 0),
+            BlockPos::new(0, 64, -1),
+            BlockPos::new(1, 64, 0),
+            BlockPos::new(2, 64, 0),
+            BlockPos::new(3, 64, 0),
+        ] {
+            out.push(format!("b{p:?}:{}", self.level.get(p).0));
+        }
+        out.push(format!(
+            "campfire:{:?}",
+            self.level.block_entity::<CampfireEntity>(pos).map(|e| (
+                e.data_values(),
+                e.items().clone(),
+                e.recipe_facts()
+            ))
+        ));
+        out.push(format!(
+            "brewing:{:?}",
+            self.level.block_entity::<BrewingStandEntity>(pos).map(|e| (
+                e.data_values(),
+                e.items().clone(),
+                e.observed_facts()
+            ))
+        ));
+        for p in [
+            BlockPos::new(0, 65, 0),
+            BlockPos::new(0, 63, 0),
+            BlockPos::new(-1, 65, 0),
+            BlockPos::new(0, 64, -1),
+        ] {
+            out.push(format!(
+                "hopper{p:?}:{:?}",
+                self.level
+                    .block_entity::<HopperEntity>(p)
+                    .map(|e| (e.cooldown_time(), e.ticked_game_time()))
+            ));
+            out.push(format!("slots{p:?}:{:?}", self.level.containers.get(&p)));
+        }
+        for p in [BlockPos::new(1, 64, 0), BlockPos::new(3, 64, 0)] {
+            out.push(format!(
+                "c{p:?}:{}",
+                self.level.redstone_table().comparator_output(p)
+            ));
+        }
+        out.push(format!(
+            "archive:{:?}",
+            self.level
+                .block_entities_table()
+                .get_dyn(pos)
+                .map(crate::archive::write_block_entity_additional)
+        ));
+        out.push(format!("seed:{}", self.level.random.source().seed()));
+        out.push(format!("writes:{:?}", self.level.writes));
+        out.push(format!("menu:{:?}", self.menu));
+        out.push(format!("clock:{}", block_entity_clock()));
+        let mut scheduled: Vec<_> = self
+            .ticks
+            .pending()
+            .map(|tick| (tick.trigger_tick, tick.priority, tick.pos, tick.block))
+            .collect();
+        scheduled.sort();
+        out.push(format!("scheduled:{scheduled:?}"));
+        out
+    }
+}
+
+fn sleep_menu_values(level: &TestLevel) -> Vec<i32> {
+    let pos = BlockPos::new(0, 64, 0);
+    let mut values = Vec::new();
+    if let Some(entity) = level.block_entity::<CampfireEntity>(pos) {
+        values.extend(entity.data_values());
+    } else if let Some(entity) = level.block_entity::<BrewingStandEntity>(pos) {
+        values.extend(entity.data_values());
+    } else {
+        values.extend([0; 8]);
+    }
+    values
+}
+
+fn seed_sleep_machine(world: &mut World<'_>, pos: BlockPos, machine: SleepMachine) {
+    match machine {
+        SleepMachine::Campfire => {
+            world.with_block_entity::<CampfireEntity, _>(pos, |entity, world| {
+                for _ in 0..2 {
+                    let _ = entity.place_food(world, &ItemStack::new(items::POTATO, 1));
+                }
+            });
+        }
+        SleepMachine::Brewing => {
+            let water = water_bottle();
+            world.with_block_entity::<BrewingStandEntity, _>(pos, |entity, _| {
+                for slot in 0..3 {
+                    entity.set_item(slot, water.clone());
+                }
+                entity.set_item(3, ItemStack::new(items::NETHER_WART, 8));
+                entity.set_item(4, ItemStack::new(items::BLAZE_POWDER, 8));
+            });
+        }
+    }
+}
+
+fn place_sleep_hoppers(
+    world: &mut World<'_>,
+    _pos: BlockPos,
+    above: BlockPos,
+    below: BlockPos,
+    before: BlockPos,
+    after: BlockPos,
+) {
+    use crate::state::FACING_HOPPER;
+    for (p, facing) in [
+        (above, Direction::Down),
+        (below, Direction::Down),
+        (before, Direction::East),
+        (after, Direction::West),
+    ] {
+        world.set_block(
+            p,
+            BlockState(blocks::HOPPER).with(FACING_HOPPER, facing),
+            UPDATE_ALL,
+        );
+        world.set_block_entity(Box::new(HopperEntity::new(p)));
+    }
+}
+
+fn compare_sleep(machine: SleepMachine, layout: SleepLayout, seed: u64, ticks: i64) -> usize {
+    let script = SleepScript::random(seed, ticks, machine, layout);
+    let mut sleeping = SleepScene::new(
+        SleepScript {
+            actions: script.actions.clone(),
+        },
+        machine,
+        layout,
+        true,
+    );
+    let mut always = SleepScene::new(
+        SleepScript {
+            actions: script.actions,
+        },
+        machine,
+        layout,
+        false,
+    );
+    for now in 1..=ticks {
+        sleeping.step(now);
+        always.step(now);
+        assert_eq!(
+            sleeping.snapshot(),
+            always.snapshot(),
+            "machine {machine:?} layout {layout:?} seed {seed} tick {now}"
+        );
+    }
+    sleeping.slept
+}
+
+#[test]
+fn campfire_and_brewing_sleep_match_ticking_every_tick() {
+    let mut total_slept = 0;
+    for seed in [1, 7, 42, 1337, 90210] {
+        for machine in [SleepMachine::Campfire, SleepMachine::Brewing] {
+            for layout in [
+                SleepLayout::Plain,
+                SleepLayout::HopperBefore,
+                SleepLayout::HopperAfter,
+            ] {
+                total_slept += compare_sleep(machine, layout, seed, 2000);
+            }
+        }
+    }
+    assert!(total_slept > 0, "休眠真的发生过");
+}
+
 /// 测量用的手工基准：几百台正在烧东西的熔炉，方块实体阶段每刻的耗时。
 ///
 /// 用法（release、安静窗口）：
