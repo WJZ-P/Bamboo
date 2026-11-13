@@ -35,6 +35,10 @@ pub struct ChunkStore {
     loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>,
     /// 每个插过盒子的位置的原样起点。没记过的位置按模板算。
     pristine: ChunkMap<PristineMark>,
+    /// 方块或光照版本变过的区块。存档每刻只看这个集合，不扫全部已加载区块。
+    changed: HashSet<ChunkPos, ChunkHasherBuilder>,
+    /// 上次判脏时看到的光照版本，用来认出光照发布。
+    saved_light_revision: ChunkMap<[u64; 2]>,
 }
 
 /// 按区块坐标索引的表，用和票表一样的便宜哈希。读方块的热路径每次都查它。
@@ -50,6 +54,8 @@ struct EditedChunks {
     revisions: ChunkMap<u64>,
     /// 发出去的最后一个版本号。
     last_revision: u64,
+    /// 版本变过、还没被存档取走的区块。
+    changed: HashSet<ChunkPos, ChunkHasherBuilder>,
 }
 
 impl EditedChunks {
@@ -63,6 +69,7 @@ impl EditedChunks {
     fn bump_revision(&mut self, pos: ChunkPos) {
         self.last_revision += 1;
         self.revisions.insert(pos, self.last_revision);
+        self.changed.insert(pos);
     }
 
     /// 没改过的区块是 0。
@@ -120,6 +127,8 @@ impl ChunkStore {
             light,
             loaded: None,
             pristine: ChunkMap::default(),
+            changed: HashSet::default(),
+            saved_light_revision: ChunkMap::default(),
         }
     }
 
@@ -155,6 +164,31 @@ impl ChunkStore {
     /// 已加载的区块数；无限模式返回 `None`。
     pub fn loaded_count(&self) -> Option<usize> {
         self.loaded.as_ref().map(HashSet::len)
+    }
+
+    /// 这个区块是不是还保持生成器原样。
+    pub fn is_pristine(&self, pos: ChunkPos) -> bool {
+        let mark = self
+            .pristine
+            .get(&pos)
+            .copied()
+            .unwrap_or(PristineMark::TEMPLATE);
+        mark.from_generator && mark.revision == self.revision(pos)
+    }
+
+    /// 取走「方块或光照版本变过」的区块集合，给存档每刻判脏用。
+    /// 只和真正改动过的区块数成正比，不扫全部已加载区块。
+    pub fn take_changed_chunks(&mut self) -> HashSet<ChunkPos, ChunkHasherBuilder> {
+        let mut changed = std::mem::take(&mut self.changed);
+        // 光照发布也换版本号：把和上次记录不同的光照柱补进集合。
+        for &pos in self.loaded.iter().flatten() {
+            let current = self.light.revision(pos);
+            if self.saved_light_revision.get(&pos).copied() != Some(current) {
+                self.saved_light_revision.insert(pos, current);
+                changed.insert(pos);
+            }
+        }
+        changed
     }
 
     /// 每个已加载区块的坐标、当前版本号，以及「是不是还保持生成器原样」。

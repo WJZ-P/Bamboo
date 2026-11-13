@@ -415,8 +415,12 @@ impl World {
         // 上一刻发出去的读盘请求，结果在这一刻开头经信箱收回。
         // Read requests dispatched last tick are collected at the start of this tick.
         self.host.poll_io(&mut self.region);
-        // 收回已经到达的 IO 栅栏回执，发等在上面的 `save-all flush` 成功消息。
-        // Release `save-all flush` success messages whose IO barrier acked.
+        // 每次 `/save-all` 等自己那道栅栏；请求里全部快照提交完之后才登记等待。
+        // Each `/save-all` waits for its own barrier, registered only after all
+        // of its snapshots have been handed to IO (review 8/9).
+        for (seq, source) in self.host.take_ready_save_barriers() {
+            self.pending_save_success.push((seq, source));
+        }
         let flushed = self.host.take_flushed_barriers();
         self.release_flushed_save_success(flushed);
         // IO 线程 panic 或通道断开是致命错误（设计稿 §14 / R12）：记日志，走关服流程，
@@ -810,17 +814,19 @@ impl World {
                         self.send_save_failure(source);
                         continue;
                     }
-                    // 一律排不阻塞的 IO 栅栏，成功/失败消息等「保存真正完成」的回执再发；
-                    // 阻塞的 flush() 只允许出现在关服。flush 标志仍按官方解析保留。
-                    // Always enqueue a non-blocking barrier; the success/failure
-                    // message waits for the real-completion ack. The blocking
-                    // flush() is shutdown-only.
-                    debug!(flush, "save-all handed its writes to the IO thread");
-                    if let Some(seq) = self.host.submit_flush_barrier() {
-                        self.pending_save_success.push((seq, source));
-                    } else {
+                    // 这次请求的全部快照都交给 IO 线程之后才排一道自己的栅栏。
+                    // 阻塞的 flush() 只允许出现在关服；flush 标志按官方解析保留。
+                    // Queue this request's own barrier after all of its snapshots
+                    // reach IO. Blocking flush() remains shutdown-only.
+                    debug!(flush, "save-all handed its writes to the bounded queue");
+                    if self.host.begin_save_all(source).is_none() {
                         // 这一局没接磁盘：没有 IO 要等，直接发。
                         self.send_save_success(source);
+                    } else {
+                        // 取回刚登记好的栅栏，等自己的 IO 回执（中 9）。
+                        for (seq, owner) in self.host.take_ready_save_barriers() {
+                            self.pending_save_success.push((seq, owner));
+                        }
                     }
                 }
                 SaveCommand::SaveOn => {
@@ -1365,6 +1371,9 @@ impl Schedule {
 
 #[cfg(test)]
 mod loaded_tests;
+#[cfg(test)]
+#[path = "world/tests/review_probe.rs"]
+mod review_probe;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]

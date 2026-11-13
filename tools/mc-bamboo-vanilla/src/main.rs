@@ -93,9 +93,9 @@ mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
 #[cfg(feature = "oracle")]
-mod world_border_oracle;
-#[cfg(feature = "oracle")]
 mod world_block;
+#[cfg(feature = "oracle")]
+mod world_border_oracle;
 #[cfg(feature = "oracle")]
 mod world_dir;
 #[cfg(feature = "oracle")]

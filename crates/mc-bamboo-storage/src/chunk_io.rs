@@ -161,13 +161,13 @@ pub struct ChunkIo {
     /// headers at startup and updated on writes, so the world thread can ask
     /// "is this on disk?" without doing synchronous IO.
     known: Arc<Mutex<HashSet<ChunkPos>>>,
-    /// 已提交、还没收到写完回执的区块。读请求要把它当成「盘上会有」，
-    /// 因为写请求和之后的读请求在同一 FIFO 信箱里、写先处理；但 `known`
-    /// 里绝不提前登记，写失败时这条也清掉，避免 `has_chunk` 撒谎。
-    /// Chunks submitted but not yet acked. A read queued behind a write in the
-    /// same FIFO mailbox must see them, but `known` (on-disk truth) is not set
-    /// until the write succeeds.
-    inflight: Mutex<HashSet<ChunkPos>>,
+    /// 已提交、还没收到回执的写，按 `(区块, seq)` 记。读请求要把它们当成
+    /// 「盘上会有」，因为读写在同一 FIFO 信箱里、写先处理；`known` 绝不提前
+    /// 登记。旧失败回执只清自己那个 seq，不能抹掉同一区块较新的在途写。
+    /// In-flight writes keyed by `(chunk, seq)`. A read queued behind a write in
+    /// the same FIFO mailbox must see them, but `known` is not set until success.
+    /// An older failure only clears its own seq, never a newer in-flight write.
+    inflight: Mutex<HashMap<ChunkPos, HashSet<u64>>>,
     requests: Sender<Request>,
     results: Receiver<Reply>,
     worker: Option<JoinHandle<()>>,
@@ -206,7 +206,7 @@ impl ChunkIo {
         Ok(Self {
             dir: dir.clone(),
             known,
-            inflight: Mutex::new(HashSet::new()),
+            inflight: Mutex::new(HashMap::new()),
             requests,
             results,
             worker: Some(worker),
@@ -238,7 +238,7 @@ impl ChunkIo {
         self.in_flight.load(Ordering::SeqCst)
     }
 
-    /// 盘上是否已经有这个区块的数据（或有一份已经入队、还没回执的写）。
+    /// 盘上是否已经有这个区块的数据（或有任何一份已经入队、还没回执的写）。
     /// 只查内存集合，不碰磁盘。`known` 只在写成功后更新。
     pub fn has_chunk(&self, pos: ChunkPos) -> bool {
         self.known
@@ -249,14 +249,30 @@ impl ChunkIo {
                 .inflight
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .contains(&pos)
+                .get(&pos)
+                .is_some_and(|seqs| !seqs.is_empty())
     }
 
-    /// 写回执到达：更新盘上真实状态，清掉在途标记。世界线程调用。
-    /// A write ack arrived: update the true on-disk state and clear inflight.
-    /// Called by the world thread.
-    pub fn set_known(&self, pos: ChunkPos, present: bool) {
-        {
+    /// 写回执到达：只清这一个 seq 的在途标记。只有当它不比任何在途写旧时，
+    /// 才把盘上真实状态更新（旧回执不能覆盖较新写的结果）。
+    /// A write ack arrived: clear just its own seq. Update the on-disk truth
+    /// only when no newer in-flight write remains for the chunk.
+    pub fn set_known(&self, pos: ChunkPos, present: bool, seq: u64) -> bool {
+        let newest = {
+            let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(seqs) = inflight.get_mut(&pos) else {
+                // 没有在途写的回执（例如关服后补发的旧回执）：不更新 known。
+                return false;
+            };
+            seqs.remove(&seq);
+            let newer = seqs.iter().any(|&other| other > seq);
+            let newest = !newer;
+            if seqs.is_empty() {
+                inflight.remove(&pos);
+            }
+            newest
+        };
+        if newest {
             let mut known = self.known.lock().unwrap_or_else(|e| e.into_inner());
             if present {
                 known.insert(pos);
@@ -264,19 +280,34 @@ impl ChunkIo {
                 known.remove(&pos);
             }
         }
-        self.inflight
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&pos);
+        newest
     }
 
-    /// 写失败：清掉在途标记，盘上状态不变。世界线程调用。
-    /// A write failed: clear inflight but leave the on-disk truth unchanged.
-    pub fn drop_inflight(&self, pos: ChunkPos) {
+    /// 这个位置还有比 `seq` 更新的在途写吗？用于「写成功才释放盒子」。
+    /// Is there a newer in-flight write for this chunk? Used before releasing
+    /// the parked box on a successful ack.
+    pub fn has_in_flight_write(&self, pos: ChunkPos, seq: u64) -> bool {
         self.inflight
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&pos);
+            .get(&pos)
+            .is_some_and(|seqs| seqs.iter().any(|&other| other > seq))
+    }
+
+    /// 写失败：只清这一个 seq 的在途标记，盘上状态不变。世界线程调用。
+    /// A write failed: clear only this seq; leave the on-disk truth unchanged.
+    pub fn drop_inflight(&self, pos: ChunkPos, seq: Option<u64>) {
+        let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(seqs) = inflight.get_mut(&pos) else {
+            return;
+        };
+        // 没有 seq 的失败回执（独立文件）不动区块在途标记。
+        if let Some(seq) = seq {
+            seqs.remove(&seq);
+            if seqs.is_empty() {
+                inflight.remove(&pos);
+            }
+        }
     }
 
     /// 提交一个异步读请求，世界线程不等待。
@@ -304,14 +335,19 @@ impl ChunkIo {
         self.inflight
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(pos);
-        self.send_request(Request::Write {
+            .entry(pos)
+            .or_default()
+            .insert(seq);
+        if !self.send_request(Request::Write {
             pos,
             seq,
             chunk,
             entities,
             timestamp: unix_seconds(),
-        });
+        }) {
+            // 通道断了：这次写根本没入队，撤掉刚登记的在途标记。
+            self.drop_inflight(pos, Some(seq));
+        }
     }
 
     /// 有了更新的快照，通知 IO 线程可以跳过旧 seq 的写。
@@ -635,7 +671,9 @@ fn worker_loop(
     let mut cache = Cache::default();
     // 每个区块最新快照的 seq，用于丢掉还没落盘的旧快照。
     let mut latest: HashMap<ChunkPos, u64> = HashMap::new();
-    // 上一道栅栏之后有没有写/刷盘失败：栅栏回执据此带 ok=false（F9）。
+    // 当前窗口里的失败只属于「下一道栅栏」：每道栅栏之后清零。
+    // 每个 `/save-all` 请求排自己的栅栏，中间夹别的栅栏不会错位（中 9）。
+    // Failures in this window belong to the next barrier; reset right after it.
     let mut failed_since_barrier = false;
     let mut should_stop = false;
     while let Ok(first) = rx.recv() {
@@ -654,13 +692,16 @@ fn worker_loop(
                 _ => {}
             }
         }
+        let batch_len = batch.len();
+        let mut processed = 0usize;
         for request in batch {
-            // 这条请求已经交给本线程处理，从在途计数里减掉（F6 背压）。
-            in_flight.fetch_sub(1, Ordering::SeqCst);
             // 测试接缝：让线程真的退出，供世界线程验证 R12（不走 catch_unwind）。
+            // 退出前把整批都没处理的请求从在途计数里扣掉，不留泄漏（低）。
             if matches!(request, Request::Crash) {
+                in_flight.fetch_sub(batch_len - processed, Ordering::SeqCst);
                 return;
             }
+            processed += 1;
             let replies = panic_replies(&request);
             // 单个任务 panic 用 catch_unwind 兜住：IO 线程继续跑，并补发回执，
             // 免得读请求永远等不到结果（官方 IOWorker.submitThrowingTask 同款）。
@@ -766,7 +807,10 @@ fn worker_loop(
                 }
                 failed_since_barrier = true;
             }
+            // 这条请求已经处理完，从在途计数里减掉（F6：量「通道里 + 正在处理」）。
+            in_flight.fetch_sub(1, Ordering::SeqCst);
             if should_stop {
+                in_flight.fetch_sub(batch_len - processed, Ordering::SeqCst);
                 let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
                 return;
             }
@@ -1146,7 +1190,7 @@ mod tests {
         assert!(!failures[0].3.is_empty(), "the reason must be included");
 
         // 世界线程收到失败回执后清掉在途标记：盘上状态绝不能被提前登记。
-        io.drop_inflight(pos);
+        io.drop_inflight(pos, Some(7));
         assert!(
             !io.has_chunk(pos),
             "a failed write must not make has_chunk lie"

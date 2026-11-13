@@ -189,6 +189,12 @@ pub trait LevelTables {
     fn block_events_table_mut(&mut self) -> &mut BlockEvents;
     fn redstone_table(&self) -> &RedstoneMemory;
     fn redstone_table_mut(&mut self) -> &mut RedstoneMemory;
+    /// 游戏层记「这个区块的持久化内容可能改了」。默认什么都不做，
+    /// `LevelSideState` 的 blanket impl 在每个带位置的写方法上调它。
+    /// 宁多勿少：多存一次没有错，漏存一次才是错。
+    /// Game layer hook: mark a chunk as possibly changed. Called from every
+    /// positional write in the blanket impl; over-marking is harmless.
+    fn mark_chunk_dirty(&mut self, _pos: ChunkPos) {}
 }
 
 impl<T: LevelTables + ?Sized> LevelSideState for T {
@@ -197,6 +203,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().set_comparator_output(pos, signal);
     }
 
@@ -205,6 +212,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().set_last_bookshelf_slot(pos, slot);
     }
 
@@ -213,6 +221,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().set_jukebox_playing(pos, playing);
     }
 
@@ -221,10 +230,12 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().set_crafter_disabled(pos, mask);
     }
 
     fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut()
             .set_crafter_crafting(pos, remaining, now);
     }
@@ -243,6 +254,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn forget_block_entity_memory(&mut self, pos: BlockPos) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().forget_block_entity(pos);
     }
 
@@ -255,6 +267,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().set_lectern(pos, facts);
     }
 
@@ -263,6 +276,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn clear_lectern(&mut self, pos: BlockPos) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().clear_lectern(pos);
     }
 
@@ -271,6 +285,7 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
+        self.mark_chunk_dirty(pos.chunk());
         self.redstone_table_mut().record_torch_toggle(pos, when);
     }
 
@@ -311,10 +326,12 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
+        self.mark_chunk_dirty(entity.pos().chunk());
         self.block_entities_table_mut().insert(entity);
     }
 
     fn remove_block_entity(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
+        self.mark_chunk_dirty(pos.chunk());
         self.block_entities_table_mut().remove(pos)
     }
 
@@ -348,6 +365,16 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     }
 
     fn begin_block_entity_tick(&mut self, now: i64) {
+        // 睡着的实体醒来、真正跑了 tick 时会改持久化的数值：把所在区块标脏。
+        // 宁多勿少，多存一次没有错（复查「高 3」+ main 的休眠熔炉）。
+        let positions: Vec<BlockPos> = self
+            .block_entities_table()
+            .ticker_positions()
+            .map(|(pos, _)| pos)
+            .collect();
+        for pos in positions {
+            self.mark_chunk_dirty(pos.chunk());
+        }
         self.block_entities_table_mut().begin_tick(now);
     }
 
@@ -404,6 +431,8 @@ pub trait LevelEntities {
 pub trait EntityTables {
     fn entities_table(&self) -> &EntityStore;
     fn entities_table_mut(&mut self) -> &mut EntityStore;
+    /// 实体写也要把所在区块标脏（实体 NBT 独立于区块文件）。
+    fn mark_chunk_dirty(&mut self, _pos: ChunkPos) {}
 }
 
 impl<T: EntityTables + ?Sized> LevelEntities for T {
@@ -428,6 +457,7 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
     }
 
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
+        self.mark_chunk_dirty(entity.block_position().chunk());
         self.entities_table_mut().spawn(entity)
     }
 
@@ -438,12 +468,18 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
     }
 
     fn discard_entity(&mut self, uid: EntityUid) -> bool {
+        if let Some(public) = self.entities_table().public_at(uid) {
+            self.mark_chunk_dirty(public.chunk_position());
+        }
         self.entities_table_mut()
             .with_mut(uid, |entity| entity.discard())
             .is_some()
     }
 
     fn remove_entity(&mut self, uid: EntityUid) {
+        if let Some(public) = self.entities_table().public_at(uid) {
+            self.mark_chunk_dirty(public.chunk_position());
+        }
         self.entities_table_mut().remove(uid);
     }
 
@@ -460,6 +496,7 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
     }
 
     fn put_entity(&mut self, entity: Entity) {
+        self.mark_chunk_dirty(entity.block_position().chunk());
         self.entities_table_mut().put(entity);
     }
 

@@ -598,6 +598,13 @@ impl BlockEntities {
         }
     }
 
+    /// 所有方块实体的位置，给游戏层的改动标记用（宁多勿少）。
+    pub fn ticker_positions(&self) -> impl Iterator<Item = (BlockPos, u64)> + '_ {
+        self.positions
+            .iter()
+            .map(|(&pos, &index)| (pos, index as u64))
+    }
+
     /// 这一刻有多少个 ticker 真跑过，差分测试和测量用。
     #[doc(hidden)]
     pub fn due_count(&self) -> usize {

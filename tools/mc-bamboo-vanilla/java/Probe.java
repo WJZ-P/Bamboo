@@ -856,22 +856,23 @@ public final class Probe {
             if (markerCommand != null) {
                 // 用主脚本里已经在 ops.json 的 OP 玩家，不额外加一个没权限的连接。
                 Join marker = clients.get(0);
+                // 先发 save-all flush：把探针自己放过的方块全部刷到盘上，
+                // 并等「保存完成」的回执。然后再放标记方块，让 D6 匀速保存
+                // 在冷却过后把这一格写下去（这才是崩溃测试要验证的路径）。
+                // Flush everything the main probe placed first, then place the
+                // marker so paced saving (not save-all) writes it before kill -9.
+                marker.send(new ServerboundChatCommandPacket("save-all flush"));
+                await("marker: the save-all flush finished",
+                        () -> containsText(marker, "Saved the game"));
                 marker.send(new ServerboundChatCommandPacket(markerCommand));
-                // 先等方块变化包真正到达：世界线程消费聊天命令和写方块都在同一刻，
-                // 不等就发 save-all 的话，快照会在 /setblock 生效之前拍下。
                 await("marker: the block is placed on the running server",
                         () -> {
                             BlockState state = marker.blocks.get(markerPos);
                             return state != null && net.minecraft.core.registries.BuiltInRegistries.BLOCK
                                     .getKey(state.getBlock()).toString().equals(markerBlock);
                         });
-                pumpFor(SETTLE_MILLIS);
-                // 让匀速保存把这一格写下去，而且等盘上的写入真正完成：
-                // 接下来是 kill -9，不落盘就检查不到。save-all 会把所有
-                // 已加载脏区块立刻交给 IO 线程并排一道栅栏。
-                marker.send(new ServerboundChatCommandPacket("save-all flush"));
-                await("marker: the save-all flush finished",
-                        () -> containsText(marker, "Saved the game"));
+                // 多等几刻，让世界线程真正消费命令并拍下改动。
+                pumpFor(SETTLE_MILLIS * 4);
             }
             for (Join client : clients) {
                 client.finishChecks();

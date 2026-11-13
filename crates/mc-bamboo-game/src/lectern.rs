@@ -289,6 +289,7 @@ pub(crate) fn complete_use(
         page_count,
         has_content,
     } = book::placed_book(&copy);
+    region.touch(pos);
     region.lecterns.books.insert(
         pos,
         Book {
@@ -415,6 +416,7 @@ pub(crate) fn tick(region: &mut Region) {
         .filter(|pos| !block_keeps_book(region, *pos))
         .collect();
     for pos in stale {
+        region.touch(pos);
         let Some(book) = region.lecterns.books.remove(&pos) else {
             continue;
         };
@@ -450,6 +452,7 @@ fn sync_view(region: &mut Region, id: PlayerId) {
 }
 
 fn turn_page(region: &mut Region, pos: BlockPos, button_id: i32) -> bool {
+    region.touch(pos);
     let Some(book) = region.lecterns.books.get_mut(&pos) else {
         return false;
     };
@@ -468,6 +471,7 @@ fn turn_page(region: &mut Region, pos: BlockPos, button_id: i32) -> bool {
 }
 
 fn take_book(region: &mut Region, id: PlayerId, pos: BlockPos) {
+    region.touch(pos);
     let Some(book) = region.lecterns.books.remove(&pos) else {
         return;
     };
@@ -571,6 +575,7 @@ fn ensure_book(region: &mut Region, pos: BlockPos) {
             },
         );
     }
+    region.touch(pos);
     region.lecterns.books.insert(
         pos,
         Book {

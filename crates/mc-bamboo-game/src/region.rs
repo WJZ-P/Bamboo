@@ -49,6 +49,7 @@ pub(crate) use column::take_pristine_cost;
 #[cfg(test)]
 mod column_tests;
 pub(crate) mod content_snapshot;
+pub(crate) mod dirty;
 pub(crate) mod parking;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
@@ -244,6 +245,8 @@ pub(crate) struct Region {
     pub(crate) peer_ips: BTreeMap<PlayerId, String>,
     /// 这个 region 每刻的耗时和数量指标。世界线程独占，一直开着。
     pub(crate) profiler: Profiler,
+    /// 「上次保存之后改过没有」的标记，见 [`dirty`]。
+    pub(crate) dirty: dirty::Dirty,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -372,6 +375,7 @@ impl Region {
             last_action_millis: BTreeMap::new(),
             peer_ips: BTreeMap::new(),
             profiler: Profiler::default(),
+            dirty: dirty::Dirty::default(),
         }
     }
 
@@ -385,6 +389,13 @@ impl Region {
 
     pub(crate) fn advance_tick(&mut self) {
         self.tick.0 += 1;
+    }
+
+    /// 游戏层直接改了按位置索引的上层表：把那一格所在区块标脏。
+    /// 宁多勿少，多存一次没有错，漏存一次才是错。
+    /// Game-layer direct write to a positional upper-layer table: mark the chunk.
+    pub(crate) fn touch(&mut self, pos: BlockPos) {
+        self.dirty.mark(pos.chunk());
     }
 
     /// 方块逻辑要的世界和计划刻队列。它们借用不同的字段，所以要一起拿。
@@ -406,6 +417,7 @@ impl Region {
             world_border: self.world_border.clone(),
             command_blocks: &mut self.command_blocks,
             tick_levels: &self.tick_levels,
+            dirty: &mut self.dirty,
         };
         (level, &mut self.block_ticks)
     }

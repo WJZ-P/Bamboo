@@ -259,11 +259,22 @@ pub struct BlockTicks {
     next_order: u64,
     blocks: TickQueue<usize>,
     fluids: TickQueue<i32>,
+    /// 计划刻增删过的区块，交给游戏层的存档改动标记。
+    dirty: std::collections::BTreeSet<ChunkPos>,
 }
 
 impl BlockTicks {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn mark_dirty(&mut self, pos: ChunkPos) {
+        self.dirty.insert(pos);
+    }
+
+    /// 取走「计划刻改过」的区块集合，由游戏层并进存档脏集合。
+    pub fn take_dirty(&mut self) -> std::collections::BTreeSet<ChunkPos> {
+        std::mem::take(&mut self.dirty)
     }
 
     /// 现在能不能按区块搬计划刻：两条队列里都没有取出、还没跑完的刻。
@@ -299,6 +310,7 @@ impl BlockTicks {
 
     /// 给方块排一个刻。这一格这个方块已经排着时什么也不做。
     pub fn schedule(&mut self, pos: BlockPos, block: usize, delay: i32, priority: TickPriority) {
+        self.mark_dirty(pos.chunk());
         if !self.blocks.has_scheduled(pos, block) {
             let order = self.order(pos, delay, priority);
             self.blocks.schedule(pos, block, order);
@@ -313,6 +325,7 @@ impl BlockTicks {
         delay: i32,
         priority: TickPriority,
     ) {
+        self.mark_dirty(pos.chunk());
         if !self.fluids.has_scheduled(pos, fluid) {
             let order = self.order(pos, delay, priority);
             self.fluids.schedule(pos, fluid, order);

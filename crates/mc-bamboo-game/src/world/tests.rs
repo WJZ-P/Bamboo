@@ -190,7 +190,7 @@ pub(crate) fn client_requesting(view_distance: i8) -> ClientInformation {
 
 /// 测试里的“连接层”：用内存队列给世界线程发消息。
 pub(crate) struct Harness {
-    world: World,
+    pub(crate) world: World,
     inbox: Sender<Inbound>,
     in_flight: Arc<AtomicUsize>,
     next_id: i32,
@@ -1476,9 +1476,12 @@ fn d6_saves_a_chunk_with_only_a_container_edit() {
     server.ensure_loaded(&[pos]);
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
 
-    // 只往容器表放一个条目，不改任何方块：ChunkStore 的版本号不会变。
+    // 只往容器表放一个条目，不改任何方块：ChunkStore 的版本号不会变，
+    // 写路径的改动标记要让它照样被 D6 写下去。
+    let chest = mc_bamboo_core::BlockPos::new(3, -60, 3);
+    server.world.region.touch(chest);
     server.world.region.containers.insert(
-        mc_bamboo_core::BlockPos::new(3, -60, 3),
+        chest,
         crate::container::ContainerEntry::new(crate::container::ContainerKind::Chest),
     );
 

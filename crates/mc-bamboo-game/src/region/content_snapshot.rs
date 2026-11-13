@@ -11,8 +11,12 @@
 //! unload save (shared `encode_parts`). `content_fingerprints` scans the upper
 //! tables once so D6 can see content-only edits.
 
-use std::collections::{BTreeMap, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use mc_bamboo_blocks::{
     ChunkRedstone, ChunkTicks,
@@ -147,6 +151,8 @@ impl EncodeParts for BorrowedParts {
 /// revision is handled by `ChunkStore`; this covers containers, block entities,
 /// entities, scheduled ticks and redstone memory (item 9: a chest edit with no
 /// block change must still be saved by D6).
+#[cfg(test)]
+#[allow(dead_code, reason = "审查探针用旧的指纹函数量开销；生产路径不再调用")]
 pub(crate) fn content_fingerprints(region: &Region) -> BTreeMap<ChunkPos, u64> {
     let mut entries: BTreeMap<ChunkPos, Vec<String>> = BTreeMap::new();
     let mut push = |at: BlockPos, text: String| {

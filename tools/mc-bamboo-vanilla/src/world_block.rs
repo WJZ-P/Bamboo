@@ -48,8 +48,12 @@ pub fn run(dir: &str, x: &str, y: &str, z: &str, block: &str, java: &str) -> Res
     }
     // 官方目录对拍：逐个 .mca 找那个区块，用官方 codec 解码并读出这一格。
     let mut found: Vec<String> = Vec::new();
-    for entry in fs::read_dir(&region_path).map_err(|error| format!("cannot read region dir: {error}"))? {
-        let path = entry.map_err(|error| format!("bad region dir entry: {error}"))?.path();
+    for entry in
+        fs::read_dir(&region_path).map_err(|error| format!("cannot read region dir: {error}"))?
+    {
+        let path = entry
+            .map_err(|error| format!("bad region dir entry: {error}"))?
+            .path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -78,7 +82,10 @@ pub fn run(dir: &str, x: &str, y: &str, z: &str, block: &str, java: &str) -> Res
         });
         let report = ask_java(java, &request)?;
         if let Some(error) = &report.error {
-            return Err(format!("official codec rejected {}: {error}", path.display()));
+            return Err(format!(
+                "official codec rejected {}: {error}",
+                path.display()
+            ));
         }
         if let Some(name) = report.block {
             found.push(name);
@@ -99,11 +106,7 @@ pub fn run(dir: &str, x: &str, y: &str, z: &str, block: &str, java: &str) -> Res
     }
     // 再用 Bamboo 自己的解码器读一遍，确认两边对同一格的答案一致。
     let chunk = ChunkPos::new(at.x.div_euclid(16), at.z.div_euclid(16));
-    let mut region = open_region(
-        &region_path,
-        RegionPos::of(chunk),
-        RegionCompression::Zlib,
-    )
+    let mut region = open_region(&region_path, RegionPos::of(chunk), RegionCompression::Zlib)
         .map_err(|error| format!("cannot open region: {error}"))?;
     let bytes = region
         .read(chunk, 32 << 20)
