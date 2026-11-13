@@ -103,6 +103,19 @@ impl EntityTables for RegionLevel<'_> {
     }
 }
 
+impl RegionLevel<'_> {
+    /// 这一格（以及双箱另一半）的容器内容可能变了：叫醒关注它的睡眠方块实体。
+    /// 和 `Region::touch` 是同一条规则，方块逻辑直接写上层表时走这里。
+    fn notify_container(&mut self, pos: BlockPos) {
+        self.block_entities.notify_cell(pos);
+        for other in self.container_positions(pos) {
+            if other != pos {
+                self.block_entities.notify_cell(other);
+            }
+        }
+    }
+}
+
 impl Level for RegionLevel<'_> {
     fn world_border(&self) -> WorldBorder {
         self.world_border.clone()
@@ -122,6 +135,7 @@ impl Level for RegionLevel<'_> {
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
         self.dirty.mark(pos.chunk());
+        self.block_entities.notify_cell(pos);
         let previous = self.chunks.block(pos).map(BlockState);
         // `/setblock` / `/fill` 没有玩家，破坏路径经过这里：官方的
         // `preRemoveSideEffects` 在读内容之前解包。
@@ -256,6 +270,7 @@ impl Level for RegionLevel<'_> {
     /// 的顺序合并，并且和漏斗一样忽略压住箱子的方块。
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
         self.dirty.mark(pos.chunk());
+        self.notify_container(pos);
         let Some(kind) = crate::container::kind_in(self.chunks, pos) else {
             return false;
         };
@@ -302,6 +317,7 @@ impl Level for RegionLevel<'_> {
         len: usize,
         f: &mut dyn FnMut(&mut [ItemStack]),
     ) -> bool {
+        self.notify_container(pos);
         let Some(kind) = crate::container::kind_in(self.chunks, pos) else {
             return false;
         };
@@ -322,6 +338,7 @@ impl Level for RegionLevel<'_> {
 
     fn clear_container(&mut self, pos: BlockPos) {
         self.dirty.mark(pos.chunk());
+        self.notify_container(pos);
         self.containers.remove(&pos);
     }
 
@@ -377,6 +394,7 @@ impl Level for RegionLevel<'_> {
     /// 拿漏斗方块实体。它正在 tick 时已经从表里拿出来了，这时返回 `false`。
     fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
         self.dirty.mark(pos.chunk());
+        self.block_entities.notify_cell(pos);
         let Some(hopper) = self.block_entities.get_mut(pos) else {
             return false;
         };
@@ -396,6 +414,9 @@ impl Level for RegionLevel<'_> {
 
     fn unpack_loot_table(&mut self, pos: BlockPos) {
         self.dirty.mark(pos.chunk());
+        if self.loot_table_pending(pos) {
+            self.notify_container(pos);
+        }
         crate::container_loot::unpack(
             crate::container_loot::Unpack {
                 chunks: self.chunks,

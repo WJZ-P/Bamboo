@@ -249,11 +249,7 @@ pub(crate) fn query<R>(
     pos: BlockPos,
     f: &mut dyn FnMut(&dyn Container) -> R,
 ) -> Option<R> {
-    let mut result = None;
-    let present = world.with_container(pos, &mut |container| {
-        result = Some(f(&*container));
-    });
-    present.then_some(result).flatten()
+    world.peek_container(pos, |container| f(container))
 }
 
 /// `HopperBlockEntity.pushItemsTick`。滴答器每刻调用它。
@@ -317,12 +313,9 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
     let direction = facing.opposite();
 
     // `getContainerAt`：目标不是容器时什么也不做。世界里的实体不是容器。
-    let mut full = None;
-    if !world.with_container(destination, &mut |container| {
-        full = Some(is_full_container(container, Some(direction)));
-    }) {
-        return false;
-    }
+    let full = query(world, destination, &mut |container| {
+        is_full_container(container, Some(direction))
+    });
     if full != Some(false) {
         return false;
     }
@@ -334,23 +327,26 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
         if item.is_empty() {
             continue;
         }
+        // 官方先 `removeItem(1)` 再 `addItem`，失败时靠同一个对象把整堆放回去。
+        // 这里两侧都是静默写：内容真变了才叫醒关注这两格的睡眠漏斗。
         let mut taken = ItemStack::empty();
-        if !world.with_container(pos, &mut |container| {
+        let mut inserted = None;
+        let source = world.silent_container(pos, &mut |container| {
             taken = remove_item(container, slot, 1);
-        }) {
+        });
+        if source.is_none() {
             continue;
         }
-        let mut inserted = None;
-        world.with_container(destination, &mut |container| {
+        let destination_written = world.silent_container(destination, &mut |container| {
             inserted = Some(add_item(container, taken.clone(), Some(direction)));
         });
-        let Some(inserted) = inserted else {
-            // 目标已经不在了，把拿出来的整堆放回去。
-            world.with_container(pos, &mut |container| container.set(slot, item.clone()));
+        let Some(inserted) = inserted.filter(|_| destination_written.is_some()) else {
+            world.silent_container(pos, &mut |container| container.set(slot, item.clone()));
             continue;
         };
 
         if inserted.remaining.is_empty() {
+            // `addItem` 成功时两侧的静默写已经各自通知过。冷却和比较器通知照官方。
             let destination_state = world.block_state(destination);
             if inserted.was_empty && destination_state.is_a(BlockAncestor::HopperBlock) {
                 apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time()));
@@ -359,8 +355,8 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
             return true;
         }
 
-        // 放不进去，槽位恢复成原来的整堆。官方靠的是同一个对象，这里是克隆，要显式写回。
-        world.with_container(pos, &mut |container| container.set(slot, item.clone()));
+        // 放不进去，槽位恢复成原来的整堆。
+        world.silent_container(pos, &mut |container| container.set(slot, item.clone()));
     }
     false
 }
@@ -432,7 +428,7 @@ pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
         if !intersects_block(item, pos) || !intersects_suck_box(item, pos) {
             continue;
         }
-        world.with_block_entity::<HopperEntity, _>(pos, |hopper, world| {
+        world.with_block_entity_for_entity::<HopperEntity, _>(pos, |hopper, world| {
             try_move_touching(world, pos, hopper, item);
         });
     }
@@ -446,22 +442,20 @@ pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
 /// instead. See [`suck_touching_item`].
 fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> bool {
     let above = pos.above();
-    let mut slots = None;
-    if !world.with_container(above, &mut |container| {
-        slots = Some(container.slots_for_face(Direction::Down).map_or_else(
+    // 只读探测：上方不是容器时改去吸物品实体。官方的 `getSourceContainer` 只读，
+    // 不该把上面那个漏斗叫醒。
+    let Some(slots) = world.peek_container(above, |container| {
+        container.slots_for_face(Direction::Down).map_or_else(
             || (0..container.size()).collect::<Vec<_>>(),
             <[usize]>::to_vec,
-        ));
-    }) {
+        )
+    }) else {
         return suck_ground_items(world, pos, entity);
-    }
-    let Some(slots) = slots else {
-        return false;
     };
     // 上面的容器也是漏斗时，`from instanceof HopperBlockEntity` 成立。
     let mut from_ticked_game_time = None;
     if world.block_state(above).is_a(BlockAncestor::HopperBlock) {
-        world.with_hopper(above, &mut |hopper| {
+        world.peek_hopper(above, &mut |hopper| {
             from_ticked_game_time = Some(hopper.ticked_game_time());
         });
     }
@@ -501,17 +495,18 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
         }
 
         let mut taken = ItemStack::empty();
-        if !world.with_container(above, &mut |container| {
+        let taken_ok = world.silent_container(above, &mut |container| {
             taken = remove_item(container, slot, 1);
-        }) {
+        });
+        if taken_ok.is_none() {
             continue;
         }
         let mut inserted = None;
-        world.with_container(pos, &mut |container| {
+        let into_written = world.silent_container(pos, &mut |container| {
             inserted = Some(add_item(container, taken.clone(), None));
         });
-        let Some(inserted) = inserted else {
-            world.with_container(above, &mut |container| container.set(slot, item.clone()));
+        let Some(inserted) = inserted.filter(|_| into_written.is_some()) else {
+            world.silent_container(above, &mut |container| container.set(slot, item.clone()));
             continue;
         };
 
@@ -525,7 +520,7 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
             return true;
         }
 
-        world.with_container(above, &mut |container| container.set(slot, item.clone()));
+        world.silent_container(above, &mut |container| container.set(slot, item.clone()));
     }
     false
 }
@@ -695,11 +690,9 @@ fn insert_into_hopper(
     hopper: &mut HopperEntity,
     stack: ItemStack,
 ) -> Option<Added> {
-    let mut added = None;
-    world.with_container(pos, &mut |container| {
-        added = Some(add_item(container, stack.clone(), None));
-    });
-    let added = added?;
+    let added = world.silent_container(pos, &mut |container| {
+        add_item(container, stack.clone(), None)
+    })?;
     // 空漏斗吃进第一件时，`tryMoveInItem` 自己把冷却设成 8。来源不是漏斗，不减 1。
     // An empty hopper sets its own cooldown to 8 on the first insert. The source is not a hopper.
     if added.was_empty && !hopper.is_on_custom_cooldown() {

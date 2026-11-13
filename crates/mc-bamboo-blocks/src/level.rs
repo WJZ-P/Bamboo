@@ -226,6 +226,17 @@ pub trait LevelSideState {
     /// 把这一刻世界边界的方块盒交给方块实体表，离开边界的睡眠实体暂停，见
     /// [`BlockEntities::sync_border`]。
     fn sync_block_entity_border(&mut self, border: BlockBox);
+    /// 这一格的方块或容器内容变了：叫醒关注它的睡眠条目，见 [`BlockEntities::notify_cell`]。
+    /// 默认什么都不做（没有休眠的世界）。
+    fn notify_block_entity_cell(&mut self, _pos: BlockPos) {}
+    /// 有实体在这个盒子里出现、移动或换了物品，见 [`BlockEntities::notify_box`]。
+    fn notify_block_entity_box(&mut self, _area: Aabb) {}
+    /// 睡眠条目关注的 16³ 段变过时交出现在的集合，见 [`BlockEntities::take_watched_sections`]。
+    fn take_block_entity_watched_sections(
+        &mut self,
+    ) -> Option<std::collections::HashSet<(i32, i32, i32)>> {
+        None
+    }
     fn begin_block_entity_tick(&mut self, now: i64);
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)>;
     fn end_block_entity_tick(&mut self);
@@ -429,6 +440,20 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         self.block_entities_table_mut().sync_border(border);
     }
 
+    fn notify_block_entity_cell(&mut self, pos: BlockPos) {
+        self.block_entities_table_mut().notify_cell(pos);
+    }
+
+    fn notify_block_entity_box(&mut self, area: Aabb) {
+        self.block_entities_table_mut().notify_box(area);
+    }
+
+    fn take_block_entity_watched_sections(
+        &mut self,
+    ) -> Option<std::collections::HashSet<(i32, i32, i32)>> {
+        self.block_entities_table_mut().take_watched_sections()
+    }
+
     fn begin_block_entity_tick(&mut self, now: i64) {
         // 睡着的实体醒来、真正跑了 tick 时会改持久化的数值：把所在区块标脏。
         // 宁多勿少，多存一次没有错（复查「高 3」+ main 的休眠熔炉）。
@@ -488,6 +513,16 @@ pub trait LevelEntities {
         public: Vec<crate::entity::EntityPublic>,
         state: Vec<crate::entity::EntityState>,
     );
+    /// 取走实体表攒下的位置事件，见 [`EntityStore::take_wake_events`]。
+    fn take_entity_wake_events(&mut self) -> Vec<Aabb> {
+        Vec::new()
+    }
+    /// 把关注段集合交给实体表，见 [`EntityStore::set_watched_sections`]。
+    fn set_entity_watched_sections(
+        &mut self,
+        _sections: std::collections::HashSet<(i32, i32, i32)>,
+    ) {
+    }
 }
 
 /// 用一整张 [`EntityStore`] 存实体的世界。实现它就自动得到 [`LevelEntities`]。
@@ -584,6 +619,17 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
         state: Vec<crate::entity::EntityState>,
     ) {
         self.entities_table_mut().publish_rows(rows, public, state);
+    }
+
+    fn take_entity_wake_events(&mut self) -> Vec<Aabb> {
+        self.entities_table_mut().take_wake_events()
+    }
+
+    fn set_entity_watched_sections(
+        &mut self,
+        sections: std::collections::HashSet<(i32, i32, i32)>,
+    ) {
+        self.entities_table_mut().set_watched_sections(sections);
     }
 }
 

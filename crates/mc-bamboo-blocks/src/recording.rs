@@ -1187,6 +1187,20 @@ impl LevelSideState for Recording<'_> {
         self.level.sync_block_entity_border(border);
     }
 
+    fn notify_block_entity_cell(&mut self, pos: BlockPos) {
+        self.level.notify_block_entity_cell(pos);
+    }
+
+    fn notify_block_entity_box(&mut self, area: crate::Aabb) {
+        self.level.notify_block_entity_box(area);
+    }
+
+    fn take_block_entity_watched_sections(
+        &mut self,
+    ) -> Option<std::collections::HashSet<(i32, i32, i32)>> {
+        self.level.take_block_entity_watched_sections()
+    }
+
     fn begin_block_entity_tick(&mut self, now: i64) {
         self.level.begin_block_entity_tick(now);
     }
@@ -1312,6 +1326,17 @@ impl LevelEntities for Recording<'_> {
     fn entities_table_mut(&mut self) -> &mut EntityStore {
         self.note_entities(13);
         self.level.entities_table_mut()
+    }
+
+    fn take_entity_wake_events(&mut self) -> Vec<crate::Aabb> {
+        self.level.take_entity_wake_events()
+    }
+
+    fn set_entity_watched_sections(
+        &mut self,
+        sections: std::collections::HashSet<(i32, i32, i32)>,
+    ) {
+        self.level.set_entity_watched_sections(sections);
     }
 
     fn publish_entity_rows(
