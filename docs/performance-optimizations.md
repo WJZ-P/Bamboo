@@ -41,6 +41,9 @@
 | 14 | 区块段哈希：每次 `Chunk::set_block` 写随机方块状态（7h） | 47.1–47.9 ns | 53.3–54.5 ns | 慢约 6.4 ns（+13%） |
 | 15 | 红石缓存正式配置：红石线阵列 `run_scheduled_ticks` 阶段每刻（7i） | 596 031.8 ns | 14 996.2 ns | 39.75× |
 | 16 | 计算池 4 线程：512 个区块的序列化 / 解析，世界线程耗时（11.3） | 92.0 / 261.5 ms | 0.1 / 0.2 ms | 吞吐 3.4–3.6× |
+| 17 | 地表规则：气候参数按 quart 格缓存，`chunk_timing` SURFACE / CARVERS（10） | 121.36 / 121.85 ms | 40.05 / 40.92 ms | 3.0× |
+| 17 | 同上：条件噪声改惰性求值后（10） | 40.05 / 40.92 ms | 15.99 / 17.47 ms | 2.5× / 2.3× |
+| 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -54,6 +57,8 @@
 第 14 项见 7h 节，是缓存的默认关状态也要付的常驻代价：段哈希给写方块加约 6 ns，不是净收益。
 第 15 项见 7i 节，是九台机器里唯一划算的一台；其它八台在正式配置下是 0.99–1.01×（门槛主动放弃了小电路的收益）。
 第 16 项见 `profiling.md` 11.3：世界线程那两列只是提交任务加收回执，池子的等待不计入；墙钟 27.4 / 72.6 ms 才是 4 线程做完这一批的时间。
+第 17 项见第 10 节，是 `mc-bamboo-worldgen` 里唯一一次「纯函数世界生成」的优化：三行分别是两个
+有收益的改动各自的前后数字和合计，口径都是 `chunk_timing` 35 个区块的中位数，不是整机 tick。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -1492,3 +1497,82 @@ BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game
 `cargo fmt --all --check`、0 警告的
 `cargo clippy --workspace --all-targets`、`cargo test --workspace` 和
 `BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game` 都通过。
+
+---
+
+## 10. 地表和雕刻器：122 ms → 17 ms / 区块
+
+代码：`crates/mc-bamboo-worldgen/src/biome_manager.rs` 的 `ClimateCache`、
+`material.rs` 的 `Scan::noise_get` 和 `carver.rs` 的邻域查询。提交 `968c292`、
+`34eb53d`。完整拆分表和逐位一致的依据见 `worldgen.md`「耗时」一节。
+
+### 10.1 原来慢在哪
+
+`Generator::terrain` 生成到 NOISE 只要 3.4 ms，多跑 `MaterialSystem.buildSurface` 之后
+变成 122 ms，慢 35 倍。临时给每段插桩（21 区块 × 3 种子，嵌套计时器报自身耗时，
+量完已还原），再用 `sample`（12 秒、1 ms 间隔）交叉验证：8 714 个主线程样本里
+6 576 个在 `build_surface`，约 5 800 个在 Perlin 噪声，468 个在 R 树，雕刻器隧道只有 6 个。
+
+两个热点加起来占了大头：
+
+* **`BiomeManager` 的群系查询**：官方这一步给的是 `createUncachedResolver`，每次
+  `getBiome` 都在一个空的 `SamplerContext` 上重算六条气候密度函数。地表逐列扫描
+  会反复问同一批 quart 格，雕刻器的 17×17 邻域也是。给官方 oracle 的 resolver 包
+  计时器测到 31 046 次查询/区块、3.54 µs/次；把 resolver 换成固定群系后，官方的
+  `buildSurface` 从 120 ms 掉到 8.99 ms。**官方在这条路径上同样慢在这里**，
+  1 种子 × 120 区块的整个 `terrain` 约 108 ms/区块，不是几毫秒量级。
+* **条件噪声被 eager 求值**：`updateY` 每格把 15 条 3d 噪声全算一遍，
+  29 093 次/区块 × 15。插桩量到 21.63 ms/区块，是单项最大的一项。
+
+### 10.2 换成了什么
+
+1. **气候参数缓存**（`968c292`）。按 `(quartX, quartY, quartZ)` 直接映射一张表，
+   记六条气候密度函数算出的 `TargetPoint`。这六条是纯函数：不记忆上下文、不取
+   随机数，所以命中时完全跳过求值，未命中时按原顺序算一次，浮点顺序和随机数
+   取用都不变。**故意不缓存群系 ID**：`ParameterList` 的 R 树带 `lastResult` 作为
+   平局时的初始候选，跳过一次查表就会改变后续查询的结果；每次仍照原顺序查表。
+   范围外的坐标走原路径、不缓存。SURFACE 121.36 → 40.05 ms，CARVERS
+   121.85 → 40.92 ms（约 3×）。
+2. **条件噪声 supplier 惰性求值**（`34eb53d`）。`javap -c -p` 核对
+   `MaterialRuleContext$1`（2d）和 `$2`（3d）：官方的 `getAsDouble` 各按
+   `lastUpdateXZ` / `lastUpdateY` 代数记住值，只在代数变了时调 `Noise.get`。
+   原来 Rust 侧的 `noise_2d/noise_3d` 是每列/每格全部重算的 `Vec<f64>`；改成
+   `Vec<Option<(代数, 值)>>`，在 `noise_get` 里第一次被问到才算该条噪声。
+   `updateXZ` 照 bytecode 把两个代数都加一，`updateY` 只加 Y。各噪声互不依赖、
+   `Noise.get` 不取随机数，所以值和随机序列不变。SURFACE 40.05 → 15.99 ms，
+   CARVERS 40.92 → 17.47 ms（约 2.4×）。
+
+### 10.3 试过但没有收益、撤掉的
+
+`LazyYCondition` / `LazyXZCondition` 的结果缓存。字节码确认 `BiomeCondition`、
+`StoneDepthCondition`、`YCondition`、`WaterCondition`、`VerticalGradientCondition`
+编译成 `LazyYCondition`，`HoleCondition` / `SteepCondition` 编译成
+`LazyXZCondition`，同一格上 `compute()` 只跑一次；`NoiseThresholdCondition`、
+`AbovePreliminarySurfaceCondition`、`TemperatureCondition` 是普通 lambda。
+按编译实例编号 + 代数记忆结果实现后对拍仍是 0 不一致，但 21 区块基准改前
+36.9 / 37.5 / 45.8 ms、改后 37.6 / 37.6 / 37.5 ms，`chunk_timing` 也都在
+40 ms 附近。按本文第 8 节「没有可测收益就撤掉」的原则撤销，没有提交。
+
+高度图（0.34 ms/区块）、矿脉成批（0.62 ms）、雕刻器隧道和 `applyCarvingMask`
+（合计 < 0.3 ms）拆开量过之后没有动。
+
+### 10.4 怎么复现、怎么确认结果没变
+
+```sh
+cargo run --release -p mc-bamboo-worldgen --example chunk_timing
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 6 --chunks 36 --through carvers
+# 换一个 salt 再跑一次
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 6 --chunks 36 --through carvers --salt 987654321
+```
+
+每项改动前后各跑一次 `chunk_timing`（同一轮里连续量，见第 8 节）；两项提交后
+6 种子 × 36 区块 × 2 个 salt 的 `chunkgen --through carvers` 都是 0 不一致
+（每阶段 21 233 664 个方块、三阶段共 63 700 992 次比较），`worldgen java` 也是
+0 不一致。数字比官方同一路径的 108 ms/区块快约 6 倍；优化的是重复计算的次数，
+不是把浮点运算重排或省掉随机数，所以逐位一致不受影响。
+
+剩下的大头是规则树 `apply` 自身（插桩 15.68 ms/区块）和 R 树查找，以及
+`finalDensity` 的 2.9 ms；并行化、SIMD 和「从已存 quart 格读群系」都不是这一轮
+做的事，后者还会改变官方路径的语义（见 `worldgen.md` 最后一节）。

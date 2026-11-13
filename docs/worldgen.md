@@ -176,20 +176,100 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen java
 ## 耗时
 
 `cargo run --release -p mc-bamboo-worldgen --example chunk_timing`：每个种子先预热一次，再对
-7 个区块、三个阶段各计时取中位数；5 个种子共 35 个区块 × 3 阶段：
+7 个区块、三个阶段各计时取中位数；5 个种子共 35 个区块 × 3 阶段。三个时间都是从头跑到该
+阶段的累计耗时，不含群系、不含 JVM、不含对拍 IO、不含建 `Generator`（每个种子只建一次）。
+
+优化前后各连续跑三轮，取中间一轮（同一台 Apple M4 Pro，release）：
+
+| 阶段 | 优化前中位数 | 优化后中位数 | 倍数 |
+|---|---|---|---|
+| NOISE | 3.39 ms | 3.53 ms | 1.0×（没改这一段） |
+| SURFACE | 121.36 ms | 15.99 ms | 7.6× |
+| CARVERS | 121.85 ms | 17.47 ms | 7.0× |
 
 ```
-Noise:   all 35 chunks median   3.41 ms, min  3.01 ms, max   3.78 ms
-Surface: all 35 chunks median 122.03 ms, min 72.25 ms, max 172.80 ms
-Carvers: all 35 chunks median 126.37 ms, min 73.11 ms, max 175.74 ms
+Noise:   all 35 chunks median   3.53 ms, min  3.25 ms, max   3.87 ms
+Surface: all 35 chunks median  15.99 ms, min 11.76 ms, max  20.37 ms
+Carvers: all 35 chunks median  17.47 ms, min 12.18 ms, max  21.78 ms
 ```
 
-**单区块生成到 NOISE 的中位数约 3.4 ms，到 SURFACE 约 122 ms，到 CARVERS 约 126 ms**
-（不同次运行有几 ms 波动）。三个时间都是从头跑到该阶段的累计耗时，不含群系、不含 JVM、
-不含对拍 IO、不含建 `Generator`（每个种子只建一次）。SURFACE 的额外耗时主要来自逐列扫描时
-对 `BiomeManager` 六条气候密度函数的单点求值和 `WORLD_SURFACE_WG` 高度图重算；CARVERS 只比
-它多约 4 ms，因为 17×17 邻域的大部分 carver 在 `isStartChunk` 就被概率过滤掉了。当前实现
-优先逐位一致：临时缓冲从 `Context` 的池里复用，但没有并行，噪声和插值都按官方顺序逐点算。
+CARVERS 只比 SURFACE 多约 1.5 ms：17×17 邻域的大部分 carver 在 `isStartChunk` 就被概率
+过滤掉了。三项优化里的两项有可测收益，逐项前后都量过 `chunk_timing` 并跑
+`chunkgen --through carvers` 多种子对拍；没有收益的一项（条件结果的惰性缓存，见下）撤掉了。
+详见 `performance-optimizations.md` 第 10 节。
+
+### 拆分表：慢在哪
+
+基准是临时插桩（嵌在 `Generator::terrain` 和地表/雕刻器里，量完已还原，没进仓库）：
+21 区块 × 3 种子，嵌套计时器报**自身耗时**（扣掉子段），所以带插桩的墙钟 58.7 ms/区块
+高于无插桩的 40 ms/区块，各行的绝对数只能横向比，不能和上面的 `chunk_timing` 直接相减。
+另用 `sample`（12 秒、1 ms 间隔）采样交叉验证：8 714 个主线程样本里 6 576 个在
+`MaterialRules::build_surface`，其中约 5 800 个在 Perlin 噪声、468 个在 R 树查找、
+雕刻器隧道只有 6 个。下表是**第一项（气候缓存）之后、第二项之前**的状态。
+
+| 段 | 细项 | 自身 ms/区块 | 调用次数/区块 |
+|---|---|---|---|
+| `doFill` | `finalDensity.sampleVolume` | 2.88 | 1 |
+| `doFill` | 含水层构造 + `computeSubstance` | 0.73 | 1 + 98 304 |
+| 地表 | 两条矿脉成批求值 | 0.62 | 3 |
+| 地表 | `WORLD_SURFACE_WG` 高度图 | 0.34 | 1 547 |
+| 地表 | `updateXZ`（surfaceDepth + 2d 条件噪声） | 0.24 | 258 |
+| 地表 | **`updateY`（15 条 3d 条件噪声，全部 eager 求值）** | **21.63** | 29 093 |
+| 地表 | 规则树 `apply` 自身 | 15.68 | 292 450 |
+| 地表 | 群系查询（气候缓存未命中 + R 树） | 8.89 | 28 572 |
+| 地表 | 条件 `test` 自身 | 3.37 | 152 828 |
+| 地表 | `preliminarySurface` 成批 + 列循环自身 + 扩展 | 1.63 | — |
+| 雕刻器 | 17×17 邻域群系 | 0.82 | 289 |
+| 雕刻器 | 隧道 | 0.11 | 67 |
+| 雕刻器 | `applyCarvingMask` 自身 + 含水层 + `topMaterial` | 0.17 | 1 + 1 280 + 2 |
+
+优化前的额外热点由官方侧交叉验证：给 `ChunkgenOracle.java` 的
+`BiomeResolver` 包一层计时器（临时副本放在 `target/vanilla/`，不进仓库），
+1 种子 × 120 区块下官方是 `doFill` 4.84 ms、`buildSurface` 101.1 ms、
+`generateCarvers` 1.70 ms、整个 `terrain` 108 ms 每区块；共 31 046 次群系查询/区块、
+109 ms/区块（计时器本身有开销），把 resolver 换成固定群系后 `buildSurface` 降到 8.99 ms。
+也就是说**官方在这条对拍路径上同样慢在 uncached 群系查询**，不是几毫秒量级；
+`-Xcomp` 更慢，GC 日志排除了 GC。Bamboo 优化后的 17 ms 已明显快于它的 108 ms。
+
+### 改了什么、为什么不改结果
+
+1. **按 quart 坐标缓存气候参数**（`biome_manager::ClimateCache`）。地表逐列扫描和
+   雕刻器 17×17 邻域会反复问同一批 quart 格，每次都要在一个空的 `SamplerContext`
+   上重算六条气候密度函数。这六条是纯函数：不记忆上下文、不取随机数，所以按
+   `(quartX, quartY, quartZ)` 记下 `TargetPoint` 即可。**只缓存气候参数，不缓存群系 ID**：
+   R 树的 `lastResult` 是平局时的初始候选，跳过一次查表会改变后续查询的结果；
+   每次仍照原顺序查表。范围外的坐标走原路径不缓存。
+2. **条件噪声 supplier 惰性求值**（`material::Scan::noise_get`）。`javap -c -p` 核对
+   `MaterialRuleContext$1`（2d）和 `$2`（3d）的 `getAsDouble`：两者各按
+   `lastUpdateXZ` / `lastUpdateY` 代数记住结果，只在代数变了时调 `Noise.get`。
+   原实现却在每格把 15 条 3d 噪声全部 eager 求一遍（29 093 次/区块）。改成
+   「每条噪声这一代第一次被问到才算」；`updateXZ` 照 bytecode 把两个代数都加一，
+   `updateY` 只加 Y。各噪声互不依赖、`Noise.get` 不取随机数，所以求值顺序、浮点
+   结果和随机序列都不变。
+3. **试过并撤销**：`LazyYCondition` / `LazyXZCondition` 的结果缓存。字节码确认了
+   `BiomeCondition` 等编译成 `LazyYCondition`、`HoleCondition`/`SteepCondition` 编译成
+   `LazyXZCondition`，按编号 + 代数记忆实现后对拍仍是 0 不一致，但 21 区块基准
+   改前 36.9 / 37.5 / 45.8 ms、改后 37.6 / 37.6 / 37.5 ms，`chunk_timing` 也都在
+   40 ms 附近，**没有可测收益**，按「没有可测收益的撤掉」撤销。
+
+剩余的大头是规则树 `apply` 自身（15.68 ms/区块）和气候缓存未命中时的 R 树查找，
+以及 `finalDensity` 的 2.9 ms；并行化和 SIMD 留到有逐位一致的基线之后再谈。
+
+### 接进游戏时要重新对拍的两处
+
+这一轮用 `javap -c -p` 核对 `ChunkStatusTasks`、`WorldGenRegion`、`ServerLevel`、
+`NoiseBasedChunkGenerator` 时确认了两点，对拍目前走的是简化路径：
+
+* `possibleBiomes` 是 `ChunkStatusTasks.collectPossibleBiomes(region, 1)`，即周围
+  3×3 区块 `collectBiomesInPalette` 的并集；对拍传的是注册表里全部群系。这只影响
+  `BiomeCondition.compile` 的静态优化，逐格判定仍走 `BiomeManager`，但接进游戏时要再
+  对拍一次。注意 `WorldGenRegion` 的 `biomeManager` 用的是
+  `ServerLevel.uncachedBiomeResolver()`（`createUncachedResolver(randomState)`），
+  也就是**真实服务端这一步同样逐点重算气候**，不是从已存 quart 格读群系。
+* 雕刻器在真实服务端里 `WorldGenRegion` 不为空，走
+  `region.getChunk(x, z).carverBiome(supplier)`，读的是 `BIOMES` 阶段已存的 quart 格；
+  对拍传 null，走 `getBiomeGenerationSettingsForCarver` 的 uncached 分支。两条路径的
+  群系来源不同，接进游戏时要再对拍一次。
 
 ## 还没做
 
@@ -200,5 +280,5 @@ Carvers: all 35 chunks median 126.37 ms, min 73.11 ms, max 175.74 ms
 * `Beardifier` 的非空路径（结构影响密度）。
 * 正式流程里的 `possibleBiomes`（周围 3×3 区块调色板的并集）；对拍用「全部群系」。
 * 高度图、后期处理位置表和 `ProtoChunk` 的其余字段；对拍目前只比方块和群系。
-* 地表/雕刻器阶段的速度优化（见「耗时」）。
+* 真实流程里的 `possibleBiomes` 和雕刻器的 `carverBiome` 分支（见「耗时」最后一节）。
 * 并行化和 SIMD：先有逐位一致的基线再谈优化。
