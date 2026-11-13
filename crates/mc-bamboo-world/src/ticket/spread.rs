@@ -124,6 +124,12 @@ fn force_dense_enabled() -> bool {
     FORCE_DENSE.with(|flag| flag.get())
 }
 
+/// 只给测试用：报告生产开关是否被环境变量关掉。
+#[cfg(test)]
+pub fn dense_enabled() -> bool {
+    dense_allowed()
+}
+
 /// 按坐标分块的稠密等级表。缺省值（limit）也照常写在数组里，只是不计入 `count`。
 /// 已分配的块不回收：全世界玩家活动过的范围是有界的，回收反而让热路径多一次判断。
 #[derive(Debug)]

@@ -6,7 +6,9 @@ type Sources = Vec<(ChunkPos, i32)>;
 
 use mc_bamboo_core::ChunkPos;
 
-use super::spread::{PEAK_MARGIN, PEAK_WINDOW, SCRATCH_POOL_CAP, SCRATCH_POOL_MIN, dense_hits};
+use super::spread::{
+    PEAK_MARGIN, PEAK_WINDOW, SCRATCH_POOL_CAP, SCRATCH_POOL_MIN, dense_enabled, dense_hits,
+};
 use super::{
     ChunkStatus, FULL_CHUNK_LEVEL, LevelChange, MAX_LEVEL, MIN_VIEW_DISTANCE, SIMULATION_MAX_LEVEL,
     SavedTicket, TicketTable, TicketType, UNLOADED_LEVEL, full_status, generation_status,
@@ -650,6 +652,10 @@ fn sparse_updates_fall_back_to_two_phase() {
 /// 单个玩家跨一格时窗口很小，正常判据下也必须命中快路径（不是悄悄回退）。
 #[test]
 fn small_move_takes_the_dense_window_path() {
+    if !dense_enabled() {
+        // 环境变量把快路径整条关掉时，这一测的是回退路径；其余测试仍照常覆盖。
+        return;
+    }
     let mut table = TicketTable::new();
     table.set_player(1, Some(p(0, 0)));
     table.run_updates();
