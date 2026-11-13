@@ -196,8 +196,10 @@ cargo run -p mc-bamboo-vanilla -- extract
 cargo run -p mc-bamboo-vanilla --no-default-features -- generate /path/to/server-26.3.jar
 ```
 
-重跑后 `git diff -- crates/mc-bamboo-data/src/generated/worldgen.json` 应当为空；不为空时
-先查是不是有新版本的官方数据，再看 `docs/worldgen.md` 里这六个位模式有没有变。
+重跑后 `git diff -- crates/mc-bamboo-data/src/generated/` 应当为空：`worldgen.json` 之外，
+`saved_world.rs` 也是生成流程写出的（官方 `WorldGenSettings.CODEC` 编出的超平坦
+`world_gen_settings.dat` 内容），`mod.rs` 的模块列表也由生成流程重写。`worldgen.json`
+不为空时先查是不是有新版本的官方数据，再看 `docs/worldgen.md` 里这六个位模式有没有变。
 确认数据没问题后跑对拍：
 
 ```bash
@@ -206,8 +208,8 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 
 cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 --through carvers --salt 1
 ```
 
-除了 `worldgen.json`，`generate` 还会写 `generated/` 下的其它文件和 `saved_world.rs`；
-只关心世界生成数据时，别把那些无关的改动混进同一个提交。`extract` 需要
+除了 `worldgen.json`，`generate` 还会写 `generated/` 下的其它文件（含 `saved_world.rs`
+和 `mod.rs`）；只关心世界生成数据时，别把那些无关的改动混进同一个提交。`extract` 需要
 `target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。
 
 ## 区块级对拍

@@ -101,13 +101,17 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
     }
     write_file(output_dir, "tags.rs", &tags)?;
-    write_saved_world(data, output_dir)?;
+    write_file(
+        output_dir,
+        "saved_world.rs",
+        &saved_world_file(&data.saved_world.world_gen_settings),
+    )?;
     write_worldgen(data, output_dir)
 }
 
 /// 官方 codec 编出的 `world_gen_settings.dat` 默认值，写成 SNBT 常量。
-fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String> {
-    let mut out = String::from(HEADER);
+fn saved_world_file(snbt: &str) -> String {
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "//! 官方 `WorldGenSettings.CODEC` 编出的超平坦默认值。主世界生成器是"
@@ -122,12 +126,8 @@ fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String
         out,
         "/// `world_gen_settings.dat` 的 `data` 复合标签（SNBT）。"
     );
-    let _ = writeln!(
-        out,
-        "pub const WORLD_GEN_SETTINGS: &str = r#\"{}\"#;",
-        data.saved_world.world_gen_settings
-    );
-    write_file(output_dir, "saved_world.rs", &out)
+    let _ = writeln!(out, "pub const WORLD_GEN_SETTINGS: &str = r#\"{snbt}\"#;");
+    out
 }
 
 /// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。
@@ -770,6 +770,7 @@ pub mod loot;
 pub mod packets;
 pub mod recipes;
 pub mod registries;
+pub mod saved_world;
 pub mod shapes;
 pub mod sounds;
 pub mod states;
@@ -3441,6 +3442,47 @@ mod tests {
             0x3fed_4558_d7b1_d486,
         ),
     ];
+
+    /// 重跑 `generate` / `extract` 后生成文件必须逐字符不变，文件头也只出现一次。
+    /// 把提交的文件里的 SNBT 喂回排版函数，再连 HEADER 一起和文件本身比较。
+    #[test]
+    fn the_saved_world_file_round_trips_through_the_generator() {
+        let committed = include_str!("../../../crates/mc-bamboo-data/src/generated/saved_world.rs");
+        let prefix = "pub const WORLD_GEN_SETTINGS: &str = r#\"";
+        let (_, rest) = committed.split_once(prefix).unwrap();
+        let (snbt, _) = rest.split_once("\"#;").unwrap();
+        assert_eq!(format!("{HEADER}{}", saved_world_file(snbt)), committed);
+        assert_eq!(committed.matches(HEADER.trim()).count(), 1);
+    }
+
+    /// `mod.rs` 由生成流程重写，漏一个模块就会让引用这个文件的 crate 编译不过。
+    /// 直接对照 `generated/` 里的 .rs 文件，防止下一个手工加的文件又被删掉。
+    #[test]
+    fn the_module_list_contains_every_generated_file() {
+        let modules = module_file();
+        let lines: Vec<&str> = modules.lines().collect();
+        let mut sorted = lines.clone();
+        sorted.sort_unstable();
+        assert_eq!(lines, sorted, "模块列表要按字母序");
+
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/mc-bamboo-data/src/generated");
+        for entry in fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            let Some(stem) = name.strip_suffix(".rs") else {
+                continue;
+            };
+            if stem == "mod" {
+                continue;
+            }
+            assert!(
+                lines.contains(&format!("pub mod {stem};").as_str()),
+                "mod.rs 漏了 {name}"
+            );
+        }
+        assert!(lines.contains(&"pub mod saved_world;"), "{modules}");
+    }
 
     #[test]
     fn official_decimals_round_trip_to_the_runtime_bits() {
