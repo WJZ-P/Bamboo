@@ -326,22 +326,35 @@ pub fn run_scheduled_ticks_with_cache(
     };
     let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
     ticks.collect_due(now, &can_tick);
-    let mut recorder = crate::recording::Recording::new(level);
-    recorder.set_tick(now);
-    let mut world = World::in_world_tick(&mut recorder, ticks);
-    run_block_ticks_cached(&mut world, cache, now);
-    // 流体刻和方块实体 tick 不在第一版缓存范围：关掉记账，原样解释执行。
-    world.set_capture(false);
-    world.collect_due_fluids();
-    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
-        fluid::tick(&mut world, pos, fluid);
+    let effects;
+    {
+        let mut recorder = crate::recording::Recording::new(&mut *level);
+        recorder.set_tick(now);
+        let mut world = World::in_world_tick(&mut recorder, ticks);
+        run_block_ticks_cached(&mut world, cache, now);
+        // 流体刻和方块事件之间的记账开关由各段自己管。
+        world.set_capture(false);
+        world.collect_due_fluids();
+        while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+            fluid::tick(&mut world, pos, fluid);
+        }
+        world.set_capture(true);
+        run_block_events_cached(&mut world, cache, now);
+        effects = world.drain_effects();
     }
-    world.set_capture(true);
-    run_block_events_cached(&mut world, cache, now);
-    world.set_capture(false);
-    world.end_handling_tick();
+    let mut effects = effects;
+    // 方块实体 tick 不在第一版缓存范围，走没有录制包装的世界，避免为它付记账开销。
+    let mut world = World::new(level, ticks);
     world.tick_block_entities();
-    outcome_from(world, InteractionResult::Pass, false)
+    effects.extend(world.drain_effects());
+    Outcome {
+        result: InteractionResult::Pass,
+        used_without_item: false,
+        placed_at: None,
+        item_exchange: None,
+        gained: None,
+        effects,
+    }
 }
 
 /// 游戏循环按官方顺序分几段调用，每段各自带缓存。方块计划刻和流体刻这一段。

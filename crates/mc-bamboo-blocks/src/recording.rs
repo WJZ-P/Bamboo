@@ -504,15 +504,22 @@ impl<'a> Recording<'a> {
         if inner.section_hashes.contains_key(&section) {
             return;
         }
-        let mut hash = 0_u128;
-        for y in section.section_y * 16..section.section_y * 16 + 16 {
-            for z in section.chunk.z * 16..section.chunk.z * 16 + 16 {
-                for x in section.chunk.x * 16..section.chunk.x * 16 + 16 {
-                    let pos = BlockPos::new(x, y, z);
-                    hash ^= cell_hash(pos, self.level.block_state(pos));
+        // 存储层维护好的整段哈希；没有实现 `section_hash` 的假世界退回逐格扫描。
+        let hash = self
+            .level
+            .section_hash(section.chunk, section.section_y)
+            .unwrap_or_else(|| {
+                let mut hash = 0_u128;
+                for y in section.section_y * 16..section.section_y * 16 + 16 {
+                    for z in section.chunk.z * 16..section.chunk.z * 16 + 16 {
+                        for x in section.chunk.x * 16..section.chunk.x * 16 + 16 {
+                            let pos = BlockPos::new(x, y, z);
+                            hash ^= cell_hash(pos, self.level.block_state(pos));
+                        }
+                    }
                 }
-            }
-        }
+                hash
+            });
         inner.section_hashes.insert(section, hash);
     }
 
@@ -1244,7 +1251,14 @@ impl Level for Recording<'_> {
     }
 
     fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
-        self.level.section_hash(chunk, section_y)
+        // 守卫读的是录制器自己维护的整段哈希：它按 `write_block` 增量更新，
+        // 和存储层给的初始哈希一致。底层 `Level` 不一定实现 `section_hash`。
+        self.inner
+            .borrow()
+            .section_hashes
+            .get(&ChunkSection { chunk, section_y })
+            .copied()
+            .or_else(|| self.level.section_hash(chunk, section_y))
     }
 
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {

@@ -22,6 +22,8 @@ pub const MAX_Y: i32 = 319;
 /// 一台机器的世界。方块表里没写的格子是空气。
 pub struct BenchLevel {
     pub blocks: BTreeMap<BlockPos, BlockState>,
+    /// 每个 16³ 段的整段方块状态哈希，写方块时增量更新。
+    pub section_hashes: std::collections::HashMap<mc_bamboo_blocks::recording::ChunkSection, u128>,
     pub containers: BTreeMap<BlockPos, Vec<ItemStack>>,
     pub random: LevelRandom,
     pub block_entities: BlockEntities,
@@ -40,6 +42,7 @@ impl BenchLevel {
     pub fn new() -> Self {
         Self {
             blocks: BTreeMap::new(),
+            section_hashes: std::collections::HashMap::new(),
             containers: BTreeMap::new(),
             random: LevelRandom::new(0),
             block_entities: BlockEntities::default(),
@@ -49,8 +52,24 @@ impl BenchLevel {
         }
     }
 
-    /// 直接摆一格，不做任何连锁。
+    /// 直接摆一格，不做任何连锁，但维护段哈希。
     pub fn set(&mut self, pos: BlockPos, state: BlockState) {
+        use mc_bamboo_blocks::recording::ChunkSection;
+        let old = self.block_state(pos);
+        let section = ChunkSection::of(pos);
+        let cell = |st: BlockState| {
+            section_hash::cell_hash(
+                pos.x.rem_euclid(16) as usize,
+                pos.y.rem_euclid(16) as usize,
+                pos.z.rem_euclid(16) as usize,
+                st.0,
+            )
+        };
+        let entry = self
+            .section_hashes
+            .entry(section)
+            .or_insert_with(section_hash::empty_section_hash);
+        *entry ^= cell(old) ^ cell(state);
         self.blocks.insert(pos, state);
     }
 
@@ -152,7 +171,7 @@ impl Level for BenchLevel {
         if !self.block_state(pos).is_same_block(state) {
             self.containers.remove(&pos);
         }
-        self.blocks.insert(pos, state);
+        self.set(pos, state);
         true
     }
 
@@ -177,14 +196,13 @@ impl Level for BenchLevel {
     }
 
     fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
-        Some(section_hash::section_hash(|x, y, z| {
-            let pos = BlockPos::new(
-                chunk.x * 16 + x as i32,
-                section_y * 16 + y as i32,
-                chunk.z * 16 + z as i32,
-            );
-            self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR).0
-        }))
+        let section = mc_bamboo_blocks::recording::ChunkSection { chunk, section_y };
+        Some(
+            self.section_hashes
+                .get(&section)
+                .copied()
+                .unwrap_or_else(section_hash::empty_section_hash),
+        )
     }
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
