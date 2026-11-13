@@ -605,6 +605,65 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
   `heightmap` 修饰器会读到过期值）。这一条**不能省**，要在第 0 阶段的
   `FeatureChunks::set_block` 里就实现。
 
+## 5.1 当前进度（本轮落地）
+
+已提交的实现：
+
+* 数据导出：`feature` / `placed_feature` / `biome_features` / `features_per_step`
+  四个顶层键，`worldgen.json` 重跑无 diff（必须用 `--no-default-features extract`，
+  否则 `preserve_order` 会改键顺序）。
+* Java 对拍：`--through features` 用 `WorldGenLevel` 动态代理 + 9 个跑到 CARVERS 的
+  `ProtoChunk`，输出 9 宫格。`--steps 6` 和 `--ore-only` 是过渡期诊断开关：
+  前者把没选中的 step 在每群系的 `BiomeGenerationSettings.features()` 里换成空
+  `HolderSet`，后者按 `Feature.DIRECT_CODEC` 的类型 ID 只保留 `minecraft:ore`；
+  两者都不动 `featuresPerStep`，所以全局 index 和 `setFeatureSeed` 参数与官方一致。
+* Rust：`feature/` 模块（注册表、provider、state、rule_test、world、placement、
+  ores、run），`Generator::features()` 入口，`chunkgen.rs` 逐方块比 9 宫格。
+  `WorldgenRandom` 补齐了 `BitRandomSource` 默认实现的 `nextInt` / `nextFloat` /
+  `nextDouble`：它继承 `LegacyRandomSource`，这些方法走 `next(31)` / `next(24)` /
+  `next(26)+next(27)`，不是内层 Xoroshiro 自己的 Lemire / 53 位路径。
+
+**一个必须照抄的顺序细节**：`FeaturePlacer` 的栈 DFS 里
+`PlacementModifier.modify` 和 `Feature.place` 是**交错执行**的。若先把全部候选
+位置收集完再逐个放置，`Feature.place` 消费的随机数会打乱后续候选位置的
+`in_square` / `height_range` 求值，得到完全不同的结果（实测会差几千个方块）。
+`placement::place_candidates` 用回调在 DFS 内部立即放置。
+
+### 对拍结果
+
+| 命令 | 结果 |
+|---|---|
+| `chunkgen java --seeds 1 --chunks 1 --through features --steps 6 --ore-only` | **0 不一致**（884736 个方块） |
+| `chunkgen java --seeds 2 --chunks 4 --through features --steps 6 --ore-only --salt 1` | **0 不一致**（7077888 个方块，8 个中心） |
+| `chunkgen java --seeds 3 --chunks 8 --through features --steps 6 --ore-only --salt 1/7` | 24 个中心里 23 个 0 不一致；固定区块 `(100,100)` 有约 200 个格子的差异 |
+| `chunkgen java --seeds 2 --chunks 6 --through carvers --salt 1` | 0 不一致（旧阶段回归） |
+| `worldgen java` | 0 不一致 |
+| `cargo test -p mc-bamboo-worldgen` | 93 个测试全过 |
+| `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
+
+**剩余差异**：`--ore-only --steps 6` 在 chunk `(100,100)`（群系含
+`minecraft:lush_caves`）时，`minecraft:ore_clay` 的一个矿团在 y≈-21..-16、
+x≈8..11、z≈14..15 处 Bamboo 多写了 `minecraft:clay`（官方是 `deepslate`）。
+已排除：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`WorldgenRandom` 全部
+取数方法（用 `RandProbe.java` 对比过 `nextInt(384)` 序列和 `nextFloat` 位模式）、
+`Context` 缓存（已换成 `Context::uncached()`）、栈 DFS 的交错顺序。最可能是
+`OreFeature.doPlace` 里 `Mth.sin` 查表或椭球边界某处 1 ulp 的浮点差，需要用
+`--trace` 把该团的中心/半径逐值对拍后定位。**这一处差异不影响其它 23/24 区块，
+也不影响已确认的 0 不一致结论，但不能算「step 6 全绿」。**
+
+### 还没做
+
+* `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter` /
+  `block_predicate_filter`：step 6 里非 ore 的 5 个 placed feature 目前标
+  `unsupported`，完整 11 步对拍会跳过这些区块。
+* 其它 10 个 step（湖、晶洞、怪物房、花草、积雪等）全部标 `unsupported`。
+* `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
+  「已移植集合」输出 `skipped`，`--ore-only` 是手工过滤。
+* 接进 Director（5.3.1 的邻居快照 + 增量合并）还没做。
+* 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
+  **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的；
+  以后接树/湖时要照 `Heightmap.update` 补上。
+
 ## 6. 工作量估计
 
 按「每做完一小步就提交」的节奏，单位是人时（单人、含对拍调试，不含等答复）：

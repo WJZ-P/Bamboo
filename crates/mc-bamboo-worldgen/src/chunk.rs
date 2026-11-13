@@ -353,7 +353,6 @@ impl<'a> Generator<'a> {
             biomes: &biomes,
             settings: self.settings,
             seed: self.seed,
-            cache_count: self.cache_count,
             steps_mask,
             allowed_kinds,
         };

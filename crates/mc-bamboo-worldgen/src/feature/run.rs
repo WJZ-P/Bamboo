@@ -28,7 +28,6 @@ pub struct FeatureContext<'a> {
     pub biomes: &'a BiomeManager<'a>,
     pub settings: &'a Settings,
     pub seed: i64,
-    pub cache_count: usize,
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
     /// 只跑这些配置类型；`None` 表示全部。过渡期诊断用。
@@ -67,7 +66,10 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
         sea_level: ctx.settings.sea_level,
     };
     let origin = (input.center_x * 16, ctx.settings.min_y, input.center_z * 16);
-    let mut density_context = Context::new(ctx.cache_count);
+    // BiomeManager 的 resolver 是 createUncachedResolver(state)：官方用
+    // SamplerContext.EMPTY_UNCACHED，单点求值不记忆缓存。这里不能用带缓存的
+    // Context，否则同一坐标在不同调用顺序下会读到上一次成批求值的缓冲。
+    let mut density_context = Context::uncached();
 
     for step in 0..DECORATION_STEPS {
         if ctx.steps_mask & (1 << step) == 0 {
