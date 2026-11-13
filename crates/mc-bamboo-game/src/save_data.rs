@@ -156,26 +156,65 @@ pub(crate) fn parse_world_border(tag: &Tag) -> Option<BorderSettings> {
     })
 }
 
-/// 把运行时世界设置写回 `LevelData`（`PrimaryLevelData.createTag` 里会变的那几项）。
-/// `hardcore` 和 `spawn.dimension` 运行时没建模，原样保留读入的值。
-/// Copy runtime world settings back into `LevelData`. `hardcore` and
-/// `spawn.dimension` are not modelled at runtime, so they keep the loaded value.
+/// 把运行时状态写回 `LevelData`，逐字段对应官方
+/// `PrimaryLevelData.setTagData`（`createTag` 的私有实现）读取的运行时字段。
+/// `world_dir` 是这一局真正打开的世界目录，末段就是官方 `level-name`
+/// （`DedicatedServerProperties.levelName` → `LevelSettings.levelName()`）。
+///
+/// Copy runtime state into `LevelData`, field by field, matching what vanilla's
+/// `PrimaryLevelData.setTagData` reads. The last component of `world_dir` is the
+/// official `level-name` (`DedicatedServerProperties.levelName` →
+/// `LevelSettings.levelName()`).
 pub(crate) fn sync_level_data(
     level: &mut LevelData,
     state: &WorldState,
+    world_dir: &std::path::Path,
     time: i64,
     last_played: i64,
 ) {
+    // `settings.levelName()`：世界目录名，Bamboo 由 `level-name` 推出来。
+    if let Some(name) = world_dir.file_name().and_then(|name| name.to_str()) {
+        level.level_name = name.to_owned();
+    }
+    // `settings.gameType()`：新玩家进服时的默认游戏模式。
     level.game_type = state.default_game_mode as i32;
+    // `respawnData`：`GlobalPos` 由 `Level.OVERWORLD` 和出生点组成，yaw/pitch 是运行时值。
+    level.spawn.dimension = mc_bamboo_storage::level_dat::OVERWORLD.to_owned();
     level.spawn.x = state.spawn.pos.x;
     level.spawn.y = state.spawn.pos.y;
     level.spawn.z = state.spawn.pos.z;
     level.spawn.yaw = state.spawn.yaw;
     level.spawn.pitch = state.spawn.pitch;
+    // `settings.difficultySettings()`：hardcore 没有运行时状态，按官方
+    // `createNewWorldData` 的常量 false 写；locked 走 `/difficulty` 的运行态。
     level.difficulty.difficulty = state.difficulty.name().to_owned();
+    level.difficulty.hardcore = false;
     level.difficulty.locked = state.difficulty_locked;
+    // `gameTime` / `Util.getEpochMillis()`。
     level.time = time;
     level.last_played = last_played;
+    // `settings.allowCommands()`：官方专用服务端只在 DEMO 下为 true，
+    // `createNewWorldData` 传常量 false；Bamboo 没有运行时开关，写真值 false。
+    level.allow_commands = false;
+    // `MinecraftServer.loadLevel` 会 `setModdedInfo("vanilla", false)`：
+    // Bamboo 是专用服务端，服务器品牌只有 vanilla，也没被 mod 过。
+    level.server_brands = vec!["vanilla".to_owned()];
+    level.was_modded = false;
+    level.removed_features.clear();
+    // `initialized` 一开局就 true（官方 parse 缺字段时也是 true）；世界已经建好了。
+    level.initialized = true;
+    // `versionHistory`：官方每次写都把当前 DataVersion 追加到末项不同的情况。
+    // 只支持一个版本，所以就是 [DATA_VERSION]。
+    level.version_history = vec![mc_bamboo_data::version::DATA_VERSION];
+    level.data_version = mc_bamboo_data::version::DATA_VERSION;
+    level.version = Default::default();
+    level.format_version = mc_bamboo_storage::level_dat::LEVEL_FORMAT_VERSION;
+    // `WorldDataConfiguration`：DataPackConfig.DEFAULT 与 DEFAULT_FLAGS。
+    // 等于默认对象时 `lenientOptionalFieldOf` 不写 `DataPacks` / `enabled_features`。
+    level.data_packs = None;
+    level.enabled_features = vec!["minecraft:vanilla".to_owned()];
+    // `createTag(null)` 走的是 `singlePlayerUUID`，专用服务端是 null。
+    level.singleplayer_uuid = None;
 }
 
 /// 把启动读到的 `level.dat` 套回运行时世界设置（进服序列和命令都从这里读）。
@@ -330,7 +369,13 @@ mod tests {
             spawn: RespawnData::of(BlockPos::new(100, 70, -200), 45.0, 20.0),
             ..Default::default()
         };
-        sync_level_data(&mut level, &state, 4242, 999);
+        sync_level_data(
+            &mut level,
+            &state,
+            std::path::Path::new("/srv/my-world"),
+            4242,
+            999,
+        );
         assert_eq!(level.game_type, 0);
         assert_eq!(level.time, 4242);
         assert_eq!(level.difficulty.difficulty, "hard");
@@ -345,5 +390,69 @@ mod tests {
         assert_eq!(applied.difficulty, Difficulty::Hard);
         assert!(applied.difficulty_locked);
         assert_eq!(applied.spawn.pos, BlockPos::new(100, 70, -200));
+    }
+
+    /// `setTagData` 的字段都来自运行时的真值，或官方专用服务端的默认值；
+    /// 读入的旧值不会原样带回来。
+    #[test]
+    fn level_dat_fields_come_from_runtime_state_or_official_defaults() {
+        use mc_bamboo_storage::level_dat::{DataPacks, LEVEL_FORMAT_VERSION, OVERWORLD};
+
+        let mut level = LevelData {
+            level_name: "stale name".to_owned(),
+            server_brands: vec!["modded".to_owned()],
+            was_modded: true,
+            removed_features: vec!["minecraft:trade_rebalance".to_owned()],
+            version_history: vec![100, 200],
+            data_version: 1,
+            game_type: 3,
+            allow_commands: true,
+            initialized: false,
+            data_packs: Some(DataPacks {
+                enabled: vec!["bamboo:pack".to_owned()],
+                disabled: Vec::new(),
+            }),
+            enabled_features: vec!["bamboo:feature".to_owned()],
+            singleplayer_uuid: Some([1, 2, 3, 4]),
+            spawn: mc_bamboo_storage::level_dat::SpawnData {
+                dimension: "minecraft:the_end".to_owned(),
+                ..Default::default()
+            },
+            difficulty: mc_bamboo_storage::level_dat::DifficultySettings {
+                difficulty: "peaceful".to_owned(),
+                hardcore: true,
+                locked: false,
+            },
+            ..Default::default()
+        };
+        let state = WorldState::default();
+        sync_level_data(
+            &mut level,
+            &state,
+            std::path::Path::new("/srv/survival"),
+            77,
+            888,
+        );
+
+        assert_eq!(level.level_name, "survival", "LevelName 来自 level-name");
+        assert_eq!(level.game_type, 1, "GameType 来自运行时默认游戏模式");
+        assert_eq!(level.spawn.dimension, OVERWORLD);
+        assert!(!level.difficulty.hardcore, "hardcore 按官方常量 false");
+        assert_eq!(level.time, 77);
+        assert_eq!(level.last_played, 888);
+        assert!(!level.allow_commands, "allowCommands 按官方常量 false");
+        assert!(level.initialized);
+        assert_eq!(level.server_brands, vec!["vanilla".to_owned()]);
+        assert!(!level.was_modded);
+        assert!(level.removed_features.is_empty());
+        assert_eq!(
+            level.version_history,
+            vec![mc_bamboo_data::version::DATA_VERSION]
+        );
+        assert_eq!(level.data_version, mc_bamboo_data::version::DATA_VERSION);
+        assert_eq!(level.format_version, LEVEL_FORMAT_VERSION);
+        assert!(level.data_packs.is_none(), "DataPacks 是官方默认，不写键");
+        assert_eq!(level.enabled_features, vec!["minecraft:vanilla".to_owned()]);
+        assert!(level.singleplayer_uuid.is_none());
     }
 }

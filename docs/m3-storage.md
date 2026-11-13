@@ -802,11 +802,41 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   玩家离开、`/save-all`（force）和关服不受影响。第二次 Ctrl+C / 桌面端第二次停止
   明确记录「未保存的改动会丢」并立刻结束进程。F6 背压只暂缓收回，交付照常。
 
+### `level.dat` 每个字段的来源
+
+逐字段核对 26.3 `PrimaryLevelData.setTagData`（`createTag` 的私有实现）的字节码
+和 `MinecraftServer.loadLevel` / `Main.createNewWorldData`。「运行时真值」指
+Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不再把读盘时的旧值带回来。
+
+| 键 | Bamboo 的来源 |
+|---|---|
+| `ServerBrands` | 运行时真值：`["vanilla"]`（`MinecraftServer.getServerModName()`；Bamboo 是专用服务端） |
+| `WasModded` | 运行时真值 `false`（`ModCheck.shouldReportAsModified()`） |
+| `removed_features` | 运行时真值：空集合，官方空时不写这个键 |
+| `Version` | 官方 `SharedConstants.getCurrentVersion()`；`mc_bamboo_data::version` 生成器导出 |
+| `version_history` | 运行时真值 `[5023]`（`writeVersionHistory` 只在末项不是当前版本时追加） |
+| `DataVersion` | 官方 `NbtUtils.addCurrentDataVersion`；生成器导出 5023 |
+| `GameType` | 运行时真值 `WorldState.default_game_mode` |
+| `spawn` | 运行时真值 `WorldState.spawn`，维度固定 `minecraft:overworld` |
+| `Time` | 运行时真值 `Global::time()` |
+| `LastPlayed` | 运行时真值 `Util.getEpochMillis()`（保存时取） |
+| `LevelName` | 运行时真值：世界目录名，即 `server.properties` 的 `level-name` |
+| `version` | 官方常量 19133 |
+| `allowCommands` | 官方 `createNewWorldData` 常量 `false`（DEMO 才为 true）；Bamboo 没有运行时开关 |
+| `initialized` | 运行时真值 `true`（世界已经建好；官方 parse 缺字段时也默认 true） |
+| `difficulty_settings` | 运行时真值 `difficulty` / `locked`；`hardcore` 按官方常量 `false` |
+| `singleplayer_uuid` | 官方 `createTag(null)` 走 `singlePlayerUUID == null`，专用服务端不写 |
+| `DataPacks` | 官方 `DataPackConfig.DEFAULT`（`Enabled=["vanilla"]`, `Disabled=[]`）；等于默认时 `lenientOptionalFieldOf` 不写键 |
+| `enabled_features` | 官方 `FeatureFlags.DEFAULT_FLAGS` = `["minecraft:vanilla"]`；等于默认时不写键 |
+
+`hardcore` / `allowCommands` / `DataPacks` / `enabled_features` 这几项 Bamboo 没有
+运行时状态，按官方专用服务端默认写；`ServerBrands` / `WasModded` /
+`removed_features` / `initialized` / `version_history` 每次保存都写真值，不再沿用
+读盘时的原值。
+
 ### 已知但没处理的（以后再看）
 
 - 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
-- `level.dat` 里 `LevelName`、`allowCommands`、`DataPacks` 等字段写的是默认值或读入时
-  的原值，不是运行时的真值。
 - 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
 - `has_chunk` 扫描盘上已有区块时不认 `.mcc` 外置大区块；`Status` 不是 `full` 的区块
   当成坏块，用模板。

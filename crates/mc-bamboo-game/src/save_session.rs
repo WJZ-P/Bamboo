@@ -165,6 +165,7 @@ impl SaveSession {
         crate::save_data::sync_level_data(
             &mut self.level,
             global.state(),
+            self.dir.root(),
             global.time().0,
             last_played,
         );
