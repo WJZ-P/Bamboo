@@ -407,6 +407,8 @@ pub(crate) fn collect_block_collisions(
 
 impl<'a> World<'a> {
     pub fn new(level: &'a mut dyn Level, ticks: &'a mut BlockTicks) -> Self {
+        // 睡着的实体按公式现算数值时要知道现在是哪一刻。
+        crate::block_entity::set_block_entity_clock(ticks.now());
         Self {
             level,
             ticks,
@@ -800,6 +802,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
     ) -> bool {
+        self.level.wake_block_entity(pos);
         // 官方 `RandomizableContainerBlockEntity.getItem/removeItem/setItem/isEmpty`
         // 都先 `unpackLootTable(null)`；漏斗、投掷器和发射器走这条路。双箱两半
         // 合成一张 `CompoundContainer`，两半都要解包。
@@ -836,6 +839,7 @@ impl<'a> World<'a> {
         len: usize,
         f: &mut dyn FnMut(&mut [mc_bamboo_protocol::item::ItemStack]),
     ) -> bool {
+        self.level.wake_block_entity(pos);
         // 陶罐的 `getTheItem/splitTheItem/setTheItem` 和漏斗/比较器读这一格都解包。
         // A decorated pot's `getTheItem/splitTheItem/setTheItem`, hoppers and comparators
         // all unpack the table before touching its single slot.
@@ -866,6 +870,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: &mut dyn FnMut(&mut crate::hopper::HopperEntity),
     ) -> bool {
+        self.level.wake_block_entity(pos);
         self.level.with_hopper(pos, f)
     }
 
@@ -873,6 +878,7 @@ impl<'a> World<'a> {
     /// 只打一条警告，说明有地方放错了。
     pub fn set_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
         let pos = entity.pos();
+        self.level.wake_block_entity(pos);
         let state = self.block_state(pos);
         if !state.has_block_entity() {
             warn!(
@@ -889,6 +895,7 @@ impl<'a> World<'a> {
 
     /// `Level.removeBlockEntity`。
     pub fn remove_block_entity(&mut self, pos: BlockPos) {
+        self.level.wake_block_entity(pos);
         let _ = self.level.remove_block_entity(pos);
     }
 
@@ -905,6 +912,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
+        self.level.wake_block_entity(pos);
         let (id, mut entity) = self.level.take_block_entity_at(pos)?;
         self.begin_held_reads();
         let result = entity
@@ -1000,7 +1008,8 @@ impl<'a> World<'a> {
     /// is put back and before the next ticker. The order does not change. The block oracle skips
     /// furnaces and brewing stands.
     pub fn tick_block_entities(&mut self) {
-        self.level.begin_block_entity_tick();
+        let now = self.ticks.now();
+        self.level.begin_block_entity_tick(now);
         while let Some((pos, id)) = self.level.next_block_entity_ticker() {
             // 官方先判 `shouldTickBlocksAt(pos)`，再判 `LevelChunk.isTicking(pos)`；
             // 跳过的 ticker 留在列表里，运行顺序不变。
@@ -1017,6 +1026,9 @@ impl<'a> World<'a> {
                 kind: self.block_state(pos).block_id(),
             });
             self.run_taken_block_entity(pos, id, entity);
+            // 一次 tick 跑完后按实体自己的公式算下一次真正需要跑的时刻。
+            let wake = self.level.block_entity_sleep_from(pos, now);
+            self.level.schedule_block_entity_wake(pos, wake);
             self.level.observe(Observation::TriggerEnd);
         }
         self.level.end_block_entity_tick();
@@ -1363,15 +1375,22 @@ impl<'a> World<'a> {
     }
 
     pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
-        self.level.set_crafter_crafting(pos, remaining);
+        self.level
+            .set_crafter_crafting(pos, remaining, self.ticks.now());
     }
 
     pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        self.level.take_crafter_crafting()
+        self.level.take_crafter_crafting(self.ticks.now())
+    }
+
+    /// 这一刻到期的合成器倒计时，见 `LevelSideState::take_due_crafter_crafting`。
+    pub fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
+        self.level.take_due_crafter_crafting(now)
     }
 
     pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
-        self.level.restore_crafter_crafting(entries);
+        self.level
+            .restore_crafter_crafting(entries, self.ticks.now());
     }
 
     pub fn forget_block_entity_memory(&mut self, pos: BlockPos) {
@@ -1565,6 +1584,7 @@ impl<'a> World<'a> {
         state: BlockState,
         flags: u32,
     ) -> Option<BlockState> {
+        self.level.wake_block_entity(pos);
         let old = self.block_state(pos);
         if old == state {
             return None;

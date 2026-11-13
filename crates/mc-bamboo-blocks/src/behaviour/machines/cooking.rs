@@ -19,7 +19,7 @@ use mc_bamboo_recipes::{
 };
 
 use crate::{
-    block_entity::{BlockEntity, drop_item_stack},
+    block_entity::{BlockEntity, block_entity_clock, drop_item_stack},
     state::{BlockState, LIT},
     world::World,
 };
@@ -61,6 +61,20 @@ pub struct FurnaceEntity {
     recipes_used: Vec<(&'static str, i32)>,
     /// 官方 `quickCheck` 缓存的上一份配方。
     last_recipe: Option<&'static Recipe>,
+    /// 一段没有可见事件的安静刻：`since` 之后每刻只按 `lit_step` / `cook_step`
+    /// 线性推进两个数值，直到 `wake_at` 那一刻必须真跑 `server_tick`。
+    sleep: Option<Sleep>,
+}
+
+/// 熔炉安静刻的线性公式。数值在 `since` 那一刻已经是真跑完的值。
+///
+/// `cook_step` 为 -2 时按官方 `Mth.clamp(timer - 2 * steps, 0, cooking_total_time)` 算。
+#[derive(Clone, Copy)]
+struct Sleep {
+    since: i64,
+    wake_at: i64,
+    lit_step: i32,
+    cook_step: i32,
 }
 
 impl FurnaceEntity {
@@ -77,6 +91,7 @@ impl FurnaceEntity {
             speed_multiplier: 1.0,
             recipes_used: Vec::new(),
             last_recipe: None,
+            sleep: None,
         }
     }
 
@@ -108,13 +123,51 @@ impl FurnaceEntity {
     /// 官方 `ContainerData.get`：`0` 剩余燃烧时间、`1` 总燃烧时间、
     /// `2` 烹饪进度、`3` 总烹饪时间。
     pub fn data(&self, id: usize) -> i32 {
+        let (lit, timer, total) = self.values_at(block_entity_clock());
         match id {
-            0 => self.lit_time_remaining,
+            0 => lit,
             1 => self.lit_total_time,
-            2 => self.cooking_timer,
-            3 => self.cooking_total_time,
+            2 => timer,
+            3 => total,
             _ => 0,
         }
+    }
+
+    /// 把安静刻的线性推进按公式算到 `now`，不改实体本身。
+    /// 只用于 `&self` 的只读访问；到点那一刻的值由真正跑 `server_tick` 给出。
+    fn values_at(&self, now: i64) -> (i32, i32, i32) {
+        let Some(sleep) = self.sleep else {
+            return (
+                self.lit_time_remaining,
+                self.cooking_timer,
+                self.cooking_total_time,
+            );
+        };
+        // 读发生在方块实体阶段之后，官方在 `now` 这一刻也跑过一次，所以要把
+        // `now` 的线性增量算进去。到点那一刻会先真跑 `server_tick` 再重新登记，
+        // 因此读路径不会看到 `now >= wake_at` 的旧睡眠。
+        let steps = now - sleep.since;
+        if steps <= 0 {
+            return (
+                self.lit_time_remaining,
+                self.cooking_timer,
+                self.cooking_total_time,
+            );
+        }
+        let steps = i32::try_from(steps).unwrap_or(i32::MAX);
+        let lit = self
+            .lit_time_remaining
+            .saturating_add(sleep.lit_step.saturating_mul(steps));
+        let timer = if sleep.cook_step < 0 {
+            self.cooking_timer
+                .saturating_sub((-sleep.cook_step).saturating_mul(steps))
+                .clamp(0, self.cooking_total_time)
+        } else {
+            self.cooking_timer
+                .saturating_add(sleep.cook_step.saturating_mul(steps))
+                .clamp(0, self.cooking_total_time)
+        };
+        (lit, timer, self.cooking_total_time)
     }
 
     /// 菜单读到的全部数据槽，官方 `AbstractFurnaceMenu.addDataSlots`。
@@ -132,6 +185,7 @@ impl FurnaceEntity {
 
     /// 存档读回时直接写官方的五个数值槽，不重算配方缓存。
     pub fn set_archive_values(&mut self, speed: f32, recipes_used: Vec<(&'static str, i32)>) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         self.speed_multiplier = speed;
         self.recipes_used = recipes_used;
         self.last_recipe = None;
@@ -146,6 +200,7 @@ impl FurnaceEntity {
     ///
     /// Vanilla `ContainerData.set`. Loading and menu data writes use this and do not go through `setItem`.
     pub fn set_data(&mut self, id: usize, value: i32) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         match id {
             0 => self.lit_time_remaining = value,
             1 => self.lit_total_time = value,
@@ -160,6 +215,7 @@ impl FurnaceEntity {
     ///
     /// 原料格换了内容时重算总烹饪时间并把进度归零。菜单点击也走这里。
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         let old = self.items[slot].clone();
         let same = !stack.is_empty() && same_item_same_components(&old, &stack);
         let mut stack = stack;
@@ -178,6 +234,7 @@ impl FurnaceEntity {
     ///
     /// Writes a slot without `setItem`. `removeItem` and in-place count edits do not recompute cook time.
     pub fn write_item(&mut self, slot: usize, stack: ItemStack) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         self.items[slot] = if stack.is_empty() {
             ItemStack::empty()
         } else {
@@ -187,6 +244,7 @@ impl FurnaceEntity {
 
     /// 官方 `Container.removeItem`：拿走一格里的几个。它不经过 `setItem`。
     pub fn remove_item(&mut self, slot: usize, amount: i32) -> ItemStack {
+        self.materialize(block_entity_clock().saturating_sub(1));
         let current = &self.items[slot];
         if current.is_empty() || amount <= 0 {
             return ItemStack::empty();
@@ -330,6 +388,7 @@ impl FurnaceEntity {
     /// 经验球不存在，但 `createExperience` 的 `nextFloat` 和
     /// `ExperienceOrb.award` 每次迭代的 `nextInt(40)` 都照抽。
     pub fn award_experience(&mut self, world: &mut World) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         let used = std::mem::take(&mut self.recipes_used);
         for (id, count) in used {
             let Some(recipe) = RecipeManager::global().recipe(id) else {
@@ -344,6 +403,9 @@ impl FurnaceEntity {
 
     /// 官方 `serverTick`。
     pub fn server_tick(&mut self, world: &mut World) {
+        let now = block_entity_clock();
+        self.materialize(now.saturating_sub(1));
+        self.sleep = None;
         // 官方 `serverTick` 的 `changed`：只有燃料、成品或 `lit` 变了才 `setChanged`。
         //
         // Vanilla `serverTick`'s `changed`: `setChanged` runs only when fuel, the result, or `lit` changes.
@@ -423,6 +485,13 @@ impl FurnaceEntity {
         if was_lit != is_lit {
             changed = true;
             let state = world.block_state(self.pos);
+            // 官方无条件 `setBlockAndUpdate(pos, state.setValue(LIT, isLit))`。
+            // `LevelChunk.setBlockState` 在新旧状态相同时直接返回 null，`Level.setBlock`
+            // 随后也直接返回，不发任何更新；这里提前判一次和它等价。
+            //
+            // Vanilla calls `setBlockAndUpdate` unconditionally. `LevelChunk.setBlockState`
+            // returns null when the state is unchanged, and `Level.setBlock` then returns
+            // without any update, so this guard is equivalent.
             if state.get(LIT) != is_lit {
                 world.set_block_and_update(self.pos, state.with(LIT, is_lit));
             }
@@ -435,6 +504,76 @@ impl FurnaceEntity {
         // or `lit` changes. Incrementing `cookingTimer` alone does not.
         if changed {
             crate::machine_container::mark_container_changed(world, self.pos);
+        }
+        let _ = now;
+    }
+
+    /// 一次 `server_tick` 之后，把安静刻的线性公式记下来。
+    ///
+    /// 官方 `serverTick` 的安静刻只有两种：点着火且有原料、有配方、结果格放得下时
+    /// `litTimeRemaining` 每刻 -1、`cookingTimer` 每刻 +1；熄火且进度 > 0 时每刻 -2
+    /// （clamp 到 0）。其余分支要么不改数值、要么会查配方/点火，都照常每刻跑。
+    ///
+    /// 到点取 `min(这一物品烧完, 燃料烧完)`。燃料烧完那刻若还有燃料/原料，官方会点火
+    /// 消耗燃料（余料掉落取世界随机数）；没有就熄火改 `LIT` 方块状态。两种都必须在
+    /// 原刻原位置真跑，所以日程不能跨过它。
+    fn arm_sleep(&mut self, now: i64) {
+        let has_input = !self.items[SLOT_INPUT].is_empty();
+        let is_lit = self.lit_time_remaining > 0;
+        self.sleep = None;
+
+        if is_lit && has_input {
+            // 查配方和结果格都不读世界，只用静态配方表和三格物品。
+            let recipe = RecipeManager::global().get_recipe_for(
+                self.recipe_type(),
+                &self.items[SLOT_INPUT],
+                self.last_recipe,
+            );
+            let Some(recipe) = recipe else {
+                return;
+            };
+            let burn_result = assemble(recipe, std::slice::from_ref(&self.items[SLOT_INPUT]))
+                .filter(|stack| !stack.is_empty());
+            if !burn_result.is_some_and(|result| self.can_burn(&result)) {
+                return;
+            }
+            let cook_left = i64::from((self.cooking_total_time - self.cooking_timer).max(1));
+            let fuel_left = i64::from(self.lit_time_remaining.max(1));
+            self.sleep = Some(Sleep {
+                since: now,
+                wake_at: now.saturating_add(cook_left.min(fuel_left)),
+                lit_step: -1,
+                cook_step: 1,
+            });
+            return;
+        }
+
+        if is_lit && !has_input {
+            // 点着火但没有原料：官方每刻只把 `cookingTimer` 归零（已经是 0），
+            // 燃料每刻 -1。到燃料烧完那刻才要真跑（可能点火或熄火）。
+            self.sleep = Some(Sleep {
+                since: now,
+                wake_at: now.saturating_add(i64::from(self.lit_time_remaining.max(1))),
+                lit_step: -1,
+                cook_step: 0,
+            });
+            return;
+        }
+
+        if !is_lit && !has_input {
+            // 熄火且没有原料：官方 `isLit || hasFuel && hasIngredient` 为假，只把进度
+            // 每刻 -2（clamp 到 0）；燃料格有没有东西都不消耗。进度到 0 之后每刻
+            // 仍跑一次但没有可见效果，睡到外部叫醒。
+            self.sleep = Some(Sleep {
+                since: now,
+                wake_at: i64::MAX,
+                lit_step: 0,
+                cook_step: if self.cooking_timer > 0 {
+                    -BURN_COOL_SPEED
+                } else {
+                    0
+                },
+            });
         }
     }
 }
@@ -494,20 +633,67 @@ impl BlockEntity for FurnaceEntity {
         self
     }
 
+    fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        self.arm_sleep(now);
+        self.sleep.map(|sleep| sleep.wake_at)
+    }
+
+    /// 把数值按公式算到「第 `tick` 刻结束时」，并结束这段睡眠。
+    /// `server_tick` 在 `now` 这一刻真跑之前用 `now - 1`，好让这一刻的增量由
+    /// `server_tick` 自己加；已经在游标前跑过的实体用 `now`。
+    fn materialize(&mut self, tick: i64) {
+        let Some(sleep) = self.sleep.take() else {
+            return;
+        };
+        let steps = tick.min(sleep.wake_at.saturating_sub(1)) - sleep.since;
+        if steps <= 0 {
+            return;
+        }
+        let steps = i32::try_from(steps).unwrap_or(i32::MAX);
+        self.lit_time_remaining = self
+            .lit_time_remaining
+            .saturating_add(sleep.lit_step.saturating_mul(steps))
+            .max(0);
+        if sleep.cook_step < 0 {
+            self.cooking_timer = self
+                .cooking_timer
+                .saturating_sub((-sleep.cook_step).saturating_mul(steps))
+                .clamp(0, self.cooking_total_time);
+        } else {
+            self.cooking_timer = self
+                .cooking_timer
+                .saturating_add(sleep.cook_step.saturating_mul(steps))
+                .clamp(0, self.cooking_total_time);
+        }
+    }
+
+    fn resleep(&mut self, since: i64, wake_at: i64) {
+        // 数值已经在装盒时按公式算到源表的最后一刻；目标表的时钟从这一刻起算。
+        self.sleep = Some(Sleep {
+            since,
+            wake_at,
+            lit_step: if self.lit_time_remaining > 0 { -1 } else { 0 },
+            cook_step: if self.lit_time_remaining > 0 && !self.items[SLOT_INPUT].is_empty() {
+                1
+            } else if self.cooking_timer > 0 {
+                -BURN_COOL_SPEED
+            } else {
+                0
+            },
+        });
+    }
+
     fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
         use crate::archive::tag::put;
         let mut out = Vec::new();
-        put(&mut out, "cooking_time_spent", Tag::Int(self.cooking_timer));
+        let (lit, timer, _) = self.values_at(block_entity_clock());
+        put(&mut out, "cooking_time_spent", Tag::Int(timer));
         put(
             &mut out,
             "cooking_total_time",
             Tag::Int(self.cooking_total_time),
         );
-        put(
-            &mut out,
-            "lit_time_remaining",
-            Tag::Int(self.lit_time_remaining),
-        );
+        put(&mut out, "lit_time_remaining", Tag::Int(lit));
         put(&mut out, "lit_total_time", Tag::Int(self.lit_total_time));
         put(
             &mut out,

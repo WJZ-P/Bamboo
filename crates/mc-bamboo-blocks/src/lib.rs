@@ -45,6 +45,9 @@ pub mod world;
 pub mod world_border;
 
 #[cfg(test)]
+mod block_entity_sleep;
+
+#[cfg(test)]
 mod testing;
 
 pub use behaviour::Behaviour;

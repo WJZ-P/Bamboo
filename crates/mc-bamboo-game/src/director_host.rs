@@ -677,7 +677,7 @@ mod tests {
             ),
         );
         // 方块实体正在 tick 中途：`deliver_column` 的只读前提不满足。
-        region.block_entities.begin_tick();
+        region.block_entities.begin_tick(0);
         assert!(!region.ready_to_move_columns(), "前提确实不满足");
 
         let first = host.flush_region_mail(region);
