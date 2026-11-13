@@ -675,14 +675,21 @@ fn dense_window_matches_brute_force_when_forced() {
 ///
 /// 传播改法只要让某一步的某个区块差一级、或者变化列表多/少一项，这里就会停在那一步。
 /// 视距和模拟距离也随机变，覆盖方环、`replaceTicketLevelOfType` 和多玩家引用计数。
+/// 长随机参照测试用的种子；强制走快路径的一版用同一组种子，方便逐位对照。
+const LONG_RANDOM_SEEDS: &[u64] = &[
+    0x5150_0a5a_1234_5678,
+    0xfeed_face_dead_beef,
+    0x9e37_79b9_7f4a_7c15,
+    0x0bad_c0de_0000_0026u64,
+    0xaaaa_bbbb_cccc_dddd,
+    0x1111_2222_3333_4444,
+    0xdead_0000_beef_ffff,
+    0x0000_0000_0000_0001,
+];
+
 #[test]
 fn long_random_sequence_matches_full_fixed_point() {
-    long_random_sequence_with_seeds(&[
-        0x5150_0a5a_1234_5678,
-        0xfeed_face_dead_beef,
-        0x9e37_79b9_7f4a_7c15,
-        0x0bad_c0de_0000_0026u64,
-    ]);
+    long_random_sequence_with_seeds(LONG_RANDOM_SEEDS);
 }
 
 /// 强制稠密窗口快路径下的长随机序列：每步把全部等级和变化列表对一遍暴力不动点。
@@ -690,12 +697,7 @@ fn long_random_sequence_matches_full_fixed_point() {
 fn dense_window_long_random_matches_full_fixed_point() {
     let _guard = TicketTable::force_dense(true);
     // 视距和模拟距离随机变化会撑出大窗口，这里覆盖到窗口边界、负坐标和多源重叠。
-    long_random_sequence_with_seeds(&[
-        0x5150_0a5a_1234_5678,
-        0xfeed_face_dead_beef,
-        0x9e37_79b9_7f4a_7c15,
-        0x0bad_c0de_0000_0026u64,
-    ]);
+    long_random_sequence_with_seeds(LONG_RANDOM_SEEDS);
 }
 
 fn long_random_sequence_with_seeds(seeds: &[u64]) {
