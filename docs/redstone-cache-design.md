@@ -527,6 +527,7 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
 | ticker 驱动的临时拿放、insert 侧的实体内容是「果」不是「因」，不进运行时守卫 | `recording::read_entity_driver`（实验 `Record` 仍照旧记两笔，历史数字不变） |
 | 方块实体 tick 接进缓存驱动，游戏循环该段也走 `run_block_entity_tick_with_cache` | `World::tick_block_entities_cached`、`interact.rs`、`mc-bamboo-game::interaction` |
 | 重放还原 tick 后实体状态但保留 ticker 编号和顺序 | `BlockEntities::replace_in_place`、`Observation::PistonTickState` |
+| 没有 tick 后实体状态可还原的 ticker（熔炉、漏斗、活塞 `finalTick`）不进缓存 | `recording::finish_record` 的 `piston_tick_replayable` 检查 |
 
 **关键的两处正确性细节**：守卫阶段实体还在表里，驱动先抄下触发前的实体可观察状态
 （`TakenEntityFacts`）再取出，避免把「解释执行后的状态」误当成输入；重放不跑方块逻辑，
@@ -535,8 +536,9 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
 `seed: None` 音效才放行，别的对外效果一律作废记录。
 
 **验收**：`cache_diff 4000`（正式与 `immediate`）九台全部 **0 刻不一致**；
-`immediate` 下活塞门 702 次触发、25 条记录、48 次重放，`cache_diff` 现在会断言
-活塞门在 `immediate` 下确实重放过（防止白名单悄悄退回解释）；
+`immediate` 下活塞门 702 次触发、19 条记录、48 次重放（其余 200 次是移除自身
+实体的 `finalTick` 或没有可还原实体状态的 ticker，已明确退回解释，见下），
+`cache_diff` 现在会断言活塞门在 `immediate` 下确实重放过（防止白名单悄悄退回解释）；
 `oracle java --only piston --weather clear` 开、关都是 10028 cases / 0 fail
 （开的那次 10009 triggers / 125 replays）；
 `oracle java --weather clear` 开、关都是 **10114 / 0 fail**；
