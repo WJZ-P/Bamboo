@@ -1654,8 +1654,10 @@ impl Level for Recording<'_> {
     }
 
     fn unpack_loot_table(&mut self, pos: BlockPos) {
+        // 实验 `Record` 的读项恒为 0（历史命中率数字不变）；运行时守卫另用
+        // 只读的 `loot_table_pending` 重算「这一格还有没有待解包的表」。
         let pending = self.level.loot_table_pending(pos);
-        self.read(Some(pos), K_LOOT_UNPACK, pending);
+        self.read(Some(pos), K_LOOT_UNPACK, 0_u8);
         self.guarded_read(ReadMethod::LootUnpack(pos), Some(pos), pending);
         self.runtime_effect(ReplayEffect::UnpackLootTable { pos });
         self.level.unpack_loot_table(pos);
