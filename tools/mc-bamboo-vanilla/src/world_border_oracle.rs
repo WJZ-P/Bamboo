@@ -3,6 +3,8 @@
 //! `WorldBorderOracle.java` 在 JVM 里直接调官方类，不启动服务端：随机的中心、大小、绝对
 //! 最大值和渐变，配上随机点，逐项给出距离、`isWithinBounds` 的几种重载、`clampToBounds`、
 //! `isInsideCloseToBorder`、`Shapes.collide` 的结果、逐刻渐变后的状态和六个包的官方编码。
+//! 逐刻渐变时还给出四条边两侧方块的 `isWithinBounds(BlockPos)`（`LevelChunk.isTicking`
+//! 的边界判断），和方块实体阶段用的整数方块盒逐格比较。
 //! 这里用同一组输入重放 `mc_bamboo_blocks::world_border`，逐位比较。
 //!
 //! Check Bamboo's border maths, lerp and six packets against vanilla 26.3 `WorldBorder`.
@@ -357,6 +359,17 @@ fn check_case(report: &mut Report, case: &Value) -> Result<(), String> {
             &step["clamp_x"],
             f64::from(far.x),
         );
+        // 方块实体阶段用的整数方块盒，和官方 `isWithinBounds(BlockPos)` 逐格比较。
+        let block_box = border.block_box();
+        for entry in array(step, "ticking_blocks")? {
+            let pos = BlockPos::new(integer(entry, "x")?, 64, integer(entry, "z")?);
+            report.flag(
+                index,
+                &format!("block entity ticks at {} {} after tick", pos.x, pos.z),
+                &entry["inside"],
+                block_box.contains(pos),
+            );
+        }
     }
     Ok(())
 }

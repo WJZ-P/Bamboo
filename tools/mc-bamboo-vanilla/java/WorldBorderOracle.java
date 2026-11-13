@@ -282,6 +282,20 @@ public final class WorldBorderOracle {
             state.addProperty("max_z", border.getMaxZ());
             state.addProperty("status", border.getStatus().name());
             state.addProperty("clamp_x", (double) border.clampToBounds(new Vec3(centerX + 1.0e9, 64.0, centerZ)).getX());
+            // `LevelChunk.isTicking(pos)` 的第一条：方块实体按这一刻的边界看自己的方块坐标。
+            // 取四条边两侧各两格的方块，渐变中每一刻都比。
+            //
+            // The first clause of `LevelChunk.isTicking(pos)`: a block entity checks its own
+            // block position against this tick's border. Blocks two either side of each edge.
+            JsonArray ticking = new JsonArray();
+            for (BlockPos block : edgeBlocks(border)) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("x", block.getX());
+                entry.addProperty("z", block.getZ());
+                entry.addProperty("inside", border.isWithinBounds(block));
+                ticking.add(entry);
+            }
+            state.add("ticking_blocks", ticking);
             steps.add(state);
         }
         root.add("steps", steps);
@@ -328,6 +342,26 @@ public final class WorldBorderOracle {
             text.append(String.format(Locale.ROOT, "%02x", value & 0xff));
         }
         return text.toString();
+    }
+
+    /** 四条边两侧各两格的方块坐标，另一轴取边界中心所在的方块。 */
+    private static List<BlockPos> edgeBlocks(WorldBorder border) {
+        int midX = (int) Math.floor(border.getCenterX());
+        int midZ = (int) Math.floor(border.getCenterZ());
+        java.util.ArrayList<BlockPos> out = new java.util.ArrayList<>();
+        for (double edge : new double[] {border.getMinX(), border.getMaxX()}) {
+            int base = (int) Math.floor(edge);
+            for (int dx = -2; dx <= 2; dx++) {
+                out.add(new BlockPos(base + dx, 64, midZ));
+            }
+        }
+        for (double edge : new double[] {border.getMinZ(), border.getMaxZ()}) {
+            int base = (int) Math.floor(edge);
+            for (int dz = -2; dz <= 2; dz++) {
+                out.add(new BlockPos(midX, 64, base + dz));
+            }
+        }
+        return out;
     }
 
     /** 在 X 或 Z 的一条边界附近取点，偏移不超过 8 格。 */
