@@ -2033,7 +2033,16 @@ fn finish_record(mut frame: Frame) -> (Record, RuntimeRecord) {
                 )
             })
             .count();
+    // 方块实体 tick 的重放必须按 `RestorePistonMoving` 还原 tick 后的实体状态；
+    // 没有这条效果（非移动活塞、或者实体被删了）就退回解释，别放它进缓存。
+    let piston_tick_replayable = !matches!(trigger, Trigger::BlockEntityTick { .. })
+        || frame
+            .runtime
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ReplayEffect::RestorePistonMoving { .. }));
     let rejected = frame.runtime.rejected
+        || !piston_tick_replayable
         || reads.len().saturating_sub(1) != expected_guards
         || frame
             .record
