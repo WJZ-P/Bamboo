@@ -27,6 +27,7 @@ use crate::{
     },
     noise::{BLENDED_NOISE_SEED, Noise, SimplexNoise},
     random::{PositionalFactory, Random},
+    volume::Volume,
 };
 
 /// 官方 `nether/temperature` 噪声的 ID，它走老的下界 fbm。
@@ -41,51 +42,100 @@ pub enum Path {
     Volume,
 }
 
-/// `SamplerContext` 里 `cache` 用的那一格。
+/// `SamplerContext.CacheCell`：`cache` 用的那一格。
 ///
-/// 两条路径各记一格。官方的 `CacheCell` 也是分开的两组字段（`valueKey`/`value` 是单点，
-/// `volume`/`buffer` 是成批），不能混用：两条路径的结果最后一位可能不同。
-#[derive(Debug, Clone, Copy)]
+/// 单点求值记一个位置和值（`valueKey`/`value`），成批求值记最后一块体积和它的缓冲。
+/// 单点求值没命中位置时还会去缓冲里找：位置正好落在上一块体积的格点上，就直接读成批算出来的值。
+/// 两条路径的结果最后一位可能不同，所以「上一次成批算过哪块体积」会影响之后单点求值的结果，
+/// 区块生成要和官方逐位一致就得照搬这个行为。
+#[derive(Debug, Clone)]
 struct CacheCell {
-    point: Option<((i32, i32, i32), f32)>,
-    volume: Option<((i32, i32, i32), f32)>,
+    value_key: i64,
+    value: f32,
+    volume: Option<Volume>,
+    buffer: Vec<f32>,
 }
 
-/// 一次求值的上下文：只有 `cache` 的记忆。
+impl CacheCell {
+    const fn empty() -> Self {
+        Self {
+            value_key: 0,
+            value: f32::NAN,
+            volume: None,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+/// `SamplerContext`：一次求值的上下文，`cache` 的格子和临时缓冲都在这里。
 ///
-/// 官方的键是 `BlockPos.asLong`，坐标超出 ±33554432 或者 y 超出 ±2048 时会撞车；
-/// 这里用三个坐标本身当键，撞不了。官方不带缓存的那条路径（`sampleBlockValueUncached`）
-/// 算出来的也是这个值，`cache` 本来就是纯函数的记忆。
+/// 官方有两种：`EMPTY_UNCACHED`（`sampleBlockValueUncached` 和对拍用，`cache` 不记忆）和
+/// `enableCaches()` 的（区块生成用，每个区块一个）。前者是 [`Context::uncached`]，后者是
+/// [`Context::new`]。
 #[derive(Debug, Default)]
 pub struct Context {
+    caching: bool,
     cells: Vec<CacheCell>,
+    /// 用完的临时缓冲，下次接着用，省掉反复分配。
+    pool: Vec<Vec<f32>>,
 }
 
-/// 空的那一格。
-const EMPTY_CELL: CacheCell = CacheCell {
-    point: None,
-    volume: None,
-};
-
 impl Context {
+    /// 开了缓存的上下文，和官方 `SamplerContext.builder().enableCaches()` 一样。
     pub fn new(cache_count: usize) -> Self {
         Self {
-            cells: vec![EMPTY_CELL; cache_count],
+            caching: true,
+            cells: vec![CacheCell::empty(); cache_count],
+            pool: Vec::new(),
         }
     }
 
-    /// `SamplerContext.getCacheCell`：格子不够就长出来。
-    fn cell(&mut self, id: usize) -> &mut CacheCell {
-        if id >= self.cells.len() {
-            self.cells.resize(id + 1, EMPTY_CELL);
+    /// 不记忆的上下文，官方的 `SamplerContext.EMPTY_UNCACHED`。
+    pub fn uncached() -> Self {
+        Self::default()
+    }
+
+    /// `SamplerContext.getCacheCell`：格子不够就长出来，没开缓存时没有格子。
+    fn cell(&mut self, id: usize) -> Option<&mut CacheCell> {
+        if !self.caching {
+            return None;
         }
-        &mut self.cells[id]
+        if id >= self.cells.len() {
+            self.cells.resize(id + 1, CacheCell::empty());
+        }
+        Some(&mut self.cells[id])
     }
 
     /// 清掉记忆，换一个种子或者重新开始时用。
     pub fn reset(&mut self) {
-        self.cells.fill(EMPTY_CELL);
+        for cell in &mut self.cells {
+            let buffer = std::mem::take(&mut cell.buffer);
+            if buffer.capacity() > 0 {
+                self.pool.push(buffer);
+            }
+            *cell = CacheCell::empty();
+        }
     }
+
+    /// `acquireBuffer(volume)`：一块够大的临时缓冲。内容不保证，调用方自己填满。
+    pub fn acquire(&mut self, len: usize) -> Vec<f32> {
+        let mut buffer = self.pool.pop().unwrap_or_default();
+        buffer.clear();
+        buffer.resize(len, 0.0);
+        buffer
+    }
+
+    /// 还回一块临时缓冲。
+    pub fn release(&mut self, buffer: Vec<f32>) {
+        self.pool.push(buffer);
+    }
+}
+
+/// `BlockPos.asLong`：x、z 各 26 位，y 12 位，官方 `cache` 的单点键就是它。
+pub fn block_pos_as_long(x: i32, y: i32, z: i32) -> i64 {
+    const XZ_MASK: i64 = (1 << 26) - 1;
+    const Y_MASK: i64 = (1 << 12) - 1;
+    ((i64::from(x) & XZ_MASK) << 38) | (i64::from(y) & Y_MASK) | ((i64::from(z) & XZ_MASK) << 12)
 }
 
 /// 官方的 `DensitySampler`，一个变体对应官方一个采样器类。
@@ -342,23 +392,33 @@ pub enum Sampler {
 }
 
 impl Sampler {
-    /// 官方的 `sampleValue` / `sampleVolume`，看 `path`。
+    /// 按 `path` 选官方的 `sampleValue` 或者 `sampleVolume`。
+    ///
+    /// [`Path::Volume`] 是在只有这一个点的体积上调 `sampleVolume`，和对拍里官方的做法一样。
     pub fn sample(&self, context: &mut Context, path: Path, x: i32, y: i32, z: i32) -> f32 {
+        match path {
+            Path::Point => self.sample_value(context, x, y, z),
+            Path::Volume => {
+                let mut out = [0.0_f32];
+                self.sample_volume(context, &mut out, &Volume::point(x, y, z));
+                out[0]
+            }
+        }
+    }
+
+    /// 官方的 `sampleValue`：单点求值。
+    pub fn sample_value(&self, context: &mut Context, x: i32, y: i32, z: i32) -> f32 {
         match self {
             Self::Constant(value) => *value,
             Self::Noise {
                 noise,
                 xz_scale,
                 y_scale,
-            } => match path {
-                Path::Point => noise.get(
-                    f64::from(x) * xz_scale,
-                    f64::from(y) * y_scale,
-                    f64::from(z) * xz_scale,
-                ),
-                // 官方先把缓冲清成 0 再 addToVolume，振幅是 1。
-                Path::Volume => noise.add_to_point((x, y, z), *xz_scale, *y_scale, 1.0),
-            },
+            } => noise.get(
+                f64::from(x) * xz_scale,
+                f64::from(y) * y_scale,
+                f64::from(z) * xz_scale,
+            ),
             Self::ShiftedXz {
                 shift_x,
                 shift_z,
@@ -367,10 +427,10 @@ impl Sampler {
                 y_scale,
             } => {
                 let noise_x =
-                    f64::from(x) * xz_scale + f64::from(shift_x.sample(context, path, x, y, z));
+                    f64::from(x) * xz_scale + f64::from(shift_x.sample_value(context, x, y, z));
                 let noise_y = f64::from(y) * y_scale;
                 let noise_z =
-                    f64::from(z) * xz_scale + f64::from(shift_z.sample(context, path, x, y, z));
+                    f64::from(z) * xz_scale + f64::from(shift_z.sample_value(context, x, y, z));
                 noise.get(noise_x, noise_y, noise_z)
             }
             Self::ShiftedXyz {
@@ -382,186 +442,104 @@ impl Sampler {
                 y_scale,
             } => {
                 let noise_x =
-                    f64::from(x) * xz_scale + f64::from(shift_x.sample(context, path, x, y, z));
+                    f64::from(x) * xz_scale + f64::from(shift_x.sample_value(context, x, y, z));
                 let noise_y =
-                    f64::from(y) * y_scale + f64::from(shift_y.sample(context, path, x, y, z));
+                    f64::from(y) * y_scale + f64::from(shift_y.sample_value(context, x, y, z));
                 let noise_z =
-                    f64::from(z) * xz_scale + f64::from(shift_z.sample(context, path, x, y, z));
+                    f64::from(z) * xz_scale + f64::from(shift_z.sample_value(context, x, y, z));
                 noise.get(noise_x, noise_y, noise_z)
             }
-            Self::ShiftB { noise } => match path {
-                Path::Point => noise.get(f64::from(z) * 0.25, f64::from(x) * 0.25, 0.0) * 4.0,
-                // 官方把体积转置过来，x 走原来的 z，y 走原来的 x，z 固定是 0，振幅 4 在噪声里面乘。
-                Path::Volume => noise.add_to_point((z, x, 0), 0.25, 0.25, 4.0),
-            },
+            Self::ShiftB { noise } => {
+                noise.get(f64::from(z) * 0.25, f64::from(x) * 0.25, 0.0) * 4.0
+            }
             Self::EndIsland { noise } => (end_island_height(noise, x / 8, z / 8) - 8.0) / 128.0,
             Self::DistanceToPoint { point, metric } => metric.compute(
                 point[0].wrapping_sub(x) as f32,
                 point[1].wrapping_sub(y) as f32,
                 point[2].wrapping_sub(z) as f32,
             ),
-            Self::GradientClamped {
-                axis,
-                from_coordinate,
-                min_coordinate,
-                max_coordinate,
-                from_value,
-                coordinate_factor,
-            } => {
-                let coordinate = axis.choose(x, y, z);
-                let relative = coordinate
-                    .clamp(*min_coordinate, *max_coordinate)
-                    .wrapping_sub(*from_coordinate);
-                from_value + relative as f32 * coordinate_factor
-            }
-            Self::GradientRepeat {
-                axis,
-                from_coordinate,
-                coordinate_range,
-                from_value,
-                coordinate_factor,
-            } => {
-                let relative = axis.choose(x, y, z).wrapping_sub(*from_coordinate);
-                from_value + java_floor_mod(relative, *coordinate_range) as f32 * coordinate_factor
-            }
-            Self::GradientMirroredRepeat {
-                axis,
-                from_coordinate,
-                coordinate_range,
-                from_value,
-                coordinate_factor,
-            } => {
-                let relative = axis.choose(x, y, z).wrapping_sub(*from_coordinate);
-                let tile = java_floor_div(relative, *coordinate_range);
-                let local = relative.wrapping_sub(tile.wrapping_mul(*coordinate_range));
-                if tile & 1 == 0 {
-                    from_value + local as f32 * coordinate_factor
-                } else {
-                    from_value + coordinate_range.wrapping_sub(local) as f32 * coordinate_factor
-                }
-            }
+            Self::GradientClamped { axis, .. }
+            | Self::GradientRepeat { axis, .. }
+            | Self::GradientMirroredRepeat { axis, .. } => self.gradient(axis.choose(x, y, z)),
             Self::Unary { op, factor, input } => {
-                let value = input.sample(context, path, x, y, z);
-                apply_unary(*op, *factor, value)
+                apply_unary(*op, *factor, input.sample_value(context, x, y, z))
             }
-            Self::RoundInteger { op, input } => op.apply(input.sample(context, path, x, y, z)),
+            Self::RoundInteger { op, input } => op.apply(input.sample_value(context, x, y, z)),
             Self::Round {
                 op,
                 input,
                 multiple,
             } => {
-                let value = input.sample(context, path, x, y, z);
-                let multiple = multiple.sample(context, path, x, y, z);
-                if multiple == 0.0 {
-                    value
-                } else {
-                    op.apply(value / multiple) * multiple
-                }
+                let value = input.sample_value(context, x, y, z);
+                let multiple = multiple.sample_value(context, x, y, z);
+                round_to_multiple(*op, value, multiple)
             }
             Self::Add { left, right } => {
-                left.sample(context, path, x, y, z) + right.sample(context, path, x, y, z)
+                left.sample_value(context, x, y, z) + right.sample_value(context, x, y, z)
             }
-            Self::ConstAdd { left, right } => left.sample(context, path, x, y, z) + right,
+            Self::ConstAdd { left, right } => left.sample_value(context, x, y, z) + right,
             Self::Sub { left, right } => {
-                left.sample(context, path, x, y, z) - right.sample(context, path, x, y, z)
+                left.sample_value(context, x, y, z) - right.sample_value(context, x, y, z)
             }
-            Self::ConstSub { left, right } => left - right.sample(context, path, x, y, z),
+            Self::ConstSub { left, right } => left - right.sample_value(context, x, y, z),
             Self::Mul { left, right } => {
-                let value = left.sample(context, path, x, y, z);
-                // 单点求值时左边是 0 就不看右边，成批求值时照乘。
-                if path == Path::Point && value == 0.0 {
+                let value = left.sample_value(context, x, y, z);
+                // 单点求值时左边是 0 就不看右边。
+                if value == 0.0 {
                     0.0
                 } else {
-                    value * right.sample(context, path, x, y, z)
+                    value * right.sample_value(context, x, y, z)
                 }
             }
-            Self::ConstMul { left, right } => left.sample(context, path, x, y, z) * right,
+            Self::ConstMul { left, right } => left.sample_value(context, x, y, z) * right,
             Self::Div { left, right } => {
-                let value = left.sample(context, path, x, y, z);
-                if path == Path::Point && value == 0.0 {
+                let value = left.sample_value(context, x, y, z);
+                if value == 0.0 {
                     0.0
                 } else {
-                    value / right.sample(context, path, x, y, z)
+                    value / right.sample_value(context, x, y, z)
                 }
             }
-            Self::ConstDiv { left, right } => left / right.sample(context, path, x, y, z),
+            Self::ConstDiv { left, right } => left / right.sample_value(context, x, y, z),
             Self::Min {
                 left,
                 right,
                 right_min,
             } => {
-                let value = left.sample(context, path, x, y, z);
-                match path {
-                    Path::Point => {
-                        if value <= *right_min {
-                            value
-                        } else {
-                            density::min(value, right.sample(context, path, x, y, z))
-                        }
-                    }
-                    Path::Volume => {
-                        let other = right.sample(context, path, x, y, z);
-                        if other < value { other } else { value }
-                    }
+                let value = left.sample_value(context, x, y, z);
+                if value <= *right_min {
+                    value
+                } else {
+                    density::min(value, right.sample_value(context, x, y, z))
                 }
             }
             Self::ConstMin { left, right } => {
-                let value = left.sample(context, path, x, y, z);
-                match path {
-                    Path::Point => density::min(value, *right),
-                    Path::Volume => {
-                        if *right < value {
-                            *right
-                        } else {
-                            value
-                        }
-                    }
-                }
+                density::min(left.sample_value(context, x, y, z), *right)
             }
             Self::Max {
                 left,
                 right,
                 right_max,
             } => {
-                let value = left.sample(context, path, x, y, z);
-                match path {
-                    Path::Point => {
-                        if value >= *right_max {
-                            value
-                        } else {
-                            density::max(value, right.sample(context, path, x, y, z))
-                        }
-                    }
-                    Path::Volume => {
-                        let other = right.sample(context, path, x, y, z);
-                        if other > value { other } else { value }
-                    }
+                let value = left.sample_value(context, x, y, z);
+                if value >= *right_max {
+                    value
+                } else {
+                    density::max(value, right.sample_value(context, x, y, z))
                 }
             }
             Self::ConstMax { left, right } => {
-                let value = left.sample(context, path, x, y, z);
-                match path {
-                    Path::Point => density::max(value, *right),
-                    Path::Volume => {
-                        if *right > value {
-                            *right
-                        } else {
-                            value
-                        }
-                    }
-                }
+                density::max(left.sample_value(context, x, y, z), *right)
             }
             Self::PowConstBase { base, exponent } => {
-                let exponent = f64::from(exponent.sample(context, path, x, y, z));
-                base.powf(exponent) as f32
+                base.powf(f64::from(exponent.sample_value(context, x, y, z))) as f32
             }
             Self::PowConstExponent { base, exponent } => {
-                let base = f64::from(base.sample(context, path, x, y, z));
-                base.powf(*exponent) as f32
+                f64::from(base.sample_value(context, x, y, z)).powf(*exponent) as f32
             }
             Self::Pow { base, exponent } => {
-                let base = f64::from(base.sample(context, path, x, y, z));
-                let exponent = f64::from(exponent.sample(context, path, x, y, z));
+                let base = f64::from(base.sample_value(context, x, y, z));
+                let exponent = f64::from(exponent.sample_value(context, x, y, z));
                 base.powf(exponent) as f32
             }
             Self::Spline {
@@ -573,7 +551,7 @@ impl Sampler {
                     if !cached[*index].is_nan() {
                         return cached[*index];
                     }
-                    let value = coordinates[*index].sample(context, path, x, y, z);
+                    let value = coordinates[*index].sample_value(context, x, y, z);
                     cached[*index] = value;
                     value
                 })
@@ -583,13 +561,13 @@ impl Sampler {
                 first,
                 second,
             } => {
-                let alpha = alpha.sample(context, path, x, y, z);
+                let alpha = alpha.sample_value(context, x, y, z);
                 if alpha == 0.0 {
                     *first
                 } else if alpha == 1.0 {
-                    second.sample(context, path, x, y, z)
+                    second.sample_value(context, x, y, z)
                 } else {
-                    lerp(alpha, *first, second.sample(context, path, x, y, z))
+                    lerp(alpha, *first, second.sample_value(context, x, y, z))
                 }
             }
             Self::LerpConstSecond {
@@ -597,13 +575,13 @@ impl Sampler {
                 first,
                 second,
             } => {
-                let alpha = alpha.sample(context, path, x, y, z);
+                let alpha = alpha.sample_value(context, x, y, z);
                 if alpha == 0.0 {
-                    first.sample(context, path, x, y, z)
+                    first.sample_value(context, x, y, z)
                 } else if alpha == 1.0 {
                     *second
                 } else {
-                    lerp(alpha, first.sample(context, path, x, y, z), *second)
+                    lerp(alpha, first.sample_value(context, x, y, z), *second)
                 }
             }
             Self::Lerp {
@@ -611,21 +589,21 @@ impl Sampler {
                 first,
                 second,
             } => {
-                let alpha = alpha.sample(context, path, x, y, z);
+                let alpha = alpha.sample_value(context, x, y, z);
                 if alpha == 0.0 {
-                    first.sample(context, path, x, y, z)
+                    first.sample_value(context, x, y, z)
                 } else if alpha == 1.0 {
-                    second.sample(context, path, x, y, z)
+                    second.sample_value(context, x, y, z)
                 } else {
                     lerp(
                         alpha,
-                        first.sample(context, path, x, y, z),
-                        second.sample(context, path, x, y, z),
+                        first.sample_value(context, x, y, z),
+                        second.sample_value(context, x, y, z),
                     )
                 }
             }
             Self::Clamp { input, min, max } => {
-                clamp(input.sample(context, path, x, y, z), *min, *max)
+                clamp(input.sample_value(context, x, y, z), *min, *max)
             }
             Self::RangeChoiceConst {
                 input,
@@ -634,7 +612,7 @@ impl Sampler {
                 when_in_range,
                 when_out_of_range,
             } => {
-                let value = input.sample(context, path, x, y, z);
+                let value = input.sample_value(context, x, y, z);
                 if value >= *min_inclusive && value < *max_exclusive {
                     *when_in_range
                 } else {
@@ -648,11 +626,11 @@ impl Sampler {
                 when_in_range,
                 when_out_of_range,
             } => {
-                let value = input.sample(context, path, x, y, z);
+                let value = input.sample_value(context, x, y, z);
                 if value >= *min_inclusive && value < *max_exclusive {
-                    when_in_range.sample(context, path, x, y, z)
+                    when_in_range.sample_value(context, x, y, z)
                 } else {
-                    when_out_of_range.sample(context, path, x, y, z)
+                    when_out_of_range.sample_value(context, x, y, z)
                 }
             }
             Self::IntervalSelectSingle {
@@ -661,11 +639,11 @@ impl Sampler {
                 if_below,
                 if_above,
             } => {
-                let value = input.sample(context, path, x, y, z);
+                let value = input.sample_value(context, x, y, z);
                 if value < *threshold {
-                    if_below.sample(context, path, x, y, z)
+                    if_below.sample_value(context, x, y, z)
                 } else {
-                    if_above.sample(context, path, x, y, z)
+                    if_above.sample_value(context, x, y, z)
                 }
             }
             Self::IntervalSelect {
@@ -673,35 +651,12 @@ impl Sampler {
                 thresholds,
                 samplers,
             } => {
-                let value = input.sample(context, path, x, y, z);
-                let index = thresholds
-                    .iter()
-                    .position(|threshold| value < *threshold)
-                    .unwrap_or(samplers.len() - 1);
-                samplers[index].sample(context, path, x, y, z)
+                let value = input.sample_value(context, x, y, z);
+                samplers[select_interval(thresholds, samplers.len(), value)]
+                    .sample_value(context, x, y, z)
             }
-            Self::Cached { id, input } => {
-                let key = (x, y, z);
-                let cell = *context.cell(*id);
-                let remembered = match path {
-                    Path::Point => cell.point,
-                    Path::Volume => cell.volume,
-                };
-                if let Some((cached_key, value)) = remembered
-                    && cached_key == key
-                    && !value.is_nan()
-                {
-                    return value;
-                }
-                let value = input.sample(context, path, x, y, z);
-                let cell = context.cell(*id);
-                match path {
-                    Path::Point => cell.point = Some((key, value)),
-                    Path::Volume => cell.volume = Some((key, value)),
-                }
-                value
-            }
-            Self::BlendDensity(input) => input.sample(context, path, x, y, z),
+            Self::Cached { id, input } => sample_value_cached(context, *id, input, x, y, z),
+            Self::BlendDensity(input) => input.sample_value(context, x, y, z),
             Self::Interpolated {
                 input,
                 cell_size_xz,
@@ -711,59 +666,959 @@ impl Sampler {
                 let y_in_cell = java_floor_mod(y, *cell_size_y);
                 let z_in_cell = java_floor_mod(z, *cell_size_xz);
                 if x_in_cell == 0 && y_in_cell == 0 && z_in_cell == 0 {
-                    return input.sample(context, path, x, y, z);
+                    return input.sample_value(context, x, y, z);
                 }
-                let base = (
-                    x.wrapping_sub(x_in_cell),
-                    y.wrapping_sub(y_in_cell),
-                    z.wrapping_sub(z_in_cell),
+                // 官方在这里对 2×2×2 的格角调 sampleVolume，所以内层走成批路径。
+                let corners = Volume::new(
+                    (2, 2, 2),
+                    (
+                        x.wrapping_sub(x_in_cell),
+                        y.wrapping_sub(y_in_cell),
+                        z.wrapping_sub(z_in_cell),
+                    ),
+                    (*cell_size_xz, *cell_size_y, *cell_size_xz),
                 );
-                // 官方在这里对 2×2×2 的格子调 sampleVolume，所以内层走成批路径。
-                let mut corner = |dx: i32, dy: i32, dz: i32| {
-                    input.sample(
-                        context,
-                        Path::Volume,
-                        base.0.wrapping_add(dx.wrapping_mul(*cell_size_xz)),
-                        base.1.wrapping_add(dy.wrapping_mul(*cell_size_y)),
-                        base.2.wrapping_add(dz.wrapping_mul(*cell_size_xz)),
-                    )
-                };
-                let values = [
-                    corner(0, 0, 0),
-                    corner(1, 0, 0),
-                    corner(0, 1, 0),
-                    corner(1, 1, 0),
-                    corner(0, 0, 1),
-                    corner(1, 0, 1),
-                    corner(0, 1, 1),
-                    corner(1, 1, 1),
-                ];
-                lerp3(
+                let mut buffer = context.acquire(corners.len());
+                input.sample_volume(context, &mut buffer, &corners);
+                let at = |dx: i32, dy: i32, dz: i32| buffer[corners.index(dx, dy, dz)];
+                let value = lerp3(
                     (
                         x_in_cell as f32 / *cell_size_xz as f32,
                         y_in_cell as f32 / *cell_size_y as f32,
                         z_in_cell as f32 / *cell_size_xz as f32,
                     ),
-                    values,
-                )
+                    [
+                        at(0, 0, 0),
+                        at(1, 0, 0),
+                        at(0, 1, 0),
+                        at(1, 1, 0),
+                        at(0, 0, 1),
+                        at(1, 0, 1),
+                        at(0, 1, 1),
+                        at(1, 1, 1),
+                    ],
+                );
+                context.release(buffer);
+                value
             }
-            Self::SliceX { input, x: fixed } => input.sample(context, path, *fixed, y, z),
-            Self::SliceY { input, y: fixed } => input.sample(context, path, x, *fixed, z),
-            Self::SliceZ { input, z: fixed } => input.sample(context, path, x, y, *fixed),
+            Self::SliceX { input, x: fixed } => input.sample_value(context, *fixed, y, z),
+            Self::SliceY { input, y: fixed } => input.sample_value(context, x, *fixed, z),
+            Self::SliceZ { input, z: fixed } => input.sample_value(context, x, y, *fixed),
             Self::SliceXz {
                 input,
                 x: fixed_x,
                 z: fixed_z,
-            } => input.sample(context, path, *fixed_x, y, *fixed_z),
+            } => input.sample_value(context, *fixed_x, y, *fixed_z),
             Self::FindTopSurface {
                 density,
                 upper_bound,
                 lower_bound,
                 cell_height,
             } => {
-                let upper = upper_bound.sample(context, path, x, y, z);
-                // 官方的这一层不管哪条路径，探测密度时都走单点求值。
-                find_surface_from(density, context, x, z, upper, *lower_bound, *cell_height)
+                let upper = upper_bound.sample_value(context, x, y, z);
+                find_surface_from(density, context, x, z, upper, *lower_bound, *cell_height) as f32
+            }
+        }
+    }
+
+    /// 三种 `GradientSampler.compute(coordinate)`。
+    fn gradient(&self, coordinate: i32) -> f32 {
+        match self {
+            Self::GradientClamped {
+                from_coordinate,
+                min_coordinate,
+                max_coordinate,
+                from_value,
+                coordinate_factor,
+                ..
+            } => {
+                let relative = coordinate
+                    .clamp(*min_coordinate, *max_coordinate)
+                    .wrapping_sub(*from_coordinate);
+                from_value + relative as f32 * coordinate_factor
+            }
+            Self::GradientRepeat {
+                from_coordinate,
+                coordinate_range,
+                from_value,
+                coordinate_factor,
+                ..
+            } => {
+                let relative = coordinate.wrapping_sub(*from_coordinate);
+                from_value + java_floor_mod(relative, *coordinate_range) as f32 * coordinate_factor
+            }
+            Self::GradientMirroredRepeat {
+                from_coordinate,
+                coordinate_range,
+                from_value,
+                coordinate_factor,
+                ..
+            } => {
+                let relative = coordinate.wrapping_sub(*from_coordinate);
+                let tile = java_floor_div(relative, *coordinate_range);
+                let local = relative.wrapping_sub(tile.wrapping_mul(*coordinate_range));
+                if tile & 1 == 0 {
+                    from_value + local as f32 * coordinate_factor
+                } else {
+                    from_value + coordinate_range.wrapping_sub(local) as f32 * coordinate_factor
+                }
+            }
+            _ => unreachable!("只给三种梯度采样器用"),
+        }
+    }
+
+    /// 官方的 `sampleVolume`：在一块体积上成批求值，结果写进 `out`（长度是 `volume.len()`）。
+    ///
+    /// 每个分支照官方对应采样器的 `sampleVolume` 写，包括子采样器的求值顺序：
+    /// `cache` 记的是最后一块体积，顺序不同会让之后的单点求值读到不同的值。
+    pub fn sample_volume(&self, context: &mut Context, out: &mut [f32], volume: &Volume) {
+        match self {
+            Self::Constant(value) => out.fill(*value),
+            Self::Noise {
+                noise,
+                xz_scale,
+                y_scale,
+            } => {
+                out.fill(0.0);
+                noise_add_to_volume(noise, out, volume, *xz_scale, *y_scale, 1.0);
+            }
+            Self::ShiftedXz {
+                shift_x,
+                shift_z,
+                noise,
+                xz_scale,
+                y_scale,
+            } => {
+                shift_x.sample_volume(context, out, volume);
+                let mut shift_z_values = context.acquire(out.len());
+                shift_z.sample_volume(context, &mut shift_z_values, volume);
+                let mut index = 0;
+                for z in 0..volume.size_z {
+                    let base_z = f64::from(volume.block_z(z)) * xz_scale;
+                    for x in 0..volume.size_x {
+                        let base_x = f64::from(volume.block_x(x)) * xz_scale;
+                        for y in 0..volume.size_y {
+                            let noise_x = base_x + f64::from(out[index]);
+                            let noise_y = f64::from(volume.block_y(y)) * y_scale;
+                            let noise_z = base_z + f64::from(shift_z_values[index]);
+                            out[index] = noise.get(noise_x, noise_y, noise_z);
+                            index += 1;
+                        }
+                    }
+                }
+                context.release(shift_z_values);
+            }
+            Self::ShiftedXyz {
+                shift_x,
+                shift_y,
+                shift_z,
+                noise,
+                xz_scale,
+                y_scale,
+            } => {
+                shift_x.sample_volume(context, out, volume);
+                let mut shift_y_values = context.acquire(out.len());
+                shift_y.sample_volume(context, &mut shift_y_values, volume);
+                let mut shift_z_values = context.acquire(out.len());
+                shift_z.sample_volume(context, &mut shift_z_values, volume);
+                let mut index = 0;
+                for z in 0..volume.size_z {
+                    let base_z = f64::from(volume.block_z(z)) * xz_scale;
+                    for x in 0..volume.size_x {
+                        let base_x = f64::from(volume.block_x(x)) * xz_scale;
+                        for y in 0..volume.size_y {
+                            let noise_x = base_x + f64::from(out[index]);
+                            let noise_y = f64::from(volume.block_y(y)) * y_scale
+                                + f64::from(shift_y_values[index]);
+                            let noise_z = base_z + f64::from(shift_z_values[index]);
+                            out[index] = noise.get(noise_x, noise_y, noise_z);
+                            index += 1;
+                        }
+                    }
+                }
+                context.release(shift_z_values);
+                context.release(shift_y_values);
+            }
+            Self::ShiftB { noise } => {
+                // 官方把体积转置过来：x 走原来的 z，y 走原来的 x，z 固定是 0。
+                let transposed = Volume::new(
+                    (volume.size_z, volume.size_x, 1),
+                    (volume.min_z, volume.min_x, 0),
+                    (volume.step_z, volume.step_x, 1),
+                );
+                let mut values = context.acquire(transposed.len());
+                values.fill(0.0);
+                noise_add_to_volume(noise, &mut values, &transposed, 0.25, 0.25, 4.0);
+                for z in 0..volume.size_z {
+                    for x in 0..volume.size_x {
+                        let value = values[transposed.index(z, x, 0)];
+                        set_column(out, volume, x, z, value);
+                    }
+                }
+                context.release(values);
+            }
+            Self::EndIsland { .. } => {
+                for z in 0..volume.size_z {
+                    let block_z = volume.block_z(z);
+                    for x in 0..volume.size_x {
+                        let value = self.sample_value(context, volume.block_x(x), 0, block_z);
+                        set_column(out, volume, x, z, value);
+                    }
+                }
+            }
+            Self::DistanceToPoint { .. } => self.sample_volume_naive(context, out, volume),
+            Self::GradientClamped { axis, .. }
+            | Self::GradientRepeat { axis, .. }
+            | Self::GradientMirroredRepeat { axis, .. } => match axis {
+                Axis::X => {
+                    for x in 0..volume.size_x {
+                        let value = self.gradient(volume.block_x(x));
+                        for z in 0..volume.size_z {
+                            set_column(out, volume, x, z, value);
+                        }
+                    }
+                }
+                Axis::Y => {
+                    for y in 0..volume.size_y {
+                        let value = self.gradient(volume.block_y(y));
+                        for z in 0..volume.size_z {
+                            for x in 0..volume.size_x {
+                                out[volume.index(x, y, z)] = value;
+                            }
+                        }
+                    }
+                }
+                Axis::Z => {
+                    let layer = (volume.size_x * volume.size_y) as usize;
+                    for z in 0..volume.size_z {
+                        let value = self.gradient(volume.block_z(z));
+                        let start = volume.index(0, 0, z);
+                        out[start..start + layer].fill(value);
+                    }
+                }
+            },
+            Self::Unary { op, factor, input } => {
+                input.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = apply_unary(*op, *factor, *value);
+                }
+            }
+            Self::RoundInteger { op, input } => {
+                input.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = op.apply(*value);
+                }
+            }
+            Self::Round {
+                op,
+                input,
+                multiple,
+            } => {
+                input.sample_volume(context, out, volume);
+                let multiples = self.child_volume(context, multiple, volume);
+                for (value, multiple) in out.iter_mut().zip(&multiples) {
+                    *value = round_to_multiple(*op, *value, *multiple);
+                }
+                context.release(multiples);
+            }
+            Self::Add { left, right } => {
+                left.sample_volume(context, out, volume);
+                let right = self.child_volume(context, right, volume);
+                for (value, other) in out.iter_mut().zip(&right) {
+                    *value += *other;
+                }
+                context.release(right);
+            }
+            Self::ConstAdd { left, right } => {
+                left.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value += *right;
+                }
+            }
+            Self::Sub { left, right } => {
+                left.sample_volume(context, out, volume);
+                let right = self.child_volume(context, right, volume);
+                for (value, other) in out.iter_mut().zip(&right) {
+                    *value += -*other;
+                }
+                context.release(right);
+            }
+            Self::ConstSub { left, right } => {
+                right.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = *left - *value;
+                }
+            }
+            Self::Mul { left, right } => {
+                left.sample_volume(context, out, volume);
+                let right = self.child_volume(context, right, volume);
+                for (value, other) in out.iter_mut().zip(&right) {
+                    *value *= *other;
+                }
+                context.release(right);
+            }
+            Self::ConstMul { left, right } => {
+                left.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value *= *right;
+                }
+            }
+            Self::Div { left, right } => {
+                left.sample_volume(context, out, volume);
+                let right = self.child_volume(context, right, volume);
+                for (value, other) in out.iter_mut().zip(&right) {
+                    *value /= *other;
+                }
+                context.release(right);
+            }
+            Self::ConstDiv { left, right } => {
+                right.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = *left / *value;
+                }
+            }
+            Self::Min { left, right, .. } => {
+                left.sample_volume(context, out, volume);
+                let right = self.child_volume(context, right, volume);
+                for (value, other) in out.iter_mut().zip(&right) {
+                    if *other < *value {
+                        *value = *other;
+                    }
+                }
+                context.release(right);
+            }
+            Self::ConstMin { left, right } => {
+                left.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    if *right < *value {
+                        *value = *right;
+                    }
+                }
+            }
+            Self::Max { left, right, .. } => {
+                left.sample_volume(context, out, volume);
+                let right = self.child_volume(context, right, volume);
+                for (value, other) in out.iter_mut().zip(&right) {
+                    if *other > *value {
+                        *value = *other;
+                    }
+                }
+                context.release(right);
+            }
+            Self::ConstMax { left, right } => {
+                left.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    if *right > *value {
+                        *value = *right;
+                    }
+                }
+            }
+            Self::PowConstBase { base, exponent } => {
+                exponent.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = base.powf(f64::from(*value)) as f32;
+                }
+            }
+            Self::PowConstExponent { base, exponent } => {
+                base.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = f64::from(*value).powf(*exponent) as f32;
+                }
+            }
+            Self::Pow { base, exponent } => {
+                base.sample_volume(context, out, volume);
+                let exponents = self.child_volume(context, exponent, volume);
+                for (value, exponent) in out.iter_mut().zip(&exponents) {
+                    *value = f64::from(*value).powf(f64::from(*exponent)) as f32;
+                }
+                context.release(exponents);
+            }
+            Self::Spline {
+                spline,
+                coordinates,
+            } => {
+                // `BufferSplineInput`：坐标第一次被用到时才在整块体积上求，之后按下标读。
+                let mut buffers: Vec<Option<Vec<f32>>> = vec![None; coordinates.len()];
+                for (index, value) in out.iter_mut().enumerate() {
+                    *value = spline.sample(&mut |coordinate: &usize| {
+                        if buffers[*coordinate].is_none() {
+                            let mut buffer = context.acquire(volume.len());
+                            coordinates[*coordinate].sample_volume(context, &mut buffer, volume);
+                            buffers[*coordinate] = Some(buffer);
+                        }
+                        buffers[*coordinate]
+                            .as_ref()
+                            .map_or(0.0, |buffer| buffer[index])
+                    });
+                }
+                for buffer in buffers.into_iter().flatten() {
+                    context.release(buffer);
+                }
+            }
+            Self::LerpConstFirst {
+                alpha,
+                first,
+                second,
+            } => {
+                alpha.sample_volume(context, out, volume);
+                let seconds = self.child_volume(context, second, volume);
+                for (value, second) in out.iter_mut().zip(&seconds) {
+                    let alpha = *value;
+                    *value = if alpha == 0.0 {
+                        *first
+                    } else if alpha == 1.0 {
+                        *second
+                    } else {
+                        lerp(alpha, *first, *second)
+                    };
+                }
+                context.release(seconds);
+            }
+            Self::LerpConstSecond {
+                alpha,
+                first,
+                second,
+            } => {
+                alpha.sample_volume(context, out, volume);
+                let firsts = self.child_volume(context, first, volume);
+                for (value, first) in out.iter_mut().zip(&firsts) {
+                    let alpha = *value;
+                    *value = if alpha == 0.0 {
+                        *first
+                    } else if alpha == 1.0 {
+                        *second
+                    } else {
+                        lerp(alpha, *first, *second)
+                    };
+                }
+                context.release(firsts);
+            }
+            Self::Lerp {
+                alpha,
+                first,
+                second,
+            } => {
+                alpha.sample_volume(context, out, volume);
+                let firsts = self.child_volume(context, first, volume);
+                let seconds = self.child_volume(context, second, volume);
+                for ((value, first), second) in out.iter_mut().zip(&firsts).zip(&seconds) {
+                    let alpha = *value;
+                    *value = if alpha == 0.0 {
+                        *first
+                    } else if alpha == 1.0 {
+                        *second
+                    } else {
+                        lerp(alpha, *first, *second)
+                    };
+                }
+                context.release(seconds);
+                context.release(firsts);
+            }
+            Self::Clamp { input, min, max } => {
+                input.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = clamp(*value, *min, *max);
+                }
+            }
+            Self::RangeChoiceConst {
+                input,
+                min_inclusive,
+                max_exclusive,
+                when_in_range,
+                when_out_of_range,
+            } => {
+                input.sample_volume(context, out, volume);
+                for value in out.iter_mut() {
+                    *value = if *value >= *min_inclusive && *value < *max_exclusive {
+                        *when_in_range
+                    } else {
+                        *when_out_of_range
+                    };
+                }
+            }
+            Self::RangeChoice {
+                input,
+                min_inclusive,
+                max_exclusive,
+                when_in_range,
+                when_out_of_range,
+            } => {
+                // 官方先把「在范围里」那一支整块算进输出，再算输入和另一支。
+                when_in_range.sample_volume(context, out, volume);
+                let inputs = self.child_volume(context, input, volume);
+                let outside = self.child_volume(context, when_out_of_range, volume);
+                for ((value, input), outside) in out.iter_mut().zip(&inputs).zip(&outside) {
+                    if !(*input >= *min_inclusive && *input < *max_exclusive) {
+                        *value = *outside;
+                    }
+                }
+                context.release(outside);
+                context.release(inputs);
+            }
+            Self::IntervalSelectSingle {
+                input,
+                threshold,
+                if_below,
+                if_above,
+            } => {
+                input.sample_volume(context, out, volume);
+                let below = self.child_volume(context, if_below, volume);
+                let above = self.child_volume(context, if_above, volume);
+                for (index, value) in out.iter_mut().enumerate() {
+                    *value = if *value < *threshold {
+                        below[index]
+                    } else {
+                        above[index]
+                    };
+                }
+                context.release(above);
+                context.release(below);
+            }
+            Self::IntervalSelect {
+                input,
+                thresholds,
+                samplers,
+            } => {
+                input.sample_volume(context, out, volume);
+                let mut buffers = Vec::with_capacity(samplers.len());
+                for sampler in samplers {
+                    buffers.push(self.child_volume(context, sampler, volume));
+                }
+                for (index, value) in out.iter_mut().enumerate() {
+                    *value = buffers[select_interval(thresholds, samplers.len(), *value)][index];
+                }
+                for buffer in buffers {
+                    context.release(buffer);
+                }
+            }
+            Self::Cached { id, input } => sample_volume_cached(context, *id, input, out, volume),
+            // 上下文里没有 Blender，官方原样返回输入。
+            Self::BlendDensity(input) => input.sample_volume(context, out, volume),
+            Self::Interpolated {
+                input,
+                cell_size_xz,
+                cell_size_y,
+            } => sample_interpolated(context, input, *cell_size_xz, *cell_size_y, out, volume),
+            Self::SliceX { input, x: fixed } => {
+                if volume.size_x == 1 && volume.min_x == *fixed {
+                    return input.sample_volume(context, out, volume);
+                }
+                let slice = Volume::new(
+                    (1, volume.size_y, volume.size_z),
+                    (*fixed, volume.min_y, volume.min_z),
+                    (volume.step_x, volume.step_y, volume.step_z),
+                );
+                let values = self.child_volume(context, input, &slice);
+                let mut index = 0;
+                for z in 0..volume.size_z {
+                    for _ in 0..volume.size_x {
+                        for y in 0..volume.size_y {
+                            out[index] = values[slice.index(0, y, z)];
+                            index += 1;
+                        }
+                    }
+                }
+                context.release(values);
+            }
+            Self::SliceY { input, y: fixed } => {
+                if volume.size_y == 1 && volume.min_y == *fixed {
+                    return input.sample_volume(context, out, volume);
+                }
+                let slice = Volume::new(
+                    (volume.size_x, 1, volume.size_z),
+                    (volume.min_x, *fixed, volume.min_z),
+                    (volume.step_x, volume.step_y, volume.step_z),
+                );
+                let values = self.child_volume(context, input, &slice);
+                for z in 0..volume.size_z {
+                    for x in 0..volume.size_x {
+                        set_column(out, volume, x, z, values[slice.index(x, 0, z)]);
+                    }
+                }
+                context.release(values);
+            }
+            Self::SliceZ { input, z: fixed } => {
+                if volume.size_z == 1 && volume.min_z == *fixed {
+                    return input.sample_volume(context, out, volume);
+                }
+                let slice = Volume::new(
+                    (volume.size_x, volume.size_y, 1),
+                    (volume.min_x, volume.min_y, *fixed),
+                    (volume.step_x, volume.step_y, volume.step_z),
+                );
+                let values = self.child_volume(context, input, &slice);
+                let mut index = 0;
+                for _ in 0..volume.size_z {
+                    for x in 0..volume.size_x {
+                        for y in 0..volume.size_y {
+                            out[index] = values[slice.index(x, y, 0)];
+                            index += 1;
+                        }
+                    }
+                }
+                context.release(values);
+            }
+            Self::SliceXz {
+                input,
+                x: fixed_x,
+                z: fixed_z,
+            } => {
+                if volume.size_x == 1
+                    && volume.size_z == 1
+                    && volume.min_x == *fixed_x
+                    && volume.min_z == *fixed_z
+                {
+                    return input.sample_volume(context, out, volume);
+                }
+                let slice = Volume::new(
+                    (1, volume.size_y, 1),
+                    (*fixed_x, volume.min_y, *fixed_z),
+                    (volume.step_x, volume.step_y, volume.step_z),
+                );
+                let values = self.child_volume(context, input, &slice);
+                for y in 0..volume.size_y {
+                    let value = values[slice.index(0, y, 0)];
+                    let mut index = volume.index(0, y, 0);
+                    for _ in 0..volume.size_z {
+                        for _ in 0..volume.size_x {
+                            out[index] = value;
+                            index += volume.size_y as usize;
+                        }
+                    }
+                }
+                context.release(values);
+            }
+            Self::FindTopSurface {
+                density,
+                upper_bound,
+                lower_bound,
+                cell_height,
+            } => {
+                // 官方要求 sizeY 是 1，外面套着的 `SliceY` 保证了这一点；万一不是，退回逐点求值。
+                if volume.size_y != 1 {
+                    return self.sample_volume_naive(context, out, volume);
+                }
+                upper_bound.sample_volume(context, out, volume);
+                let mut index = 0;
+                for z in 0..volume.size_z {
+                    let block_z = volume.block_z(z);
+                    for x in 0..volume.size_x {
+                        let block_x = volume.block_x(x);
+                        out[index] = find_surface_from(
+                            density,
+                            context,
+                            block_x,
+                            block_z,
+                            out[index],
+                            *lower_bound,
+                            *cell_height,
+                        ) as f32;
+                        index += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `DensitySampler.sampleVolumeNaive`：逐点调 `sampleValue`。
+    fn sample_volume_naive(&self, context: &mut Context, out: &mut [f32], volume: &Volume) {
+        let mut index = 0;
+        for z in 0..volume.size_z {
+            let block_z = volume.block_z(z);
+            for x in 0..volume.size_x {
+                let block_x = volume.block_x(x);
+                for y in 0..volume.size_y {
+                    out[index] = self.sample_value(context, block_x, volume.block_y(y), block_z);
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    /// 借一块缓冲，把 `child` 在这块体积上的值算进去。用完要 [`Context::release`]。
+    fn child_volume(&self, context: &mut Context, child: &Sampler, volume: &Volume) -> Vec<f32> {
+        let mut buffer = context.acquire(volume.len());
+        child.sample_volume(context, &mut buffer, volume);
+        buffer
+    }
+}
+
+/// `DensityBuffer.setRange(index(x, 0, z), sizeY, value)`：一整列填同一个值。
+fn set_column(out: &mut [f32], volume: &Volume, x: i32, z: i32, value: f32) {
+    let start = volume.index(x, 0, z);
+    out[start..start + volume.size_y as usize].fill(value);
+}
+
+/// `Noise.addToVolume`：每个点加上这个噪声的贡献，体积顺序是 z、x、y。
+fn noise_add_to_volume(
+    noise: &Noise,
+    out: &mut [f32],
+    volume: &Volume,
+    xz_scale: f64,
+    y_scale: f64,
+    amplitude: f32,
+) {
+    let mut index = 0;
+    for z in 0..volume.size_z {
+        let block_z = volume.block_z(z);
+        for x in 0..volume.size_x {
+            let block_x = volume.block_x(x);
+            for y in 0..volume.size_y {
+                out[index] += noise.add_to_point(
+                    (block_x, volume.block_y(y), block_z),
+                    xz_scale,
+                    y_scale,
+                    amplitude,
+                );
+                index += 1;
+            }
+        }
+    }
+}
+
+/// `RoundFunction.Sampler.apply(value, multiple)`。
+fn round_to_multiple(op: RoundOp, value: f32, multiple: f32) -> f32 {
+    if multiple == 0.0 {
+        value
+    } else {
+        op.apply(value / multiple) * multiple
+    }
+}
+
+/// `IntervalSelectFunction.Sampler.selectSamplerIndex`：第一个比值大的阈值，没有就取最后一个。
+fn select_interval(thresholds: &[f32], count: usize, value: f32) -> usize {
+    thresholds
+        .iter()
+        .position(|threshold| value < *threshold)
+        .unwrap_or(count - 1)
+}
+
+/// `SamplerContext.sampleValueCached`。
+fn sample_value_cached(
+    context: &mut Context,
+    id: usize,
+    input: &Sampler,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> f32 {
+    let key = block_pos_as_long(x, y, z);
+    let Some(cell) = context.cell(id) else {
+        return input.sample_value(context, x, y, z);
+    };
+    if cell.value_key == key && !cell.value.is_nan() {
+        return cell.value;
+    }
+    if let Some(volume) = cell.volume
+        && let Some(index) = volume.index_of_block(x, y, z)
+    {
+        return cell.buffer[index];
+    }
+    let value = input.sample_value(context, x, y, z);
+    if let Some(cell) = context.cell(id) {
+        cell.value_key = key;
+        cell.value = value;
+    }
+    value
+}
+
+/// `SamplerContext.sampleVolumeCached`：同一块体积直接抄上一次的缓冲。
+fn sample_volume_cached(
+    context: &mut Context,
+    id: usize,
+    input: &Sampler,
+    out: &mut [f32],
+    volume: &Volume,
+) {
+    let Some(cell) = context.cell(id) else {
+        return input.sample_volume(context, out, volume);
+    };
+    if cell.volume != Some(*volume) {
+        let old = std::mem::take(&mut cell.buffer);
+        cell.volume = Some(*volume);
+        context.release(old);
+        let mut buffer = context.acquire(volume.len());
+        input.sample_volume(context, &mut buffer, volume);
+        if let Some(cell) = context.cell(id) {
+            cell.buffer = buffer;
+        }
+    }
+    if let Some(cell) = context.cell(id) {
+        out.copy_from_slice(&cell.buffer);
+    }
+}
+
+/// `InterpolatedFunction.Sampler.sampleVolume`。
+fn sample_interpolated(
+    context: &mut Context,
+    input: &Sampler,
+    cell_xz: i32,
+    cell_y: i32,
+    out: &mut [f32],
+    volume: &Volume,
+) {
+    let on_cells = (volume.step_x == cell_xz || volume.size_x == 1)
+        && (volume.step_y == cell_y || volume.size_y == 1)
+        && (volume.step_z == cell_xz || volume.size_z == 1)
+        && java_floor_mod(volume.min_x, cell_xz) == 0
+        && java_floor_mod(volume.min_y, cell_y) == 0
+        && java_floor_mod(volume.min_z, cell_xz) == 0;
+    if on_cells {
+        return input.sample_volume(context, out, volume);
+    }
+    if volume.step_x != 1 || volume.step_y != 1 || volume.step_z != 1 {
+        // `sampleWithNonBlockStep`：先在步长为 1 的大体积上插值，再挑出要的点。
+        let blocks = Volume::blocks(
+            (
+                volume.size_x.wrapping_mul(volume.step_x),
+                volume.size_y.wrapping_mul(volume.step_y),
+                volume.size_z.wrapping_mul(volume.step_z),
+            ),
+            (volume.min_x, volume.min_y, volume.min_z),
+        );
+        let mut values = context.acquire(blocks.len());
+        sample_interpolated_blocks(context, input, cell_xz, cell_y, &mut values, &blocks);
+        for z in 0..volume.size_z {
+            for x in 0..volume.size_x {
+                for y in 0..volume.size_y {
+                    out[volume.index(x, y, z)] = values
+                        [blocks.index(x * volume.step_x, y * volume.step_y, z * volume.step_z)];
+                }
+            }
+        }
+        context.release(values);
+        return;
+    }
+    sample_interpolated_blocks(context, input, cell_xz, cell_y, out, volume);
+}
+
+/// `InterpolatedFunction.Sampler.sampleWithBlockStep`：输入在格角上成批求，格子里插值。
+///
+/// xz 方向用 `Mth.lerp`，y 方向是起点加上逐格累加的增量，浮点顺序和官方一样，
+/// 所以和单点求值的 `lerp3` 结果最后一位会不同。
+fn sample_interpolated_blocks(
+    context: &mut Context,
+    input: &Sampler,
+    cell_xz: i32,
+    cell_y: i32,
+    out: &mut [f32],
+    volume: &Volume,
+) {
+    let cell_min_x = java_floor_div(volume.min_x, cell_xz);
+    let cell_min_y = java_floor_div(volume.min_y, cell_y);
+    let cell_min_z = java_floor_div(volume.min_z, cell_xz);
+    let count_x = java_floor_div(volume.max_x(), cell_xz) - cell_min_x + 1;
+    let count_y = java_floor_div(volume.max_y(), cell_y) - cell_min_y + 1;
+    let count_z = java_floor_div(volume.max_z(), cell_xz) - cell_min_z + 1;
+    let corner_count = |count: i32, max: i32, cell: i32| {
+        if java_floor_mod(max, cell) != 0 {
+            count + 1
+        } else {
+            count
+        }
+    };
+    let corners = Volume::new(
+        (
+            corner_count(count_x, volume.max_x(), cell_xz),
+            corner_count(count_y, volume.max_y(), cell_y),
+            corner_count(count_z, volume.max_z(), cell_xz),
+        ),
+        (
+            cell_min_x.wrapping_mul(cell_xz),
+            cell_min_y.wrapping_mul(cell_y),
+            cell_min_z.wrapping_mul(cell_xz),
+        ),
+        (cell_xz, cell_y, cell_xz),
+    );
+    let mut values = context.acquire(corners.len());
+    input.sample_volume(context, &mut values, &corners);
+    let inverse_xz = 1.0 / cell_xz as f32;
+    let inverse_y = 1.0 / cell_y as f32;
+    let at = |x: i32, y: i32, z: i32| values[corners.index(x, y, z)];
+    for cz in 0..count_z {
+        let cz1 = (cz + 1).min(corners.size_z - 1);
+        for cx in 0..count_x {
+            let cx1 = (cx + 1).min(corners.size_x - 1);
+            let mut v000 = at(cx, 0, cz);
+            let mut v100 = at(cx1, 0, cz);
+            let mut v001 = at(cx, 0, cz1);
+            let mut v101 = at(cx1, 0, cz1);
+            for cy in 0..count_y {
+                let cy1 = (cy + 1).min(corners.size_y - 1);
+                let v010 = at(cx, cy1, cz);
+                let v110 = at(cx1, cy1, cz);
+                let v011 = at(cx, cy1, cz1);
+                let v111 = at(cx1, cy1, cz1);
+                let cell = CellCorners {
+                    lower: [v000, v100, v001, v101],
+                    upper: [v010, v110, v011, v111],
+                };
+                fill_cell(
+                    out,
+                    volume,
+                    &corners,
+                    (cx, cy, cz),
+                    cell,
+                    (cell_xz, cell_y),
+                    (inverse_xz, inverse_y),
+                );
+                v000 = v010;
+                v100 = v110;
+                v001 = v011;
+                v101 = v111;
+            }
+        }
+    }
+    context.release(values);
+}
+
+/// 一个格子的八个角：`lower` 是下面四个，`upper` 是上面四个，顺序都是 (x0z0, x1z0, x0z1, x1z1)。
+#[derive(Clone, Copy)]
+struct CellCorners {
+    lower: [f32; 4],
+    upper: [f32; 4],
+}
+
+/// `InterpolatedFunction.Sampler.fillCell`。
+fn fill_cell(
+    out: &mut [f32],
+    volume: &Volume,
+    corners: &Volume,
+    cell: (i32, i32, i32),
+    values: CellCorners,
+    size: (i32, i32),
+    inverse: (f32, f32),
+) {
+    let offset_x = corners.block_x(cell.0) - volume.min_x;
+    let offset_y = corners.block_y(cell.1) - volume.min_y;
+    let offset_z = corners.block_z(cell.2) - volume.min_z;
+    let start_x = 0.max(-offset_x);
+    let start_y = 0.max(-offset_y);
+    let start_z = 0.max(-offset_z);
+    let end_x = size.0.min(volume.size_x - offset_x) - 1;
+    let end_y = size.1.min(volume.size_y - offset_y) - 1;
+    let end_z = size.0.min(volume.size_z - offset_z) - 1;
+    let [l00, l10, l01, l11] = values.lower;
+    let [u00, u10, u01, u11] = values.upper;
+    for local_z in start_z..=end_z {
+        let z = offset_z + local_z;
+        let t_z = local_z as f32 * inverse.0;
+        let lower_x0 = lerp(t_z, l00, l01);
+        let upper_x0 = lerp(t_z, u00, u01);
+        let lower_x1 = lerp(t_z, l10, l11);
+        let upper_x1 = lerp(t_z, u10, u11);
+        for local_x in start_x..=end_x {
+            let x = offset_x + local_x;
+            let t_x = local_x as f32 * inverse.0;
+            let lower = lerp(t_x, lower_x0, lower_x1);
+            let upper = lerp(t_x, upper_x0, upper_x1);
+            let delta = (upper - lower) * inverse.1;
+            let mut value = lower + delta * start_y as f32;
+            let start = volume.index(x, offset_y + start_y, z);
+            let len = (end_y - start_y + 1).max(0) as usize;
+            for slot in &mut out[start..start + len] {
+                *slot = value;
+                value += delta;
             }
         }
     }
@@ -794,21 +1649,21 @@ fn find_surface_from(
     upper_bound: f32,
     lower_bound: i32,
     cell_height: i32,
-) -> f32 {
+) -> i32 {
     let top_y = floor_f32(upper_bound / cell_height as f32).wrapping_mul(cell_height);
     if top_y <= lower_bound {
-        return lower_bound as f32;
+        return lower_bound;
     }
     let mut probe_y = top_y;
     while probe_y >= lower_bound {
-        if density.sample(context, Path::Point, x, probe_y, z) > 0.0 {
-            return probe_y as f32;
+        if density.sample_value(context, x, probe_y, z) > 0.0 {
+            return probe_y;
         }
         // 官方是 int 减法。`upper_bound` 是 NaN 或者无穷时 `top_y` 会饱和到边界，
         // 这里用 wrapping 跟着官方溢出，而不是在 debug 下 panic。
         probe_y = probe_y.wrapping_sub(cell_height);
     }
-    lower_bound as f32
+    lower_bound
 }
 
 /// `EndIslandFunction.getHeightValue`。
@@ -850,8 +1705,12 @@ pub struct Compiler {
     /// 下界温度和植被的老 fbm，和上面那张表分开：同一个 ID 两条路造出来的噪声不一样。
     legacy_noises: HashMap<String, Arc<Noise>>,
     island_noise: Option<Arc<SimplexNoise>>,
-    caches: HashMap<usize, (usize, Arc<Sampler>)>,
+    caches: HashMap<String, (usize, Arc<Sampler>)>,
     next_cache_id: usize,
+    /// `slice_uniform_axes` 的记忆，键是（节点地址，上层定义域）。
+    rewritten: HashMap<(usize, u8), Ref>,
+    /// 记忆里用到的原节点，留着它们，地址才不会被别的节点重用。
+    keep_alive: Vec<Ref>,
 }
 
 impl Compiler {
@@ -871,6 +1730,8 @@ impl Compiler {
             island_noise: None,
             caches: HashMap::new(),
             next_cache_id: 0,
+            rewritten: HashMap::new(),
+            keep_alive: Vec::new(),
         }
     }
 
@@ -893,12 +1754,50 @@ impl Compiler {
         self.next_cache_id
     }
 
-    /// `DensityFunctionCompiler.getSampler(function)`。
+    /// `DensityFunctionCompiler.getSampler(function)`：先照官方重写一遍，再编译。
     ///
-    /// 官方在编译前还跑一遍 `DfRewriteRule.SLICE_UNIFORM_AXES`，把用不到某个轴的子树
-    /// 包进 `slice` 里。那一步只改哪些坐标被传下去，不改结果（`domainAxes` 是保守的），
-    /// 单点求值时可以不做，详见 crate 文档。
+    /// 官方编译前跑 `DfRewriteRule.SLICE_UNIFORM_AXES`，把用不到某个轴的子树包进 `slice`。
+    /// 单点求值的值不受影响，但成批求值时体积的形状变了，`cache` 记住的体积也跟着变，
+    /// 之后单点求值能不能读到成批的缓冲就不一样了，所以要照做。
     pub fn compile(&mut self, function: &Ref) -> Sampler {
+        let rewritten = self.slice_uniform_axes(function, density::ALL_AXES);
+        self.compile_node(&rewritten)
+    }
+
+    /// `DfRewriteRule.SliceUniformAxes.rewrite`：`parent` 是上一层的定义域。
+    ///
+    /// 结果按（节点，上层定义域）记下来，同一个共享子树重写后还是同一个节点。
+    fn slice_uniform_axes(&mut self, function: &Ref, parent: u8) -> Ref {
+        if matches!(function.kind, Kind::Constant(_) | Kind::Gradient { .. }) {
+            return Arc::clone(function);
+        }
+        let key = (Arc::as_ptr(function) as usize, parent);
+        if let Some(found) = self.rewritten.get(&key) {
+            return Arc::clone(found);
+        }
+        let axes = function.axes();
+        let rewritten = if matches!(function.kind, Kind::Cache(_)) {
+            // 官方这时 `cache` 已经是 `PreparedCache`，子树另外重写，自己不动。
+            Arc::clone(function)
+        } else {
+            density::function(
+                function
+                    .kind
+                    .map_children(&mut |child: &Ref| self.slice_uniform_axes(child, axes)),
+            )
+        };
+        let result = if parent == axes {
+            rewritten
+        } else {
+            remove_axes(rewritten, parent & !axes)
+        };
+        self.rewritten.insert(key, Arc::clone(&result));
+        self.keep_alive.push(Arc::clone(function));
+        result
+    }
+
+    /// 编译一个已经重写过的节点。
+    fn compile_node(&mut self, function: &Ref) -> Sampler {
         match &function.kind {
             Kind::Constant(value) => Sampler::Constant(*value),
             // 上下文里没有 Blender 和 Beardifier，取官方的后备常量。
@@ -921,8 +1820,8 @@ impl Compiler {
                         y_scale: *y_scale,
                     };
                 }
-                let compiled_x = Box::new(self.compile(shift_x));
-                let compiled_z = Box::new(self.compile(shift_z));
+                let compiled_x = Box::new(self.compile_node(shift_x));
+                let compiled_z = Box::new(self.compile_node(shift_z));
                 if is_zero(shift_y) {
                     return Sampler::ShiftedXz {
                         shift_x: compiled_x,
@@ -934,7 +1833,7 @@ impl Compiler {
                 }
                 Sampler::ShiftedXyz {
                     shift_x: compiled_x,
-                    shift_y: Box::new(self.compile(shift_y)),
+                    shift_y: Box::new(self.compile_node(shift_y)),
                     shift_z: compiled_z,
                     noise: instance,
                     xz_scale: *xz_scale,
@@ -1009,14 +1908,14 @@ impl Compiler {
                     UnaryOp::QuarterNegative => 0.25,
                     _ => 0.0,
                 },
-                input: Box::new(self.compile(input)),
+                input: Box::new(self.compile_node(input)),
             },
             Kind::Round {
                 op,
                 input,
                 multiple,
             } => {
-                let compiled = Box::new(self.compile(input));
+                let compiled = Box::new(self.compile_node(input));
                 if multiple.constant() == Some(1.0) {
                     Sampler::RoundInteger {
                         op: *op,
@@ -1026,14 +1925,14 @@ impl Compiler {
                     Sampler::Round {
                         op: *op,
                         input: compiled,
-                        multiple: Box::new(self.compile(multiple)),
+                        multiple: Box::new(self.compile_node(multiple)),
                     }
                 }
             }
             Kind::Binary { op, left, right } => self.compile_binary(*op, left, right),
             Kind::Pow { base, exponent } => {
-                let compiled_base = self.compile(base);
-                let compiled_exponent = Box::new(self.compile(exponent));
+                let compiled_base = self.compile_node(base);
+                let compiled_exponent = Box::new(self.compile_node(exponent));
                 match (base.constant(), exponent.constant()) {
                     (Some(value), _) => Sampler::PowConstBase {
                         base: f64::from(value),
@@ -1060,7 +1959,7 @@ impl Compiler {
                 });
                 let compiled = coordinates
                     .iter()
-                    .map(|coordinate| self.compile(coordinate))
+                    .map(|coordinate| self.compile_node(coordinate))
                     .collect();
                 Sampler::Spline {
                     spline: indexed,
@@ -1072,9 +1971,9 @@ impl Compiler {
                 first,
                 second,
             } => {
-                let compiled_alpha = Box::new(self.compile(alpha));
-                let compiled_first = Box::new(self.compile(first));
-                let compiled_second = Box::new(self.compile(second));
+                let compiled_alpha = Box::new(self.compile_node(alpha));
+                let compiled_first = Box::new(self.compile_node(first));
+                let compiled_second = Box::new(self.compile_node(second));
                 match (first.constant(), second.constant()) {
                     (Some(value), _) => Sampler::LerpConstFirst {
                         alpha: compiled_alpha,
@@ -1094,7 +1993,7 @@ impl Compiler {
                 }
             }
             Kind::Clamp { input, min, max } => Sampler::Clamp {
-                input: Box::new(self.compile(input)),
+                input: Box::new(self.compile_node(input)),
                 min: *min,
                 max: *max,
             },
@@ -1105,7 +2004,7 @@ impl Compiler {
                 when_in_range,
                 when_out_of_range,
             } => {
-                let compiled_input = Box::new(self.compile(input));
+                let compiled_input = Box::new(self.compile_node(input));
                 match (when_in_range.constant(), when_out_of_range.constant()) {
                     (Some(inside), Some(outside)) => Sampler::RangeChoiceConst {
                         input: compiled_input,
@@ -1118,8 +2017,8 @@ impl Compiler {
                         input: compiled_input,
                         min_inclusive: *min_inclusive,
                         max_exclusive: *max_exclusive,
-                        when_in_range: Box::new(self.compile(when_in_range)),
-                        when_out_of_range: Box::new(self.compile(when_out_of_range)),
+                        when_in_range: Box::new(self.compile_node(when_in_range)),
+                        when_out_of_range: Box::new(self.compile_node(when_out_of_range)),
                     },
                 }
             }
@@ -1128,18 +2027,20 @@ impl Compiler {
                 thresholds,
                 functions,
             } => {
-                let compiled_input = Box::new(self.compile(input));
+                let compiled_input = Box::new(self.compile_node(input));
                 if thresholds.len() == 1 {
                     return Sampler::IntervalSelectSingle {
                         input: compiled_input,
                         threshold: thresholds[0],
-                        if_below: Box::new(self.compile(&functions[0])),
-                        if_above: Box::new(self.compile(functions.last().expect("至少两个函数"))),
+                        if_below: Box::new(self.compile_node(&functions[0])),
+                        if_above: Box::new(
+                            self.compile_node(functions.last().expect("至少两个函数")),
+                        ),
                     };
                 }
                 let samplers = functions
                     .iter()
-                    .map(|function| self.compile(function))
+                    .map(|function| self.compile_node(function))
                     .collect();
                 Sampler::IntervalSelect {
                     input: compiled_input,
@@ -1148,13 +2049,13 @@ impl Compiler {
                 }
             }
             Kind::Cache(input) => self.compile_cache(input),
-            Kind::BlendDensity(input) => Sampler::BlendDensity(Box::new(self.compile(input))),
+            Kind::BlendDensity(input) => Sampler::BlendDensity(Box::new(self.compile_node(input))),
             Kind::Interpolated {
                 input,
                 cell_size_xz,
                 cell_size_y,
             } => Sampler::Interpolated {
-                input: Box::new(self.compile(input)),
+                input: Box::new(self.compile_node(input)),
                 cell_size_xz: *cell_size_xz,
                 cell_size_y: *cell_size_y,
             },
@@ -1170,8 +2071,8 @@ impl Compiler {
                 cell_height,
             } => Sampler::SliceY {
                 input: Box::new(Sampler::FindTopSurface {
-                    density: Box::new(self.compile(density)),
-                    upper_bound: Box::new(self.compile(upper_bound)),
+                    density: Box::new(self.compile_node(density)),
+                    upper_bound: Box::new(self.compile_node(upper_bound)),
                     lower_bound: *lower_bound,
                     cell_height: *cell_height,
                 }),
@@ -1215,8 +2116,8 @@ impl Compiler {
 
     /// `BinaryFunction.compileSampler`。官方先把两边都编译出来，再按类型和范围挑采样器。
     fn compile_binary(&mut self, op: BinaryOp, left: &Ref, right: &Ref) -> Sampler {
-        let compiled_left = Box::new(self.compile(left));
-        let compiled_right = Box::new(self.compile(right));
+        let compiled_left = Box::new(self.compile_node(left));
+        let compiled_right = Box::new(self.compile_node(right));
         match op {
             BinaryOp::Add => match (left.constant(), right.constant()) {
                 (Some(value), _) => Sampler::ConstAdd {
@@ -1347,13 +2248,13 @@ impl Compiler {
                     (*inner_coordinate, coordinate)
                 };
                 return Sampler::SliceXz {
-                    input: Box::new(self.compile(inner_input)),
+                    input: Box::new(self.compile_node(inner_input)),
                     x,
                     z,
                 };
             }
         }
-        let compiled = Box::new(self.compile(input));
+        let compiled = Box::new(self.compile_node(input));
         match axis {
             Axis::X => Sampler::SliceX {
                 input: compiled,
@@ -1372,7 +2273,8 @@ impl Compiler {
 
     /// `DensityFunctionCompiler.reuseOrPrepareCache`：同一个输入共用一个格子。
     fn compile_cache(&mut self, input: &Ref) -> Sampler {
-        let key = Arc::as_ptr(input) as usize;
+        // 官方按输入的 `equals` 去重，记录类是按结构比的，这里用调试输出当结构键。
+        let key = format!("{:?}", input.kind);
         if let Some((id, sampler)) = self.caches.get(&key) {
             return Sampler::Cached {
                 id: *id,
@@ -1381,7 +2283,8 @@ impl Compiler {
         }
         let id = self.next_cache_id;
         self.next_cache_id += 1;
-        let compiled = Arc::new(self.compile(input));
+        let rewritten = self.slice_uniform_axes(input, density::ALL_AXES);
+        let compiled = Arc::new(self.compile_node(&rewritten));
         self.caches.insert(key, (id, Arc::clone(&compiled)));
         Sampler::Cached {
             id,
@@ -1454,6 +2357,28 @@ impl Compiler {
     }
 }
 
+/// `SliceUniformAxes.removeAxes`：把 `removed` 里还没切掉的轴一层层切掉，x 在最里面，y 在最外面。
+fn remove_axes(function: Ref, removed: u8) -> Ref {
+    let mut existing = 0;
+    let mut cursor = &function;
+    while let Kind::Slice { axis, input, .. } = &cursor.kind {
+        existing |= axis.bit();
+        cursor = input;
+    }
+    let removed = removed & !existing;
+    let mut result = function;
+    for axis in [Axis::X, Axis::Z, Axis::Y] {
+        if removed & axis.bit() != 0 {
+            result = density::function(Kind::Slice {
+                axis,
+                coordinate: 0,
+                input: result,
+            });
+        }
+    }
+    result
+}
+
 /// `PowFunction.compileConstExponent`。
 fn compile_const_exponent(base: Sampler, exponent: f32) -> Sampler {
     let abs = exponent.abs();
@@ -1513,6 +2438,17 @@ mod tests {
         (sampler, context)
     }
 
+    /// 编译时官方会把用不到某个轴的根包进 `slice`，看里面那一层。
+    fn unsliced(sampler: &Sampler) -> &Sampler {
+        match sampler {
+            Sampler::SliceX { input, .. }
+            | Sampler::SliceY { input, .. }
+            | Sampler::SliceZ { input, .. }
+            | Sampler::SliceXz { input, .. } => unsliced(input),
+            other => other,
+        }
+    }
+
     #[test]
     fn gradient_clamps_at_both_ends() {
         let (sampler, mut context) = compile(
@@ -1554,7 +2490,7 @@ mod tests {
             r#"{"m": {"type": "minecraft:min", "left": -5.0, "right": 5.0}}"#,
             "m",
         );
-        assert!(matches!(sampler, Sampler::Constant(value) if value == -5.0));
+        assert!(matches!(unsliced(&sampler), Sampler::Constant(value) if *value == -5.0));
         assert_eq!(sampler.sample(&mut context, Path::Point, 0, 0, 0), -5.0);
     }
 
@@ -1569,7 +2505,7 @@ mod tests {
                     "from_value": 0.0, "to_value": 1.0}}}"#,
             "c",
         );
-        assert!(matches!(sampler, Sampler::Cached { id: 0, .. }));
+        assert!(matches!(unsliced(&sampler), Sampler::Cached { id: 0, .. }));
         assert_eq!(sampler.sample(&mut context, Path::Point, 0, 50, 0), 0.5);
         assert_eq!(sampler.sample(&mut context, Path::Point, 0, 50, 0), 0.5);
         assert_eq!(sampler.sample(&mut context, Path::Point, 0, 100, 0), 1.0);
@@ -1636,12 +2572,137 @@ mod tests {
             "p",
         );
         assert!(matches!(
-            reciprocal,
+            unsliced(&reciprocal),
             Sampler::Unary {
                 op: UnaryOp::Reciprocal,
                 ..
             }
         ));
         assert_eq!(reciprocal.sample(&mut context, Path::Point, 0, 0, 0), 1.0);
+    }
+
+    /// 一个 x、y、z 都用到的式子：x + 2y + 3z，各项都是精确的小整数，成批和单点一定相等。
+    const XYZ: &str = r#"{"f": {"type": "minecraft:add",
+        "left": {"type": "minecraft:gradient", "axis": "x",
+            "from_coordinate": -1000, "to_coordinate": 1000,
+            "from_value": -1000.0, "to_value": 1000.0},
+        "right": {"type": "minecraft:add",
+            "left": {"type": "minecraft:mul", "left": 2.0,
+                "right": {"type": "minecraft:gradient", "axis": "y",
+                    "from_coordinate": -1000, "to_coordinate": 1000,
+                    "from_value": -1000.0, "to_value": 1000.0}},
+            "right": {"type": "minecraft:mul", "left": 3.0,
+                "right": {"type": "minecraft:gradient", "axis": "z",
+                    "from_coordinate": -1000, "to_coordinate": 1000,
+                    "from_value": -1000.0, "to_value": 1000.0}}}}}"#;
+
+    /// 整块体积的成批结果按 z、x、y 排，每个点和单点求值相同。
+    #[test]
+    fn volume_layout_matches_point_values() {
+        let (sampler, mut context) = compile("{}", XYZ, "f");
+        let volume = Volume::new((3, 4, 2), (-5, 10, 7), (2, 3, 1));
+        let mut out = vec![0.0; volume.len()];
+        sampler.sample_volume(&mut context, &mut out, &volume);
+        for z in 0..volume.size_z {
+            for x in 0..volume.size_x {
+                for y in 0..volume.size_y {
+                    let (bx, by, bz) = (volume.block_x(x), volume.block_y(y), volume.block_z(z));
+                    assert_eq!(
+                        out[volume.index(x, y, z)],
+                        sampler.sample_value(&mut context, bx, by, bz)
+                    );
+                    assert_eq!(out[volume.index(x, y, z)], (bx + 2 * by + 3 * bz) as f32);
+                }
+            }
+        }
+    }
+
+    /// `interpolated` 在步长为 1 的体积上：格点就是输入，格子里线性函数插出来还是它自己。
+    #[test]
+    fn interpolated_volume_fills_whole_cells() {
+        let functions = format!(
+            r#"{{"g": {}, "i": {{"type": "minecraft:interpolated", "cell_size_xz": 4,
+                "cell_size_y": 8, "input": "g"}}}}"#,
+            &XYZ[6..XYZ.len() - 1]
+        );
+        let (sampler, mut context) = compile("{}", &functions, "i");
+        // 起点不对齐格子，终点也不对齐，测两边的半格。
+        let volume = Volume::blocks((7, 19, 6), (-3, -9, 2));
+        let mut out = vec![0.0; volume.len()];
+        sampler.sample_volume(&mut context, &mut out, &volume);
+        for z in 0..volume.size_z {
+            for x in 0..volume.size_x {
+                for y in 0..volume.size_y {
+                    let (bx, by, bz) = (volume.block_x(x), volume.block_y(y), volume.block_z(z));
+                    assert_eq!(out[volume.index(x, y, z)], (bx + 2 * by + 3 * bz) as f32);
+                }
+            }
+        }
+        // 格点体积直接交给输入。
+        let corners = Volume::new((2, 2, 2), (0, 0, 0), (4, 8, 4));
+        let mut out = vec![0.0; corners.len()];
+        sampler.sample_volume(&mut context, &mut out, &corners);
+        assert_eq!(out[corners.index(1, 1, 1)], (4 + 16 + 12) as f32);
+    }
+
+    /// 开了缓存时，单点求值落在上一块成批体积的格点上就读缓冲。
+    #[test]
+    fn point_lookups_read_the_last_cached_volume() {
+        let (sampler, mut context) = compile(
+            "{}",
+            r#"{"c": {"type": "minecraft:cache",
+                "input": {"type": "minecraft:gradient", "axis": "y",
+                    "from_coordinate": 0, "to_coordinate": 100,
+                    "from_value": 0.0, "to_value": 1.0}}}"#,
+            "c",
+        );
+        let volume = Volume::blocks((1, 4, 1), (0, 0, 0));
+        let mut out = vec![0.0; volume.len()];
+        sampler.sample_volume(&mut context, &mut out, &volume);
+        // 改掉缓冲里的值，单点求值读到的就是改过的值，说明它没有重新算。
+        let id = match unsliced(&sampler) {
+            Sampler::Cached { id, .. } => *id,
+            _ => unreachable!("根是 cache"),
+        };
+        if let Some(cell) = context.cell(id) {
+            cell.buffer[2] = 42.0;
+        }
+        assert_eq!(sampler.sample_value(&mut context, 0, 2, 0), 42.0);
+        // 不在体积里的点照常求值。
+        assert_eq!(sampler.sample_value(&mut context, 0, 50, 0), 0.5);
+        // 不开缓存时什么都不记。
+        let mut uncached = Context::uncached();
+        assert_eq!(sampler.sample_value(&mut uncached, 0, 2, 0), 0.02);
+    }
+
+    /// `range_choice` 成批时三支都算，按输入选。
+    #[test]
+    fn range_choice_volume_picks_per_point() {
+        let (sampler, mut context) = compile(
+            "{}",
+            r#"{"r": {"type": "minecraft:range_choice",
+                "input": {"type": "minecraft:gradient", "axis": "y",
+                    "from_coordinate": 0, "to_coordinate": 10,
+                    "from_value": 0.0, "to_value": 10.0},
+                "min_inclusive": 3.0, "max_exclusive": 6.0,
+                "when_in_range": {"type": "minecraft:gradient", "axis": "x",
+                    "from_coordinate": 0, "to_coordinate": 10,
+                    "from_value": 0.0, "to_value": 10.0},
+                "when_out_of_range": -1.0}}"#,
+            "r",
+        );
+        let volume = Volume::blocks((2, 10, 1), (4, 0, 0));
+        let mut out = vec![0.0; volume.len()];
+        sampler.sample_volume(&mut context, &mut out, &volume);
+        for x in 0..2 {
+            for y in 0..10 {
+                let expected = if (3..6).contains(&y) {
+                    (4 + x) as f32
+                } else {
+                    -1.0
+                };
+                assert_eq!(out[volume.index(x, y, 0)], expected);
+            }
+        }
     }
 }

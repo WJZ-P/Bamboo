@@ -570,6 +570,150 @@ impl Kind {
     }
 }
 
+impl Kind {
+    /// 换掉全部直接子节点，别的字段原样复制。官方 `rewriteChildren` 的那一半。
+    ///
+    /// `cache` 的输入不在这里换：官方编译时 `cache` 已经变成了 `PreparedCache`，
+    /// 它的 `rewriteChildren` 返回自己。
+    pub fn map_children(&self, map: &mut impl FnMut(&Ref) -> Ref) -> Kind {
+        match self {
+            Self::Constant(value) => Self::Constant(*value),
+            Self::BlendAlpha => Self::BlendAlpha,
+            Self::BlendOffset => Self::BlendOffset,
+            Self::Beardifier => Self::Beardifier,
+            Self::EndOuterIslands => Self::EndOuterIslands,
+            Self::DistanceToPoint { point, metric } => Self::DistanceToPoint {
+                point: *point,
+                metric: *metric,
+            },
+            Self::Gradient {
+                axis,
+                tiling,
+                from_coordinate,
+                to_coordinate,
+                from_value,
+                to_value,
+            } => Self::Gradient {
+                axis: *axis,
+                tiling: *tiling,
+                from_coordinate: *from_coordinate,
+                to_coordinate: *to_coordinate,
+                from_value: *from_value,
+                to_value: *to_value,
+            },
+            Self::ShiftA(noise) => Self::ShiftA(noise.clone()),
+            Self::ShiftB(noise) => Self::ShiftB(noise.clone()),
+            Self::Shift(noise) => Self::Shift(noise.clone()),
+            Self::OldBlendedNoise(parameters) => Self::OldBlendedNoise(*parameters),
+            Self::Noise {
+                noise,
+                xz_scale,
+                y_scale,
+                shift_x,
+                shift_y,
+                shift_z,
+            } => Self::Noise {
+                noise: noise.clone(),
+                xz_scale: *xz_scale,
+                y_scale: *y_scale,
+                shift_x: map(shift_x),
+                shift_y: map(shift_y),
+                shift_z: map(shift_z),
+            },
+            Self::Unary { op, input } => Self::Unary {
+                op: *op,
+                input: map(input),
+            },
+            Self::Round {
+                op,
+                input,
+                multiple,
+            } => Self::Round {
+                op: *op,
+                input: map(input),
+                multiple: map(multiple),
+            },
+            Self::Binary { op, left, right } => Self::Binary {
+                op: *op,
+                left: map(left),
+                right: map(right),
+            },
+            Self::Pow { base, exponent } => Self::Pow {
+                base: map(base),
+                exponent: map(exponent),
+            },
+            Self::Spline(spline) => Self::Spline(spline.map_coordinates(map)),
+            Self::Lerp {
+                alpha,
+                first,
+                second,
+            } => Self::Lerp {
+                alpha: map(alpha),
+                first: map(first),
+                second: map(second),
+            },
+            Self::Clamp { input, min, max } => Self::Clamp {
+                input: map(input),
+                min: *min,
+                max: *max,
+            },
+            Self::RangeChoice {
+                input,
+                min_inclusive,
+                max_exclusive,
+                when_in_range,
+                when_out_of_range,
+            } => Self::RangeChoice {
+                input: map(input),
+                min_inclusive: *min_inclusive,
+                max_exclusive: *max_exclusive,
+                when_in_range: map(when_in_range),
+                when_out_of_range: map(when_out_of_range),
+            },
+            Self::IntervalSelect {
+                input,
+                thresholds,
+                functions,
+            } => Self::IntervalSelect {
+                input: map(input),
+                thresholds: thresholds.clone(),
+                functions: functions.iter().map(&mut *map).collect(),
+            },
+            Self::Cache(input) => Self::Cache(Arc::clone(input)),
+            Self::BlendDensity(input) => Self::BlendDensity(map(input)),
+            Self::Interpolated {
+                input,
+                cell_size_xz,
+                cell_size_y,
+            } => Self::Interpolated {
+                input: map(input),
+                cell_size_xz: *cell_size_xz,
+                cell_size_y: *cell_size_y,
+            },
+            Self::Slice {
+                axis,
+                coordinate,
+                input,
+            } => Self::Slice {
+                axis: *axis,
+                coordinate: *coordinate,
+                input: map(input),
+            },
+            Self::FindTopSurface {
+                density,
+                upper_bound,
+                lower_bound,
+                cell_height,
+            } => Self::FindTopSurface {
+                density: map(density),
+                upper_bound: map(upper_bound),
+                lower_bound: *lower_bound,
+                cell_height: *cell_height,
+            },
+        }
+    }
+}
+
 /// `UnaryFunction.range()`。
 fn unary_range(op: UnaryOp, input: Interval) -> Interval {
     match op {

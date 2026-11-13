@@ -1,7 +1,8 @@
 //! 世界生成的纯计算部分：种子加坐标到数值，照官方 `net.minecraft.world.level.levelgen` 移植。
 //!
-//! 这个 crate 只有数学，**还没有接进游戏**：它不认识区块、不认识世界线程，也不生成任何方块。
-//! 真正的地形生成（区块流程、含水层、表面规则、地物、结构）是以后的里程碑。
+//! 这个 crate 是纯函数，**还没有接进游戏**：不认识世界线程，也不改世界状态。
+//! 已有的 [`chunk`] 能把一个主世界区块生成到噪声阶段（群系 + 方块），见 `docs/worldgen.md`；
+//! 地表规则、雕刻器、地物、结构、光照和区块流水线是以后的里程碑。
 //!
 //! 包含：
 //!
@@ -13,6 +14,7 @@
 //! * [`spline`]：三次样条。
 //! * [`climate`] 和 [`biome`]：气候参数、R 树查找和三个维度的群系源。
 //! * [`settings`]：`NoiseGeneratorSettings`、`NoiseRouter` 和 `RandomState`。
+//! * [`volume`]、`[`aquifer`]` 和 [`chunk`]：成批求值的体积、含水层和区块的两个生成阶段。
 //!
 //! 数据（`worldgen/noise`、`worldgen/density_function`、`worldgen/noise_settings` 和
 //! 两个多噪声群系预设）由 `mc-bamboo-vanilla` 的生成器从官方导出，存在 `mc-bamboo-data` 里，
@@ -25,11 +27,14 @@
 //! 见 [`sampler::Path`]。`interpolated` 在单点求值时读的是输入的成批路径，两条都用得到。
 //!
 //! 官方在编译前还跑一遍 `DfRewriteRule.SLICE_UNIFORM_AXES`，把用不到某个轴的子树包进
-//! `slice` 里。`domainAxes` 是保守的，所以那一步不改结果，这里没做（定义域本身算了，
-//! 见 [`density::Function::axes`]）。
+//! `slice` 里。`domainAxes` 是保守的，那一步不改单点求值的值，但会改变成批求值时体积的
+//! 形状、进而改变 `cache` 记住的体积，所以 [`sampler::Compiler::compile`] 照做了
+//! （定义域本身见 [`density::Function::axes`]）。
 
+pub mod aquifer;
 pub mod biome;
 pub mod biome_temperature;
+pub mod chunk;
 pub mod climate;
 pub mod density;
 pub mod interval;
@@ -39,6 +44,7 @@ pub mod random;
 pub mod sampler;
 pub mod settings;
 pub mod spline;
+pub mod volume;
 
 use std::collections::HashMap;
 
