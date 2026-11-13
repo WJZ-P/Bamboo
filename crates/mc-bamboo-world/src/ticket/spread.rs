@@ -893,6 +893,22 @@ impl Plane {
                 cells[index] = best.min(limit_u8);
             }
         }
+        // 调试构建里再走一遍正向扫描，断言已经收敛到不动点。发布构建里这段不存在，
+        // 热路径仍只付两遍的钱；如果哪天 halo 前提被破坏，测试会立刻停在那一格。
+        #[cfg(debug_assertions)]
+        for ix in 1..width - 1 {
+            for iz in 1..height - 1 {
+                let index = ix * height + iz;
+                let best = cells[index]
+                    .min(cells[index - height - 1].saturating_add(1))
+                    .min(cells[index - height].saturating_add(1))
+                    .min(cells[index - height + 1].saturating_add(1))
+                    .min(cells[index - 1].saturating_add(1))
+                    .min(limit_u8);
+                assert_eq!(cells[index], best, "稠密窗口第三遍扫描没有收敛");
+                cells[index] = best;
+            }
+        }
         drop(_sweep_guard);
         let _commit_guard = Guard::new(super::profile::DENSE_COMMIT);
 
