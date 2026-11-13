@@ -1,8 +1,9 @@
 //! 带红石缓存的触发执行。
 //!
 //! 现有驱动循环原样不变；带缓存的循环在每条触发边界调 [`run_cached_trigger`]：
-//! 先守卫，命中就按记录顺序套用效果，未命中就打开录制包装解释执行并收成
-//! [`RuntimeRecord`]。守卫阶段零副作用，命中不了不留半套效果。
+//! 先问一次缓存，不划算的点直接解释执行，连录制包装都不开；划算的点先守卫，
+//! 命中就按记录顺序套用效果，未命中就打开录制包装解释执行并收成 [`RuntimeRecord`]。
+//! 守卫阶段零副作用，命中不了不留半套效果。
 //!
 //! 守卫在 `World` 层做，因为它同时借着 `Level` 和 `BlockTicks`
 //! （`has_scheduled_tick` / `will_tick_this_tick` 不属于 `Level`）。
@@ -12,7 +13,7 @@ use mc_bamboo_core::BlockPos;
 use crate::{
     Level,
     cache::{RedstoneCache, ReplayEffect, RuntimeRecord, guard::GuardRead, guard::ReadMethod},
-    level::Trigger,
+    level::{RecordMode, Trigger},
     recording::ChunkSection,
     state::BlockState,
     ticks::BlockTicks,
@@ -58,11 +59,11 @@ fn guard_value(
     Some(hash)
 }
 
-/// 在**同一个 `World`** 里跑一条触发：命中就直接套用效果，否则解释并录制。
+/// 在**同一个 `World`** 里跑一条触发：命中就套用效果，否则解释并按需录制。
 ///
-/// `world` 的 `level` 是一层 [`crate::recording::Recording`]。守卫和重放期间通过
-/// [`crate::level::Observation::Capture`] 关掉记账，所以守卫的读、重放的写都
-/// 不会进读集合或效果序列。
+/// `world` 的 `level` 常驻一层 [`crate::recording::Recording`]，但记账模式默认 `Off`：
+/// 不划算的触发点只付一次查表 + 一次虚调用。试探中的点开 `Count`（只累加一个
+/// 计数器），确认划算的点才开 `Full`，产出一条运行时记录。
 pub fn run_cached_trigger(
     world: &mut World<'_>,
     cache: &mut RedstoneCache,
@@ -75,29 +76,56 @@ pub fn run_cached_trigger(
         return;
     }
     cache.set_time(now);
-    // 守卫和重放都不记账；解释执行前再打开。
-    world.set_capture(false);
-    let pos = trigger_position(trigger);
-    let state = world.block_state(pos);
+    if !cache.admits(trigger) {
+        // 常驻开销：一次查表，连 RecordMode 都不用切（驱动循环已经设成 Off）。
+        interpret(world);
+        return;
+    }
+
+    // 守卫和重放都不记账；解释执行前再按试探结果打开。
+    world.set_record_mode(RecordMode::Off);
     let effects = {
         let level = world.level();
         let ticks = world.ticks_ref();
-        let mut guard = |read: &GuardRead| guard_value(read, level, ticks, state);
+        // 触发点这一格的状态只在守卫真的要逐项复核时才读：绝大多数触发点没有
+        // 记录可查，不该为它们付这一次读。
+        let pos = trigger_position(trigger);
+        let mut state = None;
+        let mut guard = |read: &GuardRead| {
+            let state = *state.get_or_insert_with(|| level.block_state(pos));
+            guard_value(read, level, ticks, state)
+        };
         let section = |s: ChunkSection| level.section_hash(s.chunk, s.section_y);
         cache.try_replay(trigger, &mut guard, &section)
     };
     if let Some(effects) = effects {
         apply_effects(world, &effects);
-        world.set_capture(true);
         return;
     }
 
-    world.set_capture(true);
-    world.begin_trigger(trigger);
+    // 试探阶段：用上一次 `Count` 得到的读写项数问缓存要不要开录。
+    // 活跃的点每次都开 Full；试探的点按累计工作量决定。
+    let mode = if cache.begin_probe() {
+        RecordMode::Full
+    } else {
+        RecordMode::Count
+    };
+    world.set_record_mode(mode);
+    if mode == RecordMode::Full {
+        world.begin_trigger(trigger);
+    }
     interpret(world);
-    world.end_trigger();
-    if let Some(record) = world.take_runtime_records().into_iter().next() {
-        cache.record(&record);
+    if mode == RecordMode::Full {
+        world.end_trigger();
+        if let Some(record) = world.take_runtime_records().into_iter().next() {
+            cache.record(&record);
+        }
+        // 下一条触发可能是「不划算、直接解释」的点，记账必须已经关掉。
+        world.set_record_mode(RecordMode::Off);
+    } else {
+        let counted = world.take_counted_reads();
+        world.set_record_mode(RecordMode::Off);
+        cache.note_probe_work(counted);
     }
 }
 
@@ -165,6 +193,8 @@ pub fn probe_record(trigger: Trigger) -> RuntimeRecord {
         trigger,
         tick: 0,
         nanos: 0,
+        interpreted_items: 0,
+        written_items: 0,
         reads: Vec::new(),
         effects: Vec::new(),
         sections: Vec::new(),

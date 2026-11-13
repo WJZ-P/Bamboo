@@ -6,6 +6,10 @@
 //! 白名单集中在 [`supported_read`] 和 [`supported_write`] 两个函数，第 4 步扩活塞时
 //! 只改这两处。守卫不过就退回解释执行，守卫阶段零副作用。
 //!
+//! 划算不划算按触发点自己算账，不用墙上时间：`RuntimeRecord::work()` 是这次解释执行的
+//! 确定性工作量（读写项数），门槛、命中省下的代价、未命中白付的代价都用同一个单位。
+//! 见 [`Site`] 和 [`CacheConfig`]。
+//!
 //! 段的整段方块状态哈希由 `mc-bamboo-world::Chunk` 维护
 //! （`docs/performance-optimizations.md` 7h），这里通过 [`Level::section_hash`] 读它。
 
@@ -29,20 +33,29 @@ pub mod guard;
 pub use guard::{GuardRead, ReadMethod};
 
 /// 缓存的总开关和参数。`enabled = false` 时所有入口都只解释执行。
+///
+/// 工作量单位是 [`RuntimeRecord::work`] 的一次读写项，不含墙上时间；门槛和净收益
+/// 都用这同一个单位，所以判定与机器快慢、编译选项、负载无关。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheConfig {
     pub enabled: bool,
-    /// 触发点累计解释耗时达到这个纳秒数才开始录制；0 表示第一次就录（方块对拍用）。
-    pub hot_nanos: u64,
-    /// 两秒内触发数的兜底阈值。
-    pub hot_triggers_per_2s: u32,
-    /// 连续未命中多少次、且已存多少条记录、且命中率低于多少才停录。
-    pub stop_miss_streak: u32,
-    pub stop_min_records: usize,
-    /// 命中率低于这个千分数才停录；周期性电路偶尔一长串不命中不应该停。
-    pub stop_max_hit_millis: u32,
-    /// 停录后的冷却刻数，每次停录翻倍，上限 3200 刻。
-    pub stop_cooldown_ticks: i64,
+    /// 单次解释执行的工作量低于这个值的触发点不录。理由见 `docs/performance-optimizations.md` 7i：
+    /// 九台机器里最大的「小电路」触发是 25732 项，最小的红石线阵列触发是
+    /// 145105 项；65536 落在两者之间，留约 2.5 倍 / 2.2 倍的余量。
+    /// 0 表示不设门槛（方块对拍用）。
+    pub min_work: u64,
+    /// 试探阶段允许的触发次数；这么多次里没有一次达到 `min_work` 就判为不划算，
+    /// 按冷却规则过一阵再试。
+    pub probe_triggers: u32,
+    /// 每个结算窗口的触发次数。
+    pub ledger_window_triggers: u32,
+    /// 窗口内净收益低于这个阈值（工作量单位）就停掉该触发点。
+    /// 默认 0：收支相抵也算不划算，因为还白占了内存。设成 `i64::MIN` 可关掉这条规则。
+    pub ledger_min_gain: i64,
+    /// 窗口结算不划算时，至少已经命中过这么多次才停；给新点一点热起来的时间。
+    pub ledger_min_hits: u64,
+    /// 停掉一个触发点后的冷却刻数，每次停掉翻倍，上限 3200 刻。
+    pub cooldown_ticks: i64,
     /// 每个缓存实例的内存上限（字节）。
     pub memory_limit: usize,
     /// 单条记录的最大字节数。
@@ -53,12 +66,12 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            hot_nanos: 2_000_000,
-            hot_triggers_per_2s: 16,
-            stop_miss_streak: 64,
-            stop_min_records: 32,
-            stop_max_hit_millis: 50,
-            stop_cooldown_ticks: 200,
+            min_work: 65_536,
+            probe_triggers: 8,
+            ledger_window_triggers: 128,
+            ledger_min_gain: 0,
+            ledger_min_hits: 8,
+            cooldown_ticks: 200,
             memory_limit: 32 * 1024 * 1024,
             record_limit: 1024 * 1024,
         }
@@ -66,11 +79,20 @@ impl Default for CacheConfig {
 }
 
 impl CacheConfig {
-    /// 方块对拍用：第一次就录，其余参数保持默认。
+    /// 正式配置：总开关打开，其余按默认门槛。
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    /// 方块对拍用：第一次就录，且不因净收益停录，其余参数保持默认。
     pub fn immediate() -> Self {
         Self {
             enabled: true,
-            hot_nanos: 0,
+            min_work: 0,
+            ledger_min_gain: i64::MIN,
             ..Self::default()
         }
     }
@@ -79,7 +101,10 @@ impl CacheConfig {
 /// 累计统计。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CacheStats {
+    /// 进入缓存引擎（还值得查一次表）的触发数。
     pub triggers: u64,
+    /// 完全不走缓存路径、直接解释执行的触发数。
+    pub bypassed: u64,
     pub replays: u64,
     pub misses: u64,
     pub recorded: u64,
@@ -138,6 +163,11 @@ pub struct RuntimeRecord {
     pub trigger: Trigger,
     pub tick: i64,
     pub nanos: u64,
+    /// 这次解释执行真正跑过的读项数（实验 `Record` 的 `reads.len()`，含重复读同一格）。
+    /// 守卫读项只覆盖「不在方块状态里」的那一小部分，不能拿它当解释代价的代理。
+    pub interpreted_items: u64,
+    /// 这次解释执行产生的写项数（实验 `Record` 的 `writes.len()`）。
+    pub written_items: u64,
     pub reads: Vec<GuardRead>,
     pub effects: Vec<ReplayEffect>,
     pub sections: Vec<SectionKey>,
@@ -148,7 +178,25 @@ pub struct RuntimeRecord {
     pub rejected: bool,
 }
 
+/// 守卫阶段一步能否决的代价单位：每查一个段哈希、每重读一条守卫项各算一项。
+pub const GUARD_READ_WORK: u64 = 1;
+/// 录制包装的常驻代价，按每次转发多记一笔折成一份工作量。
+pub const RECORD_OVERHEAD_PER_ITEM: u64 = 1;
+/// 建键、克隆记录、插表这些与读写项数无关的固定代价。
+pub const RECORD_BASE_WORK: u64 = 8;
+
 impl RuntimeRecord {
+    /// 一次解释执行的确定性工作量：读项数 + 写项数 + 段哈希项数。
+    ///
+    /// 用读写项数而不是墙上时间：它和这次解释执行真正跑过的底层操作数量成正比，
+    /// 同一台机器在任何速度的 CPU、任何编译优化下都得到同一个数，测试可复现。
+    /// 命中时省下的就是这份工作量，未命中时白付的守卫/录制也按这个量纲折算。
+    pub const fn work(&self) -> u64 {
+        self.interpreted_items
+            .saturating_add(self.written_items)
+            .saturating_add(self.sections.len() as u64)
+    }
+
     /// 这条记录是不是能进缓存（白名单 + 无不可缓存标记 + 边界外没有写）。
     pub fn supported(&self) -> bool {
         !self.rejected
@@ -222,19 +270,47 @@ pub struct Entry {
     effects: Vec<ReplayEffect>,
     bytes: usize,
     last_used: i64,
+    /// 命中这条记录能省下的解释执行工作量。
+    saved_work: u64,
 }
 
-/// 每个触发点（归一化后的 `Trigger`）的统计。
+impl Entry {
+    /// 命中或失配都要付的守卫代价。先比段哈希，失配时只读这些段。
+    const fn section_work(&self) -> u64 {
+        GUARD_READ_WORK * self.parts.sections.len() as u64
+    }
+
+    const fn read_work(&self) -> u64 {
+        GUARD_READ_WORK * self.parts.reads.len() as u64
+    }
+}
+
+/// 每个触发点（归一化后的 `Trigger`）的一本账。
+///
+/// `gate` 是三态：`Probing` 还在试探要不要录、`Active` 正在录、`Stopped` 停到某个刻。
+/// `gain` 是当前窗口内「命中省下的工作量 − 未命中白付的守卫/录制工作量」，
+/// 全是确定性计数，不含墙上时间。
 #[derive(Debug, Clone, Copy, Default)]
 struct Site {
-    interpreted_nanos: u64,
+    gate: Gate,
+    probe_triggers: u32,
+    /// 当前窗口的净收益（工作量单位，可为负）。
+    gain: i64,
+    window_triggers: u32,
+    /// 从打开录制到现在累计命中次数，给新点一点热起来的时间。
     hits: u64,
-    misses: u32,
-    records: usize,
+    /// 连续录到白名单以外的记录的次数。这种触发点重放不了，别一直付录制开销。
+    unsupported_streak: u32,
     stopped_until: i64,
     cooldown: i64,
-    window_start: i64,
-    window_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Gate {
+    #[default]
+    Probing,
+    Active,
+    Stopped,
 }
 
 /// 红石缓存。一个 region（或实验用假世界）一份。
@@ -250,6 +326,8 @@ pub struct RedstoneCache {
     now: i64,
     stats: CacheStats,
     site: u128,
+    /// 第一次跑缓存驱动的时刻，用来给试探留一个窗口。
+    started_at: Option<i64>,
 }
 
 impl RedstoneCache {
@@ -264,6 +342,7 @@ impl RedstoneCache {
             now: 0,
             stats: CacheStats::default(),
             site: 0,
+            started_at: None,
         }
     }
 
@@ -288,10 +367,92 @@ impl RedstoneCache {
         self.now = now;
     }
 
+    /// 这一刻整个缓存是不是都不用碰。
+    ///
+    /// 有活跃触发点时永远不休眠，保证大电路的每一刻都能命中；否则在开机后的
+    /// 64 刻试探窗口、以及任何冷却到点的触发点上放行一次，其余时刻驱动直接走
+    /// 不带录制包装的原路径，常驻开销真的是 0。`min_work = 0` 的诊断配置
+    /// （`immediate()`）永不停歇。
+    pub fn dormant(&mut self, now: i64) -> bool {
+        if self.config.min_work == 0 {
+            return false;
+        }
+        let start = *self.started_at.get_or_insert(now);
+        if now.saturating_sub(start) < 64 {
+            return false;
+        }
+        !self.sites.values().any(|state| {
+            state.gate == Gate::Active
+                || (state.gate == Gate::Stopped && state.stopped_until <= now)
+        })
+    }
+
+    /// 这个触发点现在值不值得碰缓存。
+    ///
+    /// 返回 `false` 时调用方直接解释执行，不套录制包装、不建触发帧、不发守卫读项，
+    /// 常驻开销只剩这一次查表和计数。冷却结束的触发点会重新进入试探。
+    pub fn admits(&mut self, trigger: Trigger) -> bool {
+        if !self.config.enabled {
+            self.stats.bypassed += 1;
+            return false;
+        }
+        let site = site_key(trigger);
+        self.site = site;
+        let state = self.sites.entry(site).or_default();
+        if state.gate == Gate::Stopped && state.stopped_until <= self.now {
+            state.gate = Gate::Probing;
+            state.probe_triggers = 0;
+        }
+        if state.gate == Gate::Stopped {
+            self.stats.bypassed += 1;
+            false
+        } else {
+            self.stats.triggers += 1;
+            true
+        }
+    }
+
+    /// 解释执行前问一句：这个触发点现在要不要打开完整录制包装。
+    ///
+    /// 试探阶段用 `Count` 模式估计读写项数（[`Self::note_probe_work`]），
+    /// 单次越过 `min_work` 才切成 `Active`；`immediate()` 把 `min_work` 设成 0，
+    /// 于是第一次就录。
+    pub fn begin_probe(&mut self) -> bool {
+        let site = self.site;
+        let state = self.sites.entry(site).or_default();
+        if self.config.min_work == 0 && state.gate == Gate::Probing {
+            state.gate = Gate::Active;
+        }
+        state.gate == Gate::Active
+    }
+
+    /// 试探阶段一次解释执行结束，把这次的读写项数记进触发点的账。
+    ///
+    /// `Count` 模式只累加一个计数器，不建帧、不哈希，所以这里是这个触发点
+    /// 唯一的常驻开销。单次越过 `min_work` 就切成 `Active`，下次触发开始完整录制；
+    /// 连续 `probe_triggers` 次都够不到门槛就判为不划算。
+    pub fn note_probe_work(&mut self, work: u64) {
+        let site = self.site;
+        let config = self.config;
+        let Some(state) = self.sites.get_mut(&site) else {
+            return;
+        };
+        if state.gate != Gate::Probing {
+            return;
+        }
+        state.probe_triggers = state.probe_triggers.saturating_add(1);
+        if work >= config.min_work {
+            state.gate = Gate::Active;
+        } else if state.probe_triggers >= config.probe_triggers {
+            self.stop_site(site);
+        }
+    }
+
     /// 守卫通过时返回该重放的效果序列，调用方不再解释执行。
     ///
     /// `guard` 由调用方提供：它同时借着 `Level` 和 `BlockTicks`，见设计稿 §3.1。
-    /// `sections` 也由调用方在命中前复核，见 [`crate::cache_run::run_trigger`]。
+    /// `sections` 也由调用方在命中前复核，见 [`crate::cache_run::run_cached_trigger`]。
+    /// 先比段哈希这类一步就能否决的，失配立刻放弃，不再逐项重读。
     pub fn try_replay(
         &mut self,
         trigger: Trigger,
@@ -303,7 +464,8 @@ impl RedstoneCache {
         }
         let site = site_key(trigger);
         self.site = site;
-        self.stats.triggers += 1;
+        let mut guard_cost = 0_u64;
+        let mut found = None;
         let keys = self.site_keys.get(&site).cloned().unwrap_or_default();
         for key in keys {
             let Some(bucket) = self.entries.get(&key) else {
@@ -313,10 +475,9 @@ impl RedstoneCache {
                 if entry.parts.trigger != trigger {
                     continue;
                 }
-                if !guard_matches(entry, guard) {
-                    continue;
-                }
-                // 段哈希覆盖整段方块状态，必须逐段复核缓存记录里的每一段。
+                // 段哈希覆盖整段方块状态：一次查表就能否决绝大多数失配，
+                // 不要先逐项重读（那才是旧版最贵的一块常驻开销）。
+                guard_cost = guard_cost.saturating_add(entry.section_work());
                 if !entry
                     .parts
                     .sections
@@ -325,20 +486,20 @@ impl RedstoneCache {
                 {
                     continue;
                 }
+                guard_cost = guard_cost.saturating_add(entry.read_work());
+                if !guard_matches(entry, guard) {
+                    continue;
+                }
                 self.used.insert(key, self.now);
-                self.sites.entry(site).and_modify(|s| {
-                    s.misses = 0;
-                    s.hits += 1;
-                });
-                self.stats.replays += 1;
-                return Some(entry.effects.clone());
+                found = Some((entry.effects.clone(), entry.saved_work));
+                break;
+            }
+            if found.is_some() {
+                break;
             }
         }
-        self.stats.misses += 1;
-        self.sites.entry(site).and_modify(|s| s.misses += 1);
-        // 连续不命中到阈值就停录，避免「一直录但永远命中不了」的机器涨内存。
-        self.update_stop(site);
-        None
+        self.note_trigger(guard_cost, found.as_ref().map(|(_, saved)| *saved));
+        found.map(|(effects, _)| effects)
     }
 
     /// 把一条解释执行得到的运行时记录收进缓存。返回是否收下了。
@@ -346,22 +507,35 @@ impl RedstoneCache {
         if !self.config.enabled {
             return false;
         }
-        let site = self.site;
+        let site = site_key(record.trigger);
+        self.site = site;
         let config = self.config;
-        let state = self.sites.entry(site).or_default();
-        state.interpreted_nanos = state.interpreted_nanos.saturating_add(record.nanos);
-        if self.now - state.window_start >= 20 {
-            state.window_start = self.now;
-            state.window_count = 0;
-        }
-        state.window_count += 1;
-        let hot = config.hot_nanos == 0
-            || state.interpreted_nanos >= config.hot_nanos
-            || state.window_count >= config.hot_triggers_per_2s;
-        let stopped = state.stopped_until > self.now;
-        if !hot || stopped || !record.supported() {
+        let work = record.work();
+        let record_cost = RECORD_OVERHEAD_PER_ITEM
+            .saturating_mul(work)
+            .saturating_add(RECORD_BASE_WORK);
+        self.note_cost(record_cost);
+        let unsupported = !record.supported();
+        let stopped = self
+            .sites
+            .get(&site)
+            .is_some_and(|s| s.gate == Gate::Stopped);
+        if work < config.min_work || unsupported || stopped {
             self.stats.rejected += 1;
-            self.update_stop(site);
+            // 白名单以外的记录重放不了；连续几次都这样就不该继续为它付完整录制的开销。
+            // `immediate()` 是诊断配置（`min_work = 0`），保留它逐题录制、逐题拒绝的行为。
+            if unsupported && config.min_work > 0 {
+                let mut streak = 0;
+                self.sites.entry(site).and_modify(|s| {
+                    s.unsupported_streak = s.unsupported_streak.saturating_add(1);
+                    streak = s.unsupported_streak;
+                });
+                if streak >= config.probe_triggers {
+                    self.stop_site(site);
+                }
+            } else if let Some(state) = self.sites.get_mut(&site) {
+                state.unsupported_streak = 0;
+            }
             return false;
         }
         let mut sections = record.sections.clone();
@@ -369,7 +543,6 @@ impl RedstoneCache {
         let bytes = entry_bytes(&record.reads, &record.effects, &sections);
         if bytes > config.record_limit {
             self.stats.rejected += 1;
-            self.update_stop(site);
             return false;
         }
         let parts = KeyParts {
@@ -383,6 +556,7 @@ impl RedstoneCache {
             let delta = bytes.saturating_sub(old.bytes);
             old.effects = record.effects.clone();
             old.last_used = self.now;
+            old.saved_work = work;
             self.bytes = self.bytes.saturating_add(delta);
         } else {
             bucket.push(Entry {
@@ -390,9 +564,9 @@ impl RedstoneCache {
                 effects: record.effects.clone(),
                 bytes,
                 last_used: self.now,
+                saved_work: work,
             });
             self.bytes = self.bytes.saturating_add(bytes);
-            self.sites.entry(site).and_modify(|s| s.records += 1);
             self.stats.recorded += 1;
             let keys = self.site_keys.entry(site).or_default();
             if !keys.contains(&key) {
@@ -404,26 +578,75 @@ impl RedstoneCache {
         true
     }
 
-    fn update_stop(&mut self, site: u128) {
+    /// 一次触发记账：命中把省下的工作量记成收益，失配把白付的守卫记成亏损。
+    fn note_trigger(&mut self, guard_cost: u64, saved: Option<u64>) {
+        let site = self.site;
+        let delta = if let Some(saved) = saved {
+            self.stats.replays += 1;
+            i64::try_from(saved.saturating_sub(guard_cost)).unwrap_or(i64::MAX)
+        } else {
+            self.stats.misses += 1;
+            -i64::try_from(guard_cost).unwrap_or(i64::MAX)
+        };
+        let state = self.sites.entry(site).or_default();
+        state.gain = state.gain.saturating_add(delta);
+        state.window_triggers = state.window_triggers.saturating_add(1);
+        if saved.is_some() {
+            state.hits = state.hits.saturating_add(1);
+        }
+        if state.window_triggers >= self.config.ledger_window_triggers {
+            self.settle_ledger(site);
+        }
+    }
+
+    /// 录制包装本身的常驻代价，按工作量折成亏损。
+    ///
+    /// 一次触发最多由 `note_trigger` 结算一次窗口，这里只加账不推进触发计数：
+    /// 没命中时守卫和录制是同一次触发的两笔开销。
+    fn note_cost(&mut self, cost: u64) {
+        let state = self.sites.entry(self.site).or_default();
+        state.gain = state
+            .gain
+            .saturating_sub(i64::try_from(cost).unwrap_or(i64::MAX));
+    }
+
+    /// 一个窗口结算：净收益不达门槛就停掉这个触发点，按冷却规则过一阵再试。
+    fn settle_ledger(&mut self, site: u128) {
         let Some(state) = self.sites.get(&site).copied() else {
             return;
         };
-        let seen = state.hits + u64::from(state.misses);
-        let hit_millis = u32::try_from(1000 * state.hits / seen.max(1)).unwrap_or(1000);
-        if state.stopped_until <= self.now
-            && state.misses >= self.config.stop_miss_streak
-            && state.records >= self.config.stop_min_records
-            && hit_millis < self.config.stop_max_hit_millis
+        self.sites.entry(site).and_modify(|s| {
+            s.gain = 0;
+            s.window_triggers = 0;
+        });
+        if state.gate == Gate::Active
+            && state.gain < self.config.ledger_min_gain
+            && state.hits >= self.config.ledger_min_hits
         {
-            let base = self.config.stop_cooldown_ticks.clamp(1, 3200);
-            let cooldown = base.max(state.cooldown);
-            self.sites.entry(site).and_modify(|s| {
-                s.stopped_until = self.now + cooldown;
-                s.cooldown = (cooldown * 2).min(3200);
-                s.misses = 0;
-            });
-            self.stats.stopped_sites += 1;
+            self.stop_site(site);
         }
+    }
+
+    fn stop_site(&mut self, site: u128) {
+        let Some(state) = self.sites.get(&site).copied() else {
+            return;
+        };
+        if state.gate == Gate::Stopped {
+            return;
+        }
+        let base = self.config.cooldown_ticks.clamp(1, 3200);
+        let cooldown = base.max(state.cooldown).min(3200);
+        self.sites.entry(site).and_modify(|s| {
+            s.gate = Gate::Stopped;
+            s.stopped_until = self.now + cooldown;
+            s.cooldown = (cooldown * 2).min(3200);
+            s.gain = 0;
+            s.window_triggers = 0;
+            s.hits = 0;
+            s.unsupported_streak = 0;
+            s.probe_triggers = 0;
+        });
+        self.stats.stopped_sites += 1;
     }
 
     fn trim_memory(&mut self) {
@@ -526,7 +749,6 @@ pub(crate) fn hash_value(value: &impl Hash) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::guard::GuardRead;
 
     fn trigger(index: i32) -> Trigger {
         Trigger::ScheduledTick {
@@ -535,17 +757,27 @@ mod tests {
         }
     }
 
-    fn record(trigger: Trigger, nanos: u64, value: u64) -> RuntimeRecord {
+    /// 造一条读项数为 `reads`、写项数为 `effects` 的记录，工作量 = reads + effects + sections。
+    fn record(trigger: Trigger, reads: usize, effects: usize, value: u64) -> RuntimeRecord {
         RuntimeRecord {
             trigger,
             tick: 0,
-            nanos,
-            reads: vec![GuardRead {
-                method: ReadMethod::MinY,
-                pos: None,
-                value,
-            }],
-            effects: Vec::new(),
+            nanos: 0,
+            interpreted_items: reads as u64,
+            written_items: effects as u64,
+            reads: (0..reads)
+                .map(|i| GuardRead {
+                    method: ReadMethod::MinY,
+                    pos: None,
+                    value: value.wrapping_add(i as u64),
+                })
+                .collect(),
+            effects: (0..effects)
+                .map(|_| ReplayEffect::Comparator {
+                    pos: BlockPos::new(0, 64, 0),
+                    signal: 1,
+                })
+                .collect(),
             sections: Vec::new(),
             uncacheable: Vec::new(),
             boundary_writes: false,
@@ -553,69 +785,146 @@ mod tests {
         }
     }
 
-    /// 没到热点时不录；累计解释耗时越过阈值才开始录。
+    /// 一次守卫/重放：所有守卫项都给 `value`，段哈希全给 0。
+    fn trigger_once(cache: &mut RedstoneCache, trigger: Trigger, value: u64) -> bool {
+        cache
+            .try_replay(trigger, &mut |_| Some(value), &|_| Some(0))
+            .is_some()
+    }
+
+    /// 便宜的触发点不录：试探窗口里每次解释执行只有几条读项，攒不够门槛。
     #[test]
-    fn hotness_gates_recording() {
+    fn cheap_sites_are_never_recorded() {
         let mut cache = RedstoneCache::new(CacheConfig {
             enabled: true,
-            hot_nanos: 100,
-            hot_triggers_per_2s: u32::MAX,
+            min_work: 100,
+            probe_triggers: 4,
+            ledger_min_gain: i64::MIN,
             ..CacheConfig::default()
         });
-        for _ in 0..3 {
-            assert!(!cache.record(&record(trigger(0), 30, 1)));
+        for _ in 0..4 {
+            assert!(cache.admits(trigger(0)));
+            assert!(!cache.begin_probe(), "便宜的触发点不该打开录制包装");
+            cache.note_probe_work(3);
         }
-        assert!(cache.record(&record(trigger(0), 30, 1)));
+        assert_eq!(cache.stats().recorded, 0);
+        assert!(!cache.admits(trigger(0)), "试探失败后应进冷却");
+        assert!(cache.stats().bypassed > 0);
+    }
+
+    /// 够贵的触发点开录，并且只录工作量超过 min_work 的记录。
+    #[test]
+    fn expensive_sites_open_recording_and_gate_each_record() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            min_work: 10,
+            ledger_min_gain: i64::MIN,
+            ..CacheConfig::default()
+        });
+        assert!(cache.admits(trigger(0)));
+        assert!(!cache.begin_probe(), "第一次还在试探");
+        cache.note_probe_work(20);
+        assert!(cache.admits(trigger(0)));
+        assert!(cache.begin_probe(), "累计够贵就该开录");
+        assert!(!cache.record(&record(trigger(0), 2, 0, 1)), "单条太便宜");
+        assert!(cache.record(&record(trigger(0), 20, 0, 1)));
         assert_eq!(cache.stats().recorded, 1);
     }
 
-    /// 频率兜底：单次很便宜但两秒内触发够多，也要开始录。
+    /// 净收益为负的触发点会停，冷却结束后重新试探。
     #[test]
-    fn frequency_fallback_opens_a_hot_site() {
+    fn a_site_with_negative_gain_stops_and_retries_after_cooldown() {
         let mut cache = RedstoneCache::new(CacheConfig {
             enabled: true,
-            hot_nanos: u64::MAX,
-            hot_triggers_per_2s: 4,
+            min_work: 0,
+            ledger_window_triggers: 4,
+            ledger_min_gain: 0,
+            ledger_min_hits: 0,
+            cooldown_ticks: 5,
             ..CacheConfig::default()
         });
-        for i in 0..4 {
-            cache.set_time(i);
-            cache.record(&record(trigger(0), 1, 1));
-        }
-        assert_eq!(cache.stats().recorded, 1);
-    }
-
-    /// 连续不命中够多次停止录制，冷却后重试；熔炉阵列这类机器不会一直涨内存。
-    #[test]
-    fn a_site_that_never_hits_stops_recording_and_cools_down() {
-        let mut cache = RedstoneCache::new(CacheConfig {
-            enabled: true,
-            hot_nanos: 0,
-            stop_miss_streak: 2,
-            stop_min_records: 0,
-            stop_cooldown_ticks: 5,
-            ..CacheConfig::default()
-        });
-        // 先放一条记录，再连续不命中三次（`stop_miss_streak = 2`）。
-        cache.record(&record(trigger(0), 1, 1));
-        for i in 1..=3 {
-            cache.set_time(i);
-            cache.try_replay(trigger(0), &mut |_| None, &|_| None);
-            cache.record(&record(trigger(0), 1, (i + 7) as u64));
+        // 一条很便宜的记录：守卫代价（1 项）和录制代价（8+1）都比命中省下的（1）大。
+        assert!(cache.admits(trigger(0)));
+        assert!(cache.begin_probe(), "immediate 配置第一次就录");
+        assert!(cache.record(&record(trigger(0), 1, 0, 1)));
+        for now in 1..=4 {
+            cache.set_time(now);
+            assert!(cache.admits(trigger(0)), "第 {now} 次还没到窗口结算");
+            assert!(cache.begin_probe());
+            assert!(
+                !trigger_once(&mut cache, trigger(0), 999),
+                "守卫换值才能失配"
+            );
+            let _ = cache.record(&record(trigger(0), 1, 0, 1));
         }
         assert_eq!(cache.stats().stopped_sites, 1);
-        let before = cache.entry_count();
-        // 冷却到 now+5，之间每次新键都不该被录进去。
-        for i in 4..=7 {
-            cache.set_time(i);
-            cache.record(&record(trigger(0), 1, 200 + i as u64));
+        assert!(!cache.admits(trigger(0)), "停掉后直接解释执行");
+        cache.set_time(10);
+        assert!(cache.admits(trigger(0)), "冷却结束重新试探");
+    }
+
+    /// 净收益为正的触发点一直留着。
+    #[test]
+    fn a_site_with_positive_gain_stays_active() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            min_work: 0,
+            ledger_window_triggers: 4,
+            ledger_min_gain: -100_000,
+            ..CacheConfig::default()
+        });
+        assert!(cache.admits(trigger(0)));
+        assert!(cache.begin_probe());
+        cache.record(&record(trigger(0), 1000, 0, 7));
+        for now in 1..=8 {
+            cache.set_time(now);
+            assert!(cache.admits(trigger(0)));
+            assert!(cache.begin_probe());
+            assert!(
+                cache
+                    .try_replay(trigger(0), &mut |read| Some(read.value), &|_| Some(0))
+                    .is_some()
+            );
         }
-        assert_eq!(cache.entry_count(), before, "冷却期间不该继续录");
-        cache.set_time(8);
+        assert_eq!(cache.stats().stopped_sites, 0);
+        assert_eq!(cache.stats().replays, 8);
+    }
+
+    /// 段哈希失配时不再逐项重读；守卫项数就是段数。
+    #[test]
+    fn section_mismatch_skips_itemized_guard_reads() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            min_work: 0,
+            ledger_min_gain: i64::MIN,
+            ..CacheConfig::default()
+        });
+        assert!(cache.admits(trigger(0)));
+        assert!(cache.begin_probe());
+        let mut r = record(trigger(0), 3, 0, 7);
+        r.sections.push(SectionKey {
+            section: ChunkSection {
+                chunk: mc_bamboo_core::ChunkPos::new(0, 0),
+                section_y: 4,
+            },
+            hash: 42,
+        });
+        assert!(cache.record(&r));
+        let mut reads = 0;
         assert!(
-            cache.record(&record(trigger(0), 1, 99)),
-            "冷却结束后可以再试"
+            cache
+                .try_replay(
+                    trigger(0),
+                    &mut |_| {
+                        reads += 1;
+                        Some(7)
+                    },
+                    &|_| Some(0)
+                )
+                .is_none(),
+            "段哈希不匹配必须退回解释"
         );
+        assert_eq!(reads, 0, "段哈希一步否决，不该逐项重读");
     }
 
     /// 超过内存上限按最近使用淘汰，降到 80%。
@@ -623,14 +932,18 @@ mod tests {
     fn memory_limit_evicts_least_recently_used_entries() {
         let mut cache = RedstoneCache::new(CacheConfig {
             enabled: true,
-            hot_nanos: 0,
+            min_work: 0,
             memory_limit: 1000,
             record_limit: usize::MAX,
+            ledger_min_gain: i64::MIN,
             ..CacheConfig::default()
         });
         for index in 0_u64..40 {
             cache.set_time(index as i64);
-            cache.record(&record(trigger(index as i32), 1, index));
+            let t = trigger(index as i32);
+            cache.admits(t);
+            cache.begin_probe();
+            cache.record(&record(t, 4, 0, index));
         }
         assert!(cache.bytes() <= 800);
         assert!(cache.stats().evictions > 0);
@@ -642,11 +955,14 @@ mod tests {
     fn key_parts_are_compared_in_full() {
         let mut cache = RedstoneCache::new(CacheConfig {
             enabled: true,
-            hot_nanos: 0,
+            min_work: 0,
+            ledger_min_gain: i64::MIN,
             ..CacheConfig::default()
         });
-        cache.record(&record(trigger(0), 1, 1));
-        cache.record(&record(trigger(0), 1, 2));
+        cache.admits(trigger(0));
+        cache.begin_probe();
+        cache.record(&record(trigger(0), 1, 0, 1));
+        cache.record(&record(trigger(0), 1, 0, 2));
         assert_eq!(cache.entry_count(), 2);
     }
 }
