@@ -1,32 +1,52 @@
 #!/usr/bin/env bash
-# 崩溃测试：后台静默起 bamboo.exe → 官方探针改方块 → 等 D6 匀速保存 →
-# 强杀进程 → 用官方 codec 检查留下的世界目录 → 重启 → 再跑一次探针确认世界能读。
+# 崩溃测试：后台静默起 Bamboo → 官方探针改方块 → 用 /setblock 放一个不会被探针
+# 清掉的方块 → 等自动保存 → 强杀进程 → 用官方 codec 检查留下的世界目录和那一格
+# 方块 → 重启 → 再跑一次探针确认世界能读，并检查重启后那一格还在。
 #
-# Repeatable crash test: start bamboo.exe silently, let the official probe place
-# blocks, wait for D6 paced saves, kill -9, verify the left-behind world dir with
+# Repeatable crash test: start Bamboo silently, let the official probe place
+# blocks, place one marker block the probe never clears, wait for the autosave,
+# kill -9, verify the left-behind world dir (including that exact block) with
 # the official codecs, restart, and run the probe again to confirm the world loads.
 #
 # 用法 / usage:
-#   BAMBOO=<bamboo.exe 路径> PROBE_RUN=<服务端目录> \
+#   BAMBOO=<bamboo 路径> PROBE_RUN=<服务端目录> \
 #   JAVA=<java 路径> tools/crash-test.sh  （工具走 cargo run）
 #
 # PROBE_RUN 里要有 server.properties / bamboo.toml / ops.json；world/ 会被删掉重建。
 # 不提交 ops.json，也不把 world/ 留在仓库里。
+#
+# macOS / Linux 默认用 target/debug/bamboo 和 JAVA_HOME（或 PATH 里的 java）。
+# Windows（Git Bash / MSYS）也支持：BAMBOO 默认 target/debug/bamboo.exe，
+# JAVA 可以用 /c/... 形式给出。所有路径都可以用环境变量覆盖。
 
 set -u
 
 WT="$(cd "$(dirname "$0")/.." && pwd)"
-BAMBOO="${BAMBOO:-$WT/target/debug/bamboo.exe}"
+
+# 二进制在 Windows 上带 .exe；BAMBOO 给了就完全照给的值用。
+case "$(uname -s 2>/dev/null || echo Windows)" in
+    MINGW*|MSYS*|CYGWIN*|Windows*) EXE=.exe ;;
+    *) EXE= ;;
+esac
+BAMBOO="${BAMBOO:-$WT/target/debug/bamboo$EXE}"
 PROBE_RUN="${PROBE_RUN:-$WT/../probe-run}"
 
-# 工具用 cargo run 起（直接跑二进制时 workspace_root()/collect_jars 偶发异常）。
-# Use cargo run for the tool; running the binary directly can misbehave.
-vanilla() {
-    (cd "$WT" && cargo run -q -p mc-bamboo-vanilla -- "$@")
-}
-JAVA="${JAVA:-/c/Users/Administrator/.jdks/openjdk-26.0.1/bin/java}"
+# 优先 JAVA_HOME，其次 PATH 里的 java；Windows 上仍可用 /c/... 形式覆盖。
+if [ -z "${JAVA:-}" ]; then
+    if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java$EXE" ]; then
+        JAVA="$JAVA_HOME/bin/java$EXE"
+    else
+        JAVA="java"
+    fi
+fi
 PORT1="${PORT1:-25660}"
 PORT2="${PORT2:-25661}"
+# 那一格方块：探针按全新世界校准，收尾会清掉自己放的方块，所以另外放一个。
+# 用 /setblock 走命令层，保证世界线程真的把它记成改动。
+MARKER_X="${MARKER_X:-5}"
+MARKER_Y="${MARKER_Y:--59}"
+MARKER_Z="${MARKER_Z:-5}"
+MARKER_BLOCK="${MARKER_BLOCK:-minecraft:diamond_block}"
 LOG_DIR="${LOG_DIR:-$WT/target/crash-test-logs}"
 mkdir -p "$LOG_DIR"
 
@@ -64,18 +84,40 @@ start() {
     echo "$pid"
 }
 
+# 工具用 cargo run 起（直接跑二进制时 workspace_root()/collect_jars 偶发异常）。
+# Use cargo run for the tool; running the binary directly can misbehave.
+vanilla() {
+    (cd "$WT" && cargo run -q -p mc-bamboo-vanilla -- "$@")
+}
+
+# 用官方 RegionFile + SerializableChunkData.parse 从崩溃留下的 .mca 里读出那一格。
+# 这条命令只依赖官方 codec，不启动服务端、不接受 EULA。
+read_marker() {
+    vanilla world-block "$PROBE_RUN/world" "$MARKER_X" "$MARKER_Y" "$MARKER_Z" \
+        "$MARKER_BLOCK" "$JAVA"
+}
+
 echo "== crash test: fresh world =="
 rm -rf "$PROBE_RUN/world"
 PID1=$(start "$PORT1" "$LOG_DIR/first.log") || exit 1
 echo "first server pid=$PID1"
 
-echo "== first official probe (places blocks) =="
-vanilla probe 127.0.0.1 "$PORT1" "$JAVA" >"$LOG_DIR/probe1.log" 2>&1 || true
-grep -E "PROBE RESULT|PROBE FAIL" "$LOG_DIR/probe1.log" || true
+# 探针全部检查跑完之后会用官方客户端发这条 /setblock：主脚本会清掉它自己放的
+# 方块，这一格不在它的清理列表里，也不影响任何断言。
+echo "== first official probe (places blocks and the crash-test marker) =="
+MARKER_COMMAND="setblock $MARKER_X $MARKER_Y $MARKER_Z $MARKER_BLOCK"
+vanilla probe 127.0.0.1 "$PORT1" "$JAVA" "$MARKER_BLOCK" "$MARKER_COMMAND" \
+    >"$LOG_DIR/probe1.log" 2>&1 || true
+grep -E "PROBE RESULT|PROBE FAIL|marker:" "$LOG_DIR/probe1.log" || true
+grep -q "PROBE RESULT 7[0-9][0-9]/7[0-9][0-9] checks passed" "$LOG_DIR/probe1.log" || {
+    echo "the first probe did not pass all of its checks" >&2
+    tail -20 "$LOG_DIR/probe1.log" >&2
+    exit 1
+}
 
-# 让 D6 匀速保存把脏区块写下去（默认每刻至少 1 个、单区块 10 秒冷却）。
-echo "== wait for paced saves =="
-sleep 5
+# 单区块 10 秒（200 刻）冷却：匀速保存要等冷却过了才会重写改过的区块。
+echo "== wait for paced saves (past the 10s per-chunk cooldown) =="
+sleep 12
 
 echo "== force kill (simulate crash) =="
 kill -9 "$PID1" >/dev/null 2>&1 || true
@@ -93,6 +135,16 @@ echo "region/entity .mca files: $MCA"
 echo "== official world-dir verification of the crashed world =="
 vanilla world-dir "$PROBE_RUN/world" "$JAVA" 2>&1 | tail -5 || {
     echo "world-dir verification FAILED" >&2
+    exit 1
+}
+
+echo "== the marker block survived kill -9 on disk =="
+read_marker 2>&1 | tee "$LOG_DIR/marker-before-restart.log" || {
+    echo "marker block missing from the crashed world" >&2
+    exit 1
+}
+grep -F "WORLD-BLOCK RESULT" "$LOG_DIR/marker-before-restart.log" >/dev/null || {
+    echo "marker block verification did not report a result" >&2
     exit 1
 }
 

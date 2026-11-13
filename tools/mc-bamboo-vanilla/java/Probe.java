@@ -357,6 +357,10 @@ public final class Probe {
     /** 所有步骤都有时限，这是最后的保险：比如服务端不读 socket 时写操作会一直挂着。 */
     private static final long WATCHDOG_MILLIS = 480_000;
     private static final int READ_TIMEOUT_MILLIS = 5;
+    /** 崩溃测试标记方块，位置由脚本给，主脚本不会碰这一格。 */
+    private static BlockPos markerPos;
+    private static String markerBlock;
+    private static String markerCommand;
     private static final double SPAWN_X = 8.5;
     private static final double SPAWN_Y = -60.0;
     private static final double SPAWN_Z = 8.5;
@@ -469,6 +473,24 @@ public final class Probe {
         // 多出来的两个参数是开了正版验证的服务端和假 session server，没给就不查那一段。
         String onlineAddress = args.length > 2 ? args[2] : null;
         String sessionUrl = args.length > 3 ? args[3] : null;
+        // 崩溃测试给一个额外的 /setblock 命令：主脚本收尾会清掉它自己放的方块，
+        // 这一格作为 kill -9 前后都要还在的标记，位置由脚本选在主脚本不碰的地方。
+        // The crash test can append a /setblock command; the main probe clears its
+        // own blocks, so this marker is used to check persistence across kill -9.
+        String marker = args.length > 4 ? args[4] : null;
+        String command = args.length > 5 ? args[5] : null;
+        if (marker != null && command != null) {
+            // 命令形如 "setblock 5 -59 5 minecraft:diamond_block"；按官方
+            // BlockPos 的参数顺序解析三个坐标，给收尾阶段留一个不会清掉的方块。
+            String[] parts = command.trim().split("\\s+");
+            if (parts.length < 4) {
+                throw new IllegalArgumentException("bad marker command: " + command);
+            }
+            markerPos = new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]),
+                    Integer.parseInt(parts[3]));
+            markerBlock = marker;
+            markerCommand = command;
+        }
         startWatchdog();
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -829,6 +851,28 @@ public final class Probe {
                         () -> late.latencyUpdated);
             });
 
+            // 崩溃测试的标记方块：探针的全部检查跑完之后放，避免影响任何断言，
+            // 也不在探针自己清方块的列表里。等官方客户端收到 change 包再退出。
+            if (markerCommand != null) {
+                // 用主脚本里已经在 ops.json 的 OP 玩家，不额外加一个没权限的连接。
+                Join marker = clients.get(0);
+                marker.send(new ServerboundChatCommandPacket(markerCommand));
+                // 先等方块变化包真正到达：世界线程消费聊天命令和写方块都在同一刻，
+                // 不等就发 save-all 的话，快照会在 /setblock 生效之前拍下。
+                await("marker: the block is placed on the running server",
+                        () -> {
+                            BlockState state = marker.blocks.get(markerPos);
+                            return state != null && net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                                    .getKey(state.getBlock()).toString().equals(markerBlock);
+                        });
+                pumpFor(SETTLE_MILLIS);
+                // 让匀速保存把这一格写下去，而且等盘上的写入真正完成：
+                // 接下来是 kill -9，不落盘就检查不到。save-all 会把所有
+                // 已加载脏区块立刻交给 IO 线程并排一道栅栏。
+                marker.send(new ServerboundChatCommandPacket("save-all flush"));
+                await("marker: the save-all flush finished",
+                        () -> containsText(marker, "Saved the game"));
+            }
             for (Join client : clients) {
                 client.finishChecks();
             }

@@ -241,6 +241,12 @@ public final class StorageOracle {
                     response = worldDir(Path.of(request.get("dir").getAsString()));
                     response.addProperty("command", command);
                 }
+                case "world-block" -> {
+                    // 从真实 .mca 里用官方 RegionFile + SerializableChunkData.parse
+                    // 读出一格方块，报告它的注册名。崩溃测试用它确认改动没丢。
+                    response = worldBlock(request);
+                    response.addProperty("command", command);
+                }
                 default -> response.addProperty("error", "unknown command " + command);
             }
             return response;
@@ -375,6 +381,56 @@ public final class StorageOracle {
             response.addProperty("players", players);
             response.addProperty("savedData", savedData);
             response.add("errors", errors);
+            return response;
+        }
+
+        /** 用官方 RegionFile / SerializableChunkData.parse 读出一格方块的注册名。 */
+        private JsonObject worldBlock(JsonObject request) {
+            JsonObject response = new JsonObject();
+            try {
+                Path path = Path.of(request.get("dir").getAsString());
+                int rx = request.get("rx").getAsInt();
+                int rz = request.get("rz").getAsInt();
+                int x = request.get("x").getAsInt();
+                int y = request.get("y").getAsInt();
+                int z = request.get("z").getAsInt();
+                ChunkPos pos = new ChunkPos(x >> 4, z >> 4);
+                RegionStorageInfo info = new RegionStorageInfo("oracle", Level.OVERWORLD, "region");
+                try (RegionFile region = new RegionFile(info, path, path.getParent(), false)) {
+                    if (!region.hasChunk(pos)) {
+                        return response;
+                    }
+                    try (DataInputStream stream = region.getChunkDataInputStream(pos)) {
+                        if (stream == null) {
+                            response.addProperty("error", "null chunk stream");
+                            return response;
+                        }
+                        CompoundTag tag = NbtIo.read(stream);
+                        SerializableChunkData parsed = SerializableChunkData.parse(height, containers, tag);
+                        if (parsed == null) {
+                            response.addProperty("error", "SerializableChunkData.parse returned null");
+                            return response;
+                        }
+                        // sectionData 是官方解出来的段；只找带方块段的那个 Y。
+                        int sectionY = Math.floorDiv(y, 16);
+                        int localY = Math.floorMod(y, 16);
+                        for (SerializableChunkData.SectionData section : parsed.sectionData()) {
+                            if (section.y() != sectionY || section.chunkSection() == null) {
+                                continue;
+                            }
+                            BlockState state = section.chunkSection().getBlockState(
+                                    Math.floorMod(x, 16), localY, Math.floorMod(z, 16));
+                            net.minecraft.resources.Identifier id =
+                                    net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                            response.addProperty("block", id.toString());
+                            return response;
+                        }
+                        response.addProperty("error", "no block section at y=" + y);
+                    }
+                }
+            } catch (Exception error) {
+                response.addProperty("error", error.toString());
+            }
             return response;
         }
 
