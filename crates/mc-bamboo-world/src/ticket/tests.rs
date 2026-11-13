@@ -6,7 +6,7 @@ type Sources = Vec<(ChunkPos, i32)>;
 
 use mc_bamboo_core::ChunkPos;
 
-use super::spread::SCRATCH_POOL_CAP;
+use super::spread::{PEAK_MARGIN, PEAK_WINDOW, SCRATCH_POOL_CAP, SCRATCH_POOL_MIN};
 use super::{
     ChunkStatus, FULL_CHUNK_LEVEL, LevelChange, MAX_LEVEL, MIN_VIEW_DISTANCE, SIMULATION_MAX_LEVEL,
     SavedTicket, TicketTable, TicketType, UNLOADED_LEVEL, full_status, generation_status,
@@ -757,15 +757,16 @@ fn scratch_blocks_stay_bounded_while_moving_away() {
 }
 
 #[test]
-fn scratch_pool_has_a_fixed_cap_after_two_hundred_players_move_apart() {
+fn scratch_pool_recycles_after_two_hundred_players_move_apart() {
     let mut table = TicketTable::new();
-    // 200 名玩家分散到视距之外，每人沿不同方向越走越远；一次更新同时
-    // 用到的块数远小于历史走过的位置数，池子不能照历史峰值保留。
+    // 200 名玩家分散到视距之外，每人沿不同方向越走越远；近期峰值远高于
+    // 单个玩家的一次更新，池子既要跟得上，也要在峰值过去之后缩回来。
     for id in 0..200u64 {
         let step = id as i32;
         table.set_player(id, Some(p(step * 97, step * 61)));
     }
     table.run_updates();
+    let mut peak = table.scratch_blocks();
     for tick in 1..=20 {
         for id in 0..200u64 {
             let step = id as i32;
@@ -775,11 +776,30 @@ fn scratch_pool_has_a_fixed_cap_after_two_hundred_players_move_apart() {
             );
         }
         table.run_updates();
+        peak = peak.max(table.scratch_blocks());
         assert!(
             table.scratch_blocks() <= 2 * SCRATCH_POOL_CAP,
-            "辅助块池超过固定上限：{} > {}",
+            "辅助块池超过硬上限：{} > {}",
             table.scratch_blocks(),
             2 * SCRATCH_POOL_CAP
         );
     }
+    assert!(peak > 2 * SCRATCH_POOL_MIN, "分散场景确实撑大了池子");
+
+    // 玩家全部离开；再跑够一个完整的峰值窗口，旧峰值逐条滑出窗口。
+    for id in 0..200u64 {
+        table.set_player(id, None);
+    }
+    for _ in 0..=PEAK_WINDOW * 2 {
+        table.run_updates();
+        assert!(
+            table.scratch_blocks() <= 2 * SCRATCH_POOL_CAP,
+            "回收途中也不该超过硬上限"
+        );
+    }
+    assert!(
+        table.scratch_blocks() <= 2 * (SCRATCH_POOL_MIN + PEAK_MARGIN),
+        "峰值过去之后池子要缩回最小值附近：{}",
+        table.scratch_blocks()
+    );
 }

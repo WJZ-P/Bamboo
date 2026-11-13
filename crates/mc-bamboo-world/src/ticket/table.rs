@@ -415,6 +415,8 @@ impl TicketTable {
     pub fn run_updates(&mut self) -> &[LevelChange] {
         self.changes.clear();
         if self.pending.is_empty() {
+            self.loading.note_idle_round();
+            self.simulation.note_idle_round();
             return &self.changes;
         }
         let _pending_guard = Guard::new(PENDING);
