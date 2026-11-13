@@ -431,6 +431,8 @@ pub struct Director<C> {
     filtered: u64,
     acted: u64,
     shutting_down: bool,
+    /// 每次 `handle` 复用的效果列表容量。
+    effects: Vec<Effect<C>>,
     /// 构造一个「生成器输出」的盒子。宿主设置；测试可以用 `C::default`。
     template: Option<fn() -> C>,
 }
@@ -464,6 +466,7 @@ impl<C: ChunkBundle> Director<C> {
             filtered: 0,
             acted: 0,
             shutting_down: false,
+            effects: Vec::new(),
             template: None,
         }
     }
@@ -626,9 +629,20 @@ impl<C: ChunkBundle> Director<C> {
         }
     }
 
-    /// 处理一个事件，返回要派出去的任务和要发给 region 的消息。
+    /// 处理一个事件，返回它产生的效果。测试和不复用容量的调用方走这里。
     pub fn handle(&mut self, event: Event<C>) -> Vec<Effect<C>> {
         let mut out = Vec::new();
+        self.handle_effects(event, |effects| std::mem::swap(&mut out, effects));
+        out
+    }
+
+    /// 处理一个事件，把效果列表交给 `emit`。
+    ///
+    /// 效果列表在 Director 里复用：`emit` 返回后清空，下一次 `handle_effects`
+    /// 用同一块容量。宿主必须在 `emit` 里把效果消费完或换走。
+    pub fn handle_effects(&mut self, event: Event<C>, emit: impl FnOnce(&mut Vec<Effect<C>>)) {
+        let mut out = std::mem::take(&mut self.effects);
+        out.clear();
         match event {
             Event::Tickets { ops } => {
                 for op in ops {
@@ -661,7 +675,9 @@ impl<C: ChunkBundle> Director<C> {
             }
         }
         self.drive(&mut out);
-        out
+        emit(&mut out);
+        out.clear();
+        self.effects = out;
     }
 
     // ---- 票 ----

@@ -147,6 +147,8 @@ pub(crate) struct DirectorHost {
     /// 这一刻已经从 region 取回了多少个区块。收回的上限会随积压放宽，
     /// 所以不能用「剩余额度」记，要记花掉的个数。
     reclaims_spent: usize,
+    /// 每次 `Director::handle_effects` 复用的效果列表容量。
+    effect_scratch: Vec<Effect<Box<RegionColumn>>>,
     /// 统计：本刻交付/收回/停放的区块数，给剖析器用。
     delivered: usize,
     reclaimed: usize,
@@ -261,6 +263,7 @@ impl DirectorHost {
             deliveries: BTreeMap::new(),
             reclaims: Vec::new(),
             read_queue: Vec::new(),
+            effect_scratch: Vec::new(),
             delivered: 0,
             reclaimed: 0,
             parked: 0,
@@ -1006,9 +1009,11 @@ impl DirectorHost {
                     _ => SubPhase::DirectorEvents,
                 };
                 region.profiler.start_sub(sub);
-                let effects = self.director.handle(event);
+                let mut effects = std::mem::take(&mut self.effect_scratch);
+                self.director
+                    .handle_effects(event, |out| std::mem::swap(&mut effects, out));
                 region.profiler.end_sub();
-                for effect in effects {
+                for effect in effects.drain(..) {
                     match effect {
                         Effect::Submit {
                             id,
@@ -1053,6 +1058,7 @@ impl DirectorHost {
                         Effect::Warn { message } => tracing::warn!(%message, "chunk director"),
                     }
                 }
+                self.effect_scratch = effects;
             }
             // 再把 region 信箱里的交付/收回变成 Delivered / Returned 事件。
             // 没有新消息就收敛了。
