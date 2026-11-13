@@ -91,6 +91,6 @@ pub use ticks::{BlockTicks, Busy, ChunkTicks, ScheduledFluidTick, ScheduledTick,
 pub use weather::{BlockWeather, Precipitation, PrecipitationFacts};
 pub use world::World;
 pub use world_border::{
-    ABSOLUTE_MAX_SIZE, BorderEvent, BorderSettings, BorderStatus, MAX_CENTER_COORDINATE, MAX_SIZE,
-    WorldBorder,
+    ABSOLUTE_MAX_SIZE, BlockBox, BorderEvent, BorderSettings, BorderStatus, MAX_CENTER_COORDINATE,
+    MAX_SIZE, WorldBorder,
 };

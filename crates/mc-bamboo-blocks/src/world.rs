@@ -1110,11 +1110,19 @@ impl<'a> World<'a> {
     /// furnaces and brewing stands.
     pub fn tick_block_entities(&mut self) {
         let now = self.ticks.now();
+        // `LevelChunk.isTicking(pos)` 的第一条是 `getWorldBorder().isWithinBounds(pos)`：
+        // 按方块坐标判断，跨边界的区块里一部分 ticker 跑、一部分停。边界在这一刻的
+        // "world border" 阶段已经推进过，整段用同一个盒子。要在 `begin` 之前同步：
+        // `begin` 会把这一刻到点的睡眠条目直接转醒，数值留给 `tick` 自己推进，
+        // 出了边界的不会跑，必须先按公式停在上一刻。
+        let border = self.level.world_border().block_box();
+        self.level.sync_block_entity_border(border);
         self.level.begin_block_entity_tick(now);
         while let Some((pos, id)) = self.level.next_block_entity_ticker() {
-            // 官方先判 `shouldTickBlocksAt(pos)`，再判 `LevelChunk.isTicking(pos)`；
-            // 跳过的 ticker 留在列表里，运行顺序不变。
+            // 官方先判 `shouldTickBlocksAt(pos)`，再判 `LevelChunk.isTicking(pos)`
+            // （边界内、区块能 tick）；跳过的 ticker 留在列表里，运行顺序不变。
             if !self.level.chunk_ticks_blocks(pos.chunk())
+                || !border.contains(pos)
                 || !self.level.runs_block_entity_tick(pos)
             {
                 continue;

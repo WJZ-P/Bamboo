@@ -976,6 +976,17 @@ cookingTimer += 1
 恢复后重新算日程。装盒走同一套：`ChunkBlockEntities` 带相对剩余刻数，放回时按目标
 表的时钟换算（和计划刻的 `SavedTick.delay` 一样）。
 
+**世界边界外也是暂停。** 官方 `LevelChunk.isTicking(pos)` 的第一条是
+`getWorldBorder().isWithinBounds(pos)`，按方块坐标判断。方块实体阶段开头把这一刻的边界
+换成整数方块盒（`WorldBorder::block_box`，`min ≤ x < max` 用 `ceil` 换算，和 double 比较
+逐格等价），每个 ticker 多四次整数比较。盒子变了，`BlockEntities::sync_border` 只查
+「旧盒子摸到、新盒子没完全盖住」那一圈区块（圈比表里有方块实体的区块还多时改为在表里筛），
+出界的睡眠实体走和冻结同一条路径：按公式推进到上一刻、转醒，之后每刻被边界跳过。
+同步排在 `begin_tick` 之前：`begin_tick` 会把这一刻到点的睡眠条目直接转醒、数值留给
+`tick` 自己推进，出界的不会跑，必须先停在上一刻。界外的实体从不睡（只有真跑过一次才排
+日程），所以回到界内不用处理；装盒放回时落在界外的也不带睡眠。渐变边界每刻都变，但
+每刻只动边上一两圈区块，开销和已加载区块数无关。
+
 **合成器倒计时**改成记绝对到期时刻并放到期桶，`tick_crafting_clocks` 每刻只碰
 到期的那几台；盒子里仍存剩余刻数，存档键 `crafting_ticks_remaining` 不变。
 

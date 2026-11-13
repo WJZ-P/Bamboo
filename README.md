@@ -129,7 +129,11 @@ WebView2 的渲染进程不算在内。
   `WorldBorder` 类在 JVM 里对拍。方块交互、放置、破坏、活塞、下落方块、桶、床的
   `getWorldBorder().isWithinBounds` 调用点、三种实体和玩家移动的边界碰撞都读真正的状态。
   状态按维度归 `Global`（设计稿 6.6 的全局状态），region 每刻取一份只读快照；渐变在
-  `ServerLevel.tick` 的 "world border" 阶段、天气和时间之前推进。
+  `ServerLevel.tick` 的 "world border" 阶段、天气和时间之前推进。边界外照官方
+  `LevelChunk.isTicking` 只停方块实体：按方块自己的坐标判断，跨边界的区块里界内的照跑、
+  界外的暂停，边界回来后从原进度接着走；计划刻、流体刻、方块事件、随机刻和实体官方都不看
+  边界，Bamboo 也照常跑。缩小、扩大、移动和渐变每刻只换一个整数方块盒，睡着的方块实体
+  只查新旧盒子之间那一圈区块，`border-oracle` 逐刻比较这个方块盒和官方 `isWithinBounds(BlockPos)`。
 - 区块跟着玩家走，Tab 列表、玩家互相可见、潜行、冲刺、挥手、手持物同步。
   Tab 列表的延迟每 601 tick 广播一次，数值是心跳往返时间的加权平均，公式和官方一样。
   心跳 id 和正在等的那次对不上，或者当前没在等心跳，都按官方 `disconnect.timeout` 断开。
