@@ -35,10 +35,12 @@
 - 区块表是 `ChunkStore { template, edited, light, loaded, pristine }`（`mc-bamboo-world/src/store.rs`）。`template` 仍是超平坦生成器的输出；无限模式（只给测试和 oracle 用）下没改过的区块直接读它，正式入口 `loaded()` 下只有交付过的区块存在，每个已加载区块插进一份自己的 `ChunkColumn`，包体也各编一遍。`take_column` / `insert_column` 把方块、高度图、方块实体类型表、告示牌文字、`update tag` 和两层光照整柱搬走。**不给「没改过的超平坦区块」做共用模板（写时复制）**：真实地形下每个区块本来就各不相同，共用只在超平坦有用；`docs/profiling.md` 9.4 量到 `fly-20` 的 RSS 从约 135 MB 到约 622 MB（约 2.18 万个已加载区块），`docs/performance-optimizations.md` 第 9 节量到 `encode_body` 是 0.23 ms / p99 0.61 ms。
 - 票表和 Director 决定谁加载、谁 tick；收回的 `Box<RegionColumn>` 整盒停放在内存里，没改过的直接丢掉重新生成（`crates/mc-bamboo-game/src/region/parking.rs`）。
 - 带位置的上层状态在 region 里仍是整张表：`Region.containers`、`Region.block_ticks`、`Region.block_entities`、`Region.redstone`，另有按位置索引的四张表；它们各有按区块的取放接口，`RegionColumn` 把整批盒子（含 `ChunkEntities`）装在一起（`region/column.rs`）。存储内部仍是整张表，见 4.2。
-- 实体只有下落方块、点燃的 TNT 和掉落物，没有生物。实体存成 `EntityStore`（公开 / 私有分开、uid 索引、16³ 段的空间索引），逻辑走 `EntityCtx`，有精确和并行两个驱动，并行由 `BAMBOO_ENTITY_THREADS` 切换（缺省精确）；每个实体自带随机源（`mc-bamboo-blocks/src/entity/`）。
+- 实体只有下落方块、点燃的 TNT 和掉落物，没有生物。实体存成 `EntityStore`（公开 / 私有分开、uid 索引、16³ 段的空间索引），逻辑走 `EntityCtx`，有精确和并行两个驱动，由 `bamboo.toml` 的 `entity_threads` 切换（0 = 精确，缺省；≥ 1 = 并行实验）；每个实体自带随机源（`mc-bamboo-blocks/src/entity/`）。
 - 区块包体在世界线程编码，按（位置，版本号）缓存；区块帧做成 `Arc<SharedFrames>`，压缩结果用 `OnceLock` 惰性缓存，第一条需要它的连接任务压一次，其余复用（`crates/mc-bamboo-game/src/outgoing.rs`）。
 - 出站是每名玩家一串片段：`PlayerSink::send(frames: Outgoing) -> bool`，`Outgoing` 区分普通帧和共享帧（`crates/mc-bamboo-game/src/inbound.rs`）。
-- 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。节拍只用 `thread::sleep`（原来默认的 `hybrid` 先睡再自旋和世界线程 QoS 开关，2026-11-12 按用户决定删掉了）。实体线程数、交付 / 收回上限在 `bamboo.toml` 里配（`docs/configuration.md`），剖析器仍是环境变量 `BAMBOO_PROFILE`。没有自定义全局分配器。
+- 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。节拍只用 `thread::sleep`（原来默认的 `hybrid` 先睡再自旋和世界线程 QoS 开关，2026-11-12 按用户决定删掉了）。实体线程数、区块计算线程数、红石缓存开关、交付 / 收回上限都在服务器目录的 `bamboo.toml` 里配，官方的键在 `server.properties`（`docs/configuration.md`），剖析器仍是环境变量 `BAMBOO_PROFILE`。没有自定义全局分配器。
+
+  （2026-11-14 按实现更新：`docs/configuration.md`、`crates/mc-bamboo-server/src/config_files.rs` 的 `BAMBOO_KEYS`；合并提交 `54f5fd2`、`082a7c9`、`fa91b84`）
 - 存档已经接进游戏，用**官方的 Anvil 格式**，不兼容 26.3 之前的老存档布局（读到当空世界）。`mc-bamboo-storage` 的区块 NBT、Anvil 区域文件、方块实体 / 计划刻 / 三种实体 / 整块组装的编解码已完成并与官方对拍；一条 IO 线程、Director 的读盘阶段、卸载写盘、官方节奏的匀速保存（每 6000 刻全量 + 每刻最多 20 个 + 单区块 200 刻冷却）、`level.dat` / 玩家数据 / `data/` / `chunk_tickets.dat`、三个保存命令和官方 `stopServer` 关服顺序都已接进生命周期（`docs/m3-storage.md` 第 12、14 节）。**计算池也已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时解析、生成阶段和存盘序列化在常驻后台线程上跑，`Read` 仍在 IO 线程；世界生成到噪声阶段已有纯函数和对拍，但还没接进 Director 的生成流水线（`ae76868`）。多阶段生成的邻居视图、多条 IO 线程、预编码帧没做。
 
 （2026-11-14 按实现更新：`docs/m3-storage.md` 第 12 / 14 节、`docs/world-model-design.md` 5.3.1、`docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`ae76868`）
@@ -858,7 +860,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **没做**：仍是一条世界线程带一个 `Region`，没有主控线程、没有 tick 线程池，`Global` 和 Director 都在这条线程上 |
 | 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **没做** |
 | 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行用 `ScopedThreads` 每刻起线程（只用于实验），以后可以改成往计算池交任务；只读收尾仍是串行，降级阶梯没有实现 |
-| 7 | 实体系统：`EntityStore`、`EntityCtx`、两种驱动；现有三种实体迁过去，entity oracle 全绿（第 8 节） | 生物系统的地基 | **做完**：`f918171`、`b99f8b5`，另有 `BAMBOO_ENTITY_THREADS` 开关和两段式 `compute` / `commit`（8.6.1）；生物系统本身还没开始 |
+| 7 | 实体系统：`EntityStore`、`EntityCtx`、两种驱动；现有三种实体迁过去，entity oracle 全绿（第 8 节） | 生物系统的地基 | **做完**：`f918171`、`b99f8b5`，另有 `bamboo.toml` 的 `entity_threads` 开关和两段式 `compute` / `commit`（8.6.1）；生物系统本身还没开始 |
 | 8 | 生物和 AI，按 8.3、8.4 移植 | — | **没做**：只有下落方块、点燃的 TNT 和掉落物三种实体 |
 
 和主线独立、可以随时插进来的：
