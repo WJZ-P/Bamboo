@@ -382,7 +382,7 @@ WebView2 的渲染进程不算在内。
   但没接进 Director；地表规则、雕刻器、地物、结构、光照、高度图和出生点查找都没做，
   接进游戏时 `possibleBiomes` 还要从对拍用的「全部群系」改成官方的周围 3×3 区块群系调色板并集并重新对拍。
   按区块分格插值（官方 `interpolated` 的成批求值）现在在区块网格上已由 `chunkgen` 覆盖，
-  单点 `worldgen` 对拍里跳过这批函数。
+  单点 `worldgen` 对拍里跳过这批函数。下界和末地、非空 `BlendingData` / `Beardifier` 也没做。
 
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`）

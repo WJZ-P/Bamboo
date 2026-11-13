@@ -590,8 +590,9 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 | `minecraft/world_border.dat` | `world_border`（`LevelDatToSavedDataFileFix` 按维度 `overworld` / `the_nether` / `the_end` 各写一份） |
 
 其它 `SavedDataType`（地图 idcount、袭击、结构等）按各自的 id 落在 `data/` 下，
-文件名是 `<命名空间>/<路径>.dat`。Bamboo 只写建模过的四份（`game_rules`、
-`world_gen_settings`、`world_border`、空的 `chunk_tickets`），其余一个都不写。
+文件名是 `<命名空间>/<路径>.dat`。Bamboo 只写建模过的几份：全服 `data/minecraft/` 下的
+`game_rules.dat` / `world_gen_settings.dat`，以及按维度存放的 `world_border.dat` 和空的
+`chunk_tickets.dat`；其余一个都不写。
 
 格式：`SavedDataStorage` 用 `NbtIo.readCompressed`（gzip 或未压缩，按文件头判断）读，
 根是 `{ data: <SavedDataType.codec() 编出的值>, DataVersion: int }`；写时
