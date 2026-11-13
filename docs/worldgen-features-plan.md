@@ -427,7 +427,16 @@ crates/mc-bamboo-worldgen/src/feature/
 | `getLevel()` / `isClientSide()` | 843 / 838：`getLevel()` 返回代理自身（对拍里没有真 `ServerLevel`），`isClientSide()` 返回 false |
 | `findBlocksIn(BlockPos,BlockPos)` | 554：对覆盖的每个 section 调 `warnIfReadOutsideWriteZone`，再走 `WorldGenLevel.findBlocksIn` 默认实现 |
 | `destroyBlock` / `removeBlock` | 408 / 822：转发到 `setBlock(AIR, 3)` / `setBlockAndUpdate` |
-| `getNearestPlayer` / `addFreshEntity` / `playSound` / `addParticle` / `levelEvent` / `gameEvent` / `getEntities` / `players` / `getWorldBorder` / `getLightEngine` / `getSkyDarken` / `getCurrentDifficultyAt` / `getServer` / `getChunkSource` / `getLevelData` / `dimensionType` / `environmentAttributes` / `nextSubTickCount` | **本轮不实现**：一旦被调用就抛 `UnsupportedOperationException`，立刻暴露新路径；确实需要时再逐个按 `WorldGenRegion` 对应字节码补 |
+| `getHeightmapPos(type,pos)` | `LevelReader.getHeightmapPos`（122–134）：x/z 不变，y 换成 `getHeight(type,x,z)`；`PlaceOnGroundDecorator`（树）会调 |
+| `getSectionIndex(y)` / `getSectionIndexFromSectionY(y)` / `getSectionYFromSectionIndex(i)` | `LevelHeightAccessor` 默认实现（89–108）：`blockToSectionCoord(y) - minSectionY`；`BulkSectionAccess`（矿石）会调 |
+| `getBlockTicks()` / `getFluidTicks()` | 921 / 927 + 构造 5–35：`WorldGenTickAccess`，`containerGetter = pos -> chunkAt(pos).getBlockTicks()/getFluidTicks()` |
+| `scheduleTick(pos, target, delay[, priority])` / `nextSubTickCount()` | `ScheduledTickAccess` 默认实现（9–32）+ `LevelAccessor.createTick`（5–36）：转发到上一条的 `WorldGenTickAccess.schedule`。树叶 `updateShape` 会调；本轮只比方块，时间从 0 递增即可 |
+| `isOutsideBuildHeight(y)` / `isEmptyBlock(pos)` / `getMaxY()` / `getMinSectionY()` / `getMaxSectionY()` / `getSectionsCount()` | `LevelHeightAccessor` / `LevelReader` 默认实现换成代理后要自己返回，否则接口默认方法会走 `getHeight()` 之外的路径 |
+| `getNearestPlayer` / `addFreshEntity` / `playSound` / `addParticle` / `levelEvent` / `gameEvent` / `getEntities` / `players` / `getWorldBorder` / `getLightEngine` / `getSkyDarken` / `getCurrentDifficultyAt` / `getServer` / `getChunkSource` / `getLevelData` / `dimensionType` / `environmentAttributes` | **本轮不实现**：一旦被调用就抛 `UnsupportedOperationException`，立刻暴露新路径；确实需要时再逐个按 `WorldGenRegion` 对应字节码补 |
+
+上表多出来的几行是第一次跑完整 11 步时实测出来的：矿石走 `BulkSectionAccess`，
+树走 `PlaceOnGroundDecorator` 和 `LeavesBlock.updateShape`，分别需要 section index、
+heightmapPos 和计划刻。**代理没有返回默认值的分支**，未覆盖方法都会抛异常。
 
 * `getHeight` 要照 `WorldGenRegion` 加 1；`setBlock` 要照 `ensureCanWrite` 丢掉 3×3 之外的写。
 * 「空实现」只限于本来就无副作用的 `setCurrentlyGenerating` 和 `isClientSide`；
@@ -475,6 +484,15 @@ crates/mc-bamboo-worldgen/src/feature/
 * 白名单放在 Rust 侧一份常量（`chunkgen.rs` 的 `SUPPORTED_*`），Java 侧通过命令行
   参数 `--supported-features <逗号分隔>` / `--supported-modifiers` 传进去，
   避免两边各维护一份会漂移的清单。
+
+**已落地的过渡开关**（`--steps 6`）：Java 侧不能改 `featuresPerStep`（它是
+`ImmutableList`，且 `applyBiomeDecoration` 会按群系列表里留下的 index 直接
+`features.get(index)`，改短会越界）。实际做法是用反射把每个群系
+`BiomeGenerationSettings.features()` 里**没选中的 step 换成空 `HolderSet`**，并重建
+`featureSet` supplier，这样 `indices` 集合自然为空，不会调用 `placeWithBiomeCheck`；
+`featuresPerStep`、全局 index、`setFeatureSeed(decorationSeed, index, step)` 全部保持
+原样，留下的 step 与官方逐位一致。Rust 侧 `chunkgen.rs` 转发 `--steps`，并核对
+header / features 行里的 `steps` 掩码。
 * 现有 `header` 加 `through: 4` 表示 features；`Line` 枚举加 `Features` 变体；
   `Options::through` 加 `"features" => Stage::Features`（或直接扩展
   `chunk::Stage`，见下）。

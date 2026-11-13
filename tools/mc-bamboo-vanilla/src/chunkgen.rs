@@ -24,8 +24,10 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str =
-    "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] [--through STAGE] [--show N]";
+const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] \
+     [--through STAGE] [--steps 6] [--show N]";
+/// 完整的 11 个地物步骤；`--steps` 只是过渡期的诊断开关。
+const ALL_STEPS: i32 = (1 << 11) - 1;
 const DEFAULT_SHOW: usize = 8;
 
 #[derive(Debug, Deserialize)]
@@ -72,9 +74,25 @@ enum Line {
         palette: Vec<String>,
         blocks: Vec<u16>,
     },
+    /// `features` 阶段：中心加 8 个邻居，各带自己的调色板。
+    Features {
+        seed: i64,
+        x: i32,
+        z: i32,
+        chunks: Vec<FeatureChunkLine>,
+        steps: i32,
+    },
     End {
         checks: u64,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct FeatureChunkLine {
+    dx: i32,
+    dz: i32,
+    palette: Vec<String>,
+    blocks: Vec<u16>,
 }
 
 #[derive(Debug)]
@@ -87,6 +105,10 @@ struct Options {
     through_set: bool,
     /// 转发给 Java 侧的最终阶段。
     through: Stage,
+    /// 是否要跑到 `features`（`Stage` 只到 carvers，features 是另一个入口）。
+    features: bool,
+    /// 转发给 Java 侧的 `--steps` 掩码。
+    steps: i32,
 }
 
 impl Options {
@@ -97,12 +119,25 @@ impl Options {
             biomes_only: false,
             through_set: false,
             through: Stage::Noise,
+            features: false,
+            steps: ALL_STEPS,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--seeds" | "--chunks" | "--salt" => {
+                "--seeds" | "--chunks" | "--salt" | "--steps" => {
                     let value = args.next().ok_or(USAGE)?;
+                    if arg == "--steps" {
+                        let mut mask = 0_i32;
+                        for part in value.split(',') {
+                            let step: i32 = part.trim().parse().map_err(|_| USAGE)?;
+                            if !(0..11).contains(&step) {
+                                return Err(USAGE.to_owned());
+                            }
+                            mask |= 1 << step;
+                        }
+                        options.steps = mask;
+                    }
                     options
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
@@ -125,6 +160,10 @@ impl Options {
                         "noise" => Stage::Noise,
                         "surface" => Stage::Surface,
                         "carvers" => Stage::Carvers,
+                        "features" => {
+                            options.features = true;
+                            Stage::Carvers
+                        }
                         _ => return Err(USAGE.to_owned()),
                     };
                     options
@@ -148,11 +187,16 @@ struct Report<'a> {
     generators: HashMap<i64, Generator<'a>>,
     biomes: u64,
     blocks: Vec<u64>,
+    features_blocks: u64,
+    features_chunks: u64,
+    skipped_chunks: u64,
     chunks: u64,
     checks: u64,
     through: Stage,
     through_set: bool,
     biomes_only: bool,
+    features: bool,
+    steps: i32,
     mismatches: Vec<String>,
     show: usize,
     ended: bool,
@@ -176,11 +220,16 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         generators: HashMap::new(),
         biomes: 0,
         blocks: vec![0; Stage::Carvers as usize + 1],
+        features_blocks: 0,
+        features_chunks: 0,
+        skipped_chunks: 0,
         chunks: 0,
         checks: 0,
         through: options.through,
         through_set: options.through_set,
         biomes_only: options.biomes_only,
+        features: options.features,
+        steps: options.steps,
         mismatches: Vec::new(),
         show: options.show.unwrap_or(DEFAULT_SHOW),
         ended: false,
@@ -222,6 +271,8 @@ impl Report<'_> {
                     {
                         let expected = if self.biomes_only {
                             0
+                        } else if self.features {
+                            4
                         } else {
                             match self.through {
                                 Stage::Noise => 1,
@@ -283,6 +334,13 @@ impl Report<'_> {
                     palette,
                     blocks,
                 } => self.compare_blocks(Stage::Carvers, seed, x, z, &palette, &blocks),
+                Line::Features {
+                    seed,
+                    x,
+                    z,
+                    chunks,
+                    steps,
+                } => self.compare_features(seed, x, z, &chunks, steps),
                 Line::End { checks } => {
                     self.checks = checks;
                     self.ended = true;
@@ -426,6 +484,65 @@ impl Report<'_> {
         }
     }
 
+    /// `features` 阶段：Java 侧跑完 11（或 `--steps` 指定的）步之后输出 9 宫格。
+    ///
+    /// 目前 Rust 侧还没有地物放置实现，只核对 Java 侧的输出形状、步骤掩码和
+    /// 9 个区块的方块数；逐方块比较要等 `mc-bamboo-worldgen::feature` 的
+    /// `Generator::features()` 落地后接入。
+    fn compare_features(
+        &mut self,
+        seed: i64,
+        x: i32,
+        z: i32,
+        chunks: &[FeatureChunkLine],
+        steps: i32,
+    ) {
+        if steps != self.steps {
+            self.mismatch(format!(
+                "features seed {seed} chunk ({x},{z}): oracle steps {steps}, bamboo {}",
+                self.steps
+            ));
+            return;
+        }
+        if chunks.len() != 9 {
+            self.mismatch(format!(
+                "features seed {seed} chunk ({x},{z}): {} chunks vs 9",
+                chunks.len()
+            ));
+            return;
+        }
+        self.chunks += 1;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let dz = index as i32 / 3 - 1;
+            let dx = index as i32 % 3 - 1;
+            if chunk.dx != dx || chunk.dz != dz {
+                self.mismatch(format!(
+                    "features seed {seed} chunk ({x},{z}) index {index}: ({},{}) vs ({dx},{dz})",
+                    chunk.dx, chunk.dz
+                ));
+                return;
+            }
+            if chunk.blocks.len() != 384 * 256 {
+                self.mismatch(format!(
+                    "features seed {seed} chunk ({x},{z}) ({dx},{dz}): {} blocks vs {}",
+                    chunk.blocks.len(),
+                    384 * 256
+                ));
+                return;
+            }
+            for (id, &index) in chunk.blocks.iter().enumerate() {
+                if index as usize >= chunk.palette.len() {
+                    self.mismatch(format!(
+                        "features seed {seed} chunk ({x},{z}) ({dx},{dz}) at {id}: palette index {index} out of range"
+                    ));
+                    return;
+                }
+            }
+            self.features_blocks += chunk.blocks.len() as u64;
+        }
+        self.features_chunks += 1;
+    }
+
     fn mismatch(&mut self, text: String) {
         if self.mismatches.len() < self.show * 20 {
             self.mismatches.push(text);
@@ -441,6 +558,12 @@ impl Report<'_> {
             self.blocks[Stage::Surface as usize],
             self.blocks[Stage::Carvers as usize],
         );
+        if self.features {
+            println!(
+                "features: {} centers, compared shape of {} blocks in 9-chunk windows, {} skipped",
+                self.features_chunks, self.features_blocks, self.skipped_chunks
+            );
+        }
         if !self.ended {
             return Err("ChunkgenOracle.java stopped before its end line".to_owned());
         }
