@@ -135,9 +135,15 @@ fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String
 /// 这几个注册表是递归的树（密度函数里套密度函数、样条里套样条），生成等价的 Rust 结构
 /// 会是一大堆嵌套字面量，升级版本时也看不出差异；JSON 是官方 codec 的原始形态，
 /// `mc-bamboo-worldgen` 用同一套 codec 的语义解析，所以这里原样存。
+///
+/// 官方 codec 用 Gson 的 `JsonPrimitive(double)` 保留 IEEE 754 的 double，Gson 写文本时用
+/// `Double.toString` 的最短往返表示。这里先把 `extracted.json` 解析成 `serde_json::Value`，
+/// 再写回文本；两边的解析器都必须按 IEEE 754 正确舍入（工作区的 `float_roundtrip`）。
+/// 否则 17 位有效数字的十进制串会差一个最低位，写出来的文件就不是官方运行时的值了。
 fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&data.worldgen)
         .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
+    check_worldgen_floats(&data.worldgen, &json)?;
     let path = output_dir.join("worldgen.json");
     fs::write(&path, format!("{json}\n"))
         .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
@@ -161,6 +167,67 @@ fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         "pub const WORLDGEN: &str = include_str!(\"worldgen.json\");"
     );
     write_file(output_dir, "worldgen.rs", &out)
+}
+
+/// 写文件前把写出的文本再读一遍，逐值比较位模式，确保 double 往返不丢最低位。
+///
+/// 只比较浮点：整数、字符串和容器由 `serde_json` 的常规等价性保证。解析器特性被意外
+/// 关掉、或者某一侧换了会截断十进制的格式化方式时，这里会直接报错，而不是悄悄写出
+/// 一份和官方逐位不一致的数据。
+fn check_worldgen_floats(original: &serde_json::Value, json: &str) -> Result<(), String> {
+    let reread: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| format!("世界生成数据写出的 JSON 读不回来：{error}"))?;
+    let mut count = 0usize;
+    compare_floats(original, &reread, "worldgen", &mut count)?;
+    if count == 0 {
+        return Err("世界生成数据里一个浮点都没有".to_owned());
+    }
+    Ok(())
+}
+
+fn compare_floats(
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    path: &str,
+    count: &mut usize,
+) -> Result<(), String> {
+    use serde_json::Value;
+
+    match (left, right) {
+        (Value::Number(number), Value::Number(other)) => {
+            if let (Some(a), Some(b)) = (number.as_f64(), other.as_f64()) {
+                *count += 1;
+                if a.to_bits() != b.to_bits() {
+                    return Err(format!(
+                        "{path} 的 double 往返丢了精度：{a:?} ({:#x}) -> {b:?} ({:#x})",
+                        a.to_bits(),
+                        b.to_bits()
+                    ));
+                }
+            }
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            if left.len() != right.len() {
+                return Err(format!("{path} 的数组往返长度变了"));
+            }
+            for (index, (a, b)) in left.iter().zip(right).enumerate() {
+                compare_floats(a, b, &format!("{path}[{index}]"), count)?;
+            }
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            if left.len() != right.len() {
+                return Err(format!("{path} 的对象往返键数变了"));
+            }
+            for (name, a) in left {
+                let b = right
+                    .get(name)
+                    .ok_or_else(|| format!("{path}.{name} 往返时不见了"))?;
+                compare_floats(a, b, &format!("{path}.{name}"), count)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// 组件里按 ID 查表的枚举：连续的常量个数，稀疏的整张 ID 表。
@@ -3332,6 +3399,77 @@ fn write_string_map(out: &mut String, doc: &str, name: &str, map: &BTreeMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 官方 26.3 运行时 `NormalNoise.Parameters.baseAmplitude` 的位模式，
+    /// 由 `Double.doubleToRawLongBits` 读出。这几条是 17 位有效数字的十进制串，
+    /// 解析器只要换成不做正确舍入的快路径，就会全部低 1 ulp。
+    const OFFICIAL_NOISE_AMPLITUDES: &[(&str, &str, u64)] = &[
+        (
+            "minecraft:jagged",
+            "1.0383104856073737",
+            0x3ff0_9ceb_74ac_70d7,
+        ),
+        (
+            "minecraft:nether/temperature",
+            "0.9494731054427981",
+            0x3fee_6215_6c09_de3a,
+        ),
+        (
+            "minecraft:nether/vegetation",
+            "0.9494731054427981",
+            0x3fee_6215_6c09_de3a,
+        ),
+        (
+            "minecraft:offset",
+            "0.9381732587751005",
+            0x3fee_0583_ed0d_7735,
+        ),
+        (
+            "minecraft:pillar",
+            "0.9494731054427981",
+            0x3fee_6215_6c09_de3a,
+        ),
+        (
+            "minecraft:ridge",
+            "0.9147152149950137",
+            0x3fed_4558_d7b1_d486,
+        ),
+    ];
+
+    #[test]
+    fn official_decimals_round_trip_to_the_runtime_bits() {
+        let mut noise = serde_json::Map::new();
+        for &(name, text, _) in OFFICIAL_NOISE_AMPLITUDES {
+            let mut entry = serde_json::Map::new();
+            entry.insert(
+                "base_amplitude".to_owned(),
+                serde_json::from_str::<serde_json::Value>(text).unwrap(),
+            );
+            noise.insert(name.to_owned(), serde_json::Value::Object(entry));
+        }
+        let value = serde_json::Value::Object(noise);
+        let json = serde_json::to_string_pretty(&value).unwrap();
+        let reread: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        for &(name, _, expected) in OFFICIAL_NOISE_AMPLITUDES {
+            let written = reread[name]["base_amplitude"].as_f64().unwrap();
+            assert_eq!(written.to_bits(), expected, "{name} 的 double 往返丢了精度");
+        }
+        check_worldgen_floats(&value, &json).unwrap();
+    }
+
+    #[test]
+    fn the_embedded_worldgen_file_has_the_official_noise_amplitudes() {
+        // 生成文件本身也过一遍同样的读回路径，防止有人手工把值改回旧文本。
+        let text = include_str!("../../../crates/mc-bamboo-data/src/generated/worldgen.json");
+        let worldgen: serde_json::Value = serde_json::from_str(text).unwrap();
+        for &(name, _, expected) in OFFICIAL_NOISE_AMPLITUDES {
+            let value = worldgen["noise"][name]["base_amplitude"].as_f64().unwrap();
+            assert_eq!(value.to_bits(), expected, "{name} 的振幅和官方不一致");
+        }
+        check_worldgen_floats(&worldgen, &serde_json::to_string_pretty(&worldgen).unwrap())
+            .unwrap();
+    }
 
     fn block(name: &str, states: &[u32]) -> Block {
         Block {

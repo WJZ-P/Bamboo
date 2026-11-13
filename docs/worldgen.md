@@ -133,6 +133,79 @@ y 方向是起点加逐格累加的 `delta`（`fadd` 顺序），和单点 `lerp
 `shouldScheduleFluidUpdate` 只影响官方的后期处理位置表，对拍不比它，但计算照搬，以后接游戏时
 要用。
 
+## 数据的导出与重跑
+
+`mc-bamboo-data/src/generated/worldgen.json` 是整份从官方 26.3 导出的，不要手工改。顶端有九个
+键：`noise`、`density_function`、`noise_settings` 三个注册表用官方 codec 编回 JSON；
+`material_rule`、`material_condition`、`carver` 同理；`biome_carvers` 是每个群系的雕刻器列表，
+按注册表名字排序；`multi_noise_presets` 不走 codec，直接导出内存里量化好的定点数（codec 里是
+浮点，来回换算会差最低位）；`end_biomes` 是末地源固定引用的五个群系。
+
+`Extractor.java` 把 codec 的结果放进 Gson 的 `JsonElement`，用
+`new GsonBuilder().create().toJson(root)` 一次写进 `target/vanilla/extracted.json`。
+`JsonPrimitive(double)` 保留 IEEE 754 的 double，Gson 写文本时用 `Double.toString`，也就是
+保证能往返的最短十进制表示，中间没有经过 float。Rust 侧的 `extract.rs` 把报告解析成
+`serde_json::Value`，`generate.rs::write_worldgen` 再缩进排版写进生成文件，
+`mc-bamboo-worldgen` 用同一套 codec 的语义读它。
+
+**两次 JSON 解析都必须按 IEEE 754 正确舍入。** 工作区的 `serde_json` 开了
+`float_roundtrip`（在根 `Cargo.toml` 里，Cargo 对整个依赖图合并特性，所以导出工具和运行时
+用的是同一个解析器）。默认的快路径用 `significand as f64 * 10^exp`，少数 17 位有效数字的
+十进制串会差 1 ulp。26.3 的 `worldgen/noise` 里正好有六个这样的 `base_amplitude`：
+
+| 条目 | 官方运行时 | 位模式 | 快路径读出的错误值 |
+|---|---|---|---|
+| `minecraft:jagged` | `1.0383104856073737` | `0x3ff09ceb74ac70d7` | `1.0383104856073735` |
+| `minecraft:nether/temperature` | `0.9494731054427981` | `0x3fee62156c09de3a` | `0.949473105442798` |
+| `minecraft:nether/vegetation` | `0.9494731054427981` | `0x3fee62156c09de3a` | `0.949473105442798` |
+| `minecraft:offset` | `0.9381732587751005` | `0x3fee0583ed0d7735` | `0.9381732587751004` |
+| `minecraft:pillar` | `0.9494731054427981` | `0x3fee62156c09de3a` | `0.949473105442798` |
+| `minecraft:ridge` | `0.9147152149950137` | `0x3fed4558d7b1d486` | `0.9147152149950136` |
+
+位模式来自官方注册表里 `NormalNoise.Parameters.baseAmplitude` 的
+`Double.doubleToRawLongBits`，也和官方 jar 的 `data/minecraft/worldgen/noise/*.json` 原文一致。
+最早那版生成文件是在打开 `float_roundtrip` 之前导出的，所以留下的是右边那列「差 1 ulp」的值；
+后来新增地表和雕刻器四块时是手工并进旧文件的。现在整份重导过，六项都是官方运行时的值，
+`worldgen` / `chunkgen` 对拍在新值上仍是 0 不一致（见下面）。
+
+`write_worldgen` 在写文件前把排版后的文本再解析一遍，逐个浮点比较位模式；两边各有单元测试
+盯着这六条的位模式（`generate.rs` 的测试和 `mc-bamboo-worldgen/src/lib.rs` 的
+`noise_amplitudes_match_the_official_bits`）。以后升级 `serde_json` 或换导出方式，解析器一旦
+丢精度，导出和测试会直接失败，不会写出一份看着一样、实际差最低位的数据。样条里
+`2.9802322e-8` / `5.9604645e-8` 这类值只是排版上的指数写法（旧文件曾写成 `e-08`），
+数值本身没变。
+
+### 怎么重跑
+
+在同一个 jar 上，`extract` 用上次 `generate` 留下的报告和 `extracted.json` 重新导出生成文件，
+`generate` 会连官方的数据生成器报告一起重跑：
+
+```bash
+# 完整重跑；第一次或换了官方 jar 时用这条。
+# 报告装在 target/vanilla，换工作树时可以从旧工作树 cp -R 过来。
+cargo run -p mc-bamboo-vanilla -- generate /path/to/server-26.3.jar
+
+# 只改了 Rust 侧排版、jar 没换：重跑 Extractor.java 就够，快得多。
+cargo run -p mc-bamboo-vanilla -- extract
+
+# 生成文件坏了、工具带默认特性编译不过时，用这个跑 generate / extract。
+cargo run -p mc-bamboo-vanilla --no-default-features -- generate /path/to/server-26.3.jar
+```
+
+重跑后 `git diff -- crates/mc-bamboo-data/src/generated/worldgen.json` 应当为空；不为空时
+先查是不是有新版本的官方数据，再看 `docs/worldgen.md` 里这六个位模式有没有变。
+确认数据没问题后跑对拍：
+
+```bash
+cargo run --release -p mc-bamboo-vanilla -- worldgen java
+cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 --through carvers
+cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 --through carvers --salt 1
+```
+
+除了 `worldgen.json`，`generate` 还会写 `generated/` 下的其它文件和 `saved_world.rs`；
+只关心世界生成数据时，别把那些无关的改动混进同一个提交。`extract` 需要
+`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。
+
 ## 区块级对拍
 
 `tools/mc-bamboo-vanilla` 的 `chunkgen` 子命令：
