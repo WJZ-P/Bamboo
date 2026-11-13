@@ -1140,6 +1140,180 @@ fn campfire_and_brewing_sleep_match_ticking_every_tick() {
     assert!(total_slept > 0, "休眠真的发生过");
 }
 
+/// 漏斗冷却期休眠：官方在冷却里每刻只减 1、写世界时间，外部事件一律
+/// 等冷却归零那一刻才被 `tryMoveItems` 看到。下面逐条核对唤醒入口。
+struct CooldownScene {
+    level: TestLevel,
+    ticks: BlockTicks,
+    /// 开着的界面和存档每刻读到的冷却、时间相对量。
+    reads: Vec<String>,
+}
+
+impl CooldownScene {
+    fn new(sleep: bool) -> Self {
+        let pos = BlockPos::new(0, 64, 0);
+        let above = BlockPos::new(0, 65, 0);
+        let below = BlockPos::new(0, 63, 0);
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        level.set_container(pos, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
+        level.set_container(above, vec![ItemStack::empty(); 27]);
+        level.set_container(below, vec![ItemStack::empty(); 27]);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            use crate::state::FACING_HOPPER;
+            for (p, facing) in [(pos, Direction::Down), (above, Direction::Down)] {
+                world.set_block(
+                    p,
+                    BlockState(blocks::HOPPER).with(FACING_HOPPER, facing),
+                    UPDATE_ALL,
+                );
+            }
+            world.set_block(below, BlockState(blocks::CHEST), UPDATE_ALL);
+            world.set_block_entity(Box::new(HopperEntity::new(pos)));
+            world.set_block_entity(Box::new(HopperEntity::new(above)));
+            world.with_container(pos, &mut |container| {
+                container.set(0, ItemStack::new(items::DIRT, 16));
+            });
+        }
+        level.sleep_enabled(sleep);
+        Self {
+            level,
+            ticks,
+            reads: Vec::new(),
+        }
+    }
+
+    fn step(&mut self, now: i64) {
+        self.ticks.set_time(now);
+        set_block_entity_clock(now);
+        let _ = run_block_entity_tick(&mut self.level, &mut self.ticks);
+        set_block_entity_clock(now);
+        self.reads.push(self.snapshot());
+    }
+
+    fn snapshot(&self) -> String {
+        let pos = BlockPos::new(0, 64, 0);
+        let above = BlockPos::new(0, 65, 0);
+        let below = BlockPos::new(0, 63, 0);
+        let mut out = Vec::new();
+        for p in [pos, above, below] {
+            out.push(format!("b{p:?}:{}", self.level.get(p).0));
+            out.push(format!("slots{p:?}:{:?}", self.level.containers.get(&p)));
+        }
+        for p in [pos, above] {
+            out.push(format!(
+                "hopper{p:?}:{:?}",
+                self.level.block_entity::<HopperEntity>(p).map(|e| (
+                    e.cooldown_time(),
+                    e.ticked_game_time(),
+                    e.ticked_game_time_age()
+                ))
+            ));
+            out.push(format!(
+                "archive{p:?}:{:?}",
+                self.level
+                    .block_entities_table()
+                    .get_dyn(p)
+                    .map(crate::archive::write_block_entity_additional)
+            ));
+        }
+        out.push(format!("seed:{}", self.level.random.source().seed()));
+        out.push(format!("writes:{:?}", self.level.writes));
+        out.push(format!("entities:{:?}", self.level.entities().ids()));
+        out.concat()
+    }
+}
+
+/// 冷却期内逐条做外部事件，和「每刻都跑」对照；到点那一格才准动。
+fn cooldown_events(scene: &mut CooldownScene, now: i64) {
+    let pos = BlockPos::new(0, 64, 0);
+    let above = BlockPos::new(0, 65, 0);
+    let below = BlockPos::new(0, 63, 0);
+    let mut world = World::new(&mut scene.level, &mut scene.ticks);
+    match now {
+        // 目标容器变满 / 被抽空：官方只看下一次 `tryMoveItems` 的结果。
+        2 => {
+            let _ = world.with_container(below, &mut |container| {
+                for slot in 0..container.size() {
+                    container.set(slot, ItemStack::new(items::STONE, 64));
+                }
+            });
+        }
+        3 => {
+            let _ = world.with_container(below, &mut |container| {
+                for slot in 0..container.size() {
+                    container.set(slot, ItemStack::empty());
+                }
+            });
+        }
+        // 上方容器变化（邻居容器）：漏斗自己的下一次 tick 才吸。
+        4 => {
+            let _ = world.with_container(above, &mut |container| {
+                container.set(0, ItemStack::new(items::RAW_IRON, 4));
+            });
+        }
+        // 漏斗自己的物品栏 / 冷却被外部改：统一入口 `wake`。
+        5 => {
+            let _ = world.with_container(pos, &mut |container| {
+                container.set(1, ItemStack::new(items::COAL, 3));
+            });
+        }
+        // `ENABLED` 变化：`set_block_state` 的 `wake` 覆盖这一格。
+        6 => {
+            use crate::state::ENABLED;
+            let state = world.block_state(pos);
+            world.set_block_and_update(pos, state.with(ENABLED, false));
+        }
+        7 => {
+            use crate::state::ENABLED;
+            let state = world.block_state(pos);
+            world.set_block_and_update(pos, state.with(ENABLED, true));
+        }
+        // 物品实体进入吸取范围：实体生成 / 移动 / 与漏斗的 `entityInside`。
+        8 => {
+            use mc_bamboo_core::Vec3;
+            let item = crate::entity::Entity::new(
+                crate::entity::EntityKind::Item(crate::entity::GroundItem {
+                    stack: ItemStack::new(items::POTATO, 1),
+                    age: 0,
+                    pickup_delay: 0,
+                    health: 5,
+                    bob_offs: 0.0,
+                    roll_velocity: false,
+                    target: None,
+                }),
+                Vec3::new(0.5, 65.5, 0.5),
+            );
+            world.spawn_entity(item);
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn hopper_cooldown_sleep_matches_ticking_every_tick_with_external_events() {
+    let mut sleeping = CooldownScene::new(true);
+    let mut always = CooldownScene::new(false);
+    for now in 1..=40 {
+        cooldown_events(&mut sleeping, now);
+        cooldown_events(&mut always, now);
+        sleeping.step(now);
+        always.step(now);
+        assert_eq!(
+            sleeping.reads.last(),
+            always.reads.last(),
+            "tick {now}: 冷却期外部事件改变了结果"
+        );
+    }
+    // 冷却里确实睡过：至少有一刻一个 ticker 都没跑（差分表里另有断言）。
+    assert_eq!(sleeping.reads.len(), 40);
+    // 到冷却归零那一刻，漏斗确实动过：槽位从第 1 刻到第 40 刻变了，
+    // 而且两份世界的快照逐刻相同（上面的比较已经全过）。
+    assert_ne!(sleeping.reads.first(), sleeping.reads.last());
+    assert!(sleeping.level.due_count() > 0, "到点那刻真跑过 ticker");
+}
+
 /// 测量用的手工基准：几百台正在烧东西的熔炉，方块实体阶段每刻的耗时。
 ///
 /// 用法（release、安静窗口）：

@@ -372,10 +372,22 @@ fn hopper_ticked_game_time_stays_relative_across_ticks_and_archive() {
         push_items_tick(&mut world, pos, &mut hopper);
         assert_eq!(hopper.ticked_game_time(), now, "tick {now}");
         assert_eq!(hopper.ticked_game_time_age(), Some(0), "tick {now}");
+        // 官方同一刻的字段等于世界时间；相对量在后面几刻会按公式增长。
     }
-    // 读一读「下一刻」：age 变大，还原出来的绝对时刻按官方仍等于现在。
+    // 官方安静刻里每刻都真跑过（时间字段跟世界时间）。休眠期间由公式现算，
+    // 不落到字段里；这里显式推进到 15 再核对还原值。
     set_block_entity_clock(15);
-    assert_eq!(hopper.ticked_game_time_age(), Some(3));
+    let mut level = crate::testing::TestLevel::new();
+    let mut ticks = crate::BlockTicks::new();
+    ticks.set_time(15);
+    let mut world = crate::World::new(&mut level, &mut ticks);
+    world.set_block(
+        pos,
+        BlockState(mc_bamboo_data::blocks::HOPPER),
+        crate::world::UPDATE_ALL,
+    );
+    push_items_tick(&mut world, pos, &mut hopper);
+    assert_eq!(hopper.ticked_game_time_age(), Some(0));
     assert_eq!(hopper.ticked_game_time(), 15);
 
     let tag = Tag::Compound(write_block_entity_additional(&hopper).unwrap());
