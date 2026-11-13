@@ -38,12 +38,106 @@ pub struct BiomeManager<'a> {
     seed: i64,
 }
 
+/// 一次地表/雕刻扫描里的气候参数缓存。
+///
+/// `BiomeManager` 每次问群系都要在空的 `SamplerContext` 上重算六条气候密度函数，
+/// 而地表逐列扫描和雕刻器 17×17 邻域会在同一批 quart 格上反复问。气候采样是纯函数
+/// （不记忆的上下文、不取随机数），按 quart 坐标记下来即可。
+///
+/// **只缓存气候参数，不缓存群系**：查群系要过 `ParameterList` 的 R 树，而 R 树带着
+/// `lastResult` 当平局时的初始候选，跳过一次查询就会改变后续查询的平局结果。
+/// 所以每次仍照原来的顺序查表，只把前面那六次密度求值省掉。
+#[derive(Debug)]
+pub struct ClimateCache {
+    /// 缓存的 quart 范围：`(min_x, min_y, min_z, 宽, 高, 深)`。
+    shape: Option<(i32, i32, i32, i32, i32, i32)>,
+    cells: Vec<Option<TargetPoint>>,
+}
+
+impl ClimateCache {
+    /// 按一次扫描里会被问到的 quart 范围建表；范围外的坐标直接走原路径、不缓存。
+    pub fn new(min_x: i32, min_y: i32, min_z: i32, size_x: i32, size_y: i32, size_z: i32) -> Self {
+        let len = (size_x.max(0) as usize)
+            .saturating_mul(size_y.max(0) as usize)
+            .saturating_mul(size_z.max(0) as usize);
+        Self {
+            shape: (len > 0).then_some((min_x, min_y, min_z, size_x, size_y, size_z)),
+            cells: vec![None; len.min(1 << 20)],
+        }
+    }
+
+    fn index(&self, x: i32, y: i32, z: i32) -> Option<usize> {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = self.shape?;
+        let dx = x.wrapping_sub(min_x);
+        let dy = y.wrapping_sub(min_y);
+        let dz = z.wrapping_sub(min_z);
+        if dx < 0 || dy < 0 || dz < 0 || dx >= size_x || dy >= size_y || dz >= size_z {
+            return None;
+        }
+        Some((dx as usize * size_y as usize + dy as usize) * size_z as usize + dz as usize)
+    }
+
+    /// 命中就用记下的气候参数，没命中就按原顺序算一次。
+    fn climate(
+        &mut self,
+        samplers: &crate::settings::Samplers,
+        context: &mut Context,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> TargetPoint {
+        let Some(slot) = self.index(x, y, z) else {
+            return climate_at(samplers, context, x, y, z);
+        };
+        if let Some(value) = self.cells[slot] {
+            return value;
+        }
+        let value = climate_at(samplers, context, x, y, z);
+        self.cells[slot] = Some(value);
+        value
+    }
+}
+
 impl<'a> BiomeManager<'a> {
     pub fn new(source: &'a MultiNoiseBiomeSource, world_seed: i64) -> Self {
         Self {
             source,
             seed: obfuscate_seed(world_seed),
         }
+    }
+
+    /// `getBiome(x, y, z)` 的带缓存版本，气候参数走 `cache`。
+    ///
+    /// 没传缓存时走的路径和 [`Self::biome`] 完全一样。
+    pub fn biome_cached(
+        &self,
+        samplers: &crate::settings::Samplers,
+        context: &mut Context,
+        x: i32,
+        y: i32,
+        z: i32,
+        cache: Option<&mut ClimateCache>,
+    ) -> u32 {
+        let quart = self.fiddled_corner(x, y, z);
+        let target = match cache {
+            Some(cache) => cache.climate(samplers, context, quart.0, quart.1, quart.2),
+            None => climate_at(samplers, context, quart.0, quart.1, quart.2),
+        };
+        biome_id(self.source.biome(target))
+    }
+
+    /// `getNoiseBiome(quartX, quartY, quartZ)` 的带缓存版本。
+    pub fn noise_biome_cached(
+        &self,
+        samplers: &crate::settings::Samplers,
+        context: &mut Context,
+        quart_x: i32,
+        quart_y: i32,
+        quart_z: i32,
+        cache: &mut ClimateCache,
+    ) -> u32 {
+        let target = cache.climate(samplers, context, quart_x, quart_y, quart_z);
+        biome_id(self.source.biome(target))
     }
 
     /// `getBiome(x, y, z)`：返回群系注册表 ID。
@@ -58,6 +152,13 @@ impl<'a> BiomeManager<'a> {
         y: i32,
         z: i32,
     ) -> u32 {
+        let (cx, cy, cz) = self.fiddled_corner(x, y, z);
+        let target = climate_at(samplers, context, cx, cy, cz);
+        biome_id(self.source.biome(target))
+    }
+
+    /// `BiomeManager.getBiome` 的八角插值：按 `biomeZoomSeed` 选出最近的 quart 角。
+    fn fiddled_corner(&self, x: i32, y: i32, z: i32) -> (i32, i32, i32) {
         let quart_x = java_floor_div(x.wrapping_sub(2), 4);
         let quart_y = java_floor_div(y.wrapping_sub(2), 4);
         let quart_z = java_floor_div(z.wrapping_sub(2), 4);
@@ -85,11 +186,11 @@ impl<'a> BiomeManager<'a> {
             }
         }
 
-        let cx = if best & 4 == 0 { quart_x } else { quart_x + 1 };
-        let cy = if best & 2 == 0 { quart_y } else { quart_y + 1 };
-        let cz = if best & 1 == 0 { quart_z } else { quart_z + 1 };
-        let target = climate_at(samplers, context, cx, cy, cz);
-        biome_id(self.source.biome(target))
+        (
+            if best & 4 == 0 { quart_x } else { quart_x + 1 },
+            if best & 2 == 0 { quart_y } else { quart_y + 1 },
+            if best & 1 == 0 { quart_z } else { quart_z + 1 },
+        )
     }
 
     /// `getNoiseBiome(quartX, quartY, quartZ)`：雕刻器选邻域群系用。
