@@ -31,6 +31,13 @@ use super::{Entity, EntityPublic, EntityUid, FallingBlock};
 /// 方法名和 [`World`] 的只读方法一致，实体逻辑改参数类型时函数体不用改。
 pub trait BlockView {
     fn block_state(&self, pos: BlockPos) -> BlockState;
+    /// `MovingPistonBlock.getCollisionShape`：这一格移动中活塞的方块实体算出的形状，
+    /// 相对这一格的最小角。`None` 表示没有这样的方块实体，官方给 `Shapes.empty()`。
+    ///
+    /// `MovingPistonBlock.getCollisionShape`: the shape computed by the moving-piston block
+    /// entity at this cell, relative to the cell's minimum corner. `None` means there is
+    /// no such block entity, for which vanilla returns `Shapes.empty()`.
+    fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>>;
     fn fluid_state(&self, pos: BlockPos) -> FluidState;
     fn block_collisions(&self, box_: Aabb, context: CollisionContext)
     -> Vec<(BlockPos, Vec<Aabb>)>;
@@ -100,6 +107,10 @@ pub trait BlockView {
 impl BlockView for World<'_> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         World::block_state(self, pos)
+    }
+
+    fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
+        World::moving_piston_shape(self, pos)
     }
 
     fn fluid_state(&self, pos: BlockPos) -> FluidState {

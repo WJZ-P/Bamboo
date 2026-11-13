@@ -433,6 +433,15 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 
 给以后生物和 AI 预留、这次没有实现的意图：`ChangeBlock`、`TriggerBlock`、`Damage`、`Push`、`Spawn`、`Remove`、`ScheduleTick`、`Depart`。「先到的生效」「推力累加」这些冲突规则要等真有这些命令时逐个对着原版定（第 17 节第 5 条）。
 
+**活塞推实体是反方向的**：官方 `PistonMovingBlockEntity.tick` 在第 9 段（方块实体）直接改别的实体的
+位置和速度，不是实体在自己的算阶段里发命令，所以它和上面的命令表接不上。三段逻辑
+（`moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase`）连同六个辅助方法共
+7 个方法、约 250–350 行 Rust（官方 `javap` 约 500 行字节码指令），还要给三种实体补
+`MoverType.PISTON` 的 `move`、移动记录和 `NOCLIP` 形状短路。两种接法：(A) 在方块实体 tick 里当场
+改实体，只能保证精确驱动逐位一致，并行驱动要把它登记成一条新的性能模式差异；(B) 新增一条意图命令，
+或者调整第 7 节的一刻顺序把活塞的推进挪到实体算阶段之前。做之前要先把接法定下来，再补官方假世界
+的逐刻对拍；整项估 2–3 天。**现在没实现**：移动中的活塞只有碰撞形状会挡住实体，不推也不拖。
+
 性质：
 
 - **结果和线程数无关。** 算的时候只读不变的快照和自己，落地的顺序是固定的。同样的输入一定得到同样的结果。

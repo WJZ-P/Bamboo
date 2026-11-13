@@ -63,9 +63,12 @@ import net.minecraft.world.entity.player.PlayerEquipment;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
+import net.minecraft.world.level.block.piston.MovingPistonBlock;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
@@ -158,6 +161,7 @@ public final class EntityOracle {
             cases += itemPickupSpectator(official, out);
             cases += itemPickupDelay(official, out);
             cases += itemPickupInfinite(official, out);
+            cases += movingPistonCollision(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -373,6 +377,210 @@ public final class EntityOracle {
 
     private static final int FIRST_ITEM_ID = 1 << 24;
     private static final long ENTITY_RANDOM_SEED = 0x0DDB1A5E5BAD5EEDL;
+
+    /**
+     * 移动中的活塞：`moving_piston` 的碰撞形状来自方块实体，不推进动画（不登记 ticker），
+     * 逐刻考察实体在这一份形状上的落地、滑落和空形状穿越。
+     *
+     * Moving pistons: the shape comes from the block entity. The animation is frozen (no ticker),
+     * so each tick tests landing, sliding and no-block-entity pass-through against one shape.
+     */
+    private static int movingPistonCollision(Official official, Writer out) throws Exception {
+        BlockState moving = Blocks.MOVING_PISTON.defaultBlockState()
+                .setValue(MovingPistonBlock.FACING, Direction.UP);
+        // 伸出中：被推的石头按 getExtendedProgress(0.5) 往下挪半格。
+        Long2ObjectOpenHashMap<BlockState> extending = new Long2ObjectOpenHashMap<>();
+        extending.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        extending.put(BlockPos.asLong(0, 65, 0), moving);
+        playPistonFalling(official, out, "piston_extending_falling", extending,
+                Blocks.SAND.defaultBlockState(), 0, 68, 0, new BlockPos(0, 65, 0),
+                Blocks.STONE.defaultBlockState(), Direction.UP, true, false, 0.5f, 20);
+        playPistonItem(official, out, "piston_extending_item", extending,
+                new BlockPos(0, 65, 0), Blocks.STONE.defaultBlockState(), Direction.UP,
+                true, false, 0.5f, 20);
+
+        // 缩回中的源活塞：底座的伸出形状 + 活塞头按 getExtendedProgress(0.5) 往上挪半格。
+        BlockState base = Blocks.PISTON.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.piston.PistonBaseBlock.FACING, Direction.UP);
+        Long2ObjectOpenHashMap<BlockState> retracting = new Long2ObjectOpenHashMap<>();
+        retracting.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        retracting.put(BlockPos.asLong(0, 65, 0), moving);
+        playPistonFalling(official, out, "piston_retracting_falling", retracting,
+                Blocks.SAND.defaultBlockState(), 0, 68, 0, new BlockPos(0, 65, 0),
+                base, Direction.UP, false, true, 0.5f, 20);
+        playPistonItem(official, out, "piston_retracting_item", retracting,
+                new BlockPos(0, 65, 0), base, Direction.UP, false, true, 0.5f, 20);
+        return 4;
+    }
+
+    private static void attachPiston(
+            Scene scene,
+            BlockPos pos,
+            BlockState moved,
+            Direction facing,
+            boolean extending,
+            boolean source,
+            float progress) {
+        PistonMovingBlockEntity piston = (PistonMovingBlockEntity) MovingPistonBlock.newMovingBlockEntity(
+                pos, scene.level.getBlockState(pos), moved, facing, extending, source);
+        set(PistonMovingBlockEntity.class, piston, "progress", progress);
+        set(PistonMovingBlockEntity.class, piston, "progressO", progress);
+        piston.setLevel(scene.level);
+        // 只放进 `getBlockEntity` 用的表，不登记 ticker：官方 `Scene.tick` 不跑方块实体。
+        scene.level.blockEntities.put(pos.asLong(), piston);
+    }
+
+    private static void playPistonFalling(
+            Official official,
+            Writer out,
+            String name,
+            Long2ObjectOpenHashMap<BlockState> blocks,
+            BlockState state,
+            int x,
+            int y,
+            int z,
+            BlockPos pistonPos,
+            BlockState moved,
+            Direction facing,
+            boolean extending,
+            boolean source,
+            float progress,
+            int ticks)
+            throws Exception {
+        Scene scene = Scene.start(official, "falling", state, x, y, z, blocks, 1L, 1L, null, null, 1);
+        attachPiston(scene, pistonPos, moved, facing, extending, source, progress);
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"");
+        out.write(name);
+        out.write("\",\"kind\":\"falling\",\"state\":");
+        out.write(Integer.toString(Block.getId(state)));
+        out.write(",\"x\":");
+        out.write(Integer.toString(x));
+        out.write(",\"y\":");
+        out.write(Integer.toString(y));
+        out.write(",\"z\":");
+        out.write(Integer.toString(z));
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"shapes\":");
+        writePistonShapes(out, pistonPos, (PistonMovingBlockEntity) scene.level.getBlockEntity(pistonPos));
+        out.write(",\"pistons\":");
+        writePiston(out, pistonPos, moved, facing, extending, source, progress);
+        out.write(",\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+    }
+
+    private static void playPistonItem(
+            Official official,
+            Writer out,
+            String name,
+            Long2ObjectOpenHashMap<BlockState> blocks,
+            BlockPos pistonPos,
+            BlockState moved,
+            Direction facing,
+            boolean extending,
+            boolean source,
+            float progress,
+            int ticks)
+            throws Exception {
+        Scene scene = Scene.items(official, blocks, false);
+        attachPiston(scene, pistonPos, moved, facing, extending, source, progress);
+        scene.spawnItem(0.5, 68.0, 0.5, new ItemStack(Items.COBBLESTONE, 1), 10);
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < ticks; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"");
+        out.write(name);
+        out.write("\",\"kind\":\"item\",\"state\":0,\"x\":0,\"y\":0,\"z\":0");
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"item\":");
+        out.write(Integer.toString(BuiltInRegistries.ITEM.getId(Items.COBBLESTONE)));
+        out.write(",\"count\":1,\"px\":0.5,\"py\":68.0,\"pz\":0.5,\"pickupDelay\":10");
+        out.write(",\"hopper\":false");
+        out.write(",\"shapes\":");
+        writePistonShapes(out, pistonPos, (PistonMovingBlockEntity) scene.level.getBlockEntity(pistonPos));
+        out.write(",\"pistons\":");
+        writePiston(out, pistonPos, moved, facing, extending, source, progress);
+        out.write(",\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+    }
+
+    private static void writePistonShapes(
+            Writer out,
+            BlockPos pos,
+            PistonMovingBlockEntity piston)
+            throws Exception {
+        VoxelShape shape = piston.getCollisionShape(null, pos);
+        out.write("[");
+        boolean first = true;
+        for (AABB box : shape.toAabbs()) {
+            if (!first) {
+                out.write(',');
+            }
+            first = false;
+            out.write("[");
+            out.write(Double.toString(box.minX));
+            out.write(",");
+            out.write(Double.toString(box.minY));
+            out.write(",");
+            out.write(Double.toString(box.minZ));
+            out.write(",");
+            out.write(Double.toString(box.maxX));
+            out.write(",");
+            out.write(Double.toString(box.maxY));
+            out.write(",");
+            out.write(Double.toString(box.maxZ));
+            out.write("]");
+        }
+        out.write("]");
+    }
+
+    private static void writePiston(
+            Writer out,
+            BlockPos pos,
+            BlockState moved,
+            Direction facing,
+            boolean extending,
+            boolean source,
+            float progress)
+            throws Exception {
+        out.write("[{\"x\":");
+        out.write(Integer.toString(pos.getX()));
+        out.write(",\"y\":");
+        out.write(Integer.toString(pos.getY()));
+        out.write(",\"z\":");
+        out.write(Integer.toString(pos.getZ()));
+        out.write(",\"state\":");
+        out.write(Integer.toString(Block.getId(moved)));
+        out.write(",\"facing\":");
+        out.write(Integer.toString(facing.get3DDataValue()));
+        out.write(",\"extending\":");
+        out.write(Boolean.toString(extending));
+        out.write(",\"source\":");
+        out.write(Boolean.toString(source));
+        out.write(",\"progress\":");
+        out.write(Float.toString(progress));
+        out.write("}]");
+    }
 
     /** 物品从空中落到石头上。速度用实体自己的随机源，和 `spawnAtLocation` 一样。 */
     private static int itemFall(Official official, Writer out) throws Exception {
