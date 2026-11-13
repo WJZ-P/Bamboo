@@ -266,7 +266,7 @@ pub fn entity_inside_boxes(state: BlockState, pos: BlockPos, entity: EntityConte
     if state.is_a(BlockAncestor::PowderSnowBlock) {
         let boxes = collision_boxes(state, pos, CollisionContext::Entity(entity));
         return if boxes.is_empty() {
-            at_position(FULL_BLOCK, state.block(), pos)
+            Cow::Borrowed(FULL_BLOCK)
         } else {
             boxes
         };
@@ -274,15 +274,18 @@ pub fn entity_inside_boxes(state: BlockState, pos: BlockPos, entity: EntityConte
     if state.is_a(BlockAncestor::TripWireBlock) || state.is_a(BlockAncestor::EndPortalBlock) {
         return outline_boxes(state, pos);
     }
+    if state.is_a(BlockAncestor::LavaCauldronBlock) {
+        let lava = sixteenths(2.0, 4.0, 2.0, 14.0, 15.0, 14.0);
+        return Cow::Owned([cauldron_shell().to_vec(), vec![lava]].concat());
+    }
     if state.is_a(BlockAncestor::LayeredCauldronBlock) {
         let level = state.try_get(LEVEL_CAULDRON).unwrap_or(1);
-        let index = (level - 1).clamp(0, 3) as usize;
-        return Cow::Owned([cauldron_shell().to_vec(), vec![CAULDRON_FILLED[index]]].concat());
+        let height = 6.0 + 3.0 * f64::from(level.clamp(1, 3));
+        let filled = sixteenths(2.0, 4.0, 2.0, 14.0, height, 14.0);
+        return Cow::Owned([cauldron_shell().to_vec(), vec![filled]].concat());
     }
-    if state.is_a(BlockAncestor::LavaCauldronBlock) {
-        return Cow::Owned([cauldron_shell().to_vec(), vec![CAULDRON_FILLED[3]]].concat());
-    }
-    at_position(FULL_BLOCK, state.block(), pos)
+    // 默认返回静态的 `Shapes.block()`，不调用 `getShape`，也不带渲染偏移。
+    Cow::Borrowed(FULL_BLOCK)
 }
 
 /// `getShape`，也就是选中框。
@@ -323,36 +326,6 @@ const HOPPER_INSIDE: Aabb = sixteenths(2.0, 11.0, 2.0, 14.0, 16.0, 14.0);
 fn cauldron_shell() -> &'static [Aabb] {
     mc_bamboo_data::collision_shape(blocks::WATER_CAULDRON)
 }
-
-/// `LayeredCauldronBlock.FILLED_SHAPES` 里的液柱：水位 1..3 到 9、12、15 像素，
-/// 最后一项是 `LavaCauldronBlock.FILLED_SHAPE` 里那根到 15 像素的柱子。
-const CAULDRON_FILLED: &[Aabb] = &[
-    Aabb::new(
-        2.0 / 16.0,
-        4.0 / 16.0,
-        2.0 / 16.0,
-        14.0 / 16.0,
-        9.0 / 16.0,
-        14.0 / 16.0,
-    ),
-    Aabb::new(
-        2.0 / 16.0,
-        4.0 / 16.0,
-        2.0 / 16.0,
-        14.0 / 16.0,
-        12.0 / 16.0,
-        14.0 / 16.0,
-    ),
-    Aabb::new(
-        2.0 / 16.0,
-        4.0 / 16.0,
-        2.0 / 16.0,
-        14.0 / 16.0,
-        15.0 / 16.0,
-        14.0 / 16.0,
-    ),
-    CAULDRON_INSIDE,
-];
 
 /// `getInteractionShape`：射线碰到选中框后，再碰到这个形状更近时报告它的面。
 ///
@@ -733,7 +706,10 @@ mod tests {
         }
         let lava = inside(blocks::LAVA_CAULDRON);
         assert_eq!(lava.len(), cauldron_shell().len() + 1);
-        assert_eq!(lava.last().copied(), Some(CAULDRON_INSIDE));
+        assert_eq!(
+            lava.last().copied(),
+            Some(sixteenths(2.0, 4.0, 2.0, 14.0, 15.0, 14.0))
+        );
     }
 
     #[test]

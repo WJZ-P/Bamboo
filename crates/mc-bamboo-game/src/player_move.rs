@@ -21,6 +21,7 @@ use mc_bamboo_data::{blocks, items, registries::attribute_defaults};
 use mc_bamboo_protocol::{
     codec::Reader,
     frame::{MAX_FRAME_LEN, find_frame},
+    item::ItemStack,
     packet::{
         ClientboundPacket,
         play::{ClientInformation, ENTITY_FLAG_SPRINTING, EquipmentSlot, GameMode, PlayerPosition},
@@ -972,6 +973,8 @@ pub struct MoveReplay {
     pub yaw: f32,
     pub pitch: f32,
     pub on_ground: bool,
+    /// 脚上穿着皮革靴，细雪的碰撞形状要用。
+    pub boots: bool,
     pub packets: Vec<MoveReplayPacket>,
 }
 
@@ -1020,6 +1023,9 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
     player.pitch = sample.pitch;
     player.on_ground = sample.on_ground;
     player.sync.shift_key_down = sample.shift;
+    if sample.boots {
+        player.inventory.slots[8] = ItemStack::new(items::LEATHER_BOOTS, 1);
+    }
     player.sync.flying = sample.flying;
     if sample.sprint {
         player.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
