@@ -1375,6 +1375,8 @@ mod loaded_tests;
 #[path = "world/tests/review_probe.rs"]
 mod review_probe;
 #[cfg(test)]
+mod storage_diff_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
 mod ticket_tests;

@@ -180,10 +180,11 @@ pub(crate) struct DirectorHost {
     /// Backoff deadline for consecutive failures; retry when it passes. Never a
     /// permanent pause (review report, fatal 2).
     save_retry_after: u64,
-    /// 写盘失败后还欠一次保存的区块。正常判脏路径会重新拍快照（复查「致命 2」）。
-    /// Chunks whose write failed and still need saving; the normal dirty path
-    /// re-snapshots them (review fatal 2).
+    /// 写盘失败或快照被推迟、还欠一次保存的区块（复查「致命 2」「中 6」）。
+    /// Chunks whose write failed or whose snapshot was deferred.
     retry_dirty: HashSet<ChunkPos>,
+    /// 版本/上层内容已判脏、但这一刻还没轮到拍快照的区块。
+    dirty_pending: HashSet<ChunkPos>,
     /// `/save-all` 请求还剩哪些快照没提交给 IO 线程。全部提交完才排自己的栅栏，
     /// 所以「保存真正完成」包含这次请求的全部写（复查报告「中 8 / 中 9」）。
     /// Pending save-all requests and the snapshot seqs they still owe IO. A
@@ -235,6 +236,7 @@ impl DirectorHost {
             consecutive_io_failures: 0,
             save_retry_after: 0,
             retry_dirty: HashSet::new(),
+            dirty_pending: HashSet::new(),
             save_all_requests: VecDeque::new(),
             ready_save_barriers: Vec::new(),
             last_tick: 0,
@@ -590,7 +592,11 @@ impl DirectorHost {
             // 从盘上/模板交付进来的区块还没存过：照官方 `isUnsaved` 只有真被
             // 改过的才算，原样区块不写。已保存过的区块只按版本变化判脏。
             let changed_from_generator = !region.chunks.is_pristine(pos);
-            if revision_changed && (saved.is_some() || changed_from_generator || force) {
+            let upper_dirty = region.dirty.pending_contains(pos)
+                || region.block_ticks.dirty_contains(pos);
+            if revision_changed
+                && (saved.is_some() || changed_from_generator || upper_dirty || force)
+            {
                 dirty.push(pos);
             }
         }
@@ -642,20 +648,32 @@ impl DirectorHost {
         self.loaded_save_tick
             .retain(|pos, _| region.chunks.is_loaded(*pos));
 
-        let dirty = self.dirty_loaded_chunks(region, false);
-        let count = save_batch_size(dirty.len());
-        let eligible: Vec<ChunkPos> = dirty
-            .into_iter()
-            .filter(|pos| match self.loaded_save_tick.get(pos) {
-                // 写失败的区块不受冷却限制，退避到期就立刻重试。
-                None => true,
-                Some(&last) => {
-                    self.retry_dirty.contains(pos)
-                        || now_tick.saturating_sub(last) >= SAVE_COOLDOWN_TICKS
-                }
-            })
-            .take(count)
-            .collect();
+        let mut dirty = self.dirty_loaded_chunks(region, false);
+        // 上一刻没轮到的脏区块留在集合里，不会因为改动标记被取走而丢掉。
+        for pos in std::mem::take(&mut self.dirty_pending) {
+            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+                dirty.push(pos);
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        // 每刻最多 20 个（官方 `saveChunksEagerly`），单区块 10 秒冷却；
+        // 失败重试和待算光照推迟的区块不受冷却限制。
+        let count = 20;
+        let mut remaining = Vec::new();
+        let mut eligible = Vec::new();
+        for pos in dirty {
+            let cooling = self.loaded_save_tick.get(&pos).is_some_and(|&last| {
+                now_tick.saturating_sub(last) < SAVE_COOLDOWN_TICKS
+                    && !self.retry_dirty.contains(&pos)
+            });
+            if cooling || eligible.len() >= count {
+                remaining.push(pos);
+            } else {
+                eligible.push(pos);
+            }
+        }
+        self.dirty_pending.extend(remaining);
         for pos in eligible {
             self.snapshot_loaded(region, pos, now_tick);
         }
@@ -707,6 +725,9 @@ impl DirectorHost {
     /// so it is retried on a later tick.
     fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
         let Some(result) = region.encode_loaded_column(pos) else {
+            // 有待算光照 / 表正忙：推迟到下一刻，不记「已存」。
+            self.retry_dirty.insert(pos);
+            self.loaded_save_tick.remove(&pos);
             return;
         };
         match result {
@@ -731,8 +752,9 @@ impl DirectorHost {
                 // at enqueue time makes a failed write never dirty again.
                 self.acked_revisions
                     .insert(seq, (pos, region.chunks.revision(pos), 0));
-                self.retry_dirty.remove(&pos);
+                // 写成功之前不摘掉重拍标记：回执到达时在 poll_io 里清。
                 self.loaded_save_tick.insert(pos, now_tick);
+                self.dirty_pending.remove(&pos);
             }
             Err(error) => {
                 tracing::warn!(%error, ?pos, "could not encode a loaded chunk for saving");

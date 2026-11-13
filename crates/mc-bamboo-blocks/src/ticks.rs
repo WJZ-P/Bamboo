@@ -273,6 +273,10 @@ impl BlockTicks {
     }
 
     /// 取走「计划刻改过」的区块集合，由游戏层并进存档脏集合。
+    pub fn dirty_contains(&self, pos: ChunkPos) -> bool {
+        self.dirty.contains(&pos)
+    }
+
     pub fn take_dirty(&mut self) -> std::collections::BTreeSet<ChunkPos> {
         std::mem::take(&mut self.dirty)
     }

@@ -35,6 +35,10 @@ impl Dirty {
     }
 
     /// 这一刻有上层内容改动的区块。
+    pub(crate) fn pending_contains(&self, pos: ChunkPos) -> bool {
+        self.pending.contains(&pos)
+    }
+
     pub(crate) fn take(&mut self) -> BTreeSet<ChunkPos> {
         std::mem::take(&mut self.pending)
     }

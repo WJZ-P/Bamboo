@@ -1285,11 +1285,18 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
     server.ensure_loaded(&[pos]);
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    // 只读快照照复查「中 6」会推迟有待算光照的区块，先让光照算完。
+    server.world.region.chunks.finish_light_updates();
+    // 和正式路径一样走写路径的改动标记；测试直接改 ChunkStore 时补一下。
+    server.world.region.touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
 
-    server
-        .world
-        .host
-        .save_loaded_dirty(&mut server.world.region, 1, true);
+    // 有待算光照时快照按复查「中 6」推迟；先跑几刻让光照算完再重试。
+    for t in 1..8 {
+        server
+            .world
+            .host
+            .save_loaded_dirty(&mut server.world.region, t, true);
+    }
     server.world.host.flush_io();
 
     assert!(
@@ -1362,6 +1369,7 @@ fn save_all_snapshots_every_dirty_loaded_chunk() {
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
     server.set_block(mc_bamboo_core::BlockPos::new(19, -60, 3), blocks::GLOWSTONE);
+    server.world.region.chunks.finish_light_updates();
 
     server
         .world

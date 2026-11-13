@@ -270,9 +270,15 @@ impl LevelLight {
         self.queue.has_work()
     }
 
+    /// 这一柱还有没算完的光照吗？给只读存档快照判断能不能拍。
+    /// 只推迟真正有待算光照的区块，别处排队不拖住其它柱。
+    pub fn has_unfinished_round_for_column(&self, pos: ChunkPos) -> bool {
+        self.queue.has_round_for_column(pos) || self.engines.in_round()
+    }
+
     /// 可以搬区块柱了：没有排着队的任务，也没有算到一半的轮次和引擎里剩下的工作。
     /// 这时引擎和给别人读的那两份光照内容相同，盒子只装一份就够。
-    pub(crate) fn ready_to_move_columns(&self) -> bool {
+    pub fn ready_to_move_columns(&self) -> bool {
         !self.queue.has_work()
             && !self.engines.in_round()
             && !self.engines.sky.has_light_work()
