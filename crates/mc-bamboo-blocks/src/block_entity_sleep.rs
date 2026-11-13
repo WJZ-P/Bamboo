@@ -1514,10 +1514,12 @@ fn machine_phase_bench() {
                             BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
                             UPDATE_ALL,
                         );
-                        // 漏斗自己有物品、下方是容器：每次冷却归零都会送一件，
-                        // 冷却期里就是本轮休眠省下来的那 8 刻。
+                        // 五格都放满，2000 刻里每次冷却归零都会送一件，
+                        // 于是 8 刻里有 7 刻睡在冷却期，不会退化成闲置空转。
                         world.with_container(pos, &mut |container| {
-                            container.set(0, ItemStack::new(items::DIRT, 64));
+                            for slot in 0..HOPPER_CONTAINER_SIZE {
+                                container.set(slot, ItemStack::new(items::DIRT, 64));
+                            }
                         });
                         world.set_block(pos.below(), BlockState(blocks::CHEST), UPDATE_ALL);
                         world.set_block_entity(Box::new(HopperEntity::new(pos)));
