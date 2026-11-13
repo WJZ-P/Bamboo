@@ -560,7 +560,7 @@ gzip 的 NBT，根是 `{ Data: { ... } }`。`LevelStorageAccess.saveDataTag` 把
 Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键，其它顶层键、`Version` /
 `difficulty_settings` / `spawn` 里的多余键按 D9 原样写回。
 
-**文件系统层面的事这次不做，以后接进游戏时照官方**：
+**文件系统层面的事（编解码阶段不做）已按第 12 节第 6 步接进游戏，做法是照官方**：
 
 - `LevelStorageAccess.saveLevelData` 先在 `<world>/` 里 `Files.createTempFile("level", ".dat")`
   写一份完整的 gzip 文件，再 `Util.safeReplaceFile(dataFile, temp, oldDataFile)` 把它换成
@@ -569,7 +569,9 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 - `session.lock`：`DirectoryLock.create` 在 `session.lock` 里写雪人字符 `☃`，用
   `FileChannel.tryLock()` 拿独占锁；拿不到就拒绝启动，`checkLock()` 每次访问前检查锁还在。
 
-### 9.3 `data/` 下的独立 saved data（26.3 新增，只写建模过的五份）
+（2026-11-14 按实现更新：本文第 12 节第 6 步 / 第 14 节、README「存档」；合并提交 `f91e443`、`8f62c12`）
+
+### 9.3 `data/` 下的独立 saved data（26.3 新增，只写建模过的几份）
 
 26.3 把世界生成设置和游戏规则从 `level.dat` 搬到 `data/` 下的独立文件。
 `LevelDatToSavedDataFileFix` 列出了文件名（`level.dat` 在读写时由 file fixer 迁移）：
@@ -587,25 +589,31 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 | `minecraft/world_border.dat` | `world_border`（`LevelDatToSavedDataFileFix` 按维度 `overworld` / `the_nether` / `the_end` 各写一份） |
 
 其它 `SavedDataType`（地图 idcount、袭击、结构等）按各自的 id 落在 `data/` 下，
-文件名是 `<命名空间>/<路径>.dat`。这次一个都不写。
+文件名是 `<命名空间>/<路径>.dat`。Bamboo 只写建模过的四份（`game_rules`、
+`world_gen_settings`、`world_border`、空的 `chunk_tickets`），其余一个都不写。
 
 格式：`SavedDataStorage` 用 `NbtIo.readCompressed`（gzip 或未压缩，按文件头判断）读，
 根是 `{ data: <SavedDataType.codec() 编出的值>, DataVersion: int }`；写时
 `encodeUnchecked` 把 codec 的值放进 `data` 字段，再 `NbtIo.writeCompressed`。读不到
 或解析失败时 `computeIfAbsent` 调 `SavedDataType.constructor()` 造一个全默认值的对象
 （例如 `new GameRules(FeatureFlags.DEFAULT_FLAGS)`），不把错误抛给调用方；文件不存在
-也不是错误。因此 Bamboo 不写这些文件时，官方服务端仍能打开这个世界，但会按默认
-游戏规则、默认世界生成设置生成地形，和 Bamboo 的平坦模板不一样。验证只用官方的类
+也不是错误。因此 Bamboo 不写没建模的这些文件时，官方服务端仍能打开这个世界，会按官方默认值
+补上；Bamboo 写出的 `world_gen_settings.dat` 是 `minecraft:flat`、层与超平坦模板一致，
+官方服务端接着用这个世界时新生成的区块和 Bamboo 相同。验证只用官方的类
 读 / 写单个文件，不开真实服务端、不接受 EULA。
 
-（2026-11-12 按实现更新）`minecraft/world_border.dat` 的内容已经就绪、但还没接线：
-`mc-bamboo-blocks::world_border::WorldBorder` 存着官方 `WorldBorder.Settings` 的九个字段
-（`center_x` / `center_z` / `damage_per_block` / `safe_zone` / `warning_blocks` /
-`warning_time` / `size` / `lerp_time` / `lerp_target`），`export_settings()` 对应
-`Settings(WorldBorder)`，`restore(settings, game_time)` 对应 `CODEC.xmap` 加上
-`getWorldBorder()` 里的 `applyInitialSettings(gameTime)`。权威副本在 `Global`，
-不写盘、重启回到官方默认边界；接进第 6 步「接进游戏那一半」时把这两个函数挂到
-`data/` 的读写上即可（渐变中的 `lerp_time` 是剩余刻数，恢复时用当前世界时间重新起算）。
+`minecraft/world_border.dat` **已经接线**：`mc-bamboo-blocks::world_border::WorldBorder`
+存着官方 `WorldBorder.Settings` 的九个字段（`center_x` / `center_z` / `damage_per_block` /
+`safe_zone` / `warning_blocks` / `warning_time` / `size` / `lerp_time` / `lerp_target`），
+`export_settings()` 对应 `Settings(WorldBorder)`，`restore(settings, game_time)` 对应
+`CODEC.xmap` 加上 `getWorldBorder()` 里的 `applyInitialSettings(gameTime)`。权威副本在
+`Global`，关服 / 自动保存时写进按维度存放的 `world_border.dat`、启动时读回，
+渐变中的 `lerp_time` 是剩余刻数，恢复时传存档里的游戏时间重新起算。
+`game_rules.dat` 用 `GameRuleMap.CODEC`、`world_gen_settings.dat` 用
+`WorldGenSettings.CODEC`，都由 `saved-data` 子命令用官方 codec 对拍。
+
+（2026-11-14 按实现更新：本文第 2 / 12 / 14 节、README「存档」、`crates/mc-bamboo-game/src/save_data.rs`；
+合并提交 `f3953d3`、`d31e954`、`1828b8c`）
 
 ## 10. 转换工具
 
