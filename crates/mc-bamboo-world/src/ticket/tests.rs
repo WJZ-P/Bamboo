@@ -6,6 +6,7 @@ type Sources = Vec<(ChunkPos, i32)>;
 
 use mc_bamboo_core::ChunkPos;
 
+use super::spread::SCRATCH_POOL_CAP;
 use super::{
     ChunkStatus, FULL_CHUNK_LEVEL, LevelChange, MAX_LEVEL, MIN_VIEW_DISTANCE, SIMULATION_MAX_LEVEL,
     SavedTicket, TicketTable, TicketType, UNLOADED_LEVEL, full_status, generation_status,
@@ -753,4 +754,32 @@ fn scratch_blocks_stay_bounded_while_moving_away() {
         "辅助块数没有上界：起始 {first}，稳态 {steady}，峰值 {peak}，上界 {bound}"
     );
     assert_eq!(table.scratch_blocks(), steady, "稳态之后块数应该不再变化");
+}
+
+#[test]
+fn scratch_pool_has_a_fixed_cap_after_two_hundred_players_move_apart() {
+    let mut table = TicketTable::new();
+    // 200 名玩家分散到视距之外，每人沿不同方向越走越远；一次更新同时
+    // 用到的块数远小于历史走过的位置数，池子不能照历史峰值保留。
+    for id in 0..200u64 {
+        let step = id as i32;
+        table.set_player(id, Some(p(step * 97, step * 61)));
+    }
+    table.run_updates();
+    for tick in 1..=20 {
+        for id in 0..200u64 {
+            let step = id as i32;
+            table.set_player(
+                id,
+                Some(p(step * 97 + step.signum() * tick, step * 61 - tick)),
+            );
+        }
+        table.run_updates();
+        assert!(
+            table.scratch_blocks() <= 2 * SCRATCH_POOL_CAP,
+            "辅助块池超过固定上限：{} > {}",
+            table.scratch_blocks(),
+            2 * SCRATCH_POOL_CAP
+        );
+    }
 }

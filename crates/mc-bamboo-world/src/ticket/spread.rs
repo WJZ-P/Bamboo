@@ -22,6 +22,7 @@ use std::{
 use mc_bamboo_core::ChunkPos;
 
 use super::{
+    level::{MAX_VIEW_DISTANCE, PLAYER_TICKET_LEVEL, UNLOADED_LEVEL},
     profile::{Guard, count},
     table::ChunkHasherBuilder,
 };
@@ -31,6 +32,17 @@ const BLOCK_SHIFT: i32 = 6;
 const BLOCK_SIZE: i32 = 1 << BLOCK_SHIFT;
 const BLOCK_MASK: i32 = BLOCK_SIZE - 1;
 const BLOCK_CELLS: usize = (BLOCK_SIZE * BLOCK_SIZE) as usize;
+/// 等级从玩家票的 `PLAYER_TICKET_LEVEL` 最多向外传播到无票，所以一次更新的
+/// 覆盖半径不超过「视距 + 传播半径」。按最大视距算一个固定上限：跨度换成
+/// 64 格一块后两端各留一块余量，再平方。超过上限的块用完就释放，池子不再
+/// 记住历史峰值。
+#[doc(hidden)]
+pub const SCRATCH_POOL_CAP: usize = {
+    let radius = MAX_VIEW_DISTANCE + (UNLOADED_LEVEL - PLAYER_TICKET_LEVEL);
+    let span = 2 * radius + 1;
+    let blocks_per_side = ((span + BLOCK_SIZE - 1) / BLOCK_SIZE + 2) as usize;
+    blocks_per_side * blocks_per_side
+};
 const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
     (-1, -1),
     (-1, 0),
@@ -175,8 +187,6 @@ impl ScratchBlock {
 struct Scratch {
     blocks: HashMap<BlockKey, Box<ScratchBlock>, ChunkHasherBuilder>,
     pool: Vec<Box<ScratchBlock>>,
-    /// 池子最多留多少个块；按一次更新同时用到的块数定，不随世界范围增长。
-    pool_cap: usize,
     /// 清空位置按 BFS 发现顺序记，遍历它不依赖任何哈希图的顺序。
     reset_order: Vec<ChunkPos>,
     /// 本轮用到过的块号，收变化列表时按坐标排。
@@ -189,7 +199,6 @@ impl Scratch {
         Self {
             blocks: HashMap::default(),
             pool: Vec::new(),
-            pool_cap: 64,
             reset_order: Vec::new(),
             used_blocks: Vec::new(),
             epoch: 0,
@@ -208,13 +217,11 @@ impl Scratch {
         self.used_blocks.clear();
     }
 
-    /// 一轮结束：块回收，只保留有限个供下轮复用。
+    /// 一轮结束：块回收，只保留固定个供下轮复用，多出来的直接释放。
     fn recycle(&mut self) {
-        self.pool_cap = self.pool_cap.max(self.blocks.len());
-        for (_, block) in self.blocks.drain() {
-            if self.pool.len() < self.pool_cap {
-                self.pool.push(block);
-            }
+        let keep = SCRATCH_POOL_CAP.saturating_sub(self.pool.len());
+        for (_, block) in self.blocks.drain().take(keep) {
+            self.pool.push(block);
         }
     }
 
