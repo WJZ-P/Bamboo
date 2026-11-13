@@ -1,5 +1,6 @@
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.mojang.serialization.DataResult;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -30,6 +31,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
@@ -43,7 +45,10 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelHeightAccessor;
+import net.minecraft.world.level.TicketStorage;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.border.WorldBorder;
+import net.minecraft.world.level.gamerules.GameRuleMap;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
@@ -333,7 +338,14 @@ public final class StorageOracle {
                 }
             }
 
-            // 全局与维度 data/ 下的 saved data（含 game_rules.dat / world_border.dat）
+            // 补 10：对**实际写出的每个** data/ 文件用官方 codec 解码，而不是只
+            // 检查 NbtIo 能读 / 有 data 键。Bamboo 只写三份建模过的 saved data；
+            // 未建模的（旧世界/官方服务端留下的）只做 NBT 可读性检查，原样保留。
+            // Item 10: decode EVERY written data/ file with its official codec,
+            // not just "NbtIo can read it". Bamboo writes only three modelled
+            // saved-data files; unmodelled ones (from older/official worlds) are
+            // only checked for readable NBT and left untouched.
+            JsonArray codecs = new JsonArray();
             for (Path base : new Path[] {root.resolve("data"), dimension.resolve("data")}) {
                 if (!Files.isDirectory(base)) {
                     continue;
@@ -342,9 +354,12 @@ public final class StorageOracle {
                     for (Path path : stream.filter(p -> p.toString().endsWith(".dat")).toList()) {
                         try {
                             CompoundTag tag = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
-                            if (!tag.contains("data")) {
+                            Tag data = tag.get("data");
+                            if (data == null) {
                                 errors.add(path + ": no data tag");
                             } else {
+                                String codec = decodeWrittenSavedData(path, data);
+                                codecs.add(path.getFileName() + "=" + codec);
                                 savedData++;
                             }
                         } catch (Exception error) {
@@ -353,6 +368,7 @@ public final class StorageOracle {
                     }
                 }
             }
+            response.add("savedDataCodecs", codecs);
 
             response.addProperty("chunks", chunks);
             response.addProperty("entityChunks", entityChunks);
@@ -360,6 +376,32 @@ public final class StorageOracle {
             response.addProperty("savedData", savedData);
             response.add("errors", errors);
             return response;
+        }
+
+        /** 用官方 codec 解码 Bamboo 写出的一份 saved data，返回 codec 名。 */
+        private String decodeWrittenSavedData(Path path, Tag data) {
+            String name = path.getFileName().toString();
+            switch (name) {
+                case "game_rules.dat":
+                    DataResult<GameRuleMap> rules = GameRuleMap.CODEC.parse(NbtOps.INSTANCE, data);
+                    rules.getOrThrow();
+                    return "GameRuleMap.CODEC";
+                case "world_border.dat":
+                    DataResult<WorldBorder.Settings> border =
+                            WorldBorder.Settings.CODEC.parse(NbtOps.INSTANCE, data);
+                    border.getOrThrow();
+                    return "WorldBorder.Settings.CODEC";
+                case "chunk_tickets.dat":
+                    DataResult<TicketStorage> tickets = TicketStorage.CODEC.parse(NbtOps.INSTANCE, data);
+                    tickets.getOrThrow();
+                    return "TicketStorage.CODEC";
+                default:
+                    // 未建模的 saved data：只确认是合法 NBT 复合标签，不用 codec 强解。
+                    if (!(data instanceof CompoundTag)) {
+                        throw new IllegalStateException("unmodelled saved data is not a compound tag");
+                    }
+                    return "NbtIo";
+            }
         }
 
         /** 从 JSON 描述造一个官方的 SerializableChunkData，再 write()。 */

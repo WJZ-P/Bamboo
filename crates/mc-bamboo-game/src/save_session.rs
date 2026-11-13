@@ -21,8 +21,8 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::{
     level_dat::LevelData,
     world_dir::{
-        LevelSource, SAVED_DATA_IDS, SessionLock, WorldDir, encode_level_data, encode_saved_data,
-        load_level_data, read_saved_data, read_saved_data_at, write_default_saved_data,
+        LevelSource, SessionLock, WorldDir, encode_level_data, encode_saved_data, load_level_data,
+        read_saved_data, read_saved_data_at,
     },
 };
 use tracing::{info, warn};
@@ -92,7 +92,9 @@ impl SaveSession {
             ),
             LevelSource::Primary => {}
         }
-        write_default_saved_data(&dir)?;
+        // 补 10：不写未建模的 saved data 空文件；文件不存在时官方 codec 会自己造默认值。
+        // Item 10: no empty default files for unmodelled saved data; official
+        // codecs construct defaults when a file is absent.
         // 启动时读回游戏规则（全局 data/）和世界边界（维度 data/）；文件不存在时用默认。
         // Read back game rules (global data/) and world border (dimension data/) at
         // startup; a missing file means defaults.
@@ -188,17 +190,11 @@ impl SaveSession {
             backup: None,
             bytes: Self::chunk_tickets_bytes()?,
         });
-        // 全新世界的空默认文件也在 IO 线程写，世界线程只编字节。
-        for &id in SAVED_DATA_IDS {
-            let path = self.dir.saved_data(id);
-            if !path.exists() {
-                files.push(EncodedFile {
-                    path,
-                    backup: None,
-                    bytes: encode_saved_data(&Tag::Compound(Vec::new()))?,
-                });
-            }
-        }
+        // 补 10：只写建模过的四份文件；未建模的 saved data 保持「不存在」，
+        // 官方 computeIfAbsent 会自己造默认值。已有的这类文件原样保留，不动。
+        // Item 10: only the four modelled files are written; unmodelled saved
+        // data stays absent (official computeIfAbsent builds defaults). Existing
+        // files of that kind are left untouched.
         Ok(files)
     }
 
@@ -275,7 +271,9 @@ mod tests {
         assert_eq!(source, LevelSource::Fresh);
         assert!(!session.dir().level_dat().exists());
         assert!(session.dir().region_dir().is_dir());
-        assert!(session.dir().saved_data("minecraft:game_rules").exists());
+        // 补 10：全新世界不写任何 saved data 空文件。
+        assert!(!session.dir().saved_data("minecraft:game_rules").exists());
+        assert!(!session.dir().saved_data("minecraft:weather").exists());
         session.save_all(&Global::default(), 456).unwrap();
         assert!(session.dir().level_dat().exists());
         assert!(session.dir().chunk_tickets().exists());

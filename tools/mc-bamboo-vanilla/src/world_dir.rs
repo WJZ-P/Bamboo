@@ -26,6 +26,11 @@ struct Report {
     #[serde(default)]
     #[serde(rename = "savedData")]
     saved_data: u64,
+    /// 每个 data/ 文件用的官方 codec（补 10 的逐文件对拍结果）。
+    /// Official codec used for each data/ file (item 10 per-file comparison).
+    #[serde(default)]
+    #[serde(rename = "savedDataCodecs")]
+    saved_data_codecs: Vec<String>,
     #[serde(default)]
     errors: Vec<String>,
 }
@@ -116,6 +121,9 @@ pub fn run(dir: &str, java: &str) -> Result<(), String> {
         "world-dir: chunks={} entity_chunks={} players={} saved_data={}",
         report.chunks, report.entity_chunks, report.players, report.saved_data
     );
+    for codec in &report.saved_data_codecs {
+        println!("world-dir saved-data codec: {codec}");
+    }
     for error in &report.errors {
         eprintln!("world-dir error: {error}");
     }

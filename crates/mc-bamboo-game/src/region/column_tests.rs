@@ -1133,8 +1133,7 @@ fn writes_a_world_dir_fixture_for_official_verification() {
         level_dat::LevelData,
         player_data::PlayerData,
         world_dir::{
-            WorldDir, encode_player_data, save_level_data, write_default_saved_data,
-            write_saved_data, write_saved_data_at,
+            WorldDir, encode_player_data, save_level_data, write_saved_data, write_saved_data_at,
         },
     };
 
@@ -1193,10 +1192,19 @@ fn writes_a_world_dir_fixture_for_official_verification() {
         },
     )
     .unwrap();
-    write_default_saved_data(&dir).unwrap();
     let (game_rules, world_border) = crate::saved_data_samples();
     write_saved_data(&dir, "minecraft:game_rules", &game_rules).unwrap();
     write_saved_data_at(&dir.world_border_dat(), &world_border).unwrap();
+    // 和真实 save_all 一样写出 chunk_tickets.dat，让 world-dir 用官方
+    // TicketStorage.CODEC 解码到。
+    write_saved_data_at(
+        &dir.chunk_tickets(),
+        &mc_bamboo_nbt::Tag::Compound(vec![(
+            "tickets".to_owned(),
+            mc_bamboo_nbt::Tag::List(Vec::new()),
+        )]),
+    )
+    .unwrap();
 
     println!("WORLD_DIR_FIXTURE={}", root.display());
 }

@@ -538,39 +538,17 @@ pub fn read_saved_data_at(path: &Path) -> Option<Tag> {
     field(&Tag::Compound(entries), "data").cloned()
 }
 
-/// 全局 `data/` 下要写的独立文件（`docs/m3-storage.md` 9.3、Q9）。
-/// `world_border.dat` 和 `chunk_tickets.dat` 是按维度存的，在维度的
-/// `data/minecraft/` 下，不在这里。游戏规则先写空默认（官方解码时补默认值），
-/// 再由 `SaveSession::save_all` 覆盖成真实值。
-/// Global `data/` saved-data files. `world_border.dat` and `chunk_tickets.dat`
-/// are per-dimension (under the dimension's `data/minecraft/`), not here. Game
-/// rules get an empty default first (official fills defaults on decode), then
-/// `SaveSession::save_all` overwrites them with the real values.
-pub const SAVED_DATA_IDS: &[&str] = &[
-    // 新世界先写空默认（官方解码时把没写的规则重置为默认值），之后 `save_all` 覆盖成真实值。
-    // A fresh world gets an empty default (official resets missing rules to their
-    // defaults); `save_all` overwrites it with the real values.
-    "minecraft:game_rules",
-    "minecraft:world_gen_settings",
-    "minecraft:world_clocks",
-    "minecraft:weather",
-    "minecraft:scheduled_events",
-    "minecraft:wandering_trader",
-    "minecraft:custom_boss_events",
-    "minecraft:ender_dragon_fight",
-];
-
-/// 给一份新世界写出全部 `data/` 独立文件，内容为空复合（各 codec 用默认值）。
-/// 已经存在的文件不覆盖，保留上一次保存的值。
-pub fn write_default_saved_data(dir: &WorldDir) -> io::Result<()> {
-    for &id in SAVED_DATA_IDS {
-        if !dir.saved_data(id).exists() {
-            write_saved_data(dir, id, &Tag::Compound(Vec::new()))?;
-        }
-    }
-    Ok(())
-}
-
+/// 补 10：Bamboo 没建模的 saved data（`weather`、`world_gen_settings` 等）**不写空
+/// `{}` 文件。官方 `SavedDataStorage.computeIfAbsent` 找不到文件就用默认构造，
+/// 「没有就不写」是安全的；写空 `{}` 反而可能被官方 codec 当成坏档。已经存在的
+/// 这类文件（旧世界或官方服务端写的）原样保留，读盘时照常处理。
+/// Item 10: unmodelled saved data is NOT written as empty `{}` files. Official
+/// `SavedDataStorage.computeIfAbsent` constructs defaults when a file is
+/// missing, so not writing is safe; an empty `{}` could be read as corrupt by
+/// an official codec. Existing such files are left untouched.
+///
+/// Only `level.dat`, `game_rules.dat`, `world_border.dat` and `chunk_tickets.dat`
+/// are written, all via `SaveSession::encode_saves`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,17 +710,11 @@ mod tests {
         let value = Tag::Compound(vec![("keepTerrain".to_owned(), Tag::Byte(0))]);
         write_saved_data(&dir, "minecraft:game_rules", &value).unwrap();
         assert_eq!(read_saved_data(&dir, "minecraft:game_rules"), Some(value));
-
-        write_default_saved_data(&dir).unwrap();
-        // 已经写过的 game_rules 不被默认值覆盖。
-        assert_eq!(
-            read_saved_data(&dir, "minecraft:game_rules"),
-            Some(Tag::Compound(vec![(
-                "keepTerrain".to_owned(),
-                Tag::Byte(0)
-            )]))
+        // 补 10：建目录不会凭空写出未建模的 saved data，官方 computeIfAbsent 会自己造默认值。
+        assert!(
+            read_saved_data(&dir, "minecraft:weather").is_none(),
+            "unmodelled saved data must not be written as empty files"
         );
-        assert!(read_saved_data(&dir, "minecraft:weather").is_some());
     }
 
     /// 官方 `Player.getStringUUID()` 带连字符，玩家文件名必须是这个形式。
