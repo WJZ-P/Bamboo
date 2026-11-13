@@ -24,13 +24,27 @@ use crate::{
     Worldgen,
     aquifer::Aquifer,
     biome::MultiNoiseBiomeSource,
+    biome_manager::BiomeManager,
+    carver::Carvers,
     climate::TargetPoint,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
+    material::MaterialRules,
     math::{java_floor_div, quart_to_block},
     sampler::{Compiler, Context, Sampler},
     settings::Settings,
     volume::Volume,
 };
+
+/// `terrain` 状态里依次做的三件事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    /// `doFill` 跑完那一刻。
+    Noise,
+    /// `MaterialSystem.buildSurface` 跑完那一刻。
+    Surface,
+    /// `generateCarvers` 跑完那一刻。
+    Carvers,
+}
 
 /// 一个区块 16×16 个柱子。
 pub const CHUNK_WIDTH: usize = 16;
@@ -47,13 +61,19 @@ pub const OVERWORLD_PRESET: &str = "minecraft:overworld";
 /// 六条密度函数和所有噪声实例共用一个 [`Compiler`]，所以 `cache` 编号也共用。
 #[derive(Debug)]
 pub struct Generator<'a> {
+    worldgen: &'a Worldgen,
     settings: &'a Settings,
     biomes: &'a MultiNoiseBiomeSource,
-    router: Vec<Sampler>,
+    router: crate::settings::Samplers,
     aquifer: Option<AquiferFunctions>,
     /// `RandomState.getOrCreateRandomFactory("minecraft:aquifer")`。
     aquifer_random: crate::random::PositionalFactory,
     cache_count: usize,
+    material: MaterialRules,
+    carvers: Carvers,
+    /// `RandomState.random`，`MaterialSystem` 用同一个 positional factory 造噪声。
+    positional: crate::random::PositionalFactory,
+    seed: i64,
     default_block: u32,
     default_fluid: u32,
     empty: u32,
@@ -96,19 +116,16 @@ impl<'a> Generator<'a> {
         let mut compiler = Compiler::new(seed, settings.legacy_random_source);
 
         // 编译顺序要和官方一样，编译顺序决定 cache 的编号，不过编号只要自洽就不影响结果。
-        let router: Vec<Sampler> = [
-            &settings.router.temperature,
-            &settings.router.vegetation,
-            &settings.router.continents,
-            &settings.router.erosion,
-            &settings.router.depth,
-            &settings.router.ridges,
-            &settings.router.chunk_surface_level,
-            &settings.router.final_density,
-        ]
-        .iter()
-        .map(|function| compiler.compile(function))
-        .collect();
+        let router = crate::settings::Samplers {
+            temperature: compiler.compile(&settings.router.temperature),
+            vegetation: compiler.compile(&settings.router.vegetation),
+            continents: compiler.compile(&settings.router.continents),
+            erosion: compiler.compile(&settings.router.erosion),
+            depth: compiler.compile(&settings.router.depth),
+            ridges: compiler.compile(&settings.router.ridges),
+            chunk_surface_level: compiler.compile(&settings.router.chunk_surface_level),
+            final_density: compiler.compile(&settings.router.final_density),
+        };
 
         let noises = worldgen.noises();
         let functions = worldgen.functions();
@@ -117,15 +134,39 @@ impl<'a> Generator<'a> {
             .map(|value| parse_aquifer(value, noises, functions, &mut compiler))
             .transpose()?;
         let aquifer_random = compiler.random_factory("minecraft:aquifer");
+        let raw_functions = worldgen
+            .raw()
+            .get("density_function")
+            .and_then(Value::as_object)
+            .ok_or("missing density_function")?;
+        let material = MaterialRules::compile(
+            worldgen.raw(),
+            raw_functions,
+            worldgen.noises(),
+            worldgen.functions(),
+            &mut compiler,
+        )
+        .map_err(|error| format!("material rules: {error}"))?;
+        let carvers =
+            Carvers::compile(worldgen.raw()).map_err(|error| format!("carvers: {error}"))?;
+        let cache_count = compiler.cache_count();
+        let positional = compiler.positional_factory();
+        let mut material = material;
+        material.prepare(worldgen.noises(), positional, settings)?;
         let default_block = block_state(raw.get("default_block"))?;
         let default_fluid = block_state(raw.get("default_fluid"))?;
         Ok(Self {
+            worldgen,
             settings,
             biomes,
             router,
             aquifer,
             aquifer_random,
-            cache_count: compiler.cache_count(),
+            cache_count,
+            material,
+            carvers,
+            positional,
+            seed,
             default_block,
             default_fluid,
             empty: blocks::AIR,
@@ -157,9 +198,16 @@ impl<'a> Generator<'a> {
         );
         let mut context = Context::new(self.cache_count);
         let mut columns: Vec<Vec<f32>> = Vec::with_capacity(6);
-        for field in [0usize, 1, 2, 3, 4, 5] {
+        for sampler in [
+            &self.router.temperature,
+            &self.router.vegetation,
+            &self.router.continents,
+            &self.router.erosion,
+            &self.router.depth,
+            &self.router.ridges,
+        ] {
             let mut buffer = context.acquire(volume.len());
-            self.router[field].sample_volume(&mut context, &mut buffer, &volume);
+            sampler.sample_volume(&mut context, &mut buffer, &volume);
             columns.push(buffer);
         }
 
@@ -193,11 +241,21 @@ impl<'a> Generator<'a> {
     }
 
     /// `NoiseBasedChunkGenerator.doFill`：生成到 NOISE 阶段的方块。
+    pub fn noise(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain(chunk_x, chunk_z, Stage::Noise)
+    }
+
+    /// 生成到 `terrain` 状态里的某一个阶段。
     ///
     /// 返回 `height` 个方块层，每层的 256 个默认状态 ID，下标 `x*16 + z`。
-    /// 官方 `doFill` 是一次 `finalDensity.sampleVolume` 之后自顶向下问含水层；这里照做。
-    /// `biomes` 和 `noise` 用各自的 `Context`，和官方两个阶段的 `SamplerContext` 一样。
-    pub fn noise(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+    /// 三个步骤共用一个 [`Context`] 和一个 [`Aquifer`]，和官方一个 `NoiseChunk`
+    /// 一样；只跑到 `stage` 指定的那一刻就返回。
+    pub fn terrain(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+    ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
@@ -216,7 +274,9 @@ impl<'a> Generator<'a> {
             lava_state()?,
             self.empty,
         );
-        self.router[7].sample_volume(&mut context, &mut density, &volume);
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
 
         let mut layers = vec![vec![self.empty; 256]; height as usize];
         for z in 0..16 {
@@ -236,7 +296,42 @@ impl<'a> Generator<'a> {
             }
         }
         context.release(density);
+        if stage >= Stage::Surface {
+            let biomes = BiomeManager::new(self.biomes, self.seed);
+            self.material.build_surface(
+                &mut layers,
+                chunk_x,
+                chunk_z,
+                self.settings,
+                &mut context,
+                &self.router,
+                &biomes,
+                self.worldgen_noises(),
+                self.positional,
+            )?;
+        }
+        if stage >= Stage::Carvers {
+            let biomes = BiomeManager::new(self.biomes, self.seed);
+            self.carvers.generate(
+                &mut layers,
+                chunk_x,
+                chunk_z,
+                self.settings,
+                &mut context,
+                &self.router,
+                &biomes,
+                &mut aquifer,
+                &self.material,
+                self.worldgen.noises(),
+                self.positional,
+                self.seed,
+            )?;
+        }
         Ok(layers)
+    }
+
+    fn worldgen_noises(&self) -> &'a NoiseRegistry {
+        self.worldgen.noises()
     }
 }
 

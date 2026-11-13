@@ -151,7 +151,10 @@ import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.carver.WorldCarver;
 import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
+import net.minecraft.world.level.levelgen.material.condition.MaterialCondition;
+import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.lighting.LightEngine;
@@ -1388,9 +1391,29 @@ public final class Extractor {
                 encodeRegistry(registries, ops, Registries.DENSITY_FUNCTION, DensityFunction.CODEC));
         worldgen.add("noise_settings",
                 encodeRegistry(registries, ops, Registries.NOISE_SETTINGS, NoiseGeneratorSettings.DIRECT_CODEC));
+        worldgen.add("material_rule",
+                encodeRegistry(registries, ops, Registries.MATERIAL_RULE, MaterialRule.DIRECT_CODEC));
+        worldgen.add("material_condition",
+                encodeRegistry(registries, ops, Registries.MATERIAL_CONDITION, MaterialCondition.DIRECT_CODEC));
+        worldgen.add("carver", encodeRegistry(registries, ops, Registries.CARVER, WorldCarver.DIRECT_CODEC));
+        worldgen.add("biome_carvers", biomeCarvers(registries));
         worldgen.add("multi_noise_presets", multiNoisePresets(registries));
         worldgen.add("end_biomes", endBiomes());
         return worldgen;
+    }
+
+    /** 每个群系的 `BiomeGenerationSettings.getCarvers()`，顺序就是官方的迭代顺序。 */
+    private static JsonObject biomeCarvers(RegistryAccess registries) {
+        Registry<Biome> biomes = registries.lookupOrThrow(Registries.BIOME);
+        JsonObject result = new JsonObject();
+        for (Identifier name : biomes.keySet().stream().sorted().toList()) {
+            JsonArray carvers = new JsonArray();
+            for (Holder<WorldCarver> carver : biomes.getValue(name).getGenerationSettings().getCarvers()) {
+                carvers.add(carver.unwrapKey().orElseThrow().identifier().toString());
+            }
+            result.add(name.toString(), carvers);
+        }
+        return result;
     }
 
     /** 一个注册表的全部条目，按名字排序，每一条用给定的 codec 编成 JSON。 */
