@@ -770,9 +770,10 @@ fn hash_slots(slots: &[ItemStack]) -> u64 {
 ///
 /// 严格口径把它留在键里；乐观口径（「把时间比较改成相对量」）把它去掉，
 /// 否则活塞动画里 `lastTicked - now` 每刻都变，门明明周期性开合却永远不命中。
-fn entity_time_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
+fn entity_time_facts(entity: &dyn BlockEntity, _now: i64) -> u64 {
     if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
-        return stable_hash(&hopper.ticked_game_time().saturating_sub(now));
+        // 漏斗存的是相对量；`None` 是官方读盘后的初值 0。
+        return stable_hash(&hopper.ticked_game_time_age());
     }
     // 移动活塞已不含绝对时刻，见 `PistonMoving::observed_facts`。
     0

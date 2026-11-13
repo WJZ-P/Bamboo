@@ -15,7 +15,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    block_entity::BlockEntity,
+    block_entity::{BlockEntity, block_entity_clock},
     container::{
         CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
     },
@@ -37,8 +37,14 @@ pub struct HopperEntity {
     pos: BlockPos,
     /// `cooldownTime`。刚放下时是 -1。
     cooldown_time: i32,
-    /// `tickedGameTime`：上一次 tick 的 `gameTime`。相邻的漏斗靠它决定要不要少等一刻。
-    ticked_game_time: i64,
+    /// `tickedGameTime` 的相对表示：`now - 上一次真跑的 gameTime`。
+    ///
+    /// 官方每刻无条件把它写成 `level.getGameTime()`，但只在同一刻里拿两个漏斗
+    /// 比大小（决定目标漏斗少不等那一刻），所以绝对基准可以整体平移。
+    /// `None` = 官方读盘 / 刚放下的初值 0（绝对时刻），也就是「很久以前」。
+    last_tick_age: Option<i64>,
+    /// `last_tick_age` 是在哪个 `gameTime` 量出来的；读路径按当前刻补上差值。
+    last_tick_now: i64,
 }
 
 impl HopperEntity {
@@ -47,7 +53,8 @@ impl HopperEntity {
         Self {
             pos,
             cooldown_time: NO_COOLDOWN_TIME,
-            ticked_game_time: 0,
+            last_tick_age: None,
+            last_tick_now: 0,
         }
     }
 
@@ -71,14 +78,36 @@ impl HopperEntity {
         self.cooldown_time
     }
 
-    /// `tickedGameTime`。
+    /// `tickedGameTime`：按当前刻还原绝对时刻，和官方每刻写的值一致。
     pub fn ticked_game_time(&self) -> i64 {
-        self.ticked_game_time
+        self.ticked_game_time_at(block_entity_clock())
+    }
+
+    /// 读路径按当前刻现算 `now - age`；`None` 是官方读盘后的初值 0。
+    fn ticked_game_time_at(&self, now: i64) -> i64 {
+        match self.last_tick_age {
+            Some(age) => now.saturating_sub(age),
+            None => 0,
+        }
+    }
+
+    /// 相对量，供录制层 / 缓存键用；`None` 对应官方读盘后的初值 0。
+    pub fn ticked_game_time_age(&self) -> Option<i64> {
+        self.last_tick_age
+            .map(|age| age.saturating_add(block_entity_clock().saturating_sub(self.last_tick_now)))
+    }
+
+    /// 刚刚真跑过一次 `pushItemsTick`：相对量归零。
+    fn note_tick(&mut self, now: i64) {
+        self.last_tick_age = Some(0);
+        self.last_tick_now = now;
     }
 
     /// 存档读入冷却；`tickedGameTime` 官方不存，读回是构造时的 0。
     pub fn set_cooldown_from_archive(&mut self, cooldown: i32) {
         self.cooldown_time = cooldown;
+        self.last_tick_age = None;
+        self.last_tick_now = 0;
     }
 }
 
@@ -127,8 +156,10 @@ pub(crate) fn query<R>(
 
 /// `HopperBlockEntity.pushItemsTick`。滴答器每刻调用它。
 pub fn push_items_tick(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) {
+    // 官方每刻写 `tickedGameTime = level.getGameTime()`，会读一次世界时间。
+    // 这里只记相对量：读路径按当前刻还原，录制层不再看到这次时间读。
+    entity.note_tick(block_entity_clock());
     entity.cooldown_time -= 1;
-    entity.ticked_game_time = world.game_time();
     if !entity.is_on_cooldown() {
         entity.set_cooldown(0);
         try_move_items(world, pos, entity);
@@ -218,7 +249,7 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
         if inserted.remaining.is_empty() {
             let destination_state = world.block_state(destination);
             if inserted.was_empty && destination_state.is_a(BlockAncestor::HopperBlock) {
-                apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time));
+                apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time()));
             }
             set_changed(world, destination);
             return true;
@@ -244,7 +275,7 @@ pub(crate) fn apply_hopper_cooldown(
             return;
         }
         let skip = i32::from(
-            from_ticked_game_time.is_some_and(|from| destination.ticked_game_time >= from),
+            from_ticked_game_time.is_some_and(|from| destination.ticked_game_time() >= from),
         );
         destination.set_cooldown(MOVE_ITEM_SPEED - skip);
     });
@@ -383,7 +414,7 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
         if inserted.remaining.is_empty() {
             if inserted.was_empty {
                 let skip =
-                    from_ticked_game_time.is_some_and(|from| entity.ticked_game_time >= from);
+                    from_ticked_game_time.is_some_and(|from| entity.ticked_game_time() >= from);
                 entity.set_cooldown(MOVE_ITEM_SPEED - i32::from(skip));
             }
             set_changed(world, above);
