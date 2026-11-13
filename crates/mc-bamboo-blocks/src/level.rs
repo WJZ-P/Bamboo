@@ -87,6 +87,16 @@ pub enum Observation<'a> {
     /// 缓存守卫/重放期间关掉录制包装的记账：这些读写不是解释执行产生的。
     /// 实验驱动不报这个事件，历史数字不变。
     Capture(bool),
+    /// 一次活塞音高取数。重放时照样从世界随机源取一个数、按 `scale`/`base` 算 pitch。
+    PistonPitch {
+        pos: BlockPos,
+        sound: i32,
+        source: mc_bamboo_data::SoundSource,
+        volume: f32,
+        scale: f32,
+        base: f32,
+        except_initiator: bool,
+    },
     /// `World::game_time()` 被读了。
     TimeRead,
     /// `World::push_effect` 收进去的音效、世界事件等。
@@ -528,6 +538,12 @@ pub trait Level: LevelSideState + LevelEntities {
 
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
+
+    /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
+    /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。
+    fn next_random_float(&self) -> f32 {
+        self.random().source().next_float()
+    }
 
     /// `LevelChunkSection.isRandomlyTicking`：这个区块里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段里
     /// 有会随机刻的方块或者流体，也就是有状态的 `is_randomly_ticking` 或者 `is_fluid_randomly_ticking` 为真。

@@ -87,6 +87,10 @@ const NORMAL_DIFFICULTY: i32 = 2;
 const SKY_DARKEN: i32 = 0;
 
 /// 官方 `Level.playSound(null, pos, ...)` 用的坐标：方块的中心。
+pub fn block_center_public(pos: BlockPos) -> Vec3 {
+    block_center(pos)
+}
+
 fn block_center(pos: BlockPos) -> Vec3 {
     Vec3::new(
         f64::from(pos.x) + 0.5,
@@ -503,6 +507,43 @@ impl<'a> World<'a> {
         self.effects.push(effect);
     }
 
+    /// 活塞伸出/收回的「取一个数 → 算音高 → 发音效」动作。
+    ///
+    /// 官方 `PistonBaseBlock.triggerEvent` 在分支开头取 `level.getRandom()`，
+    /// 伸出用 `nextFloat()*0.25F+0.6F`，收回用 `nextFloat()*0.15F+0.6F`。
+    /// 录制包装靠 `observe` 把这次取数记成一条可重放的效果，重放时照样从
+    /// 世界随机源取，不换成自己的随机源。
+    pub fn play_piston_sound(
+        &mut self,
+        pos: BlockPos,
+        sound: u16,
+        volume: f32,
+        scale: f32,
+        base: f32,
+    ) {
+        let pitch = self.level.next_random_float() * scale + base;
+        self.level.observe(Observation::PistonPitch {
+            pos,
+            sound: i32::from(sound),
+            source: sounds::BLOCKS,
+            volume,
+            scale,
+            base,
+            except_initiator: false,
+        });
+        self.push_effect(Effect::Sound {
+            sound: i32::from(sound),
+            source: sounds::BLOCKS,
+            x: block_center(pos).x,
+            y: block_center(pos).y,
+            z: block_center(pos).z,
+            volume,
+            pitch,
+            except_initiator: false,
+            seed: None,
+        });
+    }
+
     /// `playSound(null, pos, sound, BLOCKS, volume, pitch)`，坐标是方块中心。
     pub fn play_block_sound(&mut self, pos: BlockPos, sound: u16, volume: f32, pitch: f32) {
         self.play_sound(
@@ -693,6 +734,11 @@ impl<'a> World<'a> {
     /// `getWorldBorder().isWithinBounds(pos)`: read the border snapshot from `Level`.
     pub fn is_within_world_border(&self, pos: BlockPos) -> bool {
         self.world_border().is_within_bounds_pos(pos)
+    }
+
+    /// 这一格的方块实体本刻是不是已经 tick 过，见 [`BlockTicks::entity_ticked_this_tick`]。
+    pub fn entity_ticked_this_tick(&self, pos: BlockPos) -> bool {
+        self.ticks.entity_ticked_this_tick(pos)
     }
 
     /// `Level.getWorldBorder()`，方块逻辑和实体逻辑读到的同一份快照。
@@ -1034,6 +1080,7 @@ impl<'a> World<'a> {
                 pos,
                 kind: self.block_state(pos).block_id(),
             });
+            self.ticks.note_block_entity_tick(pos);
             self.run_taken_block_entity(pos, id, entity);
             // 一次 tick 跑完后按实体自己的公式算下一次真正需要跑的时刻。
             let wake = self.level.block_entity_sleep_from(pos, now);
@@ -1163,6 +1210,11 @@ impl<'a> World<'a> {
     /// `getDifficulty().getId()`。这个世界没有难度设置，客户端收不到难度时显示普通，这里也按普通算。
     pub const fn difficulty_id(&self) -> i32 {
         NORMAL_DIFFICULTY
+    }
+
+    /// 只取一个 `next_float()`，见 [`Level::next_random_float`]。
+    pub fn next_random_float(&self) -> f32 {
+        self.level.next_random_float()
     }
 
     /// `getRandom()`，也就是 `Level.random`。

@@ -767,9 +767,7 @@ fn entity_time_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
     if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
         return stable_hash(&hopper.ticked_game_time().saturating_sub(now));
     }
-    if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
-        return stable_hash(&piston.observed_facts(now).6);
-    }
+    // 移动活塞已不含绝对时刻，见 `PistonMoving::observed_facts`。
     0
 }
 
@@ -811,10 +809,7 @@ fn entity_facts(entity: &dyn BlockEntity) -> u64 {
         shulker.progress(1.0).to_bits().hash(&mut hasher);
         shulker.progress(0.0).to_bits().hash(&mut hasher);
     } else if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
-        // 时刻字段单独记，见 `entity_time_facts` 和乐观口径的键。
-        let (state, direction, extending, source, progress, progress_o, _) =
-            piston.observed_facts(0);
-        (state, direction, extending, source, progress, progress_o).hash(&mut hasher);
+        piston.observed_facts().hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1241,6 +1236,11 @@ impl Level for Recording<'_> {
         self.uncacheable(Uncacheable::Random);
         self.read(None, K_RANDOM, self.level.random().source().seed());
         self.level.random()
+    }
+
+    fn next_random_float(&self) -> f32 {
+        // 活塞音高取数由 `Observation::PistonPitch` 记成可重放的效果。
+        self.level.next_random_float()
     }
 
     fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
@@ -1715,6 +1715,34 @@ impl Level for Recording<'_> {
             Observation::BlockEventQueued { event, existed } => {
                 // 真正的 push 走 `LevelSideState::push_block_event`，这里只记去重存在性。
                 self.runtime_read(ReadMethod::BlockEventDedup(event), Some(event.pos), existed);
+            }
+            Observation::PistonPitch {
+                sound,
+                source,
+                volume,
+                scale,
+                base,
+                except_initiator,
+                ..
+            } => {
+                // 实验的严格口径仍把「取随机数」标成不可缓存（历史数字不变）；
+                // 运行时记录里这次取数已经记成可重放的效果，不标 `Uncacheable::Random`。
+                let mut inner = self.inner.borrow_mut();
+                if let Some(frame) = inner.current.as_mut()
+                    && !frame.record.uncacheable.contains(&Uncacheable::Random)
+                {
+                    frame.record.uncacheable.push(Uncacheable::Random);
+                }
+                drop(inner);
+                self.write(Write::Effect(stable_hash(&(
+                    9_u8,
+                    sound,
+                    source.id(),
+                    volume.to_bits(),
+                    scale.to_bits(),
+                    base.to_bits(),
+                    except_initiator,
+                ))));
             }
             Observation::Capture(_) => {}
         }

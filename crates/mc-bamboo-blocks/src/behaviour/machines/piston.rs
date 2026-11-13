@@ -89,12 +89,12 @@ impl Behaviour for PistonBase {
                 world.set_block(pos, extended_state, EXTENDED_FLAGS);
                 // `playSound(null, pos, PISTON_EXTEND, BLOCKS, 0.5, nextFloat * 0.25 + 0.6)`。
                 // 分开乘加，对齐 Java `nextFloat() * 0.25F + 0.6F`，不用融合乘加。
-                let pitch = world.random().next_float() * 0.25 + 0.6;
-                world.play_block_sound(
+                world.play_piston_sound(
                     pos,
                     sound_event("minecraft:block.piston.extend"),
                     0.5,
-                    pitch,
+                    0.25,
+                    0.6,
                 );
             }
             1 | 2 => {
@@ -125,12 +125,12 @@ impl Behaviour for PistonBase {
                     world.remove_block(pos.relative(direction));
                 }
                 // `playSound(null, pos, PISTON_CONTRACT, BLOCKS, 0.5, nextFloat * 0.15 + 0.6)`。
-                let pitch = world.random().next_float() * 0.15 + 0.6;
-                world.play_block_sound(
+                world.play_piston_sound(
                     pos,
                     sound_event("minecraft:block.piston.contract"),
                     0.5,
-                    pitch,
+                    0.15,
+                    0.6,
                 );
             }
             _ => {}
@@ -209,7 +209,7 @@ fn check_if_extend(world: &mut World, pos: BlockPos, state: BlockState) {
             if moving.is_some_and(|entity| {
                 entity.is_extending()
                     && (entity.progress(0.0) < 0.5
-                        || world.game_time() == entity.last_ticked()
+                        || world.entity_ticked_this_tick(pushed_pos)
                         || world.is_handling_tick())
             }) {
                 event = 2;

@@ -33,7 +33,6 @@ pub(crate) struct PistonMoving {
     is_source_piston: bool,
     progress: f32,
     progress_o: f32,
-    last_ticked: i64,
 }
 
 impl PistonMoving {
@@ -55,7 +54,6 @@ impl PistonMoving {
             is_source_piston,
             progress: 0.0,
             progress_o: 0.0,
-            last_ticked: 0,
         }
     }
 
@@ -75,13 +73,8 @@ impl PistonMoving {
         self.progress_o + factor * (self.progress - self.progress_o)
     }
 
-    /// `getLastTicked`。
-    pub(super) const fn last_ticked(&self) -> i64 {
-        self.last_ticked
-    }
-
-    /// 录制层要看到的全部内部状态，带时刻的字段换成相对量。
-    pub fn observed_facts(&self, now: i64) -> (u32, u8, bool, bool, u32, u32, i64) {
+    /// 录制层要看到的全部内部状态；不再含绝对时刻。
+    pub fn observed_facts(&self) -> (u32, u8, bool, bool, u32, u32) {
         (
             self.moved_state.0,
             self.direction.id() as u8,
@@ -89,7 +82,6 @@ impl PistonMoving {
             self.is_source_piston,
             self.progress.to_bits(),
             self.progress_o.to_bits(),
-            self.last_ticked.saturating_sub(now),
         )
     }
 
@@ -166,7 +158,6 @@ impl PistonMoving {
 
     /// `tick`：推进半格，走完一格时把方块放回去。官方每刻还推一遍实体，这里没有。
     fn tick(&mut self, world: &mut World) {
-        self.last_ticked = world.game_time();
         self.progress_o = self.progress;
         if self.progress_o >= 1.0 {
             world.remove_block_entity(self.pos);
