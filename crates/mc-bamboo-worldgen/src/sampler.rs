@@ -139,7 +139,7 @@ pub fn block_pos_as_long(x: i32, y: i32, z: i32) -> i64 {
 }
 
 /// 官方的 `DensitySampler`，一个变体对应官方一个采样器类。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Sampler {
     /// `ConstantFunction.Sampler`，也包括 `blend_alpha`、`blend_offset` 和 `beardifier`
     /// 在没有上下文字段时的那个后备值。

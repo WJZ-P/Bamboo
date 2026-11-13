@@ -10,15 +10,17 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
+import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.QuartPos;
-import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
@@ -33,6 +35,8 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
@@ -50,20 +54,22 @@ import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
+import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 
 /**
  * 区块级对拍：在 JVM 里用官方的 {@code ChunkGenerator}、{@code RandomState} 和
- * {@code ProtoChunk} 生成同一个区块到 BIOMES 和 NOISE 两个阶段，输出逐方块、逐 quart
- * 格的结果。不启动服务端、不读存档、不接受 EULA。
+ * {@code ProtoChunk} 生成同一个区块到 NOISE、SURFACE、CARVERS 三个阶段，输出逐方块、
+ * 逐 quart 格的结果。不启动服务端、不读存档、不接受 EULA。
  *
- * <p>官方 26.3 没有单独的 NOISE 状态：{@code terrain} 一步先跑
- * {@code NoiseBasedChunkGenerator.doFill}，再跑地表规则和雕刻器。这里只调 doFill，
- * 用反射调私有方法；{@code NoiseChunk} 走公开构造器，参数和 buildTerrain 一致。
+ * <p>官方 26.3 没有单独的 NOISE/SURFACE/CARVERS 状态：{@code terrain} 一步在同一个
+ * {@code NoiseChunk} 上依次跑 {@code doFill}、{@code buildSurface}、{@code generateCarvers}。
+ * 这里反射调这三个私有方法，参数与 {@code buildTerrain} 一致；{@code WorldGenRegion}
+ * 传 null，让 {@code generateCarvers} 走 {@code getBiomeGenerationSettingsForCarver} 分支。
  *
- * <p>输出一行一个 JSON：header、每个区块一条 biomes、一条 noise、最后 end。
- * 方块按调色板压缩：palette 是方块状态的名字，blocks 是每个方块在 palette 里的下标，
- * 顺序是 y 从下到上、x 从 0 到 15、z 从 0 到 15。群系同理，顺序是段从下到上，
- * 段内 x、y、z 各 4 格。
+ * <p>输出一行一个 JSON：header、每个区块一条 biomes、最多三条方块快照（noise/surface/
+ * carvers），最后 end。方块按调色板压缩：palette 是方块状态的名字，blocks 是每个方块在
+ * palette 里的下标，顺序是 y 从下到上、x 从 0 到 15、z 从 0 到 15。群系同理，顺序是
+ * 段从下到上，段内 x、y、z 各 4 格。
  */
 public final class ChunkgenOracle {
     private static final int OUTPUT_BUFFER = 4 << 20;
@@ -121,22 +127,32 @@ public final class ChunkgenOracle {
         return initial.replaceFrom(RegistryLayer.WORLD, world);
     }
 
-    private record Options(int seeds, int chunks, long salt, boolean noise) {
+    private record Options(int seeds, int chunks, long salt, int through) {
         static Options parse(String[] args) {
             int seeds = 3;
             int chunks = 12;
             long salt = 1;
-            boolean noise = true;
+            int through = 3;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
                     case "--chunks" -> chunks = Integer.parseInt(args[++i]);
                     case "--salt" -> salt = Long.parseLong(args[++i]);
-                    case "--biomes-only" -> noise = false;
+                    case "--through" -> {
+                        String value = args[++i];
+                        through = switch (value) {
+                            case "biomes" -> 0;
+                            case "noise" -> 1;
+                            case "surface" -> 2;
+                            case "carvers" -> 3;
+                            default -> throw new IllegalArgumentException("unknown stage " + value);
+                        };
+                    }
+                    case "--biomes-only" -> through = 0;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, noise);
+            return new Options(seeds, chunks, salt, through);
         }
     }
 
@@ -148,22 +164,39 @@ public final class ChunkgenOracle {
         private final Options options;
         private final Writer out;
         private final Method doFill;
+        private final Method buildSurface;
+        private final Method generateCarvers;
         private final Field globalFluidPicker;
+        private final Set<Holder<Biome>> possibleBiomes;
         private long checks;
 
         Oracle(RegistryAccess registries, Options options, Writer out) throws Exception {
             this.registries = registries;
             this.noises = registries.lookupOrThrow(Registries.NOISE);
             this.settings = registries.lookupOrThrow(Registries.NOISE_SETTINGS);
-            registries.lookupOrThrow(Registries.BIOME);
             this.noiseLookup = registries.lookupOrThrow(Registries.NOISE);
             this.options = options;
             this.out = out;
             this.doFill = NoiseBasedChunkGenerator.class.getDeclaredMethod(
                     "doFill", NoiseChunk.class, ChunkAccess.class);
             this.doFill.setAccessible(true);
+            this.buildSurface = NoiseBasedChunkGenerator.class.getDeclaredMethod(
+                    "buildSurface", ChunkAccess.class, NoiseChunk.class, RandomState.class,
+                    BiomeManager.class, Set.class, MaterialRule.class);
+            this.buildSurface.setAccessible(true);
+            this.generateCarvers = NoiseBasedChunkGenerator.class.getDeclaredMethod(
+                    "generateCarvers", ChunkAccess.class, Blender.class, NoiseChunk.class,
+                    RandomState.class, BiomeManager.class,
+                    net.minecraft.server.level.WorldGenRegion.class, MaterialRule.class);
+            this.generateCarvers.setAccessible(true);
             this.globalFluidPicker = NoiseBasedChunkGenerator.class.getDeclaredField("globalFluidPicker");
             this.globalFluidPicker.setAccessible(true);
+            // 正式流程用周围 3x3 区块的群系调色板；这里两边都用「全部群系」，只影响
+            // BiomeCondition 的静态优化，逐格判定仍走 BiomeManager。
+            this.possibleBiomes = new HashSet<>();
+            for (Biome biome : registries.lookupOrThrow(Registries.BIOME)) {
+                this.possibleBiomes.add(registries.lookupOrThrow(Registries.BIOME).wrapAsHolder(biome));
+            }
         }
 
         void run() throws Exception {
@@ -176,6 +209,7 @@ public final class ChunkgenOracle {
             header.addProperty("minY", -64);
             header.addProperty("height", 384);
             header.addProperty("seaLevel", 63);
+            header.addProperty("through", this.options.through());
             write(header);
 
             NoiseGeneratorSettings generatorSettings = this.settings.getValue(Identifier.withDefaultNamespace("overworld"));
@@ -188,10 +222,14 @@ public final class ChunkgenOracle {
                                     registries.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
                                             .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
                             this.settings.wrapAsHolder(generatorSettings));
+            MaterialRule materialRule = generatorSettings.materialRule().value();
             for (long seed : seeds()) {
                 RandomState state = RandomState.create(this.noiseLookup, seed, generatorSettings);
                 // 和 createNoiseChunk 一样：新区块没有 BlendingData、没有结构，Beardifier 可以为空。
                 java.util.function.Supplier<Aquifer.FluidPicker> picker = instancePicker(generator);
+                // 和 WorldGenRegion 一样：uncached resolver + obfuscateSeed(worldSeed)。
+                BiomeResolver resolver = ((BiomeSource) generator.getBiomeSource()).createUncachedResolver(state);
+                BiomeManager biomeManager = new BiomeManager(resolver, BiomeManager.obfuscateSeed(seed));
 
                 for (int[] chunk : chunks(seed)) {
                     ChunkPos pos = new ChunkPos(chunk[0], chunk[1]);
@@ -200,17 +238,28 @@ public final class ChunkgenOracle {
                     // 真正的流程由 ChunkStatus 设置状态；这里补上，getNoiseBiome 才肯读。
                     proto.setPersistedStatus(ChunkStatus.BIOMES);
                     writeBiomes(seed, pos, proto);
+                    if (this.options.through() < 1) {
+                        continue;
+                    }
 
-                    if (this.options.noise()) {
-                        // 新区块没有 BlendingData，也没有结构：Beardifier.EMPTY 的填 0 分支。
-                        DensityVolume volume = new DensityVolume(
-                                16, generatorSettings.noiseSettings().height(), 16,
-                                pos.getMinBlockX(), generatorSettings.noiseSettings().minY(), pos.getMinBlockZ());
-                        try (NoiseChunk noiseChunk = new NoiseChunk(
-                                state, Beardifier.EMPTY, generatorSettings, picker.get(), Blender.empty(), volume)) {
-                            this.doFill.invoke(generator, noiseChunk, proto);
+                    // 新区块没有 BlendingData，也没有结构：Beardifier.EMPTY 的填 0 分支。
+                    DensityVolume volume = new DensityVolume(
+                            16, generatorSettings.noiseSettings().height(), 16,
+                            pos.getMinBlockX(), generatorSettings.noiseSettings().minY(), pos.getMinBlockZ());
+                    try (NoiseChunk noiseChunk = new NoiseChunk(
+                            state, Beardifier.EMPTY, generatorSettings, picker.get(), Blender.empty(), volume)) {
+                        this.doFill.invoke(generator, noiseChunk, proto);
+                        writeBlocks("noise", seed, pos, proto);
+                        if (this.options.through() >= 2) {
+                            this.buildSurface.invoke(generator, proto, noiseChunk, state, biomeManager,
+                                    this.possibleBiomes, materialRule);
+                            writeBlocks("surface", seed, pos, proto);
                         }
-                        writeNoise(seed, pos, proto);
+                        if (this.options.through() >= 3) {
+                            this.generateCarvers.invoke(generator, proto, Blender.empty(), noiseChunk, state,
+                                    biomeManager, null, materialRule);
+                            writeBlocks("carvers", seed, pos, proto);
+                        }
                     }
                 }
             }
@@ -265,7 +314,7 @@ public final class ChunkgenOracle {
             write(line);
         }
 
-        private void writeNoise(long seed, ChunkPos pos, ChunkAccess chunk) throws Exception {
+        private void writeBlocks(String stage, long seed, ChunkPos pos, ChunkAccess chunk) throws Exception {
             List<BlockState> palette = new ArrayList<>();
             java.util.Map<BlockState, Integer> ids = new java.util.HashMap<>();
             JsonArray blocks = new JsonArray();
@@ -290,7 +339,7 @@ public final class ChunkgenOracle {
                 names.add(state.toString());
             }
             JsonObject line = new JsonObject();
-            line.addProperty("type", "noise");
+            line.addProperty("type", stage);
             line.addProperty("seed", seed);
             line.addProperty("x", pos.getMinBlockX() >> 4);
             line.addProperty("z", pos.getMinBlockZ() >> 4);

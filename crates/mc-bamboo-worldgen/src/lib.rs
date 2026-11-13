@@ -33,11 +33,13 @@
 
 pub mod aquifer;
 pub mod biome;
+pub mod biome_manager;
 pub mod biome_temperature;
 pub mod chunk;
 pub mod climate;
 pub mod density;
 pub mod interval;
+pub mod material;
 pub mod math;
 pub mod noise;
 pub mod random;
@@ -68,6 +70,8 @@ pub struct Worldgen {
     settings: HashMap<String, Settings>,
     presets: HashMap<String, MultiNoiseBiomeSource>,
     end_biomes: TheEndBiomeSource,
+    /// 地表规则和雕刻器要用的原始注册表，官方 codec 的 JSON。
+    raw: serde_json::Map<String, Value>,
 }
 
 impl Worldgen {
@@ -100,6 +104,16 @@ impl Worldgen {
             presets.insert(id.clone(), MultiNoiseBiomeSource::new(parsed));
         }
 
+        // 地表规则、条件和雕刻器是新加的字段；缺了明确报错，别静默生成错的世界。
+        for name in [
+            "material_rule",
+            "material_condition",
+            "carver",
+            "biome_carvers",
+        ] {
+            object_field(root, name)?;
+        }
+
         let end = object_field(root, "end_biomes")?;
         let end_biome = |name: &str| -> Result<String, String> {
             end.get(name)
@@ -121,6 +135,7 @@ impl Worldgen {
             settings,
             presets,
             end_biomes,
+            raw: root.clone(),
         })
     }
 
@@ -148,6 +163,11 @@ impl Worldgen {
 
     pub fn end_biomes(&self) -> &TheEndBiomeSource {
         &self.end_biomes
+    }
+
+    /// 导出数据里还没解析成 Rust 结构的原始注册表。
+    pub fn raw(&self) -> &serde_json::Map<String, Value> {
+        &self.raw
     }
 }
 

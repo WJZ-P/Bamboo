@@ -16,12 +16,16 @@ use std::{
 };
 
 use mc_bamboo_data::{block_by_name, registries, version};
-use mc_bamboo_worldgen::{Worldgen, chunk::Generator};
+use mc_bamboo_worldgen::{
+    Worldgen,
+    chunk::{Generator, Stage},
+};
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] [--show N]";
+const USAGE: &str =
+    "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] [--through STAGE] [--show N]";
 const DEFAULT_SHOW: usize = 8;
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +41,7 @@ enum Line {
         height: i32,
         #[serde(rename = "seaLevel")]
         sea_level: i32,
+        through: Option<i32>,
     },
     /// 一个区块的群系：24 段，每段 64 个 quart 格，顺序 x、y、z。
     Biomes {
@@ -45,8 +50,22 @@ enum Line {
         z: i32,
         sections: Vec<Vec<String>>,
     },
-    /// 一个区块的方块：调色板加 16×高度×16 的下标，顺序 y、x、z。
+    /// 一个区块某个阶段的方块：调色板加 16×高度×16 的下标，顺序 y、x、z。
     Noise {
+        seed: i64,
+        x: i32,
+        z: i32,
+        palette: Vec<String>,
+        blocks: Vec<u16>,
+    },
+    Surface {
+        seed: i64,
+        x: i32,
+        z: i32,
+        palette: Vec<String>,
+        blocks: Vec<u16>,
+    },
+    Carvers {
         seed: i64,
         x: i32,
         z: i32,
@@ -58,17 +77,27 @@ enum Line {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Options {
     forwarded: Vec<String>,
     show: Option<usize>,
-    /// 只比 BIOMES，跳过 NOISE。
+    /// 只比 BIOMES，跳过方块阶段。
     biomes_only: bool,
+    /// `--through` 是否显式指定过（没指定时兼容旧版 oracle 的 header）。
+    through_set: bool,
+    /// 转发给 Java 侧的最终阶段。
+    through: Stage,
 }
 
 impl Options {
     fn parse(args: &[&str]) -> Result<Self, String> {
-        let mut options = Self::default();
+        let mut options = Self {
+            forwarded: Vec::new(),
+            show: None,
+            biomes_only: false,
+            through_set: false,
+            through: Stage::Noise,
+        };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
@@ -80,7 +109,27 @@ impl Options {
                 }
                 "--biomes-only" => {
                     options.biomes_only = true;
-                    options.forwarded.push(arg.to_owned());
+                    options.through_set = true;
+                    options
+                        .forwarded
+                        .extend(["--through".to_owned(), "biomes".to_owned()]);
+                }
+                "--through" => {
+                    options.through_set = true;
+                    let value = args.next().ok_or(USAGE)?;
+                    options.through = match *value {
+                        "biomes" => {
+                            options.biomes_only = true;
+                            Stage::Noise
+                        }
+                        "noise" => Stage::Noise,
+                        "surface" => Stage::Surface,
+                        "carvers" => Stage::Carvers,
+                        _ => return Err(USAGE.to_owned()),
+                    };
+                    options
+                        .forwarded
+                        .extend(["--through".to_owned(), (*value).to_owned()]);
                 }
                 "--show" => {
                     let value = args.next().ok_or(USAGE)?;
@@ -98,9 +147,12 @@ struct Report<'a> {
     worldgen: &'a Worldgen,
     generators: HashMap<i64, Generator<'a>>,
     biomes: u64,
-    noise: u64,
+    blocks: Vec<u64>,
     chunks: u64,
     checks: u64,
+    through: Stage,
+    through_set: bool,
+    biomes_only: bool,
     mismatches: Vec<String>,
     show: usize,
     ended: bool,
@@ -123,9 +175,12 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         worldgen: &worldgen,
         generators: HashMap::new(),
         biomes: 0,
-        noise: 0,
+        blocks: vec![0; Stage::Carvers as usize + 1],
         chunks: 0,
         checks: 0,
+        through: options.through,
+        through_set: options.through_set,
+        biomes_only: options.biomes_only,
         mismatches: Vec::new(),
         show: options.show.unwrap_or(DEFAULT_SHOW),
         ended: false,
@@ -160,7 +215,26 @@ impl Report<'_> {
                     min_y,
                     height,
                     sea_level,
+                    through,
                 } => {
+                    if self.through_set
+                        && let Some(reported) = through
+                    {
+                        let expected = if self.biomes_only {
+                            0
+                        } else {
+                            match self.through {
+                                Stage::Noise => 1,
+                                Stage::Surface => 2,
+                                Stage::Carvers => 3,
+                            }
+                        };
+                        if reported != expected {
+                            return Err(format!(
+                                "oracle ran through stage {reported}, bamboo compares {expected}"
+                            ));
+                        }
+                    }
                     if reported != version::GAME_VERSION || protocol != version::PROTOCOL_VERSION {
                         return Err(format!(
                             "oracle is {reported}/{protocol}, bamboo is {}/{}",
@@ -194,7 +268,21 @@ impl Report<'_> {
                     z,
                     palette,
                     blocks,
-                } => self.compare_noise(seed, x, z, &palette, &blocks),
+                } => self.compare_blocks(Stage::Noise, seed, x, z, &palette, &blocks),
+                Line::Surface {
+                    seed,
+                    x,
+                    z,
+                    palette,
+                    blocks,
+                } => self.compare_blocks(Stage::Surface, seed, x, z, &palette, &blocks),
+                Line::Carvers {
+                    seed,
+                    x,
+                    z,
+                    palette,
+                    blocks,
+                } => self.compare_blocks(Stage::Carvers, seed, x, z, &palette, &blocks),
                 Line::End { checks } => {
                     self.checks = checks;
                     self.ended = true;
@@ -255,12 +343,27 @@ impl Report<'_> {
         }
     }
 
-    fn compare_noise(&mut self, seed: i64, x: i32, z: i32, palette: &[String], expected: &[u16]) {
-        self.chunks += 1;
+    fn compare_blocks(
+        &mut self,
+        stage: Stage,
+        seed: i64,
+        x: i32,
+        z: i32,
+        palette: &[String],
+        expected: &[u16],
+    ) {
+        let label = match stage {
+            Stage::Noise => "noise",
+            Stage::Surface => "surface",
+            Stage::Carvers => "carvers",
+        };
+        if stage == Stage::Noise {
+            self.chunks += 1;
+        }
         // 官方的调色板是 `BlockState.toString()`，目前只有四个默认状态。
         let state_of = |name: &str| -> Option<u32> {
             // `Block{minecraft:stone}` 或 `Block{minecraft:water}[level=0]`。
-            // doFill 只放默认状态，属性全是默认值，忽略属性即可。
+            // terrain 三步都只放默认状态，属性全是默认值，忽略属性即可。
             let body = name.strip_prefix("Block{")?;
             let (id, _) = body.split_once('}')?;
             Some(block_by_name(id)?.default_state)
@@ -271,7 +374,7 @@ impl Report<'_> {
                 Some(state) => states.push(state),
                 None => {
                     self.mismatch(format!(
-                        "noise seed {seed} chunk ({x},{z}): unknown state {name}"
+                        "{label} seed {seed} chunk ({x},{z}): unknown state {name}"
                     ));
                     return;
                 }
@@ -279,18 +382,18 @@ impl Report<'_> {
         }
         let ours = match self
             .generator(seed)
-            .and_then(|generator| generator.noise(x, z))
+            .and_then(|generator| generator.terrain(x, z, stage))
         {
             Ok(layers) => layers,
             Err(error) => {
-                self.mismatch(format!("noise seed {seed} chunk ({x},{z}): {error}"));
+                self.mismatch(format!("{label} seed {seed} chunk ({x},{z}): {error}"));
                 return;
             }
         };
         let height = ours.len();
         if expected.len() != height * 256 {
             self.mismatch(format!(
-                "noise seed {seed} chunk ({x},{z}): {} blocks vs official {}",
+                "{label} seed {seed} chunk ({x},{z}): {} blocks vs official {}",
                 height * 256,
                 expected.len()
             ));
@@ -302,16 +405,16 @@ impl Report<'_> {
             let id = usize::from(*official_index);
             if id >= states.len() {
                 self.mismatch(format!(
-                    "noise seed {seed} chunk ({x},{z}) at {index}: official palette index {id} out of range"
+                    "{label} seed {seed} chunk ({x},{z}) at {index}: official palette index {id} out of range"
                 ));
                 return;
             }
             let official = states[id];
             let bamboo = *layer;
-            self.noise += 1;
+            self.blocks[stage as usize] += 1;
             if official != bamboo {
                 self.mismatch(format!(
-                    "noise seed {seed} chunk ({x},{z}) y {} x {} z {}: official {} ({}), bamboo {}",
+                    "{label} seed {seed} chunk ({x},{z}) y {} x {} z {}: official {} ({}), bamboo {}",
                     index as i32 / 256 - 64,
                     (index % 256) / 16,
                     index % 16,
@@ -331,8 +434,12 @@ impl Report<'_> {
 
     fn finish(&self) -> Result<(), String> {
         println!(
-            "chunkgen: {} chunks, compared {} biome cells and {} blocks",
-            self.chunks, self.biomes, self.noise
+            "chunkgen: {} chunks, compared {} biome cells, {} noise, {} surface, {} carvers blocks",
+            self.chunks,
+            self.biomes,
+            self.blocks[Stage::Noise as usize],
+            self.blocks[Stage::Surface as usize],
+            self.blocks[Stage::Carvers as usize],
         );
         if !self.ended {
             return Err("ChunkgenOracle.java stopped before its end line".to_owned());

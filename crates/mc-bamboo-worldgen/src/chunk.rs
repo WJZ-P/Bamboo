@@ -24,13 +24,26 @@ use crate::{
     Worldgen,
     aquifer::Aquifer,
     biome::MultiNoiseBiomeSource,
+    biome_manager::BiomeManager,
     climate::TargetPoint,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
+    material::MaterialRules,
     math::{java_floor_div, quart_to_block},
     sampler::{Compiler, Context, Sampler},
     settings::Settings,
     volume::Volume,
 };
+
+/// `terrain` 状态里依次做的三件事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    /// `doFill` 跑完那一刻。
+    Noise,
+    /// `MaterialSystem.buildSurface` 跑完那一刻。
+    Surface,
+    /// `generateCarvers` 跑完那一刻。
+    Carvers,
+}
 
 /// 一个区块 16×16 个柱子。
 pub const CHUNK_WIDTH: usize = 16;
@@ -47,6 +60,7 @@ pub const OVERWORLD_PRESET: &str = "minecraft:overworld";
 /// 六条密度函数和所有噪声实例共用一个 [`Compiler`]，所以 `cache` 编号也共用。
 #[derive(Debug)]
 pub struct Generator<'a> {
+    worldgen: &'a Worldgen,
     settings: &'a Settings,
     biomes: &'a MultiNoiseBiomeSource,
     router: Vec<Sampler>,
@@ -54,6 +68,10 @@ pub struct Generator<'a> {
     /// `RandomState.getOrCreateRandomFactory("minecraft:aquifer")`。
     aquifer_random: crate::random::PositionalFactory,
     cache_count: usize,
+    material: MaterialRules,
+    /// `RandomState.random`，`MaterialSystem` 用同一个 positional factory 造噪声。
+    positional: crate::random::PositionalFactory,
+    seed: i64,
     default_block: u32,
     default_fluid: u32,
     empty: u32,
@@ -117,15 +135,34 @@ impl<'a> Generator<'a> {
             .map(|value| parse_aquifer(value, noises, functions, &mut compiler))
             .transpose()?;
         let aquifer_random = compiler.random_factory("minecraft:aquifer");
+        let raw_functions = worldgen
+            .raw()
+            .get("density_function")
+            .and_then(Value::as_object)
+            .ok_or("missing density_function")?;
+        let material = MaterialRules::compile(
+            worldgen.raw(),
+            raw_functions,
+            worldgen.noises(),
+            worldgen.functions(),
+            &mut compiler,
+        )
+        .map_err(|error| format!("material rules: {error}"))?;
+        let cache_count = compiler.cache_count();
+        let positional = compiler.positional_factory();
         let default_block = block_state(raw.get("default_block"))?;
         let default_fluid = block_state(raw.get("default_fluid"))?;
         Ok(Self {
+            worldgen,
             settings,
             biomes,
             router,
             aquifer,
             aquifer_random,
-            cache_count: compiler.cache_count(),
+            cache_count,
+            material,
+            positional,
+            seed,
             default_block,
             default_fluid,
             empty: blocks::AIR,
@@ -193,11 +230,21 @@ impl<'a> Generator<'a> {
     }
 
     /// `NoiseBasedChunkGenerator.doFill`：生成到 NOISE 阶段的方块。
+    pub fn noise(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain(chunk_x, chunk_z, Stage::Noise)
+    }
+
+    /// 生成到 `terrain` 状态里的某一个阶段。
     ///
     /// 返回 `height` 个方块层，每层的 256 个默认状态 ID，下标 `x*16 + z`。
-    /// 官方 `doFill` 是一次 `finalDensity.sampleVolume` 之后自顶向下问含水层；这里照做。
-    /// `biomes` 和 `noise` 用各自的 `Context`，和官方两个阶段的 `SamplerContext` 一样。
-    pub fn noise(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+    /// 三个步骤共用一个 [`Context`] 和一个 [`Aquifer`]，和官方一个 `NoiseChunk`
+    /// 一样；只跑到 `stage` 指定的那一刻就返回。
+    pub fn terrain(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+    ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
@@ -236,7 +283,40 @@ impl<'a> Generator<'a> {
             }
         }
         context.release(density);
+        if stage >= Stage::Surface {
+            let biomes = BiomeManager::new(self.biomes, self.seed);
+            self.material.build_surface(
+                &mut layers,
+                chunk_x,
+                chunk_z,
+                self.settings,
+                &mut context,
+                &self.router_samplers(),
+                &biomes,
+                self.worldgen_noises(),
+                self.positional,
+            )?;
+        }
         Ok(layers)
+    }
+
+    /// 六个气候采样器的 `Climate.Sampler` 视图，地表规则查群系要用。
+    fn router_samplers(&self) -> crate::settings::Samplers {
+        // `Sampler` 是枚举，克隆一份让借用关系简单；一个区块只调一次。
+        crate::settings::Samplers {
+            temperature: self.router[0].clone(),
+            vegetation: self.router[1].clone(),
+            continents: self.router[2].clone(),
+            erosion: self.router[3].clone(),
+            depth: self.router[4].clone(),
+            ridges: self.router[5].clone(),
+            chunk_surface_level: self.router[6].clone(),
+            final_density: self.router[7].clone(),
+        }
+    }
+
+    fn worldgen_noises(&self) -> &'a NoiseRegistry {
+        self.worldgen.noises()
     }
 }
 
