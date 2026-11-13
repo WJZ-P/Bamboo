@@ -1261,6 +1261,15 @@ fn has_save_success(client: &Client) -> bool {
         .any(|f| f.body.windows(KEY.len()).any(|w| w == KEY))
 }
 
+/// 帧里有没有 `commands.save.failed`（F9）。
+fn has_save_failure(client: &Client) -> bool {
+    const KEY: &[u8] = b"commands.save.failed";
+    client
+        .take_frames()
+        .iter()
+        .any(|f| f.body.windows(KEY.len()).any(|w| w == KEY))
+}
+
 /// D6：匀速保存把仍加载的脏区块拍快照交给 IO 线程，区块不卸载；
 /// 已经存过且没再改的区块下一刻不会重复存。
 #[test]
@@ -1555,6 +1564,56 @@ fn non_flush_save_all_with_io_waits_for_the_mailbox_barrier() {
     assert!(has_save_success(&client), "success follows the barrier ack");
     assert!(server.world.pending_save_success.is_empty());
     let _ = dir; // 这一局没有 SaveSession，level.dat 的字节另由 save_session 测试覆盖
+}
+
+/// F9：写盘失败时 `save-all` 发 `commands.save.failed`，绝不报成功；
+/// 消息在栅栏回执（保存真正完成）之后才发。
+/// F9: a failed `save-all` sends `commands.save.failed`, never success, and
+/// only after the barrier ack (the save really completed).
+#[test]
+fn save_all_reports_failed_when_the_io_write_fails() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("save-failed");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let io = ChunkIo::open(&dir).unwrap();
+    // 区域目录换成普通文件，任何区块写都会失败。
+    for directory in [dir.region_dir(), dir.entities_dir()] {
+        std::fs::remove_dir(&directory).unwrap();
+        std::fs::write(&directory, b"not a directory").unwrap();
+    }
+
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.host.set_io(io);
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: client.id,
+        });
+    server.tick();
+    assert!(!has_save_success(&client), "no success before the ack");
+    assert!(!has_save_failure(&client), "failure waits for the ack too");
+
+    // 让 IO 处理栅栏（写失败会把回执标成 ok=false），下一刻收回执。
+    server.world.host.flush_io();
+    server.tick();
+    assert!(
+        has_save_failure(&client),
+        "commands.save.failed must be sent"
+    );
 }
 
 /// IO 线程 panic 是致命错误：世界线程要发现、记日志、走关服流程（tick 返回 Break），

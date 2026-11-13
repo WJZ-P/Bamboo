@@ -794,17 +794,27 @@ impl World {
                         .save
                         .as_mut()
                         .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
-                    match files {
-                        Some(Ok(files)) => self.host.submit_file_writes(files),
-                        Some(Err(error)) => {
-                            warn!(%error, "save-all could not encode level data")
+                    let encoded = match files {
+                        Some(Ok(files)) => {
+                            self.host.submit_file_writes(files);
+                            true
                         }
-                        None => {}
+                        Some(Err(error)) => {
+                            // 编码就失败了：绝不能报成功，直接发 commands.save.failed（F9）。
+                            warn!(%error, "save-all could not encode level data");
+                            false
+                        }
+                        None => true,
+                    };
+                    if !encoded {
+                        self.send_save_failure(source);
+                        continue;
                     }
-                    // 一律排不阻塞的 IO 栅栏，成功消息等「保存真正完成」的回执再发；
+                    // 一律排不阻塞的 IO 栅栏，成功/失败消息等「保存真正完成」的回执再发；
                     // 阻塞的 flush() 只允许出现在关服。flush 标志仍按官方解析保留。
-                    // Always enqueue a non-blocking barrier; success waits for the
-                    // real-completion ack. The blocking flush() is shutdown-only.
+                    // Always enqueue a non-blocking barrier; the success/failure
+                    // message waits for the real-completion ack. The blocking
+                    // flush() is shutdown-only.
                     debug!(flush, "save-all handed its writes to the IO thread");
                     if let Some(seq) = self.host.submit_flush_barrier() {
                         self.pending_save_success.push((seq, source));
@@ -838,10 +848,13 @@ impl World {
         );
     }
 
-    /// 收回已到达的 IO 栅栏回执，按回执的 `ok` 发等在上面的 `save-all` 消息。
-    /// `ok=false`（窗口里有写盘失败）绝不报成功；F9 会把它变成 `commands.save.failed`。
-    /// Release waiting `save-all` messages from the IO barrier acks. A failed
-    /// window never reports success; F9 turns it into `commands.save.failed`.
+    /// 收回已到达的 IO 栅栏回执，按回执的 `ok` 发等在上面的 `save-all` 消息：
+    /// 成功才发 `commands.save.success`，失败发 `commands.save.failed`（F9 /
+    /// 官方 `SaveAllCommand` 的 `ERROR_FAILED`）。两者都只在保存真正完成后发。
+    /// Release waiting `save-all` messages from the IO barrier acks: success
+    /// only sends `commands.save.success`, a failed window sends
+    /// `commands.save.failed` (F9 / official `SaveAllCommand.ERROR_FAILED`).
+    /// Both are sent only after the save really completed.
     fn release_flushed_save_success(&mut self, flushed: Vec<(u64, bool)>) {
         if flushed.is_empty() {
             return;
@@ -852,17 +865,22 @@ impl World {
                 if ok {
                     self.send_save_success(source);
                 } else {
-                    error!(
-                        ?source,
-                        "save-all reported a write failure to the IO barrier"
-                    );
-                    // F9 在这里补 commands.save.failed。
+                    error!(?source, "save-all failed: an IO write in the window failed");
+                    self.send_save_failure(source);
                 }
             } else {
                 remaining.push((seq, source));
             }
         }
         self.pending_save_success = remaining;
+    }
+
+    /// 发 `commands.save.failed`（红色系统消息），照官方 `SaveAllCommand`。
+    /// Send `commands.save.failed` (red system message) like official
+    /// `SaveAllCommand` when `saveEverything` returns false.
+    fn send_save_failure(&mut self, source: PlayerId) {
+        let failure = crate::command::feedback::fail("commands.save.failed");
+        crate::command::feedback::report(&mut self.region, source, "save-all", &failure);
     }
 
     /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
