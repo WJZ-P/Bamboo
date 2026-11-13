@@ -244,6 +244,49 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
 - **实体和 POI 跟区块一起交付**（D8）：磁盘格式照原版分开存，读的时候并行读，凑齐了才交付。原版是区块先到、实体后到。
 - 阶段函数是纯函数：`(阶段, 中心 ProtoChunk, 邻居只读视图) → 中心的新内容`。M4 接世界生成时只需要填这些函数。
 
+#### 5.3.1 计算池 `[事实]`
+
+已经落地的部分（`mc-bamboo-game` 的 `compute_pool`、`chunk_jobs`、`chunk_generator`，
+接在 `director_host` 里）：
+
+- **线程模型**：`bamboo.toml` 的 `chunk_worker_threads`，0..=64，默认 0。0 是内联
+  执行器，任务当场跑完，行为和以前逐字节相同；≥ 1 起这么多条常驻线程。只用标准库：
+  `Mutex<BinaryHeap>` + `Condvar` 做提交队列，`mpsc` 做回执信箱。池子本身是通用的
+  （任务 + 回执，不认识区块），实体并行驱动现在每刻新起线程（`ScopedThreads`），
+  以后也可以改成往这里交任务。
+- **哪些任务进池**：`Decode`（解开容器、解析两份 NBT）、每个 `Generate` 阶段、
+  `Save` 的序列化。`Read` 仍是 IO 线程（停放表命中当场返回）；`Assemble` 只是把盒子
+  交回，内联做；D6 匀速保存里仍加载的区块的快照要借用活的 region 表，仍在世界线程上。
+- **光照**：生成时的光照现在不存在（超平坦模板自带算好的光照）；运行时光照留在
+  region 里（5.6）。M4 的 `initialize_light` / `light` 两个阶段作为普通 `Generate`
+  阶段进池，只写中心、读半径 1 的邻居视图。
+- **数据交接**：任务全是拥有的数据（`Task<C>` 本来就是），世界线程把它包成
+  `ChunkJob` 交出去，回执带回盒子；存盘的序列化只借盒子读，成败都把原盒子带回来，
+  编码失败的盒子由世界线程停放。存盘的记账（D6 队列、在途写、判脏）只在世界线程上改。
+- **排序和确定性**：一次 `pump` 里攒下的计算任务和读盘一样，收尾时按离玩家的距离
+  交给池子（近的先跑，同距离按 `TaskId`）。每刻开头先收 IO 回执、再收池子回执，
+  池子回执按 `TaskId` 排好，一起喂给 Director 一次。所以同一批结果的处理顺序和线程
+  调度无关；但哪个结果落在哪一刻取决于调度，**交付时刻可以不同，区块内容不会不同**。
+  测试 `inline_and_pool_produce_identical_worlds` 用内联和 4 线程跑同一个场景
+  （生成、改方块、卸载存盘、重新加载、关服），盘上字节逐个相同。
+- **取消和过期**：Director 的 `Cancel` 对还没交出去的任务直接回「已取消」；已经在
+  池子队列里的标记取消，出队时不跑；已经在跑的照常跑完。每个任务恰好回一次执，
+  取消的生成任务把半成品带回来，Director 照旧按 `generation` 丢弃过期结果、
+  非原样的盒子回停放表。
+- **限流**：Director 的 `max_in_flight` 在两种模式下都不设限；池子的队列按距离出队，
+  票撤了的任务被取消，所以积压的都是还想要的区块。宿主侧的 F6 背压（写盘队列、
+  停放表上限）对池子回来的存盘结果照样生效。
+- **崩溃和关服**：任务 panic 被 `catch_unwind` 接住，生成失败按 `BadChunk` 走，
+  存盘失败按 `SaveFailed` 走（盒子停放），线程不退出。线程意外退出和 IO 线程挂掉
+  一样当致命错误走关服。关服在 `Shutdown` 事件之后阻塞收池子回执、继续喂给 Director，
+  直到池子空了才做最后的写盘和 `flush`；池子 drop 时通知线程退出并 join。
+- **还没做（M4）**：多阶段生成的邻居视图。`Task::Generate.neighbors` 现在总是空的，
+  `ChunkGenerator::generate` 的签名里留了视图参数。方案：Director 里的半成品改存成
+  不可变快照 `Arc<ProtoChunk>`，邻居视图只加引用计数、不复制；中心推进时
+  `Arc::try_unwrap`，还有人在读就写时复制。`features` 写半径 1 的部分随结果带回
+  「要写进邻居的改动」，世界线程按 `TaskId` 顺序合进去，写范围排他调度已经保证
+  不会有两个任务同时写同一个邻居。
+
 ### 5.4 优先级、取消、限速
 
 - 优先级 = 离最近的请求者多远，再按用途加权：等着进服或传送的最高，模拟范围内的高于只在视野里的，移动方向前方的高于身后的。
@@ -674,6 +717,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 - tick 线程空闲、并且离下一个 region 到期还有余量时，可以帮后台计算池干活；计算池的线程不跑 tick。
 - tick 线程用高优先级并绑到性能核，IO 和存盘用低优先级。本机是 10 个性能核加 4 个能效核 `[事实]`。
 - 精确模式和测试用内联执行器：提交的任务当场跑完，结果可重现。
+- 后台计算池已经落地的部分见 5.3.1：只服务 Director 的计算任务，没有 region 调度。
 
 ---
 
@@ -789,10 +833,10 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 0 | 剖析器：每个 region、每个 tick 阶段的耗时直方图；区块从请求到发出的延迟；各队列长度；tick 起点抖动；主控处理延迟 | 后面每一步的依据 | **做了一部分**：`mc-bamboo-game` 的剖析器、假玩家压测工具和基线已落地（`a1fd1a0`、`b841143`、`docs/profiling.md`），阶段直方图、墙上时间的区块延迟、起点抖动 / 刻间隔偏差、flush 字节数、按阶段和子项拆分都有；「主控处理延迟」要等主控建起来才有，`chunk_latency_us` 只覆盖排队到写出、不含读盘，和 1.2 的「读盘 p95 < 100 ms」不是一个量 |
 | 1 | 数据模型：区块束；光照和带位置的状态进区块；`Level` 的写入口收窄（第 3、4 节） | 存档、合并拆分、录制的前提。oracle 全绿是验收条件 | **做了一部分**：`Level` 已收窄成 `LevelSideState` / `LevelTables` 和 `LevelEntities` / `EntityTables`（`0442bc4`、`f918171`），`ChunkStore::take_column` / `insert_column`、`RegionColumn::take_columns` / `insert_column` 和实体的按区块取放都能整盒取放（`2b2d5f5`、`a62f179`、`5c1c0d9`、`c396f2e`、`f918171`），每一步的 oracle 都全绿。**存储内部仍是整张表**：`ChunkStore` 是「模板 + 改过的表 + 四份光照表」，计划刻、方块实体、红石记忆和容器等四张表仍按全 region 存，只加了按区块的取放接口（见 4.2）；`LevelEntities` 上又开了三个交出整张实体表的入口，还没收窄到单独 trait（见第 3 节） |
 | 2 | 网络：分段出站缓冲、区块帧只压缩一次、广播从推改成拉（第 11 节、第 7 节第 10 段） | 多人同屏时 CPU 下降 | **做了一部分**：`PlayerSink::send(Outgoing)` 分段出站和 `Arc<SharedFrames>` 用 `OnceLock` 只压一次已合入（`32b1a8b`）；包体缓存和帧缓存同时保留，帧仍在世界线程编码、压缩仍在连接任务里做。**广播从推改成拉没做**，多人同屏时 CPU 是否下降没有量过（第一份基线里 200 人扎堆时实体同步和追踪平均 1.3 ms，`docs/profiling.md` 第 6 节） |
-| 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **M3 存档部分已做完**：`TicketTable`、存档编解码、Director 状态机接进 `World::tick` 都做完；M3 分支（`cb-m3-save`）又接上了真实磁盘 IO：一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，读请求异步、结果下一刻开头经信箱收回；`mc-bamboo-game::chunk_codec` 把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器量耗时）。Director 的 `Task::Read` 是真正的读盘阶段，卸载时脏区块序列化后写盘、pristine 直接丢，Parking 改成写盘途中缓冲（写盘途中被请求回来拿最新内容），D6 匀速保存。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`、`chunk_tickets.dat`、玩家数据（进服读、离开/自动保存/关服写）和 `save-all`/`save-on`/`save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**还没做**：计算池（解析/序列化仍内联，只在接口后）、多条 IO 线程、流水线里的并行生成与预编码帧。运行中的 D6 匀速保存现在也覆盖仍加载的脏区块（每刻 `ceil(脏/6000)` 个、至少 1、单区块 10 秒冷却，`/save-all` 立刻全部拍快照，`/save-off` 暂停），快照用 `Region::encode_loaded_column` 走卸载存盘同一条编码路径原地取出/放回、区块不卸载；脏判定用 `ChunkStore` 版本号，纯上层（容器/实体/计划刻）改动的区块仍要等卸载或 `/save-all`。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
+| 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **M3 存档部分已做完**：`TicketTable`、存档编解码、Director 状态机接进 `World::tick` 都做完；M3 分支（`cb-m3-save`）又接上了真实磁盘 IO：一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，读请求异步、结果下一刻开头经信箱收回；`mc-bamboo-game::chunk_codec` 把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器量耗时）。Director 的 `Task::Read` 是真正的读盘阶段，卸载时脏区块序列化后写盘、pristine 直接丢，Parking 改成写盘途中缓冲（写盘途中被请求回来拿最新内容），D6 匀速保存。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`、`chunk_tickets.dat`、玩家数据（进服读、离开/自动保存/关服写）和 `save-all`/`save-on`/`save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时解析、每个生成阶段、卸载存盘的序列化在常驻后台线程上做，默认 0 仍是内联；内联和池子跑同一场景盘上字节相同。**还没做**：多条 IO 线程、多阶段生成的邻居快照（M4，方案见 5.3.1）、预编码帧。运行中的 D6 匀速保存现在也覆盖仍加载的脏区块（每刻 `ceil(脏/6000)` 个、至少 1、单区块 10 秒冷却，`/save-all` 立刻全部拍快照，`/save-off` 暂停），快照用 `Region::encode_loaded_column` 走卸载存盘同一条编码路径原地取出/放回、区块不卸载；脏判定用 `ChunkStore` 版本号，纯上层（容器/实体/计划刻）改动的区块仍要等卸载或 `/save-all`。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
 | 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **没做**：仍是一条世界线程带一个 `Region`，没有主控线程、没有 tick 线程池，`Global` 和 Director 都在这条线程上 |
 | 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **没做** |
-| 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：没有常驻线程池，实体并行用 `ScopedThreads` 每刻起线程（只用于实验）；只读收尾仍是串行，降级阶梯没有实现 |
+| 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行用 `ScopedThreads` 每刻起线程（只用于实验），以后可以改成往计算池交任务；只读收尾仍是串行，降级阶梯没有实现 |
 | 7 | 实体系统：`EntityStore`、`EntityCtx`、两种驱动；现有三种实体迁过去，entity oracle 全绿（第 8 节） | 生物系统的地基 | **做完**：`f918171`、`b99f8b5`，另有 `BAMBOO_ENTITY_THREADS` 开关和两段式 `compute` / `commit`（8.6.1）；生物系统本身还没开始 |
 | 8 | 生物和 AI，按 8.3、8.4 移植 | — | **没做**：只有下落方块、点燃的 TNT 和掉落物三种实体 |
 
