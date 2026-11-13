@@ -1615,22 +1615,17 @@ impl<'a> World<'a> {
     }
 
     pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
-        self.level
-            .set_crafter_crafting(pos, remaining, self.ticks.now());
+        self.level.set_crafter_crafting(pos, remaining);
     }
 
-    pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        self.level.take_crafter_crafting(self.ticks.now())
+    /// 全部还在倒数的合成器倒计时，见 `LevelSideState::crafter_crafting`。
+    pub fn crafter_crafting(&self) -> Vec<(BlockPos, i32)> {
+        self.level.crafter_crafting()
     }
 
-    /// 这一刻到期的合成器倒计时，见 `LevelSideState::take_due_crafter_crafting`。
-    pub fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
-        self.level.take_due_crafter_crafting(now)
-    }
-
-    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
-        self.level
-            .restore_crafter_crafting(entries, self.ticks.now());
+    /// 这一格合成器还剩几刻，没有记录是 0。
+    pub fn crafter_crafting_at(&self, pos: BlockPos) -> i32 {
+        self.level.crafter_crafting_at(pos)
     }
 
     pub fn forget_block_entity_memory(&mut self, pos: BlockPos) {

@@ -973,25 +973,20 @@ impl LevelSideState for Recording<'_> {
         self.level.set_crafter_disabled(pos, mask);
     }
 
-    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64) {
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
         self.redstone_write(Some(pos), 4, (4_u8, remaining));
-        self.level.set_crafter_crafting(pos, remaining, now);
+        self.level.set_crafter_crafting(pos, remaining);
     }
 
-    fn take_crafter_crafting(&mut self, now: i64) -> Vec<(BlockPos, i32)> {
-        let value = self.level.take_crafter_crafting(now);
+    fn crafter_crafting(&self) -> Vec<(BlockPos, i32)> {
+        let value = self.level.crafter_crafting();
         self.read(None, K_REDSTONE, (5_u8, &value));
         value
     }
 
-    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>, now: i64) {
-        self.redstone_write(None, 5, (5_u8, &entries));
-        self.level.restore_crafter_crafting(entries, now);
-    }
-
-    fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
-        let value = self.level.take_due_crafter_crafting(now);
-        self.read(None, K_REDSTONE, (7_u8, &value));
+    fn crafter_crafting_at(&self, pos: BlockPos) -> i32 {
+        let value = self.level.crafter_crafting_at(pos);
+        self.read(Some(pos), K_REDSTONE, (7_u8, value));
         value
     }
 
