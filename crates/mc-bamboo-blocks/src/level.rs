@@ -1,7 +1,7 @@
 //! 这个 crate 和世界存储的边界。
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
@@ -127,9 +127,11 @@ pub trait LevelSideState {
     fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool);
     fn crafter_disabled(&self, pos: BlockPos) -> u16;
     fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16);
-    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32);
-    fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)>;
-    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>);
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64);
+    fn take_crafter_crafting(&mut self, now: i64) -> Vec<(BlockPos, i32)>;
+    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>, now: i64);
+    /// 取走这一刻到期的合成器倒计时；没到期的留在表里，每刻不受它们影响。
+    fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos>;
     fn forget_block_entity_memory(&mut self, pos: BlockPos);
     fn set_pending_lectern(&mut self, facts: LecternFacts);
     fn take_pending_lectern(&mut self) -> Option<LecternFacts>;
@@ -154,6 +156,10 @@ pub trait LevelSideState {
 
     // 方块实体和它们的 ticker。
     fn block_entity_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity>;
+    /// 一次 tick 跑完后，按实体自己的公式算下一次到点时刻；休眠被关掉时返回 `None`。
+    fn block_entity_sleep_from(&mut self, pos: BlockPos, now: i64) -> Option<i64>;
+    /// 休眠是否启用（差分测试会关掉）。
+    fn block_entity_sleep_enabled(&self) -> bool;
     fn has_block_entity(&self, pos: BlockPos) -> bool;
     fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>);
     fn remove_block_entity(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>>;
@@ -161,7 +167,10 @@ pub trait LevelSideState {
     fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>>;
     fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>);
     fn is_block_entity_taken(&self, pos: BlockPos) -> bool;
-    fn begin_block_entity_tick(&mut self);
+    fn wake_block_entity(&mut self, pos: BlockPos);
+    fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>);
+    fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool);
+    fn begin_block_entity_tick(&mut self, now: i64);
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)>;
     fn end_block_entity_tick(&mut self);
 }
@@ -215,17 +224,22 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         self.redstone_table_mut().set_crafter_disabled(pos, mask);
     }
 
-    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64) {
         self.redstone_table_mut()
-            .set_crafter_crafting(pos, remaining);
+            .set_crafter_crafting(pos, remaining, now);
     }
 
-    fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        self.redstone_table_mut().take_crafter_crafting()
+    fn take_crafter_crafting(&mut self, now: i64) -> Vec<(BlockPos, i32)> {
+        self.redstone_table_mut().take_crafter_crafting(now)
     }
 
-    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
-        self.redstone_table_mut().restore_crafter_crafting(entries);
+    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>, now: i64) {
+        self.redstone_table_mut()
+            .restore_crafter_crafting(entries, now);
+    }
+
+    fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
+        self.redstone_table_mut().take_due_crafter_crafting(now)
     }
 
     fn forget_block_entity_memory(&mut self, pos: BlockPos) {
@@ -280,6 +294,18 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         self.block_entities_table().get_dyn(pos)
     }
 
+    fn block_entity_sleep_enabled(&self) -> bool {
+        self.block_entities_table().sleep_enabled()
+    }
+
+    fn block_entity_sleep_from(&mut self, pos: BlockPos, now: i64) -> Option<i64> {
+        let table = self.block_entities_table_mut();
+        if !table.sleep_enabled() {
+            return None;
+        }
+        table.sleep_from(pos, now)
+    }
+
     fn has_block_entity(&self, pos: BlockPos) -> bool {
         self.block_entities_table().contains(pos)
     }
@@ -308,8 +334,21 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
         self.block_entities_table().is_taken(pos)
     }
 
-    fn begin_block_entity_tick(&mut self) {
-        self.block_entities_table_mut().begin_tick();
+    fn wake_block_entity(&mut self, pos: BlockPos) {
+        self.block_entities_table_mut().wake(pos);
+    }
+
+    fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {
+        self.block_entities_table_mut().schedule_wake(pos, wake_at);
+    }
+
+    fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, _ticks: bool) {
+        self.block_entities_table_mut()
+            .set_chunk_ticking(chunk, _ticks);
+    }
+
+    fn begin_block_entity_tick(&mut self, now: i64) {
+        self.block_entities_table_mut().begin_tick(now);
     }
 
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
@@ -795,10 +834,13 @@ pub struct RedstoneMemory {
     /// Disabled slots of a `CrafterBlockEntity`. Bit `n` set means slot `n` is disabled.
     /// Missing positions are all enabled.
     crafter_disabled: HashMap<BlockPos, u16>,
-    /// `CrafterBlockEntity.craftingTicksRemaining`。只在大于 0 时记。
+    /// `CrafterBlockEntity.craftingTicksRemaining` 的到期时刻（绝对 `gameTime`）。
+    /// 官方每刻减 1，归零时关掉 `crafting`；记到期时刻后没到期的条目每刻不用碰。
     ///
-    /// `CrafterBlockEntity.craftingTicksRemaining`. Only recorded while positive.
-    crafter_crafting: HashMap<BlockPos, i32>,
+    /// Absolute expiry `gameTime` of `craftingTicksRemaining`.
+    crafter_crafting: HashMap<BlockPos, i64>,
+    /// 到期时刻 → 位置，只处理这一刻到期的合成器。
+    crafter_due: BTreeMap<i64, Vec<BlockPos>>,
     /// `RedstoneTorchBlock.RECENT_TOGGLES` 里属于这个世界的那一项，按时间排好。
     torch_toggles: Vec<(BlockPos, i64)>,
     /// `LecternBlockEntity` 的页码。比较器只读得了这三项，书本身在游戏层。
@@ -924,35 +966,73 @@ impl RedstoneMemory {
 
     /// `CrafterBlockEntity.setCraftingTicksRemaining`：亮起 `crafting` 时记下还剩几刻。
     ///
-    /// `CrafterBlockEntity.setCraftingTicksRemaining`: record the countdown when `crafting` turns on.
-    pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+    /// 内部记的是绝对到期时刻，配合 `crafter_due` 只处理到期的条目。
+    ///
+    /// `CrafterBlockEntity.setCraftingTicksRemaining`: record the countdown when `crafting`
+    /// turns on. Stored as an absolute expiry so only due entries are visited each tick.
+    pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64) {
         if remaining > 0 {
-            if self.crafter_crafting.insert(pos, remaining).is_none() {
+            let at = now.saturating_add(i64::from(remaining));
+            if let Some(old) = self.crafter_crafting.insert(pos, at) {
+                self.unschedule_crafter(old, pos);
+            } else {
                 self.note_pos(pos);
             }
+            self.crafter_due.entry(at).or_default().push(pos);
         } else {
-            self.crafter_crafting.remove(&pos);
+            if let Some(old) = self.crafter_crafting.remove(&pos) {
+                self.unschedule_crafter(old, pos);
+            }
         }
     }
 
-    /// 取走全部倒计时，供一刻末尾统一递减。
+    fn unschedule_crafter(&mut self, at: i64, pos: BlockPos) {
+        if let std::collections::btree_map::Entry::Occupied(mut entry) = self.crafter_due.entry(at)
+        {
+            entry.get_mut().retain(|&other| other != pos);
+            if entry.get().is_empty() {
+                entry.remove();
+            }
+        }
+    }
+
+    /// 取走全部倒计时，供测试和差分对照用；返回的是还剩几刻。
     ///
-    /// Take every countdown so the end of a tick can decrement them together.
-    pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+    /// Take every countdown (as remaining ticks); for tests and differential comparisons.
+    pub fn take_crafter_crafting(&mut self, now: i64) -> Vec<(BlockPos, i32)> {
+        self.crafter_due.clear();
         std::mem::take(&mut self.crafter_crafting)
             .into_iter()
+            .map(|(pos, at)| (pos, i32::try_from(at.saturating_sub(now)).unwrap_or(0)))
             .collect()
     }
 
-    /// 把还没到期的倒计时放回去。
+    /// 把还没到期的倒计时放回去，返回的是还剩几刻。
     ///
-    /// Put the countdowns that have not expired back.
-    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+    /// Put the countdowns (as remaining ticks) back.
+    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>, now: i64) {
         for (pos, remaining) in entries {
-            if remaining > 0 && self.crafter_crafting.insert(pos, remaining).is_none() {
-                self.note_pos(pos);
+            self.set_crafter_crafting(pos, remaining, now);
+        }
+    }
+
+    /// 取走这一刻到期的倒计时。它们到点归零，官方关掉 `crafting` 方块状态。
+    /// 没到期的条目留在表里，这一刻完全不碰。
+    ///
+    /// Take only the countdowns expiring at `now`; untouched entries stay in the table.
+    pub fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
+        let mut due = Vec::new();
+        while let Some(entry) = self.crafter_due.first_entry()
+            && *entry.key() <= now
+        {
+            for pos in entry.remove() {
+                if self.crafter_crafting.remove(&pos).is_some() {
+                    due.push(pos);
+                }
             }
         }
+        due.sort_unstable();
+        due
     }
 
     /// 这一格换了方块，官方把方块实体删掉，下次新建的是空的。
@@ -1056,9 +1136,15 @@ impl RedstoneMemory {
                 if let Some(mask) = self.crafter_disabled.remove(&pos) {
                     memory.crafter_disabled.push((pos, mask));
                 }
-                if let Some(remaining) = self.crafter_crafting.remove(&pos) {
+                if let Some(at) = self.crafter_crafting.remove(&pos) {
+                    // 盒子里存剩余刻数；目标表的时钟不同也能保持剩余寿命。
+                    let remaining = i32::try_from(at.saturating_sub(now)).unwrap_or(0);
                     memory.crafter_crafting.push((pos, remaining));
                 }
+                self.crafter_due.retain(|_, positions| {
+                    positions.retain(|other| other.chunk() != chunk);
+                    !positions.is_empty()
+                });
                 if let Some(facts) = self.lecterns.remove(&pos) {
                     memory.lecterns.push((pos, facts));
                 }
@@ -1094,7 +1180,8 @@ impl RedstoneMemory {
             self.set_crafter_disabled(pos, mask);
         }
         for (pos, remaining) in memory.crafter_crafting {
-            self.set_crafter_crafting(pos, remaining);
+            // 盒子里是剩余刻数，按目标表的 `now` 换算成新的到期时刻。
+            self.set_crafter_crafting(pos, remaining, now);
         }
         for (pos, facts) in memory.lecterns {
             self.set_lectern(pos, facts);
@@ -1357,13 +1444,16 @@ mod tests {
         fn set_crafter_disabled(&mut self, _pos: BlockPos, _mask: u16) {
             unimplemented!()
         }
-        fn set_crafter_crafting(&mut self, _pos: BlockPos, _remaining: i32) {
+        fn set_crafter_crafting(&mut self, _pos: BlockPos, _remaining: i32, _now: i64) {
             unimplemented!()
         }
-        fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
+        fn take_crafter_crafting(&mut self, _now: i64) -> Vec<(BlockPos, i32)> {
             unimplemented!()
         }
-        fn restore_crafter_crafting(&mut self, _entries: Vec<(BlockPos, i32)>) {
+        fn restore_crafter_crafting(&mut self, _entries: Vec<(BlockPos, i32)>, _now: i64) {
+            unimplemented!()
+        }
+        fn take_due_crafter_crafting(&mut self, _now: i64) -> Vec<BlockPos> {
             unimplemented!()
         }
         fn forget_block_entity_memory(&mut self, _pos: BlockPos) {
@@ -1402,6 +1492,12 @@ mod tests {
         fn block_entity_dyn(&self, _pos: BlockPos) -> Option<&dyn BlockEntity> {
             unimplemented!()
         }
+        fn block_entity_sleep_enabled(&self) -> bool {
+            unimplemented!()
+        }
+        fn block_entity_sleep_from(&mut self, _pos: BlockPos, _now: i64) -> Option<i64> {
+            unimplemented!()
+        }
         fn has_block_entity(&self, _pos: BlockPos) -> bool {
             unimplemented!()
         }
@@ -1423,7 +1519,16 @@ mod tests {
         fn is_block_entity_taken(&self, _pos: BlockPos) -> bool {
             unimplemented!()
         }
-        fn begin_block_entity_tick(&mut self) {
+        fn wake_block_entity(&mut self, _pos: BlockPos) {
+            unimplemented!()
+        }
+        fn schedule_block_entity_wake(&mut self, _pos: BlockPos, _wake_at: Option<i64>) {
+            unimplemented!()
+        }
+        fn set_chunk_block_entity_ticking(&mut self, _chunk: ChunkPos, _ticks: bool) {
+            unimplemented!()
+        }
+        fn begin_block_entity_tick(&mut self, _now: i64) {
             unimplemented!()
         }
         fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
@@ -1461,7 +1566,8 @@ mod tests {
         memory.set_last_bookshelf_slot(A1, 3);
         memory.set_jukebox_playing(A1, true);
         memory.set_crafter_disabled(A1, 0b101);
-        memory.set_crafter_crafting(A1, 4);
+        // 这些测试用 `now = 102` 装盒/放回，倒计时也按这个时钟登记。
+        memory.set_crafter_crafting(A1, 4, 102);
         memory.set_lectern(A1, FACTS);
         memory.set_comparator_output(B1, 9);
         memory.set_crafter_disabled(B1, 0b11);
@@ -1472,7 +1578,7 @@ mod tests {
 
     /// 所有能观察到的读，用来比较搬前搬后。倒计时取走后原样放回。
     fn observed(memory: &mut RedstoneMemory, now: i64) -> Vec<String> {
-        let countdowns = memory.take_crafter_crafting();
+        let countdowns = memory.take_crafter_crafting(102);
         let mut out = Vec::new();
         for pos in [A1, A2, B1] {
             out.push(format!(
@@ -1486,7 +1592,7 @@ mod tests {
                 countdowns.iter().filter(|&&(at, _)| at == pos).count()
             ));
         }
-        memory.restore_crafter_crafting(countdowns);
+        memory.restore_crafter_crafting(countdowns, 102);
         // `forget_torch_toggles_before` 也依赖时间顺序，搬完以后它仍要按时刻工作。
         memory.forget_torch_toggles_before(now);
         out.push(format!("toggles:{}", memory.torch_toggles.len()));
@@ -1509,7 +1615,7 @@ mod tests {
         assert_eq!(memory.comparator_output(B1), 9);
         assert_eq!(memory.crafter_disabled(B1), 0b11);
         assert_eq!(memory.torch_toggle_count(B1), 1);
-        assert_eq!(memory.take_crafter_crafting().len(), 0);
+        assert_eq!(memory.take_crafter_crafting(102).len(), 0);
 
         memory.insert_chunk(boxed, 102);
         assert_eq!(memory.comparator_output(A1), 7);
@@ -1518,7 +1624,7 @@ mod tests {
         assert_eq!(memory.crafter_disabled(A1), 0b101);
         assert_eq!(memory.lectern(A1), Some(FACTS));
         assert_eq!(memory.torch_toggle_count(A1), 2);
-        assert_eq!(memory.take_crafter_crafting(), [(A1, 4)]);
+        assert_eq!(memory.take_crafter_crafting(102), [(A1, 4)]);
     }
 
     #[test]

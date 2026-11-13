@@ -13,7 +13,7 @@ pub(crate) use mining::tick_mining;
 
 use std::{collections::BTreeSet, mem};
 
-use mc_bamboo_blocks::{Actor, BlockHit, BlockState, Effect, InteractionResult};
+use mc_bamboo_blocks::{Actor, BlockHit, BlockState, Effect, InteractionResult, LevelSideState};
 use mc_bamboo_command::permission;
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{BlockAncestor, SOUND_EVENTS, items, registries::attribute_defaults, sounds};
@@ -120,6 +120,16 @@ pub(crate) fn run_block_events(region: &mut Region) {
 ///
 /// `Level.tickBlockEntities`: after entities.
 pub(crate) fn run_block_entity_ticks(region: &mut Region) {
+    // 区块能不能跑方块逻辑变了：睡着的熔炉按公式推进到这一刻并结束睡眠，
+    // 下一刻从原进度重新算日程。官方在不能 tick 的刻根本不跑，所以这是暂停，
+    // 不是把冻结期间的事件攒起来补跑。
+    let changes = region.tick_levels.take_block_tick_changes();
+    if !changes.is_empty() {
+        let (mut level, _) = region.block_level();
+        for (chunk, ticks) in changes {
+            level.set_chunk_block_entity_ticking(chunk, ticks);
+        }
+    }
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_block_entity_tick(&mut level, ticks);
     send_effects(region, None, &outcome.effects);
