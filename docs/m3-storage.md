@@ -4,9 +4,14 @@
 编解码层（第 1–4 步、第 6 步的编解码那一半）早已完成并和官方对拍；
 一条 IO 线程读写区域文件、Director 的读盘阶段、卸载写盘、官方节奏的匀速保存、
 玩家数据 / `level.dat` / `data/` / `chunk_tickets.dat` 接进加载与生命周期、
-`save-all` / `save-on` / `save-off`、以及 README 都已接上。
+`save-all` / `save-on` / `save-off`、以及 README 都已接上。**区块计算池**（`chunk_worker_threads ≥ 1`）
+也已接上：区块 NBT 的解析和序列化、生成阶段、卸载时的存盘编码都可以交给常驻后台线程，
+世界线程只做记账；默认 0 仍在世界线程内联，内联和池子跑同一场景盘上字节逐个相同
+（`world-model-design.md` 5.3.1、`profiling.md` 第 11 节、`082a7c9`）。
 Linear 和转换工具（第 7、8 步）按用户决定不做。
 仍有的差异和未建模的 codec 列在 README「存档已知限制」和本文末尾「实施现状」。
+
+（2026-11-14 按实现更新：`docs/world-model-design.md` 5.3.1、`docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/chunk_jobs.rs`；合并提交 `082a7c9`）
 线程规则沿用 `folia.md` 的 R1–R12，crate 和 tick 顺序沿用 `design.md`。
 官方类名和方法名都写出来，方便逐行核对。
 
@@ -35,6 +40,16 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 | 多维度 | 只有主世界。目录结构按多维度留好（见第 2 节） |
 | 真正的 ticket 和区块卸载 | 第 12 节第 5 步（区块平面）才做，前四步只是编解码 |
 
+上表是**当时的范围**，不是现在的现状：实体存档、三种实体的加载/卸载、`chunk_tickets.dat`、
+游戏规则 / 世界生成设置 / 世界边界的 saved data、ticket 和区块卸载都已接进游戏；
+Linear、转换工具、POI、结构、DataFixerUpper、多维度仍按上表不做。
+另外「保存绝不在世界线程上做」这一条的实现是：NBT 编码默认（`chunk_worker_threads = 0`）
+仍由 `InlineCodec` 在世界线程内联做，读写文件永远在 IO 线程；打开计算池后编码也挪到后台线程。
+`tools/probe.sh --loaded` 和 `tools/crash-test.sh` 覆盖带存档世界的重启与崩溃安全。
+世界生成到噪声阶段已有纯函数和官方对拍，但还没接进 Director 的生成流水线（`ae76868`）。
+
+（2026-11-14 按实现更新：本文第 12 / 14 节、README「存档」、`crates/mc-bamboo-game/src/chunk_codec.rs`、`crates/mc-bamboo-game/src/chunk_jobs.rs`；合并提交 `1828b8c`、`082a7c9`、`ae76868`）
+
 ## 2. 磁盘布局
 
 26.3 的布局和老版本不一样，这些是从 `LevelResource`、`DimensionType.getStorageFolder` 和
@@ -50,7 +65,8 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
   dimensions/minecraft/overworld/
     region/r.<x>.<z>.mca                    区块（老版本在 <world>/region/）
     entities/  poi/
-    data/minecraft/chunk_tickets.dat
+    data/minecraft/{chunk_tickets,world_border}.dat
+  data/minecraft/{game_rules,world_gen_settings}.dat
 ```
 
 要点：
@@ -61,6 +77,11 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
   只按新布局读写；读到老布局就当成空世界，日志里说清楚。
 - `session.lock` 是一个内容为雪人字符 `☃` 的文件，官方 `DirectoryLock` 对它做
   `FileChannel.tryLock()` 独占锁，防止两个进程开同一个世界。Bamboo 照做：拿不到锁就拒绝启动。
+- 上面的 `world_border.dat` 按维度放在 `dimensions/minecraft/overworld/data/minecraft/`
+  下（`WorldBorder::export_settings` / `restore`），`game_rules.dat` 和
+  `world_gen_settings.dat` 是全服共用的 `data/minecraft/`；`chunk_tickets.dat` 目前写空 tickets 列表。
+
+  （2026-11-14 按实现更新：本文第 9.3 / 12 / 14 节、README「存档」；合并提交 `f3953d3`、`d31e954`）
 
 ## 3. 决定
 
@@ -69,7 +90,7 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 | S1 | 存档格式抽象 | `trait ChunkStorage`：`read(ChunkPos) -> Option<Vec<u8>>`、`write(ChunkPos, Option<&[u8]>)`、`flush()`。进出都是**未压缩的 NBT 字节**，压缩是实现内部的事 | Anvil 每区块一段压缩流，Linear 整个区域一段，只有这个边界两边都成立 |
 | S2 | 先做哪个 | Anvil 先做并且作为默认。Linear 是可选项 | 只有 Anvil 能和官方代码对照验证，Linear 没有权威规范 |
 | S3 | 快照在哪一层 | **不用 `ChunkSnapshot`**：`ChunkColumn`（区块束）本身就是搬运单位，存盘时复制它，读盘时从 NBT 组装它 | 见 `world-model-design.md` 4.2；这一节原来写的 `ChunkStore::snapshot` 已废弃 |
-| S4 | 后台线程数 | 一条“存档线程”（NBT 编码 + 压缩 + 写盘）加一条“加载线程”，都是 `std::thread` + `std::sync::mpsc` | 对应官方 `IOWorker` 的单 IO 线程。两条分开，读不被写堵住 |
+| S4 | 后台线程数 | **实现改成一条 IO 线程**（区域文件的压缩 / 解压 + 读写，都是 `std::thread` + `std::sync::mpsc`）加一个可选的计算池 | 对应官方 `IOWorker` 的单 IO 线程；NBT 解析 / 序列化不碰文件句柄，默认由世界线程的 `InlineCodec` 内联做，`chunk_worker_threads ≥ 1` 时交给常驻计算池（`world-model-design.md` 5.3.1）。原决定里的两条独立线程没有采用 |
 | S5 | 压缩方式 | Anvil 默认 zlib（压缩 ID 2），对应官方 `region-file-compression=deflate`。读的时候认 gzip、zlib、none | 和原版默认一致，用已有的 `flate2`，不加依赖 |
 | S6 | lz4 区块 | **不支持**，读到压缩 ID 4 就报错 | 原版默认不写 lz4，要加新依赖，见第 13 节 Q2 |
 | S7 | 调色板上盘形式 | 磁盘上永远是“调色板 + 下标”，位数按调色板大小重算，和网络格式分开写 | 官方 `PalettedContainer.pack` 就是这样，见第 5.2 节 |
@@ -79,9 +100,16 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 | S11 | 保存节奏 | 关服一次全量；运行中每 6000 刻一次全量（`MinecraftServer.autoSave`）+ 每刻最多 20 个改过的区块（`ChunkMap.saveChunksEagerly`），单区块 10 秒内不重复写 | 官方字节码：`MinecraftServer` 的 `ticksUntilAutosave`、`ChunkMap.saveChunksEagerly` 的 20 个上限和 `nextChunkSaveTime = now + 10000` |
 | S12 | `sync-chunk-writes` | 不实现，不开 `DSYNC` | 官方默认 `true`，Bamboo 先按 `false` 的行为做，见第 13 节 Q4 |
 
+S4 / S11 的实现口径以第 12、14 节和第 13 节末尾的「与官方字节码不一致、已按官方修正」为准；
+S1（`ChunkStorage` trait）、S2（Linear 可选项）、S4 的两线程方案在原设计里就没有照做。
+
+（2026-11-14 按实现更新：本文第 4 / 12 / 13 / 14 节、`crates/mc-bamboo-storage/src/chunk_io.rs`、`crates/mc-bamboo-game/src/chunk_jobs.rs`；合并提交 `082a7c9`、`be36ac3`）
+
 ## 4. Crate 结构
 
-编解码层已经落地（第 12 节第 1–4 步）。它不接进游戏，磁盘上不会因为它多出任何东西：
+编解码层已经落地（第 12 节第 1–4 步），后来又接进了加载 / 卸载和生命周期（第 12 节第 5、6 步）。
+这一节描述的是编解码层当时的边界；下面 `mc-bamboo-game` 的 `chunk_io` 接线、`chunk_codec` 和
+`chunk_jobs` / 计算池是后来加的，纯编解码这几步本身确实不会让磁盘多出东西：
 
 ```text
  mc-bamboo-storage        ← 新增：chunk_nbt、anvil、player、level_dat
@@ -129,6 +157,9 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 - 第 5 步以后（存档线程、加载线程、ticket 和卸载）按 `world-model-design.md` 的
   区块平面来做：`(区块位置 → 未压缩 NBT 字节)` 的 IO 线程接在流水线的两头，
   解析和序列化在流水线里做；不照这一节原来写的 `Saver` / `Loader` 线程方案。
+  **实际落地见第 12 / 14 节**：一条 `chunk_io` IO 线程读写区域 / 实体文件，
+  `ChunkCodec` 的 `InlineCodec` 内联解析 / 序列化，`chunk_worker_threads ≥ 1` 时
+  `chunk_jobs::ChunkWork::{Decode, Generate, Save}` 进常驻计算池；`Assemble` 内联、不进池。
 
 ## 5. 区块 NBT
 
@@ -657,17 +688,21 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    验证：第 11 节第 1、2、3、4 条；官方 `RegionFile` 双向、扇区重用、坏表项、模糊。
 5. ✅ **区块平面的加载和保存**（按 `world-model-design.md` 第 5 节）。
    `mc-bamboo-storage::chunk_io` 起一条 IO 线程读写区域 / 实体文件（压缩解压都在 IO 线程），
-   世界线程绝不等待 IO：启动时扫区域文件头得到「盘上有哪些区块」的内存集合（写盘时更新），
-   盘上已有数据的区块发异步读、结果下一刻开头经信箱收回；盘上没有的区块直接在世界线程
-   走超平坦模板，不引入一 tick 延迟，保住进服首批次区块顺序（官方探针 690/690 覆盖这一点）。
-   `mc-bamboo-game::chunk_codec`
-   把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器累计耗时）。
-   Director 的 `Task::Read` 现在是真正的读盘阶段：全 `Status` 都解码（非 `full` 按
+   世界线程绝不等待 IO：启动时扫区域文件头得到「盘上有哪些区块」的内存集合（写盘时更新）。
+   **带世界目录时所有区块都走同一条异步读流水线**（`05d8fa1`）：盘上有数据就发异步读，
+   盘上没有时 IO 线程回 `chunk: None`，两种来源的结果都在下一刻开头经信箱收回、按距离排序交付，
+   保住进服首批次「出生点、3×3」的顺序；没接世界目录（单元测试、oracle、压测）仍是当刻同步走超平坦模板，
+   停放表命中的写盘途中盒子也是同步快路径。依据见第 14 节官方 `ChunkMap.scheduleChunkLoad` 字节码核对。
+   `mc-bamboo-game::chunk_codec` 把解析/序列化放在 `ChunkCodec` 接口后，当前实现是
+   `InlineCodec`（默认 `chunk_worker_threads = 0` 在世界线程内联、剖析器累计耗时）；
+   `chunk_worker_threads ≥ 1` 时 `Decode` / `Generate` / `Save` 由 `chunk_jobs::ChunkJob`
+   交给常驻计算池，`Assemble` 仍内联、`Read` 仍在 IO 线程（`082a7c9`）。
+   Director 的 `Task::Read` 是真正的读盘阶段：任意 `Status` 都解码（非 `full` 按
    ProtoChunk 补齐）、盘上没有走超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐
-   才交付（D8）。**带世界目录时两种来源统一走异步 IO 流水线，见第 14 节**。卸载时脏区块
-   序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，写盘途中被
-   请求回来拿最新内容；同区块新快照丢旧快照；运行中按官方字节码的节奏保存
-   （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却）。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
+   才交付（D8）。卸载时脏区块序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，
+   写盘途中被请求回来拿最新内容；同区块新快照按 `(pos, seq)` 丢旧快照；运行中按官方字节码的节奏保存
+   （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却），已加载脏区块用 `BorrowedParts` 只读拍快照、
+   不取出盒子也不算完光照。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
    计划刻、三种实体、玩家位置和物品栏。
 6. ✅ **玩家数据和 level.dat**（两半都完成）。
    - ✅ **编解码那一半**：带槽位物品、`PlayerData`、`LevelData` 的 gzip NBT 写读，
@@ -713,7 +748,10 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   把游戏层四张表接进条目，并做了 `RegionColumn` ⇄ 「区块 NBT + 实体 NBT」的
   公开组装函数（`mc-bamboo-game::region::chunk_content::encode/decode`）。
   读进来的顶层附加信息也挂在 `ChunkColumn` 里随盒子走，写盘时原样带回。
-  组装函数不接进加载 / 卸载流程：卸载的区块仍整盒停放在内存里，不落盘。
+  **这一条后半句是当时的边界，现在已不成立**：组装函数已经接进加载 / 卸载流程，
+  `chunk_jobs::ChunkWork::{Decode, Save}` 和 `Region::encode_loaded_column` 都走
+  `chunk_content::encode_parts` / `decode`，卸载的脏区块会序列化后落盘，只有 pristine 直接丢；
+  已加载的脏区块用 `BorrowedParts` 只读快照，不搬盒子（`1828b8c`、`be36ac3`）。
 
 ## 13. 风险和待用户决定的问题
 
@@ -769,10 +807,15 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   物品组件、命令方块、讲台、方块实体、计划刻、实体、红石记忆）在写路径把区块放进
   `Region::dirty` 集合；每刻的开销只和改动集合大小有关，不和已加载区块数成正比。
   `content_fingerprints` 留作 `cfg(test)` 的校验器。
-- 只读快照 `BorrowedParts` 从 `&Region` 克隆各张表和「已发布」的光照层，不改版本号、
-  不重排计划刻 / 方块实体 / 实体、不发任何包；写出的 NBT 与卸载逐字节一致。
+- 只读快照 `BorrowedParts` 从 `&Region` 克隆各张表和「已发布」的光照层，**不取出/放回盒子、
+  不卸载、不算完待算光照、不动区块包缓存**；不改版本号、不重排计划刻 / 方块实体 / 实体、不发任何包。
+  `Region::encode_loaded_column` 和卸载存盘共用 `chunk_content::encode_parts`，写出的 NBT 与卸载逐字节一致。
   1000 刻「每刻自动保存 vs 从不保存」的差分测试逐刻比较方块、各张表、玩家位置和
   出站帧，内部计数器的绝对值不比。
+
+  （2026-11-14 按实现更新：`crates/mc-bamboo-game/src/region/content_snapshot.rs`、
+  `crates/mc-bamboo-game/src/region/column.rs` 的 `encode_loaded_column`、
+  `crates/mc-bamboo-game/src/chunk_codec.rs` 的 `encode_parts`；合并提交 `be36ac3`、`1828b8c`）
 - 写盘回执按 `(pos, seq)` 记账；「已保存」只在 `Written` 到达时记。`WriteFailed`
   把区块重新标脏、按连续次数有上限地退避重试，绝不永久暂停；盒子写成功才释放，
   关服把没写成功的停放盒子全部重新编码提交，磁盘仍在失败就 `error!` 列出未存区块。
@@ -856,6 +899,13 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   内容（结构、生物群系、地形）会丢，这是 M4 接真生成器时再补的。
   回归测试 `chunk_nbt::tests::status_and_data_version_are_checked` 和
   `chunk_codec::tests::a_non_full_chunk_is_completed_from_the_flat_template`。
+  M4 的地形生成已经走到噪声阶段：`mc-bamboo-worldgen` 有 `BIOMES` 的 quart 格和
+  `NoiseBasedChunkGenerator.doFill` 的纯函数，官方 `chunkgen` 逐方块 / 逐群系对拍 0 不一致，
+  但还没接进 Director 的生成流水线，所以这里读非 `full` 区块时仍只能用超平坦模板补齐
+  （`ae76868`、`docs/worldgen.md`）。接进游戏时 `possibleBiomes` 要照官方用周围 3×3
+  区块群系调色板的并集，不能沿用对拍里的「全部群系」。
+
+  （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节；合并提交 `ae76868`）
 
 ### 已知但没处理的（以后再看）
 
@@ -868,6 +918,9 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   0.000–0.001 / 0.000 / 0.000 ms，`storage_dirty` 最大 0.019 ms；判脏只碰改动
   集合，不和已加载区块数成正比。fly-20 的假玩家不改方块，`storage_candidates`
   每刻均值为 0，所以拍快照和编码没有产生可测的每刻开销。
+  计算池接进来之后又单独量了 512 个改过方块的区块：内联序列化 / 解析
+  92.0 / 261.5 ms，4 线程时世界线程只花 0.1 / 0.2 ms 提交和收回，墙钟
+  27.4 / 72.6 ms（吞吐 3.4–3.6×），见 `profiling.md` 11.3。
 - 方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家等）改了不标脏；
   `chunk_nbt` 目前不存的字段（结构、生物群系等）不进判脏。**以后接结构、生物群系
   存档时必须补上对应的标脏入口**，否则会静默丢数据。
@@ -891,4 +944,7 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   `save-all flush` → `kill -9` → 官方 `world-dir` 检查留下的目录 → 官方 codec 读出
   那一格仍是 `minecraft:diamond_block` → 重启 → 官方客户端能登录读回。
 - 配方书仍等进度（advancements）系统怎么做的决定；旧分支 / worktree 清理由用户决定。
+
+（2026-11-14 按实现更新：本文第 4 / 12 / 14 节、`docs/profiling.md` 10.6 / 11.3、
+`docs/world-model-design.md` 第 16 节第 3 步；合并提交 `082a7c9`、`f08c11a`、`ae76868`）
 
