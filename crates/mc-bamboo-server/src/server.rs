@@ -467,12 +467,12 @@ async fn wait_for_world_to_finish_saving(shared: &Arc<Shared>, world_stopped: &C
         tokio::select! {
             () = world_stopped.cancelled() => return,
             () = shared.force_stop.cancelled() => {
-                error!("a second stop request forced quit before the world finished saving");
-                return;
+                error!("a second stop request forced quit; unsaved changes will be lost");
+                std::process::exit(1);
             }
             _ = &mut second => {
-                error!("a second Ctrl+C forced quit before the world finished saving");
-                return;
+                error!("a second Ctrl+C forced quit; unsaved changes will be lost");
+                std::process::exit(1);
             }
             _ = log_interval.tick() => {
                 warn!("the world is still saving; press Ctrl+C again (or stop again) to force quit");

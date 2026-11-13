@@ -619,6 +619,13 @@ impl Region {
         &self,
         pos: ChunkPos,
     ) -> Option<Result<PackedChunk, String>> {
+        // 有待算光照时，卸载存盘会先算完光照再编码；这里不能提前算（会改变
+        // 运行状态），所以把快照推迟到光照算完之后的下一刻（复查「中 6」）。
+        // Pending light would change the bytes vs an unload save; defer the
+        // snapshot instead of settling light from a read-only path (review 6).
+        if self.chunks.has_pending_light_updates() {
+            return None;
+        }
         let parts = super::content_snapshot::BorrowedParts::build(self, pos)?;
         Some(crate::chunk_codec::encode_parts(pos, &parts))
     }

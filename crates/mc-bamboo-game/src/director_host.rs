@@ -806,6 +806,26 @@ impl DirectorHost {
         }
     }
 
+    /// `pump` 达到收敛上限：不 panic，关服时明确列出没收回、没存下来的区块。
+    /// On a non-convergent pump, log the chunks that were never reclaimed/saved.
+    fn report_unconverged_pump(&self, region: &Region, rounds: usize) {
+        let mut left: Vec<ChunkPos> = region
+            .chunks
+            .loaded_states()
+            .into_iter()
+            .map(|(pos, _, _)| pos)
+            .collect();
+        left.sort_unstable();
+        tracing::error!(
+            rounds,
+            ?left,
+            queued = self.save_queue.len(),
+            parked = self.parking.len(),
+            shutting_down = self.shutting_down,
+            "Director event loop did not converge; chunks below may not have been saved"
+        );
+    }
+
     /// 处理一个事件和它引发的全部任务，直到没有新效果。
     /// 内联执行器不设每刻上限（提交 5/6 的要求）：任务的纯函数部分当场做完，
     /// 盒子攒进信箱，由 `flush_region_mail` 按预算交付/收回。
@@ -826,10 +846,7 @@ impl DirectorHost {
             while let Some(event) = events.pop() {
                 rounds += 1;
                 if rounds >= PUMP_ROUND_LIMIT {
-                    tracing::error!(
-                        rounds,
-                        "Director event loop did not converge; stopping without a panic"
-                    );
+                    self.report_unconverged_pump(region, rounds);
                     return;
                 }
                 // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
@@ -851,10 +868,7 @@ impl DirectorHost {
                         } => {
                             rounds += 1;
                             if rounds >= PUMP_ROUND_LIMIT {
-                                tracing::error!(
-                                    rounds,
-                                    "Director event loop did not converge; stopping without a panic"
-                                );
+                                self.report_unconverged_pump(region, rounds);
                                 return;
                             }
                             region.profiler.start_sub(SubPhase::DirectorEvents);
