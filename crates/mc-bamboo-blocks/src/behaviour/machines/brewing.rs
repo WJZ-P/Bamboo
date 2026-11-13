@@ -17,7 +17,8 @@ use mc_bamboo_recipes::{
 };
 
 use crate::{
-    block_entity::{BlockEntity, drop_item_stack},
+    block_entity::{BlockEntity, block_entity_clock, drop_item_stack},
+    sleep_clock::{Sleep, materialize_one, value_at},
     state::{BlockState, HAS_BOTTLE_0, HAS_BOTTLE_1, HAS_BOTTLE_2},
     world::{UPDATE_CLIENTS, World},
 };
@@ -62,10 +63,12 @@ pub struct BrewingStandEntity {
     ///
     /// Fuel's `setChanged` has run; the brew after it has not.
     yield_tick: bool,
-    /// `0` 从燃料开始，`1` 燃料已经通知过。
+    /// `0` 从燃料开始，`1` 燃料已经通知过（`resume_tick` 的第二段）。
     ///
-    /// `0` starts at fuel. `1` means the fuel notification already ran.
+    /// `0` starts at fuel. `1` is the second segment after the fuel notification.
     tick_phase: u8,
+    /// 一段没有可见事件的安静刻：`brew_time` 每刻 -1，到点真跑一次 `serverTick`。
+    sleep: Option<Sleep>,
 }
 
 /// 酿造台里录制层要看的状态（数据槽之外）。
@@ -95,6 +98,7 @@ impl BrewingStandEntity {
             last_recipe: None,
             yield_tick: false,
             tick_phase: 0,
+            sleep: None,
         }
     }
 
@@ -117,12 +121,22 @@ impl BrewingStandEntity {
     /// `2` 总酿造时间、`3` 总燃料。
     pub fn data(&self, id: usize) -> i32 {
         match id {
-            0 => self.brew_time,
+            0 => self.brew_time_at(block_entity_clock()),
             1 => self.fuel,
             2 => self.total_brew_time,
             3 => self.total_fuel,
             _ => 0,
         }
+    }
+
+    /// 安静刻的倒计时按公式算到 `now`，不改实体本身。
+    fn brew_time_at(&self, now: i64) -> i32 {
+        value_at(self.sleep, self.brew_time, -1, now)
+    }
+
+    /// 外部写入、存档回读、装盒之前结束睡眠，数值按公式算到「第 `tick` 刻结束时」。
+    fn materialize(&mut self, tick: i64) {
+        materialize_one(&mut self.sleep, &mut self.brew_time, -1, tick);
     }
 
     /// 菜单读到的全部数据槽。
@@ -132,6 +146,7 @@ impl BrewingStandEntity {
 
     /// 录制层要看到的、数据槽之外的内部状态。
     pub fn observed_facts(&self) -> BrewingFacts {
+        // 安静刻里配方缓存不变；`yield_tick` / `tick_phase` 只在真跑的两段里变。
         BrewingFacts {
             last_potion_count: self.last_potion_count,
             ingredient: self.ingredient,
@@ -145,6 +160,7 @@ impl BrewingStandEntity {
     /// 存档读回 `speed_multiplier`；`ingredient` 由官方 `loadAdditional` 在
     /// `BrewTime > 0` 时从材料格物品重算，这里保持一致。
     pub fn set_speed_multiplier(&mut self, speed: f32) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         self.speed_multiplier = speed;
         if self.brew_time > 0 {
             self.ingredient = Some(self.items[SLOT_INGREDIENT].item);
@@ -155,6 +171,7 @@ impl BrewingStandEntity {
     ///
     /// Vanilla `ContainerData.set`. Loading and menu data writes use this.
     pub fn set_data(&mut self, id: usize, value: i32) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         match id {
             0 => self.brew_time = value,
             1 => self.fuel = value,
@@ -172,6 +189,7 @@ impl BrewingStandEntity {
     /// `getMaxStackSize`. `setChanged` is not here. The hopper path notifies at the end of the
     /// container wrapper, and a menu notifies after it writes the slots back.
     pub fn set_item(&mut self, slot: usize, stack: ItemStack) {
+        self.materialize(block_entity_clock().saturating_sub(1));
         let mut stack = stack;
         let limit = mc_bamboo_recipes::max_stack_size(&stack).min(CONTAINER_STACK_LIMIT);
         if stack.count > limit {
@@ -182,6 +200,7 @@ impl BrewingStandEntity {
 
     /// 官方 `Container.removeItem`。
     pub fn remove_item(&mut self, slot: usize, amount: i32) -> ItemStack {
+        self.materialize(block_entity_clock().saturating_sub(1));
         let current = &self.items[slot];
         if current.is_empty() || amount <= 0 {
             return ItemStack::empty();
@@ -304,6 +323,24 @@ impl BrewingStandEntity {
         true
     }
 
+    /// 官方 `serverTick` 里前半段的燃料通知。两段式 `resume_tick` 的第二段
+    /// 从这里接着跑；中间的比较器读取已经在驱动里按官方顺序跑过。
+    fn fuel_tick(&mut self, world: &mut World) {
+        let first = self.tick_phase == 0;
+        if first {
+            self.materialize(block_entity_clock().saturating_sub(1));
+            self.sleep = None;
+            self.yield_tick = false;
+        }
+        if first && self.consume_fuel(world) && world.block_entity_is_taken(self.pos) {
+            self.tick_phase = 1;
+            self.yield_tick = true;
+            return;
+        }
+        self.tick_phase = 0;
+        self.brew_and_update_bottles(world);
+    }
+
     /// 官方 `serverTick`。
     ///
     /// 消耗燃料会 `setChanged`，同一刻后面的 `doBrew` 还可能改药水。实体正被拿着时这两次
@@ -316,15 +353,7 @@ impl BrewingStandEntity {
     /// until the entity is put back and the queued reads have run. A direct call that does not
     /// hold the entity runs the whole tick at once, so the random draws stay in order.
     pub fn server_tick(&mut self, world: &mut World) {
-        self.yield_tick = false;
-        if self.tick_phase == 0 && self.consume_fuel(world) && world.block_entity_is_taken(self.pos)
-        {
-            self.tick_phase = 1;
-            self.yield_tick = true;
-            return;
-        }
-        self.tick_phase = 0;
-        self.brew_and_update_bottles(world);
+        self.fuel_tick(world);
     }
 
     fn brew_and_update_bottles(&mut self, world: &mut World) {
@@ -338,9 +367,13 @@ impl BrewingStandEntity {
             } else if !brewable || self.ingredient != Some(self.items[SLOT_INGREDIENT].item) {
                 self.brew_time = 0;
             }
-            // 官方酿造倒计时的每一刻都 `setChanged`。
-            // Vanilla calls `setChanged` on every brewing tick.
-            crate::machine_container::mark_container_changed(world, self.pos);
+            // 官方酿造倒计时的每一刻都 `setChanged`；只有 `doBrew` 那一才改物品。
+            // Vanilla calls `setChanged` on every brewing tick; only `doBrew` changes items.
+            crate::machine_container::quiet_mark_container_changed(
+                world,
+                self.pos,
+                !done || !brewable,
+            );
         } else if brewable && self.fuel > 0 {
             let speed = if self.speed_multiplier > 0.0 {
                 self.speed_multiplier
@@ -370,6 +403,39 @@ impl BrewingStandEntity {
             }
         }
     }
+
+    /// 一次 `serverTick` 之后算下一次必须真跑的时刻。
+    ///
+    /// 官方每刻都调 `isBrewable`（会更新配方缓存）、补燃料、改 `brewTime`、
+    /// 跑 `doBrew`、再把三个瓶子的空不空写回方块状态。物品不变时这些都不产生
+    /// 可见效果，只有 `brewTime` 每刻 -1；到点的那一刻才必须真跑 `doBrew`。
+    /// 没在酿、且不会下一刻开酿或补燃料时睡到外部叫醒。
+    fn arm_sleep(&mut self, now: i64) -> Option<i64> {
+        if self.yield_tick || self.tick_phase != 0 {
+            // 两段式 `resume_tick` 还没跑完。
+            return None;
+        }
+        // 和官方下一刻一致地刷新配方缓存；安静刻里它不会再变。
+        let brewable = self.is_brewable();
+        if self.brew_time > 1
+            && brewable
+            && self.ingredient == Some(self.items[SLOT_INGREDIENT].item)
+        {
+            // 第 `now + brew_time` 刻减到 0 并 `doBrew`，不能在中间醒来。
+            return Some(now.saturating_add(i64::from(self.brew_time)));
+        }
+        if self.brew_time > 0 {
+            // 下一刻就要结束这一轮，或材料已经变了要提前清零。
+            return None;
+        }
+        let fuel_will_be_consumed =
+            self.fuel <= 0 && brewing_fuel(&self.items[SLOT_FUEL]).is_some();
+        if !brewable && !fuel_will_be_consumed {
+            return Some(i64::MAX);
+        }
+        // 下一刻会开一轮或消耗燃料（余料掉落要取随机数），必须真跑。
+        None
+    }
 }
 
 impl BlockEntity for BrewingStandEntity {
@@ -378,7 +444,7 @@ impl BlockEntity for BrewingStandEntity {
     }
 
     fn tick(&mut self, world: &mut World) {
-        self.server_tick(world);
+        self.fuel_tick(world);
     }
 
     fn resume_tick(&self) -> bool {
@@ -403,7 +469,11 @@ impl BlockEntity for BrewingStandEntity {
     fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
         use crate::archive::tag::put;
         let mut out = Vec::new();
-        put(&mut out, "BrewTime", Tag::Int(self.brew_time));
+        put(
+            &mut out,
+            "BrewTime",
+            Tag::Int(self.brew_time_at(block_entity_clock())),
+        );
         put(&mut out, "total_brew_time", Tag::Int(self.total_brew_time));
         put(
             &mut out,
@@ -418,5 +488,20 @@ impl BlockEntity for BrewingStandEntity {
             Tag::Float(self.speed_multiplier),
         );
         Ok(out)
+    }
+
+    fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        let wake_at = self.arm_sleep(now)?;
+        self.sleep = Some(Sleep::new(now, wake_at));
+        Some(wake_at)
+    }
+
+    fn materialize(&mut self, tick: i64) {
+        BrewingStandEntity::materialize(self, tick);
+    }
+
+    fn resleep(&mut self, since: i64, wake_at: i64) {
+        // 装盒时数值已按公式算到源表的最后一刻；目标表从这一刻起算。
+        self.sleep = Some(Sleep::new(since, wake_at));
     }
 }

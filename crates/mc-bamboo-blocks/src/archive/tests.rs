@@ -345,3 +345,57 @@ fn furnace_recipes_used_is_a_compound() {
     assert_eq!(field(&tag, "speed_multiplier"), Some(&Tag::Float(1.5)));
     assert_eq!(entries(&tag, "RecipesUsed").len(), 1);
 }
+
+/// 漏斗 `tickedGameTime` 改成相对量之后，跨刻、跨装盒、读盘都和官方的
+/// 「每刻写世界时间 / 读盘回来是 0」完全一致。
+#[test]
+fn hopper_ticked_game_time_stays_relative_across_ticks_and_archive() {
+    use crate::block_entity::set_block_entity_clock;
+    use crate::hopper::push_items_tick;
+    use mc_bamboo_core::BlockPos;
+
+    let pos = BlockPos::new(1, 64, 2);
+    let mut hopper = HopperEntity::new(pos);
+    for now in 1..=12 {
+        set_block_entity_clock(now);
+        // `pushItemsTick` 只需要 `World` 来送 / 吸物品；这里直接验时间字段，
+        // 用一个没有容器的假世界，冷却路径不会碰任何容器。
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::new();
+        ticks.set_time(now);
+        let mut world = crate::World::new(&mut level, &mut ticks);
+        world.set_block(
+            pos,
+            BlockState(mc_bamboo_data::blocks::HOPPER),
+            crate::world::UPDATE_ALL,
+        );
+        push_items_tick(&mut world, pos, &mut hopper);
+        assert_eq!(hopper.ticked_game_time(), now, "tick {now}");
+        assert_eq!(hopper.ticked_game_time_age(), Some(0), "tick {now}");
+        // 官方同一刻的字段等于世界时间；相对量在后面几刻会按公式增长。
+    }
+    // 官方安静刻里每刻都真跑过（时间字段跟世界时间）。休眠期间由公式现算，
+    // 不落到字段里；这里显式推进到 15 再核对还原值。
+    set_block_entity_clock(15);
+    let mut level = crate::testing::TestLevel::new();
+    let mut ticks = crate::BlockTicks::new();
+    ticks.set_time(15);
+    let mut world = crate::World::new(&mut level, &mut ticks);
+    world.set_block(
+        pos,
+        BlockState(mc_bamboo_data::blocks::HOPPER),
+        crate::world::UPDATE_ALL,
+    );
+    push_items_tick(&mut world, pos, &mut hopper);
+    assert_eq!(hopper.ticked_game_time_age(), Some(0));
+    assert_eq!(hopper.ticked_game_time(), 15);
+
+    let tag = Tag::Compound(write_block_entity_additional(&hopper).unwrap());
+    let rebuilt = create_block_entity("minecraft:hopper", pos, BlockState::AIR, &tag)
+        .unwrap()
+        .unwrap();
+    let rebuilt = rebuilt.as_any().downcast_ref::<HopperEntity>().unwrap();
+    assert_eq!(rebuilt.ticked_game_time(), 0, "官方不存这个字段");
+    assert_eq!(rebuilt.ticked_game_time_age(), None);
+    assert_eq!(field(&tag, "TransferCooldown"), Some(&Tag::Int(0)));
+}

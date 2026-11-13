@@ -89,6 +89,8 @@ mod recipe_oracle;
 #[cfg(feature = "oracle")]
 mod saved_data;
 #[cfg(feature = "oracle")]
+mod seed_world;
+#[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
@@ -161,7 +163,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
       mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla world-dir <目录> <java 路径>
-      mc-bamboo-vanilla world-block <目录> <x> <y> <z> <方块名> <java 路径>";
+      mc-bamboo-vanilla world-block <目录> <x> <y> <z> <方块名> <java 路径>
+      mc-bamboo-vanilla seed-world <目录> [半径]";
 
 fn main() -> ExitCode {
     match run() {
@@ -208,6 +211,8 @@ fn run() -> Result<(), String> {
         ["world-dir", dir, java] => world_dir_cli(dir, java),
         ["world-block", dir, x, y, z, block, java] => world_block_cli(dir, x, y, z, block, java),
         ["chunk-dump", dir, x, z, java] => chunk_dump_cli(dir, x, z, java),
+        ["seed-world", dir] => seed_world_cli(dir, None),
+        ["seed-world", dir, radius] => seed_world_cli(dir, Some(radius)),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -484,6 +489,16 @@ fn saved_data_cli(_java: &str) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn world_dir_cli(dir: &str, java: &str) -> Result<(), String> {
     world_dir::run(dir, java)
+}
+
+#[cfg(feature = "oracle")]
+fn seed_world_cli(dir: &str, radius: Option<&str>) -> Result<(), String> {
+    seed_world::run(dir, radius)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn seed_world_cli(_dir: &str, _radius: Option<&str>) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 #[cfg(not(feature = "oracle"))]

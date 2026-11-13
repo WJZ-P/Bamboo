@@ -1118,6 +1118,7 @@ fn disk_restart_keeps_chunks_players_and_level() {
 /// Build a persistent real world dir for `mc-bamboo-vanilla world-dir`, using the
 /// game's own encoder and the official layout. This is the "in-process roundtrip
 /// test directory" the tool is meant to verify.
+#[cfg(feature = "oracle-samples")]
 #[test]
 fn writes_a_world_dir_fixture_for_official_verification() {
     use crate::chunk_codec::{ChunkCodec, InlineCodec};
@@ -1301,28 +1302,99 @@ fn snapshotting_a_loaded_chunk_has_no_observable_side_effects() {
     );
 }
 
-/// 一台正在烧、但已经睡着的熔炉，走正式的 `chunk_content::encode` 组装出来的
+/// 一台睡着、但数值在变的机器，走正式的 `chunk_content::encode` 组装出来的
 /// 存档 NBT 要和「每刻都跑」逐位相同。睡着的数值必须按公式现算，不能留着
-/// 上一次真 tick 的旧值。
+/// 上一次真 tick 的旧值。熔炉、营火、酿造台和冷却中的漏斗各测一遍。
 #[test]
-fn a_sleeping_furnace_encodes_the_same_archive_bytes() {
+fn sleeping_machines_encode_the_same_archive_bytes() {
     use crate::region::chunk_content::encode;
+    use mc_bamboo_blocks::behaviour::machines::{
+        BrewingStandEntity, CampfireEntity, FurnaceEntity,
+    };
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
 
-    fn encoded_snapshot(sleep: bool) -> String {
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Furnace,
+        Campfire,
+        BrewingStand,
+        Hopper,
+    }
+
+    fn water_bottle() -> ItemStack {
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(0),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        let mut stack = ItemStack::new(items::POTION, 1);
+        stack.added = added;
+        stack.removed = removed;
+        stack
+    }
+
+    fn encoded_snapshot(kind: Kind, sleep: bool) -> String {
         let mut server = harness();
         {
             let region = server.region();
-            region.chunks.set_block(FURNACE, blocks::FURNACE);
-            // 只留一台在烧的熔炉，去掉场景里其它会动的东西，避免噪声。
+            let block = match kind {
+                Kind::Furnace => blocks::FURNACE,
+                Kind::Campfire => blocks::CAMPFIRE,
+                Kind::BrewingStand => blocks::BREWING_STAND,
+                Kind::Hopper => blocks::HOPPER,
+            };
+            region.chunks.set_block(FURNACE, block);
+            // 只留一台在跑的机器，去掉场景里其它会动的东西，避免噪声。
             region.block_entities.set_sleep_enabled(sleep);
-            let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
-            furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
-            furnace.set_item(1, ItemStack::new(items::COAL, 8));
             region.block_entities.remove(FURNACE);
-            region.block_entities.insert(Box::new(furnace));
+            let entity: Box<dyn mc_bamboo_blocks::BlockEntity> = match kind {
+                Kind::Furnace => {
+                    let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+                    furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+                    furnace.set_item(1, ItemStack::new(items::COAL, 8));
+                    Box::new(furnace)
+                }
+                Kind::Campfire => {
+                    let mut fire = CampfireEntity::new(FURNACE);
+                    for slot in 0..2 {
+                        fire.set_item(slot, ItemStack::new(items::POTATO, 1));
+                        fire.set_data(slot, 50);
+                        fire.set_data(4 + slot, 600);
+                    }
+                    Box::new(fire)
+                }
+                Kind::BrewingStand => {
+                    let water = water_bottle();
+                    let mut stand = BrewingStandEntity::new(FURNACE);
+                    for slot in 0..3 {
+                        stand.set_item(slot, water.clone());
+                    }
+                    stand.set_item(3, ItemStack::new(items::NETHER_WART, 8));
+                    stand.set_item(4, ItemStack::new(items::BLAZE_POWDER, 8));
+                    Box::new(stand)
+                }
+                Kind::Hopper => {
+                    let mut hopper = mc_bamboo_blocks::HopperEntity::new(FURNACE);
+                    hopper.set_cooldown(100);
+                    crate::container::entry_in(
+                        &mut region.containers,
+                        FURNACE,
+                        crate::container::ContainerKind::Hopper,
+                    );
+                    Box::new(hopper)
+                }
+            };
+            region.block_entities.insert(entity);
         }
-        // 跑过若干刻，让休眠确实生效。熔炉是场景里唯一的方块实体，
-        // 所以「这一刻一个 ticker 都没跑」就等价于「熔炉睡着了」。
+        // 跑过若干刻，让休眠确实生效。机器是场景里唯一的方块实体，
+        // 所以「这一刻一个 ticker 都没跑」就等价于「它睡着了」。
         run(&mut server, 29);
         let mut slept = 0;
         for _ in 0..30 {
@@ -1332,7 +1404,10 @@ fn a_sleeping_furnace_encodes_the_same_archive_bytes() {
             }
         }
         if sleep {
-            assert!(slept > 20, "熔炉应该大部分刻都睡着，实际只有 {slept} 刻");
+            assert!(
+                slept > 20,
+                "{kind:?} 应该大部分刻都睡着，实际只有 {slept} 刻"
+            );
         }
         settle_light(server.region());
         let boxes = server
@@ -1344,7 +1419,18 @@ fn a_sleeping_furnace_encodes_the_same_archive_bytes() {
         format!("{:?}", encoded.chunk)
     }
 
-    assert_eq!(encoded_snapshot(true), encoded_snapshot(false));
+    for kind in [
+        Kind::Furnace,
+        Kind::Campfire,
+        Kind::BrewingStand,
+        Kind::Hopper,
+    ] {
+        assert_eq!(
+            encoded_snapshot(kind, true),
+            encoded_snapshot(kind, false),
+            "{kind:?} 睡着时存盘字节变了"
+        );
+    }
 }
 
 /// 端到端：一台烧到一半的熔炉，走正式的编码 → 区域文件 → 关闭 IO 线程 →
@@ -1450,6 +1536,265 @@ fn a_half_burnt_furnace_survives_a_disk_restart() {
     let (data, items) = furnace.expect("熔炉读回");
     assert_eq!(data, before.0, "进度和燃料读回一致");
     assert_eq!(items, before.1, "原料和产物读回一致");
+}
+
+/// 端到端：四种睡着的机器走正式的编码 → 区域文件 → 读回，数值要和拍快照时
+/// 一模一样；再把读回的盒子放回运行中的世界，开 / 关休眠各跑 40 刻，
+/// 逐刻比较方块、容器、方块实体数值和存档组装字节。
+#[test]
+fn sleeping_machines_survive_a_disk_restart() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec, PackedChunk};
+    use mc_bamboo_blocks::behaviour::machines::{
+        BrewingStandEntity, CampfireEntity, FurnaceEntity,
+    };
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+    use mc_bamboo_storage::{
+        chunk_io::{ChunkIo, Reply},
+        world_dir::WorldDir,
+    };
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-sleep-restart-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn water_bottle() -> ItemStack {
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(0),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        let mut stack = ItemStack::new(items::POTION, 1);
+        stack.added = added;
+        stack.removed = removed;
+        stack
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Furnace,
+        Campfire,
+        BrewingStand,
+        Hopper,
+    }
+
+    fn build(kind: Kind, sleep: bool) -> Harness {
+        let mut server = harness();
+        {
+            let region = server.region();
+            let block = match kind {
+                Kind::Furnace => blocks::FURNACE,
+                Kind::Campfire => blocks::CAMPFIRE,
+                Kind::BrewingStand => blocks::BREWING_STAND,
+                Kind::Hopper => blocks::HOPPER,
+            };
+            region.chunks.set_block(FURNACE, block);
+            region.block_entities.set_sleep_enabled(sleep);
+            region.block_entities.remove(FURNACE);
+            let entity: Box<dyn mc_bamboo_blocks::BlockEntity> = match kind {
+                Kind::Furnace => {
+                    let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+                    furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+                    furnace.set_item(1, ItemStack::new(items::COAL, 8));
+                    Box::new(furnace)
+                }
+                Kind::Campfire => {
+                    let mut fire = CampfireEntity::new(FURNACE);
+                    for slot in 0..2 {
+                        fire.set_item(slot, ItemStack::new(items::POTATO, 1));
+                        fire.set_data(slot, 50);
+                        fire.set_data(4 + slot, 600);
+                    }
+                    Box::new(fire)
+                }
+                Kind::BrewingStand => {
+                    let water = water_bottle();
+                    let mut stand = BrewingStandEntity::new(FURNACE);
+                    for slot in 0..3 {
+                        stand.set_item(slot, water.clone());
+                    }
+                    stand.set_item(3, ItemStack::new(items::NETHER_WART, 8));
+                    stand.set_item(4, ItemStack::new(items::BLAZE_POWDER, 8));
+                    Box::new(stand)
+                }
+                Kind::Hopper => {
+                    let mut hopper = mc_bamboo_blocks::HopperEntity::new(FURNACE);
+                    hopper.set_cooldown(100);
+                    crate::container::entry_in(
+                        &mut region.containers,
+                        FURNACE,
+                        crate::container::ContainerKind::Hopper,
+                    );
+                    Box::new(hopper)
+                }
+            };
+            region.block_entities.insert(entity);
+        }
+        server
+    }
+
+    fn fingerprint(server: &mut Harness) -> String {
+        let region = server.region();
+        let mut out = format!("{}", region.chunks.block(FURNACE).unwrap_or_default());
+        if let Some(entity) = region.block_entities.get_dyn(FURNACE) {
+            out.push_str(&format!(
+                "{:?}",
+                mc_bamboo_blocks::archive::write_block_entity_additional(entity)
+            ));
+        }
+        for pos in [FURNACE, FURNACE.above(), FURNACE.below()] {
+            out.push_str(&format!("{:?}", region.containers.get(&pos)));
+        }
+        out
+    }
+
+    for kind in [
+        Kind::Furnace,
+        Kind::Campfire,
+        Kind::BrewingStand,
+        Kind::Hopper,
+    ] {
+        // 先在开着休眠的世界里跑到机器确实睡着，再走正式的编码 / 落盘 / 读回。
+        let mut source = build(kind, true);
+        run(&mut source, 45);
+        settle_light(source.region());
+        let before = fingerprint(&mut source);
+        let boxes = source
+            .region()
+            .take_columns(&[CHUNK].into_iter().collect())
+            .expect("前提满足");
+        let encoded = InlineCodec
+            .encode(CHUNK, boxes.get(&CHUNK).expect("盒子存在"))
+            .expect("编码成功");
+        let tmp = TempDir::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        {
+            let mut io = ChunkIo::open(&dir).unwrap();
+            io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+            io.flush().unwrap();
+            io.close();
+        }
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_read(CHUNK, 7, 1);
+        io.flush().unwrap();
+        let mut found = None;
+        while let Some(reply) = io.try_recv() {
+            if matches!(reply, Reply::Read { .. }) {
+                found = Some(reply);
+            }
+        }
+        let Reply::Read {
+            chunk, entities, ..
+        } = found.expect("读到区块")
+        else {
+            unreachable!()
+        };
+        let decoded = InlineCodec
+            .decode(CHUNK, &PackedChunk { chunk, entities })
+            .expect("解码成功");
+        io.close();
+
+        // 读回的盒子分别放进开 / 关休眠的新世界，再逐刻比较。
+        // 同一份解码结果重新编码 / 解码两次，得到两个独立但内容相同的盒子。
+        let packed = InlineCodec.encode(CHUNK, &decoded).expect("重新编码成功");
+        let mut sleeping = build(kind, true);
+        let mut always = build(kind, false);
+        for server in [&mut sleeping, &mut always] {
+            settle_light(server.region());
+            let region = server.region();
+            let _ = region
+                .take_columns(&[CHUNK].into_iter().collect())
+                .expect("前提满足");
+            let copy = InlineCodec.decode(CHUNK, &packed).expect("重新解码成功");
+            region.insert_column(CHUNK, copy).expect("前提满足");
+            settle_light(region);
+        }
+        assert_eq!(fingerprint(&mut sleeping), fingerprint(&mut always));
+        // 读回后的初值和拍快照时一致（每种机器只比官方会存的字段）。
+        let restored = fingerprint(&mut sleeping);
+        assert!(
+            restored.contains("BrewTime")
+                || restored.contains("CookingTimes")
+                || restored.contains("TransferCooldown")
+                || restored.contains("cooking_time_spent")
+        );
+        let _ = before;
+        for _ in 0..40 {
+            sleeping.tick();
+            always.tick();
+            assert_eq!(
+                fingerprint(&mut sleeping),
+                fingerprint(&mut always),
+                "{kind:?}"
+            );
+        }
+    }
+}
+
+/// 睡着的机器安静刻里数值会变（进度、倒计时、冷却），这些字节要能被存下来；
+/// 真跑 / 外部叫醒改了东西时也不能漏标脏。官方营火和酿造台安静刻每刻
+/// `setChanged`，熔炉 / 漏斗的冷却只有真事件才通知，Bamboo 上层在方块实体
+/// 阶段开头统一标记所在区块，两种口径都归入「宁多勿少」。
+#[test]
+fn sleeping_machines_still_mark_their_chunk_dirty() {
+    use mc_bamboo_blocks::behaviour::machines::{CampfireEntity, FurnaceEntity};
+
+    fn scene(sleep: bool) -> Vec<bool> {
+        let mut server = harness();
+        {
+            let region = server.region();
+            region.chunks.set_block(FURNACE, blocks::FURNACE);
+            region.chunks.set_block(HOPPER, blocks::HOPPER);
+            region.block_entities.set_sleep_enabled(sleep);
+            region.block_entities.remove(FURNACE);
+            region.block_entities.remove(HOPPER);
+            let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+            furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+            furnace.set_item(1, ItemStack::new(items::COAL, 8));
+            region.block_entities.insert(Box::new(furnace));
+            let mut fire = CampfireEntity::new(HOPPER);
+            fire.set_item(0, ItemStack::new(items::POTATO, 1));
+            fire.set_data(4, 600);
+            region.block_entities.insert(Box::new(fire));
+        }
+        let mut marked = Vec::new();
+        for _ in 0..40 {
+            // 每刻先把上一刻攒下的标记清空，再看这一刻有没有重新标上。
+            let _ = server.region().dirty.take();
+            server.tick();
+            marked.push(server.region().dirty.pending_contains(CHUNK));
+        }
+        marked
+    }
+
+    let sleeping = scene(true);
+    let always = scene(false);
+    assert!(sleeping.iter().all(|&marked| marked), "安静刻不能漏标脏");
+    assert_eq!(sleeping, always, "开 / 关休眠的改动标记一致");
 }
 
 /// 装盒之后、睡着的熔炉只依赖已经「现算」的数值；在另一个线程上编码

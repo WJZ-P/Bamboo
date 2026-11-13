@@ -124,6 +124,12 @@ pub(crate) struct DirectorHost {
     /// 发给 region 的信箱：待交付的盒子（带交付时的等级）、待收回的位置。
     deliveries: BTreeMap<ChunkPos, (u64, Desired, Box<RegionColumn>)>,
     reclaims: Vec<(ChunkPos, u64)>,
+    /// 一次 `pump` 里攒着的异步读请求，收尾时按离玩家的距离排序后一起交给
+    /// IO 线程。IO 线程按 FIFO 处理：近处的回执先到，`PlayerChunkSender` 的
+    /// 第一批就一定是最近的区块，远处的模板不会抢在近处的盘上区块之前。
+    /// Async reads collected during one `pump`, submitted in distance order at
+    /// the end. The IO worker is FIFO, so near replies arrive first.
+    read_queue: Vec<(ChunkPos, TaskId, u64)>,
     /// 本刻还没花掉的预算。整刻内所有 `pump` 共用，进服/离开/移动各发一批票
     /// 也不会把上限乘上好几倍；每刻开头由 `begin_tick` 重置。
     budget_left: MailBudget,
@@ -222,6 +228,7 @@ impl DirectorHost {
             reclaims_spent: 0,
             deliveries: BTreeMap::new(),
             reclaims: Vec::new(),
+            read_queue: Vec::new(),
             delivered: 0,
             reclaimed: 0,
             parked: 0,
@@ -937,7 +944,13 @@ impl DirectorHost {
                                 events.push(next);
                             }
                         }
-                        Effect::Cancel { .. } => {}
+                        Effect::Cancel { id } => {
+                            // 任务被取消时，还没交给 IO 线程的读也要撤掉，否则它
+                            // 会占一个 FIFO 位置，把近处读的回执拖晚一刻。
+                            // Drop a queued read when its task is cancelled so it
+                            // cannot delay a nearer read in the FIFO worker.
+                            self.read_queue.retain(|&(_, queued_id, _)| queued_id != id);
+                        }
                         Effect::ToRegion(message) => self.region_message(region, message),
                         Effect::Park { pos, column } => {
                             region.profiler.start_sub(SubPhase::DirectorEvents);
@@ -958,8 +971,31 @@ impl DirectorHost {
             // 没有新消息就收敛了。
             events = self.flush_region_mail(region);
             if events.is_empty() {
+                self.submit_reads(region);
                 return;
             }
+        }
+    }
+
+    /// 把这一轮攒下的异步读按离玩家的距离提交给 IO 线程。IO 线程是 FIFO，
+    /// 先提交的先回执；`poll_io` 一次收回所有回执后按距离交付，进服的第一批
+    /// 区块因此就是最近的那一圈（官方 `PlayerChunkSender` 的语义）。
+    /// Submit the reads collected this round in distance order. The IO worker is
+    /// FIFO, so near chunks reply first and join the same ordered delivery batch.
+    fn submit_reads(&mut self, region: &Region) {
+        if self.read_queue.is_empty() {
+            return;
+        }
+        let Some(io) = &self.io else {
+            self.read_queue.clear();
+            return;
+        };
+        let centers = Self::guaranteed_centers(region);
+        let mut queued = std::mem::take(&mut self.read_queue);
+        // 稳定排序：同等距离保持 Director 派任务的顺序（TaskId 升序），结果确定。
+        queued.sort_by_key(|&(pos, _, _)| Self::distance_to_players(pos, &centers));
+        for (pos, id, generation) in queued {
+            io.submit_read(pos, id, generation);
         }
     }
 
@@ -981,16 +1017,21 @@ impl DirectorHost {
             Task::Read { pos } => {
                 if let Some(column) = self.parking.take(pos) {
                     TaskResult::Decoded { column }
-                } else if let Some(io) = &self.io {
-                    if io.has_chunk(pos) {
-                        // 盘上有这个区块：发异步读，结果下一刻从信箱收回。
-                        io.submit_read(pos, id, generation);
-                        return None;
-                    }
-                    // 盘上没有：和接存档前一样同步走超平坦模板，不引入一 tick
-                    // 的读盘延迟，进服首批次区块的顺序保持不变。
-                    TaskResult::Read { bytes: None }
+                } else if self.io.is_some() {
+                    // 官方 `ChunkMap.scheduleChunkLoad` 没有「盘上有就异步、盘上没有就
+                    // 同步生成」的快路径：所有区块都先经过异步加载流水线，变成可发的
+                    // 区块之后才登记到 `PlayerChunkSender`、按距离排序发送。这里照做：
+                    // 盘上没有数据时 IO 线程回 `chunk: None`，下一刻开头和盘上的读结果
+                    // 一起由 `poll_io` 收回，经同一次 `pump` 按距离排序交付。这样带存档
+                    // 的世界不会让远处模板区块抢在近处盘上区块之前到达。
+                    // Vanilla's `scheduleChunkLoad` sends every chunk through the async
+                    // pipeline; chunks with no on-disk data reply `None` and join the same
+                    // distance-ordered delivery batch as the ones read from disk.
+                    self.read_queue.push((pos, id, generation));
+                    return None;
                 } else {
+                    // 没接世界目录（测试、对拍、压测）：仍当刻同步走模板。
+                    // Without a world directory, keep the old synchronous template path.
                     TaskResult::Read { bytes: None }
                 }
             }
@@ -2066,5 +2107,69 @@ mod tests {
             delta / SAVES as u64
         );
         assert!(delta > 0, "encoding should record nonzero codec time");
+    }
+
+    /// 带世界目录时，盘上有和盘上没有的区块都必须走同一条异步读流水线
+    /// （官方 `ChunkMap.scheduleChunkLoad` 没有同步生成的快路径）；没接世界目录
+    /// 时仍按原来的同步模板路径走。
+    /// With a world dir every read goes through the async pipeline, whether or
+    /// not the chunk exists on disk; without one the old synchronous path stays.
+    #[test]
+    fn every_read_goes_through_the_io_thread_when_a_world_dir_is_attached() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Temp(std::path::PathBuf);
+        impl Temp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-read-order-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp = Temp::new();
+        let dir = WorldDir::new(&temp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        // 没接 IO：当刻同步回模板。
+        assert!(matches!(
+            host.run_task(0, 0, Task::Read { pos: ORIGIN }),
+            Some(Event::TaskDone { .. })
+        ));
+
+        let io = ChunkIo::open(&dir).unwrap();
+        let on_disk = ChunkPos::new(3, 0);
+        io.submit_write(on_disk, 7, Some(b"chunk bytes".to_vec()), None);
+        assert!(io.has_chunk(on_disk), "a submitted write counts as on-disk");
+        host.set_io(io);
+        // 盘上有：异步。盘上没有：也异步，结果由 IO 线程回 `chunk: None`。
+        for (id, pos) in [(1, on_disk), (2, ORIGIN), (3, ChunkPos::new(2, 1))] {
+            assert!(
+                host.run_task(id, 0, Task::Read { pos }).is_none(),
+                "read of {pos:?} must wait for the IO thread"
+            );
+        }
+        host.flush_io();
+        let mut server = Harness::new_loaded(2);
+        host.poll_io(server.region());
+        let mut seen = Vec::new();
+        while let Some(reply) = host.io().unwrap().try_recv() {
+            if let Reply::Read { pos, .. } = reply {
+                seen.push(pos);
+            }
+        }
+        assert_eq!(seen.len(), 0, "poll_io already consumed all read replies");
     }
 }

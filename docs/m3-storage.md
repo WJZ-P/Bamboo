@@ -143,7 +143,7 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 | `yPos` | `MIN_Y / 16` = −4 |
 | `LastUpdate` | 调用方给的 `last_update`（接进游戏后来自 `GameTime`） |
 | `InhabitedTime` | 调用方给的 `inhabited_time`（现在写 0） |
-| `Status` | `"minecraft:full"`；读的时候不是 `full` 就明确拒绝，交给生成流水线 |
+| `Status` | 写 `"minecraft:full"`；读任意 `Status`，非 `full` 按 ProtoChunk 用超平坦模板补齐（见「外置区块和非 `full` 的 ProtoChunk」） |
 | `UpgradeData` | 不写（官方只在非空时写） |
 | `blending_data` / `below_zero_retrogen` | 不写（官方 `storeNullable` 只在非空时写） |
 | `sections` | 见 5.2 |
@@ -662,8 +662,9 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    走超平坦模板，不引入一 tick 延迟，保住进服首批次区块顺序（官方探针 690/690 覆盖这一点）。
    `mc-bamboo-game::chunk_codec`
    把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器累计耗时）。
-   Director 的 `Task::Read` 现在是真正的读盘阶段：`Status = full` 解码交付、盘上没有走
-   超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐才交付（D8）。卸载时脏区块
+   Director 的 `Task::Read` 现在是真正的读盘阶段：全 `Status` 都解码（非 `full` 按
+   ProtoChunk 补齐）、盘上没有走超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐
+   才交付（D8）。**带世界目录时两种来源统一走异步 IO 流水线，见第 14 节**。卸载时脏区块
    序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，写盘途中被
    请求回来拿最新内容；同区块新快照丢旧快照；运行中按官方字节码的节奏保存
    （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却）。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
@@ -783,22 +784,82 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   `chunk_tickets.dat` 写空 tickets 列表。这五份都由 `mc-bamboo-vanilla saved-data` /
   `world-dir` 用官方 codec 解码对拍，并故意写坏 `level.dat` / 一个键验证会报错。
   没建模的 saved data 不写文件（官方 `computeIfAbsent` 会造默认值）。
+- `game_rules.dat` 读盘照官方 `SavedDataStorage.readSavedData`：`GameRuleMap.CODEC`
+  是 `byNameCodec().dispatchedMap(...)`，整份 map 一次解码，解码失败返回 null，
+  `computeIfAbsent` 用 `GameRuleMap.of()` 造全默认的 map。Bamboo 现在把整份
+  `data` 复合标签先解成临时值表（未知键、类型不符、越界、未启用的规则都算坏），
+  全部合法才一次性套回运行时；任何一条坏条目都让整份作废、全部退回默认值，
+  不再「只忽略坏的那一条」。
+- 进服的区块到达顺序照官方 `ChunkMap.scheduleChunkLoad` / `PlayerChunkSender`：
+  字节码里没有「盘上有就异步读、盘上没有就同步生成」的快路径，所有区块都先过
+  异步加载流水线，盘上没有时 IO 线程回 `chunk: None`，下一刻开头和盘上的读结果
+  一起由 `poll_io` 收回，经同一次 `pump` 按距离排序交付，再由 `PlayerChunkSender`
+  按 `ChunkPos.distanceSquared(玩家所在区块)` 升序发。所以带世界目录时**生成也多
+  一次 IO 线程往返、晚一刻交付**，两种来源不会再出现远的比近的先到；没接世界目录
+  （测试、对拍、压测）仍是当刻同步走模板，停放表命中的写盘途中盒子仍是同步快路径。
+  回归测试 `a_saved_world_delivers_the_nearest_chunk_first` 钉住「第一包是出生点、
+  第一批正好是 3×3」；`tools/probe.sh <目录> <端口> --loaded` 先建档再重启跑两遍。
 - `/save-off` 照官方 `noSave`：停掉匀速保存、6000 刻自动保存和区块卸载；
   玩家离开、`/save-all`（force）和关服不受影响。第二次 Ctrl+C / 桌面端第二次停止
   明确记录「未保存的改动会丢」并立刻结束进程。F6 背压只暂缓收回，交付照常。
 
+### `level.dat` 每个字段的来源
+
+逐字段核对 26.3 `PrimaryLevelData.setTagData`（`createTag` 的私有实现）的字节码
+和 `MinecraftServer.loadLevel` / `Main.createNewWorldData`。「运行时真值」指
+Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不再把读盘时的旧值带回来。
+
+| 键 | Bamboo 的来源 |
+|---|---|
+| `ServerBrands` | 运行时真值：`["vanilla"]`（`MinecraftServer.getServerModName()`；Bamboo 是专用服务端） |
+| `WasModded` | 运行时真值 `false`（`ModCheck.shouldReportAsModified()`） |
+| `removed_features` | 运行时真值：空集合，官方空时不写这个键 |
+| `Version` | 官方 `SharedConstants.getCurrentVersion()`；`mc_bamboo_data::version` 生成器导出 |
+| `version_history` | 运行时真值 `[5023]`（`writeVersionHistory` 只在末项不是当前版本时追加） |
+| `DataVersion` | 官方 `NbtUtils.addCurrentDataVersion`；生成器导出 5023 |
+| `GameType` | 运行时真值 `WorldState.default_game_mode` |
+| `spawn` | 运行时真值 `WorldState.spawn`，维度固定 `minecraft:overworld` |
+| `Time` | 运行时真值 `Global::time()` |
+| `LastPlayed` | 运行时真值 `Util.getEpochMillis()`（保存时取） |
+| `LevelName` | 运行时真值：世界目录名，即 `server.properties` 的 `level-name` |
+| `version` | 官方常量 19133 |
+| `allowCommands` | 官方 `createNewWorldData` 常量 `false`（DEMO 才为 true）；Bamboo 没有运行时开关 |
+| `initialized` | 运行时真值 `true`（世界已经建好；官方 parse 缺字段时也默认 true） |
+| `difficulty_settings` | 运行时真值 `difficulty` / `locked`；`hardcore` 按官方常量 `false` |
+| `singleplayer_uuid` | 官方 `createTag(null)` 走 `singlePlayerUUID == null`，专用服务端不写 |
+| `DataPacks` | 官方 `DataPackConfig.DEFAULT`（`Enabled=["vanilla"]`, `Disabled=[]`）；等于默认时 `lenientOptionalFieldOf` 不写键 |
+| `enabled_features` | 官方 `FeatureFlags.DEFAULT_FLAGS` = `["minecraft:vanilla"]`；等于默认时不写键 |
+
+`hardcore` / `allowCommands` / `DataPacks` / `enabled_features` 这几项 Bamboo 没有
+运行时状态，按官方专用服务端默认写；`ServerBrands` / `WasModded` /
+`removed_features` / `initialized` / `version_history` 每次保存都写真值，不再沿用
+读盘时的原值。
+
+### 外置区块和非 `full` 的 ProtoChunk
+
+- `.mcc` 外置大区块：官方 `RegionFile.hasChunk` 只看 `.mca` 的 offset 表，
+  外置区块的表项非零（区域文件里只有 5 字节桩）、压缩字节在 `.mcc` 里。
+  Bamboo 的启动扫描同样只认 `.mca` 表项，`RegionFile::read` 按 `EXTERNAL_FLAG`
+  转去读 `.mcc`，所以外置区块本来就能被扫到、也能读回；新增回归测试
+  `startup_scan_recognizes_external_mcc_chunks` 钉住这一点。`.mcc` 丢了时
+  `has_chunk` 仍为真、读失败走 warn + 模板，和官方一致。
+- 非 `full` 的 `Status` 的语义差异：官方 `SerializableChunkData.parse` 读任意
+  `Status`（`ChunkStatus.CODEC`，读不出来当 `EMPTY`），`read` 造 `ProtoChunk`
+  并 `setPersistedStatus(status)`，`ChunkMap` 从该阶段继续跑世界生成流水线到
+  `Full`。Bamboo 只有一步的超平坦模板生成，没有分阶段生成器，所以做法是：
+  接受任意 `Status`，把盘上已经写出的顶层附加信息（`LastUpdate`、
+  `InhabitedTime`、不认识的键）、方块实体、计划刻和实体原样保留，**方块层和
+  两层光照用超平坦模板补齐**（这些阶段在 ProtoChunk 里可能还没写出），高度图
+  按补齐后的方块重算，然后当成「已经生成完」交付；下次写盘时 `Status` 是
+  `minecraft:full`。与官方的差别：Bamboo 不会重跑 `structure_starts`…`spawn`
+  那些生成阶段，也不会按原 `Status` 决定从哪一步续跑；模板之外的世界生成
+  内容（结构、生物群系、地形）会丢，这是 M4 接真生成器时再补的。
+  回归测试 `chunk_nbt::tests::status_and_data_version_are_checked` 和
+  `chunk_codec::tests::a_non_full_chunk_is_completed_from_the_flat_template`。
+
 ### 已知但没处理的（以后再看）
 
-- 有存档的世界里，进服时盘上的区块走异步读、晚一刻交付，而盘上没有的区块同步用
-  模板，所以远处的区块可能先到。探针是按全新世界校准的（带存档时约 576/629），
-  这一项不算回归；崩溃测试重启后只要求官方客户端能登录、能读世界、连接不断开。
-  等世界生成也走异步以后再统一处理。
-- 游戏规则读盘时遇到坏的条目只忽略那一条，官方是整份解码失败、全部退回默认。
-- `level.dat` 里 `LevelName`、`allowCommands`、`DataPacks` 等字段写的是默认值或读入时
-  的原值，不是运行时的真值。
 - 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
-- `has_chunk` 扫描盘上已有区块时不认 `.mcc` 外置大区块；`Status` 不是 `full` 的区块
-  当成坏块，用模板。
 - 剖析数字（约 2 ms / 区块，debug 构建）只量了空模板区块，不代表真实区块。
   `fly-20` 带 / 不带世界目录各跑一次（release，`run-baseline.sh` 的 `WORLD_DIR`
   和 `serve --world-dir`）：带世界目录时约 2.16 万个已加载区块，tick p50 9.608 ms
@@ -807,18 +868,23 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   0.000–0.001 / 0.000 / 0.000 ms，`storage_dirty` 最大 0.019 ms；判脏只碰改动
   集合，不和已加载区块数成正比。fly-20 的假玩家不改方块，`storage_candidates`
   每刻均值为 0，所以拍快照和编码没有产生可测的每刻开销。
-- `saved_data_samples` 是为对拍放在生产代码里的 `pub fn`，可以挪到 `cfg(test)` 或
-  feature 后面。
 - 方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家等）改了不标脏；
   `chunk_nbt` 目前不存的字段（结构、生物群系等）不进判脏。**以后接结构、生物群系
   存档时必须补上对应的标脏入口**，否则会静默丢数据。
 - 世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏、火把抖动表等仍不存档。
 
+- `saved_data_samples` 不再是无条件编译的生产代码：`mc-bamboo-game` 加了
+  `oracle-samples` feature（默认关），`mc-bamboo-vanilla` 的 `oracle` feature
+  打开它。`world-dir` 对拍目录的 fixture 用例同样挂在这个 feature 下，
+  `cargo test -p mc-bamboo-game --features oracle-samples` 才编进测试。
+
 ### 验收
 
 - 进程内「放方块、存盘、重启、读回」往返测试、写盘途中重新加载、烧到一半的休眠
   熔炉存盘重启、装盒后睡着的熔炉在另一个线程编码字节一致、1000 刻自动保存差分
-  测试、复查探针的回归测试。
+  测试、复查探针的回归测试、带存档世界「最近的区块先到」的回归测试。
+- `tools/probe.sh <目录> <端口>` 跑全新世界；`<目录> <端口> --loaded` 用同一个
+  临时目录先建档、重启再跑一遍，两遍都报 `PROBE RESULT`。
 - `mc-bamboo-vanilla world-dir <目录> <java>`、`saved-data <java>`、
   `world-block <目录> <x> <y> <z> <方块名> <java>` 用官方 codec 检查真实目录。
 - `tools/crash-test.sh`：起服务端 → 官方探针 721/721 → 放一个具体标记方块 →

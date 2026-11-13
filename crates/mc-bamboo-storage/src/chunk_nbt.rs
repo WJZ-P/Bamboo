@@ -47,8 +47,6 @@ pub enum ChunkNbtError {
     NewerDataVersion(i32),
     #[error("unsupported DataVersion {0} (expected {expected})", expected = version::DATA_VERSION)]
     OlderDataVersion(i32),
-    #[error("chunk Status is {0:?}, only minecraft:full is supported")]
-    NotFull(String),
     #[error("chunk column cannot be built from the NBT: {0}")]
     Column(String),
 }
@@ -889,9 +887,12 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         return Err(ChunkNbtError::OlderDataVersion(version_id));
     }
     let status = as_string(field(root, "Status"), "Status")?.to_owned();
-    if status != FULL_STATUS {
-        return Err(ChunkNbtError::NotFull(status));
-    }
+    // 官方 `SerializableChunkData.parse` 读任意 `Status`（`ChunkStatus.CODEC`，
+    // 读不出来当 EMPTY），`read` 造 ProtoChunk 后由生成流水线从该状态继续跑到
+    // Full。这里也接受非 full，`status` 原样交给上层决定怎么继续生成。
+    // Vanilla parses any status into a ProtoChunk and resumes generation from
+    // it; keep the raw status for the caller instead of rejecting the chunk.
+    let full = status == FULL_STATUS;
     let chunk_pos = ChunkPos::new(
         as_int(field(root, "xPos"), "xPos")?,
         as_int(field(root, "zPos"), "zPos")?,
@@ -1063,17 +1064,63 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
     parts.archive.preserved = unknown.clone();
     parts.archive.structures = Some(structures.clone());
     parts.archive.post_processing = Some(post_processing.clone());
-    parts.archive.raw_heightmaps = Some(heightmaps_raw.clone());
+    // 非 full 的 ProtoChunk：官方把已写出的阶段内容装进 ProtoChunk，从该状态
+    // 继续跑生成流水线。Bamboo 只有一步超平坦生成，所以用模板补齐方块层和
+    // 光照（这些阶段在盘上可能还没写出），但保留盘上带来的顶层附加信息，
+    // 让上层能把它当成「已经生成完的 ProtoChunk」继续交付；上层还会保留
+    // 上层内容（方块实体、计划刻、实体），不再整块换成模板。
+    // A non-full ProtoChunk keeps its written upper-layer data and has its
+    // missing block/light stages filled from the flat template.
+    if !full {
+        // 高度图按补齐后的方块重算写四张，不把半成品的原始高度图带回去；
+        // 其它顶层附加信息（LastUpdate / InhabitedTime / 不认识的键）保留。
+        // Recompute the heightmaps from the filled blocks; keep the other
+        // top-level metadata that came from disk.
+        parts = ChunkColumnParts::read_from(&ChunkColumn::from_template());
+        parts.archive = parts_archive_meta(
+            last_update,
+            inhabited_time,
+            &unknown,
+            &structures,
+            &post_processing,
+            &[],
+        );
+        parts.archive.raw_heightmaps = None;
+    } else {
+        parts.archive.raw_heightmaps = Some(heightmaps_raw.clone());
+    }
+    // `from_parts` 把 parts.archive 装进 Chunk；非 full 时高度图按补齐后的
+    // 方块重算，存档元数据里不带原始 Heightmaps。
+    // from_parts installs parts.archive; for a non-full chunk there are no raw
+    // heightmaps, so the next save writes the four recomputed ones.
     let mut column =
         ChunkColumn::from_parts(parts).map_err(|error| ChunkNbtError::Column(error.to_string()))?;
-    column.chunk_mut().set_archive(parts_archive_meta(
-        last_update,
-        inhabited_time,
-        &unknown,
-        &structures,
-        &post_processing,
-        &heightmaps_raw,
-    ));
+    // 显式再装一次：`from_parts` 之后上层组装会替换方块层，把读盘带来的
+    // LastUpdate / InhabitedTime / 原样保留键固定在这一柱上。
+    // Re-install explicitly: the caller may rebuild the block layer afterwards,
+    // so pin the on-disk metadata to this column now.
+    let archive = if full {
+        parts_archive_meta(
+            last_update,
+            inhabited_time,
+            &unknown,
+            &structures,
+            &post_processing,
+            &heightmaps_raw,
+        )
+    } else {
+        let mut meta = parts_archive_meta(
+            last_update,
+            inhabited_time,
+            &unknown,
+            &structures,
+            &post_processing,
+            &[],
+        );
+        meta.raw_heightmaps = None;
+        meta
+    };
+    column.chunk_mut().set_archive(archive);
 
     Ok(DecodedChunk {
         column: Box::new(column),
@@ -1739,7 +1786,14 @@ mod tests {
                 *value = Tag::String("minecraft:structure_starts".to_owned());
             }
         }
-        assert!(matches!(decode(&tag), Err(ChunkNbtError::NotFull(_))));
+        // 非 full 的 ProtoChunk 不再被拒绝：原样返回 status，方块/光照用模板补齐。
+        let proto = decode(&tag).expect("非 full 的区块也要能读回");
+        assert_eq!(proto.status, "minecraft:structure_starts");
+        assert_eq!(
+            proto.column.chunk().block(3, -61, 5),
+            mc_bamboo_data::blocks::GRASS_BLOCK,
+            "没写出的方块阶段用超平坦模板补齐"
+        );
 
         let mut newer = encode(&column, &extra(ChunkPos::new(0, 0))).expect("编码成功");
         let Tag::Compound(entries) = &mut newer else {

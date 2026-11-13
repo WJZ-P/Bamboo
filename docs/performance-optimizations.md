@@ -1041,6 +1041,27 @@ cargo run --release -q -p mc-bamboo-vanilla -- oracle java --weather clear
 4.8–4.9 µs 是每刻 `begin_tick` 的桶检查、`due` 归并和少数事件刻的真跑。倍数会随
 熔炉数量、燃料/原料比例和外部动作频率变化，不能直接套到真实服上。
 
+### 7g.5 第 2 轮：营火、酿造台、漏斗冷却期
+
+同一轮里三种机器各自开 / 关休眠交替跑，各取多次里最快的一次（第 8 节口径）；
+300 台机器跑 2000 刻，世界其余部分是空的。营火四格放着食物，酿造台有三瓶水、
+地狱疣和烈焰粉，漏斗五格放满物品且下方是箱子（一直有事可做，不退化成闲置空转）。
+
+| 机器（300 台，方块实体阶段每刻） | 休眠关 | 休眠开 | 倍数 |
+|---|---:|---:|---:|
+| 漏斗（冷却期） | 123.5 µs | 92.8 µs | 1.3× |
+| 营火 | 76.0 µs | 3.3 µs | 23.2× |
+| 酿造台 | 564.7 µs | 3.8 µs | 146.7× |
+
+```text
+cargo test --release -p mc-bamboo-blocks block_entity_sleep::machine_phase_bench -- --ignored --nocapture
+```
+
+营火和酿造台的倒计时是几百刻，安静刻几乎全被省掉。漏斗只在 8 刻的冷却期里睡，
+每 8 刻仍要真跑一次 `tryMoveItems`（包括扫实体表、检查目标容器），所以只有 1.3×；
+**闲置漏斗的每刻空转没有动**，那部分要等第 9.1 节的唤醒基础设施。这三个数字和
+7g.4 的熔炉数字是同一套口径、不同时间段量的，只在本表内部交替比较。
+
 ---
 
 ## 8. 方法：怎么量才不骗自己
@@ -1071,12 +1092,12 @@ cargo run --release -q -p mc-bamboo-vanilla -- oracle java --weather clear
 
 ---
 
-## 9. 已经知道、还没做的
+## 9. 已经知道、还没做的（含本轮留下的尾巴）
 
 | 项目 | 现状 | 备注 |
 |---|---|---|
-| 营火、酿造台也按事件休眠 | 没有做，见 7g 节 | 两者在倒计时期间**每刻**都调 `BlockEntity.setChanged`（官方字节码：`CampfireBlockEntity.cookTick` 只要有物品就调、`cooldownTick` 只要有 progress>0 就调；`BrewingStandBlockEntity.serverTick` 倒计时每刻无条件调）。这条通知走 `updateNeighbourForOutputSignal` → 旁边/隔一格的比较器 `neighbor_changed` → `comparator_check_tick_on_neighbor`；营火和酿造台在物品不变时 `output == old && powered == should_turn_on`，直接返回，不排计划刻、不写方块、不发包，所以理论上没有可见效果。但 `setChanged` 还会把区块标成「改过没存」，存档任务正在照官方做这个标记；睡着之后不再每刻标记有什么影响，等那个任务合进来一起看。**下一轮把两者一起做，证明只写一次**：旁边摆比较器、录制层逐刻比较效果和包，再把这套判据写进归档。官方 `CampfireBlockEntity.cookTick` 的 `Effect::CampfireChanged` 只在烤好时发，安静刻不发 |
-| 漏斗休眠 + 不读世界时间 | 没有做 | 漏斗是生存服里最常见的开销来源，但 `HopperBlockEntity.pushItemsTick` 每刻无条件写 `tickedGameTime = level.getGameTime()`，而 `apply_hopper_cooldown` 用它比较相邻漏斗谁先 tick（决定目标漏斗少等一刻）。官方 `saveAdditional` 不存这个字段，读盘回来是 0。方向：把它改成相对量 `delta = now - 上次 tick`，被读时现算 `now - delta`，读盘后 `None` 表示官方的初值 0；这样既不用每刻读世界时间（红石缓存 9.3 也卡在这里），又能按冷却期休眠。外部唤醒入口也最多：上方物品实体进入、目标容器被抽空/变满、邻居容器变化、`ENABLED` 变化、漏斗自己物品栏变化。和接下来的红石缓存是同一件事，要一起定 |
+| 营火、酿造台按事件休眠 | 已做，见 7g 节 | 先用录制层证明「物品不变时每刻 `setChanged` 无可见效果」：旁边摆比较器、隔一格经红石导体摆比较器，开 / 关这笔安静通知逐刻比较效果、包、写方块、计划刻、红石记忆和全部内部字段，1400 刻逐位相同。营火四格各自按到点 / 退到 0 排日程，酿造台睡到 `doBrew`、提前取消、补燃料或开一轮。官方烤熟那一刻的掉落随机数和 `Effect::CampfireChanged` 仍在原刻原位置 |
+| 漏斗冷却期休眠 + 不读世界时间 | 已做冷却期，见 7g 节；闲置休眠留下一轮 | `tickedGameTime` 改成相对量（`None` = 官方读盘后的初值 0），录制层记相对值；`pushItemsTick` 不再每刻读世界时间。冷却的 8 刻里每刻只减 1、写时间字段，睡到归零那刻；物品实体进入、目标容器变满 / 抽空、上方容器变化、`ENABLED` 变化、自己物品栏变化都逐条做了差分测试，官方要等冷却归零才统一 `tryMoveItems`，不提前动作。**闲置漏斗（不在冷却、无事可做）没有做**，清单和风险见下面「闲置漏斗休眠」一节 |
 | 票表的等级传播（`TicketTable::run_updates`）剩下的单价 | 7f 节之后微观基准 141 µs/移动（200 名玩家）、126 µs（1 名玩家），每次 `run_updates` 还有 4.3 次分配和约 6000 次松弛出队（其中只 1780 次真更新） | 7f 节已经把合并（70–80 → 3 µs）、BFS（60–78 → 19 µs）和分配（38 → 4 次/更新）压下去，整体 2.1–2.3×，但离目标 80 µs 还差约 1.8 倍。整机 `fly-20` 的数字仍是 `profiling.md` 第 9 节的旧值（0.90 ms / p99 2.23 ms），**改后没有在安静窗口里重测**。下一步要么让升高锥和降低松弛共用一次遍历、要么换 64×64 块的表示；两者都改两阶段算法的结构，要重新对拍。外圈等级继续落表（Director 的生成依赖图要用），不按"外圈不落表"的方向改。见 `chunk-tickets.md` 第 5 节 |
 | `random_ticks` 剩下的差距 | 安静窗口（`profiling.md` 10.5）：`fly-20` 旧 2.26–2.30 → 新 3.82–4.30 ms，空服 0.17–0.21 → 0.63–0.84 ms | **已经拆开量过，见 7e 节**：两版 tick 的区块/段/方块数完全相同，按 ticket 模拟等级选区块符合官方；effects 全空、视图构造零分配。7d 省下的 2.65 ms 被逐段 tick 多出的 2.45 ms 吃掉：每次读方块要查区块表、读各区块自己的数据（以前共用模板）。这是区块各自一份数据的随机访问/缓存代价，不是可删的白跑，本轮没改热路径 |
 | `ChunkStore` 里给「刚查过的区块」做单槽缓存 | 没有做 | 想法：一个 `tick_chunk` 里 3 次选格 + 草逻辑读 5–10 格方块/光照，都会重复查同一区块；缓存一次哈希查找的 `&Chunk`，也许能省一点。**现在不做的理由**：`ChunkStore` 是公开、可克隆、有多条 `&mut` 写路径的结构，内部可变地存裸指针时漏一处失效就是悬垂指针，风险和收益不成比例；而且没拆开「哈希查找」和「读区块数据时的缓存不命中」各占多少，若主要是后者则省掉查找也没用。另外官方是「取位置 → 读 → tick（tick 里会取随机数）→ 再取下一个位置」，3 个位置不能预先批量算。**要做的话先量**：临时把查找换成直接拿区块引用，量 `random_sections` 子项的每区块单价降多少，再决定值不值得做安全的版本 |
@@ -1089,6 +1110,35 @@ cargo run --release -q -p mc-bamboo-vanilla -- oracle java --weather clear
 | 实体并行的发布阶段 | 0.21 ms，8 线程时占整刻两成 | 现在的加速上限 |
 | tick 间隔偏差的 p99 | 3.9 ms，目标 2 ms | 见第 6.4 节 |
 | 存档解码一个内容丰富的区块 | 1.5–1.6 ms，其中解析成 NBT 树 0.58 ms、构造 0.95 ms | 可以改成不建树的流式解析。见 `m3-storage.md` |
+
+### 9.1 闲置漏斗休眠：下一轮的起点
+
+这一轮只做到「冷却期」休眠。漏斗不在冷却、但自己是空的、上方没有容器也没有物品、
+朝向那一格送不进去时，官方仍每刻跑 `tryMoveItems`，包括吸取盒里的实体范围查询；
+这是生存服里漏斗开销的大头。要按事件休眠，必须在官方 `tryMoveItems` **第一次会成功的
+那一刻、按运行顺序**醒来。26.3 `HopperBlockEntity` 字节码（`tryMoveItems`、
+`ejectItems`、`suckInItems`、`getContainerAt`、`getSourceContainer`、
+`getItemsAtAndAbove`）读到的东西和对应的唤醒条件：
+
+| 官方读的东西 | 唤醒条件 | Bamboo 现在 |
+|---|---|---|
+| `state.ENABLED`、朝向、上方方块的碰撞形状 / `DOES_NOT_BLOCK_HOPPERS` | 本格 / 相邻格的 `setBlock`、红石更新 | `World::set_block_state` 已 `wake(pos)`，但只叫醒被改的那一格 |
+| 自己容器 `isEmpty` / `inventoryFull` / 每格物品 | 自己槽位、冷却、方块实体被外部写 | `with_container` / `with_slots` / `with_hopper` / `with_block_entity` 已 `wake(pos)` |
+| 朝向那一格和上方一格的容器及其全部槽位 | 这两格出现 / 消失容器、内容变化、双箱合并的另一半变化 | `with_container` 只 wake 被写的那一格；缺「叫醒周围漏斗」 |
+| 上方 / 朝向格的 `getEntityContainer`（1×1×1 盒内的容器实体，非空时还要 `level.getRandom().nextInt`） | 容器实体进出该盒 | **实体容器（矿车、船）还没有移植**，这条连官方行为本身都还缺，Bamboo 的 `EntityKind` 目前只有物品、下落方块、TNT |
+| `getItemsAtAndAbove` 吸取盒里的 `ItemEntity`、`entityInside` 碰漏斗方块的物品实体 | 物品实体生成、移动、合并、消失，以及从盒外进入盒内 | 只有 `suck_touching_item` 走 `with_block_entity` 会 wake 自己；实体生成 / 移动 / 合并 / 消失没有按空间范围叫醒 |
+
+**下一轮要先做「实体位置变化 → 按空间范围唤醒方块实体」的基础设施**：`Level` /
+`LevelEntities` 需要一个能按位置或 `Aabb` 叫醒关注者的入口，`spawn_entity`、
+`put_entity`、`publish_entity_rows`、`discard_entity` / `remove_entity` 和
+`Command::SuckIntoHopper` 都要经过它；并行实体驱动的发布阶段目前只有行号、
+没有旧位置，要在算阶段记下旧 / 新包围盒才能判断「第一次进入吸取盒」。再给
+`BlockEntities` 加「哪些睡着的漏斗关注哪些格子 / 范围」的表，装盒、冻结、读盘
+和一刻中途叫醒（游标前后）沿用本轮已有的 `i64::MAX` 日程和 `wake` 规则。
+
+风险比冷却期大得多：漏一条入口，漏斗就比官方晚醒一至数刻，而且「物品从远处
+飞进吸取盒」很难用现有场景覆盖；闲置休眠还会省掉每刻扫实体表，与红石缓存的
+录制层 / 回放效果有交叉。先补基础设施和实体容器，再做闲置休眠。
 
 ---
 

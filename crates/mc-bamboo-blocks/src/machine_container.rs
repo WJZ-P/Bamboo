@@ -162,6 +162,20 @@ pub(crate) fn mark_container_changed(world: &mut World, pos: BlockPos) {
     world.update_neighbour_for_output_signal(pos, state.block());
 }
 
+/// 物品没变的安静刻通知。`quiet_only` 为假时和 [`mark_container_changed`] 一样；
+/// 只给证明测试用，见 `block_entity_sleep` 的证明测试。
+///
+/// The quiet, item-unchanged notification. With `quiet_only = false` this is
+/// [`mark_container_changed`]; only the proof test switches the quiet half off.
+pub(crate) fn quiet_mark_container_changed(world: &mut World, pos: BlockPos, quiet_only: bool) {
+    #[cfg(test)]
+    if quiet_only && !crate::block_entity_sleep::quiet_changed_enabled() {
+        return;
+    }
+    let _ = quiet_only;
+    mark_container_changed(world, pos);
+}
+
 /// 熔炉方块实体上的三格，给比较器读。没有实体时用槽位表。
 ///
 /// The three furnace slots a comparator reads. Without an entity, the slot table is used.

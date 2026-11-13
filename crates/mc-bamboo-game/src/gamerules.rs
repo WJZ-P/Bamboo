@@ -132,26 +132,13 @@ impl GameRuleSet {
             .collect()
     }
 
-    /// 从 `game_rules.dat` 读入一条。官方 codec 只认启用的规则，布尔用 Byte、
-    /// 整数用 Int，越界或不认识的名字整条忽略（`SavedDataStorage` 读坏会退回默认）。
-    /// Apply one entry read from `game_rules.dat`. The official codec only accepts
-    /// enabled rules; out-of-range, wrong-typed or unknown entries are ignored.
-    pub(crate) fn apply_saved(&mut self, name: &str, value: Stored) {
-        let Some(index) = gamerules::find(name) else {
-            return;
-        };
-        let rule = &RULES[index];
-        if !rule.enabled {
-            return;
-        }
-        let stored = match (rule.kind, value) {
-            (GameRuleKind::Bool, Stored::Bool(v)) => Stored::Bool(v),
-            (GameRuleKind::Int, Stored::Int(v)) if (rule.min..=rule.max).contains(&v) => {
-                Stored::Int(v)
-            }
-            _ => return,
-        };
-        self.values[index] = stored;
+    /// 整份 `game_rules.dat` 解码成功后写回一条已经校验过的值。校验在
+    /// [`crate::save_data::apply_game_rules`] 里：任何坏条目都让整份解码失败，
+    /// 这里绝不逐条「忽略坏的、保留好的」（官方不是这个语义）。
+    /// Write one already-validated value after the whole `game_rules.dat` file
+    /// decoded successfully; a bad entry invalidates the whole file instead.
+    pub(crate) fn set_saved(&mut self, index: usize, value: Stored) {
+        self.values[index] = value;
     }
 
     /// `GameRule.serialize`：布尔是 `true`/`false`，整数是十进制。

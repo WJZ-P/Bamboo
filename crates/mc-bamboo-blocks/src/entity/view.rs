@@ -11,7 +11,7 @@ use crate::{
     Aabb, BlockGameRules, BlockHit, WorldBorder,
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, SupportType},
-    world::{collect_block_collisions, traverse_blocks},
+    world::{CollisionBlocks, collect_block_collisions, traverse_blocks},
 };
 
 use super::ctx::BlockView;
@@ -118,7 +118,20 @@ impl<T: BlockSource> SourceView<T> {
         box_: Aabb,
         context: CollisionContext,
     ) -> Vec<(BlockPos, Vec<Aabb>)> {
-        collect_block_collisions(box_, context, |pos| self.0.block_state(pos))
+        collect_block_collisions(
+            box_,
+            context,
+            CollisionBlocks {
+                block_at: |pos| self.0.block_state(pos),
+                piston_at: |pos| {
+                    self.0
+                        .block_state(pos)
+                        .is(blocks::MOVING_PISTON)
+                        .then(|| self.moving_piston_shape(pos))
+                        .flatten()
+                },
+            },
+        )
     }
 
     fn clip_collider_impl(
@@ -130,7 +143,11 @@ impl<T: BlockSource> SourceView<T> {
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
             let state = self.block_state(pos);
-            let collider = shape::collision_boxes(state, pos, context);
+            let piston = state
+                .is(blocks::MOVING_PISTON)
+                .then(|| self.moving_piston_shape(pos))
+                .flatten();
+            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
             let block_hit = clip_with_interaction_override(&collider, state, from, to, pos);
             let fluid_hit = match fluid {
                 ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
@@ -151,6 +168,10 @@ impl<T: BlockSource> SourceView<T> {
 impl<T: BlockSource> BlockView for SourceView<T> {
     fn block_state(&self, pos: BlockPos) -> BlockState {
         self.0.block_state(pos)
+    }
+
+    fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
+        self.0.moving_piston_shape(pos).map(<[Aabb]>::to_vec)
     }
 
     fn fluid_state(&self, pos: BlockPos) -> FluidState {

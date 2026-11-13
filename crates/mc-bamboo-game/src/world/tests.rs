@@ -344,6 +344,13 @@ impl Harness {
     }
 
     pub(crate) fn tick(&mut self) {
+        // 正式运行的节拍器在两刻之间留 50 ms，足够 IO 线程把上一刻的读回执
+        // 全部送回信箱；测试的 tick 是背靠背的，这里显式做一次同步点，
+        // 让「下一刻开头 poll_io 收齐整批读」的时序不依赖机器负载。
+        // The real pacer leaves 50 ms between ticks, enough for the IO thread
+        // to deliver all read replies. Test ticks are back-to-back, so add an
+        // explicit sync point to keep the ordering deterministic.
+        self.world.host.flush_io();
         assert!(self.world.tick().is_continue());
     }
 
@@ -2567,6 +2574,142 @@ fn moving_piston_entity_snapshots(threads: usize) -> Vec<(Vec3, Vec3, i32, bool)
 fn moving_piston_entities_match_in_both_drivers() {
     let precise = moving_piston_entity_snapshots(0);
     let parallel = moving_piston_entity_snapshots(4);
+    assert!(!precise.is_empty());
+    assert_eq!(precise, parallel);
+}
+
+/// 掉落物和下落方块落在一台正在伸缩的活塞上。形状来自方块实体，两种驱动都必须
+/// 用同一份按位置拷出的形状，逐刻位置、速度、落地标记要一样。
+///
+/// Items and falling blocks land on a piston mid-animation. The shape comes from the
+/// block entity, so both drivers must use the same per-position snapshot and agree
+/// on every tick's position, velocity and grounding.
+fn landing_on_moving_piston(threads: usize) -> Vec<(i32, Vec3, Vec3, bool)> {
+    use mc_bamboo_blocks::{BlockState, archive::create_block_entity, entity::Entity};
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("Kitten");
+    client.take_frames();
+    server.set_entity_threads(threads);
+
+    // 这一格是 moving_piston，形状是「被推的石头」朝上平移的半格；再放一台正在
+    // 缩回的源活塞，两种方向的形状都要被实体碰到。
+    let extending = BlockPos::new(9, -60, 8);
+    let retracting = BlockPos::new(11, -60, 8);
+    for pos in [extending, retracting] {
+        server.set_block(pos, blocks::MOVING_PISTON);
+    }
+    let piston = |pos: BlockPos, tag: Vec<(String, Tag)>| {
+        create_block_entity(
+            "minecraft:piston",
+            pos,
+            BlockState(blocks::MOVING_PISTON),
+            &Tag::Compound(tag),
+        )
+        .expect("活塞方块实体")
+        .expect("类型已知")
+    };
+    server.region().block_entities.insert(piston(
+        extending,
+        vec![
+            (
+                "blockState".to_owned(),
+                Tag::String("minecraft:stone".to_owned()),
+            ),
+            ("facing".to_owned(), Tag::Byte(1)),
+            ("progress".to_owned(), Tag::Float(0.5)),
+            ("extending".to_owned(), Tag::Byte(1)),
+            ("source".to_owned(), Tag::Byte(0)),
+        ],
+    ));
+    server.region().block_entities.insert(piston(
+        retracting,
+        vec![
+            (
+                "blockState".to_owned(),
+                Tag::String("minecraft:piston".to_owned()),
+            ),
+            ("facing".to_owned(), Tag::Byte(1)),
+            ("progress".to_owned(), Tag::Float(0.5)),
+            ("extending".to_owned(), Tag::Byte(0)),
+            ("source".to_owned(), Tag::Byte(1)),
+        ],
+    ));
+
+    let mut item = Entity::ground_item_with_delta(
+        Vec3::new(9.5, -57.5, 8.5),
+        ItemStack::new(1, 1),
+        Vec3::default(),
+    );
+    item.ground_mut().unwrap().set_pickup_delay(1000);
+    server.spawn_entity(item);
+    server.spawn_entity(Entity::falling_block(
+        BlockPos::new(11, -56, 8),
+        BlockState(blocks::SAND),
+    ));
+
+    let mut snapshots = Vec::new();
+    for _ in 0..16 {
+        server.tick();
+        for uid in server.world_region().entities.ids() {
+            let entity = server.world_region().entities.get(uid).expect("实体还在");
+            snapshots.push((entity.id, entity.position, entity.delta, entity.on_ground));
+        }
+    }
+    snapshots
+}
+
+#[test]
+fn falling_entities_land_on_moving_pistons_in_both_drivers() {
+    let precise = landing_on_moving_piston(0);
+    let parallel = landing_on_moving_piston(4);
+    // 有方块实体时物品会停在移动活塞平移后的那一层，不会一直往下掉。
+    assert!(
+        precise
+            .iter()
+            .any(|(_, position, _, on_ground)| *on_ground && (position.y - -59.0).abs() < 1.0e-6),
+        "有方块实体时实体要落在移动活塞上"
+    );
+    assert!(!precise.is_empty());
+    assert_eq!(precise, parallel);
+}
+
+/// 没有方块实体时官方给 `Shapes.empty()`，实体要穿过去。两种驱动也一致。
+#[test]
+fn moving_piston_without_block_entity_is_empty_in_both_drivers() {
+    fn fall(threads: usize) -> Vec<(Vec3, bool)> {
+        use mc_bamboo_blocks::{BlockState, entity::Entity};
+        use mc_bamboo_data::blocks;
+
+        let mut server = Harness::new(2);
+        let client = server.join_and_settle("Kitten");
+        client.take_frames();
+        server.set_entity_threads(threads);
+        server.set_block(BlockPos::new(9, -60, 8), blocks::MOVING_PISTON);
+        server.spawn_entity(Entity::falling_block(
+            BlockPos::new(9, -56, 8),
+            BlockState(blocks::SAND),
+        ));
+        let mut snapshots = Vec::new();
+        for _ in 0..6 {
+            server.tick();
+            let region = server.world_region();
+            let uid = *region.entities.ids().first().expect("下落方块还在");
+            let entity = region.entities.get(uid).expect("下落方块还在");
+            snapshots.push((entity.position, entity.on_ground));
+        }
+        snapshots
+    }
+    let precise = fall(0);
+    let parallel = fall(4);
+    // 没有方块实体时形状是空的，这几刻里不会落地。
+    assert!(
+        precise.iter().all(|(_, on_ground)| !on_ground),
+        "没有方块实体时 moving_piston 是空形状"
+    );
     assert!(!precise.is_empty());
     assert_eq!(precise, parallel);
 }

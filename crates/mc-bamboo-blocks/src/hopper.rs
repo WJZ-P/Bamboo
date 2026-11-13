@@ -15,7 +15,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    block_entity::BlockEntity,
+    block_entity::{BlockEntity, block_entity_clock},
     container::{
         CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
     },
@@ -37,8 +37,28 @@ pub struct HopperEntity {
     pos: BlockPos,
     /// `cooldownTime`。刚放下时是 -1。
     cooldown_time: i32,
-    /// `tickedGameTime`：上一次 tick 的 `gameTime`。相邻的漏斗靠它决定要不要少等一刻。
-    ticked_game_time: i64,
+    /// `tickedGameTime` 的相对表示：`now - 上一次真跑的 gameTime`。
+    ///
+    /// 官方每刻无条件把它写成 `level.getGameTime()`，但只在同一刻里拿两个漏斗
+    /// 比大小（决定目标漏斗少不等那一刻），所以绝对基准可以整体平移。
+    /// `None` = 官方读盘 / 刚放下的初值 0（绝对时刻），也就是「很久以前」。
+    last_tick_age: Option<i64>,
+    /// `last_tick_age` 是在哪个 `gameTime` 量出来的；读路径按当前刻补上差值。
+    last_tick_now: i64,
+    /// 冷却期睡眠。官方这几天里只把 `cooldownTime` 减 1、把时间字段写成世界时间，
+    /// 两者都按下面的公式现算，不落到字段里。
+    sleep: Option<HopperSleep>,
+}
+
+/// 冷却期里 `cooldownTime` 每刻 -1、`tickedGameTime` 每刻跟世界时间走。
+#[derive(Clone, Copy)]
+struct HopperSleep {
+    /// 真跑完一次 `pushItemsTick` 的那刻。
+    since: i64,
+    /// 冷却归零、必须真跑的那一格。
+    wake_at: i64,
+    /// `since` 那刻的冷却值。
+    cooldown: i32,
 }
 
 impl HopperEntity {
@@ -47,38 +67,115 @@ impl HopperEntity {
         Self {
             pos,
             cooldown_time: NO_COOLDOWN_TIME,
-            ticked_game_time: 0,
+            last_tick_age: None,
+            last_tick_now: 0,
+            sleep: None,
         }
     }
 
-    /// `isOnCooldown`：还在冷却里。
+    /// `isOnCooldown`：还在冷却里。睡着的按公式现算。
     pub fn is_on_cooldown(&self) -> bool {
-        self.cooldown_time > 0
+        self.cooldown_time() > 0
     }
 
     /// `isOnCustomCooldown`：冷却比正常的一轮长。只在往空漏斗里放东西时用到。
     pub fn is_on_custom_cooldown(&self) -> bool {
-        self.cooldown_time > MOVE_ITEM_SPEED
+        self.cooldown_time() > MOVE_ITEM_SPEED
     }
 
-    /// `setCooldown`。
+    /// `setCooldown`。外部调用前 `wake` 已经把数值算到当前刻。
     pub fn set_cooldown(&mut self, cooldown_time: i32) {
         self.cooldown_time = cooldown_time;
+        self.sleep = None;
     }
 
-    /// 现在的冷却时间，测试和存档用。
+    /// 现在的冷却时间，测试和存档用；睡着的按公式现算。
     pub fn cooldown_time(&self) -> i32 {
-        self.cooldown_time
+        self.cooldown_at(block_entity_clock())
     }
 
-    /// `tickedGameTime`。
+    /// `tickedGameTime`：按当前刻还原绝对时刻，和官方每刻写的值一致。
     pub fn ticked_game_time(&self) -> i64 {
-        self.ticked_game_time
+        self.ticked_game_time_at(block_entity_clock())
+    }
+
+    /// 读路径用当前刻现算 `now - age`；`None` 是官方读盘后的初值 0。
+    fn ticked_game_time_at(&self, now: i64) -> i64 {
+        match self.age_at(now) {
+            Some(age) => now.saturating_sub(age),
+            None => 0,
+        }
+    }
+
+    /// 相对量，供录制层 / 缓存键用；`None` 对应官方读盘后的初值 0。
+    pub fn ticked_game_time_age(&self) -> Option<i64> {
+        self.age_at(block_entity_clock())
+    }
+
+    /// 安静刻里官方每刻都真跑过，所以时间字段一直是「新鲜」的（age 0）。
+    /// 冻结 / 装盒时睡眠已经结束，差值按经过的刻数增长，和官方一样停在原值。
+    fn age_at(&self, now: i64) -> Option<i64> {
+        if self.sleep.is_some() {
+            return Some(0);
+        }
+        self.last_tick_age
+            .map(|age| age.saturating_add(now.saturating_sub(self.last_tick_now)))
+    }
+
+    /// 安静刻的冷却：`since` 之后每刻 -1，到点那刻归零。
+    fn cooldown_at(&self, now: i64) -> i32 {
+        match self.sleep {
+            Some(sleep) => {
+                let steps = now
+                    .saturating_sub(sleep.since)
+                    .min(sleep.wake_at.saturating_sub(sleep.since))
+                    .max(0);
+                sleep
+                    .cooldown
+                    .saturating_sub(i32::try_from(steps).unwrap_or(i32::MAX))
+            }
+            None => self.cooldown_time,
+        }
+    }
+
+    /// 真跑一次 `pushItemsTick` 之前，把睡眠按官方口径推进到上一刻结束。
+    fn begin_tick(&mut self, now: i64) {
+        self.materialize_at(now.saturating_sub(1));
+    }
+
+    /// 真跑完一次 `pushItemsTick`：相对时间归零。
+    fn note_tick(&mut self, now: i64) {
+        self.last_tick_age = Some(0);
+        self.last_tick_now = now;
+        self.sleep = None;
+    }
+
+    /// 结束睡眠 / 冻结恢复：把冷却和相对时间按公式算到 `tick` 那刻结束。
+    /// `tick` 用 `now - 1` 时，当前刻的减量留给真跑的 `pushItemsTick`。
+    fn materialize_at(&mut self, tick: i64) {
+        let now = block_entity_clock();
+        if let Some(sleep) = self.sleep.take() {
+            let steps = tick
+                .saturating_sub(sleep.since)
+                .min(sleep.wake_at.saturating_sub(sleep.since))
+                .max(0);
+            self.cooldown_time = sleep
+                .cooldown
+                .saturating_sub(i32::try_from(steps).unwrap_or(i32::MAX));
+            // 官方在安静刻里每刻都跑过：到 `tick` 为止最后一次是 `tick`。
+            self.last_tick_age = Some(now.saturating_sub(tick).max(0));
+        } else {
+            self.last_tick_age = self.age_at(now);
+        }
+        self.last_tick_now = now;
     }
 
     /// 存档读入冷却；`tickedGameTime` 官方不存，读回是构造时的 0。
     pub fn set_cooldown_from_archive(&mut self, cooldown: i32) {
         self.cooldown_time = cooldown;
+        self.last_tick_age = None;
+        self.last_tick_now = 0;
+        self.sleep = None;
     }
 }
 
@@ -99,12 +196,46 @@ impl BlockEntity for HopperEntity {
         self
     }
 
+    fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        // 冷却期里每刻只减 1、写世界时间，没有别的可见效果。到冷却归零
+        // 那一刻必须真跑；物品实体 / 邻居变化 / `ENABLED` 由外部写统一叫醒。
+        let cooldown = self.cooldown_time;
+        if cooldown <= 0 {
+            self.sleep = None;
+            return None;
+        }
+        let wake_at = now.saturating_add(i64::from(cooldown));
+        self.sleep = Some(HopperSleep {
+            since: now,
+            wake_at,
+            cooldown,
+        });
+        Some(wake_at)
+    }
+
+    fn materialize(&mut self, tick: i64) {
+        self.materialize_at(tick);
+    }
+
+    fn resleep(&mut self, since: i64, wake_at: i64) {
+        // 装盒时冷却已按公式算到源表的最后一刻；目标表从这一刻起算。
+        let cooldown = i32::try_from(wake_at.saturating_sub(since).max(1)).unwrap_or(i32::MAX);
+        self.cooldown_time = cooldown;
+        self.last_tick_age = Some(0);
+        self.last_tick_now = since;
+        self.sleep = Some(HopperSleep {
+            since,
+            wake_at,
+            cooldown,
+        });
+    }
+
     fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
         // 官方 HopperBlockEntity.saveAdditional 在公共容器键之外只写冷却；
         // tickedGameTime 是绝对时刻，官方不存。
         Ok(vec![(
             "TransferCooldown".to_owned(),
-            Tag::Int(self.cooldown_time),
+            Tag::Int(self.cooldown_time()),
         )])
     }
 }
@@ -127,8 +258,12 @@ pub(crate) fn query<R>(
 
 /// `HopperBlockEntity.pushItemsTick`。滴答器每刻调用它。
 pub fn push_items_tick(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) {
+    let now = block_entity_clock();
+    entity.begin_tick(now);
     entity.cooldown_time -= 1;
-    entity.ticked_game_time = world.game_time();
+    // 官方每刻写 `tickedGameTime = level.getGameTime()`，会读一次世界时间。
+    // 这里只记相对量：读路径按当前刻还原，录制层不再看到这次时间读。
+    entity.note_tick(now);
     if !entity.is_on_cooldown() {
         entity.set_cooldown(0);
         try_move_items(world, pos, entity);
@@ -218,7 +353,7 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
         if inserted.remaining.is_empty() {
             let destination_state = world.block_state(destination);
             if inserted.was_empty && destination_state.is_a(BlockAncestor::HopperBlock) {
-                apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time));
+                apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time()));
             }
             set_changed(world, destination);
             return true;
@@ -244,7 +379,7 @@ pub(crate) fn apply_hopper_cooldown(
             return;
         }
         let skip = i32::from(
-            from_ticked_game_time.is_some_and(|from| destination.ticked_game_time >= from),
+            from_ticked_game_time.is_some_and(|from| destination.ticked_game_time() >= from),
         );
         destination.set_cooldown(MOVE_ITEM_SPEED - skip);
     });
@@ -383,7 +518,7 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
         if inserted.remaining.is_empty() {
             if inserted.was_empty {
                 let skip =
-                    from_ticked_game_time.is_some_and(|from| entity.ticked_game_time >= from);
+                    from_ticked_game_time.is_some_and(|from| entity.ticked_game_time() >= from);
                 entity.set_cooldown(MOVE_ITEM_SPEED - i32::from(skip));
             }
             set_changed(world, above);
@@ -704,6 +839,7 @@ fn try_move_in_item(
 ///
 /// 双箱的 `CompoundContainer.setChanged` 两半都通知，所以位置由 [`Level::container_positions`]
 /// 按合并后的容器给出；每一半用自己那一格的状态，和官方一样。
+///
 pub fn set_changed(world: &mut World, pos: BlockPos) {
     for changed in world.container_positions(pos) {
         let state = world.block_state(changed);
@@ -722,6 +858,20 @@ pub fn set_changed(world: &mut World, pos: BlockPos) {
         }
         world.update_neighbour_for_output_signal(changed, state.block());
     }
+}
+
+/// 物品没变的安静刻通知。只给证明测试用：那个开关能省掉这次通知，
+/// 用来逐刻比较效果和包，见 `block_entity_sleep` 的证明测试。
+///
+/// The quiet, item-unchanged notification. Only used by the proof test that
+/// switches it off to compare effects and packets tick by tick.
+pub(crate) fn quiet_set_changed(world: &mut World, pos: BlockPos, quiet_only: bool) {
+    #[cfg(test)]
+    if quiet_only && !crate::block_entity_sleep::quiet_changed_enabled() {
+        return;
+    }
+    let _ = quiet_only;
+    set_changed(world, pos);
 }
 
 #[cfg(test)]
@@ -782,10 +932,12 @@ mod tests {
         assert_eq!(cooldown(&world, POS), MOVE_ITEM_SPEED);
 
         // 冷却 8 刻：第 2 到第 8 刻都不动，第 9 刻再送一个。
-        for _ in 0..7 {
+        for now in 1..8 {
+            world.ticks_mut().set_time(now);
             world.tick_block_entities();
         }
         assert_eq!(slot(&mut world, below, 0), ItemStack::new(items::DIRT, 1));
+        world.ticks_mut().set_time(8);
         world.tick_block_entities();
         assert_eq!(slot(&mut world, below, 0), ItemStack::new(items::DIRT, 2));
         assert_eq!(slot(&mut world, POS, 0), ItemStack::new(items::DIRT, 8));

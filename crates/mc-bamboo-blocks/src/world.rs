@@ -2,7 +2,7 @@
 //!
 //! `Behaviour` 的方法都通过 [`World`] 读写世界。方法名和官方相同，要对照时直接搜官方的名字。
 
-use std::collections::VecDeque;
+use std::{borrow::BorrowMut, collections::VecDeque};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
 use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
@@ -10,7 +10,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
 use crate::{
-    behaviour::machines::{ShulkerBoxEntity, open_support_shape},
+    behaviour::machines::{PistonMoving, ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
     entity::{Entity, PrimedTnt},
@@ -357,19 +357,33 @@ pub struct World<'a> {
     held_reads: Vec<VecDeque<DeferredRead>>,
 }
 
-/// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读。
+/// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
+/// `piston_at` 读（没有方块实体时给 `None`，官方给 `Shapes.empty()`）。
 ///
 /// 玩家移动不能借 `World`：`RegionLevel` 借着玩家表。形状顺序和 [`World::block_collisions`] 相同。
 ///
-/// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at`.
+/// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at` and moving-piston
+/// shapes from `piston_at`. Player movement cannot borrow `World`; shape order matches
+/// [`World::block_collisions`].
+/// `CollisionGetter.getBlockCollisions` 的方块事实：每格的状态，加上 `moving_piston`
+/// 这一格的方块实体算出的碰撞形状（没有实体时是空形状）。
 ///
-/// Player movement cannot borrow `World`: `RegionLevel` already borrows the player map.
-/// Shape order matches [`World::block_collisions`].
-pub(crate) fn collect_block_collisions(
+/// The block facts for `CollisionGetter.getBlockCollisions`: the state at each cell,
+/// plus the per-cell moving-piston shape from its block entity (empty when absent).
+pub struct CollisionBlocks<B, P> {
+    pub block_at: B,
+    pub piston_at: P,
+}
+
+pub(crate) fn collect_block_collisions<B, P>(
     box_: shape::Aabb,
     context: CollisionContext,
-    mut block_at: impl FnMut(BlockPos) -> BlockState,
-) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
+    mut blocks: impl BorrowMut<CollisionBlocks<B, P>>,
+) -> Vec<(BlockPos, Vec<shape::Aabb>)>
+where
+    B: FnMut(BlockPos) -> BlockState,
+    P: FnMut(BlockPos) -> Option<Vec<shape::Aabb>>,
+{
     let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
     let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
     let y_min = mth::floor(box_.min_y - shape::EPSILON) - 1;
@@ -377,6 +391,7 @@ pub(crate) fn collect_block_collisions(
     let z_min = mth::floor(box_.min_z - shape::EPSILON) - 1;
     let z_max = mth::floor(box_.max_z + shape::EPSILON) + 1;
     let mut collisions = Vec::new();
+    let blocks = blocks.borrow_mut();
     for z in z_min..=z_max {
         for y in y_min..=y_max {
             for x in x_min..=x_max {
@@ -387,14 +402,19 @@ pub(crate) fn collect_block_collisions(
                     continue;
                 }
                 let pos = BlockPos::new(x, y, z);
-                let state = block_at(pos);
+                let state = (blocks.block_at)(pos);
                 if corner == 1 && !shape::has_large_collision_shape(state) {
                     continue;
                 }
                 if corner == 2 && !state.is(blocks::MOVING_PISTON) {
                     continue;
                 }
-                let boxes = shape::collision_boxes(state, pos, context);
+                let piston = if state.is(blocks::MOVING_PISTON) {
+                    (blocks.piston_at)(pos)
+                } else {
+                    None
+                };
+                let boxes = shape::block_collision_boxes(state, pos, context, piston.as_deref());
                 if boxes.is_empty() {
                     continue;
                 }
@@ -2550,7 +2570,21 @@ impl<'a> World<'a> {
         box_: shape::Aabb,
         context: CollisionContext,
     ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
-        collect_block_collisions(box_, context, |pos| self.block_state(pos))
+        collect_block_collisions(
+            box_,
+            context,
+            CollisionBlocks {
+                block_at: |pos| self.block_state(pos),
+                piston_at: |pos| self.moving_piston_shape(pos),
+            },
+        )
+    }
+
+    /// `MovingPistonBlock.getCollisionShape`：这一格有移动中的活塞方块实体时用它算出的
+    /// 形状，没有时是空的。方块实体正在 tick、暂时不在表里时官方也读不到，这里照旧。
+    pub(crate) fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<shape::Aabb>> {
+        self.block_entity::<PistonMoving>(pos)
+            .map(PistonMoving::collision_shape)
     }
 
     /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
@@ -2641,7 +2675,11 @@ impl<'a> World<'a> {
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
             let state = self.block_state(pos);
-            let collider = shape::collision_boxes(state, pos, context);
+            let piston = state
+                .is(blocks::MOVING_PISTON)
+                .then(|| self.moving_piston_shape(pos))
+                .flatten();
+            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
             self.clip_one_block(pos, from, to, &collider, state, ClipFluid::None)
         })
     }
@@ -2655,7 +2693,11 @@ impl<'a> World<'a> {
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
             let state = self.block_state(pos);
-            let collider = shape::collision_boxes(state, pos, context);
+            let piston = state
+                .is(blocks::MOVING_PISTON)
+                .then(|| self.moving_piston_shape(pos))
+                .flatten();
+            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
             self.clip_one_block(pos, from, to, &collider, state, ClipFluid::SourceOnly)
         })
     }

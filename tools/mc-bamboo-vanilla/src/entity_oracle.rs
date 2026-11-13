@@ -17,12 +17,14 @@ use std::{
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
     HopperEntity, Level, LevelRandom, LevelTables, Slots, World,
+    archive::create_block_entity,
     entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{BlockAncestor, version};
 use mc_bamboo_game::receive_like_player;
 use mc_bamboo_loot::{BlockDropParams, LevelView, LootStack, RandomSequences, block_drops};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 use serde::Deserialize;
 
@@ -99,6 +101,12 @@ struct Case {
     extras: Vec<ExtraItem>,
     #[serde(default)]
     hopper: bool,
+    /// 这一题里固定的移动活塞方块实体。官方场景不 tick 它们，形状每刻一样。
+    #[serde(default)]
+    pistons: Vec<Piston>,
+    /// 官方 `PistonMovingBlockEntity.getCollisionShape` 逐盒子的结果，按原始位比较。
+    #[serde(default)]
+    shapes: Vec<[f64; 6]>,
     /// 玩家捡起才有。脚的位置固定在 (0.5, 64, 0.5)。
     ///
     /// Present when a player picks the item up. The feet stay at (0.5, 64, 0.5).
@@ -128,6 +136,22 @@ struct ExtraItem {
     x: f64,
     y: f64,
     z: f64,
+}
+
+/// 一题里一台进度固定的 `PistonMovingBlockEntity`，和官方场景的字段同名。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Piston {
+    x: i32,
+    y: i32,
+    z: i32,
+    /// `blockState`：活塞头或被推方块的状态 ID。
+    state: u32,
+    /// `Direction.get3DDataValue()`。
+    facing: i32,
+    extending: bool,
+    source: bool,
+    progress: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -433,6 +457,9 @@ impl Report {
         level.place(&case.blocks);
         let mut ticks = BlockTicks::new();
         let mut world = World::new(&mut level, &mut ticks);
+        for piston in &case.pistons {
+            place_moving_piston(&mut world, piston);
+        }
         let id = match case.kind.as_str() {
             "falling" => world.spawn_falling_block(
                 BlockPos::new(case.x, case.y, case.z),
@@ -496,6 +523,7 @@ impl Report {
         let hoppers = hopper_cells(case);
         let mut slots = case.player.as_ref().map(player_slots);
         self.compare_step(&case.name, 0, &mut world, None, &case.steps[0], &hoppers);
+        self.compare_piston_shape(&case.name, &world, case);
         if let Some(slots) = slots.as_deref() {
             self.compare_inventory(&case.name, 0, slots, &case.steps[0].inventory);
         }
@@ -555,6 +583,32 @@ impl Report {
         }
         self.compare_blocks(name, index, world, &official.blocks);
         self.compare_containers(name, index, world, hoppers, &official.containers);
+    }
+
+    /// 官方直接打出的移动活塞碰撞形状，和 Bamboo 方块实体算出的那份比较。
+    /// 官方 `Shapes.or` 会把重叠的盒子拆成不重叠的格子，盒子清单不一定逐项相同，
+    /// 所以按几何并集比（官方的 `Shapes.joinIsNotEmpty` 对称差为空）。
+    /// 形状每一刻都一样（场景不 tick 方块实体），只在第 0 步比一次。
+    fn compare_piston_shape(&mut self, name: &str, world: &World, case: &Case) {
+        let Some(piston) = case.pistons.first() else {
+            return;
+        };
+        let pos = BlockPos::new(piston.x, piston.y, piston.z);
+        let ours = mc_bamboo_blocks::entity::ctx::BlockView::moving_piston_shape(world, pos)
+            .unwrap_or_default();
+        let expected: Vec<Aabb> = case
+            .shapes
+            .iter()
+            .map(|&[min_x, min_y, min_z, max_x, max_y, max_z]| {
+                Aabb::new(min_x, min_y, min_z, max_x, max_y, max_z)
+            })
+            .collect();
+        let op = mc_bamboo_blocks::shape::BooleanOp::NotSame;
+        if mc_bamboo_blocks::shape::join_is_not_empty(&ours, &expected, op) {
+            self.mismatch(format!(
+                "{name}: moving piston shape: official {expected:?}, bamboo {ours:?}"
+            ));
+        }
     }
 
     fn compare_inventory(
@@ -1007,6 +1061,32 @@ impl LevelView for OneBlock {
     fn dimension(&self) -> Option<&'static str> {
         Some("minecraft:overworld")
     }
+}
+
+/// 按官方场景里的方块实体字段造一台进度固定、不参与 tick 的移动活塞。
+/// `progress` 和 `progressO` 相等，等价于存档读回来之后的那一刻。
+fn place_moving_piston(world: &mut World, piston: &Piston) {
+    let pos = BlockPos::new(piston.x, piston.y, piston.z);
+    let state = world.block_state(pos);
+    let tag = Tag::Compound(vec![
+        (
+            "blockState".to_owned(),
+            mc_bamboo_blocks::archive::tag::encode_block_state(BlockState(piston.state)),
+        ),
+        ("facing".to_owned(), Tag::Byte(piston.facing as i8)),
+        ("progress".to_owned(), Tag::Float(piston.progress)),
+        (
+            "extending".to_owned(),
+            Tag::Byte(i8::from(piston.extending)),
+        ),
+        ("source".to_owned(), Tag::Byte(i8::from(piston.source))),
+    ]);
+    let entity = create_block_entity("minecraft:piston", pos, state, &tag)
+        .expect("活塞方块实体")
+        .expect("类型已知");
+    world.set_block_entity(entity);
+    // `World::set_block_entity` 会登记 ticker；官方场景刻意不跑方块实体 tick，
+    // 这里也不跑 `tick_block_entities`，所以形状保持固定。
 }
 
 fn hopper_cells(case: &Case) -> Vec<BlockPos> {
