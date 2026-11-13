@@ -254,6 +254,30 @@ mod tests {
         assert_eq!(worldgen.end_biomes().end, "minecraft:the_end");
     }
 
+    /// 六条 17 位有效数字的噪声振幅必须和官方运行时的 double 逐位相同。
+    ///
+    /// 官方内存里的位模式由 `Double.doubleToRawLongBits` 读出；`serde_json` 不做正确
+    /// 舍入的快路径会把这些十进制串全部读成低 1 ulp 的值，于是对拍会悄悄失准。
+    #[test]
+    fn noise_amplitudes_match_the_official_bits() {
+        let worldgen = worldgen();
+        for (id, bits) in [
+            ("minecraft:jagged", 0x3ff0_9ceb_74ac_70d7),
+            ("minecraft:nether/temperature", 0x3fee_6215_6c09_de3a),
+            ("minecraft:nether/vegetation", 0x3fee_6215_6c09_de3a),
+            ("minecraft:offset", 0x3fee_0583_ed0d_7735),
+            ("minecraft:pillar", 0x3fee_6215_6c09_de3a),
+            ("minecraft:ridge", 0x3fed_4558_d7b1_d486),
+        ] {
+            let noise = worldgen.noises().get(id).expect("噪声在注册表里");
+            assert_eq!(
+                noise.parameters().base_amplitude.to_bits(),
+                bits,
+                "{id} 的振幅变了"
+            );
+        }
+    }
+
     #[test]
     fn dimension_settings_match_the_official_numbers() {
         let worldgen = worldgen();

@@ -43,9 +43,5 @@ mc-bamboo-worldgen = { workspace = true, optional = true }
 rand_core = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
-# 边界 oracle 逐位比较 double，官方输出的是 round-trip 十进制文本，解析器必须正确舍入。
-#
-# The border oracle compares doubles bit for bit; the official side writes
-# round-trip decimals, so the parser must round correctly.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_json.workspace = true
 tokio = { workspace = true, optional = true }
