@@ -158,6 +158,12 @@ pub(crate) struct DirectorHost {
     /// 关服中：F6 背压必须让路，保证所有区块都被收回并保存。
     /// Shutting down: F6 backpressure must stand aside so every chunk is saved.
     shutting_down: bool,
+    /// 官方 `ServerLevel.noSave` 的反面：`/save-off` 时为假，停掉匀速保存
+    /// 和卸载写盘；玩家离开的写、`/save-all`（force）和关服不受它管。
+    /// Inverse of official `ServerLevel.noSave`: false during `/save-off`,
+    /// stopping paced/unload writes. Player-leave saves, `/save-all` (force)
+    /// and shutdown are unaffected.
+    saves_enabled: bool,
 }
 
 impl DirectorHost {
@@ -189,6 +195,7 @@ impl DirectorHost {
             consecutive_io_failures: 0,
             saving_paused: false,
             shutting_down: false,
+            saves_enabled: true,
         }
     }
 
@@ -217,6 +224,12 @@ impl DirectorHost {
     /// Write failures seen this run, logged at shutdown.
     pub(crate) fn io_failures(&self) -> u64 {
         self.io_failures
+    }
+
+    /// 每刻由 `World` 按 `SaveSession::auto_save` 刷新（F7 / 官方 `noSave`）。
+    /// Refreshed each tick by `World` from `SaveSession::auto_save` (F7).
+    pub(crate) fn set_saves_enabled(&mut self, enabled: bool) {
+        self.saves_enabled = enabled;
     }
 
     /// 排一道不阻塞的 IO 栅栏，返回序号；`None` 表示这一局没接磁盘（无需等待）。
@@ -427,7 +440,16 @@ impl DirectorHost {
     /// per-chunk cooldown only skips a stale snapshot when a newer one for the
     /// same chunk is still queued, so an isolated snapshot is never dropped.
     fn pace_saves(&mut self, now_tick: u64) {
-        if self.io.is_none() || self.save_queue.is_empty() || self.saving_paused {
+        // `save-off` 照官方 `ChunkMap.tick`：noSave 时不 processUnloads，
+        // 也就是不把卸载快照交给 IO 线程（F7）。`/save-all` / 关服不走这里。
+        // `save-off` mirrors official `ChunkMap.tick`: noSave skips
+        // processUnloads, so unload writes are not handed to IO (F7).
+        // `/save-all` and shutdown do not go through this path.
+        if self.io.is_none()
+            || self.save_queue.is_empty()
+            || self.saving_paused
+            || !self.saves_enabled
+        {
             return;
         }
         let count = save_batch_size(self.save_queue.len());
@@ -1325,6 +1347,63 @@ mod tests {
         assert_eq!(host.save_queue.len(), 1);
         host.pace_saves(3);
         assert!(host.save_queue.is_empty());
+    }
+
+    /// F7：`save-off` 停掉卸载写盘（官方 `ChunkMap.tick` 的 noSave），
+    /// `save-on` 恢复；`/save-all` 的强制快照不走 `pace_saves`，不受它管。
+    /// F7: `save-off` stops unload writes (official `ChunkMap.tick` noSave),
+    /// `save-on` resumes; `/save-all`'s forced snapshots bypass `pace_saves`.
+    #[test]
+    fn save_off_stops_unload_writes_and_save_all_is_a_force() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-f7-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        let pos = ChunkPos::new(3, 4);
+        let snapshot = |seq| PendingWrite {
+            pos,
+            seq,
+            chunk: Some(vec![seq as u8]),
+            entities: None,
+        };
+        host.enqueue_snapshot(snapshot(1));
+
+        // save-off：队列不出队，`pace_saves` 不把卸载快照交给 IO。
+        host.set_saves_enabled(false);
+        host.pace_saves(1);
+        assert_eq!(host.save_queue.len(), 1, "save-off must not dequeue");
+        assert!(!host.io().unwrap().has_chunk(pos), "no write was submitted");
+
+        // save-on：恢复匀速出队。
+        host.set_saves_enabled(true);
+        host.pace_saves(2);
+        assert!(host.save_queue.is_empty(), "save-on resumes paced writes");
+        // `/save-all` 的强制快照不走 `pace_saves`，见 world 测试
+        // `save_all_is_a_force_even_during_save_off`。
     }
 
     /// F6：同一区块在 `save_queue` 里只留最新一份，旧序号不能覆盖新的。

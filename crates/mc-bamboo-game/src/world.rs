@@ -337,6 +337,12 @@ impl World {
     /// 提交 5 接 Director 后按「有在途任务/未交付」填。
     fn tick_ticket_timeouts(&mut self) {
         self.director_tick += 1;
+        // 刷新 `noSave` 反面：`/save-off` 当刻就停掉卸载写盘（F7）。
+        // Refresh the inverse of `noSave`: `/save-off` stops unload writes
+        // from this tick on (F7).
+        // 没接 SaveSession（测试 / oracle）时保持匀速写盘开启；接了就照 `noSave`。
+        let saves_enabled = self.save.as_ref().is_none_or(|save| save.auto_save());
+        self.host.set_saves_enabled(saves_enabled);
         self.host.tick(&mut self.region, self.director_tick);
     }
 
@@ -919,8 +925,10 @@ impl World {
             self.global.scoreboard_mut().on_leave(&name);
             self.global.boss_bars_mut().on_leave(id);
         }
-        // 官方 `PlayerList.remove` 在移除玩家前先存盘。
-        // Official `PlayerList.remove` saves the player before removing them.
+        // 官方 `PlayerList.remove` 在移除玩家前先存盘；`PlayerList.save` /
+        // `saveAll` 都不看 `noSave`，所以 `/save-off` 期间离开照存（F7）。
+        // Official `PlayerList.remove` saves before removing; `PlayerList.save`
+        // / `saveAll` ignore `noSave`, so a leave during `/save-off` still saves.
         self.save_one_player(id);
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
@@ -1224,6 +1232,14 @@ impl World {
         // Official order: players → chunks → level.dat/data → unlock. The
         // level.dat/data bytes are queued before the shutdown's blocking barrier;
         // the world thread only encodes, never writes file-by-file (F3 / R5).
+        // 关服前照官方 `stopServer` 把 `noSave` 复位：这一刻全量保存，
+        // 不受 `/save-off` 影响（F7）。
+        // Like official `stopServer`, reset `noSave` before the final full
+        // save so `/save-off` cannot suppress it (F7).
+        if let Some(save) = &mut self.save {
+            save.set_auto_save(true);
+        }
+        self.host.set_saves_enabled(true);
         self.save_all_players();
         let files = self
             .save

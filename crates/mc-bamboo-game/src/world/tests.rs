@@ -210,6 +210,28 @@ impl Harness {
         Self::build(view_distance, true)
     }
 
+    /// 正式入口 + 真实世界目录：`SaveSession` 和 IO 线程都接上，
+    /// 供 `/save-off` / `save-all` / 关服这类生命周期测试用。
+    /// Real world directory: both `SaveSession` and the IO thread are attached,
+    /// for `/save-off` / `save-all` / shutdown lifecycle tests.
+    pub(crate) fn new_loaded_with_save(view_distance: i32, root: &std::path::Path) -> Self {
+        let (inbox, receiver) = mpsc::channel();
+        let config = WorldConfig {
+            view_distance,
+            world_dir: Some(root.to_path_buf()),
+            ..Default::default()
+        };
+        let mut world = World::new(config, receiver);
+        world.region.random = LevelRandom::new(0);
+        world.region.sound_seed_generator = LevelRandom::new(0);
+        Self {
+            world,
+            inbox,
+            in_flight: Arc::default(),
+            next_id: 1,
+        }
+    }
+
     fn build(view_distance: i32, loaded: bool) -> Self {
         let (inbox, receiver) = mpsc::channel();
         let config = WorldConfig {
@@ -1345,6 +1367,87 @@ fn save_all_snapshots_every_dirty_loaded_chunk() {
     assert!(
         written.contains(&b),
         "second dirty loaded chunk should be written"
+    );
+}
+
+/// F7：`/save-off` 之后 `/save-all` 用 force 照样把脏区块写下去
+/// （官方 `ServerLevel.save(..., noSave && !force)`）。
+/// F7: `/save-all` forces the save even during `/save-off` (official
+/// `ServerLevel.save(..., noSave && !force)`).
+#[test]
+fn save_all_is_a_force_even_during_save_off() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::world_dir::WorldDir;
+
+    let tmp = D6TempDir::new("force-off");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    // 接真实 SaveSession：`/save-off` 才会把 noSave 落到会话上。
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveOff);
+    server.tick();
+    assert!(
+        !server.world.save.as_ref().unwrap().auto_save(),
+        "save-off must reach the SaveSession (noSave)"
+    );
+    // save-off 期间匀速不写：先确认没有 Written。
+    server.world.host.flush_io();
+    assert!(written_chunks(&server.world.host).is_empty());
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: crate::inbound::PlayerId(1),
+        });
+    server.tick();
+    server.world.host.flush_io();
+    assert!(
+        written_chunks(&server.world.host).contains(&pos),
+        "save-all must force the dirty chunk out despite save-off"
+    );
+}
+
+/// F7：官方 `PlayerList.remove` / `saveAll` 不看 `noSave`，
+/// 所以 `/save-off` 期间玩家离开照样写存档。
+/// F7: official `PlayerList.remove`/`saveAll` ignore `noSave`, so a leave
+/// during `/save-off` still writes the player save.
+#[test]
+fn save_off_keeps_player_leave_saves_like_vanilla() {
+    use mc_bamboo_storage::world_dir::WorldDir;
+
+    let tmp = D6TempDir::new("leave-off");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let client = server.join("Admin");
+    server.tick();
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveOff);
+    server.tick();
+    server.world.on_leave(client.id);
+    server.world.host.flush_io();
+
+    assert!(
+        std::fs::read_dir(dir.players_data_dir())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".dat")),
+        "the leaving player's save must still be written during save-off"
     );
 }
 
