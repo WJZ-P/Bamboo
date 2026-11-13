@@ -105,6 +105,13 @@ pub trait BlockEntity: Any + Send {
     fn watch(&self) -> Option<Watch> {
         None
     }
+
+    /// 世界边界同步碰到这个睡眠条目时，要不要按「醒着」处理、跳过暂停路径。
+    /// 默认走暂停；闲置漏斗那种「安静刻只是每刻写时间字段」的睡眠在这里
+    /// 用公式推进会和边界内外的刻序差一刻，索性不暂停，回来重新满足条件再睡。
+    fn skips_border_pause(&self) -> bool {
+        false
+    }
 }
 
 // 方块实体读路径看到的当前 `gameTime`。睡着的实体按公式现算数值，菜单数据槽、
@@ -715,9 +722,42 @@ impl BlockEntities {
                 .filter(|&pos| old.is_none_or(|old| old.contains(pos)) && !border.contains(pos))
                 .collect();
             for pos in positions {
-                self.pause(pos, target);
+                // 闲置漏斗：按「醒着」处理，不进暂停路径。停在上一刻的
+                // 数值上，之后每刻都真跑，等重新满足闲置条件再睡。
+                if self
+                    .entities
+                    .get(&pos)
+                    .is_some_and(|stored| stored.entity.skips_border_pause())
+                {
+                    self.wake_at_previous_tick(pos, target);
+                } else {
+                    self.pause(pos, target);
+                }
             }
         }
+    }
+
+    /// 按「醒着」结束睡眠：数值算到上一刻、清掉睡眠标记，但不排进本刻的 due
+    /// （这一刻的 BE 阶段还没开始，条目本来就是醒着的集合成员）。
+    fn wake_at_previous_tick(&mut self, pos: BlockPos, target: i64) {
+        let Some(&index) = self.positions.get(&pos) else {
+            return;
+        };
+        let Some(ticker) = self.slots[index] else {
+            return;
+        };
+        if ticker.wake_at.is_none() {
+            return;
+        }
+        self.unschedule(ticker.ordinal, ticker.wake_at);
+        self.slots[index] = Some(Ticker {
+            wake_at: None,
+            ..ticker
+        });
+        if let Some(stored) = self.entities.get_mut(&pos) {
+            stored.entity.materialize(target);
+        }
+        self.mark_awake(ticker.ordinal);
     }
 
     /// 结束这一格的睡眠：数值按公式算到 `target` 那一刻结束时，回到醒着的集合。

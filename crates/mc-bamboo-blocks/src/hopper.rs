@@ -275,6 +275,10 @@ impl BlockEntity for HopperEntity {
         self.watch.clone()
     }
 
+    fn skips_border_pause(&self) -> bool {
+        self.idle_sleeping
+    }
+
     fn resleep(&mut self, since: i64, wake_at: i64) {
         // 闲置睡眠跨表没有意义：放回后真跑一次，再按当前状态重新睡。
         if wake_at == i64::MAX || wake_at.saturating_sub(since) == i64::MAX {

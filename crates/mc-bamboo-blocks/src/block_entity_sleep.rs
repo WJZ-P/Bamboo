@@ -1719,6 +1719,33 @@ fn idle_hopper_phase_bench() {
     );
 }
 
+/// 和既有的 `apply_border` 同一套 5 种边界：全包住、移到远处、
+/// 缩小渐变、扩大渐变、静态中间尺寸（漏斗链的一半在界外）。
+fn border_kind(border: &mut crate::WorldBorder, kind: i32) {
+    match kind {
+        0 => {
+            border.set_center(0.0, 0.0);
+            border.set_size(crate::MAX_SIZE);
+        }
+        1 => {
+            border.set_center(100.0, 100.0);
+            border.set_size(10.0);
+        }
+        2 => {
+            border.set_center(2.0, 0.5);
+            border.lerp_size_between(30.0, 0.5, 40, 0);
+        }
+        3 => {
+            border.set_center(2.0, 0.5);
+            border.lerp_size_between(0.5, 30.0, 40, 0);
+        }
+        _ => {
+            border.set_center(2.0, 0.5);
+            border.set_size(5.0);
+        }
+    }
+}
+
 /// 闲置漏斗休眠的差分测试：开 / 关休眠两份世界，同一份脚本逐刻比较全部状态。
 ///
 /// 物品实体从远处飞进吸取盒、落在漏斗上、在盒里合并 / 消失；上方换容器，
@@ -1781,6 +1808,8 @@ mod idle_hopper {
         BoxChunk,
         /// 按存档 NBT 组装、解码、放回漏斗。
         Restart,
+        /// 世界边界：0 全在界内，1 全在界外。
+        Border(i32),
     }
 
     fn script(seed: u64, ticks: i64, _layout: Layout) -> Vec<(i64, Act)> {
@@ -1807,7 +1836,7 @@ mod idle_hopper {
                 79..=82 => Act::Freeze(random.next_int(2) == 0),
                 83..=86 => Act::BoxChunk,
                 87..=89 => Act::Restart,
-                90..=93 => continue,
+                90..=93 => Act::Border(random.next_int(5)),
                 _ => continue,
             };
             actions.push((now, act));
@@ -1873,6 +1902,8 @@ mod idle_hopper {
         }
 
         fn step(&mut self, now: i64) {
+            // 官方 `ServerLevel.tick` 开头的 "world border" 阶段：渐变推进。
+            self.level.border.tick();
             self.ticks.set_time(now);
             set_block_entity_clock(now);
             while self
@@ -1970,6 +2001,10 @@ mod idle_hopper {
                 Act::BoxChunk => {
                     let _ = world;
                     self.level.box_chunk(CHUNK);
+                }
+                Act::Border(kind) => {
+                    let _ = world;
+                    super::border_kind(&mut self.level.border, kind);
                 }
                 Act::Restart => {
                     let _ = world;
