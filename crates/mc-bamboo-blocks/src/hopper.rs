@@ -704,6 +704,7 @@ fn try_move_in_item(
 ///
 /// 双箱的 `CompoundContainer.setChanged` 两半都通知，所以位置由 [`Level::container_positions`]
 /// 按合并后的容器给出；每一半用自己那一格的状态，和官方一样。
+///
 pub fn set_changed(world: &mut World, pos: BlockPos) {
     for changed in world.container_positions(pos) {
         let state = world.block_state(changed);
@@ -722,6 +723,20 @@ pub fn set_changed(world: &mut World, pos: BlockPos) {
         }
         world.update_neighbour_for_output_signal(changed, state.block());
     }
+}
+
+/// 物品没变的安静刻通知。只给证明测试用：那个开关能省掉这次通知，
+/// 用来逐刻比较效果和包，见 `block_entity_sleep` 的证明测试。
+///
+/// The quiet, item-unchanged notification. Only used by the proof test that
+/// switches it off to compare effects and packets tick by tick.
+pub(crate) fn quiet_set_changed(world: &mut World, pos: BlockPos, quiet_only: bool) {
+    #[cfg(test)]
+    if quiet_only && !crate::block_entity_sleep::quiet_changed_enabled() {
+        return;
+    }
+    let _ = quiet_only;
+    set_changed(world, pos);
 }
 
 #[cfg(test)]

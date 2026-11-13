@@ -20,7 +20,7 @@ use mc_bamboo_recipes::{RecipeManager, assemble};
 
 use crate::{
     block_entity::{BlockEntity, drop_item_stack},
-    hopper::set_changed,
+    hopper::{quiet_set_changed, set_changed},
     level::Effect,
     state::{BlockState, LIT},
     world::World,
@@ -174,10 +174,11 @@ impl CampfireEntity {
             world.push_effect(Effect::CampfireChanged { pos: self.pos });
         }
         if occupied {
-            // 营火没有比较器输出。`setChanged` 仍然通知旁边的比较器。
+            // 营火没有比较器输出。`setChanged` 仍然通知旁边的比较器；
+            // 没烤熟的那些刻物品不变，通知只是安静刻通知。
             // A campfire has no comparator output. `setChanged` still notifies neighbouring
-            // comparators.
-            set_changed(world, self.pos);
+            // comparators. On ticks without a finished item it is a quiet notification.
+            quiet_set_changed(world, self.pos, !finished);
         }
     }
 
@@ -205,7 +206,8 @@ impl CampfireEntity {
             }
         }
         if changed {
-            set_changed(world, self.pos);
+            // 冷却的物品一直没变，只是进度在退。
+            quiet_set_changed(world, self.pos, true);
         }
     }
 }

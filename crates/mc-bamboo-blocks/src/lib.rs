@@ -47,7 +47,7 @@ pub mod world;
 pub mod world_border;
 
 #[cfg(test)]
-mod block_entity_sleep;
+pub(crate) mod block_entity_sleep;
 
 #[cfg(test)]
 mod testing;

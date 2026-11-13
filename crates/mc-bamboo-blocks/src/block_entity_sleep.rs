@@ -4,18 +4,25 @@
 //! **每一刻**比较方块状态、容器、方块实体的全部字段（睡着的按公式现算）、
 //! 写方块序列、随机数种子和计划刻，任何一位不同都算失败。
 
+use std::cell::Cell;
+
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction};
-use mc_bamboo_data::{blocks, items};
-use mc_bamboo_protocol::item::ItemStack;
+use mc_bamboo_data::{blocks, items, registries::data_component_type as kinds};
+use mc_bamboo_protocol::{
+    components::{ComponentPatch, ComponentValue, PatchEntry},
+    item::ItemStack,
+};
 
 use crate::{
     BlockState, BlockTicks, HopperEntity,
-    behaviour::machines::FurnaceEntity,
+    behaviour::machines::{BrewingStandEntity, CampfireEntity, FurnaceEntity},
     block_entity::{block_entity_clock, set_block_entity_clock},
     hopper::HOPPER_CONTAINER_SIZE,
     interact::run_block_entity_tick,
+    level::LevelTables,
     random::LegacyRandom,
-    state::LIT,
+    recording::{Record, Recording},
+    state::{ComparatorMode, HORIZONTAL_FACING, LIT, MODE_COMPARATOR},
     testing::TestLevel,
     world::{UPDATE_ALL, World},
 };
@@ -421,6 +428,265 @@ fn furnace_sleep_matches_ticking_every_tick() {
     // 纯熔炉无动作场景的近乎零开销由 `an_undisturbed_furnace_runs_only_on_event_ticks`
     // 单独断言；带漏斗的场景里漏斗仍每刻跑，所以总数只作报告。
     let _ = (rounds, total_slept);
+}
+
+// 安静刻那次 `setChanged` 的开关。只给证明用：关掉时省掉「物品没变」的通知，
+// 真改了物品的那些（放食物、烤熟、燃料消耗、doBrew、开一轮）一律照发。
+// 线程局部：方块逻辑都在调用它的那个线程上跑，两个测试线程互不干扰。
+thread_local! {
+    static QUIET_NOTIFICATIONS: Cell<bool> = const { Cell::new(true) };
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Machine {
+    Campfire,
+    BrewingStand,
+}
+
+/// 安静刻（倒计时 / 冷却）里物品不变的通知要不要照发。
+pub(crate) fn quiet_changed_enabled() -> bool {
+    QUIET_NOTIFICATIONS.with(|cell| cell.get())
+}
+
+const MACHINE: BlockPos = BlockPos::new(0, 64, 0);
+const NEAR_COMPARATOR: BlockPos = BlockPos::new(1, 64, 0);
+const REDSTONE_WALL: BlockPos = BlockPos::new(-1, 64, 0);
+const FAR_COMPARATOR: BlockPos = BlockPos::new(-2, 64, 0);
+
+struct QuietScene {
+    level: TestLevel,
+    ticks: BlockTicks,
+    /// `true` = 照官方每刻通知；`false` = 只留真改了物品的通知。
+    notify: bool,
+    /// 录制层收集的效果、包和写序列，`nanos` 不进比较。
+    records: Vec<Record>,
+    /// 上一刻新增的记录数，用来把比较范围限定在这一刻。
+    last_added: usize,
+}
+
+impl QuietScene {
+    fn new(machine: Machine, notify: bool) -> Self {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        // 这里只比较两种通知口径，不掺休眠的影响。
+        level.sleep_enabled(false);
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            // 下面一层都垫上，比较器不用检查支撑。旁边一个、隔一格一个，
+            // 后者经红石导体转发，两条路径都走到 `checkTickOnNeighbor`。
+            for pos in [MACHINE, NEAR_COMPARATOR, REDSTONE_WALL, FAR_COMPARATOR] {
+                world.set_block(pos.below(), BlockState(blocks::STONE), UPDATE_ALL);
+            }
+            world.set_block(REDSTONE_WALL, BlockState(blocks::STONE), UPDATE_ALL);
+            for (pos, facing) in [
+                (NEAR_COMPARATOR, Direction::West),
+                (FAR_COMPARATOR, Direction::East),
+            ] {
+                let state = BlockState(blocks::COMPARATOR)
+                    .with(HORIZONTAL_FACING, facing)
+                    .with(MODE_COMPARATOR, ComparatorMode::Compare);
+                world.set_block(pos, state, UPDATE_ALL);
+            }
+            let block = match machine {
+                Machine::Campfire => blocks::CAMPFIRE,
+                Machine::BrewingStand => blocks::BREWING_STAND,
+            };
+            world.set_block(MACHINE, BlockState(block), UPDATE_ALL);
+        }
+        seed_machine(&mut level, &mut ticks, machine);
+        Self {
+            level,
+            ticks,
+            notify,
+            records: Vec::new(),
+            last_added: 0,
+        }
+    }
+
+    fn step(&mut self, now: i64) -> Vec<String> {
+        self.ticks.set_time(now);
+        set_block_entity_clock(now);
+        QUIET_NOTIFICATIONS.with(|cell| cell.set(self.notify));
+        // 中途改内容：真改物品的通知和安静刻的通知会连在一起。
+        if now == 700 {
+            disturb(&mut self.level, &mut self.ticks);
+        }
+        let mut recorder = Recording::new(&mut self.level);
+        recorder.set_tick(now);
+        // 到期的比较器计划刻也在录制范围内：通知若真的改变了输出，
+        // 计划刻跑起来之后的包和写方块会不一样。
+        let mut effects =
+            crate::interact::run_due_ticks(&mut recorder, &mut self.ticks, now).effects;
+        {
+            let mut world = World::in_world_tick(&mut recorder, &mut self.ticks);
+            world.tick_block_entities();
+            effects.extend(world.drain_effects());
+        }
+        let added = recorder.take_records();
+        self.last_added = added.len();
+        self.records.extend(added);
+        let mut out = Vec::new();
+        // 录制层记下了每一刻的效果、包、写方块、红石记忆和计划刻。
+        // `nanos` 是墙上时间，不能进逐位比较。
+        // 只比这一刻新增的记录，且把「通知本身读了什么」排除：省掉一次通知
+        // 当然少读几次方块，那不是可见效果。要看的是它有没有写、有没有发包。
+        let from = self.records.len();
+        for record in &self.records[from.saturating_sub(self.last_added)..] {
+            // 排计划刻本身是查重操作：已经在队列里时 `schedule` 什么也不做，
+            // 队列的状态（含时刻、优先级）由下面的 `ticks` 快照逐刻比较。
+            // 其它每一笔写都是可见效果，一个都不能省。
+            let writes: Vec<_> = record
+                .writes
+                .iter()
+                .filter(|write| !matches!(write, crate::recording::Write::TickScheduled { .. }))
+                .collect();
+            out.push(format!(
+                "{:?}/{:?}/{:?}/{:?}",
+                record.tick, record.trigger, writes, record.uncacheable
+            ));
+        }
+        out.push(format!("effects:{effects:?}"));
+        let level = &self.level;
+        for pos in [MACHINE, NEAR_COMPARATOR, REDSTONE_WALL, FAR_COMPARATOR] {
+            out.push(format!("b{pos:?}:{}", level.get(pos).0));
+        }
+        for pos in [NEAR_COMPARATOR, FAR_COMPARATOR] {
+            out.push(format!(
+                "c{pos:?}:{}",
+                level.redstone_table().comparator_output(pos)
+            ));
+        }
+        out.push(format!("writes:{:?}", level.writes));
+        out.push(format!("seed:{}", level.random.source().seed()));
+        // 计划刻按（触发刻、优先级、位置）排序比较：表里的 HashMap 迭代顺序
+        // 不是对外行为，`will_tick_this_tick` 查重也只看那一组。
+        let mut scheduled: Vec<_> = self
+            .ticks
+            .pending()
+            .map(|tick| (tick.trigger_tick, tick.priority, tick.pos, tick.block))
+            .collect();
+        scheduled.sort();
+        out.push(format!("scheduled:{scheduled:?}"));
+        // 两份世界各自的容器、数据槽、方块实体内部状态也要逐刻相同。
+        out.push(format!("items:{:?}", machine_snapshot(&self.level)));
+        out
+    }
+}
+
+/// 两台机器当前能观察到的全部内部状态（数据槽、物品、配方缓存）。
+fn machine_snapshot(level: &TestLevel) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(campfire) = level.block_entity::<CampfireEntity>(MACHINE) {
+        out.push(format!("{:?}", campfire.data_values()));
+        out.push(format!("{:?}", campfire.items()));
+        out.push(format!("{:?}", campfire.recipe_facts()));
+    }
+    if let Some(stand) = level.block_entity::<BrewingStandEntity>(MACHINE) {
+        out.push(format!("{:?}", stand.data_values()));
+        out.push(format!("{:?}", stand.items()));
+        out.push(format!("{:?}", stand.observed_facts()));
+    }
+    out
+}
+
+/// 官方 `PotionContents.createItemStack(Items.POTION, Potions.WATER)`。
+fn water_bottle() -> ItemStack {
+    let mut patch = ComponentPatch::new();
+    patch.put(
+        kinds::POTION_CONTENTS,
+        PatchEntry::Set(ComponentValue::PotionContents {
+            potion: Some(0),
+            custom_color: None,
+            custom_effects: Vec::new(),
+            custom_name: None,
+        }),
+    );
+    let (added, removed) = patch.to_opaque();
+    let mut stack = ItemStack::new(items::POTION, 1);
+    stack.added = added;
+    stack.removed = removed;
+    stack
+}
+
+/// 营火放四份食物（错开的进度），酿造台放三瓶水、地狱疣和烈焰粉。
+fn seed_machine(level: &mut TestLevel, ticks: &mut BlockTicks, machine: Machine) {
+    let mut world = World::new(level, ticks);
+    match machine {
+        Machine::Campfire => {
+            world.with_block_entity::<CampfireEntity, _>(MACHINE, |entity, _| {
+                for slot in 0..4 {
+                    entity.set_item(slot, ItemStack::new(items::POTATO, 1));
+                    entity.set_data(4 + slot, 600);
+                    entity.set_data(slot, 120 * slot as i32);
+                }
+            });
+        }
+        Machine::BrewingStand => {
+            // 官方水瓶是带 `potion_contents = minecraft:water` 的药水物品。
+            let water = water_bottle();
+            world.with_block_entity::<BrewingStandEntity, _>(MACHINE, |entity, _| {
+                for slot in 0..3 {
+                    entity.set_item(slot, water.clone());
+                }
+                entity.set_item(3, ItemStack::new(items::NETHER_WART, 3));
+                entity.set_item(4, ItemStack::new(items::BLAZE_POWDER, 4));
+            });
+        }
+    }
+}
+
+/// 中途真改一次物品：营火熄火后重新点燃，酿造台换掉材料格。
+fn disturb(level: &mut TestLevel, ticks: &mut BlockTicks) {
+    let mut world = World::new(level, ticks);
+    let state = world.block_state(MACHINE);
+    if let Some(lit) = state.try_get(LIT) {
+        world.set_block_and_update(MACHINE, state.with(LIT, !lit));
+    } else {
+        world.with_container(MACHINE, &mut |container| {
+            let _ = container.remove_item(3, 1);
+        });
+    }
+}
+
+/// 同一个场景跑两遍：一遍照官方每刻都通知比较器，一遍只留「物品真变了」的那些通知。
+/// 录制层逐刻把效果、包、写方块、计划刻和状态全部记下来，两者必须逐位相同。
+/// 营火和酿造台在倒计时期间每刻 `setChanged`，这条测试是省掉它们的依据。
+const fn machine_name(machine: Machine) -> &'static str {
+    match machine {
+        Machine::Campfire => "营火",
+        Machine::BrewingStand => "酿造台",
+    }
+}
+
+fn compare_quiet_notifications(machine: Machine, ticks: i64) {
+    let mut notifying = QuietScene::new(machine, true);
+    let mut quiet = QuietScene::new(machine, false);
+    for now in 1..=ticks {
+        let a = notifying.step(now);
+        let b = quiet.step(now);
+        assert_eq!(
+            a, b,
+            "machine {machine:?} tick {now}: 安静刻的通知有可见效果"
+        );
+    }
+    // 证明覆盖到真事件：两种机器都跑过完整的一轮，而且安静刻的通知
+    // 在「照发」那份里确实产生过额外的读（否则这份证明是空的）。
+    assert!(notifying.records.len() > 100, "录制层覆盖了每一刻");
+    let reads = |scene: &QuietScene| -> usize {
+        scene.records.iter().map(|record| record.reads.len()).sum()
+    };
+    assert!(
+        reads(&notifying) > reads(&quiet) + 100,
+        "{} 份安静刻通知真的被省掉了",
+        machine_name(machine)
+    );
+}
+
+#[test]
+fn unchanged_items_make_campfire_and_brewing_notifications_invisible() {
+    // 烤熟一整轮 + 熄灭后冷却 + 一轮完整酿造 + 中途换配方（真改物品的通知要留下）。
+    compare_quiet_notifications(Machine::Campfire, 1400);
+    compare_quiet_notifications(Machine::BrewingStand, 1400);
 }
 
 #[test]

@@ -338,9 +338,13 @@ impl BrewingStandEntity {
             } else if !brewable || self.ingredient != Some(self.items[SLOT_INGREDIENT].item) {
                 self.brew_time = 0;
             }
-            // 官方酿造倒计时的每一刻都 `setChanged`。
-            // Vanilla calls `setChanged` on every brewing tick.
-            crate::machine_container::mark_container_changed(world, self.pos);
+            // 官方酿造倒计时的每一刻都 `setChanged`；只有 `doBrew` 那一才改物品。
+            // Vanilla calls `setChanged` on every brewing tick; only `doBrew` changes items.
+            crate::machine_container::quiet_mark_container_changed(
+                world,
+                self.pos,
+                !done || !brewable,
+            );
         } else if brewable && self.fuel > 0 {
             let speed = if self.speed_multiplier > 0.0 {
                 self.speed_multiplier
