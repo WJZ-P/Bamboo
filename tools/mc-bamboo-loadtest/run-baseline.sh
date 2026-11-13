@@ -4,6 +4,7 @@
 # 用法：run-baseline.sh [结果目录] [场景名...]
 #   结果目录缺省是临时目录，脚本结束会删掉；传了目录就保留。
 #   KEEP=1 时临时目录也保留。PORT 可以换端口，RAMP 可以换每个场景的连入时长。
+#   WORLD_DIR 给了目录时，场景的世界存档写在 WORLD_DIR/<场景名>/ 下（用真实存盘压测）。
 #
 # 服务端和压测工具是两个进程，不共用一个 tokio 运行时。五个场景都是离线模式、
 # 压缩阈值 256、视距 8、剖析间隔 10 秒；只有人数上限从默认 20 提到 500。
@@ -72,10 +73,16 @@ run_scene() {
     mkdir -p "$dir"
 
     echo "=== $name: $bots bots, $pattern/$layout, ${seconds}s ==="
+    # 给了 WORLD_DIR 就带真实世界目录跑，没给就保持纯内存（默认）。
+    local world_arg=""
+    if [ -n "${WORLD_DIR:-}" ]; then
+        mkdir -p "$WORLD_DIR/$name"
+        world_arg="--world-dir $WORLD_DIR/$name"
+    fi
     # 服务端在临时目录里跑：四份管理名单和日志都落在那里，不在仓库里留文件。
     # 不用子 shell 包一层，否则 $! 是子 shell 的 pid，kill 不到真正的服务端。
     (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" \
-        "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 \
+        "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 $world_arg \
         > server.log 2>&1) &
     SERVER=$!
 

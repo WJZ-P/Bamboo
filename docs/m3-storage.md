@@ -800,9 +800,13 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 - `has_chunk` 扫描盘上已有区块时不认 `.mcc` 外置大区块；`Status` 不是 `full` 的区块
   当成坏块，用模板。
 - 剖析数字（约 2 ms / 区块，debug 构建）只量了空模板区块，不代表真实区块。
-  `fly-20` 带 / 不带世界目录两次压测里 `storage_dirty` / `storage_snapshot` /
-  `storage_encode` 三个子段的每刻均值都小于 0.001 ms（release），判脏不和
-  约 2 万个已加载区块数成正比。
+  `fly-20` 带 / 不带世界目录各跑一次（release，`run-baseline.sh` 的 `WORLD_DIR`
+  和 `serve --world-dir`）：带世界目录时约 2.16 万个已加载区块，tick p50 9.608 ms
+  / p95 13.804 ms；不带世界目录 7.204 / 13.622 ms。存档三个子段的每刻耗时
+  （`storage_dirty` / `storage_snapshot` / `storage_encode`）均值分别是
+  0.000–0.001 / 0.000 / 0.000 ms，`storage_dirty` 最大 0.019 ms；判脏只碰改动
+  集合，不和已加载区块数成正比。fly-20 的假玩家不改方块，`storage_candidates`
+  每刻均值为 0，所以拍快照和编码没有产生可测的每刻开销。
 - `saved_data_samples` 是为对拍放在生产代码里的 `pub fn`，可以挪到 `cfg(test)` 或
   feature 后面。
 - 方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家等）改了不标脏；

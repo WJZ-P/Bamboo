@@ -23,7 +23,7 @@ use mc_bamboo_world::{
 use crate::{
     chunk_codec::{ChunkCodec, InlineCodec, PackedChunk},
     inbound::PlayerId,
-    profiler::SubPhase,
+    profiler::{Metric, SubPhase},
     region::{Region, RegionColumn, parking::Parking},
 };
 
@@ -674,6 +674,9 @@ impl DirectorHost {
         } else {
             EAGER_SAVES_PER_TICK
         };
+        region
+            .profiler
+            .record(Metric::StorageCandidates, dirty.len() as u64);
         let mut remaining = Vec::new();
         let mut eligible = Vec::new();
         for pos in dirty {
@@ -688,6 +691,9 @@ impl DirectorHost {
             }
         }
         self.dirty_pending.extend(remaining);
+        region
+            .profiler
+            .record(Metric::StorageSnapshots, eligible.len() as u64);
         for pos in eligible {
             self.snapshot_loaded(region, pos, now_tick);
         }
