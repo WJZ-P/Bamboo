@@ -73,21 +73,51 @@ pub(crate) fn game_rules_tag(rules: &GameRuleSet) -> Tag {
     Tag::Compound(entries)
 }
 
-/// 把 `game_rules.dat` 的 `data` 复合标签套回游戏规则。坏键、类型不符、越界、
-/// 没启用的规则都整条忽略，和官方 `SavedDataStorage` 读坏退回默认一致。
-/// Apply a `game_rules.dat` `data` compound back onto the game rules. Bad keys,
-/// wrong types, out-of-range and disabled rules are ignored, like vanilla.
+/// 把 `game_rules.dat` 的 `data` 复合标签套回游戏规则。
+///
+/// 官方 `GameRuleMap.CODEC` 是 `Registry.byNameCodec().dispatchedMap(...)`，
+/// 整份 map 一次解码；`SavedDataStorage.readSavedData` 用 `resultOrPartial`，
+/// 解码失败返回 null，`computeIfAbsent` 用 `constructor()` 造全默认的 map。
+/// 所以任何一条坏条目都不能「只忽略这一条」：整份解码失败，全部退回默认值。
+/// 这里先把整份解成一张临时的值表，全部条目都合法才一次性写进 `rules`。
+///
+/// Apply a `game_rules.dat` `data` compound back onto the game rules. Vanilla
+/// decodes the whole dispatched map at once and falls back to the all-default
+/// constructor if it fails, so a single bad entry invalidates the entire file.
 pub(crate) fn apply_game_rules(rules: &mut GameRuleSet, tag: &Tag) {
     let Tag::Compound(entries) = tag else {
         return;
     };
+    let mut parsed = Vec::with_capacity(entries.len());
     for (name, value) in entries {
+        // 官方 codec 只认带命名空间的、启用的规则；布尔是 Byte、整数是 Int，
+        // 整数还要在规则自己的 [min, max] 里。任一条不合格就整份作废。
+        // The official codec only accepts enabled namespaced rules, with Byte
+        // for booleans and Int (in range) for integers; reject the whole file
+        // on any mismatch instead of dropping the offending entry.
         let stored = match value {
             Tag::Byte(v) => Stored::Bool(*v != 0),
             Tag::Int(v) => Stored::Int(*v),
-            _ => continue,
+            _ => return,
         };
-        rules.apply_saved(name, stored);
+        let Some(index) = mc_bamboo_data::gamerules::find(name) else {
+            return;
+        };
+        let rule = &mc_bamboo_data::gamerules::RULES[index];
+        let valid = match (rule.kind, stored) {
+            (mc_bamboo_data::gamerules::GameRuleKind::Bool, Stored::Bool(_)) => true,
+            (mc_bamboo_data::gamerules::GameRuleKind::Int, Stored::Int(v)) => {
+                (rule.min..=rule.max).contains(&v)
+            }
+            _ => false,
+        };
+        if !rule.enabled || !valid {
+            return;
+        }
+        parsed.push((index, stored));
+    }
+    for (index, stored) in parsed {
+        rules.set_saved(index, stored);
     }
 }
 
@@ -225,6 +255,49 @@ mod tests {
         let mut restored = GameRuleSet::vanilla();
         apply_game_rules(&mut restored, &tag);
         assert_eq!(restored.int(index), 7);
+    }
+
+    /// 官方 `SavedDataStorage` 读坏整份 saved data 就用默认构造；坏一条不能
+    /// 只忽略那一条、把同文件里其它好条目套上去。
+    #[test]
+    fn a_bad_game_rule_entry_invalidates_the_whole_file() {
+        let mut rules = GameRuleSet::vanilla();
+        let index = gamerules::find("minecraft:random_tick_speed").unwrap();
+        assert!(matches!(
+            rules.assign(index, "7"),
+            crate::gamerules::Assignment::Updated(_)
+        ));
+        let mut entries = match game_rules_tag(&rules) {
+            Tag::Compound(entries) => entries,
+            _ => unreachable!("game rules tag is a compound"),
+        };
+        // 一条坏条目：未知的规则名。
+        entries.push(("minecraft:not_a_rule".to_owned(), Tag::Byte(1)));
+
+        let mut restored = GameRuleSet::vanilla();
+        apply_game_rules(&mut restored, &Tag::Compound(entries));
+        assert_eq!(
+            restored,
+            GameRuleSet::vanilla(),
+            "整份解码失败，全部退回默认值"
+        );
+
+        // 类型不符 / 越界 / 非复合标签也一律整份作废。
+        for bad in [
+            Tag::Compound(vec![(
+                "minecraft:random_tick_speed".to_owned(),
+                Tag::String("7".to_owned()),
+            )]),
+            Tag::Compound(vec![(
+                "minecraft:random_tick_speed".to_owned(),
+                Tag::Int(-1),
+            )]),
+            Tag::List(Vec::new()),
+        ] {
+            let mut restored = GameRuleSet::vanilla();
+            apply_game_rules(&mut restored, &bad);
+            assert_eq!(restored, GameRuleSet::vanilla(), "坏档 {bad:?}");
+        }
     }
 
     #[test]

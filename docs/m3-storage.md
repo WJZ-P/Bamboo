@@ -783,6 +783,12 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   `chunk_tickets.dat` 写空 tickets 列表。这五份都由 `mc-bamboo-vanilla saved-data` /
   `world-dir` 用官方 codec 解码对拍，并故意写坏 `level.dat` / 一个键验证会报错。
   没建模的 saved data 不写文件（官方 `computeIfAbsent` 会造默认值）。
+- `game_rules.dat` 读盘照官方 `SavedDataStorage.readSavedData`：`GameRuleMap.CODEC`
+  是 `byNameCodec().dispatchedMap(...)`，整份 map 一次解码，解码失败返回 null，
+  `computeIfAbsent` 用 `GameRuleMap.of()` 造全默认的 map。Bamboo 现在把整份
+  `data` 复合标签先解成临时值表（未知键、类型不符、越界、未启用的规则都算坏），
+  全部合法才一次性套回运行时；任何一条坏条目都让整份作废、全部退回默认值，
+  不再「只忽略坏的那一条」。
 - 进服的区块到达顺序照官方 `ChunkMap.scheduleChunkLoad` / `PlayerChunkSender`：
   字节码里没有「盘上有就异步读、盘上没有就同步生成」的快路径，所有区块都先过
   异步加载流水线，盘上没有时 IO 线程回 `chunk: None`，下一刻开头和盘上的读结果
@@ -798,7 +804,7 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 
 ### 已知但没处理的（以后再看）
 
-- 游戏规则读盘时遇到坏的条目只忽略那一条，官方是整份解码失败、全部退回默认。
+- 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
 - `level.dat` 里 `LevelName`、`allowCommands`、`DataPacks` 等字段写的是默认值或读入时
   的原值，不是运行时的真值。
 - 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
