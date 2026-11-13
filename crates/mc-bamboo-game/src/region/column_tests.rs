@@ -948,3 +948,49 @@ fn neighbour_light_makes_a_column_not_pristine() {
         "方块没变但光照变了，盒子必须停放，不能用模板重新生成"
     );
 }
+
+/// 一台正在烧、但已经睡着的熔炉，走正式的 `chunk_content::encode` 组装出来的
+/// 存档 NBT 要和「每刻都跑」逐位相同。睡着的数值必须按公式现算，不能留着
+/// 上一次真 tick 的旧值。
+#[test]
+fn a_sleeping_furnace_encodes_the_same_archive_bytes() {
+    use crate::region::chunk_content::encode;
+
+    fn encoded_snapshot(sleep: bool) -> String {
+        let mut server = harness();
+        {
+            let region = server.region();
+            region.chunks.set_block(FURNACE, blocks::FURNACE);
+            // 只留一台在烧的熔炉，去掉场景里其它会动的东西，避免噪声。
+            region.block_entities.set_sleep_enabled(sleep);
+            let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+            furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+            furnace.set_item(1, ItemStack::new(items::COAL, 8));
+            region.block_entities.remove(FURNACE);
+            region.block_entities.insert(Box::new(furnace));
+        }
+        // 跑过若干刻，让休眠确实生效。熔炉是场景里唯一的方块实体，
+        // 所以「这一刻一个 ticker 都没跑」就等价于「熔炉睡着了」。
+        run(&mut server, 29);
+        let mut slept = 0;
+        for _ in 0..30 {
+            server.tick();
+            if server.region().block_entities.due_count() == 0 {
+                slept += 1;
+            }
+        }
+        if sleep {
+            assert!(slept > 20, "熔炉应该大部分刻都睡着，实际只有 {slept} 刻");
+        }
+        settle_light(server.region());
+        let boxes = server
+            .region()
+            .take_columns(&[CHUNK].into_iter().collect())
+            .expect("前提满足");
+        let column = boxes.get(&CHUNK).expect("盒子存在");
+        let encoded = encode(column, CHUNK).expect("编码成功");
+        format!("{:?}", encoded.chunk)
+    }
+
+    assert_eq!(encoded_snapshot(true), encoded_snapshot(false));
+}

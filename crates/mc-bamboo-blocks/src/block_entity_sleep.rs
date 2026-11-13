@@ -488,7 +488,9 @@ fn furnace_phase_bench() {
         Scene {
             level,
             ticks,
-            script: Script { actions: Vec::new() },
+            script: Script {
+                actions: Vec::new(),
+            },
             cursor: 0,
             layout: Layout::Plain,
             menu: Vec::new(),
