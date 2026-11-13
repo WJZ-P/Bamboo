@@ -54,15 +54,20 @@ pub struct ClimateCache {
     cells: Vec<Option<TargetPoint>>,
 }
 
+/// 一张表最多记多少个 quart 格；超过就直接不缓存，免得异常尺寸撑爆内存。
+const CLIMATE_CACHE_LIMIT: usize = 1 << 20;
+
 impl ClimateCache {
     /// 按一次扫描里会被问到的 quart 范围建表；范围外的坐标直接走原路径、不缓存。
     pub fn new(min_x: i32, min_y: i32, min_z: i32, size_x: i32, size_y: i32, size_z: i32) -> Self {
         let len = (size_x.max(0) as usize)
             .saturating_mul(size_y.max(0) as usize)
             .saturating_mul(size_z.max(0) as usize);
+        let shape = (len > 0 && len <= CLIMATE_CACHE_LIMIT)
+            .then_some((min_x, min_y, min_z, size_x, size_y, size_z));
         Self {
-            shape: (len > 0).then_some((min_x, min_y, min_z, size_x, size_y, size_z)),
-            cells: vec![None; len.min(1 << 20)],
+            shape,
+            cells: vec![None; if shape.is_some() { len } else { 0 }],
         }
     }
 

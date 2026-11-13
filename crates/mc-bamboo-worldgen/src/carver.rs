@@ -492,14 +492,15 @@ impl Carvers {
         let height = settings.height;
         let max_y = min_y + height - 1 - 7;
         let mut mask = CarvingMask::new(min_y + 1, max_y);
-        // 邻域只在 y=0 这一层问 quart 群系；17×17 个格子，按 quart 坐标缓存气候参数。
+        // 邻域只在 y=0 这一层问 quart 群系：offset -8..=8 对应 quart 坐标
+        // chunk*4-32 .. chunk*4+32，共 65×65 格，按 quart 坐标缓存气候参数。
         let mut climate = ClimateCache::new(
-            java_floor_div(chunk_x.wrapping_mul(16), 4).wrapping_sub(8),
+            chunk_x.wrapping_mul(4).wrapping_sub(32),
             0,
-            java_floor_div(chunk_z.wrapping_mul(16), 4).wrapping_sub(8),
-            17 * 4,
+            chunk_z.wrapping_mul(4).wrapping_sub(32),
+            65,
             1,
-            17 * 4,
+            65,
         );
         // 初值不影响结果：每个 (邻域, carver) 都会重新 setLargeFeatureSeed。
         let worldgen_random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
