@@ -176,3 +176,166 @@ impl PoolJob for ChunkJob {
         }
     }
 }
+
+#[cfg(test)]
+mod bench_tests {
+    use std::{
+        collections::BTreeMap,
+        time::{Duration, Instant},
+    };
+
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_world::column::ChunkColumn;
+
+    use super::*;
+    use crate::{
+        compute_pool::ComputePool,
+        region::{RegionColumn, RegionColumnParts},
+    };
+
+    /// 一个改过方块的区块：几层石头里散着几种方块，让调色板和 NBT 都不是模板那份。
+    fn edited_column(seed: i32) -> Box<RegionColumn> {
+        let mut column = ChunkColumn::from_template();
+        let chunk = column.chunk_mut();
+        let palette = [
+            blocks::STONE,
+            blocks::GLOWSTONE,
+            blocks::DIAMOND_BLOCK,
+            blocks::GOLD_BLOCK,
+        ];
+        for y in -59..-20 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    let index = (x as i32 * 7 + z as i32 * 13 + y * 3 + seed).rem_euclid(4);
+                    chunk.set_block(x, y, z, palette[index as usize]);
+                }
+            }
+        }
+        RegionColumn::from_parts(RegionColumnParts {
+            column: Box::new(column),
+            ticks: None,
+            block_entities: Default::default(),
+            redstone: Default::default(),
+            containers: BTreeMap::new(),
+            block_items: BTreeMap::new(),
+            command_blocks: BTreeMap::new(),
+            books: BTreeMap::new(),
+            entities: Default::default(),
+        })
+    }
+
+    /// 跑一批任务。`pool` 为 `None` 时内联。返回（世界线程花在提交和收回上的时间, 总墙钟时间）。
+    fn run_batch(
+        pool: Option<&mut ComputePool<ChunkJob>>,
+        jobs: Vec<ChunkJob>,
+    ) -> (Duration, Duration) {
+        let started = Instant::now();
+        match pool {
+            None => {
+                for mut job in jobs {
+                    let output = job.run();
+                    let _ = job.finish(Ok(output));
+                }
+                let elapsed = started.elapsed();
+                (elapsed, elapsed)
+            }
+            Some(pool) => {
+                let count = jobs.len();
+                for (id, job) in jobs.into_iter().enumerate() {
+                    pool.submit(id as u64, 0, job);
+                }
+                let mut world = started.elapsed();
+                let mut received = 0;
+                while received < count {
+                    // 等待不算世界线程的时间：正式运行时世界线程不等，下一刻开头才收。
+                    let Some(_) = pool.recv_timeout(Duration::from_secs(10)) else {
+                        panic!("计算池 10 秒内没有回执");
+                    };
+                    let collect = Instant::now();
+                    received += 1;
+                    while pool.try_recv().is_some() {
+                        received += 1;
+                    }
+                    world += collect.elapsed();
+                }
+                (world, started.elapsed())
+            }
+        }
+    }
+
+    /// 编解码吞吐：一批改过方块的区块，内联 vs 4 线程，序列化和解析各量一次。
+    /// 只打印数字，不断言快慢：机器上同时跑别的东西时数字会有噪声。
+    ///
+    /// `cargo test --release -p mc-bamboo-game --lib codec_throughput -- --ignored --nocapture`
+    #[test]
+    #[ignore = "基准，手动跑"]
+    fn codec_throughput_inline_vs_pool() {
+        const CHUNKS: i32 = 512;
+        let columns: Vec<Box<RegionColumn>> = (0..CHUNKS).map(edited_column).collect();
+        let packed: Vec<Vec<u8>> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, column)| {
+                encode_column(ChunkPos::new(i as i32, 0), column)
+                    .expect("能编码")
+                    .pack()
+            })
+            .collect();
+        let average_bytes = packed.iter().map(Vec::len).sum::<usize>() / packed.len();
+        println!("{CHUNKS} 个区块，平均每个 {average_bytes} 字节未压缩 NBT");
+
+        // 盒子不能复制：每一批现造，造的时间不算进计时。
+        let encode_jobs = |_: &[Box<RegionColumn>]| -> Vec<ChunkJob> {
+            (0..CHUNKS)
+                .map(|i| ChunkJob {
+                    pos: ChunkPos::new(i, 0),
+                    generation: 1,
+                    work: ChunkWork::Save {
+                        seq: i as u64,
+                        column: edited_column(i),
+                    },
+                })
+                .collect()
+        };
+        let decode_jobs = |packed: &[Vec<u8>]| -> Vec<ChunkJob> {
+            packed
+                .iter()
+                .enumerate()
+                .map(|(i, bytes)| ChunkJob {
+                    pos: ChunkPos::new(i as i32, 0),
+                    generation: 1,
+                    work: ChunkWork::Decode {
+                        bytes: bytes.clone(),
+                    },
+                })
+                .collect()
+        };
+
+        let mut pool = ComputePool::new("bench-chunk-worker", 4).expect("能起线程");
+        for (name, kind) in [("序列化", 0), ("解析", 1)] {
+            let build = || {
+                if kind == 0 {
+                    encode_jobs(&columns)
+                } else {
+                    decode_jobs(&packed)
+                }
+            };
+            // 先各热身一遍。
+            let _ = run_batch(None, build());
+            let _ = run_batch(Some(&mut pool), build());
+            let (inline_world, inline_wall) = run_batch(None, build());
+            let (pool_world, pool_wall) = run_batch(Some(&mut pool), build());
+            let per = |d: Duration| d.as_secs_f64() * 1e6 / f64::from(CHUNKS);
+            println!(
+                "{name}：内联 世界线程 {:.1} ms / 墙钟 {:.1} ms（{:.1} us/区块）；\
+                 4 线程 世界线程 {:.1} ms / 墙钟 {:.1} ms（{:.1} us/区块）",
+                inline_world.as_secs_f64() * 1e3,
+                inline_wall.as_secs_f64() * 1e3,
+                per(inline_wall),
+                pool_world.as_secs_f64() * 1e3,
+                pool_wall.as_secs_f64() * 1e3,
+                per(pool_wall),
+            );
+        }
+    }
+}
