@@ -320,6 +320,9 @@ struct RuntimeFrame {
     /// 这一帧里「必须被守卫覆盖」的实验读项数；每记一条守卫读项加一，
     /// 结束时和实验读项数核对，漏一个读就整条作废。
     guarded_reads: usize,
+    /// 这一帧有没有 `Observation::PistonPitch`：只有它伴随的 `seed: None`
+    /// 音效才允许重放，别把别的音效当成活塞音效放过。
+    piston_pitch_seen: bool,
 }
 
 impl<'a> Recording<'a> {
@@ -1824,9 +1827,18 @@ impl Level for Recording<'_> {
                         param_b: *param_b,
                     });
                 } else if !matches!(effect, Effect::Sound { seed: None, .. }) {
-                    // 活塞音效已经由 `Observation::PistonPitch` 记成可重放动作，
-                    // 这里不重复记效果；其余对外效果一律作废这条记录。
+                    // 其余对外效果一律作废这条记录。
                     self.reject_runtime();
+                } else if !self.full_only() {
+                    // 守卫/重放阶段不记账，不该走到这里。
+                } else {
+                    // `seed: None` 的音效只有被 `PistonPitch` 记成可重放动作才安全。
+                    let mut inner = self.inner.borrow_mut();
+                    if let Some(frame) = inner.current.as_mut()
+                        && !frame.runtime.piston_pitch_seen
+                    {
+                        frame.runtime.rejected = true;
+                    }
                 }
                 // 活塞伸出/收回的音高和音符盒的 seed 由世界随机源决定，
                 // 不是「状态」；效果里只留音效的种类和位置，避免同一键因
@@ -1920,10 +1932,11 @@ impl Level for Recording<'_> {
                 // 实验的严格口径仍把「取随机数」标成不可缓存（历史数字不变）；
                 // 运行时把这次取数记成可重放的动作，重放时照样从世界随机源取一个。
                 let mut inner = self.inner.borrow_mut();
-                if let Some(frame) = inner.current.as_mut()
-                    && !frame.record.uncacheable.contains(&Uncacheable::Random)
-                {
-                    frame.record.uncacheable.push(Uncacheable::Random);
+                if let Some(frame) = inner.current.as_mut() {
+                    frame.runtime.piston_pitch_seen = true;
+                    if !frame.record.uncacheable.contains(&Uncacheable::Random) {
+                        frame.record.uncacheable.push(Uncacheable::Random);
+                    }
                 }
                 drop(inner);
                 self.runtime_effect(ReplayEffect::PistonSound {

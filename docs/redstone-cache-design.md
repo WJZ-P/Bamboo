@@ -514,20 +514,40 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
 单元测试覆盖「便宜的触发点不被录」「净收益为负会停」「冷却后会重试」「段哈希
 失配不再逐项重读」，全部只用确定性计数，不依赖机器快慢。
 
-第 12 节列的活塞门（第 4 步）仍在下一轮，具体计划：
+## 14. 第三版：活塞门接进缓存（2026-11-13）
 
-1. `ReplayEffect` 加带真实值的变体：`BlockEntityInsert`（`PistonMoving` 的全部字段）、
-   `RemoveBlockEntity`、`ContainerSlots(Vec<ItemStack>)`、`ClearContainer`、`Sign`、
-   `Sound { 参数 + scale/base }`；`World` 加对应的 `replay_*` 落地入口，一律走
-   `BlockEntities` / `Container` / `push_effect` 的原始入口，让去重和子序号自然发生。
-2. `ReadMethod` 给 `K_BLOCK_ENTITY` / `K_SLOTS` / `K_LOOT_UNPACK` / `K_TICKER` /
-   `K_ENTITY_TIME` / `K_WORLD_BORDER` 各加一个变体，`cache_run::guard_value` 按类别
-   重算真实值并哈希；`recording::finish_record` 的 `expected_guards` 必须覆盖新读项，
-   少一个守卫就整条记录作废。不能用通用 `Recheck`（实测会把纯信号机器的命中率
-   从 99% 打到 40%）。
-3. 扩 `cache::supported_kind` / `supported_write` / `supported_effect`、
-   `cache_run::cacheable_trigger`（接 `Trigger::BlockEntityTick`），
-   `interact.rs` 的方块实体 tick 段也走带缓存的驱动入口。
-4. 验收：`cache_diff`（正式与 `immediate`）九台 0 刻不一致、
-   `oracle java --only piston`、全量 `oracle java --weather clear` 开与不开、
-   `machine java` 里带活塞的机器；任何一项不等都不放宽白名单，退回去补守卫。
+按 §13 末尾的四步计划做完了第 12 节剩下的第 4 步。
+
+| 改动 | 落点 |
+| --- | --- |
+| 带真实值的 `ReplayEffect`：`PistonMoving` 全部字段、`RestorePistonMoving`、`RemoveBlockEntity`、`ContainerSlots(Vec<ItemStack>)`、`ClearContainer`、`ForgetBlockEntityMemory`、`UnpackLootTable`、`NoteBlockEntityTick`、`PistonSound` | `cache::ReplayEffect`；`World::replay_*` 一律走 `insert` / `remove` / `with_slots` / `clear_container` / `unpack_loot_table` / `push_effect` 原始入口 |
+| 活塞音高重放照样从世界随机源取一个 `next_random_float()`，按 `scale`/`base` 算 pitch | `World::replay_piston_sound`（设计稿 §3.2） |
+| `ReadMethod` 给 `K_BLOCK_ENTITY` / `K_ENTITY_TIME` / `K_SLOTS` / `K_LOOT_UNPACK` / `K_TICKER` / `K_WORLD_BORDER` / `K_REDSTONE` 子标签各加重算 | `cache_run::guard_value`；`Level::loot_table_pending` 是新增的只读查询（游戏层覆盖） |
+| 守卫数量核对改成 `guarded_reads` 逐项计数，漏一个读就整条作废 | `recording::RuntimeFrame` / `finish_record` |
+| ticker 驱动的临时拿放、insert 侧的实体内容是「果」不是「因」，不进运行时守卫 | `recording::read_entity_driver`（实验 `Record` 仍照旧记两笔，历史数字不变） |
+| 方块实体 tick 接进缓存驱动，游戏循环该段也走 `run_block_entity_tick_with_cache` | `World::tick_block_entities_cached`、`interact.rs`、`mc-bamboo-game::interaction` |
+| 重放还原 tick 后实体状态但保留 ticker 编号和顺序 | `BlockEntities::replace_in_place`、`Observation::PistonTickState` |
+
+**关键的两处正确性细节**：守卫阶段实体还在表里，驱动先抄下触发前的实体可观察状态
+（`TakenEntityFacts`）再取出，避免把「解释执行后的状态」误当成输入；重放不跑方块逻辑，
+所以要按录下的 tick 后状态把 `PistonMoving` 原地写回，并补上 `BlockTicks` 那笔
+「本刻 tick 过」的记录。`Write::Effect` 只有伴随 `Observation::PistonPitch` 的
+`seed: None` 音效才放行，别的对外效果一律作废记录。
+
+**验收**：`cache_diff 4000`（正式与 `immediate`）九台全部 **0 刻不一致**；
+`immediate` 下活塞门 702 次触发、25 条记录、48 次重放，`cache_diff` 现在会断言
+活塞门在 `immediate` 下确实重放过（防止白名单悄悄退回解释）；
+`oracle java --only piston --weather clear` 开、关都是 10028 cases / 0 fail
+（开的那次 10009 triggers / 125 replays）；
+`oracle java --weather clear` 开、关都是 **10114 / 0 fail**；
+`machine java` 10 runs / 0 mismatches；`cargo test --workspace` 全过、
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets` 0 警告。
+正式配置下九台机器仍没有一台比关着慢 3% 以上（重测最慢 0.97×，见 7i 的验收线），
+红石线阵列 33–40×（不同负载下）。
+
+**过程中修掉的两个坑**（都不是靠放宽白名单）：
+1. 给带缓存的 `run_scheduled_ticks_with_cache` 多调了一次 `tick_crafting_clocks`，
+   合成器 9 道 oracle 题会挂；已删掉，和原路径逐行对齐。
+2. 守卫漏掉 `K_REDSTONE` 的十来个子标签时纯信号机器看不出问题（它们不读这些项），
+   扩白名单前逐个补齐；带副作用（take/clear/torch）的子标签守卫阶段一律返回 `None`，
+   让那种记录退回解释，而不是猜一个值。

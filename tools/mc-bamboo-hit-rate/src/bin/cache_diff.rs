@@ -59,6 +59,12 @@ fn main() {
             cached.cache.as_ref().unwrap().bytes() / 1024,
         );
         total_mismatches += mismatches;
+        if immediate && name == "活塞门" {
+            assert!(
+                stats.replays > 0,
+                "immediate 配置下活塞门必须真的重放过，否则守卫测试没有覆盖到"
+            );
+        }
     }
     println!("合计：{total_mismatches} 刻不一致（应为 0）");
     assert_eq!(total_mismatches, 0, "缓存与解释执行不一致");
