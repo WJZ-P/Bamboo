@@ -1,5 +1,6 @@
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.mojang.serialization.DataResult;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -30,6 +31,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
@@ -43,7 +45,10 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelHeightAccessor;
+import net.minecraft.world.level.TicketStorage;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.border.WorldBorder;
+import net.minecraft.world.level.gamerules.GameRuleMap;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
@@ -232,9 +237,293 @@ public final class StorageOracle {
                     response.addProperty("gzip", Base64.getEncoder().encodeToString(buffer.toByteArray()));
                     response.add("canonical", canonical(tag));
                 }
+                case "world-dir" -> {
+                    response = worldDir(Path.of(request.get("dir").getAsString()));
+                    response.addProperty("command", command);
+                }
+                case "chunk-dump" -> {
+                    response = chunkDump(request);
+                    response.addProperty("command", command);
+                }
+                case "world-block" -> {
+                    // 从真实 .mca 里用官方 RegionFile + SerializableChunkData.parse
+                    // 读出一格方块，报告它的注册名。崩溃测试用它确认改动没丢。
+                    response = worldBlock(request);
+                    response.addProperty("command", command);
+                }
                 default -> response.addProperty("error", "unknown command " + command);
             }
             return response;
+        }
+
+        /** 用官方 RegionFile / SerializableChunkData / NbtIo 逐项检查一个真实世界目录。 */
+        private JsonObject worldDir(Path root) throws IOException {
+            JsonObject response = new JsonObject();
+            JsonArray errors = new JsonArray();
+            int chunks = 0;
+            int entityChunks = 0;
+            int players = 0;
+            int savedData = 0;
+
+            // region/ 与 entities/ 的 .mca：官方 RegionFile 打开，区块 NBT 交给
+            // SerializableChunkData.parse 解析（实体文件只验证 NbtIo 能读）。
+            Path dimension = root.resolve("dimensions/minecraft/overworld");
+            for (String kind : new String[] {"region", "entities"}) {
+                Path dir = dimension.resolve(kind);
+                if (!Files.isDirectory(dir)) {
+                    errors.add("missing directory " + dir);
+                    continue;
+                }
+                List<Path> files;
+                try (var stream = Files.list(dir)) {
+                    files = stream.filter(p -> p.getFileName().toString().endsWith(".mca")).toList();
+                }
+                for (Path path : files) {
+                    String stem = path.getFileName().toString();
+                    String inner = stem.substring(2, stem.length() - 4); // strip r. and .mca
+                    String[] parts = inner.split("\\.");
+                    int rx = Integer.parseInt(parts[0]);
+                    int rz = Integer.parseInt(parts[1]);
+                    RegionStorageInfo info = new RegionStorageInfo("oracle", Level.OVERWORLD, kind);
+                    try (RegionFile region = new RegionFile(info, path, dir, false)) {
+                        for (int i = 0; i < 1024; i++) {
+                            ChunkPos pos = new ChunkPos(rx * 32 + i % 32, rz * 32 + i / 32);
+                            if (!region.hasChunk(pos)) {
+                                continue;
+                            }
+                            try (DataInputStream stream = region.getChunkDataInputStream(pos)) {
+                                if (stream == null) {
+                                    errors.add(kind + " " + pos + ": null stream");
+                                    continue;
+                                }
+                                CompoundTag tag = NbtIo.read(stream);
+                                if (kind.equals("region")) {
+                                    SerializableChunkData parsed = SerializableChunkData.parse(height, containers, tag);
+                                    if (parsed == null) {
+                                        errors.add("SerializableChunkData.parse returned null for " + pos);
+                                    } else {
+                                        chunks++;
+                                    }
+                                } else {
+                                    entityChunks++;
+                                }
+                            } catch (Exception error) {
+                                errors.add(kind + " " + pos + ": " + error);
+                            }
+                        }
+                    } catch (Exception error) {
+                        errors.add(kind + " " + path + ": " + error);
+                    }
+                }
+            }
+
+            // level.dat：全新世界或崩溃后还没到保存点的世界没有这个文件，
+            // 官方 LevelStorageSource 也当全新世界处理，不算错误。
+            // level.dat: a fresh world, or one killed before its first save,
+            // has no level.dat; official treats it as a fresh world, not an error.
+            Path levelDat = root.resolve("level.dat");
+            if (Files.exists(levelDat)) {
+                try {
+                    NbtIo.readCompressed(levelDat, NbtAccounter.unlimitedHeap());
+                    response.addProperty("level", 1);
+                } catch (Exception error) {
+                    errors.add("level.dat: " + error);
+                }
+            } else {
+                response.addProperty("level", 0);
+            }
+
+            // players/data/*.dat
+            Path playersDir = root.resolve("players/data");
+            if (Files.isDirectory(playersDir)) {
+                try (var stream = Files.list(playersDir)) {
+                    for (Path path : stream.filter(p -> p.toString().endsWith(".dat")).toList()) {
+                        try {
+                            NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+                            players++;
+                        } catch (Exception error) {
+                            errors.add(path + ": " + error);
+                        }
+                    }
+                }
+            }
+
+            // 补 10：对**实际写出的每个** data/ 文件用官方 codec 解码，而不是只
+            // 检查 NbtIo 能读 / 有 data 键。Bamboo 只写三份建模过的 saved data；
+            // 未建模的（旧世界/官方服务端留下的）只做 NBT 可读性检查，原样保留。
+            // Item 10: decode EVERY written data/ file with its official codec,
+            // not just "NbtIo can read it". Bamboo writes only three modelled
+            // saved-data files; unmodelled ones (from older/official worlds) are
+            // only checked for readable NBT and left untouched.
+            JsonArray codecs = new JsonArray();
+            for (Path base : new Path[] {root.resolve("data"), dimension.resolve("data")}) {
+                if (!Files.isDirectory(base)) {
+                    continue;
+                }
+                try (var stream = Files.walk(base)) {
+                    for (Path path : stream.filter(p -> p.toString().endsWith(".dat")).toList()) {
+                        try {
+                            CompoundTag tag = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+                            Tag data = tag.get("data");
+                            if (data == null) {
+                                errors.add(path + ": no data tag");
+                            } else {
+                                String codec = decodeWrittenSavedData(path, data);
+                                codecs.add(path.getFileName() + "=" + codec);
+                                savedData++;
+                            }
+                        } catch (Exception error) {
+                            errors.add(path + ": " + error);
+                        }
+                    }
+                }
+            }
+            response.add("savedDataCodecs", codecs);
+
+            response.addProperty("chunks", chunks);
+            response.addProperty("entityChunks", entityChunks);
+            response.addProperty("players", players);
+            response.addProperty("savedData", savedData);
+            response.add("errors", errors);
+            return response;
+        }
+
+        /** 列出一个区块里所有非空气的方块，给崩溃测试核对到底存下了什么。 */
+        private JsonObject chunkDump(JsonObject request) {
+            JsonObject response = new JsonObject();
+            JsonArray blocks = new JsonArray();
+            try {
+                Path path = Path.of(request.get("dir").getAsString());
+                int rx = request.get("rx").getAsInt();
+                int rz = request.get("rz").getAsInt();
+                int x = request.get("x").getAsInt();
+                int z = request.get("z").getAsInt();
+                ChunkPos pos = new ChunkPos(x, z);
+                RegionStorageInfo info = new RegionStorageInfo("oracle", Level.OVERWORLD, "region");
+                try (RegionFile region = new RegionFile(info, path, path.getParent(), false)) {
+                    if (!region.hasChunk(pos)) { return response; }
+                    try (DataInputStream stream = region.getChunkDataInputStream(pos)) {
+                        CompoundTag tag = NbtIo.read(stream);
+                        SerializableChunkData parsed = SerializableChunkData.parse(height, containers, tag);
+                        for (SerializableChunkData.SectionData section : parsed.sectionData()) {
+                            if (section.chunkSection() == null) { continue; }
+                            int baseY = section.y() * 16;
+                            for (int ly = 0; ly < 16; ly++) {
+                                for (int lz = 0; lz < 16; lz++) {
+                                    for (int lx = 0; lx < 16; lx++) {
+                                        BlockState state = section.chunkSection().getBlockState(lx, ly, lz);
+                                        String name = BuiltInRegistriesHolder.id(state);
+                                        if (name.equals("minecraft:air") || name.equals("minecraft:bedrock")
+                                                || name.equals("minecraft:dirt") || name.equals("minecraft:grass_block")) {
+                                            continue;
+                                        }
+                                        JsonObject entry = new JsonObject();
+                                        entry.addProperty("x", x * 16 + lx);
+                                        entry.addProperty("y", baseY + ly);
+                                        entry.addProperty("z", z * 16 + lz);
+                                        entry.addProperty("block", name);
+                                        blocks.add(entry);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                response.add("blocks", blocks);
+            } catch (Exception error) {
+                response.addProperty("error", error.toString());
+            }
+            return response;
+        }
+
+        private static final class BuiltInRegistriesHolder {
+            static String id(BlockState state) {
+                return net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                        .getKey(state.getBlock()).toString();
+            }
+        }
+
+        /** 用官方 RegionFile / SerializableChunkData.parse 读出一格方块的注册名。 */
+        private JsonObject worldBlock(JsonObject request) {
+            JsonObject response = new JsonObject();
+            try {
+                Path path = Path.of(request.get("dir").getAsString());
+                int rx = request.get("rx").getAsInt();
+                int rz = request.get("rz").getAsInt();
+                int x = request.get("x").getAsInt();
+                int y = request.get("y").getAsInt();
+                int z = request.get("z").getAsInt();
+                ChunkPos pos = new ChunkPos(x >> 4, z >> 4);
+                RegionStorageInfo info = new RegionStorageInfo("oracle", Level.OVERWORLD, "region");
+                try (RegionFile region = new RegionFile(info, path, path.getParent(), false)) {
+                    if (!region.hasChunk(pos)) {
+                        return response;
+                    }
+                    try (DataInputStream stream = region.getChunkDataInputStream(pos)) {
+                        if (stream == null) {
+                            response.addProperty("error", "null chunk stream");
+                            return response;
+                        }
+                        CompoundTag tag = NbtIo.read(stream);
+                        SerializableChunkData parsed = SerializableChunkData.parse(height, containers, tag);
+                        if (parsed == null) {
+                            response.addProperty("error", "SerializableChunkData.parse returned null");
+                            return response;
+                        }
+                        // sectionData 是官方解出来的段；只找带方块段的那个 Y。
+                        int sectionY = Math.floorDiv(y, 16);
+                        int localY = Math.floorMod(y, 16);
+                        for (SerializableChunkData.SectionData section : parsed.sectionData()) {
+                            if (section.y() != sectionY || section.chunkSection() == null) {
+                                continue;
+                            }
+                            BlockState state = section.chunkSection().getBlockState(
+                                    Math.floorMod(x, 16), localY, Math.floorMod(z, 16));
+                            net.minecraft.resources.Identifier id =
+                                    net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                            response.addProperty("block", id.toString());
+                            return response;
+                        }
+                        response.addProperty("error", "no block section at y=" + y);
+                    }
+                }
+            } catch (Exception error) {
+                response.addProperty("error", error.toString());
+            }
+            return response;
+        }
+
+        /** 用官方 codec 解码 Bamboo 写出的一份 saved data，返回 codec 名。 */
+        private String decodeWrittenSavedData(Path path, Tag data) {
+            String name = path.getFileName().toString();
+            switch (name) {
+                case "game_rules.dat":
+                    DataResult<GameRuleMap> rules = GameRuleMap.CODEC.parse(NbtOps.INSTANCE, data);
+                    rules.getOrThrow();
+                    return "GameRuleMap.CODEC";
+                case "world_border.dat":
+                    DataResult<WorldBorder.Settings> border =
+                            WorldBorder.Settings.CODEC.parse(NbtOps.INSTANCE, data);
+                    border.getOrThrow();
+                    return "WorldBorder.Settings.CODEC";
+                case "world_gen_settings.dat":
+                    DataResult<net.minecraft.world.level.levelgen.WorldGenSettings> settings =
+                            net.minecraft.world.level.levelgen.WorldGenSettings.CODEC
+                                    .parse(net.minecraft.resources.RegistryOps.create(
+                                            NbtOps.INSTANCE, registries), data);
+                    settings.getOrThrow();
+                    return "WorldGenSettings.CODEC";
+                case "chunk_tickets.dat":
+                    DataResult<TicketStorage> tickets = TicketStorage.CODEC.parse(NbtOps.INSTANCE, data);
+                    tickets.getOrThrow();
+                    return "TicketStorage.CODEC";
+                default:
+                    // 未建模的 saved data：只确认是合法 NBT 复合标签，不用 codec 强解。
+                    if (!(data instanceof CompoundTag)) {
+                        throw new IllegalStateException("unmodelled saved data is not a compound tag");
+                    }
+                    return "NbtIo";
+            }
         }
 
         /** 从 JSON 描述造一个官方的 SerializableChunkData，再 write()。 */

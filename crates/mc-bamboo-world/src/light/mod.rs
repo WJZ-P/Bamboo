@@ -272,7 +272,7 @@ impl LevelLight {
 
     /// 可以搬区块柱了：没有排着队的任务，也没有算到一半的轮次和引擎里剩下的工作。
     /// 这时引擎和给别人读的那两份光照内容相同，盒子只装一份就够。
-    pub(crate) fn ready_to_move_columns(&self) -> bool {
+    pub fn ready_to_move_columns(&self) -> bool {
         !self.queue.has_work()
             && !self.engines.in_round()
             && !self.engines.sky.has_light_work()
@@ -289,6 +289,17 @@ impl LevelLight {
             "算完以后引擎和别人读到的光照数据相同"
         );
         engines
+    }
+
+    /// 只读快照：克隆这一柱「已发布」的光照数据，各表分毫不动（补 11）。
+    /// 卸载存盘也是从这一份取，所以有待算光照时两者仍然逐字节一致。
+    /// Read-only clone of this column's *published* light (item 11). Unload
+    /// saves read the same copy, so bytes match even with pending light.
+    pub(crate) fn column_clone(&self, pos: ChunkPos) -> [LightColumn; 2] {
+        [
+            self.visible.storage(LightLayer::Sky).column_at(pos),
+            self.visible.storage(LightLayer::Block).column_at(pos),
+        ]
     }
 
     /// 把一个区块柱的天空光和方块光同时放进引擎和给别人读的那份。
@@ -372,9 +383,11 @@ impl LevelLight {
             || visible.storage(LightLayer::Block).is_materialized(pos)
     }
 
-    /// 这一柱的 26 个段状态，给测试核对段状态的登记和注销用。
-    #[cfg(test)]
-    pub(crate) fn section_states(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
+    /// 这一柱的 26 个段状态，给测试核对段状态的登记和注销，以及只读快照的
+    /// 「段状态不变」断言（补 11）用。
+    /// The 26 section states, used by tests and by the read-only snapshot's
+    /// "section states unchanged" assertion (item 11).
+    pub fn section_states(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
         self.engines.sky.storage.states_at(pos)
     }
 

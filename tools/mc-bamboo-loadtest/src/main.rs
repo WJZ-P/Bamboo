@@ -5,6 +5,7 @@
 //!                 --duration 60 --ramp 5 [--speed 4.3] [--json <文件>]
 //!     在 5 秒里陆续连上 50 名假玩家，跑 60 秒，结束时打印客户端一侧的统计
 //! bamboo-loadtest serve --addr 127.0.0.1:25565 [--max-players 500] [--view-distance 8]
+//!                       [--world-dir <目录>]
 //!     用放开人数上限的 Bamboo 服务端起服，供基线脚本使用
 //! ```
 //!
@@ -63,9 +64,12 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn Error>> {
         .max(1);
     let view_distance = number_option::<u8>(args, "--view-distance")?
         .unwrap_or_else(|| mc_bamboo_server::ServerConfig::default().view_distance);
+    // 带世界目录跑压测时存档路径全部打开；不给就保持纯内存（默认）。
+    let world_dir = option(args, "--world-dir")?.map(PathBuf::from);
     let config = mc_bamboo_server::ServerConfig {
         max_players,
         view_distance,
+        world_dir,
         ..mc_bamboo_server::ServerConfig::default()
     };
     let listener = tokio::net::TcpListener::bind(&addr).await?;

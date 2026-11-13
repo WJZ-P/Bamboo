@@ -190,7 +190,7 @@ pub(crate) fn client_requesting(view_distance: i8) -> ClientInformation {
 
 /// 测试里的“连接层”：用内存队列给世界线程发消息。
 pub(crate) struct Harness {
-    world: World,
+    pub(crate) world: World,
     inbox: Sender<Inbound>,
     in_flight: Arc<AtomicUsize>,
     next_id: i32,
@@ -208,6 +208,28 @@ impl Harness {
     /// 正式入口（已加载模式）：起点没有加载任何区块，测试自己交付。
     pub(crate) fn new_loaded(view_distance: i32) -> Self {
         Self::build(view_distance, true)
+    }
+
+    /// 正式入口 + 真实世界目录：`SaveSession` 和 IO 线程都接上，
+    /// 供 `/save-off` / `save-all` / 关服这类生命周期测试用。
+    /// Real world directory: both `SaveSession` and the IO thread are attached,
+    /// for `/save-off` / `save-all` / shutdown lifecycle tests.
+    pub(crate) fn new_loaded_with_save(view_distance: i32, root: &std::path::Path) -> Self {
+        let (inbox, receiver) = mpsc::channel();
+        let config = WorldConfig {
+            view_distance,
+            world_dir: Some(root.to_path_buf()),
+            ..Default::default()
+        };
+        let mut world = World::new(config, receiver);
+        world.region.random = LevelRandom::new(0);
+        world.region.sound_seed_generator = LevelRandom::new(0);
+        Self {
+            world,
+            inbox,
+            in_flight: Arc::default(),
+            next_id: 1,
+        }
     }
 
     fn build(view_distance: i32, loaded: bool) -> Self {
@@ -252,6 +274,7 @@ impl Harness {
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
+            player_data: None,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -266,6 +289,17 @@ impl Harness {
     ///
     /// Join with a given UUID, used by reconnect tests.
     pub(crate) fn join_uuid(&mut self, name: &str, uuid: Uuid) -> Client {
+        self.join_uuid_with_data(name, uuid, None)
+    }
+
+    /// 用指定 UUID 和存档字节进服，测试老玩家恢复位置时用。
+    /// Join with a given UUID and save bytes, for restoring an old player's position.
+    pub(crate) fn join_uuid_with_data(
+        &mut self,
+        name: &str,
+        uuid: Uuid,
+        player_data: Option<Vec<u8>>,
+    ) -> Client {
         let id = PlayerId(self.next_id);
         self.next_id += 1;
         let sink = FakeSink::default();
@@ -279,10 +313,17 @@ impl Harness {
             is_op: false,
             peer_ip: "127.0.0.1".to_owned(),
             online_at_login: 0,
+            player_data,
             sink: Box::new(sink.clone()),
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
         Client { id, uuid, sink }
+    }
+
+    /// 直接改世界出生点（`LevelData` 里的那份），测试出生点包用。
+    /// Set the world spawn (the one in `LevelData`), for spawn-packet tests.
+    pub(crate) fn set_spawn(&mut self, spawn: crate::world_state::RespawnData) {
+        let _ = self.world.global.set_spawn(spawn);
     }
 
     pub(crate) fn request(&self, client: &Client, request: PlayRequest) {
@@ -618,6 +659,70 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
     expected.extend([clientbound::LEVEL_CHUNK_WITH_LIGHT; 9]);
     expected.push(clientbound::CHUNK_BATCH_FINISHED);
     assert_eq!(client.take_ids(), expected);
+}
+
+/// 老玩家存档里的位置和世界出生点不同：官方 `set_default_spawn_position` 发
+/// `LevelData` 里的世界出生点，玩家位置包（`teleport` / `player_position`）照存档，
+/// 区块中心照玩家位置。三个包分别核对。
+/// An old player's saved position differs from the world spawn: vanilla's
+/// `set_default_spawn_position` sends the world spawn from `LevelData`, the
+/// player-position packet follows the save, and the chunk center follows the
+/// player position. Check each of the three packets.
+#[test]
+fn old_player_spawn_packet_uses_world_spawn_and_position_uses_save() {
+    use mc_bamboo_storage::player_data::PlayerData;
+
+    let mut server = Harness::new(8);
+    // 世界出生点：一个和存档位置、朝向都不同的值。
+    let world_spawn =
+        crate::world_state::RespawnData::of(BlockPos::new(1000, 70, -1000), 90.0, 30.0);
+    server.set_spawn(world_spawn);
+
+    // 老玩家存档：位置、朝向都和世界出生点不同。
+    let saved = PlayerData {
+        position: [101.0, -60.0, 202.0],
+        rotation: [45.0, 20.0],
+        ..PlayerData::default()
+    };
+    let bytes = saved.to_gzip().unwrap();
+    let client = server.join_uuid_with_data("OldTimer", Uuid::from_u128(0xabcd), Some(bytes));
+    server.tick();
+    let frames = client.take_frames();
+
+    // 1) set_default_spawn_position = 世界出生点，不是玩家存档位置。
+    let spawn = frames_with_id(&frames, clientbound::SET_DEFAULT_SPAWN_POSITION);
+    assert_eq!(spawn.len(), 1);
+    let mut r = Reader::new(&spawn[0].body);
+    assert_eq!(r.string(32767).unwrap(), "minecraft:overworld");
+    assert_eq!(r.i64().unwrap(), world_spawn.pos.pack());
+    assert_eq!(r.f32().unwrap(), world_spawn.yaw);
+    assert_eq!(r.f32().unwrap(), world_spawn.pitch);
+    // 和存档位置确实不同，证明这里发的不是玩家自己的坐标。
+    assert_ne!(world_spawn.pos.pack(), BlockPos::new(101, -60, 202).pack());
+
+    // 2) player_position（teleport）= 存档位置（方块中心 +0.5）和存档朝向。
+    let positions = frames_with_id(&frames, clientbound::PLAYER_POSITION);
+    assert_eq!(positions.len(), 1);
+    let mut r = Reader::new(&positions[0].body);
+    let _teleport_id = r.varint().unwrap();
+    let x = r.f64().unwrap();
+    let _y = r.f64().unwrap();
+    let z = r.f64().unwrap();
+    let _velocity = r.bytes(24).unwrap();
+    let yaw = r.f32().unwrap();
+    let pitch = r.f32().unwrap();
+    assert_eq!(x, 101.5);
+    assert_eq!(z, 202.5);
+    assert_eq!(yaw, 45.0);
+    assert_eq!(pitch, 20.0);
+
+    // 3) set_chunk_cache_center = 玩家所在区块（存档位置），不是世界出生点区块。
+    let centers = frames_with_id(&frames, clientbound::SET_CHUNK_CACHE_CENTER);
+    assert_eq!(centers.len(), 1);
+    let mut r = Reader::new(&centers[0].body);
+    let center = ChunkPos::new(r.varint().unwrap(), r.varint().unwrap());
+    assert_eq!(center, ChunkPos::containing(101.5, 202.5));
+    assert_ne!(center, ChunkPos::containing(1000.0, -1000.0));
 }
 
 #[test]
@@ -1013,6 +1118,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         is_op: false,
         peer_ip: "127.0.0.1".to_owned(),
         online_at_login: 0,
+        player_data: None,
         sink: Box::new(sink),
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
@@ -1020,6 +1126,595 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
 
     let ids: Vec<PlayerId> = server.world.region.players.keys().copied().collect();
     assert_eq!(ids, [new_id]);
+}
+
+/// 离开 → 存档写还在 IO 线程排队 → 同 uuid 立刻重进：应拿到离开时的数据，
+/// 而不是连接层从盘上读到的旧字节（官方 `PlayerDataStorage.save` 同步写，没有这个窗口）。
+/// Leave -> the save write is still queued on the IO thread -> immediate rejoin
+/// with the same uuid: the rejoining player must get the leaving data, not the
+/// stale disk bytes read by the connection layer.
+#[test]
+fn rejoin_uses_in_flight_player_save_over_stale_disk() {
+    use mc_bamboo_protocol::packet::play::GameMode;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, player_data::PlayerData, world_dir::WorldDir};
+
+    // 一个只活到测试结束的临时世界目录。声明顺序：tmp 先、server 后，
+    // drop 时 server 先关掉 IO 线程，tmp 再删目录。
+    // A temp world dir that lives until the test ends. Declared before `server`
+    // so the IO thread is closed before the directory is removed.
+    struct TempWorldDir(std::path::PathBuf);
+    impl TempWorldDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-rejoin-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempWorldDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let tmp = TempWorldDir::new();
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new(8);
+    // 给无限超平坦测试世界接上真实 IO 线程，让 `submit_player_write` 记录待写副本。
+    // Attach a real IO thread so `submit_player_write` records the in-flight copy.
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    let uuid = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+    let old = server.join_uuid("Kitten", uuid);
+    server.tick();
+    // 把要离开的玩家改成旁观模式，作为"离开时的数据"的可区分标记。
+    server.region().players.get_mut(&old.id).unwrap().game_mode = GameMode::Spectator;
+
+    // 连接层读到的旧档：生存模式（和离开时的旁观模式不同）。
+    let stale = PlayerData {
+        game_type: 0,
+        ..PlayerData::default()
+    }
+    .to_gzip()
+    .unwrap();
+
+    let new_id = PlayerId(50);
+    let sink = FakeSink::default();
+    // 同一个 tick 里先处理 Leave 再处理 Join：poll_io 在 tick 开头已经跑过，
+    // 这次写的 PlayerWritten 回执要到下一刻才收，所以待写副本此刻一定还在。
+    server.leave(&old);
+    let request = JoinRequest {
+        id: new_id,
+        uuid,
+        name: "Kitten".to_owned(),
+        properties: Vec::new(),
+        client: client_requesting(2),
+        permission_level: 0,
+        is_op: false,
+        peer_ip: "127.0.0.1".to_owned(),
+        online_at_login: 0,
+        player_data: Some(stale),
+        sink: Box::new(sink),
+    };
+    server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
+    server.tick();
+
+    // 重进拿到的是离开时的旁观模式（待写内存副本），不是盘上的生存模式旧档。
+    let rejoined = server.world.region.players.get(&new_id).unwrap();
+    assert_eq!(
+        rejoined.game_mode,
+        GameMode::Spectator,
+        "rejoin must use the in-flight leaving save, not the stale disk bytes"
+    );
+}
+
+/// 临时世界目录，测试结束自动删。IO 线程要在删目录前关掉，所以 tmp 先声明、
+/// server 后声明（drop 时 server 先关）。
+struct D6TempDir(std::path::PathBuf);
+
+impl D6TempDir {
+    fn new(tag: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "bamboo-d6-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        Self(path)
+    }
+}
+
+impl Drop for D6TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 收回 IO 信箱里所有 `Written`，返回写过的区块坐标。
+fn written_chunks(host: &crate::director_host::DirectorHost) -> Vec<mc_bamboo_core::ChunkPos> {
+    use mc_bamboo_storage::chunk_io::Reply;
+    let io = host.io().expect("测试接了 IO 线程");
+    std::iter::from_fn(|| io.try_recv())
+        .filter_map(|r| match r {
+            Reply::Written { pos, .. } => Some(pos),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 帧里有没有 `commands.save.success` 这段翻译键（系统消息的 NBT 里是明文）。
+fn has_save_success(client: &Client) -> bool {
+    const KEY: &[u8] = b"commands.save.success";
+    client
+        .take_frames()
+        .iter()
+        .any(|f| f.body.windows(KEY.len()).any(|w| w == KEY))
+}
+
+/// 帧里有没有 `commands.save.failed`（F9）。
+fn has_save_failure(client: &Client) -> bool {
+    const KEY: &[u8] = b"commands.save.failed";
+    client
+        .take_frames()
+        .iter()
+        .any(|f| f.body.windows(KEY.len()).any(|w| w == KEY))
+}
+
+/// D6：匀速保存把仍加载的脏区块拍快照交给 IO 线程，区块不卸载；
+/// 已经存过且没再改的区块下一刻不会重复存。
+#[test]
+fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("paced");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
+    // 只读快照照复查「中 6」会推迟有待算光照的区块，先让光照算完。
+    server.world.region.chunks.finish_light_updates();
+    // 和正式路径一样走写路径的改动标记；测试直接改 ChunkStore 时补一下。
+    server
+        .world
+        .region
+        .touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
+
+    // 有待算光照时快照按复查「中 6」推迟；先跑几刻让光照算完再重试。
+    for t in 1..8 {
+        server
+            .world
+            .host
+            .save_loaded_dirty(&mut server.world.region, t, true);
+    }
+    server.world.host.flush_io();
+
+    assert!(
+        server.world.region.chunks.is_loaded(pos),
+        "snapshot must not unload the chunk"
+    );
+    assert!(
+        written_chunks(&server.world.host).contains(&pos),
+        "a dirty loaded chunk should be written"
+    );
+
+    // 版本号已经记为「已存」，且 10 秒冷却没到，pos 不该被重复写。
+    // 发光方块的光照会顺带弄脏邻居，D6 之后几刻把那些摊平写盘，属于正常匀速行为，
+    // 所以这里只针对 pos 本身，不断言整批为空。
+    // Its revision is now recorded as saved and the cooldown has not elapsed, so
+    // pos must not be written again. A light-emitting block also dirties nearby
+    // chunks, which D6 paces over the following ticks; only assert about pos.
+    for t in 2..12 {
+        server
+            .world
+            .host
+            .save_loaded_dirty(&mut server.world.region, t, true);
+        server.world.host.flush_io();
+        assert!(
+            !written_chunks(&server.world.host).contains(&pos),
+            "a clean chunk must not be re-saved inside the cooldown"
+        );
+    }
+}
+
+/// `save-off` 期间匀速保存整个停掉。
+#[test]
+fn d6_stops_when_auto_save_is_off() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("off");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
+
+    server
+        .world
+        .host
+        .save_loaded_dirty(&mut server.world.region, 1, false);
+    server.world.host.flush_io();
+    assert!(
+        written_chunks(&server.world.host).is_empty(),
+        "save-off must stop the paced snapshots"
+    );
+}
+
+/// `/save-all` 立刻给所有已加载脏区块拍快照，不受匀速和冷却限制。
+#[test]
+fn save_all_snapshots_every_dirty_loaded_chunk() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("all");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let a = mc_bamboo_core::ChunkPos::new(0, 0);
+    let b = mc_bamboo_core::ChunkPos::new(1, 0);
+    server.ensure_loaded(&[a, b]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
+    server.set_block(mc_bamboo_core::BlockPos::new(19, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(19, -60, 3));
+    server
+        .world
+        .region
+        .touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
+    server
+        .world
+        .region
+        .touch(mc_bamboo_core::BlockPos::new(19, -60, 3));
+    server.world.region.chunks.finish_light_updates();
+
+    server
+        .world
+        .host
+        .snapshot_all_dirty(&mut server.world.region, 1);
+    server.world.host.flush_io();
+    let written = written_chunks(&server.world.host);
+    assert!(
+        written.contains(&a),
+        "first dirty loaded chunk should be written"
+    );
+    assert!(
+        written.contains(&b),
+        "second dirty loaded chunk should be written"
+    );
+}
+
+/// F7：`/save-off` 之后 `/save-all` 用 force 照样把脏区块写下去
+/// （官方 `ServerLevel.save(..., noSave && !force)`）。
+/// F7: `/save-all` forces the save even during `/save-off` (official
+/// `ServerLevel.save(..., noSave && !force)`).
+#[test]
+fn save_all_is_a_force_even_during_save_off() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::world_dir::WorldDir;
+
+    let tmp = D6TempDir::new("force-off");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    // 接真实 SaveSession：`/save-off` 才会把 noSave 落到会话上。
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveOff);
+    server.tick();
+    assert!(
+        !server.world.save.as_ref().unwrap().auto_save(),
+        "save-off must reach the SaveSession (noSave)"
+    );
+    // save-off 期间匀速不写：先确认没有 Written。
+    server.world.host.flush_io();
+    assert!(written_chunks(&server.world.host).is_empty());
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: crate::inbound::PlayerId(1),
+        });
+    server.tick();
+    server.world.host.flush_io();
+    assert!(
+        written_chunks(&server.world.host).contains(&pos),
+        "save-all must force the dirty chunk out despite save-off"
+    );
+}
+
+/// F7：官方 `PlayerList.remove` / `saveAll` 不看 `noSave`，
+/// 所以 `/save-off` 期间玩家离开照样写存档。
+/// F7: official `PlayerList.remove`/`saveAll` ignore `noSave`, so a leave
+/// during `/save-off` still writes the player save.
+#[test]
+fn save_off_keeps_player_leave_saves_like_vanilla() {
+    use mc_bamboo_storage::world_dir::WorldDir;
+
+    let tmp = D6TempDir::new("leave-off");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let client = server.join("Admin");
+    server.tick();
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveOff);
+    server.tick();
+    server.world.on_leave(client.id);
+    server.world.host.flush_io();
+
+    assert!(
+        std::fs::read_dir(dir.players_data_dir())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".dat")),
+        "the leaving player's save must still be written during save-off"
+    );
+}
+
+/// 补 9：只改容器内容不改方块（方块版本号不变），匀速保存也必须把它写下去，
+/// 否则崩溃会丢箱子里的东西。
+/// Item 9: a container-only edit (block revision unchanged) must still be
+/// snapshotted by paced D6 saving, or a crash loses the chest contents.
+#[test]
+fn d6_saves_a_chunk_with_only_a_container_edit() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("container-only");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    // 只往容器表放一个条目，不改任何方块：ChunkStore 的版本号不会变，
+    // 写路径的改动标记要让它照样被 D6 写下去。
+    let chest = mc_bamboo_core::BlockPos::new(3, -60, 3);
+    server.world.region.touch(chest);
+    server.world.region.containers.insert(
+        chest,
+        crate::container::ContainerEntry::new(crate::container::ContainerKind::Chest),
+    );
+
+    server
+        .world
+        .host
+        .save_loaded_dirty(&mut server.world.region, 1, true);
+    server.world.host.flush_io();
+    assert!(
+        written_chunks(&server.world.host).contains(&pos),
+        "只改容器内容也要被 D6 写下去"
+    );
+}
+
+/// 没 `flush`：`save-all` 成功消息在快照都交给 IO 之后这一刻就发。
+#[test]
+fn save_all_sends_success_after_handoff() {
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: client.id,
+        });
+    server.tick();
+    assert!(
+        has_save_success(&client),
+        "non-flush success is sent once snapshots are handed off"
+    );
+    assert!(server.world.pending_save_success.is_empty());
+}
+
+/// 有 `flush`：成功消息要等 IO 栅栏回执（信箱），世界线程不等待；
+/// 回执到达前不发，到达后补发。
+#[test]
+fn save_all_flush_success_waits_for_the_io_barrier() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("flush-success");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: true,
+            source: client.id,
+        });
+    server.tick();
+    assert!(
+        !has_save_success(&client),
+        "flush must defer success until the IO barrier acked"
+    );
+    assert_eq!(server.world.pending_save_success.len(), 1);
+
+    // 让 IO 线程处理栅栏，再跑一刻让 poll_io 收回执、补发成功消息。
+    server.world.host.flush_io();
+    server.tick();
+    assert!(
+        has_save_success(&client),
+        "success is sent after the IO barrier acked"
+    );
+    assert!(server.world.pending_save_success.is_empty());
+}
+
+/// F3：接了真实 IO 的 `save-all`（不带 flush）也不许世界线程阻塞等 IO；
+/// 成功消息一律等信箱栅栏回执，回执到达后补发。
+/// F3: with a real IO thread, even non-flush `save-all` must not block the world
+/// thread on IO; success always waits for the mailbox barrier ack.
+#[test]
+fn non_flush_save_all_with_io_waits_for_the_mailbox_barrier() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("nonflush-barrier");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: client.id,
+        });
+    server.tick();
+    assert!(
+        !has_save_success(&client),
+        "success must wait for the IO ack, not be sent inline"
+    );
+    assert_eq!(server.world.pending_save_success.len(), 1);
+
+    server.world.host.flush_io();
+    server.tick();
+    assert!(has_save_success(&client), "success follows the barrier ack");
+    assert!(server.world.pending_save_success.is_empty());
+    let _ = dir; // 这一局没有 SaveSession，level.dat 的字节另由 save_session 测试覆盖
+}
+
+/// F9：写盘失败时 `save-all` 发 `commands.save.failed`，绝不报成功；
+/// 消息在栅栏回执（保存真正完成）之后才发。
+/// F9: a failed `save-all` sends `commands.save.failed`, never success, and
+/// only after the barrier ack (the save really completed).
+#[test]
+fn save_all_reports_failed_when_the_io_write_fails() {
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("save-failed");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let io = ChunkIo::open(&dir).unwrap();
+    // 区域目录换成普通文件，任何区块写都会失败。
+    for directory in [dir.region_dir(), dir.entities_dir()] {
+        std::fs::remove_dir(&directory).unwrap();
+        std::fs::write(&directory, b"not a directory").unwrap();
+    }
+
+    let mut server = Harness::new_loaded(2);
+    server.world.region.send_command_feedback = true;
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
+    server.world.host.set_io(io);
+
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: false,
+            source: client.id,
+        });
+    server.tick();
+    assert!(!has_save_success(&client), "no success before the ack");
+    assert!(!has_save_failure(&client), "failure waits for the ack too");
+
+    // 让 IO 处理栅栏（写失败会把回执标成 ok=false），下一刻收回执。
+    server.world.host.flush_io();
+    server.tick();
+    assert!(
+        has_save_failure(&client),
+        "commands.save.failed must be sent"
+    );
+}
+
+/// IO 线程 panic 是致命错误：世界线程要发现、记日志、走关服流程（tick 返回 Break），
+/// 且 level.dat / data/ 的字节仍会尝试交给 IO，不挂死。
+/// A dead IO thread is fatal: the world loop detects it and breaks into shutdown
+/// without hanging (level/data bytes are still attempted).
+#[test]
+fn a_dead_io_thread_shuts_the_world_down_without_hanging() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("io-fatal");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    // 故意留一个在途读请求：IO 线程死了也不能让 Director 永远等结果。
+    // Leave a read in flight: a dead IO thread must not leave the Director waiting.
+    server
+        .world
+        .host
+        .io()
+        .unwrap()
+        .submit_read(mc_bamboo_core::ChunkPos::new(3, 3), 99, 0);
+    server.world.host.io().unwrap().crash_for_test();
+    for _ in 0..2000 {
+        if server.world.host.io().unwrap().worker_stopped() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        server.world.host.io_failed(),
+        "world must notice the dead IO thread"
+    );
+    // 关服路径不能挂死：这一 tick 直接走完 shut_down 并返回 Break。
+    assert!(
+        server.world.tick().is_break(),
+        "a fatal IO error must end the world loop"
+    );
 }
 
 #[test]
@@ -1874,4 +2569,67 @@ fn moving_piston_entities_match_in_both_drivers() {
     let parallel = moving_piston_entity_snapshots(4);
     assert!(!precise.is_empty());
     assert_eq!(precise, parallel);
+}
+
+/// 崩溃测试的具体方块路径：`/setblock` 之后 `save-all flush`，
+/// 盘上要真的能读出那一格（用同一个 `world-block` 的解码路径）。
+#[test]
+fn setblock_then_save_all_flush_persists_the_block() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_storage::{
+        anvil::{RegionCompression, RegionFile},
+        world_dir::WorldDir,
+    };
+
+    let tmp = D6TempDir::new("setblock-persist");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    let pos = BlockPos::new(5, -59, 5);
+    let chunk = ChunkPos::new(0, 0);
+    server.ensure_loaded(&[chunk]);
+    server
+        .world
+        .region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .permission_level = 4;
+
+    server.request(
+        &client,
+        PlayRequest::unsigned_command("setblock 5 -59 5 minecraft:diamond_block"),
+    );
+    server.tick();
+    assert_eq!(
+        server.world.region.chunks.block(pos),
+        Some(blocks::DIAMOND_BLOCK)
+    );
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: true,
+            source: client.id,
+        });
+    for _ in 0..6 {
+        server.tick();
+    }
+    server.world.host.flush_io();
+    server.tick();
+    let path = dir.region_dir().join("r.0.0.mca");
+    assert!(path.exists(), "区块区域文件已经写出");
+    let mut region =
+        RegionFile::open(&path, dir.region_dir(), RegionCompression::Zlib).expect("区域文件能打开");
+    let bytes = region.read(chunk, 32 << 20).unwrap().expect("区块在盘上");
+    let decoded = mc_bamboo_storage::chunk_nbt::decode_bytes(&bytes).expect("官方格式能解");
+    assert_eq!(
+        decoded.column.chunk().block(5, -59, 5),
+        blocks::DIAMOND_BLOCK,
+        "kill -9 之前改的那一格要在盘上"
+    );
 }

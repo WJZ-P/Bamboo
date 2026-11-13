@@ -52,6 +52,12 @@ pub struct JoinRequest {
     pub peer_ip: String,
     /// 连接层判断满员时那一刻的在线人数，供世界线程按权威名单复查。
     pub online_at_login: usize,
+    /// 连接层从 `players/data/<uuid>.dat` 读到的原始 gzip 字节。
+    /// 没有存档或没启用存档时为 `None`，世界线程按新玩家处理。
+    ///
+    /// Raw gzip bytes the connection layer read from `players/data/<uuid>.dat`.
+    /// `None` means a new player (no save, or saving disabled).
+    pub player_data: Option<Vec<u8>>,
     pub sink: Box<dyn PlayerSink>,
 }
 

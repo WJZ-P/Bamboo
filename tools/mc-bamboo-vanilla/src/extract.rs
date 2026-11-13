@@ -105,6 +105,13 @@ pub struct BiomeClimateFact {
     pub frozen: bool,
 }
 
+/// 官方 `WorldGenSettings.CODEC` 编出的超平坦默认值（SNBT）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SavedWorldFact {
+    #[serde(rename = "flat")]
+    pub world_gen_settings: String,
+}
+
 /// 一条游戏规则。字段和 `Extractor.gameRules` 的 JSON 对应。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1078,6 +1085,8 @@ pub struct VersionData {
     pub game_rules: Vec<GameRuleFact>,
     /// 群系的气候设置，按 `minecraft:worldgen/biome` 注册表 ID。
     pub biomes: Vec<BiomeClimateFact>,
+    /// 官方 codec 编出的超平坦 `world_gen_settings.dat` 内容。
+    pub saved_world: SavedWorldFact,
 }
 
 pub fn run(
@@ -1141,6 +1150,7 @@ fn read_version_data(
         ENTITY_TYPE_REGISTRY,
         extracted.entity_types.iter().map(|type_| &type_.name),
     )?;
+    let saved_world = run_saved_world_extractor(java, work_dir, workspace_root)?;
     let (items, damageable, dyed) = read_items(
         extracted.items,
         &reports.join("minecraft/components/item"),
@@ -1185,6 +1195,7 @@ fn read_version_data(
         worldgen: extracted.worldgen,
         game_rules: extracted.game_rules,
         biomes: extracted.biomes,
+        saved_world,
     })
 }
 
@@ -1206,6 +1217,61 @@ fn check_biome_climates(climates: &[BiomeClimateFact], names: &[String]) -> Resu
         }
     }
     Ok(())
+}
+
+/// 超平坦模板的层（方块名，厚度），从下往上。必须和 `mc_bamboo_world::flat::archive_layers()` 相同。
+const FLAT_LAYERS: [(&str, i32); 3] = [
+    ("minecraft:bedrock", 1),
+    ("minecraft:dirt", 2),
+    ("minecraft:grass_block", 1),
+];
+
+#[cfg(all(test, feature = "oracle"))]
+#[test]
+fn the_extractor_layers_match_the_flat_template() {
+    assert_eq!(
+        FLAT_LAYERS.to_vec(),
+        mc_bamboo_world::flat::archive_layers(),
+        "改了超平坦模板就要同步改这里"
+    );
+}
+
+fn run_saved_world_extractor(
+    java: &str,
+    work_dir: &Path,
+    workspace_root: &Path,
+) -> Result<SavedWorldFact, String> {
+    let source = workspace_root.join("tools/mc-bamboo-vanilla/java/SavedWorldExtractor.java");
+    // 层必须和 mc-bamboo-world 的超平坦模板一致，Bamboo 和官方新生成的区块才相同。
+    // generate 要能在 --no-default-features 下跑（那时生成的数据可能是坏的），
+    // 所以这里不依赖 mc-bamboo-world，一致性由下面的测试守着。
+    let layers = FLAT_LAYERS;
+    let mut command = Command::new(java);
+    command
+        .current_dir(work_dir)
+        .arg("-cp")
+        .arg(classpath(work_dir)?)
+        .arg(source);
+    for (name, height) in layers {
+        command.arg(name).arg(height.to_string());
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("无法运行 {java}：{error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "SavedWorldExtractor.java 退出失败：{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .find(|line| line.contains("\"flat\""))
+        .ok_or_else(|| format!("SavedWorldExtractor.java 没输出报告：{text}"))?;
+    serde_json::from_str::<SavedWorldFact>(line)
+        .map_err(|error| format!("SavedWorldExtractor 报告解析失败：{error}: {line}"))
 }
 
 fn run_biome_climate_extractor(

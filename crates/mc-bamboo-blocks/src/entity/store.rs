@@ -329,7 +329,7 @@ impl ChunkEntities {
 ///
 /// 行槽的下标稳定，`take` / `put` O(1)；`index` 是 uid 到行号的映射，`grid` 是 16³ 段的行号索引。
 /// tick 期间新生成的实体进 `pending`，下一 tick 才开始 tick，和官方的 `EntityTickList` 一样。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EntityStore {
     slots: Vec<Option<EntityRow>>,
     index: BTreeMap<EntityUid, usize>,
@@ -379,6 +379,12 @@ impl EntityStore {
 
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
+    }
+
+    /// 读盘时不认识的实体类型，按区块原样保留。给每刻的内容指纹用（补 9）。
+    /// Unknown entity types kept verbatim from disk, used by the per-tick content fingerprint (item 9).
+    pub fn preserved(&self) -> &[Tag] {
+        &self.preserved
     }
 
     /// 按 uid 升序的所有 ID，也就是生成的先后。
@@ -706,6 +712,32 @@ impl EntityStore {
             rows,
             preserved: self.take_preserved(chunk),
         })
+    }
+
+    /// 只读快照：直接复制这一区块的实体行和保留条目，原表分毫不动（补 11）。
+    /// 不要求 tick 边界，也不要求没有实体被借走——存档只编内容，不搬运行态。
+    /// Read-only snapshot: copy this chunk's entity rows and preserved entries
+    /// without requiring a tick boundary. Saving encodes content, never moves
+    /// the live tables.
+    pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkEntities> {
+        let mut rows: Vec<EntityRow> = self
+            .index
+            .values()
+            .filter_map(|&row| self.slots[row].as_ref())
+            .filter(|entry| entry.public.chunk_position() == chunk)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|entry| entry.public.uid);
+        let preserved = self
+            .preserved
+            .iter()
+            .filter(|tag| {
+                let [x, _, z] = crate::archive::tag::vec3(tag, "Pos", [0.0; 3]);
+                chunk == ChunkPos::new(x.floor() as i32 >> 4, z.floor() as i32 >> 4)
+            })
+            .cloned()
+            .collect();
+        Some(ChunkEntities { rows, preserved })
     }
 
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。

@@ -35,6 +35,8 @@ pub struct ChunkStore {
     loaded: Option<HashSet<ChunkPos, ChunkHasherBuilder>>,
     /// 每个插过盒子的位置的原样起点。没记过的位置按模板算。
     pristine: ChunkMap<PristineMark>,
+    /// 方块或光照版本变过的区块。存档每刻只看这个集合，不扫全部已加载区块。
+    changed: HashSet<ChunkPos, ChunkHasherBuilder>,
 }
 
 /// 按区块坐标索引的表，用和票表一样的便宜哈希。读方块的热路径每次都查它。
@@ -50,6 +52,8 @@ struct EditedChunks {
     revisions: ChunkMap<u64>,
     /// 发出去的最后一个版本号。
     last_revision: u64,
+    /// 版本变过、还没被存档取走的区块。
+    changed: HashSet<ChunkPos, ChunkHasherBuilder>,
 }
 
 impl EditedChunks {
@@ -63,6 +67,7 @@ impl EditedChunks {
     fn bump_revision(&mut self, pos: ChunkPos) {
         self.last_revision += 1;
         self.revisions.insert(pos, self.last_revision);
+        self.changed.insert(pos);
     }
 
     /// 没改过的区块是 0。
@@ -120,6 +125,7 @@ impl ChunkStore {
             light,
             loaded: None,
             pristine: ChunkMap::default(),
+            changed: HashSet::default(),
         }
     }
 
@@ -155,6 +161,54 @@ impl ChunkStore {
     /// 已加载的区块数；无限模式返回 `None`。
     pub fn loaded_count(&self) -> Option<usize> {
         self.loaded.as_ref().map(HashSet::len)
+    }
+
+    /// 这个区块是不是还保持生成器原样。
+    pub fn is_pristine(&self, pos: ChunkPos) -> bool {
+        let mark = self
+            .pristine
+            .get(&pos)
+            .copied()
+            .unwrap_or(PristineMark::TEMPLATE);
+        mark.from_generator && mark.revision == self.revision(pos)
+    }
+
+    /// 把区块放回「版本变过」集合，供下一刻重新判脏。
+    pub fn mark_changed(&mut self, pos: ChunkPos) {
+        self.changed.insert(pos);
+    }
+
+    /// 取走「方块或光照版本变过」的区块集合，给存档每刻判脏用。
+    /// 只和真正改动过的区块数成正比，不扫全部已加载区块。
+    pub fn take_changed_chunks(&mut self) -> HashSet<ChunkPos, ChunkHasherBuilder> {
+        std::mem::take(&mut self.changed)
+    }
+
+    /// 每个已加载区块的坐标、当前版本号，以及「是不是还保持生成器原样」。
+    /// 运行中的匀速存档用它判断哪些已加载区块脏了（改过且版本号和上次落盘不同）；
+    /// 原样区块照官方不存。无限模式没有已加载集合，返回空。
+    ///
+    /// For each loaded chunk: its position, current revision, and whether it is
+    /// still the untouched generator output. Paced run-time saving uses this to
+    /// find dirty loaded chunks (edited and revision differs from the last save);
+    /// pristine chunks are not saved, like vanilla. Empty in infinite-flat mode.
+    pub fn loaded_states(&self) -> Vec<(ChunkPos, ChunkRevision, bool)> {
+        let Some(loaded) = &self.loaded else {
+            return Vec::new();
+        };
+        loaded
+            .iter()
+            .map(|&pos| {
+                let revision = self.revision(pos);
+                let mark = self
+                    .pristine
+                    .get(&pos)
+                    .copied()
+                    .unwrap_or(PristineMark::TEMPLATE);
+                let pristine = mark.from_generator && mark.revision == revision;
+                (pos, revision, pristine)
+            })
+            .collect()
     }
 
     /// 把一个区块束装进已加载集合。调用方保证位置原本没有内容。
@@ -510,6 +564,30 @@ impl ChunkStore {
     /// 调用方可以先问，再决定要不要把光照跑完。
     pub fn ready_to_move_columns(&self) -> bool {
         self.light.ready_to_move_columns()
+    }
+
+    /// 只读快照：克隆 `pos` 这一柱的方块和光照，各表分毫不动（补 11）。
+    /// 存档编码需要的是一份 `ChunkColumn`，这里按 `take_column` 同样的方式组装。
+    /// Read-only clone of this column's blocks and light (item 11). Save
+    /// encoding needs a `ChunkColumn`; assemble it exactly like `take_column`.
+    pub fn column_clone(&self, pos: ChunkPos) -> Option<crate::column::ChunkColumn> {
+        if !self.is_loaded(pos) {
+            return None;
+        }
+        let chunk = self
+            .edited
+            .chunks
+            .get(&pos)
+            .cloned()
+            .unwrap_or_else(|| self.template.clone());
+        let light = self.light.column_clone(pos);
+        let mark = self
+            .pristine
+            .get(&pos)
+            .copied()
+            .unwrap_or(PristineMark::TEMPLATE);
+        let pristine = mark.from_generator && mark.revision == self.revision(pos);
+        Some(crate::column::ChunkColumn::new(chunk, light, pristine))
     }
 
     /// 把 `pos` 这个区块整个拿走。之后这个位置读起来和没改过的区块一样（模板）。

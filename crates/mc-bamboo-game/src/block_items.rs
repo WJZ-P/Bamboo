@@ -183,8 +183,10 @@ pub(crate) fn apply(region: &mut Region, pos: BlockPos, _placer: PlayerId, stack
     }
 
     if implicit.entries().is_empty() {
+        region.touch(pos);
         region.block_items.remove(&pos);
     } else {
+        region.touch(pos);
         region.block_items.insert(pos, implicit);
     }
     refresh_update_tag(region, pos);
@@ -299,6 +301,7 @@ pub(crate) fn custom_name(region: &Region, pos: BlockPos) -> Option<&Component> 
 
 /// 方块换了以后忘掉这一格的数据。区块里那份 NBT 由 `Chunk::set_block` 自己丢。
 pub(crate) fn forget(region: &mut Region, pos: BlockPos) {
+    region.touch(pos);
     region.block_items.remove(&pos);
 }
 

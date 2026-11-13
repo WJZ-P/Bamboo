@@ -1,13 +1,15 @@
 //! 全世界共用的游戏规则。
 //!
-//! 权威副本在 [`Global`](crate::global::Global) 上，不写存档。重启之后回到官方默认值。
-//! 方块逻辑读的是 [`Region`](crate::region::Region) 上的快照，改规则时当场同步。
+//! 权威副本在 [`Global`](crate::global::Global) 上，按官方写进
+//! `data/minecraft/game_rules.dat`，启动时读回。方块逻辑读的是
+//! [`Region`](crate::region::Region) 上的快照，改规则时当场同步。
 //!
 //! Game rules shared by the whole server.
 //!
-//! The authoritative copy lives on [`Global`](crate::global::Global) and is not saved.
-//! A restart restores the official defaults. Block logic reads the snapshot on
-//! [`Region`](crate::region::Region), which is updated as soon as a rule changes.
+//! The authoritative copy lives on [`Global`](crate::global::Global), is saved to
+//! `data/minecraft/game_rules.dat` like vanilla, and read back at startup. Block
+//! logic reads the snapshot on [`Region`](crate::region::Region), updated as soon
+//! as a rule changes.
 
 use mc_bamboo_blocks::BlockGameRules;
 use mc_bamboo_command::{
@@ -41,8 +43,10 @@ pub(crate) enum Assignment {
     Disabled(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Stored {
+/// 一条规则的当前值。`save_data` 用它和 `data/minecraft/game_rules.dat` 对拍。
+/// A rule's current value; `save_data` maps it to/from the saved-data file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stored {
     Bool(bool),
     Int(i32),
 }
@@ -113,6 +117,41 @@ impl GameRuleSet {
         region.send_command_feedback = self.bool(gamerules::SEND_COMMAND_FEEDBACK);
         region.log_admin_commands = self.bool(gamerules::LOG_ADMIN_COMMANDS);
         region.command_blocks_work = self.bool(gamerules::COMMAND_BLOCKS_WORK);
+    }
+
+    /// 存档里要写的规则：默认特性开着的那些，按注册表顺序，键是带命名空间的标识符。
+    /// `GameRuleMap.of(filterFeatures(DEFAULT_FLAGS))` 只装启用的规则。
+    /// Rules to save: the enabled (default feature set) ones in registry order,
+    /// keyed by their namespaced identifier, like `GameRuleMap.of(...)`.
+    pub(crate) fn saved(&self) -> Vec<(&'static str, Stored)> {
+        RULES
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.enabled)
+            .map(|(index, rule)| (rule.identifier, self.values[index]))
+            .collect()
+    }
+
+    /// 从 `game_rules.dat` 读入一条。官方 codec 只认启用的规则，布尔用 Byte、
+    /// 整数用 Int，越界或不认识的名字整条忽略（`SavedDataStorage` 读坏会退回默认）。
+    /// Apply one entry read from `game_rules.dat`. The official codec only accepts
+    /// enabled rules; out-of-range, wrong-typed or unknown entries are ignored.
+    pub(crate) fn apply_saved(&mut self, name: &str, value: Stored) {
+        let Some(index) = gamerules::find(name) else {
+            return;
+        };
+        let rule = &RULES[index];
+        if !rule.enabled {
+            return;
+        }
+        let stored = match (rule.kind, value) {
+            (GameRuleKind::Bool, Stored::Bool(v)) => Stored::Bool(v),
+            (GameRuleKind::Int, Stored::Int(v)) if (rule.min..=rule.max).contains(&v) => {
+                Stored::Int(v)
+            }
+            _ => return,
+        };
+        self.values[index] = stored;
     }
 
     /// `GameRule.serialize`：布尔是 `true`/`false`，整数是十进制。

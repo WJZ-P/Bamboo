@@ -82,7 +82,7 @@ pub struct ScheduledFluidTick {
 type ChunkTickCheck<'a> = dyn Fn(ChunkPos) -> bool + 'a;
 
 /// 一条队列，`T` 是方块或者流体的注册表 ID。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TickQueue<T> {
     queue: BTreeMap<TickOrder, (BlockPos, T)>,
     /// 同一格同一种排队时只留第一个，`LevelChunkTicks.ticksPerPosition`。
@@ -251,7 +251,7 @@ fn merge_pending<'a, T: Copy + 'a>(
 ///
 /// 每张队列另有一张「搁置表」：到期时所在区块不能 tick 的刻按区块收起来，
 /// 保留原来的完整排序键；区块恢复时整组放回主队列，和别的刻合在一起执行。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BlockTicks {
     /// 现在的 `gameTime`，由 [`run_scheduled_ticks`](crate::run_scheduled_ticks) 更新。
     now: i64,
@@ -262,6 +262,8 @@ pub struct BlockTicks {
     /// `PistonMovingBlockEntity.lastTicked` 的相对量：位置 → 最后一次 tick 的 gameTime。
     /// 官方不存这个字段，读盘回来是 0；这里空表等价于「本刻还没 tick 过」。
     ticked_entities: HashMap<BlockPos, i64>,
+    /// 计划刻增删过的区块，交给游戏层的存档改动标记。
+    dirty: std::collections::BTreeSet<ChunkPos>,
 }
 
 impl BlockTicks {
@@ -279,6 +281,19 @@ impl BlockTicks {
     /// 所以周期性活塞门的状态能重复、能进缓存键。
     pub fn entity_ticked_this_tick(&self, pos: BlockPos) -> bool {
         self.ticked_entities.get(&pos).copied() == Some(self.now)
+    }
+
+    fn mark_dirty(&mut self, pos: ChunkPos) {
+        self.dirty.insert(pos);
+    }
+
+    /// 取走「计划刻改过」的区块集合，由游戏层并进存档脏集合。
+    pub fn dirty_contains(&self, pos: ChunkPos) -> bool {
+        self.dirty.contains(&pos)
+    }
+
+    pub fn take_dirty(&mut self) -> std::collections::BTreeSet<ChunkPos> {
+        std::mem::take(&mut self.dirty)
     }
 
     /// 现在能不能按区块搬计划刻：两条队列里都没有取出、还没跑完的刻。
@@ -314,6 +329,7 @@ impl BlockTicks {
 
     /// 给方块排一个刻。这一格这个方块已经排着时什么也不做。
     pub fn schedule(&mut self, pos: BlockPos, block: usize, delay: i32, priority: TickPriority) {
+        self.mark_dirty(pos.chunk());
         if !self.blocks.has_scheduled(pos, block) {
             let order = self.order(pos, delay, priority);
             self.blocks.schedule(pos, block, order);
@@ -328,6 +344,7 @@ impl BlockTicks {
         delay: i32,
         priority: TickPriority,
     ) {
+        self.mark_dirty(pos.chunk());
         if !self.fluids.has_scheduled(pos, fluid) {
             let order = self.order(pos, delay, priority);
             self.fluids.schedule(pos, fluid, order);
@@ -451,6 +468,15 @@ impl BlockTicks {
             blocks: Vec::new(),
             fluids: Vec::new(),
         }))
+    }
+
+    /// 只读快照：在一份克隆上走 `take_chunk`，原表分毫不动。给已加载区块的
+    /// 只读存档编码用（补 11）。tick 中途（有在途刻）时返回 `None`，调用方稍后重试。
+    /// Read-only snapshot: run `take_chunk` on a clone, leaving the original
+    /// untouched. Returns `None` mid-tick (there are running ticks); the caller
+    /// retries later. Used by the loaded-chunk read-only encoder (item 11).
+    pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkTicks> {
+        self.clone().take_chunk(chunk).ok()
     }
 
     /// 把盒子里的计划刻放回表里。只在 tick 边界调用。

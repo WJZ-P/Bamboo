@@ -490,6 +490,19 @@ impl<C: ChunkBundle> Director<C> {
         (self.filtered, self.acted)
     }
 
+    /// 从和卸载存档同一个计数器里领一个写盘序号。运行中给「仍加载的脏区块」
+    /// 拍快照也用这个序号，交给 IO 线程后按 seq 大小丢掉同区块的旧快照，
+    /// 和卸载写共用一条单调递增的序列，不会互相盖掉。
+    ///
+    /// Allocate a save seq from the same counter as unload saves. Paced snapshots
+    /// of still-loaded dirty chunks use it too, so the IO thread's per-chunk
+    /// "keep the newest seq" rule shares one monotonic sequence across both paths.
+    pub fn allocate_save_seq(&mut self) -> SaveSeq {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
     pub fn now_tick(&self) -> u64 {
         self.now_tick
     }

@@ -4,21 +4,93 @@
 //! 按离玩家的距离交付/收回，每刻有个数上限；玩家脚下 3×3 不受上限约束。
 //! 视野里没交付的区块留在 `PlayerChunkSender` 的待发送集合里，交付了才发。
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_world::director::{
-    Desired, Director, DirectorConfig, Effect, Event, RegionMessage, Task, TaskId, TaskResult,
-    TicketOp,
+use mc_bamboo_storage::chunk_io::{ChunkIo, Reply};
+use mc_bamboo_world::{
+    director::{
+        Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
+        TaskResult, TicketOp,
+    },
+    store::ChunkRevision,
 };
 
 use crate::{
-    profiler::SubPhase,
+    chunk_codec::{ChunkCodec, InlineCodec, PackedChunk},
+    inbound::PlayerId,
+    profiler::{Metric, SubPhase},
     region::{Region, RegionColumn, parking::Parking},
 };
 
+/// 编解码累计耗时（纳秒）。解析/序列化内联在世界线程上做，这里量出总耗时，
+/// 关服时记进日志，写进汇报；以后挪进计算池时可以直接对比。
+/// Accumulated codec time (ns), used in the shutdown log / report.
+static CODEC_NANOS: AtomicU64 = AtomicU64::new(0);
+
+pub fn codec_nanos() -> u64 {
+    CODEC_NANOS.load(Ordering::Relaxed)
+}
+
+fn record_codec(started: Instant) {
+    let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    CODEC_NANOS.fetch_add(elapsed, Ordering::Relaxed);
+}
+
 /// 交付/收回每刻的个数上限。0 表示不限（只给剖析和回归对比用）。
 pub(crate) const DEFAULT_MAIL_BUDGET: usize = 64;
+/// 官方 `MinecraftServer.autoSave`：每 6000 刻一次全量（只写改过的）。
+/// Official `MinecraftServer.autoSave`: one full pass every 6000 ticks.
+pub(crate) const SAVE_INTERVAL_TICKS: u64 = 6000;
+/// 官方 `ChunkMap.saveChunksEagerly`：每刻最多 20 个，单区块 10 秒冷却。
+/// Official `ChunkMap.saveChunksEagerly`: at most 20 per tick.
+pub(crate) const EAGER_SAVES_PER_TICK: usize = 20;
+/// 单区块 10 秒（200 刻）冷却，照原版 `nextChunkSaveTime`。
+/// Per-chunk 10 second (200 tick) cooldown, like vanilla `nextChunkSaveTime`.
+pub(crate) const SAVE_COOLDOWN_TICKS: u64 = 200;
+/// 写盘连续失败时的退避：从 1 刻起翻倍，封顶 200 刻。失败绝不永久暂停，
+/// 磁盘恢复后下一次到点就重试（复查报告「致命 2」）。
+/// Backoff after consecutive write failures: 1,2,4,... capped at 200 ticks.
+/// A failure never pauses saving forever: retries resume when the disk recovers.
+pub(crate) const MAX_CONSECUTIVE_IO_FAILURES: u32 = 3;
+pub(crate) const MAX_SAVE_RETRY_BACKOFF_TICKS: u64 = 200;
+/// F6：在途快照、停放盒子、IO 信箱的硬上限，超了就暂缓卸载做背压。
+/// F6: hard caps on queued snapshots, parked boxes and the IO mailbox;
+/// exceeding any of them defers unloads (backpressure).
+pub(crate) const MAX_PENDING_WRITES: usize = 4096;
+pub(crate) const MAX_PARKED_BOXES: usize = 4096;
+pub(crate) const MAX_IO_MAILBOX: usize = 16384;
+/// 一次 `pump` 里最多跑多少事件/效果。只是防真死循环的护栏，不能让大世界
+/// 关服因为达到上限就 panic：超了记 error 并停在这一轮，不走 `assert!`。
+/// Guard against a truly non-convergent `pump`. A large world must never panic
+/// here: on exceeding the cap, log and stop the pump instead of asserting.
+pub(crate) const PUMP_ROUND_LIMIT: usize = 20_000_000;
+
+/// 一次待落盘的区块快照。
+#[cfg(test)]
+pub(crate) struct PendingWrite {
+    pub(crate) pos: ChunkPos,
+    pub(crate) seq: SaveSeq,
+    pub(crate) chunk: Option<Vec<u8>>,
+    pub(crate) entities: Option<Vec<u8>>,
+}
+#[cfg(not(test))]
+struct PendingWrite {
+    pos: ChunkPos,
+    seq: SaveSeq,
+    chunk: Option<Vec<u8>>,
+    entities: Option<Vec<u8>>,
+}
+
+/// 卸载快照的匀速提交：`ceil(待写数 / 6000)`，至少 1 个。
+fn save_batch_size(queue_len: usize) -> usize {
+    (queue_len as u64).div_ceil(SAVE_INTERVAL_TICKS).max(1) as usize
+}
+
 /// 收回的积压大了之后，每刻收掉其中的这么多分之一。
 ///
 /// 交付的上限是为了削进服的尖峰；收回要是也卡死在固定的个数上，很多人同时
@@ -62,6 +134,79 @@ pub(crate) struct DirectorHost {
     delivered: usize,
     reclaimed: usize,
     parked: usize,
+    /// 区块 IO 线程。`None` 表示这一局不接磁盘（测试 / 无限超平坦）。
+    io: Option<ChunkIo>,
+    codec: InlineCodec,
+    /// 每个区块最新一次写的 seq。收到 `Written` 回执时据此丢掉写盘途中缓冲。
+    pending_writes: HashMap<ChunkPos, SaveSeq>,
+    /// D6：还没提交给 IO 线程的快照，每刻匀速出队。
+    #[cfg(test)]
+    pub(crate) save_queue: VecDeque<PendingWrite>,
+    #[cfg(not(test))]
+    save_queue: VecDeque<PendingWrite>,
+    /// 每个区块上次提交写的刻数，用于 10 秒冷却。
+    save_cooldown: HashMap<ChunkPos, u64>,
+    /// 已交给 IO 线程、还没收到写完回执的玩家存档：`uuid -> (seq, bytes)`。
+    /// 官方 `PlayerDataStorage.save` 是同步写，没有「写了但盘上还是旧的」窗口；
+    /// 这里写是异步的，重进时优先用这份内存副本，避免丢进度。
+    /// Player saves handed to the IO thread but not yet confirmed written.
+    /// Vanilla saves synchronously, so there is no stale-on-disk window; here the
+    /// write is async, and a rejoin prefers this in-memory copy to avoid losing progress.
+    pending_players: HashMap<String, (u64, Vec<u8>)>,
+    /// 每个已加载区块上次「写盘成功」后的 `(版本号, 上层内容指纹)`（补 9）。
+    /// 只在 `Written` 回执到达时记，失败写不记，下一次正常判脏会重试。
+    /// `(revision, upper-content fingerprint)` at each chunk's last *successful*
+    /// write (item 9). Recorded only on the `Written` ack, so a failed write
+    /// stays dirty and is retried by the normal path (review fatal 2).
+    saved_revisions: HashMap<ChunkPos, (ChunkRevision, u64)>,
+    /// 每次已提交写的快照时的版本号与指纹，按 seq 记；`Written` 回执到达时才搬到
+    /// `saved_revisions`。比它旧的回执不改判脏状态。
+    /// Snapshot revision/fingerprint per submitted seq; moved into
+    /// `saved_revisions` only on its `Written` ack.
+    acked_revisions: HashMap<u64, (ChunkPos, ChunkRevision, u64)>,
+    /// 每个已加载区块上次被 D6 匀速快照的刻数，用于单区块 10 秒冷却。
+    /// Last tick each loaded chunk was snapshotted by D6, for the cooldown.
+    loaded_save_tick: HashMap<ChunkPos, u64>,
+    /// 已经收到 IO 回执的异步栅栏序号和成功标志；`World` 每刻取走，发等在上面的
+    /// `save-all` 成功 / 失败消息。
+    /// Async barrier acks (seq + ok); `World` drains them each tick to release
+    /// the waiting `save-all` success/failure messages.
+    flushed_barriers: Vec<(u64, bool)>,
+    /// 累计的写盘失败次数（每次都在 `poll_io` 记 `error!`）。关服时汇报。
+    /// Count of write failures (each logged with `error!` in `poll_io`).
+    io_failures: u64,
+    /// 连续失败次数；到阈值就暂停匀速写盘，一次成功清零。
+    /// Consecutive failures; paces saves off at the threshold, reset on success.
+    consecutive_io_failures: u32,
+    /// 连续失败的退避截止刻：这一刻之前不再把新快照交给 IO 线程，到点就重试。
+    /// 绝不永久暂停（复查报告「致命 2」）。
+    /// Backoff deadline for consecutive failures; retry when it passes. Never a
+    /// permanent pause (review report, fatal 2).
+    save_retry_after: u64,
+    /// 写盘失败或快照被推迟、还欠一次保存的区块（复查「致命 2」「中 6」）。
+    /// Chunks whose write failed or whose snapshot was deferred.
+    retry_dirty: HashSet<ChunkPos>,
+    /// 版本/上层内容已判脏、但这一刻还没轮到拍快照的区块。
+    dirty_pending: HashSet<ChunkPos>,
+    /// `/save-all` 请求还剩哪些快照没提交给 IO 线程。全部提交完才排自己的栅栏，
+    /// 所以「保存真正完成」包含这次请求的全部写（复查报告「中 8 / 中 9」）。
+    /// Pending save-all requests and the snapshot seqs they still owe IO. A
+    /// barrier is submitted only when all of them are handed over (review 8/9).
+    save_all_requests: VecDeque<(PlayerId, HashSet<u64>)>,
+    /// 已经排好栅栏、等 IO 回执的 `/save-all`：`World` 按 (栅栏序号, 发起者) 发消息。
+    /// Save-all barriers already enqueued, for `World` to await.
+    ready_save_barriers: Vec<(u64, PlayerId)>,
+    /// 最近一刻的刻数，失败退避据此算截止刻。
+    last_tick: u64,
+    /// 关服中：F6 背压必须让路，保证所有区块都被收回并保存。
+    /// Shutting down: F6 backpressure must stand aside so every chunk is saved.
+    shutting_down: bool,
+    /// 官方 `ServerLevel.noSave` 的反面：`/save-off` 时为假，停掉匀速保存
+    /// 和卸载写盘；玩家离开的写、`/save-all`（force）和关服不受它管。
+    /// Inverse of official `ServerLevel.noSave`: false during `/save-off`,
+    /// stopping paced/unload writes. Player-leave saves, `/save-all` (force)
+    /// and shutdown are unaffected.
+    saves_enabled: bool,
 }
 
 impl DirectorHost {
@@ -80,7 +225,140 @@ impl DirectorHost {
             delivered: 0,
             reclaimed: 0,
             parked: 0,
+            io: None,
+            codec: InlineCodec,
+            pending_writes: HashMap::new(),
+            save_queue: VecDeque::new(),
+            save_cooldown: HashMap::new(),
+            pending_players: HashMap::new(),
+            saved_revisions: HashMap::new(),
+            acked_revisions: HashMap::new(),
+            loaded_save_tick: HashMap::new(),
+            flushed_barriers: Vec::new(),
+            io_failures: 0,
+            consecutive_io_failures: 0,
+            save_retry_after: 0,
+            retry_dirty: HashSet::new(),
+            dirty_pending: HashSet::new(),
+            save_all_requests: VecDeque::new(),
+            ready_save_barriers: Vec::new(),
+            last_tick: 0,
+            shutting_down: false,
+            saves_enabled: true,
         }
+    }
+
+    /// 接上真实磁盘 IO。只在启用存档的一局里调用一次。
+    pub(crate) fn set_io(&mut self, io: ChunkIo) {
+        self.io = Some(io);
+    }
+
+    /// 关服排空：等此前所有写落盘并 `sync_all`。失败要报出来，不能当成功。
+    /// Drain at shutdown: wait for all writes to land and `sync_all`. A failure
+    /// is logged, never silently treated as success.
+    pub(crate) fn flush_io(&self) {
+        if let Some(Err(error)) = self.io.as_ref().map(|io| io.flush()) {
+            tracing::error!(%error, "chunk IO flush failed");
+        }
+    }
+
+    /// IO 线程是不是已经退出（panic / 通道断开）。世界线程据此当成致命错误走关服。
+    /// Whether the IO thread has quit (panic / disconnected channel); the world
+    /// thread treats this as a fatal error and shuts down.
+    pub(crate) fn io_failed(&self) -> bool {
+        self.io.as_ref().is_some_and(|io| io.worker_stopped())
+    }
+
+    /// 本次运行累计的写盘失败次数，关服时记进日志。
+    /// Write failures seen this run, logged at shutdown.
+    pub(crate) fn io_failures(&self) -> u64 {
+        self.io_failures
+    }
+
+    /// 每刻由 `World` 按 `SaveSession::auto_save` 刷新（F7 / 官方 `noSave`）。
+    /// Refreshed each tick by `World` from `SaveSession::auto_save` (F7).
+    pub(crate) fn set_saves_enabled(&mut self, enabled: bool) {
+        self.saves_enabled = enabled;
+    }
+
+    /// 登记一次 `/save-all`：它排进去的快照全部交给 IO 之后才排自己的栅栏。
+    /// Register a `/save-all`: its own barrier is queued once all of its
+    /// snapshots have been handed to IO (review 8/9).
+    pub(crate) fn begin_save_all(&mut self, source: PlayerId) -> Option<()> {
+        self.io.as_ref()?;
+        let seqs: HashSet<u64> = self.save_queue.iter().map(|pending| pending.seq).collect();
+        // `/save-all` 是强制保存：这次请求的快照一次性交给 IO 线程，不受匀速
+        // 和退避影响。成功消息仍等自己那道栅栏（中 8 / 中 9）。
+        // Force: hand this request's snapshots to IO at once. Success still
+        // waits for its own barrier (review 8/9).
+        for pending in self.save_queue.drain(..) {
+            if let Some(io) = &self.io {
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
+        self.save_all_requests.push_back((source, seqs));
+        // 立刻排栅栏：这次请求的写已经全部在 FIFO 信箱里，栅栏在它们之后。
+        if let Some(seq) = self.submit_flush_barrier() {
+            self.ready_save_barriers.push((seq, source));
+        }
+        Some(())
+    }
+
+    /// 每次 `/save-all` 的栅栏在它自己的写之后排队；这里只推进等待集合的记账。
+    /// 失败窗口按栅栏序号在 `World` 里配对，两道栅栏之间夹别的失败不会错位（中 9）。
+    /// Each `/save-all` barrier is queued behind its own writes; this only
+    /// advances the bookkeeping. `World` pairs results by barrier seq (review 9).
+    fn release_ready_save_barriers(&mut self) {
+        self.save_all_requests.clear();
+    }
+
+    /// 取走已经排好的栅栏：`World` 用 `(序号, 发起者)` 等各自的回执。
+    pub(crate) fn take_ready_save_barriers(&mut self) -> Vec<(u64, PlayerId)> {
+        std::mem::take(&mut self.ready_save_barriers)
+    }
+
+    /// 排一道不阻塞的 IO 栅栏，返回序号；`None` 表示这一局没接磁盘（无需等待）。
+    /// Enqueue a non-blocking IO barrier; `None` means no disk is attached.
+    pub(crate) fn submit_flush_barrier(&mut self) -> Option<u64> {
+        self.io.as_ref().map(|io| io.submit_barrier())
+    }
+
+    /// 取走这一刻收到的栅栏回执（序号 + 成功标志），由 `World` 发等在上面的消息。
+    /// Drain the barrier acks (seq + ok) this tick; `World` releases the messages.
+    pub(crate) fn take_flushed_barriers(&mut self) -> Vec<(u64, bool)> {
+        std::mem::take(&mut self.flushed_barriers)
+    }
+
+    /// 把 `SaveSession` 编出的 `level.dat` / `data/` 字节交给 IO 线程写，
+    /// 世界线程只编码、不碰磁盘（F3 / R5）。
+    /// Hand the encoded `level.dat`/`data/` bytes to the IO thread; the world
+    /// thread only encodes and never writes to disk (F3 / R5).
+    pub(crate) fn submit_file_writes(&mut self, files: Vec<crate::save_session::EncodedFile>) {
+        if let Some(io) = &self.io {
+            for file in files {
+                io.submit_file_write(file.path, file.backup, file.bytes);
+            }
+        }
+    }
+
+    /// 提交一名玩家的存档写，并在内存里记下"已交给 IO、还没落盘"的副本。
+    /// 收到 IO 线程的 `PlayerWritten` 回执（`poll_io`）再删掉。
+    /// Submit a player save and remember the in-flight copy in memory. The IO
+    /// thread's `PlayerWritten` receipt (`poll_io`) removes it.
+    pub(crate) fn submit_player_write(&mut self, uuid: &str, bytes: Vec<u8>) {
+        if let Some(io) = &self.io {
+            let seq = io.submit_player_write(uuid, bytes.clone());
+            self.pending_players.insert(uuid.to_owned(), (seq, bytes));
+        }
+    }
+
+    /// 重进时优先用这份内存副本，而不是连接层读到的盘上旧字节。
+    /// On rejoin prefer this in-memory copy over the (possibly stale) disk bytes
+    /// read by the connection layer.
+    pub(crate) fn pending_player(&self, uuid: &str) -> Option<&[u8]> {
+        self.pending_players
+            .get(uuid)
+            .map(|(_, bytes)| bytes.as_slice())
     }
 
     /// 测试/无限超平坦专用：只记账，不派任务也不碰 region。
@@ -93,6 +371,13 @@ impl DirectorHost {
     #[allow(dead_code)]
     pub(crate) fn director(&self) -> &Director<Box<RegionColumn>> {
         &self.director
+    }
+
+    /// 测试专用：直接看 IO 线程句柄（收写回执、读回磁盘）。
+    /// Test-only: direct access to the IO handle (write acks, read-back).
+    #[cfg(test)]
+    pub(crate) fn io(&self) -> Option<&ChunkIo> {
+        self.io.as_ref()
     }
 
     pub(crate) fn director_mut(&mut self) -> &mut Director<Box<RegionColumn>> {
@@ -160,7 +445,7 @@ impl DirectorHost {
             region.profiler.end_sub();
             return;
         }
-        self.pump(region, Event::Tickets { ops });
+        self.pump(region, vec![Event::Tickets { ops }]);
     }
 
     fn apply_infinite_ticket(&mut self, op: TicketOp) {
@@ -189,6 +474,7 @@ impl DirectorHost {
 
     /// 每刻推进。预算和计数由 [`Self::begin_tick`] 在刻开头重置。
     pub(crate) fn tick(&mut self, region: &mut Region, now_tick: u64) {
+        self.last_tick = now_tick;
         if self.infinite_flat {
             region.profiler.start_sub(SubPhase::TicketUpdate);
             self.director.tickets_mut().tick(&mut |_| false);
@@ -196,43 +482,404 @@ impl DirectorHost {
             region.profiler.end_sub();
             return;
         }
-        self.pump(region, Event::Tick { now_tick });
+        self.pace_saves(now_tick);
+        self.release_ready_save_barriers();
+        self.pump(region, vec![Event::Tick { now_tick }]);
     }
 
-    /// 关服：收回全部区块、停放完所有快照。
-    // 任务 B 接真实 IO 后由 `World::shut_down` 调用：关服要等全部写入落盘。
-    #[allow(dead_code)]
-    pub(crate) fn shutdown(&mut self, _region: &mut Region) {
+    /// 同一区块在 `save_queue` 里只留最新一份快照（官方 `IOWorker.store`
+    /// 覆盖同位置的 `pendingStore.data`），且不接收比已排队的更旧的快照。
+    /// Keep only the newest snapshot per chunk in `save_queue` (official
+    /// `IOWorker.store` overwrites the same position); ignore older stragglers.
+    fn enqueue_snapshot(&mut self, pending: PendingWrite) {
+        if self
+            .save_queue
+            .iter()
+            .any(|other| other.pos == pending.pos && other.seq > pending.seq)
+        {
+            return;
+        }
+        self.save_queue.retain(|other| other.pos != pending.pos);
+        self.save_queue.push_back(pending);
+    }
+
+    /// 积压到上限就背压：暂缓卸载，已加载区块数和内存都有界（F6）。
+    /// Backpressure: defer reclaims once any cap is reached (F6).
+    fn save_backpressure(&self) -> bool {
+        if self.shutting_down {
+            return false;
+        }
+        self.save_queue.len() >= MAX_PENDING_WRITES
+            || self.parking.len() >= MAX_PARKED_BOXES
+            || self
+                .io
+                .as_ref()
+                .is_some_and(|io| io.in_flight_requests() >= MAX_IO_MAILBOX)
+    }
+
+    /// D6：每刻把 `ceil(待写数 / 6000)`（至少 1）个快照提交给 IO 线程。
+    /// 单区块 10 秒冷却只在「队列里还有同区块更新的快照」时跳过旧快照，
+    /// 保证冷却不会丢掉一个孤立的快照。
+    ///
+    /// D6: submit `ceil(pending / 6000)` (at least 1) snapshots per tick. The
+    /// per-chunk cooldown only skips a stale snapshot when a newer one for the
+    /// same chunk is still queued, so an isolated snapshot is never dropped.
+    fn pace_saves(&mut self, now_tick: u64) {
+        // `save-off` 照官方 `ChunkMap.tick`：noSave 时不 processUnloads，
+        // 也就是不把卸载快照交给 IO 线程（F7）。`/save-all` / 关服不走这里。
+        // `save-off` mirrors official `ChunkMap.tick`: noSave skips
+        // processUnloads, so unload writes are not handed to IO (F7).
+        // `/save-all` and shutdown do not go through this path.
+        if self.io.is_none()
+            || self.save_queue.is_empty()
+            || !self.saves_enabled
+            || now_tick < self.save_retry_after
+        {
+            return;
+        }
+        let count = save_batch_size(self.save_queue.len());
+        let mut to_write = Vec::new();
+        for _ in 0..count {
+            let Some(pending) = self.save_queue.pop_front() else {
+                break;
+            };
+            let last = self.save_cooldown.get(&pending.pos).copied().unwrap_or(0);
+            let has_newer = self
+                .save_queue
+                .iter()
+                .any(|other| other.pos == pending.pos && other.seq > pending.seq);
+            if now_tick.saturating_sub(last) < SAVE_COOLDOWN_TICKS && has_newer {
+                continue;
+            }
+            self.save_cooldown.insert(pending.pos, now_tick);
+            to_write.push(pending);
+        }
+        if let Some(io) = &self.io {
+            for pending in to_write {
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
+    }
+
+    /// 列出「已加载、方块/光照版本号或上层内容改动标记和上次成功写盘不同」的脏区块。
+    /// 上层内容只从 `Region::dirty` 集合取，绝不每刻扫全局表或所有已加载区块
+    /// （复查报告「高 3」）。`content_fingerprints` 只在 `cfg(test)` 里作校验器。
+    /// List loaded chunks whose block/light revision OR upper-content dirty mark
+    /// differs from the last successful write. Upper-layer changes come only
+    /// from the per-chunk dirty set, never a full-table scan (review high 3).
+    #[cfg(test)]
+    pub(crate) fn dirty_loaded_chunks(
+        &mut self,
+        region: &mut Region,
+        force: bool,
+    ) -> Vec<ChunkPos> {
+        self.dirty_loaded_chunks_impl(region, force)
+    }
+
+    #[cfg(not(test))]
+    fn dirty_loaded_chunks(&mut self, region: &mut Region, force: bool) -> Vec<ChunkPos> {
+        self.dirty_loaded_chunks_impl(region, force)
+    }
+
+    fn dirty_loaded_chunks_impl(&mut self, region: &mut Region, force: bool) -> Vec<ChunkPos> {
+        let mut dirty = Vec::new();
+        // 方块/光照的版本号：只取「版本真的变过」的区块集合，不扫全部已加载区块。
+        let changed = region.chunks.take_changed_chunks();
+        for pos in changed {
+            if !region.chunks.is_loaded(pos) {
+                continue;
+            }
+            let revision = region.chunks.revision(pos);
+            let saved = self.saved_revisions.get(&pos).copied();
+            let revision_changed =
+                saved.is_none_or(|(saved_revision, _)| saved_revision != revision);
+            // 从盘上/模板交付进来的区块还没存过：照官方 `isUnsaved` 只有真被
+            // 改过的才算，原样区块不写。已保存过的区块只按版本变化判脏。
+            let changed_from_generator = !region.chunks.is_pristine(pos);
+            let upper_dirty =
+                region.dirty.pending_contains(pos) || region.block_ticks.dirty_contains(pos);
+            if revision_changed
+                && (saved.is_some() || changed_from_generator || upper_dirty || force)
+            {
+                dirty.push(pos);
+            } else if revision_changed {
+                // 版本变了但这一刻不该存：把标记留到下一刻再判。
+                region.chunks.mark_changed(pos);
+            }
+        }
+        // 上层内容改动集合：只有真正改过的区块在这里，开销和集合大小有关。
+        // 计划刻的增删单独记在 BlockTicks 里，一并取走。
+        for pos in region.block_ticks.take_dirty() {
+            region.dirty.mark(pos);
+        }
+        for pos in region.dirty.take() {
+            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+                dirty.push(pos);
+            }
+        }
+        for pos in &self.retry_dirty {
+            if region.chunks.is_loaded(*pos) && !dirty.contains(pos) {
+                dirty.push(*pos);
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        #[cfg(test)]
+        {
+            // 校验器：被判成「没改过」的已保存区块，重新编码必须和上次写出的字节一致。
+            for (pos, (revision, _)) in self.saved_revisions.clone() {
+                if !dirty.contains(&pos) && region.chunks.revision(pos) == revision {
+                    let immutable: &Region = region;
+                    immutable.dirty.verify_clean(immutable, pos);
+                }
+            }
+        }
+        dirty
+    }
+
+    /// D6：每刻给 `ceil(已加载脏区块数 / 6000)`（至少 1）个仍加载的脏区块拍快照
+    /// 交给 IO 线程，单区块 10 秒冷却；`enabled=false`（`save-off`）时整个停掉。
+    /// 快照用 `encode_loaded_column` 走和卸载存盘同一条验证过的编码路径，不卸载区块。
+    ///
+    /// D6: each tick snapshot `ceil(dirty/6000)` (at least 1) still-loaded dirty
+    /// chunks to the IO thread with a per-chunk 10s cooldown; fully disabled
+    /// during save-off. Snapshots go through the verified unload-save encoder.
+    pub(crate) fn save_loaded_dirty(&mut self, region: &mut Region, now_tick: u64, enabled: bool) {
+        if !enabled || self.io.is_none() {
+            return;
+        }
+        // 卸载后不必留着记账，避免长局里无界增长。
+        // Drop bookkeeping for unloaded chunks so it cannot grow without bound.
+        self.saved_revisions
+            .retain(|pos, _| region.chunks.is_loaded(*pos));
+        self.loaded_save_tick
+            .retain(|pos, _| region.chunks.is_loaded(*pos));
+
+        region.profiler.start_sub(SubPhase::StorageDirty);
+        let mut dirty = self.dirty_loaded_chunks(region, false);
+        region.profiler.end_sub();
+        // 上一刻没轮到的脏区块留在集合里，不会因为改动标记被取走而丢掉。
+        for pos in std::mem::take(&mut self.dirty_pending) {
+            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+                dirty.push(pos);
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        // 6000 刻那一次全量：把改动集合里的全部都拍下来，其余每刻最多 20 个。
+        // 单区块 10 秒冷却；失败重试和待算光照推迟的区块不受冷却限制。
+        let full = now_tick.is_multiple_of(SAVE_INTERVAL_TICKS);
+        let count = if full {
+            usize::MAX
+        } else {
+            EAGER_SAVES_PER_TICK
+        };
+        region
+            .profiler
+            .record(Metric::StorageCandidates, dirty.len() as u64);
+        let mut remaining = Vec::new();
+        let mut eligible = Vec::new();
+        for pos in dirty {
+            let cooling = self.loaded_save_tick.get(&pos).is_some_and(|&last| {
+                now_tick.saturating_sub(last) < SAVE_COOLDOWN_TICKS
+                    && !self.retry_dirty.contains(&pos)
+            });
+            if cooling || eligible.len() >= count {
+                remaining.push(pos);
+            } else {
+                eligible.push(pos);
+            }
+        }
+        self.dirty_pending.extend(remaining);
+        region
+            .profiler
+            .record(Metric::StorageSnapshots, eligible.len() as u64);
+        for pos in eligible {
+            self.snapshot_loaded(region, pos, now_tick);
+        }
+        // 照官方 `ChunkMap.saveChunksEagerly`：每刻最多 20 个交给 IO 线程。
+        // 仍走同一个有上限的队列，`pace_saves` 只负责卸载快照的匀速部分。
+        // Official `saveChunksEagerly`: at most 20 per tick, through the same
+        // bounded queue; `pace_saves` only paces unload snapshots.
+        if let Some(io) = &self.io {
+            for _ in 0..20 {
+                let Some(pending) = self.save_queue.pop_front() else {
+                    break;
+                };
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
+    }
+
+    /// `/save-all`：立刻给所有已加载脏区块拍快照交给 IO 线程，不受匀速和冷却限制。
+    /// `/save-all`: snapshot every loaded dirty chunk to the IO thread at once,
+    /// ignoring the pacing and cooldown.
+    pub(crate) fn snapshot_all_dirty(&mut self, region: &mut Region, now_tick: u64) {
+        if self.io.is_none() {
+            return;
+        }
+        // `/save-all` 是显式的强制重试：清掉退避，把内存里还在的快照再提交一次。
+        // 后续失败会重新按连续次数退避，但绝不永久暂停。
+        // `save-all` is an explicit forced retry: clear the backoff and submit
+        // everything still in memory. Later failures back off again, never pause forever.
+        self.save_retry_after = 0;
+        let mut dirty = self.dirty_loaded_chunks(region, true);
+        // 冷却期 / 匀速没轮到而留到下一刻的脏区块，强制保存也要一起写。
+        for pos in std::mem::take(&mut self.dirty_pending) {
+            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+                dirty.push(pos);
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        // 强制保存不看单区块冷却。
+        self.loaded_save_tick.clear();
+        for pos in dirty {
+            self.snapshot_loaded(region, pos, now_tick);
+        }
+        // 强制保存：把这次刚拍的快照立刻交给 IO 线程，不等匀速（官方
+        // `saveEverything` 同步存所有已经改过的区块）。仍走同一个有上限的队列。
+        // Force: hand the fresh snapshots to IO immediately (official
+        // `saveEverything`), still through the bounded queue.
+        if let Some(io) = &self.io {
+            for pending in self.save_queue.drain(..) {
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
+            }
+        }
+    }
+
+    /// 给一个已加载脏区块拍快照交给 IO 线程，并记下落定后的版本号和这一刻。
+    /// 编码失败或这一刻不适合搬盒子就什么也不记，下一刻重试。
+    /// Snapshot one loaded dirty chunk to the IO thread and record the settled
+    /// revision and tick. On failure (or when the tables are busy) record nothing
+    /// so it is retried on a later tick.
+    fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
+        region.profiler.start_sub(SubPhase::StorageEncode);
+        let result = region.encode_loaded_column(pos);
+        region.profiler.end_sub();
+        let Some(result) = result else {
+            // 有待算光照 / 表正忙：推迟到下一刻，不记「已存」。
+            self.retry_dirty.insert(pos);
+            self.loaded_save_tick.remove(&pos);
+            return;
+        };
+        match result {
+            Ok(packed) => {
+                // 和卸载写共用同一个单调递增的 seq，IO 线程据此丢旧快照。
+                // Share one monotonic seq source with unload saves.
+                let seq = self.director.allocate_save_seq();
+                // 和卸载写走同一条有上限的队列，不再直接塞进无界 IO 信箱
+                // （复查报告「中：snapshot_loaded 绕过队列和背压」）。
+                // Use the same bounded queue as unload saves instead of
+                // submitting straight into the unbounded IO mailbox.
+                self.enqueue_snapshot(PendingWrite {
+                    pos,
+                    seq,
+                    chunk: packed.chunk,
+                    entities: packed.entities,
+                });
+                self.pending_writes.insert(pos, seq);
+                // 「已保存」只在 Written 回执到达时记（复查「致命 2」）：
+                // 快照刚排进队列时记成已存会让写盘失败的改动永远不再判脏。
+                // "Saved" is only recorded on the Written ack: recording it
+                // at enqueue time makes a failed write never dirty again.
+                self.acked_revisions
+                    .insert(seq, (pos, region.chunks.revision(pos), 0));
+                self.loaded_save_tick.insert(pos, now_tick);
+                self.dirty_pending.remove(&pos);
+                // 已经重新拍成新快照了：不再每刻重复重拍，等 Written 回执再彻底清。
+                self.retry_dirty.remove(&pos);
+            }
+            Err(error) => {
+                tracing::warn!(%error, ?pos, "could not encode a loaded chunk for saving");
+            }
+        }
+    }
+
+    /// 关服：收回全部已加载区块、把脏快照交给 IO 线程写盘，再排空 IO 线程。
+    /// 关服不设每刻预算，一次收完全部区块；`flush_io` 等所有写落盘并 `sync_all`。
+    /// 每一步都不 panic，任何前提不满足只会导致对应区块没存上，不让进程挂死。
+    ///
+    /// Shutdown: reclaim every loaded chunk, hand dirty snapshots to the IO thread,
+    /// then drain it. No per-tick budget at shutdown; `flush_io` waits for all writes
+    /// and calls `sync_all`.
+    pub(crate) fn shutdown(&mut self, region: &mut Region) {
         if self.infinite_flat {
             return;
         }
-        // 任务 A 没有真实磁盘：停放的盒子只活在内存表里，关服后进程就结束了。
-        // 逐柱收回几千个区块只会拖住关服，没有可观察的收益，所以这里只让
-        // Director 的状态机走完 Shutdown，不执行它派出的 Reclaim/Save。
-        // 任务 B 接真实 IO 时要把这里换成「等全部写入落盘」。
-        let mut events = vec![Event::Shutdown];
-        let mut rounds = 0;
-        while let Some(event) = events.pop() {
-            rounds += 1;
-            assert!(rounds < 100_000, "Director 的关服循环没有收敛");
-            for effect in self.director.handle(event) {
-                if let Effect::Submit {
-                    id,
-                    generation,
-                    task,
-                } = effect
-                {
-                    events.push(self.run_task(id, generation, task));
+        // 关服照官方最后全量保存：解除退避和 F6 背压，把内存里还在的
+        // 快照再试一次，所有区块都要收回（复查「致命 2」：失败盒子也要重写）。
+        // Shutdown is the final full save: lift the backoff and F6 backpressure,
+        // retry everything still in memory, including failed parked boxes.
+        self.save_retry_after = 0;
+        self.shutting_down = true;
+        self.budget = MailBudget {
+            deliveries: 0,
+            reclaims: 0,
+        };
+        self.budget_left = self.budget;
+        // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
+        region.chunks.finish_light_updates();
+        self.pump(region, vec![Event::Shutdown]);
+        // 写盘失败后还没写成功的盒子：用同一条编码路径重新提交（致命 2）。
+        // Re-encode every parked box whose write never succeeded, using the
+        // same codec as unload saves (fatal 2).
+        let failed_boxes = self.parking.take_all();
+        for (pos, column) in failed_boxes {
+            let seq = self.director.allocate_save_seq();
+            match self.codec.encode(pos, &column) {
+                Ok(packed) => self.enqueue_snapshot(PendingWrite {
+                    pos,
+                    seq,
+                    chunk: packed.chunk,
+                    entities: packed.entities,
+                }),
+                Err(error) => {
+                    tracing::error!(%error, ?pos, "could not encode a parked chunk at shutdown")
                 }
+            }
+            // 没写成功的盒子留在内存里，关服日志明确列出。
+            self.parking.park(pos, column);
+        }
+        // 关服不等 D6 匀速：把还没提交的快照一次性全部交给 IO 线程。
+        // Shutdown does not pace: hand every remaining snapshot to the IO thread.
+        let mut unsaved = Vec::new();
+        if let Some(io) = &self.io {
+            for pending in self.save_queue.drain(..) {
+                unsaved.push(pending.pos);
+                io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
             }
         }
         self.deliveries.clear();
         self.reclaims.clear();
-        self.budget_left = MailBudget {
-            deliveries: 0,
-            reclaims: 0,
-        };
-        self.flush_region_mail(_region);
+        self.flush_io();
+        // 磁盘到关服还在失败时，明确列出没存下来的区块，再照常退出。
+        if self.io_failures > 0 && !unsaved.is_empty() {
+            tracing::error!(
+                ?unsaved,
+                "these chunks still had writes pending at shutdown; IO failures were logged"
+            );
+        }
+    }
+
+    /// `pump` 达到收敛上限：不 panic，关服时明确列出没收回、没存下来的区块。
+    /// On a non-convergent pump, log the chunks that were never reclaimed/saved.
+    fn report_unconverged_pump(&self, region: &Region, rounds: usize) {
+        let mut left: Vec<ChunkPos> = region
+            .chunks
+            .loaded_states()
+            .into_iter()
+            .map(|(pos, _, _)| pos)
+            .collect();
+        left.sort_unstable();
+        tracing::error!(
+            rounds,
+            ?left,
+            queued = self.save_queue.len(),
+            parked = self.parking.len(),
+            shutting_down = self.shutting_down,
+            "Director event loop did not converge; chunks below may not have been saved"
+        );
     }
 
     /// 处理一个事件和它引发的全部任务，直到没有新效果。
@@ -242,14 +889,22 @@ impl DirectorHost {
     /// 同一刻里 Director 可能因为 `Delivered` / `Returned` 又派出新任务，
     /// 所以主循环要跑到没有新消息为止；`flush_region_mail` 每轮都只花掉
     /// 这一刻剩下的预算，预算用完之后它返回空事件，循环就停。
-    fn pump(&mut self, region: &mut Region, event: Event<Box<RegionColumn>>) {
-        let mut events = vec![event];
+    fn pump(&mut self, region: &mut Region, initial: Vec<Event<Box<RegionColumn>>>) {
+        // 一批初始事件（例如同一刻收回的所有读盘结果）一起处理，循环末尾只
+        // 交付一次，保证按距离排序、出生点 3×3 在同一批里。
+        // A batch of initial events (e.g. all reads collected this tick) is driven
+        // together and delivered once, keeping distance order and the 3x3 spawn
+        // footprint in a single batch.
+        let mut events = initial;
         let mut rounds = 0;
         loop {
             // 先把队列里的事件和它们引发的任务结果全部跑完。
             while let Some(event) = events.pop() {
                 rounds += 1;
-                assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
+                if rounds >= PUMP_ROUND_LIMIT {
+                    self.report_unconverged_pump(region, rounds);
+                    return;
+                }
                 // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
                 // 单独记在 `ticket_update`；其余事件是纯状态机推进。
                 let sub = match event {
@@ -268,11 +923,19 @@ impl DirectorHost {
                             task,
                         } => {
                             rounds += 1;
-                            assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
+                            if rounds >= PUMP_ROUND_LIMIT {
+                                self.report_unconverged_pump(region, rounds);
+                                return;
+                            }
                             region.profiler.start_sub(SubPhase::DirectorEvents);
                             let next = self.run_task(id, generation, task);
                             region.profiler.end_sub();
-                            events.push(next);
+                            // 异步读盘任务这一刻不产生回执，结果在下一刻开头从信箱收回。
+                            // An async disk read produces no ack this tick; its result
+                            // is collected from the mailbox at the start of the next tick.
+                            if let Some(next) = next {
+                                events.push(next);
+                            }
                         }
                         Effect::Cancel { .. } => {}
                         Effect::ToRegion(message) => self.region_message(region, message),
@@ -282,7 +945,11 @@ impl DirectorHost {
                             self.parked += 1;
                             region.profiler.end_sub();
                         }
-                        Effect::DropSnapshot { .. } => {}
+                        Effect::DropSnapshot { pos, seq } => {
+                            if let Some(io) = &self.io {
+                                io.drop_snapshot(pos, seq);
+                            }
+                        }
                         Effect::Warn { message } => tracing::warn!(%message, "chunk director"),
                     }
                 }
@@ -296,40 +963,260 @@ impl DirectorHost {
         }
     }
 
-    /// 内联执行器。任务全部是纯函数或内存表操作，不碰文件、不起线程。
+    /// 执行器。解析/序列化内联在世界线程上做（在 `ChunkCodec` 接口后，可挪进计算池），
+    /// 磁盘读写交给 IO 线程。`None` 表示这是一个异步读任务，结果下一刻从信箱收回。
+    ///
+    /// The executor: parse/serialize inline on the world thread (behind `ChunkCodec`),
+    /// disk IO on the IO thread. `None` means an async read whose result arrives next tick.
     fn run_task(
         &mut self,
         id: TaskId,
         generation: u64,
         task: Task<Box<RegionColumn>>,
-    ) -> Event<Box<RegionColumn>> {
+    ) -> Option<Event<Box<RegionColumn>>> {
         let pos = task.pos();
         let result = match task {
-            // 停放表里是整个盒子（不经过 NBT）。命中就直接当成解码结果交还，
-            // 没命中才让 Director 走生成流水线。
-            Task::Read { pos } => match self.parking.take(pos) {
-                Some(column) => TaskResult::Decoded { column },
-                None => TaskResult::Read { bytes: None },
-            },
-            Task::Decode { .. } => TaskResult::Decoded {
-                column: Box::new(RegionColumn::from_template()),
-            },
+            // 写盘途中缓冲（Parking）里是整个盒子的最新快照。命中就直接交还，
+            // 保证「写盘途中又被请求回来」拿到最新内容而不是从盘上读旧的。
+            Task::Read { pos } => {
+                if let Some(column) = self.parking.take(pos) {
+                    TaskResult::Decoded { column }
+                } else if let Some(io) = &self.io {
+                    if io.has_chunk(pos) {
+                        // 盘上有这个区块：发异步读，结果下一刻从信箱收回。
+                        io.submit_read(pos, id, generation);
+                        return None;
+                    }
+                    // 盘上没有：和接存档前一样同步走超平坦模板，不引入一 tick
+                    // 的读盘延迟，进服首批次区块的顺序保持不变。
+                    TaskResult::Read { bytes: None }
+                } else {
+                    TaskResult::Read { bytes: None }
+                }
+            }
+            Task::Decode { bytes, .. } => {
+                if self.io.is_some() {
+                    let started = Instant::now();
+                    let outcome = match PackedChunk::unpack(&bytes) {
+                        Err(error) => TaskResult::BadChunk { error },
+                        Ok(packed) => match self.codec.decode(pos, &packed) {
+                            Ok(column) => TaskResult::Decoded { column },
+                            Err(error) => TaskResult::BadChunk { error },
+                        },
+                    };
+                    record_codec(started);
+                    outcome
+                } else {
+                    TaskResult::Decoded {
+                        column: Box::new(RegionColumn::from_template()),
+                    }
+                }
+            }
             Task::Generate { stage, column, .. } => TaskResult::Generated {
                 stage,
                 column: column.unwrap_or_else(|| Box::new(RegionColumn::from_template())),
             },
             Task::Assemble { column, .. } => TaskResult::Assembled { column },
             Task::Save { seq, column, .. } => {
-                // 盒子随完成事件交还 Director；有票就直接重新交付，
-                // 没票才由 `Effect::Park` 放进停放表。
-                TaskResult::Saved { seq, column }
+                if self.io.is_some() {
+                    let started = Instant::now();
+                    let encoded = self.codec.encode(pos, &column);
+                    record_codec(started);
+                    match encoded {
+                        Ok(packed) => {
+                            // 不直接写盘：进 D6 匀速队列，同区块只留最新一份（F6）。
+                            self.enqueue_snapshot(PendingWrite {
+                                pos,
+                                seq,
+                                chunk: packed.chunk,
+                                entities: packed.entities,
+                            });
+                            self.pending_writes.insert(pos, seq);
+                            // 卸载写不进已加载判脏路径；回执仍要清掉在途标记。
+                            self.acked_revisions
+                                .insert(seq, (pos, ChunkRevision::default(), 0));
+                            TaskResult::Saved { seq, column }
+                        }
+                        Err(error) => {
+                            // 编码失败不能把盒子弄丢：留在停放表里，下次卸载再试。
+                            self.parking.park(pos, column);
+                            TaskResult::SaveFailed { seq, error }
+                        }
+                    }
+                } else {
+                    TaskResult::Saved { seq, column }
+                }
             }
         };
-        Event::TaskDone {
+        Some(Event::TaskDone {
             id,
             pos,
             generation,
             result,
+        })
+    }
+
+    /// 每刻开头收回 IO 信箱：读结果变成 `TaskDone` 喂给 Director，
+    /// 写完成回执用来丢掉写盘途中缓冲。
+    ///
+    /// Drain the IO mailbox at the start of each tick: read results become
+    /// `TaskDone` events; write acks release the write-in-progress buffer.
+    pub(crate) fn poll_io(&mut self, region: &mut Region) {
+        let mut replies = Vec::new();
+        if let Some(io) = &self.io {
+            while let Some(reply) = io.try_recv() {
+                replies.push(reply);
+            }
+        }
+        let mut done = Vec::new();
+        let mut known_updates: Vec<(ChunkPos, bool, u64)> = Vec::new();
+        let mut dropped_inflight: Vec<(ChunkPos, Option<u64>)> = Vec::new();
+        for reply in replies {
+            match reply {
+                Reply::Read {
+                    pos,
+                    task_id,
+                    generation,
+                    chunk,
+                    entities,
+                    error,
+                } => {
+                    let bytes = match error {
+                        Some(message) => {
+                            tracing::warn!(%message, ?pos, "chunk read failed; using flat template");
+                            None
+                        }
+                        None if chunk.is_none() => None,
+                        None => Some(PackedChunk { chunk, entities }.pack()),
+                    };
+                    done.push(Event::TaskDone {
+                        id: task_id,
+                        pos,
+                        generation,
+                        result: TaskResult::Read { bytes },
+                    });
+                }
+                Reply::Written { pos, seq, present } => {
+                    // 写成功之后才把 `known` 置成盘上真实状态（F1）。
+                    // 旧回执只清自己的 `(pos, seq)`，绝不抹掉较新的在途写（致命 1）。
+                    // Only after a successful write does `known` reflect the disk;
+                    // an older ack never clears a newer in-flight write (fatal 1).
+                    known_updates.push((pos, present, seq));
+                    if self.pending_writes.get(&pos) == Some(&seq) {
+                        self.pending_writes.remove(&pos);
+                        // 只有这个位置没有更晚的写时才释放盒子。
+                        if let Some(io) = &self.io
+                            && !io.has_in_flight_write(pos, seq)
+                        {
+                            let _ = self.parking.take(pos);
+                        }
+                    }
+                    // 「已保存」只在回执到达时记，失败写永远保持脏（致命 2）。
+                    if let Some((_, revision, fingerprint)) = self.acked_revisions.remove(&seq) {
+                        self.saved_revisions.insert(pos, (revision, fingerprint));
+                    }
+                    self.retry_dirty.remove(&pos);
+                    // 上层内容改动位由 `dirty_loaded_chunks` 在下一刻按版本号
+                    // 重新判定；写失败时 `retry_dirty` 会把它重新标脏。
+                    // 一次成功清零连续失败，恢复匀速保存。
+                    self.consecutive_io_failures = 0;
+                    self.save_retry_after = 0;
+                    // F6：写完清掉冷却记账，避免长局无界增长。
+                    self.save_cooldown.remove(&pos);
+                    // 这次写已处理完，从等待中的 `/save-all` 请求里去掉（中 8）。
+                    for (_, remaining) in &mut self.save_all_requests {
+                        remaining.remove(&seq);
+                    }
+                }
+                Reply::PlayerWritten {
+                    uuid,
+                    seq,
+                    ok,
+                    error,
+                } => {
+                    // 只有最新一次写成功落盘才丢掉内存副本；失败的写留着，
+                    // 重进仍能拿到离开时的数据。只有回执的 seq 和记录一致才删，
+                    // 免得旧写完成把新写的副本删掉。
+                    // Drop the in-memory copy only when the newest write landed.
+                    // A failed write keeps it so a rejoin still sees the leaving
+                    // data; matching seq avoids an older receipt removing a newer copy.
+                    if !ok {
+                        if let Some(error) = error {
+                            tracing::error!(%uuid, %error, "player save write failed");
+                        }
+                        continue;
+                    }
+                    if self
+                        .pending_players
+                        .get(&uuid)
+                        .is_some_and(|(s, _)| *s == seq)
+                    {
+                        self.pending_players.remove(&uuid);
+                    }
+                }
+                Reply::Flushed { seq, ok } => {
+                    // 异步栅栏的回执：World 会在本刻取走它，按 ok 发等在上面的
+                    // `save-all` 成功或失败消息。
+                    // An async barrier ack; World drains it this tick and sends
+                    // the waiting `save-all` success/failure message.
+                    self.flushed_barriers.push((seq, ok));
+                }
+                Reply::WriteFailed {
+                    pos,
+                    seq,
+                    path,
+                    error,
+                } => {
+                    // 每次写/刷盘失败都带路径和原因记 error!，绝不静默丢数据。
+                    // Log every write/sync failure with its path and reason.
+                    tracing::error!(%path, %error, ?pos, ?seq, "chunk IO write failed");
+                    self.io_failures += 1;
+                    self.consecutive_io_failures += 1;
+                    // 失败区块的盒子留在 parking 里；只清这个 seq 的在途标记，
+                    // 并把它重新标脏，让正常保存路径在退避后重拍快照（致命 2）。
+                    if let Some(pos) = pos {
+                        dropped_inflight.push((pos, seq));
+                        self.save_cooldown.remove(&pos);
+                        self.pending_writes.remove(&pos);
+                        self.saved_revisions.remove(&pos);
+                        self.retry_dirty.insert(pos);
+                        if let Some(acked) = seq.and_then(|s| self.acked_revisions.remove(&s)) {
+                            let _ = acked;
+                        }
+                    }
+                    // IO 线程按「这道栅栏提交之后有没有失败」给每次请求单独判成功
+                    // 或失败；这里只把该写从等待集合里去掉，让栅栏能排出去。
+                    if let Some(seq) = seq {
+                        for (_, remaining) in &mut self.save_all_requests {
+                            remaining.remove(&seq);
+                        }
+                    }
+                    let backoff = 1_u64
+                        .checked_shl(self.consecutive_io_failures.min(8))
+                        .unwrap_or(MAX_SAVE_RETRY_BACKOFF_TICKS)
+                        .min(MAX_SAVE_RETRY_BACKOFF_TICKS);
+                    self.save_retry_after = self.last_tick.saturating_add(backoff);
+                    if self.consecutive_io_failures >= MAX_CONSECUTIVE_IO_FAILURES {
+                        tracing::error!(
+                            failures = self.consecutive_io_failures,
+                            backoff,
+                            "consecutive chunk IO failures; retrying with backoff, data stays in memory"
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(io) = &self.io {
+            for (pos, present, seq) in known_updates {
+                io.set_known(pos, present, seq);
+            }
+            for (pos, seq) in dropped_inflight {
+                io.drop_inflight(pos, seq);
+            }
+        }
+        // 所有读盘结果一次性喂给 Director，只交付一次，保住 3×3 和距离顺序。
+        if !done.is_empty() {
+            self.pump(region, done);
         }
     }
 
@@ -367,7 +1254,16 @@ impl DirectorHost {
             }
             // `Ready` 不用另存一份集合：`ChunkStore::is_loaded` 就是已交付集合，
             // 发区块时直接问它；多存一份只会多一处要保持一致的状态。
-            RegionMessage::Ready { .. } | RegionMessage::Forgot { .. } => {}
+            RegionMessage::Ready { .. } => {}
+            RegionMessage::Forgot { positions } => {
+                // F6：区块被遗忘时清掉各处的每区块记账，避免长局无界增长。
+                // F6: clear per-chunk bookkeeping when a chunk is forgotten.
+                for &pos in &positions {
+                    self.save_cooldown.remove(&pos);
+                    self.saved_revisions.remove(&pos);
+                    self.loaded_save_tick.remove(&pos);
+                }
+            }
         }
     }
 
@@ -450,6 +1346,14 @@ impl DirectorHost {
         if self.deliveries.is_empty() && self.reclaims.is_empty() {
             return events;
         }
+        // F6 背压只跳收回，交付（含玩家脚下 3×3）照常（复查「中 4」）。
+        // 官方 `ChunkMap.tick` 在 `noSave` 时也跳过整个 processUnloads，
+        // 所以 save-off 期间连收回都不做，区块保持加载（复查「中 7」）。
+        // Backpressure skips only reclaims, never deliveries (review 4).
+        // Official `ChunkMap.tick` skips processUnloads under noSave, so
+        // save-off also keeps chunks loaded (review 7).
+        let skip_reclaims =
+            self.save_backpressure() || (!self.saves_enabled && !self.shutting_down);
         // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
         // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
         // 交付/收回要求「没有算到一半的轮次」。
@@ -504,7 +1408,7 @@ impl DirectorHost {
             self.budget_left.deliveries = delivery_left.saturating_sub(used);
         }
 
-        if self.reclaims.is_empty() {
+        if self.reclaims.is_empty() || skip_reclaims {
             return events;
         }
         let reclaimed_before = self.reclaimed;
@@ -707,5 +1611,460 @@ mod tests {
         // 其它测试可能并发改环境变量，这里只验证解析函数本身不会 panic。
         assert_eq!(MailBudget::default().deliveries, DEFAULT_MAIL_BUDGET);
         assert_eq!(MailBudget::default().reclaims, DEFAULT_MAIL_BUDGET);
+    }
+
+    #[test]
+    fn d6_batch_size_is_at_least_one() {
+        assert_eq!(save_batch_size(0), 1);
+        assert_eq!(save_batch_size(1), 1);
+        assert_eq!(save_batch_size(6000), 1);
+        assert_eq!(save_batch_size(6001), 2);
+        assert_eq!(save_batch_size(12000), 2);
+    }
+
+    #[test]
+    fn d6_drains_the_queue_one_snapshot_per_tick() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct TempDir(std::path::PathBuf);
+        impl TempDir {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!("bamboo-d6-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = TempDir::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        for i in 0..3 {
+            host.save_queue.push_back(PendingWrite {
+                pos: ChunkPos::new(i, 0),
+                seq: i as u64,
+                chunk: Some(vec![1]),
+                entities: None,
+            });
+        }
+        host.pace_saves(1);
+        assert_eq!(host.save_queue.len(), 2);
+        host.pace_saves(2);
+        assert_eq!(host.save_queue.len(), 1);
+        host.pace_saves(3);
+        assert!(host.save_queue.is_empty());
+    }
+
+    /// 待核实：`pump` 里的收敛护栏不再 `assert!`（大世界关服会超过原来的
+    /// 100 万轮），改成大得多的上限 + 记 error 后停这一轮，绝不 panic。
+    /// Review "to verify": the `pump` convergence guard no longer asserts (a
+    /// large-world shutdown can exceed 1M rounds); it uses a much larger cap
+    /// and logs instead of panicking.
+    #[test]
+    fn pump_handles_a_large_batch_without_panicking() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut region = Region::new(2, 20, false);
+        let events: Vec<_> = (0..5_000_u64)
+            .map(|now_tick| Event::Tick { now_tick })
+            .collect();
+        host.pump(&mut region, events);
+        // 能跑到这里就说明一批 5000 个事件没有触发收敛护栏、也没有 panic。
+    }
+
+    /// F7：`save-off` 停掉卸载写盘（官方 `ChunkMap.tick` 的 noSave），
+    /// `save-on` 恢复；`/save-all` 的强制快照不走 `pace_saves`，不受它管。
+    /// F7: `save-off` stops unload writes (official `ChunkMap.tick` noSave),
+    /// `save-on` resumes; `/save-all`'s forced snapshots bypass `pace_saves`.
+    #[test]
+    fn save_off_stops_unload_writes_and_save_all_is_a_force() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-f7-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        let pos = ChunkPos::new(3, 4);
+        let snapshot = |seq| PendingWrite {
+            pos,
+            seq,
+            chunk: Some(vec![seq as u8]),
+            entities: None,
+        };
+        host.enqueue_snapshot(snapshot(1));
+
+        // save-off：队列不出队，`pace_saves` 不把卸载快照交给 IO。
+        host.set_saves_enabled(false);
+        host.pace_saves(1);
+        assert_eq!(host.save_queue.len(), 1, "save-off must not dequeue");
+        assert!(!host.io().unwrap().has_chunk(pos), "no write was submitted");
+
+        // save-on：恢复匀速出队。
+        host.set_saves_enabled(true);
+        host.pace_saves(2);
+        assert!(host.save_queue.is_empty(), "save-on resumes paced writes");
+        // `/save-all` 的强制快照不走 `pace_saves`，见 world 测试
+        // `save_all_is_a_force_even_during_save_off`。
+    }
+
+    /// F6：同一区块在 `save_queue` 里只留最新一份，旧序号不能覆盖新的。
+    /// F6: only the newest snapshot per chunk stays in `save_queue`.
+    #[test]
+    fn save_queue_keeps_only_the_newest_snapshot_per_chunk() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let pos = ChunkPos::new(1, 1);
+        let other = ChunkPos::new(2, 2);
+        let snapshot = |pos, seq| PendingWrite {
+            pos,
+            seq,
+            chunk: Some(vec![seq as u8]),
+            entities: None,
+        };
+        host.enqueue_snapshot(snapshot(pos, 1));
+        host.enqueue_snapshot(snapshot(other, 1));
+        host.enqueue_snapshot(snapshot(pos, 2));
+        assert_eq!(host.save_queue.len(), 2, "one entry per chunk");
+        assert_eq!(
+            host.save_queue.iter().find(|p| p.pos == pos).unwrap().seq,
+            2
+        );
+        // 迟到的旧序号不能把新的挤掉。
+        host.enqueue_snapshot(snapshot(pos, 1));
+        assert_eq!(
+            host.save_queue.iter().find(|p| p.pos == pos).unwrap().seq,
+            2
+        );
+    }
+
+    /// F6：积压到上限触发背压，收回请求整批留到下一刻。
+    /// F6: hitting a cap defers reclaims to the next tick.
+    #[test]
+    fn a_full_save_queue_defers_reclaims_as_backpressure() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        for i in 0..MAX_PENDING_WRITES {
+            host.enqueue_snapshot(PendingWrite {
+                pos: ChunkPos::new(i as i32, 0),
+                seq: i as u64,
+                chunk: Some(vec![1]),
+                entities: None,
+            });
+        }
+        assert!(host.save_backpressure());
+        let mut region = Region::new(2, 20, false);
+        let pos = ChunkPos::new(0, 0);
+        host.reclaims.push((pos, 0));
+        let _ = host.flush_region_mail(&mut region);
+        assert_eq!(host.reclaims.len(), 1, "reclaim must be deferred");
+        let _ = pos;
+        // 队列腾空后背压解除。
+        host.save_queue.clear();
+        assert!(!host.save_backpressure());
+    }
+
+    /// F6：区块被遗忘时清掉每区块记账。
+    /// F6: per-chunk bookkeeping is cleared when a chunk is forgotten.
+    #[test]
+    fn forgetting_a_chunk_clears_its_bookkeeping() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut region = Region::new(2, 20, false);
+        let pos = ChunkPos::new(5, 5);
+        host.save_cooldown.insert(pos, 10);
+        host.loaded_save_tick.insert(pos, 20);
+        host.saved_revisions
+            .insert(pos, (region.chunks.revision(pos), 0));
+        host.region_message(
+            &mut region,
+            RegionMessage::Forgot {
+                positions: vec![pos],
+            },
+        );
+        assert!(!host.save_cooldown.contains_key(&pos));
+        assert!(!host.loaded_save_tick.contains_key(&pos));
+        assert!(!host.saved_revisions.contains_key(&pos));
+    }
+
+    /// F1：写盘失败不回 `Written`，世界线程保留 parking 盒子、记 error、
+    /// 清掉在途标记；连续失败到阈值后暂停接收新保存请求（§8），
+    /// `/save-all` 作为强制重试解除暂停。
+    /// F1: a failed write keeps the parked box, logs the error, clears inflight,
+    /// and after consecutive failures pauses new saves (§8); `save-all` forces
+    /// a retry.
+    #[test]
+    fn a_failed_write_keeps_the_parked_box_and_pauses_saves() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-f1-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let io = ChunkIo::open(&dir).unwrap();
+        // 先起 IO 线程再把 region/entities/ 换成普通文件，令写必然失败。
+        // Replace the region dirs with files only after the thread is up.
+        for directory in [dir.region_dir(), dir.entities_dir()] {
+            std::fs::remove_dir(&directory).unwrap();
+            std::fs::write(&directory, b"not a directory").unwrap();
+        }
+        let pos = ChunkPos::new(4, -2);
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(io);
+        host.parking
+            .park(pos, Box::new(RegionColumn::from_template()));
+        host.pending_writes.insert(pos, 5);
+        host.save_queue.push_back(PendingWrite {
+            pos,
+            seq: 5,
+            chunk: Some(vec![1]),
+            entities: None,
+        });
+
+        host.pace_saves(1);
+        let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
+        let mut region = Region::new(2, 20, false);
+        host.poll_io(&mut region);
+
+        assert!(
+            host.parking.contains(pos),
+            "a failed write must keep the parked box, not ack Written"
+        );
+        // region/ 和 entities/ 两份各自报一条失败，所以至少一条。
+        assert!(
+            host.io_failures() >= 1,
+            "the failure must be counted and logged"
+        );
+        assert!(
+            !host.io().unwrap().has_chunk(pos),
+            "has_chunk must not lie after a failed write"
+        );
+
+        // 连续失败只做有上限的退避，不永久暂停：到点之后队列照常出队重试。
+        for i in 0..MAX_CONSECUTIVE_IO_FAILURES {
+            host.pending_writes.insert(pos, 100 + u64::from(i));
+            host.save_queue.push_back(PendingWrite {
+                pos,
+                seq: 100 + u64::from(i),
+                chunk: Some(vec![2]),
+                entities: None,
+            });
+            host.pace_saves(2 + u64::from(i));
+            let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
+            host.poll_io(&mut region);
+        }
+        assert!(
+            host.save_retry_after > 0,
+            "consecutive failures must back off"
+        );
+        let before = host.save_queue.len();
+        host.pace_saves(1);
+        assert_eq!(
+            host.save_queue.len(),
+            before,
+            "during the backoff window saves are deferred"
+        );
+        assert!(host.parking.contains(pos), "the box is still in memory");
+
+        // 退避到期之后自动重试：磁盘恢复时不再需要人工 `/save-all`。
+        host.pace_saves(host.save_retry_after);
+        assert!(
+            host.save_queue.len() < before,
+            "once the backoff expires normal saving retries"
+        );
+        // `/save-all` 是显式强制重试：清掉剩余的退避。
+        host.snapshot_all_dirty(&mut region, 60);
+        assert_eq!(
+            host.save_retry_after, 0,
+            "save-all forces an immediate retry"
+        );
+    }
+
+    /// 写盘途中又被要回来：快照还排在 D6 队列里没落盘、盘上是旧数据，
+    /// 这时 `Task::Read` 必须直接拿 Parking 里的最新盒子，绝不能去读旧盘或用模板。
+    /// A read while a write is in flight: the snapshot is still queued (not on
+    /// disk) and disk holds stale bytes; `Task::Read` must return the parked
+    /// edited box, never a stale disk read or a template.
+    #[test]
+    fn a_read_during_an_in_flight_write_returns_the_parked_edited_box() {
+        use mc_bamboo_core::BlockPos;
+        use mc_bamboo_data::blocks;
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+        use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-inflight-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+
+        // 造一个改过的盒子。
+        let mut server = Harness::new_loaded(2);
+        let pos = ChunkPos::new(0, 0);
+        let edit = BlockPos::new(2, -60, 2);
+        server
+            .region()
+            .chunks
+            .load(pos, Box::new(ChunkColumn::from_template()));
+        server.region().chunks.set_block(edit, blocks::STONE);
+        server.region().chunks.finish_light_updates();
+        let column = server
+            .region()
+            .take_columns(&[pos].into_iter().collect())
+            .expect("preconditions met")
+            .remove(&pos)
+            .expect("box present");
+        assert!(!column.is_pristine(), "the edited box is dirty");
+
+        // 盘上有一份旧数据（这样不命中 Parking 就会发异步读，读到旧的）。
+        host.io
+            .as_ref()
+            .unwrap()
+            .submit_write(pos, 99, Some(b"stale".to_vec()), None);
+        assert!(host.io.as_ref().unwrap().has_chunk(pos));
+        // 新快照还在 D6 队列里没交给 IO，盒子停在写盘途中缓冲。
+        host.save_queue.push_back(PendingWrite {
+            pos,
+            seq: 100,
+            chunk: Some(vec![7]),
+            entities: None,
+        });
+        host.parking.park(pos, column);
+
+        let event = host
+            .run_task(0, 0, Task::Read { pos })
+            .expect("a parked box answers synchronously, no async disk read");
+        let Event::TaskDone { result, .. } = event else {
+            panic!("expected a TaskDone event");
+        };
+        let TaskResult::Decoded { column } = result else {
+            panic!("in-flight write must return the parked box, not a disk read/template");
+        };
+        assert_eq!(
+            column.column().chunk().block(2, -60, 2),
+            blocks::STONE,
+            "the rejoining chunk must carry the latest edit"
+        );
+        assert!(host.parking.is_empty(), "the read consumes the parked box");
+    }
+
+    /// 剖析：跑一批真实的 `Task::Save` 编码，量出 `codec_nanos` 的实际增量。
+    /// Profiling: run a batch of real `Task::Save` encodes and measure the
+    /// `codec_nanos` delta (printed with --nocapture for the report).
+    #[test]
+    fn codec_profiler_records_real_encode_work() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Tmp(std::path::PathBuf);
+        impl Tmp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-codec-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        const SAVES: usize = 200;
+        let tmp = Tmp::new();
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        let before = codec_nanos();
+        for i in 0..SAVES {
+            let column = Box::new(RegionColumn::from_template());
+            let _ = host.run_task(
+                i as u64,
+                0,
+                Task::Save {
+                    pos: ORIGIN,
+                    seq: i as u64 + 1,
+                    column,
+                },
+            );
+        }
+        let after = codec_nanos();
+        let delta = after - before;
+        println!(
+            "CODEC_NANOS {SAVES} template encodes: total={delta} ns, per_chunk={} ns",
+            delta / SAVES as u64
+        );
+        assert!(delta > 0, "encoding should record nonzero codec time");
     }
 }

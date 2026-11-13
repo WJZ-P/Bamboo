@@ -949,6 +949,358 @@ fn neighbour_light_makes_a_column_not_pristine() {
     );
 }
 
+/// 进程内「放方块、存盘、重启、读回」：走真实的区域文件、玩家文件和 level.dat，
+/// 验证方块、方块实体、计划刻、三种实体、玩家位置和物品栏都读回一致。
+/// In-process place / save / restart / read-back through real region, player and
+/// level files: blocks, block entities, scheduled ticks, all three entity kinds,
+/// player position and inventory must all survive.
+#[test]
+fn disk_restart_keeps_chunks_players_and_level() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec, PackedChunk};
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt};
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::components::archive::slots::SlottedItem;
+    use mc_bamboo_storage::{
+        chunk_io::{ChunkIo, Reply},
+        level_dat::LevelData,
+        player_data::PlayerData,
+        world_dir::{
+            WorldDir, encode_player_data, load_level_data, read_player_bytes, save_level_data,
+        },
+    };
+
+    // 造一个带方块、方块实体、计划刻和三种实体的盒子。
+    let mut server = harness();
+    furnish(server.region());
+    settle_light(server.region());
+    run(&mut server, 2);
+    settle_light(server.region());
+    let region = server.region();
+    region.redstone.clear_torch_toggles();
+    for entry in region.containers.values_mut() {
+        entry.dead = false;
+        entry.recheck_at = None;
+    }
+    for (x, kind) in [
+        (
+            1,
+            EntityKind::FallingBlock(FallingBlock::new(
+                mc_bamboo_blocks::BlockState(blocks::SAND),
+                p(1, 2),
+            )),
+        ),
+        (2, EntityKind::Tnt(PrimedTnt::new())),
+        (
+            3,
+            EntityKind::Item(GroundItem::new(ItemStack::new(items::DIAMOND, 3), false)),
+        ),
+    ] {
+        region
+            .entities
+            .spawn(Entity::new(kind, Vec3::new(f64::from(x), -59.0, 2.0)));
+    }
+    let boxes = region
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let original = boxes.get(&CHUNK).expect("盒子存在");
+    let encoded = InlineCodec.encode(CHUNK, original).expect("编码");
+    assert!(encoded.chunk.is_some(), "区块 NBT 在");
+    assert!(encoded.entities.is_some(), "实体 NBT 在");
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-disk-restart-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let tmp = TempDir::new();
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let uuid = "test-player-uuid";
+    let player_data = PlayerData {
+        position: [1.5, -60.0, 2.5],
+        inventory: vec![SlottedItem {
+            slot: 0,
+            stack: ItemStack::new(items::DIAMOND, 3),
+        }],
+        ..PlayerData::default()
+    };
+    let player_bytes = encode_player_data(&player_data).unwrap();
+    let level = LevelData {
+        time: 4242,
+        ..LevelData::default()
+    };
+
+    // 第一局写盘，然后关掉 IO 线程（模拟关服）。
+    {
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+        io.submit_player_write(uuid, player_bytes.clone());
+        io.flush().unwrap();
+        io.close();
+    }
+    save_level_data(&dir, &level).unwrap();
+
+    // 第二局（重启）：读回并逐项核对。
+    assert_eq!(load_level_data(&dir).data.time, 4242);
+    assert_eq!(read_player_bytes(&dir, uuid), Some(player_bytes.clone()));
+    let back = PlayerData::from_gzip(&read_player_bytes(&dir, uuid).unwrap()).unwrap();
+    assert_eq!(back.position, [1.5, -60.0, 2.5]);
+    assert_eq!(back.inventory.len(), 1);
+
+    let mut io = ChunkIo::open(&dir).unwrap();
+    io.submit_read(CHUNK, 7, 1);
+    io.flush().unwrap();
+    let mut found = None;
+    while let Some(reply) = io.try_recv() {
+        if matches!(reply, Reply::Read { .. }) {
+            found = Some(reply);
+        }
+    }
+    let Reply::Read {
+        chunk,
+        entities,
+        error,
+        ..
+    } = found.expect("读到区块")
+    else {
+        unreachable!()
+    };
+    assert!(error.is_none(), "读盘没有报错：{error:?}");
+    let decoded = InlineCodec
+        .decode(CHUNK, &PackedChunk { chunk, entities })
+        .expect("解码");
+    // 逐项比内容。`from_parts` 重建时部分字段的默认值/顺序会变，重编码的字节
+    // 不一定逐字节相同，所以和 `archive_round_trip` 一样比读回的内容。
+    let got = decoded.parts();
+    let want = original.parts();
+    for y in -64..0 {
+        for x in 0_usize..16 {
+            for z in 0_usize..16 {
+                assert_eq!(
+                    got.column.chunk().block(x, y, z),
+                    want.column.chunk().block(x, y, z),
+                    "方块 ({x},{y},{z}) 读回不一致"
+                );
+            }
+        }
+    }
+    assert!(!got.containers.is_empty(), "方块实体读回");
+    assert_eq!(got.containers.len(), want.containers.len());
+    assert!(got.ticks.is_some(), "计划刻读回");
+    assert_eq!(
+        got.block_entities.entities().len(),
+        want.block_entities.entities().len()
+    );
+    assert!(got.entities.rows().len() >= 3, "三种实体读回");
+    assert_eq!(got.entities.rows().len(), want.entities.rows().len());
+    io.close();
+}
+
+/// 给 `mc-bamboo-vanilla world-dir` 造一个持久的真实世界目录（放 `target/`，gitignored）：
+/// 用游戏逻辑造一个改过的区块，走正式的编码 / 写盘路径，再补齐 `level.dat`、玩家和
+/// `data/` 的游戏规则 / 世界边界。这就是「进程内往返测试写出的目录」。
+/// Build a persistent real world dir for `mc-bamboo-vanilla world-dir`, using the
+/// game's own encoder and the official layout. This is the "in-process roundtrip
+/// test directory" the tool is meant to verify.
+#[test]
+fn writes_a_world_dir_fixture_for_official_verification() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec};
+    use mc_bamboo_blocks::{
+        BlockState,
+        entity::{Entity, EntityKind, FallingBlock, GroundItem, PrimedTnt},
+    };
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{blocks, items};
+    use mc_bamboo_protocol::item::ItemStack;
+    use mc_bamboo_storage::{
+        chunk_io::ChunkIo,
+        level_dat::LevelData,
+        player_data::PlayerData,
+        world_dir::{
+            WorldDir, encode_player_data, save_level_data, write_saved_data, write_saved_data_at,
+        },
+    };
+
+    let mut server = harness();
+    furnish(server.region());
+    settle_light(server.region());
+    for (x, kind) in [
+        (
+            1,
+            EntityKind::FallingBlock(FallingBlock::new(BlockState(blocks::SAND), p(1, 2))),
+        ),
+        (2, EntityKind::Tnt(PrimedTnt::new())),
+        (
+            3,
+            EntityKind::Item(GroundItem::new(ItemStack::new(items::DIAMOND, 3), false)),
+        ),
+    ] {
+        server
+            .region()
+            .entities
+            .spawn(Entity::new(kind, Vec3::new(f64::from(x), -59.0, 2.0)));
+    }
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let original = boxes.get(&CHUNK).expect("盒子存在");
+    let encoded = InlineCodec.encode(CHUNK, original).expect("编码");
+    assert!(encoded.chunk.is_some());
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .join("target/bamboo-world-dir-fixture");
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = WorldDir::new(&root);
+    dir.create_layout().unwrap();
+
+    {
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+        let player = PlayerData {
+            position: [1.5, -60.0, 2.5],
+            ..PlayerData::default()
+        };
+        io.submit_player_write("probe-player-uuid", encode_player_data(&player).unwrap());
+        io.flush().unwrap();
+        io.close();
+    }
+    save_level_data(
+        &dir,
+        &LevelData {
+            time: 4242,
+            ..LevelData::default()
+        },
+    )
+    .unwrap();
+    let (game_rules, world_border) = crate::saved_data_samples();
+    write_saved_data(&dir, "minecraft:game_rules", &game_rules).unwrap();
+    write_saved_data_at(&dir.world_border_dat(), &world_border).unwrap();
+    // 和真实 save_all 一样写出 chunk_tickets.dat，让 world-dir 用官方
+    // TicketStorage.CODEC 解码到。
+    write_saved_data_at(
+        &dir.chunk_tickets(),
+        &mc_bamboo_nbt::Tag::Compound(vec![(
+            "tickets".to_owned(),
+            mc_bamboo_nbt::Tag::List(Vec::new()),
+        )]),
+    )
+    .unwrap();
+
+    println!("WORLD_DIR_FIXTURE={}", root.display());
+}
+
+/// 补 11：只读快照写出的 NBT 和卸载存盘逐字节一致（共用 `encode_parts`）。
+/// Item 11: the read-only snapshot's NBT is byte-identical to an unload save.
+#[test]
+fn read_only_snapshot_bytes_match_an_unload_save() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec};
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, PrimedTnt};
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new_loaded(2);
+    server.ensure_loaded(&[CHUNK]);
+    // 一个方块改动 + 一个实体，让两份编码都有内容可比。
+    server.region().chunks.set_block(p(2, 2), blocks::STONE);
+    server.region().entities.spawn(Entity::new(
+        EntityKind::Tnt(PrimedTnt::new()),
+        Vec3::new(3.0, -59.0, 3.0),
+    ));
+    server.region().chunks.finish_light_updates();
+
+    let read_only = server
+        .region()
+        .encode_loaded_column(CHUNK)
+        .expect("只读快照")
+        .expect("编码成功");
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let unload = InlineCodec.encode(CHUNK, &boxes[&CHUNK]).expect("卸载编码");
+    assert_eq!(read_only, unload, "只读快照和卸载存盘必须逐字节一致");
+}
+
+/// 补 11：给已加载区块拍存档快照没有任何可观察的副作用：不改版本号（区块包
+/// 缓存不会重编/重发）、不改方块和光照、不改段状态、不提前算完待算光照、不发任何包。
+/// Item 11: snapshotting a loaded chunk has no observable side effects — the
+/// revision (chunk-packet cache validity), blocks, light, section states and
+/// pending light are all unchanged, and no packets are sent to players.
+#[test]
+fn snapshotting_a_loaded_chunk_has_no_observable_side_effects() {
+    let mut server = Harness::new_loaded(2);
+    server.ensure_loaded(&[CHUNK]);
+    let edit = p(3, 3);
+    // 改一格，故意留着待算的光照（不调用 finish_light_updates）。
+    assert!(server.region().chunks.set_block(edit, blocks::GLOWSTONE));
+    assert!(
+        server.region().chunks.has_pending_light_updates(),
+        "前提：有待算的光照"
+    );
+
+    let region = server.region();
+    let before = (
+        region.chunks.revision(CHUNK),
+        region.chunks.block(edit),
+        region.chunks.light_value(LightLayer::Sky, edit),
+        region.chunks.light().section_states(CHUNK),
+    );
+    // 先把之前攒的包清空，之后只测拍快照期间有没有新包。
+    let _ = server.region().links.flush();
+
+    let encoded = server
+        .region()
+        .encode_loaded_column(CHUNK)
+        .expect("已加载区块应该能拍快照");
+    assert!(encoded.is_ok(), "编码要成功");
+
+    let region = server.region();
+    assert_eq!(
+        region.chunks.revision(CHUNK),
+        before.0,
+        "版本号不变，区块包缓存不用重编/重发"
+    );
+    assert_eq!(region.chunks.block(edit), before.1, "方块内容不变");
+    assert_eq!(
+        region.chunks.light_value(LightLayer::Sky, edit),
+        before.2,
+        "光照不变"
+    );
+    assert_eq!(
+        region.chunks.light().section_states(CHUNK),
+        before.3,
+        "段状态不变"
+    );
+    assert!(
+        region.chunks.has_pending_light_updates(),
+        "待算的光照绝不能被提前算完"
+    );
+    assert_eq!(
+        server.region().links.flush(),
+        0,
+        "拍快照期间发给玩家的包为零"
+    );
+}
+
 /// 一台正在烧、但已经睡着的熔炉，走正式的 `chunk_content::encode` 组装出来的
 /// 存档 NBT 要和「每刻都跑」逐位相同。睡着的数值必须按公式现算，不能留着
 /// 上一次真 tick 的旧值。
@@ -993,4 +1345,141 @@ fn a_sleeping_furnace_encodes_the_same_archive_bytes() {
     }
 
     assert_eq!(encoded_snapshot(true), encoded_snapshot(false));
+}
+
+/// 端到端：一台烧到一半的熔炉，走正式的编码 → 区域文件 → 关闭 IO 线程 →
+/// 重启读回，进度、燃料、原料和产物都要一致（main 的方块实体休眠接进存档后）。
+#[test]
+fn a_half_burnt_furnace_survives_a_disk_restart() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec, PackedChunk};
+    use mc_bamboo_storage::{
+        chunk_io::{ChunkIo, Reply},
+        world_dir::WorldDir,
+    };
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-furnace-restart-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let mut server = harness();
+    {
+        let region = server.region();
+        region.chunks.set_block(FURNACE, blocks::FURNACE);
+        let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+        furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+        furnace.set_item(1, ItemStack::new(items::COAL, 8));
+        region.block_entities.remove(FURNACE);
+        region.block_entities.insert(Box::new(furnace));
+    }
+    // 跑到熔炉睡着、进度到一半，拍下当时的数值。
+    run(&mut server, 60);
+    settle_light(server.region());
+    let before = {
+        let region = server.region();
+        let entity = region.block_entities.get_dyn(FURNACE).expect("熔炉在");
+        let furnace = entity
+            .as_any()
+            .downcast_ref::<FurnaceEntity>()
+            .expect("是熔炉");
+        (furnace.data_values(), furnace.items().to_vec())
+    };
+    assert!(before.0[0] > 0, "熔炉应该烧到一半");
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let encoded = InlineCodec
+        .encode(CHUNK, boxes.get(&CHUNK).expect("盒子存在"))
+        .expect("编码成功");
+
+    let tmp = TempDir::new();
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    {
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+        io.flush().unwrap();
+        io.close();
+    }
+    let mut io = ChunkIo::open(&dir).unwrap();
+    io.submit_read(CHUNK, 7, 1);
+    io.flush().unwrap();
+    let mut found = None;
+    while let Some(reply) = io.try_recv() {
+        if matches!(reply, Reply::Read { .. }) {
+            found = Some(reply);
+        }
+    }
+    let Reply::Read {
+        chunk, entities, ..
+    } = found.expect("读到区块")
+    else {
+        unreachable!()
+    };
+    let decoded = InlineCodec
+        .decode(CHUNK, &PackedChunk { chunk, entities })
+        .expect("解码成功");
+    io.close();
+    let parts = decoded.parts();
+    let mut furnace = None;
+    parts.block_entities.entities().iter().for_each(|entity| {
+        if entity.pos() == FURNACE {
+            furnace = entity
+                .as_any()
+                .downcast_ref::<FurnaceEntity>()
+                .map(|f| (f.data_values(), f.items().to_vec()));
+        }
+    });
+    let (data, items) = furnace.expect("熔炉读回");
+    assert_eq!(data, before.0, "进度和燃料读回一致");
+    assert_eq!(items, before.1, "原料和产物读回一致");
+}
+
+/// 装盒之后、睡着的熔炉只依赖已经「现算」的数值；在另一个线程上编码
+/// 整份盒子，字节必须和世界线程上编出来的完全相同（世界线程只做编码）。
+#[test]
+fn a_parked_sleeping_furnace_encodes_identically_on_another_thread() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec};
+
+    let mut server = harness();
+    {
+        let region = server.region();
+        region.chunks.set_block(FURNACE, blocks::FURNACE);
+        let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+        furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+        furnace.set_item(1, ItemStack::new(items::COAL, 8));
+        region.block_entities.remove(FURNACE);
+        region.block_entities.insert(Box::new(furnace));
+    }
+    run(&mut server, 40);
+    settle_light(server.region());
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let mut boxes = boxes;
+    let column: Box<crate::region::RegionColumn> = boxes.remove(&CHUNK).expect("盒子存在");
+    let on_world_thread = InlineCodec.encode(CHUNK, &column).expect("编码成功");
+    let on_other_thread =
+        std::thread::spawn(move || InlineCodec.encode(CHUNK, &column).expect("编码成功"))
+            .join()
+            .expect("另一个线程没有 panic");
+    assert_eq!(on_world_thread, on_other_thread);
 }

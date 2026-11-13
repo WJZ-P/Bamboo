@@ -1,10 +1,12 @@
 //! 不属于任何区块、但全世界共用的状态。权威副本挂在 [`Global`](crate::global::Global) 上。
 //!
 //! 难度、默认游戏模式、世界出生点、种子、天气和随机序列都由命令改，进服序列从这里读。
-//! 不写存档，重启回到默认值；玩家自己的重生点存在 `Player`，不在这里。
+//! 难度、默认游戏模式、出生点写进 `level.dat` 并在启动时读回；天气、种子、随机序列不存档；
+//! 玩家自己的重生点存在 `Player`，不在这里。
 //!
 //! World-wide state that belongs to no chunk. Commands change it and the join sequence reads it.
-//! Nothing is saved; a restart returns to the defaults. Per-player respawn points live on `Player`.
+//! Difficulty, default game mode and spawn are saved to `level.dat` and read back at startup;
+//! weather, seed and random sequences are not saved. Per-player respawn points live on `Player`.
 
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_loot::RandomSequences;

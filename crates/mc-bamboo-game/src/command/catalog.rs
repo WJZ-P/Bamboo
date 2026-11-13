@@ -8,8 +8,8 @@ use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
     CommandFn, Commands, admin, blocks, bossbar, clone, enchant, gamerule, items, loot, particle,
-    players, playsound, random, scoreboard, stopsound, team, teleport, text, time, title, weather,
-    world_border, world_settings,
+    players, playsound, random, save, scoreboard, stopsound, team, teleport, text, time, title,
+    weather, world_border, world_settings,
 };
 
 struct Builder {
@@ -76,6 +76,7 @@ pub(crate) fn build() -> Commands {
     register_pardon(&mut builder, root);
     register_pardon_ip(&mut builder, root);
     register_set_idle_timeout(&mut builder, root);
+    register_save(&mut builder, root);
     register_stop(&mut builder, root);
     register_transfer(&mut builder, root);
     register_version(&mut builder, root);
@@ -1340,6 +1341,18 @@ fn register_whitelist(builder: &mut Builder, root: usize) {
     let remove = builder.literal(list, "remove", 0);
     let removed = builder.argument(remove, "targets", ArgumentType::GameProfile, 0);
     builder.run(removed, admin::whitelist_remove);
+}
+
+fn register_save(builder: &mut Builder, root: usize) {
+    // 官方 `SaveAllCommand.register`：save-all 可执行，另有一个 flush 分支。
+    let save_all = builder.literal(root, "save-all", permission::OWNERS);
+    builder.run(save_all, save::save_all);
+    let flush = builder.literal(save_all, "flush", 0);
+    builder.run(flush, save::save_all_flush);
+    let save_on = builder.literal(root, "save-on", permission::OWNERS);
+    builder.run(save_on, save::save_on);
+    let save_off = builder.literal(root, "save-off", permission::OWNERS);
+    builder.run(save_off, save::save_off);
 }
 
 fn register_stop(builder: &mut Builder, root: usize) {

@@ -87,11 +87,17 @@ mod predicate_oracle;
 #[cfg(feature = "oracle")]
 mod recipe_oracle;
 #[cfg(feature = "oracle")]
+mod saved_data;
+#[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
 #[cfg(feature = "oracle")]
+mod world_block;
+#[cfg(feature = "oracle")]
 mod world_border_oracle;
+#[cfg(feature = "oracle")]
+mod world_dir;
 #[cfg(feature = "oracle")]
 mod worldgen;
 
@@ -149,10 +155,13 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla storage <java 路径> [--show N]
+      mc-bamboo-vanilla saved-data <java 路径>
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
-      mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]";
+      mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]
+      mc-bamboo-vanilla world-dir <目录> <java 路径>
+      mc-bamboo-vanilla world-block <目录> <x> <y> <z> <方块名> <java 路径>";
 
 fn main() -> ExitCode {
     match run() {
@@ -175,6 +184,10 @@ fn run() -> Result<(), String> {
         ["gamerules", java] => dump_gamerules(java),
         ["probe", host, port] => probe(host, port, "java"),
         ["probe", host, port, java] => probe(host, port, java),
+        // 崩溃测试用：探针的额外两个参数是标记方块的注册名和 /setblock 命令。
+        ["probe", host, port, java, marker_block, marker_command] => {
+            probe_with_marker(host, port, java, marker_block, marker_command)
+        }
         ["oracle", java, ref options @ ..] => oracle(java, options),
         ["light", java, ref options @ ..] => light(java, options),
         ["menu", java, ref options @ ..] => menu(java, options),
@@ -187,10 +200,14 @@ fn run() -> Result<(), String> {
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
+        ["saved-data", java] => saved_data_cli(java),
         ["player-data", java, ref options @ ..] => player_data_oracle(java, options),
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
         ["border-oracle", java, ref options @ ..] => world_border_oracle(java, options),
+        ["world-dir", dir, java] => world_dir_cli(dir, java),
+        ["world-block", dir, x, y, z, block, java] => world_block_cli(dir, x, y, z, block, java),
+        ["chunk-dump", dir, x, z, java] => chunk_dump_cli(dir, x, z, java),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -280,6 +297,37 @@ fn probe(host: &str, port: &str, java: &str) -> Result<(), String> {
     // 正版验证的检查要连另一个服务端，这两个服务活到探针跑完。
     let _online = online_probe(&mut command)?;
 
+    let status = command
+        .status()
+        .map_err(|error| format!("无法运行 {java}：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("探针发现了问题：{status}"))
+    }
+}
+
+/// 崩溃测试专用：跑完整探针，另外让官方客户端发一条 `/setblock` 留一个标记方块。
+/// 探针主流程会清掉它自己放的方块，只有这一格留到 `kill -9` 之后复查。
+fn probe_with_marker(
+    host: &str,
+    port: &str,
+    java: &str,
+    marker_block: &str,
+    marker_command: &str,
+) -> Result<(), String> {
+    let root = workspace_root();
+    let work_dir = root.join(WORK_DIR);
+    let classpath = extract::classpath(&work_dir)?;
+    let mut command = Command::new(java);
+    command
+        .current_dir(&work_dir)
+        .arg("-cp")
+        .arg(classpath)
+        .arg(root.join(PROBE_SOURCE))
+        .args([host, port]);
+    let _online = online_probe(&mut command)?;
+    command.args([marker_block, marker_command]);
     let status = command
         .status()
         .map_err(|error| format!("无法运行 {java}：{error}"))?;
@@ -421,6 +469,70 @@ fn official_program(java: &str, source: &str) -> Result<Command, String> {
         .arg(classpath)
         .arg(root.join(source));
     Ok(command)
+}
+
+#[cfg(feature = "oracle")]
+fn saved_data_cli(java: &str) -> Result<(), String> {
+    saved_data::run(java)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn saved_data_cli(_java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn world_dir_cli(dir: &str, java: &str) -> Result<(), String> {
+    world_dir::run(dir, java)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn world_dir_cli(_dir: &str, _java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn world_block_cli(
+    dir: &str,
+    x: &str,
+    y: &str,
+    z: &str,
+    block: &str,
+    java: &str,
+) -> Result<(), String> {
+    world_block::run(dir, x, y, z, block, java)
+}
+
+#[cfg(feature = "oracle")]
+fn chunk_dump_cli(dir: &str, x: &str, z: &str, java: &str) -> Result<(), String> {
+    let chunk = mc_bamboo_core::ChunkPos::new(
+        x.parse().map_err(|_| format!("bad x {x:?}"))?,
+        z.parse().map_err(|_| format!("bad z {z:?}"))?,
+    );
+    let path = fs::canonicalize(dir).map_err(|error| format!("cannot resolve {dir:?}: {error}"))?;
+    let region = path
+        .join("dimensions/minecraft/overworld/region")
+        .join(format!("r.{}.{}.mca", chunk.x >> 5, chunk.z >> 5));
+    let text = world_block::dump_chunk(java, &region, chunk)?;
+    println!("CHUNK DUMP {chunk:?}: {text}");
+    Ok(())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn chunk_dump_cli(_dir: &str, _x: &str, _z: &str, _java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn world_block_cli(
+    _dir: &str,
+    _x: &str,
+    _y: &str,
+    _z: &str,
+    _block: &str,
+    _java: &str,
+) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 #[cfg(not(feature = "oracle"))]

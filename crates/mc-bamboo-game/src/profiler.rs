@@ -261,10 +261,16 @@ pub(crate) enum SubPhase {
     DirectorAck,
     /// 收回的盒子判「原不原样」（逐段比模板）和丢弃。
     PristineCheck,
+    /// 存档：每刻判「改过没有」（只读改动集合）。
+    StorageDirty,
+    /// 存档：给改过的区块拍只读快照。
+    StorageSnapshot,
+    /// 存档：把快照编成 NBT 字节（世界线程上的编码）。
+    StorageEncode,
 }
 
 impl SubPhase {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 21] = [
         Self::TicketUpdate,
         Self::DirectorEvents,
         Self::DeliveryLightFinish,
@@ -283,6 +289,9 @@ impl SubPhase {
         Self::ReturnBoxes,
         Self::DirectorAck,
         Self::PristineCheck,
+        Self::StorageDirty,
+        Self::StorageSnapshot,
+        Self::StorageEncode,
     ];
 
     fn name(self) -> &'static str {
@@ -305,6 +314,9 @@ impl SubPhase {
             Self::ReturnBoxes => "return_boxes",
             Self::DirectorAck => "director_ack",
             Self::PristineCheck => "pristine_check",
+            Self::StorageDirty => "storage_dirty",
+            Self::StorageSnapshot => "storage_snapshot",
+            Self::StorageEncode => "storage_encode",
         }
     }
 }
@@ -332,12 +344,16 @@ pub(crate) enum Metric {
     ParkedChunks,
     ChunkLatencyUs,
     FlushBytes,
+    /// 这一刻判脏看到的候选区块数（存档路径的开销指标）。
+    StorageCandidates,
+    /// 这一刻拍的只读快照数。
+    StorageSnapshots,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
     SkippedCatchUps,
 }
 
 impl Metric {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 16] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -352,6 +368,8 @@ impl Metric {
         Self::ParkedChunks,
         Self::ChunkLatencyUs,
         Self::FlushBytes,
+        Self::StorageCandidates,
+        Self::StorageSnapshots,
     ];
 
     fn name(self) -> &'static str {
@@ -370,6 +388,8 @@ impl Metric {
             Self::ParkedChunks => "parked_chunks",
             Self::ChunkLatencyUs => "chunk_latency_us",
             Self::FlushBytes => "flush_bytes",
+            Self::StorageCandidates => "storage_candidates",
+            Self::StorageSnapshots => "storage_snapshots",
             Self::SkippedCatchUps => "skipped_catch_ups",
         }
     }
@@ -385,7 +405,9 @@ impl Metric {
             | Self::ChunksDelivered
             | Self::ChunksReclaimed
             | Self::LoadedChunks
-            | Self::ParkedChunks => "chunks",
+            | Self::ParkedChunks
+            | Self::StorageCandidates
+            | Self::StorageSnapshots => "chunks",
             Self::ChunkLatencyUs => "us",
             Self::FlushBytes => "bytes",
             Self::SkippedCatchUps => "times",

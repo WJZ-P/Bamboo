@@ -89,6 +89,12 @@ pub struct ServerConfig {
     /// 四份管理名单文件所在的目录。空路径表示工作目录，和官方一样。
     /// 测试把这个字段指到临时目录，不在仓库里留文件。
     pub list_directory: std::path::PathBuf,
+    /// 世界目录。`None` 表示不存档（测试、oracle、压测用），启动时不会建目录或拿锁。
+    /// 命令行版由 `ConfigFiles::to_server_config` 按 `level-name` 设好。
+    ///
+    /// The world directory. `None` disables saving (tests, oracle, load tests): no
+    /// directory is created and no lock is taken at startup.
+    pub world_dir: Option<std::path::PathBuf>,
     /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动（实验）。
     pub entity_threads: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
@@ -116,6 +122,7 @@ impl Default for ServerConfig {
             forwarding: ForwardingMode::Off,
             forwarding_secret: String::new(),
             list_directory: std::path::PathBuf::new(),
+            world_dir: None,
             entity_threads: 0,
             redstone_cache: false,
             mail_budget: MailBudget::default(),

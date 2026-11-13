@@ -75,9 +75,11 @@ pub struct ServerSnapshot {
 }
 
 /// 持有运行中的服务端。同一时间最多只有一个。
+/// `force_handle` 在第一次优雅停止期间留着句柄，让第二次按停止能强制退出。
 #[derive(Default)]
 pub struct ServerController {
     running: Mutex<Option<RunningServer>>,
+    force_handle: Mutex<Option<ServerHandle>>,
 }
 
 impl ServerController {
@@ -145,15 +147,26 @@ impl ServerController {
     }
 
     pub async fn stop(&self, app: &AppHandle) -> ServerSnapshot {
-        let mut running = self.running.lock().await;
-        if let Some(server) = running.take() {
+        // 先把运行项摘出来就放掉锁，别在 `.await` 等服务端时一直占着：
+        // 第二次按停止要能进来触发强制退出。
+        // Take the running entry and drop the lock before awaiting, so a second
+        // stop press can get in and force quit while the first one waits.
+        let running = self.running.lock().await.take();
+        if let Some(server) = running {
+            // 优雅停止期间留着句柄，供第二次按停止强制退出。
+            *self.force_handle.lock().await = Some(server.handle.clone());
             server.watcher_task.abort();
             // 接收端已经结束时发送会失败，那也正是我们要的结果。
             let _ = server.stop.send(());
             if let Err(error) = server.server_task.await {
                 warn!(%error, "server task ended abnormally");
             }
+            *self.force_handle.lock().await = None;
             info!("Bamboo stopped");
+        } else if let Some(handle) = self.force_handle.lock().await.take() {
+            // 第二次按停止：不再等存盘，强制退出。
+            handle.force_stop();
+            warn!("forcing the server to quit before the world finished saving");
         }
 
         let snapshot = snapshot_of(None);

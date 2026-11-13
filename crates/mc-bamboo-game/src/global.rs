@@ -181,13 +181,18 @@ pub(crate) struct Global {
     end_clock: Clock,
     roster: BTreeMap<PlayerId, RosterEntry>,
     ticks_since_latency_broadcast: u32,
-    /// 游戏规则。不写存档，重启回到官方默认值。
+    /// 游戏规则。按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，
+    /// 启动时读回。
     ///
-    /// Game rules. They are not saved, so a restart restores the official defaults.
+    /// Game rules. Saved to `data/minecraft/game_rules.dat` with the official
+    /// `GameRuleMap.CODEC` and read back at startup.
     rules: crate::gamerules::GameRuleSet,
-    /// 难度、出生点、天气等世界设置。不写存档。
+    /// 难度、出生点、天气等世界设置。难度、默认游戏模式、出生点写进 `level.dat` 并读回；
+    /// 天气、种子、随机序列不存档。
     ///
-    /// Difficulty, spawn, weather and other world settings. Nothing is saved.
+    /// Difficulty, spawn, weather and other world settings. Difficulty, default
+    /// game mode and spawn are saved to `level.dat` and read back; weather, seed
+    /// and random sequences are not saved.
     state: WorldState,
     /// 全服一份的计分板和队伍。不写存档。
     ///
@@ -199,17 +204,23 @@ pub(crate) struct Global {
     boss_bars: crate::scoreboard::BossBars,
     /// 主世界的边界。官方按维度各有一份，这里按设计稿 6.6 放在 `Global`（全局状态）：
     /// 同一个维度以后拆成多个 region 时它们要看到同一份，region 每刻只读一份快照。
-    /// 权威副本不写存档，M3 那边把 `data/world_border` 接进来。
+    /// 权威副本写进按维度存放的 `world_border.dat`（`export_settings` / `restore`，
+    /// `restore` 传存档里的游戏时间），启动时读回。
     ///
     /// The overworld's world border. Vanilla keeps one per dimension; here it lives on
     /// `Global` (§6.6 global state) so future regions of the same dimension share it,
-    /// each reading a snapshot every tick. This copy is not saved; M3 will wire the
-    /// `data/world_border` file to [`WorldBorder::restore`].
+    /// each reading a snapshot every tick. It is saved to the per-dimension
+    /// `world_border.dat` (`export_settings` / `restore` with the saved game time)
+    /// and read back at startup.
     world_border: WorldBorder,
     /// OP、封禁和白名单的权威副本。世界线程是唯一写者。
     pub(crate) admin: crate::admin::AdminState,
     /// 名单变更后发布给连接层并写盘的通道。没有连接层时（单元测试）是 `None`。
     pub(crate) admin_messages: Option<std::sync::mpsc::Sender<crate::admin::AdminMessage>>,
+    /// 命令压进来的存档请求，由 `World` 在 tick 里消费（命令动作不碰 IO）。
+    pub(crate) save_requests: Vec<crate::save_session::SaveCommand>,
+    /// 自动保存开关的权威镜像（命令改它，`World` 同步到存档会话）。
+    pub(crate) save_auto: bool,
 }
 
 impl Default for Global {
@@ -227,6 +238,8 @@ impl Default for Global {
             world_border: WorldBorder::default(),
             admin: crate::admin::AdminState::default(),
             admin_messages: None,
+            save_requests: Vec::new(),
+            save_auto: true,
         }
     }
 }

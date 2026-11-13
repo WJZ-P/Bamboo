@@ -2,6 +2,7 @@
 
 use std::{
     ops::ControlFlow,
+    path::PathBuf,
     sync::{
         Arc,
         mpsc::{Receiver, TryRecvError},
@@ -9,16 +10,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mc_bamboo_core::{ChunkPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::packets::play::serverbound;
 use mc_bamboo_protocol::{
     packet::play::{ClientInformation, GameMode, PlayRequest},
     text::Component,
 };
+use mc_bamboo_storage::{
+    chunk_io::ChunkIo,
+    player_data::PlayerData,
+    world_dir::{encode_player_data, player_uuid_string},
+};
 use mc_bamboo_world::director::TicketOp;
 
 use crate::director_host::{DirectorHost, MailBudget};
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 use crate::{
     book, chat, chunk_broadcast,
@@ -30,10 +36,13 @@ use crate::{
     inventory, lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
     player::shows_hat,
+    player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
     profiler::{Metric, Phase},
     region::{JoinSettings, Region},
+    save_session::{SaveCommand, SaveSession},
     secure_chat::{self, ServiceProfileKeys},
     sign, weather,
+    world_state::RespawnData,
 };
 
 const TICK: Duration = Duration::from_millis(50);
@@ -67,6 +76,10 @@ pub struct WorldConfig {
     pub redstone_cache: bool,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
+    /// 世界目录。`None` 表示不存档（测试、oracle、压测都走这条路）。
+    ///
+    /// The world directory. `None` disables saving (tests, oracle, load tests).
+    pub world_dir: Option<PathBuf>,
 }
 
 impl Default for WorldConfig {
@@ -80,6 +93,7 @@ impl Default for WorldConfig {
             entity_threads: 0,
             redstone_cache: false,
             mail_budget: MailBudget::default(),
+            world_dir: None,
         }
     }
 }
@@ -102,6 +116,13 @@ pub struct World {
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
     /// Director 的逻辑刻数，每次 `tick_ticket_timeouts` 加一。
     director_tick: u64,
+    /// 存档会话。`None` 表示这一局不存档。
+    save: Option<SaveSession>,
+    /// 启动阶段打开存档失败的原因；非空时 `run` 直接拒绝启动。
+    startup_error: Option<String>,
+    /// 等着某道 IO 栅栏回执再发成功消息的 `save-all flush`：`(栅栏序号, 玩家)`。
+    /// `save-all flush` success messages waiting on an IO barrier: `(seq, player)`.
+    pending_save_success: Vec<(u64, PlayerId)>,
 }
 
 impl World {
@@ -142,23 +163,53 @@ impl World {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
+        // 启动阶段同步打开存档：建目录、拿锁、读 level.dat。失败就拒绝启动，
+        // 不让世界线程带着一个没锁住的世界目录继续跑。
+        // Open the save synchronously at startup: create the layout, take the lock,
+        // read level.dat. On failure, refuse to start instead of running unlocked.
+        let (save, startup_error) = match (&config.world_dir, infinite_flat) {
+            (Some(root), false) => match SaveSession::open(root) {
+                Ok((session, _source)) => (Some(session), None),
+                Err(error) => {
+                    let message = format!("could not open the world directory: {error}");
+                    error!(%message, "refusing to start");
+                    (None, Some(message))
+                }
+            },
+            _ => (None, None),
+        };
         let mut global = Global::default();
         let authoritative_admin = admin.is_some();
         if let Some(init) = admin {
             global.admin = init.snapshot.into_state();
             global.admin_messages = init.messages;
         }
+        let mut region = Region::with_keys(
+            view_distance,
+            config.max_players,
+            config.online_mode,
+            config.enforce_secure_profile,
+            keys,
+        );
+        // 启动时把读到的 `level.dat` 世界设置和 `data/` 的游戏规则 / 世界边界
+        // 套回运行时；边界的 `restore` 用存档里的游戏时间。全新世界没有 `level.dat`，
+        // 运行时默认值才是权威（不能拿 `LevelData::default()` 的出生点覆盖它）。
+        // Apply loaded `level.dat` world settings and `data/` game rules / border
+        // back onto runtime; `restore` uses the saved game time. A fresh world has
+        // no `level.dat`, so runtime defaults are authoritative (do not overwrite
+        // them with `LevelData::default()`'s spawn).
+        if let Some(save) = &save {
+            if save.has_loaded_level() {
+                crate::save_data::apply_level_data(global.state_mut(), save.level());
+            }
+            save.startup()
+                .apply(&mut global, &mut region, save.level().time);
+        }
         let mut world = Self {
             authoritative_admin,
             entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
             global,
-            region: Region::with_keys(
-                view_distance,
-                config.max_players,
-                config.online_mode,
-                config.enforce_secure_profile,
-                keys,
-            ),
+            region,
             inbox,
             pacer: Pacer,
             host: if infinite_flat {
@@ -174,6 +225,9 @@ impl World {
             },
             ticket_centers: std::collections::BTreeMap::new(),
             director_tick: 0,
+            save,
+            startup_error,
+            pending_save_success: Vec::new(),
         };
         world
             .host
@@ -194,6 +248,18 @@ impl World {
                     enabled: true,
                     ..Default::default()
                 });
+        }
+        // 启用存档时起一条 IO 线程并接进 Director 宿主；起不来也拒绝启动。
+        // With saving enabled, start one IO thread and attach it to the host.
+        if let Some(save) = &world.save {
+            match ChunkIo::open(save.dir()) {
+                Ok(io) => world.host.set_io(io),
+                Err(error) => {
+                    let message = format!("could not start the chunk IO thread: {error}");
+                    error!(%message, "refusing to start");
+                    world.startup_error = Some(message);
+                }
+            }
         }
         world.region.profiler.on_world_start();
         world
@@ -281,11 +347,21 @@ impl World {
     /// 提交 5 接 Director 后按「有在途任务/未交付」填。
     fn tick_ticket_timeouts(&mut self) {
         self.director_tick += 1;
+        // 刷新 `noSave` 反面：`/save-off` 当刻就停掉卸载写盘（F7）。
+        // Refresh the inverse of `noSave`: `/save-off` stops unload writes
+        // from this tick on (F7).
+        // 没接 SaveSession（测试 / oracle）时保持匀速写盘开启；接了就照 `noSave`。
+        let saves_enabled = self.save.as_ref().is_none_or(|save| save.auto_save());
+        self.host.set_saves_enabled(saves_enabled);
         self.host.tick(&mut self.region, self.director_tick);
     }
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
+        if let Some(message) = &self.startup_error {
+            error!(%message, "world startup failed; not running");
+            return;
+        }
         let mut timing = WallTiming;
         let mut schedule = Schedule::starting_at(self.region.profiler.now());
         loop {
@@ -346,7 +422,30 @@ impl World {
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
         self.host.begin_tick();
+        // 上一刻发出去的读盘请求，结果在这一刻开头经信箱收回。
+        // Read requests dispatched last tick are collected at the start of this tick.
+        self.host.poll_io(&mut self.region);
+        // 每次 `/save-all` 等自己那道栅栏；请求里全部快照提交完之后才登记等待。
+        // Each `/save-all` waits for its own barrier, registered only after all
+        // of its snapshots have been handed to IO (review 8/9).
+        for (seq, source) in self.host.take_ready_save_barriers() {
+            self.pending_save_success.push((seq, source));
+        }
+        let flushed = self.host.take_flushed_barriers();
+        self.release_flushed_save_success(flushed);
+        // IO 线程 panic 或通道断开是致命错误（设计稿 §14 / R12）：记日志，走关服流程，
+        // 尽量把还能存的存下来，不挂死。`shut_down` 里的同步写（level.dat / data/）不依赖
+        // IO 线程，失败的写也不会让 flush 无限等待（通道已断立刻返回）。
+        // A dead IO thread is fatal (design §14 / R12): log, shut down, save what
+        // can still be saved, never hang. `shut_down`'s synchronous writes do not
+        // depend on the IO thread, and a disconnected channel makes flush return
+        // immediately instead of blocking.
+        if self.host.io_failed() {
+            error!("chunk IO thread stopped unexpectedly; shutting down to avoid silent data loss");
+            return self.shut_down();
+        }
         self.process_inbox()?;
+        self.consume_save_commands();
         self.sync_player_tickets();
         self.region.profiler.lap(Phase::Inbox);
         self.tick_ticket_timeouts();
@@ -432,6 +531,33 @@ impl World {
         let flush_bytes = self.region.links.flush();
         self.region.profiler.record(Metric::FlushBytes, flush_bytes);
         self.region.profiler.lap(Phase::Flush);
+        // 运行中每 6000 tick 自动保存一次（官方 `autoSave`，`save-on` 控制开关）。
+        // Run-time autosave every 6000 ticks (official `autoSave`, gated by save-on).
+        if self.director_tick > 0
+            && self.director_tick.is_multiple_of(6_000)
+            && self.save.as_ref().is_some_and(|save| save.auto_save())
+        {
+            // 自动保存照官方 autoSave：只入队，不 join、不排阻塞栅栏（R5 / F3）。
+            // Autosave like official autoSave: enqueue only, never join or block.
+            self.save_all_players();
+            let files = self
+                .save
+                .as_mut()
+                .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
+            match files {
+                Some(Ok(files)) => self.host.submit_file_writes(files),
+                Some(Err(error)) => warn!(%error, "could not encode level data for autosave"),
+                None => {}
+            }
+        }
+        // 运行中匀速给仍加载的脏区块拍快照写盘（D6），`save-off` 时停。
+        // 区块平时由这条平摊的 IO 保存，不再等 6000 刻集中刷，世界线程也不等待。
+        // Paced run-time snapshots of still-loaded dirty chunks (D6), off during
+        // save-off. Chunks are saved by this flat IO stream rather than a
+        // 6000-tick burst; the world thread never waits.
+        let save_enabled = self.save.as_ref().is_some_and(|save| save.auto_save());
+        self.host
+            .save_loaded_dirty(&mut self.region, self.director_tick, save_enabled);
         if self.global.admin.stop_requested {
             let flow = self.shut_down();
             self.region.profiler.lap(Phase::TickTail);
@@ -542,7 +668,44 @@ impl World {
             name: request.name.clone(),
         });
 
-        let game_mode = self.global.state().default_game_mode;
+        // 恢复玩家存档：位置取整到方块、朝向、游戏模式、物品栏。
+        // 位置的小数部分丢掉（不额外补发位置包），见 README 已知限制。
+        // 离开时的写交给 IO 线程异步做，重进可能早于落盘：优先用世界线程
+        // 记下的那份"已交给 IO、还没写完"的内存副本，而不是连接层读到的盘上旧字节。
+        // Restore from the player save: block-rounded position, rotation, game
+        // mode and inventory. The sub-block fraction is dropped (no extra
+        // position packet); see README known limitations. A leave is written
+        // asynchronously, so a rejoin can beat the disk: prefer the world
+        // thread's in-flight in-memory copy over the connection-layer disk bytes.
+        let uuid_string = player_uuid_string(request.uuid.as_bytes());
+        let player_bytes = self
+            .host
+            .pending_player(&uuid_string)
+            .map(<[u8]>::to_vec)
+            .or_else(|| request.player_data.take());
+        let restored = player_bytes.and_then(|bytes| match PlayerData::from_gzip(&bytes) {
+            Ok(data) => Some(data),
+            Err(error) => {
+                warn!(%error, "could not decode player data; treating as a new player");
+                None
+            }
+        });
+        let game_mode = restored
+            .as_ref()
+            .map(|data| game_mode_from_id(data.game_type))
+            .unwrap_or(self.global.state().default_game_mode);
+        let join_spawn = match &restored {
+            Some(data) => RespawnData::of(
+                BlockPos::new(
+                    data.position[0] as i32,
+                    data.position[1] as i32,
+                    data.position[2] as i32,
+                ),
+                data.rotation[0],
+                data.rotation[1],
+            ),
+            None => self.global.state().spawn,
+        };
         let uuid = request.uuid;
         let entry = RosterEntry {
             uuid,
@@ -556,7 +719,7 @@ impl World {
         };
 
         let difficulty_frames = self.global.difficulty_frames();
-        let spawn = self.global.state().spawn.pos;
+        let spawn = join_spawn.pos;
         let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
             id: u64::from(id.0 as u32),
@@ -567,7 +730,7 @@ impl World {
             JoinSettings {
                 game_mode,
                 difficulty_frames: &difficulty_frames,
-                spawn: self.global.state().spawn,
+                spawn: join_spawn,
                 hashed_seed: self.global.state().hashed_seed(),
                 permission_level,
                 is_op,
@@ -604,6 +767,11 @@ impl World {
             .boss_bars_mut()
             .on_join(&mut self.region, id, uuid);
 
+        // `set_default_spawn_position` 发的是世界出生点（`LevelData`），不是玩家存档里的位置。
+        // 玩家位置走上面的 `JoinSettings.spawn`（存档），区块中心走 `player.chunk_pos()`。
+        // `set_default_spawn_position` carries the world spawn from `LevelData`, not
+        // the saved player position. The player's position comes from
+        // `JoinSettings.spawn` above (the save), and the chunk center from `player.chunk_pos()`.
         self.region.start_loading_chunks(
             id,
             self.global.time(),
@@ -612,6 +780,147 @@ impl World {
             self.global.state().weather,
             self.global.world_border(),
         );
+
+        // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
+        if let Some(data) = &restored
+            && let Some(player) = self.region.players.get_mut(&id)
+        {
+            restore_inventory(player, data);
+        }
+    }
+
+    /// 消费 `save-all` / `save-on` / `save-off` 压进来的请求（命令动作不碰 IO）。
+    fn consume_save_commands(&mut self) {
+        let requests = std::mem::take(&mut self.global.save_requests);
+        for request in requests {
+            match request {
+                SaveCommand::SaveAll { flush, source } => {
+                    // 照官方 saveEverything：先给所有脏的已加载区块拍快照交给 IO 线程，
+                    // 再存玩家，最后把 level.dat / data/ 的字节交给 IO 线程。
+                    // 世界线程只编码、不碰磁盘，也不阻塞等 IO（R5 / F3）。
+                    // Like official saveEverything: snapshot dirty loaded chunks,
+                    // save players, then hand level.dat/data bytes to the IO
+                    // thread. The world thread only encodes, never blocks on IO.
+                    self.host
+                        .snapshot_all_dirty(&mut self.region, self.director_tick);
+                    self.save_all_players();
+                    let files = self
+                        .save
+                        .as_mut()
+                        .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
+                    let encoded = match files {
+                        Some(Ok(files)) => {
+                            self.host.submit_file_writes(files);
+                            true
+                        }
+                        Some(Err(error)) => {
+                            // 编码就失败了：绝不能报成功，直接发 commands.save.failed（F9）。
+                            warn!(%error, "save-all could not encode level data");
+                            false
+                        }
+                        None => true,
+                    };
+                    if !encoded {
+                        self.send_save_failure(source);
+                        continue;
+                    }
+                    // 这次请求的全部快照都交给 IO 线程之后才排一道自己的栅栏。
+                    // 阻塞的 flush() 只允许出现在关服；flush 标志按官方解析保留。
+                    // Queue this request's own barrier after all of its snapshots
+                    // reach IO. Blocking flush() remains shutdown-only.
+                    debug!(flush, "save-all handed its writes to the bounded queue");
+                    if self.host.begin_save_all(source).is_none() {
+                        // 这一局没接磁盘：没有 IO 要等，直接发。
+                        self.send_save_success(source);
+                    } else {
+                        // 取回刚登记好的栅栏，等自己的 IO 回执（中 9）。
+                        for (seq, owner) in self.host.take_ready_save_barriers() {
+                            self.pending_save_success.push((seq, owner));
+                        }
+                    }
+                }
+                SaveCommand::SaveOn => {
+                    if let Some(save) = &mut self.save {
+                        save.set_auto_save(true);
+                    }
+                }
+                SaveCommand::SaveOff => {
+                    if let Some(save) = &mut self.save {
+                        save.set_auto_save(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 发 `commands.save.success`（广播给 OP），和命令侧原来的一致。
+    /// Send `commands.save.success` (broadcast to ops), as the command did.
+    fn send_save_success(&mut self, source: PlayerId) {
+        crate::command::feedback::success(
+            &mut self.region,
+            source,
+            Component::translate("commands.save.success", []),
+            true,
+        );
+    }
+
+    /// 收回已到达的 IO 栅栏回执，按回执的 `ok` 发等在上面的 `save-all` 消息：
+    /// 成功才发 `commands.save.success`，失败发 `commands.save.failed`（F9 /
+    /// 官方 `SaveAllCommand` 的 `ERROR_FAILED`）。两者都只在保存真正完成后发。
+    /// Release waiting `save-all` messages from the IO barrier acks: success
+    /// only sends `commands.save.success`, a failed window sends
+    /// `commands.save.failed` (F9 / official `SaveAllCommand.ERROR_FAILED`).
+    /// Both are sent only after the save really completed.
+    fn release_flushed_save_success(&mut self, flushed: Vec<(u64, bool)>) {
+        if flushed.is_empty() {
+            return;
+        }
+        let mut remaining = Vec::new();
+        for (seq, source) in std::mem::take(&mut self.pending_save_success) {
+            if let Some(&(_, ok)) = flushed.iter().find(|(got, _)| *got == seq) {
+                if ok {
+                    self.send_save_success(source);
+                } else {
+                    error!(?source, "save-all failed: an IO write in the window failed");
+                    self.send_save_failure(source);
+                }
+            } else {
+                remaining.push((seq, source));
+            }
+        }
+        self.pending_save_success = remaining;
+    }
+
+    /// 发 `commands.save.failed`（红色系统消息），照官方 `SaveAllCommand`。
+    /// Send `commands.save.failed` (red system message) like official
+    /// `SaveAllCommand` when `saveEverything` returns false.
+    fn send_save_failure(&mut self, source: PlayerId) {
+        let failure = crate::command::feedback::fail("commands.save.failed");
+        crate::command::feedback::report(&mut self.region, source, "save-all", &failure);
+    }
+
+    /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
+    fn save_one_player(&mut self, id: PlayerId) {
+        let encoded = self.region.players.get(&id).and_then(encode_player_save);
+        if let Some((uuid, bytes)) = encoded {
+            self.host.submit_player_write(&uuid, bytes);
+        }
+    }
+
+    /// 存档所有在线玩家（自动保存、关服、`save-all`）。
+    fn save_all_players(&mut self) {
+        // 先把所有存档编出来，避免遍历 `region.players` 时又可变借 `host`。
+        // Encode every save first so we don't hold a borrow of `region.players`
+        // while mutably borrowing `host`.
+        let encoded: Vec<(String, Vec<u8>)> = self
+            .region
+            .players
+            .values()
+            .filter_map(encode_player_save)
+            .collect();
+        for (uuid, bytes) in encoded {
+            self.host.submit_player_write(&uuid, bytes);
+        }
     }
 
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
@@ -650,6 +959,11 @@ impl World {
             self.global.scoreboard_mut().on_leave(&name);
             self.global.boss_bars_mut().on_leave(id);
         }
+        // 官方 `PlayerList.remove` 在移除玩家前先存盘；`PlayerList.save` /
+        // `saveAll` 都不看 `noSave`，所以 `/save-off` 期间离开照存（F7）。
+        // Official `PlayerList.remove` saves before removing; `PlayerList.save`
+        // / `saveAll` ignore `noSave`, so a leave during `/save-off` still saves.
+        self.save_one_player(id);
         self.region.players.remove(&id);
         self.region.player_grid.remove(id);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
@@ -937,14 +1251,70 @@ impl World {
         }
     }
 
-    /// 给所有人发关闭的原因，然后结束世界线程。
+    /// 按官方 `stopServer` 顺序关服：先存玩家、再存区块（后续步骤接入 IO 线程后补），
+    /// 然后写 `level.dat` / `data/` / `chunk_tickets.dat`，最后释放锁、踢人。
+    /// 任何一步出错都只记日志，不让关服挂死。
+    ///
+    /// Shut down in the official `stopServer` order: save players, then chunks
+    /// (added with the IO thread in a later step), then write `level.dat`, `data/`
+    /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
+    /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
-        // 任务 A 没有真实磁盘：`DirectorHost::shutdown` 只走状态机、不落盘，
-        // 关服时跑它没有可观察收益，还会拖住世界线程。
-        // 任务 B 接真实 IO 时在这里换回 `self.host.shutdown(...)`。
+        // 官方顺序：玩家 → 区块 → level.dat / data/ → 解锁。
+        // level.dat/data 的字节也在关服的阻塞栅栏之前交给 IO 线程，
+        // 世界线程只编码，不逐文件同步写（F3 / R5）。
+        // Official order: players → chunks → level.dat/data → unlock. The
+        // level.dat/data bytes are queued before the shutdown's blocking barrier;
+        // the world thread only encodes, never writes file-by-file (F3 / R5).
+        // 关服前照官方 `stopServer` 把 `noSave` 复位：这一刻全量保存，
+        // 不受 `/save-off` 影响（F7）。
+        // Like official `stopServer`, reset `noSave` before the final full
+        // save so `/save-off` cannot suppress it (F7).
+        if let Some(save) = &mut self.save {
+            save.set_auto_save(true);
+        }
+        self.host.set_saves_enabled(true);
+        self.save_all_players();
+        let files = self
+            .save
+            .as_mut()
+            .map(|save| save.encode_saves(&self.global, crate::admin::now_millis()));
+        match files {
+            Some(Ok(files)) => self.host.submit_file_writes(files),
+            Some(Err(error)) => warn!(%error, "could not encode level data on shutdown"),
+            None => {}
+        }
+        // 收回全部已加载区块、提交全部积压写，然后排空 IO 线程并 sync_all：
+        // 这是唯一允许世界线程阻塞等 IO 的地方。
+        // Reclaim every loaded chunk, hand over every queued write, then drain
+        // and sync_all: the only place the world thread may block on IO.
+        self.host.shutdown(&mut self.region);
+        if let Some(save) = &mut self.save {
+            save.close();
+        }
+        info!(
+            codec_nanos = crate::director_host::codec_nanos(),
+            io_failures = self.host.io_failures(),
+            "chunk codec time and IO failures on this run"
+        );
         let reason = Component::translate(SERVER_SHUTDOWN, []);
         self.region.links.kick_all(&reason);
         ControlFlow::Break(())
+    }
+}
+
+/// 编出一名在线玩家的存档字节（纯函数，不碰 `self`，避免和 `host` 的可变借用冲突）。
+/// 返回带连字符的 uuid 和 gzip 字节，交给 [`World::save_all_players`] 提交给 IO 线程。
+/// Encode one live player's save (pure, so it does not conflict with the mutable
+/// borrow of `host`). Returns the hyphenated uuid and gzip bytes for submission.
+fn encode_player_save(player: &crate::player::Player) -> Option<(String, Vec<u8>)> {
+    let data = runtime_player_data(player);
+    match encode_player_data(&data) {
+        Ok(bytes) => Some((player_uuid_string(player.uuid.as_bytes()), bytes)),
+        Err(error) => {
+            warn!(%error, "could not encode player data");
+            None
+        }
     }
 }
 
@@ -1011,6 +1381,11 @@ impl Schedule {
 
 #[cfg(test)]
 mod loaded_tests;
+#[cfg(test)]
+#[path = "world/tests/review_probe.rs"]
+mod review_probe;
+#[cfg(test)]
+mod storage_diff_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]

@@ -13,14 +13,19 @@ use std::{
     sync::OnceLock,
 };
 
-use mc_bamboo_blocks::{ChunkBlockEntities, ChunkRedstone, ChunkTicks, entity::ChunkEntities};
+use mc_bamboo_blocks::{
+    ChunkBlockEntities, ChunkRedstone, ChunkTicks,
+    archive::block_entity::write_block_entity_additional,
+    entity::{ChunkEntities, EntityRow},
+};
 use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
 
 use crate::{
-    command_block::CommandBlockData, container::ContainerEntry, lectern::Book, profiler::SubPhase,
-    region::Region,
+    chunk_codec::PackedChunk, command_block::CommandBlockData, container::ContainerEntry,
+    lectern::Book, profiler::SubPhase, region::Region,
 };
 
 /// 剖析器用的全局计时开关：连接层没有 `Profiler`，`is_pristine` 在世界线程里
@@ -168,6 +173,58 @@ impl ChunkBundle for Box<RegionColumn> {
         let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         PRISTINE_NANOS.fetch_add(elapsed, std::sync::atomic::Ordering::Relaxed);
         result
+    }
+}
+
+/// `RegionColumn` 实现 `EncodeParts`，供卸载存盘走和只读快照同一条编码路径
+/// （补 11）。字段都在这个模块里，所以实现放在这里而不是 `chunk_content`。
+/// `RegionColumn` implements `EncodeParts` so unload saves share the same
+/// encoder as the read-only snapshot (item 11). The impl lives here because
+/// the fields are private to this module.
+impl super::chunk_content::EncodeParts for RegionColumn {
+    fn chunk_column(&self) -> &ChunkColumn {
+        &self.column
+    }
+
+    fn ticks(&self) -> Option<&ChunkTicks> {
+        self.ticks.as_ref()
+    }
+
+    fn live_additional(&self, pos: BlockPos) -> Option<Result<Vec<(String, Tag)>, String>> {
+        let live = self
+            .block_entities
+            .entities()
+            .iter()
+            .find(|live| live.pos() == pos)?;
+        Some(write_block_entity_additional(live.as_ref()).map_err(|e| e.0))
+    }
+
+    fn redstone(&self) -> &ChunkRedstone {
+        &self.redstone
+    }
+
+    fn container(&self, pos: BlockPos) -> Option<&ContainerEntry> {
+        self.containers.get(&pos).map(|packed| packed.entry())
+    }
+
+    fn block_item(&self, pos: BlockPos) -> Option<&ComponentPatch> {
+        self.block_items.get(&pos)
+    }
+
+    fn command_block(&self, pos: BlockPos) -> Option<&CommandBlockData> {
+        self.command_blocks.get(&pos)
+    }
+
+    fn book(&self, pos: BlockPos) -> Option<&Book> {
+        self.books.get(&pos)
+    }
+
+    fn entity_rows(&self) -> &[EntityRow] {
+        self.entities.rows()
+    }
+
+    fn preserved_entities(&self) -> &[Tag] {
+        self.entities.preserved()
     }
 }
 
@@ -546,6 +603,28 @@ impl Region {
         }
         self.profiler.end_sub();
         Ok(boxes)
+    }
+
+    /// 给一个仍加载的区块拍存档快照，**不卸载、不移动盒子、不改任何状态**（补 11）：
+    /// 从借用的状态只读地组装 `BorrowedParts`，走和卸载存盘同一条
+    /// `chunk_content::encode_parts` 编码路径，写出的 NBT 与卸载逐字节一致。
+    /// 不会提前算完待算光照、不发任何包、不动光照/方块变化与区块包缓存。
+    /// `None` 表示区块没加载、或表正忙（稍后重试）；区块是否原样由调用方的
+    /// 脏判定（补 9）决定，这里不重复判断。
+    ///
+    /// Snapshot a still-loaded chunk read-only (item 11): build `BorrowedParts`
+    /// from borrowed state and run the same `encode_parts` as an unload save,
+    /// byte-identical NBT. No light settling, no packets, no cache mutation.
+    pub(crate) fn encode_loaded_column(
+        &self,
+        pos: ChunkPos,
+    ) -> Option<Result<PackedChunk, String>> {
+        // 只读快照从「已发布」的光照层克隆，和卸载存盘用的是同一份；哪怕
+        // 引擎里还有在算的轮次，字节也和卸载一致，不必推迟快照（复查「中 6」）。
+        // Read-only snapshots clone the published light layers, the same bytes
+        // an unload save writes, so pending work never changes the snapshot.
+        let parts = super::content_snapshot::BorrowedParts::build(self, pos)?;
+        Some(crate::chunk_codec::encode_parts(pos, &parts))
     }
 }
 

@@ -55,6 +55,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
     /// 这一刻哪些区块参与各阶段。无限超平坦模式下恒为真。
     pub(crate) tick_levels: &'a TickLevels,
+    /// 「改过没存」的标记，方块逻辑的每一次写都在这里登记。
+    pub(crate) dirty: &'a mut crate::region::dirty::Dirty,
 }
 
 impl LevelTables for RegionLevel<'_> {
@@ -81,6 +83,10 @@ impl LevelTables for RegionLevel<'_> {
     fn redstone_table_mut(&mut self) -> &mut RedstoneMemory {
         self.redstone
     }
+
+    fn mark_chunk_dirty(&mut self, pos: ChunkPos) {
+        self.dirty.mark(pos);
+    }
 }
 
 impl EntityTables for RegionLevel<'_> {
@@ -90,6 +96,10 @@ impl EntityTables for RegionLevel<'_> {
 
     fn entities_table_mut(&mut self) -> &mut EntityStore {
         self.entities
+    }
+
+    fn mark_chunk_dirty(&mut self, pos: ChunkPos) {
+        self.dirty.mark(pos);
     }
 }
 
@@ -111,6 +121,7 @@ impl Level for RegionLevel<'_> {
     }
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
+        self.dirty.mark(pos.chunk());
         let previous = self.chunks.block(pos).map(BlockState);
         // `/setblock` / `/fill` 没有玩家，破坏路径经过这里：官方的
         // `preRemoveSideEffects` 在读内容之前解包。
@@ -186,6 +197,7 @@ impl Level for RegionLevel<'_> {
     }
 
     fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        self.dirty.mark(pos.chunk());
         self.chunks.set_sign(pos, content)
     }
 
@@ -243,6 +255,7 @@ impl Level for RegionLevel<'_> {
     /// `getBlockContainer`：方块是容器时给它建一张槽位表。双箱按 `CompoundContainer`
     /// 的顺序合并，并且和漏斗一样忽略压住箱子的方块。
     fn with_container(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut dyn Container)) -> bool {
+        self.dirty.mark(pos.chunk());
         let Some(kind) = crate::container::kind_in(self.chunks, pos) else {
             return false;
         };
@@ -308,6 +321,7 @@ impl Level for RegionLevel<'_> {
     }
 
     fn clear_container(&mut self, pos: BlockPos) {
+        self.dirty.mark(pos.chunk());
         self.containers.remove(&pos);
     }
 
@@ -362,6 +376,7 @@ impl Level for RegionLevel<'_> {
 
     /// 拿漏斗方块实体。它正在 tick 时已经从表里拿出来了，这时返回 `false`。
     fn with_hopper(&mut self, pos: BlockPos, f: &mut dyn FnMut(&mut HopperEntity)) -> bool {
+        self.dirty.mark(pos.chunk());
         let Some(hopper) = self.block_entities.get_mut(pos) else {
             return false;
         };
@@ -375,6 +390,7 @@ impl Level for RegionLevel<'_> {
     /// `RandomizableContainer.unpackLootTable`: fill the table into the slots before
     /// a hopper, dispenser, decorated pot or comparator reads this cell.
     fn unpack_loot_table(&mut self, pos: BlockPos) {
+        self.dirty.mark(pos.chunk());
         crate::container_loot::unpack(
             crate::container_loot::Unpack {
                 chunks: self.chunks,

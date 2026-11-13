@@ -634,6 +634,7 @@ impl ConfigFiles {
             forwarding: self.bamboo.forwarding,
             forwarding_secret: self.bamboo.forwarding_secret.clone(),
             list_directory: directory.to_path_buf(),
+            world_dir: Some(world_dir(directory, self)),
             entity_threads: self.bamboo.entity_threads,
             redstone_cache: self.bamboo.redstone_cache,
             mail_budget: MailBudget {

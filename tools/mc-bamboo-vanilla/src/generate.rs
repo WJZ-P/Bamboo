@@ -101,7 +101,33 @@ pub fn write_all(data: &VersionData, output_dir: &Path) -> Result<(), String> {
         write_file(output_dir, "gamerules.rs", &gamerules)?;
     }
     write_file(output_dir, "tags.rs", &tags)?;
+    write_saved_world(data, output_dir)?;
     write_worldgen(data, output_dir)
+}
+
+/// 官方 codec 编出的 `world_gen_settings.dat` 默认值，写成 SNBT 常量。
+fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String> {
+    let mut out = String::from(HEADER);
+    let _ = writeln!(
+        out,
+        "//! 官方 `WorldGenSettings.CODEC` 编出的超平坦默认值。主世界生成器是"
+    );
+    let _ = writeln!(
+        out,
+        "//! `minecraft:flat`，地层与 Bamboo 的超平坦模板一致，官方服务端打开"
+    );
+    let _ = writeln!(out, "//! 这个世界时新生成的区块和 Bamboo 一致。");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/// `world_gen_settings.dat` 的 `data` 复合标签（SNBT）。"
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_GEN_SETTINGS: &str = r#\"{}\"#;",
+        data.saved_world.world_gen_settings
+    );
+    write_file(output_dir, "saved_world.rs", &out)
 }
 
 /// 世界生成的数据写成一个 JSON 文件，再加一个只有 `include_str!` 的 Rust 文件。

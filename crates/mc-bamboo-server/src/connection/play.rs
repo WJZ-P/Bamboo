@@ -280,6 +280,11 @@ impl RequestReader<'_> {
             is_op: op.is_some(),
             peer_ip: self.peer_ip.clone(),
             online_at_login: session.online_at_login,
+            // 连接层做这一次文件 IO：读回玩家存档，世界线程再解析。
+            // The connection task does this file IO; the world thread parses it.
+            player_data: self.shared.config.world_dir.as_ref().and_then(|root| {
+                mc_bamboo_game::save_session::load_player_bytes(root, session.uuid.as_bytes())
+            }),
             sink: Box::new(outbound.clone()),
         };
         self.send_to_world(Inbound::Join(Box::new(request)))

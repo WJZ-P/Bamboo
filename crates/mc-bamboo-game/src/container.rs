@@ -377,6 +377,7 @@ fn increment_openers(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
     };
     if previous == 0 {
         on_open(region, pos, kind);
+        region.touch(pos);
         if let Some(entry) = region.containers.get_mut(&pos) {
             let at = region.tick.plus(RECHECK_DELAY);
             entry.recheck_at.get_or_insert(at);
@@ -387,6 +388,7 @@ fn increment_openers(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
         .containers
         .get(&pos)
         .map_or(0.0, |entry| entry.max_range);
+    region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.max_range = range.max(BLOCK_INTERACTION_RANGE);
     }
@@ -405,6 +407,7 @@ fn decrement_openers(region: &mut Region, pos: BlockPos, kind: ContainerKind) {
         .map_or(0, |entry| entry.open_count);
     if current == 0 {
         on_close(region, pos, kind);
+        region.touch(pos);
         if let Some(entry) = region.containers.get_mut(&pos) {
             entry.max_range = 0.0;
         }
@@ -664,6 +667,7 @@ fn recheck_openers(region: &mut Region, pos: BlockPos) {
     let Some(kind) = kind_at(region, pos) else {
         return;
     };
+    region.touch(pos);
     let old_range = match region.containers.get_mut(&pos) {
         Some(entry) => {
             entry.recheck_at = None;
@@ -692,6 +696,7 @@ fn recheck_openers(region: &mut Region, pos: BlockPos) {
         .map(|player| player.id)
         .collect();
 
+    region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.max_range = 0.0;
     }
@@ -713,11 +718,13 @@ fn recheck_openers(region: &mut Region, pos: BlockPos) {
         } else if current == 0 {
             on_close(region, pos, kind);
         }
+        region.touch(pos);
         if let Some(entry) = region.containers.get_mut(&pos) {
             entry.open_count = current;
         }
     }
     opener_count_changed(region, pos, kind, previous);
+    region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.max_range = range;
         if current == 0 {
@@ -766,15 +773,18 @@ pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
     crate::block_items::forget(region, pos);
     // 官方 `dropContents` 之前已经解包，这里顺手把还挂着的表也清掉。
     // Vanilla unpacks before `dropContents`; clear any table left on this cell.
+    region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.loot_table = None;
         entry.loot_table_seed = 0;
     }
     let targeted = region.menus.values().any(|menu| menu.target.contains(pos));
     if !targeted {
+        region.touch(pos);
         region.containers.remove(&pos);
         return;
     }
+    region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.dead = true;
     }
@@ -786,6 +796,7 @@ pub(crate) fn on_block_destroyed(region: &mut Region, pos: BlockPos) {
 /// For commands and other direct writes to the container table: clear a pending
 /// table so block-entity data does not follow replaced contents.
 pub(crate) fn forget_loot_table(region: &mut Region, pos: BlockPos) {
+    region.touch(pos);
     if let Some(entry) = region.containers.get_mut(&pos) {
         entry.loot_table = None;
         entry.loot_table_seed = 0;
