@@ -181,6 +181,14 @@ impl TicketTable {
         self.loading.scratch_blocks() + self.simulation.scratch_blocks()
     }
 
+    /// 只给单元测试用：强制每次 `run_updates` 都走稠密窗口快路径。
+    /// 返回的 guard 离开作用域时还原；生产构建里没有这个函数。
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn force_dense(on: bool) -> super::spread::ForceDenseGuard {
+        super::spread::force_dense(on)
+    }
+
     /// 全部有票的区块，按坐标排序。
     pub fn ticket_positions(&self) -> Vec<ChunkPos> {
         let mut out: Vec<_> = self.tickets.keys().copied().collect();

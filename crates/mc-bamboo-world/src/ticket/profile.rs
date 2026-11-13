@@ -22,6 +22,9 @@ pub const SIMULATION_COLLECT: usize = 7;
 pub const MERGE: usize = 8;
 pub const PENDING: usize = 9;
 pub const FOLD: usize = 10;
+/// 有界窗口快路径的计时（两张平面各自一个下标）。
+pub const LOADING_DENSE: usize = 11;
+pub const SIMULATION_DENSE: usize = 12;
 
 /// 计数器下标，和 `COUNTER_LABELS` 对应。
 pub const C_BFS_VISIT: usize = 0;
@@ -32,8 +35,14 @@ pub const C_RELAX_POP: usize = 4;
 pub const C_RELAX_UPDATE: usize = 5;
 pub const C_COLLECT_SCAN: usize = 6;
 pub const C_CHANGES: usize = 7;
+/// 命中稠密窗口快路径的平面轮数。
+pub const C_DENSE_HIT: usize = 8;
+/// 回退到两阶段算法的平面轮数。
+pub const C_DENSE_FALLBACK: usize = 9;
+/// 快路径铺开的窗口格数（两张平面合计）。
+pub const C_DENSE_CELLS: usize = 10;
 
-pub const COUNTER_LABELS: [&str; 8] = [
+pub const COUNTER_LABELS: [&str; 11] = [
     "BFS 访问格",
     "BFS 清空格",
     "建种子查邻居",
@@ -42,9 +51,15 @@ pub const COUNTER_LABELS: [&str; 8] = [
     "松弛真更新",
     "收变化扫描格",
     "输出变化数",
+    "快路径命中轮",
+    "回退轮",
+    "快路径窗口格",
 ];
 
-static COUNTS: [AtomicU64; 8] = [
+static COUNTS: [AtomicU64; 11] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -63,7 +78,7 @@ pub fn count(stage: usize, by: u64) {
     }
 }
 
-pub const LABELS: [&str; 11] = [
+pub const LABELS: [&str; 13] = [
     "加载 升高锥BFS",
     "加载 建种子",
     "加载 分桶松弛",
@@ -75,12 +90,16 @@ pub const LABELS: [&str; 11] = [
     "合并两平面",
     "分流 pending",
     "折叠源变化",
+    "加载 稠密窗口",
+    "模拟 稠密窗口",
 ];
 
 /// 0 = 还没查过环境变量，1 = 关，2 = 开。计数器在热循环里调用 `enabled()`，
 /// 每次都去查环境变量会贵到失真，所以查一次就缓存。
 static ENABLED: AtomicU8 = AtomicU8::new(0);
-static NANOS: [AtomicU64; 11] = [
+static NANOS: [AtomicU64; 13] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),

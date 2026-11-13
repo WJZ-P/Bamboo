@@ -16,12 +16,17 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    mem,
+    env, mem,
+    sync::atomic::{AtomicU8, Ordering},
 };
+
+#[cfg(test)]
+use std::cell::Cell;
 
 use mc_bamboo_core::ChunkPos;
 
 use super::{
+    level::SIMULATION_MAX_LEVEL,
     profile::{Guard, count},
     table::ChunkHasherBuilder,
 };
@@ -57,6 +62,67 @@ type BlockMap<T> = HashMap<BlockKey, Box<T>, ChunkHasherBuilder>;
 
 fn block_key(pos: ChunkPos) -> BlockKey {
     (pos.x >> BLOCK_SHIFT, pos.z >> BLOCK_SHIFT)
+}
+
+/// 单窗口快路径的硬上限：每张平面 1 M 格（等级用 `u8` 存，约 1 MiB）。
+const DENSE_MAX_CELLS: usize = 1 << 20;
+/// 每个有效源变化最多摊到这么多窗口格，超过就说明窗口里大片区域白扫。
+const DENSE_CELLS_PER_CHANGE: usize = 2048;
+/// 影响球并集至少覆盖窗口的 1/4 个 64×64 块，否则算稀疏场景。
+const DENSE_COVERAGE_DIVISOR: usize = 4;
+
+thread_local! {
+    /// 只给测试用：强制每次 `update` 都走稠密窗口快路径（跳过稀疏/超界回退判据）。
+    /// 生产构建里不存在这个变量；窗口本身的内存硬上限依然生效。
+    #[cfg(test)]
+    static FORCE_DENSE: Cell<bool> = const { Cell::new(false) };
+    /// 累计命中快路径的平面轮数。线程局部，避免并行测试互相干扰。
+    #[cfg(test)]
+    static DENSE_HITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 只给测试用：累计命中快路径的平面轮数（不受 `TICKET_PROFILE` 开关影响）。
+#[cfg(test)]
+pub fn dense_hits() -> u64 {
+    DENSE_HITS.with(|hits| hits.get())
+}
+
+/// 测试期间强制走快路径；返回一个还原原值的 guard。
+#[cfg(test)]
+pub fn force_dense(on: bool) -> ForceDenseGuard {
+    let previous = FORCE_DENSE.with(|flag| flag.replace(on));
+    ForceDenseGuard(previous)
+}
+
+#[cfg(test)]
+pub struct ForceDenseGuard(bool);
+
+#[cfg(test)]
+impl Drop for ForceDenseGuard {
+    fn drop(&mut self) {
+        FORCE_DENSE.with(|flag| flag.set(self.0));
+    }
+}
+
+/// 0 = 还没查过环境变量，1 = 关，2 = 开。测试里可以强制打开快路径。
+static DENSE_ALLOWED: AtomicU8 = AtomicU8::new(0);
+
+/// 默认开启；`BAMBOO_TICKET_DENSE=0` 可以整条关掉，用来交替测量。
+fn dense_allowed() -> bool {
+    match DENSE_ALLOWED.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = env::var_os("BAMBOO_TICKET_DENSE").is_none_or(|value| value != "0");
+            DENSE_ALLOWED.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+#[cfg(test)]
+fn force_dense_enabled() -> bool {
+    FORCE_DENSE.with(|flag| flag.get())
 }
 
 /// 按坐标分块的稠密等级表。缺省值（limit）也照常写在数组里，只是不计入 `count`。
@@ -400,6 +466,43 @@ impl Scratch {
     }
 }
 
+/// 有界窗口快路径的等级缓冲：按 x 主序铺开一个坐标长方体，跨轮复用容量。
+///
+/// 沿用 7k 的「近 [`PEAK_WINDOW`] 轮峰值」口径：峰值过去后把过大的缓冲整块释放，
+/// 免得一次大批玩家移动留下的缓冲一直占着内存。`scratch_blocks()` 按 64×64
+/// 块折算上报，两个内存回收测试对两条路径都成立。
+#[derive(Debug)]
+struct DenseWorkspace {
+    cells: Vec<u8>,
+    recent_usage: [usize; PEAK_WINDOW],
+    next_usage: usize,
+}
+
+impl DenseWorkspace {
+    fn new() -> Self {
+        Self {
+            cells: Vec::new(),
+            recent_usage: [0; PEAK_WINDOW],
+            next_usage: 0,
+        }
+    }
+
+    /// 记下这一轮铺开的格数，并在峰值过去后收掉过大的缓冲。
+    fn note_round(&mut self, used: usize) {
+        self.recent_usage[self.next_usage] = used;
+        self.next_usage = (self.next_usage + 1) % PEAK_WINDOW;
+        let peak = self.recent_usage.iter().copied().max().unwrap_or(0);
+        // 留一倍滞后，稳态时不会因为刚好过一点就每轮重新分配。
+        if self.cells.capacity() > peak.saturating_mul(2).saturating_add(BLOCK_CELLS) {
+            self.cells = Vec::new();
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        self.cells.capacity().div_ceil(BLOCK_CELLS)
+    }
+}
+
 /// 一张等级平面。
 #[derive(Debug)]
 pub struct Plane {
@@ -415,6 +518,8 @@ pub struct Plane {
     queue: LevelQueue,
     /// 跨轮复用的源变化列表。
     buffers: Buffers,
+    /// 稠密窗口快路径的等级缓冲。
+    dense: DenseWorkspace,
 }
 
 /// `update` 里每轮都要用、但跨轮可以复用容量的几个 `Vec`。
@@ -444,6 +549,7 @@ impl Plane {
             scratch: Scratch::new(),
             queue: LevelQueue::new(limit),
             buffers: Buffers::new(limit),
+            dense: DenseWorkspace::new(),
         }
     }
 
@@ -452,9 +558,10 @@ impl Plane {
         self.levels.get(pos)
     }
 
-    /// 这一轮没有源变化：推进辅助块池的近期峰值窗口。
+    /// 这一轮没有源变化：推进两条路径各自的近期峰值窗口。
     pub fn note_idle_round(&mut self) {
         self.scratch.note_idle_round();
+        self.dense.note_round(0);
     }
 
     /// 表里非默认等级的区块数。
@@ -465,7 +572,7 @@ impl Plane {
     /// 辅助结构占的块数，测试用来检查长期移动不会让内存一直涨。
     #[doc(hidden)]
     pub fn scratch_blocks(&self) -> usize {
-        self.scratch.block_count()
+        self.scratch.block_count() + self.dense.block_count()
     }
 
     fn source(&self, pos: ChunkPos) -> i32 {
@@ -512,10 +619,25 @@ impl Plane {
         if effective.is_empty() {
             self.buffers.effective = effective;
             self.scratch.note_idle_round();
+            self.dense.note_round(0);
             return Vec::new();
         }
-        self.scratch.begin();
         drop(_fold_guard);
+
+        // 影响球并集落在一个有界窗口里时，用一次稠密光栅扫描替代两阶段算法的四遍遍历。
+        // 不满足判据就原样走回退路径；两条路径算的是同一个不动点，见下文注释。
+        let dense_stage = if limit == SIMULATION_MAX_LEVEL {
+            super::profile::SIMULATION_DENSE
+        } else {
+            super::profile::LOADING_DENSE
+        };
+        if let Some(result) = self.try_dense_update(&effective, dense_stage) {
+            self.buffers.effective = effective;
+            return result;
+        }
+        count(super::profile::C_DENSE_FALLBACK, 1);
+        self.dense.note_round(0);
+        self.scratch.begin();
 
         // 阶段一：多源 BFS 找升高锥，只看旧的等级表，不改表。
         let _bfs_guard = Guard::new(stages[0]);
@@ -601,6 +723,195 @@ impl Plane {
         self.scratch.recycle();
         drop(_collect_guard);
         result
+    }
+
+    /// 有界窗口快路径：把影响球并集铺成一张稠密 `u8` 表，两遍光栅扫描直接算新不动点。
+    ///
+    /// 官方 `DynamicGraphMinFixedPoint` 的稳定解是
+    /// `L(p) = min( min_s(S(s) + chebyshev(s, p)), limit )`（字节码 `getComputedLevel` /
+    /// `computeLevelFromNeighbor` / `runUpdates` 已核）。等级为 `v` 的源只可能改变
+    /// `chebyshev <= limit - 1 - v` 的格子，所以每个有效变化的 `old`、`new` 取较小者
+    /// 得出影响球半径，包围盒再加两格余量。加余量后窗口最外一圈（halo）上的
+    /// `L_old == L_new`：任何外部源到窗口内的最短 8 邻路径必经这一圈，而坐标长方体
+    /// 内部的最短路径不会再出去。把 halo 钉在旧值、窗口内部按**新**源初始化，
+    /// 算出的 min-plus 不动点就是全局新不动点。
+    ///
+    /// 切比雪夫最短路可以按 x 单调取，所以一遍 x↑z↑（看上/左上/右上/左 +1）
+    /// 加一遍 x↓z↓（看下/左下/右下/右 +1）就收敛，不需要优先队列。窗口外一格不变，
+    /// 按 x 主序扫一遍旧/新值即可产出恰好全部变化、且天然按 `(x, z)` 有序。
+    ///
+    /// 返回 `None` 表示这轮不满足判据，调用方原样走两阶段回退路径。
+    fn try_dense_update(
+        &mut self,
+        effective: &[(ChunkPos, i32, i32)],
+        dense_stage: usize,
+    ) -> Option<Vec<(ChunkPos, i32, i32)>> {
+        if !dense_allowed() {
+            return None;
+        }
+        let limit = self.limit;
+        let limit_u8 = u8::try_from(limit).ok()?;
+        let forced = {
+            #[cfg(test)]
+            {
+                force_dense_enabled()
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        // 每个变化源的影响球，坐标用 i64 算，极端输入也不会溢出。
+        let mut x0 = i64::MAX;
+        let mut x1 = i64::MIN;
+        let mut z0 = i64::MAX;
+        let mut z1 = i64::MIN;
+        let mut coverage = 0usize;
+        for &(pos, old, new) in effective {
+            let radius = i64::from(limit) - 1 - i64::from(old.min(new));
+            let cx = i64::from(pos.x);
+            let cz = i64::from(pos.z);
+            x0 = x0.min(cx - radius - 2);
+            x1 = x1.max(cx + radius + 2);
+            z0 = z0.min(cz - radius - 2);
+            z1 = z1.max(cz + radius + 2);
+            // 影响球覆盖的 64×64 块数，用来判稀疏。
+            let bx0 = (cx - radius).div_euclid(BLOCK_SIZE as i64);
+            let bx1 = (cx + radius).div_euclid(BLOCK_SIZE as i64);
+            let bz0 = (cz - radius).div_euclid(BLOCK_SIZE as i64);
+            let bz1 = (cz + radius).div_euclid(BLOCK_SIZE as i64);
+            coverage = coverage.saturating_add(
+                (bx1 - bx0 + 1).unsigned_abs() as usize * (bz1 - bz0 + 1).unsigned_abs() as usize,
+            );
+        }
+        // 窗口就是包围盒本身；等级表按 64 分块，但拷入/拷出用块游标，不需要对齐。
+        // 对齐只会把窗口白白放大到四倍。
+        let width = (x1 - x0 + 1) as u64;
+        let height = (z1 - z0 + 1) as u64;
+        let area = width
+            .checked_mul(height)
+            .and_then(|n| usize::try_from(n).ok())?;
+        let window_blocks = width.div_ceil(BLOCK_SIZE as u64) as usize
+            * height.div_ceil(BLOCK_SIZE as u64) as usize;
+        // 强制开关只跳过「稀疏 / 每变化源面积」两条启发式判据；窗口内存硬上限仍生效。
+        if area > DENSE_MAX_CELLS
+            || (!forced
+                && (area > DENSE_CELLS_PER_CHANGE.saturating_mul(effective.len())
+                    || coverage.saturating_mul(DENSE_COVERAGE_DIVISOR) < window_blocks))
+        {
+            return None;
+        }
+        let (x0, z0, x1, z1) = (
+            i32::try_from(x0).ok()?,
+            i32::try_from(z0).ok()?,
+            i32::try_from(x1).ok()?,
+            i32::try_from(z1).ok()?,
+        );
+        let width = width as usize;
+        let height = height as usize;
+        let _dense_guard = Guard::new(dense_stage);
+        count(super::profile::C_DENSE_HIT, 1);
+        count(super::profile::C_DENSE_CELLS, area as u64);
+        #[cfg(test)]
+        DENSE_HITS.with(|hits| hits.set(hits.get() + 1));
+
+        let mut cells = mem::take(&mut self.dense.cells);
+        cells.clear();
+        cells.resize(area, limit_u8);
+        // 内部格按**新**源等级初始化：source 表里除了 effective 涉及的位置都还是新值，
+        // effective 覆盖的位置以它的最终值为准（含被撤掉的源，不能留在表里）。
+        for (&pos, &level) in &self.sources {
+            if pos.x > x0 && pos.x < x1 && pos.z > z0 && pos.z < z1 {
+                let index = (pos.x - x0) as usize * height + (pos.z - z0) as usize;
+                cells[index] = cells[index].min(level.clamp(0, limit) as u8);
+            }
+        }
+        for &(pos, _old, new) in effective {
+            if pos.x > x0 && pos.x < x1 && pos.z > z0 && pos.z < z1 {
+                let index = (pos.x - x0) as usize * height + (pos.z - z0) as usize;
+                cells[index] = if new >= limit {
+                    // 源被撤掉，或降到无票等级：该位置从 limit 重新被邻居传播。
+                    limit_u8
+                } else {
+                    new.clamp(0, limit) as u8
+                };
+            }
+        }
+        // halo 钉在旧等级上；按行读，用块游标跨块才查一次哈希。
+        {
+            let mut cursor = self.levels.cursor();
+            for ix in 0..width {
+                for iz in 0..height {
+                    if ix == 0 || ix + 1 == width || iz == 0 || iz + 1 == height {
+                        let pos = ChunkPos::new(x0 + ix as i32, z0 + iz as i32);
+                        cells[ix * height + iz] = cursor.get(pos).clamp(0, limit) as u8;
+                    }
+                }
+            }
+        }
+        // 两遍光栅扫描：3×3 邻域的切比雪夫距离变换，对按 x 单调的最短路是精确的。
+        for ix in 1..width - 1 {
+            for iz in 1..height - 1 {
+                let index = ix * height + iz;
+                let best = cells[index]
+                    .min(cells[index - height - 1].saturating_add(1))
+                    .min(cells[index - height].saturating_add(1))
+                    .min(cells[index - height + 1].saturating_add(1))
+                    .min(cells[index - 1].saturating_add(1));
+                cells[index] = best.min(limit_u8);
+            }
+        }
+        for ix in (1..width - 1).rev() {
+            for iz in (1..height - 1).rev() {
+                let index = ix * height + iz;
+                let best = cells[index]
+                    .min(cells[index + height - 1].saturating_add(1))
+                    .min(cells[index + height].saturating_add(1))
+                    .min(cells[index + height + 1].saturating_add(1))
+                    .min(cells[index + 1].saturating_add(1));
+                cells[index] = best.min(limit_u8);
+            }
+        }
+
+        // 应用新源表（和回退路径的顺序一致），再按 x↑z↑ 扫一遍收变化并写回持久表。
+        for &(pos, _old, new) in effective {
+            if new >= limit {
+                self.sources.remove(&pos);
+            } else {
+                self.sources.insert(pos, new);
+            }
+        }
+        let mut result = Vec::new();
+        {
+            let mut cursor = self.levels.cursor();
+            for ix in 1..width - 1 {
+                for iz in 1..height - 1 {
+                    let pos = ChunkPos::new(x0 + ix as i32, z0 + iz as i32);
+                    let index = ix * height + iz;
+                    let old = cursor.get(pos);
+                    let new = i32::from(cells[index]).min(limit);
+                    if old != new {
+                        result.push((pos, old, new));
+                    }
+                }
+            }
+        }
+        for &(pos, old, new) in &result {
+            debug_assert_ne!(old, new);
+            self.levels.set(pos, new);
+        }
+        debug_assert!(
+            result
+                .windows(2)
+                .all(|w| (w[0].0.x, w[0].0.z) < (w[1].0.x, w[1].0.z))
+        );
+        count(super::profile::C_CHANGES, result.len() as u64);
+        let used = cells.len();
+        self.dense.cells = cells;
+        self.dense.note_round(used);
+        // 快路径没用到两阶段辅助块；峰值窗口照样推进，旧峰值过期后回收。
+        self.scratch.note_idle_round();
+        Some(result)
     }
 
     /// 从全部"等级变大/被撤掉"的源一起做 BFS，找等级可能升高的区块。
