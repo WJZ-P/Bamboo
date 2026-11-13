@@ -930,6 +930,59 @@ mod tests {
         out
     }
 
+    /// 外置大区块（`.mcc`）在启动扫描里必须被认出来：官方 `RegionFile.hasChunk`
+    /// 只看 `.mca` 的 offset 表，外置区块的表项非零、数据在 `.mcc` 里。
+    #[test]
+    fn startup_scan_recognizes_external_mcc_chunks() {
+        use crate::anvil::open_region;
+
+        let tmp = TempDir::new("scan-external");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let pos = ChunkPos::new(5, 6);
+        // 造一个超过 1 MiB 的区块，RegionFile::write 会走外置文件。
+        let mut data = Vec::new();
+        let mut state = 0x1234_5678_u64;
+        for _ in 0..300 {
+            for _ in 0..4096 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                data.push((state >> 24) as u8);
+            }
+        }
+        {
+            let mut region = open_region(
+                dir.region_dir(),
+                crate::anvil::RegionPos::of(pos),
+                RegionCompression::Zlib,
+            )
+            .unwrap();
+            region.write(pos, Some(&data), 1).unwrap();
+            region.sync().unwrap();
+            assert!(region.has_chunk(pos));
+        }
+        assert!(
+            dir.region_dir().join("c.5.6.mcc").exists(),
+            "确实写出了外置文件"
+        );
+        let known = scan_existing_chunks(&dir.region_dir());
+        assert!(known.contains(&pos), "启动扫描必须认出 .mcc 外置区块");
+        // 真的能读回来。
+        let mut io = ChunkIo::open(&dir).unwrap();
+        assert!(io.has_chunk(pos));
+        io.submit_read(pos, 1, 0);
+        let _ = io.flush();
+        let replies = collect(&io);
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, Reply::Read { pos: at, chunk: Some(_), .. } if *at == pos)),
+            "外置区块的 NBT 能读回来：{replies:?}"
+        );
+        io.close();
+    }
+
     #[test]
     fn a_write_can_be_read_back_and_missing_chunks_are_none() {
         let tmp = TempDir::new("roundtrip");

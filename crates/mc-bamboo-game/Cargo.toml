@@ -9,6 +9,12 @@ description = "World thread of the Bamboo Minecraft server: the single owner of 
 keywords = ["minecraft", "server"]
 categories = ["games"]
 
+[features]
+default = []
+# 只给 mc-bamboo-vanilla 的官方 codec 对拍用；正式构建不编进库里。
+# Only for the mc-bamboo-vanilla official-codec comparison; off in production.
+oracle-samples = []
+
 [dependencies]
 mc-bamboo-blocks.workspace = true
 mc-bamboo-loot.workspace = true

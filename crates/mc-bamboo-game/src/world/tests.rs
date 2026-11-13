@@ -344,6 +344,13 @@ impl Harness {
     }
 
     pub(crate) fn tick(&mut self) {
+        // 正式运行的节拍器在两刻之间留 50 ms，足够 IO 线程把上一刻的读回执
+        // 全部送回信箱；测试的 tick 是背靠背的，这里显式做一次同步点，
+        // 让「下一刻开头 poll_io 收齐整批读」的时序不依赖机器负载。
+        // The real pacer leaves 50 ms between ticks, enough for the IO thread
+        // to deliver all read replies. Test ticks are back-to-back, so add an
+        // explicit sync point to keep the ordering deterministic.
+        self.world.host.flush_io();
         assert!(self.world.tick().is_continue());
     }
 

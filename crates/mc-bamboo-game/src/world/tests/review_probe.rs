@@ -390,3 +390,83 @@ fn dirty_detection_cost_does_not_scale_with_loaded_chunks() {
         "每刻判脏 {per_tick_ms} ms，和已加载区块数成正比"
     );
 }
+
+/// 带存档重启：近处盘上有区块、远处盘上没有，两种来源都走异步读流水线，
+/// 回执在同一刻开头收回，按距离排序交付。第一包必须是出生点，第一批 9 个
+/// 必须正好是脚下 3×3（官方 `PlayerChunkSender` 的 `distanceSquared` 顺序）。
+///
+/// A world with a save: the near chunk is on disk, a far one is not. Both go
+/// through the async read pipeline, replies arrive in the same tick, and delivery
+/// is distance-ordered: the first packet is the spawn chunk and the first batch
+/// is exactly the 3x3 around it.
+#[test]
+fn a_saved_world_delivers_the_nearest_chunk_first() {
+    use mc_bamboo_data::packets::play::clientbound;
+    use mc_bamboo_storage::chunk_io::Reply;
+    use mc_bamboo_storage::chunk_nbt::{ChunkEncodeExtra, encode_bytes};
+    use mc_bamboo_world::column::ChunkColumn;
+
+    let temp = TempWorld::new("saved-order");
+    let dir = WorldDir::new(&temp.0);
+    dir.create_layout().unwrap();
+
+    // 先在一个临时世界目录里写出「近处有存档」：把 (0,0) 的官方格式 NBT 直接
+    // 放进 region/r.0.0.mca，`ChunkIo::open` 的启动扫描会认出它。
+    let near = ChunkPos::new(0, 0);
+    let bytes = encode_bytes(
+        &ChunkColumn::from_template(),
+        &ChunkEncodeExtra {
+            chunk_pos: near,
+            ..ChunkEncodeExtra::default()
+        },
+    )
+    .unwrap();
+    let mut region_file = RegionFile::open(
+        dir.region_dir().join("r.0.0.mca"),
+        dir.region_dir(),
+        RegionCompression::Zlib,
+    )
+    .unwrap();
+    region_file.write(near, Some(&bytes), 1).unwrap();
+    region_file.sync().unwrap();
+    drop(region_file);
+
+    let mut server = Harness::new_loaded_with_save(8, &temp.0);
+    assert!(
+        server.world.host.io().unwrap().has_chunk(near),
+        "启动扫描必须认出盘上已有的区块"
+    );
+    let client = server.join_with("Kitten", crate::world::tests::client_requesting(8));
+    server.confirm_teleport(&client);
+    server.load_player(&client);
+    // 第一刻只派读任务，不应该发出任何区块包：模板不能再抢先。
+    server.tick();
+    let first_tick = client.take_frames();
+    assert!(
+        crate::world::tests::received_chunks(&first_tick).is_empty(),
+        "两种来源都还没回执时不发区块，远处的模板不能抢先"
+    );
+    // 第二刻开头收回所有读结果，一次按距离排序交付。
+    server.tick();
+    let frames = client.take_frames();
+    let chunks = crate::world::tests::received_chunks(&frames);
+    assert_eq!(chunks.first(), Some(&near), "第一包必须是出生点区块");
+    let first_batch: std::collections::BTreeSet<ChunkPos> = chunks.into_iter().collect();
+    let expected: std::collections::BTreeSet<ChunkPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    assert_eq!(first_batch, expected, "第一批正好是脚下 3×3");
+    assert_eq!(
+        crate::world::tests::frames_with_id(&frames, clientbound::CHUNK_BATCH_FINISHED).len(),
+        1,
+        "一批一个 ChunkBatchFinished"
+    );
+    // IO 信箱里不该有没收回的读回执。
+    assert!(
+        !matches!(
+            server.world.host.io().unwrap().try_recv(),
+            Some(Reply::Read { .. })
+        ),
+        "读结果已经全部收回"
+    );
+}

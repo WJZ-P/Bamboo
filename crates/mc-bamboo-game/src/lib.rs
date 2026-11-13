@@ -92,9 +92,12 @@ pub use world::{MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig};
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
 /// 两份示例 `data` 复合标签（游戏规则、世界边界）。只暴露公开的 [`Tag`]，
 /// 不把运行时类型泄漏到 crate 外。值固定，方便对拍期望值。
+/// 只在 `oracle-samples` feature 下编进库里，正式构建不含这段对拍代码。
 /// Samples of Bamboo's saved-data encoders for the `mc-bamboo-vanilla
 /// saved-data` official-codec comparison. Exposes only public [`Tag`]s with
-/// fixed values so the tool can assert the expected decoded values.
+/// fixed values so the tool can assert the expected decoded values. Gated
+/// behind the `oracle-samples` feature so production builds omit it.
+#[cfg(feature = "oracle-samples")]
 pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
     let mut rules = gamerules::GameRuleSet::vanilla();
     let index = mc_bamboo_data::gamerules::find("minecraft:random_tick_speed").unwrap();
