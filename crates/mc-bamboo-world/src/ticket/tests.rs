@@ -891,6 +891,44 @@ fn scratch_blocks_stay_bounded_while_moving_away() {
     assert_eq!(table.scratch_blocks(), steady, "稳态之后块数应该不再变化");
 }
 
+/// 快路径的稠密缓冲也按近期峰值回收：走过一大片之后峰值滑出窗口，缓冲缩回。
+#[test]
+fn dense_buffer_recycles_after_a_large_window() {
+    if !dense_enabled() {
+        return;
+    }
+    let mut table = TicketTable::new();
+    // 一个玩家的小窗口稳态。
+    table.set_player(1, Some(p(0, 0)));
+    for x in 1..=PEAK_WINDOW as i32 {
+        table.set_player(1, Some(p(x, 0)));
+        table.run_updates();
+    }
+    let steady = table.scratch_blocks();
+    assert!(steady > 0);
+    // 一批玩家分散在一段仍有界、但比单个视野大得多的区域里，撑大窗口。
+    for id in 0..40u64 {
+        table.set_player(id, Some(p(id as i32 * 23, (id as i32 % 7) * 9)));
+    }
+    table.run_updates();
+    let peak = table.scratch_blocks();
+    assert!(peak > steady, "大窗口应该撑大辅助结构：{steady} → {peak}");
+    assert!(dense_hits() > 0, "这个场景应该走快路径");
+    // 全部离开，跑够一个完整的峰值窗口。
+    for id in 0..40u64 {
+        table.set_player(id, None);
+    }
+    for _ in 0..=PEAK_WINDOW * 2 {
+        table.run_updates();
+    }
+    assert!(
+        table.scratch_blocks() <= steady + 2 * (PEAK_MARGIN + SCRATCH_POOL_MIN),
+        "峰值过去后辅助结构要缩回稳态附近：{} → {}",
+        peak,
+        table.scratch_blocks()
+    );
+}
+
 #[test]
 fn scratch_pool_recycles_after_two_hundred_players_move_apart() {
     let mut table = TicketTable::new();
