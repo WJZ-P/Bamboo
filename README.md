@@ -10,7 +10,7 @@ A Minecraft server written from scratch in Rust
 
 </div>
 
-> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个超平坦世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。
+> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个超平坦世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存和区块计算池；世界目录按 `level-name` 放在服务器目录下。
 
 ## 运行
 
@@ -54,10 +54,13 @@ WebView2 的渲染进程不算在内。
 `dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat`。
 `ServerConfig.world_dir` 为 `None` 时不落盘（单元测试、oracle、压测都走这条路）。
 
-一条 IO 线程负责区域文件的压缩和读写；世界线程只做 NBT 解析/序列化，绝不等待 IO：
-启动时扫一遍区域文件头，得到「盘上有哪些区块」的内存集合（写盘时更新）。盘上已有
-数据的区块发异步读、结果下一刻开头经信箱收回；盘上没有的区块直接在世界线程走超平坦
-模板，不引入一 tick 的读盘延迟，保住进服首批次区块的顺序。改过的区块无论卸载与否都照官方字节码的节奏保存：`MinecraftServer` 每 6000 刻
+一条 IO 线程负责区域文件的压缩和读写；世界线程绝不等待 IO：启动时扫一遍区域文件头，
+得到「盘上有哪些区块」的内存集合（写盘时更新）。**带世界目录时所有区块都走同一条异步读
+流水线**：盘上有数据就发异步读、盘上没有时 IO 线程回 `chunk: None`，两种来源的结果都在
+下一刻开头经信箱收回、按距离排序交付；没接世界目录（测试、对拍、压测）仍是当刻同步走
+超平坦模板，停放表命中的写盘途中盒子也是同步快路径。NBT 解析 / 序列化默认在世界线程
+由 `InlineCodec` 内联做，`bamboo.toml` 里 `chunk_worker_threads ≥ 1` 时交给常驻计算池
+（`Decode` / 每个 `Generate` 阶段 / `Save`），`Read` 仍在 IO 线程、世界线程只做记账。改过的区块无论卸载与否都照官方字节码的节奏保存：`MinecraftServer` 每 6000 刻
 一次全量（只写改过的），`ChunkMap.saveChunksEagerly` 每刻最多给 20 个改过的区块
 拍快照交给 IO 线程，单区块 10 秒（200 刻）冷却；卸载的快照另走一条有上限的匀速队列。
 「改过没有」用改动标记：方块和光照用 `ChunkStore` 的版本号，上层内容（容器、物品
@@ -78,8 +81,13 @@ WebView2 的渲染进程不算在内。
 致命错误：记日志、走关服流程把还能同步写的 `level.dat` / `data/` 存下来，不挂死。
 
 探针和每个测试都从空世界开始：单元测试 / oracle 用 `world_dir = None` 或临时目录，
-不碰世界目录；跑官方探针前删掉 `probe-run/world` 再启动 `bamboo`
-（`probe-run/ops.json` 不要提交）。仓库里不留世界目录。
+不碰世界目录；`tools/probe.sh <目录> <端口> [--loaded]` 在临时目录里写好离线的
+`server.properties` 再起 `bamboo`，`--loaded` 模式先建档再重启跑两遍完整 probe。
+仓库里不留世界目录。
+
+（2026-11-14 按实现更新：`docs/m3-storage.md` 第 14 节、`docs/world-model-design.md` 5.3.1、
+`docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/chunk_jobs.rs`、`tools/probe.sh`；
+合并提交 `05d8fa1`、`082a7c9`、`54f5fd2`）
 
 ### 存档已知限制
 
@@ -105,22 +113,36 @@ WebView2 的渲染进程不算在内。
   天气、世界时钟、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些没建模的
   saved data 不写文件（官方 `computeIfAbsent` 会自己造默认值）；`/weather` 不写存档。
   `chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
-- 盘上 `Status` 不是 `minecraft:full` 的区块、或读坏的区域文件，都当坏块 warn + 用超平坦
-  模板，不走官方的重新生成流水线，也不另存区块备份。
+- 盘上 `Status` 不是 `minecraft:full` 的区块当成 ProtoChunk 读回：顶层附加信息、
+  方块实体、计划刻和实体原样保留，方块层和两层光照用超平坦模板补齐、高度图重算，
+  下次写盘时 `Status` 是 `minecraft:full`；官方会从原阶段续跑生成流水线，Bamboo 不会。
+  `.mcc` 外置大区块能扫到也能读回，丢了就按读坏处理。读坏的区域文件仍是 warn + 模板，
+  不另存区块备份。
 - 玩家文件名照官方 `getStringUUID()` 用带连字符 UUID；坏玩家文件另存
   `<uuid>_corrupted_<yyyy-MM-dd_HH-mm-ss>.dat`（官方 `FileNameDateFormatter`，Bamboo
   按 UTC 算，官方按本地时区）。`/save-all` 的成功消息不带 `flush` 时在快照都交给 IO
   线程后发、带 `flush` 时等 IO 栅栏回执再发，都不在请求入队那一刻发（比官方同步保存晚，
-  但世界线程不等待 IO）；拍快照时临时取出盒子再放回，期间会把光照算完、区块包缓存重新编码。
+  但世界线程不等待 IO）；`/save-all` 和匀速保存都用 `BorrowedParts` 从 `&Region` 只读拍快照，
+  **不取出/放回盒子、不算完待算光照、不动区块包缓存、不改运行态表的顺序和版本号**。
 - 火把抖动表、容器开合状态与计数、方块实体的 `dead` / `recheck_at` 等瞬时状态不存；
   世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏也不存档（沿用原有限制）。
 
+（2026-11-14 按实现更新：`docs/m3-storage.md` 第 14 节 `外置区块和非 full 的 ProtoChunk`、
+`crates/mc-bamboo-game/src/region/content_snapshot.rs`、`crates/mc-bamboo-game/src/region/column.rs`
+的 `encode_loaded_column`；合并提交 `7e23929`、`be36ac3`、`1828b8c`）
+
 ## 现在能玩什么
 
-- 多名玩家进入同一个超平坦世界，默认走离线模式登录。
+- 多名玩家进入同一个超平坦世界；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
+- 默认按官方 `server.properties` 的 `online-mode=true` 走正版验证；官方未实现的键原样保留、
+  写回并在启动日志里列出「现在不起作用」。要离线直连就要在 `server.properties` 里写
+  `online-mode=false`（`probe` / 单元测试 / 压测工具的内置 `serve` 用 `ServerConfig::default()`，本来就是离线）。
+  `bamboo.toml` 的 `redstone_cache` 默认关、`chunk_worker_threads` 默认 0（内联）、
+  `entity_threads` 默认 0（精确模式），完整清单见 `docs/configuration.md`。
 - 玩家位置不再照单全收。一个 tick 里离本 tick 起点太远会拉回（`moved too quickly`），
   位移和方块碰撞对不上、或者新位置穿进实心方块也会拉回。生存和冒险模式悬空超过 80 tick
-  会按 `multiplayer.disconnect.flying` 断开。创造和旁观可以飞。`allow-flight` 没有配置项，按官方默认关闭。
+  会按 `multiplayer.disconnect.flying` 断开。创造和旁观可以飞。`allow-flight` 已在
+  `server.properties` 里原样保留，但 Bamboo 还没实现这个键，按官方默认关闭。
 - 世界边界按官方 26.3 做全了：中心、大小、渐变（lerp）、伤害量、安全区、警告时间、警告距离和
   绝对最大值都可调，`/worldborder` 的全部子命令、等级 2 权限、成功和失败消息照官方
   `WorldBorderCommand`。进服序列在官方 `PlayerList.sendLevelInfo` 的位置发 `initialize_border`，
@@ -268,7 +290,7 @@ WebView2 的渲染进程不算在内。
   `tryHandleChat` 直接发、不看可见性。被踢但还没 `Leave` 的玩家不再进聊天广播名单。
 - 网络压缩：登录末尾告诉客户端阈值（默认 256，负值关闭），之后两个方向都按官方格式收发压缩帧，
   小于阈值的包原样发。压缩只在连接任务里做，世界线程交出的帧本身不变。
-- 正版验证和加密（`online_mode`，默认关闭）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
+- 正版验证和加密（`server.properties` 的 `online-mode`，默认 true；`ServerConfig::default()` / oracle / probe 是 false）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
   客户端回来的共享密钥和挑战码按官方解密校验，密钥包之后两个方向都走 AES/CFB8，加密在最外层，连长度前缀一起加密。
   serverId 哈希用官方那套带符号的十六进制 SHA-1，再按官方格式问 session server 的 `hasJoined`，
   打开 `prevent-proxy-connections` 时带上客户端 IP。失败的分类照 authlib 来：连不上、超时和 5xx 是
@@ -315,7 +337,9 @@ WebView2 的渲染进程不算在内。
   每刻推进半格，到一格时把方块放回去并更新邻居，动画期间被破坏也有官方的处理。官方客户端会收到方块事件，
   播放伸出和收回的动画。`PushReaction` 和推不动的方块来自官方导出的数据。
 
-世界生成的数学已经移植好了；天气只用到了其中的群系温度，地形生成**还没有接进游戏**，世界还是超平坦：
+世界生成的数学已经移植好了；**区块级的主世界 `BIOMES` 和噪声填充（`doFill`）也已有纯函数
+和官方逐方块 / 逐群系对拍**，但整套生成还没接进游戏，游戏里用的仍然只有群系温度（天气），
+世界还是超平坦：
 
 - `mc-bamboo-worldgen` 是「种子 + 坐标 → 数值」的纯函数：官方的随机源（`XoroshiroRandomSource`、
   `RandomSupport` 的种子混合、两种 `PositionalRandomFactory`、`WorldgenRandom` 的种子设置）、
@@ -328,6 +352,10 @@ WebView2 的渲染进程不算在内。
 - 用官方代码出题比对：几十万个点上每条噪声的两条路径、每条注册表密度函数和七套维度设置的
   噪声路由的两条路径、三个维度的群系，以及 67 个群系在几处坐标上的 `Biome.getTemperature`
   （含固定种子的三份噪声和 `frozen` 修饰），浮点按 `Float.floatToRawIntBits` 逐位相同。
+- 区块级的 `chunkgen` 对拍另有一道：官方在 JVM 里用 `ChunkGenerator` / `RandomState` /
+  `ProtoChunk` 生成同一个主世界区块到 `BIOMES` 和噪声填充，逐格比较群系注册表和方块，
+  0 不一致（命令和耗时见 `docs/worldgen.md`）。含水层、成批密度求值和官方 sampler 缓存
+  也已移植；这是纯函数加 oracle，**没有接进 Director 的生成流水线**。
 
 已知限制：
 
@@ -349,13 +377,21 @@ WebView2 的渲染进程不算在内。
   边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
   （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
   `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
-- 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
-  含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
-  按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
+- 世界生成接进游戏的部分仍然只有群系温度：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
+  已有的纯函数覆盖了主世界的 `BIOMES` 和噪声填充（`doFill`，含官方含水层与成批密度路径），
+  但没接进 Director；地表规则、雕刻器、地物、结构、光照、高度图和出生点查找都没做，
+  接进游戏时 `possibleBiomes` 还要从对拍用的「全部群系」改成官方的周围 3×3 区块群系调色板并集并重新对拍。
+  按区块分格插值（官方 `interpolated` 的成批求值）现在在区块网格上已由 `chunkgen` 覆盖，
+  单点 `worldgen` 对拍里跳过这批函数。
+
+  （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
+  README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`）
 - 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但官方 `PistonMovingBlockEntity` 的
   `moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块
   和点燃的 TNT 不会被活塞推动，也不会被粘液块、蜂蜜块带着走。移动中的活塞按方块实体算出的形状挡住实体；
+  实体在方块内的形状默认整格，潜影盒盖、细雪（皮革靴 / 潜行）和脚手架按实体状态取形状，
+  精确和并行两条驱动都读同一份（官方 `entity-oracle` / `move-oracle` 有对应场景）。
   伸出和收回的音效按官方 `PistonBaseBlock.triggerEvent` 发出。
   `moveBlocks` 里的破坏事件 2001 官方包在 `level.isClientSide()` 里，服务端不发，客户端处理方块事件时自己放。
   移动中的方块不发方块实体数据，客户端靠方块事件播放动画。
@@ -497,9 +533,12 @@ WebView2 的渲染进程不算在内。
 - 存档已经接进区块的加载和卸载，但只做 Anvil、只支持 26.3 新布局，且有一批内容不存，
   见上面「存档已知限制」和 `docs/m3-storage.md`。方块实体内容、计划刻、红石记忆、机器状态、
   方块实体带来的物品组件、命令方块、讲台上的书和三种实体的官方 NBT 都能整块组装并与官方
-  对拍，也会随改过的区块一起写进世界目录。
+  对拍，也会随改过的区块一起写进世界目录。熔炉 / 合成器 / 营火 / 酿造台 / 漏斗会睡到下一个
+  事件（闲置漏斗按关注格子和吸取盒休眠），区块不能 tick 或方块在世界边界外时按官方暂停；
+  世界边界按方块坐标判断，跨边界的区块里界内的照跑、界外的暂停，边界回来后从原进度接着走。
+  红石缓存默认关，打开后按确定性工作量门槛只在划算的触发点生效。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
-  语法、权限和提示按官方 Brigadier。启动时从工作目录读 `ops.json`，名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
+  语法、权限和提示按官方 Brigadier。启动时从服务器目录读 `ops.json`（命令行版的工作目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`），名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
   26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius` 存着，死亡重生还没做。世界出生点由 `/setworldspawn` 改，新玩家直接落在它的水平中心（不做 `respawn_radius` 随机找落脚点），`/spawnpoint` 只把玩家自己的重生点存起来，不影响进服位置。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。还没接的差异：天气变暗的天空光（下雨/打雷时官方会改 `getSkyDarken`，进而影响阳光探测器、雪和霜冰的亮度判定）、雷击生成的实体、闪电对避雷针/实体/方块的作用和苦力怕充能，以及天空、雾和云的颜色变化。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟，登录包仍只带主世界。
   按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
@@ -533,7 +572,7 @@ WebView2 的渲染进程不算在内。
   选择器的 `scores=` 和 `team=` 现在能查计分板；`trigger` 命令、统计加分、死亡消息可见性、友军伤害和碰撞规则还没接到对应的游戏逻辑。
 - 服务器管理命令：`/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`。
   命令树（节点名、参数解析器和属性、`executable`、权限）和官方数据生成器的 `commands.json` 逐节点一致，`/version` 要等级 2、`/stop` 要等级 4，其余要等级 3。
-  四份名单文件在服务器目录（命令行版的工作目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`）：`ops.json`、`banned-players.json`、`banned-ips.json`、`whitelist.json`。启动时读一次，命令改完按官方 `StoredUserList.save` 的字段顺序写回（pretty-printed JSON 数组）；Bamboo 先写临时文件再改名，比官方直接覆盖安全。世界线程只持有内存里的权威副本，写盘和 `/whitelist reload` 的读盘在连接层的专门线程上，世界线程不做 IO。
+  四份名单文件在服务器目录（命令行版是当前目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`）：`ops.json`、`banned-players.json`、`banned-ips.json`、`whitelist.json`。启动时读一次，命令改完按官方 `StoredUserList.save` 的字段顺序写回（pretty-printed JSON 数组）；Bamboo 先写临时文件再改名，比官方直接覆盖安全。世界线程只持有内存里的权威副本，写盘和 `/whitelist reload` 的读盘在连接层的专门线程上，世界线程不做 IO。
   `/op`、`/deop` 改完立刻给在线的当事人重发权限等级（`entity_event` 24–28）和他用得了的整棵命令树；`/op` 新加的等级按官方 `op-permission-level` 默认 4。`/ban` 和 `/ban-ip` 当场踢人，登录时按官方 `PlayerList.canPlayerLogin` 的顺序（玩家封禁 → 白名单 → IP 封禁）拒绝并给出带原因和到期时间的翻译文本；连接层检查完、世界线程处理 `Join` 时再按权威副本复查一次。封禁项里的 `created` 按官方 `yyyy-MM-dd HH:mm:ss Z` 写入，Bamboo 用 UTC；过期时间只按读入时解析出的毫秒值判断。
   `/whitelist` 有 `on`、`off`、`add`、`remove`、`list`、`reload`。`reload` 的读盘在连接层线程上，结果下一 tick 才被世界线程采用（官方同步读盘后立刻生效，这是世界线程不做 IO 的代价）；成功消息在发出读盘请求时立刻回给命令来源。两个开关都按官方默认值：`white-list` 运行时由 `on|off` 改、重启恢复 false（官方会写回 `server.properties`；Bamboo 会原样保留这个文件里的 `white-list`，但目前不读它也不存档）；`enforce-whitelist` 官方默认 false，Bamboo 没有这个配置项，所以 `on` / `remove` / `reload` 默认不会踢在线玩家，踢人路径只在单元测试里注入开关覆盖。OP 不受白名单限制。
   `/stop` 发 `commands.stop.stopping` 之后走现有关服流程，世界线程给所有玩家发 `multiplayer.disconnect.server_shutdown` 再退出，服务端随世界线程结束。`/setidletimeout` 的单位是分钟，0 关闭；空闲判断照官方 `ServerGamePacketListenerImpl.tick`，Bamboo 已解码且能对应的动作（聊天、命令、按键输入、玩家指令、挥手、换快捷栏、破坏、右键、容器点击和按钮、告示牌、客户端指令、位移）会重置 `lastActionTime`，官方另外那些 handler（攻击实体、交互、旁观者动作、放配方、书与笔等）还没接。
@@ -591,7 +630,8 @@ WebView2 的渲染进程不算在内。
   铲子扑灭先发 `levelEvent(1009)`，再灭掉，再按 `hurtAndBreak(1)` 扣耐久（创造模式不取耐久附魔的随机数）。
   被水浇灭时先放 `entity.generic.extinguish_fire`。没有粒子、统计和 `gameEvent`。客户端的 `particleTick` 不在服务端跑。
   不记统计、不发配方音效、不触发进度。有限合成（`limited_crafting`）没做，默认和官方一样是关的。
-- 正版验证的限制：`online_mode` 默认关闭，命令行版用的是默认配置，桌面端的设置页里可以打开。
+- 正版验证的限制：`server.properties` 的 `online-mode` 官方默认 true，命令行版和桌面端都读同一份文件、
+  设置页里可以改；`ServerConfig::default()`（不读配置文件的嵌入用法）是 false。
   和代理转发互斥：打开转发时正版验证会被关掉，因为代理已经替服务端验过了。
   正版验证打开且公钥取到了之后，聊天按上面一节签名。取钥失败会按 authlib 的间隔在后台重试，钥匙到达后安全聊天立刻生效。
   RSA 解密用的 `rsa` crate 有 RUSTSEC-2023-0071（Marvin 计时侧信道），上游还没有修好的版本，
@@ -599,6 +639,13 @@ WebView2 的渲染进程不算在内。
 - 系统消息的可见性按官方做，但官方 `ServerPlayer.sendSystemMessage` 还用
   `PacketSendListener.exceptionallySend` 在发包失败时补一条 `multiplayer.message_not_delivered`；
   Bamboo 的链路写失败时直接关连接，没有这个回调，所以不发这条补发消息。
+- 实体容器（矿车、船）没有移植，`EntityKind` 只有物品、下落方块和点燃的 TNT；
+  官方漏斗的 `getEntityContainer` 会读中心 1×1×1 盒里的容器实体，这一支连官方行为本身都缺，
+  闲置漏斗休眠也按「没有这类实体」处理。
+
+（2026-11-14 按实现更新：`docs/performance-optimizations.md` 7g.1–7g.6 / 7i / 第 9 节、
+`docs/configuration.md`、`README.md`「现在能玩什么」的世界边界条目、`crates/mc-bamboo-server/src/config_files.rs`；
+合并提交 `54f5fd2`、`69cd662`、`4864a49`、`b02ad69`、`e6f8d6e`、`edce3ab`、`fa91b84`）
 
 ## 项目结构
 
@@ -609,8 +656,8 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-game` | 世界线程：tick、玩家、区块跟踪、实体同步、方块交互、方块实体的物品数据、聊天，不依赖 tokio |
 | `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包、物品数据组件，只处理字节 |
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、超平坦，不知道网络 |
-| `crates/mc-bamboo-worldgen` | 世界生成的数学：随机源、噪声、密度函数、气候、群系源和官方群系温度，纯函数；天气的群系温度已接进游戏，生成地形还没接 |
-| `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件和会 tick 的方块实体，纯逻辑，不知道网络和存储 |
+| `crates/mc-bamboo-worldgen` | 世界生成的数学和区块级生成：随机源、噪声、密度函数、气候、群系源、官方群系温度、含水层、主世界 `BIOMES` 和 `doFill`，纯函数；游戏里只用到群系温度，生成流水线还没接 |
+| `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件、会 tick 的方块实体（按事件休眠）和触发级红石缓存，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
 | `crates/mc-bamboo-loot` | 战利品表：方块掉落已经接进生存和冒险挖掘、爆炸、可替换方块的破坏和 `/loot`，箱子填充接进开箱和容器读写，实体死亡还没接进游戏 |
@@ -638,8 +685,9 @@ protocol blocks world
 `command` 依赖 `core`、`data`、`blocks` 和 `uuid`；只有 `game` 依赖它。它不认识网络，也不认识世界线程。
 `recipes` 依赖 `data` 和 `protocol`：组装产物要写组件。它不认识数据包的帧，也不认识世界线程。
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
-`worldgen` 的地形生成还没接进游戏；`game` 只用它算 `Biome.getTemperature`（天气的结冰、积雪和降水类型），
-工具里的 oracle 用其余的数学。它依赖 `data`（官方导出的世界生成数据和群系气候表）和
+`worldgen` 的区块生成（`BIOMES` / `doFill`）还是纯函数、没接进游戏；`game` 只用它算
+`Biome.getTemperature`（天气的结冰、积雪和降水类型），工具里的 `chunkgen` / `worldgen` oracle
+用其余的数学。它依赖 `data`（官方导出的世界生成数据和群系气候表）和
 `blocks`（里面有官方的 `LegacyRandomSource`）。
 `loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸、`destroyBlock`、`/loot` 和容器第一次读写时调用；
 它依赖 `data`（嵌入的战利品表 JSON）和 `blocks`（随机源、方块状态）。
