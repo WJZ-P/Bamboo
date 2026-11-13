@@ -146,6 +146,8 @@ pub struct ServerSettings {
     pub forwarding_secret: String,
     /// 实体阶段线程数（实验）：0 = 精确模式，≥ 1 = 性能模式。
     pub entity_threads: u32,
+    /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。
+    pub redstone_cache: bool,
     /// Director 信箱每刻最多交付多少个区块，0 表示不限。
     pub deliveries_per_tick: u32,
     /// Director 信箱每刻最多收回多少个区块，0 表示不限。
@@ -187,6 +189,7 @@ impl ServerSettings {
             forwarding: bamboo.forwarding.into(),
             forwarding_secret: bamboo.forwarding_secret.clone(),
             entity_threads: u32::try_from(bamboo.entity_threads).unwrap_or(u32::MAX),
+            redstone_cache: bamboo.redstone_cache,
             deliveries_per_tick: u32::try_from(bamboo.deliveries_per_tick).unwrap_or(u32::MAX),
             reclaims_per_tick: u32::try_from(bamboo.reclaims_per_tick).unwrap_or(u32::MAX),
         }
@@ -214,6 +217,7 @@ impl ServerSettings {
             // 四份管理名单固定放在服务器目录里，由 load 时的路径决定。
             list_directory: PathBuf::from(&self.server_directory),
             entity_threads: self.entity_threads as usize,
+            redstone_cache: self.redstone_cache,
             mail_budget: mc_bamboo_game::MailBudget {
                 deliveries: self.deliveries_per_tick as usize,
                 reclaims: self.reclaims_per_tick as usize,
@@ -468,6 +472,7 @@ mod tests {
             forwarding: Forwarding::Modern,
             forwarding_secret: "secret".to_owned(),
             entity_threads: 4,
+            redstone_cache: true,
             deliveries_per_tick: 16,
             reclaims_per_tick: 8,
         };
@@ -485,6 +490,7 @@ mod tests {
         assert_eq!(config.forwarding, ForwardingMode::Modern);
         assert_eq!(config.forwarding_secret, "secret");
         assert_eq!(config.entity_threads, 4);
+        assert!(config.redstone_cache);
         assert_eq!(config.mail_budget.deliveries, 16);
         assert_eq!(config.mail_budget.reclaims, 8);
         assert_eq!(config.list_directory, PathBuf::from("/tmp/server"));

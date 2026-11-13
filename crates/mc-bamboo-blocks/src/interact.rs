@@ -328,22 +328,61 @@ pub fn run_scheduled_ticks_with_cache(
     ticks.collect_due(now, &can_tick);
     let mut recorder = crate::recording::Recording::new(level);
     recorder.set_tick(now);
-    {
-        let mut world = World::in_world_tick(&mut recorder, ticks);
-        run_block_ticks_cached(&mut world, cache, now);
-        // 流体刻和方块实体 tick 不在第一版缓存范围：关掉记账，原样解释执行。
-        world.set_capture(false);
-        world.collect_due_fluids();
-        while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
-            fluid::tick(&mut world, pos, fluid);
-        }
-        world.set_capture(true);
-        run_block_events_cached(&mut world, cache, now);
-        world.set_capture(false);
-        world.end_handling_tick();
-        world.tick_block_entities();
-        outcome_from(world, InteractionResult::Pass, false)
+    let mut world = World::in_world_tick(&mut recorder, ticks);
+    run_block_ticks_cached(&mut world, cache, now);
+    // 流体刻和方块实体 tick 不在第一版缓存范围：关掉记账，原样解释执行。
+    world.set_capture(false);
+    world.collect_due_fluids();
+    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        fluid::tick(&mut world, pos, fluid);
     }
+    world.set_capture(true);
+    run_block_events_cached(&mut world, cache, now);
+    world.set_capture(false);
+    world.end_handling_tick();
+    world.tick_block_entities();
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// 游戏循环按官方顺序分几段调用，每段各自带缓存。方块计划刻和流体刻这一段。
+pub fn run_due_ticks_with_cache(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    now: i64,
+    cache: Option<&mut RedstoneCache>,
+) -> Outcome {
+    let Some(cache) = cache else {
+        return run_due_ticks(level, ticks, now);
+    };
+    let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+    ticks.collect_due(now, &can_tick);
+    let mut recorder = crate::recording::Recording::new(level);
+    recorder.set_tick(now);
+    let mut world = World::in_world_tick(&mut recorder, ticks);
+    run_block_ticks_cached(&mut world, cache, now);
+    world.set_capture(false);
+    world.collect_due_fluids();
+    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        fluid::tick(&mut world, pos, fluid);
+    }
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// 游戏循环方块事件这一段，带缓存。
+pub fn run_block_event_phase_with_cache(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    cache: Option<&mut RedstoneCache>,
+    now: i64,
+) -> Outcome {
+    let Some(cache) = cache else {
+        return run_block_event_phase(level, ticks);
+    };
+    let mut recorder = crate::recording::Recording::new(level);
+    recorder.set_tick(now);
+    let mut world = World::in_world_tick(&mut recorder, ticks);
+    run_block_events_cached(&mut world, cache, now);
+    outcome_from(world, InteractionResult::Pass, false)
 }
 
 /// 到期的方块计划刻，带缓存的驱动循环。

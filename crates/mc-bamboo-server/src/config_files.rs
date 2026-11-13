@@ -125,6 +125,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "auth_connect_timeout_seconds",
     "auth_read_timeout_seconds",
     "entity_threads",
+    "redstone_cache",
     "deliveries_per_tick",
     "reclaims_per_tick",
 ];
@@ -148,6 +149,8 @@ pub struct BambooConfig {
     pub auth_read_timeout: Duration,
     /// 实体阶段线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动（实验）。
     pub entity_threads: usize,
+    /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
+    pub redstone_cache: bool,
     /// Director 信箱每刻交付区块的个数上限，0 表示不限。
     pub deliveries_per_tick: usize,
     /// Director 信箱每刻收回区块的个数上限，0 表示不限。
@@ -166,6 +169,7 @@ impl Default for BambooConfig {
             auth_connect_timeout: defaults.auth_connect_timeout,
             auth_read_timeout: defaults.auth_read_timeout,
             entity_threads: defaults.entity_threads,
+            redstone_cache: defaults.redstone_cache,
             deliveries_per_tick: defaults.mail_budget.deliveries,
             reclaims_per_tick: defaults.mail_budget.reclaims,
         }
@@ -210,6 +214,9 @@ impl BambooConfig {
                 "# 实体并行线程数（实验）：0 = 精确模式（默认，和官方逐位一致）；>= 1 = 性能模式。\n",
                 "entity_threads = {}\n",
                 "\n",
+                "# 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认 false。\n",
+                "redstone_cache = {}\n",
+                "\n",
                 "# Director 信箱每刻最多交付多少个区块，0 表示不限，默认 64。\n",
                 "deliveries_per_tick = {}\n",
                 "\n",
@@ -224,6 +231,7 @@ impl BambooConfig {
             self.auth_connect_timeout.as_secs(),
             self.auth_read_timeout.as_secs(),
             self.entity_threads,
+            self.redstone_cache,
             self.deliveries_per_tick,
             self.reclaims_per_tick,
         )
@@ -271,6 +279,7 @@ impl BambooConfig {
             ),
             auth_read_timeout: seconds("auth_read_timeout_seconds", defaults.auth_read_timeout),
             entity_threads: integer(table, "entity_threads", file, 0, 0, MAX_ENTITY_THREADS),
+            redstone_cache: boolean(table, "redstone_cache", file, false),
             deliveries_per_tick: integer(
                 table,
                 "deliveries_per_tick",
@@ -317,6 +326,17 @@ fn string(table: &Table, key: &str, file: &Path, default: &str) -> String {
         Some(value) => {
             warn!(key, original = %value, file = %file.display(), used = default, "invalid Bamboo config value, using default");
             default.to_owned()
+        }
+    }
+}
+
+fn boolean(table: &Table, key: &str, file: &Path, default: bool) -> bool {
+    match table.get(key) {
+        None => default,
+        Some(Value::Boolean(value)) => *value,
+        Some(value) => {
+            warn!(key, original = %value, file = %file.display(), used = default, "invalid Bamboo config value, using default");
+            default
         }
     }
 }
@@ -615,6 +635,7 @@ impl ConfigFiles {
             forwarding_secret: self.bamboo.forwarding_secret.clone(),
             list_directory: directory.to_path_buf(),
             entity_threads: self.bamboo.entity_threads,
+            redstone_cache: self.bamboo.redstone_cache,
             mail_budget: MailBudget {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
@@ -641,6 +662,7 @@ impl ConfigFiles {
         bamboo.auth_connect_timeout = config.auth_connect_timeout;
         bamboo.auth_read_timeout = config.auth_read_timeout;
         bamboo.entity_threads = config.entity_threads;
+        bamboo.redstone_cache = config.redstone_cache;
         bamboo.deliveries_per_tick = config.mail_budget.deliveries;
         bamboo.reclaims_per_tick = config.mail_budget.reclaims;
         Self { official, bamboo }
@@ -737,6 +759,11 @@ impl ConfigFiles {
                 "entity_threads",
                 self.bamboo.entity_threads as u64,
                 defaults.bamboo.entity_threads as u64,
+            ),
+            (
+                "redstone_cache",
+                u64::from(self.bamboo.redstone_cache),
+                u64::from(defaults.bamboo.redstone_cache),
             ),
             (
                 "deliveries_per_tick",

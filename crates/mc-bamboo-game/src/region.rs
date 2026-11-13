@@ -107,6 +107,11 @@ pub(crate) const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
 pub(crate) struct RegionTick(u64);
 
 impl RegionTick {
+    /// 现在的游戏刻号。
+    pub(crate) fn game_time(self) -> i64 {
+        i64::try_from(self.0).unwrap_or(i64::MAX)
+    }
+
     /// 从 `earlier` 到现在过了多少 tick。
     pub(crate) fn since(self, earlier: Self) -> u64 {
         self.0.saturating_sub(earlier.0)
@@ -168,6 +173,8 @@ pub(crate) struct Region {
     block_events: BlockEvents,
     /// 方块逻辑的随机源，官方的 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
+    /// 红石缓存，一个 region 一份；开关从 `bamboo.toml` 读，默认关。
+    pub(crate) redstone_cache: mc_bamboo_blocks::cache::RedstoneCache,
     /// 战利品表的 `random_sequence`。平坦世界的种子是 0，和 `login` 里的 `hashed_seed` 一样。
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
@@ -348,6 +355,9 @@ impl Region {
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
             random: LevelRandom::new(unique_seed()),
+            redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
+                mc_bamboo_blocks::cache::CacheConfig::default(),
+            ),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
@@ -407,6 +417,35 @@ impl Region {
             tick_levels: &self.tick_levels,
         };
         (level, &mut self.block_ticks)
+    }
+
+    /// 带红石缓存的方块逻辑入口：只有游戏 tick 的两段用得到。
+    pub(crate) fn block_level_with_cache(
+        &mut self,
+    ) -> (
+        RegionLevel<'_>,
+        &mut BlockTicks,
+        &mut mc_bamboo_blocks::cache::RedstoneCache,
+    ) {
+        let level = RegionLevel {
+            chunks: &mut self.chunks,
+            changes: &mut self.block_changes,
+            block_items: &mut self.block_items,
+            players: &mut self.players,
+            random: &self.random,
+            redstone: &mut self.redstone,
+            block_entities: &mut self.block_entities,
+            block_events: &mut self.block_events,
+            containers: &mut self.containers,
+            entities: &mut self.entities,
+            loot_sequences: &self.loot_sequences,
+            block_rules: self.block_rules,
+            block_weather: self.block_weather,
+            world_border: self.world_border.clone(),
+            command_blocks: &mut self.command_blocks,
+            tick_levels: &self.tick_levels,
+        };
+        (level, &mut self.block_ticks, &mut self.redstone_cache)
     }
 
     /// 进服开头：`login`、`change_difficulty`、`player_abilities`、权限事件、命令树、

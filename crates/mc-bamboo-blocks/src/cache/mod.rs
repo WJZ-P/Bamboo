@@ -36,9 +36,11 @@ pub struct CacheConfig {
     pub hot_nanos: u64,
     /// 两秒内触发数的兜底阈值。
     pub hot_triggers_per_2s: u32,
-    /// 连续未命中多少次、且已存多少条记录后停录。
+    /// 连续未命中多少次、且已存多少条记录、且命中率低于多少才停录。
     pub stop_miss_streak: u32,
     pub stop_min_records: usize,
+    /// 命中率低于这个千分数才停录；周期性电路偶尔一长串不命中不应该停。
+    pub stop_max_hit_millis: u32,
     /// 停录后的冷却刻数，每次停录翻倍，上限 3200 刻。
     pub stop_cooldown_ticks: i64,
     /// 每个缓存实例的内存上限（字节）。
@@ -55,6 +57,7 @@ impl Default for CacheConfig {
             hot_triggers_per_2s: 16,
             stop_miss_streak: 64,
             stop_min_records: 32,
+            stop_max_hit_millis: 50,
             stop_cooldown_ticks: 200,
             memory_limit: 32 * 1024 * 1024,
             record_limit: 1024 * 1024,
@@ -225,6 +228,7 @@ pub struct Entry {
 #[derive(Debug, Clone, Copy, Default)]
 struct Site {
     interpreted_nanos: u64,
+    hits: u64,
     misses: u32,
     records: usize,
     stopped_until: i64,
@@ -322,13 +326,18 @@ impl RedstoneCache {
                     continue;
                 }
                 self.used.insert(key, self.now);
-                self.sites.entry(site).and_modify(|s| s.misses = 0);
+                self.sites.entry(site).and_modify(|s| {
+                    s.misses = 0;
+                    s.hits += 1;
+                });
                 self.stats.replays += 1;
                 return Some(entry.effects.clone());
             }
         }
         self.stats.misses += 1;
         self.sites.entry(site).and_modify(|s| s.misses += 1);
+        // 连续不命中到阈值就停录，避免「一直录但永远命中不了」的机器涨内存。
+        self.update_stop(site);
         None
     }
 
@@ -391,7 +400,6 @@ impl RedstoneCache {
             }
         }
         self.used.insert(key, self.now);
-        self.sites.entry(site).and_modify(|s| s.misses = 0);
         self.trim_memory();
         true
     }
@@ -400,8 +408,12 @@ impl RedstoneCache {
         let Some(state) = self.sites.get(&site).copied() else {
             return;
         };
-        if state.misses >= self.config.stop_miss_streak
+        let seen = state.hits + u64::from(state.misses);
+        let hit_millis = u32::try_from(1000 * state.hits / seen.max(1)).unwrap_or(1000);
+        if state.stopped_until <= self.now
+            && state.misses >= self.config.stop_miss_streak
             && state.records >= self.config.stop_min_records
+            && hit_millis < self.config.stop_max_hit_millis
         {
             let base = self.config.stop_cooldown_ticks.clamp(1, 3200);
             let cooldown = base.max(state.cooldown);
@@ -509,4 +521,132 @@ impl Hasher for KeyHasher {
 /// guard 模块按真实值重算哈希时用同一个稳定算法。
 pub(crate) fn hash_value(value: &impl Hash) -> u64 {
     crate::recording::stable_hash(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::guard::GuardRead;
+
+    fn trigger(index: i32) -> Trigger {
+        Trigger::ScheduledTick {
+            pos: BlockPos::new(index, 64, 0),
+            kind: 1,
+        }
+    }
+
+    fn record(trigger: Trigger, nanos: u64, value: u64) -> RuntimeRecord {
+        RuntimeRecord {
+            trigger,
+            tick: 0,
+            nanos,
+            reads: vec![GuardRead {
+                method: ReadMethod::MinY,
+                pos: None,
+                value,
+            }],
+            effects: Vec::new(),
+            sections: Vec::new(),
+            uncacheable: Vec::new(),
+            boundary_writes: false,
+            rejected: false,
+        }
+    }
+
+    /// 没到热点时不录；累计解释耗时越过阈值才开始录。
+    #[test]
+    fn hotness_gates_recording() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            hot_nanos: 100,
+            hot_triggers_per_2s: u32::MAX,
+            ..CacheConfig::default()
+        });
+        for _ in 0..3 {
+            assert!(!cache.record(&record(trigger(0), 30, 1)));
+        }
+        assert!(cache.record(&record(trigger(0), 30, 1)));
+        assert_eq!(cache.stats().recorded, 1);
+    }
+
+    /// 频率兜底：单次很便宜但两秒内触发够多，也要开始录。
+    #[test]
+    fn frequency_fallback_opens_a_hot_site() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            hot_nanos: u64::MAX,
+            hot_triggers_per_2s: 4,
+            ..CacheConfig::default()
+        });
+        for i in 0..4 {
+            cache.set_time(i);
+            cache.record(&record(trigger(0), 1, 1));
+        }
+        assert_eq!(cache.stats().recorded, 1);
+    }
+
+    /// 连续不命中够多次停止录制，冷却后重试；熔炉阵列这类机器不会一直涨内存。
+    #[test]
+    fn a_site_that_never_hits_stops_recording_and_cools_down() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            hot_nanos: 0,
+            stop_miss_streak: 2,
+            stop_min_records: 0,
+            stop_cooldown_ticks: 5,
+            ..CacheConfig::default()
+        });
+        // 先放一条记录，再连续不命中三次（`stop_miss_streak = 2`）。
+        cache.record(&record(trigger(0), 1, 1));
+        for i in 1..=3 {
+            cache.set_time(i);
+            cache.try_replay(trigger(0), &mut |_| None, &|_| None);
+            cache.record(&record(trigger(0), 1, (i + 7) as u64));
+        }
+        assert_eq!(cache.stats().stopped_sites, 1);
+        let before = cache.entry_count();
+        // 冷却到 now+5，之间每次新键都不该被录进去。
+        for i in 4..=7 {
+            cache.set_time(i);
+            cache.record(&record(trigger(0), 1, 200 + i as u64));
+        }
+        assert_eq!(cache.entry_count(), before, "冷却期间不该继续录");
+        cache.set_time(8);
+        assert!(
+            cache.record(&record(trigger(0), 1, 99)),
+            "冷却结束后可以再试"
+        );
+    }
+
+    /// 超过内存上限按最近使用淘汰，降到 80%。
+    #[test]
+    fn memory_limit_evicts_least_recently_used_entries() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            hot_nanos: 0,
+            memory_limit: 1000,
+            record_limit: usize::MAX,
+            ..CacheConfig::default()
+        });
+        for index in 0_u64..40 {
+            cache.set_time(index as i64);
+            cache.record(&record(trigger(index as i32), 1, index));
+        }
+        assert!(cache.bytes() <= 800);
+        assert!(cache.stats().evictions > 0);
+        assert!(cache.entry_count() < 40);
+    }
+
+    /// 键原料逐项比对：128 位哈希相同但读项不同的两条记录不会互相覆盖。
+    #[test]
+    fn key_parts_are_compared_in_full() {
+        let mut cache = RedstoneCache::new(CacheConfig {
+            enabled: true,
+            hot_nanos: 0,
+            ..CacheConfig::default()
+        });
+        cache.record(&record(trigger(0), 1, 1));
+        cache.record(&record(trigger(0), 1, 2));
+        assert_eq!(cache.entry_count(), 2);
+    }
 }

@@ -63,6 +63,8 @@ pub struct WorldConfig {
     pub admin: crate::admin::AdminSnapshot,
     /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动。
     pub entity_threads: usize,
+    /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
+    pub redstone_cache: bool,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
 }
@@ -76,6 +78,7 @@ impl Default for WorldConfig {
             enforce_secure_profile: true,
             admin: crate::admin::AdminSnapshot::default(),
             entity_threads: 0,
+            redstone_cache: false,
             mail_budget: MailBudget::default(),
         }
     }
@@ -184,6 +187,13 @@ impl World {
             .set_simulation_distance(crate::interaction::SIMULATION_DISTANCE);
         if infinite_flat {
             world.region.use_infinite_flat_chunks();
+        }
+        if config.redstone_cache {
+            world.region.redstone_cache =
+                mc_bamboo_blocks::cache::RedstoneCache::new(mc_bamboo_blocks::cache::CacheConfig {
+                    enabled: true,
+                    ..Default::default()
+                });
         }
         world.region.profiler.on_world_start();
         world
