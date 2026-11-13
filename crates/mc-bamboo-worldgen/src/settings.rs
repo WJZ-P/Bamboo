@@ -218,7 +218,8 @@ impl SeededRouter {
             chunk_surface_level: compiler.compile(&router.chunk_surface_level),
             final_density: compiler.compile(&router.final_density),
         };
-        let context = Context::new(compiler.cache_count());
+        // 官方的 `sampleBlockValueUncached` 用 `SamplerContext.EMPTY_UNCACHED`，`cache` 不记忆。
+        let context = Context::uncached();
         Self {
             compiler,
             samplers,

@@ -39,6 +39,7 @@ pub mod random;
 pub mod sampler;
 pub mod settings;
 pub mod spline;
+pub mod volume;
 
 use std::collections::HashMap;
 
