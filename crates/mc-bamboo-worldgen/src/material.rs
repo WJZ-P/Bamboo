@@ -188,9 +188,13 @@ struct Scan<'a> {
     stone_depth_below: i32,
     stone_depth_above: i32,
     biome: Option<u32>,
-    /// 2d / 3d 噪声 supplier 的当前值；每列（2d）或每格（3d）重算一次。
-    noise_2d: Vec<f64>,
-    noise_3d: Vec<f64>,
+    /// `MaterialRuleContext.createNoiseSampler2d/3d` 的 `DoubleSupplier`：按代数惰性求值，
+    /// 每列（2d）或每格（3d）第一次被问到才算一次。
+    noise_2d: Vec<Option<(usize, f64)>>,
+    noise_3d: Vec<Option<(usize, f64)>>,
+    /// `MaterialRuleContext.lastUpdateXZ` / `lastUpdateY`。
+    update_xz: usize,
+    update_y: usize,
     veins: Vec<VeinBuffers>,
 }
 
@@ -729,8 +733,10 @@ impl<'a> Scan<'a> {
             stone_depth_below: 0,
             stone_depth_above: 0,
             biome: None,
-            noise_2d: vec![0.0; rules.noise_ids.len()],
-            noise_3d: vec![0.0; rules.noise_ids.len()],
+            noise_2d: vec![None; rules.noise_ids.len()],
+            noise_3d: vec![None; rules.noise_ids.len()],
+            update_xz: 0,
+            update_y: 0,
             veins: vein_buffers,
         })
     }
@@ -738,6 +744,9 @@ impl<'a> Scan<'a> {
 
 impl Scan<'_> {
     fn update_xz(&mut self, x: i32, z: i32, gradient_x: i32, gradient_z: i32) {
+        // 官方 `updateXZ` 同时把 lastUpdateXZ 和 lastUpdateY 各加一。
+        self.update_xz = self.update_xz.wrapping_add(1);
+        self.update_y = self.update_y.wrapping_add(1);
         self.block_x = x;
         self.block_z = z;
         self.surface_gradient_x = gradient_x;
@@ -746,24 +755,15 @@ impl Scan<'_> {
         self.surface_secondary = None;
         self.min_surface_level = None;
         self.biome = None;
-        for (index, noise) in self.noises.iter().enumerate() {
-            self.noise_2d[index] = f64::from(noise.get(f64::from(x), 0.0, f64::from(z)));
-        }
     }
 
     fn update_y(&mut self, above: i32, below: i32, water: i32, y: i32) {
+        self.update_y = self.update_y.wrapping_add(1);
         self.biome = None;
         self.block_y = y;
         self.water_height = water;
         self.stone_depth_below = below;
         self.stone_depth_above = above;
-        for (index, noise) in self.noises.iter().enumerate() {
-            self.noise_3d[index] = f64::from(noise.get(
-                f64::from(self.block_x),
-                f64::from(y),
-                f64::from(self.block_z),
-            ));
-        }
     }
 
     fn get_biome(&mut self) -> u32 {
@@ -824,12 +824,25 @@ impl Scan<'_> {
         level
     }
 
-    fn noise_get(&self, index: usize, is_3d: bool) -> f64 {
-        if is_3d {
-            self.noise_3d[index]
+    /// `MaterialRuleContext$1/$2.getAsDouble`：代数没变就返回上次的值，变了才调噪声。
+    fn noise_get(&mut self, index: usize, is_3d: bool) -> f64 {
+        let (slot, generation) = if is_3d {
+            (&mut self.noise_3d[index], self.update_y)
         } else {
-            self.noise_2d[index]
+            (&mut self.noise_2d[index], self.update_xz)
+        };
+        if let Some((seen, value)) = *slot
+            && seen == generation
+        {
+            return value;
         }
+        let value = f64::from(self.noises[index].get(
+            f64::from(self.block_x),
+            if is_3d { f64::from(self.block_y) } else { 0.0 },
+            f64::from(self.block_z),
+        ));
+        *slot = Some((generation, value));
+        value
     }
 
     fn get_band(&self, x: i32, y: i32, z: i32) -> u32 {
