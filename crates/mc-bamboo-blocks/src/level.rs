@@ -70,6 +70,17 @@ pub enum Trigger {
     BlockEntityTick { pos: BlockPos, kind: usize },
 }
 
+/// 录制包装的工作模式。缓存驱动按触发点切换，见 `cache_run::run_cached_trigger`。
+///
+/// `Off` 只做一次布尔判断；`Count` 只累加一个计数器，用来估计这次解释执行的工作量；
+/// `Full` 才是实验和缓存录制用的完整记账。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordMode {
+    Off,
+    Count,
+    Full,
+}
+
 /// 方块逻辑里不经过 [`Level`] 读写方法的那些事件，默认谁也不看。
 ///
 /// `World` 在每次触发的开头结尾、读世界时间、收集对外效果、查/排计划刻时各报一次。
@@ -84,9 +95,9 @@ pub enum Trigger {
 pub enum Observation<'a> {
     TriggerBegin(Trigger),
     TriggerEnd,
-    /// 缓存守卫/重放期间关掉录制包装的记账：这些读写不是解释执行产生的。
+    /// 切换录制包装的记账模式。守卫/重放期间是 `Off`，试探便宜触发点时是 `Count`。
     /// 实验驱动不报这个事件，历史数字不变。
-    Capture(bool),
+    RecordMode(RecordMode),
     /// 一次活塞音高取数。重放时照样从世界随机源取一个数、按 `scale`/`base` 算 pitch。
     PistonPitch {
         pos: BlockPos,
@@ -887,6 +898,11 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 会返回内容，缓存驱动用它收成一条记录。
     fn runtime_records(&self) -> Vec<crate::cache::RuntimeRecord> {
         Vec::new()
+    }
+
+    /// 取走 [`RecordMode::Count`] 累计的读写项数。只有录制包装会返回非零值。
+    fn take_counted_reads(&self) -> u64 {
+        0
     }
 
     /// 观察一次不经过本 trait 读写方法的事件，见 [`Observation`]。

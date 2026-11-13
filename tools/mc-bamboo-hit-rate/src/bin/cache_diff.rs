@@ -1,8 +1,11 @@
 //! 九台机器的开/关缓存逐刻差分。
 //!
 //! ```bash
-//! cargo run --release -p mc-bamboo-hit-rate --bin cache_diff -- [刻数]
+//! cargo run --release -p mc-bamboo-hit-rate --bin cache_diff -- [刻数] [immediate]
 //! ```
+//!
+//! 第二个参数传 `immediate` 时用「第一次就录」的最坏情况配置；默认用正式配置
+//! `CacheConfig::enabled()`（按触发点算账，只在划算的地方缓存）。
 //!
 //! 逐刻比较世界状态、对外效果（含顺序和 pitch 的位模式）、发包层的音效取数次数、
 //! 世界随机源种子和计划刻队列。任何一项不等就打印机器名、刻号和两份差异。
@@ -15,11 +18,17 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(4000);
+    let immediate = std::env::args().nth(2).is_some_and(|s| s == "immediate");
+    let config = if immediate {
+        CacheConfig::immediate()
+    } else {
+        CacheConfig::enabled()
+    };
     let mut total_mismatches = 0;
     for build in machines::all() {
         let name = build().name;
         let mut cached = build();
-        cached.cache = Some(RedstoneCache::new(CacheConfig::immediate()));
+        cached.cache = Some(RedstoneCache::new(config));
         let mut plain = build();
         let mut mismatches = 0;
         let mut first = None;
@@ -39,8 +48,9 @@ fn main() {
         }
         let stats = cached.cache.as_ref().unwrap().stats();
         println!(
-            "{name}: {mismatches} 刻不一致（首次 {first:?}），触发 {} / 命中 {} / 记录 {} / 拒绝 {} / 淘汰 {} / 停录点 {} / 缓存 {} KiB",
+            "{name}: {mismatches} 刻不一致（首次 {first:?}），触发 {} / 直达 {} / 命中 {} / 记录 {} / 拒绝 {} / 淘汰 {} / 停录点 {} / 缓存 {} KiB",
             stats.triggers,
+            stats.bypassed,
             stats.replays,
             stats.recorded,
             stats.rejected,

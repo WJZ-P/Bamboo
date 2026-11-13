@@ -14,7 +14,7 @@
 //! [`Level::observe`]. Recording never changes behaviour.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     time::Instant,
@@ -271,6 +271,11 @@ impl Record {
 pub struct Recording<'a> {
     level: &'a mut dyn Level,
     inner: RefCell<Inner>,
+    /// 记账模式放在 `Cell` 里：`Off` 时每次转发只是一次非原子的加载和比较，
+    /// 不用借 `RefCell`，这是「不缓存的触发点常驻开销接近 0」的关键。
+    mode: Cell<crate::level::RecordMode>,
+    /// `Count` 模式下的读写项数同样只是一次 `Cell` 加法。
+    counted: Cell<u64>,
 }
 
 struct Inner {
@@ -285,8 +290,6 @@ struct Inner {
     runtime: Vec<RuntimeRecord>,
     /// 两次触发边界之间发生过写，下一次触发的运行时记录作废。
     boundary_writes: bool,
-    /// 守卫/重放阶段关掉记账，见 `set_capture`。
-    capture: bool,
     tick: i64,
 }
 
@@ -326,9 +329,10 @@ impl<'a> Recording<'a> {
                 section_hashes: HashMap::new(),
                 runtime: Vec::new(),
                 boundary_writes: false,
-                capture: true,
                 tick: 0,
             }),
+            mode: Cell::new(crate::level::RecordMode::Full),
+            counted: Cell::new(0),
         }
     }
 
@@ -345,10 +349,19 @@ impl<'a> Recording<'a> {
         inner.boundary_writes = false;
     }
 
-    /// 关掉/打开记账。守卫和重放阶段必须关掉：它们产生的读写不是解释执行的结果，
+    /// 切换记账模式。守卫和重放阶段必须是 `Off`：它们产生的读写不是解释执行的结果，
     /// 不能进读集合或效果序列。实验驱动不调用这个方法，行为不变。
     pub fn set_capture(&self, capture: bool) {
-        self.inner.borrow_mut().capture = capture;
+        self.set_record_mode(if capture {
+            crate::level::RecordMode::Full
+        } else {
+            crate::level::RecordMode::Off
+        });
+    }
+
+    /// 按 [`crate::level::RecordMode`] 切换。计数由 `take_counted_reads` 单独取走。
+    pub fn set_record_mode(&self, mode: crate::level::RecordMode) {
+        self.mode.set(mode);
     }
 
     /// 取走目前为止的全部记录，清空。
@@ -361,9 +374,27 @@ impl<'a> Recording<'a> {
         std::mem::take(&mut self.inner.borrow_mut().runtime)
     }
 
+    /// 实验录制层的一读或一写：`Count` 模式只累加一个计数器，于是计数和
+    /// `RuntimeRecord::work()` 的读项数 + 写项数一一对应。`Off` 时只加载一次 `Cell`。
+    fn accounting(&self) -> bool {
+        match self.mode.get() {
+            crate::level::RecordMode::Full => true,
+            crate::level::RecordMode::Count => {
+                self.counted.set(self.counted.get().saturating_add(1));
+                false
+            }
+            crate::level::RecordMode::Off => false,
+        }
+    }
+
+    /// 运行时记录专用：不重复计数（它和实验的读/写是同一次底层操作）。
+    fn full_only(&self) -> bool {
+        self.mode.get() == crate::level::RecordMode::Full
+    }
+
     /// 一次运行时读。白名单之外的读也记下来，让记录被判为不可缓存。
     fn runtime_read(&self, method: ReadMethod, pos: Option<BlockPos>, value: impl Hash) {
-        if !self.inner.borrow().capture {
+        if !self.full_only() {
             return;
         }
         let mut inner = self.inner.borrow_mut();
@@ -374,7 +405,7 @@ impl<'a> Recording<'a> {
 
     /// 一次运行时效果。白名单之外的写用 `reject_runtime` 作废整条记录。
     fn runtime_effect(&self, effect: ReplayEffect) {
-        if !self.inner.borrow().capture {
+        if !self.full_only() {
             return;
         }
         let mut inner = self.inner.borrow_mut();
@@ -384,6 +415,9 @@ impl<'a> Recording<'a> {
     }
 
     fn reject_runtime(&self) {
+        if !self.full_only() {
+            return;
+        }
         let mut inner = self.inner.borrow_mut();
         if let Some(frame) = inner.current.as_mut() {
             frame.runtime.rejected = true;
@@ -397,7 +431,7 @@ impl<'a> Recording<'a> {
 
     /// 一次读进读集合。
     fn read(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
-        if !self.inner.borrow().capture {
+        if !self.accounting() {
             return;
         }
         // 白名单之外的读项让这条运行时记录作废，见 `RuntimeRecord::supported`。
@@ -442,7 +476,7 @@ impl<'a> Recording<'a> {
 
     /// 一次写进效果。
     fn write(&self, entry: Write) {
-        if !self.inner.borrow().capture {
+        if !self.accounting() {
             return;
         }
         // 白名单之外的写让这条运行时记录作废。
@@ -472,7 +506,7 @@ impl<'a> Recording<'a> {
 
     /// 标一个不能缓存的原因，同一次触发里只记一次。
     fn uncacheable(&self, reason: Uncacheable) {
-        if !self.inner.borrow().capture {
+        if !self.accounting() {
             return;
         }
         let mut inner = self.inner.borrow_mut();
@@ -1549,12 +1583,17 @@ impl Level for Recording<'_> {
         self.take_runtime_records()
     }
 
+    fn take_counted_reads(&self) -> u64 {
+        self.counted.replace(0)
+    }
+
     fn observe(&self, event: Observation<'_>) {
-        if let Observation::Capture(capture) = event {
-            self.set_capture(capture);
+        if let Observation::RecordMode(mode) = event {
+            self.set_record_mode(mode);
             return;
         }
-        if !self.inner.borrow().capture {
+        // `Off` / `Count` 模式下连触发帧都不建：这是不缓存的触发点最贵的一块开销。
+        if self.mode.get() != crate::level::RecordMode::Full {
             return;
         }
         match event {
@@ -1759,7 +1798,7 @@ impl Level for Recording<'_> {
                     except_initiator,
                 ))));
             }
-            Observation::Capture(_) => {}
+            Observation::RecordMode(_) => {}
         }
     }
 }
@@ -1830,6 +1869,8 @@ fn finish_record(mut frame: Frame) -> (Record, RuntimeRecord) {
         trigger,
         tick: frame.runtime.tick,
         nanos,
+        interpreted_items: frame.record.reads.len() as u64,
+        written_items: frame.record.writes.len() as u64,
         reads,
         effects: frame.runtime.effects,
         sections,

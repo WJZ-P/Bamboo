@@ -324,21 +324,26 @@ pub fn run_scheduled_ticks_with_cache(
     let Some(cache) = cache else {
         return run_scheduled_ticks(level, ticks, now);
     };
+    // 所有触发点都停着且还没过冷却时，连 `Recording` 包装都不套。
+    if cache.dormant(now) {
+        return run_scheduled_ticks(level, ticks, now);
+    }
     let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
     ticks.collect_due(now, &can_tick);
     let effects;
     {
         let mut recorder = crate::recording::Recording::new(&mut *level);
         recorder.set_tick(now);
+        // 缓存驱动默认不记账，只有确认划算的触发点才临时打开。
+        recorder.set_record_mode(crate::level::RecordMode::Off);
         let mut world = World::in_world_tick(&mut recorder, ticks);
         run_block_ticks_cached(&mut world, cache, now);
-        // 流体刻和方块事件之间的记账开关由各段自己管。
-        world.set_capture(false);
+        // 流体刻不进第一版缓存；保持 Off，避免为它付记账开销。
+        world.set_record_mode(crate::level::RecordMode::Off);
         world.collect_due_fluids();
         while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
             fluid::tick(&mut world, pos, fluid);
         }
-        world.set_capture(true);
         run_block_events_cached(&mut world, cache, now);
         effects = world.drain_effects();
     }
@@ -367,13 +372,17 @@ pub fn run_due_ticks_with_cache(
     let Some(cache) = cache else {
         return run_due_ticks(level, ticks, now);
     };
+    if cache.dormant(now) {
+        return run_due_ticks(level, ticks, now);
+    }
     let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
     ticks.collect_due(now, &can_tick);
     let mut recorder = crate::recording::Recording::new(level);
     recorder.set_tick(now);
+    recorder.set_record_mode(crate::level::RecordMode::Off);
     let mut world = World::in_world_tick(&mut recorder, ticks);
     run_block_ticks_cached(&mut world, cache, now);
-    world.set_capture(false);
+    world.set_record_mode(crate::level::RecordMode::Off);
     world.collect_due_fluids();
     while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
         fluid::tick(&mut world, pos, fluid);
@@ -391,8 +400,12 @@ pub fn run_block_event_phase_with_cache(
     let Some(cache) = cache else {
         return run_block_event_phase(level, ticks);
     };
+    if cache.dormant(now) {
+        return run_block_event_phase(level, ticks);
+    }
     let mut recorder = crate::recording::Recording::new(level);
     recorder.set_tick(now);
+    recorder.set_record_mode(crate::level::RecordMode::Off);
     let mut world = World::in_world_tick(&mut recorder, ticks);
     run_block_events_cached(&mut world, cache, now);
     outcome_from(world, InteractionResult::Pass, false)
@@ -413,7 +426,6 @@ fn run_block_ticks_cached(world: &mut World, cache: &mut RedstoneCache, now: i64
 
 /// 方块事件阶段，带缓存的驱动循环。
 fn run_block_events_cached(world: &mut World, cache: &mut RedstoneCache, now: i64) {
-    world.set_capture(true);
     let mut reschedule = Vec::new();
     while let Some(event) = world.pop_block_event() {
         if !world.chunk_ticks_blocks(event.pos.chunk()) {

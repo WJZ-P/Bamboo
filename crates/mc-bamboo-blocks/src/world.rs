@@ -1051,9 +1051,23 @@ impl<'a> World<'a> {
         self.level.observe(Observation::TriggerBegin(trigger));
     }
 
-    /// 缓存守卫/重放期间关掉录制记账，见 [`Observation::Capture`]。
+    /// 切换录制包装的记账模式，见 [`Observation::RecordMode`]。
+    pub fn set_record_mode(&self, mode: crate::level::RecordMode) {
+        self.level.observe(Observation::RecordMode(mode));
+    }
+
+    /// 取走 `Count` 模式累计的读写项数，别的 `Level` 实现返回 0。
+    pub fn take_counted_reads(&self) -> u64 {
+        self.level.take_counted_reads()
+    }
+
+    /// 缓存守卫/重放期间关掉录制记账。
     pub fn set_capture(&self, capture: bool) {
-        self.level.observe(Observation::Capture(capture));
+        self.set_record_mode(if capture {
+            crate::level::RecordMode::Full
+        } else {
+            crate::level::RecordMode::Off
+        });
     }
 
     /// 一条到期的方块计划刻的边界。

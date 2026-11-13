@@ -239,17 +239,26 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
 
 ### 4.3 热点判断、停止录制、内存上限（用户 11-12 指定的第一版必备）
 
-每个触发点按 `(Trigger 的种类, pos, kind)` 归一化（去掉 `BlockEvent` 的
-`param_a/param_b` 之外的变化项）记一个 `TriggerStats`：
+每个触发点按 `(Trigger 的种类, pos)` 归一化（去掉 `BlockEvent` 的
+`param_a/param_b` 等变化项）记一个 `Site`。第一版用「累计解释耗时 ≥ 2 ms」当热点，
+7i 的实测说明这不够：小电路一次解释只要几微秒，守卫和录制的常驻开销比直接算还贵；
+互质时钟汇合三条时钟在同一段里交错写，段哈希频繁失配，没命中时白付了查找、守卫、
+录制，再照常算一遍。第二版改成**按触发点自己算账**（2026-11-13）：
 
-| 规则 | 建议参数（可调，§10 Q6/Q7） | 目的 |
+| 规则 | 参数 | 目的 |
 | --- | --- | --- |
-| **热点**：才开始录制 | 每个触发点累计的**解释执行耗时** ≥ 2 ms，或每秒触发数 ≥ 8 持续 2 秒；两者取或 | 设计稿 §9.3 写的是「每段每秒触发数」，但实验里红石线阵列只有 1.7 次/秒、却是单机最省时的（10.8 ms/次，可省 99.2%）。只按频率会漏掉最该缓存的那台，所以补一个「累计耗时」口径 |
-| **停止录制**：命中不了的触发点 | 该点连续 `miss_streak ≥ 64` 次未命中、且已存 `≥ 32` 条记录 → 停录；冷却 200 刻（10 秒）后允许再试一次，仍不命中就再停、冷却翻倍直到上限 3200 刻 | 熔炉阵列严格口径 4000 刻涨到 16000 条 / 19 MiB、命中率 0%，必须在几百次内停住 |
-| **每个 region 内存上限 + LRU** | 32 MiB / region；单条记录 ≤ 1 MiB（超了不缓存，红石线阵列按段存键后远小于此）；按 `last_used_tick` 最近使用淘汰，命中/插入都刷新；达到上限时先淘汰最久未用，直到降到 80% | 兜住「一直录但一直不命中」和 9.4「计数器占内存」两类 |
-| **开关** | 配置一个总开关，默认关；差分测试和 oracle 显式打开 | 上线前默认不影响任何现有行为 |
+| **确定性工作量** | `work = 实验 Record 的读项数 + 写项数 + 段数` | 不用墙上时间：同一台机器在任何 CPU、任何编译选项下都得到同一个数，单元测试可复现。命中省下的就是这份工作量，守卫（每段一次查哈希、每条守卫项一次重读）和录制包装（每个读写项多记一笔）也折成同一个单位 |
+| **太便宜的不录** | 单次 `work < 65536` 的触发点不录；试探阶段用 `RecordMode::Count` 只累加一个计数器，连续 8 次都够不到门槛就把该点判为不划算 | 九台机器里最大的「小电路」触发 25732 项、最小的红石线阵列触发 145105 项，65536 落在两者之间。见 `performance-optimizations.md` 7i 的门槛表 |
+| **按净收益留不留** | 每个触发点一个 128 次触发的窗口，账 = 命中省下的 `work` − 白付的守卫 `work` − 白付的录制 `work`；窗口结算为负、且该点已命中过至少 8 次就停掉 | 负收益的触发点不再继续占内存和查表。给 8 次命中的宽限，是避免刚录到第一条记录、还没热起来的点被首窗口误关 |
+| **停录与冷却** | 停掉后 200 刻（10 秒）内该点完全不碰缓存，之后重新试探；连续不划算时冷却翻倍到上限 3200 刻 | 沿用第一版规则；试探窗口用完后也走同一条冷却路径 |
+| **守卫先做便宜的** | 先逐段比 128 位哈希，失配立刻放弃这条记录，不再逐项重读 `GuardRead` | 段内交错写的机器失配早，省掉旧版最贵的逐项守卫 |
+| **不缓存的点常驻开销≈0** | `Recording` 加 `RecordMode::{Off, Count, Full}`，`Off` 时每次转发只是一次 `Cell` 加载；`admits` 查一次表就直达解释执行，不建触发帧、不发守卫读项 | 小电路在开关打开时不再为录制包装付钱 |
+| **每个 region 内存上限 + LRU** | 32 MiB / region；单条记录 ≤ 1 MiB；按 `last_used_tick` 最近使用淘汰，达到上限时降到 80% | 兜住「一直录但一直不命中」和 9.4「计数器占内存」两类 |
+| **开关** | 总开关默认关；差分测试和 oracle 显式打开 | 上线前默认不影响任何现有行为 |
 
 统计和 LRU 都在缓存引擎内部，不进存档、不进 `BlockEntities`、不进 `director_host.rs`。
+`CacheConfig::immediate()` 是最坏情况诊断配置：第一次就录、不因净收益停录，方块对拍
+和 7i 的参考表用它；正式配置和差分测试用 `CacheConfig::enabled()`。
 
 ## 5. 两个绝对时刻
 
@@ -376,6 +385,9 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
   这里量的是整个方块逻辑阶段，预期节省比例低于实验数字，差额就是省不掉的那部分。
 - 与 `bench` 的钩子开销基准对照，确认常驻包装（若采用 §10 Q2 的方案）没有把
   未命中的路径拖慢超过 2%。
+- 正式配置与最坏情况配置各跑一张表：`cache_bench 4000 5` 用 `CacheConfig::enabled()`，
+  `cache_bench 4000 5 immediate` 用 `CacheConfig::immediate()`。**验收线是正式配置下
+  九台机器没有一台比关着慢 3% 以上**，同时红石线阵列的收益保持在同一量级。
 
 ## 8. 风险和边界（写清楚不做什么）
 
@@ -481,3 +493,41 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
 `oracle java --weather clear` 与 `oracle java --weather clear --redstone-cache`
 都是 10114 cases / 0 fail（开的那次 2364 triggers / 20 replays）、
 `machine java` 10 runs / 0 mismatches、九台机器差分 0 刻不一致。
+
+## 13. 第二版：只在划算的地方生效（2026-11-13）
+
+§12 的第 7 步暴露了「开着缓存反而更慢」的机器，见 `performance-optimizations.md` 7i。
+按 §4.3 的新规则改造了缓存引擎和录制包装：
+
+| 改动 | 落点 |
+| --- | --- |
+| 确定性工作量、门槛、窗口净收益账、冷却、三态门控 | `cache::RedstoneCache`（`admits` / `begin_probe` / `note_probe_work` / `try_replay` / `record`） |
+| 守卫先比段哈希，失配立刻放弃 | `cache::RedstoneCache::try_replay` |
+| `RecordMode::{Off, Count, Full}`，`Off`/`Count` 只碰 `Cell` | `level::Observation::RecordMode`、`recording::Recording`、`world::World` |
+| 不划算的点直达解释执行，不建触发帧 | `cache_run::run_cached_trigger`、`interact.rs` 的带缓存驱动入口 |
+| 正式配置与最坏情况配置都能量 | `cache_bench` / `cache_diff` 的第三个/第二个参数 `immediate` |
+
+**验收**：正式配置下九台机器开/关对比最慢 0.99×（比较器阵列，慢 0.8%），
+红石线阵列 39.75×，见 `performance-optimizations.md` 7i；
+`cache_diff 4000`（正式与 `immediate` 两种配置）九台全部 0 刻不一致；
+`oracle java --weather clear` 开、关都是 10114 / 0 fail；
+单元测试覆盖「便宜的触发点不被录」「净收益为负会停」「冷却后会重试」「段哈希
+失配不再逐项重读」，全部只用确定性计数，不依赖机器快慢。
+
+第 12 节列的活塞门（第 4 步）仍在下一轮，具体计划：
+
+1. `ReplayEffect` 加带真实值的变体：`BlockEntityInsert`（`PistonMoving` 的全部字段）、
+   `RemoveBlockEntity`、`ContainerSlots(Vec<ItemStack>)`、`ClearContainer`、`Sign`、
+   `Sound { 参数 + scale/base }`；`World` 加对应的 `replay_*` 落地入口，一律走
+   `BlockEntities` / `Container` / `push_effect` 的原始入口，让去重和子序号自然发生。
+2. `ReadMethod` 给 `K_BLOCK_ENTITY` / `K_SLOTS` / `K_LOOT_UNPACK` / `K_TICKER` /
+   `K_ENTITY_TIME` / `K_WORLD_BORDER` 各加一个变体，`cache_run::guard_value` 按类别
+   重算真实值并哈希；`recording::finish_record` 的 `expected_guards` 必须覆盖新读项，
+   少一个守卫就整条记录作废。不能用通用 `Recheck`（实测会把纯信号机器的命中率
+   从 99% 打到 40%）。
+3. 扩 `cache::supported_kind` / `supported_write` / `supported_effect`、
+   `cache_run::cacheable_trigger`（接 `Trigger::BlockEntityTick`），
+   `interact.rs` 的方块实体 tick 段也走带缓存的驱动入口。
+4. 验收：`cache_diff`（正式与 `immediate`）九台 0 刻不一致、
+   `oracle java --only piston`、全量 `oracle java --weather clear` 开与不开、
+   `machine java` 里带活塞的机器；任何一项不等都不放宽白名单，退回去补守卫。
