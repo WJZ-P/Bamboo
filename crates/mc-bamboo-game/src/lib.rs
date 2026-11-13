@@ -38,6 +38,8 @@ mod chunk_encoding;
 mod chunk_tracking;
 pub mod command;
 mod command_block;
+#[allow(dead_code)] // 下一个提交接进 Director 宿主。
+mod compute_pool;
 mod container;
 mod container_loot;
 mod debug_stick;
