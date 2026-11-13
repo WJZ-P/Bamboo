@@ -27,6 +27,7 @@ use crate::{
     biome_manager::BiomeManager,
     climate::TargetPoint,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
+    carver::Carvers,
     material::MaterialRules,
     math::{java_floor_div, quart_to_block},
     sampler::{Compiler, Context, Sampler},
@@ -69,6 +70,7 @@ pub struct Generator<'a> {
     aquifer_random: crate::random::PositionalFactory,
     cache_count: usize,
     material: MaterialRules,
+    carvers: Carvers,
     /// `RandomState.random`，`MaterialSystem` 用同一个 positional factory 造噪声。
     positional: crate::random::PositionalFactory,
     seed: i64,
@@ -148,6 +150,8 @@ impl<'a> Generator<'a> {
             &mut compiler,
         )
         .map_err(|error| format!("material rules: {error}"))?;
+        let carvers = Carvers::compile(worldgen.raw())
+            .map_err(|error| format!("carvers: {error}"))?;
         let cache_count = compiler.cache_count();
         let positional = compiler.positional_factory();
         let default_block = block_state(raw.get("default_block"))?;
@@ -161,6 +165,7 @@ impl<'a> Generator<'a> {
             aquifer_random,
             cache_count,
             material,
+            carvers,
             positional,
             seed,
             default_block,
@@ -295,6 +300,20 @@ impl<'a> Generator<'a> {
                 &biomes,
                 self.worldgen_noises(),
                 self.positional,
+            )?;
+        }
+        if stage >= Stage::Carvers {
+            let biomes = BiomeManager::new(self.biomes, self.seed);
+            self.carvers.generate(
+                &mut layers,
+                chunk_x,
+                chunk_z,
+                self.settings,
+                &mut context,
+                &self.router_samplers(),
+                &biomes,
+                &mut aquifer,
+                self.seed,
             )?;
         }
         Ok(layers)
