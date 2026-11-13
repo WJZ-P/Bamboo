@@ -97,3 +97,25 @@ pub fn values_at<const N: usize>(
         None => base,
     }
 }
+
+/// 单条数值的线性推进。酿造台倒计时只减到 0，不按总时间夹取。
+pub fn advance_unclamped(base: i32, step: i32, steps: i64) -> i32 {
+    let steps = i32::try_from(steps).unwrap_or(i32::MAX);
+    base.saturating_add(step.saturating_mul(steps))
+}
+
+/// 单条数值的睡眠推进；`step` 为负时回落到 0。
+pub fn materialize_one(sleep: &mut Option<Sleep>, base: &mut i32, step: i32, tick: i64) {
+    let Some(armed) = sleep.take() else {
+        return;
+    };
+    *base = advance_unclamped(*base, step, armed.steps(tick)).max(0);
+}
+
+/// 单条数值的读路径；到点那一刻一定已经真跑过，所以不会读到负数。
+pub fn value_at(sleep: Option<Sleep>, base: i32, step: i32, now: i64) -> i32 {
+    match sleep {
+        Some(armed) => advance_unclamped(base, step, armed.read_steps(now)).max(0),
+        None => base,
+    }
+}
