@@ -2,7 +2,7 @@
 
 这份文档是 M3（存档）的设计约定。**第 12 节现在已全部接进游戏（第 5、6、9 步）**：
 编解码层（第 1–4 步、第 6 步的编解码那一半）早已完成并和官方对拍；
-一条 IO 线程读写区域文件、Director 的读盘阶段、卸载写盘、D6 匀速保存、
+一条 IO 线程读写区域文件、Director 的读盘阶段、卸载写盘、官方节奏的匀速保存、
 玩家数据 / `level.dat` / `data/` / `chunk_tickets.dat` 接进加载与生命周期、
 `save-all` / `save-on` / `save-off`、以及 README 都已接上。
 Linear 和转换工具（第 7、8 步）按用户决定不做。
@@ -76,7 +76,7 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 | S8 | 坏区块 | 当成“这个区块不存在”，日志 `warn`，继续跑。不 panic，不删文件 | 对应 `ChunkMap` 读失败后重新生成的行为 |
 | S9 | 红石记忆 | `RedstoneMemory` 按位置切片存进区块 NBT 的 `block_entities`，火把抖动表不存 | 官方把它们放在方块实体里；火把表是 `RedstoneTorchBlock.RECENT_TOGGLES` 这个 static `WeakHashMap`，官方也不存 |
 | S10 | 玩家数据 | `players/data/<uuid>.dat`，字段名照官方；Bamboo 真的有的状态照官方写，没有的用官方默认值补上（表见 9.1），不认识的键原样保留（D9） | 官方读的时候缺字段都有默认值；两种写法读出来的结果等价 |
-| S11 | 保存节奏 | 关服一次全量，运行中每 300 秒（6000 tick）扫一遍脏区块；单区块 10 秒内不重复写 | 10 秒冷却是官方 `ChunkMap` 的 `nextChunkSaveTime = now + 10000` |
+| S11 | 保存节奏 | 关服一次全量；运行中每 6000 刻一次全量（`MinecraftServer.autoSave`）+ 每刻最多 20 个改过的区块（`ChunkMap.saveChunksEagerly`），单区块 10 秒内不重复写 | 官方字节码：`MinecraftServer` 的 `ticksUntilAutosave`、`ChunkMap.saveChunksEagerly` 的 20 个上限和 `nextChunkSaveTime = now + 10000` |
 | S12 | `sync-chunk-writes` | 不实现，不开 `DSYNC` | 官方默认 `true`，Bamboo 先按 `false` 的行为做，见第 13 节 Q4 |
 
 ## 4. Crate 结构
@@ -538,7 +538,7 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 - `session.lock`：`DirectoryLock.create` 在 `session.lock` 里写雪人字符 `☃`，用
   `FileChannel.tryLock()` 拿独占锁；拿不到就拒绝启动，`checkLock()` 每次访问前检查锁还在。
 
-### 9.3 `data/` 下的独立 saved data（26.3 新增，这次不写）
+### 9.3 `data/` 下的独立 saved data（26.3 新增，只写建模过的五份）
 
 26.3 把世界生成设置和游戏规则从 `level.dat` 搬到 `data/` 下的独立文件。
 `LevelDatToSavedDataFileFix` 列出了文件名（`level.dat` 在读写时由 file fixer 迁移）：
@@ -665,8 +665,8 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    Director 的 `Task::Read` 现在是真正的读盘阶段：`Status = full` 解码交付、盘上没有走
    超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐才交付（D8）。卸载时脏区块
    序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，写盘途中被
-   请求回来拿最新内容；同区块新快照丢旧快照；D6 匀速保存（每刻 `脏/6000`、至少 1 个、
-   单区块 10 秒冷却）。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
+   请求回来拿最新内容；同区块新快照丢旧快照；运行中按官方字节码的节奏保存
+   （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却）。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
    计划刻、三种实体、玩家位置和物品栏。
 6. ✅ **玩家数据和 level.dat**（两半都完成）。
    - ✅ **编解码那一半**：带槽位物品、`PlayerData`、`LevelData` 的 gzip NBT 写读，
@@ -675,7 +675,8 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
      离开 / 自动保存 / 关服 / `save-all` 时写；`level.dat` 启动时读、关服 / 自动保存时写，
      `level.dat_old` 轮换、坏文件退回备份；`session.lock` 独占锁；`level.dat` 写回运行时
      出生点/默认游戏模式/难度，`data/` 的游戏规则和按维度的 `world_border.dat` 写真实值
-     并用官方 codec 对拍，其余没建模的 saved data 写空默认文件；`chunk_tickets.dat` 写空
+     并用官方 codec 对拍，`world_gen_settings.dat` 写官方 codec 编出的超平坦默认值，
+     其余没建模的 saved data 不写文件；`chunk_tickets.dat` 写空
      tickets 列表。
      `/save-all [flush]`、`/save-on`、`/save-off` 按官方消息和权限等级 4 实现。
 7. ⬜ **Linear**（Q1 决定：先不做）。
@@ -751,53 +752,73 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 | Q8 | 只支持 26.3 的新布局，不兼容老存档 |
 | Q9 | 照官方写 `data/` 下的独立文件（游戏规则、世界生成设置等），让官方服务端能接着用这个世界 |
 
-## 14. 实施现状（2026-11-12，M3 存档分支）
+**实施时与官方字节码不一致、已按官方修正的地方**：设计稿 D6 原来要求「每刻
+`ceil(脏/6000)`、至少 1 个」把待写快照摊到 6000 刻。字节码核对后改成
+`MinecraftServer` 每 6000 刻一次全量 + `ChunkMap.saveChunksEagerly` 每刻最多
+20 个，单区块 10 秒冷却；改动集合只由写路径置位，不每刻扫全表。
 
-第 12 节第 5、6、9 步已接进游戏。仍与官方有差异、或故意没做的部分（都写进
-README「存档已知限制」，供逐条核实）：
+## 14. 实施现状（2026-11-13，M3 存档分支收尾）
 
-- 运行中的 D6 匀速保存现在覆盖**仍加载的脏区块**：每刻给
-  `ceil(已加载脏区块数 / 6000)`（至少 1、单区块 10 秒冷却）个区块拍快照交给 IO 线程，
-  `/save-all` 立刻给全部脏的已加载区块拍快照，`/save-off` 期间暂停。快照走
-  `Region::encode_loaded_column`：临时 `take_columns` 取出盒子、用和卸载存盘同一条
-  `InlineCodec` 编码、`insert_column` 原地放回，写出的 NBT 与卸载一致、区块保持加载，
-  期间三张瞬时缓存（方块/光照变化、区块包缓存）原样存回。脏的判定用 `ChunkStore` 版本号，
-  所以只有容器内容/实体/计划刻变化而方块版本号没变的区块仍要等卸载或 `/save-all` 才存，
-  这一条与官方 `ServerChunkCache.save` 的「任何改动都 setUnsaved」不完全一致。
-- `level.dat` 现在写回运行时的出生点、默认游戏模式、难度（和 `time` / `last_played`），
-  启动时读回；游戏规则用官方 `GameRuleMap.CODEC`（键带命名空间、布尔 Byte / 整数 Int）
-  写进 `data/minecraft/game_rules.dat`；世界边界用 `WorldBorder::export_settings` /
-  `restore`（`restore` 传存档里的游戏时间）写进按维度存放的
-  `dimensions/minecraft/overworld/data/minecraft/world_border.dat`，二者启动时都读回。
-  这三处的编码由 `mc-bamboo-vanilla saved-data` 用官方 codec 解码对拍，并故意写坏一个键
-  确认会报错。天气、世界生成设置、世界时钟、计划事件、流浪商人、自定义 Boss 栏、
-  末影龙战斗这些没建模的 saved data 仍写空默认 `{}`（官方 codec 读到补默认值）。
-- 玩家位置取整到方块（小数部分丢、不补发位置包）；运行时没建模的玩家字段用官方默认值。
-- 盘上 `Status` 不是 full 的区块当坏块（warn + 模板），不走官方重新生成流水线；
-  读坏的区域文件不另存 corrupted 备份（玩家文件有）。
-- `save-all` 成功消息不带 `flush` 时在快照都交给 IO 线程后发、带 `flush` 时等一道不阻塞的
-  IO 栅栏回执再发；比官方同步 `saveEverything` 返回后发要晚一点，但世界线程从不等待 IO。
-- IO 出错不再静默：每次写/刷盘失败由 IO 线程把 `(路径, 原因)` 送回信箱，世界线程
-  `error!` 记录并计数，失败区块不回 `Written`（写盘途中缓冲留到关服再试）；`flush`
-  失败作为 `Err` 报出。IO 线程 panic / 通道断开用 `JoinHandle::is_finished` 发现，按
-  §14 / R12 记日志、走关服流程把还能同步写的 `level.dat` / `data/` 存下来，不挂死。
-  注入失败写与注入 panic 都有单元测试。缓存淘汰时的 `sync` 仍是尽力而为（没接到信箱）。
-- 世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏、火把抖动表、容器开合状态等仍不存档。
+第 12 节第 5、6、9 步已接进游戏，第三轮独立复查的 2 致命 / 3 高 / 4 中 / 4 低
+全部修掉，回归测试在 `crates/mc-bamboo-storage/tests/review_probe.rs` 和
+`crates/mc-bamboo-game/src/world/tests/review_probe.rs`。
 
-验证：进程内「放方块、存盘、重启、读回」往返测试
-（`region::column_tests::disk_restart_keeps_chunks_players_and_level`）、
-写盘途中重新加载的专门测试（`director_host::tests::a_read_during_an_in_flight_write_returns_the_parked_edited_box`）、
-`cargo test -p mc-bamboo-vanilla`、官方探针与全量检查在最后一个提交上跑，结果见任务汇报。
+- 运行中的保存照官方字节码：每 6000 刻一次全量（只写改过的），每刻最多 20 个，
+  单区块 10 秒冷却。`ChunkStore::revision` 认方块 / 光照的改动，上层内容（容器、
+  物品组件、命令方块、讲台、方块实体、计划刻、实体、红石记忆）在写路径把区块放进
+  `Region::dirty` 集合；每刻的开销只和改动集合大小有关，不和已加载区块数成正比。
+  `content_fingerprints` 留作 `cfg(test)` 的校验器。
+- 只读快照 `BorrowedParts` 从 `&Region` 克隆各张表和「已发布」的光照层，不改版本号、
+  不重排计划刻 / 方块实体 / 实体、不发任何包；写出的 NBT 与卸载逐字节一致。
+  1000 刻「每刻自动保存 vs 从不保存」的差分测试逐刻比较方块、各张表、玩家位置和
+  出站帧，内部计数器的绝对值不比。
+- 写盘回执按 `(pos, seq)` 记账；「已保存」只在 `Written` 到达时记。`WriteFailed`
+  把区块重新标脏、按连续次数有上限地退避重试，绝不永久暂停；盒子写成功才释放，
+  关服把没写成功的停放盒子全部重新编码提交，磁盘仍在失败就 `error!` 列出未存区块。
+  每次 `/save-all` 等自己那道栅栏的回执才发成功 / 失败消息。
+- `level.dat` 写回运行时出生点、默认游戏模式、难度；`data/minecraft/game_rules.dat`
+  用 `GameRuleMap.CODEC`，`data/minecraft/world_gen_settings.dat` 用
+  `WorldGenSettings.CODEC` 编出 `minecraft:flat`（层与 Bamboo 的超平坦模板一致），
+  按维度的 `world_border.dat` 用 `WorldBorder::export_settings` / `restore`；
+  `chunk_tickets.dat` 写空 tickets 列表。这五份都由 `mc-bamboo-vanilla saved-data` /
+  `world-dir` 用官方 codec 解码对拍，并故意写坏 `level.dat` / 一个键验证会报错。
+  没建模的 saved data 不写文件（官方 `computeIfAbsent` 会造默认值）。
+- `/save-off` 照官方 `noSave`：停掉匀速保存、6000 刻自动保存和区块卸载；
+  玩家离开、`/save-all`（force）和关服不受影响。第二次 Ctrl+C / 桌面端第二次停止
+  明确记录「未保存的改动会丢」并立刻结束进程。F6 背压只暂缓收回，交付照常。
 
-`mc-bamboo-vanilla world-dir <目录> <java>` 用官方 `RegionFile` /
-`SerializableChunkData.parse` / `NbtIo.readCompressed` 逐项检查真实世界目录，
-失败返回非 0；内置「故意写坏 `level.dat`」自检确认它会报错。
-`mc-bamboo-vanilla saved-data <java>` 用官方 `GameRuleMap.CODEC` /
-`WorldBorder.Settings.CODEC` 解码第 5 项写出的两份文件并故意写坏一个键验证。
-`tools/crash-test.sh` 可重复跑：起服务端 → 探针改方块 → 等 D6 匀速保存 →
-`kill -9` → 官方 `world-dir` 检查留下的目录 → 重启 → 再跑探针。
+### 已知但没处理的（以后再看）
 
-剖析（`director_host::tests::codec_profiler_records_real_encode_work`，
-`--nocapture`）：debug 构建下 200 次 `Task::Save` 模板区块编码累计
-`codec_nanos = 400447400` ns，约 `2002237` ns / 区块（≈2.0 ms）；这是单线程内联
-编码的耗时，不含压缩与落盘（在 IO 线程）。数值随机器和负载波动，只作量级参考。
+- 有存档的世界里，进服时盘上的区块走异步读、晚一刻交付，而盘上没有的区块同步用
+  模板，所以远处的区块可能先到。探针是按全新世界校准的（带存档时约 576/629），
+  这一项不算回归；崩溃测试重启后只要求官方客户端能登录、能读世界、连接不断开。
+  等世界生成也走异步以后再统一处理。
+- 游戏规则读盘时遇到坏的条目只忽略那一条，官方是整份解码失败、全部退回默认。
+- `level.dat` 里 `LevelName`、`allowCommands`、`DataPacks` 等字段写的是默认值或读入时
+  的原值，不是运行时的真值。
+- 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
+- `has_chunk` 扫描盘上已有区块时不认 `.mcc` 外置大区块；`Status` 不是 `full` 的区块
+  当成坏块，用模板。
+- 剖析数字（约 2 ms / 区块，debug 构建）只量了空模板区块，不代表真实区块。
+  `fly-20` 带 / 不带世界目录两次压测里 `storage_dirty` / `storage_snapshot` /
+  `storage_encode` 三个子段的每刻均值都小于 0.001 ms（release），判脏不和
+  约 2 万个已加载区块数成正比。
+- `saved_data_samples` 是为对拍放在生产代码里的 `pub fn`，可以挪到 `cfg(test)` 或
+  feature 后面。
+- 方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家等）改了不标脏；
+  `chunk_nbt` 目前不存的字段（结构、生物群系等）不进判脏。**以后接结构、生物群系
+  存档时必须补上对应的标脏入口**，否则会静默丢数据。
+- 世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏、火把抖动表等仍不存档。
+
+### 验收
+
+- 进程内「放方块、存盘、重启、读回」往返测试、写盘途中重新加载、烧到一半的休眠
+  熔炉存盘重启、装盒后睡着的熔炉在另一个线程编码字节一致、1000 刻自动保存差分
+  测试、复查探针的回归测试。
+- `mc-bamboo-vanilla world-dir <目录> <java>`、`saved-data <java>`、
+  `world-block <目录> <x> <y> <z> <方块名> <java>` 用官方 codec 检查真实目录。
+- `tools/crash-test.sh`：起服务端 → 官方探针 721/721 → 放一个具体标记方块 →
+  `save-all flush` → `kill -9` → 官方 `world-dir` 检查留下的目录 → 官方 codec 读出
+  那一格仍是 `minecraft:diamond_block` → 重启 → 官方客户端能登录读回。
+- 配方书仍等进度（advancements）系统怎么做的决定；旧分支 / worktree 清理由用户决定。
+
