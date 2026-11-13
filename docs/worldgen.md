@@ -199,7 +199,9 @@ cargo run -p mc-bamboo-vanilla --no-default-features -- generate /path/to/server
 重跑后 `git diff -- crates/mc-bamboo-data/src/generated/` 应当为空：`worldgen.json` 之外，
 `saved_world.rs` 也是生成流程写出的（官方 `WorldGenSettings.CODEC` 编出的超平坦
 `world_gen_settings.dat` 内容），`mod.rs` 的模块列表也由生成流程重写。`worldgen.json`
-不为空时先查是不是有新版本的官方数据，再看 `docs/worldgen.md` 里这六个位模式有没有变。
+写出前会递归按键名排序：默认特性的依赖图统一开了 serde_json 的 `preserve_order`，
+不排序就会让两种特性配置写出键序不同的文件。`worldgen.json` 不为空时先查是不是有
+新版本的官方数据，再看 `docs/worldgen.md` 里这六个位模式有没有变。
 确认数据没问题后跑对拍：
 
 ```bash

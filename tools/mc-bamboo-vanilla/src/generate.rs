@@ -143,9 +143,14 @@ fn saved_world_file(snbt: &str) -> String {
 /// `float_roundtrip`）。默认的快路径用 `significand as f64 * 10^exp`，少数 17 位有效数字的
 /// 串会差一个最低位；下面的单元测试把官方运行时的位模式钉死，防止读报告那一步悄悄出错。
 fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(&data.worldgen)
+    // `probe-online` 会把 `mc-bamboo-server` 的 serde_json `preserve_order` 特性统一进来，
+    // 那时 `Value` 的键保持 Java 报告的插入顺序，而 `--no-default-features` 下是 BTreeMap
+    // 的字母序。统一排序，两种特性配置写出的文件才逐字符一致。
+    let mut canonical = data.worldgen.clone();
+    canonical.sort_all_objects();
+    let json = serde_json::to_string_pretty(&canonical)
         .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
-    check_worldgen_floats(&data.worldgen, &json)?;
+    check_worldgen_floats(&canonical, &json)?;
     let path = output_dir.join("worldgen.json");
     fs::write(&path, format!("{json}\n"))
         .map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
@@ -3442,6 +3447,34 @@ mod tests {
             0x3fed_4558_d7b1_d486,
         ),
     ];
+
+    /// `preserve_order` 打开时 `Value` 的键是插入顺序，关闭时是字母序。写出前
+    /// 必须递归排序，否则默认特性的 `generate` 会把 `worldgen.json` 整个重排。
+    #[test]
+    fn worldgen_keys_are_sorted_before_writing() {
+        let text = include_str!("../../../crates/mc-bamboo-data/src/generated/worldgen.json");
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        fn check(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let keys: Vec<&String> = map.keys().collect();
+                    let mut sorted = keys.clone();
+                    sorted.sort_unstable();
+                    assert_eq!(keys, sorted, "{path} 的键没有按字母序");
+                    for (key, child) in map {
+                        check(child, &format!("{path}/{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        check(child, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        check(&value, "worldgen");
+    }
 
     /// 重跑 `generate` / `extract` 后生成文件必须逐字符不变，文件头也只出现一次。
     /// 把提交的文件里的 SNBT 喂回排版函数，再连 HEADER 一起和文件本身比较。
