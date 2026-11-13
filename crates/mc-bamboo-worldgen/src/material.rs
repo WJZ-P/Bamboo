@@ -17,9 +17,9 @@ use mc_bamboo_data::{block_by_name, blocks};
 use serde_json::Value;
 
 use crate::{
-    biome_manager::{self, BiomeManager},
+    biome_manager::{self, BiomeManager, ClimateCache},
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
-    math::{floor_f32, java_round},
+    math::{floor_f32, java_floor_div, java_round},
     noise::Noise as NoiseInstance,
     random::{PositionalFactory, Random},
     sampler::{Compiler, Context, Sampler},
@@ -174,6 +174,8 @@ struct Scan<'a> {
     preliminary_ready: bool,
     router: &'a RouterSamplers,
     biome_manager: &'a BiomeManager<'a>,
+    /// 一次扫描里反复问的气候参数；`topMaterial` 单独建一张 1×1×1 的。
+    climate: &'a mut ClimateCache,
     block_x: i32,
     block_z: i32,
     surface_gradient_x: i32,
@@ -186,9 +188,13 @@ struct Scan<'a> {
     stone_depth_below: i32,
     stone_depth_above: i32,
     biome: Option<u32>,
-    /// 2d / 3d 噪声 supplier 的当前值；每列（2d）或每格（3d）重算一次。
-    noise_2d: Vec<f64>,
-    noise_3d: Vec<f64>,
+    /// `MaterialRuleContext.createNoiseSampler2d/3d` 的 `DoubleSupplier`：按代数惰性求值，
+    /// 每列（2d）或每格（3d）第一次被问到才算一次。
+    noise_2d: Vec<Option<(usize, f64)>>,
+    noise_3d: Vec<Option<(usize, f64)>>,
+    /// `MaterialRuleContext.lastUpdateXZ` / `lastUpdateY`。
+    update_xz: usize,
+    update_y: usize,
     veins: Vec<VeinBuffers>,
 }
 
@@ -295,6 +301,16 @@ impl MaterialRules {
         let top_y = (highest + settings.min_y / 16) * 16 + 15;
         let min_x = chunk_x.wrapping_mul(16);
         let min_z = chunk_z.wrapping_mul(16);
+        // `getBiome` 和规则条件用的是 (blockX-2, blockY-2, blockZ-2) 的 quart 格，
+        // 加上八角插值可能选到的 +1 角；y 从 minY 到最高非空段。
+        let mut climate = ClimateCache::new(
+            java_floor_div(min_x.wrapping_sub(2), 4).wrapping_sub(1),
+            java_floor_div(settings.min_y.wrapping_sub(2), 4).wrapping_sub(1),
+            java_floor_div(min_z.wrapping_sub(2), 4).wrapping_sub(1),
+            8,
+            java_floor_div(settings.height, 4).wrapping_add(4),
+            8,
+        );
         let mut scan = Scan::new(
             self,
             system,
@@ -305,6 +321,7 @@ impl MaterialRules {
             context,
             router,
             biome_manager,
+            &mut climate,
             noises,
             positional,
             (16, (top_y - settings.min_y + 1).max(1), 16),
@@ -318,8 +335,14 @@ impl MaterialRules {
                 let block_x = min_x + x;
                 let block_z = min_z + z;
                 let start = world_surface_height(layers, settings.min_y, x, z) + 1;
-                let biome =
-                    biome_manager.biome(router, &mut Context::uncached(), block_x, start, block_z);
+                let biome = scan.biome_manager.biome_cached(
+                    router,
+                    &mut Context::uncached(),
+                    block_x,
+                    start,
+                    block_z,
+                    Some(scan.climate),
+                );
                 if biome_manager::biome_name(biome) == "minecraft:eroded_badlands" {
                     eroded_badlands_extension(
                         layers, system, settings, x, z, block_x, block_z, start,
@@ -425,6 +448,14 @@ impl MaterialRules {
             .system
             .as_ref()
             .ok_or("material system was not prepared")?;
+        let mut climate = ClimateCache::new(
+            java_floor_div(x.wrapping_sub(2), 4),
+            java_floor_div(y.wrapping_sub(2), 4),
+            java_floor_div(z.wrapping_sub(2), 4),
+            2,
+            2,
+            2,
+        );
         let mut scan = Scan::new(
             self,
             system,
@@ -435,6 +466,7 @@ impl MaterialRules {
             context,
             router,
             biome_manager,
+            &mut climate,
             noises,
             positional,
             (1, 1, 1),
@@ -638,7 +670,7 @@ impl<'a> Scan<'a> {
     /// 造一次地表扫描的状态；`topMaterial` 也走这里，只是体积是 1×1×1。
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rules: &MaterialRules,
+        rules: &'a MaterialRules,
         system: &'a System,
         _layers: &[Vec<u32>],
         chunk_x: i32,
@@ -647,6 +679,7 @@ impl<'a> Scan<'a> {
         context: &mut Context,
         router: &'a RouterSamplers,
         biome_manager: &'a BiomeManager<'a>,
+        climate: &'a mut ClimateCache,
         _noises: &NoiseRegistry,
         positional: PositionalFactory,
         expected_size: (i32, i32, i32),
@@ -687,6 +720,7 @@ impl<'a> Scan<'a> {
             preliminary_ready: false,
             router,
             biome_manager,
+            climate,
             block_x: min_x,
             block_z: min_z,
             surface_gradient_x: 0,
@@ -699,8 +733,10 @@ impl<'a> Scan<'a> {
             stone_depth_below: 0,
             stone_depth_above: 0,
             biome: None,
-            noise_2d: vec![0.0; rules.noise_ids.len()],
-            noise_3d: vec![0.0; rules.noise_ids.len()],
+            noise_2d: vec![None; rules.noise_ids.len()],
+            noise_3d: vec![None; rules.noise_ids.len()],
+            update_xz: 0,
+            update_y: 0,
             veins: vein_buffers,
         })
     }
@@ -708,6 +744,9 @@ impl<'a> Scan<'a> {
 
 impl Scan<'_> {
     fn update_xz(&mut self, x: i32, z: i32, gradient_x: i32, gradient_z: i32) {
+        // 官方 `updateXZ` 同时把 lastUpdateXZ 和 lastUpdateY 各加一。
+        self.update_xz = self.update_xz.wrapping_add(1);
+        self.update_y = self.update_y.wrapping_add(1);
         self.block_x = x;
         self.block_z = z;
         self.surface_gradient_x = gradient_x;
@@ -716,36 +755,28 @@ impl Scan<'_> {
         self.surface_secondary = None;
         self.min_surface_level = None;
         self.biome = None;
-        for (index, noise) in self.noises.iter().enumerate() {
-            self.noise_2d[index] = f64::from(noise.get(f64::from(x), 0.0, f64::from(z)));
-        }
     }
 
     fn update_y(&mut self, above: i32, below: i32, water: i32, y: i32) {
+        self.update_y = self.update_y.wrapping_add(1);
         self.biome = None;
         self.block_y = y;
         self.water_height = water;
         self.stone_depth_below = below;
         self.stone_depth_above = above;
-        for (index, noise) in self.noises.iter().enumerate() {
-            self.noise_3d[index] = f64::from(noise.get(
-                f64::from(self.block_x),
-                f64::from(y),
-                f64::from(self.block_z),
-            ));
-        }
     }
 
     fn get_biome(&mut self) -> u32 {
         if let Some(id) = self.biome {
             return id;
         }
-        let id = self.biome_manager.biome(
+        let id = self.biome_manager.biome_cached(
             self.router,
             &mut Context::uncached(),
             self.block_x,
             self.block_y,
             self.block_z,
+            Some(self.climate),
         );
         self.biome = Some(id);
         id
@@ -793,12 +824,25 @@ impl Scan<'_> {
         level
     }
 
-    fn noise_get(&self, index: usize, is_3d: bool) -> f64 {
-        if is_3d {
-            self.noise_3d[index]
+    /// `MaterialRuleContext$1/$2.getAsDouble`：代数没变就返回上次的值，变了才调噪声。
+    fn noise_get(&mut self, index: usize, is_3d: bool) -> f64 {
+        let (slot, generation) = if is_3d {
+            (&mut self.noise_3d[index], self.update_y)
         } else {
-            self.noise_2d[index]
+            (&mut self.noise_2d[index], self.update_xz)
+        };
+        if let Some((seen, value)) = *slot
+            && seen == generation
+        {
+            return value;
         }
+        let value = f64::from(self.noises[index].get(
+            f64::from(self.block_x),
+            if is_3d { f64::from(self.block_y) } else { 0.0 },
+            f64::from(self.block_z),
+        ));
+        *slot = Some((generation, value));
+        value
     }
 
     fn get_band(&self, x: i32, y: i32, z: i32) -> u32 {

@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{
     aquifer::Aquifer,
-    biome_manager::BiomeManager,
+    biome_manager::{BiomeManager, ClimateCache},
     density::NoiseRegistry,
     material::MaterialRules,
     math::{floor, java_floor_div},
@@ -492,6 +492,16 @@ impl Carvers {
         let height = settings.height;
         let max_y = min_y + height - 1 - 7;
         let mut mask = CarvingMask::new(min_y + 1, max_y);
+        // 邻域只在 y=0 这一层问 quart 群系：offset -8..=8 对应 quart 坐标
+        // chunk*4-32 .. chunk*4+32，共 65×65 格，按 quart 坐标缓存气候参数。
+        let mut climate = ClimateCache::new(
+            chunk_x.wrapping_mul(4).wrapping_sub(32),
+            0,
+            chunk_z.wrapping_mul(4).wrapping_sub(32),
+            65,
+            1,
+            65,
+        );
         // 初值不影响结果：每个 (邻域, carver) 都会重新 setLargeFeatureSeed。
         let worldgen_random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
         // `generateCarvers` 的邻域是硬编码的 -8..=8，不是 `getRange()` 的 4。
@@ -502,12 +512,13 @@ impl Carvers {
                 // `WorldGenRegion` 为 null 走 `getBiomeGenerationSettingsForCarver`。
                 let quart_x = java_floor_div(neighbor_x * 16, 4);
                 let quart_z = java_floor_div(neighbor_z * 16, 4);
-                let biome = biome_manager.noise_biome(
+                let biome = biome_manager.noise_biome_cached(
                     router,
                     &mut Context::uncached(),
                     quart_x,
                     0,
                     quart_z,
+                    &mut climate,
                 );
 
                 let list = self
