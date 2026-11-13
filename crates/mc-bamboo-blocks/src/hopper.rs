@@ -15,7 +15,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    block_entity::{BlockEntity, block_entity_clock},
+    block_entity::{BlockEntity, Watch, block_entity_clock},
     container::{
         CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
     },
@@ -48,6 +48,12 @@ pub struct HopperEntity {
     /// 冷却期睡眠。官方这几天里只把 `cooldownTime` 减 1、把时间字段写成世界时间，
     /// 两者都按下面的公式现算，不落到字段里。
     sleep: Option<HopperSleep>,
+    /// 这一刻的 `tryMoveItems` 返回 false、并且没有别的可见改动，可以睡到外部叫醒。
+    idle: bool,
+    /// 已经在闲置睡眠里。读路径按「每刻都跑过」现算 `tickedGameTime`。
+    idle_sleeping: bool,
+    /// 上次真跑时登记的关注范围，供 `watch()` 交给方块实体表。
+    watch: Option<Watch>,
 }
 
 /// 冷却期里 `cooldownTime` 每刻 -1、`tickedGameTime` 每刻跟世界时间走。
@@ -70,6 +76,9 @@ impl HopperEntity {
             last_tick_age: None,
             last_tick_now: 0,
             sleep: None,
+            idle: false,
+            idle_sleeping: false,
+            watch: None,
         }
     }
 
@@ -87,6 +96,8 @@ impl HopperEntity {
     pub fn set_cooldown(&mut self, cooldown_time: i32) {
         self.cooldown_time = cooldown_time;
         self.sleep = None;
+        self.idle = false;
+        self.idle_sleeping = false;
     }
 
     /// 现在的冷却时间，测试和存档用；睡着的按公式现算。
@@ -115,7 +126,7 @@ impl HopperEntity {
     /// 安静刻里官方每刻都真跑过，所以时间字段一直是「新鲜」的（age 0）。
     /// 冻结 / 装盒时睡眠已经结束，差值按经过的刻数增长，和官方一样停在原值。
     fn age_at(&self, now: i64) -> Option<i64> {
-        if self.sleep.is_some() {
+        if self.sleep.is_some() || self.idle_sleeping {
             return Some(0);
         }
         self.last_tick_age
@@ -148,12 +159,23 @@ impl HopperEntity {
         self.last_tick_age = Some(0);
         self.last_tick_now = now;
         self.sleep = None;
+        self.idle_sleeping = false;
     }
 
     /// 结束睡眠 / 冻结恢复：把冷却和相对时间按公式算到 `tick` 那刻结束。
     /// `tick` 用 `now - 1` 时，当前刻的减量留给真跑的 `pushItemsTick`。
     fn materialize_at(&mut self, tick: i64) {
         let now = block_entity_clock();
+        // 闲置睡眠的安静刻官方仍每刻写时间字段，装盒 / 冻结 / 叫醒都要按
+        // 「刚跑过」的口径还原；冷却期睡眠则按公式推进。
+        if self.idle_sleeping {
+            self.sleep = None;
+            // 官方在安静刻每刻都跑过：到 `tick` 为止最后一次是 `tick`。
+            self.last_tick_age = Some(now.saturating_sub(tick).max(0));
+            self.last_tick_now = now;
+            self.cooldown_time = 0;
+            return;
+        }
         if let Some(sleep) = self.sleep.take() {
             let steps = tick
                 .saturating_sub(sleep.since)
@@ -170,12 +192,32 @@ impl HopperEntity {
         self.last_tick_now = now;
     }
 
+    /// 真跑完一次 `tryMoveItems`：记下能不能睡到外部叫醒，以及要关注哪些格子 / 盒子。
+    fn note_idle(&mut self, idle: bool, pos: BlockPos, facing: Direction) {
+        self.idle = idle;
+        if !idle {
+            self.watch = None;
+            return;
+        }
+        let above = pos.above();
+        let destination = pos.relative(facing);
+        // 官方读取的全部输入：自己的状态 / 物品、朝向那一格的方块和容器、
+        // 上方一格的方块和容器，以及吸取盒里的物品实体。
+        self.watch = Some(Watch {
+            cells: vec![pos, above, destination],
+            boxes: vec![suck_box(pos)],
+        });
+    }
+
     /// 存档读入冷却；`tickedGameTime` 官方不存，读回是构造时的 0。
     pub fn set_cooldown_from_archive(&mut self, cooldown: i32) {
         self.cooldown_time = cooldown;
         self.last_tick_age = None;
         self.last_tick_now = 0;
         self.sleep = None;
+        self.idle = false;
+        self.idle_sleeping = false;
+        self.watch = None;
     }
 }
 
@@ -197,6 +239,15 @@ impl BlockEntity for HopperEntity {
     }
 
     fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        // 闲置漏斗：没有物品可搬、上方没有容器能给出物品、吸取盒里没有物品实体。
+        // 官方这一刻也只是减冷却、写时间字段，接下来每刻都一样，直到某个
+        // 关注格或吸取盒发生变化。装盒时按「醒着」处理（见下面的 i64::MAX）。
+        if self.idle {
+            self.idle = false;
+            self.idle_sleeping = true;
+            return Some(i64::MAX);
+        }
+        self.watch = None;
         // 冷却期里每刻只减 1、写世界时间，没有别的可见效果。到冷却归零
         // 那一刻必须真跑；物品实体 / 邻居变化 / `ENABLED` 由外部写统一叫醒。
         let cooldown = self.cooldown_time;
@@ -215,19 +266,43 @@ impl BlockEntity for HopperEntity {
 
     fn materialize(&mut self, tick: i64) {
         self.materialize_at(tick);
+        self.idle = false;
+        self.idle_sleeping = false;
+        self.watch = None;
+    }
+
+    fn watch(&self) -> Option<Watch> {
+        self.watch.clone()
+    }
+
+    fn skips_border_pause(&self) -> bool {
+        self.idle_sleeping
     }
 
     fn resleep(&mut self, since: i64, wake_at: i64) {
-        // 装盒时冷却已按公式算到源表的最后一刻；目标表从这一刻起算。
+        // 闲置睡眠跨表没有意义：放回后真跑一次，再按当前状态重新睡。
+        if wake_at == i64::MAX || wake_at.saturating_sub(since) == i64::MAX {
+            self.cooldown_time = 0;
+            self.last_tick_age = Some(0);
+            self.last_tick_now = since;
+            self.sleep = None;
+            self.idle = false;
+            self.idle_sleeping = false;
+            self.watch = None;
+            return;
+        }
+        // 装盒时冷却已按公式算到源表的最后一刻。放回的 ticker 是醒着的，
+        // 这一刻会真跑一次 `pushItemsTick`（自己减这一刻的 1），跑完再由
+        // `sleep_from` 重新排日程。这里若重新登记睡眠，读路径会把这一刻的
+        // 减量提前算掉，实体阶段的 `entityInside` 就会比官方少看到一刻冷却。
         let cooldown = i32::try_from(wake_at.saturating_sub(since).max(1)).unwrap_or(i32::MAX);
         self.cooldown_time = cooldown;
         self.last_tick_age = Some(0);
         self.last_tick_now = since;
-        self.sleep = Some(HopperSleep {
-            since,
-            wake_at,
-            cooldown,
-        });
+        self.sleep = None;
+        self.idle = false;
+        self.idle_sleeping = false;
+        self.watch = None;
     }
 
     fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
@@ -249,11 +324,7 @@ pub(crate) fn query<R>(
     pos: BlockPos,
     f: &mut dyn FnMut(&dyn Container) -> R,
 ) -> Option<R> {
-    let mut result = None;
-    let present = world.with_container(pos, &mut |container| {
-        result = Some(f(&*container));
-    });
-    present.then_some(result).flatten()
+    world.peek_container(pos, |container| f(container))
 }
 
 /// `HopperBlockEntity.pushItemsTick`。滴答器每刻调用它。
@@ -266,7 +337,14 @@ pub fn push_items_tick(world: &mut World, pos: BlockPos, entity: &mut HopperEnti
     entity.note_tick(now);
     if !entity.is_on_cooldown() {
         entity.set_cooldown(0);
-        try_move_items(world, pos, entity);
+        let writes = world.content_writes();
+        let changed = try_move_items(world, pos, entity);
+        let state = world.block_state(pos);
+        let facing = state.get(FACING_HOPPER);
+        // 只有「没事可做、也没有部分吸入 / 送出」的漏斗才睡到外部叫醒。
+        // 冷却期、失败的搬运、被红石锁住都按官方的逐刻推进留在醒着的集合。
+        let idle = !changed && world.content_writes() == writes && !world.hopper_has_items(pos);
+        entity.note_idle(idle, pos, facing);
     }
 }
 
@@ -317,12 +395,9 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
     let direction = facing.opposite();
 
     // `getContainerAt`：目标不是容器时什么也不做。世界里的实体不是容器。
-    let mut full = None;
-    if !world.with_container(destination, &mut |container| {
-        full = Some(is_full_container(container, Some(direction)));
-    }) {
-        return false;
-    }
+    let full = query(world, destination, &mut |container| {
+        is_full_container(container, Some(direction))
+    });
     if full != Some(false) {
         return false;
     }
@@ -334,23 +409,26 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
         if item.is_empty() {
             continue;
         }
+        // 官方先 `removeItem(1)` 再 `addItem`，失败时靠同一个对象把整堆放回去。
+        // 这里两侧都是静默写：内容真变了才叫醒关注这两格的睡眠漏斗。
         let mut taken = ItemStack::empty();
-        if !world.with_container(pos, &mut |container| {
+        let mut inserted = None;
+        let source = world.silent_container(pos, &mut |container| {
             taken = remove_item(container, slot, 1);
-        }) {
+        });
+        if source.is_none() {
             continue;
         }
-        let mut inserted = None;
-        world.with_container(destination, &mut |container| {
+        let destination_written = world.silent_container(destination, &mut |container| {
             inserted = Some(add_item(container, taken.clone(), Some(direction)));
         });
-        let Some(inserted) = inserted else {
-            // 目标已经不在了，把拿出来的整堆放回去。
-            world.with_container(pos, &mut |container| container.set(slot, item.clone()));
+        let Some(inserted) = inserted.filter(|_| destination_written.is_some()) else {
+            world.silent_container(pos, &mut |container| container.set(slot, item.clone()));
             continue;
         };
 
         if inserted.remaining.is_empty() {
+            // `addItem` 成功时两侧的静默写已经各自通知过。冷却和比较器通知照官方。
             let destination_state = world.block_state(destination);
             if inserted.was_empty && destination_state.is_a(BlockAncestor::HopperBlock) {
                 apply_hopper_cooldown(world, destination, Some(entity.ticked_game_time()));
@@ -359,8 +437,8 @@ fn eject_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> b
             return true;
         }
 
-        // 放不进去，槽位恢复成原来的整堆。官方靠的是同一个对象，这里是克隆，要显式写回。
-        world.with_container(pos, &mut |container| container.set(slot, item.clone()));
+        // 放不进去，槽位恢复成原来的整堆。
+        world.silent_container(pos, &mut |container| container.set(slot, item.clone()));
     }
     false
 }
@@ -394,45 +472,79 @@ pub(crate) fn apply_hopper_cooldown(
 ///
 /// The suck box is taller than the block. An item that only sits above the hopper, without
 /// touching this cell, waits for the hopper tick's `suckInItems`.
-pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
-    let Some(ground) = item.ground() else {
-        return;
-    };
-    if ground.stack.is_empty() || item.removed {
-        return;
-    }
-    let bounds = item.bounding_box();
-    let min = BlockPos::new(
-        mth::floor(bounds.min_x),
-        mth::floor(bounds.min_y) - 2,
-        mth::floor(bounds.min_z),
-    );
-    let max = BlockPos::new(
-        mth::floor(bounds.max_x),
-        mth::floor(bounds.max_y),
-        mth::floor(bounds.max_z),
-    );
-    let mut hoppers = Vec::new();
+/// `ItemEntity.tick` 发 `SuckIntoHopper` 之前扫的格子。精确和并行两种驱动、
+/// 闲置漏斗能不能睡，都必须用这一份判定：差一格就会漏一次 `entityInside`。
+///
+/// The cells an item can trigger `entityInside` on. Both entity drivers and the
+/// idle-hopper sleep gate use this exact range.
+pub fn hopper_cells_touched(bounds: Aabb) -> (BlockPos, BlockPos) {
+    (
+        BlockPos::new(
+            mth::floor(bounds.min_x),
+            mth::floor(bounds.min_y) - 2,
+            mth::floor(bounds.min_z),
+        ),
+        BlockPos::new(
+            mth::floor(bounds.max_x),
+            mth::floor(bounds.max_y),
+            mth::floor(bounds.max_z),
+        ),
+    )
+}
+
+/// 这一件物品会不会对 `pos` 这一格触发 `HopperBlock.entityInside`。
+/// 判定和 [`intersects_block`] / [`intersects_suck_box`] 共用同一组形状。
+///
+/// Whether this item triggers `entityInside` for the hopper at `pos`.
+pub fn item_touches_hopper(item: &Entity, pos: BlockPos) -> bool {
+    intersects_block(item, pos) && intersects_suck_box(item, pos)
+}
+
+/// `ItemEntity.tick` 发 `SuckIntoHopper` 之前用 `any_hopper_in` 扫的那片格子里，
+/// 真正有漏斗方块的位置。精确 / 并行两种驱动和闲置漏斗睡眠门控共用它。
+///
+/// The hopper cells in the range that `ItemEntity.tick` scans before emitting
+/// `SuckIntoHopper`. Shared by both entity drivers and the idle sleep gate.
+pub fn entity_inside_cells(world: &World, bounds: Aabb) -> Vec<BlockPos> {
+    let (min, max) = hopper_cells_touched(bounds);
+    let mut found = Vec::new();
     for y in min.y..=max.y {
         for z in min.z..=max.z {
             for x in min.x..=max.x {
                 let pos = BlockPos::new(x, y, z);
-                if world.block_state(pos).is_a(BlockAncestor::HopperBlock) {
-                    hoppers.push(pos);
+                if world
+                    .block_state(pos)
+                    .is_a(mc_bamboo_data::BlockAncestor::HopperBlock)
+                {
+                    found.push(pos);
                 }
             }
         }
     }
+    found
+}
+
+pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
+    if item.removed || entity_inside_cells(world, item.bounding_box()).is_empty() {
+        return;
+    }
+    let Some(ground) = item.ground() else {
+        return;
+    };
+    if ground.stack.is_empty() {
+        return;
+    }
+    let hoppers = entity_inside_cells(world, item.bounding_box());
     for pos in hoppers {
         if item.removed {
             break;
         }
         // 官方先要求实体碰到这一格（`Shapes.block()`），再要求吸取盒。
         // Vanilla requires the entity to touch this cell (`Shapes.block()`), then the suck box.
-        if !intersects_block(item, pos) || !intersects_suck_box(item, pos) {
+        if !item_touches_hopper(item, pos) {
             continue;
         }
-        world.with_block_entity::<HopperEntity, _>(pos, |hopper, world| {
+        world.with_block_entity_for_entity::<HopperEntity, _>(pos, |hopper, world| {
             try_move_touching(world, pos, hopper, item);
         });
     }
@@ -446,22 +558,20 @@ pub(crate) fn suck_touching_item(world: &mut World, item: &mut Entity) {
 /// instead. See [`suck_touching_item`].
 fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) -> bool {
     let above = pos.above();
-    let mut slots = None;
-    if !world.with_container(above, &mut |container| {
-        slots = Some(container.slots_for_face(Direction::Down).map_or_else(
+    // 只读探测：上方不是容器时改去吸物品实体。官方的 `getSourceContainer` 只读，
+    // 不该把上面那个漏斗叫醒。
+    let Some(slots) = world.peek_container(above, |container| {
+        container.slots_for_face(Direction::Down).map_or_else(
             || (0..container.size()).collect::<Vec<_>>(),
             <[usize]>::to_vec,
-        ));
-    }) {
+        )
+    }) else {
         return suck_ground_items(world, pos, entity);
-    }
-    let Some(slots) = slots else {
-        return false;
     };
     // 上面的容器也是漏斗时，`from instanceof HopperBlockEntity` 成立。
     let mut from_ticked_game_time = None;
     if world.block_state(above).is_a(BlockAncestor::HopperBlock) {
-        world.with_hopper(above, &mut |hopper| {
+        world.peek_hopper(above, &mut |hopper| {
             from_ticked_game_time = Some(hopper.ticked_game_time());
         });
     }
@@ -501,17 +611,18 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
         }
 
         let mut taken = ItemStack::empty();
-        if !world.with_container(above, &mut |container| {
+        let taken_ok = world.silent_container(above, &mut |container| {
             taken = remove_item(container, slot, 1);
-        }) {
+        });
+        if taken_ok.is_none() {
             continue;
         }
         let mut inserted = None;
-        world.with_container(pos, &mut |container| {
+        let into_written = world.silent_container(pos, &mut |container| {
             inserted = Some(add_item(container, taken.clone(), None));
         });
-        let Some(inserted) = inserted else {
-            world.with_container(above, &mut |container| container.set(slot, item.clone()));
+        let Some(inserted) = inserted.filter(|_| into_written.is_some()) else {
+            world.silent_container(above, &mut |container| container.set(slot, item.clone()));
             continue;
         };
 
@@ -525,7 +636,7 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
             return true;
         }
 
-        world.with_container(above, &mut |container| container.set(slot, item.clone()));
+        world.silent_container(above, &mut |container| container.set(slot, item.clone()));
     }
     false
 }
@@ -533,7 +644,7 @@ fn suck_in_items(world: &mut World, pos: BlockPos, entity: &mut HopperEntity) ->
 /// `Hopper.SUCK_AABB`：方块内 x/z 整格，y 从 11/16 到 2。
 ///
 /// `Hopper.SUCK_AABB`: a full block on x/z, y from 11/16 to 2.
-fn suck_box(pos: BlockPos) -> Aabb {
+pub fn suck_box(pos: BlockPos) -> Aabb {
     Aabb::new(
         f64::from(pos.x),
         f64::from(pos.y) + 11.0 / 16.0,
@@ -576,7 +687,12 @@ fn suck_ground_items(world: &mut World, pos: BlockPos, hopper: &mut HopperEntity
         return false;
     }
     let area = suck_box(pos);
-    let ids = world.entity_ids();
+    // 空间索引按 uid 升序给出和吸取盒相交的实体，和官方 `getEntitiesOfClass` 的候选
+    // 相同；前一件吸入时可能改了后面的实体，所以只先记 ID，逐个重新读当前状态。
+    let mut ids = Vec::new();
+    world
+        .level()
+        .for_each_entity_in(area, &mut |public| ids.push(public.uid));
     for id in ids {
         let stack = world.entity(id).and_then(|entity| {
             if entity.removed || !entity.bounding_box().intersects(area) {
@@ -690,11 +806,9 @@ fn insert_into_hopper(
     hopper: &mut HopperEntity,
     stack: ItemStack,
 ) -> Option<Added> {
-    let mut added = None;
-    world.with_container(pos, &mut |container| {
-        added = Some(add_item(container, stack.clone(), None));
-    });
-    let added = added?;
+    let added = world.silent_container(pos, &mut |container| {
+        add_item(container, stack.clone(), None)
+    })?;
     // 空漏斗吃进第一件时，`tryMoveInItem` 自己把冷却设成 8。来源不是漏斗，不减 1。
     // An empty hopper sets its own cooldown to 8 on the first insert. The source is not a hopper.
     if added.was_empty && !hopper.is_on_custom_cooldown() {

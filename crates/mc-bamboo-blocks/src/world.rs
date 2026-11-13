@@ -355,6 +355,10 @@ pub struct World<'a> {
     /// Comparator reads and shulker neighbour updates queued while a block entity is out of
     /// the map. One frame per take.
     held_reads: Vec<VecDeque<DeferredRead>>,
+    /// 只读容器访问 / 漏斗静默写期间压住「关注者叫醒」，见 [`World::peek_container`]。
+    quiet: usize,
+    /// 静默写真改了容器内容的次数，见 [`World::has_content_writes`]。
+    content_writes: usize,
 }
 
 /// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
@@ -451,6 +455,14 @@ where
     collisions
 }
 
+/// 容器访问要不要叫醒这一格自己的方块实体。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WakeMode {
+    Always,
+    /// 只有真解包了战利品表才叫醒：那是一次写。
+    OnlyUnpack,
+}
+
 impl<'a> World<'a> {
     pub fn new(level: &'a mut dyn Level, ticks: &'a mut BlockTicks) -> Self {
         // 睡着的实体按公式现算数值时要知道现在是哪一刻。
@@ -466,6 +478,8 @@ impl<'a> World<'a> {
             wire_should_signal: true,
             handling_tick: false,
             held_reads: Vec::new(),
+            quiet: 0,
+            content_writes: 0,
         }
     }
 
@@ -882,6 +896,87 @@ impl<'a> World<'a> {
         found
     }
 
+    /// 报告这一格（以及双箱另一半）的方块或容器内容变了，叫醒关注它们的睡眠条目。
+    ///
+    /// Report a block or container change at this cell to the sleepers watching it.
+    pub(crate) fn notify_changed(&mut self, pos: BlockPos) {
+        if self.quiet == 0 {
+            self.notify_changed_always(pos);
+        }
+    }
+
+    /// 真改了容器内容的静默写累计次数。漏斗在自己的 tick 前后各读一次，
+    /// 差值不为零说明这一刻有部分吸入 / 送出，不能睡。
+    pub(crate) fn content_writes(&self) -> usize {
+        self.content_writes
+    }
+
+    /// 吸取盒里、或者 `entityInside` 会扫到的格子里有没有活着的物品实体。
+    /// 判定和两条原路径共用同一份格子范围 / 相交函数；空间索引只查附近的实体。
+    ///
+    /// Whether a living item sits in the suck box or can trigger `entityInside`.
+    /// Uses the exact shared predicates and the entity spatial index.
+    pub(crate) fn hopper_has_items(&self, pos: BlockPos) -> bool {
+        let suck = crate::hopper::suck_box(pos);
+        let mut found = false;
+        self.level.for_each_entity_in(suck, &mut |public| {
+            if found || public.removed {
+                return;
+            }
+            if matches!(public.kind, crate::entity::KindPublic::Item { .. })
+                && public.bounding_box().intersects(suck)
+            {
+                found = true;
+            }
+        });
+        if found {
+            return true;
+        }
+        // `entityInside` 扫的格子比吸取盒低两格；这段范围也查一次。
+        let (min, max) = crate::hopper::hopper_cells_touched(suck);
+        let lower = crate::shape::Aabb::new(
+            f64::from(min.x),
+            f64::from(min.y),
+            f64::from(min.z),
+            f64::from(max.x + 1),
+            f64::from(max.y + 1),
+            f64::from(max.z + 1),
+        );
+        self.level.for_each_entity_in(lower, &mut |public| {
+            if found || public.removed {
+                return;
+            }
+            if matches!(public.kind, crate::entity::KindPublic::Item { .. }) {
+                let (cells_min, cells_max) =
+                    crate::hopper::hopper_cells_touched(public.bounding_box());
+                if cells_min.x <= pos.x
+                    && cells_max.x >= pos.x
+                    && cells_min.y <= pos.y
+                    && cells_max.y >= pos.y
+                    && cells_min.z <= pos.z
+                    && cells_max.z >= pos.z
+                {
+                    found = true;
+                }
+            }
+        });
+        found
+    }
+
+    /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。
+    /// 没有任何关注登记时直接返回，写入热路径不额外查容器位置。
+    fn notify_changed_always(&mut self, pos: BlockPos) {
+        if !self.level.has_any_block_entity_watchers() {
+            return;
+        }
+        self.level.notify_block_entity_cell(pos);
+        for other in self.level.container_positions(pos) {
+            if other != pos {
+                self.level.notify_block_entity_cell(other);
+            }
+        }
+    }
+
     /// 这一格的物品栏，见 [`Level::with_container`]。
     ///
     /// 堆肥桶没有方块实体，官方 `ComposterBlock.getContainer` 按等级现做一个容器，这里同样处理。
@@ -891,12 +986,105 @@ impl<'a> World<'a> {
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
     ) -> bool {
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
+        self.with_container_inner(pos, f, WakeMode::Always)
+    }
+
+    /// 只读地看这一格的容器。漏斗每刻读目标容器时走这里：读不该叫醒旁边睡着的
+    /// 漏斗（漏斗链会互相读，否则谁都睡不着）。战利品表解包仍然是写，会通知。
+    ///
+    /// Read-only container access. A hopper probing its neighbour must not wake
+    /// a sleeping hopper watching that cell; unpacking a loot table is a write.
+    pub(crate) fn peek_container<R>(
+        &mut self,
+        pos: BlockPos,
+        mut f: impl FnMut(&dyn crate::container::Container) -> R,
+    ) -> Option<R> {
+        self.quiet += 1;
+        self.level.wake_block_entity(pos);
+        let mut result = None;
+        let present = self.with_container_inner(
+            pos,
+            &mut |container| {
+                let before = (0..container.size())
+                    .map(|slot| container.get(slot))
+                    .collect::<Vec<_>>();
+                result = Some(f(&*container));
+                let after = (0..container.size())
+                    .map(|slot| container.get(slot))
+                    .collect::<Vec<_>>();
+                debug_assert_eq!(before, after, "peek_container 的回调只准读，不准写");
+            },
+            WakeMode::OnlyUnpack,
+        );
+        self.quiet -= 1;
+        present.then_some(result).flatten()
+    }
+
+    /// 漏斗「先取一件，失败再放回」的静默写。没有内容变化时不叫醒关注者；
+    /// 调试构建里断言恢复后和原来的槽位表逐位相同（物品、数量、组件都比）。
+    ///
+    /// A silent hopper write that restores its slot list on failure. Debug builds
+    /// assert the restored contents match exactly; a real change must notify.
+    pub(crate) fn silent_container<R>(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut dyn crate::container::Container) -> R,
+    ) -> Option<R> {
+        self.quiet += 1;
+        let mut result = None;
+        let mut changed = false;
+        let present = self.with_container_inner(
+            pos,
+            &mut |container| {
+                let before = (0..container.size())
+                    .map(|slot| container.get(slot))
+                    .collect::<Vec<_>>();
+                result = Some(f(container));
+                let after = (0..container.size())
+                    .map(|slot| container.get(slot))
+                    .collect::<Vec<_>>();
+                changed = after != before;
+            },
+            WakeMode::OnlyUnpack,
+        );
+        self.quiet -= 1;
+        if !present {
+            return None;
+        }
+        if !changed {
+            debug_assert!(result.is_some(), "静默写没改内容时也要把结果带出来");
+        }
+        if changed {
+            self.content_writes += 1;
+            self.notify_changed(pos);
+        }
+        result
+    }
+
+    fn with_container_inner(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&mut dyn crate::container::Container),
+        wake: WakeMode,
+    ) -> bool {
+        if wake == WakeMode::Always {
+            self.level.wake_block_entity(pos);
+        }
+        // 静默写 / 只读访问也不叫醒这一格自己的实体：只有真改了内容才叫醒。
         // 官方 `RandomizableContainerBlockEntity.getItem/removeItem/setItem/isEmpty`
         // 都先 `unpackLootTable(null)`；漏斗、投掷器和发射器走这条路。双箱两半
         // 合成一张 `CompoundContainer`，两半都要解包。
         // Vanilla's `getItem/removeItem/setItem/isEmpty` all unpack the loot table first;
         // hoppers, droppers and dispensers use this path. A double chest combines both
         // halves, so both are unpacked.
+        // 只有战利品表解包是真写：读路径下它也要叫醒本格和关注者。
+        // Unpacking a loot table is a real write, even on a read path.
+        let pending = self.level.loot_table_pending(pos);
+        if pending && wake == WakeMode::OnlyUnpack {
+            self.level.wake_block_entity(pos);
+            self.notify_changed_always(pos);
+        }
         self.level.unpack_loot_table(pos);
         for other in self.level.container_positions(pos) {
             if other != pos {
@@ -928,6 +1116,7 @@ impl<'a> World<'a> {
         f: &mut dyn FnMut(&mut [mc_bamboo_protocol::item::ItemStack]),
     ) -> bool {
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
         // 陶罐的 `getTheItem/splitTheItem/setTheItem` 和漏斗/比较器读这一格都解包。
         // A decorated pot's `getTheItem/splitTheItem/setTheItem`, hoppers and comparators
         // all unpack the table before touching its single slot.
@@ -959,7 +1148,21 @@ impl<'a> World<'a> {
         f: &mut dyn FnMut(&mut crate::hopper::HopperEntity),
     ) -> bool {
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
         self.level.with_hopper(pos, f)
+    }
+
+    /// 只读地看一个漏斗的时间字段。漏斗从上方漏斗吸物品时只比较时刻，不该把对方叫醒。
+    ///
+    /// Read a hopper's time fields without waking it.
+    pub(crate) fn peek_hopper(
+        &mut self,
+        pos: BlockPos,
+        f: &mut dyn FnMut(&crate::hopper::HopperEntity),
+    ) {
+        self.quiet += 1;
+        let _ = self.level.with_hopper(pos, &mut |hopper| f(&*hopper));
+        self.quiet -= 1;
     }
 
     /// `Level.setBlockEntity`：放进这一格并登记 ticker。状态不收方块实体时和官方一样什么也不做，
@@ -967,6 +1170,7 @@ impl<'a> World<'a> {
     pub fn set_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
         let pos = entity.pos();
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
         let state = self.block_state(pos);
         if !state.has_block_entity() {
             warn!(
@@ -984,6 +1188,7 @@ impl<'a> World<'a> {
     /// `Level.removeBlockEntity`。
     pub fn remove_block_entity(&mut self, pos: BlockPos) {
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
         let _ = self.level.remove_block_entity(pos);
     }
 
@@ -1001,6 +1206,7 @@ impl<'a> World<'a> {
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
         let (id, mut entity) = self.level.take_block_entity_at(pos)?;
         self.begin_held_reads();
         let result = entity
@@ -1009,6 +1215,23 @@ impl<'a> World<'a> {
             .map(|typed| f(typed, self));
         self.level.put_block_entity(pos, id, entity);
         self.end_held_reads();
+        result
+    }
+
+    /// `HopperBlock.entityInside` 用的那一半：叫醒本格漏斗并跑官方的 `tryMoveItems`，
+    /// 但不因为「实体碰到了漏斗」就叫醒关注这一格的所有漏斗。真正改了物品的
+    /// 写入会各自通知（容器内容、物品实体的堆变化）。
+    ///
+    /// Entity-inside writes: wake this hopper, but do not wake every watcher of the cell
+    /// just because an item overlapped it. Real content changes notify individually.
+    pub(crate) fn with_block_entity_for_entity<T: BlockEntity, R>(
+        &mut self,
+        pos: BlockPos,
+        f: impl FnOnce(&mut T, &mut World) -> R,
+    ) -> Option<R> {
+        self.quiet += 1;
+        let result = self.with_block_entity(pos, f);
+        self.quiet -= 1;
         result
     }
 
@@ -1127,8 +1350,13 @@ impl<'a> World<'a> {
         // 出了边界的不会跑，必须先按公式停在上一刻。
         let border = self.level.world_border().block_box();
         self.level.sync_block_entity_border(border);
+        // 关注登记变了就把新的 16³ 段交给实体表；没有登记时这两步都是空操作。
+        self.sync_watched_sections();
+        self.deliver_entity_wakes();
         self.level.begin_block_entity_tick(now);
         while let Some((pos, id)) = self.level.next_block_entity_ticker() {
+            // 前一个 ticker 可能改了物品的堆，事件在这一刻还没跑到它时就要交付。
+            self.deliver_entity_wakes();
             // 官方先判 `shouldTickBlocksAt(pos)`，再判 `LevelChunk.isTicking(pos)`
             // （边界内、区块能 tick）；跳过的 ticker 留在列表里，运行顺序不变。
             if !self.level.chunk_ticks_blocks(pos.chunk())
@@ -1140,18 +1368,50 @@ impl<'a> World<'a> {
             let Some(entity) = self.level.take_block_entity(pos, id) else {
                 continue;
             };
+            // 熔炉 / 酿造台自己的 tick 会改物品，那条写不经过容器写入口。
+            // 有别的睡眠漏斗关注这一格时，真改了物品就通知它们。
+            let watched = self.level.has_block_entity_watchers(pos);
+            let before =
+                watched.then(|| crate::machine_container::entity_container_items(&*entity));
             self.begin_trigger(Trigger::BlockEntityTick {
                 pos,
                 kind: self.block_state(pos).block_id(),
             });
             self.ticks.note_block_entity_tick(pos);
             self.run_taken_block_entity(pos, id, entity);
+            if let Some(before) = before {
+                let after = self
+                    .level
+                    .block_entity_dyn(pos)
+                    .and_then(crate::machine_container::entity_container_items);
+                if after.is_some_and(|after| Some(&after) != before.as_ref()) {
+                    self.level.notify_block_entity_cell(pos);
+                }
+            }
             // 一次 tick 跑完后按实体自己的公式算下一次真正需要跑的时刻。
             let wake = self.level.block_entity_sleep_from(pos, now);
             self.level.schedule_block_entity_wake(pos, wake);
             self.level.observe(Observation::TriggerEnd);
         }
+        self.deliver_entity_wakes();
+        self.sync_watched_sections();
         self.level.end_block_entity_tick();
+    }
+
+    /// 把实体表攒下的位置事件按精确盒子交给方块实体表。事件按生成的先后到达，
+    /// 叫醒按现有的游标规则决定这一刻跑还是下一刻跑。
+    fn deliver_entity_wakes(&mut self) {
+        for area in self.level.take_entity_wake_events() {
+            self.level.notify_block_entity_box(area);
+        }
+    }
+
+    /// 这一刻新登记 / 撤掉的关注盒子：把段集合交给实体表。放在方块实体阶段
+    /// 结尾，下一刻的实体阶段才不会漏掉移动；阶段开头也同步一次。
+    fn sync_watched_sections(&mut self) {
+        if let Some(sections) = self.level.take_block_entity_watched_sections() {
+            self.level.set_entity_watched_sections(sections);
+        }
     }
 
     /// 缓存驱动：方块实体 tick 阶段的边界和每个 ticker 的一次触发。
@@ -1755,6 +2015,10 @@ impl<'a> World<'a> {
     /// `flags` 照旧登记广播和光照，见 [`Level::write_block`]。
     pub fn replay_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) {
         let _ = self.level.write_block(pos, state, flags);
+        // 重放也改了这一格的内容：睡着的漏斗要按原路径一样被叫醒。
+        if self.level.has_any_block_entity_watchers() {
+            self.level.notify_block_entity_cell(pos);
+        }
     }
 
     /// 缓存重放：写比较器输出，不报观察事件。
@@ -1991,6 +2255,7 @@ impl<'a> World<'a> {
         flags: u32,
     ) -> Option<BlockState> {
         self.level.wake_block_entity(pos);
+        self.notify_changed(pos);
         let old = self.block_state(pos);
         if old == state {
             return None;

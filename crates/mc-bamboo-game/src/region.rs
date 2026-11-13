@@ -406,6 +406,17 @@ impl Region {
     /// Game-layer direct write to a positional upper-layer table: mark the chunk.
     pub(crate) fn touch(&mut self, pos: BlockPos) {
         self.dirty.mark(pos.chunk());
+        // 同一个入口同时报告「这一格内容变了」：以后新写的容器路径只要标脏，
+        // 关注这格的睡眠漏斗也会醒，不用再记一份清单。
+        self.block_entities.notify_cell(pos);
+        // 双箱两半合成一张容器时，内容变化要报告两格：漏斗可能只关注其中一半。
+        if crate::container::kind_in(&self.chunks, pos)
+            == Some(crate::container::ContainerKind::Chest)
+            && let Ok(Some(chest)) = crate::container::chest_shape_with(&self.chunks, pos, true)
+        {
+            self.block_entities.notify_cell(chest.first);
+            self.block_entities.notify_cell(chest.second);
+        }
     }
 
     /// 方块逻辑要的世界和计划刻队列。它们借用不同的字段，所以要一起拿。

@@ -8,7 +8,7 @@
 //! design, section 4.3. Row slots keep their indices stable; [`EntityStore::snapshot`] lays
 //! out three parallel arrays for the parallel driver.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::entity_types;
@@ -342,6 +342,12 @@ pub struct EntityStore {
     ticking: bool,
     /// 读盘时不认识的实体类型，按区块原样保留。
     preserved: Vec<Tag>,
+    /// 睡着的方块实体关注的 16³ 段。空表时实体写入完全不额外做事。
+    watched_sections: HashSet<(i32, i32, i32)>,
+    /// 精确驱动 tick 期间被拿出去、所在段有人关注的行，记着旧位置和物品堆。
+    taken_snapshots: BTreeMap<EntityUid, (Aabb, Option<ItemStack>)>,
+    /// 位置或堆变了的实体的新包围盒，交给方块实体表精确判定。
+    wake_events: Vec<Aabb>,
 }
 
 impl Default for EntityStore {
@@ -356,6 +362,9 @@ impl Default for EntityStore {
             pending: Vec::new(),
             ticking: false,
             preserved: Vec::new(),
+            watched_sections: HashSet::new(),
+            taken_snapshots: BTreeMap::new(),
+            wake_events: Vec::new(),
         }
     }
 }
@@ -410,7 +419,7 @@ impl EntityStore {
         let mut entity = self.slots[row].as_ref()?.clone().into_entity();
         let result = f(&mut entity);
         let replaced = entity.split();
-        self.replace_row(row, replaced);
+        self.replace_row(row, replaced, true);
         Some(result)
     }
 
@@ -529,7 +538,7 @@ impl EntityStore {
         debug_assert_eq!(rows.len(), public.len());
         debug_assert_eq!(rows.len(), state.len());
         for ((row, public), state) in rows.iter().copied().zip(public).zip(state) {
-            self.replace_row(row, EntityRow { public, state });
+            self.replace_row(row, EntityRow { public, state }, true);
         }
     }
 
@@ -566,6 +575,9 @@ impl EntityStore {
     }
 
     fn insert_row(&mut self, row: EntityRow) {
+        if !self.watched_sections.is_empty() {
+            self.note_entity_change(row.public.bounding_box());
+        }
         let row_index = self.allocate_slot();
         self.index.insert(row.public.uid, row_index);
         self.grid_insert(row_index, &row.public);
@@ -603,6 +615,7 @@ impl EntityStore {
             return;
         };
         self.taken.remove(&uid);
+        self.taken_snapshots.remove(&uid);
         if let Some(entry) = self.slots[row].take() {
             self.grid_remove(row, &entry.public);
         }
@@ -614,6 +627,11 @@ impl EntityStore {
         let row = self.index.remove(&uid)?;
         let entry = self.slots[row].take()?;
         self.grid_remove(row, &entry.public);
+        if !self.watched_sections.is_empty() {
+            // 只记旧状态；站住的实体不该在每刻 tick 里把自己的漏斗吵醒。
+            self.taken_snapshots
+                .insert(uid, Self::watch_facts(&entry.public));
+        }
         self.taken.insert(uid, row);
         Some(entry.into_entity())
     }
@@ -621,16 +639,30 @@ impl EntityStore {
     /// 放回 tick 过的行，占回原来的槽位。
     pub fn put(&mut self, entity: Entity) {
         let uid = entity.id;
+        let split = entity.split();
+        if let Some(before) = self.taken_snapshots.remove(&uid) {
+            let after = Self::watch_facts(&split.public);
+            if before != after {
+                self.note_entity_change(after.0);
+            }
+        }
         let row = self
             .taken
             .remove(&uid)
             .unwrap_or_else(|| self.allocate_slot());
-        self.replace_row(row, entity.split());
+        self.replace_row(row, split, false);
         self.index.insert(uid, row);
     }
 
-    fn replace_row(&mut self, row: usize, new: EntityRow) {
+    fn replace_row(&mut self, row: usize, new: EntityRow, note: bool) {
         let old = self.slots[row].take();
+        if note && !self.watched_sections.is_empty() {
+            let now = Self::watch_facts(&new.public);
+            let before = old.as_ref().map(|old| Self::watch_facts(&old.public));
+            if before.as_ref() != Some(&now) {
+                self.note_entity_change(now.0);
+            }
+        }
         let changed = old.as_ref().is_none_or(|old| {
             section_range(&old.public.bounding_box()) != section_range(&new.public.bounding_box())
         });
@@ -643,6 +675,44 @@ impl EntityStore {
         self.slots[row] = Some(new);
     }
 
+    /// 同步关注段集合。方块实体表里的登记变了才调，空集合时以后每次写入只多一个分支。
+    pub fn set_watched_sections(&mut self, sections: HashSet<(i32, i32, i32)>) {
+        self.watched_sections = sections;
+    }
+
+    /// 取走这一刻攒下的实体位置事件，按生成顺序。
+    pub fn take_wake_events(&mut self) -> Vec<Aabb> {
+        std::mem::take(&mut self.wake_events)
+    }
+
+    /// 这个包围盒摸到的段里有没有人关注；顺带把「变化」记进事件表。
+    /// 没有关注时直接返回，实体移动的热路径不受影响。
+    fn note_entity_change(&mut self, area: Aabb) {
+        if self.watched_sections.is_empty() {
+            return;
+        }
+        let (first, last) = section_range(&area);
+        for x in first.0..=last.0 {
+            for y in first.1..=last.1 {
+                for z in first.2..=last.2 {
+                    if self.watched_sections.contains(&(x, y, z)) {
+                        self.wake_events.push(area);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// 一行的公开数据里，方块实体休眠关心的部分：位置和物品堆。
+    fn watch_facts(public: &EntityPublic) -> (Aabb, Option<ItemStack>) {
+        let stack = match &public.kind {
+            KindPublic::Item { stack, .. } => Some(stack.clone()),
+            _ => None,
+        };
+        (public.bounding_box(), stack)
+    }
+
     pub fn begin_tick(&mut self) {
         self.ticking = true;
     }
@@ -650,6 +720,8 @@ impl EntityStore {
     /// tick 结束时把这次生成的实体并进来，它们下一 tick 才 tick。
     pub fn end_tick(&mut self) {
         self.ticking = false;
+        // 这一拍被 `discard` 的实体不会 `put` 回来，旧位置快照在这里统一丢掉。
+        self.taken_snapshots.clear();
         let pending = std::mem::take(&mut self.pending);
         for row in pending {
             self.insert_row(row);
