@@ -1472,3 +1472,109 @@ fn furnace_phase_bench() {
         off / on
     );
 }
+
+/// 测量用的手工基准：几百台正在工作的漏斗、营火、酿造台，方块实体阶段每刻的耗时。
+///
+/// 用法（release、安静窗口）：
+/// `cargo test --release -p mc-bamboo-blocks block_entity_sleep::machine_phase_bench -- --ignored --nocapture`
+/// 同一轮里三种机器各自开 / 关休眠交替跑，取多次里最快的一次。
+#[test]
+#[ignore]
+fn machine_phase_bench() {
+    const COUNT: i32 = 300;
+    const TICKS: i64 = 2000;
+    const ROUNDS: usize = 3;
+
+    #[derive(Clone, Copy, Debug)]
+    enum BenchKind {
+        Hopper,
+        Campfire,
+        Brewing,
+    }
+
+    fn build(kind: BenchKind, sleep: bool) -> (TestLevel, BlockTicks) {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        for i in 0..COUNT {
+            let pos = BlockPos::new(i, 64, 0);
+            if matches!(kind, BenchKind::Hopper) {
+                level.set_container(pos, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
+                level.set_container(pos.below(), vec![ItemStack::empty(); 27]);
+            }
+        }
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for i in 0..COUNT {
+                let pos = BlockPos::new(i, 64, 0);
+                match kind {
+                    BenchKind::Hopper => {
+                        use crate::state::FACING_HOPPER;
+                        world.set_block(
+                            pos,
+                            BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
+                            UPDATE_ALL,
+                        );
+                        // 漏斗自己有物品、下方是容器：每次冷却归零都会送一件，
+                        // 冷却期里就是本轮休眠省下来的那 8 刻。
+                        world.with_container(pos, &mut |container| {
+                            container.set(0, ItemStack::new(items::DIRT, 64));
+                        });
+                        world.set_block(pos.below(), BlockState(blocks::CHEST), UPDATE_ALL);
+                        world.set_block_entity(Box::new(HopperEntity::new(pos)));
+                    }
+                    BenchKind::Campfire => {
+                        world.set_block(pos, BlockState(blocks::CAMPFIRE), UPDATE_ALL);
+                        world.with_block_entity::<CampfireEntity, _>(pos, |entity, world| {
+                            for _ in 0..4 {
+                                let _ = entity.place_food(world, &ItemStack::new(items::POTATO, 1));
+                            }
+                        });
+                    }
+                    BenchKind::Brewing => {
+                        world.set_block(pos, BlockState(blocks::BREWING_STAND), UPDATE_ALL);
+                        let water = water_bottle();
+                        world.with_block_entity::<BrewingStandEntity, _>(pos, |entity, _| {
+                            for slot in 0..3 {
+                                entity.set_item(slot, water.clone());
+                            }
+                            entity.set_item(3, ItemStack::new(items::NETHER_WART, 64));
+                            entity.set_item(4, ItemStack::new(items::BLAZE_POWDER, 64));
+                        });
+                    }
+                }
+            }
+        }
+        level.sleep_enabled(sleep);
+        (level, ticks)
+    }
+
+    fn measure(kind: BenchKind, sleep: bool) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..ROUNDS {
+            let (mut level, mut ticks) = build(kind, sleep);
+            let started = std::time::Instant::now();
+            for now in 1..=TICKS {
+                ticks.set_time(now);
+                set_block_entity_clock(now);
+                let _ = run_block_entity_tick(&mut level, &mut ticks);
+            }
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64 / TICKS as f64 / 1000.0
+    }
+
+    for kind in [BenchKind::Hopper, BenchKind::Campfire, BenchKind::Brewing] {
+        let mut off = Vec::new();
+        let mut on = Vec::new();
+        for _ in 0..3 {
+            off.push(measure(kind, false));
+            on.push(measure(kind, true));
+        }
+        let off = off.into_iter().fold(f64::INFINITY, f64::min);
+        let on = on.into_iter().fold(f64::INFINITY, f64::min);
+        println!(
+            "{COUNT} 台{kind:?}，方块实体阶段每刻：休眠关 {off:.1} µs，休眠开 {on:.1} µs，{:.1}×",
+            off / on
+        );
+    }
+}
