@@ -12,7 +12,10 @@
 use mc_bamboo_blocks::entity::{
     self, TravelSegment, enclosed_in_air, no_block_collision, overlaps_new_blocks, sweep_movement,
 };
-use mc_bamboo_blocks::{Aabb, BlockEntities, BlockState, CollisionContext, EntityContext, PistonMoving};
+use mc_bamboo_blocks::{
+    Aabb, BlockEntities, BlockState, CollisionContext, EntityContext, PistonMoving,
+    world::CollisionBlocks,
+};
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{blocks, registries::attribute_defaults};
 use mc_bamboo_protocol::{
@@ -398,7 +401,6 @@ fn inside_stuck(region: &Region, id: PlayerId, pending: &[TravelSegment]) -> Opt
         },
         context,
         &mut |pos| block_state(&region.chunks, pos),
-        |pos| PlayerBlocks::piston_from(&region.block_entities, pos),
     )
 }
 
@@ -513,8 +515,10 @@ fn apply_change(
         no_block_collision(
             old_box,
             context_at(player, end.y, false),
-            &mut |pos: BlockPos| change.blocks.state(pos),
-            |pos| change.blocks.piston(pos),
+            CollisionBlocks {
+                block_at: |pos: BlockPos| change.blocks.state(pos),
+                piston_at: |pos| change.blocks.piston(pos),
+            },
         ) && border.no_border_collision(player.position().x, player.position().z, old_box);
     let newly = overlaps_new_blocks(
         old_box,
@@ -522,8 +526,10 @@ fn apply_change(
         end,
         change.target,
         context_at(player, old_box.min_y, true),
-        &mut |pos: BlockPos| change.blocks.state(pos),
-        |pos| change.blocks.piston(pos),
+        CollisionBlocks {
+            block_at: |pos: BlockPos| change.blocks.state(pos),
+            piston_at: |pos| change.blocks.piston(pos),
+        },
     );
     let accept = player.motion.no_physics || (!fail || !old_clear) && !newly;
     if !accept {
@@ -535,8 +541,7 @@ fn apply_change(
 
     player.set_position(grid, change.target);
     set_rotation(player, change.yaw, change.pitch);
-    player.motion.client_is_floating =
-        floating_now(player, from_last.y, stands, change.blocks);
+    player.motion.client_is_floating = floating_now(player, from_last.y, stands, change.blocks);
     player.on_ground = change.on_ground;
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
@@ -622,8 +627,10 @@ fn simulate_move(
         step_height(),
         player.on_ground,
         move_context(player),
-        &mut |pos| blocks.state(pos),
-        |pos| blocks.piston(pos),
+        CollisionBlocks {
+            block_at: |pos| blocks.state(pos),
+            piston_at: |pos| blocks.piston(pos),
+        },
         border,
     );
     let moved_vertically = delta.y.abs() > 0.0;
@@ -692,11 +699,7 @@ fn jump_from_ground(player: &mut Player) {
     player.motion.delta = delta;
 }
 
-fn back_off_from_edge(
-    player: &Player,
-    delta: Vec3,
-    blocks: &PlayerBlocks<'_>,
-) -> Vec3 {
+fn back_off_from_edge(player: &Player, delta: Vec3, blocks: &PlayerBlocks<'_>) -> Vec3 {
     let max_down = step_height();
     if player.sync.flying
         || delta.y > 0.0
@@ -738,11 +741,7 @@ fn back_off_from_edge(
     Vec3::new(x, delta.y, z)
 }
 
-fn is_above_ground(
-    player: &Player,
-    max_down: f32,
-    blocks: &PlayerBlocks<'_>,
-) -> bool {
+fn is_above_ground(player: &Player, max_down: f32, blocks: &PlayerBlocks<'_>) -> bool {
     player.on_ground
         || player.motion.fall_distance < f64::from(max_down)
             && !can_fall_at_least(
@@ -773,8 +772,10 @@ fn can_fall_at_least(
     no_block_collision(
         probe,
         move_context(player),
-        &mut |pos| blocks.state(pos),
-        |pos| blocks.piston(pos),
+        CollisionBlocks {
+            block_at: |pos| blocks.state(pos),
+            piston_at: |pos| blocks.piston(pos),
+        },
     )
 }
 
@@ -787,11 +788,7 @@ fn record_fall(fall: &mut f64, ya: f64, on_ground: bool) {
     }
 }
 
-fn block_speed_factor(
-    player: &Player,
-    position: Vec3,
-    blocks: &PlayerBlocks<'_>,
-) -> f32 {
+fn block_speed_factor(player: &Player, position: Vec3, blocks: &PlayerBlocks<'_>) -> f32 {
     // 飞行时 `Player.getBlockSpeedFactor` 直接是 1，不读脚下的方块。
     //
     // While flying, `Player.getBlockSpeedFactor` is 1 and ignores the block underfoot.
@@ -860,8 +857,10 @@ fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
     no_block_collision(
         box_,
         move_context(player),
-        &mut |pos| blocks.state(pos),
-        |pos| blocks.piston(pos),
+        CollisionBlocks {
+            block_at: |pos| blocks.state(pos),
+            piston_at: |pos| blocks.piston(pos),
+        },
     )
 }
 
@@ -926,11 +925,7 @@ impl PlayerBlocks<'_> {
     }
 
     fn piston(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
-        Self::piston_from(self.entities, pos)
-    }
-
-    fn piston_from(entities: &BlockEntities, pos: BlockPos) -> Option<Vec<Aabb>> {
-        let entity = entities.find_dyn(pos)?;
+        let entity = self.entities.find_dyn(pos)?;
         entity
             .as_any()
             .downcast_ref::<PistonMoving>()

@@ -233,28 +233,26 @@ fn entity_collision_boxes(state: BlockState, pos: BlockPos, entity: EntityContex
 /// `BlockState.hasLargeCollisionShape`：碰撞形状伸出 0 到 1 以外。
 ///
 /// 官方的 `BlockCollisions` 只在实体盒子碰到搜索范围边界时才看这个：没有伸出格的形状
-/// 不可能碰到边上的方块。
+/// 不可能碰到边上的方块。`dynamicShape` 方块没有形状缓存，官方这时一律返回真，
+/// 因为形状要按位置现算；表里那份恒定的形状（移动活塞是空）不代表真实结果。
 pub fn has_large_collision_shape(state: BlockState) -> bool {
-    mc_bamboo_data::collision_shape(state.0)
-        .iter()
-        .any(|bounds| {
-            [Axis::X, Axis::Y, Axis::Z]
-                .into_iter()
-                .any(|axis| bounds.min(axis) < 0.0 || bounds.max(axis) > 1.0)
-        })
+    state.block().dynamic_shape
+        || mc_bamboo_data::collision_shape(state.0)
+            .iter()
+            .any(|bounds| {
+                [Axis::X, Axis::Y, Axis::Z]
+                    .into_iter()
+                    .any(|axis| bounds.min(axis) < 0.0 || bounds.max(axis) > 1.0)
+            })
 }
 
 /// `BlockState.getEntityInsideCollisionShape`：判断实体“在这一格里”用的形状。
-/// `dynamicShape` 的 `moving_piston` 在这里也问方块实体的碰撞形状。
 ///
+/// 官方 `MovingPistonBlock` 只改了 `getShape` 和 `getCollisionShape`，没改这一项，
+/// 所以移动中的活塞在这里仍是默认的整格，不读方块实体的动画形状。
 /// 细雪的碰撞形状对普通实体是空的，但在里面判定时按整格算。
-pub fn entity_inside_boxes(
-    state: BlockState,
-    pos: BlockPos,
-    entity: EntityContext,
-    piston: Option<&[Aabb]>,
-) -> Boxes {
-    let boxes = block_collision_boxes(state, pos, CollisionContext::Entity(entity), piston);
+pub fn entity_inside_boxes(state: BlockState, pos: BlockPos, entity: EntityContext) -> Boxes {
+    let boxes = collision_boxes(state, pos, CollisionContext::Entity(entity));
     if boxes.is_empty() && state.is_a(BlockAncestor::PowderSnowBlock) {
         return at_position(FULL_BLOCK, state.block(), pos);
     }

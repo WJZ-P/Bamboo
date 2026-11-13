@@ -11,7 +11,7 @@ use crate::{
     Aabb, BlockGameRules, BlockHit, WorldBorder,
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, SupportType},
-    world::{collect_block_collisions, traverse_blocks},
+    world::{CollisionBlocks, collect_block_collisions, traverse_blocks},
 };
 
 use super::ctx::BlockView;
@@ -121,13 +121,15 @@ impl<T: BlockSource> SourceView<T> {
         collect_block_collisions(
             box_,
             context,
-            |pos| self.0.block_state(pos),
-            |pos| {
-                self.0
-                    .block_state(pos)
-                    .is(blocks::MOVING_PISTON)
-                    .then(|| self.moving_piston_shape(pos))
-                    .flatten()
+            CollisionBlocks {
+                block_at: |pos| self.0.block_state(pos),
+                piston_at: |pos| {
+                    self.0
+                        .block_state(pos)
+                        .is(blocks::MOVING_PISTON)
+                        .then(|| self.moving_piston_shape(pos))
+                        .flatten()
+                },
             },
         )
     }
