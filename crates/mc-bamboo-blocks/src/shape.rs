@@ -248,9 +248,9 @@ pub fn has_large_collision_shape(state: BlockState) -> bool {
 
 /// `BlockState.getEntityInsideCollisionShape`：判断实体“在这一格里”用的形状。
 ///
-/// 官方 `MovingPistonBlock` 只改了 `getShape` 和 `getCollisionShape`，没改这一项，
-/// 所以移动中的活塞在这里仍是默认的整格，不读方块实体的动画形状。
-/// 细雪的碰撞形状对普通实体是空的，但在里面判定时按整格算。
+/// 官方 `MovingPistonBlock` 只改了 `getShape` 和 `getCollisionShape`，没改这一项：
+/// 这里的形状仍按状态表算，不读方块实体的动画形状。细雪的碰撞形状对普通实体
+/// 是空的，但在里面判定时按整格算。
 pub fn entity_inside_boxes(state: BlockState, pos: BlockPos, entity: EntityContext) -> Boxes {
     let boxes = collision_boxes(state, pos, CollisionContext::Entity(entity));
     if boxes.is_empty() && state.is_a(BlockAncestor::PowderSnowBlock) {
