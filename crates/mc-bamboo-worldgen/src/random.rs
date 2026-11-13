@@ -695,7 +695,8 @@ mod tests {
 ///
 /// 期望值来自 `RandProbe.java`（`setDecorationSeed(0,0,0)` 再
 /// `setFeatureSeed(deco,0,6)` 后的 12 个 `nextDouble`）和
-/// `RandProbe2.java`（`setFeatureSeed(1234,3,2)` 后的 8 个 `nextFloat`）。
+/// `RandProbe2.java` / `OreProbe2.java`（`setFeatureSeed(1234,3,2)` 后的
+/// `nextFloat`、`nextInt(16)`、`nextInt(321)` 序列）。
 #[cfg(test)]
 mod bit_source_tests {
     use super::*;
@@ -732,5 +733,21 @@ mod bit_source_tests {
             assert_eq!(r2.next_float().to_bits(), *want, "nextFloat {i}");
         }
         assert_eq!(r2.count(), 8);
+
+        let r3 = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+        r3.set_feature_seed(1234, 3, 2);
+        let ni16: [i32; 20] = [
+            2, 5, 6, 10, 13, 9, 7, 2, 1, 5, 9, 5, 11, 9, 11, 9, 4, 3, 14, 14,
+        ];
+        let ni321: [i32; 20] = [
+            120, 74, 0, 130, 167, 278, 166, 163, 160, 213, 284, 47, 93, 52, 266, 213, 1, 94, 74,
+            163,
+        ];
+        for (i, want) in ni16.iter().enumerate() {
+            assert_eq!(r3.next_int(16), *want, "nextInt(16) {i}");
+        }
+        for (i, want) in ni321.iter().enumerate() {
+            assert_eq!(r3.next_int(321), *want, "nextInt(321) {i}");
+        }
     }
 }
