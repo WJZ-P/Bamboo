@@ -1118,6 +1118,7 @@ fn disk_restart_keeps_chunks_players_and_level() {
 /// Build a persistent real world dir for `mc-bamboo-vanilla world-dir`, using the
 /// game's own encoder and the official layout. This is the "in-process roundtrip
 /// test directory" the tool is meant to verify.
+#[cfg(feature = "oracle-samples")]
 #[test]
 fn writes_a_world_dir_fixture_for_official_verification() {
     use crate::chunk_codec::{ChunkCodec, InlineCodec};

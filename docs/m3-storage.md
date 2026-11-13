@@ -867,12 +867,15 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   0.000–0.001 / 0.000 / 0.000 ms，`storage_dirty` 最大 0.019 ms；判脏只碰改动
   集合，不和已加载区块数成正比。fly-20 的假玩家不改方块，`storage_candidates`
   每刻均值为 0，所以拍快照和编码没有产生可测的每刻开销。
-- `saved_data_samples` 是为对拍放在生产代码里的 `pub fn`，可以挪到 `cfg(test)` 或
-  feature 后面。
 - 方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家等）改了不标脏；
   `chunk_nbt` 目前不存的字段（结构、生物群系等）不进判脏。**以后接结构、生物群系
   存档时必须补上对应的标脏入口**，否则会静默丢数据。
 - 世界随机源 / 随机序列、计分板 / 队伍 / Boss 栏、火把抖动表等仍不存档。
+
+- `saved_data_samples` 不再是无条件编译的生产代码：`mc-bamboo-game` 加了
+  `oracle-samples` feature（默认关），`mc-bamboo-vanilla` 的 `oracle` feature
+  打开它。`world-dir` 对拍目录的 fixture 用例同样挂在这个 feature 下，
+  `cargo test -p mc-bamboo-game --features oracle-samples` 才编进测试。
 
 ### 验收
 

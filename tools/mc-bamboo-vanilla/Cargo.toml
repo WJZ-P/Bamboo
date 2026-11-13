@@ -31,7 +31,7 @@ probe-online = ["dep:mc-bamboo-server", "dep:rand_core", "dep:rsa", "dep:tokio"]
 mc-bamboo-blocks = { workspace = true, optional = true }
 mc-bamboo-core = { workspace = true, optional = true }
 mc-bamboo-data = { workspace = true, optional = true }
-mc-bamboo-game = { workspace = true, optional = true }
+mc-bamboo-game = { workspace = true, optional = true, features = ["oracle-samples"] }
 mc-bamboo-loot = { workspace = true, optional = true }
 mc-bamboo-nbt = { workspace = true, optional = true }
 mc-bamboo-protocol = { workspace = true, optional = true }
