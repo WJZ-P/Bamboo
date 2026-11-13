@@ -181,8 +181,8 @@ y 方向是起点加逐格累加的 `delta`（`fadd` 顺序），和单点 `lerp
 
 ### 怎么重跑
 
-在同一个 jar 上，`extract` 用上次 `generate` 留下的报告和 `extracted.json` 重新导出生成文件，
-`generate` 会连官方的数据生成器报告一起重跑：
+在同一个 jar 上，`extract` 用上次 `generate` 留下的报告重跑 `Extractor.java`（重写
+`extracted.json`），再导出全部生成文件；`generate` 会连官方的数据生成器报告一起重跑：
 
 ```bash
 # 完整重跑；第一次或换了官方 jar 时用这条。
