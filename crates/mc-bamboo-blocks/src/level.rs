@@ -221,8 +221,6 @@ pub trait LevelSideState {
     fn put_block_entity(&mut self, pos: BlockPos, id: u64, entity: Box<dyn BlockEntity>);
     fn is_block_entity_taken(&self, pos: BlockPos) -> bool;
     fn wake_block_entity(&mut self, pos: BlockPos);
-    /// 实体阶段中途叫醒，见 [`BlockEntities::wake_fresh`]。
-    fn wake_block_entity_fresh(&mut self, _pos: BlockPos) {}
     fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>);
     fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool);
     /// 把这一刻世界边界的方块盒交给方块实体表，离开边界的睡眠实体暂停，见
@@ -431,10 +429,6 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
 
     fn wake_block_entity(&mut self, pos: BlockPos) {
         self.block_entities_table_mut().wake(pos);
-    }
-
-    fn wake_block_entity_fresh(&mut self, pos: BlockPos) {
-        self.block_entities_table_mut().wake_fresh(pos);
     }
 
     fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {

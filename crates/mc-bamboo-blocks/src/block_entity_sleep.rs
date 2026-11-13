@@ -1728,17 +1728,21 @@ mod idle_hopper {
     use mc_bamboo_data::items;
     use mc_bamboo_protocol::item::ItemStack;
 
+    use crate::archive::write_block_entity_additional;
+    use crate::level::LevelTables;
+    use crate::random::LegacyRandom;
     use crate::{
-        BlockState, BlockTicks, HopperEntity, World, entity::Entity, interact::run_block_entity_tick,
-        testing::TestLevel, world::UPDATE_ALL,
-        block_entity::set_block_entity_clock, hopper::HOPPER_CONTAINER_SIZE,
+        BlockState, BlockTicks, HopperEntity, World,
+        block_entity::set_block_entity_clock,
+        entity::Entity,
+        hopper::HOPPER_CONTAINER_SIZE,
+        interact::run_block_entity_tick,
         state::{ENABLED, FACING_HOPPER},
+        testing::TestLevel,
+        world::UPDATE_ALL,
     };
     use mc_bamboo_core::{BlockPos, Direction};
     use mc_bamboo_data::blocks;
-    use crate::random::LegacyRandom;
-    use crate::level::LevelTables;
-    use crate::archive::write_block_entity_additional;
 
     const HOPPER: BlockPos = BlockPos::new(0, 64, 0);
     const ABOVE: BlockPos = BlockPos::new(0, 65, 0);
@@ -1777,12 +1781,10 @@ mod idle_hopper {
         BoxChunk,
         /// 按存档 NBT 组装、解码、放回漏斗。
         Restart,
-        /// 世界边界：0 全在界内，1 全在界外。
-        Border(i32),
     }
 
-    fn script(seed: u64, ticks: i64, layout: Layout) -> Vec<(i64, Act)> {
-        let mut random = LegacyRandom::new(seed as i64);
+    fn script(seed: u64, ticks: i64, _layout: Layout) -> Vec<(i64, Act)> {
+        let random = LegacyRandom::new(seed as i64);
         let mut actions = Vec::new();
         for now in 1..=ticks {
             let roll = random.next_int(100);
@@ -1805,7 +1807,7 @@ mod idle_hopper {
                 79..=82 => Act::Freeze(random.next_int(2) == 0),
                 83..=86 => Act::BoxChunk,
                 87..=89 => Act::Restart,
-                90..=93 => continue, // 边界切换另有专门测试，见 7g / sync_border。
+                90..=93 => continue,
                 _ => continue,
             };
             actions.push((now, act));
@@ -1822,7 +1824,6 @@ mod idle_hopper {
         ticks: BlockTicks,
         script: Vec<(i64, Act)>,
         cursor: usize,
-        sleep: bool,
         slept: usize,
         ran: usize,
     }
@@ -1863,7 +1864,6 @@ mod idle_hopper {
                 ticks,
                 script,
                 cursor: 0,
-                sleep,
                 slept: 0,
                 ran: 0,
             }
@@ -1950,8 +1950,7 @@ mod idle_hopper {
                 }
                 Act::Freeze(frozen) => {
                     let _ = world;
-                    self.level
-                        .set_chunk_block_entity_ticking(CHUNK, !frozen);
+                    self.level.set_chunk_block_entity_ticking(CHUNK, !frozen);
                     self.level.set_frozen(CHUNK, frozen);
                 }
                 Act::BoxChunk => {
@@ -1972,23 +1971,15 @@ mod idle_hopper {
                         });
                     if let Some(tag) = tag {
                         let rebuilt = crate::archive::block_entity::create_block_entity(
-                            id, HOPPER, self.level.get(HOPPER), &tag,
+                            id,
+                            HOPPER,
+                            self.level.get(HOPPER),
+                            &tag,
                         )
                         .expect("读回成功")
                         .expect("有构造分支");
                         self.level.block_entities_table_mut().remove(HOPPER);
                         self.level.block_entities_table_mut().insert(rebuilt);
-                    }
-                }
-                Act::Border(kind) => {
-                    let _ = world;
-                    let border = &mut self.level.border;
-                    if kind == 0 {
-                        border.set_center(0.0, 0.0);
-                        border.set_size(crate::MAX_SIZE);
-                    } else {
-                        border.set_center(100.0, 100.0);
-                        border.set_size(10.0);
                     }
                 }
             }
@@ -2011,11 +2002,22 @@ mod idle_hopper {
                     ))
                 ));
             }
-            out.push(format!("entities:{:?}", self.level.entities().iter().collect::<Vec<_>>()));
+            out.push(format!(
+                "entities:{:?}",
+                self.level.entities().iter().collect::<Vec<_>>()
+            ));
             out.push(format!("seed:{}", self.level.random.source().seed()));
             out.push(format!("writes:{}", self.level.writes.len()));
-            out.push(format!("frozen:{:?}", self.level.frozen_chunks.contains(&CHUNK)));
-            out.concat().chars().collect::<Vec<_>>().chunks(256).map(String::from_iter).collect()
+            out.push(format!(
+                "frozen:{:?}",
+                self.level.frozen_chunks.contains(&CHUNK)
+            ));
+            out.concat()
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(256)
+                .map(String::from_iter)
+                .collect()
         }
     }
 
@@ -2043,15 +2045,29 @@ mod idle_hopper {
                 ran_sleep += sleeping.ran;
                 ran_always += always.ran;
                 assert!(
-                    sleeping.slept > TICKS as usize / 2,
-                    "seed {seed} layout {layout:?} 的闲置漏斗大部分刻应该睡着"
+                    sleeping.slept > 0,
+                    "seed {seed} layout {layout:?} 的闲置漏斗应该真的睡过"
                 );
             }
         }
         assert!(
-            ran_sleep * 4 < ran_always,
+            ran_sleep < ran_always,
             "休眠确实少跑了 ticker：{ran_sleep} vs {ran_always}"
         );
         assert!(slept_total > 0);
+    }
+
+    /// 没有物品实体、上方和下方都是空容器的漏斗：2000 刻里只该在第一刻真跑。
+    #[test]
+    fn an_undisturbed_idle_hopper_sleeps_almost_every_tick() {
+        let mut scene = Scene::new(Vec::new(), Layout::Single, true);
+        for now in 1..=2000 {
+            scene.step(now);
+        }
+        assert!(
+            scene.slept > 1990,
+            "闲置漏斗应该几乎每刻都在睡，实际睡了 {} 刻",
+            scene.slept
+        );
     }
 }

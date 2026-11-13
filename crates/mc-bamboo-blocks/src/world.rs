@@ -901,19 +901,27 @@ impl<'a> World<'a> {
         self.content_writes
     }
 
-    /// 吸取盒里有没有还活着的物品实体。漏斗只在盒子空着时才敢睡：盒子里的
-    /// 物品下一刻可能先被 `entityInside` 吸走，那条路径不经过漏斗自己的 tick。
-    pub(crate) fn has_items_in(&self, area: crate::shape::Aabb) -> bool {
-        let mut found = false;
-        self.level.for_each_entity_in(area, &mut |public| {
-            if !public.removed
-                && matches!(public.kind, crate::entity::KindPublic::Item { .. })
-                && !found
-            {
-                found = true;
+    /// 有没有活着的物品实体会触发这个漏斗的 `entityInside`，或者落在它的吸取盒里。
+    /// 判定和两条原路径共用同一组函数；只要可能，漏斗就保持醒着。
+    ///
+    /// Whether a living item can trigger `entityInside` or sits in the suck box.
+    /// Both checks reuse the original predicates; if either can happen, the hopper stays awake.
+    pub(crate) fn hopper_has_items(&self, pos: BlockPos) -> bool {
+        let suck = crate::hopper::suck_box(pos);
+        for entity in self.level.live_entities() {
+            if entity.removed || entity.ground().is_none() {
+                continue;
             }
-        });
-        found
+            let bounds = entity.bounding_box();
+            if bounds.intersects(suck)
+                || crate::hopper::entity_inside_cells(self, bounds)
+                    .iter()
+                    .any(|&at| at == pos && crate::hopper::item_touches_hopper(&entity, at))
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。
@@ -1179,7 +1187,6 @@ impl<'a> World<'a> {
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
         self.quiet += 1;
-        self.level.wake_block_entity_fresh(pos);
         let result = self.with_block_entity(pos, f);
         self.quiet -= 1;
         result

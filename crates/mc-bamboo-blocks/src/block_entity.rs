@@ -628,16 +628,6 @@ impl BlockEntities {
         }
     }
 
-    /// 实体阶段的 `entityInside` 路径：这一刻的方块实体阶段还没开始，
-    /// 官方安静刻每刻都写过时间字段，读路径要按「这一刻已经写过」现算。
-    /// 其余唤醒规则（游标、到期桶）和 [`Self::wake`] 完全一致。
-    pub fn wake_fresh(&mut self, pos: BlockPos) {
-        self.wake(pos);
-        if let Some(stored) = self.entities.get_mut(&pos) {
-            stored.entity.materialize(block_entity_clock());
-        }
-    }
-
     /// 这一格有没有别的睡眠条目关注（自己关注自己不算）。
     pub fn has_cell_watchers(&self, pos: BlockPos) -> bool {
         self.watchers
