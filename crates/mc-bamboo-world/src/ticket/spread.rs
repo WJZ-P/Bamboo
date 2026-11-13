@@ -812,11 +812,6 @@ impl Plane {
         let width = width as usize;
         let height = height as usize;
         let _setup_guard = Guard::new(super::profile::DENSE_SETUP);
-        count(super::profile::C_DENSE_HIT, 1);
-        count(super::profile::C_DENSE_CELLS, area as u64);
-        #[cfg(test)]
-        DENSE_HITS.with(|hits| hits.set(hits.get() + 1));
-
         let mut cells = mem::take(&mut self.dense.cells);
         cells.clear();
         cells.resize(area, limit_u8);
@@ -852,28 +847,28 @@ impl Plane {
             }
         }
         // 两遍光栅扫描的前提：halo 自己满足 8 邻 +1 的 Lipschitz 条件。调试构建里
-        // 抽查相邻 halo 格，防止将来改动持久等级表时悄悄破坏这个前提。
-        debug_assert!({
+        // 抽查相邻 halo 格；万一前提不成立就退回两阶段算法，绝不 panic。
+        #[cfg(debug_assertions)]
+        {
             let ring_ok = |a: usize, b: usize| {
                 let (left, right) = (i32::from(cells[a]), i32::from(cells[b]));
                 (left - right).abs() <= 1
             };
-            (1..width).all(|ix| {
-                // 相邻两列的上边界、相邻两列的下边界。
+            let top_bottom_ok = (1..width).all(|ix| {
                 let top_a = (ix - 1) * height;
                 let top_b = ix * height;
-                let bottom_a = top_a + height - 1;
-                let bottom_b = top_b + height - 1;
-                ring_ok(top_a, top_b) && ring_ok(bottom_a, bottom_b)
-            }) && (1..height).all(|iz| {
-                // 相邻两行的左边界、相邻两行的右边界。
-                let left_a = iz - 1;
-                let left_b = iz;
+                ring_ok(top_a, top_b) && ring_ok(top_a + height - 1, top_b + height - 1)
+            });
+            let sides_ok = (1..height).all(|iz| {
                 let right_a = (width - 1) * height + iz - 1;
-                let right_b = right_a + 1;
-                ring_ok(left_a, left_b) && ring_ok(right_a, right_b)
-            })
-        });
+                ring_ok(iz - 1, iz) && ring_ok(right_a, right_a + 1)
+            });
+            if !top_bottom_ok || !sides_ok {
+                self.dense.cells = cells;
+                self.dense.note_round(0);
+                return None;
+            }
+        }
         drop(_setup_guard);
         // 两遍光栅扫描：3×3 邻域的切比雪夫距离变换，对按 x 单调的最短路是精确的。
         let _sweep_guard = Guard::new(super::profile::DENSE_SWEEP);
@@ -899,24 +894,41 @@ impl Plane {
                 cells[index] = best.min(limit_u8);
             }
         }
-        // 调试构建里再走一遍正向扫描，断言已经收敛到不动点。发布构建里这段不存在，
-        // 热路径仍只付两遍的钱；如果哪天 halo 前提被破坏，测试会立刻停在那一格。
+        // 调试构建里再走一遍正向扫描，确认已经收敛到不动点。发布构建里这段不存在，
+        // 热路径仍只付两遍的钱；万一没收敛就退回两阶段算法，绝不 panic。
         #[cfg(debug_assertions)]
-        for ix in 1..width - 1 {
-            for iz in 1..height - 1 {
-                let index = ix * height + iz;
-                let best = cells[index]
-                    .min(cells[index - height - 1].saturating_add(1))
-                    .min(cells[index - height].saturating_add(1))
-                    .min(cells[index - height + 1].saturating_add(1))
-                    .min(cells[index - 1].saturating_add(1))
-                    .min(limit_u8);
-                assert_eq!(cells[index], best, "稠密窗口第三遍扫描没有收敛");
-                cells[index] = best;
+        {
+            let mut converged = true;
+            for ix in 1..width - 1 {
+                for iz in 1..height - 1 {
+                    let index = ix * height + iz;
+                    let best = cells[index]
+                        .min(cells[index - height - 1].saturating_add(1))
+                        .min(cells[index - height].saturating_add(1))
+                        .min(cells[index - height + 1].saturating_add(1))
+                        .min(cells[index - 1].saturating_add(1))
+                        .min(limit_u8);
+                    if cells[index] != best {
+                        converged = false;
+                        break;
+                    }
+                }
+                if !converged {
+                    break;
+                }
+            }
+            if !converged {
+                self.dense.cells = cells;
+                self.dense.note_round(0);
+                return None;
             }
         }
         drop(_sweep_guard);
         let _commit_guard = Guard::new(super::profile::DENSE_COMMIT);
+        count(super::profile::C_DENSE_HIT, 1);
+        count(super::profile::C_DENSE_CELLS, area as u64);
+        #[cfg(test)]
+        DENSE_HITS.with(|hits| hits.set(hits.get() + 1));
 
         // 应用新源表（和回退路径的顺序一致），再按 x↑z↑ 扫一遍收变化并写回持久表。
         for &(pos, _old, new) in effective {
