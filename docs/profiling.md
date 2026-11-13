@@ -1,7 +1,9 @@
 # 剖析器与压测工具
 
 `mc-bamboo-game/src/profiler.rs` 给世界线程每刻记一份耗时直方图。本文说明怎么打开它、
-报告里每一项是什么、怎么用假玩家给服务端加负载，以及第一份基线数据。
+报告里每一项是什么、怎么用假玩家给服务端加负载，以及第一份基线数据。后面几节按时间顺序
+记了区块平面（第 8–10 节）、交付/收回的分配（10.6）和区块计算池（第 11 节）的对比；
+`world_dir` 和 `chunk_worker_threads` 都能从压测工具的 `serve` 子命令行给，见第 3 节。
 
 ## 1. 打开剖析器
 
@@ -32,7 +34,9 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 `entities` 一段，算完立刻落地；并行驱动（`entity_threads ≥ 1`）记
 `entity_compute`（只读算阶段）和 `entity_commit`（发布状态、按 uid 升序应用命令、
 发效果）两段，`entities` 没有样本。所以报告里有 18 个阶段，但任何一次运行只会有
-17 个阶段有样本。常驻线程池还没做，并行驱动现在每刻起线程，剖析数字包含这项开销。
+17 个阶段有样本。**实体并行驱动仍用 `ScopedThreads` 每刻起线程**，剖析数字包含这项开销；
+常驻的 `ComputePool` 是区块计算池，只跑区块的 `Decode` / `Generate` / `Save`，不接实体驱动
+（`chunk_worker_threads` 控制，见第 11 节）。两处不要混淆。
 
 第二段 `metrics` 里，`tick_total`、`tick_start_lateness` 和
 `tick_interval_deviation` 是时间（ms）：
@@ -166,11 +170,17 @@ BAMBOO_PROFILE=10 ./target/release/bamboo-loadtest serve \
 ```
 
 `serve` 用现有的公开接口（`Server::new`、`Server::run`）起服，日志初始化方式相同；
-配置是 `ServerConfig::default()`，只覆盖 `max_players`（默认 500）和 `view_distance`
-（默认沿用 `ServerConfig::default()` 的 8）。和命令行版 `bamboo` 的差别是：它不读
-配置文件、人数上限和可选的视距由命令行给、日志里第一行写的是
+配置是 `ServerConfig::default()`，命令行只覆盖 `max_players`（默认 500）、`view_distance`
+（默认沿用 `ServerConfig::default()` 的 8）、`world_dir`（`--world-dir <目录>`，不给就纯内存）
+和 `chunk_worker_threads`（`--chunk-worker-threads <N>`，缺省 0 = 内联）。
+`run-baseline.sh` 里对应的环境变量是 `WORLD_DIR` 和 `CHUNK_THREADS`；`WORLD_DIR` 给了目录时
+每个场景写在 `WORLD_DIR/<场景名>/`，第 11 节的计算池对比就靠这两个开关跑。
+和命令行版 `bamboo` 的差别是：它不读配置文件、上面四项由命令行给、日志里第一行写的是
 "loadtest server is listening"、玩家名前缀是 `Bot`。游戏逻辑、tick 顺序和网络参数
 都没改。
+
+（2026-11-14 按实现更新：`tools/mc-bamboo-loadtest/src/main.rs` 的 `serve`、
+`tools/mc-bamboo-loadtest/run-baseline.sh` 的 `WORLD_DIR` / `CHUNK_THREADS`、本文第 11 节；合并提交 `7bc6422`、`021a26f`、`082a7c9`）
 
 `ops.json` 的 `bypassesPlayerLimit` 现在参与登录准入：满员时只有这个位为真的 OP
 能进来（官方 `DedicatedPlayerList.canBypassPlayerLimit`）。基线里的假玩家都不是 OP，
@@ -195,6 +205,13 @@ tools/mc-bamboo-loadtest/run-baseline.sh [结果目录] [场景名...]
 | crowd-200 | 200 | wander | cluster | 60 s |
 | walk-50 | 50 | walk | spread | 60 s |
 | fly-20 | 20 | fly | spread | 60 s |
+
+`WORLD_DIR` 和 `CHUNK_THREADS` 也在这里生效：带 `WORLD_DIR` 时每个场景用
+`WORLD_DIR/<场景名>/` 下的独立真实世界目录，不带时全部纯内存；`CHUNK_THREADS`
+原样传给 `serve --chunk-worker-threads`。第 11 节的计算池对比就是这两个开关加
+`BAMBOO_FAKE_GEN_DELAY_US` 跑出来的。
+
+（2026-11-14 按实现更新：`tools/mc-bamboo-loadtest/run-baseline.sh`、本文第 3 / 11 节；合并提交 `7bc6422`、`021a26f`）
 
 脚本最后用 `summarize.py` 打一张汇总表并写 `summary.tsv` / `summary.json`。
 剖析器每 10 秒打完报告就清零样本，没法从多份直方图精确合并分位数，
@@ -1000,3 +1017,9 @@ c、d 两组交替跑。
 - 世界线程上的编解码时间基本归零；4 线程的吞吐是内联的 3.4–3.6 倍。
 - 解析一个改过的区块约 0.5 ms，比 `world-model-design.md` 5.4 估的「读盘每个 1.5 ms」里的解析部分小；
   压缩/解压在 IO 线程，不在这张表里。
+- 这张表只量解析 / 序列化，不含 `Generate` 阶段；正式配置下 `chunk_worker_threads`
+  默认仍是 0（内联），打开池子时 `Read` 仍在 IO 线程、`Assemble` 仍内联
+  （`world-model-design.md` 5.3.1）。世界生成到噪声阶段已有纯函数和 `chunkgen` oracle，
+  但还没接进 Director 的 `Generate` 阶段，所以这里量到的生成仍只是超平坦模板或假延迟。
+
+（2026-11-14 按实现更新：`docs/world-model-design.md` 5.3.1、`crates/mc-bamboo-game/src/chunk_jobs.rs`、`docs/worldgen.md`「还没做」；合并提交 `082a7c9`、`ae76868`）
