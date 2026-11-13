@@ -51,6 +51,8 @@ const MAX_CATCH_UP: Duration = Duration::from_secs(2);
 /// 信箱预算和实体线程数的上限，防住配置文件里的巨值。
 pub const MAX_MAIL_BUDGET: usize = 1 << 16;
 pub const MAX_ENTITY_THREADS: usize = 256;
+/// 区块计算池线程数的上限。
+pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
 
@@ -74,6 +76,9 @@ pub struct WorldConfig {
     pub entity_threads: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，对大型红石电路有效。默认关。
     pub redstone_cache: bool,
+    /// 区块计算池的线程数。0 = 内联执行器（解析、生成、序列化在世界线程上做）；
+    /// ≥ 1 = 常驻后台线程。区块内容和线程数无关，只有交付的时刻可能不同。
+    pub chunk_worker_threads: usize,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
     /// 世界目录。`None` 表示不存档（测试、oracle、压测都走这条路）。
@@ -92,6 +97,7 @@ impl Default for WorldConfig {
             admin: crate::admin::AdminSnapshot::default(),
             entity_threads: 0,
             redstone_cache: false,
+            chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
             world_dir: None,
         }
@@ -249,6 +255,9 @@ impl World {
                     ..Default::default()
                 });
         }
+        world
+            .host
+            .set_compute_threads(config.chunk_worker_threads.min(MAX_CHUNK_WORKER_THREADS));
         // 启用存档时起一条 IO 线程并接进 Director 宿主；起不来也拒绝启动。
         // With saving enabled, start one IO thread and attach it to the host.
         if let Some(save) = &world.save {
@@ -444,6 +453,10 @@ impl World {
             error!("chunk IO thread stopped unexpectedly; shutting down to avoid silent data loss");
             return self.shut_down();
         }
+        if self.host.compute_failed() {
+            error!("chunk compute thread stopped unexpectedly; shutting down");
+            return self.shut_down();
+        }
         self.process_inbox()?;
         self.consume_save_commands();
         self.sync_player_tickets();
@@ -454,6 +467,8 @@ impl World {
         profiler.record(Metric::ChunksDelivered, delivered as u64);
         profiler.record(Metric::ChunksReclaimed, reclaimed as u64);
         profiler.record(Metric::ParkedChunks, self.host.parked_count() as u64);
+        profiler.record(Metric::ComputeInFlight, self.host.compute_in_pool() as u64);
+        profiler.record(Metric::ComputeBacklog, self.host.compute_backlog() as u64);
         profiler.lap(Phase::Delivery);
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
@@ -1379,6 +1394,9 @@ impl Schedule {
     }
 }
 
+#[cfg(test)]
+#[path = "world/tests/compute_pool_tests.rs"]
+mod compute_pool_tests;
 #[cfg(test)]
 mod loaded_tests;
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //!                 --duration 60 --ramp 5 [--speed 4.3] [--json <文件>]
 //!     在 5 秒里陆续连上 50 名假玩家，跑 60 秒，结束时打印客户端一侧的统计
 //! bamboo-loadtest serve --addr 127.0.0.1:25565 [--max-players 500] [--view-distance 8]
-//!                       [--world-dir <目录>]
+//!                       [--world-dir <目录>] [--chunk-worker-threads <N>]
 //!     用放开人数上限的 Bamboo 服务端起服，供基线脚本使用
 //! ```
 //!
@@ -66,15 +66,18 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| mc_bamboo_server::ServerConfig::default().view_distance);
     // 带世界目录跑压测时存档路径全部打开；不给就保持纯内存（默认）。
     let world_dir = option(args, "--world-dir")?.map(PathBuf::from);
+    // 区块计算池的线程数，缺省 0（内联，和命令行版默认一致）；世界线程自己再夹上限。
+    let chunk_worker_threads = number_option::<usize>(args, "--chunk-worker-threads")?.unwrap_or(0);
     let config = mc_bamboo_server::ServerConfig {
         max_players,
         view_distance,
         world_dir,
+        chunk_worker_threads,
         ..mc_bamboo_server::ServerConfig::default()
     };
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(
-        "loadtest server is listening on {} for Minecraft {} (max_players={max_players}, view_distance={view_distance})",
+        "loadtest server is listening on {} for Minecraft {} (max_players={max_players}, view_distance={view_distance}, chunk_worker_threads={chunk_worker_threads})",
         listener.local_addr()?,
         mc_bamboo_server::GAME_VERSION
     );

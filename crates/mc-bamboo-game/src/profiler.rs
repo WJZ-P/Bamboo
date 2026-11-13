@@ -342,6 +342,10 @@ pub(crate) enum Metric {
     LoadedChunks,
     /// 这一刻结束时停放表里的区块数。
     ParkedChunks,
+    /// 已经交给计算池、还没回来的区块任务数；内联执行器记 0。
+    ComputeInFlight,
+    /// 宿主手里还没交给计算池的区块任务数；内联执行器记 0。
+    ComputeBacklog,
     ChunkLatencyUs,
     FlushBytes,
     /// 这一刻判脏看到的候选区块数（存档路径的开销指标）。
@@ -353,7 +357,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -366,6 +370,8 @@ impl Metric {
         Self::ChunksReclaimed,
         Self::LoadedChunks,
         Self::ParkedChunks,
+        Self::ComputeInFlight,
+        Self::ComputeBacklog,
         Self::ChunkLatencyUs,
         Self::FlushBytes,
         Self::StorageCandidates,
@@ -386,6 +392,8 @@ impl Metric {
             Self::ChunksReclaimed => "chunks_reclaimed",
             Self::LoadedChunks => "loaded_chunks",
             Self::ParkedChunks => "parked_chunks",
+            Self::ComputeInFlight => "compute_in_flight",
+            Self::ComputeBacklog => "compute_backlog",
             Self::ChunkLatencyUs => "chunk_latency_us",
             Self::FlushBytes => "flush_bytes",
             Self::StorageCandidates => "storage_candidates",
@@ -406,6 +414,8 @@ impl Metric {
             | Self::ChunksReclaimed
             | Self::LoadedChunks
             | Self::ParkedChunks
+            | Self::ComputeInFlight
+            | Self::ComputeBacklog
             | Self::StorageCandidates
             | Self::StorageSnapshots => "chunks",
             Self::ChunkLatencyUs => "us",

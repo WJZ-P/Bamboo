@@ -35,9 +35,12 @@ mod chat;
 mod chunk_broadcast;
 pub mod chunk_codec;
 mod chunk_encoding;
+mod chunk_generator;
+mod chunk_jobs;
 mod chunk_tracking;
 pub mod command;
 mod command_block;
+mod compute_pool;
 mod container;
 mod container_loot;
 mod debug_stick;
@@ -87,7 +90,9 @@ pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};
 pub use outgoing::{Outgoing, Segment, SharedFrames};
 pub use player_move::{MoveReplay, MoveReplayPacket, MoveReplayReport, replay_movement};
 pub use secure_chat::ServiceProfileKeys;
-pub use world::{MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig};
+pub use world::{
+    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig,
+};
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
 /// 两份示例 `data` 复合标签（游戏规则、世界边界）。只暴露公开的 [`Tag`]，

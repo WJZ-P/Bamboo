@@ -5,6 +5,7 @@
 #   结果目录缺省是临时目录，脚本结束会删掉；传了目录就保留。
 #   KEEP=1 时临时目录也保留。PORT 可以换端口，RAMP 可以换每个场景的连入时长。
 #   WORLD_DIR 给了目录时，场景的世界存档写在 WORLD_DIR/<场景名>/ 下（用真实存盘压测）。
+#   CHUNK_THREADS 是区块计算池的线程数（缺省 0 = 内联）。
 #
 # 服务端和压测工具是两个进程，不共用一个 tokio 运行时。五个场景都是离线模式、
 # 压缩阈值 256、视距 8、剖析间隔 10 秒；只有人数上限从默认 20 提到 500。
@@ -83,6 +84,7 @@ run_scene() {
     # 不用子 shell 包一层，否则 $! 是子 shell 的 pid，kill 不到真正的服务端。
     (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" \
         "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 $world_arg \
+        --chunk-worker-threads "${CHUNK_THREADS:-0}" \
         > server.log 2>&1) &
     SERVER=$!
 

@@ -210,15 +210,38 @@ impl Harness {
         Self::build(view_distance, true)
     }
 
+    /// 已加载模式 + 区块计算池（不接存档）。
+    pub(crate) fn new_loaded_with_threads(view_distance: i32, chunk_worker_threads: usize) -> Self {
+        let mut harness = Self::build(view_distance, true);
+        harness.world.host.set_compute_threads(chunk_worker_threads);
+        harness
+    }
+
+    /// 发一条关服消息并跑完这一刻，世界循环必须结束。
+    pub(crate) fn shut_down(&mut self) {
+        self.inbox.send(Inbound::Shutdown).unwrap();
+        assert!(self.world.tick().is_break(), "关服要结束世界循环");
+    }
+
     /// 正式入口 + 真实世界目录：`SaveSession` 和 IO 线程都接上，
     /// 供 `/save-off` / `save-all` / 关服这类生命周期测试用。
     /// Real world directory: both `SaveSession` and the IO thread are attached,
     /// for `/save-off` / `save-all` / shutdown lifecycle tests.
     pub(crate) fn new_loaded_with_save(view_distance: i32, root: &std::path::Path) -> Self {
+        Self::new_loaded_with_save_and_threads(view_distance, root, 0)
+    }
+
+    /// 同上，另外指定区块计算池的线程数（0 = 内联执行器）。
+    pub(crate) fn new_loaded_with_save_and_threads(
+        view_distance: i32,
+        root: &std::path::Path,
+        chunk_worker_threads: usize,
+    ) -> Self {
         let (inbox, receiver) = mpsc::channel();
         let config = WorldConfig {
             view_distance,
             world_dir: Some(root.to_path_buf()),
+            chunk_worker_threads,
             ..Default::default()
         };
         let mut world = World::new(config, receiver);

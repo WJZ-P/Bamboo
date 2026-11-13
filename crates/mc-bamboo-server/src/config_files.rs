@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use mc_bamboo_game::{MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget};
+use mc_bamboo_game::{MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget};
 use toml::{Table, Value};
 use tracing::{info, warn};
 
@@ -126,6 +126,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "auth_read_timeout_seconds",
     "entity_threads",
     "redstone_cache",
+    "chunk_worker_threads",
     "deliveries_per_tick",
     "reclaims_per_tick",
 ];
@@ -151,6 +152,8 @@ pub struct BambooConfig {
     pub entity_threads: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
+    /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
+    pub chunk_worker_threads: usize,
     /// Director 信箱每刻交付区块的个数上限，0 表示不限。
     pub deliveries_per_tick: usize,
     /// Director 信箱每刻收回区块的个数上限，0 表示不限。
@@ -170,6 +173,7 @@ impl Default for BambooConfig {
             auth_read_timeout: defaults.auth_read_timeout,
             entity_threads: defaults.entity_threads,
             redstone_cache: defaults.redstone_cache,
+            chunk_worker_threads: defaults.chunk_worker_threads,
             deliveries_per_tick: defaults.mail_budget.deliveries,
             reclaims_per_tick: defaults.mail_budget.reclaims,
         }
@@ -217,6 +221,10 @@ impl BambooConfig {
                 "# 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认 false。\n",
                 "redstone_cache = {}\n",
                 "\n",
+                "# 区块计算池的线程数：0 = 解析、生成、序列化在世界线程上做（默认）；\n",
+                "# >= 1 = 交给这么多条常驻后台线程。区块内容一样，只有到达的时刻可能不同。\n",
+                "chunk_worker_threads = {}\n",
+                "\n",
                 "# Director 信箱每刻最多交付多少个区块，0 表示不限，默认 64。\n",
                 "deliveries_per_tick = {}\n",
                 "\n",
@@ -232,6 +240,7 @@ impl BambooConfig {
             self.auth_read_timeout.as_secs(),
             self.entity_threads,
             self.redstone_cache,
+            self.chunk_worker_threads,
             self.deliveries_per_tick,
             self.reclaims_per_tick,
         )
@@ -280,6 +289,14 @@ impl BambooConfig {
             auth_read_timeout: seconds("auth_read_timeout_seconds", defaults.auth_read_timeout),
             entity_threads: integer(table, "entity_threads", file, 0, 0, MAX_ENTITY_THREADS),
             redstone_cache: boolean(table, "redstone_cache", file, false),
+            chunk_worker_threads: integer(
+                table,
+                "chunk_worker_threads",
+                file,
+                defaults.chunk_worker_threads,
+                0,
+                MAX_CHUNK_WORKER_THREADS,
+            ),
             deliveries_per_tick: integer(
                 table,
                 "deliveries_per_tick",
@@ -637,6 +654,7 @@ impl ConfigFiles {
             world_dir: Some(world_dir(directory, self)),
             entity_threads: self.bamboo.entity_threads,
             redstone_cache: self.bamboo.redstone_cache,
+            chunk_worker_threads: self.bamboo.chunk_worker_threads,
             mail_budget: MailBudget {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
@@ -664,6 +682,7 @@ impl ConfigFiles {
         bamboo.auth_read_timeout = config.auth_read_timeout;
         bamboo.entity_threads = config.entity_threads;
         bamboo.redstone_cache = config.redstone_cache;
+        bamboo.chunk_worker_threads = config.chunk_worker_threads;
         bamboo.deliveries_per_tick = config.mail_budget.deliveries;
         bamboo.reclaims_per_tick = config.mail_budget.reclaims;
         Self { official, bamboo }
@@ -765,6 +784,11 @@ impl ConfigFiles {
                 "redstone_cache",
                 u64::from(self.bamboo.redstone_cache),
                 u64::from(defaults.bamboo.redstone_cache),
+            ),
+            (
+                "chunk_worker_threads",
+                self.bamboo.chunk_worker_threads as u64,
+                defaults.bamboo.chunk_worker_threads as u64,
             ),
             (
                 "deliveries_per_tick",

@@ -40,6 +40,7 @@ export interface ServerSettings {
   forwarding: Forwarding;
   forwardingSecret: string;
   entityThreads: number;
+  chunkWorkerThreads: number;
   deliveriesPerTick: number;
   reclaimsPerTick: number;
 }
