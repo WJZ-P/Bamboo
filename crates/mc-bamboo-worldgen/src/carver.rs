@@ -16,8 +16,10 @@ use serde_json::Value;
 use crate::{
     aquifer::Aquifer,
     biome_manager::BiomeManager,
+    density::NoiseRegistry,
+    material::MaterialRules,
     math::{floor, java_floor_div},
-    random::{Random, WorldgenRandom},
+    random::{PositionalFactory, Random, WorldgenRandom},
     sampler::Context,
     settings::{Samplers as RouterSamplers, Settings},
 };
@@ -27,7 +29,6 @@ const RANGE: i32 = 4;
 /// `SingleThreadedRandomSource` 的种子常量。
 /// `Mth.SIN_SCALE` 和查找表长度。
 const SIN_SCALE: f64 = 10_430.378_350_470_453;
-const COS_OFFSET: i64 = 16_384;
 const SIN_MASK: i64 = 65_535;
 use std::sync::OnceLock;
 
@@ -48,7 +49,8 @@ fn mth_sin(value: f64) -> f32 {
 }
 
 fn mth_cos(value: f64) -> f32 {
-    let index = ((value * SIN_SCALE) as i64 + COS_OFFSET) & SIN_MASK;
+    // 官方先加 16384.0（double）再 d2i，负数时和「先截断再加」差一位。
+    let index = ((value * SIN_SCALE + 16_384.0) as i64) & SIN_MASK;
     sin_table()[index as usize]
 }
 
@@ -73,7 +75,9 @@ impl FloatProvider {
         if let Some(number) = value.as_f64() {
             return Ok(Self::Constant(number as f32));
         }
-        let object = value.as_object().ok_or("float provider must be an object")?;
+        let object = value
+            .as_object()
+            .ok_or("float provider must be an object")?;
         match string(object, "type")? {
             "minecraft:constant" => Ok(Self::Constant(float(object, "value")?)),
             "minecraft:uniform" => Ok(Self::Uniform {
@@ -126,7 +130,9 @@ enum IntProvider {
 impl IntProvider {
     fn parse(value: &Value) -> Result<Self, String> {
         if let Some(number) = value.as_i64() {
-            return Ok(Self::Constant(i32::try_from(number).map_err(|_| "int out of range")?));
+            return Ok(Self::Constant(
+                i32::try_from(number).map_err(|_| "int out of range")?,
+            ));
         }
         let object = value.as_object().ok_or("int provider must be an object")?;
         match string(object, "type")? {
@@ -164,11 +170,7 @@ enum Anchor {
 impl Anchor {
     fn parse(value: &Value) -> Result<Self, String> {
         let object = value.as_object().ok_or("anchor must be an object")?;
-        for (name, kind) in [
-            ("absolute", 0),
-            ("above_bottom", 1),
-            ("below_top", 2),
-        ] {
+        for (name, kind) in [("absolute", 0), ("above_bottom", 1), ("below_top", 2)] {
             if let Some(offset) = object.get(name).and_then(Value::as_i64) {
                 let offset = i32::try_from(offset).map_err(|_| "anchor out of range")?;
                 return Ok(match kind {
@@ -201,7 +203,9 @@ enum HeightProvider {
 
 impl HeightProvider {
     fn parse(value: &Value) -> Result<Self, String> {
-        let object = value.as_object().ok_or("height provider must be an object")?;
+        let object = value
+            .as_object()
+            .ok_or("height provider must be an object")?;
         match string(object, "type")? {
             "minecraft:constant" => Ok(Self::Constant(
                 Anchor::parse(object.get("value").ok_or("missing value")?)?.resolve(0, 0),
@@ -287,14 +291,19 @@ impl Carver {
                 vertical_radius_multiplier: FloatProvider::parse(
                     object.get("vertical_radius_multiplier"),
                 )?,
-                start_vertical_radius_multiplier: match object.get("start_vertical_radius_multiplier") {
+                start_vertical_radius_multiplier: match object
+                    .get("start_vertical_radius_multiplier")
+                {
                     Some(value) => FloatProvider::parse(Some(value))?,
                     None => FloatProvider::Constant(1.0),
                 },
                 floor_level: FloatProvider::parse(object.get("floor_level"))?,
             }),
             "minecraft:canyon" => {
-                let shape = object.get("shape").and_then(Value::as_object).ok_or("missing shape")?;
+                let shape = object
+                    .get("shape")
+                    .and_then(Value::as_object)
+                    .ok_or("missing shape")?;
                 Ok(Self::Canyon {
                     probability,
                     y,
@@ -474,6 +483,9 @@ impl Carvers {
         router: &RouterSamplers,
         biome_manager: &BiomeManager<'_>,
         aquifer: &mut Aquifer<'_>,
+        material: &MaterialRules,
+        noises: &NoiseRegistry,
+        positional: PositionalFactory,
         seed: i64,
     ) -> Result<(), String> {
         let min_y = settings.min_y;
@@ -490,7 +502,13 @@ impl Carvers {
                 // `WorldGenRegion` 为 null 走 `getBiomeGenerationSettingsForCarver`。
                 let quart_x = java_floor_div(neighbor_x * 16, 4);
                 let quart_z = java_floor_div(neighbor_z * 16, 4);
-                let biome = biome_manager.noise_biome(router, &mut Context::uncached(), quart_x, 0, quart_z);
+                let biome = biome_manager.noise_biome(
+                    router,
+                    &mut Context::uncached(),
+                    quart_x,
+                    0,
+                    quart_z,
+                );
 
                 let list = self
                     .per_biome
@@ -512,27 +530,33 @@ impl Carvers {
                     if start_value > carver.probability() {
                         continue;
                     }
-
                     self.carve(
-                        carver,
-                        &mut mask,
-                        chunk_x,
-                        chunk_z,
-                        neighbor_x,
-                        neighbor_z,
-                        &random,
+                        carver, &mut mask, chunk_x, chunk_z, neighbor_x, neighbor_z, &random,
                         settings,
                     );
-
                 }
             }
         }
         if mask.is_empty() {
             return Ok(());
         }
-        self.apply_mask(&mask, layers, chunk_x, chunk_z, settings, context, router, biome_manager, aquifer)
+        self.apply_mask(
+            &mask,
+            layers,
+            chunk_x,
+            chunk_z,
+            settings,
+            context,
+            router,
+            biome_manager,
+            aquifer,
+            material,
+            noises,
+            positional,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn carve(
         &self,
         carver: &Carver,
@@ -566,13 +590,13 @@ impl Carvers {
 
                     let horizontal = f64::from(horizontal_radius_multiplier.sample(random));
                     let vertical = f64::from(vertical_radius_multiplier.sample(random));
-                    let start_vertical =
-                        f64::from(start_vertical_radius_multiplier.sample(random));
+                    let start_vertical = f64::from(start_vertical_radius_multiplier.sample(random));
                     let floor = f64::from(floor_level.sample(random));
                     let mut tunnels = 1;
                     if random.next_int(4) == 0 {
-                        let room_vertical = f64::from(room_vertical_radius_multiplier.sample(random));
-                        let radius = 1.0 + random.next_float() * 6.0;
+                        let room_vertical =
+                            f64::from(room_vertical_radius_multiplier.sample(random));
+                        let radius = 1.0_f32 + random.next_float() * 6.0;
                         create_room(
                             mask,
                             chunk_x,
@@ -580,20 +604,16 @@ impl Carvers {
                             x,
                             y,
                             z,
-                            radius as f64,
+                            radius,
                             room_vertical,
                             floor,
                         );
                         tunnels += random.next_int(4);
                     }
                     for _ in 0..tunnels {
-                        let yaw = random.next_float() * 6.283_185_5_f32;
+                        let yaw = random.next_float() * std::f32::consts::TAU;
                         let pitch = (random.next_float() - 0.5) / 4.0;
-                        let thickness = get_thickness(
-                            thickness,
-                            *weird_thickness_bias,
-                            random,
-                        );
+                        let thickness = get_thickness(thickness, *weird_thickness_bias, random);
                         let length = span - random.next_int(span / 4);
                         create_tunnel(
                             mask,
@@ -626,7 +646,7 @@ impl Carvers {
                 let x = f64::from(neighbor_x * 16 + random.next_int(16));
                 let y = y.sample(random, settings.min_y, settings.height);
                 let z = f64::from(neighbor_z * 16 + random.next_int(16));
-                let yaw = random.next_float() * 6.283_185_5_f32;
+                let yaw = random.next_float() * std::f32::consts::TAU;
                 let pitch = vertical_rotation.sample(random);
                 let y_scale = f64::from(shape.y_scale.sample(random));
                 let thickness = shape.thickness.sample(random);
@@ -665,6 +685,9 @@ impl Carvers {
         router: &RouterSamplers,
         biome_manager: &BiomeManager<'_>,
         aquifer: &mut Aquifer<'_>,
+        material: &MaterialRules,
+        noises: &NoiseRegistry,
+        positional: PositionalFactory,
     ) -> Result<(), String> {
         let min_x = chunk_x * 16;
         let min_z = chunk_z * 16;
@@ -672,7 +695,11 @@ impl Carvers {
         let mycelium = block_state("minecraft:mycelium")?;
         let dirt = block_state("minecraft:dirt")?;
         let uncarvable = block_tag("minecraft:uncarvable").unwrap_or(&[]);
+        let mut error = None;
         mask.visit(&mut |x, z, from, to| {
+            if error.is_some() {
+                return;
+            }
             let block_x = min_x + x;
             let block_z = min_z + z;
             let mut surface_flag = false;
@@ -693,48 +720,52 @@ impl Carvers {
                 if surface_flag && y > settings.min_y {
                     let below = layer_get(layers, settings.min_y, x, y - 1, z);
                     if below == dirt {
-                        let material = self.top_material(
+                        let gradient_x =
+                            crate::material::surface_gradient_x(layers, settings.min_y, x, z);
+                        let gradient_z =
+                            crate::material::surface_gradient_z(layers, settings.min_y, x, z);
+                        // 官方传的是下方方块的位置，`updateY` 用 `pos.getY() + 1`，
+                        // 正好等于当前被挖的这一格的 y。
+                        let water = if crate::biome_manager::fluid_is_empty(new_state) {
+                            i32::MIN
+                        } else {
+                            y
+                        };
+                        let top = material.top_material(
                             layers,
+                            chunk_x,
+                            chunk_z,
+                            block_x,
+                            y - 1,
+                            block_z,
+                            gradient_x,
+                            gradient_z,
+                            water,
                             settings,
                             context,
                             router,
                             biome_manager,
-                            block_x,
-                            y - 1,
-                            block_z,
-                            x,
-                            z,
-                            new_state,
+                            noises,
+                            positional,
                         );
-                        if let Some(state) = material {
+                        let top = match top {
+                            Ok(top) => top,
+                            Err(failure) => {
+                                error = Some(failure);
+                                return;
+                            }
+                        };
+                        if let Some(state) = top {
                             layer_set(layers, settings.min_y, x, y - 1, z, state);
                         }
                     }
                 }
             }
         });
-        Ok(())
-    }
-
-    /// `MaterialSystem.topMaterial`：在一个 1×1×1 的体积上重新跑一遍规则树。
-    #[allow(clippy::too_many_arguments)]
-    fn top_material(
-        &self,
-        _layers: &[Vec<u32>],
-        _settings: &Settings,
-        _context: &mut Context,
-        _router: &RouterSamplers,
-        _biome_manager: &BiomeManager<'_>,
-        _x: i32,
-        _y: i32,
-        _z: i32,
-        _local_x: i32,
-        _local_z: i32,
-        _new_state: u32,
-    ) -> Option<u32> {
-        // 26.3 的 `topMaterial` 会再编一次规则树；地表规则已经把草方块写回时，
-        // 下方泥土通常不会再被改动。对拍以最终方块为准，这条路径留到接进游戏时实现。
-        None
+        match error {
+            Some(failure) => Err(failure),
+            None => Ok(()),
+        }
     }
 }
 
@@ -786,7 +817,8 @@ fn carve_ellipsoid(
             if dx * dx + dz * dz >= 1.0 {
                 continue;
             }
-            for block_y in (y0..=y1).rev() {
+            // 官方是 `for (y = y1; y > y0; y--)`，下界是开的。
+            for block_y in (y0 + 1..=y1).rev() {
                 let dy = (f64::from(block_y) - 0.5 - y) / vertical;
                 if !skip(dx, dy, dz, block_y) {
                     mask.carve(local_x, block_y, local_z);
@@ -796,6 +828,7 @@ fn carve_ellipsoid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_room(
     mask: &mut CarvingMask,
     chunk_x: i32,
@@ -803,11 +836,11 @@ fn create_room(
     x: f64,
     y: f64,
     z: f64,
-    radius: f64,
+    radius: f32,
     vertical_multiplier: f64,
     floor: f64,
 ) {
-    let scale = 1.5 + f64::from(mth_sin(std::f64::consts::FRAC_PI_2)) * radius;
+    let scale = 1.5 + f64::from(mth_sin(1.570_796_370_506_286_6) * radius);
     carve_ellipsoid(
         mask,
         chunk_x,
@@ -817,12 +850,8 @@ fn create_room(
         z,
         scale,
         scale * vertical_multiplier,
-        |_, dy, _, _| dy > floor || ellipsoid_skip(dy),
+        |dx, dy, dz, _| dy <= floor || dx * dx + dy * dy + dz * dz >= 1.0,
     );
-}
-
-fn ellipsoid_skip(dy: f64) -> bool {
-    dy * dy >= 1.0
 }
 
 /// `CaveWorldCarver.createTunnel`。
@@ -851,14 +880,14 @@ fn create_tunnel(
     let mut pitch_delta = 0.0_f32;
     for step in start..length {
         let scale = 1.5
-            + f64::from(mth_sin(
-                f64::from(3.141_592_7_f32 * step as f32 / length as f32),
-            )) * f64::from(thickness);
+            + f64::from(mth_sin(f64::from(
+                std::f32::consts::PI * step as f32 / length as f32,
+            ))) * f64::from(thickness);
         let vertical_scale = scale * start_vertical;
-        let cos_yaw = mth_cos(f64::from(yaw));
-        x += f64::from(mth_cos(f64::from(pitch)) * cos_yaw);
+        let cos_pitch = mth_cos(f64::from(pitch));
+        x += f64::from(mth_cos(f64::from(yaw)) * cos_pitch);
         y += f64::from(mth_sin(f64::from(pitch)));
-        z += f64::from(mth_sin(f64::from(pitch)) * cos_yaw);
+        z += f64::from(mth_sin(f64::from(yaw)) * cos_pitch);
         pitch *= if thin { 0.92 } else { 0.7 };
         pitch += pitch_delta * 0.1;
         yaw += yaw_delta * 0.1;
@@ -867,44 +896,47 @@ fn create_tunnel(
         pitch_delta += (random.next_float() - random.next_float()) * random.next_float() * 2.0;
         yaw_delta += (random.next_float() - random.next_float()) * random.next_float() * 4.0;
         if step == branch_at && thickness > 1.0 {
-            let factor = f64::from(random.next_float() * 0.5 + 0.5);
+            // 官方每条分支先取 nextLong 当种子，再取 nextFloat 当厚度；顺序不能换。
+            let first_seed = random.next_long();
+            let first_thickness = random.next_float() * 0.5 + 0.5;
             create_tunnel(
                 mask,
                 chunk_x,
                 chunk_z,
-                TunnelRandom::new(random.next_long()),
+                TunnelRandom::new(first_seed),
                 x,
                 y,
                 z,
                 horizontal,
                 vertical,
-                random.next_float() * 0.5 + 0.5,
-                yaw - 1.570_796_4_f32,
+                first_thickness,
+                yaw - std::f32::consts::FRAC_PI_2,
                 pitch / 3.0,
                 step,
                 length,
                 1.0,
                 floor,
             );
+            let second_seed = random.next_long();
+            let second_thickness = random.next_float() * 0.5 + 0.5;
             create_tunnel(
                 mask,
                 chunk_x,
                 chunk_z,
-                TunnelRandom::new(random.next_long()),
+                TunnelRandom::new(second_seed),
                 x,
                 y,
                 z,
                 horizontal,
                 vertical,
-                random.next_float() * 0.5 + 0.5,
-                yaw + 1.570_796_4_f32,
+                second_thickness,
+                yaw + std::f32::consts::FRAC_PI_2,
                 pitch / 3.0,
                 step,
                 length,
                 1.0,
                 floor,
             );
-            let _ = factor;
             return;
         }
         if random.next_int(4) != 0 {
@@ -920,7 +952,7 @@ fn create_tunnel(
                 z,
                 scale * horizontal,
                 vertical_scale * vertical,
-                |dx, dy, dz, _| dy > floor || dx * dx + dy * dy + dz * dz >= 1.0,
+                |dx, dy, dz, _| dy <= floor || dx * dx + dy * dy + dz * dz >= 1.0,
             );
         }
     }
@@ -939,7 +971,7 @@ fn can_reach(
     let dx = x - f64::from(chunk_x * 16 + 8);
     let dz = z - f64::from(chunk_z * 16 + 8);
     let dy = f64::from(length - step);
-    let reach = f64::from(thickness + 2.0) + 16.0;
+    let reach = f64::from((thickness + 2.0) + 16.0);
     dx * dx + dz * dz - dy * dy <= reach * reach
 }
 
@@ -967,18 +999,14 @@ fn carve_canyon(
     let mut pitch_delta = 0.0_f32;
     for step in start..length {
         let scale = 1.5
-            + f64::from(mth_sin(
-                f64::from(3.141_592_7_f32 * step as f32 / length as f32),
-            )) * f64::from(thickness);
+            + f64::from(mth_sin(f64::from(
+                std::f32::consts::PI * step as f32 / length as f32,
+            ))) * f64::from(thickness);
         let mut vertical_scale = scale * y_scale;
-        let horizontal_scale = scale * f64::from(shape.horizontal_radius_factor.sample_tunnel(&random));
-        vertical_scale = update_vertical_radius(
-            &random,
-            vertical_scale,
-            step as f32,
-            length as f32,
-            shape,
-        );
+        let horizontal_scale =
+            scale * f64::from(shape.horizontal_radius_factor.sample_tunnel(&random));
+        vertical_scale =
+            update_vertical_radius(&random, vertical_scale, step as f32, length as f32, shape);
         let cos_pitch = mth_cos(f64::from(pitch));
         let sin_pitch = mth_sin(f64::from(pitch));
         x += f64::from(mth_cos(f64::from(yaw)) * cos_pitch);
@@ -1006,11 +1034,8 @@ fn carve_canyon(
                 vertical_scale,
                 |dx, dy, dz, block_y| {
                     let index = (block_y - settings.min_y - 1).max(0) as usize;
-                    let factor = width_factors
-                        .get(index)
-                        .copied()
-                        .unwrap_or(1.0);
-                    dx * dx + dz * dz + f64::from(factor) * dy * dy + dy * dy / 6.0 >= 1.0
+                    let factor = width_factors.get(index).copied().unwrap_or(1.0);
+                    (dx * dx + dz * dz) * f64::from(factor) + dy * dy / 6.0 >= 1.0
                 },
             );
         }
@@ -1037,8 +1062,8 @@ fn update_vertical_radius(
     shape: &CanyonShape,
 ) -> f64 {
     let center = 1.0 - (0.5 - step / length).abs() * 2.0;
-    let factor = shape.vertical_radius_default_factor
-        + shape.vertical_radius_center_factor * center;
+    let factor =
+        shape.vertical_radius_default_factor + shape.vertical_radius_center_factor * center;
     radius * f64::from(factor) * f64::from(0.75 + random.next_float() * 0.25)
 }
 
@@ -1086,4 +1111,3 @@ fn integer(object: &serde_json::Map<String, Value>, name: &str) -> Result<i32, S
         .and_then(|value| i32::try_from(value).ok())
         .ok_or_else(|| format!("missing field {name}"))
 }
-

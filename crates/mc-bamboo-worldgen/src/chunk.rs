@@ -25,9 +25,9 @@ use crate::{
     aquifer::Aquifer,
     biome::MultiNoiseBiomeSource,
     biome_manager::BiomeManager,
+    carver::Carvers,
     climate::TargetPoint,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
-    carver::Carvers,
     material::MaterialRules,
     math::{java_floor_div, quart_to_block},
     sampler::{Compiler, Context, Sampler},
@@ -64,7 +64,7 @@ pub struct Generator<'a> {
     worldgen: &'a Worldgen,
     settings: &'a Settings,
     biomes: &'a MultiNoiseBiomeSource,
-    router: Vec<Sampler>,
+    router: crate::settings::Samplers,
     aquifer: Option<AquiferFunctions>,
     /// `RandomState.getOrCreateRandomFactory("minecraft:aquifer")`。
     aquifer_random: crate::random::PositionalFactory,
@@ -116,19 +116,16 @@ impl<'a> Generator<'a> {
         let mut compiler = Compiler::new(seed, settings.legacy_random_source);
 
         // 编译顺序要和官方一样，编译顺序决定 cache 的编号，不过编号只要自洽就不影响结果。
-        let router: Vec<Sampler> = [
-            &settings.router.temperature,
-            &settings.router.vegetation,
-            &settings.router.continents,
-            &settings.router.erosion,
-            &settings.router.depth,
-            &settings.router.ridges,
-            &settings.router.chunk_surface_level,
-            &settings.router.final_density,
-        ]
-        .iter()
-        .map(|function| compiler.compile(function))
-        .collect();
+        let router = crate::settings::Samplers {
+            temperature: compiler.compile(&settings.router.temperature),
+            vegetation: compiler.compile(&settings.router.vegetation),
+            continents: compiler.compile(&settings.router.continents),
+            erosion: compiler.compile(&settings.router.erosion),
+            depth: compiler.compile(&settings.router.depth),
+            ridges: compiler.compile(&settings.router.ridges),
+            chunk_surface_level: compiler.compile(&settings.router.chunk_surface_level),
+            final_density: compiler.compile(&settings.router.final_density),
+        };
 
         let noises = worldgen.noises();
         let functions = worldgen.functions();
@@ -150,10 +147,12 @@ impl<'a> Generator<'a> {
             &mut compiler,
         )
         .map_err(|error| format!("material rules: {error}"))?;
-        let carvers = Carvers::compile(worldgen.raw())
-            .map_err(|error| format!("carvers: {error}"))?;
+        let carvers =
+            Carvers::compile(worldgen.raw()).map_err(|error| format!("carvers: {error}"))?;
         let cache_count = compiler.cache_count();
         let positional = compiler.positional_factory();
+        let mut material = material;
+        material.prepare(worldgen.noises(), positional, settings)?;
         let default_block = block_state(raw.get("default_block"))?;
         let default_fluid = block_state(raw.get("default_fluid"))?;
         Ok(Self {
@@ -199,9 +198,16 @@ impl<'a> Generator<'a> {
         );
         let mut context = Context::new(self.cache_count);
         let mut columns: Vec<Vec<f32>> = Vec::with_capacity(6);
-        for field in [0usize, 1, 2, 3, 4, 5] {
+        for sampler in [
+            &self.router.temperature,
+            &self.router.vegetation,
+            &self.router.continents,
+            &self.router.erosion,
+            &self.router.depth,
+            &self.router.ridges,
+        ] {
             let mut buffer = context.acquire(volume.len());
-            self.router[field].sample_volume(&mut context, &mut buffer, &volume);
+            sampler.sample_volume(&mut context, &mut buffer, &volume);
             columns.push(buffer);
         }
 
@@ -268,7 +274,9 @@ impl<'a> Generator<'a> {
             lava_state()?,
             self.empty,
         );
-        self.router[7].sample_volume(&mut context, &mut density, &volume);
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
 
         let mut layers = vec![vec![self.empty; 256]; height as usize];
         for z in 0..16 {
@@ -296,7 +304,7 @@ impl<'a> Generator<'a> {
                 chunk_z,
                 self.settings,
                 &mut context,
-                &self.router_samplers(),
+                &self.router,
                 &biomes,
                 self.worldgen_noises(),
                 self.positional,
@@ -310,28 +318,16 @@ impl<'a> Generator<'a> {
                 chunk_z,
                 self.settings,
                 &mut context,
-                &self.router_samplers(),
+                &self.router,
                 &biomes,
                 &mut aquifer,
+                &self.material,
+                self.worldgen.noises(),
+                self.positional,
                 self.seed,
             )?;
         }
         Ok(layers)
-    }
-
-    /// 六个气候采样器的 `Climate.Sampler` 视图，地表规则查群系要用。
-    fn router_samplers(&self) -> crate::settings::Samplers {
-        // `Sampler` 是枚举，克隆一份让借用关系简单；一个区块只调一次。
-        crate::settings::Samplers {
-            temperature: self.router[0].clone(),
-            vegetation: self.router[1].clone(),
-            continents: self.router[2].clone(),
-            erosion: self.router[3].clone(),
-            depth: self.router[4].clone(),
-            ridges: self.router[5].clone(),
-            chunk_surface_level: self.router[6].clone(),
-            final_density: self.router[7].clone(),
-        }
     }
 
     fn worldgen_noises(&self) -> &'a NoiseRegistry {

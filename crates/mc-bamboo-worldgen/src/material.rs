@@ -41,6 +41,12 @@ const BAND_COUNT: usize = 192;
 #[derive(Debug)]
 pub struct MaterialRules {
     root: RuleNode,
+    /// `MaterialSystem` 的九条内置噪声只跟种子有关，按 `Generator` 缓存一次。
+    system: Option<System>,
+    /// 条件噪声实例，按 `noise_ids` 的顺序。
+    condition_noises: Vec<Arc<NoiseInstance>>,
+    /// 192 格陶土色带，按种子算一次。
+    clay_bands: Vec<u32>,
     veins: Vec<Vein>,
     /// 条件噪声的 ID，按首次出现顺序编号。
     noise_ids: Vec<String>,
@@ -232,10 +238,39 @@ impl MaterialRules {
         )?;
         Ok(Self {
             root: tree,
+            system: None,
+            condition_noises: Vec::new(),
+            clay_bands: Vec::new(),
             veins,
             noise_ids,
             ore_random: compiler.random_factory("minecraft:ore"),
         })
+    }
+
+    /// 按种子造一次九条内置噪声、条件噪声和陶土色带。
+    pub fn prepare(
+        &mut self,
+        noises: &NoiseRegistry,
+        positional: PositionalFactory,
+        settings: &Settings,
+    ) -> Result<(), String> {
+        if self.system.is_some() {
+            return Ok(());
+        }
+        let system = System::new(noises, positional, settings)?;
+        self.condition_noises = self
+            .noise_ids
+            .iter()
+            .map(|id| {
+                let parameters = noises
+                    .get(id)
+                    .ok_or_else(|| format!("missing noise {id}"))?;
+                Ok(Arc::new(parameters.create(&positional.from_hash_of(id))))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.clay_bands = generate_bands(&system.bands_random);
+        self.system = Some(system);
+        Ok(())
     }
 
     /// `MaterialSystem.buildSurface`：把规则应用到 `layers` 上。
@@ -252,70 +287,31 @@ impl MaterialRules {
         noises: &NoiseRegistry,
         positional: PositionalFactory,
     ) -> Result<(), String> {
-        let system = System::new(noises, positional, settings)?;
-        let min_x = chunk_x.wrapping_mul(16);
-        let min_z = chunk_z.wrapping_mul(16);
+        let system = self
+            .system
+            .as_ref()
+            .ok_or("material system was not prepared")?;
         let highest = highest_filled_section(layers);
         let top_y = (highest + settings.min_y / 16) * 16 + 15;
-        let expected = Volume::blocks(
-            (16, (top_y - settings.min_y + 1).max(1), 16),
-            (min_x, settings.min_y, min_z),
-        );
-        // 官方 `MaterialRule.compile` 的顺序：两条矿脉各对 density/richness 成批求值，
-        // fillerGap 不求值（编译时只是 `getDensitiesInChunk(fn, false)`）。
-        let mut vein_buffers = Vec::with_capacity(self.veins.len());
-        for vein in &self.veins {
-            let mut density = context.acquire(expected.len());
-            vein.density.sample_volume(context, &mut density, &expected);
-            let mut richness = context.acquire(expected.len());
-            vein.richness
-                .sample_volume(context, &mut richness, &expected);
-            vein_buffers.push(VeinBuffers { density, richness });
-        }
-        let preliminary = Volume::blocks((16, 1, 16), (min_x, 0, min_z));
-        let condition_noises = self
-            .noise_ids
-            .iter()
-            .map(|id| {
-                let parameters = noises
-                    .get(id)
-                    .ok_or_else(|| format!("missing noise {id}"))?;
-                Ok(Arc::new(parameters.create(&positional.from_hash_of(id))))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        let mut scan = Scan {
-            surface_noise: &system.surface,
-            surface_secondary_noise: &system.surface_secondary,
-            clay_bands_offset_noise: &system.clay_bands_offset,
-            positional,
-            noises: condition_noises,
-            clay_bands: generate_bands(&system.bands_random),
-            sea_level: settings.sea_level,
-            min_y: settings.min_y,
-            height: settings.height,
-            expected,
-            preliminary,
-            preliminary_buffer: context.acquire(preliminary.len()),
-            preliminary_ready: false,
+        let min_x = chunk_x.wrapping_mul(16);
+        let min_z = chunk_z.wrapping_mul(16);
+        let mut scan = Scan::new(
+            self,
+            system,
+            layers,
+            chunk_x,
+            chunk_z,
+            settings,
+            context,
             router,
             biome_manager,
-            block_x: min_x,
-            block_z: min_z,
-            surface_gradient_x: 0,
-            surface_gradient_z: 0,
-            surface_depth: 0,
-            surface_secondary: None,
-            min_surface_level: None,
-            block_y: 0,
-            water_height: I32_MIN,
-            stone_depth_below: 0,
-            stone_depth_above: 0,
-            biome: None,
-            noise_2d: vec![0.0; self.noise_ids.len()],
-            noise_3d: vec![0.0; self.noise_ids.len()],
-            veins: vein_buffers,
-        };
+            noises,
+            positional,
+            (16, (top_y - settings.min_y + 1).max(1), 16),
+            (min_x, settings.min_y, min_z),
+            (16, 1, 16),
+            (min_x, 0, min_z),
+        )?;
 
         for x in 0..16 {
             for z in 0..16 {
@@ -326,7 +322,7 @@ impl MaterialRules {
                     biome_manager.biome(router, &mut Context::uncached(), block_x, start, block_z);
                 if biome_manager::biome_name(biome) == "minecraft:eroded_badlands" {
                     eroded_badlands_extension(
-                        layers, &system, settings, x, z, block_x, block_z, start,
+                        layers, system, settings, x, z, block_x, block_z, start,
                     );
                 }
                 let start = world_surface_height(layers, settings.min_y, x, z) + 1;
@@ -382,7 +378,7 @@ impl MaterialRules {
                     let min_surface = scan.min_surface_level(context);
                     frozen_ocean_extension(
                         layers,
-                        &system,
+                        system,
                         settings,
                         x,
                         z,
@@ -401,6 +397,60 @@ impl MaterialRules {
         }
         context.release(scan.preliminary_buffer);
         Ok(())
+    }
+
+    /// `MaterialSystem.topMaterial`：在 1×1×1 的体积上重新编译并应用一次规则树。
+    ///
+    /// 雕刻器把草方块挖掉后，用它决定下面那格泥土该变成什么。
+    #[allow(clippy::too_many_arguments)]
+    pub fn top_material(
+        &self,
+        layers: &[Vec<u32>],
+        chunk_x: i32,
+        chunk_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        surface_gradient_x: i32,
+        surface_gradient_z: i32,
+        water_height: i32,
+        settings: &Settings,
+        context: &mut Context,
+        router: &RouterSamplers,
+        biome_manager: &BiomeManager<'_>,
+        noises: &NoiseRegistry,
+        positional: PositionalFactory,
+    ) -> Result<Option<u32>, String> {
+        let system = self
+            .system
+            .as_ref()
+            .ok_or("material system was not prepared")?;
+        let mut scan = Scan::new(
+            self,
+            system,
+            layers,
+            chunk_x,
+            chunk_z,
+            settings,
+            context,
+            router,
+            biome_manager,
+            noises,
+            positional,
+            (1, 1, 1),
+            (x, y, z),
+            (1, 1, 1),
+            (x, 0, z),
+        )?;
+        scan.update_xz(x, z, surface_gradient_x, surface_gradient_z);
+        scan.update_y(1, 1, water_height, y);
+        let state = self.apply(&self.root, &mut scan, context, x, y, z);
+        for buffer in scan.veins {
+            context.release(buffer.density);
+            context.release(buffer.richness);
+        }
+        context.release(scan.preliminary_buffer);
+        Ok((state != NO_STATE).then_some(state))
     }
 
     /// `RuleEvaluator.tryApply`。
@@ -584,6 +634,78 @@ impl MaterialRules {
     }
 }
 
+impl<'a> Scan<'a> {
+    /// 造一次地表扫描的状态；`topMaterial` 也走这里，只是体积是 1×1×1。
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        rules: &MaterialRules,
+        system: &'a System,
+        _layers: &[Vec<u32>],
+        chunk_x: i32,
+        chunk_z: i32,
+        settings: &Settings,
+        context: &mut Context,
+        router: &'a RouterSamplers,
+        biome_manager: &'a BiomeManager<'a>,
+        _noises: &NoiseRegistry,
+        positional: PositionalFactory,
+        expected_size: (i32, i32, i32),
+        expected_min: (i32, i32, i32),
+        preliminary_size: (i32, i32, i32),
+        preliminary_min: (i32, i32, i32),
+    ) -> Result<Scan<'a>, String> {
+        let min_x = chunk_x.wrapping_mul(16);
+        let min_z = chunk_z.wrapping_mul(16);
+        let expected = Volume::blocks(expected_size, expected_min);
+        // 官方 `MaterialRule.compile` 的顺序：两条矿脉各对 density/richness 成批求值，
+        // fillerGap 不求值（编译时只是 `getDensitiesInChunk(fn, false)`）。
+        let mut vein_buffers = Vec::with_capacity(rules.veins.len());
+        for vein in &rules.veins {
+            let mut density = context.acquire(expected.len());
+            vein.density.sample_volume(context, &mut density, &expected);
+            let mut richness = context.acquire(expected.len());
+            vein.richness
+                .sample_volume(context, &mut richness, &expected);
+            vein_buffers.push(VeinBuffers { density, richness });
+        }
+        let preliminary = Volume::blocks(preliminary_size, preliminary_min);
+        let condition_noises = rules.condition_noises.clone();
+
+        Ok(Scan {
+            surface_noise: &system.surface,
+            surface_secondary_noise: &system.surface_secondary,
+            clay_bands_offset_noise: &system.clay_bands_offset,
+            positional,
+            noises: condition_noises,
+            clay_bands: rules.clay_bands.clone(),
+            sea_level: settings.sea_level,
+            min_y: settings.min_y,
+            height: settings.height,
+            expected,
+            preliminary,
+            preliminary_buffer: context.acquire(preliminary.len()),
+            preliminary_ready: false,
+            router,
+            biome_manager,
+            block_x: min_x,
+            block_z: min_z,
+            surface_gradient_x: 0,
+            surface_gradient_z: 0,
+            surface_depth: 0,
+            surface_secondary: None,
+            min_surface_level: None,
+            block_y: 0,
+            water_height: I32_MIN,
+            stone_depth_below: 0,
+            stone_depth_above: 0,
+            biome: None,
+            noise_2d: vec![0.0; rules.noise_ids.len()],
+            noise_3d: vec![0.0; rules.noise_ids.len()],
+            veins: vein_buffers,
+        })
+    }
+}
+
 impl Scan<'_> {
     fn update_xz(&mut self, x: i32, z: i32, gradient_x: i32, gradient_z: i32) {
         self.block_x = x;
@@ -692,6 +814,7 @@ impl Scan<'_> {
 }
 
 /// `MaterialSystem` 的九条内置噪声，用 `RandomState.random` 实例化。
+#[derive(Debug)]
 struct System {
     surface: NoiseInstance,
     surface_secondary: NoiseInstance,
@@ -1190,6 +1313,18 @@ fn make_bands(random: &Random, bands: &mut [u32], base: i32, state: u32) {
             bands[start + offset] = state;
         }
     }
+}
+
+/// `MaterialSystem.getSurfaceGradientX`：给 `topMaterial` 用。
+pub fn surface_gradient_x(layers: &[Vec<u32>], min_y: i32, x: i32, z: i32) -> i32 {
+    world_surface_height(layers, min_y, (x + 1).min(15), z)
+        - world_surface_height(layers, min_y, (x - 1).max(0), z)
+}
+
+/// `MaterialSystem.getSurfaceGradientZ`：给 `topMaterial` 用。
+pub fn surface_gradient_z(layers: &[Vec<u32>], min_y: i32, x: i32, z: i32) -> i32 {
+    world_surface_height(layers, min_y, x, (z + 1).min(15))
+        - world_surface_height(layers, min_y, x, (z - 1).max(0))
 }
 
 /// `WORLD_SURFACE_WG`：从顶往下第一个非空方块。
