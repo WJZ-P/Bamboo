@@ -1099,7 +1099,8 @@ impl LevelSideState for Recording<'_> {
     fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
         let pos = entity.pos();
         let facts = entity_facts(entity.as_ref());
-        self.read_entity(pos, Some(entity.as_ref()), 6_u8);
+        // 读的是刚要写入的实体本身，是「果」不是「因」，不作守卫。
+        self.read_entity_driver(pos, Some(entity.as_ref()), 6_u8);
         // 运行时只支持 `PistonMoving`：其余实体类型没有按值还原的路径，
         // 见到就作废整条记录，别只放宽白名单。
         if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
@@ -1142,14 +1143,14 @@ impl LevelSideState for Recording<'_> {
         let value = self.level.take_block_entity_at(pos);
         // ticker 的内部 id 是递增的实现细节，不进读集合。
         let entity = value.as_ref().map(|(_, entity)| entity.as_ref());
-        self.read_entity_driver(pos, entity, 3_u8);
+        self.read_entity(pos, entity, 3_u8);
         value
     }
 
     fn take_block_entity(&mut self, pos: BlockPos, id: u64) -> Option<Box<dyn BlockEntity>> {
         let value = self.level.take_block_entity(pos, id);
         let _ = id;
-        self.read_entity_driver(pos, value.as_deref(), 4_u8);
+        self.read_entity(pos, value.as_deref(), 4_u8);
         value
     }
 

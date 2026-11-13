@@ -357,7 +357,6 @@ pub fn run_scheduled_ticks_with_cache(
         world.tick_block_entities_cached(cache, now);
         effects.extend(world.drain_effects());
     }
-    crate::crafter::tick_crafting_clocks(&mut World::new(level, ticks));
     Outcome {
         result: InteractionResult::Pass,
         used_without_item: false,
@@ -421,7 +420,7 @@ pub fn run_block_event_phase_with_cache(
 fn run_block_ticks_cached(world: &mut World, cache: &mut RedstoneCache, now: i64) {
     while let Some((pos, block)) = world.ticks_mut().next_due() {
         let trigger = crate::level::Trigger::ScheduledTick { pos, kind: block };
-        run_cached_trigger(world, cache, trigger, now, |world| {
+        run_cached_trigger(world, cache, trigger, now, Default::default(), |world| {
             let state = world.block_state(pos);
             if state.block_id() == block {
                 state.tick(world, pos);
@@ -448,7 +447,7 @@ fn run_block_events_cached(world: &mut World, cache: &mut RedstoneCache, now: i6
             param_a: event.param_a,
             param_b: event.param_b,
         };
-        run_cached_trigger(world, cache, trigger, now, |world| {
+        run_cached_trigger(world, cache, trigger, now, Default::default(), |world| {
             let state = world.block_state(event.pos);
             if state.trigger_event(world, event.pos, event.param_a, event.param_b) {
                 world.push_effect(crate::level::Effect::BlockEvent {

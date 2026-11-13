@@ -20,6 +20,16 @@ use crate::{
     world::World,
 };
 
+/// 方块实体 tick 阶段：驱动在取出实体之前抄下的可观察状态。
+/// 守卫阶段实体还在表里，但 `take` 之后调用的记录读的是「拿出来的那个」；
+/// 用这份值重算，避免把「果」当成「因」。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TakenEntityFacts {
+    pub pos: Option<BlockPos>,
+    pub facts: Option<u64>,
+    pub time: u64,
+}
+
 /// 守卫重算：计划刻查询由 `BlockTicks` 给，其余读项由 `Level` 给。
 fn guard_value(
     read: &GuardRead,
@@ -27,6 +37,7 @@ fn guard_value(
     ticks: &BlockTicks,
     trigger_state: BlockState,
     trigger_pos: BlockPos,
+    taken: TakenEntityFacts,
 ) -> Option<u64> {
     let hash = match read.method {
         ReadMethod::Block | ReadMethod::Trigger => crate::recording::stable_hash(&trigger_state.0),
@@ -63,17 +74,25 @@ fn guard_value(
             } else if sub == 1 {
                 crate::recording::stable_hash(&(tag, level.is_block_entity_taken(pos)))
             } else {
-                let facts = level
-                    .block_entity_dyn(pos)
-                    .map(crate::recording::guard_facts::entity_facts);
+                let facts = if taken.pos == Some(pos) {
+                    taken.facts
+                } else {
+                    level
+                        .block_entity_dyn(pos)
+                        .map(crate::recording::guard_facts::entity_facts)
+                };
                 crate::recording::stable_hash(&(tag, facts))
             }
         }
         ReadMethod::EntityTime(pos) => {
-            let entity = level.block_entity_dyn(pos);
-            let time = entity.map_or(0, |entity| {
-                crate::recording::guard_facts::entity_time_facts(entity, ticks.now())
-            });
+            let time = if taken.pos == Some(pos) {
+                taken.time
+            } else {
+                let entity = level.block_entity_dyn(pos);
+                entity.map_or(0, |entity| {
+                    crate::recording::guard_facts::entity_time_facts(entity, ticks.now())
+                })
+            };
             crate::recording::stable_hash(&time)
         }
         ReadMethod::Slots(pos, sub) => {
@@ -163,6 +182,7 @@ pub fn run_cached_trigger(
     cache: &mut RedstoneCache,
     trigger: Trigger,
     now: i64,
+    taken: TakenEntityFacts,
     interpret: impl FnOnce(&mut World<'_>),
 ) {
     if !cacheable_trigger(trigger) {
@@ -187,7 +207,7 @@ pub fn run_cached_trigger(
         let mut state = None;
         let mut guard = |read: &GuardRead| {
             let state = *state.get_or_insert_with(|| level.block_state(pos));
-            guard_value(read, level, ticks, state, pos)
+            guard_value(read, level, ticks, state, pos, taken)
         };
         let section = |s: ChunkSection| level.section_hash(s.chunk, s.section_y);
         cache.try_replay(trigger, &mut guard, &section)
@@ -267,15 +287,15 @@ fn apply_effects(world: &mut World<'_>, effects: &[ReplayEffect]) {
                 source,
                 progress,
                 progress_o,
-            } => world.replay_piston_moving(
-                *pos,
-                *moved_state,
-                *direction,
-                *extending,
-                *source,
-                *progress,
-                *progress_o,
-            ),
+            } => world.replay_piston_moving(crate::world::PistonReplayFacts {
+                pos: *pos,
+                moved_state: *moved_state,
+                direction: *direction,
+                extending: *extending,
+                source: *source,
+                progress: *progress,
+                progress_o: *progress_o,
+            }),
             ReplayEffect::RestorePistonMoving {
                 pos,
                 moved_state,
@@ -284,15 +304,15 @@ fn apply_effects(world: &mut World<'_>, effects: &[ReplayEffect]) {
                 source,
                 progress,
                 progress_o,
-            } => world.replay_restore_piston_moving(
-                *pos,
-                *moved_state,
-                *direction,
-                *extending,
-                *source,
-                *progress,
-                *progress_o,
-            ),
+            } => world.replay_restore_piston_moving(crate::world::PistonReplayFacts {
+                pos: *pos,
+                moved_state: *moved_state,
+                direction: *direction,
+                extending: *extending,
+                source: *source,
+                progress: *progress,
+                progress_o: *progress_o,
+            }),
             ReplayEffect::RemoveBlockEntity { pos } => world.replay_remove_block_entity(*pos),
             ReplayEffect::ContainerSlots { pos, slots } => {
                 world.replay_container_slots(*pos, slots.clone());
@@ -313,15 +333,15 @@ fn apply_effects(world: &mut World<'_>, effects: &[ReplayEffect]) {
                 scale,
                 base,
                 except_initiator,
-            } => world.replay_piston_sound(
-                *pos,
-                *sound,
-                mc_bamboo_data::SoundSource::from_id(*source),
-                f32::from_bits(*volume),
-                f32::from_bits(*scale),
-                f32::from_bits(*base),
-                *except_initiator,
-            ),
+            } => world.replay_piston_sound(crate::cache::PistonSoundEffect {
+                pos: *pos,
+                sound: *sound,
+                source: *source,
+                volume: *volume,
+                scale: *scale,
+                base: *base,
+                except_initiator: *except_initiator,
+            }),
         }
     }
 }
@@ -336,16 +356,12 @@ pub const fn trigger_position(trigger: Trigger) -> BlockPos {
     }
 }
 
-/// 目前只接方块计划刻和方块事件。
-///
-/// 方块实体 tick 的守卫/重放还在做：ticker 临时把实体从表里拿出来，重放必须
-/// 同时还原「解释执行后实体的新状态」和 ticker 的内部顺序，逐刻差分还没过，
-/// 所以这一阶段明确退回解释执行。读项和效果的录制照旧产出，等差分过了再打开，
-/// 不能靠放宽白名单让守卫漏读。
 pub const fn cacheable_trigger(trigger: Trigger) -> bool {
     matches!(
         trigger,
-        Trigger::ScheduledTick { .. } | Trigger::BlockEvent { .. }
+        Trigger::ScheduledTick { .. }
+            | Trigger::BlockEvent { .. }
+            | Trigger::BlockEntityTick { .. }
     )
 }
 

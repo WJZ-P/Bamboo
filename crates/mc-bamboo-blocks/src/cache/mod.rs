@@ -119,6 +119,19 @@ pub struct SectionKey {
     pub hash: u128,
 }
 
+/// 活塞伸出/收回的音效参数，pitch 重放时照样从世界随机源取一个数算。
+/// 用值对象装起来，让 `World::replay_piston_sound` 不带七八个参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PistonSoundEffect {
+    pub pos: BlockPos,
+    pub sound: i32,
+    pub source: u8,
+    pub volume: u32,
+    pub scale: u32,
+    pub base: u32,
+    pub except_initiator: bool,
+}
+
 /// 一次可重放的效果，带真实参数（实验的 `Write` 只存哈希，不能用来重放）。
 ///
 /// 不实现 `Hash`：`ItemStack` 没有 `Hash`，而效果序列只按值比较、不进键。
@@ -315,10 +328,7 @@ pub const fn supported_write(write: Write) -> bool {
             | Write::Redstone { kind: 0 | 6, .. }
             | Write::BlockEvent { popped: None, .. }
             | Write::BlockEntity { kind: 0 | 1, .. }
-            | Write::Container {
-                kind: 0 | 1 | 2,
-                ..
-            }
+            | Write::Container { kind: 0..=2, .. }
             | Write::Effect(_)
     )
 }
