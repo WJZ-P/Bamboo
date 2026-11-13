@@ -143,7 +143,7 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 | `yPos` | `MIN_Y / 16` = −4 |
 | `LastUpdate` | 调用方给的 `last_update`（接进游戏后来自 `GameTime`） |
 | `InhabitedTime` | 调用方给的 `inhabited_time`（现在写 0） |
-| `Status` | `"minecraft:full"`；读的时候不是 `full` 就明确拒绝，交给生成流水线 |
+| `Status` | 写 `"minecraft:full"`；读任意 `Status`，非 `full` 按 ProtoChunk 用超平坦模板补齐（见「外置区块和非 `full` 的 ProtoChunk」） |
 | `UpgradeData` | 不写（官方只在非空时写） |
 | `blending_data` / `below_zero_retrogen` | 不写（官方 `storeNullable` 只在非空时写） |
 | `sections` | 见 5.2 |
@@ -662,8 +662,9 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    走超平坦模板，不引入一 tick 延迟，保住进服首批次区块顺序（官方探针 690/690 覆盖这一点）。
    `mc-bamboo-game::chunk_codec`
    把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器累计耗时）。
-   Director 的 `Task::Read` 现在是真正的读盘阶段：`Status = full` 解码交付、盘上没有走
-   超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐才交付（D8）。卸载时脏区块
+   Director 的 `Task::Read` 现在是真正的读盘阶段：全 `Status` 都解码（非 `full` 按
+   ProtoChunk 补齐）、盘上没有走超平坦模板、读坏 warn + 模板；实体文件与区块一起读齐
+   才交付（D8）。**带世界目录时两种来源统一走异步 IO 流水线，见第 14 节**。卸载时脏区块
    序列化后交给 IO 线程、pristine 直接丢；Parking 只留作写盘途中缓冲，写盘途中被
    请求回来拿最新内容；同区块新快照丢旧快照；运行中按官方字节码的节奏保存
    （6000 刻全量 + 每刻最多 20 个、单区块 10 秒冷却）。进程内「放方块、存盘、重启、读回」测试覆盖方块、方块实体、
