@@ -783,16 +783,21 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   `chunk_tickets.dat` 写空 tickets 列表。这五份都由 `mc-bamboo-vanilla saved-data` /
   `world-dir` 用官方 codec 解码对拍，并故意写坏 `level.dat` / 一个键验证会报错。
   没建模的 saved data 不写文件（官方 `computeIfAbsent` 会造默认值）。
+- 进服的区块到达顺序照官方 `ChunkMap.scheduleChunkLoad` / `PlayerChunkSender`：
+  字节码里没有「盘上有就异步读、盘上没有就同步生成」的快路径，所有区块都先过
+  异步加载流水线，盘上没有时 IO 线程回 `chunk: None`，下一刻开头和盘上的读结果
+  一起由 `poll_io` 收回，经同一次 `pump` 按距离排序交付，再由 `PlayerChunkSender`
+  按 `ChunkPos.distanceSquared(玩家所在区块)` 升序发。所以带世界目录时**生成也多
+  一次 IO 线程往返、晚一刻交付**，两种来源不会再出现远的比近的先到；没接世界目录
+  （测试、对拍、压测）仍是当刻同步走模板，停放表命中的写盘途中盒子仍是同步快路径。
+  回归测试 `a_saved_world_delivers_the_nearest_chunk_first` 钉住「第一包是出生点、
+  第一批正好是 3×3」；`tools/probe.sh <目录> <端口> --loaded` 先建档再重启跑两遍。
 - `/save-off` 照官方 `noSave`：停掉匀速保存、6000 刻自动保存和区块卸载；
   玩家离开、`/save-all`（force）和关服不受影响。第二次 Ctrl+C / 桌面端第二次停止
   明确记录「未保存的改动会丢」并立刻结束进程。F6 背压只暂缓收回，交付照常。
 
 ### 已知但没处理的（以后再看）
 
-- 有存档的世界里，进服时盘上的区块走异步读、晚一刻交付，而盘上没有的区块同步用
-  模板，所以远处的区块可能先到。探针是按全新世界校准的（带存档时约 576/629），
-  这一项不算回归；崩溃测试重启后只要求官方客户端能登录、能读世界、连接不断开。
-  等世界生成也走异步以后再统一处理。
 - 游戏规则读盘时遇到坏的条目只忽略那一条，官方是整份解码失败、全部退回默认。
 - `level.dat` 里 `LevelName`、`allowCommands`、`DataPacks` 等字段写的是默认值或读入时
   的原值，不是运行时的真值。
@@ -818,7 +823,9 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
 
 - 进程内「放方块、存盘、重启、读回」往返测试、写盘途中重新加载、烧到一半的休眠
   熔炉存盘重启、装盒后睡着的熔炉在另一个线程编码字节一致、1000 刻自动保存差分
-  测试、复查探针的回归测试。
+  测试、复查探针的回归测试、带存档世界「最近的区块先到」的回归测试。
+- `tools/probe.sh <目录> <端口>` 跑全新世界；`<目录> <端口> --loaded` 用同一个
+  临时目录先建档、重启再跑一遍，两遍都报 `PROBE RESULT`。
 - `mc-bamboo-vanilla world-dir <目录> <java>`、`saved-data <java>`、
   `world-block <目录> <x> <y> <z> <方块名> <java>` 用官方 codec 检查真实目录。
 - `tools/crash-test.sh`：起服务端 → 官方探针 721/721 → 放一个具体标记方块 →
