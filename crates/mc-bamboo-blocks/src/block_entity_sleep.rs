@@ -57,6 +57,8 @@ enum Action {
     BoxChunk,
     /// 冻结 / 恢复熔炉所在区块。
     Freeze(bool),
+    /// 改世界边界，见 [`apply_border`]。
+    Border(i32),
     /// 开着的界面每刻读数据槽，这里记一次显式读取。
     MenuRead,
 }
@@ -79,6 +81,7 @@ impl Script {
                 57 if now > 300 && now % 5 == 0 => Some(Action::BoxChunk),
                 58..=60 => Some(Action::Freeze(random.next_int(2) == 0)),
                 61..=70 => Some(Action::MenuRead),
+                71..=73 => Some(Action::Border(random.next_int(BORDER_KINDS))),
                 _ => None,
             };
             if let Some(action) = action {
@@ -170,6 +173,8 @@ impl Scene {
     }
 
     fn step(&mut self, now: i64) {
+        // 官方 `ServerLevel.tick` 开头的 "world border" 阶段。
+        self.level.border.tick();
         self.ticks.set_time(now);
         set_block_entity_clock(now);
         while self
@@ -268,6 +273,10 @@ impl Scene {
                     .set_chunk_block_entity_ticking(ChunkPos::new(0, 0), !frozen);
                 self.level.set_frozen(ChunkPos::new(0, 0), frozen);
             }
+            Action::Border(kind) => {
+                let _ = world;
+                apply_border(&mut self.level.border, kind);
+            }
             Action::MenuRead => {
                 // 快照里已经每刻读一次数据槽；这里额外读一次并记进快照。
                 if let Some(entity) = world.block_entity::<FurnaceEntity>(FURNACE) {
@@ -341,6 +350,43 @@ fn place_hoppers(world: &mut World<'_>) {
             UPDATE_ALL,
         );
         world.set_block_entity(Box::new(HopperEntity::new(pos)));
+    }
+}
+
+/// [`apply_border`] 的种类数。
+const BORDER_KINDS: i32 = 5;
+
+/// 改世界边界：机器在 (0, 0)，漏斗在 x = -1 或 z = -1。
+///
+/// 中心 (2, 0.5) 的边界尺寸跨过 3、4、6 时，机器和两个漏斗在不同的刻进出边界；
+/// 渐变让这些时刻落在两次动作之间。
+fn apply_border(border: &mut crate::WorldBorder, kind: i32) {
+    match kind {
+        // 默认边界，全部在界内。
+        0 => {
+            border.set_center(0.0, 0.0);
+            border.set_size(crate::MAX_SIZE);
+        }
+        // 移到远处，全部在界外。
+        1 => {
+            border.set_center(100.0, 100.0);
+            border.set_size(10.0);
+        }
+        // 缩小渐变：从全包住到全在外面。
+        2 => {
+            border.set_center(2.0, 0.5);
+            border.lerp_size_between(30.0, 0.5, 40, 0);
+        }
+        // 扩大渐变：反过来。
+        3 => {
+            border.set_center(2.0, 0.5);
+            border.lerp_size_between(0.5, 30.0, 40, 0);
+        }
+        // 静态的中间尺寸：机器在界内，x = -1 的漏斗在界外。
+        _ => {
+            border.set_center(2.0, 0.5);
+            border.set_size(5.0);
+        }
     }
 }
 
@@ -754,6 +800,8 @@ enum SleepAction {
     BoxChunk,
     /// 冻结 / 恢复方块实体所在的区块。
     Freeze(bool),
+    /// 改世界边界，见 [`apply_border`]。
+    Border(i32),
     /// 换掉漏斗的 `ENABLED`，考验漏斗自己的唤醒入口。
     ToggleHopper,
     /// 往漏斗链上游放一个物品（会送进机器 / 或抽走结果）。
@@ -791,6 +839,7 @@ impl SleepScript {
                 64..=68 => Some(SleepAction::ComparatorRead),
                 69 if now > 400 && now % 11 == 0 => Some(SleepAction::Restart),
                 70..=80 => Some(SleepAction::MenuRead),
+                81..=83 => Some(SleepAction::Border(random.next_int(BORDER_KINDS))),
                 _ => None,
             };
             if let Some(action) = action {
@@ -894,6 +943,8 @@ impl SleepScene {
     }
 
     fn step(&mut self, now: i64) {
+        // 官方 `ServerLevel.tick` 开头的 "world border" 阶段。
+        self.level.border.tick();
         self.ticks.set_time(now);
         set_block_entity_clock(now);
         while self
@@ -1004,6 +1055,10 @@ impl SleepScene {
             SleepAction::Restart => {
                 let _ = world;
                 self.restart_machine();
+            }
+            SleepAction::Border(kind) => {
+                let _ = world;
+                apply_border(&mut self.level.border, kind);
             }
             SleepAction::MenuRead => self.menu.extend(sleep_menu_values(&self.level)),
         }

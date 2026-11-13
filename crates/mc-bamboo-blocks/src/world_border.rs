@@ -542,6 +542,22 @@ impl WorldBorder {
         self.is_within_bounds(f64::from(pos.x), f64::from(pos.z), 0.0)
     }
 
+    /// 这一刻的边界换成整数方块坐标的盒子，和 [`Self::is_within_bounds_pos`] 等价，
+    /// 但每次判断只是四次整数比较。
+    ///
+    /// The border as an integer block box at this tick, equivalent to
+    /// [`Self::is_within_bounds_pos`] but costing four integer comparisons per check.
+    pub fn block_box(&self) -> BlockBox {
+        // 整数 x 满足 `x >= min` 当且仅当 `x >= ceil(min)`，满足 `x < max` 当且仅当
+        // `x < ceil(max)`；`as` 对超界和 NaN 是饱和转换，不会 panic。
+        BlockBox {
+            min_x: self.min_x().ceil() as i64,
+            max_x: self.max_x().ceil() as i64,
+            min_z: self.min_z().ceil() as i64,
+            max_z: self.max_z().ceil() as i64,
+        }
+    }
+
     /// `isWithinBounds(ChunkPos)`：两个对角都在界内。
     ///
     /// `isWithinBounds(ChunkPos)`: both opposite corners must be inside.
@@ -748,6 +764,58 @@ fn clamp(value: f64, min: f64, max: f64) -> f64 {
         max
     } else {
         value
+    }
+}
+
+/// 世界边界在某一刻覆盖的方块列：`min ≤ x < max`、`min ≤ z < max`，方块坐标。
+///
+/// 官方 `LevelChunk.isTicking(BlockPos)` 用的就是 `isWithinBounds(BlockPos)`，只看方块的
+/// 整数 X / Z。盒子是空的（`min ≥ max`）时没有方块在界内。
+///
+/// The block columns a world border covers at one tick: `min ≤ x < max` and
+/// `min ≤ z < max` in block coordinates. Empty when `min ≥ max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockBox {
+    pub min_x: i64,
+    pub max_x: i64,
+    pub min_z: i64,
+    pub max_z: i64,
+}
+
+impl BlockBox {
+    /// 这一格在不在盒子里。
+    ///
+    /// Whether this block is inside the box.
+    pub fn contains(self, pos: BlockPos) -> bool {
+        let (x, z) = (i64::from(pos.x), i64::from(pos.z));
+        x >= self.min_x && x < self.max_x && z >= self.min_z && z < self.max_z
+    }
+
+    /// 这个区块的 16×16 列里是不是至少有一列在盒子里。
+    ///
+    /// Whether at least one column of this chunk is inside the box.
+    pub fn touches_chunk(self, chunk: ChunkPos) -> bool {
+        let (x0, z0) = (i64::from(chunk.x) * 16, i64::from(chunk.z) * 16);
+        !self.is_empty()
+            && x0 < self.max_x
+            && x0 + 16 > self.min_x
+            && z0 < self.max_z
+            && z0 + 16 > self.min_z
+    }
+
+    /// 盒子里一列方块都没有（边界缩到不足一格宽、又没盖住任何整数坐标）。
+    ///
+    /// No block column is inside the box.
+    pub fn is_empty(self) -> bool {
+        self.min_x >= self.max_x || self.min_z >= self.max_z
+    }
+
+    /// 这个区块的 16×16 列是不是全在盒子里。
+    ///
+    /// Whether every column of this chunk is inside the box.
+    pub fn covers_chunk(self, chunk: ChunkPos) -> bool {
+        let (x0, z0) = (i64::from(chunk.x) * 16, i64::from(chunk.z) * 16);
+        x0 >= self.min_x && x0 + 16 <= self.max_x && z0 >= self.min_z && z0 + 16 <= self.max_z
     }
 }
 
@@ -989,5 +1057,58 @@ mod tests {
         assert_eq!(near.len(), 8);
         assert_eq!(near[0].max_x, border.min_x().floor());
         assert_eq!(near[8 - 1].min_x, border.max_x().ceil());
+    }
+
+    #[test]
+    fn block_box_matches_is_within_bounds_pos() {
+        let cases = [
+            (10.0, 0.0, 0.0),
+            (5.0, 2.0, 0.5),
+            (0.5, 2.0, 0.5),
+            (17.3, -3.7, 8.25),
+            (1.0, -0.5, -0.5),
+            (MAX_SIZE, 0.0, 0.0),
+        ];
+        for (size, cx, cz) in cases {
+            let border = border(size, cx, cz);
+            let block = border.block_box();
+            for x in -40..40 {
+                for z in -40..40 {
+                    let pos = BlockPos::new(x, 64, z);
+                    assert_eq!(
+                        block.contains(pos),
+                        border.is_within_bounds_pos(pos),
+                        "size {size} center ({cx}, {cz}) pos {x} {z}"
+                    );
+                }
+            }
+            for x in -4..4 {
+                for z in -4..4 {
+                    let chunk = ChunkPos::new(x, z);
+                    let cells = (0..16).flat_map(|dx| {
+                        (0..16).map(move |dz| BlockPos::new(x * 16 + dx, 0, z * 16 + dz))
+                    });
+                    let inside: Vec<bool> = cells.map(|p| block.contains(p)).collect();
+                    assert_eq!(block.touches_chunk(chunk), inside.iter().any(|&b| b));
+                    assert_eq!(block.covers_chunk(chunk), inside.iter().all(|&b| b));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_moving_border_has_a_block_box_at_every_tick() {
+        let mut border = border(30.0, 2.0, 0.5);
+        border.lerp_size_between(30.0, 0.5, 40, 0);
+        for _ in 0..45 {
+            border.tick();
+            let block = border.block_box();
+            for x in -20..20 {
+                for z in -20..20 {
+                    let pos = BlockPos::new(x, 0, z);
+                    assert_eq!(block.contains(pos), border.is_within_bounds_pos(pos));
+                }
+            }
+        }
     }
 }

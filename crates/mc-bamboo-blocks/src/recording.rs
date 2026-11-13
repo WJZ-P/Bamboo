@@ -1087,6 +1087,10 @@ impl LevelSideState for Recording<'_> {
         self.level.set_chunk_block_entity_ticking(chunk, ticks);
     }
 
+    fn sync_block_entity_border(&mut self, border: crate::BlockBox) {
+        self.level.sync_block_entity_border(border);
+    }
+
     fn begin_block_entity_tick(&mut self, now: i64) {
         self.level.begin_block_entity_tick(now);
     }

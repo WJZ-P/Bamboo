@@ -22,6 +22,7 @@ use crate::{
     shape::Aabb,
     state::{BlockState, NoteBlockInstrument},
     ticks::TickPriority,
+    world_border::BlockBox,
 };
 
 /// 发射器前方一格里、可能被穿上装备的生物。
@@ -207,6 +208,9 @@ pub trait LevelSideState {
     fn wake_block_entity(&mut self, pos: BlockPos);
     fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>);
     fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool);
+    /// 把这一刻世界边界的方块盒交给方块实体表，离开边界的睡眠实体暂停，见
+    /// [`BlockEntities::sync_border`]。
+    fn sync_block_entity_border(&mut self, border: BlockBox);
     fn begin_block_entity_tick(&mut self, now: i64);
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)>;
     fn end_block_entity_tick(&mut self);
@@ -404,6 +408,10 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
     fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, _ticks: bool) {
         self.block_entities_table_mut()
             .set_chunk_ticking(chunk, _ticks);
+    }
+
+    fn sync_block_entity_border(&mut self, border: BlockBox) {
+        self.block_entities_table_mut().sync_border(border);
     }
 
     fn begin_block_entity_tick(&mut self, now: i64) {
@@ -1674,6 +1682,9 @@ mod tests {
             unimplemented!()
         }
         fn set_chunk_block_entity_ticking(&mut self, _chunk: ChunkPos, _ticks: bool) {
+            unimplemented!()
+        }
+        fn sync_block_entity_border(&mut self, _border: BlockBox) {
             unimplemented!()
         }
         fn begin_block_entity_tick(&mut self, _now: i64) {

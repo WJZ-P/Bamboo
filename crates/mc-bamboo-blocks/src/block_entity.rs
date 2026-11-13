@@ -29,6 +29,7 @@ use crate::{
     },
     ticks::Busy,
     world::World,
+    world_border::BlockBox,
 };
 
 /// 一种方块实体，对应官方 `BlockEntity` 和它的 `BlockEntityTicker`。
@@ -160,6 +161,8 @@ pub struct BlockEntities {
     next: usize,
     next_id: u64,
     next_ordinal: u64,
+    /// 上一次 [`Self::sync_border`] 记下的边界盒；`None` 是还没同步过。
+    border: Option<BlockBox>,
 }
 
 impl Default for BlockEntities {
@@ -187,6 +190,7 @@ impl Default for BlockEntities {
             next: 0,
             next_id: 0,
             next_ordinal: 0,
+            border: None,
         }
     }
 }
@@ -580,30 +584,80 @@ impl BlockEntities {
             return;
         };
         let positions: Vec<BlockPos> = positions.iter().copied().collect();
+        let target = block_entity_clock().saturating_sub(1);
         for pos in positions {
-            let Some(&index) = self.positions.get(&pos) else {
+            self.pause(pos, target);
+        }
+    }
+
+    /// 世界边界这一刻的方块盒子。上一次同步之后离开边界的格子，睡着的实体按公式推进到
+    /// 上一刻并结束睡眠，和区块冻结（[`Self::set_chunk_ticking`]）是同一条暂停路径：
+    /// 官方 `LevelChunk.isTicking` 在边界外的刻根本不跑，回来后从原进度接着走。
+    ///
+    /// 进入边界不用处理：边界外的实体从不睡（只有真跑过一次才会排日程），醒着的条目
+    /// 回到界内就照常跑。只查「上一次盒子摸到、这一次盒子没完全盖住」的那一圈区块；
+    /// 圈比表里的区块还多（边界很大或者一下子跳很远）时改为扫表里的区块，
+    /// 开销取两者较小的那个，和已加载区块总数无关。
+    ///
+    /// The world border's block box at this tick. Sleeping entities in cells that left the
+    /// border since the last sync are materialized at the previous tick and woken, the same
+    /// pause path as a frozen chunk. Entering the border needs nothing: entities outside
+    /// never sleep. Only the ring of chunks the old box touched and the new box does not
+    /// fully cover is visited, or the table's chunks when that is smaller.
+    pub fn sync_border(&mut self, border: BlockBox) {
+        let old = self.border.replace(border);
+        if old == Some(border) || !self.sleep_enabled {
+            return;
+        }
+        // 第一次同步时不知道之前的边界（比如读盘放回的实体带着睡眠）：把表里没被
+        // 新盒子完全盖住的区块都查一遍，只发生一次。
+        let chunks = match old {
+            Some(old) => lost_chunks(old, border, &self.by_chunk),
+            None => self
+                .by_chunk
+                .keys()
+                .copied()
+                .filter(|&chunk| !border.covers_chunk(chunk))
+                .collect(),
+        };
+        let target = block_entity_clock().saturating_sub(1);
+        for chunk in chunks {
+            let Some(positions) = self.by_chunk.get(&chunk) else {
                 continue;
             };
-            let Some(ticker) = self.slots[index] else {
-                continue;
-            };
-            if ticker.wake_at.is_none() {
-                continue;
+            let positions: Vec<BlockPos> = positions
+                .iter()
+                .copied()
+                .filter(|&pos| old.is_none_or(|old| old.contains(pos)) && !border.contains(pos))
+                .collect();
+            for pos in positions {
+                self.pause(pos, target);
             }
-            self.unschedule(ticker.ordinal, ticker.wake_at);
-            self.slots[index] = Some(Ticker {
-                wake_at: None,
-                ..ticker
-            });
-            if let Some(stored) = self.entities.get_mut(&pos) {
-                stored
-                    .entity
-                    .materialize(block_entity_clock().saturating_sub(1));
-            }
-            self.mark_awake(ticker.ordinal);
-            if self.sleep_enabled && self.ticking {
-                self.push_due(ticker.ordinal);
-            }
+        }
+    }
+
+    /// 结束这一格的睡眠：数值按公式算到 `target` 那一刻结束时，回到醒着的集合。
+    fn pause(&mut self, pos: BlockPos, target: i64) {
+        let Some(&index) = self.positions.get(&pos) else {
+            return;
+        };
+        let Some(ticker) = self.slots[index] else {
+            return;
+        };
+        if ticker.wake_at.is_none() {
+            return;
+        }
+        self.unschedule(ticker.ordinal, ticker.wake_at);
+        self.slots[index] = Some(Ticker {
+            wake_at: None,
+            ..ticker
+        });
+        if let Some(stored) = self.entities.get_mut(&pos) {
+            stored.entity.materialize(target);
+        }
+        self.mark_awake(ticker.ordinal);
+        if self.sleep_enabled && self.ticking {
+            self.push_due(ticker.ordinal);
         }
     }
 
@@ -736,7 +790,14 @@ impl BlockEntities {
             .into_iter()
             .zip(sleep_in.into_iter().chain(std::iter::repeat(None)))
         {
-            if let Some(remaining) = remaining {
+            // 边界外的实体不跑，也就不能带着睡眠回来：数值在装盒时已经按公式算到
+            // 源表的最后一刻，不再登记睡眠，回到界内时从这些数值接着跑。
+            let outside = self
+                .border
+                .is_some_and(|border| !border.contains(entity.pos()));
+            if let Some(remaining) = remaining
+                && !outside
+            {
                 // 相对延迟换算到目标时钟；下一次 tick 会重新算出真实日程。
                 entity.resleep(self.now, self.now.saturating_add(remaining));
             }
@@ -1222,5 +1283,298 @@ mod tests {
         let (_id, _entity) = entities.take_at(A2).unwrap();
         assert!(entities.remove(A2).is_none());
         assert!(matches!(entities.take_chunk(CHUNK_A), Err(Busy)));
+    }
+
+    /// 「旧盒子摸到、新盒子没盖住」的那一圈，两条路（逐个列圈、在表里筛）都和
+    /// 逐个区块按定义算的一致。
+    #[test]
+    fn lost_chunks_is_the_ring_the_new_box_does_not_cover() {
+        let boxes = [
+            BlockBox {
+                min_x: -20,
+                max_x: 30,
+                min_z: -5,
+                max_z: 7,
+            },
+            BlockBox {
+                min_x: 0,
+                max_x: 16,
+                min_z: 0,
+                max_z: 16,
+            },
+            BlockBox {
+                min_x: 1,
+                max_x: 15,
+                min_z: -33,
+                max_z: 2,
+            },
+            BlockBox {
+                min_x: 5,
+                max_x: 5,
+                min_z: 0,
+                max_z: 9,
+            },
+            BlockBox {
+                min_x: -64,
+                max_x: 64,
+                min_z: -64,
+                max_z: 64,
+            },
+            BlockBox {
+                min_x: 100,
+                max_x: 140,
+                min_z: 100,
+                max_z: 110,
+            },
+        ];
+        let mut table: HashMap<ChunkPos, ()> = HashMap::new();
+        for x in -12..14 {
+            for z in -12..14 {
+                table.insert(ChunkPos::new(x, z), ());
+            }
+        }
+        for old in boxes {
+            for new in boxes {
+                let mut expected: Vec<ChunkPos> = table
+                    .keys()
+                    .copied()
+                    .filter(|&chunk| old.touches_chunk(chunk) && !new.covers_chunk(chunk))
+                    .collect();
+                expected.sort_unstable();
+                let ring = Ring::new(old, new);
+                let mut listed = ring.chunks();
+                listed.sort_unstable();
+                assert_eq!(listed, expected, "ring: old {old:?} new {new:?}");
+                assert_eq!(
+                    ring.len(),
+                    expected.len() as i128,
+                    "len: old {old:?} new {new:?}"
+                );
+                let mut picked = lost_chunks(old, new, &table);
+                picked.sort_unstable();
+                assert_eq!(picked, expected, "table: old {old:?} new {new:?}");
+                let small: HashMap<ChunkPos, ()> = [(ChunkPos::new(0, 0), ())].into();
+                let mut filtered = lost_chunks(old, new, &small);
+                filtered.sort_unstable();
+                let want: Vec<ChunkPos> = expected
+                    .iter()
+                    .copied()
+                    .filter(|c| *c == ChunkPos::new(0, 0))
+                    .collect();
+                filtered.retain(|c| small.contains_key(c));
+                assert_eq!(filtered, want, "small table: old {old:?} new {new:?}");
+            }
+        }
+    }
+
+    /// 盒子六千万格宽时圈的大小不溢出，圈太大就退回在表里筛。
+    #[test]
+    fn a_huge_border_ring_falls_back_to_the_table() {
+        let max = 29_999_984;
+        let old = BlockBox {
+            min_x: -max,
+            max_x: max,
+            min_z: -max,
+            max_z: max,
+        };
+        let new = BlockBox {
+            min_x: -10,
+            max_x: 10,
+            min_z: -10,
+            max_z: 10,
+        };
+        let table: HashMap<ChunkPos, ()> =
+            [(ChunkPos::new(0, 0), ()), (ChunkPos::new(5, 5), ())].into();
+        let mut got = lost_chunks(old, new, &table);
+        got.sort_unstable();
+        assert_eq!(got, vec![ChunkPos::new(0, 0), ChunkPos::new(5, 5)]);
+        assert!(Ring::new(old, new).len() > 10_000_000);
+    }
+
+    /// 边界缩到一个睡着的实体外面：数值停在上一刻，转醒，之后边界外不再排日程。
+    #[test]
+    fn leaving_the_border_pauses_a_sleeping_entity() {
+        #[derive(Debug)]
+        struct Clock {
+            pos: BlockPos,
+            since: Option<i64>,
+            materialized: Vec<i64>,
+        }
+        impl BlockEntity for Clock {
+            fn pos(&self) -> BlockPos {
+                self.pos
+            }
+            fn tick(&mut self, _world: &mut World) {}
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn as_any_mut(&mut self) -> &mut dyn Any {
+                self
+            }
+            fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+                Ok(Vec::new())
+            }
+            fn materialize(&mut self, tick: i64) {
+                if self.since.take().is_some() {
+                    self.materialized.push(tick);
+                }
+            }
+            fn resleep(&mut self, since: i64, _wake_at: i64) {
+                self.since = Some(since);
+            }
+        }
+        let inside = BlockPos::new(3, 64, 3);
+        let outside = BlockPos::new(40, 64, 3);
+        let mut table = BlockEntities::default();
+        for pos in [inside, outside] {
+            table.insert(Box::new(Clock {
+                pos,
+                since: Some(0),
+                materialized: Vec::new(),
+            }));
+        }
+        let wide = BlockBox {
+            min_x: -100,
+            max_x: 100,
+            min_z: -100,
+            max_z: 100,
+        };
+        set_block_entity_clock(5);
+        table.sync_border(wide);
+        table.begin_tick(5);
+        while table.next_ticker().is_some() {}
+        table.schedule_wake(inside, Some(50));
+        table.schedule_wake(outside, Some(50));
+        table.end_tick();
+
+        // 第 10 刻边界缩到 x < 16：只有 `outside` 出界。
+        set_block_entity_clock(10);
+        let narrow = BlockBox {
+            min_x: -16,
+            max_x: 16,
+            min_z: -16,
+            max_z: 16,
+        };
+        table.sync_border(narrow);
+        let clock = |table: &BlockEntities, pos| {
+            table
+                .entities
+                .get(&pos)
+                .and_then(|s| s.entity.as_any().downcast_ref::<Clock>())
+                .map(|c| c.materialized.clone())
+        };
+        assert_eq!(
+            clock(&table, outside),
+            Some(vec![9]),
+            "出界的实体停在上一刻"
+        );
+        assert_eq!(clock(&table, inside), Some(vec![]), "界内的实体接着睡");
+        table.begin_tick(10);
+        let mut due = Vec::new();
+        while let Some((pos, _)) = table.next_ticker() {
+            due.push(pos);
+        }
+        table.end_tick();
+        assert_eq!(due, vec![outside], "出界的实体醒着，由调用方按边界跳过");
+    }
+}
+
+/// 上一次的盒子摸到、这一次的盒子没有完全盖住的区块：离开边界的格子只可能在这些区块里。
+///
+/// 那一圈比表里有方块实体的区块还多时，改为在表里的区块里筛，开销取两者较小的那个。
+fn lost_chunks<V>(old: BlockBox, new: BlockBox, table: &HashMap<ChunkPos, V>) -> Vec<ChunkPos> {
+    let ring = Ring::new(old, new);
+    if ring.len() > table.len() as i128 {
+        return table
+            .keys()
+            .copied()
+            .filter(|chunk| ring.contains(*chunk))
+            .collect();
+    }
+    ring.chunks()
+}
+
+/// 区块坐标上的一圈：外框是旧盒子摸到的区块，挖掉新盒子完全盖住的区块。都是闭区间。
+#[derive(Debug, Clone, Copy)]
+struct Ring {
+    outer: Option<(i64, i64, i64, i64)>,
+    inner: (i64, i64, i64, i64),
+}
+
+impl Ring {
+    fn new(old: BlockBox, new: BlockBox) -> Self {
+        // 方块坐标换成区块坐标：摸到的区块是 [floor(min/16), floor((max-1)/16)]，
+        // 完全盖住的区块是 [ceil(min/16), floor(max/16) - 1]。
+        let outer = (!old.is_empty()).then(|| {
+            (
+                old.min_x.div_euclid(16),
+                (old.max_x - 1).div_euclid(16),
+                old.min_z.div_euclid(16),
+                (old.max_z - 1).div_euclid(16),
+            )
+        });
+        let inner = (
+            -((-new.min_x).div_euclid(16)),
+            new.max_x.div_euclid(16) - 1,
+            -((-new.min_z).div_euclid(16)),
+            new.max_z.div_euclid(16) - 1,
+        );
+        Self { outer, inner }
+    }
+
+    fn contains(self, chunk: ChunkPos) -> bool {
+        let Some((ox0, ox1, oz0, oz1)) = self.outer else {
+            return false;
+        };
+        let (x, z) = (i64::from(chunk.x), i64::from(chunk.z));
+        let (ix0, ix1, iz0, iz1) = self.inner;
+        x >= ox0
+            && x <= ox1
+            && z >= oz0
+            && z <= oz1
+            && !(x >= ix0 && x <= ix1 && z >= iz0 && z <= iz1)
+    }
+
+    /// 圈里的区块数。用 `i128`：盒子可以有六千万格宽。
+    fn len(self) -> i128 {
+        let Some((ox0, ox1, oz0, oz1)) = self.outer else {
+            return 0;
+        };
+        let (ix0, ix1, iz0, iz1) = self.inner;
+        let span = |a: i64, b: i64| i128::from(b.saturating_sub(a).saturating_add(1).max(0));
+        span(ox0, ox1) * span(oz0, oz1)
+            - span(ox0.max(ix0), ox1.min(ix1)) * span(oz0.max(iz0), oz1.min(iz1))
+    }
+
+    /// 逐个列出圈里的区块。调用方保证圈不比表大，所以只在圈小时用。
+    fn chunks(self) -> Vec<ChunkPos> {
+        let Some((ox0, ox1, oz0, oz1)) = self.outer else {
+            return Vec::new();
+        };
+        let (ix0, ix1, iz0, iz1) = self.inner;
+        let mut out = Vec::new();
+        for z in oz0..=oz1 {
+            let Ok(chunk_z) = i32::try_from(z) else {
+                continue;
+            };
+            let mut push = |x: i64| {
+                if let Ok(chunk_x) = i32::try_from(x) {
+                    out.push(ChunkPos::new(chunk_x, chunk_z));
+                }
+            };
+            if z >= iz0 && z <= iz1 && ix0 <= ix1 {
+                for x in ox0..=ox1.min(ix0 - 1) {
+                    push(x);
+                }
+                for x in ox0.max(ix1 + 1)..=ox1 {
+                    push(x);
+                }
+            } else {
+                for x in ox0..=ox1 {
+                    push(x);
+                }
+            }
+        }
+        out
     }
 }

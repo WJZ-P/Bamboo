@@ -54,6 +54,8 @@ pub(crate) struct TestLevel {
     /// 每次调用 `block_loot_drops` / `spawn_after_break_random` / `write_block` 时记下的写入数，
     /// 用来验证掉落在改方块之前。
     pub(crate) drop_order: Vec<(&'static str, usize)>,
+    /// `Level.getWorldBorder()`。默认是官方默认边界。
+    pub(crate) border: crate::WorldBorder,
 }
 
 impl TestLevel {
@@ -76,6 +78,7 @@ impl TestLevel {
             rules: crate::gamerules::BlockGameRules::vanilla(),
             loot: Vec::new(),
             drop_order: Vec::new(),
+            border: crate::WorldBorder::default(),
         }
     }
 
@@ -183,6 +186,10 @@ impl EntityTables for TestLevel {
 }
 
 impl Level for TestLevel {
+    fn world_border(&self) -> crate::WorldBorder {
+        self.border.clone()
+    }
+
     fn chunk_ticks_blocks(&self, chunk: ChunkPos) -> bool {
         !self.frozen_chunks.contains(&chunk)
     }
