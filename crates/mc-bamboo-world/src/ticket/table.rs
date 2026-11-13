@@ -411,6 +411,7 @@ impl TicketTable {
     /// 把积压的源变化传播完，返回这次等级变了的区块。
     ///
     /// 顺序按 (x, z) 排序，且恰好包含等级变了的区块，不多不少。
+    /// 返回的切片只在下一次 `run_updates` 之前有效；长期持有请复制。
     pub fn run_updates(&mut self) -> &[LevelChange] {
         self.changes.clear();
         if self.pending.is_empty() {

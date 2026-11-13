@@ -433,6 +433,13 @@ pub struct Director<C> {
     shutting_down: bool,
     /// 每次 `handle` 复用的效果列表容量。
     effects: Vec<Effect<C>>,
+    /// 一次等级变化里「跨了 tick 档」的位置，跨次复用容量。
+    level_changed: Vec<LevelChange>,
+    /// 票表变化列表的只读副本，跨次复用容量。
+    changes_scratch: Vec<LevelChange>,
+    /// 新排的读任务和待派任务编号，跨次 `drive` 复用容量。
+    reads: Vec<(ChunkPos, u64)>,
+    task_ids: Vec<TaskId>,
     /// 构造一个「生成器输出」的盒子。宿主设置；测试可以用 `C::default`。
     template: Option<fn() -> C>,
 }
@@ -467,6 +474,10 @@ impl<C: ChunkBundle> Director<C> {
             acted: 0,
             shutting_down: false,
             effects: Vec::new(),
+            level_changed: Vec::new(),
+            changes_scratch: Vec::new(),
+            reads: Vec::new(),
+            task_ids: Vec::new(),
             template: None,
         }
     }
@@ -707,10 +718,14 @@ impl<C: ChunkBundle> Director<C> {
 
     /// 把 `run_updates()` 的输出量化，只有真正要动作的区块才碰 `chunks`。
     fn consume_level_changes(&mut self, out: &mut Vec<Effect<C>>) {
-        let mut changes: Vec<LevelChange> = self.tickets.run_updates().to_vec();
-        changes.sort_unstable_by_key(|change| (change.pos.x, change.pos.z));
-        let mut level_changed = Vec::new();
-        for change in changes {
+        // `run_updates` 返回的列表已经按 (x, z) 排好；这里按只读切片遍历，
+        // 不再克隆一份，也不再排一次。
+        let mut level_changed = std::mem::take(&mut self.level_changed);
+        level_changed.clear();
+        let mut changes = std::mem::take(&mut self.changes_scratch);
+        changes.clear();
+        changes.extend_from_slice(self.tickets.run_updates());
+        for &change in &changes {
             let class = classify(change);
             // 任一套等级跨了 tick 档，都要告诉 region：交付中的区块撤票时会从 31
             // 一步跳到 34 以上，归到 Unload/Demote 而不是 LevelOnly，但 region 里
@@ -732,10 +747,11 @@ impl<C: ChunkBundle> Director<C> {
             }
         }
         if !level_changed.is_empty() {
-            out.push(Effect::ToRegion(RegionMessage::LevelChanged {
-                changes: level_changed,
-            }));
+            let changes = std::mem::take(&mut level_changed);
+            out.push(Effect::ToRegion(RegionMessage::LevelChanged { changes }));
         }
+        self.level_changed = level_changed;
+        self.changes_scratch = changes;
     }
 
     /// 一条报出来的等级变化：把记录里的两个等级数字同步到票表的新值，
@@ -1276,21 +1292,23 @@ impl<C: ChunkBundle> Director<C> {
         // 等级 34..44 的区块是依赖圈里的半成品，由 `ensure_dependencies`
         // 建记录，不进 region、不发区块包。
         // 只排这一批新记录，不扫整张表。`enqueue` 会把它从队列里摘掉。
-        let reads: Vec<(ChunkPos, u64)> = std::mem::take(&mut self.queued_reads)
-            .into_iter()
-            .filter_map(|pos| {
-                self.chunks.get(&pos).and_then(|record| {
-                    (record.owner == Owner::Pipeline
-                        && record.task.is_none()
-                        && !record.dependency
-                        && record.desired.target == Some(ChunkStatus::Full))
-                    .then_some((pos, record.generation))
-                })
-            })
-            .collect();
-        for (pos, generation) in reads {
+        let mut reads = std::mem::take(&mut self.reads);
+        reads.clear();
+        for pos in std::mem::take(&mut self.queued_reads) {
+            if self.chunks.get(&pos).is_some_and(|record| {
+                record.owner == Owner::Pipeline
+                    && record.task.is_none()
+                    && !record.dependency
+                    && record.desired.target == Some(ChunkStatus::Full)
+            }) {
+                let generation = self.chunks[&pos].generation;
+                reads.push((pos, generation));
+            }
+        }
+        for (pos, generation) in reads.drain(..) {
             self.enqueue(out, pos, generation, None, Task::Read { pos });
         }
+        self.reads = reads;
 
         // 按 TaskId 顺序尝试派出；写范围相交的任务留到下次。
         // 看一眼配额：没有可派的余量时连 `pending` 的键都不收集。
@@ -1302,21 +1320,22 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         // 只从「上一轮被挡住」和「这一轮新排的」里挑，不收集整张 `pending`。
-        let ids: Vec<TaskId> = std::mem::take(&mut self.submittable)
-            .into_iter()
-            .chain(
-                // 新排的任务编号总在末尾，用范围查询只走这一批的键，
-                // 不把之前积压的整个 `pending` 过滤一遍。
-                self.pending
-                    .range((
-                        std::ops::Bound::Excluded(self.last_seen_task),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .map(|(&id, _)| id),
-            )
-            .collect();
-        let mut blocked = Vec::new();
-        for id in ids {
+        let mut ids = std::mem::take(&mut self.task_ids);
+        ids.clear();
+        ids.extend(std::mem::take(&mut self.submittable));
+        // 新排的任务编号总在末尾，用范围查询只走这一批的键，
+        // 不把之前积压的整个 `pending` 过滤一遍。
+        let new_ids = self
+            .pending
+            .range((
+                std::ops::Bound::Excluded(self.last_seen_task),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(&id, _)| id);
+        ids.extend(new_ids);
+        let mut blocked = std::mem::take(&mut self.submittable);
+        blocked.clear();
+        for id in ids.drain(..) {
             if self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick
             {
@@ -1366,6 +1385,7 @@ impl<C: ChunkBundle> Director<C> {
             let _ = pending.seq;
         }
         self.submittable = blocked;
+        self.task_ids = ids;
         self.last_seen_task = self.next_task.wrapping_sub(1);
         self.flush_notifications(out);
     }
