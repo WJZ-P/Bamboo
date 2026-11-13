@@ -281,6 +281,15 @@ impl BlockEntities {
         self.entities.get(&pos)?.entity.as_any().downcast_ref()
     }
 
+    /// 只读地按位置取方块实体，供实体碰撞查询动态形状。不碰休眠时钟：
+    /// 活塞的进度直接存在实体里，不像睡着的容器那样要按时钟现算。
+    ///
+    /// Read-only access by position for entity collision queries. Unlike a sleeping
+    /// container, a piston stores its progress directly and needs no sleep clock.
+    pub fn find_dyn(&self, pos: BlockPos) -> Option<&dyn BlockEntity> {
+        Some(self.entities.get(&pos)?.entity.as_ref())
+    }
+
     /// 见 [`BlockEntities::get`]，不按具体类型取。给 dyn 安全的 [`crate::LevelSideState`] 用，
     /// 向下转型放在调用方。
     ///

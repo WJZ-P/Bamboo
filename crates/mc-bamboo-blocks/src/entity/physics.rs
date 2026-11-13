@@ -198,6 +198,7 @@ impl Entity {
             self.on_ground,
             self.collision_context(),
             |pos| world.block_state(pos),
+            |pos| world.moving_piston_shape(pos),
             &world.world_border(),
         )
     }
@@ -464,7 +465,12 @@ impl Entity {
             if state.is_air() {
                 return true;
             }
-            let inside_boxes = shape::entity_inside_boxes(state, pos, self.entity_context());
+            let piston = state
+                .is(blocks::MOVING_PISTON)
+                .then(|| world.moving_piston_shape(pos))
+                .flatten();
+            let inside_boxes =
+                shape::entity_inside_boxes(state, pos, self.entity_context(), piston.as_deref());
             let inside_block = shape::is_unit_cube(&inside_boxes)
                 || self.collided_with_shape_moving_from(from, to, &world_boxes(&inside_boxes, pos));
             if inside_block && !visited.contains(&pos) {
@@ -536,6 +542,7 @@ pub fn sweep_movement(
     on_ground: bool,
     context: CollisionContext,
     mut block_at: impl FnMut(BlockPos) -> BlockState,
+    mut piston_at: impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
     border: &WorldBorder,
 ) -> Vec3 {
     let (source_x, source_z) = centre(bounds);
@@ -544,6 +551,7 @@ pub fn sweep_movement(
         bounds,
         context,
         &mut block_at,
+        &mut piston_at,
         border,
         source_x,
         source_z,
@@ -567,6 +575,7 @@ pub fn sweep_movement(
             step_box,
             context,
             &mut block_at,
+            &mut piston_at,
         ));
         colliders.extend(border.collision_colliders(source_x, source_z, step_box));
         let skip = movement_step.y as f32;
@@ -604,8 +613,9 @@ pub fn no_block_collision(
     bounds: Aabb,
     context: CollisionContext,
     block_at: impl FnMut(BlockPos) -> BlockState,
+    piston_at: impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
 ) -> bool {
-    world::collect_block_collisions(bounds, context, block_at).is_empty()
+    world::collect_block_collisions(bounds, context, block_at, piston_at).is_empty()
 }
 
 /// `ServerGamePacketListenerImpl.isEntityCollidingWithAnythingNew` 的方块部分。
@@ -622,6 +632,7 @@ pub fn overlaps_new_blocks(
     target: Vec3,
     pre_move: CollisionContext,
     block_at: impl FnMut(BlockPos) -> BlockState,
+    piston_at: impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
 ) -> bool {
     let new_box = current_box.moved(
         target.x - current.x,
@@ -631,7 +642,9 @@ pub fn overlaps_new_blocks(
     let shrink = f64::from(1.0e-5_f32);
     let new_deflated = new_box.deflate(shrink, shrink, shrink);
     let old_deflated = old_box.deflate(shrink, shrink, shrink);
-    for (_, boxes) in world::collect_block_collisions(new_deflated, pre_move, block_at) {
+    for (_, boxes) in
+        world::collect_block_collisions(new_deflated, pre_move, block_at, piston_at)
+    {
         if !shape::join_is_not_empty(&boxes, &[old_deflated], BooleanOp::And) {
             return true;
         }
@@ -679,6 +692,7 @@ pub fn stuck_speed(
     mut box_at: impl FnMut(Vec3) -> Aabb,
     context: EntityContext,
     mut block_at: impl FnMut(BlockPos) -> BlockState,
+    mut piston_at: impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
 ) -> Option<Vec3> {
     let mut inside = InsideBlocks::default();
     for segment in segments {
@@ -697,6 +711,7 @@ pub fn stuck_speed(
                             &mut box_at,
                             context,
                             &mut block_at,
+                            &mut piston_at,
                             &mut inside,
                             max_iterations,
                         );
@@ -711,6 +726,7 @@ pub fn stuck_speed(
                     &mut box_at,
                     context,
                     &mut block_at,
+                    &mut piston_at,
                     &mut inside,
                     16,
                 );
@@ -723,6 +739,7 @@ pub fn stuck_speed(
                 &mut box_at,
                 context,
                 &mut block_at,
+                &mut piston_at,
                 &mut inside,
                 1,
             );
@@ -746,6 +763,7 @@ fn stuck_between(
     box_at: &mut impl FnMut(Vec3) -> Aabb,
     context: EntityContext,
     block_at: &mut impl FnMut(BlockPos) -> BlockState,
+    piston_at: &mut impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
     inside: &mut InsideBlocks,
     max_iterations: i32,
 ) -> i32 {
@@ -760,7 +778,11 @@ fn stuck_between(
         if state.is_air() {
             return true;
         }
-        let inside_boxes = shape::entity_inside_boxes(state, pos, context);
+        let piston = state
+            .is(blocks::MOVING_PISTON)
+            .then(|| piston_at(pos))
+            .flatten();
+        let inside_boxes = shape::entity_inside_boxes(state, pos, context, piston.as_deref());
         let bounds = box_at(from);
         let inside_block = shape::is_unit_cube(&inside_boxes)
             || bounds.collided_along_vector(to.subtract(from), &world_boxes(&inside_boxes, pos));
@@ -791,6 +813,7 @@ fn collide_bounding_box(
     bounds: Aabb,
     context: CollisionContext,
     block_at: &mut impl FnMut(BlockPos) -> BlockState,
+    piston_at: &mut impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
     border: &WorldBorder,
     source_x: f64,
     source_z: f64,
@@ -799,7 +822,9 @@ fn collide_bounding_box(
         return movement;
     }
     let target = bounds.expanded_towards(movement.x, movement.y, movement.z);
-    let mut boxes = flatten(&world::collect_block_collisions(target, context, block_at));
+    let mut boxes = flatten(&world::collect_block_collisions(
+        target, context, block_at, piston_at,
+    ));
     boxes.extend(border.collision_colliders(source_x, source_z, target));
     collide_with_shapes(movement, bounds, &boxes)
 }
@@ -1274,6 +1299,10 @@ mod step_tests {
         })
     }
 
+    fn no_pistons(_pos: BlockPos) -> Option<Vec<Aabb>> {
+        None
+    }
+
     /// 半砖能迈上去，整块和零台阶高度都不能。
     ///
     /// A slab can be stepped onto. A full block, and a zero step height, cannot.
@@ -1301,6 +1330,7 @@ mod step_tests {
             true,
             context(),
             at(slab),
+            no_pistons,
             &default_border,
         );
         let blocked = sweep_movement(
@@ -1310,6 +1340,7 @@ mod step_tests {
             true,
             context(),
             at(stone),
+            no_pistons,
             &default_border,
         );
         let no_step = sweep_movement(
@@ -1319,6 +1350,7 @@ mod step_tests {
             true,
             context(),
             at(slab),
+            no_pistons,
             &default_border,
         );
         assert!(climbed.y > 0.4, "{climbed:?}");

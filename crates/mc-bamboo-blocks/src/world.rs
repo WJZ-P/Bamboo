@@ -10,7 +10,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
 use crate::{
-    behaviour::machines::{ShulkerBoxEntity, open_support_shape},
+    behaviour::machines::{PistonMoving, ShulkerBoxEntity, open_support_shape},
     block_entity::{self, BlockEntity, BlockEvent},
     context::BlockHit,
     entity::{Entity, PrimedTnt},
@@ -345,18 +345,19 @@ pub struct World<'a> {
     held_reads: Vec<VecDeque<DeferredRead>>,
 }
 
-/// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读。
+/// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
+/// `piston_at` 读（没有方块实体时给 `None`，官方给 `Shapes.empty()`）。
 ///
 /// 玩家移动不能借 `World`：`RegionLevel` 借着玩家表。形状顺序和 [`World::block_collisions`] 相同。
 ///
-/// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at`.
-///
-/// Player movement cannot borrow `World`: `RegionLevel` already borrows the player map.
-/// Shape order matches [`World::block_collisions`].
+/// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at` and moving-piston
+/// shapes from `piston_at`. Player movement cannot borrow `World`; shape order matches
+/// [`World::block_collisions`].
 pub(crate) fn collect_block_collisions(
     box_: shape::Aabb,
     context: CollisionContext,
     mut block_at: impl FnMut(BlockPos) -> BlockState,
+    mut piston_at: impl FnMut(BlockPos) -> Option<Vec<shape::Aabb>>,
 ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
     let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
     let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
@@ -382,7 +383,12 @@ pub(crate) fn collect_block_collisions(
                 if corner == 2 && !state.is(blocks::MOVING_PISTON) {
                     continue;
                 }
-                let boxes = shape::collision_boxes(state, pos, context);
+                let piston = if state.is(blocks::MOVING_PISTON) {
+                    piston_at(pos)
+                } else {
+                    None
+                };
+                let boxes = shape::block_collision_boxes(state, pos, context, piston.as_deref());
                 if boxes.is_empty() {
                     continue;
                 }
@@ -2313,7 +2319,19 @@ impl<'a> World<'a> {
         box_: shape::Aabb,
         context: CollisionContext,
     ) -> Vec<(BlockPos, Vec<shape::Aabb>)> {
-        collect_block_collisions(box_, context, |pos| self.block_state(pos))
+        collect_block_collisions(
+            box_,
+            context,
+            |pos| self.block_state(pos),
+            |pos| self.moving_piston_shape(pos),
+        )
+    }
+
+    /// `MovingPistonBlock.getCollisionShape`：这一格有移动中的活塞方块实体时用它算出的
+    /// 形状，没有时是空的。方块实体正在 tick、暂时不在表里时官方也读不到，这里照旧。
+    pub(crate) fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<shape::Aabb>> {
+        self.block_entity::<PistonMoving>(pos)
+            .map(PistonMoving::collision_shape)
     }
 
     /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
@@ -2404,7 +2422,11 @@ impl<'a> World<'a> {
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
             let state = self.block_state(pos);
-            let collider = shape::collision_boxes(state, pos, context);
+            let piston = state
+                .is(blocks::MOVING_PISTON)
+                .then(|| self.moving_piston_shape(pos))
+                .flatten();
+            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
             self.clip_one_block(pos, from, to, &collider, state, ClipFluid::None)
         })
     }
@@ -2418,7 +2440,11 @@ impl<'a> World<'a> {
     ) -> Option<BlockHit> {
         traverse_blocks(from, to, |pos| {
             let state = self.block_state(pos);
-            let collider = shape::collision_boxes(state, pos, context);
+            let piston = state
+                .is(blocks::MOVING_PISTON)
+                .then(|| self.moving_piston_shape(pos))
+                .flatten();
+            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
             self.clip_one_block(pos, from, to, &collider, state, ClipFluid::SourceOnly)
         })
     }

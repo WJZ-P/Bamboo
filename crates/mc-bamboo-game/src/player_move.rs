@@ -12,7 +12,7 @@
 use mc_bamboo_blocks::entity::{
     self, TravelSegment, enclosed_in_air, no_block_collision, overlaps_new_blocks, sweep_movement,
 };
-use mc_bamboo_blocks::{Aabb, BlockState, CollisionContext, EntityContext};
+use mc_bamboo_blocks::{Aabb, BlockEntities, BlockState, CollisionContext, EntityContext, PistonMoving};
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{blocks, registries::attribute_defaults};
 use mc_bamboo_protocol::{
@@ -167,6 +167,7 @@ pub(crate) fn on_move_player(
         player_grid,
         links,
         chunks,
+        block_entities,
         tick,
         ..
     } = region;
@@ -203,7 +204,7 @@ pub(crate) fn on_move_player(
         return;
     }
 
-    let mut sample = |pos: BlockPos| block_state(chunks, pos);
+    let sample = PlayerBlocks::new(chunks, block_entities);
     apply_change(
         player,
         player_grid,
@@ -216,7 +217,7 @@ pub(crate) fn on_move_player(
             on_ground,
             horizontal_collision,
         },
-        &mut sample,
+        &sample,
         &border,
     );
 }
@@ -240,6 +241,7 @@ pub(crate) fn on_accept_teleportation(
         player_grid,
         links,
         chunks,
+        block_entities,
         tick,
         ..
     } = region;
@@ -262,7 +264,7 @@ pub(crate) fn on_accept_teleportation(
         .expect("上面已经确认过");
     player.set_position(player_grid, awaiting);
     player.motion.last_good = awaiting;
-    let mut sample = |pos: BlockPos| block_state(chunks, pos);
+    let sample = PlayerBlocks::new(chunks, block_entities);
     apply_change(
         player,
         player_grid,
@@ -275,7 +277,7 @@ pub(crate) fn on_accept_teleportation(
             on_ground: false,
             horizontal_collision: false,
         },
-        &mut sample,
+        &sample,
         &border,
     );
 }
@@ -331,11 +333,14 @@ pub(crate) fn place_player(region: &mut Region, id: PlayerId, position: Vec3) {
 fn finish_player(region: &mut Region, id: PlayerId) {
     {
         let Region {
-            players, chunks, ..
+            players,
+            chunks,
+            block_entities,
+            ..
         } = region;
         if let Some(player) = players.get_mut(&id) {
-            let mut sample = |pos: BlockPos| block_state(chunks, pos);
-            update_body(player, &mut sample);
+            let sample = PlayerBlocks::new(chunks, block_entities);
+            update_body(player, &sample);
         }
     }
     let pending = {
@@ -392,7 +397,8 @@ fn inside_stuck(region: &Region, id: PlayerId, pending: &[TravelSegment]) -> Opt
             template.moved(delta.x, delta.y, delta.z)
         },
         context,
-        |pos| block_state(&region.chunks, pos),
+        &mut |pos| block_state(&region.chunks, pos),
+        |pos| PlayerBlocks::piston_from(&region.block_entities, pos),
     )
 }
 
@@ -433,7 +439,7 @@ struct Change<'a> {
     pitch: f32,
     on_ground: bool,
     horizontal_collision: bool,
-    blocks: &'a mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &'a PlayerBlocks<'a>,
 }
 
 fn apply_change(
@@ -442,7 +448,7 @@ fn apply_change(
     links: &mut crate::links::Links,
     now: crate::region::RegionTick,
     attempt: Attempt,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
     border: &mc_bamboo_blocks::WorldBorder,
 ) {
     let change = Change {
@@ -464,7 +470,7 @@ fn apply_change(
         jump_from_ground(player);
     }
     let stands = player.motion.vertical_collision_below;
-    let simulated = simulate_move(player, from_last, &mut *change.blocks, border);
+    let simulated = simulate_move(player, from_last, change.blocks, border);
     let end = start.add(simulated.movement);
     player.motion.delta = simulated.velocity;
     player.motion.stuck_speed = simulated.stuck_speed;
@@ -507,7 +513,8 @@ fn apply_change(
         no_block_collision(
             old_box,
             context_at(player, end.y, false),
-            &mut *change.blocks,
+            &mut |pos: BlockPos| change.blocks.state(pos),
+            |pos| change.blocks.piston(pos),
         ) && border.no_border_collision(player.position().x, player.position().z, old_box);
     let newly = overlaps_new_blocks(
         old_box,
@@ -515,7 +522,8 @@ fn apply_change(
         end,
         change.target,
         context_at(player, old_box.min_y, true),
-        &mut *change.blocks,
+        &mut |pos: BlockPos| change.blocks.state(pos),
+        |pos| change.blocks.piston(pos),
     );
     let accept = player.motion.no_physics || (!fail || !old_clear) && !newly;
     if !accept {
@@ -528,7 +536,7 @@ fn apply_change(
     player.set_position(grid, change.target);
     set_rotation(player, change.yaw, change.pitch);
     player.motion.client_is_floating =
-        floating_now(player, from_last.y, stands, &mut *change.blocks);
+        floating_now(player, from_last.y, stands, change.blocks);
     player.on_ground = change.on_ground;
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
@@ -586,7 +594,7 @@ struct Simulated {
 fn simulate_move(
     player: &Player,
     displacement: Vec3,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
     border: &mc_bamboo_blocks::WorldBorder,
 ) -> Simulated {
     let mut velocity = player.motion.delta;
@@ -614,7 +622,8 @@ fn simulate_move(
         step_height(),
         player.on_ground,
         move_context(player),
-        &mut *blocks,
+        &mut |pos| blocks.state(pos),
+        |pos| blocks.piston(pos),
         border,
     );
     let moved_vertically = delta.y.abs() > 0.0;
@@ -655,14 +664,14 @@ fn floating_now(
     player: &Player,
     oy: f64,
     stands_on_something: bool,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
 ) -> bool {
     oy >= -0.03125
         && !stands_on_something
         && player.game_mode != GameMode::Spectator
         && !ALLOW_FLIGHT
         && !may_fly(player.game_mode)
-        && enclosed_in_air(movement_box(player), blocks)
+        && enclosed_in_air(movement_box(player), &mut |pos| blocks.state(pos))
 }
 
 fn jump_from_ground(player: &mut Player) {
@@ -686,7 +695,7 @@ fn jump_from_ground(player: &mut Player) {
 fn back_off_from_edge(
     player: &Player,
     delta: Vec3,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
 ) -> Vec3 {
     let max_down = step_height();
     if player.sync.flying
@@ -732,7 +741,7 @@ fn back_off_from_edge(
 fn is_above_ground(
     player: &Player,
     max_down: f32,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
 ) -> bool {
     player.on_ground
         || player.motion.fall_distance < f64::from(max_down)
@@ -750,7 +759,7 @@ fn can_fall_at_least(
     delta_x: f64,
     delta_z: f64,
     min_height: f64,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
 ) -> bool {
     let bounds = movement_box(player);
     let probe = Aabb::new(
@@ -761,7 +770,12 @@ fn can_fall_at_least(
         bounds.min_y,
         bounds.max_z - 1.0e-7 + delta_z,
     );
-    no_block_collision(probe, move_context(player), blocks)
+    no_block_collision(
+        probe,
+        move_context(player),
+        &mut |pos| blocks.state(pos),
+        |pos| blocks.piston(pos),
+    )
 }
 
 fn record_fall(fall: &mut f64, ya: f64, on_ground: bool) {
@@ -776,7 +790,7 @@ fn record_fall(fall: &mut f64, ya: f64, on_ground: bool) {
 fn block_speed_factor(
     player: &Player,
     position: Vec3,
-    blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    blocks: &PlayerBlocks<'_>,
 ) -> f32 {
     // 飞行时 `Player.getBlockSpeedFactor` 直接是 1，不读脚下的方块。
     //
@@ -785,7 +799,7 @@ fn block_speed_factor(
         return 1.0;
     }
     let here_pos = BlockPos::containing(position);
-    let state = blocks(here_pos);
+    let state = blocks.state(here_pos);
     let here = state.block().speed_factor;
     if !state.is(blocks::WATER) && !state.is(blocks::BUBBLE_COLUMN) && here == 1.0 {
         let below = BlockPos::new(
@@ -793,7 +807,7 @@ fn block_speed_factor(
             mth::floor(position.y - 0.500001),
             mth::floor(position.z),
         );
-        blocks(below).block().speed_factor
+        blocks.state(below).block().speed_factor
     } else {
         here
     }
@@ -822,7 +836,7 @@ fn context_at(player: &Player, bottom: f64, placement: bool) -> CollisionContext
 /// `Player.updatePlayerPose`。游泳姿势塞不进去就保持原样。
 ///
 /// `Player.updatePlayerPose`. The pose stays put when the swimming box does not fit.
-fn update_body(player: &mut Player, blocks: &mut dyn FnMut(BlockPos) -> BlockState) {
+fn update_body(player: &mut Player, blocks: &PlayerBlocks<'_>) {
     if !body_fits(player, SWIMMING_BODY, blocks) {
         return;
     }
@@ -841,9 +855,14 @@ fn update_body(player: &mut Player, blocks: &mut dyn FnMut(BlockPos) -> BlockSta
     };
 }
 
-fn body_fits(player: &Player, height: f64, blocks: &mut dyn FnMut(BlockPos) -> BlockState) -> bool {
+fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
     let box_ = body_box(player.position(), height).deflated(1.0e-7);
-    no_block_collision(box_, move_context(player), blocks)
+    no_block_collision(
+        box_,
+        move_context(player),
+        &mut |pos| blocks.state(pos),
+        |pos| blocks.piston(pos),
+    )
 }
 
 fn movement_box(player: &Player) -> Aabb {
@@ -884,6 +903,39 @@ fn clamp_position(position: Vec3) -> Vec3 {
 
 fn block_state(chunks: &ChunkStore, pos: BlockPos) -> BlockState {
     BlockState(chunks.block(pos).unwrap_or(blocks::VOID_AIR))
+}
+
+/// 玩家移动校验用到的只读方块视图。除了区块表还要带方块实体表：`moving_piston`
+/// 是 `dynamicShape`，碰撞形状要从这一格的 [`PistonMoving`] 现算。
+///
+/// The read-only block view for player movement checks. Besides the chunk store it
+/// carries the block-entity table: `moving_piston` is a dynamic shape whose collision
+/// shape comes from the [`PistonMoving`] at that cell.
+struct PlayerBlocks<'a> {
+    chunks: &'a ChunkStore,
+    entities: &'a BlockEntities,
+}
+
+impl PlayerBlocks<'_> {
+    fn new<'a>(chunks: &'a ChunkStore, entities: &'a BlockEntities) -> PlayerBlocks<'a> {
+        PlayerBlocks { chunks, entities }
+    }
+
+    fn state(&self, pos: BlockPos) -> BlockState {
+        block_state(self.chunks, pos)
+    }
+
+    fn piston(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
+        Self::piston_from(self.entities, pos)
+    }
+
+    fn piston_from(entities: &BlockEntities, pos: BlockPos) -> Option<Vec<Aabb>> {
+        let entity = entities.find_dyn(pos)?;
+        entity
+            .as_any()
+            .downcast_ref::<PistonMoving>()
+            .map(PistonMoving::collision_shape)
+    }
 }
 
 /// 一次和官方 `handleMovePlayer` 对照的样本。调用方给出和官方相同的起点、方块和移动包。
