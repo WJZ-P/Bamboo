@@ -40,6 +40,7 @@ pub mod random;
 pub mod random_tick;
 pub mod recording;
 pub mod shape;
+pub(crate) mod sleep_clock;
 pub mod state;
 pub mod ticks;
 pub mod weather;
@@ -47,7 +48,7 @@ pub mod world;
 pub mod world_border;
 
 #[cfg(test)]
-mod block_entity_sleep;
+pub(crate) mod block_entity_sleep;
 
 #[cfg(test)]
 mod testing;
