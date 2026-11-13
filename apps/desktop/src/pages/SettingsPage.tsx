@@ -9,6 +9,7 @@ import {
   fieldError,
   GROUPS,
   type NumberField,
+  SECTIONS,
   type SettingField,
 } from "../settings/fields";
 import { useServer } from "../state/ServerContext";
@@ -225,6 +226,12 @@ export function SettingsPage() {
         <PanelTitle>服务器设置</PanelTitle>
         <Lead>
           下面每一项都是服务端启动时读一次，保存之后要重启服务器才会生效。默认值写在每一项下面。
+          官方设置写进 server.properties，Bamboo 优化设置写进 bamboo.toml。
+        </Lead>
+        <Lead>服务器目录：{draft.serverDirectory || settings?.serverDirectory}</Lead>
+        <Lead>
+          命令行版用 <code>bamboo --server-dir {draft.serverDirectory || "这个目录"}</code>{" "}
+          就能读到完全相同的两份文件。
         </Lead>
         {snapshot?.running && (
           <Notice role="status">服务器正在运行，现在保存的修改要到下次启动时才生效。</Notice>
@@ -232,30 +239,38 @@ export function SettingsPage() {
       </PixelPanel>
 
       <Form onSubmit={(event) => void handleSubmit(event)}>
-        {GROUPS.map((group) => (
-          <PixelPanel key={group.id}>
-            <PanelTitle>{group.title}</PanelTitle>
-            <Lead>{group.hint}</Lead>
-            <Grid>
-              {FIELDS.filter((field) => field.group === group.id).map((field) => (
-                <Field
-                  key={field.key}
-                  as={field.control === "text" || field.control === "number" ? "label" : "div"}
-                  $wide={field.wide}
-                >
-                  {field.control === "slider"
-                    ? `${field.label}：${numberText(draft[field.key])}${field.unit ? ` ${field.unit}` : ""}`
-                    : field.label}
-                  {control(field)}
-                  <Hint>{field.hint}</Hint>
-                  <Hint>默认 {describeDefault(field, defaults)}</Hint>
-                  {errors.has(field.key) && (
-                    <ErrorText role="alert">{errors.get(field.key)}</ErrorText>
-                  )}
-                </Field>
-              ))}
-            </Grid>
-          </PixelPanel>
+        {SECTIONS.map((section) => (
+          <div key={section.id}>
+            <PixelPanel>
+              <PanelTitle>{section.title}</PanelTitle>
+              <Lead>{section.hint}</Lead>
+            </PixelPanel>
+            {GROUPS.filter((group) => group.section === section.id).map((group) => (
+              <PixelPanel key={group.id}>
+                <PanelTitle>{group.title}</PanelTitle>
+                <Lead>{group.hint}</Lead>
+                <Grid>
+                  {FIELDS.filter((field) => field.group === group.id).map((field) => (
+                    <Field
+                      key={field.key}
+                      as={field.control === "text" || field.control === "number" ? "label" : "div"}
+                      $wide={field.wide}
+                    >
+                      {field.control === "slider"
+                        ? `${field.label}：${numberText(draft[field.key])}${field.unit ? ` ${field.unit}` : ""}`
+                        : field.label}
+                      {control(field)}
+                      <Hint>{field.hint}</Hint>
+                      <Hint>{field.fileKey} · 默认 {describeDefault(field, defaults)}</Hint>
+                      {errors.has(field.key) && (
+                        <ErrorText role="alert">{errors.get(field.key)}</ErrorText>
+                      )}
+                    </Field>
+                  ))}
+                </Grid>
+              </PixelPanel>
+            ))}
+          </div>
         ))}
 
         <PixelPanel>

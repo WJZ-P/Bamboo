@@ -30,10 +30,6 @@ thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# 世界线程可选的用户交互级 QoS。
-libc.workspace = true
-
 [dev-dependencies]
 rand_core.workspace = true
 serde_json.workspace = true

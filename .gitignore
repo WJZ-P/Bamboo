@@ -5,6 +5,8 @@ node_modules/
 /apps/desktop/src-tauri/gen/
 /.idea/
 /logs/
+# 在 crate 目录里跑测试时日志写到这里。 / Logs written here when tests run inside a crate directory.
+/crates/*/logs/
 /.deps/
 
 # macOS 的目录元数据

@@ -20,7 +20,10 @@ A Minecraft server written from scratch in Rust
 cargo run --bin bamboo
 ```
 
-默认监听 `0.0.0.0:25565`，也可以传入地址：`cargo run --bin bamboo -- 127.0.0.1:25565`。
+服务器目录缺省是当前目录，里面放 `server.properties`（官方 26.3 的键和默认值）和
+`bamboo.toml`（Bamboo 自己的项）；两个文件不存在时会按默认值写出来。
+`bamboo --server-dir /srv/bamboo` 可以指定服务器目录，`bamboo 127.0.0.1:25566`
+可以临时覆盖这一次的监听地址而不写回文件。完整说明见 `docs/configuration.md`。
 
 桌面控制台（需要 Node.js 和 pnpm）：
 
@@ -32,12 +35,11 @@ pnpm start
 
 打包用 `pnpm tauri build`。
 
-桌面端有总览、控制台、玩家和设置四个页面。设置页按基本、网络、正版验证、代理转发、高级分组，
-覆盖服务端全部可调的选项：监听地址和端口、服务器介绍、最大玩家数、视距、压缩阈值、
-心跳间隔、正版验证和禁止代理连接、代理转发模式和密钥、进服时限和进服连接数上限。
-每一项都写了用途和默认值，越界的值和互斥的组合（比如正版验证加代理转发）会当场提示。
-设置存在应用配置目录的 `server-settings.json` 里，
-服务端只在启动时读一次，所以改完要重启服务器才生效。
+桌面端有总览、控制台、玩家和设置四个页面。设置页分成「官方设置」和「Bamboo 优化设置」
+两个分区，读写 APP 数据目录 `server/` 下的 `server.properties` 和 `bamboo.toml`，
+和命令行版完全是同一套文件。每一项都写了用途和默认值，越界的值和互斥的组合
+（比如正版验证加代理转发）会当场提示。老版本的 `server-settings.json` 第一次启动时
+导入一次，之后不再读它。服务端只在启动时读一次，所以改完要重启服务器才生效。
 
 控制台顶部有 CPU 和内存监控，每秒更新一次，曲线显示最近 60 秒，参照任务管理器。
 服务端跑在应用进程里，所以显示的是这个进程占整机的 CPU 和它的工作集，旁边附整机的 CPU 和内存；
@@ -49,6 +51,15 @@ WebView2 的渲染进程不算在内。
 - 玩家位置不再照单全收。一个 tick 里离本 tick 起点太远会拉回（`moved too quickly`），
   位移和方块碰撞对不上、或者新位置穿进实心方块也会拉回。生存和冒险模式悬空超过 80 tick
   会按 `multiplayer.disconnect.flying` 断开。创造和旁观可以飞。`allow-flight` 没有配置项，按官方默认关闭。
+- 世界边界按官方 26.3 做全了：中心、大小、渐变（lerp）、伤害量、安全区、警告时间、警告距离和
+  绝对最大值都可调，`/worldborder` 的全部子命令、等级 2 权限、成功和失败消息照官方
+  `WorldBorderCommand`。进服序列在官方 `PlayerList.sendLevelInfo` 的位置发 `initialize_border`，
+  改动按 `BorderChangeListener` 广播五个包（伤害两项官方就不发包）。数学（距离、`isWithinBounds`
+  的几种重载、`clampToBounds`、碰撞形状、`isInsideCloseToBorder`）和逐刻渐变、六个包的编码都用官方
+  `WorldBorder` 类在 JVM 里对拍。方块交互、放置、破坏、活塞、下落方块、桶、床的
+  `getWorldBorder().isWithinBounds` 调用点、三种实体和玩家移动的边界碰撞都读真正的状态。
+  状态按维度归 `Global`（设计稿 6.6 的全局状态），region 每刻取一份只读快照；渐变在
+  `ServerLevel.tick` 的 "world border" 阶段、天气和时间之前推进。
 - 区块跟着玩家走，Tab 列表、玩家互相可见、潜行、冲刺、挥手、手持物同步。
   Tab 列表的延迟每 601 tick 广播一次，数值是心跳往返时间的加权平均，公式和官方一样。
   心跳 id 和正在等的那次对不上，或者当前没在等心跳，都按官方 `disconnect.timeout` 断开。
@@ -160,7 +171,7 @@ WebView2 的渲染进程不算在内。
   关闭时和离线模式完全一样，握手地址里的 NUL 只是普通文本。
   配置是 `ServerConfig` 里的 `forwarding`（`Off`、`Legacy`、`Modern`）和 `forwarding_secret`；
   `Modern` 没有密钥时启动会退回 `Off`，桌面端的设置页里也能改。
-- 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。阈值是 `server.properties` 里的 `chat-spam-threshold-seconds`，不是游戏规则。
+- 聊天，加入和离开消息。刷屏的玩家和官方一样会被踢。代码里按官方 `server.properties` 的 `chat-spam-threshold-seconds` 默认值（10）计算，不是游戏规则；这个键本身还没实现，改它暂时不起作用。
   发送者不是全零 UUID 的聊天发 `player_chat`。没签名时签名位是空的，正文按 `PlayerChatMessage.unsigned`
   （时间是现在、盐是 0、已读列表是空的）。全零 UUID 的系统消息（不带签名的 `chat_command`）仍是 `disguised_chat`。
   不可信的广播日志带 `[Not Secure]`，格式和官方 `PlayerList.logChatMessage` 一样。
@@ -177,6 +188,10 @@ WebView2 的渲染进程不算在内。
   成功后 24 小时再刷新。第一次不论成败都放行登录。失败时保留上一份钥匙，安全聊天保持关闭、服务器照常开。
   没有发现文档。离线模式不去取公钥。
   没有聊天过滤和举报。`delete_chat` 的编码在，原版专用服务器不会发，这里也不发。
+  所有非 overlay 的系统消息（命令成功/失败与错误位置、给其他 OP 的 `chat.type.admin`、加入/离开提示、
+  `/gamerule`、`/random`、签名命令被拒等）都照官方 `ServerPlayer.sendSystemMessage` 看可见性：
+  聊天设成 `HIDDEN` 时不发，`overlay=true` 的动作栏消息照常发；「聊天已关闭」的提示照官方
+  `tryHandleChat` 直接发、不看可见性。被踢但还没 `Leave` 的玩家不再进聊天广播名单。
 - 网络压缩：登录末尾告诉客户端阈值（默认 256，负值关闭），之后两个方向都按官方格式收发压缩帧，
   小于阈值的包原样发。压缩只在连接任务里做，世界线程交出的帧本身不变。
 - 正版验证和加密（`online_mode`，默认关闭）：启动时生成 RSA 1024 密钥对，收到 `hello` 后把公钥和 4 字节挑战码发给客户端，
@@ -244,11 +259,22 @@ WebView2 的渲染进程不算在内。
 
 - 移动校验比官方严，也有几处更松。没有鞘翅的 300 格上限、漂浮、激流、睡觉、骑乘、击退宽限、
   切维度、单人房主豁免，游戏规则 `player_movement_check` 也关不掉，速度上限始终是 100。
-  不跑 `LivingEntity.travel`，所以预期位移只有跳跃和卡在方块里的减速。碰撞只算方块，
-  玩家互相穿身，世界边界也不挡人（只做 ±3.0E7 的坐标夹取）。没加载的区块仍用超平坦模板，
-  官方那里没有碰撞。摔落距离只记录，不结算伤害，也不调用方块的 `fallOn`。
+  不跑 `LivingEntity.travel`，所以预期位移只有跳跃和卡在方块里的减速。碰撞算方块和世界边界，
+  边界按官方 `Entity.collectCollidersIgnoringWorldBorder` 的条件（离边界够近）才把碰撞形状加进来；
+  玩家互相穿身，±3.0E7 的坐标夹取仍在（`Level.isInWorldBoundsHorizontal`，和世界边界是两件事）。
+  没加载的区块仍用超平坦模板，官方那里没有碰撞。摔落距离只记录，不结算伤害，也不调用方块的 `fallOn`；
+  世界边界的伤害也不结算，见下一条。
   蜘蛛网和细雪会在 tick 结束时套上卡住的速度并清掉摔落距离；压力板、绊线和甜浆果丛被踩到的效果没接。
   终末之诗、每 200 tick 补发脚下方块、载具移动都没做。
+- 世界边界还有几处没接：Bamboo 没有玩家生命值和伤害系统，官方 `LivingEntity.baseTick` 里的
+  边界伤害（`damageSources().outOfBorder()`）不结算，`damage amount` / `damage buffer` 只存起来、
+  跟着 `initialize_border` 发给客户端；`max-world-size` 没读，绝对最大值固定 29999984。
+  重生点和传送不按官方 `getWorldBorderAdjustedRespawnData`、`PortalForcer`、
+  `LivingEntity.randomTeleport` 夹进边界（没有死亡重生、下界传送门和随机传送）；
+  `canSpawnEntitiesInChunk`、刷怪和生物 AI 里的边界判断用不上（没有生物）。
+  边界状态不写存档，重启回到官方默认值：`mc-bamboo-blocks::world_border::WorldBorder` 已提供
+  和官方 `Settings` 编解码字段一一对应的 `export_settings` / `restore`，等 M3 接
+  `data/minecraft/world_border.dat`。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
 - 世界生成只有数学，没有地形：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
   含水层、表面规则、雕刻器、地物、结构、高度图和出生点查找都没做。
   按区块分格插值（官方 `interpolated` 的成批求值）要区块网格才有意义，只做了单个坐标上的结果。
@@ -414,7 +440,7 @@ WebView2 的渲染进程不算在内。
   （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
   `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源（官方也拒绝 entity 来源）。
   两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
-  难度默认 `easy`（和官方专用服务器一致，没有 `server.properties` 配置），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存，Bamboo 没有 `gamemode` 配置项）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。没有 `level-seed` 配置，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
+  难度默认 `easy`（和官方专用服务器一致；`difficulty` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存；`gamemode` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。`level-seed` 还没有实现，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
   `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（还没有实体死亡和钓鱼系统）。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸和 `/loot` 已经调用；实体死亡还没接。容器上的 `LootTable` / `LootTableSeed`（或物品上的 `container_loot` 组件放下后的方块实体）在官方 `unpackLootTable` 的调用点解包：玩家打开菜单、漏斗和投掷器读写、发射器取槽、饰纹陶罐读写、比较器读信号、破坏掉内容之前。填完就清表，旁观者打开不解包。随机源按 `LootContext.Builder.create` 选：种子非 0 用 `LegacyRandomSource(seed)`，种子为 0 且表有 `random_sequence` 用世界共用的序列缓存，都没有才用 `level.random`；结构生成时 `setBlockEntityLootTable` 的 `nextLong` 还没接。未解包的表会原样写回中键物品的 `container_loot`。`/setblock` 的方块 NBT 后缀和 `/give` 的物品组件后缀目前会明确报不支持，所以暂时不能用命令造出带战利品表的箱子；方块实体数据里的 `LootTable` / `LootTableSeed` 和 `container_loot` 组件能直接由物品或 `/clone` 带进游戏。解包不走 `THIS_ENTITY` 参数，玩家幸运值按默认的 0；依赖 `this_entity` 的自定义表会报不支持并清表。`loot-oracle` 的箱子题逐项比较 `fill`，另加了一道带 `BLOCK_ENTITY` 的潜影盒掉落题逐项比组件；`menu` oracle 加了一道「打开带战利品表的箱子」。序列缓存在世界里，种子是平坦世界的 0，不存档。
 - 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
@@ -429,9 +455,9 @@ WebView2 的渲染进程不算在内。
   选择器的 `scores=` 和 `team=` 现在能查计分板；`trigger` 命令、统计加分、死亡消息可见性、友军伤害和碰撞规则还没接到对应的游戏逻辑。
 - 服务器管理命令：`/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`。
   命令树（节点名、参数解析器和属性、`executable`、权限）和官方数据生成器的 `commands.json` 逐节点一致，`/version` 要等级 2、`/stop` 要等级 4，其余要等级 3。
-  四份名单文件在工作目录：`ops.json`、`banned-players.json`、`banned-ips.json`、`whitelist.json`。启动时读一次，命令改完按官方 `StoredUserList.save` 的字段顺序写回（pretty-printed JSON 数组）；Bamboo 先写临时文件再改名，比官方直接覆盖安全。世界线程只持有内存里的权威副本，写盘和 `/whitelist reload` 的读盘在连接层的专门线程上，世界线程不做 IO。
+  四份名单文件在服务器目录（命令行版的工作目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`）：`ops.json`、`banned-players.json`、`banned-ips.json`、`whitelist.json`。启动时读一次，命令改完按官方 `StoredUserList.save` 的字段顺序写回（pretty-printed JSON 数组）；Bamboo 先写临时文件再改名，比官方直接覆盖安全。世界线程只持有内存里的权威副本，写盘和 `/whitelist reload` 的读盘在连接层的专门线程上，世界线程不做 IO。
   `/op`、`/deop` 改完立刻给在线的当事人重发权限等级（`entity_event` 24–28）和他用得了的整棵命令树；`/op` 新加的等级按官方 `op-permission-level` 默认 4。`/ban` 和 `/ban-ip` 当场踢人，登录时按官方 `PlayerList.canPlayerLogin` 的顺序（玩家封禁 → 白名单 → IP 封禁）拒绝并给出带原因和到期时间的翻译文本；连接层检查完、世界线程处理 `Join` 时再按权威副本复查一次。封禁项里的 `created` 按官方 `yyyy-MM-dd HH:mm:ss Z` 写入，Bamboo 用 UTC；过期时间只按读入时解析出的毫秒值判断。
-  `/whitelist` 有 `on`、`off`、`add`、`remove`、`list`、`reload`。`reload` 的读盘在连接层线程上，结果下一 tick 才被世界线程采用（官方同步读盘后立刻生效，这是世界线程不做 IO 的代价）；成功消息在发出读盘请求时立刻回给命令来源。两个开关都按官方默认值：`white-list` 运行时由 `on|off` 改、重启恢复 false（官方会写回 `server.properties`，Bamboo 没有这个文件也不存档）；`enforce-whitelist` 官方默认 false，Bamboo 没有这个配置项，所以 `on` / `remove` / `reload` 默认不会踢在线玩家，踢人路径只在单元测试里注入开关覆盖。OP 不受白名单限制。
+  `/whitelist` 有 `on`、`off`、`add`、`remove`、`list`、`reload`。`reload` 的读盘在连接层线程上，结果下一 tick 才被世界线程采用（官方同步读盘后立刻生效，这是世界线程不做 IO 的代价）；成功消息在发出读盘请求时立刻回给命令来源。两个开关都按官方默认值：`white-list` 运行时由 `on|off` 改、重启恢复 false（官方会写回 `server.properties`；Bamboo 会原样保留这个文件里的 `white-list`，但目前不读它也不存档）；`enforce-whitelist` 官方默认 false，Bamboo 没有这个配置项，所以 `on` / `remove` / `reload` 默认不会踢在线玩家，踢人路径只在单元测试里注入开关覆盖。OP 不受白名单限制。
   `/stop` 发 `commands.stop.stopping` 之后走现有关服流程，世界线程给所有玩家发 `multiplayer.disconnect.server_shutdown` 再退出，服务端随世界线程结束。`/setidletimeout` 的单位是分钟，0 关闭；空闲判断照官方 `ServerGamePacketListenerImpl.tick`，Bamboo 已解码且能对应的动作（聊天、命令、按键输入、玩家指令、挥手、换快捷栏、破坏、右键、容器点击和按钮、告示牌、客户端指令、位移）会重置 `lastActionTime`，官方另外那些 handler（攻击实体、交互、旁观者动作、放配方、书与笔等）还没接。
   `/transfer` 发 `ClientboundTransferPacket`（主机名、端口，默认 25565），`/version` 按官方 `VersionCommand.dumpVersion` 的行序打印；版本信息用 `mc-bamboo-data` 的常量，`series`、`build_time`、两个 `pack_version` 按 26.3 官方 `version.json` 固定，测试会读官方 jar 逐个对照。
   名字参数用官方 `GameProfileArgument`：`@` 开头按玩家选择器解析，在线玩家按名字解析；离线模式不在线的名字用官方 `UUIDUtil.createOfflinePlayerUUID`（`OfflinePlayer:<name>` 的 MD5）。正版模式按官方 `CachedUserNameToIdResolver` 维护一份「本次启动以来进过服的玩家 名字→UUID」缓存（`Join` 时记下，不写盘；官方会持久化到 `usercache.json`），在线玩家查不到时先查这份缓存，再查不到就按官方「查不到」报 `argument.player.unknown`（Bamboo 没有 Mojang 档案查询，也不从白名单猜 UUID）。`ban-ip` / `pardon-ip` 的 target 是 IP 或在线玩家名（用连接层报来的对端 IP）。
@@ -491,6 +517,9 @@ WebView2 的渲染进程不算在内。
   正版验证打开且公钥取到了之后，聊天按上面一节签名。取钥失败会按 authlib 的间隔在后台重试，钥匙到达后安全聊天立刻生效。
   RSA 解密用的 `rsa` crate 有 RUSTSEC-2023-0071（Marvin 计时侧信道），上游还没有修好的版本，
   Bamboo 用 `decrypt_blinded` 做盲化缓解，详见 `crates/mc-bamboo-auth/src/keypair.rs` 的注释。
+- 系统消息的可见性按官方做，但官方 `ServerPlayer.sendSystemMessage` 还用
+  `PacketSendListener.exceptionallySend` 在发包失败时补一条 `multiplayer.message_not_delivered`；
+  Bamboo 的链路写失败时直接关连接，没有这个回调，所以不发这条补发消息。
 
 ## 项目结构
 
@@ -511,7 +540,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-nbt` | NBT 编解码，解码带官方的配额和深度上限 |
 | `crates/mc-bamboo-data` | 版本数据：由官方服务端生成的协议号、包 ID、方块、物品、配方、战利品表、注册表和标签 |
 | `apps/desktop` | 桌面控制台：Tauri + React + styled-components |
-| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表和世界生成 |
+| `tools/mc-bamboo-vanilla` | 开发工具：生成版本数据、用官方代码验证 Bamboo 的协议、方块行为、光照、菜单、熔炉、酿造台和营火的逐刻状态、物品组件、方块谓词、配方、战利品表、世界边界和世界生成 |
 
 依赖方向是单向的：
 
@@ -689,6 +718,15 @@ cargo test --release -p mc-bamboo-storage chunk_nbt_cost -- --ignored --nocaptur
 ```bash
 cargo run -p mc-bamboo-vanilla -- ticket-oracle <java 路径> \
     [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
+```
+
+世界边界也一样：官方 `WorldBorder` 在 JVM 里对随机的中心、大小、绝对最大值和渐变出题，
+比对距离、`isWithinBounds` 的几种重载、`clampToBounds`、`isInsideCloseToBorder` 与
+`Shapes.collide` 的碰撞结果、逐刻渐变后的尺寸和状态，以及六个 clientbound 包的官方编码；
+不启动服务端，用官方类直接算：
+
+```bash
+cargo run -p mc-bamboo-vanilla -- border-oracle <java 路径> [--cases N] [--seed S] [--show N]
 ```
 
 这些命令需要 Java 25 或更新版本。

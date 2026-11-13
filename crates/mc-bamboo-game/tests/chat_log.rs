@@ -79,6 +79,7 @@ fn chat_is_logged_with_the_not_secure_tag() {
         online_mode: false,
         enforce_secure_profile: false,
         admin: Default::default(),
+        ..Default::default()
     };
     let world = World::new(config, receiver);
     let player = PlayerId(1);

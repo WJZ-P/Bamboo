@@ -137,7 +137,7 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
 
 /// `EntityTickList.forEach`。计划刻里生成的实体这一步才第一次 tick。
 ///
-/// 精确驱动（默认）整个阶段算完立刻落地，剖析器记为一段；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）
+/// 精确驱动（默认）整个阶段算完立刻落地，剖析器记为一段；并行驱动（`bamboo.toml` 里 `entity_threads ≥ 1`）
 /// 拆成只读算阶段和落地阶段，剖析器分别记两段。开关存在 `World` 上，创建时读一次。
 ///
 /// `EntityTickList.forEach`. Entities spawned by scheduled ticks tick here for the first time.
@@ -171,6 +171,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             entities,
             block_entities,
             block_rules,
+            world_border,
             tick_levels,
             profiler,
             ..
@@ -192,6 +193,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             facts,
             open_shulker_boxes,
             hopper_positions,
+            world_border: world_border.clone(),
         });
         let executor = ScopedThreads { threads };
         let computed = compute(&view, entities, &executor);
@@ -579,9 +581,11 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 }
             }
             Effect::CampfireChanged { pos } => crate::campfire::write_update_tag(region, pos),
-            // `ServerPlayer.sendOverlayMessage`。只发给发起动作的那名玩家。
+            // `ServerPlayer.sendOverlayMessage` → `sendSystemMessage(message, true)`，
+            // overlay 恒发（隐藏聊天也收）。只发给发起动作的那名玩家。
             //
-            // `ServerPlayer.sendOverlayMessage`. Only the player who started the action.
+            // `ServerPlayer.sendOverlayMessage` → `sendSystemMessage(message, true)`;
+            // overlay messages always arrive, even for hidden chat. Only the acting player.
             Effect::Overlay { key, first, second } => {
                 let Some(id) = initiator else {
                     continue;
@@ -594,13 +598,7 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     args.push(second.into());
                 }
                 let content = Component::translate(key, args);
-                region.links.send(
-                    id,
-                    &SystemChat {
-                        content: &content,
-                        overlay: true,
-                    },
-                );
+                crate::chat::send_system_message(region, id, &content, true);
             }
             Effect::OpenCommandBlock { pos } => {
                 if let Some(id) = initiator {
@@ -733,6 +731,19 @@ pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemO
         return;
     }
 
+    // 官方 `handleUseItemOn` 的 `level.mayInteract(player, pos)`：边界外不能交互，
+    // 走 `sendBuildLimitMessage(true, maxY)` 那条路，但仍把两格方块发回去。
+    //
+    // Official `handleUseItemOn`'s `level.mayInteract(player, pos)`: outside the
+    // border the click is refused with `sendBuildLimitMessage(true, maxY)`, yet both
+    // block updates are still sent.
+    if !region.world_border.is_within_bounds_pos(pos) {
+        send_build_limit(&mut region.links, id, TOO_HIGH, MAX_Y);
+        send_current_block(region, id, pos);
+        send_current_block(region, id, pos.relative(face));
+        return;
+    }
+
     // 客户端可能还没收到传送，这时的点击不能信。
     if !player.teleport.is_awaiting() {
         use_held_item(region, id, &packet);
@@ -760,6 +771,15 @@ fn send_current_block(region: &mut Region, id: PlayerId, pos: BlockPos) {
 /// 快捷栏上方的红字提示。`blocks-inventory.md` 6.6。
 fn send_build_limit(links: &mut Links, id: PlayerId, key: &str, limit: i32) {
     let content = Component::translate(key, [limit.into()]).color(Color::Red);
+    // 官方 `sendBuildLimitMessage` → `sendOverlayMessage` → `sendSystemMessage(message, true)`，
+    // overlay 恒发（隐藏聊天也收），所以直接 `links.send` 与走
+    // `send_system_message(..., true)` 等价。这是只拿 `Links` 的网络层小助手，
+    // 保持直接发，不去改动交互里的高度判断。
+    //
+    // Official `sendBuildLimitMessage` → `sendOverlayMessage` → `sendSystemMessage(message, true)`;
+    // overlay always arrives (even for hidden chat), so a direct `links.send` is equivalent to
+    // `send_system_message(..., true)`. This network-layer helper only holds `Links`; it stays a
+    // direct send to avoid touching the interaction height checks.
     let packet = SystemChat {
         content: &content,
         overlay: true,
@@ -851,13 +871,10 @@ fn spectator_use_item_on(region: &mut Region, id: PlayerId, packet: &UseItemOn) 
         .is_some_and(|state| BlockState(state).is_a(BlockAncestor::Portal));
     if portal {
         let content = Component::translate("spectator.cannot_teleport", []).color(Color::Red);
-        region.links.send(
-            id,
-            &SystemChat {
-                content: &content,
-                overlay: true,
-            },
-        );
+        // 官方 `sendOverlayMessage` → `sendSystemMessage(message, true)`，overlay 恒发。
+        //
+        // Official `sendOverlayMessage` → `sendSystemMessage(message, true)`; overlay always arrives.
+        crate::chat::send_system_message(region, id, &content, true);
         swing(region, id, packet.hand, InteractionResult::Consume);
         return;
     }

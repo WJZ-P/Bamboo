@@ -39,12 +39,11 @@ use crate::{
 const TICK: Duration = Duration::from_millis(50);
 /// 落后超过这个时长就不追了，直接跳过去。短暂的卡顿靠连续跑 tick 追上。
 const MAX_CATCH_UP: Duration = Duration::from_secs(2);
+/// 信箱预算和实体线程数的上限，防住配置文件里的巨值。
+pub const MAX_MAIL_BUDGET: usize = 1 << 16;
+pub const MAX_ENTITY_THREADS: usize = 256;
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
-
-/// 实体阶段的并行线程数。缺省或 0 = 精确驱动；≥ 1 = 并行驱动（1 也是单线程，用来对比）。
-/// 世界创建时读一次，之后不再看环境变量。
-const ENTITY_THREADS_ENV: &str = "BAMBOO_ENTITY_THREADS";
 
 /// 世界的启动参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +61,24 @@ pub struct WorldConfig {
     pub enforce_secure_profile: bool,
     /// 启动时读到的管理名单，成为世界线程里的权威副本。
     pub admin: crate::admin::AdminSnapshot,
+    /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动。
+    pub entity_threads: usize,
+    /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
+    pub mail_budget: MailBudget,
+}
+
+impl Default for WorldConfig {
+    fn default() -> Self {
+        Self {
+            view_distance: 8,
+            max_players: 20,
+            online_mode: false,
+            enforce_secure_profile: true,
+            admin: crate::admin::AdminSnapshot::default(),
+            entity_threads: 0,
+            mail_budget: MailBudget::default(),
+        }
+    }
 }
 
 /// 所有游戏状态的唯一所有者。
@@ -69,7 +86,7 @@ pub struct World {
     pub(crate) global: Global,
     pub(crate) region: Region,
     inbox: Receiver<Inbound>,
-    /// 睡到下一刻的策略和世界线程的优先级，创建时读一次环境变量。
+    /// 睡到下一刻用的节拍器。
     pacer: Pacer,
     /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
     /// 直接嵌 `World::new` 的测试/工具按 `JoinRequest` 传入的等级走。
@@ -82,14 +99,6 @@ pub struct World {
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
     /// Director 的逻辑刻数，每次 `tick_ticket_timeouts` 加一。
     director_tick: u64,
-}
-
-/// 世界创建时读一次环境变量。读不到、0、负数或解析不了都是精确驱动。
-fn entity_threads_from_env() -> usize {
-    std::env::var(ENTITY_THREADS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
 }
 
 impl World {
@@ -138,7 +147,7 @@ impl World {
         }
         let mut world = Self {
             authoritative_admin,
-            entity_threads: entity_threads_from_env(),
+            entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
             global,
             region: Region::with_keys(
                 view_distance,
@@ -148,12 +157,17 @@ impl World {
                 keys,
             ),
             inbox,
-            pacer: Pacer::from_env(),
+            pacer: Pacer,
             host: if infinite_flat {
                 DirectorHost::new_infinite_flat(Default::default())
             } else {
-                // 信箱预算在世界创建时读一次环境变量，之后不再看它。
-                DirectorHost::new(Default::default(), MailBudget::from_env())
+                DirectorHost::new(
+                    Default::default(),
+                    MailBudget {
+                        deliveries: config.mail_budget.deliveries.min(MAX_MAIL_BUDGET),
+                        reclaims: config.mail_budget.reclaims.min(MAX_MAIL_BUDGET),
+                    },
+                )
             },
             ticket_centers: std::collections::BTreeMap::new(),
             director_tick: 0,
@@ -262,7 +276,6 @@ impl World {
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
     pub fn run(mut self) {
-        self.pacer.set_thread_priority();
         let mut timing = WallTiming;
         let mut schedule = Schedule::starting_at(self.region.profiler.now());
         loop {
@@ -277,11 +290,7 @@ impl World {
                 break;
             }
             schedule.after_tick(self.region.profiler.now());
-            let spun = self.pacer.wait_until(schedule.deadline(), &mut timing);
-            self.region.profiler.record(
-                Metric::TickSpinUs,
-                spun.as_micros().min(u128::from(u64::MAX)) as u64,
-            );
+            self.pacer.wait_until(schedule.deadline(), &mut timing);
         }
     }
 
@@ -340,6 +349,14 @@ impl World {
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);
 
+        // 官方 `ServerLevel.tick` 开头的 "world border" 阶段在天气和时间之前。
+        // 渐变推进后把新快照发布给 region，这一刻的方块逻辑和实体碰撞都读它。
+        //
+        // Vanilla `ServerLevel.tick`'s "world border" phase comes before weather and time.
+        // After the lerp step, publish the new snapshot; this tick's block logic and
+        // entity collisions read it.
+        self.global.tick_world_border();
+        self.global.publish_border(&mut self.region);
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
         let weather = weather::advance(&mut self.global, &self.region);
         if !weather.is_empty() {
@@ -559,7 +576,11 @@ impl World {
         self.region.send_own_entity_data(id);
 
         if let Some(frames) = self.global.joined_message(id) {
-            self.region.links.broadcast_except(id, &frames);
+            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性；进服消息跳过本人。
+            //
+            // Official `PlayerList.broadcastSystemMessage` checks visibility per player;
+            // the join message skips the joining player.
+            crate::chat::broadcast_system_message(&mut self.region, &frames, Some(id));
         }
 
         // 官方 `ServerScoreboard.getStartTrackingPackets` 和 `CustomBossEvents.onPlayerConnect`
@@ -579,6 +600,7 @@ impl World {
             self.global.clock(),
             self.global.state().spawn,
             self.global.state().weather,
+            self.global.world_border(),
         );
     }
 
@@ -594,7 +616,10 @@ impl World {
         self.region.peer_ips.remove(&id);
 
         if let Some(frames) = self.global.left_message(id) {
-            self.region.links.broadcast(&frames);
+            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性。
+            //
+            // Official `PlayerList.broadcastSystemMessage` checks visibility per player.
+            crate::chat::broadcast_system_message(&mut self.region, &frames, None);
         }
         entity_sync::on_leave(&mut self.region, id);
         entity_tracking::on_leave(&mut self.region, id);

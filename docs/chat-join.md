@@ -35,7 +35,7 @@
 
 ## 1. 结论
 
-**实现现状：** 正版验证打开、并且已经拿到服务公钥、`enforce-secure-profile` 为真时，按官方做安全聊天。公钥按 authlib `RetryableFetch` 在连接任务里重试（5 分钟起、每次翻倍、封顶 320 分钟，成功后 24 小时刷新），钥匙到达后强制立刻生效。`chat_session_update` 会校验并广播 `INITIALIZE_CHAT`；签名消息转发为 `player_chat`；`chat_ack` 会推进已读窗口。发送者不是全零 UUID 的未签名消息也发 `player_chat`（没有签名），控制台对不可信广播加 `[Not Secure]`。不带签名的 `chat_command` 仍是全零发送者，走 `disguised_chat`。下面第 1–3 条，以及后文写着「签名丢掉」「不处理 `chat_ack`」「不处理 `chat_session_update`」「玩家聊天用 `disguised_chat`」的句子，说的是改动之前的离线做法。`delete_chat` 能编码，不会发送。没有发现文档。
+**实现现状：** 正版验证打开、并且已经拿到服务公钥、`enforce-secure-profile` 为真时，按官方做安全聊天。公钥按 authlib `RetryableFetch` 在连接任务里重试（5 分钟起、每次翻倍、封顶 320 分钟，成功后 24 小时刷新），钥匙到达后强制立刻生效。`chat_session_update` 会校验并广播 `INITIALIZE_CHAT`；签名消息转发为 `player_chat`；`chat_ack` 会推进已读窗口。发送者不是全零 UUID 的未签名消息也发 `player_chat`（没有签名），控制台对不可信广播加 `[Not Secure]`。不带签名的 `chat_command` 仍是全零发送者，走 `disguised_chat`。下面第 1–3 条，以及后文写着「签名丢掉」「不处理 `chat_ack`」「不处理 `chat_session_update`」「玩家聊天用 `disguised_chat`」的句子，说的是改动之前的离线做法。`delete_chat` 能编码，不会发送。系统消息的可见性也按官方 `ServerPlayer.sendSystemMessage` 做：非 overlay 的系统消息（命令反馈、给 OP 的 `chat.type.admin`、加入/离开提示等）对 `HIDDEN` 玩家不发，overlay 消息照发，「聊天已关闭」提示照 `tryHandleChat` 直接发；被踢但还没 `Leave` 的玩家不再进聊天广播名单。没有发现文档。
 
 1. **离线聊天不需要任何签名。** 默认配置的 `login` 里 `online_mode=false`、`enforces_secure_chat=false`，客户端不创建聊天会话，`chat` 包里签名为空，`chat_session_update` 不会发。
 2. **`LastSeenMessages.Update` 可以解码后丢弃。** 只要服务端不发带签名的 `player_chat`，客户端发来的永远是 `00 00 00 00 01`，`chat_ack` 也永远不会发。

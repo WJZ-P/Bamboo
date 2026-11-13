@@ -12,14 +12,15 @@ use std::{
 
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockGameRules, BlockTicks, LevelRandom, RedstoneMemory,
-    entity::Entities,
+    WorldBorder, entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameEvent, GameMode,
-    Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime, UpdateAttributes,
+    InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime,
+    UpdateAttributes,
 };
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
@@ -217,6 +218,13 @@ pub(crate) struct Region {
     /// The weather snapshot block logic reads. The authoritative copy is on `Global`
     /// and is copied here after each tick's weather advance.
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
+    /// 这一维度的世界边界快照。权威副本在 `Global`，每刻推进渐变后、以及命令改完
+    /// 边界后写过来。方块逻辑、移动校验和实体碰撞都读这一份。
+    ///
+    /// This dimension's world-border snapshot. The authoritative copy is on `Global`
+    /// and is copied here after each tick's lerp step and after a border command.
+    /// Block logic, movement checks and entity collisions all read this copy.
+    pub(crate) world_border: WorldBorder,
     /// `GameRules.SEND_COMMAND_FEEDBACK`。
     pub(crate) send_command_feedback: bool,
     /// `GameRules.LOG_ADMIN_COMMANDS`。
@@ -354,6 +362,7 @@ impl Region {
             clock_millis: None,
             block_rules: rules.block_snapshot(),
             block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
+            world_border: WorldBorder::default(),
             send_command_feedback: rules.bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
             log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
             command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
@@ -393,6 +402,7 @@ impl Region {
             loot_sequences: &self.loot_sequences,
             block_rules: self.block_rules,
             block_weather: self.block_weather,
+            world_border: self.world_border.clone(),
             command_blocks: &mut self.command_blocks,
             tick_levels: &self.tick_levels,
         };
@@ -495,9 +505,13 @@ impl Region {
         );
     }
 
-    /// 官方 `PlayerList.sendLevelInfo`：`set_time`、`set_default_spawn_position`，
-    /// 下雨时的三个 `game_event`，然后 `game_event` 13 和 `set_chunk_cache_center`。
-    /// 世界边界不在范围内，跳过。
+    /// 官方 `PlayerList.sendLevelInfo`：`initialize_border` 开头，然后 `set_time`、
+    /// `set_default_spawn_position`、下雨时的三个 `game_event`，最后 `game_event` 13
+    /// 和 `set_chunk_cache_center`。
+    ///
+    /// Official `PlayerList.sendLevelInfo`: `initialize_border` first, then `set_time`,
+    /// `set_default_spawn_position`, the three rain `game_event`s, and finally
+    /// `game_event` 13 and `set_chunk_cache_center`.
     pub(crate) fn start_loading_chunks(
         &mut self,
         id: PlayerId,
@@ -505,7 +519,21 @@ impl Region {
         clock: Clock,
         spawn: RespawnData,
         weather: Weather,
+        border: &WorldBorder,
     ) {
+        self.links.send(
+            id,
+            &InitializeBorder {
+                center_x: border.center_x(),
+                center_z: border.center_z(),
+                old_size: border.size(),
+                new_size: border.lerp_target(),
+                lerp_time: border.lerp_time(),
+                absolute_max_size: border.absolute_max_size(),
+                warning_blocks: border.warning_blocks(),
+                warning_time: border.warning_time(),
+            },
+        );
         self.send_time(id, time, clock);
         self.links.send(
             id,

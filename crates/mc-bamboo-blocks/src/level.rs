@@ -600,6 +600,16 @@ pub trait Level: LevelSideState + LevelEntities {
         crate::weather::BlockWeather::CLEAR
     }
 
+    /// `Level.getWorldBorder()`：这一维度的世界边界。默认是官方默认边界，权威副本
+    /// 在世界线程的 `Global` 上，游戏层和实体的只读视图各覆盖一份快照。
+    ///
+    /// `Level.getWorldBorder()`: this dimension's world border. The default is the
+    /// vanilla default border; the authoritative copy lives on the world thread's
+    /// `Global`, and the game layer and entity read-only views each supply a snapshot.
+    fn world_border(&self) -> crate::WorldBorder {
+        crate::WorldBorder::default()
+    }
+
     /// `BlockAndLightGetter.canSeeSky(pos)`：天空光是 15 就看得见天。
     ///
     /// `isRainingAt` 用得到。默认实现读上一轮算好的天空光，和官方一致。

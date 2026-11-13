@@ -41,6 +41,8 @@
 //!     用官方 BlockEntity / SavedTick / Entity 检查区块上层内容的存档 NBT
 //! mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
 //!     让官方 `DistanceManager` 在随机票操作里算区块等级，用 `TicketTable` 重放，逐步比较两套等级
+//! mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]
+//!     让官方 `WorldBorder` 对随机的中心、大小和渐变出题，比对数学、逐刻推进和六个包的编码
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -89,6 +91,8 @@ mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
 #[cfg(feature = "oracle")]
+mod world_border_oracle;
+#[cfg(feature = "oracle")]
 mod worldgen;
 
 use std::{
@@ -130,6 +134,8 @@ const CHUNK_CONTENT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkCon
 const TICKET_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TicketOracle.java";
 #[cfg(feature = "oracle")]
 const PLAYER_DATA_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PlayerDataOracle.java";
+#[cfg(feature = "oracle")]
+const WORLD_BORDER_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldBorderOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值] [--weather clear|rain|thunder]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -145,7 +151,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla storage <java 路径> [--show N]
       mc-bamboo-vanilla player-data <java 路径> [--show N]
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
-      mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]";
+      mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
+      mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -183,6 +190,7 @@ fn run() -> Result<(), String> {
         ["player-data", java, ref options @ ..] => player_data_oracle(java, options),
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
+        ["border-oracle", java, ref options @ ..] => world_border_oracle(java, options),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -387,6 +395,16 @@ fn player_data_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn ticket_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     ticket_oracle::run(official_program(java, TICKET_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn world_border_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    world_border_oracle::run(official_program(java, WORLD_BORDER_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn world_border_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 /// 用官方解压出来的 jar 当 classpath，运行一个单文件 Java 程序。

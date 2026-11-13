@@ -158,6 +158,10 @@ pub(crate) fn on_move_player(
     on_ground: bool,
     horizontal_collision: bool,
 ) {
+    // 边界快照在借出玩家表之前取：两种借用互不相交。
+    //
+    // Take the border snapshot before borrowing the player map: the borrows are disjoint.
+    let border = region.world_border.clone();
     let Region {
         players,
         player_grid,
@@ -213,6 +217,7 @@ pub(crate) fn on_move_player(
             horizontal_collision,
         },
         &mut sample,
+        &border,
     );
 }
 
@@ -226,6 +231,10 @@ pub(crate) fn on_accept_teleportation(
     position: Vec3,
     (yaw, pitch): (f32, f32),
 ) {
+    // 边界快照在借出玩家表之前取：两种借用互不相交。
+    //
+    // Take the border snapshot before borrowing the player map: the borrows are disjoint.
+    let border = region.world_border.clone();
     let Region {
         players,
         player_grid,
@@ -267,6 +276,7 @@ pub(crate) fn on_accept_teleportation(
             horizontal_collision: false,
         },
         &mut sample,
+        &border,
     );
 }
 
@@ -433,6 +443,7 @@ fn apply_change(
     now: crate::region::RegionTick,
     attempt: Attempt,
     blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    border: &mc_bamboo_blocks::WorldBorder,
 ) {
     let change = Change {
         target: clamp_position(attempt.target),
@@ -453,7 +464,7 @@ fn apply_change(
         jump_from_ground(player);
     }
     let stands = player.motion.vertical_collision_below;
-    let simulated = simulate_move(player, from_last, &mut *change.blocks);
+    let simulated = simulate_move(player, from_last, &mut *change.blocks, border);
     let end = start.add(simulated.movement);
     player.motion.delta = simulated.velocity;
     player.motion.stuck_speed = simulated.stuck_speed;
@@ -487,11 +498,17 @@ fn apply_change(
         warn!("{} moved wrongly!", player.name);
     }
     let old_box = movement_box(player);
-    let old_clear = no_block_collision(
-        old_box,
-        context_at(player, end.y, false),
-        &mut *change.blocks,
-    );
+    // 官方 `level.noCollision(player, oldAABB)` 是方块、实体、边界三样都不碰。
+    // 方块和实体在 `no_block_collision` 里，边界单独补上。
+    //
+    // Vanilla `level.noCollision(player, oldAABB)` means no block, entity or border
+    // collision. Blocks and entities live in `no_block_collision`; the border is added here.
+    let old_clear =
+        no_block_collision(
+            old_box,
+            context_at(player, end.y, false),
+            &mut *change.blocks,
+        ) && border.no_border_collision(player.position().x, player.position().z, old_box);
     let newly = overlaps_new_blocks(
         old_box,
         box_at(player, end),
@@ -570,6 +587,7 @@ fn simulate_move(
     player: &Player,
     displacement: Vec3,
     blocks: &mut dyn FnMut(BlockPos) -> BlockState,
+    border: &mc_bamboo_blocks::WorldBorder,
 ) -> Simulated {
     let mut velocity = player.motion.delta;
     let mut stuck_speed = player.motion.stuck_speed;
@@ -597,6 +615,7 @@ fn simulate_move(
         player.on_ground,
         move_context(player),
         &mut *blocks,
+        border,
     );
     let moved_vertically = delta.y.abs() > 0.0;
     let end = player.position().add(resolved);

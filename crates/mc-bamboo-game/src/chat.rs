@@ -152,7 +152,19 @@ pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: ChatMessage<'_
         .is_some_and(|player| player.client.chat_visibility == ChatVisibility::Hidden);
     if hidden {
         let notice = Component::translate(CHAT_DISABLED, []).color(Color::Red);
-        send_system_chat(region, id, &notice);
+        // 官方 `tryHandleChat` 里「聊天已关闭」的提示直接 `connection.send`，不看可见性，
+        // 所以连 HIDDEN 玩家也发。别处发系统消息要走 [`send_system_message`]。
+        //
+        // The "chat disabled" notice in official `tryHandleChat` goes straight through
+        // `connection.send` with no visibility check, so even a HIDDEN player receives it.
+        // System messages elsewhere must go through [`send_system_message`].
+        region.links.send(
+            id,
+            &SystemChat {
+                content: &notice,
+                overlay: false,
+            },
+        );
         return false;
     }
     let name = match region.players.get(&id) {
@@ -204,12 +216,60 @@ fn kick_for_illegal_characters(region: &mut Region, id: PlayerId) {
         .kick(id, &Component::translate(ILLEGAL_CHARACTERS, []));
 }
 
-fn send_system_chat(region: &mut Region, id: PlayerId, content: &Component) {
-    let packet = SystemChat {
-        content,
-        overlay: false,
-    };
-    region.links.send(id, &packet);
+/// 官方 `ServerPlayer.acceptsSystemMessages(boolean overlay)`：聊天可见性是 `HIDDEN`
+/// 时只接受 overlay，其他可见性一律接受。
+///
+/// Official `ServerPlayer.acceptsSystemMessages(boolean overlay)`: a HIDDEN chat accepts
+/// only overlay messages; every other visibility accepts everything.
+fn accepts_system_messages(visibility: ChatVisibility, overlay: bool) -> bool {
+    visibility != ChatVisibility::Hidden || overlay
+}
+
+/// 官方 `ServerPlayer.sendSystemMessage(Component, boolean overlay)`：先看可见性再发包。
+/// 命令的成功/失败、广播给 OP 的 `chat.type.admin`、签名命令失败等系统消息都走这里。
+///
+/// Official `ServerPlayer.sendSystemMessage(Component, boolean overlay)`: check visibility
+/// before sending. Command feedback, the `chat.type.admin` broadcast to ops, and secure-chat
+/// failures all come through here.
+pub(crate) fn send_system_message(
+    region: &mut Region,
+    id: PlayerId,
+    content: &Component,
+    overlay: bool,
+) {
+    let accepts = region
+        .players
+        .get(&id)
+        .is_some_and(|player| accepts_system_messages(player.client.chat_visibility, overlay));
+    if accepts {
+        region.links.send(id, &SystemChat { content, overlay });
+    }
+}
+
+/// 官方 `PlayerList.broadcastSystemMessage` 的逐玩家可见性过滤：把编好的非 overlay
+/// `SystemChat` 帧发给所有没把聊天设成「隐藏」的玩家，`except` 是要跳过的人
+/// （进服消息跳过刚进来的玩家）。链路已关的玩家由 `Links::send_frames` 自己丢掉。
+///
+/// Per-recipient visibility filter of official `PlayerList.broadcastSystemMessage`: sends
+/// encoded non-overlay `SystemChat` frames to every player who has not hidden chat; `except`
+/// is skipped (join messages skip the joining player). Players with a closed link are dropped
+/// by `Links::send_frames` itself.
+pub(crate) fn broadcast_system_message(
+    region: &mut Region,
+    frames: &[u8],
+    except: Option<PlayerId>,
+) {
+    let ids: Vec<PlayerId> = region
+        .players
+        .iter()
+        .filter(|(id, player)| {
+            Some(**id) != except && accepts_system_messages(player.client.chat_visibility, false)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        region.links.send_frames(id, frames);
+    }
 }
 
 #[cfg(test)]

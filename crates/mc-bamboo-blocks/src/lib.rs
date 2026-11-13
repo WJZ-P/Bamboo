@@ -42,6 +42,7 @@ pub mod state;
 pub mod ticks;
 pub mod weather;
 pub mod world;
+pub mod world_border;
 
 #[cfg(test)]
 mod block_entity_sleep;
@@ -85,3 +86,7 @@ pub use state::{BlockState, FluidState, Property, PropertyValue, SupportType};
 pub use ticks::{BlockTicks, Busy, ChunkTicks, ScheduledFluidTick, ScheduledTick, TickPriority};
 pub use weather::{BlockWeather, Precipitation, PrecipitationFacts};
 pub use world::World;
+pub use world_border::{
+    ABSOLUTE_MAX_SIZE, BorderEvent, BorderSettings, BorderStatus, MAX_CENTER_COORDINATE, MAX_SIZE,
+    WorldBorder,
+};

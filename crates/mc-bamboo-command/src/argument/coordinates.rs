@@ -149,6 +149,25 @@ pub fn parse_vec3_without_centering(reader: &mut StringReader) -> Result<Value, 
     }
 }
 
+/// 官方 `Vec2Argument.vec2()`：两个水平坐标，绝对整数都居中，不支持 `^` 局部坐标。
+///
+/// Vanilla `Vec2Argument.vec2()`: two horizontal coordinates, centring absolute
+/// integers; local `^` coordinates are not accepted by `parse`.
+pub fn parse_vec2(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    if !reader.can_read() {
+        return Err(ParseError::new("argument.pos2d.incomplete"));
+    }
+    let x = parse_world_double(reader, true)?;
+    if reader.can_read() && reader.peek() == ' ' {
+        reader.skip();
+        let z = parse_world_double(reader, true)?;
+        return Ok(Value::Vec2([x, z]));
+    }
+    reader.set_cursor(start);
+    Err(ParseError::new("argument.pos2d.incomplete"))
+}
+
 /// `BlockPosArgument.blockPos()`。
 pub fn parse_block_pos(reader: &mut StringReader) -> Result<Value, ParseError> {
     if reader.can_read() && reader.peek() == LOCAL_PREFIX {

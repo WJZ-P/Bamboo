@@ -3,6 +3,7 @@
 //! 按主题分成几个子模块，所有公开项都从这里导出。
 
 mod block;
+mod border;
 mod chat;
 mod command;
 mod entity;
@@ -18,6 +19,7 @@ mod sound;
 mod title;
 
 pub use block::*;
+pub use border::*;
 pub use chat::*;
 pub use command::*;
 pub use entity::*;

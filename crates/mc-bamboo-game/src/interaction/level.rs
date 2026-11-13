@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, slice};
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockGameRules, BlockState, Combined, Container, EntityStore,
     EntityTables, HopperEntity, Level, LevelRandom, LevelTables, RedstoneMemory, ShulkerSlots,
-    Slots,
+    Slots, WorldBorder,
     container::redstone_signal,
     entity::Entities,
     level::EquipTarget,
@@ -48,6 +48,10 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_rules: BlockGameRules,
     /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
+    /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
+    ///
+    /// This dimension's world-border snapshot, `Level.getWorldBorder()`.
+    pub(crate) world_border: WorldBorder,
     pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
     /// 这一刻哪些区块参与各阶段。无限超平坦模式下恒为真。
     pub(crate) tick_levels: &'a TickLevels,
@@ -86,6 +90,10 @@ impl EntityTables for RegionLevel<'_> {
 }
 
 impl Level for RegionLevel<'_> {
+    fn world_border(&self) -> WorldBorder {
+        self.world_border.clone()
+    }
+
     fn chunk_ticks_blocks(&self, chunk: ChunkPos) -> bool {
         self.tick_levels.chunk_ticks_blocks(chunk)
     }

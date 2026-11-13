@@ -10,7 +10,7 @@
 没设、设成 0、负数或解析不了都当成关闭（仍累计但不打印）。
 
 ```bash
-BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
+BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 ```
 
 `RUST_LOG` 可以调日志级别，默认是 `info`；剖析报告是 `info` 级别的，日志级别调到
@@ -28,8 +28,8 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 分位数落在对数直方图的桶下界上，是偏保守的估计；桶在 0..15 ns 是逐纳秒，
 之上每个 2 的幂再分 8 份，相对误差不超过 12.5%。
 
-实体阶段按驱动分：精确驱动（默认，`BAMBOO_ENTITY_THREADS` 没设或为 0）只记
-`entities` 一段，算完立刻落地；并行驱动（`BAMBOO_ENTITY_THREADS≥1`）记
+实体阶段按驱动分：精确驱动（默认，`bamboo.toml` 里 `entity_threads = 0`）只记
+`entities` 一段，算完立刻落地；并行驱动（`entity_threads ≥ 1`）记
 `entity_compute`（只读算阶段）和 `entity_commit`（发布状态、按 uid 升序应用命令、
 发效果）两段，`entities` 没有样本。所以报告里有 18 个阶段，但任何一次运行只会有
 17 个阶段有样本。常驻线程池还没做，并行驱动现在每刻起线程，剖析数字包含这项开销。
@@ -42,7 +42,6 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 | `tick_total` | `end_tick − begin_tick`，一刻的实际总耗时 |
 | `tick_start_lateness` | 实际开始时刻减去调度器给出的应开始时刻；提前醒了记 0 |
 | `tick_interval_deviation` | \|相邻两刻**实际起点**的间隔 − 50 ms\|，设计稿 1.2「抖动 < 2 ms」看这一项 |
-| `tick_spin_us` | 这一刻为等下一刻自旋了多久（微秒）；`plain` 和追赶中的刻记 0 |
 | `inbound_messages` | 每刻从信箱取出并处理的入站消息数 |
 | `online_players` | 每刻开始时的在线玩家数 |
 | `due_scheduled_ticks` | 每刻开始时到期的方块/流体计划刻数 |
@@ -105,7 +104,7 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo -- 127.0.0.1:25565
 数量指标的直方图记的是「每刻多少个」（区块延迟是「每个区块多少微秒」），
 所以这些行的 `mean`、`p50`、`p95`、`p99`、`max` 单位不是 ms，而是每行末尾的 `unit`。
 `count` / `samples` 是这段报告的样本数：`phases`、`tick_total`、
-`tick_start_lateness`、`tick_interval_deviation`、`tick_spin_us` 和 `flush_bytes` 每刻一次
+`tick_start_lateness`、`tick_interval_deviation` 和 `flush_bytes` 每刻一次
 （追赶和放弃追赶的刻少掉一条间隔偏差样本），`chunk_latency_us` 每发出一个区块一次。
 报告头部 `N ticks` 是这段时间内跑了多少刻。
 
@@ -153,25 +152,23 @@ cargo build --release -p mc-bamboo-loadtest
 
 ### 内置服务端 `serve`
 
-命令行版 `bamboo` 的 `ServerConfig::default()` 把 `max_players` 固定为 20，
-`crates/mc-bamboo/src/main.rs` 又没有任何配置入口（环境变量、配置文件都没有），
-50 人和 200 人场景会被「服务器已满」拒绝。桌面端有 `server-settings.json`，
-命令行版没有。**这是服务端以后要补的一条**：命令行版没有配置项可改，
-人数上限、视距、压缩阈值等都改不了。
-
-基线因此用压测工具自己的子命令起服，两个进程分开，不共用 tokio 运行时：
+命令行版 `bamboo` 和桌面端现在都从服务器目录的 `server.properties` /
+`bamboo.toml` 读配置（见 `configuration.md`），人数上限、视距、压缩阈值都能改。
+基线仍用压测工具自己的子命令起服：它直接用 `ServerConfig::default()`、
+不读配置文件，这样 50 人和 200 人场景不必先准备一份配置文件，两个进程也分开，
+不共用 tokio 运行时：
 
 ```bash
 BAMBOO_PROFILE=10 ./target/release/bamboo-loadtest serve \
     --addr 127.0.0.1:25977 --max-players 500 --view-distance 8
 ```
 
-`serve` 照 `crates/mc-bamboo/src/main.rs` 的结构用现有的公开接口
-（`Server::new`、`Server::run`）起服，日志初始化方式相同；配置是
-`ServerConfig::default()`，只覆盖 `max_players`（默认 500）和 `view_distance`
-（默认沿用 `ServerConfig::default()` 的 8）。和命令行版 `bamboo` 的差别只有：
-人数上限、可选的视距、日志里第一行写的是 "loadtest server is listening"、
-玩家名前缀是 `Bot`。游戏逻辑、tick 顺序和网络参数都没改；没有改 `crates/` 下任何代码。
+`serve` 用现有的公开接口（`Server::new`、`Server::run`）起服，日志初始化方式相同；
+配置是 `ServerConfig::default()`，只覆盖 `max_players`（默认 500）和 `view_distance`
+（默认沿用 `ServerConfig::default()` 的 8）。和命令行版 `bamboo` 的差别是：它不读
+配置文件、人数上限和可选的视距由命令行给、日志里第一行写的是
+"loadtest server is listening"、玩家名前缀是 `Bot`。游戏逻辑、tick 顺序和网络参数
+都没改。
 
 `ops.json` 的 `bypassesPlayerLimit` 现在参与登录准入：满员时只有这个位为真的 OP
 能进来（官方 `DedicatedPlayerList.canBypassPlayerLimit`）。基线里的假玩家都不是 OP，
@@ -291,7 +288,10 @@ walk-50 12 426.0 / 585.6，fly-20 2 378.9 / 1 047.2。
   只干几毫秒的线程被系统放到了能效核或者较低的频率上；机器繁忙时所有核都在高频。
 - 单刻最大值（10..16 ms）在安静的机器上仍然出现，不全是后台编译造成的。
 
-## 5c. 四种节拍配置的对比（暂停后台编译后）
+## 5c. 四种节拍配置的对比（暂停后台编译后，历史记录）
+
+> 这一节记的是已删除的四种节拍配置；2026-11-12 起代码里只剩 `thread::sleep`，
+> 这些开关都不存在了。
 
 提交 `3cfb30c`，2026-11-10（PST）。和 5b 一样先暂停机器上其它编译任务再测；四种配置连续跑，
 每种跑 `idle`、`crowd-200`、`fly-20` 三个场景，开始时 1 分钟平均负载 7.2，结束时 3.3。
@@ -359,45 +359,16 @@ walk-50 12 426.0 / 585.6，fly-20 2 378.9 / 1 047.2。
   `walk-50` / `fly-20` 更低是因为稳态报告里 0 的样本数更多。
   不能把它当成稳态的区块延迟读。这个疑点已记给主代理审查，本任务没有改服务端。
 
-## 7. tick 节拍的可切换策略
+## 7. tick 节拍
 
-世界创建时读一次下面三个环境变量，启动时用一条 `tick pacing` 日志打出实际生效的值
-（`sleep`、`spin_max_us`、`qos`）。读到不认识的值记一条警告并回落到缺省值。
-和 `BAMBOO_PROFILE` 一样，`run-baseline.sh` 起服务端时会继承这些变量；
-脚本在汇总表标题行前打印它们，`summarize.py` 也加了一列 `spin us/tick`。
-默认是 `hybrid`，依据是第 5c 节的测量。
+> **2026-11-12 用户决定废弃精确节拍**：先睡再自旋、自旋上限和线程 QoS 开关、
+> 以及 `BAMBOO_TICK_SLEEP` / `BAMBOO_TICK_SPIN_MAX_US` / `BAMBOO_TICK_QOS`
+> 三个环境变量都已删除。第 5c 节是当时的对比数据，留作记录。
 
-| 变量 | 取值 | 缺省 | 含义 |
-|---|---|---|---|
-| `BAMBOO_TICK_SLEEP` | `plain` / `hybrid` | `hybrid` | 怎么睡到下一刻 |
-| `BAMBOO_TICK_SPIN_MAX_US` | 微秒数 | `6000` | `hybrid` 时每刻最多愿意自旋多久；0 等价于 `plain` |
-| `BAMBOO_TICK_QOS` | `default` / `interactive` | `default` | 世界线程的优先级设置 |
-
-- **plain**：`thread::sleep` 一直睡到下一刻的截止时刻；系统提前唤醒时补睡，
-  返回时一定不早于截止时刻。追赶中的刻（已经落后）不睡也不自旋。
-- **hybrid**：先睡到「截止时刻 − 余量」，剩下的时间用 `spin_loop` 自旋到截止时刻。
-  余量取最近 64 次睡眠「睡过头了多久」的最大值再加一点，夹在 250 us 和
-  `BAMBOO_TICK_SPIN_MAX_US` 之间（余量还不会超过这一刻本来要等的时间）；
-  自旋期间这条线程占满一个核。上限是每刻愿意付的占核代价，设为 0 就完全退回
-  `plain`。睡眠超时太多、导致醒来时已经过了截止时刻，这一刻直接返回，不多自旋。
-
-`tick_spin_us` 每刻记一条：`hybrid` 记这一刻实际自旋的墙上时长（从睡眠醒来
-到截止时刻，最多不超过自旋上限；睡眠超时直接过了截止时刻就记 0），`plain`、
-上限为 0 以及追赶中的刻记 0。它量的是为了准时付出的 CPU 占用，不是 tick 本身的
-耗时，也不算在 `tick_total` 里。
-
-线程优先级的平台现状：
-
-- macOS：`BAMBOO_TICK_QOS=interactive` 时，世界线程开始跑主循环前调
-  `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` 把自己设成用户
-  交互级 QoS。这是仓库里少数用 `unsafe` 的地方，只在这一小段函数里；调用失败
-  只记一条警告，不影响运行。`default` 不改动线程优先级。
-- Linux：这次没有实现优先级设置，开关 `interactive` 是空操作并记一条警告。
-  睡眠精度在这些平台上的具体表现没有验证。
-- Windows：这次没有实现优先级设置，开关 `interactive` 是空操作并记一条警告，
-  留给以后；睡眠精度也没有验证。
-
-设计稿第 12 节还要求 tick 线程绑到性能核，这次没有做。
+现在世界线程每刻结束只用 `thread::sleep` 睡到下一刻的截止时刻；系统提前唤醒时
+补睡，返回时一定不早于截止时刻。落后时连着跑几刻追赶、不睡的逻辑保留。
+没有可切换的策略，也没有线程优先级设置；设计稿第 12 节要求把 tick 线程绑到
+性能核，这次没有做。
 
 ## 8. 区块交付限速前后（提交 `aad4851` / `95147fe` / `d1a4317`，2026-11-11 PST）
 
@@ -419,9 +390,9 @@ Director 信箱改成每刻最多交付 N 个区块（默认 N=64，脚下 3×3 
 | `chunks_delivered` | 这一刻 region 收下的区块数；一个都没收也记 0 |
 | `chunks_reclaimed` | 这一刻 region 交还的区块数；一个都没交还也记 0 |
 
-环境变量 `BAMBOO_DELIVERIES_PER_TICK` / `BAMBOO_RECLAIMS_PER_TICK` 在世界创建时
-各读一次，缺省 64，`0` 表示不限（这一节用它复现改动之前的行为）。非法值记警告
-并回落缺省值。
+这两个预算现在在 `bamboo.toml` 里：`deliveries_per_tick` / `reclaims_per_tick`，
+缺省 64，`0` 表示不限（这一节用它复现改动之前的行为）；非法值记警告并回落缺省值。
+`serve` 不读配置文件，用的是 `ServerConfig::default()` 里的同一组缺省值。
 
 ### 怎么测
 

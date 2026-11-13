@@ -356,13 +356,10 @@ pub(crate) fn apply_mode(
         // `GameRules.SEND_COMMAND_FEEDBACK`.
         if region.send_command_feedback {
             let changed = Component::translate("gameMode.changed", [mode_name.clone().into()]);
-            region.links.send(
-                target,
-                &mc_bamboo_protocol::packet::play::SystemChat {
-                    content: &changed,
-                    overlay: false,
-                },
-            );
+            // `GameModeCommand.logGamemodeChange` 走 `ServerPlayer.sendSystemMessage`。
+            //
+            // `GameModeCommand.logGamemodeChange` goes through `ServerPlayer.sendSystemMessage`.
+            crate::chat::send_system_message(region, target, &changed, false);
         }
         feedback::success(
             region,
@@ -460,10 +457,17 @@ fn broadcast_chat(
     target: Option<&Component>,
 ) {
     let name = Component::text(player_name(region, sender));
+    // 官方断开时立刻把玩家移出名单，Bamboo 要等 `Leave`，所以这里跳过链路已关的玩家。
+    //
+    // Official servers remove a player from the list as soon as it disconnects; Bamboo waits
+    // for `Leave`, so players with a closed link are skipped here.
+    let links = &region.links;
     let ids: Vec<PlayerId> = region
         .players
         .iter()
-        .filter(|(_, player)| player.client.chat_visibility == ChatVisibility::Full)
+        .filter(|(id, player)| {
+            player.client.chat_visibility == ChatVisibility::Full && links.is_open(**id)
+        })
         .map(|(id, _)| *id)
         .collect();
     for id in ids {

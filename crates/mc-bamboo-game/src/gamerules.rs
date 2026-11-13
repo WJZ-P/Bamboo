@@ -16,13 +16,10 @@ use mc_bamboo_command::{
     permission,
 };
 use mc_bamboo_data::gamerules::{self, GameRuleKind, RULES};
-use mc_bamboo_protocol::{
-    packet::play::{GameRuleValues, SystemChat},
-    text::Component,
-};
+use mc_bamboo_protocol::{packet::play::GameRuleValues, text::Component};
 use tracing::warn;
 
-use crate::{inbound::PlayerId, links::encode_frames, region::Region};
+use crate::{inbound::PlayerId, region::Region};
 
 /// 一次赋值的结果。
 ///
@@ -253,15 +250,12 @@ pub(crate) fn on_set_packet(
 
 fn broadcast_set(region: &mut Region, name: &str, value: &str) {
     // 普通系统消息，不包 `chat.type.admin`，也不看 `send_command_feedback`。
-    // 每个 `isOp` 都收到，包括改规则的那个人。
+    // 每个 `isOp` 都收到，包括改规则的那个人；隐藏聊天的 OP 由 `sendSystemMessage` 抑制。
     //
     // A plain system message. It is not wrapped in `chat.type.admin` and it ignores
-    // `send_command_feedback`. Every `isOp` receives it, including the player who set it.
+    // `send_command_feedback`. Every `isOp` receives it, including the player who set it;
+    // a hidden-chat op is suppressed by `sendSystemMessage`.
     let content = Component::translate("commands.gamerule.set", [name.into(), value.into()]);
-    let frames = encode_frames(&SystemChat {
-        content: &content,
-        overlay: false,
-    });
     let ops: Vec<PlayerId> = region
         .players
         .iter()
@@ -269,7 +263,7 @@ fn broadcast_set(region: &mut Region, name: &str, value: &str) {
         .map(|(id, _)| *id)
         .collect();
     for id in ops {
-        region.links.send_frames(id, &frames);
+        crate::chat::send_system_message(region, id, &content, false);
     }
 }
 
