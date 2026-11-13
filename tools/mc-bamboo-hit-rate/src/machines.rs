@@ -35,6 +35,7 @@ fn machine(name: &'static str, input: Input) -> Machine {
         ticks: BlockTicks::new(),
         input,
         cache: None,
+        border_period: None,
         effects: Vec::new(),
         sound_draws: 0,
     }
@@ -307,6 +308,18 @@ pub fn furnace_array() -> Machine {
         stack: ItemStack::new(items::RAW_IRON, 16),
         period: 40,
     };
+    m
+}
+
+/// 只给差分用的机器：不在 [`all`] 里，命中率和基准报告的口径不变。
+///
+/// 熔炉阵列加上来回渐变的世界边界：边界中心在阵列中间，缩小时依次切过各台熔炉
+/// 和漏斗，扩大时再依次放回来。界外的方块实体 ticker 整刻不跑（`LevelChunk.isTicking`）。
+pub fn border_furnaces() -> Machine {
+    let mut m = furnace_array();
+    m.name = "边界切过熔炉";
+    m.level.border.set_center(4.5, 0.5);
+    m.border_period = Some(80);
     m
 }
 
