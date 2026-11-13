@@ -491,10 +491,9 @@ impl BlockEntity for BrewingStandEntity {
     }
 
     fn sleep_from(&mut self, now: i64) -> Option<i64> {
-        self.arm_sleep(now).map(|wake_at| {
-            self.sleep = Some(Sleep::new(now, wake_at));
-            wake_at
-        })
+        let wake_at = self.arm_sleep(now)?;
+        self.sleep = Some(Sleep::new(now, wake_at));
+        Some(wake_at)
     }
 
     fn materialize(&mut self, tick: i64) {
