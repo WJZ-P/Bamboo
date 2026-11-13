@@ -6,8 +6,11 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use mc_bamboo_core::ChunkPos;
@@ -21,7 +24,10 @@ use mc_bamboo_world::{
 };
 
 use crate::{
-    chunk_codec::{ChunkCodec, InlineCodec, PackedChunk},
+    chunk_codec::PackedChunk,
+    chunk_generator::{ChunkGenerator, FlatGenerator},
+    chunk_jobs::{ChunkJob, ChunkOutcome, ChunkReply, ChunkWork, decode_packed, encode_column},
+    compute_pool::{ComputePool, PoolJob},
     inbound::PlayerId,
     profiler::{Metric, SubPhase},
     region::{Region, RegionColumn, parking::Parking},
@@ -36,7 +42,7 @@ pub fn codec_nanos() -> u64 {
     CODEC_NANOS.load(Ordering::Relaxed)
 }
 
-fn record_codec(started: Instant) {
+pub(crate) fn record_codec(started: Instant) {
     let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
     CODEC_NANOS.fetch_add(elapsed, Ordering::Relaxed);
 }
@@ -142,7 +148,21 @@ pub(crate) struct DirectorHost {
     parked: usize,
     /// 区块 IO 线程。`None` 表示这一局不接磁盘（测试 / 无限超平坦）。
     io: Option<ChunkIo>,
-    codec: InlineCodec,
+    /// 生成阶段函数。内联执行器和计算池共用这一个。
+    generator: Arc<dyn ChunkGenerator>,
+    /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
+    pool: Option<ComputePool<ChunkJob>>,
+    /// 一次 `pump` 里攒着的计算任务，收尾时按离玩家的距离交给计算池。
+    compute_queue: Vec<(TaskId, ChunkJob)>,
+    /// 还没交给池子就被取消的任务：回执留到下一次收池结果时一起交给 Director，
+    /// 保证每个派出去的任务都恰好回一次执。
+    early_replies: Vec<(TaskId, ChunkReply)>,
+    /// 已经交给池子、又被 Director 取消的任务。它们的解析结果直接丢掉：
+    /// 字节来自盘上，盘上还有，不必停放。
+    cancelled_compute: HashSet<TaskId>,
+    /// 测试用：交给池子的 (解析, 生成, 序列化) 任务数。
+    #[cfg(test)]
+    pub(crate) pooled_kinds: [usize; 3],
     /// 每个区块最新一次写的 seq。收到 `Written` 回执时据此丢掉写盘途中缓冲。
     pending_writes: HashMap<ChunkPos, SaveSeq>,
     /// D6：还没提交给 IO 线程的快照，每刻匀速出队。
@@ -233,7 +253,13 @@ impl DirectorHost {
             reclaimed: 0,
             parked: 0,
             io: None,
-            codec: InlineCodec,
+            generator: Arc::new(FlatGenerator::from_env()),
+            pool: None,
+            compute_queue: Vec::new(),
+            early_replies: Vec::new(),
+            cancelled_compute: HashSet::new(),
+            #[cfg(test)]
+            pooled_kinds: [0; 3],
             pending_writes: HashMap::new(),
             save_queue: VecDeque::new(),
             save_cooldown: HashMap::new(),
@@ -258,6 +284,39 @@ impl DirectorHost {
     /// 接上真实磁盘 IO。只在启用存档的一局里调用一次。
     pub(crate) fn set_io(&mut self, io: ChunkIo) {
         self.io = Some(io);
+    }
+
+    /// 起 `threads` 条计算线程；0 表示内联执行器（默认）。只在开局调用一次。
+    /// 起不来时记一条错误，退回内联执行器。
+    pub(crate) fn set_compute_threads(&mut self, threads: usize) {
+        self.pool = None;
+        if threads == 0 || self.infinite_flat {
+            return;
+        }
+        match ComputePool::new("bamboo-chunk-worker", threads) {
+            Ok(pool) => self.pool = Some(pool),
+            Err(error) => {
+                tracing::error!(%error, "could not start the chunk compute pool; running inline");
+            }
+        }
+    }
+
+    /// 换生成器。测试和压测用。
+    #[cfg(test)]
+    pub(crate) fn set_generator(&mut self, generator: Arc<dyn ChunkGenerator>) {
+        self.generator = generator;
+    }
+
+    /// 计算池的线程是不是意外退出了。任务 panic 不算，那会变成失败回执。
+    pub(crate) fn compute_failed(&self) -> bool {
+        self.pool.as_ref().is_some_and(ComputePool::worker_died)
+    }
+
+    /// 计算池里还没收回回执的任务数（含还在宿主手里没交出去的）；内联执行器恒为 0。
+    pub(crate) fn compute_in_flight(&self) -> usize {
+        self.pool.as_ref().map_or(0, ComputePool::in_flight)
+            + self.compute_queue.len()
+            + self.early_replies.len()
     }
 
     /// 关服排空：等此前所有写落盘并 `sync_all`。失败要报出来，不能当成功。
@@ -828,13 +887,16 @@ impl DirectorHost {
         // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
         region.chunks.finish_light_updates();
         self.pump(region, vec![Event::Shutdown]);
+        // 等计算池里的解析/生成/序列化都回来：存盘的盒子要回到世界线程才能
+        // 排进写盘队列，收到的结果可能又派出新任务，所以循环到池子空为止。
+        self.drain_compute(region);
         // 写盘失败后还没写成功的盒子：用同一条编码路径重新提交（致命 2）。
         // Re-encode every parked box whose write never succeeded, using the
         // same codec as unload saves (fatal 2).
         let failed_boxes = self.parking.take_all();
         for (pos, column) in failed_boxes {
             let seq = self.director.allocate_save_seq();
-            match self.codec.encode(pos, &column) {
+            match encode_column(pos, &column) {
                 Ok(packed) => self.enqueue_snapshot(PendingWrite {
                     pos,
                     seq,
@@ -950,6 +1012,7 @@ impl DirectorHost {
                             // Drop a queued read when its task is cancelled so it
                             // cannot delay a nearer read in the FIFO worker.
                             self.read_queue.retain(|&(_, queued_id, _)| queued_id != id);
+                            self.cancel_compute(id);
                         }
                         Effect::ToRegion(message) => self.region_message(region, message),
                         Effect::Park { pos, column } => {
@@ -972,6 +1035,7 @@ impl DirectorHost {
             events = self.flush_region_mail(region);
             if events.is_empty() {
                 self.submit_reads(region);
+                self.submit_compute(region);
                 return;
             }
         }
@@ -1037,53 +1101,50 @@ impl DirectorHost {
             }
             Task::Decode { bytes, .. } => {
                 if self.io.is_some() {
-                    let started = Instant::now();
-                    let outcome = match PackedChunk::unpack(&bytes) {
+                    if self.pool.is_some() {
+                        self.queue_compute(id, pos, generation, ChunkWork::Decode { bytes });
+                        return None;
+                    }
+                    match decode_packed(pos, &bytes) {
+                        Ok(column) => TaskResult::Decoded { column },
                         Err(error) => TaskResult::BadChunk { error },
-                        Ok(packed) => match self.codec.decode(pos, &packed) {
-                            Ok(column) => TaskResult::Decoded { column },
-                            Err(error) => TaskResult::BadChunk { error },
-                        },
-                    };
-                    record_codec(started);
-                    outcome
+                    }
                 } else {
                     TaskResult::Decoded {
                         column: Box::new(RegionColumn::from_template()),
                     }
                 }
             }
-            Task::Generate { stage, column, .. } => TaskResult::Generated {
-                stage,
-                column: column.unwrap_or_else(|| Box::new(RegionColumn::from_template())),
-            },
+            Task::Generate { stage, column, .. } => {
+                if self.pool.is_some() {
+                    let generator = Arc::clone(&self.generator);
+                    self.queue_compute(
+                        id,
+                        pos,
+                        generation,
+                        ChunkWork::Generate {
+                            stage,
+                            center: column,
+                            generator,
+                        },
+                    );
+                    return None;
+                }
+                // 邻居视图现在总是空的（超平坦不需要），见 `chunk_generator`。
+                TaskResult::Generated {
+                    stage,
+                    column: self.generator.generate(stage, pos, column, &[]),
+                }
+            }
             Task::Assemble { column, .. } => TaskResult::Assembled { column },
             Task::Save { seq, column, .. } => {
                 if self.io.is_some() {
-                    let started = Instant::now();
-                    let encoded = self.codec.encode(pos, &column);
-                    record_codec(started);
-                    match encoded {
-                        Ok(packed) => {
-                            // 不直接写盘：进 D6 匀速队列，同区块只留最新一份（F6）。
-                            self.enqueue_snapshot(PendingWrite {
-                                pos,
-                                seq,
-                                chunk: packed.chunk,
-                                entities: packed.entities,
-                            });
-                            self.pending_writes.insert(pos, seq);
-                            // 卸载写不进已加载判脏路径；回执仍要清掉在途标记。
-                            self.acked_revisions
-                                .insert(seq, (pos, ChunkRevision::default(), 0));
-                            TaskResult::Saved { seq, column }
-                        }
-                        Err(error) => {
-                            // 编码失败不能把盒子弄丢：留在停放表里，下次卸载再试。
-                            self.parking.park(pos, column);
-                            TaskResult::SaveFailed { seq, error }
-                        }
+                    if self.pool.is_some() {
+                        self.queue_compute(id, pos, generation, ChunkWork::Save { seq, column });
+                        return None;
                     }
+                    let encoded = encode_column(pos, &column);
+                    self.saved_outcome(pos, seq, column, encoded)
                 } else {
                     TaskResult::Saved { seq, column }
                 }
@@ -1095,6 +1156,180 @@ impl DirectorHost {
             generation,
             result,
         })
+    }
+
+    /// 序列化做完之后的记账：成功就进 D6 匀速写盘队列，失败就把盒子停放起来。
+    /// 内联执行器和计算池的回执都走这里，记账只在世界线程上改。
+    fn saved_outcome(
+        &mut self,
+        pos: ChunkPos,
+        seq: SaveSeq,
+        column: Box<RegionColumn>,
+        encoded: Result<PackedChunk, String>,
+    ) -> TaskResult<Box<RegionColumn>> {
+        match encoded {
+            Ok(packed) => {
+                // 不直接写盘：进 D6 匀速队列，同区块只留最新一份（F6）。
+                self.enqueue_snapshot(PendingWrite {
+                    pos,
+                    seq,
+                    chunk: packed.chunk,
+                    entities: packed.entities,
+                });
+                self.pending_writes.insert(pos, seq);
+                // 卸载写不进已加载判脏路径；回执仍要清掉在途标记。
+                self.acked_revisions
+                    .insert(seq, (pos, ChunkRevision::default(), 0));
+                TaskResult::Saved { seq, column }
+            }
+            Err(error) => {
+                // 编码失败不能把盒子弄丢：留在停放表里，下次卸载再试。
+                self.parking.park(pos, column);
+                TaskResult::SaveFailed { seq, error }
+            }
+        }
+    }
+
+    /// 攒一个计算任务，`pump` 收尾时和读盘一起按距离交给池子。
+    fn queue_compute(&mut self, id: TaskId, pos: ChunkPos, generation: u64, work: ChunkWork) {
+        #[cfg(test)]
+        {
+            let kind = match work {
+                ChunkWork::Decode { .. } => 0,
+                ChunkWork::Generate { .. } => 1,
+                ChunkWork::Save { .. } => 2,
+            };
+            self.pooled_kinds[kind] += 1;
+        }
+        self.compute_queue.push((
+            id,
+            ChunkJob {
+                pos,
+                generation,
+                work,
+            },
+        ));
+    }
+
+    /// Director 取消了一个任务。还在宿主手里的直接变成「已取消」回执；
+    /// 已经交给池子的只有还在排队时才取消得掉，回执照常从池子回来。
+    fn cancel_compute(&mut self, id: TaskId) {
+        if let Some(index) = self
+            .compute_queue
+            .iter()
+            .position(|(queued, _)| *queued == id)
+        {
+            let (_, job) = self.compute_queue.swap_remove(index);
+            self.early_replies.push((id, job.cancelled()));
+        } else if let Some(pool) = &mut self.pool {
+            pool.cancel(id);
+            self.cancelled_compute.insert(id);
+        }
+    }
+
+    /// 把这一轮攒下的计算任务按离玩家的距离交给池子，近的先跑。
+    fn submit_compute(&mut self, region: &Region) {
+        if self.compute_queue.is_empty() {
+            return;
+        }
+        let centers = Self::guaranteed_centers(region);
+        let Some(pool) = &mut self.pool else {
+            // 没有池子不会走到 `queue_compute`；万一走到了也不丢任务。
+            for (id, job) in std::mem::take(&mut self.compute_queue) {
+                let mut job = job;
+                let output = job.run();
+                self.early_replies.push((id, job.finish(Ok(output))));
+            }
+            return;
+        };
+        for (id, job) in std::mem::take(&mut self.compute_queue) {
+            let (distance, _, _) = Self::distance_to_players(job.pos, &centers);
+            pool.submit(id, distance, job);
+        }
+    }
+
+    /// 收走池子里已经回来的结果，按 `TaskId` 升序变成 `TaskDone`。
+    ///
+    /// 回执到达的先后取决于线程调度；排好序再交给 Director，同一批结果里
+    /// 交付给世界的顺序就和调度无关。哪个结果落在哪一刻仍然取决于调度，
+    /// 所以内联执行器和计算池的交付时刻可以不同，区块内容相同。
+    fn collect_compute(&mut self, wait: Option<Duration>) -> Vec<Event<Box<RegionColumn>>> {
+        let mut replies = std::mem::take(&mut self.early_replies);
+        if let Some(pool) = &mut self.pool {
+            if let Some(timeout) = wait
+                && replies.is_empty()
+                && let Some(reply) = pool.recv_timeout(timeout)
+            {
+                replies.push(reply);
+            }
+            while let Some(reply) = pool.try_recv() {
+                replies.push(reply);
+            }
+        }
+        replies.sort_by_key(|(id, _)| *id);
+        // `pump` 从末尾弹事件：倒着放，编号小的先处理。
+        replies
+            .into_iter()
+            .rev()
+            .map(|(id, reply)| self.compute_event(id, reply))
+            .collect()
+    }
+
+    /// 一条池子回执变成 Director 的 `TaskDone`。
+    fn compute_event(&mut self, id: TaskId, reply: ChunkReply) -> Event<Box<RegionColumn>> {
+        let ChunkReply {
+            pos,
+            generation,
+            outcome,
+        } = reply;
+        let cancelled = self.cancelled_compute.remove(&id);
+        let result = match outcome {
+            // 取消之前已经开始跑的解析：结果没人要了，盘上的字节还在。
+            ChunkOutcome::Decoded(_) if cancelled => TaskResult::Cancelled,
+            ChunkOutcome::Decoded(Ok(column)) => TaskResult::Decoded { column },
+            ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
+            ChunkOutcome::Generated { stage, column } => TaskResult::Generated { stage, column },
+            ChunkOutcome::GenerateFailed { error } => TaskResult::BadChunk { error },
+            ChunkOutcome::Saved {
+                seq,
+                column,
+                encoded,
+            } => self.saved_outcome(pos, seq, column, encoded),
+            // 取消的任务 Director 已经不认了，结果只会被当成孤儿处理：
+            // 带回来的半成品按「生成完成」交回去，非原样的由它停放。
+            ChunkOutcome::Cancelled {
+                column: Some(column),
+            } => TaskResult::Assembled { column },
+            ChunkOutcome::Cancelled { column: None } => TaskResult::Cancelled,
+        };
+        Event::TaskDone {
+            id,
+            pos,
+            generation,
+            result,
+        }
+    }
+
+    /// 关服用：阻塞等计算池把在途任务全部做完，结果照常喂给 Director。
+    /// 池子线程意外全退时不会无限等：超时一轮没有任何进展就记错误退出。
+    fn drain_compute(&mut self, region: &mut Region) {
+        let mut idle_rounds = 0;
+        while self.compute_in_flight() > 0 {
+            let events = self.collect_compute(Some(Duration::from_millis(100)));
+            if events.is_empty() {
+                idle_rounds += 1;
+                if self.compute_failed() && idle_rounds > 50 {
+                    tracing::error!(
+                        left = self.compute_in_flight(),
+                        "chunk compute pool stopped with jobs in flight; their chunks are not saved"
+                    );
+                    return;
+                }
+                continue;
+            }
+            idle_rounds = 0;
+            self.pump(region, events);
+        }
     }
 
     /// 每刻开头收回 IO 信箱：读结果变成 `TaskDone` 喂给 Director，
@@ -1255,6 +1490,9 @@ impl DirectorHost {
                 io.drop_inflight(pos, seq);
             }
         }
+        // 再收计算池的结果（按 TaskId 排好），和读盘结果合成一批。
+        // 读盘结果在前、池结果在后；`pump` 从末尾弹，所以池结果先处理。
+        done.extend(self.collect_compute(None));
         // 所有读盘结果一次性喂给 Director，只交付一次，保住 3×3 和距离顺序。
         if !done.is_empty() {
             self.pump(region, done);

@@ -54,6 +54,7 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 | `skipped_catch_ups` | 这段时间内放弃追赶的次数（只有累计值，没有直方图） |
 | `loaded_chunks` | 这一刻开始时已加载的区块数；无限模式记 0 |
 | `parked_chunks` | 这一刻交付/收回之后停放表里的区块数 |
+| `compute_in_flight` | 这一刻交付/收回之后计算池里还没回来的区块任务数；内联执行器（`chunk_worker_threads = 0`）恒为 0 |
 
 `tick_start_lateness` 量的是「每刻都比计划晚多少」，`tick_interval_deviation` 量的是
 「刻与刻之间均不均匀」：睡眠精度带来的固定 4 ms 偏差只会出现在前一项里。

@@ -112,6 +112,8 @@ const MAX_KEEP_ALIVE_SECONDS = 29;
 const MAX_COMPRESSION_THRESHOLD = 2_097_151;
 /** 服务端能接受的实体线程数上限。 */
 const MAX_ENTITY_THREADS = 256;
+/** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
+const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
 
 export const FIELDS: readonly SettingField[] = [
@@ -308,6 +310,16 @@ export const FIELDS: readonly SettingField[] = [
     control: "toggle",
     wide: true,
     hint: "把反复执行、每次读到相同状态的一段红石电路记下来，下次直接套用结果。结果和官方逐位一致，打开后对大型红石电路有效；小型电路和容器机器收益很小。默认关闭，打开后每个 region 的缓存有 32 MiB 上限，命中不了的触发点会自动停止录制。",
+  },
+  {
+    key: "chunkWorkerThreads",
+    group: "performance",
+    fileKey: "chunk_worker_threads",
+    label: "区块计算线程数",
+    control: "number",
+    min: 0,
+    max: MAX_CHUNK_WORKER_THREADS,
+    hint: "区块的解析、生成和存盘序列化放到多少条常驻后台线程上做。0 = 在世界线程上做（默认）。区块内容和线程数无关，只有区块到达的时刻可能不同。",
   },
   {
     key: "deliveriesPerTick",

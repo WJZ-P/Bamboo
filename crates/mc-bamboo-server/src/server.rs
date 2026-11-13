@@ -564,6 +564,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         admin: AdminSnapshot::default(),
         entity_threads: config.entity_threads,
         redstone_cache: config.redstone_cache,
+        chunk_worker_threads: config.chunk_worker_threads,
         mail_budget: config.mail_budget,
         world_dir: config.world_dir.clone(),
     }

@@ -99,6 +99,8 @@ pub struct ServerConfig {
     pub entity_threads: usize,
     /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
     pub redstone_cache: bool,
+    /// 区块计算池的线程数。0 = 内联执行器（默认）；≥ 1 = 常驻后台线程。
+    pub chunk_worker_threads: usize,
     /// Director 信箱每刻交付/收回区块的个数上限，0 表示不限。
     pub mail_budget: MailBudget,
 }
@@ -125,6 +127,7 @@ impl Default for ServerConfig {
             world_dir: None,
             entity_threads: 0,
             redstone_cache: false,
+            chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
         }
     }
