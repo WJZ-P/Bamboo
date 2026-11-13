@@ -311,7 +311,7 @@ pub const fn supported_read(method: ReadMethod) -> bool {
             | ReadMethod::BlockEventDedup(_)
             | ReadMethod::BlockEntity(_, _, _)
             | ReadMethod::EntityTime(_)
-            | ReadMethod::Slots(_, _)
+            | ReadMethod::Slots(_, _, _, _)
             | ReadMethod::Ticker(0 | 1, _)
             | ReadMethod::LootUnpack(_)
             | ReadMethod::WorldBorder

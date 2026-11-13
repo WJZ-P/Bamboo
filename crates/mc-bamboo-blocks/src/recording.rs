@@ -1600,7 +1600,7 @@ impl Level for Recording<'_> {
         let after = self.level.slots_at(pos);
         self.read(Some(pos), K_SLOTS, (len, hash_slots(&before), applied));
         self.guarded_read(
-            ReadMethod::Slots(pos, 1),
+            ReadMethod::Slots(pos, 1, len, applied),
             Some(pos),
             (len, hash_slots(&before), applied),
         );
@@ -1622,7 +1622,7 @@ impl Level for Recording<'_> {
         let value = self.level.slots_at(pos);
         self.read(Some(pos), K_SLOTS, (0_u8, hash_slots(&value)));
         self.guarded_read(
-            ReadMethod::Slots(pos, 0),
+            ReadMethod::Slots(pos, 0, 0, true),
             Some(pos),
             (0_u8, hash_slots(&value)),
         );

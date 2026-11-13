@@ -95,10 +95,9 @@ fn guard_value(
             };
             crate::recording::stable_hash(&time)
         }
-        ReadMethod::Slots(pos, sub) => {
-            // sub=0 是 `slots_at`，1 是 `with_slots(len, before, applied)`。
-            // `with_slots` 的 before/applied 是调用时的状态，守卫阶段只能复核当前槽位：
-            // 只要当前槽位表与录下的 before 相同，重放落地就与解释执行一致。
+        ReadMethod::Slots(pos, sub, len, applied) => {
+            // 按录制时完全相同的三元组重算：长度取录制时请求的长度，
+            // 命中标记取录制时的结果，只有槽位内容从当前世界重读。
             let slots = level.slots_at(pos);
             if sub == 0 {
                 crate::recording::stable_hash(&(
@@ -107,9 +106,9 @@ fn guard_value(
                 ))
             } else {
                 crate::recording::stable_hash(&(
-                    slots.len(),
+                    len,
                     crate::recording::guard_facts::hash_slots(&slots),
-                    true,
+                    applied,
                 ))
             }
         }

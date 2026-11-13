@@ -41,8 +41,9 @@ pub enum ReadMethod {
     BlockEntity(BlockPos, u8, u8),
     /// 方块实体里由绝对时刻派生的字段（现在活塞已相对化，恒为 0 或漏斗的差值）。
     EntityTime(BlockPos),
-    /// `slots_at` / `with_slots` / `with_container` 的一次槽位读。
-    Slots(BlockPos, u8),
+    /// `slots_at`(0) / `with_slots`(1) 的一次槽位读；后者带请求长度和是否命中，
+    /// 守卫按同样的三元组重算。
+    Slots(BlockPos, u8, usize, bool),
     /// `unpack_loot_table` 之前这一格有没有表可解包。
     LootUnpack(BlockPos),
     /// `next_block_entity_ticker`(0) / `runs_block_entity_tick`(1) 的驱动读。
