@@ -40,7 +40,8 @@
 - 出站是每名玩家一串片段：`PlayerSink::send(frames: Outgoing) -> bool`，`Outgoing` 区分普通帧和共享帧（`crates/mc-bamboo-game/src/inbound.rs`）。
 - 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。节拍只用 `thread::sleep`（原来默认的 `hybrid` 先睡再自旋和世界线程 QoS 开关，2026-11-12 按用户决定删掉了）。实体线程数、区块计算线程数、红石缓存开关、交付 / 收回上限都在服务器目录的 `bamboo.toml` 里配，官方的键在 `server.properties`（`docs/configuration.md`），剖析器仍是环境变量 `BAMBOO_PROFILE`。没有自定义全局分配器。
 
-  （2026-11-14 按实现更新：`docs/configuration.md`、`crates/mc-bamboo-server/src/config_files.rs` 的 `BAMBOO_KEYS`；合并提交 `54f5fd2`、`082a7c9`、`fa91b84`）
+（2026-11-14 按实现更新：`docs/configuration.md`、`crates/mc-bamboo-server/src/config_files.rs` 的 `BAMBOO_KEYS`；合并提交 `54f5fd2`、`082a7c9`、`fa91b84`）
+
 - 存档已经接进游戏，用**官方的 Anvil 格式**，不兼容 26.3 之前的老存档布局（读到当空世界）。`mc-bamboo-storage` 的区块 NBT、Anvil 区域文件、方块实体 / 计划刻 / 三种实体 / 整块组装的编解码已完成并与官方对拍；一条 IO 线程、Director 的读盘阶段、卸载写盘、官方节奏的匀速保存（每 6000 刻全量 + 每刻最多 20 个 + 单区块 200 刻冷却）、`level.dat` / 玩家数据 / `data/` / `chunk_tickets.dat`、三个保存命令和官方 `stopServer` 关服顺序都已接进生命周期（`docs/m3-storage.md` 第 12、14 节）。**计算池也已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时解析、生成阶段和存盘序列化在常驻后台线程上跑，`Read` 仍在 IO 线程；世界生成到噪声阶段已有纯函数和对拍，但还没接进 Director 的生成流水线（`ae76868`）。多阶段生成的邻居视图、多条 IO 线程、预编码帧没做。
 
 （2026-11-14 按实现更新：`docs/m3-storage.md` 第 12 / 14 节、`docs/world-model-design.md` 5.3.1、`docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`ae76868`）
