@@ -266,9 +266,30 @@ fn temp_file(dir: &Path, tag: &str) -> io::Result<(PathBuf, File)> {
     ))
 }
 
-/// 原子替换 `target`：先写临时文件并刷盘，再把旧文件挪到 `backup`（若有），
-/// 最后把临时文件改名成 `target`。和官方 `Util.safeReplaceFile` 的落盘结果一致。
-/// `backup` 为 `None` 时（官方 `data/` 文件）直接覆盖，不留备份。
+/// 官方 `Util.runWithRetries(10, ...)`：一步最多重试 10 次。
+/// 闭包内部按官方顺序执行若干操作 + 最终检查，全成功才算这一步成功。
+/// Official `Util.runWithRetries(10, ...)`: retry a step at most 10 times.
+/// The closure runs the operations in sequence plus the final check.
+const SAFE_REPLACE_RETRIES: usize = 10;
+
+fn run_with_retries(mut step: impl FnMut() -> bool) -> bool {
+    for _ in 0..SAFE_REPLACE_RETRIES {
+        if step() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 原子替换 `target`：写临时文件并刷盘 → 旧文件挪到 `backup`（若有）→
+/// 删旧 `target` → 临时文件改名成 `target`。每一步都照官方
+/// `Util.safeReplaceOrMoveFile` 最多重试 10 次；`replace` 失败时（且没有
+/// `noRollback`，即 `backup` 非空）把备份挪回 `target` 再返回错误。
+/// `backup` 为 `None` 时（官方 `data/` 文件，`noRollback`）不留备份、不回滚。
+///
+/// Atomic replace following official `Util.safeReplaceOrMoveFile`: each step
+/// is retried up to 10 times; on a failed replace the backup is restored
+/// (unless `backup` is `None`, the `noRollback` case for `data/` files).
 pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::Result<()> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
@@ -280,31 +301,68 @@ pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::R
     }
     drop(file);
 
-    if target.exists() {
-        if let Some(bk) = backup {
-            let _ = fs::remove_file(bk);
-            if let Err(error) = fs::rename(target, bk) {
-                let _ = fs::remove_file(&tmp);
-                return Err(error);
-            }
-        } else if let Err(error) = fs::remove_file(target) {
+    // 1. create backup：官方只在 target 已经存在时做这一步。
+    if target.exists()
+        && let Some(bk) = backup
+    {
+        let ok = run_with_retries(|| {
+            let _ = fs::remove_file(bk); // createDeleter(backup)
+            let _ = fs::rename(target, bk); // createRenamer(target, backup)
+            bk.is_file() // createFileCreatedCheck(backup)
+        });
+        if !ok {
             let _ = fs::remove_file(&tmp);
-            return Err(error);
+            return Err(io::Error::other(format!(
+                "could not back up {} to {}",
+                target.display(),
+                bk.display()
+            )));
         }
     }
 
-    if let Err(error) = fs::rename(&tmp, target) {
-        // 尽量把备份挪回来，不留下一个没有主文件的世界。
-        if let Some(bk) = backup
-            && bk.exists()
-            && !target.exists()
-        {
-            let _ = fs::rename(bk, target);
+    // 2. remove old target：官方无条件执行（上一步已把 target 挪走时是空操作）。
+    let removed = run_with_retries(|| {
+        let _ = fs::remove_file(target); // createDeleter(target)
+        !target.exists() // createFileDeletedCheck(target)
+    });
+    if !removed {
+        if let Some(bk) = backup {
+            let _ = restore_backup(bk, target);
         }
         let _ = fs::remove_file(&tmp);
-        return Err(error);
+        return Err(io::Error::other(format!(
+            "could not remove old {}",
+            target.display()
+        )));
+    }
+
+    // 3. replace：临时文件改名成 target。
+    let replaced = run_with_retries(|| {
+        let _ = fs::rename(&tmp, target); // createRenamer(newPath, target)
+        target.is_file() // createFileCreatedCheck(target)
+    });
+    if !replaced {
+        // 回滚条件照官方：replace 失败且 !noRollback 就从备份恢复。
+        // Official rollback: on a failed replace with !noRollback, restore
+        // from backup (retried 10 times), then report the failure.
+        if let Some(bk) = backup {
+            let _ = restore_backup(bk, target);
+        }
+        let _ = fs::remove_file(&tmp);
+        return Err(io::Error::other(format!(
+            "could not replace {}",
+            target.display()
+        )));
     }
     Ok(())
+}
+
+/// 官方 rollback 那一步：`rename(backup → target)` 也最多重试 10 次。
+fn restore_backup(bk: &Path, target: &Path) -> bool {
+    run_with_retries(|| {
+        let _ = fs::rename(bk, target);
+        target.is_file()
+    })
 }
 
 /// 从复合标签里取字段（`CompoundTag` 键序无关，重名按最后一次）。
@@ -535,6 +593,53 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// F8：官方 `Util.runWithRetries(10, ...)` 的步数：最多 10 次，
+    /// 第 10 次成功就算成功，一直失败返回 false 且正好试 10 次。
+    /// F8: official `Util.runWithRetries(10, ...)` — at most 10 attempts;
+    /// succeeding on the 10th counts, persistent failure tries exactly 10.
+    #[test]
+    fn run_with_retries_tries_at_most_ten_times() {
+        let mut attempts = 0;
+        assert!(run_with_retries(|| {
+            attempts += 1;
+            attempts >= 10
+        }));
+        assert_eq!(attempts, 10);
+
+        let mut attempts = 0;
+        assert!(!run_with_retries(|| {
+            attempts += 1;
+            false
+        }));
+        assert_eq!(attempts, 10);
+    }
+
+    /// F8：备份这一步重试 10 次仍失败时，`safe_replace` 报错，
+    /// 原主文件原封不动，临时文件也清掉（绝不留下半写的世界）。
+    /// F8: when the backup step fails through all 10 retries, `safe_replace`
+    /// returns Err, the original file is untouched and the temp file is gone.
+    #[test]
+    fn a_failed_backup_leaves_the_original_intact() {
+        let tmp = TempDir::new("retry-backup");
+        fs::create_dir_all(&tmp.0).unwrap();
+        let target = tmp.0.join("level.dat");
+        fs::write(&target, b"original").unwrap();
+        // 备份路径的父目录是个普通文件：rename 必然失败，10 次都不行。
+        let blocker = tmp.0.join("blocker");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let backup = blocker.join("level.dat_old");
+
+        assert!(safe_replace(&target, b"new", Some(&backup)).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert!(
+            fs::read_dir(&tmp.0)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp")),
+            "the temporary file must be cleaned up"
+        );
     }
 
     #[test]
