@@ -1828,3 +1828,61 @@ fn a_parked_sleeping_furnace_encodes_identically_on_another_thread() {
             .expect("另一个线程没有 panic");
     assert_eq!(on_world_thread, on_other_thread);
 }
+
+/// 闲置漏斗睡着时没有可见内容变化：官方 `tryMoveItems` 返回 false 也不发
+/// `setChanged`，所以少标脏反而是对的。真往漏斗里放东西时必须标脏。
+#[test]
+fn an_idle_sleeping_hopper_only_marks_its_chunk_when_content_changes() {
+    use mc_bamboo_blocks::{BlockState, state::FACING_HOPPER};
+    use mc_bamboo_core::Direction;
+
+    fn scene(sleep: bool) -> Vec<bool> {
+        let mut server = harness();
+        {
+            let region = server.region();
+            region.chunks.set_block(
+                HOPPER,
+                BlockState(blocks::HOPPER)
+                    .with(FACING_HOPPER, Direction::Down)
+                    .0,
+            );
+            region.block_entities.set_sleep_enabled(sleep);
+            region.block_entities.remove(HOPPER);
+            region.containers.insert(
+                HOPPER,
+                crate::container::ContainerEntry::new(ContainerKind::Hopper),
+            );
+            region
+                .block_entities
+                .insert(Box::new(HopperEntity::new(HOPPER)));
+        }
+        let mut marked = Vec::new();
+        for tick in 0..40 {
+            let _ = server.region().dirty.take();
+            if tick == 20 {
+                let region = server.region();
+                let entry = crate::container::entry_in(
+                    &mut region.containers,
+                    HOPPER,
+                    ContainerKind::Hopper,
+                );
+                entry.slots[0] = ItemStack::new(items::DIRT, 3);
+                region.touch(HOPPER);
+            }
+            server.tick();
+            marked.push(server.region().dirty.pending_contains(CHUNK));
+        }
+        marked
+    }
+
+    let sleeping = scene(true);
+    let always = scene(false);
+    assert!(sleeping[20], "真改了物品的那刻一定标脏");
+    assert_eq!(
+        sleeping[20..],
+        always[20..],
+        "有内容之后开 / 关休眠的改动标记一致"
+    );
+    // 睡着的前 20 刻不必每刻标脏：这一段的差异是省掉无效果的每刻真跑。
+    assert!(sleeping[20], "改物品之前漏斗确实在跑这套场景");
+}
