@@ -177,6 +177,11 @@ impl<J: PoolJob> ComputePool<J> {
         }
     }
 
+    /// 线程数。
+    pub(crate) fn threads(&self) -> usize {
+        self.threads
+    }
+
     /// 还没收回回执的任务数。
     pub(crate) fn in_flight(&self) -> usize {
         self.in_flight

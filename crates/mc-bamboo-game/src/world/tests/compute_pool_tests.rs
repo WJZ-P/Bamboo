@@ -248,3 +248,63 @@ fn a_slow_generator_runs_off_the_world_thread() {
         "用池子时世界线程这一刻不该等生成：{pooled:?}（内联 {inline:?}）"
     );
 }
+
+/// 数一数生成器真的被调了几次。
+struct CountingGenerator {
+    inner: FlatGenerator,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::chunk_generator::ChunkGenerator for CountingGenerator {
+    fn generate(
+        &self,
+        stage: mc_bamboo_world::ticket::ChunkStatus,
+        pos: ChunkPos,
+        center: Option<Box<crate::region::RegionColumn>>,
+        neighbors: crate::chunk_generator::NeighborView<'_>,
+    ) -> Box<crate::region::RegionColumn> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.generate(stage, pos, center, neighbors)
+    }
+}
+
+/// 池子里同时最多放 `线程数 × POOL_JOBS_PER_THREAD` 个任务，其余留在宿主的待办里；
+/// 撤票时待办里的任务直接丢掉，不会在池子里排着。
+#[test]
+fn the_pool_holds_a_bounded_number_of_jobs_and_cancels_the_backlog() {
+    use crate::director_host::POOL_JOBS_PER_THREAD;
+
+    let threads = 2;
+    let cap = threads * POOL_JOBS_PER_THREAD;
+    let mut server = Harness::new_loaded_with_threads(2, threads);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    server.world.host.set_generator(Arc::new(CountingGenerator {
+        inner: FlatGenerator {
+            delay: Duration::from_millis(20),
+        },
+        calls: Arc::clone(&calls),
+    }));
+    let positions: Vec<ChunkPos> = (40..46)
+        .flat_map(|x| (40..46).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    force(&mut server, &positions, true);
+    server.tick();
+    assert!(
+        server.world.host.compute_in_pool() <= cap,
+        "池子里最多 {cap} 个：{}",
+        server.world.host.compute_in_pool()
+    );
+    let queued = server.world.host.compute_backlog();
+    assert!(queued > 0, "超出上限的任务留在待办里");
+
+    // 撤掉全部票：待办里的任务当场取消，只剩池子里那几个在跑。
+    force(&mut server, &positions, false);
+    assert_eq!(server.world.host.compute_backlog(), 0, "撤票后待办清空");
+    settle(&mut server);
+    assert_eq!(server.world.host.compute_in_flight(), 0);
+    let ran = calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        ran <= cap * 2,
+        "撤票后待办里的 {queued} 个生成不该再跑：实际跑了 {ran} 个"
+    );
+}

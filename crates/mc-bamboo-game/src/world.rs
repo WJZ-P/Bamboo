@@ -467,10 +467,8 @@ impl World {
         profiler.record(Metric::ChunksDelivered, delivered as u64);
         profiler.record(Metric::ChunksReclaimed, reclaimed as u64);
         profiler.record(Metric::ParkedChunks, self.host.parked_count() as u64);
-        profiler.record(
-            Metric::ComputeInFlight,
-            self.host.compute_in_flight() as u64,
-        );
+        profiler.record(Metric::ComputeInFlight, self.host.compute_in_pool() as u64);
+        profiler.record(Metric::ComputeBacklog, self.host.compute_backlog() as u64);
         profiler.lap(Phase::Delivery);
         light_updates::run_light_updates(&mut self.region);
         self.region.profiler.lap(Phase::LightUpdates);

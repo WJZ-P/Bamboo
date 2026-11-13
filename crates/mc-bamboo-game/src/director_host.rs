@@ -5,7 +5,8 @@
 //! 视野里没交付的区块留在 `PlayerChunkSender` 的待发送集合里，交付了才发。
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -75,6 +76,10 @@ pub(crate) const MAX_IO_MAILBOX: usize = 16384;
 /// Guard against a truly non-convergent `pump`. A large world must never panic
 /// here: on exceeding the cap, log and stop the pump instead of asserting.
 pub(crate) const PUMP_ROUND_LIMIT: usize = 20_000_000;
+/// 计算池里每条线程最多同时放几个任务，其余留在宿主的待办里。
+/// 留在宿主手里的任务还能按玩家的新位置重排、撤票时直接丢掉，
+/// 不会在池子里排一长串过期的远处任务。
+pub(crate) const POOL_JOBS_PER_THREAD: usize = 4;
 
 /// 一次待落盘的区块快照。
 #[cfg(test)]
@@ -152,8 +157,15 @@ pub(crate) struct DirectorHost {
     generator: Arc<dyn ChunkGenerator>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
-    /// 一次 `pump` 里攒着的计算任务，收尾时按离玩家的距离交给计算池。
-    compute_queue: Vec<(TaskId, ChunkJob)>,
+    /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
+    /// 个，其余留在这里，每次 `pump` 收尾按离玩家的距离挑最近的补进去；撤票时
+    /// 直接从这里删掉。存盘不进待办，直接交给池子。
+    compute_backlog: HashMap<TaskId, ChunkJob>,
+    /// 待办的出队顺序：`(离玩家的距离, TaskId)` 小的先出。删掉的任务不从堆里删，
+    /// 出堆时发现它已经不在 `compute_backlog` 里就跳过。
+    backlog_order: BinaryHeap<Reverse<(u64, TaskId)>>,
+    /// 算 `backlog_order` 里那些距离时用的玩家区块。玩家跨了区块就整堆重排。
+    backlog_centers: Vec<ChunkPos>,
     /// 还没交给池子就被取消的任务：回执留到下一次收池结果时一起交给 Director，
     /// 保证每个派出去的任务都恰好回一次执。
     early_replies: Vec<(TaskId, ChunkReply)>,
@@ -255,7 +267,9 @@ impl DirectorHost {
             io: None,
             generator: Arc::new(FlatGenerator::from_env()),
             pool: None,
-            compute_queue: Vec::new(),
+            compute_backlog: HashMap::new(),
+            backlog_order: BinaryHeap::new(),
+            backlog_centers: Vec::new(),
             early_replies: Vec::new(),
             cancelled_compute: HashSet::new(),
             #[cfg(test)]
@@ -312,11 +326,21 @@ impl DirectorHost {
         self.pool.as_ref().is_some_and(ComputePool::worker_died)
     }
 
-    /// 计算池里还没收回回执的任务数（含还在宿主手里没交出去的）；内联执行器恒为 0。
+    /// 还没回执的计算任务总数：池子里的 + 待办里的 + 等着回「已取消」的。
+    /// 内联执行器恒为 0。
     pub(crate) fn compute_in_flight(&self) -> usize {
+        self.compute_in_pool() + self.compute_backlog.len() + self.early_replies.len()
+    }
+
+    /// 已经交给池子、还没收回回执的任务数。上限见 [`POOL_JOBS_PER_THREAD`]，
+    /// 存盘不受上限，可能略超。
+    pub(crate) fn compute_in_pool(&self) -> usize {
         self.pool.as_ref().map_or(0, ComputePool::in_flight)
-            + self.compute_queue.len()
-            + self.early_replies.len()
+    }
+
+    /// 宿主手里还没交给池子的待办数。
+    pub(crate) fn compute_backlog(&self) -> usize {
+        self.compute_backlog.len()
     }
 
     /// 关服排空：等此前所有写落盘并 `sync_all`。失败要报出来，不能当成功。
@@ -1190,7 +1214,8 @@ impl DirectorHost {
         }
     }
 
-    /// 攒一个计算任务，`pump` 收尾时和读盘一起按距离交给池子。
+    /// 攒一个计算任务。存盘直接交给池子（最优先，写盘和卸载背压都在等它），
+    /// 其余进待办，`pump` 收尾时按距离补进池子。
     fn queue_compute(&mut self, id: TaskId, pos: ChunkPos, generation: u64, work: ChunkWork) {
         #[cfg(test)]
         {
@@ -1201,25 +1226,26 @@ impl DirectorHost {
             };
             self.pooled_kinds[kind] += 1;
         }
-        self.compute_queue.push((
-            id,
-            ChunkJob {
-                pos,
-                generation,
-                work,
-            },
-        ));
+        let job = ChunkJob {
+            pos,
+            generation,
+            work,
+        };
+        if matches!(job.work, ChunkWork::Save { .. })
+            && let Some(pool) = &mut self.pool
+        {
+            pool.submit(id, 0, job);
+            return;
+        }
+        let distance = Self::distance_to_players(pos, &self.backlog_centers).0;
+        self.backlog_order.push(Reverse((distance, id)));
+        self.compute_backlog.insert(id, job);
     }
 
-    /// Director 取消了一个任务。还在宿主手里的直接变成「已取消」回执；
+    /// Director 取消了一个任务。还在待办里的直接删掉、回「已取消」；
     /// 已经交给池子的只有还在排队时才取消得掉，回执照常从池子回来。
     fn cancel_compute(&mut self, id: TaskId) {
-        if let Some(index) = self
-            .compute_queue
-            .iter()
-            .position(|(queued, _)| *queued == id)
-        {
-            let (_, job) = self.compute_queue.swap_remove(index);
+        if let Some(job) = self.compute_backlog.remove(&id) {
             self.early_replies.push((id, job.cancelled()));
         } else if let Some(pool) = &mut self.pool {
             pool.cancel(id);
@@ -1227,24 +1253,44 @@ impl DirectorHost {
         }
     }
 
-    /// 把这一轮攒下的计算任务按离玩家的距离交给池子，近的先跑。
+    /// 从待办里按离玩家的距离挑最近的补进池子，直到池子里有
+    /// `threads × POOL_JOBS_PER_THREAD` 个任务。玩家跨了区块才整堆重排，
+    /// 平时只从堆顶取。
     fn submit_compute(&mut self, region: &Region) {
-        if self.compute_queue.is_empty() {
+        if self.compute_backlog.is_empty() {
+            self.backlog_order.clear();
             return;
         }
-        let centers = Self::guaranteed_centers(region);
         let Some(pool) = &mut self.pool else {
             // 没有池子不会走到 `queue_compute`；万一走到了也不丢任务。
-            for (id, job) in std::mem::take(&mut self.compute_queue) {
-                let mut job = job;
+            let mut jobs: Vec<(TaskId, ChunkJob)> = self.compute_backlog.drain().collect();
+            jobs.sort_by_key(|(id, _)| *id);
+            for (id, mut job) in jobs {
                 let output = job.run();
                 self.early_replies.push((id, job.finish(Ok(output))));
             }
+            self.backlog_order.clear();
             return;
         };
-        for (id, job) in std::mem::take(&mut self.compute_queue) {
-            let (distance, _, _) = Self::distance_to_players(job.pos, &centers);
-            pool.submit(id, distance, job);
+        let mut centers = Self::guaranteed_centers(region);
+        centers.sort_unstable();
+        if centers != self.backlog_centers {
+            self.backlog_order = self
+                .compute_backlog
+                .iter()
+                .map(|(&id, job)| Reverse((Self::distance_to_players(job.pos, &centers).0, id)))
+                .collect();
+            self.backlog_centers = centers;
+        }
+        let cap = pool.threads().saturating_mul(POOL_JOBS_PER_THREAD);
+        while pool.in_flight() < cap {
+            let Some(Reverse((distance, id))) = self.backlog_order.pop() else {
+                break;
+            };
+            // 已经取消（不在待办里）的堆项直接跳过。
+            if let Some(job) = self.compute_backlog.remove(&id) {
+                pool.submit(id, distance, job);
+            }
         }
     }
 
@@ -1315,6 +1361,7 @@ impl DirectorHost {
     fn drain_compute(&mut self, region: &mut Region) {
         let mut idle_rounds = 0;
         while self.compute_in_flight() > 0 {
+            self.submit_compute(region);
             let events = self.collect_compute(Some(Duration::from_millis(100)));
             if events.is_empty() {
                 idle_rounds += 1;
