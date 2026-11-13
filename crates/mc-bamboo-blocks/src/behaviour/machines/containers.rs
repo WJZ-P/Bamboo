@@ -118,6 +118,17 @@ impl ShulkerBoxEntity {
         self.open_count
     }
 
+    /// 给固定进度的碰撞测试和对拍场景用：把两帧的动画都设成同一个值。
+    pub fn set_progress(&mut self, progress: f32) {
+        self.progress_old = progress;
+        self.progress = progress;
+        self.status = if progress > 0.0 {
+            ShulkerStatus::Opened
+        } else {
+            ShulkerStatus::Closed
+        };
+    }
+
     /// `getProgress(a)`：上一次和这一次的进度之间插值。
     pub fn progress(&self, a: f32) -> f32 {
         let factor = a.min(1.0);

@@ -67,6 +67,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
+import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.level.block.piston.MovingPistonBlock;
 import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.flag.FeatureFlags;
@@ -162,6 +164,7 @@ public final class EntityOracle {
             cases += itemPickupDelay(official, out);
             cases += itemPickupInfinite(official, out);
             cases += movingPistonCollision(official, out);
+            cases += dynamicShapeCollision(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -411,6 +414,56 @@ public final class EntityOracle {
         playPistonItem(official, out, "piston_retracting_item", retracting,
                 new BlockPos(0, 65, 0), base, Direction.UP, false, true, 0.5f, 20);
         return 4;
+    }
+
+    /**
+     * 开着盖子的潜影盒，以及细雪上的下落方块：形状由方块实体和实体上下文决定。
+     *
+     * An open shulker box and a falling block in powder snow: the shapes come from
+     * a block entity and the entity collision context respectively.
+     */
+    private static int dynamicShapeCollision(Official official, Writer out) throws Exception {
+        BlockPos boxPos = new BlockPos(0, 65, 0);
+        BlockState shulker = Blocks.SHULKER_BOX.defaultBlockState()
+                .setValue(ShulkerBoxBlock.FACING, Direction.UP);
+        Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+        blocks.put(BlockPos.asLong(0, 64, 0), Blocks.STONE.defaultBlockState());
+        blocks.put(boxPos.asLong(), shulker);
+        blocks.put(BlockPos.asLong(0, 68, 0), Blocks.POWDER_SNOW.defaultBlockState());
+        Scene scene = Scene.start(official, "falling", Blocks.SAND.defaultBlockState(),
+                0, 70, 0, blocks, 1L, 1L, null, null, 1);
+        attachShulker(scene, boxPos, shulker, 1.0f);
+        StringBuilder steps = new StringBuilder();
+        steps.append('[');
+        scene.writeStep(steps);
+        for (int tick = 0; tick < 20; tick++) {
+            steps.append(',');
+            scene.tick();
+            scene.writeStep(steps);
+        }
+        steps.append(']');
+        out.write("{\"type\":\"case\",\"name\":\"dynamic_shapes_falling\"");
+        out.write(",\"kind\":\"falling\",\"state\":");
+        out.write(Integer.toString(Block.getId(Blocks.SAND.defaultBlockState())));
+        out.write(",\"x\":0,\"y\":70,\"z\":0");
+        out.write(",\"levelSeed\":1,\"entitySeed\":1,\"hurts\":null,\"fuse\":null");
+        out.write(",\"shulkers\":[{\"x\":0,\"y\":65,\"z\":0,\"progress\":1.0}]");
+        out.write(",\"blocks\":");
+        writeBlocks(out, blocks);
+        out.write(",\"steps\":");
+        out.write(steps.toString());
+        out.write("}\n");
+        return 1;
+    }
+
+    private static void attachShulker(
+            Scene scene, BlockPos pos, BlockState state, float progress) throws Exception {
+        ShulkerBoxBlockEntity shulker = new ShulkerBoxBlockEntity(pos, state);
+        set(ShulkerBoxBlockEntity.class, shulker, "progress", progress);
+        set(ShulkerBoxBlockEntity.class, shulker, "progressOld", progress);
+        shulker.setLevel(scene.level);
+        // 只放进 `getBlockEntity` 用的表，不登记 ticker：官方场景不跑方块实体。
+        scene.level.blockEntities.put(pos.asLong(), shulker);
     }
 
     private static void attachPiston(

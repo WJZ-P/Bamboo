@@ -16,7 +16,7 @@ use std::{
 
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, Container, EntityStore, EntityTables,
-    HopperEntity, Level, LevelRandom, LevelTables, Slots, World,
+    HopperEntity, Level, LevelRandom, LevelTables, ShulkerBoxEntity, Slots, World,
     archive::create_block_entity,
     entity::{Entities, Entity, EntityKind, JavaRandom, can_pick_up, take_stack},
 };
@@ -104,6 +104,9 @@ struct Case {
     /// 这一题里固定的移动活塞方块实体。官方场景不 tick 它们，形状每刻一样。
     #[serde(default)]
     pistons: Vec<Piston>,
+    /// 这一题里固定进度的潜影盒方块实体。官方场景不 tick 它们。
+    #[serde(default)]
+    shulkers: Vec<Shulker>,
     /// 官方 `PistonMovingBlockEntity.getCollisionShape` 逐盒子的结果，按原始位比较。
     #[serde(default)]
     shapes: Vec<[f64; 6]>,
@@ -151,6 +154,14 @@ struct Piston {
     facing: i32,
     extending: bool,
     source: bool,
+    progress: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct Shulker {
+    x: i32,
+    y: i32,
+    z: i32,
     progress: f32,
 }
 
@@ -459,6 +470,12 @@ impl Report {
         let mut world = World::new(&mut level, &mut ticks);
         for piston in &case.pistons {
             place_moving_piston(&mut world, piston);
+        }
+        for shulker in &case.shulkers {
+            let pos = BlockPos::new(shulker.x, shulker.y, shulker.z);
+            let mut entity = ShulkerBoxEntity::new(pos);
+            entity.set_progress(shulker.progress);
+            world.set_block_entity(Box::new(entity));
         }
         let id = match case.kind.as_str() {
             "falling" => world.spawn_falling_block(
