@@ -450,3 +450,34 @@ world.push_effect(Effect::Sound { …, pitch, seed: None });
 7. 量收益（照 §7），写进 `docs/performance-optimizations.md`。
 
 每一步都单独提交，每一步差分测试都要过。
+
+## 12. 第一版实现结果（2026-11-12）
+
+按 §11 的顺序做完了第 1、2、3、5、6、7 步，**第 4 步（把活塞门接进缓存）
+只做完了前置工作，活塞方块事件和方块实体 tick 仍退回解释执行**。逐项：
+
+| 步骤 | 状态 | 验收 |
+| --- | --- | --- |
+| 1 段哈希进 `Chunk` | 完成 | 每段 128 位哈希、`set_block` 增量异或、读盘整段重算、debug 断言、随机改 4000 次测试；`+6.4 ns/写`，见 `performance-optimizations.md` 7h |
+| 2 引擎、录制、守卫、重放 | 完成 | 计划刻和方块事件；白名单集中在 `cache::supported_kind` / `supported_write`；去重存在性进守卫；`Observation::Capture` 关掉守卫/重放的记账 |
+| 3 九台机器差分 | 完成 | `cache_diff 4000`：九台全部 **0 刻不一致**（世界状态、效果、发包取数、随机源种子、计划刻队列）；实验的命中率数字和「键同效果不同 0 次」不变 |
+| 4 活塞门接进缓存 | **部分** | `lastTicked` 已改成相对量（跨 `World` 实例的 `BlockTicks::ticked_entities`）；活塞音高已改成 `next_random_float` + `Observation::PistonPitch` 的可重放动作；但 `Write::BlockEntity` / `Write::Container` / `Write::Effect` 在实验录制层里只存哈希，还原不出 `PistonMoving`、槽位表和音效参数，所以活塞触发仍按白名单退回解释 |
+| 5 热点/停录/LRU | 完成 | 5 个单元测试；热点以累计解释耗时为主、频率兜底；停录还要求该触发点的命中率低；32 MiB/region、按最近使用淘汰 |
+| 6 配置项 | 完成 | `bamboo.toml` 的 `redstone_cache`（默认关）、`ServerConfig`、`WorldConfig`、APP 设置页；游戏 tick 的两段接 `run_*_with_cache` |
+| 7 收益 | 完成 | `cache_bench`：红石线阵列 **36.7×**，小型电路和互质汇合变慢，见 `performance-optimizations.md` 7i |
+
+**第 4 步剩下的具体工作**（下一轮）：给运行时录制层加带真实值的
+`ReplayEffect::BlockEntityInsert(PistonMoving 的全部字段)`、
+`ContainerSlots(Vec<ItemStack>)`、`Sound { pitch 由取数动作算 }`，并给
+`K_BLOCK_ENTITY` / `K_SLOTS` / `K_LOOT_UNPACK` / `K_TICKER` / `K_ENTITY_TIME` /
+`K_WORLD_BORDER` 各自写守卫重算（不能只用通用的 `Recheck`，实测过它会把
+纯信号机器的命中率从 99% 打到 40%，因为读项的值形状对不上）。
+然后扩 `cache::supported_kind` / `supported_write`，把 `Trigger::BlockEntityTick`
+接进 `cache_run::cacheable_trigger`，再用 `cache_diff` 和活塞 oracle 题验收。
+这一段不能靠放宽白名单糊过去：守卫漏一个读就是误命中，就是和官方不一致。
+
+**已验证**：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets`
+0 警告、`cargo test --workspace` 全过、
+`oracle java --weather clear` 与 `oracle java --weather clear --redstone-cache`
+都是 10114 cases / 0 fail（开的那次 2364 triggers / 20 replays）、
+`machine java` 10 runs / 0 mismatches、九台机器差分 0 刻不一致。
