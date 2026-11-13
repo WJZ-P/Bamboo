@@ -675,10 +675,19 @@ HolderSet 换空，Java 的 step 6 `indices` 只含 26 个 ore；Rust 仍从**�
 `CountPlacement[count=46] → InSquare → HeightRange[0 above bottom-256 absolute]
 → BiomeFilter`，与导出的 JSON 一致。
 
+补充排除：`OreProbe2.java` 逐位验证了 `WorldgenRandom.nextInt(16)` 与
+`nextInt(321)` 序列（已写进 `random.rs` 的 `bit_source_tests`）。
+`RandomState.createClimateSampler(EMPTY_UNCACHED)` 用
+`samplersWithContext` + `NoiseRouter.createClimateSampler(DensitySamplerSet)`，
+与 Rust 的 `settings::Samplers` 数学上等价，但 `BiomeManager::biome` +
+`Context::uncached()` 这条组合从未单独对拍过（terrain 走 `biome_cached` +
+`Context::new` + `ClimateCache`）。
+
 **下一步**：在 Java 代理里给 `FeaturePlacer` 的 `in_square` / `height_range`
 加探针（或直接给 `WorldgenRandom` 包一层记数），逐项对比 `ore_clay` 的
-46 个候选位置在两边各自消费的 `nextInt(16)` / `nextInt(321)` 序列。
-既然 `setFeatureSeed` 与 `count` 都一致，分歧只能在这条链的某个取数上。
+46 个候选位置在两边各自消费的 `nextInt(16)` / `nextInt(321)` 序列；
+同时确认 Java 的 `setFeatureSeed` 实际用的 index 值。既然种子、
+所有取数方法、`count` 与配置都一致，分歧只能在这条链的调用顺序上。
 
 **已排除**：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`Mth.sin` 65536
 项查表（用 `MthProbe.java` 逐值比过）、`WorldgenRandom` 的
