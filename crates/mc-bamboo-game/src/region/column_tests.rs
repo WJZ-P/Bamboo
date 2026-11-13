@@ -1754,6 +1754,48 @@ fn sleeping_machines_survive_a_disk_restart() {
     }
 }
 
+/// 睡着的机器安静刻里数值会变（进度、倒计时、冷却），这些字节要能被存下来；
+/// 真跑 / 外部叫醒改了东西时也不能漏标脏。官方营火和酿造台安静刻每刻
+/// `setChanged`，熔炉 / 漏斗的冷却只有真事件才通知，Bamboo 上层在方块实体
+/// 阶段开头统一标记所在区块，两种口径都归入「宁多勿少」。
+#[test]
+fn sleeping_machines_still_mark_their_chunk_dirty() {
+    use mc_bamboo_blocks::behaviour::machines::{CampfireEntity, FurnaceEntity};
+
+    fn scene(sleep: bool) -> Vec<bool> {
+        let mut server = harness();
+        {
+            let region = server.region();
+            region.chunks.set_block(FURNACE, blocks::FURNACE);
+            region.chunks.set_block(HOPPER, blocks::HOPPER);
+            region.block_entities.set_sleep_enabled(sleep);
+            region.block_entities.remove(FURNACE);
+            region.block_entities.remove(HOPPER);
+            let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+            furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+            furnace.set_item(1, ItemStack::new(items::COAL, 8));
+            region.block_entities.insert(Box::new(furnace));
+            let mut fire = CampfireEntity::new(HOPPER);
+            fire.set_item(0, ItemStack::new(items::POTATO, 1));
+            fire.set_data(4, 600);
+            region.block_entities.insert(Box::new(fire));
+        }
+        let mut marked = Vec::new();
+        for _ in 0..40 {
+            // 每刻先把上一刻攒下的标记清空，再看这一刻有没有重新标上。
+            let _ = server.region().dirty.take();
+            server.tick();
+            marked.push(server.region().dirty.pending_contains(CHUNK));
+        }
+        marked
+    }
+
+    let sleeping = scene(true);
+    let always = scene(false);
+    assert!(sleeping.iter().all(|&marked| marked), "安静刻不能漏标脏");
+    assert_eq!(sleeping, always, "开 / 关休眠的改动标记一致");
+}
+
 /// 装盒之后、睡着的熔炉只依赖已经「现算」的数值；在另一个线程上编码
 /// 整份盒子，字节必须和世界线程上编出来的完全相同（世界线程只做编码）。
 #[test]
