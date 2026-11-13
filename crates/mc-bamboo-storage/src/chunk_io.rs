@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -182,6 +182,9 @@ pub struct ChunkIo {
     /// Set when the IO thread exits or a `send` fails; the world thread uses it
     /// each tick to trigger the R12 shutdown flow.
     dead: Arc<AtomicBool>,
+    /// 已入队、还没处理完的请求数，给世界线程的背压门限用（F6）。
+    /// Queued-but-unprocessed requests, used by the world thread's backpressure.
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl ChunkIo {
@@ -195,9 +198,11 @@ impl ChunkIo {
         let (tx, results) = mpsc::channel::<Reply>();
         let dead = Arc::new(AtomicBool::new(false));
         let worker_dead = Arc::clone(&dead);
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let worker_in_flight = Arc::clone(&in_flight);
         let worker = thread::Builder::new()
             .name("bamboo-chunk-io".to_owned())
-            .spawn(move || worker_loop(layout, rx, tx, worker_dead))?;
+            .spawn(move || worker_loop(layout, rx, tx, worker_dead, worker_in_flight))?;
         Ok(Self {
             dir: dir.clone(),
             known,
@@ -208,6 +213,7 @@ impl ChunkIo {
             next_player_seq: AtomicU64::new(1),
             next_barrier_seq: AtomicU64::new(1),
             dead,
+            in_flight,
         })
     }
 
@@ -215,13 +221,21 @@ impl ChunkIo {
     /// Send a request; if the channel is gone, flag `dead` so the world thread
     /// notices on its next tick (R12).
     fn send_request(&self, request: Request) -> bool {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
         match self.requests.send(request) {
             Ok(()) => true,
             Err(_) => {
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 self.dead.store(true, Ordering::SeqCst);
                 false
             }
         }
+    }
+
+    /// 已入队但还没处理的请求数（F6 背压门限）。
+    /// Queued-but-unprocessed request count (F6 backpressure threshold).
+    pub fn in_flight_requests(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
     }
 
     /// 盘上是否已经有这个区块的数据（或有一份已经入队、还没回执的写）。
@@ -610,7 +624,13 @@ fn panic_replies(request: &Request) -> Vec<Reply> {
     }
 }
 
-fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>, dead: Arc<AtomicBool>) {
+fn worker_loop(
+    dir: WorldDir,
+    rx: Receiver<Request>,
+    tx: Sender<Reply>,
+    dead: Arc<AtomicBool>,
+    in_flight: Arc<AtomicUsize>,
+) {
     let _guard = DeathGuard(dead);
     let mut cache = Cache::default();
     // 每个区块最新快照的 seq，用于丢掉还没落盘的旧快照。
@@ -635,6 +655,8 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>, dead: Ar
             }
         }
         for request in batch {
+            // 这条请求已经交给本线程处理，从在途计数里减掉（F6 背压）。
+            in_flight.fetch_sub(1, Ordering::SeqCst);
             // 测试接缝：让线程真的退出，供世界线程验证 R12（不走 catch_unwind）。
             if matches!(request, Request::Crash) {
                 return;
@@ -673,10 +695,12 @@ fn worker_loop(dir: WorldDir, rx: Receiver<Request>, tx: Sender<Reply>, dead: Ar
                         // 只有两份都写成功才回 Written；失败绝不谎报成功。
                         if failures.is_empty() {
                             let _ = tx.send(Reply::Written { pos, seq, present });
-                            latest.remove(&pos);
                         } else if report_failures(&tx, failures, Some(pos), Some(seq)) {
                             failed_since_barrier = true;
                         }
+                        // 写成功或失败都算处理完，清掉去重记账（F6）。
+                        // Success or failure, the dedup entry is done (F6).
+                        latest.remove(&pos);
                     }
                 }
                 Request::DropSnapshot { .. } => {}
@@ -1140,7 +1164,25 @@ mod tests {
         io.close();
     }
 
-    /// F4：单个任务 panic 被 `catch_unwind` 兜住，IO 线程继续活着，
+    /// F6：在途请求计数随入队上升、处理完回到 0，给世界线程的背压门限用。
+    /// F6: the in-flight counter rises on submit and returns to 0 once the
+    /// requests are processed (used by the world thread's backpressure).
+    #[test]
+    fn in_flight_requests_are_counted_and_drained() {
+        let tmp = TempDir::new("in-flight");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        assert_eq!(io.in_flight_requests(), 0);
+        io.submit_write(ChunkPos::new(0, 0), 1, Some(vec![1]), None);
+        io.submit_write(ChunkPos::new(1, 0), 2, Some(vec![2]), None);
+        // flush 当同步点：返回时这两条和栅栏本身都已处理完。
+        io.flush().unwrap();
+        assert_eq!(io.in_flight_requests(), 0);
+        io.close();
+    }
+
+    /// F4：单个任务 panic 被 `catch_unwind` 兜住，IO 线程继续活着、
     /// 读请求照样收到带 error 的回执（Director 不会永远等），之后正常读写仍可用。
     /// F4: a single task panic is caught; the IO thread stays alive, the read
     /// still gets a reply with an error (Director never waits forever), and

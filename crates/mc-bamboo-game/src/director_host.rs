@@ -53,6 +53,12 @@ pub(crate) const SAVE_COOLDOWN_TICKS: u64 = 200;
 /// §8: after this many consecutive write failures, stop accepting new save
 /// requests (data stays in memory; shutdown / `save-all` retries).
 pub(crate) const MAX_CONSECUTIVE_IO_FAILURES: u32 = 3;
+/// F6：在途快照、停放盒子、IO 信箱的硬上限，超了就暂缓卸载做背压。
+/// F6: hard caps on queued snapshots, parked boxes and the IO mailbox;
+/// exceeding any of them defers unloads (backpressure).
+pub(crate) const MAX_PENDING_WRITES: usize = 4096;
+pub(crate) const MAX_PARKED_BOXES: usize = 4096;
+pub(crate) const MAX_IO_MAILBOX: usize = 16384;
 
 /// 一次待落盘的区块快照。
 struct PendingWrite {
@@ -149,6 +155,9 @@ pub(crate) struct DirectorHost {
     /// §8 pause: no new snapshots are handed to IO; data stays in `save_queue` /
     /// `parking` and is retried at shutdown or by `/save-all`.
     saving_paused: bool,
+    /// 关服中：F6 背压必须让路，保证所有区块都被收回并保存。
+    /// Shutting down: F6 backpressure must stand aside so every chunk is saved.
+    shutting_down: bool,
 }
 
 impl DirectorHost {
@@ -179,6 +188,7 @@ impl DirectorHost {
             io_failures: 0,
             consecutive_io_failures: 0,
             saving_paused: false,
+            shutting_down: false,
         }
     }
 
@@ -379,6 +389,36 @@ impl DirectorHost {
         self.pump(region, vec![Event::Tick { now_tick }]);
     }
 
+    /// 同一区块在 `save_queue` 里只留最新一份快照（官方 `IOWorker.store`
+    /// 覆盖同位置的 `pendingStore.data`），且不接收比已排队的更旧的快照。
+    /// Keep only the newest snapshot per chunk in `save_queue` (official
+    /// `IOWorker.store` overwrites the same position); ignore older stragglers.
+    fn enqueue_snapshot(&mut self, pending: PendingWrite) {
+        if self
+            .save_queue
+            .iter()
+            .any(|other| other.pos == pending.pos && other.seq > pending.seq)
+        {
+            return;
+        }
+        self.save_queue.retain(|other| other.pos != pending.pos);
+        self.save_queue.push_back(pending);
+    }
+
+    /// 积压到上限就背压：暂缓卸载，已加载区块数和内存都有界（F6）。
+    /// Backpressure: defer reclaims once any cap is reached (F6).
+    fn save_backpressure(&self) -> bool {
+        if self.shutting_down {
+            return false;
+        }
+        self.save_queue.len() >= MAX_PENDING_WRITES
+            || self.parking.len() >= MAX_PARKED_BOXES
+            || self
+                .io
+                .as_ref()
+                .is_some_and(|io| io.in_flight_requests() >= MAX_IO_MAILBOX)
+    }
+
     /// D6：每刻把 `ceil(待写数 / 6000)`（至少 1）个快照提交给 IO 线程。
     /// 单区块 10 秒冷却只在「队列里还有同区块更新的快照」时跳过旧快照，
     /// 保证冷却不会丢掉一个孤立的快照。
@@ -525,10 +565,12 @@ impl DirectorHost {
         if self.infinite_flat {
             return;
         }
-        // 关服照官方最后全量保存：解除 §8 暂停，把内存里还在的快照再试一次。
-        // Shutdown is the final full save: lift the §8 pause and retry everything
-        // still in memory.
+        // 关服照官方最后全量保存：解除 §8 暂停和 F6 背压，把内存里还在的
+        // 快照再试一次，所有区块都要收回。
+        // Shutdown is the final full save: lift the §8 pause and F6 backpressure
+        // and retry everything still in memory; every chunk must be reclaimed.
         self.saving_paused = false;
+        self.shutting_down = true;
         self.budget = MailBudget {
             deliveries: 0,
             reclaims: 0,
@@ -685,8 +727,8 @@ impl DirectorHost {
                     record_codec(started);
                     match encoded {
                         Ok(packed) => {
-                            // 不直接写盘：进 D6 匀速队列，每刻出队一小批。
-                            self.save_queue.push_back(PendingWrite {
+                            // 不直接写盘：进 D6 匀速队列，同区块只留最新一份（F6）。
+                            self.enqueue_snapshot(PendingWrite {
                                 pos,
                                 seq,
                                 chunk: packed.chunk,
@@ -879,7 +921,16 @@ impl DirectorHost {
             }
             // `Ready` 不用另存一份集合：`ChunkStore::is_loaded` 就是已交付集合，
             // 发区块时直接问它；多存一份只会多一处要保持一致的状态。
-            RegionMessage::Ready { .. } | RegionMessage::Forgot { .. } => {}
+            RegionMessage::Ready { .. } => {}
+            RegionMessage::Forgot { positions } => {
+                // F6：区块被遗忘时清掉各处的每区块记账，避免长局无界增长。
+                // F6: clear per-chunk bookkeeping when a chunk is forgotten.
+                for &pos in &positions {
+                    self.save_cooldown.remove(&pos);
+                    self.saved_revisions.remove(&pos);
+                    self.loaded_save_tick.remove(&pos);
+                }
+            }
         }
     }
 
@@ -960,6 +1011,13 @@ impl DirectorHost {
             self.return_pending_deliveries(&mut events);
         });
         if self.deliveries.is_empty() && self.reclaims.is_empty() {
+            return events;
+        }
+        // F6 背压：积压到上限就暂缓卸载，把收回请求整批留到下一刻。
+        // 交付照常，玩家脚下的区块不受影响。
+        // F6 backpressure: defer reclaims once a cap is hit; deliveries (and
+        // the 3x3 under players) continue untouched.
+        if !self.reclaims.is_empty() && self.save_backpressure() {
             return events;
         }
         // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
@@ -1267,6 +1325,82 @@ mod tests {
         assert_eq!(host.save_queue.len(), 1);
         host.pace_saves(3);
         assert!(host.save_queue.is_empty());
+    }
+
+    /// F6：同一区块在 `save_queue` 里只留最新一份，旧序号不能覆盖新的。
+    /// F6: only the newest snapshot per chunk stays in `save_queue`.
+    #[test]
+    fn save_queue_keeps_only_the_newest_snapshot_per_chunk() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let pos = ChunkPos::new(1, 1);
+        let other = ChunkPos::new(2, 2);
+        let snapshot = |pos, seq| PendingWrite {
+            pos,
+            seq,
+            chunk: Some(vec![seq as u8]),
+            entities: None,
+        };
+        host.enqueue_snapshot(snapshot(pos, 1));
+        host.enqueue_snapshot(snapshot(other, 1));
+        host.enqueue_snapshot(snapshot(pos, 2));
+        assert_eq!(host.save_queue.len(), 2, "one entry per chunk");
+        assert_eq!(
+            host.save_queue.iter().find(|p| p.pos == pos).unwrap().seq,
+            2
+        );
+        // 迟到的旧序号不能把新的挤掉。
+        host.enqueue_snapshot(snapshot(pos, 1));
+        assert_eq!(
+            host.save_queue.iter().find(|p| p.pos == pos).unwrap().seq,
+            2
+        );
+    }
+
+    /// F6：积压到上限触发背压，收回请求整批留到下一刻。
+    /// F6: hitting a cap defers reclaims to the next tick.
+    #[test]
+    fn a_full_save_queue_defers_reclaims_as_backpressure() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        for i in 0..MAX_PENDING_WRITES {
+            host.enqueue_snapshot(PendingWrite {
+                pos: ChunkPos::new(i as i32, 0),
+                seq: i as u64,
+                chunk: Some(vec![1]),
+                entities: None,
+            });
+        }
+        assert!(host.save_backpressure());
+        let mut region = Region::new(2, 20, false);
+        let pos = ChunkPos::new(0, 0);
+        host.reclaims.push((pos, 0));
+        let _ = host.flush_region_mail(&mut region);
+        assert_eq!(host.reclaims.len(), 1, "reclaim must be deferred");
+        let _ = pos;
+        // 队列腾空后背压解除。
+        host.save_queue.clear();
+        assert!(!host.save_backpressure());
+    }
+
+    /// F6：区块被遗忘时清掉每区块记账。
+    /// F6: per-chunk bookkeeping is cleared when a chunk is forgotten.
+    #[test]
+    fn forgetting_a_chunk_clears_its_bookkeeping() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut region = Region::new(2, 20, false);
+        let pos = ChunkPos::new(5, 5);
+        host.save_cooldown.insert(pos, 10);
+        host.loaded_save_tick.insert(pos, 20);
+        host.saved_revisions
+            .insert(pos, region.chunks.revision(pos));
+        host.region_message(
+            &mut region,
+            RegionMessage::Forgot {
+                positions: vec![pos],
+            },
+        );
+        assert!(!host.save_cooldown.contains_key(&pos));
+        assert!(!host.loaded_save_tick.contains_key(&pos));
+        assert!(!host.saved_revisions.contains_key(&pos));
     }
 
     /// F1：写盘失败不回 `Written`，世界线程保留 parking 盒子、记 error、
