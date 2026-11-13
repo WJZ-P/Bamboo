@@ -30,6 +30,63 @@ struct Report {
     block: Option<String>,
 }
 
+/// 诊断用：列出一个区块里所有非模板方块。
+pub fn dump_chunk(
+    java: &str,
+    dir: &std::path::Path,
+    pos: mc_bamboo_core::ChunkPos,
+) -> Result<String, String> {
+    let request = json!({
+        "command": "chunk-dump",
+        "dir": dir.to_string_lossy(),
+        "rx": pos.x >> 5,
+        "rz": pos.z >> 5,
+        "x": pos.x,
+        "z": pos.z,
+    });
+    #[derive(Debug, Deserialize)]
+    struct Dump {
+        #[serde(default)]
+        blocks: Vec<Value>,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let report: Dump = ask_java_generic(java, &request)?;
+    if let Some(error) = &report.error {
+        return Err(error.clone());
+    }
+    Ok(format!("{:?}", report.blocks))
+}
+
+fn ask_java_generic<T: serde::de::DeserializeOwned>(
+    java: &str,
+    request: &Value,
+) -> Result<T, String> {
+    let mut child = crate::official_program(java, SOURCE)?
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run java: {e}"))?;
+    {
+        let mut stdin = child.stdin.take().ok_or("java has no stdin")?;
+        stdin
+            .write_all(request.to_string().as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .and_then(|_| stdin.flush())
+            .map_err(|e| format!("cannot write java stdin: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot wait for java: {e}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.contains("\"command\""))
+        .ok_or_else(|| format!("no report: {text}"))?;
+    serde_json::from_str::<T>(line).map_err(|e| format!("bad JSON {line}: {e}"))
+}
+
 pub fn run(dir: &str, x: &str, y: &str, z: &str, block: &str, java: &str) -> Result<(), String> {
     let at = BlockPos::new(
         x.parse().map_err(|_| format!("bad x coordinate {x:?}"))?,

@@ -714,11 +714,30 @@ impl EntityStore {
         })
     }
 
-    /// 只读快照：在一份克隆上走 `take_chunk`，原表分毫不动（补 11）。
-    /// tick 中途或正在 tick 时返回 `None`，调用方稍后重试。
-    /// Read-only snapshot on a clone, leaving the original untouched (item 11).
+    /// 只读快照：直接复制这一区块的实体行和保留条目，原表分毫不动（补 11）。
+    /// 不要求 tick 边界，也不要求没有实体被借走——存档只编内容，不搬运行态。
+    /// Read-only snapshot: copy this chunk's entity rows and preserved entries
+    /// without requiring a tick boundary. Saving encodes content, never moves
+    /// the live tables.
     pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkEntities> {
-        self.clone().take_chunk(chunk).ok()
+        let mut rows: Vec<EntityRow> = self
+            .index
+            .values()
+            .filter_map(|&row| self.slots[row].as_ref())
+            .filter(|entry| entry.public.chunk_position() == chunk)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|entry| entry.public.uid);
+        let preserved = self
+            .preserved
+            .iter()
+            .filter(|tag| {
+                let [x, _, z] = crate::archive::tag::vec3(tag, "Pos", [0.0; 3]);
+                chunk == ChunkPos::new(x.floor() as i32 >> 4, z.floor() as i32 >> 4)
+            })
+            .cloned()
+            .collect();
+        Some(ChunkEntities { rows, preserved })
     }
 
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。

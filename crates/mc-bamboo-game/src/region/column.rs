@@ -619,13 +619,10 @@ impl Region {
         &self,
         pos: ChunkPos,
     ) -> Option<Result<PackedChunk, String>> {
-        // 有待算光照时，卸载存盘会先算完光照再编码；这里不能提前算（会改变
-        // 运行状态），所以把快照推迟到光照算完之后的下一刻（复查「中 6」）。
-        // 只在这一柱自己的任务已经排成轮次、还没算完时推迟；还在攒的任务
-        // 不改已发布的光照层，拍出来的字节和卸载一致。
-        if self.chunks.light().has_unfinished_round_for_column(pos) {
-            return None;
-        }
+        // 只读快照从「已发布」的光照层克隆，和卸载存盘用的是同一份；哪怕
+        // 引擎里还有在算的轮次，字节也和卸载一致，不必推迟快照（复查「中 6」）。
+        // Read-only snapshots clone the published light layers, the same bytes
+        // an unload save writes, so pending work never changes the snapshot.
         let parts = super::content_snapshot::BorrowedParts::build(self, pos)?;
         Some(crate::chunk_codec::encode_parts(pos, &parts))
     }

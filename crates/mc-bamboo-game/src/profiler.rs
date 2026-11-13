@@ -261,10 +261,16 @@ pub(crate) enum SubPhase {
     DirectorAck,
     /// 收回的盒子判「原不原样」（逐段比模板）和丢弃。
     PristineCheck,
+    /// 存档：每刻判「改过没有」（只读改动集合）。
+    StorageDirty,
+    /// 存档：给改过的区块拍只读快照。
+    StorageSnapshot,
+    /// 存档：把快照编成 NBT 字节（世界线程上的编码）。
+    StorageEncode,
 }
 
 impl SubPhase {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 21] = [
         Self::TicketUpdate,
         Self::DirectorEvents,
         Self::DeliveryLightFinish,
@@ -283,6 +289,9 @@ impl SubPhase {
         Self::ReturnBoxes,
         Self::DirectorAck,
         Self::PristineCheck,
+        Self::StorageDirty,
+        Self::StorageSnapshot,
+        Self::StorageEncode,
     ];
 
     fn name(self) -> &'static str {
@@ -305,6 +314,9 @@ impl SubPhase {
             Self::ReturnBoxes => "return_boxes",
             Self::DirectorAck => "director_ack",
             Self::PristineCheck => "pristine_check",
+            Self::StorageDirty => "storage_dirty",
+            Self::StorageSnapshot => "storage_snapshot",
+            Self::StorageEncode => "storage_encode",
         }
     }
 }

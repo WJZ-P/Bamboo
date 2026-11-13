@@ -148,11 +148,26 @@ grep -F "WORLD-BLOCK RESULT" "$LOG_DIR/marker-before-restart.log" >/dev/null || 
     exit 1
 }
 
-echo "== restart and second official probe =="
+echo "== restart: official client can log in and read the saved world =="
 PID2=$(start "$PORT2" "$LOG_DIR/second.log") || exit 1
 echo "second server pid=$PID2"
+# 带存档重启后，探针里按「全新世界」校准的断言会失败（交接文档已知限制：
+# 盘上的区块走异步读、晚一刻交付，远处的区块可能先到）。这里只要求官方
+# 客户端能完成登录、收到出生点区块且连接不断开，证明这个世界读得回来。
 vanilla probe 127.0.0.1 "$PORT2" "$JAVA" >"$LOG_DIR/probe2.log" 2>&1 || true
-grep -E "PROBE RESULT|PROBE FAIL" "$LOG_DIR/probe2.log" || true
+grep -E "PROBE RESULT" "$LOG_DIR/probe2.log" || true
+for check in "login: name is kept" \
+             "login: uuid uses the offline algorithm" \
+             "login: session id is present"; do
+    grep -F "PROBE ok   $check" "$LOG_DIR/probe2.log" >/dev/null || {
+        echo "restart check missing: $check" >&2
+        exit 1
+    }
+done
+if grep -q "PROBE disconnected" "$LOG_DIR/probe2.log"; then
+    echo "official client was disconnected after restart" >&2
+    exit 1
+fi
 
 echo "== stopping and cleaning up =="
 kill -9 "$PID2" >/dev/null 2>&1 || true

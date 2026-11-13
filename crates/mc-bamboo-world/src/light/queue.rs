@@ -13,7 +13,7 @@
 
 use std::{collections::VecDeque, mem};
 
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_core::BlockPos;
 
 use super::{Chunks, SectionPos, TASKS_PER_BATCH, write_block};
 use crate::chunk::Chunk;
@@ -87,18 +87,6 @@ impl TaskQueue {
     /// 还有没算完的任务：算到一半的、排好的和正在攒的都算。
     pub(super) fn has_work(&self) -> bool {
         self.running || !self.rounds.is_empty() || !self.forming.tasks.is_empty()
-    }
-
-    /// 这一柱还有排着的改动或没算完的任务吗？
-    pub(super) fn has_round_for_column(&self, pos: ChunkPos) -> bool {
-        let in_round = |round: &Round| {
-            round.blocks.iter().any(|(at, _)| at.chunk() == pos)
-                || round.tasks.iter().any(|task| match task {
-                    Task::CheckBlock(at) => at.chunk() == pos,
-                    Task::SectionStatus(section, _) => section.chunk() == pos,
-                })
-        };
-        self.rounds.iter().any(in_round)
     }
 
     /// 开始算排好的下一轮：先把它排好之前的方块改动补进副本，返回它的任务。没有排好的轮次时返回 `None`。

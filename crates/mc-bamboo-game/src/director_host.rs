@@ -655,7 +655,9 @@ impl DirectorHost {
         self.loaded_save_tick
             .retain(|pos, _| region.chunks.is_loaded(*pos));
 
+        region.profiler.start_sub(SubPhase::StorageDirty);
         let mut dirty = self.dirty_loaded_chunks(region, false);
+        region.profiler.end_sub();
         // 上一刻没轮到的脏区块留在集合里，不会因为改动标记被取走而丢掉。
         for pos in std::mem::take(&mut self.dirty_pending) {
             if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
@@ -715,7 +717,17 @@ impl DirectorHost {
         // `save-all` is an explicit forced retry: clear the backoff and submit
         // everything still in memory. Later failures back off again, never pause forever.
         self.save_retry_after = 0;
-        let dirty = self.dirty_loaded_chunks(region, true);
+        let mut dirty = self.dirty_loaded_chunks(region, true);
+        // 冷却期 / 匀速没轮到而留到下一刻的脏区块，强制保存也要一起写。
+        for pos in std::mem::take(&mut self.dirty_pending) {
+            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+                dirty.push(pos);
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        // 强制保存不看单区块冷却。
+        self.loaded_save_tick.clear();
         for pos in dirty {
             self.snapshot_loaded(region, pos, now_tick);
         }
@@ -736,7 +748,10 @@ impl DirectorHost {
     /// revision and tick. On failure (or when the tables are busy) record nothing
     /// so it is retried on a later tick.
     fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
-        let Some(result) = region.encode_loaded_column(pos) else {
+        region.profiler.start_sub(SubPhase::StorageEncode);
+        let result = region.encode_loaded_column(pos);
+        region.profiler.end_sub();
+        let Some(result) = result else {
             // 有待算光照 / 表正忙：推迟到下一刻，不记「已存」。
             self.retry_dirty.insert(pos);
             self.loaded_save_tick.remove(&pos);

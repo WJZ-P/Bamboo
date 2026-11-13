@@ -241,6 +241,10 @@ public final class StorageOracle {
                     response = worldDir(Path.of(request.get("dir").getAsString()));
                     response.addProperty("command", command);
                 }
+                case "chunk-dump" -> {
+                    response = chunkDump(request);
+                    response.addProperty("command", command);
+                }
                 case "world-block" -> {
                     // 从真实 .mca 里用官方 RegionFile + SerializableChunkData.parse
                     // 读出一格方块，报告它的注册名。崩溃测试用它确认改动没丢。
@@ -382,6 +386,61 @@ public final class StorageOracle {
             response.addProperty("savedData", savedData);
             response.add("errors", errors);
             return response;
+        }
+
+        /** 列出一个区块里所有非空气的方块，给崩溃测试核对到底存下了什么。 */
+        private JsonObject chunkDump(JsonObject request) {
+            JsonObject response = new JsonObject();
+            JsonArray blocks = new JsonArray();
+            try {
+                Path path = Path.of(request.get("dir").getAsString());
+                int rx = request.get("rx").getAsInt();
+                int rz = request.get("rz").getAsInt();
+                int x = request.get("x").getAsInt();
+                int z = request.get("z").getAsInt();
+                ChunkPos pos = new ChunkPos(x, z);
+                RegionStorageInfo info = new RegionStorageInfo("oracle", Level.OVERWORLD, "region");
+                try (RegionFile region = new RegionFile(info, path, path.getParent(), false)) {
+                    if (!region.hasChunk(pos)) { return response; }
+                    try (DataInputStream stream = region.getChunkDataInputStream(pos)) {
+                        CompoundTag tag = NbtIo.read(stream);
+                        SerializableChunkData parsed = SerializableChunkData.parse(height, containers, tag);
+                        for (SerializableChunkData.SectionData section : parsed.sectionData()) {
+                            if (section.chunkSection() == null) { continue; }
+                            int baseY = section.y() * 16;
+                            for (int ly = 0; ly < 16; ly++) {
+                                for (int lz = 0; lz < 16; lz++) {
+                                    for (int lx = 0; lx < 16; lx++) {
+                                        BlockState state = section.chunkSection().getBlockState(lx, ly, lz);
+                                        String name = BuiltInRegistriesHolder.id(state);
+                                        if (name.equals("minecraft:air") || name.equals("minecraft:bedrock")
+                                                || name.equals("minecraft:dirt") || name.equals("minecraft:grass_block")) {
+                                            continue;
+                                        }
+                                        JsonObject entry = new JsonObject();
+                                        entry.addProperty("x", x * 16 + lx);
+                                        entry.addProperty("y", baseY + ly);
+                                        entry.addProperty("z", z * 16 + lz);
+                                        entry.addProperty("block", name);
+                                        blocks.add(entry);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                response.add("blocks", blocks);
+            } catch (Exception error) {
+                response.addProperty("error", error.toString());
+            }
+            return response;
+        }
+
+        private static final class BuiltInRegistriesHolder {
+            static String id(BlockState state) {
+                return net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                        .getKey(state.getBlock()).toString();
+            }
         }
 
         /** 用官方 RegionFile / SerializableChunkData.parse 读出一格方块的注册名。 */

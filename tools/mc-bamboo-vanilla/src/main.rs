@@ -207,6 +207,7 @@ fn run() -> Result<(), String> {
         ["border-oracle", java, ref options @ ..] => world_border_oracle(java, options),
         ["world-dir", dir, java] => world_dir_cli(dir, java),
         ["world-block", dir, x, y, z, block, java] => world_block_cli(dir, x, y, z, block, java),
+        ["chunk-dump", dir, x, z, java] => chunk_dump_cli(dir, x, z, java),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -500,6 +501,26 @@ fn world_block_cli(
     java: &str,
 ) -> Result<(), String> {
     world_block::run(dir, x, y, z, block, java)
+}
+
+#[cfg(feature = "oracle")]
+fn chunk_dump_cli(dir: &str, x: &str, z: &str, java: &str) -> Result<(), String> {
+    let chunk = mc_bamboo_core::ChunkPos::new(
+        x.parse().map_err(|_| format!("bad x {x:?}"))?,
+        z.parse().map_err(|_| format!("bad z {z:?}"))?,
+    );
+    let path = fs::canonicalize(dir).map_err(|error| format!("cannot resolve {dir:?}: {error}"))?;
+    let region = path
+        .join("dimensions/minecraft/overworld/region")
+        .join(format!("r.{}.{}.mca", chunk.x >> 5, chunk.z >> 5));
+    let text = world_block::dump_chunk(java, &region, chunk)?;
+    println!("CHUNK DUMP {chunk:?}: {text}");
+    Ok(())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn chunk_dump_cli(_dir: &str, _x: &str, _z: &str, _java: &str) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 #[cfg(not(feature = "oracle"))]
