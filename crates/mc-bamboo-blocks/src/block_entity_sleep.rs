@@ -756,6 +756,14 @@ enum SleepAction {
     Freeze(bool),
     /// 换掉漏斗的 `ENABLED`，考验漏斗自己的唤醒入口。
     ToggleHopper,
+    /// 往漏斗链上游放一个物品（会送进机器 / 或抽走结果）。
+    HopperFeed(ItemStack),
+    /// 抽走漏斗链下游的东西。
+    HopperDrain,
+    /// 主动读两个比较器的输出，逐刻对照读数。
+    ComparatorRead,
+    /// 把机器存档组装、读回再放回（模拟存盘重启）。
+    Restart,
     /// 开着的界面每刻读一次全部数据槽。
     MenuRead,
 }
@@ -776,7 +784,13 @@ impl SleepScript {
                 37..=40 if now > 300 && now % 7 == 0 => Some(SleepAction::BoxChunk),
                 41..=45 => Some(SleepAction::Freeze(random.next_int(2) == 0)),
                 46..=50 if layout != SleepLayout::Plain => Some(SleepAction::ToggleHopper),
-                51..=65 => Some(SleepAction::MenuRead),
+                51..=58 if layout != SleepLayout::Plain => {
+                    Some(SleepAction::HopperFeed(feed_stack(machine, &mut random)))
+                }
+                59..=63 if layout != SleepLayout::Plain => Some(SleepAction::HopperDrain),
+                64..=68 => Some(SleepAction::ComparatorRead),
+                69 if now > 400 && now % 11 == 0 => Some(SleepAction::Restart),
+                70..=80 => Some(SleepAction::MenuRead),
                 _ => None,
             };
             if let Some(action) = action {
@@ -810,6 +824,8 @@ struct SleepScene {
     menu: Vec<i32>,
     /// 是否有过真的安静刻（至少一刻一个 ticker 都没跑）。
     slept: usize,
+    /// 每次 `Restart` 后重新造出来的方块实体读数。
+    restarts: Vec<String>,
 }
 
 impl SleepScene {
@@ -873,6 +889,7 @@ impl SleepScene {
             layout,
             menu: Vec::new(),
             slept: 0,
+            restarts: Vec::new(),
         }
     }
 
@@ -956,8 +973,80 @@ impl SleepScene {
                     world.set_block_and_update(hopper, state.with(ENABLED, !state.get(ENABLED)));
                 }
             }
+            SleepAction::HopperFeed(stack) => {
+                let at = BlockPos::new(-1, 65, 0);
+                world.with_container(at, &mut |container| {
+                    for slot in 0..container.size() {
+                        if container.get(slot).is_empty() {
+                            container.set(slot, stack.clone());
+                            break;
+                        }
+                    }
+                });
+            }
+            SleepAction::HopperDrain => {
+                let at = BlockPos::new(0, 64, -1);
+                world.with_container(at, &mut |container| {
+                    for slot in 0..container.size() {
+                        let _ = container.remove_item(slot, 64);
+                    }
+                });
+            }
+            SleepAction::ComparatorRead => {
+                let mut values = Vec::new();
+                for p in [BlockPos::new(1, 64, 0), BlockPos::new(3, 64, 0)] {
+                    let state = self.level.get(p);
+                    let world = World::new(&mut self.level, &mut self.ticks);
+                    values.push(state.analog_output_signal(&world, p, Direction::Up));
+                }
+                self.menu.extend(values);
+            }
+            SleepAction::Restart => {
+                let _ = world;
+                self.restart_machine();
+            }
             SleepAction::MenuRead => self.menu.extend(sleep_menu_values(&self.level)),
         }
+    }
+
+    /// 存档组装 → 按 id 读回 → 放回表：睡着的数值必须按当前刻现算，
+    /// 读回来的实体没有当时的日程，下一次 tick 重新算（等价于立刻醒）。
+    fn restart_machine(&mut self) {
+        use crate::archive::block_entity::{BlockEntityKind, create_block_entity};
+        use mc_bamboo_nbt::Tag;
+
+        let pos = BlockPos::new(0, 64, 0);
+        let (id, tag) = {
+            let entity = self
+                .level
+                .block_entities_table()
+                .get_dyn(pos)
+                .expect("机器还在");
+            let id = match self.machine {
+                SleepMachine::Campfire => BlockEntityKind::Campfire,
+                SleepMachine::Brewing => BlockEntityKind::BrewingStand,
+            };
+            (
+                id.name(),
+                Tag::Compound(
+                    crate::archive::write_block_entity_additional(entity).expect("写出成功"),
+                ),
+            )
+        };
+        let rebuilt = create_block_entity(id, pos, self.level.get(pos), &tag)
+            .expect("读回成功")
+            .expect("有构造分支");
+        self.level.block_entities_table_mut().remove(pos);
+        self.level.block_entities_table_mut().insert(rebuilt);
+        self.restarts.push(format!(
+            "{:?}",
+            crate::archive::write_block_entity_additional(
+                self.level
+                    .block_entities_table()
+                    .get_dyn(pos)
+                    .expect("刚放回")
+            )
+        ));
     }
 
     fn snapshot(&self) -> Vec<String> {
@@ -1022,6 +1111,7 @@ impl SleepScene {
         out.push(format!("seed:{}", self.level.random.source().seed()));
         out.push(format!("writes:{:?}", self.level.writes));
         out.push(format!("menu:{:?}", self.menu));
+        out.push(format!("restarts:{:?}", self.restarts));
         out.push(format!("clock:{}", block_entity_clock()));
         let mut scheduled: Vec<_> = self
             .ticks
