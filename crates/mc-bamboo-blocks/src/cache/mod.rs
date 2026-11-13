@@ -1,10 +1,8 @@
 //! 红石热点缓存：录下一次触发读到的状态和产生的效果，命中时直接套用。
 //!
-//! 第一版只接**方块计划刻**和**方块事件**两种触发，而且只缓存白名单里的读和写：
-//! 读 `K_BLOCK` / `K_MIN_Y` / `K_MAX_Y` / `K_REDSTONE` / `K_TICK_QUERY`，
-//! 写 `Block` / `TickScheduled` / `Redstone(kind 0)` / `BlockEvent`。
-//! 白名单集中在 [`supported_read`] 和 [`supported_write`] 两个函数，第 4 步扩活塞时
-//! 只改这两处。守卫不过就退回解释执行，守卫阶段零副作用。
+//! 只缓存白名单里的读和写，白名单集中在 [`supported_read`]、[`supported_write`]
+//! 和 [`supported_effect`]；每个白名单读项都有一条按 [`ReadMethod`] 重算真实值的守卫，
+//! 漏一个读就整条记录作废。守卫不过就退回解释执行，守卫阶段零副作用。
 //!
 //! 划算不划算按触发点自己算账，不用墙上时间：`RuntimeRecord::work()` 是这次解释执行的
 //! 确定性工作量（读写项数），门槛、命中省下的代价、未命中白付的代价都用同一个单位。
@@ -19,6 +17,7 @@ use std::{
 };
 
 use mc_bamboo_core::BlockPos;
+use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
     BlockState,
@@ -121,7 +120,9 @@ pub struct SectionKey {
 }
 
 /// 一次可重放的效果，带真实参数（实验的 `Write` 只存哈希，不能用来重放）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// 不实现 `Hash`：`ItemStack` 没有 `Hash`，而效果序列只按值比较、不进键。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayEffect {
     Block {
         pos: BlockPos,
@@ -151,6 +152,48 @@ pub enum ReplayEffect {
         pos: BlockPos,
         fluid: i32,
         delay: i32,
+    },
+    /// `PistonMoving` 的全部字段。重放时按这些值造一个实体，走原始 `insert`。
+    PistonMoving {
+        pos: BlockPos,
+        moved_state: BlockState,
+        direction: u8,
+        extending: bool,
+        source: bool,
+        progress: u32,
+        progress_o: u32,
+    },
+    /// 移除这一格的方块实体，走原始 `remove`。
+    RemoveBlockEntity {
+        pos: BlockPos,
+    },
+    /// 把这一格的槽位表整个换成 `slots`，走原始 `with_slots`。
+    ContainerSlots {
+        pos: BlockPos,
+        slots: Vec<ItemStack>,
+    },
+    /// 清掉这一格的容器，走原始 `clear_container`。
+    ClearContainer {
+        pos: BlockPos,
+    },
+    /// 换方块时清掉比较器输出等红石记忆，走原始 `forget_block_entity_memory`。
+    ForgetBlockEntityMemory {
+        pos: BlockPos,
+    },
+    /// 解包这一格的战利品表，走原始 `unpack_loot_table`。
+    UnpackLootTable {
+        pos: BlockPos,
+    },
+    /// 活塞伸出/收回的音效。pitch 重放时照样从世界随机源取一个数算，
+    /// 取数的次数和时机与解释执行相同（设计稿 §3.2）。
+    PistonSound {
+        pos: BlockPos,
+        sound: i32,
+        source: u8,
+        volume: u32,
+        scale: u32,
+        base: u32,
+        except_initiator: bool,
     },
 }
 
@@ -206,17 +249,27 @@ impl RuntimeRecord {
             && self.effects.iter().all(supported_effect)
             && matches!(
                 self.trigger,
-                Trigger::ScheduledTick { .. } | Trigger::BlockEvent { .. }
+                Trigger::ScheduledTick { .. }
+                    | Trigger::BlockEvent { .. }
+                    | Trigger::BlockEntityTick { .. }
             )
     }
 }
 
 /// 实验录制层的类别编号到运行时白名单的映射。
+///
+/// 编号见 `recording.rs`：1 方块、5 方块实体、6 红石记忆、7 方块事件、9/10 高度、
+/// 19 容器、24 槽位、26 战利品解包、29 计划刻查询、32 ticker、33 实体时刻、
+/// 34 世界边界。每个白名单里的读项都在 `finish_record` 里数一遍守卫，
+/// 守卫数量对不上就整条记录作废。
 pub const fn supported_kind(kind: u8) -> bool {
-    matches!(kind, 1 | 6 | 7 | 9 | 10 | 29)
+    matches!(
+        kind,
+        1 | 5 | 6 | 7 | 9 | 10 | 19 | 24 | 26 | 29 | 32 | 33 | 34
+    )
 }
 
-/// 白名单：第一版只支持这些读入口。
+/// 白名单：每个变体都在 `guard_value` 里有对应的按类别重算。
 pub const fn supported_read(method: ReadMethod) -> bool {
     matches!(
         method,
@@ -228,17 +281,26 @@ pub const fn supported_read(method: ReadMethod) -> bool {
             | ReadMethod::TickQuery(_, _, _)
             | ReadMethod::Dedup(_, _)
             | ReadMethod::BlockEventDedup(_)
+            | ReadMethod::BlockEntity(_, _, _)
+            | ReadMethod::EntityTime(_)
+            | ReadMethod::Slots(_, _)
+            | ReadMethod::Ticker(1, _)
+            | ReadMethod::WorldBorder
+            | ReadMethod::Redstone(_, 0 | 1 | 2 | 3 | 6)
     )
 }
 
-/// 白名单：第一版只支持这些写。
+/// 白名单：每个变体都有对应的按值重放效果。
 pub const fn supported_write(write: Write) -> bool {
     matches!(
         write,
         Write::Block { .. }
             | Write::TickScheduled { .. }
-            | Write::Redstone { kind: 0, .. }
+            | Write::Redstone { kind: 0 | 6, .. }
             | Write::BlockEvent { popped: None, .. }
+            | Write::BlockEntity { kind: 0 | 1, .. }
+            | Write::Container { kind: 0 | 1 | 2, .. }
+            | Write::Effect(_)
     )
 }
 
@@ -252,6 +314,13 @@ pub const fn supported_effect(effect: &ReplayEffect) -> bool {
             | ReplayEffect::Comparator { .. }
             | ReplayEffect::BlockEvent(_)
             | ReplayEffect::BlockEventPacket { .. }
+            | ReplayEffect::PistonMoving { .. }
+            | ReplayEffect::RemoveBlockEntity { .. }
+            | ReplayEffect::ContainerSlots { .. }
+            | ReplayEffect::ClearContainer { .. }
+            | ReplayEffect::ForgetBlockEntityMemory { .. }
+            | ReplayEffect::UnpackLootTable { .. }
+            | ReplayEffect::PistonSound { .. }
     )
 }
 

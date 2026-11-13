@@ -1608,6 +1608,91 @@ impl<'a> World<'a> {
             .schedule_fluid(pos, fluid, delay, TickPriority::Normal);
     }
 
+    /// 缓存重放：按录下的全部字段造回 `PistonMoving` 并走原始 `insert`。
+    pub fn replay_piston_moving(
+        &mut self,
+        pos: BlockPos,
+        moved_state: BlockState,
+        direction: u8,
+        extending: bool,
+        source: bool,
+        progress: u32,
+        progress_o: u32,
+    ) {
+        let entity = crate::behaviour::machines::PistonMoving::from_facts(
+            pos,
+            moved_state,
+            direction,
+            extending,
+            source,
+            progress,
+            progress_o,
+        );
+        self.level.wake_block_entity(pos);
+        self.level.insert_block_entity(Box::new(entity));
+    }
+
+    /// 缓存重放：移除这一格的方块实体，走原始 `remove`。
+    pub fn replay_remove_block_entity(&mut self, pos: BlockPos) {
+        self.level.wake_block_entity(pos);
+        let _ = self.level.remove_block_entity(pos);
+    }
+
+    /// 缓存重放：把这一格的槽位表整个换掉，走原始 `with_slots`。
+    pub fn replay_container_slots(&mut self, pos: BlockPos, slots: Vec<mc_bamboo_protocol::item::ItemStack>) {
+        let len = slots.len();
+        let mut it = slots.into_iter();
+        let _ = self
+            .level
+            .with_slots(pos, len, &mut |target| {
+                for slot in target.iter_mut() {
+                    if let Some(stack) = it.next() {
+                        *slot = stack;
+                    }
+                }
+            });
+    }
+
+    /// 缓存重放：清掉这一格的容器。
+    pub fn replay_clear_container(&mut self, pos: BlockPos) {
+        self.level.clear_container(pos);
+    }
+
+    /// 缓存重放：清掉比较器输出等红石记忆。
+    pub fn replay_forget_block_entity_memory(&mut self, pos: BlockPos) {
+        self.level.forget_block_entity_memory(pos);
+    }
+
+    /// 缓存重放：解包这一格的战利品表。
+    pub fn replay_unpack_loot_table(&mut self, pos: BlockPos) {
+        self.level.unpack_loot_table(pos);
+    }
+
+    /// 缓存重放：活塞音高照样从世界随机源取一个数，再发 `Effect::Sound`。
+    pub fn replay_piston_sound(
+        &mut self,
+        pos: BlockPos,
+        sound: i32,
+        source: mc_bamboo_data::SoundSource,
+        volume: f32,
+        scale: f32,
+        base: f32,
+        except_initiator: bool,
+    ) {
+        let pitch = self.level.next_random_float() * scale + base;
+        self.push_effect(Effect::Sound {
+            sound,
+            source,
+            x: block_center(pos).x,
+            y: block_center(pos).y,
+            z: block_center(pos).z,
+            volume,
+            pitch,
+            except_initiator,
+            seed: None,
+        });
+    }
+
     /// 缓存守卫：重查计划刻队列（`Level` 包装看不见它）。
     pub fn guard_tick_query(&self, pos: BlockPos, block: usize, will_tick_this_tick: bool) -> bool {
         if will_tick_this_tick {

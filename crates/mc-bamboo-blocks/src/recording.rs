@@ -465,13 +465,20 @@ impl<'a> Recording<'a> {
     }
 
     /// 一次方块实体读：内容哈希 + 时间派生部分各记一笔。
-    fn read_entity(&self, pos: BlockPos, entity: Option<&dyn BlockEntity>, tag: impl Hash) {
+    fn read_entity(&self, pos: BlockPos, entity: Option<&dyn BlockEntity>, tag: impl Hash + Copy) {
         let now = self.inner.borrow().tick;
-        self.read(Some(pos), K_BLOCK_ENTITY, (tag, entity.map(entity_facts)));
+        let facts = entity.map(entity_facts);
         let time = entity
             .map(|entity| entity_time_facts(entity, now))
             .unwrap_or(0);
+        self.read(Some(pos), K_BLOCK_ENTITY, (tag, facts));
         self.read(Some(pos), K_ENTITY_TIME, time);
+        self.runtime_read(
+            ReadMethod::BlockEntity(pos, 0, 2),
+            Some(pos),
+            (tag, facts),
+        );
+        self.runtime_read(ReadMethod::EntityTime(pos), Some(pos), time);
     }
 
     /// 一次写进效果。
@@ -495,6 +502,16 @@ impl<'a> Recording<'a> {
 
     fn redstone_write(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
         let value = stable_hash(&value);
+        // 只有这几个子标签有按值还原的效果；其余子标签出现时整条记录作废。
+        match (pos, kind) {
+            (Some(pos), 0) | (Some(pos), 6) => {
+                if kind == 6 {
+                    self.runtime_effect(ReplayEffect::ForgetBlockEntityMemory { pos });
+                }
+            }
+            (Some(_), _) => self.reject_runtime(),
+            (None, _) => self.reject_runtime(),
+        }
         self.write(Write::Redstone { pos, kind, value });
     }
 
@@ -785,7 +802,7 @@ fn hash_effect(effect: &Effect) -> u64 {
     hasher.finish()
 }
 
-fn hash_slots(slots: &[ItemStack]) -> u64 {
+pub fn hash_slots(slots: &[ItemStack]) -> u64 {
     let mut hasher = StableHasher::new();
     slots.len().hash(&mut hasher);
     for stack in slots {
@@ -800,11 +817,16 @@ fn hash_slots(slots: &[ItemStack]) -> u64 {
     hasher.finish()
 }
 
+/// 缓存守卫重算用：和录制时同一个 `entity_facts` / `entity_time_facts` / `hash_slots`。
+pub mod guard_facts {
+    pub use super::{entity_facts, entity_time_facts, hash_slots};
+}
+
 /// 方块实体里由绝对游戏时刻决定的字段，单独记一笔读。
 ///
 /// 严格口径把它留在键里；乐观口径（「把时间比较改成相对量」）把它去掉，
 /// 否则活塞动画里 `lastTicked - now` 每刻都变，门明明周期性开合却永远不命中。
-fn entity_time_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
+pub fn entity_time_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
     if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
         return stable_hash(&hopper.ticked_game_time().saturating_sub(now));
     }
@@ -827,7 +849,7 @@ fn hash_sign(content: &SignContent) -> u64 {
 
 /// 方块实体里能观察到的状态。私有字段通过各类自己的公开取值函数拿，
 /// 带绝对时刻的字段换成相对值，见 [`Recording::relative_time`]。
-fn entity_facts(entity: &dyn BlockEntity) -> u64 {
+pub fn entity_facts(entity: &dyn BlockEntity) -> u64 {
     let mut hasher = StableHasher::new();
     std::any::type_name_of_val(entity).hash(&mut hasher);
     if let Some(furnace) = entity.as_any().downcast_ref::<FurnaceEntity>() {
@@ -872,6 +894,11 @@ impl LevelSideState for Recording<'_> {
     fn last_bookshelf_slot(&self, pos: BlockPos) -> Option<usize> {
         let value = self.level.last_bookshelf_slot(pos);
         self.read(Some(pos), K_REDSTONE, (1_u8, value));
+        self.runtime_read(
+            ReadMethod::Redstone(Some(pos), 1),
+            Some(pos),
+            (1_u8, value),
+        );
         value
     }
 
@@ -883,6 +910,11 @@ impl LevelSideState for Recording<'_> {
     fn is_jukebox_playing(&self, pos: BlockPos) -> bool {
         let value = self.level.is_jukebox_playing(pos);
         self.read(Some(pos), K_REDSTONE, (2_u8, value));
+        self.runtime_read(
+            ReadMethod::Redstone(Some(pos), 2),
+            Some(pos),
+            (2_u8, value),
+        );
         value
     }
 
@@ -894,6 +926,11 @@ impl LevelSideState for Recording<'_> {
     fn crafter_disabled(&self, pos: BlockPos) -> u16 {
         let value = self.level.crafter_disabled(pos);
         self.read(Some(pos), K_REDSTONE, (3_u8, value));
+        self.runtime_read(
+            ReadMethod::Redstone(Some(pos), 3),
+            Some(pos),
+            (3_u8, value),
+        );
         value
     }
 
@@ -979,6 +1016,11 @@ impl LevelSideState for Recording<'_> {
     fn torch_toggle_count(&self, pos: BlockPos) -> usize {
         let value = self.level.torch_toggle_count(pos);
         self.read(Some(pos), K_REDSTONE, (11_u8, value));
+        self.runtime_read(
+            ReadMethod::Redstone(Some(pos), 11),
+            Some(pos),
+            (11_u8, value),
+        );
         value
     }
 
@@ -1020,6 +1062,7 @@ impl LevelSideState for Recording<'_> {
     fn has_block_entity(&self, pos: BlockPos) -> bool {
         let value = self.level.has_block_entity(pos);
         self.read(Some(pos), K_BLOCK_ENTITY, (0_u8, value));
+        self.runtime_read(ReadMethod::BlockEntity(pos, 0, 0), Some(pos), (0_u8, value));
         value
     }
 
@@ -1027,6 +1070,23 @@ impl LevelSideState for Recording<'_> {
         let pos = entity.pos();
         let facts = entity_facts(entity.as_ref());
         self.read_entity(pos, Some(entity.as_ref()), 6_u8);
+        // 运行时只支持 `PistonMoving`：其余实体类型没有按值还原的路径，
+        // 见到就作废整条记录，别只放宽白名单。
+        if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
+            let (moved, direction, extending, source, progress, progress_o) =
+                piston.observed_facts();
+            self.runtime_effect(ReplayEffect::PistonMoving {
+                pos,
+                moved_state: BlockState(moved),
+                direction,
+                extending,
+                source,
+                progress,
+                progress_o,
+            });
+        } else {
+            self.reject_runtime();
+        }
         self.write(Write::BlockEntity {
             pos,
             kind: 0,
@@ -1038,6 +1098,7 @@ impl LevelSideState for Recording<'_> {
     fn remove_block_entity(&mut self, pos: BlockPos) -> Option<Box<dyn BlockEntity>> {
         let value = self.level.remove_block_entity(pos);
         self.read_entity(pos, value.as_deref(), 7_u8);
+        self.runtime_effect(ReplayEffect::RemoveBlockEntity { pos });
         self.write(Write::BlockEntity {
             pos,
             kind: 1,
@@ -1071,6 +1132,7 @@ impl LevelSideState for Recording<'_> {
     fn is_block_entity_taken(&self, pos: BlockPos) -> bool {
         let value = self.level.is_block_entity_taken(pos);
         self.read(Some(pos), K_BLOCK_ENTITY, (1_u8, value));
+        self.runtime_read(ReadMethod::BlockEntity(pos, 1, 1), Some(pos), (1_u8, value));
         value
     }
 
@@ -1094,6 +1156,8 @@ impl LevelSideState for Recording<'_> {
         // 只记位置：ticker 的内部 id 递增，是实现细节，不进读集合。
         let value = self.level.next_block_entity_ticker();
         self.read(None, K_TICKER, value.map(|(pos, _)| pos));
+        // 队列推进有副作用，守卫阶段不能重算：见到就作废这条记录。
+        self.reject_runtime();
         value
     }
 
@@ -1354,6 +1418,7 @@ impl Level for Recording<'_> {
     fn runs_block_entity_tick(&self, pos: BlockPos) -> bool {
         let value = self.level.runs_block_entity_tick(pos);
         self.read(Some(pos), K_TICKER, (2_u8, value));
+        self.runtime_read(ReadMethod::Ticker(1, pos), Some(pos), (2_u8, value));
         value
     }
 
@@ -1391,24 +1456,22 @@ impl Level for Recording<'_> {
 
     fn world_border(&self) -> crate::WorldBorder {
         let value = self.level.world_border();
-        self.read(
-            None,
-            K_WORLD_BORDER,
-            (
-                value.min_x().to_bits(),
-                value.max_x().to_bits(),
-                value.min_z().to_bits(),
-                value.max_z().to_bits(),
-                value.size().to_bits(),
-                value.lerp_time(),
-                value.lerp_target().to_bits(),
-                value.safe_zone().to_bits(),
-                value.damage_per_block().to_bits(),
-                value.warning_time(),
-                value.warning_blocks(),
-                value.absolute_max_size(),
-            ),
+        let facts = (
+            value.min_x().to_bits(),
+            value.max_x().to_bits(),
+            value.min_z().to_bits(),
+            value.max_z().to_bits(),
+            value.size().to_bits(),
+            value.lerp_time(),
+            value.lerp_target().to_bits(),
+            value.safe_zone().to_bits(),
+            value.damage_per_block().to_bits(),
+            value.warning_time(),
+            value.warning_blocks(),
+            value.absolute_max_size(),
         );
+        self.read(None, K_WORLD_BORDER, facts);
+        self.runtime_read(ReadMethod::WorldBorder, None, facts);
         value
     }
 
@@ -1439,6 +1502,13 @@ impl Level for Recording<'_> {
         let applied = self.level.with_container(pos, f);
         let after = self.level.slots_at(pos);
         self.read(Some(pos), K_CONTAINER, (hash_slots(&before), applied));
+        self.reject_runtime(); // with_container 的 before/applied 守卫无法无副作用重算
+        if applied {
+            self.runtime_effect(ReplayEffect::ContainerSlots {
+                pos,
+                slots: after.clone(),
+            });
+        }
         self.write(Write::Container {
             pos,
             kind: 0,
@@ -1492,6 +1562,17 @@ impl Level for Recording<'_> {
         let applied = self.level.with_slots(pos, len, f);
         let after = self.level.slots_at(pos);
         self.read(Some(pos), K_SLOTS, (len, hash_slots(&before), applied));
+        self.runtime_read(
+            ReadMethod::Slots(pos, 1),
+            Some(pos),
+            (len, hash_slots(&before), applied),
+        );
+        if applied {
+            self.runtime_effect(ReplayEffect::ContainerSlots {
+                pos,
+                slots: after.clone(),
+            });
+        }
         self.write(Write::Container {
             pos,
             kind: 1,
@@ -1503,10 +1584,16 @@ impl Level for Recording<'_> {
     fn slots_at(&self, pos: BlockPos) -> Vec<ItemStack> {
         let value = self.level.slots_at(pos);
         self.read(Some(pos), K_SLOTS, (0_u8, hash_slots(&value)));
+        self.runtime_read(
+            ReadMethod::Slots(pos, 0),
+            Some(pos),
+            (0_u8, hash_slots(&value)),
+        );
         value
     }
 
     fn clear_container(&mut self, pos: BlockPos) {
+        self.runtime_effect(ReplayEffect::ClearContainer { pos });
         self.write(Write::Container {
             pos,
             kind: 2,
@@ -1531,6 +1618,8 @@ impl Level for Recording<'_> {
 
     fn unpack_loot_table(&mut self, pos: BlockPos) {
         self.read(Some(pos), K_LOOT_UNPACK, 0_u8);
+        self.reject_runtime(); // 没有只读的「表是否已解包」查询，守卫不能确认
+        self.runtime_effect(ReplayEffect::UnpackLootTable { pos });
         self.level.unpack_loot_table(pos);
     }
 
@@ -1686,7 +1775,9 @@ impl Level for Recording<'_> {
                         param_a: *param_a,
                         param_b: *param_b,
                     });
-                } else {
+                } else if !matches!(effect, Effect::Sound { seed: None, .. }) {
+                    // 活塞音效已经由 `Observation::PistonPitch` 记成可重放动作，
+                    // 这里不重复记效果；其余对外效果一律作废这条记录。
                     self.reject_runtime();
                 }
                 // 活塞伸出/收回的音高和音符盒的 seed 由世界随机源决定，
@@ -1770,16 +1861,16 @@ impl Level for Recording<'_> {
                 self.runtime_read(ReadMethod::BlockEventDedup(event), Some(event.pos), existed);
             }
             Observation::PistonPitch {
+                pos,
                 sound,
                 source,
                 volume,
                 scale,
                 base,
                 except_initiator,
-                ..
             } => {
                 // 实验的严格口径仍把「取随机数」标成不可缓存（历史数字不变）；
-                // 运行时记录里这次取数已经记成可重放的效果，不标 `Uncacheable::Random`。
+                // 运行时把这次取数记成可重放的动作，重放时照样从世界随机源取一个。
                 let mut inner = self.inner.borrow_mut();
                 if let Some(frame) = inner.current.as_mut()
                     && !frame.record.uncacheable.contains(&Uncacheable::Random)
@@ -1787,6 +1878,15 @@ impl Level for Recording<'_> {
                     frame.record.uncacheable.push(Uncacheable::Random);
                 }
                 drop(inner);
+                self.runtime_effect(ReplayEffect::PistonSound {
+                    pos,
+                    sound,
+                    source: source.id(),
+                    volume: volume.to_bits(),
+                    scale: scale.to_bits(),
+                    base: base.to_bits(),
+                    except_initiator,
+                });
                 self.write(Write::Effect(stable_hash(&(
                     9_u8,
                     sound,
@@ -1836,12 +1936,28 @@ fn finish_record(mut frame: Frame) -> (Record, RuntimeRecord) {
     );
     // 守卫读项必须覆盖每一个白名单里的实验读项：漏一个读就可能误命中。
     // K_BLOCK 由整段哈希覆盖、K_BLOCK_EVENT 由 Trigger 本身覆盖，都不需要逐项守卫。
-    // 每个白名单读项对应一条守卫；另有「触发本身」和每次排刻/排事件的去重存在性。
+    // `read_entity` 一次记两笔（K_BLOCK_ENTITY + K_ENTITY_TIME），对应两条守卫；
+    // 其余每个白名单读项对应一条；另有「触发本身」和每次排刻/排事件的去重存在性。
+    // 只有 guard_value 能无副作用重算的守卫变体才进 supported_read，其余一律
+    // 在录制时调 reject_runtime，绝不靠放宽白名单糊过去。
     let expected_guards = frame
         .record
         .reads
         .iter()
-        .filter(|read| matches!(read.kind, K_MIN_Y | K_MAX_Y | K_REDSTONE | K_TICK_QUERY))
+        .filter(|read| {
+            matches!(
+                read.kind,
+                K_MIN_Y
+                    | K_MAX_Y
+                    | K_REDSTONE
+                    | K_TICK_QUERY
+                    | K_BLOCK_ENTITY
+                    | K_ENTITY_TIME
+                    | K_SLOTS
+                    | K_TICKER
+                    | K_WORLD_BORDER
+            )
+        })
         .count()
         + reads
             .iter()

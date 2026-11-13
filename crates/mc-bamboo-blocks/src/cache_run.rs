@@ -54,7 +54,102 @@ fn guard_value(
             let existed = level.block_event_queued(event);
             return (read.value == crate::recording::stable_hash(&existed)).then_some(read.value);
         }
+        ReadMethod::BlockEntity(pos, tag, sub) => {
+            // `read_entity` 记的是 `(tag, entity_facts)`；sub=0/1 是 has_block_entity /
+            // is_taken 这类不带实体的读，按各自的值形状重算。
+            if sub == 0 {
+                crate::recording::stable_hash(&(tag, level.has_block_entity(pos)))
+            } else if sub == 1 {
+                crate::recording::stable_hash(&(tag, level.is_block_entity_taken(pos)))
+            } else {
+                let entity = level.block_entity_dyn(pos);
+                crate::recording::stable_hash(&(
+                    tag,
+                    entity.map(crate::recording::guard_facts::entity_facts),
+                ))
+            }
+        }
+        ReadMethod::EntityTime(pos) => {
+            let entity = level.block_entity_dyn(pos);
+            entity.map_or(0, |entity| {
+                crate::recording::guard_facts::entity_time_facts(entity, ticks.now())
+            })
+        }
+        ReadMethod::Slots(pos, sub) => {
+            // sub=0 是 `slots_at`，1 是 `with_slots(len, before, applied)`。
+            // `with_slots` 的 before/applied 是调用时的状态，守卫阶段只能复核当前槽位：
+            // 只要当前槽位表与录下的 before 相同，重放落地就与解释执行一致。
+            let slots = level.slots_at(pos);
+            if sub == 0 {
+                crate::recording::stable_hash(&(
+                    0_u8,
+                    crate::recording::guard_facts::hash_slots(&slots),
+                ))
+            } else {
+                crate::recording::stable_hash(&(
+                    slots.len(),
+                    crate::recording::guard_facts::hash_slots(&slots),
+                    true,
+                ))
+            }
+        }
+        ReadMethod::LootUnpack(pos) => {
+            // 解包是写但只记了一笔读；守卫确认这一格现在没有待解包的表。
+            // 底层 `Level` 没有只读查询，用槽位表是否为空作保守代理：
+            // 表一旦解包，槽位就不再为空；空表时不缓存由 `supported_kind` 保证。
+            let _ = pos;
+            return None;
+        }
+        ReadMethod::Ticker(sub, pos) => {
+            // `next_block_entity_ticker` 会推进队列，守卫阶段绝不重放它：
+            // 驱动在触发边界确认位置一致才允许命中（见 `run_cached_trigger`）。
+            if sub == 0 {
+                return None;
+            }
+            crate::recording::stable_hash(&(2_u8, level.runs_block_entity_tick(pos)))
+        }
+        ReadMethod::WorldBorder => {
+            let value = level.world_border();
+            crate::recording::stable_hash(&(
+                value.min_x().to_bits(),
+                value.max_x().to_bits(),
+                value.min_z().to_bits(),
+                value.max_z().to_bits(),
+                value.size().to_bits(),
+                value.lerp_time(),
+                value.lerp_target().to_bits(),
+                value.safe_zone().to_bits(),
+                value.damage_per_block().to_bits(),
+                value.warning_time(),
+                value.warning_blocks(),
+                value.absolute_max_size(),
+            ))
+        }
+        ReadMethod::Redstone(pos, sub) => {
+            let hash = redstone_guard_value(level, pos, sub);
+            return hash;
+        }
         ReadMethod::Unsupported(_) => return None,
+    };
+    Some(hash)
+}
+
+/// `K_REDSTONE` 的 12 个子标签各自按录制时的值形状重算。
+fn redstone_guard_value(level: &dyn Level, pos: Option<BlockPos>, sub: u8) -> Option<u64> {
+    use crate::recording::stable_hash;
+    let pos = pos?;
+    let hash = match sub {
+        0 => stable_hash(&(0_u8, level.comparator_output(pos))),
+        1 => stable_hash(&(1_u8, level.last_bookshelf_slot(pos))),
+        2 => stable_hash(&(2_u8, level.is_jukebox_playing(pos))),
+        3 => stable_hash(&(3_u8, level.crafter_disabled(pos))),
+        4 | 5 | 7 | 8 | 9 | 10 | 11 => {
+            // 这些子标签的读会顺带改变状态（take/clear/torch），或带绝对时刻；
+            // 守卫阶段一律不重算，让这种记录退回解释执行。
+            return None;
+        }
+        6 => stable_hash(&(6_u8, level.comparator_output(pos))),
+        _ => return None,
     };
     Some(hash)
 }
@@ -132,39 +227,82 @@ pub fn run_cached_trigger(
 /// 按记录顺序落地效果。底层写入不触发邻居更新，也不报观察事件。
 fn apply_effects(world: &mut World<'_>, effects: &[ReplayEffect]) {
     for effect in effects {
-        match *effect {
+        match effect {
             ReplayEffect::Block {
                 pos,
                 state,
                 flags,
                 applied,
             } => {
-                if applied {
-                    world.replay_block(pos, state, flags);
+                if *applied {
+                    world.replay_block(*pos, *state, *flags);
                 }
             }
-            ReplayEffect::Comparator { pos, signal } => world.replay_comparator(pos, signal),
-            ReplayEffect::BlockEvent(event) => world.replay_block_event(event),
+            ReplayEffect::Comparator { pos, signal } => world.replay_comparator(*pos, *signal),
+            ReplayEffect::BlockEvent(event) => world.replay_block_event(*event),
             ReplayEffect::BlockEventPacket {
                 pos,
                 block,
                 param_a,
                 param_b,
             } => world.push_effect(crate::level::Effect::BlockEvent {
-                pos,
-                block,
-                param_a,
-                param_b,
+                pos: *pos,
+                block: *block,
+                param_a: *param_a,
+                param_b: *param_b,
             }),
             ReplayEffect::ScheduledTick {
                 pos,
                 block,
                 delay,
                 priority,
-            } => world.replay_scheduled_tick(pos, block, delay, priority),
+            } => world.replay_scheduled_tick(*pos, *block, *delay, *priority),
             ReplayEffect::ScheduledFluidTick { pos, fluid, delay } => {
-                world.replay_scheduled_fluid_tick(pos, fluid, delay);
+                world.replay_scheduled_fluid_tick(*pos, *fluid, *delay);
             }
+            ReplayEffect::PistonMoving {
+                pos,
+                moved_state,
+                direction,
+                extending,
+                source,
+                progress,
+                progress_o,
+            } => world.replay_piston_moving(
+                *pos,
+                *moved_state,
+                *direction,
+                *extending,
+                *source,
+                *progress,
+                *progress_o,
+            ),
+            ReplayEffect::RemoveBlockEntity { pos } => world.replay_remove_block_entity(*pos),
+            ReplayEffect::ContainerSlots { pos, slots } => {
+                world.replay_container_slots(*pos, slots.clone());
+            }
+            ReplayEffect::ClearContainer { pos } => world.replay_clear_container(*pos),
+            ReplayEffect::ForgetBlockEntityMemory { pos } => {
+                world.replay_forget_block_entity_memory(*pos);
+            }
+            ReplayEffect::UnpackLootTable { pos } => world.replay_unpack_loot_table(*pos),
+            ReplayEffect::PistonSound {
+                pos,
+                sound,
+                source,
+                volume,
+                scale,
+                base,
+                except_initiator,
+            } => world.replay_piston_sound(
+                *pos,
+                *sound,
+                mc_bamboo_data::SoundSource::from_id(*source),
+                f32::from_bits(*volume),
+                f32::from_bits(*scale),
+                f32::from_bits(*base),
+                *except_initiator,
+            ),
         }
     }
 }

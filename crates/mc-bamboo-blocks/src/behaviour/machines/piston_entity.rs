@@ -85,6 +85,27 @@ impl PistonMoving {
         )
     }
 
+    /// 缓存重放：按录下的全部字段造回同一个实体，其余字段走 `new` 的初值后覆盖。
+    pub fn from_facts(
+        pos: BlockPos,
+        moved_state: BlockState,
+        direction: u8,
+        extending: bool,
+        source: bool,
+        progress: u32,
+        progress_o: u32,
+    ) -> Self {
+        Self {
+            pos,
+            moved_state,
+            direction: Direction::from_id(i32::from(direction)),
+            extending,
+            is_source_piston: source,
+            progress: f32::from_bits(progress),
+            progress_o: f32::from_bits(progress_o),
+        }
+    }
+
     /// 算阶段拷出的只读碰撞形状：`PistonMovingBlockEntity.getCollisionShape`。
     ///
     /// 方块实体表不是 `Sync`，并行算阶段借不到整张表；视图只带这份按值拷出的形状。
