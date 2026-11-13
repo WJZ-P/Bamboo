@@ -12,6 +12,7 @@ Linear 和转换工具（第 7、8 步）按用户决定不做。
 仍有的差异和未建模的 codec 列在 README「存档已知限制」和本文末尾「实施现状」。
 
 （2026-11-14 按实现更新：`docs/world-model-design.md` 5.3.1、`docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/chunk_jobs.rs`；合并提交 `082a7c9`）
+
 线程规则沿用 `folia.md` 的 R1–R12，crate 和 tick 顺序沿用 `design.md`。
 官方类名和方法名都写出来，方便逐行核对。
 
