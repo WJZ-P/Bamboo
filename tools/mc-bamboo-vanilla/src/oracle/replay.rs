@@ -600,6 +600,10 @@ impl Level for OracleLevel {
         u16::try_from(component_slot).ok()
     }
 
+    fn replace_block_entity_for_cache(&mut self, entity: Box<dyn mc_bamboo_blocks::BlockEntity>) {
+        self.block_entities.replace_in_place(entity);
+    }
+
     /// 打开缓存时守卫要读整段哈希：oracle 的假世界是稀疏表，按空气补齐整段。
     fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
         Some(mc_bamboo_core::section_hash::section_hash(|x, y, z| {

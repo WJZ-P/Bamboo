@@ -1104,6 +1104,116 @@ impl<'a> World<'a> {
         self.level.end_block_entity_tick();
     }
 
+    /// 缓存驱动：方块实体 tick 阶段的边界和每个 ticker 的一次触发。
+    ///
+    /// 和 [`Self::tick_block_entities`] 的循环逐行对齐，只是把「取出的实体跑一次 tick」
+    /// 交给 `run_trigger`，让缓存能在守卫通过时直接套用效果。
+    pub fn tick_block_entities_cached(
+        &mut self,
+        cache: &mut crate::cache::RedstoneCache,
+        now: i64,
+    ) {
+        self.level.begin_block_entity_tick(now);
+        while let Some((pos, id)) = self.level.next_block_entity_ticker() {
+            if !self.level.chunk_ticks_blocks(pos.chunk())
+                || !self.level.runs_block_entity_tick(pos)
+            {
+                continue;
+            }
+            let trigger = Trigger::BlockEntityTick {
+                pos,
+                kind: self.block_state(pos).block_id(),
+            };
+            // 取出实体放在 interpret 里：守卫阶段它还好好地在表里，
+            // `block_entity_dyn` 能读到录制时的触发前状态。
+            crate::cache_run::run_cached_trigger(self, cache, trigger, now, |world| {
+                let Some(entity) = world.take_block_entity_for_cache(pos, id) else {
+                    return;
+                };
+                world.run_taken_block_entity_for_cache(pos, id, entity);
+                let wake = world.block_entity_sleep_from_for_cache(pos, now);
+                world.schedule_block_entity_wake_for_cache(pos, wake);
+            });
+        }
+        self.level.end_block_entity_tick();
+    }
+
+    /// 缓存驱动用：按 ticker 编号把实体从表里取出来。
+    pub fn take_block_entity_for_cache(
+        &mut self,
+        pos: BlockPos,
+        id: u64,
+    ) -> Option<Box<dyn BlockEntity>> {
+        self.level.take_block_entity(pos, id)
+    }
+
+    /// 缓存驱动用：`BlockTicks` 记下这一格本刻 tick 过。
+    pub fn note_block_entity_tick_for_cache(&mut self, pos: BlockPos) {
+        self.ticks.note_block_entity_tick(pos);
+        self.level.observe(Observation::NoteBlockEntityTick { pos });
+    }
+
+    /// 缓存驱动用：拿出的实体跑完 `tick` 再放回去，并报一次最终状态供重放。
+    pub fn run_taken_block_entity_for_cache(
+        &mut self,
+        pos: BlockPos,
+        id: u64,
+        mut entity: Box<dyn BlockEntity>,
+    ) {
+        // 和 `run_taken_block_entity` 逐行对齐，只是多一步「把最终状态报给录制层」。
+        for _ in 0..4 {
+            self.begin_held_reads();
+            entity.tick(self);
+            let again = entity.resume_tick();
+            self.level.put_block_entity(pos, id, entity);
+            self.end_held_reads();
+            if !again {
+                self.report_piston_tick_state(pos);
+                return;
+            }
+            let Some(next) = self.level.take_block_entity(pos, id) else {
+                return;
+            };
+            entity = next;
+        }
+        self.level.put_block_entity(pos, id, entity);
+        self.report_piston_tick_state(pos);
+    }
+
+    /// 把这一格 tick 完的 `PistonMoving` 报给录制层；没有实体时什么都不报。
+    fn report_piston_tick_state(&self, pos: BlockPos) {
+        let Some(entity) = self.level.block_entity_dyn(pos) else {
+            return;
+        };
+        let Some(piston) = entity
+            .as_any()
+            .downcast_ref::<crate::behaviour::machines::PistonMoving>()
+        else {
+            // 不是移动活塞（熔炉、漏斗等）就不报，这种记录会因为别的守卫退回解释。
+            return;
+        };
+        let (moved, direction, extending, source, progress, progress_o) = piston.observed_facts();
+        self.level.observe(Observation::PistonTickState {
+            pos,
+            moved_state: moved,
+            direction,
+            extending,
+            source,
+            progress,
+            progress_o,
+        });
+    }
+
+    /// 缓存驱动用：按实体自己的公式算下一次真正需要跑的时刻。
+    pub fn block_entity_sleep_from_for_cache(&mut self, pos: BlockPos, now: i64) -> Option<i64> {
+        self.level.block_entity_sleep_from(pos, now)
+    }
+
+    /// 缓存驱动用：把下一次要醒来的时刻排回去。
+    pub fn schedule_block_entity_wake_for_cache(&mut self, pos: BlockPos, wake: Option<i64>) {
+        self.level.schedule_block_entity_wake(pos, wake);
+    }
+
     /// 拿出的实体跑完 `tick` 再放回去，然后按请求顺序做排队的读取。
     /// 酿造台会在燃料通知之后停一次，读完再继续。
     ///
@@ -1632,6 +1742,30 @@ impl<'a> World<'a> {
         self.level.insert_block_entity(Box::new(entity));
     }
 
+    /// 缓存重放：把 tick 跑完后的 `PistonMoving` 原地写回表里那一个，
+    /// 不动 ticker 的编号和顺序。只对 `BlockEntityTick` 的命中路径使用。
+    pub fn replay_restore_piston_moving(
+        &mut self,
+        pos: BlockPos,
+        moved_state: BlockState,
+        direction: u8,
+        extending: bool,
+        source: bool,
+        progress: u32,
+        progress_o: u32,
+    ) {
+        let entity = crate::behaviour::machines::PistonMoving::from_facts(
+            pos,
+            moved_state,
+            direction,
+            extending,
+            source,
+            progress,
+            progress_o,
+        );
+        self.level.replace_block_entity_for_cache(Box::new(entity));
+    }
+
     /// 缓存重放：移除这一格的方块实体，走原始 `remove`。
     pub fn replay_remove_block_entity(&mut self, pos: BlockPos) {
         self.level.wake_block_entity(pos);
@@ -1639,18 +1773,20 @@ impl<'a> World<'a> {
     }
 
     /// 缓存重放：把这一格的槽位表整个换掉，走原始 `with_slots`。
-    pub fn replay_container_slots(&mut self, pos: BlockPos, slots: Vec<mc_bamboo_protocol::item::ItemStack>) {
+    pub fn replay_container_slots(
+        &mut self,
+        pos: BlockPos,
+        slots: Vec<mc_bamboo_protocol::item::ItemStack>,
+    ) {
         let len = slots.len();
         let mut it = slots.into_iter();
-        let _ = self
-            .level
-            .with_slots(pos, len, &mut |target| {
-                for slot in target.iter_mut() {
-                    if let Some(stack) = it.next() {
-                        *slot = stack;
-                    }
+        let _ = self.level.with_slots(pos, len, &mut |target| {
+            for slot in target.iter_mut() {
+                if let Some(stack) = it.next() {
+                    *slot = stack;
                 }
-            });
+            }
+        });
     }
 
     /// 缓存重放：清掉这一格的容器。

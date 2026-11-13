@@ -46,8 +46,7 @@ pub enum ReadMethod {
     /// `unpack_loot_table` 之前这一格有没有表可解包。
     LootUnpack(BlockPos),
     /// `next_block_entity_ticker`(0) / `runs_block_entity_tick`(1) 的驱动读。
-    /// `next_ticker` 会推进队列，守卫阶段不能重放；0 这个值只在方块实体 tick 的
-    /// 边界外出现，重算恒为「录下的那个位置」（由驱动确认）。
+    /// sub=0 会推进队列，守卫阶段不能重查：只确认录下的位置就是当前触发的位置。
     Ticker(u8, BlockPos),
     /// `WorldBorder` 的 12 元组快照。
     WorldBorder,

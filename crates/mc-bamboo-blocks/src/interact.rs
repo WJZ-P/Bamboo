@@ -348,10 +348,16 @@ pub fn run_scheduled_ticks_with_cache(
         effects = world.drain_effects();
     }
     let mut effects = effects;
-    // 方块实体 tick 不在第一版缓存范围，走没有录制包装的世界，避免为它付记账开销。
-    let mut world = World::new(level, ticks);
-    world.tick_block_entities();
-    effects.extend(world.drain_effects());
+    // 方块实体 tick 走带缓存的驱动：活塞门动画的每一次 ticker 都能命中。
+    {
+        let mut recorder = crate::recording::Recording::new(level);
+        recorder.set_tick(now);
+        recorder.set_record_mode(crate::level::RecordMode::Off);
+        let mut world = World::new(&mut recorder, ticks);
+        world.tick_block_entities_cached(cache, now);
+        effects.extend(world.drain_effects());
+    }
+    crate::crafter::tick_crafting_clocks(&mut World::new(level, ticks));
     Outcome {
         result: InteractionResult::Pass,
         used_without_item: false,
@@ -507,6 +513,42 @@ pub fn run_block_entity_tick(level: &mut dyn Level, ticks: &mut BlockTicks) -> O
     // phase decrements the countdown.
     crate::crafter::tick_crafting_clocks(&mut world);
     outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// [`run_block_entity_tick`] 的带缓存版本，供游戏循环的方块实体 tick 段调用。
+pub fn run_block_entity_tick_with_cache(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    now: i64,
+    cache: Option<&mut RedstoneCache>,
+) -> Outcome {
+    let Some(cache) = cache else {
+        return run_block_entity_tick(level, ticks);
+    };
+    if cache.dormant(now) {
+        return run_block_entity_tick(level, ticks);
+    }
+    let effects;
+    {
+        let mut recorder = crate::recording::Recording::new(level);
+        recorder.set_tick(now);
+        recorder.set_record_mode(crate::level::RecordMode::Off);
+        let mut world = World::new(&mut recorder, ticks);
+        world.tick_block_entities_cached(cache, now);
+        effects = world.drain_effects();
+    }
+    let mut world = World::new(level, ticks);
+    crate::crafter::tick_crafting_clocks(&mut world);
+    let mut effects = effects;
+    effects.extend(world.drain_effects());
+    Outcome {
+        result: InteractionResult::Pass,
+        used_without_item: false,
+        placed_at: None,
+        item_exchange: None,
+        gained: None,
+        effects,
+    }
 }
 
 /// oracle 的 tick 题：官方的题在动作里直接调用这一格的 `state.tick`，还没进 `ServerLevel.tick`，

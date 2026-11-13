@@ -145,6 +145,14 @@ pub(crate) fn run_block_entity_ticks(region: &mut Region) {
             level.set_chunk_block_entity_ticking(chunk, ticks);
         }
     }
+    if region.redstone_cache.config().enabled {
+        let now = region.tick.game_time();
+        let (mut level, ticks, cache) = region.block_level_with_cache();
+        let outcome =
+            mc_bamboo_blocks::run_block_entity_tick_with_cache(&mut level, ticks, now, Some(cache));
+        send_effects(region, None, &outcome.effects);
+        return;
+    }
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_block_entity_tick(&mut level, ticks);
     send_effects(region, None, &outcome.effects);

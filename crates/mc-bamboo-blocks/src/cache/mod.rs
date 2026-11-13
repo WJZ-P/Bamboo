@@ -163,6 +163,17 @@ pub enum ReplayEffect {
         progress: u32,
         progress_o: u32,
     },
+    /// 方块实体 tick 跑完后的 `PistonMoving` 状态：原地替换表里那一个，
+    /// 保留 ticker 的编号和顺序（设计稿 §3.1 第 2 条）。
+    RestorePistonMoving {
+        pos: BlockPos,
+        moved_state: BlockState,
+        direction: u8,
+        extending: bool,
+        source: bool,
+        progress: u32,
+        progress_o: u32,
+    },
     /// 移除这一格的方块实体，走原始 `remove`。
     RemoveBlockEntity {
         pos: BlockPos,
@@ -182,6 +193,10 @@ pub enum ReplayEffect {
     },
     /// 解包这一格的战利品表，走原始 `unpack_loot_table`。
     UnpackLootTable {
+        pos: BlockPos,
+    },
+    /// 方块实体 tick 阶段记下「这一格本刻 tick 过」，见 `BlockTicks::note_block_entity_tick`。
+    NoteBlockEntityTick {
         pos: BlockPos,
     },
     /// 活塞伸出/收回的音效。pitch 重放时照样从世界随机源取一个数算，
@@ -284,7 +299,8 @@ pub const fn supported_read(method: ReadMethod) -> bool {
             | ReadMethod::BlockEntity(_, _, _)
             | ReadMethod::EntityTime(_)
             | ReadMethod::Slots(_, _)
-            | ReadMethod::Ticker(1, _)
+            | ReadMethod::Ticker(0 | 1, _)
+            | ReadMethod::LootUnpack(_)
             | ReadMethod::WorldBorder
             | ReadMethod::Redstone(_, 0 | 1 | 2 | 3 | 6)
     )
@@ -299,7 +315,10 @@ pub const fn supported_write(write: Write) -> bool {
             | Write::Redstone { kind: 0 | 6, .. }
             | Write::BlockEvent { popped: None, .. }
             | Write::BlockEntity { kind: 0 | 1, .. }
-            | Write::Container { kind: 0 | 1 | 2, .. }
+            | Write::Container {
+                kind: 0 | 1 | 2,
+                ..
+            }
             | Write::Effect(_)
     )
 }
@@ -315,11 +334,13 @@ pub const fn supported_effect(effect: &ReplayEffect) -> bool {
             | ReplayEffect::BlockEvent(_)
             | ReplayEffect::BlockEventPacket { .. }
             | ReplayEffect::PistonMoving { .. }
+            | ReplayEffect::RestorePistonMoving { .. }
             | ReplayEffect::RemoveBlockEntity { .. }
             | ReplayEffect::ContainerSlots { .. }
             | ReplayEffect::ClearContainer { .. }
             | ReplayEffect::ForgetBlockEntityMemory { .. }
             | ReplayEffect::UnpackLootTable { .. }
+            | ReplayEffect::NoteBlockEntityTick { .. }
             | ReplayEffect::PistonSound { .. }
     )
 }

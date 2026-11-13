@@ -26,6 +26,7 @@ fn guard_value(
     level: &dyn Level,
     ticks: &BlockTicks,
     trigger_state: BlockState,
+    trigger_pos: BlockPos,
 ) -> Option<u64> {
     let hash = match read.method {
         ReadMethod::Block | ReadMethod::Trigger => crate::recording::stable_hash(&trigger_state.0),
@@ -62,18 +63,18 @@ fn guard_value(
             } else if sub == 1 {
                 crate::recording::stable_hash(&(tag, level.is_block_entity_taken(pos)))
             } else {
-                let entity = level.block_entity_dyn(pos);
-                crate::recording::stable_hash(&(
-                    tag,
-                    entity.map(crate::recording::guard_facts::entity_facts),
-                ))
+                let facts = level
+                    .block_entity_dyn(pos)
+                    .map(crate::recording::guard_facts::entity_facts);
+                crate::recording::stable_hash(&(tag, facts))
             }
         }
         ReadMethod::EntityTime(pos) => {
             let entity = level.block_entity_dyn(pos);
-            entity.map_or(0, |entity| {
+            let time = entity.map_or(0, |entity| {
                 crate::recording::guard_facts::entity_time_facts(entity, ticks.now())
-            })
+            });
+            crate::recording::stable_hash(&time)
         }
         ReadMethod::Slots(pos, sub) => {
             // sub=0 是 `slots_at`，1 是 `with_slots(len, before, applied)`。
@@ -94,17 +95,15 @@ fn guard_value(
             }
         }
         ReadMethod::LootUnpack(pos) => {
-            // 解包是写但只记了一笔读；守卫确认这一格现在没有待解包的表。
-            // 底层 `Level` 没有只读查询，用槽位表是否为空作保守代理：
-            // 表一旦解包，槽位就不再为空；空表时不缓存由 `supported_kind` 保证。
-            let _ = pos;
-            return None;
+            // 解包是写但只记了一笔读；守卫确认这一格现在仍没有待解包的表。
+            crate::recording::stable_hash(&level.loot_table_pending(pos))
         }
         ReadMethod::Ticker(sub, pos) => {
-            // `next_block_entity_ticker` 会推进队列，守卫阶段绝不重放它：
-            // 驱动在触发边界确认位置一致才允许命中（见 `run_cached_trigger`）。
+            // sub=0 是 `next_block_entity_ticker`：它会推进队列，守卫阶段绝不重查；
+            // 但这次触发本身就是刚取出的那个 ticker，触发的 pos 已经进键，
+            // 所以只需确认录下的位置和触发位置一致。
             if sub == 0 {
-                return None;
+                return (trigger_pos == pos).then_some(read.value);
             }
             crate::recording::stable_hash(&(2_u8, level.runs_block_entity_tick(pos)))
         }
@@ -188,7 +187,7 @@ pub fn run_cached_trigger(
         let mut state = None;
         let mut guard = |read: &GuardRead| {
             let state = *state.get_or_insert_with(|| level.block_state(pos));
-            guard_value(read, level, ticks, state)
+            guard_value(read, level, ticks, state, pos)
         };
         let section = |s: ChunkSection| level.section_hash(s.chunk, s.section_y);
         cache.try_replay(trigger, &mut guard, &section)
@@ -277,6 +276,23 @@ fn apply_effects(world: &mut World<'_>, effects: &[ReplayEffect]) {
                 *progress,
                 *progress_o,
             ),
+            ReplayEffect::RestorePistonMoving {
+                pos,
+                moved_state,
+                direction,
+                extending,
+                source,
+                progress,
+                progress_o,
+            } => world.replay_restore_piston_moving(
+                *pos,
+                *moved_state,
+                *direction,
+                *extending,
+                *source,
+                *progress,
+                *progress_o,
+            ),
             ReplayEffect::RemoveBlockEntity { pos } => world.replay_remove_block_entity(*pos),
             ReplayEffect::ContainerSlots { pos, slots } => {
                 world.replay_container_slots(*pos, slots.clone());
@@ -286,6 +302,9 @@ fn apply_effects(world: &mut World<'_>, effects: &[ReplayEffect]) {
                 world.replay_forget_block_entity_memory(*pos);
             }
             ReplayEffect::UnpackLootTable { pos } => world.replay_unpack_loot_table(*pos),
+            ReplayEffect::NoteBlockEntityTick { pos } => {
+                world.note_block_entity_tick_for_cache(*pos)
+            }
             ReplayEffect::PistonSound {
                 pos,
                 sound,
@@ -317,7 +336,12 @@ pub const fn trigger_position(trigger: Trigger) -> BlockPos {
     }
 }
 
-/// 第一版只接方块计划刻和方块事件。
+/// 目前只接方块计划刻和方块事件。
+///
+/// 方块实体 tick 的守卫/重放还在做：ticker 临时把实体从表里拿出来，重放必须
+/// 同时还原「解释执行后实体的新状态」和 ticker 的内部顺序，逐刻差分还没过，
+/// 所以这一阶段明确退回解释执行。读项和效果的录制照旧产出，等差分过了再打开，
+/// 不能靠放宽白名单让守卫漏读。
 pub const fn cacheable_trigger(trigger: Trigger) -> bool {
     matches!(
         trigger,

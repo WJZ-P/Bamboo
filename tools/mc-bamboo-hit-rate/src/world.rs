@@ -195,6 +195,10 @@ impl Level for BenchLevel {
         false
     }
 
+    fn replace_block_entity_for_cache(&mut self, entity: Box<dyn mc_bamboo_blocks::BlockEntity>) {
+        self.block_entities.replace_in_place(entity);
+    }
+
     fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
         let section = mc_bamboo_blocks::recording::ChunkSection { chunk, section_y };
         Some(
