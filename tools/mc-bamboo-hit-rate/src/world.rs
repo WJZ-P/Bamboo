@@ -30,6 +30,8 @@ pub struct BenchLevel {
     pub block_events: BlockEvents,
     pub redstone: RedstoneMemory,
     pub entities: EntityStore,
+    /// 世界边界。默认是官方默认值（全包住）；边界机器会让它来回渐变。
+    pub border: mc_bamboo_blocks::WorldBorder,
 }
 
 impl Default for BenchLevel {
@@ -49,6 +51,7 @@ impl BenchLevel {
             block_events: BlockEvents::default(),
             redstone: RedstoneMemory::default(),
             entities: EntityStore::default(),
+            border: mc_bamboo_blocks::WorldBorder::default(),
         }
     }
 
@@ -109,6 +112,18 @@ impl BenchLevel {
                 self.redstone.torch_toggle_count(*pos),
             ));
         }
+        // 方块实体的全部存档字段（熔炉进度、燃料、物品），按公式现算的值。
+        let mut entity_positions: Vec<BlockPos> = self
+            .block_entities
+            .ticker_positions()
+            .map(|(pos, _)| pos)
+            .collect();
+        entity_positions.sort_unstable();
+        for pos in entity_positions {
+            if let Some(entity) = self.block_entities.get_dyn(pos) {
+                out.push(format!("e{pos:?}:{:?}", entity.write_additional()));
+            }
+        }
         for tick in ticks.pending() {
             out.push(format!(
                 "t{:?}:{}:{}:{:?}",
@@ -157,6 +172,10 @@ impl LevelTables for BenchLevel {
 }
 
 impl Level for BenchLevel {
+    fn world_border(&self) -> mc_bamboo_blocks::WorldBorder {
+        self.border.clone()
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         if !(MIN_Y..=MAX_Y).contains(&pos.y) {
             return BlockState(blocks::VOID_AIR);
@@ -328,6 +347,8 @@ pub struct Machine {
     pub input: Input,
     /// 打开时驱动走带缓存的入口；`None` 走原样解释执行。
     pub cache: Option<mc_bamboo_blocks::cache::RedstoneCache>,
+    /// 每隔这么多刻让边界在大小之间渐变一次（缩小、扩大交替），`None` 是不动。
+    pub border_period: Option<i64>,
     /// 上一刻方块逻辑收集到的对外效果，差分测试逐刻比它。
     pub effects: Vec<String>,
     /// 对外音效包 `seed: None` 时由发包层取的随机数次数，差分测试比对。
@@ -365,6 +386,20 @@ impl Machine {
 
     fn apply_input(&mut self, now: i64) {
         use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
+        // 官方 `ServerLevel.tick` 开头先推进边界，再跑计划刻和方块实体。
+        self.level.border.tick();
+        if let Some(period) = self.border_period
+            && now % period == 0
+        {
+            let (from, to) = if (now / period) % 2 == 1 {
+                (24.0, 2.0)
+            } else {
+                (2.0, 24.0)
+            };
+            self.level
+                .border
+                .lerp_size_between(from, to, period / 2, now);
+        }
         match self.input.clone() {
             Input::None => {}
             Input::Clock { pos, period } => {

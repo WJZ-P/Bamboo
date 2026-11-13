@@ -987,8 +987,17 @@ cookingTimer += 1
 日程），所以回到界内不用处理；装盒放回时落在界外的也不带睡眠。渐变边界每刻都变，但
 每刻只动边上一两圈区块，开销和已加载区块数无关。
 
-**合成器倒计时**改成记绝对到期时刻并放到期桶，`tick_crafting_clocks` 每刻只碰
-到期的那几台；盒子里仍存剩余刻数，存档键 `crafting_ticks_remaining` 不变。
+**合成器倒计时**曾经改成记绝对到期时刻并放到期桶，后来退回存剩余刻数：绝对时刻表达
+不了冻结和边界外的暂停，而且合成那一刻的方块实体段官方就会减 1（计划刻先于
+`tickBlockEntities`），到期桶晚了一刻。现在 `tick_crafting_clocks` 每刻按位置顺序走一遍
+还在倒数的合成器（每台只活 6 刻，表一直很小），区块不能 tick 或在边界盒外的跳过不减，
+和方块实体阶段用同一个 `WorldBorder::block_box()`。盒子里存剩余刻数，存档键
+`crafting_ticks_remaining` 不变。
+
+合成那一刻就减 1、第 T+5 刻熄灭，是对 `d125647` 晚一刻（T+6）的纠正，依据是
+`ServerLevel.tick` 的字节码里计划刻（`CrafterBlock.tick` → `setCraftingTicksRemaining(6)`）
+排在 `tickBlockEntities` 之前，合成器的 ticker 早已在列表里，同一刻就会跑。这一点
+**没有直接的对拍**：方块 oracle 不登记合成器的 ticker，`machine` 也不覆盖合成器。
 
 ### 7g.3 为什么结果不变
 
@@ -1266,7 +1275,10 @@ cargo test --release -p mc-bamboo-blocks block_entity_sleep::machine_phase_bench
 `cargo run --release -p mc-bamboo-hit-rate --bin cache_diff -- 4000`（正式配置）
 和 `... 4000 immediate`（最坏情况）都是九台机器 **0 刻不一致**：比较世界状态、
 对外效果（含顺序和 pitch 的位模式）、发包层的音效取数次数、世界随机源种子和计划刻
-队列。`oracle java --weather clear` 开、关都是 **10114 cases / 0 fail**，开的那次
+队列。后来 `cache_diff` 多跑一台只用于差分的「边界切过熔炉」（世界边界在 2 和 24 格
+之间来回渐变，依次切过熔炉和漏斗），快照里也加了方块实体的全部存档字段；它查出过
+带缓存的方块实体阶段漏了 `LevelChunk.isTicking` 的边界判断（`immediate` 下 3892 刻
+不一致），补上后 0 不一致。这台不在 `machines::all()` 里，命中率和基准的口径不变。`oracle java --weather clear` 开、关都是 **10114 cases / 0 fail**，开的那次
 报告 `2364 triggers, 20 replays, 239 records`。`cargo test --workspace` 全过，新增的
 缓存单元测试覆盖「便宜的触发点不被录」「净收益为负会停」「冷却后会重试」「段哈希
 失配不再逐项重读」，全部只用确定性计数。缓存总开关仍默认关。

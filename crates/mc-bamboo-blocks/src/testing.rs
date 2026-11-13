@@ -142,6 +142,13 @@ impl TestLevel {
         self.block_entities.insert_chunk(boxed);
     }
 
+    /// 把整个区块的红石记忆装盒再放回，两边时钟可以不同。
+    #[cfg(test)]
+    pub(crate) fn box_redstone(&mut self, chunk: ChunkPos, taken_at: i64, put_at: i64) {
+        let boxed = self.redstone.take_chunk(chunk, taken_at);
+        self.redstone.insert_chunk(boxed, put_at);
+    }
+
     /// 冻结或恢复区块时通知方块实体日程。
     #[cfg(test)]
     pub(crate) fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool) {

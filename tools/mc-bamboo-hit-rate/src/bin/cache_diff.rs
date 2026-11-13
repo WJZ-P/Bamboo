@@ -1,4 +1,4 @@
-//! 九台机器的开/关缓存逐刻差分。
+//! 十台机器的开/关缓存逐刻差分（第十台是边界来回切过熔炉阵列）。
 //!
 //! ```bash
 //! cargo run --release -p mc-bamboo-hit-rate --bin cache_diff -- [刻数] [immediate]
@@ -25,7 +25,9 @@ fn main() {
         CacheConfig::enabled()
     };
     let mut total_mismatches = 0;
-    for build in machines::all() {
+    let mut builds = machines::all();
+    builds.push(machines::border_furnaces);
+    for build in builds {
         let name = build().name;
         let mut cached = build();
         cached.cache = Some(RedstoneCache::new(config));
@@ -43,6 +45,15 @@ fn main() {
                 mismatches += 1;
                 if first.is_none() {
                     first = Some(now);
+                    if std::env::var_os("CACHE_DIFF_SHOW").is_some() {
+                        let a = cached.level.snapshot(&cached.ticks);
+                        let b = plain.level.snapshot(&plain.ticks);
+                        for (x, y) in a.iter().zip(&b) {
+                            if x != y {
+                                println!("  缓存: {x}\n  解释: {y}");
+                            }
+                        }
+                    }
                 }
             }
         }

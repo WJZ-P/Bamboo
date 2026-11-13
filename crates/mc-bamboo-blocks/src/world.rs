@@ -1153,9 +1153,15 @@ impl<'a> World<'a> {
         cache: &mut crate::cache::RedstoneCache,
         now: i64,
     ) {
+        // 和 `tick_block_entities` 一样：这一刻的边界盒先交给方块实体表（出界的睡眠条目
+        // 停在上一刻），再逐个 ticker 判 `LevelChunk.isTicking(pos)`。边界判断在触发之外：
+        // 出界的 ticker 根本不进缓存，进了的那次 tick 自己不读边界，守卫不用管它。
+        let border = self.level.world_border().block_box();
+        self.level.sync_block_entity_border(border);
         self.level.begin_block_entity_tick(now);
         while let Some((pos, id)) = self.level.next_block_entity_ticker() {
             if !self.level.chunk_ticks_blocks(pos.chunk())
+                || !border.contains(pos)
                 || !self.level.runs_block_entity_tick(pos)
             {
                 continue;
@@ -1615,22 +1621,17 @@ impl<'a> World<'a> {
     }
 
     pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
-        self.level
-            .set_crafter_crafting(pos, remaining, self.ticks.now());
+        self.level.set_crafter_crafting(pos, remaining);
     }
 
-    pub fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        self.level.take_crafter_crafting(self.ticks.now())
+    /// 全部还在倒数的合成器倒计时，见 `LevelSideState::crafter_crafting`。
+    pub fn crafter_crafting(&self) -> Vec<(BlockPos, i32)> {
+        self.level.crafter_crafting()
     }
 
-    /// 这一刻到期的合成器倒计时，见 `LevelSideState::take_due_crafter_crafting`。
-    pub fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
-        self.level.take_due_crafter_crafting(now)
-    }
-
-    pub fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
-        self.level
-            .restore_crafter_crafting(entries, self.ticks.now());
+    /// 这一格合成器还剩几刻，没有记录是 0。
+    pub fn crafter_crafting_at(&self, pos: BlockPos) -> i32 {
+        self.level.crafter_crafting_at(pos)
     }
 
     pub fn forget_block_entity_memory(&mut self, pos: BlockPos) {
@@ -2985,6 +2986,62 @@ mod tests {
         assert_eq!(world.block_entity::<Counter>(a).unwrap().ticks, 1);
         assert_eq!(world.block_entity::<Counter>(b).unwrap().ticks, 1);
         assert_eq!(world.block_entity::<Counter>(c).unwrap().ticks, 2);
+    }
+
+    /// 红石缓存打开时方块实体也要按世界边界跳过，和解释执行逐刻一致。
+    /// 边界中心在 x = 10，来回在 2 和 30 格之间渐变，依次切过一排计数器。
+    #[test]
+    fn cached_block_entity_ticks_skip_tickers_outside_the_border() {
+        use crate::cache::{CacheConfig, RedstoneCache};
+        let row: Vec<BlockPos> = (0..20).map(|x| BlockPos::new(x, 64, 0)).collect();
+        let build = || {
+            let mut level = TestLevel::new();
+            for &pos in &row {
+                level.set(pos, BlockState(blocks::CHEST).default_state());
+                with_world(&mut level, |world| {
+                    world.set_block_entity(Counter::boxed(pos));
+                });
+            }
+            level.border.set_center(10.0, 0.5);
+            level
+        };
+        let mut plain = build();
+        let mut cached = build();
+        let mut plain_ticks = BlockTicks::new();
+        let mut cached_ticks = BlockTicks::new();
+        let mut cache = RedstoneCache::new(CacheConfig::immediate());
+        let mut skipped = false;
+        for now in 1..=240_i64 {
+            for level in [&mut plain, &mut cached] {
+                level.border.tick();
+                if now % 60 == 1 {
+                    let (from, to) = if (now / 60) % 2 == 0 {
+                        (30.0, 2.0)
+                    } else {
+                        (2.0, 30.0)
+                    };
+                    level.border.lerp_size_between(from, to, 40, now);
+                }
+            }
+            plain_ticks.set_time(now);
+            cached_ticks.set_time(now);
+            let _ = crate::interact::run_block_entity_tick(&mut plain, &mut plain_ticks);
+            let _ = crate::interact::run_block_entity_tick_with_cache(
+                &mut cached,
+                &mut cached_ticks,
+                now,
+                Some(&mut cache),
+            );
+            let counts = |level: &TestLevel| -> Vec<i32> {
+                row.iter()
+                    .map(|&pos| level.block_entity::<Counter>(pos).unwrap().ticks)
+                    .collect()
+            };
+            let expected = counts(&plain);
+            skipped |= expected.iter().any(|&ticks| ticks != expected[10]);
+            assert_eq!(counts(&cached), expected, "tick {now}");
+        }
+        assert!(skipped, "边界必须真的切过这排计数器");
     }
 
     fn destroyed_positions(effects: &[Effect]) -> Vec<BlockPos> {

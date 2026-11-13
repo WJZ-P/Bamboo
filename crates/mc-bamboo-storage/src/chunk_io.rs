@@ -569,7 +569,7 @@ impl Cache {
 /// 把一批写/刷盘失败送回世界线程信箱，`pos/seq` 只对区块写非空。
 /// Send write/sync failures back to the world thread; `pos/seq` are set for chunks.
 fn report_failures(
-    tx: &Sender<Reply>,
+    outbox: &mut Vec<Reply>,
     failures: Vec<(String, String)>,
     pos: Option<ChunkPos>,
     seq: Option<u64>,
@@ -577,7 +577,7 @@ fn report_failures(
     let mut any = false;
     for (path, error) in failures {
         any = true;
-        let _ = tx.send(Reply::WriteFailed {
+        outbox.push(Reply::WriteFailed {
             pos,
             seq,
             path,
@@ -703,6 +703,12 @@ fn worker_loop(
             }
             processed += 1;
             let replies = panic_replies(&request);
+            // 回执先攒着，等在途计数减掉以后再发：收到回执的一方看到的计数里
+            // 已经不含这条请求（F6 的口径是「通道里 + 正在处理」）。
+            // Replies wait until the counter drops, so whoever sees a reply also
+            // sees a count that no longer includes its request.
+            let mut outbox: Vec<Reply> = Vec::new();
+            let mut flushed: Option<(Sender<io::Result<()>>, io::Result<()>)> = None;
             // 单个任务 panic 用 catch_unwind 兜住：IO 线程继续跑，并补发回执，
             // 免得读请求永远等不到结果（官方 IOWorker.submitThrowingTask 同款）。
             // Catch a single task panic: the IO thread lives on and still replies,
@@ -714,7 +720,7 @@ fn worker_loop(
                     generation,
                 } => {
                     let (chunk, entities, error) = read_one(&mut cache, &dir, pos);
-                    let _ = tx.send(Reply::Read {
+                    outbox.push(Reply::Read {
                         pos,
                         task_id,
                         generation,
@@ -735,8 +741,8 @@ fn worker_loop(
                         let failures = write_one(&mut cache, &dir, pos, chunk, entities, timestamp);
                         // 只有两份都写成功才回 Written；失败绝不谎报成功。
                         if failures.is_empty() {
-                            let _ = tx.send(Reply::Written { pos, seq, present });
-                        } else if report_failures(&tx, failures, Some(pos), Some(seq)) {
+                            outbox.push(Reply::Written { pos, seq, present });
+                        } else if report_failures(&mut outbox, failures, Some(pos), Some(seq)) {
                             failed_since_barrier = true;
                         }
                         // 写成功或失败都算处理完，清掉去重记账（F6）。
@@ -754,7 +760,7 @@ fn worker_loop(
                     let result = safe_replace(&path, &bytes, backup.as_deref());
                     if let Err(error) = result.as_ref()
                         && report_failures(
-                            &tx,
+                            &mut outbox,
                             vec![(path.display().to_string(), error.to_string())],
                             None,
                             None,
@@ -765,7 +771,7 @@ fn worker_loop(
                     if let Some((uuid, seq)) = player {
                         let error = result.as_ref().err().map(|e| e.to_string());
                         let ok = result.is_ok();
-                        let _ = tx.send(Reply::PlayerWritten {
+                        outbox.push(Reply::PlayerWritten {
                             uuid,
                             seq,
                             ok,
@@ -775,7 +781,7 @@ fn worker_loop(
                 }
                 Request::Flush { done } => {
                     let failures = cache.sync_all(&dir);
-                    let sync_failed = report_failures(&tx, failures.clone(), None, None);
+                    let sync_failed = report_failures(&mut outbox, failures.clone(), None, None);
                     let failed = failed_since_barrier || sync_failed || !failures.is_empty();
                     let result = if failed {
                         Err(io::Error::other(format!(
@@ -785,13 +791,14 @@ fn worker_loop(
                     } else {
                         Ok(())
                     };
-                    let _ = done.send(result);
+                    flushed = Some((done, result));
                     failed_since_barrier = false;
                 }
                 Request::Barrier { seq } => {
-                    let sync_failed = report_failures(&tx, cache.sync_all(&dir), None, None);
+                    let sync_failed =
+                        report_failures(&mut outbox, cache.sync_all(&dir), None, None);
                     let ok = !failed_since_barrier && !sync_failed;
-                    let _ = tx.send(Reply::Flushed { seq, ok });
+                    outbox.push(Reply::Flushed { seq, ok });
                     failed_since_barrier = false;
                 }
                 Request::PanicTask { .. } => {
@@ -802,21 +809,32 @@ fn worker_loop(
                 }
             }));
             if outcome.is_err() {
-                for reply in replies {
-                    let _ = tx.send(reply);
-                }
+                outbox.extend(replies);
                 failed_since_barrier = true;
             }
-            // 这条请求已经处理完，从在途计数里减掉（F6：量「通道里 + 正在处理」）。
-            in_flight.fetch_sub(1, Ordering::SeqCst);
             if should_stop {
+                let _ = report_failures(&mut outbox, cache.sync_all(&dir), None, None);
                 in_flight.fetch_sub(batch_len - processed, Ordering::SeqCst);
-                let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
+            }
+            // 这条请求已经处理完，从在途计数里减掉（F6：量「通道里 + 正在处理」），
+            // 然后才发回执。
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            for reply in outbox {
+                let _ = tx.send(reply);
+            }
+            if let Some((done, result)) = flushed {
+                let _ = done.send(result);
+            }
+            if should_stop {
                 return;
             }
         }
     }
-    let _ = report_failures(&tx, cache.sync_all(&dir), None, None);
+    let mut outbox = Vec::new();
+    let _ = report_failures(&mut outbox, cache.sync_all(&dir), None, None);
+    for reply in outbox {
+        let _ = tx.send(reply);
+    }
 }
 
 fn read_one(
@@ -1271,11 +1289,14 @@ mod tests {
         dir.create_layout().unwrap();
         let mut io = ChunkIo::open(&dir).unwrap();
         assert_eq!(io.in_flight_requests(), 0);
-        io.submit_write(ChunkPos::new(0, 0), 1, Some(vec![1]), None);
-        io.submit_write(ChunkPos::new(1, 0), 2, Some(vec![2]), None);
-        // flush 当同步点：返回时这两条和栅栏本身都已处理完。
-        io.flush().unwrap();
-        assert_eq!(io.in_flight_requests(), 0);
+        // flush 当同步点：worker 先把计数减掉再发回执，所以 `flush` 返回时这两条写
+        // 和栅栏本身都已不在计数里。多跑几轮，回执抢在计数前面的旧写法几乎每次都会露出来。
+        for round in 0..64_u64 {
+            io.submit_write(ChunkPos::new(0, 0), 2 * round + 1, Some(vec![1]), None);
+            io.submit_write(ChunkPos::new(1, 0), 2 * round + 2, Some(vec![2]), None);
+            io.flush().unwrap();
+            assert_eq!(io.in_flight_requests(), 0, "round {round}");
+        }
         io.close();
     }
 

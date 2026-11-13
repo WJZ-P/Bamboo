@@ -116,16 +116,37 @@ pub fn dispense_from(world: &mut World, pos: BlockPos, state: BlockState) {
 /// 方块 oracle 不登记合成器的 ticker，所以比较时 `crafting` 保持亮着；只有游戏循环和
 /// 测试用的世界刻会调用这里。
 ///
+/// ticker 由 `LevelChunk$BoundTickingBlockEntity.tick` 包着：先判 `LevelChunk.isTicking(pos)`
+/// （世界边界内、区块能 tick），不满足就整刻不跑，倒计时停在原值，恢复后接着倒数。
+/// 边界判断和方块实体阶段用同一个整数方块盒。
+///
 /// `CrafterBlockEntity.serverTick`: decrement the countdown each tick and clear `crafting` when
 /// it reaches zero. The block oracle does not register a crafter ticker, so `crafting` stays on
-/// while a case is compared; only the game loop and test world ticks call this.
+/// while a case is compared; only the game loop and test world ticks call this. Like every
+/// ticker it is skipped while the chunk cannot tick or the block is outside the world border,
+/// so the countdown pauses there and resumes later.
 pub(crate) fn tick_crafting_clocks(world: &mut World) {
-    // 官方每刻减一次倒计时，归零时关掉 `crafting`。倒计时亮起时就按绝对到期时刻
-    // 排进桶里，这里只碰这一刻到期的那几台；没到期的每刻完全不用扫。
-    let now = crate::block_entity::block_entity_clock();
-    let due = world.take_due_crafter_crafting(now);
-    for pos in due {
-        if is_crafter(world, pos) {
+    let clocks = world.crafter_crafting();
+    if clocks.is_empty() {
+        return;
+    }
+    let border = world.world_border().block_box();
+    for (pos, _) in clocks {
+        if !world.chunk_ticks_blocks(pos.chunk()) || !border.contains(pos) {
+            continue;
+        }
+        if !is_crafter(world, pos) {
+            // 方块已经换掉，官方的方块实体和 ticker 一起没了。
+            world.set_crafter_crafting(pos, 0);
+            continue;
+        }
+        // 前面那台关 `crafting` 时的邻居更新也可能碰到这一台，按表里的当前值减。
+        let next = world.crafter_crafting_at(pos) - 1;
+        if next < 0 {
+            continue;
+        }
+        world.set_crafter_crafting(pos, next);
+        if next == 0 {
             let state = world.block_state(pos);
             world.set_block_and_update(pos, state.with(CRAFTING, false));
         }
@@ -626,13 +647,12 @@ mod tests {
         assert!(level.get(POS).get(CRAFTING));
 
         let mut ticks = BlockTicks::new();
-        // 官方每刻 `gameTime` 加一；合成器倒计时按绝对到期时刻排。
-        // 亮起时是第 0 刻，六刻之后（第 6 刻）关掉 `crafting`。
+        // 计划刻那一段不减倒计时，只有方块实体段的 ticker 减。
         ticks.set_time(1);
         crate::interact::run_scheduled_ticks(&mut level, &mut ticks, 1);
         assert!(level.get(POS).get(CRAFTING));
 
-        for now in 2..=5 {
+        for now in 1..=5 {
             ticks.set_time(now);
             crate::interact::run_block_entity_tick(&mut level, &mut ticks);
         }
@@ -648,7 +668,7 @@ mod tests {
         facing_north(&mut level, POS);
         let powered = level.get(POS).with(TRIGGERED, true).with(CRAFTING, true);
         level.set(POS, powered);
-        level.set_crafter_crafting(POS, 2, 0);
+        level.set_crafter_crafting(POS, 2);
         let mut ticks = BlockTicks::new();
         {
             let mut world = World::new(&mut level, &mut ticks);
@@ -663,5 +683,135 @@ mod tests {
         ticks.set_time(2);
         crate::interact::run_block_entity_tick(&mut level, &mut ticks);
         assert!(!level.get(POS).get(CRAFTING));
+    }
+
+    /// 官方 ticker 的逐刻模型：区块能 tick 且在边界内才减 1，减到 0 关 `crafting`。
+    struct ClockModel {
+        remaining: i32,
+        crafting: bool,
+    }
+
+    /// 一排合成器跨过边界和两个区块，倒计时反复亮起，同时冻结 / 恢复区块、
+    /// 缩小 / 扩大边界、装盒再换个时钟放回。每一刻和官方 ticker 的模型比较。
+    #[test]
+    fn countdowns_pause_while_frozen_or_outside_the_border() {
+        use mc_bamboo_core::ChunkPos;
+        // x = 14..=17 跨过区块 0 / 1 的分界；边界中心在 x = 16。
+        let row: Vec<BlockPos> = (12..=19).map(|x| BlockPos::new(x, 64, 0)).collect();
+        let chunk = ChunkPos::new(0, 0);
+        for kind in 0..4 {
+            let mut level = TestLevel::new();
+            let mut ticks = BlockTicks::new();
+            let mut models: Vec<ClockModel> = Vec::new();
+            for &pos in &row {
+                facing_north(&mut level, pos);
+                models.push(ClockModel {
+                    remaining: 0,
+                    crafting: false,
+                });
+            }
+            level.border.set_center(16.0, 0.5);
+            match kind {
+                // 缩小渐变：从全包住缩到只剩中间。
+                0 => {
+                    level.border.lerp_size_between(20.0, 1.0, 60, 0);
+                }
+                // 扩大渐变：从只剩中间到全包住。
+                1 => {
+                    level.border.lerp_size_between(1.0, 20.0, 60, 0);
+                }
+                // 一下子跳小再跳大。
+                _ => {
+                    level.border.set_size(20.0);
+                }
+            }
+            let mut frozen = false;
+            for now in 1..=160_i64 {
+                ticks.set_time(now);
+                level.border.tick();
+                if kind >= 2 && now % 23 == 0 {
+                    let size = if level.border.size() > 10.0 {
+                        3.0
+                    } else {
+                        20.0
+                    };
+                    level.border.set_size(size);
+                }
+                if kind != 2 && now % 7 == 0 {
+                    frozen = !frozen;
+                    level.set_frozen(chunk, frozen);
+                }
+                if now % 19 == 0 {
+                    // 区块束带着剩余刻数走，放回的表时钟差很多也不影响。
+                    level.box_redstone(chunk, now, now + 1000);
+                    level.box_redstone(ChunkPos::new(1, 0), now + 1000, now);
+                }
+                // 隔几刻让其中一台重新亮起，和 `dispenseFrom` 一样先记倒计时再写状态。
+                let lit = (now as usize * 5) % row.len();
+                if now % 3 == 0 {
+                    let pos = row[lit];
+                    level.set_crafter_crafting(pos, MAX_CRAFTING_TICKS);
+                    let state = level.get(pos).with(CRAFTING, true);
+                    level.set(pos, state);
+                    models[lit].remaining = MAX_CRAFTING_TICKS;
+                    models[lit].crafting = true;
+                }
+                crate::interact::run_block_entity_tick(&mut level, &mut ticks);
+                let border = level.border.block_box();
+                for (index, &pos) in row.iter().enumerate() {
+                    let model = &mut models[index];
+                    let ticking = !(frozen && pos.chunk() == chunk) && border.contains(pos);
+                    if ticking && model.remaining > 0 {
+                        model.remaining -= 1;
+                        if model.remaining == 0 {
+                            model.crafting = false;
+                        }
+                    }
+                    assert_eq!(
+                        level.get(pos).get(CRAFTING),
+                        model.crafting,
+                        "kind {kind} tick {now} {pos:?}"
+                    );
+                    assert_eq!(
+                        level.crafter_crafting_at(pos),
+                        model.remaining,
+                        "kind {kind} tick {now} {pos:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 冻结期间一直亮着，恢复那一刻起接着倒数剩下的刻数。
+    #[test]
+    fn a_frozen_crafter_resumes_its_countdown() {
+        use mc_bamboo_core::ChunkPos;
+        let mut level = TestLevel::new();
+        facing_north(&mut level, POS);
+        put(&mut level, POS, 0, ItemStack::new(items::OAK_LOG, 1));
+        tick(&mut level, POS);
+        let mut ticks = BlockTicks::new();
+        for now in 1..=2 {
+            ticks.set_time(now);
+            crate::interact::run_block_entity_tick(&mut level, &mut ticks);
+        }
+        assert_eq!(level.crafter_crafting_at(POS), 4);
+        level.set_frozen(ChunkPos::new(0, 0), true);
+        for now in 3..=50 {
+            ticks.set_time(now);
+            crate::interact::run_block_entity_tick(&mut level, &mut ticks);
+            assert!(level.get(POS).get(CRAFTING));
+        }
+        assert_eq!(level.crafter_crafting_at(POS), 4);
+        level.set_frozen(ChunkPos::new(0, 0), false);
+        for now in 51..=53 {
+            ticks.set_time(now);
+            crate::interact::run_block_entity_tick(&mut level, &mut ticks);
+            assert!(level.get(POS).get(CRAFTING));
+        }
+        ticks.set_time(54);
+        crate::interact::run_block_entity_tick(&mut level, &mut ticks);
+        assert!(!level.get(POS).get(CRAFTING));
+        assert_eq!(level.crafter_crafting_at(POS), 0);
     }
 }
