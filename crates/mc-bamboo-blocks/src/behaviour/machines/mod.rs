@@ -43,7 +43,7 @@ pub(crate) use self::diode::{
     comparator_reads_taken_entity, resume_comparator_placed, resume_comparator_refresh,
 };
 pub use self::lectern::{reset_lectern, signal_lectern_page};
-pub(crate) use self::piston_entity::PistonMoving;
+pub use self::piston_entity::PistonMoving;
 pub(crate) use self::pumpkin::can_spawn_golem;
 
 use mc_bamboo_data::{Block, BlockClass};

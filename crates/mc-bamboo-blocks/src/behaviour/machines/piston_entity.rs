@@ -25,7 +25,7 @@ const PROGRESS_PER_TICK: f32 = 0.5;
 const SHORT_THRESHOLD: f32 = 0.25;
 
 /// 一次移动。
-pub(crate) struct PistonMoving {
+pub struct PistonMoving {
     pos: BlockPos,
     moved_state: BlockState,
     direction: Direction,
@@ -91,6 +91,13 @@ impl PistonMoving {
             self.progress_o.to_bits(),
             self.last_ticked.saturating_sub(now),
         )
+    }
+
+    /// 算阶段拷出的只读碰撞形状：`PistonMovingBlockEntity.getCollisionShape`。
+    ///
+    /// 方块实体表不是 `Sync`，并行算阶段借不到整张表；视图只带这份按值拷出的形状。
+    pub fn collision_shape(&self) -> Vec<crate::Aabb> {
+        self.collision_boxes().into_owned()
     }
 
     /// 存档读入：官方写的是 `progressO`，读回时 `progress` 和 `progressO` 相等。
