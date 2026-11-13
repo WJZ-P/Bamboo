@@ -765,20 +765,26 @@ impl LevelSideState for Recording<'_> {
         self.level.set_crafter_disabled(pos, mask);
     }
 
-    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+    fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32, now: i64) {
         self.redstone_write(Some(pos), 4, (4_u8, remaining));
-        self.level.set_crafter_crafting(pos, remaining);
+        self.level.set_crafter_crafting(pos, remaining, now);
     }
 
-    fn take_crafter_crafting(&mut self) -> Vec<(BlockPos, i32)> {
-        let value = self.level.take_crafter_crafting();
+    fn take_crafter_crafting(&mut self, now: i64) -> Vec<(BlockPos, i32)> {
+        let value = self.level.take_crafter_crafting(now);
         self.read(None, K_REDSTONE, (5_u8, &value));
         value
     }
 
-    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>) {
+    fn restore_crafter_crafting(&mut self, entries: Vec<(BlockPos, i32)>, now: i64) {
         self.redstone_write(None, 5, (5_u8, &entries));
-        self.level.restore_crafter_crafting(entries);
+        self.level.restore_crafter_crafting(entries, now);
+    }
+
+    fn take_due_crafter_crafting(&mut self, now: i64) -> Vec<BlockPos> {
+        let value = self.level.take_due_crafter_crafting(now);
+        self.read(None, K_REDSTONE, (7_u8, &value));
+        value
     }
 
     fn forget_block_entity_memory(&mut self, pos: BlockPos) {
@@ -865,6 +871,14 @@ impl LevelSideState for Recording<'_> {
         value
     }
 
+    fn block_entity_sleep_enabled(&self) -> bool {
+        self.level.block_entity_sleep_enabled()
+    }
+
+    fn block_entity_sleep_from(&mut self, pos: BlockPos, now: i64) -> Option<i64> {
+        self.level.block_entity_sleep_from(pos, now)
+    }
+
     fn has_block_entity(&self, pos: BlockPos) -> bool {
         let value = self.level.has_block_entity(pos);
         self.read(Some(pos), K_BLOCK_ENTITY, (0_u8, value));
@@ -922,8 +936,20 @@ impl LevelSideState for Recording<'_> {
         value
     }
 
-    fn begin_block_entity_tick(&mut self) {
-        self.level.begin_block_entity_tick();
+    fn wake_block_entity(&mut self, pos: BlockPos) {
+        self.level.wake_block_entity(pos);
+    }
+
+    fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {
+        self.level.schedule_block_entity_wake(pos, wake_at);
+    }
+
+    fn set_chunk_block_entity_ticking(&mut self, chunk: ChunkPos, ticks: bool) {
+        self.level.set_chunk_block_entity_ticking(chunk, ticks);
+    }
+
+    fn begin_block_entity_tick(&mut self, now: i64) {
+        self.level.begin_block_entity_tick(now);
     }
 
     fn next_block_entity_ticker(&mut self) -> Option<(BlockPos, u64)> {
