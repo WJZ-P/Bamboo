@@ -146,11 +146,20 @@ import net.minecraft.world.level.block.state.properties.IntegerProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.WoodType;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.FeatureSorter;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.feature.Feature;
+import net.minecraft.world.level.levelgen.placement.PlacedFeature;
 import net.minecraft.world.level.levelgen.carver.WorldCarver;
 import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
 import net.minecraft.world.level.levelgen.material.condition.MaterialCondition;
@@ -212,6 +221,8 @@ public final class Extractor {
     private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
+    /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
+    private static final int EXPECTED_OVERWORLD_POSSIBLE_BIOMES = 56;
     /** loadRegistries 加载的静态注册表标签，itemComponents 再加载服务端资源时还要用。 */
     private static List<Registry.PendingTags<?>> STATIC_TAGS = List.of();
 
@@ -1397,9 +1408,82 @@ public final class Extractor {
                 encodeRegistry(registries, ops, Registries.MATERIAL_CONDITION, MaterialCondition.DIRECT_CODEC));
         worldgen.add("carver", encodeRegistry(registries, ops, Registries.CARVER, WorldCarver.DIRECT_CODEC));
         worldgen.add("biome_carvers", biomeCarvers(registries));
+        worldgen.add("feature", encodeRegistry(registries, ops, Registries.FEATURE, Feature.DIRECT_CODEC));
+        worldgen.add("placed_feature",
+                encodeRegistry(registries, ops, Registries.PLACED_FEATURE, PlacedFeature.DIRECT_CODEC));
+        worldgen.add("biome_features", biomeFeatures(registries));
+        worldgen.add("features_per_step", featuresPerStep(registries));
         worldgen.add("multi_noise_presets", multiNoisePresets(registries));
         worldgen.add("end_biomes", endBiomes());
         return worldgen;
+    }
+
+    /** 每个群系 11 个生成步骤的 `PlacedFeature` 列表，按官方 `features()` 的顺序。 */
+    private static JsonObject biomeFeatures(RegistryAccess registries) {
+        Registry<Biome> biomes = registries.lookupOrThrow(Registries.BIOME);
+        JsonObject result = new JsonObject();
+        for (Identifier name : biomes.keySet().stream().sorted().toList()) {
+            JsonArray steps = new JsonArray();
+            for (HolderSet<PlacedFeature> step :
+                    biomes.getValue(name).getGenerationSettings().features()) {
+                JsonArray entries = new JsonArray();
+                for (Holder<PlacedFeature> feature : step) {
+                    entries.add(feature.unwrapKey().orElseThrow().identifier().toString());
+                }
+                steps.add(entries);
+            }
+            result.add(name.toString(), steps);
+        }
+        return result;
+    }
+
+    /**
+     * `FeatureSorter` 排好的每步全局顺序。
+     *
+     * <p>`ChunkGenerator.applyBiomeDecoration` 用这个列表的下标做
+     * `setFeatureSeed(decorationSeed, index, step)`，所以顺序必须和官方一致；
+     * 自己重推要复刻 `ImmutableSet` 的迭代序、`TreeMap` 比较器和 DFS 的邻接表顺序，
+     * 不如直接从官方的 `featuresPerStep` supplier 读。
+     */
+    private static JsonArray featuresPerStep(RegistryAccess registries) {
+        Registry<NoiseGeneratorSettings> settings = registries.lookupOrThrow(Registries.NOISE_SETTINGS);
+        Registry<PlacedFeature> placed = registries.lookupOrThrow(Registries.PLACED_FEATURE);
+        ChunkGenerator generator = new NoiseBasedChunkGenerator(
+                MultiNoiseBiomeSource.createFromPreset(
+                        registries.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
+                                .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
+                settings.wrapAsHolder(
+                        settings.getValue(Identifier.withDefaultNamespace("overworld"))));
+        // 官方生成器用这套群系源的全部可能群系排地物。这里的数量是主世界预设里去重后的
+        // 群系数，和 `minecraft:worldgen/biome` 注册表的条目数不必相同；换版本时靠下面的
+        // 断言发现变化，不要直接改数字。
+        int possibleBiomes = generator.getBiomeSource().possibleBiomes().size();
+        if (possibleBiomes != EXPECTED_OVERWORLD_POSSIBLE_BIOMES) {
+            throw new IllegalStateException("unexpected overworld possibleBiomes count: "
+                    + possibleBiomes + ", expected " + EXPECTED_OVERWORLD_POSSIBLE_BIOMES);
+        }
+        Object rawSupplier;
+        try {
+            rawSupplier = readField(ChunkGenerator.class, "featuresPerStep", generator);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("cannot read ChunkGenerator.featuresPerStep", error);
+        }
+        @SuppressWarnings("unchecked")
+        java.util.function.Supplier<List<FeatureSorter.StepFeatureData>> supplier =
+                (java.util.function.Supplier<List<FeatureSorter.StepFeatureData>>) rawSupplier;
+        List<FeatureSorter.StepFeatureData> steps = supplier.get();
+        if (steps.size() != GenerationStep.Decoration.values().length) {
+            throw new IllegalStateException("unexpected featuresPerStep size " + steps.size());
+        }
+        JsonArray result = new JsonArray();
+        for (FeatureSorter.StepFeatureData step : steps) {
+            JsonArray entries = new JsonArray();
+            for (PlacedFeature feature : step.features()) {
+                entries.add(placed.getKey(feature).toString());
+            }
+            result.add(entries);
+        }
+        return result;
     }
 
     /** 每个群系的 `BiomeGenerationSettings.getCarvers()`，顺序就是官方的迭代顺序。 */
