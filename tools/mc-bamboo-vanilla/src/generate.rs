@@ -136,10 +136,12 @@ fn write_saved_world(data: &VersionData, output_dir: &Path) -> Result<(), String
 /// 会是一大堆嵌套字面量，升级版本时也看不出差异；JSON 是官方 codec 的原始形态，
 /// `mc-bamboo-worldgen` 用同一套 codec 的语义解析，所以这里原样存。
 ///
-/// 官方 codec 用 Gson 的 `JsonPrimitive(double)` 保留 IEEE 754 的 double，Gson 写文本时用
-/// `Double.toString` 的最短往返表示。这里先把 `extracted.json` 解析成 `serde_json::Value`，
-/// 再写回文本；两边的解析器都必须按 IEEE 754 正确舍入（工作区的 `float_roundtrip`）。
-/// 否则 17 位有效数字的十进制串会差一个最低位，写出来的文件就不是官方运行时的值了。
+/// 官方 codec 用 Gson 的 `JsonPrimitive(double)` 保留 IEEE 754 的 double，Gson 的
+/// `JsonWriter.value(double)` 写文本时调 `Double.toString`，也就是保证能往返的最短十进制表示，
+/// 中间没有经过 float。这里先把 `extracted.json` 解析成 `serde_json::Value`，再写回文本；
+/// 读报告和读回写出的文本这两次解析都必须按 IEEE 754 正确舍入（工作区统一开了
+/// `float_roundtrip`）。默认的快路径用 `significand as f64 * 10^exp`，少数 17 位有效数字的
+/// 串会差一个最低位；下面的单元测试把官方运行时的位模式钉死，防止读报告那一步悄悄出错。
 fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&data.worldgen)
         .map_err(|error| format!("无法写出世界生成数据：{error}"))?;
@@ -169,11 +171,11 @@ fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
     write_file(output_dir, "worldgen.rs", &out)
 }
 
-/// 写文件前把写出的文本再读一遍，逐值比较位模式，确保 double 往返不丢最低位。
+/// 写文件前把排版后的文本再读一遍，确保 `to_string_pretty` + 解析这一步不丢 double 的最低位。
 ///
-/// 整数、字符串和容器按常规等价性比较，浮点额外比 `to_bits()`。解析器特性被意外关掉、
-/// 或者某一侧换了会截断十进制的格式化方式时，这里直接报错，而不是悄悄写出一份和官方
-/// 逐位不一致的数据。
+/// 整数、字符串和容器按常规等价性比较，浮点额外比 `to_bits()`。格式化或解析器一旦换了会
+/// 截断十进制的实现，这里直接报错，而不是悄悄写出一份和内存里的值逐位不一致的数据。
+/// 读 `extracted.json` 那一步的精度由下面的官方位模式单元测试守着。
 fn check_worldgen_floats(original: &serde_json::Value, json: &str) -> Result<(), String> {
     let reread: serde_json::Value = serde_json::from_str(json)
         .map_err(|error| format!("世界生成数据写出的 JSON 读不回来：{error}"))?;
