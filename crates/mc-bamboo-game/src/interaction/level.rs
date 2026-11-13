@@ -156,6 +156,10 @@ impl Level for RegionLevel<'_> {
         self.chunks.is_randomly_ticking_section(chunk, section_y)
     }
 
+    fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
+        self.chunks.section_hash(chunk, section_y)
+    }
+
     fn randomly_ticking_sections(&self, chunk: ChunkPos) -> u32 {
         self.chunks.randomly_ticking_sections(chunk)
     }

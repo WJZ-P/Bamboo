@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_core::sign::SignContent;
+use mc_bamboo_core::{
+    section_hash::{cell_hash, empty_section_hash, section_hash},
+    sign::SignContent,
+};
 use mc_bamboo_data::{
     block_of_state, blocks, facts, heightmaps, registries, state_facts, state_fluid,
 };
@@ -219,6 +222,8 @@ pub struct Section {
     /// 会随机刻的方块数，官方 `tickingBlockCount` 和 `tickingFluidCount` 合在一起。
     random_tickers: u16,
     fluids: u16,
+    /// 整段方块状态的 128 位哈希，红石缓存的段哈希键用它。只在内存里，不进存档。
+    block_hash: u128,
 }
 
 /// 逐段数出来的位图：第 i 位表示 `sections[i]` 里有会随机刻的方块。
@@ -243,6 +248,7 @@ impl Section {
             non_air_blocks: 0,
             random_tickers: 0,
             fluids: 0,
+            block_hash: empty_section_hash(),
         }
     }
 
@@ -254,8 +260,10 @@ impl Section {
             non_air_blocks: 0,
             random_tickers: 0,
             fluids: 0,
+            block_hash: 0,
         };
         section.recount();
+        section.rehash();
         section
     }
 
@@ -298,9 +306,17 @@ impl Section {
         self.blocks.get(Self::block_index(x, y, z))
     }
 
+    /// 整段重算一遍哈希，读盘组装时用。
+    fn rehash(&mut self) {
+        self.block_hash = section_hash(|x, y, z| self.block(x, y, z));
+    }
+
     fn set_block(&mut self, x: usize, y: usize, z: usize, state: u32) {
         let index = Self::block_index(x, y, z);
         let previous = self.blocks.get(index);
+        if previous != state {
+            self.block_hash ^= cell_hash(x, y, z, previous) ^ cell_hash(x, y, z, state);
+        }
         match (is_air(previous), is_air(state)) {
             (true, false) => self.non_air_blocks += 1,
             (false, true) => self.non_air_blocks -= 1,
@@ -314,6 +330,18 @@ impl Section {
             _ => {}
         }
         self.blocks.set(index, state);
+    }
+
+    /// 整段方块状态的 128 位哈希，红石缓存的段哈希键读它。
+    ///
+    /// 调试构建里顺手整段重算一遍，确认增量更新没算错。
+    pub fn block_hash(&self) -> u128 {
+        debug_assert_eq!(
+            self.block_hash,
+            section_hash(|x, y, z| self.block(x, y, z)),
+            "段哈希和整段方块状态不一致"
+        );
+        self.block_hash
     }
 
     /// `LevelChunkSection.isRandomlyTicking`：里面有会随机刻的方块或者流体。
@@ -530,6 +558,13 @@ impl Chunk {
 
     pub fn sections(&self) -> &[Section] {
         &self.sections
+    }
+
+    /// `section_y` 是 `pos.y >> 4` 的整段方块状态哈希，红石缓存的段哈希键读它。
+    /// 不在世界高度内时返回 `None`；只在内存里，不进存档。
+    pub fn section_hash(&self, section_y: i32) -> Option<u128> {
+        let index = usize::try_from(section_y - (MIN_Y >> 4)).ok()?;
+        Some(self.sections.get(index)?.block_hash())
     }
 
     /// 每一列最低的天空光源。
@@ -1057,5 +1092,50 @@ mod tests {
             order(&forward),
             [(-60, 9, 2), (7, 1, 0), (7, 2, 0), (7, 2, 1)]
         );
+    }
+
+    /// 随机改几千次方块，每改一次都对一遍增量哈希和整段重算。
+    #[test]
+    fn section_hash_tracks_thousands_of_random_writes() {
+        let mut chunk = Chunk::empty(0);
+        for section in chunk.sections() {
+            assert_eq!(section.block_hash(), empty_section_hash());
+        }
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        for _ in 0..4000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let x = (seed >> 16) as usize & 15;
+            let z = (seed >> 24) as usize & 15;
+            let y = MIN_Y + ((seed >> 32) as i32).rem_euclid(WORLD_HEIGHT);
+            let state = (seed >> 48) as u32 % 64;
+            chunk.set_block(x, y, z, state);
+            let (section, local_y) = Chunk::locate(y);
+            let expected = section_hash(|cx, cy, cz| {
+                let world_y = MIN_Y + section as i32 * SECTION_SIZE + cy as i32;
+                chunk.block(cx, world_y, cz)
+            });
+            assert_eq!(chunk.sections()[section].block_hash(), expected);
+            assert_eq!(chunk.section_hash(y >> 4), Some(expected));
+            assert_eq!(local_y, (y - MIN_Y) as usize % 16);
+        }
+    }
+
+    /// 读盘组装的段也带正确的哈希（不逐格重放 `set_block`）。
+    #[test]
+    fn from_disk_sections_are_hashed() {
+        let mut source = Chunk::empty(0);
+        source.set_block(3, MIN_Y + 2, 4, blocks::STONE);
+        source.set_block(15, MIN_Y + 15, 15, blocks::DIRT);
+        let rebuilt = Chunk::from_sections(source.sections().to_vec(), &[None, None, None, None])
+            .expect("读盘组装");
+        for (index, section) in rebuilt.sections().iter().enumerate() {
+            assert_eq!(
+                section.block_hash(),
+                source.sections()[index].block_hash(),
+                "段 {index} 的哈希在读盘组装后变了"
+            );
+        }
     }
 }

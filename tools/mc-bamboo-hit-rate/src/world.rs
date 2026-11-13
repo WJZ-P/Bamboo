@@ -12,7 +12,7 @@ use mc_bamboo_blocks::{
     level::EquipTarget,
     recording::{Record, Recording},
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, section_hash, sign::SignContent};
 use mc_bamboo_data::blocks;
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -170,6 +170,17 @@ impl Level for BenchLevel {
 
     fn is_randomly_ticking_section(&self, _chunk: ChunkPos, _section_y: i32) -> bool {
         false
+    }
+
+    fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
+        Some(section_hash::section_hash(|x, y, z| {
+            let pos = BlockPos::new(
+                chunk.x * 16 + x as i32,
+                section_y * 16 + y as i32,
+                chunk.z * 16 + z as i32,
+            );
+            self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR).0
+        }))
     }
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {

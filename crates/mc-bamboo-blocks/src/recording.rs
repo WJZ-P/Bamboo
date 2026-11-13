@@ -513,9 +513,12 @@ fn stable_hash(value: &impl Hash) -> u64 {
 }
 
 fn cell_hash(pos: BlockPos, state: BlockState) -> u128 {
-    let lo = stable_hash(&(pos, 0_u8, state.0));
-    let hi = stable_hash(&(pos, 1_u8, state.0));
-    u128::from(lo) | u128::from(hi) << 64
+    mc_bamboo_core::section_hash::cell_hash(
+        pos.x.rem_euclid(16) as usize,
+        pos.y.rem_euclid(16) as usize,
+        pos.z.rem_euclid(16) as usize,
+        state.0,
+    )
 }
 
 fn hash_effect(effect: &Effect) -> u64 {

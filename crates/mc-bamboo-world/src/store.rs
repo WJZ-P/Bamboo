@@ -327,6 +327,18 @@ impl ChunkStore {
             .is_some_and(Section::is_randomly_ticking)
     }
 
+    /// `section_y`（方块的 `y >> 4`）这一段的整段方块状态哈希，红石缓存的键读它。
+    /// 区块没加载、段超出世界高度时返回 `None`。
+    pub fn section_hash(&self, pos: ChunkPos, section_y: i32) -> Option<u128> {
+        if !self.is_loaded(pos) {
+            return None;
+        }
+        self.edited
+            .get(&pos)
+            .unwrap_or(&self.template)
+            .section_hash(section_y)
+    }
+
     /// 设置方块状态，返回方块是否真的变了。高度超出世界时什么也不做。
     ///
     /// 和官方的 `LevelChunk.setBlockState` 一样：区块段变空或者变满时登记一下，

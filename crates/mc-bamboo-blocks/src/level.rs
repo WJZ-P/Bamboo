@@ -512,6 +512,15 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 有会随机刻的方块或者流体，也就是有状态的 `is_randomly_ticking` 或者 `is_fluid_randomly_ticking` 为真。
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool;
 
+    /// `section_y`（方块的 `y >> 4`）这一段的整段方块状态哈希，红石缓存的键读它。
+    ///
+    /// 默认实现逐格重算；有区块存储的实现应该覆盖它，直接读区块段里维护好的哈希。
+    /// 段内坐标用于哈希，段坐标本身另进缓存键。段超出世界高度或所在区块不可用时
+    /// 返回 `None`：这时调用方必须退回解释执行。
+    fn section_hash(&self, _chunk: ChunkPos, _section_y: i32) -> Option<u128> {
+        None
+    }
+
     /// 这个区块里哪些区块段 [`is_randomly_ticking_section`](Self::is_randomly_ticking_section)：
     /// 第 i 位对应从世界底部数起的第 i 段。
     ///
