@@ -32,6 +32,11 @@ use crate::{
     world_border::BlockBox,
 };
 
+mod watch;
+
+pub use watch::Watch;
+use watch::Watchers;
+
 /// 一种方块实体，对应官方 `BlockEntity` 和它的 `BlockEntityTicker`。
 ///
 /// `Send` 是因为世界线程以后要把整块 `Region` 交给线程池。
@@ -92,6 +97,14 @@ pub trait BlockEntity: Any + Send {
     ///
     /// Re-arm a sleep after a chunk box is put into a table with a different clock.
     fn resleep(&mut self, _since: i64, _wake_at: i64) {}
+
+    /// 刚排上日程的睡眠要关注什么：这些格子的方块 / 容器内容变了、或者有实体进出
+    /// 这些盒子时要叫醒它。`None` = 只关注自己这一格（默认；到点或自己被写时醒）。
+    ///
+    /// What a sleep that was just scheduled watches. `None` means only its own cell.
+    fn watch(&self) -> Option<Watch> {
+        None
+    }
 }
 
 // 方块实体读路径看到的当前 `gameTime`。睡着的实体按公式现算数值，菜单数据槽、
@@ -163,6 +176,8 @@ pub struct BlockEntities {
     next_ordinal: u64,
     /// 上一次 [`Self::sync_border`] 记下的边界盒；`None` 是还没同步过。
     border: Option<BlockBox>,
+    /// 睡到外部变化的条目关注的格子和实体盒子，见 [`Self::notify_cell`]。
+    watchers: Watchers,
 }
 
 impl Default for BlockEntities {
@@ -191,6 +206,7 @@ impl Default for BlockEntities {
             next_id: 0,
             next_ordinal: 0,
             border: None,
+            watchers: Watchers::default(),
         }
     }
 }
@@ -447,6 +463,9 @@ impl BlockEntities {
                     wake_at: None,
                     ..ticker
                 });
+                if !self.watchers.is_empty() {
+                    self.watchers.unwatch(ticker.pos);
+                }
                 self.awake.insert(ordinal);
                 due.push(ordinal);
             }
@@ -530,6 +549,13 @@ impl BlockEntities {
                 ..ticker
             });
             self.sleeping.entry(at).or_default().insert(ticker.ordinal);
+            if let Some(watch) = self
+                .entities
+                .get(&pos)
+                .and_then(|stored| stored.entity.watch())
+            {
+                self.watchers.watch(pos, watch);
+            }
         } else {
             self.slots[index] = Some(Ticker {
                 wake_at: None,
@@ -583,6 +609,44 @@ impl BlockEntities {
         if in_suffix {
             self.push_due(ticker.ordinal);
         }
+    }
+
+    /// 这一格的方块或容器内容变了：叫醒关注它的睡眠条目（不含这一格自己的实体，
+    /// 那由 [`Self::wake`] 负责）。没有任何关注时只是一次分支。
+    ///
+    /// The block or container contents at `pos` changed: wake the sleepers watching it.
+    pub fn notify_cell(&mut self, pos: BlockPos) {
+        if self.watchers.is_empty() {
+            return;
+        }
+        let Some(watchers) = self.watchers.cell_watchers(pos) else {
+            return;
+        };
+        let watchers = watchers.to_vec();
+        for watcher in watchers {
+            self.wake(watcher);
+        }
+    }
+
+    /// 有实体在 `area` 里出现、移动或者换了物品：叫醒盒子和它相交的睡眠条目。
+    ///
+    /// An entity appeared, moved or changed its stack inside `area`.
+    pub fn notify_box(&mut self, area: crate::shape::Aabb) {
+        if self.watchers.is_empty() {
+            return;
+        }
+        let mut found = Vec::new();
+        self.watchers.box_watchers(area, &mut found);
+        found.sort_unstable();
+        found.dedup();
+        for watcher in found {
+            self.wake(watcher);
+        }
+    }
+
+    /// 关注盒子覆盖的 16³ 段变过时交出现在的集合，实体表据此决定哪些移动要报告。
+    pub fn take_watched_sections(&mut self) -> Option<HashSet<(i32, i32, i32)>> {
+        self.watchers.take_changed_sections()
     }
 
     /// 区块冻结或恢复：把这一区块睡着的实体按公式推进到当前刻并结束睡眠，
@@ -706,6 +770,7 @@ impl BlockEntities {
                 stored.entity.materialize(self.now);
             }
             self.sleeping.clear();
+            self.watchers = Watchers::default();
             for ticker in self.slots.iter_mut().flatten() {
                 ticker.wake_at = None;
             }
@@ -728,6 +793,13 @@ impl BlockEntities {
 
     fn unschedule(&mut self, ordinal: u64, wake_at: Option<i64>) {
         let Some(at) = wake_at else { return };
+        // 睡眠结束（叫醒、暂停、删除、重新排期）都经过这里，关注登记跟着撤掉。
+        if !self.watchers.is_empty()
+            && let Some(&index) = self.ordinals.get(&ordinal)
+            && let Some(ticker) = self.slots[index]
+        {
+            self.watchers.unwatch(ticker.pos);
+        }
         if let std::collections::btree_map::Entry::Occupied(mut entry) = self.sleeping.entry(at) {
             entry.get_mut().remove(&ordinal);
             if entry.get().is_empty() {
