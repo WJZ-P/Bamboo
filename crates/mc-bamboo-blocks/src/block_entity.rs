@@ -628,6 +628,11 @@ impl BlockEntities {
         }
     }
 
+    /// 有没有任何睡眠条目登记了关注格子 / 盒子。
+    pub fn has_any_watchers(&self) -> bool {
+        !self.watchers.is_empty()
+    }
+
     /// 这一格有没有别的睡眠条目关注（自己关注自己不算）。
     pub fn has_cell_watchers(&self, pos: BlockPos) -> bool {
         self.watchers

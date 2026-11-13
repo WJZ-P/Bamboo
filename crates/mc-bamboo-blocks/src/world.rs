@@ -954,7 +954,11 @@ impl<'a> World<'a> {
     }
 
     /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。
+    /// 没有任何关注登记时直接返回，写入热路径不额外查容器位置。
     fn notify_changed_always(&mut self, pos: BlockPos) {
+        if !self.level.has_any_block_entity_watchers() {
+            return;
+        }
         self.level.notify_block_entity_cell(pos);
         for other in self.level.container_positions(pos) {
             if other != pos {
@@ -2000,6 +2004,10 @@ impl<'a> World<'a> {
     /// `flags` 照旧登记广播和光照，见 [`Level::write_block`]。
     pub fn replay_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) {
         let _ = self.level.write_block(pos, state, flags);
+        // 重放也改了这一格的内容：睡着的漏斗要按原路径一样被叫醒。
+        if self.level.has_any_block_entity_watchers() {
+            self.level.notify_block_entity_cell(pos);
+        }
     }
 
     /// 缓存重放：写比较器输出，不报观察事件。

@@ -40,12 +40,16 @@ impl Default for BenchLevel {
 
 impl BenchLevel {
     pub fn new() -> Self {
+        // 缓存差分只跑计划刻，没有方块实体阶段；休眠依赖每刻的 BE 阶段
+        // 交付唤醒事件，所以这个基准世界里关掉休眠，两边都按官方每刻真跑。
+        let mut block_entities = BlockEntities::default();
+        block_entities.set_sleep_enabled(false);
         Self {
             blocks: BTreeMap::new(),
             section_hashes: std::collections::HashMap::new(),
             containers: BTreeMap::new(),
             random: LevelRandom::new(0),
-            block_entities: BlockEntities::default(),
+            block_entities,
             block_events: BlockEvents::default(),
             redstone: RedstoneMemory::default(),
             entities: EntityStore::default(),
