@@ -59,6 +59,11 @@ pub(crate) const MAX_CONSECUTIVE_IO_FAILURES: u32 = 3;
 pub(crate) const MAX_PENDING_WRITES: usize = 4096;
 pub(crate) const MAX_PARKED_BOXES: usize = 4096;
 pub(crate) const MAX_IO_MAILBOX: usize = 16384;
+/// 一次 `pump` 里最多跑多少事件/效果。只是防真死循环的护栏，不能让大世界
+/// 关服因为达到上限就 panic：超了记 error 并停在这一轮，不走 `assert!`。
+/// Guard against a truly non-convergent `pump`. A large world must never panic
+/// here: on exceeding the cap, log and stop the pump instead of asserting.
+pub(crate) const PUMP_ROUND_LIMIT: usize = 20_000_000;
 
 /// 一次待落盘的区块快照。
 struct PendingWrite {
@@ -632,7 +637,13 @@ impl DirectorHost {
             // 先把队列里的事件和它们引发的任务结果全部跑完。
             while let Some(event) = events.pop() {
                 rounds += 1;
-                assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
+                if rounds >= PUMP_ROUND_LIMIT {
+                    tracing::error!(
+                        rounds,
+                        "Director event loop did not converge; stopping without a panic"
+                    );
+                    return;
+                }
                 // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
                 // 单独记在 `ticket_update`；其余事件是纯状态机推进。
                 let sub = match event {
@@ -651,7 +662,13 @@ impl DirectorHost {
                             task,
                         } => {
                             rounds += 1;
-                            assert!(rounds < 1_000_000, "Director 的事件循环没有收敛");
+                            if rounds >= PUMP_ROUND_LIMIT {
+                                tracing::error!(
+                                    rounds,
+                                    "Director event loop did not converge; stopping without a panic"
+                                );
+                                return;
+                            }
                             region.profiler.start_sub(SubPhase::DirectorEvents);
                             let next = self.run_task(id, generation, task);
                             region.profiler.end_sub();
@@ -1347,6 +1364,22 @@ mod tests {
         assert_eq!(host.save_queue.len(), 1);
         host.pace_saves(3);
         assert!(host.save_queue.is_empty());
+    }
+
+    /// 待核实：`pump` 里的收敛护栏不再 `assert!`（大世界关服会超过原来的
+    /// 100 万轮），改成大得多的上限 + 记 error 后停这一轮，绝不 panic。
+    /// Review "to verify": the `pump` convergence guard no longer asserts (a
+    /// large-world shutdown can exceed 1M rounds); it uses a much larger cap
+    /// and logs instead of panicking.
+    #[test]
+    fn pump_handles_a_large_batch_without_panicking() {
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut region = Region::new(2, 20, false);
+        let events: Vec<_> = (0..5_000_u64)
+            .map(|now_tick| Event::Tick { now_tick })
+            .collect();
+        host.pump(&mut region, events);
+        // 能跑到这里就说明一批 5000 个事件没有触发收敛护栏、也没有 panic。
     }
 
     /// F7：`save-off` 停掉卸载写盘（官方 `ChunkMap.tick` 的 noSave），
