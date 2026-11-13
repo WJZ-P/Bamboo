@@ -1800,3 +1800,78 @@ fn isolated_entities_emit_identical_bytes_in_both_drivers() {
     assert!(!precise.is_empty());
     assert_eq!(precise, parallel);
 }
+
+/// 移动中的活塞：`moving_piston` 的碰撞形状来自方块实体，只读视图在这一格要和
+/// 精确驱动给出同一个 `isFaceSturdy` 答案。物品泡在下落的水里时，
+/// `FlowingFluid.getFlow` 会查四周这一面结不结实，两种驱动因此必须逐刻一致。
+fn moving_piston_entity_snapshots(threads: usize) -> Vec<(Vec3, Vec3, i32, bool)> {
+    use mc_bamboo_blocks::{
+        BlockState, archive::create_block_entity, entity::Entity, state::LEVEL,
+    };
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_nbt::Tag;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("Kitten");
+    client.take_frames();
+    server.set_entity_threads(threads);
+
+    let piston_pos = BlockPos::new(9, -60, 8);
+    server.set_block(piston_pos, blocks::MOVING_PISTON);
+    let tag = Tag::Compound(vec![
+        (
+            "blockState".to_owned(),
+            Tag::String("minecraft:stone".to_owned()),
+        ),
+        ("facing".to_owned(), Tag::Byte(1)),
+        ("progress".to_owned(), Tag::Float(0.5)),
+        ("extending".to_owned(), Tag::Byte(1)),
+        ("source".to_owned(), Tag::Byte(0)),
+    ]);
+    let entity = create_block_entity(
+        "minecraft:piston",
+        piston_pos,
+        BlockState(blocks::MOVING_PISTON),
+        &tag,
+    )
+    .expect("活塞方块实体")
+    .expect("类型已知");
+    server.region().block_entities.insert(entity);
+
+    // 下落的水在活塞旁边，物品泡在里面。流动的水会查四周的 `isFaceSturdy`。
+    let water = BlockPos::new(8, -60, 8);
+    server.set_block(water, BlockState::WATER.with(LEVEL, 8).0);
+    server.set_block(water.above(), BlockState::WATER.0);
+    let mut item = Entity::ground_item_with_delta(
+        Vec3::new(8.5, -59.5, 8.5),
+        ItemStack::new(1, 1),
+        Vec3::new(0.0, 0.0, 0.0),
+    );
+    item.ground_mut().unwrap().set_pickup_delay(1000);
+    server.spawn_entity(item);
+
+    let _ = client.take_frames();
+    let mut snapshots = Vec::new();
+    for _ in 0..6 {
+        server.tick();
+        for uid in server.world_region().entities.ids() {
+            let entity = server.world_region().entities.get(uid).expect("物品还在");
+            snapshots.push((
+                entity.position,
+                entity.delta,
+                entity.ground().map_or(-1, |item| item.age),
+                entity.on_ground,
+            ));
+        }
+    }
+    snapshots
+}
+
+#[test]
+fn moving_piston_entities_match_in_both_drivers() {
+    let precise = moving_piston_entity_snapshots(0);
+    let parallel = moving_piston_entity_snapshots(4);
+    assert!(!precise.is_empty());
+    assert_eq!(precise, parallel);
+}

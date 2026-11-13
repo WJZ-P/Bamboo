@@ -60,6 +60,17 @@ pub trait BlockSource: Sync {
         false
     }
 
+    /// `Level.getBlockEntity(...) instanceof PistonMovingBlockEntity` 时的碰撞形状，
+    /// 也就是官方 `MovingPistonBlock.getCollisionShape` 的结果。
+    ///
+    /// `None` 表示这一格没有这样的方块实体：官方这时给的是 `Shapes.empty()`。
+    /// 算阶段借不到不是 `Sync` 的方块实体表，带这份表的视图在开头按位置拷出形状。
+    /// `moving_piston` 标了 `dynamicShape`，`isFaceSturdy` 每次都要读这份形状，
+    /// 不能用状态表里那份恒为空的形状。
+    fn moving_piston_shape(&self, _pos: BlockPos) -> Option<&[Aabb]> {
+        None
+    }
+
     /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
     ///
     /// 和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：精确驱动的
@@ -225,11 +236,11 @@ impl<T: BlockSource> BlockView for SourceView<T> {
     fn is_face_sturdy(&self, pos: BlockPos, face: Direction, support: SupportType) -> bool {
         let state = self.block_state(pos);
         if state.is(blocks::MOVING_PISTON) {
-            // `moving_piston` 的碰撞形状来自方块实体里的动画状态，只读视图拿不到；
-            // 按官方 `isFaceSturdy` 的写法交给 `World` 那一份实现去读。算阶段里没有
-            // 活塞在推实体，这里退化成表里的形状。
-            let boxes = shape::collision_boxes(state, pos, CollisionContext::Empty);
-            return shape::is_supporting(&boxes, face, support);
+            // 官方 `isFaceSturdy` 在 `dynamicShape` 方块上每次问 `getBlockSupportShape`，
+            // 也就是方块实体的碰撞形状。快照里没有实体时那一份形状是空的。
+            let empty: [Aabb; 0] = [];
+            let boxes = self.0.moving_piston_shape(pos).unwrap_or(&empty);
+            return shape::is_supporting(boxes, face, support);
         }
         if state.is_a(BlockAncestor::ShulkerBoxBlock) {
             if self.0.shulker_box_open(pos) {

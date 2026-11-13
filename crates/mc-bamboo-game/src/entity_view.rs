@@ -5,13 +5,15 @@
 //! 它和精确模式的 `World` 共用 `mc_bamboo_blocks::entity::view` 的查询实现。
 //!
 //! 方块实体表不是 `Sync`（里面是 `Box<dyn BlockEntity>`），所以算阶段只带
-//! 「哪些格子的潜影盒是开着的」这一份按位置拷出来的只读事实，不借整张表。
+//! 「哪些格子的潜影盒是开着的」和「移动中活塞的碰撞形状」这两份按位置拷出来的
+//! 只读事实，不借整张表。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
-    BlockState, ShulkerBoxEntity, WorldBorder,
+    BlockState, PistonMoving, ShulkerBoxEntity, WorldBorder,
     entity::view::{BlockSource, SourceView, ViewFacts},
+    shape::Aabb,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
 use mc_bamboo_data::{BlockAncestor, blocks};
@@ -27,6 +29,9 @@ pub(crate) struct ReadOnlyWorld<'a> {
     pub(crate) facts: ViewFacts,
     /// 盖子开着的潜影盒位置。`isFaceSturdy` 要读，别的方块实体数据算阶段用不到。
     pub(crate) open_shulker_boxes: BTreeSet<BlockPos>,
+    /// 移动中活塞的碰撞形状。`isFaceSturdy` 读它，和精确驱动从方块实体表里
+    /// 读到的形状必须一致。
+    pub(crate) moving_piston_shapes: BTreeMap<BlockPos, Vec<Aabb>>,
     /// 世界里漏斗方块的位置。没有漏斗时物品不发 `SuckIntoHopper` 命令。
     pub(crate) hopper_positions: BTreeSet<BlockPos>,
     /// 这一维度的世界边界快照，实体的碰撞要读它。
@@ -50,6 +55,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn shulker_box_open(&self, pos: BlockPos) -> bool {
         self.open_shulker_boxes.contains(&pos)
+    }
+
+    fn moving_piston_shape(&self, pos: BlockPos) -> Option<&[Aabb]> {
+        self.moving_piston_shapes.get(&pos).map(Vec::as_slice)
     }
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
@@ -137,9 +146,13 @@ pub(crate) fn hopper_positions(chunks: &ChunkStore) -> BTreeSet<BlockPos> {
     found
 }
 
-/// 从方块实体表里拷出盖子开着的潜影盒位置。只在算阶段开头跑一次。
-pub(crate) fn open_shulker_boxes(entities: &mc_bamboo_blocks::BlockEntities) -> BTreeSet<BlockPos> {
+/// 从方块实体表里拷出盖子开着的潜影盒位置，以及移动中活塞的碰撞形状。
+/// 只在算阶段开头跑一次；方块实体表本身不是 `Sync`，算阶段借不到它。
+pub(crate) fn block_entity_shapes(
+    entities: &mc_bamboo_blocks::BlockEntities,
+) -> (BTreeSet<BlockPos>, BTreeMap<BlockPos, Vec<Aabb>>) {
     let mut open = BTreeSet::new();
+    let mut pistons = BTreeMap::new();
     entities.visit(|pos, entity| {
         if entity
             .as_any()
@@ -148,6 +161,9 @@ pub(crate) fn open_shulker_boxes(entities: &mc_bamboo_blocks::BlockEntities) -> 
         {
             open.insert(pos);
         }
+        if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
+            pistons.insert(pos, piston.collision_shape());
+        }
     });
-    open
+    (open, pistons)
 }
