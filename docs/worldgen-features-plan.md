@@ -395,21 +395,43 @@ crates/mc-bamboo-worldgen/src/feature/
   `setPersistedStatus(ChunkStatus.TERRAIN)`。
 * 对每个 chunk 调 `Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS)`
   （公开静态方法），让 `ChunkAccess.getHeight` 直接可用。
-* `InvocationHandler` 只实现地物会用到的接口方法，按 `BlockPos` 算出
-  `(chunk index, local x/y/z)` 转发给对应的 `ProtoChunk`：
-  `getBlockState`、`getFluidState`、`setBlock`、`getChunk(int,int)`、
-  `getChunk(BlockPos)`、`hasChunk`、`getHeight(Heightmap.Types,int,int)`、
-  `getMinY`、`getHeight`、`getMinSectionY`、`getMaxY`、`isOutsideBuildHeight`、
-  `getBiome`（走 `BiomeManager`）、`getNoiseBiome`（走 chunk 的 quart 格）、
-  `getUncachedNoiseBiome`（走 `BiomeResolver`）、`getBiomeManager`、
-  `getSeed`、`registryAccess`、`getLevel`（返回自身）、
-  `setCurrentlyGenerating`（空实现）、`ensureCanWrite`（3×3 判定）、
-  `getBlockEntity` / `setBlockEntity` / `removeBlockEntity`（转发给 ProtoChunk）、
-  `getBlockTicks` / `getFluidTicks`（空实现）、`environmentAttributes`（可空）、
-  `markPosForPostProcessing`（转发）、`getLightEngine`（空实现）、
-  `isStateAtPosition` / `isFluidAtPosition`（用 `getBlockState` / `getFluidState`）。
-  其余方法返回默认值或抛 `UnsupportedOperationException`，真被调用了就能立刻发现。
+* `InvocationHandler` **只实现地物真正用到的方法**；每个方法的语义都照
+  `WorldGenRegion` 的字节码核对（下表给出对应行号，指 `javap -c -p
+  net.minecraft.server.level.WorldGenRegion` 的输出）。**没实现的方法一律抛
+  `UnsupportedOperationException`，不返回默认值**：没覆盖到的路径要立刻暴露，
+  不能悄悄算错。
+* 按 `BlockPos` 算出 `(chunk index, local x/y/z)` 转发给对应的 `ProtoChunk`：
+
+| 代理方法 | 照搬的 `WorldGenRegion` 逻辑 |
+|---|---|
+| `getBlockState(BlockPos)` | 331：先 `warnIfReadOutsideWriteZone`（超 3×3 只记日志），再 `getChunk(sectionX, sectionZ)` → `ChunkAccess.getBlockState` |
+| `getFluidState(BlockPos)` | 353：同上，转发 `getFluidState` |
+| `getChunk(int,int)` / `getChunk(int,int,status,boolean)` | 169 / 178：按 chessboard 距离查 9 宫格，超出返回 null；`ChunkStatus.isOrBefore` 判定照 71–80 |
+| `getChunk(BlockPos)` | 用 `SectionPos.blockToSectionCoord` 换算后转发 |
+| `hasChunk(int,int)` | 311：`distance < directDependencies.size()`（本轮 9 宫格内恒 true） |
+| `ensureCanWrite(BlockPos)` | 635：`isWithinWriteZone` = `|cx-centerX| <= 1 && |cz-centerZ| <= 1`（612 行），且不在升级中；false 就不写 |
+| `setBlock(BlockPos, BlockState, int, int)` | 691：先 `ensureCanWrite`；`ChunkAccess.setBlockState(pos, state, flags)`；`state.hasBlockEntity()` 时按 44–101 登记/移除方块实体（PROTOCHUNK 走 104–167 的 DUMMY NBT 分支）；`flags & 16 == 0` 时按 189–215 调 `getPostProcessPos` + `markPosForPostProcessing`。**`flags` 不能丢**：`Feature.safeSetBlock` 传 2，`setBlockAndUpdate` 传 3 |
+| `markPosForPostProcessing(BlockPos)` | 794：转发给对应 `ChunkAccess` |
+| `getHeight(Heightmap.Types,int,int)` | 946：`getChunk(sectionX, sectionZ).getHeight(type, x&15, z&15) + 1`；高度图随 `ChunkAccess.setBlockState` 里 `Heightmap.update` 自动增量更新 |
+| `getBiome(BlockPos)` | `LevelReader.getBiome`（24–30）：`getBiomeManager().getBiome(pos)`，即 8 角 fiddled distance；**不是** quart 格直读 |
+| `getNoiseBiome(int,int,int)` | `LevelReader.getNoiseBiome`（74–98）：先 `getChunk(...).getNoiseBiome(quart)`，取不到才 `getUncachedNoiseBiome` |
+| `getUncachedNoiseBiome(int,int,int)` | 391：转发给 `BiomeResolver`（`createUncachedResolver(state)`） |
+| `getBiomeManager()` | 385：返回 `new BiomeManager(resolver, BiomeManager.obfuscateSeed(seed))`（构造 150–165 行） |
+| `getSeed()` / `getRandom()` | 915 / 940：`getSeed()` 返回世界种子；`getRandom()` 用 `RandomState.getOrCreateRandomFactory("minecraft:worldgen_region").at(中心区块 origin)`（构造 106–130 行），地物放置本身不用它但要给对 |
+| `getMinY()` / `getHeight()` / `getMinSectionY()` / `getSeaLevel()` | 1029 / 1036 / 对应 `LevelHeightAccessor` 默认 / 933：从 `generatorSettings` 和 `LevelHeightAccessor` 取 |
+| `isOutsideBuildHeight(int)` / `isStateAtPosition` / `isFluidAtPosition` | 996 / 1005：用 `getBlockState` / `getFluidState` 转发 |
+| `getBlockEntity(BlockPos)` | 428：先 `getChunk(...).getBlockEntity`，为 null 时按 18–113 处理 DUMMY NBT |
+| `getBlockTicks()` / `getFluidTicks()` | 921 / 927：`WorldGenTickAccess`，本轮只比方块，转发给 ProtoChunk 的 tick 容器 |
+| `setCurrentlyGenerating(Supplier<String>)` | 162：存起来，仅 `warnIfReadOutsideWriteZone` 打日志用 |
+| `registryAccess()` / `enabledFeatures()` | 849 / 856：返回加载好的 `RegistryAccess` / `FeatureFlagSet` |
+| `getLevel()` / `isClientSide()` | 843 / 838：`getLevel()` 返回代理自身（对拍里没有真 `ServerLevel`），`isClientSide()` 返回 false |
+| `findBlocksIn(BlockPos,BlockPos)` | 554：对覆盖的每个 section 调 `warnIfReadOutsideWriteZone`，再走 `WorldGenLevel.findBlocksIn` 默认实现 |
+| `destroyBlock` / `removeBlock` | 408 / 822：转发到 `setBlock(AIR, 3)` / `setBlockAndUpdate` |
+| `getNearestPlayer` / `addFreshEntity` / `playSound` / `addParticle` / `levelEvent` / `gameEvent` / `getEntities` / `players` / `getWorldBorder` / `getLightEngine` / `getSkyDarken` / `getCurrentDifficultyAt` / `getServer` / `getChunkSource` / `getLevelData` / `dimensionType` / `environmentAttributes` / `nextSubTickCount` | **本轮不实现**：一旦被调用就抛 `UnsupportedOperationException`，立刻暴露新路径；确实需要时再逐个按 `WorldGenRegion` 对应字节码补 |
+
 * `getHeight` 要照 `WorldGenRegion` 加 1；`setBlock` 要照 `ensureCanWrite` 丢掉 3×3 之外的写。
+* 「空实现」只限于本来就无副作用的 `setCurrentlyGenerating` 和 `isClientSide`；
+  其余未覆盖方法一律抛异常。
 * `StructureManager` 用 `new StructureManager(proxy, new WorldOptions(..., generateStructures=false),
   ...)` 或 `Unsafe` 造的子类覆写 `shouldGenerateStructures() -> false`，让结构分支整段跳过。
 * 调 `generator.applyBiomeDecoration(proxy, centerChunk, structureManager)`。
