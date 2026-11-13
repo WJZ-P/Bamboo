@@ -171,21 +171,21 @@ fn write_worldgen(data: &VersionData, output_dir: &Path) -> Result<(), String> {
 
 /// 写文件前把写出的文本再读一遍，逐值比较位模式，确保 double 往返不丢最低位。
 ///
-/// 只比较浮点：整数、字符串和容器由 `serde_json` 的常规等价性保证。解析器特性被意外
-/// 关掉、或者某一侧换了会截断十进制的格式化方式时，这里会直接报错，而不是悄悄写出
-/// 一份和官方逐位不一致的数据。
+/// 整数、字符串和容器按常规等价性比较，浮点额外比 `to_bits()`。解析器特性被意外关掉、
+/// 或者某一侧换了会截断十进制的格式化方式时，这里直接报错，而不是悄悄写出一份和官方
+/// 逐位不一致的数据。
 fn check_worldgen_floats(original: &serde_json::Value, json: &str) -> Result<(), String> {
     let reread: serde_json::Value = serde_json::from_str(json)
         .map_err(|error| format!("世界生成数据写出的 JSON 读不回来：{error}"))?;
     let mut count = 0usize;
-    compare_floats(original, &reread, "worldgen", &mut count)?;
+    compare_round_trip(original, &reread, "worldgen", &mut count)?;
     if count == 0 {
         return Err("世界生成数据里一个浮点都没有".to_owned());
     }
     Ok(())
 }
 
-fn compare_floats(
+fn compare_round_trip(
     left: &serde_json::Value,
     right: &serde_json::Value,
     path: &str,
@@ -195,7 +195,8 @@ fn compare_floats(
 
     match (left, right) {
         (Value::Number(number), Value::Number(other)) => {
-            if let (Some(a), Some(b)) = (number.as_f64(), other.as_f64()) {
+            let (a, b) = (number.as_f64(), other.as_f64());
+            if let (Some(a), Some(b)) = (a, b) {
                 *count += 1;
                 if a.to_bits() != b.to_bits() {
                     return Err(format!(
@@ -204,6 +205,8 @@ fn compare_floats(
                         b.to_bits()
                     ));
                 }
+            } else if number != other {
+                return Err(format!("{path} 的整数往返变了：{number} -> {other}"));
             }
         }
         (Value::Array(left), Value::Array(right)) => {
@@ -211,7 +214,7 @@ fn compare_floats(
                 return Err(format!("{path} 的数组往返长度变了"));
             }
             for (index, (a, b)) in left.iter().zip(right).enumerate() {
-                compare_floats(a, b, &format!("{path}[{index}]"), count)?;
+                compare_round_trip(a, b, &format!("{path}[{index}]"), count)?;
             }
         }
         (Value::Object(left), Value::Object(right)) => {
@@ -222,10 +225,11 @@ fn compare_floats(
                 let b = right
                     .get(name)
                     .ok_or_else(|| format!("{path}.{name} 往返时不见了"))?;
-                compare_floats(a, b, &format!("{path}.{name}"), count)?;
+                compare_round_trip(a, b, &format!("{path}.{name}"), count)?;
             }
         }
-        _ => {}
+        _ if left == right => {}
+        _ => return Err(format!("{path} 往返时值变了：{left} -> {right}")),
     }
     Ok(())
 }
@@ -3469,6 +3473,19 @@ mod tests {
         }
         check_worldgen_floats(&worldgen, &serde_json::to_string_pretty(&worldgen).unwrap())
             .unwrap();
+    }
+
+    /// 写文件前的校验要能抓住只差一个最低位的改写。
+    #[test]
+    fn the_round_trip_check_rejects_a_one_ulp_edit() {
+        let original: serde_json::Value = serde_json::from_str(
+            r#"{"noise": {"jagged": {"base_amplitude": 1.0383104856073737}}}"#,
+        )
+        .unwrap();
+        let edited = r#"{"noise": {"jagged": {"base_amplitude": 1.0383104856073735}}}"#;
+        let error = check_worldgen_floats(&original, edited).unwrap_err();
+        assert!(error.contains("base_amplitude"), "{error}");
+        assert!(error.contains("丢了精度"), "{error}");
     }
 
     fn block(name: &str, states: &[u32]) -> Block {
