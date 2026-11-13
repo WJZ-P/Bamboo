@@ -84,11 +84,26 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
         let mut indices: Vec<u32> = Vec::new();
         for &biome in &biome_set {
             for name in ctx.registry.biome_features(biome, step) {
-                if let Some(id) = ctx.registry.placed_id(name) {
-                    // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
-                    if let Some(index) = globals.iter().position(|&g| g == id) {
-                        indices.push(index as u32);
+                let Some(id) = ctx.registry.placed_id(name) else {
+                    continue;
+                };
+                // 过渡期 `--ore-only`：Java 侧把非 ore 的 HolderSet 换空了，
+                // 这里要在收集 indices 时用同一套白名单过滤，否则两边跑的
+                // (index, step) 集合不同。
+                if let Some(kinds) = ctx.allowed_kinds {
+                    let Some(placed) = ctx.registry.placed(id) else {
+                        continue;
+                    };
+                    let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
+                        continue;
+                    };
+                    if !kinds.contains(&kind.as_str()) {
+                        continue;
                     }
+                }
+                // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
+                if let Some(index) = globals.iter().position(|&g| g == id) {
+                    indices.push(index as u32);
                 }
             }
         }

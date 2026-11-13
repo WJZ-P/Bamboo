@@ -641,20 +641,44 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 | `cargo test -p mc-bamboo-worldgen` | 93 个测试全过 |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
-**剩余差异（已定位到 `BiomeFilter`）**：`--ore-only --steps 6` 在第三个种子的
-chunk `(100,100)` 时，`minecraft:ore_clay` 放行的候选位置数量不同：Java 侧
-`OreFeature.place` 被调用 2 次（`getHeight` trace 2 行），Bamboo 侧只有 1 次。
-两边各自写下的 clay 团位置因此不同，产生约 200 格差异。
+**剩余差异（已定位到 `ore_clay` 的候选位置）**：`--ore-only --steps 6` 在第三个
+种子的 chunk `(100,100)` 时，`minecraft:ore_clay` 的 46 个候选位置在 Java 与
+Bamboo 之间**逐个不同**（Java 首个 `(1608,-53,1615)`，Bamboo 首个
+`(1606,178,1603)`），因此 `BiomeFilter` 放行的数量也不同（Java 2 个、
+Bamboo 1 个），各自写下的 clay 团位置不同，产生约 200 格差异。
 
 诊断证据：
 * `ore_clay` 只属于 `minecraft:lush_caves`（注册表 ID 31），只有该群系出现在
   3×3 群系并集里才会被收集，所以 `--seeds 1/2` 全绿、`--seeds 3` 才复现。
 * 输入 terrain 里 clay 数为 0，确认差异来自 features 阶段。
-* Rust 侧打印 46 个候选位置的 `biome_at` / `hasFeature`：绝大多数是
-  `ocean`(36)、`beach`(3)、`river`(42)，只有 `(1610,-18,1601)` 是
-  `lush_caves`(31) 并放行；Java 放行了 2 个。
+* `decoration_seed(seed=1, x=1600, z=1600) = 5899775146600525569`，
+  Java 与 Rust 一致；`setFeatureSeed(deco, 27, 6)` 的参数也一致。
+* 两边的 `indices` 里 `ore_clay` 都是 step 6 的全局 index 27，
+  而 index 0..25 的所有 ore 都逐方块一致。
 * 跳过 Rust 的 `ore_clay` 后差异方向反转（变成官方有 clay、Bamboo 没有），
   说明 Java 确实跑了 `ore_clay`，不是 `featureSet` 过滤差异。
+
+**已确认**：Java 与 Rust 的 `indices` 集合不同。`--ore-only` 把非 ore 的
+HolderSet 换空，Java 的 step 6 `indices` 只含 26 个 ore；Rust 仍从**未过滤**的
+`biome_features` 收集，多出 `underwater_magma`(26)、`disk_sand`(30)、
+`disk_clay`(31)、`disk_gravel`(32)。这些在 Rust 里因 `kind != ore` 或
+`Modifier::Unsupported` 被 `continue`，不调 `Feature.place`；而且
+`setFeatureSeed` 按 index 重新播种，理论上不该污染 index 27。但
+`FeaturePlacer` 的栈 DFS 里 `in_square` / `height_range` 会在
+`Feature.place` **之前**消费随机数，若 Rust 多跑的 index 在某些路径上
+没有完全跳过，就会打乱后续序列。
+
+已让 Rust 的 `indices` 在 `--ore-only` 下按 `allowed_kinds` 过滤，与 Java 的
+`keep` 集合对齐（两边现在都只跑 26 个 ore 的 index）；**差异仍存在**，符合
+`setFeatureSeed` 按 index 重置的预期，但这一步让两侧语义一致，保留。
+`OreProbe.java` 确认 `ore_clay` 的链是
+`CountPlacement[count=46] → InSquare → HeightRange[0 above bottom-256 absolute]
+→ BiomeFilter`，与导出的 JSON 一致。
+
+**下一步**：在 Java 代理里给 `FeaturePlacer` 的 `in_square` / `height_range`
+加探针（或直接给 `WorldgenRandom` 包一层记数），逐项对比 `ore_clay` 的
+46 个候选位置在两边各自消费的 `nextInt(16)` / `nextInt(321)` 序列。
+既然 `setFeatureSeed` 与 `count` 都一致，分歧只能在这条链的某个取数上。
 
 **已排除**：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`Mth.sin` 65536
 项查表（用 `MthProbe.java` 逐值比过）、`WorldgenRandom` 的
