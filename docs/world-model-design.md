@@ -18,9 +18,9 @@
 3. **区块束是唯一的搬运单位。** 一个区块的方块、光照、方块实体、计划刻、实体索引放在一个盒子里。加载、卸载、存盘、region 合并拆分都是搬盒子。
 4. **region 不同步加载区块，隔离带比 Folia 小一半。** 视距 10 时两名玩家相距约 530–640 格就能分属两个 region。
 5. **实体阶段分两步：并行算，按顺序落地。** 每个实体的感知、决策、寻路、移动并行执行，只读这一阶段开始时的世界，只写自己；对世界和别的实体的影响变成命令，之后按实体顺序串行应用。结果和线程数无关。
-6. **红石热点优化可行，形式是“触发级的记录重放”。** 以一次触发（计划刻、流体计划刻、方块事件或方块实体 tick，见 9.1）为单位，把“读到的状态 → 产生的全部效果”缓存起来，状态相同就直接套用效果。不改变执行顺序，结果和解释执行相同。它不是第一优先，命中率实验已做完，缓存本身还没做。
+6. **红石热点优化可行，形式是“触发级的记录重放”。** 以一次触发（计划刻、流体计划刻、方块事件或方块实体 tick，见 9.1）为单位，把“读到的状态 → 产生的全部效果”缓存起来，状态相同就直接套用效果。不改变执行顺序，结果和解释执行相同。命中率实验、缓存引擎、活塞门重放和「只在划算的触发点生效」的门槛都已做完；`bamboo.toml` 的 `redstone_cache` 默认关，九台机器里只有红石线阵列在正式配置下真的命中（`docs/redstone-cache-design.md` §12–14、`docs/performance-optimizations.md` 7i）。
 
-（2026-11-12 按实现更新：设计稿 9.1 / 9.7、`docs/redstone-cache-experiment.md`）
+（2026-11-14 按实现更新：`docs/redstone-cache-design.md` §12 / §13 / §14、`docs/performance-optimizations.md` 7h / 7i、`crates/mc-bamboo-server/src/config_files.rs` 的 `redstone_cache`；合并提交 `afaf4bb`、`672cb97`、`fa91b84`）
 7. **过载先降玩家看不见的东西**，按固定顺序，有下限。
 8. **保留精确模式**：每个维度一个 region、串行、齐步走，所有 oracle 在这个模式下跑。精确和性能是同一套代码的两种配置。
 
@@ -39,9 +39,9 @@
 - 区块包体在世界线程编码，按（位置，版本号）缓存；区块帧做成 `Arc<SharedFrames>`，压缩结果用 `OnceLock` 惰性缓存，第一条需要它的连接任务压一次，其余复用（`crates/mc-bamboo-game/src/outgoing.rs`）。
 - 出站是每名玩家一串片段：`PlayerSink::send(frames: Outgoing) -> bool`，`Outgoing` 区分普通帧和共享帧（`crates/mc-bamboo-game/src/inbound.rs`）。
 - 落后 2 秒以内连续追赶（`MAX_CATCH_UP`）。`TCP_NODELAY` 已开。节拍只用 `thread::sleep`（原来默认的 `hybrid` 先睡再自旋和世界线程 QoS 开关，2026-11-12 按用户决定删掉了）。实体线程数、交付 / 收回上限在 `bamboo.toml` 里配（`docs/configuration.md`），剖析器仍是环境变量 `BAMBOO_PROFILE`。没有自定义全局分配器。
-- 存档先做**官方的 Anvil 格式**，不兼容 26.3 之前的老存档布局（读到当空世界）。`mc-bamboo-storage` 的区块 NBT、Anvil 区域文件、方块实体 / 计划刻 / 三种实体 / 整块组装的编解码已完成并与官方对拍；M3 分支（`cb-m3-save`）已用一条 IO 线程把加载和卸载接进游戏，并接上 `level.dat`、玩家数据、`data/` 和三个保存命令（`docs/m3-storage.md` 第 2、12、14 节）。计算池、流水线里的并行生成仍未做。
+- 存档已经接进游戏，用**官方的 Anvil 格式**，不兼容 26.3 之前的老存档布局（读到当空世界）。`mc-bamboo-storage` 的区块 NBT、Anvil 区域文件、方块实体 / 计划刻 / 三种实体 / 整块组装的编解码已完成并与官方对拍；一条 IO 线程、Director 的读盘阶段、卸载写盘、官方节奏的匀速保存（每 6000 刻全量 + 每刻最多 20 个 + 单区块 200 刻冷却）、`level.dat` / 玩家数据 / `data/` / `chunk_tickets.dat`、三个保存命令和官方 `stopServer` 关服顺序都已接进生命周期（`docs/m3-storage.md` 第 12、14 节）。**计算池也已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时解析、生成阶段和存盘序列化在常驻后台线程上跑，`Read` 仍在 IO 线程；世界生成到噪声阶段已有纯函数和对拍，但还没接进 Director 的生成流水线（`ae76868`）。多阶段生成的邻居视图、多条 IO 线程、预编码帧没做。
 
-（2026-11-12 按实现更新：`docs/profiling.md` 第 2、7、9.4 节、`docs/performance-optimizations.md` 第 0、9 节、`docs/chunk-tickets.md`、`docs/m3-storage.md` 第 2、12 节；合并提交 `a1fd1a0`、`0442bc4`、`32b1a8b`、`f918171`、`fabb9ba`、`4d55b93`、`209e3ae`、`865bd3f`、`2452510`）
+（2026-11-14 按实现更新：`docs/m3-storage.md` 第 12 / 14 节、`docs/world-model-design.md` 5.3.1、`docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`ae76868`）
 
 ### 1.2 玩家感觉到的是什么
 
@@ -186,11 +186,11 @@ ChunkColumn
 
 `mc-bamboo-world` 里邻居段计数的限制已解决（`2635fe8`，现已合入 main）：柱里的 `sectionStates` 记着相邻段有没有方块，邻居柱里为它记下的计数留在原 store。现在 `take_column` / `insert_column` 会按目标世界此刻的方块重算这一柱和 8 个邻居柱的 26 个段状态（官方 `ThreadedLevelLightEngine.initializeLight` 的登记和 `updateChunkStatus` 的注销），所以单独把一柱放到一圈不同的邻居中间也正确；盒子自带的来源世界计数不跨世界沿用。已加载模式下还按 5.6 的规则给状态非 0 却没有数据层的段补建一层，状态变回 0 的段不丢数据层。
 
-**方块实体里带绝对时刻的字段**：`HopperEntity.ticked_game_time` 和 `PistonMoving.last_ticked` 装在不公开的 `Box<dyn BlockEntity>` 盒子里，仍是绝对时刻，装盒时换算不了。官方根本不存这两个字段，读回来是构造器初值（漏斗的 `TransferCooldown` 是官方存盘的字段，照它读写）；Bamboo 的存档编解码照官方不写它们，单元测试也钉住读回来是初值。所以「存盘后重新加载」不需要换算；跨到模拟时间不同的 region 时照官方「读回来是初值」处理即可，也不需要随 6.3 的 `time_offset` 一起改（多 region 还没实现，这是设计上的结论）。现在只有**红石缓存**需要它们不读世界时间：按 9.3 的规则，漏斗和移动中的活塞读 `game_time()` 就直接判成不能缓存（`docs/redstone-cache-experiment.md` 结论第 4、5 条）。容器条目的 `recheck_at` 已按相对剩余刻数装盒，计划刻和红石火把记录同理。
+**方块实体里带绝对时刻的字段**：官方根本不存 `HopperEntity.tickedGameTime` 和 `PistonMoving.lastTicked`，读回来是构造器初值（漏斗的 `TransferCooldown` 是官方存盘的字段，照它读写）；Bamboo 的存档编解码照官方不写它们，单元测试也钉住读回来是初值。为了让**方块实体休眠**和**红石缓存**不必每刻读世界时间，这两个字段现在都改成相对量：漏斗存 `ticked_game_time_age`（`now - 上一次真跑的 gameTime`，`None` 表示官方读盘后的初值 0），读路径按当前刻还原；移动活塞的 `lastTicked` 由 `BlockTicks::ticked_entities` 按相对量记（`adc5814`、`591d0f1`）。录制层记相对值，缓存守卫用 `K_ENTITY_TIME` 等子标签重算。装盒时相对量随盒子走，跨到模拟时间不同的 region 时按 6.3 的 `time_offset` 换算即可（多 region 还没实现，这是设计上的结论）。容器条目的 `recheck_at` 已按相对剩余刻数装盒，计划刻和红石火把记录同理。
 
 菜单、`lecterns.views` / `pending`、链路、玩家表和其它与位置无关的字段按 4.4 留在 region，前者跟着玩家走，后者以后搬去 `Global`。跨区块双箱要两半一起搬（也就是「整片相邻区块一起搬」），玩家开着的菜单要求「玩家和他附近的区块一起搬」；`dead` 容器条目和告示牌编辑者原样装盒。
 
-（2026-11-12 按实现更新：`crates/mc-bamboo-blocks/src/entity/store.rs`、`crates/mc-bamboo-game/src/region/column.rs`、`crates/mc-bamboo-blocks/src/archive/tests.rs`、`docs/m3-storage.md` 第 12 节、`docs/redstone-cache-experiment.md` 结论第 4、5 条；合并提交 `f918171`、`2635fe8`、`865bd3f`）
+（2026-11-14 按实现更新：`crates/mc-bamboo-blocks/src/hopper.rs` 的 `ticked_game_time_age`、`crates/mc-bamboo-blocks/src/ticks.rs` 的 `ticked_entities`、`crates/mc-bamboo-blocks/src/archive/tests.rs` 的 `hopper_ticked_game_time_stays_relative_across_ticks_and_archive`、`crates/mc-bamboo-blocks/src/recording.rs` 的 `K_ENTITY_TIME`、提交 `591d0f1` / `adc5814`；原文其余依据仍见 `f918171`、`2635fe8`、`865bd3f`）
 
 ### 4.3 实体存储 `EntityStore`
 
@@ -309,7 +309,7 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
   半径 1 / 2 邻域，查询是常数时间。可见范围最外面一两圈因此「加载着但不 tick」，
   会 tick 的区块读不到没加载的邻居。「邻居已交付」写成显式判断，给上面的每刻
   交付上限留好位置（内联执行器下交付是当刻完成的，这一条恒成立）。
-- 运行中的保存**匀速**进行（D6）：每刻存“脏区块数 ÷ 6000”个，至少 1 个，单区块 10 秒冷却照原版。磁盘结果和 300 秒集中保存一样，IO 是平的。同一区块有新快照时丢掉没写完的旧快照。
+- 运行中的保存**照官方字节码的节奏**，不是 D6 原式（每刻 `ceil(脏/6000)`）：`MinecraftServer.autoSave` 每 6000 刻把改过的全量拍一遍，`ChunkMap.saveChunksEagerly` 每刻最多给 20 个改过的区块拍快照交给 IO 线程，单区块 10 秒（200 刻）冷却；卸载快照另走一条有上限的 `ceil(待写/6000)`（至少 1）匀速队列。磁盘结果和 300 秒集中保存一样，IO 是平的。同一区块有新快照时按 `(pos, seq)` 丢掉没写完的旧快照。已加载脏区块用 `BorrowedParts` 只读拍快照、不取出盒子；方块 / 光照改动看 `ChunkStore` 版本号，纯上层改动由写路径放进 `Region::dirty`。`/save-all` 立刻全部拍快照，`/save-off` 照 `noSave` 暂停。（2026-11-14 按实现更新：`docs/m3-storage.md` 第 13 / 14 节、`crates/mc-bamboo-game/src/director_host.rs` 的 `SAVE_INTERVAL_TICKS` / `EAGER_SAVES_PER_TICK` / `save_loaded_dirty`；合并提交 `32b2fb3`、`be36ac3`、`1828b8c`）
 - 方块实体照官方 `saveAdditional` / `loadAdditional` 读写，不认识的键原样保留（D9 选 A）。
 - 存储格式、崩溃安全见 `m3-storage.md`，这里只规定它接在流水线的哪两头。
 
@@ -404,6 +404,12 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
 `WorldBorder::export_settings` / `restore`（`restore` 传存档里的游戏时间）写进按维度存放的
 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`，启动时读回，字段和官方
 `WorldBorder.Settings.CODEC` 一一对应、由 `saved-data` 子命令对拍。
+边界外按官方 `LevelChunk.isTicking(pos)` 只停方块实体：方块实体阶段把这一刻的边界换成整数方块盒，
+每个 ticker 多四次整数比较；盒子变了只查新旧盒子之间那一圈区块，睡着的机器按公式推进到上一刻并转醒，
+回到界内从原进度接着走。计划刻、流体刻、方块事件、随机刻和实体官方都不看边界，Bamboo 也照常跑
+（`b02ad69`、`e6f8d6e`、`docs/performance-optimizations.md` 7g.2）。
+
+（2026-11-14 按实现更新：`docs/performance-optimizations.md` 7g.2 / 7g.6、README「现在能玩什么」；合并提交 `b02ad69`、`e6f8d6e`、`edce3ab`）
 
 ---
 
@@ -422,7 +428,7 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
 | 6 | 方块事件 | `runBlockEvents` | 串行；热点走机器缓存 |
 | 7 | 实体：算 | `EntityTickList.forEach` | **并行**（第 8 节） |
 | 8 | 实体：落地。应用命令，发布公开状态，更新空间索引 | 同上 | 串行，按实体顺序 |
-| 9 | 方块实体 | `tickBlockEntities` | 串行；没事可做的休眠（9.5） |
+| 9 | 方块实体 | `tickBlockEntities` | 串行；没事可做的休眠（9.5，已实现）、边界外暂停 |
 | 10 | 只读收尾：实体追踪、方块变化和实体数据的组包 | 广播 | **按玩家并行** |
 | 11 | 区块批次、flush、把票变化和离境对象发给主控 | — | 串行 |
 
@@ -486,7 +492,9 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 `MoverType.PISTON` 的 `move`、移动记录和 `NOCLIP` 形状短路。两种接法：(A) 在方块实体 tick 里当场
 改实体，只能保证精确驱动逐位一致，并行驱动要把它登记成一条新的性能模式差异；(B) 新增一条意图命令，
 或者调整第 7 节的一刻顺序把活塞的推进挪到实体算阶段之前。做之前要先把接法定下来，再补官方假世界
-的逐刻对拍；整项估 2–3 天。**现在没实现**：移动中的活塞只有碰撞形状会挡住实体，不推也不拖。
+的逐刻对拍；整项估 2–3 天。**现在没实现**：移动中的活塞只有碰撞形状会挡住实体，不推也不拖。碰撞形状这一半已经做完：移动活塞按方块实体算出的形状进碰撞收集，实体在方块内的形状默认整格，潜影盒盖、细雪（皮革靴 / 潜行）和脚手架按实体状态取形状，精确和并行两条驱动都读同一份；官方 `move-oracle` / `entity-oracle` 有对应场景（`69cd662`、`4864a49`）。
+
+（2026-11-14 按实现更新：`crates/mc-bamboo-blocks/src/entity/ctx.rs` 的 `moving_piston_shape`、`crates/mc-bamboo-blocks/src/shape.rs` 的 `entity_inside_boxes`、README「已知限制」；合并提交 `69cd662`、`4864a49`）
 
 性质：
 
@@ -624,15 +632,19 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 
 “范围里没有实体”可以进键：记录时查到是空的，套用前再确认还是空的。
 
-活塞的那 100 次方块事件占这台机器 51.5% 的耗时，取数只决定音效参数、不决定方块状态。可以考虑把「取一个数、按公式算音高、发音效」整体记成一条效果，重放时仍从世界随机源取这个数，否则后面所有用世界随机源的逻辑都会和解释执行不同。**2026-11-12 用户定了采用这个办法**（不改成自己的随机源，结果和官方逐位一致），排在方块实体休眠之后做；还没有实现。
+活塞的那 100 次方块事件占这台机器 51.5% 的耗时，取数只决定音效参数、不决定方块状态。可以考虑把「取一个数、按公式算音高、发音效」整体记成一条效果，重放时仍从世界随机源取这个数，否则后面所有用世界随机源的逻辑都会和解释执行不同。**2026-11-12 用户定了采用这个办法**（不改成自己的随机源，结果和官方逐位一致）。**已按 `docs/redstone-cache-design.md` §14 实现**：`ReplayEffect::PistonSound` 重放时照取一个 `next_random_float()` 再按 `scale` / `base` 算音高；活塞门、方块实体 tick 本身也已接进缓存驱动，不能还原 tick 后状态的 ticker（熔炉、漏斗、活塞 `finalTick`）仍退回解释执行（`fa91b84`、`672cb97`）。
+
+（2026-11-14 按实现更新：`docs/redstone-cache-design.md` §14、`docs/performance-optimizations.md` 7i `正确性`；合并提交 `672cb97`、`fa91b84`）
 
 **热点判断和退出**：每个触发点记累计的解释执行耗时和每秒触发数，**耗时为主、频率兜底**，持续超过阈值才开始录制。每个触发点记命中率，长期命中不了的停止录制，冷却后再试。每个 region 的缓存有内存上限，按最近使用淘汰。这三条是第一版缓存里**必须**有的：熔炉阵列就是「命中不了还一直录」的内存反例（`docs/redstone-cache-experiment.md` 结论第 6 条）。
 
 （2026-11-12 改热点口径：原先写的是「每个区块段数每秒执行了多少触发」，但命中率实验里红石线阵列只有约 1.7 次触发/秒、却是单机最省时的——每次触发读 1178 个位置、耗时 p50 10.8 ms、命中后可省 99.2% 的「算」的时间。只按频率会把最该缓存的那台漏掉，所以改成以「触发点累计解释耗时」为主，频率只作兜底。实现见 `docs/redstone-cache-design.md` §4.3、§10 Q6。）
 
-**套用**：按记录写方块（走不触发邻居更新的底层写入，但照常登记“这一段变了”供广播和光照使用）、排计划刻、排方块事件、发音效。写的同时更新段哈希。实验只量了「算」，套用时省不掉的写、光照和发包还没有量。
+**套用**：按记录写方块（走不触发邻居更新的底层写入，但照常登记“这一段变了”供广播和光照使用）、排计划刻、排方块事件、发音效（活塞音高重放时照取一次世界随机数）。写的同时更新段哈希。实验只量了「算」；`docs/performance-optimizations.md` 7i 量的是整个方块逻辑阶段，套用时省不掉的写、光照和发包仍没有单独量过。
 
-（2026-11-12 按实现更新：`docs/redstone-cache-experiment.md`「方法 / 结果 / 活塞门的随机数 / 结论」、`docs/world-model-design.md` 9.4、9.7；合并提交 `bec0707`）
+**实现进度**：9.3 描述的录制、守卫、重放和热点退出规则已经是代码（`docs/redstone-cache-design.md` §12–14）；第二版把「累计解释耗时 + 频率」的热点口径换成**确定性的读写项数**当代理，`min_work = 65536`、128 次触发结一次净收益账、负值停录并冷却重试，所有触发点都不活跃时走不带录制包装的原路径，常驻开销为 0。第一版的 `immediate`（不设门槛）只作对照和方块对拍。数字见 `docs/performance-optimizations.md` 7i。
+
+（2026-11-14 按实现更新：`docs/redstone-cache-design.md` §12 / §13 / §14、`docs/performance-optimizations.md` 7h / 7i；合并提交 `afaf4bb`、`672cb97`、`fa91b84`；实验结论仍依据 `docs/redstone-cache-experiment.md` 与 `bec0707`）
 
 ### 9.4 能快多少，对什么没用
 
@@ -641,22 +653,26 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 机器 | 效果 |
 |---|---|
 | 时钟、脉冲电路、显示屏 | 状态周期性重复，命中率高。**实测 98%–99.8%**，只要几条到几十条记录 |
-| 反复开关的活塞门 | 原来预测“命中率高”，**按现在的规则实测一条也缓存不了**：活塞伸缩时取一次世界随机源算音效音高，移动中的活塞每刻读世界时间。把这两处处理掉之后是 96.5% |
+| 反复开关的活塞门 | 原来预测“命中率高”，**按实验的严格口径实测一条也缓存不了**：活塞伸缩时取一次世界随机源算音效音高，移动中的活塞每刻读世界时间。把这两处处理掉之后是 96.5%；现在音效取数和 `lastTicked` 都已做成可重放（`redstone-cache-design.md` §14），但正式配置下活塞门的单次工作量低于 `min_work` 门槛，仍不触发缓存，`immediate` 下逐刻对拍 0 不一致 |
 | 观察者加活塞的收割机 | 信号传递的那几刻能命中；破坏作物、产生掉落物的那一刻不能 |
 | 计数器、红石计算机 | 状态很少重复，命中率低，占内存。适合 9.6 的编译方式。**还没有被真正检验**：实验里没有搭出状态单调累加的电路 |
 | 漏斗链、物品分类机 | 基本无效。**实测的原因比“状态不重复”更靠前**：漏斗每次 tick 都读世界时间算冷却，按 9.3 直接不缓存。忽略时间读的话命中率 99% 以上，但只省两成多的时间 |
 | 刷怪塔、村民交易所 | 开销在实体，不在红石。靠第 8 节 |
 
-还有一点要清楚：**套用省掉的是“算”，省不掉“写”。** 红石灯亮灭引起的光照更新、发给客户端的方块变化，一样要做。
+还有一点要清楚：**套用省掉的是“算”，省不掉“写”。** 红石灯亮灭引起的光照更新、发给客户端的方块变化，一样要做。这张表是命中率实验（离线估计）的口径；正式配置的实测见 `docs/performance-optimizations.md` 7i：红石线阵列整个方块逻辑阶段 39.75×，其余八台 0.99–1.01×，门槛主动放弃了小电路在 `immediate` 下的收益。
+
+（2026-11-14 按实现更新：`docs/redstone-cache-design.md` §14、`docs/performance-optimizations.md` 7i；合并提交 `672cb97`、`fa91b84`）
 
 ### 9.5 先做这些更便宜的
 
 它们都不改变结果，实现简单，而且对上表里“无效”的那几类机器正好有效：
 
-1. **方块实体休眠**：熔炉没有燃料和原料、漏斗没东西可搬也没东西可吸时，从 tick 列表里摘掉，登记唤醒条件（物品栏变了、邻居变了、有物品实体进入上方）。漏斗是生存服里最常见的开销来源之一。**2026-11-12 用户把它扩展为“睡到下一个事件”**：正在烧的熔炉也不必每刻跑，算出这一个物品烧完、燃料烧完哪个先到，睡到那一刻、在原来的运行顺序位置醒来；外部变化立刻叫醒重算，睡着时被读的值（界面进度条、存盘）按公式现算，结果和官方逐位一致。正在做。
-2. **容器引用缓存**：漏斗记住它朝向和上方的容器是谁，邻居变了再重查。
-3. **信号查询缓存**：同一刻里对同一位置的 `getSignal` 之类的查询记下结果，该位置或邻居被写时失效。
+1. **方块实体休眠**：**已做完**（`docs/performance-optimizations.md` 7g）。熔炉和合成器按到期时刻排日程，正在烧的熔炉算出物品烧完 / 燃料烧完哪个先到，睡到那一刻、在原来的运行顺序位置醒来；外部变化立刻叫醒重算，睡着时被读的值（界面进度条、存盘）按公式现算。营火四格、酿造台、漏斗的 8 刻冷却期、以及「不在冷却、无事可做」的闲置漏斗也都睡到外部变化：闲置漏斗按 `Watchers` 关注自己 / 朝向 / 上方格子和吸取盒的 16³ 段，实体位置变化和容器写入按关注表叫醒。逐位一致由差分测试守住（5 种子 × 3 布局 × 2000 刻，精确和并行两条驱动）。区块不能 tick 和世界边界外都按官方暂停、不补跑。400 台熔炉 15.2–16.6×、300 台营火 23.2×、300 台酿造台 146.7×、300 台闲置漏斗 93.7–93.8×（都只量方块实体阶段）。剩下两条尾巴：吸取盒里长期停着一件吸不进去的物品时那个漏斗仍每刻真跑；实体容器（矿车 / 船）还没移植。
+2. **容器引用缓存**：还没做。漏斗现在每次 `tryMoveItems` 重查朝向和上方的容器。
+3. **信号查询缓存**：还没做。同一刻里对同一位置的 `getSignal` 之类的查询目前每次都算。
 4. **红石线算法做成选项**：原版红石线断电时的更新量很大。26.3 自带一套实验性的算法：特性开关 `FeatureFlags.REDSTONE_EXPERIMENTS`，实现是 `ExperimentalRedstoneWireEvaluator`，和默认的 `DefaultRedstoneWireEvaluator` 并列 `[事实：官方 26.3 的类]`。可以照它移植一份作为可选项，并用 oracle 在打开这个特性的条件下对比。它和默认算法的更新顺序不同，所以是开关，默认关。它具体快多少 UNVERIFIED。**已决定先不做，保持默认算法。** 要做的话不只是换一个类：开关打开后按钮、拉杆、中继器、侦测器、红石火把、活塞等十几个类发邻居更新时都要带上 `Orientation`；来向未知时它还会读世界随机源，这类触发按 9.3 不能缓存。
+
+（2026-11-14 按实现更新：`docs/performance-optimizations.md` 7g.1–7g.6 / 第 9 节、`crates/mc-bamboo-blocks/src/block_entity/watch.rs`、`crates/mc-bamboo-blocks/src/hopper.rs` 的相对 `tickedGameTime`；合并提交 `8baec27`、`df82a78`、`e6f8d6e`、`edce3ab`）
 
 ### 9.6 以后：编译成网表
 
@@ -668,7 +684,9 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 
 > **已做，结果在 `redstone-cache-experiment.md`。** 要点：九台机器约 16 万次触发，“键相同但效果不同”为 0；纯信号电路命中 98%–99.8%；9.3 第一版的段哈希键在多数机器上只比精确键低 0–0.1 个百分点、键小 4–330 倍；读世界时间（漏斗的冷却、移动中的活塞）是最大的拦路虎，把这些绝对时刻改成相对量后活塞门和漏斗类机器才用得上缓存；熔炉这类进度单调增长的方块实体缓存不了，要靠 9.5 的休眠。实验只量了“算”，没有量套用时省不掉的写、光照和发包。上面 9.4 的表已按实测更正。
 
-不写缓存，只在解释器里加统计：每次触发记（触发点，读集合的哈希，耗时，读和写的数量），离线算“如果有缓存，命中率是多少，能省多少时间”。在几种典型机器上跑（时钟、活塞门、分类机、农场、一台小计算机）。命中率和可省时间都高，再做 9.3。
+不写缓存，只在解释器里加统计：每次触发记（触发点，读集合的哈希，耗时，读和写的数量），离线算“如果有缓存，命中率是多少，能省多少时间”。在几种典型机器上跑（时钟、活塞门、分类机、农场、一台小计算机）。命中率和可省时间都高，再做 9.3。**9.3 已经做完并接进游戏**，`redstone_cache` 默认关；正式配置下九台机器里只有红石线阵列划算（39.75×），其余八台按确定性工作量门槛不录，开 / 关都在 0.99–1.01× 内（`docs/redstone-cache-design.md` §12–14、`docs/performance-optimizations.md` 7i）。还没量的是套用时省不掉的写、光照更新和发包，以及真正单调累加的计数器式电路。
+
+（2026-11-14 按实现更新：`docs/redstone-cache-design.md` §12 / §13 / §14、`docs/performance-optimizations.md` 7i / 第 9 节；合并提交 `afaf4bb`、`672cb97`、`fa91b84`）
 
 ---
 
@@ -836,7 +854,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 0 | 剖析器：每个 region、每个 tick 阶段的耗时直方图；区块从请求到发出的延迟；各队列长度；tick 起点抖动；主控处理延迟 | 后面每一步的依据 | **做了一部分**：`mc-bamboo-game` 的剖析器、假玩家压测工具和基线已落地（`a1fd1a0`、`b841143`、`docs/profiling.md`），阶段直方图、墙上时间的区块延迟、起点抖动 / 刻间隔偏差、flush 字节数、按阶段和子项拆分都有；「主控处理延迟」要等主控建起来才有，`chunk_latency_us` 只覆盖排队到写出、不含读盘，和 1.2 的「读盘 p95 < 100 ms」不是一个量 |
 | 1 | 数据模型：区块束；光照和带位置的状态进区块；`Level` 的写入口收窄（第 3、4 节） | 存档、合并拆分、录制的前提。oracle 全绿是验收条件 | **做了一部分**：`Level` 已收窄成 `LevelSideState` / `LevelTables` 和 `LevelEntities` / `EntityTables`（`0442bc4`、`f918171`），`ChunkStore::take_column` / `insert_column`、`RegionColumn::take_columns` / `insert_column` 和实体的按区块取放都能整盒取放（`2b2d5f5`、`a62f179`、`5c1c0d9`、`c396f2e`、`f918171`），每一步的 oracle 都全绿。**存储内部仍是整张表**：`ChunkStore` 是「模板 + 改过的表 + 四份光照表」，计划刻、方块实体、红石记忆和容器等四张表仍按全 region 存，只加了按区块的取放接口（见 4.2）；`LevelEntities` 上又开了三个交出整张实体表的入口，还没收窄到单独 trait（见第 3 节） |
 | 2 | 网络：分段出站缓冲、区块帧只压缩一次、广播从推改成拉（第 11 节、第 7 节第 10 段） | 多人同屏时 CPU 下降 | **做了一部分**：`PlayerSink::send(Outgoing)` 分段出站和 `Arc<SharedFrames>` 用 `OnceLock` 只压一次已合入（`32b1a8b`）；包体缓存和帧缓存同时保留，帧仍在世界线程编码、压缩仍在连接任务里做。**广播从推改成拉没做**，多人同屏时 CPU 是否下降没有量过（第一份基线里 200 人扎堆时实体同步和追踪平均 1.3 ms，`docs/profiling.md` 第 6 节） |
-| 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **M3 存档部分已做完**：`TicketTable`、存档编解码、Director 状态机接进 `World::tick` 都做完；M3 分支（`cb-m3-save`）又接上了真实磁盘 IO：一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，读请求异步、结果下一刻开头经信箱收回；`mc-bamboo-game::chunk_codec` 把解析/序列化放在 `ChunkCodec` 接口后（当前 `InlineCodec` 内联、剖析器量耗时）。Director 的 `Task::Read` 是真正的读盘阶段，卸载时脏区块序列化后写盘、pristine 直接丢，Parking 改成写盘途中缓冲（写盘途中被请求回来拿最新内容），D6 匀速保存。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`、`chunk_tickets.dat`、玩家数据（进服读、离开/自动保存/关服写）和 `save-all`/`save-on`/`save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时解析、每个生成阶段、卸载存盘的序列化在常驻后台线程上做，默认 0 仍是内联；内联和池子跑同一场景盘上字节相同。**还没做**：多条 IO 线程、多阶段生成的邻居快照（M4，方案见 5.3.1）、预编码帧。运行中的 D6 匀速保存现在也覆盖仍加载的脏区块（每刻 `ceil(脏/6000)` 个、至少 1、单区块 10 秒冷却，`/save-all` 立刻全部拍快照，`/save-off` 暂停），快照用 `Region::encode_loaded_column` 走卸载存盘同一条编码路径原地取出/放回、区块不卸载；脏判定用 `ChunkStore` 版本号，纯上层（容器/实体/计划刻）改动的区块仍要等卸载或 `/save-all`。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
+| 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **存档和计算池已做完，M4 多阶段生成还没接进流水线**：`TicketTable`、存档编解码、Director 状态机都接进 `World::tick`；一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，带世界目录时所有区块（盘上有和没有）都走同一条异步读流水线，结果下一刻开头经信箱收回，进服第一批仍按距离交付（`docs/m3-storage.md` 第 14 节 `05d8fa1`）。非 `full` 的 `Status` 按 ProtoChunk 读回、方块光照由模板补齐，`.mcc` 外置区块也能扫到。卸载时脏区块序列化后写盘、pristine 直接丢；Parking 只留作写盘途中缓冲。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`（游戏规则 / 世界生成设置 / 世界边界）、`chunk_tickets.dat`、玩家数据和 `save-all [flush]` / `save-on` / `save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时 `Decode` / 每个 `Generate` 阶段 / `Save` 的序列化在常驻后台线程上做，`Read` 仍在 IO 线程、`Assemble` 内联；默认 0 是世界线程上的 `InlineCodec`，内联和池子跑同一场景盘上字节相同。**运行中的匀速保存照官方字节码，不是 D6 原式**：`MinecraftServer.autoSave` 每 6000 刻一次全量（只写改过的）、`ChunkMap.saveChunksEagerly` 每刻最多 20 个、单区块 200 刻冷却；卸载快照另走 `ceil(待写/6000)`（至少 1）的有上限匀速队列。`Region::encode_loaded_column` 从 `&Region` 用 `BorrowedParts` 只读组装一柱，和卸载存盘共用 `chunk_content::encode_parts`，**不取出/放回盒子、不卸载、不算完待算光照、不发任何包、不改运行态表的顺序和版本号**；写出的 NBT 与卸载逐字节一致。纯上层（容器 / 实体 / 计划刻 / 方块实体 / 红石记忆）改动也由 `Region::dirty` 标脏并参与匀速保存，不必等卸载或 `/save-all`。`/save-all` 立刻给所有已加载脏区块拍快照，`/save-off` 照 `noSave` 暂停。**还没做**：多条 IO 线程、多阶段生成的邻居快照（M4，方案见 5.3.1）、预编码帧；世界生成到噪声阶段已有纯函数和对拍，但还没接进 Director 的生成流水线（`ae76868`）。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
 | 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **没做**：仍是一条世界线程带一个 `Region`，没有主控线程、没有 tick 线程池，`Global` 和 Director 都在这条线程上 |
 | 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **没做** |
 | 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行用 `ScopedThreads` 每刻起线程（只用于实验），以后可以改成往计算池交任务；只读收尾仍是串行，降级阶梯没有实现 |
@@ -845,11 +863,12 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 
 和主线独立、可以随时插进来的：
 
-- 方块实体休眠、容器引用缓存、信号查询缓存（9.5）：**没做**；红石线实验性算法已决定先不做（9.5 第 4 条）。
-- 红石触发的命中率实验（9.7）：**做完**（`bec0707`、`docs/redstone-cache-experiment.md`），结果好再做机器缓存（9.3）：**缓存本身没做**。
+- 方块实体休眠（9.5 第 1 条）：**做完**（`docs/performance-optimizations.md` 7g.1–7g.6）。熔炉 / 合成器、营火 / 酿造台 / 漏斗冷却、闲置漏斗、边界外暂停共四轮；容器引用缓存和信号查询缓存（第 2、3 条）**没做**，红石线实验性算法（第 4 条）已决定先不做。
+- 红石触发的命中率实验（9.7）和机器缓存（9.3）：**都做完**（`bec0707`、`docs/redstone-cache-design.md` §12–14）。第一版引擎、第二版确定性工作量门槛、第三版活塞门和方块实体 tick 重放已合入；`bamboo.toml` 的 `redstone_cache` 默认关，正式配置下九台机器只有红石线阵列划算。数字见 `docs/performance-optimizations.md` 7h / 7i。
 - 换全局分配器、换压缩后端，实测后决定：**没做**。
+- 世界生成的噪声阶段（`ae76868`）：纯函数和区块级 `chunkgen` oracle 做完，群系 quart 格和 `doFill` 的方块逐位对拍；地表规则、雕刻器、接进 Director 流水线还没做（`docs/worldgen.md`，本任务不改它）。
 
-（2026-11-12 按实现更新：`docs/profiling.md` 第 2、6、9 节、`docs/performance-optimizations.md` 第 0、9 节、`docs/m3-storage.md` 第 12 节、`docs/chunk-tickets.md`、`docs/redstone-cache-experiment.md`；合并提交 `a1fd1a0` / `b841143` / `0442bc4` / `32b1a8b` / `2b2d5f5` / `a62f179` / `5c1c0d9` / `f918171` / `fabb9ba` / `209e3ae` / `4d55b93` / `865bd3f` / `b99f8b5` / `bec0707`）
+（2026-11-14 按实现更新：第 16 节第 3 步、`docs/m3-storage.md` 第 14 节、`docs/performance-optimizations.md` 7g / 7i / 第 9 节、`docs/redstone-cache-design.md` §12–14、`docs/worldgen.md`「还没做」、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、`crates/mc-bamboo-game/src/region/content_snapshot.rs`；合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`afaf4bb`、`672cb97`、`fa91b84`、`8baec27`、`df82a78`、`e6f8d6e`、`edce3ab`、`ae76868`）
 
 ---
 
@@ -863,9 +882,9 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 
 4. **`public` 里放什么会不断被追加。** 每加一个字段都增加每刻的拷贝量。要有评审规则：只有被别的实体的逻辑读到的才能进。
 5. **命令落地的语义要逐个对着原版定。** “后到的看到状态已变就作废”在大多数情况下合理，但每种命令都要想一遍原版里两个实体同刻抢同一个东西会怎样。
-6. **机器缓存的收益已有命中率实验。** 9.7 的实验做完（`docs/redstone-cache-experiment.md`）：九台机器约 16.4 万次触发、严格和乐观两种口径、三种键，「键相同但效果不同」为 0；纯信号电路精确键命中率 98.1%–99.8%、可省 96.0%–99.7% 的「算」的时间，只要 3–98 条记录（6 KiB–4.3 MiB）。活塞门、漏斗链、分类机、熔炉按现在的规则用不上缓存，原因和乐观口径的上界见 9.3、9.4。还要测的：写屏障给普通写方块增加的开销（预期是一次分支）、**套用时省不掉的写、光照更新和发包**（实验只量了「算」），以及真正单调累加的计数器式电路。缓存本身还没实现。
+6. **机器缓存的收益已有命中率实验，缓存本身也已实现。** 9.7 的实验做完（`docs/redstone-cache-experiment.md`）：九台机器约 16.4 万次触发、严格和乐观两种口径、三种键，「键相同但效果不同」为 0；纯信号电路精确键命中率 98.1%–99.8%、可省 96.0%–99.7% 的「算」的时间，只要 3–98 条记录（6 KiB–4.3 MiB）。实现进度见 `docs/redstone-cache-design.md` §12–14：写方块时维护 128 位段哈希（`+6.4 ns/写`，7h），活塞音效重放照样取世界随机数，方块实体 tick 也接进缓存驱动；第二版按确定性工作量门槛只在划算的触发点录制，正式配置下红石线阵列 39.75×，其余八台 0.99–1.01×（7i）。活塞门在正式配置下因工作量低于门槛而不触发缓存，`immediate` 下逐刻对拍 0 不一致；漏斗链、分类机、熔炉这类机器靠 9.5 的休眠，不靠缓存。还要测的：**套用时省不掉的写、光照更新和发包**（7i 量的是整个方块逻辑阶段，实验只量了「算」），以及真正单调累加的计数器式电路。
 
-   （2026-11-12 按实现更新：`docs/redstone-cache-experiment.md` 结论、设计稿 9.4 / 9.7；合并提交 `bec0707`）
+   （2026-11-14 按实现更新：`docs/redstone-cache-experiment.md` 结论、`docs/redstone-cache-design.md` §12 / §13 / §14、`docs/performance-optimizations.md` 7h / 7i / 第 9 节；合并提交 `bec0707`、`afaf4bb`、`672cb97`、`fa91b84`）
 
 7. **主控是单点。** 它卡住，所有 region 的重新排队都会晚。
 8. **广播从推改成拉**在“变化很多、玩家很少”时可能更慢，第 2 步两种都测。
