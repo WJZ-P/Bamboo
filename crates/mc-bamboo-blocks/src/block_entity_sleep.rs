@@ -1292,6 +1292,8 @@ struct CooldownScene {
     ticks: BlockTicks,
     /// 开着的界面和存档每刻读到的冷却、时间相对量。
     reads: Vec<String>,
+    /// 是否有过一刻真跑过 ticker。
+    ran_at_least_once: bool,
 }
 
 impl CooldownScene {
@@ -1326,6 +1328,7 @@ impl CooldownScene {
             level,
             ticks,
             reads: Vec::new(),
+            ran_at_least_once: false,
         }
     }
 
@@ -1333,6 +1336,7 @@ impl CooldownScene {
         self.ticks.set_time(now);
         set_block_entity_clock(now);
         let _ = run_block_entity_tick(&mut self.level, &mut self.ticks);
+        self.ran_at_least_once |= self.level.due_count() > 0;
         set_block_entity_clock(now);
         self.reads.push(self.snapshot());
     }
@@ -1456,7 +1460,8 @@ fn hopper_cooldown_sleep_matches_ticking_every_tick_with_external_events() {
     // 到冷却归零那一刻，漏斗确实动过：槽位从第 1 刻到第 40 刻变了，
     // 而且两份世界的快照逐刻相同（上面的比较已经全过）。
     assert_ne!(sleeping.reads.first(), sleeping.reads.last());
-    assert!(sleeping.level.due_count() > 0, "到点那刻真跑过 ticker");
+    // 到冷却归零那几刻真跑过 ticker；最后一刻可能已经进入闲置休眠。
+    assert!(sleeping.ran_at_least_once, "40 刻里到点那刻真跑过 ticker");
 }
 
 /// 测量用的手工基准：几百台正在烧东西的熔炉，方块实体阶段每刻的耗时。

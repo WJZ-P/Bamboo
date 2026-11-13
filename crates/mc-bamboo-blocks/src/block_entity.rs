@@ -628,6 +628,13 @@ impl BlockEntities {
         }
     }
 
+    /// 这一格有没有别的睡眠条目关注（自己关注自己不算）。
+    pub fn has_cell_watchers(&self, pos: BlockPos) -> bool {
+        self.watchers
+            .cell_watchers(pos)
+            .is_some_and(|list| list.iter().any(|&watcher| watcher != pos))
+    }
+
     /// 有实体在 `area` 里出现、移动或者换了物品：叫醒盒子和它相交的睡眠条目。
     ///
     /// An entity appeared, moved or changed its stack inside `area`.

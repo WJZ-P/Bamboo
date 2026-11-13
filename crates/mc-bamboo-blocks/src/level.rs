@@ -229,6 +229,10 @@ pub trait LevelSideState {
     /// 这一格的方块或容器内容变了：叫醒关注它的睡眠条目，见 [`BlockEntities::notify_cell`]。
     /// 默认什么都不做（没有休眠的世界）。
     fn notify_block_entity_cell(&mut self, _pos: BlockPos) {}
+    /// 这一格有没有别的睡眠条目关注它。方块实体自己 tick 改了物品时要查。
+    fn has_block_entity_watchers(&self, _pos: BlockPos) -> bool {
+        false
+    }
     /// 有实体在这个盒子里出现、移动或换了物品，见 [`BlockEntities::notify_box`]。
     fn notify_block_entity_box(&mut self, _area: Aabb) {}
     /// 睡眠条目关注的 16³ 段变过时交出现在的集合，见 [`BlockEntities::take_watched_sections`]。
@@ -442,6 +446,10 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
 
     fn notify_block_entity_cell(&mut self, pos: BlockPos) {
         self.block_entities_table_mut().notify_cell(pos);
+    }
+
+    fn has_block_entity_watchers(&self, pos: BlockPos) -> bool {
+        self.block_entities_table().has_cell_watchers(pos)
     }
 
     fn notify_block_entity_box(&mut self, area: Aabb) {

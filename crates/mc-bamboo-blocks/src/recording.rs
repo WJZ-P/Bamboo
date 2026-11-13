@@ -1191,6 +1191,10 @@ impl LevelSideState for Recording<'_> {
         self.level.notify_block_entity_cell(pos);
     }
 
+    fn has_block_entity_watchers(&self, pos: BlockPos) -> bool {
+        self.level.has_block_entity_watchers(pos)
+    }
+
     fn notify_block_entity_box(&mut self, area: crate::Aabb) {
         self.level.notify_block_entity_box(area);
     }

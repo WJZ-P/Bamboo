@@ -15,7 +15,7 @@ use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
-    block_entity::{BlockEntity, block_entity_clock},
+    block_entity::{BlockEntity, Watch, block_entity_clock},
     container::{
         CONTAINER_STACK_LIMIT, Container, item_max, remove_item, same_item_same_components,
     },
@@ -48,6 +48,12 @@ pub struct HopperEntity {
     /// 冷却期睡眠。官方这几天里只把 `cooldownTime` 减 1、把时间字段写成世界时间，
     /// 两者都按下面的公式现算，不落到字段里。
     sleep: Option<HopperSleep>,
+    /// 这一刻的 `tryMoveItems` 返回 false、并且没有别的可见改动，可以睡到外部叫醒。
+    idle: bool,
+    /// 已经在闲置睡眠里。读路径按「每刻都跑过」现算 `tickedGameTime`。
+    idle_sleeping: bool,
+    /// 上次真跑时登记的关注范围，供 `watch()` 交给方块实体表。
+    watch: Option<Watch>,
 }
 
 /// 冷却期里 `cooldownTime` 每刻 -1、`tickedGameTime` 每刻跟世界时间走。
@@ -70,6 +76,9 @@ impl HopperEntity {
             last_tick_age: None,
             last_tick_now: 0,
             sleep: None,
+            idle: false,
+            idle_sleeping: false,
+            watch: None,
         }
     }
 
@@ -87,6 +96,8 @@ impl HopperEntity {
     pub fn set_cooldown(&mut self, cooldown_time: i32) {
         self.cooldown_time = cooldown_time;
         self.sleep = None;
+        self.idle = false;
+        self.idle_sleeping = false;
     }
 
     /// 现在的冷却时间，测试和存档用；睡着的按公式现算。
@@ -115,7 +126,7 @@ impl HopperEntity {
     /// 安静刻里官方每刻都真跑过，所以时间字段一直是「新鲜」的（age 0）。
     /// 冻结 / 装盒时睡眠已经结束，差值按经过的刻数增长，和官方一样停在原值。
     fn age_at(&self, now: i64) -> Option<i64> {
-        if self.sleep.is_some() {
+        if self.sleep.is_some() || self.idle_sleeping {
             return Some(0);
         }
         self.last_tick_age
@@ -154,6 +165,17 @@ impl HopperEntity {
     /// `tick` 用 `now - 1` 时，当前刻的减量留给真跑的 `pushItemsTick`。
     fn materialize_at(&mut self, tick: i64) {
         let now = block_entity_clock();
+        // 闲置睡眠的安静刻官方仍每刻写时间字段，装盒 / 冻结 / 叫醒都要按
+        // 「刚跑过」的口径还原；冷却期睡眠则按公式推进。
+        if self.idle_sleeping {
+            self.sleep = None;
+            // 官方在安静刻每刻都跑过，最后一次真跑是 `tick` 那刻。冻结 / 装盒
+            // 后这一刻不会再跑，读路径就该看到那个时刻，而不是当前时刻。
+            self.last_tick_age = Some(now.saturating_sub(tick).max(0));
+            self.last_tick_now = now;
+            self.cooldown_time = 0;
+            return;
+        }
         if let Some(sleep) = self.sleep.take() {
             let steps = tick
                 .saturating_sub(sleep.since)
@@ -170,12 +192,32 @@ impl HopperEntity {
         self.last_tick_now = now;
     }
 
+    /// 真跑完一次 `tryMoveItems`：记下能不能睡到外部叫醒，以及要关注哪些格子 / 盒子。
+    fn note_idle(&mut self, idle: bool, pos: BlockPos, facing: Direction) {
+        self.idle = idle;
+        if !idle {
+            self.watch = None;
+            return;
+        }
+        let above = pos.above();
+        let destination = pos.relative(facing);
+        // 官方读取的全部输入：自己的状态 / 物品、朝向那一格的方块和容器、
+        // 上方一格的方块和容器，以及吸取盒里的物品实体。
+        self.watch = Some(Watch {
+            cells: vec![pos, above, destination],
+            boxes: vec![suck_box(pos)],
+        });
+    }
+
     /// 存档读入冷却；`tickedGameTime` 官方不存，读回是构造时的 0。
     pub fn set_cooldown_from_archive(&mut self, cooldown: i32) {
         self.cooldown_time = cooldown;
         self.last_tick_age = None;
         self.last_tick_now = 0;
         self.sleep = None;
+        self.idle = false;
+        self.idle_sleeping = false;
+        self.watch = None;
     }
 }
 
@@ -197,6 +239,15 @@ impl BlockEntity for HopperEntity {
     }
 
     fn sleep_from(&mut self, now: i64) -> Option<i64> {
+        // 闲置漏斗：没有物品可搬、上方没有容器能给出物品、吸取盒里没有物品实体。
+        // 官方这一刻也只是减冷却、写时间字段，接下来每刻都一样，直到某个
+        // 关注格或吸取盒发生变化。装盒时按「醒着」处理（见下面的 i64::MAX）。
+        if self.idle {
+            self.idle = false;
+            self.idle_sleeping = true;
+            return Some(i64::MAX);
+        }
+        self.watch = None;
         // 冷却期里每刻只减 1、写世界时间，没有别的可见效果。到冷却归零
         // 那一刻必须真跑；物品实体 / 邻居变化 / `ENABLED` 由外部写统一叫醒。
         let cooldown = self.cooldown_time;
@@ -215,9 +266,27 @@ impl BlockEntity for HopperEntity {
 
     fn materialize(&mut self, tick: i64) {
         self.materialize_at(tick);
+        self.idle = false;
+        self.idle_sleeping = false;
+        self.watch = None;
+    }
+
+    fn watch(&self) -> Option<Watch> {
+        self.watch.clone()
     }
 
     fn resleep(&mut self, since: i64, wake_at: i64) {
+        // 闲置睡眠跨表没有意义：放回后真跑一次，再按当前状态重新睡。
+        if wake_at == i64::MAX || wake_at.saturating_sub(since) == i64::MAX {
+            self.cooldown_time = 0;
+            self.last_tick_age = Some(0);
+            self.last_tick_now = since;
+            self.sleep = None;
+            self.idle = false;
+            self.idle_sleeping = false;
+            self.watch = None;
+            return;
+        }
         // 装盒时冷却已按公式算到源表的最后一刻；目标表从这一刻起算。
         let cooldown = i32::try_from(wake_at.saturating_sub(since).max(1)).unwrap_or(i32::MAX);
         self.cooldown_time = cooldown;
@@ -262,7 +331,14 @@ pub fn push_items_tick(world: &mut World, pos: BlockPos, entity: &mut HopperEnti
     entity.note_tick(now);
     if !entity.is_on_cooldown() {
         entity.set_cooldown(0);
-        try_move_items(world, pos, entity);
+        let writes = world.content_writes();
+        let changed = try_move_items(world, pos, entity);
+        let state = world.block_state(pos);
+        let facing = state.get(FACING_HOPPER);
+        // 只有「没事可做、也没有部分吸入 / 送出」的漏斗才睡到外部叫醒。
+        // 冷却期、失败的搬运、被红石锁住都按官方的逐刻推进留在醒着的集合。
+        let idle = !changed && world.content_writes() == writes;
+        entity.note_idle(idle, pos, facing);
     }
 }
 

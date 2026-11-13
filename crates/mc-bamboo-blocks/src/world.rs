@@ -357,6 +357,8 @@ pub struct World<'a> {
     held_reads: Vec<VecDeque<DeferredRead>>,
     /// 只读容器访问 / 漏斗静默写期间压住「关注者叫醒」，见 [`World::peek_container`]。
     quiet: usize,
+    /// 静默写真改了容器内容的次数，见 [`World::has_content_writes`]。
+    content_writes: usize,
 }
 
 /// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
@@ -467,6 +469,7 @@ impl<'a> World<'a> {
             handling_tick: false,
             held_reads: Vec::new(),
             quiet: 0,
+            content_writes: 0,
         }
     }
 
@@ -892,6 +895,12 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 真改了容器内容的静默写累计次数。漏斗在自己的 tick 前后各读一次，
+    /// 差值不为零说明这一刻有部分吸入 / 送出，不能睡。
+    pub(crate) fn content_writes(&self) -> usize {
+        self.content_writes
+    }
+
     /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。
     fn notify_changed_always(&mut self, pos: BlockPos) {
         self.level.notify_block_entity_cell(pos);
@@ -981,6 +990,7 @@ impl<'a> World<'a> {
             debug_assert!(result.is_some(), "静默写没改内容时也要把结果带出来");
         }
         if changed {
+            self.content_writes += 1;
             self.notify_changed(pos);
         }
         result
@@ -1295,12 +1305,26 @@ impl<'a> World<'a> {
             let Some(entity) = self.level.take_block_entity(pos, id) else {
                 continue;
             };
+            // 熔炉 / 酿造台自己的 tick 会改物品，那条写不经过容器写入口。
+            // 有别的睡眠漏斗关注这一格时，真改了物品就通知它们。
+            let watched = self.level.has_block_entity_watchers(pos);
+            let before =
+                watched.then(|| crate::machine_container::entity_container_items(&*entity));
             self.begin_trigger(Trigger::BlockEntityTick {
                 pos,
                 kind: self.block_state(pos).block_id(),
             });
             self.ticks.note_block_entity_tick(pos);
             self.run_taken_block_entity(pos, id, entity);
+            if let Some(before) = before {
+                let after = self
+                    .level
+                    .block_entity_dyn(pos)
+                    .and_then(crate::machine_container::entity_container_items);
+                if after.is_some_and(|after| Some(&after) != before.as_ref()) {
+                    self.level.notify_block_entity_cell(pos);
+                }
+            }
             // 一次 tick 跑完后按实体自己的公式算下一次真正需要跑的时刻。
             let wake = self.level.block_entity_sleep_from(pos, now);
             self.level.schedule_block_entity_wake(pos, wake);
