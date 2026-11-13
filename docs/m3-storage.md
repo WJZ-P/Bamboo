@@ -834,12 +834,31 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
 `removed_features` / `initialized` / `version_history` 每次保存都写真值，不再沿用
 读盘时的原值。
 
+### 外置区块和非 `full` 的 ProtoChunk
+
+- `.mcc` 外置大区块：官方 `RegionFile.hasChunk` 只看 `.mca` 的 offset 表，
+  外置区块的表项非零（区域文件里只有 5 字节桩）、压缩字节在 `.mcc` 里。
+  Bamboo 的启动扫描同样只认 `.mca` 表项，`RegionFile::read` 按 `EXTERNAL_FLAG`
+  转去读 `.mcc`，所以外置区块本来就能被扫到、也能读回；新增回归测试
+  `startup_scan_recognizes_external_mcc_chunks` 钉住这一点。`.mcc` 丢了时
+  `has_chunk` 仍为真、读失败走 warn + 模板，和官方一致。
+- 非 `full` 的 `Status` 的语义差异：官方 `SerializableChunkData.parse` 读任意
+  `Status`（`ChunkStatus.CODEC`，读不出来当 `EMPTY`），`read` 造 `ProtoChunk`
+  并 `setPersistedStatus(status)`，`ChunkMap` 从该阶段继续跑世界生成流水线到
+  `Full`。Bamboo 只有一步的超平坦模板生成，没有分阶段生成器，所以做法是：
+  接受任意 `Status`，把盘上已经写出的顶层附加信息（`LastUpdate`、
+  `InhabitedTime`、不认识的键）、方块实体、计划刻和实体原样保留，**方块层和
+  两层光照用超平坦模板补齐**（这些阶段在 ProtoChunk 里可能还没写出），高度图
+  按补齐后的方块重算，然后当成「已经生成完」交付；下次写盘时 `Status` 是
+  `minecraft:full`。与官方的差别：Bamboo 不会重跑 `structure_starts`…`spawn`
+  那些生成阶段，也不会按原 `Status` 决定从哪一步续跑；模板之外的世界生成
+  内容（结构、生物群系、地形）会丢，这是 M4 接真生成器时再补的。
+  回归测试 `chunk_nbt::tests::status_and_data_version_are_checked` 和
+  `chunk_codec::tests::a_non_full_chunk_is_completed_from_the_flat_template`。
+
 ### 已知但没处理的（以后再看）
 
 - 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
-- 玩家数据里 Bamboo 没建模的字段（血量、经验、饥饿等）存的是官方默认值。
-- `has_chunk` 扫描盘上已有区块时不认 `.mcc` 外置大区块；`Status` 不是 `full` 的区块
-  当成坏块，用模板。
 - 剖析数字（约 2 ms / 区块，debug 构建）只量了空模板区块，不代表真实区块。
   `fly-20` 带 / 不带世界目录各跑一次（release，`run-baseline.sh` 的 `WORLD_DIR`
   和 `serve --world-dir`）：带世界目录时约 2.16 万个已加载区块，tick p50 9.608 ms
