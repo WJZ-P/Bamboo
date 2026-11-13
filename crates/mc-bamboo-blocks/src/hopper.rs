@@ -576,7 +576,12 @@ fn suck_ground_items(world: &mut World, pos: BlockPos, hopper: &mut HopperEntity
         return false;
     }
     let area = suck_box(pos);
-    let ids = world.entity_ids();
+    // 空间索引按 uid 升序给出和吸取盒相交的实体，和官方 `getEntitiesOfClass` 的候选
+    // 相同；前一件吸入时可能改了后面的实体，所以只先记 ID，逐个重新读当前状态。
+    let mut ids = Vec::new();
+    world
+        .level()
+        .for_each_entity_in(area, &mut |public| ids.push(public.uid));
     for id in ids {
         let stack = world.entity(id).and_then(|entity| {
             if entity.removed || !entity.bounding_box().intersects(area) {

@@ -1635,3 +1635,81 @@ fn machine_phase_bench() {
         );
     }
 }
+
+/// 测量用的手工基准：几百台闲置漏斗（空的、上方是空气、下方是空箱子），
+/// 世界里另有几百个不在吸取盒里的物品实体。方块实体阶段每刻的耗时。
+///
+/// 用法（release、安静窗口）：
+/// `cargo test --release -p mc-bamboo-blocks block_entity_sleep::idle_hopper_phase_bench -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn idle_hopper_phase_bench() {
+    use mc_bamboo_core::Vec3;
+
+    use crate::{entity::Entity, state::FACING_HOPPER};
+
+    const COUNT: i32 = 300;
+    const ITEMS: i32 = 300;
+    const TICKS: i64 = 2000;
+    const ROUNDS: usize = 3;
+
+    fn build(sleep: bool) -> (TestLevel, BlockTicks) {
+        let mut level = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        for i in 0..COUNT {
+            let pos = BlockPos::new(i, 64, 0);
+            level.set_container(pos, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
+            level.set_container(pos.below(), vec![ItemStack::empty(); 27]);
+        }
+        {
+            let mut world = World::new(&mut level, &mut ticks);
+            for i in 0..COUNT {
+                let pos = BlockPos::new(i, 64, 0);
+                world.set_block(
+                    pos,
+                    BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
+                    UPDATE_ALL,
+                );
+                world.set_block(pos.below(), BlockState(blocks::CHEST), UPDATE_ALL);
+                world.set_block_entity(Box::new(HopperEntity::new(pos)));
+            }
+            // 远处的物品：只测方块实体阶段，它们不动，也永远不在任何吸取盒里。
+            for i in 0..ITEMS {
+                world.spawn_entity(Entity::ground_item(
+                    Vec3::new(f64::from(i) + 0.5, 64.0, 40.5),
+                    ItemStack::new(items::DIRT, 1),
+                ));
+            }
+        }
+        level.sleep_enabled(sleep);
+        (level, ticks)
+    }
+
+    fn measure(sleep: bool) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..ROUNDS {
+            let (mut level, mut ticks) = build(sleep);
+            let started = std::time::Instant::now();
+            for now in 1..=TICKS {
+                ticks.set_time(now);
+                set_block_entity_clock(now);
+                let _ = run_block_entity_tick(&mut level, &mut ticks);
+            }
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64 / TICKS as f64 / 1000.0
+    }
+
+    let mut off = Vec::new();
+    let mut on = Vec::new();
+    for _ in 0..3 {
+        off.push(measure(false));
+        on.push(measure(true));
+    }
+    let off = off.into_iter().fold(f64::INFINITY, f64::min);
+    let on = on.into_iter().fold(f64::INFINITY, f64::min);
+    println!(
+        "{COUNT} 台闲置漏斗 + {ITEMS} 个远处物品，方块实体阶段每刻：休眠关 {off:.1} µs，休眠开 {on:.1} µs，{:.1}×",
+        off / on
+    );
+}
