@@ -978,7 +978,7 @@ impl<'a> World<'a> {
             return None;
         }
         if !changed {
-            debug_assert_eq!(result.is_some(), true, "静默写没改内容时也要把结果带出来");
+            debug_assert!(result.is_some(), "静默写没改内容时也要把结果带出来");
         }
         if changed {
             self.notify_changed(pos);
