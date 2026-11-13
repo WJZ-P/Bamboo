@@ -38,6 +38,9 @@ pub trait BlockView {
     /// entity at this cell, relative to the cell's minimum corner. `None` means there is
     /// no such block entity, for which vanilla returns `Shapes.empty()`.
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>>;
+    /// `ShulkerBoxBlock.getShape`：这一格潜影盒实体按开盖进度算出的碰撞形状。
+    /// `None` 表示没有实体，官方这时给 `Shapes.block()`。
+    fn shulker_box_shape(&self, pos: BlockPos) -> Option<Aabb>;
     fn fluid_state(&self, pos: BlockPos) -> FluidState;
     fn block_collisions(&self, box_: Aabb, context: CollisionContext)
     -> Vec<(BlockPos, Vec<Aabb>)>;
@@ -111,6 +114,10 @@ impl BlockView for World<'_> {
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
         World::moving_piston_shape(self, pos)
+    }
+
+    fn shulker_box_shape(&self, pos: BlockPos) -> Option<Aabb> {
+        World::shulker_box_shape(self, pos)
     }
 
     fn fluid_state(&self, pos: BlockPos) -> FluidState {

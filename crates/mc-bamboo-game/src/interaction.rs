@@ -199,8 +199,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             profiler,
             ..
         } = &mut *region;
-        let (open_shulker_boxes, moving_piston_shapes) =
-            crate::entity_view::block_entity_shapes(block_entities);
+        let block_entity_shapes = crate::entity_view::block_entity_shapes(chunks, block_entities);
         // `pickup_before_entities` 已经跑过；把实体表切进「这一刻正在 tick」的状态。
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
         entities.begin_tick();
@@ -215,8 +214,9 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             chunks,
             tick_levels,
             facts,
-            open_shulker_boxes,
-            moving_piston_shapes,
+            open_shulker_boxes: block_entity_shapes.open_shulker_boxes,
+            moving_piston_shapes: block_entity_shapes.moving_piston_shapes,
+            shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
             world_border: world_border.clone(),
         });

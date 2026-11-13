@@ -14,16 +14,16 @@ use mc_bamboo_blocks::entity::{
 };
 use mc_bamboo_blocks::{
     Aabb, BlockEntities, BlockState, CollisionContext, EntityContext, PistonMoving,
-    world::CollisionBlocks,
+    ShulkerBoxEntity, world::CollisionBlocks,
 };
 use mc_bamboo_core::{BlockPos, Vec3, mth};
-use mc_bamboo_data::{blocks, registries::attribute_defaults};
+use mc_bamboo_data::{blocks, items, registries::attribute_defaults};
 use mc_bamboo_protocol::{
     codec::Reader,
     frame::{MAX_FRAME_LEN, find_frame},
     packet::{
         ClientboundPacket,
-        play::{ClientInformation, ENTITY_FLAG_SPRINTING, GameMode, PlayerPosition},
+        play::{ClientInformation, ENTITY_FLAG_SPRINTING, EquipmentSlot, GameMode, PlayerPosition},
     },
 };
 use mc_bamboo_world::store::ChunkStore;
@@ -392,6 +392,7 @@ fn inside_stuck(region: &Region, id: PlayerId, pending: &[TravelSegment]) -> Opt
         falling_block: false,
         descending: player.sync.shift_key_down,
         placement: false,
+        powder_snow_walkable: wears_leather_boots(player),
     };
     entity::stuck_speed(
         pending,
@@ -518,6 +519,7 @@ fn apply_change(
             CollisionBlocks {
                 block_at: |pos: BlockPos| change.blocks.state(pos),
                 piston_at: |pos| change.blocks.piston(pos),
+                shulker_at: |pos| change.blocks.shulker(pos),
             },
         ) && border.no_border_collision(player.position().x, player.position().z, old_box);
     let newly = overlaps_new_blocks(
@@ -529,6 +531,7 @@ fn apply_change(
         CollisionBlocks {
             block_at: |pos: BlockPos| change.blocks.state(pos),
             piston_at: |pos| change.blocks.piston(pos),
+            shulker_at: |pos| change.blocks.shulker(pos),
         },
     );
     let accept = player.motion.no_physics || (!fail || !old_clear) && !newly;
@@ -630,6 +633,7 @@ fn simulate_move(
         CollisionBlocks {
             block_at: |pos| blocks.state(pos),
             piston_at: |pos| blocks.piston(pos),
+            shulker_at: |pos| blocks.shulker(pos),
         },
         border,
     );
@@ -775,6 +779,7 @@ fn can_fall_at_least(
         CollisionBlocks {
             block_at: |pos| blocks.state(pos),
             piston_at: |pos| blocks.piston(pos),
+            shulker_at: |pos| blocks.shulker(pos),
         },
     )
 }
@@ -810,6 +815,14 @@ fn block_speed_factor(player: &Player, position: Vec3, blocks: &PlayerBlocks<'_>
     }
 }
 
+/// `canEntityWalkOnPowderSnow` 的 LivingEntity 分支：脚上穿皮革靴。
+fn wears_leather_boots(player: &Player) -> bool {
+    player
+        .inventory
+        .equipment(EquipmentSlot::Feet)
+        .is_some_and(|boots| boots.item == items::LEATHER_BOOTS && !boots.is_empty())
+}
+
 fn move_context(player: &Player) -> CollisionContext {
     CollisionContext::Entity(EntityContext {
         fall_distance: player.motion.fall_distance,
@@ -817,6 +830,7 @@ fn move_context(player: &Player) -> CollisionContext {
         falling_block: false,
         descending: player.sync.shift_key_down,
         placement: false,
+        powder_snow_walkable: wears_leather_boots(player),
     })
 }
 
@@ -827,6 +841,7 @@ fn context_at(player: &Player, bottom: f64, placement: bool) -> CollisionContext
         falling_block: false,
         descending: player.sync.shift_key_down,
         placement,
+        powder_snow_walkable: wears_leather_boots(player),
     })
 }
 
@@ -860,6 +875,7 @@ fn body_fits(player: &Player, height: f64, blocks: &PlayerBlocks<'_>) -> bool {
         CollisionBlocks {
             block_at: |pos| blocks.state(pos),
             piston_at: |pos| blocks.piston(pos),
+            shulker_at: |pos| blocks.shulker(pos),
         },
     )
 }
@@ -930,6 +946,14 @@ impl PlayerBlocks<'_> {
             .as_any()
             .downcast_ref::<PistonMoving>()
             .map(PistonMoving::collision_shape)
+    }
+
+    fn shulker(&self, pos: BlockPos) -> Option<Aabb> {
+        let entity = self.entities.find_dyn(pos)?;
+        entity
+            .as_any()
+            .downcast_ref::<ShulkerBoxEntity>()
+            .map(|shulker| shulker.bounding_box(self.state(pos)))
     }
 }
 

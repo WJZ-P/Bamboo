@@ -365,24 +365,28 @@ pub struct World<'a> {
 /// `CollisionGetter.getBlockCollisions`, reading blocks from `block_at` and moving-piston
 /// shapes from `piston_at`. Player movement cannot borrow `World`; shape order matches
 /// [`World::block_collisions`].
-/// `CollisionGetter.getBlockCollisions` 的方块事实：每格的状态，加上 `moving_piston`
-/// 这一格的方块实体算出的碰撞形状（没有实体时是空形状）。
+/// `CollisionGetter.getBlockCollisions` 的方块事实：每格的状态，加上 `dynamicShape`
+/// 方块按这一格的方块实体现算的形状。`piston_at` 没有实体时是空形状；
+/// `shulker_at` 没有实体时给 `None`，官方这时按整格算。
 ///
 /// The block facts for `CollisionGetter.getBlockCollisions`: the state at each cell,
-/// plus the per-cell moving-piston shape from its block entity (empty when absent).
-pub struct CollisionBlocks<B, P> {
+/// plus per-cell shapes from block entities for dynamic-shape blocks. A missing
+/// piston entity is an empty shape; a missing shulker entity is a full cube.
+pub struct CollisionBlocks<B, P, S> {
     pub block_at: B,
     pub piston_at: P,
+    pub shulker_at: S,
 }
 
-pub(crate) fn collect_block_collisions<B, P>(
+pub(crate) fn collect_block_collisions<B, P, S>(
     box_: shape::Aabb,
     context: CollisionContext,
-    mut blocks: impl BorrowMut<CollisionBlocks<B, P>>,
+    mut blocks: impl BorrowMut<CollisionBlocks<B, P, S>>,
 ) -> Vec<(BlockPos, Vec<shape::Aabb>)>
 where
     B: FnMut(BlockPos) -> BlockState,
     P: FnMut(BlockPos) -> Option<Vec<shape::Aabb>>,
+    S: FnMut(BlockPos) -> Option<shape::Aabb>,
 {
     let x_min = mth::floor(box_.min_x - shape::EPSILON) - 1;
     let x_max = mth::floor(box_.max_x + shape::EPSILON) + 1;
@@ -414,7 +418,13 @@ where
                 } else {
                     None
                 };
-                let boxes = shape::block_collision_boxes(state, pos, context, piston.as_deref());
+                let shulker = if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+                    (blocks.shulker_at)(pos)
+                } else {
+                    None
+                };
+                let boxes =
+                    shape::block_collision_boxes(state, pos, context, piston.as_deref(), shulker);
                 if boxes.is_empty() {
                     continue;
                 }
@@ -2585,6 +2595,7 @@ impl<'a> World<'a> {
             CollisionBlocks {
                 block_at: |pos| self.block_state(pos),
                 piston_at: |pos| self.moving_piston_shape(pos),
+                shulker_at: |pos| self.shulker_box_shape(pos),
             },
         )
     }
@@ -2594,6 +2605,13 @@ impl<'a> World<'a> {
     pub(crate) fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<shape::Aabb>> {
         self.block_entity::<PistonMoving>(pos)
             .map(PistonMoving::collision_shape)
+    }
+
+    /// `ShulkerBoxBlock.getShape`：有潜影盒实体时按它的开盖进度算，没有时是整格。
+    pub(crate) fn shulker_box_shape(&self, pos: BlockPos) -> Option<shape::Aabb> {
+        let state = self.block_state(pos);
+        self.block_entity::<ShulkerBoxEntity>(pos)
+            .map(|entity| entity.bounding_box(state))
     }
 
     /// `CollisionGetter.findSupportingBlock`：脚下这一片里离实体中心最近的方块。
@@ -2688,7 +2706,13 @@ impl<'a> World<'a> {
                 .is(blocks::MOVING_PISTON)
                 .then(|| self.moving_piston_shape(pos))
                 .flatten();
-            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
+            let collider = shape::block_collision_boxes(
+                state,
+                pos,
+                context,
+                piston.as_deref(),
+                self.shulker_box_shape(pos),
+            );
             self.clip_one_block(pos, from, to, &collider, state, ClipFluid::None)
         })
     }
@@ -2706,7 +2730,13 @@ impl<'a> World<'a> {
                 .is(blocks::MOVING_PISTON)
                 .then(|| self.moving_piston_shape(pos))
                 .flatten();
-            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
+            let collider = shape::block_collision_boxes(
+                state,
+                pos,
+                context,
+                piston.as_deref(),
+                self.shulker_box_shape(pos),
+            );
             self.clip_one_block(pos, from, to, &collider, state, ClipFluid::SourceOnly)
         })
     }

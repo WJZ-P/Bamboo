@@ -72,6 +72,9 @@ pub struct EntityContext {
     ///
     /// `isPlacement()`. `CollisionContext.withPosition` sets it, so powder snow and scaffolding have no collision.
     pub placement: bool,
+    /// `canEntityWalkOnPowderSnow`：实体类型在 `powder_snow_walkable_mobs` 里，或者脚上
+    /// 穿着皮革靴。现有三种实体都不是，玩家按脚槽的装备填。
+    pub powder_snow_walkable: bool,
 }
 
 impl EntityContext {
@@ -163,16 +166,21 @@ pub fn collision_boxes(state: BlockState, pos: BlockPos, context: CollisionConte
 /// `MovingPistonBlock.getCollisionShape`，也就是这一格的方块实体算出来的形状。
 ///
 /// `piston` 是这一格 [`PistonMoving`](crate::PistonMoving) 的形状，`None` 表示没有
-/// 方块实体：官方这时给 `Shapes.empty()`。别的方块不看这份事实，照表走。
+/// 方块实体：官方这时给 `Shapes.empty()`。`shulker` 是这一格潜影盒实体的包围盒，
+/// `None` 表示没有实体：官方的 `ShulkerBoxBlock.getShape` 这时给 `Shapes.block()`。
 /// 形状相对这一格的最小角，和 [`collision_boxes`] 的返回值一样。
 pub fn block_collision_boxes(
     state: BlockState,
     pos: BlockPos,
     context: CollisionContext,
     piston: Option<&[Aabb]>,
+    shulker: Option<Aabb>,
 ) -> Boxes {
     if state.is(blocks::MOVING_PISTON) {
         return Cow::Owned(piston.unwrap_or(&[]).to_vec());
+    }
+    if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+        return Cow::Owned(vec![shulker.unwrap_or(FULL_BLOCK[0])]);
     }
     collision_boxes(state, pos, context)
 }
@@ -206,7 +214,11 @@ fn entity_collision_boxes(state: BlockState, pos: BlockPos, entity: EntityContex
         if entity.fall_distance > 2.5 {
             return at_position(&[POWDER_SNOW_FALLING], state.block(), pos);
         }
-        if entity.falling_block {
+        if entity.falling_block
+            || (entity.powder_snow_walkable
+                && entity.is_above(FULL_BLOCK, pos)
+                && !entity.descending)
+        {
             return outline_boxes(state, pos);
         }
         return Cow::Borrowed(&[]);
@@ -682,6 +694,7 @@ mod tests {
             falling_block: false,
             descending: false,
             placement: false,
+            powder_snow_walkable: false,
         };
         let pos = BlockPos::new(3, 4, 5);
         let inside = |state: u32| entity_inside_boxes(BlockState(state), pos, entity);
