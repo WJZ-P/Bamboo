@@ -91,6 +91,8 @@ struct Case {
     loaded: bool,
     #[serde(rename = "onGround")]
     on_ground: bool,
+    #[serde(default)]
+    boots: bool,
     sx: i64,
     sy: i64,
     sz: i64,
@@ -223,6 +225,7 @@ impl Report {
             yaw: 0.0,
             pitch: 0.0,
             on_ground: case.on_ground,
+            boots: case.boots,
             packets: case
                 .packets
                 .iter()

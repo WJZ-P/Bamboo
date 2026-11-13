@@ -2737,6 +2737,75 @@ fn moving_piston_without_block_entity_is_empty_in_both_drivers() {
     assert_eq!(precise, parallel);
 }
 
+/// 开着盖子的潜影盒、随机偏移的竹子、细雪和脚手架：这些 `dynamicShape` 方块的
+/// 碰撞形状按状态或方块实体变化。两种驱动逐刻都要读到同一份形状。
+fn dynamic_shape_entities(threads: usize) -> Vec<(i32, Vec3, Vec3, bool)> {
+    use mc_bamboo_blocks::{BlockState, ShulkerBoxEntity, entity::Entity};
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("Kitten");
+    client.take_frames();
+    server.set_entity_threads(threads);
+
+    let base_y = -60;
+    let cells = [
+        (8, blocks::SHULKER_BOX),
+        (10, blocks::BAMBOO),
+        (12, blocks::POWDER_SNOW),
+        (14, blocks::SCAFFOLDING),
+        (16, blocks::POINTED_DRIPSTONE),
+    ];
+    for (x, state) in cells {
+        server.set_block(BlockPos::new(x, base_y, 8), state);
+    }
+    let shulker_pos = BlockPos::new(8, base_y, 8);
+    let mut shulker = ShulkerBoxEntity::new(shulker_pos);
+    shulker.set_progress(1.0);
+    server.region().block_entities.insert(Box::new(shulker));
+
+    // 落上、横穿（贴着一侧）、从下面竖直穿过，三种撞法都要覆盖。
+    for (x, _) in cells {
+        let mut item = Entity::ground_item_with_delta(
+            Vec3::new(f64::from(x) + 0.5, f64::from(base_y) + 4.0, 8.5),
+            ItemStack::new(1, 1),
+            Vec3::default(),
+        );
+        item.ground_mut().unwrap().set_pickup_delay(1000);
+        server.spawn_entity(item);
+        let mut side = Entity::ground_item_with_delta(
+            Vec3::new(f64::from(x) + 0.5, f64::from(base_y) + 0.5, 8.5),
+            ItemStack::new(1, 1),
+            Vec3::new(0.6, 0.0, 0.0),
+        );
+        side.ground_mut().unwrap().set_pickup_delay(1000);
+        server.spawn_entity(side);
+    }
+    server.spawn_entity(Entity::falling_block(
+        BlockPos::new(8, base_y + 4, 8),
+        BlockState(blocks::SAND),
+    ));
+
+    let mut snapshots = Vec::new();
+    for _ in 0..20 {
+        server.tick();
+        for uid in server.world_region().entities.ids() {
+            let entity = server.world_region().entities.get(uid).expect("实体还在");
+            snapshots.push((entity.id, entity.position, entity.delta, entity.on_ground));
+        }
+    }
+    snapshots
+}
+
+#[test]
+fn dynamic_shape_entities_match_in_both_drivers() {
+    let precise = dynamic_shape_entities(0);
+    let parallel = dynamic_shape_entities(4);
+    assert!(precise.len() > 100, "要有逐刻的实体快照");
+    assert_eq!(precise, parallel);
+}
+
 /// 崩溃测试的具体方块路径：`/setblock` 之后 `save-all flush`，
 /// 盘上要真的能读出那一格（用同一个 `world-block` 的解码路径）。
 #[test]

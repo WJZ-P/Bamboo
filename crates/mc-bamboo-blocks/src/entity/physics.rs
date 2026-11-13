@@ -107,6 +107,7 @@ impl Entity {
             falling_block: self.kind.is_falling_block(),
             descending: false,
             placement: false,
+            powder_snow_walkable: false,
         })
     }
 
@@ -200,6 +201,7 @@ impl Entity {
             world::CollisionBlocks {
                 block_at: |pos| world.block_state(pos),
                 piston_at: |pos| world.moving_piston_shape(pos),
+                shulker_at: |pos| world.shulker_box_shape(pos),
             },
             &world.world_border(),
         )
@@ -499,6 +501,7 @@ impl Entity {
             falling_block: self.kind.is_falling_block(),
             descending: false,
             placement: false,
+            powder_snow_walkable: false,
         }
     }
 
@@ -541,6 +544,7 @@ pub fn sweep_movement(
     mut blocks: world::CollisionBlocks<
         impl FnMut(BlockPos) -> BlockState,
         impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
+        impl FnMut(BlockPos) -> Option<Aabb>,
     >,
     border: &WorldBorder,
 ) -> Vec3 {
@@ -612,6 +616,7 @@ pub fn no_block_collision(
     blocks: world::CollisionBlocks<
         impl FnMut(BlockPos) -> BlockState,
         impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
+        impl FnMut(BlockPos) -> Option<Aabb>,
     >,
 ) -> bool {
     world::collect_block_collisions(bounds, context, blocks).is_empty()
@@ -633,6 +638,7 @@ pub fn overlaps_new_blocks(
     blocks: world::CollisionBlocks<
         impl FnMut(BlockPos) -> BlockState,
         impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
+        impl FnMut(BlockPos) -> Option<Aabb>,
     >,
 ) -> bool {
     let new_box = current_box.moved(
@@ -805,6 +811,7 @@ fn collide_bounding_box(
     blocks: &mut world::CollisionBlocks<
         impl FnMut(BlockPos) -> BlockState,
         impl FnMut(BlockPos) -> Option<Vec<Aabb>>,
+        impl FnMut(BlockPos) -> Option<Aabb>,
     >,
     border: &WorldBorder,
     source_x: f64,
@@ -1286,10 +1293,15 @@ mod step_tests {
             falling_block: false,
             descending: false,
             placement: false,
+            powder_snow_walkable: false,
         })
     }
 
     fn no_pistons(_pos: BlockPos) -> Option<Vec<Aabb>> {
+        None
+    }
+
+    fn no_shulkers(_pos: BlockPos) -> Option<Aabb> {
         None
     }
 
@@ -1322,6 +1334,7 @@ mod step_tests {
             world::CollisionBlocks {
                 block_at: at(slab),
                 piston_at: no_pistons,
+                shulker_at: no_shulkers,
             },
             &default_border,
         );
@@ -1334,6 +1347,7 @@ mod step_tests {
             world::CollisionBlocks {
                 block_at: at(stone),
                 piston_at: no_pistons,
+                shulker_at: no_shulkers,
             },
             &default_border,
         );
@@ -1346,6 +1360,7 @@ mod step_tests {
             world::CollisionBlocks {
                 block_at: at(slab),
                 piston_at: no_pistons,
+                shulker_at: no_shulkers,
             },
             &default_border,
         );

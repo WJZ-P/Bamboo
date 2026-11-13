@@ -66,6 +66,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
@@ -74,6 +75,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -277,7 +280,17 @@ public final class MovementOracle {
                         ? List.of()
                         : List.of(),
                 List.of(move(air.add(0.0, -2.0, 0.0), false)));
-        return 13;
+        // 细雪上的皮革靴：不潜行时按整格托住，潜行时踩进去。
+        BlockPos snow = new BlockPos(0, 79, 0);
+        play(official, out, "powder_snow_boots", GameType.SURVIVAL, false, false, false, true,
+                new Vec3(0.5, 81.0, 0.5), true,
+                List.of(new Placed(snow, Blocks.POWDER_SNOW.defaultBlockState())),
+                List.of(move(new Vec3(0.5, 80.0, 0.5), true)), true);
+        play(official, out, "powder_snow_boots_shift", GameType.SURVIVAL, true, false, false, true,
+                new Vec3(0.5, 81.0, 0.5), true,
+                List.of(new Placed(snow, Blocks.POWDER_SNOW.defaultBlockState())),
+                List.of(move(new Vec3(0.5, 80.0, 0.5), true)), true);
+        return 15;
     }
 
     private static int random(Official official, Writer out, int cases, long seed) throws Exception {
@@ -346,6 +359,24 @@ public final class MovementOracle {
             List<Placed> blocks,
             List<Step> packets)
             throws Exception {
+        play(official, out, name, mode, shift, sprint, flying, loaded, start, onGround, blocks, packets, false);
+    }
+
+    private static void play(
+            Official official,
+            Writer out,
+            String name,
+            GameType mode,
+            boolean shift,
+            boolean sprint,
+            boolean flying,
+            boolean loaded,
+            Vec3 start,
+            boolean onGround,
+            List<Placed> blocks,
+            List<Step> packets,
+            boolean leatherBoots)
+            throws Exception {
         session = new Session();
         FakeLevel level = FakeLevel.create(official);
         for (Placed placed : blocks) {
@@ -359,6 +390,10 @@ public final class MovementOracle {
         player.setXRot(0.0F);
         player.setOnGround(onGround);
         player.setShiftKeyDown(shift);
+        if (leatherBoots) {
+            player.getInventory().setItem(EquipmentSlot.FEET.getIndex(36),
+                    new ItemStack(Items.LEATHER_BOOTS, 1));
+        }
         player.setSprinting(sprint);
         player.getAbilities().flying = flying && (mode == GameType.CREATIVE || mode == GameType.SPECTATOR);
         updatePose(player);
@@ -416,7 +451,8 @@ public final class MovementOracle {
                     .append(Block.getId(placed.state))
                     .append(']');
         }
-        line.append("],\"packets\":[");
+        line.append("],\"boots\":").append(leatherBoots);
+        line.append(",\"packets\":[");
         for (int i = 0; i < packets.size(); i++) {
             if (i > 0) {
                 line.append(',');

@@ -12,7 +12,7 @@ use mc_bamboo_data::{Block, BlockAncestor, BlockOffset, blocks};
 
 use crate::{
     context::BlockHit,
-    state::{BOTTOM, BlockState, FACING_HOPPER, STABILITY_DISTANCE, SupportType},
+    state::{BOTTOM, BlockState, FACING_HOPPER, LEVEL_CAULDRON, STABILITY_DISTANCE, SupportType},
 };
 
 /// 比这更近的两个坐标算同一个。官方合并形状时用的是同一个阈值。
@@ -72,6 +72,9 @@ pub struct EntityContext {
     ///
     /// `isPlacement()`. `CollisionContext.withPosition` sets it, so powder snow and scaffolding have no collision.
     pub placement: bool,
+    /// `canEntityWalkOnPowderSnow`：实体类型在 `powder_snow_walkable_mobs` 里，或者脚上
+    /// 穿着皮革靴。现有三种实体都不是，玩家按脚槽的装备填。
+    pub powder_snow_walkable: bool,
 }
 
 impl EntityContext {
@@ -163,16 +166,21 @@ pub fn collision_boxes(state: BlockState, pos: BlockPos, context: CollisionConte
 /// `MovingPistonBlock.getCollisionShape`，也就是这一格的方块实体算出来的形状。
 ///
 /// `piston` 是这一格 [`PistonMoving`](crate::PistonMoving) 的形状，`None` 表示没有
-/// 方块实体：官方这时给 `Shapes.empty()`。别的方块不看这份事实，照表走。
+/// 方块实体：官方这时给 `Shapes.empty()`。`shulker` 是这一格潜影盒实体的包围盒，
+/// `None` 表示没有实体：官方的 `ShulkerBoxBlock.getShape` 这时给 `Shapes.block()`。
 /// 形状相对这一格的最小角，和 [`collision_boxes`] 的返回值一样。
 pub fn block_collision_boxes(
     state: BlockState,
     pos: BlockPos,
     context: CollisionContext,
     piston: Option<&[Aabb]>,
+    shulker: Option<Aabb>,
 ) -> Boxes {
     if state.is(blocks::MOVING_PISTON) {
         return Cow::Owned(piston.unwrap_or(&[]).to_vec());
+    }
+    if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+        return Cow::Owned(vec![shulker.unwrap_or(FULL_BLOCK[0])]);
     }
     collision_boxes(state, pos, context)
 }
@@ -206,7 +214,11 @@ fn entity_collision_boxes(state: BlockState, pos: BlockPos, entity: EntityContex
         if entity.fall_distance > 2.5 {
             return at_position(&[POWDER_SNOW_FALLING], state.block(), pos);
         }
-        if entity.falling_block {
+        if entity.falling_block
+            || (entity.powder_snow_walkable
+                && entity.is_above(FULL_BLOCK, pos)
+                && !entity.descending)
+        {
             return outline_boxes(state, pos);
         }
         return Cow::Borrowed(&[]);
@@ -248,15 +260,32 @@ pub fn has_large_collision_shape(state: BlockState) -> bool {
 
 /// `BlockState.getEntityInsideCollisionShape`：判断实体“在这一格里”用的形状。
 ///
-/// 官方 `MovingPistonBlock` 只改了 `getShape` 和 `getCollisionShape`，没改这一项：
-/// 这里的形状仍按状态表算，不读方块实体的动画形状。细雪的碰撞形状对普通实体
-/// 是空的，但在里面判定时按整格算。
+/// 官方的 `BlockBehaviour` 默认返回整格，和碰撞形状无关；只有五个类改了它。
+/// `moving_piston` 也因此是整格，不读方块实体的动画形状。
 pub fn entity_inside_boxes(state: BlockState, pos: BlockPos, entity: EntityContext) -> Boxes {
-    let boxes = collision_boxes(state, pos, CollisionContext::Entity(entity));
-    if boxes.is_empty() && state.is_a(BlockAncestor::PowderSnowBlock) {
-        return at_position(FULL_BLOCK, state.block(), pos);
+    if state.is_a(BlockAncestor::PowderSnowBlock) {
+        let boxes = collision_boxes(state, pos, CollisionContext::Entity(entity));
+        return if boxes.is_empty() {
+            Cow::Borrowed(FULL_BLOCK)
+        } else {
+            boxes
+        };
     }
-    boxes
+    if state.is_a(BlockAncestor::TripWireBlock) || state.is_a(BlockAncestor::EndPortalBlock) {
+        return outline_boxes(state, pos);
+    }
+    if state.is_a(BlockAncestor::LavaCauldronBlock) {
+        let lava = sixteenths(2.0, 4.0, 2.0, 14.0, 15.0, 14.0);
+        return Cow::Owned([cauldron_shell().to_vec(), vec![lava]].concat());
+    }
+    if state.is_a(BlockAncestor::LayeredCauldronBlock) {
+        let level = state.try_get(LEVEL_CAULDRON).unwrap_or(1);
+        let height = 6.0 + 3.0 * f64::from(level.clamp(1, 3));
+        let filled = sixteenths(2.0, 4.0, 2.0, 14.0, height, 14.0);
+        return Cow::Owned([cauldron_shell().to_vec(), vec![filled]].concat());
+    }
+    // 默认返回静态的 `Shapes.block()`，不调用 `getShape`，也不带渲染偏移。
+    Cow::Borrowed(FULL_BLOCK)
 }
 
 /// `getShape`，也就是选中框。
@@ -292,6 +321,11 @@ const fn sixteenths(
 const CAULDRON_INSIDE: Aabb = sixteenths(2.0, 4.0, 2.0, 14.0, 16.0, 14.0);
 /// 漏斗构造函数里的 `inside`：`Block.column(12.0, 11.0, 16.0)`。
 const HOPPER_INSIDE: Aabb = sixteenths(2.0, 11.0, 2.0, 14.0, 16.0, 14.0);
+
+/// `AbstractCauldronBlock.SHAPE` 的外壳，和炼药锅的碰撞形状是同一组盒子。
+fn cauldron_shell() -> &'static [Aabb] {
+    mc_bamboo_data::collision_shape(blocks::WATER_CAULDRON)
+}
 
 /// `getInteractionShape`：射线碰到选中框后，再碰到这个形状更近时报告它的面。
 ///
@@ -622,6 +656,60 @@ mod tests {
         assert!(!is_full_block(&[Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0)]));
         // 栅栏的碰撞盒比一格高，所以不算完整方块。
         assert!(!is_full_block(&[Aabb::new(0.0, 0.0, 0.0, 1.0, 1.5, 1.0)]));
+    }
+
+    /// 官方 `getEntityInsideCollisionShape` 默认整格，五个覆盖类各按自己的形状。
+    #[test]
+    fn entity_inside_shapes_follow_the_block_class() {
+        let entity = EntityContext {
+            fall_distance: 0.0,
+            bottom: 0.0,
+            falling_block: false,
+            descending: false,
+            placement: false,
+            powder_snow_walkable: false,
+        };
+        let pos = BlockPos::new(3, 4, 5);
+        let inside = |state: u32| entity_inside_boxes(BlockState(state), pos, entity);
+        // 没有碰撞形状的方块在这一项里仍是整格。
+        for state in [blocks::MOVING_PISTON, blocks::COBWEB, blocks::AIR] {
+            assert_eq!(inside(state), FULL_BLOCK, "state {state}");
+        }
+        // 细雪空碰撞时整格；下落超过 2.5 格时是 0.9 高的碰撞盒。
+        let powder = inside(blocks::POWDER_SNOW);
+        assert_eq!(powder, FULL_BLOCK);
+        let falling = EntityContext {
+            fall_distance: 3.0,
+            ..entity
+        };
+        assert_eq!(
+            entity_inside_boxes(BlockState(blocks::POWDER_SNOW), pos, falling),
+            [POWDER_SNOW_FALLING].as_slice()
+        );
+        // 绊线和末地传送门按选中框，炼药锅按水位。
+        assert_eq!(
+            inside(blocks::END_PORTAL),
+            outline_boxes(BlockState(blocks::END_PORTAL), pos)
+        );
+        assert_eq!(
+            inside(blocks::TRIPWIRE),
+            outline_boxes(BlockState(blocks::TRIPWIRE), pos)
+        );
+        for (level, height) in [(1, 9.0), (2, 12.0), (3, 15.0)] {
+            let state = BlockState(blocks::WATER_CAULDRON).with(LEVEL_CAULDRON, level);
+            let boxes = entity_inside_boxes(state, pos, entity);
+            assert_eq!(boxes.len(), cauldron_shell().len() + 1, "水位 {level}");
+            assert_eq!(
+                boxes.last().copied(),
+                Some(sixteenths(2.0, 4.0, 2.0, 14.0, height, 14.0))
+            );
+        }
+        let lava = inside(blocks::LAVA_CAULDRON);
+        assert_eq!(lava.len(), cauldron_shell().len() + 1);
+        assert_eq!(
+            lava.last().copied(),
+            Some(sixteenths(2.0, 4.0, 2.0, 14.0, 15.0, 14.0))
+        );
     }
 
     #[test]

@@ -71,6 +71,11 @@ pub trait BlockSource: Sync {
         None
     }
 
+    /// `ShulkerBoxBlockEntity.getBoundingBox(state)`，算阶段开始时就按位置拷出来的形状。
+    fn shulker_box_shape(&self, _pos: BlockPos) -> Option<Aabb> {
+        None
+    }
+
     /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
     ///
     /// 和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：精确驱动的
@@ -130,6 +135,7 @@ impl<T: BlockSource> SourceView<T> {
                         .then(|| self.moving_piston_shape(pos))
                         .flatten()
                 },
+                shulker_at: |pos| self.0.shulker_box_shape(pos),
             },
         )
     }
@@ -147,7 +153,13 @@ impl<T: BlockSource> SourceView<T> {
                 .is(blocks::MOVING_PISTON)
                 .then(|| self.moving_piston_shape(pos))
                 .flatten();
-            let collider = shape::block_collision_boxes(state, pos, context, piston.as_deref());
+            let collider = shape::block_collision_boxes(
+                state,
+                pos,
+                context,
+                piston.as_deref(),
+                self.0.shulker_box_shape(pos),
+            );
             let block_hit = clip_with_interaction_override(&collider, state, from, to, pos);
             let fluid_hit = match fluid {
                 ClipFluid::SourceOnly => clip_source(state.fluid(), pos, from, to),
@@ -172,6 +184,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<Vec<Aabb>> {
         self.0.moving_piston_shape(pos).map(<[Aabb]>::to_vec)
+    }
+
+    fn shulker_box_shape(&self, pos: BlockPos) -> Option<Aabb> {
+        self.0.shulker_box_shape(pos)
     }
 
     fn fluid_state(&self, pos: BlockPos) -> FluidState {

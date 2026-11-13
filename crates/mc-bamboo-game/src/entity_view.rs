@@ -32,6 +32,9 @@ pub(crate) struct ReadOnlyWorld<'a> {
     /// 移动中活塞的碰撞形状。`isFaceSturdy` 读它，和精确驱动从方块实体表里
     /// 读到的形状必须一致。
     pub(crate) moving_piston_shapes: BTreeMap<BlockPos, Vec<Aabb>>,
+    /// 潜影盒按开盖进度算出的碰撞形状。`collect_block_collisions` 用它让两种驱动
+    /// 读到同一份方块实体事实。
+    pub(crate) shulker_box_shapes: BTreeMap<BlockPos, Aabb>,
     /// 世界里漏斗方块的位置。没有漏斗时物品不发 `SuckIntoHopper` 命令。
     pub(crate) hopper_positions: BTreeSet<BlockPos>,
     /// 这一维度的世界边界快照，实体的碰撞要读它。
@@ -59,6 +62,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn moving_piston_shape(&self, pos: BlockPos) -> Option<&[Aabb]> {
         self.moving_piston_shapes.get(&pos).map(Vec::as_slice)
+    }
+
+    fn shulker_box_shape(&self, pos: BlockPos) -> Option<Aabb> {
+        self.shulker_box_shapes.get(&pos).copied()
     }
 
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
@@ -146,24 +153,36 @@ pub(crate) fn hopper_positions(chunks: &ChunkStore) -> BTreeSet<BlockPos> {
     found
 }
 
-/// 从方块实体表里拷出盖子开着的潜影盒位置，以及移动中活塞的碰撞形状。
-/// 只在算阶段开头跑一次；方块实体表本身不是 `Sync`，算阶段借不到它。
+/// 算阶段开头从方块实体表里拷出的形状。表本身不是 `Sync`，算阶段借不到它。
+#[derive(Debug, Default)]
+pub(crate) struct BlockEntityShapes {
+    pub(crate) open_shulker_boxes: BTreeSet<BlockPos>,
+    pub(crate) moving_piston_shapes: BTreeMap<BlockPos, Vec<Aabb>>,
+    pub(crate) shulker_box_shapes: BTreeMap<BlockPos, Aabb>,
+}
+
+/// 从方块实体表里拷出盖子开着的潜影盒位置，以及移动中活塞、潜影盒的碰撞形状。
+/// 只在算阶段开头跑一次。
 pub(crate) fn block_entity_shapes(
+    chunks: &ChunkStore,
     entities: &mc_bamboo_blocks::BlockEntities,
-) -> (BTreeSet<BlockPos>, BTreeMap<BlockPos, Vec<Aabb>>) {
-    let mut open = BTreeSet::new();
-    let mut pistons = BTreeMap::new();
+) -> BlockEntityShapes {
+    let mut shapes = BlockEntityShapes::default();
     entities.visit(|pos, entity| {
-        if entity
-            .as_any()
-            .downcast_ref::<ShulkerBoxEntity>()
-            .is_some_and(|box_| !box_.is_closed())
-        {
-            open.insert(pos);
+        if let Some(shulker) = entity.as_any().downcast_ref::<ShulkerBoxEntity>() {
+            if !shulker.is_closed() {
+                shapes.open_shulker_boxes.insert(pos);
+            }
+            let state = BlockState(chunks.block(pos).unwrap_or(blocks::VOID_AIR));
+            shapes
+                .shulker_box_shapes
+                .insert(pos, shulker.bounding_box(state));
         }
         if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
-            pistons.insert(pos, piston.collision_shape());
+            shapes
+                .moving_piston_shapes
+                .insert(pos, piston.collision_shape());
         }
     });
-    (open, pistons)
+    shapes
 }
