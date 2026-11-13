@@ -66,6 +66,10 @@ impl LevelTables for RegionLevel<'_> {
         self.block_entities
     }
 
+    fn block_events_table(&self) -> &BlockEvents {
+        self.block_events
+    }
+
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         self.block_events
     }

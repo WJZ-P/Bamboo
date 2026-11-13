@@ -34,6 +34,9 @@ fn machine(name: &'static str, input: Input) -> Machine {
         level: BenchLevel::new(),
         ticks: BlockTicks::new(),
         input,
+        cache: None,
+        effects: Vec::new(),
+        sound_draws: 0,
     }
 }
 

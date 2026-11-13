@@ -84,6 +84,9 @@ pub enum Trigger {
 pub enum Observation<'a> {
     TriggerBegin(Trigger),
     TriggerEnd,
+    /// 缓存守卫/重放期间关掉录制包装的记账：这些读写不是解释执行产生的。
+    /// 实验驱动不报这个事件，历史数字不变。
+    Capture(bool),
     /// `World::game_time()` 被读了。
     TimeRead,
     /// `World::push_effect` 收进去的音效、世界事件等。
@@ -96,12 +99,21 @@ pub enum Observation<'a> {
         result: bool,
     },
     /// 新排的一个方块或流体计划刻，延迟是触发时刻起的相对刻数。
+    /// `existed` 是排之前这一格这一种刻/事件是不是已经排着：
+    /// `BlockTicks::schedule` 和 `BlockEvents::push` 在重复时不产生变化，
+    /// 也不递增内部序号，守卫必须复核（设计稿 §3.1）。
     TickScheduled {
         pos: BlockPos,
         kind: i64,
         fluid: bool,
         delay: i32,
         priority: TickPriority,
+        existed: bool,
+    },
+    /// 排一个方块事件之前，它是不是已经在队列里。
+    BlockEventQueued {
+        event: crate::block_entity::BlockEvent,
+        existed: bool,
     },
 }
 
@@ -143,6 +155,10 @@ pub trait LevelSideState {
     fn torch_toggle_count(&self, pos: BlockPos) -> usize;
 
     // 方块事件。
+    /// 这一条方块事件是不是已经在队列里（`BlockEvents::queued`）。
+    fn block_event_queued(&self, _event: BlockEvent) -> bool {
+        false
+    }
     fn push_block_event(&mut self, event: BlockEvent);
     fn pop_block_event(&mut self) -> Option<BlockEvent>;
     /// 一轮方块事件结束后，按原顺序放回那些所在区块不能 tick 的事件。
@@ -186,6 +202,7 @@ pub trait LevelSideState {
 pub trait LevelTables {
     fn block_entities_table(&self) -> &BlockEntities;
     fn block_entities_table_mut(&mut self) -> &mut BlockEntities;
+    fn block_events_table(&self) -> &BlockEvents;
     fn block_events_table_mut(&mut self) -> &mut BlockEvents;
     fn redstone_table(&self) -> &RedstoneMemory;
     fn redstone_table_mut(&mut self) -> &mut RedstoneMemory;
@@ -276,6 +293,10 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
 
     fn torch_toggle_count(&self, pos: BlockPos) -> usize {
         self.redstone_table().torch_toggle_count(pos)
+    }
+
+    fn block_event_queued(&self, event: BlockEvent) -> bool {
+        self.block_events_table().contains(event)
     }
 
     fn push_block_event(&mut self, event: BlockEvent) {
@@ -807,6 +828,12 @@ pub trait Level: LevelSideState + LevelEntities {
     ) -> Option<u16> {
         let _ = (entity_id, component_slot, stack);
         None
+    }
+
+    /// 取走录制包装产出的运行时记录。默认实现为空：只有 [`crate::recording::Recording`]
+    /// 会返回内容，缓存驱动用它收成一条记录。
+    fn runtime_records(&self) -> Vec<crate::cache::RuntimeRecord> {
+        Vec::new()
     }
 
     /// 观察一次不经过本 trait 读写方法的事件，见 [`Observation`]。

@@ -319,6 +319,11 @@ impl BlockTicks {
         }
     }
 
+    /// 这一格这种流体是不是已经排着一条流体刻。
+    pub fn has_scheduled_fluid(&self, pos: BlockPos, fluid: i32) -> bool {
+        self.fluids.has_scheduled(pos, fluid)
+    }
+
     /// `getBlockTicks().hasScheduledTick`。
     pub fn has_scheduled_tick(&self, pos: BlockPos, block: usize) -> bool {
         self.blocks.has_scheduled(pos, block)

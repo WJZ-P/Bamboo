@@ -933,12 +933,16 @@ impl<'a> World<'a> {
         param_b: i32,
     ) {
         let block = BlockState(block.default_state).block_id();
-        self.level.push_block_event(BlockEvent {
+        let event = BlockEvent {
             pos,
             block,
             param_a,
             param_b,
-        });
+        };
+        let existed = self.level.block_event_queued(event);
+        self.level
+            .observe(Observation::BlockEventQueued { event, existed });
+        self.level.push_block_event(event);
     }
 
     /// `ServerLevel.runBlockEvents`：按排队的顺序一直处理到队列空，处理中新排进来的同一轮执行。
@@ -979,6 +983,11 @@ impl<'a> World<'a> {
     /// 驱动循环在每次触发开始前报一次边界。
     pub fn begin_trigger(&self, trigger: Trigger) {
         self.level.observe(Observation::TriggerBegin(trigger));
+    }
+
+    /// 缓存守卫/重放期间关掉录制记账，见 [`Observation::Capture`]。
+    pub fn set_capture(&self, capture: bool) {
+        self.level.observe(Observation::Capture(capture));
     }
 
     /// 一条到期的方块计划刻的边界。
@@ -1470,8 +1479,76 @@ impl<'a> World<'a> {
             fluid: false,
             delay,
             priority,
+            existed: self.ticks.has_scheduled_tick(pos, id),
         });
         self.ticks.schedule(pos, id, delay, priority);
+    }
+
+    /// 缓存守卫用的计划刻队列，见 `guard_tick_query`。
+    pub fn ticks_ref(&self) -> &BlockTicks {
+        self.ticks
+    }
+
+    /// 缓存驱动：取走录制包装刚产出的一条运行时记录。
+    pub fn take_runtime_records(&self) -> Vec<crate::cache::RuntimeRecord> {
+        self.level.runtime_records()
+    }
+
+    /// 缓存驱动：按排队顺序取一个方块事件。
+    pub fn pop_block_event(&mut self) -> Option<BlockEvent> {
+        self.level.pop_block_event()
+    }
+
+    /// 缓存驱动：这一格所在区块现在跑不跑方块逻辑。
+    pub fn chunk_ticks_blocks(&self, chunk: ChunkPos) -> bool {
+        self.level.chunk_ticks_blocks(chunk)
+    }
+
+    /// 缓存驱动：一轮结束后把推迟的事件按原顺序放回。
+    pub fn reschedule_block_events(&mut self, events: Vec<BlockEvent>) {
+        self.level.reschedule_block_events(events);
+    }
+
+    /// 缓存重放：按效果序列写一格方块，不触发邻居更新，也不报观察事件。
+    /// `flags` 照旧登记广播和光照，见 [`Level::write_block`]。
+    pub fn replay_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) {
+        let _ = self.level.write_block(pos, state, flags);
+    }
+
+    /// 缓存重放：写比较器输出，不报观察事件。
+    pub fn replay_comparator(&mut self, pos: BlockPos, signal: i32) {
+        self.level.set_comparator_output(pos, signal);
+    }
+
+    /// 缓存重放：排一个方块事件，不报观察事件。
+    pub fn replay_block_event(&mut self, event: BlockEvent) {
+        self.level.push_block_event(event);
+    }
+
+    /// 缓存重放：排一个方块计划刻，不报观察事件。
+    pub fn replay_scheduled_tick(
+        &mut self,
+        pos: BlockPos,
+        block: usize,
+        delay: i32,
+        priority: TickPriority,
+    ) {
+        self.ticks.schedule(pos, block, delay, priority);
+    }
+
+    /// 缓存重放：排一个流体计划刻，不报观察事件。
+    pub fn replay_scheduled_fluid_tick(&mut self, pos: BlockPos, fluid: i32, delay: i32) {
+        self.ticks
+            .schedule_fluid(pos, fluid, delay, TickPriority::Normal);
+    }
+
+    /// 缓存守卫：重查计划刻队列（`Level` 包装看不见它）。
+    pub fn guard_tick_query(&self, pos: BlockPos, block: usize, will_tick_this_tick: bool) -> bool {
+        if will_tick_this_tick {
+            self.ticks.will_tick_this_tick(pos, block)
+        } else {
+            self.ticks.has_scheduled_tick(pos, block)
+        }
     }
 
     /// `getBlockTicks().hasScheduledTick`。
@@ -1515,6 +1592,7 @@ impl<'a> World<'a> {
             fluid: true,
             delay,
             priority: TickPriority::Normal,
+            existed: self.ticks.has_scheduled_fluid(pos, fluid),
         });
         self.ticks
             .schedule_fluid(pos, fluid, delay, TickPriority::Normal);

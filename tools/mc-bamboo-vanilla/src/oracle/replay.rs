@@ -423,6 +423,10 @@ impl LevelTables for OracleLevel {
         &mut self.block_entities
     }
 
+    fn block_events_table(&self) -> &BlockEvents {
+        &self.block_events
+    }
+
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         &mut self.block_events
     }

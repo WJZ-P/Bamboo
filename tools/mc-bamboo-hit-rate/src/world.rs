@@ -120,6 +120,10 @@ impl LevelTables for BenchLevel {
         &mut self.block_entities
     }
 
+    fn block_events_table(&self) -> &BlockEvents {
+        &self.block_events
+    }
+
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         &mut self.block_events
     }
@@ -300,6 +304,12 @@ pub struct Machine {
     pub level: BenchLevel,
     pub ticks: BlockTicks,
     pub input: Input,
+    /// 打开时驱动走带缓存的入口；`None` 走原样解释执行。
+    pub cache: Option<mc_bamboo_blocks::cache::RedstoneCache>,
+    /// 上一刻方块逻辑收集到的对外效果，差分测试逐刻比它。
+    pub effects: Vec<String>,
+    /// 对外音效包 `seed: None` 时由发包层取的随机数次数，差分测试比对。
+    pub sound_draws: u64,
 }
 
 /// 翻转一格周期输入：红石块（满信号）<-> 空气，并通知邻居。
@@ -327,6 +337,10 @@ impl Machine {
     }
 
     /// 这一刻的外部输入（如果有）。
+    pub fn apply_input_public(&mut self, now: i64) {
+        self.apply_input(now);
+    }
+
     fn apply_input(&mut self, now: i64) {
         use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
         match self.input.clone() {
@@ -375,7 +389,22 @@ impl Machine {
     pub fn step(&mut self, now: i64, recording: bool) -> Vec<Record> {
         self.apply_input(now);
         if !recording {
-            mc_bamboo_blocks::run_scheduled_ticks(&mut self.level, &mut self.ticks, now);
+            let outcome = if let Some(cache) = self.cache.as_mut() {
+                mc_bamboo_blocks::run_scheduled_ticks_with_cache(
+                    &mut self.level,
+                    &mut self.ticks,
+                    now,
+                    Some(cache),
+                )
+            } else {
+                mc_bamboo_blocks::run_scheduled_ticks(&mut self.level, &mut self.ticks, now)
+            };
+            self.effects = outcome.effects.iter().map(|e| format!("{e:?}")).collect();
+            self.sound_draws = self
+                .effects
+                .iter()
+                .filter(|e| e.contains("Sound") && e.contains("seed: None"))
+                .count() as u64;
             return Vec::new();
         }
         let mut recorder = Recording::new(&mut self.level);
