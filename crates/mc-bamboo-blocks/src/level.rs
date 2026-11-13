@@ -84,6 +84,19 @@ pub enum Trigger {
 pub enum Observation<'a> {
     TriggerBegin(Trigger),
     TriggerEnd,
+    /// 缓存守卫/重放期间关掉录制包装的记账：这些读写不是解释执行产生的。
+    /// 实验驱动不报这个事件，历史数字不变。
+    Capture(bool),
+    /// 一次活塞音高取数。重放时照样从世界随机源取一个数、按 `scale`/`base` 算 pitch。
+    PistonPitch {
+        pos: BlockPos,
+        sound: i32,
+        source: mc_bamboo_data::SoundSource,
+        volume: f32,
+        scale: f32,
+        base: f32,
+        except_initiator: bool,
+    },
     /// `World::game_time()` 被读了。
     TimeRead,
     /// `World::push_effect` 收进去的音效、世界事件等。
@@ -96,12 +109,21 @@ pub enum Observation<'a> {
         result: bool,
     },
     /// 新排的一个方块或流体计划刻，延迟是触发时刻起的相对刻数。
+    /// `existed` 是排之前这一格这一种刻/事件是不是已经排着：
+    /// `BlockTicks::schedule` 和 `BlockEvents::push` 在重复时不产生变化，
+    /// 也不递增内部序号，守卫必须复核（设计稿 §3.1）。
     TickScheduled {
         pos: BlockPos,
         kind: i64,
         fluid: bool,
         delay: i32,
         priority: TickPriority,
+        existed: bool,
+    },
+    /// 排一个方块事件之前，它是不是已经在队列里。
+    BlockEventQueued {
+        event: crate::block_entity::BlockEvent,
+        existed: bool,
     },
 }
 
@@ -143,6 +165,10 @@ pub trait LevelSideState {
     fn torch_toggle_count(&self, pos: BlockPos) -> usize;
 
     // 方块事件。
+    /// 这一条方块事件是不是已经在队列里（`BlockEvents::queued`）。
+    fn block_event_queued(&self, _event: BlockEvent) -> bool {
+        false
+    }
     fn push_block_event(&mut self, event: BlockEvent);
     fn pop_block_event(&mut self) -> Option<BlockEvent>;
     /// 一轮方块事件结束后，按原顺序放回那些所在区块不能 tick 的事件。
@@ -186,6 +212,7 @@ pub trait LevelSideState {
 pub trait LevelTables {
     fn block_entities_table(&self) -> &BlockEntities;
     fn block_entities_table_mut(&mut self) -> &mut BlockEntities;
+    fn block_events_table(&self) -> &BlockEvents;
     fn block_events_table_mut(&mut self) -> &mut BlockEvents;
     fn redstone_table(&self) -> &RedstoneMemory;
     fn redstone_table_mut(&mut self) -> &mut RedstoneMemory;
@@ -276,6 +303,10 @@ impl<T: LevelTables + ?Sized> LevelSideState for T {
 
     fn torch_toggle_count(&self, pos: BlockPos) -> usize {
         self.redstone_table().torch_toggle_count(pos)
+    }
+
+    fn block_event_queued(&self, event: BlockEvent) -> bool {
+        self.block_events_table().contains(event)
     }
 
     fn push_block_event(&mut self, event: BlockEvent) {
@@ -508,9 +539,24 @@ pub trait Level: LevelSideState + LevelEntities {
     /// `Level.random` 和 `randValue`，方块逻辑的随机数都从这里取。
     fn random(&self) -> &LevelRandom;
 
+    /// 只取一个 `next_float()`，供活塞音高这类「取数 → 算参数 → 发效果」的动作使用。
+    /// 默认实现转发给 [`Self::random`]；录制包装覆盖它把这次取数记成可重放的效果。
+    fn next_random_float(&self) -> f32 {
+        self.random().source().next_float()
+    }
+
     /// `LevelChunkSection.isRandomlyTicking`：这个区块里纵坐标是 `section_y`（方块的 `y >> 4`）的区块段里
     /// 有会随机刻的方块或者流体，也就是有状态的 `is_randomly_ticking` 或者 `is_fluid_randomly_ticking` 为真。
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool;
+
+    /// `section_y`（方块的 `y >> 4`）这一段的整段方块状态哈希，红石缓存的键读它。
+    ///
+    /// 默认实现逐格重算；有区块存储的实现应该覆盖它，直接读区块段里维护好的哈希。
+    /// 段内坐标用于哈希，段坐标本身另进缓存键。段超出世界高度或所在区块不可用时
+    /// 返回 `None`：这时调用方必须退回解释执行。
+    fn section_hash(&self, _chunk: ChunkPos, _section_y: i32) -> Option<u128> {
+        None
+    }
 
     /// 这个区块里哪些区块段 [`is_randomly_ticking_section`](Self::is_randomly_ticking_section)：
     /// 第 i 位对应从世界底部数起的第 i 段。
@@ -798,6 +844,12 @@ pub trait Level: LevelSideState + LevelEntities {
     ) -> Option<u16> {
         let _ = (entity_id, component_slot, stack);
         None
+    }
+
+    /// 取走录制包装产出的运行时记录。默认实现为空：只有 [`crate::recording::Recording`]
+    /// 会返回内容，缓存驱动用它收成一条记录。
+    fn runtime_records(&self) -> Vec<crate::cache::RuntimeRecord> {
+        Vec::new()
     }
 
     /// 观察一次不经过本 trait 读写方法的事件，见 [`Observation`]。

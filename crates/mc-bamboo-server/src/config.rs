@@ -91,6 +91,8 @@ pub struct ServerConfig {
     pub list_directory: std::path::PathBuf,
     /// 实体阶段的线程数。0 = 精确驱动（和官方逐位一致）；≥ 1 = 并行驱动（实验）。
     pub entity_threads: usize,
+    /// 红石缓存（实验）：结果和官方逐位一致，打开后对大型红石电路有效。默认关。
+    pub redstone_cache: bool,
     /// Director 信箱每刻交付/收回区块的个数上限，0 表示不限。
     pub mail_budget: MailBudget,
 }
@@ -115,6 +117,7 @@ impl Default for ServerConfig {
             forwarding_secret: String::new(),
             list_directory: std::path::PathBuf::new(),
             entity_threads: 0,
+            redstone_cache: false,
             mail_budget: MailBudget::default(),
         }
     }

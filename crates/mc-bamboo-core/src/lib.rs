@@ -4,6 +4,7 @@
 
 pub mod mth;
 pub mod profile;
+pub mod section_hash;
 pub mod sign;
 
 mod shape;

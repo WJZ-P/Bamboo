@@ -52,7 +52,7 @@ const LOG_TAIL: usize = 60;
 /// `--show` 的默认值。
 const DEFAULT_SHOW: usize = 3;
 
-const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value] [--weather clear|rain|thunder]";
+const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value] [--weather clear|rain|thunder] [--redstone-cache]";
 
 /// 不比较的内容。每一条都有原因，第 4 章要求排除的内容进最后的报告。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -309,6 +309,8 @@ struct Options {
     pure: bool,
     show: usize,
     show_blocked: bool,
+    /// 打开时方块逻辑走带缓存的入口，热点阈值 0（第一次就录）。
+    redstone_cache: bool,
 }
 
 impl Options {
@@ -318,6 +320,7 @@ impl Options {
             pure: false,
             show: DEFAULT_SHOW,
             show_blocked: false,
+            redstone_cache: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -344,6 +347,7 @@ impl Options {
                 }
                 "--pure" => options.pure = true,
                 "--show-blocked" => options.show_blocked = true,
+                "--redstone-cache" => options.redstone_cache = true,
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -374,6 +378,9 @@ impl Options {
         }
         if self.pure {
             args.push("--pure".to_owned());
+        }
+        if self.redstone_cache {
+            args.push("--redstone-cache".to_owned());
         }
         args.join(" ")
     }
@@ -550,6 +557,7 @@ pub(crate) fn collect_log(child: &mut Child) -> Result<mpsc::Receiver<Vec<String
 /// 一次运行的状态。
 struct Session {
     options: Options,
+    cache: mc_bamboo_blocks::cache::RedstoneCache,
     names: Names,
     header: Option<Header>,
     report: Report,
@@ -560,6 +568,9 @@ impl Session {
     fn new(options: Options) -> Self {
         Self {
             report: Report::new(options.show, options.show_blocked),
+            cache: mc_bamboo_blocks::cache::RedstoneCache::new(
+                mc_bamboo_blocks::cache::CacheConfig::immediate(),
+            ),
             options,
             names: Names::new(),
             header: None,
@@ -581,6 +592,15 @@ impl Session {
     fn finish(&self) -> Result<(), String> {
         if !self.ended {
             return Err("BlockOracle.java stopped before its end line".to_owned());
+        }
+        if self.options.redstone_cache {
+            println!(
+                "redstone cache: {} triggers, {} replays, {} records, {} rejected",
+                self.cache.stats().triggers,
+                self.cache.stats().replays,
+                self.cache.stats().recorded,
+                self.cache.stats().rejected,
+            );
         }
         self.report.print(&self.options.rerun_args());
         self.report.verdict()
@@ -681,7 +701,8 @@ impl Session {
             self.report.excluded(block, kind, rule);
             return Ok(());
         }
-        let replayed = match run_guarded(case, header, &self.names)? {
+        let cache = self.options.redstone_cache.then_some(&mut self.cache);
+        let replayed = match run_guarded(case, header, &self.names, cache)? {
             Ok(replayed) => replayed,
             Err(message) => {
                 let mismatch = Mismatch {
@@ -1200,9 +1221,12 @@ fn run_guarded(
     case: &Case,
     header: &Header,
     names: &Names,
+    mut cache: Option<&mut mc_bamboo_blocks::cache::RedstoneCache>,
 ) -> Result<Result<Replayed, String>, String> {
     REPLAYING.set(true);
-    let replayed = panic::catch_unwind(AssertUnwindSafe(|| replay(case, header, names)));
+    let replayed = panic::catch_unwind(AssertUnwindSafe(|| {
+        replay(case, header, names, cache.as_deref_mut())
+    }));
     REPLAYING.set(false);
     match replayed {
         Ok(result) => result.map(Ok),

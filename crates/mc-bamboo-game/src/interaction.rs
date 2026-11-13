@@ -102,6 +102,13 @@ pub(crate) struct UseItemOn {
 
 /// tick 第 2 阶段之后：到期的计划刻。官方 `ServerLevel.tick` 在时间加一之后、区块广播之前跑它们。
 pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
+    if region.redstone_cache.config().enabled {
+        let (mut level, ticks, cache) = region.block_level_with_cache();
+        let outcome =
+            mc_bamboo_blocks::run_due_ticks_with_cache(&mut level, ticks, time.0, Some(cache));
+        send_effects(region, None, &outcome.effects);
+        return;
+    }
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_due_ticks(&mut level, ticks, time.0);
     send_effects(region, None, &outcome.effects);
@@ -111,6 +118,14 @@ pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
 ///
 /// `ServerLevel.runBlockEvents`: after random ticks, before entities.
 pub(crate) fn run_block_events(region: &mut Region) {
+    if region.redstone_cache.config().enabled {
+        let now = region.tick.game_time();
+        let (mut level, ticks, cache) = region.block_level_with_cache();
+        let outcome =
+            mc_bamboo_blocks::run_block_event_phase_with_cache(&mut level, ticks, Some(cache), now);
+        send_effects(region, None, &outcome.effects);
+        return;
+    }
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::run_block_event_phase(&mut level, ticks);
     send_effects(region, None, &outcome.effects);

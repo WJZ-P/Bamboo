@@ -29,6 +29,8 @@ use crate::{
         BrewingStandEntity, CampfireEntity, FurnaceEntity, PistonMoving, ShulkerBoxEntity,
     },
     block_entity::{BlockEntity, BlockEvent},
+    cache::{GuardRead, ReadMethod, guard::trigger_pos},
+    cache::{ReplayEffect, RuntimeRecord, SectionKey},
     entity::{Entity, EntityPublic, EntityState, EntityStore, EntityUid},
     gamerules::BlockGameRules,
     level::{
@@ -280,14 +282,34 @@ struct Inner {
     pending_uncacheable: Vec<Uncacheable>,
     /// 每段现在的内容哈希，写方块时增量更新（设计稿 9.3 的做法）。
     section_hashes: HashMap<ChunkSection, u128>,
+    runtime: Vec<RuntimeRecord>,
+    /// 两次触发边界之间发生过写，下一次触发的运行时记录作废。
+    boundary_writes: bool,
+    /// 守卫/重放阶段关掉记账，见 `set_capture`。
+    capture: bool,
     tick: i64,
 }
 
 struct Frame {
     record: Record,
+    runtime: RuntimeFrame,
     started: Instant,
     /// 触发开始时各段的哈希快照。
     section_start: HashMap<ChunkSection, u128>,
+}
+
+/// 一次触发的运行时录制，和实验的 `Record` 并行产出。
+#[derive(Debug, Default)]
+struct RuntimeFrame {
+    trigger: Option<Trigger>,
+    trigger_state: u32,
+    tick: i64,
+    reads: Vec<GuardRead>,
+    effects: Vec<ReplayEffect>,
+    uncacheable: Vec<Uncacheable>,
+    boundary_writes: bool,
+    /// 录制到了白名单以外的读或写，整条运行时记录作废。
+    rejected: bool,
 }
 
 impl<'a> Recording<'a> {
@@ -302,23 +324,70 @@ impl<'a> Recording<'a> {
                 pending_writes: Vec::new(),
                 pending_uncacheable: Vec::new(),
                 section_hashes: HashMap::new(),
+                runtime: Vec::new(),
+                boundary_writes: false,
+                capture: true,
                 tick: 0,
             }),
         }
     }
 
     /// 把时钟拨到 `tick`，丢掉上一刻遗留的边界读写。
+    ///
+    /// 边界外的写会留在 `boundary_writes` 里，让下一次触发的运行时记录作废
+    /// （设计稿 §4.2）：实验的 `Record` 仍然把它归到下一次触发，历史数字不变。
     pub fn set_tick(&self, tick: i64) {
         let mut inner = self.inner.borrow_mut();
         inner.tick = tick;
         inner.pending_reads.clear();
         inner.pending_writes.clear();
         inner.pending_uncacheable.clear();
+        inner.boundary_writes = false;
+    }
+
+    /// 关掉/打开记账。守卫和重放阶段必须关掉：它们产生的读写不是解释执行的结果，
+    /// 不能进读集合或效果序列。实验驱动不调用这个方法，行为不变。
+    pub fn set_capture(&self, capture: bool) {
+        self.inner.borrow_mut().capture = capture;
     }
 
     /// 取走目前为止的全部记录，清空。
     pub fn take_records(&self) -> Vec<Record> {
         std::mem::take(&mut self.inner.borrow_mut().records)
+    }
+
+    /// 取走运行时记录（带真实值的守卫读项和效果），实验的 `Record` 不受影响。
+    pub fn take_runtime_records(&self) -> Vec<RuntimeRecord> {
+        std::mem::take(&mut self.inner.borrow_mut().runtime)
+    }
+
+    /// 一次运行时读。白名单之外的读也记下来，让记录被判为不可缓存。
+    fn runtime_read(&self, method: ReadMethod, pos: Option<BlockPos>, value: impl Hash) {
+        if !self.inner.borrow().capture {
+            return;
+        }
+        let mut inner = self.inner.borrow_mut();
+        if let Some(frame) = inner.current.as_mut() {
+            frame.runtime.reads.push(GuardRead::new(method, pos, value));
+        }
+    }
+
+    /// 一次运行时效果。白名单之外的写用 `reject_runtime` 作废整条记录。
+    fn runtime_effect(&self, effect: ReplayEffect) {
+        if !self.inner.borrow().capture {
+            return;
+        }
+        let mut inner = self.inner.borrow_mut();
+        if let Some(frame) = inner.current.as_mut() {
+            frame.runtime.effects.push(effect);
+        }
+    }
+
+    fn reject_runtime(&self) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(frame) = inner.current.as_mut() {
+            frame.runtime.rejected = true;
+        }
     }
 
     /// 借回里面的世界，供实验程序读状态。录制器还活着时不要用它跑方块逻辑。
@@ -328,6 +397,17 @@ impl<'a> Recording<'a> {
 
     /// 一次读进读集合。
     fn read(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
+        if !self.inner.borrow().capture {
+            return;
+        }
+        // 白名单之外的读项让这条运行时记录作废，见 `RuntimeRecord::supported`。
+        if !crate::cache::supported_kind(kind) {
+            self.reject_runtime();
+        }
+        // 运行时守卫按「类别 + 真实值」记一笔，白名单之外的读项让记录作废。
+        if !crate::cache::supported_kind(kind) {
+            self.reject_runtime();
+        }
         let value = stable_hash(&value);
         let section = pos.map(ChunkSection::of);
         if let Some(section) = section {
@@ -362,10 +442,20 @@ impl<'a> Recording<'a> {
 
     /// 一次写进效果。
     fn write(&self, entry: Write) {
+        if !self.inner.borrow().capture {
+            return;
+        }
+        // 白名单之外的写让这条运行时记录作废。
+        if !crate::cache::supported_write(entry) {
+            self.reject_runtime();
+        }
         let mut inner = self.inner.borrow_mut();
         match inner.current.as_mut() {
             Some(frame) => frame.record.writes.push(entry),
-            None => inner.pending_writes.push(entry),
+            None => {
+                inner.boundary_writes = true;
+                inner.pending_writes.push(entry);
+            }
         }
     }
 
@@ -382,11 +472,17 @@ impl<'a> Recording<'a> {
 
     /// 标一个不能缓存的原因，同一次触发里只记一次。
     fn uncacheable(&self, reason: Uncacheable) {
+        if !self.inner.borrow().capture {
+            return;
+        }
         let mut inner = self.inner.borrow_mut();
         match inner.current.as_mut() {
             Some(frame) => {
                 if !frame.record.uncacheable.contains(&reason) {
                     frame.record.uncacheable.push(reason);
+                }
+                if !frame.runtime.uncacheable.contains(&reason) {
+                    frame.runtime.uncacheable.push(reason);
                 }
             }
             None => {
@@ -408,15 +504,22 @@ impl<'a> Recording<'a> {
         if inner.section_hashes.contains_key(&section) {
             return;
         }
-        let mut hash = 0_u128;
-        for y in section.section_y * 16..section.section_y * 16 + 16 {
-            for z in section.chunk.z * 16..section.chunk.z * 16 + 16 {
-                for x in section.chunk.x * 16..section.chunk.x * 16 + 16 {
-                    let pos = BlockPos::new(x, y, z);
-                    hash ^= cell_hash(pos, self.level.block_state(pos));
+        // 存储层维护好的整段哈希；没有实现 `section_hash` 的假世界退回逐格扫描。
+        let hash = self
+            .level
+            .section_hash(section.chunk, section.section_y)
+            .unwrap_or_else(|| {
+                let mut hash = 0_u128;
+                for y in section.section_y * 16..section.section_y * 16 + 16 {
+                    for z in section.chunk.z * 16..section.chunk.z * 16 + 16 {
+                        for x in section.chunk.x * 16..section.chunk.x * 16 + 16 {
+                            let pos = BlockPos::new(x, y, z);
+                            hash ^= cell_hash(pos, self.level.block_state(pos));
+                        }
+                    }
                 }
-            }
-        }
+                hash
+            });
         inner.section_hashes.insert(section, hash);
     }
 
@@ -506,16 +609,19 @@ impl Hasher for StableHasher {
     }
 }
 
-fn stable_hash(value: &impl Hash) -> u64 {
+pub fn stable_hash(value: &impl Hash) -> u64 {
     let mut hasher = StableHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
 }
 
 fn cell_hash(pos: BlockPos, state: BlockState) -> u128 {
-    let lo = stable_hash(&(pos, 0_u8, state.0));
-    let hi = stable_hash(&(pos, 1_u8, state.0));
-    u128::from(lo) | u128::from(hi) << 64
+    mc_bamboo_core::section_hash::cell_hash(
+        pos.x.rem_euclid(16) as usize,
+        pos.y.rem_euclid(16) as usize,
+        pos.z.rem_euclid(16) as usize,
+        state.0,
+    )
 }
 
 fn hash_effect(effect: &Effect) -> u64 {
@@ -668,9 +774,7 @@ fn entity_time_facts(entity: &dyn BlockEntity, now: i64) -> u64 {
     if let Some(hopper) = entity.as_any().downcast_ref::<HopperEntity>() {
         return stable_hash(&hopper.ticked_game_time().saturating_sub(now));
     }
-    if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
-        return stable_hash(&piston.observed_facts(now).6);
-    }
+    // 移动活塞已不含绝对时刻，见 `PistonMoving::observed_facts`。
     0
 }
 
@@ -712,10 +816,7 @@ fn entity_facts(entity: &dyn BlockEntity) -> u64 {
         shulker.progress(1.0).to_bits().hash(&mut hasher);
         shulker.progress(0.0).to_bits().hash(&mut hasher);
     } else if let Some(piston) = entity.as_any().downcast_ref::<PistonMoving>() {
-        // 时刻字段单独记，见 `entity_time_facts` 和乐观口径的键。
-        let (state, direction, extending, source, progress, progress_o, _) =
-            piston.observed_facts(0);
-        (state, direction, extending, source, progress, progress_o).hash(&mut hasher);
+        piston.observed_facts().hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -724,11 +825,13 @@ impl LevelSideState for Recording<'_> {
     fn comparator_output(&self, pos: BlockPos) -> i32 {
         let value = self.level.comparator_output(pos);
         self.read(Some(pos), K_REDSTONE, (0_u8, value));
+        self.runtime_read(ReadMethod::Comparator(pos), Some(pos), value);
         value
     }
 
     fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
         self.redstone_write(Some(pos), 0, (0_u8, signal));
+        self.runtime_effect(ReplayEffect::Comparator { pos, signal });
         self.level.set_comparator_output(pos, signal);
     }
 
@@ -850,6 +953,7 @@ impl LevelSideState for Recording<'_> {
             event,
             popped: None,
         });
+        self.runtime_effect(ReplayEffect::BlockEvent(event));
         self.level.push_block_event(event);
     }
 
@@ -1099,6 +1203,12 @@ impl Level for Recording<'_> {
             flags,
             applied,
         });
+        self.runtime_effect(ReplayEffect::Block {
+            pos,
+            state,
+            flags,
+            applied,
+        });
         applied
     }
 
@@ -1118,12 +1228,14 @@ impl Level for Recording<'_> {
     fn min_y(&self) -> i32 {
         let value = self.level.min_y();
         self.read(None, K_MIN_Y, value);
+        self.runtime_read(ReadMethod::MinY, None, value);
         value
     }
 
     fn max_y(&self) -> i32 {
         let value = self.level.max_y();
         self.read(None, K_MAX_Y, value);
+        self.runtime_read(ReadMethod::MaxY, None, value);
         value
     }
 
@@ -1131,6 +1243,22 @@ impl Level for Recording<'_> {
         self.uncacheable(Uncacheable::Random);
         self.read(None, K_RANDOM, self.level.random().source().seed());
         self.level.random()
+    }
+
+    fn next_random_float(&self) -> f32 {
+        // 活塞音高取数由 `Observation::PistonPitch` 记成可重放的效果。
+        self.level.next_random_float()
+    }
+
+    fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
+        // 守卫读的是录制器自己维护的整段哈希：它按 `write_block` 增量更新，
+        // 和存储层给的初始哈希一致。底层 `Level` 不一定实现 `section_hash`。
+        self.inner
+            .borrow()
+            .section_hashes
+            .get(&ChunkSection { chunk, section_y })
+            .copied()
+            .or_else(|| self.level.section_hash(chunk, section_y))
     }
 
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
@@ -1416,12 +1544,25 @@ impl Level for Recording<'_> {
         value
     }
 
+    fn runtime_records(&self) -> Vec<RuntimeRecord> {
+        self.take_runtime_records()
+    }
+
     fn observe(&self, event: Observation<'_>) {
+        if let Observation::Capture(capture) = event {
+            self.set_capture(capture);
+            return;
+        }
+        if !self.inner.borrow().capture {
+            return;
+        }
         match event {
             Observation::TriggerBegin(trigger) => {
                 let mut inner = self.inner.borrow_mut();
                 if let Some(frame) = inner.current.take() {
-                    inner.records.push(finish_record(frame));
+                    let (record, runtime) = finish_record(frame);
+                    inner.records.push(record);
+                    inner.runtime.push(runtime);
                 }
                 let record = Record {
                     tick: inner.tick,
@@ -1440,6 +1581,13 @@ impl Level for Recording<'_> {
                     .map(ChunkSection::of)
                     .collect();
                 inner.current = Some(Frame {
+                    runtime: RuntimeFrame {
+                        trigger: Some(trigger),
+                        trigger_state: self.level.block_state(trigger_pos(trigger)).0,
+                        tick: inner.tick,
+                        boundary_writes: inner.boundary_writes,
+                        ..RuntimeFrame::default()
+                    },
                     record,
                     started: Instant::now(),
                     section_start: HashMap::new(),
@@ -1473,14 +1621,35 @@ impl Level for Recording<'_> {
             Observation::TriggerEnd => {
                 let mut inner = self.inner.borrow_mut();
                 if let Some(frame) = inner.current.take() {
-                    inner.records.push(finish_record(frame));
+                    let (record, runtime) = finish_record(frame);
+                    inner.records.push(record);
+                    inner.runtime.push(runtime);
                 }
+                inner.boundary_writes = false;
             }
             Observation::TimeRead => {
                 self.uncacheable(Uncacheable::Time);
                 self.read(None, K_TIME, 0_u8);
             }
             Observation::Effect(effect) => {
+                // 方块事件成功的包是确定的，记成可重放的效果；其余对外效果
+                // 不能重放，见到就把这条运行时记录作废。
+                if let Effect::BlockEvent {
+                    pos,
+                    block,
+                    param_a,
+                    param_b,
+                } = effect
+                {
+                    self.runtime_effect(ReplayEffect::BlockEventPacket {
+                        pos: *pos,
+                        block: *block,
+                        param_a: *param_a,
+                        param_b: *param_b,
+                    });
+                } else {
+                    self.reject_runtime();
+                }
                 // 活塞伸出/收回的音高和音符盒的 seed 由世界随机源决定，
                 // 不是「状态」；效果里只留音效的种类和位置，避免同一键因
                 // 随机数不同而被算成「效果不同」。触发本身已标为不可缓存。
@@ -1516,6 +1685,11 @@ impl Level for Recording<'_> {
                 result,
             } => {
                 self.read(Some(pos), K_TICK_QUERY, (kind, will_tick_this_tick, result));
+                self.runtime_read(
+                    ReadMethod::TickQuery(pos, kind, will_tick_this_tick),
+                    Some(pos),
+                    (kind, will_tick_this_tick, result),
+                );
             }
             Observation::TickScheduled {
                 pos,
@@ -1523,7 +1697,27 @@ impl Level for Recording<'_> {
                 fluid,
                 delay,
                 priority,
+                existed,
             } => {
+                // `existed` 为真的写入在重放时仍走原始入口，去重和内部序号自然发生；
+                // 这里只把它记成守卫读项，不因此作废记录。
+                self.runtime_read(ReadMethod::Dedup(kind, fluid), Some(pos), existed);
+                if fluid {
+                    if let Ok(fluid_id) = i32::try_from(kind) {
+                        self.runtime_effect(ReplayEffect::ScheduledFluidTick {
+                            pos,
+                            fluid: fluid_id,
+                            delay,
+                        });
+                    }
+                } else if let Ok(block) = usize::try_from(kind) {
+                    self.runtime_effect(ReplayEffect::ScheduledTick {
+                        pos,
+                        block,
+                        delay,
+                        priority,
+                    });
+                }
                 self.write(Write::TickScheduled {
                     pos,
                     kind,
@@ -1532,12 +1726,46 @@ impl Level for Recording<'_> {
                     priority,
                 });
             }
+            Observation::BlockEventQueued { event, existed } => {
+                // 真正的 push 走 `LevelSideState::push_block_event`，这里只记去重存在性。
+                self.runtime_read(ReadMethod::BlockEventDedup(event), Some(event.pos), existed);
+            }
+            Observation::PistonPitch {
+                sound,
+                source,
+                volume,
+                scale,
+                base,
+                except_initiator,
+                ..
+            } => {
+                // 实验的严格口径仍把「取随机数」标成不可缓存（历史数字不变）；
+                // 运行时记录里这次取数已经记成可重放的效果，不标 `Uncacheable::Random`。
+                let mut inner = self.inner.borrow_mut();
+                if let Some(frame) = inner.current.as_mut()
+                    && !frame.record.uncacheable.contains(&Uncacheable::Random)
+                {
+                    frame.record.uncacheable.push(Uncacheable::Random);
+                }
+                drop(inner);
+                self.write(Write::Effect(stable_hash(&(
+                    9_u8,
+                    sound,
+                    source.id(),
+                    volume.to_bits(),
+                    scale.to_bits(),
+                    base.to_bits(),
+                    except_initiator,
+                ))));
+            }
+            Observation::Capture(_) => {}
         }
     }
 }
 
-fn finish_record(mut frame: Frame) -> Record {
-    frame.record.nanos = u64::try_from(frame.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+fn finish_record(mut frame: Frame) -> (Record, RuntimeRecord) {
+    let nanos = u64::try_from(frame.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    frame.record.nanos = nanos;
     let used: HashSet<ChunkSection> = frame
         .record
         .reads
@@ -1547,11 +1775,68 @@ fn finish_record(mut frame: Frame) -> Record {
         .collect();
     frame.record.sections = frame
         .section_start
-        .into_iter()
+        .iter()
         .filter(|(section, _)| used.contains(section))
+        .map(|(&section, &hash)| (section, hash))
         .collect();
     frame.record.sections.sort_by_key(|(section, _)| *section);
-    frame.record
+    let mut sections: Vec<SectionKey> = frame
+        .record
+        .sections
+        .iter()
+        .map(|&(section, hash)| SectionKey { section, hash })
+        .collect();
+    sections.sort_by_key(|s| s.section);
+    let trigger = frame.runtime.trigger.unwrap_or(frame.record.trigger);
+    // 触发本身这一格的方块状态进守卫，确认它还是记录里那个方块。
+    let mut reads = frame.runtime.reads;
+    // 触发点的方块状态：录制时记下原始状态 ID，守卫在 World 层重查。
+    reads.insert(
+        0,
+        GuardRead::trigger(trigger_pos(trigger), frame.runtime.trigger_state),
+    );
+    // 守卫读项必须覆盖每一个白名单里的实验读项：漏一个读就可能误命中。
+    // K_BLOCK 由整段哈希覆盖、K_BLOCK_EVENT 由 Trigger 本身覆盖，都不需要逐项守卫。
+    // 每个白名单读项对应一条守卫；另有「触发本身」和每次排刻/排事件的去重存在性。
+    let expected_guards = frame
+        .record
+        .reads
+        .iter()
+        .filter(|read| matches!(read.kind, K_MIN_Y | K_MAX_Y | K_REDSTONE | K_TICK_QUERY))
+        .count()
+        + reads
+            .iter()
+            .filter(|read| {
+                matches!(
+                    read.method,
+                    ReadMethod::Dedup(_, _) | ReadMethod::BlockEventDedup(_)
+                )
+            })
+            .count();
+    let rejected = frame.runtime.rejected
+        || reads.len().saturating_sub(1) != expected_guards
+        || frame
+            .record
+            .reads
+            .iter()
+            .any(|read| !crate::cache::supported_kind(read.kind))
+        || frame
+            .record
+            .writes
+            .iter()
+            .any(|write| !crate::cache::supported_write(*write));
+    let runtime = RuntimeRecord {
+        trigger,
+        tick: frame.runtime.tick,
+        nanos,
+        reads,
+        effects: frame.runtime.effects,
+        sections,
+        uncacheable: frame.runtime.uncacheable.clone(),
+        boundary_writes: frame.runtime.boundary_writes,
+        rejected,
+    };
+    (frame.record, runtime)
 }
 
 const _: fn() = || {

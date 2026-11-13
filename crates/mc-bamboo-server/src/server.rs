@@ -472,6 +472,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         enforce_secure_profile: config.enforce_secure_profile,
         admin: AdminSnapshot::default(),
         entity_threads: config.entity_threads,
+        redstone_cache: config.redstone_cache,
         mail_budget: config.mail_budget,
     }
 }

@@ -822,6 +822,11 @@ impl BlockEvents {
         }
     }
 
+    /// 这一条事件是不是已经在队列里。
+    pub fn contains(&self, event: BlockEvent) -> bool {
+        self.queued.contains(&event)
+    }
+
     /// 按排队的顺序取出一项。
     pub fn pop(&mut self) -> Option<BlockEvent> {
         let event = self.queue.pop_front()?;

@@ -4,7 +4,7 @@
 //! 先比到期时间，再比优先级，最后比加入的先后。
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt,
     hash::Hash,
 };
@@ -259,11 +259,26 @@ pub struct BlockTicks {
     next_order: u64,
     blocks: TickQueue<usize>,
     fluids: TickQueue<i32>,
+    /// `PistonMovingBlockEntity.lastTicked` 的相对量：位置 → 最后一次 tick 的 gameTime。
+    /// 官方不存这个字段，读盘回来是 0；这里空表等价于「本刻还没 tick 过」。
+    ticked_entities: HashMap<BlockPos, i64>,
 }
 
 impl BlockTicks {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 记下一次方块实体 tick，供活塞的 `lastTicked == gameTime` 比较用。
+    pub fn note_block_entity_tick(&mut self, pos: BlockPos) {
+        self.ticked_entities.insert(pos, self.now);
+    }
+
+    /// 这一格的方块实体本刻是不是已经 tick 过。等价于官方
+    /// `level.getGameTime() == moving.getLastTicked()`，但不含绝对时刻，
+    /// 所以周期性活塞门的状态能重复、能进缓存键。
+    pub fn entity_ticked_this_tick(&self, pos: BlockPos) -> bool {
+        self.ticked_entities.get(&pos).copied() == Some(self.now)
     }
 
     /// 现在能不能按区块搬计划刻：两条队列里都没有取出、还没跑完的刻。
@@ -317,6 +332,11 @@ impl BlockTicks {
             let order = self.order(pos, delay, priority);
             self.fluids.schedule(pos, fluid, order);
         }
+    }
+
+    /// 这一格这种流体是不是已经排着一条流体刻。
+    pub fn has_scheduled_fluid(&self, pos: BlockPos, fluid: i32) -> bool {
+        self.fluids.has_scheduled(pos, fluid)
     }
 
     /// `getBlockTicks().hasScheduledTick`。

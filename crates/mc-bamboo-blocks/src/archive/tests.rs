@@ -146,9 +146,8 @@ fn piston_writes_previous_progress_and_drops_absolute_time() {
         .unwrap()
         .unwrap();
     let piston = rebuilt.as_any().downcast_ref::<PistonMoving>().unwrap();
-    assert_eq!(piston.observed_facts(0).4, 0.5f32.to_bits());
-    assert_eq!(piston.observed_facts(0).5, 0.5f32.to_bits());
-    assert_eq!(piston.observed_facts(0).6, 0);
+    assert_eq!(piston.observed_facts().4, 0.5f32.to_bits());
+    assert_eq!(piston.observed_facts().5, 0.5f32.to_bits());
 }
 
 #[test]

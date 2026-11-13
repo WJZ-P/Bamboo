@@ -12,7 +12,7 @@ use mc_bamboo_blocks::{
     level::EquipTarget,
     recording::{Record, Recording},
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, section_hash, sign::SignContent};
 use mc_bamboo_data::blocks;
 use mc_bamboo_protocol::item::ItemStack;
 
@@ -22,6 +22,8 @@ pub const MAX_Y: i32 = 319;
 /// 一台机器的世界。方块表里没写的格子是空气。
 pub struct BenchLevel {
     pub blocks: BTreeMap<BlockPos, BlockState>,
+    /// 每个 16³ 段的整段方块状态哈希，写方块时增量更新。
+    pub section_hashes: std::collections::HashMap<mc_bamboo_blocks::recording::ChunkSection, u128>,
     pub containers: BTreeMap<BlockPos, Vec<ItemStack>>,
     pub random: LevelRandom,
     pub block_entities: BlockEntities,
@@ -40,6 +42,7 @@ impl BenchLevel {
     pub fn new() -> Self {
         Self {
             blocks: BTreeMap::new(),
+            section_hashes: std::collections::HashMap::new(),
             containers: BTreeMap::new(),
             random: LevelRandom::new(0),
             block_entities: BlockEntities::default(),
@@ -49,8 +52,24 @@ impl BenchLevel {
         }
     }
 
-    /// 直接摆一格，不做任何连锁。
+    /// 直接摆一格，不做任何连锁，但维护段哈希。
     pub fn set(&mut self, pos: BlockPos, state: BlockState) {
+        use mc_bamboo_blocks::recording::ChunkSection;
+        let old = self.block_state(pos);
+        let section = ChunkSection::of(pos);
+        let cell = |st: BlockState| {
+            section_hash::cell_hash(
+                pos.x.rem_euclid(16) as usize,
+                pos.y.rem_euclid(16) as usize,
+                pos.z.rem_euclid(16) as usize,
+                st.0,
+            )
+        };
+        let entry = self
+            .section_hashes
+            .entry(section)
+            .or_insert_with(section_hash::empty_section_hash);
+        *entry ^= cell(old) ^ cell(state);
         self.blocks.insert(pos, state);
     }
 
@@ -120,6 +139,10 @@ impl LevelTables for BenchLevel {
         &mut self.block_entities
     }
 
+    fn block_events_table(&self) -> &BlockEvents {
+        &self.block_events
+    }
+
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         &mut self.block_events
     }
@@ -148,7 +171,7 @@ impl Level for BenchLevel {
         if !self.block_state(pos).is_same_block(state) {
             self.containers.remove(&pos);
         }
-        self.blocks.insert(pos, state);
+        self.set(pos, state);
         true
     }
 
@@ -170,6 +193,16 @@ impl Level for BenchLevel {
 
     fn is_randomly_ticking_section(&self, _chunk: ChunkPos, _section_y: i32) -> bool {
         false
+    }
+
+    fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
+        let section = mc_bamboo_blocks::recording::ChunkSection { chunk, section_y };
+        Some(
+            self.section_hashes
+                .get(&section)
+                .copied()
+                .unwrap_or_else(section_hash::empty_section_hash),
+        )
     }
 
     fn any_player_close_enough_to(&self, _pos: BlockPos, _max_distance: i32) -> bool {
@@ -289,6 +322,12 @@ pub struct Machine {
     pub level: BenchLevel,
     pub ticks: BlockTicks,
     pub input: Input,
+    /// 打开时驱动走带缓存的入口；`None` 走原样解释执行。
+    pub cache: Option<mc_bamboo_blocks::cache::RedstoneCache>,
+    /// 上一刻方块逻辑收集到的对外效果，差分测试逐刻比它。
+    pub effects: Vec<String>,
+    /// 对外音效包 `seed: None` 时由发包层取的随机数次数，差分测试比对。
+    pub sound_draws: u64,
 }
 
 /// 翻转一格周期输入：红石块（满信号）<-> 空气，并通知邻居。
@@ -316,6 +355,10 @@ impl Machine {
     }
 
     /// 这一刻的外部输入（如果有）。
+    pub fn apply_input_public(&mut self, now: i64) {
+        self.apply_input(now);
+    }
+
     fn apply_input(&mut self, now: i64) {
         use mc_bamboo_blocks::{World, world::UPDATE_CLIENTS};
         match self.input.clone() {
@@ -364,7 +407,22 @@ impl Machine {
     pub fn step(&mut self, now: i64, recording: bool) -> Vec<Record> {
         self.apply_input(now);
         if !recording {
-            mc_bamboo_blocks::run_scheduled_ticks(&mut self.level, &mut self.ticks, now);
+            let outcome = if let Some(cache) = self.cache.as_mut() {
+                mc_bamboo_blocks::run_scheduled_ticks_with_cache(
+                    &mut self.level,
+                    &mut self.ticks,
+                    now,
+                    Some(cache),
+                )
+            } else {
+                mc_bamboo_blocks::run_scheduled_ticks(&mut self.level, &mut self.ticks, now)
+            };
+            self.effects = outcome.effects.iter().map(|e| format!("{e:?}")).collect();
+            self.sound_draws = self
+                .effects
+                .iter()
+                .filter(|e| e.contains("Sound") && e.contains("seed: None"))
+                .count() as u64;
             return Vec::new();
         }
         let mut recorder = Recording::new(&mut self.level);

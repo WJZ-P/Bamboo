@@ -66,6 +66,10 @@ impl LevelTables for RegionLevel<'_> {
         self.block_entities
     }
 
+    fn block_events_table(&self) -> &BlockEvents {
+        self.block_events
+    }
+
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         self.block_events
     }
@@ -154,6 +158,10 @@ impl Level for RegionLevel<'_> {
 
     fn is_randomly_ticking_section(&self, chunk: ChunkPos, section_y: i32) -> bool {
         self.chunks.is_randomly_ticking_section(chunk, section_y)
+    }
+
+    fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
+        self.chunks.section_hash(chunk, section_y)
     }
 
     fn randomly_ticking_sections(&self, chunk: ChunkPos) -> u32 {

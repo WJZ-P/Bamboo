@@ -14,6 +14,7 @@ use mc_bamboo_blocks::{
     entity::Entities,
     level::EquipTarget,
     random_tick, redstone_signal, run_action_block_ticks, run_scheduled_ticks,
+    run_scheduled_ticks_with_cache,
     shape::{self, BooleanOp},
     state::{
         CHEST_TYPE, ChestType, FACING, HAS_RECORD, SLOT_0_OCCUPIED, SLOT_1_OCCUPIED,
@@ -423,6 +424,10 @@ impl LevelTables for OracleLevel {
         &mut self.block_entities
     }
 
+    fn block_events_table(&self) -> &BlockEvents {
+        &self.block_events
+    }
+
     fn block_events_table_mut(&mut self) -> &mut BlockEvents {
         &mut self.block_events
     }
@@ -593,6 +598,18 @@ impl Level for OracleLevel {
         let stored = target.equipment.get_mut(index)?.as_mut()?;
         *stored = stack;
         u16::try_from(component_slot).ok()
+    }
+
+    /// 打开缓存时守卫要读整段哈希：oracle 的假世界是稀疏表，按空气补齐整段。
+    fn section_hash(&self, chunk: ChunkPos, section_y: i32) -> Option<u128> {
+        Some(mc_bamboo_core::section_hash::section_hash(|x, y, z| {
+            let pos = BlockPos::new(
+                chunk.x * 16 + x as i32,
+                section_y * 16 + y as i32,
+                chunk.z * 16 + z as i32,
+            );
+            self.blocks.get(&pos).copied().unwrap_or(BlockState::AIR).0
+        }))
     }
 
     /// 官方假世界的区块段每次都扫一遍场景。
@@ -867,7 +884,12 @@ fn hit_of(action: &Action) -> Result<BlockHit, String> {
 }
 
 /// 跑一道题。题目本身有问题时返回错误，`mc-bamboo-blocks` 的 panic 由调用方接住。
-pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, String> {
+pub fn replay(
+    case: &Case,
+    header: &Header,
+    names: &Names,
+    redstone_cache: Option<&mut mc_bamboo_blocks::cache::RedstoneCache>,
+) -> Result<Replayed, String> {
     let action = &case.action;
     let mut level = OracleLevel::new(case, header, names)?;
     let mut ticks = BlockTicks::new();
@@ -916,7 +938,14 @@ pub fn replay(case: &Case, header: &Header, names: &Names) -> Result<Replayed, S
         _ => now,
     };
     let end = after_action + i64::from(action.settle);
-    settle(&mut level, &mut ticks, after_action, end, &mut outcome);
+    settle(
+        &mut level,
+        &mut ticks,
+        after_action,
+        end,
+        &mut outcome,
+        redstone_cache,
+    );
 
     let (level_events, sounds) = events_of(&outcome);
     Ok(Replayed {
@@ -940,9 +969,14 @@ fn settle(
     start: i64,
     end: i64,
     outcome: &mut Outcome,
+    mut redstone_cache: Option<&mut mc_bamboo_blocks::cache::RedstoneCache>,
 ) {
     for now in start + 1..=end {
-        let settled = run_scheduled_ticks(level, ticks, now);
+        let settled = if let Some(cache) = redstone_cache.as_deref_mut() {
+            run_scheduled_ticks_with_cache(level, ticks, now, Some(cache))
+        } else {
+            run_scheduled_ticks(level, ticks, now)
+        };
         outcome.effects.extend(settled.effects);
     }
 }

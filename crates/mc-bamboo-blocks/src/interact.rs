@@ -7,6 +7,8 @@ use mc_bamboo_data::{BlockAncestor, items};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{
+    cache::RedstoneCache,
+    cache_run::run_cached_trigger,
     context::{Actor, BlockHit, UseContext},
     fluid::{
         self,
@@ -310,6 +312,137 @@ pub fn run_scheduled_ticks(level: &mut dyn Level, ticks: &mut BlockTicks, now: i
     world.end_handling_tick();
     world.tick_block_entities();
     outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// [`run_scheduled_ticks`] 的带缓存版本。现有入口零改动转发到 `cache = None`。
+pub fn run_scheduled_ticks_with_cache(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    now: i64,
+    cache: Option<&mut RedstoneCache>,
+) -> Outcome {
+    let Some(cache) = cache else {
+        return run_scheduled_ticks(level, ticks, now);
+    };
+    let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+    ticks.collect_due(now, &can_tick);
+    let effects;
+    {
+        let mut recorder = crate::recording::Recording::new(&mut *level);
+        recorder.set_tick(now);
+        let mut world = World::in_world_tick(&mut recorder, ticks);
+        run_block_ticks_cached(&mut world, cache, now);
+        // 流体刻和方块事件之间的记账开关由各段自己管。
+        world.set_capture(false);
+        world.collect_due_fluids();
+        while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+            fluid::tick(&mut world, pos, fluid);
+        }
+        world.set_capture(true);
+        run_block_events_cached(&mut world, cache, now);
+        effects = world.drain_effects();
+    }
+    let mut effects = effects;
+    // 方块实体 tick 不在第一版缓存范围，走没有录制包装的世界，避免为它付记账开销。
+    let mut world = World::new(level, ticks);
+    world.tick_block_entities();
+    effects.extend(world.drain_effects());
+    Outcome {
+        result: InteractionResult::Pass,
+        used_without_item: false,
+        placed_at: None,
+        item_exchange: None,
+        gained: None,
+        effects,
+    }
+}
+
+/// 游戏循环按官方顺序分几段调用，每段各自带缓存。方块计划刻和流体刻这一段。
+pub fn run_due_ticks_with_cache(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    now: i64,
+    cache: Option<&mut RedstoneCache>,
+) -> Outcome {
+    let Some(cache) = cache else {
+        return run_due_ticks(level, ticks, now);
+    };
+    let can_tick = |chunk| level.chunk_ticks_blocks(chunk);
+    ticks.collect_due(now, &can_tick);
+    let mut recorder = crate::recording::Recording::new(level);
+    recorder.set_tick(now);
+    let mut world = World::in_world_tick(&mut recorder, ticks);
+    run_block_ticks_cached(&mut world, cache, now);
+    world.set_capture(false);
+    world.collect_due_fluids();
+    while let Some((pos, fluid)) = world.ticks_mut().next_fluid_due() {
+        fluid::tick(&mut world, pos, fluid);
+    }
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// 游戏循环方块事件这一段，带缓存。
+pub fn run_block_event_phase_with_cache(
+    level: &mut dyn Level,
+    ticks: &mut BlockTicks,
+    cache: Option<&mut RedstoneCache>,
+    now: i64,
+) -> Outcome {
+    let Some(cache) = cache else {
+        return run_block_event_phase(level, ticks);
+    };
+    let mut recorder = crate::recording::Recording::new(level);
+    recorder.set_tick(now);
+    let mut world = World::in_world_tick(&mut recorder, ticks);
+    run_block_events_cached(&mut world, cache, now);
+    outcome_from(world, InteractionResult::Pass, false)
+}
+
+/// 到期的方块计划刻，带缓存的驱动循环。
+fn run_block_ticks_cached(world: &mut World, cache: &mut RedstoneCache, now: i64) {
+    while let Some((pos, block)) = world.ticks_mut().next_due() {
+        let trigger = crate::level::Trigger::ScheduledTick { pos, kind: block };
+        run_cached_trigger(world, cache, trigger, now, |world| {
+            let state = world.block_state(pos);
+            if state.block_id() == block {
+                state.tick(world, pos);
+            }
+        });
+    }
+}
+
+/// 方块事件阶段，带缓存的驱动循环。
+fn run_block_events_cached(world: &mut World, cache: &mut RedstoneCache, now: i64) {
+    world.set_capture(true);
+    let mut reschedule = Vec::new();
+    while let Some(event) = world.pop_block_event() {
+        if !world.chunk_ticks_blocks(event.pos.chunk()) {
+            reschedule.push(event);
+            continue;
+        }
+        let state = world.block_state(event.pos);
+        if state.block_id() != event.block {
+            continue;
+        }
+        let trigger = crate::level::Trigger::BlockEvent {
+            pos: event.pos,
+            kind: event.block,
+            param_a: event.param_a,
+            param_b: event.param_b,
+        };
+        run_cached_trigger(world, cache, trigger, now, |world| {
+            let state = world.block_state(event.pos);
+            if state.trigger_event(world, event.pos, event.param_a, event.param_b) {
+                world.push_effect(crate::level::Effect::BlockEvent {
+                    pos: event.pos,
+                    block: event.block,
+                    param_a: event.param_a,
+                    param_b: event.param_b,
+                });
+            }
+        });
+    }
+    world.reschedule_block_events(reschedule);
 }
 
 /// `ServerLevel.tick` 开头的两段：到期的方块刻，然后到期的流体刻。`handlingTick` 为真。

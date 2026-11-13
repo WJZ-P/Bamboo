@@ -301,6 +301,15 @@ export const FIELDS: readonly SettingField[] = [
     hint: "0 = 精确模式（默认）：实体逐个算完立刻落地，和官方逐位一致，所有 oracle、probe、单元测试都在这个模式下跑。≥ 1 = 性能模式：实体阶段改成「并行算、按 uid 升序串行落地」，3000 个掉落物加 300 个下落方块的场景里 8 线程整刻快 4.0 倍。性能模式相对官方有已知差异：物品合并少看一拍（最多晚一刻合并）、TNT 爆炸的击退晚一刻体现在物理上、漏斗吸走物品后物品自己这一刻的 age 和位置仍按未被吸走算；别的实体看到的也是这一刻开始时的样子。目前每刻新起线程，只用于实验，不建议在正式服开。",
   },
   {
+    key: "redstoneCache",
+    group: "performance",
+    fileKey: "redstone_cache",
+    label: "红石缓存（实验）",
+    control: "toggle",
+    wide: true,
+    hint: "把反复执行、每次读到相同状态的一段红石电路记下来，下次直接套用结果。结果和官方逐位一致，打开后对大型红石电路有效；小型电路和容器机器收益很小。默认关闭，打开后每个 region 的缓存有 32 MiB 上限，命中不了的触发点会自动停止录制。",
+  },
+  {
     key: "deliveriesPerTick",
     group: "performance",
     fileKey: "deliveries_per_tick",
