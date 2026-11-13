@@ -33,6 +33,7 @@
 | 11 | 同上：1 名玩家 | 289 µs | 126 µs | 2.3× |
 | 11 | 同上：每次 `run_updates` 的堆分配 | 37.7 次 + 28 MiB 搬移 | 4.3 次 + 5.5 MiB 搬移 | 8.8× |
 | 12 | 400 台正在烧的熔炉，方块实体阶段每刻 | 74.8–81.9 µs | 4.8–5.0 µs | 15.2–16.6× |
+| 13 | 区块交付/收回的堆分配：`fly-20` 整个进程，最后一份 10 秒报告 | 8 124 次/刻 | 4 633 次/刻 | 1.8× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -41,6 +42,8 @@
 第 11 项见 7f 节，数字是单项微观基准，不是整机 tick 耗时；整机效果还没在安静窗口里量过。
 第 12 项见 7g 节，是微观基准里方块实体阶段单独的耗时，不是整机 tick 耗时；
 400 台熔炉之外的世界是空的，所以倍数不能直接套到真实服上。
+第 13 项见 7k 节，数的是带仪表的全局分配次数，不是耗时；只在同一轮带仪表的
+`fly-20` 报告之间比较，见 `profiling.md` 10.6。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -1121,7 +1124,7 @@ cargo test --release -p mc-bamboo-blocks block_entity_sleep::machine_phase_bench
 | 票表的等级传播（`TicketTable::run_updates`）剩下的单价 | 7f 节之后微观基准 141 µs/移动（200 名玩家）、126 µs（1 名玩家），每次 `run_updates` 还有 4.3 次分配和约 6000 次松弛出队（其中只 1780 次真更新） | 7f 节已经把合并（70–80 → 3 µs）、BFS（60–78 → 19 µs）和分配（38 → 4 次/更新）压下去，整体 2.1–2.3×，但离目标 80 µs 还差约 1.8 倍。整机 `fly-20` 的数字仍是 `profiling.md` 第 9 节的旧值（0.90 ms / p99 2.23 ms），**改后没有在安静窗口里重测**。下一步要么让升高锥和降低松弛共用一次遍历、要么换 64×64 块的表示；两者都改两阶段算法的结构，要重新对拍。外圈等级继续落表（Director 的生成依赖图要用），不按"外圈不落表"的方向改。见 `chunk-tickets.md` 第 5 节 |
 | `random_ticks` 剩下的差距 | 安静窗口（`profiling.md` 10.5）：`fly-20` 旧 2.26–2.30 → 新 3.82–4.30 ms，空服 0.17–0.21 → 0.63–0.84 ms | **已经拆开量过，见 7e 节**：两版 tick 的区块/段/方块数完全相同，按 ticket 模拟等级选区块符合官方；effects 全空、视图构造零分配。7d 省下的 2.65 ms 被逐段 tick 多出的 2.45 ms 吃掉：每次读方块要查区块表、读各区块自己的数据（以前共用模板）。这是区块各自一份数据的随机访问/缓存代价，不是可删的白跑，本轮没改热路径 |
 | `ChunkStore` 里给「刚查过的区块」做单槽缓存 | 没有做 | 想法：一个 `tick_chunk` 里 3 次选格 + 草逻辑读 5–10 格方块/光照，都会重复查同一区块；缓存一次哈希查找的 `&Chunk`，也许能省一点。**现在不做的理由**：`ChunkStore` 是公开、可克隆、有多条 `&mut` 写路径的结构，内部可变地存裸指针时漏一处失效就是悬垂指针，风险和收益不成比例；而且没拆开「哈希查找」和「读区块数据时的缓存不命中」各占多少，若主要是后者则省掉查找也没用。另外官方是「取位置 → 读 → tick（tick 里会取随机数）→ 再取下一个位置」，3 个位置不能预先批量算。**要做的话先量**：临时把查找换成直接拿区块引用，量 `random_sections` 子项的每区块单价降多少，再决定值不值得做安全的版本 |
-| `inbox` / `delivery` 的全局分配 | 带仪表量到 `fly-20` 稳态整个进程的分配 2 250（旧）→ 10 342 次/刻（新），多出来的约 8 000 次几乎全在票表传播和区块交付/收回 | 和随机刻无关（`random_ticks` 反而从 1 094 降到 7 次/刻）。`profiling.md` 10.4 有按阶段的归类，只报告、没修。票表那部分在 7f 节之后每次 `run_updates` 从约 38 次降到 4.3 次，整机的分配数没有重量 |
+| `inbox` / `delivery` 剩下的全局分配 | 已做，见 7k 节和 `profiling.md` 10.6：带仪表的 `fly-20` 最后一份 10 秒报告从 8 124 降到 4 633 次/刻，`delivery` 从 2 985 降到 419 | 去掉了收回时重复克隆的整柱和信箱泵/Director 每次事件新建的临时 `Vec`；票表辅助块池改成按视距的固定上限。剩下的按交付/发出的区块数线性增长：各表的 `BTreeMap` 节点、模板盒子、包体和帧字节，以及每次 `run_updates` 约 100 次，见 7f 节。没在安静窗口里量 tick 耗时 |
 | 已加载模式下每个区块的包体各编一遍 | `encode_body` 实测 `fly-20` 0.23 ms / p99 0.61 ms、`walk-50` 0.03 / 0.22 ms | 以前没改过的区块共用一份模板的包体；真实地形下本来就该各编一遍，超平坦下是退步。量出来很小，本轮没改 |
 | 卸载时取计划刻要扫整条队列 | 微观基准：取 16 个区块、队列 10 万条约 7 ms；`fly-20` 实测 `reclaim_ticks` **0.001 ms/tick**、p99 0.002 ms | 真实卸载场景里的队列很短，不是问题；第 4.2 节的取舍成立。本轮没改 |
 | 信箱全量重排 | `mail_sort` 实测 `fly-20` 0.010 ms / p99 0.037 ms | 第 8 节曾经怀疑它；限速后的信箱已经很小。按「没有可测收益就撤掉」没改 |
@@ -1289,3 +1292,110 @@ cargo test --release -p mc-bamboo-blocks block_entity_sleep::machine_phase_bench
 （它的单次工作量远低于 65536 门槛），但 `immediate` 下会真的重放，
 用 `cache_diff 4000 immediate` 逐刻验过 0 不一致。上表的数字是安静窗口里量的，
 作为正式验收值保留。
+
+---
+
+## 7k. 区块交付和收回的临时列表：8 124 → 4 633 次分配/刻
+
+代码：`crates/mc-bamboo-game/src/director_host.rs`、
+`crates/mc-bamboo-game/src/region/column.rs`、
+`crates/mc-bamboo-world/src/store.rs`、
+`crates/mc-bamboo-world/src/director/state.rs` 和
+`crates/mc-bamboo-world/src/ticket/{table,spread}.rs`。提交
+`c3de088` .. `93e9d14`，2026-11-13 PST。
+
+### 7k.1 原来慢在哪
+
+`profiling.md` 10.4 记下区块平面接进来之后，`fly-20` 整个进程每刻多出约
+8 000 次堆分配，几乎都在 `inbox`（票表传播）和 `delivery`（交付/收回）。
+7f 节把票表每次 `run_updates` 的分配从约 38 次压到 4.3 次，但整机的
+`fly-20` 没有重量。这一轮把同一个临时仪表重新接到 main：按剖析器的
+`lap` 阶段和 `SubPhase` 子段记全局分配差分，再用函数级 RAII 计数定位：
+
+- 每个区块收回时，`Region::take_columns` 已经把方块、光照和各张表组装成
+  `RegionColumn` 盒子；紧接着 `ChunkStore::unload` 又调一次
+  `take_column` 取了完整一份区块柱，结果直接丢弃。每块多克隆一次 24 段的
+  方块、26 段×2 层的光照和四份光照存储里的柱，约 2 000–2 800 次分配/刻。
+- 一次 `pump` 里每个事件都新建 `Vec<Effect>`、事件队列、IO 回执列表和
+  `flush_region_mail` 的回执列表；`Director::drive` 每处理一个事件又新建
+  任务 id、读任务、等级变化的几个 `Vec`，合计约 1 000 次/刻。
+- `TicketTable::run_updates` 把积压的源变化分到两张平面时，两个 `Vec`
+  每轮都新建；7f 节留下的辅助块池按「历史峰值」保留，200 名分散玩家
+  可能留下几十 MiB 不再使用的 64×64 块。
+
+### 7k.2 换成了什么
+
+1. `ChunkStore::finish_unload` 把 `unload` 的「取盒子」和「注销已加载位置、
+   光照柱、3×3 段状态」拆开。`Region::reclaim_columns` 先 `take_columns`，
+   再逐块 `finish_unload`，不再取第二份盒子。`unload` 本身仍是两步组合，
+   测试/无限模式的对外行为不变。
+2. `Director::handle_effects` 通过回调把复用的效果列表交给宿主，宿主按
+   `drain(..)` 消费后归还容量；公开 `handle()` 仍返回 owned `Vec`，纯状态机
+   测试不用改。信箱泵的事件队列、单事件批次、IO 回执和读盘结果列表也跨刻
+   复用；`flush_region_mail_into` 直接把回执写进泵的事件队列。
+3. `Director::drive` 复用任务 id、读任务和等级变化列表；`run_updates` 的
+   输出本来已按 `(x, z)` 排好，去掉一次 `to_vec()` 和一次重复排序。
+   `TicketTable` 的两个分平面变化列表跨轮复用容量。
+4. 辅助块池改成固定上限：按最大视距 32 加传播半径，换算成 64 格一块的
+   跨度取平方，超过上限的块用完直接释放，不再记历史峰值。加了 200 名玩家
+   分散移动的测试，断言池中的块数不超过上限。
+
+每一项单独提交，前后各跑一次带仪表的 `fly-20`；没有可测收益的都撤掉了：
+信箱排序/批次/玩家中心列表复用、IO 写回执小列表复用、入站消息和玩家票
+`Vec` 复用、票表初始化预留容量、跳过 `Assemble` 往返、只让引擎保留一份
+光照柱。最后一项在 `loaded_tests` 的 debug 断言里失败，因为引擎和给别人
+读的那份在无限模式下的注销语义不同。
+
+### 7k.3 为什么结果不变
+
+`finish_unload` 只作用于「盒子已取走」之后：已加载集合、`remove_loaded`、
+原样标记和 `rebind_area` 的顺序、内容都和原来的 `unload` 一致。复用列表
+时每次都 `clear()` 或 `drain(..)`，效果按原顺序产生、按原顺序消费；
+等级变化列表仍是 `run_updates` 的原顺序，只少了重复的排序和克隆。
+块池上限只影响「用完后留着还是释放」，块借出时仍按 epoch 逐格重置标记，
+传播算法、不动点和输出顺序都没动。全部对拍和两遍 `--loaded` probe 通过，
+见 7k.5。
+
+### 7k.4 数字和复现
+
+带临时仪表的 `fly-20`（20 人，`--ramp 5`、60 秒，10 秒一份报告，
+视距 8、模拟距离 10、超平坦、离线，非安静窗口）。下面取同一轮倒数第二份
+和最后一份报告；完整阶段/子项表见 `profiling.md` 10.6：
+
+| 每刻分配次数 | 改之前 | 改之后 |
+|---|---:|---:|
+| 整个进程 | 7 032 / 8 124 | 4 023 / 4 633 |
+| `inbox` | 3 776 / 4 320 | 2 980 / 3 401 |
+| `delivery` | 2 439 / 2 985 | 263 / 419 |
+| `reclaim_storage` | 2 311 / 3 193 | 158 / 263 |
+| `director_events` | 3 123 / 3 237 | 2 514 / 2 874 |
+
+`chunk_sending`（约 730 次/刻）、`ticket_update`（约 100 次/刻）和
+`encode_body`（约 440 次/刻）基本没变：它们按发出的区块数和变等级的
+区块数计，是每块固有的一次编码/建表，不在这一轮范围内。
+
+```text
+# 临时仪表不提交：包住全局分配器，按 profiler 的 lap / SubPhase 记差分
+# （本轮做法与 profiling.md 第 10.4 节相同）。
+BAMBOO_PROFILE=10 ./target/release/bamboo-loadtest serve \
+    --addr 127.0.0.1:25977 --max-players 500 --view-distance 8
+./target/release/bamboo-loadtest --addr 127.0.0.1:25977 \
+    --bots 20 --pattern fly --layout spread --duration 60 --ramp 5
+cargo run --release -q -p mc-bamboo-world --example ticket_alloc_count -- 200 100
+cargo test -p mc-bamboo-world --lib ticket::
+cargo test --workspace
+BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game
+```
+
+### 7k.5 怎么保证没改坏
+
+全量对拍：`oracle java --weather clear` 10114 例 0 失败；`machine`、
+`menu`、`entity-oracle`、`light`、`ticket-oracle`（400 场景 / 4364 步）、
+`storage`、`chunk-content`、`player-data`、`components`、`border-oracle`、
+`saved-data`、`move-oracle`、`loot-oracle`、`predicate-oracle`、
+`recipe-oracle`、`worldgen` 全部 0 不一致；`cache_diff 4000` 和
+`cache_diff 4000 immediate` 都是 0 刻不一致；hy4 probe 718/718，
+`tools/probe.sh --loaded` 两遍各 718/718。
+`cargo fmt --all --check`、0 警告的
+`cargo clippy --workspace --all-targets`、`cargo test --workspace` 和
+`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game` 都通过。
