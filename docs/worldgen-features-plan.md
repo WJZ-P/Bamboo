@@ -635,17 +635,17 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 |---|---|
 | `chunkgen java --seeds 1 --chunks 1 --through features --steps 6 --ore-only` | **0 不一致**（884736 个方块） |
 | `chunkgen java --seeds 2 --chunks 4 --through features --steps 6 --ore-only --salt 1` | **0 不一致**（7077888 个方块，8 个中心） |
-| `chunkgen java --seeds 3 --chunks 8 --through features --steps 6 --ore-only --salt 1/7` | 24 个中心里 23 个 0 不一致；固定区块 `(100,100)` 有约 200 个格子的差异 |
+| `chunkgen java --seeds 3 --chunks 8 --through features --steps 6 --ore-only --salt 1/7` | **0 不一致**（修复后） |
+| `chunkgen java --seeds 6 --chunks 36 --through features --steps 6 --ore-only --salt 1/7` | **0 不一致**（216 中心 / 各 191102976 方块） |
 | `chunkgen java --seeds 2 --chunks 6 --through carvers --salt 1` | 0 不一致（旧阶段回归） |
 | `worldgen java` | 0 不一致 |
-| `cargo test -p mc-bamboo-worldgen` | 93 个测试全过 |
+| `cargo test -p mc-bamboo-worldgen` | 95 个测试全过 |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
-**剩余差异（已定位到 `ore_clay` 的候选位置）**：`--ore-only --steps 6` 在第三个
-种子的 chunk `(100,100)` 时，`minecraft:ore_clay` 的 46 个候选位置在 Java 与
+**曾有的差异（已解决，见下）**：`--ore-only --steps 6` 在第三个种子的
+chunk `(100,100)` 时，`minecraft:ore_clay` 的 46 个候选位置在 Java 与
 Bamboo 之间**逐个不同**（Java 首个 `(1608,-53,1615)`，Bamboo 首个
-`(1606,178,1603)`），因此 `BiomeFilter` 放行的数量也不同（Java 2 个、
-Bamboo 1 个），各自写下的 clay 团位置不同，产生约 200 格差异。
+`(1606,178,1603)`），`BiomeFilter` 放行数也不同，产生约 200 格差异。
 
 诊断证据：
 * `ore_clay` 只属于 `minecraft:lush_caves`（注册表 ID 31），只有该群系出现在
@@ -653,41 +653,49 @@ Bamboo 1 个），各自写下的 clay 团位置不同，产生约 200 格差异
 * 输入 terrain 里 clay 数为 0，确认差异来自 features 阶段。
 * `decoration_seed(seed=1, x=1600, z=1600) = 5899775146600525569`，
   Java 与 Rust 一致；`setFeatureSeed(deco, 27, 6)` 的参数也一致。
-* 两边的 `indices` 里 `ore_clay` 都是 step 6 的全局 index 27，
-  而 index 0..25 的所有 ore 都逐方块一致。
+* 603 行 `(step, index, placed feature id)` 序列两边逐行完全一致；
+  但 Java 运行时 `featuresPerStep[6]` 只有 29 项、`ore_clay` 是 index 26，
+  而导出的表是 34 项、index 27（这正是根因，见下）。
 * 跳过 Rust 的 `ore_clay` 后差异方向反转（变成官方有 clay、Bamboo 没有），
   说明 Java 确实跑了 `ore_clay`，不是 `featureSet` 过滤差异。
 
-**已确认**：Java 与 Rust 的 `indices` 集合不同。`--ore-only` 把非 ore 的
-HolderSet 换空，Java 的 step 6 `indices` 只含 26 个 ore；Rust 仍从**未过滤**的
-`biome_features` 收集，多出 `underwater_magma`(26)、`disk_sand`(30)、
-`disk_clay`(31)、`disk_gravel`(32)。这些在 Rust 里因 `kind != ore` 或
-`Modifier::Unsupported` 被 `continue`，不调 `Feature.place`；而且
-`setFeatureSeed` 按 index 重新播种，理论上不该污染 index 27。但
-`FeaturePlacer` 的栈 DFS 里 `in_square` / `height_range` 会在
-`Feature.place` **之前**消费随机数，若 Rust 多跑的 index 在某些路径上
-没有完全跳过，就会打乱后续序列。
+### 根因与修复（已解决）
 
-已让 Rust 的 `indices` 在 `--ore-only` 下按 `allowed_kinds` 过滤，与 Java 的
-`keep` 集合对齐（两边现在都只跑 26 个 ore 的 index）；**差异仍存在**，符合
-`setFeatureSeed` 按 index 重置的预期，但这一步让两侧语义一致，保留。
-`OreProbe.java` 确认 `ore_clay` 的链是
-`CountPlacement[count=46] → InSquare → HeightRange[0 above bottom-256 absolute]
-→ BiomeFilter`，与导出的 JSON 一致。
+问题**不在 Rust 的地物实现**，而在 `--ore-only` / `--steps` 这两个诊断开关本身。
 
-补充排除：`OreProbe2.java` 逐位验证了 `WorldgenRandom.nextInt(16)` 与
-`nextInt(321)` 序列（已写进 `random.rs` 的 `bit_source_tests`）。
-`RandomState.createClimateSampler(EMPTY_UNCACHED)` 用
-`samplersWithContext` + `NoiseRouter.createClimateSampler(DensitySamplerSet)`，
-与 Rust 的 `settings::Samplers` 数学上等价，但 `BiomeManager::biome` +
-`Context::uncached()` 这条组合从未单独对拍过（terrain 走 `biome_cached` +
-`Context::new` + `ClimateCache`）。
+`ChunkGenerator.featuresPerStep` 是一个 **memoized supplier**，第一次
+`Supplier.get()` 时才按注册表此刻的 `BiomeGenerationSettings.features()`
+跑 `FeatureSorter` 排全局顺序。`applyBiomeDecoration` 是它的第一个调用者，
+而两个诊断过滤在 `run()` 里**先于** `applyBiomeDecoration` 执行，于是
+supplier 在**被过滤后的**注册表上求值：`--ore-only` 让 step 6 从导出的
+34 项缩成 29 项，`ore_clay` 的全局 index 从 **27 变成 26**。
+`setFeatureSeed(decorationSeed, index, step)` 因此用了错的 seed，
+46 个候选位置全错位。index 0..25 恰好在两份列表里下标相同，所以之前一直全绿。
 
-**下一步**：在 Java 代理里给 `FeaturePlacer` 的 `in_square` / `height_range`
-加探针（或直接给 `WorldgenRandom` 包一层记数），逐项对比 `ore_clay` 的
-46 个候选位置在两边各自消费的 `nextInt(16)` / `nextInt(321)` 序列；
-同时确认 Java 的 `setFeatureSeed` 实际用的 index 值。既然种子、
-所有取数方法、`count` 与配置都一致，分歧只能在这条链的调用顺序上。
+修法：在 `ChunkgenOracle.run()` 里、两个诊断过滤**之前**调
+`generator.validate()`（`ChunkGenerator.validate` 的字节码就是
+`featuresPerStep.get()`），把 supplier 固定在未过滤的 34 项上。
+同时让 Rust 的 `indices` 在 `--ore-only` 下按 `allowed_kinds` 过滤，
+两边跑的 `(index, step)` 集合也对齐。
+
+**修复后 step 6 的 `--ore-only` 多种子全绿**：
+
+| 命令 | 结果 |
+|---|---|
+| `--seeds 3 --chunks 8 --salt 1` | 0 不一致（24 中心 / 21233664 方块） |
+| `--seeds 3 --chunks 8 --salt 7` | 0 不一致 |
+| `--seeds 4 --chunks 12 --salt 1` | 0 不一致（48 中心 / 42467328 方块） |
+| `--seeds 6 --chunks 36 --salt 1` | **0 不一致**（216 中心 / 191102976 方块） |
+| `--seeds 6 --chunks 36 --salt 7` | **0 不一致** |
+
+诊断过程中逐位排除（结论仍成立，探针都在 `target/vanilla/*.java`，未提交）：
+`decoration_seed`、`setFeatureSeed` 参数、`nextInt(3)` / `nextInt(16)` /
+`nextInt(321)` / `nextFloat` / `nextDouble` 全部序列、`Mth.sin` 表、
+`Math.sin/cos`、`OreFeature.place` 的 `fmul`/`dmul` 顺序、`count=46`、
+placement 链、栈 DFS 交错、`Context::uncached()`、603 行
+`(step, index, feature id)` 序列（两边逐行完全一致）。
+`Mth.sin` 的索引在 26.3 是 **double 乘法** `dmul`
+（`ldc2_w 10430.378350470453d`），不是旧版的 float 乘法。
 
 **已排除**：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`Mth.sin` 65536
 项查表（用 `MthProbe.java` 逐值比过）、`WorldgenRandom` 的
@@ -708,9 +716,6 @@ HolderSet 换空，Java 的 step 6 `indices` 只含 26 个 ore；Rust 仍从**�
 `Context::uncached()` 组合从未单独对拍过**。优先核对这两条 climate sampler
 构造路径是否逐位一致，以及 `interpolated` 在 uncached 单点路径下的行为
 （`docs/worldgen.md` 提到它在 1×1×1 上不是纯函数）。
-**这一处差异不影响其它 23/24 区块，也不影响已确认的 0 不一致结论，
-但不能算「step 6 全绿」。**
-
 ### 还没做
 
 * `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter` /

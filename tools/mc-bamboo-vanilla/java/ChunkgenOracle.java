@@ -568,6 +568,11 @@ public final class ChunkgenOracle {
                                     registries.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
                                             .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
                             this.settings.wrapAsHolder(generatorSettings));
+            // featuresPerStep 是 memoized supplier，第一次 get() 会按注册表此刻的
+            // BiomeGenerationSettings.features() 排全局顺序。必须在两个诊断过滤之前
+            // 固定它，否则 --steps / --ore-only 会让全局 index 变成过滤后的下标，
+            // setFeatureSeed 的参数就和导出的 features_per_step 不一致了。
+            generator.validate();
             applyStepsMask(generator);
             applyFeatureAllowList(generator);
             MaterialRule materialRule = generatorSettings.materialRule().value();
