@@ -31,6 +31,16 @@ const BLOCK_SHIFT: i32 = 6;
 const BLOCK_SIZE: i32 = 1 << BLOCK_SHIFT;
 const BLOCK_MASK: i32 = BLOCK_SIZE - 1;
 const BLOCK_CELLS: usize = (BLOCK_SIZE * BLOCK_SIZE) as usize;
+/// 池子至少留这么多块：视距 8 的一次更新用不了几块，留 16 块省掉冷启动的分配。
+#[doc(hidden)]
+pub const SCRATCH_POOL_MIN: usize = 16;
+/// 每张平面的硬上限：32 MiB / 每块约 53 KiB。两张平面合计不超过 64 MiB。
+#[doc(hidden)]
+pub const SCRATCH_POOL_CAP: usize = 32 * 1024 * 1024 / (BLOCK_CELLS * 17);
+/// 近期峰值窗口：只记最近 64 次 `update` 里单次用到的最多块数，峰值过去后回收。
+pub const PEAK_WINDOW: usize = 64;
+/// 峰值之外留一点余量，避免刚好卡在边界时每次都重新分配一块。
+pub const PEAK_MARGIN: usize = 4;
 const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
     (-1, -1),
     (-1, 0),
@@ -175,8 +185,9 @@ impl ScratchBlock {
 struct Scratch {
     blocks: HashMap<BlockKey, Box<ScratchBlock>, ChunkHasherBuilder>,
     pool: Vec<Box<ScratchBlock>>,
-    /// 池子最多留多少个块；按一次更新同时用到的块数定，不随世界范围增长。
-    pool_cap: usize,
+    /// 最近每次更新用到的块数（环形窗口），用来算「近期峰值」。
+    recent_usage: [usize; PEAK_WINDOW],
+    next_usage: usize,
     /// 清空位置按 BFS 发现顺序记，遍历它不依赖任何哈希图的顺序。
     reset_order: Vec<ChunkPos>,
     /// 本轮用到过的块号，收变化列表时按坐标排。
@@ -189,7 +200,8 @@ impl Scratch {
         Self {
             blocks: HashMap::default(),
             pool: Vec::new(),
-            pool_cap: 64,
+            recent_usage: [0; PEAK_WINDOW],
+            next_usage: 0,
             reset_order: Vec::new(),
             used_blocks: Vec::new(),
             epoch: 0,
@@ -208,14 +220,37 @@ impl Scratch {
         self.used_blocks.clear();
     }
 
-    /// 一轮结束：块回收，只保留有限个供下轮复用。
+    /// 一轮结束：按最近 [`PEAK_WINDOW`] 次更新的峰值决定保留多少块，
+    /// 多出来的直接释放。峰值滑出窗口之后池子会自己缩小；硬上限按内存算，
+    /// 不随玩家历史走过的距离增长。
     fn recycle(&mut self) {
-        self.pool_cap = self.pool_cap.max(self.blocks.len());
-        for (_, block) in self.blocks.drain() {
-            if self.pool.len() < self.pool_cap {
-                self.pool.push(block);
-            }
+        self.recent_usage[self.next_usage] = self.blocks.len();
+        self.advance_window();
+        let cap = self.pool_cap();
+        let keep = cap.saturating_sub(self.pool.len());
+        for (_, block) in self.blocks.drain().take(keep) {
+            self.pool.push(block);
         }
+        self.pool.truncate(cap);
+    }
+
+    /// 这一轮没用到辅助块：窗口照样往前走，旧峰值过期后把多余的块释放掉。
+    fn note_idle_round(&mut self) {
+        self.recent_usage[self.next_usage] = 0;
+        self.advance_window();
+        if self.pool.len() > SCRATCH_POOL_MIN {
+            self.pool.truncate(self.pool_cap());
+        }
+    }
+
+    fn advance_window(&mut self) {
+        self.next_usage = (self.next_usage + 1) % PEAK_WINDOW;
+    }
+
+    fn pool_cap(&self) -> usize {
+        let peak = self.recent_usage.iter().copied().max().unwrap_or(0);
+        peak.saturating_add(PEAK_MARGIN)
+            .clamp(SCRATCH_POOL_MIN, SCRATCH_POOL_CAP)
     }
 
     /// 辅助结构当前占着多少个块（含池子）；公开给上层测试检查内存不随历史距离增长。
@@ -417,6 +452,11 @@ impl Plane {
         self.levels.get(pos)
     }
 
+    /// 这一轮没有源变化：推进辅助块池的近期峰值窗口。
+    pub fn note_idle_round(&mut self) {
+        self.scratch.note_idle_round();
+    }
+
     /// 表里非默认等级的区块数。
     pub fn len(&self) -> usize {
         self.levels.count
@@ -471,6 +511,7 @@ impl Plane {
         self.buffers.folded = folded;
         if effective.is_empty() {
             self.buffers.effective = effective;
+            self.scratch.note_idle_round();
             return Vec::new();
         }
         self.scratch.begin();

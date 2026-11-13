@@ -147,6 +147,18 @@ pub(crate) struct DirectorHost {
     /// 这一刻已经从 region 取回了多少个区块。收回的上限会随积压放宽，
     /// 所以不能用「剩余额度」记，要记花掉的个数。
     reclaims_spent: usize,
+    /// 每次 `Director::handle_effects` 复用的效果列表容量。
+    effect_scratch: Vec<Effect<Box<RegionColumn>>>,
+    /// 信箱泵的事件队列，跨刻复用容量。
+    pump_events: Vec<Event<Box<RegionColumn>>>,
+    /// 交给 `pump` 的单事件批次，跨刻复用容量。
+    initial_scratch: Vec<Event<Box<RegionColumn>>>,
+    /// 交付/收回回执列表，测试版 `flush_region_mail` 跨次复用容量。
+    #[cfg(test)]
+    mail_events: Vec<Event<Box<RegionColumn>>>,
+    /// IO 回执和读盘结果事件列表，跨刻复用容量。
+    io_replies: Vec<Reply>,
+    done_scratch: Vec<Event<Box<RegionColumn>>>,
     /// 统计：本刻交付/收回/停放的区块数，给剖析器用。
     delivered: usize,
     reclaimed: usize,
@@ -261,6 +273,13 @@ impl DirectorHost {
             deliveries: BTreeMap::new(),
             reclaims: Vec::new(),
             read_queue: Vec::new(),
+            effect_scratch: Vec::new(),
+            pump_events: Vec::new(),
+            initial_scratch: Vec::new(),
+            #[cfg(test)]
+            mail_events: Vec::new(),
+            io_replies: Vec::new(),
+            done_scratch: Vec::new(),
             delivered: 0,
             reclaimed: 0,
             parked: 0,
@@ -535,7 +554,9 @@ impl DirectorHost {
             region.profiler.end_sub();
             return;
         }
-        self.pump(region, vec![Event::Tickets { ops }]);
+        let mut events = std::mem::take(&mut self.initial_scratch);
+        events.push(Event::Tickets { ops });
+        self.pump(region, events);
     }
 
     fn apply_infinite_ticket(&mut self, op: TicketOp) {
@@ -574,7 +595,9 @@ impl DirectorHost {
         }
         self.pace_saves(now_tick);
         self.release_ready_save_barriers();
-        self.pump(region, vec![Event::Tick { now_tick }]);
+        let mut events = std::mem::take(&mut self.initial_scratch);
+        events.push(Event::Tick { now_tick });
+        self.pump(region, events);
     }
 
     /// 同一区块在 `save_queue` 里只留最新一份快照（官方 `IOWorker.store`
@@ -910,7 +933,9 @@ impl DirectorHost {
         self.budget_left = self.budget;
         // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
         region.chunks.finish_light_updates();
-        self.pump(region, vec![Event::Shutdown]);
+        let mut events = std::mem::take(&mut self.initial_scratch);
+        events.push(Event::Shutdown);
+        self.pump(region, events);
         // 等计算池里的解析/生成/序列化都回来：存盘的盒子要回到世界线程才能
         // 排进写盘队列，收到的结果可能又派出新任务，所以循环到池子空为止。
         self.drain_compute(region);
@@ -982,13 +1007,17 @@ impl DirectorHost {
     /// 同一刻里 Director 可能因为 `Delivered` / `Returned` 又派出新任务，
     /// 所以主循环要跑到没有新消息为止；`flush_region_mail` 每轮都只花掉
     /// 这一刻剩下的预算，预算用完之后它返回空事件，循环就停。
-    fn pump(&mut self, region: &mut Region, initial: Vec<Event<Box<RegionColumn>>>) {
+    /// 把一批初始事件处理到收敛。`initial` 在本函数返回时清空，容量留给下次。
+    fn pump(&mut self, region: &mut Region, mut initial: Vec<Event<Box<RegionColumn>>>) {
         // 一批初始事件（例如同一刻收回的所有读盘结果）一起处理，循环末尾只
         // 交付一次，保证按距离排序、出生点 3×3 在同一批里。
         // A batch of initial events (e.g. all reads collected this tick) is driven
         // together and delivered once, keeping distance order and the 3x3 spawn
         // footprint in a single batch.
-        let mut events = initial;
+        let mut events = std::mem::take(&mut self.pump_events);
+        events.clear();
+        events.append(&mut initial);
+        self.initial_scratch = initial;
         let mut rounds = 0;
         loop {
             // 先把队列里的事件和它们引发的任务结果全部跑完。
@@ -1006,9 +1035,11 @@ impl DirectorHost {
                     _ => SubPhase::DirectorEvents,
                 };
                 region.profiler.start_sub(sub);
-                let effects = self.director.handle(event);
+                let mut effects = std::mem::take(&mut self.effect_scratch);
+                self.director
+                    .handle_effects(event, |out| std::mem::swap(&mut effects, out));
                 region.profiler.end_sub();
-                for effect in effects {
+                for effect in effects.drain(..) {
                     match effect {
                         Effect::Submit {
                             id,
@@ -1053,13 +1084,15 @@ impl DirectorHost {
                         Effect::Warn { message } => tracing::warn!(%message, "chunk director"),
                     }
                 }
+                self.effect_scratch = effects;
             }
             // 再把 region 信箱里的交付/收回变成 Delivered / Returned 事件。
             // 没有新消息就收敛了。
-            events = self.flush_region_mail(region);
+            self.flush_region_mail_into(region, &mut events);
             if events.is_empty() {
                 self.submit_reads(region);
                 self.submit_compute(region);
+                self.pump_events = events;
                 return;
             }
         }
@@ -1385,16 +1418,18 @@ impl DirectorHost {
     /// Drain the IO mailbox at the start of each tick: read results become
     /// `TaskDone` events; write acks release the write-in-progress buffer.
     pub(crate) fn poll_io(&mut self, region: &mut Region) {
-        let mut replies = Vec::new();
+        let mut replies = std::mem::take(&mut self.io_replies);
+        replies.clear();
         if let Some(io) = &self.io {
             while let Some(reply) = io.try_recv() {
                 replies.push(reply);
             }
         }
-        let mut done = Vec::new();
+        let mut done = std::mem::take(&mut self.done_scratch);
+        done.clear();
         let mut known_updates: Vec<(ChunkPos, bool, u64)> = Vec::new();
         let mut dropped_inflight: Vec<(ChunkPos, Option<u64>)> = Vec::new();
-        for reply in replies {
+        for reply in replies.drain(..) {
             match reply {
                 Reply::Read {
                     pos,
@@ -1543,7 +1578,11 @@ impl DirectorHost {
         // 所有读盘结果一次性喂给 Director，只交付一次，保住 3×3 和距离顺序。
         if !done.is_empty() {
             self.pump(region, done);
+        } else {
+            done.clear();
+            self.done_scratch = done;
         }
+        self.io_replies = replies;
     }
 
     fn region_message(&mut self, region: &mut Region, message: RegionMessage<Box<RegionColumn>>) {
@@ -1657,20 +1696,33 @@ impl DirectorHost {
     /// 收回的上限见 [`Self::reclaim_cap`]，剩下的留到下一刻。
     /// 同一刻内 `pump` 会多次调用它，交付共用 `budget_left` 里的剩余额度，
     /// 收回共用 `reclaims_spent`。
+    #[cfg(test)]
     fn flush_region_mail(&mut self, region: &mut Region) -> Vec<Event<Box<RegionColumn>>> {
+        let mut events = std::mem::take(&mut self.mail_events);
+        events.clear();
+        self.flush_region_mail_into(region, &mut events);
+        events
+    }
+
+    /// 把这一轮产生的回执写进 `events`。
+    fn flush_region_mail_into(
+        &mut self,
+        region: &mut Region,
+        events: &mut Vec<Event<Box<RegionColumn>>>,
+    ) {
         let delivery_left = self.budget_left.deliveries;
         let limited_deliveries = self.budget.deliveries > 0;
-        let mut events = Vec::new();
+        events.clear();
         // 收回优先：盒子可能还在 `deliveries` 里排队（交付有了每刻上限之后，
         // 一个盒子可以在信箱里等好几刻）。这时 Director 已经把它记成
         // `Reclaiming`，盒子必须原封不动地作为 `Returned` 回去，绝不能先进
         // region 再被取出来，更不能晚几刻变成一个没人管的孤儿。
         // 这一步不碰 region，不占交付/收回上限，也不需要等光照。
         region.profiler.time_sub(SubPhase::ReturnBoxes, || {
-            self.return_pending_deliveries(&mut events);
+            self.return_pending_deliveries(events);
         });
         if self.deliveries.is_empty() && self.reclaims.is_empty() {
-            return events;
+            return;
         }
         // F6 背压只跳收回，交付（含玩家脚下 3×3）照常（复查「中 4」）。
         // 官方 `ChunkMap.tick` 在 `noSave` 时也跳过整个 processUnloads，
@@ -1735,7 +1787,7 @@ impl DirectorHost {
         }
 
         if self.reclaims.is_empty() || skip_reclaims {
-            return events;
+            return;
         }
         let reclaimed_before = self.reclaimed;
         // 远的先收回：这些区块不急，玩家脚下的票也没了时先留着更保险。
@@ -1761,7 +1813,7 @@ impl DirectorHost {
         if count == 0 {
             // 这一刻的额度用完了，全部留到下一刻。
             self.reclaims.extend(by_generation);
-            return events;
+            return;
         }
         let batch: Vec<(ChunkPos, u64)> = ordered
             .into_iter()
@@ -1798,7 +1850,6 @@ impl DirectorHost {
             }
         }
         self.reclaims_spent += self.reclaimed.saturating_sub(reclaimed_before);
-        events
     }
 
     /// 一刻里最多从 region 取回多少个区块。`demand` 是这一刻要收回的总数。

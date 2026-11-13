@@ -106,6 +106,9 @@ pub struct TicketTable {
     simulation_sources: HashMap<ChunkPos, i32, ChunkHasherBuilder>,
     /// 攒着的源变化，等 `run_updates` 一起传播。
     pending: Vec<(ChunkPos, i32, i32, bool)>,
+    /// 按平面分好的源变化，跨轮复用容量。
+    loading_changes: Vec<(ChunkPos, i32, i32)>,
+    simulation_changes: Vec<(ChunkPos, i32, i32)>,
     /// 攒着的等级变化，`run_updates` 返回它。
     changes: Vec<LevelChange>,
     players: BTreeMap<u64, ChunkPos>,
@@ -135,6 +138,8 @@ impl TicketTable {
             loading_sources: HashMap::default(),
             simulation_sources: HashMap::default(),
             pending: Vec::new(),
+            loading_changes: Vec::new(),
+            simulation_changes: Vec::new(),
             changes: Vec::new(),
             players: BTreeMap::new(),
             player_count: HashMap::default(),
@@ -406,14 +411,19 @@ impl TicketTable {
     /// 把积压的源变化传播完，返回这次等级变了的区块。
     ///
     /// 顺序按 (x, z) 排序，且恰好包含等级变了的区块，不多不少。
+    /// 返回的切片只在下一次 `run_updates` 之前有效；长期持有请复制。
     pub fn run_updates(&mut self) -> &[LevelChange] {
         self.changes.clear();
         if self.pending.is_empty() {
+            self.loading.note_idle_round();
+            self.simulation.note_idle_round();
             return &self.changes;
         }
         let _pending_guard = Guard::new(PENDING);
-        let mut loading_changes = Vec::new();
-        let mut simulation_changes = Vec::new();
+        let mut loading_changes = std::mem::take(&mut self.loading_changes);
+        let mut simulation_changes = std::mem::take(&mut self.simulation_changes);
+        loading_changes.clear();
+        simulation_changes.clear();
         for &(pos, old, new, simulation) in &self.pending {
             if simulation {
                 simulation_changes.push((pos, old, new));
@@ -492,6 +502,8 @@ impl TicketTable {
             });
         }
         drop(_merge_guard);
+        self.loading_changes = loading_changes;
+        self.simulation_changes = simulation_changes;
         &self.changes
     }
 
