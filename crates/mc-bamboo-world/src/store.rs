@@ -527,6 +527,30 @@ impl ChunkStore {
         self.light.ready_to_move_columns()
     }
 
+    /// 只读快照：克隆 `pos` 这一柱的方块和光照，各表分毫不动（补 11）。
+    /// 存档编码需要的是一份 `ChunkColumn`，这里按 `take_column` 同样的方式组装。
+    /// Read-only clone of this column's blocks and light (item 11). Save
+    /// encoding needs a `ChunkColumn`; assemble it exactly like `take_column`.
+    pub fn column_clone(&self, pos: ChunkPos) -> Option<crate::column::ChunkColumn> {
+        if !self.is_loaded(pos) {
+            return None;
+        }
+        let chunk = self
+            .edited
+            .chunks
+            .get(&pos)
+            .cloned()
+            .unwrap_or_else(|| self.template.clone());
+        let light = self.light.column_clone(pos);
+        let mark = self
+            .pristine
+            .get(&pos)
+            .copied()
+            .unwrap_or(PristineMark::TEMPLATE);
+        let pristine = mark.from_generator && mark.revision == self.revision(pos);
+        Some(crate::column::ChunkColumn::new(chunk, light, pristine))
+    }
+
     /// 把 `pos` 这个区块整个拿走。之后这个位置读起来和没改过的区块一样（模板）。
     ///
     /// 区块束里只有一份光照，所以只允许在光照全部算完、没有算到一半的轮次时取。

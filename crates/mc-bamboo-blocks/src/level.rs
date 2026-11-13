@@ -1075,6 +1075,47 @@ impl RedstoneMemory {
         memory
     }
 
+    /// 只读快照：和 [`Self::take_chunk`] 一样收集这一区块会存盘的红石记忆，
+    /// 但只 `.get()` 不 `.remove()`，也不要求 `pending_lectern` 为空（补 11）。
+    /// 给已加载区块的只读存档编码用，原表分毫不动。
+    /// Read-only snapshot: gather the same saved redstone state as `take_chunk`
+    /// with `.get()` instead of `.remove()`, no `pending_lectern` precondition
+    /// (item 11). The original memory is untouched.
+    pub fn snapshot_chunk(&self, chunk: ChunkPos, now: i64) -> ChunkRedstone {
+        let mut memory = ChunkRedstone::default();
+        if let Some(positions) = self.by_chunk.get(&chunk) {
+            let mut positions: Vec<BlockPos> = positions.iter().copied().collect();
+            positions.sort_unstable();
+            for pos in positions {
+                if let Some(&signal) = self.comparator_outputs.get(&pos) {
+                    memory.comparator_outputs.push((pos, signal));
+                }
+                if let Some(&slot) = self.bookshelf_slots.get(&pos) {
+                    memory.bookshelf_slots.push((pos, slot));
+                }
+                if self.jukebox_playing.contains(&pos) {
+                    memory.jukebox_playing.push(pos);
+                }
+                if let Some(&mask) = self.crafter_disabled.get(&pos) {
+                    memory.crafter_disabled.push((pos, mask));
+                }
+                if let Some(&remaining) = self.crafter_crafting.get(&pos) {
+                    memory.crafter_crafting.push((pos, remaining));
+                }
+                if let Some(&facts) = self.lecterns.get(&pos) {
+                    memory.lecterns.push((pos, facts));
+                }
+            }
+        }
+        memory.torch_toggles = self
+            .torch_toggles
+            .iter()
+            .filter(|&&(pos, _)| pos.chunk() == chunk)
+            .map(|&(pos, toggled_at)| (pos, now.saturating_sub(toggled_at)))
+            .collect();
+        memory
+    }
+
     /// 把盒子里的红石记忆放回表里。只在 tick 边界调用。
     ///
     /// 火把记录按目标表的 `now` 从相对年龄换算回世界时间，再用稳定排序接回

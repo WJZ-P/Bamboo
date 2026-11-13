@@ -1460,6 +1460,39 @@ fn save_off_keeps_player_leave_saves_like_vanilla() {
     );
 }
 
+/// 补 9：只改容器内容不改方块（方块版本号不变），匀速保存也必须把它写下去，
+/// 否则崩溃会丢箱子里的东西。
+/// Item 9: a container-only edit (block revision unchanged) must still be
+/// snapshotted by paced D6 saving, or a crash loses the chest contents.
+#[test]
+fn d6_saves_a_chunk_with_only_a_container_edit() {
+    use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+    let tmp = D6TempDir::new("container-only");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded(2);
+    let pos = mc_bamboo_core::ChunkPos::new(0, 0);
+    server.ensure_loaded(&[pos]);
+    server.world.host.set_io(ChunkIo::open(&dir).unwrap());
+
+    // 只往容器表放一个条目，不改任何方块：ChunkStore 的版本号不会变。
+    server.world.region.containers.insert(
+        mc_bamboo_core::BlockPos::new(3, -60, 3),
+        crate::container::ContainerEntry::new(crate::container::ContainerKind::Chest),
+    );
+
+    server
+        .world
+        .host
+        .save_loaded_dirty(&mut server.world.region, 1, true);
+    server.world.host.flush_io();
+    assert!(
+        written_chunks(&server.world.host).contains(&pos),
+        "只改容器内容也要被 D6 写下去"
+    );
+}
+
 /// 没 `flush`：`save-all` 成功消息在快照都交给 IO 之后这一刻就发。
 #[test]
 fn save_all_sends_success_after_handoff() {

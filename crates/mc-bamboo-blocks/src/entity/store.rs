@@ -329,7 +329,7 @@ impl ChunkEntities {
 ///
 /// 行槽的下标稳定，`take` / `put` O(1)；`index` 是 uid 到行号的映射，`grid` 是 16³ 段的行号索引。
 /// tick 期间新生成的实体进 `pending`，下一 tick 才开始 tick，和官方的 `EntityTickList` 一样。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EntityStore {
     slots: Vec<Option<EntityRow>>,
     index: BTreeMap<EntityUid, usize>,
@@ -379,6 +379,12 @@ impl EntityStore {
 
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
+    }
+
+    /// 读盘时不认识的实体类型，按区块原样保留。给每刻的内容指纹用（补 9）。
+    /// Unknown entity types kept verbatim from disk, used by the per-tick content fingerprint (item 9).
+    pub fn preserved(&self) -> &[Tag] {
+        &self.preserved
     }
 
     /// 按 uid 升序的所有 ID，也就是生成的先后。
@@ -706,6 +712,13 @@ impl EntityStore {
             rows,
             preserved: self.take_preserved(chunk),
         })
+    }
+
+    /// 只读快照：在一份克隆上走 `take_chunk`，原表分毫不动（补 11）。
+    /// tick 中途或正在 tick 时返回 `None`，调用方稍后重试。
+    /// Read-only snapshot on a clone, leaving the original untouched (item 11).
+    pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkEntities> {
+        self.clone().take_chunk(chunk).ok()
     }
 
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。

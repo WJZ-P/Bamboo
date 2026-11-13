@@ -1200,3 +1200,95 @@ fn writes_a_world_dir_fixture_for_official_verification() {
 
     println!("WORLD_DIR_FIXTURE={}", root.display());
 }
+
+/// 补 11：只读快照写出的 NBT 和卸载存盘逐字节一致（共用 `encode_parts`）。
+/// Item 11: the read-only snapshot's NBT is byte-identical to an unload save.
+#[test]
+fn read_only_snapshot_bytes_match_an_unload_save() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec};
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, PrimedTnt};
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new_loaded(2);
+    server.ensure_loaded(&[CHUNK]);
+    // 一个方块改动 + 一个实体，让两份编码都有内容可比。
+    server.region().chunks.set_block(p(2, 2), blocks::STONE);
+    server.region().entities.spawn(Entity::new(
+        EntityKind::Tnt(PrimedTnt::new()),
+        Vec3::new(3.0, -59.0, 3.0),
+    ));
+    server.region().chunks.finish_light_updates();
+
+    let read_only = server
+        .region()
+        .encode_loaded_column(CHUNK)
+        .expect("只读快照")
+        .expect("编码成功");
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let unload = InlineCodec.encode(CHUNK, &boxes[&CHUNK]).expect("卸载编码");
+    assert_eq!(read_only, unload, "只读快照和卸载存盘必须逐字节一致");
+}
+
+/// 补 11：给已加载区块拍存档快照没有任何可观察的副作用：不改版本号（区块包
+/// 缓存不会重编/重发）、不改方块和光照、不改段状态、不提前算完待算光照、不发任何包。
+/// Item 11: snapshotting a loaded chunk has no observable side effects — the
+/// revision (chunk-packet cache validity), blocks, light, section states and
+/// pending light are all unchanged, and no packets are sent to players.
+#[test]
+fn snapshotting_a_loaded_chunk_has_no_observable_side_effects() {
+    let mut server = Harness::new_loaded(2);
+    server.ensure_loaded(&[CHUNK]);
+    let edit = p(3, 3);
+    // 改一格，故意留着待算的光照（不调用 finish_light_updates）。
+    assert!(server.region().chunks.set_block(edit, blocks::GLOWSTONE));
+    assert!(
+        server.region().chunks.has_pending_light_updates(),
+        "前提：有待算的光照"
+    );
+
+    let region = server.region();
+    let before = (
+        region.chunks.revision(CHUNK),
+        region.chunks.block(edit),
+        region.chunks.light_value(LightLayer::Sky, edit),
+        region.chunks.light().section_states(CHUNK),
+    );
+    // 先把之前攒的包清空，之后只测拍快照期间有没有新包。
+    let _ = server.region().links.flush();
+
+    let encoded = server
+        .region()
+        .encode_loaded_column(CHUNK)
+        .expect("已加载区块应该能拍快照");
+    assert!(encoded.is_ok(), "编码要成功");
+
+    let region = server.region();
+    assert_eq!(
+        region.chunks.revision(CHUNK),
+        before.0,
+        "版本号不变，区块包缓存不用重编/重发"
+    );
+    assert_eq!(region.chunks.block(edit), before.1, "方块内容不变");
+    assert_eq!(
+        region.chunks.light_value(LightLayer::Sky, edit),
+        before.2,
+        "光照不变"
+    );
+    assert_eq!(
+        region.chunks.light().section_states(CHUNK),
+        before.3,
+        "段状态不变"
+    );
+    assert!(
+        region.chunks.has_pending_light_updates(),
+        "待算的光照绝不能被提前算完"
+    );
+    assert_eq!(
+        server.region().links.flush(),
+        0,
+        "拍快照期间发给玩家的包为零"
+    );
+}

@@ -48,6 +48,7 @@ mod column;
 pub(crate) use column::take_pristine_cost;
 #[cfg(test)]
 mod column_tests;
+pub(crate) mod content_snapshot;
 pub(crate) mod parking;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。

@@ -291,6 +291,17 @@ impl LevelLight {
         engines
     }
 
+    /// 只读快照：克隆这一柱的光照数据，各表分毫不动（补 11）。
+    /// 存档编码只用数据层和 `light_on`，不需要段状态，所以从引擎那份取即可。
+    /// Read-only clone of this column's light data (item 11). Save encoding only
+    /// needs the data layers and `light_on`, so the engines' copy is enough.
+    pub(crate) fn column_clone(&self, pos: ChunkPos) -> [LightColumn; 2] {
+        [
+            self.engines.sky.storage.column_at(pos),
+            self.engines.block.storage.column_at(pos),
+        ]
+    }
+
     /// 把一个区块柱的天空光和方块光同时放进引擎和给别人读的那份。
     pub(crate) fn insert_column(&mut self, pos: ChunkPos, [sky, block]: [LightColumn; 2]) {
         self.engines
@@ -372,9 +383,11 @@ impl LevelLight {
             || visible.storage(LightLayer::Block).is_materialized(pos)
     }
 
-    /// 这一柱的 26 个段状态，给测试核对段状态的登记和注销用。
-    #[cfg(test)]
-    pub(crate) fn section_states(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
+    /// 这一柱的 26 个段状态，给测试核对段状态的登记和注销，以及只读快照的
+    /// 「段状态不变」断言（补 11）用。
+    /// The 26 section states, used by tests and by the read-only snapshot's
+    /// "section states unchanged" assertion (item 11).
+    pub fn section_states(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
         self.engines.sky.storage.states_at(pos)
     }
 

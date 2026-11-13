@@ -16,7 +16,7 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_nbt::{Accounter, Tag, read_named, write_named};
 use tracing::warn;
 
-use crate::region::{RegionColumn, chunk_content};
+use crate::region::{RegionColumn, chunk_content, chunk_content::EncodeParts};
 
 /// 容器版本号，读的时候校验。
 const MAGIC: u8 = 1;
@@ -88,16 +88,24 @@ pub trait ChunkCodec: Send {
     fn decode(&self, pos: ChunkPos, packed: &PackedChunk) -> Result<Box<RegionColumn>, String>;
 }
 
+/// 把只读部件（`RegionColumn` 或 `BorrowedParts`）编成两份 NBT 字节。
+/// 卸载存盘和已加载区块的只读快照共用这一条路径（补 11）。
+/// Encode read-only parts (`RegionColumn` or `BorrowedParts`) into both NBT
+/// blobs; unload saves and loaded-chunk read-only snapshots share it (item 11).
+pub(crate) fn encode_parts(pos: ChunkPos, parts: &impl EncodeParts) -> Result<PackedChunk, String> {
+    let encoded = chunk_content::encode_parts(parts, pos).map_err(|e| e.to_string())?;
+    Ok(PackedChunk {
+        chunk: Some(named_bytes(&encoded.chunk)),
+        entities: encoded.entities.as_ref().map(named_bytes),
+    })
+}
+
 /// 内联执行器：直接在调用它的线程上跑完编码/解码。
 pub struct InlineCodec;
 
 impl ChunkCodec for InlineCodec {
     fn encode(&self, pos: ChunkPos, column: &RegionColumn) -> Result<PackedChunk, String> {
-        let encoded = chunk_content::encode(column, pos).map_err(|e| e.to_string())?;
-        Ok(PackedChunk {
-            chunk: Some(named_bytes(&encoded.chunk)),
-            entities: encoded.entities.as_ref().map(named_bytes),
-        })
+        encode_parts(pos, column)
     }
 
     fn decode(&self, pos: ChunkPos, packed: &PackedChunk) -> Result<Box<RegionColumn>, String> {

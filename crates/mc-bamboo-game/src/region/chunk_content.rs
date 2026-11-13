@@ -11,7 +11,7 @@ use mc_bamboo_blocks::state::TRIGGERED;
 use mc_bamboo_blocks::{
     BlockState, ChunkBlockEntities, ChunkRedstone, ChunkTicks,
     archive::{
-        block_entity::{create_block_entity, items_tag, write_block_entity_additional},
+        block_entity::{create_block_entity, items_tag},
         entity::{read_entity, write_entity},
         redstone::{RedstoneFacts, read_redstone, write_redstone},
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
@@ -35,11 +35,13 @@ use mc_bamboo_storage::{
     },
     chunk_nbt::{self, ChunkEncodeExtra, DecodedChunk as DecodedColumn, field},
 };
+use mc_bamboo_world::column::ChunkColumn;
 
 use super::column::{PackedContainer, RegionColumn, RegionColumnParts};
 use crate::{
-    command_block::ArchiveCommandBlock,
+    command_block::{ArchiveCommandBlock, CommandBlockData},
     container::{ContainerEntry, ContainerKind},
+    lectern::Book,
 };
 
 /// 组装失败的原因。
@@ -74,47 +76,76 @@ pub struct DecodedChunk {
     pub problems: Vec<Problem>,
 }
 
+/// 存档编码需要的只读部件。`RegionColumn`（卸载存盘）和 `BorrowedParts`
+/// （已加载区块的只读快照，不移动盒子，见 `region::content_snapshot`）都实现它，
+/// 共用 [`encode_parts`] 这一条编码路径（补 11）。
+/// Read-only parts needed to encode a save. Both `RegionColumn` (unload save)
+/// and `BorrowedParts` (read-only snapshot of a still-loaded column, item 11)
+/// implement it and share the single `encode_parts` path.
+pub(crate) trait EncodeParts {
+    fn chunk_column(&self) -> &ChunkColumn;
+    fn ticks(&self) -> Option<&ChunkTicks>;
+    /// 活方块实体按世界坐标给出的 `saveAdditional` 键。卸载盒子从自己那份
+    /// `ChunkBlockEntities` 里查；只读快照从 region 的借用状态里查，都不需要
+    /// 拥有 `Box<dyn BlockEntity>`。
+    fn live_additional(&self, pos: BlockPos) -> Option<Result<Vec<(String, Tag)>, String>>;
+    fn redstone(&self) -> &ChunkRedstone;
+    fn container(&self, pos: BlockPos) -> Option<&ContainerEntry>;
+    fn block_item(&self, pos: BlockPos) -> Option<&ComponentPatch>;
+    fn command_block(&self, pos: BlockPos) -> Option<&CommandBlockData>;
+    fn book(&self, pos: BlockPos) -> Option<&Book>;
+    fn entity_rows(&self) -> &[EntityRow];
+    fn preserved_entities(&self) -> &[Tag];
+}
+
 /// 把一个区块束整个写成官方的两份 NBT。
 ///
 /// 盒子里的计划刻已经是相对延迟，不需要当前时刻；`last_update` / `inhabited_time`
 /// 读盘时挂在 `ChunkColumn` 里，没有就用 0。
+/// 把一个已经从 region 收回的盒子编码成两份 NBT（卸载存盘路径）。
+/// Encode a box taken out of the region (unload-save path).
 pub fn encode(column: &RegionColumn, pos: ChunkPos) -> Result<EncodedChunk, Error> {
-    let view = column.parts();
+    encode_parts(column, pos)
+}
+
+/// 从只读部件编码两份 NBT。卸载存盘和已加载区块的只读快照都走这里，
+/// 只是前者传 `RegionColumn`、后者传 `BorrowedParts`（补 11）。
+/// Encode from read-only parts: unload saves pass a `RegionColumn`, loaded-chunk
+/// snapshots pass `BorrowedParts` (item 11); the NBT is byte-identical.
+pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<EncodedChunk, Error> {
+    let column = parts.chunk_column();
     let mut problems = Vec::new();
     let mut modeled_ids: Vec<&str> = Vec::new();
 
     // 1. 按位置把每种方块实体建模的键攒起来。
     let mut modeled = Vec::new();
-    for entity in view.column.chunk().block_entities() {
+    for entity in column.chunk().block_entities() {
         let name = kinds::name_of(entity.kind).unwrap_or("minecraft:unknown");
         modeled_ids.push(name);
         let x = pos.x * 16 + entity.x as i32;
         let z = pos.z * 16 + entity.z as i32;
         let world_pos = BlockPos::new(x, entity.y, z);
         let mut entry = ModeledBlockEntity::new(name, x, entity.y, z);
-        write_game_fields(&mut entry, &mut problems, name, world_pos, &view, pos);
+        write_game_fields(&mut entry, &mut problems, name, world_pos, parts, pos);
         // 会动的方块实体自己的键。
-        let live = view
-            .block_entities
-            .entities()
-            .iter()
-            .find(|live| live.pos() == world_pos);
-        if let Some(live) = live {
-            for (key, value) in
-                write_block_entity_additional(live.as_ref()).map_err(|e| Error::Blocks(e.0))?
-            {
-                entry.put(&key, value);
+        match parts.live_additional(world_pos) {
+            Some(Ok(additional)) => {
+                for (key, value) in additional {
+                    entry.put(&key, value);
+                }
             }
-        } else {
-            // 官方必写但我们没有实例的键：按官方默认值补齐。
-            write_default_block_entity_fields(&mut entry, name);
+            Some(Err(error)) => return Err(Error::Blocks(error)),
+            None => {
+                // 官方必写但我们没有实例的键：按官方默认值补齐。
+                write_default_block_entity_fields(&mut entry, name);
+            }
         }
         // 红石记忆里属于这一格的那几项。
         for (key, value) in write_redstone(
             world_pos,
             name,
-            &view.redstone.archive_entries(),
-            redstone_facts(name, world_pos, &view, pos),
+            &parts.redstone().archive_entries(),
+            redstone_facts(name, world_pos, parts, pos),
         )
         .map_err(|e| Error::Blocks(e.0))?
         {
@@ -130,7 +161,7 @@ pub fn encode(column: &RegionColumn, pos: ChunkPos) -> Result<EncodedChunk, Erro
     let raw: Vec<Tag> = decode_raw_block_entities(column, pos)
         .into_iter()
         .filter(|tag| {
-            view.column.chunk().block_entities().any(|entity| {
+            column.chunk().block_entities().any(|entity| {
                 let x = pos.x * 16 + entity.x as i32;
                 let z = pos.z * 16 + entity.z as i32;
                 Some((x, entity.y, z)) == tag_position_of(tag)
@@ -144,23 +175,23 @@ pub fn encode(column: &RegionColumn, pos: ChunkPos) -> Result<EncodedChunk, Erro
         chunk_pos: pos,
         ..Default::default()
     };
-    let archive = view.column.chunk().archive();
+    let archive = column.chunk().archive();
     extra.last_update = archive.last_update;
     extra.inhabited_time = archive.inhabited_time;
     let empty_ticks = ChunkTicks::empty();
-    let lists =
-        encode_chunk_ticks(view.ticks.unwrap_or(&empty_ticks)).map_err(|e| Error::Blocks(e.0))?;
+    let lists = encode_chunk_ticks(parts.ticks().unwrap_or(&empty_ticks))
+        .map_err(|e| Error::Blocks(e.0))?;
     problems.extend((0..lists.clamped).map(|_| Problem {
         at: "ticks".to_owned(),
         message: "delay was clamped to i32".to_owned(),
     }));
     merge_tick_lists(lists.blocks, lists.fluids, &[], &[], &mut extra);
     extra.raw_block_entities = Some(merged);
-    let chunk = chunk_nbt::encode(view.column, &extra)?;
+    let chunk = chunk_nbt::encode(column, &extra)?;
 
     // 3. 实体文件：三种建模实体 + 不认识的类型整条原样保留。
     let mut file = EntityFile::empty(pos);
-    for row in view.entities.rows() {
+    for row in parts.entity_rows() {
         match write_entity(row) {
             Ok(tag) => file.entities.push(tag),
             Err(error) => problems.push(Problem {
@@ -170,7 +201,7 @@ pub fn encode(column: &RegionColumn, pos: ChunkPos) -> Result<EncodedChunk, Erro
         }
     }
     file.preserved_entities
-        .extend(view.entities.preserved().iter().cloned());
+        .extend(parts.preserved_entities().iter().cloned());
     Ok(EncodedChunk {
         chunk,
         entities: file.encode(),
@@ -317,13 +348,13 @@ fn tag_position_of(tag: &Tag) -> Option<(i32, i32, i32)> {
     Some((x, y, z))
 }
 
-fn decode_raw_block_entities(column: &RegionColumn, pos: ChunkPos) -> Vec<Tag> {
-    let mut out = Vec::new();
-    for (x, y, z, _, tag) in column.parts().column.chunk().preserved_block_entities() {
-        let _ = (x, y, z, pos);
-        out.push(tag.clone());
-    }
-    out
+fn decode_raw_block_entities(column: &ChunkColumn, pos: ChunkPos) -> Vec<Tag> {
+    let _ = pos;
+    column
+        .chunk()
+        .preserved_block_entities()
+        .map(|(_, _, _, _, tag)| tag.clone())
+        .collect()
 }
 
 fn write_game_fields(
@@ -331,12 +362,11 @@ fn write_game_fields(
     problems: &mut Vec<Problem>,
     id: &str,
     pos: BlockPos,
-    view: &super::column::RegionColumnView<'_>,
+    parts: &impl EncodeParts,
     _chunk: ChunkPos,
 ) {
     // 容器：Items、LootTable、LootTableSeed。
-    if let Some(packed) = view.containers.get(&pos) {
-        let game = packed.entry();
+    if let Some(game) = parts.container(pos) {
         let slots: Vec<_> = game
             .slots
             .iter()
@@ -370,12 +400,12 @@ fn write_game_fields(
         }
     }
     // 方块实体从物品带来的组件：CustomName / lock / 旗帜 / 头颅 / 陶罐。
-    if let Some(patch) = view.block_items.get(&pos) {
+    if let Some(patch) = parts.block_item(pos) {
         write_component_fields(entry, problems, id, pos, patch);
     }
     // 命令方块。
     if id == "minecraft:command_block" {
-        if let Some(data) = view.command_blocks.get(&pos) {
+        if let Some(data) = parts.command_block(pos) {
             let data = data.archive();
             put_string(entry, "Command", data.command);
             put_int(entry, "SuccessCount", data.success_count);
@@ -391,7 +421,7 @@ fn write_game_fields(
     }
     // 讲台上的书。
     if id == "minecraft:lectern" {
-        if let Some(book) = view.books.get(&pos) {
+        if let Some(book) = parts.book(pos) {
             let (stack, page) = book.archive();
             if !stack.is_empty() {
                 match slots::encode_item(stack) {
@@ -521,19 +551,18 @@ fn items(slots: &[ItemStack]) -> Tag {
 fn redstone_facts(
     id: &str,
     pos: BlockPos,
-    view: &super::column::RegionColumnView<'_>,
+    parts: &impl EncodeParts,
     chunk: ChunkPos,
 ) -> RedstoneFacts {
-    let state = view.column.chunk().block(
+    let state = parts.chunk_column().chunk().block(
         (pos.x - chunk.x * 16) as usize,
         pos.y,
         (pos.z - chunk.z * 16) as usize,
     );
     let state = BlockState(state);
-    let has_record = view
-        .containers
-        .get(&pos)
-        .and_then(|packed| packed.entry().slots.first())
+    let has_record = parts
+        .container(pos)
+        .and_then(|game| game.slots.first())
         .is_some_and(|stack| !stack.is_empty());
     RedstoneFacts {
         jukebox_has_record: id == "minecraft:jukebox" && has_record,

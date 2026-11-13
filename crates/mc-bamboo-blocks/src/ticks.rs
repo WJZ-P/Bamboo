@@ -82,7 +82,7 @@ pub struct ScheduledFluidTick {
 type ChunkTickCheck<'a> = dyn Fn(ChunkPos) -> bool + 'a;
 
 /// 一条队列，`T` 是方块或者流体的注册表 ID。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TickQueue<T> {
     queue: BTreeMap<TickOrder, (BlockPos, T)>,
     /// 同一格同一种排队时只留第一个，`LevelChunkTicks.ticksPerPosition`。
@@ -251,7 +251,7 @@ fn merge_pending<'a, T: Copy + 'a>(
 ///
 /// 每张队列另有一张「搁置表」：到期时所在区块不能 tick 的刻按区块收起来，
 /// 保留原来的完整排序键；区块恢复时整组放回主队列，和别的刻合在一起执行。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BlockTicks {
     /// 现在的 `gameTime`，由 [`run_scheduled_ticks`](crate::run_scheduled_ticks) 更新。
     now: i64,
@@ -431,6 +431,15 @@ impl BlockTicks {
             blocks: Vec::new(),
             fluids: Vec::new(),
         }))
+    }
+
+    /// 只读快照：在一份克隆上走 `take_chunk`，原表分毫不动。给已加载区块的
+    /// 只读存档编码用（补 11）。tick 中途（有在途刻）时返回 `None`，调用方稍后重试。
+    /// Read-only snapshot: run `take_chunk` on a clone, leaving the original
+    /// untouched. Returns `None` mid-tick (there are running ticks); the caller
+    /// retries later. Used by the loaded-chunk read-only encoder (item 11).
+    pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkTicks> {
+        self.clone().take_chunk(chunk).ok()
     }
 
     /// 把盒子里的计划刻放回表里。只在 tick 边界调用。

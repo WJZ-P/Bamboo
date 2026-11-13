@@ -367,7 +367,6 @@ impl LightStorage {
     }
 
     /// 这一柱的 26 个段状态，给测试核对登记/注销用。
-    #[cfg(test)]
     pub(crate) fn states_at(&self, pos: ChunkPos) -> [u8; LIGHT_SECTION_COUNT] {
         self.column(pos).states
     }

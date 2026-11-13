@@ -140,7 +140,9 @@ pub(crate) struct DirectorHost {
     /// 每个已加载区块上次拍快照（存/卸载写）落定后的版本号，用来认出
     /// 「改过但还没存」的脏区块。版本号由 `ChunkStore` 在每次写方块/光照时更换。
     /// Revision at each loaded chunk's last snapshot, to find dirty loaded chunks.
-    saved_revisions: HashMap<ChunkPos, ChunkRevision>,
+    /// 每个已加载区块上次拍快照落定后的 `(版本号, 上层内容指纹)`（补 9）。
+    /// `(revision, upper-content fingerprint)` at each chunk's last snapshot (item 9).
+    saved_revisions: HashMap<ChunkPos, (ChunkRevision, u64)>,
     /// 每个已加载区块上次被 D6 匀速快照的刻数，用于单区块 10 秒冷却。
     /// Last tick each loaded chunk was snapshotted by D6, for the cooldown.
     loaded_save_tick: HashMap<ChunkPos, u64>,
@@ -481,15 +483,28 @@ impl DirectorHost {
         }
     }
 
-    /// 列出「已加载、非原样、版本号和上次快照不同」的脏区块，按坐标排序。
-    /// `pristine` 的区块照官方不存；版本号一变就说明自上次落盘后又改过。
-    /// List loaded, non-pristine chunks whose revision differs from their last
-    /// save, sorted. Pristine chunks are not saved (vanilla); a changed revision
-    /// means the chunk was edited since its last snapshot.
-    fn dirty_loaded_chunks(&self, region: &Region) -> Vec<ChunkPos> {
+    /// 列出「已加载、非原样、且版本号或上层内容和上次快照不同」的脏区块（补 9），按坐标排序。
+    /// 方块/光照的版本号由 `ChunkStore` 负责；`content_fingerprints` 补上容器内容、
+    /// 方块实体、实体、计划刻、红石记忆这些 `ChunkAccess.setUnsaved` 会置脏、
+    /// 但方块版本号不变的上层内容。原样（既没有方块改动也没有上层内容）的区块照官方不存。
+    /// List loaded, non-pristine chunks whose revision OR upper-content
+    /// fingerprint differs from the last snapshot (item 9). The lower revision
+    /// covers blocks/light; `content_fingerprints` covers containers, block
+    /// entities, entities, scheduled ticks and redstone memory — exactly the
+    /// upper-layer content vanilla `ChunkAccess.setUnsaved` marks dirty. Fully
+    /// pristine chunks are not saved, like vanilla.
+    fn dirty_loaded_chunks(
+        &self,
+        region: &Region,
+        fingerprints: &BTreeMap<ChunkPos, u64>,
+    ) -> Vec<ChunkPos> {
         let mut dirty = Vec::new();
-        for (pos, revision, pristine) in region.chunks.loaded_states() {
-            if !pristine && self.saved_revisions.get(&pos).copied() != Some(revision) {
+        for (pos, revision, lower_pristine) in region.chunks.loaded_states() {
+            let fingerprint = fingerprints.get(&pos).copied().unwrap_or(0);
+            let has_upper = fingerprints.contains_key(&pos);
+            let pristine = lower_pristine && !has_upper;
+            let changed = self.saved_revisions.get(&pos).copied() != Some((revision, fingerprint));
+            if !pristine && changed {
                 dirty.push(pos);
             }
         }
@@ -515,7 +530,8 @@ impl DirectorHost {
         self.loaded_save_tick
             .retain(|pos, _| region.chunks.is_loaded(*pos));
 
-        let dirty = self.dirty_loaded_chunks(region);
+        let fingerprints = crate::region::content_snapshot::content_fingerprints(region);
+        let dirty = self.dirty_loaded_chunks(region, &fingerprints);
         let count = save_batch_size(dirty.len());
         let eligible: Vec<ChunkPos> = dirty
             .into_iter()
@@ -526,7 +542,8 @@ impl DirectorHost {
             .take(count)
             .collect();
         for pos in eligible {
-            self.snapshot_loaded(region, pos, now_tick);
+            let fingerprint = fingerprints.get(&pos).copied().unwrap_or(0);
+            self.snapshot_loaded(region, pos, now_tick, fingerprint);
         }
     }
 
@@ -542,9 +559,11 @@ impl DirectorHost {
         // `save-all` is an explicit forced retry: clear the §8 pause so the
         // in-memory snapshots are attempted again. A later failure re-pauses.
         self.saving_paused = false;
-        let dirty = self.dirty_loaded_chunks(region);
+        let fingerprints = crate::region::content_snapshot::content_fingerprints(region);
+        let dirty = self.dirty_loaded_chunks(region, &fingerprints);
         for pos in dirty {
-            self.snapshot_loaded(region, pos, now_tick);
+            let fingerprint = fingerprints.get(&pos).copied().unwrap_or(0);
+            self.snapshot_loaded(region, pos, now_tick, fingerprint);
         }
     }
 
@@ -553,12 +572,18 @@ impl DirectorHost {
     /// Snapshot one loaded dirty chunk to the IO thread and record the settled
     /// revision and tick. On failure (or when the tables are busy) record nothing
     /// so it is retried on a later tick.
-    fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
+    fn snapshot_loaded(
+        &mut self,
+        region: &mut Region,
+        pos: ChunkPos,
+        now_tick: u64,
+        fingerprint: u64,
+    ) {
         if self.saving_paused {
             // §8 暂停期间不接新的保存请求；盒子留在 region / parking 里。
             return;
         }
-        let Some(result) = region.encode_loaded_column(pos, &self.codec) else {
+        let Some(result) = region.encode_loaded_column(pos) else {
             return;
         };
         match result {
@@ -569,10 +594,13 @@ impl DirectorHost {
                 if let Some(io) = &self.io {
                     io.submit_write(pos, seq, packed.chunk, packed.entities);
                 }
-                // 搬盒子会换版本号，落定之后再记，下一刻才不会被误判成又脏了。
-                // The round-trip bumps the revision; record it afterwards.
+                // 只读编码不换版本号，直接记下当时的版本号和上层内容指纹，
+                // 下一刻才不会被误判成又脏了（补 9 / 补 11）。
+                // The read-only encode does not bump the revision: record the
+                // revision and the upper-content fingerprint as they stand
+                // (items 9 / 11).
                 self.saved_revisions
-                    .insert(pos, region.chunks.revision(pos));
+                    .insert(pos, (region.chunks.revision(pos), fingerprint));
                 self.loaded_save_tick.insert(pos, now_tick);
             }
             Err(error) => {
@@ -1503,7 +1531,7 @@ mod tests {
         host.save_cooldown.insert(pos, 10);
         host.loaded_save_tick.insert(pos, 20);
         host.saved_revisions
-            .insert(pos, region.chunks.revision(pos));
+            .insert(pos, (region.chunks.revision(pos), 0));
         host.region_message(
             &mut region,
             RegionMessage::Forgot {
