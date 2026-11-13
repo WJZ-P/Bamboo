@@ -419,7 +419,7 @@ impl EntityStore {
         let mut entity = self.slots[row].as_ref()?.clone().into_entity();
         let result = f(&mut entity);
         let replaced = entity.split();
-        self.replace_row(row, replaced);
+        self.replace_row(row, replaced, true);
         Some(result)
     }
 
@@ -538,7 +538,7 @@ impl EntityStore {
         debug_assert_eq!(rows.len(), public.len());
         debug_assert_eq!(rows.len(), state.len());
         for ((row, public), state) in rows.iter().copied().zip(public).zip(state) {
-            self.replace_row(row, EntityRow { public, state });
+            self.replace_row(row, EntityRow { public, state }, true);
         }
     }
 
@@ -650,13 +650,13 @@ impl EntityStore {
             .taken
             .remove(&uid)
             .unwrap_or_else(|| self.allocate_slot());
-        self.replace_row(row, split);
+        self.replace_row(row, split, false);
         self.index.insert(uid, row);
     }
 
-    fn replace_row(&mut self, row: usize, new: EntityRow) {
+    fn replace_row(&mut self, row: usize, new: EntityRow, note: bool) {
         let old = self.slots[row].take();
-        if !self.watched_sections.is_empty() {
+        if note && !self.watched_sections.is_empty() {
             let now = Self::watch_facts(&new.public);
             let before = old.as_ref().map(|old| Self::watch_facts(&old.public));
             if before.as_ref() != Some(&now) {
@@ -720,6 +720,8 @@ impl EntityStore {
     /// tick 结束时把这次生成的实体并进来，它们下一 tick 才 tick。
     pub fn end_tick(&mut self) {
         self.ticking = false;
+        // 这一拍被 `discard` 的实体不会 `put` 回来，旧位置快照在这里统一丢掉。
+        self.taken_snapshots.clear();
         let pending = std::mem::take(&mut self.pending);
         for row in pending {
             self.insert_row(row);

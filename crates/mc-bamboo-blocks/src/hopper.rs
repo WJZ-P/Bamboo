@@ -52,6 +52,8 @@ pub struct HopperEntity {
     idle: bool,
     /// 已经在闲置睡眠里。读路径按「每刻都跑过」现算 `tickedGameTime`。
     idle_sleeping: bool,
+    /// 刚从闲置睡眠里被叫醒，`tickedGameTime` 还停在官方上一刻写下的值。
+    woken_from_idle: bool,
     /// 上次真跑时登记的关注范围，供 `watch()` 交给方块实体表。
     watch: Option<Watch>,
 }
@@ -78,6 +80,7 @@ impl HopperEntity {
             sleep: None,
             idle: false,
             idle_sleeping: false,
+            woken_from_idle: false,
             watch: None,
         }
     }
@@ -97,7 +100,13 @@ impl HopperEntity {
         self.cooldown_time = cooldown_time;
         self.sleep = None;
         self.idle = false;
-        self.idle_sleeping = false;
+        // 从闲置睡眠里叫醒时，安静刻官方每刻都写过时间字段。刚被叫醒的这一次
+        // 写冷却要按「本刻还没跑方块实体阶段」还原：相对年龄 1。
+        if self.woken_from_idle {
+            self.last_tick_age = Some(1);
+            self.woken_from_idle = false;
+        }
+        self.last_tick_now = block_entity_clock();
     }
 
     /// 现在的冷却时间，测试和存档用；睡着的按公式现算。
@@ -159,6 +168,8 @@ impl HopperEntity {
         self.last_tick_age = Some(0);
         self.last_tick_now = now;
         self.sleep = None;
+        self.woken_from_idle = false;
+        self.idle_sleeping = false;
     }
 
     /// 结束睡眠 / 冻结恢复：把冷却和相对时间按公式算到 `tick` 那刻结束。
@@ -217,6 +228,7 @@ impl HopperEntity {
         self.sleep = None;
         self.idle = false;
         self.idle_sleeping = false;
+        self.woken_from_idle = false;
         self.watch = None;
     }
 }
@@ -265,6 +277,7 @@ impl BlockEntity for HopperEntity {
     }
 
     fn materialize(&mut self, tick: i64) {
+        self.woken_from_idle = self.idle_sleeping;
         self.materialize_at(tick);
         self.idle = false;
         self.idle_sleeping = false;
@@ -284,6 +297,7 @@ impl BlockEntity for HopperEntity {
             self.sleep = None;
             self.idle = false;
             self.idle_sleeping = false;
+            self.woken_from_idle = false;
             self.watch = None;
             return;
         }
@@ -337,7 +351,9 @@ pub fn push_items_tick(world: &mut World, pos: BlockPos, entity: &mut HopperEnti
         let facing = state.get(FACING_HOPPER);
         // 只有「没事可做、也没有部分吸入 / 送出」的漏斗才睡到外部叫醒。
         // 冷却期、失败的搬运、被红石锁住都按官方的逐刻推进留在醒着的集合。
-        let idle = !changed && world.content_writes() == writes;
+        let idle = !changed
+            && world.content_writes() == writes
+            && !world.has_items_in(suck_box(pos));
         entity.note_idle(idle, pos, facing);
     }
 }
@@ -451,7 +467,10 @@ pub(crate) fn apply_hopper_cooldown(
             return;
         }
         let skip = i32::from(
-            from_ticked_game_time.is_some_and(|from| destination.ticked_game_time() >= from),
+            from_ticked_game_time.is_some_and(|from| {
+                let ok = destination.ticked_game_time() >= from;
+                ok
+            }),
         );
         destination.set_cooldown(MOVE_ITEM_SPEED - skip);
     });
@@ -685,6 +704,9 @@ fn try_move_touching(
     hopper: &mut HopperEntity,
     item: &mut Entity,
 ) {
+    if std::env::var("IDLE_DEBUG").is_ok() {
+        eprintln!("try_move_touching clock={} cd={} tgt={} itempos={:?}", crate::block_entity::block_entity_clock(), hopper.cooldown_time(), hopper.ticked_game_time(), item.position);
+    }
     if hopper.is_on_cooldown() {
         return;
     }

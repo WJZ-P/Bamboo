@@ -901,6 +901,21 @@ impl<'a> World<'a> {
         self.content_writes
     }
 
+    /// 吸取盒里有没有还活着的物品实体。漏斗只在盒子空着时才敢睡：盒子里的
+    /// 物品下一刻可能先被 `entityInside` 吸走，那条路径不经过漏斗自己的 tick。
+    pub(crate) fn has_items_in(&self, area: crate::shape::Aabb) -> bool {
+        let mut found = false;
+        self.level.for_each_entity_in(area, &mut |public| {
+            if !public.removed
+                && matches!(public.kind, crate::entity::KindPublic::Item { .. })
+                && !found
+            {
+                found = true;
+            }
+        });
+        found
+    }
+
     /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。
     fn notify_changed_always(&mut self, pos: BlockPos) {
         self.level.notify_block_entity_cell(pos);
@@ -1149,7 +1164,6 @@ impl<'a> World<'a> {
             .map(|typed| f(typed, self));
         self.level.put_block_entity(pos, id, entity);
         self.end_held_reads();
-        self.deliver_entity_wakes();
         result
     }
 
@@ -1165,6 +1179,7 @@ impl<'a> World<'a> {
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
         self.quiet += 1;
+        self.level.wake_block_entity_fresh(pos);
         let result = self.with_block_entity(pos, f);
         self.quiet -= 1;
         result
@@ -1286,9 +1301,7 @@ impl<'a> World<'a> {
         let border = self.level.world_border().block_box();
         self.level.sync_block_entity_border(border);
         // 关注登记变了就把新的 16³ 段交给实体表；没有登记时这两步都是空操作。
-        if let Some(sections) = self.level.take_block_entity_watched_sections() {
-            self.level.set_entity_watched_sections(sections);
-        }
+        self.sync_watched_sections();
         self.deliver_entity_wakes();
         self.level.begin_block_entity_tick(now);
         while let Some((pos, id)) = self.level.next_block_entity_ticker() {
@@ -1331,6 +1344,7 @@ impl<'a> World<'a> {
             self.level.observe(Observation::TriggerEnd);
         }
         self.deliver_entity_wakes();
+        self.sync_watched_sections();
         self.level.end_block_entity_tick();
     }
 
@@ -1339,6 +1353,14 @@ impl<'a> World<'a> {
     fn deliver_entity_wakes(&mut self) {
         for area in self.level.take_entity_wake_events() {
             self.level.notify_block_entity_box(area);
+        }
+    }
+
+    /// 这一刻新登记 / 撤掉的关注盒子：把段集合交给实体表。放在方块实体阶段
+    /// 结尾，下一刻的实体阶段才不会漏掉移动；阶段开头也同步一次。
+    fn sync_watched_sections(&mut self) {
+        if let Some(sections) = self.level.take_block_entity_watched_sections() {
+            self.level.set_entity_watched_sections(sections);
         }
     }
 

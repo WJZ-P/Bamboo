@@ -1175,6 +1175,10 @@ impl LevelSideState for Recording<'_> {
         self.level.wake_block_entity(pos);
     }
 
+    fn wake_block_entity_fresh(&mut self, pos: BlockPos) {
+        self.level.wake_block_entity_fresh(pos);
+    }
+
     fn schedule_block_entity_wake(&mut self, pos: BlockPos, wake_at: Option<i64>) {
         self.level.schedule_block_entity_wake(pos, wake_at);
     }

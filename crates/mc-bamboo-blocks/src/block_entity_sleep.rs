@@ -1718,3 +1718,340 @@ fn idle_hopper_phase_bench() {
         off / on
     );
 }
+
+/// 闲置漏斗休眠的差分测试：开 / 关休眠两份世界，同一份脚本逐刻比较全部状态。
+///
+/// 物品实体从远处飞进吸取盒、落在漏斗上、在盒里合并 / 消失；上方换容器，
+/// 下方箱子写满又抽空；`ENABLED`、漏斗链、冻结、装盒、存盘重启、边界外暂停。
+mod idle_hopper {
+    use mc_bamboo_core::{ChunkPos, Vec3};
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use crate::{
+        BlockState, BlockTicks, HopperEntity, World, entity::Entity, interact::run_block_entity_tick,
+        testing::TestLevel, world::UPDATE_ALL,
+        block_entity::set_block_entity_clock, hopper::HOPPER_CONTAINER_SIZE,
+        state::{ENABLED, FACING_HOPPER},
+    };
+    use mc_bamboo_core::{BlockPos, Direction};
+    use mc_bamboo_data::blocks;
+    use crate::random::LegacyRandom;
+    use crate::level::LevelTables;
+    use crate::archive::write_block_entity_additional;
+
+    const HOPPER: BlockPos = BlockPos::new(0, 64, 0);
+    const ABOVE: BlockPos = BlockPos::new(0, 65, 0);
+    const BELOW: BlockPos = BlockPos::new(0, 63, 0);
+    const CHAIN: BlockPos = BlockPos::new(0, 66, 0);
+    const CHUNK: ChunkPos = ChunkPos::new(0, 0);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Layout {
+        Single,
+        Chain,
+        Chests,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Act {
+        /// 从远处（含另一个 16³ 段）以给定速度放一件物品。
+        Fly(f64, f64, ItemStack),
+        /// 直接在吸取盒里放一件物品。
+        Drop(f64, ItemStack),
+        /// 改一个还活着的物品实体的堆（模拟合并的一部分）。
+        Merge(i32),
+        /// 丢掉一个物品实体。
+        Kill,
+        /// 写一个容器的全部槽。
+        Fill(BlockPos, ItemStack),
+        /// 清空一个容器。
+        Empty(BlockPos),
+        /// 上方一格换方块：空气 / 完整方块 / 不挡漏斗的方块 / 箱子。
+        Above(i32),
+        /// 开关漏斗。
+        Enabled(bool),
+        /// 冻结 / 解冻。
+        Freeze(bool),
+        /// 装盒再放回。
+        BoxChunk,
+        /// 按存档 NBT 组装、解码、放回漏斗。
+        Restart,
+        /// 世界边界：0 全在界内，1 全在界外。
+        Border(i32),
+    }
+
+    fn script(seed: u64, ticks: i64, layout: Layout) -> Vec<(i64, Act)> {
+        let mut random = LegacyRandom::new(seed as i64);
+        let mut actions = Vec::new();
+        for now in 1..=ticks {
+            let roll = random.next_int(100);
+            let stack = ItemStack::new(items::POTATO, 1 + random.next_int(8));
+            let act = match roll {
+                0..=11 => Act::Fly(
+                    f64::from(random.next_int(3) + 1) * 8.0,
+                    f64::from(random.next_int(5)).mul_add(-0.25, 0.5),
+                    stack,
+                ),
+                12..=23 => Act::Drop(f64::from(random.next_int(2)).mul_add(0.3, 0.5), stack),
+                24..=29 => Act::Merge(1 + random.next_int(3)),
+                30..=34 => Act::Kill,
+                35..=43 => Act::Fill(BELOW, stack),
+                44..=51 => Act::Empty(BELOW),
+                52..=58 => Act::Fill(ABOVE, stack),
+                59..=64 => Act::Empty(ABOVE),
+                65..=71 => Act::Above(random.next_int(4)),
+                72..=78 => Act::Enabled(random.next_int(2) == 0),
+                79..=82 => Act::Freeze(random.next_int(2) == 0),
+                83..=86 => Act::BoxChunk,
+                87..=89 => Act::Restart,
+                90..=93 => continue, // 边界切换另有专门测试，见 7g / sync_border。
+                _ => continue,
+            };
+            actions.push((now, act));
+        }
+        actions
+    }
+
+    fn item(at: Vec3, stack: ItemStack, delta_x: f64) -> Entity {
+        Entity::ground_item_with_delta(at, stack, Vec3::new(delta_x, 0.0, 0.0))
+    }
+
+    struct Scene {
+        level: TestLevel,
+        ticks: BlockTicks,
+        script: Vec<(i64, Act)>,
+        cursor: usize,
+        sleep: bool,
+        slept: usize,
+        ran: usize,
+    }
+
+    impl Scene {
+        fn new(script: Vec<(i64, Act)>, layout: Layout, sleep: bool) -> Self {
+            let mut level = TestLevel::new();
+            let mut ticks = BlockTicks::new();
+            level.set_container(HOPPER, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
+            level.set_container(BELOW, vec![ItemStack::empty(); 27]);
+            if layout == Layout::Chests {
+                level.set_container(ABOVE, vec![ItemStack::empty(); 27]);
+            }
+            if layout == Layout::Chain {
+                level.set_container(CHAIN, vec![ItemStack::empty(); HOPPER_CONTAINER_SIZE]);
+            }
+            {
+                let mut world = World::new(&mut level, &mut ticks);
+                world.set_block(
+                    HOPPER,
+                    BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
+                    UPDATE_ALL,
+                );
+                world.set_block(BELOW, BlockState(blocks::CHEST), UPDATE_ALL);
+                world.set_block_entity(Box::new(HopperEntity::new(HOPPER)));
+                if layout == Layout::Chain {
+                    world.set_block(
+                        CHAIN,
+                        BlockState(blocks::HOPPER).with(FACING_HOPPER, Direction::Down),
+                        UPDATE_ALL,
+                    );
+                    world.set_block_entity(Box::new(HopperEntity::new(CHAIN)));
+                }
+            }
+            level.sleep_enabled(sleep);
+            Self {
+                level,
+                ticks,
+                script,
+                cursor: 0,
+                sleep,
+                slept: 0,
+                ran: 0,
+            }
+        }
+
+        fn step(&mut self, now: i64) {
+            self.ticks.set_time(now);
+            set_block_entity_clock(now);
+            while self
+                .script
+                .get(self.cursor)
+                .is_some_and(|(at, _)| *at == now)
+            {
+                let act = self.script[self.cursor].1.clone();
+                self.cursor += 1;
+                self.apply(act, now);
+            }
+            // 实体阶段：物品飞近 / 合并 / 消失，然后方块实体阶段。
+            {
+                let mut world = World::new(&mut self.level, &mut self.ticks);
+                world.tick_entities();
+            }
+            let _ = run_block_entity_tick(&mut self.level, &mut self.ticks);
+            set_block_entity_clock(now);
+            if self.level.due_count() == 0 {
+                self.slept += 1;
+            }
+            self.ran += self.level.due_count();
+        }
+
+        fn apply(&mut self, act: Act, _now: i64) {
+            let mut world = World::new(&mut self.level, &mut self.ticks);
+            match act {
+                Act::Fly(distance, y, stack) => {
+                    world.spawn_entity(item(
+                        Vec3::new(0.5 + distance, 64.0 + y, 0.5),
+                        stack,
+                        -distance / 12.0,
+                    ));
+                }
+                Act::Drop(y, stack) => {
+                    world.spawn_entity(item(Vec3::new(0.5, 64.0 + y, 0.5), stack, 0.0));
+                }
+                Act::Merge(add) => {
+                    let ids = world.entity_ids();
+                    let Some(&id) = ids.last() else { return };
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(ground) = entity.ground_mut() {
+                            ground.stack.count = ground.stack.count.saturating_add(add);
+                        }
+                    });
+                }
+                Act::Kill => {
+                    let ids = world.entity_ids();
+                    let Some(&id) = ids.first() else { return };
+                    world.remove_entity(id);
+                }
+                Act::Fill(pos, stack) => {
+                    world.with_container(pos, &mut |container| {
+                        for slot in 0..container.size() {
+                            container.set(slot, stack.clone());
+                        }
+                    });
+                }
+                Act::Empty(pos) => {
+                    world.with_container(pos, &mut |container| {
+                        for slot in 0..container.size() {
+                            container.set(slot, ItemStack::empty());
+                        }
+                    });
+                }
+                Act::Above(kind) => {
+                    let block = match kind {
+                        0 => blocks::AIR,
+                        1 => blocks::STONE,
+                        2 => blocks::GLASS,
+                        _ => blocks::CHEST,
+                    };
+                    world.set_block_and_update(ABOVE, BlockState(block));
+                }
+                Act::Enabled(enabled) => {
+                    let state = world.block_state(HOPPER);
+                    world.set_block_and_update(HOPPER, state.with(ENABLED, enabled));
+                }
+                Act::Freeze(frozen) => {
+                    let _ = world;
+                    self.level
+                        .set_chunk_block_entity_ticking(CHUNK, !frozen);
+                    self.level.set_frozen(CHUNK, frozen);
+                }
+                Act::BoxChunk => {
+                    let _ = world;
+                    self.level.box_chunk(CHUNK);
+                }
+                Act::Restart => {
+                    let _ = world;
+                    let id = "minecraft:hopper";
+                    let tag = self
+                        .level
+                        .block_entities_table()
+                        .get_dyn(HOPPER)
+                        .map(|entity| {
+                            mc_bamboo_nbt::Tag::Compound(
+                                write_block_entity_additional(entity).expect("写出成功"),
+                            )
+                        });
+                    if let Some(tag) = tag {
+                        let rebuilt = crate::archive::block_entity::create_block_entity(
+                            id, HOPPER, self.level.get(HOPPER), &tag,
+                        )
+                        .expect("读回成功")
+                        .expect("有构造分支");
+                        self.level.block_entities_table_mut().remove(HOPPER);
+                        self.level.block_entities_table_mut().insert(rebuilt);
+                    }
+                }
+                Act::Border(kind) => {
+                    let _ = world;
+                    let border = &mut self.level.border;
+                    if kind == 0 {
+                        border.set_center(0.0, 0.0);
+                        border.set_size(crate::MAX_SIZE);
+                    } else {
+                        border.set_center(100.0, 100.0);
+                        border.set_size(10.0);
+                    }
+                }
+            }
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            let mut out = Vec::new();
+            for p in [HOPPER, ABOVE, BELOW, CHAIN] {
+                out.push(format!("b{p:?}:{}", self.level.get(p).0));
+                out.push(format!("c{p:?}:{:?}", self.level.containers.get(&p)));
+            }
+            for p in [HOPPER, CHAIN] {
+                out.push(format!(
+                    "h{p:?}:{:?}",
+                    self.level.block_entity::<HopperEntity>(p).map(|e| (
+                        e.cooldown_time(),
+                        e.ticked_game_time(),
+                        e.ticked_game_time_age(),
+                        write_block_entity_additional(e).expect("写出成功")
+                    ))
+                ));
+            }
+            out.push(format!("entities:{:?}", self.level.entities().iter().collect::<Vec<_>>()));
+            out.push(format!("seed:{}", self.level.random.source().seed()));
+            out.push(format!("writes:{}", self.level.writes.len()));
+            out.push(format!("frozen:{:?}", self.level.frozen_chunks.contains(&CHUNK)));
+            out.concat().chars().collect::<Vec<_>>().chunks(256).map(String::from_iter).collect()
+        }
+    }
+
+    #[test]
+    fn idle_hoppers_match_ticking_every_tick() {
+        const TICKS: i64 = 2000;
+        let mut slept_total = 0;
+        let mut ran_sleep = 0;
+        let mut ran_always = 0;
+        for seed in [1, 7, 42, 1337, 90210] {
+            for layout in [Layout::Single, Layout::Chain, Layout::Chests] {
+                let actions = script(seed, TICKS, layout);
+                let mut sleeping = Scene::new(actions.clone(), layout, true);
+                let mut always = Scene::new(actions, layout, false);
+                for now in 1..=TICKS {
+                    sleeping.step(now);
+                    always.step(now);
+                    assert_eq!(
+                        sleeping.snapshot(),
+                        always.snapshot(),
+                        "seed {seed} layout {layout:?} tick {now}"
+                    );
+                }
+                slept_total += sleeping.slept;
+                ran_sleep += sleeping.ran;
+                ran_always += always.ran;
+                assert!(
+                    sleeping.slept > TICKS as usize / 2,
+                    "seed {seed} layout {layout:?} 的闲置漏斗大部分刻应该睡着"
+                );
+            }
+        }
+        assert!(
+            ran_sleep * 4 < ran_always,
+            "休眠确实少跑了 ticker：{ran_sleep} vs {ran_always}"
+        );
+        assert!(slept_total > 0);
+    }
+}
