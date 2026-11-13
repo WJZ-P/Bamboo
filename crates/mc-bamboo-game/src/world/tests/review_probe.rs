@@ -149,6 +149,7 @@ fn a_failed_write_is_retried_by_autosave_after_the_disk_recovers() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
     server.world.region.chunks.finish_light_updates();
 
     break_disk(&dir);
@@ -185,6 +186,7 @@ fn repeated_save_all_after_a_failed_write_recovers_the_chunk() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
     server.world.region.chunks.finish_light_updates();
 
     break_disk(&dir);
@@ -229,6 +231,7 @@ fn a_failed_in_flight_write_with_no_queue_residue_is_retried() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
     server.world.region.chunks.finish_light_updates();
 
     break_disk(&dir);

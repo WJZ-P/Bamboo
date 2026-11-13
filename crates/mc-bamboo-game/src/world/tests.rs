@@ -1285,10 +1285,14 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
     server.ensure_loaded(&[pos]);
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
     // 只读快照照复查「中 6」会推迟有待算光照的区块，先让光照算完。
     server.world.region.chunks.finish_light_updates();
     // 和正式路径一样走写路径的改动标记；测试直接改 ChunkStore 时补一下。
-    server.world.region.touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
+    server
+        .world
+        .region
+        .touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
 
     // 有待算光照时快照按复查「中 6」推迟；先跑几刻让光照算完再重试。
     for t in 1..8 {
@@ -1341,6 +1345,7 @@ fn d6_stops_when_auto_save_is_off() {
     server.ensure_loaded(&[pos]);
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
 
     server
         .world
@@ -1368,7 +1373,17 @@ fn save_all_snapshots_every_dirty_loaded_chunk() {
     server.ensure_loaded(&[a, b]);
     server.world.host.set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
     server.set_block(mc_bamboo_core::BlockPos::new(19, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(19, -60, 3));
+    server
+        .world
+        .region
+        .touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
+    server
+        .world
+        .region
+        .touch(mc_bamboo_core::BlockPos::new(19, -60, 3));
     server.world.region.chunks.finish_light_updates();
 
     server
@@ -1404,6 +1419,7 @@ fn save_all_is_a_force_even_during_save_off() {
     let pos = mc_bamboo_core::ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
 
     server
         .world
@@ -1637,6 +1653,7 @@ fn save_all_reports_failed_when_the_io_write_fails() {
     let pos = mc_bamboo_core::ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
+    server.world.region.touch(BlockPos::new(3, -60, 3));
     server.world.host.set_io(io);
 
     server
@@ -2477,4 +2494,67 @@ fn isolated_entities_emit_identical_bytes_in_both_drivers() {
     let parallel = isolated(4);
     assert!(!precise.is_empty());
     assert_eq!(precise, parallel);
+}
+
+/// 崩溃测试的具体方块路径：`/setblock` 之后 `save-all flush`，
+/// 盘上要真的能读出那一格（用同一个 `world-block` 的解码路径）。
+#[test]
+fn setblock_then_save_all_flush_persists_the_block() {
+    use mc_bamboo_core::BlockPos;
+    use mc_bamboo_storage::{
+        anvil::{RegionCompression, RegionFile},
+        world_dir::WorldDir,
+    };
+
+    let tmp = D6TempDir::new("setblock-persist");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+    let client = server.join("Admin");
+    server.tick();
+    client.take_frames();
+    let pos = BlockPos::new(5, -59, 5);
+    let chunk = ChunkPos::new(0, 0);
+    server.ensure_loaded(&[chunk]);
+    server
+        .world
+        .region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .permission_level = 4;
+
+    server.request(
+        &client,
+        PlayRequest::unsigned_command("setblock 5 -59 5 minecraft:diamond_block"),
+    );
+    server.tick();
+    assert_eq!(
+        server.world.region.chunks.block(pos),
+        Some(blocks::DIAMOND_BLOCK)
+    );
+    server
+        .world
+        .global
+        .save_requests
+        .push(crate::save_session::SaveCommand::SaveAll {
+            flush: true,
+            source: client.id,
+        });
+    for _ in 0..6 {
+        server.tick();
+    }
+    server.world.host.flush_io();
+    server.tick();
+    let path = dir.region_dir().join("r.0.0.mca");
+    assert!(path.exists(), "区块区域文件已经写出");
+    let mut region =
+        RegionFile::open(&path, dir.region_dir(), RegionCompression::Zlib).expect("区域文件能打开");
+    let bytes = region.read(chunk, 32 << 20).unwrap().expect("区块在盘上");
+    let decoded = mc_bamboo_storage::chunk_nbt::decode_bytes(&bytes).expect("官方格式能解");
+    assert_eq!(
+        decoded.column.chunk().block(5, -59, 5),
+        blocks::DIAMOND_BLOCK,
+        "kill -9 之前改的那一格要在盘上"
+    );
 }

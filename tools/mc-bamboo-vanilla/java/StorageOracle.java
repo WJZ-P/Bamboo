@@ -447,6 +447,13 @@ public final class StorageOracle {
                             WorldBorder.Settings.CODEC.parse(NbtOps.INSTANCE, data);
                     border.getOrThrow();
                     return "WorldBorder.Settings.CODEC";
+                case "world_gen_settings.dat":
+                    DataResult<net.minecraft.world.level.levelgen.WorldGenSettings> settings =
+                            net.minecraft.world.level.levelgen.WorldGenSettings.CODEC
+                                    .parse(net.minecraft.resources.RegistryOps.create(
+                                            NbtOps.INSTANCE, registries), data);
+                    settings.getOrThrow();
+                    return "WorldGenSettings.CODEC";
                 case "chunk_tickets.dat":
                     DataResult<TicketStorage> tickets = TicketStorage.CODEC.parse(NbtOps.INSTANCE, data);
                     tickets.getOrThrow();

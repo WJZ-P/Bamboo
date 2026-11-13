@@ -305,7 +305,11 @@ pub fn safe_replace(target: &Path, bytes: &[u8], backup: Option<&Path>) -> io::R
     // 1. create backup：官方只在 target 已经存在时做这一步。data/ 文件不写
     // 长期备份，但失败时要能回滚，所以这里用一份临时备份。
     let rollback_only = backup.is_none();
-    let temporary_backup = dir.join(format!("{}.rollback-{}", tmp.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
+    let temporary_backup = dir.join(format!(
+        "{}.rollback-{}",
+        tmp.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
     let effective_backup: Option<&Path> = match backup {
         Some(bk) => Some(bk),
         None => target.exists().then_some(temporary_backup.as_path()),

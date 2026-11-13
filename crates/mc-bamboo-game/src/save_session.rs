@@ -185,12 +185,24 @@ impl SaveSession {
                 &global.world_border().export_settings(),
             ))?,
         });
+        // 官方服务端打开这个世界时按 `minecraft:flat` 继续生成，层与 Bamboo
+        // 的超平坦模板一致（数据由生成流程从官方 `WorldGenSettings.CODEC` 导出）。
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:world_gen_settings"),
+            backup: None,
+            bytes: encode_saved_data(
+                &mc_bamboo_nbt::parse_snbt(mc_bamboo_data::saved_world::WORLD_GEN_SETTINGS)
+                    .map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                    })?,
+            )?,
+        });
         files.push(EncodedFile {
             path: self.dir.chunk_tickets(),
             backup: None,
             bytes: Self::chunk_tickets_bytes()?,
         });
-        // 补 10：只写建模过的四份文件；未建模的 saved data 保持「不存在」，
+        // 补 10：只写建模过的五份文件；未建模的 saved data 保持「不存在」，
         // 官方 computeIfAbsent 会自己造默认值。已有的这类文件原样保留，不动。
         // Item 10: only the four modelled files are written; unmodelled saved
         // data stays absent (official computeIfAbsent builds defaults). Existing

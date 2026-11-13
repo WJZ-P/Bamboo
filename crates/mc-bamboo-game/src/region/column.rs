@@ -623,7 +623,9 @@ impl Region {
         // 运行状态），所以把快照推迟到光照算完之后的下一刻（复查「中 6」）。
         // 只在这一柱自己的任务已经排成轮次、还没算完时推迟；还在攒的任务
         // 不改已发布的光照层，拍出来的字节和卸载一致。
-        let _ = pos;
+        if self.chunks.light().has_unfinished_round_for_column(pos) {
+            return None;
+        }
         let parts = super::content_snapshot::BorrowedParts::build(self, pos)?;
         Some(crate::chunk_codec::encode_parts(pos, &parts))
     }

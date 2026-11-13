@@ -14,21 +14,57 @@ import java.io.PrintStream;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import net.minecraft.SharedConstants;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.LayeredRegistryAccess;
+import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.RegistryDataLoader;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.server.RegistryLayer;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.repository.PackRepository;
+import net.minecraft.server.packs.repository.ServerPacksSource;
+import net.minecraft.server.packs.resources.CloseableResourceManager;
+import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.gamerules.GameRuleMap;
+import net.minecraft.world.level.levelgen.WorldGenSettings;
+import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
+import net.minecraft.world.level.levelgen.FlatLevelSource;
 
 public final class SavedDataOracle {
+    private static JsonObject result0;
+
     private SavedDataOracle() {
+    }
+
+    /** 和 LightOracle 一样，只加载世界层注册表，不构造 ServerLevel。 */
+    private static RegistryAccess.Frozen loadRegistries(CloseableResourceManager resources) {
+        LayeredRegistryAccess<RegistryLayer> initial = RegistryLayer.createRegistryAccess();
+        List<Registry.PendingTags<?>> staticTags =
+                TagLoader.loadTagsForExistingRegistries(resources, initial.getLayer(RegistryLayer.STATIC));
+        RegistryAccess.Frozen context = initial.getAccessForLoading(RegistryLayer.WORLD);
+        List<HolderLookup.RegistryLookup<?>> lookups = TagLoader.buildUpdatedLookups(context, staticTags);
+        RegistryAccess.Frozen world = RegistryDataLoader
+                .load(resources, lookups, RegistryDataLoader.WORLD_REGISTRIES,
+                        java.util.concurrent.ForkJoinPool.commonPool())
+                .join();
+        staticTags.forEach(Registry.PendingTags::apply);
+        return initial.replaceFrom(RegistryLayer.WORLD, world).compositeAccess();
     }
 
     public static void main(String[] args) {
@@ -48,9 +84,41 @@ public final class SavedDataOracle {
         FileOutputStream stdout = new FileOutputStream(FileDescriptor.out);
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
-        if (args.length != 2) {
-            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat>");
+        PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
+        repository.reload();
+        repository.setSelected(List.of("vanilla"));
+        try (CloseableResourceManager resources =
+                new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
+        RegistryAccess.Frozen registries = loadRegistries(resources);
+        RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
+        if (args.length != 3) {
+            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_gen_settings.dat>");
         }
+
+        CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[2]), NbtAccounter.unlimitedHeap());
+        Tag genData = genRoot.get("data");
+        if (genData == null) {
+            throw new IllegalStateException("world_gen_settings.dat has no data tag");
+        }
+        // 官方 codec 必须能解出这份文件；主世界生成器要是 minecraft:flat。
+        WorldGenSettings settings = WorldGenSettings.CODEC.parse(ops, genData).getOrThrow();
+        var stem = settings.dimensions().get(net.minecraft.world.level.dimension.LevelStem.OVERWORLD);
+        if (stem.isEmpty() || !(stem.get().generator() instanceof FlatLevelSource flat)) {
+            throw new IllegalStateException("overworld generator is not minecraft:flat");
+        }
+        JsonObject gen = new JsonObject();
+        JsonArray layers = new JsonArray();
+        for (var info : flat.settings().getLayersInfo()) {
+            Identifier id = BuiltInRegistries.BLOCK.getKey(info.getBlockState().getBlock());
+            JsonObject layer = new JsonObject();
+            layer.addProperty("block", id.toString());
+            layer.addProperty("height", info.getHeight());
+            layers.add(layer);
+        }
+        gen.add("layers", layers);
+        gen.addProperty("biome", registries.lookupOrThrow(Registries.BIOME)
+                .getKey(flat.settings().getBiome().value()).toString());
+        result0 = gen;
 
         CompoundTag gameRulesRoot = NbtIo.readCompressed(Path.of(args[0]), NbtAccounter.unlimitedHeap());
         Tag gameRulesData = gameRulesRoot.get("data");
@@ -97,10 +165,12 @@ public final class SavedDataOracle {
         b.addProperty("lerp_time", border.lerpTime());
         b.addProperty("lerp_target", border.lerpTarget());
         result.add("world_border", b);
+        result.add("world_gen_settings", result0);
 
         try (Writer out = new OutputStreamWriter(stdout, StandardCharsets.UTF_8)) {
             out.write(result.toString());
             out.flush();
+        }
         }
     }
 }

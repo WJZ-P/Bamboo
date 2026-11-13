@@ -19,6 +19,19 @@ const SOURCE: &str = "tools/mc-bamboo-vanilla/java/SavedDataOracle.java";
 struct Report {
     game_rules: Vec<RuleEntry>,
     world_border: BorderReport,
+    world_gen_settings: GenReport,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenReport {
+    layers: Vec<GenLayer>,
+    biome: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenLayer {
+    block: String,
+    height: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,10 +55,16 @@ struct BorderReport {
     lerp_target: f64,
 }
 
-fn decode(java: &str, game_rules: &Path, world_border: &Path) -> Result<Report, String> {
+fn decode(
+    java: &str,
+    game_rules: &Path,
+    world_border: &Path,
+    world_gen_settings: &Path,
+) -> Result<Report, String> {
     let output = crate::official_program(java, SOURCE)?
         .arg(game_rules)
         .arg(world_border)
+        .arg(world_gen_settings)
         .output()
         .map_err(|error| format!("cannot run java: {error}"))?;
     if !output.status.success() {
@@ -85,14 +104,19 @@ pub fn run(java: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot create check dir: {error}"))?;
     let game_rules_path = world.saved_data("minecraft:game_rules");
     let world_border_path = world.world_border_dat();
+    let world_gen_path = world.saved_data("minecraft:world_gen_settings");
     write_saved_data_at(&game_rules_path, &game_rules_tag)
         .map_err(|error| format!("cannot write game_rules.dat: {error}"))?;
     write_saved_data_at(&world_border_path, &world_border_tag)
         .map_err(|error| format!("cannot write world_border.dat: {error}"))?;
+    let world_gen_tag = mc_bamboo_nbt::parse_snbt(mc_bamboo_data::saved_world::WORLD_GEN_SETTINGS)
+        .map_err(|error| format!("cannot parse generated world_gen_settings SNBT: {error}"))?;
+    write_saved_data_at(&world_gen_path, &world_gen_tag)
+        .map_err(|error| format!("cannot write world_gen_settings.dat: {error}"))?;
 
     // 1. 官方 codec 能解码 Bamboo 写出的文件，且值一致。
     // The official codecs decode Bamboo's files and the values match.
-    let report = decode(java, &game_rules_path, &world_border_path)?;
+    let report = decode(java, &game_rules_path, &world_border_path, &world_gen_path)?;
     check_rule(&report, "minecraft:random_tick_speed", "int", &json!(7))?;
     check_rule(&report, "minecraft:fire_damage", "bool", &json!(false))?;
     let b = &report.world_border;
@@ -107,6 +131,29 @@ pub fn run(java: &str) -> Result<(), String> {
         if got != want {
             return Err(format!("world_border {name}: expected {want}, got {got}"));
         }
+    }
+    // 官方 codec 解出的超平坦层要和 Bamboo 的模板逐项一致，
+    // 这样官方接着生成的新区块和 Bamboo 的模板相同。
+    let expected: Vec<(String, i32)> = mc_bamboo_world::flat::archive_layers()
+        .into_iter()
+        .map(|(name, height)| (name.to_owned(), height))
+        .collect();
+    let actual: Vec<(String, i32)> = report
+        .world_gen_settings
+        .layers
+        .iter()
+        .map(|layer| (layer.block.clone(), layer.height))
+        .collect();
+    if actual != expected {
+        return Err(format!(
+            "flat layers differ: official {actual:?}, Bamboo {expected:?}"
+        ));
+    }
+    if report.world_gen_settings.biome != "minecraft:plains" {
+        return Err(format!(
+            "flat biome is {}, expected minecraft:plains",
+            report.world_gen_settings.biome
+        ));
     }
     if b.warning_blocks != 7 || b.warning_time != 42 || b.lerp_time != 99 {
         return Err(format!(
@@ -133,13 +180,13 @@ pub fn run(java: &str) -> Result<(), String> {
         .collect();
     write_saved_data_at(&world_border_path, &Tag::Compound(renamed))
         .map_err(|error| format!("cannot write broken world_border.dat: {error}"))?;
-    if decode(java, &game_rules_path, &world_border_path).is_ok() {
+    if decode(java, &game_rules_path, &world_border_path, &world_gen_path).is_ok() {
         return Err("official codec accepted a world_border.dat with a broken key".to_owned());
     }
 
     let _ = fs::remove_dir_all(&dir);
     println!(
-        "SAVED-DATA RESULT: game_rules.dat and world_border.dat match the official codecs; broken key rejected"
+        "SAVED-DATA RESULT: game_rules.dat, world_border.dat and the flat world_gen_settings.dat match the official codecs; broken key rejected"
     );
     Ok(())
 }

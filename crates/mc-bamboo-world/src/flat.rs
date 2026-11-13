@@ -25,6 +25,20 @@ pub const fn surface_y() -> i32 {
     y
 }
 
+/// 超平坦模板的地层，按从下往上的顺序，给生成器导出 `world_gen_settings.dat` 用。
+/// 名字带命名空间；和官方 `FlatLevelGeneratorSettings` 的 `layers` 一致。
+pub fn archive_layers() -> Vec<(&'static str, i32)> {
+    LAYERS
+        .iter()
+        .map(|&(state, thickness)| {
+            let name = mc_bamboo_data::block_of_state(state)
+                .expect("模板层必须是已知方块")
+                .name;
+            (name, thickness)
+        })
+        .collect()
+}
+
 /// 生成一个超平坦区块。所有区块的内容都相同，所以不需要坐标。
 pub fn generate_chunk() -> Chunk {
     let mut chunk = Chunk::empty(biome::PLAINS as u32);

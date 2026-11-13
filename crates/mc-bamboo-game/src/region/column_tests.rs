@@ -1346,3 +1346,140 @@ fn a_sleeping_furnace_encodes_the_same_archive_bytes() {
 
     assert_eq!(encoded_snapshot(true), encoded_snapshot(false));
 }
+
+/// 端到端：一台烧到一半的熔炉，走正式的编码 → 区域文件 → 关闭 IO 线程 →
+/// 重启读回，进度、燃料、原料和产物都要一致（main 的方块实体休眠接进存档后）。
+#[test]
+fn a_half_burnt_furnace_survives_a_disk_restart() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec, PackedChunk};
+    use mc_bamboo_storage::{
+        chunk_io::{ChunkIo, Reply},
+        world_dir::WorldDir,
+    };
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "bamboo-furnace-restart-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let mut server = harness();
+    {
+        let region = server.region();
+        region.chunks.set_block(FURNACE, blocks::FURNACE);
+        let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+        furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+        furnace.set_item(1, ItemStack::new(items::COAL, 8));
+        region.block_entities.remove(FURNACE);
+        region.block_entities.insert(Box::new(furnace));
+    }
+    // 跑到熔炉睡着、进度到一半，拍下当时的数值。
+    run(&mut server, 60);
+    settle_light(server.region());
+    let before = {
+        let region = server.region();
+        let entity = region.block_entities.get_dyn(FURNACE).expect("熔炉在");
+        let furnace = entity
+            .as_any()
+            .downcast_ref::<FurnaceEntity>()
+            .expect("是熔炉");
+        (furnace.data_values(), furnace.items().to_vec())
+    };
+    assert!(before.0[0] > 0, "熔炉应该烧到一半");
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let encoded = InlineCodec
+        .encode(CHUNK, boxes.get(&CHUNK).expect("盒子存在"))
+        .expect("编码成功");
+
+    let tmp = TempDir::new();
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    {
+        let mut io = ChunkIo::open(&dir).unwrap();
+        io.submit_write(CHUNK, 1, encoded.chunk.clone(), encoded.entities.clone());
+        io.flush().unwrap();
+        io.close();
+    }
+    let mut io = ChunkIo::open(&dir).unwrap();
+    io.submit_read(CHUNK, 7, 1);
+    io.flush().unwrap();
+    let mut found = None;
+    while let Some(reply) = io.try_recv() {
+        if matches!(reply, Reply::Read { .. }) {
+            found = Some(reply);
+        }
+    }
+    let Reply::Read {
+        chunk, entities, ..
+    } = found.expect("读到区块")
+    else {
+        unreachable!()
+    };
+    let decoded = InlineCodec
+        .decode(CHUNK, &PackedChunk { chunk, entities })
+        .expect("解码成功");
+    io.close();
+    let parts = decoded.parts();
+    let mut furnace = None;
+    parts.block_entities.entities().iter().for_each(|entity| {
+        if entity.pos() == FURNACE {
+            furnace = entity
+                .as_any()
+                .downcast_ref::<FurnaceEntity>()
+                .map(|f| (f.data_values(), f.items().to_vec()));
+        }
+    });
+    let (data, items) = furnace.expect("熔炉读回");
+    assert_eq!(data, before.0, "进度和燃料读回一致");
+    assert_eq!(items, before.1, "原料和产物读回一致");
+}
+
+/// 装盒之后、睡着的熔炉只依赖已经「现算」的数值；在另一个线程上编码
+/// 整份盒子，字节必须和世界线程上编出来的完全相同（世界线程只做编码）。
+#[test]
+fn a_parked_sleeping_furnace_encodes_identically_on_another_thread() {
+    use crate::chunk_codec::{ChunkCodec, InlineCodec};
+
+    let mut server = harness();
+    {
+        let region = server.region();
+        region.chunks.set_block(FURNACE, blocks::FURNACE);
+        let mut furnace = FurnaceEntity::new(FURNACE, CookingKind::Smelting);
+        furnace.set_item(0, ItemStack::new(items::RAW_IRON, 32));
+        furnace.set_item(1, ItemStack::new(items::COAL, 8));
+        region.block_entities.remove(FURNACE);
+        region.block_entities.insert(Box::new(furnace));
+    }
+    run(&mut server, 40);
+    settle_light(server.region());
+    let boxes = server
+        .region()
+        .take_columns(&[CHUNK].into_iter().collect())
+        .expect("前提满足");
+    let mut boxes = boxes;
+    let column: Box<crate::region::RegionColumn> = boxes.remove(&CHUNK).expect("盒子存在");
+    let on_world_thread = InlineCodec.encode(CHUNK, &column).expect("编码成功");
+    let on_other_thread =
+        std::thread::spawn(move || InlineCodec.encode(CHUNK, &column).expect("编码成功"))
+            .join()
+            .expect("另一个线程没有 panic");
+    assert_eq!(on_world_thread, on_other_thread);
+}

@@ -37,8 +37,6 @@ pub struct ChunkStore {
     pristine: ChunkMap<PristineMark>,
     /// 方块或光照版本变过的区块。存档每刻只看这个集合，不扫全部已加载区块。
     changed: HashSet<ChunkPos, ChunkHasherBuilder>,
-    /// 上次判脏时看到的光照版本，用来认出光照发布。
-    saved_light_revision: ChunkMap<[u64; 2]>,
 }
 
 /// 按区块坐标索引的表，用和票表一样的便宜哈希。读方块的热路径每次都查它。
@@ -128,7 +126,6 @@ impl ChunkStore {
             loaded: None,
             pristine: ChunkMap::default(),
             changed: HashSet::default(),
-            saved_light_revision: ChunkMap::default(),
         }
     }
 
@@ -176,19 +173,15 @@ impl ChunkStore {
         mark.from_generator && mark.revision == self.revision(pos)
     }
 
+    /// 把区块放回「版本变过」集合，供下一刻重新判脏。
+    pub fn mark_changed(&mut self, pos: ChunkPos) {
+        self.changed.insert(pos);
+    }
+
     /// 取走「方块或光照版本变过」的区块集合，给存档每刻判脏用。
     /// 只和真正改动过的区块数成正比，不扫全部已加载区块。
     pub fn take_changed_chunks(&mut self) -> HashSet<ChunkPos, ChunkHasherBuilder> {
-        let mut changed = std::mem::take(&mut self.changed);
-        // 光照发布也换版本号：把和上次记录不同的光照柱补进集合。
-        for &pos in self.loaded.iter().flatten() {
-            let current = self.light.revision(pos);
-            if self.saved_light_revision.get(&pos).copied() != Some(current) {
-                self.saved_light_revision.insert(pos, current);
-                changed.insert(pos);
-            }
-        }
-        changed
+        std::mem::take(&mut self.changed)
     }
 
     /// 每个已加载区块的坐标、当前版本号，以及「是不是还保持生成器原样」。

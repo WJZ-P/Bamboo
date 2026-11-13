@@ -856,14 +856,16 @@ public final class Probe {
             if (markerCommand != null) {
                 // 用主脚本里已经在 ops.json 的 OP 玩家，不额外加一个没权限的连接。
                 Join marker = clients.get(0);
-                // 先发 save-all flush：把探针自己放过的方块全部刷到盘上，
-                // 并等「保存完成」的回执。然后再放标记方块，让 D6 匀速保存
-                // 在冷却过后把这一格写下去（这才是崩溃测试要验证的路径）。
-                // Flush everything the main probe placed first, then place the
-                // marker so paced saving (not save-all) writes it before kill -9.
+                // 让主脚本放过的方块先被刷到盘上，再放标记方块。
+                // 等方块变化包到达后，用第二道 save-all flush 把标记也写下去：
+                // 崩溃测试要检查「kill -9 之前改的那一格」，而不是等 D6 冷却。
                 marker.send(new ServerboundChatCommandPacket("save-all flush"));
-                await("marker: the save-all flush finished",
-                        () -> containsText(marker, "Saved the game"));
+                // `commands.save.saving` 只发给发起者一次；`Saved the game` 会
+                // 作为管理员广播再发一次，不能用它数「第几次」。
+                await("marker: the first save-all flush finished",
+                        () -> marker.systemTexts().stream()
+                                .filter(text -> text.contains("Saving the game"))
+                                .count() >= 1);
                 marker.send(new ServerboundChatCommandPacket(markerCommand));
                 await("marker: the block is placed on the running server",
                         () -> {
@@ -871,8 +873,14 @@ public final class Probe {
                             return state != null && net.minecraft.core.registries.BuiltInRegistries.BLOCK
                                     .getKey(state.getBlock()).toString().equals(markerBlock);
                         });
-                // 多等几刻，让世界线程真正消费命令并拍下改动。
                 pumpFor(SETTLE_MILLIS * 4);
+                marker.send(new ServerboundChatCommandPacket("save-all flush"));
+                await("marker: the second save-all flush finished",
+                        () -> marker.systemTexts().stream()
+                                .filter(text -> text.contains("Saving the game"))
+                                .count() >= 2);
+                // 两道栅栏都处理完再断开：让 IO 线程把第二道 save-all 的写落盘。
+                pumpFor(SETTLE_MILLIS * 20);
             }
             for (Join client : clients) {
                 client.finishChecks();

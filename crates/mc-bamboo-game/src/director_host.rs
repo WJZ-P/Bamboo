@@ -581,7 +581,8 @@ impl DirectorHost {
     fn dirty_loaded_chunks_impl(&mut self, region: &mut Region, force: bool) -> Vec<ChunkPos> {
         let mut dirty = Vec::new();
         // 方块/光照的版本号：只取「版本真的变过」的区块集合，不扫全部已加载区块。
-        for pos in region.chunks.take_changed_chunks() {
+        let changed = region.chunks.take_changed_chunks();
+        for pos in changed {
             if !region.chunks.is_loaded(pos) {
                 continue;
             }
@@ -592,12 +593,15 @@ impl DirectorHost {
             // 从盘上/模板交付进来的区块还没存过：照官方 `isUnsaved` 只有真被
             // 改过的才算，原样区块不写。已保存过的区块只按版本变化判脏。
             let changed_from_generator = !region.chunks.is_pristine(pos);
-            let upper_dirty = region.dirty.pending_contains(pos)
-                || region.block_ticks.dirty_contains(pos);
+            let upper_dirty =
+                region.dirty.pending_contains(pos) || region.block_ticks.dirty_contains(pos);
             if revision_changed
                 && (saved.is_some() || changed_from_generator || upper_dirty || force)
             {
                 dirty.push(pos);
+            } else if revision_changed {
+                // 版本变了但这一刻不该存：把标记留到下一刻再判。
+                region.chunks.mark_changed(pos);
             }
         }
         // 上层内容改动集合：只有真正改过的区块在这里，开销和集合大小有关。
@@ -752,9 +756,10 @@ impl DirectorHost {
                 // at enqueue time makes a failed write never dirty again.
                 self.acked_revisions
                     .insert(seq, (pos, region.chunks.revision(pos), 0));
-                // 写成功之前不摘掉重拍标记：回执到达时在 poll_io 里清。
                 self.loaded_save_tick.insert(pos, now_tick);
                 self.dirty_pending.remove(&pos);
+                // 已经重新拍成新快照了：不再每刻重复重拍，等 Written 回执再彻底清。
+                self.retry_dirty.remove(&pos);
             }
             Err(error) => {
                 tracing::warn!(%error, ?pos, "could not encode a loaded chunk for saving");
