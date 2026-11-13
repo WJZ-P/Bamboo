@@ -641,17 +641,40 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 | `cargo test -p mc-bamboo-worldgen` | 93 个测试全过 |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
-**剩余差异**：`--ore-only --steps 6` 在第三个种子的 chunk `(100,100)` 时，
-`minecraft:ore_clay` 的一个矿团在 y≈-21..-16、x≈8..11、z≈14..15（跨中心与
-`(0,-1)` 邻居的边界）Bamboo 多写了约 200 格 `minecraft:clay`（官方是
-`deepslate`）。`ore_clay` 只属于 `minecraft:lush_caves`，只有该群系出现在 3×3
-群系并集里才会被收集，所以 `--seeds 1/2` 全绿、`--seeds 3` 才复现；
-输入 terrain 里 clay 数为 0，确认是 features 阶段写的。
-已排除：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`WorldgenRandom` 全部
-取数方法（用 `RandProbe.java` 对比过 `nextInt(384)` 序列和 `nextFloat` 位模式）、
+**剩余差异（已定位到 `BiomeFilter`）**：`--ore-only --steps 6` 在第三个种子的
+chunk `(100,100)` 时，`minecraft:ore_clay` 放行的候选位置数量不同：Java 侧
+`OreFeature.place` 被调用 2 次（`getHeight` trace 2 行），Bamboo 侧只有 1 次。
+两边各自写下的 clay 团位置因此不同，产生约 200 格差异。
+
+诊断证据：
+* `ore_clay` 只属于 `minecraft:lush_caves`（注册表 ID 31），只有该群系出现在
+  3×3 群系并集里才会被收集，所以 `--seeds 1/2` 全绿、`--seeds 3` 才复现。
+* 输入 terrain 里 clay 数为 0，确认差异来自 features 阶段。
+* Rust 侧打印 46 个候选位置的 `biome_at` / `hasFeature`：绝大多数是
+  `ocean`(36)、`beach`(3)、`river`(42)，只有 `(1610,-18,1601)` 是
+  `lush_caves`(31) 并放行；Java 放行了 2 个。
+* 跳过 Rust 的 `ore_clay` 后差异方向反转（变成官方有 clay、Bamboo 没有），
+  说明 Java 确实跑了 `ore_clay`，不是 `featureSet` 过滤差异。
+
+**已排除**：`Math.sin/cos` 的 Java/Rust 位模式（逐值比过）、`Mth.sin` 65536
+项查表（用 `MthProbe.java` 逐值比过）、`WorldgenRandom` 的
+`nextInt(384)` / `nextFloat` / `nextDouble` / `nextInt(3)` 序列和
+`setDecorationSeed` 值（用 `RandProbe2.java` / `OreProbe.java` 逐位比过）、
+`OreFeature.place` 的 float/double 运算顺序（字节码 `fmul`/`dmul` 逐条核过）、
 `Context` 缓存（已换成 `Context::uncached()`）、栈 DFS 的交错顺序、
-`getHeight` 序列（用 trace 对过前 40 行）。最可能是 `OreFeature.doPlace` 里
-`Mth.sin` 查表或椭球边界某处 1 ulp 的浮点差，需要把该团的中心/半径逐值对拍后定位。
+`getHeight` 序列、`OreFeature` 全部配置的解析。
+
+**下一步**：在 Java 代理的 `getBiome` 里打印 `ore_clay` 46 个候选位置的群系，
+和 Rust 的 `biome_at` 逐点对比。字节码确认
+`ServerLevel.uncachedBiomeResolver()` =
+`BiomeSource.createUncachedResolver(RandomState)`，它用
+`RandomState.createClimateSampler(SamplerContext.EMPTY_UNCACHED)` 重新构造
+`Climate.Sampler`；Rust 侧复用的却是 `settings::Samplers`（直接编译
+`NoiseRouter` 六个字段）。terrain 阶段的对拍走的是 `biome_cached` +
+`Context::new`（带缓存）+ `ClimateCache`，**`BiomeManager::biome` 的
+`Context::uncached()` 组合从未单独对拍过**。优先核对这两条 climate sampler
+构造路径是否逐位一致，以及 `interpolated` 在 uncached 单点路径下的行为
+（`docs/worldgen.md` 提到它在 1×1×1 上不是纯函数）。
 **这一处差异不影响其它 23/24 区块，也不影响已确认的 0 不一致结论，
 但不能算「step 6 全绿」。**
 

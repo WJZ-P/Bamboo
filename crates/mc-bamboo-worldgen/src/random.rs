@@ -690,3 +690,47 @@ mod tests {
         assert_eq!(wrapper.count(), 2);
     }
 }
+
+/// `WorldgenRandom` 的 `BitRandomSource` 默认方法与官方逐位一致。
+///
+/// 期望值来自 `RandProbe.java`（`setDecorationSeed(0,0,0)` 再
+/// `setFeatureSeed(deco,0,6)` 后的 12 个 `nextDouble`）和
+/// `RandProbe2.java`（`setFeatureSeed(1234,3,2)` 后的 8 个 `nextFloat`）。
+#[cfg(test)]
+mod bit_source_tests {
+    use super::*;
+
+    #[test]
+    fn next_double_and_float_match_official_bits() {
+        let doubles: [u64; 12] = [
+            0x3fe5176a7c84f4e0,
+            0x3fd3ae22ec25f982,
+            0x3fe21317d64bb543,
+            0x3f9eecb1b3865040,
+            0x3fed928a2f45aae2,
+            0x3fe2d596e048cffe,
+            0x3fe88d1290842d31,
+            0x3fe31bd6f7bfcb1b,
+            0x3fc7d41e9728d59c,
+            0x3fe22d31f3aa9fa3,
+            0x3fea431af13bd658,
+            0x3fd69e680b06f434,
+        ];
+        let floats: [u32; 8] = [
+            0x3e354818, 0x3eabcbde, 0x3ed271ae, 0x3f29410d, 0x3f5b6976, 0x3f155757, 0x3ee4b004,
+            0x3e2925d8,
+        ];
+        let r = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+        let deco = r.set_decoration_seed(0, 0, 0);
+        r.set_feature_seed(deco, 0, 6);
+        for (i, want) in doubles.iter().enumerate() {
+            assert_eq!(r.next_double().to_bits(), *want, "nextDouble {i}");
+        }
+        let r2 = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+        r2.set_feature_seed(1234, 3, 2);
+        for (i, want) in floats.iter().enumerate() {
+            assert_eq!(r2.next_float().to_bits(), *want, "nextFloat {i}");
+        }
+        assert_eq!(r2.count(), 8);
+    }
+}

@@ -256,6 +256,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_every_step_six_ore_modifier() {
+        let text = mc_bamboo_data::worldgen::WORLDGEN;
+        let root: Value = serde_json::from_str(text).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        for &id in &registry.steps()[6] {
+            let placed = registry.placed(id).unwrap();
+            let (kind, config) = super::super::run::resolve_feature(&registry, &placed.feature)
+                .unwrap_or_else(|| panic!("{} has no feature", placed.name));
+            if kind != "minecraft:ore" {
+                continue;
+            }
+            OreFeature::parse(config).unwrap_or_else(|e| panic!("{}: {e}", placed.name));
+            for m in &placed.placement {
+                Modifier::parse(m).unwrap_or_else(|e| panic!("{} modifier: {e}", placed.name));
+            }
+        }
+    }
+
+    #[test]
     fn parses_step_six_modifiers() {
         let cases = [
             (r#"{"type":"minecraft:count","count":30}"#, "count"),
