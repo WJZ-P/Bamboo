@@ -1438,3 +1438,136 @@ fn slow_delivery_keeps_tick_sets_consistent_with_the_region() {
         "全部到齐时三个集合和上限不设时相同"
     );
 }
+
+/// 官方 `LevelChunk.isTicking(pos)` 按方块坐标看世界边界，只拦方块实体；计划刻、
+/// 实体都不看边界（`LevelTicks`、`entityTickList` 的判断里没有边界）。
+/// 同一个区块里，界内的熔炉照烧、界外的熔炉停住；边界渐变扩大到它时从原进度接着烧。
+#[test]
+fn block_entities_outside_the_world_border_pause_and_resume() {
+    use mc_bamboo_blocks::{
+        BlockState, TickPriority, World as BlockWorld, behaviour::machines::FurnaceEntity,
+        entity::Entity, state::LIT, world::UPDATE_ALL,
+    };
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let mut server = Harness::new_loaded(2);
+    let _client = server.join_and_settle("Kitten");
+    let inside = BlockPos::new(4, -60, 8);
+    let outside = BlockPos::new(12, -60, 8);
+    let lamp = BlockPos::new(13, -60, 2);
+    assert_eq!(inside.chunk(), outside.chunk(), "两台熔炉在同一个区块");
+    assert!(
+        server
+            .world_region()
+            .tick_levels
+            .chunk_ticks_blocks(inside.chunk())
+    );
+    {
+        let (mut level, ticks) = server.region().block_level();
+        let mut world = BlockWorld::new(&mut level, ticks);
+        for pos in [inside, outside] {
+            world.set_block(pos, BlockState(blocks::FURNACE), UPDATE_ALL);
+            world.with_block_entity::<FurnaceEntity, _>(pos, |entity, _| {
+                entity.write_item(0, ItemStack::new(items::RAW_IRON, 8));
+                entity.write_item(1, ItemStack::new(items::COAL, 8));
+            });
+        }
+    }
+    let lit = BlockState(blocks::REDSTONE_LAMP).with(LIT, true);
+    server.set_block(lamp, lit.0);
+    server
+        .region()
+        .block_ticks
+        .schedule(lamp, lit.block_id(), 3, TickPriority::Normal);
+    let item_start = Vec3::new(12.5, -50.0, 8.5);
+    let uid = server.spawn_entity(Entity::ground_item_with_delta(
+        item_start,
+        ItemStack::new(1, 1),
+        Vec3::new(0.0, 0.0, 0.0),
+    ));
+
+    let progress = |server: &Harness, pos| {
+        // `get` 把读路径的时钟拨到表自己的这一刻，睡着的熔炉按公式现算。
+        server
+            .world_region()
+            .block_entities
+            .get::<FurnaceEntity>(pos)
+            .map(|entity| entity.data_values())
+            .expect("熔炉还在")
+    };
+    // 先在默认边界里烧 10 刻，两台熔炉都点着、进入休眠。
+    for _ in 0..10 {
+        server.tick();
+    }
+    let warm_inside = progress(&server, inside);
+    let warm_outside = progress(&server, outside);
+    assert_eq!(warm_inside, warm_outside, "两台熔炉同步烧");
+    assert!(warm_outside[2] > 0, "已经在烧：{warm_outside:?}");
+
+    // 边界缩到 x ∈ [1.5, 11.5)：x = 4 在界内，x = 12 和 13 在界外。
+    {
+        let border = server.world.global.world_border_mut();
+        border.set_center(6.5, 8.0);
+        border.set_size(10.0);
+    }
+    server.tick();
+    let first_inside = progress(&server, inside);
+    let first_outside = progress(&server, outside);
+    assert_eq!(
+        first_outside, warm_outside,
+        "缩小那一刻起界外的熔炉就不跑：{warm_outside:?} → {first_outside:?}"
+    );
+    for _ in 0..30 {
+        server.tick();
+        assert_eq!(
+            progress(&server, outside),
+            first_outside,
+            "界外的熔炉每一刻都不动"
+        );
+    }
+    let later_inside = progress(&server, inside);
+    assert_eq!(
+        later_inside[2] - first_inside[2],
+        30,
+        "界内的熔炉每刻 +1：{first_inside:?} → {later_inside:?}"
+    );
+    // 计划刻和实体不看边界：界外的灯照样灭，界外的物品照样下落。
+    assert_eq!(
+        server.world_region().chunks.block(lamp),
+        Some(BlockState(blocks::REDSTONE_LAMP).with(LIT, false).0),
+        "界外的计划刻照常执行"
+    );
+    let item = server.world_region().entities.get(uid).expect("物品还在");
+    assert!(item.position.y < item_start.y, "界外的实体照常 tick");
+
+    // 渐变扩大，第 k 刻把 x = 12 盖进来：之后从原进度接着烧，每刻 +1。
+    {
+        let global = &mut server.world.global;
+        let game_time = server.world.region.tick.game_time();
+        let _ = global
+            .world_border_mut()
+            .lerp_size_between(10.0, 30.0, 20, game_time);
+    }
+    let mut resumed_at = None;
+    for step in 0..20 {
+        server.tick();
+        let now = progress(&server, outside);
+        if now != first_outside {
+            assert_eq!(
+                now[2],
+                first_outside[2] + 1,
+                "恢复的第一刻只走一步 {first_outside:?} → {now:?}"
+            );
+            resumed_at = Some(step);
+            break;
+        }
+    }
+    let resumed_at = resumed_at.expect("边界扩大到熔炉后它恢复");
+    let border = server.world_region().world_border.clone();
+    assert!(border.is_within_bounds_pos(outside));
+    // 大小 10 → 30 用 20 刻，每刻 +1，中心 6.5。渐变中的 `getMaxX()` 是
+    // `getMaxX(0f)`，按 `lerp(0, previousSize, size)` 取上一刻的大小：第 0、1、2 刻的
+    // 右边界是 11.5、12、12.5。`isWithinBounds` 右边不含，x = 12 第 2 刻才回到界内。
+    assert_eq!(resumed_at, 2, "右边界 12.5 那一刻熔炉回到界内");
+}
