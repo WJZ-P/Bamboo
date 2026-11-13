@@ -1376,7 +1376,11 @@ cargo test --release -p mc-bamboo-blocks block_entity_sleep::machine_phase_bench
 
 `chunk_sending`（约 730 次/刻）、`ticket_update`（约 100 次/刻）和
 `encode_body`（约 440 次/刻）基本没变：它们按发出的区块数和变等级的
-区块数计，是每块固有的一次编码/建表，不在这一轮范围内。
+区块数计，是每块固有的一次编码/建表，不在这一轮范围内。块池改成
+「近期峰值 + 硬上限」后带仪表重测末两份为 4 619 / 4 919 次/刻，
+`delivery` 403 / 486；`ticket_alloc_count 200 100` 是
+**2.3 次 alloc + 33 次 realloc（5.2 MiB）/ 次更新**，比 7f 的
+4.3 次还略低，同时两张平面合计内存不超过 64 MiB。
 
 ```text
 # 临时仪表不提交：包住全局分配器，按 profiler 的 lap / SubPhase 记差分

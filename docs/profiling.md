@@ -928,6 +928,11 @@ Director 按 ticket 交付，`world/loaded_tests.rs` 里 30 多个已加载模�
 Director 消费它们时的几张表，见 7f 和 7k 节；`chunk_sending` 的约 730 次是每块
 包体和帧的字节缓冲，按内容共享、不能跨块复用。
 
+后来把票表块池从严格固定上限改成「近 64 轮峰值 + 32 MiB/平面硬上限」
+（见 7k 节），带仪表重测末两份报告是 4 619 / 4 919 次/刻，
+`inbox` 3 401 / 3 614、`delivery` 403 / 486；和上表在负载噪声内一致，
+`ticket_alloc_count 200 100` 则回到 2.3 次分配/更新。
+
 ## 11. 区块计算池（`chunk_worker_threads`，2026-11-13 PST）
 
 设计和实现见 `world-model-design.md` 5.3.1。这里量两件事：慢生成器挪到池子之后
