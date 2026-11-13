@@ -136,6 +136,21 @@ pub enum Observation<'a> {
         event: crate::block_entity::BlockEvent,
         existed: bool,
     },
+    /// 方块实体 tick 开始，记下这一格本刻 tick 过。
+    NoteBlockEntityTick {
+        pos: BlockPos,
+    },
+    /// 方块实体 tick 结束后，这一格的 `PistonMoving` 状态。缓存重放时按它写回，
+    /// 保留 ticker 编号与顺序；实验的 `Record` 忽略这个事件（历史数字不变）。
+    PistonTickState {
+        pos: BlockPos,
+        moved_state: u32,
+        direction: u8,
+        extending: bool,
+        source: bool,
+        progress: u32,
+        progress_o: u32,
+    },
 }
 
 /// 方块状态装不下、跟着位置走的世界数据：方块实体、方块事件、红石记忆。
@@ -846,6 +861,12 @@ pub trait Level: LevelSideState + LevelEntities {
     /// loot table is filled before its first read or write. Fake worlds leave this empty.
     fn unpack_loot_table(&mut self, _pos: BlockPos) {}
 
+    /// 这一格有没有还没解包的战利品表。缓存守卫用它确认解包动作可以重放，
+    /// 默认返回 `false`（假世界没有战利品表）；游戏层按容器条目覆盖。
+    fn loot_table_pending(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// 官方 `ShulkerBoxBlock.playerWillDestroy` 的创造模式分支：非空潜影盒直接
     /// 掉出带 `BlockEntity.collectComponents()` 的方块物品。默认没有这类物品。
     ///
@@ -903,6 +924,12 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 取走 [`RecordMode::Count`] 累计的读写项数。只有录制包装会返回非零值。
     fn take_counted_reads(&self) -> u64 {
         0
+    }
+
+    /// 缓存重放：原地换掉这一格的方块实体但保留 ticker 编号和顺序。
+    /// 默认实现走 `insert`，会分配新编号；带表的实现覆盖它。
+    fn replace_block_entity_for_cache(&mut self, entity: Box<dyn BlockEntity>) {
+        self.insert_block_entity(entity);
     }
 
     /// 观察一次不经过本 trait 读写方法的事件，见 [`Observation`]。

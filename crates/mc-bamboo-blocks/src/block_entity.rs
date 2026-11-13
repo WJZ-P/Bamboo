@@ -300,6 +300,14 @@ impl BlockEntities {
         Some(self.entities.get(&pos)?.entity.as_ref())
     }
 
+    /// 缓存重放：原地换掉实体内容，保留 id 和 ticker 顺序。
+    pub fn replace_in_place(&mut self, entity: Box<dyn BlockEntity>) {
+        let pos = entity.pos();
+        if let Some(stored) = self.entities.get_mut(&pos) {
+            stored.entity = entity;
+        }
+    }
+
     /// 见 [`BlockEntities::get`]，拿的是可变引用。实体正在 tick 时不在表里，返回 `None`。
     ///
     /// See [`BlockEntities::get`], but mutable. Returns `None` while that entity is ticking,

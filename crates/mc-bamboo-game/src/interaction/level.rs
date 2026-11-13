@@ -389,6 +389,11 @@ impl Level for RegionLevel<'_> {
     ///
     /// `RandomizableContainer.unpackLootTable`: fill the table into the slots before
     /// a hopper, dispenser, decorated pot or comparator reads this cell.
+    fn replace_block_entity_for_cache(&mut self, entity: Box<dyn mc_bamboo_blocks::BlockEntity>) {
+        self.dirty.mark(entity.pos().chunk());
+        self.block_entities.replace_in_place(entity);
+    }
+
     fn unpack_loot_table(&mut self, pos: BlockPos) {
         self.dirty.mark(pos.chunk());
         crate::container_loot::unpack(
@@ -401,6 +406,12 @@ impl Level for RegionLevel<'_> {
             },
             pos,
         );
+    }
+
+    fn loot_table_pending(&self, pos: BlockPos) -> bool {
+        self.containers
+            .get(&pos)
+            .is_some_and(|entry| entry.loot_table.is_some())
     }
 
     /// `ShulkerBoxBlock.playerWillDestroy` 的创造模式分支。空盒子返回 `None`。
