@@ -776,6 +776,33 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   **对拍仍有 126 处不一致**（`--seeds 2 --chunks 20 --salt 11 --steps 9`），
   表现是 `glow_lichen -> water` / `air -> glow_lichen`，位置差一格左右，
   疑点在汇报里。
+* 组合类回归（`6723362` 合并 main 后，`871f2b4`）：树在本分支已经可用，于是把
+  `random_selector` 和 `weighted_random_selector` 放开逐方块对拍。
+  * 6 个 `random_selector` 树（trees_plains / trees_savanna / trees_taiga /
+    trees_birch / trees_flower_forest / trees_windswept_hills），
+    `--seeds 2 --chunks 24 --salt 13 --steps 9`：**0 不一致**，48 中心 /
+    42467328 方块 / 0 skipped。故意把 `random_selector` 的 chance 判定改成恒真
+    （永远选第一个子项）后同一命令报 160 处不一致（`air -> birch_log`），
+    确认这个 0 不是假绿。
+  * `trees_dappled_forest`（`weighted_random_selector`，5 个加权子项），
+    `--seeds 1 --chunk -900 461 --scan 3 --steps 9`：**0 不一致**，9 中心 /
+    7962624 方块 / 0 skipped；临时日志确认树叶子被调用 18 次，不是空跑。
+* 合并 main 时同步改了一处签名：`StateProvider::get_state` 现在要
+  `(world, random, pos)`（`NoiseProvider` / `DualNoiseProvider` /
+  `RuleBasedStateProvider` 都按坐标取值）。main 的树 / 蘑菇 / 装饰器调用点逐个
+  按官方传参补上位置：`TrunkPlacer.placeLog` / `placeBelowTrunkBlock`、
+  `FoliagePlacer`、`RootPlacer.placeRoot`（含 `aboveRootProvider`）、
+  `MangroveRootPlacer.placeRoot`、`AttachedToLeaves` / `AttachedToLogs` /
+  `PlaceOnGround` 装饰器、`FallenTreeFeature`、
+  `AbstractHugeMushroomFeature`（官方蘑菇传的是 `origin`）。
+* `ChunkgenOracle.java` 补 `WorldGenLevel.getRawBrightness`（恒 15，和
+  `BlockOracle` 的既有约定一致）。树合并后 step 9 会走到
+  `MushroomBlock.canSurvive`，之前代理直接抛异常让整个 oracle 崩掉。恒 15 意味着
+  亮度门槛的判定在官方侧一律为假，所以蘑菇在 Rust 侧继续标 `unsupported`
+  （整块跳过），两边不会拿假亮度做比较。副作用：**完整 11 步、不过滤类型的
+  step 9 对拍目前 40 个区块全部 skipped**（`overlay` / `block_column` /
+  `coral_tree` / `vegetation_patch` / `root_system` 还没移植），要等那些分支合进来
+  才能不加 `--feature-types` 跑。
 
 #### 本分支对拍结果（`--through features --steps 9`）
 
@@ -799,6 +826,9 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
 | `minecraft:vines`（`--seeds 1 --chunk -784 -132 --scan 3 --steps 9`） | 8 处差异，全部是 terrain 既有差异（`--steps 0` 同样复现），但**藤蔓未被调用**（候选 0 次），不算验证 |
 | `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **126 处不一致**（已写未验证，见疑点） |
+| 6 个 `random_selector` 树（`--seeds 2 --chunks 24 --salt 13 --steps 9`） | **0 不一致**（48 中心 / 42467328 方块，0 skipped） |
+| 故意把 `random_selector` 的 chance 改成恒真 | 160 处不一致（确认非假绿） |
+| `trees_dappled_forest`（`--seeds 1 --chunk -900 461 --scan 3 --steps 9`） | **0 不一致**（9 中心 / 7962624 方块，0 skipped；树叶子调用 18 次） |
 
 **terrain 含水层既有差异**：`--salt 7` 下 seed -1、中心 chunk (52,-27) 的 +z 邻居
 (52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
