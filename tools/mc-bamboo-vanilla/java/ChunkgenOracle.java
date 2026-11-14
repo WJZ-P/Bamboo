@@ -474,10 +474,11 @@ public final class ChunkgenOracle {
             // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
             boolean realPath = false;
             // `--chunk X Z` 只出题这一个区块（精确复现）；`--scan N` 每个种子出 N 个
-            // 覆盖近处/远处/负坐标的区块（大范围地形扫描）。两者只改坐标来源。
+            // 覆盖近处/远处/负坐标的随机区块；两者合用则出以 (X,Z) 为中心的连续网格。
+            // 都只改坐标来源。
             // `--chunk X Z` emits only this one chunk (exact reproduction); `--scan N` emits
-            // N chunks per seed spanning near/far/negative coordinates (wide terrain scan).
-            // Both only change where the chunk coordinates come from.
+            // N random chunks per seed spanning near/far/negative coordinates; combined they
+            // emit a contiguous grid centered on (X,Z). All only change the coordinate source.
             Integer forcedX = null;
             Integer forcedZ = null;
             int scan = 0;
@@ -1176,6 +1177,30 @@ public final class ChunkgenOracle {
         }
 
         private int[][] chunks(long seed) {
+            // `--chunk X Z --scan N`：以 (X,Z) 为中心的一连续网格，密集覆盖含水层
+            // 格子边界。稀有分支（如岩浆层上边界 y=-54）只在连续洞穴区域里出现，
+            // 稀疏的随机区块扫不到，所以扫描要用相邻区块而不是完全随机的坐标。
+            // `--chunk X Z --scan N`: a contiguous grid centered on (X,Z) that densely
+            // covers aquifer cell boundaries. Rare branches (e.g. the lava-layer top at
+            // y=-54) only occur inside connected cave regions, which sparse random chunks
+            // miss; scanning therefore needs adjacent chunks rather than purely random ones.
+            if (this.options.forcedX() != null && this.options.scan() > 0) {
+                int side = 1;
+                while (side * side < this.options.scan()) {
+                    side += 2;
+                }
+                int r = side / 2;
+                int[][] grid = new int[side * side][2];
+                int k = 0;
+                for (int dz = -r; dz <= r; dz++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        grid[k][0] = this.options.forcedX() + dx;
+                        grid[k][1] = this.options.forcedZ() + dz;
+                        k++;
+                    }
+                }
+                return grid;
+            }
             // `--chunk` 覆盖成单个区块，用 FIXED_SEEDS 里的种子逐个复现。
             // `--chunk` overrides to a single chunk, reproduced under each FIXED_SEEDS entry.
             if (this.options.forcedX() != null) {

@@ -28,7 +28,8 @@ use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] \
      [--through STAGE] [--steps 6] [--feature-types IDS] [--ore-only] [--show N] \
-     [--chunk X Z] [--scan N] [--break-self-test]";
+     [--chunk X Z] [--scan N] [--break-self-test] \
+     (--chunk X Z + --scan N = contiguous grid centered on X,Z)";
 /// 完整的 11 个地物步骤；`--steps` 只是过渡期的诊断开关。
 const ALL_STEPS: i32 = (1 << 11) - 1;
 const DEFAULT_SHOW: usize = 8;
@@ -202,9 +203,11 @@ impl Options {
                     let value = args.next().ok_or(USAGE)?;
                     options.show = Some(value.parse().map_err(|_| USAGE)?);
                 }
-                // 精确复现单个区块 / 大范围地形扫描，都只转发给 Java 侧来出坐标。
-                // Exact single-chunk reproduction / wide terrain scan: both are forwarded
-                // to the Java side, which is the only place chunk coordinates are produced.
+                // 精确复现单个区块 / 大范围地形扫描 / 以该区块为中心的连续网格，
+                // 都只转发给 Java 侧来出坐标，组合语义也在 Java 侧解释。
+                // Exact single-chunk reproduction / wide terrain scan / contiguous grid
+                // centered on that chunk: all are forwarded to the Java side, which produces
+                // the coordinates and interprets the combined form.
                 "--chunk" => {
                     let x = args.next().ok_or(USAGE)?;
                     let z = args.next().ok_or(USAGE)?;
