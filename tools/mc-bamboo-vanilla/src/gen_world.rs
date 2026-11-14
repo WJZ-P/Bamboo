@@ -9,6 +9,7 @@
 //! 地物、结构、光照还没移植：Java 侧 `--through carvers` 本来就不跑它们，游戏侧
 //! 的 `features` / `initialize_light` / `light` / `spawn` 阶段本轮也是透传，两边
 //! 用同样的边界（CARVERS 快照）比较，符合 `--through` / `--steps` 的做法。
+//! `--level-type` 把 `normal` / `large_biomes` / `amplified` 三种噪声世界逐个对拍。
 //!
 //! `gen-world`: compare vanilla generation against the SAME code the game runs.
 //! `ChunkgenOracle.java --through carvers` emits quart biomes and blocks for a set
@@ -18,6 +19,7 @@
 //! Features / structures / light are not ported: the Java side stops at CARVERS
 //! and the game's `features` / light / spawn stages are pass-throughs, so both
 //! compare the same CARVERS snapshot (the `--through` convention).
+//! `--level-type` compares each of `normal` / `large_biomes` / `amplified`.
 
 use std::{
     collections::HashMap,
@@ -34,27 +36,44 @@ use serde_json::Value;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--show N] \
-     [--break-self-test]";
+const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--show N] \
+     [--level-type normal|large_biomes|amplified] [--break-self-test] [--through features]";
 const DEFAULT_SHOW: usize = 8;
 
 #[derive(Debug)]
 struct Options {
     forwarded: Vec<String>,
     show: usize,
+    /// 对拍哪种噪声世界；三种共用 overworld 群系预设，只换 NoiseGeneratorSettings。
+    /// Which noise world to compare; all three share the overworld biome preset and
+    /// differ only in NoiseGeneratorSettings.
+    level_type: LevelType,
     /// 故意把 Bamboo 的第一个方块改坏，确认对拍会报不一致（自检）。
     /// Deliberately corrupt the first Bamboo block to verify the oracle fails (self-test).
     break_self_test: bool,
+    /// 跑到 `features`（只放开已移植的矿石）：Java 侧 `--ore-only`，游戏侧调
+    /// `game_features`，逐方块比 9 宫格。
+    /// Run through `features` (ported ores only): Java `--ore-only`, game calls
+    /// `game_features`, comparing the 9-chunk window block by block.
+    features: bool,
 }
 
 impl Options {
     fn parse(args: &[&str]) -> Result<Self, String> {
         let mut options = Self {
-            // 固定跑到 carvers：游戏侧同一阶段也只有 CARVERS 快照。
-            // Always go through carvers: the game side only has that snapshot too.
-            forwarded: vec!["--through".to_owned(), "carvers".to_owned()],
+            // 固定跑到 carvers，并走真实服务端路径（3×3 possibleBiomes、carverBiome、
+            // region.getBiomeManager()），Java 侧会额外输出各张高度图。
+            // Always go through carvers on the real-server path (3x3 possibleBiomes,
+            // carverBiome, region.getBiomeManager()); Java also emits all heightmaps.
+            forwarded: vec![
+                "--through".to_owned(),
+                "carvers".to_owned(),
+                "--real-path".to_owned(),
+            ],
             show: DEFAULT_SHOW,
+            level_type: LevelType::Normal,
             break_self_test: false,
+            features: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -65,10 +84,56 @@ impl Options {
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
                 }
+                // 指定区块：官方那边每个种子只出这一个区块。
+                // A fixed chunk: the oracle emits just this chunk for every seed.
+                "--chunk" => {
+                    let x = args.next().ok_or(USAGE)?;
+                    let z = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend([arg.to_owned(), (*x).to_owned(), (*z).to_owned()]);
+                }
                 "--show" => {
                     options.show = args.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
                 }
+                "--level-type" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    let level = LevelType::from_level_id(value)
+                        .filter(|l| !l.is_flat())
+                        .ok_or(USAGE)?;
+                    let settings = level
+                        .settings_id()
+                        .and_then(|id| id.strip_prefix("minecraft:"))
+                        .ok_or(USAGE)?;
+                    options.level_type = level;
+                    options
+                        .forwarded
+                        .extend(["--settings".to_owned(), settings.to_owned()]);
+                }
                 "--break-self-test" => options.break_self_test = true,
+                "--through" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    if *value != "features" {
+                        return Err(format!(
+                            "gen-world only supports --through features: {USAGE}"
+                        ));
+                    }
+                    // 游戏侧只移植了矿石，Java 侧也只留矿石地物；其余类型两边都
+                    // 不放，9 宫格逐方块仍可比（见 docs/worldgen-features-plan.md）。
+                    // Only ores are ported in-game; filter Java to ores too, so the
+                    // 9-chunk windows stay comparable block by block.
+                    options.features = true;
+                    // 原地替换头两个 `--through carvers`，不动可能已经追加的
+                    // `--seeds/--chunks/--salt`。
+                    // Replace the leading `--through carvers` in place, keeping
+                    // any size args already appended.
+                    options.forwarded[1] = "features".to_owned();
+                    // Java 侧 `--real-path` 优先于 `--through features`，地物模式不能带它。
+                    // Java's `--real-path` takes precedence over `--through features`,
+                    // so features mode must not forward it.
+                    options.forwarded.retain(|arg| arg != "--real-path");
+                    options.forwarded.push("--ore-only".to_owned());
+                }
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -81,6 +146,8 @@ struct Stats {
     chunks: u64,
     biome_cells: u64,
     blocks: u64,
+    heightmap_columns: u64,
+    heightmap_words: u64,
     mismatches: Vec<String>,
 }
 
@@ -104,7 +171,9 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         pending_biomes: HashMap::new(),
         stats: Stats::default(),
         show: options.show,
+        level_type: options.level_type,
         break_self_test: options.break_self_test,
+        features: options.features,
         header_ok: false,
         official_checks: 0,
     };
@@ -129,7 +198,11 @@ struct Report {
     pending_biomes: HashMap<(i64, i32, i32), Vec<Vec<String>>>,
     stats: Stats,
     show: usize,
+    level_type: LevelType,
     break_self_test: bool,
+    /// 跑到 features：读 `features` 线、调 `game_features` 比 9 宫格。
+    /// Features mode: read `features` lines, compare the 9-chunk window via `game_features`.
+    features: bool,
     header_ok: bool,
     official_checks: u64,
 }
@@ -146,11 +219,18 @@ impl Report {
                 .ok_or("oracle line has no type")?;
             match kind {
                 "header" => self.check_header(&value)?,
+                // features 模式下 biomes 线没有对应的 carvers 线，忽略。
+                // In features mode the biomes line has no matching carvers line.
+                "biomes" if self.features => {}
                 "biomes" => self.on_biomes(&value)?,
                 // noise / surface 是 CARVERS 之前的中间快照，游戏侧没有，跳过。
                 // noise / surface are pre-CARVERS snapshots the game side lacks; skip.
                 "noise" | "surface" => {}
+                "carvers" if self.features => {
+                    return Err("features-mode oracle emitted a carvers line".to_owned());
+                }
                 "carvers" => self.on_carvers(&value)?,
+                "features" if self.features => self.on_features(&value)?,
                 "end" => {
                     self.official_checks = value.get("checks").and_then(Value::as_u64).unwrap_or(0);
                 }
@@ -160,7 +240,7 @@ impl Report {
         if !self.header_ok {
             return Err("oracle did not emit a header".to_owned());
         }
-        if !self.pending_biomes.is_empty() {
+        if !self.features && !self.pending_biomes.is_empty() {
             return Err(format!(
                 "{} biomes lines had no matching carvers line",
                 self.pending_biomes.len()
@@ -191,22 +271,26 @@ impl Report {
                 version::PROTOCOL_VERSION
             ));
         }
-        // `ChunkgenOracle.java` 固定用 minecraft:overworld 设置和群系预设；gen-world
-        // 只验证 normal 世界类型，其余类型要等 Java 侧支持别的 settings 再放开。
-        // `ChunkgenOracle.java` fixes minecraft:overworld settings/preset; gen-world
-        // only verifies the normal level type until other settings are supported.
-        if get_str("settings")? != "minecraft:overworld"
-            || get_str("preset")? != "minecraft:overworld"
-        {
-            return Err("gen-world expects the overworld settings/preset".to_owned());
+        // 三种噪声世界共用 minecraft:overworld 群系预设，只换 NoiseGeneratorSettings；
+        // header 里的 settings 必须等于这次对拍选的世界类型。
+        // All three noise worlds share the minecraft:overworld biome preset and differ
+        // only in NoiseGeneratorSettings; the header settings must match the level type.
+        let settings_id = self
+            .level_type
+            .settings_id()
+            .ok_or("flat has no noise settings")?;
+        if get_str("settings")? != settings_id || get_str("preset")? != "minecraft:overworld" {
+            return Err(format!(
+                "gen-world expects {settings_id} / minecraft:overworld"
+            ));
         }
         let min_y = get_i64("minY")?;
         let height = get_i64("height")?;
         let sea_level = get_i64("seaLevel")?;
         let settings = mc_bamboo_worldgen::Worldgen::load()?
-            .settings("minecraft:overworld")
+            .settings(settings_id)
             .map(|s| (s.min_y, s.height, s.sea_level))
-            .ok_or("missing overworld settings")?;
+            .ok_or("missing noise settings")?;
         if (min_y, height, sea_level)
             != (
                 i64::from(settings.0),
@@ -220,9 +304,12 @@ impl Report {
             ));
         }
         let through = get_i64("through")?;
-        if through != 3 {
+        // carvers=3, features=4（和 chunkgen.rs 的 header 约定一致）。
+        // carvers=3, features=4 (same header convention as chunkgen.rs).
+        let expected = if self.features { 4 } else { 3 };
+        if through != expected {
             return Err(format!(
-                "oracle ran through {through}, gen-world needs carvers (3)"
+                "oracle ran through {through}, gen-world needs {expected}"
             ));
         }
         self.header_ok = true;
@@ -271,7 +358,7 @@ impl Report {
 
         let config = WorldGenConfig {
             seed,
-            level_type: LevelType::Normal,
+            level_type: self.level_type,
             ..WorldGenConfig::default()
         };
         let mut generated =
@@ -279,9 +366,16 @@ impl Report {
                 format!("game generation failed for seed {seed} ({x},{z}): {error}")
             })?;
         if self.break_self_test {
-            // 自检：把第一层第一个方块改成岩浆，确认下面会报不一致。
-            // Self-test: corrupt one block so the comparison must report a mismatch.
+            // 自检：改坏一个方块、一张高度图的一列，以及一个高层方块（让从 blocks
+            // 重算的 FINAL words 也变化），确认三个比较器都会报不一致。
+            // Self-test: corrupt one block, one heightmap column, and one high block
+            // (so the FINAL words recomputed from blocks change too); all three
+            // comparators must then report mismatches.
             generated.blocks[0][0] = mc_bamboo_data::blocks::LAVA;
+            generated.blocks[200][0] = mc_bamboo_data::blocks::STONE;
+            if let Some(first) = generated.heightmaps.values_mut().next() {
+                first[0] = first[0].wrapping_add(1);
+            }
         }
         self.stats.chunks += 1;
         compare_biomes(&mut self.stats, seed, x, z, &biomes, &generated);
@@ -294,6 +388,107 @@ impl Report {
             block_indices,
             &generated,
         )?;
+        // 真实路径一定带高度图；缺了就当对拍配置错误，不静默跳过。
+        // The real-server path always emits heightmaps; a missing field is an error.
+        let columns = value
+            .get("heightmaps")
+            .and_then(Value::as_object)
+            .ok_or("carvers line missing heightmaps")?;
+        compare_heightmaps(&mut self.stats, seed, x, z, columns, &generated);
+        let words = value
+            .get("heightmap_words")
+            .and_then(Value::as_object)
+            .ok_or("carvers line missing heightmap_words")?;
+        let ours = mc_bamboo_game::worldgen::final_heightmap_words(&generated)
+            .map_err(|error| format!("cannot assemble column seed {seed} ({x},{z}): {error}"))?;
+        compare_heightmap_words(&mut self.stats, seed, x, z, words, &ours);
+        Ok(())
+    }
+
+    /// `--through features`：官方一行是中心 `(x,z)` 加 3×3 九宫格，每格带自己的
+    /// 调色板和方块数组。游戏侧调 `game_features`（同一份 `run_features`），把
+    /// 9 宫格逐方块比过去；`--break-self-test` 改坏第一格确认比较器会响。
+    ///
+    /// `--through features`: one line is the center `(x,z)` plus a 3×3 window,
+    /// each cell with its own palette and block array. Call `game_features`
+    /// (the same `run_features`) and compare all 9 cells block by block;
+    /// `--break-self-test` corrupts one cell to prove the detector works.
+    fn on_features(&mut self, value: &Value) -> Result<(), String> {
+        let (seed, x, z) = line_key(value)?;
+        let steps = value.get("steps").and_then(Value::as_i64).unwrap_or(0);
+        // 全部 11 步：`(1<<11)-1`。Java `--ore-only` 不改 steps，游戏侧也跑全部步。
+        // All 11 steps: `(1<<11)-1`. Java `--ore-only` keeps all steps; so does the game.
+        if steps != 2047 {
+            return Err(format!(
+                "features seed {seed} ({x},{z}): oracle ran steps mask {steps}, expected 2047"
+            ));
+        }
+        let chunks = value
+            .get("chunks")
+            .and_then(Value::as_array)
+            .ok_or("features line missing chunks")?;
+        if chunks.len() != 9 {
+            return Err(format!(
+                "features seed {seed} ({x},{z}): {} chunks vs 9",
+                chunks.len()
+            ));
+        }
+
+        let config = WorldGenConfig {
+            seed,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        // 和 Java 侧的 `--ore-only` 同一份白名单：两边都只跑矿石。
+        // Same allow list as Java's `--ore-only`: both sides run ores only.
+        let ore_only = ["minecraft:ore".to_owned()];
+        let mut result =
+            mc_bamboo_game::worldgen_features::game_features(&config, x, z, Some(&ore_only))
+                .map_err(|error| {
+                    format!("game features failed for seed {seed} ({x},{z}): {error}")
+                })?;
+        if self.break_self_test {
+            // 自检：把九宫格第一格的第一个方块改成岩浆，确认下面会报不一致。
+            // Self-test: corrupt one block so the comparison must report a mismatch.
+            result.blocks[0][0][0] = mc_bamboo_data::blocks::LAVA;
+        }
+        self.stats.chunks += 1;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let dz = index as i32 / 3 - 1;
+            let dx = index as i32 % 3 - 1;
+            let reported_dx = chunk.get("dx").and_then(Value::as_i64).unwrap_or(99);
+            let reported_dz = chunk.get("dz").and_then(Value::as_i64).unwrap_or(99);
+            if reported_dx != i64::from(dx) || reported_dz != i64::from(dz) {
+                return Err(format!(
+                    "features seed {seed} ({x},{z}) index {index}: ({reported_dx},{reported_dz}) vs ({dx},{dz})"
+                ));
+            }
+            let palette = chunk
+                .get("palette")
+                .and_then(Value::as_array)
+                .ok_or("features chunk missing palette")?;
+            let indices = chunk
+                .get("blocks")
+                .and_then(Value::as_array)
+                .ok_or("features chunk missing blocks")?;
+            // 复用 CARVERS 的逐方块比较器（同一套调色板 / 下标语义）。
+            // Reuse the CARVERS block comparator (same palette / index layout).
+            let generated = GeneratedChunk {
+                blocks: result.blocks[index].clone(),
+                biomes: Vec::new(),
+                heightmaps: Default::default(),
+            };
+            compare_blocks(
+                &mut self.stats,
+                seed,
+                x + dx,
+                z + dz,
+                palette,
+                indices,
+                &generated,
+            )?;
+        }
         Ok(())
     }
 
@@ -302,10 +497,13 @@ impl Report {
             chunks,
             biome_cells,
             blocks,
+            heightmap_columns,
+            heightmap_words,
             mismatches,
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
+             {heightmap_columns} heightmap columns, {heightmap_words} heightmap words, \
              {} mismatches, {} official checks",
             mismatches.len(),
             self.official_checks
@@ -450,6 +648,101 @@ fn compare_blocks(
     Ok(())
 }
 
+/// 逐列比较六张高度图（世界高度 `getFirstAvailable`）。
+/// Compare the six heightmaps column by column (world height `getFirstAvailable`).
+fn compare_heightmaps(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    columns: &serde_json::Map<String, Value>,
+    generated: &GeneratedChunk,
+) {
+    for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
+        let expected = match columns.get(key).and_then(Value::as_array) {
+            Some(array) => array,
+            None => {
+                stats.mismatches.push(format!(
+                    "heightmaps seed {seed} ({x},{z}): official has no {key}"
+                ));
+                continue;
+            }
+        };
+        let ours = match generated.heightmaps.get(key) {
+            Some(map) => map,
+            None => {
+                stats.mismatches.push(format!(
+                    "heightmaps seed {seed} ({x},{z}): game has no {key}"
+                ));
+                continue;
+            }
+        };
+        if expected.len() != 256 || ours.len() != 256 {
+            stats.mismatches.push(format!(
+                "heightmaps seed {seed} ({x},{z}) {key}: {} columns vs official {}",
+                ours.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        for (column, (&ours_value, official)) in ours.iter().zip(expected).enumerate() {
+            stats.heightmap_columns += 1;
+            let official = official.as_i64().unwrap_or(i64::MIN) as i32;
+            if ours_value != official {
+                stats.mismatches.push(format!(
+                    "heightmaps seed {seed} ({x},{z}) {key} column {column}: \
+                     official {official}, game {ours_value}"
+                ));
+            }
+        }
+    }
+}
+
+/// 比较四张 FINAL 高度图的打包位流（存档写出的 `LongArrayTag` 内容）。
+/// Compare the packed words of the four FINAL heightmaps (the saved `LongArrayTag`).
+fn compare_heightmap_words(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    words: &serde_json::Map<String, Value>,
+    ours: &std::collections::BTreeMap<&'static str, Vec<u64>>,
+) {
+    for (key, values) in ours {
+        let expected = match words.get(*key).and_then(Value::as_array) {
+            Some(array) => array,
+            None => {
+                stats.mismatches.push(format!(
+                    "heightmap_words seed {seed} ({x},{z}): official has no {key}"
+                ));
+                continue;
+            }
+        };
+        if expected.len() != values.len() {
+            stats.mismatches.push(format!(
+                "heightmap_words seed {seed} ({x},{z}) {key}: {} words vs official {}",
+                values.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        for (index, (&ours_word, official)) in values.iter().zip(expected).enumerate() {
+            stats.heightmap_words += 1;
+            let official = official
+                .as_i64()
+                .map(|value| value as u64)
+                .or_else(|| official.as_u64())
+                .unwrap_or(0);
+            if ours_word != official {
+                stats.mismatches.push(format!(
+                    "heightmap_words seed {seed} ({x},{z}) {key} word {index}: \
+                     official {official}, game {ours_word}"
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +754,7 @@ mod tests {
         let generated = GeneratedChunk {
             blocks: vec![vec![mc_bamboo_data::blocks::STONE; 256]; 1],
             biomes: vec![],
+            heightmaps: Default::default(),
         };
         let palette = vec![Value::String("Block{minecraft:stone}".to_owned())];
         let indices: Vec<Value> = (0..256).map(|_| Value::from(0u64)).collect();
@@ -482,6 +776,7 @@ mod tests {
         let generated = GeneratedChunk {
             blocks: vec![],
             biomes: vec![vec![registries::biome::PLAINS as u32; 64]],
+            heightmaps: Default::default(),
         };
         let sections = vec![vec!["minecraft:desert".to_owned(); 64]];
         let mut stats = Stats::default();
@@ -489,12 +784,95 @@ mod tests {
         assert_eq!(stats.mismatches.len(), 64);
     }
 
+    /// 故意改坏一列：确认六张高度图的逐列比较会报不一致。
+    /// Deliberately break one column: the six-heightmap comparison must fail.
+    #[test]
+    fn heightmap_comparator_detects_a_wrong_column() {
+        let mut heightmaps = std::collections::BTreeMap::new();
+        for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
+            heightmaps.insert(key, vec![100_i32; 256]);
+        }
+        let generated = GeneratedChunk {
+            blocks: vec![],
+            biomes: vec![],
+            heightmaps,
+        };
+        let mut columns = serde_json::Map::new();
+        for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
+            columns.insert(
+                key.to_owned(),
+                Value::Array((0..256).map(|_| Value::from(100_i64)).collect()),
+            );
+        }
+        let mut clean = Stats::default();
+        compare_heightmaps(&mut clean, 1, 0, 0, &columns, &generated);
+        assert!(clean.mismatches.is_empty());
+        assert_eq!(clean.heightmap_columns, 6 * 256);
+
+        columns.insert(
+            "WORLD_SURFACE_WG".to_owned(),
+            Value::Array((0..256).map(|_| Value::from(101_i64)).collect()),
+        );
+        let mut broken = Stats::default();
+        compare_heightmaps(&mut broken, 1, 0, 0, &columns, &generated);
+        assert_eq!(broken.mismatches.len(), 256);
+    }
+
+    /// 故意改坏一个 long：确认 FINAL 高度图位流比较会报不一致。
+    /// Deliberately break one long: the FINAL heightmap-word comparison must fail.
+    #[test]
+    fn heightmap_words_comparator_detects_a_wrong_word() {
+        let mut ours: std::collections::BTreeMap<&'static str, Vec<u64>> =
+            std::collections::BTreeMap::new();
+        ours.insert("WORLD_SURFACE", vec![7_u64; 37]);
+        let mut words = serde_json::Map::new();
+        words.insert(
+            "WORLD_SURFACE".to_owned(),
+            Value::Array((0..37).map(|_| Value::from(7_i64)).collect()),
+        );
+        let mut clean = Stats::default();
+        compare_heightmap_words(&mut clean, 1, 0, 0, &words, &ours);
+        assert!(clean.mismatches.is_empty());
+        assert_eq!(clean.heightmap_words, 37);
+
+        words.insert(
+            "WORLD_SURFACE".to_owned(),
+            Value::Array((0..37).map(|_| Value::from(8_i64)).collect()),
+        );
+        let mut broken = Stats::default();
+        compare_heightmap_words(&mut broken, 1, 0, 0, &words, &ours);
+        assert_eq!(broken.mismatches.len(), 37);
+    }
+
     #[test]
     fn options_force_carvers_and_forward_seed_args() {
         let options = Options::parse(&["--seeds", "2", "--chunks", "4", "--salt", "9"]).unwrap();
         assert!(options.forwarded.contains(&"--through".to_owned()));
         assert!(options.forwarded.contains(&"carvers".to_owned()));
+        assert!(options.forwarded.contains(&"--real-path".to_owned()));
         assert!(options.forwarded.contains(&"2".to_owned()));
         assert!(Options::parse(&["--bogus"]).is_err());
+    }
+
+    #[test]
+    fn level_type_forwards_the_settings_id() {
+        let normal = Options::parse(&[]).unwrap();
+        assert_eq!(normal.level_type, LevelType::Normal);
+        assert!(!normal.forwarded.contains(&"--settings".to_owned()));
+        let large = Options::parse(&["--level-type", "large_biomes"]).unwrap();
+        assert_eq!(large.level_type, LevelType::LargeBiomes);
+        let forwarded = large
+            .forwarded
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()));
+        assert!(
+            forwarded
+                .into_iter()
+                .any(|(k, v)| k == "--settings" && v == "large_biomes")
+        );
+        let amplified = Options::parse(&["--level-type", "minecraft:amplified"]).unwrap();
+        assert_eq!(amplified.level_type, LevelType::Amplified);
+        // flat 不是噪声世界，不接受。/ flat is not a noise world, so it is rejected.
+        assert!(Options::parse(&["--level-type", "flat"]).is_err());
     }
 }

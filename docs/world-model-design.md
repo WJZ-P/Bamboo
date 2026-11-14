@@ -286,12 +286,20 @@ region 是一个可以整个 move 的值，必须是 `Send`（R2）。它里面�
   存盘失败按 `SaveFailed` 走（盒子停放），线程不退出。线程意外退出和 IO 线程挂掉
   一样当致命错误走关服。关服在 `Shutdown` 事件之后阻塞收池子回执、继续喂给 Director，
   直到池子空了才做最后的写盘和 `flush`；池子 drop 时通知线程退出并 join。
-- **还没做（M4）**：多阶段生成的邻居视图。`Task::Generate.neighbors` 现在总是空的，
-  `ChunkGenerator::generate` 的签名里留了视图参数。方案：Director 里的半成品改存成
-  不可变快照 `Arc<ProtoChunk>`，邻居视图只加引用计数、不复制；中心推进时
-  `Arc::try_unwrap`，还有人在读就写时复制。`features` 写半径 1 的部分随结果带回
-  「要写进邻居的改动」，世界线程按 `TaskId` 顺序合进去，写范围排他调度已经保证
-  不会有两个任务同时写同一个邻居。
+- **已做（第二轮，M4 的邻居视图 + features）**：`features` 阶段接进流水线，见
+  `docs/worldgen.md`「第二轮」。`Task::Generate.neighbors` 按 `ChunkStep` 依赖半径带
+  `(位置, 阶段)`，世界线程把每个区块的 CARVERS 半成品存成不可变 `Arc<GeneratedChunk>`
+  快照（`director_host.rs` 的 `partials`），发任务时挂 `Arc` 克隆到计算任务、只读不复制；
+  快照只在世界线程增删、发出后不改写。计算池跑 `Generator::features()`，把中心内容和
+  写邻居的增量带回；世界线程按 `TaskId` 顺序把增量追加到目标区块的增量表，完工
+  `assemble_feature_column` 排 `(x,y,z,state)` 规范序落到盒子。和原设计的差别：半成品是
+  「CARVERS 地形 + 累计增量」而不是逐阶段推进的同一 `Arc`（`Arc::try_unwrap` 写时复制），
+  增量是纯数据 `Vec` 缓冲、完工一次性排规范序，不逐条 `Arc::make_mut`；中心还会纯函数
+  重算 8 个邻居中心溢进来的写，保证集合与邻居任务落地时刻无关（调度不保证它们先到）。
+  写范围排他调度（`features` 半径 1）仍由 Director 的 `write_ranges_overlap` 保证。
+  `light` 也带半径 1 邻居引用，但真实光照计算（下一轮）没做。
+- **还没做（M4 剩余）**：生成期 `initialize_light` / `light` 的真实计算、`spawn` 刷怪、
+  结构两阶段、其余地物类型、以及把这些阶段接上后重新对拍。
 
 ### 5.4 优先级、取消、限速
 
@@ -857,7 +865,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 0 | 剖析器：每个 region、每个 tick 阶段的耗时直方图；区块从请求到发出的延迟；各队列长度；tick 起点抖动；主控处理延迟 | 后面每一步的依据 | **做了一部分**：`mc-bamboo-game` 的剖析器、假玩家压测工具和基线已落地（`a1fd1a0`、`b841143`、`docs/profiling.md`），阶段直方图、墙上时间的区块延迟、起点抖动 / 刻间隔偏差、flush 字节数、按阶段和子项拆分都有；「主控处理延迟」要等主控建起来才有，`chunk_latency_us` 只覆盖排队到写出、不含读盘，和 1.2 的「读盘 p95 < 100 ms」不是一个量 |
 | 1 | 数据模型：区块束；光照和带位置的状态进区块；`Level` 的写入口收窄（第 3、4 节） | 存档、合并拆分、录制的前提。oracle 全绿是验收条件 | **做了一部分**：`Level` 已收窄成 `LevelSideState` / `LevelTables` 和 `LevelEntities` / `EntityTables`（`0442bc4`、`f918171`），`ChunkStore::take_column` / `insert_column`、`RegionColumn::take_columns` / `insert_column` 和实体的按区块取放都能整盒取放（`2b2d5f5`、`a62f179`、`5c1c0d9`、`c396f2e`、`f918171`），每一步的 oracle 都全绿。**存储内部仍是整张表**：`ChunkStore` 是「模板 + 改过的表 + 四份光照表」，计划刻、方块实体、红石记忆和容器等四张表仍按全 region 存，只加了按区块的取放接口（见 4.2）；`LevelEntities` 上又开了三个交出整张实体表的入口，还没收窄到单独 trait（见第 3 节） |
 | 2 | 网络：分段出站缓冲、区块帧只压缩一次、广播从推改成拉（第 11 节、第 7 节第 10 段） | 多人同屏时 CPU 下降 | **做了一部分**：`PlayerSink::send(Outgoing)` 分段出站和 `Arc<SharedFrames>` 用 `OnceLock` 只压一次已合入（`32b1a8b`）；包体缓存和帧缓存同时保留，帧仍在世界线程编码、压缩仍在连接任务里做。**广播从推改成拉没做**，多人同屏时 CPU 是否下降没有量过（第一份基线里 200 人扎堆时实体同步和追踪平均 1.3 ms，`docs/profiling.md` 第 6 节） |
-| 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **存档和计算池已做完，M4 多阶段生成还没接进流水线**：`TicketTable`、存档编解码、Director 状态机都接进 `World::tick`；一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，带世界目录时所有区块（盘上有和没有）都走同一条异步读流水线，结果下一刻开头经信箱收回，进服第一批仍按距离交付（`docs/m3-storage.md` 第 14 节 `05d8fa1`）。非 `full` 的 `Status` 按 ProtoChunk 读回、方块光照由模板补齐，`.mcc` 外置区块也能扫到。卸载时脏区块序列化后写盘、pristine 直接丢；Parking 只留作写盘途中缓冲。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`（游戏规则 / 世界生成设置 / 世界边界）、`chunk_tickets.dat`、玩家数据和 `save-all [flush]` / `save-on` / `save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时 `Decode` / 每个 `Generate` 阶段 / `Save` 的序列化在常驻后台线程上做，`Read` 仍在 IO 线程、`Assemble` 内联；默认 0 是世界线程上的 `InlineCodec`，内联和池子跑同一场景盘上字节相同。**运行中的匀速保存照官方字节码，不是 D6 原式**：`MinecraftServer.autoSave` 每 6000 刻一次全量（只写改过的）、`ChunkMap.saveChunksEagerly` 每刻最多 20 个、单区块 200 刻冷却；卸载快照另走 `ceil(待写/6000)`（至少 1）的有上限匀速队列。`Region::encode_loaded_column` 从 `&Region` 用 `BorrowedParts` 只读组装一柱，和卸载存盘共用 `chunk_content::encode_parts`，**不取出/放回盒子、不卸载、不算完待算光照、不发任何包、不改运行态表的顺序和版本号**；写出的 NBT 与卸载逐字节一致。纯上层（容器 / 实体 / 计划刻 / 方块实体 / 红石记忆）改动也由 `Region::dirty` 标脏并参与匀速保存，不必等卸载或 `/save-all`。`/save-all` 立刻给所有已加载脏区块拍快照，`/save-off` 照 `noSave` 暂停。**terrain 生成已接进流水线**（本轮，见 `docs/worldgen.md`「接进游戏」）：`World::build` 对非 flat 世界用 `PipelineKind::Staged` + `OverworldGenerator`，`terrain` 阶段把 worldgen 纯函数的结果（quart 群系 + 方块）写进 `RegionColumn`，其余阶段透传；四个 `server.properties` 世界生成键生效、新世界默认 `normal`、`world_gen_settings.dat` 持久化种子与维度生成器、`gen-world` 对拍 0 不一致、默认起小计算池把生成移出世界线程。**还没做**：features / 生成时 `initialize_light` / `light` / `spawn` 阶段的真实内容、多阶段生成的邻居快照（M4，方案见 5.3.1，`Task::Generate.neighbors` 仍恒空）、`FeatureResult.deltas` 合并、ProtoChunk 从非 full 状态继续生成、多条 IO 线程、预编码帧、`fly-20` 飞行压测。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
+| 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **存档和计算池已做完，M4 多阶段生成还没接进流水线**：`TicketTable`、存档编解码、Director 状态机都接进 `World::tick`；一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，带世界目录时所有区块（盘上有和没有）都走同一条异步读流水线，结果下一刻开头经信箱收回，进服第一批仍按距离交付（`docs/m3-storage.md` 第 14 节 `05d8fa1`）。非 `full` 的 `Status` 按 ProtoChunk 读回、方块光照由模板补齐，`.mcc` 外置区块也能扫到。卸载时脏区块序列化后写盘、pristine 直接丢；Parking 只留作写盘途中缓冲。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`（游戏规则 / 世界生成设置 / 世界边界）、`chunk_tickets.dat`、玩家数据和 `save-all [flush]` / `save-on` / `save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时 `Decode` / 每个 `Generate` 阶段 / `Save` 的序列化在常驻后台线程上做，`Read` 仍在 IO 线程、`Assemble` 内联；默认 0 是世界线程上的 `InlineCodec`，内联和池子跑同一场景盘上字节相同。**运行中的匀速保存照官方字节码，不是 D6 原式**：`MinecraftServer.autoSave` 每 6000 刻一次全量（只写改过的）、`ChunkMap.saveChunksEagerly` 每刻最多 20 个、单区块 200 刻冷却；卸载快照另走 `ceil(待写/6000)`（至少 1）的有上限匀速队列。`Region::encode_loaded_column` 从 `&Region` 用 `BorrowedParts` 只读组装一柱，和卸载存盘共用 `chunk_content::encode_parts`，**不取出/放回盒子、不卸载、不算完待算光照、不发任何包、不改运行态表的顺序和版本号**；写出的 NBT 与卸载逐字节一致。纯上层（容器 / 实体 / 计划刻 / 方块实体 / 红石记忆）改动也由 `Region::dirty` 标脏并参与匀速保存，不必等卸载或 `/save-all`。`/save-all` 立刻给所有已加载脏区块拍快照，`/save-off` 照 `noSave` 暂停。**terrain 生成已接进流水线**（本轮，见 `docs/worldgen.md`「接进游戏」）：`World::build` 对非 flat 世界用 `PipelineKind::Staged` + `OverworldGenerator`，`terrain` 阶段把 worldgen 纯函数的结果（quart 群系 + 方块）写进 `RegionColumn`，其余阶段透传；四个 `server.properties` 世界生成键生效、新世界默认 `normal`、`world_gen_settings.dat` 持久化种子与维度生成器、`gen-world` 对拍 0 不一致、默认起小计算池把生成移出世界线程。**第二轮（本轮）**：`features` 阶段接进流水线（见 `docs/worldgen.md`「第二轮」、5.3.1）：`Task::Generate.neighbors` 按 `ChunkStep` 半径带邻居引用、世界线程存不可变 `Arc` CARVERS 快照、计算池跑 `Generator::features()`、写邻居增量按 `TaskId` 合并 + 完工排规范序；`gen-world --through features` 对拍 0 不一致、1/4 线程逐字节相同；`initialize_light` / `light` 已在流水线里用邻居快照算出生成期光照（`b2778a8`，`gen-light` 对拍）；真实服务端路径（`collectPossibleBiomes(region,1)` / `carverBiome` / `region.getBiomeManager()`）和六张高度图也已逐方块、逐列对拍 0 不一致。**还没做**：生成时 `initialize_light` / `light` 以外的`spawn` 刷怪、其余地物类型、结构两阶段、ProtoChunk 从非 full 状态继续生成、多条 IO 线程、预编码帧、`fly-20` 飞行压测。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
 | 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **没做**：仍是一条世界线程带一个 `Region`，没有主控线程、没有 tick 线程池，`Global` 和 Director 都在这条线程上 |
 | 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **没做** |
 | 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行用 `ScopedThreads` 每刻起线程（只用于实验），以后可以改成往计算池交任务；只读收尾仍是串行，降级阶梯没有实现 |
@@ -869,7 +877,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 - 方块实体休眠（9.5 第 1 条）：**做完**（`docs/performance-optimizations.md` 7g.1–7g.6）。熔炉 / 合成器、营火 / 酿造台 / 漏斗冷却、闲置漏斗、边界外暂停共四轮；容器引用缓存和信号查询缓存（第 2、3 条）**没做**，红石线实验性算法（第 4 条）已决定先不做。
 - 红石触发的命中率实验（9.7）和机器缓存（9.3）：**都做完**（`bec0707`、`docs/redstone-cache-design.md` §12–14）。第一版引擎、第二版确定性工作量门槛、第三版活塞门和方块实体 tick 重放已合入；`bamboo.toml` 的 `redstone_cache` 默认关，正式配置下九台机器只有红石线阵列划算。数字见 `docs/performance-optimizations.md` 7h / 7i。
 - 换全局分配器、换压缩后端，实测后决定：**没做**。
-- 世界生成的噪声阶段（`ae76868`）：纯函数和区块级 `chunkgen` oracle 做完，群系 quart 格和 `doFill` 的方块逐位对拍。地表规则、雕刻器（`docs/worldgen.md`）和接进 Director 流水线（本轮，`docs/worldgen.md`「接进游戏」）都已做完，`gen-world` 对拍 0 不一致；地物、结构、生成时光照和多阶段邻居视图还没接。
+- 世界生成的噪声阶段（`ae76868`）：纯函数和区块级 `chunkgen` oracle 做完，群系 quart 格和 `doFill` 的方块逐位对拍。地表规则、雕刻器（`docs/worldgen.md`）和接进 Director 流水线（本轮，`docs/worldgen.md`「接进游戏」）都已做完，`gen-world` 对拍 0 不一致；第二轮已把多阶段邻居视图 + `features`（矿石）接进 Director（`docs/worldgen.md`「第二轮」，`gen-world --through features` 0 不一致）；结构、生成时光照、其余地物类型还没接。
 
 （2026-11-14 按实现更新：第 16 节第 3 步、`docs/m3-storage.md` 第 14 节、`docs/performance-optimizations.md` 7g / 7i / 第 9 节、`docs/redstone-cache-design.md` §12–14、`docs/worldgen.md`「还没做」、`crates/mc-bamboo-game/src/director_host.rs` 的 `save_loaded_dirty` / `snapshot_loaded`、`crates/mc-bamboo-game/src/region/content_snapshot.rs`；合并提交 `1828b8c`、`1a0dee9`、`082a7c9`、`afaf4bb`、`672cb97`、`fa91b84`、`8baec27`、`df82a78`、`e6f8d6e`、`edce3ab`、`ae76868`）
 

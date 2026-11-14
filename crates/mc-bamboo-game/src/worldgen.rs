@@ -14,11 +14,15 @@
 //! `mc_bamboo_worldgen::chunk::Generator`, stopping at CARVERS (features,
 //! structures and light are later stages, not wired this round).
 
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+};
 
 use mc_bamboo_data::{blocks, registries};
 use mc_bamboo_world::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
+    chunk::HeightmapKind,
     column::{ChunkColumn, ChunkColumnParts, SectionParts},
     palette::PalettedContainer,
 };
@@ -34,19 +38,40 @@ const WIDTH: usize = 16;
 /// 一段的 quart 群系格数。
 const SECTION_BIOMES: usize = 64;
 
+/// 官方 `ChunkStatus` 各阶段 prime/更新的六张高度图的序列化名。
+///
+/// `WORLDGEN_HEIGHTMAPS`（`OCEAN_FLOOR_WG`、`WORLD_SURFACE_WG`）是 EMPTY..BIOMES
+/// 之后的两张，`FINAL_HEIGHTMAPS`（其余四张）是 TERRAIN 及之后 prime 的四张。
+///
+/// The six heightmap serialization names the `ChunkStatus` stages prime/update.
+/// `WORLDGEN_HEIGHTMAPS` are the two after EMPTY..BIOMES; `FINAL_HEIGHTMAPS` are
+/// the four primed at TERRAIN and later.
+pub const HEIGHTMAP_KEYS: [&str; 6] = [
+    "WORLD_SURFACE_WG",
+    "WORLD_SURFACE",
+    "OCEAN_FLOOR_WG",
+    "OCEAN_FLOOR",
+    "MOTION_BLOCKING",
+    "MOTION_BLOCKING_NO_LEAVES",
+];
+
 /// 一个区块到 `terrain` 阶段的样子。
 ///
 /// `blocks` 是 `WORLD_HEIGHT` 层 × 256（`x*16+z`）个默认状态 ID，y 从 `MIN_Y` 往上；
 /// `biomes` 是 `SECTION_COUNT` 段 × 64 个 quart 格，顺序 `x → y → z`（和
-/// `Generator::biomes` 的输出一致）。
+/// `Generator::biomes` 的输出一致）；`heightmaps` 是 [`HEIGHTMAP_KEYS`] 里每张图的
+/// 256 列世界高度（`Heightmap.getFirstAvailable`，即最高地面的上面一格），下标 `x+z*16`。
 ///
 /// A chunk at `terrain`: `blocks` is `WORLD_HEIGHT` layers × 256 (`x*16+z`)
 /// default state ids, y from `MIN_Y` up; `biomes` is `SECTION_COUNT` sections ×
-/// 64 quart cells in `x → y → z` order (same as `Generator::biomes` output).
+/// 64 quart cells in `x → y → z` order; `heightmaps` holds, for each
+/// [`HEIGHTMAP_KEYS`] type, the 256 per-column world heights
+/// (`Heightmap.getFirstAvailable`), indexed `x+z*16`.
 #[derive(Debug, Clone)]
 pub struct GeneratedChunk {
     pub blocks: Vec<Vec<u32>>,
     pub biomes: Vec<Vec<u32>>,
+    pub heightmaps: BTreeMap<&'static str, Vec<i32>>,
 }
 
 // 每条计算线程各缓存一份解析好的 `Worldgen` 和按种子/设置建好的 `Generator`。
@@ -72,7 +97,7 @@ thread_local! {
 /// from the level type; all three noise worlds share the `minecraft:overworld`
 /// biome preset (`WorldPresets.bootstrap`) and differ only in
 /// `NoiseGeneratorSettings`.
-fn with_generator<T>(
+pub(crate) fn with_generator<T>(
     config: &WorldGenConfig,
     f: impl FnOnce(&chunk::Generator<'static>) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -101,6 +126,73 @@ fn with_generator<T>(
     })
 }
 
+/// 官方 `Heightmap.Types.isOpaque()` 对某个方块状态的判定。
+///
+/// Vanilla `Heightmap.Types.isOpaque()` for one block state.
+fn heightmap_predicate(key: &str, state: u32) -> bool {
+    let facts = mc_bamboo_data::state_facts(state);
+    let motion = facts & mc_bamboo_data::facts::MOTION_BLOCKING != 0;
+    let motion_no_leaves = facts & mc_bamboo_data::facts::MOTION_BLOCKING_NO_LEAVES != 0;
+    let fluid_nonempty =
+        mc_bamboo_data::state_fluid(state).fluid != mc_bamboo_data::registries::fluid::EMPTY;
+    match key {
+        // `NOT_AIR`：air / cave_air / void_air 都不算地面。
+        // `NOT_AIR`: air, cave_air and void_air are all transparent to this map.
+        "WORLD_SURFACE_WG" | "WORLD_SURFACE" => facts & mc_bamboo_data::facts::AIR == 0,
+        // `MATERIAL_MOTION_BLOCKING`：不含流体。 `MATERIAL_MOTION_BLOCKING`: no fluids.
+        "OCEAN_FLOOR_WG" | "OCEAN_FLOOR" => motion,
+        "MOTION_BLOCKING" => motion || fluid_nonempty,
+        "MOTION_BLOCKING_NO_LEAVES" => motion_no_leaves || fluid_nonempty,
+        _ => false,
+    }
+}
+
+/// 照 `Heightmap.primeHeightmaps`：每列从顶往下找第一个满足各自谓词的方块，记 `y+1`；
+/// 整列没有就留在 `MIN_Y`。六张图都从最终 CARVERS 方块 prime（官方 doFill 的两张 WG
+/// 经 setBlockState 增量维护到 CARVERS，最终值与从最终方块 prime 相同）。
+///
+/// Mirrors `Heightmap.primeHeightmaps`: per column, top-down, find the first block
+/// satisfying each type's predicate and record `y+1`; an empty column stays at
+/// `MIN_Y`. All six maps are primed from the final CARVERS blocks (vanilla's two
+/// doFill WG maps are maintained by setBlockState up to CARVERS, so their final
+/// values equal a prime over the final blocks).
+fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
+    let mut maps: BTreeMap<&'static str, Vec<i32>> = BTreeMap::new();
+    for &key in &HEIGHTMAP_KEYS {
+        maps.insert(key, vec![MIN_Y; WIDTH * WIDTH]);
+    }
+    let height = blocks.len() as i32;
+    for x in 0..WIDTH {
+        for z in 0..WIDTH {
+            // 方块层是 `x*16+z`（GeneratedChunk.blocks 的布局），高度图是官方的
+            // `Heightmap.getIndex(x,z) = x + z*16`，两者下标顺序不同。
+            // The block layers use `x*16+z` (GeneratedChunk.blocks layout) while
+            // heightmaps use vanilla's `Heightmap.getIndex(x,z) = x + z*16`.
+            let block_index = x * WIDTH + z;
+            let map_index = x + z * WIDTH;
+            let mut pending: Vec<&'static str> = HEIGHTMAP_KEYS.to_vec();
+            for local_y in (0..height).rev() {
+                if pending.is_empty() {
+                    break;
+                }
+                let state = blocks[local_y as usize][block_index];
+                let mut kept = Vec::with_capacity(pending.len());
+                for key in pending {
+                    if heightmap_predicate(key, state) {
+                        if let Some(map) = maps.get_mut(key) {
+                            map[map_index] = MIN_Y + local_y + 1;
+                        }
+                    } else {
+                        kept.push(key);
+                    }
+                }
+                pending = kept;
+            }
+        }
+    }
+    maps
+}
+
 /// 超平坦：按预设的层从 `MIN_Y` 往上填方块，整个区块一个群系。
 ///
 /// Flat: fill blocks from `MIN_Y` using the preset layers; one biome everywhere.
@@ -116,10 +208,47 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
         }
     }
     let cells = vec![config.flat.biome; SECTION_BIOMES];
+    let heightmaps = compute_heightmaps(&blocks);
     GeneratedChunk {
         blocks,
         biomes: vec![cells; SECTION_COUNT],
+        heightmaps,
     }
+}
+
+// 每条计算线程各缓存一份到 CARVERS 的地形，供 `features` 阶段拼 3×3 视图时免于
+// 反复重算。键含种子和世界类型；地形是纯函数，命中与否不改变结果，只省时间。
+// 只在 `features` 阶段用，条目数封顶，超过就整表清掉（不逐条淘汰、不依赖顺序）。
+// Each compute thread caches CARVERS terrain so the `features` 3×3 view does not
+// recompute it. The key includes seed and world type; terrain is pure, so a hit
+// never changes the result. Bounded: clear the whole table past the cap.
+type TerrainCache = HashMap<(i64, Option<&'static str>, i32, i32), GeneratedChunk>;
+thread_local! {
+    static TERRAIN_CACHE: RefCell<TerrainCache> = RefCell::new(HashMap::new());
+}
+const TERRAIN_CACHE_CAP: usize = 1024;
+
+/// 带线程本地缓存的 `generate_chunk`，`features` 阶段拼 3×3 视图用。
+///
+/// Cached `generate_chunk` for building the `features` 3×3 view.
+pub(crate) fn cached_generate_chunk(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+) -> Result<GeneratedChunk, String> {
+    let key = (config.seed, config.level_type.settings_id(), x, z);
+    TERRAIN_CACHE.with(|cache| {
+        if let Some(chunk) = cache.borrow().get(&key) {
+            return Ok(chunk.clone());
+        }
+        let chunk = generate_chunk(config, x, z)?;
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= TERRAIN_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, chunk.clone());
+        Ok(chunk)
+    })
 }
 
 /// 生成中心区块到 `terrain` 阶段。
@@ -139,7 +268,12 @@ pub fn generate_chunk(config: &WorldGenConfig, x: i32, z: i32) -> Result<Generat
     with_generator(config, |generator| {
         let biomes = generator.biomes(x, z)?;
         let blocks = generator.terrain(x, z, chunk::Stage::Carvers)?;
-        Ok(GeneratedChunk { blocks, biomes })
+        let heightmaps = compute_heightmaps(&blocks);
+        Ok(GeneratedChunk {
+            blocks,
+            biomes,
+            heightmaps,
+        })
     })
 }
 
@@ -152,9 +286,12 @@ pub fn generate_biomes(config: &WorldGenConfig, x: i32, z: i32) -> Result<Genera
     }
     with_generator(config, |generator| {
         let biomes = generator.biomes(x, z)?;
+        let blocks = vec![vec![blocks::AIR; WIDTH * WIDTH]; WORLD_HEIGHT as usize];
+        let heightmaps = compute_heightmaps(&blocks);
         Ok(GeneratedChunk {
-            blocks: vec![vec![blocks::AIR; WIDTH * WIDTH]; WORLD_HEIGHT as usize],
+            blocks,
             biomes,
+            heightmaps,
         })
     })
 }
@@ -231,6 +368,34 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         books: Default::default(),
         entities: Default::default(),
     }))
+}
+
+/// 交付/存档会写出的四张 `FINAL_HEIGHTMAPS` 的打包位流（`LongArrayTag` 的内容）。
+///
+/// 用 [`build_region_column`] 组装后再读，和游戏写盘走的是同一条
+/// `Chunk::from_sections` 重算路径，所以对拍比较的正是存档里真正写出的值。
+///
+/// The packed `LongArrayTag` words of the four `FINAL_HEIGHTMAPS` that delivery/save
+/// writes. Assembles via [`build_region_column`] first, so the comparison covers the
+/// very values the game persists through `Chunk::from_sections`.
+pub fn final_heightmap_words(
+    chunk: &GeneratedChunk,
+) -> Result<BTreeMap<&'static str, Vec<u64>>, String> {
+    let column = build_region_column(chunk)?;
+    let world = column.parts().column.chunk();
+    let mut out = BTreeMap::new();
+    for (key, kind) in [
+        ("WORLD_SURFACE", HeightmapKind::WorldSurface),
+        ("OCEAN_FLOOR", HeightmapKind::OceanFloor),
+        ("MOTION_BLOCKING", HeightmapKind::MotionBlocking),
+        (
+            "MOTION_BLOCKING_NO_LEAVES",
+            HeightmapKind::MotionBlockingNoLeaves,
+        ),
+    ] {
+        out.insert(key, world.heightmap(kind));
+    }
+    Ok(out)
 }
 
 /// 建 biome 容器时用的初始群系；`set` 会立刻覆盖全部 64 格，这个值不进结果。

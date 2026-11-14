@@ -21,6 +21,7 @@ use mc_bamboo_world::{
         Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
         TaskResult, TicketOp,
     },
+    light::generate::GeneratedLight,
     store::ChunkRevision,
 };
 
@@ -32,6 +33,8 @@ use crate::{
     inbound::PlayerId,
     profiler::{Metric, SubPhase},
     region::{Region, RegionColumn, parking::Parking},
+    worldgen::GeneratedChunk,
+    worldgen_features::{BlockDelta, GenerateOutput, assemble_feature_column},
 };
 
 /// 编解码累计耗时（纳秒）。解析/序列化内联在世界线程上做，这里量出总耗时，
@@ -76,6 +79,14 @@ pub(crate) const MAX_IO_MAILBOX: usize = 16384;
 /// Guard against a truly non-convergent `pump`. A large world must never panic
 /// here: on exceeding the cap, log and stop the pump instead of asserting.
 pub(crate) const PUMP_ROUND_LIMIT: usize = 20_000_000;
+/// 关服排空计算池的墙钟上限。正常关服远小于这个值；它只防止任务被无限重派
+/// 时世界线程卡死，超时后明确记下没存下来的区块、继续关服，绝不无限等。
+///
+/// Wall-clock bound for draining the compute pool at shutdown. Normal shutdown
+/// is far shorter; it only stops the world thread from hanging if tasks keep
+/// being resubmitted forever. On timeout, log the unsaved chunks and continue
+/// shutting down instead of waiting forever.
+pub(crate) const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// 计算池里每条线程最多同时放几个任务，其余留在宿主的待办里。
 /// 留在宿主手里的任务还能按玩家的新位置重排、撤票时直接丢掉，
 /// 不会在池子里排一长串过期的远处任务。
@@ -167,6 +178,27 @@ pub(crate) struct DirectorHost {
     io: Option<ChunkIo>,
     /// 生成阶段函数。内联执行器和计算池共用这一个。
     generator: Arc<dyn ChunkGenerator>,
+    /// 生成期每个区块的半成品 ProtoChunk（CARVERS 地形 + 已按 `TaskId` 顺序合并的
+    /// 地物写增量），存成不可变 `Arc`：任务发出后世界线程不再改这份快照，要改就
+    /// `Arc::make_mut` 写时复制出新的 `Arc`（设计稿 5.3.1）。只在世界线程读写，
+    /// 计算池拿到的都是 `Arc` 克隆、只读。区块交付/收回时清掉。
+    ///
+    /// Half-built ProtoChunk per chunk during generation (CARVERS terrain +
+    /// feature deltas merged in `TaskId` order), as an immutable `Arc`: once a
+    /// task is dispatched the world thread never mutates that snapshot, it
+    /// copy-on-writes a new `Arc` via `Arc::make_mut` (design 5.3.1). Only the
+    /// world thread mutates; the compute pool gets read-only `Arc` clones.
+    partials: BTreeMap<ChunkPos, Arc<GeneratedChunk>>,
+    /// 每个区块累计的地物写增量，按世界线程收到结果的顺序（`TaskId` 升序）
+    /// 追加；完工组装时排成规范序再落盘，结果与追加顺序无关。
+    /// Per-chunk feature write deltas, appended in the order the world thread
+    /// receives results (ascending `TaskId`); sorted canonically at assembly so
+    /// the final blocks do not depend on append order.
+    feature_deltas: BTreeMap<ChunkPos, Vec<BlockDelta>>,
+    /// `light` 阶段算出的生成期光照，按区块存；完工组装时装进交付盒子并清掉。
+    /// Generation-time light from the `light` stage, per chunk; installed into
+    /// the delivered column at final assembly and cleared.
+    generated_light: BTreeMap<ChunkPos, GeneratedLight>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
     /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
@@ -285,6 +317,9 @@ impl DirectorHost {
             parked: 0,
             io: None,
             generator: Arc::new(FlatGenerator::from_env()),
+            partials: BTreeMap::new(),
+            feature_deltas: BTreeMap::new(),
+            generated_light: BTreeMap::new(),
             pool: None,
             compute_backlog: HashMap::new(),
             backlog_order: BinaryHeap::new(),
@@ -1093,7 +1128,7 @@ impl DirectorHost {
             // 没有新消息就收敛了。
             self.flush_region_mail_into(region, &mut events);
             if events.is_empty() {
-                self.submit_reads(region);
+                self.submit_reads();
                 self.submit_compute(region);
                 self.pump_events = events;
                 return;
@@ -1106,7 +1141,17 @@ impl DirectorHost {
     /// 区块因此就是最近的那一圈（官方 `PlayerChunkSender` 的语义）。
     /// Submit the reads collected this round in distance order. The IO worker is
     /// FIFO, so near chunks reply first and join the same ordered delivery batch.
-    fn submit_reads(&mut self, region: &Region) {
+    ///
+    /// 玩家中心取自 Director 票表而不是 `region.players`：进服那一刻
+    /// `Event::Tickets`（`PlayerMoved`）先派读任务、随后才 `region.add_player`，
+    /// 用 `region.players` 会取到空表，读任务退化成按坐标排序，远处区块抢先回执。
+    /// 票表在 `handle_effects` 里同步 `set_player`，派读时一定有正确的中心。
+    /// Player centers come from the Director ticket table, not `region.players`:
+    /// on join, `Event::Tickets` (`PlayerMoved`) queues reads before
+    /// `region.add_player`, so `region.players` is empty and reads would fall back
+    /// to raw coordinate order, letting far chunks reply first. The ticket table
+    /// is updated synchronously in `handle_effects`, so centers are always valid.
+    fn submit_reads(&mut self) {
         if self.read_queue.is_empty() {
             return;
         }
@@ -1114,7 +1159,7 @@ impl DirectorHost {
             self.read_queue.clear();
             return;
         };
-        let centers = Self::guaranteed_centers(region);
+        let centers = self.director.tickets().player_centers();
         let mut queued = std::mem::take(&mut self.read_queue);
         // 稳定排序：同等距离保持 Director 派任务的顺序（TaskId 升序），结果确定。
         queued.sort_by_key(|&(pos, _, _)| Self::distance_to_players(pos, &centers));
@@ -1175,7 +1220,24 @@ impl DirectorHost {
                     }
                 }
             }
-            Task::Generate { stage, column, .. } => {
+            Task::Generate {
+                stage,
+                column,
+                neighbors,
+                ..
+            } => {
+                // 只读快照：中心取自己的半成品，邻居按 Director 列的位置从缓存取；
+                // 没有快照的位置留 `None`，计算线程用纯函数现算。全是 `Arc` 克隆，
+                // 不复制方块数据，也不改缓存。
+                // Read-only snapshots: the center's half-built column plus each
+                // listed neighbor's `Arc`; a missing neighbor is `None` and the
+                // compute thread regenerates it purely. All `Arc` clones: no
+                // block copy, no cache mutation.
+                let center_snapshot = self.partials.get(&pos).cloned();
+                let snapshots: Vec<(ChunkPos, Option<Arc<GeneratedChunk>>)> = neighbors
+                    .iter()
+                    .map(|(npos, _)| (*npos, self.partials.get(npos).cloned()))
+                    .collect();
                 if self.pool.is_some() {
                     let generator = Arc::clone(&self.generator);
                     self.queue_compute(
@@ -1185,18 +1247,49 @@ impl DirectorHost {
                         ChunkWork::Generate {
                             stage,
                             center: column,
+                            center_snapshot,
+                            neighbors: snapshots,
                             generator,
                         },
                     );
                     return None;
                 }
-                // 邻居视图现在总是空的（超平坦不需要），见 `chunk_generator`。
+                // 内联执行器：当场跑，增量由 `merge_generated` 合并（同一世界线程）。
+                // Inline: run now; `merge_generated` merges deltas on this thread.
+                let output =
+                    self.generator
+                        .generate(stage, pos, column, center_snapshot, &snapshots);
+                self.merge_generated(pos, &output);
                 TaskResult::Generated {
                     stage,
-                    column: self.generator.generate(stage, pos, column, &[]),
+                    column: output.column,
                 }
             }
-            Task::Assemble { column, .. } => TaskResult::Assembled { column },
+            Task::Assemble { column, .. } => {
+                // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物增量组装交付
+                // 盒子（增量排规范序，和合并顺序无关）；flat / 读盘路径没有这份
+                // 快照，原盒子照旧。组装和生成用的是同一个 `build_region_column`。
+                // At completion, assemble from the immutable CARVERS snapshot +
+                // accumulated feature deltas (canonical order, merge-order
+                // independent); flat / disk paths keep the original box.
+                let mut column = match self.partials.get(&pos) {
+                    Some(snapshot) => {
+                        let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
+                        assemble_feature_column(snapshot.as_ref(), &mut deltas).unwrap_or(column)
+                    }
+                    None => column,
+                };
+                // `light` 阶段算好的天空光 + 方块光装进交付盒子并标记
+                // `isLightOn=true`；flat / 读盘路径没有这份光照，盒子照旧。
+                // Install the `light` stage's sky + block light into the
+                // delivered column with `isLightOn=true`; flat/disk keep theirs.
+                if let Some(light) = self.generated_light.remove(&pos) {
+                    column.set_generated_light(light);
+                }
+                self.partials.remove(&pos);
+                self.feature_deltas.remove(&pos);
+                TaskResult::Assembled { column }
+            }
             Task::Save { seq, column, .. } => {
                 if self.io.is_some() {
                     if self.pool.is_some() {
@@ -1357,6 +1450,31 @@ impl DirectorHost {
             .collect()
     }
 
+    /// 合并一次生成结果：`terrain` 的 CARVERS 快照进缓存（不可变 `Arc`，不改
+    /// 已有的那份）；地物写增量按 `TaskId` 顺序追加到目标区块的增量表。
+    /// `compute_event` 已按 `TaskId` 升序、内联路径也在同一世界线程调用，所以
+    /// 追加顺序确定；完工时 `assemble_feature_column` 再排规范序，结果与顺序无关。
+    ///
+    /// Merge one generation result: cache the `terrain` CARVERS snapshot as an
+    /// immutable `Arc` (never mutate an existing snapshot) and append feature
+    /// deltas to each target chunk's delta list in `TaskId` order. `compute_event`
+    /// calls this in ascending `TaskId` order; `assemble_feature_column` sorts
+    /// canonically at completion, so the result is order-independent.
+    fn merge_generated(&mut self, pos: ChunkPos, output: &GenerateOutput) {
+        if let Some(terrain) = &output.terrain {
+            self.partials.insert(pos, Arc::new(terrain.clone()));
+        }
+        for (target, deltas) in &output.deltas {
+            self.feature_deltas
+                .entry(*target)
+                .or_default()
+                .extend_from_slice(deltas);
+        }
+        if let Some(light) = &output.light {
+            self.generated_light.insert(pos, light.clone());
+        }
+    }
+
     /// 一条池子回执变成 Director 的 `TaskDone`。
     fn compute_event(&mut self, id: TaskId, reply: ChunkReply) -> Event<Box<RegionColumn>> {
         let ChunkReply {
@@ -1370,7 +1488,13 @@ impl DirectorHost {
             ChunkOutcome::Decoded(_) if cancelled => TaskResult::Cancelled,
             ChunkOutcome::Decoded(Ok(column)) => TaskResult::Decoded { column },
             ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
-            ChunkOutcome::Generated { stage, column } => TaskResult::Generated { stage, column },
+            ChunkOutcome::Generated { stage, output } => {
+                self.merge_generated(pos, &output);
+                TaskResult::Generated {
+                    stage,
+                    column: output.column,
+                }
+            }
             ChunkOutcome::GenerateFailed { error } => TaskResult::BadChunk { error },
             ChunkOutcome::Saved {
                 seq,
@@ -1393,10 +1517,23 @@ impl DirectorHost {
     }
 
     /// 关服用：阻塞等计算池把在途任务全部做完，结果照常喂给 Director。
-    /// 池子线程意外全退时不会无限等：超时一轮没有任何进展就记错误退出。
+    /// 池子线程意外全退、或任务被无限重派时都不会无限等：没有进展或超过
+    /// 墙钟上限就记错误退出，把还没存下来的区块列出来。
+    ///
+    /// Drain the compute pool at shutdown, feeding results to the Director. A
+    /// dead pool or endlessly resubmitted tasks must never hang the world thread:
+    /// no progress or a wall-clock timeout logs the unsaved chunks and returns.
     fn drain_compute(&mut self, region: &mut Region) {
+        let started = Instant::now();
         let mut idle_rounds = 0;
         while self.compute_in_flight() > 0 {
+            if started.elapsed() >= SHUTDOWN_DRAIN_TIMEOUT {
+                tracing::error!(
+                    left = self.compute_in_flight(),
+                    "chunk compute pool did not drain before the shutdown deadline; some chunks are not saved"
+                );
+                return;
+            }
             self.submit_compute(region);
             let events = self.collect_compute(Some(Duration::from_millis(100)));
             if events.is_empty() {
@@ -1630,6 +1767,11 @@ impl DirectorHost {
                     self.save_cooldown.remove(&pos);
                     self.saved_revisions.remove(&pos);
                     self.loaded_save_tick.remove(&pos);
+                    // 生成期的半成品快照、累计增量和光照也在这里清掉。
+                    // Clear the generation-time snapshot, deltas and light.
+                    self.partials.remove(&pos);
+                    self.feature_deltas.remove(&pos);
+                    self.generated_light.remove(&pos);
                 }
             }
         }
@@ -2510,5 +2652,71 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 0, "poll_io already consumed all read replies");
+    }
+
+    /// 进服那刻的票 pump 在 `region.add_player` 之前派读任务，`region.players`
+    /// 还是空的；`submit_reads` 必须用 Director 票表里的玩家中心按距离排序，
+    /// 否则读任务退化成按坐标排序，远处区块抢先回执、第一批不是脚下 3×3。
+    ///
+    /// On join, the ticket pump queues reads before `region.add_player`, so
+    /// `region.players` is empty. `submit_reads` must order by the player centers
+    /// from the Director ticket table; otherwise reads fall back to raw coordinate
+    /// order, far chunks reply first, and the first batch is not the 3x3.
+    #[test]
+    fn read_submission_uses_ticket_table_centers_not_region_players() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Temp(std::path::PathBuf);
+        impl Temp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-submit-order-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp = Temp::new();
+        let dir = WorldDir::new(&temp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        // 玩家只在票表里（模拟进服派读时尚未 region.add_player），region 里没有玩家。
+        // The player is only in the ticket table (reads queued before add_player).
+        host.director
+            .tickets_mut()
+            .set_player(1, Some(ChunkPos::new(0, 0)));
+
+        // 故意远处在前、出生点在后：修复前会按坐标排，(-10,-10) 抢在最前。
+        // Far chunks first on purpose: before the fix they sorted by coordinate.
+        host.read_queue = vec![
+            (ChunkPos::new(10, 10), 1, 0),
+            (ORIGIN, 2, 0),
+            (ChunkPos::new(3, 0), 3, 0),
+            (ChunkPos::new(-10, -10), 4, 0),
+        ];
+        host.submit_reads();
+        host.flush_io();
+
+        let mut seen = Vec::new();
+        while let Some(reply) = host.io().unwrap().try_recv() {
+            if let Reply::Read { pos, .. } = reply {
+                seen.push(pos);
+            }
+        }
+        assert_eq!(seen.len(), 4, "四个读都提交了");
+        assert_eq!(seen[0], ORIGIN, "最近的出生点区块必须先提交给 IO 线程");
+        assert_eq!(seen[1], ChunkPos::new(3, 0), "其次按距离");
     }
 }

@@ -9,6 +9,7 @@
 mod block;
 mod data_layer;
 mod engine;
+pub mod generate;
 mod level;
 mod properties;
 mod queue;

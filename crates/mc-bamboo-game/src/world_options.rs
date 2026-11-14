@@ -88,28 +88,45 @@ impl LevelType {
 
 /// 超平坦预设，从 `generator-settings` 的 JSON 解析。
 ///
-/// 官方 `FlatLevelGeneratorSettings.CODEC` 认 `layers`、`biome`、`features`、
-/// `lakes` 等；空 JSON（`{}`）得到默认预设。这里只需要地层和群系：其余字段
-/// 只影响地物和结构，本轮都不接。
+/// 照官方 26.3 `FlatLevelGeneratorSettings.CODEC` 解析全部五个字段：`layers`、
+/// `biome`、`features`、`lakes`、`structure_overrides`。`features` / `lakes` /
+/// `structure_overrides` 只影响地物、湖和结构，Bamboo 的超平坦地形只填地层和群系，
+/// 所以解析后存着但不参与 `flat_chunk`（见 README 已知限制）。空 JSON（`{}`）按
+/// `server.properties` 的默认超平坦预设补齐。
 ///
-/// Flat preset parsed from `generator-settings` JSON. Vanilla's
-/// `FlatLevelGeneratorSettings.CODEC` reads `layers`, `biome`, `features`,
-/// `lakes`, etc.; an empty `{}` yields the default preset. Only layers and biome
-/// matter here: the other fields drive features and structures, not wired yet.
+/// Flat preset parsed from `generator-settings` JSON, reading all five fields of
+/// vanilla 26.3 `FlatLevelGeneratorSettings.CODEC`: `layers`, `biome`, `features`,
+/// `lakes`, `structure_overrides`. The last three drive features / lakes /
+/// structures only; Bamboo's flat terrain fills just layers and biome, so they
+/// are stored but do not affect `flat_chunk` (see README known limitations).
+/// An empty `{}` falls back to the `server.properties` default flat preset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatSettings {
     /// 从世界底部往上的 `(默认状态 ID, 层数)`。
     pub layers: Vec<(u32, i32)>,
     /// 每个 quart 格填的群系注册表 ID。
     pub biome: u32,
+    /// `features`：`applyBiomeDecoration` 放不放地物。
+    /// `features`: whether `applyBiomeDecoration` places features.
+    pub features: bool,
+    /// `lakes`：放不放湖特征。/ `lakes`: whether lake features are placed.
+    pub lakes: bool,
+    /// `structure_overrides`：官方 codec 的 `HolderSet`，规范化成注册名列表
+    /// （`#tag` 是单个带 `#` 前缀的元素，列表就是各项）。空表示没有该字段。
+    /// `structure_overrides`: the codec's `HolderSet`, normalized to a list of
+    /// ids (a `#tag` is one `#`-prefixed element, a list keeps its entries).
+    /// Empty means the field is absent.
+    pub structure_overrides: Vec<String>,
 }
 
 impl Default for FlatSettings {
-    /// 官方默认：`bedrock ×1`、`dirt ×2`、`grass_block ×1`，群系 `plains`。
+    /// 官方默认：`bedrock ×1`、`dirt ×2`、`grass_block ×1`，群系 `plains`，
+    /// features/lakes/structure_overrides 都是关/空。
     /// 和 `mc_bamboo_world::flat::generate_chunk` / 导出的 `WORLD_GEN_SETTINGS` 一致。
     ///
-    /// Official default: `bedrock ×1`, `dirt ×2`, `grass_block ×1`, biome `plains`.
-    /// Matches `mc_bamboo_world::flat::generate_chunk` and the exported `WORLD_GEN_SETTINGS`.
+    /// Official default: `bedrock ×1`, `dirt ×2`, `grass_block ×1`, biome `plains`,
+    /// features/lakes/structure_overrides off/empty. Matches
+    /// `mc_bamboo_world::flat::generate_chunk` and the exported `WORLD_GEN_SETTINGS`.
     fn default() -> Self {
         Self {
             layers: vec![
@@ -118,17 +135,25 @@ impl Default for FlatSettings {
                 (blocks::GRASS_BLOCK, 1),
             ],
             biome: registries::biome::PLAINS as u32,
+            features: false,
+            lakes: false,
+            structure_overrides: Vec::new(),
         }
     }
 }
 
 impl FlatSettings {
     /// 解析 `generator-settings`。解析失败返回错误，让调用方回落默认预设。
-    /// 只认 `layers`（`block` + `height`）和 `biome`；缺字段按官方默认补齐。
+    /// 照官方 `FlatLevelGeneratorSettings.CODEC` 认全部五个字段：`layers`、
+    /// `biome`、`features`、`lakes`、`structure_overrides`；`features` / `lakes`
+    /// 缺省 false，`structure_overrides` 缺省空，和官方的
+    /// `optionalAlwaysPresentFieldOf` / `lenientOptionalFieldOf` 一致。
     ///
     /// Parse `generator-settings`; on failure the caller falls back to the
-    /// default. Reads `layers` (`block` + `height`) and `biome`, defaulting the
-    /// rest like vanilla.
+    /// default. Reads all five fields of vanilla `FlatLevelGeneratorSettings.CODEC`:
+    /// `layers`, `biome`, `features`, `lakes`, `structure_overrides`. `features` /
+    /// `lakes` default to false and `structure_overrides` to empty, matching the
+    /// official `optionalAlwaysPresentFieldOf` / `lenientOptionalFieldOf`.
     pub fn parse(json: &str) -> Result<Self, String> {
         let text = if json.trim().is_empty() { "{}" } else { json };
         let root: Value = serde_json::from_str(text)
@@ -155,8 +180,11 @@ impl FlatSettings {
                     .ok_or_else(|| format!("unknown flat layer block {name}"))?
                     .default_state;
                 let height = i32::try_from(height).map_err(|_| "flat layer height too large")?;
-                if height <= 0 {
-                    return Err("flat layer height must be positive".to_owned());
+                // 官方 `FlatLayerInfo.CODEC` 是 `intRange(0, Y_SIZE)`，0 层合法（不填方块）。
+                // Official `FlatLayerInfo.CODEC` is `intRange(0, Y_SIZE)`; height 0
+                // is legal and simply fills no blocks.
+                if height < 0 {
+                    return Err("flat layer height must not be negative".to_owned());
                 }
                 parsed.push((state, height));
             }
@@ -169,6 +197,25 @@ impl FlatSettings {
                 .ok_or_else(|| format!("unknown flat biome {biome}"))?
                 as u32;
         }
+        // `features` / `lakes`：官方 `optionalAlwaysPresentFieldOf` 默认 false。
+        // `features` / `lakes`: official `optionalAlwaysPresentFieldOf`, default false.
+        settings.features = root
+            .get("features")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        settings.lakes = root.get("lakes").and_then(Value::as_bool).unwrap_or(false);
+        // `structure_overrides`：标签是单个 `#tag` 字符串，直接列表是字符串数组；
+        // 坏形状按 `lenientOptionalFieldOf` 当空处理。
+        // `structure_overrides`: a tag is one `#tag` string, a direct list is a
+        // string array; a bad shape is treated as empty (lenient).
+        settings.structure_overrides = match root.get("structure_overrides") {
+            Some(Value::String(tag)) => vec![tag.clone()],
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect(),
+            _ => Vec::new(),
+        };
         Ok(settings)
     }
 }
@@ -386,8 +433,38 @@ mod tests {
         let parsed = FlatSettings::parse(custom).unwrap();
         assert_eq!(parsed.layers, vec![(blocks::STONE, 3)]);
         assert_eq!(parsed.biome, registries::biome::DESERT as u32);
+        assert!(!parsed.features);
+        assert!(!parsed.lakes);
+        assert!(parsed.structure_overrides.is_empty());
         assert!(FlatSettings::parse("[]").is_err());
         assert!(FlatSettings::parse(r#"{"layers":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn flat_parse_reads_all_five_codec_fields() {
+        // 全部五个字段：features / lakes / structure_overrides 也要解析。
+        // All five fields: features / lakes / structure_overrides must parse too.
+        let tag = r##"{"layers":[{"block":"minecraft:stone","height":2},{"block":"minecraft:glass","height":0}],"biome":"minecraft:desert","features":true,"lakes":true,"structure_overrides":"#minecraft:villages"}"##;
+        let parsed = FlatSettings::parse(tag).unwrap();
+        assert_eq!(parsed.layers, vec![(blocks::STONE, 2), (blocks::GLASS, 0)]);
+        assert_eq!(parsed.biome, registries::biome::DESERT as u32);
+        assert!(parsed.features);
+        assert!(parsed.lakes);
+        assert_eq!(
+            parsed.structure_overrides,
+            vec!["#minecraft:villages".to_owned()]
+        );
+
+        // 直接列表形态。/ Direct list form.
+        let list = r#"{"structure_overrides":["minecraft:villages","minecraft:desert_pyramids"]}"#;
+        let parsed = FlatSettings::parse(list).unwrap();
+        assert_eq!(
+            parsed.structure_overrides,
+            vec![
+                "minecraft:villages".to_owned(),
+                "minecraft:desert_pyramids".to_owned()
+            ]
+        );
     }
 
     #[test]

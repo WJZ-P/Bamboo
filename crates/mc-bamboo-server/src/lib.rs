@@ -9,6 +9,7 @@
 mod config;
 pub mod config_files;
 mod connection;
+mod console;
 mod event;
 mod lists;
 mod ops;

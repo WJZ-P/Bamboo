@@ -21,7 +21,11 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, ChunkPos};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::components::ComponentPatch;
-use mc_bamboo_world::{column::ChunkColumn, director::ChunkBundle};
+use mc_bamboo_world::{
+    column::{ChunkColumn, ChunkColumnParts},
+    director::ChunkBundle,
+    light::generate::GeneratedLight,
+};
 
 use crate::{
     chunk_codec::PackedChunk, command_block::CommandBlockData, container::ContainerEntry,
@@ -311,6 +315,26 @@ impl RegionColumn {
             command_blocks: &self.command_blocks,
             books: &self.books,
             entities: &self.entities,
+        }
+    }
+
+    /// 把生成期算好的天空光 / 方块光装进这一柱，并标记 `isLightOn=true`。
+    ///
+    /// 用 [`ChunkColumnParts::read_from`] 原样搬方块、高度图、告示牌等，只换掉两层
+    /// 光照，再用 [`ChunkColumn::from_parts`] 重建 —— 和读盘解码同一条路径，`None`
+    /// 段按官方规则处理。生成列总是合法的，正常不会重建失败；万一失败就保持原样。
+    ///
+    /// Install generation-time sky/block light into this column and set
+    /// `isLightOn=true`. `ChunkColumnParts::read_from` copies blocks, heightmaps,
+    /// signs, etc.; only the two light layers are replaced before
+    /// `ChunkColumn::from_parts` rebuilds (same path as disk decode). Generated
+    /// columns are always valid; a failed rebuild keeps the original column.
+    pub fn set_generated_light(&mut self, light: GeneratedLight) {
+        let mut parts = ChunkColumnParts::read_from(&self.column);
+        parts.light = [light.sky, light.block];
+        parts.light_on = true;
+        if let Ok(column) = ChunkColumn::from_parts(parts) {
+            *self.column = column;
         }
     }
 

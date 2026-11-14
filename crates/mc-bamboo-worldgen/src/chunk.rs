@@ -23,6 +23,7 @@ use serde_json::Value;
 use crate::{
     Worldgen,
     aquifer::Aquifer,
+    beardifier::Beardifier,
     biome::MultiNoiseBiomeSource,
     biome_manager::BiomeManager,
     carver::Carvers,
@@ -261,10 +262,31 @@ impl<'a> Generator<'a> {
         chunk_z: i32,
         stage: Stage,
     ) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain_with_beardifier(chunk_x, chunk_z, stage, None)
+    }
+
+    /// `terrain` 加上一个本区块的 `Beardifier`。`structure_starts` / `structure_references`
+    /// 接进游戏后由调用方把真实结构喂进来；`None` 等价于官方 `Beardifier.EMPTY`，和
+    /// [`Generator::terrain`] 逐位相同。`first_occupied_height` 等基线路径永远走 `None`。
+    ///
+    /// `terrain` with a per-chunk `Beardifier`. Once the structure stages are wired into the
+    /// game the caller feeds real structures here; `None` equals vanilla `Beardifier.EMPTY` and
+    /// is bit-identical to [`Generator::terrain`]. Baseline paths such as
+    /// `first_occupied_height` always stay on `None`.
+    pub fn terrain_with_beardifier(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: Option<&Beardifier>,
+    ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
         let mut context = Context::new(self.cache_count);
+        if let Some(beardifier) = beardifier {
+            context.set_beardifier(std::sync::Arc::new(beardifier.clone()));
+        }
         let mut density = context.acquire(volume.len());
         // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
         // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
@@ -346,7 +368,38 @@ impl<'a> Generator<'a> {
     /// scanning top-down for the first non-air block. `getBaseHeight` returns blockY+1 and
     /// `getFirstOccupiedHeight` subtracts 1, so we return that blockY directly; an all-air
     /// column yields minY-1.
+    ///
+    /// 官方 `iterateNoiseColumn` 用 `Beardifier = null`（EMPTY）：`getBaseHeight` 永远不受
+    /// 结构地基影响，所以这里固定走 EMPTY 分支，绝不调用 `terrain_with_beardifier`。接入真实
+    /// Beardifier 时这一支必须保持 EMPTY，否则结构生成期的高度判定会算进结构地基，和原版不一致。
+    ///
+    /// Vanilla `iterateNoiseColumn` passes a `null` (EMPTY) beardifier: `getBaseHeight` never
+    /// accounts for structure terrain, so this stays on the EMPTY branch and must never call
+    /// `terrain_with_beardifier`. Keep it EMPTY when a real Beardifier is wired in, or structure
+    /// height checks would wrongly include structure terrain and diverge from vanilla.
     pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
+        self.first_occupied_height_impl(block_x, block_z, false)
+    }
+
+    /// `getFirstOccupiedHeight(x, z, OCEAN_FLOOR_WG, ...)`：自顶向下找第一个 `BLOCKS_MOTION_IN_HEIGHTMAP`
+    /// 方块（WORLD_SURFACE_WG 用 `NOT_AIR`；OCEAN_FLOOR_WG 用 `MATERIAL_MOTION_BLOCKING`）。
+    ///
+    /// `getFirstOccupiedHeight(x, z, OCEAN_FLOOR_WG, ...)`: top-down first motion-blocking block
+    /// (WORLD_SURFACE_WG uses `NOT_AIR`; OCEAN_FLOOR_WG uses `MATERIAL_MOTION_BLOCKING`).
+    pub fn first_occupied_height_ocean_floor(
+        &self,
+        block_x: i32,
+        block_z: i32,
+    ) -> Result<i32, String> {
+        self.first_occupied_height_impl(block_x, block_z, true)
+    }
+
+    fn first_occupied_height_impl(
+        &self,
+        block_x: i32,
+        block_z: i32,
+        motion_blocking: bool,
+    ) -> Result<i32, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
@@ -372,7 +425,13 @@ impl<'a> Generator<'a> {
             let state = aquifer
                 .compute_substance(&mut context, block_x, block_y, block_z, value)
                 .unwrap_or(self.default_block);
-            if state != self.empty {
+            let opaque = if motion_blocking {
+                mc_bamboo_blocks::BlockState(state)
+                    .is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+            } else {
+                state != self.empty
+            };
+            if opaque {
                 context.release(density);
                 return Ok(block_y);
             }
@@ -449,7 +508,7 @@ impl<'a> Generator<'a> {
         &self,
         input: &crate::feature::FeatureChunks,
         steps_mask: i32,
-        allowed_kinds: Option<&'static [&'static str]>,
+        allowed_kinds: Option<&[String]>,
     ) -> Result<crate::feature::FeatureResult, String> {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         let context = crate::feature::run::FeatureContext {
@@ -562,6 +621,33 @@ mod tests {
         for section in sections {
             assert_eq!(section.len(), 64);
             assert!(section.iter().all(|id| (*id as usize) < 67));
+        }
+    }
+
+    /// 回归：种子 -1、区块 (52,-26) 在岩浆层上边界（y=-54）应给出水，而不是深板岩。
+    /// 官方 `Aquifer.NoiseBasedAquifer.computeSubstance` 在最近格子给的是水、且正下方
+    /// 全局流体是岩浆时，跳过压力计算直接返回水；缺失这段会误判成实心方块。
+    /// Regression: seed -1, chunk (52,-26) at the lava-layer top (y=-54) must be water,
+    /// not deepslate. Vanilla `computeSubstance` short-circuits to water when the nearest
+    /// cell is water and the global fluid one block below is lava; without it a pressure
+    /// check wrongly returns a solid block.
+    #[test]
+    fn aquifer_water_over_lava_boundary() {
+        let worldgen = Worldgen::load().expect("能读数据");
+        let generator = Generator::new(&worldgen, -1).expect("能建生成器");
+        let layers = generator
+            .terrain(52, -26, Stage::Noise)
+            .expect("能生成地形");
+        let water = block_by_name("minecraft:water")
+            .expect("有水方块")
+            .default_state;
+        let min_y = worldgen
+            .settings("minecraft:overworld")
+            .expect("有主世界设置")
+            .min_y;
+        let local_y = (-54 - min_y) as usize;
+        for z in 1..=3 {
+            assert_eq!(layers[local_y][14 * 16 + z], water, "y=-54 x=14 z={z}");
         }
     }
 }

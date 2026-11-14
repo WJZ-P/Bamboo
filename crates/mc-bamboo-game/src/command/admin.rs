@@ -235,6 +235,9 @@ fn apply_online_permission(region: &mut Region, uuid: Uuid, level: u8, op: bool)
 }
 
 fn level_of(region: &Region, id: PlayerId) -> u8 {
+    if crate::command::console::is_console(id) {
+        return crate::command::console::PERMISSION;
+    }
     region
         .players
         .get(&id)
@@ -243,6 +246,9 @@ fn level_of(region: &Region, id: PlayerId) -> u8 {
 }
 
 fn player_name(region: &Region, id: PlayerId) -> String {
+    if crate::command::console::is_console(id) {
+        return crate::command::console::NAME.to_owned();
+    }
     region
         .players
         .get(&id)

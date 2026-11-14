@@ -15,6 +15,7 @@ mod blocks;
 mod bossbar;
 mod catalog;
 mod clone;
+pub(crate) mod console;
 mod effects;
 mod enchant;
 pub(crate) mod feedback;
@@ -411,7 +412,16 @@ fn view_node(node: &OwnedNode) -> CommandNode<'_> {
     }
 }
 
+/// 命令来源的权限等级。控制台来源固定 4（官方 `LevelBasedPermissionSet.OWNER`），
+/// 其余按玩家表；查不到的玩家退回 `permission::ALL`。
+///
+/// Permission level of a command source. The console source is always 4
+/// (official `LevelBasedPermissionSet.OWNER`); players use their level, missing ones
+/// fall back to `permission::ALL`.
 fn level_of(region: &Region, id: PlayerId) -> u8 {
+    if console::is_console(id) {
+        return console::PERMISSION;
+    }
     region
         .players
         .get(&id)

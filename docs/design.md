@@ -65,7 +65,7 @@ mc-bamboo (bin)      apps/desktop
 
 | 通道 | 类型 | 满或断开时 |
 |---|---|---|
-| inbox | `std::sync::mpsc::Sender<Inbound>`，无界 | `InFlight` 配额 4096，超了断开。`Join`、`Leave`、`Latency`、`Shutdown` 不占配额 |
+| inbox | `std::sync::mpsc::Sender<Inbound>`，无界 | `InFlight` 配额 4096，超了断开。`Join`、`Leave`、`Latency`、`Shutdown`、`WhitelistReload`、`ConsoleCommand` 不占配额。`ConsoleCommand` 由命令行版单独的控制台输入线程读 stdin 产生（世界线程不读 stdin），用服务器控制台来源执行 |
 | 出站 | `tokio::sync::mpsc::UnboundedSender` 加一个字节计数 | 超过 64 MiB 时 `send` 返回 `false` 并立刻中止连接 |
 
 规则：

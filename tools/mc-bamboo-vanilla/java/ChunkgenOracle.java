@@ -456,7 +456,8 @@ public final class ChunkgenOracle {
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
-            String featureAllowList) {
+            String featureAllowList, boolean realPath, String settings,
+            Integer forcedX, Integer forcedZ, int scan) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -465,12 +466,30 @@ public final class ChunkgenOracle {
             long salt = 1;
             int through = 3;
             int stepsMask = ALL_STEPS;
+            // 逗号分隔的 Feature 类型 ID 白名单；null 表示不过滤。`--ore-only` 等价于
+            // `--feature-types minecraft:ore`，保留它是为了兼容旧的对拍脚本。
+            // Comma-separated Feature type-ID allow list; null means no filter.
+            // `--ore-only` is kept as an alias for `--feature-types minecraft:ore`.
             String featureAllowList = null;
+            // 真实服务端路径：3×3 possibleBiomes、carverBiome 分支、region.getBiomeManager()。
+            // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
+            boolean realPath = false;
+            String settings = "overworld";
+            // `--chunk X Z` 只出题这一个区块（精确复现）；`--scan N` 每个种子出 N 个
+            // 覆盖近处/远处/负坐标的随机区块；两者合用则出以 (X,Z) 为中心的连续网格。
+            // 都只改坐标来源。
+            // `--chunk X Z` emits only this one chunk (exact reproduction); `--scan N` emits
+            // N random chunks per seed spanning near/far/negative coordinates; combined they
+            // emit a contiguous grid centered on (X,Z). All only change the coordinate source.
+            Integer forcedX = null;
+            Integer forcedZ = null;
+            int scan = 0;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
                     case "--chunks" -> chunks = Integer.parseInt(args[++i]);
                     case "--salt" -> salt = Long.parseLong(args[++i]);
+                    case "--settings" -> settings = args[++i];
                     case "--through" -> {
                         String value = args[++i];
                         through = switch (value) {
@@ -493,11 +512,19 @@ public final class ChunkgenOracle {
                         }
                     }
                     case "--ore-only" -> featureAllowList = "minecraft:ore";
+                    case "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
+                    case "--real-path" -> realPath = true;
+                    case "--chunk" -> {
+                        forcedX = Integer.parseInt(args[++i]);
+                        forcedZ = Integer.parseInt(args[++i]);
+                    }
+                    case "--scan" -> scan = Integer.parseInt(args[++i]);
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
+                    forcedX, forcedZ, scan);
         }
     }
 
@@ -545,23 +572,29 @@ public final class ChunkgenOracle {
         }
 
         void run() throws Exception {
+            // --settings 在 normal / large_biomes / amplified 之间切 NoiseGeneratorSettings，
+            // 三种世界共用 minecraft:overworld 群系预设（WorldPresets.bootstrap）。
+            // --settings switches NoiseGeneratorSettings between normal / large_biomes /
+            // amplified; all three share the minecraft:overworld biome preset (WorldPresets.bootstrap).
+            String settingsId = "minecraft:" + this.options.settings();
+            NoiseGeneratorSettings generatorSettings =
+                    this.settings.getValue(Identifier.withDefaultNamespace(this.options.settings()));
+            if (generatorSettings == null) {
+                throw new IllegalStateException("missing " + settingsId + " noise settings");
+            }
             JsonObject header = new JsonObject();
             header.addProperty("type", "header");
             header.addProperty("version", SharedConstants.getCurrentVersion().id());
             header.addProperty("protocol", SharedConstants.getCurrentVersion().protocolVersion());
-            header.addProperty("settings", "minecraft:overworld");
+            header.addProperty("settings", settingsId);
             header.addProperty("preset", "minecraft:overworld");
-            header.addProperty("minY", -64);
-            header.addProperty("height", 384);
-            header.addProperty("seaLevel", 63);
+            header.addProperty("minY", generatorSettings.noiseSettings().minY());
+            header.addProperty("height", generatorSettings.noiseSettings().height());
+            header.addProperty("seaLevel", generatorSettings.seaLevel());
             header.addProperty("through", this.options.through());
             header.addProperty("steps", this.options.stepsMask());
             write(header);
 
-            NoiseGeneratorSettings generatorSettings = this.settings.getValue(Identifier.withDefaultNamespace("overworld"));
-            if (generatorSettings == null) {
-                throw new IllegalStateException("missing minecraft:overworld noise settings");
-            }
             NoiseBasedChunkGenerator generator =
                     new NoiseBasedChunkGenerator(
                             MultiNoiseBiomeSource.createFromPreset(
@@ -597,8 +630,16 @@ public final class ChunkgenOracle {
                     if (this.options.through() < 1) {
                         continue;
                     }
+                    if (this.options.realPath()) {
+                        // 真实服务端路径：3×3 possibleBiomes、carverBiome、region 的 biomeManager，
+                        // 并输出各阶段 prime/更新后的高度图。
+                        // Real-server path: 3x3 possibleBiomes, carverBiome, region's biomeManager,
+                        // plus every heightmap after the stage's prime/update.
+                        writeRealPath(seed, pos, proto, generator, generatorSettings, state, resolver);
+                        continue;
+                    }
                     if (this.options.through() >= 4) {
-                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager);
+                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager, resolver);
                         continue;
                     }
 
@@ -640,13 +681,13 @@ public final class ChunkgenOracle {
          */
         private void writeFeatures(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState randomState,
-                BiomeManager biomeManager) throws Exception {
+                BiomeManager biomeManager, BiomeResolver resolver) throws Exception {
             TerrainChunk[] chunks = new TerrainChunk[9];
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     chunks[(dz + 1) * 3 + dx + 1] = generateTerrain(
                             seed, new ChunkPos(pos.x() + dx, pos.z() + dz), generator,
-                            generatorSettings, randomState, biomeManager);
+                            generatorSettings, randomState, resolver);
                 }
             }
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
@@ -699,24 +740,13 @@ public final class ChunkgenOracle {
         /** 现有单区块生成流程抽出来，features 阶段要用九次。 */
         private TerrainChunk generateTerrain(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState state,
-                BiomeManager biomeManager) throws Exception {
+                BiomeResolver resolver) throws Exception {
+            // 和游戏一样走真实服务端路径（3×3 possibleBiomes、region 的 biomeManager）。
+            // Same real-server path as the game (3x3 possibleBiomes, region's biomeManager).
             ProtoChunk proto = newChunk(pos, generatorSettings);
             generator.createBiomes(state, Blender.empty(), null, proto).join();
             proto.setPersistedStatus(ChunkStatus.BIOMES);
-            DensityVolume volume = new DensityVolume(
-                    16, generatorSettings.noiseSettings().height(), 16,
-                    pos.getMinBlockX(), generatorSettings.noiseSettings().minY(), pos.getMinBlockZ());
-            java.util.function.Supplier<Aquifer.FluidPicker> picker = instancePicker(generator);
-            try (NoiseChunk noiseChunk = new NoiseChunk(
-                    state, Beardifier.EMPTY, generatorSettings, picker.get(), Blender.empty(), volume)) {
-                this.doFill.invoke(generator, noiseChunk, proto);
-                this.buildSurface.invoke(generator, proto, noiseChunk, state, biomeManager,
-                        this.possibleBiomes, generatorSettings.materialRule().value());
-                this.generateCarvers.invoke(generator, proto, Blender.empty(), noiseChunk, state,
-                        biomeManager, null, generatorSettings.materialRule().value());
-            }
-            proto.setPersistedStatus(ChunkStatus.TERRAIN);
-            Heightmap.primeHeightmaps(proto, ChunkStatus.FINAL_HEIGHTMAPS);
+            buildRealTerrain(seed, pos, proto, generator, generatorSettings, state, resolver);
             return new TerrainChunk(proto);
         }
 
@@ -797,6 +827,20 @@ public final class ChunkgenOracle {
             if (allowed == null) {
                 return;
             }
+            // 白名单是逗号分隔的一组条目：每个可以是 Feature 类型 ID（精确匹配 codec
+            // 的类型 ID），也可以是 placed feature 的注册名（精确匹配）。这样既能按类型
+            // 放开一整类，也能只隔离出单个 placed feature 做逐方块对拍。
+            // `--ore-only` 传单个 "minecraft:ore"，走同一条路径。
+            // Comma-separated allow list: each entry is either a Feature type ID
+            // (matched against the codec type ID) or a placed-feature registry name
+            // (matched exactly), so a whole type or a single placed feature can be run.
+            Set<String> selectors = new HashSet<>();
+            for (String part : allowed.split(",")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    selectors.add(trimmed);
+                }
+            }
             Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
                     this.registries.lookupOrThrow(Registries.PLACED_FEATURE);
             Set<String> keep = new HashSet<>();
@@ -805,9 +849,9 @@ public final class ChunkgenOracle {
                     net.minecraft.world.level.levelgen.placement.PlacedFeature> entry
                     : placed.entrySet()) {
                 net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
-                // 用 codec 的类型 ID 比，不用注册名前缀猜。
-                if (allowed.equals(featureTypeId(value.feature().value()))) {
-                    keep.add(entry.getKey().identifier().toString());
+                String name = entry.getKey().identifier().toString();
+                if (selectors.contains(featureTypeId(value.feature().value())) || selectors.contains(name)) {
+                    keep.add(name);
                 }
             }
             if (keep.isEmpty()) {
@@ -863,6 +907,168 @@ public final class ChunkgenOracle {
             java.util.function.Supplier<Aquifer.FluidPicker> picker =
                     (java.util.function.Supplier<Aquifer.FluidPicker>) this.globalFluidPicker.get(generator);
             return picker;
+        }
+
+        /**
+         * 真实服务端路径：照 {@code ChunkStatusTasks.buildTerrain}，用周围 3×3 群系调色板
+         * 并集、{@code carverBiome} 分支和 {@code region.getBiomeManager()}。造 17×17 个
+         * ProtoChunk（3×3 跑 {@code createBiomes}），不启动服务端、不接受 EULA。
+         *
+         * Real-server path: mirrors {@code ChunkStatusTasks.buildTerrain} with the
+         * 3x3 biome-palette union, the {@code carverBiome} branch and
+         * {@code region.getBiomeManager()}. Builds 17x17 ProtoChunks (3x3 run
+         * {@code createBiomes}); no server, no EULA.
+         */
+        private void writeRealPath(long seed, ChunkPos pos, ProtoChunk center,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
+                RandomState state, BiomeResolver resolver) throws Exception {
+            buildRealTerrain(seed, pos, center, generator, gs, state, resolver);
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "carvers");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            addBlocks(line, center);
+            addHeightmaps(line, center);
+            write(line);
+        }
+
+        /**
+         * 真实服务端路径把 center 跑到 TERRAIN 并 prime FINAL_HEIGHTMAPS；center 须已有群系。
+         *
+         * Real-server path: run center (biomes already filled) to TERRAIN and prime
+         * FINAL_HEIGHTMAPS.
+         */
+        private void buildRealTerrain(long seed, ChunkPos pos, ProtoChunk center,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
+                RandomState state, BiomeResolver resolver) throws Exception {
+            ProtoChunk[][] neighbors = new ProtoChunk[17][17];
+            for (int dx = -8; dx <= 8; dx++) {
+                for (int dz = -8; dz <= 8; dz++) {
+                    ProtoChunk p;
+                    if (dx == 0 && dz == 0) {
+                        p = center;
+                    } else {
+                        p = newChunk(new ChunkPos(pos.x() + dx, pos.z() + dz), gs);
+                        // 3×3 的 quart 群系格必须填好：collectPossibleBiomes 和
+                        // region.getBiomeManager().getBiome 都会读它们。
+                        // The 3x3 quart cells must be filled: collectPossibleBiomes and
+                        // region.getBiomeManager().getBiome both read them.
+                        if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) {
+                            generator.createBiomes(state, Blender.empty(), null, p).join();
+                        }
+                        p.setPersistedStatus(ChunkStatus.BIOMES);
+                    }
+                    neighbors[dx + 8][dz + 8] = p;
+                }
+            }
+            net.minecraft.server.level.WorldGenRegion region =
+                    makeRegion(center, neighbors, pos, seed, resolver);
+            Set<Holder<Biome>> possibleBiomes = collectPossibleBiomes(region, pos);
+            DensityVolume volume = new DensityVolume(
+                    16, gs.noiseSettings().height(), 16,
+                    pos.getMinBlockX(), gs.noiseSettings().minY(), pos.getMinBlockZ());
+            try (NoiseChunk noiseChunk = new NoiseChunk(
+                    state, Beardifier.EMPTY, gs, instancePicker(generator).get(),
+                    Blender.empty(), volume)) {
+                this.doFill.invoke(generator, noiseChunk, center);
+                this.buildSurface.invoke(generator, center, noiseChunk, state,
+                        region.getBiomeManager(), possibleBiomes, gs.materialRule().value());
+                this.generateCarvers.invoke(generator, center, Blender.empty(), noiseChunk,
+                        state, region.getBiomeManager(), region, gs.materialRule().value());
+            }
+            // ChunkStatusTasks.buildTerrain 的 thenApply：升到 TERRAIN 后 prime FINAL_HEIGHTMAPS。
+            // buildTerrain's thenApply: raise to TERRAIN, then prime FINAL_HEIGHTMAPS.
+            center.setPersistedStatus(ChunkStatus.TERRAIN);
+            Heightmap.primeHeightmaps(center, ChunkStatus.FINAL_HEIGHTMAPS);
+        }
+
+        /**
+         * 用 Unsafe 造一个不跑构造器的 WorldGenRegion，只填 getChunk/getBiomeManager 需要的字段。
+         *
+         * Build a constructor-less WorldGenRegion via Unsafe, filling only the fields
+         * getChunk/getBiomeManager need.
+         */
+        private net.minecraft.server.level.WorldGenRegion makeRegion(
+                ProtoChunk center, ProtoChunk[][] neighbors, ChunkPos pos, long seed,
+                BiomeResolver resolver) throws Exception {
+            net.minecraft.server.level.WorldGenRegion region =
+                    (net.minecraft.server.level.WorldGenRegion) allocate(
+                            net.minecraft.server.level.WorldGenRegion.class);
+            net.minecraft.util.StaticCache2D<ChunkAccess> cache =
+                    net.minecraft.util.StaticCache2D.create(pos.x(), pos.z(), 8,
+                            (x, z) -> neighbors[x - pos.x() + 8][z - pos.z() + 8]);
+            // terrain 步的 directDependencies：[BIOMES, BIOMES, STRUCTURE_STARTS×7]
+            // （ChunkPyramid: addRequirement(STRUCTURE_STARTS,8) + addRequirement(BIOMES,1)）。
+            // terrain step's directDependencies, from ChunkPyramid.
+            List<ChunkStatus> deps = new ArrayList<>();
+            deps.add(ChunkStatus.BIOMES);
+            deps.add(ChunkStatus.BIOMES);
+            for (int i = 2; i < 9; i++) {
+                deps.add(ChunkStatus.STRUCTURE_STARTS);
+            }
+            net.minecraft.world.level.chunk.status.ChunkDependencies direct =
+                    new net.minecraft.world.level.chunk.status.ChunkDependencies(
+                            com.google.common.collect.ImmutableList.copyOf(deps));
+            net.minecraft.world.level.chunk.status.ChunkStep step =
+                    new net.minecraft.world.level.chunk.status.ChunkStep(
+                            ChunkStatus.TERRAIN, direct, direct, 1, null);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "cache", cache);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "center", center);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "generatingStep", step);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region,
+                    "uncachedBiomeResolver", resolver);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "biomeManager",
+                    new BiomeManager(region, BiomeManager.obfuscateSeed(seed)));
+            return region;
+        }
+
+        /**
+         * 照 ChunkStatusTasks.collectPossibleBiomes(region, 1)：周围 3×3 调色板并集。
+         *
+         * Mirrors ChunkStatusTasks.collectPossibleBiomes(region, 1): the 3x3 palette union.
+         */
+        private Set<Holder<Biome>> collectPossibleBiomes(
+                net.minecraft.server.level.WorldGenRegion region, ChunkPos pos) {
+            Set<Holder<Biome>> out = new HashSet<>();
+            for (int z = pos.z() - 1; z <= pos.z() + 1; z++) {
+                for (int x = pos.x() - 1; x <= pos.x() + 1; x++) {
+                    region.getChunk(x, z).collectBiomesInPalette(out);
+                }
+            }
+            return out;
+        }
+
+        private static final sun.misc.Unsafe UNSAFE = loadUnsafe();
+
+        private static sun.misc.Unsafe loadUnsafe() {
+            try {
+                Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                field.setAccessible(true);
+                return (sun.misc.Unsafe) field.get(null);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        /** 跳过构造器分配实例，和 BlockOracle 一样。 Skip the constructor, as BlockOracle does. */
+        @SuppressWarnings("unchecked")
+        private static <T> T allocate(Class<T> type) {
+            try {
+                return (T) UNSAFE.allocateInstance(type);
+            } catch (InstantiationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        private static void setField(Class<?> owner, Object target, String name, Object value) {
+            try {
+                Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
         }
 
         private ProtoChunk newChunk(ChunkPos pos, NoiseGeneratorSettings generatorSettings) {
@@ -939,6 +1145,38 @@ public final class ChunkgenOracle {
             line.add("blocks", blocks);
         }
 
+        /**
+         * 输出 ProtoChunk 里现有的每一张高度图：逐列的 getFirstAvailable（世界高度）
+         * 和打包的 raw long[]（存档/发包用的位流）。
+         *
+         * Emit every heightmap present on the ProtoChunk: per-column getFirstAvailable
+         * (world height) and the packed raw long[] (the on-disk/wire bitstream).
+         */
+        private void addHeightmaps(JsonObject line, ChunkAccess chunk) {
+            JsonObject columns = new JsonObject();
+            JsonObject words = new JsonObject();
+            for (java.util.Map.Entry<Heightmap.Types, Heightmap> entry : chunk.getHeightmaps()) {
+                Heightmap.Types type = entry.getKey();
+                Heightmap map = entry.getValue();
+                JsonArray perColumn = new JsonArray();
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        perColumn.add(map.getFirstAvailable(x, z));
+                        this.checks++;
+                    }
+                }
+                columns.add(type.getSerializationKey(), perColumn);
+                JsonArray raw = new JsonArray();
+                for (long word : map.getRawData()) {
+                    raw.add(word);
+                    this.checks++;
+                }
+                words.add(type.getSerializationKey(), raw);
+            }
+            line.add("heightmaps", columns);
+            line.add("heightmap_words", words);
+        }
+
         private long[] seeds() {
             long[] seeds = new long[this.options.seeds()];
             Random random = new Random(this.options.salt());
@@ -949,16 +1187,53 @@ public final class ChunkgenOracle {
         }
 
         private int[][] chunks(long seed) {
-            int count = this.options.chunks();
+            // `--chunk X Z --scan N`：以 (X,Z) 为中心的一连续网格，密集覆盖含水层
+            // 格子边界。稀有分支（如岩浆层上边界 y=-54）只在连续洞穴区域里出现，
+            // 稀疏的随机区块扫不到，所以扫描要用相邻区块而不是完全随机的坐标。
+            // `--chunk X Z --scan N`: a contiguous grid centered on (X,Z) that densely
+            // covers aquifer cell boundaries. Rare branches (e.g. the lava-layer top at
+            // y=-54) only occur inside connected cave regions, which sparse random chunks
+            // miss; scanning therefore needs adjacent chunks rather than purely random ones.
+            if (this.options.forcedX() != null && this.options.scan() > 0) {
+                int side = 1;
+                while (side * side < this.options.scan()) {
+                    side += 2;
+                }
+                int r = side / 2;
+                int[][] grid = new int[side * side][2];
+                int k = 0;
+                for (int dz = -r; dz <= r; dz++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        grid[k][0] = this.options.forcedX() + dx;
+                        grid[k][1] = this.options.forcedZ() + dz;
+                        k++;
+                    }
+                }
+                return grid;
+            }
+            // `--chunk` 覆盖成单个区块，用 FIXED_SEEDS 里的种子逐个复现。
+            // `--chunk` overrides to a single chunk, reproduced under each FIXED_SEEDS entry.
+            if (this.options.forcedX() != null) {
+                return new int[][] {{this.options.forcedX(), this.options.forcedZ()}};
+            }
+            boolean scan = this.options.scan() > 0;
+            int count = scan ? this.options.scan() : this.options.chunks();
             int[][] result = new int[count][2];
-            Random random = new Random(seed ^ 0x51A7_5EEDL ^ this.options.salt());
+            // 扫描用独立的播种，覆盖近处网格（容易撞上含水层格子边界）、
+            // 中距离、远距离和负坐标；和默认坐标生成互不干扰。
+            // Scanning uses its own seed and spans a near grid (likely to hit aquifer cell
+            // boundaries), mid range, far range and negative coordinates, independent of
+            // the default coordinate generator.
+            long randomSeed = seed ^ 0x51A7_5EEDL ^ this.options.salt();
+            Random random = new Random(scan ? randomSeed ^ 0x5CA4_5EEDL : randomSeed);
             for (int i = 0; i < count; i++) {
-                if (i < FIXED_CHUNKS.length) {
+                if (!scan && i < FIXED_CHUNKS.length) {
                     result[i] = FIXED_CHUNKS[i].clone();
                 } else {
-                    int bound = switch (i % 3) {
-                        case 0 -> 64;
-                        case 1 -> 4096;
+                    int bound = switch (i % 4) {
+                        case 0 -> 48;
+                        case 1 -> 512;
+                        case 2 -> 16384;
                         default -> 1_000_000;
                     };
                     result[i][0] = random.nextInt(-bound, bound);

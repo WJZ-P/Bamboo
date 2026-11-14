@@ -32,6 +32,7 @@
 //! （定义域本身见 [`density::Function::axes`]）。
 
 pub mod aquifer;
+pub mod beardifier;
 pub mod biome;
 pub mod biome_manager;
 pub mod biome_temperature;
@@ -47,6 +48,7 @@ pub mod noise;
 pub mod random;
 pub mod sampler;
 pub mod settings;
+pub mod spawn;
 pub mod spline;
 pub mod structure;
 pub mod volume;

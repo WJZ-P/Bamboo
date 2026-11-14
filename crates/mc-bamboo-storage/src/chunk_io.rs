@@ -23,10 +23,10 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use mc_bamboo_core::ChunkPos;
@@ -40,6 +40,13 @@ use crate::{
 const READ_LIMIT: usize = 1 << 24;
 /// 打开的区域文件缓存上限，超过就整体关掉重开（设计稿 LRU 256 的简化版）。
 const CACHE_LIMIT: usize = 256;
+/// 关服 `flush` 栅栏的墙钟上限。正常关服远早于此；IO 线程卡住时（例如磁盘
+/// 故障）世界线程也必须能退出，不能无限等。超时会作为 Err 报出来。
+///
+/// Wall-clock bound for the shutdown `flush` barrier. Normal shutdown returns
+/// far earlier; a stuck IO thread (e.g. a disk failure) must still let the world
+/// thread exit instead of waiting forever. A timeout is reported as `Err`.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 世界线程发给 IO 线程的请求。
 enum Request {
@@ -410,11 +417,12 @@ impl ChunkIo {
 
     /// 阻塞栅栏：等此前所有请求处理完并 `sync_all`。**只允许关服使用**（设计稿
     /// 明确允许世界线程等待 IO 的唯一一处）；`save-all` 一律走不阻塞的 `Barrier`
-    /// 回执。刷盘或写盘失败会作为 `Err` 返回，不当成功。
+    /// 回执。刷盘、写盘失败或等待超时都会作为 `Err` 返回，不当成功、也不无限等。
     /// Blocking barrier: wait for all earlier requests and `sync_all`.
     /// **Shutdown only** (the single design-approved wait point); `save-all`
-    /// always uses the non-blocking `Barrier` ack. A sync or write failure is
-    /// returned as `Err`, never silently treated as success.
+    /// always uses the non-blocking `Barrier` ack. A sync failure, write failure
+    /// or wait timeout is returned as `Err`, never treated as success and never
+    /// waited on forever.
     pub fn flush(&self) -> io::Result<()> {
         let (done, wait) = mpsc::channel();
         if !self.send_request(Request::Flush { done }) {
@@ -423,12 +431,17 @@ impl ChunkIo {
                 "chunk IO thread stopped",
             ));
         }
-        wait.recv().map_err(|_| {
-            io::Error::new(
+        match wait.recv_timeout(FLUSH_TIMEOUT) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "chunk IO flush timed out at shutdown",
+            )),
+            Err(RecvTimeoutError::Disconnected) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "chunk IO thread stopped during flush",
-            )
-        })?
+            )),
+        }
     }
 
     /// 测试接缝：让 IO 线程真的退出。正常代码不要调用。

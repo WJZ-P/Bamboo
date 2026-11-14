@@ -250,6 +250,19 @@ impl<'a> Aquifer<'a> {
                 false
             }
         } else {
+            // 官方 `computeSubstance` 的岩浆层短路：最近格子在 y 给的是水，且
+            // (x, y-1, z) 的全局流体是岩浆时，跳过压力计算直接返回水。
+            // 缺了这段，压力判据会把水误判成实心方块（如 (52,-26) y=-54）。
+            // Vanilla `computeSubstance` lava-layer short circuit: if the nearest cell
+            // gives water at y and the global fluid at (x, y-1, z) is lava, return water
+            // without the pressure checks. Without it the pressure test turns the water
+            // into a solid block (e.g. chunk (52,-26) at y=-54).
+            if fluid == self.default_water
+                && self.global_fluid(y - 1).at(y - 1) == self.default_lava
+            {
+                self.should_schedule_fluid_update = true;
+                return Some(fluid);
+            }
             let mut barrier = f64::NAN;
             let second = self.status(context, indices[1]);
             let raw_pressure =
@@ -280,12 +293,14 @@ impl<'a> Aquifer<'a> {
                     return None;
                 }
             }
-            let changed = first != second
-                || (second_similarity >= flowing_update_similarity() && second != third)
-                || (third_similarity >= flowing_update_similarity() && first != third);
-            if changed {
+            // mayFlow23 用 similarity23，mayFlow13 用 similarity13（官方 337-339 行）。
+            // mayFlow23 uses similarity23, mayFlow13 uses similarity13 (vanilla lines 337-339).
+            let may_flow_12 = first != second;
+            let may_flow_23 = third_similarity >= flowing_update_similarity() && second != third;
+            let may_flow_13 = second_similarity >= flowing_update_similarity() && first != third;
+            if may_flow_12 || may_flow_23 || may_flow_13 {
                 true
-            } else if third_similarity >= flowing_update_similarity()
+            } else if second_similarity >= flowing_update_similarity()
                 && similarity(distances[0], distances[3]) >= flowing_update_similarity()
             {
                 let fourth = self.status(context, indices[3]);

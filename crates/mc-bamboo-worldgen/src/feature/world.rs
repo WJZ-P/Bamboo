@@ -5,7 +5,7 @@
 
 use mc_bamboo_data::{facts, state_facts};
 
-use super::{CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps};
+use super::{CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps, heightmap::is_opaque};
 
 /// 3×3 世界生成空间的读写接口。
 pub struct FeatureWorld<'a> {
@@ -17,8 +17,12 @@ pub struct FeatureWorld<'a> {
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
     pub biomes: &'a [Vec<Vec<u32>>; 9],
-    /// 只读的 primed 高度图（terrain 阶段算好的）。
-    pub heights: &'a [Heightmaps; 9],
+    /// primed 高度图（terrain 阶段算好的）；`set_block` 会按 `Heightmap.update` 增量更新
+    /// 四种 FINAL 类型。拥有一份可变拷贝，不借用输入，后续 feature 才能读到更新后的值。
+    ///
+    /// Primed heightmaps, owned so `set_block` can update the four FINAL types
+    /// incrementally via `Heightmap.update`; later features read the updated values.
+    pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
 }
@@ -36,7 +40,7 @@ impl<'a> FeatureWorld<'a> {
             height: input.height,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
-            heights: &input.heights,
+            heights: input.heights,
             deltas: empty(),
         })
     }
@@ -96,6 +100,30 @@ impl<'a> FeatureWorld<'a> {
         if chunk != CENTER {
             self.deltas[chunk].push((x, y, z, state));
         }
+        true
+    }
+
+    /// `Feature.safeSetBlock` / `level.setBlock`：先写 `ChunkAccess.setBlockState`，
+    /// 再按 `Heightmap.update` 增量更新四种 FINAL 高度图。只有走 `setBlockState` 的
+    /// 地物（simple_block / tree / 组合类里真正放方块的那些）用这条；`OreFeature` 走
+    /// `BulkSectionAccess`，仍用 [`Self::set_block`]。
+    ///
+    /// `Feature.safeSetBlock` path: write via `ChunkAccess.setBlockState` then
+    /// incrementally update the four FINAL heightmaps. Only features that go through
+    /// `setBlockState` use this; `OreFeature` (BulkSectionAccess) uses `set_block`.
+    pub fn set_block_with_heightmaps(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        let Some((chunk, index)) = self.block_index(x, y, z) else {
+            return false;
+        };
+        self.blocks[chunk][index / 256][index % 256] = state;
+        if chunk != CENTER {
+            self.deltas[chunk].push((x, y, z, state));
+        }
+        // 两个不相交的字段借用：`blocks` 只读（向下重扫要用），`heights` 可变。
+        // Disjoint field borrows: `blocks` shared (for the downward rescan), `heights` mutable.
+        let blocks = &self.blocks[chunk];
+        let heights = &mut self.heights[chunk];
+        super::heightmap::update(heights, blocks, self.min_y, x, y, z, state);
         true
     }
 
@@ -165,7 +193,14 @@ impl HeightmapKind {
     }
 }
 
-/// 从 terrain 阶段的方块自顶向下扫描出 primed 高度图。
+/// 从 terrain 阶段的方块自顶向下扫描出 primed 高度图，判定用官方 `Heightmap.Types.isOpaque()`
+/// （`heightmap::is_opaque`）。`WORLD_SURFACE_WG`/`WORLD_SURFACE` 共用 `NOT_AIR`，
+/// `OCEAN_FLOOR_WG`/`OCEAN_FLOOR` 共用 `MATERIAL_MOTION_BLOCKING`；
+/// `MOTION_BLOCKING` 与 `MOTION_BLOCKING_NO_LEAVES` 还要把含流体（水）的方块算进来。
+///
+/// Prime heightmaps using the official `Heightmap.Types.isOpaque()` predicates.
+/// WORLD_SURFACE(_WG) shares NOT_AIR, OCEAN_FLOOR(_WG) shares MATERIAL_MOTION_BLOCKING,
+/// and the two MOTION_BLOCKING variants also count blocks with a non-empty fluid.
 pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Heightmaps {
     let _ = height;
     let mut result = Heightmaps::new(min_y);
@@ -176,17 +211,16 @@ pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Height
         let mut motion_no_leaves = min_y - 1;
         for y in (min_y..min_y + blocks.len() as i32).rev() {
             let state = blocks[(y - min_y) as usize][column];
-            let bits = state_facts(state);
-            if bits & facts::AIR == 0 {
+            if is_opaque(state, HeightmapKind::WorldSurfaceWg) {
                 world_surface = world_surface.max(y);
             }
-            if bits & facts::MOTION_BLOCKING != 0 {
+            if is_opaque(state, HeightmapKind::OceanFloorWg) {
                 ocean_floor = ocean_floor.max(y);
-                motion = motion.max(y);
-            } else if bits & facts::CAN_OCCLUDE != 0 {
+            }
+            if is_opaque(state, HeightmapKind::MotionBlocking) {
                 motion = motion.max(y);
             }
-            if bits & facts::MOTION_BLOCKING_NO_LEAVES != 0 {
+            if is_opaque(state, HeightmapKind::MotionBlockingNoLeaves) {
                 motion_no_leaves = motion_no_leaves.max(y);
             }
         }
@@ -200,17 +234,7 @@ pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Height
     result
 }
 
-/// `Heightmap.primeHeightmaps` 的 `WORLD_SURFACE_WG` 判定：非空气。
+/// `Heightmap.Types.isOpaque()`，转发到 [`super::heightmap::is_opaque`]。
 pub fn is_heightmap_opaque(state: u32, kind: HeightmapKind) -> bool {
-    let bits = state_facts(state);
-    match kind {
-        HeightmapKind::WorldSurfaceWg | HeightmapKind::WorldSurface => bits & facts::AIR == 0,
-        HeightmapKind::OceanFloorWg | HeightmapKind::OceanFloor => {
-            bits & facts::MOTION_BLOCKING != 0
-        }
-        HeightmapKind::MotionBlocking => {
-            bits & facts::MOTION_BLOCKING != 0 || bits & facts::CAN_OCCLUDE != 0
-        }
-        HeightmapKind::MotionBlockingNoLeaves => bits & facts::MOTION_BLOCKING_NO_LEAVES != 0,
-    }
+    is_opaque(state, kind)
 }
