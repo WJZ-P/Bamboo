@@ -457,7 +457,7 @@ WebView2 的渲染进程不算在内。
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`。第二轮 features 接入见
   `docs/worldgen.md`、`docs/worldgen-features-plan.md`、`docs/world-model-design.md` 5.3.1 / 第 16 节）
-- 结构生成（`docs/worldgen-structures-plan.md`）本轮只做到「放置判定」这一步的纯函数和对拍：
+- 结构生成（`docs/worldgen-structures-plan.md`）目前是纯函数 + 官方对拍，没有接进游戏：
   `worldgen.json` 从官方导出了 `structure_set` / `structure` / `template_pool` / `processor_list`
   四个注册表。`mc-bamboo-worldgen::structure` 移植并逐格对拍了 `random_spread` 的潜在起点、
   四种频率削减（9280 个比较 0 不一致）、`createStructures` 的加权选择 / `existingStart` 短路
@@ -474,11 +474,15 @@ WebView2 的渲染进程不算在内。
   反转起点群系判定两处故意改坏各被抓到并失败，还原后回 0。
   已知限制：全是纯函数，没接进 Director 的 `structure_starts` / `structure_references` 阶段；
   这里的「是否有效」是 `onTopOfChunkCenter` 基线路径的通用群系 / 高度判定，不是
-  `Structure.generate` 的最终有效——每个结构真正的 `findGenerationPoint`（结构件生成、模板、
-  jigsaw）还没做，组合对拍只覆盖 6 个 `random_spread` 结构集、不含 `isStructureChunk` 命中过滤
-  （那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。结构件生成
-  （所有旧式 / jigsaw 结构）、`features` 阶段的 `placeInChunk` / `postProcess` / processors /
-  方块实体 / 拼图替换、存档 `structures` 键全都没做（`Beardifier` 见下面单独一条）；
+  `Structure.generate` 的最终有效，组合对拍只覆盖 6 个 `random_spread` 结构集、不含
+  `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。
+  本轮新增并完成对拍的里程碑：四个代码生成单件结构（沙漠神殿、丛林神殿、女巫小屋、
+  埋藏的宝藏）的结构件布局（`structure-single`，8 种子 × 12 区块 × 4 类 = 384 查询、
+  384 结构件、384 行比较 0 不一致）；存档 `structures` 键
+  （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
+  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：需要模板的单件结构
+  （雪屋、沉船、海底遗迹、废弃传送门）、jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
+  `postProcess` / processors / 方块实体 / 拼图替换，以及把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
@@ -486,24 +490,35 @@ WebView2 的渲染进程不算在内。
   古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）仍没做；`pillager_outposts` 的排除区只有
   单元测试、未进官方逐格对拍。整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
   基本恒定），两条路径各自用故意改坏单独验过。
-- 多件式结构的结构件布局（分支 `cb-wg-multipiece`）：`mc-bamboo-worldgen::structure::pieces`
-  把废弃矿井（普通 / 恶地）、要塞、海底神殿三个「用代码生成结构件列表」的布局移植成纯函数：
-  结构件的类型、包围盒、朝向、genDepth、各子类参数，以及世界随机源的取数次数和顺序逐步照
-  官方 26.3 翻译；不含把方块写进世界的 `postProcess`（属放置那一步）。新增
-  `cargo run -p mc-bamboo-vanilla -- structure-pieces <java>`：`StructurePiecesOracle.java`
-  直接调官方结构件类（不启服务端 / 读存档 / 接受 EULA，海底神殿的 `childPieces` 走反射列出），
-  按统一格式 dump，Rust 侧用生产代码复算逐项比。6 种子 × 8 区块覆盖普通矿井、恶地矿井
-  （两种 `surfaceHeight`）、要塞、海底神殿共 240 个查询、25660 个结构件、25660 个比较
-  0 不一致；三个结构各自先故意改坏一处（矿井丢弃首个 `nextDouble`、要塞丢弃
-  `randomSmallDoor` 的 `nextInt(5)`、海底神殿把扫描循环尝试数 5 改 4）确认对拍会失败再还原。
-  恶地矿井的 `surfaceHeight`（官方取自 `getBaseHeight`）作为外部输入喂入，布局函数只在给定
-  高度值下复现；这些仍是纯函数，没接进 `structure_starts` 阶段。
-  已知限制：**林地府邸（`WoodlandMansionPieces.MansionGrid` / `MansionPiecePlacer.createMansion`）
-  的结构件布局没做**——`createMansion` 约 360 行带 `rotation.rotate(Direction)` 与网格位标志的
-  位置运算、外加约 300 行 `MansionGrid`，且 Java 侧需要一个 `StructureTemplateManager` 才能构造
-  `WoodlandMansionPiece`；本轮没有移植，也没有假装支持，交接见 `docs/worldgen-structures-plan.md`
-  第 0 节。其余没做的结构（沉船、神殿、jigsaw 等）、结构件放置、存档
-  `structures` 键仍同上一条；Beardifier 见下面单独一条。
+- 多件式结构的结构件布局与前置判定（分支 `cb-wg-multipiece`）：
+  `mc-bamboo-worldgen::structure::pieces` 把四个「用代码生成结构件列表」的结构布局**全部**
+  移植成纯函数——废弃矿井（普通 / 恶地）、要塞、海底神殿、林地府邸
+  （`MansionGrid` + `MansionPiecePlacer.createMansion`，模板包围盒由 `cb-wg-jigsaw` 导出的
+  1511 个 `.nbt` 经 `mc-bamboo-data::structures` / `structure::template` 算出）：结构件的类型、
+  包围盒、朝向、genDepth、各子类参数，以及世界随机源的取数次数和顺序逐步照官方 26.3 翻译；
+  不含把方块写进世界的 `postProcess`（属放置那一步）。`structure-pieces` 对拍
+  （`StructurePiecesOracle.java` 直接调官方结构件类、不启服务端 / 读存档 / 接受 EULA，
+  海底神殿的 `childPieces` 走反射、林地府邸的 Java oracle 构造真实
+  `StructureTemplateManager`）6 种子 × 8 区块、336 个查询、77960 个结构件逐项比
+  0 不一致；四个结构各自先故意改坏一处确认失败（矿井丢弃首个 `nextDouble`、要塞丢弃
+  `randomSmallDoor` 的 `nextInt(5)`、海底神殿扫描循环 5 改 4、林地府邸用错房间名 /
+  多取一次随机）再还原。
+  `mc-bamboo-worldgen::structure::start_point` 又移植四个结构各自的 `findGenerationPoint`
+  前置判定（`findValidGenerationPoint` = stub 存在且 `isValidBiome(stub)`）：恶地矿井
+  `getBaseHeight(WORLD_SURFACE_WG)`、海底神殿 `getBiomesWithin` 周边海洋 +
+  `OCEAN_FLOOR_WG`、要塞 `getWorldPosition()` 起点、林地府邸四角最低高度 +
+  `startPos.getY() < 60`；`chunk.rs` 加 `first_occupied_height_ocean_floor` 原语。新对拍
+  `cargo run -p mc-bamboo-vanilla -- structure-generation <java>` 用官方
+  `Structure.findValidGenerationPoint` 造 96 个查询、480 行、5286 个字段逐项比，
+  0 不一致；故意丢掉 `isValidBiome` 过滤立刻 192 处不一致，还原回 0。
+  海底神殿「只存一个 `MonumentBuilding`、读回 `regeneratePiecesAfterLoad` 重建房间图」的
+  存档口径写在 `docs/worldgen-structures-plan.md` 4.1，留给结构队员的第 7 步。
+  已知限制：以上全是纯函数 + oracle，没接进 Director 的 `structure_starts` /
+  `structure_references` 阶段，游戏里还没有结构；布局函数里恶地的 `surfaceHeight` /
+  府邸的 `startY` 在对拍中仍作为外部输入喂入（前置判定模块已用 `Generator` 的高度原语
+  算出并喂给布局）；结构件放置（第 5 步）、jigsaw 与其余旧式结构的结构件布局仍没做，
+  不假装支持。存档 `structures` 键的通用编码（第 7 步）见上一条，各结构件的
+  `addAdditionalSaveData` 字段与读档路径还没补齐；Beardifier 见下面单独一条。
 - 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍
   0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见

@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--show N] \
+const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--show N] \
      [--level-type normal|large_biomes|amplified] [--break-self-test] [--through features]";
 const DEFAULT_SHOW: usize = 8;
 
@@ -83,6 +83,15 @@ impl Options {
                     options
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
+                }
+                // 指定区块：官方那边每个种子只出这一个区块。
+                // A fixed chunk: the oracle emits just this chunk for every seed.
+                "--chunk" => {
+                    let x = args.next().ok_or(USAGE)?;
+                    let z = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend([arg.to_owned(), (*x).to_owned(), (*z).to_owned()]);
                 }
                 "--show" => {
                     options.show = args.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
