@@ -11,6 +11,7 @@
 //! `getRandomNamedJigsaw`, the rotated template bounding box,
 //! `project_start_to_heightmap` / `getFirstFreeHeight`, and `centerPiece.move`.
 
+pub mod alias;
 pub mod config;
 pub mod element;
 pub mod placer;
@@ -18,6 +19,7 @@ pub mod pool;
 pub mod rotation;
 pub mod shapes;
 
+pub use alias::PoolAliasLookup;
 pub use config::{HeightProvider, JigsawConfig, JigsawStructures, WorldGenerationContext};
 pub use element::{JigsawBlock, PoolElement, Projection, can_attach};
 pub use placer::{Junction, Piece, StructurePieces, add_pieces};
@@ -49,10 +51,17 @@ pub struct CenterPiece {
 
 /// `Structure.GenerationStub` 的中心部分：stub 位置 + 中心结构件。
 ///
+/// `start_position` 是 `HeightProvider.sample` 出的原始起点（`PoolAliasLookup` 的
+/// `pos` 参数用它）；`position` 是 stub 位置。
+///
 /// The center part of `Structure.GenerationStub`: stub position + center piece.
+/// `start_position` is the raw `HeightProvider.sample` position (the `pos` argument of
+/// `PoolAliasLookup`); `position` is the stub position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationPoint {
     pub position: (i32, i32, i32),
+    pub start_position: (i32, i32, i32),
+    pub aliases: PoolAliasLookup,
     pub center: CenterPiece,
 }
 
@@ -76,7 +85,9 @@ pub fn center_piece(
 ) -> Result<Option<GenerationPoint>, String> {
     let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
     random.set_large_feature_seed(seed, chunk.0, chunk.1);
-    center_piece_with_random(config, pools, generator, allowed, dims, chunk, &random)
+    center_piece_with_random(
+        config, pools, generator, allowed, dims, chunk, seed, &random,
+    )
 }
 
 /// 同一份逻辑，但复用调用方的 `WorldgenRandom`（`addPieces` 的递归继续用它）。
@@ -91,6 +102,7 @@ pub fn center_piece_with_random(
     allowed: &HashSet<String>,
     dims: (i32, i32, i32),
     chunk: (i32, i32),
+    seed: i64,
     random: &WorldgenRandom,
 ) -> Result<Option<GenerationPoint>, String> {
     let (cx, cz) = chunk;
@@ -105,10 +117,17 @@ pub fn center_piece_with_random(
     let position = (cx * 16, height_value, cz * 16);
     let center_rotation = Rotation::get_random(random);
 
-    // `poolAliasLookup.lookup(startPool)` 尚未移植：这里直接用配置的 start_pool。
+    // `PoolAliasLookup.create(poolAliases, startPos, seed)`：`startPos` 是刚 sample 出的
+    // 起点。它自带 `RandomSource.create(seed)`，不从 `context.random()` 取数。
+    // `PoolAliasLookup.create(poolAliases, startPos, seed)`: `startPos` is the just
+    // sampled start. It has its own `RandomSource.create(seed)` and draws nothing from
+    // `context.random()`.
+    let aliases = PoolAliasLookup::create(&config.pool_aliases, position, seed)?;
+
+    let start_pool = aliases.lookup(&config.start_pool);
     let center_pool = pools
-        .get(&config.start_pool)
-        .ok_or_else(|| format!("missing start pool {}", config.start_pool))?;
+        .get(start_pool)
+        .ok_or_else(|| format!("missing start pool {start_pool}"))?;
     let center_element = center_pool.get_random_template(random)?;
     if center_element == PoolElement::Empty {
         return Ok(None);
@@ -176,6 +195,8 @@ pub fn center_piece_with_random(
     let center_y = bottom_y + local_anchor.1;
     Ok(Some(GenerationPoint {
         position: (center_x, center_y, center_z),
+        start_position: position,
+        aliases,
         center: CenterPiece {
             element: center_element,
             position: piece_position,

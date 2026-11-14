@@ -25,6 +25,7 @@ use crate::{
 };
 
 use super::{
+    alias::PoolAliasLookup,
     center_piece_with_random,
     config::JigsawConfig,
     element::{JigsawBlock, PoolElement, Projection, can_attach},
@@ -104,6 +105,7 @@ struct Placer<'a> {
     generator: &'a Generator<'a>,
     random: &'a WorldgenRandom,
     config: &'a JigsawConfig,
+    aliases: &'a PoolAliasLookup,
     pieces: Vec<Piece>,
     placing: PriorityQueue<PieceState>,
 }
@@ -123,8 +125,9 @@ pub fn add_pieces(
 ) -> Result<Option<StructurePieces>, String> {
     let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
     random.set_large_feature_seed(seed, chunk.0, chunk.1);
-    let Some(point) =
-        center_piece_with_random(config, pools, generator, allowed, dims, chunk, &random)?
+    let Some(point) = center_piece_with_random(
+        config, pools, generator, allowed, dims, chunk, seed, &random,
+    )?
     else {
         return Ok(None);
     };
@@ -160,11 +163,18 @@ pub fn add_pieces(
             big,
             Box4::from_bounds(pieces[0].bounding_box),
         )));
+        // `PoolAliasLookup.create(poolAliases, position, seed)` 在 `findGenerationPoint`
+        // 里就算好了，`addPieces` 的递归共用同一个映射；`start_position` 只是留档。
+        // `PoolAliasLookup.create(poolAliases, position, seed)` is built once in
+        // `findGenerationPoint`; the recursion shares it. `start_position` is kept only
+        // for reference.
+        let aliases = point.aliases.clone();
         let mut placer = Placer {
             pools,
             generator,
             random: &random,
             config,
+            aliases: &aliases,
             pieces,
             placing: PriorityQueue::default(),
         };
@@ -213,8 +223,9 @@ impl<'a> Placer<'a> {
             let source_jigsaw_local_y = source_jigsaw_pos.1 - source_box_y;
             let mut base_height: Option<i32> = None;
 
-            // `PoolAliasLookup.EMPTY`：别名映射尚未移植，直接用拼图方块上的 pool 名。
-            let pool_name = &source_jigsaw.pool;
+            // `poolAliasLookup.lookup(sourceJigsaw.pool())`。
+            // `poolAliasLookup.lookup(sourceJigsaw.pool())`.
+            let pool_name = self.aliases.lookup(&source_jigsaw.pool);
             let Some(target_pool) = self.pools.get(pool_name) else {
                 continue 'sources;
             };
@@ -398,7 +409,7 @@ impl<'a> Placer<'a> {
             if !hack_box.contains(neighbour.0, neighbour.1, neighbour.2) {
                 continue;
             }
-            let size = match self.pools.get(&jigsaw.pool) {
+            let size = match self.pools.get(self.aliases.lookup(&jigsaw.pool)) {
                 Some(pool) => {
                     let own = pool.max_size()?;
                     let fallback = self

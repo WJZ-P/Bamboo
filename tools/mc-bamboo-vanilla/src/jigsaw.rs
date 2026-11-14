@@ -34,9 +34,8 @@ use mc_bamboo_worldgen::{
 };
 use serde_json::Value;
 
-/// 本轮 `pieces` 对拍的结构。`PoolAliasLookup` 尚未移植，先排除 `trial_chambers`
-/// （它有 pool_aliases）；第 6 步补齐别名后再纳入全部 9 种。
-const STRUCTURES: [&str; 8] = [
+/// 本轮 `pieces` 对拍的结构（村庄五种 + 前哨站 + 古城 + 试炼密室 + 古迹废墟）。
+const STRUCTURES: [&str; 9] = [
     "minecraft:village_plains",
     "minecraft:village_desert",
     "minecraft:village_savanna",
@@ -44,6 +43,7 @@ const STRUCTURES: [&str; 8] = [
     "minecraft:village_taiga",
     "minecraft:pillager_outpost",
     "minecraft:ancient_city",
+    "minecraft:trial_chambers",
     "minecraft:trail_ruins",
 ];
 const SEEDS: [i64; 6] = [0, 1, -1, 42, 12_345_678_901, -98_765_432_123];
