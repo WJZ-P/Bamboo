@@ -112,20 +112,22 @@ impl RegionBiomes {
     /// Take the nine chunks' cells in "centre first, then neighbours with `dx` outer
     /// and `dz` inner" order — the same order as the oracle builds its region.
     pub fn new(zoom_seed: i64, center: ChunkBiomes, neighbors: Vec<ChunkBiomes>) -> Self {
-        let mut chunks = Vec::with_capacity((SIDE * SIDE) as usize);
         let (center_x, center_z) = center.pos();
-        let mut ordered: Vec<Option<ChunkBiomes>> = vec![None; (SIDE * SIDE) as usize];
+        let mut ordered: [Option<ChunkBiomes>; (SIDE * SIDE) as usize] =
+            std::array::from_fn(|_| None);
         ordered[CENTER] = Some(center);
         for neighbor in neighbors {
             let (x, z) = neighbor.pos();
             let index = (z - center_z + RADIUS) * SIDE + (x - center_x + RADIUS);
-            if let Some(slot) = ordered.get_mut(index as usize) {
-                *slot = Some(neighbor);
-            }
+            ordered[index as usize] = Some(neighbor);
         }
-        for chunk in ordered.into_iter().flatten() {
-            chunks.push(chunk);
-        }
+        // 九个格子必须齐全；缺一个是调用方的错，早报比读出别处的群系好。
+        // All nine slots must be filled; a missing one is a caller bug, and failing
+        // here beats silently reading another chunk's biome.
+        let chunks = ordered
+            .into_iter()
+            .map(|slot| slot.expect("biome region needs all 3x3 chunks"))
+            .collect();
         Self { zoom_seed, chunks }
     }
 
