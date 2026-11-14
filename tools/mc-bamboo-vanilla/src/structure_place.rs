@@ -466,15 +466,27 @@ impl FlatLevel {
         }
     }
 
-    /// 只输出「和初始填充不同」的方块，按 x、y、z 排序。
+    /// 只输出「和初始填充不同的非空气方块」，按 x、y、z 排序。
     ///
-    /// Only positions whose state differs from the initial fill, sorted by x, y, z.
+    /// air 家族之间的区分在官方的 `ProtoChunk` 里不可靠（`PalettedContainer` 按
+    /// `state.isAir()` 判定，cave_air / void_air 都算空气，单值调色板不会真的落盘），
+    /// 所以两侧都只比非空气方块。结构件写空气只为挖空。
+    ///
+    /// Only positions that differ from the initial fill and are not air, sorted by x, y,
+    /// z. Air-family distinctions are unreliable in vanilla's `ProtoChunk`
+    /// (`PalettedContainer` tests `state.isAir()`), so both sides compare non-air blocks.
     fn snapshot(&self) -> Vec<String> {
         let mut out: BTreeMap<(i32, i32, i32), String> = BTreeMap::new();
         for &(x, y, z) in &self.written {
             let state = self.get_block(x, y, z);
+            if is_air_block(state) {
+                out.remove(&(x, y, z));
+                continue;
+            }
             if state != self.initial_block(y) {
                 out.insert((x, y, z), format!("{x} {y} {z} {}", state_name(state)));
+            } else {
+                out.remove(&(x, y, z));
             }
         }
         out.into_values().collect()

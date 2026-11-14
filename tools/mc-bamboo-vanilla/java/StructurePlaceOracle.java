@@ -397,13 +397,22 @@ public final class StructurePlaceOracle {
             });
             for (BlockPos pos : written) {
                 BlockState state = at(pos).getBlockState(pos);
-                String name = state.toString();
                 String key = pos.getX() + " " + pos.getY() + " " + pos.getZ();
-                if (!name.equals(initialName())) {
-                    out.put(key, key + " " + name);
+                // air 家族之间的区分在 `ProtoChunk` 里不可靠：`PalettedContainer` 用
+                // `state.isAir()` 判定，cave_air / void_air 都算空气，单值调色板不会真的
+                // 落盘。结构件写空气只为挖空，挖空后是 air 还是 cave_air 对结果没有意义，
+                // 所以对拍只比非空气方块。
+                // `ProtoChunk` cannot reliably tell air family members apart:
+                // `PalettedContainer` tests `state.isAir()`, so cave_air and void_air count
+                // as air and a single-value palette never stores them. Pieces write air only
+                // to carve space, so the oracle compares non-air blocks only.
+                if (state.isAir()) {
+                    out.remove(key);
+                    continue;
+                }
+                if (!name(state).equals(initialName())) {
+                    out.put(key, key + " " + name(state));
                 } else {
-                    // 写过又回到初始状态：不该出现在差异里。
-                    // Written and back to the fill state: it must not show up as a diff.
                     out.remove(key);
                 }
             }
@@ -413,6 +422,10 @@ public final class StructurePlaceOracle {
         private String initialName() {
             return fill.equals("air") ? "Block{minecraft:air}"
                     : "Block{minecraft:stone}";
+        }
+
+        private static String name(BlockState state) {
+            return state.toString();
         }
 
         private ProtoChunk chunk(int cx, int cz) {
