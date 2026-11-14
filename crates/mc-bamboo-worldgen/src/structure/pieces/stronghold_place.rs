@@ -415,6 +415,29 @@ pub fn prison_hall_post_process(
     piece.place(top, 4, 2, 8);
 }
 
+/// `LeftTurn.postProcess`。
+///
+/// 与 `RightTurn` 的方向判定相反：NORTH / EAST 时挖左侧，否则挖右侧。
+///
+/// `LeftTurn.postProcess`. The side test is the opposite of `RightTurn`.
+pub fn left_turn_post_process(
+    piece: &mut StrongholdPiece<'_>,
+    random: &WorldgenRandom,
+    entry_door: SmallDoorType,
+    orientation: Option<HDir>,
+) {
+    piece.box_selected(0, 0, 0, 4, 4, 4, true, random);
+    generate_small_door(piece, entry_door, 1, 1, 0);
+    match orientation {
+        Some(HDir::North | HDir::East) => {
+            piece.box_at(0, 1, 1, 0, 3, 3, cave_air(), cave_air(), false);
+        }
+        _ => {
+            piece.box_at(4, 1, 1, 4, 3, 3, cave_air(), cave_air(), false);
+        }
+    }
+}
+
 /// `RightTurn.postProcess`。
 ///
 /// `RightTurn.postProcess`.

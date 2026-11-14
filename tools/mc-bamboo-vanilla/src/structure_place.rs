@@ -66,7 +66,7 @@ fn build_queries() -> Vec<Query> {
     let mut queries = Vec::new();
     for &seed in &SEEDS {
         for &(cx, cz) in &CHUNKS {
-            for kind in ["mineshaft_normal", "mineshaft_mesa"] {
+            for kind in ["mineshaft_normal", "mineshaft_mesa", "stronghold"] {
                 for &fill in &FILLS {
                     queries.push(Query {
                         kind,
@@ -219,6 +219,7 @@ fn layout(q: &Query) -> Result<Vec<Piece>, String> {
     match q.kind {
         "mineshaft_normal" => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, false, 0)),
         "mineshaft_mesa" => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, 0)),
+        "stronghold" => Ok(pieces::stronghold::generate(q.seed, q.cx, q.cz)),
         other => Err(format!("no Rust layout for kind {other}")),
     }
 }
@@ -236,6 +237,11 @@ fn place_piece(
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
+
+    let _ = layout;
+    if kind == "stronghold" {
+        return place_stronghold_piece(piece, index, level, chunk_bb, random);
+    }
 
     let shaft = if kind == "mineshaft_mesa" {
         place::ShaftType::Mesa
@@ -296,8 +302,82 @@ fn place_piece(
     Ok(None)
 }
 
-/// 是不是 `Blocks.AIR`（**只**算普通空气，cave_air / void_air 不算）。
-/// `ProtoChunk.setBlockState` 的 `state.is(Blocks.AIR)` 是方块身份比较，不是 `isAir()`。
+/// 要塞结构件的 `postProcess` 分发：按注册名选十二个子类之一。
+///
+/// Dispatch a stronghold piece to one of the twelve `postProcess` bodies.
+fn place_stronghold_piece(
+    piece: &Piece,
+    index: usize,
+    level: &mut FlatLevel,
+    chunk_bb: [i32; 6],
+    random: &mc_bamboo_worldgen::random::WorldgenRandom,
+) -> Result<Option<()>, String> {
+    use mc_bamboo_worldgen::structure::pieces::stronghold_place as sp;
+
+    let orientation = (piece.o >= 0).then(|| HDir::from_2d(piece.o));
+    let mut stronghold = sp::StrongholdPiece {
+        ctx: PieceCtx::new(piece.bb, orientation),
+        level,
+        chunk_bb,
+    };
+
+    // 存档里的布尔取 `B:1`，整数取 `I:n`。
+    // Saved booleans are `B:1`, integers `I:n`.
+    let flag = |key: &str| piece.extras.get(key).is_some_and(|v| v.token() == "B:1");
+    let integer = |key: &str| {
+        piece
+            .extras
+            .get(key)
+            .map(|v| v.token())
+            .and_then(|v| v.strip_prefix("I:").and_then(|v| v.parse::<i32>().ok()))
+            .unwrap_or(0)
+    };
+    let door = piece
+        .extras
+        .get("EntryDoor")
+        .map(|v| sp::door_type_from_name(&v.token()))
+        .unwrap_or(sp::SmallDoorType::Opening);
+
+    match piece.id.as_str() {
+        "minecraft:shcc" => {
+            let mut chest = false;
+            sp::chest_corridor_post_process(&mut stronghold, random, door, &mut chest);
+        }
+        "minecraft:shfc" => sp::filler_corridor_post_process(&mut stronghold, integer("Steps")),
+        "minecraft:shs" => {
+            sp::straight_post_process(&mut stronghold, random, door, flag("Left"), flag("Right"))
+        }
+        "minecraft:shph" => sp::prison_hall_post_process(&mut stronghold, random, door),
+        "minecraft:shrt" => sp::right_turn_post_process(&mut stronghold, random, door, orientation),
+        "minecraft:shlt" => sp::left_turn_post_process(&mut stronghold, random, door, orientation),
+        "minecraft:shrc" => {
+            sp::room_crossing_post_process(&mut stronghold, random, door, integer("Type"))
+        }
+        "minecraft:shsd" => sp::stairs_down_post_process(&mut stronghold, random, door),
+        "minecraft:shstart" => sp::stairs_down_post_process(&mut stronghold, random, door),
+        "minecraft:shssd" => sp::straight_stairs_down_post_process(&mut stronghold, random, door),
+        "minecraft:sh5c" => sp::five_crossing_post_process(
+            &mut stronghold,
+            random,
+            door,
+            (
+                flag("leftLow"),
+                flag("leftHigh"),
+                flag("rightLow"),
+                flag("rightHigh"),
+            ),
+        ),
+        "minecraft:shli" => sp::library_post_process(&mut stronghold, random, door, flag("Tall")),
+        "minecraft:shpr" => {
+            let mut spawner = false;
+            sp::portal_room_post_process(&mut stronghold, random, &mut spawner);
+        }
+        other => return Err(format!("no stronghold postProcess for {other} ({index})")),
+    }
+    Ok(None)
+}
+
+/// 是不是 `Blocks.AIR`（**只**算普通空气，cave_air / void_air 不算）。/// `ProtoChunk.setBlockState` 的 `state.is(Blocks.AIR)` 是方块身份比较，不是 `isAir()`。
 ///
 /// Whether the state is `Blocks.AIR` (**only** plain air; cave_air and void_air do not
 /// count). `ProtoChunk.setBlockState` uses `state.is(Blocks.AIR)`, a block identity
