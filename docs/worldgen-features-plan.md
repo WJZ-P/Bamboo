@@ -729,6 +729,73 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的；
   以后接树/湖时要照 `Heightmap.update` 补上。
 
+## 5.2 `features_per_step` 全部 placed feature 的分类（非植被 / 植被）
+
+分工按「placed feature 的配置类型」（`Feature.DIRECT_CODEC` 的类型 ID）划界：`cb-wg-feat-a`
+做非植被，`cb-wg-feat-b` 做植被。下表把导出的 `features_per_step`（11 步、共 167 个
+placed feature，主世界 67 个群系的全局有序并集）按类型逐类列出。`ore`（step 6 的 29 个 +
+step 7 的 1 个）是流水线里程碑已完成的，本轮不再改，列出来只是为了让表完整。
+
+判据：树、花草、蘑菇、patch、海草/海带/珊瑚、竹、甘蔗、仙人掌、藤蔓、地衣、发光
+地衣、孢子花等，以及只包着这些的 selector / sequence 容器归植被；湖、晶洞、冰山、森林
+岩石、滴水石、矿石、disk、地下水岩浆、怪物房、化石、泉水、积雪结冰、地下装饰里的
+sculk/硫磺/滴水石簇归非植被。**拿不准的容器类型（`sequence`、`simple_random_selector`、
+`multiface_growth`、`root_system`、`random_boolean_selector`）一律归植被**，在汇报里列出。
+
+### 非植被（`cb-wg-feat-a`）
+
+| step | 类型 ID | placed feature |
+|---:|---|---|
+| 1 | `minecraft:lake` | `lake_lava_underground`, `lake_lava_surface` |
+| 2 | `minecraft:geode` | `amethyst_geode` |
+| 2 | `minecraft:iceberg` | `iceberg_packed`, `iceberg_blue` |
+| 2 | `minecraft:large_dripstone` | `large_dripstone` |
+| 2 | `minecraft:block_blob` | `forest_rock` |
+| 3 | `minecraft:monster_room` | `monster_room`, `monster_room_deep` |
+| 3 | `minecraft:fossil` | `fossil_upper`, `fossil_lower` |
+| 4 | `minecraft:spike` | `ice_spike` |
+| 4 | `minecraft:disk` | `ice_patch` |
+| 4 | `minecraft:overlay` | `desert_well` |
+| 4 | `minecraft:blue_ice` | `blue_ice` |
+| 6 | `minecraft:ore` | 29 个 `ore_*`（已完成） |
+| 6 | `minecraft:disk` | `disk_grass`, `disk_sand`, `disk_clay`, `disk_gravel` |
+| 6 | `minecraft:underwater_magma` | `underwater_magma` |
+| 7 | `minecraft:ore` | `ore_infested`（已完成） |
+| 7 | `minecraft:speleothem_cluster` | `sulfur_spike_cluster`, `dripstone_cluster` |
+| 8 | `minecraft:spring_feature` | `spring_water`, `spring_lava`, `spring_lava_frozen` |
+| 10 | `minecraft:freeze_top_layer` | `freeze_top_layer` |
+
+step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_predicate_filter`（155 处
+中的 disk 几处）、以及 disk 用到的 `rule_based` / `simple` 状态提供者、`matching_blocks` /
+`matching_fluids` / `solid` / `any_of` / `not` 谓词也归 `cb-wg-feat-a`（它们是放置/配置的
+公共构件，不是某一类地物）。
+
+### 植被（`cb-wg-feat-b`）
+
+| step | 类型 ID | 个数 | 代表 placed feature |
+|---:|---|---:|---|
+| 1 | `minecraft:root_system` | 1 | `rooted_sulfur_spring`（拿不准，归植被） |
+| 1 | `minecraft:sequence` | 1 | `sulfur_pool`（拿不准，归植被） |
+| 7 | `minecraft:multiface_growth` | 1 | `sculk_vein`（拿不准，归植被） |
+| 7 | `minecraft:sequence` | 1 | `sculk_patch_deep_dark`（拿不准，归植被） |
+| 7 | `minecraft:simple_random_selector` | 2 | `sulfur_spike`, `pointed_dripstone`（拿不准，归植被） |
+| 9 | `minecraft:tree` | 2 | `trees_swamp`, `trees_cherry` |
+| 9 | `minecraft:random_selector` | 23 | `trees_plains`, `trees_savanna`, … |
+| 9 | `minecraft:weighted_random_selector` | 9 | `seagrass_river`, `trees_dappled_forest`, … |
+| 9 | `minecraft:simple_random_selector` | 3 | `flower_forest_flowers`, `warm_ocean_vegetation`, … |
+| 9 | `minecraft:random_boolean_selector` | 2 | `lush_caves_clay`, `mushroom_island_vegetation` |
+| 9 | `minecraft:simple_block` | 52 | `flower_plains`, `patch_grass_normal`, 蘑菇、孢子和花等 |
+| 9 | `minecraft:bamboo` | 2 | `bamboo`, `bamboo_light` |
+| 9 | `minecraft:block_column` | 9 | `cave_vines`, `patch_sugar_cane`, `patch_cactus`, `kelp_*` |
+| 9 | `minecraft:vegetation_patch` | 3 | `pale_moss_patch`, `lush_caves_vegetation`, … |
+| 9 | `minecraft:vines` | 2 | `classic_vines_cave_feature`, `vines` |
+| 9 | `minecraft:multiface_growth` | 1 | `glow_lichen` |
+| 9 | `minecraft:root_system` | 1 | `rooted_azalea_tree` |
+
+`placed_feature` 注册表里还有一批只在下界/末地群系出现的类型（`end_island`、`end_spike`、
+`chorus_plant`、`huge_fungus`、`delta_feature`、`netherrack_replace_blobs`、`void_start_platform`
+等），它们**不在**主世界 `features_per_step` 里，本轮不做。
+
 ## 6. 工作量估计
 
 按「每做完一小步就提交」的节奏，单位是人时（单人、含对拍调试，不含等答复）：
