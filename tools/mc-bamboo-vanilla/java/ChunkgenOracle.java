@@ -286,6 +286,11 @@ final class FeatureLevelHandler implements InvocationHandler {
                         (java.util.function.Predicate<net.minecraft.world.level.material.FluidState>) args[1];
                 return predicate.test(getFluidState((BlockPos) args[0]));
             }
+            case "isWaterAt":
+                // `LevelReader.isWaterAt(pos)` = 该格流体是 `FluidTags.WATER`。
+                // `LevelReader.isWaterAt(pos)`: the cell's fluid is in `FluidTags.WATER`.
+                return getFluidState((BlockPos) args[0])
+                        .is(net.minecraft.tags.FluidTags.WATER);
             case "getHeightmapPos": {
                 // LevelReader.getHeightmapPos：x/z 不变，y 换成 getHeight(type,x,z)。
                 Heightmap.Types type = (Heightmap.Types) args[0];
