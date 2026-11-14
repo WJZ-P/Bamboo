@@ -47,6 +47,7 @@ pub mod noise;
 pub mod random;
 pub mod sampler;
 pub mod settings;
+pub mod spawn;
 pub mod spline;
 pub mod structure;
 pub mod volume;
