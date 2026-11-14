@@ -84,7 +84,10 @@ WebView2 的渲染进程不算在内。
 探针和每个测试都从空世界开始：单元测试 / oracle 用 `world_dir = None` 或临时目录，
 不碰世界目录；`tools/probe.sh <目录> <端口> [--loaded]` 在临时目录里写好离线的
 `server.properties` 再起 `bamboo`，`--loaded` 模式先建档再重启跑两遍完整 probe。
-仓库里不留世界目录。
+探针收尾让管理员执行 `/stop` 正常关服，脚本等服务端自己退出（最多 60 秒）当作一项
+检查，再查 `level.dat` / 玩家数据 / 区域文件都在、并用 `mc-bamboo-vanilla world-dir`
+让官方 codec 读一遍世界目录；没自己退出才 `kill -9` 并判失败。两遍都报 719/719
+（比原来多一项 `/stop` 回执检查）。仓库里不留世界目录。
 
 （2026-11-14 按实现更新：`docs/m3-storage.md` 第 14 节、`docs/world-model-design.md` 5.3.1、
 `docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/chunk_jobs.rs`、`tools/probe.sh`；
@@ -671,6 +674,17 @@ WebView2 的渲染进程不算在内。
   名字参数用官方 `GameProfileArgument`：`@` 开头按玩家选择器解析，在线玩家按名字解析；离线模式不在线的名字用官方 `UUIDUtil.createOfflinePlayerUUID`（`OfflinePlayer:<name>` 的 MD5）。正版模式按官方 `CachedUserNameToIdResolver` 维护一份「本次启动以来进过服的玩家 名字→UUID」缓存（`Join` 时记下，不写盘；官方会持久化到 `usercache.json`），在线玩家查不到时先查这份缓存，再查不到就按官方「查不到」报 `argument.player.unknown`（Bamboo 没有 Mojang 档案查询，也不从白名单猜 UUID）。`ban-ip` / `pardon-ip` 的 target 是 IP 或在线玩家名（用连接层报来的对端 IP）。
   `/save-all [flush]`、`/save-on`、`/save-off` 按官方消息和权限等级 4 实现，见「存档」一节
   （成功消息在快照交给 IO 线程后、或 `flush` 的 IO 栅栏回执后才发，差异记在已知限制里）。`/ban-ip` 的 `commands.banip.info` 用逗号连接玩家名，和官方 `EntitySelector.joinNames` 的格式不同；`/version` 的 `build_time` 是纯文本而不是官方的 `Date` 翻译参数。
+  控制台命令（照官方 `DedicatedServer` 的 "Server console handler" 线程）：命令行版起一条
+  单独的线程读 stdin，每行当作服务器控制台的命令，经 `Inbound::ConsoleCommand` 交给世界线程
+  执行，世界线程从不读 stdin。来源是官方 `CommandSourceStack` 的服务器来源：名字 `Server`、
+  权限 4、不是世界里的实体；`broadcast-console-to-ops` 按 `server.properties`（默认 true）
+  决定反馈要不要广播给在线 OP，反馈打进日志（官方 `MinecraftServer.sendSystemMessage`）。
+  `/stop` 走同一条关服流程，所以控制台 `stop` 和客户端 `/stop` 都能正常关服并存盘。
+  已知限制：Bamboo 没有语言文件，日志里保留翻译键（如 `commands.stop.stopping`）加参数，
+  不解析成英文；控制台来源没有实体和出生点位置，带 `@s` 或相对坐标的选择器/命令按「没有
+  来源实体」处理，和官方从世界出生点续算不完全一致；桌面端是 GUI，不起读 stdin 的线程；
+  Windows 后台起的原生进程没有可用 stdin，控制台线程读到 EOF 就退出，`tools/probe.sh`
+  因此用客户端 `/stop`，有真实控制台/管道时往 stdin 写 `stop` 一样能关服。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。
   做完的函数：`set_count`、`set_item`、`set_components`、`apply_bonus`（三种公式）、`copy_state`、`discard`、`explosion_decay`、`filtered`、`limit_count`、`set_damage`、`set_enchantments`、`set_instrument`、`set_ominous_bottle_amplifier`、`set_potion`（只写药水 id）、`set_stew_effect`、`enchant_randomly`、`enchant_with_levels`、`enchanted_count_increase`、`furnace_smelt`、`copy_components`（只做 `block_entity` 来源）、不带实体的 `set_name`。
   没做、求值时直接报不支持的：`exploration_map`、`set_custom_data`、`set_attributes`、`copy_name`、`set_contents`、`modify_contents`、`set_loot_table`、`set_lore`、`fill_player_head`、`copy_custom_data`、`set_banner_pattern`、`set_random_dyes`、`set_random_potion`、`set_fireworks`、`set_firework_explosion`、`set_book_cover`、`set_written_book_pages`、`set_writable_book_pages`、`toggle_tooltips`、`set_custom_model_data`，以及 `copy_components` 的实体或物品来源、带实体的 `set_name`、按名字引用的物品修饰器。
@@ -818,6 +832,8 @@ cargo run -p mc-bamboo-vanilla -- probe 127.0.0.1 25565
 `probe` 连的是你启动的那个 Bamboo，它跑的是离线模式。正版验证那一段要换一个服务端（`online_mode`
 在启动时就定下来了），所以 `probe` 会在自己的进程里再起一个开了正版验证的 Bamboo，外加一个假的
 session server 顶替 Mojang，让官方客户端代码走完加密登录，全程只走 `127.0.0.1`，不访问外网。
+`tools/probe.sh` 会设 `BAMBOO_PROBE_STOP=1`，让探针收尾用 `/stop` 正常关服再验证存档；
+直接跑上面的命令不会停服务端，要自己关。
 
 最后让官方代码给方块行为出题和给答案，用 `mc-bamboo-blocks` 重放，比较两边的结果：
 

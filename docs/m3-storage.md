@@ -880,13 +880,20 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   `handle_effects` 里同步 `set_player`，派读时一定有正确的中心；带盘上区块的
   世界和全新世界都按距离交付第一批。回归测试
   `director_host::tests::read_submission_uses_ticket_table_centers_not_region_players`，
-  全新世界探针 `tools/probe.sh` 与 `--loaded` 两种模式都跑 718/718。
+  全新世界探针 `tools/probe.sh` 与 `--loaded` 两种模式都跑 719/719（探针收尾多了
+  一项 `/stop` 回执检查，见下）。
 
-  验证说明：Windows 下 `tokio::signal::ctrl_c()` 需要控制台；无人值守的 `-p`
-  环境里 `tools/probe.sh` 后台启动的 `bamboo` 没有控制台，`kill -INT` 送不到
-  `ctrl_c()`，探针脚本的优雅关服一步会等满 30 秒后 `kill -9`。关服不再挂住、
-  存盘完整这一点由上面的进程内回归测试（直接发 `Inbound::Shutdown` 走完
-  `shut_down()`）验证；有控制台的环境下 `tools/probe.sh` 能正常关服。
+  验证说明（2026-11-14 按实现更新）：无人值守 `-p` 环境里后台启动的 `bamboo`
+  没有控制台，`kill -INT` 送不到 `tokio::signal::ctrl_c()`，所以脚本不再用信号
+  关服。现在 `Probe.java` 收尾让管理员 Kitten 执行 `/stop`（`BAMBOO_PROBE_STOP=1`），
+  服务端走 `stopServer` 流程自己退出并存盘；`tools/probe.sh` 等进程自己退出
+  （最多 60 秒），把「正常退出」当一项检查，退出后检查 `level.dat` / 玩家数据 /
+  区域文件都在，并用 `mc-bamboo-vanilla world-dir` 让官方 codec 读一遍世界目录。
+  只有没自己退出才 `kill -9` 并把探针判为失败。`--loaded` 两遍都照此处理。
+  官方客户端的 `/stop` 和控制台 `stop` 走同一条关服流程；控制台线程从 stdin
+  读命令（见 README「控制台命令」），但这台 Windows 上后台原生进程的 stdin
+  不可用，脚本因此选客户端 `/stop`。两遍都实测 `PROBE RESULT 719/719`、
+  `Bamboo stopped`、世界文件齐全、`WORLD-DIR RESULT` 通过。
 
 ### `level.dat` 每个字段的来源
 
@@ -979,7 +986,10 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   熔炉存盘重启、装盒后睡着的熔炉在另一个线程编码字节一致、1000 刻自动保存差分
   测试、复查探针的回归测试、带存档世界「最近的区块先到」的回归测试。
 - `tools/probe.sh <目录> <端口>` 跑全新世界；`<目录> <端口> --loaded` 用同一个
-  临时目录先建档、重启再跑一遍，两遍都报 `PROBE RESULT`。
+  临时目录先建档、重启再跑一遍，两遍都报 `PROBE RESULT 719/719`。两遍收尾都由
+  `Probe.java` 的 `/stop` 正常关服，脚本等进程自己退出（最多 60 秒），再检查
+  `level.dat` / 玩家数据 / 区域文件都在，并跑一次官方 `world-dir`；没自己退出
+  才 `kill -9` 并判失败。
 - `mc-bamboo-vanilla world-dir <目录> <java>`、`saved-data <java>`、
   `world-block <目录> <x> <y> <z> <方块名> <java>` 用官方 codec 检查真实目录。
 - `tools/crash-test.sh`：起服务端 → 官方探针 721/721 → 放一个具体标记方块 →
