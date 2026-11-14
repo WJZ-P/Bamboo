@@ -1,4 +1,4 @@
-import com.mojang.datafixers.util.Either;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,9 +26,12 @@ import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSeriali
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftPieces;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure;
+import net.minecraft.world.level.levelgen.structure.structures.OceanMonumentPieces;
+import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
 
 /**
- * 用官方 26.3 的结构件类直接对拍四个多件式结构的「结构件列表」布局。
+ * 用官方 26.3 的结构件类直接对拍多件式结构的「结构件列表」布局
+ * （当前覆盖废弃矿井、要塞、海底神殿三种）。
  *
  * <p>不启动服务端、不读存档、不接受 EULA、不加载 worldgen 注册表：只需要
  * {@code Bootstrap.bootStrap()} 让 {@code BuiltInRegistries.STRUCTURE_PIECE} 就绪。
@@ -41,8 +44,9 @@ import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructur
  * 外部输入（恶地的 surfaceHeight；其余为 0）。输出每个查询一段：{@code Q} 头带
  * 结构件数，随后若干 {@code P} 行。
  *
- * <p>Compare the piece-list layout of the four code-built multi-piece structures
- * against vanilla 26.3, calling the official piece classes directly. No server,
+ * <p>Compare the piece-list layout of code-built multi-piece structures (currently
+ * mineshaft, stronghold, ocean monument) against vanilla 26.3, calling the official
+ * piece classes directly. No server,
  * save, EULA or worldgen registry load; only {@code Bootstrap.bootStrap()}. Each
  * query seeds its own WorldgenRandom via {@code setLargeFeatureSeed} and mirrors
  * the {@code findGenerationPoint} / {@code generatePieces} orchestration. Pieces
@@ -53,6 +57,9 @@ import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructur
 public final class StructurePiecesOracle {
     private static final int SEA_LEVEL = 63;
     private static final int MIN_Y = -64;
+    // 和 Rust 侧一致的重试安全上限；正常种子远在此之前命中传送门房间。
+    // Retry safety cap matching the Rust side; normal seeds hit the portal room well before it.
+    private static final int MAX_TRIES = 128;
 
     // createTag 里由基类写的四个键，不进 extras。
     // Four base keys written by StructurePiece.createTag; excluded from extras.
@@ -83,6 +90,8 @@ public final class StructurePiecesOracle {
             List<String> pieces = switch (kind) {
                 case "mineshaft_normal" -> mineshaft(seed, cx, cz, false, arg);
                 case "mineshaft_mesa" -> mineshaft(seed, cx, cz, true, arg);
+                case "stronghold" -> stronghold(seed, cx, cz);
+                case "ocean_monument" -> oceanMonument(seed, cx, cz);
                 default -> throw new IllegalArgumentException("unknown kind " + kind);
             };
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
@@ -118,6 +127,65 @@ public final class StructurePiecesOracle {
         }
 
         return builder.build().pieces().stream().map(StructurePiecesOracle::dump).collect(Collectors.toList());
+    }
+
+    /** StrongholdStructure.generatePieces 的重试循环编排（全用公开成员复刻）。 */
+    private static List<String> stronghold(long seed, int cx, int cz) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        ChunkPos chunkPos = new ChunkPos(cx, cz);
+        StructurePiecesBuilder builder = new StructurePiecesBuilder();
+        int tries = 0;
+        StrongholdPieces.StartPiece startRoom;
+        while (true) {
+            builder.clear();
+            random.setLargeFeatureSeed(seed + tries++, cx, cz);
+            StrongholdPieces.resetPieces();
+            startRoom = new StrongholdPieces.StartPiece(
+                    random, chunkPos.getBlockX(2), chunkPos.getBlockZ(2));
+            builder.addPiece(startRoom);
+            startRoom.addChildren(startRoom, builder, random);
+            List<StructurePiece> pending = startRoom.pendingChildren;
+            while (!pending.isEmpty()) {
+                int pos = random.nextInt(pending.size());
+                StructurePiece piece = pending.remove(pos);
+                piece.addChildren(startRoom, builder, random);
+            }
+            builder.moveBelowSeaLevel(SEA_LEVEL, MIN_Y, random, 10);
+            if (!builder.isEmpty() && startRoom.portalRoomPiece != null) {
+                break;
+            }
+            if (tries >= MAX_TRIES) {
+                break;
+            }
+        }
+        return builder.build().pieces().stream().map(StructurePiecesOracle::dump).collect(Collectors.toList());
+    }
+
+    /** OceanMonumentStructure.createTopPiece + MonumentBuilding；childPieces 走反射列出。 */
+    private static List<String> oceanMonument(long seed, int cx, int cz) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        random.setLargeFeatureSeed(seed, cx, cz);
+        int west = cx * 16 - 29;
+        int north = cz * 16 - 29;
+        Direction orientation = Direction.Plane.HORIZONTAL.getRandomDirection(random);
+        OceanMonumentPieces.MonumentBuilding building =
+                new OceanMonumentPieces.MonumentBuilding(random, west, north, orientation);
+        StructurePiecesBuilder builder = new StructurePiecesBuilder();
+        builder.addPiece(building);
+        List<String> out = new ArrayList<>();
+        for (StructurePiece p : builder.build().pieces()) {
+            out.add(dump(p));
+        }
+        try {
+            Field field = OceanMonumentPieces.MonumentBuilding.class.getDeclaredField("childPieces");
+            field.setAccessible(true);
+            for (Object child : (List<?>) field.get(building)) {
+                out.add(dump((StructurePiece) child));
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("cannot read MonumentBuilding.childPieces", e);
+        }
+        return out;
     }
 
     /** 把一个结构件按统一格式 dump 成一行。 */

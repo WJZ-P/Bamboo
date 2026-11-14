@@ -1,5 +1,5 @@
-//! 四个多件式结构的结构件布局对拍：官方 `StructurePiecesOracle` 对
-//! `mc-bamboo-worldgen::structure::pieces` 的纯函数实现。
+//! 多件式结构的结构件布局对拍：官方 `StructurePiecesOracle` 对
+//! `mc-bamboo-worldgen::structure::pieces` 的纯函数实现（已移植矿井 / 要塞 / 海底神殿）。
 //!
 //! 每条查询由 Rust 生成 queries.txt，Java 侧照官方编排生成结构件并按统一格式
 //! dump；Rust 侧用生产代码复算，逐行比 `P` 行（类型、包围盒、O、GD、rotation、
@@ -82,6 +82,20 @@ fn build_queries() -> Vec<Query> {
                     arg: surface,
                 });
             }
+            queries.push(Query {
+                kind: "stronghold",
+                seed,
+                cx,
+                cz,
+                arg: 0,
+            });
+            queries.push(Query {
+                kind: "ocean_monument",
+                seed,
+                cx,
+                cz,
+                arg: 0,
+            });
         }
     }
     queries
@@ -153,6 +167,8 @@ fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
     let pieces: Vec<Piece> = match q.kind {
         "mineshaft_normal" => pieces::mineshaft::generate(q.seed, q.cx, q.cz, false, q.arg),
         "mineshaft_mesa" => pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, q.arg),
+        "stronghold" => pieces::stronghold::generate(q.seed, q.cx, q.cz),
+        "ocean_monument" => pieces::ocean_monument::generate(q.seed, q.cx, q.cz),
         other => return Err(format!("no Rust layout for kind {other}")),
     };
     Ok(pieces.iter().map(Piece::canonical_line).collect())
