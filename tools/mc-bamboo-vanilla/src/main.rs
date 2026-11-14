@@ -197,7 +197,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
-      mc-bamboo-vanilla chunkgen <java 路径> [--seeds N] [--chunks N] [--salt S] [--biomes-only] [--show N]
+      mc-bamboo-vanilla chunkgen <java 路径> [--seeds N] [--chunks N] [--salt S] [--through STAGE] [--biomes-only] [--show N] [--chunk X Z] [--scan N]
       mc-bamboo-vanilla structures <java 路径>
       mc-bamboo-vanilla gen-world <java 路径> [--seeds N] [--chunks N] [--salt S] [--show N] [--break-self-test]
       mc-bamboo-vanilla structure-rings <java 路径>

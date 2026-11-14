@@ -27,7 +27,8 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] \
-     [--through STAGE] [--steps 6] [--feature-types IDS] [--ore-only] [--show N]";
+     [--through STAGE] [--steps 6] [--feature-types IDS] [--ore-only] [--show N] \
+     [--chunk X Z] [--scan N] [--break-self-test]";
 /// 完整的 11 个地物步骤；`--steps` 只是过渡期的诊断开关。
 const ALL_STEPS: i32 = (1 << 11) - 1;
 const DEFAULT_SHOW: usize = 8;
@@ -119,6 +120,9 @@ struct Options {
     /// placed-feature registry name; Java keeps only those placed features and Rust
     /// filters indices by the same set. `None` means no filtering.
     feature_types: Option<Vec<String>>,
+    /// 自检：故意改坏一个方块，确认比较器会报不一致。
+    /// Self-test: deliberately break one block so the comparator must report a mismatch.
+    break_self_test: bool,
 }
 
 impl Options {
@@ -132,6 +136,7 @@ impl Options {
             features: false,
             steps: ALL_STEPS,
             feature_types: None,
+            break_self_test: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -197,6 +202,23 @@ impl Options {
                     let value = args.next().ok_or(USAGE)?;
                     options.show = Some(value.parse().map_err(|_| USAGE)?);
                 }
+                // 精确复现单个区块 / 大范围地形扫描，都只转发给 Java 侧来出坐标。
+                // Exact single-chunk reproduction / wide terrain scan: both are forwarded
+                // to the Java side, which is the only place chunk coordinates are produced.
+                "--chunk" => {
+                    let x = args.next().ok_or(USAGE)?;
+                    let z = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend(["--chunk".to_owned(), (*x).to_owned(), (*z).to_owned()]);
+                }
+                "--scan" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend(["--scan".to_owned(), (*value).to_owned()]);
+                }
+                "--break-self-test" => options.break_self_test = true,
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -224,6 +246,7 @@ struct Report<'a> {
     mismatches: Vec<String>,
     show: usize,
     ended: bool,
+    break_self_test: bool,
 }
 
 /// 启动官方进程，一边读一边比较。`command` 已经是能运行 `ChunkgenOracle.java` 的命令。
@@ -258,6 +281,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         mismatches: Vec::new(),
         show: options.show.unwrap_or(DEFAULT_SHOW),
         ended: false,
+        break_self_test: options.break_self_test,
     };
     let read = report.read_lines(BufReader::new(stdout));
     if read.is_err() {
@@ -463,7 +487,7 @@ impl Report<'_> {
                 }
             }
         }
-        let ours = match self
+        let mut ours = match self
             .generator(seed)
             .and_then(|generator| generator.terrain(x, z, stage))
         {
@@ -473,6 +497,12 @@ impl Report<'_> {
                 return;
             }
         };
+        // 自检：在第一个 NOISE 区块改坏一格，确认逐方块比较器确实会报不一致。
+        // Self-test: break one block in the first NOISE chunk so the block-by-block
+        // comparator must report a mismatch.
+        if self.break_self_test && stage == Stage::Noise && self.chunks == 1 {
+            ours[0][0] = u32::MAX;
+        }
         let height = ours.len();
         if expected.len() != height * 256 {
             self.mismatch(format!(
@@ -691,6 +721,19 @@ impl Report<'_> {
             return Err("ChunkgenOracle.java stopped before its end line".to_owned());
         }
         println!("oracle reported {} checks", self.checks);
+        if self.break_self_test {
+            if self.mismatches.is_empty() {
+                return Err(
+                    "chunkgen self-test broke a block but reported 0 mismatches; the detector is broken"
+                        .to_owned(),
+                );
+            }
+            println!(
+                "chunkgen self-test: detector works ({} mismatches from the deliberate break)",
+                self.mismatches.len()
+            );
+            return Ok(());
+        }
         if !self.mismatches.is_empty() {
             for text in &self.mismatches[..self.mismatches.len().min(self.show)] {
                 println!("  {text}");

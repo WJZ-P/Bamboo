@@ -456,7 +456,7 @@ public final class ChunkgenOracle {
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
-            String featureAllowList, boolean realPath) {
+            String featureAllowList, boolean realPath, Integer forcedX, Integer forcedZ, int scan) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -473,6 +473,14 @@ public final class ChunkgenOracle {
             // 真实服务端路径：3×3 possibleBiomes、carverBiome 分支、region.getBiomeManager()。
             // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
             boolean realPath = false;
+            // `--chunk X Z` 只出题这一个区块（精确复现）；`--scan N` 每个种子出 N 个
+            // 覆盖近处/远处/负坐标的区块（大范围地形扫描）。两者只改坐标来源。
+            // `--chunk X Z` emits only this one chunk (exact reproduction); `--scan N` emits
+            // N chunks per seed spanning near/far/negative coordinates (wide terrain scan).
+            // Both only change where the chunk coordinates come from.
+            Integer forcedX = null;
+            Integer forcedZ = null;
+            int scan = 0;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -503,10 +511,16 @@ public final class ChunkgenOracle {
                     case "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     case "--real-path" -> realPath = true;
+                    case "--chunk" -> {
+                        forcedX = Integer.parseInt(args[++i]);
+                        forcedZ = Integer.parseInt(args[++i]);
+                    }
+                    case "--scan" -> scan = Integer.parseInt(args[++i]);
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath,
+                    forcedX, forcedZ, scan);
         }
     }
 
@@ -1162,16 +1176,29 @@ public final class ChunkgenOracle {
         }
 
         private int[][] chunks(long seed) {
-            int count = this.options.chunks();
+            // `--chunk` 覆盖成单个区块，用 FIXED_SEEDS 里的种子逐个复现。
+            // `--chunk` overrides to a single chunk, reproduced under each FIXED_SEEDS entry.
+            if (this.options.forcedX() != null) {
+                return new int[][] {{this.options.forcedX(), this.options.forcedZ()}};
+            }
+            boolean scan = this.options.scan() > 0;
+            int count = scan ? this.options.scan() : this.options.chunks();
             int[][] result = new int[count][2];
-            Random random = new Random(seed ^ 0x51A7_5EEDL ^ this.options.salt());
+            // 扫描用独立的播种，覆盖近处网格（容易撞上含水层格子边界）、
+            // 中距离、远距离和负坐标；和默认坐标生成互不干扰。
+            // Scanning uses its own seed and spans a near grid (likely to hit aquifer cell
+            // boundaries), mid range, far range and negative coordinates, independent of
+            // the default coordinate generator.
+            long randomSeed = seed ^ 0x51A7_5EEDL ^ this.options.salt();
+            Random random = new Random(scan ? randomSeed ^ 0x5CA4_5EEDL : randomSeed);
             for (int i = 0; i < count; i++) {
-                if (i < FIXED_CHUNKS.length) {
+                if (!scan && i < FIXED_CHUNKS.length) {
                     result[i] = FIXED_CHUNKS[i].clone();
                 } else {
-                    int bound = switch (i % 3) {
-                        case 0 -> 64;
-                        case 1 -> 4096;
+                    int bound = switch (i % 4) {
+                        case 0 -> 48;
+                        case 1 -> 512;
+                        case 2 -> 16384;
                         default -> 1_000_000;
                     };
                     result[i][0] = random.nextInt(-bound, bound);
