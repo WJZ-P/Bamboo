@@ -17,52 +17,50 @@ use mc_bamboo_data::{facts, state_facts, state_fluid};
 
 use crate::random::WorldgenRandom;
 
-use super::{
-    state::{parse_state, with_property},
-    survival,
-    world::FeatureWorld,
-};
+use super::{state::with_property, state_provider::StateProvider, survival, world::FeatureWorld};
 
 type Pos = (i32, i32, i32);
 
 /// 已解析、已确认能逐块对拍的 `SimpleBlockFeature`。
 pub struct SimpleBlockFeature {
-    state: u32,
+    provider: StateProvider,
 }
 
 impl SimpleBlockFeature {
-    /// 只接受内联 bare state，且该方块的存活判定已移植；否则返回 `None`（标 unsupported）。
+    /// 解析 `to_place` 为已移植的 provider，且所有可能状态的存活判定都已移植；
+    /// holder 引用和未移植的 typed provider 返回 `None`（标 unsupported）。
     ///
-    /// Accept only an inline bare state whose survival check is ported; otherwise return
-    /// `None` (unsupported).
+    /// Parse `to_place` into a ported provider whose every possible state has a ported
+    /// survival check; holder references and unported typed providers return `None`.
     pub fn parse(config: &Value) -> Option<Self> {
         let to_place = config.as_object()?.get("to_place")?;
-        // 有 `type` 字段的是 typed provider（weighted / randomized_int），暂不支持；
-        // 字符串是 BLOCK_STATE_PROVIDER 注册表引用，未导出，也不支持。
-        // A `type` field means a typed provider; a string is a holder reference.
-        if to_place.get("type").is_some() || to_place.is_string() {
+        let provider = StateProvider::parse(to_place)?;
+        if !provider
+            .possible_states()
+            .iter()
+            .all(|&state| survival::supports(state))
+        {
             return None;
         }
-        let state = parse_state(to_place).ok()?;
-        if !survival::supports(state) {
-            return None;
-        }
-        Some(Self { state })
+        Some(Self { provider })
     }
 
-    /// 官方 `SimpleBlockFeature.place` 的单个候选位置，返回是否走过 `setBlock`。
-    /// SimpleStateProvider.getState 不消费随机数，`random` 只为和组合类共用签名。
+    /// 官方 `SimpleBlockFeature.place` 的单个候选位置：`getOptionalState`（typed provider
+    /// 会消费随机数）→ `canSurvive` → 按方块类分派放置。
     ///
-    /// One candidate of official `SimpleBlockFeature.place`; returns whether `setBlock`
-    /// ran. `SimpleStateProvider.getState` consumes no random; `random` keeps the signature.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, _random: &WorldgenRandom, pos: Pos) -> bool {
-        if !survival::can_survive(self.state, world, pos) {
+    /// One candidate of official `SimpleBlockFeature.place`: `getOptionalState` (typed
+    /// providers consume random), then `canSurvive`, then dispatch by block class.
+    pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
+        let Some(state) = self.provider.get_state(random) else {
+            return false;
+        };
+        if !survival::can_survive(state, world, pos) {
             return false;
         }
-        if survival::is_double_plant(self.state) {
-            self.place_at(world, pos)
+        if survival::is_double_plant(state) {
+            self.place_at(world, pos, state)
         } else {
-            world.set_block_with_heightmaps(pos.0, pos.1, pos.2, self.state);
+            world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
             true
         }
     }
@@ -75,21 +73,21 @@ impl SimpleBlockFeature {
     /// `DoublePlantBlock.placeAt`: check the block above, then place `half=lower` / `half=upper`.
     /// The three exported double plants have only a `half` property (no `waterlogged`), so
     /// `copyWaterloggedFrom` is a no-op here.
-    fn place_at(&self, world: &mut FeatureWorld<'_>, pos: Pos) -> bool {
+    fn place_at(&self, world: &mut FeatureWorld<'_>, pos: Pos, state: u32) -> bool {
         let (x, y, z) = pos;
         let above = world.get_block(x, y + 1, z);
         let above_air = state_facts(above) & facts::AIR != 0;
         if !above_air {
             // `!aboveState.isAir() && (!fluidEquals || !aboveState.canBeReplaced())` 时不放。
             // Skip when the block above is neither air nor (fluid-equal and replaceable).
-            let fluid_same = state_fluid(self.state).fluid == state_fluid(above).fluid;
+            let fluid_same = state_fluid(state).fluid == state_fluid(above).fluid;
             let replaceable = state_facts(above) & facts::REPLACEABLE != 0;
             if !fluid_same || !replaceable {
                 return false;
             }
         }
-        let lower = with_property(self.state, "half", "lower").unwrap_or(self.state);
-        let upper = with_property(self.state, "half", "upper").unwrap_or(self.state);
+        let lower = with_property(state, "half", "lower").unwrap_or(state);
+        let upper = with_property(state, "half", "upper").unwrap_or(state);
         world.set_block_with_heightmaps(x, y, z, lower);
         world.set_block_with_heightmaps(x, y + 1, z, upper);
         true
@@ -106,13 +104,13 @@ mod tests {
         let pumpkin: Value =
             json!({"to_place": {"id": "minecraft:pumpkin"}, "type": "minecraft:simple_block"});
         assert!(SimpleBlockFeature::parse(&pumpkin).is_some());
-        // typed provider（weighted）暂不支持。
-        // A typed provider (weighted) is not supported yet.
+        // weighted typed provider 现在支持。
+        // The weighted typed provider is now supported.
         let weighted: Value = json!({
             "to_place": {"type": "minecraft:weighted", "entries": [{"data": "minecraft:poppy", "weight": 1}]},
             "type": "minecraft:simple_block",
         });
-        assert!(SimpleBlockFeature::parse(&weighted).is_none());
+        assert!(SimpleBlockFeature::parse(&weighted).is_some());
         // holder 字符串引用未导出的注册表，也不支持。
         // A holder string references an unexported registry; unsupported.
         let holder: Value =

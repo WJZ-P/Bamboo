@@ -13,7 +13,9 @@
 //! (mushrooms need brightness, lily pads need a fluid, spore blossoms need `canSupportCenter`)
 //! stay unported and make the whole placed feature unsupported.
 
-use mc_bamboo_data::{BlockClass, block_id_of_state, block_of_state, block_tag};
+use mc_bamboo_data::{
+    BlockClass, block_id_of_state, block_of_state, block_tag, facts, state_facts,
+};
 
 use super::world::FeatureWorld;
 
@@ -30,6 +32,8 @@ enum Kind {
     /// `DoublePlantBlock.canSurvive`（下半格走 `VegetationBlock`）：标签判定，
     /// 但放置走 `placeAt` 放上下两格。
     DoublePlant(&'static str),
+    /// `LeafLitterBlock.canSurvive`：下面那格 `isFaceSturdy(FULL, UP)`。
+    SturdyFaceUp,
 }
 
 /// 这个状态的存活判定是否已移植。未移植时调用方要把整个 placed feature 标 unsupported，
@@ -45,14 +49,19 @@ pub fn supports(state: u32) -> bool {
 ///
 /// Official `BlockState.canSurvive(level, pos)`. Call only when [`supports`] is true.
 pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
-    let tag = match classify(state) {
-        Some(Kind::Default) => return true,
-        Some(Kind::Vegetation(tag)) | Some(Kind::DoublePlant(tag)) => tag,
-        None => return false,
-    };
     let below = world.get_block(pos.0, pos.1 - 1, pos.2);
-    let id = block_id_of_state(below).map_or(-1, |id| id as i32);
-    block_tag(tag).is_some_and(|ids| ids.contains(&id))
+    match classify(state) {
+        Some(Kind::Default) => true,
+        Some(Kind::Vegetation(tag)) | Some(Kind::DoublePlant(tag)) => {
+            let id = block_id_of_state(below).map_or(-1, |id| id as i32);
+            block_tag(tag).is_some_and(|ids| ids.contains(&id))
+        }
+        // `LeafLitterBlock.canSurvive`：`below.isFaceSturdy(level, below, Direction.UP)`，
+        // 即 `isFaceSturdy(FULL)`；Direction.UP 的 ordinal 是 1。
+        // `LeafLitterBlock.canSurvive`: `isFaceSturdy(FULL, UP)`; UP's ordinal is 1.
+        Some(Kind::SturdyFaceUp) => state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0,
+        None => false,
+    }
 }
 
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
@@ -82,8 +91,14 @@ fn classify(state: u32) -> Option<Kind> {
         | BlockClass::SweetBerryBushBlock
         | BlockClass::EyeblossomBlock
         | BlockClass::FireflyBushBlock
-        | BlockClass::SaplingBlock => Kind::Vegetation("minecraft:supports_vegetation"),
-        BlockClass::DryVegetationBlock => Kind::Vegetation("minecraft:supports_dry_vegetation"),
+        | BlockClass::SaplingBlock
+        | BlockClass::FlowerBedBlock => Kind::Vegetation("minecraft:supports_vegetation"),
+        BlockClass::DryVegetationBlock
+        | BlockClass::ShortDryGrassBlock
+        | BlockClass::TallDryGrassBlock => Kind::Vegetation("minecraft:supports_dry_vegetation"),
+        // LeafLitterBlock 覆写 canSurvive 为 isFaceSturdy(UP)。
+        // LeafLitterBlock overrides canSurvive with isFaceSturdy(UP).
+        BlockClass::LeafLitterBlock => Kind::SturdyFaceUp,
         // 配置里的 to_place 都是默认状态（half=lower），canSurvive 走 VegetationBlock。
         // Exported to_place states are all the default (half=lower), so canSurvive uses
         // the VegetationBlock tag check; placement still goes through placeAt.
@@ -123,6 +138,10 @@ mod tests {
             "minecraft:tall_grass",
             "minecraft:sunflower",
             "minecraft:large_fern",
+            "minecraft:wildflowers",
+            "minecraft:short_dry_grass",
+            "minecraft:tall_dry_grass",
+            "minecraft:leaf_litter",
         ] {
             assert!(supports(state(name)), "{name}");
         }
