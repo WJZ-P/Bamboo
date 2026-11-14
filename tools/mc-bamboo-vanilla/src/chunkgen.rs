@@ -640,26 +640,31 @@ impl Report<'_> {
             for dx in -1..=1 {
                 let cx = x + dx;
                 let cz = z + dz;
-                let layers = match generator.terrain(cx, cz, Stage::Carvers) {
-                    Ok(layers) => layers,
+                // 和游戏、和官方地物对拍一样走真实服务端路径：地表读 3×3 区块里存的群系格。
+                // Same real-server path as the game and the Java features oracle: the
+                // surface reads the biome cells stored in the 3x3 chunk region.
+                let region = match generator.biome_region(cx, cz) {
+                    Ok(region) => region,
                     Err(error) => {
                         self.mismatch(format!(
-                            "features seed {seed} chunk ({x},{z}) ({dx},{dz}) terrain: {error}"
+                            "features seed {seed} chunk ({x},{z}) ({dx},{dz}) biome region: {error}"
                         ));
                         return;
                     }
                 };
+                let layers =
+                    match generator.terrain_with_region(cx, cz, Stage::Carvers, None, &region) {
+                        Ok(layers) => layers,
+                        Err(error) => {
+                            self.mismatch(format!(
+                                "features seed {seed} chunk ({x},{z}) ({dx},{dz}) terrain: {error}"
+                            ));
+                            return;
+                        }
+                    };
                 heights.push(prime_heightmaps(&layers, -64, 384));
                 blocks.push(layers);
-                match generator.biomes(cx, cz) {
-                    Ok(sections) => biomes.push(sections),
-                    Err(error) => {
-                        self.mismatch(format!(
-                            "features seed {seed} chunk ({x},{z}) ({dx},{dz}) biomes: {error}"
-                        ));
-                        return;
-                    }
-                }
+                biomes.push(region.center().sections().to_vec());
             }
         }
         let input = FeatureChunks {

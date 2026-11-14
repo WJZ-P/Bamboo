@@ -266,8 +266,9 @@ pub fn generate_chunk(config: &WorldGenConfig, x: i32, z: i32) -> Result<Generat
         return Ok(flat_chunk(config));
     }
     with_generator(config, |generator| {
-        let biomes = generator.biomes(x, z)?;
-        let blocks = generator.terrain(x, z, chunk::Stage::Carvers)?;
+        let region = generator.biome_region(x, z)?;
+        let blocks = generator.terrain_with_region(x, z, chunk::Stage::Carvers, None, &region)?;
+        let biomes = region.center().sections().to_vec();
         let heightmaps = compute_heightmaps(&blocks);
         Ok(GeneratedChunk {
             blocks,
@@ -476,6 +477,69 @@ mod tests {
         // Biomes read back through `biome_at` are still plains (index mapping correct).
         let quart = world.biome_at(0, MIN_Y, 0);
         assert_eq!(quart, registries::biome::PLAINS as u32);
+    }
+
+    /// 回归：种子 0、区块 (644792,109695) 是恶地和沙漠的交界。官方 `buildTerrain`
+    /// 的地表阶段读相邻区块里 `BIOMES` 阶段成批填好的 quart 群系格；如果改回单点
+    /// 气候采样，这一列的气候参数落在 R 树最近邻的临界点上，会选到砂岩而不是陶瓦，
+    /// 出现 33 处不一致（`gen-world --seeds 1 --chunk 644792 109695`）。
+    ///
+    /// 断言用官方给出的几个已知格子：y 66–74 的 x 12–15、z 8–12 是砂岩或沙子，
+    /// 不是各色陶瓦。这样即使生成器整体退化也能定位到「真实路径没生效」。
+    ///
+    /// Regression: seed 0 chunk (644792,109695) sits on a badlands/desert boundary.
+    /// Vanilla's `buildTerrain` surface pass reads the quart biome cells the `BIOMES`
+    /// stage wrote into the neighbouring chunks. Sampling the climate per point
+    /// instead lands on an R-tree nearest-neighbour tie in this column and picks
+    /// sandstone instead of terracotta, giving 33 mismatches in
+    /// `gen-world --seeds 1 --chunk 644792 109695`.
+    #[test]
+    fn badlands_desert_boundary_uses_stored_quart_biomes() {
+        let cfg = normal(0);
+        let chunk = generate_chunk(&cfg, 644_792, 109_695).unwrap();
+        let sandstone = mc_bamboo_data::block_by_name("minecraft:sandstone")
+            .expect("有砂岩")
+            .default_state;
+        let sand = mc_bamboo_data::block_by_name("minecraft:sand")
+            .expect("有沙子")
+            .default_state;
+        // 这几格在修复前是各色陶瓦（13211/13212/13215/13219/13223/14759），
+        // 官方是砂岩或沙子。只断言「不是陶瓦、是砂岩或沙子」。
+        let terracotta: Vec<u32> = [
+            "minecraft:terracotta",
+            "minecraft:orange_terracotta",
+            "minecraft:yellow_terracotta",
+            "minecraft:brown_terracotta",
+            "minecraft:white_terracotta",
+            "minecraft:light_gray_terracotta",
+            "minecraft:red_terracotta",
+        ]
+        .iter()
+        .filter_map(|name| mc_bamboo_data::block_by_name(name).map(|b| b.default_state))
+        .collect();
+        for (y, x, z) in [
+            (66, 12, 12),
+            (66, 13, 12),
+            (67, 13, 12),
+            (68, 13, 10),
+            (69, 14, 11),
+            (72, 13, 8),
+            (73, 13, 9),
+            (74, 13, 10),
+            (75, 13, 8),
+            (77, 15, 11),
+            (79, 15, 11),
+        ] {
+            let state = chunk.blocks[(y - MIN_Y) as usize][x * WIDTH + z];
+            assert!(
+                state == sandstone || state == sand,
+                "({x},{y},{z}) should be sandstone or sand, got state {state}"
+            );
+            assert!(
+                !terracotta.contains(&state),
+                "({x},{y},{z}) must not be terracotta"
+            );
+        }
     }
 
     #[test]

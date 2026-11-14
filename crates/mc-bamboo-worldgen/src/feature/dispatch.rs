@@ -16,6 +16,7 @@ use super::{
     block_column::BlockColumnFeature,
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
+    huge_mushroom::HugeMushroomFeature,
     large_dripstone::{self, LargeDripstoneFeature},
     multiface::MultifaceGrowthFeature,
     ores,
@@ -25,6 +26,7 @@ use super::{
     speleothem_cluster::{self, SpeleothemClusterFeature},
     spike::{self, SpikeFeature},
     spring::{self, SpringFeature},
+    tree::{TreeFeature, fallen::FallenTreeFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     vines::VinesFeature,
     world::FeatureWorld,
@@ -41,6 +43,8 @@ pub enum Leaf {
     BlueIce(BlueIceFeature),
     BlockColumn(BlockColumnFeature),
     Disk(DiskFeature),
+    FallenTree(Box<FallenTreeFeature>),
+    HugeMushroom(Box<HugeMushroomFeature>),
     LargeDripstone(LargeDripstoneFeature),
     Multiface(MultifaceGrowthFeature),
     Ore(OreFeature),
@@ -49,6 +53,7 @@ pub enum Leaf {
     SpeleothemCluster(SpeleothemClusterFeature),
     Spike(SpikeFeature),
     Spring(SpringFeature),
+    Tree(Box<TreeFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
     Vines(VinesFeature),
 }
@@ -76,6 +81,10 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
         "minecraft:block_column" => Leaf::BlockColumn(BlockColumnFeature::parse(config)?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
+        "minecraft:fallen_tree" => Leaf::FallenTree(Box::new(FallenTreeFeature::parse(config)?)),
+        "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
+            Leaf::HugeMushroom(Box::new(HugeMushroomFeature::parse(kind, config)?))
+        }
         "minecraft:large_dripstone" => {
             Leaf::LargeDripstone(LargeDripstoneFeature::parse(config).ok()?)
         }
@@ -88,6 +97,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         }
         "minecraft:spike" => Leaf::Spike(SpikeFeature::parse(config).ok()?),
         "minecraft:spring_feature" => Leaf::Spring(SpringFeature::parse(config).ok()?),
+        "minecraft:tree" => Leaf::Tree(Box::new(TreeFeature::parse(config)?)),
         "minecraft:underwater_magma" => {
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
         }
@@ -111,6 +121,8 @@ pub fn place_leaf(
         Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
+        Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
         Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
@@ -119,6 +131,7 @@ pub fn place_leaf(
         Leaf::SpeleothemCluster(feature) => speleothem_cluster::place(feature, world, random, pos),
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
+        Leaf::Tree(tree) => tree.place(world, random, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
     }

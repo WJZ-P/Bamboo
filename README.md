@@ -420,6 +420,12 @@ WebView2 的渲染进程不算在内。
 - **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成，`possibleBiomes`、雕刻器的
   `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径逐方块对拍 0 不一致，
   六张高度图逐列、存档里四张 FINAL 高度图位流逐字对拍 0 不一致（见 `docs/worldgen.md`）。
+  `terrain` 的地表阶段现在读**相邻区块里 `BIOMES` 阶段成批填好的 quart 群系格**，和官方
+  `WorldGenRegion.getBiomeManager()` 一样，而不是重算单点气候：成批 `sampleVolume` 和单点 `sampleValue`
+  的浮点顺序不同，气候值落在 `ParameterList` R 树最近邻的临界点上时会选到不同群系。**这条以前漏过**：
+  种子 0 的区块 (644792,109695)（恶地和沙漠交界）地表 33 格被放成各色陶瓦，官方是砂岩/沙子；修复后
+  该区块 0 不一致，并加了回归测试 `worldgen::tests::badlands_desert_boundary_uses_stored_quart_biomes`。
+  代价是每个区块的 `terrain` 多算 8 个邻居区块的群系（气候成批采样，本机约 +4 ms/区块）。
   `features` 阶段已接进游戏：`Task::Generate` 按 `ChunkStep` 依赖半径带邻居引用，世界线程把每个区块的
   CARVERS 半成品存成不可变 `Arc` 快照，计算池上跑 `Generator::features()`，写邻居的增量按 `TaskId` 顺序合并、
   完工时排规范序落到交付盒子；1 线程与 4 线程计算池生成同一片区块逐字节相同。已合进 main 的地物类型都会在
@@ -576,6 +582,20 @@ WebView2 的渲染进程不算在内。
   只在连续的洞穴含水层区域里出现，稀疏的随机区块扫描碰不到，所以加了以指定区块为中心的
   连续网格扫描模式（`chunkgen --chunk X Z --scan N`）和单区块回归测试验证；
   多种子、多 salt、含负坐标与远坐标的地形阶段扫描已逐方块对拍 0 不一致。
+- 树（`mc-bamboo-worldgen::feature::tree`）：`tree`、`fallen_tree`、`huge_brown_mushroom`、
+  `huge_red_mushroom` 已照官方移植并在游戏里放置。十种树干放置器、十二种树叶放置器、
+  红树根放置器、十种装饰器（树干藤蔓、树叶藤蔓、可可、蜂巢、灰化土、树叶附着物、原木
+  附着物、地面落叶、层架蘑菇、嘎枝之心）都有。官方用 `HashSet<BlockPos>` 记树干和树叶，
+  `updateLeaves` 和装饰器的结果取决于它的迭代顺序，所以 `tree/java_set.rs` 照
+  `java.util.HashMap` 的规则重放这个顺序。放完之后的 `updateShapeAtEdge` 通过
+  `feature/shape_update.rs` 直接调用 `mc-bamboo-blocks` 里方块自己的 `updateShape`。
+  对拍：`chunkgen --through features` 放开全部 26 组含树的 placed feature，随机 156 个
+  中心区块 0 不一致；红树林沼泽、斑驳森林、黑森林、蘑菇岛各取 3×3 的定点区块
+  （共 72 个中心）0 不一致；把树叶 `distance`、红树根、白杨横向原木各故意改坏一处都会
+  报不一致。已知限制：`pale_moss` 装饰器没做（它要放 `pale_moss_patch`，属于还没移植的
+  `vegetation_patch`），所以苍白橡树整棵标 `unsupported`；蜂巢里的蜜蜂、战利品这类方块
+  实体内容没有对拍，只照取了随机数；`HashSet` 的一个桶超过 8 个元素时 Java 会把它变成
+  红黑树，这种情况没有复现，只置了标记（树的坐标聚在一起，哈希几乎不冲突）。
 - Beardifier / 结构对地形密度的影响（分支 `cb-wg-beard`）：`mc-bamboo-worldgen::beardifier`
   逐行移植官方 `net.minecraft.world.level.levelgen.Beardifier`：五种 `TerrainAdjustment`
   （`none` / `bury` / `beard_thin` / `beard_box` / `encapsulate`）、`BEARD_KERNEL`（24³
