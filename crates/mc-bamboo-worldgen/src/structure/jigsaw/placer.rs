@@ -36,7 +36,16 @@ use super::{
 
 /// 一个结构件（`PoolElementStructurePiece`），放置阶段可直接用这些字段。
 ///
+/// 存档相关的两个基类字段是常量，所以不单独存：`PoolElementStructurePiece` 的构造器
+/// 是 `super(StructurePieceType.JIGSAW, 0, boundingBox)`，即 `GD` 恒为 0；它从不调用
+/// `setOrientation`，所以 `StructurePiece.getOrientation()` 是 null，`O` 写 -1。
+///
 /// A structure piece (`PoolElementStructurePiece`) for the placement stage.
+/// The two save-only base fields are constants and thus not stored: the
+/// `PoolElementStructurePiece` constructor is
+/// `super(StructurePieceType.JIGSAW, 0, boundingBox)`, so `GD` is always 0; it never
+/// calls `setOrientation`, so `StructurePiece.getOrientation()` stays null and `O`
+/// is written as -1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
     pub element: PoolElement,
@@ -57,6 +66,34 @@ pub struct Junction {
     pub source_z: i32,
     pub delta_y: i32,
     pub dest_projection: Projection,
+}
+
+impl Piece {
+    /// 转成存档用的 `StructurePiece`（`PiecesContainer.save` 的 `Children` 一项）。
+    ///
+    /// 官方 `PoolElementStructurePiece.addAdditionalSaveData` 的 `extras`：
+    /// `PosX`/`PosY`/`PosZ`、`ground_level_delta`、`pool_element`、`rotation`
+    /// （`Rotation.LEGACY_CODEC`，名字 `none`/`clockwise_90`/`180`/`counterclockwise_90`）、
+    /// `junctions`（每项 `{source_x, source_ground_y, source_z, delta_y, dest_proj}`）。
+    ///
+    /// Convert to the save-side `StructurePiece` (one `Children` entry written by
+    /// `PiecesContainer.save`). The `extras` mirror vanilla
+    /// `PoolElementStructurePiece.addAdditionalSaveData`: `PosX`/`PosY`/`PosZ`,
+    /// `ground_level_delta`, `pool_element`, `rotation` (`Rotation.LEGACY_CODEC`, names
+    /// `none`/`clockwise_90`/`180`/`counterclockwise_90`) and `junctions` (each
+    /// `{source_x, source_ground_y, source_z, delta_y, dest_proj}`).
+    pub fn to_save_piece(&self) -> crate::structure::start::StructurePiece {
+        crate::structure::start::StructurePiece {
+            piece_type: "minecraft:jigsaw".to_owned(),
+            bounding_box: self.bounding_box,
+            // `setOrientation` 从未被调用，`O` 写 -1。
+            // `setOrientation` is never called, so `O` is written as -1.
+            orientation: -1,
+            // `super(StructurePieceType.JIGSAW, 0, ...)`：`GD` 恒为 0。
+            // `super(StructurePieceType.JIGSAW, 0, ...)`: `GD` is always 0.
+            ground_level_delta: 0,
+        }
+    }
 }
 
 /// `addPieces` 的完整产出：stub 位置 + 全部结构件（含中心件）。
