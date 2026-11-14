@@ -1,4 +1,4 @@
-import com.mojang.datafixers.util.Either;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,6 +26,7 @@ import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSeriali
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftPieces;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure;
+import net.minecraft.world.level.levelgen.structure.structures.OceanMonumentPieces;
 import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
 
 /**
@@ -88,6 +89,7 @@ public final class StructurePiecesOracle {
                 case "mineshaft_normal" -> mineshaft(seed, cx, cz, false, arg);
                 case "mineshaft_mesa" -> mineshaft(seed, cx, cz, true, arg);
                 case "stronghold" -> stronghold(seed, cx, cz);
+                case "ocean_monument" -> oceanMonument(seed, cx, cz);
                 default -> throw new IllegalArgumentException("unknown kind " + kind);
             };
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
@@ -155,6 +157,33 @@ public final class StructurePiecesOracle {
             }
         }
         return builder.build().pieces().stream().map(StructurePiecesOracle::dump).collect(Collectors.toList());
+    }
+
+    /** OceanMonumentStructure.createTopPiece + MonumentBuilding；childPieces 走反射列出。 */
+    private static List<String> oceanMonument(long seed, int cx, int cz) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        random.setLargeFeatureSeed(seed, cx, cz);
+        int west = cx * 16 - 29;
+        int north = cz * 16 - 29;
+        Direction orientation = Direction.Plane.HORIZONTAL.getRandomDirection(random);
+        OceanMonumentPieces.MonumentBuilding building =
+                new OceanMonumentPieces.MonumentBuilding(random, west, north, orientation);
+        StructurePiecesBuilder builder = new StructurePiecesBuilder();
+        builder.addPiece(building);
+        List<String> out = new ArrayList<>();
+        for (StructurePiece p : builder.build().pieces()) {
+            out.add(dump(p));
+        }
+        try {
+            Field field = OceanMonumentPieces.MonumentBuilding.class.getDeclaredField("childPieces");
+            field.setAccessible(true);
+            for (Object child : (List<?>) field.get(building)) {
+                out.add(dump((StructurePiece) child));
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("cannot read MonumentBuilding.childPieces", e);
+        }
+        return out;
     }
 
     /** 把一个结构件按统一格式 dump 成一行。 */

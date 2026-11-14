@@ -13,6 +13,7 @@
 //! names and positions only). Each structure exposes one pure function.
 
 pub mod mineshaft;
+pub mod ocean_monument;
 pub mod stronghold;
 
 use std::collections::BTreeMap;
