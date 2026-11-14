@@ -107,6 +107,7 @@ mod seed_world;
 mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod structure_rings;
+mod structure_templates;
 #[cfg(feature = "oracle")]
 mod structure_validity;
 #[cfg(feature = "oracle")]
@@ -299,6 +300,7 @@ fn generate(server_jar: &str, java: &str) -> Result<(), String> {
     let output_dir = root.join(OUTPUT_DIR);
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
+    structure_templates::export(&work_dir, &output_dir)?;
 
     println!(
         "已生成 Minecraft {} 的数据（协议 {}）",
@@ -316,6 +318,7 @@ fn extract(java: &str) -> Result<(), String> {
     let output_dir = root.join(OUTPUT_DIR);
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
+    structure_templates::export(&work_dir, &output_dir)?;
 
     println!(
         "已用现有的报告重新生成 Minecraft {} 的数据（协议 {}）",
