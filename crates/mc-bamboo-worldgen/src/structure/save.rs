@@ -328,9 +328,17 @@ pub fn load_piece(tag: &Tag) -> Result<LoadedPiece, String> {
 /// 已知的结构件类型 id（`BuiltInRegistries.STRUCTURE_PIECE`），用于判「官方能不能读」。
 /// `PiecesContainer.load` 对未知 id 只打日志并跳过该结构件。
 ///
+/// **版本相关的硬编码表**：`worldgen.json` 目前没有导出 `structure_piece` 注册表，
+/// 所以这张表只能手写；换 jar 版本要重新核对（`BuiltInRegistries.STRUCTURE_PIECE`
+/// 的键）。
+///
 /// Known structure piece type ids (`BuiltInRegistries.STRUCTURE_PIECE`), used to
 /// tell whether vanilla could read a piece. `PiecesContainer.load` logs and skips
 /// unknown ids.
+///
+/// **Hard-coded version-dependent table**: `worldgen.json` does not export the
+/// `structure_piece` registry yet, so this list is written by hand; re-check it
+/// against `BuiltInRegistries.STRUCTURE_PIECE` when the jar version changes.
 pub const KNOWN_PIECE_IDS: &[&str] = &[
     // 废弃矿井 / 要塞 / 海底神殿 / 林地府邸：本里程碑负责的四个多件式结构。
     // Mineshaft / stronghold / ocean monument / woodland mansion: the four
