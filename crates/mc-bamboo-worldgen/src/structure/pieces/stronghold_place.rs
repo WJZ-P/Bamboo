@@ -341,7 +341,10 @@ pub fn filler_corridor_post_process(piece: &mut StrongholdPiece<'_>, steps: i32)
 
 /// `Straight.postProcess`。
 ///
-/// `Straight.postProcess`.
+/// 选择器盒 → 门 → 四处 0.1F 火把 → 左右两侧挖空。
+///
+/// `Straight.postProcess`: selector box, door, four 0.1F torches, then the two side
+/// openings.
 pub fn straight_post_process(
     piece: &mut StrongholdPiece<'_>,
     random: &WorldgenRandom,
@@ -349,13 +352,22 @@ pub fn straight_post_process(
     left_child: bool,
     right_child: bool,
 ) {
-    piece.box_selected(0, 0, 0, 4, 4, 4, true, random);
+    piece.box_selected(0, 0, 0, 4, 4, 6, true, random);
     generate_small_door(piece, entry_door, 1, 1, 0);
+    generate_small_door(piece, SmallDoorType::Opening, 1, 1, 6);
+    let east_torch = with_property(block("minecraft:wall_torch"), "facing", "east")
+        .unwrap_or_else(|| block("minecraft:wall_torch"));
+    let west_torch = with_property(block("minecraft:wall_torch"), "facing", "west")
+        .unwrap_or_else(|| block("minecraft:wall_torch"));
+    maybe_place(piece, random, 0.1, 1, 2, 1, east_torch);
+    maybe_place(piece, random, 0.1, 3, 2, 1, west_torch);
+    maybe_place(piece, random, 0.1, 1, 2, 5, east_torch);
+    maybe_place(piece, random, 0.1, 3, 2, 5, west_torch);
     if left_child {
-        piece.box_at(0, 1, 1, 0, 3, 3, cave_air(), cave_air(), false);
+        piece.box_at(0, 1, 2, 0, 3, 4, cave_air(), cave_air(), false);
     }
     if right_child {
-        piece.box_at(4, 1, 1, 4, 3, 3, cave_air(), cave_air(), false);
+        piece.box_at(4, 1, 2, 4, 3, 4, cave_air(), cave_air(), false);
     }
 }
 
@@ -786,98 +798,107 @@ pub fn library_post_process(
 /// `PortalRoom.postProcess`。
 ///
 /// `PortalRoom.postProcess`.
+/// `PortalRoom.postProcess`。
+///
+/// 12 块末地传送门框架各取一次 `nextFloat() > 0.9F` 决定有没有眼睛；全部有眼睛时铺九格
+/// `END_PORTAL`。蠹虫刷怪笼的方块要写，实体 id 不比。
+///
+/// `PortalRoom.postProcess`. Twelve end-portal frames each draw `nextFloat() > 0.9F` for
+/// the eye; when every frame has one, nine `END_PORTAL` blocks go in. The silverfish
+/// spawner block is placed, but its entity id is not compared.
 pub fn portal_room_post_process(
     piece: &mut StrongholdPiece<'_>,
     random: &WorldgenRandom,
-    entry_door: SmallDoorType,
     has_placed_spawner: &mut bool,
 ) {
+    // 官方固定用 `GRATES` 门，不看 `entryDoor`。
+    // Vanilla always uses a `GRATES` door here, ignoring `entryDoor`.
     piece.box_selected(0, 0, 0, 10, 7, 15, false, random);
-    generate_small_door(piece, entry_door, 4, 1, 0);
-    let bricks = Bricks::bricks();
+    generate_small_door(piece, SmallDoorType::Grates, 4, 1, 0);
+    // 天花板四条边。
+    // The four ceiling edges.
+    piece.box_selected(1, 6, 1, 1, 6, 14, false, random);
+    piece.box_selected(9, 6, 1, 9, 6, 14, false, random);
+    piece.box_selected(2, 6, 1, 8, 6, 2, false, random);
+    piece.box_selected(2, 6, 14, 8, 6, 14, false, random);
+    // 入口两侧的平台与熔岩。
+    // The platforms and lava beside the entrance.
+    piece.box_selected(1, 1, 1, 2, 1, 4, false, random);
+    piece.box_selected(8, 1, 1, 9, 1, 4, false, random);
+    let lava = block("minecraft:lava");
+    piece.box_at(1, 1, 1, 1, 1, 3, lava, lava, false);
+    piece.box_at(9, 1, 1, 9, 1, 3, lava, lava, false);
+    // 传送门厅地板与中央熔岩池。
+    // The portal-hall floor and its central lava pool.
+    piece.box_selected(3, 1, 8, 7, 1, 12, false, random);
+    piece.box_at(4, 1, 9, 6, 1, 11, lava, lava, false);
+
     let bars = block("minecraft:iron_bars");
-    for y in 1..=6 {
-        piece.place(bricks, 1, y, 1);
-        piece.place(bricks, 1, y, 14);
-        piece.place(bricks, 9, y, 1);
-        piece.place(bricks, 9, y, 14);
+    let ns_bars = with_props(bars, &[("north", "true"), ("south", "true")]);
+    let we_bars = with_props(bars, &[("west", "true"), ("east", "true")]);
+    let mut z = 3;
+    while z < 14 {
+        piece.box_at(0, 3, z, 0, 4, z, ns_bars, ns_bars, false);
+        piece.box_at(10, 3, z, 10, 4, z, ns_bars, ns_bars, false);
+        z += 2;
     }
-    piece.box_at(2, 1, 1, 8, 6, 1, bricks, bricks, false);
-    piece.box_at(2, 1, 14, 8, 6, 14, bricks, bricks, false);
-    piece.box_at(2, 1, 2, 2, 6, 13, bricks, bricks, false);
-    piece.box_at(8, 1, 2, 8, 6, 13, bricks, bricks, false);
-    piece.box_at(3, 1, 2, 7, 6, 13, cave_air(), cave_air(), false);
-    piece.box_at(3, 1, 12, 7, 6, 13, bricks, bricks, false);
-    piece.box_at(3, 1, 2, 7, 1, 11, bricks, bricks, false);
+    let mut x = 2;
+    while x < 9 {
+        piece.box_at(x, 3, 15, x, 4, 15, we_bars, we_bars, false);
+        x += 2;
+    }
 
-    // 末地传送门框架及其上的眼睛。
-    let frame = with_property(block("minecraft:end_portal_frame"), "eye", "false")
-        .unwrap_or_else(|| block("minecraft:end_portal_frame"));
-    piece.place(
-        with_property(frame, "facing", "south").unwrap_or(frame),
-        4,
-        1,
-        4,
-    );
-    piece.place(
-        with_property(frame, "facing", "west").unwrap_or(frame),
-        5,
-        1,
-        4,
-    );
-    piece.place(
-        with_property(frame, "facing", "east").unwrap_or(frame),
-        6,
-        1,
-        4,
-    );
-    piece.place(
-        with_property(frame, "facing", "north").unwrap_or(frame),
-        7,
-        1,
-        4,
-    );
-    piece.place(
-        with_property(frame, "facing", "south").unwrap_or(frame),
-        4,
-        1,
-        12,
-    );
-    piece.place(
-        with_property(frame, "facing", "west").unwrap_or(frame),
-        5,
-        1,
-        12,
-    );
-    piece.place(
-        with_property(frame, "facing", "east").unwrap_or(frame),
-        6,
-        1,
-        12,
-    );
-    piece.place(
-        with_property(frame, "facing", "north").unwrap_or(frame),
-        7,
-        1,
-        12,
-    );
-    piece.place(bars, 4, 2, 4);
-    piece.place(bars, 4, 3, 4);
-    piece.place(bars, 7, 2, 4);
-    piece.place(bars, 7, 3, 4);
-    piece.place(bars, 4, 2, 12);
-    piece.place(bars, 4, 3, 12);
-    piece.place(bars, 7, 2, 12);
-    piece.place(bars, 7, 3, 12);
-
-    // 楼梯与平台。
-    let stairs = with_property(block("minecraft:stone_brick_stairs"), "facing", "south")
+    // 通往传送门的三级台阶。
+    // The three steps up to the portal.
+    piece.box_selected(4, 1, 5, 6, 1, 7, false, random);
+    piece.box_selected(4, 2, 6, 6, 2, 7, false, random);
+    piece.box_selected(4, 3, 7, 6, 3, 7, false, random);
+    let stairs = with_property(block("minecraft:stone_brick_stairs"), "facing", "north")
         .unwrap_or_else(|| block("minecraft:stone_brick_stairs"));
-    for i in 0..3 {
-        piece.place(stairs, 4, 3 + i, 5 + i);
-        piece.place(stairs, 5, 3 + i, 5 + i);
-        piece.place(stairs, 6, 3 + i, 5 + i);
-        piece.place(stairs, 7, 3 + i, 5 + i);
+    for x in 4..=6 {
+        piece.place(stairs, x, 1, 4);
+        piece.place(stairs, x, 2, 5);
+        piece.place(stairs, x, 3, 6);
+    }
+
+    // 12 块框架的眼睛：每块一次 `nextFloat()`，全部命中就生成传送门。
+    // Eyes on the twelve frames: one `nextFloat()` each; all hit opens the portal.
+    let frame = block("minecraft:end_portal_frame");
+    let mut eyes = [false; 12];
+    let mut all_eyes = true;
+    for eye in &mut eyes {
+        *eye = random.next_float() > 0.9;
+        all_eyes &= *eye;
+    }
+    let frame_with = |facing: &str, has_eye: bool| {
+        with_props(
+            frame,
+            &[
+                ("facing", facing),
+                ("eye", if has_eye { "true" } else { "false" }),
+            ],
+        )
+    };
+    piece.place(frame_with("north", eyes[0]), 4, 3, 8);
+    piece.place(frame_with("north", eyes[1]), 5, 3, 8);
+    piece.place(frame_with("north", eyes[2]), 6, 3, 8);
+    piece.place(frame_with("south", eyes[3]), 4, 3, 12);
+    piece.place(frame_with("south", eyes[4]), 5, 3, 12);
+    piece.place(frame_with("south", eyes[5]), 6, 3, 12);
+    piece.place(frame_with("east", eyes[6]), 3, 3, 9);
+    piece.place(frame_with("east", eyes[7]), 3, 3, 10);
+    piece.place(frame_with("east", eyes[8]), 3, 3, 11);
+    piece.place(frame_with("west", eyes[9]), 7, 3, 9);
+    piece.place(frame_with("west", eyes[10]), 7, 3, 10);
+    piece.place(frame_with("west", eyes[11]), 7, 3, 11);
+
+    if all_eyes {
+        let portal = block("minecraft:end_portal");
+        for z in [9, 10, 11] {
+            for x in [4, 5, 6] {
+                piece.place(portal, x, 3, z);
+            }
+        }
     }
 
     let (wx, wy, wz) = piece.ctx.world_pos(5, 3, 6);
@@ -885,10 +906,9 @@ pub fn portal_room_post_process(
         *has_placed_spawner = true;
         piece
             .level
-            .set_block(wx, wy, wz, block("minecraft:silverfish_spawner"));
+            .set_block(wx, wy, wz, block("minecraft:spawner"));
     }
 }
-
 /// 供对拍比较用的方块名（调试与断言）。
 ///
 /// Block name for oracle comparisons (debug and assertions).
