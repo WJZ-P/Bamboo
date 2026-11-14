@@ -11,12 +11,16 @@ use serde_json::Value;
 
 use crate::random::WorldgenRandom;
 
-use super::{ores, placement::OreFeature, simple_block::SimpleBlockFeature, world::FeatureWorld};
+use super::{
+    bamboo::BambooFeature, ores, placement::OreFeature, simple_block::SimpleBlockFeature,
+    world::FeatureWorld,
+};
 
 type Pos = (i32, i32, i32);
 
 /// 一个已移植、`place` 不再需要注册表解析的叶子地物。
 pub enum Leaf {
+    Bamboo(Box<BambooFeature>),
     Ore(Box<OreFeature>),
     SimpleBlock(Box<SimpleBlockFeature>),
 }
@@ -26,6 +30,9 @@ pub enum Leaf {
 /// Parse a config by `Feature` type ID; return `None` for unported / unparsable types.
 pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     match kind {
+        // 按 Feature 类型 ID 的字母序插入。
+        // Inserted in Feature type ID order.
+        "minecraft:bamboo" => Some(Leaf::Bamboo(Box::new(BambooFeature::parse(config)?))),
         "minecraft:ore" => Some(Leaf::Ore(Box::new(OreFeature::parse(config).ok()?))),
         "minecraft:simple_block" => Some(Leaf::SimpleBlock(Box::new(SimpleBlockFeature::parse(
             config,
@@ -44,6 +51,7 @@ pub fn place_leaf(
     pos: Pos,
 ) -> bool {
     match leaf {
+        Leaf::Bamboo(bamboo) => bamboo.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
     }
