@@ -24,6 +24,7 @@ use super::{
     placement::OreFeature,
     simple_block::SimpleBlockFeature,
     speleothem_cluster::SpeleothemClusterFeature,
+    spike::{self, SpikeFeatureFeature},
     spring::{self, SpringFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     world::FeatureWorld,
@@ -47,6 +48,7 @@ pub enum Leaf {
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
     SpeleothemCluster(Box<SpeleothemClusterFeature>),
+    Spike(SpikeFeatureFeature),
     Spring(SpringFeature),
     UnderwaterMagma(UnderwaterMagmaFeature),
 }
@@ -70,6 +72,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(Box::new(SpeleothemClusterFeature::parse(config).ok()?))
         }
+        "minecraft:spike" => Leaf::Spike(SpikeFeatureFeature::parse(config).ok()?),
         "minecraft:spring_feature" => Leaf::Spring(SpringFeature::parse(config).ok()?),
         "minecraft:underwater_magma" => {
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
@@ -94,6 +97,7 @@ fn is_supported(leaf: &Leaf) -> bool {
         Leaf::Disk(disk) => disk.supported(),
         Leaf::Geode(geode) => geode.supported(),
         Leaf::Lake(lake) => lake.supported(),
+        Leaf::Spike(spike) => spike.supported(),
         Leaf::LargeDripstone(feature) => feature.supported(),
         _ => true,
     }
@@ -120,6 +124,7 @@ pub fn place_leaf(
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::SpeleothemCluster(feature) => feature.place(world, random, pos),
+        Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
     }
