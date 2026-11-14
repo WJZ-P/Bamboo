@@ -573,8 +573,11 @@ public final class ChunkgenOracle {
             // 固定它，否则 --steps / --ore-only 会让全局 index 变成过滤后的下标，
             // setFeatureSeed 的参数就和导出的 features_per_step 不一致了。
             generator.validate();
+            checkFeaturesPerStep(generator);
             applyStepsMask(generator);
             applyFeatureAllowList(generator);
+            // 过滤只能改变「哪些 index 被跑」，不能改变全局顺序本身。
+            checkFeaturesPerStep(generator);
             MaterialRule materialRule = generatorSettings.materialRule().value();
             for (long seed : seeds()) {
                 RandomState state = RandomState.create(this.noiseLookup, seed, generatorSettings);
@@ -725,6 +728,33 @@ public final class ChunkgenOracle {
          *
          * <p>群系对象是注册表里的共享实例，只在这个 oracle 进程里改，不影响导出数据。
          */
+        /**
+         * 核对 {@code featuresPerStep[6]} 仍是导出的 34 项、且 {@code ore_clay}
+         * 在 index 27。诊断过滤只能改变哪些 index 被跑，不能改变全局顺序；
+         * 换了 jar 版本或 validate() 的行为变了，这里会立刻报错而不是静默算错。
+         */
+        private void checkFeaturesPerStep(NoiseBasedChunkGenerator generator) throws Exception {
+            Field field = net.minecraft.world.level.chunk.ChunkGenerator.class
+                    .getDeclaredField("featuresPerStep");
+            field.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>
+                    supplier = (java.util.function.Supplier<
+                            List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>)
+                            field.get(generator);
+            List<net.minecraft.world.level.levelgen.placement.PlacedFeature> features =
+                    supplier.get().get(6).features();
+            Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
+                    this.registries.lookupOrThrow(Registries.PLACED_FEATURE);
+            if (features.size() != 34
+                    || !placed.getKey(features.get(27)).toString()
+                            .equals("minecraft:ore_clay")) {
+                throw new IllegalStateException(
+                        "featuresPerStep[6] changed: size=" + features.size()
+                                + " index27=" + placed.getKey(features.get(27)));
+            }
+        }
+
         private void applyStepsMask(NoiseBasedChunkGenerator generator) throws Exception {
             if (this.options.stepsMask() == Options.ALL_STEPS) {
                 return;
