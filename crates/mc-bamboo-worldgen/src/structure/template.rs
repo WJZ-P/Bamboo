@@ -82,6 +82,40 @@ impl Direction {
     pub const fn axis_is_horizontal(self) -> bool {
         matches!(self, Self::North | Self::South | Self::West | Self::East)
     }
+
+    /// `Direction.getClockWise()`（绕 Y 轴）。
+    pub const fn clock_wise(self) -> Self {
+        match self {
+            Self::North => Self::East,
+            Self::East => Self::South,
+            Self::South => Self::West,
+            Self::West => Self::North,
+            _ => self,
+        }
+    }
+
+    /// `Direction.getCounterClockWise()`（绕 Y 轴）。
+    pub const fn counter_clock_wise(self) -> Self {
+        match self {
+            Self::North => Self::West,
+            Self::West => Self::South,
+            Self::South => Self::East,
+            Self::East => Self::North,
+            _ => self,
+        }
+    }
+
+    /// `Direction.getNormal()` 的 X/Y/Z 步长。
+    pub const fn step(self) -> (i32, i32, i32) {
+        match self {
+            Self::Down => (0, -1, 0),
+            Self::Up => (0, 1, 0),
+            Self::North => (0, 0, -1),
+            Self::South => (0, 0, 1),
+            Self::West => (-1, 0, 0),
+            Self::East => (1, 0, 0),
+        }
+    }
 }
 
 /// `JigsawBlockEntity.JointType`。
@@ -178,10 +212,29 @@ pub struct StructureTemplate {
 impl StructureTemplate {
     /// 按注册名（`minecraft:...`）加载模板。
     ///
-    /// Load a template by its id (`minecraft:...`).
+    /// 官方 `StructureTemplateManager.getOrCreate(id)` 对数据包里找不到的模板返回一个
+    /// 空 `StructureTemplate`（size 0、无 palette），不是错误；这里照做。
+    ///
+    /// Load a template by its id (`minecraft:...`). Vanilla `getOrCreate(id)`
+    /// returns an empty `StructureTemplate` for a missing id instead of an error.
     pub fn load(name: &str) -> Result<Self, String> {
-        let bytes = blob::get(name).ok_or_else(|| format!("unknown structure template {name}"))?;
+        let Some(bytes) = blob::get(name) else {
+            return Ok(Self::empty());
+        };
         Self::parse(bytes)
+    }
+
+    /// `new StructureTemplate()`：size 0、无 palette、无方块、无实体、无拼图方块。
+    ///
+    /// `new StructureTemplate()`: size 0, no palettes, blocks, entities or jigsaws.
+    pub fn empty() -> Self {
+        Self {
+            size: (0, 0, 0),
+            palettes: Vec::new(),
+            blocks: Vec::new(),
+            entities: Vec::new(),
+            jigsaws: Vec::new(),
+        }
     }
 
     /// 从官方 `NbtIo.writeCompressed` 的 gzip 字节解析。

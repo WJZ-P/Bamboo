@@ -13,7 +13,10 @@ use serde_json::Value;
 
 use crate::random::WorldgenRandom;
 
-use super::{element::PoolElement, rotation::shuffled_copy};
+use super::{
+    element::PoolElement,
+    rotation::{Rotation, shuffled_copy},
+};
 
 #[derive(Debug, Clone)]
 pub struct TemplatePool {
@@ -69,9 +72,12 @@ impl TemplatePool {
         Ok(self.elements[index].clone())
     }
 
-    /// `StructureTemplatePool.getShuffledTemplates(random)`：返回展开后的下标。
-    pub fn shuffled_templates(&self, random: &WorldgenRandom) -> Vec<usize> {
+    /// `StructureTemplatePool.getShuffledTemplates(random)`：展开列表洗牌后的 element。
+    pub fn shuffled_elements(&self, random: &WorldgenRandom) -> Vec<PoolElement> {
         shuffled_copy(&self.expanded, random)
+            .into_iter()
+            .map(|index| self.elements[index].clone())
+            .collect()
     }
 
     pub fn element(&self, index: usize) -> Option<&PoolElement> {
@@ -84,6 +90,24 @@ impl TemplatePool {
 
     pub fn fallback(&self) -> &str {
         &self.fallback
+    }
+
+    /// `StructureTemplatePool.getMaxSize(manager)`：展开列表里（除 empty）各 element
+    /// 在 `Rotation.NONE` / `BlockPos.ZERO` 下包围盒的最大 `getYSpan()`。
+    ///
+    /// `getMaxSize(manager)`: the max `getYSpan()` of every (non-empty) expanded
+    /// element's bounding box at `Rotation.NONE` / `BlockPos.ZERO`.
+    pub fn max_size(&self) -> Result<i32, String> {
+        let mut max = 0;
+        for &index in &self.expanded {
+            let element = &self.elements[index];
+            if matches!(element, PoolElement::Empty) {
+                continue;
+            }
+            let box_ = element.bounding_box((0, 0, 0), Rotation::None)?;
+            max = max.max(box_.max_y - box_.min_y + 1);
+        }
+        Ok(max)
     }
 }
 

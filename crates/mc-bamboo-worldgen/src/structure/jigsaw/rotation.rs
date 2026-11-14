@@ -6,7 +6,10 @@
 //! Port of vanilla `Rotation`: the four values, `getRandom` / `getShuffled` draw order,
 //! `StructureTemplate.transform` (mirror NONE, pivot ZERO), `getSize`, `getBoundingBox`.
 
-use crate::{random::WorldgenRandom, structure::BoundingBox};
+use crate::{
+    random::WorldgenRandom,
+    structure::{BoundingBox, template::Direction},
+};
 
 /// `Rotation` 的四个值，序号就是 `getIndex()` / `ordinal()`。
 ///
@@ -60,6 +63,24 @@ impl Rotation {
             Self::Clockwise90 => (-z, y, x),
             Self::Clockwise180 => (-x, y, -z),
             Self::Counterclockwise90 => (z, y, -x),
+        }
+    }
+
+    /// `JigsawBlock.rotate` / `OctahedralGroup.rotate(FrontAndTop)`：
+    /// 绕 Y 轴旋转时水平方向按 clock-wise/opposite/counter-clock-wise 变，Y 方向不变。
+    ///
+    /// `JigsawBlock.rotate` / `OctahedralGroup.rotate(FrontAndTop)`: for Y-axis
+    /// rotations horizontal directions rotate clock-wise / opposite / counter-clock-wise,
+    /// vertical directions are unchanged.
+    pub fn rotate_direction(self, direction: Direction) -> Direction {
+        if !direction.axis_is_horizontal() {
+            return direction;
+        }
+        match self {
+            Self::None => direction,
+            Self::Clockwise90 => direction.clock_wise(),
+            Self::Clockwise180 => direction.opposite(),
+            Self::Counterclockwise90 => direction.counter_clock_wise(),
         }
     }
 

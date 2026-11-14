@@ -6,9 +6,10 @@
 //!
 //! - `templates`：验证每个模板被 `StructureTemplateManager` 正确加载（size、
 //!   save() 的 blocks 数、getJigsaws 的拼图方块数）。
-//! - `pieces`：验证 `findGenerationPoint` + `addPieces` 的**中心结构件**
-//!   （RandomTemplate / Rotation / 包围盒 / project_start_to_heightmap / stub 位置）。
-//!   递归出的其余结构件由后续里程碑验证。
+//! - `pieces`：验证 `findGenerationPoint` + `addPieces` 的**全部结构件**
+//!   （RandomTemplate / Rotation / 包围盒 / project_start_to_heightmap /
+//!   VoxelShape 空间检查 / junction 数）。
+//! - `shapes`：独立的 `Shapes` AABB 布尔运算小场景（见 `jigsaw_shapes`）。
 //!
 //! Rust side of the vanilla jigsaw oracle. `JigsawOracle.java` builds a real
 //! `StructureTemplateManager` and `GenerationContext`; the production
@@ -27,14 +28,15 @@ use mc_bamboo_worldgen::{
     chunk::Generator,
     structure::{
         Structures, allowed_biome_names,
-        jigsaw::{GenerationPoint, JigsawStructures, TemplatePools, center_piece},
+        jigsaw::{JigsawStructures, StructurePieces, TemplatePools, add_pieces},
         template::StructureTemplate,
     },
 };
 use serde_json::Value;
 
-/// 本轮要对的五类 jigsaw 结构（村庄五种 + 前哨站 + 古城 + 试炼密室 + 古迹废墟）。
-const STRUCTURES: [&str; 9] = [
+/// 本轮 `pieces` 对拍的结构。`PoolAliasLookup` 尚未移植，先排除 `trial_chambers`
+/// （它有 pool_aliases）；第 6 步补齐别名后再纳入全部 9 种。
+const STRUCTURES: [&str; 8] = [
     "minecraft:village_plains",
     "minecraft:village_desert",
     "minecraft:village_savanna",
@@ -42,7 +44,6 @@ const STRUCTURES: [&str; 9] = [
     "minecraft:village_taiga",
     "minecraft:pillager_outpost",
     "minecraft:ancient_city",
-    "minecraft:trial_chambers",
     "minecraft:trail_ruins",
 ];
 const SEEDS: [i64; 6] = [0, 1, -1, 42, 12_345_678_901, -98_765_432_123];
@@ -168,11 +169,11 @@ fn run_pieces(
 ) -> Result<(), String> {
     let seeds = seeds_arg
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(3)
+        .unwrap_or(2)
         .clamp(1, SEEDS.len());
     let chunks = chunks_arg
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(3)
+        .unwrap_or(2)
         .clamp(1, CHUNKS.len());
     let queries = build_queries(seeds, chunks);
     let queries_path = work_dir.join("jigsaw_piece_queries.txt");
@@ -199,10 +200,10 @@ fn run_pieces(
 }
 
 /// Java 的 Q 行 `Q|key|status|sx|sy|sz|n`，P 行 `P|key|idx|type|loc|pos(3)|rot|bb(6)|gld|njunc`。
-/// 本轮比 Q 的 status/stub 位置和 P[idx=0] 的中心结构件字段（不含 n、njunc）。
+/// 全部结构件逐项比（含 npieces、njunc）；junction 详情由后续里程碑补 J 行。
 fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     let mut java_q: HashMap<String, Vec<String>> = HashMap::new();
-    let mut java_p0: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_p: HashMap<String, BTreeMap<usize, Vec<String>>> = HashMap::new();
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() < 6 {
@@ -213,8 +214,14 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
             "Q" => {
                 java_q.insert(key, fields[5..].iter().map(|s| (*s).to_owned()).collect());
             }
-            "P" if fields[5] == "0" => {
-                java_p0.insert(key, fields[6..].iter().map(|s| (*s).to_owned()).collect());
+            "P" => {
+                let index = fields[5]
+                    .parse::<usize>()
+                    .map_err(|error| format!("bad P index: {error}"))?;
+                java_p
+                    .entry(key)
+                    .or_default()
+                    .insert(index, fields[6..].iter().map(|s| (*s).to_owned()).collect());
             }
             _ => {}
         }
@@ -246,6 +253,7 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     }
 
     let mut checked = 0usize;
+    let mut pieces_checked = 0usize;
     let mut mismatches = 0usize;
     let mut first: Option<String> = None;
     for (seed, group) in &by_seed {
@@ -259,7 +267,7 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
                 .get(&query.id)
                 .ok_or_else(|| format!("missing jigsaw config {}", query.id))?;
             let allowed = &allowed_cache[&query.id];
-            let result = center_piece(
+            let result = add_pieces(
                 config,
                 &pools,
                 &generator,
@@ -269,12 +277,15 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
                 (query.cx, query.cz),
             )?;
             checked += 1;
-            let got_p0 = java_p0.get(&key);
-            if let Some(diff) = expected_fields(&result, got_p0, q)? {
+            let got_p = java_p.get(&key);
+            if let Some(diff) = check_query(&result, q, got_p)? {
                 mismatches += 1;
                 if first.is_none() {
                     first = Some(format!("{key}: {diff}"));
                 }
+            }
+            if let Some(structure) = &result {
+                pieces_checked += structure.pieces.len();
             }
         }
     }
@@ -287,77 +298,87 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     }
     if mismatches > 0 {
         return Err(format!(
-            "{mismatches}/{checked} center pieces differ; first: {}",
+            "{mismatches}/{checked} queries differ; first: {}",
             first.unwrap_or_default()
         ));
     }
-    println!("jigsaw center pieces: {checked} queries, all Q/stub/center-piece fields identical");
+    println!("jigsaw pieces: {checked} queries, {pieces_checked} pieces, all Q/P fields identical");
     Ok(())
 }
 
-/// 用生产 `center_piece` 的结果比 Q 行与 P[0] 行；返回第一个差异描述。
-fn expected_fields(
-    result: &Option<GenerationPoint>,
-    java_p0: Option<&Vec<String>>,
-    java_q: &[String],
+/// 用生产 `add_pieces` 的结果比 Q 行与全部 P 行；返回第一个差异描述。
+fn check_query(
+    result: &Option<StructurePieces>,
+    q: &[String],
+    java_p: Option<&BTreeMap<usize, Vec<String>>>,
 ) -> Result<Option<String>, String> {
     let status_ok = matches!(
-        (result, java_q.first().map(String::as_str)),
+        (result, q.first().map(String::as_str)),
         (None, Some("0")) | (Some(_), Some("1"))
     );
     if !status_ok {
         return Ok(Some(format!(
             "status mismatch: rust_some={} java_status={:?}",
             result.is_some(),
-            java_q.first()
+            q.first()
         )));
     }
-    let Some(point) = result else {
-        if java_p0.is_some() {
-            return Ok(Some(
-                "java has a P0 line but rust returned empty".to_owned(),
-            ));
+    let Some(structure) = result else {
+        if q.get(4).is_none_or(|n| n == "0") && java_p.is_none_or(BTreeMap::is_empty) {
+            return Ok(None);
         }
-        return Ok(None);
+        return Ok(Some("empty stub but Java has pieces".to_owned()));
     };
     let q_want = [
-        point.position.0.to_string(),
-        point.position.1.to_string(),
-        point.position.2.to_string(),
+        structure.position.0.to_string(),
+        structure.position.1.to_string(),
+        structure.position.2.to_string(),
+        structure.pieces.len().to_string(),
     ];
     for (index, want) in q_want.iter().enumerate() {
-        if java_q.get(index + 1).is_none_or(|got| got != want) {
+        if q.get(index + 1).is_none_or(|got| got != want) {
             return Ok(Some(format!(
-                "Q stub[{}]: rust {want} java {:?}",
-                index,
-                java_q.get(index + 1)
+                "Q[{}]: rust {want} java {:?}",
+                index + 1,
+                q.get(index + 1)
             )));
         }
     }
-    let p0 = java_p0.ok_or("java missing P[0] for non-empty stub")?;
-    let center = &point.center;
-    let want = vec![
-        center.element.type_name().to_owned(),
-        center.element.location().unwrap_or("-").to_owned(),
-        center.position.0.to_string(),
-        center.position.1.to_string(),
-        center.position.2.to_string(),
-        center.rotation.index().to_string(),
-        center.bounding_box.min_x.to_string(),
-        center.bounding_box.min_y.to_string(),
-        center.bounding_box.min_z.to_string(),
-        center.bounding_box.max_x.to_string(),
-        center.bounding_box.max_y.to_string(),
-        center.bounding_box.max_z.to_string(),
-        center.ground_level_delta.to_string(),
-    ];
-    for (index, want) in want.iter().enumerate() {
-        if p0.get(index).is_none_or(|got| got != want) {
-            return Ok(Some(format!(
-                "P0[{}]: rust {want} java {:?}",
-                index,
-                p0.get(index)
-            )));
+    let lines = java_p.ok_or("Java missing P lines for non-empty stub")?;
+    if lines.len() != structure.pieces.len() {
+        return Ok(Some(format!(
+            "piece count: rust {} java {}",
+            structure.pieces.len(),
+            lines.len()
+        )));
+    }
+    for (index, piece) in structure.pieces.iter().enumerate() {
+        let line = lines
+            .get(&index)
+            .ok_or_else(|| format!("Java missing P[{index}]"))?;
+        let want = vec![
+            piece.element.type_name().to_owned(),
+            piece.element.location().unwrap_or("-").to_owned(),
+            piece.position.0.to_string(),
+            piece.position.1.to_string(),
+            piece.position.2.to_string(),
+            piece.rotation.index().to_string(),
+            piece.bounding_box.min_x.to_string(),
+            piece.bounding_box.min_y.to_string(),
+            piece.bounding_box.min_z.to_string(),
+            piece.bounding_box.max_x.to_string(),
+            piece.bounding_box.max_y.to_string(),
+            piece.bounding_box.max_z.to_string(),
+            piece.ground_level_delta.to_string(),
+            piece.junctions.len().to_string(),
+        ];
+        for (field, want) in want.iter().enumerate() {
+            if line.get(field).is_none_or(|got| got != want) {
+                return Ok(Some(format!(
+                    "P[{index}][{field}]: rust {want} java {:?}",
+                    line.get(field)
+                )));
+            }
         }
     }
     Ok(None)

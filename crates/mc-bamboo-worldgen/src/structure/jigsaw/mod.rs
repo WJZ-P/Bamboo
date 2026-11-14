@@ -13,12 +13,14 @@
 
 pub mod config;
 pub mod element;
+pub mod placer;
 pub mod pool;
 pub mod rotation;
 pub mod shapes;
 
 pub use config::{HeightProvider, JigsawConfig, JigsawStructures, WorldGenerationContext};
-pub use element::{JigsawBlock, PoolElement, Projection};
+pub use element::{JigsawBlock, PoolElement, Projection, can_attach};
+pub use placer::{Junction, Piece, StructurePieces, add_pieces};
 pub use pool::{TemplatePool, TemplatePools};
 pub use rotation::{Rotation, shuffle, shuffled_copy};
 
@@ -72,6 +74,25 @@ pub fn center_piece(
     seed: i64,
     chunk: (i32, i32),
 ) -> Result<Option<GenerationPoint>, String> {
+    let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
+    random.set_large_feature_seed(seed, chunk.0, chunk.1);
+    center_piece_with_random(config, pools, generator, allowed, dims, chunk, &random)
+}
+
+/// 同一份逻辑，但复用调用方的 `WorldgenRandom`（`addPieces` 的递归继续用它）。
+///
+/// Same logic but reusing the caller's `WorldgenRandom` (the `addPieces`
+/// recursion keeps drawing from it).
+#[allow(clippy::too_many_arguments)]
+pub fn center_piece_with_random(
+    config: &JigsawConfig,
+    pools: &TemplatePools,
+    generator: &Generator<'_>,
+    allowed: &HashSet<String>,
+    dims: (i32, i32, i32),
+    chunk: (i32, i32),
+    random: &WorldgenRandom,
+) -> Result<Option<GenerationPoint>, String> {
     let (cx, cz) = chunk;
     let (min_y, height, sea_level) = dims;
     let context = WorldGenerationContext {
@@ -80,27 +101,22 @@ pub fn center_piece(
         sea_level,
     };
 
-    // `GenerationContext.makeRandom` 用 setLargeFeatureSeed，startHeight.sample 与
-    // addPieces 共用同一个 WorldgenRandom。
-    let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
-    random.set_large_feature_seed(seed, cx, cz);
-
-    let height_value = config.start_height.sample(&random, &context);
+    let height_value = config.start_height.sample(random, &context);
     let position = (cx * 16, height_value, cz * 16);
-    let center_rotation = Rotation::get_random(&random);
+    let center_rotation = Rotation::get_random(random);
 
     // `poolAliasLookup.lookup(startPool)` 尚未移植：这里直接用配置的 start_pool。
     let center_pool = pools
         .get(&config.start_pool)
         .ok_or_else(|| format!("missing start pool {}", config.start_pool))?;
-    let center_element = center_pool.get_random_template(&random)?;
+    let center_element = center_pool.get_random_template(random)?;
     if center_element == PoolElement::Empty {
         return Ok(None);
     }
 
     // `getRandomNamedJigsaw`：洗牌后找第一个 name 匹配的拼图方块。
     let anchored_position = if let Some(target) = &config.start_jigsaw_name {
-        let jigsaws = center_element.shuffled_jigsaws(position, center_rotation, &random)?;
+        let jigsaws = center_element.shuffled_jigsaws(position, center_rotation, random)?;
         match jigsaws
             .iter()
             .find(|jigsaw| jigsaw.name.as_deref() == Some(target.as_str()))

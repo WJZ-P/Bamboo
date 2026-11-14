@@ -14,7 +14,10 @@ use std::cmp::Reverse;
 
 use crate::{
     random::WorldgenRandom,
-    structure::{BoundingBox, template::StructureTemplate},
+    structure::{
+        BoundingBox,
+        template::{Direction, JointType, StructureTemplate},
+    },
 };
 use serde_json::Value;
 
@@ -77,8 +80,39 @@ pub struct JigsawBlock {
     pub pool: String,
     pub placement_priority: i32,
     pub selection_priority: i32,
-    /// 原始 `orientation`（`<front>_<top>`），旋转后的 front/top 由 `canAttach` 阶段处理。
-    pub orientation: String,
+    /// 经 `Rotation` 旋转后的 front / top（`OctahedralGroup.rotate(FrontAndTop)`）。
+    pub front: Direction,
+    pub top: Direction,
+    /// `JigsawBlockEntity.JointType`，不受旋转影响。
+    pub joint: JointType,
+}
+
+/// `JigsawBlock.canAttach(source, target)`。
+///
+/// `sourceFront == targetFront.getOpposite()`，且（rollable 或 top 相同），
+/// 且 target 的 name 为 null 或 `source.target == target.name`。
+pub fn can_attach(source: &JigsawBlock, target: &JigsawBlock) -> bool {
+    let rollable = source.joint == JointType::Rollable;
+    source.front == target.front.opposite()
+        && (rollable || source.top == target.top)
+        && target
+            .name
+            .as_ref()
+            .is_none_or(|name| source.target == *name)
+}
+
+/// 解析 `orientation` 名字 `<front>_<top>`（如 `north_up` / `down_south`）。
+fn parse_orientation(value: &str) -> Result<(Direction, Direction), String> {
+    let mut parts = value.splitn(2, '_');
+    let front = parts
+        .next()
+        .and_then(Direction::from_name)
+        .ok_or_else(|| format!("bad orientation {value}"))?;
+    let top = parts
+        .next()
+        .and_then(Direction::from_name)
+        .ok_or_else(|| format!("bad orientation {value}"))?;
+    Ok((front, top))
 }
 
 impl PoolElement {
@@ -232,7 +266,9 @@ impl PoolElement {
                 pool: "minecraft:empty".to_owned(),
                 placement_priority: 0,
                 selection_priority: 0,
-                orientation: "down_south".to_owned(),
+                front: Direction::Down,
+                top: Direction::South,
+                joint: JointType::Rollable,
             }]),
             Self::Single { location, .. } => {
                 let template = StructureTemplate::load(location)?;
@@ -243,8 +279,9 @@ impl PoolElement {
                 let mut blocks: Vec<JigsawBlock> = jigsaws
                     .iter()
                     .map(|jigsaw| {
+                        let (front0, top0) = parse_orientation(&jigsaw.orientation)?;
                         let local = rotation.transform(jigsaw.pos);
-                        JigsawBlock {
+                        Ok(JigsawBlock {
                             pos: (
                                 local.0 + position.0,
                                 local.1 + position.1,
@@ -255,10 +292,12 @@ impl PoolElement {
                             pool: jigsaw.pool.clone(),
                             placement_priority: jigsaw.placement_priority,
                             selection_priority: jigsaw.selection_priority,
-                            orientation: jigsaw.orientation.clone(),
-                        }
+                            front: rotation.rotate_direction(front0),
+                            top: rotation.rotate_direction(top0),
+                            joint: jigsaw.joint,
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
                 shuffle(&mut blocks, random);
                 // Java `List.sort` 是稳定的；同 selectionPriority 保持洗牌后的顺序。
                 // Java `List.sort` is stable; equal priorities keep the shuffled order.

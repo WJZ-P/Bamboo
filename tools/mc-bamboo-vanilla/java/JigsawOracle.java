@@ -154,6 +154,7 @@ public final class JigsawOracle {
         Registry<Structure> structureReg = registries.lookupOrThrow(Registries.STRUCTURE);
 
         Map<Long, RandomState> states = new HashMap<>();
+        Map<Long, Climate.Sampler> samplers = new HashMap<>();
         StringBuilder out = new StringBuilder();
         for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
             if (line.isBlank()) {
@@ -164,10 +165,15 @@ public final class JigsawOracle {
             long seed = Long.parseLong(p[1]);
             int cx = Integer.parseInt(p[2]);
             int cz = Integer.parseInt(p[3]);
-            RandomState state = states.computeIfAbsent(
-                    seed, s -> RandomState.create(noiseLookup, s, settings));
-            Climate.Sampler sampler = state.createClimateSampler(
-                    SamplerContext.builder().enableCaches().build());
+            RandomState state = states.get(seed);
+            Climate.Sampler sampler = samplers.get(seed);
+            if (state == null || sampler == null) {
+                state = RandomState.create(noiseLookup, seed, settings);
+                sampler = state.createClimateSampler(
+                        SamplerContext.builder().enableCaches().build());
+                states.put(seed, state);
+                samplers.put(seed, sampler);
+            }
             Structure structure = structureReg.getValue(Identifier.parse(id));
             if (!(structure instanceof JigsawStructure jigsaw)) {
                 throw new IllegalStateException(id + " is not a jigsaw structure");
@@ -180,6 +186,9 @@ public final class JigsawOracle {
             Optional<Structure.GenerationStub> stub = jigsaw.findGenerationPoint(context);
             if (stub.isEmpty()) {
                 out.append("Q|").append(key).append("|0|0|0|0|0\n");
+                System.out.print(out);
+                System.out.flush();
+                out.setLength(0);
                 continue;
             }
             StructurePiecesBuilder builder = stub.get().getPiecesBuilder();
@@ -195,8 +204,10 @@ public final class JigsawOracle {
                 out.append("P|").append(key).append('|').append(i).append('|')
                         .append(description).append('\n');
             }
+            System.out.print(out);
+            System.out.flush();
+            out.setLength(0);
         }
-        System.out.print(out);
     }
 
     /** 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|junctions。 */
