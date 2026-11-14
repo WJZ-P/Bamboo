@@ -231,8 +231,14 @@ impl<'a> Generator<'a> {
     pub fn biome_region(&self, chunk_x: i32, chunk_z: i32) -> Result<RegionBiomes, String> {
         let center = self.chunk_biomes(chunk_x, chunk_z)?;
         let mut neighbors = Vec::with_capacity(8);
-        for dz in -1..=1 {
-            for dx in -1..=1 {
+        // 顺序照 `ChunkgenOracle.buildRealTerrain`：`dx` 外层、`dz` 内层、跳过中心。
+        // 顺序决定 `ParameterList` 的 `lastResult` 链，进而决定平局时选哪条。
+        //
+        // Same order as `ChunkgenOracle.buildRealTerrain`: `dx` outer, `dz` inner,
+        // skipping the centre. The order drives the `ParameterList` `lastResult` chain
+        // and therefore which entry wins a tie.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
