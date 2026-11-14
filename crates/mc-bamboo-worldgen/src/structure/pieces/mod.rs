@@ -14,6 +14,7 @@
 //! names and positions only). Each structure exposes one pure function.
 
 pub mod mineshaft;
+pub mod mineshaft_place;
 pub mod ocean_monument;
 pub mod stronghold;
 pub mod woodland_mansion;
